@@ -1,0 +1,11 @@
+--- Test 1: stream=True simple ---
+finish_reason: stop
+content: Hello! How can I help you today?
+PASS
+
+--- Test 2: stream=True + tools ---
+finish_reason: tool_calls
+content: empty
+tool_calls: 1 calls
+  [0] id=call_c9a1851f2adf4597b2ba9ed7 name=fs_read args={"path":"C:/test.txt"}
+PASS

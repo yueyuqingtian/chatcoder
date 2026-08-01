@@ -1,0 +1,71 @@
+{
+  "name": "chatcoder",
+  "version": "0.1.0",
+  "description": "chatcoder - AI 多 Agent 协同编码工作台(桌面版)",
+  "author": "chatcoder",
+  "license": "UNLICENSED",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "start": "electron electron/main.cjs",
+    "build:frontend": "cd client && npm run build",
+    "build:backend": "cd server && .venv\\Scripts\\pyinstaller.exe chatcoder-server.spec --noconfirm",
+    "build:all": "npm run build:frontend && npm run build:backend && npm run dist",
+    "dist": "electron-builder --win",
+    "dist:dir": "electron-builder --win --dir"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.chatcoder.desktop",
+    "productName": "chatcoder",
+    "copyright": "Copyright © 2026 chatcoder",
+    "directories": {
+      "output": "release",
+      "buildResources": "electron/build"
+    },
+    "files": [
+      "electron/main.cjs",
+      "electron/preload.cjs",
+      "electron/loading.html"
+    ],
+    "extraResources": [
+      {
+        "from": "client/dist",
+        "to": "frontend"
+      },
+      {
+        "from": "server/dist/chatcoder-server",
+        "to": "server/chatcoder-server"
+      },
+      {
+        "from": "server/.env",
+        "to": "server/chatcoder-server/.env"
+      }
+    ],
+    "win": {
+      "icon": "electron/build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "signAndEditExecutable": false,
+      "forceCodeSigning": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "chatcoder",
+      "deleteAppDataOnUninstall": false,
+      "displayLanguageSelector": false,
+      "language": "2052"
+    }
+  }
+}

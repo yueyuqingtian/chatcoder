@@ -1,0 +1,4 @@
+npm warn Unknown user config "SASS_BINARY_SITE". This will stop working in the next major version of npm. See `npm help npmrc` for supported config options.
+npm warn Unknown user config "CHROMEDRIVER_CDNURL". This will stop working in the next major version of npm. See `npm help npmrc` for supported config options.
+src/components/SettingsPage.tsx(45,72): error TS2353: Object literal may only specify known properties, and 'sepia' does not exist in type 'Record<Theme, string>'.
+src/components/Workspace.tsx(48,9): error TS6133: 'isEmpty' is declared but its value is never read.

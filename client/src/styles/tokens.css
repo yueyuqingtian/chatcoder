@@ -1,0 +1,135 @@
+/* ═══════════════════════════════════════════════════════════
+ * 设计令牌 v5 - 黑白灰基调（参照 Codex 风格）
+ * 主色调：中性灰，强调色仅用于激活/关键操作
+ * ═══════════════════════════════════════════════════════════ */
+
+/* ── 浅色主题 ── */
+:root,
+:root[data-theme="light"] {
+  --bg-sidebar: #F5F5F5;
+  --bg-main: #FFFFFF;
+  --bg-panel: #FFFFFF;
+  --bg-elevated: #FAFAFA;
+  --bg-hover: rgba(0, 0, 0, 0.05);
+  --bg-active: rgba(0, 0, 0, 0.08);
+  --bg-overlay: rgba(0, 0, 0, 0.3);
+
+  --accent: #1A1A1E;
+  --accent-2: #1A1A1E;
+  --accent-grad: #1A1A1E;
+  --accent-hover: #333338;
+  --accent-soft: rgba(0, 0, 0, 0.06);
+  --accent-contrast: #FFFFFF;
+
+  --text-1: #1A1A1E;
+  --text-2: #6B6B74;
+  --text-3: #9A9AA3;
+
+  --border: #E5E5EA;
+  --border-light: #F0F0F2;
+  --border-strong: #D1D1D6;
+
+  --success: #2D9F4A;
+  --success-soft: rgba(45, 159, 74, 0.10);
+  --warning: #D98014;
+  --warning-soft: rgba(217, 128, 20, 0.10);
+  --error: #D63E3E;
+  --error-soft: rgba(214, 62, 62, 0.10);
+  --info: #3B82F6;
+  --info-soft: rgba(59, 130, 246, 0.10);
+
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08), 0 2px 4px rgba(0, 0, 0, 0.04);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.10), 0 4px 8px rgba(0, 0, 0, 0.06);
+  --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.12), 0 4px 8px rgba(0, 0, 0, 0.08);
+
+  color-scheme: light;
+}
+
+/* ── 深色主题 ── */
+:root[data-theme="dark"] {
+  --bg-sidebar: #1B1B1F;
+  --bg-main: #232328;
+  --bg-panel: #232328;
+  --bg-elevated: #2A2A2F;
+  --bg-hover: rgba(255, 255, 255, 0.06);
+  --bg-active: rgba(255, 255, 255, 0.08);
+  --bg-overlay: rgba(0, 0, 0, 0.6);
+
+  --accent: #E8E8E8;
+  --accent-2: #E8E8E8;
+  --accent-grad: #E8E8E8;
+  --accent-hover: #FFFFFF;
+  --accent-soft: rgba(255, 255, 255, 0.10);
+  --accent-contrast: #1A1A1E;
+
+  --text-1: #F0F0F3;
+  --text-2: #A6A6AF;
+  --text-3: #6E6E78;
+
+  --border: #35353D;
+  --border-light: #2E2E35;
+  --border-strong: #45454D;
+
+  --success: #3DD26A;
+  --success-soft: rgba(61, 210, 106, 0.16);
+  --warning: #F0A030;
+  --warning-soft: rgba(240, 160, 48, 0.16);
+  --error: #FF5252;
+  --error-soft: rgba(255, 82, 82, 0.16);
+  --info: #60A5FA;
+  --info-soft: rgba(96, 165, 250, 0.16);
+
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3), 0 2px 4px rgba(0, 0, 0, 0.2);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4), 0 4px 8px rgba(0, 0, 0, 0.3);
+  --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.5), 0 4px 8px rgba(0, 0, 0, 0.3);
+
+  color-scheme: dark;
+}
+
+/* ── 尺寸令牌 ── */
+:root {
+  --titlebar-h: 36px;
+  --sidebar-w: 260px;
+  --sidebar-min: 200px;
+  --sidebar-max: 480px;
+  --rightpanel-w: 420px;
+  --rightpanel-min: 200px;
+  --rightpanel-max: 1600px;
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --r-xl: 16px;
+  --dur-fast: 0.12s;
+  --dur-med: 0.2s;
+  --dur-normal: 0.25s;
+  --curve: cubic-bezier(0.22, 0.8, 0.28, 1);
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", "Cascadia Code", Consolas, monospace;
+  --content-max-w: 840px;
+}
+
+/* 向后兼容别名 */
+:root {
+  --bg: var(--bg-main);
+  --bg-muted: var(--bg-elevated);
+  --text: var(--text-1);
+  --text-secondary: var(--text-2);
+  --text-muted: var(--text-3);
+  --brand: var(--accent);
+  --brand-soft: var(--accent-soft);
+  --brand-hover: var(--accent-hover);
+  --radius-xs: var(--r-xs);
+  --radius-sm: var(--r-sm);
+  --radius-md: var(--r-md);
+  --radius-lg: var(--r-lg);
+  --radius-xl: var(--r-xl);
+  --ease-out: var(--curve);
+  --ease-spring: var(--curve);
+}

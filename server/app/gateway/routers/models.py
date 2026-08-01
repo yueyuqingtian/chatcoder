@@ -1,0 +1,83 @@
+"""模型管理 API（v2）。"""
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.gateway.schemas import ModelCreate, ModelOut, ModelUpdate
+from app.persistence.database import get_db
+from app.services import model_service
+
+router = APIRouter()
+
+
+def _to_out(m) -> ModelOut:
+    return ModelOut(
+        id=m.id,
+        name=m.name,
+        provider=m.provider,
+        base_url=m.base_url,
+        intelligence_level=m.intelligence_level,
+        context_window=m.context_window,
+        source_type=m.source_type,
+        is_active=m.is_active,
+        is_multimodal=getattr(m, "is_multimodal", False),
+        api_format=getattr(m, "api_format", "openai"),
+        has_api_key=bool(getattr(m, "api_key", None)),
+        reasoning_efforts=getattr(m, "reasoning_efforts", None) or [],
+    )
+
+
+@router.post("/models", response_model=ModelOut)
+async def create_model(body: ModelCreate, db: AsyncSession = Depends(get_db)):
+    model = await model_service.create_model(
+        db,
+        name=body.name,
+        provider=body.provider,
+        base_url=body.base_url,
+        intelligence_level=body.intelligence_level,
+        context_window=body.context_window,
+        source_type=body.source_type,
+        is_active=body.is_active,
+        is_multimodal=body.is_multimodal,
+        api_format=body.api_format,
+        api_key=body.api_key,
+        reasoning_efforts=body.reasoning_efforts,
+    )
+    await db.commit()
+    return _to_out(model)
+
+
+@router.get("/models", response_model=list[ModelOut])
+async def list_models(db: AsyncSession = Depends(get_db)):
+    models = await model_service.list_models(db)
+    return [_to_out(m) for m in models]
+
+
+@router.patch("/models/{model_id}", response_model=ModelOut)
+async def update_model(model_id: int, body: ModelUpdate, db: AsyncSession = Depends(get_db)):
+    """编辑模型配置。api_key 传空字符串则清除。"""
+    model = await model_service.update_model(
+        db, model_id,
+        name=body.name,
+        provider=body.provider,
+        base_url=body.base_url,
+        intelligence_level=body.intelligence_level,
+        context_window=body.context_window,
+        is_active=body.is_active,
+        is_multimodal=body.is_multimodal,
+        api_format=body.api_format,
+        api_key=body.api_key,
+        reasoning_efforts=body.reasoning_efforts,
+    )
+    if model is None:
+        raise HTTPException(404, "model not found")
+    await db.commit()
+    return _to_out(model)
+
+
+@router.delete("/models/{model_id}")
+async def delete_model(model_id: int, db: AsyncSession = Depends(get_db)):
+    ok = await model_service.delete_model(db, model_id)
+    if not ok:
+        raise HTTPException(404, "model not found")
+    await db.commit()
+    return {"ok": True}

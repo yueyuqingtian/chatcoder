@@ -1,0 +1,30 @@
+---
+description: 代码探索时必须先调用 codegraph MCP，禁止跳过
+alwaysApply: true
+enabled: true
+updatedAt: 2026-07-25T17:47:07.687Z
+provider: 
+---
+
+## 核心规则：代码探索必须优先使用 codegraph MCP
+
+全局使用中文。
+
+### 强制流程
+
+当你需要理解代码结构、查找符号、分析调用关系或定位问题时：
+
+1. **第一步** → 调用 `mcp_get_tool_description` 获取 `codegraph_explore` 的参数
+2. **第二步** → 调用 `codegraph_explore` 查询相关符号/文件
+3. **第三步** → 如果 codegraph 返回的源码已覆盖需求（它标注了 `treat the shown source as already Read`），**禁止**再用 `read_file` 重复读取
+4. **第四步** → 仅当 codegraph 的输出被截断或未覆盖关键文件时，才用 `read_file` 补充
+
+### 禁止行为
+
+- ❌ 跳过 codegraph，直接 `read_file`/`search_file`/`search_content`
+- ❌ 对 codegraph 已返回源码的文件重复调用 `read_file`
+
+### 例外
+
+- 已知精确路径的单个小文件（< 30 行）可直接 `read_file`
+- `codegraph_explore` 自身调用失败时，降级使用其他工具

@@ -1,0 +1,165 @@
+/** 浏览器面板（v5）：iframe + 地址栏 + 元素标注 + 发送到主对话。
+ * 标注模式：overlay 拦截鼠标，移动时实时高亮 iframe 内元素，
+ * 点击后弹出标注卡，保持选择模式可连续标注，Esc 退出。
+ * 修复：overlay 需 inset:0 撑满；坐标用 clientX/clientY 直接传 elementFromPoint；
+ *       跨域 iframe 降级为坐标标注。
+ */
+import { useEffect, useRef, useState } from "react";
+import { useChatStore } from "../../store/chat";
+import { IconArrowLeft, IconArrowRight, IconRefresh, IconGlobe, IconTarget, IconArrowUp, IconX } from "../icons";
+
+export function BrowserPanel() {
+  const [url, setUrl] = useState("https://example.com");
+  const [current, setCurrent] = useState("https://example.com");
+  const [history, setHistory] = useState<string[]>(["https://example.com"]);
+  const [hIdx, setHIdx] = useState(0);
+  const [selecting, setSelecting] = useState(false);
+  const [annotState, setAnnotState] = useState<{ x: number; y: number; source: string } | null>(null);
+  const [annotText, setAnnotText] = useState("");
+  const [sentMsg, setSentMsg] = useState(false);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const setComposerDraft = useChatStore((s) => s.setComposerDraft);
+
+  const navigate = (target: string) => {
+    let t = target.trim();
+    if (!t) return;
+    if (!/^https?:\/\//i.test(t)) t = `https://${t}`;
+    const next = [...history.slice(0, hIdx + 1), t];
+    setHistory(next); setHIdx(next.length - 1); setCurrent(t); setUrl(t);
+  };
+  const goBack = () => { if (hIdx <= 0) return; setHIdx(hIdx - 1); setCurrent(history[hIdx - 1]); setUrl(history[hIdx - 1]); };
+  const goForward = () => { if (hIdx >= history.length - 1) return; setHIdx(hIdx + 1); setCurrent(history[hIdx + 1]); setUrl(history[hIdx + 1]); };
+  const toggleSelect = () => { setSelecting((v) => !v); setAnnotState(null); setSentMsg(false); };
+
+  const clearHighlight = () => {
+    try {
+      const doc = iframeRef.current?.contentDocument;
+      if (doc) {
+        doc.querySelectorAll(".__cc_hover").forEach((n) => {
+          const el = n as HTMLElement;
+          el.classList.remove("__cc_hover");
+          el.style.outline = el.dataset.__cc_outline ?? "";
+        });
+      }
+    } catch { /* 跨域：忽略 */ }
+  };
+
+  // 尝试获取 iframe document（跨域返回 null）
+  const getIframeDoc = (): Document | null => {
+    try {
+      return iframeRef.current?.contentDocument ?? null;
+    } catch {
+      return null;
+    }
+  };
+
+  // Esc 退出选择模式
+  useEffect(() => {
+    if (!selecting) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { setSelecting(false); clearHighlight(); setAnnotState(null); } };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selecting]);
+
+  const highlightAt = (e: React.MouseEvent) => {
+    const doc = getIframeDoc();
+    if (!doc) return; // 跨域：无法高亮，仅显示提示
+    // elementFromPoint 需要相对于视口的 clientX/clientY，直接使用即可
+    const el = doc.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+    if (el && el !== doc.body && el !== doc.documentElement) {
+      clearHighlight();
+      el.dataset.__cc_outline = el.style.outline;
+      el.classList.add("__cc_hover");
+      el.style.outline = "2px solid #3B82F6";
+      el.style.outlineOffset = "1px";
+    } else {
+      clearHighlight();
+    }
+  };
+
+  const handleOverlayClick = (e: React.MouseEvent) => {
+    const rect = viewportRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const localX = e.clientX - rect.left;
+    const localY = e.clientY - rect.top;
+    let source = "";
+    const doc = getIframeDoc();
+    if (doc) {
+      const el = doc.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+      if (el) {
+        source = el.outerHTML.slice(0, 600);
+      }
+    }
+    if (!source) source = `页面坐标 (${Math.round(localX)}, ${Math.round(localY)}) - 跨域页面无法获取元素`;
+    clearHighlight();
+    setAnnotState({ x: localX, y: localY, source });
+    setAnnotText("");
+  };
+
+  const sendToChat = () => {
+    if (!annotState) return;
+    const payload = `【浏览器标注】\n页面: ${current}\n${annotState.source}\n\n【标注说明】${annotText}`;
+    setComposerDraft(payload);
+    setSentMsg(true);
+    clearHighlight();
+    setAnnotState(null);
+    setAnnotText("");
+    setTimeout(() => setSentMsg(false), 3000);
+  };
+
+  return (
+    <div className="browser-panel">
+      <div className="browser-toolbar">
+        <button className="browser-btn" onClick={goBack} disabled={hIdx <= 0} title="后退"><IconArrowLeft size={13} /></button>
+        <button className="browser-btn" onClick={goForward} disabled={hIdx >= history.length - 1} title="前进"><IconArrowRight size={13} /></button>
+        <button className="browser-btn" onClick={() => setCurrent(url)} title="刷新"><IconRefresh size={13} /></button>
+        <div className="browser-url"><IconGlobe size={12} /><input value={url} onChange={(e) => setUrl(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") navigate(url); }} spellCheck={false} /></div>
+        <button className={`browser-btn${selecting ? " active" : ""}`} onClick={toggleSelect} title={selecting ? "取消选择" : "选择元素标注"}><IconTarget size={13} /></button>
+      </div>
+
+      {sentMsg && <div style={{ padding: "6px 12px", background: "var(--success-soft)", color: "var(--success)", fontSize: 12 }}>已发送到主对话输入框</div>}
+
+      <div className="browser-viewport" ref={viewportRef} style={{ cursor: selecting ? "crosshair" : "default" }}>
+        <iframe ref={iframeRef} src={current} sandbox="allow-scripts allow-same-origin allow-forms allow-popups" title="browser" />
+        {selecting && (
+          <div
+            className="browser-annot-overlay active"
+            style={{ position: "absolute", inset: 0, zIndex: 10, cursor: "crosshair" }}
+            onMouseMove={highlightAt}
+            onClick={handleOverlayClick}
+            onMouseLeave={clearHighlight}
+          >
+            <div className="browser-annot-tip" style={{
+              position: "absolute", top: 8, left: "50%", transform: "translateX(-50%)",
+              padding: "4px 10px", borderRadius: 4, background: "var(--bg-elevated)",
+              border: "1px solid var(--border)", fontSize: 11, color: "var(--text-2)",
+              whiteSpace: "nowrap", pointerEvents: "none",
+            }}>
+              移动鼠标聚焦元素，点击添加标注 · Esc 退出
+            </div>
+          </div>
+        )}
+        {annotState && (
+          <div className="browser-annot-card" style={{
+            position: "absolute", left: Math.min(annotState.x + 10, 200), top: Math.min(annotState.y + 10, 100),
+            maxWidth: 320, padding: 10, borderRadius: 6, background: "var(--bg-elevated)",
+            border: "1px solid var(--border)", boxShadow: "var(--shadow-md)", zIndex: 20,
+            display: "flex", flexDirection: "column", gap: 6,
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontSize: 11, color: "var(--text-3)" }}>已选中元素，添加标注说明后发送给 AI：</span>
+              <button onClick={() => { setAnnotState(null); setAnnotText(""); }} style={{ width: 18, height: 18, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-3)" }}><IconX size={12} /></button>
+            </div>
+            <div style={{ fontSize: 10, color: "var(--text-3)", maxHeight: 60, overflow: "auto", background: "var(--bg-hover)", padding: 4, borderRadius: 4, fontFamily: "var(--font-mono)" }}>{annotState.source.substring(0, 200)}</div>
+            <textarea value={annotText} onChange={(e) => setAnnotText(e.target.value)} placeholder="描述你希望 AI 关注的内容…" autoFocus style={{ minHeight: 50, resize: "vertical" }} />
+            <div className="browser-annot-card-actions" style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
+              <button className="btn btn-ghost btn-sm" onClick={() => { setSelecting(false); clearHighlight(); setAnnotState(null); setAnnotText(""); }}>完成</button>
+              <button className="btn btn-primary btn-sm" onClick={sendToChat}><IconArrowUp size={12} /> 发送到对话</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

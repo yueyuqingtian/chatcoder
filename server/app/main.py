@@ -1,0 +1,119 @@
+"""FastAPI 应用工厂（v2）。"""
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from app.core.config import settings
+from app.core.logging import setup_logging
+from app.gateway.routers import (
+    diagnostics,
+    exec_policy,
+    hooks,
+    memories,
+    models,
+    profiles,
+    projects,
+    scheduled,
+    sessions,
+    skills_mcp,
+    turns,
+)
+from app.gateway.ws import ws_router
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    setup_logging(debug=settings.debug)
+    # 初始化数据库 + 幂等种子
+    try:
+        from app.persistence.database import init_db, async_session_factory
+        from app.persistence.migrations import run_migrations
+        from app.persistence.seed import seed
+        await init_db()
+        # 幂等补列(与打包入口 run_server.py 保持一致)
+        async with async_session_factory() as db:
+            await run_migrations(db)
+        await seed()
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).exception("数据库初始化失败: %s", e)
+    yield
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(
+        title="chatcoder API",
+        version="0.2.0",
+        description="AI 编码代理工作台 - 服务端（v2 项目任务驱动）",
+        lifespan=lifespan,
+        debug=settings.debug,
+    )
+
+    if settings.cors_allow_all:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origin_regex=".*",
+            allow_credentials=False,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+    else:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.cors_origin_list,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+    # 统一错误响应（规范 §4.8）
+    @app.exception_handler(StarletteHTTPException)
+    async def http_exc_handler(request: Request, exc: StarletteHTTPException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": {"code": f"http_{exc.status_code}", "message": str(exc.detail)}},
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_exc_handler(request: Request, exc: RequestValidationError):
+        return JSONResponse(
+            status_code=422,
+            content={"error": {"code": "validation_error", "message": "请求参数错误", "detail": exc.errors()}},
+        )
+
+    @app.exception_handler(Exception)
+    async def unhandled_exc_handler(request: Request, exc: Exception):
+        import logging
+        logging.getLogger("app").exception("未处理异常: %s", exc)
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"code": "internal_error", "message": str(exc)[:300]}},
+        )
+
+    # 路由
+    app.include_router(projects.router, prefix="/api", tags=["projects"])
+    app.include_router(sessions.router, prefix="/api", tags=["sessions"])
+    app.include_router(turns.router, prefix="/api", tags=["turns"])
+    app.include_router(models.router, prefix="/api", tags=["models"])
+    app.include_router(scheduled.router, prefix="/api", tags=["scheduled"])
+    app.include_router(profiles.router, prefix="/api", tags=["profiles"])
+    app.include_router(exec_policy.router, prefix="/api", tags=["exec-policy"])
+    app.include_router(hooks.router, prefix="/api", tags=["hooks"])
+    app.include_router(memories.router, prefix="/api", tags=["memories"])
+    app.include_router(skills_mcp.router, prefix="/api", tags=["skills-mcp"])
+    app.include_router(diagnostics.router, prefix="/api", tags=["diagnostics"])
+    app.include_router(ws_router, tags=["websocket"])
+
+    # 健康检查
+    @app.get("/api/health", tags=["health"])
+    async def health():
+        return {"status": "ok", "version": "0.2.0"}
+
+    return app
+
+
+app = create_app()
