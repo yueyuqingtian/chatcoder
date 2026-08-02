@@ -289,6 +289,17 @@ async def run_agent_loop(
     # 不同 Agent 可能绑定不同模型（如 A=500K，B=1M），压缩阈值应基于各自模型
     from app.orchestration.token_counter import get_agent_context_window
     agent_context_window = await get_agent_context_window(db, agent)
+    # v6.4: 最小窗口保护 —— 若 model.context_window 配置过小，用默认值兜底
+    if agent_context_window < 100000:
+        logger.warning(
+            "[agent] task=%s agent_context_window=%d 过小(<100k)，用默认 500000 兜底",
+            task_id, agent_context_window,
+        )
+        agent_context_window = 500000
+    logger.info("[agent] task=%s agent_context_window=%d, 压缩阈值=%.0f%% (%d tokens)",
+                task_id, agent_context_window,
+                settings.auto_compact_threshold_ratio * 100,
+                int(agent_context_window * settings.auto_compact_threshold_ratio))
 
     # v6.1: 对齐 codex -- 不传 temperature，只用 reasoning_effort 控制推理深度
     # codex build_responses_request 完全不传 temperature
@@ -388,13 +399,9 @@ async def run_agent_loop(
             from app.orchestration.compaction import ensure_tool_pairing
             messages = ensure_tool_pairing(messages)
 
-            # v6.0: 主动自动压缩 -- 达到 72% 阈值时用 LLM handoff summary 替换较早历史
-            # 职责边界：仅压缩当前子 agent 的 in-memory messages，不写库、不影响其他 agent；
-            # 主会话 Leader 的群聊历史由 context_memory.maybe_summarize_main_session 独立压缩。
-            from app.orchestration.token_counter import should_auto_compact
-            if should_auto_compact(messages, agent_context_window):
-                from app.orchestration.compaction import auto_compact
-                messages = await auto_compact(messages, agent_context_window, provider)
+            # v6.4: 移除每步开头的估算式 should_auto_compact 检查（与 agent_loop.py 对齐）
+            # 根因：估算 token 与 API 真实 prompt_tokens 偏差大，过早触发 auto_compact。
+            # 改为仅在 API 响应后用精确 prompt_tokens 判断（见下方 step 后段）。
 
             # v3.6: 格式锚定 -- 每 FORM_ANCHOR_INTERVAL 步注入格式提醒，防止多轮后退化
             # v6.1: developer 角色注入（不污染 user 对话流）
@@ -496,18 +503,24 @@ async def run_agent_loop(
                     },
                 })
 
-            # v6.2: 调用后真实占用驱动压缩 —— API 精确 prompt_tokens 达到窗口 90% 即压缩。
+            # v6.2/v6.4: 调用后真实占用驱动压缩 —— API 精确 prompt_tokens 达到窗口 90% 即压缩。
             # 比循环开头的估算更可靠（估算只算消息体，API 含 tool schema/system 等真实开销）。
             if response.usage and response.usage.prompt_tokens > 0:
                 _real_ratio = response.usage.prompt_tokens / agent_context_window if agent_context_window > 0 else 0
                 if _real_ratio >= settings.auto_compact_threshold_ratio:
-                    logger.info(
+                    logger.warning(
                         "[agent] task=%s step=%s 真实上下文占用 %.1f%% (p=%d/w=%d) >= %.0f%%，触发自动压缩",
                         task_id, step, _real_ratio * 100, response.usage.prompt_tokens,
                         agent_context_window, settings.auto_compact_threshold_ratio * 100,
                     )
                     from app.orchestration.compaction import auto_compact
                     messages = await auto_compact(messages, agent_context_window, provider)
+                else:
+                    logger.debug(
+                        "[agent] task=%s step=%s 上下文占用 %.1f%% (p=%d/w=%d) < %.0f%%，无需压缩",
+                        task_id, step, _real_ratio * 100, response.usage.prompt_tokens,
+                        agent_context_window, settings.auto_compact_threshold_ratio * 100,
+                    )
 
             # v4.3: 流式广播模型的推理/思考内容（DeepSeek reasoning / Claude thinking）
             if response.thinking:
@@ -591,6 +604,13 @@ async def run_agent_loop(
 
             # 4a. 有 tool_calls → 执行 → 追加消息 → 继续
             if response.tool_calls:
+                # v1.3: 中间步骤正文也落库，前端按时间顺序展示在思考块与工具调用之间
+                if response.content and response.content.strip():
+                    await _emit_thread(
+                        db, session_id=session_id, thread_id=task_id,
+                        agent_id=agent_id, agent_name=agent_name,
+                        text=response.content,
+                    )
                 # 追加 assistant 消息(含 tool_calls,供 function-calling 往返)
                 # v4.0: content 必须为 None（OpenAI 协议要求 assistant 带 tool_calls 时 content 为 null）
                 messages.append(ChatMessage(

@@ -32,8 +32,10 @@ export class WsClient {
 
   private _doConnect(sessionId: number) {
     // 桌面版直连后端;网页版走同源代理
+    // v6.4: 开发模式直连后端，绕过 vite ws 代理
     const isElectron = typeof window !== "undefined" && Boolean((window as Window).chatcoderAPI);
-    const wsUrl = isElectron
+    const isDev = import.meta.env.DEV;
+    const wsUrl = (isElectron || isDev)
       ? `ws://127.0.0.1:8000/ws/sessions/${sessionId}`
       : `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws/sessions/${sessionId}`;
     this.ws = new WebSocket(wsUrl);

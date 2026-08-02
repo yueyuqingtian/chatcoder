@@ -16,27 +16,45 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 # (表名, 列名, DDL 列定义)
+# 注意：v2 重构后模型定义与 v1 差异很大，以下迁移覆盖 v1→v2 所有缺失列。
+# 团队相关表 (team_agents/teams/agent_templates/session_members/task_edges/decisions)
+# 已被 v2 废弃，不再维护迁移。
 _MIGRATIONS: list[tuple[str, str, str]] = [
+    # ========== sessions（v1 缺 project_id / model_id / pinned / fork_parent / worktree / updated_at）==========
+    ("sessions", "project_id", "BIGINT"),
     ("sessions", "workspace_root", "VARCHAR(512)"),
     ("sessions", "knowledge_base_ids", "JSON"),
     ("sessions", "rules_doc", "VARCHAR(512)"),
     ("sessions", "rules_docs", "JSON"),
+    ("sessions", "model_id", "BIGINT"),
+    ("sessions", "pinned", "BOOLEAN DEFAULT 0 NOT NULL"),
+    ("sessions", "fork_parent_id", "BIGINT"),
+    ("sessions", "worktree_path", "VARCHAR(512)"),
+    ("sessions", "plan_confirmed", "BOOLEAN DEFAULT 1 NOT NULL"),
+    ("sessions", "updated_at", "VARCHAR"),
+    # ========== messages（v1 缺 turn_id）==========
+    ("messages", "turn_id", "BIGINT"),
     ("messages", "deleted", "BOOLEAN DEFAULT 0 NOT NULL"),
+    # ========== artifacts（v1 缺 git_baseline / files）==========
     ("artifacts", "git_baseline", "VARCHAR(64)"),
     ("artifacts", "files", "JSON"),
+    # ========== tasks（v1 缺 turn_id / agent_id / note，assigned_agent_id→agent_id 重命名）==========
+    ("tasks", "turn_id", "BIGINT"),
+    ("tasks", "agent_id", "BIGINT"),
+    ("tasks", "note", "VARCHAR(500)"),
     ("tasks", "needs_review", "BOOLEAN DEFAULT 0 NOT NULL"),
+    # ========== audit_logs（v1 表结构不同，v2 缺 session_id / turn_id）==========
+    ("audit_logs", "session_id", "BIGINT"),
+    ("audit_logs", "turn_id", "BIGINT"),
+    # ========== models（v2 新增多模态 / api_format / api_key / reasoning_efforts）==========
+    ("models", "is_multimodal", "BOOLEAN DEFAULT 0 NOT NULL"),
+    ("models", "api_format", "VARCHAR(20) DEFAULT 'openai'"),
+    ("models", "api_key", "VARCHAR(500)"),
+    ("models", "reasoning_efforts", "JSON"),
+    # ========== team_agents（v1 遗留表，v2 不再使用，仅保留迁移以防旧表有数据）==========
     ("team_agents", "learned_facts", "JSON"),
     ("team_agents", "skill_ids", "JSON"),
     ("team_agents", "mcp_server_ids", "JSON"),
-    # v1.0: 模型多模态支持
-    ("models", "is_multimodal", "BOOLEAN DEFAULT 0 NOT NULL"),
-    ("models", "api_format", "VARCHAR(20) DEFAULT 'openai'"),
-    # v2.0: per-model API key
-    ("models", "api_key", "VARCHAR(500)"),
-    # v4: 模型支持的推理深度档位列表
-    ("models", "reasoning_efforts", "JSON"),
-    # v5.0: 任务执行备注（异常原因持久化）
-    ("tasks", "note", "VARCHAR(500)"),
 ]
 
 

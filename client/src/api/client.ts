@@ -19,9 +19,11 @@ import type {
   TurnSnapshotOut,
 } from "@chatcoder/shared";
 
-/** 后端 API 基址:桌面版直连 127.0.0.1:8000,网页版用相对路径走代理。 */
+/** 后端 API 基址:桌面版直连 127.0.0.1:8000,网页版用相对路径走代理。
+ * v6.4: 开发模式直连后端，绕过 vite 代理（Node 18+ Happy Eyeballs IPv6 问题）。 */
 const IS_ELECTRON = typeof window !== "undefined" && Boolean((window as Window).chatcoderAPI);
-const BASE = IS_ELECTRON ? "http://127.0.0.1:8000/api" : "/api";
+const IS_DEV = import.meta.env.DEV;
+const BASE = (IS_ELECTRON || IS_DEV) ? "http://127.0.0.1:8000/api" : "/api";
 
 /** 带重试的 fetch — 后端启动中时自动重试,避免 "Failed to fetch" */
 async function fetchWithRetry(

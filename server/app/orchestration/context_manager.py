@@ -121,6 +121,117 @@ async def build_main_context(
     memories = await _load_memories(db, session.id)
     if memories:
         bundle.developer_parts.append(f"## Your Memory (from previous tasks)\n{memories}")
+
+    # v6.4: 注入历史消息窗口 —— 修复上下文丢失问题
+    # 根因：build_main_context 原本只注入 turn 摘要，不注入历史消息，
+    # 导致 AI 每个 turn 都看不到之前的完整对话，只能看到摘要片段。
+    # 现在直接取未摘要的历史消息，用 token 预算贪心选取，转成 ChatMessage 注入。
+    try:
+        from app.orchestration.context_memory import (
+            _fetch_main_messages, _resolve_leader_context_window,
+        )
+        from app.orchestration.token_counter import (
+            select_messages_by_token_budget, get_main_window_budget, MIN_MESSAGES_KEEP,
+        )
+        from app.models.schemas import ChatMessage as _CM
+
+        context_window = await _resolve_leader_context_window(db, session)
+        window_budget = get_main_window_budget(context_window)
+
+        # v6.4: shared_context 是动态属性，可能不存在，用 getattr 安全访问
+        ctx = getattr(session, "shared_context", None) or {}
+        if not isinstance(ctx, dict):
+            ctx = {}
+        summarized_ids = set(ctx.get("summarized_ids") or [])
+
+        # v6.4: 提高limit到2000，覆盖全部历史消息（原来200条会丢失早期对话）
+        all_msgs = await _fetch_main_messages(db, session.id, limit=2000)
+        unsummarized = [m for m in all_msgs if m.id not in summarized_ids]
+
+        # v6.5: 保留 text + tool_call + tool_result（过滤 thinking/plan 等非对话类型）。
+        # 旧版只保留 text，导致 AI 看不到工具调用历史，上下文严重偏低且无法复用工具结果。
+        from app.core.enums import MsgType as _MsgType
+        _keep_types = {_MsgType.TEXT.value, _MsgType.TOOL_CALL.value, _MsgType.TOOL_RESULT.value}
+        unsummarized = [m for m in unsummarized if m.msg_type in _keep_types]
+
+        # Token-budget 选取：从最新向前贪心，直到预算耗尽
+        recent, _ = select_messages_by_token_budget(
+            unsummarized, window_budget, min_keep=MIN_MESSAGES_KEEP,
+        )
+
+        # v6.5: 在历史前插入明确标记，让AI知道这是完整历史对话而非摘要
+        if recent:
+            bundle.history.append(_CM(
+                role="user",
+                content="## Complete Conversation History (full text, not summary)\nBelow is the complete history of our conversation so far. This is the actual original text, NOT a compressed summary. You can see and reference all of it."
+            ))
+            bundle.history.append(_CM(
+                role="assistant",
+                content="Understood. I can see the complete conversation history below and will reference it as needed."
+            ))
+
+        # v6.5: 转成 ChatMessage，正确处理 text/tool_call/tool_result 三种类型。
+        # tool_call -> assistant 带 tool_calls；tool_result -> tool 角色消息。
+        # 保证 OpenAI tool_calls/tool 结果配对，避免网关 400 报错。
+        _pending_tool_calls: list[dict] = []
+        for m in recent:
+            if m.msg_type == _MsgType.TEXT.value:
+                text = m.content.get("text") or m.content.get("note") or ""
+                if not text:
+                    continue
+                if m.sender_type == "user":
+                    bundle.history.append(_CM(role="user", content=text))
+                else:
+                    bundle.history.append(_CM(role="assistant", content=text))
+            elif m.msg_type == _MsgType.TOOL_CALL.value:
+                # 工具调用作为 assistant 消息（带 tool_calls）
+                tool_name = m.content.get("tool", "")
+                args = m.content.get("args", {}) or {}
+                call_key = m.content.get("call_key", "") or f"call_{m.id}"
+                if isinstance(args, str):
+                    try:
+                        import json as _json
+                        args = _json.loads(args)
+                    except Exception:
+                        args = {"_raw": args}
+                bundle.history.append(_CM(
+                    role="assistant",
+                    content=None,
+                    tool_calls=[{
+                        "id": call_key,
+                        "name": tool_name,
+                        "arguments": args,
+                    }],
+                ))
+            elif m.msg_type == _MsgType.TOOL_RESULT.value:
+                # 工具结果作为 tool 角色消息
+                tool_name = m.content.get("tool", "")
+                call_key = m.content.get("call_key", "") or f"call_{m.id}"
+                output = m.content.get("output", "") or ""
+                error = m.content.get("error", "") or ""
+                result_text = output or error or "(无输出)"
+                # 截断过长的工具输出，避免单条结果撑爆窗口
+                if len(result_text) > 4000:
+                    result_text = result_text[:4000] + "\n...(工具输出已截断)"
+                bundle.history.append(_CM(
+                    role="tool",
+                    content=result_text,
+                    name=tool_name,
+                    tool_call_id=call_key,
+                ))
+
+        logger.info(
+            "[context] session=%s 注入历史消息 %d 条 (window=%dK, budget=%d tokens, summarized=%d, recent=%d)",
+            session.id, len(bundle.history),
+            context_window // 1000, window_budget, len(summarized_ids), len(recent),
+        )
+        # v6.4 诊断：打印前3条和后3条历史消息的摘要
+        for _i, _m in enumerate(recent[:3] + recent[-3:]):
+            _text = (_m.content.get("text") or _m.content.get("note") or "")[:80]
+            logger.info("[context] recent[%d] sender=%s text=%s", _i, _m.sender_type, _text)
+    except Exception:
+        logger.warning("[context] 注入历史消息失败(非阻塞)", exc_info=True)
+
     # 6. Skills / MCP
     skills, mcp = await _load_skills_and_mcp(db)
     if skills:

@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 # v3.0: thread 历史限制扩大（配合 micro_compact 自动压缩旧工具结果）
 _THREAD_HISTORY_LIMIT = 40
-_MAIN_SUMMARY_LIMIT = 8
+_MAIN_SUMMARY_LIMIT = 20  # v6.3: 从 8 提升到 20，保留更多最近消息
 
 
 async def _layer1_global_summary(db: AsyncSession, session: "Session") -> str:
@@ -511,9 +511,31 @@ async def build_agent_context(
     if mcp_text:
         dev_parts.append(f"## Available MCP Servers\n{mcp_text}")
 
-    # 9. 全局上下文摘要（背景信息，压缩到 800 字内）
+    # 9. 全局上下文摘要 + 最近主聊天历史（v6.3: 移除 800 字截断，注入完整上下文）
     if global_summary:
-        dev_parts.append(f"## Global Context\n{global_summary[:800]}")
+        dev_parts.append(f"## Global Context\n{global_summary}")
+
+    # v6.3: 注入最近主聊天历史，让 agent 能看到完整对话上下文
+    try:
+        from app.orchestration.context_memory import _fetch_main_messages
+        recent_main = await _fetch_main_messages(db, session.id, limit=20)
+        if recent_main:
+            chat_lines: list[str] = []
+            for m in recent_main:
+                speaker = "用户" if m.sender_type == "user" else (
+                    m.content.get("agent_name", "agent") if isinstance(m.content, dict) else "agent"
+                )
+                if isinstance(m.content, dict):
+                    text = m.content.get("text") or m.content.get("note") or ""
+                else:
+                    text = str(m.content)
+                text = (text or "").strip()[:500]
+                if text:
+                    chat_lines.append(f"[{speaker}] {text}")
+            if chat_lines:
+                dev_parts.append(f"## Recent Chat History\n" + "\n".join(chat_lines))
+    except Exception:
+        logger.debug("注入主聊天历史失败(非阻塞)", exc_info=True)
 
     # 10. 项目规范（参考性质，不干扰核心推理）
     if rules_text:

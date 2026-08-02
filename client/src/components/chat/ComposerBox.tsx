@@ -21,6 +21,7 @@ export function ComposerBox() {
   const currentSessionId = useChatStore((s) => s.currentSessionId);
   const isRunning = useChatStore((s) => s.isRunning);
   const usage = useChatStore((s) => s.usage);
+  const isCompacting = useChatStore((s) => s.isCompacting);
  const sendTurn = useChatStore((s) => s.sendTurn);
  const forceStop = useChatStore((s) => s.forceStop);
 
@@ -217,8 +218,13 @@ export function ComposerBox() {
               </div>
             )}
             <div className="composer-usage">
-              <UsageRing pct={usagePct} usage={usage} />
+              <UsageRing pct={usagePct} usage={usage} compacting={isCompacting} />
             </div>
+            {isCompacting && (
+              <span className="composer-compacting-badge" title="上下文接近窗口上限，正在压缩历史对话">
+                正在压缩上下文…
+              </span>
+            )}
             <button className={`composer-ctx${listening ? " listening" : ""}`} onClick={toggleVoice} title={listening ? "停止录音" : "语音输入"}><IconMic size={15} /></button>
             {isRunning ? (
               <button className="composer-send stop" onClick={handleCancel} title="停止"><IconStop size={14} /></button>
@@ -241,13 +247,13 @@ function fmtTokens(n: number): string {
 }
 
 /** token 占用圆环：无文字，hover 显示百分比 tooltip，点击弹窗详情 */
-function UsageRing({ pct, usage }: { pct: number; usage: UsageDetail | null }) {
+function UsageRing({ pct, usage, compacting }: { pct: number; usage: UsageDetail | null; compacting?: boolean }) {
   const [showDetail, setShowDetail] = useState(false);
   const ringRef = useRef<HTMLButtonElement>(null);
   const radius = 10;
   const circ = 2 * Math.PI * radius;
   const offset = circ - (pct / 100) * circ;
-  const color = pct > 80 ? "var(--error)" : pct > 50 ? "var(--warning)" : "var(--success)";
+  const color = compacting ? "var(--warning)" : pct > 80 ? "var(--error)" : pct > 50 ? "var(--warning)" : "var(--success)";
 
   useEffect(() => {
     if (!showDetail) return;
@@ -264,8 +270,8 @@ function UsageRing({ pct, usage }: { pct: number; usage: UsageDetail | null }) {
     <div className="composer-usage-ring-wrap">
       <button
         ref={ringRef}
-        className="composer-usage-ring"
-        title={`上下文占用 ${pct}%`}
+        className={`composer-usage-ring${compacting ? " compacting" : ""}`}
+        title={compacting ? `正在压缩上下文（${pct}%）` : `上下文占用 ${pct}%`}
         onClick={() => setShowDetail((v) => !v)}
         style={{ position: "relative", width: 26, height: 26, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: "50%", border: "none", background: "transparent", cursor: "pointer" }}
       >
@@ -283,12 +289,12 @@ function UsageRing({ pct, usage }: { pct: number; usage: UsageDetail | null }) {
         <div className="composer-usage-detail" style={{ display: "block" }}>
           {usage ? (
             <>
-              <div className="composer-usage-title">上下文占用 {pct}%</div>
+              <div className="composer-usage-title">上下文占用 {pct}%{compacting ? " · 正在压缩" : ""}</div>
               <div className="composer-usage-row"><span>输入</span><span>{fmtTokens(usage.input)}</span></div>
               <div className="composer-usage-row"><span>缓存输入</span><span>{fmtTokens(usage.cached_input)}</span></div>
               <div className="composer-usage-row"><span>输出</span><span>{fmtTokens(usage.output)}</span></div>
               <div className="composer-usage-row"><span>推理</span><span>{fmtTokens(usage.reasoning_output)}</span></div>
-              <div className="composer-usage-row total"><span>合计</span><span>{fmtTokens(usage.total)}</span></div>
+              <div className="composer-usage-row total"><span>当前占用</span><span>{fmtTokens(usage.total)}</span></div>
               <div className="composer-usage-row"><span>窗口</span><span>{fmtTokens(usage.context_window)}</span></div>
               {usage.agent_name && <div className="composer-usage-agent">{usage.agent_name}</div>}
             </>

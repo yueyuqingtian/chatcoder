@@ -246,6 +246,10 @@ a { color: var(--accent); text-decoration: none; }
 .composer-usage-row { display: flex; justify-content: space-between; padding: 1px 0; }
 .composer-usage-row.total { border-top: 1px solid var(--border); margin-top: 3px; padding-top: 3px; font-weight: 600; }
 .composer-usage-agent { margin-top: 4px; color: var(--text-3); font-size: 10px; }
+/* v6.5: 上下文压缩反馈 */
+.composer-usage-ring.compacting svg circle:last-child { animation: compacting-pulse 1s ease-in-out infinite; }
+@keyframes compacting-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+.composer-compacting-badge { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; color: var(--warning); white-space: nowrap; animation: compacting-pulse 1.2s ease-in-out infinite; }
 .composer-reasoning { position: relative; }
 .composer-reasoning-btn { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; padding: 5px 8px; border-radius: var(--r-sm); background: transparent; color: var(--text-2); cursor: pointer; white-space: nowrap; border: none; transition: all var(--dur-fast); }
 .composer-reasoning-btn:hover { background: var(--bg-hover); color: var(--text-1); }

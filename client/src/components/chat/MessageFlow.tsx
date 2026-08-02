@@ -29,7 +29,7 @@ function StreamingText() {
   const text = Object.values(buffers).join("");
 
   return (
-    <div className="mf-entry" style={{ minHeight: "33vh", paddingBottom: 16 }}>
+    <div className="mf-entry" style={{ minHeight: "60px", paddingBottom: 16 }}>
       <div className="turn-group">
         {text && (
           <div className="turn-item turn-item-text">
@@ -89,44 +89,54 @@ export function MessageFlow() {
     return out;
   }, [entries, query]);
 
-  // 新消息自动滚到底（只在靠近底部时）
+  // v6.3/v6.4: 统一滚动管理 —— 合并 3 个竞争 effect 为 1 个，消除鬼畜抖动
+  // v6.4: 流式输出时直接同步滚动（不走 rAF），避免大量 delta 时 rAF 被频繁取消导致滚动滞后
   const prevCount = useRef(0);
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    if (entries.length === prevCount.current) return;
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 200;
-    if (nearBottom || entries.length > prevCount.current) {
-      el.scrollTop = el.scrollHeight;
-    }
-    prevCount.current = entries.length;
-  }, [entries.length]);
-
-  // 发送消息后（isRunning 从 false->true）强制滚动到底部，展示留白区域
   const prevRunning = useRef(false);
-  useEffect(() => {
-    if (isRunning && !prevRunning.current) {
-      const el = scrollRef.current;
-      if (el) {
-        requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
-      }
-    }
-    prevRunning.current = isRunning;
-  }, [isRunning]);
+  const rafRef = useRef<number | null>(null);
+  // 缓存"是否靠近底部"的判断，流式 delta 高频到达时避免重复计算 + 重复滚动
+  const nearBottomRef = useRef(true);
+  // 节流：流式输出时最多每 16ms 滚动一次（一帧），避免每个 token 都触发回流
+  const lastScrollTsRef = useRef(0);
 
-  // 流式输出时持续滚动到底部
-  const streamingText = useMemo(() => {
-    return Object.values(streamingBuffers).join("") + Object.values(thinkingBuffers).join("");
-  }, [streamingBuffers, thinkingBuffers]);
   useEffect(() => {
-    if (!isRunning) return;
     const el = scrollRef.current;
     if (!el) return;
+
+    // 判断是否靠近底部（用户是否在查看历史）
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 300;
-    if (nearBottom) {
-      el.scrollTop = el.scrollHeight;
+    nearBottomRef.current = nearBottom;
+
+    // 情况1：新消息条数增加 → 滚到底
+    const newEntries = entries.length > prevCount.current;
+    // 情况2：开始运行（false→true）→ 强制滚到底
+    const justStarted = isRunning && !prevRunning.current;
+    // 情况3：流式输出中 + 靠近底部 → 跟随滚动
+    const streaming = isRunning && nearBottom;
+
+    if (streaming) {
+      // v6.4: 流式输出 —— 同步直接滚动 + 时间节流
+      // 大量 token delta 到达时，每个都触发 effect，但只在一帧内滚动一次
+      const now = performance.now();
+      if (now - lastScrollTsRef.current >= 16) {
+        lastScrollTsRef.current = now;
+        el.scrollTop = el.scrollHeight;
+      }
+    } else if (newEntries || justStarted) {
+      // 非流式场景（新消息/开始运行）用 rAF 合并，避免抖动
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+      }
+      rafRef.current = requestAnimationFrame(() => {
+        const el2 = scrollRef.current;
+        if (el2) el2.scrollTop = el2.scrollHeight;
+        rafRef.current = null;
+      });
     }
-  }, [isRunning, streamingText, entries.length]);
+
+    prevCount.current = entries.length;
+    prevRunning.current = isRunning;
+  }, [entries.length, isRunning, streamingBuffers, thinkingBuffers]);
 
   const jumpToEntry = useCallback((entry: TimelineEntry) => {
     const idx = entries.findIndex((e) => e === entry);

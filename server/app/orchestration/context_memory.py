@@ -44,19 +44,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# ── v3.3: Per-Agent 动态窗口管理 ──
+# ── v3.3/v6.3: Per-Agent 动态窗口管理 ──
 # 所有窗口/阈值基于每个 Agent 的 Model.context_window 按比例计算，不再固定。
 # 比例定义在 token_counter.py 中：
-#   MAIN_WINDOW_RATIO = 0.08       主群聊窗口 = ctx_window × 8%
-#   MAIN_SUMMARIZE_RATIO = 0.15    摘要触发 = ctx_window × 15%
-#   MAIN_SUMMARIZE_BATCH_RATIO = 0.06  每次摘要量 = ctx_window × 6%
-#   THREAD_WINDOW_RATIO = 0.15     Thread 窗口 = ctx_window × 15%
-#   AGENT_LOOP_COMPACT_RATIO = 0.72 Agent Loop 压缩 = ctx_window × 72%
-#
-# 示例（不同模型对比）：
-# ┌──────────┬──────────┬──────────┬──────────┬──────────┐
-# │ 模型窗口  │ 主群聊窗口│ 摘要触发  │ Thread   │ Loop压缩  │
-# │ 200K     │ 16K      │ 30K      │ 30K      │ 144K     │
+#   MAIN_WINDOW_RATIO = 0.80       主群聊窗口 = ctx_window × 80%
+#   MAIN_SUMMARIZE_RATIO = 0.85    摘要触发 = ctx_window × 85%
+#   MAIN_SUMMARIZE_BATCH_RATIO = 0.35  每次摘要量 = ctx_window × 35%
+#   THREAD_WINDOW_RATIO = 0.85     Thread 窗口 = ctx_window × 85%
+#   AGENT_LOOP_COMPACT_RATIO = 0.90 Agent Loop 压缩 = ctx_window × 90%
 # │ 500K     │ 40K      │ 75K      │ 75K      │ 360K     │
 # │ 1M       │ 80K      │ 150K     │ 150K     │ 720K     │
 # └──────────┴──────────┴──────────┴──────────┴──────────┘
@@ -246,10 +241,10 @@ async def maybe_summarize_main_session(
 ) -> None:
     """检查主会话是否需要摘要，需要则生成并更新 shared_context。
 
-    v3.3: 摘要触发阈值基于 Leader 模型的 context_window 动态计算。
+    v3.3/v6.3: 摘要触发阈值基于 Leader 模型的 context_window 动态计算。
     - context_window 由调用方传入，或自动从 Leader 模型解析
-    - 触发阈值 = context_window × MAIN_SUMMARIZE_RATIO (15%)
-    - 每次摘要量 = context_window × MAIN_SUMMARIZE_BATCH_RATIO (6%)
+    - 触发阈值 = context_window × MAIN_SUMMARIZE_RATIO (85%)  # v6.3: 从 15% 提升到 85%
+    - 每次摘要量 = context_window × MAIN_SUMMARIZE_BATCH_RATIO (35%)  # v6.3: 从 6% 提升到 35%
     """
     # v3.3: 解析 Leader 的 context_window
     if context_window is None:
@@ -270,6 +265,13 @@ async def maybe_summarize_main_session(
 
     # v3.3: 按 token 触发，而非按条数
     candidates_tokens = messages_token_total(candidates)
+    # v6.4: 诊断日志 —— 打印主会话摘要判断的实际值
+    logger.info(
+        "[main_summary] session=%s context_window=%d threshold=%d candidates_tokens=%d (ratio=%.1f%%) %s",
+        session.id, context_window, summarize_threshold, candidates_tokens,
+        (candidates_tokens / context_window * 100) if context_window > 0 else 0,
+        "→ 跳过" if candidates_tokens <= summarize_threshold else "→ 触发摘要",
+    )
     if candidates_tokens <= summarize_threshold:
         return
 

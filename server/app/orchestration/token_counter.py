@@ -18,8 +18,11 @@ logger = logging.getLogger(__name__)
 
 # ── Token 估算常量（对齐 codex APPROX_BYTES_PER_TOKEN = 4）──
 _BYTES_PER_TOKEN = 4
-_MESSAGE_OVERHEAD = 4   # 每条消息的 role 标记 + 分隔符开销
-_TOOL_CALL_OVERHEAD = 10  # tool_call 结构额外开销
+# v6.5: 每条消息结构开销。OpenAI ChatML 每条约 4 token（<im_start>{role}\n...<im_end>\n）。
+# 实测 glm-5.2：959条消息真实80k，纯文本99条约25k估算，工具开销需保守避免高估。
+_MESSAGE_OVERHEAD = 4
+_TOOL_CALL_OVERHEAD = 8   # tool_call 结构额外开销（function + id + type）
+_TOOL_RESULT_OVERHEAD = 8  # tool result 结构额外开销（tool_call_id + name）
 
 
 def _approx_token_count(text: str) -> int:
@@ -139,6 +142,7 @@ def estimate_message_tokens_from_model(msg) -> int:
     不依赖 ChatMessage 结构，直接从 DB 模型估算。
     """
     from app.core.enums import MsgType
+    import json as _json
 
     total = _MESSAGE_OVERHEAD
 
@@ -147,13 +151,18 @@ def estimate_message_tokens_from_model(msg) -> int:
         if msg.msg_type == MsgType.TOOL_CALL:
             tool = content.get("tool", "")
             args = content.get("args", {})
-            args_str = str(args) if args else ""
+            # v6.5: 用 json.dumps 估算 args，比 str() 更接近实际序列化后的体积
+            try:
+                args_str = _json.dumps(args, ensure_ascii=False) if args else ""
+            except (TypeError, ValueError):
+                args_str = str(args) if args else ""
             total += rough_token_estimate(tool + args_str)
             total += _TOOL_CALL_OVERHEAD
         elif msg.msg_type == MsgType.TOOL_RESULT:
-            output = content.get("output", "") or content.get("error", "")
+            output = content.get("output", "") or content.get("error", "") or ""
             tool = content.get("tool", "")
             total += rough_token_estimate(tool + output)
+            total += _TOOL_RESULT_OVERHEAD
         else:
             text = content.get("text") or content.get("note") or ""
             total += rough_token_estimate(text)
@@ -226,10 +235,10 @@ def _ratio(name: str, default: float) -> float:
     return float(getattr(settings, name, default))
 
 AGENT_LOOP_COMPACT_RATIO = 0.90
-MAIN_SUMMARIZE_RATIO = 0.15
-MAIN_WINDOW_RATIO = 0.08
-MAIN_SUMMARIZE_BATCH_RATIO = 0.06
-THREAD_WINDOW_RATIO = 0.15
+MAIN_SUMMARIZE_RATIO = 0.85       # v6.3: 从 0.15 提升到 0.85，达到阈值才摘要压缩
+MAIN_WINDOW_RATIO = 0.80          # v6.3: 从 0.08 提升到 0.80，保留更多上下文窗口
+MAIN_SUMMARIZE_BATCH_RATIO = 0.35  # v6.3: 从 0.06 提升到 0.35，一次摘要更多
+THREAD_WINDOW_RATIO = 0.85        # v6.3: 从 0.15 提升到 0.85，线程窗口保留更多历史
 # 至少保留的最近消息条数（保底，不按比例）
 MIN_MESSAGES_KEEP = 5
 

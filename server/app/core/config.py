@@ -67,6 +67,13 @@ class Settings(BaseSettings):
     agent_tool_temperature: float = 0.3
     agent_text_temperature: float = 0.7
 
+    # v6.5: 模型单次输出最大 token 数。部分网关默认值很小（如 4096），
+    # 导致长报告/多工具调用被截断。显式设置避免网关默认值截断。
+    # 设为 0 则不传（用网关默认）。
+    # 注意：glm-5.2 网关上限约 65536-131072，设为 65536 安全。
+    # 之前设 150000 会触发"AI服务异常"。
+    agent_max_output_tokens: int = 65536
+
     # v1.1: 工具输出字符阈值分级（痛点1：替代全局 3000 硬截断）
     tool_output_chars_read: int = 12000        # fs_read / fs_list
     tool_output_chars_grep: int = 16000        # fs_grep / codebase_search

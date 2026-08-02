@@ -95,6 +95,25 @@ async def run_agent_loop(
     if max_steps is None:
         max_steps = settings.agent_max_steps
 
+    # v6.4: 启动时打印压缩阈值诊断日志
+    try:
+        from app.orchestration.token_counter import get_agent_context_window
+        _diag_window = await get_agent_context_window(db, agent)
+        if _diag_window < 100000:
+            logger.warning(
+                "[agent] turn=%s agent_window=%d 过小(<100k)，用默认 500000 兜底",
+                turn_id, _diag_window,
+            )
+            _diag_window = 500000
+        logger.info(
+            "[agent] turn=%s agent_context_window=%d, 压缩阈值=%.0f%% (%d tokens)",
+            turn_id, _diag_window,
+            settings.auto_compact_threshold_ratio * 100,
+            int(_diag_window * settings.auto_compact_threshold_ratio),
+        )
+    except Exception:
+        pass
+
     await broadcast(session_id, {
         "event": "agent.started",
         "payload": {"agent_id": agent_id, "kind": agent.kind, "name": agent_name,
@@ -109,6 +128,10 @@ async def run_agent_loop(
     total_tokens = 0
     final_text = ""
     write_paths: list[str] = []
+    # v6.5: 估算校准系数 -- 用 API 真实 prompt_tokens 动态校准估算值。
+    # 字节/4 对中文偏高，不同模型/网关分词差异大，静态常量无法精准。
+    # 每次拿到 API 真实值就更新系数，用于前置压缩估算，实现自适应精准压缩。
+    _calib_factor = 1.0  # real / est，初始1.0（无校准）
 
     try:
         for step in range(1, max_steps + 1):
@@ -118,18 +141,43 @@ async def run_agent_loop(
 
             await asyncio.sleep(0)
 
-            # 上下文压缩（复用 v0.1 compaction）
+            # 上下文压缩（v6.4: 移除每步开头的估算式 should_auto_compact 检查）
+            # 根因：估算 token 与 API 真实 prompt_tokens 偏差大，且当 model.context_window
+            # 配置较小时会过早触发 auto_compact（用户反馈 20k 就摘要）。
+            # 改为仅在 API 响应后用精确 prompt_tokens 判断（见下方 step 后段）。
             agent_window = 0
             try:
                 from app.orchestration.compaction import build_api_copy, ensure_tool_pairing
-                from app.orchestration.token_counter import should_auto_compact, get_agent_context_window
+                from app.orchestration.token_counter import get_agent_context_window, estimate_messages_tokens as _est_tokens
                 agent_window = await get_agent_context_window(db, agent)
+                # v6.4: 最小窗口保护 —— 若 model.context_window 配置过小，用默认值兜底
+                # 避免因模型窗口配置错误导致压缩阈值过低、过早摘要
+                if agent_window < 100000:
+                    logger.warning(
+                        "[agent] turn=%s agent_window=%d 过小(<100k)，用默认 500000 兜底",
+                        turn_id, agent_window,
+                    )
+                    agent_window = 500000
                 messages = ensure_tool_pairing(messages)
                 api_messages = build_api_copy(messages)
-                if should_auto_compact(messages, agent_window):
-                    from app.orchestration.compaction import auto_compact
-                    messages = await auto_compact(messages, agent_window, provider)
+
+                # v6.5: 前置压缩检查 -- 用校准系数调整估算，超阈值则先压缩
+                _est_raw = _est_tokens(api_messages)
+                _est_prompt = int(_est_raw * _calib_factor)
+                _pre_threshold = int(agent_window * settings.auto_compact_threshold_ratio)
+                if _est_prompt >= _pre_threshold:
+                    logger.info("[agent] turn=%s step=%s 前置估算 prompt=%d (raw=%d calib=%.3f) >= 阈值 %d，调用前压缩", turn_id, step, _est_prompt, _est_raw, _calib_factor, _pre_threshold)
+                    await broadcast(session_id, {"event": "compact.started", "payload": {"agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id, "used_tokens": _est_prompt, "context_window": agent_window, "ratio": round(_est_prompt / agent_window * 100, 1)}})
+                    from app.orchestration.compaction import auto_compact as _ac_pre
+                    messages = await _ac_pre(messages, agent_window, provider)
+                    messages = ensure_tool_pairing(messages)
                     api_messages = build_api_copy(messages)
+                    _est_after = int(_est_tokens(api_messages) * _calib_factor)
+                    logger.info("[agent] turn=%s step=%s 前置压缩后 prompt=%d -> %d", turn_id, step, _est_prompt, _est_after)
+                    await broadcast(session_id, {"event": "usage.update", "payload": {"agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id, "prompt_tokens": _est_after, "completion_tokens": 0, "total_tokens": _est_after, "context_window": agent_window, "usage_source": "est_after_compact", "cached_input_tokens": 0, "reasoning_tokens": 0}})
+                    await broadcast(session_id, {"event": "compact.completed", "payload": {"agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id}})
+                else:
+                    logger.debug("[agent] turn=%s step=%s 前置估算 prompt=%d (raw=%d calib=%.3f) < 阈值 %d，不压缩", turn_id, step, _est_prompt, _est_raw, _calib_factor, _pre_threshold)
             except Exception:
                 api_messages = messages
 
@@ -138,14 +186,35 @@ async def run_agent_loop(
                 tools=tool_schemas or None,
                 temperature=settings.agent_tool_temperature if tool_schemas else settings.agent_text_temperature,
                 reasoning_effort=reasoning_effort or (settings.agent_reasoning_effort if tool_schemas else None),
+                max_tokens=settings.agent_max_output_tokens or None,
             )
+            # v6.4 临时诊断：打印实际发送给 API 的消息数和角色分布
+            if step == 1:
+                _role_counts = {}
+                for _m in api_messages:
+                    _role_counts[_m.role] = _role_counts.get(_m.role, 0) + 1
+                logger.warning(
+                    "[agent] turn=%s step=1 发送给API的消息数=%d 角色分布=%s",
+                    turn_id, len(api_messages), _role_counts,
+                )
 
             try:
                 response = await _stream_chat_and_broadcast(
                     provider, request,
                     session_id=session_id, turn_id=turn_id,
                     agent_id=agent_id, agent_name=agent_name,
+                    cancel_event=cancel_event,
                 )
+                # v6.4: 流式调用被用户中断 → 立即退出循环
+                if cancel_event and cancel_event.is_set():
+                    logger.warning("[agent] turn=%s 流式调用后检测到中断信号，退出循环", turn_id)
+                    final_text = response.content or ""
+                    if final_text:
+                        await _emit_agent_msg(db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
+                                              agent_id=agent_id, agent_name=agent_name,
+                                              msg_type=MsgType.TEXT,
+                                              content={"text": final_text, "agent_name": agent_name})
+                    return AgentOutput(kind="error", error="任务被用户中断")
             except Exception as api_err:
                 logger.warning("[agent] turn=%s 模型调用失败，尝试紧急压缩: %s", turn_id, str(api_err)[:200])
                 try:
@@ -156,6 +225,7 @@ async def run_agent_loop(
                     request = ChatRequest(
                         messages=messages, model="", tools=tool_schemas or None,
                         temperature=settings.agent_tool_temperature if tool_schemas else settings.agent_text_temperature,
+                        max_tokens=settings.agent_max_output_tokens or None,
                     )
                     response = await provider.chat(request)
                 except Exception as retry_err:
@@ -174,26 +244,108 @@ async def run_agent_loop(
                 len(response.content or ""),
             )
 
-            # token 统计与广播
-            if response.usage and response.usage.total_tokens > 0:
-                total_tokens += response.usage.total_tokens
-                if token_budget and total_tokens > token_budget:
-                    logger.warning("[agent] turn=%s token 预算熔断", turn_id)
-                    final_text = response.content or "(预算耗尽，任务中止)"
-                    break
-                await broadcast(session_id, {
-                    "event": "usage.update",
-                    "payload": {
-                        "agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id,
-                        "prompt_tokens": response.usage.prompt_tokens,
-                        "completion_tokens": response.usage.completion_tokens,
-                        "total_tokens": response.usage.total_tokens,
-                        "context_window": agent_window,
-                        # v1.2: 精确 token 统计
-                        "cached_input_tokens": getattr(response.usage, 'cached_input_tokens', 0) or 0,
-                        "reasoning_tokens": getattr(response.usage, 'reasoning_tokens', 0) or 0,
-                    },
-                })
+            # v6.5: token 统计与广播 -- 网关可能不返回 usage（stream 末尾无 usage chunk），
+            # 此时用 estimate_messages_tokens 估算 prompt_tokens 兜底，确保：
+            # 1) usage.update 总被广播（前端占用显示实时更新）
+            # 2) auto_compact 压缩逻辑能基于真实占用触发（避免永不压缩）
+            from app.orchestration.token_counter import estimate_messages_tokens as _est_tokens
+            _est_prompt = _est_tokens(api_messages) if api_messages else 0
+            _api_prompt = 0
+            _api_completion = 0
+            _api_total = 0
+            _usage_source = "none"
+            if response.usage:
+                _api_prompt = response.usage.prompt_tokens or 0
+                _api_completion = response.usage.completion_tokens or 0
+                _api_total = response.usage.total_tokens or 0
+                if _api_prompt > 0:
+                    _usage_source = "api"
+
+            if _usage_source == "none":
+                # 网关未返回 usage，用估算值兜底
+                _final_prompt = _est_prompt
+                _final_completion = 0
+                logger.warning(
+                    "[agent] turn=%s step=%s 网关未返回 usage，用估算 prompt=%d (est) 兜底",
+                    turn_id, step, _est_prompt,
+                )
+            else:
+                _final_prompt = _api_prompt
+                _final_completion = _api_completion
+                # v6.5: 用 API 真实值更新校准系数（real/est），指数平滑避免抖动。
+                # 下一次前置估算会更准，实现自适应精准压缩。
+                if _est_prompt > 0 and _api_prompt > 0:
+                    _new_factor = _api_prompt / _est_prompt
+                    _calib_factor = _calib_factor * 0.5 + _new_factor * 0.5
+                    logger.debug(
+                        "[agent] turn=%s step=%s 校准系数更新: %.3f (real=%d est=%d new=%.3f)",
+                        turn_id, step, _calib_factor, _api_prompt, _est_prompt, _new_factor,
+                    )
+
+            total_tokens += (_api_total or (_final_prompt + _final_completion))
+            if token_budget and total_tokens > token_budget:
+                logger.warning("[agent] turn=%s token 预算熔断", turn_id)
+                final_text = response.content or "(预算耗尽，任务中止)"
+                break
+
+            # v6.5: total_tokens 发送 prompt_tokens（真实当前上下文占用），
+            # prompt_tokens 包含 system+history+tools+当前输入，是"窗口被占用了多少"的真实值。
+            await broadcast(session_id, {
+                "event": "usage.update",
+                "payload": {
+                    "agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id,
+                    "prompt_tokens": _final_prompt,
+                    "completion_tokens": _final_completion,
+                    "total_tokens": _final_prompt,
+                    "context_window": agent_window,
+                    "usage_source": _usage_source,
+                    "cached_input_tokens": getattr(response.usage, 'cached_input_tokens', 0) or 0 if response.usage else 0,
+                    "reasoning_tokens": getattr(response.usage, 'reasoning_tokens', 0) or 0 if response.usage else 0,
+                },
+            })
+            logger.info(
+                "[agent] turn=%s step=%s 上下文占用 prompt=%d (source=%s) / window=%d = %.1f%%",
+                turn_id, step, _final_prompt, _usage_source, agent_window,
+                (_final_prompt / agent_window * 100) if agent_window > 0 else 0,
+            )
+
+            # v6.4: 调用后真实占用驱动压缩 -- 用 API 精确 prompt_tokens 判断
+            # 替代旧的 should_auto_compact 估算检查，避免过早摘要。
+            # 阈值 = agent_window * auto_compact_threshold_ratio (默认 0.90)
+            if _final_prompt > 0 and agent_window > 0:
+                _real_ratio = _final_prompt / agent_window
+                _threshold = settings.auto_compact_threshold_ratio
+                if _real_ratio >= _threshold:
+                    logger.info(
+                        "[agent] turn=%s step=%s 真实上下文占用 %.1f%% (p=%d/w=%d) >= %.0f%%，触发自动压缩",
+                        turn_id, step, _real_ratio * 100, _final_prompt,
+                        agent_window, _threshold * 100,
+                    )
+                    # v6.5: 压缩前广播，让前端显示"正在压缩上下文"反馈
+                    await broadcast(session_id, {
+                        "event": "compact.started",
+                        "payload": {
+                            "agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id,
+                            "used_tokens": _final_prompt,
+                            "context_window": agent_window,
+                            "ratio": round(_real_ratio * 100, 1),
+                        },
+                    })
+                    from app.orchestration.compaction import auto_compact
+                    messages = await auto_compact(messages, agent_window, provider)
+                    # v6.5: 压缩后广播，前端关闭反馈提示
+                    await broadcast(session_id, {
+                        "event": "compact.completed",
+                        "payload": {
+                            "agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id,
+                        },
+                    })
+                else:
+                    logger.debug(
+                        "[agent] turn=%s step=%s 上下文占用 %.1f%% (p=%d/w=%d) < %.0f%%，无需压缩",
+                        turn_id, step, _real_ratio * 100, _final_prompt,
+                        agent_window, _threshold * 100,
+                    )
 
             # 思考写入消息
             if response.thinking:
@@ -205,11 +357,23 @@ async def run_agent_loop(
 
             # 工具调用
             if response.tool_calls:
+                # v1.3: 有工具调用且有文本内容时，先提交文本消息再提交工具调用
+                # 否则前端 streamingBuffers 被 tool_call 的 message.created 清空后，
+                # 文本内容永久丢失（后端没提交，前端也读不到）
+                if response.content:
+                    await _emit_agent_msg(db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
+                                          agent_id=agent_id, agent_name=agent_name,
+                                          msg_type=MsgType.TEXT,
+                                          content={"text": response.content, "agent_name": agent_name})
                 messages.append(ChatMessage(
                     role="assistant", content=response.content,
                     tool_calls=response.tool_calls,
                 ))
                 for tc in response.tool_calls:
+                    # v6.4: 工具执行前检查中断信号
+                    if cancel_event and cancel_event.is_set():
+                        logger.warning("[agent] turn=%s 工具执行前检测到中断信号，退出循环", turn_id)
+                        return AgentOutput(kind="error", error="任务被用户中断")
                     tool_name = tc.get("name", "")
                     args = tc.get("arguments", {}) or {}
                     call_key = "tc_" + uuid.uuid4().hex[:12]
@@ -354,16 +518,27 @@ async def _emit_agent_msg(db, *, session_id, turn_id, thread_id, agent_id, agent
     )
 
 
-async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, agent_id, agent_name):
-    """流式调用 provider，实时广播 thinking/content delta。"""
+async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, agent_id, agent_name,
+                                     cancel_event: asyncio.Event | None = None):
+    """流式调用 provider，实时广播 thinking/content delta。
+
+    v6.4: 支持 cancel_event —— 流式输出中检测到中断信号时立即终止，返回已收到的部分内容。
+    """
     from app.models.schemas import ChatResponse, Usage as UsageModel
     full_content = ""
     full_thinking = ""
     tool_calls = []
     finish_reason = "stop"
     usage = UsageModel()
+    _cancelled = False
     try:
         async for event in provider.stream_structured(request):
+            # v6.4: 流式输出中检查中断信号，立即停止
+            if cancel_event and cancel_event.is_set():
+                logger.warning("[agent] turn=%s 流式输出中收到中断信号，停止接收", turn_id)
+                _cancelled = True
+                finish_reason = "cancelled"
+                break
             if event["type"] == "thinking":
                 delta = event.get("delta", "")
                 full_thinking += delta
@@ -386,13 +561,16 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
                 usage = event.get("usage", UsageModel())
                 break
     except Exception:
-        logger.exception("[agent] turn=%s 流式调用异常，回退非流式", turn_id)
-        response = await provider.chat(request)
-        full_content = response.content or ""
-        full_thinking = response.thinking or ""
-        tool_calls = response.tool_calls or []
-        finish_reason = response.finish_reason
-        usage = response.usage
+        if _cancelled:
+            pass  # 中断导致的异常，忽略
+        else:
+            logger.exception("[agent] turn=%s 流式调用异常，回退非流式", turn_id)
+            response = await provider.chat(request)
+            full_content = response.content or ""
+            full_thinking = response.thinking or ""
+            tool_calls = response.tool_calls or []
+            finish_reason = response.finish_reason
+            usage = response.usage
 
     if full_thinking:
         await broadcast(session_id, {

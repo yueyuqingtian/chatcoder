@@ -167,7 +167,11 @@ async def get_session_usage(session_id: int, db: AsyncSession = Depends(get_db))
             Message.thread_id.is_(None),
         ).order_by(Message.id.asc())
     )
-    msgs = list(res.scalars().all())
+    # v6.5: 过滤 thinking 消息（思考块不发给AI，与 build_main_context 保持一致），
+    # 使初始估算值与 API 真实 prompt_tokens 接近，避免进入会话显示 145k、
+    # 发消息后骤降到 18.7k 的不一致问题。
+    from app.core.enums import MsgType
+    msgs = [m for m in res.scalars().all() if m.msg_type == MsgType.TEXT.value]
     total_tokens = messages_token_total(msgs)
 
     # 获取 context_window：优先 session.model_id，否则用默认

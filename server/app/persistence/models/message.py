@@ -16,6 +16,7 @@ class Session(Base):
     pinned: Mapped[bool] = mapped_column(Boolean, default=False)
     fork_parent_id: Mapped[int | None] = mapped_column(BigInteger)  # 分支来源会话 id
     worktree_path: Mapped[str | None] = mapped_column(String(512))  # git 工作树路径（有则优先作为工作目录）
+    plan_confirmed: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")  # 计划确认门
     created_at: Mapped[str] = mapped_column(server_default=func.now())
     updated_at: Mapped[str] = mapped_column(server_default=func.now(), onupdate=func.now())
 

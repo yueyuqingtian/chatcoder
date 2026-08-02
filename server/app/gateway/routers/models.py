@@ -1,9 +1,11 @@
 """模型管理 API（v2）。"""
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.gateway.schemas import ModelCreate, ModelOut, ModelUpdate
 from app.persistence.database import get_db
+from app.persistence.models.agent import Agent
 from app.services import model_service
 
 router = APIRouter()
@@ -42,6 +44,13 @@ async def create_model(body: ModelCreate, db: AsyncSession = Depends(get_db)):
         api_key=body.api_key,
         reasoning_efforts=body.reasoning_efforts,
     )
+    # v1.3: 自动绑定到未绑定模型的 main agent，让用户配置后直接可用
+    if body.is_active:
+        res = await db.execute(select(Agent).where(Agent.kind == "main").limit(1))
+        main_agent = res.scalars().first()
+        if main_agent and not main_agent.model_id:
+            main_agent.model_id = model.id
+            await db.flush()
     await db.commit()
     return _to_out(model)
 

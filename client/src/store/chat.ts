@@ -35,6 +35,8 @@ interface ChatState {
   thinkingBuffers: Record<number, string>;
   /** 上下文占用（最新 usage.update）。 */
   usage: UsageDetail | null;
+  /** v6.5: 是否正在压缩上下文（用于页面反馈）。 */
+  isCompacting: boolean;
   /** 待审批请求。 */
   pendingApproval: { approvalId: string; detail: Record<string, unknown> } | null;
   /** 回滚/撤销后回填输入框的草稿。 */
@@ -104,6 +106,7 @@ function _resetSessionState(): Partial<ChatState> {
     streamingBuffers: {},
     thinkingBuffers: {},
     usage: null,
+    isCompacting: false,
     pendingApproval: null,
   };
 }
@@ -122,6 +125,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   streamingBuffers: {},
   thinkingBuffers: {},
   usage: null,
+  isCompacting: false,
   pendingApproval: null,
   composerDraft: "",
   loading: false,
@@ -463,7 +467,43 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const rawMsg = (payload.msg ?? payload) as MessageOut;
         if (rawMsg.id != null) rawMsg.id = Number(rawMsg.id);
         if (rawMsg.content == null) rawMsg.content = {};
-        get().addMessage(rawMsg);
+        // v1.3: 合并 addMessage 和清空 buffer 为一次 set()，避免中间态闪烁
+        const sid = Number(rawMsg.sender_id);
+        const isThinking = Boolean((rawMsg.content as Record<string, unknown>).thinking);
+        set((state) => {
+          // 去重
+          if (state.messages.some((m) => m.id === rawMsg.id)) return {};
+          // 处理乐观消息替换
+          const isUserMsg = rawMsg.sender_type === "user";
+          const msgText = (rawMsg.content as Record<string, unknown>).text as string | undefined;
+          let newMessages: MessageOut[];
+          if (isUserMsg && msgText) {
+            const optimisticIdx = state.messages.findIndex((m) =>
+              m.sender_type === "user" &&
+              m.id > 1_000_000_000_000 &&
+              (m.content as Record<string, unknown>).text === msgText
+            );
+            if (optimisticIdx >= 0) {
+              newMessages = [...state.messages];
+              newMessages.splice(optimisticIdx, 1, rawMsg);
+            } else {
+              newMessages = [...state.messages, rawMsg].sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
+            }
+          } else {
+            newMessages = [...state.messages, rawMsg].sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
+          }
+          // 清空对应 agent 的流式 buffer，与消息落库同一次渲染完成
+          const newStreaming = sid ? { ...state.streamingBuffers } : state.streamingBuffers;
+          const newThinking = sid ? { ...state.thinkingBuffers } : state.thinkingBuffers;
+          if (sid) {
+            if (isThinking) {
+              delete newThinking[sid];
+            } else {
+              delete newStreaming[sid];
+            }
+          }
+          return { messages: newMessages, streamingBuffers: newStreaming, thinkingBuffers: newThinking };
+        });
         break;
       }
       case "turn.started":
@@ -487,6 +527,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set((s) => ({
           turns: s.turns.map((t) => (t.id === turnId ? { ...t, status: "completed", summary: (payload.summary as string) ?? t.summary } : t)),
           runningTurnId: null, isRunning: false,
+          streamingBuffers: {}, thinkingBuffers: {},  // v1.3: turn 结束兜底清空
         }));
         get().refreshMessages();
         get().refreshTasks();
@@ -494,7 +535,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       case "turn.interrupted": {
         const turnId = Number(payload.turn_id);
-        set({ interruptedTurnId: turnId, runningTurnId: null, isRunning: false });
+        set({ interruptedTurnId: turnId, runningTurnId: null, isRunning: false, streamingBuffers: {}, thinkingBuffers: {} });
         get().refreshMessages();
         break;
       }
@@ -515,13 +556,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break;
       }
       case "thinking.done": {
-        const aid = Number(payload.agent_id);
-        if (aid) {
-          set((s) => {
-            const { [aid]: _drop, ...rest } = s.thinkingBuffers;
-            return { thinkingBuffers: rest };
-          });
-        }
+        // v1.3: 不立即清空 buffer，等 message.created 落库后再清
         break;
       }
       case "token.delta": {
@@ -533,13 +568,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break;
       }
       case "token.done": {
-        const aid = Number(payload.agent_id);
-        if (aid) {
-          set((s) => {
-            const { [aid]: _drop, ...rest } = s.streamingBuffers;
-            return { streamingBuffers: rest };
-          });
-        }
+        // v1.3: 不立即清空 buffer，等 message.created 落库后再清
+        // 避免流式正文"刷完就消失"（落库消息到达前 buffer 保留显示）
         break;
       }
       case "tool.call":
@@ -556,17 +586,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break;
       }
       case "usage.update": {
-        // v1.2: 字段名对齐后端 payload（prompt_tokens/completion_tokens/cached_input_tokens/reasoning_tokens）
+        // v6.5: total 用 prompt_tokens（真实当前上下文占用），而非 total_tokens(prompt+completion)。
+        // prompt_tokens 包含 system+history+tools+当前输入，是"窗口被占用了多少"的真实值。
+        // 后端已将 total_tokens 字段也设为 prompt_tokens，这里取 prompt_tokens 更明确。
+        const promptTokens = Number(payload.prompt_tokens ?? payload.input_tokens ?? 0);
         const detail: UsageDetail = {
-          input: Number(payload.prompt_tokens ?? payload.input_tokens ?? 0),
+          input: promptTokens,
           cached_input: Number(payload.cached_input_tokens ?? 0),
           output: Number(payload.completion_tokens ?? payload.output_tokens ?? 0),
           reasoning_output: Number(payload.reasoning_tokens ?? 0),
-          total: Number(payload.total_tokens ?? payload.total_context_used ?? 0),
+          total: promptTokens,
           context_window: Number(payload.context_window ?? 0),
           agent_name: String(payload.agent_name ?? "main"),
         };
         set({ usage: detail });
+        break;
+      }
+      case "compact.started": {
+        // v6.5: 压缩开始，前端显示"正在压缩上下文"反馈
+        set({ isCompacting: true });
+        break;
+      }
+      case "compact.completed": {
+        // v6.5: 压缩完成，关闭反馈提示
+        set({ isCompacting: false });
         break;
       }
       case "approval.request":

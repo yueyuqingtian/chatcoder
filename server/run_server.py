@@ -88,10 +88,41 @@ def _write_crash_log(exc: BaseException) -> None:
         pass  # 不让日志写失败导致二次崩溃
 
 
+def _load_env_from_exe_dir() -> None:
+    """从 exe 所在目录加载 .env 文件到环境变量中。
+
+    打包后 pydantic-settings 依赖 os.getcwd() 找 .env 文件，
+    但 _setup_env 会 chdir 到 %LOCALAPPDATA%/chatcoder，
+    导致 Settings 实例化时找不到 .env → default_llm_* 全为空。
+    因此在 chdir 之前，先把 .env 中的关键变量注入 os.environ。
+    """
+    exe_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+    env_file = exe_dir / ".env"
+    if not env_file.exists():
+        print(f"[chatcoder-server] WARNING: .env not found at {env_file}")
+        return
+    print(f"[chatcoder-server] loading env from {env_file}")
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        # 去掉值的引号(如果有)
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        # 仅设置未定义的环境变量，避免覆盖 Electron 传入的显式值
+        os.environ.setdefault(key, value)
+
+
 def _setup_env() -> None:
     """设置环境变量,确保所有写操作落到可写目录。"""
     data_dir = _resolve_data_dir()
     _setup_logging(data_dir)
+
+    # 关键: 在 chdir 之前加载 .env 到环境变量,确保 Settings 能读到配置
+    _load_env_from_exe_dir()
 
     # ── 数据库: SQLite,放在可写数据目录 ──
     db_path = data_dir / "chatcoder.db"
