@@ -14,6 +14,34 @@ from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 logger = logging.getLogger(__name__)
 
 
+def _to_root_uri(root_path: str | None) -> str | None:
+    """将本地项目路径转换为 MCP initialize 的 rootUri（Windows 兼容）。
+
+    例: D:\\myProject\\chatcoder -> file:///D:/myProject/chatcoder
+    """
+    if not root_path:
+        return None
+    path = str(root_path).replace("\\", "/")
+    if not path.startswith("/"):
+        path = "/" + path
+    return f"file://{path}"
+
+
+def _resolve_tool_call(args: dict, tool_name: str) -> tuple[str, dict]:
+    """解析实际要调用的 MCP 工具名与参数。
+
+    通用兜底包装器（tool_name == "call"）的入参为 {"method": 工具名, "args": {...}}，
+    需要解包出真实工具名与参数；其余包装器直接使用自身工具名与入参。
+    """
+    if tool_name == "call" and isinstance(args, dict) and args.get("method"):
+        real_name = str(args["method"])
+        real_args = args.get("args")
+        if not isinstance(real_args, dict):
+            real_args = {k: v for k, v in args.items() if k != "method"}
+        return real_name, real_args
+    return tool_name, args
+
+
 class McpToolWrapper(Tool):
     """将 MCP Server 暴露的单个工具包装为系统 Tool。
 
@@ -112,6 +140,12 @@ class McpToolWrapper(Tool):
 
         try:
             # Step 1: 发送 initialize
+            # v6.0: 部分 MCP server（如 codegraph）依赖 rootUri 确定目标项目，
+            # 未传 rootUri 时握手会一直等待。优先用配置的项目路径，回退到 workspace_root。
+            root_uri = _to_root_uri(
+                self._server_config.get("path")
+                or getattr(ctx, "workspace_root", None)
+            )
             init_request = {
                 "jsonrpc": "2.0",
                 "id": 0,
@@ -122,6 +156,8 @@ class McpToolWrapper(Tool):
                     "clientInfo": {"name": "chatcoder", "version": "6.0"},
                 },
             }
+            if root_uri:
+                init_request["params"]["rootUri"] = root_uri
             init_resp = await self._send_and_read(proc, init_request, timeout=10)
             if not init_resp:
                 stderr = await proc.stderr.read() if proc.stderr else b""
@@ -139,13 +175,14 @@ class McpToolWrapper(Tool):
             await proc.stdin.drain()
 
             # Step 3: 发送 tools/call
+            call_tool_name, call_args = _resolve_tool_call(args, self._tool_name)
             call_request = {
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "tools/call",
                 "params": {
-                    "name": self._tool_name,
-                    "arguments": args,
+                    "name": call_tool_name,
+                    "arguments": call_args,
                 },
             }
             call_resp = await self._send_and_read(proc, call_request, timeout=60, expected_id=1)
@@ -238,13 +275,14 @@ class McpToolWrapper(Tool):
         try:
             import aiohttp
 
+            call_tool_name, call_args = _resolve_tool_call(args, self._tool_name)
             request_data = {
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "tools/call",
                 "params": {
-                    "name": self._tool_name,
-                    "arguments": args,
+                    "name": call_tool_name,
+                    "arguments": call_args,
                 },
             }
 
@@ -288,6 +326,7 @@ def build_mcp_tools_for_agent(
             "args": srv.args or [],
             "env": srv.env or {},
             "url": srv.url,
+            "path": getattr(srv, "path", None),
         }
 
         # 如果 MCP Server 已有缓存的 tools 列表，直接用

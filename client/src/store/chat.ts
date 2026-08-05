@@ -43,6 +43,8 @@ interface ChatState {
   composerDraft: string;
   /** v6: /plan 计划确认弹窗（plan turn 完成后触发，task 为待执行任务）。 */
   pendingPlan: { task: string } | null;
+  /** v7: /plan 待确认的 plan turn（turnId + 任务内容），等 plan 文档生成（turn.completed）后才弹确认框。 */
+  pendingPlanTurn: { turnId: number; task: string } | null;
   /** v6: 已审查的产物文件（path -> true），用于审查清单展示。 */
   reviewedFiles: Record<string, boolean>;
   loading: boolean;
@@ -65,6 +67,7 @@ resumeTurn: () => Promise<void>;
   rollbackTurn: (turnId: number, restoreToComposer?: boolean) => Promise<void>;
   confirmPlan: (task: string) => Promise<void>;
   dismissPlan: () => void;
+  respondApproval: (approvalId: string, approved: boolean) => void;
   markFileReviewed: (path: string, reviewed: boolean) => void;
   refreshMessages: () => Promise<void>;
   refreshTurns: () => Promise<void>;
@@ -115,6 +118,7 @@ function _resetSessionState(): Partial<ChatState> {
     usage: null,
     isCompacting: false,
     pendingApproval: null,
+    pendingPlanTurn: null,
   };
 }
 
@@ -135,6 +139,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   isCompacting: false,
   pendingApproval: null,
   pendingPlan: null,
+  pendingPlanTurn: null,
   reviewedFiles: {},
   composerDraft: "",
   loading: false,
@@ -308,8 +313,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       created_at: new Date().toISOString(),
     };
     get().addMessage(optimisticUserMsg);
-    // /plan 计划 turn：记录待确认任务（plan turn 完成后触发确认弹窗）
-    if (mode === "plan") set({ pendingPlan: { task: content } });
     try {
       const turn = await api.createTurn({ session_id: currentSessionId, content, attachments, reasoning_effort: reasoningEffort, mode });
       set((s) => ({
@@ -317,10 +320,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         runningTurnId: turn.id,
         isRunning: true,
         interruptedTurnId: null,
+        // v7: /plan 不再立即弹确认框——记录待确认 plan turn，
+        // 等后端真正生成 plan 文档并 turn.completed 后才弹出确认弹窗
+        ...(mode === "plan" ? { pendingPlanTurn: { turnId: turn.id, task: content } } : {}),
       }));
       _startHeartbeat();
     } catch (e) {
-      set({ error: String(e), isRunning: false, pendingPlan: null });
+      set({ error: String(e), isRunning: false, pendingPlan: null, pendingPlanTurn: null });
     } finally {
       _sendingGuard = false;
     }
@@ -334,7 +340,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
     await get().sendTurn(task);
   },
 
-  dismissPlan: () => set({ pendingPlan: null }),
+  dismissPlan: () => set({ pendingPlan: null, pendingPlanTurn: null }),
+
+  respondApproval: (approvalId, approved) => {
+    // 通过 WS 将审批结果发送给后端，工具调用随之继续/终止
+    wsClient.send("approval.response", { approval_id: approvalId, approved });
+    // 本地立即关闭横幅，避免等待广播返回造成的 UI 延迟
+    set({ pendingApproval: null });
+  },
 
   markFileReviewed: (path, reviewed) => {
     set((s) => {
@@ -542,23 +555,38 @@ export const useChatStore = create<ChatState>((set, get) => ({
       case "turn.updated": {
         const turnId = Number(payload.turn_id);
         const status = String(payload.status ?? "");
-        set((s) => ({
-          turns: s.turns.map((t) => (t.id === turnId ? { ...t, status } : t)),
-          ...(status === "running" ? { runningTurnId: turnId, isRunning: true } : {}),
-          ...(status === "completed" || status === "failed" || status === "cancelled" || status === "blocked"
-            ? { runningTurnId: null, isRunning: false }
-            : {}),
-          ...(status === "interrupted" ? { interruptedTurnId: turnId, runningTurnId: null, isRunning: false } : {}),
-        }));
+        set((s) => {
+          const ended = status === "completed" || status === "failed" || status === "cancelled" || status === "blocked";
+          // plan turn 异常结束（未生成 plan）时清除待确认记录
+          const clearPlanTurn = ended && status !== "completed" && s.pendingPlanTurn?.turnId === turnId;
+          return {
+            turns: s.turns.map((t) => (t.id === turnId ? { ...t, status } : t)),
+            ...(status === "running" ? { runningTurnId: turnId, isRunning: true } : {}),
+            ...(ended ? { runningTurnId: null, isRunning: false } : {}),
+            ...(status === "interrupted" ? { interruptedTurnId: turnId, runningTurnId: null, isRunning: false } : {}),
+            ...(clearPlanTurn ? { pendingPlanTurn: null } : {}),
+          };
+        });
         break;
       }
       case "turn.completed": {
         const turnId = Number(payload.turn_id);
-        set((s) => ({
-          turns: s.turns.map((t) => (t.id === turnId ? { ...t, status: "completed", summary: (payload.summary as string) ?? t.summary } : t)),
-          runningTurnId: null, isRunning: false,
-          streamingBuffers: {}, thinkingBuffers: {},  // v1.3: turn 结束兜底清空
-        }));
+        set((s) => {
+          // v7: /plan —— plan turn 完成（plan 文档已生成）后，才弹出确认执行弹窗
+          let pendingPlan = s.pendingPlan;
+          let pendingPlanTurn = s.pendingPlanTurn;
+          if (pendingPlanTurn && pendingPlanTurn.turnId === turnId) {
+            pendingPlan = { task: pendingPlanTurn.task };
+            pendingPlanTurn = null;
+          }
+          return {
+            turns: s.turns.map((t) => (t.id === turnId ? { ...t, status: "completed", summary: (payload.summary as string) ?? t.summary } : t)),
+            runningTurnId: null, isRunning: false,
+            streamingBuffers: {}, thinkingBuffers: {},  // v1.3: turn 结束兜底清空
+            pendingPlan,
+            pendingPlanTurn,
+          };
+        });
         get().refreshMessages();
         get().refreshTasks();
         break;
@@ -610,9 +638,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const taskId = Number(payload.task_id);
         const status = String(payload.status ?? "");
         const note = payload.note != null ? String(payload.note) : null;
-        set((s) => ({
-          tasks: s.tasks.map((t) => (t.id === taskId ? { ...t, status: status || t.status, ...(note ? { note } : {}) } : t)),
-        }));
+        set((s) => {
+          const exists = s.tasks.some((t) => t.id === taskId);
+          if (exists) {
+            return {
+              tasks: s.tasks.map((t) => (t.id === taskId ? { ...t, status: status || t.status, ...(note ? { note } : {}) } : t)),
+            };
+          }
+          return {};
+        });
+        // v7: 新任务（如运行中创建）实时拉取完整列表，保证任务步骤/进度即时可见
+        if (!get().tasks.some((t) => t.id === taskId)) {
+          get().refreshTasks();
+        }
         break;
       }
       case "usage.update": {
@@ -644,6 +682,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       case "approval.request":
         set({ pendingApproval: { approvalId: String(payload.approval_id ?? ""), detail: (payload.detail || {}) as Record<string, unknown> } });
+        break;
+      case "approval.response":
+        // 审批结果广播回前端（含其他窗口），关闭本地审批横幅
+        set({ pendingApproval: null });
         break;
       case "session.completed":
         set({ isRunning: false, runningTurnId: null });

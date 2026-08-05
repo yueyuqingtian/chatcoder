@@ -299,9 +299,13 @@ def scan_all_mcp_servers(workspace_root: str | None = None) -> list[ScannedMcpSe
     return results
 
 
-async def fetch_mcp_tools(command: str, args: list[str], env: dict) -> list[dict]:
+async def fetch_mcp_tools(
+    command: str, args: list[str], env: dict,
+    root_path: str | None = None,
+) -> list[dict]:
     """通过 stdio 与 MCP server 握手并获取 tools/list。
     v4.8: 扫描时填充 tools 列表，解决 agent 看不到 MCP 工具的问题。
+    v6.0: 支持传入 root_path（转为 rootUri），codegraph 等 server 依赖它定位项目。
     """
     import asyncio
     import os
@@ -323,10 +327,16 @@ async def fetch_mcp_tools(command: str, args: list[str], env: dict) -> list[dict
 
     try:
         # initialize
-        init_req = {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+        init_params: dict = {
             "protocolVersion": "2024-11-05", "capabilities": {},
             "clientInfo": {"name": "chatcoder", "version": "4.8"},
-        }}
+        }
+        if root_path:
+            p = str(root_path).replace("\\", "/")
+            if not p.startswith("/"):
+                p = "/" + p
+            init_params["rootUri"] = f"file://{p}"
+        init_req = {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": init_params}
         proc.stdin.write((json.dumps(init_req) + "\n").encode())
         await proc.stdin.drain()
         await asyncio.wait_for(proc.stdout.readline(), timeout=5)

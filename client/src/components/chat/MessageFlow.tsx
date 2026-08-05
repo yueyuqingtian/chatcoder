@@ -14,7 +14,10 @@ import { IconSearch, IconChevronUp, IconChevronDown, IconX } from "../icons";
 import { MarkdownContent } from "../MarkdownContent";
 import { useChatStore } from "../../store/chat";
 
-/** 流式文本展示（token.delta 实时渲染）+ 底部状态行，作为虚拟列表最后一个虚拟项。 */
+/** 流式展示（thinking/token delta 实时渲染），作为虚拟列表最后一个虚拟项。
+ * v7: 当前轮次的"思考中"以思考块形式实时显示在列表最底部（正在进行的动作），
+ * 上面已完成的历史按时间顺序排列——不会出现"上面在思考、下面已有消息/工具调用"的错位观感。
+ */
 function StreamingText() {
   const buffers = useChatStore((s) => s.streamingBuffers);
   const thinkingBuffers = useChatStore((s) => s.thinkingBuffers);
@@ -25,11 +28,23 @@ function StreamingText() {
   const thinkingText = Object.values(thinkingBuffers).join("").trim();
   const text = Object.values(buffers).join("");
 
-  // 状态优先级：思考中 > 处理中 > 等待响应
-  const status = thinkingText ? "思考中…" : text ? "处理中…" : "等待响应…";
-
   return (
     <div className="turn-group" style={{ minHeight: "36px", paddingBottom: 8 }}>
+      {/* 当前轮次思考中：实时思考内容（思考落库后此块消失，思考块按时间顺序出现在消息流中） */}
+      {thinkingText && (
+        <div className="thinking-block active open">
+          <div className="thinking-block-head" style={{ cursor: "default" }}>
+            <span className="thinking-block-chev" />
+            <span className="thinking-block-title">
+              <span className="thinking-block-breath" />
+              思考中…
+            </span>
+          </div>
+          <div className="thinking-block-body" style={{ maxHeight: 160, overflowY: "auto" }}>
+            <pre className="thinking-block-content">{thinkingText}</pre>
+          </div>
+        </div>
+      )}
       {text && (
         <div className="turn-item turn-item-text">
           <div className="turn-agent-text">
@@ -38,10 +53,12 @@ function StreamingText() {
           </div>
         </div>
       )}
-      <div className="turn-status-line">
-        <span className="thinking-block-breath" style={{ marginRight: 6 }} />
-        <span>{status}</span>
-      </div>
+      {!thinkingText && (
+        <div className="turn-status-line">
+          <span className="thinking-block-breath" style={{ marginRight: 6 }} />
+          <span>{text ? "处理中…" : "等待响应…"}</span>
+        </div>
+      )}
     </div>
   );
 }

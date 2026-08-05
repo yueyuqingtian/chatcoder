@@ -17,6 +17,14 @@ interface AttachmentPayload {
 const REASONING_STORAGE_PREFIX = "reasoning:";
 const MAX_TEXTAREA_HEIGHT = 200;
 
+const SLASH_COMMANDS = [
+  { cmd: "/plan", desc: "先规划再执行" },
+  { cmd: "/chat", desc: "只读审阅模式" },
+  { cmd: "/clear", desc: "清空当前对话" },
+  { cmd: "/compact", desc: "压缩上下文" },
+  { cmd: "/init", desc: "初始化项目文档" },
+];
+
 export function ComposerBox() {
   const currentSessionId = useChatStore((s) => s.currentSessionId);
   const isRunning = useChatStore((s) => s.isRunning);
@@ -27,6 +35,8 @@ export function ComposerBox() {
  const pendingPlan = useChatStore((s) => s.pendingPlan);
  const confirmPlan = useChatStore((s) => s.confirmPlan);
  const dismissPlan = useChatStore((s) => s.dismissPlan);
+ const pendingApproval = useChatStore((s) => s.pendingApproval);
+ const respondApproval = useChatStore((s) => s.respondApproval);
 
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<AttachmentPayload[]>([]);
@@ -36,6 +46,7 @@ export function ComposerBox() {
   const [showModels, setShowModels] = useState(false);
   const [showReasoning, setShowReasoning] = useState(false);
   const [showSlash, setShowSlash] = useState(false);
+  const [slashIndex, setSlashIndex] = useState(0);
   const [showAt, setShowAt] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [listening, setListening] = useState(false);
@@ -45,10 +56,27 @@ export function ComposerBox() {
   const recogRef = useRef<{ stop: () => void } | null>(null);
 
   useEffect(() => {
-    api.listModels().then((ms) => setModels(ms)).catch(() => {});
-    if (currentSessionId) {
-      api.getSession(currentSessionId).then((s) => setSessionModelId(s.model_id)).catch(() => {});
-    }
+    let cancelled = false;
+    if (!currentSessionId) { setSessionModelId(null); return; }
+    (async () => {
+      try {
+        const ms = await api.listModels();
+        if (cancelled) return;
+        setModels(ms);
+        let s = null;
+        try { s = await api.getSession(currentSessionId); } catch { /* ignore */ }
+        if (cancelled) return;
+        if (s && s.model_id != null) {
+          // 会话已绑定模型：跟随会话
+          setSessionModelId(s.model_id);
+        } else if (ms.length > 0) {
+          // 新会话/未绑定模型：自动选择第一个可用模型并持久化
+          setSessionModelId(ms[0].id);
+          if (s) api.updateSession(currentSessionId, { model_id: ms[0].id }).catch(() => {});
+        }
+      } catch { /* ignore */ }
+    })();
+    return () => { cancelled = true; };
   }, [currentSessionId]);
 
   useEffect(() => {
@@ -72,7 +100,7 @@ export function ComposerBox() {
     if (!showModels && !showReasoning && !showSlash && !showAt) return;
     const handler = (e: MouseEvent) => {
       const target = e.target as Element;
-      const withinMenu = target.closest?.(".composer-menu") || target.closest?.(".composer-model-badge") || target.closest?.(".composer-reasoning-btn") || target.closest?.(".composer-usage-ring");
+      const withinMenu = target.closest?.(".composer-menu") || target.closest?.(".composer-model-badge") || target.closest?.(".composer-reasoning-btn") || target.closest?.(".composer-usage-ring") || target.closest?.(".composer-input") || target.closest?.(".composer-main");
       if (!withinMenu) {
         setShowModels(false);
         setShowReasoning(false);
@@ -180,8 +208,17 @@ export function ComposerBox() {
           placeholder="输入消息…  / 命令  ·  @ 文件"
           value={input}
           rows={2}
-          onChange={(e) => { setInput(e.target.value); setShowSlash(e.target.value.startsWith("/")); setShowAt(e.target.value.endsWith("@") || /@\S*$/.test(e.target.value)); }}
-          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); } if (e.key === "Escape") { setShowSlash(false); setShowAt(false); } }}
+          onChange={(e) => { setInput(e.target.value); const v = e.target.value; const isSlash = v.startsWith("/"); setShowSlash(isSlash); if (isSlash) setSlashIndex(0); setShowAt(v.endsWith("@") || /@\S*$/.test(v)); }}
+          onKeyDown={(e) => {
+            if (showSlash) {
+              if (e.key === "ArrowDown") { e.preventDefault(); setSlashIndex((i) => (i + 1) % SLASH_COMMANDS.length); return; }
+              if (e.key === "ArrowUp") { e.preventDefault(); setSlashIndex((i) => (i - 1 + SLASH_COMMANDS.length) % SLASH_COMMANDS.length); return; }
+              if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); const cmd = SLASH_COMMANDS[slashIndex]; setInput(cmd.cmd + " "); setShowSlash(false); return; }
+              if (e.key === "Escape") { e.preventDefault(); setShowSlash(false); return; }
+            }
+            if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
+            if (e.key === "Escape") { setShowSlash(false); setShowAt(false); }
+          }}
         />
         <div className="composer-toolbar">
           <div className="composer-tools-left">
@@ -242,8 +279,51 @@ export function ComposerBox() {
         </div>
       </div>
       {dragOver && (<div className="composer-drag-overlay"><IconPaperclip size={24} /><span>松开以添加附件</span></div>)}
-      {showSlash && (<div className="composer-menu composer-slash"><div className="composer-menu-title">命令</div><button onClick={() => { setInput("/plan "); setShowSlash(false); }}>/plan <span className="composer-slash-desc">先规划再执行</span></button><button onClick={() => { setInput("/chat "); setShowSlash(false); }}>/chat <span className="composer-slash-desc">只读审阅</span></button><button onClick={() => { setInput("/clear"); setShowSlash(false); }}>/clear</button><button onClick={() => { setInput("/compact"); setShowSlash(false); }}>/compact</button><button onClick={() => { setInput("/init"); setShowSlash(false); }}>/init</button></div>)}
+      {showSlash && (
+        <div className="composer-menu composer-slash">
+          <div className="composer-menu-title">命令</div>
+          {SLASH_COMMANDS.map((item, idx) => (
+            <button
+              key={item.cmd}
+              className={idx === slashIndex ? "active" : ""}
+              onMouseEnter={() => setSlashIndex(idx)}
+              onClick={() => { setInput(item.cmd + " "); setShowSlash(false); taRef.current?.focus(); }}
+            >
+              <span>{item.cmd}</span>
+              {item.desc && <span className="composer-slash-desc">{item.desc}</span>}
+            </button>
+          ))}
+        </div>
+      )}
       {showAt && (<div className="composer-menu composer-at"><div className="composer-menu-title">提及文件</div><div className="composer-menu-empty">继续输入文件名以补全…</div></div>)}
+      {pendingApproval && (
+        <div className="approval-overlay">
+          <div className="approval-card">
+            <div className="approval-title">工具审批请求</div>
+            <div className="approval-tool">
+              <span className="approval-tool-name">{String(pendingApproval.detail.tool ?? "unknown")}</span>
+              <span className={`approval-risk risk-${String(pendingApproval.detail.risk_level ?? "low")}`}>
+                {String(pendingApproval.detail.risk_level ?? "low")} 风险
+              </span>
+            </div>
+            {pendingApproval.detail.agent_name != null && (
+              <div className="approval-agent">
+                {String(pendingApproval.detail.agent_name)} 申请执行此工具
+              </div>
+            )}
+            {pendingApproval.detail.args != null && (
+              <pre className="approval-args">{formatApprovalArgs(pendingApproval.detail.args)}</pre>
+            )}
+            {typeof pendingApproval.detail.summary === "string" && (
+              <div className="approval-summary">{pendingApproval.detail.summary}</div>
+            )}
+            <div className="approval-actions">
+              <button className="btn-ghost" onClick={() => respondApproval(pendingApproval.approvalId, false)}>拒绝</button>
+              <button className="btn-primary" onClick={() => respondApproval(pendingApproval.approvalId, true)}>允许执行</button>
+            </div>
+          </div>
+        </div>
+      )}
       {pendingPlan && (
         <div className="plan-confirm-overlay">
           <div className="plan-confirm-card">
@@ -269,6 +349,17 @@ export function ComposerBox() {
 function fmtTokens(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
   return String(n);
+}
+
+/** 格式化审批请求中的工具参数（JSON 摘要，命令类参数高亮可读性）。 */
+function formatApprovalArgs(args: unknown): string {
+  if (typeof args === "string") return args;
+  try {
+    const str = JSON.stringify(args, null, 2);
+    return str.length > 800 ? str.slice(0, 800) + "\n…" : str;
+  } catch {
+    return String(args);
+  }
 }
 
 /** token 占用圆环：无文字，hover 显示百分比 tooltip，点击弹窗详情 */

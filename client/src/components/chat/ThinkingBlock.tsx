@@ -25,7 +25,10 @@ export function ThinkingBlock({ text, active, turnId, agentId }: {
 
   // §3.3.1: 流式内容从 store 读取，key=agent_id（与后端 thinking.delta 事件 payload.agent_id 对应）
   const streamText = useChatStore((s) => (agentId != null ? s.thinkingBuffers[agentId] : undefined));
-  const displayText = active ? (streamText ?? text) : text;
+  // v7: 已落库的思考块只显示自己的内容；仅当本思考块尚无落库文本（仍在流式）时才用流式 buffer。
+  // 避免多轮思考时，上一个已完成的思考块被最新 thinking buffer 覆盖，出现"上面还在思考、下面已有消息/工具调用"的错位观感。
+  const displayText = text || streamText || "";
+  const isStreaming = active && !text && (streamText ?? "").length > 0;
 
   // 计时（完成后记录耗时）
   useEffect(() => {
@@ -56,7 +59,7 @@ export function ThinkingBlock({ text, active, turnId, agentId }: {
           <IconArrowToggle open={open} size={12} />
         </span>
         <span className="thinking-block-title">
-          {active ? (
+          {isStreaming ? (
             <>
               <span className="thinking-block-breath" />
               思考中…

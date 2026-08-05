@@ -72,6 +72,7 @@ async def run_agent_loop(
     token_budget: int | None = None,
     subagent_context: dict | None = None,
     reasoning_effort: str | None = None,
+    task_id: int | None = None,
 ) -> AgentOutput:
     """运行单个 agent 推理循环。
 
@@ -472,13 +473,13 @@ async def run_agent_loop(
                                   content={"text": f"达到步数上限({max_steps})，任务未完成", "agent_name": agent_name})
             return AgentOutput(kind="error", error=f"达到步数上限({max_steps})")
 
-        # 产物抽取
+        # 产物抽取（v7: 关联到主 turn 对应的任务；task_id 为空时兜底用 turn_id）
         artifact_ids: list[int] = []
         if final_text and len(final_text.strip()) > 10:
             try:
                 from app.orchestration.artifacts import extract_and_persist_artifacts
                 artifact_ids = await extract_and_persist_artifacts(
-                    db, task_id=turn_id, text=final_text, write_paths=write_paths,
+                    db, task_id=task_id or turn_id, text=final_text, write_paths=write_paths,
                 )
             except Exception:
                 logger.debug("[agent] 产物抽取失败(非阻塞)", exc_info=True)
@@ -489,7 +490,12 @@ async def run_agent_loop(
                 db, session_id=session_id, turn_id=turn_id, thread_id=None,
                 sender_type=SenderType.AGENT.value, sender_id=agent_id,
                 msg_type=MsgType.ARTIFACT.value,
-                content={"artifact_ids": artifact_ids, "agent_name": agent_name},
+                content={
+                    "artifact_ids": artifact_ids,
+                    "agent_name": agent_name,
+                    # v7: 携带实际写盘文件列表，前端产物卡片据此展示文件清单
+                    "files": list(dict.fromkeys(write_paths)),
+                },
             )
 
         await broadcast(session_id, {

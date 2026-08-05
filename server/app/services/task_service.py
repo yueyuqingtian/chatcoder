@@ -43,6 +43,18 @@ async def update_task_status(db: AsyncSession, task_id: int, status: str,
     return task
 
 
+async def attach_artifacts(db: AsyncSession, task_id: int, artifact_ids: list[int]) -> None:
+    """将产物 id 列表挂到任务上（去重保序）。task 不存在时静默忽略（非阻塞）。"""
+    if not artifact_ids:
+        return
+    task = await db.get(Task, task_id)
+    if task is None:
+        return
+    merged = list(dict.fromkeys((task.artifact_ids or []) + list(artifact_ids)))
+    task.artifact_ids = merged
+    await db.flush()
+
+
 async def cancel_turn_tasks(db: AsyncSession, session_id: int, turn_id: int) -> int:
     """回滚/取消时，将该 turn 之后运行中的任务置 cancelled。"""
     res = await db.execute(

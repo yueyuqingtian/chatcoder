@@ -63,26 +63,33 @@ export function TaskSummaryPanel() {
         </div>
       )}
 
-      {/* 任务拆分步骤 */}
+      {/* 任务步骤（每个 turn 一个步骤，含状态进度与产物数） */}
       {tasks.length === 0 ? (
         <div className="rp-empty">暂无任务，发送需求后由 AI 自动拆解</div>
       ) : (
         <div className="ts-section">
-          <div className="ts-section-title">任务拆分</div>
-          {tasks.map((t) => (
-            <div key={t.id} className={`rp-task ${t.status}`}>
-              <span className={`rp-task-status ${t.status}`}>
-                {t.status === "done" ? "✓" : t.status === "running" ? "◌" : t.status === "failed" ? "✕" : "·"}
-              </span>
-              <div className="rp-task-main">
-                <div className="rp-task-title">{t.title}</div>
-                {t.note && <div className="rp-task-note">{t.note}</div>}
-                {t.artifact_ids && t.artifact_ids.length > 0 && (
-                  <div className="ts-artifacts">{t.artifact_ids.length} 个产物</div>
-                )}
+          <div className="ts-section-title">
+            <span>任务步骤</span>
+            <span className="ts-count">{tasks.length} 步</span>
+          </div>
+          <div className="ts-task-scroll">
+            {tasks.map((t, idx) => (
+              <div key={t.id} className={`rp-task ${t.status}`}>
+                <span className={`rp-task-status ${t.status}`}>
+                  {t.status === "done" ? "✓" : t.status === "running" ? "◌" : t.status === "failed" ? "✕" : "·"}
+                </span>
+                <div className="rp-task-main">
+                  <div className="rp-task-title">
+                    <span className="rp-task-step">#{idx + 1}</span>{t.title}
+                  </div>
+                  {t.note && <div className="rp-task-note">{t.note}</div>}
+                  {t.artifact_ids && t.artifact_ids.length > 0 && (
+                    <div className="ts-artifacts">{t.artifact_ids.length} 个产物文件</div>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
       )}
 

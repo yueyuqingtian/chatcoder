@@ -63,6 +63,8 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
     _running_turns.add(turn_id)
     cancel_event = asyncio.Event()
     _cancel_events[turn_id] = cancel_event
+    # v7: 主 turn 对应的任务记录（任务摘要步骤），创建后跟踪状态与产物
+    main_task = None
 
     try:
         session = await session_service.get_session(db, session_id)
@@ -95,6 +97,14 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             logger.debug("创建回滚快照失败(非阻塞)", exc_info=True)
 
         await broadcast(session_id, {"event": "turn.started", "payload": {"turn_id": turn_id}})
+
+        # v7: 主 turn 创建任务记录（任务摘要的"步骤"），运行中置 running
+        main_task = await task_service.create_task(
+            db, session_id=session_id, turn_id=turn_id,
+            title=(user_text.strip().replace("\n", " ") or "任务")[:60],
+            description=user_text,
+        )
+        await broadcast(session_id, {"event": "task.updated", "payload": {"task_id": main_task.id, "status": "running"}})
 
         # 1. 主上下文
         bundle = await build_main_context(
@@ -162,6 +172,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             tool_schemas=tool_schemas, workspace=workspace,
             cancel_event=cancel_event,
             reasoning_effort=reasoning_effort,
+            task_id=main_task.id,
             subagent_context={
                 "manager": mgr, "session": session, "project": project,
                 "cancel_event": cancel_event,
@@ -180,6 +191,18 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             "event": "turn.completed",
             "payload": {"turn_id": turn_id, "summary": summary, "artifact_ids": out.artifact_ids},
         })
+        # v7: 同步任务状态（步骤进度）并挂接产物
+        _task_status = "done" if out.kind == "message" else "failed"
+        _task_note = (summary or "").strip()[:300] or None
+        try:
+            await task_service.update_task_status(db, main_task.id, _task_status, note=_task_note)
+            await task_service.attach_artifacts(db, main_task.id, out.artifact_ids)
+            await broadcast(session_id, {
+                "event": "task.updated",
+                "payload": {"task_id": main_task.id, "status": _task_status, "note": _task_note or ""},
+            })
+        except Exception:
+            logger.debug("[engine] 任务状态更新失败(非阻塞)", exc_info=True)
         await audit_service.log(db, action="turn", session_id=session_id, turn_id=turn_id,
                                 detail={"kind": out.kind, "tokens": 0})
 
@@ -192,6 +215,15 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             await _auto_title(db, session, user_text)
 
         return {"ok": True, "kind": out.kind, "summary": summary}
+    except Exception as _exc:
+        # v7: 主 turn 任务异常结束 → 标记 failed，避免任务摘要出现永久 running 的假象
+        if main_task is not None:
+            try:
+                await task_service.update_task_status(db, main_task.id, "failed", note=f"执行异常: {str(_exc)[:200]}")
+                await broadcast(session_id, {"event": "task.updated", "payload": {"task_id": main_task.id, "status": "failed"}})
+            except Exception:
+                logger.debug("[engine] 任务标记失败失败(非阻塞)", exc_info=True)
+        raise
     finally:
         _running_turns.discard(turn_id)
         _cancel_events.pop(turn_id, None)

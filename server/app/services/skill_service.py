@@ -131,7 +131,10 @@ async def create_mcp_server(
     if not srv.tools and srv.transport == "stdio" and srv.command:
         try:
             from app.orchestration.skill_scanner import fetch_mcp_tools
-            fetched = await fetch_mcp_tools(srv.command, srv.args or [], srv.env or {})
+            # v6: 传入项目路径(rootUri)，codegraph 等 server 依赖它定位项目才能响应握手
+            fetched = await fetch_mcp_tools(
+                srv.command, srv.args or [], srv.env or {}, root_path=srv.path,
+            )
             if fetched:
                 srv.tools = fetched
         except Exception:

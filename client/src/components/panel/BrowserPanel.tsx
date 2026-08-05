@@ -110,8 +110,13 @@ export function BrowserPanel() {
   const highlightAt = (e: React.MouseEvent) => {
     const doc = getIframeDoc();
     if (!doc) return; // 跨域：无法高亮，仅显示提示
-    // elementFromPoint 需要相对于视口的 clientX/clientY，直接使用即可
-    const el = doc.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+    const iframe = iframeRef.current;
+    if (!iframe) return;
+    // 将浏览器视口坐标转换为 iframe 内部视口坐标
+    const iframeRect = iframe.getBoundingClientRect();
+    const localX = e.clientX - iframeRect.left;
+    const localY = e.clientY - iframeRect.top;
+    const el = doc.elementFromPoint(localX, localY) as HTMLElement | null;
     if (el && el !== doc.body && el !== doc.documentElement) {
       clearHighlight();
       el.dataset.__cc_outline = el.style.outline;
@@ -132,10 +137,17 @@ export function BrowserPanel() {
     let info: ElementInfo | null = null;
     const doc = getIframeDoc();
     if (doc) {
-      const el = doc.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
-      if (el) {
-        source = el.outerHTML.slice(0, 600);
-        try { info = getElementInfo(el); } catch {}
+      const iframe = iframeRef.current;
+      if (iframe) {
+        // 将浏览器视口坐标转换为 iframe 内部视口坐标
+        const iframeRect = iframe.getBoundingClientRect();
+        const elX = e.clientX - iframeRect.left;
+        const elY = e.clientY - iframeRect.top;
+        const el = doc.elementFromPoint(elX, elY) as HTMLElement | null;
+        if (el) {
+          source = el.outerHTML.slice(0, 600);
+          try { info = getElementInfo(el); } catch {}
+        }
       }
     }
     if (!source) source = `页面坐标 (${Math.round(localX)}, ${Math.round(localY)}) - 跨域页面无法获取元素`;

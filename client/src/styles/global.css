@@ -316,6 +316,10 @@ a { color: var(--accent); text-decoration: none; }
 /* ── 任务摘要面板 ── */
 .ts-stats { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; font-size: 12px; color: var(--text-2); }
 .ts-stat { display: inline-flex; align-items: center; gap: 3px; }
+/* v7: 任务步骤区域限高滚动，避免挤占下方"产物审查/浏览过的文件"（浏览过的文件被压到最底部） */
+.ts-task-scroll { max-height: 220px; overflow-y: auto; margin-right: -6px; padding-right: 6px; }
+.ts-count { color: var(--text-3); font-weight: 400; font-size: 11px; }
+.rp-task-step { color: var(--text-3); margin-right: 6px; font-weight: 400; font-size: 11px; }
 .ts-stat b { color: var(--text-1); font-weight: 600; }
 .ts-stat.running { color: var(--success); }
 .ts-refresh { width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; border-radius: var(--r-xs); color: var(--text-3); cursor: pointer; border: none; background: transparent; transition: all var(--dur-fast); margin-left: auto; }
@@ -580,6 +584,66 @@ a { color: var(--accent); text-decoration: none; }
 .plan-confirm-actions .btn-primary:hover { filter: brightness(1.1); }
 .plan-confirm-actions .btn-ghost { padding: 7px 16px; border: 1px solid var(--border); border-radius: var(--r-sm); background: transparent; color: var(--text-2); font-size: 13px; cursor: pointer; }
 .plan-confirm-actions .btn-ghost:hover { background: var(--bg-hover); color: var(--text-1); }
+/* v7: 工具审批弹窗——terminal_exec / ci_run 等非低风险工具调用时展示，批准后工具才会执行 */
+.approval-overlay { position: fixed; inset: var(--titlebar-h) 0 0 0; z-index: 200; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.35); backdrop-filter: blur(2px); animation: plan-fade var(--dur-fast); }
+.approval-card { width: min(520px, 88vw); max-height: 70vh; overflow: auto; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--r-md); box-shadow: var(--shadow-lg); padding: 20px; animation: plan-pop var(--dur-med); }
+.approval-title { font-size: 15px; font-weight: 600; color: var(--text-1); margin-bottom: 10px; }
+.approval-tool { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.approval-tool-name { font-family: var(--font-mono); font-size: 13px; color: var(--accent); font-weight: 600; }
+.approval-risk { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-2); }
+.approval-risk.risk-high { color: #e5534b; border-color: #e5534b; background: rgba(229,83,75,0.12); }
+.approval-risk.risk-medium { color: #d29922; border-color: #d29922; background: rgba(210,153,34,0.12); }
+.approval-risk.risk-low { color: var(--ok); border-color: var(--ok); }
+.approval-agent { font-size: 11px; color: var(--text-3); margin-bottom: 8px; }
+.approval-args { margin: 0 0 10px; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-sm); font-family: var(--font-mono); font-size: 12px; line-height: 1.5; color: var(--text-1); white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow: auto; }
+.approval-summary { font-size: 12px; color: var(--text-2); line-height: 1.6; margin-bottom: 12px; }
+.approval-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.approval-actions .btn-primary { padding: 7px 16px; border: none; border-radius: var(--r-sm); background: var(--accent); color: #fff; font-size: 13px; cursor: pointer; }
+.approval-actions .btn-primary:hover { filter: brightness(1.1); }
+.approval-actions .btn-ghost { padding: 7px 16px; border: 1px solid var(--border); border-radius: var(--r-sm); background: transparent; color: var(--text-2); font-size: 13px; cursor: pointer; }
+.approval-actions .btn-ghost:hover { background: var(--bg-hover); color: var(--text-1); }
+/* v7: turn 级操作行——以整个 turn 为单位，hover turn-group 时浮现，不在消息片段中间重复出现 */
+.turn-actions { display: flex; justify-content: flex-end; opacity: 0; pointer-events: none; padding: 2px 0 2px; transition: opacity var(--dur-fast); }
+.turn-group:hover .turn-actions, .turn-group:focus-within .turn-actions { opacity: 1; pointer-events: auto; }
+.turn-actions .msg-actions { position: static; opacity: 1; pointer-events: auto; transform: none; box-shadow: none; background: transparent; border: none; padding: 0; }
+/* v7: 深色主题下代码高亮 token 与数学公式颜色适配，避免深色背景下的黑色文字不可见 */
+:root[data-theme="dark"] .md-body .katex,
+:root[data-theme="dark"] .md-body .katex-display { color: var(--text-1); }
+:root[data-theme="dark"] .md-body .katex * { color: inherit; }
+:root[data-theme="dark"] .md-code-pre,
+:root[data-theme="dark"] .md-code-pre code { color: var(--text-1); }
+:root[data-theme="dark"] .md-code-pre code .hljs-comment,
+:root[data-theme="dark"] .md-code-pre code .hljs-quote { color: #8b949e; }
+:root[data-theme="dark"] .md-code-pre code .hljs-keyword,
+:root[data-theme="dark"] .md-code-pre code .hljs-selector-tag,
+:root[data-theme="dark"] .md-code-pre code .hljs-subst { color: #ff7b72; }
+:root[data-theme="dark"] .md-code-pre code .hljs-string,
+:root[data-theme="dark"] .md-code-pre code .hljs-regexp,
+:root[data-theme="dark"] .md-code-pre code .hljs-addition,
+:root[data-theme="dark"] .md-code-pre code .hljs-attribute { color: #a5d6ff; }
+:root[data-theme="dark"] .md-code-pre code .hljs-number,
+:root[data-theme="dark"] .md-code-pre code .hljs-literal { color: #79c0ff; }
+:root[data-theme="dark"] .md-code-pre code .hljs-title,
+:root[data-theme="dark"] .md-code-pre code .hljs-title.function_,
+:root[data-theme="dark"] .md-code-pre code .hljs-built_in { color: #d2a8ff; }
+:root[data-theme="dark"] .md-code-pre code .hljs-variable,
+:root[data-theme="dark"] .md-code-pre code .hljs-template-variable,
+:root[data-theme="dark"] .md-code-pre code .hljs-params { color: #ffa657; }
+:root[data-theme="dark"] .md-code-pre code .hljs-type,
+:root[data-theme="dark"] .md-code-pre code .hljs-class,
+:root[data-theme="dark"] .md-code-pre code .hljs-title.class_ { color: #ffa657; }
+:root[data-theme="dark"] .md-code-pre code .hljs-tag,
+:root[data-theme="dark"] .md-code-pre code .hljs-name,
+:root[data-theme="dark"] .md-code-pre code .hljs-selector-id,
+:root[data-theme="dark"] .md-code-pre code .hljs-selector-class { color: #7ee787; }
+:root[data-theme="dark"] .md-code-pre code .hljs-meta,
+:root[data-theme="dark"] .md-code-pre code .hljs-meta .hljs-keyword { color: #ff7b72; }
+:root[data-theme="dark"] .md-code-pre code .hljs-deletion { color: #ff7b72; }
+:root[data-theme="dark"] .md-code-pre code .hljs-section,
+:root[data-theme="dark"] .md-code-pre code .hljs-symbol,
+:root[data-theme="dark"] .md-code-pre code .hljs-bullet { color: #ffa657; }
+:root[data-theme="dark"] .md-code-pre code .hljs-emphasis { font-style: italic; }
+:root[data-theme="dark"] .md-code-pre code .hljs-strong { font-weight: 600; }
 .settings-pill { padding: 4px 12px; border-radius: var(--r-sm); border: 1px solid var(--border); background: transparent; color: var(--text-2); font-size: 12px; cursor: pointer; transition: all var(--dur-fast); }
 .settings-pill:hover { border-color: var(--text-2); }
 .settings-pill.active { background: var(--bg-active); border-color: var(--text-1); color: var(--text-1); }
@@ -695,6 +759,8 @@ body.panel-dragging .app-pane { transition: none; }
 /* 输入框与消息流同宽同 padding */
 .composer { position: relative; max-width: var(--content-max-w); margin: 0 auto; padding: 4px 24px 10px; }
 .composer-main { min-height: 60px; padding: 8px 10px; }
+/* v7: 输入框整体上移——给 composer 容器增加底部留白，避免输入框贴死窗口底部 */
+.chat-panel-composer { padding-bottom: 16px; }
 .composer-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 4px; padding-top: 6px; }
 .composer-input { min-height: 44px; font-size: 13px; line-height: 1.5; padding: 10px 6px; }
 .composer-input-row { align-items: center; min-height: 44px; }

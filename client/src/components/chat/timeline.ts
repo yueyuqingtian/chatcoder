@@ -167,7 +167,10 @@ export function buildTimeline(messages: MessageOut[]): TimelineEntry[] {
       } else if (m.msg_type === MsgType.ToolResult) {
         const key = String(c.call_key ?? "");
         resultsByKey.set(key, m);
-      } else if (m.msg_type === MsgType.Thinking) {
+      } else if (m.msg_type === MsgType.Thinking || (m.msg_type === MsgType.Text && c.thinking === true)) {
+        // v7: 兼容两种后端写法——agent_loop 写 MsgType.Thinking；
+        // agent_runtime 的 _emit_thread(thinking=True) 写 MsgType.Text + content.thinking=true。
+        // 否则思考内容会被当作正文展示在消息流中间，导致"思考块与消息/工具调用位置错乱"。
         flushTools();
         items.push({ kind: "thinking", msg: m });
       } else if (m.msg_type === MsgType.Summary) {
