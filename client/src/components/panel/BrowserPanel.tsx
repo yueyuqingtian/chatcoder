@@ -8,15 +8,60 @@ import { useEffect, useRef, useState } from "react";
 import { useChatStore } from "../../store/chat";
 import { IconArrowLeft, IconArrowRight, IconRefresh, IconGlobe, IconTarget, IconArrowUp, IconX } from "../icons";
 
+/** 选中元素的 devtools 风格信息。 */
+interface ElementInfo {
+  tag: string;
+  id: string;
+  className: string;
+  width: number;
+  height: number;
+  x: number;
+  y: number;
+  display: string;
+  position: string;
+  color: string;
+  background: string;
+  fontSize: string;
+  padding: string;
+  margin: string;
+  text: string;
+}
+
 export function BrowserPanel() {
   const [url, setUrl] = useState("https://example.com");
   const [current, setCurrent] = useState("https://example.com");
   const [history, setHistory] = useState<string[]>(["https://example.com"]);
   const [hIdx, setHIdx] = useState(0);
   const [selecting, setSelecting] = useState(false);
-  const [annotState, setAnnotState] = useState<{ x: number; y: number; source: string } | null>(null);
+  const [annotState, setAnnotState] = useState<{ x: number; y: number; source: string; info: ElementInfo | null } | null>(null);
   const [annotText, setAnnotText] = useState("");
   const [sentMsg, setSentMsg] = useState(false);
+
+  // 选中元素的 devtools 风格信息
+  const getElementInfo = (el: HTMLElement): ElementInfo => {
+    const rect = el.getBoundingClientRect();
+    const cs = window.getComputedStyle(el);
+    const cls = Array.from(el.classList || []).slice(0, 8).join(" ");
+    const id = el.id || "";
+    const innerText = (el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 120);
+    return {
+      tag: el.tagName.toLowerCase(),
+      id,
+      className: cls,
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+      x: Math.round(rect.x),
+      y: Math.round(rect.y),
+      display: cs.display,
+      position: cs.position,
+      color: cs.color,
+      background: cs.backgroundColor,
+      fontSize: cs.fontSize,
+      padding: `${cs.paddingTop} ${cs.paddingRight} ${cs.paddingBottom} ${cs.paddingLeft}`,
+      margin: `${cs.marginTop} ${cs.marginRight} ${cs.marginBottom} ${cs.marginLeft}`,
+      text: innerText,
+    };
+  };
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const setComposerDraft = useChatStore((s) => s.setComposerDraft);
@@ -84,16 +129,18 @@ export function BrowserPanel() {
     const localX = e.clientX - rect.left;
     const localY = e.clientY - rect.top;
     let source = "";
+    let info: ElementInfo | null = null;
     const doc = getIframeDoc();
     if (doc) {
       const el = doc.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
       if (el) {
         source = el.outerHTML.slice(0, 600);
+        try { info = getElementInfo(el); } catch {}
       }
     }
     if (!source) source = `页面坐标 (${Math.round(localX)}, ${Math.round(localY)}) - 跨域页面无法获取元素`;
     clearHighlight();
-    setAnnotState({ x: localX, y: localY, source });
+    setAnnotState({ x: localX, y: localY, source, info });
     setAnnotText("");
   };
 
@@ -152,6 +199,27 @@ export function BrowserPanel() {
               <button onClick={() => { setAnnotState(null); setAnnotText(""); }} style={{ width: 18, height: 18, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-3)" }}><IconX size={12} /></button>
             </div>
             <div style={{ fontSize: 10, color: "var(--text-3)", maxHeight: 60, overflow: "auto", background: "var(--bg-hover)", padding: 4, borderRadius: 4, fontFamily: "var(--font-mono)" }}>{annotState.source.substring(0, 200)}</div>
+            {annotState.info && (
+              <div className="browser-annot-info">
+                <div className="browser-annot-info-title">
+                  &lt;{annotState.info.tag}&gt;{annotState.info.id && <span className="browser-annot-info-id">#{annotState.info.id}</span>}
+                  {annotState.info.className && <span className="browser-annot-info-cls">.{annotState.info.className.split(" ").join(".")}</span>}
+                </div>
+                <div className="browser-annot-info-grid">
+                  <span>尺寸</span><b>{annotState.info.width} × {annotState.info.height}px</b>
+                  <span>位置</span><b>({annotState.info.x}, {annotState.info.y})</b>
+                  <span>显示</span><b>{annotState.info.display}</b>
+                  <span>定位</span><b>{annotState.info.position}</b>
+                  <span>字体</span><b>{annotState.info.fontSize}</b>
+                  <span>文字色</span><b style={{ color: annotState.info.color }}>{annotState.info.color}</b>
+                  <span>背景</span><b style={{ color: annotState.info.background }}>{annotState.info.background}</b>
+                  <span>内边距</span><b>{annotState.info.padding}</b>
+                </div>
+                {annotState.info.text && (
+                  <div className="browser-annot-info-text" title={annotState.info.text}>"{annotState.info.text}"</div>
+                )}
+              </div>
+            )}
             <textarea value={annotText} onChange={(e) => setAnnotText(e.target.value)} placeholder="描述你希望 AI 关注的内容…" autoFocus style={{ minHeight: 50, resize: "vertical" }} />
             <div className="browser-annot-card-actions" style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
               <button className="btn btn-ghost btn-sm" onClick={() => { setSelecting(false); clearHighlight(); setAnnotState(null); setAnnotText(""); }}>完成</button>

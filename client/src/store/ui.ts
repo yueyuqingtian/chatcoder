@@ -19,10 +19,26 @@ export interface UiPrefs {
   chatFontSize: number;
   /** 对话气泡最大宽度(%) */
   chatBubbleWidth: number;
+  /** 消息行高倍率 */
+  chatLineHeight: number;
+  /** 代码块文字颜色 */
+  chatCodeColor: string;
+  /** 标题文字颜色 */
+  chatHeadingColor: string;
+  /** 链接文字颜色 */
+  chatLinkColor: string;
+  /** 引用块文字颜色 */
+  chatQuoteColor: string;
   /** 主界面基础字号(px) */
   uiBaseFontSize: number;
   /** 内容区最大宽度(px),0=不限 */
   contentMaxWidth: number;
+  /** 左面板文字大小(px) */
+  sidebarFontSize: number;
+  /** 左面板图标大小(px) */
+  sidebarIconSize: number;
+  /** 左面板聚焦颜色 */
+  sidebarFocusColor: string;
   /** 界面语言 */
   language: Language;
 }
@@ -36,8 +52,16 @@ const DEFAULTS: UiPrefs = {
   chatFontFamily: "system",
   chatFontSize: 13,
   chatBubbleWidth: 70,
+  chatLineHeight: 1.6,
+  chatCodeColor: "#D98014",
+  chatHeadingColor: "#1A1A1E",
+  chatLinkColor: "#3B82F6",
+  chatQuoteColor: "#6B6B74",
   uiBaseFontSize: 13,
   contentMaxWidth: 840,
+  sidebarFontSize: 12,
+  sidebarIconSize: 14,
+  sidebarFocusColor: "",
   language: "zh",
 };
 
@@ -75,8 +99,17 @@ export function applyUiVars(p: UiPrefs) {
   root.style.setProperty("--fs-md", `${p.chatFontSize}px`);
   root.style.setProperty("--chat-font", FONT_OPTIONS[p.chatFontFamily] || FONT_OPTIONS.system);
   root.style.setProperty("--chat-bubble-w", `${p.chatBubbleWidth}%`);
+  root.style.setProperty("--chat-line-height", `${p.chatLineHeight}`);
+  root.style.setProperty("--chat-code-color", p.chatCodeColor);
+  root.style.setProperty("--chat-heading-color", p.chatHeadingColor);
+  root.style.setProperty("--chat-link-color", p.chatLinkColor);
+  root.style.setProperty("--chat-quote-color", p.chatQuoteColor);
   root.style.setProperty("--content-max-w", p.contentMaxWidth > 0 ? `${p.contentMaxWidth}px` : "none");
   root.style.setProperty("--ui-base-fs", `${p.uiBaseFontSize}px`);
+  root.style.setProperty("--sidebar-fs", `${p.sidebarFontSize}px`);
+  root.style.setProperty("--sidebar-icon", `${p.sidebarIconSize}px`);
+  if (p.sidebarFocusColor) root.style.setProperty("--sidebar-focus", p.sidebarFocusColor);
+  else root.style.removeProperty("--sidebar-focus");
   root.style.fontSize = `${p.uiBaseFontSize}px`;
   root.setAttribute("data-glass", p.glassmorphism ? "on" : "off");
   root.setAttribute("data-lang", p.language);

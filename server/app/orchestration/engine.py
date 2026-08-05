@@ -22,11 +22,37 @@ logger = logging.getLogger(__name__)
 _running_turns: set[int] = set()
 _cancel_events: dict[int, asyncio.Event] = {}
 
+# 命令模式：只读审阅（/chat）工具白名单
+_READONLY_TOOLS = [
+    "fs_read", "fs_list", "fs_grep", "git_diff",
+    "memory_search", "web_fetch", "web_search", "view_image",
+]
+# 规划模式（/plan）：只读 + 允许写计划文档
+_PLAN_TOOLS = _READONLY_TOOLS + ["fs_write"]
+
+_MODE_HINTS = {
+    "readonly": (
+        "【审阅模式】当前处于只读审阅模式，你只能查看、检索、分析代码，"
+        "严禁执行任何修改操作（禁止写入文件、运行命令、应用补丁）。"
+        "请直接给出审阅意见、发现的问题与改进建议。"
+    ),
+    "plan": (
+        "【规划模式】请先规划再执行：不要直接修改业务代码。"
+        "先在项目根目录创建 ai/ 目录，在其中编写任务计划文档 ai/chatcoder-plan.md，"
+        "包含目标、步骤拆解、涉及文件与验收标准。完成计划文档后请停下，等待用户确认，"
+        "不要执行计划中的修改动作。"
+    ),
+}
+
 
 async def start_turn(db: AsyncSession, *, turn_id: int,
                      attachments: list[dict] | None = None,
-                     reasoning_effort: str | None = None) -> dict:
-    """执行一个 turn。turn 与用户消息已由路由创建。"""
+                     reasoning_effort: str | None = None,
+                     mode: str | None = None) -> dict:
+    """执行一个 turn。turn 与用户消息已由路由创建。
+
+    mode: readonly(只读审阅) / plan(先规划后执行) / None(默认)。
+    """
     turn = await turn_service.get_turn(db, turn_id)
     if turn is None:
         return {"ok": False, "error": "turn not found"}
@@ -76,8 +102,32 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             user_message=user_text, attachments=attachments,
         )
 
-        # 2. 工具 schemas（全量 + 子代理工具）
-        tool_schemas = tool_registry.all_schemas()
+        # 命令模式：注入模式指令（/chat 只读、/plan 先规划后执行）
+        if mode in _MODE_HINTS:
+            bundle.instruction = (_MODE_HINTS[mode] + "\n\n" + bundle.instruction).strip() if bundle.instruction else _MODE_HINTS[mode]
+
+        # 2. 工具 schemas（按模式过滤 + 子代理工具）
+        if mode == "readonly":
+            tool_schemas = tool_registry.all_schemas(_READONLY_TOOLS)
+        elif mode == "plan":
+            tool_schemas = tool_registry.all_schemas(_PLAN_TOOLS)
+        else:
+            tool_schemas = tool_registry.all_schemas()
+            # v6: 主 turn 路径 MCP 注入（修复：导入的 MCP 工具未注册导致 AI 无法使用）
+            # 对齐 agent_runtime 的 per-agent scope 模式，仅当全局 registry 无同名工具时注册。
+            try:
+                from app.services.skill_service import get_agent_mcp_servers
+                from app.orchestration.tools.mcp_wrapper import build_mcp_tools_for_agent
+                mcp_servers = await get_agent_mcp_servers(db, main_agent)
+                if mcp_servers:
+                    _mcp_tools = build_mcp_tools_for_agent(mcp_servers)
+                    for mt in _mcp_tools:
+                        tool_schemas.append(mt.function_schema())
+                        if not tool_registry.get(mt.name):
+                            tool_registry.register(mt)
+                    logger.info("[engine] turn=%s 注入 %d 个 MCP 工具", turn_id, len(_mcp_tools))
+            except Exception:
+                logger.warning("[engine] MCP 工具加载失败(非阻塞)", exc_info=True)
         tool_schemas.append({
             "type": "function",
             "function": {

@@ -19,6 +19,7 @@ MCP 配置扫描来源：
 - .mcp.json (项目根)
 - ~/.claude/mcp.json (Claude Code 风格)
 """
+import asyncio
 import json
 import logging
 import os
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 # 外部工具扫描目录配置
 _TOOL_DIRS: dict[str, list[str]] = {
+    "claude": [".claude", ".claude"],
     "codex": [".codex", ".codex"],
     "codebuddy": [".codebuddy", ".codebuddy"],
     "qoder": [".qoder", ".qoder"],
@@ -435,3 +437,112 @@ def _parse_mcp_config(
         ))
 
     return results
+
+
+# ───────────────────────────────────────────────────────────────────
+# v6: 云端技能仓库（第15点：配置 git url 拉取技能仓库并导入）
+# ───────────────────────────────────────────────────────────────────
+
+async def clone_skill_repo(url: str, dest_dir: str) -> dict:
+    """克隆/更新技能仓库到本地缓存目录。
+
+    Returns:
+        {"ok": bool, "error": str, "dir": str}
+    """
+    import subprocess
+    dest = Path(dest_dir)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.is_dir():
+        r = await asyncio.to_thread(
+            subprocess.run, ["git", "pull", "--rebase", "--depth", "1"],
+            cwd=str(dest), capture_output=True, text=True,
+        )
+    else:
+        r = await asyncio.to_thread(
+            subprocess.run, ["git", "clone", "--depth", "1", url, str(dest)],
+            capture_output=True, text=True,
+        )
+    if r.returncode != 0:
+        return {"ok": False, "error": (r.stderr or r.stdout or "git 失败").strip()[:500], "dir": str(dest)}
+    return {"ok": True, "error": "", "dir": str(dest)}
+
+
+def _parse_skill_frontmatter(text: str) -> dict:
+    """解析技能 md 的 YAML frontmatter（description/trigger/tools）。"""
+    m = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.DOTALL)
+    out: dict = {}
+    if not m:
+        return out
+    body = m.group(1)
+    for line in body.splitlines():
+        if ":" in line:
+            key, _, val = line.partition(":")
+            key = key.strip().lower()
+            val = val.strip().strip("\"'")
+            if key == "description":
+                out["description"] = val
+            elif key == "trigger":
+                out["trigger"] = val
+            elif key == "name":
+                out["display_name"] = val
+    return out
+
+
+def list_repo_skills(repo_dir: str) -> list[dict]:
+    """扫描仓库中的技能文件。
+
+    支持两种格式：
+    - skills/<name>.md       单文件技能
+    - skills/<name>/SKILL.md 目录技能（claude/agents 风格）
+
+    Returns:
+        [{name, display_name, description, path, content, trigger, tools}]
+    """
+    base = Path(repo_dir)
+    if not base.is_dir():
+        return []
+    skills_dir = base / "skills"
+    candidates: list[Path] = []
+    if skills_dir.is_dir():
+        # 单文件: skills/*.md
+        candidates += [p for p in skills_dir.iterdir() if p.is_file() and p.suffix.lower() == ".md"]
+        # 目录技能: skills/<name>/SKILL.md
+        for sub in skills_dir.iterdir():
+            if sub.is_dir():
+                for sk in ("SKILL.md", "skill.md"):
+                    p = sub / sk
+                    if p.is_file():
+                        candidates.append(p)
+                        break
+    else:
+        # 无 skills 目录时，扫描仓库根的一级 *.md（如 README.md 之外可能含技能）
+        candidates += [p for p in base.iterdir() if p.is_file() and p.suffix.lower() == ".md"]
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for p in candidates:
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if not text.strip():
+            continue
+        rel = str(p.relative_to(base)).replace("\\", "/")
+        fm = _parse_skill_frontmatter(text)
+        # 技能名：目录技能用目录名，单文件用文件名（去掉 .md）
+        name = p.parent.name if p.name.lower() == "skill.md" else p.stem
+        if name in seen:
+            continue
+        seen.add(name)
+        # 去除 frontmatter 后再存内容
+        content = re.sub(r"^---\s*\n.*?\n---\s*\n", "", text, count=1, flags=re.DOTALL).strip()
+        out.append({
+            "name": name,
+            "display_name": fm.get("display_name", name),
+            "description": fm.get("description", content[:120].replace("\n", " ")),
+            "path": rel,
+            "content": content,
+            "trigger": fm.get("trigger", ""),
+            "tools": [],
+        })
+    return out

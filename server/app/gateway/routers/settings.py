@@ -1,4 +1,4 @@
-"""系统设置：工作目录、全局规则、记忆开关等桌面版可配置项。"""
+"""系统设置：工作目录、全局规则、记忆开关、AI 规则来源等桌面版可配置项。"""
 import json
 import os
 from pathlib import Path
@@ -13,6 +13,40 @@ router = APIRouter()
 _USER_CONFIG_PATH = Path(
     os.environ.get("CHATCODER_USER_CONFIG", str(Path.home() / ".chatcoder" / "config.json"))
 )
+
+# ── AI 规则来源识别（第8点：扫描常见 AI 软件规则文档并按来源启停）──
+# 来源名 → 该软件常见的规则文档相对路径/目录（相对项目根）
+AI_RULE_SOURCES: dict[str, dict] = {
+    "claude": {
+        "label": "Claude Code",
+        "files": ["CLAUDE.md", ".claude/CLAUDE.md"],
+    },
+    "codex": {
+        "label": "Codex",
+        "files": ["AGENTS.md", ".codex/AGENTS.md"],
+    },
+    "codebuddy": {
+        "label": "CodeBuddy",
+        "files": ["CODEBUDDY.md", ".codebuddy/AGENTS.md", ".codebuddy/rules"],
+    },
+    "trae": {
+        "label": "Trae",
+        "files": [".trae/rules", "rules.md"],
+    },
+    "qoder": {
+        "label": "Qoder",
+        "files": ["QODER.md", ".qoder/AGENTS.md"],
+    },
+    "cursor": {
+        "label": "Cursor",
+        "files": [".cursorrules", ".cursor/rules"],
+    },
+}
+
+
+def _is_dir_candidate(path: Path) -> bool:
+    """规则候选可能是文件或目录（如 .trae/rules 目录）。"""
+    return path.exists()
 
 
 # ── 通用配置读写 ──
@@ -225,3 +259,93 @@ async def set_workdir_rules(body: ScopeRulesIn) -> ScopeRulesOut:
     data[storage_key] = {"rules": body.rules, "scope": "workdir", "key": ws_key}
     _save_config(data)
     return ScopeRulesOut(scope="workdir", key=ws_key, rules=body.rules)
+
+
+# ── AI 规则来源（第8点：扫描常见 AI 软件规则文档并按来源启停）──
+
+class AiRuleScanItem(BaseModel):
+    source: str
+    label: str
+    path: str
+    exists: bool
+    kind: str  # file | dir
+
+
+class AiRulesOut(BaseModel):
+    sources: list[dict]  # [{source,label,enabled}]
+    global_rules: str = ""
+    workdir_rules: str = ""
+
+
+class AiRulesIn(BaseModel):
+    enabled_sources: list[str] | None = None
+    global_rules: str | None = None
+    workdir_rules: str | None = None
+
+
+@router.get("/settings/ai-rules/scan", response_model=list[dict])
+async def scan_ai_rules(path: str = ""):
+    """扫描项目下的 AI 规则文档，按来源识别。"""
+    root = Path(path) if path else Path(settings.workspace_root)
+    if not root.is_dir():
+        return []
+    out: list[dict] = []
+    for source, cfg in AI_RULE_SOURCES.items():
+        for rel in cfg["files"]:
+            p = root / rel
+            if p.exists():
+                out.append({
+                    "source": source,
+                    "label": cfg["label"],
+                    "path": rel,
+                    "exists": True,
+                    "kind": "dir" if p.is_dir() else "file",
+                })
+    return out
+
+
+@router.get("/settings/ai-rules", response_model=AiRulesOut)
+async def get_ai_rules() -> AiRulesOut:
+    """读取 AI 规则配置（来源启停 + 全局/项目规则）。"""
+    data = _load_config()
+    ws_key = str(Path(settings.workspace_root).resolve())
+    workdir_data = data.get(_get_scope_rules_key("workdir", ws_key), {})
+    workdir_rules = workdir_data.get("rules", "") if isinstance(workdir_data, dict) else str(workdir_data)
+    enabled = set(data.get("ai_rules_enabled") or list(AI_RULE_SOURCES.keys()))
+    sources = [
+        {"source": s, "label": cfg["label"], "enabled": s in enabled}
+        for s, cfg in AI_RULE_SOURCES.items()
+    ]
+    return AiRulesOut(
+        sources=sources,
+        global_rules=data.get("global_rules", ""),
+        workdir_rules=workdir_rules,
+    )
+
+
+@router.put("/settings/ai-rules", response_model=AiRulesOut)
+async def set_ai_rules(body: AiRulesIn) -> AiRulesOut:
+    """保存 AI 规则配置。"""
+    data = _load_config()
+    if body.enabled_sources is not None:
+        data["ai_rules_enabled"] = list(dict.fromkeys(body.enabled_sources))
+    if body.global_rules is not None:
+        data["global_rules"] = body.global_rules
+    if body.workdir_rules is not None:
+        ws_key = str(Path(settings.workspace_root).resolve())
+        data[_get_scope_rules_key("workdir", ws_key)] = {
+            "rules": body.workdir_rules, "scope": "workdir", "key": ws_key,
+        }
+    _save_config(data)
+    enabled = set(data.get("ai_rules_enabled") or list(AI_RULE_SOURCES.keys()))
+    sources = [
+        {"source": s, "label": cfg["label"], "enabled": s in enabled}
+        for s, cfg in AI_RULE_SOURCES.items()
+    ]
+    workdir_data = data.get(_get_scope_rules_key("workdir", str(Path(settings.workspace_root).resolve())), {})
+    workdir_rules = workdir_data.get("rules", "") if isinstance(workdir_data, dict) else str(workdir_data)
+    return AiRulesOut(
+        sources=sources,
+        global_rules=data.get("global_rules", ""),
+        workdir_rules=workdir_rules,
+    )

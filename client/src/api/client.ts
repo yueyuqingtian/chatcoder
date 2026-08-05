@@ -105,6 +105,19 @@ async function del<T>(path: string): Promise<T> {
   return res.json();
 }
 
+async function put<T>(path: string, body?: unknown): Promise<T> {
+  const res = await fetchWithRetry(`${BASE}${path}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(errorMessage(res, detail));
+  }
+  return res.json();
+}
+
 // ── 目录树（项目）──
 export interface TreeNode {
   name: string;
@@ -124,6 +137,7 @@ export interface TurnCreateBody {
   attachments?: Record<string, unknown>[];
   scheduled_task_id?: number;
   reasoning_effort?: string;
+  mode?: "readonly" | "plan" | null;
 }
 
 export interface RollbackParams {
@@ -329,6 +343,13 @@ export const api = {
     source_path: string;
   }>>("/mcp-servers/scan"),
 
+  // ── 技能仓库（第15点：云端 git url 技能仓库）──
+  listSkillRepos: () => get<Array<{ id: string; name: string; url: string; synced?: boolean; skill_count?: number }>>("/skills/repos"),
+  createSkillRepo: (data: { url: string; name?: string }) => post<{ id: string; name: string; url: string }>("/skills/repos", data),
+  syncSkillRepo: (repoId: string) => post<{ repo: Record<string, unknown>; skills: Array<{ name: string; display_name: string; description: string; path: string; content: string; trigger: string; tools: string[] }> }>(`/skills/repos/${repoId}/sync`),
+  importRepoSkill: (repoId: string, skillName: string) => post<{ ok: boolean; id: number }>("/skills/repos/import", { repo_id: repoId, skill_name: skillName }),
+  deleteSkillRepo: (repoId: string) => del<{ ok: boolean }>(`/skills/repos/${repoId}`),
+
   // ── 文件上传 ──
   uploadFile: async (file: File): Promise<{
     type: string; content: string; data_url: string | null;
@@ -343,6 +364,15 @@ export const api = {
     }
     return res.json();
   },
+
+  // ── AI 规则（第8点：扫描多软件规则文档并按来源启停）──
+  scanAiRules: (path?: string) =>
+    get<Array<{ source: string; label: string; path: string; exists: boolean; kind: string }>>(
+      `/settings/ai-rules/scan${path ? `?path=${encodeURIComponent(path)}` : ""}`
+    ),
+  getAiRules: () => get<{ sources: Array<{ source: string; label: string; enabled: boolean }>; global_rules: string; workdir_rules: string }>("/settings/ai-rules"),
+  setAiRules: (data: { enabled_sources?: string[]; global_rules?: string; workdir_rules?: string }) =>
+    put<{ sources: Array<{ source: string; label: string; enabled: boolean }>; global_rules: string; workdir_rules: string }>("/settings/ai-rules", data),
 };
 
 export type {

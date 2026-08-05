@@ -16,7 +16,12 @@ function SwitchRow({ checked, onChange }: { checked: boolean; onChange: (v: bool
 export function ScheduledPage() {
   const [tasks, setTasks] = useState<ScheduledTaskOut[]>([]);
   const [showCreate, setShowCreate] = useState(false);
-  const [form, setForm] = useState({ name: "", cron: "0 9 * * *", prompt: "" });
+  // v6: 用"日期时间 + 频率"替代 cron 表达式（普通用户无需了解 cron）
+  const [form, setForm] = useState<{ name: string; runAt: string; freq: string; weekday: string; prompt: string }>(() => {
+    const d = new Date(Date.now() + 3600000);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return { name: "", runAt: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`, freq: "daily", weekday: "1", prompt: "" };
+  });
   const currentSessionId = useChatStore((s) => s.currentSessionId);
 
   const load = useCallback(async () => {
@@ -25,12 +30,31 @@ export function ScheduledPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  // 友好时间 → cron 换算
+  const toCron = (): string | null => {
+    if (!form.runAt) return null;
+    const d = new Date(form.runAt);
+    if (isNaN(d.getTime())) return null;
+    const min = d.getMinutes(), hour = d.getHours(), day = d.getDate(), month = d.getMonth() + 1;
+    switch (form.freq) {
+      case "once": return `${min} ${hour} ${day} ${month} *`;
+      case "daily": return `${min} ${hour} * * *`;
+      case "weekly": return `${min} ${hour} * * ${form.weekday}`;
+      case "monthly": return `${min} ${hour} ${day} * *`;
+      default: return `${min} ${hour} * * *`;
+    }
+  };
+
   const handleCreate = async () => {
     if (!currentSessionId || !form.name.trim() || !form.prompt.trim()) return;
+    const cron = toCron();
+    if (!cron) { alert("请选择有效的执行时间"); return; }
     try {
-      await api.createScheduledTask({ session_id: currentSessionId, name: form.name.trim(), cron: form.cron.trim(), prompt: form.prompt.trim() });
+      await api.createScheduledTask({ session_id: currentSessionId, name: form.name.trim(), cron, prompt: form.prompt.trim() });
       setShowCreate(false);
-      setForm({ name: "", cron: "0 9 * * *", prompt: "" });
+      const d = new Date(Date.now() + 3600000);
+      const pad = (n: number) => String(n).padStart(2, "0");
+      setForm((p) => ({ ...p, name: "", prompt: "", runAt: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}` }));
       load();
     } catch (e) { alert(String(e)); }
   };
@@ -44,7 +68,20 @@ export function ScheduledPage() {
       {showCreate && (
         <div className="navpage-form">
           <input className="sp-input" placeholder="任务名称" value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} />
-          <input className="sp-input" placeholder="Cron (如 0 9 * * *)" value={form.cron} onChange={(e) => setForm((p) => ({ ...p, cron: e.target.value }))} />
+          <label className="sp-label">执行时间</label>
+          <input type="datetime-local" className="sp-input" value={form.runAt} onChange={(e) => setForm((p) => ({ ...p, runAt: e.target.value }))} />
+          <label className="sp-label">重复频率</label>
+          <div className="sp-freq-row">
+            {[["once", "仅一次"], ["daily", "每天"], ["weekly", "每周"], ["monthly", "每月"]].map(([v, l]) => (
+              <button key={v} className={"sp-pill" + (form.freq === v ? " active" : "")} onClick={() => setForm((p) => ({ ...p, freq: v }))}>{l}</button>
+            ))}
+          </div>
+          {form.freq === "weekly" && (
+            <select className="sp-input" value={form.weekday} onChange={(e) => setForm((p) => ({ ...p, weekday: e.target.value }))}>
+              {[["1", "周一"], ["2", "周二"], ["3", "周三"], ["4", "周四"], ["5", "周五"], ["6", "周六"], ["0", "周日"]].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+            </select>
+          )}
+          <label className="sp-label">执行提示词</label>
           <textarea className="sp-textarea" placeholder="执行提示词…" rows={3} value={form.prompt} onChange={(e) => setForm((p) => ({ ...p, prompt: e.target.value }))} />
           <div className="navpage-form-actions">
             <button className="btn-ghost" onClick={() => setShowCreate(false)}>取消</button>

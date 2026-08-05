@@ -75,6 +75,7 @@ class TurnCreate(BaseModel):
     attachments: list[dict[str, Any]] | None = None
     scheduled_task_id: int | None = None  # 定时任务触发
     reasoning_effort: str | None = None  # v4: turn 级推理深度覆盖
+    mode: str | None = None  # v6: 命令模式: readonly(只读审阅) / plan(先规划后执行)
 
 
 class TurnOut(BaseModel):

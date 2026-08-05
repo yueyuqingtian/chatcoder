@@ -14,7 +14,7 @@ export function Workspace({ nav, onSessionStart }: {
   nav: NavKey | null;
   onSessionStart?: () => void;
 }) {
-  const { sessions, currentSessionId, isRunning, projects, currentProjectId } = useChatStore();
+  const { sessions, currentSessionId, projects, currentProjectId } = useChatStore();
 
   if (nav && nav !== "chat") {
     return (
@@ -64,15 +64,6 @@ export function Workspace({ nav, onSessionStart }: {
         </div>
         <div className="ws-header-meta title-no-drag">
           {project && <span title={project.path}>{project.path}</span>}
-        </div>
-        <div className="ws-header-meta title-no-drag">
-          {isRunning ? (
-            <span style={{ color: "var(--success)", display: "flex", alignItems: "center", gap: 4 }}>
-              <span className="sidebar-session-pulse" /> 执行中
-            </span>
-          ) : (
-            <span style={{ color: "var(--text-3)" }}>空闲</span>
-          )}
         </div>
       </header>
 
@@ -246,7 +237,7 @@ function EmptyState({ onStarted }: { onStarted: () => void }) {
                       onClick={() => { setSelectedModel(m.id); setShowModels(false); }}
                     >
                       <IconCpu size={13} />
-                      <span>{m.name}</span>
+                      <span title={m.name}>{m.name.split("/").pop()}</span>
                     </button>
                   ))}
                 </div>

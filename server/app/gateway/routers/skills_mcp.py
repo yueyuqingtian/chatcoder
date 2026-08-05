@@ -1,4 +1,9 @@
-"""技能（Skills）与 MCP Server 路由（v2）。"""
+"""技能（Skills）、MCP Server 与技能仓库路由。"""
+import json
+import os
+import uuid
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,6 +13,33 @@ from app.services import skill_service
 
 router = APIRouter()
 from app.services.mcp_scan import scan_local_mcp
+
+# 技能仓库配置持久化到用户 config.json
+_REPO_CFG_PATH = Path(
+    os.environ.get("CHATCODER_USER_CONFIG", str(Path.home() / ".chatcoder" / "config.json"))
+)
+_REPO_ROOT = Path(os.environ.get("CHATCODER_SKILL_REPO_DIR", str(Path.home() / ".chatcoder" / "skill-repos")))
+
+
+def _load_repos() -> list[dict]:
+    try:
+        if _REPO_CFG_PATH.exists():
+            data = json.loads(_REPO_CFG_PATH.read_text(encoding="utf-8"))
+            repos = data.get("skill_repos", [])
+            return repos if isinstance(repos, list) else []
+    except (OSError, json.JSONDecodeError):
+        pass
+    return []
+
+
+def _save_repos(repos: list[dict]) -> None:
+    try:
+        _REPO_CFG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        data = json.loads(_REPO_CFG_PATH.read_text(encoding="utf-8")) if _REPO_CFG_PATH.exists() else {}
+        data["skill_repos"] = repos
+        _REPO_CFG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def skill_to_dict(s) -> dict:
@@ -158,3 +190,96 @@ async def delete_mcp(server_id: int, db: AsyncSession = Depends(get_db)):
 async def scan_mcp_servers():
     """扫描本机常见 MCP 客户端配置，返回候选 server 列表（不落库）。"""
     return await scan_local_mcp()
+
+
+# ── 技能仓库（第15点：云端 git url 技能仓库）──
+
+class SkillRepoCreate(BaseModel):
+    url: str
+    name: str | None = None
+
+
+class SkillRepoImport(BaseModel):
+    repo_id: str
+    skill_name: str
+
+
+@router.get("/skills/repos", response_model=list[dict])
+async def list_skill_repos():
+    """列出已配置的技能仓库。"""
+    repos = _load_repos()
+    for r in repos:
+        local = _REPO_ROOT / str(r["id"])
+        r["synced"] = local.is_dir()
+        r["skill_count"] = len(list_repo_skills(str(local))) if local.is_dir() else 0
+    return repos
+
+
+@router.post("/skills/repos", response_model=dict)
+async def create_skill_repo(body: SkillRepoCreate):
+    """添加技能仓库（git url）。"""
+    repos = _load_repos()
+    for r in repos:
+        if r.get("url") == body.url:
+            raise HTTPException(400, "该仓库已添加")
+    repo = {
+        "id": uuid.uuid4().hex[:12],
+        "name": body.name or body.url.rstrip("/").split("/")[-1],
+        "url": body.url,
+    }
+    repos.append(repo)
+    _save_repos(repos)
+    return repo
+
+
+@router.post("/skills/repos/{repo_id}/sync", response_model=dict)
+async def sync_skill_repo(repo_id: str):
+    """拉取仓库并列出其中的技能。"""
+    repos = _load_repos()
+    repo = next((r for r in repos if r.get("id") == repo_id), None)
+    if repo is None:
+        raise HTTPException(404, "仓库不存在")
+    local = _REPO_ROOT / repo_id
+    res = await clone_skill_repo(repo["url"], str(local))
+    if not res["ok"]:
+        raise HTTPException(400, res["error"])
+    skills = list_repo_skills(str(local))
+    return {"repo": {**repo, "synced": True, "skill_count": len(skills)}, "skills": skills}
+
+
+@router.post("/skills/repos/import", response_model=dict)
+async def import_repo_skill(body: SkillRepoImport, db: AsyncSession = Depends(get_db)):
+    """导入仓库中的某个技能到本地技能库并启用。"""
+    local = _REPO_ROOT / body.repo_id
+    if not local.is_dir():
+        raise HTTPException(404, "仓库未同步")
+    skills = list_repo_skills(str(local))
+    target = next((s for s in skills if s["name"] == body.skill_name), None)
+    if target is None:
+        raise HTTPException(404, "技能不存在")
+    existing = await skill_service.get_skill_by_name(db, target["name"])
+    if existing is not None:
+        raise HTTPException(400, f"技能 {target['name']} 已存在")
+    skill = await skill_service.create_skill(
+        db, name=target["name"], display_name=target["display_name"],
+        description=target["description"], content=target["content"],
+        source="repo", path=target["path"], trigger=target["trigger"],
+        tools=target["tools"], is_active=True, auto_load=True,
+    )
+    await db.commit()
+    return {"ok": True, "id": skill.id}
+
+
+@router.delete("/skills/repos/{repo_id}", response_model=dict)
+async def delete_skill_repo(repo_id: str):
+    """删除技能仓库配置及本地缓存。"""
+    repos = _load_repos()
+    _save_repos([r for r in repos if r.get("id") != repo_id])
+    local = _REPO_ROOT / repo_id
+    try:
+        import shutil
+        if local.is_dir():
+            shutil.rmtree(str(local), ignore_errors=True)
+    except Exception:
+        pass
+    return {"ok": True}

@@ -1,19 +1,24 @@
-/** TurnGroup（v5）：单个 turn 容器。移除消息操作行。 */
+/** TurnGroup（v6）：单个 turn 容器。接入 MessageActions（hover 悬浮，复制/Markdown/回滚）。 */
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ToolTree } from "./ToolTree";
 import { ArtifactList } from "./ArtifactList";
+import { MessageActions } from "./MessageActions";
 import { MarkdownContent } from "../MarkdownContent";
 import type { TimelineEntry } from "./timeline";
 import { msgText } from "./timeline";
+import { useChatStore } from "../../store/chat";
 
 export function TurnGroup({ entry, isRunning }: {
   entry: Extract<TimelineEntry, { kind: "turn" }>;
   isRunning: boolean;
 }) {
+  const rollbackTurn = useChatStore((s) => s.rollbackTurn);
   let lastThinkingIdx = -1;
   for (let k = entry.items.length - 1; k >= 0; k--) {
     if (entry.items[k].kind === "thinking") { lastThinkingIdx = k; break; }
   }
+  const turnId = entry.turnId;
+  const onRollback = turnId != null ? () => rollbackTurn(turnId) : undefined;
 
   return (
     <div className="turn-group">
@@ -23,6 +28,7 @@ export function TurnGroup({ entry, isRunning }: {
             return (
               <div key={i} className="turn-item turn-item-user">
                 <div className="turn-user-bubble">{msgText(item.msg.content)}</div>
+                <MessageActions entry={entry} isUser onRollback={onRollback} />
               </div>
             );
           case "thinking":
@@ -35,12 +41,13 @@ export function TurnGroup({ entry, isRunning }: {
                 <div className="turn-agent-text">
                   <MarkdownContent>{msgText(item.msg.content)}</MarkdownContent>
                 </div>
+                <MessageActions entry={entry} isUser={false} />
               </div>
             );
           case "tools":
             return <ToolTree key={i} nodes={item.nodes} />;
           case "artifacts":
-            return <ArtifactList key={i} msgs={item.msgs} />;
+            return <ArtifactList key={i} msgs={item.msgs} turnId={turnId} />;
           case "summary":
             return (
               <div key={i} className="turn-item turn-item-summary">

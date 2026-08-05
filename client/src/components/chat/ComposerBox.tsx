@@ -24,6 +24,9 @@ export function ComposerBox() {
   const isCompacting = useChatStore((s) => s.isCompacting);
  const sendTurn = useChatStore((s) => s.sendTurn);
  const forceStop = useChatStore((s) => s.forceStop);
+ const pendingPlan = useChatStore((s) => s.pendingPlan);
+ const confirmPlan = useChatStore((s) => s.confirmPlan);
+ const dismissPlan = useChatStore((s) => s.dismissPlan);
 
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<AttachmentPayload[]>([]);
@@ -104,9 +107,14 @@ export function ComposerBox() {
 
   const handleSend = () => {
     if (!canSend) return;
-    const content = input.trim();
+    let content = input.trim();
+    // /plan 先规划后执行；/chat 只读审阅
+    let mode: "readonly" | "plan" | null = null;
+    if (content.startsWith("/plan")) { mode = "plan"; content = content.replace(/^\/plan\s*/, "").trim(); }
+    else if (content.startsWith("/chat")) { mode = "readonly"; content = content.replace(/^\/chat\s*/, "").trim(); }
+    if (!content) return;
     const atts = attachments.length > 0 ? attachments.map((a) => ({ ...a })) : undefined;
-    sendTurn(content, atts, reasoningEffort ?? undefined);
+    sendTurn(content, atts, reasoningEffort ?? undefined, mode);
     setInput("");
     setAttachments([]);
     setShowSlash(false);
@@ -194,8 +202,7 @@ export function ComposerBox() {
                   {models.length === 0 && <div className="composer-menu-empty">暂无模型</div>}
                   {models.map((m) => (
                     <button key={m.id} className={m.id === sessionModelId ? "active" : ""} onClick={() => changeModel(m.id)}>
-                      <IconCpu size={13} /><span className="composer-model-name">{m.name}</span>
-                      {m.provider && <span className="composer-model-provider">{m.provider}</span>}
+                      <IconCpu size={13} /><span className="composer-model-name" title={m.name}>{m.name.split("/").pop()}</span>
                     </button>
                   ))}
                 </div>
@@ -235,8 +242,26 @@ export function ComposerBox() {
         </div>
       </div>
       {dragOver && (<div className="composer-drag-overlay"><IconPaperclip size={24} /><span>松开以添加附件</span></div>)}
-      {showSlash && (<div className="composer-menu composer-slash"><div className="composer-menu-title">命令</div><button onClick={() => { setInput("/clear"); setShowSlash(false); }}>/clear</button><button onClick={() => { setInput("/compact"); setShowSlash(false); }}>/compact</button><button onClick={() => { setInput("/init"); setShowSlash(false); }}>/init</button></div>)}
+      {showSlash && (<div className="composer-menu composer-slash"><div className="composer-menu-title">命令</div><button onClick={() => { setInput("/plan "); setShowSlash(false); }}>/plan <span className="composer-slash-desc">先规划再执行</span></button><button onClick={() => { setInput("/chat "); setShowSlash(false); }}>/chat <span className="composer-slash-desc">只读审阅</span></button><button onClick={() => { setInput("/clear"); setShowSlash(false); }}>/clear</button><button onClick={() => { setInput("/compact"); setShowSlash(false); }}>/compact</button><button onClick={() => { setInput("/init"); setShowSlash(false); }}>/init</button></div>)}
       {showAt && (<div className="composer-menu composer-at"><div className="composer-menu-title">提及文件</div><div className="composer-menu-empty">继续输入文件名以补全…</div></div>)}
+      {pendingPlan && (
+        <div className="plan-confirm-overlay">
+          <div className="plan-confirm-card">
+            <div className="plan-confirm-title">计划已生成</div>
+            <div className="plan-confirm-desc">
+              AI 已在项目根目录 <code>ai/</code> 目录生成计划文档 <code>chatcoder-plan.md</code>，请审阅后确认是否按计划执行。
+            </div>
+            <div className="plan-confirm-task">
+              <span className="plan-confirm-label">任务</span>
+              <div className="plan-confirm-task-text">{pendingPlan.task}</div>
+            </div>
+            <div className="plan-confirm-actions">
+              <button className="btn-ghost" onClick={() => dismissPlan()}>取消</button>
+              <button className="btn-primary" onClick={() => confirmPlan(pendingPlan.task)}>确认执行</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

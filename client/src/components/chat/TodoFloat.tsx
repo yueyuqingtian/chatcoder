@@ -52,7 +52,7 @@ export function TodoFloat() {
                 {t.status === "failed" && "✗"}
                 {t.status === "blocked" && "⏸"}
               </span>
-              <span>{t.title || t.description || `任务 ${t.id}`}</span>
+              <span className="todo-item-text">{t.title || t.description || `任务 ${t.id}`}</span>
             </div>
           ))}
         </div>

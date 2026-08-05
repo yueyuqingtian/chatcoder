@@ -12,6 +12,51 @@ _RULE_NAMES = ("AGENTS.md", ".cursorrules", "CLAUDE.md", "CLAUDE.md", "AGENTS.md
 _MAX_TOTAL_BYTES = 32 * 1024
 _MAX_SINGLE_BYTES = 16 * 1024
 
+# v6: 规则文档 → 来源软件映射（用于按来源启用/停用）
+_RULE_SOURCE_MAP: list[tuple[str, str]] = [
+    # (规则文件/目录相对路径, 来源)
+    ("CLAUDE.md", "claude"),
+    (".claude/CLAUDE.md", "claude"),
+    ("AGENTS.md", "codex"),
+    (".codex/AGENTS.md", "codex"),
+    ("CODEBUDDY.md", "codebuddy"),
+    (".codebuddy/AGENTS.md", "codebuddy"),
+    (".codebuddy/rules", "codebuddy"),
+    (".trae/rules", "trae"),
+    ("rules.md", "trae"),
+    ("QODER.md", "qoder"),
+    (".qoder/AGENTS.md", "qoder"),
+    (".cursorrules", "cursor"),
+    (".cursor/rules", "cursor"),
+]
+
+
+def _get_enabled_rule_sources() -> set[str]:
+    """读取用户配置中启用的规则来源；未配置时全部启用。"""
+    try:
+        import json as _json
+        from pathlib import Path as _Path
+        import os as _os
+        cfg_path = _Path(
+            _os.environ.get("CHATCODER_USER_CONFIG", str(_Path.home() / ".chatcoder" / "config.json"))
+        )
+        if cfg_path.exists():
+            data = _json.loads(cfg_path.read_text(encoding="utf-8"))
+            enabled = data.get("ai_rules_enabled")
+            if isinstance(enabled, list) and enabled:
+                return set(str(x) for x in enabled)
+    except Exception:
+        pass
+    return {s for _, s in _RULE_SOURCE_MAP}
+
+
+def _source_of(rel: str) -> str | None:
+    """判断相对路径所属的规则来源。"""
+    for path, source in _RULE_SOURCE_MAP:
+        if rel == path or rel.startswith(path.rstrip("/") + "/"):
+            return source
+    return None
+
 
 async def scan_rules_docs(root: str) -> list[str]:
     """扫描目录（根 + 一级子目录）下的规范文档，返回相对路径列表。"""
@@ -44,9 +89,13 @@ async def load_session_rules(workspace: str, rules_docs: list[str] | None = None
         p = Path(rel)
         candidates.append(p if p.is_absolute() else base / p)
 
-    # 自动探测补全（未手动配置的文件）
+    # 自动探测补全（仅加载已启用来源的规则文档，v6 按来源启停）
+    enabled = _get_enabled_rule_sources()
     auto = await scan_rules_docs(workspace)
     for rel in auto:
+        src = _source_of(rel)
+        if src is not None and src not in enabled:
+            continue
         p = base / rel
         if p not in candidates:
             candidates.append(p)

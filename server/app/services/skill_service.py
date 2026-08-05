@@ -126,6 +126,16 @@ async def create_mcp_server(
         path=path,
         meta=meta,
     )
+    # v6: 创建/导入时若未提供 tools，自动握手获取真实工具列表，
+    # 避免 build_mcp_tools_for_agent 退化为不可用的通用 call 工具（修复 agent 无法使用 MCP）。
+    if not srv.tools and srv.transport == "stdio" and srv.command:
+        try:
+            from app.orchestration.skill_scanner import fetch_mcp_tools
+            fetched = await fetch_mcp_tools(srv.command, srv.args or [], srv.env or {})
+            if fetched:
+                srv.tools = fetched
+        except Exception:
+            pass
     db.add(srv)
     await db.flush()
     return srv

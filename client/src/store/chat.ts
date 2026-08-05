@@ -41,6 +41,10 @@ interface ChatState {
   pendingApproval: { approvalId: string; detail: Record<string, unknown> } | null;
   /** 回滚/撤销后回填输入框的草稿。 */
   composerDraft: string;
+  /** v6: /plan 计划确认弹窗（plan turn 完成后触发，task 为待执行任务）。 */
+  pendingPlan: { task: string } | null;
+  /** v6: 已审查的产物文件（path -> true），用于审查清单展示。 */
+  reviewedFiles: Record<string, boolean>;
   loading: boolean;
   error: string | null;
   wsConnected: boolean;
@@ -54,11 +58,14 @@ interface ChatState {
   deleteSession: (sessionId: number) => Promise<void>;
   renameSession: (sessionId: number, title: string) => Promise<void>;
   forkSession: (sessionId: number) => Promise<void>;
- sendTurn: (content: string, attachments?: Record<string, unknown>[], reasoningEffort?: string) => Promise<void>;
- cancelTurn: () => Promise<void>;
+sendTurn: (content: string, attachments?: Record<string, unknown>[], reasoningEffort?: string, mode?: "readonly" | "plan" | null) => Promise<void>;
+cancelTurn: () => Promise<void>;
   forceStop: () => Promise<void>;
- resumeTurn: () => Promise<void>;
+resumeTurn: () => Promise<void>;
   rollbackTurn: (turnId: number, restoreToComposer?: boolean) => Promise<void>;
+  confirmPlan: (task: string) => Promise<void>;
+  dismissPlan: () => void;
+  markFileReviewed: (path: string, reviewed: boolean) => void;
   refreshMessages: () => Promise<void>;
   refreshTurns: () => Promise<void>;
   refreshTasks: () => Promise<void>;
@@ -127,6 +134,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   usage: null,
   isCompacting: false,
   pendingApproval: null,
+  pendingPlan: null,
+  reviewedFiles: {},
   composerDraft: "",
   loading: false,
   error: null,
@@ -280,7 +289,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  sendTurn: async (content, attachments, reasoningEffort) => {
+  sendTurn: async (content, attachments, reasoningEffort, mode) => {
     const { currentSessionId, isRunning } = get();
     if (!currentSessionId || !content.trim()) return;
     if (_sendingGuard || isRunning) return;
@@ -299,8 +308,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       created_at: new Date().toISOString(),
     };
     get().addMessage(optimisticUserMsg);
+    // /plan 计划 turn：记录待确认任务（plan turn 完成后触发确认弹窗）
+    if (mode === "plan") set({ pendingPlan: { task: content } });
     try {
-      const turn = await api.createTurn({ session_id: currentSessionId, content, attachments, reasoning_effort: reasoningEffort });
+      const turn = await api.createTurn({ session_id: currentSessionId, content, attachments, reasoning_effort: reasoningEffort, mode });
       set((s) => ({
         turns: [...s.turns, turn],
         runningTurnId: turn.id,
@@ -309,10 +320,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }));
       _startHeartbeat();
     } catch (e) {
-      set({ error: String(e), isRunning: false });
+      set({ error: String(e), isRunning: false, pendingPlan: null });
     } finally {
       _sendingGuard = false;
     }
+  },
+
+  confirmPlan: async (task) => {
+    const { currentSessionId } = get();
+    if (!currentSessionId || !task.trim()) return;
+    // 清空确认状态后，按计划执行任务（正常模式，agent 将读取 ai/chatcoder-plan.md 执行）
+    set({ pendingPlan: null });
+    await get().sendTurn(task);
+  },
+
+  dismissPlan: () => set({ pendingPlan: null }),
+
+  markFileReviewed: (path, reviewed) => {
+    set((s) => {
+      const next = { ...s.reviewedFiles };
+      if (reviewed) next[path] = true;
+      else delete next[path];
+      return { reviewedFiles: next };
+    });
   },
 
  cancelTurn: async () => {

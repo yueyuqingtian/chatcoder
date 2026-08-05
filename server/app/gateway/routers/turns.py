@@ -52,7 +52,7 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
         from app.persistence.database import async_session_factory
         async with async_session_factory() as s:
             try:
-                await engine.start_turn(s, turn_id=turn.id, attachments=body.attachments, reasoning_effort=body.reasoning_effort)
+                await engine.start_turn(s, turn_id=turn.id, attachments=body.attachments, reasoning_effort=body.reasoning_effort, mode=body.mode)
                 await s.commit()
             except Exception:
                 await s.rollback()
