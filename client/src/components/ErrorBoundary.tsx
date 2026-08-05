@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import { IconAlertTriangle } from "./icons";
 
 interface Props {
   children: ReactNode;
@@ -49,7 +50,7 @@ export class ErrorBoundary extends Component<Props, State> {
             background: "var(--bg, #fff)",
           }}
         >
-          <div style={{ fontSize: "48px" }}>⚠️</div>
+          <div style={{ display: "flex", color: "var(--warning, #d98014)" }}><IconAlertTriangle size={48} strokeWidth={1.5} /></div>
           <h1 style={{ fontSize: "20px", fontWeight: 600, margin: 0 }}>
             应用遇到意外错误
           </h1>

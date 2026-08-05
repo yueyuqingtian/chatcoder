@@ -111,9 +111,67 @@ function _clearHeartbeat() {
   }
 }
 
+/**
+ * 性能优化（rAF 批量合并）：token.delta / thinking.delta 高频到达时，
+ * 先累积到模块级 pending 缓冲，每帧仅一次 set() 合并进 store，
+ * 将"每 token 一次全量渲染"降为"每帧一次"，大幅减少 React 重渲染次数。
+ */
+let _pendingToken: Record<number, string> = {};
+let _pendingThinking: Record<number, string> = {};
+let _flushScheduled = false;
+
+function _clearPendingDeltas() {
+  _pendingToken = {};
+  _pendingThinking = {};
+}
+
+function _scheduleDeltaFlush() {
+  if (_flushScheduled) return;
+  _flushScheduled = true;
+  requestAnimationFrame(() => {
+    _flushScheduled = false;
+    const tok = _pendingToken;
+    const thk = _pendingThinking;
+    _pendingToken = {};
+    _pendingThinking = {};
+    const tokKeys = Object.keys(tok);
+    const thkKeys = Object.keys(thk);
+    if (tokKeys.length === 0 && thkKeys.length === 0) return;
+    useChatStore.setState((s) => {
+      const next: Partial<ChatState> = {};
+      if (tokKeys.length > 0) {
+        const streaming = { ...s.streamingBuffers };
+        for (const k of tokKeys) {
+          const aid = Number(k);
+          streaming[aid] = (streaming[aid] || "") + tok[aid];
+        }
+        next.streamingBuffers = streaming;
+      }
+      if (thkKeys.length > 0) {
+        const thinking = { ...s.thinkingBuffers };
+        for (const k of thkKeys) {
+          const aid = Number(k);
+          thinking[aid] = (thinking[aid] || "") + thk[aid];
+        }
+        next.thinkingBuffers = thinking;
+      }
+      return next;
+    });
+  });
+}
+
+/** 有序追加：后端按 id 升序投递，常规追加 O(1)；仅乱序兜底时排序插入。 */
+function _appendOrdered(messages: MessageOut[], msg: MessageOut): MessageOut[] {
+  const last = messages[messages.length - 1];
+  const lastId = last ? Number(last.id) || 0 : 0;
+  if ((Number(msg.id) || 0) >= lastId) return [...messages, msg];
+  return [...messages, msg].sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
+}
+
 /** 统一清理所有会话级字段（§9.1 #18：防止切换会话后残留） */
 function _resetSessionState(): Partial<ChatState> {
   _clearHeartbeat();
+  _clearPendingDeltas();
   return {
     messages: [],
     turns: [],
@@ -528,13 +586,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return { messages: newMessages };
         }
       }
-      // 按 ID 升序插入，保证顺序正确（后端按 id asc 返回）
-      const newMessages = [...state.messages, msg].sort((a, b) => {
-        const ia = Number(a.id) || 0;
-        const ib = Number(b.id) || 0;
-        return ia - ib;
-      });
-      return { messages: newMessages };
+      // 按 ID 升序插入（后端按 id asc 投递，常规直接追加 O(1)，仅乱序兜底排序）
+      return { messages: _appendOrdered(state.messages, msg) };
     });
   },
 
@@ -568,10 +621,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
               newMessages = [...state.messages];
               newMessages.splice(optimisticIdx, 1, rawMsg);
             } else {
-              newMessages = [...state.messages, rawMsg].sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
+              newMessages = _appendOrdered(state.messages, rawMsg);
             }
           } else {
-            newMessages = [...state.messages, rawMsg].sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
+            newMessages = _appendOrdered(state.messages, rawMsg);
           }
           // 清空对应 agent 的流式 buffer，与消息落库同一次渲染完成
           const newStreaming = sid ? { ...state.streamingBuffers } : state.streamingBuffers;
@@ -609,6 +662,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       case "turn.completed": {
         const turnId = Number(payload.turn_id);
+        _clearPendingDeltas();
         set((s) => {
           // v7: /plan —— plan turn 完成（plan 文档已生成）后，才弹出确认执行弹窗
           let pendingPlan = s.pendingPlan;
@@ -647,7 +701,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const aid = Number(payload.agent_id);
         const delta = String(payload.delta ?? "");
         if (aid && delta) {
-          set((s) => ({ thinkingBuffers: { ...s.thinkingBuffers, [aid]: (s.thinkingBuffers[aid] || "") + delta } }));
+          _pendingThinking[aid] = (_pendingThinking[aid] || "") + delta;
+          _scheduleDeltaFlush();
         }
         break;
       }
@@ -659,7 +714,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const aid = Number(payload.agent_id);
         const delta = String(payload.delta ?? "");
         if (aid && delta) {
-          set((s) => ({ streamingBuffers: { ...s.streamingBuffers, [aid]: (s.streamingBuffers[aid] || "") + delta } }));
+          _pendingToken[aid] = (_pendingToken[aid] || "") + delta;
+          _scheduleDeltaFlush();
         }
         break;
       }

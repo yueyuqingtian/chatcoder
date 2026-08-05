@@ -5,13 +5,13 @@
  *   - output 按文件扩展名包裹代码块获得高亮
  *   - 支持多层嵌套（子代理调用）
  */
-import { useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import type { ToolLeaf, ToolNode } from "./timeline";
 import { usePanelStore } from "../../store/panel";
 import {
   IconFileRead, IconFileWrite, IconFolder, IconGlobe, IconSearch, IconTerminal,
   IconUsers, IconBox, IconZap, IconFlask, IconGitBranch, IconBrain,
-  IconArrowToggle,
+  IconArrowToggle, IconSpinner, IconCheck, IconX,
 } from "../icons";
 
 const GROUP_PHRASES: Record<string, string> = {
@@ -68,8 +68,10 @@ function leafPath(leaf: ToolLeaf): string | null {
   return null;
 }
 
-function LeafRow({ leaf }: { leaf: ToolLeaf }) {
-  const { setPreviewPath, openPanel, openTab } = usePanelStore();
+const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
+  const setPreviewPath = usePanelStore((s) => s.setPreviewPath);
+  const openPanel = usePanelStore((s) => s.openPanel);
+  const openTab = usePanelStore((s) => s.openTab);
   const [expanded, setExpanded] = useState(false);
   const path = leafPath(leaf);
   const ok = leaf.ok;
@@ -99,8 +101,8 @@ function LeafRow({ leaf }: { leaf: ToolLeaf }) {
             {path.split(/[\\/]/).pop() || path}
           </button>
         )}
-        <span className={"tc-status " + (ok === null ? "wait" : ok ? "ok" : "fail")}>
-          {ok === null ? "…" : ok ? "✓" : "✕"}
+        <span className={"tc-status " + (ok === null ? "wait" : ok ? "ok" : "fail")} style={{ display: "inline-flex", alignItems: "center" }}>
+          {ok === null ? <IconSpinner size={11} /> : ok ? <IconCheck size={11} /> : <IconX size={11} />}
         </span>
         {leaf.durationMs != null && ok !== null && (
           <span className="tc-duration">{leaf.durationMs}ms</span>
@@ -120,9 +122,9 @@ function LeafRow({ leaf }: { leaf: ToolLeaf }) {
       )}
     </div>
   );
-}
+});
 
-export function ToolTree({ nodes }: { nodes: ToolNode[] }) {
+export const ToolTree = memo(function ToolTree({ nodes }: { nodes: ToolNode[] }) {
   const [open, setOpen] = useState(false);
 
   const stats = useMemo(() => {
@@ -179,4 +181,4 @@ export function ToolTree({ nodes }: { nodes: ToolNode[] }) {
       )}
     </div>
   );
-}
+});

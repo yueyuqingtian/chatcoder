@@ -3,13 +3,13 @@
  * - 完成后标题显示"已完成思考（n秒）"
  * - 流式内容从 store thinkingBuffers 读取（key=agent_id）
  */
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { IconArrowToggle } from "../icons";
 import { useChatStore } from "../../store/chat";
 
 const MAX_HEIGHT = 160;
 
-export function ThinkingBlock({ text, active, turnId, agentId }: {
+export const ThinkingBlock = memo(function ThinkingBlock({ text, active, turnId, agentId }: {
   text: string;
   active: boolean;
   turnId?: number;
@@ -62,7 +62,7 @@ export function ThinkingBlock({ text, active, turnId, agentId }: {
           {isStreaming ? (
             <>
               <span className="thinking-block-breath" />
-              思考中…
+              <span className="text-flow">思考中…</span>
             </>
           ) : (
             <>已完成思考{duration != null ? `（${duration} 秒）` : ""}</>
@@ -76,4 +76,4 @@ export function ThinkingBlock({ text, active, turnId, agentId }: {
       )}
     </div>
   );
-}
+});

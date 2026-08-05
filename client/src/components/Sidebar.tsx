@@ -39,11 +39,14 @@ function shortPath(path: string): string {
 
 export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleCollapse: _onToggleCollapse }: SidebarProps) {
   void _onToggleCollapse;
-  const {
-    projects, sessions, currentSessionId,
-    loadBootstrap, switchSession, deleteSession,
-    renameSession, forkSession,
-  } = useChatStore();
+  const projects = useChatStore((s) => s.projects);
+  const sessions = useChatStore((s) => s.sessions);
+  const currentSessionId = useChatStore((s) => s.currentSessionId);
+  const loadBootstrap = useChatStore((s) => s.loadBootstrap);
+  const switchSession = useChatStore((s) => s.switchSession);
+  const deleteSession = useChatStore((s) => s.deleteSession);
+  const renameSession = useChatStore((s) => s.renameSession);
+  const forkSession = useChatStore((s) => s.forkSession);
 
   const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
@@ -187,7 +190,7 @@ function SortIcon({ type }: { type: "pinned" | "recent" | "name" }) {
                     const isCurrent = s.id === currentSessionId;
                     return (
                       <div key={s.id} className={`sidebar-session-item${isCurrent ? " active" : ""}`} onClick={() => { switchSession(s.id); onSessionFocus(); }}>
-                        {s.pinned && <span title="置顶">📌</span>}
+                        {s.pinned && <span title="置顶" className="sidebar-pin-icon"><IconPin size={11} /></span>}
                         {renaming?.id === s.id ? (
                           <input className="input" style={{ padding: "2px 4px", fontSize: 12 }} autoFocus value={renaming.value} onFocus={(e) => e.target.select()} onChange={(e) => setRenaming({ id: s.id, value: e.target.value })} onClick={(e) => e.stopPropagation()} onBlur={async () => { const title = renaming.value.trim(); setRenaming(null); if (title && title !== s.title) await renameSession(s.id, title); }} onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setRenaming(null); }} />
                         ) : (

@@ -5,13 +5,13 @@
  * - scope="ai"  ：默认在回复下方展示「复制」图标按钮；「赞/踩/重试」hover 才显示
  * - 移除带文字的按钮（复制/Markdown/重试/回滚 等文字标签），全部改为纯图标
  */
-import { useState } from "react";
+import { memo, useState } from "react";
 import { useChatStore } from "../../store/chat";
 import { IconCopy, IconRotateCcw, IconThumbsUp, IconThumbsDown, IconRefresh, IconCheck } from "../icons";
 import type { TimelineEntry } from "./timeline";
 import { turnToPlainText } from "./markdown";
 
-export function MessageActions({ entry, onRollback, scope = "full" }: {
+export const MessageActions = memo(function MessageActions({ entry, onRollback, scope = "full" }: {
   entry: TimelineEntry;
   onRollback?: () => void;
   /** user=仅用户消息按钮（复制/回滚）；ai=仅 AI 回复按钮（复制+赞踩重试） */
@@ -75,4 +75,4 @@ export function MessageActions({ entry, onRollback, scope = "full" }: {
       )}
     </div>
   );
-}
+});

@@ -826,3 +826,23 @@ export function IconWrench({ size = 16, color = "currentColor", strokeWidth = 1.
     </svg>
   );
 }
+
+/** 下箭头（跳转底部） */
+export function IconArrowDown({ size = 18, color = "currentColor", strokeWidth = 2, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <polyline points="19 12 12 19 5 12" />
+    </svg>
+  );
+}
+
+/** 对勾圆圈（完成/成功状态） */
+export function IconCheckCircle({ size = 16, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+      <polyline points="22 4 12 14.01 9 11.01" />
+    </svg>
+  );
+}

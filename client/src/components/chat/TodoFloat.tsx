@@ -5,11 +5,13 @@ import { useMemo, useState } from "react";
 import { useChatStore } from "../../store/chat";
 import { usePanelStore } from "../../store/panel";
 import type { TaskOut } from "../../api/client";
-import { IconCheck, IconChevronDown, IconChevronUp } from "../icons";
+import { IconCheck, IconChevronDown, IconChevronUp, IconX, IconPause } from "../icons";
 
 export function TodoFloat() {
-  const { tasks } = useChatStore();
-  const { openPanel, openTab, expanded } = usePanelStore();
+  const tasks = useChatStore((s) => s.tasks);
+  const openPanel = usePanelStore((s) => s.openPanel);
+  const openTab = usePanelStore((s) => s.openTab);
+  const expanded = usePanelStore((s) => s.expanded);
   const [collapsed, setCollapsed] = useState(false);
 
   // v9: 只展示「最新 turn」的任务——新任务开始后右上角卡片自动清理历史任务步骤，
@@ -61,9 +63,9 @@ export function TodoFloat() {
               >
                 <span className={`status-icon ${st}`}>
                   {st === "done" && <IconCheck size={12} />}
-                  {st === "running" && <span className="todo-spinner">◌</span>}
-                  {st === "failed" && "✗"}
-                  {st === "blocked" && "⏸"}
+                  {st === "running" && <span className="todo-spinner" />}
+                  {st === "failed" && <IconX size={11} />}
+                  {st === "blocked" && <IconPause size={10} />}
                 </span>
                 <span className="todo-item-text">{t.title || t.description || `任务 ${t.id}`}</span>
               </div>

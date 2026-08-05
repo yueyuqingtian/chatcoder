@@ -4,13 +4,13 @@
  * - 滚动策略：靠近底部自动跟随（流式/新消息），不在底部由用户滚动。
  * - 左侧 JumpDots、Ctrl+F 会话内搜索保留。
  */
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, memo } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { TimelineEntry } from "./timeline";
 import { buildTimeline, msgText } from "./timeline";
 import { TurnGroup } from "./TurnGroup";
 import { JumpDots } from "./JumpDots";
-import { IconSearch, IconChevronUp, IconChevronDown, IconX } from "../icons";
+import { IconSearch, IconChevronUp, IconChevronDown, IconX, IconArrowDown } from "../icons";
 import { MarkdownContent } from "../MarkdownContent";
 import { useChatStore } from "../../store/chat";
 
@@ -37,7 +37,7 @@ function StreamingText() {
             <span className="thinking-block-chev" />
             <span className="thinking-block-title">
               <span className="thinking-block-breath" />
-              思考中…
+              <span className="text-flow">思考中…</span>
             </span>
           </div>
           <div className="thinking-block-body" style={{ maxHeight: 160, overflowY: "auto" }}>
@@ -49,21 +49,21 @@ function StreamingText() {
         <div className="turn-item turn-item-text">
           <div className="turn-agent-text">
             <MarkdownContent>{text}</MarkdownContent>
-            <span className="thinking-block-breath" style={{ display: "inline-block", marginLeft: 2, verticalAlign: "middle" }} />
+            <span className="stream-caret" />
           </div>
         </div>
       )}
       {!thinkingText && (
         <div className="turn-status-line">
           <span className="thinking-block-breath" style={{ marginRight: 6 }} />
-          <span>{text ? "处理中…" : "等待响应…"}</span>
+          <span className="text-flow">{text ? "处理中…" : "等待响应…"}</span>
         </div>
       )}
     </div>
   );
 }
 
-function StandaloneEntry({ entry }: { entry: Extract<TimelineEntry, { kind: "standalone" }> }) {
+const StandaloneEntry = memo(function StandaloneEntry({ entry }: { entry: Extract<TimelineEntry, { kind: "standalone" }> }) {
   return (
     <div className="turn-group">
       <div className="turn-item turn-item-text">
@@ -73,7 +73,7 @@ function StandaloneEntry({ entry }: { entry: Extract<TimelineEntry, { kind: "sta
       </div>
     </div>
   );
-}
+});
 
 export function MessageFlow() {
   const messages = useChatStore((s) => s.messages);
@@ -86,6 +86,11 @@ export function MessageFlow() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [matchIdx, setMatchIdx] = useState(0);
+  // 是否贴近底部（驱动"跳转底部"悬浮按钮显隐，与 nearBottomRef 同步）
+  const [nearBottom, setNearBottom] = useState(true);
+  // 已见过的时间线条目 key：入场动画只对真正新增的条目播放一次，
+  // 虚拟列表滚动导致的重挂载不会重播（key 已在集合中）。
+  const seenKeysRef = useRef<Set<string>>(new Set());
 
   const entries = useMemo(() => buildTimeline(messages), [messages]);
 
@@ -105,15 +110,19 @@ export function MessageFlow() {
   // 虚拟化：count = entries + 运行中的 StreamingText 占位
   const count = entries.length + (isRunning ? 1 : 0);
 
+  // 条目 key（虚拟列表 key 与"新条目入场"追踪共用）
+  const entryKeyAt = useCallback((index: number): string =>
+    index < entries.length
+      ? (entries[index].kind === "turn" ? `turn-${entries[index].turnId ?? index}` : `std-${entries[index].msg.id ?? index}`)
+      : "streaming",
+  [entries]);
+
   const virtualizer = useVirtualizer({
     count,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => 120,
     overscan: 8,
-    getItemKey: (index) =>
-      index < entries.length
-        ? (entries[index].kind === "turn" ? `turn-${entries[index].turnId ?? index}` : `std-${entries[index].msg.id ?? index}`)
-        : "streaming",
+    getItemKey: entryKeyAt,
   });
 
   // 统一滚动管理：靠近底部自动跟随，否则由用户滚动
@@ -126,6 +135,7 @@ export function MessageFlow() {
   const scrollToBottom = useCallback(() => {
     if (entries.length === 0) return;
     nearBottomRef.current = true; // 锁定贴底
+    setNearBottom(true);
     virtualizer.scrollToIndex(entries.length - 1, { align: "end" });
     // 双保险：虚拟列表测量完成后再次贴底
     requestAnimationFrame(() => {
@@ -138,7 +148,9 @@ export function MessageFlow() {
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    nearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    nearBottomRef.current = near;
+    setNearBottom((prev) => (prev === near ? prev : near));
   }, []);
 
   // 虚拟列表测量更新（totalSize 变化）时，若处于贴底锁定状态则保持贴底
@@ -269,19 +281,33 @@ export function MessageFlow() {
           </div>
         ) : (
           <div className="mf-virtual" style={{ height: virtualizer.getTotalSize(), position: "relative", width: "100%" }}>
-            {virtualizer.getVirtualItems().map((vi) => (
-              <div
-                key={vi.key}
-                data-index={vi.index}
-                ref={virtualizer.measureElement}
-                style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${vi.start}px)` }}
-              >
-                <div className="mf-list">{renderRow(vi.index)}</div>
-              </div>
-            ))}
+            {virtualizer.getVirtualItems().map((vi) => {
+              // 新条目入场动画：仅首次出现的 key 挂动画类，虚拟列表重挂载不重播
+              const k = String(vi.key);
+              const seen = seenKeysRef.current;
+              const isNew = vi.index < entries.length && !seen.has(k);
+              if (!seen.has(k)) seen.add(k);
+              return (
+                <div
+                  key={vi.key}
+                  data-index={vi.index}
+                  ref={virtualizer.measureElement}
+                  style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${vi.start}px)` }}
+                >
+                  <div className={"mf-list" + (isNew ? " mf-entry-new" : "")}>{renderRow(vi.index)}</div>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
+
+      {/* 跳转底部：用户向上翻阅历史时出现，点击回到最新消息并恢复自动跟随 */}
+      {!nearBottom && (entries.length > 0 || isRunning) && (
+        <button className="mf-jump-bottom" onClick={scrollToBottom} title="回到底部">
+          <IconArrowDown size={14} />
+        </button>
+      )}
     </div>
   );
 }

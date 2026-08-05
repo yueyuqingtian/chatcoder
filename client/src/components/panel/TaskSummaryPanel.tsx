@@ -2,11 +2,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { useChatStore } from "../../store/chat";
 import { usePanelStore } from "../../store/panel";
-import { IconFileRead, IconRefresh, IconExternalLink, IconCheck, IconRotateCcw } from "../icons";
+import { IconFileRead, IconRefresh, IconExternalLink, IconCheck, IconRotateCcw, IconSpinner, IconX, IconCheckCircle } from "../icons";
 
 export function TaskSummaryPanel() {
-  const { tasks, currentSessionId, refreshTasks, messages, reviewedFiles, markFileReviewed } = useChatStore();
-  const { setPreviewPath, openTab } = usePanelStore();
+  const tasks = useChatStore((s) => s.tasks);
+  const currentSessionId = useChatStore((s) => s.currentSessionId);
+  const refreshTasks = useChatStore((s) => s.refreshTasks);
+  const messages = useChatStore((s) => s.messages);
+  const reviewedFiles = useChatStore((s) => s.reviewedFiles);
+  const markFileReviewed = useChatStore((s) => s.markFileReviewed);
+  const setPreviewPath = usePanelStore((s) => s.setPreviewPath);
+  const openTab = usePanelStore((s) => s.openTab);
   const [visitedFiles, setVisitedFiles] = useState<string[]>([]);
 
   // 从消息中提取 AI 浏览过的文件（fs_read 参数）
@@ -68,7 +74,7 @@ export function TaskSummaryPanel() {
       {currentTurnTasks.length > 0 && (
         <div className="ts-stats">
           <span className="ts-stat"><b>{stats.done}</b>/{stats.total} 完成</span>
-          {stats.running > 0 && <span className="ts-stat running">◌ {stats.running} 进行中</span>}
+          {stats.running > 0 && <span className="ts-stat running"><IconSpinner size={11} /> {stats.running} 进行中</span>}
           <button className="ts-refresh" onClick={() => refreshTasks()} title="刷新"><IconRefresh size={12} /></button>
         </div>
       )}
@@ -89,7 +95,7 @@ export function TaskSummaryPanel() {
               return (
                 <div key={t.id} className={`rp-task ${st}`}>
                   <span className={`rp-task-status ${st}`}>
-                    {st === "done" ? "✓" : st === "running" ? "◌" : st === "failed" ? "✕" : "·"}
+                    {st === "done" ? <IconCheck size={11} /> : st === "running" ? <IconSpinner size={11} /> : st === "failed" ? <IconX size={11} /> : "·"}
                   </span>
                   <div className="rp-task-main">
                     <div className="rp-task-title">
@@ -118,7 +124,7 @@ export function TaskSummaryPanel() {
               </button>
             </div>
           </div>
-          {unReviewed.length === 0 && <div className="ts-empty">全部文件已审查 ✅</div>}
+          {unReviewed.length === 0 && <div className="ts-empty" style={{ display: "flex", alignItems: "center", gap: 4 }}><IconCheckCircle size={13} color="var(--success)" /> 全部文件已审查</div>}
           {artifacts.map((a) => (
             <div key={a.path} className={`ts-file-review-row${reviewedFiles[a.path] ? " reviewed" : ""}`}>
               <span

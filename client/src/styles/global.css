@@ -142,31 +142,30 @@ a { color: var(--accent); text-decoration: none; }
 .turn-group { margin-bottom: 4px; padding: 0; width: 100%; }
 .turn-item { margin-bottom: 1px; position: relative; }
 .turn-item-user { display: flex; flex-direction: column; align-items: flex-end; margin-bottom: 3px; }
-.turn-user-bubble { max-width: 75%; padding: 7px 32px 7px 12px; border-radius: var(--r-lg); background: var(--bg-active); color: var(--text-1); font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+.turn-user-bubble { max-width: 75%; padding: 7px 12px; border-radius: var(--r-lg); background: var(--bg-active); color: var(--text-1); font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
 .turn-item-text { margin-bottom: 1px; }
 .turn-agent-text { color: var(--text-1); font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
 .turn-item-summary { padding: 5px 10px; border-radius: var(--r-sm); background: var(--bg-elevated); color: var(--text-2); font-size: 12px; margin: 2px 0; }
 .turn-item-error { padding: 5px 10px; border-radius: var(--r-sm); background: var(--error-soft); color: var(--error); font-size: 12px; margin: 2px 0; }
-/* v9: 消息操作按钮——无边框 SVG 图标按钮，内联到各自消息框内，避免连续消息错位。
-   - 用户消息：按钮在气泡右上角，hover/聚焦气泡时显示（复制/回滚）
-   - AI 消息：复制按钮默认显示在回复下方；赞/踩/重试 hover 时显示
+/* v10: 消息操作按钮——无边框 SVG 图标按钮。
+   - 用户消息：按钮在气泡下方（流内、独立一行，不重叠文字），鼠标聚焦消息时显示（复制/回滚）
+   - AI 消息：整个回复作为一个整体，复制按钮默认显示在最后一段回复下方；赞/踩/重试 hover 时显示
 */
-.turn-item-user, .turn-item-text { position: relative; }
-.turn-user-bubble { position: relative; }
-.turn-user-bubble .msg-actions {
-  position: absolute;
-  top: 3px;
-  right: 4px;
+.turn-item-user { position: relative; }
+.turn-item-text { position: relative; }
+/* 用户消息按钮：流内布局，右对齐（气泡靠右），hover 消息项时显示 */
+.turn-item-user .msg-actions {
   display: flex;
   align-items: center;
   gap: 1px;
+  margin-top: 1px;
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--dur-fast);
   z-index: 6;
 }
-.turn-user-bubble:hover .msg-actions,
-.turn-user-bubble:focus-within .msg-actions { opacity: 1; pointer-events: auto; }
+.turn-item-user:hover .msg-actions,
+.turn-item-user:focus-within .msg-actions { opacity: 1; pointer-events: auto; }
 /* AI 消息：复制默认可见；赞/踩/重试 hover 可见 */
 .turn-item-text .msg-actions {
   display: flex;
@@ -932,3 +931,216 @@ body.panel-dragging .app-pane { transition: none; }
 .policy-batch-bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; margin-bottom: 8px; border-radius: var(--r-sm); background: var(--bg-elevated); border: 1px solid var(--border); font-size: 12px; }
 .policy-checkbox { width: 14px; height: 14px; cursor: pointer; accent-color: var(--accent); }
 .policy-batch-actions { display: flex; gap: 6px; margin-left: auto; }
+
+/* ═══════════════════════════════════════════════════════════
+ * v6 动效体系 · 毛玻璃 · 渐变点缀
+ * 原则：只动 transform/opacity；入场 ease-out ≤ 300ms；
+ *       品牌紫罗兰渐变只用于"关键时刻"（发送/进度/品牌/流光）。
+ * ═══════════════════════════════════════════════════════════ */
+
+/* ── 基础动效工具 ── */
+.spinning { animation: spin 0.8s linear infinite; }
+
+/* motion.ts 动画类（进入动画，both 保持终态） */
+.anim-fade-in { animation: anim-fade-in var(--dur-view) var(--ease-out) both; }
+.anim-slide-up { animation: anim-slide-up var(--dur-view) var(--ease-out) both; }
+.anim-slide-in-left { animation: anim-slide-in-left var(--dur-view) var(--ease-out) both; }
+.anim-scale-in { animation: anim-scale-in var(--dur-view) var(--ease-out) both; }
+@keyframes anim-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes anim-slide-up { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes anim-slide-in-left { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: none; } }
+@keyframes anim-scale-in { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: none; } }
+
+/* 视图切换入场（Workspace / 右面板标签内容 key 重挂载时使用） */
+.view-enter { animation: view-enter var(--dur-view) var(--ease-out) both; }
+.view-enter-slow { animation: view-enter var(--dur-slow) var(--ease-out) both; }
+@keyframes view-enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* ── 消息流动效 ── */
+/* 新消息入场（仅对真正新增的条目挂 .mf-entry-new，虚拟列表滚动重挂载不重播） */
+.mf-entry-new { animation: msg-in var(--dur-view) var(--ease-out) both; }
+@keyframes msg-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+
+/* 流光文字：状态提示（如"思考中…"）background-clip: text + 周期性位移，无缝循环 */
+.text-flow {
+  background-image: var(--grad-flow);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: text-flow 2.4s linear infinite;
+}
+@keyframes text-flow { from { background-position: 200% 0; } to { background-position: 0 0; } }
+
+/* 流式输出光标：品牌渐变细条，柔和闪烁 */
+.stream-caret {
+  display: inline-block;
+  width: 6px;
+  height: 13px;
+  margin-left: 3px;
+  vertical-align: -2px;
+  border-radius: 1.5px;
+  background: var(--accent-grad);
+  animation: caret-blink 1.1s ease-in-out infinite;
+}
+@keyframes caret-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.12; } }
+
+/* 折叠面板体入场（思考块/工具簇/输出块挂载时轻微下落淡入） */
+.thinking-block-body, .tool-cluster-body, .tc-group-body, .tc-output, .tc-error-output {
+  animation: expand-in var(--dur-med) var(--ease-out);
+}
+@keyframes expand-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+
+/* 跳转底部悬浮按钮 */
+.mf-jump-bottom {
+  position: absolute; right: 22px; bottom: 14px; z-index: 20;
+  width: 30px; height: 30px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg-elevated); border: 1px solid var(--border);
+  box-shadow: var(--shadow-md); color: var(--text-2); cursor: pointer;
+  transition: color var(--dur-fast), transform var(--dur-fast), box-shadow var(--dur-fast);
+  animation: anim-scale-in var(--dur-med) var(--ease-spring) both;
+}
+.mf-jump-bottom:hover { color: var(--text-1); transform: translateY(-2px); box-shadow: var(--shadow-pop); }
+.mf-jump-bottom:active { transform: translateY(0) scale(0.95); }
+
+/* 空态首页分层入场 */
+.empty-state > * { animation: anim-slide-up var(--dur-slow) var(--ease-out) both; }
+.empty-state > *:nth-child(2) { animation-delay: 60ms; }
+.empty-state > *:nth-child(3) { animation-delay: 120ms; }
+.empty-state > *:nth-child(4) { animation-delay: 170ms; }
+.empty-state > *:nth-child(5) { animation-delay: 210ms; }
+
+/* ── 渐变点缀（品牌紫罗兰只出现在关键时刻） ── */
+.es-send, .composer-send {
+  background: var(--grad-brand);
+  box-shadow: var(--grad-glow);
+  color: #fff;
+}
+:root[data-theme="dark"] .es-send, :root[data-theme="dark"] .composer-send { color: #fff; }
+.es-send:hover:not(:disabled), .composer-send:hover:not(:disabled):not(.stop) {
+  filter: brightness(1.12);
+  transform: translateY(-1px);
+}
+.es-send:active:not(:disabled), .composer-send:active:not(:disabled):not(.stop) { transform: translateY(0) scale(0.94); }
+/* 停止态保持红色，不要渐变 */
+.composer-send.stop { background: var(--error); box-shadow: none; }
+.composer-send.stop:hover { background: var(--error); filter: brightness(1.1); }
+
+.todo-float-progress-fill { background: var(--grad-brand); }
+
+.empty-state-logo {
+  background: var(--accent-grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+/* 标题栏品牌徽标：渐变圆角方块 */
+.titlebar-brand-icon {
+  width: 20px; height: 20px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 6px;
+  background: var(--grad-brand);
+  color: #fff;
+  box-shadow: var(--grad-glow);
+}
+.titlebar-brand { font-size: 12px; font-weight: 600; color: var(--text-1); letter-spacing: 0.3px; }
+
+/* 待办浮窗运行中 spinner 用品牌色 */
+.todo-float-item .status-icon.running { border-color: #7A5CFF; border-top-color: transparent; }
+
+/* 侧栏置顶图标 */
+.sidebar-pin-icon { display: inline-flex; align-items: center; color: var(--text-3); flex-shrink: 0; }
+
+/* ── 对话排版偏好接线（store/ui.ts 下发的 CSS 变量） ── */
+.turn-agent-text { font-family: var(--chat-font, var(--font-sans)); }
+.turn-user-bubble { max-width: var(--chat-bubble-w, 75%); font-family: var(--chat-font, var(--font-sans)); }
+
+/* ═══════════════════════════════════════════════════════════
+ * 毛玻璃模式（设置开启后 <html data-glass="on">）
+ * body 铺环境光渐变，三栏面板半透明 + backdrop-filter 磨砂。
+ * ═══════════════════════════════════════════════════════════ */
+:root[data-glass="on"] body {
+  background-color: var(--bg-main);
+  background-image: var(--bg-ambient);
+}
+:root[data-glass="on"] .app-shell { background: transparent; }
+:root[data-glass="on"] .titlebar { background: transparent; }
+
+:root[data-glass="on"] .app-pane-left {
+  background: var(--glass-sidebar);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+}
+:root[data-glass="on"] .sidebar { background: transparent; }
+
+:root[data-glass="on"] .app-main {
+  background: var(--glass-panel);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  box-shadow: var(--glass-shadow);
+}
+:root[data-glass="on"] .ws-header,
+:root[data-glass="on"] .workspace-settings { background: transparent; }
+
+:root[data-glass="on"] .app-pane-right {
+  background: var(--glass-panel);
+  border-left-color: var(--glass-border);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  box-shadow: var(--glass-shadow);
+}
+:root[data-glass="on"] .right-panel,
+:root[data-glass="on"] .browser-panel,
+:root[data-glass="on"] .terminal-panel { background: transparent; }
+
+/* 输入框 / 空态卡片：浮在磨砂面上的玻璃卡片 */
+:root[data-glass="on"] .composer-main {
+  background: var(--glass-elevated);
+  border-color: var(--glass-border);
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(14px) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(14px) saturate(var(--glass-saturate));
+}
+:root[data-glass="on"] .empty-state-card {
+  background: var(--glass-panel-strong);
+  border-color: var(--glass-border);
+  box-shadow: var(--glass-shadow);
+}
+
+/* 浮层 / 菜单 / 弹窗：统一玻璃质感 */
+:root[data-glass="on"] .composer-menu,
+:root[data-glass="on"] .context-menu,
+:root[data-glass="on"] .ctx-menu,
+:root[data-glass="on"] .rp-add-menu,
+:root[data-glass="on"] .es-project-menu,
+:root[data-glass="on"] .jump-dot-tooltip,
+:root[data-glass="on"] .toast,
+:root[data-glass="on"] .todo-float,
+:root[data-glass="on"] .mf-jump-bottom,
+:root[data-glass="on"] .modal-window,
+:root[data-glass="on"] .plan-confirm-card,
+:root[data-glass="on"] .approval-card,
+:root[data-glass="on"] .confirm-dialog,
+:root[data-glass="on"] .rc-modal {
+  background: var(--glass-elevated);
+  border-color: var(--glass-border);
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+}
+
+/* ═══════════════════════════════════════════════════════════
+ * 无障碍：偏好减少动态 → 动画瞬时完成（保留状态可见性）
+ * ═══════════════════════════════════════════════════════════ */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

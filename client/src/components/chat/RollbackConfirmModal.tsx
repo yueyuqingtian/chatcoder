@@ -4,6 +4,7 @@
  */
 import { useState } from "react";
 import { useChatStore } from "../../store/chat";
+import { IconAlertTriangle } from "../icons";
 import type { RollbackPreviewFile } from "../../api/client";
 
 interface DiffRow { type: "same" | "del" | "add"; line: string }
@@ -101,8 +102,9 @@ export function RollbackConfirmModal() {
             共涉及 <b>{files.length}</b> 个文件：
           </p>
           {conflictCount > 0 && (
-            <p className="rc-conflict-note">
-              ⚠ {conflictCount} 个文件与你的手动改动存在重叠，回滚将<b>跳过</b>它们（不会覆盖你的改动）。
+            <p className="rc-conflict-note" style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
+              <IconAlertTriangle size={13} style={{ flexShrink: 0, marginTop: 1 }} />
+              <span>{conflictCount} 个文件与你的手动改动存在重叠，回滚将<b>跳过</b>它们（不会覆盖你的改动）。</span>
             </p>
           )}
           <div className="rc-file-list">

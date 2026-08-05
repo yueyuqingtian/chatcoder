@@ -26,7 +26,14 @@ function PanelContent({ id }: { id: PanelTabId }) {
 }
 
 export function RightPanel() {
-  const { tabs, activeKey, closePanel, openTab, closeTab, setActiveTab, fullscreen, toggleFullscreen } = usePanelStore();
+  const tabs = usePanelStore((s) => s.tabs);
+  const activeKey = usePanelStore((s) => s.activeKey);
+  const closePanel = usePanelStore((s) => s.closePanel);
+  const openTab = usePanelStore((s) => s.openTab);
+  const closeTab = usePanelStore((s) => s.closeTab);
+  const setActiveTab = usePanelStore((s) => s.setActiveTab);
+  const fullscreen = usePanelStore((s) => s.fullscreen);
+  const toggleFullscreen = usePanelStore((s) => s.toggleFullscreen);
   const [showAddMenu, setShowAddMenu] = useState(false);
 
   const handleAdd = (id: PanelTabId) => { openTab(id); setShowAddMenu(false); };
@@ -67,7 +74,11 @@ export function RightPanel() {
       <div className="rp-content">
         {activeKey ? (() => {
           const active = tabs.find((t) => `${t.id}-${t.instance}` === activeKey);
-          return active ? <PanelContent id={active.id} /> : null;
+          return active ? (
+            <div key={activeKey} className="view-enter" style={{ height: "100%" }}>
+              <PanelContent id={active.id} />
+            </div>
+          ) : null;
         })() : (
           <div className="rp-quick">
             <button onClick={() => openTab("task-summary")}>任务摘要</button>

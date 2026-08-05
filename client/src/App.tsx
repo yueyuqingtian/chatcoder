@@ -19,8 +19,12 @@ export default function App() {
   const [showSplash, setShowSplash] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [nav, setNav] = useState<NavKey | null>(null);
-  const { leftPanelWidth, setLeftPanelWidth } = useUiStore();
-  const { expanded: rightExpanded, width: rightPanelWidth, fullscreen: rightFullscreen, setWidth: setRightPanelWidth } = usePanelStore();
+  const leftPanelWidth = useUiStore((s) => s.leftPanelWidth);
+  const setLeftPanelWidth = useUiStore((s) => s.setLeftPanelWidth);
+  const rightExpanded = usePanelStore((s) => s.expanded);
+  const rightPanelWidth = usePanelStore((s) => s.width);
+  const rightFullscreen = usePanelStore((s) => s.fullscreen);
+  const setRightPanelWidth = usePanelStore((s) => s.setWidth);
 
   useEffect(() => { initTheme(); initUi(); }, []);
 

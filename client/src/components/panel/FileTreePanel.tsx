@@ -108,8 +108,10 @@ function FileRow({ node, depth, onSelect, openPaths, setOpenPaths, selectedPath,
 }
 
 export function FileTreePanel() {
-  const { currentProjectId, projects } = useChatStore();
-  const { previewPath, setPreviewPath } = usePanelStore();
+  const currentProjectId = useChatStore((s) => s.currentProjectId);
+  const projects = useChatStore((s) => s.projects);
+  const previewPath = usePanelStore((s) => s.previewPath);
+  const setPreviewPath = usePanelStore((s) => s.setPreviewPath);
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [openPaths, setOpenPaths] = useState<Set<string>>(new Set());
   const [content, setContent] = useState<string>("");

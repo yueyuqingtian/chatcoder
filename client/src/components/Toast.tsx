@@ -1,34 +1,37 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useChatStore } from "../store/chat";
+import { IconInfo, IconX } from "./icons";
 
 export function Toast() {
   const error = useChatStore((s) => s.error);
+  // 离场状态：先播放退出动画，再真正卸载，避免 toast 生硬消失
+  const [leaving, setLeaving] = useState(false);
 
   useEffect(() => {
-    if (!error) return;
-    const timer = setTimeout(() => {
-      useChatStore.setState({ error: null });
-    }, 4000);
+    if (!error) { setLeaving(false); return; }
+    const timer = setTimeout(() => setLeaving(true), 4000);
     return () => clearTimeout(timer);
   }, [error]);
+
+  useEffect(() => {
+    if (!leaving) return;
+    const t = setTimeout(() => {
+      useChatStore.setState({ error: null });
+      setLeaving(false);
+    }, 220);
+    return () => clearTimeout(t);
+  }, [leaving]);
 
   if (!error) return null;
 
   return (
-    <div className="toast">
+    <div className={"toast" + (leaving ? " toast-out" : "")}>
       <div className="toast-content">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-          <circle cx="12" cy="12" r="10" />
-          <line x1="12" y1="8" x2="12" y2="12" />
-          <line x1="12" y1="16" x2="12.01" y2="16" />
-        </svg>
+        <IconInfo size={14} />
         <span>{error}</span>
       </div>
-      <button className="toast-close" onClick={() => useChatStore.setState({ error: null })} title="关闭">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <line x1="18" y1="6" x2="6" y2="18" />
-          <line x1="6" y1="6" x2="18" y2="18" />
-        </svg>
+      <button className="toast-close" onClick={() => setLeaving(true)} title="关闭">
+        <IconX size={12} />
       </button>
       <style>{`
         .toast {
@@ -42,8 +45,9 @@ export function Toast() {
           max-width: 380px; word-break: break-word;
           animation: toast-in var(--dur-normal) var(--ease-out);
         }
+        .toast.toast-out { animation: toast-out var(--dur-normal) var(--ease-out) forwards; }
         .toast-content { display: flex; align-items: flex-start; gap: 8px; flex: 1; min-width: 0; }
-        .toast-content svg { color: var(--error); margin-top: 1px; }
+        .toast-content svg { color: var(--error); margin-top: 1px; flex-shrink: 0; }
         .toast-close {
           flex-shrink: 0; width: 24px; height: 24px; padding: 0;
           display: flex; align-items: center; justify-content: center;
@@ -55,6 +59,10 @@ export function Toast() {
         @keyframes toast-in {
           from { opacity: 0; transform: translateX(16px); }
           to { opacity: 1; transform: translateX(0); }
+        }
+        @keyframes toast-out {
+          from { opacity: 1; transform: translateX(0); }
+          to { opacity: 0; transform: translateX(16px); }
         }
       `}</style>
     </div>

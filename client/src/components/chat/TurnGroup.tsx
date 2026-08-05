@@ -4,6 +4,7 @@
  *   用户消息项靠右、AI 回复项靠左（对应各自消息的展示方向）
  * - 运行中（AI 正在回复）不渲染操作行，避免 hover 浮现显得杂乱
  */
+import { useCallback, memo } from "react";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ToolTree } from "./ToolTree";
 import { ArtifactList } from "./ArtifactList";
@@ -13,7 +14,12 @@ import type { TimelineEntry } from "./timeline";
 import { msgText } from "./timeline";
 import { useChatStore } from "../../store/chat";
 
-export function TurnGroup({ entry, isRunning }: {
+/**
+ * 性能优化：memo 包裹——entries 由 MessageFlow 按 messages 记忆化，
+ * 流式 delta 只更新 streamingBuffers，entry 引用不变，
+ * 已完成的历史 turn 在每帧流式刷新时跳过重渲染。
+ */
+export const TurnGroup = memo(function TurnGroup({ entry, isRunning }: {
   entry: Extract<TimelineEntry, { kind: "turn" }>;
   isRunning: boolean;
 }) {
@@ -27,7 +33,16 @@ export function TurnGroup({ entry, isRunning }: {
   }
   const turnId = entry.turnId;
   // v9: 回滚为高风险操作——先展示文件级回滚预览，确认后再执行
-  const onRollback = turnId != null ? () => requestRollbackPreview(turnId) : undefined;
+  const rollbackFn = useCallback(
+    () => { if (turnId != null) requestRollbackPreview(turnId); },
+    [turnId, requestRollbackPreview],
+  );
+  const onRollback = turnId != null ? rollbackFn : undefined;
+  // v10: 整个 AI 回复作为整体——复制按钮只出现在最后一个 text 段下方
+  let lastTextIdx = -1;
+  for (let k = items.length - 1; k >= 0; k--) {
+    if (items[k].kind === "text") { lastTextIdx = k; break; }
+  }
 
   return (
     <div className="turn-group">
@@ -36,14 +51,14 @@ export function TurnGroup({ entry, isRunning }: {
           case "user":
             return (
               <div key={i} className="turn-item turn-item-user">
-                {/* v9: 操作按钮内联进消息气泡内部（右上角），
-                    避免连续两条消息时操作行错位/重叠 */}
                 <div className="turn-user-bubble">
                   {msgText(item.msg.content)}
-                  {!isRunning && (
-                    <MessageActions entry={entry} onRollback={onRollback} scope="user" />
-                  )}
                 </div>
+                {/* v10: 用户消息按钮放气泡下方（流内、不重叠文字），
+                    鼠标聚焦消息时显示复制/回滚；各自归属自己的消息，不会错位 */}
+                {!isRunning && (
+                  <MessageActions entry={entry} onRollback={onRollback} scope="user" />
+                )}
               </div>
             );
           case "thinking":
@@ -62,7 +77,9 @@ export function TurnGroup({ entry, isRunning }: {
                 <div className="turn-agent-text">
                   <MarkdownContent>{msgText(item.msg.content)}</MarkdownContent>
                 </div>
-                {!isRunning && (
+                {/* v10: 整段回复只显示一次复制按钮（最后一段文本下方），
+                    复制内容为整个回复（turnToPlainText） */}
+                {!isRunning && i === lastTextIdx && (
                   <MessageActions entry={entry} onRollback={onRollback} scope="ai" />
                 )}
               </div>
@@ -89,4 +106,4 @@ export function TurnGroup({ entry, isRunning }: {
       })}
     </div>
   );
-}
+});

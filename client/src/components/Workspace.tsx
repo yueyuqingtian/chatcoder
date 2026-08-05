@@ -14,7 +14,10 @@ export function Workspace({ nav, onSessionStart }: {
   nav: NavKey | null;
   onSessionStart?: () => void;
 }) {
-  const { sessions, currentSessionId, projects, currentProjectId } = useChatStore();
+  const sessions = useChatStore((s) => s.sessions);
+  const currentSessionId = useChatStore((s) => s.currentSessionId);
+  const projects = useChatStore((s) => s.projects);
+  const currentProjectId = useChatStore((s) => s.currentProjectId);
 
   if (nav && nav !== "chat") {
     return (
@@ -24,7 +27,7 @@ export function Workspace({ nav, onSessionStart }: {
             <span className="ws-header-title">{NAV_TITLES[nav]}</span>
           </div>
         </header>
-        <div className="ws-body ws-navpage">
+        <div key={nav} className="ws-body ws-navpage view-enter">
           {nav === "scheduled" && <ScheduledPage />}
           {nav === "skills" && <SkillsPage />}
           {nav === "mcp" && <McpPage />}
@@ -67,7 +70,7 @@ export function Workspace({ nav, onSessionStart }: {
         </div>
       </header>
 
-      <div className="ws-body">
+      <div key={currentSessionId} className="ws-body view-enter">
         <ChatPanel />
         <TodoFloat />
       </div>
@@ -88,7 +91,11 @@ interface AttachmentPayload {
 
 /** 空态首页：Logo + 居中输入卡 + 环境/目录下拉 + 快捷胶囊 */
 function EmptyState({ onStarted }: { onStarted: () => void }) {
-  const { projects, currentProjectId, createSession, createProject, sendTurn } = useChatStore();
+  const projects = useChatStore((s) => s.projects);
+  const currentProjectId = useChatStore((s) => s.currentProjectId);
+  const createSession = useChatStore((s) => s.createSession);
+  const createProject = useChatStore((s) => s.createProject);
+  const sendTurn = useChatStore((s) => s.sendTurn);
   const [input, setInput] = useState("");
   const [models, setModels] = useState<ModelOut[]>([]);
   const [selectedModel, setSelectedModel] = useState<number | null>(null);

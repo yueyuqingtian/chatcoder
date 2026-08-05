@@ -16,10 +16,29 @@
 
   --accent: #1A1A1E;
   --accent-2: #1A1A1E;
-  --accent-grad: #1A1A1E;
+  /* 品牌渐变：启动页紫罗兰是全应用唯一强调色，只用于"关键时刻" */
+  --accent-grad: linear-gradient(135deg, #4836FF 0%, #CE53FF 100%);
+  --grad-brand: linear-gradient(135deg, #4836FF 0%, #8A4DFF 52%, #CE53FF 100%);
+  --grad-brand-soft: linear-gradient(135deg, rgba(72, 54, 255, 0.10), rgba(206, 83, 255, 0.10));
+  --grad-glow: 0 4px 14px rgba(96, 68, 255, 0.30);
   --accent-hover: #333338;
   --accent-soft: rgba(0, 0, 0, 0.06);
   --accent-contrast: #FFFFFF;
+
+  /* 毛玻璃令牌（data-glass="on" 时启用） */
+  --glass-blur: 20px;
+  --glass-saturate: 1.5;
+  --glass-sidebar: rgba(246, 246, 248, 0.62);
+  --glass-panel: rgba(255, 255, 255, 0.68);
+  --glass-panel-strong: rgba(255, 255, 255, 0.84);
+  --glass-elevated: rgba(255, 255, 255, 0.88);
+  --glass-border: rgba(255, 255, 255, 0.62);
+  --glass-shadow: 0 8px 32px rgba(40, 44, 80, 0.10), 0 1px 3px rgba(40, 44, 80, 0.06);
+  /* 环境光背景：毛玻璃模式下为半透明面板提供可折射的渐变内容 */
+  --bg-ambient:
+    radial-gradient(1100px 700px at 88% -12%, rgba(72, 54, 255, 0.10), transparent 60%),
+    radial-gradient(900px 640px at -8% 112%, rgba(206, 83, 255, 0.08), transparent 55%),
+    radial-gradient(700px 500px at 55% 118%, rgba(59, 130, 246, 0.05), transparent 55%);
 
   --text-1: #1A1A1E;
   --text-2: #6B6B74;
@@ -60,10 +79,29 @@
 
   --accent: #E8E8E8;
   --accent-2: #E8E8E8;
-  --accent-grad: #E8E8E8;
+  /* 品牌渐变（深色下提亮，保证对比度） */
+  --accent-grad: linear-gradient(135deg, #7A6BFF 0%, #E08BFF 100%);
+  --grad-brand: linear-gradient(135deg, #5A48FF 0%, #9A5EFF 52%, #D96BFF 100%);
+  --grad-brand-soft: linear-gradient(135deg, rgba(122, 107, 255, 0.16), rgba(224, 139, 255, 0.16));
+  --grad-glow: 0 4px 18px rgba(122, 94, 255, 0.40);
   --accent-hover: #FFFFFF;
   --accent-soft: rgba(255, 255, 255, 0.10);
   --accent-contrast: #1A1A1E;
+
+  /* 毛玻璃令牌（深色） */
+  --glass-blur: 20px;
+  --glass-saturate: 1.4;
+  --glass-sidebar: rgba(27, 27, 33, 0.60);
+  --glass-panel: rgba(38, 38, 46, 0.62);
+  --glass-panel-strong: rgba(44, 44, 52, 0.82);
+  --glass-elevated: rgba(52, 52, 62, 0.86);
+  --glass-border: rgba(255, 255, 255, 0.09);
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.42), 0 1px 3px rgba(0, 0, 0, 0.30);
+  /* 环境光背景（深色）：幽紫微光，折射在磨砂面板上 */
+  --bg-ambient:
+    radial-gradient(1100px 700px at 88% -12%, rgba(106, 84, 255, 0.17), transparent 62%),
+    radial-gradient(900px 640px at -8% 112%, rgba(217, 107, 255, 0.11), transparent 55%),
+    radial-gradient(700px 500px at 55% 118%, rgba(96, 165, 250, 0.08), transparent 55%);
 
   --text-1: #F0F0F3;
   --text-2: #A6A6AF;
@@ -109,7 +147,16 @@
   --dur-fast: 0.12s;
   --dur-med: 0.2s;
   --dur-normal: 0.25s;
+  --dur-slow: 0.32s;
+  --dur-view: 0.24s;
   --curve: cubic-bezier(0.22, 0.8, 0.28, 1);
+  /* 动效曲线（motion.ts 引用的完整集合） */
+  --ease-out: cubic-bezier(0.22, 0.8, 0.28, 1);
+  --ease-out-expo: cubic-bezier(0.19, 1, 0.22, 1);
+  --ease-in-out: cubic-bezier(0.645, 0.045, 0.355, 1);
+  --ease-spring: cubic-bezier(0.34, 1.3, 0.44, 1);
+  /* 思考/流式文字的流光渐变（background-clip: text 使用） */
+  --grad-flow: linear-gradient(90deg, var(--text-3) 0%, var(--text-1) 40%, var(--text-3) 80%);
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-mono: "JetBrains Mono", "SF Mono", "Cascadia Code", Consolas, monospace;
   --content-max-w: 840px;
@@ -121,6 +168,13 @@
   --sidebar-fs: 12px;
   --sidebar-icon: 14px;
   --sidebar-focus: var(--accent);
+  /* 补齐被引用但此前缺失的变量 */
+  --ok: var(--success);
+  --radius: var(--r-sm);
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 15px;
+  --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.16), 0 6px 16px rgba(0, 0, 0, 0.08);
 }
 
 /* 向后兼容别名 */
@@ -138,6 +192,9 @@
   --radius-md: var(--r-md);
   --radius-lg: var(--r-lg);
   --radius-xl: var(--r-xl);
-  --ease-out: var(--curve);
-  --ease-spring: var(--curve);
+}
+
+/* 深色主题下的阴影令牌微调（--shadow-xl 需要更深） */
+:root[data-theme="dark"] {
+  --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.5), 0 6px 16px rgba(0, 0, 0, 0.35);
 }

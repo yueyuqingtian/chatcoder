@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { IconChevronLeft, IconX } from "./icons";
 
 interface ModalProps {
   open: boolean;
@@ -27,13 +28,13 @@ export function Modal({ open, onClose, title, subtitle, actions, children, width
       <div className="modal-window" style={winStyle} onClick={(e) => e.stopPropagation()}>
         <header className="modal-header">
           <div className="modal-title-wrap">
-            {showBack && <button className="modal-back" onClick={onClose} title="返回"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>}
+            {showBack && <button className="modal-back" onClick={onClose} title="返回"><IconChevronLeft size={16} /></button>}
             <div className="modal-title">{title}</div>
             {subtitle && <div className="modal-subtitle">{subtitle}</div>}
           </div>
           <div className="modal-actions">
             {actions}
-            {!showBack && <button className="modal-close" onClick={onClose} title="关闭 (Esc)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>}
+            {!showBack && <button className="modal-close" onClick={onClose} title="关闭 (Esc)"><IconX size={16} /></button>}
           </div>
         </header>
         <div className="modal-body">{children}</div>

@@ -1,14 +1,16 @@
 /** ArtifactList（v6）：turn 产物文件清单。
  * 展示修改/新增/删除的文件，支持展开查看 diff、单文件审查、批量审查、单条撤销（turn 级回滚）。
  */
-import { useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import type { MessageOut } from "../../api/client";
 import { usePanelStore } from "../../store/panel";
 import { useChatStore } from "../../store/chat";
 import { IconFileText, IconExternalLink, IconChevronDown, IconChevronUp, IconRotateCcw, IconCheck } from "../icons";
 
-export function ArtifactList({ msgs, turnId }: { msgs: MessageOut[]; turnId?: number | null }) {
-  const { setPreviewPath, openPanel, openTab } = usePanelStore();
+export const ArtifactList = memo(function ArtifactList({ msgs, turnId }: { msgs: MessageOut[]; turnId?: number | null }) {
+  const setPreviewPath = usePanelStore((s) => s.setPreviewPath);
+  const openPanel = usePanelStore((s) => s.openPanel);
+  const openTab = usePanelStore((s) => s.openTab);
   const reviewedFiles = useChatStore((s) => s.reviewedFiles);
   const markFileReviewed = useChatStore((s) => s.markFileReviewed);
   const requestRollbackPreview = useChatStore((s) => s.requestRollbackPreview);
@@ -110,4 +112,4 @@ export function ArtifactList({ msgs, turnId }: { msgs: MessageOut[]; turnId?: nu
       )}
     </div>
   );
-}
+});
