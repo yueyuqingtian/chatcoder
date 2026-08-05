@@ -6,8 +6,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import MsgType, SenderType
-from app.gateway.schemas import (MessageOut, RollbackResult, TaskOut, TurnCreate,
-                                 TurnOut, TurnSnapshotOut)
+from app.gateway.schemas import (MessageOut, RollbackPreviewFile, RollbackPreviewOut,
+                                 RollbackResult, TaskOut, TurnCreate, TurnOut, TurnSnapshotOut)
 from app.orchestration import engine
 from app.persistence.database import get_db
 from app.services import message_service, rollback_service, session_service, task_service, turn_service
@@ -105,7 +105,7 @@ async def resume_turn(turn_id: int, db: AsyncSession = Depends(get_db)):
 @router.post("/{turn_id}/rollback", response_model=RollbackResult)
 async def rollback(turn_id: int, restore_to_composer: bool = True,
                    db: AsyncSession = Depends(get_db)):
-    """回滚指定 turn（文件恢复 + 消息软删 + 可回填输入框）。"""
+    """回滚指定 turn（精确文件恢复 + 消息软删 + 可回填输入框）。"""
     try:
         result = await rollback_service.rollback_turn(
             db, turn_id=turn_id, restore_to_composer=restore_to_composer,
@@ -114,6 +114,39 @@ async def rollback(turn_id: int, restore_to_composer: bool = True,
         if not result.get("ok"):
             raise HTTPException(400, result.get("reason", "回滚失败"))
         return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@router.get("/{turn_id}/rollback_preview", response_model=RollbackPreviewOut)
+async def rollback_preview(turn_id: int, db: AsyncSession = Depends(get_db)):
+    """回滚预览：计算本次回滚将撤销的文件及回滚前后内容（不修改任何文件）。
+
+    前端确认弹窗据此展示文件清单与 diff 对比，供用户审核后确认执行。
+    """
+    try:
+        snap = await rollback_service._snapshot_for_turn(db, turn_id)
+        if snap is None:
+            raise HTTPException(404, "该 turn 无快照")
+        if snap.rolled_back:
+            raise HTTPException(400, "该 turn 已回滚，不可重复操作")
+        from app.persistence.models.message import Session
+        session = await db.get(Session, snap.session_id)
+        workspace = session.worktree_path if session and session.worktree_path else None
+        if workspace is None:
+            from app.services.project_service import get_project
+            if session and session.project_id:
+                project = await get_project(db, session.project_id)
+                workspace = project.path if project else None
+        workspace = workspace or ""
+        writes = await rollback_service.list_turn_writes(db, snap.session_id, turn_id)
+        if not writes or not workspace:
+            files: list[RollbackPreviewFile] = []
+        else:
+            files = [RollbackPreviewFile(**f) for f in await rollback_service.preview_turn_files(workspace, writes)]
+        return RollbackPreviewOut(ok=True, turn_id=turn_id, files=files)
     except HTTPException:
         raise
     except Exception as e:
@@ -170,8 +203,12 @@ async def get_session_usage(session_id: int, db: AsyncSession = Depends(get_db))
     # v6.5: 过滤 thinking 消息（思考块不发给AI，与 build_main_context 保持一致），
     # 使初始估算值与 API 真实 prompt_tokens 接近，避免进入会话显示 145k、
     # 发消息后骤降到 18.7k 的不一致问题。
+    # v9: 与 build_main_context 的 _keep_types 对齐，统计 text + tool_call + tool_result。
+    # 旧版仅统计 TEXT，重启后 usage 严重低估（如运行时 120k、重启后只剩 20k），
+    # 因为工具调用与结果是会话占用的大头。
     from app.core.enums import MsgType
-    msgs = [m for m in res.scalars().all() if m.msg_type == MsgType.TEXT.value]
+    _keep = {MsgType.TEXT.value, MsgType.TOOL_CALL.value, MsgType.TOOL_RESULT.value}
+    msgs = [m for m in res.scalars().all() if m.msg_type in _keep]
     total_tokens = messages_token_total(msgs)
 
     # 获取 context_window：优先 session.model_id，否则用默认

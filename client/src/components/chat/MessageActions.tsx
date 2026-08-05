@@ -1,34 +1,35 @@
-/** MessageActions（v5）：turn 级消息操作行。
- * hover 浮现：复制 / Markdown / 👍 / 👎 / 重试（AI 回复）/ 回滚（用户消息）
+/** MessageActions（v9）：消息级操作行——无边框 SVG 图标按钮。
  *
- * v7: 不再挂在每个消息片段上——操作行收敛到 turn 末尾，
- * 复制/Markdown 以"用户消息 + AI 完整回复"整个 turn 为单位。
+ * v9 变更（按用户要求）：
+ * - scope="user"：仅「复制」「回滚」两个图标按钮，内联在用户气泡内，鼠标聚焦时显示
+ * - scope="ai"  ：默认在回复下方展示「复制」图标按钮；「赞/踩/重试」hover 才显示
+ * - 移除带文字的按钮（复制/Markdown/重试/回滚 等文字标签），全部改为纯图标
  */
 import { useState } from "react";
 import { useChatStore } from "../../store/chat";
-import { IconCopy, IconMarkdown, IconRotateCcw, IconThumbsUp, IconThumbsDown, IconRefresh } from "../icons";
+import { IconCopy, IconRotateCcw, IconThumbsUp, IconThumbsDown, IconRefresh, IconCheck } from "../icons";
 import type { TimelineEntry } from "./timeline";
-import { msgText } from "./timeline";
-import { turnToMarkdown, turnToPlainText } from "./markdown";
+import { turnToPlainText } from "./markdown";
 
-export function MessageActions({ entry, onRollback }: {
+export function MessageActions({ entry, onRollback, scope = "full" }: {
   entry: TimelineEntry;
   onRollback?: () => void;
+  /** user=仅用户消息按钮（复制/回滚）；ai=仅 AI 回复按钮（复制+赞踩重试） */
+  scope?: "full" | "user" | "ai";
 }) {
-  const [copied, setCopied] = useState<"text" | "md" | null>(null);
+  const [copied, setCopied] = useState(false);
   const [feedback, setFeedback] = useState<"up" | "down" | null>(null);
   const sendTurn = useChatStore((s) => s.sendTurn);
 
-  // v7: 根据 turn 内容判断——有 AI 回复才显示赞/踩/重试；有用户消息才显示回滚
-  const hasAi = entry.kind === "turn" && entry.items.some((it) => it.kind !== "user");
-  const hasUser = entry.kind === "turn" && entry.items.some((it) => it.kind === "user");
+  const hasAi = scope === "user" ? false : (entry.kind === "turn" && entry.items.some((it) => it.kind !== "user"));
+  const hasUser = scope === "ai" ? false : (entry.kind === "turn" && entry.items.some((it) => it.kind === "user"));
 
-  const copy = async (mode: "text" | "md") => {
-    const content = mode === "md" ? turnToMarkdown(entry) : turnToPlainText(entry);
+  const copy = async () => {
+    const content = turnToPlainText(entry);
     try {
       await navigator.clipboard.writeText(content);
-      setCopied(mode);
-      setTimeout(() => setCopied(null), 1500);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
     } catch { /* ignore */ }
   };
 
@@ -36,50 +37,41 @@ export function MessageActions({ entry, onRollback }: {
     if (entry.kind !== "turn") return;
     const userItem = entry.items.find((it) => it.kind === "user");
     if (!userItem || userItem.kind !== "user") return;
-    const content = msgText(userItem.msg.content);
-    if (content) sendTurn(content);
+    const content = userItem.msg.content as Record<string, unknown>;
+    const text = typeof content?.text === "string" ? content.text : "";
+    if (text) sendTurn(text);
   };
 
   return (
-    <div className="msg-actions">
-      <button className="msg-action" title="复制整个回合的纯文本" onClick={() => copy("text")}>
-        <IconCopy size={12} />
-        <span>{copied === "text" ? "已复制" : "复制"}</span>
+    <div className={`msg-actions scope-${scope}`}>
+      <button className={`msg-action${copied ? " active" : ""}`} title="复制" onClick={copy}>
+        {copied ? <IconCheck size={13} /> : <IconCopy size={13} />}
       </button>
-      <button className="msg-action" title="复制整个回合为 Markdown" onClick={() => copy("md")}>
-        <IconMarkdown size={12} />
-        <span>{copied === "md" ? "已复制" : "Markdown"}</span>
-      </button>
-      {hasAi && (
+      {scope === "user" && hasUser && onRollback && (
+        <button className="msg-action danger" title="回滚此消息及其后的更改" onClick={onRollback}>
+          <IconRotateCcw size={13} />
+        </button>
+      )}
+      {scope === "ai" && hasAi && (
         <>
           <button
-            className={`msg-action${feedback === "up" ? " active" : ""}`}
+            className={`msg-action msg-action-hover${feedback === "up" ? " active" : ""}`}
             title="赞"
             onClick={() => setFeedback(feedback === "up" ? null : "up")}
           >
-            <IconThumbsUp size={12} />
+            <IconThumbsUp size={13} />
           </button>
           <button
-            className={`msg-action${feedback === "down" ? " active" : ""}`}
+            className={`msg-action msg-action-hover${feedback === "down" ? " active" : ""}`}
             title="踩"
             onClick={() => setFeedback(feedback === "down" ? null : "down")}
           >
-            <IconThumbsDown size={12} />
+            <IconThumbsDown size={13} />
           </button>
-          <button className="msg-action" title="重新生成此回复" onClick={handleRetry}>
-            <IconRefresh size={12} />
-            <span>重试</span>
+          <button className="msg-action msg-action-hover" title="重新生成此回复" onClick={handleRetry}>
+            <IconRefresh size={13} />
           </button>
         </>
-      )}
-      {hasUser && onRollback && (
-        <button className="msg-action danger" title="回滚此消息及其后的更改" onClick={onRollback}>
-          <IconRotateCcw size={12} />
-          <span>回滚</span>
-        </button>
-      )}
-      {hasAi && (
-        <span className="msg-ai-label">由 AI 生成</span>
       )}
     </div>
   );

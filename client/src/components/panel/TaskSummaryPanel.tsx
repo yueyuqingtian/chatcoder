@@ -41,12 +41,22 @@ export function TaskSummaryPanel() {
   const unReviewed = artifacts.filter((a) => !reviewedFiles[a.path]);
   const allReviewed = artifacts.length > 0 && unReviewed.length === 0;
 
-  const stats = useMemo(() => {
-    const total = tasks.length;
-    const done = tasks.filter((t) => t.status === "done" || t.status === "cancelled").length;
-    const running = tasks.filter((t) => t.status === "running").length;
-    return { total, done, running };
+  // v9: 只展示「最新 turn」的任务步骤——新任务开始后自动清理历史任务步骤，
+  // 聚焦展示新任务的拆分步骤与执行情况（历史 turn 的任务不再占用面板）。
+  const currentTurnTasks = useMemo(() => {
+    const withTurn = tasks.filter((t) => t.turn_id != null);
+    if (withTurn.length === 0) return tasks;
+    const latest = Math.max(...withTurn.map((t) => t.turn_id as number));
+    return tasks.filter((t) => t.turn_id === latest);
   }, [tasks]);
+
+  const stats = useMemo(() => {
+    const total = currentTurnTasks.length;
+    const done = currentTurnTasks.filter((t) => t.status === "done" || t.status === "cancelled").length;
+    // in_progress 是子代理任务的"运行中"状态（agent_runtime 使用），统一计入进行中
+    const running = currentTurnTasks.filter((t) => t.status === "running" || t.status === "in_progress").length;
+    return { total, done, running };
+  }, [currentTurnTasks]);
 
   const openFile = (path: string) => {
     setPreviewPath(path);
@@ -55,7 +65,7 @@ export function TaskSummaryPanel() {
 
   return (
     <div className="rp-body">
-      {tasks.length > 0 && (
+      {currentTurnTasks.length > 0 && (
         <div className="ts-stats">
           <span className="ts-stat"><b>{stats.done}</b>/{stats.total} 完成</span>
           {stats.running > 0 && <span className="ts-stat running">◌ {stats.running} 进行中</span>}
@@ -63,32 +73,36 @@ export function TaskSummaryPanel() {
         </div>
       )}
 
-      {/* 任务步骤（每个 turn 一个步骤，含状态进度与产物数） */}
-      {tasks.length === 0 ? (
+      {/* 任务步骤（当前 turn 的拆分步骤，含状态进度与产物数） */}
+      {currentTurnTasks.length === 0 ? (
         <div className="rp-empty">暂无任务，发送需求后由 AI 自动拆解</div>
       ) : (
         <div className="ts-section">
           <div className="ts-section-title">
             <span>任务步骤</span>
-            <span className="ts-count">{tasks.length} 步</span>
+            <span className="ts-count">{currentTurnTasks.length} 步</span>
           </div>
           <div className="ts-task-scroll">
-            {tasks.map((t, idx) => (
-              <div key={t.id} className={`rp-task ${t.status}`}>
-                <span className={`rp-task-status ${t.status}`}>
-                  {t.status === "done" ? "✓" : t.status === "running" ? "◌" : t.status === "failed" ? "✕" : "·"}
-                </span>
-                <div className="rp-task-main">
-                  <div className="rp-task-title">
-                    <span className="rp-task-step">#{idx + 1}</span>{t.title}
+            {currentTurnTasks.map((t, idx) => {
+              // in_progress -> running：统一"进行中"展示（agent_runtime 的子代理任务状态）
+              const st = t.status === "in_progress" ? "running" : t.status;
+              return (
+                <div key={t.id} className={`rp-task ${st}`}>
+                  <span className={`rp-task-status ${st}`}>
+                    {st === "done" ? "✓" : st === "running" ? "◌" : st === "failed" ? "✕" : "·"}
+                  </span>
+                  <div className="rp-task-main">
+                    <div className="rp-task-title">
+                      <span className="rp-task-step">#{idx + 1}</span>{t.title}
+                    </div>
+                    {t.note && <div className="rp-task-note">{t.note}</div>}
+                    {t.artifact_ids && t.artifact_ids.length > 0 && (
+                      <div className="ts-artifacts">{t.artifact_ids.length} 个产物文件</div>
+                    )}
                   </div>
-                  {t.note && <div className="rp-task-note">{t.note}</div>}
-                  {t.artifact_ids && t.artifact_ids.length > 0 && (
-                    <div className="ts-artifacts">{t.artifact_ids.length} 个产物文件</div>
-                  )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -118,7 +132,7 @@ export function TaskSummaryPanel() {
               <div className="ts-file-review-ops">
                 <button className="ts-mini-btn" onClick={() => openFile(a.path)} title="查看变更"><IconExternalLink size={11} /></button>
                 {a.turnId != null && (
-                  <button className="ts-mini-btn danger" title="撤销该 turn 变更" onClick={() => useChatStore.getState().rollbackTurn(a.turnId!)}>
+                  <button className="ts-mini-btn danger" title="撤销该 turn 变更（先预览确认）" onClick={() => useChatStore.getState().requestRollbackPreview(a.turnId!)}>
                     <IconRotateCcw size={11} />
                   </button>
                 )}

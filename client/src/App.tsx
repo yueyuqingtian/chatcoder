@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { TitleBar } from "./components/TitleBar";
 import { Sidebar, type NavKey } from "./components/Sidebar";
 import { Workspace } from "./components/Workspace";
+import { RollbackConfirmModal } from "./components/chat/RollbackConfirmModal";
 import { ResizeHandle } from "./components/ResizeHandle";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Toast } from "./components/Toast";
@@ -46,6 +47,7 @@ export default function App() {
       {showSplash && <Splash onDone={() => setShowSplash(false)} />}
       <div className="app-shell">
         <Toast />
+        <RollbackConfirmModal />
         <TitleBar leftCollapsed={sidebarCollapsed} rightCollapsed={!rightExpanded} onToggleLeft={() => setSidebarCollapsed((v) => !v)} onToggleRight={() => usePanelStore.getState().togglePanel()} />
         <div className="app-body">
           <div ref={leftPanelElRef} className={`app-pane app-pane-left collapsible${sidebarCollapsed ? " collapsed" : ""}`} style={sidebarCollapsed ? undefined : { width: `${leftPanelWidth}px`, flexBasis: `${leftPanelWidth}px` }}>

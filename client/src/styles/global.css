@@ -142,21 +142,162 @@ a { color: var(--accent); text-decoration: none; }
 .turn-group { margin-bottom: 4px; padding: 0; width: 100%; }
 .turn-item { margin-bottom: 1px; position: relative; }
 .turn-item-user { display: flex; flex-direction: column; align-items: flex-end; margin-bottom: 3px; }
-.turn-user-bubble { max-width: 75%; padding: 7px 12px; border-radius: var(--r-lg); background: var(--bg-active); color: var(--text-1); font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+.turn-user-bubble { max-width: 75%; padding: 7px 32px 7px 12px; border-radius: var(--r-lg); background: var(--bg-active); color: var(--text-1); font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
 .turn-item-text { margin-bottom: 1px; }
 .turn-agent-text { color: var(--text-1); font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
 .turn-item-summary { padding: 5px 10px; border-radius: var(--r-sm); background: var(--bg-elevated); color: var(--text-2); font-size: 12px; margin: 2px 0; }
 .turn-item-error { padding: 5px 10px; border-radius: var(--r-sm); background: var(--error-soft); color: var(--error); font-size: 12px; margin: 2px 0; }
+/* v9: 消息操作按钮——无边框 SVG 图标按钮，内联到各自消息框内，避免连续消息错位。
+   - 用户消息：按钮在气泡右上角，hover/聚焦气泡时显示（复制/回滚）
+   - AI 消息：复制按钮默认显示在回复下方；赞/踩/重试 hover 时显示
+*/
 .turn-item-user, .turn-item-text { position: relative; }
-.msg-actions { position: absolute; top: 100%; display: flex; align-items: center; gap: 2px; padding: 3px; border-radius: var(--r-sm); background: var(--bg-elevated); border: 1px solid var(--border); box-shadow: var(--shadow-sm); opacity: 0; pointer-events: none; transform: translateY(-3px); transition: opacity var(--dur-fast), transform var(--dur-fast); z-index: 6; }
-.turn-item-user .msg-actions { right: 0; }
-.turn-item-text .msg-actions { left: 0; }
-/* 操作条紧贴消息底部，鼠标移动路径无间隙，不会因离开 hover 区而消失 */
-.msg-actions:hover { opacity: 1; pointer-events: auto; transform: translateY(0); }
-.turn-item:hover .msg-actions, .turn-item:focus-within .msg-actions { opacity: 1; pointer-events: auto; transform: translateY(0); }
-.msg-action { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; color: var(--text-3); cursor: pointer; border: none; background: transparent; padding: 2px 5px; border-radius: var(--r-xs); transition: all var(--dur-fast); }
+.turn-user-bubble { position: relative; }
+.turn-user-bubble .msg-actions {
+  position: absolute;
+  top: 3px;
+  right: 4px;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-fast);
+  z-index: 6;
+}
+.turn-user-bubble:hover .msg-actions,
+.turn-user-bubble:focus-within .msg-actions { opacity: 1; pointer-events: auto; }
+/* AI 消息：复制默认可见；赞/踩/重试 hover 可见 */
+.turn-item-text .msg-actions {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  margin: 2px 0;
+}
+.turn-item-text .msg-actions .msg-action-hover {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-fast);
+}
+.turn-item-text:hover .msg-actions .msg-action-hover,
+.turn-item-text:focus-within .msg-actions .msg-action-hover { opacity: 1; pointer-events: auto; }
+.msg-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  border-radius: var(--r-xs);
+  transition: all var(--dur-fast);
+}
 .msg-action:hover { background: var(--bg-hover); color: var(--text-1); }
+.msg-action.danger:hover { color: var(--error); }
+.msg-action.active { color: var(--accent); }
 .msg-ai-label { font-size: 10px; color: var(--text-3); margin-left: auto; padding: 0 4px; }
+
+/* ── v9: 回滚确认弹窗（文件清单 + 回滚前后对比）── */
+.rc-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.rc-modal {
+  width: min(760px, 92vw);
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel, var(--bg-elevated));
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+.rc-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.rc-header h3 { margin: 0; font-size: 15px; }
+.rc-close {
+  border: none;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: var(--r-xs);
+}
+.rc-close:hover { background: var(--bg-hover); color: var(--text-1); }
+.rc-body { padding: 12px 16px; overflow-y: auto; flex: 1; }
+.rc-desc { margin: 0 0 8px; font-size: 13px; color: var(--text-2); }
+.rc-conflict-note {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--error);
+  background: color-mix(in srgb, var(--error) 8%, transparent);
+  border-radius: var(--r-xs);
+  padding: 6px 10px;
+}
+.rc-file-list { display: flex; flex-direction: column; gap: 6px; }
+.rc-empty { font-size: 13px; color: var(--text-3); padding: 8px 0; }
+.rc-file {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  background: var(--bg-elevated);
+}
+.rc-file.conflict { border-color: color-mix(in srgb, var(--error) 55%, var(--border)); }
+.rc-file-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  cursor: pointer;
+  user-select: none;
+}
+.rc-file-head:hover { background: var(--bg-hover); }
+.rc-file-action {
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 99px;
+}
+.rc-file-action.restore { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
+.rc-file-action.delete { background: color-mix(in srgb, var(--error) 14%, transparent); color: var(--error); }
+.rc-file-path { flex: 1; font-family: var(--font-mono, monospace); font-size: 12px; color: var(--text-1); word-break: break-all; }
+.rc-file-flag { font-size: 11px; color: var(--text-3); flex-shrink: 0; }
+.rc-file-flag.conflict { color: var(--error); }
+.rc-file-toggle { flex-shrink: 0; font-size: 10px; color: var(--text-3); }
+.rc-diff { border-top: 1px solid var(--border); background: var(--bg-base, var(--bg)); }
+.rc-diff-msg { margin: 0; padding: 10px; font-size: 12px; color: var(--error); white-space: pre-wrap; }
+.rc-diff-body { max-height: 340px; overflow: auto; font-family: var(--font-mono, monospace); font-size: 12px; line-height: 1.5; }
+.rc-line { display: flex; padding: 0 10px; white-space: pre-wrap; word-break: break-all; }
+.rc-line-sign { flex-shrink: 0; width: 16px; user-select: none; opacity: 0.8; }
+.rc-line.same { color: var(--text-2); }
+.rc-line.del { background: color-mix(in srgb, var(--error) 16%, transparent); color: var(--error); }
+.rc-line.add { background: color-mix(in srgb, var(--success, #2ecc71) 16%, transparent); color: var(--success, #2ecc71); }
+.rc-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+}
+.rc-footer .btn.danger {
+  background: var(--error);
+  color: #fff;
+}
+.rc-footer .btn.danger:disabled { opacity: 0.6; cursor: default; }
 .turn-status-line { display: flex; align-items: center; gap: 0; padding: 6px 0 2px; color: var(--text-3); font-size: 12px; }
 .turn-status-line > span:last-child { animation: status-pulse 1.6s ease-in-out infinite; }
 @keyframes status-pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
@@ -602,10 +743,8 @@ a { color: var(--accent); text-decoration: none; }
 .approval-actions .btn-primary:hover { filter: brightness(1.1); }
 .approval-actions .btn-ghost { padding: 7px 16px; border: 1px solid var(--border); border-radius: var(--r-sm); background: transparent; color: var(--text-2); font-size: 13px; cursor: pointer; }
 .approval-actions .btn-ghost:hover { background: var(--bg-hover); color: var(--text-1); }
-/* v7: turn 级操作行——以整个 turn 为单位，hover turn-group 时浮现，不在消息片段中间重复出现 */
-.turn-actions { display: flex; justify-content: flex-end; opacity: 0; pointer-events: none; padding: 2px 0 2px; transition: opacity var(--dur-fast); }
-.turn-group:hover .turn-actions, .turn-group:focus-within .turn-actions { opacity: 1; pointer-events: auto; }
-.turn-actions .msg-actions { position: static; opacity: 1; pointer-events: auto; transform: none; box-shadow: none; background: transparent; border: none; padding: 0; }
+/* v8: 操作行已挂到每条消息项下方（.turn-item-user 靠右 / .turn-item-text 靠左），
+      由 .msg-actions 自身的绝对定位 + hover 浮现控制，不再使用 turn 级容器 */
 /* v7: 深色主题下代码高亮 token 与数学公式颜色适配，避免深色背景下的黑色文字不可见 */
 :root[data-theme="dark"] .md-body .katex,
 :root[data-theme="dark"] .md-body .katex-display { color: var(--text-1); }

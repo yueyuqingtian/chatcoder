@@ -26,13 +26,16 @@ from app.models.schemas import ChatMessage, ChatRequest
 from app.orchestration.agent_events import broadcast
 from app.orchestration.tools import ToolContext, tool_executor
 from app.orchestration.tools.registry import tool_registry
-from app.services import message_service, task_service
+from app.services import message_service, rollback_service, task_service
 
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_OUTPUT_CHARS = 8000  # v1.1: 已弃用，保留仅向后兼容；实际用 _tool_output_limit
 _STREAM_CHUNK_SIZE = 80
 _STREAM_INTERVAL = 0.01
+
+# v9: 写盘工具集合——执行时记录前后内容（精确回滚依据）
+_WRITE_TOOLS = ("fs_write", "editor_apply_diff", "multi_file_edit")
 
 
 def _truncate_output(text: str, limit: int = MAX_TOOL_OUTPUT_CHARS) -> str:
@@ -148,7 +151,7 @@ async def run_agent_loop(
             # 改为仅在 API 响应后用精确 prompt_tokens 判断（见下方 step 后段）。
             agent_window = 0
             try:
-                from app.orchestration.compaction import build_api_copy, ensure_tool_pairing
+                from app.orchestration.compaction import build_api_copy, ensure_tool_pairing, normalize_tool_sequence
                 from app.orchestration.token_counter import get_agent_context_window, estimate_messages_tokens as _est_tokens
                 agent_window = await get_agent_context_window(db, agent)
                 # v6.4: 最小窗口保护 —— 若 model.context_window 配置过小，用默认值兜底
@@ -160,6 +163,8 @@ async def run_agent_loop(
                     )
                     agent_window = 500000
                 messages = ensure_tool_pairing(messages)
+                # v8 根治: 强制 assistant(tool_calls) 后紧跟 tool 结果，杜绝 400
+                messages = normalize_tool_sequence(messages)
                 api_messages = build_api_copy(messages)
 
                 # v6.5: 前置压缩检查 -- 用校准系数调整估算，超阈值则先压缩
@@ -172,6 +177,7 @@ async def run_agent_loop(
                     from app.orchestration.compaction import auto_compact as _ac_pre
                     messages = await _ac_pre(messages, agent_window, provider)
                     messages = ensure_tool_pairing(messages)
+                    messages = normalize_tool_sequence(messages)
                     api_messages = build_api_copy(messages)
                     _est_after = int(_est_tokens(api_messages) * _calib_factor)
                     logger.info("[agent] turn=%s step=%s 前置压缩后 prompt=%d -> %d", turn_id, step, _est_prompt, _est_after)
@@ -223,6 +229,8 @@ async def run_agent_loop(
                     from app.orchestration.token_counter import get_agent_context_window
                     agent_window = await get_agent_context_window(db, agent)
                     messages = emergency_compact(messages, agent_window)
+                    # v8 根治: 紧急压缩后同样规范化工具消息序列，防止孤立 tool / 夹层消息
+                    messages = normalize_tool_sequence(messages)
                     request = ChatRequest(
                         messages=messages, model="", tools=tool_schemas or None,
                         temperature=settings.agent_tool_temperature if tool_schemas else settings.agent_text_temperature,
@@ -412,6 +420,9 @@ async def run_agent_loop(
                         cancel_event=cancel_event,
                     )
                     _ts0 = time.monotonic()
+                    # v9: 写盘工具执行前读取原文件内容（精确回滚依据：只撤销 AI 改动部分）
+                    _pre_paths = rollback_service.resolve_write_paths(tool_name, args) if tool_name in _WRITE_TOOLS else []
+                    _pre_before = {p: rollback_service._read_file_text(workspace, p) for p in _pre_paths}
                     try:
                         result = await asyncio.wait_for(
                             tool_executor.execute(
@@ -429,11 +440,16 @@ async def run_agent_loop(
                         result = ToolResult(ok=False, output="", error=f"[工具执行异常] {exc}")
                     _dur = int((time.monotonic() - _ts0) * 1000)
 
-                    # 写盘工具 checkpoint（回滚 §4.10）
-                    if tool_name in ("fs_write", "editor_apply_diff") and result.ok:
-                        target = args.get("path")
-                        if target:
+                    # 写盘工具：登记路径 + 记录 before/after（v9 精确回滚依据）
+                    if tool_name in _WRITE_TOOLS and result.ok:
+                        for target in _pre_paths:
                             write_paths.append(str(target))
+                            await rollback_service.record_turn_write(
+                                db, session_id=session_id, turn_id=turn_id, tool=tool_name,
+                                path=target,
+                                before=_pre_before.get(target),
+                                after=rollback_service._read_file_text(workspace, target),
+                            )
 
                     await broadcast(session_id, {
                         "event": "tool.result",

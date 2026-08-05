@@ -50,6 +50,9 @@ win-unpacked/
 *.snap
 *.blockmap
 builder-debug.yml
+v2/
+releasev1/
+v3/
 
 # ========================================
 # 环境变量 & 密钥（.env.example 保留提交）

@@ -188,6 +188,59 @@ def ensure_tool_pairing(messages: list[ChatMessage]) -> list[ChatMessage]:
     return fixed
 
 
+def normalize_tool_sequence(messages: list[ChatMessage]) -> list[ChatMessage]:
+    """v8 根治：强制 OpenAI 协议 —— assistant(tool_calls) 后必须紧跟对应的 tool 消息。
+
+    背景：context_manager 重建历史 / 截断 / 压缩后，可能出现
+    - assistant(tool_calls) 与 tool 之间夹着 assistant 文本等非 tool 消息 → 网关 400
+      "An assistant message with 'tool_calls' must be followed by tool messages"
+    - 孤立的 tool 消息（无前置 assistant(tool_calls)）→ 网关 400
+      "Messages with role 'tool' must be a response to a preceding message with 'tool_calls'"
+
+    策略（在 ensure_tool_pairing 之后调用）：
+    1. 遇到 assistant(tool_calls)：进入"等待 tool 结果"状态，记录所有 tool_call id
+    2. 等待期间：
+       - tool 消息且 id 匹配 → 直接通过；全部匹配后放回延迟的消息
+       - tool 消息但 id 不匹配（孤立）→ 丢弃
+       - 其他消息（assistant 文本等）→ 延迟到该组 tool 结果全部匹配之后再放回
+    3. 保证任何非 tool 消息都不会出现在 assistant(tool_calls) 与其 tool 结果之间。
+    """
+    if not messages:
+        return messages
+
+    result: list[ChatMessage] = []
+    pending_ids: list[str] = []
+    deferred: list[ChatMessage] = []
+
+    def _flush_deferred() -> None:
+        nonlocal deferred
+        if deferred:
+            result.extend(deferred)
+            deferred = []
+
+    for m in messages:
+        if pending_ids:
+            if m.role == "tool" and m.tool_call_id in pending_ids:
+                result.append(m)
+                pending_ids.remove(m.tool_call_id)
+                if not pending_ids:
+                    _flush_deferred()
+                continue
+            if m.role == "tool":
+                # 孤立的 tool 消息（不在当前等待集）——丢弃
+                logger.debug("[normalize] 丢弃孤立 tool 消息: %s", m.tool_call_id)
+                continue
+            # 非 tool 消息夹在 assistant(tool_calls) 与 tool 之间 → 延迟
+            deferred.append(m)
+            continue
+        result.append(m)
+        if m.role == "assistant" and m.tool_calls:
+            pending_ids = [tc.get("id") for tc in m.tool_calls if tc.get("id")]
+
+    _flush_deferred()
+    return result
+
+
 # ---------------------------------------------------------------------------
 # v6.0: 工具结果预算 -- 构造本轮 API 副本（不修改原始历史）
 # 对应调研结论："工具结果预算（本轮怎么发）vs auto-compact（以后保留什么）两层分离"

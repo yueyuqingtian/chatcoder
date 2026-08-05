@@ -173,18 +173,28 @@ async def build_main_context(
         # v6.5: 转成 ChatMessage，正确处理 text/tool_call/tool_result 三种类型。
         # tool_call -> assistant 带 tool_calls；tool_result -> tool 角色消息。
         # 保证 OpenAI tool_calls/tool 结果配对，避免网关 400 报错。
-        _pending_tool_calls: list[dict] = []
+        #
+        # v8: agent_loop 把"同一轮 assistant(文本+tool_calls)"落库为 text + tool_call 两条消息。
+        # 若照旧各转成独立消息，会出现 assistant(tool_calls) 与 tool 结果之间夹着
+        # assistant(文本) 的顺序，违反 OpenAI 协议（assistant(tool_calls) 后必须紧跟 tool），
+        # 网关报 "An assistant message with 'tool_calls' must be followed by tool messages"。
+        # 因此将紧随 tool_call 之前的 agent 文本合并进同一条 assistant(tool_calls) 消息。
+        _pending_agent_text = ""
         for m in recent:
             if m.msg_type == _MsgType.TEXT.value:
                 text = m.content.get("text") or m.content.get("note") or ""
                 if not text:
                     continue
                 if m.sender_type == "user":
+                    if _pending_agent_text:
+                        bundle.history.append(_CM(role="assistant", content=_pending_agent_text))
+                        _pending_agent_text = ""
                     bundle.history.append(_CM(role="user", content=text))
                 else:
-                    bundle.history.append(_CM(role="assistant", content=text))
+                    # 暂存 agent 文本，等待下一个 tool_call 合并
+                    _pending_agent_text = text
             elif m.msg_type == _MsgType.TOOL_CALL.value:
-                # 工具调用作为 assistant 消息（带 tool_calls）
+                # 工具调用作为 assistant 消息（带 tool_calls），合并暂存的 agent 文本
                 tool_name = m.content.get("tool", "")
                 args = m.content.get("args", {}) or {}
                 call_key = m.content.get("call_key", "") or f"call_{m.id}"
@@ -196,15 +206,19 @@ async def build_main_context(
                         args = {"_raw": args}
                 bundle.history.append(_CM(
                     role="assistant",
-                    content=None,
+                    content=_pending_agent_text or None,
                     tool_calls=[{
                         "id": call_key,
                         "name": tool_name,
                         "arguments": args,
                     }],
                 ))
+                _pending_agent_text = ""
             elif m.msg_type == _MsgType.TOOL_RESULT.value:
                 # 工具结果作为 tool 角色消息
+                if _pending_agent_text:
+                    bundle.history.append(_CM(role="assistant", content=_pending_agent_text))
+                    _pending_agent_text = ""
                 tool_name = m.content.get("tool", "")
                 call_key = m.content.get("call_key", "") or f"call_{m.id}"
                 output = m.content.get("output", "") or ""
@@ -219,6 +233,9 @@ async def build_main_context(
                     name=tool_name,
                     tool_call_id=call_key,
                 ))
+        if _pending_agent_text:
+            # 循环结束：暂存的 agent 文本（无后续 tool_call）作为独立 assistant 消息
+            bundle.history.append(_CM(role="assistant", content=_pending_agent_text))
 
         logger.info(
             "[context] session=%s 注入历史消息 %d 条 (window=%dK, budget=%d tokens, summarized=%d, recent=%d)",

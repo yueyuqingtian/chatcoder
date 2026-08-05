@@ -1,7 +1,7 @@
 /** v2 会话状态管理（zustand）：项目 / 会话 / turn 任务驱动。 */
 import { create } from "zustand";
 import { api } from "../api/client";
-import type { MessageOut, ProjectOut, SessionOut, TaskOut, TurnOut } from "../api/client";
+import type { MessageOut, ProjectOut, RollbackPreviewFile, SessionOut, TaskOut, TurnOut } from "../api/client";
 import { wsClient } from "../api/ws";
 
 /** 上下文占用详情（输入框圆环）。 */
@@ -47,6 +47,8 @@ interface ChatState {
   pendingPlanTurn: { turnId: number; task: string } | null;
   /** v6: 已审查的产物文件（path -> true），用于审查清单展示。 */
   reviewedFiles: Record<string, boolean>;
+  /** v9: 回滚确认弹窗数据（点击回滚先预览，确认后执行）。 */
+  rollbackPending: { turnId: number; files: RollbackPreviewFile[] } | null;
   loading: boolean;
   error: string | null;
   wsConnected: boolean;
@@ -65,6 +67,12 @@ cancelTurn: () => Promise<void>;
   forceStop: () => Promise<void>;
 resumeTurn: () => Promise<void>;
   rollbackTurn: (turnId: number, restoreToComposer?: boolean) => Promise<void>;
+  /** v9: 请求回滚预览（拉取文件级回滚对比），返回是否成功（失败时 error 已设置）。 */
+  requestRollbackPreview: (turnId: number) => Promise<boolean>;
+  /** v9: 确认执行回滚（预览弹窗点确认后调用）。 */
+  confirmRollback: (restoreToComposer?: boolean) => Promise<void>;
+  /** v9: 取消回滚（关闭弹窗）。 */
+  cancelRollback: () => void;
   confirmPlan: (task: string) => Promise<void>;
   dismissPlan: () => void;
   respondApproval: (approvalId: string, approved: boolean) => void;
@@ -141,6 +149,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pendingPlan: null,
   pendingPlanTurn: null,
   reviewedFiles: {},
+  rollbackPending: null,
   composerDraft: "",
   loading: false,
   error: null,
@@ -426,6 +435,35 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ error: String(e) });
     }
   },
+
+  // v9: 回滚前先预览（文件级 before/after 对比），经用户确认后再执行，避免误伤手动改动。
+  requestRollbackPreview: async (turnId) => {
+    const { currentSessionId } = get();
+    if (!currentSessionId) return false;
+    try {
+      // 若该 turn 正在运行，先取消
+      if (get().runningTurnId === turnId) {
+        await api.cancelTurn(turnId);
+        set({ runningTurnId: null, isRunning: false });
+      }
+      const preview = await api.rollbackPreview(turnId);
+      set({ rollbackPending: { turnId, files: preview.files } });
+      return true;
+    } catch (e) {
+      set({ error: String(e) });
+      return false;
+    }
+  },
+
+  confirmRollback: async (restoreToComposer = true) => {
+    const pending = get().rollbackPending;
+    if (!pending) return;
+    const turnId = pending.turnId;
+    set({ rollbackPending: null });
+    await get().rollbackTurn(turnId, restoreToComposer);
+  },
+
+  cancelRollback: () => set({ rollbackPending: null }),
 
   refreshMessages: async () => {
     const { currentSessionId } = get();

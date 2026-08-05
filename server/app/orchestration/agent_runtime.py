@@ -332,8 +332,14 @@ async def run_agent_loop(
             mcp_servers = await get_agent_mcp_servers(db, agent)
             if mcp_servers:
                 mcp_tools = build_mcp_tools_for_agent(mcp_servers)
+                # v8: 去重——MCP 工具可能已注册进全局 registry（上一 turn），
+                # 无条件 append 会导致工具名重复，网关报 "Tool names must be unique"。
+                _existing_names = {s["function"]["name"] for s in tool_schemas}
                 for mt in mcp_tools:
+                    if mt.name in _existing_names:
+                        continue
                     tool_schemas.append(mt.function_schema())
+                    _existing_names.add(mt.name)
                     # v1.0: 注册到 per-invocation scope，不污染全局
                     _scoped_mcp_tools[mt.name] = mt
                     # 全局 registry 中不存在时才注册（兼容 executor 查找）

@@ -254,6 +254,26 @@ export interface RollbackResult {
   user_message: string | null;
 }
 
+/** 回滚预览：单个文件回滚前后的内容对比（供用户审核确认）。 */
+export interface RollbackPreviewFile {
+  path: string;
+  /** "restore"（恢复）/ "delete"（删除新建文件） */
+  action: string;
+  /** true=存在用户手动改动冲突，回滚将跳过该文件 */
+  conflict: boolean;
+  reason: string | null;
+  /** 回滚前（当前）文件内容 */
+  before: string | null;
+  /** 回滚后文件内容 */
+  after: string | null;
+}
+
+export interface RollbackPreviewOut {
+  ok: boolean;
+  turn_id: number;
+  files: RollbackPreviewFile[];
+}
+
 // ── WebSocket 事件 ──
 
 /** 服务端 → 客户端 */

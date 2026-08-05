@@ -254,6 +254,22 @@ class RollbackResult(BaseModel):
     user_message: str | None = None  # restore_to_composer=True 时回填
 
 
+class RollbackPreviewFile(BaseModel):
+    """回滚预览单文件：展示回滚前/后内容供用户审核。"""
+    path: str
+    action: str  # "restore"（恢复）/ "delete"（删除新建文件）
+    conflict: bool = False  # True=存在用户手动改动冲突，回滚将跳过该文件
+    reason: str | None = None
+    before: str | None = None  # 回滚前（当前）文件内容
+    after: str | None = None   # 回滚后文件内容
+
+
+class RollbackPreviewOut(BaseModel):
+    ok: bool
+    turn_id: int
+    files: list[RollbackPreviewFile]
+
+
 # ── 审计 ──
 class AuditLogOut(BaseModel):
     id: int

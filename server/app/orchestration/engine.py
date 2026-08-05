@@ -104,6 +104,13 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             title=(user_text.strip().replace("\n", " ") or "任务")[:60],
             description=user_text,
         )
+        # v9: 立即提交，保证前端任务面板/右上角卡片实时拉取到新任务步骤
+        # （此前仅 flush，turn 结束才 commit，前端 refreshTasks 查不到新任务，
+        #   表现为"新任务开始后未展示步骤与执行情况"）
+        try:
+            await db.commit()
+        except Exception:
+            logger.debug("[engine] 任务创建提交失败(非阻塞)", exc_info=True)
         await broadcast(session_id, {"event": "task.updated", "payload": {"task_id": main_task.id, "status": "running"}})
 
         # 1. 主上下文
@@ -142,7 +149,15 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             "type": "function",
             "function": {
                 "name": "spawn_subagent",
-                "description": "Spawn a subagent to work on a separable subtask in an isolated context.",
+                "description": (
+                    "Decompose a LARGE task into an independent subtask and run it in an isolated subagent. "
+                    "Use when the request spans multiple files/modules or has clearly separable deliverables: "
+                    "spawn ONE subagent per subtask, each with a precise task_title, a task_description "
+                    "(what to implement), and acceptance_criteria (definition of done). "
+                    "Subagents run in parallel isolated contexts, so their file edits never conflict. "
+                    "After spawning, call collect_results to gather every subagent's summary. "
+                    "Do NOT use for tiny single-tool steps or strictly sequential work."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {

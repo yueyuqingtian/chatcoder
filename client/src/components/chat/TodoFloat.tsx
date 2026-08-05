@@ -12,11 +12,20 @@ export function TodoFloat() {
   const { openPanel, openTab, expanded } = usePanelStore();
   const [collapsed, setCollapsed] = useState(false);
 
-  const stats = useMemo(() => {
-    const total = tasks.length;
-    const done = tasks.filter((t: TaskOut) => t.status === "done" || t.status === "cancelled").length;
-    return { total, done };
+  // v9: 只展示「最新 turn」的任务——新任务开始后右上角卡片自动清理历史任务步骤，
+  // 聚焦当前任务的拆分步骤与执行进度。
+  const currentTurnTasks = useMemo(() => {
+    const withTurn = tasks.filter((t: TaskOut) => t.turn_id != null);
+    if (withTurn.length === 0) return tasks;
+    const latest = Math.max(...withTurn.map((t) => t.turn_id as number));
+    return tasks.filter((t) => t.turn_id === latest);
   }, [tasks]);
+
+  const stats = useMemo(() => {
+    const total = currentTurnTasks.length;
+    const done = currentTurnTasks.filter((t: TaskOut) => t.status === "done" || t.status === "cancelled").length;
+    return { total, done };
+  }, [currentTurnTasks]);
 
   // 无任务不渲染
   if (stats.total === 0) return null;
@@ -41,20 +50,25 @@ export function TodoFloat() {
       </div>
       {!collapsed && (
         <div className="todo-float-list">
-          {tasks.map((t: TaskOut) => (
-            <div
-              key={t.id}
-              className="todo-float-item"
-              onClick={handleClick}
-            >
-              <span className={`status-icon ${t.status}`}>
-                {t.status === "done" && <IconCheck size={12} />}
-                {t.status === "failed" && "✗"}
-                {t.status === "blocked" && "⏸"}
-              </span>
-              <span className="todo-item-text">{t.title || t.description || `任务 ${t.id}`}</span>
-            </div>
-          ))}
+          {currentTurnTasks.map((t: TaskOut) => {
+            // in_progress -> running：统一"进行中"展示
+            const st = t.status === "in_progress" ? "running" : t.status;
+            return (
+              <div
+                key={t.id}
+                className="todo-float-item"
+                onClick={handleClick}
+              >
+                <span className={`status-icon ${st}`}>
+                  {st === "done" && <IconCheck size={12} />}
+                  {st === "running" && <span className="todo-spinner">◌</span>}
+                  {st === "failed" && "✗"}
+                  {st === "blocked" && "⏸"}
+                </span>
+                <span className="todo-item-text">{t.title || t.description || `任务 ${t.id}`}</span>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

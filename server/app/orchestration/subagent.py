@@ -40,6 +40,10 @@ class SubagentManager:
 
         async def _run():
             try:
+                # v9: 子任务启动即广播 in_progress（提交任务创建 + 状态），
+                # 前端任务面板/右上角卡片实时展示新任务的拆分步骤与执行情况。
+                # 此前子任务创建后从不更新状态，前端看不到子任务步骤执行进度。
+                await _sync_task_status(db, self.session_id, task.id, "in_progress", None)
                 out = await run_agent_loop(
                     db, session_id=self.session_id, turn_id=turn_id,
                     agent=agent, context_messages=context_bundle.to_messages(),
@@ -49,9 +53,15 @@ class SubagentManager:
                 handle.status = "done" if out.kind == "message" else "failed"
                 handle.summary = out.text or ""
                 handle.error = out.error or ""
+                await _sync_task_status(
+                    db, self.session_id, task.id,
+                    "done" if handle.status == "done" else "failed",
+                    (out.text or "")[:300] or None,
+                )
             except Exception as e:
                 handle.status = "failed"
                 handle.error = str(e)
+                await _sync_task_status(db, self.session_id, task.id, "failed", f"执行异常: {str(e)[:200]}")
                 logger.exception("[subagent] %s 异常", agent.id)
             logger.info("[subagent] %s 完成 status=%s", agent.id, handle.status)
 
@@ -88,3 +98,22 @@ def get_subagent_manager(session_id: int) -> SubagentManager:
 
 def cleanup(session_id: int) -> None:
     _managers.pop(session_id, None)
+
+
+async def _sync_task_status(db, session_id: int, task_id: int, status: str, note: str | None) -> None:
+    """更新子任务状态并广播，前端任务面板据此实时刷新步骤与执行情况。
+
+    先提交（子任务与主代理共享 session，创建任务的 flush 需随 commit 落库，
+    否则前端 refreshTasks 通过 HTTP 查询时看不到新任务），再广播 task.updated。
+    """
+    try:
+        from app.orchestration.agent_events import broadcast
+        from app.services import task_service
+        await task_service.update_task_status(db, task_id, status, note=note)
+        await db.commit()
+        await broadcast(session_id, {
+            "event": "task.updated",
+            "payload": {"task_id": task_id, "status": status, "note": note or ""},
+        })
+    except Exception:
+        logger.debug("[subagent] 子任务状态同步失败(非阻塞)", exc_info=True)

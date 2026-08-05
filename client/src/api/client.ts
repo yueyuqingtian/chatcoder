@@ -11,6 +11,8 @@ import type {
   MessageOut,
   ModelOut,
   ProjectOut,
+  RollbackPreviewFile,
+  RollbackPreviewOut,
   RollbackResult,
   ScheduledTaskOut,
   SessionOut,
@@ -244,6 +246,7 @@ export const api = {
     const q = params.restore_to_composer === false ? "?restore_to_composer=false" : "";
     return post<RollbackResult>(`/turns/${turnId}/rollback${q}`);
   },
+  rollbackPreview: (turnId: number) => get<RollbackPreviewOut>(`/turns/${turnId}/rollback_preview`),
   getTurnSnapshot: (turnId: number) => get<TurnSnapshotOut>(`/turns/${turnId}/snapshot`),
 
   // ── 会话数据查询 ──
@@ -378,4 +381,5 @@ export const api = {
 export type {
   ProjectOut, SessionOut, TurnOut, MessageOut, TaskOut, ArtifactOut, ModelOut,
   ExecPolicyRuleOut, HookConfigOut, MemoryEntryOut, ScheduledTaskOut,
+  RollbackPreviewFile, RollbackPreviewOut,
 };

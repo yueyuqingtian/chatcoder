@@ -80,7 +80,10 @@ async def _fetch_main_messages(
         select(Message)
         .where(Message.session_id == session_id)
         .where(Message.thread_id.is_(None))
-        .order_by(Message.created_at.desc())
+        # v8: 必须加 id 次级排序 —— 同一步内多条消息 created_at 相同（同一秒），
+        # 仅按 created_at 排序不稳定，reversed 后 text/tool_call/tool_result 相对顺序错乱，
+        # 导致 assistant(tool_calls) 与 tool 消息之间夹着 assistant 文本，网关报 400。
+        .order_by(Message.created_at.desc(), Message.id.desc())
         .limit(limit)
     )
     return list(reversed(res.scalars().all()))
@@ -534,7 +537,7 @@ async def search_session_memory(
         select(Message)
         .where(Message.session_id == session_id)
         .where(Message.content["text"].as_string().like(pattern))
-        .order_by(Message.created_at.desc())
+        .order_by(Message.created_at.desc(), Message.id.desc())
         .limit(limit)
     )
     return list(reversed(res.scalars().all()))

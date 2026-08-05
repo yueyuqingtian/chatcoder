@@ -11,7 +11,7 @@ export function ArtifactList({ msgs, turnId }: { msgs: MessageOut[]; turnId?: nu
   const { setPreviewPath, openPanel, openTab } = usePanelStore();
   const reviewedFiles = useChatStore((s) => s.reviewedFiles);
   const markFileReviewed = useChatStore((s) => s.markFileReviewed);
-  const rollbackTurn = useChatStore((s) => s.rollbackTurn);
+  const requestRollbackPreview = useChatStore((s) => s.requestRollbackPreview);
   const [expanded, setExpanded] = useState(false);
 
   const stats = useMemo(() => {
@@ -97,8 +97,8 @@ export function ArtifactList({ msgs, turnId }: { msgs: MessageOut[]; turnId?: nu
                 {turnId != null && (
                   <button
                     className="artifact-file-btn danger"
-                    onClick={async () => { if (confirm(`撤销此 turn 的变更（回滚 ${f} 所在 turn）？`)) { await rollbackTurn(turnId); } }}
-                    title="回滚该 turn 变更"
+                    onClick={() => requestRollbackPreview(turnId)}
+                    title="回滚该 turn 变更（先预览确认）"
                   >
                     <IconRotateCcw size={11} />
                   </button>
