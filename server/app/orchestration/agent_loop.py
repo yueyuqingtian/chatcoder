@@ -1,13 +1,8 @@
-# ═══════════════════════════════════════════════════════════
-# DEPRECATED: 本文件为未完成的重构尝试，实际使用 agent_runtime.py
-# 请勿在此文件修改 agent 逻辑，所有变更请到 agent_runtime.py
-# 计划后续迭代收敛为一套实现
-# ═══════════════════════════════════════════════════════════
-"""Agent 推理循环（v2：主/子代理统一，从 v0.1 agent_runtime 重构提取）。
+"""Agent 推理循环（v2：主/子代理统一，当前实际生效实现）。
 
-[已废弃] 实际使用 agent_runtime.py，本文件保留仅作历史参考。
-职责：流式模型调用 + 思考/文本广播 + 工具执行 + token 预算 + 产物抽取。
-移除团队/Leader 概念，改为 agent + context bundle 驱动。
+职责：流式模型调用 + 思考/文本广播 + 工具执行 + token 预算 + 产物抽取 + 回滚写盘埋点。
+由 engine.start_turn（主代理）与 subagent.SubagentManager（子代理）统一调用。
+旧版 agent_runtime.py（v0.1 团队编排路径）已废弃删除。
 """
 import asyncio
 import json
@@ -76,6 +71,7 @@ async def run_agent_loop(
     subagent_context: dict | None = None,
     reasoning_effort: str | None = None,
     task_id: int | None = None,
+    model_id: int | None = None,
 ) -> AgentOutput:
     """运行单个 agent 推理循环。
 
@@ -86,9 +82,16 @@ async def run_agent_loop(
     agent_name = agent.name
     thread_id = None if agent.kind == "main" else agent.id  # 子代理消息进自己的线程
 
-    # 解析 provider
+    # 解析 provider（v10: 会话级模型覆盖优先——engine 传入 session.model_id，
+    # 优先于 agent.model_id，解决"配置无默认模型 + 页面会话选择模型"不可用问题）
     registry = get_model_registry()
-    provider, reason = await registry.get_provider_for_agent(db, agent)
+    provider, reason = None, None
+    if model_id is not None:
+        from app.persistence.models.model_reg import Model
+        _model = await db.get(Model, model_id)
+        provider, reason = await registry.get_provider_for_model(db, _model)
+    if provider is None:
+        provider, reason = await registry.get_provider_for_agent(db, agent)
     if provider is None:
         await _emit_agent_msg(db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
                               agent_id=agent_id, agent_name=agent_name,
@@ -423,6 +426,8 @@ async def run_agent_loop(
                     # v9: 写盘工具执行前读取原文件内容（精确回滚依据：只撤销 AI 改动部分）
                     _pre_paths = rollback_service.resolve_write_paths(tool_name, args) if tool_name in _WRITE_TOOLS else []
                     _pre_before = {p: rollback_service._read_file_text(workspace, p) for p in _pre_paths}
+                    # v10: 对已存在的目标文件额外建立磁盘 checkpoint（.chatcoder/checkpoints 兜底备份），
+                    # 与精确回滚的 before/after 记录双保险，防数据库记录异常时无法恢复。
                     try:
                         result = await asyncio.wait_for(
                             tool_executor.execute(
@@ -444,6 +449,9 @@ async def run_agent_loop(
                     if tool_name in _WRITE_TOOLS and result.ok:
                         for target in _pre_paths:
                             write_paths.append(str(target))
+                            # v10: 文件级 checkpoint 兜底（写盘前快照备份）
+                            if _pre_before.get(target) is not None:
+                                rollback_service.checkpoint_file(workspace, target)
                             await rollback_service.record_turn_write(
                                 db, session_id=session_id, turn_id=turn_id, tool=tool_name,
                                 path=target,
@@ -650,6 +658,7 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         project = subagent_context.get("project")
         session = subagent_context.get("session")
         cancel_event = subagent_context.get("cancel_event")
+        main_task_id = subagent_context.get("main_task_id")
         if manager is None or project is None:
             return "Error: subagent manager unavailable"
 
@@ -659,11 +668,22 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         if not task_title:
             return "Error: task_title is required"
 
+        # v10: 子代理数量硬性限制——超过配置上限时拒绝新子代理，
+        # 提示主代理合并子任务或自行串行处理，防止无限拆分资源失控。
+        from app.core.config import settings
+        if len(manager._handles) >= settings.max_subagents_per_turn:
+            return (
+                f"Error: subagent limit reached (max {settings.max_subagents_per_turn} per turn). "
+                "Do not spawn more subagents. Collect the results of already spawned ones "
+                "with collect_results, or perform the remaining work yourself directly."
+            )
+
         # 创建子代理 Agent + Task
         from app.core.enums import AgentKind
         from app.persistence.models.agent import Agent
         sub_agent = Agent(kind=AgentKind.SUB.value, name=task_title[:40],
-                          model_id=agent.model_id, session_id=session_id,
+                          model_id=subagent_context.get("model_id") or agent.model_id,
+                          session_id=session_id,
                           turn_id=turn_id, parent_agent_id=agent.id)
         db.add(sub_agent)
         await db.flush()
@@ -672,9 +692,21 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
             db, session_id=session_id, turn_id=turn_id,
             title=task_title, description=task_desc,
             acceptance_criteria=acceptance, agent_id=sub_agent.id,
-            parent_task_id=turn_id, priority=1,
+            parent_task_id=main_task_id or turn_id, priority=1,
         )
         await db.flush()
+
+        # v10: 子任务创建后立即提交并广播，前端任务卡实时展示拆分步骤
+        # （此前仅 flush，前端 refreshTasks 查不到新子任务，任务卡无新步骤）
+        from app.orchestration.agent_events import broadcast
+        try:
+            await db.commit()
+            await broadcast(session_id, {
+                "event": "task.updated",
+                "payload": {"task_id": task.id, "status": "pending", "note": (task_desc or "")[:200]},
+            })
+        except Exception:
+            logger.debug("[agent] 子任务创建提交/广播失败(非阻塞)", exc_info=True)
 
         # 构建子代理上下文（独立，仅 handoff + 项目规则）
         from app.orchestration.context_manager import build_subagent_context

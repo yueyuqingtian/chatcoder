@@ -106,6 +106,9 @@ class Settings(BaseSettings):
 
     # v4.6: 单会话 token 预算--超过此值任务自动终止
     session_token_budget: int = 2_000_000
+    # v10: 单个 turn 的子代理数量上限——主代理 spawn_subagent 的硬性限制。
+    # 超过上限时拒绝新子代理并提示主代理合并/串行处理，防止无限拆分导致资源失控。
+    max_subagents_per_turn: int = 6
 
     @field_validator("cors_origins")
     @classmethod

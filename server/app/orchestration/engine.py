@@ -8,6 +8,7 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.enums import MsgType, SenderType
 from app.orchestration.agent_events import broadcast, broadcast_turn_updated
 from app.orchestration.agent_loop import run_agent_loop
@@ -150,13 +151,16 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             "function": {
                 "name": "spawn_subagent",
                 "description": (
-                    "Decompose a LARGE task into an independent subtask and run it in an isolated subagent. "
-                    "Use when the request spans multiple files/modules or has clearly separable deliverables: "
-                    "spawn ONE subagent per subtask, each with a precise task_title, a task_description "
+                    "Decompose a LARGE task into independent subtasks and run each in an isolated subagent. "
+                    "MANDATORY — you MUST spawn subagents when the request spans multiple files/modules/layers, "
+                    "has clearly separable deliverables, or is large and parallelizable. "
+                    "FORBIDDEN — do NOT spawn for small tasks that a single tool call can finish "
+                    "(reading a file, one small edit), nor for strictly sequential work (do those yourself). "
+                    f"Hard limit: at most {settings.max_subagents_per_turn} subagents per turn. "
+                    "Spawn ONE subagent per subtask, each with a precise task_title, a task_description "
                     "(what to implement), and acceptance_criteria (definition of done). "
                     "Subagents run in parallel isolated contexts, so their file edits never conflict. "
-                    "After spawning, call collect_results to gather every subagent's summary. "
-                    "Do NOT use for tiny single-tool steps or strictly sequential work."
+                    "After spawning, call collect_results to gather every subagent's summary."
                 ),
                 "parameters": {
                     "type": "object",
@@ -179,6 +183,9 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         })
 
         # 3. 运行主代理
+        # v10: 会话级模型覆盖——用户页面上选择的模型（session.model_id）
+        # 优先于全局 main agent 的 model_id，解决"配置无默认模型时页面选择模型不可用"问题。
+        effective_model_id = session.model_id or main_agent.model_id
         from app.orchestration.subagent import get_subagent_manager
         mgr = get_subagent_manager(session_id)
         out = await run_agent_loop(
@@ -188,9 +195,12 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             cancel_event=cancel_event,
             reasoning_effort=reasoning_effort,
             task_id=main_task.id,
+            model_id=effective_model_id,
             subagent_context={
                 "manager": mgr, "session": session, "project": project,
                 "cancel_event": cancel_event,
+                "main_task_id": main_task.id,
+                "model_id": effective_model_id,
             },
         )
 

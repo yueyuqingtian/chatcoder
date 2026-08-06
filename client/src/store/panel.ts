@@ -23,6 +23,8 @@ interface PanelState {
   expanded: boolean;
   width: number;
   fullscreen: boolean;
+  /** v10: 主窗口顶部任务卡显隐开关（TitleBar 折叠按钮控制） */
+  taskCardVisible: boolean;
   tabs: PanelTab[];
   activeKey: string | null;
   previewPath: string | null;
@@ -30,6 +32,7 @@ interface PanelState {
   closePanel: () => void;
   togglePanel: () => void;
   toggleFullscreen: () => void;
+  toggleTaskCard: () => void;
   setWidth: (w: number) => void;
   openTab: (id: PanelTabId) => void;
   closeTab: (key: string) => void;
@@ -43,6 +46,7 @@ export const usePanelStore = create<PanelState>((set, get) => ({
   expanded: false,
   width: initial.width,
   fullscreen: false,
+  taskCardVisible: true,
   tabs: [],
   activeKey: null,
   previewPath: null,
@@ -50,6 +54,7 @@ export const usePanelStore = create<PanelState>((set, get) => ({
   closePanel: () => set({ expanded: false, fullscreen: false }),
   togglePanel: () => set((s) => ({ expanded: !s.expanded })),
   toggleFullscreen: () => set((s) => ({ fullscreen: !s.fullscreen })),
+  toggleTaskCard: () => set((s) => ({ taskCardVisible: !s.taskCardVisible })),
   setWidth: (w) => {
     const clamped = Math.max(200, Math.min(MAX_WIDTH, Math.round(w)));
     set({ width: clamped });

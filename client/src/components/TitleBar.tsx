@@ -3,10 +3,11 @@
  * 右：折叠右面板钮 + 主题切换 + 窗口控制
  */
 import { useThemeStore } from "../store/theme";
+import { usePanelStore } from "../store/panel";
 import {
   IconSun, IconMoon, IconMinus, IconSquare, IconX,
   IconMessageSquare, IconPanelLeft, IconPanelRight,
-  IconArrowToggle,
+  IconCheckSquare, IconArrowToggle,
 } from "./icons";
 
 interface TitleBarProps {
@@ -23,6 +24,8 @@ export function TitleBar({
   onToggleRight,
 }: TitleBarProps) {
   const { theme, toggle } = useThemeStore();
+  const taskCardVisible = usePanelStore((s) => s.taskCardVisible);
+  const toggleTaskCard = usePanelStore((s) => s.toggleTaskCard);
   const api = (window as Window & { chatcoderAPI?: WindowAPI }).chatcoderAPI;
 
   return (
@@ -43,6 +46,15 @@ export function TitleBar({
       <div className="titlebar-mid" />
 
       <div className="titlebar-right title-no-drag">
+        {/* v10: 主窗口任务卡显隐开关（位于"收起任务栏"按钮左侧） */}
+        <button
+          className={`app-pane-toggle titlebar-btn${taskCardVisible ? "" : " collapsed"}`}
+          onClick={toggleTaskCard}
+          title={taskCardVisible ? "收起任务卡" : "展开任务卡"}
+        >
+          <IconCheckSquare size={14} />
+          <IconArrowToggle open={taskCardVisible} size={12} />
+        </button>
         <button
           className={`app-pane-toggle titlebar-btn${rightCollapsed ? " collapsed" : ""}`}
           onClick={onToggleRight}

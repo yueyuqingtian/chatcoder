@@ -138,7 +138,18 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
             workspace = project.path if project else None
     workspace = workspace or ""
 
-    # 1. 停止关联执行（turn 引擎的 cancel 由调用方在 engine 层处理，这里兜底标记）
+    # 1. 先真正停止当前任务：设置 cancel 事件中断运行中的 agent loop（主/子代理共享），
+    #    并等待其退出（最长 3s），避免回滚期间 agent 仍在写文件导致并发冲突。
+    #    （延迟 import 避免与 engine 模块循环依赖）
+    from app.orchestration import engine
+    await engine.cancel_turn(turn_id)
+    if turn_id in engine._running_turns:
+        for _ in range(30):
+            if turn_id not in engine._running_turns:
+                break
+            await asyncio.sleep(0.1)
+
+    # 1.1 DB 层兜底：将该 turn 之后 pending/running 的任务置 cancelled
     from app.services import task_service, turn_service
     await task_service.cancel_turn_tasks(db, snap.session_id, turn_id)
 
@@ -155,23 +166,46 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
         if written_paths and workspace:
             file_result = await _rollback_turn_files(workspace, written_paths)
 
-    # 3. 消息软删：仅软删主线程中「本 turn 及其之后」的消息（turn_id 精确匹配）。
-    #    不再删除 turn_id IS NULL 的历史消息 / 子代理线程消息，避免误删非当前 turn 内容。
+    # 3. 消息软删：软删主线程「本 turn 及其之后」的消息，同时软删该 turn 及其之后
+    #    子代理线程（thread_id 属于 kind=sub 的 agent）的消息——子代理消息也是本 turn 的
+    #    执行内容，回滚后不应残留。turn_id IS NULL 的历史消息不删除，避免误删非当前 turn 内容。
     res = await db.execute(
         select(Message).where(
             Message.session_id == snap.session_id,
             Message.deleted == False,  # noqa: E712
         )
     )
+    # 该 turn 及其之后的子代理（v10：子代理线程消息随 turn 一并回滚）
+    from app.persistence.models.agent import Agent
+    sub_res = await db.execute(
+        select(Agent).where(
+            Agent.session_id == snap.session_id,
+            Agent.kind == "sub",
+            Agent.turn_id >= turn_id,
+        )
+    )
+    sub_agents = list(sub_res.scalars().all())
+    sub_ids_set = {a.id for a in sub_agents}
     msgs = [
         m for m in res.scalars().all()
-        if m.thread_id is None and m.turn_id is not None and m.turn_id >= turn_id
+        if m.turn_id is not None and m.turn_id >= turn_id
+        and (m.thread_id is None or m.thread_id in sub_ids_set)
     ]
     user_text = None
     for m in msgs:
         if m.id == snap.user_message_id and restore_to_composer:
             user_text = str((m.content or {}).get("text", ""))
         m.deleted = True
+
+    # 3.1 子代理 Agent 记录置为 terminated（保留历史，明确已随 turn 回滚终止）
+    from app.orchestration.agent_events import broadcast
+    for a in sub_agents:
+        if a.status in ("running", "done", "failed"):
+            a.status = "terminated"
+            await broadcast(snap.session_id, {
+                "event": "agent.updated",
+                "payload": {"agent_id": a.id, "status": "terminated"},
+            })
 
     # 4. 状态标记
     snap.rolled_back = True
