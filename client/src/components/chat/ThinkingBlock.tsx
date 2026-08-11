@@ -61,8 +61,8 @@ export const ThinkingBlock = memo(function ThinkingBlock({ text, active, turnId,
         <span className="thinking-block-title">
           {isStreaming ? (
             <>
-              <span className="thinking-block-breath" />
-              <span className="text-flow">思考中…</span>
+              <span className="breath-pulse"><i /><i /><i /></span>
+              <span className="text-shine">思考中…</span>
             </>
           ) : (
             <>已完成思考{duration != null ? `（${duration} 秒）` : ""}</>

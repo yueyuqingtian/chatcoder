@@ -8,6 +8,7 @@ import { useCallback, memo } from "react";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ToolTree } from "./ToolTree";
 import { ArtifactList } from "./ArtifactList";
+import { ReviewCard } from "./ReviewCard";
 import { MessageActions } from "./MessageActions";
 import { MarkdownContent } from "../MarkdownContent";
 import type { TimelineEntry } from "./timeline";
@@ -104,6 +105,8 @@ export const TurnGroup = memo(function TurnGroup({ entry, isRunning }: {
             return null;
         }
       })}
+      {/* v11: turn 完成后的变更审核卡片（仅在完成且有写盘变更时显示） */}
+      <ReviewCard turnId={turnId} isRunning={isRunning} />
     </div>
   );
 });

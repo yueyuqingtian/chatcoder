@@ -270,6 +270,29 @@ class RollbackPreviewOut(BaseModel):
     files: list[RollbackPreviewFile]
 
 
+# ── 变更审核 ──
+class FileChangeOut(BaseModel):
+    """变更审核清单单文件：仅元数据（不含文件全文），reviewed 为后端持久化状态。"""
+    path: str
+    action: str  # "modified"（修改）/ "added"（新增）/ "deleted"（删除）
+    additions: int = 0  # 新增行数
+    deletions: int = 0  # 删除行数
+    reviewed: bool = False  # 后端持久化审核状态
+
+
+class FileDiffOut(BaseModel):
+    """单文件变更 diff（按需拉取，大文件截断）。"""
+    path: str
+    before: str | None = None  # 写盘前内容（新建文件为 None）
+    after: str | None = None   # 当前磁盘内容（已删除文件为 None）
+    truncated: bool = False    # 变更行数超限已截断
+
+
+class ReviewBatchBody(BaseModel):
+    paths: list[str]
+    reviewed: bool = True
+
+
 # ── 审计 ──
 class AuditLogOut(BaseModel):
     id: int

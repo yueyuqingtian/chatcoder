@@ -95,7 +95,7 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
           <span className="tc-chevron tc-chevron-spacer" />
         )}
         <span className="tc-icon">{toolIcon(leaf.tool)}</span>
-        <span className="tc-name">{leaf.tool}</span>
+        <span className={"tc-name" + (ok === null ? " text-shine" : "")}>{leaf.tool}</span>
         {path && (
           <button className="tc-path" title={path} onClick={openInPanel}>
             {path.split(/[\\/]/).pop() || path}
@@ -139,6 +139,19 @@ export const ToolTree = memo(function ToolTree({ nodes }: { nodes: ToolNode[] })
     return [...map.entries()];
   }, [nodes]);
 
+  // 是否有仍在执行（进行中）的工具：用于簇标题挂流光文字
+  const hasRunning = useMemo(() => {
+    let found = false;
+    const walk = (ns: ToolNode[]) => {
+      for (const n of ns) {
+        if (n.kind === "group") { if (n.leaves.some((l) => l.ok === null)) { found = true; return; } }
+        else if (n.leaf.ok === null) { found = true; return; }
+      }
+    };
+    walk(nodes);
+    return found;
+  }, [nodes]);
+
   if (nodes.length === 0) return null;
 
   return (
@@ -152,7 +165,7 @@ export const ToolTree = memo(function ToolTree({ nodes }: { nodes: ToolNode[] })
             <span key={tool} className="tool-cluster-cat">
               {i > 0 && <span className="tool-cluster-sep">·</span>}
               {toolIcon(tool)}
-              <span>{groupPhrase(tool, n)}</span>
+              <span className={hasRunning ? "text-shine" : undefined}>{groupPhrase(tool, n)}</span>
             </span>
           ))}
         </span>
@@ -164,7 +177,7 @@ export const ToolTree = memo(function ToolTree({ nodes }: { nodes: ToolNode[] })
               <div key={"g" + i} className="tc-group">
                 <div className="tc-group-head">
                   <span className="tc-icon">{toolIcon(n.tool)}</span>
-                  <span className="tc-name">{groupPhrase(n.tool, n.count)}</span>
+                  <span className={"tc-name" + (n.leaves.some((l) => l.ok === null) ? " text-shine" : "")}>{groupPhrase(n.tool, n.count)}</span>
                   <span className="tc-status ok">{n.leaves.filter((l) => l.ok).length}/{n.count}</span>
                 </div>
                 <div className="tc-group-body">

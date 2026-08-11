@@ -9,6 +9,7 @@ from app.persistence.models.memory import MemoryEntry
 from app.persistence.models.message import Message, Session
 from app.persistence.models.model_reg import Model
 from app.persistence.models.project import Project
+from app.persistence.models.review import FileReview
 from app.persistence.models.rollback import TurnSnapshot
 from app.persistence.models.scheduled import ScheduledTask
 from app.persistence.models.skill import McpServer, Skill
@@ -34,6 +35,7 @@ __all__ = [
     "AuditLog",
     "MemoryEntry",
     "TurnSnapshot",
+    "FileReview",
     "KnowledgeBase",
     "KnowledgeDoc",
     "Skill",

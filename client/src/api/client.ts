@@ -6,6 +6,8 @@ import type {
   ArtifactOut,
   ConfigProfileOut,
   ExecPolicyRuleOut,
+  FileChangeOut,
+  FileDiffOut,
   HookConfigOut,
   MemoryEntryOut,
   MessageOut,
@@ -249,6 +251,13 @@ export const api = {
   rollbackPreview: (turnId: number) => get<RollbackPreviewOut>(`/turns/${turnId}/rollback_preview`),
   getTurnSnapshot: (turnId: number) => get<TurnSnapshotOut>(`/turns/${turnId}/snapshot`),
 
+  // ── 变更审核（v11）──
+  getTurnChanges: (turnId: number) => get<FileChangeOut[]>(`/turns/${turnId}/changes`),
+  getFileDiff: (turnId: number, path: string) =>
+    get<FileDiffOut>(`/turns/${turnId}/changes/diff?path=${encodeURIComponent(path)}`),
+  reviewFiles: (turnId: number, paths: string[], reviewed: boolean) =>
+    put<{ ok: boolean; updated: number }>(`/turns/${turnId}/reviews`, { paths, reviewed }),
+
   // ── 会话数据查询 ──
   listSessionMessages: (sessionId: number) => get<MessageOut[]>(`/turns/sessions/${sessionId}/messages`),
   listSessionTasks: (sessionId: number) => get<TaskOut[]>(`/turns/sessions/${sessionId}/tasks`),
@@ -381,5 +390,5 @@ export const api = {
 export type {
   ProjectOut, SessionOut, TurnOut, MessageOut, TaskOut, ArtifactOut, ModelOut,
   ExecPolicyRuleOut, HookConfigOut, MemoryEntryOut, ScheduledTaskOut,
-  RollbackPreviewFile, RollbackPreviewOut,
+  RollbackPreviewFile, RollbackPreviewOut, FileChangeOut, FileDiffOut,
 };

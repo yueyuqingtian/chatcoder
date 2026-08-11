@@ -31,4 +31,13 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
   minimizeWindow: () => ipcRenderer.send("window:minimize"),
   toggleMaximize: () => ipcRenderer.send("window:maximizeToggle"),
   closeWindow: () => ipcRenderer.send("window:close"),
+  // 外部穿透开关（透桌面/其他软件颜色）
+  setExternalBackdrop: (on) => ipcRenderer.send("window:setExternalBackdrop", !!on),
 });
+
+// 注入平台到 <html data-platform>，供 CSS 平台感知样式（如 Win11 微圆角+四角透桌面）使用
+try {
+  if (typeof document !== "undefined" && document.documentElement) {
+    document.documentElement.setAttribute("data-platform", process.platform);
+  }
+} catch { /* 非浏览器环境忽略 */ }

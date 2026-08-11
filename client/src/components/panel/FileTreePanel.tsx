@@ -1,6 +1,9 @@
-/** 文件管理面板（v2）：项目目录树 + 文件预览（monaco）+ 在外部打开。 */
+/** 文件管理面板（v2）：项目目录树 + 文件预览（monaco）+ 在外部打开。
+ * v11: 变更审核 diff 视图——diffPreview.path 匹配当前预览文件时，
+ * 用 Monaco DiffEditor 展示 before/after，可切换「变更对比 / 当前内容」。
+ */
 import { useEffect, useRef, useState } from "react";
-import Editor from "@monaco-editor/react";
+import Editor, { DiffEditor } from "@monaco-editor/react";
 import { api, type TreeNode } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { usePanelStore } from "../../store/panel";
@@ -112,15 +115,28 @@ export function FileTreePanel() {
   const projects = useChatStore((s) => s.projects);
   const previewPath = usePanelStore((s) => s.previewPath);
   const setPreviewPath = usePanelStore((s) => s.setPreviewPath);
+  const diffPreview = usePanelStore((s) => s.diffPreview);
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [openPaths, setOpenPaths] = useState<Set<string>>(new Set());
   const [content, setContent] = useState<string>("");
   const [contentLang, setContentLang] = useState<string>("plaintext");
   const [contentError, setContentError] = useState<string | null>(null);
+  // v11: 变更对比 / 当前内容 视图切换（仅当 diff 与当前文件匹配时生效）
+  const [viewMode, setViewMode] = useState<"diff" | "content">("diff");
   const treeRef = useRef<HTMLDivElement>(null);
   const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
   const project = projects.find((p) => p.id === currentProjectId);
+
+  // v11: 当前是否处于 diff 视图（diffPreview 与预览文件匹配）
+  const showDiff = viewMode === "diff" && diffPreview != null && diffPreview.path === previewPath;
+
+  // v11: 新 diff 到达时默认回到「变更对比」视图（用户手动切换「当前内容」不受影响）
+  useEffect(() => {
+    if (diffPreview != null && diffPreview.path === previewPath) {
+      setViewMode("diff");
+    }
+  }, [diffPreview, previewPath]);
 
   const loadTree = async () => {
     if (!currentProjectId) return;
@@ -209,9 +225,25 @@ export function FileTreePanel() {
           <div className="ft-preview">
             <div className="ft-preview-head">
               <span className="ft-preview-path">{previewPath.split("/").pop()}</span>
+              <div className="ft-diff-toggle">
+                <button className={viewMode === "diff" ? "active" : ""} onClick={() => setViewMode("diff")}>变更对比</button>
+                <button className={viewMode === "content" ? "active" : ""} onClick={() => setViewMode("content")}>当前内容</button>
+              </div>
               <button className="ft-close" onClick={() => setPreviewPath(null)}>✕</button>
             </div>
-            {contentError ? (
+            {showDiff ? (
+              <div className="ft-diff-body">
+                <DiffEditor
+                  height="100%"
+                  language={contentLang}
+                  original={diffPreview!.before ?? ""}
+                  modified={diffPreview!.after ?? ""}
+                  theme={document.documentElement.getAttribute("data-theme") === "dark" ? "vs-dark" : "light"}
+                  options={{ readOnly: true, minimap: { enabled: false }, fontSize: 12, renderSideBySide: true }}
+                />
+                {diffPreview!.truncated && <div className="ft-diff-truncated">变更行数过大，内容已截断显示</div>}
+              </div>
+            ) : contentError ? (
               <div className="ft-preview-err">
                 <p>{contentError}</p>
                 <button className="btn-ghost" onClick={() => openExternal(previewPath)}>在外部打开</button>

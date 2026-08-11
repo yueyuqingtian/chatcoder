@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.message import Message
+from app.persistence.models.review import FileReview
 from app.persistence.models.rollback import RollbackWrite, TurnSnapshot
 
 logger = logging.getLogger(__name__)
@@ -267,6 +268,171 @@ async def list_turn_writes(db: AsyncSession, session_id: int, turn_id: int) -> l
         ).order_by(RollbackWrite.id.asc())
     )
     return list(res.scalars().all())
+
+
+# ── 变更审核（v11）：以 RollbackWrite 为数据源的聚合 + FileReview 审核状态 ──
+
+_MAX_DIFF_CHANGE_LINES = 2000  # 单文件 diff 变更行数上限，超出截断提示
+
+
+def _diff_stats(before: str | None, after: str | None) -> tuple[int, int]:
+    """用 difflib.unified_diff 统计增删行数（仅含变更行，不含上下文/文件头）。"""
+    b = (before or "").splitlines()
+    a = (after or "").splitlines()
+    if b == a:
+        return 0, 0
+    additions = deletions = 0
+    for line in difflib.unified_diff(b, a, n=0, lineterm=""):
+        if line.startswith(("+++", "---")):
+            continue
+        if line.startswith("+"):
+            additions += 1
+        elif line.startswith("-"):
+            deletions += 1
+    return additions, deletions
+
+
+def _truncate_lines(text: str | None, limit: int = _MAX_DIFF_CHANGE_LINES) -> str | None:
+    """按行截断长文本（保留足够上下文用于 diff 展示），返回 None 表示原本无内容。"""
+    if text is None:
+        return None
+    lines = text.splitlines()
+    if len(lines) <= limit:
+        return text
+    return "\n".join(lines[:limit]) + "\n…(内容过长，已截断)"
+
+
+async def list_turn_changes(db: AsyncSession, *, session_id: int, turn_id: int,
+                            workspace: str) -> list[dict]:
+    """聚合该 turn 的全部写盘记录为变更清单（不含文件全文）。
+
+    主/子代理写盘同 turn_id，一并聚合；按 path 分组：
+    - before = 首条写盘的 old_content，after = 当前磁盘内容
+    - action：全部 old_content 为 None → added；文件当前不存在 → deleted；否则 modified
+    - difflib.unified_diff 统计增删行数
+    - reviewed 来自 FileReview（turn_id+path 唯一键），与实际磁盘内容无关
+    """
+    res = await db.execute(
+        select(RollbackWrite).where(
+            RollbackWrite.session_id == session_id,
+            RollbackWrite.turn_id == turn_id,
+        ).order_by(RollbackWrite.id.asc())
+    )
+    writes = list(res.scalars().all())
+    if not writes:
+        return []
+
+    by_path: dict[str, list[RollbackWrite]] = {}
+    for w in writes:
+        by_path.setdefault(w.path, []).append(w)
+
+    reviewed = await reviewed_paths(db, turn_id)
+    changes: list[dict] = []
+    for path, recs in by_path.items():
+        before = recs[0].old_content
+        after = _read_file_text(workspace, path)
+        if all(r.old_content is None for r in recs):
+            action = "added"
+        elif after is None:
+            action = "deleted"
+        else:
+            action = "modified"
+        additions, deletions = _diff_stats(before, after)
+        changes.append({
+            "path": path,
+            "action": action,
+            "additions": additions,
+            "deletions": deletions,
+            "reviewed": reviewed.get(path, False),
+        })
+    changes.sort(key=lambda c: c["path"])
+    return changes
+
+
+async def get_file_diff(db: AsyncSession, *, session_id: int, turn_id: int,
+                        workspace: str, path: str) -> dict | None:
+    """单文件 diff：before=首条写盘前内容，after=当前磁盘内容（大文件截断）。
+
+    返回 None 表示该 turn 无此文件写盘记录。
+    """
+    res = await db.execute(
+        select(RollbackWrite).where(
+            RollbackWrite.session_id == session_id,
+            RollbackWrite.turn_id == turn_id,
+            RollbackWrite.path == path,
+        ).order_by(RollbackWrite.id.asc())
+    )
+    writes = list(res.scalars().all())
+    if not writes:
+        return None
+
+    before = writes[0].old_content
+    after = _read_file_text(workspace, path)
+    add, dele = _diff_stats(before, after)
+    truncated = (add + dele) > _MAX_DIFF_CHANGE_LINES
+    return {
+        "path": path,
+        "before": _truncate_lines(before),
+        "after": _truncate_lines(after),
+        "truncated": truncated,
+    }
+
+
+async def reviewed_paths(db: AsyncSession, turn_id: int) -> dict[str, bool]:
+    """查询该 turn 的全部审核记录（path -> reviewed）。"""
+    res = await db.execute(select(FileReview).where(FileReview.turn_id == turn_id))
+    return {r.path: bool(r.reviewed) for r in res.scalars().all()}
+
+
+async def upsert_file_reviews(db: AsyncSession, *, turn_id: int,
+                              paths: list[str], reviewed: bool) -> int:
+    """幂等写入审核记录（turn_id+path 唯一键 upsert），返回变更条数。
+
+    reviewed=False 时仅更新已存在记录为未审，不删除记录（保证状态可追溯）。
+    """
+    updated = 0
+    paths = [p for p in (paths or []) if isinstance(p, str) and p.strip()]
+    if not paths:
+        return 0
+    existing: dict[str, FileReview] = {}
+    res = await db.execute(
+        select(FileReview).where(
+            FileReview.turn_id == turn_id,
+            FileReview.path.in_(paths),
+        )
+    )
+    for r in res.scalars().all():
+        existing[r.path] = r
+    for p in paths:
+        rec = existing.get(p)
+        if rec is None:
+            db.add(FileReview(turn_id=turn_id, path=p, reviewed=reviewed))
+            updated += 1
+        elif rec.reviewed != reviewed:
+            rec.reviewed = reviewed
+            updated += 1
+    if updated:
+        await db.flush()
+    return updated
+
+
+async def resolve_turn_workspace(db: AsyncSession, turn_id: int) -> tuple[int | None, str]:
+    """解析 turn 所属会话与工作区路径（worktree 优先，回退项目路径）。
+
+    返回 (session_id, workspace)。无快照时 session_id 为 None。
+    """
+    snap = await _snapshot_for_turn(db, turn_id)
+    if snap is None:
+        return None, ""
+    from app.persistence.models.message import Session
+    session = await db.get(Session, snap.session_id)
+    workspace = session.worktree_path if session and session.worktree_path else None
+    if workspace is None:
+        from app.services.project_service import get_project
+        if session and session.project_id:
+            project = await get_project(db, session.project_id)
+            workspace = project.path if project else None
+    return snap.session_id, workspace or ""
 
 
 # ── 文件读写（工作区相对路径）──

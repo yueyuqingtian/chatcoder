@@ -28,21 +28,28 @@
   /* 毛玻璃令牌（data-glass="on" 时启用） */
   --glass-blur: 20px;
   --glass-saturate: 1.5;
-  --glass-sidebar: rgba(246, 246, 248, 0.62);
+  --glass-sidebar: rgba(246, 246, 248, 0.93);
   --glass-panel: rgba(255, 255, 255, 0.68);
   --glass-panel-strong: rgba(255, 255, 255, 0.84);
   --glass-elevated: rgba(255, 255, 255, 0.88);
   --glass-border: rgba(255, 255, 255, 0.62);
-  --glass-shadow: 0 8px 32px rgba(40, 44, 80, 0.10), 0 1px 3px rgba(40, 44, 80, 0.06);
-  /* 环境光背景：毛玻璃模式下为半透明面板提供可折射的渐变内容 */
+  --glass-shadow: 0 8px 32px rgba(40, 44, 80, calc(0.10 * var(--shadow-strength, 1))), 0 1px 3px rgba(40, 44, 80, calc(0.06 * var(--shadow-strength, 1)));
+  /* 玻璃强度（设置页可配：0=轻柔 1=标准 2=深邃，映射到 blur/半透明） */
+  --glass-strength: 1;
+  /* 环境光背景双主色：毛玻璃模式下为半透明面板提供可折射的渐变内容，设置页可配置 */
+  --ambient-c1: #F5F5F5;
+  --ambient-c2: #F5F5F5;
   --bg-ambient:
-    radial-gradient(1100px 700px at 88% -12%, rgba(72, 54, 255, 0.10), transparent 60%),
-    radial-gradient(900px 640px at -8% 112%, rgba(206, 83, 255, 0.08), transparent 55%),
-    radial-gradient(700px 500px at 55% 118%, rgba(59, 130, 246, 0.05), transparent 55%);
+    linear-gradient(135deg, var(--ambient-c1) 0%, var(--ambient-c2) 100%);
 
   --text-1: #1A1A1E;
   --text-2: #6B6B74;
   --text-3: #9A9AA3;
+
+  /* 输入框聚焦呼吸光晕主色（设置页可配） */
+  --composer-glow: #8A4DFF;
+  /* 流光文字品牌渐变（background-clip: text 使用） */
+  --text-shine-grad: linear-gradient(90deg, var(--text-3) 0%, var(--text-1) 28%, #CE53FF 50%, var(--text-1) 72%, var(--text-3) 100%);
 
   --border: #E5E5EA;
   --border-light: #F0F0F2;
@@ -57,12 +64,15 @@
   --info: #3B82F6;
   --info-soft: rgba(59, 130, 246, 0.10);
 
-  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.04);
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08), 0 2px 4px rgba(0, 0, 0, 0.04);
-  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.10), 0 4px 8px rgba(0, 0, 0, 0.06);
-  --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
-  --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.12), 0 4px 8px rgba(0, 0, 0, 0.08);
+  /* 阴影强度乘数：0=扁平 0.5=轻柔 1=标准 1.5=深邃 2=戏剧，设置页可配置 */
+  --shadow-strength: 1;
+
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, calc(0.04 * var(--shadow-strength)));
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, calc(0.06 * var(--shadow-strength))), 0 1px 2px rgba(0, 0, 0, calc(0.04 * var(--shadow-strength)));
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, calc(0.08 * var(--shadow-strength))), 0 2px 4px rgba(0, 0, 0, calc(0.04 * var(--shadow-strength)));
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, calc(0.10 * var(--shadow-strength))), 0 4px 8px rgba(0, 0, 0, calc(0.06 * var(--shadow-strength)));
+  --card-shadow: 0 1px 3px rgba(0, 0, 0, calc(0.06 * var(--shadow-strength))), 0 1px 2px rgba(0, 0, 0, calc(0.04 * var(--shadow-strength)));
+  --shadow-pop: 0 8px 24px rgba(0, 0, 0, calc(0.12 * var(--shadow-strength))), 0 4px 8px rgba(0, 0, 0, calc(0.08 * var(--shadow-strength)));
 
   color-scheme: light;
 }
@@ -90,22 +100,30 @@
 
   /* 毛玻璃令牌（深色） */
   --glass-blur: 20px;
-  --glass-saturate: 1.4;
-  --glass-sidebar: rgba(27, 27, 33, 0.60);
-  --glass-panel: rgba(38, 38, 46, 0.62);
-  --glass-panel-strong: rgba(44, 44, 52, 0.82);
-  --glass-elevated: rgba(52, 52, 62, 0.86);
+  /* 深色下降低饱和度增强，避免高饱和渐变+半透明面板叠加产生色带条纹 */
+  --glass-saturate: 1.05;
+  --glass-sidebar: rgba(27, 27, 33, 0.94);
+  --glass-panel: rgba(38, 38, 46, 0.80);
+  --glass-panel-strong: rgba(44, 44, 52, 0.90);
+  --glass-elevated: rgba(52, 52, 62, 0.92);
   --glass-border: rgba(255, 255, 255, 0.09);
-  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.42), 0 1px 3px rgba(0, 0, 0, 0.30);
-  /* 环境光背景（深色）：幽紫微光，折射在磨砂面板上 */
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, calc(0.42 * var(--shadow-strength, 1))), 0 1px 3px rgba(0, 0, 0, calc(0.30 * var(--shadow-strength, 1)));
+  /* 玻璃强度（深色） */
+  --glass-strength: 1;
+  /* 环境光背景双主色（深色） */
+  --ambient-c1: #181822;
+  --ambient-c2: #12121A;
   --bg-ambient:
-    radial-gradient(1100px 700px at 88% -12%, rgba(106, 84, 255, 0.17), transparent 62%),
-    radial-gradient(900px 640px at -8% 112%, rgba(217, 107, 255, 0.11), transparent 55%),
-    radial-gradient(700px 500px at 55% 118%, rgba(96, 165, 250, 0.08), transparent 55%);
+    linear-gradient(135deg, var(--ambient-c1) 0%, var(--ambient-c2) 100%);
 
   --text-1: #F0F0F3;
   --text-2: #A6A6AF;
   --text-3: #6E6E78;
+
+  /* 输入框聚焦呼吸光晕主色（深色，提亮保证可见） */
+  --composer-glow: #9A5EFF;
+  /* 流光文字品牌渐变（深色） */
+  --text-shine-grad: linear-gradient(90deg, var(--text-3) 0%, var(--text-1) 28%, #D96BFF 50%, var(--text-1) 72%, var(--text-3) 100%);
 
   --border: #35353D;
   --border-light: #2E2E35;
@@ -120,12 +138,12 @@
   --info: #60A5FA;
   --info-soft: rgba(96, 165, 250, 0.16);
 
-  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3), 0 2px 4px rgba(0, 0, 0, 0.2);
-  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4), 0 4px 8px rgba(0, 0, 0, 0.3);
-  --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
-  --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.5), 0 4px 8px rgba(0, 0, 0, 0.3);
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, calc(0.30 * var(--shadow-strength, 1)));
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, calc(0.30 * var(--shadow-strength, 1))), 0 1px 2px rgba(0, 0, 0, calc(0.20 * var(--shadow-strength, 1)));
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, calc(0.30 * var(--shadow-strength, 1))), 0 2px 4px rgba(0, 0, 0, calc(0.20 * var(--shadow-strength, 1)));
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, calc(0.40 * var(--shadow-strength, 1))), 0 4px 8px rgba(0, 0, 0, calc(0.30 * var(--shadow-strength, 1)));
+  --card-shadow: 0 1px 3px rgba(0, 0, 0, calc(0.30 * var(--shadow-strength, 1))), 0 1px 2px rgba(0, 0, 0, calc(0.20 * var(--shadow-strength, 1)));
+  --shadow-pop: 0 8px 24px rgba(0, 0, 0, calc(0.50 * var(--shadow-strength, 1))), 0 4px 8px rgba(0, 0, 0, calc(0.30 * var(--shadow-strength, 1)));
 
   color-scheme: dark;
 }
@@ -174,7 +192,7 @@
   --fs-sm: 12px;
   --fs-md: 13px;
   --fs-lg: 15px;
-  --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.16), 0 6px 16px rgba(0, 0, 0, 0.08);
+  --shadow-xl: 0 16px 48px rgba(0, 0, 0, calc(0.16 * var(--shadow-strength, 1))), 0 6px 16px rgba(0, 0, 0, calc(0.08 * var(--shadow-strength, 1)));
 }
 
 /* 向后兼容别名 */
@@ -196,5 +214,5 @@
 
 /* 深色主题下的阴影令牌微调（--shadow-xl 需要更深） */
 :root[data-theme="dark"] {
-  --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.5), 0 6px 16px rgba(0, 0, 0, 0.35);
+  --shadow-xl: 0 16px 48px rgba(0, 0, 0, calc(0.50 * var(--shadow-strength, 1))), 0 6px 16px rgba(0, 0, 0, calc(0.35 * var(--shadow-strength, 1)));
 }

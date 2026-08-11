@@ -140,8 +140,11 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                 if mcp_servers:
                     _mcp_tools = build_mcp_tools_for_agent(mcp_servers)
                     for mt in _mcp_tools:
-                        tool_schemas.append(mt.function_schema())
+                        # v10: 仅当全局 registry 无同名工具时才注册并追加到 schemas。
+                        # tool_schemas 已由 all_schemas() 包含已注册工具，若无条件 append，
+                        # 第二次 turn 会产生重复工具名，LLM 报 "Tool names must be unique" (HTTP 400)。
                         if not tool_registry.get(mt.name):
+                            tool_schemas.append(mt.function_schema())
                             tool_registry.register(mt)
                     logger.info("[engine] turn=%s 注入 %d 个 MCP 工具", turn_id, len(_mcp_tools))
             except Exception:

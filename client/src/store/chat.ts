@@ -1,7 +1,7 @@
 /** v2 会话状态管理（zustand）：项目 / 会话 / turn 任务驱动。 */
 import { create } from "zustand";
 import { api } from "../api/client";
-import type { MessageOut, ProjectOut, RollbackPreviewFile, SessionOut, TaskOut, TurnOut } from "../api/client";
+import type { FileChangeOut, MessageOut, ProjectOut, RollbackPreviewFile, SessionOut, TaskOut, TurnOut } from "../api/client";
 import { wsClient } from "../api/ws";
 
 /** 上下文占用详情（输入框圆环）。 */
@@ -49,6 +49,8 @@ interface ChatState {
   reviewedFiles: Record<string, boolean>;
   /** v9: 回滚确认弹窗数据（点击回滚先预览，确认后执行）。 */
   rollbackPending: { turnId: number; files: RollbackPreviewFile[] } | null;
+  /** v11: turn 完成后的变更审核清单缓存（turnId -> FileChangeOut[]）。 */
+  turnChanges: Record<number, FileChangeOut[]>;
   loading: boolean;
   error: string | null;
   wsConnected: boolean;
@@ -77,6 +79,10 @@ resumeTurn: () => Promise<void>;
   dismissPlan: () => void;
   respondApproval: (approvalId: string, approved: boolean) => void;
   markFileReviewed: (path: string, reviewed: boolean) => void;
+  /** v11: 拉取指定 turn 的变更审核清单。 */
+  loadTurnChanges: (turnId: number) => Promise<void>;
+  /** v11: 批量审核（乐观更新 + PUT 持久化，失败回滚并 toast）。 */
+  reviewFiles: (turnId: number, paths: string[], reviewed: boolean) => Promise<void>;
   refreshMessages: () => Promise<void>;
   refreshTurns: () => Promise<void>;
   refreshTasks: () => Promise<void>;
@@ -185,6 +191,7 @@ function _resetSessionState(): Partial<ChatState> {
     isCompacting: false,
     pendingApproval: null,
     pendingPlanTurn: null,
+    turnChanges: {},
   };
 }
 
@@ -208,6 +215,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pendingPlanTurn: null,
   reviewedFiles: {},
   rollbackPending: null,
+  turnChanges: {},
   composerDraft: "",
   loading: false,
   error: null,
@@ -312,6 +320,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
           agent_name: usage.agent_name,
         }});
       } catch { /* usage 加载失败不阻塞 */ }
+
+      // v11: 重开/刷新会话后恢复已完成 turn 的审核卡片（审核状态持久化在后端）。
+      // 仅取最近 10 个已完成 turn，避免请求过多。
+      for (const t of turns.filter((x) => x.status === "completed").slice(-10)) {
+        get().loadTurnChanges(t.id);
+      }
 
       // WS 连接 + 事件监听（保存 cleanup 函数）
       wsClient.connect(sessionId);
@@ -423,6 +437,33 @@ export const useChatStore = create<ChatState>((set, get) => ({
       else delete next[path];
       return { reviewedFiles: next };
     });
+  },
+
+  // v11: 拉取该 turn 的变更审核清单（含后端持久化审核状态）。失败静默，下次完成/切会话时重试。
+  loadTurnChanges: async (turnId) => {
+    try {
+      const changes = await api.getTurnChanges(turnId);
+      set((s) => ({ turnChanges: { ...s.turnChanges, [turnId]: changes } }));
+    } catch { /* 非关键路径，忽略 */ }
+  },
+
+  // v11: 批量审核——乐观更新本地状态后 PUT 持久化；失败回滚并 toast 提示。
+  reviewFiles: async (turnId, paths, reviewed) => {
+    const prev = get().turnChanges[turnId] ?? [];
+    set((s) => ({
+      turnChanges: {
+        ...s.turnChanges,
+        [turnId]: (s.turnChanges[turnId] ?? []).map((c) =>
+          paths.includes(c.path) ? { ...c, reviewed } : c,
+        ),
+      },
+    }));
+    try {
+      await api.reviewFiles(turnId, paths, reviewed);
+    } catch (e) {
+      set((s) => ({ turnChanges: { ...s.turnChanges, [turnId]: prev } }));
+      set({ error: String(e) });
+    }
   },
 
  cancelTurn: async () => {
@@ -681,6 +722,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         });
         get().refreshMessages();
         get().refreshTasks();
+        // v11: turn 完成后拉取变更审核清单（写盘变更 + 持久化审核状态）
+        get().loadTurnChanges(turnId);
         break;
       }
       case "turn.interrupted": {
@@ -689,11 +732,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
         get().refreshMessages();
         break;
       }
-      case "turn.rolled_back":
+      case "turn.rolled_back": {
+        // v11: 已回滚 turn 的变更已撤销，清掉其审核卡片
+        const rollbackTurnId = Number((payload as { turn_id?: unknown }).turn_id ?? 0);
+        set((s) => {
+          if (!rollbackTurnId || !s.turnChanges[rollbackTurnId]) return {};
+          const next = { ...s.turnChanges };
+          delete next[rollbackTurnId];
+          return { turnChanges: next };
+        });
         get().refreshMessages();
         get().refreshTurns();
         get().refreshTasks();
         break;
+      }
       case "agent.completed":
         get().refreshTasks();
         break;

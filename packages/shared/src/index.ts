@@ -274,6 +274,30 @@ export interface RollbackPreviewOut {
   files: RollbackPreviewFile[];
 }
 
+/** 变更审核：单文件变更元数据（不含文件全文）。 */
+export interface FileChangeOut {
+  path: string;
+  /** "modified"（修改）/ "added"（新增）/ "deleted"（删除） */
+  action: string;
+  /** 新增行数 */
+  additions: number;
+  /** 删除行数 */
+  deletions: number;
+  /** 后端持久化审核状态 */
+  reviewed: boolean;
+}
+
+/** 变更审核：单文件 diff（按需拉取，大文件截断）。 */
+export interface FileDiffOut {
+  path: string;
+  /** 写盘前内容（新建文件为 null） */
+  before: string | null;
+  /** 当前磁盘内容（已删除文件为 null） */
+  after: string | null;
+  /** 变更行数超限已截断 */
+  truncated: boolean;
+}
+
 // ── WebSocket 事件 ──
 
 /** 服务端 → 客户端 */

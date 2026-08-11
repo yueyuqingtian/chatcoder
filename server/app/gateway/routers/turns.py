@@ -1,18 +1,22 @@
-"""轮次（turn）路由：发消息、查询、取消、回滚、续跑。"""
+"""轮次（turn）路由：发消息、查询、取消、回滚、续跑、变更审核。"""
 import asyncio
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import MsgType, SenderType
-from app.gateway.schemas import (MessageOut, RollbackPreviewFile, RollbackPreviewOut,
+from app.gateway.schemas import (FileChangeOut, FileDiffOut, MessageOut, ReviewBatchBody,
+                                 RollbackPreviewFile, RollbackPreviewOut,
                                  RollbackResult, TaskOut, TurnCreate, TurnOut, TurnSnapshotOut)
 from app.orchestration import engine
 from app.persistence.database import get_db
 from app.services import message_service, rollback_service, session_service, task_service, turn_service
 
 router = APIRouter(prefix="/turns", tags=["turns"])
+
+logger = logging.getLogger(__name__)
 
 
 @router.post("", response_model=TurnOut)
@@ -132,15 +136,7 @@ async def rollback_preview(turn_id: int, db: AsyncSession = Depends(get_db)):
             raise HTTPException(404, "该 turn 无快照")
         if snap.rolled_back:
             raise HTTPException(400, "该 turn 已回滚，不可重复操作")
-        from app.persistence.models.message import Session
-        session = await db.get(Session, snap.session_id)
-        workspace = session.worktree_path if session and session.worktree_path else None
-        if workspace is None:
-            from app.services.project_service import get_project
-            if session and session.project_id:
-                project = await get_project(db, session.project_id)
-                workspace = project.path if project else None
-        workspace = workspace or ""
+        _, workspace = await rollback_service.resolve_turn_workspace(db, turn_id)
         writes = await rollback_service.list_turn_writes(db, snap.session_id, turn_id)
         if not writes or not workspace:
             files: list[RollbackPreviewFile] = []
@@ -150,6 +146,67 @@ async def rollback_preview(turn_id: int, db: AsyncSession = Depends(get_db)):
     except HTTPException:
         raise
     except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+# ── 变更审核（v11）──
+
+@router.get("/{turn_id}/changes", response_model=list[FileChangeOut])
+async def list_turn_changes(turn_id: int, db: AsyncSession = Depends(get_db)):
+    """变更审核清单：聚合该 turn 的写盘记录（含审核状态），不含文件全文。"""
+    try:
+        session_id, workspace = await rollback_service.resolve_turn_workspace(db, turn_id)
+        if session_id is None or not workspace:
+            logger.info("[review] changes 跳过(无快照/工作区): turn=%s", turn_id)
+            return []
+        changes = await rollback_service.list_turn_changes(
+            db, session_id=session_id, turn_id=turn_id, workspace=workspace,
+        )
+        logger.info("[review] changes: turn=%s files=%s", turn_id, len(changes))
+        return changes
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning("[review] changes 失败: turn=%s err=%s", turn_id, e, exc_info=True)
+        raise HTTPException(500, str(e))
+
+
+@router.get("/{turn_id}/changes/diff", response_model=FileDiffOut)
+async def get_change_diff(turn_id: int, path: str, db: AsyncSession = Depends(get_db)):
+    """单文件变更 diff：按需拉取 before/after（大文件截断），供右侧面板 DiffEditor。"""
+    try:
+        session_id, workspace = await rollback_service.resolve_turn_workspace(db, turn_id)
+        if session_id is None or not workspace:
+            raise HTTPException(404, "该 turn 无快照")
+        diff = await rollback_service.get_file_diff(
+            db, session_id=session_id, turn_id=turn_id, workspace=workspace, path=path,
+        )
+        if diff is None:
+            raise HTTPException(404, "该 turn 无此文件的写盘记录")
+        logger.info("[review] diff: turn=%s file=%s truncated=%s",
+                    turn_id, path, diff["truncated"])
+        return diff
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning("[review] diff 失败: turn=%s file=%s err=%s", turn_id, path, e, exc_info=True)
+        raise HTTPException(500, str(e))
+
+
+@router.put("/{turn_id}/reviews", response_model=dict)
+async def set_reviews(turn_id: int, body: ReviewBatchBody, db: AsyncSession = Depends(get_db)):
+    """批量审核（幂等 upsert）：{paths, reviewed} → {ok, updated}。"""
+    try:
+        updated = await rollback_service.upsert_file_reviews(
+            db, turn_id=turn_id, paths=body.paths, reviewed=body.reviewed,
+        )
+        await db.commit()
+        logger.info("[review] upsert: turn=%s paths=%s reviewed=%s updated=%s",
+                    turn_id, len(body.paths), body.reviewed, updated)
+        return {"ok": True, "updated": updated}
+    except Exception as e:
+        await db.rollback()
+        logger.warning("[review] upsert 失败: turn=%s err=%s", turn_id, e, exc_info=True)
         raise HTTPException(500, str(e))
 
 

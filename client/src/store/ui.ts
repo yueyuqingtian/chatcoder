@@ -13,6 +13,18 @@ export interface UiPrefs {
   rightPanelWidth: number;
   /** 毛玻璃效果开关 */
   glassmorphism: boolean;
+  /** 毛玻璃玻璃强度:0=轻柔 1=标准 2=深邃 */
+  glassStrength: number;
+  /** 外部穿透（Electron 透明窗口透桌面/软件颜色） */
+  externalBackdrop: boolean;
+  /** 玻璃渐变主色1 */
+  glassGradientC1: string;
+  /** 玻璃渐变主色2 */
+  glassGradientC2: string;
+  /** 输入框聚焦呼吸光晕颜色 */
+  composerGlowColor: string;
+  /** 阴影强度:0=无 0.5=轻柔 1=标准 1.5=深邃 2=戏剧 */
+  shadowStrength: number;
   /** 对话字体族 */
   chatFontFamily: string;
   /** 对话字号(px) */
@@ -49,6 +61,12 @@ const DEFAULTS: UiPrefs = {
   leftPanelWidth: 264,
   rightPanelWidth: 420,
   glassmorphism: false,
+  glassStrength: 1,
+  externalBackdrop: false,
+  glassGradientC1: "",
+  glassGradientC2: "",
+  composerGlowColor: "",
+  shadowStrength: 1,
   chatFontFamily: "system",
   chatFontSize: 13,
   chatBubbleWidth: 70,
@@ -112,6 +130,22 @@ export function applyUiVars(p: UiPrefs) {
   else root.style.removeProperty("--sidebar-focus");
   root.style.fontSize = `${p.uiBaseFontSize}px`;
   root.setAttribute("data-glass", p.glassmorphism ? "on" : "off");
+  root.setAttribute("data-external", p.externalBackdrop ? "on" : "off");
+  // 同步桌面主进程（透明窗口/外部穿透）
+  try {
+    (window as any).chatcoderAPI?.setExternalBackdrop?.(!!p.externalBackdrop);
+  } catch { /* 非桌面环境忽略 */ }
+  // 玻璃强度:0=0.5x 1=1x 2=1.6x 模糊
+  const strength = p.glassStrength === 2 ? 1.6 : p.glassStrength === 0 ? 0.5 : 1;
+  root.style.setProperty("--glass-strength", String(strength));
+  // 玻璃渐变主色（空则使用主题默认）
+  if (p.glassGradientC1) root.style.setProperty("--ambient-c1", p.glassGradientC1);
+  else root.style.removeProperty("--ambient-c1");
+  if (p.glassGradientC2) root.style.setProperty("--ambient-c2", p.glassGradientC2);
+  else root.style.removeProperty("--ambient-c2");
+  // 输入框聚焦光晕颜色
+  if (p.composerGlowColor) root.style.setProperty("--composer-glow", p.composerGlowColor);
+  else root.style.removeProperty("--composer-glow");
   root.setAttribute("data-lang", p.language);
 }
 

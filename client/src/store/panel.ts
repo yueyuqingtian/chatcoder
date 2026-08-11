@@ -19,6 +19,14 @@ function loadState(): { width: number } {
 function saveWidth(width: number) { try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ width })); } catch {} }
 function tabKey(t: PanelTab) { return `${t.id}-${t.instance}`; }
 
+/** v11: 变更审核 diff 预览（右面板「文件」标签页的 Monaco DiffEditor 数据源）。 */
+export interface DiffPreview {
+  path: string;
+  before: string | null;
+  after: string | null;
+  truncated: boolean;
+}
+
 interface PanelState {
   expanded: boolean;
   width: number;
@@ -28,6 +36,8 @@ interface PanelState {
   tabs: PanelTab[];
   activeKey: string | null;
   previewPath: string | null;
+  /** v11: 变更审核 diff 预览（path 匹配 previewPath 时 FileTreePanel 展示 DiffEditor）。 */
+  diffPreview: DiffPreview | null;
   openPanel: () => void;
   closePanel: () => void;
   togglePanel: () => void;
@@ -38,6 +48,7 @@ interface PanelState {
   closeTab: (key: string) => void;
   setActiveTab: (key: string) => void;
   setPreviewPath: (path: string | null) => void;
+  setDiffPreview: (diff: DiffPreview | null) => void;
   reset: () => void;
 }
 
@@ -50,8 +61,9 @@ export const usePanelStore = create<PanelState>((set, get) => ({
   tabs: [],
   activeKey: null,
   previewPath: null,
+  diffPreview: null,
   openPanel: () => set({ expanded: true }),
-  closePanel: () => set({ expanded: false, fullscreen: false }),
+  closePanel: () => set({ expanded: false, fullscreen: false, diffPreview: null }),
   togglePanel: () => set((s) => ({ expanded: !s.expanded })),
   toggleFullscreen: () => set((s) => ({ fullscreen: !s.fullscreen })),
   toggleTaskCard: () => set((s) => ({ taskCardVisible: !s.taskCardVisible })),
@@ -79,6 +91,8 @@ export const usePanelStore = create<PanelState>((set, get) => ({
     set({ tabs: next, activeKey: nextActive });
   },
   setActiveTab: (key) => set({ activeKey: key }),
-  setPreviewPath: (path) => set({ previewPath: path }),
-  reset: () => set({ expanded: false, fullscreen: false, tabs: [], activeKey: null }),
+  // v11: 切换预览文件时清空 diff（diff 视图仅由变更审核卡片进入时提供）
+  setPreviewPath: (path) => set({ previewPath: path, diffPreview: null }),
+  setDiffPreview: (diff) => set({ diffPreview: diff }),
+  reset: () => set({ expanded: false, fullscreen: false, tabs: [], activeKey: null, diffPreview: null }),
 }));

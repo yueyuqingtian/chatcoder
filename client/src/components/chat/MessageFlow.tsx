@@ -36,8 +36,8 @@ function StreamingText() {
           <div className="thinking-block-head" style={{ cursor: "default" }}>
             <span className="thinking-block-chev" />
             <span className="thinking-block-title">
-              <span className="thinking-block-breath" />
-              <span className="text-flow">思考中…</span>
+              <span className="breath-pulse"><i /><i /><i /></span>
+              <span className="text-shine">思考中…</span>
             </span>
           </div>
           <div className="thinking-block-body" style={{ maxHeight: 160, overflowY: "auto" }}>
@@ -49,14 +49,14 @@ function StreamingText() {
         <div className="turn-item turn-item-text">
           <div className="turn-agent-text">
             <MarkdownContent>{text}</MarkdownContent>
-            <span className="stream-caret" />
+            <span className="stream-caret"><i /><i /><i /></span>
           </div>
         </div>
       )}
       {!thinkingText && (
         <div className="turn-status-line">
-          <span className="thinking-block-breath" style={{ marginRight: 6 }} />
-          <span className="text-flow">{text ? "处理中…" : "等待响应…"}</span>
+          <span className="breath-pulse" style={{ marginRight: 6 }}><i /><i /><i /></span>
+          <span className="text-shine">{text ? "处理中…" : "等待响应…"}</span>
         </div>
       )}
     </div>
