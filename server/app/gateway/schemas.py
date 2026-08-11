@@ -264,10 +264,17 @@ class RollbackPreviewFile(BaseModel):
     after: str | None = None   # 回滚后文件内容
 
 
+class RollbackAffected(BaseModel):
+    """回滚连带影响统计（v12）：随回滚一并撤销的任务/消息数。"""
+    tasks: int = 0
+    messages: int = 0
+
+
 class RollbackPreviewOut(BaseModel):
     ok: bool
     turn_id: int
     files: list[RollbackPreviewFile]
+    affected: RollbackAffected = RollbackAffected()
 
 
 # ── 变更审核 ──

@@ -1,7 +1,7 @@
 /** v2 会话状态管理（zustand）：项目 / 会话 / turn 任务驱动。 */
 import { create } from "zustand";
 import { api } from "../api/client";
-import type { FileChangeOut, MessageOut, ProjectOut, RollbackPreviewFile, SessionOut, TaskOut, TurnOut } from "../api/client";
+import type { ArtifactOut, FileChangeOut, MessageOut, ProjectOut, RollbackAffected, RollbackPreviewFile, SessionOut, TaskOut, TurnOut } from "../api/client";
 import { wsClient } from "../api/ws";
 
 /** 上下文占用详情（输入框圆环）。 */
@@ -24,6 +24,8 @@ interface ChatState {
   messages: MessageOut[];
   turns: TurnOut[];
   tasks: TaskOut[];
+  /** v12: 当前会话产物聚合（Artifact 表，含 title/summary/files）。 */
+  artifacts: ArtifactOut[];
   /** 当前正在运行的 turnId（无则 null）。 */
   runningTurnId: number | null;
   isRunning: boolean;
@@ -47,8 +49,8 @@ interface ChatState {
   pendingPlanTurn: { turnId: number; task: string } | null;
   /** v6: 已审查的产物文件（path -> true），用于审查清单展示。 */
   reviewedFiles: Record<string, boolean>;
-  /** v9: 回滚确认弹窗数据（点击回滚先预览，确认后执行）。 */
-  rollbackPending: { turnId: number; files: RollbackPreviewFile[] } | null;
+  /** v9: 回滚确认弹窗数据（点击回滚先预览，确认后执行）。v12: 含连带影响统计。 */
+  rollbackPending: { turnId: number; files: RollbackPreviewFile[]; affected: RollbackAffected } | null;
   /** v11: turn 完成后的变更审核清单缓存（turnId -> FileChangeOut[]）。 */
   turnChanges: Record<number, FileChangeOut[]>;
   loading: boolean;
@@ -86,6 +88,8 @@ resumeTurn: () => Promise<void>;
   refreshMessages: () => Promise<void>;
   refreshTurns: () => Promise<void>;
   refreshTasks: () => Promise<void>;
+  /** v12: 刷新当前会话产物聚合（随 refreshTasks 一并拉取）。 */
+  refreshArtifacts: () => Promise<void>;
   setComposerDraft: (text: string) => void;
   clearError: () => void;
   addMessage: (msg: MessageOut) => void;
@@ -182,6 +186,7 @@ function _resetSessionState(): Partial<ChatState> {
     messages: [],
     turns: [],
     tasks: [],
+    artifacts: [],
     runningTurnId: null,
     isRunning: false,
     interruptedTurnId: null,
@@ -203,6 +208,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
   turns: [],
   tasks: [],
+  artifacts: [],
   runningTurnId: null,
   isRunning: false,
   interruptedTurnId: null,
@@ -546,7 +552,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set({ runningTurnId: null, isRunning: false });
       }
       const preview = await api.rollbackPreview(turnId);
-      set({ rollbackPending: { turnId, files: preview.files } });
+      set({ rollbackPending: { turnId, files: preview.files, affected: preview.affected } });
       return true;
     } catch (e) {
       set({ error: String(e) });
@@ -599,6 +605,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       const tasks = await api.listSessionTasks(currentSessionId);
       set({ tasks });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+    get().refreshArtifacts();
+  },
+
+  refreshArtifacts: async () => {
+    const { currentSessionId } = get();
+    if (!currentSessionId) return;
+    try {
+      const artifacts = await api.listSessionArtifacts(currentSessionId);
+      set({ artifacts });
     } catch (e) {
       set({ error: String(e) });
     }

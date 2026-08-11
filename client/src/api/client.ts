@@ -13,6 +13,7 @@ import type {
   MessageOut,
   ModelOut,
   ProjectOut,
+  RollbackAffected,
   RollbackPreviewFile,
   RollbackPreviewOut,
   RollbackResult,
@@ -261,6 +262,7 @@ export const api = {
   // ── 会话数据查询 ──
   listSessionMessages: (sessionId: number) => get<MessageOut[]>(`/turns/sessions/${sessionId}/messages`),
   listSessionTasks: (sessionId: number) => get<TaskOut[]>(`/turns/sessions/${sessionId}/tasks`),
+  listSessionArtifacts: (sessionId: number) => get<ArtifactOut[]>(`/turns/sessions/${sessionId}/artifacts`),
   listSessionSnapshots: (sessionId: number) => get<TurnSnapshotOut[]>(`/turns/sessions/${sessionId}/snapshots`),
   listSessionAudit: (sessionId: number) => get<AuditLogOut[]>(`/turns/sessions/${sessionId}/audit`),
   getSessionUsage: (sessionId: number) => get<{
@@ -390,5 +392,5 @@ export const api = {
 export type {
   ProjectOut, SessionOut, TurnOut, MessageOut, TaskOut, ArtifactOut, ModelOut,
   ExecPolicyRuleOut, HookConfigOut, MemoryEntryOut, ScheduledTaskOut,
-  RollbackPreviewFile, RollbackPreviewOut, FileChangeOut, FileDiffOut,
+  RollbackPreviewFile, RollbackAffected, RollbackPreviewOut, FileChangeOut, FileDiffOut,
 };

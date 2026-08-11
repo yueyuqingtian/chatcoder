@@ -80,6 +80,8 @@ export function MessageFlow() {
   const currentSessionId = useChatStore((s) => s.currentSessionId);
   const runningTurnId = useChatStore((s) => s.runningTurnId);
   const isRunning = useChatStore((s) => s.isRunning);
+  // v12: 已回滚 turn 标识（时间线横幅 + 产物灰置）
+  const turns = useChatStore((s) => s.turns);
   const streamingBuffers = useChatStore((s) => s.streamingBuffers);
   const thinkingBuffers = useChatStore((s) => s.thinkingBuffers);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -234,11 +236,10 @@ export function MessageFlow() {
   const renderRow = (index: number) => {
     if (index < entries.length) {
       const entry = entries[index];
-      return entry.kind === "turn" ? (
-        <TurnGroup entry={entry} isRunning={runningTurnId === entry.turnId} />
-      ) : (
-        <StandaloneEntry entry={entry} />
-      );
+      if (entry.kind !== "turn") return <StandaloneEntry entry={entry} />;
+      // v12: 已回滚 turn 显示专用横幅（回滚后消息被软删，以此占位区分「回滚了」与「没执行」）
+      const rolledBack = turns.find((t) => t.id === entry.turnId)?.status === "rolled_back";
+      return <TurnGroup entry={entry} isRunning={runningTurnId === entry.turnId} rolledBack={rolledBack} />;
     }
     return <StreamingText />;
   };

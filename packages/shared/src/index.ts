@@ -268,10 +268,18 @@ export interface RollbackPreviewFile {
   after: string | null;
 }
 
+export interface RollbackAffected {
+  /** 该 turn 及其之后将被取消的任务数 */
+  tasks: number;
+  /** 该 turn 及其之后将被软删的消息数 */
+  messages: number;
+}
+
 export interface RollbackPreviewOut {
   ok: boolean;
   turn_id: number;
   files: RollbackPreviewFile[];
+  affected: RollbackAffected;
 }
 
 /** 变更审核：单文件变更元数据（不含文件全文）。 */

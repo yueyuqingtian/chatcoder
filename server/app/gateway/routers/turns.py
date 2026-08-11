@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import MsgType, SenderType
-from app.gateway.schemas import (FileChangeOut, FileDiffOut, MessageOut, ReviewBatchBody,
+from app.gateway.schemas import (ArtifactOut, FileChangeOut, FileDiffOut, MessageOut, ReviewBatchBody,
                                  RollbackPreviewFile, RollbackPreviewOut,
                                  RollbackResult, TaskOut, TurnCreate, TurnOut, TurnSnapshotOut)
 from app.orchestration import engine
@@ -142,7 +142,10 @@ async def rollback_preview(turn_id: int, db: AsyncSession = Depends(get_db)):
             files: list[RollbackPreviewFile] = []
         else:
             files = [RollbackPreviewFile(**f) for f in await rollback_service.preview_turn_files(workspace, writes)]
-        return RollbackPreviewOut(ok=True, turn_id=turn_id, files=files)
+        # v12: 连带影响统计（该 turn 及其之后将被取消的任务/软删的消息）
+        affected = await rollback_service.count_rollback_affected(db, snap.session_id, turn_id)
+        return RollbackPreviewOut(ok=True, turn_id=turn_id, files=files,
+                                  affected=affected)
     except HTTPException:
         raise
     except Exception as e:
@@ -294,6 +297,12 @@ async def get_session_usage(session_id: int, db: AsyncSession = Depends(get_db))
 @router.get("/sessions/{session_id}/tasks", response_model=list[TaskOut])
 async def list_tasks(session_id: int, db: AsyncSession = Depends(get_db)):
     return await task_service.list_tasks(db, session_id)
+
+
+@router.get("/sessions/{session_id}/artifacts", response_model=list[ArtifactOut])
+async def list_session_artifacts(session_id: int, db: AsyncSession = Depends(get_db)):
+    """产物聚合（v12）：Artifact 表全量（含 title/summary/files），前端按任务分组展示。"""
+    return await task_service.list_artifacts(db, session_id)
 
 
 @router.get("/sessions/{session_id}/snapshots", response_model=list[TurnSnapshotOut])

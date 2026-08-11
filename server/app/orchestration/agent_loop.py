@@ -11,6 +11,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -659,6 +660,18 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         session = subagent_context.get("session")
         cancel_event = subagent_context.get("cancel_event")
         main_task_id = subagent_context.get("main_task_id")
+        # v12: 兜底解析主任务（步骤载体）——context 缺失时按 turn 查最早的任务记录，
+        # 保证子代理任务 parent_task_id 始终指向真实的主任务（而非退化用 turn_id）。
+        if not main_task_id:
+            from app.persistence.models.task import Task
+            mt_res = await db.execute(
+                select(Task).where(
+                    Task.session_id == session_id,
+                    Task.turn_id == turn_id,
+                ).order_by(Task.id.asc()).limit(1)
+            )
+            mt = mt_res.scalars().first()
+            main_task_id = mt.id if mt else None
         if manager is None or project is None:
             return "Error: subagent manager unavailable"
 

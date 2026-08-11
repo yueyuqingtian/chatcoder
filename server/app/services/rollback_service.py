@@ -154,6 +154,34 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
     from app.services import task_service, turn_service
     await task_service.cancel_turn_tasks(db, snap.session_id, turn_id)
 
+    # 1.2 产物清扫（v12）：该 turn 及其之后任务的 artifact_ids 置空，
+    #     Artifact 行 task_id 置 NULL（保留行，前端不再按任务展示），
+    #     该 turn 的 FileReview 审核记录作废删除——回滚后产物区不残留已撤销文件。
+    from app.persistence.models.task import Artifact, Task
+    task_res = await db.execute(
+        select(Task).where(
+            Task.session_id == snap.session_id,
+            Task.turn_id >= turn_id,
+        )
+    )
+    rollback_task_ids: list[int] = []
+    for t in task_res.scalars().all():
+        if t.artifact_ids:
+            t.artifact_ids = []
+            rollback_task_ids.append(t.id)
+    if rollback_task_ids:
+        art_res = await db.execute(
+            select(Artifact).where(Artifact.task_id.in_(rollback_task_ids))
+        )
+        for a in art_res.scalars().all():
+            a.task_id = None
+    review_res = await db.execute(
+        select(FileReview).where(FileReview.turn_id == turn_id)
+    )
+    for rv in review_res.scalars().all():
+        await db.delete(rv)
+    await db.flush()
+
     # 2. 文件回滚（v9 精确回滚：只撤销 AI 改动的那部分，保留用户手动改动；
     #    绝不全局 git 恢复，避免误伤非当前 turn 的改动）
     writes = await list_turn_writes(db, snap.session_id, turn_id)
@@ -230,6 +258,49 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
 async def _snapshot_for_turn(db: AsyncSession, turn_id: int) -> TurnSnapshot | None:
     res = await db.execute(select(TurnSnapshot).where(TurnSnapshot.turn_id == turn_id))
     return res.scalars().first()
+
+
+async def count_rollback_affected(db: AsyncSession, session_id: int, turn_id: int) -> dict:
+    """统计本次回滚将连带撤销的任务与消息数（与 rollback_turn 执行口径一致）。
+
+    任务：该 turn 及其之后 pending/running 的任务（将被置 cancelled）。
+    消息：主线程该 turn 及其之后未删消息 + 该 turn 及其之后子代理线程消息（将被软删）。
+    """
+    from app.persistence.models.agent import Agent
+    from app.persistence.models.task import Task
+
+    res = await db.execute(
+        select(Task).where(
+            Task.session_id == session_id,
+            Task.status.in_(["pending", "running"]),
+        )
+    )
+    tasks = 0
+    for t in res.scalars().all():
+        if (t.turn_id or 0) >= turn_id:
+            tasks += 1
+
+    sub_res = await db.execute(
+        select(Agent).where(
+            Agent.session_id == session_id,
+            Agent.kind == "sub",
+            Agent.turn_id >= turn_id,
+        )
+    )
+    sub_ids = {a.id for a in sub_res.scalars().all()}
+    msg_res = await db.execute(
+        select(Message).where(
+            Message.session_id == session_id,
+            Message.deleted == False,  # noqa: E712
+            Message.turn_id.is_not(None),
+            Message.turn_id >= turn_id,
+        )
+    )
+    messages = sum(
+        1 for m in msg_res.scalars().all()
+        if m.thread_id is None or m.thread_id in sub_ids
+    )
+    return {"tasks": tasks, "messages": messages}
 
 
 # ── 写盘记录（v9 精确回滚依据）──

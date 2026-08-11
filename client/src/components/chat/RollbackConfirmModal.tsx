@@ -86,7 +86,7 @@ export function RollbackConfirmModal() {
   const [confirming, setConfirming] = useState(false);
 
   if (!pending) return null;
-  const { turnId, files } = pending;
+  const { turnId, files, affected } = pending;
   const conflictCount = files.filter((f) => f.conflict).length;
 
   return (
@@ -101,6 +101,18 @@ export function RollbackConfirmModal() {
             将回滚 <b>turn #{turnId}</b> 及其后的更改（撤销 AI 的改动，保留你的手动改动）。
             共涉及 <b>{files.length}</b> 个文件：
           </p>
+          {(affected.tasks > 0 || affected.messages > 0) && (
+            <p className="rc-conflict-note" style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
+              <IconAlertTriangle size={13} style={{ flexShrink: 0, marginTop: 1 }} />
+              <span>
+                将连带撤销该 turn 之后的执行结果：
+                {affected.tasks > 0 && <>取消 <b>{affected.tasks}</b> 个任务</>}
+                {affected.tasks > 0 && affected.messages > 0 && "、"}
+                {affected.messages > 0 && <>软删 <b>{affected.messages}</b> 条消息</>}
+                。
+              </span>
+            </p>
+          )}
           {conflictCount > 0 && (
             <p className="rc-conflict-note" style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
               <IconAlertTriangle size={13} style={{ flexShrink: 0, marginTop: 1 }} />

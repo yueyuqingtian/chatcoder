@@ -11,6 +11,7 @@ import { ArtifactList } from "./ArtifactList";
 import { ReviewCard } from "./ReviewCard";
 import { MessageActions } from "./MessageActions";
 import { MarkdownContent } from "../MarkdownContent";
+import { IconRotateCcw } from "../icons";
 import type { TimelineEntry } from "./timeline";
 import { msgText } from "./timeline";
 import { useChatStore } from "../../store/chat";
@@ -20,9 +21,11 @@ import { useChatStore } from "../../store/chat";
  * 流式 delta 只更新 streamingBuffers，entry 引用不变，
  * 已完成的历史 turn 在每帧流式刷新时跳过重渲染。
  */
-export const TurnGroup = memo(function TurnGroup({ entry, isRunning }: {
+export const TurnGroup = memo(function TurnGroup({ entry, isRunning, rolledBack = false }: {
   entry: Extract<TimelineEntry, { kind: "turn" }>;
   isRunning: boolean;
+  /** v12: 该 turn 已回滚：显示已回滚横幅，隐藏回滚入口、产物灰置。 */
+  rolledBack?: boolean;
 }) {
   const requestRollbackPreview = useChatStore((s) => s.requestRollbackPreview);
   // v7: 按消息时间顺序渲染；timeline 已保证用户消息在最前
@@ -38,7 +41,8 @@ export const TurnGroup = memo(function TurnGroup({ entry, isRunning }: {
     () => { if (turnId != null) requestRollbackPreview(turnId); },
     [turnId, requestRollbackPreview],
   );
-  const onRollback = turnId != null ? rollbackFn : undefined;
+  // v12: 已回滚 turn 不再提供回滚入口
+  const onRollback = turnId != null && !rolledBack ? rollbackFn : undefined;
   // v10: 整个 AI 回复作为整体——复制按钮只出现在最后一个 text 段下方
   let lastTextIdx = -1;
   for (let k = items.length - 1; k >= 0; k--) {
@@ -47,6 +51,23 @@ export const TurnGroup = memo(function TurnGroup({ entry, isRunning }: {
 
   return (
     <div className="turn-group">
+      {/* v12: 已回滚横幅（消息已软删，以横幅占位区分「回滚了」与「没执行」） */}
+      {rolledBack && (
+        <>
+          <style>{`
+            .turn-rolledback-banner {
+              display: flex; align-items: center; gap: 6px;
+              padding: 7px 12px; margin: 2px 0 10px 28px;
+              border: 1px dashed var(--text-3); border-radius: var(--radius-sm);
+              color: var(--text-3); font-size: 12px; background: var(--bg-muted);
+            }
+          `}</style>
+          <div className="turn-rolledback-banner">
+            <IconRotateCcw size={12} />
+            该轮次已回滚（其改动已撤销，期间消息已清理）
+          </div>
+        </>
+      )}
       {items.map((item, i) => {
         switch (item.kind) {
           case "user":
@@ -88,7 +109,7 @@ export const TurnGroup = memo(function TurnGroup({ entry, isRunning }: {
           case "tools":
             return <ToolTree key={i} nodes={item.nodes} />;
           case "artifacts":
-            return <ArtifactList key={i} msgs={item.msgs} turnId={turnId} />;
+            return <ArtifactList key={i} msgs={item.msgs} turnId={turnId} rolledBack={rolledBack} />;
           case "summary":
             return (
               <div key={i} className="turn-item turn-item-summary">
@@ -105,8 +126,8 @@ export const TurnGroup = memo(function TurnGroup({ entry, isRunning }: {
             return null;
         }
       })}
-      {/* v11: turn 完成后的变更审核卡片（仅在完成且有写盘变更时显示） */}
-      <ReviewCard turnId={turnId} isRunning={isRunning} />
+      {/* v11: turn 完成后的变更审核卡片（仅在完成且有写盘变更时显示；已回滚 turn 不显示） */}
+      {!rolledBack && <ReviewCard turnId={turnId} isRunning={isRunning} />}
     </div>
   );
 });
