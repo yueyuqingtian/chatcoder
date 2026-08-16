@@ -8,6 +8,7 @@ import { api, type TreeNode } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { usePanelStore } from "../../store/panel";
 import { IconArrowToggle, IconFileText, IconFolder, IconFolderOpen, IconRefresh } from "../icons";
+import { MarkdownContent } from "../MarkdownContent";
 
 /** 文件扩展名 -> Monaco 语言 ID 映射（后端只返回扩展名，这里兜底转换）。 */
 const EXT_LANG_MAP: Record<string, string> = {
@@ -114,6 +115,7 @@ export function FileTreePanel() {
   const currentProjectId = useChatStore((s) => s.currentProjectId);
   const projects = useChatStore((s) => s.projects);
   const previewPath = usePanelStore((s) => s.previewPath);
+  const previewLine = usePanelStore((s) => s.previewLine);
   const setPreviewPath = usePanelStore((s) => s.setPreviewPath);
   const diffPreview = usePanelStore((s) => s.diffPreview);
   const [tree, setTree] = useState<TreeNode[]>([]);
@@ -123,8 +125,12 @@ export function FileTreePanel() {
   const [contentError, setContentError] = useState<string | null>(null);
   // v11: 变更对比 / 当前内容 视图切换（仅当 diff 与当前文件匹配时生效）
   const [viewMode, setViewMode] = useState<"diff" | "content">("diff");
+  // v17: Markdown 文件支持 预览/源码 切换（默认预览渲染）
+  const [mdView, setMdView] = useState<"preview" | "source">("preview");
   const treeRef = useRef<HTMLDivElement>(null);
   const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  // v2.2 (对齐 zcode 3.14.2): Monaco 编辑器实例引用（grep 行号定位）
+  const editorRef = useRef<{ revealLineInCenter: (line: number) => void; setPosition: (p: { lineNumber: number; column: number }) => void; focus: () => void } | null>(null);
 
   const project = projects.find((p) => p.id === currentProjectId);
 
@@ -166,6 +172,18 @@ export function FileTreePanel() {
  useEffect(() => {
    if (previewPath) loadFile(previewPath);
  }, [previewPath]);
+
+  // v2.2 (对齐 zcode 3.14.2): grep path:line 跳转 → Monaco 定位到行
+  useEffect(() => {
+    if (previewLine != null && editorRef.current) {
+      const editor = editorRef.current;
+      try {
+        editor.revealLineInCenter(previewLine);
+        editor.setPosition({ lineNumber: previewLine, column: 1 });
+        editor.focus();
+      } catch { /* ignore */ }
+    }
+  }, [previewLine, content, contentLang]);
 
   // 打开文件后自动展开父级目录并滚动定位到该文件
   useEffect(() => {
@@ -229,6 +247,12 @@ export function FileTreePanel() {
                 <button className={viewMode === "diff" ? "active" : ""} onClick={() => setViewMode("diff")}>变更对比</button>
                 <button className={viewMode === "content" ? "active" : ""} onClick={() => setViewMode("content")}>当前内容</button>
               </div>
+              {/\.(md|markdown)$/i.test(previewPath) && (
+                <div className="ft-diff-toggle">
+                  <button className={mdView === "preview" ? "active" : ""} onClick={() => setMdView("preview")}>预览</button>
+                  <button className={mdView === "source" ? "active" : ""} onClick={() => setMdView("source")}>源码</button>
+                </div>
+              )}
               <button className="ft-close" onClick={() => setPreviewPath(null)}>✕</button>
             </div>
             {showDiff ? (
@@ -248,6 +272,10 @@ export function FileTreePanel() {
                 <p>{contentError}</p>
                 <button className="btn-ghost" onClick={() => openExternal(previewPath)}>在外部打开</button>
               </div>
+            ) : /\.(md|markdown)$/i.test(previewPath) && mdView === "preview" ? (
+              <div className="ft-md-preview">
+                <MarkdownContent>{content}</MarkdownContent>
+              </div>
             ) : (
               <Editor
                 height="100%"
@@ -255,6 +283,7 @@ export function FileTreePanel() {
                 value={content}
                 theme={document.documentElement.getAttribute("data-theme") === "dark" ? "vs-dark" : "light"}
                 options={{ readOnly: true, minimap: { enabled: false }, fontSize: 12 }}
+                onMount={(editor) => { editorRef.current = editor; }}
               />
             )}
           </div>

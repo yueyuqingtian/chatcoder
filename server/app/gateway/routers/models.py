@@ -11,11 +11,13 @@ from app.services import model_service
 router = APIRouter()
 
 
-def _to_out(m) -> ModelOut:
+def _to_out(m, provider_name: str | None = None) -> ModelOut:
     return ModelOut(
         id=m.id,
         name=m.name,
         provider=m.provider,
+        provider_id=getattr(m, "provider_id", None),
+        provider_name=provider_name,
         base_url=m.base_url,
         intelligence_level=m.intelligence_level,
         context_window=m.context_window,
@@ -34,6 +36,7 @@ async def create_model(body: ModelCreate, db: AsyncSession = Depends(get_db)):
         db,
         name=body.name,
         provider=body.provider,
+        provider_id=body.provider_id,
         base_url=body.base_url,
         intelligence_level=body.intelligence_level,
         context_window=body.context_window,
@@ -58,7 +61,14 @@ async def create_model(body: ModelCreate, db: AsyncSession = Depends(get_db)):
 @router.get("/models", response_model=list[ModelOut])
 async def list_models(db: AsyncSession = Depends(get_db)):
     models = await model_service.list_models(db)
-    return [_to_out(m) for m in models]
+    # v16: 附带供应商名，前端选择器按供应商分组展示
+    from app.persistence.models.model_reg import Provider
+    provider_ids = {m.provider_id for m in models if getattr(m, "provider_id", None)}
+    provider_names: dict[int, str] = {}
+    if provider_ids:
+        res = await db.execute(select(Provider).where(Provider.id.in_(provider_ids)))
+        provider_names = {p.id: p.name for p in res.scalars().all()}
+    return [_to_out(m, provider_names.get(getattr(m, "provider_id", None))) for m in models]
 
 
 @router.patch("/models/{model_id}", response_model=ModelOut)
@@ -68,6 +78,7 @@ async def update_model(model_id: int, body: ModelUpdate, db: AsyncSession = Depe
         db, model_id,
         name=body.name,
         provider=body.provider,
+        provider_id=body.provider_id,
         base_url=body.base_url,
         intelligence_level=body.intelligence_level,
         context_window=body.context_window,

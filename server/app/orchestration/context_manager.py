@@ -6,8 +6,11 @@
 5. Project Structure  6. Session Memory  7. Subagent Handoff  8. Skills/MCP
 9. Global Context  10. Token Budget
 """
+import base64
 import logging
+import mimetypes
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +20,15 @@ from app.orchestration.rules_loader import load_session_rules, project_structure
 
 logger = logging.getLogger(__name__)
 
+# v14: 附件类型中文标签（前端上传返回的 type 字段）
+_ATT_TYPE_LABEL = {
+    "image": "图片",
+    "text": "文本",
+    "spreadsheet": "表格",
+    "document": "文档",
+    "unsupported": "附件",
+}
+
 
 @dataclass
 class ContextBundle:
@@ -24,6 +36,8 @@ class ContextBundle:
     developer_parts: list[str] = field(default_factory=list)
     history: list[ChatMessage] = field(default_factory=list)
     instruction: str = ""
+    # v15: 多模态指令内容块（图片附件直接以 image_url 注入当前用户消息）
+    instruction_blocks: list[dict] | None = None
 
     def to_messages(self) -> list[ChatMessage]:
         """组装 system + 合并 developer + 历史 + user 指令。"""
@@ -31,8 +45,11 @@ class ContextBundle:
         if self.developer_parts:
             messages.append(ChatMessage(role="developer", content="\n\n".join(self.developer_parts)))
         messages.extend(self.history)
-        if self.instruction:
-            messages.append(ChatMessage(role="user", content=self.instruction))
+        if self.instruction or self.instruction_blocks:
+            messages.append(ChatMessage(
+                role="user", content=self.instruction,
+                content_blocks=self.instruction_blocks,
+            ))
         return messages
 
 
@@ -86,9 +103,62 @@ async def _session_memory_summary(db: AsyncSession, session_id: int) -> str:
         return ""
 
 
+# v15: 多模态图片注入上限（防单次请求过大）
+_MAX_INLINE_IMAGES = 4
+_MAX_INLINE_IMAGE_BYTES = 4 * 1024 * 1024  # 4MB/张
+
+
+def _load_inline_image_blocks(attachments: list[dict]) -> tuple[list[dict], list[str]]:
+    """把图片附件读成 image_url 内容块（供多模态模型直接看图）。
+
+    返回 (blocks, notes)：notes 记录被跳过图片的原因，注入上下文让 AI 知情。
+    """
+    from app.core.config import settings
+    from app.services.doc_parser import is_image
+
+    try:
+        root = Path(settings.uploads_dir).resolve()
+    except (OSError, ValueError):
+        return [], []
+    blocks: list[dict] = []
+    notes: list[str] = []
+    for a in attachments:
+        if not isinstance(a, dict):
+            continue
+        rel = str(a.get("path") or "")
+        filename = str(a.get("filename") or "")
+        if not rel or not is_image(filename or rel):
+            continue
+        if len(blocks) >= _MAX_INLINE_IMAGES:
+            notes.append(f"- {filename}: 超出单次注入图片上限({_MAX_INLINE_IMAGES}张)，未直接附带")
+            continue
+        try:
+            target = (root / rel).resolve()
+            target.relative_to(root)
+        except (OSError, ValueError):
+            notes.append(f"- {filename}: 路径非法({rel})，未直接附带")
+            continue
+        if not target.is_file():
+            notes.append(f"- {filename}: 文件不存在({rel})，未直接附带")
+            continue
+        size = target.stat().st_size
+        if size > _MAX_INLINE_IMAGE_BYTES:
+            notes.append(f"- {filename}: 图片过大({size // 1024 // 1024}MB)，未直接附带")
+            continue
+        try:
+            b64 = base64.b64encode(target.read_bytes()).decode("ascii")
+        except OSError:
+            notes.append(f"- {filename}: 读取失败，未直接附带")
+            continue
+        mime = str(a.get("mime_type") or "") or mimetypes.guess_type(target.name)[0] or "image/png"
+        blocks.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+    return blocks, notes
+
+
 async def build_main_context(
     db: AsyncSession, *, agent, session, project, turn, user_message: str,
     attachments: list[dict] | None = None,
+    multimodal: bool = False,
 ) -> ContextBundle:
     """构建主代理上下文。"""
     workspace = session.worktree_path or (project.path if project else "")
@@ -150,8 +220,11 @@ async def build_main_context(
 
         # v6.5: 保留 text + tool_call + tool_result（过滤 thinking/plan 等非对话类型）。
         # 旧版只保留 text，导致 AI 看不到工具调用历史，上下文严重偏低且无法复用工具结果。
+        # v1.2: thinking 也保留——thinking 模式网关要求工具调用回合把历史
+        # reasoning_content 回传，历史重建时用 thinking 消息补回该字段。
         from app.core.enums import MsgType as _MsgType
-        _keep_types = {_MsgType.TEXT.value, _MsgType.TOOL_CALL.value, _MsgType.TOOL_RESULT.value}
+        _keep_types = {_MsgType.TEXT.value, _MsgType.TOOL_CALL.value,
+                       _MsgType.TOOL_RESULT.value, _MsgType.THINKING.value}
         unsummarized = [m for m in unsummarized if m.msg_type in _keep_types]
 
         # Token-budget 选取：从最新向前贪心，直到预算耗尽
@@ -163,11 +236,11 @@ async def build_main_context(
         if recent:
             bundle.history.append(_CM(
                 role="user",
-                content="## Complete Conversation History (full text, not summary)\nBelow is the complete history of our conversation so far. This is the actual original text, NOT a compressed summary. You can see and reference all of it."
+                content="## Conversation History\nBelow is our conversation history. Text messages are shown in full; tool results are the actual outputs as recorded (very long tool outputs may be truncated). You can reference all of it."
             ))
             bundle.history.append(_CM(
                 role="assistant",
-                content="Understood. I can see the complete conversation history below and will reference it as needed."
+                content="Understood. I can see the conversation history below and will reference it as needed."
             ))
 
         # v6.5: 转成 ChatMessage，正确处理 text/tool_call/tool_result 三种类型。
@@ -180,15 +253,44 @@ async def build_main_context(
         # 网关报 "An assistant message with 'tool_calls' must be followed by tool messages"。
         # 因此将紧随 tool_call 之前的 agent 文本合并进同一条 assistant(tool_calls) 消息。
         _pending_agent_text = ""
+        # v1.2: 暂存紧随 tool_call 之前的思考内容，回传为 assistant 的 reasoning_content
+        # （thinking 模式网关要求，缺失会 400）
+        _pending_thinking = ""
+
+        def _flush_agent_text() -> None:
+            """把暂存的 agent 文本（及其思考内容）落为 assistant 消息并清空暂存。"""
+            nonlocal _pending_agent_text, _pending_thinking
+            if _pending_agent_text:
+                _cm = _CM(role="assistant", content=_pending_agent_text)
+                if _pending_thinking:
+                    _cm.reasoning_content = _pending_thinking
+                bundle.history.append(_cm)
+            _pending_agent_text = ""
+            _pending_thinking = ""
+
         for m in recent:
+            if m.msg_type == _MsgType.THINKING.value:
+                # v1.2: 思考块不直接转成消息，暂存到紧随的 assistant 消息
+                _pending_thinking = m.content.get("text") or _pending_thinking
+                continue
             if m.msg_type == _MsgType.TEXT.value:
                 text = m.content.get("text") or m.content.get("note") or ""
-                if not text:
-                    continue
+                atts = m.content.get("attachments") or []
+                att_note = ""
+                if atts and isinstance(atts, list):
+                    att_note = "\n".join(
+                        f"- {a.get('filename') or '(未命名)'}: path=`{a.get('path') or ''}`"
+                        for a in atts if isinstance(a, dict) and a.get("path")
+                    )
+                    if att_note:
+                        att_note = "（该消息附带附件：\n" + att_note + "\n如需内容请调用 read_attachment 读取 path）"
                 if m.sender_type == "user":
-                    if _pending_agent_text:
-                        bundle.history.append(_CM(role="assistant", content=_pending_agent_text))
-                        _pending_agent_text = ""
+                    # v14: 历史用户消息若带附件（文件地址），把路径一并注入，
+                    # AI 可随时通过 read_attachment 回读附件内容；仅附件无文字的消息也注入
+                    if not text and not att_note:
+                        continue
+                    text = f"{text}\n{att_note}" if att_note else text
+                    _flush_agent_text()
                     bundle.history.append(_CM(role="user", content=text))
                 else:
                     # 暂存 agent 文本，等待下一个 tool_call 合并
@@ -212,30 +314,30 @@ async def build_main_context(
                         "name": tool_name,
                         "arguments": args,
                     }],
+                    # v1.2: 回传思考内容（thinking 模式网关要求）
+                    reasoning_content=_pending_thinking or None,
                 ))
                 _pending_agent_text = ""
+                _pending_thinking = ""
             elif m.msg_type == _MsgType.TOOL_RESULT.value:
                 # 工具结果作为 tool 角色消息
-                if _pending_agent_text:
-                    bundle.history.append(_CM(role="assistant", content=_pending_agent_text))
-                    _pending_agent_text = ""
+                _flush_agent_text()
                 tool_name = m.content.get("tool", "")
                 call_key = m.content.get("call_key", "") or f"call_{m.id}"
                 output = m.content.get("output", "") or ""
                 error = m.content.get("error", "") or ""
                 result_text = output or error or "(无输出)"
-                # 截断过长的工具输出，避免单条结果撑爆窗口
-                if len(result_text) > 4000:
-                    result_text = result_text[:4000] + "\n...(工具输出已截断)"
+                # 截断过长的工具输出，避免单条结果撑爆窗口（与落库截断 MAX_TOOL_OUTPUT_CHARS 对齐）
+                if len(result_text) > 16000:
+                    result_text = result_text[:16000] + "\n...(工具输出已截断)"
                 bundle.history.append(_CM(
                     role="tool",
                     content=result_text,
                     name=tool_name,
                     tool_call_id=call_key,
                 ))
-        if _pending_agent_text:
-            # 循环结束：暂存的 agent 文本（无后续 tool_call）作为独立 assistant 消息
-            bundle.history.append(_CM(role="assistant", content=_pending_agent_text))
+        # 循环结束：暂存的 agent 文本（无后续 tool_call）作为独立 assistant 消息
+        _flush_agent_text()
 
         logger.info(
             "[context] session=%s 注入历史消息 %d 条 (window=%dK, budget=%d tokens, summarized=%d, recent=%d)",
@@ -255,11 +357,43 @@ async def build_main_context(
         bundle.developer_parts.append(f"## Available Skills\n{skills}")
     if mcp:
         bundle.developer_parts.append(f"## Available MCP Servers\n{mcp}")
-    # 附件注入
+    # 附件注入（v14: 附件已统一为文件地址，注入路径清单 + 读取工具说明，
+    # AI 通过 read_attachment 工具按 path 读取图片/文档内容）
+    # v15: 多模态模型时图片直接以 image_url 内容块注入当前用户消息，
+    # AI 无需工具调用即可看图；非图片/非多模态仍走 read_attachment。
     if attachments:
-        doc_parts = [a.get("content") for a in attachments if a.get("content")]
-        if doc_parts:
-            bundle.instruction += "\n\n## 用户上传的附件\n" + "\n\n".join(str(p) for p in doc_parts)
+        att_lines = [
+            f"- {a.get('filename') or '(未命名)'}（{_ATT_TYPE_LABEL.get(a.get('type'), a.get('mime_type') or '附件')}）: "
+            f"path=`{a.get('path') or ''}`"
+            for a in attachments if isinstance(a, dict) and a.get("path")
+        ]
+        if att_lines:
+            hint = (
+                "## 用户上传的附件\n"
+                "用户消息附带了以下文件（已保存到服务器，path 为附件实际地址）：\n"
+                + "\n".join(att_lines)
+            )
+            if multimodal:
+                blocks, notes = _load_inline_image_blocks(attachments)
+                if blocks:
+                    bundle.instruction_blocks = blocks
+                    hint += (
+                        f"\n\n其中 {len(blocks)} 张图片已直接附带在用户消息中，"
+                        "请直接查看图片内容回答，无需调用任何工具。"
+                    )
+                if notes:
+                    hint += "\n以下图片未能直接附带：\n" + "\n".join(notes)
+                hint += (
+                    "\n\n其他文件（docx/pdf/xlsx/txt 等）阅读方法：调用 read_attachment 工具读取，"
+                    "参数 path 使用上面的附件路径，返回解析文本。"
+                )
+            else:
+                hint += (
+                    "\n\n阅读方法：调用 read_attachment 工具读取，参数 path 使用上面的附件路径"
+                    "（如 `1a2b3c/报告.docx`，不要自行猜测绝对路径）。"
+                    "docx/pdf/xlsx/txt 等返回解析文本。"
+                )
+            bundle.developer_parts.append(hint)
     return bundle
 
 

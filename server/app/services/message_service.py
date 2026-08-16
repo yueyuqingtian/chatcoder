@@ -39,6 +39,11 @@ async def create_message(
     )
     db.add(msg)
     await db.flush()
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
     if broadcast:
         try:
             from app.gateway.ws import manager as ws_manager

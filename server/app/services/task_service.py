@@ -8,11 +8,16 @@ from app.persistence.models.task import Artifact, Task
 async def create_task(db: AsyncSession, *, session_id: int, title: str,
                       description: str | None = None, acceptance_criteria: str | None = None,
                       turn_id: int | None = None, agent_id: int | None = None,
-                      parent_task_id: int | None = None, priority: int = 0) -> Task:
+                      parent_task_id: int | None = None, priority: int = 0,
+                      kind: str = "request", depends_on: list[int] | None = None,
+                      estimate: int | None = None, is_hidden: bool = False,
+                      status: str = "pending") -> Task:
     task = Task(
         session_id=session_id, title=title, description=description,
         acceptance_criteria=acceptance_criteria, turn_id=turn_id,
         agent_id=agent_id, parent_task_id=parent_task_id, priority=priority,
+        kind=kind, depends_on=depends_on, estimate=estimate, is_hidden=is_hidden,
+        status=status,
     )
     db.add(task)
     await db.flush()
@@ -60,7 +65,7 @@ async def cancel_turn_tasks(db: AsyncSession, session_id: int, turn_id: int) -> 
     res = await db.execute(
         select(Task).where(
             Task.session_id == session_id,
-            Task.status.in_(["pending", "running"]),
+            Task.status.in_(["proposed", "pending", "running"]),
         )
     )
     count = 0

@@ -7,15 +7,17 @@ from app.persistence.models.hook import HookConfig
 from app.persistence.models.knowledge import KnowledgeBase, KnowledgeDoc
 from app.persistence.models.memory import MemoryEntry
 from app.persistence.models.message import Message, Session
-from app.persistence.models.model_reg import Model
+from app.persistence.models.model_reg import Model, Provider
 from app.persistence.models.project import Project
 from app.persistence.models.review import FileReview
 from app.persistence.models.rollback import TurnSnapshot
 from app.persistence.models.scheduled import ScheduledTask
 from app.persistence.models.skill import McpServer, Skill
+from app.persistence.models.subagent_profile import SubagentProfile
 from app.persistence.models.task import Artifact, Task
 from app.persistence.models.turn import Turn
 from app.persistence.models.tenant import Tenant, User
+from app.persistence.models.usage_record import UsageRecord
 
 __all__ = [
     "Tenant",
@@ -28,6 +30,7 @@ __all__ = [
     "Task",
     "Artifact",
     "Model",
+    "Provider",
     "ScheduledTask",
     "ConfigProfile",
     "ExecPolicyRule",
@@ -40,4 +43,6 @@ __all__ = [
     "KnowledgeDoc",
     "Skill",
     "McpServer",
+    "SubagentProfile",
+    "UsageRecord",
 ]

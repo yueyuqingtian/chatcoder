@@ -148,3 +148,43 @@ analyze_payload.py
 # ========================================
 /server/test_*.py
 /server/test_out.txt
+
+# ========================================
+# Forensic / debug artifacts (health check P0: ignore, keep files)
+# ========================================
+.zcode-extract/
+zkeys*.txt
+zsym*.txt
+*.pid
+.chatcoder/
+.codebuddy/
+.pi/
+.ta3-testing/
+.workbuddy/
+.zcode/
+server/workspace/
+
+# ========================================
+# 临时分析产物 & 一次性脚本（仓库清理后禁止再次入库）
+# ========================================
+/nls
+/remote_files.txt
+/status_out.txt
+/tracked.txt
+/tracked_files.txt
+/_tracked_files.txt
+/paste-*.png
+/main.cjs
+/research.md
+ai/
+dist_log.txt
+client/build_out.txt
+client/vite.config.js
+client/vite.config.d.ts
+server/_deploy_exe.ps1
+server/_pytest_out.txt
+server/build_log.txt
+server/verify_model_override.py
+server/*_out.txt
+*_out.txt
+*_log.txt

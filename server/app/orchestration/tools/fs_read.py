@@ -10,8 +10,13 @@ from typing import Any
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 from app.orchestration.tools.safe_path import safe_resolve
 
-_MAX_CHARS = 8000
-_MAX_LINES = 200
+_MAX_LINES = 400  # v15: 200→400，配合字符上限(tool_output_chars_read=16000)提升单次读取量，减少分页重读
+
+
+def _max_chars() -> int:
+    """fs_read 单次输出字符上限 —— 读取分级配置，避免写死常量与其它层不一致。"""
+    from app.core.config import settings
+    return settings.tool_output_chars_read
 
 
 class FsReadTool(Tool):
@@ -23,7 +28,7 @@ class FsReadTool(Tool):
         "适用于大文件分段阅读。\n"
         "- path: 文件路径（相对工作根，如 'clinic/pom.xml'，也可用绝对路径）\n"
         "- offset: 从第几行开始读（1-based，默认 1）\n"
-        "- limit: 最多读取多少行（默认 200）"
+        "- limit: 最多读取多少行（默认 200，单次最多 400 行）"
     )
 
     def function_schema(self) -> dict:
@@ -48,7 +53,7 @@ class FsReadTool(Tool):
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "最多读取多少行(默认200, 大文件可分段读取)",
+                            "description": "最多读取多少行(默认200, 单次最多400行, 大文件可分段读取)",
                         },
                     },
                     "required": ["path"],
@@ -97,8 +102,8 @@ class FsReadTool(Tool):
         result = "\n".join(formatted_lines)
 
         # 截断超长输出
-        if len(result) > _MAX_CHARS:
-            result = result[:_MAX_CHARS] + "\n...(已截断,可用更大 offset 继续读取)"
+        if len(result) > _max_chars():
+            result = result[:_max_chars()] + "\n...(已截断,可用更大 offset 继续读取)"
 
         # 头部信息
         header = f"文件: {path} (共 {total_lines} 行)"

@@ -17,10 +17,15 @@ from app.gateway.routers import (
     models,
     profiles,
     projects,
+    providers,
     scheduled,
     sessions,
+    settings as settings_routes,
     skills_mcp,
+    subagents,
     turns,
+    upload,
+    usage,
 )
 from app.gateway.ws import ws_router
 
@@ -99,12 +104,17 @@ def create_app() -> FastAPI:
     app.include_router(sessions.router, prefix="/api", tags=["sessions"])
     app.include_router(turns.router, prefix="/api", tags=["turns"])
     app.include_router(models.router, prefix="/api", tags=["models"])
+    app.include_router(providers.router, prefix="/api", tags=["providers"])
     app.include_router(scheduled.router, prefix="/api", tags=["scheduled"])
     app.include_router(profiles.router, prefix="/api", tags=["profiles"])
     app.include_router(exec_policy.router, prefix="/api", tags=["exec-policy"])
     app.include_router(hooks.router, prefix="/api", tags=["hooks"])
     app.include_router(memories.router, prefix="/api", tags=["memories"])
     app.include_router(skills_mcp.router, prefix="/api", tags=["skills-mcp"])
+    app.include_router(settings_routes.router, prefix="/api", tags=["settings"])
+    app.include_router(usage.router, prefix="/api", tags=["usage"])
+    app.include_router(subagents.router, prefix="/api", tags=["subagents"])
+    app.include_router(upload.router, prefix="/api", tags=["upload"])
     app.include_router(diagnostics.router, prefix="/api", tags=["diagnostics"])
     app.include_router(ws_router, tags=["websocket"])
 

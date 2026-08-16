@@ -22,7 +22,7 @@ os.environ.setdefault("REDIS_URL", "redis://localhost:6379/15")  # 测试库
 os.environ.setdefault("QDRANT_URL", "http://localhost:6333")
 os.environ.setdefault("WORKSPACE_ROOT", "./workspace_test")
 os.environ.setdefault("AUTO_CONFIRM_PLAN", "false")
-os.environ.setdefault("AUTO_APPROVE_TOOLS", "false")  # 测试不走自动批准
+os.environ["AUTO_APPROVE_TOOLS"] = "false"  # v1.1: 必须覆盖本机残留的 true 环境变量,测试不走自动批准
 os.environ.setdefault("APPROVAL_TIMEOUT_SEC", "2")  # 测试用短超时
 os.environ.setdefault("AGENT_MAX_STEPS", "3")
 os.environ.setdefault("JWT_SECRET", "test-secret")

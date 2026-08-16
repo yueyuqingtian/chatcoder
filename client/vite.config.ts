@@ -31,9 +31,10 @@ export default defineConfig({
     },
   },
   resolve: {
-    alias: {
-      "@": "/src",
-      "@chatcoder/shared": "/../packages/shared/src/index.ts",
-    },
+    alias: [
+      { find: "@", replacement: "/src" },
+      { find: /^@chatcoder\/shared$/, replacement: "/../packages/shared/src/index.ts" },
+      { find: /^@chatcoder\/shared\/(.+)$/, replacement: "/../packages/shared/src/$1" },
+    ],
   },
 });

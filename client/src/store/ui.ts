@@ -15,8 +15,6 @@ export interface UiPrefs {
   glassmorphism: boolean;
   /** 毛玻璃玻璃强度:0=轻柔 1=标准 2=深邃 */
   glassStrength: number;
-  /** 外部穿透（Electron 透明窗口透桌面/软件颜色） */
-  externalBackdrop: boolean;
   /** 玻璃渐变主色1 */
   glassGradientC1: string;
   /** 玻璃渐变主色2 */
@@ -51,6 +49,8 @@ export interface UiPrefs {
   sidebarIconSize: number;
   /** 左面板聚焦颜色 */
   sidebarFocusColor: string;
+  /** 设置页左侧导航宽度(px) */
+  settingsNavWidth: number;
   /** 界面语言 */
   language: Language;
 }
@@ -62,7 +62,6 @@ const DEFAULTS: UiPrefs = {
   rightPanelWidth: 420,
   glassmorphism: false,
   glassStrength: 1,
-  externalBackdrop: false,
   glassGradientC1: "",
   glassGradientC2: "",
   composerGlowColor: "",
@@ -70,16 +69,17 @@ const DEFAULTS: UiPrefs = {
   chatFontFamily: "system",
   chatFontSize: 13,
   chatBubbleWidth: 70,
-  chatLineHeight: 1.6,
+  chatLineHeight: 1.7,
   chatCodeColor: "#D98014",
   chatHeadingColor: "#1A1A1E",
   chatLinkColor: "#3B82F6",
   chatQuoteColor: "#6B6B74",
   uiBaseFontSize: 13,
-  contentMaxWidth: 840,
+  contentMaxWidth: 1120,
   sidebarFontSize: 12,
   sidebarIconSize: 14,
   sidebarFocusColor: "",
+  settingsNavWidth: 220,
   language: "zh",
 };
 
@@ -95,7 +95,10 @@ function loadPrefs(): UiPrefs {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return DEFAULTS;
-    return { ...DEFAULTS, ...JSON.parse(raw) };
+    const stored = JSON.parse(raw) as Partial<UiPrefs>;
+    // v14: 840px 是旧版默认值；仅迁移未主动调整过的旧默认，不覆盖用户自定义宽度。
+    if (stored.contentMaxWidth === 840) stored.contentMaxWidth = DEFAULTS.contentMaxWidth;
+    return { ...DEFAULTS, ...stored };
   } catch {
     return DEFAULTS;
   }
@@ -130,11 +133,8 @@ export function applyUiVars(p: UiPrefs) {
   else root.style.removeProperty("--sidebar-focus");
   root.style.fontSize = `${p.uiBaseFontSize}px`;
   root.setAttribute("data-glass", p.glassmorphism ? "on" : "off");
-  root.setAttribute("data-external", p.externalBackdrop ? "on" : "off");
-  // 同步桌面主进程（透明窗口/外部穿透）
-  try {
-    (window as any).chatcoderAPI?.setExternalBackdrop?.(!!p.externalBackdrop);
-  } catch { /* 非桌面环境忽略 */ }
+  // v15: 外部穿透已移除；清理旧版本可能遗留的 DOM 属性。
+  root.removeAttribute("data-external");
   // 玻璃强度:0=0.5x 1=1x 2=1.6x 模糊
   const strength = p.glassStrength === 2 ? 1.6 : p.glassStrength === 0 ? 0.5 : 1;
   root.style.setProperty("--glass-strength", String(strength));
@@ -146,6 +146,8 @@ export function applyUiVars(p: UiPrefs) {
   // 输入框聚焦光晕颜色
   if (p.composerGlowColor) root.style.setProperty("--composer-glow", p.composerGlowColor);
   else root.style.removeProperty("--composer-glow");
+  // v1.1: 阴影强度（此前完全未应用）
+  root.style.setProperty("--shadow-strength", String(p.shadowStrength));
   root.setAttribute("data-lang", p.language);
 }
 
@@ -159,13 +161,33 @@ export const FONT_LABELS: Record<string, { zh: string; en: string }> = {
 interface UiState extends UiPrefs {
   setLeftPanelWidth: (w: number) => void;
   setRightPanelWidth: (w: number) => void;
+  setSettingsNavWidth: (w: number) => void;
   setPrefs: (partial: Partial<UiPrefs>) => void;
   toggleGlass: () => void;
   setLanguage: (lang: Language) => void;
+  /** v1.1: 后端全局设置缓存（show_todos/show_reasoning 等） */
+  showTodos: boolean;
+  showReasoning: boolean;
+  refreshGlobalFlags: () => Promise<void>;
 }
 
 export const useUiStore = create<UiState>((set, get) => ({
   ...loadPrefs(),
+
+  // v1.1: 消息流显示开关默认开，启动后由后端全局设置刷新
+  showTodos: true,
+  showReasoning: true,
+  refreshGlobalFlags: async () => {
+    try {
+      // 动态 import 避免循环依赖（ui.ts 与 api/client 相互独立但被各组件引用）
+      const { api } = await import("../api/client");
+      const data = await api.getGlobalSettings();
+      set({
+        showTodos: data.show_todos !== false,
+        showReasoning: data.show_reasoning !== false,
+      });
+    } catch { /* 后端不可达时保持默认 */ }
+  },
 
   setLeftPanelWidth: (w) => {
     const clamped = Math.max(200, Math.min(480, Math.round(w)));
@@ -175,10 +197,16 @@ export const useUiStore = create<UiState>((set, get) => ({
   },
 
  setRightPanelWidth: (w) => {
-    const clamped = Math.max(320, Math.min(640, Math.round(w)));
+    const clamped = Math.max(320, Math.min(1200, Math.round(w))); // v1.1: 上限 640 → 1200，与外观滑杆 max 一致
     set({ rightPanelWidth: clamped });
     savePrefs({ ...get(), rightPanelWidth: clamped });
     applyUiVars({ ...get(), rightPanelWidth: clamped });
+  },
+
+  setSettingsNavWidth: (w) => {
+    const clamped = Math.max(160, Math.min(400, Math.round(w)));
+    set({ settingsNavWidth: clamped });
+    savePrefs({ ...get(), settingsNavWidth: clamped });
   },
 
   setPrefs: (partial) => {

@@ -22,6 +22,7 @@ class SenderType(str, Enum):
 
 
 class TurnStatus(str, Enum):
+    AWAITING_CONFIRMATION = "awaiting_confirmation"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -31,6 +32,8 @@ class TurnStatus(str, Enum):
 
 
 class TaskStatus(str, Enum):
+    PROPOSED = "proposed"
+    PARTIAL = "partial"
     PENDING = "pending"
     RUNNING = "running"
     DONE = "done"

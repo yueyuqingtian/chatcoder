@@ -247,11 +247,16 @@ def normalize_tool_sequence(messages: list[ChatMessage]) -> list[ChatMessage]:
 # ---------------------------------------------------------------------------
 
 def build_api_copy(
-    messages: list[ChatMessage], keep_recent_groups: int = 3,
+    messages: list[ChatMessage],
+    keep_recent_groups: int | None = None,
+    fold_budget_tokens: int | None = None,
 ) -> list[ChatMessage]:
-    """v6.0: 基于原始历史构造发给模型的 API 副本，折叠较早的 tool result，不修改原始。
+    """v6.0 + v15: 基于原始历史构造发给模型的 API 副本。
 
-    近期 keep_recent_groups 组工具调用回合保留完整（已由 _truncate_output 截断），
+    默认（fold_budget_tokens=None）不折叠任何 tool result，完整保留历史内容，
+    避免模型因"看不到自己读过的内容"而反复重读文件。
+    仅在上下文占用达到预算（fold_budget_tokens）时才折叠较早的 tool result：
+    keep_recent_groups 组工具调用回合保留完整（已由 _truncate_output 截断），
     更早的 tool result 折叠为摘要占位，减少上下文占用。
     保证不破坏 tool_call/tool_result 配对（只截断 content 不删消息）。
     """
@@ -261,6 +266,20 @@ def build_api_copy(
         return messages
 
     api = [_copy.copy(m) for m in messages]
+
+    # v15: 默认不折叠 —— 未显式给预算时完整保留历史，避免模型因内容被折叠而重读
+    if fold_budget_tokens is None:
+        return api
+
+    from app.orchestration.token_counter import estimate_messages_tokens
+    est = estimate_messages_tokens(api)
+    if est <= fold_budget_tokens:
+        logger.debug("[api_copy] 估算 %d <= 折叠预算 %d，保留全部工具结果", est, fold_budget_tokens)
+        return api
+
+    if keep_recent_groups is None:
+        from app.core.config import settings
+        keep_recent_groups = settings.auto_compact_keep_rounds
 
     # 从后往前找第 keep_recent_groups 个 assistant(tool_calls)，之前的 tool result 折叠
     keep_from = 0
@@ -284,6 +303,46 @@ def build_api_copy(
 
     if folded:
         logger.debug("[api_copy] 折叠了 %d 条较早的 tool result", folded)
+
+    # v2.2 (对齐 zcode 3.10 micro-compact): 单条超长 tool result 就地折叠——
+    # 原文落盘 .compact-cache，占位符提示可用 fs_read 恢复（防模型失忆重复读取）。
+    api = _micro_compact(api)
+    return api
+
+
+def _micro_compact(api: list[ChatMessage]) -> list[ChatMessage]:
+    """v2.2 (对齐 zcode 3.10): 单个超大工具结果 → 占位符 + 落盘引用。
+
+    与 buildClearedToolResultContent 对齐：sha256 前 8 位标识，原文写
+    {workspace}/.compact-cache/{hash8}.txt，占位文本附恢复路径提示。
+    """
+    from app.core.config import settings
+
+    limit = getattr(settings, "tool_output_chars_read", 16000) or 16000
+    for m in api:
+        if m.role != "tool" or not m.content or len(m.content) <= limit:
+            continue
+        try:
+            import hashlib
+            from pathlib import Path
+            from app.core.config import resolve_workspace_root
+
+            digest = hashlib.sha256(m.content.encode("utf-8", errors="replace")).hexdigest()[:8]
+            cache_dir = Path(resolve_workspace_root()) / ".compact-cache"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_file = cache_dir / f"{digest}.txt"
+            if not cache_file.exists():
+                cache_file.write_text(m.content, encoding="utf-8", errors="replace")
+            orig_len = len(m.content)
+            tool_name = m.name or "unknown"
+            m.content = (
+                f"[内容已折叠: 工具 {tool_name} 原始输出 {orig_len} 字符，"
+                f"sha256 前8位 {digest}] 如需完整内容，用 fs_read 读取 "
+                f".compact-cache/{digest}.txt 恢复。"
+            )
+            logger.info("[micro-compact] 折叠超长工具结果 %s (%d 字符 -> 占位符)", tool_name, orig_len)
+        except Exception:
+            logger.warning("[micro-compact] 落盘失败，保留原文(非阻塞)", exc_info=True)
     return api
 
 
@@ -342,8 +401,17 @@ async def auto_compact(
     from app.orchestration.prompts import COMPACTION_PROMPT
     from app.orchestration.token_counter import estimate_messages_tokens
 
+    # v2.2 (对齐 zcode 3.10 压缩边界): 已有边界标记时只压缩边界之后的内容，
+    # 防止对历史摘要反复二次摘要（摘要嵌套失真）。
+    pre_boundary: list[ChatMessage] = []
+    for i, m in enumerate(messages):
+        if m.role in ("system", "developer") and "[compact-boundary" in str(m.content or ""):
+            pre_boundary = messages[:i + 1]  # 含边界标记本身
+            messages = messages[i + 1:]
+            break
+
     if not messages or len(messages) < 10:
-        return messages
+        return pre_boundary + messages
 
     # v6.1: system + developer 都是系统级消息，必须保留不被折叠
     system_msgs = [m for m in messages if m.role in ("system", "developer")]
@@ -366,7 +434,7 @@ async def auto_compact(
         rounds.insert(0, current_round)
 
     if len(rounds) <= keep_rounds:
-        return messages
+        return pre_boundary + messages
 
     keep_rounds_data = rounds[-keep_rounds:]
     old_rounds = rounds[:-keep_rounds]
@@ -422,12 +490,43 @@ async def auto_compact(
         role="developer",
         content=f"{SUMMARY_PREFIX}\n\n{summary_text}",
     )
-    result = system_msgs + [summary_msg] + [m for r in keep_rounds_data for m in r]
+
+    # v2.2 (对齐 zcode 3.10): 压缩边界标记 + ReadState 提醒——
+    # 边界标记让后续压缩识别"已压缩区"；ReadState 提醒告知模型哪些文件此前读过，
+    # 防止压缩失忆后反复重读同一文件。
+    import uuid as _uuid
+    boundary_msg = ChatMessage(
+        role="system",
+        content=f"[compact-boundary id={_uuid.uuid4().hex[:12]}] 以上历史已压缩为摘要。",
+    )
+    read_paths: list[str] = []
+    for m in old_messages_flat:
+        if m.role == "assistant" and m.tool_calls:
+            for tc in m.tool_calls:
+                if tc.get("name") in ("fs_read",) and isinstance(tc.get("arguments"), dict):
+                    p = tc["arguments"].get("path")
+                    if p and str(p) not in read_paths:
+                        read_paths.append(str(p))
+    readstate_msg: ChatMessage | None = None
+    if read_paths:
+        readstate_msg = ChatMessage(
+            role="system",
+            content=(
+                "以下文件在已压缩的历史中曾被读取：\n"
+                + "\n".join(f"- {p}" for p in read_paths[:20])
+                + "\n如需这些文件的最新内容，请重新调用 fs_read 读取，不要凭记忆猜测。"
+            ),
+        )
+
+    result = system_msgs + [boundary_msg, summary_msg] + [m for r in keep_rounds_data for m in r]
+    if readstate_msg is not None:
+        result = [readstate_msg] + result
     result = ensure_tool_pairing(result)
+    result = pre_boundary + result
 
     logger.info(
-        "[auto_compact] %d -> %d 条消息（折叠 %d 回合/%d tokens 为摘要）",
-        len(messages), len(result), len(old_rounds), old_tokens,
+        "[auto_compact] %d -> %d 条消息（折叠 %d 回合/%d tokens 为摘要，ReadState 提醒 %d 文件）",
+        len(messages), len(result), len(old_rounds), old_tokens, len(read_paths),
     )
     return result
 

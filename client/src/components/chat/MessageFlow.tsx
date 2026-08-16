@@ -10,9 +10,11 @@ import type { TimelineEntry } from "./timeline";
 import { buildTimeline, msgText } from "./timeline";
 import { TurnGroup } from "./TurnGroup";
 import { JumpDots } from "./JumpDots";
-import { IconSearch, IconChevronUp, IconChevronDown, IconX, IconArrowDown } from "../icons";
+import { IconSearch, IconChevronUp, IconChevronDown, IconX, IconArrowDown, IconBrain, IconClipboard } from "../icons";
 import { MarkdownContent } from "../MarkdownContent";
+import { MsgType } from "@chatcoder/shared";
 import { useChatStore } from "../../store/chat";
+import { usePanelStore } from "../../store/panel";
 
 /** 流式展示（thinking/token delta 实时渲染），作为虚拟列表最后一个虚拟项。
  * v7: 当前轮次的"思考中"以思考块形式实时显示在列表最底部（正在进行的动作），
@@ -23,10 +25,19 @@ function StreamingText() {
   const thinkingBuffers = useChatStore((s) => s.thinkingBuffers);
   const runningTurnId = useChatStore((s) => s.runningTurnId);
   const isRunning = useChatStore((s) => s.isRunning);
-  if (!isRunning || !runningTurnId) return null;
-
+  const bodyRef = useRef<HTMLDivElement>(null);
   const thinkingText = Object.values(thinkingBuffers).join("").trim();
   const text = Object.values(buffers).join("");
+
+  // 思考流自动滚到底部（zcode 风格）
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (el && thinkingText) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [thinkingText]);
+
+  if (!isRunning || !runningTurnId) return null;
 
   return (
     <div className="turn-group" style={{ minHeight: "36px", paddingBottom: 8 }}>
@@ -34,13 +45,14 @@ function StreamingText() {
       {thinkingText && (
         <div className="thinking-block active open">
           <div className="thinking-block-head" style={{ cursor: "default" }}>
-            <span className="thinking-block-chev" />
+            <span className="thinking-block-icon"><IconBrain size={12} /></span>
             <span className="thinking-block-title">
-              <span className="breath-pulse"><i /><i /><i /></span>
-              <span className="text-shine">思考中…</span>
+              <span className="thinking-block-breath" />
+              <span className="thinking-block-status">思考中…</span>
             </span>
+            <span className="thinking-block-chev" />
           </div>
-          <div className="thinking-block-body" style={{ maxHeight: 160, overflowY: "auto" }}>
+          <div className="thinking-block-body" ref={bodyRef} style={{ maxHeight: 160, overflowY: "auto" }}>
             <pre className="thinking-block-content">{thinkingText}</pre>
           </div>
         </div>
@@ -55,8 +67,8 @@ function StreamingText() {
       )}
       {!thinkingText && (
         <div className="turn-status-line">
-          <span className="breath-pulse" style={{ marginRight: 6 }}><i /><i /><i /></span>
-          <span className="text-shine">{text ? "处理中…" : "等待响应…"}</span>
+          <span className="thinking-block-breath" style={{ marginRight: 6 }} />
+          <span className="thinking-block-status">{text ? "处理中…" : "等待响应…"}</span>
         </div>
       )}
     </div>
@@ -64,6 +76,18 @@ function StreamingText() {
 }
 
 const StandaloneEntry = memo(function StandaloneEntry({ entry }: { entry: Extract<TimelineEntry, { kind: "standalone" }> }) {
+  // 系统消息（模型切换 divider 等，前方没有任何 turn 时落到这里）：渲染为分割线
+  if (entry.msg.msg_type === MsgType.System) {
+    return (
+      <div className="turn-group">
+        <div className="turn-item turn-item-divider">
+          <span className="turn-divider-line" />
+          <span className="turn-divider-text">{msgText(entry.msg.content)}</span>
+          <span className="turn-divider-line" />
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="turn-group">
       <div className="turn-item turn-item-text">
@@ -75,15 +99,55 @@ const StandaloneEntry = memo(function StandaloneEntry({ entry }: { entry: Extrac
   );
 });
 
+/** 计划确认卡（对齐 zcode 图6）：plan 模式 turn 完成后内嵌在消息流底部展示，
+ *  「查看完整计划 →」打开右侧文件预览，确认执行/取消。 */
+function PlanCard() {
+  const pendingPlan = useChatStore((s) => s.pendingPlan);
+  const confirmPlan = useChatStore((s) => s.confirmPlan);
+  const dismissPlan = useChatStore((s) => s.dismissPlan);
+  if (!pendingPlan) return null;
+  return (
+    <div className="turn-group">
+      <div className="plan-inline-card">
+        <div className="plan-inline-head">
+          <IconClipboard size={13} /> 计划
+        </div>
+        <div className="plan-inline-title">{pendingPlan.task}</div>
+        <div className="plan-inline-desc">
+          AI 已在项目根目录 <code>ai/</code> 目录生成计划文档 <code>chatcoder-plan.md</code>，请审阅后确认是否按计划执行。
+        </div>
+        <div className="plan-inline-actions">
+          <button
+            className="plan-inline-view"
+            onClick={() => {
+              usePanelStore.getState().setPreviewPath("ai/chatcoder-plan.md");
+              usePanelStore.getState().openPanel();
+              usePanelStore.getState().openTab("files");
+            }}
+          >
+            查看完整计划 →
+          </button>
+          <span className="plan-inline-spacer" />
+          <button className="btn-ghost" onClick={() => dismissPlan()}>取消</button>
+          <button className="plan-inline-confirm" onClick={() => confirmPlan(pendingPlan.task)}>确认执行</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function MessageFlow() {
   const messages = useChatStore((s) => s.messages);
   const currentSessionId = useChatStore((s) => s.currentSessionId);
   const runningTurnId = useChatStore((s) => s.runningTurnId);
   const isRunning = useChatStore((s) => s.isRunning);
+  const scrollTarget = useChatStore((s) => s.scrollTarget);
+  const clearScrollTarget = useChatStore((s) => s.clearScrollTarget);
   // v12: 已回滚 turn 标识（时间线横幅 + 产物灰置）
   const turns = useChatStore((s) => s.turns);
   const streamingBuffers = useChatStore((s) => s.streamingBuffers);
   const thinkingBuffers = useChatStore((s) => s.thinkingBuffers);
+  const hasPlanCard = useChatStore((s) => s.pendingPlan != null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -95,6 +159,37 @@ export function MessageFlow() {
   const seenKeysRef = useRef<Set<string>>(new Set());
 
   const entries = useMemo(() => buildTimeline(messages), [messages]);
+
+  // v2.2: 任务卡步骤点击穿透——按 scrollTarget 滚动到对应条目
+  useEffect(() => {
+    if (!scrollTarget) return;
+    const { threadId, turnId } = scrollTarget;
+    let idx = -1;
+    if (threadId != null) {
+      idx = entries.findIndex((e) => {
+        if (e.kind !== "turn") return false;
+        return e.items.some((it) => {
+          if ("msg" in it) return it.msg.thread_id === threadId;
+          if (it.kind === "tools") {
+            return it.nodes.some((n) =>
+              n.kind === "leaf" ? n.leaf.threadId === threadId : n.leaves.some((leaf) => leaf.threadId === threadId),
+            );
+          }
+          return false;
+        });
+      });
+    } else if (turnId != null) {
+      idx = entries.findIndex((e) => e.kind === "turn" && e.turnId === turnId);
+    }
+    if (idx >= 0) {
+      virtualizer.scrollToIndex(idx, { align: "start" });
+      // 滚动完成后清除目标（避免重复触发）
+      window.setTimeout(() => clearScrollTarget(), 800);
+    } else {
+      clearScrollTarget();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scrollTarget]);
 
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -109,15 +204,15 @@ export function MessageFlow() {
     return out;
   }, [entries, query]);
 
-  // 虚拟化：count = entries + 运行中的 StreamingText 占位
-  const count = entries.length + (isRunning ? 1 : 0);
+  // 虚拟化：count = entries + 运行中的 StreamingText 占位 + 计划确认卡占位
+  const count = entries.length + (isRunning ? 1 : 0) + (hasPlanCard ? 1 : 0);
 
   // 条目 key（虚拟列表 key 与"新条目入场"追踪共用）
   const entryKeyAt = useCallback((index: number): string =>
     index < entries.length
       ? (entries[index].kind === "turn" ? `turn-${entries[index].turnId ?? index}` : `std-${entries[index].msg.id ?? index}`)
-      : "streaming",
-  [entries]);
+      : (index === entries.length && isRunning ? "streaming" : "plan-card"),
+  [entries, isRunning]);
 
   const virtualizer = useVirtualizer({
     count,
@@ -241,7 +336,8 @@ export function MessageFlow() {
       const rolledBack = turns.find((t) => t.id === entry.turnId)?.status === "rolled_back";
       return <TurnGroup entry={entry} isRunning={runningTurnId === entry.turnId} rolledBack={rolledBack} />;
     }
-    return <StreamingText />;
+    if (index === entries.length && isRunning) return <StreamingText />;
+    return <PlanCard />;
   };
 
   return (

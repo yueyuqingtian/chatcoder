@@ -16,11 +16,13 @@ async def list_rules(db: AsyncSession, session_id: int | None = None) -> list[Ex
 
 
 async def create_rule(db: AsyncSession, *, command_pattern: str, decision: str,
-                      session_id: int | None = None, justification: str | None = None) -> ExecPolicyRule:
+                      session_id: int | None = None, justification: str | None = None,
+                      tool_name: str | None = None) -> ExecPolicyRule:
     if decision not in ("allow", "deny", "ask"):
         raise ValueError("decision 必须为 allow/deny/ask")
     rule = ExecPolicyRule(command_pattern=command_pattern, decision=decision,
-                          session_id=session_id, justification=justification)
+                          session_id=session_id, justification=justification,
+                          tool_name=tool_name)
     db.add(rule)
     await db.flush()
     return rule
@@ -44,9 +46,22 @@ def match_rule(rules: list[ExecPolicyRule], command: str) -> tuple[str | None, s
     if not cmd_tokens:
         return None, None
     for rule in rules:
+        if getattr(rule, "tool_name", None):
+            continue  # 工具级规则不参与命令匹配
         pat_tokens = rule.command_pattern.strip().split()
         if len(pat_tokens) > len(cmd_tokens):
             continue
         if all(a == b for a, b in zip(pat_tokens, cmd_tokens)):
+            return rule.decision, rule.justification
+    return None, None
+
+
+def match_tool_rule(rules: list[ExecPolicyRule], tool_name: str) -> tuple[str | None, str | None]:
+    """v2.2 (对齐 zcode 3.12): 工具级规则匹配（审批卡"始终允许"生成）。
+
+    返回 (decision, justification)；未命中返回 (None, None)。
+    """
+    for rule in rules:
+        if getattr(rule, "tool_name", None) == tool_name:
             return rule.decision, rule.justification
     return None, None

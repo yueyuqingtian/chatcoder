@@ -142,7 +142,7 @@ class AnthropicProvider(ModelProvider):
     async def chat(self, request: ChatRequest) -> ChatResponse:
         payload = self._build_payload(request, stream=False)
         headers = self._headers()
-        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT, headers={"Accept-Encoding": "gzip, deflate"}) as client:
             resp = await client.post(self._endpoint, json=payload, headers=headers)
         resp.raise_for_status()
         data = resp.json()
@@ -185,7 +185,7 @@ class AnthropicProvider(ModelProvider):
         payload = self._build_payload(request, stream=True)
         headers = self._headers()
         timeout = httpx.Timeout(_DEFAULT_TIMEOUT, read=None)
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, headers={"Accept-Encoding": "gzip, deflate"}) as client:
             async with client.stream("POST", self._endpoint, json=payload, headers=headers) as resp:
                 resp.raise_for_status()
                 event_type = ""
@@ -220,7 +220,7 @@ class AnthropicProvider(ModelProvider):
         payload = self._build_payload(request, stream=True)
         headers = self._headers()
         timeout = httpx.Timeout(_DEFAULT_TIMEOUT, read=None)
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, headers={"Accept-Encoding": "gzip, deflate"}) as client:
             async with client.stream("POST", self._endpoint, json=payload, headers=headers) as resp:
                 resp.raise_for_status()
                 event_type = ""

@@ -13,6 +13,7 @@ from app.services import skill_service
 
 router = APIRouter()
 from app.services.mcp_scan import scan_local_mcp
+from app.orchestration.skill_scanner import clone_skill_repo, list_repo_skills, parse_skill_markdown
 
 # 技能仓库配置持久化到用户 config.json
 _REPO_CFG_PATH = Path(
@@ -109,7 +110,20 @@ class McpUpdate(BaseModel):
 
 @router.get("/skills", response_model=list[dict])
 async def list_skills(source: str | None = None, db: AsyncSession = Depends(get_db)):
-    return [skill_to_dict(s) for s in await skill_service.list_skills(db, source)]
+    skills = await skill_service.list_skills(db, source)
+    out = []
+    for s in skills:
+        d = skill_to_dict(s)
+        # v1.1: link 模式（content 为空 + path 存在）→ list 时实时读文件内容
+        if not d["content"] and s.path:
+            p = Path(s.path)
+            try:
+                if p.is_file():
+                    d["content"] = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+        out.append(d)
+    return out
 
 
 @router.post("/skills", response_model=dict)
@@ -190,6 +204,66 @@ async def delete_mcp(server_id: int, db: AsyncSession = Depends(get_db)):
 async def scan_mcp_servers():
     """扫描本机常见 MCP 客户端配置，返回候选 server 列表（不落库）。"""
     return await scan_local_mcp()
+
+
+# ── 本地技能导入（v1.1：选择本地目录/md 文件导入）──
+
+class SkillImportLocal(BaseModel):
+    path: str
+    mode: str = "copy"  # copy=内容入库 | link=只存路径（list 时实时读取）
+
+
+@router.post("/skills/import-local", response_model=dict)
+async def import_local_skill(body: SkillImportLocal, db: AsyncSession = Depends(get_db)):
+    """从本地目录或 md 文件导入技能。
+
+    目录规则（对齐 pi agent loadSkillsFromDir）：
+    - 目录含 SKILL.md → 视为单个技能根；
+    - 否则导入目录下直接的 *.md（每个文件一个技能）；
+    - 再递归子目录找 SKILL.md。
+    """
+    p = Path(body.path).expanduser()
+    if not p.exists():
+        raise HTTPException(404, "路径不存在")
+
+    targets: list[Path] = []
+    if p.is_file():
+        if p.suffix.lower() != ".md":
+            raise HTTPException(400, "仅支持 .md 文件")
+        targets = [p]
+    else:
+        skill_md = p / "SKILL.md"
+        if skill_md.is_file():
+            targets = [skill_md]
+        else:
+            targets = [f for f in p.iterdir() if f.is_file() and f.suffix.lower() == ".md"]
+            for sub in p.iterdir():
+                if sub.is_dir() and (sub / "SKILL.md").is_file():
+                    targets.append(sub / "SKILL.md")
+    if not targets:
+        raise HTTPException(400, "该目录下未发现技能（需含 SKILL.md 或 *.md）")
+
+    imported: list[str] = []
+    skipped: list[str] = []
+    for f in targets:
+        meta, content = parse_skill_markdown(f)
+        name = f.parent.name if f.name.lower() == "skill.md" else f.stem
+        existing = await skill_service.get_skill_by_name(db, name)
+        if existing is not None:
+            skipped.append(name)  # 重名跳过，避免覆盖
+            continue
+        skill = await skill_service.create_skill(
+            db, name=name,
+            display_name=meta.get("display_name") or name.replace("_", " ").replace("-", " ").title(),
+            description=meta.get("description") or "",
+            content=None if body.mode == "link" else content,
+            source="local", path=str(f.resolve()),
+            trigger=meta.get("trigger"), tools=meta.get("tools"),
+            is_active=True, auto_load=bool(meta.get("auto_load", True)),
+        )
+        imported.append(skill.name)
+    await db.commit()
+    return {"ok": True, "imported": imported, "skipped": skipped, "count": len(imported)}
 
 
 # ── 技能仓库（第15点：云端 git url 技能仓库）──

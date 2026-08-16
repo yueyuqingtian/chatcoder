@@ -14,11 +14,16 @@ class Session(Base):
     model_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("models.id"))  # 会话级模型
     status: Mapped[str] = mapped_column(String(20), default="active")  # active / archived
     pinned: Mapped[bool] = mapped_column(Boolean, default=False)
+    # v2.2 (对齐 zcode 3.12): 权限模式 default/accept_edits/plan
+    permission_mode: Mapped[str] = mapped_column(String(20), default="default")
     fork_parent_id: Mapped[int | None] = mapped_column(BigInteger)  # 分支来源会话 id
     worktree_path: Mapped[str | None] = mapped_column(String(512))  # git 工作树路径（有则优先作为工作目录）
     plan_confirmed: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")  # 计划确认门
     created_at: Mapped[str] = mapped_column(server_default=func.now())
     updated_at: Mapped[str] = mapped_column(server_default=func.now(), onupdate=func.now())
+    # v1.1: 最后一次 API 真实上下文占用（重启/切会话后优先以此口径显示，避免骤降）
+    last_prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    last_usage_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
 
 class Message(Base):

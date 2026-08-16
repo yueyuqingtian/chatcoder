@@ -4,8 +4,9 @@
  * - 流式内容从 store thinkingBuffers 读取（key=agent_id）
  */
 import { memo, useEffect, useRef, useState } from "react";
-import { IconArrowToggle } from "../icons";
+import { IconArrowToggle, IconBrain } from "../icons";
 import { useChatStore } from "../../store/chat";
+import { useUiStore } from "../../store/ui";
 
 const MAX_HEIGHT = 160;
 
@@ -16,6 +17,8 @@ export const ThinkingBlock = memo(function ThinkingBlock({ text, active, turnId,
   agentId?: number;
 }) {
   void turnId; // 保留 prop 用于未来按 turn 分组
+  // v1.1: 常规设置"消息流显示 reasoning"关闭时隐藏历史思考块（运行中的实时思考流不受影响）
+  const showReasoning = useUiStore((s) => s.showReasoning);
   // v1.3: 默认折叠（包括思考中），用户可手动展开
   const [open, setOpen] = useState(false);
   const [duration, setDuration] = useState<number | null>(null);
@@ -44,29 +47,33 @@ export const ThinkingBlock = memo(function ThinkingBlock({ text, active, turnId,
   // 流式自动滚到底（仅展开时）
   useEffect(() => {
     const el = scrollRef.current;
-    if (el && open && active && displayText.length !== prevLenRef.current) {
+    if (el && open && displayText.length !== prevLenRef.current) {
       el.scrollTop = el.scrollHeight;
       prevLenRef.current = displayText.length;
     }
-  }, [displayText, active, open]);
+  }, [displayText, open]);
 
-  if (!active && !text) return null;
+  if (!showReasoning || (!active && !text)) return null;
 
   return (
     <div className={`thinking-block${active ? " active" : ""}${open ? " open" : ""}`}>
       <button className="thinking-block-head" onClick={() => setOpen((v) => !v)}>
-        <span className="thinking-block-chev">
-          <IconArrowToggle open={open} size={12} />
-        </span>
+        <span className="thinking-block-icon"><IconBrain size={12} /></span>
         <span className="thinking-block-title">
           {isStreaming ? (
             <>
-              <span className="breath-pulse"><i /><i /><i /></span>
-              <span className="text-shine">思考中…</span>
+              <span className="thinking-block-breath" />
+              <span className="thinking-block-status">思考中…</span>
             </>
           ) : (
-            <>已完成思考{duration != null ? `（${duration} 秒）` : ""}</>
+            <>
+              思考过程
+              <span className="thinking-block-duration">{duration != null ? `持续了 ${duration} 秒` : "持续了几秒"}</span>
+            </>
           )}
+        </span>
+        <span className="thinking-block-chev">
+          <IconArrowToggle open={open} size={12} />
         </span>
       </button>
       {open && (

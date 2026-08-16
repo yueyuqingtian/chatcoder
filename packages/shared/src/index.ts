@@ -3,6 +3,9 @@
  * 与服务端 app/core/enums.py 保持一致，修改时需同步。
  */
 
+// v2.1: WS 事件协议契约（seq / 断线补偿 / 穷举事件名）
+export * from "./events";
+
 // ── 枚举 ──
 
 export enum MsgType {
@@ -111,6 +114,7 @@ export interface SessionOut {
   worktree_path: string | null;
   has_running?: boolean;
   has_interrupted_turn?: boolean;
+  last_activity_at?: string | null;
 }
 
 export interface TurnOut {
@@ -153,6 +157,10 @@ export interface TaskOut {
   session_id: number;
   turn_id: number | null;
   parent_task_id: number | null;
+  kind?: string;
+  depends_on?: number[] | null;
+  estimate?: number | null;
+  is_hidden?: boolean;
   title: string;
   description: string | null;
   acceptance_criteria: string | null;
@@ -224,6 +232,8 @@ export interface ModelOut {
   id: number;
   name: string;
   provider: string | null;
+  provider_id: number | null;
+  provider_name: string | null;
   base_url: string | null;
   api_format: string;
   context_window: number | null;
@@ -232,6 +242,23 @@ export interface ModelOut {
   source_type: string;
   has_api_key: boolean;
   reasoning_efforts: string[];
+}
+
+export interface ProviderOut {
+  id: number;
+  name: string;
+  base_url: string | null;
+  api_format: string;
+  is_active: boolean;
+  has_api_key: boolean;
+  model_count: number;
+  created_at: string | null;
+}
+
+export interface ScannedModel {
+  id: string;
+  context_window: number | null;
+  owned_by: string | null;
 }
 
 export interface TurnSnapshotOut {

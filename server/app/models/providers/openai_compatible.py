@@ -28,11 +28,14 @@ class OpenAICompatibleProvider(ModelProvider):
 
     def __init__(self, *, api_key: str, base_url: str, model: str):
         self._default_model = model
+        # v6.3: 不声明接受 br 压缩——打包版 brotlicffi 缺 Decompressor C 扩展，
+        # 网关若返回 br 压缩流会直接崩，gzip/deflate 由 httpx 原生支持
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url.rstrip("/"),
             timeout=_DEFAULT_TIMEOUT,
             max_retries=3,
+            default_headers={"Accept-Encoding": "gzip, deflate"},
         )
 
     async def chat(self, request: ChatRequest) -> ChatResponse:
@@ -403,6 +406,9 @@ class OpenAICompatibleProvider(ModelProvider):
                     "role": "assistant",
                     "content": m.content,  # None 时 SDK 处理为 null
                     "tool_calls": tc_list,
+                    # v1.2: thinking 模式网关（DeepSeek/GLM 经 LiteLLM）要求把
+                    # 历史 assistant 的 reasoning_content 原样回传，否则 400
+                    **({"reasoning_content": m.reasoning_content} if m.reasoning_content else {}),
                 })
             elif m.role == "tool":
                 result.append({
@@ -417,7 +423,11 @@ class OpenAICompatibleProvider(ModelProvider):
                 parts.extend(m.content_blocks)
                 result.append({"role": m.role, "content": parts})
             else:
-                result.append({"role": m.role, "content": m.content or ""})
+                _d = {"role": m.role, "content": m.content or ""}
+                # v1.2: 纯文本 assistant 也回传 reasoning_content（thinking 模式网关要求）
+                if m.role == "assistant" and m.reasoning_content:
+                    _d["reasoning_content"] = m.reasoning_content
+                result.append(_d)
 
         return result
 

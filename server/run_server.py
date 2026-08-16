@@ -186,6 +186,8 @@ def main() -> None:
             reload=False,
             log_level="warning",
             access_log=False,
+            # 打包环境下 httptools 的 C 扩展收集不可靠，统一用纯 Python 的 h11
+            http="h11",
         )
         server = uvicorn.Server(config)
         print(f"[chatcoder-server] listening on {settings.server_host}:{settings.server_port}")

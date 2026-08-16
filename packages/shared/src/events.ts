@@ -1,0 +1,93 @@
+/**
+ * WS 事件协议契约（v2.1，对齐 zcode-alignment-master-plan-v2 第 3.2 节）。
+ *
+ * 规则：
+ * - 服务端广播的每条事件带单调递增 `seq`（per session），用于断线补偿；
+ * - 前端 handleWs 用 switch 穷举 ServerWsEvent，default 走 never 兜底；
+ * - 新增事件必须先在此登记，并在 server/app/gateway/schemas.py 镜像定义。
+ */
+
+// ── 通用信封 ──
+
+export interface WsEnvelope {
+  event: string;
+  /** 服务端注入的会话级单调事件序号（断线补偿依据，per session） */
+  seq?: number;
+  payload: Record<string, unknown>;
+}
+
+// ── 服务端 → 客户端 ──
+
+export type ServerWsEvent =
+  | { event: "message.created"; payload: { msg: Record<string, unknown> } }
+  | { event: "turn.started"; payload: { turn_id: number } }
+  | { event: "turn.updated"; payload: { turn_id: number; status: string } }
+  | { event: "turn.completed"; payload: { turn_id: number; summary?: string | null; artifact_ids?: number[] } }
+  | { event: "turn.interrupted"; payload: { turn_id: number; last_message_id?: number | null } }
+  | { event: "turn.rolled_back"; payload: { turn_id: number; rolled_back_msgs?: number; file_recovery?: Record<string, unknown> } }
+  | { event: "agent.started"; payload: { agent_id: number; kind?: string; name?: string; turn_id?: number | null } }
+  | { event: "agent.updated"; payload: { agent_id: number; status?: string; tool?: string; step?: number } }
+  | { event: "agent.completed"; payload: { agent_id: number; summary?: string | null; artifact_ids?: number[] } }
+  | { event: "thinking.delta"; payload: { agent_id: number; turn_id?: number | null; delta: string } }
+  | { event: "thinking.done"; payload: { agent_id: number; turn_id?: number | null; full_text?: string } }
+  | { event: "token.delta"; payload: { agent_id: number; turn_id?: number | null; delta: string } }
+  | { event: "token.done"; payload: { agent_id: number; turn_id?: number | null; full_text?: string } }
+  | { event: "tool.call"; payload: { turn_id: number; agent_id: number; tool: string; args_preview?: string; args_partial?: string } }
+  | { event: "tool.result"; payload: { turn_id: number; tool: string; ok: boolean; duration_ms?: number; output_preview?: string; change_stat?: { path: string; additions: number; deletions: number } } }
+  | { event: "todo.updated"; payload: { turn_id: number; todos: unknown[]; persisted: boolean } }
+  | { event: "task.proposed"; payload: { turn_id: number; request_task_id?: number; group_task_id?: number; reasons?: string[] } }
+  | { event: "task.planned"; payload: { turn_id: number; steps?: unknown[] } }
+  | { event: "task.updated"; payload: { task_id: number; status?: string; note?: string | null } }
+  | { event: "usage.update"; payload: Record<string, unknown> }
+  | { event: "compact.started"; payload: { agent_id?: number; turn_id?: number; used_tokens?: number; context_window?: number; ratio?: number } }
+  | { event: "compact.completed"; payload: { agent_id?: number; turn_id?: number } }
+  | { event: "approval.request"; payload: { approval_id: string; detail: Record<string, unknown> } }
+  | { event: "approval.response"; payload: { approval_id: string; approved: boolean } }
+  | { event: "api.retry"; payload: { attempt: number; wait_ms: number; reason?: string } }
+  | { event: "config.changed"; payload: { profile_id: number; changed_keys: string[] } }
+  | { event: "scheduled.triggered"; payload: { task_id: number; turn_id: number } }
+  | { event: "session.completed"; payload: { session_id: number } }
+  | { event: "error"; payload: { code?: string; message?: string } }
+  /** 服务端对客户端请求的确认（approval/cancel/sync 等） */
+  | { event: "ack"; payload: { ref: string; ok?: boolean; resolved?: boolean } }
+  /** 断线补偿补发（ws.py 重放缓冲区事件时以原始事件直发，本类型仅作文档标记） */
+  | { event: "sync.response"; payload: { last_seq: number; count: number } };
+
+export type ServerEventName = ServerWsEvent["event"];
+
+/** 需要端到端有序的事件（seq 断点重放时前端按序处理） */
+export const ORDERED_EVENTS: ReadonlySet<string> = new Set([
+  "message.created",
+  "token.delta",
+  "token.done",
+  "thinking.delta",
+  "thinking.done",
+  "tool.call",
+  "tool.result",
+  "todo.updated",
+  "task.updated",
+  "task.proposed",
+  "task.planned",
+  "turn.started",
+  "turn.updated",
+  "turn.completed",
+  "agent.started",
+  "agent.updated",
+  "agent.completed",
+  "usage.update",
+  "compact.started",
+  "compact.completed",
+  "approval.request",
+  "approval.response",
+  "api.retry",
+]);
+
+// ── 客户端 → 服务端 ──
+
+export type ClientWsEvent =
+  | { event: "approval.response"; payload: { approval_id: string; approved: boolean } }
+  | { event: "terminal.input"; payload: { id: string; data: string } }
+  | { event: "browser.command"; payload: { id: string; cmd: string; payload: Record<string, unknown> } }
+  | { event: "cancel"; payload: { turn_id: number } }
+  /** 断线补偿请求：重连后带 last_seq 请求补发 */
+  | { event: "sync.request"; payload: { last_seq: number } };

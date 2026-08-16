@@ -4,7 +4,7 @@
  *   用户消息项靠右、AI 回复项靠左（对应各自消息的展示方向）
  * - 运行中（AI 正在回复）不渲染操作行，避免 hover 浮现显得杂乱
  */
-import { useCallback, memo } from "react";
+import { useCallback, memo, useEffect, useState } from "react";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ToolTree } from "./ToolTree";
 import { ArtifactList } from "./ArtifactList";
@@ -15,6 +15,27 @@ import { IconRotateCcw } from "../icons";
 import type { TimelineEntry } from "./timeline";
 import { msgText } from "./timeline";
 import { useChatStore } from "../../store/chat";
+import { parseUtc } from "../../utils/time";
+import { AttachmentCard, attachmentsOf } from "./AttachmentCard";
+
+/** 「已工作 X 分 X 秒」计时条（对齐 zcode turn 头部） */
+function WorkTimer({ turnId, isRunning }: { turnId: number | null; isRunning: boolean }) {
+  const turn = useChatStore((s) => s.turns.find((t) => t.id === turnId));
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (!isRunning) return;
+    const t = setInterval(() => tick((v) => v + 1), 1000);
+    return () => clearInterval(t);
+  }, [isRunning]);
+  if (!turn?.started_at) return null;
+  const start = parseUtc(turn.started_at);
+  const end = turn.completed_at ? parseUtc(turn.completed_at) : Date.now();
+  if (!start) return null;
+  const sec = Math.max(0, Math.round((end - start) / 1000));
+  const min = Math.floor(sec / 60);
+  const label = min > 0 ? `${min} 分 ${sec % 60} 秒` : `${sec} 秒`;
+  return <div className="turn-worktime">已工作 {label}</div>;
+}
 
 /**
  * 性能优化：memo 包裹——entries 由 MessageFlow 按 messages 记忆化，
@@ -48,6 +69,11 @@ export const TurnGroup = memo(function TurnGroup({ entry, isRunning, rolledBack 
   for (let k = items.length - 1; k >= 0; k--) {
     if (items[k].kind === "text") { lastTextIdx = k; break; }
   }
+  // v13: 「已工作」计时条位于用户消息之后（对齐 zcode）
+  let firstUserIdx = -1;
+  for (let k = 0; k < items.length; k++) {
+    if (items[k].kind === "user") { firstUserIdx = k; break; }
+  }
 
   return (
     <div className="turn-group">
@@ -74,13 +100,18 @@ export const TurnGroup = memo(function TurnGroup({ entry, isRunning, rolledBack 
             return (
               <div key={i} className="turn-item turn-item-user">
                 <div className="turn-user-bubble">
-                  {msgText(item.msg.content)}
+                  {msgText(item.msg.content) && <div className="turn-user-text">{msgText(item.msg.content)}</div>}
+                  {/* v14: 用户消息中的附件以文件卡片展示，点击可预览 */}
+                  {attachmentsOf(item.msg.content).map((a) => (
+                    <AttachmentCard key={a.file_id || a.url} att={a} />
+                  ))}
                 </div>
                 {/* v10: 用户消息按钮放气泡下方（流内、不重叠文字），
                     鼠标聚焦消息时显示复制/回滚；各自归属自己的消息，不会错位 */}
                 {!isRunning && (
                   <MessageActions entry={entry} onRollback={onRollback} scope="user" />
                 )}
+                {i === firstUserIdx && <WorkTimer turnId={turnId} isRunning={isRunning} />}
               </div>
             );
           case "thinking":
@@ -119,7 +150,35 @@ export const TurnGroup = memo(function TurnGroup({ entry, isRunning, rolledBack 
           case "error":
             return (
               <div key={i} className="turn-item turn-item-error">
-                {msgText(item.msg.content) || "执行出错"}
+                <svg className="err-icon" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+                  <path
+                    fill="currentColor"
+                    d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"
+                  />
+                </svg>
+                <div className="err-body">
+                  {(() => {
+                    const raw = msgText(item.msg.content) || "执行出错";
+                    const idx = raw.indexOf(":");
+                    return idx > 0 && idx < 60 ? (
+                      <>
+                        <div className="err-title">{raw.slice(0, idx)}</div>
+                        <div className="err-msg">{raw.slice(idx + 1).trim()}</div>
+                      </>
+                    ) : (
+                      <div className="err-msg">{raw}</div>
+                    );
+                  })()}
+                </div>
+              </div>
+            );
+          case "divider":
+            // v2.2 (对齐 zcode 3.11): 系统分割线（模型切换等）
+            return (
+              <div key={i} className="turn-item turn-item-divider">
+                <span className="turn-divider-line" />
+                <span className="turn-divider-text">{msgText(item.msg.content)}</span>
+                <span className="turn-divider-line" />
               </div>
             );
           default:
@@ -127,7 +186,7 @@ export const TurnGroup = memo(function TurnGroup({ entry, isRunning, rolledBack 
         }
       })}
       {/* v11: turn 完成后的变更审核卡片（仅在完成且有写盘变更时显示；已回滚 turn 不显示） */}
-      {!rolledBack && <ReviewCard turnId={turnId} isRunning={isRunning} />}
+      {!rolledBack && <ReviewCard turnId={turnId} isRunning={isRunning} onRollback={onRollback} />}
     </div>
   );
 });

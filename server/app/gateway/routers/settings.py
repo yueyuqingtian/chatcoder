@@ -103,6 +103,12 @@ def load_persisted_workspace() -> None:
         settings.force_approval_tools = str(data["force_approval_tools"])
     if "session_token_budget" in data:
         settings.session_token_budget = int(data["session_token_budget"])
+    if "enhanced_search" in data:
+        settings.enhanced_search = bool(data["enhanced_search"])
+    if "show_todos" in data:
+        settings.show_todos = bool(data["show_todos"])
+    if "show_reasoning" in data:
+        settings.show_reasoning = bool(data["show_reasoning"])
 
 
 @router.get("/settings/workspace", response_model=WorkspaceOut)
@@ -131,6 +137,13 @@ class GlobalSettingsOut(BaseModel):
     auto_approve_tools: bool = False
     force_approval_tools: str = "terminal_exec,ci_run,browser_navigate,browser_click,browser_type"
     session_token_budget: int = 200_000
+    # v2.2 (对齐 zcode 3.15/3.18): 常规面板补项
+    terminal_shell: str = "auto"  # auto/pwsh/powershell/cmd/git-bash
+    terminal_font: str = ""  # 留空继承系统终端字体
+    http_proxy: str = ""
+    enhanced_search: bool = True  # ripgrep 增强搜索
+    show_todos: bool = True  # 消息流显示 todos 卡片
+    show_reasoning: bool = True  # 消息流显示 reasoning 块
 
 
 class GlobalSettingsIn(BaseModel):
@@ -142,11 +155,18 @@ class GlobalSettingsIn(BaseModel):
     auto_approve_tools: bool | None = None
     force_approval_tools: str | None = None
     session_token_budget: int | None = None
+    # v2.2 (对齐 zcode 3.15/3.18): 常规面板补项
+    terminal_shell: str | None = None
+    terminal_font: str | None = None
+    http_proxy: str | None = None
+    enhanced_search: bool | None = None
+    show_todos: bool | None = None
+    show_reasoning: bool | None = None
 
 
 @router.get("/settings/global", response_model=GlobalSettingsOut)
 async def get_global_settings() -> GlobalSettingsOut:
-    """读取全局设置(记忆开关、全局规则、Agent/安全配置等)。"""
+    """读取全局设置(记忆开关、全局规则、Agent/安全配置、终端/显示选项等)。"""
     data = _load_config()
     return GlobalSettingsOut(
         memory_enabled=data.get("memory_enabled", True),
@@ -156,6 +176,13 @@ async def get_global_settings() -> GlobalSettingsOut:
         auto_approve_tools=data.get("auto_approve_tools", settings.auto_approve_tools),
         force_approval_tools=data.get("force_approval_tools", settings.force_approval_tools),
         session_token_budget=data.get("session_token_budget", 200_000),
+        # v2.2: 常规面板补项
+        terminal_shell=data.get("terminal_shell", "auto"),
+        terminal_font=data.get("terminal_font", ""),
+        http_proxy=data.get("http_proxy", ""),
+        enhanced_search=data.get("enhanced_search", True),
+        show_todos=data.get("show_todos", True),
+        show_reasoning=data.get("show_reasoning", True),
     )
 
 
@@ -181,6 +208,28 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
     if body.session_token_budget is not None:
         data["session_token_budget"] = body.session_token_budget
         settings.session_token_budget = body.session_token_budget
+    # v2.2: 常规面板补项
+    if body.terminal_shell is not None:
+        data["terminal_shell"] = body.terminal_shell
+    if body.terminal_font is not None:
+        data["terminal_font"] = body.terminal_font
+    if body.http_proxy is not None:
+        data["http_proxy"] = body.http_proxy
+        if body.http_proxy:
+            os.environ["HTTP_PROXY"] = body.http_proxy
+            os.environ["HTTPS_PROXY"] = body.http_proxy
+        else:
+            os.environ.pop("HTTP_PROXY", None)
+            os.environ.pop("HTTPS_PROXY", None)
+    if body.enhanced_search is not None:
+        data["enhanced_search"] = body.enhanced_search
+        settings.enhanced_search = body.enhanced_search
+    if body.show_todos is not None:
+        data["show_todos"] = body.show_todos
+        settings.show_todos = body.show_todos
+    if body.show_reasoning is not None:
+        data["show_reasoning"] = body.show_reasoning
+        settings.show_reasoning = body.show_reasoning
     _save_config(data)
     # 运行时更新 context compaction 设置
     if body.auto_compact_enabled is not None:
@@ -193,6 +242,13 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         auto_approve_tools=data.get("auto_approve_tools", settings.auto_approve_tools),
         force_approval_tools=data.get("force_approval_tools", settings.force_approval_tools),
         session_token_budget=data.get("session_token_budget", 200_000),
+        # v2.2: 常规面板补项
+        terminal_shell=data.get("terminal_shell", "auto"),
+        terminal_font=data.get("terminal_font", ""),
+        http_proxy=data.get("http_proxy", ""),
+        enhanced_search=data.get("enhanced_search", True),
+        show_todos=data.get("show_todos", True),
+        show_reasoning=data.get("show_reasoning", True),
     )
 
 

@@ -1,27 +1,21 @@
-/** ReviewCard（v11）：turn 完成后的「变更审核」卡片。
- *
- * 展示该 turn 写盘变更清单（修改/新增/删除 + 增删行数），支持：
- * - 单条审核：逐文件勾选/取消，乐观更新 + PUT 持久化
- * - 批量审核：「全部通过」/「取消全部」
- * - 点击文件 → 右侧面板「文件」标签页 Monaco DiffEditor 展示 before/after
- * 与 ArtifactList 折叠条并存互不影响；卡片仅在 turn 完成且存在变更时显示，可折叠收起。
+/** ReviewCard（v13 对齐 ZCode 变更集卡片）：
+ * 头部：⌄ N 个文件已更改 +x -y …… 右侧「撤销」
+ * 文件行：类型徽标 + 文件名(粗体) + 目录路径(灰) + +x -y + [审查] + [打开]
+ * 底部：全部通过 / 取消全部 + 已审进度
+ * 点击文件行 → 右侧面板 Monaco DiffEditor 展示 before/after。
  */
 import { memo, useState } from "react";
 import type { FileChangeOut } from "@chatcoder/shared";
 import { api } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { usePanelStore } from "../../store/panel";
-import { IconCheck, IconChevronDown, IconChevronUp } from "../icons";
+import { IconCheck, IconChevronDown, IconRotateCcw } from "../icons";
+import { FileBadge, splitFilePath } from "./FileBadge";
 
-const ACTION_LABEL: Record<string, string> = {
-  modified: "修改",
-  added: "新增",
-  deleted: "删除",
-};
-
-export const ReviewCard = memo(function ReviewCard({ turnId, isRunning }: {
+export const ReviewCard = memo(function ReviewCard({ turnId, isRunning, onRollback }: {
   turnId: number | null;
   isRunning: boolean;
+  onRollback?: () => void;
 }) {
   const changes = useChatStore((s) => (turnId != null ? s.turnChanges[turnId] : undefined));
   const reviewFiles = useChatStore((s) => s.reviewFiles);
@@ -29,16 +23,16 @@ export const ReviewCard = memo(function ReviewCard({ turnId, isRunning }: {
   const setDiffPreview = usePanelStore((s) => s.setDiffPreview);
   const openPanel = usePanelStore((s) => s.openPanel);
   const openTab = usePanelStore((s) => s.openTab);
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(false);
 
-  // 仅在该 turn 完成（非运行中）且存在写盘变更时显示
   if (isRunning || turnId == null) return null;
   const files = changes ?? [];
   if (files.length === 0) return null;
 
   const reviewedCount = files.filter((f) => f.reviewed).length;
   const allReviewed = reviewedCount === files.length;
-  const pendingCount = files.length - reviewedCount;
+  const totalAdd = files.reduce((sum, f) => sum + (f.additions ?? 0), 0);
+  const totalDel = files.reduce((sum, f) => sum + (f.deletions ?? 0), 0);
 
   const openDiff = async (f: FileChangeOut) => {
     setPreviewPath(f.path);
@@ -57,44 +51,56 @@ export const ReviewCard = memo(function ReviewCard({ turnId, isRunning }: {
   return (
     <div className="review-card">
       <div className="review-card-head" onClick={() => setExpanded((v) => !v)}>
+        <span className={`review-card-caret${expanded ? " open" : ""}`}><IconChevronDown size={13} /></span>
         <span className="review-card-title">
-          变更审核
-          {!allReviewed && (
-            <span className="review-pending">
-              <span className="review-pending-dot" />
-              <span>{pendingCount} 个待审核</span>
+          {files.length} 个文件已更改
+          {(totalAdd > 0 || totalDel > 0) && (
+            <span className="review-diff">
+              {totalAdd > 0 && <span className="add">+{totalAdd}</span>}
+              {totalDel > 0 && <span className="del">-{totalDel}</span>}
             </span>
           )}
         </span>
-        <button
-          className="review-collapse"
-          onClick={(e) => { e.stopPropagation(); setExpanded((v) => !v); }}
-        >
-          {expanded ? <IconChevronUp size={13} /> : <IconChevronDown size={13} />}
-        </button>
+        {!allReviewed && <span className="review-pending-count">{files.length - reviewedCount} 待审核</span>}
+        {onRollback && (
+          <button
+            className="review-rollback"
+            onClick={(e) => { e.stopPropagation(); onRollback(); }}
+            title="撤销本轮全部改动"
+          >
+            <IconRotateCcw size={12} /> 撤销
+          </button>
+        )}
       </div>
 
       {expanded && (
         <div className="review-body">
-          {files.map((f) => (
-            <div key={f.path} className="review-file" onClick={() => openDiff(f)}>
-              <span
-                className={"review-check" + (f.reviewed ? " checked" : "")}
-                onClick={(e) => { e.stopPropagation(); reviewFiles(turnId, [f.path], !f.reviewed); }}
-                title={f.reviewed ? "已审核，点击取消" : "标记为已审核"}
-              >
-                {f.reviewed && <IconCheck size={10} />}
-              </span>
-              <span className="review-file-name" title={f.path}>{f.path}</span>
-              <span className={`review-action ${f.action}`}>{ACTION_LABEL[f.action] ?? f.action}</span>
-              {(f.additions > 0 || f.deletions > 0) && (
-                <span className="review-diff">
-                  {f.additions > 0 && <span className="add">+{f.additions}</span>}
-                  {f.deletions > 0 && <span className="del">−{f.deletions}</span>}
+          {files.map((f) => {
+            const { dir, name } = splitFilePath(f.path);
+            return (
+              <div key={f.path} className="review-file" onClick={() => openDiff(f)}>
+                <FileBadge path={f.path} />
+                <span className="review-file-name">{name}</span>
+                <span className="review-file-dir" title={f.path}>{dir}</span>
+                {(f.additions > 0 || f.deletions > 0) && (
+                  <span className="review-diff">
+                    {f.additions > 0 && <span className="add">+{f.additions}</span>}
+                    {f.deletions > 0 && <span className="del">-{f.deletions}</span>}
+                  </span>
+                )}
+                <span className="review-file-actions" onClick={(e) => e.stopPropagation()}>
+                  <button
+                    className={"review-btn" + (f.reviewed ? " done" : "")}
+                    onClick={() => reviewFiles(turnId, [f.path], !f.reviewed)}
+                    title={f.reviewed ? "已审核，点击取消" : "标记为已审核"}
+                  >
+                    {f.reviewed ? <><IconCheck size={11} /> 已审</> : "审查"}
+                  </button>
+                  <button className="review-btn" onClick={() => openDiff(f)}>打开</button>
                 </span>
-              )}
-            </div>
-          ))}
+              </div>
+            );
+          })}
 
           <div className="review-footer">
             <div className="review-footer-actions">

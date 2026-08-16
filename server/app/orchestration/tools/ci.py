@@ -58,9 +58,21 @@ class CiRunTool(Tool):
                 stderr=asyncio.subprocess.PIPE,
                 cwd=ctx.workspace_root,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_TIMEOUT_SEC)
-        except asyncio.TimeoutError:
-            return ToolResult(ok=False, output="", error=f"CI {check} 超时(>{_TIMEOUT_SEC}s)")
+            communicate_task = asyncio.create_task(proc.communicate())
+            # v1.1: 等待期间轮询取消信号，命中即 kill 子进程（停止按钮穿透）
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    asyncio.shield(_poll_ci(communicate_task, ctx)),
+                    timeout=_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return ToolResult(ok=False, output="", error=f"CI {check} 超时(>{_TIMEOUT_SEC}s)")
+            except asyncio.CancelledError:
+                proc.kill()
+                await proc.wait()
+                return ToolResult(ok=False, output="", error="已被用户中断")
         except OSError as e:
             return ToolResult(ok=False, output="", error=f"CI {check} 执行失败: {e}")
 
@@ -76,6 +88,16 @@ class CiRunTool(Tool):
             data={"check": check, "returncode": proc.returncode, "command": command},
             error="" if proc.returncode == 0 else f"{check} 失败(退出码 {proc.returncode})",
         )
+
+
+async def _poll_ci(task: asyncio.Task, ctx: ToolContext):
+    """等待 communicate 完成；期间检查取消信号，命中则取消任务。"""
+    while not task.done():
+        if ctx.cancel_event and ctx.cancel_event.is_set():
+            task.cancel()
+            raise asyncio.CancelledError("cancelled by user")
+        await asyncio.sleep(0.2)
+    return await task
 
 
 def _build_command(check: str) -> str | None:

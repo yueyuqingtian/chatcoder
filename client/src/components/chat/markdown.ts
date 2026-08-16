@@ -9,6 +9,11 @@ function toolNodesToMd(nodes: ToolNode[], depth: number): string {
     if (n.kind === "group") {
       lines.push(`${indent}- **${n.tool}** × ${n.count}`);
       lines.push(toolNodesToMd(n.leaves.map((l) => ({ kind: "leaf", leaf: l })), depth + 1));
+    } else if (n.kind === "explore") {
+      for (const l of n.leaves) {
+        const status = l.ok === null ? "⏳" : l.ok ? "✓" : "✕";
+        lines.push(`${indent}- \`${l.tool}\` ${status} ${l.args?.path ? `\`${String(l.args.path)}\`` : ""}`);
+      }
     } else {
       const l = n.leaf;
       const status = l.ok === null ? "⏳" : l.ok ? "✓" : "✕";
@@ -82,6 +87,12 @@ export function turnToPlainText(entry: TimelineEntry): string {
             if (n.kind === "group") {
               parts.push(`${"  ".repeat(d)}- ${n.tool} × ${n.count}`);
               walk(n.leaves.map((l) => ({ kind: "leaf", leaf: l })), d + 1);
+            } else if (n.kind === "explore") {
+              for (const l of n.leaves) {
+                parts.push(
+                  `${"  ".repeat(d)}- [${l.tool}] ${l.ok === null ? "…" : l.ok ? "ok" : "fail"}${l.args?.path ? ` ${String(l.args.path)}` : ""}`,
+                );
+              }
             } else {
               const l = n.leaf;
               parts.push(

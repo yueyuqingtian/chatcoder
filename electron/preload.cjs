@@ -4,12 +4,17 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("chatcoderAPI", {
   // 选择工作目录(返回绝对路径或 null)
   selectDirectory: () => ipcRenderer.invoke("dialog:selectDirectory"),
+  // 多选 md 文件（v1.1: 本地技能导入）
+  selectFiles: (filters) => ipcRenderer.invoke("dialog:selectFiles", filters),
+  // 后端端口（主进程探活后选定的实际端口，前端去硬编码）
+  getBackendPort: () => ipcRenderer.invoke("backend:getPort"),
   // 系统集成
   openPath: (p) => ipcRenderer.invoke("shell:openPath", p),
   showItemInFolder: (p) => ipcRenderer.invoke("shell:showItemInFolder", p),
   // 终端 PTY
   ptySpawn: (opts) => ipcRenderer.invoke("pty:spawn", opts),
   ptyWrite: (id, data) => ipcRenderer.send("pty:write", id, data),
+  ptyResize: (id, cols, rows) => ipcRenderer.send("pty:resize", id, cols, rows),
   ptyKill: (id) => ipcRenderer.send("pty:kill", id),
   onPtyData: (cb) => {
     const handler = (_e, id, data) => cb(id, data);
@@ -33,6 +38,13 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
   closeWindow: () => ipcRenderer.send("window:close"),
   // 外部穿透开关（透桌面/其他软件颜色）
   setExternalBackdrop: (on) => ipcRenderer.send("window:setExternalBackdrop", !!on),
+  // 当前系统用户名（侧栏底部用户条展示，对齐 zcode）
+  getUsername: () => {
+    try { return Promise.resolve(require("os").userInfo().username || ""); }
+    catch { return Promise.resolve(""); }
+  },
+  // 保持唤醒开关（powerSaveBlocker）
+  setKeepAwake: (on) => ipcRenderer.invoke("power:setKeepAwake", !!on),
 });
 
 // 注入平台到 <html data-platform>，供 CSS 平台感知样式（如 Win11 微圆角+四角透桌面）使用

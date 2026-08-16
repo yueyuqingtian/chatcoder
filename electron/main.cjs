@@ -4,9 +4,30 @@ const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const http = require("http");
+const net = require("net");
 const fs = require("fs");
 
-const BACKEND_PORT = Number(process.env.CHATCODER_PORT || 8000);
+// ── 后端端口选择（v2.1: 冲突时自动选空闲端口）──
+function probePort(port) {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.once("error", () => resolve(false));
+    srv.once("listening", () => srv.close(() => resolve(true)));
+    srv.listen(port, "127.0.0.1");
+  });
+}
+
+async function pickBackendPort() {
+  const base = Number(process.env.CHATCODER_PORT || 8000);
+  // 探活：端口已被占用则向后找空闲端口（上限 +50）
+  for (let p = base; p < base + 50; p++) {
+    // 8000 可能被 CLodop 打印服务占用（已知共存场景），跳过占用的端口即可
+    if (await probePort(p)) return p;
+  }
+  return base; // 全部被占时退回默认，交给后端报错
+}
+
+let BACKEND_PORT = Number(process.env.CHATCODER_PORT || 8000);
 let backendProcess = null;
 let mainWindow = null;
 let backendReady = false;
@@ -279,6 +300,18 @@ ipcMain.handle("dialog:selectDirectory", async () => {
   return result.filePaths[0];
 });
 
+// ── IPC:多选 md 文件（v1.1: 本地技能导入）──
+ipcMain.handle("dialog:selectFiles", async (_e, filters) => {
+  const result = await dialog.showOpenDialog({
+    properties: ["openFile", "multiSelections"],
+    filters: filters && filters.length ? filters : [{ name: "Markdown", extensions: ["md"] }],
+  });
+  return result.canceled ? [] : result.filePaths;
+});
+
+// ── IPC:后端端口透传（v2.1: 前端 BASE 去硬编码）──
+ipcMain.handle("backend:getPort", () => BACKEND_PORT);
+
 // ── IPC:系统集成 ──
 ipcMain.handle("shell:openPath", (_event, p) => {
   if (p) shell.openPath(p);
@@ -296,46 +329,68 @@ ipcMain.on("window:maximizeToggle", () => {
 });
 ipcMain.on("window:close", () => { if (mainWindow) mainWindow.close(); });
 
-// ── IPC:终端 PTY（child_process.spawn 起 pwsh/cmd，转发 stdin/stdout）──
-const ptyProcs = new Map(); // id -> { proc, buf }
+// ── IPC:保持唤醒（对齐 zcode「运行会话时保持电脑唤醒」）──
+let _psbId = null;
+ipcMain.handle("power:setKeepAwake", (_e, on) => {
+  const { powerSaveBlocker } = require("electron");
+  if (on) {
+    if (_psbId === null) _psbId = powerSaveBlocker.start("prevent-app-suspension");
+  } else if (_psbId !== null) {
+    try { powerSaveBlocker.stop(_psbId); } catch { /* ignore */ }
+    _psbId = null;
+  }
+  return _psbId !== null;
+});
+
+// ── IPC:终端 PTY（v2.2: node-pty 真 PTY，支持 resize/全屏程序；加载失败回退 spawn）──
+const { createPty, usingNodePty } = require("./pty.cjs");
+const ptyProcs = new Map(); // id -> pty handle
 let ptySeq = 0;
 ipcMain.handle("pty:spawn", (_event, opts) => {
   const id = ++ptySeq;
-  const cwd = (opts && opts.cwd) || process.cwd();
-  const shellName = process.platform === "win32" ? "pwsh.exe" : (process.env.SHELL || "bash");
-  const args = process.platform === "win32" ? ["-NoLogo"] : [];
-  let proc;
-  try {
-    proc = spawn(shellName, args, { cwd, env: process.env });
-  } catch (e) {
-    log("pty spawn failed:", String(e));
-    return { id: 0, error: String(e) };
+  const pty = createPty({
+    id,
+    cwd: (opts && opts.cwd) || process.cwd(),
+    cols: (opts && opts.cols) || 80,
+    rows: (opts && opts.rows) || 24,
+    shell: opts && opts.shell,
+  });
+  if (!pty.pid) {
+    log("pty spawn failed, no pid");
+    return { id: 0, error: "无法启动终端进程" };
   }
-  ptyProcs.set(id, { proc });
-  proc.stdout.on("data", (chunk) => {
-    if (mainWindow) mainWindow.webContents.send("pty:data", id, chunk.toString());
+  ptyProcs.set(id, pty);
+  pty.onData((chunk) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("pty:data", id, chunk);
+    }
   });
-  proc.stderr.on("data", (chunk) => {
-    if (mainWindow) mainWindow.webContents.send("pty:data", id, chunk.toString());
-  });
-  proc.on("close", (code) => {
-    if (mainWindow) mainWindow.webContents.send("pty:exit", id, code);
+  pty.onExit((code) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("pty:exit", id, code);
+    }
     ptyProcs.delete(id);
   });
-  return { id };
+  log("[pty] spawn id=" + id + " pid=" + pty.pid + " nodePty=" + pty.isPty + " shell=" + ((opts && opts.shell) || "auto"));
+  return { id, pid: pty.pid, isPty: pty.isPty };
 });
 
 ipcMain.on("pty:write", (_event, id, data) => {
-  const entry = ptyProcs.get(id);
-  if (entry && entry.proc.stdin && entry.proc.stdin.writable) {
-    entry.proc.stdin.write(data);
+  const pty = ptyProcs.get(id);
+  if (pty) pty.write(data);
+});
+
+ipcMain.on("pty:resize", (_event, id, cols, rows) => {
+  const pty = ptyProcs.get(id);
+  if (pty) {
+    pty.resize(Number(cols) || 80, Number(rows) || 24);
   }
 });
 
 ipcMain.on("pty:kill", (_event, id) => {
-  const entry = ptyProcs.get(id);
-  if (entry) {
-    try { entry.proc.kill(); } catch {}
+  const pty = ptyProcs.get(id);
+  if (pty) {
+    try { pty.kill(); } catch {}
     ptyProcs.delete(id);
   }
 });
@@ -370,14 +425,20 @@ app.whenReady().then(async () => {
     logErr("[chatcoder] createWindow 失败:", err);
   }
 
-  // 2. 后台启动后端
+  // 2. 端口探活（8000 被打印服务等占用时自动换空闲端口）
+  BACKEND_PORT = await pickBackendPort();
+  if (BACKEND_PORT !== Number(process.env.CHATCODER_PORT || 8000)) {
+    log("[chatcoder] 默认端口被占用，改用端口:", BACKEND_PORT);
+  }
+
+  // 3. 后台启动后端
   try {
     startBackend();
   } catch (err) {
     logErr("[chatcoder] startBackend 失败:", err);
   }
 
-  // 3. 等待后端就绪
+  // 4. 等待后端就绪
   try {
     await waitForBackend();
     backendReady = true;
@@ -392,7 +453,7 @@ app.whenReady().then(async () => {
     }
   }
 
-  // 4. 加载前端
+  // 5. 加载前端
   try {
     loadFrontend();
   } catch (err) {

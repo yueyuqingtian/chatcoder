@@ -22,6 +22,7 @@ class SubagentHandle:
     status: str = "running"  # running / done / failed
     summary: str = ""
     error: str = ""
+    artifact_ids: list[int] = field(default_factory=list)
 
 
 class SubagentManager:
@@ -49,10 +50,12 @@ class SubagentManager:
                     agent=agent, context_messages=context_bundle.to_messages(),
                     tool_schemas=tool_schemas, workspace=workspace,
                     cancel_event=cancel_event, token_budget=token_budget,
+                    task_id=getattr(task, "id", None), model_id=getattr(agent, "model_id", None),
                 )
                 handle.status = "done" if out.kind == "message" else "failed"
                 handle.summary = out.text or ""
                 handle.error = out.error or ""
+                handle.artifact_ids = list(out.artifact_ids or [])
                 await _sync_task_status(
                     db, self.session_id, task.id,
                     "done" if handle.status == "done" else "failed",

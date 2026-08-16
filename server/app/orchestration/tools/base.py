@@ -2,7 +2,10 @@
 import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 RiskLevel = Literal["low", "medium", "high"]
 
@@ -18,6 +21,10 @@ class ToolContext:
     agent_name: str
     # v0.9: 任务中断事件,set 后 agent loop 与长工具应主动退出
     cancel_event: asyncio.Event | None = None
+    # P0 修复: agent 主循环同连接 db 会话,供工具直接落库（避免跨连接 SQLite 写锁）
+    db: "AsyncSession | None" = None
+    # v2.2 (对齐 zcode 3.12): 会话权限模式 default / accept_edits / plan
+    permission_mode: str = "default"
 
 
 @dataclass
@@ -47,3 +54,12 @@ class Tool(ABC):
     @abstractmethod
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         """执行工具。"""
+
+    def approval_precheck(self, args: dict[str, Any], ctx: ToolContext) -> tuple[bool, str]:
+        """v2.2 (对齐 zcode 3.12 命令安全分级): 审批门前置检查。
+
+        返回 (skip_approval, reason)：
+        - skip_approval=True 时 executor 跳过审批直接执行（安全命令免审）；
+        - 默认 (False, "")，维持原有 risk_level 审批流程。
+        """
+        return False, ""

@@ -12,8 +12,9 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # ── 支持的文件类型 ──
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 SPREADSHEET_EXTS = {".csv", ".tsv", ".xlsx", ".xls"}
+DOC_EXTS = {".docx", ".pdf"}
 TEXT_EXTS = {".txt", ".md", ".json", ".yaml", ".yml", ".xml", ".html", ".htm", ".log", ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".go", ".rs", ".c", ".cpp", ".h", ".sh", ".sql"}
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 MAX_SPREADSHEET_ROWS = 200  # 表格最大预览行数
@@ -25,6 +26,10 @@ def is_image(filename: str) -> bool:
 
 def is_spreadsheet(filename: str) -> bool:
     return Path(filename).suffix.lower() in SPREADSHEET_EXTS
+
+
+def is_document(filename: str) -> bool:
+    return Path(filename).suffix.lower() in DOC_EXTS
 
 
 def is_text(filename: str) -> bool:
@@ -95,12 +100,53 @@ def _parse_excel(data: bytes) -> str:
     return "\n".join(parts) if parts else "(空 Excel)"
 
 
+def _parse_docx(data: bytes) -> str:
+    """解析 .docx 为纯文本（python-docx）。"""
+    try:
+        from docx import Document  # type: ignore
+    except ImportError:
+        return "(需要安装 python-docx 才能解析 Word 文档)"
+
+    try:
+        doc = Document(io.BytesIO(data))
+        parts = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+        # 表格内容
+        for table in doc.tables:
+            for row in table.rows:
+                cells = [c.text.strip().replace("\n", " ") for c in row.cells]
+                parts.append(" | ".join(cells))
+        return "\n".join(parts) if parts else "(空 Word 文档)"
+    except Exception as e:
+        logger.warning("[doc_parser] docx 解析失败: %s", e)
+        return f"(Word 解析失败: {e})"
+
+
+def _parse_pdf(data: bytes) -> str:
+    """解析 .pdf 为纯文本（pypdf）。"""
+    try:
+        from pypdf import PdfReader  # type: ignore
+    except ImportError:
+        return "(需要安装 pypdf 才能解析 PDF 文档)"
+
+    try:
+        reader = PdfReader(io.BytesIO(data))
+        parts: list[str] = []
+        for i, page in enumerate(reader.pages):
+            text = page.extract_text() or ""
+            if text.strip():
+                parts.append(f"--- 第 {i + 1} 页 ---\n{text.strip()}")
+        return "\n\n".join(parts) if parts else "(PDF 无可提取文本，可能是扫描件/纯图片)"
+    except Exception as e:
+        logger.warning("[doc_parser] pdf 解析失败: %s", e)
+        return f"(PDF 解析失败: {e})"
+
+
 def parse_file(filename: str, data: bytes) -> dict:
     """解析上传文件，返回 {type, content, data_url, mime}。
 
-    type: "image" | "text" | "spreadsheet" | "unsupported"
+    type: "image" | "text" | "spreadsheet" | "document" | "unsupported"
     - image: content 为 data_url
-    - text/spreadsheet: content 为解析后的文本
+    - text/spreadsheet/document: content 为解析后的文本
     """
     suffix = Path(filename).suffix
     size = len(data)
@@ -136,6 +182,18 @@ def parse_file(filename: str, data: bytes) -> dict:
             "mime": "text/markdown",
         }
 
+    if is_document(filename):
+        if suffix.lower() == ".docx":
+            text = _parse_docx(data)
+        else:
+            text = _parse_pdf(data)
+        return {
+            "type": "document",
+            "content": f"📎 **{filename}**\n\n{text}",
+            "data_url": None,
+            "mime": "text/plain",
+        }
+
     if is_text(filename):
         text = data.decode("utf-8", errors="replace")
         return {
@@ -151,3 +209,24 @@ def parse_file(filename: str, data: bytes) -> dict:
         "data_url": None,
         "mime": None,
     }
+
+
+def extract_plain_text(filename: str, data: bytes) -> str | None:
+    """提取文件的纯文本内容（供 AI 工具阅读或上下文注入）。
+
+    图片返回 None（AI 应通过 view_image 读取）；
+    文本/表格/文档返回提取后的文本；不支持的返回 None。
+    """
+    parsed = parse_file(filename, data)
+    if parsed["type"] == "unsupported" or parsed["type"] == "image":
+        return None
+    content = parsed.get("content") or ""
+    # 去掉 parse_file 拼装的 📎 **filename** 前缀（markdown 代码围栏一并去除）
+    if content.startswith("📎 **"):
+        lines = content.split("\n", 1)
+        content = lines[1] if len(lines) > 1 else ""
+        if content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+    return content.strip()

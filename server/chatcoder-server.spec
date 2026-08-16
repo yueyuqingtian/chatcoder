@@ -12,8 +12,12 @@ block_cipher = None
 
 SERVER_DIR = Path(SPECPATH).resolve()
 
+# 安全说明：server/.env 含真实 API Key / 内部网关地址，禁止打包进产物
+# （隐私红线：.env 已在 .gitignore 中，也不得进入 dist/ 安装包）
+# 打包产物运行时 pydantic-settings 自动从环境变量 / 工作目录 .env 读取配置，
+# 未配置默认模型时用户在应用设置中添加 BYOK 模型即可。
 datas = [
-    (str(SERVER_DIR / ".env"), "."),
+    (str(SERVER_DIR / ".env.example"), ".env.example"),
 ]
 
 hiddenimports = [
@@ -34,7 +38,8 @@ hiddenimports = [
     "passlib.handlers.bcrypt",
     "jose",
     "orjson",
-    "httptools",
+    "h11",
+    "uvicorn.protocols.http.h11_impl",
     "websockets",
     "email_validator",
     "multipart",

@@ -3,6 +3,7 @@ import { create } from "zustand";
 import { api } from "../api/client";
 import type { ArtifactOut, FileChangeOut, MessageOut, ProjectOut, RollbackAffected, RollbackPreviewFile, SessionOut, TaskOut, TurnOut } from "../api/client";
 import { wsClient } from "../api/ws";
+import type { ServerEventName } from "@chatcoder/shared/events";
 
 /** 上下文占用详情（输入框圆环）。 */
 export interface UsageDetail {
@@ -13,6 +14,90 @@ export interface UsageDetail {
   total: number;
   context_window: number;
   agent_name: string;
+  /** v2.2 (对齐 zcode 3.10): 7 类用量分类（system/history/tool_results/thinking/input） */
+  breakdown?: Record<string, number>;
+  /** v1.1: 占用口径（api_last=最后一次 API 真实占用 / est=本地估算） */
+  source?: string;
+}
+
+/** v15: 模型自主维护的执行清单项（todo_write 工具事件投影）。 */
+export interface TodoItem {
+  content: string;
+  activeForm?: string;
+  status: "pending" | "in_progress" | "completed";
+}
+
+/** v2.2: 排队输入项（运行中发送的消息进入队列，turn 完成后自动续发）。 */
+export interface QueuedInput {
+  id: string;
+  content: string;
+  attachments?: Record<string, unknown>[];
+  reasoningEffort?: string;
+  mode?: "readonly" | "plan" | null;
+}
+
+/**
+ * v2.2 会话状态分桶（对齐 zcode 方案 3.21.1）：
+ * 单会话的全部可变状态收敛为一个 slice，切换会话时视图零重载、状态不串。
+ * 视图字段（messages/turns/...）仍是当前会话的投影，组件选择器无需改动。
+ */
+export interface SessionSlice {
+  messages: MessageOut[];
+  turns: TurnOut[];
+  tasks: TaskOut[];
+  artifacts: ArtifactOut[];
+  runningTurnId: number | null;
+  isRunning: boolean;
+  interruptedTurnId: number | null;
+  streamingBuffers: Record<number, string>;
+  thinkingBuffers: Record<number, string>;
+  usage: UsageDetail | null;
+  isCompacting: boolean;
+  pendingApproval: { approvalId: string; detail: Record<string, unknown> } | null;
+  pendingPlan: { task: string } | null;
+  pendingPlanTurn: { turnId: number; task: string } | null;
+  pendingSplit: { turnId: number; requestTaskId: number; groupTaskId: number; reasons: string[] } | null;
+  reviewedFiles: Record<string, boolean>;
+  rollbackPending: { turnId: number; files: RollbackPreviewFile[]; affected: RollbackAffected } | null;
+  turnChanges: Record<number, FileChangeOut[]>;
+  todos: TodoItem[] | null;
+  todoPersisted: boolean;
+  agentActivity: Record<number, string>;
+  queuedInputs: QueuedInput[];
+}
+
+/** 视图 → slice 快照（切换会话前保存当前会话状态）。 */
+function _snapshotSlice(s: ChatState): SessionSlice {
+  return {
+    messages: s.messages,
+    turns: s.turns,
+    tasks: s.tasks,
+    artifacts: s.artifacts,
+    runningTurnId: s.runningTurnId,
+    isRunning: s.isRunning,
+    interruptedTurnId: s.interruptedTurnId,
+    streamingBuffers: s.streamingBuffers,
+    thinkingBuffers: s.thinkingBuffers,
+    usage: s.usage,
+    isCompacting: s.isCompacting,
+    pendingApproval: s.pendingApproval,
+    pendingPlan: s.pendingPlan,
+    pendingPlanTurn: s.pendingPlanTurn,
+    pendingSplit: s.pendingSplit,
+    reviewedFiles: s.reviewedFiles,
+    rollbackPending: s.rollbackPending,
+    turnChanges: s.turnChanges,
+    todos: s.todos,
+    todoPersisted: s.todoPersisted,
+    agentActivity: s.agentActivity,
+    queuedInputs: s.queuedInputs,
+  };
+}
+
+/** slice → 视图投影（切换会话时恢复缓存，跳过重复 REST 拉取）。 */
+function _sliceToView(slice: SessionSlice | undefined): Partial<ChatState> {
+  if (!slice) return {};
+  return { ...slice };
 }
 
 interface ChatState {
@@ -20,6 +105,8 @@ interface ChatState {
   sessions: SessionOut[];
   currentProjectId: number | null;
   currentSessionId: number | null;
+  /** v2.2 分桶：按 sessionId 隔离的会话状态（切换零重载 + 状态不串）。 */
+  sessionState: Record<number, SessionSlice>;
   /** 当前会话全部消息（含 turn_id，供 timeline 分组）。 */
   messages: MessageOut[];
   turns: TurnOut[];
@@ -45,14 +132,28 @@ interface ChatState {
   composerDraft: string;
   /** v6: /plan 计划确认弹窗（plan turn 完成后触发，task 为待执行任务）。 */
   pendingPlan: { task: string } | null;
-  /** v7: /plan 待确认的 plan turn（turnId + 任务内容），等 plan 文档生成（turn.completed）后才弹确认框。 */
+  /** v7: /plan 待确认的 plan turn（旧兼容字段）。 */
   pendingPlanTurn: { turnId: number; task: string } | null;
+  /** v13: 后端任务拆分提案所在区块。 */
+  pendingSplit: { turnId: number; requestTaskId: number; groupTaskId: number; reasons: string[] } | null;
   /** v6: 已审查的产物文件（path -> true），用于审查清单展示。 */
   reviewedFiles: Record<string, boolean>;
   /** v9: 回滚确认弹窗数据（点击回滚先预览，确认后执行）。v12: 含连带影响统计。 */
   rollbackPending: { turnId: number; files: RollbackPreviewFile[]; affected: RollbackAffected } | null;
   /** v11: turn 完成后的变更审核清单缓存（turnId -> FileChangeOut[]）。 */
   turnChanges: Record<number, FileChangeOut[]>;
+  /** v15: 当前 turn 模型自主维护的执行清单（todo.updated 事件）。 */
+  todos: TodoItem[] | null;
+  /** v15: 清单是否已持久化到任务区块（已持久化时由任务卡片展示，内嵌卡片隐藏）。 */
+  todoPersisted: boolean;
+  /** v15: 子代理实时活动（agentId -> 最新工具调用摘要，来自 tool.call 事件）。 */
+  agentActivity: Record<number, string>;
+  /** v2.2: 消息流滚动目标（任务卡步骤点击穿透 / turn 导航）。 */
+  scrollTarget: { threadId?: number; turnId?: number } | null;
+  /** v18: 全局最近选择的思考深度档位（空态首页选择跨入会话后由 ComposerBox 承接）。 */
+  lastReasoningEffort: string | null;
+  /** v2.2 (对齐 zcode 3.8): 输入队列——运行中发送的消息排队，turn 完成后自动续发。 */
+  queuedInputs: QueuedInput[];
   loading: boolean;
   error: string | null;
   wsConnected: boolean;
@@ -62,7 +163,11 @@ interface ChatState {
   createProject: (path: string, name?: string) => Promise<ProjectOut | null>;
   selectProject: (projectId: number) => Promise<void>;
   createSession: (projectId: number, title?: string) => Promise<void>;
-  switchSession: (sessionId: number) => Promise<void>;
+  switchSession: (sessionId: number, fromHist?: boolean) => Promise<void>;
+  /** 会话前进/后退历史（侧栏 logo 区与折叠态标题栏共用，zcode 顶部导航箭头） */
+  sessionHist: number[];
+  sessionHistIdx: number;
+  histGo: (dir: -1 | 1) => void;
   deleteSession: (sessionId: number) => Promise<void>;
   renameSession: (sessionId: number, title: string) => Promise<void>;
   forkSession: (sessionId: number) => Promise<void>;
@@ -78,8 +183,11 @@ resumeTurn: () => Promise<void>;
   /** v9: 取消回滚（关闭弹窗）。 */
   cancelRollback: () => void;
   confirmPlan: (task: string) => Promise<void>;
+  confirmTaskSplit: (accepted: boolean, steps?: Array<{ task_id?: number; title: string }>) => Promise<void>;
+  /** v15: 重试失败/已取消的步骤。 */
+  retryTask: (taskId: number) => Promise<void>;
   dismissPlan: () => void;
-  respondApproval: (approvalId: string, approved: boolean) => void;
+  respondApproval: (approvalId: string, approved: boolean, remember?: boolean, answer?: Record<string, unknown>) => void;
   markFileReviewed: (path: string, reviewed: boolean) => void;
   /** v11: 拉取指定 turn 的变更审核清单。 */
   loadTurnChanges: (turnId: number) => Promise<void>;
@@ -93,6 +201,13 @@ resumeTurn: () => Promise<void>;
   setComposerDraft: (text: string) => void;
   clearError: () => void;
   addMessage: (msg: MessageOut) => void;
+  /** v2.2: 请求消息流滚动到某子代理线程首条消息（任务卡步骤穿透）。 */
+  requestScrollTo: (target: { threadId?: number; turnId?: number }) => void;
+  clearScrollTarget: () => void;
+  /** v2.2: 更新/删除排队输入（patch=null 表示删除）。 */
+  updateQueuedInput: (id: string, patch: Partial<QueuedInput> | null) => void;
+  /** v2.2: turn 结束后自动续发队列头（内部调用）。 */
+  _drainQueue: () => Promise<void>;
   handleWs: (event: string, payload: Record<string, unknown>) => void;
 }
 
@@ -100,6 +215,7 @@ let _sendingGuard = false;
 let _wsUnsub: (() => void) | null = null;
 let _heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
 const HEARTBEAT_TIMEOUT = 60_000; // 60s 无事件超时兜底复位
+let _stopGuardTs = 0; // v1.1: 用户点击停止后 5 秒内，忽略后端残留的 running 状态回跳
 
 /** 启动/重置心跳计时器：60s 内无任何 WS 事件则强制复位 isRunning */
 function _startHeartbeat() {
@@ -107,9 +223,12 @@ function _startHeartbeat() {
   _heartbeatTimer = setTimeout(() => {
     _heartbeatTimer = null;
     const st = useChatStore.getState();
-    if (st.isRunning) {
+    if (!st.isRunning) return;
+    void st.refreshTurns().catch(() => {
       useChatStore.setState({ isRunning: false, runningTurnId: null });
-    }
+    }).finally(() => {
+      if (useChatStore.getState().isRunning) _startHeartbeat();
+    });
   }, HEARTBEAT_TIMEOUT);
 }
 
@@ -133,6 +252,11 @@ let _flushScheduled = false;
 function _clearPendingDeltas() {
   _pendingToken = {};
   _pendingThinking = {};
+}
+
+function _clearPendingFor(agentId: number) {
+  delete _pendingToken[agentId];
+  delete _pendingThinking[agentId];
 }
 
 function _scheduleDeltaFlush() {
@@ -178,7 +302,25 @@ function _appendOrdered(messages: MessageOut[], msg: MessageOut): MessageOut[] {
   return [...messages, msg].sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
 }
 
-/** 统一清理所有会话级字段（§9.1 #18：防止切换会话后残留） */
+/**
+ * v14: 判断乐观用户消息与后端真实用户消息是否同一条。
+ * 文本一致即可；仅附件（空文本）消息比较附件 file_id 集合，
+ * 保证「只发文件」的消息也能被乐观消息替换而非重复追加。
+ */
+function _sameUserContent(a: Record<string, unknown> | undefined, b: Record<string, unknown> | undefined): boolean {
+  const ta = typeof a?.text === "string" ? a.text : "";
+  const tb = typeof b?.text === "string" ? b.text : "";
+  if (ta || tb) return ta === tb;
+  const fa = Array.isArray(a?.attachments)
+    ? (a.attachments as { file_id?: unknown }[]).map((x) => String(x.file_id ?? "")).join(",")
+    : "";
+  const fb = Array.isArray(b?.attachments)
+    ? (b.attachments as { file_id?: unknown }[]).map((x) => String(x.file_id ?? "")).join(",")
+    : "";
+  return fa !== "" && fa === fb;
+}
+
+/** 统一清理所有会话级字段（§9.1 #18：防止切换会话后残留）。v2.2: 并入分桶重置。 */
 function _resetSessionState(): Partial<ChatState> {
   _clearHeartbeat();
   _clearPendingDeltas();
@@ -195,8 +337,17 @@ function _resetSessionState(): Partial<ChatState> {
     usage: null,
     isCompacting: false,
     pendingApproval: null,
+    pendingPlan: null,
     pendingPlanTurn: null,
+    pendingSplit: null,
+    reviewedFiles: {},
+    rollbackPending: null,
     turnChanges: {},
+    todos: null,
+    todoPersisted: false,
+    agentActivity: {},
+    scrollTarget: null,
+    queuedInputs: [],
   };
 }
 
@@ -205,6 +356,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
   currentProjectId: null,
   currentSessionId: null,
+  sessionHist: [],
+  sessionHistIdx: -1,
+  histGo: (dir) => {
+    const { sessionHist, sessionHistIdx } = get();
+    const next = sessionHistIdx + dir;
+    if (next < 0 || next >= sessionHist.length) return;
+    set({ sessionHistIdx: next });
+    void get().switchSession(sessionHist[next], true);
+  },
+  sessionState: {},
   messages: [],
   turns: [],
   tasks: [],
@@ -219,10 +380,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pendingApproval: null,
   pendingPlan: null,
   pendingPlanTurn: null,
+  pendingSplit: null,
   reviewedFiles: {},
   rollbackPending: null,
   turnChanges: {},
+  todos: null,
+  todoPersisted: false,
+  agentActivity: {},
+  scrollTarget: null,
+  queuedInputs: [],
   composerDraft: "",
+  lastReasoningEffort: null,
   loading: false,
   error: null,
   wsConnected: false,
@@ -264,7 +432,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   selectProject: async (projectId) => {
-    set({ currentProjectId: projectId, currentSessionId: null, messages: [], turns: [], tasks: [] });
+    // v2.2: 切项目前快照当前会话（与 switchSession 保持一致的分桶语义）
+    const prev = get();
+    if (prev.currentSessionId != null) {
+      const slice = _snapshotSlice(prev);
+      set((s) => ({ sessionState: { ...s.sessionState, [prev.currentSessionId as number]: slice } }));
+    }
+    set({ currentProjectId: projectId, currentSessionId: null, ..._resetSessionState() });
     try {
       const sessions = await api.listSessions(projectId);
       set({ sessions });
@@ -285,17 +459,64 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  switchSession: async (sessionId) => {
+  switchSession: async (sessionId, fromHist) => {
+    // 导航历史入栈（histGo 触发的切换跳过，避免重复入栈）
+    if (!fromHist) {
+      const h = get().sessionHist;
+      const idx = get().sessionHistIdx;
+      if (h[idx] !== sessionId) {
+        const stack = [...h.slice(0, idx + 1), sessionId];
+        set({ sessionHist: stack, sessionHistIdx: stack.length - 1 });
+      }
+    }
     // 清理旧 WS 连接和 handler（§9.1 #1②：防止 handler 累积）
     wsClient.disconnect();
     if (_wsUnsub) { _wsUnsub(); _wsUnsub = null; }
 
+    // v2.2 分桶：切走前把当前视图快照存回旧会话 slice（后台会话状态不丢）
+    const prev = get();
+    const prevId = prev.currentSessionId;
+    if (prevId != null && prevId !== sessionId) {
+      const slice = _snapshotSlice(prev);
+      set((s) => ({ sessionState: { ...s.sessionState, [prevId]: slice } }));
+    }
+
+    const cached = get().sessionState[sessionId];
     set({
       currentSessionId: sessionId,
       ..._resetSessionState(),
+      // v2.2: 有缓存直接恢复视图（零重载切换），无缓存走 REST 首次加载
+      ..._sliceToView(cached),
     });
     const session = get().sessions.find((s) => s.id === sessionId);
     if (session?.project_id) set({ currentProjectId: session.project_id });
+
+    // WS 连接 + 事件监听（保存 cleanup 函数）
+    wsClient.connect(sessionId);
+    _wsUnsub = wsClient.on((ev) => {
+      const payload = ev.payload as Record<string, unknown>;
+      get().handleWs(ev.event, payload);
+    });
+
+    if (cached) {
+      // v2.2: 缓存命中——零重载切换，静默补齐运行状态与任务（后台期间可能已变化）
+      if (cached.isRunning || cached.runningTurnId) {
+        _startHeartbeat();
+      }
+      void get().refreshTurns();
+      void get().refreshTasks();
+      // v1.1: 缓存切换也要刷新占用（后台会话可能已运行/压缩过）
+      void api.getSessionUsage(sessionId).then((u) => {
+        if (get().currentSessionId !== sessionId) return;
+        set({ usage: {
+          input: u.input, cached_input: u.cached_input, output: u.output,
+          reasoning_output: u.reasoning_output, total: u.total,
+          context_window: u.context_window, agent_name: u.agent_name,
+          source: u.source,
+        } });
+      }).catch(() => {});
+      return;
+    }
 
     set({ loading: true, error: null });
     try {
@@ -324,6 +545,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           total: usage.total,
           context_window: usage.context_window,
           agent_name: usage.agent_name,
+          source: usage.source, // v1.1: 口径标注（api_last / est）
         }});
       } catch { /* usage 加载失败不阻塞 */ }
 
@@ -332,13 +554,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       for (const t of turns.filter((x) => x.status === "completed").slice(-10)) {
         get().loadTurnChanges(t.id);
       }
-
-      // WS 连接 + 事件监听（保存 cleanup 函数）
-      wsClient.connect(sessionId);
-      _wsUnsub = wsClient.on((ev) => {
-        const payload = ev.payload as Record<string, unknown>;
-        get().handleWs(ev.event, payload);
-      });
 
       // 如果有运行中的 turn，启动心跳超时兜底（§9.1 #3）
       if (running) _startHeartbeat();
@@ -351,7 +566,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       await api.deleteSession(sessionId);
       const sessions = await api.listSessions();
-      set({ sessions });
+      set((s) => ({
+        sessions,
+        // v2.2: 同步清理已删除会话的分桶缓存
+        ...(s.sessionState[sessionId]
+          ? { sessionState: Object.fromEntries(Object.entries(s.sessionState).filter(([k]) => Number(k) !== sessionId)) }
+          : {}),
+      }));
       if (get().currentSessionId === sessionId) {
         const active = sessions.find((s) => s.status !== "archived" && s.id !== sessionId);
         if (active) await get().switchSession(active.id);
@@ -383,8 +604,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   sendTurn: async (content, attachments, reasoningEffort, mode) => {
     const { currentSessionId, isRunning } = get();
-    if (!currentSessionId || !content.trim()) return;
-    if (_sendingGuard || isRunning) return;
+    if (!currentSessionId) return;
+    // v14: 支持「只发附件不带文字」——只要 content 或 attachments 有其一即可发送
+    const hasText = Boolean(content && content.trim());
+    const hasAtts = Array.isArray(attachments) && attachments.length > 0;
+    if (!hasText && !hasAtts) return;
+    // v2.2: 输入队列——运行中发送的消息进入队列，当前 turn 完成后自动续发
+    if (_sendingGuard) {
+      // 并发保护（如 turn 结束事件连续触发）：放回队头不丢失
+      set((s) => ({
+        queuedInputs: [{
+          id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          content, attachments, reasoningEffort, mode,
+        }, ...s.queuedInputs],
+      }));
+      return;
+    }
+    if (isRunning) {
+      set((s) => ({
+        queuedInputs: [...s.queuedInputs, {
+          id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          content,
+          attachments,
+          reasoningEffort,
+          mode,
+        }],
+      }));
+      return;
+    }
     _sendingGuard = true;
     // 立即添加用户消息到本地状态，实现即时显示（流式体验）
     const optimisticUserMsg: MessageOut = {
@@ -395,7 +642,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sender_type: "user",
       sender_id: null,
       msg_type: "text",
-      content: { text: content },
+      content: hasAtts ? { text: content || "", attachments } : { text: content },
       token_usage: 0,
       created_at: new Date().toISOString(),
     };
@@ -429,9 +676,37 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   dismissPlan: () => set({ pendingPlan: null, pendingPlanTurn: null }),
 
-  respondApproval: (approvalId, approved) => {
-    // 通过 WS 将审批结果发送给后端，工具调用随之继续/终止
-    wsClient.send("approval.response", { approval_id: approvalId, approved });
+  confirmTaskSplit: async (accepted, steps) => {
+    const pending = get().pendingSplit;
+    if (!pending) return;
+    try {
+      await api.confirmTaskPlan(pending.turnId, pending.groupTaskId, { accepted, steps });
+      set({ pendingSplit: null });
+      await get().refreshTasks();
+      if (!accepted) await get().refreshTurns();
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  retryTask: async (taskId) => {
+    const task = get().tasks.find((t) => t.id === taskId);
+    if (!task || task.turn_id == null) return;
+    try {
+      await api.retryTask(task.turn_id, taskId);
+      await get().refreshTasks();
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  respondApproval: (approvalId, approved, remember = false, answer) => {
+    // v2.2 (对齐 zcode 3.12/3.14): remember=true 生成"始终允许"规则；
+    // answer 为 ask_user_question 的结构化回答
+    wsClient.send("approval.response", {
+      approval_id: approvalId, approved, remember,
+      ...(answer ? { answer } : {}),
+    });
     // 本地立即关闭横幅，避免等待广播返回造成的 UI 延迟
     set({ pendingApproval: null });
   },
@@ -475,6 +750,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
  cancelTurn: async () => {
    const { runningTurnId } = get();
    if (!runningTurnId) return;
+   _stopGuardTs = Date.now(); // v1.1: 进入停止保护窗
    try {
      await api.cancelTurn(runningTurnId);
       // 后端确认取消成功后复位
@@ -490,6 +766,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
  },
   forceStop: async () => {
     // 兜底强制复位：turn 可能已结束但 WS 未通知，或后端取消接口报错
+    _stopGuardTs = Date.now(); // v1.1: 进入停止保护窗
     const { runningTurnId, currentSessionId } = get();
     if (runningTurnId) {
       try { await api.cancelTurn(runningTurnId); } catch { /* 已结束则忽略 */ }
@@ -604,7 +881,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!currentSessionId) return;
     try {
       const tasks = await api.listSessionTasks(currentSessionId);
-      set({ tasks });
+      const visible = tasks.filter((task) => !task.is_hidden);
+      const proposedGroup = visible.find((task) => task.kind === "group" && task.status === "proposed");
+      const requestTask = proposedGroup
+        ? visible.find((task) => task.id === proposedGroup.parent_task_id)
+        : undefined;
+      set({
+        tasks,
+        ...(proposedGroup && requestTask && proposedGroup.turn_id != null
+          ? { pendingSplit: {
+              turnId: proposedGroup.turn_id,
+              requestTaskId: requestTask.id,
+              groupTaskId: proposedGroup.id,
+              reasons: [],
+            } }
+          : {}),
+      });
     } catch (e) {
       set({ error: String(e) });
     }
@@ -625,6 +917,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setComposerDraft: (text) => set({ composerDraft: text }),
   clearError: () => set({ error: null }),
 
+  requestScrollTo: (target) => set({ scrollTarget: { ...target } }),
+  clearScrollTarget: () => set({ scrollTarget: null }),
+
+  updateQueuedInput: (id, patch) => {
+    set((s) => ({
+      queuedInputs: patch === null
+        ? s.queuedInputs.filter((q) => q.id !== id)
+        : s.queuedInputs.map((q) => (q.id === id ? { ...q, ...patch } : q)),
+    }));
+  },
+
+  _drainQueue: async () => {
+    const { queuedInputs, isRunning, currentSessionId } = get();
+    if (!currentSessionId || isRunning || _sendingGuard) return;
+    const next = queuedInputs[0];
+    if (!next) return;
+    // 出队后立即续发（sendTurn 内部会重新入队若仍运行中）
+    set((s) => ({ queuedInputs: s.queuedInputs.slice(1) }));
+    await get().sendTurn(next.content, next.attachments, next.reasoningEffort, next.mode);
+  },
+
   addMessage: (msg) => {
     set((state) => {
       // 去重：相同 ID 直接跳过
@@ -632,12 +945,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 处理乐观消息替换：后端真实用户消息到达时，移除同内容同 sender 的临时乐观消息
       // 乐观消息 ID 是 Date.now()（很大），真实消息 ID 较小
       const isUserMsg = msg.sender_type === "user";
-      const msgText = (msg.content as Record<string, unknown>).text as string | undefined;
-      if (isUserMsg && msgText) {
+      if (isUserMsg) {
         const optimisticIdx = state.messages.findIndex((m) =>
           m.sender_type === "user" &&
           m.id > 1_000_000_000_000 && // 乐观消息特征：超大临时 ID
-          (m.content as Record<string, unknown>).text === msgText
+          _sameUserContent(m.content, msg.content) // v14: 文本或附件 file_id 一致即可替换
         );
         if (optimisticIdx >= 0) {
           const newMessages = [...state.messages];
@@ -654,7 +966,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const st = get();
     // 运行中收到任何 WS 事件时重置心跳（§9.1 #3：60s 无事件超时兜底）
     if (st.isRunning) _startHeartbeat();
-    switch (event) {
+    // v2.1: 事件名契约化（packages/shared/src/events.ts 穷举），default 走 never 编译期兜底
+    const ev = event as ServerEventName;
+    switch (ev) {
       case "message.created": {
         // 后端 payload 结构为 { msg: MessageOut }，需解包
         const rawMsg = (payload.msg ?? payload) as MessageOut;
@@ -662,19 +976,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (rawMsg.content == null) rawMsg.content = {};
         // v1.3: 合并 addMessage 和清空 buffer 为一次 set()，避免中间态闪烁
         const sid = Number(rawMsg.sender_id);
+        if (sid) _clearPendingFor(sid);
         const isThinking = Boolean((rawMsg.content as Record<string, unknown>).thinking);
         set((state) => {
           // 去重
           if (state.messages.some((m) => m.id === rawMsg.id)) return {};
           // 处理乐观消息替换
           const isUserMsg = rawMsg.sender_type === "user";
-          const msgText = (rawMsg.content as Record<string, unknown>).text as string | undefined;
           let newMessages: MessageOut[];
-          if (isUserMsg && msgText) {
+          if (isUserMsg) {
             const optimisticIdx = state.messages.findIndex((m) =>
               m.sender_type === "user" &&
               m.id > 1_000_000_000_000 &&
-              (m.content as Record<string, unknown>).text === msgText
+              _sameUserContent(m.content, rawMsg.content)
             );
             if (optimisticIdx >= 0) {
               newMessages = [...state.messages];
@@ -700,30 +1014,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break;
       }
       case "turn.started":
-        set({ runningTurnId: Number(payload.turn_id), isRunning: true });
+        // v15: 新 turn 清空上一轮的清单与活动记录
+        set({ runningTurnId: Number(payload.turn_id), isRunning: true, agentActivity: {}, todos: null, todoPersisted: false });
         break;
       case "turn.updated": {
         const turnId = Number(payload.turn_id);
         const status = String(payload.status ?? "");
         set((s) => {
-          const ended = status === "completed" || status === "failed" || status === "cancelled" || status === "blocked";
+          const ended = status === "completed" || status === "failed" || status === "cancelled" || status === "interrupted" || status === "blocked" || status === "awaiting_confirmation";
           // plan turn 异常结束（未生成 plan）时清除待确认记录
           const clearPlanTurn = ended && status !== "completed" && s.pendingPlanTurn?.turnId === turnId;
           return {
             turns: s.turns.map((t) => (t.id === turnId ? { ...t, status } : t)),
-            ...(status === "running" ? { runningTurnId: turnId, isRunning: true } : {}),
+            // v1.1: 停止保护窗内忽略后端残留的 running 回跳（用户点击停止后 5 秒）
+            ...(status === "running"
+              ? (Date.now() - _stopGuardTs > 5000
+                  ? { runningTurnId: turnId, isRunning: true }
+                  : {})
+              : {}),
             ...(ended ? { runningTurnId: null, isRunning: false } : {}),
             ...(status === "interrupted" ? { interruptedTurnId: turnId, runningTurnId: null, isRunning: false } : {}),
             ...(clearPlanTurn ? { pendingPlanTurn: null } : {}),
           };
         });
+        // v2.2: turn 异常/取消等结束态也续发排队输入（仅非运行态）
+        const endedNow = ["completed", "failed", "cancelled", "interrupted", "blocked", "awaiting_confirmation"].includes(String(payload.status ?? ""));
+        if (endedNow) void get()._drainQueue();
         break;
       }
       case "turn.completed": {
         const turnId = Number(payload.turn_id);
         _clearPendingDeltas();
         set((s) => {
-          // v7: /plan —— plan turn 完成（plan 文档已生成）后，才弹出确认执行弹窗
+          // v13: 任务拆分提案由 task.proposed 驱动；保留旧 /plan 弹窗兼容历史事件。
           let pendingPlan = s.pendingPlan;
           let pendingPlanTurn = s.pendingPlanTurn;
           if (pendingPlanTurn && pendingPlanTurn.turnId === turnId) {
@@ -736,12 +1059,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
             streamingBuffers: {}, thinkingBuffers: {},  // v1.3: turn 结束兜底清空
             pendingPlan,
             pendingPlanTurn,
+            // v1.1: 本地摘除会话转圈标记（双保险，与 session.completed 同写法）
+            sessions: s.sessions.map((x) => (x.id === s.currentSessionId ? { ...x, has_running: false } : x)),
           };
         });
         get().refreshMessages();
         get().refreshTasks();
         // v11: turn 完成后拉取变更审核清单（写盘变更 + 持久化审核状态）
         get().loadTurnChanges(turnId);
+        // v2.2: turn 结束 → 自动续发排队输入
+        void get()._drainQueue();
         break;
       }
       case "turn.interrupted": {
@@ -766,6 +1093,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       case "agent.completed":
         get().refreshTasks();
+        break;
+      case "agent.started":
+      case "agent.updated":
+        // 子代理活动状态由 TaskSummaryPanel/工具卡消费，此处无需全局状态
+        break;
+      case "task.planned":
+        // 计划模式产物：刷新任务与消息即可
+        get().refreshTasks();
+        get().refreshMessages();
+        break;
+      case "api.retry":
+        // 模型繁忙重试提示（v2.1: 前端 Composer 上方横幅消费）
+        break;
+      case "config.changed":
+      case "scheduled.triggered":
+        // 跨会话辅助事件：当前无全局 UI 动作
         break;
       case "thinking.delta": {
         const aid = Number(payload.agent_id);
@@ -794,10 +1137,45 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // 避免流式正文"刷完就消失"（落库消息到达前 buffer 保留显示）
         break;
       }
-      case "tool.call":
+      case "tool.call": {
+        // v15: 记录子代理最新工具调用，任务卡片进行中步骤行内展示实时活动
+        const agentId = Number(payload.agent_id ?? 0);
+        const tool = String(payload.tool ?? "");
+        if (agentId && tool) {
+          const preview = String(payload.args_preview ?? "").replace(/\s+/g, " ").slice(0, 60);
+          set((s) => ({ agentActivity: { ...s.agentActivity, [agentId]: preview ? `${tool} ${preview}` : tool } }));
+        }
+        break;
+      }
       case "tool.result":
         // 工具调用由 message.created 落库驱动展示；此处仅触发消息刷新兜底
         break;
+      case "todo.updated": {
+        // v15: 模型自主维护的执行清单（todo_write）
+        const items = Array.isArray(payload.todos) ? payload.todos : [];
+        set({
+          todos: items
+            .filter((t): t is Record<string, unknown> => typeof t === "object" && t !== null)
+            .map((t) => ({
+              content: String(t.content ?? ""),
+              activeForm: t.activeForm ? String(t.activeForm) : undefined,
+              status: (["pending", "in_progress", "completed"].includes(String(t.status)) ? String(t.status) : "pending") as TodoItem["status"],
+            }))
+            .filter((t) => t.content),
+          todoPersisted: Boolean(payload.persisted),
+        });
+        break;
+      }
+      case "task.proposed": {
+        const turnId = Number(payload.turn_id ?? 0);
+        const requestTaskId = Number(payload.request_task_id ?? 0);
+        const groupTaskId = Number(payload.group_task_id ?? 0);
+        const reasons = Array.isArray(payload.reasons) ? payload.reasons.map(String) : [];
+        set({ pendingSplit: { turnId, requestTaskId, groupTaskId, reasons }, isRunning: false, runningTurnId: null });
+        // 提案事件只携带轻量步骤摘要，完整字段通过 REST 拉取，避免协议中泄露执行细节。
+        get().refreshTasks();
+        break;
+      }
       case "task.updated": {
         const taskId = Number(payload.task_id);
         const status = String(payload.status ?? "");
@@ -830,6 +1208,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           total: promptTokens,
           context_window: Number(payload.context_window ?? 0),
           agent_name: String(payload.agent_name ?? "main"),
+          breakdown: (payload.breakdown as Record<string, number> | undefined) ?? undefined,
         };
         set({ usage: detail });
         break;
@@ -851,16 +1230,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // 审批结果广播回前端（含其他窗口），关闭本地审批横幅
         set({ pendingApproval: null });
         break;
-      case "session.completed":
-        set({ isRunning: false, runningTurnId: null });
+      case "session.completed": {
+        const sid = Number((payload as { session_id?: unknown }).session_id ?? 0);
+        // v1.1: 本地立即摘除转圈标记，避免等待 REST
+        set((s) => ({
+          isRunning: false, runningTurnId: null,
+          sessions: s.sessions.map((x) => (x.id === sid ? { ...x, has_running: false } : x)),
+        }));
         get().refreshTurns();
         get().refreshTasks();
         break;
+      }
       case "error":
         set({ error: String((payload as { message?: string }).message ?? "未知错误") });
         break;
-      default:
+      case "ack":
         break;
+      case "sync.response": {
+        const count = Number(payload.count ?? 0);
+        if (count > 0) {
+          _clearPendingDeltas();
+          set({ streamingBuffers: {}, thinkingBuffers: {} });
+          void get().refreshMessages();
+          void get().refreshTurns();
+          void get().refreshTasks();
+        }
+        break;
+      }
+      default: {
+        // 编译期穷举检查：后端新增事件未在 events.ts 登记时此处报错
+        const _exhaustive: never = ev;
+        void _exhaustive;
+        break;
+      }
     }
     void st;
   },

@@ -19,7 +19,8 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"],
-      "@chatcoder/shared": ["../packages/shared/src/index.ts"]
+      "@chatcoder/shared": ["../packages/shared/src/index.ts"],
+      "@chatcoder/shared/*": ["../packages/shared/src/*"]
     }
   },
   "include": ["src"],

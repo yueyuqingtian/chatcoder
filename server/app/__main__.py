@@ -24,6 +24,8 @@ def main() -> None:
         host=settings.server_host,
         port=settings.server_port,
         reload=settings.debug,
+        # 打包环境下 httptools 的 C 扩展收集不可靠，统一用纯 Python 的 h11
+        http="h11",
     )
 
 

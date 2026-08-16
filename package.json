@@ -17,6 +17,9 @@
     "electron": "^31.0.0",
     "electron-builder": "^24.13.3"
   },
+  "optionalDependencies": {
+    "node-pty": "^1.0.0"
+  },
   "build": {
     "appId": "com.chatcoder.desktop",
     "productName": "chatcoder",
@@ -28,7 +31,11 @@
     "files": [
       "electron/main.cjs",
       "electron/preload.cjs",
+      "electron/pty.cjs",
       "electron/loading.html"
+    ],
+    "asarUnpack": [
+      "node_modules/node-pty/**"
     ],
     "extraResources": [
       {
@@ -49,7 +56,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "signAndEditExecutable": false,

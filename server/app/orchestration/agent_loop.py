@@ -26,7 +26,7 @@ from app.services import message_service, rollback_service, task_service
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_OUTPUT_CHARS = 8000  # v1.1: 已弃用，保留仅向后兼容；实际用 _tool_output_limit
+MAX_TOOL_OUTPUT_CHARS = 16000  # v15: 与 fs_read 上限(settings.tool_output_chars_read)对齐；历史上曾为 8000
 _STREAM_CHUNK_SIZE = 80
 _STREAM_INTERVAL = 0.01
 
@@ -49,9 +49,34 @@ def _truncate_args(args: dict, limit: int = 800) -> str:
     return s if len(s) <= limit else s[:limit] + "\n...(已截断)"
 
 
+def _line_change_stat(before: str | None, after: str | None) -> tuple[int, int]:
+    """行级变更统计（v2.2，对齐 ZCode computeLineChangeStat 简化版）。
+
+    返回 (additions, deletions)：按行 diff 计数（SequenceMatcher opcode 聚合）。
+    """
+    if before is None or after is None:
+        return (0, 0)
+    try:
+        import difflib
+        diff = list(difflib.SequenceMatcher(
+            None, before.splitlines(), after.splitlines(),
+        ).get_opcodes())
+        additions = sum(
+            (b2 - b1) for tag, _a1, _a2, b1, b2 in diff
+            if tag in ("insert", "replace")
+        )
+        deletions = sum(
+            (a2 - a1) for tag, a1, a2, _b1, _b2 in diff
+            if tag in ("delete", "replace")
+        )
+        return (int(additions), int(deletions))
+    except Exception:
+        return (0, 0)
+
+
 @dataclass
 class AgentOutput:
-    kind: str  # message | done | error | skipped
+    kind: str  # message | done | error | cancelled | skipped
     text: str = ""
     error: str = ""
     artifact_ids: list[int] = field(default_factory=list)
@@ -73,15 +98,27 @@ async def run_agent_loop(
     reasoning_effort: str | None = None,
     task_id: int | None = None,
     model_id: int | None = None,
+    multimodal: bool = False,
 ) -> AgentOutput:
     """运行单个 agent 推理循环。
 
     context_messages 已由 context_manager 组装（system + developer + 历史 + 指令）。
     subagent_context: 主代理专用，含子代理管理能力（spawn_subagent/collect_results 工具）。
+    multimodal: 当前模型支持图片输入时，read_attachment/view_image 的图片结果
+    会以 image_url 内容块追加一条 user 消息，让模型真正"看到"图片（v15）。
     """
     agent_id = agent.id
     agent_name = agent.name
     thread_id = None if agent.kind == "main" else agent.id  # 子代理消息进自己的线程
+
+    # v2.2 (对齐 zcode 3.12): 会话权限模式（executor 审批门前决策）
+    permission_mode = "default"
+    try:
+        from app.persistence.models.message import Session as _Session
+        _sess = await db.get(_Session, session_id)
+        permission_mode = getattr(_sess, "permission_mode", None) or "default"
+    except Exception:
+        logger.warning("[agent] turn=%s 读取会话权限模式失败，用 default", turn_id, exc_info=True)
 
     # 解析 provider（v10: 会话级模型覆盖优先——engine 传入 session.model_id，
     # 优先于 agent.model_id，解决"配置无默认模型 + 页面会话选择模型"不可用问题）
@@ -120,7 +157,7 @@ async def run_agent_loop(
             int(_diag_window * settings.auto_compact_threshold_ratio),
         )
     except Exception:
-        pass
+        logger.warning("[agent] turn=%s 压缩阈值诊断日志获取失败", turn_id, exc_info=True)
 
     await broadcast(session_id, {
         "event": "agent.started",
@@ -136,16 +173,23 @@ async def run_agent_loop(
     total_tokens = 0
     final_text = ""
     write_paths: list[str] = []
+    # v2.2 (对齐 zcode 3.9): todo 提醒机制——模型维护的执行清单连续 N 步未更新时注入提醒
+    _todo_active = False       # 本 turn 是否已创建过清单
+    _todo_updated_at_step = 0  # 清单最后一次更新的步数
     # v6.5: 估算校准系数 -- 用 API 真实 prompt_tokens 动态校准估算值。
     # 字节/4 对中文偏高，不同模型/网关分词差异大，静态常量无法精准。
     # 每次拿到 API 真实值就更新系数，用于前置压缩估算，实现自适应精准压缩。
     _calib_factor = 1.0  # real / est，初始1.0（无校准）
+    # v2.2 (对齐 zcode 3.14): 重复工具调用检测——工具名+参数签名 → 连续次数
+    _call_sigs: dict[str, int] = {}
+    # 待注入提醒（下一步循环构建 api_messages 后追加，避免被重建丢弃）
+    _pending_reminders: list[str] = []
 
     try:
         for step in range(1, max_steps + 1):
             if cancel_event and cancel_event.is_set():
                 logger.warning("[agent] task turn=%s 收到中断信号", turn_id)
-                return AgentOutput(kind="error", error="任务被用户中断")
+                return AgentOutput(kind="cancelled", error="任务被用户中断")
 
             await asyncio.sleep(0)
 
@@ -169,7 +213,9 @@ async def run_agent_loop(
                 messages = ensure_tool_pairing(messages)
                 # v8 根治: 强制 assistant(tool_calls) 后紧跟 tool 结果，杜绝 400
                 messages = normalize_tool_sequence(messages)
-                api_messages = build_api_copy(messages)
+                # v15: 预算驱动折叠 —— 上下文占用 < api_copy_fold_ratio 时保留全部工具结果
+                _fold_budget = int(agent_window * settings.api_copy_fold_ratio)
+                api_messages = build_api_copy(messages, fold_budget_tokens=_fold_budget)
 
                 # v6.5: 前置压缩检查 -- 用校准系数调整估算，超阈值则先压缩
                 _est_raw = _est_tokens(api_messages)
@@ -182,7 +228,7 @@ async def run_agent_loop(
                     messages = await _ac_pre(messages, agent_window, provider)
                     messages = ensure_tool_pairing(messages)
                     messages = normalize_tool_sequence(messages)
-                    api_messages = build_api_copy(messages)
+                    api_messages = build_api_copy(messages, fold_budget_tokens=int(agent_window * settings.api_copy_fold_ratio))
                     _est_after = int(_est_tokens(api_messages) * _calib_factor)
                     logger.info("[agent] turn=%s step=%s 前置压缩后 prompt=%d -> %d", turn_id, step, _est_prompt, _est_after)
                     await broadcast(session_id, {"event": "usage.update", "payload": {"agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id, "prompt_tokens": _est_after, "completion_tokens": 0, "total_tokens": _est_after, "context_window": agent_window, "usage_source": "est_after_compact", "cached_input_tokens": 0, "reasoning_tokens": 0}})
@@ -190,7 +236,31 @@ async def run_agent_loop(
                 else:
                     logger.debug("[agent] turn=%s step=%s 前置估算 prompt=%d (raw=%d calib=%.3f) < 阈值 %d，不压缩", turn_id, step, _est_prompt, _est_raw, _calib_factor, _pre_threshold)
             except Exception:
+                logger.warning("[agent] turn=%s step=%s 前置压缩检查失败，降级为原始消息继续", turn_id, step, exc_info=True)
                 api_messages = messages
+
+            # v2.2: todo 提醒——存在清单且连续 N 步未更新 → 注入 system 提醒
+            # （对齐 ZCode buildTodoReminderBody：防模型"开清单后跑偏"）
+            if _todo_active and step - _todo_updated_at_step >= settings.todo_reminder_interval:
+                api_messages = [*api_messages, ChatMessage(
+                    role="system",
+                    content=(
+                        "[任务清单提醒] 本任务存在执行清单，但最近几步未调用 todo_write 更新。"
+                        "请审视当前进度：已完成步骤标记 completed，进行中步骤标记 in_progress，"
+                        "必要时调整清单内容后再继续执行。"
+                    ),
+                )]
+                _todo_updated_at_step = step  # 重置计数，避免每步重复注入
+                logger.info(
+                    "[agent] turn=%s step=%s 注入 todo 提醒（清单 %d 步未更新）",
+                    turn_id, step, settings.todo_reminder_interval,
+                )
+            # v2.2: 注入待发的重复调用提醒（上一步工具执行中检测到）
+            if _pending_reminders:
+                api_messages = [*api_messages, *[
+                    ChatMessage(role="system", content=r) for r in _pending_reminders
+                ]]
+                _pending_reminders = []
 
             request = ChatRequest(
                 messages=api_messages, model="",
@@ -225,7 +295,7 @@ async def run_agent_loop(
                                               agent_id=agent_id, agent_name=agent_name,
                                               msg_type=MsgType.TEXT,
                                               content={"text": final_text, "agent_name": agent_name})
-                    return AgentOutput(kind="error", error="任务被用户中断")
+                    return AgentOutput(kind="cancelled", error="任务被用户中断")
             except Exception as api_err:
                 logger.warning("[agent] turn=%s 模型调用失败，尝试紧急压缩: %s", turn_id, str(api_err)[:200])
                 try:
@@ -303,6 +373,14 @@ async def run_agent_loop(
 
             # v6.5: total_tokens 发送 prompt_tokens（真实当前上下文占用），
             # prompt_tokens 包含 system+history+tools+当前输入，是"窗口被占用了多少"的真实值。
+            # v2.2 (对齐 zcode 3.10): 用量分类 breakdown（前端用量环 hover 展示分类条）
+            _breakdown: dict = {}
+            try:
+                from app.orchestration.token_counter import estimate_breakdown
+                _breakdown = estimate_breakdown(api_messages)
+            except Exception:
+                logger.debug("[agent] breakdown 估算失败(非阻塞)", exc_info=True)
+
             await broadcast(session_id, {
                 "event": "usage.update",
                 "payload": {
@@ -314,6 +392,7 @@ async def run_agent_loop(
                     "usage_source": _usage_source,
                     "cached_input_tokens": getattr(response.usage, 'cached_input_tokens', 0) or 0 if response.usage else 0,
                     "reasoning_tokens": getattr(response.usage, 'reasoning_tokens', 0) or 0 if response.usage else 0,
+                    "breakdown": _breakdown,
                 },
             })
             logger.info(
@@ -321,6 +400,34 @@ async def run_agent_loop(
                 turn_id, step, _final_prompt, _usage_source, agent_window,
                 (_final_prompt / agent_window * 100) if agent_window > 0 else 0,
             )
+
+            # v1.1: 用量流水落库（全软件统计的数据源），失败不阻断主流程
+            try:
+                from app.persistence.models.usage_record import UsageRecord
+                _model_name = ""
+                if model_id is not None:
+                    from app.persistence.models.model_reg import Model
+                    _m = await db.get(Model, model_id)
+                    _model_name = _m.name if _m else ""
+                db.add(UsageRecord(
+                    session_id=session_id, turn_id=turn_id, agent_id=agent_id,
+                    model_id=model_id, model_name=_model_name,
+                    prompt_tokens=_final_prompt, completion_tokens=_final_completion,
+                    reasoning_tokens=(getattr(response.usage, "reasoning_tokens", 0) or 0) if response.usage else 0,
+                    cached_tokens=(getattr(response.usage, "cached_input_tokens", 0) or 0) if response.usage else 0,
+                    usage_source=_usage_source,
+                ))
+                await db.commit()
+                # v1.1: 主代理同步持久化最后一次真实占用（重启/切会话后圆环口径一致）
+                if thread_id is None and _final_prompt > 0:
+                    _srow = await db.get(_Session, session_id)
+                    if _srow is not None:
+                        from datetime import datetime
+                        _srow.last_prompt_tokens = _final_prompt
+                        _srow.last_usage_at = str(datetime.utcnow())
+                        await db.commit()
+            except Exception:
+                logger.debug("usage 流水落库失败(非阻塞)", exc_info=True)
 
             # v6.4: 调用后真实占用驱动压缩 -- 用 API 精确 prompt_tokens 判断
             # 替代旧的 should_auto_compact 估算检查，避免过早摘要。
@@ -381,15 +488,39 @@ async def run_agent_loop(
                 messages.append(ChatMessage(
                     role="assistant", content=response.content,
                     tool_calls=response.tool_calls,
+                    # v1.2: thinking 模式网关要求工具调用回合的历史 assistant 回传
+                    # reasoning_content（模型本步产生的思考），否则下一轮调用 400
+                    reasoning_content=response.thinking or None,
                 ))
                 for tc in response.tool_calls:
                     # v6.4: 工具执行前检查中断信号
                     if cancel_event and cancel_event.is_set():
                         logger.warning("[agent] turn=%s 工具执行前检测到中断信号，退出循环", turn_id)
-                        return AgentOutput(kind="error", error="任务被用户中断")
+                        return AgentOutput(kind="cancelled", error="任务被用户中断")
                     tool_name = tc.get("name", "")
                     args = tc.get("arguments", {}) or {}
                     call_key = "tc_" + uuid.uuid4().hex[:12]
+
+                    # v2.2 (对齐 zcode 3.14): 重复调用签名检测——连续 ≥2 步同工具同参数
+                    # 注入提醒（对齐 buildRepeatedToolCallReminderBody），防死循环空转。
+                    try:
+                        _sig = tool_name + "|" + json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
+                        _sig_count = _call_sigs.get(_sig, 0) + 1
+                        _call_sigs[_sig] = _sig_count
+                        if _sig_count >= 2:
+                            _call_sigs = {k: v for k, v in _call_sigs.items() if k == _sig or v < _sig_count}
+                            _pending_reminders.append(
+                                f"[重复调用提醒] 你已连续 {_sig_count} 次调用 {tool_name} "
+                                "且参数完全相同，但结果未推动任务进展。"
+                                "请停止重复，改用其他方法：检查文件是否存在、换用不同工具或参数、"
+                                "或总结当前发现并询问用户。"
+                            )
+                            logger.warning(
+                                "[agent] turn=%s step=%s 重复调用提醒: %s x%d",
+                                turn_id, step, tool_name, _sig_count,
+                            )
+                    except Exception:
+                        pass
 
                     # ── 子代理工具（主代理专用）──
                     if subagent_context and tool_name in ("spawn_subagent", "collect_results"):
@@ -422,6 +553,8 @@ async def run_agent_loop(
                         workspace_root=workspace, session_id=session_id,
                         task_id=turn_id, agent_id=agent_id, agent_name=agent_name,
                         cancel_event=cancel_event,
+                        db=db,
+                        permission_mode=permission_mode,
                     )
                     _ts0 = time.monotonic()
                     # v9: 写盘工具执行前读取原文件内容（精确回滚依据：只撤销 AI 改动部分）
@@ -429,25 +562,34 @@ async def run_agent_loop(
                     _pre_before = {p: rollback_service._read_file_text(workspace, p) for p in _pre_paths}
                     # v10: 对已存在的目标文件额外建立磁盘 checkpoint（.chatcoder/checkpoints 兜底备份），
                     # 与精确回滚的 before/after 记录双保险，防数据库记录异常时无法恢复。
+                    # v1.1: 取消穿透——长工具执行期间轮询 cancel_event，命中即取消底层任务
+                    _exec_task = asyncio.ensure_future(tool_executor.execute(
+                        tool_name=tool_name, args=args, call_key=call_key,
+                        agent=agent, ctx=ctx,
+                        on_approval_request=_make_approval_emitter(session_id),
+                    ))
                     try:
                         result = await asyncio.wait_for(
-                            tool_executor.execute(
-                                tool_name=tool_name, args=args, call_key=call_key,
-                                agent=agent, ctx=ctx,
-                                on_approval_request=_make_approval_emitter(session_id),
-                            ),
+                            asyncio.shield(_poll_cancel(_exec_task, cancel_event)),
                             timeout=120.0,
                         )
                     except asyncio.TimeoutError:
+                        _exec_task.cancel()
                         from app.orchestration.tools.base import ToolResult
                         result = ToolResult(ok=False, output="", error=f"[工具执行超时(120s)] {tool_name}")
+                    except asyncio.CancelledError:
+                        from app.orchestration.tools.base import ToolResult
+                        result = ToolResult(ok=False, output="", error="[已被用户中断]")
                     except Exception as exc:
                         from app.orchestration.tools.base import ToolResult
                         result = ToolResult(ok=False, output="", error=f"[工具执行异常] {exc}")
                     _dur = int((time.monotonic() - _ts0) * 1000)
 
                     # 写盘工具：登记路径 + 记录 before/after（v9 精确回滚依据）
+                    _change_stat = None
                     if tool_name in _WRITE_TOOLS and result.ok:
+                        _total_add = 0
+                        _total_del = 0
                         for target in _pre_paths:
                             write_paths.append(str(target))
                             # v10: 文件级 checkpoint 兜底（写盘前快照备份）
@@ -459,26 +601,59 @@ async def run_agent_loop(
                                 before=_pre_before.get(target),
                                 after=rollback_service._read_file_text(workspace, target),
                             )
+                            # v2.2 (对齐 zcode 3.7): 行级变更统计（+N -M），工具卡摘要展示
+                            _add, _del = _line_change_stat(
+                                _pre_before.get(target),
+                                rollback_service._read_file_text(workspace, target),
+                            )
+                            _total_add += _add
+                            _total_del += _del
+                        if _total_add or _total_del:
+                            _change_stat = {
+                                "path": str(_pre_paths[0]),
+                                "additions": _total_add,
+                                "deletions": _total_del,
+                            }
 
                     await broadcast(session_id, {
                         "event": "tool.result",
                         "payload": {"turn_id": turn_id, "tool": tool_name,
                                     "ok": result.ok, "duration_ms": _dur,
-                                    "output_preview": (result.output or result.error)[:300]},
+                                    "output_preview": (result.output or result.error)[:300],
+                                    **({"change_stat": _change_stat} if _change_stat else {})},
                     })
                     await message_service.create_message(
                         db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
                         sender_type=SenderType.AGENT.value, sender_id=agent_id,
                         msg_type=MsgType.TOOL_RESULT.value,
                         content={"tool": tool_name, "call_key": call_key,
-                                 "ok": result.ok, "output": result.output[:4000],
+                                 "ok": result.ok, "output": result.output[:MAX_TOOL_OUTPUT_CHARS],
                                  "error": result.error, "duration_ms": _dur,
-                                 "agent_name": agent_name},
+                                 "agent_name": agent_name,
+                                 **({"change_stat": _change_stat} if _change_stat else {})},
                     )
                     messages.append(ChatMessage(
                         role="tool", content=_truncate_output(result.output or result.error),
                         name=tool_name, tool_call_id=tc.get("id", ""),
                     ))
+                    # v2.2: todo_write 成功 → 重置 todo 提醒计数
+                    if tool_name == "todo_write" and result.ok:
+                        _todo_active = True
+                        _todo_updated_at_step = step
+                    # v15: 图片类工具结果 → 多模态模型追加 image_url 消息，让模型真正看到图片。
+                    # （此前 base64 只放在 ToolResult.data，从未进入对话，模型只能看到
+                    #   "Base64 length: N" 文本，被迫转向 OCR/命令行猜图）
+                    if multimodal and result.ok and tool_name in ("read_attachment", "view_image"):
+                        _b64 = (result.data or {}).get("base64")
+                        if _b64:
+                            import mimetypes as _mt
+                            _fname = str((result.data or {}).get("filename") or (result.data or {}).get("path") or "")
+                            _mime = _mt.guess_type(_fname)[0] or "image/png"
+                            messages.append(ChatMessage(
+                                role="user",
+                                content=f"[系统] 上面工具 {tool_name} 读取的图片内容如下，请直接查看：",
+                                content_blocks=[{"type": "image_url", "image_url": {"url": f"data:{_mime};base64,{_b64}"}}],
+                            ))
                 continue
 
             # 最终文本
@@ -507,7 +682,7 @@ async def run_agent_loop(
                     db, task_id=task_id or turn_id, text=final_text, write_paths=write_paths,
                 )
             except Exception:
-                logger.debug("[agent] 产物抽取失败(非阻塞)", exc_info=True)
+                logger.warning("[agent] 产物抽取失败(非阻塞)", exc_info=True)
 
         # 主代理最终文字与产物也写入主线程（子代理已写 thread）
         if agent.kind == "main" and artifact_ids:
@@ -539,6 +714,16 @@ async def run_agent_loop(
 
 
 # ── 辅助 ──
+
+async def _poll_cancel(task: asyncio.Task, cancel_event: asyncio.Event | None):
+    """等待工具任务完成；期间轮询取消信号，命中则取消底层任务（停止按钮对长工具即时生效）。"""
+    while not task.done():
+        if cancel_event is not None and cancel_event.is_set():
+            task.cancel()
+            raise asyncio.CancelledError("cancelled by user")
+        await asyncio.sleep(0.2)
+    return await task
+
 
 async def _emit_agent_msg(db, *, session_id, turn_id, thread_id, agent_id, agent_name,
                           msg_type, content) -> None:
@@ -719,7 +904,7 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
                 "payload": {"task_id": task.id, "status": "pending", "note": (task_desc or "")[:200]},
             })
         except Exception:
-            logger.debug("[agent] 子任务创建提交/广播失败(非阻塞)", exc_info=True)
+            logger.warning("[agent] 子任务创建提交/广播失败(非阻塞)", exc_info=True)
 
         # 构建子代理上下文（独立，仅 handoff + 项目规则）
         from app.orchestration.context_manager import build_subagent_context

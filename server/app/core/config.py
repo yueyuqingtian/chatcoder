@@ -37,6 +37,8 @@ class Settings(BaseSettings):
 
     # v0.3: 工作区根目录(服务端工具执行沙箱边界)
     workspace_root: str = "./workspace"
+    # v14: 附件上传目录(文件实际落盘位置, AI 通过 read_attachment 工具读取)
+    uploads_dir: str = "./uploads"
     # v0.9: 默认模型上下文窗口(支持 500k 长上下文)
     default_context_window: int = 500000
     # v3.0: 上下文压缩相关配置（对齐 codex openai_models.rs）
@@ -44,6 +46,10 @@ class Settings(BaseSettings):
     context_compaction_enabled: bool = True
     # v6.1: 对齐 codex -- auto_compact_token_limit = context_window * 90%
     auto_compact_threshold_ratio: float = 0.90
+    # v15: API 副本折叠阈值 —— 上下文占用低于此比例时 build_api_copy 不折叠任何
+    # tool result（保留全部读取内容，根治"模型失忆反复读文件"）；高于此比例才
+    # 按 keep_recent_groups 折叠旧工具输出，与下层 auto_compact(90%) 形成两级降级。
+    api_copy_fold_ratio: float = 0.70
     # v0.3: 计划确认门 — 默认硬门,需用户确认拆解后才执行
     auto_confirm_plan: bool = False
     # v0.3: 审批超时(秒),超时自动拒绝
@@ -75,12 +81,19 @@ class Settings(BaseSettings):
     agent_max_output_tokens: int = 65536
 
     # v1.1: 工具输出字符阈值分级（痛点1：替代全局 3000 硬截断）
-    tool_output_chars_read: int = 12000        # fs_read / fs_list
+    # v15: fs_read 上限提到 16000，与内存/落库截断对齐，避免大文件一次读不全被迫分页重读
+    tool_output_chars_read: int = 16000        # fs_read / fs_list
     tool_output_chars_grep: int = 16000        # fs_grep / codebase_search
     tool_output_chars_terminal: int = 12000    # terminal_exec
     tool_output_chars_web: int = 8000          # web_fetch / web_search
     tool_output_chars_write: int = 500          # fs_write 回执
     tool_output_chars_default: int = 8000       # 兜底
+
+    # v1.1: 增强搜索（ripgrep）；关闭或无 rg 时 fs_grep 回退纯 Python 逐行匹配
+    enhanced_search: bool = True
+    # v1.1: 消息流展示开关（后端缓存值，前端启动时拉取）
+    show_todos: bool = True
+    show_reasoning: bool = True
 
     # v1.1: 上下文预算集中化（痛点5：替代散落的魔法常量）
     context_main_window_ratio: float = 0.15        # 主会话窗口占 context_window 比例
@@ -109,6 +122,16 @@ class Settings(BaseSettings):
     # v10: 单个 turn 的子代理数量上限——主代理 spawn_subagent 的硬性限制。
     # 超过上限时拒绝新子代理并提示主代理合并/串行处理，防止无限拆分导致资源失控。
     max_subagents_per_turn: int = 6
+    # v13: 任务规划与拆分
+    task_split_confirm: bool = True
+    # v2.2 (对齐 zcode 3.9): todo 提醒间隔——模型维护的执行清单连续 N 步未更新时
+    # 注入 system 提醒（防"开清单后跑偏"，对齐 ZCode buildTodoReminderBody）
+    todo_reminder_interval: int = 3
+    complexity_direct_max_chars: int = 15
+    complexity_llm_timeout: float = 15.0
+    task_fail_policy: str = "continue"  # continue | abort
+    task_retry_count: int = 1
+    plan_mode_auto_split: bool = True
 
     @field_validator("cors_origins")
     @classmethod

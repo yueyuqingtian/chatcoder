@@ -134,6 +134,58 @@ async def _seed_exec_policy(db: AsyncSession) -> None:
     await db.flush()
 
 
+async def _seed_subagent_profiles(db: AsyncSession) -> None:
+    """v2.2 (对齐 zcode 3.13): 内置子代理类型 Explore / general（幂等）。"""
+    from app.persistence.models.subagent_profile import SubagentProfile
+
+    presets = [
+        {
+            "name": "explore",
+            "description": "只读探索代理：搜索/阅读代码，不可写盘",
+            "tools_whitelist": [
+                "fs_read", "fs_list", "fs_grep", "git_diff",
+                "web_fetch", "web_search", "codebase_search", "memory_search",
+            ],
+            "system_prompt": (
+                "你是代码探索代理，只能读取与搜索。请全面定位相关代码并给出结论，"
+                "不要修改任何文件。"
+            ),
+        },
+        {
+            "name": "general",
+            "description": "通用代理：全量工具",
+            "tools_whitelist": None,
+            "system_prompt": None,
+        },
+    ]
+    for preset in presets:
+        res = await db.execute(
+            select(SubagentProfile).where(SubagentProfile.name == preset["name"])
+        )
+        if res.scalars().first() is None:
+            db.add(SubagentProfile(**preset))
+    await db.flush()
+
+
+async def _heal_orphan_turns(db: AsyncSession) -> None:
+    """v1.1: 启动自愈——把上次进程异常退出遗留的 running turn 统一置为 failed。
+
+    后端被杀时 turn 可能停留在 running，导致前端左侧会话永远转圈。
+    启动时无任何执行中的 turn，running 状态必然是孤儿。
+    """
+    from app.persistence.models.turn import Turn
+    res = await db.execute(select(Turn).where(Turn.status == "running"))
+    orphans = list(res.scalars().all())
+    if not orphans:
+        return
+    from sqlalchemy import func
+    for t in orphans:
+        t.status = "failed"
+        t.summary = "执行中断(服务重启)"
+        t.completed_at = str(func.now())
+    await db.flush()
+
+
 async def seed() -> dict:
     """执行幂等种子,返回统计信息。"""
     async with async_session_factory() as db:
@@ -143,6 +195,8 @@ async def seed() -> dict:
         agent = await _get_or_create_main_agent(db, model)
         await _seed_profiles(db)
         await _seed_exec_policy(db)
+        await _seed_subagent_profiles(db)
+        await _heal_orphan_turns(db)
         await db.commit()
         return {
             "tenant_id": tenant.id,

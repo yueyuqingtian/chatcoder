@@ -14,11 +14,27 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.persistence.database import Base
 
 
+class Provider(Base):
+    """v16: 模型供应商 —— 一个供应商(URL+Key)下挂多个模型。"""
+    __tablename__ = "providers"
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int | None] = mapped_column(BigInteger)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    base_url: Mapped[str | None] = mapped_column(String(255))
+    api_key: Mapped[str | None] = mapped_column(String(500))
+    api_format: Mapped[str] = mapped_column(String(20), default="openai")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[str] = mapped_column(server_default=func.now())
+
+
 class Model(Base):
     __tablename__ = "models"
 
     id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
     tenant_id: Mapped[int | None] = mapped_column(BigInteger)
+    # v16: 所属供应商；为空表示独立模型（使用自身 base_url/api_key）
+    provider_id: Mapped[int | None] = mapped_column(BigInteger)
     name: Mapped[str] = mapped_column(String(80), nullable=False)
     provider: Mapped[str | None] = mapped_column(String(40))
     base_url: Mapped[str | None] = mapped_column(String(255))

@@ -725,12 +725,12 @@ export function IconClock({ size = 18, color = "currentColor", strokeWidth = 1.7
   );
 }
 
-/** 图钉（置顶排序） */
-export function IconPin({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+/** 图钉（置顶排序）：细线、对称轮廓，避免旧版不规则厚重感。 */
+export function IconPin({ size = 18, color = "currentColor", strokeWidth = 1.6, ...rest }: IconProps) {
   return (
     <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <path d="M12 17v5" />
-      <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 11 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+      <path d="M8.5 3.5h7l-.8 4.1 2.8 3.1v1.3H6.5v-1.3l2.8-3.1z" />
+      <path d="M12 12v8.5M9.5 20.5h5" />
     </svg>
   );
 }
@@ -843,6 +843,111 @@ export function IconCheckCircle({ size = 16, color = "currentColor", strokeWidth
     <svg {...baseProps(size, color, strokeWidth, rest)}>
       <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
       <polyline points="22 4 12 14.01 9 11.01" />
+    </svg>
+  );
+}
+
+/** 盾牌（权限/完全访问标识，对齐 zcode 输入框左侧） */
+export function IconShield({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+    </svg>
+  );
+}
+
+/** 下载（导入入口，对齐 zcode 技能页头部） */
+export function IconDownload({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" y1="15" x2="12" y2="3" />
+    </svg>
+  );
+}
+
+/** 调色板（外观设置，对齐 zcode 设置导航） */
+export function IconPalette({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <circle cx="13.5" cy="6.5" r=".5" />
+      <circle cx="17.5" cy="10.5" r=".5" />
+      <circle cx="8.5" cy="7.5" r=".5" />
+      <circle cx="6.5" cy="12.5" r=".5" />
+      <path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z" />
+    </svg>
+  );
+}
+
+/** 锚（钩子设置，对齐 zcode 设置导航） */
+export function IconAnchor({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <circle cx="12" cy="5" r="3" />
+      <line x1="12" y1="22" x2="12" y2="8" />
+      <path d="M5 12H2a10 10 0 0 0 20 0h-3" />
+    </svg>
+  );
+}
+
+/** 柱状图（使用统计，对齐 zcode 设置导航） */
+export function IconBarChart({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <line x1="12" y1="20" x2="12" y2="10" />
+      <line x1="18" y1="20" x2="18" y2="4" />
+      <line x1="6" y1="20" x2="6" y2="16" />
+    </svg>
+  );
+}
+
+/** 井号（分组视图切换，对齐 zcode 侧栏） */
+export function IconHash({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <line x1="4" y1="9" x2="20" y2="9" />
+      <line x1="4" y1="15" x2="20" y2="15" />
+      <line x1="10" y1="3" x2="8" y2="21" />
+      <line x1="16" y1="3" x2="14" y2="21" />
+    </svg>
+  );
+}
+
+/** 列表筛选（排序按钮，对齐 zcode：三条横线带圆点） */
+export function IconListFilter({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <line x1="3" y1="6" x2="13" y2="6" />
+      <circle cx="17" cy="6" r="2" />
+      <line x1="3" y1="12" x2="7" y2="12" />
+      <circle cx="11" cy="12" r="2" />
+      <line x1="15" y1="12" x2="21" y2="12" />
+      <line x1="3" y1="18" x2="15" y2="18" />
+      <circle cx="19" cy="18" r="2" />
+    </svg>
+  );
+}
+
+/** 对角展开（侧栏宽度展开，对齐 zcode） */
+export function IconExpandDiagonal({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <polyline points="15 3 21 3 21 9" />
+      <polyline points="9 21 3 21 3 15" />
+      <line x1="21" y1="3" x2="14" y2="10" />
+      <line x1="3" y1="21" x2="10" y2="14" />
+    </svg>
+  );
+}
+
+/** 方形加号（新建项目，对齐 zcode 侧栏操作位） */
+export function IconSquarePlus({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <rect x="3" y="3" width="18" height="18" rx="4" />
+      <line x1="12" y1="8" x2="12" y2="16" />
+      <line x1="8" y1="12" x2="16" y2="12" />
     </svg>
   );
 }

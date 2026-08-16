@@ -15,6 +15,11 @@ class ChatMessage(BaseModel):
     # v1.0: 多模态内容块 — [{type: "text", text: "..."}, {type: "image_url", image_url: {url: "data:..."}}, ...]
     # 为 None 时 content 为纯文本;有值时 content 作为首文本块,content_blocks 追加图片等
     content_blocks: list[dict[str, Any]] | None = None
+    # v1.2: 思考模式的推理内容（DeepSeek reasoning_content / GLM thinking）。
+    # thinking 模式下网关要求多轮对话（尤其工具调用）中把历史 assistant 的
+    # reasoning_content 原样回传，否则 400: "The reasoning_content in the
+    # thinking mode must be passed back to the API."
+    reasoning_content: str | None = None
 
 
 class ChatRequest(BaseModel):

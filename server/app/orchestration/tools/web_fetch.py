@@ -100,7 +100,7 @@ class WebFetchTool(Tool):
             return ToolResult(ok=False, output="", error=f"[SSRF 防护] {err}")
 
         try:
-            async with httpx.AsyncClient(timeout=_TIMEOUT_SEC, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=_TIMEOUT_SEC, follow_redirects=True, headers={"Accept-Encoding": "gzip, deflate"}) as client:
                 resp = await client.get(url, headers={"User-Agent": "chatcoder/1.0"})
                 text = resp.text
         except Exception as e:

@@ -1,10 +1,12 @@
 /** WebSocket 客户端：连接会话通道，接收实时事件。
  *
  * v1.0: 指数退避重连 + 断线补偿 + handler 清理。
+ * v2.1: 会话级事件序号跟踪（lastSeq），重连后发 sync.request 补发断线期间事件。
  */
 
 export interface ServerEvent {
   event: string;
+  seq?: number;
   payload: Record<string, unknown>;
 }
 
@@ -21,33 +23,58 @@ export class WsClient {
   private reconnectAttempt = 0;
   private currentSessionId: number | null = null;
   private intentionalClose = false;
+  /** 会话级事件序号（断线补偿：重连后请求补发 seq > lastSeq 的事件） */
+  private lastSeq = 0;
 
   connect(sessionId: number) {
     this.disconnect();
     this.currentSessionId = sessionId;
     this.intentionalClose = false;
     this.reconnectAttempt = 0;
+    this.lastSeq = 0;
     this._doConnect(sessionId);
   }
 
   private _doConnect(sessionId: number) {
     // 桌面版直连后端;网页版走同源代理
     // v6.4: 开发模式直连后端，绕过 vite ws 代理
+    // v2.1: 打包版端口由主进程透传（getBackendPort），端口冲突自动换空闲端口
     const isElectron = typeof window !== "undefined" && Boolean((window as Window).chatcoderAPI);
     const isDev = import.meta.env.DEV;
-    const wsUrl = (isElectron || isDev)
-      ? `ws://127.0.0.1:8000/ws/sessions/${sessionId}`
-      : `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws/sessions/${sessionId}`;
+    const portPromise = isElectron
+      ? (window as Window).chatcoderAPI?.getBackendPort?.() ?? Promise.resolve(8000)
+      : Promise.resolve(8000);
+    void portPromise
+      .then((port) => {
+        if (!Number.isFinite(port) || port <= 0) port = 8000;
+        const wsUrl = (isElectron || isDev)
+          ? `ws://127.0.0.1:${port}/ws/sessions/${sessionId}`
+          : `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws/sessions/${sessionId}`;
+        this._open(sessionId, wsUrl);
+      })
+      .catch(() => {
+        const wsUrl = `ws://127.0.0.1:8000/ws/sessions/${sessionId}`;
+        this._open(sessionId, wsUrl);
+      });
+  }
+
+  private _open(sessionId: number, wsUrl: string) {
     this.ws = new WebSocket(wsUrl);
 
     this.ws.onopen = () => {
       // v1.0: 重连成功，重置计数
       this.reconnectAttempt = 0;
+      // v2.1: 断线补偿——请求补发 lastSeq 之后的事件
+      this.send("sync.request", { last_seq: this.lastSeq });
     };
 
     this.ws.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data) as ServerEvent;
+        // v2.1: 推进事件序号（sync.response 的 seq=0 不参与推进）
+        if (typeof data.seq === "number" && data.seq > this.lastSeq) {
+          this.lastSeq = data.seq;
+        }
         this.handlers.forEach((h) => h(data));
       } catch {
         // ignore invalid
@@ -79,6 +106,7 @@ export class WsClient {
     this.ws?.close();
     this.ws = null;
     this.currentSessionId = null;
+    this.lastSeq = 0;
     // v1.0: 清理所有 handler，避免累积泄漏
     this.handlers.clear();
   }

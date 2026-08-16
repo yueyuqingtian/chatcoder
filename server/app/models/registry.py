@@ -77,6 +77,20 @@ class ModelRegistry:
                     "model_key",
                 )
 
+        # v16: 模型挂在供应商下 —— 用供应商的 base_url/api_key 构造
+        provider_id = getattr(model, "provider_id", None)
+        if provider_id:
+            from app.persistence.models.model_reg import Provider
+
+            provider = await db.get(Provider, provider_id)
+            if provider and provider.is_active and provider.base_url and provider.api_key:
+                api_format = (provider.api_format or getattr(model, "api_format", "openai") or "openai")
+                return (
+                    _build_provider(api_key=provider.api_key, base_url=provider.base_url, model=model.name, api_format=api_format),
+                    "provider_key",
+                )
+            return None, "provider_incomplete"
+
         if model.source_type == ModelSource.BYOK:
             return None, "byok_requires_client"
 

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.enums import MsgType, SenderType
 from app.gateway.schemas import (ArtifactOut, FileChangeOut, FileDiffOut, MessageOut, ReviewBatchBody,
                                  RollbackPreviewFile, RollbackPreviewOut,
-                                 RollbackResult, TaskOut, TurnCreate, TurnOut, TurnSnapshotOut)
+                                 RollbackResult, TaskConfirmBody, TaskOut, TurnCreate, TurnOut, TurnSnapshotOut)
 from app.orchestration import engine
 from app.persistence.database import get_db
 from app.services import message_service, rollback_service, session_service, task_service, turn_service
@@ -26,12 +26,16 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
     if session is None:
         raise HTTPException(404, "会话不存在")
 
-    # 用户消息入库
+    # 用户消息入库（v14: 附件以文件地址形式持久化到 content.attachments，
+    # 前端从历史消息可直接展示附件卡片并点击预览）
+    user_content: dict = {"text": body.content}
+    if body.attachments:
+        user_content["attachments"] = body.attachments
     user_msg = await message_service.create_message(
         db, session_id=body.session_id,
         sender_type=SenderType.USER.value,
         msg_type=MsgType.TEXT.value,
-        content={"text": body.content},
+        content=user_content,
         broadcast=False,
     )
     turn = await turn_service.create_turn(db, session_id=body.session_id, user_message_id=user_msg.id)
@@ -60,7 +64,19 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
                 await s.commit()
             except Exception:
                 await s.rollback()
-                raise
+                # v1.1: 异常也必须关 turn——否则 DB 永远 running，左侧会话永远转圈
+                logger.exception("turn 执行异常 turn=%s", turn.id)
+                try:
+                    await turn_service.update_turn_status(s, turn.id, "failed",
+                                                          summary="执行异常", completed=True)
+                    await s.commit()
+                    from app.gateway.ws import manager as ws_manager
+                    await ws_manager.broadcast(body.session_id, {
+                        "event": "turn.updated",
+                        "payload": {"turn_id": turn.id, "status": "failed"},
+                    })
+                except Exception:
+                    logger.debug("turn 异常态落库失败", exc_info=True)
 
     asyncio.get_event_loop().create_task(_run())
     return turn
@@ -100,7 +116,19 @@ async def resume_turn(turn_id: int, db: AsyncSession = Depends(get_db)):
                 await s.commit()
             except Exception:
                 await s.rollback()
-                raise
+                # v1.1: 续跑异常同样必须关 turn（避免 DB 永远 running）
+                logger.exception("turn 续跑执行异常 turn=%s", turn_id)
+                try:
+                    await turn_service.update_turn_status(s, turn_id, "failed",
+                                                          summary="执行异常", completed=True)
+                    await s.commit()
+                    from app.gateway.ws import manager as ws_manager
+                    await ws_manager.broadcast(turn.session_id, {
+                        "event": "turn.updated",
+                        "payload": {"turn_id": turn_id, "status": "failed"},
+                    })
+                except Exception:
+                    logger.debug("turn 异常态落库失败", exc_info=True)
 
     asyncio.get_event_loop().create_task(_run())
     return turn
@@ -224,8 +252,10 @@ async def get_snapshot(turn_id: int, db: AsyncSession = Depends(get_db)):
 # ── 会话数据查询（挂 turns 下便于前端一次获取）──
 
 @router.get("/sessions/{session_id}/messages", response_model=list[MessageOut])
-async def list_messages(session_id: int, db: AsyncSession = Depends(get_db)):
-    msgs = await message_service.list_messages(db, session_id)
+async def list_messages(session_id: int, thread_id: int | None = None,
+                        db: AsyncSession = Depends(get_db)):
+    # v2.2 (对齐 zcode 3.13): thread_id 过滤——子代理详情面板数据源
+    msgs = await message_service.list_messages(db, session_id, thread_id=thread_id)
     return [
         MessageOut(
             id=m.id, session_id=m.session_id, turn_id=m.turn_id, thread_id=m.thread_id,
@@ -269,7 +299,14 @@ async def get_session_usage(session_id: int, db: AsyncSession = Depends(get_db))
     from app.core.enums import MsgType
     _keep = {MsgType.TEXT.value, MsgType.TOOL_CALL.value, MsgType.TOOL_RESULT.value}
     msgs = [m for m in res.scalars().all() if m.msg_type in _keep]
-    total_tokens = messages_token_total(msgs)
+
+    # v1.1: 优先用最后一次 API 真实占用（与运行时圆环同口径），无则本地估算兜底
+    if getattr(session, "last_prompt_tokens", 0) and session.last_prompt_tokens > 0:
+        total_tokens = session.last_prompt_tokens
+        _source = "api_last"
+    else:
+        total_tokens = messages_token_total(msgs)
+        _source = "est"
 
     # 获取 context_window：优先 session.model_id，否则用默认
     context_window = 0
@@ -291,12 +328,149 @@ async def get_session_usage(session_id: int, db: AsyncSession = Depends(get_db))
         "output": 0,
         "reasoning_output": 0,
         "agent_name": "main",
+        "source": _source,  # v1.1: api_last=最后一次 API 真实占用 / est=本地估算
     }
 
 
 @router.get("/sessions/{session_id}/tasks", response_model=list[TaskOut])
 async def list_tasks(session_id: int, db: AsyncSession = Depends(get_db)):
     return await task_service.list_tasks(db, session_id)
+
+
+@router.post("/{turn_id}/tasks/{task_id}/retry", response_model=dict)
+async def retry_task_step(turn_id: int, task_id: int, db: AsyncSession = Depends(get_db)):
+    """重试失败/已取消的步骤：后台重新执行该步的子代理。"""
+    from app.persistence.models.task import Task
+    step = await db.get(Task, task_id)
+    if step is None or step.turn_id != turn_id or step.kind != "step":
+        raise HTTPException(404, "步骤不存在")
+    if step.status not in ("failed", "cancelled"):
+        raise HTTPException(409, "仅失败或已取消的步骤可重试")
+
+    async def _run_retry():
+        from app.persistence.database import async_session_factory
+        async with async_session_factory() as session_db:
+            try:
+                await engine.retry_failed_step(session_db, turn_id=turn_id, task_id=task_id)
+            except Exception:
+                await session_db.rollback()
+                logger.exception("步骤重试失败 turn=%s task=%s", turn_id, task_id)
+                # v1.1: 重试异常兜底：把 step 标 failed 并广播 task.updated，避免永久 running
+                try:
+                    from app.gateway.ws import manager as ws_manager
+                    step_row = await session_db.get(Task, task_id)
+                    if step_row is not None:
+                        step_row.status = "failed"
+                        step_row.note = "执行异常"
+                        await session_db.commit()
+                        await ws_manager.broadcast(step_row.session_id, {
+                            "event": "task.updated",
+                            "payload": {"task_id": task_id, "status": "failed", "note": "执行异常"},
+                        })
+                except Exception:
+                    logger.debug("步骤异常态落库失败", exc_info=True)
+
+    asyncio.get_event_loop().create_task(_run_retry())
+    return {"ok": True}
+
+
+@router.post("/{turn_id}/tasks/{group_id}/confirm", response_model=dict)
+async def confirm_task_plan(turn_id: int, group_id: int, body: TaskConfirmBody,
+                            db: AsyncSession = Depends(get_db)):
+    """确认/拒绝任务拆分提案；确认后在后台启动真实执行。"""
+    from app.persistence.models.task import Task
+    from sqlalchemy import select
+
+    turn = await turn_service.get_turn(db, turn_id)
+    group = await db.get(Task, group_id)
+    if turn is None or group is None or group.turn_id != turn_id or group.kind != "group":
+        raise HTTPException(404, "任务拆分提案不存在")
+    if turn.status != "awaiting_confirmation" or group.status != "proposed":
+        raise HTTPException(409, "该任务提案已处理或不在待确认状态")
+
+    steps = list((await db.execute(
+        select(Task).where(Task.parent_task_id == group.id).order_by(Task.priority.asc(), Task.id.asc())
+    )).scalars().all())
+    request_task = await db.get(Task, group.parent_task_id) if group.parent_task_id else None
+    if request_task is None:
+        raise HTTPException(400, "任务提案缺少请求任务")
+
+    # 调整只允许编辑可见标题和顺序；隐藏字段仍由后端保留。
+    if body.steps is not None:
+        submitted = [item for item in body.steps if item.title.strip()]
+        if not submitted:
+            raise HTTPException(400, "至少保留一个任务步骤")
+        by_id = {step.id: step for step in steps}
+        used: set[int] = set()
+        for index, item in enumerate(submitted[:12]):
+            target = by_id.get(item.task_id) if item.task_id is not None else None
+            if target is None:
+                target = next((step for step in steps if step.id not in used), None)
+            if target is None:
+                # 调整新增的小点只继承区块的真实执行上下文，不接收用户提交的隐藏字段。
+                target = Task(
+                    session_id=turn.session_id, turn_id=turn_id, parent_task_id=group.id,
+                    kind="step", status="proposed", priority=index,
+                    title=item.title.strip()[:200], description=item.title.strip()[:1000],
+                )
+                db.add(target)
+                await db.flush()
+            target.title = item.title.strip()[:200]
+            target.priority = index
+            target.status = "proposed"
+            target.is_hidden = False
+            used.add(target.id)
+        for step in steps:
+            if step.id not in used:
+                step.is_hidden = True
+                step.status = "cancelled"
+
+    if not body.accepted:
+        group.status = "cancelled"
+        group.is_hidden = True
+        for step in steps:
+            step.status = "cancelled"
+            step.is_hidden = True
+        request_task.status = "running"
+        await turn_service.update_turn_status(db, turn_id, "running")
+        await db.commit()
+
+        async def _run_direct():
+            from app.persistence.database import async_session_factory
+            async with async_session_factory() as session_db:
+                try:
+                    await engine.start_turn(
+                        session_db, turn_id=turn_id, existing_task_id=request_task.id,
+                        force_direct=True,
+                    )
+                    await session_db.commit()
+                except Exception:
+                    await session_db.rollback()
+                    logger.exception("直接执行提案失败 turn=%s", turn_id)
+
+        asyncio.get_event_loop().create_task(_run_direct())
+        return {"ok": True, "mode": "direct"}
+
+    group.status = "pending"
+    group.is_hidden = False
+    for step in steps:
+        if not step.is_hidden:
+            step.status = "pending"
+    request_task.status = "running"
+    await turn_service.update_turn_status(db, turn_id, "running")
+    await db.commit()
+
+    async def _run_plan():
+        from app.persistence.database import async_session_factory
+        async with async_session_factory() as session_db:
+            try:
+                await engine.execute_confirmed_plan(session_db, turn_id=turn_id, group_id=group_id)
+            except Exception:
+                await session_db.rollback()
+                logger.exception("确认任务执行失败 turn=%s group=%s", turn_id, group_id)
+
+    asyncio.get_event_loop().create_task(_run_plan())
+    return {"ok": True, "mode": "split"}
 
 
 @router.get("/sessions/{session_id}/artifacts", response_model=list[ArtifactOut])

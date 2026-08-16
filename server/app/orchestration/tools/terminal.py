@@ -56,6 +56,13 @@ class TerminalExecTool(Tool):
         if not command:
             return ToolResult(ok=False, output="", error="command 为空")
 
+        # v2.2 (对齐 zcode 3.12): 静态安全分级——危险命令直接拒绝（不审批不执行）
+        from app.orchestration.tools.shell_policy import analyze as _analyze_shell
+        verdict, reason = _analyze_shell(command)
+        if verdict == "deny":
+            logger.warning("terminal_exec 危险命令拦截: %r (%s)", command[:120], reason)
+            return ToolResult(ok=False, output="", error=f"[安全策略] {reason}")
+
         # 1. 检测裸 cd 命令 → 给提示但不执行(避免无效调用)
         bare_cd = re.match(r"^(?:cd|chdir)\s+(.+)$", command, re.IGNORECASE)
         if bare_cd and "&&" not in command and "&" not in command and "|" not in command:
@@ -117,7 +124,18 @@ class TerminalExecTool(Tool):
                 stderr=asyncio.subprocess.PIPE,
                 cwd=resolved_cwd,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_TIMEOUT_SEC)
+            communicate_task = asyncio.create_task(proc.communicate())
+            deadline = asyncio.get_running_loop().time() + _TIMEOUT_SEC
+            while not communicate_task.done():
+                if ctx.cancel_event and ctx.cancel_event.is_set():
+                    proc.kill()
+                    await proc.wait()
+                    communicate_task.cancel()
+                    return ToolResult(ok=False, output="", error="已被用户中断")
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise asyncio.TimeoutError
+                await asyncio.sleep(0.2)
+            stdout, stderr = await communicate_task
         except asyncio.TimeoutError:
             # v1.0: 超时后强制 kill 子进程，避免资源耗尽/后台恶意进程
             try:
@@ -145,6 +163,15 @@ class TerminalExecTool(Tool):
             data={"returncode": proc.returncode, "cwd": resolved_cwd, "cmd": command},
             error="" if proc.returncode == 0 else f"退出码 {proc.returncode}",
         )
+
+    def approval_precheck(self, args: dict[str, Any], ctx: ToolContext) -> tuple[bool, str]:
+        """v2.2 (对齐 zcode 3.12): 只读安全命令免审批；其余维持 high 风险审批。"""
+        from app.orchestration.tools.shell_policy import analyze as _analyze_shell
+        command = str(args.get("command", "") or "")
+        verdict, reason = _analyze_shell(command)
+        if verdict == "allow":
+            return True, reason
+        return False, reason
 
     @staticmethod
     def _resolve_path(workspace_root: str, rel: str) -> str:

@@ -50,7 +50,8 @@ async def test_fs_read_traversal_rejected(workspace):
 @pytest.mark.asyncio
 async def test_fs_read_truncates_large_file(workspace):
     f = workspace / "big.txt"
-    f.write_text("X" * 10000, encoding="utf-8")
+    # v1.1: v15 起 tool_output_chars_read=16000，需超过该上限才能触发截断
+    f.write_text("X" * 20000, encoding="utf-8")
     tool = FsReadTool()
     r = await tool.run({"path": "big.txt"}, _ctx(workspace))
     assert r.ok is True

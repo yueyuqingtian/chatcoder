@@ -1,0 +1,38 @@
+/* v18: 两级级联模型选择器（供应商 → 模型） */
+.mp-menu { width: 440px; max-width: min(440px, calc(100vw - 40px)); padding: 5px; border-radius: 10px; max-height: none; overflow: visible; right: 0; left: auto; }
+.mp-label { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mp-cascade { display: flex; height: 300px; }
+.mp-col { overflow-y: auto; overflow-x: hidden; padding: 3px; display: flex; flex-direction: column; gap: 2px; }
+.mp-col::-webkit-scrollbar { width: 8px; }
+.mp-col-groups { width: 168px; flex-shrink: 0; border-right: 1px solid var(--border-light); }
+.mp-col-models { flex: 1 1 auto; min-width: 0; }
+/* 供应商行：图标 + 名称 + 数量角标 */
+.mp-group { display: flex; align-items: center; gap: 7px; width: 100%; padding: 7px 8px; border-radius: 7px; font-size: 12.5px; color: var(--text-2); cursor: pointer; border: none; background: transparent; text-align: left; transition: background var(--dur-fast), color var(--dur-fast); }
+.mp-group-icon { flex-shrink: 0; opacity: 0.75; }
+.mp-group-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.mp-group-count { font-size: 10.5px; line-height: 1; color: var(--text-3); background: var(--bg-hover); border-radius: 999px; padding: 2px 6px; flex-shrink: 0; }
+.mp-group:hover { background: var(--bg-hover); color: var(--text-1); }
+.mp-group.active { background: var(--bg-active); color: var(--text-1); }
+.mp-group.active .mp-group-icon { color: var(--accent); opacity: 1; }
+.mp-group.active .mp-group-count { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.mp-item { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 32px; padding: 5px 9px; border-radius: 7px; font-size: 12.5px; color: var(--text-1); cursor: pointer; border: none; background: transparent; text-align: left; transition: background var(--dur-fast); }
+/* 覆盖 .composer-menu button > span 的 flex:1——否则勾选列把模型名顶到右侧 */
+.mp-item > span { flex: none; }
+.mp-item:hover { background: var(--bg-hover); }
+.mp-item.active { background: var(--bg-active); }
+.mp-item-check { width: 14px; flex-shrink: 0; display: inline-flex; align-items: center; color: var(--accent); }
+.mp-item > .mp-item-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 多模态角标：轻量药丸，无边框硬朗感 */
+.mp-tag { font-size: 10px; line-height: 1; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); border-radius: 999px; padding: 3px 7px; flex-shrink: 0; font-weight: 500; }
+.mp-footer { border-top: 1px solid var(--border-light); margin-top: 5px; padding-top: 5px; }
+.mp-manage { width: 100%; padding: 6px 9px; border-radius: 7px; font-size: 12px; color: var(--text-2); cursor: pointer; border: none; background: transparent; text-align: left; transition: background var(--dur-fast); }
+.mp-manage:hover { background: var(--bg-hover); color: var(--text-1); }
+
+/* 供应商设置面板 */
+.provider-models-sub { margin: 6px 0 10px 12px; padding-left: 10px; border-left: 2px solid var(--border); display: flex; flex-direction: column; gap: 4px; }
+.scan-list { max-height: 380px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.scan-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--r-sm); font-size: 12px; }
+.scan-item.off { opacity: 0.55; }
+.scan-item .scan-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.scan-item .scan-ctx { width: 90px; }
+.scan-item label { display: inline-flex; align-items: center; gap: 4px; color: var(--text-3); font-size: 11px; white-space: nowrap; }

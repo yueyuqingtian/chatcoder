@@ -5,6 +5,7 @@ import { useState } from "react";
 import { IconX } from "./icons";
 import { MessageFlow } from "./chat/MessageFlow";
 import { ComposerBox } from "./chat/ComposerBox";
+import { TodoBlock } from "./chat/TodoBlock";
 import { useChatStore } from "../store/chat";
 
 export function ChatPanel() {
@@ -29,6 +30,7 @@ export function ChatPanel() {
       <div className="chat-panel-flow">
         <MessageFlow />
       </div>
+      <TodoBlock />
       <div className="chat-panel-composer">
         <ComposerBox />
       </div>

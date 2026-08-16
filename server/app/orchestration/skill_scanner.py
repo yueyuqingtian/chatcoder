@@ -498,6 +498,49 @@ def _parse_skill_frontmatter(text: str) -> dict:
     return out
 
 
+def parse_skill_markdown(path: Path | str) -> tuple[dict, str]:
+    """解析技能 md 文件（v1.1 公开函数：本地导入接口用）。
+
+    解析 YAML frontmatter（name/display_name/description/trigger/tools/auto_load），
+    无 frontmatter 时 meta 为空、content 为全文。
+    Returns: (meta: dict, content: str)
+    """
+    p = Path(path)
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}, ""
+    meta: dict = {}
+    content = text.strip()
+    m = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.DOTALL)
+    if m:
+        content = text[m.end():].strip()
+        for line in m.group(1).splitlines():
+            if ":" in line:
+                key, _, val = line.partition(":")
+                key = key.strip().lower()
+                val = val.strip().strip("\"'")
+                if not key or not val:
+                    continue
+                if key in ("description", "desc"):
+                    meta["description"] = val
+                elif key in ("trigger", "when"):
+                    meta["trigger"] = val
+                elif key in ("name", "title", "display_name"):
+                    meta["display_name"] = val
+                elif key in ("tools", "tool"):
+                    if isinstance(val, str):
+                        meta["tools"] = [t.strip() for t in val.split(",") if t.strip()]
+                elif key in ("auto_load", "autoload"):
+                    meta["auto_load"] = str(val).lower() in ("true", "1", "yes", "on")
+    if not meta.get("display_name"):
+        # 无 frontmatter：正文第一行标题作展示名
+        first_line = content.split("\n")[0].strip() if content else ""
+        if first_line.startswith("#"):
+            meta["display_name"] = first_line.lstrip("#").strip()
+    return meta, content
+
+
 def list_repo_skills(repo_dir: str) -> list[dict]:
     """扫描仓库中的技能文件。
 

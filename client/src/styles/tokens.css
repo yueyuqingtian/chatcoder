@@ -1,198 +1,365 @@
 /* ═══════════════════════════════════════════════════════════
- * 设计令牌 v5 - 黑白灰基调（参照 Codex 风格）
- * 主色调：中性灰，强调色仅用于激活/关键操作
+ * 设计令牌 v6 —— 完全对齐 ZCode（提取自 zcode styles-BxSv8qTx.css）
+ * 体系：neutral 灰阶 + sky 品牌色，无渐变/无毛玻璃/无发光
+ * 结构：① zcode 调色板 ② zcode 语义变量(浅/深) ③ chatcoder 变量映射层 ④ 尺寸令牌
  * ═══════════════════════════════════════════════════════════ */
 
-/* ── 浅色主题 ── */
+/* ── ① ZCode 调色板（oklch 原值） ── */
+:root {
+  --color-red-50: oklch(97.1% .013 17.38);
+  --color-red-400: oklch(70.4% .191 22.216);
+  --color-red-500: oklch(63.7% .237 25.331);
+  --color-red-600: oklch(57.7% .245 27.325);
+  --color-red-700: oklch(50.5% .213 27.518);
+  --color-orange-50: oklch(98% .016 73.684);
+  --color-amber-50: oklch(98.7% .022 95.277);
+  --color-amber-600: oklch(66.6% .179 58.318);
+  --color-yellow-500: oklch(79.5% .184 86.047);
+  --color-yellow-600: oklch(68.1% .162 75.834);
+  --color-green-50: oklch(98.2% .018 155.826);
+  --color-green-300: oklch(87.1% .15 154.449);
+  --color-green-400: oklch(79.2% .209 151.711);
+  --color-green-500: oklch(72.3% .219 149.579);
+  --color-green-600: oklch(62.7% .194 149.214);
+  --color-green-700: oklch(52.7% .154 150.069);
+  --color-green-950: oklch(26.6% .065 152.934);
+  --color-teal-400: oklch(77.7% .152 181.912);
+  --color-teal-600: oklch(60% .118 184.704);
+  --color-cyan-400: oklch(78.9% .154 211.53);
+  --color-cyan-500: oklch(71.5% .143 215.221);
+  --color-cyan-600: oklch(60.9% .126 221.723);
+  --color-sky-50: oklch(97.7% .013 236.62);
+  --color-sky-100: oklch(95.1% .026 236.824);
+  --color-sky-200: oklch(90.1% .058 230.902);
+  --color-sky-300: oklch(82.8% .111 230.318);
+  --color-sky-400: oklch(74.6% .16 232.661);
+  --color-sky-500: oklch(68.5% .169 237.323);
+  --color-sky-600: oklch(58.8% .158 241.966);
+  --color-sky-700: oklch(50% .134 242.749);
+  --color-sky-950: oklch(29.3% .066 243.157);
+  --color-blue-600: oklch(54.6% .245 262.881);
+  --color-indigo-400: oklch(67.3% .182 276.935);
+  --color-indigo-500: oklch(58.5% .233 277.117);
+  --color-violet-50: oklch(96.9% .016 293.756);
+  --color-violet-400: oklch(70.2% .183 293.541);
+  --color-violet-600: oklch(54.1% .281 293.009);
+  --color-violet-950: oklch(28.3% .141 291.089);
+  --color-fuchsia-500: oklch(66.7% .295 322.15);
+  --color-fuchsia-600: oklch(59.1% .293 322.896);
+  --color-rose-400: oklch(71.2% .194 13.428);
+  --color-rose-500: oklch(64.5% .246 16.439);
+  --color-neutral-50: oklch(98.5% 0 0);
+  --color-neutral-100: oklch(97% 0 0);
+  --color-neutral-200: oklch(92.2% 0 0);
+  --color-neutral-300: oklch(87% 0 0);
+  --color-neutral-500: oklch(55.6% 0 0);
+  --color-neutral-700: oklch(37.1% 0 0);
+  --color-neutral-800: oklch(26.9% 0 0);
+  --color-neutral-900: oklch(20.5% 0 0);
+  --color-neutral-950: oklch(14.5% 0 0);
+  --color-black: #000;
+  --color-white: #fff;
+}
+
+/* ── ② ZCode 语义变量（浅色，:root 默认） ── */
 :root,
 :root[data-theme="light"] {
-  --bg-sidebar: #F5F5F5;
-  --bg-main: #FFFFFF;
-  --bg-panel: #FFFFFF;
-  --bg-elevated: #FAFAFA;
-  --bg-hover: rgba(0, 0, 0, 0.05);
-  --bg-active: rgba(0, 0, 0, 0.08);
-  --bg-overlay: rgba(0, 0, 0, 0.3);
+  --ui-font-size: 14px;
 
-  --accent: #1A1A1E;
-  --accent-2: #1A1A1E;
-  /* 品牌渐变：启动页紫罗兰是全应用唯一强调色，只用于"关键时刻" */
-  --accent-grad: linear-gradient(135deg, #4836FF 0%, #CE53FF 100%);
-  --grad-brand: linear-gradient(135deg, #4836FF 0%, #8A4DFF 52%, #CE53FF 100%);
-  --grad-brand-soft: linear-gradient(135deg, rgba(72, 54, 255, 0.10), rgba(206, 83, 255, 0.10));
-  --grad-glow: 0 4px 14px rgba(96, 68, 255, 0.30);
-  --accent-hover: #333338;
-  --accent-soft: rgba(0, 0, 0, 0.06);
-  --accent-contrast: #FFFFFF;
+  --color-background: var(--color-neutral-50);
+  --color-background-alt: color-mix(in oklab, var(--color-neutral-100) 60%, transparent);
+  --color-background-win-alt: var(--color-neutral-200);
+  --color-sidebar: var(--color-neutral-100);
+  --color-header: var(--color-neutral-100);
+  --color-panel: var(--color-neutral-100);
+  --color-card: var(--color-white);
+  --color-card-selected: var(--color-neutral-200);
+  --color-card-border: var(--color-border);
+  --color-popover: var(--color-white);
+  --color-popover-foreground: var(--color-foreground);
+  --color-popover-header: var(--color-neutral-100);
+  --color-popover-border: var(--color-border);
+  --color-input: var(--color-white);
+  --color-input-focused: var(--color-neutral-50);
+  --color-menu: var(--color-white);
+  --color-menu-hover: var(--color-neutral-100);
 
-  /* 毛玻璃令牌（data-glass="on" 时启用） */
-  --glass-blur: 20px;
-  --glass-saturate: 1.5;
-  --glass-sidebar: rgba(246, 246, 248, 0.93);
-  --glass-panel: rgba(255, 255, 255, 0.68);
-  --glass-panel-strong: rgba(255, 255, 255, 0.84);
-  --glass-elevated: rgba(255, 255, 255, 0.88);
-  --glass-border: rgba(255, 255, 255, 0.62);
-  --glass-shadow: 0 8px 32px rgba(40, 44, 80, calc(0.10 * var(--shadow-strength, 1))), 0 1px 3px rgba(40, 44, 80, calc(0.06 * var(--shadow-strength, 1)));
-  /* 玻璃强度（设置页可配：0=轻柔 1=标准 2=深邃，映射到 blur/半透明） */
-  --glass-strength: 1;
-  /* 环境光背景双主色：毛玻璃模式下为半透明面板提供可折射的渐变内容，设置页可配置 */
-  --ambient-c1: #F5F5F5;
-  --ambient-c2: #F5F5F5;
-  --bg-ambient:
-    linear-gradient(135deg, var(--ambient-c1) 0%, var(--ambient-c2) 100%);
+  --color-brand: var(--color-sky-400);
+  --color-accent: var(--color-sky-50);
+  --color-primary: var(--color-neutral-950);
+  --color-primary-foreground: var(--color-neutral-50);
+  --color-secondary: var(--color-neutral-300);
 
-  --text-1: #1A1A1E;
-  --text-2: #6B6B74;
-  --text-3: #9A9AA3;
+  --color-border: color-mix(in oklab, var(--color-neutral-950) 10%, transparent);
+  --color-border-hover: color-mix(in oklab, var(--color-neutral-950) 20%, transparent);
+  --color-input-border: var(--color-border);
+  --color-input-border-hover: var(--color-border-hover);
+  --color-input-border-focused: var(--color-brand);
+  --color-hover: var(--color-neutral-200);
+  --color-selected: color-mix(in oklab, var(--color-neutral-950) 10%, transparent);
+  --color-surface: color-mix(in oklab, var(--color-neutral-950) 3%, transparent);
+  --color-surface-hover: color-mix(in oklab, var(--color-neutral-950) 5%, transparent);
 
-  /* 输入框聚焦呼吸光晕主色（设置页可配） */
-  --composer-glow: #8A4DFF;
-  /* 流光文字品牌渐变（background-clip: text 使用） */
-  --text-shine-grad: linear-gradient(90deg, var(--text-3) 0%, var(--text-1) 28%, #CE53FF 50%, var(--text-1) 72%, var(--text-3) 100%);
+  --color-foreground: var(--color-neutral-700);
+  --color-foreground-subtle: color-mix(in oklab, var(--color-neutral-700) 60%, transparent);
+  --color-foreground-subtlest: color-mix(in oklab, var(--color-neutral-700) 40%, transparent);
+  --color-foreground-inverse: var(--color-white);
 
-  --border: #E5E5EA;
-  --border-light: #F0F0F2;
-  --border-strong: #D1D1D6;
+  --color-success: var(--color-green-600);
+  --color-success-foreground: var(--color-foreground-inverse);
+  --color-destructive: var(--color-red-600);
+  --color-destructive-foreground: var(--color-foreground-inverse);
+  --color-warning: var(--color-yellow-600);
+  --color-warning-foreground: var(--color-foreground-inverse);
+  --color-idle-task: var(--color-violet-600);
+  --color-idle-task-surface: var(--color-violet-50);
 
-  --success: #2D9F4A;
-  --success-soft: rgba(45, 159, 74, 0.10);
-  --warning: #D98014;
-  --warning-soft: rgba(217, 128, 20, 0.10);
-  --error: #D63E3E;
-  --error-soft: rgba(214, 62, 62, 0.10);
-  --info: #3B82F6;
-  --info-soft: rgba(59, 130, 246, 0.10);
+  --color-interaction-ask-surface: var(--color-sky-50);
+  --color-interaction-ask-foreground: var(--color-sky-700);
+  --color-interaction-ask-fill: color-mix(in oklab, var(--color-green-500) 20%, transparent);
+  --color-interaction-confirmation-surface: var(--color-green-50);
+  --color-interaction-confirmation-foreground: var(--color-green-700);
 
-  /* 阴影强度乘数：0=扁平 0.5=轻柔 1=标准 1.5=深邃 2=戏剧，设置页可配置 */
-  --shadow-strength: 1;
+  --color-diff-added: var(--color-green-600);
+  --color-diff-removed: var(--color-red-600);
+  --color-git-modified: var(--color-amber-600);
+  --color-git-added: var(--color-teal-600);
+  --color-git-deleted: var(--color-red-600);
+  --color-git-renamed: var(--color-sky-600);
+  --color-git-untracked: var(--color-teal-600);
 
-  --shadow-xs: 0 1px 2px rgba(0, 0, 0, calc(0.04 * var(--shadow-strength)));
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, calc(0.06 * var(--shadow-strength))), 0 1px 2px rgba(0, 0, 0, calc(0.04 * var(--shadow-strength)));
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, calc(0.08 * var(--shadow-strength))), 0 2px 4px rgba(0, 0, 0, calc(0.04 * var(--shadow-strength)));
-  --shadow-lg: 0 8px 24px rgba(0, 0, 0, calc(0.10 * var(--shadow-strength))), 0 4px 8px rgba(0, 0, 0, calc(0.06 * var(--shadow-strength)));
-  --card-shadow: 0 1px 3px rgba(0, 0, 0, calc(0.06 * var(--shadow-strength))), 0 1px 2px rgba(0, 0, 0, calc(0.04 * var(--shadow-strength)));
-  --shadow-pop: 0 8px 24px rgba(0, 0, 0, calc(0.12 * var(--shadow-strength))), 0 4px 8px rgba(0, 0, 0, calc(0.08 * var(--shadow-strength)));
+  --color-tag: var(--color-neutral-200);
+  --color-markdown-inline-code: var(--color-tag);
+  --color-file-node: color-mix(in oklab, var(--color-sky-600) 14%, transparent);
+  --color-file-node-foreground: var(--color-sky-600);
+  --color-toast: var(--color-white);
+  --color-tooltip: var(--color-neutral-100);
+  --color-tooltip-foreground: var(--color-neutral-950);
+  --color-find-highlight: #fde68a;
+  --color-find-highlight-active: #facc15;
+
+  --color-terminal-bg: var(--color-neutral-50);
+  --color-terminal-fg: var(--color-neutral-950);
+  --color-terminal-cursor: var(--color-neutral-950);
+  --color-terminal-cursor-accent: var(--color-neutral-50);
+  --color-terminal-selection: color-mix(in oklab, var(--color-sky-500) 32%, transparent);
+  --color-terminal-selection-inactive: color-mix(in oklab, var(--color-sky-500) 22%, transparent);
 
   color-scheme: light;
 }
 
-/* ── 深色主题 ── */
+/* ── ② ZCode 语义变量（深色 .dark 等价） ── */
 :root[data-theme="dark"] {
-  --bg-sidebar: #1B1B1F;
-  --bg-main: #232328;
-  --bg-panel: #232328;
-  --bg-elevated: #2A2A2F;
-  --bg-hover: rgba(255, 255, 255, 0.06);
-  --bg-active: rgba(255, 255, 255, 0.08);
-  --bg-overlay: rgba(0, 0, 0, 0.6);
+  --color-background: var(--color-neutral-900);
+  --color-background-alt: color-mix(in oklab, var(--color-neutral-800) 60%, transparent);
+  --color-background-win-alt: var(--color-neutral-800);
+  --color-sidebar: var(--color-neutral-950);
+  --color-header: var(--color-neutral-900);
+  --color-panel: var(--color-neutral-900);
+  --color-card: var(--color-neutral-800);
+  --color-card-selected: var(--color-neutral-700);
+  --color-popover: var(--color-neutral-800);
+  --color-popover-header: var(--color-neutral-700);
+  --color-input: var(--color-neutral-800);
+  --color-input-focused: var(--color-neutral-950);
+  --color-menu: var(--color-neutral-950);
+  --color-menu-hover: var(--color-neutral-900);
 
-  --accent: #E8E8E8;
-  --accent-2: #E8E8E8;
-  /* 品牌渐变（深色下提亮，保证对比度） */
-  --accent-grad: linear-gradient(135deg, #7A6BFF 0%, #E08BFF 100%);
-  --grad-brand: linear-gradient(135deg, #5A48FF 0%, #9A5EFF 52%, #D96BFF 100%);
-  --grad-brand-soft: linear-gradient(135deg, rgba(122, 107, 255, 0.16), rgba(224, 139, 255, 0.16));
-  --grad-glow: 0 4px 18px rgba(122, 94, 255, 0.40);
-  --accent-hover: #FFFFFF;
-  --accent-soft: rgba(255, 255, 255, 0.10);
-  --accent-contrast: #1A1A1E;
+  --color-brand: var(--color-sky-500);
+  --color-accent: color-mix(in oklab, var(--color-sky-950) 50%, transparent);
+  --color-primary: var(--color-neutral-50);
+  --color-primary-foreground: var(--color-neutral-950);
+  --color-secondary: var(--color-neutral-700);
 
-  /* 毛玻璃令牌（深色） */
-  --glass-blur: 20px;
-  /* 深色下降低饱和度增强，避免高饱和渐变+半透明面板叠加产生色带条纹 */
-  --glass-saturate: 1.05;
-  --glass-sidebar: rgba(27, 27, 33, 0.94);
-  --glass-panel: rgba(38, 38, 46, 0.80);
-  --glass-panel-strong: rgba(44, 44, 52, 0.90);
-  --glass-elevated: rgba(52, 52, 62, 0.92);
-  --glass-border: rgba(255, 255, 255, 0.09);
-  --glass-shadow: 0 8px 32px rgba(0, 0, 0, calc(0.42 * var(--shadow-strength, 1))), 0 1px 3px rgba(0, 0, 0, calc(0.30 * var(--shadow-strength, 1)));
-  /* 玻璃强度（深色） */
-  --glass-strength: 1;
-  /* 环境光背景双主色（深色） */
-  --ambient-c1: #181822;
-  --ambient-c2: #12121A;
-  --bg-ambient:
-    linear-gradient(135deg, var(--ambient-c1) 0%, var(--ambient-c2) 100%);
+  --color-border: color-mix(in oklab, var(--color-neutral-50) 10%, transparent);
+  --color-border-hover: color-mix(in oklab, var(--color-neutral-50) 30%, transparent);
+  --color-hover: var(--color-surface-hover);
+  --color-selected: color-mix(in oklab, var(--color-white) 10%, transparent);
+  --color-surface: color-mix(in oklab, var(--color-white) 5%, transparent);
+  --color-surface-hover: color-mix(in oklab, var(--color-white) 10%, transparent);
 
-  --text-1: #F0F0F3;
-  --text-2: #A6A6AF;
-  --text-3: #6E6E78;
+  --color-foreground: var(--color-neutral-200);
+  --color-foreground-subtle: color-mix(in oklab, var(--color-neutral-200) 60%, transparent);
+  --color-foreground-subtlest: color-mix(in oklab, var(--color-neutral-200) 30%, transparent);
+  --color-foreground-inverse: var(--color-white);
 
-  /* 输入框聚焦呼吸光晕主色（深色，提亮保证可见） */
-  --composer-glow: #9A5EFF;
-  /* 流光文字品牌渐变（深色） */
-  --text-shine-grad: linear-gradient(90deg, var(--text-3) 0%, var(--text-1) 28%, #D96BFF 50%, var(--text-1) 72%, var(--text-3) 100%);
+  --color-success: var(--color-green-500);
+  --color-destructive: var(--color-red-500);
+  --color-warning: var(--color-yellow-500);
+  --color-idle-task: var(--color-violet-400);
+  --color-idle-task-surface: color-mix(in oklab, var(--color-violet-950) 50%, transparent);
 
-  --border: #35353D;
-  --border-light: #2E2E35;
-  --border-strong: #45454D;
+  --color-interaction-ask-surface: color-mix(in oklab, var(--color-sky-950) 50%, transparent);
+  --color-interaction-ask-foreground: var(--color-sky-300);
+  --color-interaction-ask-fill: color-mix(in oklab, var(--color-green-400) 24%, transparent);
+  --color-interaction-confirmation-surface: color-mix(in oklab, var(--color-green-950) 45%, transparent);
+  --color-interaction-confirmation-foreground: var(--color-green-300);
 
-  --success: #3DD26A;
-  --success-soft: rgba(61, 210, 106, 0.16);
-  --warning: #F0A030;
-  --warning-soft: rgba(240, 160, 48, 0.16);
-  --error: #FF5252;
-  --error-soft: rgba(255, 82, 82, 0.16);
-  --info: #60A5FA;
-  --info-soft: rgba(96, 165, 250, 0.16);
+  --color-diff-added: var(--color-green-500);
+  --color-diff-removed: var(--color-red-500);
+  --color-git-modified: var(--color-amber-600);
+  --color-git-added: var(--color-teal-400);
+  --color-git-deleted: var(--color-red-400);
+  --color-git-renamed: var(--color-sky-400);
+  --color-git-untracked: var(--color-teal-400);
 
-  --shadow-xs: 0 1px 2px rgba(0, 0, 0, calc(0.30 * var(--shadow-strength, 1)));
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, calc(0.30 * var(--shadow-strength, 1))), 0 1px 2px rgba(0, 0, 0, calc(0.20 * var(--shadow-strength, 1)));
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, calc(0.30 * var(--shadow-strength, 1))), 0 2px 4px rgba(0, 0, 0, calc(0.20 * var(--shadow-strength, 1)));
-  --shadow-lg: 0 8px 24px rgba(0, 0, 0, calc(0.40 * var(--shadow-strength, 1))), 0 4px 8px rgba(0, 0, 0, calc(0.30 * var(--shadow-strength, 1)));
-  --card-shadow: 0 1px 3px rgba(0, 0, 0, calc(0.30 * var(--shadow-strength, 1))), 0 1px 2px rgba(0, 0, 0, calc(0.20 * var(--shadow-strength, 1)));
-  --shadow-pop: 0 8px 24px rgba(0, 0, 0, calc(0.50 * var(--shadow-strength, 1))), 0 4px 8px rgba(0, 0, 0, calc(0.30 * var(--shadow-strength, 1)));
+  --color-tag: var(--color-neutral-700);
+  --color-file-node: color-mix(in oklab, var(--color-sky-400) 18%, transparent);
+  --color-file-node-foreground: var(--color-sky-400);
+  --color-toast: var(--color-neutral-900);
+  --color-tooltip: var(--color-neutral-900);
+  --color-tooltip-foreground: var(--color-neutral-50);
+  --color-find-highlight: #713f12;
+  --color-find-highlight-active: #a16207;
+
+  --color-terminal-bg: var(--color-neutral-950);
+  --color-terminal-fg: var(--color-neutral-50);
+  --color-terminal-cursor: var(--color-neutral-50);
+  --color-terminal-cursor-accent: var(--color-neutral-950);
+  --color-terminal-selection: color-mix(in oklab, var(--color-sky-500) 26%, transparent);
+  --color-terminal-selection-inactive: color-mix(in oklab, var(--color-neutral-50) 16%, transparent);
 
   color-scheme: dark;
 }
 
-/* ── 尺寸令牌 ── */
+/* ── ③ chatcoder 变量映射层（旧变量名 → zcode 值，组件零改动换肤） ── */
+:root,
+:root[data-theme="light"] {
+  --bg-sidebar: var(--color-sidebar);
+  --bg-main: var(--color-background);
+  --bg-panel: var(--color-panel);
+  --bg-elevated: var(--color-popover);
+  --bg-hover: var(--color-hover);
+  --bg-active: var(--color-selected);
+  --bg-overlay: rgba(0, 0, 0, 0.3);
+
+  /* 主强调 = zcode 主按钮色（近黑）；品牌色 = sky-400（聚焦/链接/高亮） */
+  --accent: var(--color-primary);
+  --accent-2: var(--color-primary);
+  --accent-hover: var(--color-neutral-800);
+  --accent-soft: var(--color-surface);
+  --accent-contrast: var(--color-primary-foreground);
+  /* 渐变已全部废除：以纯色渐变占位，视觉为纯色，避免 background-image 引用断裂 */
+  --accent-grad: linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary) 100%);
+  --grad-brand: linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary) 100%);
+  --grad-brand-soft: linear-gradient(135deg, var(--color-surface), var(--color-surface));
+  --grad-glow: none;
+
+  /* 毛玻璃废除：全部退化为不透明 zcode 色 */
+  --glass-blur: 0px;
+  --glass-saturate: 1;
+  --glass-sidebar: var(--color-sidebar);
+  --glass-panel: var(--color-panel);
+  --glass-panel-strong: var(--color-panel);
+  --glass-elevated: var(--color-popover);
+  --glass-border: var(--color-border);
+  --glass-shadow: 0 8px 24px rgba(0, 0, 0, 0.12), 0 4px 8px rgba(0, 0, 0, 0.08);
+  --glass-strength: 1;
+  --ambient-c1: var(--color-background);
+  --ambient-c2: var(--color-background);
+  --bg-ambient: none;
+
+  --text-1: var(--color-neutral-950);
+  --text-2: var(--color-foreground-subtle);
+  --text-3: var(--color-foreground-subtlest);
+
+  /* 输入框聚焦色：zcode 用 brand(sky-400) 1px 边，无发光；glow token 改色备用 */
+  --composer-glow: var(--color-brand);
+  --text-shine-grad: none;
+  --grad-flow: none;
+
+  --border: var(--color-border);
+  --border-light: color-mix(in oklab, var(--color-neutral-950) 5%, transparent);
+  --border-strong: var(--color-border-hover);
+
+  --success: var(--color-success);
+  --success-soft: color-mix(in oklab, var(--color-green-600) 10%, transparent);
+  --warning: var(--color-warning);
+  --warning-soft: color-mix(in oklab, var(--color-yellow-600) 10%, transparent);
+  --error: var(--color-destructive);
+  --error-soft: color-mix(in oklab, var(--color-red-600) 10%, transparent);
+  --info: var(--color-sky-600);
+  --info-soft: var(--color-sky-50);
+
+  --shadow-strength: 1;
+  /* v1.1: 阴影强度可缩放（applyUiVars 写 --shadow-strength） */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, calc(0.04 * var(--shadow-strength, 1)));
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, calc(0.06 * var(--shadow-strength, 1))), 0 1px 2px rgba(0, 0, 0, calc(0.04 * var(--shadow-strength, 1)));
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, calc(0.08 * var(--shadow-strength, 1))), 0 2px 4px rgba(0, 0, 0, calc(0.04 * var(--shadow-strength, 1)));
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, calc(0.10 * var(--shadow-strength, 1))), 0 4px 8px rgba(0, 0, 0, calc(0.06 * var(--shadow-strength, 1)));
+  --card-shadow: 0 1px 2px rgba(0, 0, 0, calc(0.05 * var(--shadow-strength, 1)));
+  --shadow-pop: 0 8px 24px rgba(0, 0, 0, calc(0.12 * var(--shadow-strength, 1))), 0 4px 8px rgba(0, 0, 0, calc(0.08 * var(--shadow-strength, 1)));
+}
+
+:root[data-theme="dark"] {
+  --bg-overlay: rgba(0, 0, 0, 0.6);
+  --accent-hover: var(--color-white);
+  --border-light: color-mix(in oklab, var(--color-neutral-50) 5%, transparent);
+  --info: var(--color-sky-400);
+  --info-soft: color-mix(in oklab, var(--color-sky-500) 16%, transparent);
+  --success-soft: color-mix(in oklab, var(--color-green-500) 16%, transparent);
+  --warning-soft: color-mix(in oklab, var(--color-yellow-500) 16%, transparent);
+  --error-soft: color-mix(in oklab, var(--color-red-500) 16%, transparent);
+
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, calc(0.3 * var(--shadow-strength, 1)));
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, calc(0.3 * var(--shadow-strength, 1))), 0 1px 2px rgba(0, 0, 0, calc(0.2 * var(--shadow-strength, 1)));
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, calc(0.3 * var(--shadow-strength, 1))), 0 2px 4px rgba(0, 0, 0, calc(0.2 * var(--shadow-strength, 1)));
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, calc(0.4 * var(--shadow-strength, 1))), 0 4px 8px rgba(0, 0, 0, calc(0.3 * var(--shadow-strength, 1)));
+  --card-shadow: 0 1px 3px rgba(0, 0, 0, calc(0.3 * var(--shadow-strength, 1))), 0 1px 2px rgba(0, 0, 0, calc(0.2 * var(--shadow-strength, 1)));
+  --shadow-pop: 0 8px 24px rgba(0, 0, 0, calc(0.5 * var(--shadow-strength, 1))), 0 4px 8px rgba(0, 0, 0, calc(0.3 * var(--shadow-strength, 1)));
+  --glass-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 4px 8px rgba(0, 0, 0, 0.3);
+}
+
+/* ── ④ 尺寸令牌（对齐 zcode：圆角 2/4/6/8/12/16，UI 基准 14px） ── */
 :root {
-  --titlebar-h: 36px;
-  --sidebar-w: 260px;
+  --titlebar-h: 40px;
+  --sidebar-w: 272px;
   --sidebar-min: 200px;
   --sidebar-max: 480px;
-  --rightpanel-w: 420px;
+  --rightpanel-w: 360px;
   --rightpanel-min: 200px;
   --rightpanel-max: 1600px;
-  --r-xs: 4px;
-  --r-sm: 6px;
-  --r-md: 20px;
-  --r-lg: 12px;
-  --r-xl: 16px;
+  /* v1.1: 滚动条 gutter 预留宽度（输入框对齐消息流用） */
+  --scrollbar-gutter-w: 12px;
+  /* zcode radius: xs2 sm4 md6 lg8 xl12 2xl16（修复原 --r-md:20px 异常值） */
+  --r-xs: 2px;
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 8px;
+  --r-xl: 12px;
+  --r-2xl: 16px;
   --dur-fast: 0.12s;
-  --dur-med: 0.2s;
-  --dur-normal: 0.25s;
-  --dur-slow: 0.32s;
-  --dur-view: 0.24s;
-  --curve: cubic-bezier(0.22, 0.8, 0.28, 1);
-  /* 动效曲线（motion.ts 引用的完整集合） */
-  --ease-out: cubic-bezier(0.22, 0.8, 0.28, 1);
+  --dur-med: 0.15s;
+  --dur-normal: 0.15s;
+  --dur-slow: 0.2s;
+  --dur-view: 0.16s;
+  /* zcode 默认过渡曲线 */
+  --curve: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
   --ease-out-expo: cubic-bezier(0.19, 1, 0.22, 1);
-  --ease-in-out: cubic-bezier(0.645, 0.045, 0.355, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
   --ease-spring: cubic-bezier(0.34, 1.3, 0.44, 1);
-  /* 思考/流式文字的流光渐变（background-clip: text 使用） */
-  --grad-flow: linear-gradient(90deg, var(--text-3) 0%, var(--text-1) 40%, var(--text-3) 80%);
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-  --font-mono: "JetBrains Mono", "SF Mono", "Cascadia Code", Consolas, monospace;
-  --content-max-w: 840px;
-  --chat-line-height: 1.6;
-  --chat-code-color: #D98014;
-  --chat-heading-color: var(--text-1);
-  --chat-link-color: #3B82F6;
-  --chat-quote-color: var(--text-2);
-  --sidebar-fs: 12px;
-  --sidebar-icon: 14px;
-  --sidebar-focus: var(--accent);
-  /* 补齐被引用但此前缺失的变量 */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  /* zcode 消息流阅读列宽 */
+  --content-max-w: 768px;
+  --chat-line-height: 1.625;
+  --chat-code-color: var(--color-foreground);
+  --chat-heading-color: var(--color-neutral-950);
+  --chat-link-color: var(--color-sky-600);
+  --chat-quote-color: var(--color-foreground-subtle);
+  --sidebar-fs: 13px;
+  --sidebar-icon: 16px;
+  --sidebar-focus: var(--text-1);
+  --sidebar-active-bg: var(--color-selected);
+  --sidebar-active-bar: transparent;
+  /* 兼容补齐 */
   --ok: var(--success);
-  --radius: var(--r-sm);
+  --radius: var(--r-md);
   --fs-sm: 12px;
   --fs-md: 13px;
   --fs-lg: 15px;
-  --shadow-xl: 0 16px 48px rgba(0, 0, 0, calc(0.16 * var(--shadow-strength, 1))), 0 6px 16px rgba(0, 0, 0, calc(0.08 * var(--shadow-strength, 1)));
+  --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.16), 0 6px 16px rgba(0, 0, 0, 0.08);
 }
 
 /* 向后兼容别名 */
@@ -212,7 +379,8 @@
   --radius-xl: var(--r-xl);
 }
 
-/* 深色主题下的阴影令牌微调（--shadow-xl 需要更深） */
 :root[data-theme="dark"] {
-  --shadow-xl: 0 16px 48px rgba(0, 0, 0, calc(0.50 * var(--shadow-strength, 1))), 0 6px 16px rgba(0, 0, 0, calc(0.35 * var(--shadow-strength, 1)));
+  --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.5), 0 6px 16px rgba(0, 0, 0, 0.35);
+  --chat-heading-color: var(--color-neutral-50);
+  --chat-link-color: var(--color-sky-400);
 }

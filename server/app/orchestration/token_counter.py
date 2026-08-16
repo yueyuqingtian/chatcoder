@@ -91,6 +91,39 @@ def estimate_messages_tokens(messages: list[ChatMessage]) -> int:
     return sum(estimate_message_tokens(m) for m in messages)
 
 
+def estimate_breakdown(messages: list[ChatMessage]) -> dict[str, int]:
+    """v2.2 (对齐 zcode 3.10): 上下文用量 7 类分类估算。
+
+    分类（对齐 ZCode context-breakdown-1..7 色块）：
+    system(系统提示) / tools(工具定义，无法从消息列表精确分离，归入 system)
+    / history(历史对话) / tool_results(工具结果) / thinking(思考) / input(当前输入)
+    """
+    breakdown = {
+        "system": 0, "tools": 0, "history": 0,
+        "tool_results": 0, "thinking": 0, "input": 0,
+    }
+    for i, m in enumerate(messages):
+        if m.role in ("system", "developer"):
+            breakdown["system"] += estimate_message_tokens(m)
+        elif m.role == "tool":
+            breakdown["tool_results"] += estimate_message_tokens(m)
+        elif m.role == "assistant":
+            is_thinking = bool(m.content and "[思考]" in str(m.content))
+            if is_thinking or (m.content and "thinking" in str(m.content).lower()[:200]):
+                breakdown["thinking"] += estimate_message_tokens(m)
+            else:
+                breakdown["history"] += estimate_message_tokens(m)
+        elif m.role == "user":
+            # 最后一条 user 消息视为当前输入，其余为历史
+            if i == len(messages) - 1:
+                breakdown["input"] += estimate_message_tokens(m)
+            else:
+                breakdown["history"] += estimate_message_tokens(m)
+        else:
+            breakdown["history"] += estimate_message_tokens(m)
+    return breakdown
+
+
 def get_context_budget(context_window: int) -> dict[str, int]:
     """计算上下文预算分配（对齐 codex openai_models.rs）。
 

@@ -272,7 +272,7 @@ async def count_rollback_affected(db: AsyncSession, session_id: int, turn_id: in
     res = await db.execute(
         select(Task).where(
             Task.session_id == session_id,
-            Task.status.in_(["pending", "running"]),
+            Task.status.in_(["proposed", "pending", "running"]),
         )
     )
     tasks = 0

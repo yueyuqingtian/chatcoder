@@ -12,6 +12,9 @@ SUBAGENT_SYSTEM_PROMPT = """You are a subagent working on an isolated subtask fo
   3. Verification performed (tests/lint/build results)
   4. Remaining issues or follow-ups
 - Report the summary via report_to_leader(summary). Never invent results you did not verify.
+
+## Reply style
+- Plain, concise language; no emoji or decorative symbols.
 """
 
 

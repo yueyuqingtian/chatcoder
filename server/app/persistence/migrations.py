@@ -32,6 +32,13 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("sessions", "worktree_path", "VARCHAR(512)"),
     ("sessions", "plan_confirmed", "BOOLEAN DEFAULT 1 NOT NULL"),
     ("sessions", "updated_at", "VARCHAR"),
+    # ========== sessions（v2.2 对齐 zcode 3.12：权限模式）==========
+    ("sessions", "permission_mode", "VARCHAR(20) DEFAULT 'default' NOT NULL"),
+    # ========== sessions（v1.1：最后一次 API 真实上下文占用）==========
+    ("sessions", "last_prompt_tokens", "INTEGER DEFAULT 0 NOT NULL"),
+    ("sessions", "last_usage_at", "VARCHAR(40)"),
+    # ========== exec_policy_rules（v2.2：工具级规则）==========
+    ("exec_policy_rules", "tool_name", "VARCHAR(60)"),
     # ========== messages（v1 缺 turn_id）==========
     ("messages", "turn_id", "BIGINT"),
     ("messages", "deleted", "BOOLEAN DEFAULT 0 NOT NULL"),
@@ -42,6 +49,10 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("tasks", "turn_id", "BIGINT"),
     ("tasks", "agent_id", "BIGINT"),
     ("tasks", "note", "VARCHAR(500)"),
+    ("tasks", "kind", "VARCHAR(16) DEFAULT 'request' NOT NULL"),
+    ("tasks", "depends_on", "JSON"),
+    ("tasks", "estimate", "INTEGER"),
+    ("tasks", "is_hidden", "BOOLEAN DEFAULT 0 NOT NULL"),
     ("tasks", "needs_review", "BOOLEAN DEFAULT 0 NOT NULL"),
     # ========== audit_logs（v1 表结构不同，v2 缺 session_id / turn_id）==========
     ("audit_logs", "session_id", "BIGINT"),
@@ -51,6 +62,8 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("models", "api_format", "VARCHAR(20) DEFAULT 'openai'"),
     ("models", "api_key", "VARCHAR(500)"),
     ("models", "reasoning_efforts", "JSON"),
+    # ========== models（v16 供应商化：模型挂到 provider 下）==========
+    ("models", "provider_id", "BIGINT"),
     # ========== team_agents（v1 遗留表，v2 不再使用，仅保留迁移以防旧表有数据）==========
     ("team_agents", "learned_facts", "JSON"),
     ("team_agents", "skill_ids", "JSON"),
@@ -123,6 +136,16 @@ async def run_migrations(db: AsyncSession) -> dict:
         except Exception:
             pass
 
+    # v16: 数据迁移 -- 存量模型按 (base_url, api_key, api_format) 归组生成供应商
+    try:
+        await _group_models_into_providers(db)
+    except Exception as e:
+        logger.warning("模型归组迁移失败(非阻塞): %s", e)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
     if migrated:
         logger.info("数据库迁移完成: 新增 %d 列, 跳过 %d, 失败 %d", migrated, skipped, errors)
     return {"migrated": migrated, "skipped": skipped, "errors": errors}
@@ -134,7 +157,62 @@ async def _upgrade_template_prompts(db: AsyncSession) -> int:
     按 role 匹配 LEGACY_ROLE_PROMPTS 快照，只有完全一致才升级为 CORE_ROLE_PROMPTS，
     避免覆盖用户已自定义的提示词。
     """
-    from app.orchestration.prompts import CORE_ROLE_PROMPTS, LEGACY_ROLE_PROMPTS
-
     # v3：AgentTemplate 模型已移除（团队概念废弃），无模板可升级，直接返回。
     return 0
+
+
+async def _group_models_into_providers(db: AsyncSession) -> int:
+    """v16: 幂等归组——把带 base_url/api_key 且未挂供应商的存量模型，
+    按 (base_url, api_key, api_format) 分组生成 Provider 记录并回填 provider_id。
+    供应商名取 base_url 主机名（去端口），空 base_url 的模型跳过。
+    """
+    from urllib.parse import urlparse
+
+    from app.persistence.models.model_reg import Model, Provider
+
+    if not await _table_exists(db, "providers"):
+        return 0
+    if not await _column_exists(db, "models", "provider_id"):
+        return 0
+
+    rows = (await db.execute(
+        select(Model).where(Model.provider_id.is_(None))
+    )).scalars().all()
+    if not rows:
+        return 0
+
+    # 已有供应商按 (base_url, api_key, api_format) 建索引，避免重复创建
+    existing = (await db.execute(select(Provider))).scalars().all()
+    index: dict[tuple, Provider] = {}
+    for p in existing:
+        index[(p.base_url or "", p.api_key or "", p.api_format or "openai")] = p
+
+    grouped = 0
+    for m in rows:
+        if not (m.base_url or m.api_key):
+            continue  # 无连接信息的模型保持独立
+        key = (m.base_url or "", m.api_key or "", getattr(m, "api_format", None) or "openai")
+        provider = index.get(key)
+        if provider is None:
+            host = urlparse(m.base_url).hostname if m.base_url else None
+            name = host or "自定义供应商"
+            # 同名供应商（不同 key）加序号区分
+            existing_names = {p.name for p in index.values()}
+            base_name, i = name, 2
+            while name in existing_names:
+                name = f"{base_name}-{i}"
+                i += 1
+            provider = Provider(
+                tenant_id=1, name=name, base_url=m.base_url,
+                api_key=m.api_key, api_format=key[2], is_active=True,
+            )
+            db.add(provider)
+            await db.flush()
+            index[key] = provider
+            logger.info("迁移: 创建供应商 %s (%s)", provider.name, provider.base_url)
+        m.provider_id = provider.id
+        grouped += 1
+    await db.commit()
+    if grouped:
+        logger.info("迁移: %d 个存量模型已归组到供应商", grouped)
+    return grouped

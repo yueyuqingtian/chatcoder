@@ -2,15 +2,21 @@
 from functools import lru_cache
 
 from app.orchestration.tools.base import Tool
+from app.orchestration.tools.ask_user import AskUserQuestionTool
 from app.orchestration.tools.ci import CiRunTool
+from app.orchestration.tools.codebase_search import CodebaseSearchTool
 from app.orchestration.tools.editor import EditorApplyDiffTool
 from app.orchestration.tools.fs_list import FsListTool
 from app.orchestration.tools.fs_read import FsReadTool
 from app.orchestration.tools.fs_write import FsWriteTool
+from app.orchestration.tools.git import GitTool
 from app.orchestration.tools.git_diff import GitDiffTool
 from app.orchestration.tools.grep import GrepTool
 from app.orchestration.tools.memory_search import MemorySearchTool
+from app.orchestration.tools.multi_edit import MultiFileEditTool
+from app.orchestration.tools.read_attachment import ReadAttachmentTool
 from app.orchestration.tools.terminal import TerminalExecTool
+from app.orchestration.tools.todo import TodoWriteTool
 from app.orchestration.tools.view_image import ViewImageTool
 from app.orchestration.tools.web_fetch import WebFetchTool
 from app.orchestration.tools.web_search import WebSearchTool
@@ -63,6 +69,9 @@ def _build_default_registry() -> ToolRegistry:
         TerminalExecTool, EditorApplyDiffTool, WebFetchTool,
         CiRunTool, MemorySearchTool, GitDiffTool,
         GrepTool, WebSearchTool, ViewImageTool,
+        ReadAttachmentTool, TodoWriteTool,
+        # v2.2 (对齐 zcode 3.14): 补注册——多文件编辑/git 操作/代码库搜索/结构化提问
+        MultiFileEditTool, GitTool, CodebaseSearchTool, AskUserQuestionTool,
     ):
         reg.register(tool_cls())
     return reg

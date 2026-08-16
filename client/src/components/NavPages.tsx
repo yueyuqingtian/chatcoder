@@ -1,8 +1,12 @@
-/** 左侧导航页（v2）：定时任务 / 技能 / MCP 管理页。 */
+/** 左侧导航页（v7 对齐 ZCode）：自动化（定时任务）/ 技能 / MCP 管理页。 */
 import { useCallback, useEffect, useState } from "react";
 import { api, type McpServerOut, type ScheduledTaskOut, type SkillOut } from "../api/client";
 import { useChatStore } from "../store/chat";
-import { IconPlus, IconRefresh, IconX } from "./icons";
+import {
+  IconBox, IconCheckSquare, IconClipboard, IconFileText, IconInfo,
+  IconPlus, IconRefresh, IconSearch, IconTarget, IconX, IconZap,
+  IconChevronDown, IconDownload,
+} from "./icons";
 
 function SwitchRow({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
   return (
@@ -13,10 +17,37 @@ function SwitchRow({ checked, onChange }: { checked: boolean; onChange: (v: bool
   );
 }
 
+/** 任务模板（对齐 zcode 自动化页） */
+const IDLE_TEMPLATES = [
+  { icon: <IconClipboard size={15} />, name: "Git 站会摘要", desc: "每周五总结这一周发生的事情。", schedule: "最早可用时段", cron: "0 13 * * 5", prompt: "总结本周 git 提交、模块变化与待跟进事项，生成站会摘要。" },
+  { icon: <IconZap size={15} />, name: "CI 失败与不稳定测试报告", desc: "汇总近期 CI 失败和不稳定测试，并分析可能原因。", schedule: "最早可用时段", cron: "0 13 * * *", prompt: "汇总近期 CI 失败和不稳定测试，并分析可能原因。" },
+  { icon: <IconCheckSquare size={15} />, name: "文档同步检查", desc: "检查 README、docs、配置说明和使用示例是否与当前代码一致。", schedule: "最早可用时段", cron: "0 13 * * 3", prompt: "检查 README、docs、配置说明和使用示例是否与当前代码一致，列出不一致处。" },
+];
+const CRON_TEMPLATES = [
+  { icon: <IconTarget size={15} />, name: "晨会动态", desc: "汇总上一个工作日以来的提交、模块变化与待跟进事项。", schedule: "工作日 09:00", cron: "0 9 * * 1-5", prompt: "汇总上一个工作日以来的 git 提交、模块变化与待跟进事项。" },
+  { icon: <IconZap size={15} />, name: "风险扫描", desc: "检查最近 24 小时的代码变更，报告有直接证据的高置信风险。", schedule: "每天 10:00", cron: "0 10 * * *", prompt: "检查最近 24 小时的代码变更，报告有直接证据的高置信风险。" },
+  { icon: <IconFileText size={15} />, name: "发布简报", desc: "整理本周已合并变更，生成团队版与用户版发布摘要。", schedule: "每周五 16:00", cron: "0 16 * * 5", prompt: "整理本周已合并变更，生成团队版与用户版发布摘要。" },
+  { icon: <IconCheckSquare size={15} />, name: "文档同步检查", desc: "对照近期实现变更，找出可能遗漏的文档更新。", schedule: "每周三 15:00", cron: "0 15 * * 3", prompt: "对照近期实现变更，找出可能遗漏的文档更新。" },
+];
+
+/** cron → 人类可读（对齐 zcode 调度文案） */
+function cronLabel(cron: string): string {
+  const p = cron.trim().split(/\s+/);
+  if (p.length !== 5) return cron;
+  const [min, hour, , , dow] = p;
+  const time = `${hour.padStart(2, "0")}:${min.padStart(2, "0")}`;
+  if (dow === "*") return `每天 ${time}`;
+  if (dow === "1-5") return `工作日 ${time}`;
+  const dowMap: Record<string, string> = { "0": "日", "1": "一", "2": "二", "3": "三", "4": "四", "5": "五", "6": "六" };
+  if (dowMap[dow]) return `每周${dowMap[dow]} ${time}`;
+  return cron;
+}
+
 export function ScheduledPage() {
   const [tasks, setTasks] = useState<ScheduledTaskOut[]>([]);
   const [showCreate, setShowCreate] = useState(false);
-  // v6: 用"日期时间 + 频率"替代 cron 表达式（普通用户无需了解 cron）
+  const [createMenu, setCreateMenu] = useState(false);
+  const [keepAwake, setKeepAwake] = useState(() => localStorage.getItem("chatcoder.keepAwake") === "1");
   const [form, setForm] = useState<{ name: string; runAt: string; freq: string; weekday: string; prompt: string }>(() => {
     const d = new Date(Date.now() + 3600000);
     const pad = (n: number) => String(n).padStart(2, "0");
@@ -30,7 +61,19 @@ export function ScheduledPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  // 友好时间 → cron 换算
+  useEffect(() => {
+    void window.chatcoderAPI?.setKeepAwake?.(keepAwake);
+    localStorage.setItem("chatcoder.keepAwake", keepAwake ? "1" : "0");
+  }, [keepAwake]);
+
+  // 点击外部关闭创建下拉
+  useEffect(() => {
+    if (!createMenu) return;
+    const handler = () => setCreateMenu(false);
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [createMenu]);
+
   const toCron = (): string | null => {
     if (!form.runAt) return null;
     const d = new Date(form.runAt);
@@ -48,7 +91,7 @@ export function ScheduledPage() {
   const handleCreate = async () => {
     if (!currentSessionId || !form.name.trim() || !form.prompt.trim()) return;
     const cron = toCron();
-    if (!cron) { alert("请选择有效的执行时间"); return; }
+    if (!cron) return;
     try {
       await api.createScheduledTask({ session_id: currentSessionId, name: form.name.trim(), cron, prompt: form.prompt.trim() });
       setShowCreate(false);
@@ -56,110 +99,191 @@ export function ScheduledPage() {
       const pad = (n: number) => String(n).padStart(2, "0");
       setForm((p) => ({ ...p, name: "", prompt: "", runAt: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}` }));
       load();
-    } catch (e) { alert(String(e)); }
+    } catch { /* ignore */ }
+  };
+
+  /** 模板 → 预填表单 */
+  const applyTemplate = (tpl: { name: string; cron: string; prompt: string }) => {
+    const p = tpl.cron.split(/\s+/);
+    const [min, hour, , , dow] = p;
+    const d = new Date();
+    d.setHours(parseInt(hour, 10) || 9, parseInt(min, 10) || 0, 0, 0);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    setForm({
+      name: tpl.name,
+      prompt: tpl.prompt,
+      runAt: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`,
+      freq: dow === "*" ? "daily" : "weekly",
+      weekday: dow === "*" || dow.includes("-") ? "1" : dow,
+    });
+    setShowCreate(true);
   };
 
   return (
-    <div className="navpage">
-      <div className="navpage-head">
-        <span className="navpage-title">定时任务</span>
-        <button className="btn-ghost" onClick={() => setShowCreate((v) => !v)}><IconPlus size={13} /> 新建</button>
-      </div>
-      {showCreate && (
-        <div className="navpage-form">
-          <input className="sp-input" placeholder="任务名称" value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} />
-          <label className="sp-label">执行时间</label>
-          <input type="datetime-local" className="sp-input" value={form.runAt} onChange={(e) => setForm((p) => ({ ...p, runAt: e.target.value }))} />
-          <label className="sp-label">重复频率</label>
-          <div className="sp-freq-row">
-            {[["once", "仅一次"], ["daily", "每天"], ["weekly", "每周"], ["monthly", "每月"]].map(([v, l]) => (
-              <button key={v} className={"sp-pill" + (form.freq === v ? " active" : "")} onClick={() => setForm((p) => ({ ...p, freq: v }))}>{l}</button>
+    <div className="automation-page">
+      <h1 className="automation-title">自动化</h1>
+      <p className="automation-sub">创建定时任务，或排队在闲时算力空闲时后台执行。</p>
+
+      <div className="automation-card">
+        {tasks.length === 0 && !showCreate && <div className="automation-empty">还没有定时任务</div>}
+        {tasks.length > 0 && (
+          <div className="automation-list">
+            {tasks.map((t) => (
+              <div key={t.id} className="automation-item">
+                <div className="automation-item-main">
+                  <div className="automation-item-name">{t.name}</div>
+                  <div className="automation-item-desc">{cronLabel(t.cron)}</div>
+                </div>
+                <div className="automation-item-actions">
+                  <SwitchRow checked={t.enabled} onChange={async (v) => { try { await api.updateScheduledTask(t.id, { enabled: v }); load(); } catch { /* ignore */ } }} />
+                  <button className="sb-icon-btn" title="删除" onClick={async () => { try { await api.deleteScheduledTask(t.id); load(); } catch { /* ignore */ } }}><IconX size={13} /></button>
+                </div>
+              </div>
             ))}
           </div>
-          {form.freq === "weekly" && (
-            <select className="sp-input" value={form.weekday} onChange={(e) => setForm((p) => ({ ...p, weekday: e.target.value }))}>
-              {[["1", "周一"], ["2", "周二"], ["3", "周三"], ["4", "周四"], ["5", "周五"], ["6", "周六"], ["0", "周日"]].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-            </select>
-          )}
-          <label className="sp-label">执行提示词</label>
-          <textarea className="sp-textarea" placeholder="执行提示词…" rows={3} value={form.prompt} onChange={(e) => setForm((p) => ({ ...p, prompt: e.target.value }))} />
-          <div className="navpage-form-actions">
-            <button className="btn-ghost" onClick={() => setShowCreate(false)}>取消</button>
-            <button className="btn-primary" onClick={handleCreate} disabled={!form.name.trim() || !form.prompt.trim()}>创建</button>
+        )}
+        {showCreate && (
+          <div className="navpage-form automation-form">
+            <input className="sp-input" placeholder="任务名称" value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} />
+            <label className="sp-label">执行时间</label>
+            <input type="datetime-local" className="sp-input" value={form.runAt} onChange={(e) => setForm((p) => ({ ...p, runAt: e.target.value }))} />
+            <label className="sp-label">重复频率</label>
+            <div className="sp-freq-row">
+              {[["once", "仅一次"], ["daily", "每天"], ["weekly", "每周"], ["monthly", "每月"]].map(([v, l]) => (
+                <button key={v} className={"sp-pill" + (form.freq === v ? " active" : "")} onClick={() => setForm((p) => ({ ...p, freq: v }))}>{l}</button>
+              ))}
+            </div>
+            {form.freq === "weekly" && (
+              <select className="sp-input" value={form.weekday} onChange={(e) => setForm((p) => ({ ...p, weekday: e.target.value }))}>
+                {[["1", "周一"], ["2", "周二"], ["3", "周三"], ["4", "周四"], ["5", "周五"], ["6", "周六"], ["0", "周日"]].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+              </select>
+            )}
+            <label className="sp-label">执行提示词</label>
+            <textarea className="sp-textarea" placeholder="执行提示词…" rows={3} value={form.prompt} onChange={(e) => setForm((p) => ({ ...p, prompt: e.target.value }))} />
+            {!currentSessionId && <div className="automation-hint">需先进入一个会话才能创建任务</div>}
+            <div className="navpage-form-actions">
+              <button className="btn-ghost" onClick={() => setShowCreate(false)}>取消</button>
+              <button className="btn-primary" onClick={handleCreate} disabled={!currentSessionId || !form.name.trim() || !form.prompt.trim()}>创建</button>
+            </div>
           </div>
-        </div>
-      )}
-      <div className="navpage-list">
-        {tasks.map((t) => (
-          <div key={t.id} className="navpage-item">
-            <div className="navpage-item-main">
-              <div className="navpage-item-title">{t.name}</div>
-              <div className="navpage-item-desc">
-                <span className="np-tag">{t.cron}</span>
-                <span>{t.next_run_at ? `下次: ${t.next_run_at}` : "未排程"}</span>
+        )}
+        <div className="automation-actions">
+          <div className="automation-create-wrap">
+            <button className="automation-btn-primary" onClick={() => setShowCreate((v) => !v)}>
+              创建定时任务
+            </button>
+            <button className="automation-btn-primary automation-btn-caret" onClick={(e) => { e.stopPropagation(); setCreateMenu(!createMenu); }}>
+              <IconChevronDown size={13} />
+            </button>
+            {createMenu && (
+              <div className="context-menu automation-create-menu">
+                {[["once", "仅一次"], ["daily", "每天"], ["weekly", "每周"], ["monthly", "每月"]].map(([v, l]) => (
+                  <div key={v} className="context-menu-item" onClick={() => { setForm((p) => ({ ...p, freq: v })); setShowCreate(true); setCreateMenu(false); }}>{l}</div>
+                ))}
               </div>
-            </div>
-            <div className="navpage-item-actions">
-              <SwitchRow checked={t.enabled} onChange={async (v) => { try { await api.updateScheduledTask(t.id, { enabled: v }); load(); } catch { /* ignore */ } }} />
-              <button className="icon-btn" onClick={async () => { if (confirm(`删除「${t.name}」?`)) { try { await api.deleteScheduledTask(t.id); load(); } catch { /* ignore */ } } }}><IconX size={12} /></button>
-            </div>
+            )}
           </div>
-        ))}
-        {tasks.length === 0 && <div className="navpage-empty">暂无定时任务</div>}
+          <button className="automation-btn-ghost" onClick={() => applyTemplate(IDLE_TEMPLATES[0])}>创建闲时任务</button>
+        </div>
       </div>
-    </div>
-  );
-}
 
-function ResourceNavPage<T extends { id: number; is_active: boolean }>({ loader, title, renderName, renderDesc, onToggle, onDelete }: {
-  loader: () => Promise<T[]>;
-  title: string;
-  renderName: (t: T) => string;
-  renderDesc: (t: T) => string;
-  onToggle: (t: T, v: boolean) => Promise<unknown>;
-  onDelete: (t: T) => Promise<unknown>;
-}) {
-  const [items, setItems] = useState<T[]>([]);
-  const load = useCallback(async () => {
-    try { setItems(await loader()); } catch { /* ignore */ }
-  }, [loader]);
-  useEffect(() => { load(); }, [load]);
-
-  return (
-    <div className="navpage">
-      <div className="navpage-head">
-        <span className="navpage-title">{title}</span>
-        <button className="btn-ghost" onClick={load}><IconRefresh size={13} /> 刷新</button>
+      <div className="automation-wake">
+        <IconInfo size={14} />
+        <span className="automation-wake-text">chatcoder 运行会话时保持电脑唤醒。</span>
+        <SwitchRow checked={keepAwake} onChange={setKeepAwake} />
       </div>
-      <div className="navpage-list">
-        {items.map((it) => (
-          <div key={it.id} className="navpage-item">
-            <div className="navpage-item-main">
-              <div className="navpage-item-title">{renderName(it)}</div>
-              <div className="navpage-item-desc">{renderDesc(it)}</div>
-            </div>
-            <div className="navpage-item-actions">
-              <SwitchRow checked={it.is_active} onChange={(v) => onToggle(it, v).then(load)} />
-              <button className="icon-btn" onClick={() => onDelete(it).then(load)}><IconX size={12} /></button>
-            </div>
-          </div>
+
+      <div className="automation-section">闲时任务模板</div>
+      <div className="automation-grid">
+        {IDLE_TEMPLATES.map((t) => (
+          <button key={t.name} className="automation-tpl" onClick={() => applyTemplate(t)}>
+            <span className="automation-tpl-head">{t.icon} {t.name}</span>
+            <span className="automation-tpl-desc">{t.desc}</span>
+            <span className="automation-tpl-sched">{t.schedule}</span>
+          </button>
         ))}
-        {items.length === 0 && <div className="navpage-empty">暂无数据</div>}
+      </div>
+
+      <div className="automation-section">定时任务模板</div>
+      <div className="automation-grid">
+        {CRON_TEMPLATES.map((t, i) => (
+          <button key={`${t.name}-${i}`} className="automation-tpl" onClick={() => applyTemplate(t)}>
+            <span className="automation-tpl-head">{t.icon} {t.name}</span>
+            <span className="automation-tpl-desc">{t.desc}</span>
+            <span className="automation-tpl-sched">{t.schedule}</span>
+          </button>
+        ))}
       </div>
     </div>
   );
 }
 
 export function SkillsPage() {
+  const [items, setItems] = useState<SkillOut[]>([]);
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<string>("all");
+  const load = useCallback(async () => {
+    try { setItems(await api.listSkills()); } catch { /* ignore */ }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const sources = Array.from(new Set(items.map((s) => s.source || "user")));
+  const filtered = items.filter((s) => {
+    if (filter !== "all" && (s.source || "user") !== filter) return false;
+    if (query.trim()) {
+      const q = query.toLowerCase();
+      return (s.name + (s.display_name || "") + (s.description || "")).toLowerCase().includes(q);
+    }
+    return true;
+  });
+  const grouped = sources.map((src) => ({ src, list: filtered.filter((s) => (s.source || "user") === src) })).filter((g) => g.list.length > 0);
+  const sourceLabel = (src: string) => (src === "plugin" ? "Plugin" : src === "project" ? "项目" : "用户");
+
   return (
-    <ResourceNavPage<SkillOut>
-      loader={() => api.listSkills()}
-      title="技能"
-      renderName={(s) => s.display_name || s.name}
-      renderDesc={(s) => `${s.description || "无描述"} · ${s.source}`}
-      onToggle={(s, v) => api.updateSkill(s.id, { is_active: v })}
-      onDelete={(s) => api.deleteSkill(s.id)}
-    />
+    <div className="skills-page">
+      <div className="skills-head">
+        <h1 className="automation-title">技能</h1>
+        <div className="skills-head-actions">
+          <button className="sb-icon-btn" title="新建技能" onClick={() => window.dispatchEvent(new CustomEvent("chatcoder:open-settings", { detail: { tab: "skills" } }))}><IconPlus size={15} /></button>
+          <button className="sb-icon-btn" title="导入技能"><IconDownload size={15} /></button>
+          <button className="sb-icon-btn" title="刷新" onClick={load}><IconRefresh size={14} /></button>
+        </div>
+      </div>
+      <p className="automation-sub">管理项目级与用户级技能。启用后可在聊天里通过 $skill-name 使用。</p>
+      <div className="skills-toolbar">
+        <div className="skills-search">
+          <IconSearch size={13} />
+          <input placeholder="搜索技能…" value={query} onChange={(e) => setQuery(e.target.value)} />
+        </div>
+        <select className="skills-filter" value={filter} onChange={(e) => setFilter(e.target.value)}>
+          <option value="all">全部</option>
+          {sources.map((s) => <option key={s} value={s}>{sourceLabel(s)}</option>)}
+        </select>
+      </div>
+      {grouped.map((g) => (
+        <div key={g.src} className="skills-group">
+          <div className="skills-group-head">
+            <span>{sourceLabel(g.src)} 技能 <span className="skills-count">{g.list.length} 项</span></span>
+            {g.src === "plugin" && <span className="skills-group-note">由插件注册，修改请到对应插件中进行。</span>}
+          </div>
+          <div className="skills-list">
+            {g.list.map((s) => (
+              <div key={s.id} className="skills-item">
+                <span className="skills-item-icon"><IconBox size={16} /></span>
+                <div className="skills-item-main">
+                  <div className="skills-item-name">{s.name}</div>
+                  <div className="skills-item-desc">{s.description || "无描述"}</div>
+                </div>
+                <span className="skills-item-source">{s.source || "user"}</span>
+                <span className="skills-item-tag">{sourceLabel(g.src)}</span>
+                <SwitchRow checked={s.is_active} onChange={(v) => { void api.updateSkill(s.id, { is_active: v }).then(load); }} />
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+      {filtered.length === 0 && <div className="navpage-empty">暂无技能</div>}
+    </div>
   );
 }
 

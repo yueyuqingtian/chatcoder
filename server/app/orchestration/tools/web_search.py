@@ -56,7 +56,7 @@ class WebSearchTool(Tool):
         }
 
         try:
-            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers={"Accept-Encoding": "gzip, deflate"}) as client:
                 resp = await client.get(url, headers=headers)
         except Exception as e:
             return ToolResult(ok=False, output="", error=f"Search failed: {e}")

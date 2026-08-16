@@ -53,6 +53,7 @@ class SessionUpdate(BaseModel):
     model_id: int | None = None
     pinned: bool | None = None
     status: str | None = None  # active / archived
+    permission_mode: str | None = None  # v2.2: default / accept_edits / plan
 
 
 class SessionOut(BaseModel):
@@ -62,10 +63,12 @@ class SessionOut(BaseModel):
     model_id: int | None = None
     status: str = "active"
     pinned: bool = False
+    permission_mode: str = "default"  # v2.2: default / accept_edits / plan
     fork_parent_id: int | None = None
     worktree_path: str | None = None
     has_running: bool = False
     has_interrupted_turn: bool = False
+    last_activity_at: str | None = None  # 最近一条消息时间（侧栏相对时间展示）
 
 
 # ── 轮次 ──
@@ -117,10 +120,16 @@ class MessageOut(BaseModel):
 
 # ── 任务与产物 ──
 class TaskOut(BaseModel):
+    model_config = {"from_attributes": True}
+
     id: int
     session_id: int
     turn_id: int | None = None
     parent_task_id: int | None = None
+    kind: str = "request"
+    depends_on: list[int] | None = None
+    estimate: int | None = None
+    is_hidden: bool = False
     title: str
     description: str | None = None
     acceptance_criteria: str | None = None
@@ -131,7 +140,19 @@ class TaskOut(BaseModel):
     note: str | None = None
 
 
+class TaskConfirmStep(BaseModel):
+    task_id: int | None = None
+    title: str
+
+
+class TaskConfirmBody(BaseModel):
+    accepted: bool
+    steps: list[TaskConfirmStep] | None = None
+
+
 class ArtifactOut(BaseModel):
+    model_config = {"from_attributes": True}
+
     id: int
     task_id: int | None = None
     type: str | None = None
@@ -314,6 +335,7 @@ class AuditLogOut(BaseModel):
 class ModelCreate(BaseModel):
     name: str
     provider: str | None = None
+    provider_id: int | None = None
     base_url: str | None = None
     intelligence_level: int = 2
     context_window: int | None = None
@@ -328,6 +350,7 @@ class ModelCreate(BaseModel):
 class ModelUpdate(BaseModel):
     name: str | None = None
     provider: str | None = None
+    provider_id: int | None = None
     base_url: str | None = None
     intelligence_level: int | None = None
     context_window: int | None = None
@@ -342,6 +365,8 @@ class ModelOut(BaseModel):
     id: int
     name: str
     provider: str | None = None
+    provider_id: int | None = None
+    provider_name: str | None = None
     base_url: str | None = None
     intelligence_level: int = 2
     context_window: int | None = None
@@ -351,3 +376,187 @@ class ModelOut(BaseModel):
     api_format: str = "openai"
     has_api_key: bool = False
     reasoning_efforts: list[str] = []
+
+
+# ── 供应商（v16）──
+class ProviderCreate(BaseModel):
+    name: str
+    base_url: str | None = None
+    api_key: str | None = None
+    api_format: str = "openai"
+    is_active: bool = True
+
+
+class ProviderUpdate(BaseModel):
+    name: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None  # 传空字符串 = 清除
+    api_format: str | None = None
+    is_active: bool | None = None
+
+
+class ProviderOut(BaseModel):
+    id: int
+    name: str
+    base_url: str | None = None
+    api_format: str = "openai"
+    is_active: bool = True
+    has_api_key: bool = False
+    model_count: int = 0
+    created_at: str | None = None
+
+
+class ScannedModel(BaseModel):
+    """供应商扫描到的模型条目。"""
+    id: str
+    context_window: int | None = None
+    owned_by: str | None = None
+
+
+class ProviderScanOut(BaseModel):
+    models: list[ScannedModel]
+
+
+class ProviderModelItem(BaseModel):
+    """批量保存时单个模型的配置。"""
+    name: str
+    is_active: bool = True
+    context_window: int | None = None
+    is_multimodal: bool = False
+    reasoning_efforts: list[str] | None = None
+
+
+class ProviderModelsBulkIn(BaseModel):
+    models: list[ProviderModelItem]
+
+
+# ─────────────────────────────────────────────────────────────
+# WS 事件协议镜像（v2.1，对齐 zcode 方案 3.2：packages/shared/src/events.ts 的 pydantic 侧）
+# 规则：新增事件必须同时在 packages/shared/src/events.ts 与本表登记；
+# broadcast 前用 payload 模型做宽松校验（失败仅告警不阻断广播，避免影响主流程）。
+# ─────────────────────────────────────────────────────────────
+
+class WsEventPayload(BaseModel):
+    """宽松基类：事件 payload 允许任意附加字段。"""
+
+    model_config = {"extra": "allow"}
+
+
+class EvTurnStarted(WsEventPayload):
+    turn_id: int | None = None
+
+
+class EvTurnCompleted(WsEventPayload):
+    turn_id: int | None = None
+    summary: str | None = None
+    artifact_ids: list[int] | None = None
+
+
+class EvTokenDelta(WsEventPayload):
+    agent_id: int | None = None
+    turn_id: int | None = None
+    delta: str = ""
+
+
+class EvToolCall(WsEventPayload):
+    turn_id: int | None = None
+    agent_id: int | None = None
+    tool: str = ""
+    args_preview: str | None = None
+    args_partial: str | None = None
+
+
+class EvToolResult(WsEventPayload):
+    turn_id: int | None = None
+    tool: str = ""
+    ok: bool = True
+    duration_ms: int | None = None
+    output_preview: str | None = None
+    change_stat: dict | None = None
+
+
+class EvTodoUpdated(WsEventPayload):
+    turn_id: int | None = None
+    todos: list | None = None
+    persisted: bool = False
+
+
+class EvTaskUpdated(WsEventPayload):
+    task_id: int | None = None
+    status: str | None = None
+    note: str | None = None
+
+
+class EvUsageUpdate(WsEventPayload):
+    agent_id: int | None = None
+    turn_id: int | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    context_window: int | None = None
+    breakdown: dict | None = None
+
+
+class EvCompactEvent(WsEventPayload):
+    agent_id: int | None = None
+    turn_id: int | None = None
+    used_tokens: int | None = None
+    context_window: int | None = None
+
+
+class EvApprovalRequest(WsEventPayload):
+    approval_id: str = ""
+    detail: dict | None = None
+
+
+class EvAgentEvent(WsEventPayload):
+    agent_id: int | None = None
+    kind: str | None = None
+    status: str | None = None
+    summary: str | None = None
+    artifact_ids: list[int] | None = None
+
+
+class EvError(WsEventPayload):
+    code: str | None = None
+    message: str | None = None
+
+
+# 事件名 → payload 模型（broadcast 校验用；未登记的兜底 WsEventPayload）
+WS_EVENT_PAYLOAD_MODELS: dict[str, type[WsEventPayload]] = {
+    "message.created": WsEventPayload,
+    "turn.started": EvTurnStarted,
+    "turn.updated": EvTurnStarted,
+    "turn.completed": EvTurnCompleted,
+    "turn.interrupted": EvTurnStarted,
+    "turn.rolled_back": WsEventPayload,
+    "agent.started": EvAgentEvent,
+    "agent.updated": EvAgentEvent,
+    "agent.completed": EvAgentEvent,
+    "thinking.delta": EvTokenDelta,
+    "thinking.done": WsEventPayload,
+    "token.delta": EvTokenDelta,
+    "token.done": WsEventPayload,
+    "tool.call": EvToolCall,
+    "tool.result": EvToolResult,
+    "todo.updated": EvTodoUpdated,
+    "task.proposed": WsEventPayload,
+    "task.planned": WsEventPayload,
+    "task.updated": EvTaskUpdated,
+    "usage.update": EvUsageUpdate,
+    "compact.started": EvCompactEvent,
+    "compact.completed": EvCompactEvent,
+    "approval.request": EvApprovalRequest,
+    "approval.response": WsEventPayload,
+    "api.retry": WsEventPayload,
+    "config.changed": WsEventPayload,
+    "scheduled.triggered": WsEventPayload,
+    "session.completed": WsEventPayload,
+    "error": EvError,
+    "ack": WsEventPayload,
+    "sync.response": WsEventPayload,
+    # 客户端事件转发（terminal/browser 面板协作预留通道）
+    "terminal.input": WsEventPayload,
+    "browser.command": WsEventPayload,
+    "cancel": WsEventPayload,
+}

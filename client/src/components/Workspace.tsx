@@ -7,26 +7,19 @@ import { ChatPanel } from "./ChatPanel";
 import { TodoFloat } from "./chat/TodoFloat";
 import { ScheduledPage, SkillsPage, McpPage } from "./NavPages";
 import { useChatStore } from "../store/chat";
-import { api, type ModelOut } from "../api/client";
-import { IconGitBranch, IconPaperclip, IconMic, IconCpu, IconArrowUp, IconImage, IconWrench, IconBrain, IconFolder } from "./icons";
+import { api, type AttachmentInfo, type ModelOut, resolveFileUrl } from "../api/client";
+import { IconPaperclip, IconArrowUp, IconBrain, IconFolder, IconX, IconPlus, IconChevronDown, IconShield } from "./icons";
+import { ModelPicker } from "./chat/ModelPicker";
 
 export function Workspace({ nav, onSessionStart }: {
   nav: NavKey | null;
   onSessionStart?: () => void;
 }) {
-  const sessions = useChatStore((s) => s.sessions);
   const currentSessionId = useChatStore((s) => s.currentSessionId);
-  const projects = useChatStore((s) => s.projects);
-  const currentProjectId = useChatStore((s) => s.currentProjectId);
 
   if (nav && nav !== "chat") {
     return (
       <main className="workspace">
-        <header className="ws-header title-drag-region">
-          <div className="ws-header-left title-no-drag">
-            <span className="ws-header-title">{NAV_TITLES[nav]}</span>
-          </div>
-        </header>
         <div key={nav} className="ws-body ws-navpage view-enter">
           {nav === "scheduled" && <ScheduledPage />}
           {nav === "skills" && <SkillsPage />}
@@ -38,12 +31,7 @@ export function Workspace({ nav, onSessionStart }: {
 
   if (!currentSessionId) {
     return (
-      <main className="workspace">
-        <header className="ws-header title-drag-region">
-          <div className="ws-header-left title-no-drag">
-            <span className="ws-header-title">新任务</span>
-          </div>
-        </header>
+      <main className="workspace workspace-empty">
         <div className="ws-body ws-empty">
           <EmptyState onStarted={() => onSessionStart?.()} />
         </div>
@@ -51,25 +39,8 @@ export function Workspace({ nav, onSessionStart }: {
     );
   }
 
-  const session = sessions.find((s) => s.id === currentSessionId);
-  const project = projects.find((p) => p.id === (session?.project_id ?? currentProjectId));
-
   return (
-    <main className="workspace">
-      <header className="ws-header title-drag-region">
-        <div className="ws-header-left title-no-drag">
-          <span className="ws-header-title">{session?.title || "新任务"}</span>
-          {session?.worktree_path && (
-            <span className="ws-header-meta" title={session.worktree_path}>
-              <IconGitBranch size={11} /> 工作树
-            </span>
-          )}
-        </div>
-        <div className="ws-header-meta title-no-drag">
-          {project && <span title={project.path}>{project.path}</span>}
-        </div>
-      </header>
-
+    <main className="workspace workspace-session">
       <div key={currentSessionId} className="ws-body view-enter">
         <ChatPanel />
         <TodoFloat />
@@ -78,18 +49,18 @@ export function Workspace({ nav, onSessionStart }: {
   );
 }
 
-const NAV_TITLES: Record<string, string> = {
-  scheduled: "定时任务",
-  skills: "技能",
-  mcp: "MCP",
-};
-
-interface AttachmentPayload {
-  filename: string;
-  data_url: string;
+/** 时段问候语（对齐 zcode 空态首页） */
+function greeting(): string {
+  const h = new Date().getHours();
+  if (h >= 23 || h < 5) return "夜深啦，别忘了照顾好自己哦";
+  if (h < 9) return "早上好";
+  if (h < 12) return "上午好";
+  if (h < 14) return "中午好";
+  if (h < 18) return "下午好";
+  return "晚上好";
 }
 
-/** 空态首页：Logo + 居中输入卡 + 环境/目录下拉 + 快捷胶囊 */
+/** 空态首页：问候语 + 居中输入卡（项目 chip 内嵌） + 权限/模型/思考工具行 */
 function EmptyState({ onStarted }: { onStarted: () => void }) {
   const projects = useChatStore((s) => s.projects);
   const currentProjectId = useChatStore((s) => s.currentProjectId);
@@ -105,7 +76,10 @@ function EmptyState({ onStarted }: { onStarted: () => void }) {
   const [showModels, setShowModels] = useState(false);
   const [showReasoning, setShowReasoning] = useState(false);
   const [reasoningEffort, setReasoningEffort] = useState<string | null>(null);
-  const [attachments, setAttachments] = useState<AttachmentPayload[]>([]);
+  const [attachments, setAttachments] = useState<AttachmentInfo[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [permMode, setPermMode] = useState<"default" | "accept_edits" | "plan">("accept_edits");
+  const [showPerm, setShowPerm] = useState(false);
   const taRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -124,29 +98,54 @@ function EmptyState({ onStarted }: { onStarted: () => void }) {
   const activeModel = models.find((m) => m.id === selectedModel);
   const supportsReasoning = !!activeModel?.reasoning_efforts && activeModel.reasoning_efforts.length > 0;
 
-  const addFiles = (files: FileList | File[]) => {
-    Array.from(files).forEach((f) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        setAttachments((prev) => [...prev, { filename: f.name, data_url: String(reader.result || "") }]);
-      };
-      reader.readAsDataURL(f);
-    });
+  // v14: 上传优先——文件先 POST /api/upload 落盘，附件统一为文件地址
+  const addFiles = async (files: FileList | File[]) => {
+    const arr = Array.from(files);
+    if (arr.length === 0) return;
+    setUploading(true);
+    const uploaded: AttachmentInfo[] = [];
+    const failed: string[] = [];
+    try {
+      for (const f of arr) {
+        try {
+          const up = await api.uploadFile(f);
+          uploaded.push({
+            file_id: up.file_id, filename: up.filename, path: up.path,
+            url: up.url, size: up.size, mime_type: up.mime_type, type: up.type,
+          });
+        } catch (e) {
+          console.warn("[workspace] 上传失败", f.name, e);
+          failed.push(`${f.name}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+      if (uploaded.length > 0) setAttachments((prev) => [...prev, ...uploaded]);
+      // v16: 上传失败必须给用户可见反馈，不能静默吞掉（"选了文件没反应"的根因之一）
+      if (failed.length > 0) {
+        useChatStore.setState({ error: `附件上传失败（${failed.length} 个）\n${failed.join("\n")}` });
+      }
+    } finally {
+      setUploading(false);
+    }
   };
 
   const handleSend = async () => {
     const text = input.trim();
-    if (!text || sending) return;
     const pid = selectedProject ?? currentProjectId;
-    if (!pid) return;
+    if ((!text && attachments.length === 0) || sending || !pid) return;
     setSending(true);
     try {
       await createSession(pid, "新任务");
       const sid = useChatStore.getState().currentSessionId;
-      if (selectedModel && sid) {
-        try { await api.updateSession(sid, { model_id: selectedModel }); } catch { /* ignore */ }
+      if (sid) {
+        try {
+          await api.updateSession(sid, { model_id: selectedModel ?? undefined, permission_mode: permMode });
+          // 同步 store，让聊天输入框的模型显示与空态选择一致（避免挂载竞态显示成列表第一个模型）
+          if (selectedModel != null) {
+            useChatStore.setState((st) => ({ sessions: st.sessions.map((x) => (x.id === sid ? { ...x, model_id: selectedModel } : x)) }));
+          }
+        } catch { /* ignore */ }
       }
-      const atts = attachments.length > 0 ? attachments.map((a) => ({ filename: a.filename, data_url: a.data_url })) : undefined;
+      const atts = attachments.length > 0 ? attachments.map((a) => ({ ...a })) : undefined;
       await sendTurn(text, atts, reasoningEffort ?? undefined);
       setAttachments([]);
       onStarted();
@@ -183,112 +182,14 @@ function EmptyState({ onStarted }: { onStarted: () => void }) {
 
   return (
     <div className="empty-state">
-      <div className="empty-state-logo">&lt;/&gt; ChatCoder</div>
+      <div className="empty-state-greeting">{greeting()}</div>
       <div className="empty-state-card">
-        {attachments.length > 0 && (
-          <div className="composer-attachments">
-            {attachments.map((a, i) => (
-              <div key={i} className="composer-attach-chip" title={a.filename}>
-                <IconPaperclip size={11} />
-                <span>{a.filename}</span>
-                <button className="remove" onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}>×</button>
-              </div>
-            ))}
-          </div>
-        )}
-        <textarea
-          ref={taRef}
-          className="empty-state-textarea"
-          placeholder="输入消息，开始对话…"
-          value={input}
-          rows={1}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              handleSend();
-            }
-          }}
-        />
-        <div className="empty-state-toolbar">
-          <div className="es-tools-left">
-            <button className="es-tool" title="添加附件" onClick={() => fileRef.current?.click()}>
-              <IconPaperclip size={15} />
-            </button>
-            <button className="es-tool" title="添加图片" onClick={() => fileRef.current?.click()}>
-              <IconImage size={15} />
-            </button>
-            <button className="es-tool" title="技能">
-              <IconWrench size={14} />
-            </button>
-            <input
-              ref={fileRef}
-              type="file"
-              multiple
-              style={{ display: "none" }}
-              onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = ""; }}
-            />
-          </div>
-          <div className="es-tools-right">
-            <div className="es-model-wrap">
-              <button className="es-tool es-tool-model" onClick={() => { setShowModels((v) => !v); setShowReasoning(false); }}>
-                <IconCpu size={13} />
-                {activeModel ? activeModel.name.split("/").pop() : "模型"}
-              </button>
-              {showModels && (
-                <div className="composer-menu es-model-menu">
-                  {models.map((m) => (
-                    <button
-                      key={m.id}
-                      className={m.id === selectedModel ? "active" : ""}
-                      onClick={() => { setSelectedModel(m.id); setShowModels(false); }}
-                    >
-                      <IconCpu size={13} />
-                      <span title={m.name}>{m.name.split("/").pop()}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-            {supportsReasoning && (
-              <div className="es-model-wrap">
-                <button className="es-tool es-tool-model" onClick={() => { setShowReasoning((v) => !v); setShowModels(false); }} title="思考深度">
-                  <IconBrain size={11} />
-                  {reasoningEffort || "默认"}
-                </button>
-                {showReasoning && (
-                  <div className="composer-menu es-model-menu" style={{ right: 0, left: "auto" }}>
-                    <div className="composer-menu-title">思考深度</div>
-                    {activeModel!.reasoning_efforts.map((effort) => (
-                      <button key={effort} className={effort === reasoningEffort ? "active" : ""} onClick={() => { setReasoningEffort(effort); setShowReasoning(false); }}>
-                        {effort}
-                      </button>
-                    ))}
-                    <button className={reasoningEffort === null ? "active" : ""} onClick={() => { setReasoningEffort(null); setShowReasoning(false); }}>
-                      默认
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-            <button className="es-tool" title="语音输入"><IconMic size={15} /></button>
-            <button
-              className="es-send"
-              disabled={!input.trim() || sending || !selectedProject}
-              onClick={handleSend}
-            >
-              <IconArrowUp size={16} />
-            </button>
-          </div>
-        </div>
-      </div>
-     <div className="es-selectors">
-       <span className="es-env">本地</span>
-        <div className="es-project-dropdown">
+        {/* 项目选择 chip（对齐 zcode：位于输入卡顶部） */}
+        <div className="es-card-project">
           <button className="es-project-trigger" onClick={() => setShowProjectMenu(!showProjectMenu)} title={activeProject?.path ?? "选择项目"}>
             <IconFolder size={13} />
-           <span className="es-project-name">{activeProject ? shortPathName(activeProject.path) : "选择项目…"}</span>
-            <span style={{ fontSize: 10, opacity: 0.6 }}>▾</span>
+            <span className="es-project-name">{activeProject ? shortPathName(activeProject.path) : "选择项目…"}</span>
+            <IconChevronDown size={11} />
           </button>
           {showProjectMenu && (
             <div className="context-menu es-project-menu" onClick={() => setShowProjectMenu(false)}>
@@ -303,6 +204,123 @@ function EmptyState({ onStarted }: { onStarted: () => void }) {
               ))}
             </div>
           )}
+        </div>
+        {attachments.length > 0 && (
+          <div className="composer-attachments">
+            {attachments.map((a, i) => (
+              <div key={a.file_id || i} className={`composer-attach-chip${a.type === "image" ? " image" : ""}`} title={a.filename}>
+                {a.type === "image" ? (
+                  <img
+                    src={resolveFileUrl(a.url)} alt={a.filename}
+                    className="attach-chip-thumb"
+                    onClick={() => window.open(resolveFileUrl(a.url), "_blank", "noopener")}
+                  />
+                ) : (
+                  <IconPaperclip size={11} />
+                )}
+                <span className="attach-chip-name" onClick={() => window.open(resolveFileUrl(a.url), "_blank", "noopener")}>{a.filename}</span>
+                <button className="remove" onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}><IconX size={10} /></button>
+              </div>
+            ))}
+            {uploading && <span className="composer-attach-uploading">上传中…</span>}
+          </div>
+        )}
+        <textarea
+          ref={taRef}
+          className="empty-state-textarea"
+          placeholder="向 ChatCoder 提问，使用 @ 添加上下文，使用 / 选择命令或能力"
+          value={input}
+          rows={1}
+          onPaste={(e) => {
+            // v16: 粘贴图片/文件 → 提取剪贴板 File 后走上传流程
+            const files: File[] = [];
+            for (const item of Array.from(e.clipboardData?.items || [])) {
+              if (item.kind === "file") {
+                const f = item.getAsFile();
+                if (f) {
+                  const ext = (f.type.split("/")[1] || "png").replace(/[^a-z0-9]/gi, "") || "png";
+                  const ts = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
+                  files.push(f.name && f.name.trim() && f.name !== "image.png" ? f : new File([f], `paste-${ts}.${ext}`, { type: f.type || "image/png" }));
+                }
+              }
+            }
+            if (files.length > 0) { e.preventDefault(); void addFiles(files); }
+          }}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              handleSend();
+            }
+          }}
+        />
+        <div className="empty-state-toolbar">
+          <div className="es-tools-left">
+            <button className="es-tool" title="添加附件" onClick={() => fileRef.current?.click()}>
+              <IconPlus size={16} />
+            </button>
+            <div className="es-model-wrap">
+              <button className="es-tool es-tool-perm" onClick={() => { setShowPerm((v) => !v); setShowModels(false); setShowReasoning(false); }} title="权限模式">
+                <IconShield size={13} />
+                {permMode === "accept_edits" ? "完全访问" : permMode === "plan" ? "计划模式" : "默认"}
+                <IconChevronDown size={11} />
+              </button>
+              {showPerm && (
+                <div className="composer-menu es-model-menu" style={{ left: 0 }}>
+                  <div className="composer-menu-title">权限模式</div>
+                  <button className={permMode === "default" ? "active" : ""} onClick={() => { setPermMode("default"); setShowPerm(false); }}>默认</button>
+                  <button className={permMode === "accept_edits" ? "active" : ""} onClick={() => { setPermMode("accept_edits"); setShowPerm(false); }}>完全访问</button>
+                  <button className={permMode === "plan" ? "active" : ""} onClick={() => { setPermMode("plan"); setShowPerm(false); }}>计划模式</button>
+                </div>
+              )}
+            </div>
+            <input
+              ref={fileRef}
+              type="file"
+              multiple
+              style={{ display: "none" }}
+              onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = ""; }}
+            />
+          </div>
+          <div className="es-tools-right">
+            <div className="es-model-wrap">
+              <ModelPicker
+                models={models}
+                value={selectedModel}
+                onChange={(id) => { setSelectedModel(id); setShowModels(false); }}
+                open={showModels}
+                onToggle={() => { setShowModels((v) => !v); setShowReasoning(false); }}
+              />
+            </div>
+            {supportsReasoning && (
+              <div className="es-model-wrap">
+                <button className="es-tool es-tool-model" onClick={() => { setShowReasoning((v) => !v); setShowModels(false); }} title="思考深度">
+                  <IconBrain size={11} />
+                  {reasoningEffort || "默认"}
+                </button>
+                {showReasoning && (
+                  <div className="composer-menu es-model-menu" style={{ right: 0, left: "auto" }}>
+                    <div className="composer-menu-title">思考深度</div>
+                    {activeModel!.reasoning_efforts.map((effort) => (
+                      <button key={effort} className={effort === reasoningEffort ? "active" : ""} onClick={() => { setReasoningEffort(effort); useChatStore.setState({ lastReasoningEffort: effort }); setShowReasoning(false); }}>
+                        {effort}
+                      </button>
+                    ))}
+                    <button className={reasoningEffort === null ? "active" : ""} onClick={() => { setReasoningEffort(null); useChatStore.setState({ lastReasoningEffort: null }); setShowReasoning(false); }}>
+                      默认
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+            <button
+              className="es-send"
+              disabled={!input.trim() || sending || !selectedProject}
+              onClick={handleSend}
+            >
+              <IconArrowUp size={16} />
+            </button>
+          </div>
         </div>
       </div>
     </div>

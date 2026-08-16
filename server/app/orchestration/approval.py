@@ -92,15 +92,26 @@ class ApprovalManager:
             async with self._lock:
                 self._pending.pop(approval_id, None)
 
-    def resolve(self, approval_id: str, approved: bool) -> bool:
-        """解析审批。返回是否成功匹配到 pending(供 ws 判 404)。"""
+    def resolve(self, approval_id: str, approved: bool, answer: dict | None = None) -> bool:
+        """解析审批。返回是否成功匹配到 pending(供 ws 判 404)。
+
+        v2.2: answer 为结构化回答（ask_user_question 工具），
+        回填到 pending 的 detail（与工具侧共享引用，工具从 detail["answer"] 读取）。
+        """
         pa = self._pending.get(approval_id)
         if pa is None:
             return False
+        if answer is not None:
+            pa.detail["answer"] = answer
         fut = pa.ensure_future()
         if not fut.done():
             fut.set_result(approved)
         return True
+
+    def get_detail(self, approval_id: str) -> dict | None:
+        """v2.2: 取 pending 审批的 detail（供"始终允许"生成规则）。"""
+        pa = self._pending.get(approval_id)
+        return dict(pa.detail) if pa else None
 
     @property
     def pending_count(self) -> int:

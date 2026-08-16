@@ -476,7 +476,13 @@ async def build_thread_context_with_window(
     )
 
     out: list[ChatMessage] = []
+    # v1.2: 暂存紧随 tool_call 之前的思考内容，回传为 assistant 的 reasoning_content
+    # （thinking 模式网关要求，缺失会 400）
+    _pending_thinking = ""
     for m in selected:
+        if m.msg_type == MsgType.THINKING:
+            _pending_thinking = m.content.get("text") or _pending_thinking
+            continue
         if m.msg_type == MsgType.TOOL_CALL:
             # 序列化为 assistant 的 tool_call（让 LLM 能看到之前调用了什么工具）
             tool = m.content.get("tool", "")
@@ -490,7 +496,9 @@ async def build_thread_context_with_window(
                     "name": tool,
                     "arguments": args,
                 }],
+                reasoning_content=_pending_thinking or None,
             ))
+            _pending_thinking = ""
         elif m.msg_type == MsgType.TOOL_RESULT:
             # 序列化为 tool 的返回结果（让 LLM 能看到之前的工具输出）
             tool = m.content.get("tool", "")

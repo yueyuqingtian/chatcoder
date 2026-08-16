@@ -1,8 +1,8 @@
 """会话 CRUD（v2：项目下多会话，支持 fork/重命名/置顶/归档）。"""
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.persistence.models.message import Session
+from app.persistence.models.message import Message, Session
 from app.persistence.models.turn import Turn
 
 
@@ -77,12 +77,40 @@ async def fork_session(db: AsyncSession, session_id: int, title: str | None = No
     return new_session
 
 
+async def create_system_message(db: AsyncSession, *, session_id: int, content: dict) -> None:
+    """v2.2 (对齐 zcode 3.11): 写一条系统消息（模型切换 divider 等）。"""
+    from app.core.enums import MsgType, SenderType
+
+    from app.persistence.models.message import Message
+    db.add(Message(
+        session_id=session_id, turn_id=None, thread_id=None,
+        sender_type=SenderType.SYSTEM.value, sender_id=None,
+        msg_type=MsgType.SYSTEM.value, content=content,
+    ))
+    await db.flush()
+
+
+async def last_activity_at(db: AsyncSession, session_id: int) -> str | None:
+    """最近一条未删除消息时间；无消息回退会话创建时间。"""
+    res = await db.execute(
+        select(func.max(Message.created_at)).where(
+            Message.session_id == session_id,
+            Message.deleted.is_(False),
+        )
+    )
+    ts = res.scalar_one_or_none()
+    if ts is None:
+        s = await db.get(Session, session_id)
+        ts = s.created_at if s else None
+    return ts
+
+
 async def has_running_turn(db: AsyncSession, session_id: int) -> bool:
     """会话是否存在运行中的 turn。"""
     res = await db.execute(
         select(Turn.id).where(
             Turn.session_id == session_id,
-            Turn.status.in_(["running", "interrupted"]),
+            Turn.status == "running",
         ).limit(1)
     )
     return res.scalars().first() is not None
