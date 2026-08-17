@@ -22,6 +22,7 @@ export function TaskSummaryPanel() {
   const tasks = useChatStore((state) => state.tasks);
   const messages = useChatStore((state) => state.messages);
   const pendingSplit = useChatStore((state) => state.pendingSplit);
+  const hasPendingPlan = useChatStore((state) => state.pendingPlan != null);
   const confirmTaskSplit = useChatStore((state) => state.confirmTaskSplit);
   const refreshTasks = useChatStore((state) => state.refreshTasks);
   const reviewedFiles = useChatStore((state) => state.reviewedFiles);
@@ -154,7 +155,7 @@ export function TaskSummaryPanel() {
         </section>
       ))}
 
-      {pendingSplit && (
+      {pendingSplit && !hasPendingPlan && (
         <div className="ts-proposal-actions">
           <button className="ts-proposal-primary" onClick={() => confirmTaskSplit(true)} type="button">接受拆分</button>
           <button onClick={() => confirmTaskSplit(false)} type="button">直接执行</button>

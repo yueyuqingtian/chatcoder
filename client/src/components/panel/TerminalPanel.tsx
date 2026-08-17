@@ -4,7 +4,7 @@
  * - 面板尺寸变化自动 fit + 同步后端 cols/rows（pty:resize）
  * - 多终端标签并存（RightPanel 保活渲染，每个 tab 独立 PTY 会话）
  */
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -29,6 +29,9 @@ export function TerminalPanel({ tab }: TerminalPanelProps) {
   const termRef = useRef<Terminal | null>(null);
   const ptyIdRef = useRef<number | null>(null);
   const api = typeof window !== "undefined" ? window.chatcoderAPI : undefined;
+  // v19: spawn 失败可见反馈（此前静默吞错导致白屏无提示）
+  const [spawnError, setSpawnError] = useState<string | null>(null);
+  const [retryTick, setRetryTick] = useState(0);
 
   const projects = useChatStore((s) => s.projects);
   const currentProjectId = useChatStore((s) => s.currentProjectId);
@@ -76,20 +79,28 @@ export function TerminalPanel({ tab }: TerminalPanelProps) {
     function spawnPty() {
       const cols = term.cols || 80;
       const rows = term.rows || 24;
+      // v19: spawn 失败不再静默——红色错误行 + 重试覆盖层
+      const handleRes = (res: { id: number; error?: string }) => {
+        if (disposed) return;
+        if (!res.id) {
+          const msg = res.error || "无法启动终端进程";
+          setSpawnError(msg);
+          term.write(`\r\n\x1b[31m[终端错误] ${msg}\x1b[0m\r\n`);
+          return;
+        }
+        setSpawnError(null);
+        ptyIdRef.current = res.id;
+      };
       // v2.2: 集成终端 Shell 选择读全局设置（auto 交给主进程按平台默认解析）
       backendApi.getGlobalSettings().then((g) => {
         if (disposed) return;
         const shell = g.terminal_shell && g.terminal_shell !== "auto" ? g.terminal_shell : undefined;
-        return api!.ptySpawn!({ cwd, cols, rows, shell }).then((res: { id: number; error?: string }) => {
-          if (disposed || !res.id) return;
-          ptyIdRef.current = res.id;
-        });
+        return api!.ptySpawn!({ cwd, cols, rows, shell }).then(handleRes);
       }).catch(() => {
         if (disposed) return;
-        api!.ptySpawn!({ cwd, cols, rows }).then((res: { id: number; error?: string }) => {
-          if (disposed || !res.id) return;
-          ptyIdRef.current = res.id;
-        }).catch(() => {});
+        api!.ptySpawn!({ cwd, cols, rows }).then(handleRes).catch((e) => {
+          if (!disposed) setSpawnError(String(e));
+        });
       });
       offData = api!.onPtyData?.((id, data) => {
         if (ptyIdRef.current !== id) return;
@@ -136,12 +147,24 @@ export function TerminalPanel({ tab }: TerminalPanelProps) {
       term.dispose();
       termRef.current = null;
     };
-    // tab.instance 变化（多开）时重建独立 PTY
-  }, [api, cwd, tab.instance]);
+    // tab.instance 变化（多开）时重建独立 PTY；retryTick 触发重试重建
+  }, [api, cwd, tab.instance, retryTick]);
 
   if (!api?.ptySpawn) {
     return <div className="rp-body"><div className="rp-empty">终端需要桌面版环境</div></div>;
   }
 
-  return <div ref={containerRef} className="terminal-xterm" />;
+  return (
+    <div className="terminal-wrap">
+      <div ref={containerRef} className="terminal-xterm" />
+      {spawnError && (
+        <div className="terminal-error-overlay">
+          <div className="terminal-error-msg">终端启动失败：{spawnError}</div>
+          <button className="btn btn-ghost btn-sm" onClick={() => { setSpawnError(null); setRetryTick((v) => v + 1); }}>
+            重试
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }

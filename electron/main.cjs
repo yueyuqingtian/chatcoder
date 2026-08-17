@@ -300,10 +300,12 @@ ipcMain.handle("dialog:selectDirectory", async () => {
   return result.filePaths[0];
 });
 
-// ── IPC:多选 md 文件（v1.1: 本地技能导入）──
-ipcMain.handle("dialog:selectFiles", async (_e, filters) => {
+// ── IPC:多选 md 文件（v1.1: 本地技能导入；v19: 支持目录+文件混合选择）──
+ipcMain.handle("dialog:selectFiles", async (_e, filters, opts) => {
+  const properties = ["openFile", "multiSelections"];
+  if (opts && opts.allowDirectories) properties.push("openDirectory");
   const result = await dialog.showOpenDialog({
-    properties: ["openFile", "multiSelections"],
+    properties,
     filters: filters && filters.length ? filters : [{ name: "Markdown", extensions: ["md"] }],
   });
   return result.canceled ? [] : result.filePaths;
@@ -311,6 +313,36 @@ ipcMain.handle("dialog:selectFiles", async (_e, filters) => {
 
 // ── IPC:后端端口透传（v2.1: 前端 BASE 去硬编码）──
 ipcMain.handle("backend:getPort", () => BACKEND_PORT);
+
+// ── IPC:v19 外挂插件扫描（~/.chatcoder/plugins/<dir>/plugin.json + entry 源码）──
+ipcMain.handle("plugins:list", () => {
+  const fs = require("fs");
+  const path = require("path");
+  const os = require("os");
+  const root = path.join(os.homedir(), ".chatcoder", "plugins");
+  const out = [];
+  try {
+    if (!fs.existsSync(root)) return out;
+    for (const dir of fs.readdirSync(root)) {
+      const manifestPath = path.join(root, dir, "plugin.json");
+      try {
+        if (!fs.existsSync(manifestPath)) continue;
+        const m = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
+        if (!m.id || !m.slot || !m.entry) continue;
+        const entryPath = path.join(root, dir, m.entry);
+        if (!fs.existsSync(entryPath)) continue;
+        out.push({
+          id: String(m.id), name: String(m.name || m.id), slot: String(m.slot),
+          description: String(m.description || ""),
+          code: fs.readFileSync(entryPath, "utf-8"),
+        });
+      } catch (e) {
+        log("[plugins] 读取插件失败 " + dir + ": " + (e && e.message));
+      }
+    }
+  } catch { /* ignore */ }
+  return out;
+});
 
 // ── IPC:系统集成 ──
 ipcMain.handle("shell:openPath", (_event, p) => {

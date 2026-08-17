@@ -19,6 +19,8 @@ export interface ToolLeaf {
   agentName: string;
   /** v2.2: 所属线程（子代理消息 thread_id=agent_id，任务卡步骤点击穿透定位用） */
   threadId: number | null;
+  /** v19: 所属 turn（写操作行展开拉取 diff 用） */
+  turnId: number | null;
   /** null = 结果尚未返回 */
   ok: boolean | null;
   output: string;
@@ -31,14 +33,19 @@ export interface ToolLeaf {
 export type ToolNode =
   | { kind: "group"; tool: string; count: number; leaves: ToolLeaf[] }
   | { kind: "leaf"; leaf: ToolLeaf }
-  /** 连续探索类工具（读/搜/列）≥2 次合并为一行「探索 · N 文件」 */
-  | { kind: "explore"; leaves: ToolLeaf[] };
+  /** v19: 两次思考间连续非写操作 ≥2 合并为一行（运行中动词滚动，完成后摘要可展开） */
+  | { kind: "action-cluster"; leaves: ToolLeaf[] }
+  /** v19: 紧邻同文件的连续写操作合并为一行（+N -M 累加） */
+  | { kind: "write-merged"; leaves: ToolLeaf[] };
 
-/** 探索类工具：连续出现时合并展示；写入/终端等操作永不合并 */
-const EXPLORE_TOOLS = new Set([
-  "fs_read", "fs_list", "fs_grep", "codebase_search",
-  "web_search", "web_fetch", "memory_search", "view_image", "read_attachment",
-]);
+/** v19: 写入类工具——独占一行（用户要求"一个写操作就是一行"），仅紧邻同文件可合并 */
+export const WRITE_TOOLS = new Set(["fs_write", "editor_apply_diff", "multi_file_edit"]);
+
+/** 搜索类工具（合并行摘要统计用） */
+export const SEARCH_TOOLS = new Set(["fs_grep", "codebase_search", "web_search", "memory_search"]);
+
+/** 终端/命令类工具（合并行摘要统计用） */
+export const RUN_TOOLS = new Set(["terminal_exec", "ci_run", "shell_exec"]);
 
 export type TurnItem =
   | { kind: "user"; msg: MessageOut }
@@ -71,6 +78,7 @@ function buildLeaf(call: MessageOut, result?: MessageOut): ToolLeaf {
     args: (cc.args && typeof cc.args === "object" ? cc.args : {}) as Record<string, unknown>,
     agentName: String(cc.agent_name ?? ""),
     threadId: call.thread_id != null ? Number(call.thread_id) : null,
+    turnId: call.turn_id != null ? Number(call.turn_id) : null,
     ok: result ? Boolean(rc.ok) : null,
     output: typeof rc.output === "string" ? rc.output : "",
     error: typeof rc.error === "string" ? rc.error : null,
@@ -81,34 +89,53 @@ function buildLeaf(call: MessageOut, result?: MessageOut): ToolLeaf {
   };
 }
 
+function leafPathOf(leaf: ToolLeaf): string {
+  const p = leaf.args?.path;
+  if (typeof p === "string" && p) return p.replace(/\\/g, "/");
+  const f = leaf.args?.file_path;
+  if (typeof f === "string" && f) return f.replace(/\\/g, "/");
+  return "";
+}
+
 /** 将某 turn 的工具调用/结果消息聚合成 ToolNode[]。
- *  v15: 连续探索类调用 ≥2 合并为 explore 节点（zcode「探索 · N 文件」）；
- *  写入/终端等操作类调用始终独占一行（完整展示命令/文件与 +N -M 统计）。 */
+ *  v19 聚类规则（用户要求）：
+ *  - 写操作独占一行；紧邻且同 path 的连续写合并为 write-merged（+N -M 累加）；
+ *  - 连续非写操作 ≥2 合并为 action-cluster（运行中动词滚动，完成后摘要可展开）；
+ *  - 单个非写操作退化为 leaf。 */
 function buildToolTree(calls: MessageOut[], resultsByKey: Map<string, MessageOut>): ToolNode[] {
   const nodes: ToolNode[] = [];
-  let i = 0;
   const leafOf = (c: MessageOut) =>
     buildLeaf(c, resultsByKey.get(String((c.content as Record<string, unknown>).call_key ?? c.id)));
+  let i = 0;
   while (i < calls.length) {
-    const firstLeaf = leafOf(calls[i]);
-    if (EXPLORE_TOOLS.has(firstLeaf.tool)) {
-      // 收集连续探索调用
+    const first = leafOf(calls[i]);
+    if (WRITE_TOOLS.has(first.tool)) {
+      // 紧邻同文件连续写合并
+      const path = leafPathOf(first);
+      let j = i + 1;
+      if (path) {
+        while (j < calls.length) {
+          const lj = leafOf(calls[j]);
+          if (!WRITE_TOOLS.has(lj.tool) || leafPathOf(lj) !== path) break;
+          j++;
+        }
+      }
+      const leaves = calls.slice(i, j).map(leafOf);
+      if (leaves.length >= 2) nodes.push({ kind: "write-merged", leaves });
+      else nodes.push({ kind: "leaf", leaf: leaves[0] });
+      i = j;
+    } else {
+      // 收集连续非写操作
       let j = i + 1;
       while (j < calls.length) {
         const lj = leafOf(calls[j]);
-        if (!EXPLORE_TOOLS.has(lj.tool)) break;
+        if (WRITE_TOOLS.has(lj.tool)) break;
         j++;
       }
       const leaves = calls.slice(i, j).map(leafOf);
-      if (leaves.length >= 2) {
-        nodes.push({ kind: "explore", leaves });
-      } else {
-        nodes.push({ kind: "leaf", leaf: leaves[0] });
-      }
+      if (leaves.length >= 2) nodes.push({ kind: "action-cluster", leaves });
+      else nodes.push({ kind: "leaf", leaf: leaves[0] });
       i = j;
-    } else {
-      nodes.push({ kind: "leaf", leaf: firstLeaf });
-      i++;
     }
   }
   return nodes;

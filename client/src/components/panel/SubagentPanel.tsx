@@ -1,90 +1,37 @@
-/** v2.2 (对齐 zcode 3.13): 子代理详情面板——按 thread_id 展示子代理完整消息流。 */
-import { useEffect, useState } from "react";
-import { api, type MessageOut } from "../../api/client";
+/** v20: 子代理详情面板——壳 + 头部，消息体交给共享 message-flow 插件（source="subagent"）。
+ * 数据组装（REST 历史 + 实时桶合并去重）/ 加载态 / 滚动 / 流式渲染全部下沉到消息流插件，
+ * 与主界面共用同一注册插件（参考 deepseek-harness「同一渲染引擎 + 数据注入」模式）。
+ * 头部显示状态文案（执行中/已完成/失败），对齐消息流子代理卡片图标体系。
+ */
 import { useChatStore } from "../../store/chat";
-import { MarkdownContent } from "../MarkdownContent";
+import { PluginSlot } from "../../plugins/registry";
+import { IconCpu, IconSpinner, IconCheck, IconX } from "../icons";
 
 export function SubagentPanel({ threadId, agentName }: { threadId?: number; agentName?: string }) {
-  const currentSessionId = useChatStore((s) => s.currentSessionId);
-  const [messages, setMessages] = useState<MessageOut[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!currentSessionId || threadId == null) return;
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    (async () => {
-      try {
-        const msgs = await api.listSessionMessages(currentSessionId, threadId);
-        if (!cancelled) setMessages(msgs);
-      } catch (e) {
-        if (!cancelled) setError(String(e));
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [currentSessionId, threadId]);
+  const meta = useChatStore((s) => (threadId != null ? s.subagentMeta[threadId] : undefined));
+  const liveCount = useChatStore((s) => (threadId != null ? s.subagentMessages[threadId]?.length ?? 0 : 0));
+  const running = meta?.status === "running" || meta?.status === "in_progress";
+  const failed = meta?.status === "failed" || meta?.status === "cancelled";
+  const done = meta?.status === "done";
 
   if (threadId == null) return <div className="subagent-panel-empty">未指定子代理</div>;
-  if (loading) return <div className="subagent-panel-empty">加载子代理消息流…</div>;
-  if (error) return <div className="subagent-panel-empty">加载失败：{error}</div>;
-  if (messages.length === 0) return <div className="subagent-panel-empty">该子代理暂无消息</div>;
 
   return (
     <div className="subagent-panel">
       <div className="subagent-panel-head">
-        <span className="subagent-panel-name">{agentName || `子代理 #${threadId}`}</span>
-        <span className="subagent-panel-count">{messages.length} 条消息</span>
+        <span className="tc-icon"><IconCpu size={13} /></span>
+        <span className="subagent-panel-name">{agentName || meta?.name || `子代理 #${threadId}`}</span>
+        {running && <span className="tc-status wait"><IconSpinner size={11} /></span>}
+        {done && <span className="tc-status ok"><IconCheck size={11} /></span>}
+        {failed && <span className="tc-status fail"><IconX size={11} /></span>}
+        <span className="subagent-panel-status">
+          {running ? "执行中…" : done ? "已完成" : failed ? "失败" : meta?.status ?? ""}
+        </span>
+        <span className="subagent-panel-count">{liveCount} 条消息</span>
       </div>
       <div className="subagent-panel-body">
-        {messages.map((m) => {
-          const c = m.content as Record<string, unknown>;
-          if (m.msg_type === "thinking") {
-            return (
-              <div key={m.id} className="sa-item sa-thinking">
-                <div className="sa-label">思考</div>
-                <pre className="sa-thinking-text">{String(c.text ?? "")}</pre>
-              </div>
-            );
-          }
-          if (m.msg_type === "tool_call") {
-            const args = typeof c.args === "object" ? JSON.stringify(c.args).slice(0, 200) : "";
-            return (
-              <div key={m.id} className="sa-item sa-toolcall">
-                <div className="sa-label">工具调用</div>
-                <div className="sa-tool-name">{String(c.tool ?? "")}</div>
-                {args && <pre className="sa-args">{args}</pre>}
-              </div>
-            );
-          }
-          if (m.msg_type === "tool_result") {
-            return (
-              <div key={m.id} className="sa-item sa-toolresult">
-                <div className="sa-label">结果 {c.ok === false ? "（失败）" : ""}</div>
-                <pre className="sa-output">{(typeof c.output === "string" ? c.output : c.error ? String(c.error) : "").slice(0, 2000)}</pre>
-              </div>
-            );
-          }
-          if (m.msg_type === "error") {
-            return (
-              <div key={m.id} className="sa-item sa-error">
-                <div className="sa-label">错误</div>
-                <div className="sa-error-text">{String(c.text ?? "")}</div>
-              </div>
-            );
-          }
-          const text = typeof c.text === "string" ? c.text : "";
-          if (!text) return null;
-          return (
-            <div key={m.id} className={`sa-item ${m.sender_type === "user" ? "sa-user" : "sa-agent"}`}>
-              <div className="sa-label">{m.sender_type === "user" ? "用户" : (c.agent_name ? String(c.agent_name) : "AI")}</div>
-              <div className="sa-text"><MarkdownContent>{text}</MarkdownContent></div>
-            </div>
-          );
-        })}
+        {/* v20: 消息体共享 message-flow 插件（source=subagent，操作仅复制） */}
+        <PluginSlot slot="message-flow" source="subagent" threadId={threadId} className="subagent-flow" />
       </div>
     </div>
   );

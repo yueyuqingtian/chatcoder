@@ -4,8 +4,8 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("chatcoderAPI", {
   // 选择工作目录(返回绝对路径或 null)
   selectDirectory: () => ipcRenderer.invoke("dialog:selectDirectory"),
-  // 多选 md 文件（v1.1: 本地技能导入）
-  selectFiles: (filters) => ipcRenderer.invoke("dialog:selectFiles", filters),
+  // 多选 md 文件（v1.1: 本地技能导入；v19: opts.allowDirectories 支持目录+文件混合选择）
+  selectFiles: (filters, opts) => ipcRenderer.invoke("dialog:selectFiles", filters, opts),
   // 后端端口（主进程探活后选定的实际端口，前端去硬编码）
   getBackendPort: () => ipcRenderer.invoke("backend:getPort"),
   // 系统集成
@@ -45,6 +45,8 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
   },
   // 保持唤醒开关（powerSaveBlocker）
   setKeepAwake: (on) => ipcRenderer.invoke("power:setKeepAwake", !!on),
+  // v19: 外挂插件列表（manifest + 源码文本）
+  listUserPlugins: () => ipcRenderer.invoke("plugins:list"),
 });
 
 // 注入平台到 <html data-platform>，供 CSS 平台感知样式（如 Win11 微圆角+四角透桌面）使用

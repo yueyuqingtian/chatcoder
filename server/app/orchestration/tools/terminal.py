@@ -2,6 +2,8 @@
 
 v2.5: 修复多 git 仓库 cwd 探测冲突 + cd && 链重复执行问题。
 v1.0: 超时后 kill 子进程 + cwd 路径穿越防护。
+v1.2: 按 terminal_shell 设置解析执行 shell（PowerShell/Git Bash/cmd），
+     与交互终端保持一致；输出解码兼容 GBK（中文 Windows 下 cmd/PowerShell 输出 GBK）。
 """
 import asyncio
 import logging
@@ -11,6 +13,7 @@ from typing import Any
 
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 from app.orchestration.tools.git_root import resolve_repo_for_cwd, list_git_repos
+from app.orchestration.tools.shell_env import resolve_shell, shell_kind
 
 logger = logging.getLogger(__name__)
 
@@ -18,11 +21,27 @@ _TIMEOUT_SEC = 30
 _MAX_OUTPUT = 8000
 
 
+def _decode_output(data: bytes) -> str:
+    """优先 UTF-8，失败回退 GBK：cmd/PowerShell 在中文 Windows 上输出 GBK，
+    直接按 UTF-8 解码会得到乱码（如 "'Get-ChildItem' 不是内部或外部命令" 变问号）。"""
+    if not data:
+        return ""
+    for enc in ("utf-8", "gbk"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
 class TerminalExecTool(Tool):
     name = "terminal_exec"
     risk_level = "high"
     description = (
-        "在工作区目录内执行 shell 命令(超时 30s)。需用户审批。不做命令白名单。\n"
+        "在工作区目录内执行 shell 命令(超时 30s)。\n"
+        "当前 shell 见系统提示的「Shell 环境」——Windows 上通常是 PowerShell 或 cmd.exe，不是 bash，\n"
+        "请按该 shell 的语法写命令（如 Get-ChildItem 仅 PowerShell 可用，grep/find 通常不存在）。\n"
+        "只读安全命令(如 git status/findstr/dir)免审批直接执行；危险命令被安全策略直接拒绝。\n"
         "重要: 每次调用是全新的 shell 进程,cd 不会跨调用持久化。\n"
         "如需在特定子目录执行,请用 cwd 参数指定,而不是 cd 命令。\n"
         '例: {"command": "git diff", "cwd": "clinic"}'
@@ -116,14 +135,32 @@ class TerminalExecTool(Tool):
                     data={"hint": "specify_cwd", "repos": repo_names},
                 )
 
-        # 5. 执行
+        # 5. 执行（按当前 shell 解析：PowerShell/Git Bash 显式传 -Command/-lc 参数，
+        #    cmd 及其他走 create_subprocess_shell 默认解析）
+        shell = resolve_shell()
+        kind = shell_kind()
         try:
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=resolved_cwd,
-            )
+            if kind in ("pwsh", "powershell"):
+                proc = await asyncio.create_subprocess_exec(
+                    shell, "-NoProfile", "-NonInteractive", "-Command", command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=resolved_cwd,
+                )
+            elif kind == "git-bash":
+                proc = await asyncio.create_subprocess_exec(
+                    shell, "-lc", command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=resolved_cwd,
+                )
+            else:
+                proc = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=resolved_cwd,
+                )
             communicate_task = asyncio.create_task(proc.communicate())
             deadline = asyncio.get_running_loop().time() + _TIMEOUT_SEC
             while not communicate_task.done():
@@ -148,8 +185,8 @@ class TerminalExecTool(Tool):
         except OSError as e:
             return ToolResult(ok=False, output="", error=f"执行失败: {e}")
 
-        out = (stdout or b"").decode("utf-8", errors="replace")
-        err = (stderr or b"").decode("utf-8", errors="replace")
+        out = _decode_output(stdout or b"")
+        err = _decode_output(stderr or b"")
         combined = out
         if err:
             combined += ("\n-- stderr --\n" + err) if combined else err

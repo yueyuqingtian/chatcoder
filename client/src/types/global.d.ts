@@ -4,7 +4,7 @@ declare global {
   interface Window {
     chatcoderAPI?: {
       selectDirectory: () => Promise<string | null>;
-      selectFiles?: (filters?: Array<{ name: string; extensions: string[] }>) => Promise<string[]>;
+      selectFiles?: (filters?: Array<{ name: string; extensions: string[] }>, opts?: { allowDirectories?: boolean }) => Promise<string[]>;
       getBackendPort?: () => Promise<number>;
       openPath?: (path: string) => Promise<string>;
       showItemInFolder?: (path: string) => Promise<void>;

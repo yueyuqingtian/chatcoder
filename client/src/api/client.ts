@@ -307,6 +307,9 @@ export const api = {
   // ── 会话数据查询 ──
   listSessionMessages: (sessionId: number, threadId?: number) =>
     get<MessageOut[]>(`/turns/sessions/${sessionId}/messages${threadId != null ? `?thread_id=${threadId}` : ""}`),
+  // v19: 会话子代理列表（消息流卡片重建）
+  listSessionSubagents: (sessionId: number) =>
+    get<Array<{ agent_id: number; name: string; turn_id: number | null; task_id: number | null; task_title: string | null; status: string }>>(`/turns/sessions/${sessionId}/subagents`),
   listSessionTasks: (sessionId: number) => get<TaskOut[]>(`/turns/sessions/${sessionId}/tasks`),
   confirmTaskPlan: (turnId: number, groupId: number, data: { accepted: boolean; steps?: Array<{ task_id?: number; title: string }> }) =>
     post<{ ok: boolean }>(`/turns/${turnId}/tasks/${groupId}/confirm`, data),

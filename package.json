@@ -11,11 +11,13 @@
     "build:backend": "cd server && .venv\\Scripts\\pyinstaller.exe chatcoder-server.spec --noconfirm",
     "build:all": "npm run build:frontend && npm run build:backend && npm run dist",
     "dist": "electron-builder --win",
-    "dist:dir": "electron-builder --win --dir"
+    "dist:dir": "electron-builder --win --dir",
+    "postinstall": "electron-rebuild -f -w node-pty || echo electron-rebuild skipped"
   },
   "devDependencies": {
     "electron": "^31.0.0",
-    "electron-builder": "^24.13.3"
+    "electron-builder": "^24.13.3",
+    "electron-rebuild": "^3.2.9"
   },
   "optionalDependencies": {
     "node-pty": "^1.0.0"
@@ -25,14 +27,16 @@
     "productName": "chatcoder",
     "copyright": "Copyright © 2026 chatcoder",
     "directories": {
-      "output": "release",
+      "output": "v5",
       "buildResources": "electron/build"
     },
     "files": [
       "electron/main.cjs",
       "electron/preload.cjs",
       "electron/pty.cjs",
-      "electron/loading.html"
+      "electron/loading.html",
+      "package.json",
+      "node_modules/node-pty/**"
     ],
     "asarUnpack": [
       "node_modules/node-pty/**"
@@ -52,7 +56,7 @@
       }
     ],
     "win": {
-      "icon": "electron/build/icon.ico",
+      "icon": "electron/build/icon.png",
       "target": [
         {
           "target": "nsis",

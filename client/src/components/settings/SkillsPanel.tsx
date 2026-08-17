@@ -1,6 +1,6 @@
 /** 设置中心：技能管理（v2.2 对齐 zcode 3.18）。
  * 本地技能启停 + 云端 Git 技能仓库（添加/同步/导入）+ 本地目录/md 文件导入（v1.1）。 */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, type SkillOut } from "../../api/client";
 import { IconRefresh, IconPlus, IconX, IconFolder } from "../icons";
 import { Sw } from "./shared";
@@ -14,24 +14,13 @@ export function SkillsPanel() {
   const [syncingRepo, setSyncingRepo] = useState<string | null>(null);
   const [repoSkills, setRepoSkills] = useState<{ repoId: string; name: string; skills: Array<{ name: string; display_name: string; description: string; path: string }> } | null>(null);
   // v1.1: 本地导入
-  const [showImportMenu, setShowImportMenu] = useState(false);
   const [importing, setImporting] = useState(false);
-  const importMenuRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
     try { setItems(await api.listSkills()); } catch {}
     try { setRepos(await api.listSkillRepos()); } catch {}
   }, []);
   useEffect(() => { load(); }, [load]);
-
-  useEffect(() => {
-    if (!showImportMenu) return;
-    const handler = (e: MouseEvent) => {
-      if (importMenuRef.current && !importMenuRef.current.contains(e.target as Node)) setShowImportMenu(false);
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [showImportMenu]);
 
   const doImport = useCallback(async (paths: string[]) => {
     if (paths.length === 0) return;
@@ -49,29 +38,21 @@ export function SkillsPanel() {
     finally { setImporting(false); }
   }, [load]);
 
+  // v19: 点击「导入本地技能」直接弹出系统选择器（目录或 .md 文件混合选择），不再出现下拉小菜单
   const handleImportLocal = async () => {
-    setShowImportMenu(false);
     const api_ = window.chatcoderAPI;
+    if (api_?.selectFiles) {
+      const paths = await api_.selectFiles([{ name: "Markdown", extensions: ["md"] }], { allowDirectories: true });
+      if (paths && paths.length > 0) doImport(paths);
+      return;
+    }
     if (api_?.selectDirectory) {
       const dir = await api_.selectDirectory();
       if (dir) doImport([dir]);
       return;
     }
     // web 降级：输入绝对路径
-    const p = prompt("请输入技能目录或 .md 文件的绝对路径：");
-    if (p && p.trim()) doImport([p.trim()]);
-  };
-
-  const handleImportLocalFiles = async () => {
-    setShowImportMenu(false);
-    const api_ = window.chatcoderAPI;
-    if (api_?.selectFiles) {
-      const files = await api_.selectFiles([{ name: "Markdown", extensions: ["md"] }]);
-      if (files && files.length > 0) doImport(files);
-      return;
-    }
-    // web 降级：浏览器拿不到本地绝对路径，改为输入路径
-    const p = prompt("请输入 .md 文件的绝对路径（多个用逗号分隔）：");
+    const p = prompt("请输入技能目录或 .md 文件的绝对路径（多个用逗号分隔）：");
     if (p && p.trim()) doImport(p.split(/[,，]/).map((x) => x.trim()).filter(Boolean));
   };
 
@@ -105,17 +86,9 @@ export function SkillsPanel() {
     <div>
       <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginBottom: 12 }}>
         <button className="btn btn-ghost btn-sm" onClick={load}><IconRefresh size={13} /> 刷新扫描</button>
-        <div style={{ position: "relative" }} ref={importMenuRef}>
-          <button className="btn btn-ghost btn-sm" onClick={() => setShowImportMenu((v) => !v)} disabled={importing}>
-            <IconFolder size={13} /> {importing ? "导入中…" : "导入本地技能"}
-          </button>
-          {showImportMenu && (
-            <div className="composer-menu" style={{ position: "absolute", right: 0, top: "100%", marginTop: 4, zIndex: 50, minWidth: 160 }}>
-              <button onClick={handleImportLocal} style={{ display: "block", width: "100%", padding: "6px 10px", border: "none", background: "transparent", color: "var(--text-1)", textAlign: "left", cursor: "pointer", fontSize: 12 }}>选择目录…</button>
-              <button onClick={handleImportLocalFiles} style={{ display: "block", width: "100%", padding: "6px 10px", border: "none", background: "transparent", color: "var(--text-1)", textAlign: "left", cursor: "pointer", fontSize: 12 }}>选择 .md 文件…</button>
-            </div>
-          )}
-        </div>
+        <button className="btn btn-ghost btn-sm" onClick={() => void handleImportLocal()} disabled={importing}>
+          <IconFolder size={13} /> {importing ? "导入中…" : "导入本地技能"}
+        </button>
         <button className="btn btn-primary btn-sm" onClick={() => setShowAddRepo(!showAddRepo)}><IconPlus size={13} /> 添加技能仓库</button>
       </div>
 

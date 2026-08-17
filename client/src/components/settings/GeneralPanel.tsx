@@ -18,7 +18,8 @@ export function GeneralPanel() {
   const ui = useUiStore();
   const [cfg, setCfg] = useState({
     terminal_shell: "auto", terminal_font: "", http_proxy: "",
-    enhanced_search: true, show_todos: true, show_reasoning: true,
+    enhanced_search: true, show_reasoning: true,
+    auto_approve_tools: false, force_approval_tools: "",
   });
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -31,8 +32,9 @@ export function GeneralPanel() {
         terminal_font: g.terminal_font || "",
         http_proxy: g.http_proxy || "",
         enhanced_search: g.enhanced_search,
-        show_todos: g.show_todos,
         show_reasoning: g.show_reasoning,
+        auto_approve_tools: g.auto_approve_tools,
+        force_approval_tools: g.force_approval_tools || "",
       });
     } catch {}
   }, []);
@@ -48,8 +50,9 @@ export function GeneralPanel() {
         terminal_font: cfg.terminal_font,
         http_proxy: cfg.http_proxy,
         enhanced_search: cfg.enhanced_search,
-        show_todos: cfg.show_todos,
         show_reasoning: cfg.show_reasoning,
+        auto_approve_tools: cfg.auto_approve_tools,
+        force_approval_tools: cfg.force_approval_tools,
       });
       // v1.1: 保存即生效——刷新 todos/reasoning 显示开关
       await useUiStore.getState().refreshGlobalFlags();
@@ -85,11 +88,24 @@ export function GeneralPanel() {
         <Row title="增强搜索（ripgrep）" desc="使用 ripgrep 进行更快的全库文本搜索">
           <Sw checked={cfg.enhanced_search} onChange={(v) => patch({ enhanced_search: v })} />
         </Row>
-        <Row title="消息流显示 todos" desc="在消息流中渲染任务清单卡片（TodoBlock）">
-          <Sw checked={cfg.show_todos} onChange={(v) => patch({ show_todos: v })} />
-        </Row>
         <Row title="消息流显示 reasoning" desc="在消息流中渲染思考过程块（ThinkingBlock）">
           <Sw checked={cfg.show_reasoning} onChange={(v) => patch({ show_reasoning: v })} />
+        </Row>
+        <Row title="自动批准工具调用" desc="开启后自动允许工具请求；关闭时工作区外访问会弹出手动审批">
+          <Sw checked={cfg.auto_approve_tools} onChange={(v) => patch({ auto_approve_tools: v })} />
+        </Row>
+        <Row title="始终需要审批的工具" desc="用逗号分隔工具名，例如 read_file, write_file">
+          <input className="ui-input" placeholder="留空表示不额外强制审批" value={cfg.force_approval_tools} onChange={(e) => patch({ force_approval_tools: e.target.value })} />
+        </Row>
+        <Row title="消息流密度" desc="思考/工具调用/文本等消息块之间的行间距（立即生效）">
+          <select
+            className="ui-select"
+            value={ui.msgDensity}
+            onChange={(e) => ui.setPrefs({ msgDensity: e.target.value as "comfortable" | "compact" })}
+          >
+            <option value="comfortable">舒适</option>
+            <option value="compact">紧凑</option>
+          </select>
         </Row>
       </div>
 

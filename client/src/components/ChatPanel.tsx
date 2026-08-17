@@ -3,10 +3,8 @@
  */
 import { useState } from "react";
 import { IconX } from "./icons";
-import { MessageFlow } from "./chat/MessageFlow";
-import { ComposerBox } from "./chat/ComposerBox";
-import { TodoBlock } from "./chat/TodoBlock";
 import { useChatStore } from "../store/chat";
+import { PluginSlot } from "../plugins/registry";
 
 export function ChatPanel() {
   const error = useChatStore((s) => s.error);
@@ -28,11 +26,11 @@ export function ChatPanel() {
         </div>
       )}
       <div className="chat-panel-flow">
-        <MessageFlow />
+        {/* v19: 插件 slot 渲染（可被用户外挂组件替换） */}
+        <PluginSlot slot="message-flow" />
       </div>
-      <TodoBlock />
       <div className="chat-panel-composer">
-        <ComposerBox />
+        <PluginSlot slot="composer" />
       </div>
     </div>
   );

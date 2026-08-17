@@ -23,6 +23,8 @@ class SubagentHandle:
     summary: str = ""
     error: str = ""
     artifact_ids: list[int] = field(default_factory=list)
+    # v20: 探索子代理的"结论"文本（只读探索任务的最终输出，主代理据此整合，不落线程消息）
+    findings: str = ""
 
 
 class SubagentManager:
@@ -56,6 +58,8 @@ class SubagentManager:
                 handle.summary = out.text or ""
                 handle.error = out.error or ""
                 handle.artifact_ids = list(out.artifact_ids or [])
+                # v20: 探索子代理最终输出即结论文本（供主代理 wait 后直接整合）
+                handle.findings = out.text or ""
                 await _sync_task_status(
                     db, self.session_id, task.id,
                     "done" if handle.status == "done" else "failed",
@@ -70,6 +74,26 @@ class SubagentManager:
 
         handle.task = asyncio.create_task(_run())
         return agent.id
+
+    async def spawn_and_wait(self, db, *, agent, turn_id: int, task, handoff_summary: str,
+                             context_bundle, tool_schemas: list[dict], workspace: str,
+                             cancel_event: asyncio.Event | None = None,
+                             token_budget: int | None = None) -> SubagentHandle:
+        """同步启动并等待子代理完成，返回已填充结果的 handle。
+
+        v20: 探索子代理（只读调研）用——主代理调用 spawn_subagent(explore=true) 后
+        直接拿到结论文本（handle.findings），不必再轮询 collect_results。
+        """
+        handle_id = self.spawn(
+            db, agent=agent, turn_id=turn_id, task=task,
+            handoff_summary=handoff_summary, context_bundle=context_bundle,
+            tool_schemas=tool_schemas, workspace=workspace,
+            cancel_event=cancel_event, token_budget=token_budget,
+        )
+        handle = self._handles.get(handle_id)
+        if handle is not None and handle.task is not None:
+            await handle.task
+        return handle
 
     def get(self, agent_id: int) -> SubagentHandle | None:
         return self._handles.get(agent_id)

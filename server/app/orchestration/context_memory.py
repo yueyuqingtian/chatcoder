@@ -230,11 +230,20 @@ async def _compress_super_summary(summaries: list[dict]) -> list[dict]:
 
 
 async def _resolve_leader_context_window(db: AsyncSession, session: "Session") -> int:
-    """解析 Leader Agent 的模型上下文窗口大小。
+    """解析主代理（会话绑定模型）的上下文窗口大小。
 
-    v3：团队概念已移除，不再有 Leader 角色。
-    回退到默认上下文窗口（_DEFAULT_CTX_WINDOW_FALLBACK）。
+    v19: 优先取会话绑定模型的 context_window（>0 时采用），保证压缩阈值与
+    占用分母按真实窗口计算；未配置时回退默认上下文窗口。
     """
+    try:
+        model_id = getattr(session, "model_id", None)
+        if model_id:
+            from app.persistence.models.model_reg import Model
+            model = await db.get(Model, model_id)
+            if model and model.context_window and model.context_window > 0:
+                return int(model.context_window)
+    except Exception:
+        logger.debug("[context] 解析会话模型窗口失败，回退默认", exc_info=True)
     return _DEFAULT_CTX_WINDOW_FALLBACK
 
 

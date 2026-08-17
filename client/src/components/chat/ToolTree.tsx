@@ -1,6 +1,8 @@
-/** ToolTree（v13 对齐 ZCode）：工具调用逐行平铺。
- * 行结构：动词（已编辑/已运行/已搜索…）+ 文件徽标 + 文件名(粗体) + 目录(灰) + +x -y
- * 点击行展开 output；grep 命中行可点击跳转右侧面板。
+/** ToolTree（v19）：工具调用展示。
+ * - 非写操作：两次思考间连续 ≥2 合并为 action-cluster 行（运行中动词滚动切换，完成后摘要可展开）；
+ * - 写操作：一行一次；紧邻同文件连续写合并为 write-merged（+N -M 累加，数字滚动动效）；
+ * - 写行展开 = 真实变更（拉取 /turns/{id}/changes/diff 内联行级 diff）；点击文件名走右面板 DiffEditor；
+ * - hover 不变色，仅显示展开箭头。
  */
 
 /** v2.2 (对齐 zcode 3.14.2): 解析 grep 输出中的 `path:line:` 行 → [{path, line, rest}] */
@@ -13,8 +15,10 @@ function parseGrepLines(output: string): Array<{ path: string; line: number; res
   }
   return out;
 }
-import { memo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import type { ToolLeaf, ToolNode } from "./timeline";
+import { WRITE_TOOLS, SEARCH_TOOLS, RUN_TOOLS } from "./timeline";
+import { api } from "../../api/client";
 import { usePanelStore } from "../../store/panel";
 import { FileBadge, splitFilePath } from "./FileBadge";
 import {
@@ -70,7 +74,7 @@ function toolIcon(tool: string): React.ReactNode {
 }
 
 function toolVerb(tool: string): string {
-  return TOOL_VERBS[tool] ?? "已调用";
+  return TOOL_VERBS[tool] ?? `已调用 ${tool}`;
 }
 
 function leafPath(leaf: ToolLeaf): string | null {
@@ -90,17 +94,87 @@ function leafSummary(leaf: ToolLeaf): string {
   return "";
 }
 
-/** 写入类工具：永不合并，行内展示文件与 +N -M，点击文件名打开右侧变更预览 */
-const WRITE_TOOLS = new Set(["fs_write", "editor_apply_diff", "multi_file_edit"]);
+/** v19: +N -M 数字滚动动效组件（值变化时旧数字上移出新数字） */
+const ChangeStat = memo(function ChangeStat({ additions, deletions }: { additions: number; deletions: number }) {
+  return (
+    <span className="tc-change-stat">
+      <span className="tc-stat-roll" key={`a${additions}`}>
+        <span className="tc-add">+{additions}</span>
+      </span>
+      <span className="tc-stat-roll" key={`d${deletions}`}>
+        <span className="tc-del">-{deletions}</span>
+      </span>
+    </span>
+  );
+});
+
+/** v19: 简易行级 diff（before/after 文本 → add/del/ctx 行），超长降级为全量 -/+ */
+function simpleLineDiff(before: string, after: string): Array<{ type: "add" | "del" | "ctx"; text: string }> {
+  const a = before ? before.split("\n") : [];
+  const b = after ? after.split("\n") : [];
+  if (a.length + b.length > 1600) {
+    return [
+      ...a.map((t) => ({ type: "del" as const, text: t })),
+      ...b.map((t) => ({ type: "add" as const, text: t })),
+    ];
+  }
+  // LCS 行 diff（带长度上限的 DP）
+  const n = a.length, m = b.length;
+  const dp: Uint16Array[] = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const out: Array<{ type: "add" | "del" | "ctx"; text: string }> = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { out.push({ type: "ctx", text: a[i] }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ type: "del", text: a[i] }); i++; }
+    else { out.push({ type: "add", text: b[j] }); j++; }
+  }
+  while (i < n) { out.push({ type: "del", text: a[i++] }); }
+  while (j < m) { out.push({ type: "add", text: b[j++] }); }
+  return out;
+}
+
+/** v19: 内联 diff 块（写操作行展开内容） */
+function InlineDiff({ turnId, path }: { turnId: number | null; path: string }) {
+  const [state, setState] = useState<{ kind: "loading" } | { kind: "error"; msg: string } | { kind: "ok"; lines: Array<{ type: "add" | "del" | "ctx"; text: string }>; truncated: boolean }>({ kind: "loading" });
+  useEffect(() => {
+    let cancelled = false;
+    if (turnId == null) { setState({ kind: "error", msg: "无 turn 信息，无法拉取变更" }); return; }
+    api.getFileDiff(turnId, path)
+      .then((d) => {
+        if (cancelled) return;
+        setState({ kind: "ok", lines: simpleLineDiff(d.before ?? "", d.after ?? ""), truncated: d.truncated });
+      })
+      .catch((e) => { if (!cancelled) setState({ kind: "error", msg: String(e) }); });
+    return () => { cancelled = true; };
+  }, [turnId, path]);
+  if (state.kind === "loading") return <pre className="tc-plain">加载变更…</pre>;
+  if (state.kind === "error") return <pre className="tc-plain">变更加载失败：{state.msg}</pre>;
+  return (
+    <pre className="tc-diff">
+      {state.lines.map((l, i) => (
+        <div key={i} className={`tc-diff-line ${l.type}`}>{l.type === "add" ? "+ " : l.type === "del" ? "- " : "  "}{l.text}</div>
+      ))}
+      {state.truncated && <div className="tc-diff-trunc">变更过大，已截断显示</div>}
+    </pre>
+  );
+}
 
 const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
   const setPreviewPath = usePanelStore((s) => s.setPreviewPath);
+  const setDiffPreview = usePanelStore((s) => s.setDiffPreview);
   const openPanel = usePanelStore((s) => s.openPanel);
   const openTab = usePanelStore((s) => s.openTab);
   const [expanded, setExpanded] = useState(false);
   const path = leafPath(leaf);
   const ok = leaf.ok;
+  const isWrite = WRITE_TOOLS.has(leaf.tool);
   const hasOutput = (leaf.output && leaf.output.length > 0) || !!leaf.error;
+  const expandable = hasOutput || isWrite;
   const grepHits = leaf.tool === "fs_grep" && leaf.output ? parseGrepLines(leaf.output) : [];
   const summary = path ? "" : leafSummary(leaf);
 
@@ -111,95 +185,160 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
     openTab("files");
   };
 
-  // 点击文件名/徽标：右侧面板查看文件（写入工具 = 查看变更）
-  const openFilePreview = (e: React.MouseEvent, p: string) => {
+  // 点击文件名/徽标：写入工具 = 右面板 Monaco DiffEditor 查看变更；其余查看文件
+  const openFilePreview = async (e: React.MouseEvent, p: string) => {
     e.stopPropagation();
     setPreviewPath(p);
     openPanel();
     openTab("files");
+    if (isWrite && leaf.turnId != null) {
+      try {
+        const d = await api.getFileDiff(leaf.turnId, p);
+        setDiffPreview({ path: d.path, before: d.before, after: d.after, truncated: d.truncated });
+      } catch { /* 回退普通预览 */ }
+    }
   };
 
-  const isWrite = WRITE_TOOLS.has(leaf.tool);
   const { dir, name } = path ? splitFilePath(path) : { dir: "", name: "" };
 
   return (
     <div className="tc-node">
-      <div className={"tc-row" + (hasOutput ? " has-output" : "") + (expanded ? " expanded" : "") + (isWrite ? " tc-write" : "")} onClick={() => hasOutput && setExpanded(!expanded)}>
+      <div className={"tc-row" + (expandable ? " has-output" : "") + (expanded ? " expanded" : "") + (isWrite ? " tc-write" : "")} onClick={() => expandable && setExpanded(!expanded)}>
         <span className="tc-icon">{toolIcon(leaf.tool)}</span>
         <span className={"tc-verb" + (ok === null ? " text-shine" : "")}>
           {ok === null ? toolVerb(leaf.tool).replace("已", "正在") : toolVerb(leaf.tool)}
         </span>
         {path && (
-          <span className="tc-filelink" title={`${path}（点击查看${isWrite ? "变更" : "文件"}）`} onClick={(e) => openFilePreview(e, path)}>
+          <span className="tc-filelink" title={`${path}（点击查看${isWrite ? "变更" : "文件"}）`} onClick={(e) => void openFilePreview(e, path)}>
             <FileBadge path={path} size={16} />
             <span className="tc-filename">{name}</span>
           </span>
         )}
         {path && dir && <span className="tc-dir" title={path}>{dir}</span>}
+        {!path && <span className="tc-tool-name" title={leaf.tool}>{leaf.tool}</span>}
         {!path && summary && <span className="tc-query" title={summary}>{summary}</span>}
-        {leaf.changeStat && ok && (
-          <span className="tc-change-stat">
-            <span className="tc-add">+{leaf.changeStat.additions}</span>
-            <span className="tc-del">-{leaf.changeStat.deletions}</span>
-          </span>
-        )}
+        {leaf.changeStat && ok && <ChangeStat additions={leaf.changeStat.additions} deletions={leaf.changeStat.deletions} />}
         {ok === null && <span className="tc-status wait"><IconSpinner size={11} /></span>}
         {ok === false && <span className="tc-status fail"><IconX size={11} /></span>}
-        {hasOutput ? (
+        {expandable ? (
           <span className={"tc-chevron" + (expanded ? " open" : "")}><IconChevronRight size={11} /></span>
         ) : null}
       </div>
-      {expanded && hasOutput && (
+      {expanded && (
         <div className="tc-output">
-          {grepHits.length > 0 && (
-            <div className="tc-grep-hits">
-              {grepHits.slice(0, 20).map((hit, i) => (
-                <button key={i} className="tc-grep-hit" title={hit.path} onClick={(e) => openGrepHit(e, hit)}>
-                  <span className="tc-grep-path">{hit.path.split(/[\\/]/).pop()}</span>
-                  <span className="tc-grep-ln">:{hit.line}</span>
-                  <span className="tc-grep-text">{hit.rest.slice(0, 60)}</span>
-                </button>
-              ))}
-            </div>
-          )}
-          {leaf.output && (path && /\.(ts|tsx|js|jsx|py|json|md|css|html|go|rs|java|c|cpp|sh)$/i.test(path) ? (
-            <pre className="tc-code"><code>{leaf.output}</code></pre>
+          {isWrite && path ? (
+            <InlineDiff turnId={leaf.turnId} path={path} />
           ) : (
-            <pre className="tc-plain">{leaf.output}</pre>
-          ))}
-          {leaf.error && <pre className="tc-error-output">{leaf.error}</pre>}
+            <>
+              {grepHits.length > 0 && (
+                <div className="tc-grep-hits">
+                  {grepHits.slice(0, 20).map((hit, i) => (
+                    <button key={i} className="tc-grep-hit" title={hit.path} onClick={(e) => openGrepHit(e, hit)}>
+                      <span className="tc-grep-path">{hit.path.split(/[\\/]/).pop()}</span>
+                      <span className="tc-grep-ln">:{hit.line}</span>
+                      <span className="tc-grep-text">{hit.rest.slice(0, 60)}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {leaf.output && (path && /\.(ts|tsx|js|jsx|py|json|md|css|html|go|rs|java|c|cpp|sh)$/i.test(path) ? (
+                <pre className="tc-code"><code>{leaf.output}</code></pre>
+              ) : (
+                <pre className="tc-plain">{leaf.output}</pre>
+              ))}
+              {leaf.error && <pre className="tc-error-output">{leaf.error}</pre>}
+            </>
+          )}
         </div>
       )}
     </div>
   );
 });
 
-/** 探索合并行（对齐 zcode「🔍 探索 · N 文件」）：
- *  连续读/搜/列调用 ≥2 合并为一行；点击展开查看每次调用明细。
- *  从单行升级为合并行时以动画过渡（新挂载即播放一次）。
- */
-const ExploreCluster = memo(function ExploreCluster({ leaves }: { leaves: ToolLeaf[] }) {
+/** v19: 操作合并行（两次思考间的连续非写操作）：
+ *  运行中——动词区每 1.2s 轮播最新操作（translateY 滚动动效）；
+ *  完成后——「已执行 N 个操作（…）」摘要行，可展开查看全部明细。 */
+const ActionClusterRow = memo(function ActionClusterRow({ leaves }: { leaves: ToolLeaf[] }) {
   const [expanded, setExpanded] = useState(false);
   const running = leaves.some((l) => l.ok === null);
   const failed = leaves.some((l) => l.ok === false);
+  // 轮播索引：运行中循环展示最近若干条
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (!running) return;
+    const t = setInterval(() => setTick((v) => v + 1), 1200);
+    return () => clearInterval(t);
+  }, [running]);
 
-  // 汇总：搜索类计「N 搜索」，其余按唯一文件路径计「N 文件」
-  const SEARCH_TOOLS = new Set(["fs_grep", "codebase_search", "web_search", "memory_search"]);
-  const searchCount = leaves.filter((l) => SEARCH_TOOLS.has(l.tool)).length;
-  const fileCount = new Set(
-    leaves.filter((l) => !SEARCH_TOOLS.has(l.tool)).map((l) => leafPath(l)).filter(Boolean),
-  ).size;
-  const parts: string[] = [];
-  if (searchCount > 0) parts.push(`${searchCount} 搜索`);
-  if (fileCount > 0) parts.push(`${fileCount} 文件`);
-  const summary = parts.length > 0 ? parts.join(", ") : `${leaves.length} 次调用`;
+  const summary = useMemo(() => {
+    const search = leaves.filter((l) => SEARCH_TOOLS.has(l.tool)).length;
+    const run = leaves.filter((l) => RUN_TOOLS.has(l.tool)).length;
+    const read = leaves.filter((l) => ["fs_read", "fs_list", "view_image", "read_attachment"].includes(l.tool)).length;
+    const other = leaves.length - search - run - read;
+    const parts: string[] = [];
+    if (search > 0) parts.push(`${search} 搜索`);
+    if (read > 0) parts.push(`${read} 读取`);
+    if (run > 0) parts.push(`${run} 运行`);
+    if (other > 0) parts.push(`${other} 调用`);
+    return parts.join(", ") || `${leaves.length} 次调用`;
+  }, [leaves]);
+
+  const rolling = leaves[Math.min(tick % Math.max(1, leaves.length), leaves.length - 1)];
+  const rollingPath = rolling ? leafPath(rolling) : null;
+  const rollingText = rolling
+    ? `${toolVerb(rolling.tool).replace("已", "正在")} ${rollingPath ? splitFilePath(rollingPath).name : leafSummary(rolling)}`.trim()
+    : "";
 
   return (
     <div className="tc-node tc-explore">
       <div className={"tc-row has-output tc-explore-row" + (expanded ? " expanded" : "")} onClick={() => setExpanded(!expanded)}>
         <span className="tc-icon"><IconSearch size={13} /></span>
-        <span className={"tc-verb" + (running ? " text-shine" : "")}>{running ? "正在探索" : "探索"}</span>
-        <span className="tc-explore-summary">{summary}</span>
+        {running ? (
+          <span className="tc-verb-roll" key={tick}>
+            <span className="tc-verb text-shine">{rollingText || "正在执行"}</span>
+          </span>
+        ) : (
+          <>
+            <span className="tc-verb">已执行 {leaves.length} 个操作</span>
+            <span className="tc-explore-summary">{summary}</span>
+          </>
+        )}
+        {running && <span className="tc-status wait"><IconSpinner size={11} /></span>}
+        {!running && failed && <span className="tc-status fail"><IconX size={11} /></span>}
+        <span className={"tc-chevron" + (expanded ? " open" : "")}><IconChevronRight size={11} /></span>
+      </div>
+      {expanded && (
+        <div className="tc-explore-detail">
+          {leaves.map((leaf, j) => <LeafRow key={j} leaf={leaf} />)}
+        </div>
+      )}
+    </div>
+  );
+});
+
+/** v19: 同文件连续写合并行：文件徽标 + 累加 +N -M（滚动动效），展开看每次写明细（各自内联 diff） */
+const WriteMergedRow = memo(function WriteMergedRow({ leaves }: { leaves: ToolLeaf[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const running = leaves.some((l) => l.ok === null);
+  const failed = leaves.some((l) => l.ok === false);
+  const path = leafPath(leaves[0]) ?? "";
+  const add = leaves.reduce((s, l) => s + (l.changeStat?.additions ?? 0), 0);
+  const del = leaves.reduce((s, l) => s + (l.changeStat?.deletions ?? 0), 0);
+  const { dir, name } = path ? splitFilePath(path) : { dir: "", name: "" };
+
+  return (
+    <div className="tc-node">
+      <div className={"tc-row has-output tc-write" + (expanded ? " expanded" : "")} onClick={() => setExpanded(!expanded)}>
+        <span className="tc-icon"><IconFileWrite size={13} /></span>
+        <span className={"tc-verb" + (running ? " text-shine" : "")}>{running ? "正在编辑" : `已编辑 ×${leaves.length}`}</span>
+        {path && (
+          <span className="tc-filelink">
+            <FileBadge path={path} size={16} />
+            <span className="tc-filename">{name}</span>
+          </span>
+        )}
+        {path && dir && <span className="tc-dir" title={path}>{dir}</span>}
+        {(add > 0 || del > 0) && <ChangeStat additions={add} deletions={del} />}
         {running && <span className="tc-status wait"><IconSpinner size={11} /></span>}
         {!running && failed && <span className="tc-status fail"><IconX size={11} /></span>}
         <span className={"tc-chevron" + (expanded ? " open" : "")}><IconChevronRight size={11} /></span>
@@ -218,11 +357,13 @@ export const ToolTree = memo(function ToolTree({ nodes }: { nodes: ToolNode[] })
   return (
     <div className="tool-flat">
       {nodes.map((n, i) =>
-        n.kind === "explore"
-          ? <ExploreCluster key={`e${i}`} leaves={n.leaves} />
-          : n.kind === "group"
-            ? n.leaves.map((leaf, j) => <LeafRow key={`g${i}-${j}`} leaf={leaf} />)
-            : <LeafRow key={`l${i}`} leaf={n.leaf} />,
+        n.kind === "action-cluster"
+          ? <ActionClusterRow key={`e${i}`} leaves={n.leaves} />
+          : n.kind === "write-merged"
+            ? <WriteMergedRow key={`w${i}`} leaves={n.leaves} />
+            : n.kind === "group"
+              ? n.leaves.map((leaf, j) => <LeafRow key={`g${i}-${j}`} leaf={leaf} />)
+              : <LeafRow key={`l${i}`} leaf={n.leaf} />,
       )}
     </div>
   );

@@ -31,6 +31,16 @@ function resolveGitBash() {
   }
   return "bash.exe";
 }
+// v19: win32 默认 shell 按存在性探测（部分机器无 pwsh，直接 spawn 会失败导致终端白屏）
+function resolveWinDefaultShell() {
+  const fs = require("fs");
+  const sys32 = process.env.SystemRoot ? require("path").join(process.env.SystemRoot, "System32") : "";
+  const candidates = ["pwsh.exe", "powershell.exe", "cmd.exe"];
+  for (const c of candidates) {
+    if (sys32 && fs.existsSync(require("path").join(sys32, c))) return c;
+  }
+  return "cmd.exe";
+}
 function resolveShell(opts) {
   const want = (opts.shell && opts.shell !== "auto") ? opts.shell : process.env.CHATCODER_SHELL;
   if (want) {
@@ -38,7 +48,7 @@ function resolveShell(opts) {
     if (SHELL_RESOLVE[want]) return SHELL_RESOLVE[want];
     return want;
   }
-  if (process.platform === "win32") return "pwsh.exe";
+  if (process.platform === "win32") return resolveWinDefaultShell();
   return process.env.SHELL || "bash";
 }
 
@@ -58,9 +68,22 @@ function createPty(opts) {
   const dataListeners = [];
   const exitListeners = [];
   let proc = null;
+  let exited = false;
 
   const emitData = (d) => { for (const cb of dataListeners) { try { cb(d); } catch {} } };
-  const emitExit = (code) => { for (const cb of exitListeners) { try { cb(code); } catch {} } };
+  const emitExit = (code) => {
+    if (exited) return;
+    exited = true;
+    for (const cb of exitListeners) { try { cb(code); } catch {} }
+  };
+  const onData = (cb) => {
+    dataListeners.push(cb);
+    return () => { const i = dataListeners.indexOf(cb); if (i >= 0) dataListeners.splice(i, 1); };
+  };
+  const onExit = (cb) => {
+    exitListeners.push(cb);
+    return () => { const i = exitListeners.indexOf(cb); if (i >= 0) exitListeners.splice(i, 1); };
+  };
 
   if (usingNodePty) {
     try {
@@ -81,6 +104,8 @@ function createPty(opts) {
         write: (d) => { try { proc.write(d); } catch {} },
         resize: (c, r) => { try { proc.resize(c, r); } catch {} },
         kill: () => { try { proc.kill(); } catch {} },
+        onData,
+        onExit,
       };
     } catch (e) {
       // node-pty spawn 失败时回退到 spawn
@@ -102,6 +127,8 @@ function createPty(opts) {
     write: (d) => { if (proc.stdin && proc.stdin.writable) proc.stdin.write(d); },
     resize: () => { /* spawn 伪 PTY 不支持 resize */ },
     kill: () => { try { proc.kill(); } catch {} },
+    onData,
+    onExit,
   };
 }
 

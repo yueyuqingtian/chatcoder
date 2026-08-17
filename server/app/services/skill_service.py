@@ -108,7 +108,7 @@ async def create_mcp_server(
     args: list | None = None, env: dict | None = None,
     url: str | None = None, tools: list | None = None,
     is_active: bool = True, path: str | None = None,
-    meta: dict | None = None,
+    meta: dict | None = None, fetch_tools: bool = True,
 ) -> McpServer:
     """创建 MCP Server 配置。"""
     srv = McpServer(
@@ -128,7 +128,9 @@ async def create_mcp_server(
     )
     # v6: 创建/导入时若未提供 tools，自动握手获取真实工具列表，
     # 避免 build_mcp_tools_for_agent 退化为不可用的通用 call 工具（修复 agent 无法使用 MCP）。
-    if not srv.tools and srv.transport == "stdio" and srv.command:
+    # v6.5: fetch_tools=False 时（导入未启用的 server）跳过握手，避免 codegraph 等
+    # 不响应 MCP 的进程把创建请求挂死。
+    if fetch_tools and not srv.tools and srv.transport == "stdio" and srv.command:
         try:
             from app.orchestration.skill_scanner import fetch_mcp_tools
             # v6: 传入项目路径(rootUri)，codegraph 等 server 依赖它定位项目才能响应握手

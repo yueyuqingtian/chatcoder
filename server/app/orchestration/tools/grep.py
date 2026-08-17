@@ -101,7 +101,8 @@ class GrepTool(Tool):
         case_sensitive = args.get("case_sensitive", False)
         context_lines = min(args.get("context_lines", 0), 5)
 
-        # 解析搜索根目录
+        # 解析搜索根目录（支持目录或单个文件；v1.2: path 指向文件时只搜该文件）
+        ws_root = Path(ctx.workspace_root)
         if search_path:
             root = safe_resolve(ctx.workspace_root, search_path)
             if root is None:
@@ -110,11 +111,9 @@ class GrepTool(Tool):
                     error=f"路径越界或非法: {search_path}",
                 )
             if not root.exists():
-                return ToolResult(ok=False, output="", error=f"目录不存在: {search_path}")
-            if not root.is_dir():
-                return ToolResult(ok=False, output="", error=f"不是目录: {search_path}")
+                return ToolResult(ok=False, output="", error=f"路径不存在: {search_path}")
         else:
-            root = Path(ctx.workspace_root)
+            root = ws_root
 
         # 编译正则
         flags = 0 if case_sensitive else re.IGNORECASE
@@ -131,7 +130,8 @@ class GrepTool(Tool):
 
         # v1.1: 增强搜索 — enhanced_search 开启且系统有 ripgrep 时走 rg 快路径；
         # rg 不可用/超时/失败返回 None，回退下方纯 Python 逐行匹配。
-        if settings.enhanced_search and shutil.which("rg"):
+        # v1.2: rg 快路径仅对目录生效（rg 的 cwd 必须是目录），单文件走纯 Python 匹配。
+        if root.is_dir() and settings.enhanced_search and shutil.which("rg"):
             rg_result = await self._rg_search(
                 root=root, ws_root=ws_root, pattern=pattern_str,
                 include_glob=include_glob, case_sensitive=case_sensitive,
@@ -145,64 +145,65 @@ class GrepTool(Tool):
         results: list[str] = []
         total_matches = 0
         files_searched = 0
-        ws_root = Path(ctx.workspace_root)
 
-        for dirpath, dirnames, filenames in os.walk(root):
-            # 跳过排除目录
-            dirnames[:] = [d for d in dirnames if d not in _DEFAULT_EXCLUDE_DIRS]
+        def iter_files():
+            """产出待搜索文件：单文件模式产出该文件，目录模式递归产出文本文件。"""
+            if root.is_file():
+                yield root
+                return
+            for dirpath, dirnames, filenames in os.walk(root):
+                # 跳过排除目录
+                dirnames[:] = [d for d in dirnames if d not in _DEFAULT_EXCLUDE_DIRS]
+                for filename in filenames:
+                    yield Path(dirpath) / filename
 
-            for filename in filenames:
-                if files_searched >= _MAX_FILES_SCAN:
-                    break
+        for file_path in iter_files():
+            if files_searched >= _MAX_FILES_SCAN:
+                break
+            if total_matches >= _MAX_MATCHES:
+                break
+
+            # 扩展名过滤
+            if include_re and not include_re.match(file_path.name):
+                continue
+            if not include_re and file_path.suffix.lower() in _BINARY_EXTENSIONS:
+                continue
+
+            # 大小过滤
+            try:
+                if file_path.stat().st_size > _MAX_FILE_SIZE:
+                    continue
+            except OSError:
+                continue
+
+            files_searched += 1
+
+            try:
+                text = file_path.read_text(encoding="utf-8", errors="replace")
+                lines = text.splitlines()
+            except OSError:
+                continue
+
+            try:
+                rel_path = str(file_path.relative_to(ws_root))
+            except ValueError:
+                rel_path = str(file_path)
+
+            for line_no, line in enumerate(lines, 1):
                 if total_matches >= _MAX_MATCHES:
                     break
-
-                file_path = Path(dirpath) / filename
-
-                # 扩展名过滤
-                if include_re and not include_re.match(filename):
-                    continue
-                if not include_re and file_path.suffix.lower() in _BINARY_EXTENSIONS:
-                    continue
-
-                # 大小过滤
-                try:
-                    if file_path.stat().st_size > _MAX_FILE_SIZE:
-                        continue
-                except OSError:
-                    continue
-
-                files_searched += 1
-
-                try:
-                    text = file_path.read_text(encoding="utf-8", errors="replace")
-                    lines = text.splitlines()
-                except OSError:
-                    continue
-
-                try:
-                    rel_path = str(file_path.relative_to(ws_root))
-                except ValueError:
-                    rel_path = str(file_path)
-
-                for line_no, line in enumerate(lines, 1):
-                    if total_matches >= _MAX_MATCHES:
-                        break
-                    if regex.search(line):
-                        total_matches += 1
-                        if context_lines > 0:
-                            start = max(0, line_no - 1 - context_lines)
-                            end = min(len(lines), line_no + context_lines)
-                            snippet_lines = []
-                            for j in range(start, end):
-                                marker = ">>" if j == line_no - 1 else "  "
-                                snippet_lines.append(f"  {marker} {j+1}: {lines[j]}")
-                            results.append(f"\n{rel_path}:\n" + "\n".join(snippet_lines))
-                        else:
-                            results.append(f"{rel_path}:{line_no}: {line.strip()[:200]}")
-
-            if files_searched >= _MAX_FILES_SCAN or total_matches >= _MAX_MATCHES:
-                break
+                if regex.search(line):
+                    total_matches += 1
+                    if context_lines > 0:
+                        start = max(0, line_no - 1 - context_lines)
+                        end = min(len(lines), line_no + context_lines)
+                        snippet_lines = []
+                        for j in range(start, end):
+                            marker = ">>" if j == line_no - 1 else "  "
+                            snippet_lines.append(f"  {marker} {j+1}: {lines[j]}")
+                        results.append(f"\n{rel_path}:\n" + "\n".join(snippet_lines))
+                    else:
+                        results.append(f"{rel_path}:{line_no}: {line.strip()[:200]}")
 
         if not results:
             output = f"未找到匹配项 (搜索了 {files_searched} 个文件)"

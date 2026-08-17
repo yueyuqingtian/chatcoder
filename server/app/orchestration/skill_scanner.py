@@ -306,10 +306,9 @@ async def fetch_mcp_tools(
     """通过 stdio 与 MCP server 握手并获取 tools/list。
     v4.8: 扫描时填充 tools 列表，解决 agent 看不到 MCP 工具的问题。
     v6.0: 支持传入 root_path（转为 rootUri），codegraph 等 server 依赖它定位项目。
+    v6.5: 整段握手加硬超时 + Windows 进程树强杀——部分 MCP server（如 codegraph）
+    不响应握手且 kill 后仍有子进程持有管道，导致创建/导入接口永久挂起。
     """
-    import asyncio
-    import os
-
     if not command:
         return []
 
@@ -326,62 +325,100 @@ async def fetch_mcp_tools(
         return []
 
     try:
-        # initialize
-        init_params: dict = {
-            "protocolVersion": "2024-11-05", "capabilities": {},
-            "clientInfo": {"name": "chatcoder", "version": "4.8"},
-        }
-        if root_path:
-            p = str(root_path).replace("\\", "/")
-            if not p.startswith("/"):
-                p = "/" + p
-            init_params["rootUri"] = f"file://{p}"
-        init_req = {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": init_params}
-        proc.stdin.write((json.dumps(init_req) + "\n").encode())
-        await proc.stdin.drain()
-        await asyncio.wait_for(proc.stdout.readline(), timeout=5)
-
-        # initialized notification
-        notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
-        proc.stdin.write((json.dumps(notif) + "\n").encode())
-        await proc.stdin.drain()
-
-        # tools/list
-        list_req = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
-        proc.stdin.write((json.dumps(list_req) + "\n").encode())
-        await proc.stdin.drain()
-
-        import time
-        deadline = asyncio.get_event_loop().time() + 5
-        while asyncio.get_event_loop().time() < deadline:
-            try:
-                line = await asyncio.wait_for(
-                    proc.stdout.readline(),
-                    timeout=max(1, deadline - asyncio.get_event_loop().time()),
-                )
-            except asyncio.TimeoutError:
-                break
-            if not line:
-                break
-            text = line.decode("utf-8", errors="replace").strip()
-            if not text:
-                continue
-            try:
-                resp = json.loads(text)
-            except json.JSONDecodeError:
-                continue
-            if resp.get("id") == 1:
-                tools = resp.get("result", {}).get("tools", [])
-                return tools if isinstance(tools, list) else []
-        return []
+        return await asyncio.wait_for(
+            _fetch_mcp_tools_handshake(proc, root_path),
+            timeout=15,
+        )
     except Exception:
         return []
     finally:
+        await _terminate_process_tree(proc)
+
+
+async def _fetch_mcp_tools_handshake(
+    proc: asyncio.subprocess.Process, root_path: str | None,
+) -> list[dict]:
+    """单次 MCP initialize + tools/list 握手（由 fetch_mcp_tools 包硬超时）。"""
+    init_params: dict = {
+        "protocolVersion": "2024-11-05", "capabilities": {},
+        "clientInfo": {"name": "chatcoder", "version": "4.8"},
+    }
+    if root_path:
+        p = str(root_path).replace("\\", "/")
+        if not p.startswith("/"):
+            p = "/" + p
+        init_params["rootUri"] = f"file://{p}"
+    init_req = {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": init_params}
+    proc.stdin.write((json.dumps(init_req) + "\n").encode())
+    await proc.stdin.drain()
+    await asyncio.wait_for(proc.stdout.readline(), timeout=5)
+
+    # initialized notification
+    notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+    proc.stdin.write((json.dumps(notif) + "\n").encode())
+    await proc.stdin.drain()
+
+    # tools/list
+    list_req = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    proc.stdin.write((json.dumps(list_req) + "\n").encode())
+    await proc.stdin.drain()
+
+    deadline = asyncio.get_event_loop().time() + 5
+    while asyncio.get_event_loop().time() < deadline:
         try:
-            proc.kill()
-            await proc.wait()
+            line = await asyncio.wait_for(
+                proc.stdout.readline(),
+                timeout=max(1, deadline - asyncio.get_event_loop().time()),
+            )
+        except asyncio.TimeoutError:
+            break
+        if not line:
+            break
+        text = line.decode("utf-8", errors="replace").strip()
+        if not text:
+            continue
+        try:
+            resp = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if resp.get("id") == 1:
+            tools = resp.get("result", {}).get("tools", [])
+            return tools if isinstance(tools, list) else []
+    return []
+
+
+async def _terminate_process_tree(proc: asyncio.subprocess.Process) -> None:
+    """结束 MCP 握手子进程（含子进程树），最多等待 5s，绝不阻塞调用方。"""
+    if proc.returncode is None:
+        try:
+            if os.name == "nt" and proc.pid:
+                killer = await asyncio.create_subprocess_exec(
+                    "taskkill", "/F", "/T", "/PID", str(proc.pid),
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                try:
+                    await asyncio.wait_for(killer.wait(), timeout=5)
+                except Exception:
+                    pass
+            else:
+                proc.kill()
         except Exception:
-            pass
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5)
+    except Exception:
+        pass
+    # 显式关闭管道，避免 Windows Proactor 在进程树强杀后残留未关闭 transport 告警
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:
+                pass
 
 
 def _parse_mcp_config(

@@ -1,16 +1,15 @@
 /** 应用根（v5）：三栏骨架 + 右面板最大宽度限制 + 全屏模式。 */
 import { useEffect, useRef, useState } from "react";
-import { TitleBar } from "./components/TitleBar";
-import { Sidebar, type NavKey } from "./components/Sidebar";
+import type { NavKey } from "./components/Sidebar";
 import { Workspace } from "./components/Workspace";
 import { RollbackConfirmModal } from "./components/chat/RollbackConfirmModal";
 import { ResizeHandle } from "./components/ResizeHandle";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Toast } from "./components/Toast";
 import { Splash } from "./components/Splash";
-import { SettingsPage } from "./components/settings";
+import { SettingsContent, type SettingsTab } from "./components/settings";
 import { CommandCenter } from "./components/CommandCenter";
-import { RightPanel } from "./components/panel/RightPanel";
+import { PluginSlot } from "./plugins/registry";
 import { useUiStore, initUi } from "./store/ui";
 import { usePanelStore } from "./store/panel";
 import { useChatStore } from "./store/chat";
@@ -20,14 +19,16 @@ export default function App() {
   const [showSplash, setShowSplash] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [nav, setNav] = useState<NavKey | null>(null);
+  // 进入设置前的工作区导航状态：退出设置时原路返回（首页/会话/自动化/技能等）
+  const [returnNav, setReturnNav] = useState<NavKey | null>(null);
   const [settingsTab, setSettingsTab] = useState<string | undefined>(undefined);
+  // v19: 设置页当前 tab（左栏 SettingsSidebar 与内容区共享）
+  const [settingsActiveTab, setSettingsActiveTab] = useState<SettingsTab>("general");
   const leftPanelWidth = useUiStore((s) => s.leftPanelWidth);
   const setLeftPanelWidth = useUiStore((s) => s.setLeftPanelWidth);
   const rightExpanded = usePanelStore((s) => s.expanded);
   const rightPanelWidth = usePanelStore((s) => s.width);
   const rightFullscreen = usePanelStore((s) => s.fullscreen);
-  const taskCardVisible = usePanelStore((s) => s.taskCardVisible);
-  const hasTasks = useChatStore((s) => s.tasks.length > 0);
   const setRightPanelWidth = usePanelStore((s) => s.setWidth);
 
   useEffect(() => { initTheme(); initUi(); }, []);
@@ -52,6 +53,7 @@ export default function App() {
   useEffect(() => {
     const handler = (e: Event) => {
       const tab = (e as CustomEvent<{ tab?: string }>).detail?.tab;
+      if (tab) setSettingsActiveTab(tab as SettingsTab);
       setSettingsTab(tab);
       setNav("settings");
       setSidebarCollapsed(false);
@@ -59,6 +61,14 @@ export default function App() {
     window.addEventListener("chatcoder:open-settings", handler);
     return () => window.removeEventListener("chatcoder:open-settings", handler);
   }, []);
+  // v19: 命令中心跳转设置 tab 同步
+  useEffect(() => {
+    if (settingsTab && nav === "settings") setSettingsActiveTab(settingsTab as SettingsTab);
+  }, [settingsTab, nav]);
+  // 记录最近一次非设置页的导航位置，设置页退出时原路返回
+  useEffect(() => {
+    if (nav !== "settings") setReturnNav(nav);
+  }, [nav]);
 
   const leftPanelElRef = useRef<HTMLDivElement>(null);
   const rightPanelElRef = useRef<HTMLDivElement>(null);
@@ -89,21 +99,30 @@ export default function App() {
         {/* v18 布局重构（对齐 zcode）：左侧栏全高（含 logo/导航箭头），
             右侧列 = 顶部标题栏 + 内容行（消息流 + 右侧面板） */}
         <div ref={leftPanelElRef} className={`app-pane app-pane-left collapsible${sidebarCollapsed ? " collapsed" : ""}`} style={sidebarCollapsed ? { width: "0px", flexBasis: "0px" } : { width: `${leftPanelWidth}px`, flexBasis: `${leftPanelWidth}px` }}>
-          <Sidebar active={nav} onChange={(k) => { setNav(k); if (k === "settings") setSidebarCollapsed(false); if (k === "chat") { useChatStore.setState({ currentSessionId: null, messages: [], turns: [], tasks: [], runningTurnId: null, isRunning: false, interruptedTurnId: null, streamingBuffers: {}, thinkingBuffers: {}, usage: null, pendingApproval: null, pendingPlan: null, reviewedFiles: {} }); } }} onSessionFocus={() => setNav(null)} collapsed={sidebarCollapsed} onToggleCollapse={() => setSidebarCollapsed((v) => !v)} />
+          {nav === "settings" ? (
+            /* v19: 设置侧栏经插件 slot 渲染（与外部侧栏共用壳与宽度） */
+            <PluginSlot slot="settings-sidebar" tab={settingsActiveTab} onTab={setSettingsActiveTab} onBack={() => setNav(returnNav)} collapsed={sidebarCollapsed} />
+          ) : (
+            <PluginSlot slot="sidebar" active={nav} onChange={(k: NavKey) => { setNav(k); if (k === "settings") setSidebarCollapsed(false); if (k === "chat") { useChatStore.setState({ currentSessionId: null, messages: [], turns: [], tasks: [], runningTurnId: null, isRunning: false, interruptedTurnId: null, streamingBuffers: {}, thinkingBuffers: {}, usage: null, pendingApproval: null, pendingPlan: null, reviewedFiles: {}, composerDraft: "" }); } }} onSessionFocus={() => setNav(null)} collapsed={sidebarCollapsed} onToggleCollapse={() => setSidebarCollapsed((v) => !v)} />
+          )}
         </div>
         {!sidebarCollapsed && <ResizeHandle side="left" baseWidth={leftPanelWidth} minWidth={200} maxWidth={480} panelEl={leftPanelElRef} onCommit={setLeftPanelWidth} />}
         <div className="app-right">
-          <TitleBar leftCollapsed={sidebarCollapsed} rightCollapsed={!rightExpanded} onToggleLeft={() => setSidebarCollapsed((v) => !v)} onToggleRight={() => usePanelStore.getState().togglePanel()} />
+          {/* v19: 标题栏/右面板经插件 slot 渲染 */}
+          <PluginSlot slot="titlebar" leftCollapsed={sidebarCollapsed} rightCollapsed={!rightExpanded} onToggleLeft={() => setSidebarCollapsed((v) => !v)} onToggleRight={() => usePanelStore.getState().togglePanel()} />
           <div className="app-body">
-            <main className={`app-main${taskCardVisible && hasTasks ? " todo-card-active" : ""}${!rightExpanded ? " right-panel-collapsed" : ""}`}><Workspace nav={nav} onSessionStart={() => setNav(null)} /></main>
-            {rightExpanded && !rightFullscreen && <ResizeHandle side="right" baseWidth={rightPanelWidth} minWidth={200} maxWidth={1200} panelEl={rightPanelElRef} onCommit={setRightPanelWidth} />}
+            <main className={`app-main${!rightExpanded ? " right-panel-collapsed" : ""}`}>
+              {nav === "settings"
+                ? <SettingsContent tab={settingsActiveTab} />
+                : <Workspace nav={nav} onSessionStart={() => setNav(null)} />}
+            </main>
+            {rightExpanded && !rightFullscreen && <ResizeHandle side="right" baseWidth={rightPanelWidth} minWidth={280} maxWidth={1200} panelEl={rightPanelElRef} onCommit={setRightPanelWidth} />}
             <div ref={rightPanelElRef} className={`app-pane app-pane-right${rightExpanded ? "" : " collapsed"}${rightFullscreen ? " fullscreen" : ""}`} style={{ width: rightExpanded ? (rightFullscreen ? "100%" : `${rightPanelWidth}px`) : "0px", flexBasis: rightExpanded ? (rightFullscreen ? "100%" : `${rightPanelWidth}px`) : "0px" }}>
-              {rightExpanded && <RightPanel />}
+              {rightExpanded && <PluginSlot slot="right-panel" />}
             </div>
           </div>
         </div>
       </div>
-      {nav === "settings" && <SettingsPage initialTab={settingsTab} onBack={() => setNav(null)} />}
     </ErrorBoundary>
   );
 }

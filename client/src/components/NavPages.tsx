@@ -291,6 +291,7 @@ export function McpPage() {
   const [items, setItems] = useState<McpServerOut[]>([]);
   const [candidates, setCandidates] = useState<Array<{ name: string; transport: string; command: string | null; args: string[]; env: Record<string, string> | null; url: string | null; source_path: string }>>([]);
   const [scanning, setScanning] = useState(false);
+  const [importing, setImporting] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try { setItems(await api.listMcpServers()); } catch { /* ignore */ }
@@ -301,26 +302,38 @@ export function McpPage() {
   const handleScan = async () => {
     setScanning(true);
     try {
-      const result = await api.scanMcpServers();
-      const existing = new Set(items.map((m) => m.name));
-      setCandidates(result.filter((c) => !existing.has(c.name)));
+      // v6.5: 与设置页 MCP 面板一致——拉取最新列表去重，避免删除后状态不同步
+      const [servers, result] = await Promise.all([api.listMcpServers(), api.scanMcpServers()]);
+      setItems(servers);
+      const existing = new Set(servers.map((m) => m.name));
+      const seen = new Set<string>();
+      const next: typeof candidates = [];
+      for (const c of result) {
+        if (existing.has(c.name) || seen.has(c.name)) continue;
+        seen.add(c.name);
+        next.push(c);
+      }
+      setCandidates(next);
     } catch (e) {
-      alert("扫描失败: " + String(e));
+      useChatStore.setState({ error: "扫描失败: " + String(e) });
     } finally {
       setScanning(false);
     }
   };
 
   const handleImport = async (c: { name: string; transport: string; command: string | null; args: string[]; env: Record<string, string> | null; url: string | null }) => {
+    setImporting(c.name);
     try {
       await api.createMcpServer({
         name: c.name, transport: c.transport, command: c.command ?? undefined,
         args: c.args, env: c.env ?? undefined, url: c.url ?? undefined, is_active: false,
       });
-      setCandidates((prev) => prev.filter((x) => x !== c));
+      setCandidates((prev) => prev.filter((x) => x.name !== c.name));
       load();
     } catch (e) {
-      alert("导入失败: " + String(e));
+      useChatStore.setState({ error: `导入 ${c.name} 失败: ${String(e)}` });
+    } finally {
+      setImporting(null);
     }
   };
 
@@ -359,7 +372,7 @@ export function McpPage() {
         <div className="navpage-candidates">
           <div className="navpage-candidates-title">扫描候选（勾选导入）</div>
           {candidates.map((c, i) => (
-            <div key={i} className="navpage-candidate">
+            <div key={`${c.name}-${i}`} className="navpage-candidate">
               <div className="navpage-item-main">
                 <div className="navpage-item-title">{c.name}</div>
                 <div className="navpage-item-desc">
@@ -368,7 +381,7 @@ export function McpPage() {
                   <span className="np-source">来自 {c.source_path}</span>
                 </div>
               </div>
-              <button className="btn-primary btn-sm" onClick={() => handleImport(c)}>导入</button>
+              <button className="btn-primary btn-sm" disabled={importing !== null} onClick={() => handleImport(c)}>{importing === c.name ? "导入中…" : "导入"}</button>
             </div>
           ))}
         </div>

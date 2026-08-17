@@ -49,8 +49,8 @@ export interface UiPrefs {
   sidebarIconSize: number;
   /** 左面板聚焦颜色 */
   sidebarFocusColor: string;
-  /** 设置页左侧导航宽度(px) */
-  settingsNavWidth: number;
+  /** 消息流密度：comfortable=舒适(默认) compact=紧凑 */
+  msgDensity: "comfortable" | "compact";
   /** 界面语言 */
   language: Language;
 }
@@ -79,7 +79,7 @@ const DEFAULTS: UiPrefs = {
   sidebarFontSize: 12,
   sidebarIconSize: 14,
   sidebarFocusColor: "",
-  settingsNavWidth: 220,
+  msgDensity: "comfortable",
   language: "zh",
 };
 
@@ -148,6 +148,8 @@ export function applyUiVars(p: UiPrefs) {
   else root.style.removeProperty("--composer-glow");
   // v1.1: 阴影强度（此前完全未应用）
   root.style.setProperty("--shadow-strength", String(p.shadowStrength));
+  // 消息流密度：舒适(默认 10px 块间距) / 紧凑(2px)
+  root.style.setProperty("--msg-gap", p.msgDensity === "compact" ? "2px" : "10px");
   root.setAttribute("data-lang", p.language);
 }
 
@@ -161,7 +163,6 @@ export const FONT_LABELS: Record<string, { zh: string; en: string }> = {
 interface UiState extends UiPrefs {
   setLeftPanelWidth: (w: number) => void;
   setRightPanelWidth: (w: number) => void;
-  setSettingsNavWidth: (w: number) => void;
   setPrefs: (partial: Partial<UiPrefs>) => void;
   toggleGlass: () => void;
   setLanguage: (lang: Language) => void;
@@ -201,12 +202,6 @@ export const useUiStore = create<UiState>((set, get) => ({
     set({ rightPanelWidth: clamped });
     savePrefs({ ...get(), rightPanelWidth: clamped });
     applyUiVars({ ...get(), rightPanelWidth: clamped });
-  },
-
-  setSettingsNavWidth: (w) => {
-    const clamped = Math.max(160, Math.min(400, Math.round(w)));
-    set({ settingsNavWidth: clamped });
-    savePrefs({ ...get(), settingsNavWidth: clamped });
   },
 
   setPrefs: (partial) => {

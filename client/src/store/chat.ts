@@ -148,6 +148,15 @@ interface ChatState {
   todoPersisted: boolean;
   /** v15: 子代理实时活动（agentId -> 最新工具调用摘要，来自 tool.call 事件）。 */
   agentActivity: Record<number, string>;
+  /** v19: 子代理元信息（agentId -> 名称/turn/任务/状态）——消息流子代理卡片数据源。 */
+  subagentMeta: Record<number, { name: string; turnId: number | null; taskId: number | null; status: string }>;
+  /** v19: 子代理线程消息桶（threadId=agentId -> 落库消息），右面板完整会话数据源。 */
+  subagentMessages: Record<number, MessageOut[]>;
+  /** v19: 子代理流式缓冲（threadId -> 文本/思考），主消息流不再混入子代理内容。 */
+  subagentStreams: Record<number, string>;
+  subagentThinking: Record<number, string>;
+  /** v19: 拉取会话子代理列表（REST 重建卡片，历史会话可用）。 */
+  loadSessionSubagents: () => Promise<void>;
   /** v2.2: 消息流滚动目标（任务卡步骤点击穿透 / turn 导航）。 */
   scrollTarget: { threadId?: number; turnId?: number } | null;
   /** v18: 全局最近选择的思考深度档位（空态首页选择跨入会话后由 ComposerBox 承接）。 */
@@ -162,7 +171,7 @@ interface ChatState {
   loadBootstrap: () => Promise<void>;
   createProject: (path: string, name?: string) => Promise<ProjectOut | null>;
   selectProject: (projectId: number) => Promise<void>;
-  createSession: (projectId: number, title?: string) => Promise<void>;
+  createSession: (projectId: number, title?: string) => Promise<number | null>;
   switchSession: (sessionId: number, fromHist?: boolean) => Promise<void>;
   /** 会话前进/后退历史（侧栏 logo 区与折叠态标题栏共用，zcode 顶部导航箭头） */
   sessionHist: number[];
@@ -216,6 +225,7 @@ let _wsUnsub: (() => void) | null = null;
 let _heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
 const HEARTBEAT_TIMEOUT = 60_000; // 60s 无事件超时兜底复位
 let _stopGuardTs = 0; // v1.1: 用户点击停止后 5 秒内，忽略后端残留的 running 状态回跳
+let _stoppingTurnId: number | null = null;
 
 /** 启动/重置心跳计时器：60s 内无任何 WS 事件则强制复位 isRunning */
 function _startHeartbeat() {
@@ -247,16 +257,28 @@ function _clearHeartbeat() {
  */
 let _pendingToken: Record<number, string> = {};
 let _pendingThinking: Record<number, string> = {};
+// v19: agentId -> threadId（子代理流式内容分桶到 subagentStreams/subagentThinking）
+let _pendingThread: Record<number, number> = {};
+let _streamDoneText: Record<string, string> = {};
 let _flushScheduled = false;
 
 function _clearPendingDeltas() {
   _pendingToken = {};
   _pendingThinking = {};
+  _pendingThread = {};
+  _streamDoneText = {};
 }
 
 function _clearPendingFor(agentId: number) {
   delete _pendingToken[agentId];
   delete _pendingThinking[agentId];
+  delete _pendingThread[agentId];
+}
+
+/** 清除某 agent/thread 的流完成标记：消息落库后允许同 turn 内的下一段思考/正文继续实时流式 */
+function _clearStreamDoneFor(agentOrThread: number) {
+  delete _streamDoneText[`thinking:${agentOrThread}`];
+  delete _streamDoneText[`token:${agentOrThread}`];
 }
 
 function _scheduleDeltaFlush() {
@@ -266,28 +288,39 @@ function _scheduleDeltaFlush() {
     _flushScheduled = false;
     const tok = _pendingToken;
     const thk = _pendingThinking;
+    const thr = _pendingThread;
     _pendingToken = {};
     _pendingThinking = {};
+    _pendingThread = {};
     const tokKeys = Object.keys(tok);
     const thkKeys = Object.keys(thk);
     if (tokKeys.length === 0 && thkKeys.length === 0) return;
     useChatStore.setState((s) => {
       const next: Partial<ChatState> = {};
+      // v19: 子代理（thread_id != null）流式内容进独立桶，主消息流不混入
       if (tokKeys.length > 0) {
         const streaming = { ...s.streamingBuffers };
+        const subStreams = { ...s.subagentStreams };
         for (const k of tokKeys) {
           const aid = Number(k);
-          streaming[aid] = (streaming[aid] || "") + tok[aid];
+          const tid = thr[aid];
+          if (tid != null) subStreams[tid] = (subStreams[tid] || "") + tok[aid];
+          else streaming[aid] = (streaming[aid] || "") + tok[aid];
         }
         next.streamingBuffers = streaming;
+        next.subagentStreams = subStreams;
       }
       if (thkKeys.length > 0) {
         const thinking = { ...s.thinkingBuffers };
+        const subThinking = { ...s.subagentThinking };
         for (const k of thkKeys) {
           const aid = Number(k);
-          thinking[aid] = (thinking[aid] || "") + thk[aid];
+          const tid = thr[aid];
+          if (tid != null) subThinking[tid] = (subThinking[tid] || "") + thk[aid];
+          else thinking[aid] = (thinking[aid] || "") + thk[aid];
         }
         next.thinkingBuffers = thinking;
+        next.subagentThinking = subThinking;
       }
       return next;
     });
@@ -346,6 +379,10 @@ function _resetSessionState(): Partial<ChatState> {
     todos: null,
     todoPersisted: false,
     agentActivity: {},
+    subagentMeta: {},
+    subagentMessages: {},
+    subagentStreams: {},
+    subagentThinking: {},
     scrollTarget: null,
     queuedInputs: [],
   };
@@ -387,6 +424,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   todos: null,
   todoPersisted: false,
   agentActivity: {},
+  subagentMeta: {},
+  subagentMessages: {},
+  subagentStreams: {},
+  subagentThinking: {},
   scrollTarget: null,
   queuedInputs: [],
   composerDraft: "",
@@ -399,10 +440,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const [projects, sessions] = await Promise.all([api.listProjects(), api.listSessions()]);
-      set({ projects, sessions, loading: false });
-      // 自动选中第一个活跃项目/会话
+      // 自动选中第一个活跃项目/会话，并清理已归档或已删除的旧项目 ID。
       const activeProjects = projects.filter((p) => !p.archived);
       const activeSessions = sessions.filter((s) => s.status !== "archived");
+      const current = get();
+      const currentProject = activeProjects.find((p) => p.id === current.currentProjectId);
+      const sessionProject = current.currentSessionId == null
+        ? null
+        : activeProjects.find((p) => p.id === sessions.find((s) => s.id === current.currentSessionId)?.project_id);
+      set({
+        projects,
+        sessions,
+        loading: false,
+        currentProjectId: currentProject?.id ?? sessionProject?.id ?? activeProjects[0]?.id ?? null,
+      });
       if (!get().currentSessionId && activeSessions.length > 0) {
         const first = activeSessions[0];
         const proj = activeProjects.find((p) => p.id === first.project_id) || null;
@@ -454,8 +505,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const session = await api.createSession({ project_id: projectId, title });
       set((s) => ({ sessions: [session, ...s.sessions] }));
       await get().switchSession(session.id);
+      return session.id;
     } catch (e) {
       set({ error: String(e) });
+      return null;
     }
   },
 
@@ -515,6 +568,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           source: u.source,
         } });
       }).catch(() => {});
+      // v19: 缓存切换同样重建子代理卡片
+      void get().loadSessionSubagents();
       return;
     }
 
@@ -557,6 +612,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       // 如果有运行中的 turn，启动心跳超时兜底（§9.1 #3）
       if (running) _startHeartbeat();
+      // v19: 重建子代理卡片（历史会话刷新后可点击进右面板）
+      void get().loadSessionSubagents();
     } catch (e) {
       set({ loading: false, error: String(e) });
     }
@@ -649,6 +706,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     get().addMessage(optimisticUserMsg);
     try {
       const turn = await api.createTurn({ session_id: currentSessionId, content, attachments, reasoning_effort: reasoningEffort, mode });
+      _clearPendingDeltas(); // v6.5: 新 turn 清掉上一轮残留的完成标记，保证思考/正文从头实时流式
       set((s) => ({
         turns: [...s.turns, turn],
         runningTurnId: turn.id,
@@ -747,37 +805,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
- cancelTurn: async () => {
-   const { runningTurnId } = get();
-   if (!runningTurnId) return;
-   _stopGuardTs = Date.now(); // v1.1: 进入停止保护窗
-   try {
-     await api.cancelTurn(runningTurnId);
-      // 后端确认取消成功后复位
-      _clearHeartbeat();
-      set({ isRunning: false, runningTurnId: null });
-   } catch (e) {
-      // 取消失败：turn 可能已结束，强制复位并刷新真实状态
-      _clearHeartbeat();
-      set({ isRunning: false, runningTurnId: null, streamingBuffers: {}, thinkingBuffers: {} });
-      const { currentSessionId } = get();
-      if (currentSessionId) { try { await get().refreshTurns(); } catch { /* ignore */ } }
-   }
- },
-  forceStop: async () => {
-    // 兜底强制复位：turn 可能已结束但 WS 未通知，或后端取消接口报错
-    _stopGuardTs = Date.now(); // v1.1: 进入停止保护窗
-    const { runningTurnId, currentSessionId } = get();
-    if (runningTurnId) {
-      try { await api.cancelTurn(runningTurnId); } catch { /* 已结束则忽略 */ }
+   cancelTurn: async () => {
+    const { runningTurnId } = get();
+    if (!runningTurnId || _stoppingTurnId === runningTurnId) return;
+    _stopGuardTs = Date.now();
+    _stoppingTurnId = runningTurnId;
+    try { await api.cancelTurn(runningTurnId); }
+    catch (e) { set({ error: String(e) }); }
+    finally {
+      if (_stoppingTurnId === runningTurnId) _stoppingTurnId = null;
+      const sid = get().currentSessionId;
+      if (sid) { try { await get().refreshTurns(); } catch { /* ignore */ } }
     }
-    _clearHeartbeat();
-    set({ isRunning: false, runningTurnId: null, streamingBuffers: {}, thinkingBuffers: {} });
-    // 重新拉取 turn 状态以同步真实状态
-    if (currentSessionId) { try { await get().refreshTurns(); } catch { /* ignore */ } }
   },
-
-  resumeTurn: async () => {
+  forceStop: async () => {
+    const { runningTurnId, currentSessionId } = get();
+    if (!runningTurnId || _stoppingTurnId === runningTurnId) return;
+    _stopGuardTs = Date.now();
+    _stoppingTurnId = runningTurnId;
+    try { await api.cancelTurn(runningTurnId); } catch { /* 后端可能已结束 */ }
+    finally {
+      if (_stoppingTurnId === runningTurnId) _stoppingTurnId = null;
+      if (currentSessionId) { try { await get().refreshTurns(); } catch { /* ignore */ } }
+    }
+  },resumeTurn: async () => {
     const { interruptedTurnId, currentSessionId } = get();
     if (!interruptedTurnId || !currentSessionId) return;
     try {
@@ -847,12 +898,35 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   cancelRollback: () => set({ rollbackPending: null }),
 
+  loadSessionSubagents: async () => {
+    const { currentSessionId } = get();
+    if (!currentSessionId) return;
+    try {
+      const list = await api.listSessionSubagents(currentSessionId);
+      set((s) => {
+        const meta = { ...s.subagentMeta };
+        for (const it of list) {
+          const prev = meta[it.agent_id];
+          meta[it.agent_id] = {
+            name: it.name || prev?.name || `子代理 #${it.agent_id}`,
+            turnId: it.turn_id ?? prev?.turnId ?? null,
+            taskId: it.task_id ?? prev?.taskId ?? null,
+            // 实时事件已标记 running 时不被 REST 旧状态回退
+            status: prev?.status === "running" && it.status === "pending" ? "running" : (it.status || prev?.status || "running"),
+          };
+        }
+        return { subagentMeta: meta };
+      });
+    } catch { /* 非阻塞 */ }
+  },
+
   refreshMessages: async () => {
     const { currentSessionId } = get();
     if (!currentSessionId) return;
     try {
       const messages = await api.listSessionMessages(currentSessionId);
-      set({ messages });
+      if (get().currentSessionId !== currentSessionId) return;
+       set({ messages });
     } catch (e) {
       set({ error: String(e) });
     }
@@ -863,7 +937,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!currentSessionId) return;
     try {
       const turns = await api.listTurns(currentSessionId);
-      const running = turns.find((t) => t.status === "running");
+      if (get().currentSessionId !== currentSessionId) return;
+       const running = turns.find((t) => t.status === "running");
       const interrupted = turns.find((t) => t.status === "interrupted");
       set({
         turns,
@@ -881,7 +956,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!currentSessionId) return;
     try {
       const tasks = await api.listSessionTasks(currentSessionId);
-      const visible = tasks.filter((task) => !task.is_hidden);
+      if (get().currentSessionId !== currentSessionId) return;
+       const visible = tasks.filter((task) => !task.is_hidden);
       const proposedGroup = visible.find((task) => task.kind === "group" && task.status === "proposed");
       const requestTask = proposedGroup
         ? visible.find((task) => task.id === proposedGroup.parent_task_id)
@@ -908,7 +984,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!currentSessionId) return;
     try {
       const artifacts = await api.listSessionArtifacts(currentSessionId);
-      set({ artifacts });
+      if (get().currentSessionId !== currentSessionId) return;
+       set({ artifacts });
     } catch (e) {
       set({ error: String(e) });
     }
@@ -978,6 +1055,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const sid = Number(rawMsg.sender_id);
         if (sid) _clearPendingFor(sid);
         const isThinking = Boolean((rawMsg.content as Record<string, unknown>).thinking);
+        // v19: 子代理线程消息进独立桶（右面板完整会话数据源），不混入主消息流
+        const rawThread = rawMsg.thread_id != null ? Number(rawMsg.thread_id) : null;
+        if (rawThread != null) {
+          set((state) => {
+            const bucket = state.subagentMessages[rawThread] ?? [];
+            if (bucket.some((m) => m.id === rawMsg.id)) return {};
+            const subStreams = { ...state.subagentStreams };
+            const subThinking = { ...state.subagentThinking };
+            delete subStreams[rawThread];
+            delete subThinking[rawThread];
+            _clearStreamDoneFor(rawThread);
+            return {
+              subagentMessages: { ...state.subagentMessages, [rawThread]: _appendOrdered(bucket, rawMsg) },
+              subagentStreams: subStreams,
+              subagentThinking: subThinking,
+            };
+          });
+          break;
+        }
         set((state) => {
           // 去重
           if (state.messages.some((m) => m.id === rawMsg.id)) return {};
@@ -1003,6 +1099,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const newStreaming = sid ? { ...state.streamingBuffers } : state.streamingBuffers;
           const newThinking = sid ? { ...state.thinkingBuffers } : state.thinkingBuffers;
           if (sid) {
+            _clearStreamDoneFor(sid); // 落库后允许同 turn 的下一段思考/正文继续流式
             if (isThinking) {
               delete newThinking[sid];
             } else {
@@ -1015,7 +1112,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       case "turn.started":
         // v15: 新 turn 清空上一轮的清单与活动记录
+        _clearPendingDeltas(); // v6.5: 清理上一轮残留 delta/完成标记，思考从第一个 token 实时显示
         set({ runningTurnId: Number(payload.turn_id), isRunning: true, agentActivity: {}, todos: null, todoPersisted: false });
+        // v19: 重建子代理卡片（历史 turn 的子代理经 REST 恢复）
+        void get().loadSessionSubagents();
         break;
       case "turn.updated": {
         const turnId = Number(payload.turn_id);
@@ -1057,6 +1157,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             turns: s.turns.map((t) => (t.id === turnId ? { ...t, status: "completed", summary: (payload.summary as string) ?? t.summary } : t)),
             runningTurnId: null, isRunning: false,
             streamingBuffers: {}, thinkingBuffers: {},  // v1.3: turn 结束兜底清空
+            subagentStreams: {}, subagentThinking: {},  // v19: 子代理流式缓冲同样兜底清空
             pendingPlan,
             pendingPlanTurn,
             // v1.1: 本地摘除会话转圈标记（双保险，与 session.completed 同写法）
@@ -1091,10 +1192,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
         get().refreshTasks();
         break;
       }
-      case "agent.completed":
+      case "agent.completed": {
+        // v19: 子代理完成 → 卡片状态 done
+        const doneAid = Number(payload.agent_id ?? 0);
+        if (doneAid && get().subagentMeta[doneAid]) {
+          set((s) => ({ subagentMeta: { ...s.subagentMeta, [doneAid]: { ...s.subagentMeta[doneAid], status: "done" } } }));
+        }
         get().refreshTasks();
         break;
-      case "agent.started":
+      }
+      case "agent.started": {
+        // v19: 子代理启动 → 消息流卡片实时出现（engine 直启与 spawn_subagent 路径均广播）
+        const aid = Number(payload.agent_id ?? 0);
+        const kind = String(payload.kind ?? "");
+        if (aid && kind === "sub") {
+          const turnId = payload.turn_id != null ? Number(payload.turn_id) : null;
+          const taskId = payload.task_id != null ? Number(payload.task_id) : null;
+          const name = String(payload.name ?? "") || `子代理 #${aid}`;
+          set((s) => ({
+            subagentMeta: {
+              ...s.subagentMeta,
+              [aid]: { name, turnId: turnId ?? s.subagentMeta[aid]?.turnId ?? null, taskId: taskId ?? s.subagentMeta[aid]?.taskId ?? null, status: "running" },
+            },
+          }));
+        }
+        break;
+      }
       case "agent.updated":
         // 子代理活动状态由 TaskSummaryPanel/工具卡消费，此处无需全局状态
         break;
@@ -1113,28 +1236,50 @@ export const useChatStore = create<ChatState>((set, get) => ({
       case "thinking.delta": {
         const aid = Number(payload.agent_id);
         const delta = String(payload.delta ?? "");
-        if (aid && delta) {
+        const tid = payload.thread_id != null ? Number(payload.thread_id) : null;
+        if (aid && delta && !_streamDoneText[`thinking:${tid ?? aid}`]) {
           _pendingThinking[aid] = (_pendingThinking[aid] || "") + delta;
+          // v19: 记录 thread_id，flush 时按主/子分桶
+
+          if (tid != null) _pendingThread[aid] = tid;
           _scheduleDeltaFlush();
         }
         break;
       }
       case "thinking.done": {
-        // v1.3: 不立即清空 buffer，等 message.created 落库后再清
+        const aid = Number(payload.agent_id);
+        const full = typeof payload.full_text === "string" ? payload.full_text : null;
+        if (aid && full != null) {
+          const tid = payload.thread_id != null ? Number(payload.thread_id) : null;
+          _clearPendingFor(aid);
+          if (tid != null) set((s) => ({ subagentThinking: { ...s.subagentThinking, [tid]: full } }));
+          else set((s) => ({ thinkingBuffers: { ...s.thinkingBuffers, [aid]: full } }));
+          _streamDoneText[`thinking:${tid ?? aid}`] = full;
+        }
         break;
       }
       case "token.delta": {
         const aid = Number(payload.agent_id);
         const delta = String(payload.delta ?? "");
-        if (aid && delta) {
+        const tid = payload.thread_id != null ? Number(payload.thread_id) : null;
+        if (aid && delta && !_streamDoneText[`token:${tid ?? aid}`]) {
           _pendingToken[aid] = (_pendingToken[aid] || "") + delta;
+
+          if (tid != null) _pendingThread[aid] = tid;
           _scheduleDeltaFlush();
         }
         break;
       }
       case "token.done": {
-        // v1.3: 不立即清空 buffer，等 message.created 落库后再清
-        // 避免流式正文"刷完就消失"（落库消息到达前 buffer 保留显示）
+        const aid = Number(payload.agent_id);
+        const full = typeof payload.full_text === "string" ? payload.full_text : null;
+        if (aid && full != null) {
+          const tid = payload.thread_id != null ? Number(payload.thread_id) : null;
+          _clearPendingFor(aid);
+          if (tid != null) set((s) => ({ subagentStreams: { ...s.subagentStreams, [tid]: full } }));
+          else set((s) => ({ streamingBuffers: { ...s.streamingBuffers, [aid]: full } }));
+          _streamDoneText[`token:${tid ?? aid}`] = full;
+        }
         break;
       }
       case "tool.call": {
@@ -1180,6 +1325,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const taskId = Number(payload.task_id);
         const status = String(payload.status ?? "");
         const note = payload.note != null ? String(payload.note) : null;
+        // v19: 子代理状态随任务状态同步（in_progress→running / done / failed / cancelled）
+        if (status) {
+          const mapped = status === "in_progress" ? "running"
+            : status === "done" ? "done"
+            : status === "failed" ? "failed"
+            : status === "cancelled" ? "failed"
+            : null;
+          if (mapped) {
+            set((s) => {
+              const hit = Object.entries(s.subagentMeta).find(([, m]) => m.taskId === taskId);
+              if (!hit) return {};
+              const aid = Number(hit[0]);
+              return { subagentMeta: { ...s.subagentMeta, [aid]: { ...s.subagentMeta[aid], status: mapped } } };
+            });
+          }
+        }
         set((s) => {
           const exists = s.tasks.some((t) => t.id === taskId);
           if (exists) {
@@ -1196,6 +1357,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break;
       }
       case "usage.update": {
+        // v19: 圆环仅统计主代理占用——子代理 usage 不覆盖（避免多步任务数字来回跳变）
+        const agentKind = String(payload.agent_kind ?? "main");
+        if (agentKind === "sub") break;
         // v6.5: total 用 prompt_tokens（真实当前上下文占用），而非 total_tokens(prompt+completion)。
         // prompt_tokens 包含 system+history+tools+当前输入，是"窗口被占用了多少"的真实值。
         // 后端已将 total_tokens 字段也设为 prompt_tokens，这里取 prompt_tokens 更明确。

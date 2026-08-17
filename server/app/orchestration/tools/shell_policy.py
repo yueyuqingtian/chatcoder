@@ -81,26 +81,29 @@ _READONLY_WHITELIST: dict[str, set[str] | None] = {
     "measure-object": None,
 }
 
-# 危险黑名单：命中即整体拒绝（regex 匹配原始命令行）
-_DANGEROUS_PATTERNS: list[re.Pattern] = [
-    re.compile(r"\brm\s+(-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r|--recursive)", re.I),
-    re.compile(r"\brm\s+(-[a-z]*f|--force)\b", re.I),
-    re.compile(r"\bRemove-Item\b.*\b-Recurse\b", re.I),
-    re.compile(r"\bdel\s+/[sfq]", re.I),
-    re.compile(r"\brmdir\s+/s", re.I),
-    re.compile(r"\bformat\b", re.I),
-    re.compile(r"\bdiskpart\b", re.I),
-    re.compile(r"\bmkfs\b", re.I),
-    re.compile(r"\bdd\s+if=", re.I),
-    re.compile(r"\bshutdown\b", re.I),
-    re.compile(r"\breboot\b", re.I),
-    re.compile(r"\bStop-Computer\b", re.I),
-    re.compile(r"\bRestart-Computer\b", re.I),
-    re.compile(r"\bgit\s+(reset\s+--hard|clean\s+-[a-z]*f|checkout\s+--\s+\.)", re.I),
-    re.compile(r">\s*(/dev/|nul\b)", re.I),
-    re.compile(r"\bchmod\s+-R\s+777\b", re.I),
-    re.compile(r"\bicacls\b", re.I),
-    re.compile(r"\brmdir\b.*\b/s\b", re.I),
+# 危险黑名单：命中即整体拒绝（regex 匹配原始命令行）。
+# v1.2: 每项带可操作的中文原因，agent 看到后知道该怎么改；
+#       去掉 `> nul` 拦截——Windows 上 nul 是合法的空设备（findstr ... > nul 属于正常用法），
+#       仅拦截 `/dev/null`（Windows 无此设备，重定向会产生垃圾文件 dev/null）。
+_DANGEROUS_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\brm\s+(-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r|--recursive)", re.I), "危险命令已拦截: rm 递归强制删除"),
+    (re.compile(r"\brm\s+(-[a-z]*f|--force)\b", re.I), "危险命令已拦截: rm 强制删除"),
+    (re.compile(r"\bRemove-Item\b.*\b-Recurse\b", re.I), "危险命令已拦截: Remove-Item 递归删除"),
+    (re.compile(r"\bdel\s+/[sfq]", re.I), "危险命令已拦截: del 静默/递归删除"),
+    (re.compile(r"\brmdir\s+/s", re.I), "危险命令已拦截: rmdir 递归删除"),
+    (re.compile(r"\bformat\b", re.I), "危险命令已拦截: format"),
+    (re.compile(r"\bdiskpart\b", re.I), "危险命令已拦截: diskpart"),
+    (re.compile(r"\bmkfs\b", re.I), "危险命令已拦截: mkfs"),
+    (re.compile(r"\bdd\s+if=", re.I), "危险命令已拦截: dd 写入"),
+    (re.compile(r"\bshutdown\b", re.I), "危险命令已拦截: shutdown"),
+    (re.compile(r"\breboot\b", re.I), "危险命令已拦截: reboot"),
+    (re.compile(r"\bStop-Computer\b", re.I), "危险命令已拦截: Stop-Computer"),
+    (re.compile(r"\bRestart-Computer\b", re.I), "危险命令已拦截: Restart-Computer"),
+    (re.compile(r"\bgit\s+(reset\s+--hard|clean\s+-[a-z]*f|checkout\s+--\s+\.)", re.I), "危险命令已拦截: git 破坏性操作"),
+    (re.compile(r">\s*/dev/", re.I), "危险命令已拦截: Windows 没有 /dev/null，请去掉重定向或改用 > nul"),
+    (re.compile(r"\bchmod\s+-R\s+777\b", re.I), "危险命令已拦截: chmod -R 777"),
+    (re.compile(r"\bicacls\b", re.I), "危险命令已拦截: icacls"),
+    (re.compile(r"\brmdir\b.*\b/s\b", re.I), "危险命令已拦截: rmdir /s"),
 ]
 
 # 管道分隔（考虑引号内管道符误判：简单处理——按常见引号保护）
@@ -114,9 +117,9 @@ def analyze(command: str) -> tuple[str, str]:
         return "deny", "命令为空"
 
     # 1. 危险黑名单（原始命令匹配，任一段命中即 deny）
-    for pat in _DANGEROUS_PATTERNS:
+    for pat, reason in _DANGEROUS_PATTERNS:
         if pat.search(cmd):
-            return "deny", f"危险命令已拦截: {pat.pattern[:40]}"
+            return "deny", reason
 
     # 2. 逐段管道判定只读白名单
     segments = [s.strip() for s in _PIPE_SPLIT_RE.split(cmd) if s.strip()]

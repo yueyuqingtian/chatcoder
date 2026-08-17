@@ -71,7 +71,7 @@
   --color-background-win-alt: var(--color-neutral-200);
   --color-sidebar: var(--color-neutral-100);
   --color-header: var(--color-neutral-100);
-  --color-panel: var(--color-neutral-100);
+  --color-panel: var(--color-neutral-50);
   --color-card: var(--color-white);
   --color-card-selected: var(--color-neutral-200);
   --color-card-border: var(--color-border);
@@ -137,6 +137,13 @@
   --color-tooltip-foreground: var(--color-neutral-950);
   --color-find-highlight: #fde68a;
   --color-find-highlight-active: #facc15;
+  --color-code-comment: #6b7280;
+  --color-code-keyword: #b42318;
+  --color-code-string: #05603a;
+  --color-code-number: #175cd3;
+  --color-code-title: #6941c6;
+  --color-code-variable: #b54708;
+  --color-code-tag: #027a48;
 
   --color-terminal-bg: var(--color-neutral-50);
   --color-terminal-fg: var(--color-neutral-950);
@@ -211,6 +218,13 @@
   --color-tooltip-foreground: var(--color-neutral-50);
   --color-find-highlight: #713f12;
   --color-find-highlight-active: #a16207;
+  --color-code-comment: #98a2b3;
+  --color-code-keyword: #f97066;
+  --color-code-string: #84ca9c;
+  --color-code-number: #84adff;
+  --color-code-title: #cdb4ff;
+  --color-code-variable: #ffb870;
+  --color-code-tag: #8ce6ae;
 
   --color-terminal-bg: var(--color-neutral-950);
   --color-terminal-fg: var(--color-neutral-50);
@@ -259,7 +273,7 @@
   --ambient-c2: var(--color-background);
   --bg-ambient: none;
 
-  --text-1: var(--color-neutral-950);
+  --text-1: var(--color-foreground);
   --text-2: var(--color-foreground-subtle);
   --text-3: var(--color-foreground-subtlest);
 
@@ -292,6 +306,9 @@
 }
 
 :root[data-theme="dark"] {
+  --text-1: var(--color-foreground);
+  --text-2: var(--color-foreground-subtle);
+  --text-3: var(--color-foreground-subtlest);
   --bg-overlay: rgba(0, 0, 0, 0.6);
   --accent-hover: var(--color-white);
   --border-light: color-mix(in oklab, var(--color-neutral-50) 5%, transparent);

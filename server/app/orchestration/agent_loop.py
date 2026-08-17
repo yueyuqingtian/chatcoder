@@ -7,6 +7,7 @@
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -39,6 +40,20 @@ def _truncate_output(text: str, limit: int = MAX_TOOL_OUTPUT_CHARS) -> str:
         return text
     half = limit // 2
     return text[:half] + f"\n\n... [已截断,原始 {len(text)} 字符] ...\n\n" + text[-half:]
+
+
+# v19: 部分网关把思考内容以 <thinking>…</thinking> 标签混入正文文本，
+# 落库/广播前剥离，思考部分并入 thinking 消息（ThinkingBlock 展示），正文只保留干净文本。
+_INLINE_THINKING_RE = re.compile(r"<(?:thinking|thought)>(.*?)</(?:thinking|thought)>", re.DOTALL | re.IGNORECASE)
+
+
+def _split_inline_thinking(text: str) -> tuple[str, str]:
+    """剥离正文中的内联思考标签，返回 (干净正文, 思考内容)。"""
+    if not text or ("<thinking" not in text.lower() and "<thought" not in text.lower()):
+        return text or "", ""
+    parts = _INLINE_THINKING_RE.findall(text)
+    clean = _INLINE_THINKING_RE.sub("", text).strip()
+    return clean, "\n".join(p.strip() for p in parts if p.strip())
 
 
 def _truncate_args(args: dict, limit: int = 800) -> str:
@@ -231,7 +246,7 @@ async def run_agent_loop(
                     api_messages = build_api_copy(messages, fold_budget_tokens=int(agent_window * settings.api_copy_fold_ratio))
                     _est_after = int(_est_tokens(api_messages) * _calib_factor)
                     logger.info("[agent] turn=%s step=%s 前置压缩后 prompt=%d -> %d", turn_id, step, _est_prompt, _est_after)
-                    await broadcast(session_id, {"event": "usage.update", "payload": {"agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id, "prompt_tokens": _est_after, "completion_tokens": 0, "total_tokens": _est_after, "context_window": agent_window, "usage_source": "est_after_compact", "cached_input_tokens": 0, "reasoning_tokens": 0}})
+                    await broadcast(session_id, {"event": "usage.update", "payload": {"agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id, "prompt_tokens": _est_after, "completion_tokens": 0, "total_tokens": _est_after, "context_window": agent_window, "usage_source": "est_after_compact", "cached_input_tokens": 0, "reasoning_tokens": 0, "agent_kind": agent.kind}})
                     await broadcast(session_id, {"event": "compact.completed", "payload": {"agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id}})
                 else:
                     logger.debug("[agent] turn=%s step=%s 前置估算 prompt=%d (raw=%d calib=%.3f) < 阈值 %d，不压缩", turn_id, step, _est_prompt, _est_raw, _calib_factor, _pre_threshold)
@@ -285,7 +300,14 @@ async def run_agent_loop(
                     session_id=session_id, turn_id=turn_id,
                     agent_id=agent_id, agent_name=agent_name,
                     cancel_event=cancel_event,
+                    thread_id=thread_id,
                 )
+                # v19: 兜底剥离内联思考标签（流式路径已剥离则为 no-op）
+                if response.content:
+                    _c, _t = _split_inline_thinking(response.content)
+                    if _t:
+                        response.content = _c or None
+                        response.thinking = (response.thinking + "\n" + _t).strip() if response.thinking else _t
                 # v6.4: 流式调用被用户中断 → 立即退出循环
                 if cancel_event and cancel_event.is_set():
                     logger.warning("[agent] turn=%s 流式调用后检测到中断信号，退出循环", turn_id)
@@ -311,6 +333,12 @@ async def run_agent_loop(
                         max_tokens=settings.agent_max_output_tokens or None,
                     )
                     response = await provider.chat(request)
+                    # v19: 紧急压缩非流式重试路径同样剥离内联思考标签
+                    if response.content:
+                        _c, _t = _split_inline_thinking(response.content)
+                        if _t:
+                            response.content = _c or None
+                            response.thinking = (response.thinking + "\n" + _t).strip() if response.thinking else _t
                 except Exception as retry_err:
                     logger.error("[agent] turn=%s 紧急压缩重试失败: %s", turn_id, retry_err)
                     await _emit_agent_msg(db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
@@ -393,6 +421,8 @@ async def run_agent_loop(
                     "cached_input_tokens": getattr(response.usage, 'cached_input_tokens', 0) or 0 if response.usage else 0,
                     "reasoning_tokens": getattr(response.usage, 'reasoning_tokens', 0) or 0 if response.usage else 0,
                     "breakdown": _breakdown,
+                    # v19: 前端圆环仅统计主代理占用，子代理不覆盖
+                    "agent_kind": agent.kind,
                 },
             })
             logger.info(
@@ -735,10 +765,13 @@ async def _emit_agent_msg(db, *, session_id, turn_id, thread_id, agent_id, agent
 
 
 async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, agent_id, agent_name,
-                                     cancel_event: asyncio.Event | None = None):
+                                     cancel_event: asyncio.Event | None = None,
+                                     thread_id: int | None = None):
     """流式调用 provider，实时广播 thinking/content delta。
 
     v6.4: 支持 cancel_event —— 流式输出中检测到中断信号时立即终止，返回已收到的部分内容。
+    v19: 事件 payload 携带 thread_id（子代理线程），前端据此将子代理流式内容分桶到右面板，
+    不再混入主消息流；流式结束后统一剥离正文中的内联 <thinking> 标签。
     """
     from app.models.schemas import ChatResponse, Usage as UsageModel
     full_content = ""
@@ -760,14 +793,16 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
                 full_thinking += delta
                 await broadcast(session_id, {
                     "event": "thinking.delta",
-                    "payload": {"agent_id": agent_id, "turn_id": turn_id, "delta": delta},
+                    "payload": {"agent_id": agent_id, "turn_id": turn_id, "delta": delta,
+                                "thread_id": thread_id},
                 })
             elif event["type"] == "content":
                 delta = event.get("delta", "")
                 full_content += delta
                 await broadcast(session_id, {
                     "event": "token.delta",
-                    "payload": {"agent_id": agent_id, "turn_id": turn_id, "delta": delta},
+                    "payload": {"agent_id": agent_id, "turn_id": turn_id, "delta": delta,
+                                "thread_id": thread_id},
                 })
             elif event["type"] == "done":
                 full_content = event.get("content") or full_content
@@ -788,15 +823,24 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
             finish_reason = response.finish_reason
             usage = response.usage
 
+    # v19: 剥离正文中的内联思考标签（部分网关把思考写进 content）
+    if full_content:
+        _clean, _inline_think = _split_inline_thinking(full_content)
+        if _inline_think:
+            full_thinking = (full_thinking + "\n" + _inline_think).strip() if full_thinking else _inline_think
+            full_content = _clean
+
     if full_thinking:
         await broadcast(session_id, {
             "event": "thinking.done",
-            "payload": {"agent_id": agent_id, "turn_id": turn_id, "full_text": full_thinking},
+            "payload": {"agent_id": agent_id, "turn_id": turn_id, "full_text": full_thinking,
+                        "thread_id": thread_id},
         })
     if full_content:
         await broadcast(session_id, {
             "event": "token.done",
-            "payload": {"agent_id": agent_id, "turn_id": turn_id, "full_text": full_content},
+            "payload": {"agent_id": agent_id, "turn_id": turn_id, "full_text": full_content,
+                        "thread_id": thread_id},
         })
     return ChatResponse(
         content=full_content or None, thinking=full_thinking or None,
@@ -832,11 +876,14 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
             return "No subagents were spawned in this turn."
         results = manager.results()
         if not results:
-            return "No subagents have finished yet."
+            pending = manager.pending_count()
+            return f"No subagents have finished yet ({pending} still running)."
         lines = []
         for r in results:
             status = "completed" if r["status"] == "done" else "failed"
             lines.append(f"- subagent#{r['agent_id']} [{status}] {(r['summary'] or r['error'] or '')[:500]}")
+        if manager.pending_count():
+            lines.append(f"- ({manager.pending_count()} subagents still running)")
         return "Subagent results:\n" + "\n".join(lines)
 
     if tool_name == "spawn_subagent":
@@ -863,15 +910,17 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         task_title = str(args.get("task_title", ""))[:200]
         task_desc = str(args.get("task_description", ""))[:4000]
         acceptance = str(args.get("acceptance_criteria", ""))[:500]
+        # v20: explore=true → 只读探索子代理，结果直接返回给主代理（见下方同步等待）。
+        explore = bool(args.get("explore", False))
         if not task_title:
             return "Error: task_title is required"
 
-        # v10: 子代理数量硬性限制——超过配置上限时拒绝新子代理，
-        # 提示主代理合并子任务或自行串行处理，防止无限拆分资源失控。
+        # v10/v20: 子代理数量硬性限制——超过配置上限时拒绝新子代理。
+        # 按"运行中"数量计（探索子代理完成后不占名额，主代理仍可继续 spawn 实现子任务）。
         from app.core.config import settings
-        if len(manager._handles) >= settings.max_subagents_per_turn:
+        if manager.pending_count() >= settings.max_subagents_per_turn:
             return (
-                f"Error: subagent limit reached (max {settings.max_subagents_per_turn} per turn). "
+                f"Error: subagent limit reached (max {settings.max_subagents_per_turn} running). "
                 "Do not spawn more subagents. Collect the results of already spawned ones "
                 "with collect_results, or perform the remaining work yourself directly."
             )
@@ -906,25 +955,70 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         except Exception:
             logger.warning("[agent] 子任务创建提交/广播失败(非阻塞)", exc_info=True)
 
-        # 构建子代理上下文（独立，仅 handoff + 项目规则）
+        # 构建子代理上下文（v19: 注入用户原始请求 + 主会话摘要，修复继承断裂）
         from app.orchestration.context_manager import build_subagent_context
+        _orig_req = ""
+        try:
+            from app.persistence.models.message import Message
+            _ures = await db.execute(
+                select(Message).where(
+                    Message.session_id == session_id,
+                    Message.sender_type == "user",
+                ).order_by(Message.id.desc()).limit(1)
+            )
+            _um = _ures.scalars().first()
+            if _um and isinstance(_um.content, dict):
+                _orig_req = str(_um.content.get("text") or "")
+        except Exception:
+            _orig_req = ""
         bundle = await build_subagent_context(
             db, agent=sub_agent, session=session, project=project, task=task,
             handoff_summary=task_desc,
+            original_request=_orig_req,
         )
         # 子代理工具范围：全量工具（不含子代理递归工具）
         from app.orchestration.tools.registry import tool_registry
         sub_tools = tool_registry.all_schemas()
 
+        # v20: 探索子代理只读工具（探索 = 调研/阅读/分析，不产生写盘副作用）
+        if explore:
+            from app.orchestration.subagent_tools import EXPLORE_TOOLS
+            explore_schemas = tool_registry.all_schemas(EXPLORE_TOOLS)
+            if explore_schemas:
+                sub_tools = explore_schemas
+
         from app.orchestration.subagent import get_subagent_manager
         mgr = manager or get_subagent_manager(session_id)
+        # v20: explore 子代理同步等待——主代理拿结论后继续串行整合，
+        # 避免主代理把"等待"变成反复轮询 collect_results 的空转。
+        if explore:
+            await broadcast(session.id, {
+                "event": "agent.started",
+                "payload": {"agent_id": sub_agent.id, "kind": "sub",
+                            "name": sub_agent.name, "turn_id": turn_id},
+            })
+            handle = await mgr.spawn_and_wait(
+                db, agent=sub_agent, turn_id=turn_id, task=task,
+                handoff_summary=task_desc, context_bundle=bundle,
+                tool_schemas=sub_tools, workspace=workspace,
+                cancel_event=cancel_event,
+            )
+            if handle is not None and handle.status == "done":
+                return (
+                    f"Exploration subagent #{sub_agent.id} finished for: {task_title}.\n"
+                    f"Findings:\n{(handle.findings or handle.summary or '')[:4000]}"
+                )
+            return (
+                f"Exploration subagent #{sub_agent.id} failed for: {task_title}.\n"
+                f"Error: {(handle.error if handle else 'unknown')[:1000]}"
+            )
         sub_agent_id = mgr.spawn(
             db, agent=sub_agent, turn_id=turn_id, task=task,
             handoff_summary=task_desc, context_bundle=bundle,
             tool_schemas=sub_tools, workspace=workspace,
             cancel_event=cancel_event,
         )
-        await broadcast(session_id, {
+        await broadcast(session.id, {
             "event": "agent.started",
             "payload": {"agent_id": sub_agent_id, "kind": "sub",
                         "name": sub_agent.name, "turn_id": turn_id},

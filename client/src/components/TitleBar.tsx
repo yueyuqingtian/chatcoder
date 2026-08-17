@@ -5,12 +5,12 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
-import { usePanelStore } from "../store/panel";
 import { useChatStore } from "../store/chat";
+import { usePanelStore } from "../store/panel";
 import { ConfirmDialog } from "./ConfirmDialog";
 import {
   IconMinus, IconSquare, IconX, IconFolder,
-  IconCheckSquare, IconArrowToggle, IconGitBranch,
+  IconGitBranch, IconTerminal,
   IconMoreHorizontal, IconPanelLeft, IconPanelRight,
   IconChevronLeft, IconChevronRight,
 } from "./icons";
@@ -23,8 +23,6 @@ interface TitleBarProps {
 }
 
 export function TitleBar({ leftCollapsed, rightCollapsed, onToggleLeft, onToggleRight }: TitleBarProps) {
-  const taskCardVisible = usePanelStore((s) => s.taskCardVisible);
-  const toggleTaskCard = usePanelStore((s) => s.toggleTaskCard);
   const currentSessionId = useChatStore((s) => s.currentSessionId);
   const sessions = useChatStore((s) => s.sessions);
   const projects = useChatStore((s) => s.projects);
@@ -70,21 +68,17 @@ export function TitleBar({ leftCollapsed, rightCollapsed, onToggleLeft, onToggle
   return (
     <div className={`titlebar title-drag-region${leftCollapsed ? " left-collapsed" : ""}`}>
       <div className="titlebar-left title-no-drag">
-        {/* 侧栏折叠时：logo 与前进/后退移到标题栏左侧（zcode 同款） */}
+        {/* 侧栏折叠时：logo 与前进/后退 + 展开按钮移到标题栏左侧（展开态折叠入口在侧栏头部） */}
         {leftCollapsed && (
           <>
             <span className="sb-logo" title="chatcoder">C</span>
+            <button className="titlebar-btn collapsed" onClick={onToggleLeft} title="展开侧栏 (Ctrl+B)">
+              <IconPanelLeft size={15} />
+            </button>
             <button className="sb-nav-arrow" disabled={!canBack} onClick={() => histGo(-1)} title="后退"><IconChevronLeft size={15} /></button>
             <button className="sb-nav-arrow" disabled={!canForward} onClick={() => histGo(1)} title="前进"><IconChevronRight size={15} /></button>
           </>
         )}
-        <button
-          className={`titlebar-btn${leftCollapsed ? " collapsed" : ""}`}
-          onClick={onToggleLeft}
-          title={leftCollapsed ? "展开侧栏 (Ctrl+B)" : "收起侧栏 (Ctrl+B)"}
-        >
-          <IconPanelLeft size={15} />
-        </button>
       </div>
 
       <div className="titlebar-workspace title-no-drag">
@@ -142,13 +136,9 @@ export function TitleBar({ leftCollapsed, rightCollapsed, onToggleLeft, onToggle
         <button className="titlebar-btn titlebar-folder" onClick={openWorkspaceFolder} title="打开工作区目录" disabled={!project?.path}>
           <IconFolder size={15} />
         </button>
-        <button
-          className={`app-pane-toggle titlebar-btn${taskCardVisible ? "" : " collapsed"}`}
-          onClick={toggleTaskCard}
-          title={taskCardVisible ? "收起任务卡" : "展开任务卡"}
-        >
-          <IconCheckSquare size={14} />
-          <IconArrowToggle open={taskCardVisible} size={12} />
+        {/* v19: 终端入口移至顶栏右上 */}
+        <button className="titlebar-btn" onClick={() => usePanelStore.getState().openNewTab("terminal")} title="打开终端 (Ctrl+J)">
+          <IconTerminal size={14} />
         </button>
         <button
           className={`app-pane-toggle titlebar-btn${rightCollapsed ? " collapsed" : ""}`}
@@ -156,7 +146,6 @@ export function TitleBar({ leftCollapsed, rightCollapsed, onToggleLeft, onToggle
           title={rightCollapsed ? "展开任务栏" : "收起任务栏"}
         >
           <IconPanelRight size={14} />
-          <IconArrowToggle open={!rightCollapsed} size={12} />
         </button>
         <span className="titlebar-sep" />
         <button className="titlebar-btn" onClick={() => winApi?.minimizeWindow?.()} title="最小化" disabled={!winApi}>

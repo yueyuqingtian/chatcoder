@@ -50,11 +50,11 @@ export class ErrorBoundary extends Component<Props, State> {
             background: "var(--bg, #fff)",
           }}
         >
-          <div style={{ display: "flex", color: "var(--warning, #d98014)" }}><IconAlertTriangle size={48} strokeWidth={1.5} /></div>
+          <div style={{ display: "flex", color: "var(--warning)" }}><IconAlertTriangle size={48} strokeWidth={1.5} /></div>
           <h1 style={{ fontSize: "20px", fontWeight: 600, margin: 0 }}>
             应用遇到意外错误
           </h1>
-          <p style={{ fontSize: "14px", color: "var(--text-muted, #666)", maxWidth: "500px", textAlign: "center" }}>
+          <p style={{ fontSize: "14px", color: "var(--text-2)", maxWidth: "500px", textAlign: "center" }}>
             {this.state.error?.message || "未知错误"}
           </p>
           <button

@@ -172,6 +172,8 @@ async def create_mcp(body: McpCreate, db: AsyncSession = Depends(get_db)):
         description=body.description, source=body.source, transport=body.transport,
         command=body.command, args=body.args, env=body.env, url=body.url,
         is_active=body.is_active,
+        # v6.5: 导入（is_active=false）不阻塞握手；仅手动创建并直接启用时才拉取工具列表
+        fetch_tools=body.is_active,
     )
     await db.commit()
     return mcp_to_dict(server)

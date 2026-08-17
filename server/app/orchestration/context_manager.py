@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.schemas import ChatMessage
 from app.orchestration.prompts import build_main_system_prompt, build_subagent_system_prompt
 from app.orchestration.rules_loader import load_session_rules, project_structure_brief
+from app.orchestration.tools.shell_env import shell_hint
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +176,8 @@ async def build_main_context(
         "Use tools via structured function calls. Never describe tool actions in natural language.\n"
         f"All paths are relative to the working directory: {workspace}."
     )
+    # v1.2: 注入 shell 环境说明，避免 agent 用错 shell 语法（Get-ChildItem/grep/… 报错）
+    ws_ctx += "\n\n" + shell_hint()
     bundle.developer_parts.append(ws_ctx)
     # 3. Git Repos（并入结构摘要）
     structure = await project_structure_brief(workspace)
@@ -400,24 +403,42 @@ async def build_main_context(
 async def build_subagent_context(
     db: AsyncSession, *, agent, session, project, task,
     handoff_summary: str,
+    original_request: str = "",
 ) -> ContextBundle:
-    """构建子代理上下文（独立，仅看交接摘要 + 项目规则）。"""
+    """构建子代理上下文（交接摘要 + 用户原始请求 + 主会话摘要 + 项目规则）。
+
+    v19: 修复上下文继承断裂——子代理此前仅能看到 handoff 摘要，不知道用户
+    原始诉求与主会话进展；现注入 original_request 与主会话 shared_context 摘要。
+    """
     workspace = session.worktree_path or (project.path if project else "")
     bundle = ContextBundle(
         system=build_subagent_system_prompt(task.title or "", task.acceptance_criteria or ""),
         instruction=f"Start working on: {task.title}",
     )
+    if original_request:
+        bundle.developer_parts.append(f"## Original User Request\n{original_request[:2000]}")
     bundle.developer_parts.append(f"## Current Task\nTitle: {task.title}")
     if task.description:
         bundle.developer_parts.append(f"Description: {task.description}")
     if handoff_summary:
         bundle.developer_parts.append(f"## Handoff Summary (from main agent)\n{handoff_summary}")
+    # v19: 主会话摘要（历史对话压缩产物），让子代理了解整体进展
+    try:
+        _ctx = getattr(session, "shared_context", None) or {}
+        if isinstance(_ctx, dict):
+            _summary = (_ctx.get("summary") or "").strip()
+            if _summary:
+                bundle.developer_parts.append(f"## Main Session Summary\n{_summary[:2000]}")
+    except Exception:
+        logger.debug("[context] 读取主会话摘要失败(非阻塞)", exc_info=True)
     ws_ctx = f"Working directory: {workspace}"
     ws_ctx += (
         "\n\n## Tool Usage Rules\n"
         "Use tools via structured function calls. Never describe tool actions in natural language.\n"
         f"All paths are relative to the working directory: {workspace}."
     )
+    # v1.2: 注入 shell 环境说明（与主代理一致，防止用错 shell 语法）
+    ws_ctx += "\n\n" + shell_hint()
     bundle.developer_parts.append(ws_ctx)
     rules = await load_session_rules(workspace, project.rules_docs if project else None)
     if rules:

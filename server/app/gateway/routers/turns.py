@@ -255,7 +255,19 @@ async def get_snapshot(turn_id: int, db: AsyncSession = Depends(get_db)):
 async def list_messages(session_id: int, thread_id: int | None = None,
                         db: AsyncSession = Depends(get_db)):
     # v2.2 (对齐 zcode 3.13): thread_id 过滤——子代理详情面板数据源
-    msgs = await message_service.list_messages(db, session_id, thread_id=thread_id)
+    # v19: 主消息流（thread_id 缺省）仅返回主线程消息，子代理线程消息不再混入主时间线
+    if thread_id is None:
+        from app.persistence.models.message import Message
+        res = await db.execute(
+            select(Message).where(
+                Message.session_id == session_id,
+                Message.thread_id.is_(None),
+                Message.deleted == False,  # noqa: E712
+            ).order_by(Message.id.asc())
+        )
+        msgs = list(res.scalars().all())
+    else:
+        msgs = await message_service.list_messages(db, session_id, thread_id=thread_id)
     return [
         MessageOut(
             id=m.id, session_id=m.session_id, turn_id=m.turn_id, thread_id=m.thread_id,
@@ -264,6 +276,32 @@ async def list_messages(session_id: int, thread_id: int | None = None,
             created_at=str(m.created_at) if m.created_at else None,
         ) for m in msgs
     ]
+
+
+@router.get("/sessions/{session_id}/subagents", response_model=list[dict])
+async def list_session_subagents(session_id: int, turn_id: int | None = None,
+                                 db: AsyncSession = Depends(get_db)):
+    """v19: 会话子代理列表（kind=sub），左联 Task 取状态——前端消息流子代理卡片重建数据源。"""
+    from app.persistence.models.agent import Agent
+    from app.persistence.models.task import Task
+    stmt = select(Agent, Task).outerjoin(
+        Task, Task.agent_id == Agent.id
+    ).where(Agent.session_id == session_id, Agent.kind == "sub")
+    if turn_id is not None:
+        stmt = stmt.where(Agent.turn_id == turn_id)
+    stmt = stmt.order_by(Agent.id.asc())
+    res = await db.execute(stmt)
+    out: list[dict] = []
+    for agent, task in res.all():
+        out.append({
+            "agent_id": agent.id,
+            "name": agent.name or f"子代理 #{agent.id}",
+            "turn_id": agent.turn_id,
+            "task_id": task.id if task else None,
+            "task_title": task.title if task else None,
+            "status": (task.status if task else None) or "running",
+        })
+    return out
 
 
 @router.get("/sessions/{session_id}/usage")
@@ -464,7 +502,8 @@ async def confirm_task_plan(turn_id: int, group_id: int, body: TaskConfirmBody,
         from app.persistence.database import async_session_factory
         async with async_session_factory() as session_db:
             try:
-                await engine.execute_confirmed_plan(session_db, turn_id=turn_id, group_id=group_id)
+                # v20: 拆分确认后走"探索并行 + 主代理串行"编排
+                await engine.execute_split_then_main(session_db, turn_id=turn_id, group_id=group_id)
             except Exception:
                 await session_db.rollback()
                 logger.exception("确认任务执行失败 turn=%s group=%s", turn_id, group_id)

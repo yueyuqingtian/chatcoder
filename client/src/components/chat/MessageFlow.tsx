@@ -1,78 +1,40 @@
-/** MessageFlow（v6 虚拟化重写）：消息流容器。
- * - 改用 @tanstack/react-virtual 虚拟化列表，仅渲染可视区消息，解决大量消息时拖拽/折叠卡死。
- * - 动态高度：measureElement + ResizeObserver 自动测量。
- * - 滚动策略：靠近底部自动跟随（流式/新消息），不在底部由用户滚动。
- * - 左侧 JumpDots、Ctrl+F 会话内搜索保留。
+/** MessageFlow（v20 插件化重写）：消息流公共插件。
+ * - source="main"（默认）：主会话全局 store 数据，全功能（虚拟化/搜索/JumpDots/计划卡/流式）。
+ * - source="subagent"：子代理线程数据（threadId 读 store 桶 + REST 历史合并去重），
+ *   窄面板排版，关闭 JumpDots/搜索/计划卡，操作仅复制。
+ * 共享内核 MessageFlowCore：虚拟化 + 贴底滚动 + 跳底按钮 + 入场动画 + 搜索 + JumpDots，
+ * 与参考项目「同一渲染引擎 + 数据注入」对齐——中间面板与右面板共用同一注册插件。
  */
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, memo } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, memo, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { TimelineEntry } from "./timeline";
 import { buildTimeline, msgText } from "./timeline";
 import { TurnGroup } from "./TurnGroup";
 import { JumpDots } from "./JumpDots";
-import { IconSearch, IconChevronUp, IconChevronDown, IconX, IconArrowDown, IconBrain, IconClipboard } from "../icons";
+import { StreamingText } from "./StreamingText";
+import { IconSearch, IconChevronUp, IconChevronDown, IconX, IconArrowDown, IconClipboard } from "../icons";
 import { MarkdownContent } from "../MarkdownContent";
 import { MsgType } from "@chatcoder/shared";
 import { useChatStore } from "../../store/chat";
 import { usePanelStore } from "../../store/panel";
+import { api, type MessageOut } from "../../api/client";
 
-/** 流式展示（thinking/token delta 实时渲染），作为虚拟列表最后一个虚拟项。
- * v7: 当前轮次的"思考中"以思考块形式实时显示在列表最底部（正在进行的动作），
- * 上面已完成的历史按时间顺序排列——不会出现"上面在思考、下面已有消息/工具调用"的错位观感。
- */
-function StreamingText() {
-  const buffers = useChatStore((s) => s.streamingBuffers);
-  const thinkingBuffers = useChatStore((s) => s.thinkingBuffers);
-  const runningTurnId = useChatStore((s) => s.runningTurnId);
-  const isRunning = useChatStore((s) => s.isRunning);
-  const bodyRef = useRef<HTMLDivElement>(null);
-  const thinkingText = Object.values(thinkingBuffers).join("").trim();
-  const text = Object.values(buffers).join("");
-
-  // 思考流自动滚到底部（zcode 风格）
-  useEffect(() => {
-    const el = bodyRef.current;
-    if (el && thinkingText) {
-      el.scrollTop = el.scrollHeight;
-    }
-  }, [thinkingText]);
-
-  if (!isRunning || !runningTurnId) return null;
-
-  return (
-    <div className="turn-group" style={{ minHeight: "36px", paddingBottom: 8 }}>
-      {/* 当前轮次思考中：实时思考内容（思考落库后此块消失，思考块按时间顺序出现在消息流中） */}
-      {thinkingText && (
-        <div className="thinking-block active open">
-          <div className="thinking-block-head" style={{ cursor: "default" }}>
-            <span className="thinking-block-icon"><IconBrain size={12} /></span>
-            <span className="thinking-block-title">
-              <span className="thinking-block-breath" />
-              <span className="thinking-block-status">思考中…</span>
-            </span>
-            <span className="thinking-block-chev" />
-          </div>
-          <div className="thinking-block-body" ref={bodyRef} style={{ maxHeight: 160, overflowY: "auto" }}>
-            <pre className="thinking-block-content">{thinkingText}</pre>
-          </div>
-        </div>
-      )}
-      {text && (
-        <div className="turn-item turn-item-text">
-          <div className="turn-agent-text">
-            <MarkdownContent>{text}</MarkdownContent>
-            <span className="stream-caret"><i /><i /><i /></span>
-          </div>
-        </div>
-      )}
-      {!thinkingText && (
-        <div className="turn-status-line">
-          <span className="thinking-block-breath" style={{ marginRight: 6 }} />
-          <span className="thinking-block-status">{text ? "处理中…" : "等待响应…"}</span>
-        </div>
-      )}
-    </div>
-  );
+/** v20: message-flow 插件数据契约——宿主（中间面板/右面板）经 PluginSlot props 注入。 */
+export interface MessageStreamProps {
+  /** 数据源模式：main=主会话全局 store；subagent=子代理线程（按 threadId 取 store 桶） */
+  source?: "main" | "subagent";
+  /** subagent 模式必填：线程 id（=agentId），用于读取 subagentMessages/Thinking/Streams 与 REST 历史 */
+  threadId?: number;
+  /** 功能开关（缺省按模式：main 全开；subagent 关闭 JumpDots/搜索/计划卡，操作仅复制） */
+  features?: {
+    jumpDots?: boolean;
+    search?: boolean;
+    planCard?: boolean;
+    /** 消息操作行能力：full=完整（赞踩/重试/回滚）；copy-only=仅复制；none=无操作行 */
+    actions?: "full" | "copy-only" | "none";
+  };
+  /** 容器附加类名（子代理面板窄版适配） */
+  className?: string;
 }
 
 const StandaloneEntry = memo(function StandaloneEntry({ entry }: { entry: Extract<TimelineEntry, { kind: "standalone" }> }) {
@@ -99,9 +61,9 @@ const StandaloneEntry = memo(function StandaloneEntry({ entry }: { entry: Extrac
   );
 });
 
-/** 计划确认卡（对齐 zcode 图6）：plan 模式 turn 完成后内嵌在消息流底部展示，
- *  「查看完整计划 →」打开右侧文件预览，确认执行/取消。 */
+/** 计划确认卡（主界面专属）：plan 模式 turn 完成后内嵌在消息流底部展示。 */
 function PlanCard() {
+  const [expanded, setExpanded] = useState(false);
   const pendingPlan = useChatStore((s) => s.pendingPlan);
   const confirmPlan = useChatStore((s) => s.confirmPlan);
   const dismissPlan = useChatStore((s) => s.dismissPlan);
@@ -112,7 +74,8 @@ function PlanCard() {
         <div className="plan-inline-head">
           <IconClipboard size={13} /> 计划
         </div>
-        <div className="plan-inline-title">{pendingPlan.task}</div>
+        <button type="button" className="plan-inline-title" onClick={() => setExpanded((v) => !v)} aria-expanded={expanded}>{pendingPlan.task}</button>
+        {expanded && <div className="plan-inline-preview"><code>ai/chatcoder-plan.md</code><br />展开右侧文件面板可查看完整计划内容。</div>}
         <div className="plan-inline-desc">
           AI 已在项目根目录 <code>ai/</code> 目录生成计划文档 <code>chatcoder-plan.md</code>，请审阅后确认是否按计划执行。
         </div>
@@ -136,31 +99,164 @@ function PlanCard() {
   );
 }
 
-export function MessageFlow() {
-  const messages = useChatStore((s) => s.messages);
-  const currentSessionId = useChatStore((s) => s.currentSessionId);
-  const runningTurnId = useChatStore((s) => s.runningTurnId);
-  const isRunning = useChatStore((s) => s.isRunning);
-  const scrollTarget = useChatStore((s) => s.scrollTarget);
-  const clearScrollTarget = useChatStore((s) => s.clearScrollTarget);
-  // v12: 已回滚 turn 标识（时间线横幅 + 产物灰置）
-  const turns = useChatStore((s) => s.turns);
-  const streamingBuffers = useChatStore((s) => s.streamingBuffers);
-  const thinkingBuffers = useChatStore((s) => s.thinkingBuffers);
-  const hasPlanCard = useChatStore((s) => s.pendingPlan != null);
+/** v20: 消息流共享内核——虚拟化 + 贴底滚动跟随 + 跳底按钮 + 入场动画 + 搜索 + JumpDots。
+ * 主会话与子代理面板共用；宿主差异（数据源/功能开关/空态文案）经 props 注入。 */
+interface MessageFlowCoreProps {
+  entries: TimelineEntry[];
+  /** 是否运行中（决定流式占位与贴底策略） */
+  running: boolean;
+  /** 渲染单条 entry（外层闭包提供 TurnGroup/StandaloneEntry 与各模式差异） */
+  renderEntry: (entry: TimelineEntry, index: number) => ReactNode;
+  /** 运行中尾部（StreamingText），占虚拟列表最后一项 */
+  streamingNode: ReactNode | null;
+  /** 额外尾部（如计划卡），占最后一项 */
+  trailingNode?: ReactNode | null;
+  /** 会话标识：变化时强制跳底（主界面传 currentSessionId，子代理传 threadId） */
+  sessionKey: string | number;
+  /** 流式信号：内容变化时贴底跟随（避免整对象依赖） */
+  streamSignal: string;
+  /** 功能开关（默认按模式由外层传入） */
+  jumpDots?: boolean;
+  search?: boolean;
+  /** 滚动目标（主界面任务卡点击穿透 / turn 导航） */
+  scrollTarget?: { threadId?: number; turnId?: number } | null;
+  clearScrollTarget?: () => void;
+  /** 容器附加类名 */
+  className?: string;
+  /** 空态文案（entries 为空且未运行） */
+  emptyText: string;
+}
+
+function MessageFlowCore({
+  entries, running, renderEntry, streamingNode, trailingNode = null,
+  sessionKey, streamSignal, jumpDots = true, search = true,
+  scrollTarget = null, clearScrollTarget, className, emptyText,
+}: MessageFlowCoreProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [matchIdx, setMatchIdx] = useState(0);
-  // 是否贴近底部（驱动"跳转底部"悬浮按钮显隐，与 nearBottomRef 同步）
   const [nearBottom, setNearBottom] = useState(true);
-  // 已见过的时间线条目 key：入场动画只对真正新增的条目播放一次，
-  // 虚拟列表滚动导致的重挂载不会重播（key 已在集合中）。
   const seenKeysRef = useRef<Set<string>>(new Set());
 
-  const entries = useMemo(() => buildTimeline(messages), [messages]);
+  // 虚拟化：count = entries + 运行中 StreamingText 占位 + 额外尾部占位
+  const count = entries.length + (running ? 1 : 0) + (trailingNode ? 1 : 0);
 
-  // v2.2: 任务卡步骤点击穿透——按 scrollTarget 滚动到对应条目
+  const entryKeyAt = useCallback((index: number): string =>
+    index < entries.length
+      ? (entries[index].kind === "turn" ? `turn-${entries[index].turnId ?? index}` : `std-${entries[index].msg.id ?? index}`)
+      : (index === entries.length && running ? "streaming" : "trailing"),
+  [entries, running]);
+
+  const virtualizer = useVirtualizer({
+    count,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 120,
+    overscan: 8,
+    getItemKey: entryKeyAt,
+  });
+
+  // 统一滚动管理：靠近底部自动跟随，否则由用户滚动
+  const prevCount = useRef(0);
+  const prevRunning = useRef(false);
+  const prevSessionRef = useRef<string | number | null>(null);
+  const nearBottomRef = useRef(true);
+  const lastScrollTsRef = useRef(0);
+
+  const scrollToBottom = useCallback(() => {
+    if (entries.length === 0) return;
+    nearBottomRef.current = true; // 锁定贴底
+    setNearBottom(true);
+    virtualizer.scrollToIndex(entries.length - 1, { align: "end" });
+    requestAnimationFrame(() => {
+      const el = scrollRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+  }, [entries.length, virtualizer]);
+
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    nearBottomRef.current = near;
+    setNearBottom((prev) => (prev === near ? prev : near));
+  }, []);
+
+  // 虚拟列表测量更新时保持贴底（进入会话即显示最底部，全程无滚动动画）
+  const totalSize = virtualizer.getTotalSize();
+  useLayoutEffect(() => {
+    if (nearBottomRef.current && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [totalSize]);
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    if (prevSessionRef.current !== sessionKey) {
+      prevSessionRef.current = sessionKey;
+      prevCount.current = entries.length;
+      prevRunning.current = running;
+      scrollToBottom();
+      return;
+    }
+
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    nearBottomRef.current = nearBottom;
+
+    const newEntries = entries.length > prevCount.current;
+    const justStarted = running && !prevRunning.current;
+    const streaming = running && nearBottom;
+
+    if (streaming) {
+      const now = performance.now();
+      if (now - lastScrollTsRef.current >= 16) {
+        lastScrollTsRef.current = now;
+        el.scrollTop = el.scrollHeight;
+      }
+    } else if (newEntries || justStarted) {
+      if (prevCount.current === 0) {
+        scrollToBottom();
+      } else {
+        requestAnimationFrame(() => {
+          if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+        });
+      }
+    }
+
+    prevCount.current = entries.length;
+    prevRunning.current = running;
+  }, [sessionKey, entries.length, running, streamSignal, virtualizer, scrollToBottom]);
+
+  const jumpToEntry = useCallback((entry: TimelineEntry) => {
+    const idx = entries.findIndex((e) => e === entry);
+    if (idx >= 0) virtualizer.scrollToIndex(idx, { align: "start" });
+  }, [entries, virtualizer]);
+
+  const matches = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return [] as number[];
+    const out: number[] = [];
+    entries.forEach((e, i) => {
+      const text = e.kind === "turn"
+        ? e.items.map((it) => (it.kind === "user" || it.kind === "text" || it.kind === "summary" || it.kind === "thinking" ? msgText(it.msg.content) : "")).join(" ")
+        : msgText(e.msg.content);
+      if (text.toLowerCase().includes(q)) out.push(i);
+    });
+    return out;
+  }, [entries, query]);
+
+  const gotoMatch = (dir: 1 | -1) => {
+    if (matches.length === 0) return;
+    setMatchIdx((prev) => {
+      const next = (prev + dir + matches.length) % matches.length;
+      virtualizer.scrollToIndex(matches[next], { align: "start" });
+      return next;
+    });
+  };
+
+  // 滚动目标：任务卡步骤点击穿透 / turn 导航
   useEffect(() => {
     if (!scrollTarget) return;
     const { threadId, turnId } = scrollTarget;
@@ -183,140 +279,15 @@ export function MessageFlow() {
     }
     if (idx >= 0) {
       virtualizer.scrollToIndex(idx, { align: "start" });
-      // 滚动完成后清除目标（避免重复触发）
-      window.setTimeout(() => clearScrollTarget(), 800);
+      window.setTimeout(() => clearScrollTarget?.(), 800);
     } else {
-      clearScrollTarget();
+      clearScrollTarget?.();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scrollTarget]);
 
-  const matches = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return [] as number[];
-    const out: number[] = [];
-    entries.forEach((e, i) => {
-      const text = e.kind === "turn"
-        ? e.items.map((it) => (it.kind === "user" || it.kind === "text" || it.kind === "summary" || it.kind === "thinking" ? msgText(it.msg.content) : "")).join(" ")
-        : msgText(e.msg.content);
-      if (text.toLowerCase().includes(q)) out.push(i);
-    });
-    return out;
-  }, [entries, query]);
-
-  // 虚拟化：count = entries + 运行中的 StreamingText 占位 + 计划确认卡占位
-  const count = entries.length + (isRunning ? 1 : 0) + (hasPlanCard ? 1 : 0);
-
-  // 条目 key（虚拟列表 key 与"新条目入场"追踪共用）
-  const entryKeyAt = useCallback((index: number): string =>
-    index < entries.length
-      ? (entries[index].kind === "turn" ? `turn-${entries[index].turnId ?? index}` : `std-${entries[index].msg.id ?? index}`)
-      : (index === entries.length && isRunning ? "streaming" : "plan-card"),
-  [entries, isRunning]);
-
-  const virtualizer = useVirtualizer({
-    count,
-    getScrollElement: () => scrollRef.current,
-    estimateSize: () => 120,
-    overscan: 8,
-    getItemKey: entryKeyAt,
-  });
-
-  // 统一滚动管理：靠近底部自动跟随，否则由用户滚动
-  const prevCount = useRef(0);
-  const prevRunning = useRef(false);
-  const prevSessionRef = useRef<number | null>(null);
-  const nearBottomRef = useRef(true);
-  const lastScrollTsRef = useRef(0);
-
-  const scrollToBottom = useCallback(() => {
-    if (entries.length === 0) return;
-    nearBottomRef.current = true; // 锁定贴底
-    setNearBottom(true);
-    virtualizer.scrollToIndex(entries.length - 1, { align: "end" });
-    // 双保险：虚拟列表测量完成后再次贴底
-    requestAnimationFrame(() => {
-      const el = scrollRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
-    });
-  }, [entries.length, virtualizer]);
-
-  // 用户手动滚动：离开底部则解锁自动贴底，之后新消息不再打扰
-  const handleScroll = useCallback(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-    nearBottomRef.current = near;
-    setNearBottom((prev) => (prev === near ? prev : near));
-  }, []);
-
-  // 虚拟列表测量更新（totalSize 变化）时，若处于贴底锁定状态则保持贴底
-  // 效果：进入会话即显示最底部，全程无滚动动画
-  const totalSize = virtualizer.getTotalSize();
-  useLayoutEffect(() => {
-    if (nearBottomRef.current && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [totalSize]);
-
-  // 使用 useLayoutEffect：在浏览器绘制前完成滚动定位，避免首帧显示顶部再滚动
-  useLayoutEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-
-    // 会话切换或刷新后首次加载：无论消息数增减都直接跳到对话最底部
-    if (prevSessionRef.current !== currentSessionId) {
-      prevSessionRef.current = currentSessionId;
-      prevCount.current = entries.length;
-      prevRunning.current = isRunning;
-      scrollToBottom();
-      return;
-    }
-
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-    nearBottomRef.current = nearBottom;
-
-    const newEntries = entries.length > prevCount.current;
-    const justStarted = isRunning && !prevRunning.current;
-    const streaming = isRunning && nearBottom;
-
-    if (streaming) {
-      // 流式输出用时间节流，避免鬼畜抖动
-      const now = performance.now();
-      if (now - lastScrollTsRef.current >= 16) {
-        lastScrollTsRef.current = now;
-        el.scrollTop = el.scrollHeight;
-      }
-    } else if (newEntries || justStarted) {
-      if (prevCount.current === 0) {
-        // 首次加载（消息异步到达）：虚拟列表定位更可靠
-        scrollToBottom();
-      } else {
-        requestAnimationFrame(() => {
-          if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-        });
-      }
-    }
-
-    prevCount.current = entries.length;
-    prevRunning.current = isRunning;
-  }, [currentSessionId, entries.length, isRunning, streamingBuffers, thinkingBuffers, virtualizer, scrollToBottom]);
-
-  const jumpToEntry = useCallback((entry: TimelineEntry) => {
-    const idx = entries.findIndex((e) => e === entry);
-    if (idx >= 0) virtualizer.scrollToIndex(idx, { align: "start" });
-  }, [entries, virtualizer]);
-
-  const gotoMatch = (dir: 1 | -1) => {
-    if (matches.length === 0) return;
-    setMatchIdx((prev) => {
-      const next = (prev + dir + matches.length) % matches.length;
-      virtualizer.scrollToIndex(matches[next], { align: "start" });
-      return next;
-    });
-  };
-
   useEffect(() => {
+    if (!search) return;
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
         e.preventDefault();
@@ -326,25 +297,19 @@ export function MessageFlow() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, []);
+  }, [search]);
 
   const renderRow = (index: number) => {
-    if (index < entries.length) {
-      const entry = entries[index];
-      if (entry.kind !== "turn") return <StandaloneEntry entry={entry} />;
-      // v12: 已回滚 turn 显示专用横幅（回滚后消息被软删，以此占位区分「回滚了」与「没执行」）
-      const rolledBack = turns.find((t) => t.id === entry.turnId)?.status === "rolled_back";
-      return <TurnGroup entry={entry} isRunning={runningTurnId === entry.turnId} rolledBack={rolledBack} />;
-    }
-    if (index === entries.length && isRunning) return <StreamingText />;
-    return <PlanCard />;
+    if (index < entries.length) return renderEntry(entries[index], index);
+    if (index === entries.length && running) return streamingNode;
+    return trailingNode;
   };
 
   return (
-    <div className="message-flow-wrap">
-      <JumpDots entries={entries} onJump={jumpToEntry} />
+    <div className={"message-flow-wrap" + (className ? ` ${className}` : "")}>
+      {jumpDots && <JumpDots entries={entries} onJump={jumpToEntry} />}
 
-      {searchOpen && (
+      {search && searchOpen && (
         <div className="mf-search">
           <IconSearch size={12} />
           <input
@@ -372,14 +337,14 @@ export function MessageFlow() {
       )}
 
       <div className="message-flow" ref={scrollRef} onScroll={handleScroll}>
-        {entries.length === 0 && !isRunning ? (
+        {entries.length === 0 && !running ? (
           <div className="mf-empty">
-            <p>选择或创建会话，开始你的任务</p>
+            <p>{emptyText}</p>
           </div>
         ) : (
           <div className="mf-virtual" style={{ height: virtualizer.getTotalSize(), position: "relative", width: "100%" }}>
             {virtualizer.getVirtualItems().map((vi) => {
-              // 新条目入场动画：仅首次出现的 key 挂动画类，虚拟列表重挂载不重播
+              // 新条目入场动画：仅首次出现的 key 挂动画类，虚拟列表滚动重挂载不重播
               const k = String(vi.key);
               const seen = seenKeysRef.current;
               const isNew = vi.index < entries.length && !seen.has(k);
@@ -400,11 +365,166 @@ export function MessageFlow() {
       </div>
 
       {/* 跳转底部：用户向上翻阅历史时出现，点击回到最新消息并恢复自动跟随 */}
-      {!nearBottom && (entries.length > 0 || isRunning) && (
+      {!nearBottom && (entries.length > 0 || running) && (
         <button className="mf-jump-bottom" onClick={scrollToBottom} title="回到底部">
           <IconArrowDown size={14} />
         </button>
       )}
     </div>
   );
+}
+
+/** 主会话数据源（source="main"）：读全局 store，行为与 v19 一致。 */
+function MainMessageFlow({ className }: { className?: string }) {
+  const messages = useChatStore((s) => s.messages);
+  const currentSessionId = useChatStore((s) => s.currentSessionId);
+  const runningTurnId = useChatStore((s) => s.runningTurnId);
+  const isRunning = useChatStore((s) => s.isRunning);
+  const scrollTarget = useChatStore((s) => s.scrollTarget);
+  const clearScrollTarget = useChatStore((s) => s.clearScrollTarget);
+  const turns = useChatStore((s) => s.turns);
+  const subagentMeta = useChatStore((s) => s.subagentMeta);
+  const streamingBuffers = useChatStore((s) => s.streamingBuffers);
+  const thinkingBuffers = useChatStore((s) => s.thinkingBuffers);
+  const hasPlanCard = useChatStore((s) => s.pendingPlan != null);
+
+  const subagentsByTurn = useMemo(() => {
+    const map = new Map<number, Array<{ agentId: number; name: string; status: string }>>();
+    for (const [aid, m] of Object.entries(subagentMeta)) {
+      if (m.turnId == null) continue;
+      const list = map.get(m.turnId) ?? [];
+      list.push({ agentId: Number(aid), name: m.name, status: m.status });
+      map.set(m.turnId, list);
+    }
+    return map;
+  }, [subagentMeta]);
+
+  const entries = useMemo(() => buildTimeline(messages), [messages]);
+
+  const renderEntry = useCallback((entry: TimelineEntry) => {
+    if (entry.kind !== "turn") return <StandaloneEntry entry={entry} />;
+    // v12: 已回滚 turn 显示专用横幅（回滚后消息被软删，以此占位区分「回滚了」与「没执行」）
+    const rolledBack = turns.find((t) => t.id === entry.turnId)?.status === "rolled_back";
+    return (
+      <TurnGroup
+        entry={entry}
+        isRunning={runningTurnId === entry.turnId}
+        rolledBack={rolledBack}
+        subagents={entry.turnId != null ? subagentsByTurn.get(entry.turnId) : undefined}
+      />
+    );
+  }, [turns, runningTurnId, subagentsByTurn]);
+
+  const streamSignal = useMemo(
+    () => Object.values(streamingBuffers).join("") + "|" + Object.values(thinkingBuffers).join(""),
+    [streamingBuffers, thinkingBuffers],
+  );
+  const thinkingText = Object.values(thinkingBuffers).join("").trim();
+  const text = Object.values(streamingBuffers).join("");
+
+  return (
+    <MessageFlowCore
+      entries={entries}
+      running={isRunning}
+      renderEntry={renderEntry}
+      streamingNode={<StreamingText active={Boolean(isRunning && runningTurnId)} thinking={thinkingText} text={text} />}
+      trailingNode={hasPlanCard ? <PlanCard /> : null}
+      sessionKey={currentSessionId ?? 0}
+      streamSignal={streamSignal}
+      jumpDots
+      search
+      scrollTarget={scrollTarget}
+      clearScrollTarget={clearScrollTarget}
+      className={className}
+      emptyText="选择或创建会话，开始你的任务"
+    />
+  );
+}
+
+/** 子代理数据源（source="subagent"）：store 消息桶 + REST 历史合并去重，流式尾部用线程缓冲。 */
+function SubagentMessageFlow({ threadId, actions, className }: {
+  threadId?: number;
+  actions?: "full" | "copy-only" | "none";
+  className?: string;
+}) {
+  const currentSessionId = useChatStore((s) => s.currentSessionId);
+  const liveMessages = useChatStore((s) => (threadId != null ? s.subagentMessages[threadId] : undefined));
+  const meta = useChatStore((s) => (threadId != null ? s.subagentMeta[threadId] : undefined));
+  const thinking = useChatStore((s) => (threadId != null ? s.subagentThinking[threadId] ?? "" : ""));
+  const stream = useChatStore((s) => (threadId != null ? s.subagentStreams[threadId] ?? "" : ""));
+  const [history, setHistory] = useState<MessageOut[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // 首次挂载拉取历史消息（实时桶增量追加，合并去重）
+  useEffect(() => {
+    if (!currentSessionId || threadId == null) return;
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    api.listSessionMessages(currentSessionId, threadId)
+      .then((msgs) => { if (!cancelled) setHistory(msgs); })
+      .catch((e) => { if (!cancelled) setError(String(e)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [currentSessionId, threadId]);
+
+  const messages = useMemo(() => {
+    const seen = new Set<number>();
+    const out: MessageOut[] = [];
+    for (const m of [...(history ?? []), ...(liveMessages ?? [])]) {
+      if (seen.has(m.id)) continue;
+      seen.add(m.id);
+      out.push(m);
+    }
+    out.sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
+    return out;
+  }, [history, liveMessages]);
+
+  const entries = useMemo(() => buildTimeline(messages), [messages]);
+  const running = meta?.status === "running" || meta?.status === "in_progress";
+
+  const renderEntry = useCallback((entry: TimelineEntry, index: number) => {
+    if (entry.kind !== "turn") return <StandaloneEntry entry={entry} />;
+    return (
+      <TurnGroup
+        entry={entry}
+        isRunning={running && index === entries.length - 1}
+        actions={actions ?? "copy-only"}
+      />
+    );
+  }, [running, entries.length, actions]);
+
+  if (threadId == null) return <div className="mf-empty"><p>未指定子代理</p></div>;
+  if (loading && messages.length === 0) return <div className="mf-empty"><p>加载子代理消息流…</p></div>;
+  if (error && messages.length === 0) return <div className="mf-empty"><p>加载失败：{error}</p></div>;
+
+  return (
+    <MessageFlowCore
+      entries={entries}
+      running={running}
+      renderEntry={renderEntry}
+      streamingNode={running ? <StreamingText active thinking={thinking} text={stream} /> : null}
+      sessionKey={threadId}
+      streamSignal={thinking + "|" + stream}
+      jumpDots={false}
+      search={false}
+      className={className}
+      emptyText="该子代理暂无消息"
+    />
+  );
+}
+
+/** 插件入口：按 source 分发数据源（主会话全局 store / 子代理线程桶）。 */
+export function MessageFlow(props: MessageStreamProps) {
+  if (props.source === "subagent") {
+    return (
+      <SubagentMessageFlow
+        threadId={props.threadId}
+        actions={props.features?.actions}
+        className={props.className}
+      />
+    );
+  }
+  return <MainMessageFlow className={props.className} />;
 }

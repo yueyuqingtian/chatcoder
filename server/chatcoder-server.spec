@@ -17,7 +17,7 @@ SERVER_DIR = Path(SPECPATH).resolve()
 # 打包产物运行时 pydantic-settings 自动从环境变量 / 工作目录 .env 读取配置，
 # 未配置默认模型时用户在应用设置中添加 BYOK 模型即可。
 datas = [
-    (str(SERVER_DIR / ".env.example"), ".env.example"),
+    (str(SERVER_DIR.parent / ".env.example"), ".env.example"),
 ]
 
 hiddenimports = [

@@ -16,6 +16,7 @@ from app.orchestration.agent_events import broadcast, broadcast_turn_updated
 from app.orchestration.agent_loop import run_agent_loop
 from app.orchestration.context_manager import build_main_context, build_subagent_context
 from app.orchestration.subagent import cleanup, get_subagent_manager
+from app.orchestration.subagent_tools import append_subagent_tools
 from app.orchestration.tools.registry import tool_registry
 from app.orchestration.task_planner import PlannedStep, decompose_request, evaluate_complexity
 from app.services import audit_service, message_service, project_service, rollback_service, session_service, task_service, turn_service
@@ -34,6 +35,9 @@ _READONLY_TOOLS = [
 ]
 # 规划模式（/plan）：只读 + 允许写计划文档
 _PLAN_TOOLS = _READONLY_TOOLS + ["fs_write"]
+
+# v20: 探索子代理工具白名单（只读调研），与 subagent_tools.EXPLORE_TOOLS 对齐
+EXPLORE_TOOLS = list(_READONLY_TOOLS)
 
 _MODE_HINTS = {
     "readonly": (
@@ -151,24 +155,27 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             "payload": {"task_id": main_task.id, "status": task_initial_status},
         })
 
-        # 普通复杂请求先生成待确认提案，不启动主代理或子代理。
+        # 普通复杂请求：拆分后直接执行（免确认）。拆分结果仅作右上角任务卡展示，
+        # 不再进入 awaiting_confirmation 等待用户点确认。
         if existing_task_id is None and not force_direct and verdict and verdict.decision == "split" and mode != "plan":
             group, steps = await _create_task_proposal(
                 db, session_id=session_id, turn_id=turn_id, request_task=main_task,
                 provider=planner_provider, source_text=user_text,
                 suggested_steps=verdict.suggested_steps, plan_mode=False,
             )
-            await turn_service.update_turn_status(
-                db, turn_id, "awaiting_confirmation",
-                summary="任务已拆分，等待确认后执行", completed=True,
-            )
+            # v20: 拆分后先并行探索、再主代理串行整合执行（不再直接并行执行步骤）。
+            # 提案即刻生效：group/steps 置 pending，请求任务恢复 running。
+            group.status = "pending"
+            for step in steps:
+                step.status = "pending"
+            main_task.status = "running"
+            await turn_service.update_turn_status(db, turn_id, "running")
             await db.commit()
-            await _broadcast_task_proposed(
-                session_id, turn_id, main_task, group, steps,
-                reasons=verdict.reasons,
-            )
-            await broadcast_turn_updated(session_id, turn_id, "awaiting_confirmation")
-            return {"ok": True, "awaiting_confirmation": True, "task_id": main_task.id}
+            # execute_split_then_main 会重新登记 _running_turns / cancel_event，
+            # 先释放本 turn 的占用，避免被误判为重复运行。
+            _running_turns.discard(turn_id)
+            _cancel_events.pop(turn_id, None)
+            return await execute_split_then_main(db, turn_id=turn_id, group_id=group.id)
 
         # 1. 主上下文
         # v15: 多模态模型时图片附件直接注入用户消息（AI 直接看图，不再走工具猜测路径）
@@ -208,8 +215,12 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                     logger.info("[engine] turn=%s 注入 %d 个 MCP 工具", turn_id, len(_mcp_tools))
             except Exception:
                 logger.warning("[engine] MCP 工具加载失败(非阻塞)", exc_info=True)
-        # 子任务由 task_planner + execute_confirmed_plan 统一编排。
-        # 不再把 spawn_subagent 暴露给主代理，避免模型绕过提案确认自行制造任务卡条目。
+        # 子任务由 task_planner + execute_split_then_main 统一编排。
+        # v20: 恢复把 spawn_subagent/collect_results 暴露给主代理——
+        # 拆分后探索子代理并行调研，主代理用这两个工具 spawn 探索任务并拿回结论，再串行实现。
+        # 子代理工具仅追加 schema（executor 不注册），agent_loop 特判执行。
+        if mode not in ("readonly", "plan"):
+            tool_schemas = append_subagent_tools(tool_schemas)
         # 3. 运行主代理
         # v10/v13: 会话级模型覆盖；同一模型也用于规划评估与拆分。
         from app.orchestration.subagent import get_subagent_manager
@@ -436,6 +447,262 @@ def _split_parallel_batches(indexes: list[int], steps, max_parallel: int = MAX_P
     return batches
 
 
+async def execute_split_then_main(db: AsyncSession, *, turn_id: int, group_id: int) -> dict:
+    """v20: 拆分后编排——探索子代理并行调研 → 主代理串行整合执行。
+
+    取代旧 execute_confirmed_plan 的"每步一个子代理并行执行 + 拼接 summary"。
+    核心改动：
+    1. 拆分出的步骤不直接分发给子代理执行；而是先并行 spawn 只读探索子代理，
+       收集对工作区/相关代码/方案的调研结论（explore=true，同步拿回 findings）。
+    2. 探索结论注入主代理上下文后，由主代理**串行**执行：自行读代码、写文件、
+       验证；需要并行调研时可用 spawn_subagent(explore=true) 再派发探索任务。
+    3. 步骤任务卡仍按拆分展示，探索子代理的执行情况实时广播。
+    """
+    if turn_id in _running_turns:
+        return {"ok": False, "error": "turn already running"}
+    _running_turns.add(turn_id)
+    cancel_event = asyncio.Event()
+    _cancel_events[turn_id] = cancel_event
+    _session_id: int | None = None
+    try:
+        from sqlalchemy import select
+        from app.persistence.models.agent import Agent
+        from app.persistence.models.task import Task
+        from app.orchestration.context_manager import build_subagent_context, build_main_context
+        from app.orchestration.subagent import get_subagent_manager
+        from app.orchestration.subagent_tools import append_subagent_tools
+        from app.orchestration.tools.registry import tool_registry
+        turn = await turn_service.get_turn(db, turn_id)
+        if turn is None:
+            return {"ok": False, "error": "turn not found"}
+        session = await session_service.get_session(db, turn.session_id)
+        _session_id = session.id if session else turn.session_id
+        project = await project_service.get_project(db, session.project_id) if session and session.project_id else None
+        if session is None or project is None:
+            return {"ok": False, "error": "session/project not found"}
+        group = await db.get(Task, group_id)
+        if group is None or group.turn_id != turn_id or group.kind != "group":
+            return {"ok": False, "error": "task group not found"}
+        request_task = await db.get(Task, group.parent_task_id) if group.parent_task_id else None
+        main_agent = (await db.execute(select(Agent).where(Agent.kind == "main").limit(1))).scalars().first()
+        if main_agent is None:
+            return {"ok": False, "error": "主代理未初始化"}
+        steps = list((await db.execute(
+            select(Task).where(Task.parent_task_id == group.id, Task.is_hidden == False).order_by(Task.priority.asc(), Task.id.asc())  # noqa: E712
+        )).scalars().all())
+        workspace = _resolve_workspace(session, project)
+        manager = get_subagent_manager(session.id)
+        effective_model_id = session.model_id or main_agent.model_id
+        await broadcast(session.id, {"event": "turn.started", "payload": {"turn_id": turn_id}})
+        if request_task:
+            request_task.status = "running"
+        group.status = "running"
+        await db.commit()
+        await broadcast(session.id, {"event": "task.planned", "payload": {
+            "turn_id": turn_id, "request_task_id": request_task.id if request_task else None,
+            "group_task_id": group.id,
+            "steps": [{"task_id": s.id, "title": s.title, "status": "pending", "kind": "step"} for s in steps],
+        }})
+
+        # 用户原始请求（主代理与探索子代理上下文继承）
+        original_request = ""
+        if request_task:
+            original_request = f"{request_task.title or ''}\n{request_task.description or ''}".strip()
+        if not original_request:
+            try:
+                from app.persistence.models.message import Message
+                _ures = await db.execute(
+                    select(Message).where(
+                        Message.session_id == session.id,
+                        Message.sender_type == "user",
+                    ).order_by(Message.id.desc()).limit(1)
+                )
+                _um = _ures.scalars().first()
+                if _um and isinstance(_um.content, dict):
+                    original_request = str(_um.content.get("text") or "")
+            except Exception:
+                original_request = ""
+
+        from app.orchestration.subagent_tools import EXPLORE_TOOLS
+        explore_schemas = tool_registry.all_schemas(EXPLORE_TOOLS)
+        explore_schemas = [s for s in explore_schemas if s]
+
+        # —— 阶段一：探索子代理并行调研（只读）——
+        # 每个拆分步骤派一个探索子代理，调研该步涉及的文件/方案，返回结论。
+        # 并行上限沿用 MAX_PARALLEL_STEPS（文件冲突无关紧要，探索只读）。
+        # 每个探索子代理用独立 session 跑（与 execute_confirmed_plan 同理：
+        # 并行子代理共享连接会互相 commit 对方状态，SQLite 单写锁冲突）。
+        from app.persistence.database import async_session_factory
+        explore_titles = {s.id: (s.title or "")[:40] for s in steps}
+        explore_done: dict[int, str] = {}  # step_id -> findings text
+        explore_failed: dict[int, str] = {}
+
+        async def _run_explore(index: int) -> None:
+            step = steps[index]
+            title = explore_titles[step.id]
+            handoff = (step.description or step.title or title)[:4000]
+            async with async_session_factory() as sdb:
+                try:
+                    sub_agent = Agent(
+                        kind="sub", name=f"探索·{title}"[:40], model_id=effective_model_id,
+                        session_id=session.id, turn_id=turn_id, parent_agent_id=main_agent.id,
+                    )
+                    sdb.add(sub_agent)
+                    await sdb.flush()
+                    task_row = await sdb.get(Task, step.id)
+                    if task_row is not None:
+                        task_row.agent_id = sub_agent.id
+                        task_row.status = "running"
+                    await sdb.commit()
+                    await broadcast(session.id, {"event": "task.updated", "payload": {
+                        "task_id": step.id, "status": "running", "note": "探索调研中…"}})
+                    context = await build_subagent_context(
+                        sdb, agent=sub_agent, session=session, project=project, task=task_row,
+                        handoff_summary=handoff,
+                        original_request=original_request,
+                    )
+                    handle_id = manager.spawn(
+                        sdb, agent=sub_agent, turn_id=turn_id, task=task_row,
+                        handoff_summary=handoff, context_bundle=context,
+                        tool_schemas=explore_schemas, workspace=workspace,
+                        cancel_event=cancel_event,
+                    )
+                    await broadcast(session.id, {
+                        "event": "agent.started",
+                        "payload": {"agent_id": sub_agent.id, "kind": "sub",
+                                    "name": sub_agent.name, "turn_id": turn_id,
+                                    "task_id": step.id},
+                    })
+                    handle = manager.get(handle_id)
+                    if handle is not None and handle.task is not None:
+                        await handle.task
+                    if handle is not None and handle.status == "done":
+                        findings = (handle.findings or handle.summary or "").strip()
+                        explore_done[step.id] = findings or "（探索完成，无结论）"
+                        # 探索完成只记录结论，不把步骤标 done——该步骤最终由主代理串行完成
+                        await task_service.update_task_status(sdb, step.id, "running", note="探索完成，等待主代理执行")
+                        await sdb.commit()
+                    else:
+                        err = (handle.error if handle else "探索子代理未返回结果")[:500]
+                        explore_failed[step.id] = err
+                        await task_service.update_task_status(sdb, step.id, "running", note="探索失败，主代理直接执行")
+                        await sdb.commit()
+                except Exception as exc:
+                    logger.warning("[engine] 探索子代理异常 step=%s: %s", step.id, exc, exc_info=True)
+                    explore_failed[step.id] = str(exc)[:500]
+                    try:
+                        await task_service.update_task_status(sdb, step.id, "failed", note="探索异常")
+                        await sdb.commit()
+                    except Exception:
+                        pass
+                finally:
+                    await broadcast(session.id, {"event": "task.updated", "payload": {
+                        "task_id": step.id, "status": "done",
+                        "note": (explore_done.get(step.id) or explore_failed.get(step.id) or "")[:200]}})
+
+        for batch in _split_parallel_batches(list(range(len(steps))), steps):
+            await asyncio.gather(*(_run_explore(i) for i in batch))
+
+        # —— 阶段二：主代理串行整合执行 ——
+        # 探索结论拼进主上下文（Current Goal 后），主代理带 spawn/collect 工具自行执行。
+        bundle = await build_main_context(
+            db, agent=main_agent, session=session, project=project, turn=turn,
+            user_message=original_request,
+        )
+        explore_report = "\n\n".join(
+            f"### {steps[i].title if i < len(steps) else '步骤'}\n{findings}"
+            for i, step in enumerate(steps)
+            for findings in [explore_done.get(step.id, "") or f"（无探索结论{(': ' + explore_failed.get(step.id, '')) if explore_failed.get(step.id) else ''}）"]
+        )
+        if explore_report.strip():
+            bundle.developer_parts.append(
+                "## 探索结论（并行子代理调研结果，仅作参考，请自行核实关键信息）\n" + explore_report
+            )
+        bundle.instruction = (
+            "以下是已拆分出的执行步骤（仅作任务卡展示，请按其推进，可自行合并/细化）：\n"
+            + "\n".join(f"{i + 1}. {s.title}" for i, s in enumerate(steps))
+            + "\n\n请按这些步骤**串行**推进任务：自行阅读、编辑、验证。"
+              "如需并行调研多个问题，可用 spawn_subagent(explore=true) 派发只读探索子代理拿回结论。"
+        )
+        main_tools = tool_registry.all_schemas()
+        main_tools = append_subagent_tools(main_tools)
+        mgr = get_subagent_manager(session.id)
+        out = await run_agent_loop(
+            db, session_id=session.id, turn_id=turn_id,
+            agent=main_agent, context_messages=bundle.to_messages(),
+            tool_schemas=main_tools, workspace=workspace,
+            cancel_event=cancel_event,
+            task_id=request_task.id if request_task else None,
+            model_id=effective_model_id,
+            subagent_context={
+                "manager": mgr, "session": session, "project": project,
+                "cancel_event": cancel_event,
+                "main_task_id": request_task.id if request_task else None,
+                "model_id": effective_model_id,
+            },
+        )
+
+        # —— 收尾：状态与产物 ——
+        summary = out.text or ""
+        final_status = (
+            "interrupted" if out.kind in ("cancelled", "interrupted")
+            else "completed" if out.kind == "message" else "failed"
+        )
+        await turn_service.update_turn_status(
+            db, turn_id, final_status,
+            summary=summary[:500] or ("用户中断" if final_status == "interrupted" else None), completed=True,
+        )
+        if group is not None:
+            group.status = "done" if out.kind == "message" else "failed"
+        if request_task is not None:
+            request_task.status = "done" if out.kind == "message" else "failed"
+            if out.kind == "message" and out.artifact_ids:
+                await task_service.attach_artifacts(db, request_task.id, out.artifact_ids)
+        # v20: 主代理完成后统一收尾步骤状态（探索阶段步骤保持 running）
+        _final_step_status = "done" if out.kind == "message" else "failed"
+        for _s in steps:
+            _row = await db.get(Task, _s.id)
+            if _row is not None:
+                _row.status = _final_step_status
+                if _row.note is None or _row.note.startswith("探索"):
+                    _row.note = None
+                await broadcast(session.id, {"event": "task.updated", "payload": {
+                    "task_id": _s.id, "status": _final_step_status}})
+        await db.commit()
+        await broadcast_turn_updated(session.id, turn_id, final_status)
+        await broadcast(session.id, {
+            "event": "turn.completed" if final_status == "completed" else "turn.interrupted",
+            "payload": {"turn_id": turn_id, "status": final_status, "summary": summary,
+                        "artifact_ids": out.artifact_ids},
+        })
+        await broadcast(session.id, {"event": "task.updated", "payload": {
+            "task_id": request_task.id if request_task else group.id, "status": request_task.status if request_task else group.status}})
+        if out.kind == "message" and summary:
+            _spawn_memory_extract(db, session_id=session.id, turn_id=turn_id, text=summary)
+        if not session.title and turn.user_message_id:
+            await _auto_title(db, session, original_request)
+        return {"ok": True, "kind": out.kind, "summary": summary}
+    except Exception as exc:
+        logger.exception("拆分后主代理执行失败 turn=%s group=%s", turn_id, group_id)
+        try:
+            await db.rollback()
+            await turn_service.update_turn_status(db, turn_id, "failed", summary=str(exc)[:500], completed=True)
+            await db.commit()
+            await broadcast_turn_updated(_session_id or 0, turn_id, "failed")
+        except Exception:
+            pass
+        return {"ok": False, "error": str(exc)}
+    finally:
+        _running_turns.discard(turn_id)
+        _cancel_events.pop(turn_id, None)
+        cleanup(_session_id or 0)
+        if _session_id:
+            try:
+                await broadcast(_session_id, {"event": "session.completed", "payload": {"session_id": _session_id}})
+            except Exception:
+                pass
+
+
 async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int, group_id: int) -> dict:
     """确认后按依赖顺序执行小点，每个小点使用一个隔离子代理。"""
     if turn_id in _running_turns:
@@ -492,9 +759,28 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int, group_id: in
         done_summaries: list[str] = []
 
         def _prior_summaries_text() -> str:
-            """前序已完成步骤摘要链：最近 3 步、总长 ≤800 字，消除上下文断裂。"""
-            text = "\n".join(done_summaries[-3:])
-            return text[:800]
+            """前序已完成步骤摘要链：v19 扩为全部已完成步骤、总长 ≤2000 字，消除上下文断裂。"""
+            text = "\n".join(done_summaries)
+            return text[:2000]
+
+        # v19: 用户原始请求（子代理上下文继承）——优先主请求任务，缺则最近 user 消息
+        original_request = ""
+        if request_task:
+            original_request = f"{request_task.title or ''}\n{request_task.description or ''}".strip()
+        if not original_request:
+            try:
+                from app.persistence.models.message import Message
+                _ures = await db.execute(
+                    select(Message).where(
+                        Message.session_id == session.id,
+                        Message.sender_type == "user",
+                    ).order_by(Message.id.desc()).limit(1)
+                )
+                _um = _ures.scalars().first()
+                if _um and isinstance(_um.content, dict):
+                    original_request = str(_um.content.get("text") or "")
+            except Exception:
+                original_request = ""
 
         async def _run_one_step(index: int) -> None:
             nonlocal completed, failed
@@ -536,6 +822,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int, group_id: in
                 context = await build_subagent_context(
                     sdb, agent=sub_agent, session=session, project=project, task=step_row,
                     handoff_summary=handoff,
+                    original_request=original_request,
                 )
                 handle_id = manager.spawn(
                     sdb, agent=sub_agent, turn_id=turn_id, task=step_row,
@@ -543,6 +830,13 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int, group_id: in
                     context_bundle=context, tool_schemas=tool_schemas,
                     workspace=workspace, cancel_event=cancel_event,
                 )
+                # v19: 与 spawn_subagent 工具路径对齐——广播子代理启动事件，前端消息流卡片据此实时展示
+                await broadcast(session.id, {
+                    "event": "agent.started",
+                    "payload": {"agent_id": sub_agent.id, "kind": "sub",
+                                "name": sub_agent.name, "turn_id": turn_id,
+                                "task_id": step_row.id},
+                })
                 handle = manager.get(handle_id)
                 if handle and handle.task:
                     await handle.task
@@ -640,9 +934,25 @@ async def retry_failed_step(db: AsyncSession, *, turn_id: int, task_id: int) -> 
     await db.commit()
     await broadcast(session.id, {"event": "task.updated", "payload": {"task_id": step.id, "status": "running"}})
     handoff = step.description or step.title
+    # v19: 重试步骤同样继承用户原始请求
+    original_request = ""
+    try:
+        from app.persistence.models.message import Message
+        _ures = await db.execute(
+            select(Message).where(
+                Message.session_id == session.id,
+                Message.sender_type == "user",
+            ).order_by(Message.id.desc()).limit(1)
+        )
+        _um = _ures.scalars().first()
+        if _um and isinstance(_um.content, dict):
+            original_request = str(_um.content.get("text") or "")
+    except Exception:
+        original_request = ""
     context = await build_subagent_context(
         db, agent=sub_agent, session=session, project=project, task=step,
         handoff_summary=handoff,
+        original_request=original_request,
     )
     handle_id = manager.spawn(
         db, agent=sub_agent, turn_id=turn_id, task=step,
@@ -650,6 +960,13 @@ async def retry_failed_step(db: AsyncSession, *, turn_id: int, task_id: int) -> 
         context_bundle=context, tool_schemas=tool_schemas,
         workspace=workspace, cancel_event=cancel_event,
     )
+    # v19: 重试也广播子代理启动事件
+    await broadcast(session.id, {
+        "event": "agent.started",
+        "payload": {"agent_id": sub_agent.id, "kind": "sub",
+                    "name": sub_agent.name, "turn_id": turn_id,
+                    "task_id": step.id},
+    })
     handle = manager.get(handle_id)
     if handle and handle.task:
         await handle.task

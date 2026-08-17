@@ -2,6 +2,7 @@
  * 自动扫描本机 + 手动创建（stdio/sse）+ 启停。 */
 import { useCallback, useEffect, useState } from "react";
 import { api, type McpServerOut } from "../../api/client";
+import { useChatStore } from "../../store/chat";
 import { IconRefresh, IconPlus, IconX } from "../icons";
 import { Sw } from "./shared";
 
@@ -9,6 +10,7 @@ export function McpPanel() {
   const [items, setItems] = useState<McpServerOut[]>([]);
   const [candidates, setCandidates] = useState<Array<{ name: string; transport: string; command: string | null; args?: string[]; env?: Record<string, string> | null; url?: string | null }>>([]);
   const [scanning, setScanning] = useState(false);
+  const [importing, setImporting] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState({ name: "", transport: "stdio", command: "", url: "" });
   const load = useCallback(async () => { try { setItems(await api.listMcpServers()); } catch {} }, []);
@@ -16,18 +18,36 @@ export function McpPanel() {
   const handleScan = async () => {
     setScanning(true);
     try {
-      const result = await api.scanMcpServers();
-      const existing = new Set(items.map((m) => m.name));
-      setCandidates(result.filter((c) => !existing.has(c.name)));
-    } catch (e) { alert("扫描失败: " + String(e)); }
-    finally { setScanning(false); }
+      // v6.5: 同时拉取最新已存在列表，避免“刚删除的 MCP”因本地状态未刷新被错误过滤；
+      // 并按 name 去重（多个客户端配置里常出现同名 server）。
+      const [servers, result] = await Promise.all([api.listMcpServers(), api.scanMcpServers()]);
+      setItems(servers);
+      const existing = new Set(servers.map((m) => m.name));
+      const seen = new Set<string>();
+      const next: typeof candidates = [];
+      for (const c of result) {
+        if (existing.has(c.name) || seen.has(c.name)) continue;
+        seen.add(c.name);
+        next.push(c);
+      }
+      setCandidates(next);
+    } catch (e) {
+      useChatStore.setState({ error: "扫描失败: " + String(e) });
+    } finally {
+      setScanning(false);
+    }
   };
   const handleImport = async (c: { name: string; transport: string; command: string | null; args?: string[]; env?: Record<string, string> | null; url?: string | null }) => {
+    setImporting(c.name);
     try {
       await api.createMcpServer({ name: c.name, transport: c.transport, command: c.command || undefined, args: c.args, env: c.env || undefined, url: c.url || undefined, is_active: false });
       setCandidates((prev) => prev.filter((x) => x.name !== c.name));
       load();
-    } catch (e) { alert("导入失败: " + String(e)); }
+    } catch (e) {
+      useChatStore.setState({ error: `导入 ${c.name} 失败: ${String(e)}` });
+    } finally {
+      setImporting(null);
+    }
   };
   const handleCreate = async () => {
     if (!form.name.trim()) return;
@@ -36,7 +56,7 @@ export function McpPanel() {
       setShowCreate(false);
       setForm({ name: "", transport: "stdio", command: "", url: "" });
       load();
-    } catch (e) { alert(String(e)); }
+    } catch (e) { useChatStore.setState({ error: String(e) }); }
   };
   return (
     <div>
@@ -75,13 +95,13 @@ export function McpPanel() {
       {candidates.length > 0 && (
         <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-2)", marginBottom: 8 }}>扫描候选</div>
-          {candidates.map((c) => (
-            <div key={c.name} className="settings-resource-item" style={{ marginBottom: 4 }}>
+          {candidates.map((c, i) => (
+            <div key={`${c.name}-${i}`} className="settings-resource-item" style={{ marginBottom: 4 }}>
               <div className="settings-resource-info">
                 <div className="settings-resource-name">{c.name}</div>
                 <div className="settings-resource-desc"><span className="settings-resource-tag">{c.transport}</span></div>
               </div>
-              <button className="btn btn-primary btn-xs" onClick={() => handleImport(c)}>导入</button>
+              <button className="btn btn-primary btn-xs" disabled={importing !== null} onClick={() => handleImport(c)}>{importing === c.name ? "导入中…" : "导入"}</button>
             </div>
           ))}
         </div>

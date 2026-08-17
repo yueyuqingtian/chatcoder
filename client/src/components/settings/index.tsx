@@ -1,8 +1,7 @@
-/** 设置中心（v13 全屏页对齐 ZCode）：左侧「返回工作区」+ 分组图标导航 + 右侧内容区。
- * 三组：基础设置 / Agent 能力 / 数据与统计。SETTINGS_INDEX 供命令中心（Cmd+K）搜索跳转。 */
-import { useEffect, useRef, useState } from "react";
-import { useUiStore } from "../../store/ui";
-import { ResizeHandle } from "../ResizeHandle";
+/** 设置中心（v19 并入主布局）：左侧导航由 SettingsSidebar（SidebarShell）渲染，
+ * 本文件提供设置项索引（SETTINGS_INDEX，供命令中心搜索）与右侧内容区 SettingsContent。
+ * 三组：基础设置 / Agent 能力 / 数据与统计。
+ */
 import { AppearancePanel } from "./AppearancePanel";
 import { GeneralPanel } from "./GeneralPanel";
 import { ModelsPanel } from "./ModelsPanel";
@@ -16,17 +15,18 @@ import { HooksPanel } from "./HooksPanel";
 import { MemoryPanel } from "./MemoryPanel";
 import { UsagePanel } from "./UsagePanel";
 import { DiagnosticsPanel } from "./DiagnosticsPanel";
+import { PluginsPanel } from "./PluginsPanel";
 import {
-  IconAnchor, IconArrowLeft, IconBarChart, IconBookOpen, IconBrain, IconCalendar,
+  IconAnchor, IconBarChart, IconBookOpen, IconBrain, IconCalendar,
   IconCpu, IconInfo, IconPalette, IconPlug, IconSettings,
-  IconShield, IconTool, IconUsers, IconZap,
+  IconShield, IconTool, IconUsers, IconZap, IconBox,
 } from "../icons";
 
 export type SettingsTab =
   | "general" | "appearance"
   | "models" | "skills" | "subagents" | "mcp" | "rules"
   | "policy"
-  | "scheduled" | "hooks" | "memory" | "usage" | "diagnostics" | "about";
+  | "scheduled" | "hooks" | "memory" | "usage" | "diagnostics" | "plugins" | "about";
 
 export interface SettingsIndexItem {
   key: SettingsTab;
@@ -41,6 +41,7 @@ export const SETTINGS_INDEX: SettingsIndexItem[] = [
   { key: "general", label: "常规", group: "basic", keywords: "语言 代理 终端 Shell 字体 搜索 todos reasoning", icon: <IconSettings size={15} /> },
   { key: "appearance", label: "外观", group: "basic", keywords: "主题 毛玻璃 布局 字号 颜色 面板", icon: <IconPalette size={15} /> },
   { key: "models", label: "模型设置", group: "basic", keywords: "供应商 模型 上下文 多模态 推理", icon: <IconCpu size={15} /> },
+  { key: "plugins", label: "插件", group: "basic", keywords: "插件 组件 替换 slot 外挂", icon: <IconBox size={15} /> },
   { key: "memory", label: "记忆", group: "agent", keywords: "记忆 召回 entries", icon: <IconBrain size={15} /> },
   { key: "skills", label: "技能", group: "agent", keywords: "skill 技能仓库 git 导入", icon: <IconZap size={15} /> },
   { key: "subagents", label: "子智能体", group: "agent", keywords: "子代理 profile 工具白名单", icon: <IconUsers size={15} /> },
@@ -54,7 +55,7 @@ export const SETTINGS_INDEX: SettingsIndexItem[] = [
   { key: "about", label: "关于", group: "basic", keywords: "版本 信息", icon: <IconInfo size={15} /> },
 ];
 
-const NAV_GROUPS: Array<{ id: SettingsIndexItem["group"]; label: string }> = [
+export const NAV_GROUPS: Array<{ id: SettingsIndexItem["group"]; label: string }> = [
   { id: "basic", label: "基础设置" },
   { id: "agent", label: "Agent 能力" },
   { id: "data", label: "数据与统计" },
@@ -82,44 +83,18 @@ function Panel({ tab }: { tab: SettingsTab }) {
     case "memory": return <div className="settings-content-inner"><div className="settings-page-title">记忆</div><div className="settings-card"><MemoryPanel /></div></div>;
     case "usage": return <div className="settings-content-inner"><div className="settings-page-title">用量统计</div><div className="settings-page-subtitle">整个软件的 token 用量：总数与各模型分布</div><div className="settings-card"><UsagePanel /></div></div>;
     case "diagnostics": return <div className="settings-content-inner"><div className="settings-page-title">诊断</div><div className="settings-page-subtitle">系统健康检查</div><div className="settings-card"><DiagnosticsPanel /></div></div>;
+    case "plugins": return <div className="settings-content-inner"><div className="settings-page-title">插件</div><div className="settings-page-subtitle">系统组件插件化：查看可替换的 slot 组件，像拼积木一样替换内置/外挂组件</div><div className="settings-card"><PluginsPanel /></div></div>;
     case "about": return <div className="settings-content-inner"><div className="settings-page-title">关于</div><div className="settings-card"><AboutPanel /></div></div>;
     default: return null;
   }
 }
 
-export function SettingsPage({ onBack, initialTab }: { onBack: () => void; initialTab?: string }) {
-  const [tab, setTab] = useState<SettingsTab>((initialTab as SettingsTab) || "general");
-  useEffect(() => { if (initialTab) setTab(initialTab as SettingsTab); }, [initialTab]);
-  // v1.1: 左侧导航可拖拽调宽（160~400，持久化）
-  const navWidth = useUiStore((s) => s.settingsNavWidth);
-  const setNavWidth = useUiStore((s) => s.setSettingsNavWidth);
-  const navRef = useRef<HTMLElement>(null);
-  useEffect(() => {
-    if (navRef.current) navRef.current.style.width = `${navWidth}px`;
-  }, [navWidth]);
+/** v19: 设置右侧内容区（主布局 main 内渲染，顶部 TitleBar 与左栏宽度共用）。
+ * tab 状态由 App 持有（左栏 SettingsSidebar 与内容区共享）。 */
+export function SettingsContent({ tab }: { tab: SettingsTab }) {
   return (
-    <div className="settings-page-overlay">
-      <nav className="settings-nav" ref={navRef} style={{ width: `${navWidth}px` }}>
-        <div className="settings-back" onClick={onBack}>
-          <IconArrowLeft size={14} /> 返回工作区
-        </div>
-        {NAV_GROUPS.map((g) => (
-          <div key={g.id} className="settings-nav-group">
-            <div className="settings-nav-group-label">{g.label}</div>
-            {SETTINGS_INDEX.filter((it) => it.group === g.id).map((it) => (
-              <div key={it.key} className={"settings-nav-item" + (tab === it.key ? " active" : "")} onClick={() => setTab(it.key)}>
-                <span className="settings-nav-icon">{it.icon}</span>
-                {it.label}
-              </div>
-            ))}
-          </div>
-        ))}
-      </nav>
-      <ResizeHandle side="left" baseWidth={navWidth} minWidth={160} maxWidth={400}
-                    panelEl={navRef} onCommit={setNavWidth} />
-      <div className="settings-content">
-        <Panel tab={tab} />
-      </div>
+    <div className="settings-content" style={{ height: "100%", overflowY: "auto" }}>
+      <Panel tab={tab} />
     </div>
   );
 }

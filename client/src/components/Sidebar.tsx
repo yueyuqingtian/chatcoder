@@ -9,14 +9,13 @@ import { useEffect, useMemo, useState } from "react";
 import type { ProjectOut, SessionOut } from "../api/client";
 import { api } from "../api/client";
 import { useChatStore } from "../store/chat";
-import { usePanelStore } from "../store/panel";
 import { formatRelativeTime, parseUtc } from "../utils/time";
 import { ConfirmDialog } from "./ConfirmDialog";
 import {
-  IconCalendar, IconChevronLeft, IconChevronRight, IconExpandDiagonal,
+  IconCalendar, IconChevronLeft, IconChevronRight, IconPanelLeft,
   IconFolder, IconHash, IconListFilter,
   IconMoreHorizontal, IconPin, IconPlus, IconSearch, IconSettings,
-  IconSquarePlus, IconTerminal, IconZap,
+  IconSquarePlus, IconZap,
 } from "./icons";
 
 export type NavKey = "chat" | "scheduled" | "skills" | "mcp" | "settings";
@@ -69,10 +68,8 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
   const [confirmDelete, setConfirmDelete] = useState<SessionOut | null>(null);
   const [renaming, setRenaming] = useState<{ id: number; value: string } | null>(null);
   const [collapsedProjects, setCollapsedProjects] = useState<Record<number, boolean>>({});
-  const [username, setUsername] = useState("");
 
   useEffect(() => { loadBootstrap(); }, [loadBootstrap]);
-  useEffect(() => { window.chatcoderAPI?.getUsername?.().then((n) => n && setUsername(n)).catch(() => {}); }, []);
 
   // Ctrl+N 新建任务（对齐 zcode 快捷键）
   useEffect(() => {
@@ -158,9 +155,10 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
 
   return (
     <nav className={`sidebar sb${collapsed ? " collapsed" : ""}`}>
-      {/* 头部：logo + 前进/后退（全高侧栏的顶行；拖拽区，按钮不拖拽） */}
+      {/* 头部：logo + 折叠按钮 + 前进/后退（v19: 折叠入口移入侧栏头部左侧） */}
       <div className="sb-head title-drag-region">
         <span className="sb-logo title-no-drag" title="chatcoder">C</span>
+        <button className="sb-nav-arrow title-no-drag" onClick={onToggleCollapse} title="折叠侧栏 (Ctrl+B)"><IconPanelLeft size={15} /></button>
         <button className="sb-nav-arrow title-no-drag" disabled={!canBack} onClick={() => histGo(-1)} title="后退"><IconChevronLeft size={15} /></button>
         <button className="sb-nav-arrow title-no-drag" disabled={!canForward} onClick={() => histGo(1)} title="前进"><IconChevronRight size={15} /></button>
       </div>
@@ -188,7 +186,6 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
               <button className={view === "project" ? "active" : ""} onClick={() => setView("project")}><IconFolder size={12} /> 项目</button>
             </div>
             <div className="sb-view-actions">
-              <button className="sb-icon-btn" title="折叠侧栏" onClick={onToggleCollapse}><IconExpandDiagonal size={14} /></button>
               <button className={"sb-icon-btn" + (sortMenuOpen ? " active" : "")} title="排序方式" onClick={() => setSortMenuOpen(!sortMenuOpen)}><IconListFilter size={14} /></button>
               <button className="sb-icon-btn" title="新建项目" onClick={handleNewProject}><IconSquarePlus size={14} /></button>
             </div>
@@ -213,7 +210,8 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
                   return (
                     <div key={p.id} className="sb-project-group">
                       <div className={`sb-project${isCurrent ? " current" : ""}`}
-                        onClick={() => { if (!open) toggleProject(p.id); if (!isCurrent) void selectProject(p.id); else toggleProject(p.id); }}>
+                        onClick={() => { toggleProject(p.id); if (!isCurrent) void selectProject(p.id); }}>
+                        <span className={`sb-project-chevron${open ? " open" : ""}`} aria-hidden="true"><IconChevronRight size={13} /></span>
                         <IconFolder size={14} />
                         <span className="sb-project-name" title={p.path}>{p.name || shortPath(p.path)}</span>
                         <span className="sb-project-actions" onClick={(e) => { e.stopPropagation(); setProjectMenuFor(projectMenuFor === p.id ? null : p.id); }}>
@@ -227,7 +225,7 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
                           </div>
                         )}
                       </div>
-                      {open && projSessions.map(renderSession)}
+                      {open && <div className="sb-project-children">{projSessions.map(renderSession)}</div>}
                     </div>
                   );
                 })}
@@ -254,18 +252,9 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
         </>
       )}
 
-      {/* 底部用户条 */}
+      {/* v19: 底部仅保留设置入口（头像/昵称/终端入口移除，终端移至顶栏右上） */}
       <div className="sb-userbar">
-        <div className="sb-user">
-          <span className="sb-avatar">{(username || "U").slice(0, 1).toUpperCase()}</span>
-          {!collapsed && <span className="sb-username" title={username}>{username || "用户"}</span>}
-        </div>
-        {!collapsed && (
-          <div className="sb-user-actions">
-            <button className="sb-icon-btn" title="打开终端" onClick={() => usePanelStore.getState().openTab("terminal")}><IconTerminal size={14} /></button>
-            <button className={`sb-icon-btn${active === "settings" ? " active" : ""}`} title="设置" onClick={() => onChange("settings")}><IconSettings size={14} /></button>
-          </div>
-        )}
+        <button className={`sb-user-settings${active === "settings" ? " active" : ""}`} title="设置" onClick={() => onChange("settings")}><IconSettings size={16} />{!collapsed && <span>设置</span>}</button>
       </div>
 
       <ConfirmDialog open={confirmDelete !== null} title="删除会话" message={`确定删除「${confirmDelete?.title || "会话"}」吗？删除后将归档，不可恢复。`} confirmLabel="删除" danger

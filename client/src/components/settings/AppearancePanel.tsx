@@ -23,8 +23,8 @@ export function AppearancePanel() {
         </Row>
         <Row title="玻璃渐变颜色" desc="毛玻璃背后的环境光渐变双色">
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: "var(--text-3)" }}>起始<input type="color" className="settings-color-input" value={ui.glassGradientC1 || "#F5F5F5"} onChange={(e) => ui.setPrefs({ glassGradientC1: e.target.value })} /></span>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: "var(--text-3)" }}>结束<input type="color" className="settings-color-input" value={ui.glassGradientC2 || "#F5F5F5"} onChange={(e) => ui.setPrefs({ glassGradientC2: e.target.value })} /></span>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: "var(--text-3)" }}>起始<input type="color" className="settings-color-input" value={ui.glassGradientC1 || "#808080"} onChange={(e) => ui.setPrefs({ glassGradientC1: e.target.value })} /></span>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: "var(--text-3)" }}>结束<input type="color" className="settings-color-input" value={ui.glassGradientC2 || "#606060"} onChange={(e) => ui.setPrefs({ glassGradientC2: e.target.value })} /></span>
             <button className="btn btn-ghost btn-xs" onClick={() => ui.setPrefs({ glassGradientC1: "", glassGradientC2: "" })}>重置</button>
           </div>
         </Row>
