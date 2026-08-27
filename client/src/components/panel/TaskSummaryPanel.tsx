@@ -20,6 +20,7 @@ function StepStatus({ status }: { status: string }) {
 
 export function TaskSummaryPanel() {
   const tasks = useChatStore((state) => state.tasks);
+  const todos = useChatStore((state) => state.todos);
   const messages = useChatStore((state) => state.messages);
   const pendingSplit = useChatStore((state) => state.pendingSplit);
   const hasPendingPlan = useChatStore((state) => state.pendingPlan != null);
@@ -60,7 +61,8 @@ export function TaskSummaryPanel() {
   }, [currentTasks, proposedGroup]);
 
   const groups = useMemo(() => {
-    const realGroups = currentTasks.filter((task) => task.kind === "group" && task.status !== "proposed" && !task.is_hidden);
+    // 排除 todo 持久化的「任务清单」区块（后端 _TODO_GROUP_TITLE），避免与任务进度重复展示
+    const realGroups = currentTasks.filter((task) => task.kind === "group" && task.status !== "proposed" && !task.is_hidden && task.title !== "任务清单");
     if (realGroups.length > 0) {
       return realGroups.map((group) => ({
         id: group.id,
@@ -68,9 +70,9 @@ export function TaskSummaryPanel() {
         steps: steps.filter((step) => isStep(step) && step.parent_task_id === group.id),
       })).filter((group) => group.steps.length > 0);
     }
-    if (steps.length > 0) return [{ id: "steps", title: proposedGroup ? "建议步骤" : "任务步骤", steps }];
+    if (steps.length > 0) return [{ id: "steps", title: "任务步骤", steps }];
     return requestTask ? [{ id: "request", title: "任务步骤", steps: [requestTask] }] : [];
-  }, [currentTasks, steps, proposedGroup]);
+  }, [currentTasks, steps]);
 
   const artifactFiles = useMemo(() => {
     const seen = new Set<string>();
@@ -96,9 +98,39 @@ export function TaskSummaryPanel() {
     openTab("files");
   };
 
-  // v13: 进程统计（对齐 zcode 计划面板「进程 8/8 · 已完成 N 项」）
-  const allSteps = groups.flatMap((g) => g.steps);
-  const doneSteps = allSteps.filter((s) => normalizeStatus(s.status) === "done").length;
+  // 任务进度：todo 清单优先（计划拆分确认后自动初始化、todo_write 驱动），
+  // 缺失时回退引擎任务步骤（与输入框贴条同口径），消除「执行清单/任务清单/建议步骤」重复区块。
+  const todoItems = useMemo(() => (Array.isArray(todos) ? todos.filter((t) => t.content) : []), [todos]);
+  const fallbackSteps = useMemo(() => groups.flatMap((g) => g.steps), [groups]);
+  const progressRows = useMemo(() => {
+    const useTodo = todoItems.length > 0;
+    const hasRunning = todoItems.some((t) => t.status === "in_progress");
+    const fallbackIdx = hasRunning ? -1 : todoItems.findIndex((t) => t.status !== "completed");
+    const rows = useTodo
+      ? todoItems.map((t, i) => ({
+          key: `${t.content}-${i}`,
+          title: t.content,
+          note: t.activeForm || "",
+          status: t.status === "completed" ? "done" : t.status === "in_progress" ? "running" : i === fallbackIdx ? "running" : "pending",
+          isTodo: true,
+          agentId: null,
+        }))
+      : fallbackSteps.map((s) => ({
+          key: String(s.id),
+          title: s.title,
+          note: s.note || "",
+          status: normalizeStatus(s.status),
+          isTodo: false,
+          agentId: s.agent_id ?? null,
+        }));
+    // 兜底：无 running 项时，首个未完成项按 running 展示（保证转圈动画可见）
+    if (rows.length > 0 && !rows.some((r) => r.status === "running")) {
+      const idx = rows.findIndex((r) => r.status !== "done");
+      if (idx >= 0) rows[idx] = { ...rows[idx], status: "running" };
+    }
+    return rows;
+  }, [todoItems, fallbackSteps]);
+  const progressDone = progressRows.filter((r) => r.status === "done").length;
 
   const ArtifactRows = ({ items }: { items: ArtifactOut[] }) => (
     <div className="ts-artifact-list">
@@ -123,42 +155,38 @@ export function TaskSummaryPanel() {
         {pendingSplit && <div className="ts-summary-hint">任务步骤待确认</div>}
       </section>
 
-      {allSteps.length > 0 && (
-        <div className="ts-progress-row">
-          <span className="ts-progress-label">进程</span>
-          <span className="ts-progress-value">{doneSteps}/{allSteps.length}</span>
-        </div>
-      )}
-
-      {groups.map((group) => (
-        <section className="ts-section ts-real-section" key={group.id}>
-          <div className="ts-section-title">{group.title}</div>
+      {progressRows.length > 0 && (
+        <section className="ts-section ts-real-section">
+          <div className="ts-section-title">任务进度 {progressDone}/{progressRows.length}</div>
           <div className="ts-step-list">
-            {group.steps.map((step: TaskOut) => (
-              <div className={`ts-step-item ${normalizeStatus(step.status)}`} key={step.id}>
-                <StepStatus status={step.status} />
-                <button
-                  className="ts-step-title ts-step-jump"
-                  type="button"
-                  disabled={step.agent_id == null}
-                  title={step.agent_id != null ? "点击定位到执行消息" : step.title}
-                  onClick={() => {
-                    // v2.2: 任务卡点击穿透——滚动到该步骤子代理的首条消息
-                    if (step.agent_id != null) useChatStore.getState().requestScrollTo({ threadId: step.agent_id });
-                  }}
-                >
-                  {step.title}
-                </button>
+            {progressRows.map((row, i) => (
+              <div className={`ts-step-item ${row.status}`} key={`${row.key}-${i}`}>
+                <StepStatus status={row.status} />
+                {row.isTodo ? (
+                  <span className="ts-step-title" title={row.note || row.title}>{row.title}</span>
+                ) : (
+                  <button
+                    className="ts-step-title ts-step-jump"
+                    type="button"
+                    disabled={row.agentId == null}
+                    title={row.agentId != null ? "点击定位到执行消息" : row.title}
+                    onClick={() => {
+                      if (row.agentId != null) useChatStore.getState().requestScrollTo({ threadId: row.agentId });
+                    }}
+                  >
+                    {row.title}
+                  </button>
+                )}
               </div>
             ))}
           </div>
         </section>
-      ))}
+      )}
 
       {pendingSplit && !hasPendingPlan && (
         <div className="ts-proposal-actions">
           <button className="ts-proposal-primary" onClick={() => confirmTaskSplit(true)} type="button">接受拆分</button>
-          <button onClick={() => confirmTaskSplit(false)} type="button">直接执行</button>
+          <button onClick={() => confirmTaskSplit(false)} type="button">停止任务</button>
         </div>
       )}
 

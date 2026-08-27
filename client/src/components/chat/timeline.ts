@@ -41,6 +41,13 @@ export type ToolNode =
 /** v19: 写入类工具——独占一行（用户要求"一个写操作就是一行"），仅紧邻同文件可合并 */
 export const WRITE_TOOLS = new Set(["fs_write", "editor_apply_diff", "multi_file_edit"]);
 
+/** v25: 是否按"写操作行"展示——白名单写盘工具，或非白名单工具但结果携带 change_stat
+ * （模型用 terminal_exec 等"工具伪装"改文件，服务端检测到变更后在 tool.result 附 change_stat，
+ * 前端据此把该行渲染为可展开 diff，而不是普通命令输出）。 */
+export function isWriteLeaf(leaf: ToolLeaf): boolean {
+  return WRITE_TOOLS.has(leaf.tool) || leaf.changeStat != null;
+}
+
 /** 搜索类工具（合并行摘要统计用） */
 export const SEARCH_TOOLS = new Set(["fs_grep", "codebase_search", "web_search", "memory_search"]);
 
@@ -52,6 +59,7 @@ export type TurnItem =
   | { kind: "thinking"; msg: MessageOut }
   | { kind: "text"; msg: MessageOut }
   | { kind: "tools"; nodes: ToolNode[] }
+  | { kind: "subagent"; msg: MessageOut }
   | { kind: "artifacts"; msgs: MessageOut[] }
   | { kind: "summary"; msg: MessageOut }
   | { kind: "error"; msg: MessageOut }
@@ -94,6 +102,8 @@ function leafPathOf(leaf: ToolLeaf): string {
   if (typeof p === "string" && p) return p.replace(/\\/g, "/");
   const f = leaf.args?.file_path;
   if (typeof f === "string" && f) return f.replace(/\\/g, "/");
+  // v25: 非白名单写盘工具（terminal_exec 等）路径来自 change_stat
+  if (leaf.changeStat?.path) return leaf.changeStat.path.replace(/\\/g, "/");
   return "";
 }
 
@@ -109,14 +119,15 @@ function buildToolTree(calls: MessageOut[], resultsByKey: Map<string, MessageOut
   let i = 0;
   while (i < calls.length) {
     const first = leafOf(calls[i]);
-    if (WRITE_TOOLS.has(first.tool)) {
+    // v25: 工具伪装写盘（terminal_exec 等带 change_stat）同样按写操作独占一行
+    if (isWriteLeaf(first)) {
       // 紧邻同文件连续写合并
       const path = leafPathOf(first);
       let j = i + 1;
       if (path) {
         while (j < calls.length) {
           const lj = leafOf(calls[j]);
-          if (!WRITE_TOOLS.has(lj.tool) || leafPathOf(lj) !== path) break;
+          if (!isWriteLeaf(lj) || leafPathOf(lj) !== path) break;
           j++;
         }
       }
@@ -129,7 +140,7 @@ function buildToolTree(calls: MessageOut[], resultsByKey: Map<string, MessageOut
       let j = i + 1;
       while (j < calls.length) {
         const lj = leafOf(calls[j]);
-        if (WRITE_TOOLS.has(lj.tool)) break;
+        if (isWriteLeaf(lj)) break;
         j++;
       }
       const leaves = calls.slice(i, j).map(leafOf);
@@ -144,7 +155,8 @@ function buildToolTree(calls: MessageOut[], resultsByKey: Map<string, MessageOut
 /** 从扁平消息构建时间线。
  *  关键修复：turn 排序依据是该 turn 首条消息在输入数组中的原始位置，而非 turn_id 数值。
  *  这保证用户消息（先落库）所在的 turn 始终排在 AI 回复 turn 之前。
- */
+ *  v30.1: 被压缩的消息不再过滤隐藏——保留在时间线上（CompactionCard 提供折叠查看），
+ *  压缩块 SUMMARY 消息按 id 顺序自然落在被压缩消息之后，时间线排序保持一致。 */
 export function buildTimeline(messages: MessageOut[]): TimelineEntry[] {
   // 1. 单遍扫描：turn 消息按 turn_id 聚合（占位 entry 保持首现顺序）；
   //    turn_id 为 null 的消息就地处理——用户消息独立成组；
@@ -213,10 +225,21 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
     if (m.sender_type === SenderType.User) continue; // 跳过用户消息（已处理）
     const c = m.content as Record<string, unknown>;
     if (m.msg_type === MsgType.ToolCall) {
-      pendingTools.push(m);
+      if (c.tool === "spawn_subagent") {
+        // v22: spawn_subagent 工具调用独立作为时间线条目，按时间轴精准穿插在消息流中
+        // （此前被当成普通工具节点混入 ToolTree，且 SubagentCard 全部堆在用户消息下方）
+        flushTools();
+        items.push({ kind: "subagent", msg: m });
+      } else {
+        pendingTools.push(m);
+      }
     } else if (m.msg_type === MsgType.ToolResult) {
-      const key = String(c.call_key ?? "");
-      resultsByKey.set(key, m);
+      if (c.tool === "spawn_subagent") {
+        // 子代理结果由 SubagentCard 自身展示，不进入 ToolTree
+      } else {
+        const key = String(c.call_key ?? "");
+        resultsByKey.set(key, m);
+      }
     } else if (m.msg_type === MsgType.Thinking || (m.msg_type === MsgType.Text && c.thinking === true)) {
       // v7: 兼容两种后端写法——agent_loop 写 MsgType.Thinking；
       // agent_runtime 的 _emit_thread(thinking=True) 写 MsgType.Text + content.thinking=true。

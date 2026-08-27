@@ -35,6 +35,24 @@ const NAV_ITEMS: { key: NavKey | "search"; label: string; icon: React.ReactNode;
   { key: "skills", label: "技能", icon: <IconZap size={16} /> },
 ];
 
+const STORAGE_KEY_COLLAPSED_PROJECTS = "chatcoder:collapsed-projects";
+
+function loadCollapsedProjects(): Record<number, boolean> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_COLLAPSED_PROJECTS);
+    if (!raw) return {};
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+function saveCollapsedProjects(val: Record<number, boolean>) {
+  try {
+    localStorage.setItem(STORAGE_KEY_COLLAPSED_PROJECTS, JSON.stringify(val));
+  } catch { /* ignore */ }
+}
+
 function shortPath(path: string): string {
   const clean = path.replace(/\\/g, "/").replace(/\/$/, "");
   const parts = clean.split("/");
@@ -48,7 +66,6 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
   const currentProjectId = useChatStore((s) => s.currentProjectId);
   const loadBootstrap = useChatStore((s) => s.loadBootstrap);
   const switchSession = useChatStore((s) => s.switchSession);
-  const selectProject = useChatStore((s) => s.selectProject);
   const createProject = useChatStore((s) => s.createProject);
   const deleteSession = useChatStore((s) => s.deleteSession);
   const renameSession = useChatStore((s) => s.renameSession);
@@ -67,7 +84,9 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
   const [projectMenuFor, setProjectMenuFor] = useState<number | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<SessionOut | null>(null);
   const [renaming, setRenaming] = useState<{ id: number; value: string } | null>(null);
-  const [collapsedProjects, setCollapsedProjects] = useState<Record<number, boolean>>({});
+  // v24: 项目展开/折叠只由用户手动控制并持久化到 localStorage：
+  // 记录为 true 的项目保持折叠，其它项目保持展开；组件重新挂载或切换会话绝不重置或莫名其妙展开。
+  const [collapsedProjects, setCollapsedProjects] = useState<Record<number, boolean>>(() => loadCollapsedProjects());
 
   useEffect(() => { loadBootstrap(); }, [loadBootstrap]);
 
@@ -111,8 +130,17 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
     });
   }, [sessions, sort]);
 
-  const isProjectOpen = (p: ProjectOut) => collapsedProjects[p.id] ?? p.id === currentProjectId;
-  const toggleProject = (id: number) => setCollapsedProjects((prev) => ({ ...prev, [id]: !(prev[id] ?? id === currentProjectId) }));
+  const isProjectOpen = (p: ProjectOut) => !collapsedProjects[p.id];
+  const toggleProject = (id: number) => setCollapsedProjects((prev) => {
+    const next = { ...prev };
+    if (next[id]) {
+      delete next[id]; // 展开：清除显式折叠记录
+    } else {
+      next[id] = true; // 折叠：记录显式折叠
+    }
+    saveCollapsedProjects(next);
+    return next;
+  });
 
   const handleNewProject = async () => {
     const dir = await window.chatcoderAPI?.selectDirectory?.();
@@ -210,7 +238,7 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
                   return (
                     <div key={p.id} className="sb-project-group">
                       <div className={`sb-project${isCurrent ? " current" : ""}`}
-                        onClick={() => { toggleProject(p.id); if (!isCurrent) void selectProject(p.id); }}>
+                        onClick={() => toggleProject(p.id)}>
                         <span className={`sb-project-chevron${open ? " open" : ""}`} aria-hidden="true"><IconChevronRight size={13} /></span>
                         <IconFolder size={14} />
                         <span className="sb-project-name" title={p.path}>{p.name || shortPath(p.path)}</span>

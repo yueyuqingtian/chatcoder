@@ -19,8 +19,6 @@ export interface UiPrefs {
   glassGradientC1: string;
   /** 玻璃渐变主色2 */
   glassGradientC2: string;
-  /** 输入框聚焦呼吸光晕颜色 */
-  composerGlowColor: string;
   /** 阴影强度:0=无 0.5=轻柔 1=标准 1.5=深邃 2=戏剧 */
   shadowStrength: number;
   /** 对话字体族 */
@@ -31,14 +29,6 @@ export interface UiPrefs {
   chatBubbleWidth: number;
   /** 消息行高倍率 */
   chatLineHeight: number;
-  /** 代码块文字颜色 */
-  chatCodeColor: string;
-  /** 标题文字颜色 */
-  chatHeadingColor: string;
-  /** 链接文字颜色 */
-  chatLinkColor: string;
-  /** 引用块文字颜色 */
-  chatQuoteColor: string;
   /** 主界面基础字号(px) */
   uiBaseFontSize: number;
   /** 内容区最大宽度(px),0=不限 */
@@ -64,16 +54,11 @@ const DEFAULTS: UiPrefs = {
   glassStrength: 1,
   glassGradientC1: "",
   glassGradientC2: "",
-  composerGlowColor: "",
   shadowStrength: 1,
   chatFontFamily: "system",
   chatFontSize: 13,
   chatBubbleWidth: 70,
   chatLineHeight: 1.7,
-  chatCodeColor: "#D98014",
-  chatHeadingColor: "#1A1A1E",
-  chatLinkColor: "#3B82F6",
-  chatQuoteColor: "#6B6B74",
   uiBaseFontSize: 13,
   contentMaxWidth: 1120,
   sidebarFontSize: 12,
@@ -121,10 +106,6 @@ export function applyUiVars(p: UiPrefs) {
   root.style.setProperty("--chat-font", FONT_OPTIONS[p.chatFontFamily] || FONT_OPTIONS.system);
   root.style.setProperty("--chat-bubble-w", `${p.chatBubbleWidth}%`);
   root.style.setProperty("--chat-line-height", `${p.chatLineHeight}`);
-  root.style.setProperty("--chat-code-color", p.chatCodeColor);
-  root.style.setProperty("--chat-heading-color", p.chatHeadingColor);
-  root.style.setProperty("--chat-link-color", p.chatLinkColor);
-  root.style.setProperty("--chat-quote-color", p.chatQuoteColor);
   root.style.setProperty("--content-max-w", p.contentMaxWidth > 0 ? `${p.contentMaxWidth}px` : "none");
   root.style.setProperty("--ui-base-fs", `${p.uiBaseFontSize}px`);
   root.style.setProperty("--sidebar-fs", `${p.sidebarFontSize}px`);
@@ -143,9 +124,6 @@ export function applyUiVars(p: UiPrefs) {
   else root.style.removeProperty("--ambient-c1");
   if (p.glassGradientC2) root.style.setProperty("--ambient-c2", p.glassGradientC2);
   else root.style.removeProperty("--ambient-c2");
-  // 输入框聚焦光晕颜色
-  if (p.composerGlowColor) root.style.setProperty("--composer-glow", p.composerGlowColor);
-  else root.style.removeProperty("--composer-glow");
   // v1.1: 阴影强度（此前完全未应用）
   root.style.setProperty("--shadow-strength", String(p.shadowStrength));
   // 消息流密度：舒适(默认 10px 块间距) / 紧凑(2px)

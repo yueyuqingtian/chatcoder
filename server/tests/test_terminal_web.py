@@ -73,6 +73,55 @@ def test_terminal_risk_level_is_high():
     assert tool.risk_level == "high"
 
 
+# ───────────────── v3.0 (plan-88): 外部访问开关的 cwd 解析 ─────────────────
+
+
+def test_resolve_path_outside_blocked_by_default(tmp_path):
+    """开关关闭(默认)：越界 cwd 回退 workspace_root。"""
+    ws = str(tmp_path)
+    tool = TerminalExecTool()
+    assert tool._resolve_path(ws, "..") == ws
+    assert tool._resolve_path(ws, str(tmp_path.parent)) == ws
+
+
+def test_resolve_path_outside_allowed_when_enabled(tmp_path):
+    """开关开启：绝对越界路径与 ../ 相对越界均放行。"""
+    ws = str(tmp_path)
+    tool = TerminalExecTool()
+    parent = str(tmp_path.parent)
+    assert tool._resolve_path(ws, parent, allow_outside=True) == parent
+    assert tool._resolve_path(ws, "..", allow_outside=True) == parent
+
+
+def test_resolve_path_inside_unchanged(tmp_path):
+    """工作区内路径不受开关影响。"""
+    ws = str(tmp_path)
+    tool = TerminalExecTool()
+    (tmp_path / "clinic").mkdir()
+    assert tool._resolve_path(ws, "clinic") == str(tmp_path / "clinic")
+    assert tool._resolve_path(ws, "clinic", allow_outside=True) == str(tmp_path / "clinic")
+
+
+def test_plan_mode_outside_flag_in_result(tmp_path):
+    """plan 模式 + 开关开启：执行数据带 outside_access 审计标记。"""
+    tool = TerminalExecTool()
+    ctx = ToolContext(
+        workspace_root=str(tmp_path),
+        session_id=1, task_id=1, agent_id=1, agent_name="tester",
+        permission_mode="plan",
+    )
+    from app.core.config import settings as _s
+    prev = _s.plan_mode_allow_outside_access
+    _s.plan_mode_allow_outside_access = True
+    try:
+        r = asyncio.run(tool.run({"command": "echo x", "cwd": ".."}, ctx))
+    finally:
+        _s.plan_mode_allow_outside_access = prev
+    assert r.ok is True
+    assert r.data.get("outside_access") is True
+    assert r.data["cwd"] == str(tmp_path.parent)
+
+
 # ───────────────── web.fetch(仅 schema + 风险等级,不实际发请求) ─────────────────
 
 

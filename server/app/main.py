@@ -23,9 +23,12 @@ from app.gateway.routers import (
     settings as settings_routes,
     skills_mcp,
     subagents,
+    ta3_auth,
+    trae_auth,
     turns,
     upload,
     usage,
+    workbuddy_auth,
 )
 from app.gateway.ws import ws_router
 
@@ -42,6 +45,24 @@ async def lifespan(app: FastAPI):
         # 幂等补列(与打包入口 run_server.py 保持一致)
         async with async_session_factory() as db:
             await run_migrations(db)
+            from sqlalchemy import select
+            from app.persistence.models.turn import Turn
+            from app.persistence.models.task import Task
+            from app.persistence.models.agent import Agent
+            from datetime import datetime, timezone
+            stale = list((await db.execute(select(Turn).where(Turn.status == "running"))).scalars().all())
+            for turn in stale:
+                turn.status = "interrupted"
+                turn.summary = turn.summary or "应用关闭时任务已停止"
+                turn.completed_at = turn.completed_at or datetime.now(timezone.utc).isoformat()
+                rows = (await db.execute(select(Task).where(Task.turn_id == turn.id, Task.status.in_(["proposed", "pending", "running", "in_progress"]))))
+                for task in rows.scalars().all():
+                    task.status = "cancelled"
+                    task.note = task.note or "应用关闭时任务已停止"
+                agents = (await db.execute(select(Agent).where(Agent.turn_id == turn.id, Agent.status == "running")))
+                for agent in agents.scalars().all():
+                    agent.status = "terminated"
+            await db.commit()
         await seed()
     except Exception as e:  # noqa: BLE001
         import logging
@@ -114,6 +135,9 @@ def create_app() -> FastAPI:
     app.include_router(settings_routes.router, prefix="/api", tags=["settings"])
     app.include_router(usage.router, prefix="/api", tags=["usage"])
     app.include_router(subagents.router, prefix="/api", tags=["subagents"])
+    app.include_router(ta3_auth.router, prefix="/api", tags=["ta3"])
+    app.include_router(workbuddy_auth.router, prefix="/api", tags=["workbuddy"])
+    app.include_router(trae_auth.router, prefix="/api", tags=["trae"])
     app.include_router(upload.router, prefix="/api", tags=["upload"])
     app.include_router(diagnostics.router, prefix="/api", tags=["diagnostics"])
     app.include_router(ws_router, tags=["websocket"])

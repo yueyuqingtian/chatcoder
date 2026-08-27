@@ -4,6 +4,7 @@
  */
 import type {
   ArtifactOut,
+  CompactionIndexOut,
   ConfigProfileOut,
   ExecPolicyRuleOut,
   FileChangeOut,
@@ -194,6 +195,8 @@ export interface AuditLogOut {
 export interface DiagnosticsOut {
   ok: boolean;
   checks: { name: string; ok: boolean; detail?: string }[];
+  /** plan-88: 各项目工作区 .chatcoder/checkpoints 占用统计 */
+  checkpoints?: Array<{ workspace: string; file_count: number; size_mb: number; orphan_count: number }>;
 }
 
 export interface UpdateCheckOut {
@@ -253,7 +256,8 @@ export interface UsageSummaryOut {
 
 export const api = {
   // ── 项目 ──
-  listProjects: () => get<ProjectOut[]>("/projects"),
+  listProjects: (params?: { include_archived?: boolean }) =>
+    get<ProjectOut[]>(`/projects${params?.include_archived ? "?include_archived=true" : ""}`),
   createProject: (data: { path: string; name?: string; rules_docs?: string[]; auto_scan_rules?: boolean }) =>
     post<ProjectOut>("/projects", data),
   getProject: (id: number) => get<ProjectOut>(`/projects/${id}`),
@@ -261,15 +265,18 @@ export const api = {
     patch<ProjectOut>(`/projects/${id}`, data),
   deleteProject: (id: number) => del<{ ok: boolean }>(`/projects/${id}`),
   scanProjectRules: (id: number) => get<string[]>(`/projects/${id}/scan-rules`),
-  getProjectTree: (id: number, depth = 3) => get<ProjectTreeOut>(`/projects/${id}/tree?depth=${depth}`),
+  getProjectTree: (id: number, depth = 8) => get<ProjectTreeOut>(`/projects/${id}/tree?depth=${depth}`),
   readProjectFile: (id: number, path: string) =>
     get<{ path: string; content: string; size: number; truncated: boolean; language: string | null }>(
       `/projects/${id}/read-file?path=${encodeURIComponent(path)}`,
     ),
 
   // ── 会话 ──
-  listSessions: (projectId?: number) =>
-    get<SessionOut[]>(`/sessions${projectId ? `?project_id=${projectId}` : ""}`),
+  listSessions: (projectId?: number, includeArchived?: boolean) => {
+    const q = [projectId != null ? `project_id=${projectId}` : "", includeArchived ? "include_archived=true" : ""]
+      .filter(Boolean).join("&");
+    return get<SessionOut[]>(`/sessions${q ? `?${q}` : ""}`);
+  },
   createSession: (data: { project_id: number; title?: string; model_id?: number }) =>
     post<SessionOut>("/sessions", data),
   getSession: (id: number) => get<SessionOut>(`/sessions/${id}`),
@@ -307,12 +314,19 @@ export const api = {
   // ── 会话数据查询 ──
   listSessionMessages: (sessionId: number, threadId?: number) =>
     get<MessageOut[]>(`/turns/sessions/${sessionId}/messages${threadId != null ? `?thread_id=${threadId}` : ""}`),
+  // v30.1: 压缩块索引 / 原文还原（AI 与前端按索引查看压缩前会话）
+  listCompactions: (sessionId: number) =>
+    get<CompactionIndexOut[]>(`/sessions/${sessionId}/compactions`),
+  getCompactedMessages: (sessionId: number, compactionId: string) =>
+    get<MessageOut[]>(`/sessions/${sessionId}/compactions/${encodeURIComponent(compactionId)}/messages`),
+  restoreCompaction: (sessionId: number, compactionId: string) =>
+    post<{ ok: boolean; restored_messages: number }>(`/sessions/${sessionId}/compactions/${encodeURIComponent(compactionId)}/restore`),
   // v19: 会话子代理列表（消息流卡片重建）
   listSessionSubagents: (sessionId: number) =>
     get<Array<{ agent_id: number; name: string; turn_id: number | null; task_id: number | null; task_title: string | null; status: string }>>(`/turns/sessions/${sessionId}/subagents`),
   listSessionTasks: (sessionId: number) => get<TaskOut[]>(`/turns/sessions/${sessionId}/tasks`),
   confirmTaskPlan: (turnId: number, groupId: number, data: { accepted: boolean; steps?: Array<{ task_id?: number; title: string }> }) =>
-    post<{ ok: boolean }>(`/turns/${turnId}/tasks/${groupId}/confirm`, data),
+    post<{ ok: boolean; permission_mode?: string }>(`/turns/${turnId}/tasks/${groupId}/confirm`, data),
   retryTask: (turnId: number, taskId: number) =>
     post<{ ok: boolean }>(`/turns/${turnId}/tasks/${taskId}/retry`, {}),
   listSessionArtifacts: (sessionId: number) => get<ArtifactOut[]>(`/turns/sessions/${sessionId}/artifacts`),
@@ -347,7 +361,8 @@ export const api = {
 
   // ── 执行策略 ──
   listExecPolicyRules: () => get<ExecPolicyRuleOut[]>("/exec-policy"),
-  createExecPolicyRule: (data: { session_id?: number; command_pattern: string; decision: string; justification?: string }) =>
+  listExecPolicyTools: () => get<ExecPolicyToolInfo[]>("/exec-policy/tools"),
+  createExecPolicyRule: (data: { session_id?: number; command_pattern: string; decision: string; justification?: string; tool_name?: string }) =>
     post<ExecPolicyRuleOut>("/exec-policy", data),
   deleteExecPolicyRule: (id: number) => del<{ ok: boolean }>(`/exec-policy/${id}`),
 
@@ -388,9 +403,44 @@ export const api = {
     name: string; is_active?: boolean; context_window?: number; is_multimodal?: boolean; reasoning_efforts?: string[];
   }>) => post<ModelOut[]>(`/providers/${id}/models`, { models }),
 
+  // ── ta3（Ta+3 牛码）供应商（v23）──
+  ta3LoginStart: (id: number) => post<{
+    status: string; authorize_url?: string; state?: string; port?: number; expires_in?: number;
+    account?: Record<string, unknown> | null;
+  }>(`/providers/${id}/ta3/login/start`, {}),
+  ta3LoginCancel: (id: number) => post<{ ok: boolean }>(`/providers/${id}/ta3/login/cancel`, {}),
+  ta3LoginStatus: (id: number) => get<{ status: string; account?: Record<string, unknown> | null; error?: string | null }>(`/providers/${id}/ta3/login/status`),
+  ta3Logout: (id: number) => post<{ ok: boolean }>(`/providers/${id}/ta3/logout`, {}),
+  ta3Sync: (id: number) => post<{ synced: number; models: Array<{ name: string }> }>(`/providers/${id}/ta3/sync`, {}),
+
+  // ── workbuddy（腾讯 CodeBuddy/WorkBuddy）供应商（v24）──
+  workbuddyLoginStart: (id: number) => post<{
+    status: string; auth_url?: string; state?: string; expires_in?: number;
+    account?: Record<string, unknown> | null;
+  }>(`/providers/${id}/workbuddy/login/start`, {}),
+  workbuddyLoginCancel: (id: number) => post<{ ok: boolean }>(`/providers/${id}/workbuddy/login/cancel`, {}),
+  workbuddyLoginStatus: (id: number) => get<{ status: string; account?: Record<string, unknown> | null; error?: string | null }>(`/providers/${id}/workbuddy/login/status`),
+  workbuddyLogout: (id: number) => post<{ ok: boolean }>(`/providers/${id}/workbuddy/logout`, {}),
+  workbuddySync: (id: number) => post<{ synced: number; models: Array<{ name: string }> }>(`/providers/${id}/workbuddy/sync`, {}),
+
+  // ── trae（TRAE SOLO CN）供应商（v25）──
+  traeLoginStart: (id: number) => post<{
+    status: string; authorize_url?: string; state?: string; port?: number; expires_in?: number;
+    account?: Record<string, unknown> | null;
+  }>(`/providers/${id}/trae/login/start`, {}),
+  traeLoginCancel: (id: number) => post<{ ok: boolean }>(`/providers/${id}/trae/login/cancel`, {}),
+  traeLoginStatus: (id: number) => get<{ status: string; account?: Record<string, unknown> | null; error?: string | null }>(`/providers/${id}/trae/login/status`),
+  traeLogout: (id: number) => post<{ ok: boolean }>(`/providers/${id}/trae/logout`, {}),
+  traeSync: (id: number) => post<{ synced: number; models: Array<{ name: string }> }>(`/providers/${id}/trae/sync`, {}),
+
   // ── 诊断 ──
   runDiagnostics: () => get<DiagnosticsOut>("/diagnostics"),
   updateCheck: () => get<UpdateCheckOut>("/update-check"),
+  /** plan-88: 手动触发 checkpoint 垃圾回收（不传 workspace=全部活跃项目） */
+  cleanupCheckpoints: (workspace?: string) =>
+    post<{ ok: boolean; results: Array<Record<string, unknown>> }>(
+      `/diagnostics/checkpoints/cleanup${workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""}`,
+    ),
 
   // ── 技能 ──
   listSkills: (source?: string) =>
@@ -411,7 +461,7 @@ export const api = {
   createMcpServer: (data: {
     name: string; display_name?: string; description?: string; source?: string;
     transport?: string; command?: string; args?: string[]; env?: Record<string, string>;
-    url?: string; is_active?: boolean;
+    url?: string; is_active?: boolean; path?: string;
   }) => post<McpServerOut>("/mcp-servers", data),
   updateMcpServer: (id: number, data: {
     display_name?: string; description?: string; transport?: string; command?: string;
@@ -496,9 +546,20 @@ export interface GlobalSettingsOut {
   enhanced_search: boolean;
   show_todos: boolean;
   show_reasoning: boolean;
+  /** v3.0 (plan-88): 计划模式允许访问工作区外路径 */
+  plan_mode_allow_outside_access: boolean;
+  /** v32 (plan-89): 沙箱模式（workspace-write / read-only / danger-full-access） */
+  sandbox_mode: string;
 }
 
 export type GlobalSettingsIn = Partial<Omit<GlobalSettingsOut, never>>;
+
+/** v3.0 (plan-88): 工具级规则候选清单项（PolicyPanel 工具下拉数据源） */
+export interface ExecPolicyToolInfo {
+  name: string;
+  risk_level: string;
+  description: string;
+}
 
 /** v2.2 (对齐 zcode 3.13): 子代理类型 */
 export interface SubagentProfileOut {

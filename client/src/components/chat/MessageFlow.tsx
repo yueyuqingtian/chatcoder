@@ -11,6 +11,7 @@ import type { TimelineEntry } from "./timeline";
 import { buildTimeline, msgText } from "./timeline";
 import { TurnGroup } from "./TurnGroup";
 import { JumpDots } from "./JumpDots";
+import { CompactingCard } from "./CompactCard";
 import { StreamingText } from "./StreamingText";
 import { IconSearch, IconChevronUp, IconChevronDown, IconX, IconArrowDown, IconClipboard } from "../icons";
 import { MarkdownContent } from "../MarkdownContent";
@@ -61,29 +62,60 @@ const StandaloneEntry = memo(function StandaloneEntry({ entry }: { entry: Extrac
   );
 });
 
-/** 计划确认卡（主界面专属）：plan 模式 turn 完成后内嵌在消息流底部展示。 */
+/** 计划确认卡（主界面专属）：plan 模式 turn 完成后内嵌在其所属 turn 行尾展示。 */
 function PlanCard() {
   const [expanded, setExpanded] = useState(false);
   const pendingPlan = useChatStore((s) => s.pendingPlan);
+  const pendingSplit = useChatStore((s) => s.pendingSplit);
+  const tasks = useChatStore((s) => s.tasks);
+  const currentSessionId = useChatStore((s) => s.currentSessionId);
   const confirmPlan = useChatStore((s) => s.confirmPlan);
+  const confirmTaskSplit = useChatStore((s) => s.confirmTaskSplit);
   const dismissPlan = useChatStore((s) => s.dismissPlan);
-  if (!pendingPlan) return null;
+  const splitSteps = pendingSplit
+    ? tasks.filter((task) => task.parent_task_id === pendingSplit.groupTaskId && !task.is_hidden)
+    : [];
+  if (!pendingPlan && !pendingSplit) return null;
+  // plan-95: 展示守卫——提案组已不是 proposed（已确认/已取消）时不渲染，
+  // 防止 tasks 刷新滞后导致旧卡短暂复现
+  if (pendingSplit) {
+    const group = tasks.find((t) => t.id === pendingSplit.groupTaskId);
+    if (group && group.status !== "proposed") return null;
+  }
+  // 计划文档与会话绑定：优先使用后端广播的实际文档路径（AI 可能写时间戳文件名），
+  // 缺省回退约定名 ai/chatcoder-plan-<sessionId>.md。
+  const planDocPath = pendingSplit?.planDocPath
+    ?? (currentSessionId != null ? `ai/chatcoder-plan-${currentSessionId}.md` : "ai/chatcoder-plan.md");
+  const title = pendingPlan?.task
+    ?? tasks.find((task) => task.id === pendingSplit?.requestTaskId)?.title
+    ?? "任务执行计划";
+  const confirm = () => {
+    if (pendingSplit) {
+      void confirmTaskSplit(true, splitSteps.map((step) => ({ task_id: step.id, title: step.title })));
+    } else if (pendingPlan) {
+      void confirmPlan(pendingPlan.task);
+    }
+  };
+  const cancel = () => {
+    if (pendingSplit) void confirmTaskSplit(false);
+    else dismissPlan();
+  };
   return (
     <div className="turn-group">
       <div className="plan-inline-card">
         <div className="plan-inline-head">
           <IconClipboard size={13} /> 计划
         </div>
-        <button type="button" className="plan-inline-title" onClick={() => setExpanded((v) => !v)} aria-expanded={expanded}>{pendingPlan.task}</button>
-        {expanded && <div className="plan-inline-preview"><code>ai/chatcoder-plan.md</code><br />展开右侧文件面板可查看完整计划内容。</div>}
+        <button type="button" className="plan-inline-title" onClick={() => setExpanded((v) => !v)} aria-expanded={expanded}>{title}</button>
+        {expanded && <div className="plan-inline-preview"><code>{planDocPath}</code><br />展开右侧文件面板可查看完整计划内容。</div>}
         <div className="plan-inline-desc">
-          AI 已在项目根目录 <code>ai/</code> 目录生成计划文档 <code>chatcoder-plan.md</code>，请审阅后确认是否按计划执行。
+          AI 已在项目根目录 <code>ai/</code> 目录生成计划文档 <code>{planDocPath}</code>，请审阅后确认是否按计划执行。
         </div>
         <div className="plan-inline-actions">
           <button
             className="plan-inline-view"
             onClick={() => {
-              usePanelStore.getState().setPreviewPath("ai/chatcoder-plan.md");
+              usePanelStore.getState().setPreviewPath(planDocPath);
               usePanelStore.getState().openPanel();
               usePanelStore.getState().openTab("files");
             }}
@@ -91,8 +123,13 @@ function PlanCard() {
             查看完整计划 →
           </button>
           <span className="plan-inline-spacer" />
-          <button className="btn-ghost" onClick={() => dismissPlan()}>取消</button>
-          <button className="plan-inline-confirm" onClick={() => confirmPlan(pendingPlan.task)}>确认执行</button>
+          {splitSteps.length > 0 && expanded && (
+            <div className="plan-inline-steps">
+              {splitSteps.map((step, index) => <div key={step.id}>{index + 1}. {step.title}</div>)}
+            </div>
+          )}
+          <button className="btn-ghost" onClick={cancel}>取消</button>
+          <button className="plan-inline-confirm" onClick={confirm}>确认执行</button>
         </div>
       </div>
     </div>
@@ -386,7 +423,13 @@ function MainMessageFlow({ className }: { className?: string }) {
   const subagentMeta = useChatStore((s) => s.subagentMeta);
   const streamingBuffers = useChatStore((s) => s.streamingBuffers);
   const thinkingBuffers = useChatStore((s) => s.thinkingBuffers);
-  const hasPlanCard = useChatStore((s) => s.pendingPlan != null);
+  const hasPlanCard = useChatStore((s) => s.pendingPlan != null || s.pendingSplit != null);
+  // plan-95: 计划卡归属 turn——卡片内嵌到该 turn 行尾随时间线滚动，
+  // 不再固定在消息流最底部（与后续新消息脱节）
+  const planTurnId = useChatStore((s) => s.pendingSplit?.turnId ?? s.pendingPlan?.turnId ?? null);
+  // v30: 压缩中进度（compact.started 载荷）——消息流尾部渲染"压缩中"卡片
+  const isCompacting = useChatStore((s) => s.isCompacting);
+  const compactingInfo = useChatStore((s) => s.compactingInfo);
 
   const subagentsByTurn = useMemo(() => {
     const map = new Map<number, Array<{ agentId: number; name: string; status: string }>>();
@@ -399,21 +442,27 @@ function MainMessageFlow({ className }: { className?: string }) {
     return map;
   }, [subagentMeta]);
 
+  // v30: 被压缩的消息保留在时间线上（不隐藏）；压缩块卡由 SUMMARY 消息渲染
   const entries = useMemo(() => buildTimeline(messages), [messages]);
 
   const renderEntry = useCallback((entry: TimelineEntry) => {
     if (entry.kind !== "turn") return <StandaloneEntry entry={entry} />;
     // v12: 已回滚 turn 显示专用横幅（回滚后消息被软删，以此占位区分「回滚了」与「没执行」）
     const rolledBack = turns.find((t) => t.id === entry.turnId)?.status === "rolled_back";
+    // plan-95: 计划卡内嵌到其归属 turn 的行尾（同工具调用一样按时间线定位）
+    const planCardHere = entry.turnId != null && entry.turnId === planTurnId;
     return (
-      <TurnGroup
-        entry={entry}
-        isRunning={runningTurnId === entry.turnId}
-        rolledBack={rolledBack}
-        subagents={entry.turnId != null ? subagentsByTurn.get(entry.turnId) : undefined}
-      />
+      <>
+        <TurnGroup
+          entry={entry}
+          isRunning={runningTurnId === entry.turnId}
+          rolledBack={rolledBack}
+          subagents={entry.turnId != null ? subagentsByTurn.get(entry.turnId) : undefined}
+        />
+        {planCardHere && <PlanCard />}
+      </>
     );
-  }, [turns, runningTurnId, subagentsByTurn]);
+  }, [turns, runningTurnId, subagentsByTurn, planTurnId]);
 
   const streamSignal = useMemo(
     () => Object.values(streamingBuffers).join("") + "|" + Object.values(thinkingBuffers).join(""),
@@ -421,14 +470,21 @@ function MainMessageFlow({ className }: { className?: string }) {
   );
   const thinkingText = Object.values(thinkingBuffers).join("").trim();
   const text = Object.values(streamingBuffers).join("");
+  const turnStatus = useChatStore((s) => s.turnStatus);
 
   return (
     <MessageFlowCore
       entries={entries}
       running={isRunning}
       renderEntry={renderEntry}
-      streamingNode={<StreamingText active={Boolean(isRunning && runningTurnId)} thinking={thinkingText} text={text} />}
-      trailingNode={hasPlanCard ? <PlanCard /> : null}
+      streamingNode={<StreamingText active={Boolean(isRunning && runningTurnId)} thinking={thinkingText} text={text} statusLabel={turnStatus ?? undefined} />}
+      trailingNode={
+        <>
+          {/* plan-95: 归属 turn 不在时间线上时兑底渲染到尾部；正常情况内嵌于 turn 行 */}
+          {hasPlanCard && planTurnId == null && <PlanCard />}
+          {isCompacting && <CompactingCard info={compactingInfo} />}
+        </>
+      }
       sessionKey={currentSessionId ?? 0}
       streamSignal={streamSignal}
       jumpDots

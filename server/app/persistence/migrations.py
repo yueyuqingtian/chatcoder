@@ -34,9 +34,13 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("sessions", "updated_at", "VARCHAR"),
     # ========== sessions（v2.2 对齐 zcode 3.12：权限模式）==========
     ("sessions", "permission_mode", "VARCHAR(20) DEFAULT 'default' NOT NULL"),
+    # ========== sessions（plan-88：确认执行后恢复 plan 模式标记）==========
+    ("sessions", "plan_restore_after_turn", "BOOLEAN DEFAULT 0 NOT NULL"),
     # ========== sessions（v1.1：最后一次 API 真实上下文占用）==========
     ("sessions", "last_prompt_tokens", "INTEGER DEFAULT 0 NOT NULL"),
     ("sessions", "last_usage_at", "VARCHAR(40)"),
+    # ========== sessions（v21：主会话上下文摘要持久化）==========
+    ("sessions", "shared_context", "JSON"),
     # ========== exec_policy_rules（v2.2：工具级规则）==========
     ("exec_policy_rules", "tool_name", "VARCHAR(60)"),
     # ========== messages（v1 缺 turn_id）==========
@@ -64,10 +68,21 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("models", "reasoning_efforts", "JSON"),
     # ========== models（v16 供应商化：模型挂到 provider 下）==========
     ("models", "provider_id", "BIGINT"),
+    # ========== providers（v23 ta3 供应商：登录态）==========
+    ("providers", "auth_status", "VARCHAR(20)"),
+    ("providers", "account_label", "VARCHAR(120)"),
+    # ========== models（v23 ta3 模型：远端元数据 JSON）==========
+    ("models", "ta3_meta", "JSON"),
+    # ========== models（v24 workbuddy 模型：远端元数据 JSON）==========
+    ("models", "workbuddy_meta", "JSON"),
+    # ========== models（v25 trae 模型：远端元数据 JSON）==========
+    ("models", "trae_meta", "JSON"),
     # ========== team_agents（v1 遗留表，v2 不再使用，仅保留迁移以防旧表有数据）==========
     ("team_agents", "learned_facts", "JSON"),
     ("team_agents", "skill_ids", "JSON"),
     ("team_agents", "mcp_server_ids", "JSON"),
+    # ========== rollback_writes（plan-88：二进制/超限文件只走 checkpoint 恢复）==========
+    ("rollback_writes", "binary", "BOOLEAN DEFAULT 0 NOT NULL"),
 ]
 
 

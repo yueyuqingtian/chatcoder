@@ -178,11 +178,11 @@ async def _heal_orphan_turns(db: AsyncSession) -> None:
     orphans = list(res.scalars().all())
     if not orphans:
         return
-    from sqlalchemy import func
+    from datetime import datetime, timezone
     for t in orphans:
         t.status = "failed"
         t.summary = "执行中断(服务重启)"
-        t.completed_at = str(func.now())
+        t.completed_at = datetime.now(timezone.utc).isoformat()
     await db.flush()
 
 

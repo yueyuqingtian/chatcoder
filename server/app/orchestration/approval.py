@@ -56,13 +56,16 @@ class ApprovalManager:
         risk_level = detail.get("risk_level", "low")
 
         # v1.0: auto_approve=True 时完全跳过审批，包括强制列表工具
-        if settings.auto_approve_tools:
-            logger.info("自动批准工具调用(auto_approve): %s (risk=%s)", tool_name, detail.get("risk_level"))
-            return True
-
-        # auto_approve=False 时，强制审批工具始终需要审批
+        # v32 (plan-89): 修复与"始终需要审批的工具"语义冲突——auto_approve 仅批准
+        # 未在 force_approval_tools 列表且非 high 风险的工具；强制列表/高风险仍弹审批
+        # （force_approval_tools 是最高例外，设置中心文案"始终需要审批"与之一致）。
         force_tools = settings.force_approval_tools_list
         is_forced = tool_name in force_tools or risk_level == "high"
+        if settings.auto_approve_tools:
+            if not is_forced:
+                logger.info("自动批准工具调用(auto_approve): %s (risk=%s)", tool_name, detail.get("risk_level"))
+                return True
+            logger.info("auto_approve 命中强制审批列表/高风险，仍弹审批: %s (risk=%s)", tool_name, risk_level)
         if is_forced:
             logger.info("强制审批(高风险/强制列表): %s (risk=%s)", tool_name, risk_level)
         approval_id = approval_id or self.new_id()

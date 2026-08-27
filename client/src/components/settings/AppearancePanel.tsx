@@ -1,7 +1,7 @@
 /** 设置中心：外观（v2.2 对齐 zcode 3.18）。
- * 主题模式、毛玻璃效果、布局宽度、字号、特殊文字颜色、左侧面板外观。 */
+ * 主题模式、毛玻璃效果、布局宽度、字号、左侧面板外观。 */
 import { useThemeStore, type Theme } from "../../store/theme";
-import { useUiStore, type UiPrefs } from "../../store/ui";
+import { useUiStore } from "../../store/ui";
 import { Row, Sw } from "./shared";
 
 const THEMES: Record<Theme, string> = { light: "浅色", dark: "深色" };
@@ -28,12 +28,6 @@ export function AppearancePanel() {
             <button className="btn btn-ghost btn-xs" onClick={() => ui.setPrefs({ glassGradientC1: "", glassGradientC2: "" })}>重置</button>
           </div>
         </Row>
-        <Row title="输入框聚焦光晕" desc="输入框聚焦时的呼吸光影颜色（毛玻璃模式）">
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input type="color" className="settings-color-input" value={ui.composerGlowColor || "#8A4DFF"} onChange={(e) => ui.setPrefs({ composerGlowColor: e.target.value })} />
-            <button className="btn btn-ghost btn-xs" onClick={() => ui.setPrefs({ composerGlowColor: "" })}>重置</button>
-          </div>
-        </Row>
         <Row title="阴影强度" desc="无阴影 / 轻柔 / 标准 / 深邃 / 戏剧">
           <div style={{ display: "flex", gap: 4 }}>{([["0", "无"], ["0.5", "轻柔"], ["1", "标准"], ["1.5", "深邃"], ["2", "戏剧"]] as const).map(([v, label]) => <button key={v} className={"settings-pill" + (String(ui.shadowStrength) === v ? " active" : "")} onClick={() => ui.setPrefs({ shadowStrength: Number(v) })}>{label}</button>)}</div>
         </Row>
@@ -55,15 +49,6 @@ export function AppearancePanel() {
         <Row title="内容展示宽度" desc="0 表示不限制">
           <div className="settings-slider-wrap"><input type="range" className="settings-slider" min={0} max={1200} step={50} value={ui.contentMaxWidth} onChange={(e) => ui.setPrefs({ contentMaxWidth: Number(e.target.value) })} /><span className="settings-slider-value">{ui.contentMaxWidth === 0 ? "不限" : ui.contentMaxWidth + "px"}</span></div>
         </Row>
-      </div>
-
-      <div className="settings-card">
-        <div className="settings-card-title">特殊文字颜色</div>
-        <div className="settings-color-grid">
-          {([["chatCodeColor", "代码块", ui.chatCodeColor], ["chatHeadingColor", "标题", ui.chatHeadingColor], ["chatLinkColor", "链接", ui.chatLinkColor], ["chatQuoteColor", "引用", ui.chatQuoteColor]] as const).map(([key, label, val]) => (
-            <div key={key} className="settings-color-item"><span>{label}</span><input type="color" className="settings-color-input" value={val} onChange={(e) => ui.setPrefs({ [key]: e.target.value } as Partial<UiPrefs>)} /></div>
-          ))}
-        </div>
       </div>
 
       <div className="settings-card">

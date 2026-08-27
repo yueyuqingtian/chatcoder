@@ -50,10 +50,10 @@ _FORBIDDEN_CAPABILITY_PATTERNS = (
 
 
 def _contains_explicit_list(text: str) -> bool:
-    if re.search(r"(?:^|\n)\s*(?:[-*]|\d+[.)]|[一二三四五六七八九十]+[、.])\s+", text):
-        return True
-    # 中文常见的多交付物连接词，只作为预筛信号，不做复杂度分数。
-    return len(re.findall(r"(?:实现|修复|新增|添加|支持|优化|改造|迁移)", text)) >= 3
+    # v23: 仅识别显式列表标记（符号/数字/中文序号开头的列表行）；
+    # 移除"≥3 个动词关键词即强制拆分"的纯计数触发——口语化多动词请求改交
+    # LLM 语义评估，避免把普通请求过度拆分（连带导致子代理滥用）。
+    return bool(re.search(r"(?:^|\n)\s*(?:[-*]|\d+[.)]|[一二三四五六七八九十]+[、.])\s+", text))
 
 
 def _parse_json(raw: str) -> dict[str, Any] | None:

@@ -57,12 +57,17 @@ MODEL_CATALOG: dict[str, dict] = {
     "glm-5.1": {"context_window": 200000, "multimodal": True, "reasoning_efforts": ["low", "medium", "high"]},
     "glm-5.2": {"context_window": 200000, "multimodal": True, "reasoning_efforts": ["low", "medium", "high"]},
     # ── DeepSeek ──
-    "deepseek-chat": {"context_window": 128000, "multimodal": False, "reasoning_efforts": []},
-    "deepseek-reasoner": {"context_window": 128000, "multimodal": False, "reasoning_efforts": ["low", "medium", "high"]},
+    # v21: deepseek-chat(V3.2+)/v3.2/reasoner/r1 均支持 thinking 模式（thinking:{type:"enabled"}），
+    # reasoning_efforts 不再为空；新增 deepseek-v4-flash/v4-pro（对齐 zcode 模型目录：
+    # context 1M，输出 384k，reasoning=true，interleaved reasoning_content）。
+    "deepseek-chat": {"context_window": 128000, "multimodal": False, "reasoning_efforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max"]},
+    "deepseek-reasoner": {"context_window": 128000, "multimodal": False, "reasoning_efforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max"]},
     "deepseek-v3": {"context_window": 128000, "multimodal": False, "reasoning_efforts": []},
     "deepseek-v3.1": {"context_window": 128000, "multimodal": False, "reasoning_efforts": []},
-    "deepseek-v3.2": {"context_window": 128000, "multimodal": False, "reasoning_efforts": []},
-    "deepseek-r1": {"context_window": 128000, "multimodal": False, "reasoning_efforts": ["low", "medium", "high"]},
+    "deepseek-v3.2": {"context_window": 128000, "multimodal": False, "reasoning_efforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max"]},
+    "deepseek-r1": {"context_window": 128000, "multimodal": False, "reasoning_efforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max"]},
+    "deepseek-v4-flash": {"context_window": 1000000, "multimodal": False, "reasoning_efforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max"]},
+    "deepseek-v4-pro": {"context_window": 1000000, "multimodal": False, "reasoning_efforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max"]},
     # ── Qwen ──
     "qwen-max": {"context_window": 131072, "multimodal": False, "reasoning_efforts": []},
     "qwen-plus": {"context_window": 131072, "multimodal": False, "reasoning_efforts": []},

@@ -2,6 +2,30 @@
 import type { TimelineEntry, TurnItem, ToolNode, ToolLeaf } from "./timeline";
 import { msgText } from "./timeline";
 
+/** v33: 把消息 content 中的附件信息序列化为文本（复制时携带文件名/路径）。 */
+function attachmentsToText(content: unknown, heading: string): string {
+  const c = content as Record<string, unknown> | undefined;
+  const atts = c?.attachments;
+  if (!Array.isArray(atts) || atts.length === 0) return "";
+  const lines: string[] = [];
+  for (const a of atts) {
+    if (!a || typeof a !== "object") continue;
+    const rec = a as Record<string, unknown>;
+    const name = String(rec.filename ?? "(未命名)");
+    const path = String(rec.path ?? "");
+    const url = String(rec.url ?? "");
+    const loc = path || url;
+    lines.push(`- ${name}${loc ? ` (${loc})` : ""}`);
+  }
+  return `\n${heading}\n${lines.join("\n")}`;
+}
+
+function userTextWithAttachments(content: Record<string, unknown>): string {
+  const text = msgText(content);
+  const att = attachmentsToText(content, "[附件]");
+  return text ? text + att : att.trim();
+}
+
 function toolNodesToMd(nodes: ToolNode[], depth: number): string {
   const indent = "  ".repeat(depth);
   const lines: string[] = [];
@@ -27,13 +51,13 @@ function toolNodesToMd(nodes: ToolNode[], depth: number): string {
 /** 将单个 turn 条目序列化为 Markdown。 */
 export function turnToMarkdown(entry: TimelineEntry): string {
   if (entry.kind === "standalone") {
-    return msgText(entry.msg.content);
+    return userTextWithAttachments(entry.msg.content);
   }
   const parts: string[] = [];
   for (const item of entry.items) {
     switch (item.kind) {
       case "user":
-        parts.push(`**用户**：${msgText(item.msg.content)}`);
+        parts.push(`**用户**：${userTextWithAttachments(item.msg.content)}`);
         break;
       case "thinking":
         parts.push(`<details><summary>思考</summary>\n\n${msgText(item.msg.content)}\n\n</details>`);
@@ -67,13 +91,13 @@ export function turnToMarkdown(entry: TimelineEntry): string {
 /** 将 turn 条目序列化为纯文本。 */
 export function turnToPlainText(entry: TimelineEntry): string {
   if (entry.kind === "standalone") {
-    return msgText(entry.msg.content);
+    return userTextWithAttachments(entry.msg.content);
   }
   const parts: string[] = [];
   for (const item of entry.items) {
     switch (item.kind) {
       case "user":
-        parts.push(msgText(item.msg.content));
+        parts.push(userTextWithAttachments(item.msg.content));
         break;
       case "thinking":
         parts.push(`[思考] ${msgText(item.msg.content)}`);
@@ -127,7 +151,7 @@ export function turnToPlainText(entry: TimelineEntry): string {
 /** v19: 按归属序列化 turn（复制用户消息只复制用户内容，复制 AI 回复不含用户消息）。 */
 export function turnPartToPlainText(entry: TimelineEntry, part: "user" | "ai"): string {
   if (entry.kind === "standalone") {
-    return part === "user" ? msgText(entry.msg.content) : "";
+    return part === "user" ? userTextWithAttachments(entry.msg.content) : "";
   }
   const parts: string[] = [];
   for (const item of entry.items) {
@@ -135,6 +159,9 @@ export function turnPartToPlainText(entry: TimelineEntry, part: "user" | "ai"): 
     if (part === "user" ? !isUser : isUser) continue;
     switch (item.kind) {
       case "user":
+        // v33: 复制用户消息时携带附件信息（文件名 + 路径）
+        parts.push(userTextWithAttachments(item.msg.content));
+        break;
       case "text":
       case "summary":
         parts.push(msgText(item.msg.content));

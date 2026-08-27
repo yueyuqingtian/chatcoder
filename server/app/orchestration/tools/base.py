@@ -25,6 +25,9 @@ class ToolContext:
     db: "AsyncSession | None" = None
     # v2.2 (对齐 zcode 3.12): 会话权限模式 default / accept_edits / plan
     permission_mode: str = "default"
+    # v3.0 (plan-88): 沙箱模式 read-only / workspace-write / danger-full-access
+    # （P0：executor 审批门消费；P1/P2：进程与文件系统隔离，见 docs/sandbox-design.md）
+    sandbox_mode: str = "workspace-write"
 
 
 @dataclass

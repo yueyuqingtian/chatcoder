@@ -4,14 +4,16 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type McpServerOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { IconRefresh, IconPlus, IconX } from "../icons";
+import { ConfirmDialog } from "../ConfirmDialog";
 import { Sw } from "./shared";
 
 export function McpPanel() {
   const [items, setItems] = useState<McpServerOut[]>([]);
-  const [candidates, setCandidates] = useState<Array<{ name: string; transport: string; command: string | null; args?: string[]; env?: Record<string, string> | null; url?: string | null }>>([]);
+  const [candidates, setCandidates] = useState<Array<{ name: string; transport: string; command: string | null; args?: string[]; env?: Record<string, string> | null; url?: string | null; source_path?: string }>>([]);
   const [scanning, setScanning] = useState(false);
   const [importing, setImporting] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [confirmTarget, setConfirmTarget] = useState<McpServerOut | null>(null);
   const [form, setForm] = useState({ name: "", transport: "stdio", command: "", url: "" });
   const load = useCallback(async () => { try { setItems(await api.listMcpServers()); } catch {} }, []);
   useEffect(() => { load(); }, [load]);
@@ -37,10 +39,10 @@ export function McpPanel() {
       setScanning(false);
     }
   };
-  const handleImport = async (c: { name: string; transport: string; command: string | null; args?: string[]; env?: Record<string, string> | null; url?: string | null }) => {
+  const handleImport = async (c: { name: string; transport: string; command: string | null; args?: string[]; env?: Record<string, string> | null; url?: string | null; source_path?: string }) => {
     setImporting(c.name);
     try {
-      await api.createMcpServer({ name: c.name, transport: c.transport, command: c.command || undefined, args: c.args, env: c.env || undefined, url: c.url || undefined, is_active: false });
+      await api.createMcpServer({ name: c.name, transport: c.transport, command: c.command || undefined, args: c.args, env: c.env || undefined, url: c.url || undefined, is_active: false, path: c.source_path || undefined });
       setCandidates((prev) => prev.filter((x) => x.name !== c.name));
       load();
     } catch (e) {
@@ -86,12 +88,25 @@ export function McpPanel() {
             </div>
             <div className="settings-resource-actions">
               <Sw checked={m.is_active} onChange={async (v) => { try { await api.updateMcpServer(m.id, { is_active: v }); load(); } catch {} }} />
-              <button className="btn btn-ghost btn-xs" onClick={async () => { if (confirm("删除？")) { try { await api.deleteMcpServer(m.id); load(); } catch {} } }}><IconX size={12} /></button>
+              <button className="btn btn-ghost btn-xs" onClick={() => setConfirmTarget(m)}><IconX size={12} /></button>
             </div>
           </div>
         ))}
         {items.length === 0 && !showCreate && <div className="navpage-empty">暂无 MCP 服务器</div>}
       </div>
+      <ConfirmDialog
+        open={confirmTarget !== null}
+        title="删除 MCP 服务器"
+        message={`删除「${confirmTarget?.display_name || confirmTarget?.name || ""}」？`}
+        danger
+        onCancel={() => setConfirmTarget(null)}
+        onConfirm={async () => {
+          const it = confirmTarget;
+          setConfirmTarget(null);
+          if (!it) return;
+          try { await api.deleteMcpServer(it.id); load(); } catch { /* ignore */ }
+        }}
+      />
       {candidates.length > 0 && (
         <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-2)", marginBottom: 8 }}>扫描候选</div>

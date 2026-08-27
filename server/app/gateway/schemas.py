@@ -48,6 +48,19 @@ class SessionCreate(BaseModel):
     model_id: int | None = None
 
 
+class CompactionIndexOut(BaseModel):
+    """压缩块索引（v30.1：AI 按索引查看压缩前会话的定位信息）。"""
+    index: int | None = None
+    compaction_id: str | None = None
+    summary_message_id: int | None = None
+    shadowed_ids: list[int] = []
+    shadowed_tokens: int = 0
+    saved_tokens: int = 0
+    trigger: str = "pressure"
+    created_at: str | None = None
+    summary_preview: str = ""
+
+
 class SessionUpdate(BaseModel):
     title: str | None = None
     model_id: int | None = None
@@ -217,6 +230,8 @@ class ExecPolicyRuleOut(BaseModel):
     command_pattern: str
     decision: str
     justification: str | None = None
+    # v2.2/v3.0: 工具级规则（非空 = 该规则作用于工具本身，command_pattern 存 "(tool)xxx"）
+    tool_name: str | None = None
 
 
 class ExecPolicyRuleCreate(BaseModel):
@@ -224,6 +239,7 @@ class ExecPolicyRuleCreate(BaseModel):
     command_pattern: str
     decision: str
     justification: str | None = None
+    tool_name: str | None = None
 
 
 # ── 钩子 ──
@@ -273,6 +289,7 @@ class RollbackResult(BaseModel):
     rolled_back_msgs: int
     file_recovery: dict[str, Any]
     user_message: str | None = None  # restore_to_composer=True 时回填
+    user_attachments: list[dict[str, Any]] | None = None  # restore_to_composer=True 时回填附件（图片等）
 
 
 class RollbackPreviewFile(BaseModel):
@@ -314,6 +331,7 @@ class FileDiffOut(BaseModel):
     before: str | None = None  # 写盘前内容（新建文件为 None）
     after: str | None = None   # 当前磁盘内容（已删除文件为 None）
     truncated: bool = False    # 变更行数超限已截断
+    reason: str | None = None  # 二进制/大文件说明（不展示文本 diff）
 
 
 class ReviewBatchBody(BaseModel):
@@ -376,6 +394,11 @@ class ModelOut(BaseModel):
     api_format: str = "openai"
     has_api_key: bool = False
     reasoning_efforts: list[str] = []
+    # ── trae 供应商扩展（源自 trae_meta）──
+    trae_max_context: int | None = None        # max 档上下文（如 1000000 = 1M）
+    trae_consumption_rate: float | None = None  # 积分消耗倍率（max 档更快）
+    trae_available: bool = False               # TRAE 客户端实际可用
+    trae_thinking: bool = False                # 支持思考档位
 
 
 # ── 供应商（v16）──
@@ -403,7 +426,69 @@ class ProviderOut(BaseModel):
     is_active: bool = True
     has_api_key: bool = False
     model_count: int = 0
+    # v23: ta3 供应商登录态
+    auth_status: str | None = None
+    account_label: str | None = None
     created_at: str | None = None
+
+
+# ── ta3 登录/同步（v23）──
+class Ta3LoginStartOut(BaseModel):
+    status: str
+    authorize_url: str | None = None
+    state: str | None = None
+    port: int | None = None
+    expires_in: int | None = None
+
+
+class Ta3LoginStatusOut(BaseModel):
+    status: str  # pending | logged_in | failed
+    account: dict | None = None
+    error: str | None = None
+
+
+class Ta3SyncOut(BaseModel):
+    synced: int
+    models: list[dict]
+
+
+# ── workbuddy（腾讯 CodeBuddy/WorkBuddy）登录/同步（v24）──
+class WorkBuddyLoginStartOut(BaseModel):
+    status: str  # pending | logged_in
+    auth_url: str | None = None
+    state: str | None = None
+    expires_in: int | None = None
+
+
+class WorkBuddyLoginStatusOut(BaseModel):
+    status: str  # pending | logged_in | failed
+    account: dict | None = None
+    error: str | None = None
+
+
+class WorkBuddySyncOut(BaseModel):
+    synced: int
+    models: list[dict]
+
+
+# ── TRAE SOLO CN 登录/同步（v25）──
+class TraeLoginStartOut(BaseModel):
+    status: str  # pending | logged_in | failed
+    authorize_url: str | None = None
+    state: str | None = None
+    port: int | None = None
+    expires_in: int | None = None
+
+
+class TraeLoginStatusOut(BaseModel):
+    status: str  # pending | logged_in | failed
+    account: dict | None = None
+    error: str | None = None
+
+
+class TraeSyncOut(BaseModel):
+    synced: int
+    models: list[dict]
 
 
 class ScannedModel(BaseModel):
@@ -498,10 +583,26 @@ class EvUsageUpdate(WsEventPayload):
 
 
 class EvCompactEvent(WsEventPayload):
+    """压缩事件载荷（compact.started / compact.summary / compact.completed）。
+
+    started: used_tokens/context_window/ratio 为触发时的占用信息；
+    summary/completed: compaction_id/shadowed_range/shadowed_seqs/saved_tokens/
+    summary_message_id 为落库后的压缩结果（阴影定价），供前端渲染压缩卡片。
+    """
     agent_id: int | None = None
     turn_id: int | None = None
     used_tokens: int | None = None
     context_window: int | None = None
+    ratio: float | None = None
+    # v30: 压缩结果字段
+    compaction_id: str | None = None
+    shadowed_range: list[int] | None = None
+    shadowed_seqs: list[int] | None = None
+    shadowed_tokens: int | None = None
+    saved_tokens: int | None = None
+    summary_message_id: int | None = None
+    summary: str | None = None
+    trigger: str | None = None
 
 
 class EvApprovalRequest(WsEventPayload):
@@ -537,20 +638,25 @@ WS_EVENT_PAYLOAD_MODELS: dict[str, type[WsEventPayload]] = {
     "thinking.done": WsEventPayload,
     "token.delta": EvTokenDelta,
     "token.done": WsEventPayload,
+    # v35: turn 级瞬态状态（重试/恢复提示），前端流式状态行展示，不落库
+    "turn.status": WsEventPayload,
     "tool.call": EvToolCall,
     "tool.result": EvToolResult,
+    "file.change": WsEventPayload,
     "todo.updated": EvTodoUpdated,
     "task.proposed": WsEventPayload,
     "task.planned": WsEventPayload,
     "task.updated": EvTaskUpdated,
     "usage.update": EvUsageUpdate,
     "compact.started": EvCompactEvent,
+    "compact.summary": EvCompactEvent,
     "compact.completed": EvCompactEvent,
     "approval.request": EvApprovalRequest,
     "approval.response": WsEventPayload,
     "api.retry": WsEventPayload,
     "config.changed": WsEventPayload,
     "scheduled.triggered": WsEventPayload,
+    "session.updated": WsEventPayload,
     "session.completed": WsEventPayload,
     "error": EvError,
     "ack": WsEventPayload,

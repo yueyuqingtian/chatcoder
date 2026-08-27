@@ -18,6 +18,8 @@ declare global {
       minimizeWindow?: () => void;
       toggleMaximize?: () => void;
       closeWindow?: () => void;
+      fixTextInput?: () => Promise<boolean>;
+      onRendererFocus?: (cb: () => void) => () => void;
       getUsername?: () => Promise<string>;
       setKeepAwake?: (on: boolean) => Promise<boolean>;
     };

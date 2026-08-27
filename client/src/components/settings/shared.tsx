@@ -1,6 +1,7 @@
 /** 设置中心共享组件（v2.2 对齐 zcode 3.18）：开关 / 行 / 通用资源列表。 */
 import { useCallback, useEffect, useState } from "react";
 import { IconX } from "../icons";
+import { ConfirmDialog } from "../ConfirmDialog";
 
 export function Sw({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
   return <label className="ui-switch"><input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} /><span className="ui-switch-track" /></label>;
@@ -24,6 +25,7 @@ export function GenericPanel<T extends { id: number }>({ loader, getName, getDes
   getActive: (it: T) => boolean;
 }) {
   const [items, setItems] = useState<T[]>([]);
+  const [confirmTarget, setConfirmTarget] = useState<T | null>(null);
   const load = useCallback(async () => { try { setItems(await loader()); } catch {} }, [loader]);
   useEffect(() => { load(); }, [load]);
   return (
@@ -36,11 +38,24 @@ export function GenericPanel<T extends { id: number }>({ loader, getName, getDes
           </div>
           <div className="settings-resource-actions">
             {onToggle && <Sw checked={getActive(it)} onChange={async (v) => { try { await onToggle(it, v); load(); } catch {} }} />}
-            <button className="btn btn-ghost btn-xs" onClick={async () => { if (confirm("删除？")) { try { await onDelete(it); load(); } catch {} } }}><IconX size={12} /></button>
+            <button className="btn btn-ghost btn-xs" onClick={() => setConfirmTarget(it)}><IconX size={12} /></button>
           </div>
         </div>
       ))}
       {items.length === 0 && <div className="navpage-empty">暂无数据</div>}
+      <ConfirmDialog
+        open={confirmTarget !== null}
+        title="删除"
+        message={`删除「${confirmTarget ? getName(confirmTarget) : ""}」？`}
+        danger
+        onCancel={() => setConfirmTarget(null)}
+        onConfirm={async () => {
+          const it = confirmTarget;
+          setConfirmTarget(null);
+          if (!it) return;
+          try { await onDelete(it); load(); } catch { /* ignore */ }
+        }}
+      />
     </div>
   );
 }

@@ -17,16 +17,35 @@ interface Props {
   minWidth: number;
   /** 最大宽度(px) */
   maxWidth: number;
+  /** plan-95: 拖拽方向上其余区域需保留的最小空间(px)，动态上限 = 容器宽 - reservePx */
+  reservePx?: number;
   /** 拖拽过程中直接操作的 DOM 元素 ref */
   panelEl: React.RefObject<HTMLElement | null>;
   /** 拖拽结束,提交最终宽度 */
   onCommit: (width: number) => void;
 }
 
-export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, panelEl, onCommit }: Props) {
+export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 0, panelEl, onCommit }: Props) {
   const startXRef = useRef(0);
   const baseWRef = useRef(baseWidth);
   const draggingRef = useRef(false);
+  // plan-95: 动态实际上限——静态 maxWidth 不考虑窗口可用空间，窄窗口下拖到
+  // "拖不动"后 DOM 宽度仍超布局，溢出部分被裁剪（面板右缘图标不可见）。
+  // 上限取 min(maxWidth, 容器宽 - reservePx)，到达上限后宽度与视觉完全静止。
+  const effectiveMaxRef = useRef(maxWidth);
+
+  const clampMax = useCallback(() => {
+    const parent = panelEl.current?.parentElement;
+    const avail = parent ? parent.clientWidth - reservePx : Number.POSITIVE_INFINITY;
+    effectiveMaxRef.current = Math.max(minWidth, Math.min(maxWidth, avail));
+  }, [maxWidth, minWidth, panelEl, reservePx]);
+
+  const applyWidth = useCallback((w: number) => {
+    const el = panelEl.current;
+    if (!el) return;
+    el.style.width = w + "px";
+    el.style.flexBasis = w + "px";
+  }, [panelEl]);
 
   const handleMouseMove = useCallback((e: MouseEvent) => {
     if (!draggingRef.current) return;
@@ -34,15 +53,11 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, panelEl, onC
 
     const rawDelta = e.clientX - startXRef.current;
     const effective = side === "right" ? -rawDelta : rawDelta;
-    const newWidth = Math.round(Math.max(minWidth, Math.min(maxWidth, baseWRef.current + effective)));
+    const newWidth = Math.round(Math.max(minWidth, Math.min(effectiveMaxRef.current, baseWRef.current + effective)));
 
     // 直接操作 DOM — 零 React 重渲染
-    const el = panelEl.current;
-    if (el) {
-      el.style.width = newWidth + "px";
-      el.style.flexBasis = newWidth + "px";
-    }
-  }, [side, minWidth, maxWidth, panelEl]);
+    applyWidth(newWidth);
+  }, [side, minWidth, applyWidth]);
 
   const handleMouseUp = useCallback(() => {
     if (!draggingRef.current) return;
@@ -54,9 +69,12 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, panelEl, onC
     document.body.style.userSelect = "";
     document.body.classList.remove("panel-dragging");
 
-    // 读取最终宽度,一次性提交
+    // 读取最终宽度,一次性提交（plan-95: 提交前按动态上限钳制，不持久化越界值）
     const el = panelEl.current;
-    const finalWidth = el ? parseInt(el.style.width, 10) || baseWRef.current : baseWRef.current;
+    const finalWidth = Math.min(
+      effectiveMaxRef.current,
+      el ? parseInt(el.style.width, 10) || baseWRef.current : baseWRef.current,
+    );
     onCommit(finalWidth);
   }, [handleMouseMove, panelEl, onCommit]);
 
@@ -66,6 +84,7 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, panelEl, onC
     draggingRef.current = true;
     startXRef.current = e.clientX;
     baseWRef.current = baseWidth;
+    clampMax();
 
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
@@ -73,7 +92,7 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, panelEl, onC
 
     document.addEventListener("mousemove", handleMouseMove);
     document.addEventListener("mouseup", handleMouseUp);
-  }, [baseWidth, handleMouseMove, handleMouseUp]);
+  }, [baseWidth, clampMax, handleMouseMove, handleMouseUp]);
 
   return (
     <div

@@ -4,6 +4,7 @@
 """
 import asyncio
 import difflib
+import hashlib
 import logging
 import re as _re
 import shutil
@@ -13,6 +14,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.persistence.models.message import Message
 from app.persistence.models.review import FileReview
 from app.persistence.models.rollback import RollbackWrite, TurnSnapshot
@@ -21,9 +23,32 @@ logger = logging.getLogger(__name__)
 
 _MAX_GIT_TIMEOUT = 30
 _CHECKPOINT_DIR = ".chatcoder/checkpoints"
+_BINARY_SNIFF_BYTES = 8192  # 二进制判定采样字节数
 
 # 写盘工具集合：这些工具会改写工作区文件，回滚时只恢复这些文件（绝不全局 git 回滚）
 _WRITE_TOOLS = ("fs_write", "editor_apply_diff", "multi_file_edit")
+
+
+def _is_binary_path(workspace: str, rel: str, max_bytes: int = 0) -> bool:
+    """写盘文件是否为二进制或超限：是则只做 checkpoint 备份，不存文本前后内容。
+
+    判定规则：含 NUL 字节 / 非 UTF-8 解码失败 / 超过 max_bytes（0=不限制）。
+    读取失败也视为二进制（走 checkpoint 二进制兜底，避免损坏文件）。
+    """
+    p = _fs_path(workspace, rel)
+    try:
+        if not p.exists() or not p.is_file():
+            return False
+        if max_bytes > 0 and p.stat().st_size > max_bytes:
+            return True
+        with open(p, "rb") as f:
+            sample = f.read(_BINARY_SNIFF_BYTES)
+        if b"\x00" in sample:
+            return True
+        sample.decode("utf-8")
+        return False
+    except (OSError, UnicodeDecodeError):
+        return True
 
 
 # ── git 基础操作 ──
@@ -51,18 +76,40 @@ async def _get_git_head(workspace: str) -> str | None:
 
 # ── 文件级 checkpoint（非 git 兜底）──
 
-def checkpoint_file(workspace_root: str, file_path: str) -> str | None:
-    """fs_write 前复制文件到 .chatcoder/checkpoints/。返回快照路径。"""
+def checkpoint_file(workspace_root: str, file_path: str,
+                    session_id: int | None = None, turn_id: int | None = None) -> str | None:
+    """fs_write 前复制文件到 .chatcoder/checkpoints/。返回快照路径。
+
+    v26: 文件名保留原相对路径（超长时截断并追加路径哈希），
+    配合 TurnSnapshot.file_list 的 {ckpt, path} 登记可反查原文件，
+    使非 git 仓库也能通过 checkpoint 兜底恢复。
+    v2.2 (plan-88): 按会话/轮次分子目录（session-{id}/{turn_id}/），
+    便于按会话归档/GC 整体清理；反查仍走 file_list 登记。
+    """
     try:
         src = Path(file_path)
         if not src.is_absolute():
             src = Path(workspace_root) / file_path
         if not src.exists():
             return None  # 新文件无需快照
-        ckpt_dir = Path(workspace_root) / _CHECKPOINT_DIR
+        root = Path(workspace_root).resolve()
+        ckpt_dir = root / _CHECKPOINT_DIR
+        if session_id is not None:
+            ckpt_dir = ckpt_dir / f"session-{session_id}"
+        if turn_id is not None:
+            ckpt_dir = ckpt_dir / str(turn_id)
         ckpt_dir.mkdir(parents=True, exist_ok=True)
-        ts = _time.strftime("%Y%m%d_%H%M%S")
-        ckpt_path = ckpt_dir / f"{ts}_{src.name}"
+        # 毫秒级时间戳，避免同秒多次写盘重名（Windows strftime 无 %f）
+        ts = f"{_time.strftime('%Y%m%d_%H%M%S')}_{int(_time.time() * 1000) % 1000:03d}"
+        rel = src.resolve().relative_to(root) if src.resolve().is_relative_to(root) else None
+        if rel is not None:
+            safe = _re.sub(r"[^\w.\-]", "_", rel.as_posix())
+            if len(safe) > 80:
+                safe = safe[:80] + "_" + hashlib.md5(rel.as_posix().encode("utf-8")).hexdigest()[:8]
+            name = f"{ts}_{safe}"
+        else:
+            name = f"{ts}_{src.name}"
+        ckpt_path = ckpt_dir / name
         shutil.copy2(str(src), str(ckpt_path))
         return str(ckpt_path)
     except OSError as e:
@@ -88,11 +135,63 @@ def restore_checkpoint(workspace_root: str, checkpoint_path: str, target_path: s
         return False
 
 
+async def _restore_checkpoints_for_turn(workspace: str, snap: TurnSnapshot) -> dict:
+    """从快照的 checkpoint 清单恢复文件（不依赖 git，非 git 仓库可用）。
+
+    仅处理 v26 后的 {ckpt, path} 字典条目；旧字符串条目（无路径映射）跳过。
+    同时删除快照登记的 new_files（该 turn 新建、回滚时移除）。
+    """
+    restored = deleted = failed = 0
+    for item in snap.file_list or []:
+        if not isinstance(item, dict):
+            continue
+        ckpt = item.get("ckpt") or ""
+        rel = item.get("path") or ""
+        if not ckpt or not rel or not _is_safe_rel_path(rel):
+            continue
+        src = Path(ckpt)
+        if not src.is_absolute():
+            src = _fs_path(workspace, ckpt)
+        if not src.exists():
+            failed += 1
+            continue
+        try:
+            dst = _fs_path(workspace, rel)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(src), str(dst))
+            restored += 1
+        except OSError:
+            failed += 1
+    for rel in snap.new_files or []:
+        if not _is_safe_rel_path(rel):
+            continue
+        if _delete_file(workspace, rel):
+            deleted += 1
+        else:
+            failed += 1
+    return {
+        "ok": failed == 0,
+        "skipped": restored == 0 and deleted == 0,
+        "restored": restored,
+        "deleted": deleted,
+        "failed": failed,
+        "reason": f"checkpoint 恢复 {restored} 个，删除新建 {deleted} 个，失败 {failed} 个",
+    }
+
+
 # ── 快照创建 ──
 
 async def create_turn_snapshot(db: AsyncSession, *, session_id: int, turn_id: int,
                                workspace: str, user_message_id: int | None = None) -> TurnSnapshot | None:
-    """turn 开始前创建快照。"""
+    """turn 开始前创建快照（幂等 get-or-create）。
+
+    plan-95: 路由层在 turn 创建时提前调用一次，引擎内再调用时直接返回已有快照——
+    保证"发送后立即停止"等任何路径下 turn 都有快照可回滚。
+    """
+    res = await db.execute(select(TurnSnapshot).where(TurnSnapshot.turn_id == turn_id))
+    existing = res.scalars().first()
+    if existing is not None:
+        return existing
     try:
         git_head = await _get_git_head(workspace)
     except Exception:
@@ -108,11 +207,45 @@ async def create_turn_snapshot(db: AsyncSession, *, session_id: int, turn_id: in
 
 
 def record_checkpoint(snap: TurnSnapshot, checkpoint_path: str, new_file: str | None = None) -> None:
-    """工具写盘后登记 checkpoint 或新建文件。"""
+    """工具写盘后登记 checkpoint 或新建文件（旧同步入口，仅登记新建文件）。
+
+    checkpoint 登记请用 record_checkpoint_for_turn（含 {ckpt, path} 反查映射）。"""
     if new_file:
         snap.new_files = list(snap.new_files or []) + [new_file]
     elif checkpoint_path:
         snap.file_list = list(snap.file_list or []) + [checkpoint_path]
+
+
+async def record_checkpoint_for_turn(db: AsyncSession, turn_id: int, checkpoint_path: str,
+                                     rel_path: str, new_file: str | None = None) -> None:
+    """按 turn 登记 checkpoint（内部查快照并追加 file_list/new_files）。失败非阻塞。
+
+    rel_path：原文件相对工作区的路径（恢复时反查目标）。
+    v2.2 (plan-88): 同 turn 同文件去重——首次写盘前备份一次即可恢复整个 turn，
+    后续重复写盘跳过备份，避免 checkpoint 目录膨胀。
+    """
+    if not checkpoint_path and not new_file:
+        return
+    try:
+        snap_res = await db.execute(select(TurnSnapshot).where(TurnSnapshot.turn_id == turn_id))
+        snap = snap_res.scalars().first()
+        if snap is None:
+            return
+        if new_file:
+            files = list(snap.new_files or [])
+            if new_file not in files:
+                files.append(new_file)
+                snap.new_files = files
+        elif checkpoint_path:
+            entry = {"ckpt": checkpoint_path, "path": rel_path}
+            items = list(snap.file_list or [])
+            if any(isinstance(it, dict) and it.get("path") == rel_path for it in items):
+                return  # 该文件本 turn 已备份，无需重复
+            items.append(entry)
+            snap.file_list = items
+        await db.flush()
+    except Exception:
+        logger.debug("[checkpoint] 登记失败(非阻塞): turn=%s %s", turn_id, rel_path, exc_info=True)
 
 
 # ── 回滚执行 ──
@@ -139,7 +272,7 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
             workspace = project.path if project else None
     workspace = workspace or ""
 
-    # 1. 先真正停止当前任务：设置 cancel 事件中断运行中的 agent loop（主/子代理共享），
+    # 1. 先真正停止当前任务：设置 cancel 事件中断运行中的 agent loop（主/子代理共享）。
     #    并等待其退出（最长 3s），避免回滚期间 agent 仍在写文件导致并发冲突。
     #    （延迟 import 避免与 engine 模块循环依赖）
     from app.orchestration import engine
@@ -154,8 +287,8 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
     from app.services import task_service, turn_service
     await task_service.cancel_turn_tasks(db, snap.session_id, turn_id)
 
-    # 1.2 产物清扫（v12）：该 turn 及其之后任务的 artifact_ids 置空，
-    #     Artifact 行 task_id 置 NULL（保留行，前端不再按任务展示），
+    # 1.2 产物清扫（v12）：该 turn 及其之后任务的 artifact_ids 置空。
+    #     Artifact 表 task_id 置 NULL（保留行，前端不再按任务展示），
     #     该 turn 的 FileReview 审核记录作废删除——回滚后产物区不残留已撤销文件。
     from app.persistence.models.task import Artifact, Task
     task_res = await db.execute(
@@ -186,17 +319,48 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
     #    绝不全局 git 恢复，避免误伤非当前 turn 的改动）
     writes = await list_turn_writes(db, snap.session_id, turn_id)
     if writes and workspace:
-        file_result = await _rollback_turn_files_precise(workspace, writes)
+        file_result = await _rollback_turn_files_precise(workspace, writes, snap)
     else:
-        # 旧数据无写盘记录：降级为按路径 git 单文件恢复（仍不全局回滚）
-        written_paths = await _turn_written_paths(db, snap.session_id, turn_id)
-        file_result = {"ok": True, "skipped": not written_paths, "restored": 0, "deleted": 0, "failed": 0,
-                       "reason": "该 turn 无精确写盘记录，降级恢复" if written_paths else "该 turn 无文件写入记录，无需恢复"}
-        if written_paths and workspace:
-            file_result = await _rollback_turn_files(workspace, written_paths)
+        # v26: 无精确写盘记录 → 优先 checkpoint 恢复（不依赖 git，非 git 仓库可用）。
+        # 快照登记的 checkpoint = 该 turn 写盘前文件内容，直接复制还原；新建文件删除。
+        ckpt_result = await _restore_checkpoints_for_turn(workspace, snap)
+        if ckpt_result.get("restored") or ckpt_result.get("deleted"):
+            file_result = ckpt_result
+        else:
+            # 旧数据无写盘记录：降级为按路径 git 单文件恢复（仍不全局回滚）
+            written_paths = await _turn_written_paths(db, snap.session_id, turn_id)
+            file_result = {"ok": True, "skipped": not written_paths, "restored": 0, "deleted": 0, "failed": 0,
+                           "reason": "该 turn 无精确写盘记录，降级恢复" if written_paths else "该 turn 无文件写入记录，无需恢复"}
+            if written_paths and workspace:
+                file_result = await _rollback_turn_files(workspace, written_paths)
+
+    # v2.2 (plan-88): 回滚完成后清理该 turn 的 checkpoint 文件（配置开启时）。
+    # 备份已完成使命（精确回滚用写盘记录，checkpoint 仅兜底），删除磁盘文件并
+    # 同步清空快照 file_list 登记，避免 .chatcoder/checkpoints 无限膨胀。
+    if settings.checkpoint_cleanup_on_rollback and snap.file_list:
+        _deleted_ckpts = 0
+        for item in snap.file_list:
+            if not isinstance(item, dict):
+                continue
+            ckpt = item.get("ckpt") or ""
+            if not ckpt:
+                continue
+            cp = Path(ckpt)
+            if not cp.is_absolute():
+                cp = _fs_path(workspace, ckpt)
+            try:
+                if cp.exists():
+                    cp.unlink()
+                    _deleted_ckpts += 1
+            except OSError:
+                pass
+        if _deleted_ckpts:
+            logger.info("[rollback] turn=%s 回滚后清理 checkpoint %d 个", turn_id, _deleted_ckpts)
+        snap.file_list = []
+        await db.flush()
 
     # 3. 消息软删：软删主线程「本 turn 及其之后」的消息，同时软删该 turn 及其之后
-    #    子代理线程（thread_id 属于 kind=sub 的 agent）的消息——子代理消息也是本 turn 的
+    #    子代理线程（thread_id 属于 kind=sub 的 agent）的消息——子代理消息也是该 turn 的
     #    执行内容，回滚后不应残留。turn_id IS NULL 的历史消息不删除，避免误删非当前 turn 内容。
     res = await db.execute(
         select(Message).where(
@@ -221,12 +385,15 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
         and (m.thread_id is None or m.thread_id in sub_ids_set)
     ]
     user_text = None
+    user_attachments = None
     for m in msgs:
         if m.id == snap.user_message_id and restore_to_composer:
+            # v2.2: 回滚撤销时同时回填文字与附件（图片等），前端可修改后直接重发
             user_text = str((m.content or {}).get("text", ""))
+            user_attachments = (m.content or {}).get("attachments")
         m.deleted = True
 
-    # 3.1 子代理 Agent 记录置为 terminated（保留历史，明确已随 turn 回滚终止）
+    # 3.1 子代理 Agent 记录置为 terminated（保留历史，明确已随 turn 回滚终止）。
     from app.orchestration.agent_events import broadcast
     for a in sub_agents:
         if a.status in ("running", "done", "failed"):
@@ -252,6 +419,7 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
         "rolled_back_msgs": len(msgs),
         "file_recovery": file_result,
         "user_message": user_text if restore_to_composer else None,
+        "user_attachments": user_attachments if restore_to_composer else None,
     }
 
 
@@ -319,12 +487,153 @@ def resolve_write_paths(tool: str, args: dict) -> list[str]:
     return [p.strip()] if isinstance(p, str) and p.strip() else []
 
 
+# ── 工具伪装兜底（v25）：从 shell 命令解析候选写盘路径 ──
+# 模型常把文件写入伪装成 terminal_exec 命令（重定向 / Set-Content / Out-File /
+# python open(...,'w') / node writeFileSync 等），这些调用不在 _WRITE_TOOLS 白名单里，
+# 原逻辑完全不留痕，前端展开看不到文件变更。这里从命令文本解析候选路径，
+# agent_loop 在执行前后对比文件内容，检测真实变更并登记回滚记录。
+
+_PATH_TOKEN = r'(?:"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\'|[^\s"\'<>&|;=,]+)'
+
+
+def _unquote_token(raw: str) -> str:
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ('"', "'"):
+        return raw[1:-1]
+    return raw
+
+
+def _redirect_targets(command: str) -> list[str]:
+    """重定向写盘：> file / >> file / 1> file / 2> file（排除 >&1 等 fd 引用与空设备）。"""
+    out: list[str] = []
+    for m in _re.finditer(r'(?<![<>=-])>+[\s]*(?P<p>' + _PATH_TOKEN + r')', command, _re.I):
+        p = _unquote_token(m.group("p"))
+        if p and p.lower() not in ("nul", "con", "/dev/null"):
+            out.append(p)
+    return out
+
+
+_CMDLET_PATH_PARAM_RE = _re.compile(r'(?<!\w)-(?:Path|FilePath|Destination|LiteralPath)\s+(?P<p>' + _PATH_TOKEN + r')', _re.I)
+_CMDLET_VALUE_RE = _re.compile(r'\s-(?:Value|Body|InputObject|Content|ItemType|Force|Encoding)\b', _re.I)
+_CMDLET_RE = _re.compile(
+    r'\b(?P<cmd>Set-Content|Add-Content|Out-File|Clear-Content|Set-Item|New-Item|Copy-Item|Move-Item)\b(?P<seg>[^\r\n;|]*)',
+    _re.I,
+)
+
+
+def _cmdlet_targets(command: str) -> list[str]:
+    """PowerShell 写盘 cmdlet：优先 -Path/-FilePath 参数，缺省取首个非 -flag 位置参数。"""
+    out: list[str] = []
+    for m in _CMDLET_RE.finditer(command):
+        seg = m.group("seg")
+        pm = _CMDLET_PATH_PARAM_RE.search(seg)
+        if pm:
+            out.append(_unquote_token(pm.group("p")))
+            continue
+        # 无 -Path 参数：跳过 -Value/-Body 等值参数，取第一个非 flag token（Set-Content f.txt -Value x）
+        seg = _CMDLET_VALUE_RE.split(seg, maxsplit=1)[0]
+        for t in seg.split():
+            if t.startswith("-") or t.startswith("=") or t in ("|", "&&", ";"):
+                continue
+            p = _unquote_token(t)
+            if p:
+                out.append(p)
+                break
+    return out
+
+
+def _posix_targets(command: str) -> list[str]:
+    """POSIX 写命令：tee/touch 目标、curl -o/--output、wget -O、sed -i（跳过 -flag 参数）。"""
+    out: list[str] = []
+    # tee / touch：首参数可能带 -a/-t 等 flag，跳过
+    for m in _re.finditer(r'\b(?P<cmd>tee|touch)\b(?P<seg>[^\r\n;|&]*)', command, _re.I):
+        for t in m.group("seg").split():
+            if t.startswith("-"):
+                continue
+            p = _unquote_token(t)
+            if p:
+                out.append(p)
+                break
+    # curl -o file / --output file
+    for m in _re.finditer(r'\bcurl\b[^\r\n]*?(?<!\w)(?:-o|--output)\s+(?P<p>' + _PATH_TOKEN + r')', command, _re.I):
+        out.append(_unquote_token(m.group("p")))
+    # wget -O file
+    for m in _re.finditer(r'\bwget\b[^\r\n]*?(?<!\w)-O\s+(?P<p>' + _PATH_TOKEN + r')', command, _re.I):
+        out.append(_unquote_token(m.group("p")))
+    # sed -i ... file（最后的位置参数为被改写文件）
+    for m in _re.finditer(r'\bsed\s+-i\b(?P<seg>[^\r\n;|&]*)', command, _re.I):
+        toks = [t for t in m.group("seg").split() if not t.startswith("-")]
+        if toks:
+            out.append(_unquote_token(toks[-1]))
+    return out
+
+
+def _inline_targets(command: str) -> list[str]:
+    """内联脚本写文件：python open(..., 'w') / node writeFileSync(...)。"""
+    out: list[str] = []
+    for m in _re.finditer(r'\bopen\((?P<q>["\'])(?P<p>.*?)(?P=q)\s*,\s*["\']w', command, _re.I):
+        out.append(m.group("p"))
+    for m in _re.finditer(r'\bwriteFileSync\s*\(\s*["\'](?P<p>.*?)["\']', command, _re.I):
+        out.append(m.group("p"))
+    return out
+
+
+def extract_shell_write_paths(command: str) -> list[str]:
+    """从 shell 命令解析候选写盘路径（去引号、去重保序，不含工作区归一化）。
+
+    覆盖常见"工具伪装"写法：重定向、PowerShell 写 cmdlet、POSIX 写命令、内联脚本。
+    解析是启发式的：漏报只影响展示/回滚记录的完整性，不影响工具执行本身。
+    """
+    raw = _redirect_targets(command) + _cmdlet_targets(command) + _posix_targets(command) + _inline_targets(command)
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in raw:
+        if p and p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+def resolve_command_write_paths(tool_name: str, args: dict, workspace: str) -> list[str]:
+    """非白名单写盘工具（terminal_exec 等）的候选写盘路径（相对工作区，越界剔除）。"""
+    if tool_name != "terminal_exec":
+        return []
+    command = str((args or {}).get("command") or "")
+    if not command.strip():
+        return []
+    if not workspace:
+        return []
+    root = Path(workspace).resolve()
+    cwd = str((args or {}).get("cwd") or "").strip()
+    base = (root / cwd) if cwd else root
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in extract_shell_write_paths(command):
+        if not raw:
+            continue
+        try:
+            p = Path(raw)
+            full = p.resolve() if p.is_absolute() else (base / p).resolve()
+            rel = full.relative_to(root)
+        except (OSError, ValueError):
+            continue
+        rel_s = rel.as_posix()
+        if rel_s and rel_s not in seen:
+            seen.add(rel_s)
+            out.append(rel_s)
+    return out
+
+
 async def record_turn_write(db: AsyncSession, *, session_id: int, turn_id: int,
-                            tool: str, path: str, before: str | None, after: str | None) -> None:
-    """记录一次写盘操作的前后内容（精确回滚依据）。失败不阻塞（非关键路径）。"""
+                            tool: str, path: str, before: str | None, after: str | None,
+                            binary: bool = False) -> None:
+    """记录一次写盘操作的前后内容（精确回滚依据）。失败不阻塞（非关键路径）。
+
+    binary=True 表示二进制/超限文件：不存文本前后内容，回滚走 checkpoint 备份恢复。
+    """
     try:
         db.add(RollbackWrite(session_id=session_id, turn_id=turn_id, tool=tool,
-                             path=path, old_content=before, new_content=after))
+                             path=path, old_content=before, new_content=after, binary=binary))
         await db.flush()
     except Exception:
         logger.debug("[rollback] 写盘记录失败(非阻塞): %s %s", tool, path, exc_info=True)
@@ -400,9 +709,12 @@ async def list_turn_changes(db: AsyncSession, *, session_id: int, turn_id: int,
     reviewed = await reviewed_paths(db, turn_id)
     changes: list[dict] = []
     for path, recs in by_path.items():
+        binary = all(getattr(r, "binary", False) for r in recs)
         before = recs[0].old_content
         after = _read_file_text(workspace, path)
-        if all(r.old_content is None for r in recs):
+        if binary:
+            action = "modified"  # 二进制/大文件：按写盘前备份恢复，不展示文本 diff
+        elif all(r.old_content is None for r in recs):
             action = "added"
         elif after is None:
             action = "deleted"
@@ -436,6 +748,16 @@ async def get_file_diff(db: AsyncSession, *, session_id: int, turn_id: int,
     writes = list(res.scalars().all())
     if not writes:
         return None
+
+    if writes[0].binary:
+        # 二进制/大文件：不展示文本 diff，提示按写盘前备份恢复
+        return {
+            "path": path,
+            "before": None,
+            "after": None,
+            "truncated": False,
+            "reason": "二进制/大文件，不展示文本 diff，回滚按写盘前备份恢复",
+        }
 
     before = writes[0].old_content
     after = _read_file_text(workspace, path)
@@ -490,20 +812,41 @@ async def upsert_file_reviews(db: AsyncSession, *, turn_id: int,
 async def resolve_turn_workspace(db: AsyncSession, turn_id: int) -> tuple[int | None, str]:
     """解析 turn 所属会话与工作区路径（worktree 优先，回退项目路径）。
 
-    返回 (session_id, workspace)。无快照时 session_id 为 None。
+    返回 (session_id, workspace)。无快照时回退写盘记录反查（v26: 快照缺失/旧数据
+    场景，只要该 turn 有写盘记录仍可展示变更清单）。
     """
     snap = await _snapshot_for_turn(db, turn_id)
-    if snap is None:
+    if snap is not None:
+        from app.persistence.models.message import Session
+        session = await db.get(Session, snap.session_id)
+        workspace = session.worktree_path if session and session.worktree_path else None
+        if workspace is None:
+            from app.services.project_service import get_project
+            if session and session.project_id:
+                project = await get_project(db, session.project_id)
+                workspace = project.path if project else None
+        return snap.session_id, workspace or ""
+
+    # v26: 无快照兜底——从写盘记录反查会话与工作区
+    try:
+        rec_res = await db.execute(
+            select(RollbackWrite).where(RollbackWrite.turn_id == turn_id).limit(1)
+        )
+        rec = rec_res.scalars().first()
+        if rec is None:
+            return None, ""
+        from app.persistence.models.message import Session
+        session = await db.get(Session, rec.session_id)
+        workspace = session.worktree_path if session and session.worktree_path else None
+        if workspace is None:
+            from app.services.project_service import get_project
+            if session and session.project_id:
+                project = await get_project(db, session.project_id)
+                workspace = project.path if project else None
+        return rec.session_id, workspace or ""
+    except Exception:
+        logger.debug("[rollback] 写盘记录反查工作区失败(非阻塞)", exc_info=True)
         return None, ""
-    from app.persistence.models.message import Session
-    session = await db.get(Session, snap.session_id)
-    workspace = session.worktree_path if session and session.worktree_path else None
-    if workspace is None:
-        from app.services.project_service import get_project
-        if session and session.project_id:
-            project = await get_project(db, session.project_id)
-            workspace = project.path if project else None
-    return snap.session_id, workspace or ""
 
 
 # ── 文件读写（工作区相对路径）──
@@ -522,10 +865,30 @@ def _fs_path(workspace: str, rel: str) -> Path:
     return p if p.is_absolute() else Path(workspace) / rel
 
 
-def _read_file_text(workspace: str, rel: str) -> str | None:
+def normalize_workspace_path(workspace: str, raw: str) -> str | None:
+    """把写盘路径参数规范为工作区相对路径（绝对路径转相对；越界返回 None）。"""
+    if not raw:
+        return None
+    try:
+        root = Path(workspace).resolve()
+        p = Path(raw)
+        full = p.resolve() if p.is_absolute() else (root / p).resolve()
+        rel = full.relative_to(root)
+    except (OSError, ValueError):
+        return None
+    return rel.as_posix()
+
+
+def _read_file_text(workspace: str, rel: str, max_bytes: int = 0) -> str | None:
+    """读取文本文件内容。
+
+    max_bytes>0 且文件超过该大小时返回 None（调用方视为超限走 checkpoint 兜底）。
+    """
     try:
         p = _fs_path(workspace, rel)
         if p.exists() and p.is_file():
+            if max_bytes > 0 and p.stat().st_size > max_bytes:
+                return None
             return p.read_text(encoding="utf-8", errors="replace")
     except OSError:
         pass
@@ -580,10 +943,10 @@ def _merge3(base: str, theirs: str, ours: str) -> tuple[str, bool]:
     if b == t:
         return ours, False  # AI 未实际改动，无需回滚
 
-    # AI 映射：theirs 行 -> base 行（仅 AI 保留的行）；AI 新增行的 base 锚点
+    # AI 映射：theirs 行 -> base 行（为 AI 保留的行）；AI 新增行的 base 锚点
     t2b: dict[int, int] = {}
-    ai_new_anchor: dict[int, int] = {}  # AI 新增行 theirs idx -> base 锚点行
-    ai_del_base: set[int] = set()       # 被 AI 纯删除的 base 行（回滚恢复）
+    ai_new_anchor: dict[int, int] = {}  # AI 新增行: theirs idx -> base 锚点。
+    ai_del_base: set[int] = set()       # 为 AI 纯删除的 base 行（回滚恢复用）
     ai_del_contents: set[str] = set()   # AI 删除的 base 行内容（用于用户重复恢复去重）
     for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, b, t, autojunk=False).get_opcodes():
         if tag == "equal":
@@ -654,7 +1017,10 @@ def _merge3(base: str, theirs: str, ours: str) -> tuple[str, bool]:
 
 
 def _rollback_one_file(workspace: str, rec: RollbackWrite) -> dict:
-    """对单条写盘记录做精确回滚（内存三路合并 + 写盘）。"""
+    """对单条写盘记录做精确回滚（内存三路合并 + 写盘）。
+
+    binary=True 的记录不经此函数（由 _rollback_turn_files_precise 走 checkpoint 恢复）。
+    """
     rel = rec.path
     before, after = rec.old_content, rec.new_content
     current = _read_file_text(workspace, rel)
@@ -702,15 +1068,26 @@ def _preview_one_file(workspace: str, rec: RollbackWrite) -> dict:
     return {"path": rel, "action": "restore", "conflict": False, "before": current, "after": merged}
 
 
-async def _rollback_turn_files_precise(workspace: str, writes: list[RollbackWrite]) -> dict:
+async def _rollback_turn_files_precise(workspace: str, writes: list[RollbackWrite],
+                                       snap: TurnSnapshot | None = None) -> dict:
     """精确回滚：按写盘记录倒序（最后写入先撤销），只撤销 AI 改动部分。
 
-    用户在同一文件上的手动改动（非 AI 写盘引入的部分）被保留；
-    与 AI 改动重叠的冲突文件跳过并标记，不覆盖用户改动。
+    binary 记录（二进制/超限文件）从快照 file_list 反查 checkpoint 做二进制恢复，
+    不做文本三路合并（避免损坏文件）。其余走 _rollback_one_file。
     """
     restored = deleted = skipped = conflicts = 0
     details: list[dict] = []
     for rec in reversed(writes):
+        if rec.binary:
+            ckpt = _checkpoint_for_path(snap, rec.path)
+            if ckpt and restore_checkpoint(workspace, ckpt, rec.path):
+                restored += 1
+                details.append({"path": rec.path, "action": "restore", "ok": True, "conflict": False})
+            else:
+                conflicts += 1
+                details.append({"path": rec.path, "action": "restore", "ok": False, "conflict": True,
+                                "reason": "二进制文件缺少写盘前备份，跳过"})
+            continue
         r = _rollback_one_file(workspace, rec)
         details.append(r)
         if r.get("ok"):
@@ -733,10 +1110,30 @@ async def _rollback_turn_files_precise(workspace: str, writes: list[RollbackWrit
     }
 
 
-async def preview_turn_files(workspace: str, writes: list[RollbackWrite]) -> list[dict]:
-    """计算本次回滚的文件级预览（不修改工作区文件）。"""
+def _checkpoint_for_path(snap: TurnSnapshot | None, rel: str) -> str | None:
+    """从快照 file_list 反查该 path 的 checkpoint 路径（v26 {ckpt, path} 条目）。"""
+    if snap is None:
+        return None
+    for item in snap.file_list or []:
+        if isinstance(item, dict) and item.get("path") == rel:
+            return item.get("ckpt") or None
+    return None
+
+
+async def preview_turn_files(workspace: str, writes: list[RollbackWrite],
+                             snap: TurnSnapshot | None = None) -> list[dict]:
+    """计算本次回滚的文件级预览（不修改工作区文件）。
+
+    binary 记录不展示文本 diff，提示按写盘前备份恢复。
+    """
     files: list[dict] = []
     for rec in reversed(writes):
+        if rec.binary:
+            current = _read_file_text(workspace, rec.path)
+            files.append({"path": rec.path, "action": "restore", "conflict": False,
+                          "reason": "二进制/大文件，回滚按写盘前备份恢复",
+                          "before": current, "after": current})
+            continue
         r = _preview_one_file(workspace, rec)
         files.append(r)
     return files
@@ -791,7 +1188,7 @@ async def _rollback_turn_files(workspace: str, paths: list[str]) -> dict:
         seen.add(p)
         ok, _, _ = await _run_git(workspace, "cat-file", "-e", f"HEAD:{p}")
         if ok:
-            # 已跟踪文件：恢复到 HEAD 版本（撤销该 turn 的修改）
+            # 已跟踪文件：恢复为 HEAD 版本（撤销该 turn 的修改）
             rok, _, err = await _run_git(workspace, "checkout", "HEAD", "--", p)
             if rok:
                 restored += 1

@@ -12,6 +12,9 @@ router = APIRouter()
 
 
 def _to_out(m, provider_name: str | None = None) -> ModelOut:
+    tmeta = getattr(m, "trae_meta", None) or {}
+    if not isinstance(tmeta, dict):
+        tmeta = {}
     return ModelOut(
         id=m.id,
         name=m.name,
@@ -27,6 +30,12 @@ def _to_out(m, provider_name: str | None = None) -> ModelOut:
         api_format=getattr(m, "api_format", "openai"),
         has_api_key=bool(getattr(m, "api_key", None)),
         reasoning_efforts=getattr(m, "reasoning_efforts", None) or [],
+        # trae 供应商扩展字段（与 providers.py _model_to_out 对齐）：
+        # 缺这些字段时前端会把 trae 组整个过滤掉（trae_available=undefined → 过滤）
+        trae_max_context=tmeta.get("context_window_max"),
+        trae_consumption_rate=tmeta.get("consumption_rate"),
+        trae_available=bool(tmeta.get("is_available")),
+        trae_thinking=bool(tmeta.get("thinking")),
     )
 
 

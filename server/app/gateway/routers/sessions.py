@@ -1,12 +1,12 @@
-"""会话路由（v2：CRUD/fork/rename/worktree）。"""
+"""会话路由（v2：CRUD/fork/rename/worktree；v30.1：压缩块索引/还原）。"""
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.gateway.schemas import SessionCreate, SessionOut, SessionUpdate
+from app.gateway.schemas import CompactionIndexOut, MessageOut, SessionCreate, SessionOut, SessionUpdate
 from app.persistence.database import get_db
-from app.services import session_service, worktree_service
+from app.services import compression_service, session_service, worktree_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -34,8 +34,10 @@ async def create_session(body: SessionCreate, db: AsyncSession = Depends(get_db)
 
 
 @router.get("", response_model=list[SessionOut])
-async def list_sessions(project_id: int | None = None, db: AsyncSession = Depends(get_db)):
-    sessions = await session_service.list_sessions(db, project_id=project_id)
+async def list_sessions(project_id: int | None = None, include_archived: bool = False,
+                        db: AsyncSession = Depends(get_db)):
+    """会话列表；include_archived=true 时返回含归档会话（归档恢复面板用）。"""
+    sessions = await session_service.list_sessions(db, project_id=project_id, include_archived=include_archived)
     return [await _to_out(db, s) for s in sessions]
 
 
@@ -127,3 +129,41 @@ async def remove_worktree(session_id: int, db: AsyncSession = Depends(get_db)):
         return result
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+# ── v30.1: 压缩块索引 / 原文还原 ──
+
+@router.get("/{session_id}/compactions", response_model=list[CompactionIndexOut])
+async def list_compactions(session_id: int, db: AsyncSession = Depends(get_db)):
+    """会话内全部压缩块索引（按压缩发生顺序）。AI 可据此定位压缩前会话。"""
+    return await compression_service.list_compaction_index(db, session_id)
+
+
+@router.get("/{session_id}/compactions/{compaction_id}/messages", response_model=list[MessageOut])
+async def get_compacted_messages(session_id: int, compaction_id: str,
+                                 db: AsyncSession = Depends(get_db)):
+    """按压缩块 id 取被压缩消息的完整原文（还原查看用）。"""
+    try:
+        msgs = await compression_service.get_compacted_messages(db, session_id, compaction_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return [
+        MessageOut(
+            id=m.id, session_id=m.session_id, turn_id=m.turn_id, thread_id=m.thread_id,
+            sender_type=m.sender_type, sender_id=m.sender_id, msg_type=m.msg_type,
+            content=m.content or {}, token_usage=m.token_usage or 0,
+            created_at=str(m.created_at) if m.created_at else None,
+        )
+        for m in msgs
+    ]
+
+
+@router.post("/{session_id}/compactions/{compaction_id}/restore", response_model=dict)
+async def restore_compaction(session_id: int, compaction_id: str,
+                             db: AsyncSession = Depends(get_db)):
+    """还原压缩块：被压缩消息重新参与上下文构建。"""
+    try:
+        count = await compression_service.restore_compaction(db, session_id, compaction_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True, "restored_messages": count}

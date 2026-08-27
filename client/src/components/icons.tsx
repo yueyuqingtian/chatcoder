@@ -261,6 +261,22 @@ export function IconBrain({ size = 18, color = "currentColor", strokeWidth = 1.7
   );
 }
 
+/** 压缩 / 上下文折叠 */
+export function IconCompress({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <path d="M4 9V4h5" />
+      <path d="M9 4l-5 5" />
+      <path d="M20 9V4h-5" />
+      <path d="M15 4l5 5" />
+      <path d="M4 15v5h5" />
+      <path d="M9 20l-5-5" />
+      <path d="M20 15v5h-5" />
+      <path d="M15 20l5-5" />
+    </svg>
+  );
+}
+
 /** 终端 / 命令 */
 export function IconTerminal({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (

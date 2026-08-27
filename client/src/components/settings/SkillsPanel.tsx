@@ -2,8 +2,15 @@
  * 本地技能启停 + 云端 Git 技能仓库（添加/同步/导入）+ 本地目录/md 文件导入（v1.1）。 */
 import { useCallback, useEffect, useState } from "react";
 import { api, type SkillOut } from "../../api/client";
+import { useChatStore } from "../../store/chat";
 import { IconRefresh, IconPlus, IconX, IconFolder } from "../icons";
+import { ConfirmDialog } from "../ConfirmDialog";
 import { Sw } from "./shared";
+
+/** 非阻塞提示：Electron 中 window.alert 是原生模态框，关闭后会破坏窗口焦点，统一改用全局提示条。 */
+function notify(msg: string) {
+  useChatStore.setState({ error: msg });
+}
 
 export function SkillsPanel() {
   const [items, setItems] = useState<SkillOut[]>([]);
@@ -13,6 +20,7 @@ export function SkillsPanel() {
   const [repoName, setRepoName] = useState("");
   const [syncingRepo, setSyncingRepo] = useState<string | null>(null);
   const [repoSkills, setRepoSkills] = useState<{ repoId: string; name: string; skills: Array<{ name: string; display_name: string; description: string; path: string }> } | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{ kind: "repo"; id: string; name: string } | { kind: "skill"; id: number; name: string } | null>(null);
   // v1.1: 本地导入
   const [importing, setImporting] = useState(false);
 
@@ -30,11 +38,11 @@ export function SkillsPanel() {
       for (const p of paths) {
         const res = await api.importLocalSkill({ path: p, mode: "copy" });
         okNames.push(...res.imported);
-        if (res.skipped.length > 0) alert(`以下技能已存在，已跳过：${res.skipped.join("、")}`);
+        if (res.skipped.length > 0) notify(`以下技能已存在，已跳过：${res.skipped.join("、")}`);
       }
       await load();
-      if (okNames.length > 0) alert(`成功导入 ${okNames.length} 个技能：${okNames.join("、")}`);
-    } catch (e) { alert("导入失败: " + String(e)); }
+      if (okNames.length > 0) notify(`成功导入 ${okNames.length} 个技能：${okNames.join("、")}`);
+    } catch (e) { notify("导入失败: " + String(e)); }
     finally { setImporting(false); }
   }, [load]);
 
@@ -61,7 +69,7 @@ export function SkillsPanel() {
     try {
       await api.createSkillRepo({ url: repoUrl.trim(), name: repoName.trim() || undefined });
       setShowAddRepo(false); setRepoUrl(""); setRepoName(""); load();
-    } catch (e) { alert(String(e)); }
+    } catch (e) { notify(String(e)); }
   };
 
   const handleSync = async (repoId: string, name: string) => {
@@ -70,7 +78,7 @@ export function SkillsPanel() {
       const res = await api.syncSkillRepo(repoId);
       setRepoSkills({ repoId, name, skills: res.skills });
       load();
-    } catch (e) { alert("同步失败: " + String(e)); }
+    } catch (e) { notify("同步失败: " + String(e)); }
     finally { setSyncingRepo(null); }
   };
 
@@ -79,7 +87,18 @@ export function SkillsPanel() {
     try {
       await api.importRepoSkill(repoSkills.repoId, skillName);
       load();
-    } catch (e) { alert(String(e)); }
+    } catch (e) { notify(String(e)); }
+  };
+
+  const doDelete = async () => {
+    const target = confirmDelete;
+    setConfirmDelete(null);
+    if (!target) return;
+    try {
+      if (target.kind === "repo") { await api.deleteSkillRepo(target.id); if (repoSkills?.repoId === target.id) setRepoSkills(null); }
+      else await api.deleteSkill(target.id);
+      load();
+    } catch { /* ignore */ }
   };
 
   return (
@@ -120,7 +139,7 @@ export function SkillsPanel() {
                   <button className="btn btn-ghost btn-xs" onClick={() => handleSync(r.id, r.name)} disabled={syncingRepo === r.id}>
                     {syncingRepo === r.id ? "同步中…" : "同步/查看"}
                   </button>
-                  <button className="btn btn-ghost btn-xs" onClick={async () => { if (confirm("删除仓库？")) { try { await api.deleteSkillRepo(r.id); load(); } catch {} } }}><IconX size={12} /></button>
+                  <button className="btn btn-ghost btn-xs" onClick={() => setConfirmDelete({ kind: "repo", id: r.id, name: r.name })}><IconX size={12} /></button>
                 </div>
               </div>
             ))}
@@ -153,12 +172,20 @@ export function SkillsPanel() {
             </div>
             <div className="settings-resource-actions">
               <Sw checked={s.is_active} onChange={async (v) => { try { await api.updateSkill(s.id, { is_active: v }); load(); } catch {} }} />
-              <button className="btn btn-ghost btn-xs" onClick={async () => { if (confirm("删除？")) { try { await api.deleteSkill(s.id); load(); } catch {} } }}><IconX size={12} /></button>
+              <button className="btn btn-ghost btn-xs" onClick={() => setConfirmDelete({ kind: "skill", id: s.id, name: s.display_name || s.name })}><IconX size={12} /></button>
             </div>
           </div>
         ))}
         {items.length === 0 && <div className="navpage-empty">暂无技能</div>}
       </div>
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        title={confirmDelete?.kind === "repo" ? "删除技能仓库" : "删除技能"}
+        message={confirmDelete ? `删除「${confirmDelete.name}」？` : ""}
+        danger
+        onCancel={() => setConfirmDelete(null)}
+        onConfirm={doDelete}
+      />
     </div>
   );
 }

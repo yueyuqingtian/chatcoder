@@ -32,20 +32,25 @@ export type ServerWsEvent =
   | { event: "thinking.done"; payload: { agent_id: number; turn_id?: number | null; full_text?: string } }
   | { event: "token.delta"; payload: { agent_id: number; turn_id?: number | null; delta: string } }
   | { event: "token.done"; payload: { agent_id: number; turn_id?: number | null; full_text?: string } }
+  /** v35: turn 级瞬态状态（重试/恢复提示），前端流式状态行展示；text 空串 = 清除 */
+  | { event: "turn.status"; payload: { turn_id: number; thread_id?: number | null; text: string } }
   | { event: "tool.call"; payload: { turn_id: number; agent_id: number; tool: string; args_preview?: string; args_partial?: string } }
   | { event: "tool.result"; payload: { turn_id: number; tool: string; ok: boolean; duration_ms?: number; output_preview?: string; change_stat?: { path: string; additions: number; deletions: number } } }
+  | { event: "file.change"; payload: { turn_id: number; path?: string } }
   | { event: "todo.updated"; payload: { turn_id: number; todos: unknown[]; persisted: boolean } }
-  | { event: "task.proposed"; payload: { turn_id: number; request_task_id?: number; group_task_id?: number; reasons?: string[] } }
+  | { event: "task.proposed"; payload: { turn_id: number; request_task_id?: number; group_task_id?: number; reasons?: string[]; plan_doc_path?: string } }
   | { event: "task.planned"; payload: { turn_id: number; steps?: unknown[] } }
   | { event: "task.updated"; payload: { task_id: number; status?: string; note?: string | null } }
   | { event: "usage.update"; payload: Record<string, unknown> }
   | { event: "compact.started"; payload: { agent_id?: number; turn_id?: number; used_tokens?: number; context_window?: number; ratio?: number } }
-  | { event: "compact.completed"; payload: { agent_id?: number; turn_id?: number } }
+  | { event: "compact.summary"; payload: CompactSummaryPayload }
+  | { event: "compact.completed"; payload: { agent_id?: number; turn_id?: number } & Partial<CompactSummaryPayload> }
   | { event: "approval.request"; payload: { approval_id: string; detail: Record<string, unknown> } }
   | { event: "approval.response"; payload: { approval_id: string; approved: boolean } }
   | { event: "api.retry"; payload: { attempt: number; wait_ms: number; reason?: string } }
   | { event: "config.changed"; payload: { profile_id: number; changed_keys: string[] } }
   | { event: "scheduled.triggered"; payload: { task_id: number; turn_id: number } }
+  | { event: "session.updated"; payload: { session_id: number; title?: string; permission_mode?: string } }
   | { event: "session.completed"; payload: { session_id: number } }
   | { event: "error"; payload: { code?: string; message?: string } }
   /** 服务端对客户端请求的确认（approval/cancel/sync 等） */
@@ -54,6 +59,30 @@ export type ServerWsEvent =
   | { event: "sync.response"; payload: { last_seq: number; count: number } };
 
 export type ServerEventName = ServerWsEvent["event"];
+
+/**
+ * 压缩结果载荷（compact.summary / compact.completed）。
+ * 阴影定价：shadowed_range/shadowed_seqs/shadowed_tokens 描述被压缩遮蔽的消息范围，
+ * saved_tokens 为压缩节省的 token 数，供前端渲染压缩卡片（对齐 deepseek-harness
+ * CompactionResult.shadowedRange/Seqs/TokenCount）。
+ */
+export interface CompactSummaryPayload {
+  agent_id?: number;
+  turn_id?: number;
+  compaction_id?: string;
+  /** v30.1: 压缩块序号（会话内从 1 起，AI compaction_index/view 工具用） */
+  index?: number;
+  shadowed_range?: [number, number] | null;
+  shadowed_seqs?: number[];
+  shadowed_tokens?: number;
+  saved_tokens?: number;
+  summary_message_id?: number;
+  summary?: string;
+  trigger?: string;
+  used_tokens?: number;
+  context_window?: number;
+  ratio?: number;
+}
 
 /** 需要端到端有序的事件（seq 断点重放时前端按序处理） */
 export const ORDERED_EVENTS: ReadonlySet<string> = new Set([
@@ -76,6 +105,7 @@ export const ORDERED_EVENTS: ReadonlySet<string> = new Set([
   "agent.completed",
   "usage.update",
   "compact.started",
+  "compact.summary",
   "compact.completed",
   "approval.request",
   "approval.response",

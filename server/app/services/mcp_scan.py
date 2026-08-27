@@ -21,12 +21,19 @@ def _candidate_paths() -> list[Path]:
         home / ".cursor" / "mcp.json",
         home / ".claude.json",
         home / ".codebuddy" / "mcp.json",
+        home / ".chatcoder" / "mcp.json",
+        home / ".qoder" / "mcp.json",
+        home / ".trae" / "mcp.json",
+        home / ".codex" / "mcp.json",
+        home / ".mcp.json",
     ]
-    # Claude Desktop 配置
+    # Claude Desktop / CodeBuddy 桌面端配置
     if os.name == "nt":
         appdata = os.environ.get("APPDATA")
         if appdata:
             paths.append(Path(appdata) / "Claude" / "claude_desktop_config.json")
+            paths.append(Path(appdata) / "CodeBuddy" / "mcp.json")
+            paths.append(Path(appdata) / "chatcoder" / "mcp.json")
     elif os.name == "posix":
         paths.append(home / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json")
     return paths
@@ -101,12 +108,18 @@ def _parse_config(raw: str, source_path: str) -> list[dict]:
 async def scan_local_mcp() -> list[dict]:
     """扫描本机常见 MCP 配置路径，返回候选 server 列表（不落库）。"""
     candidates: list[dict] = []
+    seen: set[str] = set()
     for p in _candidate_paths():
         try:
             if not p.is_file():
                 continue
             raw = p.read_text(encoding="utf-8", errors="replace")
-            candidates.extend(_parse_config(raw, str(p)))
+            for item in _parse_config(raw, str(p)):
+                name = str(item.get("name") or "")
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                candidates.append(item)
         except OSError:
             continue
     return candidates

@@ -20,9 +20,19 @@ async def save_memories(db: AsyncSession, *, session_id: int, turn_id: int | Non
         text = str(m.get("text", "")).strip()
         if not text or len(text) < 8:
             continue
+        try:
+            importance = float(m.get("importance", 1.0))
+        except (TypeError, ValueError):
+            importance = 0.0
+        if importance < 0.65:
+            continue
         kind = str(m.get("kind", "fact"))
         if kind not in ("fact", "convention", "pitfall", "decision"):
             kind = "fact"
+        normalized = " ".join(text.casefold().split())
+        existing = await db.execute(select(MemoryEntry).where(MemoryEntry.session_id == session_id))
+        if any(" ".join(str(entry.text).casefold().split()) == normalized for entry in existing.scalars()):
+            continue
         db.add(MemoryEntry(session_id=session_id, turn_id=turn_id, text=text[:500], kind=kind))
         count += 1
     await db.flush()

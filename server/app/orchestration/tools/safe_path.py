@@ -69,6 +69,33 @@ def safe_resolve(workspace_root: str, rel_path: str) -> Path | None:
     return target
 
 
+def safe_resolve_read(workspace_root: str, rel_path: str) -> Path | None:
+    """读取类工具（fs_read/view_image）的路径解析：workspace 优先，附件上传目录兜底。
+
+    用户消息附件存放在 uploads 目录（工作区之外）。AI 常直接用消息中给出的
+    绝对路径或 `{file_id}/{filename}` 相对路径调用读取工具；上传目录是用户
+    主动提供内容的白名单根，允许只读访问，不放开其它工作区外路径。
+
+    workspace 内解析成功但文件不存在时（如把附件相对路径拼到工作区根），
+    继续尝试上传目录；两边都未命中时返回 workspace 解析结果，
+    让调用方报出准确的「文件不存在」。
+    """
+    from app.core.config import settings
+
+    target = safe_resolve(workspace_root, rel_path)
+    if target is not None and target.exists():
+        return target
+
+    try:
+        uploads_root = str(Path(settings.uploads_dir).resolve())
+    except (OSError, ValueError):
+        return target
+    fallback = safe_resolve(uploads_root, rel_path)
+    if fallback is not None and fallback.is_file():
+        return fallback
+    return target
+
+
 def safe_resolve_parent(workspace_root: str, rel_path: str) -> Path | None:
     """v2.5: 对 fs.write 这类需要创建新文件的场景,
     检查父目录是否在 workspace 内(文件本身可能尚不存在)。

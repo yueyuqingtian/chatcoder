@@ -2,6 +2,7 @@
  * 全局 / 项目规则，以及多 AI 软件规则文档的扫描与启用。 */
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api/client";
+import { useChatStore } from "../../store/chat";
 import { IconRefresh } from "../icons";
 import { Sw } from "./shared";
 
@@ -25,7 +26,7 @@ export function RulesPanel() {
   useEffect(() => { load(); }, [load]);
 
   const handleScan = async () => {
-    try { setScanned(await api.scanAiRules()); } catch (e) { alert("扫描失败: " + String(e)); }
+    try { setScanned(await api.scanAiRules()); } catch (e) { useChatStore.setState({ error: "扫描失败: " + String(e) }); }
   };
 
   const toggleSource = (src: string) => {
@@ -41,7 +42,7 @@ export function RulesPanel() {
         workdir_rules: workdirRules,
       });
       load();
-    } catch (e) { alert("保存失败: " + String(e)); }
+    } catch (e) { useChatStore.setState({ error: "保存失败: " + String(e) }); }
     finally { setSaving(false); }
   };
 

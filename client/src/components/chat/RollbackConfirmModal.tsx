@@ -137,9 +137,9 @@ export function RollbackConfirmModal() {
           </div>
         </div>
         <footer className="rc-footer">
-          <button className="btn ghost" onClick={cancelRollback}>取消</button>
+          <button className="btn btn-ghost" onClick={cancelRollback}>取消</button>
           <button
-            className="btn danger"
+            className="btn btn-danger"
             disabled={confirming}
             onClick={async () => {
               setConfirming(true);

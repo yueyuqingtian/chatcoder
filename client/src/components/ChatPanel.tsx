@@ -5,6 +5,7 @@ import { useState } from "react";
 import { IconX } from "./icons";
 import { useChatStore } from "../store/chat";
 import { PluginSlot } from "../plugins/registry";
+import { TaskStatusPanel } from "./chat/TaskStatusPanel";
 
 export function ChatPanel() {
   const error = useChatStore((s) => s.error);
@@ -30,6 +31,7 @@ export function ChatPanel() {
         <PluginSlot slot="message-flow" />
       </div>
       <div className="chat-panel-composer">
+        <TaskStatusPanel />
         <PluginSlot slot="composer" />
       </div>
     </div>

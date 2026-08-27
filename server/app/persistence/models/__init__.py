@@ -14,10 +14,13 @@ from app.persistence.models.rollback import TurnSnapshot
 from app.persistence.models.scheduled import ScheduledTask
 from app.persistence.models.skill import McpServer, Skill
 from app.persistence.models.subagent_profile import SubagentProfile
+from app.persistence.models.ta3_auth import Ta3Auth
 from app.persistence.models.task import Artifact, Task
-from app.persistence.models.turn import Turn
+from app.persistence.models.trae_auth import TraeAuth
 from app.persistence.models.tenant import Tenant, User
+from app.persistence.models.turn import Turn
 from app.persistence.models.usage_record import UsageRecord
+from app.persistence.models.workbuddy_auth import WorkBuddyAuth
 
 __all__ = [
     "Tenant",
@@ -44,5 +47,8 @@ __all__ = [
     "Skill",
     "McpServer",
     "SubagentProfile",
+    "Ta3Auth",
+    "WorkBuddyAuth",
+    "TraeAuth",
     "UsageRecord",
 ]

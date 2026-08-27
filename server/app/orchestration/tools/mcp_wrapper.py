@@ -27,6 +27,21 @@ def _to_root_uri(root_path: str | None) -> str | None:
     return f"file://{path}"
 
 
+def _resolve_workspace_placeholder(arg: str, workspace_root: str | None) -> str:
+    """解析命令行参数中的工作区占位符。
+
+    VSCode 系 MCP 配置常用 ${workspaceFolder} 表示项目根；chatcoder 不做变量替换，
+    字面量会原样传给子进程，导致 codegraph 等 server 以错误路径初始化索引、
+    查询时 projectPath 不匹配而挂起直到超时。这里在 spawn 前替换为实际工作区路径；
+    无工作区上下文时返回空串（由调用方过滤，避免传空参数破坏命令行）。
+    """
+    if "${workspaceFolder}" not in arg:
+        return arg
+    if not workspace_root:
+        return ""
+    return arg.replace("${workspaceFolder}", workspace_root)
+
+
 def _resolve_tool_call(args: dict, tool_name: str) -> tuple[str, dict]:
     """解析实际要调用的 MCP 工具名与参数。
 
@@ -116,18 +131,31 @@ class McpToolWrapper(Tool):
         """
         command = self._server_config.get("command", "")
         cmd_args = self._server_config.get("args", [])
-        env_vars = self._server_config.get("env", {})
+        env_vars = dict(self._server_config.get("env", {}) or {})
 
         if not command:
             return ToolResult(ok=False, output="", error="MCP Server 未配置 command")
 
         import os
 
-        full_env = {**os.environ, **env_vars}
+        # 解析 args 中的 ${workspaceFolder} 占位符，替换为实际工作区路径（无则移除该参数）
+        workspace_root = getattr(ctx, "workspace_root", None)
+        resolved_args = [
+            a for a in (_resolve_workspace_placeholder(a, workspace_root) for a in cmd_args) if a
+        ]
+
+        # codegraph 默认以 Direct 模式（CODEGRAPH_NO_DAEMON=1）运行：每次调用 spawn
+        # 独立进程，不连接共享 daemon，避免多客户端共享 daemon 主线程卡死导致 60s 超时。
+        # 用户可在 env 中显式设置 CODEGRAPH_NO_DAEMON=0 恢复共享 daemon（索引复用更快）。
+        if "codegraph" in command.lower() and "CODEGRAPH_NO_DAEMON" not in env_vars:
+            env_vars["CODEGRAPH_NO_DAEMON"] = "1"
+
+        # 优化：优先使用系统环境，并在 Windows 下保证 UTF-8 stdio
+        full_env = {**os.environ, **env_vars, "PYTHONIOENCODING": "utf-8"}
 
         try:
             proc = await asyncio.create_subprocess_exec(
-                command, *cmd_args,
+                command, *resolved_args,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -224,7 +252,10 @@ class McpToolWrapper(Tool):
         finally:
             try:
                 proc.kill()
-                await proc.wait()
+                # Windows asyncio Proactor 下 kill 后 wait() 可能永久挂起（子进程树
+                # 存活时管道不关闭，如 codegraph 经 npm-shim spawnSync 的捆绑 node），
+                # 导致 executor 60s 超时。加 3s 上限，清理失败不阻塞调用方返回。
+                await asyncio.wait_for(proc.wait(), timeout=3)
             except Exception:
                 pass
 

@@ -36,6 +36,8 @@ export function BrowserPanel() {
   const [annotState, setAnnotState] = useState<{ x: number; y: number; source: string; info: ElementInfo | null } | null>(null);
   const [annotText, setAnnotText] = useState("");
   const [sentMsg, setSentMsg] = useState(false);
+  // 悬停元素的光标跟随标签（devtools 风格：<tag> W×H）
+  const [hoverTag, setHoverTag] = useState<{ x: number; y: number; text: string } | null>(null);
 
   // 选中元素的 devtools 风格信息
   const getElementInfo = (el: HTMLElement): ElementInfo => {
@@ -75,9 +77,10 @@ export function BrowserPanel() {
   };
   const goBack = () => { if (hIdx <= 0) return; setHIdx(hIdx - 1); setCurrent(history[hIdx - 1]); setUrl(history[hIdx - 1]); };
   const goForward = () => { if (hIdx >= history.length - 1) return; setHIdx(hIdx + 1); setCurrent(history[hIdx + 1]); setUrl(history[hIdx + 1]); };
-  const toggleSelect = () => { setSelecting((v) => !v); setAnnotState(null); setSentMsg(false); };
+  const toggleSelect = () => { setSelecting((v) => !v); setAnnotState(null); setSentMsg(false); setHoverTag(null); };
 
   const clearHighlight = () => {
+    setHoverTag(null);
     try {
       const doc = iframeRef.current?.contentDocument;
       if (doc) {
@@ -111,7 +114,8 @@ export function BrowserPanel() {
     const doc = getIframeDoc();
     if (!doc) return; // 跨域：无法高亮，仅显示提示
     const iframe = iframeRef.current;
-    if (!iframe) return;
+    const viewport = viewportRef.current;
+    if (!iframe || !viewport) return;
     // 将浏览器视口坐标转换为 iframe 内部视口坐标
     const iframeRect = iframe.getBoundingClientRect();
     const localX = e.clientX - iframeRect.left;
@@ -123,6 +127,17 @@ export function BrowserPanel() {
       el.classList.add("__cc_hover");
       el.style.outline = "2px solid #3B82F6";
       el.style.outlineOffset = "1px";
+      // 光标跟随标签（overlay 坐标系 = viewport 坐标系）
+      const vpRect = viewport.getBoundingClientRect();
+      const tag = el.tagName.toLowerCase();
+      const id = el.id ? `#${el.id}` : "";
+      const cls = (el.classList?.[0] ? `.${el.classList[0]}` : "");
+      const r = el.getBoundingClientRect();
+      setHoverTag({
+        x: e.clientX - vpRect.left,
+        y: e.clientY - vpRect.top,
+        text: `<${tag}${id}${cls}> ${Math.round(r.width)}×${Math.round(r.height)}`,
+      });
     } else {
       clearHighlight();
     }
@@ -152,7 +167,13 @@ export function BrowserPanel() {
     }
     if (!source) source = `页面坐标 (${Math.round(localX)}, ${Math.round(localY)}) - 跨域页面无法获取元素`;
     clearHighlight();
-    setAnnotState({ x: localX, y: localY, source, info });
+    // 标注卡定位：贴点击点展开，触及视口右/下边缘时翻转到左/上侧，保证不溢出
+    const CARD_W = 300, CARD_H = 300;
+    let cardX = localX + 12;
+    if (cardX + CARD_W > rect.width - 8) cardX = Math.max(8, localX - CARD_W - 12);
+    let cardY = localY + 12;
+    if (cardY + CARD_H > rect.height - 8) cardY = Math.max(8, rect.height - CARD_H - 8);
+    setAnnotState({ x: cardX, y: cardY, source, info });
     setAnnotText("");
   };
 
@@ -197,12 +218,25 @@ export function BrowserPanel() {
             }}>
               移动鼠标聚焦元素，点击添加标注 · Esc 退出
             </div>
+            {hoverTag && (
+              <div style={{
+                position: "absolute",
+                left: Math.min(hoverTag.x + 14, Math.max(8, (viewportRef.current?.clientWidth ?? 300) - 170)),
+                top: hoverTag.y + 16,
+                padding: "2px 7px", borderRadius: 4, background: "#3B82F6", color: "#fff",
+                fontSize: 10, fontFamily: "var(--font-mono)", whiteSpace: "nowrap",
+                pointerEvents: "none", zIndex: 15,
+              }}>
+                {hoverTag.text}
+              </div>
+            )}
           </div>
         )}
         {annotState && (
           <div className="browser-annot-card" style={{
-            position: "absolute", left: Math.min(annotState.x + 10, 200), top: Math.min(annotState.y + 10, 100),
-            maxWidth: 320, padding: 10, borderRadius: 6, background: "var(--bg-elevated)",
+            position: "absolute", left: annotState.x, top: annotState.y,
+            width: 300, maxHeight: "calc(100% - 16px)", overflowY: "auto",
+            padding: 10, borderRadius: 8, background: "var(--bg-elevated)",
             border: "1px solid var(--border)", boxShadow: "var(--shadow-md)", zIndex: 20,
             display: "flex", flexDirection: "column", gap: 6,
           }}>

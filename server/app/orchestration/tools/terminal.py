@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from app.core.config import settings
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 from app.orchestration.tools.git_root import resolve_repo_for_cwd, list_git_repos
 from app.orchestration.tools.shell_env import resolve_shell, shell_kind
@@ -101,13 +102,18 @@ class TerminalExecTool(Tool):
             command, re.IGNORECASE,
         )
         explicit_cwd = args.get("cwd", None)
+        # v3.0 (plan-88): 计划模式外部访问开关——开启后放行工作区外 cwd（仅 plan 模式生效）
+        allow_outside = (
+            getattr(ctx, "permission_mode", "default") == "plan"
+            and settings.plan_mode_allow_outside_access
+        )
         resolved_cwd: str | None = None
 
         if explicit_cwd:
-            resolved_cwd = self._resolve_path(ctx.workspace_root, explicit_cwd)
+            resolved_cwd = self._resolve_path(ctx.workspace_root, explicit_cwd, allow_outside)
         elif cd_chain_match:
             cd_dir = cd_chain_match.group(1).strip().strip('"').strip("'")
-            resolved_cwd = self._resolve_path(ctx.workspace_root, cd_dir)
+            resolved_cwd = self._resolve_path(ctx.workspace_root, cd_dir, allow_outside)
             # 从命令中移除 'cd xxx && ' 部分
             command = re.sub(
                 r"(?:cd|chdir)\s+[^\s&;|]+\s*(?:&&|;|&)\s*",
@@ -194,10 +200,19 @@ class TerminalExecTool(Tool):
             combined = combined[:_MAX_OUTPUT] + "\n...(已截断)"
 
         logger.debug("terminal.exec cmd=%r cwd=%s rc=%s", command, resolved_cwd, proc.returncode)
+        data: dict[str, Any] = {"returncode": proc.returncode, "cwd": resolved_cwd, "cmd": command}
+        if allow_outside:
+            # 审计标记：放行后实际 cwd 落在工作区外时记录，供回放/审计识别越界访问
+            try:
+                _inside = Path(resolved_cwd).resolve().is_relative_to(Path(ctx.workspace_root).resolve())
+            except (OSError, ValueError):
+                _inside = False
+            if not _inside:
+                data["outside_access"] = True
         return ToolResult(
             ok=proc.returncode == 0,
             output=combined or "(无输出)",
-            data={"returncode": proc.returncode, "cwd": resolved_cwd, "cmd": command},
+            data=data,
             error="" if proc.returncode == 0 else f"退出码 {proc.returncode}",
         )
 
@@ -211,8 +226,19 @@ class TerminalExecTool(Tool):
         return False, reason
 
     @staticmethod
-    def _resolve_path(workspace_root: str, rel: str) -> str:
-        """v1.0: 把相对路径解析为绝对路径，增加路径穿越防护。"""
+    def _resolve_path(workspace_root: str, rel: str, allow_outside: bool = False) -> str:
+        """把相对路径解析为绝对路径。
+
+        allow_outside=True（plan 模式外部访问开关开启）时放行工作区外路径：
+        绝对路径直接用，相对路径以 workspace_root 为基准解析（允许 ../ 越界）。
+        否则维持 v1.0 穿越防护：越界路径回退 workspace_root。
+        """
+        if allow_outside:
+            try:
+                p = Path(rel)
+                return str(p if p.is_absolute() else (Path(workspace_root) / p).resolve())
+            except (OSError, ValueError):
+                return workspace_root
         from app.orchestration.tools.safe_path import safe_resolve
         # 优先用 safe_resolve 校验路径安全性
         resolved = safe_resolve(workspace_root, rel)

@@ -153,6 +153,18 @@ class ServerToolExecutor(ToolExecutor):
         # 写盘工具集合（accept_edits 免审 / plan 拒绝）
         _WRITE_TOOLS = ("fs_write", "editor_apply_diff", "multi_file_edit")
 
+        # 0. v3.0 (plan-88): 沙箱模式硬边界——read-only 拒绝一切写盘与高危命令
+        # （优先级最高，exec_policy allow 也不可绕过；见 docs/sandbox-design.md）
+        sandbox = getattr(ctx, "sandbox_mode", "workspace-write") or "workspace-write"
+        if sandbox == "read-only":
+            if tool_name in _WRITE_TOOLS:
+                return False, "只读沙箱不允许写盘工具"
+            if tool_name == "terminal_exec":
+                from app.orchestration.tools.shell_policy import analyze as _analyze_shell
+                _v, _r = _analyze_shell(str(args.get("command", "") or ""))
+                if _v != "allow":
+                    return False, "只读沙箱仅允许只读命令"
+
         # 1. 工具自身的安全分级钩子（terminal_exec 只读命令免审）
         try:
             skip, reason = tool.approval_precheck(args, ctx)
@@ -187,6 +199,19 @@ class ServerToolExecutor(ToolExecutor):
                     return False, just or f"执行策略已禁止 {tool_name}"
             except Exception:
                 logger.warning("exec_policy 规则匹配异常(忽略)", exc_info=True)
+
+        # 4. v3.0 (plan-88): danger-full-access 沙箱——跳过审批门直接执行
+        # v32 (plan-89): 修复与"始终需要审批的工具"的冲突——danger-full-access 是
+        # 显式全访问模式，仅尊重用户显式配置的 force_approval_tools 列表（最高例外，
+        # 仍弹审批）；high 风险通用拦截不适用于本模式（否则与"全访问"自相矛盾）。
+        if sandbox == "danger-full-access":
+            from app.core.config import settings as _settings
+            if tool_name in _settings.force_approval_tools_list:
+                logger.info("danger-full-access 命中强制审批列表，保留审批: %s", tool_name)
+            else:
+                logger.info("danger-full-access 沙箱免审批: %s pm=%s", tool_name,
+                            getattr(ctx, "permission_mode", "default"))
+                return True, ""
 
         return False, ""
 

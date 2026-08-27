@@ -8,7 +8,7 @@
 from typing import Any
 
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
-from app.orchestration.tools.safe_path import safe_resolve
+from app.orchestration.tools.safe_path import safe_resolve_read
 
 _MAX_LINES = 400  # v15: 200→400，配合字符上限(tool_output_chars_read=16000)提升单次读取量，减少分页重读
 
@@ -66,7 +66,8 @@ class FsReadTool(Tool):
         offset = max(1, args.get("offset", 1))
         limit = min(_MAX_LINES, args.get("limit", _MAX_LINES))
 
-        target = safe_resolve(ctx.workspace_root, path)
+        # 附件目录兜底：用户消息附件在工作区外的 uploads 目录，允许只读
+        target = safe_resolve_read(ctx.workspace_root, path)
         if target is None:
             return ToolResult(
                 ok=False, output="",

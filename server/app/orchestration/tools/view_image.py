@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
-from app.orchestration.tools.safe_path import safe_resolve
+from app.orchestration.tools.safe_path import safe_resolve_read
 
 _MAX_IMAGE_BYTES = 4 * 1024 * 1024  # 4MB
 _ALLOWED_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
@@ -30,7 +30,7 @@ class ViewImageTool(Tool):
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Image file path (relative to workspace root)",
+                            "description": "Image file path (relative to workspace root, absolute path, or user attachment path)",
                         },
                     },
                     "required": ["path"],
@@ -43,7 +43,8 @@ class ViewImageTool(Tool):
         if not rel_path:
             return ToolResult(ok=False, output="path is required")
 
-        target = safe_resolve(ctx.workspace_root, rel_path)
+        # 附件目录兜底：用户消息附件在工作区外的 uploads 目录，允许只读
+        target = safe_resolve_read(ctx.workspace_root, rel_path)
         if target is None:
             return ToolResult(ok=False, output=f"Cannot resolve path: {rel_path}")
 

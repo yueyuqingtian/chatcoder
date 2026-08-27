@@ -16,9 +16,10 @@ import { MemoryPanel } from "./MemoryPanel";
 import { UsagePanel } from "./UsagePanel";
 import { DiagnosticsPanel } from "./DiagnosticsPanel";
 import { PluginsPanel } from "./PluginsPanel";
+import { ArchivedPanel } from "./ArchivedPanel";
 import {
   IconAnchor, IconBarChart, IconBookOpen, IconBrain, IconCalendar,
-  IconCpu, IconInfo, IconPalette, IconPlug, IconSettings,
+  IconCpu, IconInfo, IconPalette, IconPlug, IconRotateCcw, IconSettings,
   IconShield, IconTool, IconUsers, IconZap, IconBox,
 } from "../icons";
 
@@ -26,7 +27,8 @@ export type SettingsTab =
   | "general" | "appearance"
   | "models" | "skills" | "subagents" | "mcp" | "rules"
   | "policy"
-  | "scheduled" | "hooks" | "memory" | "usage" | "diagnostics" | "plugins" | "about";
+  | "scheduled" | "hooks" | "memory" | "usage" | "diagnostics" | "plugins" | "about"
+  | "archive";
 
 export interface SettingsIndexItem {
   key: SettingsTab;
@@ -52,6 +54,7 @@ export const SETTINGS_INDEX: SettingsIndexItem[] = [
   { key: "scheduled", label: "定时任务", group: "data", keywords: "cron 定时 自动化", icon: <IconCalendar size={15} /> },
   { key: "usage", label: "使用统计", group: "data", keywords: "token 用量 统计 context", icon: <IconBarChart size={15} /> },
   { key: "diagnostics", label: "诊断", group: "data", keywords: "健康检查 系统状态 索引", icon: <IconTool size={15} /> },
+  { key: "archive", label: "归档恢复", group: "data", keywords: "归档 恢复 已删除 archived restore", icon: <IconRotateCcw size={15} /> },
   { key: "about", label: "关于", group: "basic", keywords: "版本 信息", icon: <IconInfo size={15} /> },
 ];
 
@@ -83,6 +86,7 @@ function Panel({ tab }: { tab: SettingsTab }) {
     case "memory": return <div className="settings-content-inner"><div className="settings-page-title">记忆</div><div className="settings-card"><MemoryPanel /></div></div>;
     case "usage": return <div className="settings-content-inner"><div className="settings-page-title">用量统计</div><div className="settings-page-subtitle">整个软件的 token 用量：总数与各模型分布</div><div className="settings-card"><UsagePanel /></div></div>;
     case "diagnostics": return <div className="settings-content-inner"><div className="settings-page-title">诊断</div><div className="settings-page-subtitle">系统健康检查</div><div className="settings-card"><DiagnosticsPanel /></div></div>;
+    case "archive": return <div className="settings-content-inner"><div className="settings-page-title">归档恢复</div><div className="settings-page-subtitle">已归档的项目与会话，支持一键恢复</div><div className="settings-card"><ArchivedPanel /></div></div>;
     case "plugins": return <div className="settings-content-inner"><div className="settings-page-title">插件</div><div className="settings-page-subtitle">系统组件插件化：查看可替换的 slot 组件，像拼积木一样替换内置/外挂组件</div><div className="settings-card"><PluginsPanel /></div></div>;
     case "about": return <div className="settings-content-inner"><div className="settings-page-title">关于</div><div className="settings-card"><AboutPanel /></div></div>;
     default: return null;

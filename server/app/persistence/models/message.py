@@ -19,11 +19,18 @@ class Session(Base):
     fork_parent_id: Mapped[int | None] = mapped_column(BigInteger)  # 分支来源会话 id
     worktree_path: Mapped[str | None] = mapped_column(String(512))  # git 工作树路径（有则优先作为工作目录）
     plan_confirmed: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")  # 计划确认门
+    # v2.2 (plan-88): 确认执行被切为 accept_edits 的 plan 会话标记——执行 turn 结束后
+    # 恢复 permission_mode="plan"（保持"先规划后执行"的模式粘性）。
+    plan_restore_after_turn: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[str] = mapped_column(server_default=func.now())
     updated_at: Mapped[str] = mapped_column(server_default=func.now(), onupdate=func.now())
     # v1.1: 最后一次 API 真实上下文占用（重启/切会话后优先以此口径显示，避免骤降）
     last_prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     last_usage_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # v21: 主会话上下文摘要（LLM 压缩产物：summaries/summarized_ids/summary）。
+    # 此前仅作为内存属性存在，从不落库——跨轮/重启后摘要全部丢失，主 turn 路径
+    # 无摘要兜底，超过窗口预算的旧消息被静默丢弃。落库后摘要系统真正生效。
+    shared_context: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=None)
 
 
 class Message(Base):

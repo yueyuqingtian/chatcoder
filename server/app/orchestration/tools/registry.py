@@ -5,6 +5,7 @@ from app.orchestration.tools.base import Tool
 from app.orchestration.tools.ask_user import AskUserQuestionTool
 from app.orchestration.tools.ci import CiRunTool
 from app.orchestration.tools.codebase_search import CodebaseSearchTool
+from app.orchestration.tools.compaction_view import CompactionIndexTool, CompactionViewTool
 from app.orchestration.tools.editor import EditorApplyDiffTool
 from app.orchestration.tools.fs_list import FsListTool
 from app.orchestration.tools.fs_read import FsReadTool
@@ -72,6 +73,8 @@ def _build_default_registry() -> ToolRegistry:
         ReadAttachmentTool, TodoWriteTool,
         # v2.2 (对齐 zcode 3.14): 补注册——多文件编辑/git 操作/代码库搜索/结构化提问
         MultiFileEditTool, GitTool, CodebaseSearchTool, AskUserQuestionTool,
+        # v30.1: 压缩索引查看（AI 按需查看压缩前会话）
+        CompactionIndexTool, CompactionViewTool,
     ):
         reg.register(tool_cls())
     return reg

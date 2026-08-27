@@ -265,15 +265,26 @@ async def maybe_summarize_main_session(
     summarize_threshold = get_main_summarize_threshold(context_window)
     batch_tokens = get_main_summarize_batch_tokens(context_window)
 
-    messages = await _fetch_main_messages(db, session.id)
+    messages = await _fetch_main_messages(db, session.id, limit=2000)  # v21: 200→2000，与主路径重建范围一致，老消息也能被摘要覆盖
 
     ctx = session.shared_context or {}
     if not isinstance(ctx, dict):
         ctx = {}
 
     summarized_ids: set[int] = set(ctx.get("summarized_ids") or [])
-    # 只看未摘要的消息
-    candidates = [m for m in messages if m.id not in summarized_ids]
+    # v30: 已被落库式压缩遮蔽的消息不再进入渐进摘要（内容已由 checkpoint 承载）
+    compacted_ids: set[int] = set(ctx.get("compacted_ids") or [])
+    # v33: 已还原的压缩块消息也不进入渐进摘要——否则用户刚还原（希望 AI 看到原文）
+    # 的对话会在下一个 turn 被"35% 阈值渐进摘要"立即吞掉，表现为"还原后仍看不到"。
+    restored_ids: set[int] = set()
+    for _cmp in ctx.get("compactions") or []:
+        if _cmp.get("restored"):
+            restored_ids.update(_cmp.get("shadowed_ids") or [])
+    # 只看未摘要、未压缩、未还原的消息
+    candidates = [
+        m for m in messages
+        if m.id not in summarized_ids and m.id not in compacted_ids and m.id not in restored_ids
+    ]
 
     # v3.3: 按 token 触发，而非按条数
     candidates_tokens = messages_token_total(candidates)
@@ -332,11 +343,13 @@ async def maybe_summarize_main_session(
 
     latest_summarized_ids.update(our_ids)
 
-    latest_ctx["summaries"] = summaries
-    latest_ctx["summarized_ids"] = list(latest_summarized_ids)
+    # v30.1: 拷贝新 dict 再赋值——JSON 列同引用赋值不触发 UPDATE（SQLAlchemy 按 identity 检测 dirty）
+    new_ctx = dict(latest_ctx)
+    new_ctx["summaries"] = summaries
+    new_ctx["summarized_ids"] = list(latest_summarized_ids)
     # 拼接总摘要供 _layer1 使用
-    latest_ctx["summary"] = "\n\n".join(s["text"] for s in summaries)
-    session.shared_context = latest_ctx
+    new_ctx["summary"] = "\n\n".join(s["text"] for s in summaries)
+    session.shared_context = new_ctx
     await db.flush()
     logger.info(
         "会话 %s 生成摘要: %d 条消息 %d tokens -> %d 字符 (摘要总数=%d, 窗口=%dK)",
@@ -368,7 +381,8 @@ async def build_main_chat_context(
     # v3.3: 取全部未摘要消息，用 token 预算贪心选取
     all_msgs = await _fetch_main_messages(db, session.id, limit=200)
     summarized_ids = set(ctx.get("summarized_ids") or [])
-    unsummarized = [m for m in all_msgs if m.id not in summarized_ids]
+    compacted_ids = set(ctx.get("compacted_ids") or [])
+    unsummarized = [m for m in all_msgs if m.id not in summarized_ids and m.id not in compacted_ids]
 
     # Token-budget 选取：从最新向前贪心，直到预算耗尽
     recent, _ = select_messages_by_token_budget(
@@ -426,7 +440,8 @@ async def build_leader_context_lines(
     # v3.3: token 预算贪心选取
     all_msgs = await _fetch_main_messages(db, session.id, limit=200)
     summarized_ids = set(ctx.get("summarized_ids") or [])
-    unsummarized = [m for m in all_msgs if m.id not in summarized_ids]
+    compacted_ids = set(ctx.get("compacted_ids") or [])
+    unsummarized = [m for m in all_msgs if m.id not in summarized_ids and m.id not in compacted_ids]
     recent, _ = select_messages_by_token_budget(
         unsummarized, window_budget, min_keep=MIN_MESSAGES_KEEP,
     )

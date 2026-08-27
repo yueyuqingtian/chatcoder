@@ -110,8 +110,10 @@ async def ws_endpoint(ws: WebSocket, session_id: int) -> None:
                     else:
                         resolved = approval_manager.resolve(approval_id, approved)
                     # v2.2 (对齐 zcode 3.12): 审批卡"始终允许"→ 生成工具级 exec_policy 规则
+                    # v3.0 (plan-88): remember_scope 区分会话级/全局（global 规则 session_id=None）
                     if approved and payload.get("remember"):
-                        await _remember_approval(approval_id, session_id)
+                        scope = "global" if payload.get("remember_scope") == "global" else "session"
+                        await _remember_approval(approval_id, session_id, scope)
                 await ws.send_text(json.dumps({
                     "event": "ack", "payload": {"ref": approval_id, "resolved": resolved},
                 }))
@@ -145,11 +147,13 @@ async def ws_endpoint(ws: WebSocket, session_id: int) -> None:
         manager.disconnect(session_id, ws)
 
 
-async def _remember_approval(approval_id: str, session_id: int) -> None:
+async def _remember_approval(approval_id: str, session_id: int,
+                             scope: str = "session") -> None:
     """v2.2 (对齐 zcode 3.12): 审批卡"始终允许"→ 生成工具级 exec_policy 规则。
 
     从 approval_manager 取 pending 的 detail（含 tool/session_id），
-    写 allow 规则（session 级）。失败仅告警不阻断。
+    写 allow 规则：scope=session → 会话级（session_id 绑定）；
+    scope=global → 全局规则（session_id=None）。失败仅告警不阻断。
     """
     try:
         from app.orchestration.approval import approval_manager
@@ -165,11 +169,11 @@ async def _remember_approval(approval_id: str, session_id: int) -> None:
         async with async_session_factory() as db:
             await exec_policy_service.create_rule(
                 db, command_pattern=f"(tool){tool_name}", decision="allow",
-                session_id=detail.get("session_id") or session_id,
-                justification="审批卡“始终允许”自动生成",
+                session_id=None if scope == "global" else (detail.get("session_id") or session_id),
+                justification="审批卡“始终允许”自动生成" if scope == "global" else "审批卡“当前会话允许”自动生成",
                 tool_name=tool_name,
             )
             await db.commit()
-        logger.info("[ws] 审批始终允许已生成规则: tool=%s", tool_name)
+        logger.info("[ws] 审批始终允许已生成规则: tool=%s scope=%s", tool_name, scope)
     except Exception:
         logger.warning("[ws] 始终允许规则生成失败(非阻塞)", exc_info=True)

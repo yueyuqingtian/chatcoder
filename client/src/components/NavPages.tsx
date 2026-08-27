@@ -7,6 +7,7 @@ import {
   IconPlus, IconRefresh, IconSearch, IconTarget, IconX, IconZap,
   IconChevronDown, IconDownload,
 } from "./icons";
+import { ConfirmDialog } from "./ConfirmDialog";
 
 function SwitchRow({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
   return (
@@ -292,6 +293,7 @@ export function McpPage() {
   const [candidates, setCandidates] = useState<Array<{ name: string; transport: string; command: string | null; args: string[]; env: Record<string, string> | null; url: string | null; source_path: string }>>([]);
   const [scanning, setScanning] = useState(false);
   const [importing, setImporting] = useState<string | null>(null);
+  const [confirmTarget, setConfirmTarget] = useState<McpServerOut | null>(null);
 
   const load = useCallback(async () => {
     try { setItems(await api.listMcpServers()); } catch { /* ignore */ }
@@ -321,12 +323,13 @@ export function McpPage() {
     }
   };
 
-  const handleImport = async (c: { name: string; transport: string; command: string | null; args: string[]; env: Record<string, string> | null; url: string | null }) => {
+  const handleImport = async (c: { name: string; transport: string; command: string | null; args: string[]; env: Record<string, string> | null; url: string | null; source_path?: string }) => {
     setImporting(c.name);
     try {
       await api.createMcpServer({
         name: c.name, transport: c.transport, command: c.command ?? undefined,
         args: c.args, env: c.env ?? undefined, url: c.url ?? undefined, is_active: false,
+        path: c.source_path || undefined,
       });
       setCandidates((prev) => prev.filter((x) => x.name !== c.name));
       load();
@@ -362,12 +365,25 @@ export function McpPage() {
             </div>
             <div className="navpage-item-actions">
               <SwitchRow checked={m.is_active} onChange={async (v) => { try { await api.updateMcpServer(m.id, { is_active: v }); load(); } catch { /* ignore */ } }} />
-              <button className="icon-btn" onClick={async () => { if (confirm(`删除「${m.name}」?`)) { try { await api.deleteMcpServer(m.id); load(); } catch { /* ignore */ } } }}><IconX size={12} /></button>
+              <button className="icon-btn" onClick={() => setConfirmTarget(m)}><IconX size={12} /></button>
             </div>
           </div>
         ))}
         {items.length === 0 && <div className="navpage-empty">暂无 MCP 服务器，点击「自动扫描本机」导入</div>}
       </div>
+      <ConfirmDialog
+        open={confirmTarget !== null}
+        title="删除 MCP 服务器"
+        message={confirmTarget ? `删除「${confirmTarget.display_name || confirmTarget.name}」？` : ""}
+        danger
+        onCancel={() => setConfirmTarget(null)}
+        onConfirm={async () => {
+          const it = confirmTarget;
+          setConfirmTarget(null);
+          if (!it) return;
+          try { await api.deleteMcpServer(it.id); load(); } catch { /* ignore */ }
+        }}
+      />
       {candidates.length > 0 && (
         <div className="navpage-candidates">
           <div className="navpage-candidates-title">扫描候选（勾选导入）</div>

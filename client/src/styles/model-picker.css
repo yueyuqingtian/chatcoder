@@ -1,11 +1,16 @@
-/* v18: 两级级联模型选择器（供应商 → 模型） */
-.mp-menu { width: 440px; max-width: min(440px, calc(100vw - 40px)); padding: 5px; border-radius: 10px; max-height: none; overflow: visible; right: 0; left: auto; }
+/* v18: 两级级联模型选择器（供应商 → 模型）
+ * v19: fixed 定位 + 自适应高度 + 多模态角标美化；修复 .composer-menu button > span 特异性覆盖问题 */
+.mp-menu { width: min(460px, calc(100vw - 16px)); padding: 6px; border-radius: 10px; display: flex; flex-direction: column; overflow: hidden; }
+.mp-menu-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 8px 7px; border-bottom: 1px solid var(--border-light); flex-shrink: 0; }
+.mp-menu-hint { font-size: 10px; color: var(--text-3); font-weight: 400; }
 .mp-label { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mp-cascade { display: flex; height: 300px; }
-.mp-col { overflow-y: auto; overflow-x: hidden; padding: 3px; display: flex; flex-direction: column; gap: 2px; }
-.mp-col::-webkit-scrollbar { width: 8px; }
-.mp-col-groups { width: 168px; flex-shrink: 0; border-right: 1px solid var(--border-light); }
-.mp-col-models { flex: 1 1 auto; min-width: 0; }
+.mp-cascade { display: grid; grid-template-columns: 168px minmax(0, 1fr); min-height: 220px; height: 360px; max-height: 360px; min-width: 0; flex: 1 1 auto; overflow: hidden; }
+.mp-col { padding: 5px; display: flex; flex-direction: column; min-height: 0; }
+.mp-col::-webkit-scrollbar, .mp-groups-list::-webkit-scrollbar { width: 8px; }
+.mp-col-groups { width: auto; min-width: 0; border-right: 1px solid var(--border-light); display: flex; flex-direction: column; overflow: hidden; padding-bottom: 2px; }
+.mp-groups-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 3px; }
+.mp-left-footer { flex-shrink: 0; border-top: 1px solid var(--border-light); margin-top: 4px; padding-top: 4px; }
+.mp-col-models { flex: 1 1 auto; min-width: 0; overflow-y: auto; overflow-x: hidden; gap: 3px; }
 /* 供应商行：图标 + 名称 + 数量角标 */
 .mp-group { display: flex; align-items: center; gap: 7px; width: 100%; padding: 7px 8px; border-radius: 7px; font-size: 12.5px; color: var(--text-2); cursor: pointer; border: none; background: transparent; text-align: left; transition: background var(--dur-fast), color var(--dur-fast); }
 .mp-group-icon { flex-shrink: 0; opacity: 0.75; }
@@ -15,15 +20,14 @@
 .mp-group.active { background: var(--bg-active); color: var(--text-1); }
 .mp-group.active .mp-group-icon { color: var(--accent); opacity: 1; }
 .mp-group.active .mp-group-count { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
-.mp-item { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 32px; padding: 5px 9px; border-radius: 7px; font-size: 12.5px; color: var(--text-1); cursor: pointer; border: none; background: transparent; text-align: left; transition: background var(--dur-fast); }
-/* 覆盖 .composer-menu button > span 的 flex:1——否则勾选列把模型名顶到右侧 */
-.mp-item > span { flex: none; }
+.mp-menu .mp-item { display: grid; grid-template-columns: 16px minmax(0, 1fr); grid-template-rows: auto auto; align-items: center; column-gap: 6px; row-gap: 4px; width: 100%; min-height: 46px; padding: 7px 9px; border-radius: 7px; font-size: 12.5px; color: var(--text-1); cursor: pointer; border: none; background: transparent; text-align: left; transition: background var(--dur-fast); }
 .mp-item:hover { background: var(--bg-hover); }
 .mp-item.active { background: var(--bg-active); }
-.mp-item-check { width: 14px; flex-shrink: 0; display: inline-flex; align-items: center; color: var(--accent); }
-.mp-item > .mp-item-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* 多模态角标：轻量药丸，无边框硬朗感 */
-.mp-tag { font-size: 10px; line-height: 1; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); border-radius: 999px; padding: 3px 7px; flex-shrink: 0; font-weight: 500; }
+.mp-menu .mp-item > .mp-item-check { grid-column: 1; grid-row: 1; width: 14px; display: inline-flex; align-items: center; color: var(--accent); }
+.mp-menu .mp-item > .mp-item-name { grid-column: 2; grid-row: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 550; color: var(--text-1); }
+/* 标签独占第二行，避免思考档位/倍率把模型名压缩到不可见。 */
+.mp-menu .mp-item > .mp-tags { grid-column: 2; grid-row: 2; display: flex; flex-wrap: wrap; gap: 3px; min-width: 0; }
+.mp-menu .mp-item > .mp-tag { display: inline-flex; align-items: center; gap: 3px; min-width: 0; font-size: 10px; line-height: 1; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent); border-radius: 999px; padding: 2px 5px; font-weight: 500; }
 .mp-footer { border-top: 1px solid var(--border-light); margin-top: 5px; padding-top: 5px; }
 .mp-manage { width: 100%; padding: 6px 9px; border-radius: 7px; font-size: 12px; color: var(--text-2); cursor: pointer; border: none; background: transparent; text-align: left; transition: background var(--dur-fast); }
 .mp-manage:hover { background: var(--bg-hover); color: var(--text-1); }

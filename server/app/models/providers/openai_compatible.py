@@ -9,16 +9,52 @@ stream=True，在内部收集所有 chunk 拼成完整响应。
 import asyncio
 import json
 import logging
+import uuid
 from collections.abc import AsyncIterator
 
-from openai import AsyncOpenAI, APIError, APIConnectionError, APITimeoutError
+from openai import APIConnectionError, APIError, APITimeoutError, AsyncOpenAI
 
+from app.core.config import settings
 from app.models.base import ModelProvider
 from app.models.schemas import ChatRequest, ChatResponse, Usage
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_TIMEOUT = 120.0
+# v28.1: httpx 网络层超时不再硬编码 120s——read 超时必须 >= chunk 空闲超时
+# (provider_stream_idle_timeout)。旧固定 120s 小于默认 180s：长思考模型在思考
+# 阶段静默（SSE 无 chunk）超过 120s 时 httpx ReadTimeout 先于 asyncio chunk
+# 超时触发，配置形同虚设，表现为"长思考超过一定时间就报错"。取配置值并留
+# 600s 下限，防止配置调小后网络层反而先于 chunk 超时收紧。
+_DEFAULT_TIMEOUT = max(
+    600.0,
+    float(getattr(settings, "provider_stream_idle_timeout", 180) or 180),
+)
+
+
+def _new_call_id() -> str:
+    """生成全局唯一 tool_call id。
+
+    Gemini 等严格网关要求 function call id 在整段对话中唯一且非空。
+    旧实现用 f"call_{idx:02d}" 兜底，idx 每轮从 0 开始，跨轮次会产生重复 id，
+    网关返回 400 "Please ensure that function call ... has been called exactly once"。
+    """
+    return "call_" + uuid.uuid4().hex[:12]
+
+# v21: thinking 模式思考预算（对齐 anthropic provider 的 effort→budget 映射；
+# zcode 默认 budget 1024）。仅当 request.thinking=True 时使用。
+_THINKING_BUDGET_BY_EFFORT = {
+    "none": 0,
+    "minimal": 2048,
+    "low": 2048,
+    "medium": 8192,
+    "high": 16384,
+    "xhigh": 32768,
+    "max": 32768,
+}
+# 支持 thinking:{type:"enabled"} 参数的网关域名（对齐 zcode: deepseek.com/z.ai/bigmodel.cn/chatglm.site）
+_THINKING_DOMAINS = ("deepseek.com", "z.ai", "bigmodel.cn", "chatglm.site", "moonshot.cn", "kimi.com")
+# 支持 thinking 参数的模型名前缀（DeepSeek/GLM/Kimi 系）
+_THINKING_MODEL_PREFIXES = ("deepseek", "glm", "kimi", "moonshot")
 
 
 class OpenAICompatibleProvider(ModelProvider):
@@ -28,6 +64,9 @@ class OpenAICompatibleProvider(ModelProvider):
 
     def __init__(self, *, api_key: str, base_url: str, model: str):
         self._default_model = model
+        # v28: stream chunk 空闲超时改读配置——长思考模型（grok-4.6 等）chunk 间隔
+        # 可能超过旧硬编码 30s，导致"运行中突然停止且无报错"。
+        self._chunk_timeout = float(getattr(settings, "provider_stream_idle_timeout", 180) or 180)
         # v6.3: 不声明接受 br 压缩——打包版 brotlicffi 缺 Decompressor C 扩展，
         # 网关若返回 br 压缩流会直接崩，gzip/deflate 由 httpx 原生支持
         self._client = AsyncOpenAI(
@@ -37,6 +76,77 @@ class OpenAICompatibleProvider(ModelProvider):
             max_retries=3,
             default_headers={"Accept-Encoding": "gzip, deflate"},
         )
+        self._base_url = base_url.rstrip("/").lower()
+        self._model_name = model
+
+    # v21: 判断网关/模型是否支持 thinking:{type:"enabled"} 参数。
+    # 对齐 zcode 的域名启发式 + 模型名前缀；OpenAI/Anthropic 官方网关不在此列
+    # （OpenAI 用 reasoning_effort、Anthropic 走独立 provider 的 extended thinking）。
+    def supports_thinking(self) -> bool:
+        if any(d in self._base_url for d in _THINKING_DOMAINS):
+            return True
+        name = (self._model_name or "").lower()
+        return any(name.startswith(p) for p in _THINKING_MODEL_PREFIXES)
+
+    @staticmethod
+    def _thinking_budget(reasoning_effort: str | None) -> int:
+        """effort 档位 → 思考预算 token（默认 1024，对齐 zcode）。"""
+        if not reasoning_effort:
+            from app.core.config import settings
+            return settings.agent_thinking_budget_tokens
+        return _THINKING_BUDGET_BY_EFFORT.get(
+            reasoning_effort.lower(),
+            _THINKING_BUDGET_BY_EFFORT.get("medium"),
+        )
+
+    def _apply_thinking(self, kwargs: dict, request: "ChatRequest") -> None:
+        """request.thinking=True 时写入 thinking 参数并移除 temperature。
+
+        对齐 deepseek-harness serialize.ts（thinking:{type:"enabled"}）与 zcode
+        （thinking 开启时 temperature 不支持，置空由网关内部固定采样）。
+        v23.1: 轻量网关（智谱 bigmodel 中转、LiteLLM 等）只认 thinking.type、
+        不认识 budget_tokens，会直接 400 UNKNOWN_FIELD——budget_tokens 仅发给
+        官方 Anthropic 网关（Anthropic extended thinking 协议原生要求该字段）。
+        """
+        if not request.thinking:
+            return
+        thinking: dict = {"type": "enabled"}
+        if "api.anthropic.com" in self._base_url:
+            thinking["budget_tokens"] = self._thinking_budget(request.reasoning_effort)
+        # 必须走 extra_body：openai SDK 1.x 的 create() 签名不含 thinking 参数，
+        # 直接传 thinking= 会抛 "AsyncCompletions.create() got an unexpected keyword argument 'thinking'"；
+        # extra_body 会把字段合并进请求体，由网关解释。
+        kwargs["extra_body"] = {"thinking": thinking}
+        kwargs.pop("temperature", None)
+
+    async def _create_compat(self, kwargs: dict):
+        """v23.1: 思考参数的兼容性重试（保留思考深度配置，自动降级字段）。
+
+        部分中转网关（9router/cmc 等）会把 reasoning_effort=max 转译为
+        thinking.budget_tokens 注入上游，或对 thinking 子字段做白名单校验，
+        触发 400 UNKNOWN_FIELD。此时自动降级重试一次：
+        剥离 thinking.budget_tokens（仅保留 type:"enabled"），并将 max 降为 xhigh。
+        思考深度能力不丢：支持该字段的网关（官方 Anthropic）仍在首次请求中携带。
+        """
+        try:
+            return await self._client.chat.completions.create(**kwargs)
+        except APIError as e:
+            msg = str(getattr(e, "message", "") or "")
+            unknown_thinking_field = getattr(e, "status_code", None) == 400 and (
+                "budget_tokens" in msg or ("UNKNOWN_FIELD" in msg and "thinking" in msg)
+            )
+            if not unknown_thinking_field:
+                raise
+            retry = dict(kwargs)
+            eb = dict(retry.get("extra_body") or {})
+            th = eb.get("thinking")
+            if isinstance(th, dict):
+                eb["thinking"] = {k: v for k, v in th.items() if k != "budget_tokens"}
+                retry["extra_body"] = eb
+            if retry.get("reasoning_effort") == "max":
+                retry["reasoning_effort"] = "xhigh"
+            logger.warning("[provider] 网关拒绝 thinking 字段(400 UNKNOWN_FIELD)，降级重试一次")
+            return await self._client.chat.completions.create(**retry)
 
     async def chat(self, request: ChatRequest) -> ChatResponse:
         """非流式调用，内部用 stream=True 收集。"""
@@ -57,9 +167,11 @@ class OpenAICompatibleProvider(ModelProvider):
         # v6.0: 透传 reasoning_effort（对齐 codex thinking），none/None 不传以兼容老网关
         if request.reasoning_effort and request.reasoning_effort != "none":
             kwargs["reasoning_effort"] = request.reasoning_effort
+        # v21: thinking 模式（DeepSeek/GLM 系）——发 thinking 参数并移除 temperature
+        self._apply_thinking(kwargs, request)
 
         try:
-            stream = await self._client.chat.completions.create(**kwargs)
+            stream = await self._create_compat(kwargs)
         except APIConnectionError as e:
             logger.error("[provider] 连接失败: %s", e)
             raise RuntimeError(f"model gateway error (connection): {e}") from e
@@ -79,14 +191,19 @@ class OpenAICompatibleProvider(ModelProvider):
 
         try:
             # v4.8.3: chat() 回退路径也加 chunk 超时，与 stream_structured 一致
+            # v28: 超时值改读配置 provider_stream_idle_timeout（默认 180s，兼容长思考模型）
             _stream_iter = stream.__aiter__()
             while True:
                 try:
-                    chunk = await asyncio.wait_for(_stream_iter.__anext__(), timeout=30.0)
+                    chunk = await asyncio.wait_for(
+                        _stream_iter.__anext__(), timeout=self._chunk_timeout,
+                    )
                 except StopAsyncIteration:
                     break
                 except asyncio.TimeoutError:
-                    raise RuntimeError("model gateway error: stream chunk timeout (30s)")
+                    raise RuntimeError(
+                        f"model gateway error: stream chunk timeout ({int(self._chunk_timeout)}s)"
+                    ) from None
                 # v4.5: 无论是否有 choices 都检查 usage
                 if chunk.usage:
                     _prompt_details = getattr(chunk.usage, 'prompt_tokens_details', None)
@@ -136,6 +253,7 @@ class OpenAICompatibleProvider(ModelProvider):
 
         # 组装 tool_calls
         tool_calls = []
+        _seen_ids: set[str] = set()
         for idx in sorted(tool_calls_map.keys()):
             tc = tool_calls_map[idx]
             args_raw = tc["arguments"] or "{}"
@@ -143,8 +261,13 @@ class OpenAICompatibleProvider(ModelProvider):
                 args = json.loads(args_raw) if args_raw else {}
             except (json.JSONDecodeError, TypeError):
                 args = {"_raw": args_raw}
+            # 网关偶发返回空/重复 id：uuid 兜底并去重，保证全局唯一
+            call_id = tc["id"] or _new_call_id()
+            if call_id in _seen_ids:
+                call_id = _new_call_id()
+            _seen_ids.add(call_id)
             tool_calls.append({
-                "id": tc["id"] or f"call_{idx:02d}",
+                "id": call_id,
                 "name": tc["name"],
                 "arguments": args,
             })
@@ -218,9 +341,11 @@ class OpenAICompatibleProvider(ModelProvider):
         # v6.0: 透传 reasoning_effort（对齐 codex thinking），none/None 不传以兼容老网关
         if request.reasoning_effort and request.reasoning_effort != "none":
             kwargs["reasoning_effort"] = request.reasoning_effort
+        # v21: thinking 模式（DeepSeek/GLM 系）——发 thinking 参数并移除 temperature
+        self._apply_thinking(kwargs, request)
 
         try:
-            stream = await self._client.chat.completions.create(**kwargs)
+            stream = await self._create_compat(kwargs)
             async for chunk in stream:
                 if chunk.choices and chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
@@ -253,9 +378,11 @@ class OpenAICompatibleProvider(ModelProvider):
         # v6.0: 透传 reasoning_effort（对齐 codex thinking），none/None 不传以兼容老网关
         if request.reasoning_effort and request.reasoning_effort != "none":
             kwargs["reasoning_effort"] = request.reasoning_effort
+        # v21: thinking 模式（DeepSeek/GLM 系）——发 thinking 参数并移除 temperature
+        self._apply_thinking(kwargs, request)
 
         try:
-            s = await self._client.chat.completions.create(**kwargs)
+            s = await self._create_compat(kwargs)
         except APIError as e:
             logger.error("[provider] 流式错误: %s", e)
             raise RuntimeError(f"model gateway error: {e.message}") from e
@@ -267,14 +394,19 @@ class OpenAICompatibleProvider(ModelProvider):
         usage_data = Usage()
 
         # v4.8: 流式读取加 chunk 超时，防止网关半开连接导致永久挂起
+        # v28: 超时值改读配置 provider_stream_idle_timeout（默认 180s，兼容长思考模型）
         _stream_iter = s.__aiter__()
         while True:
             try:
-                chunk = await asyncio.wait_for(_stream_iter.__anext__(), timeout=30.0)
+                chunk = await asyncio.wait_for(
+                    _stream_iter.__anext__(), timeout=self._chunk_timeout,
+                )
             except StopAsyncIteration:
                 break
             except asyncio.TimeoutError:
-                raise RuntimeError("model gateway error: stream chunk timeout (30s)")
+                raise RuntimeError(
+                    f"model gateway error: stream chunk timeout ({int(self._chunk_timeout)}s)"
+                ) from None
             # v4.5: 无论是否有 choices 都检查 usage（某些网关把 usage 放在最后有 choices 的 chunk）
             if chunk.usage:
                 _prompt_details = getattr(chunk.usage, 'prompt_tokens_details', None)
@@ -325,6 +457,7 @@ class OpenAICompatibleProvider(ModelProvider):
 
         # 组装 tool_calls
         tool_calls = []
+        _seen_ids: set[str] = set()
         for idx in sorted(tool_calls_map.keys()):
             tc = tool_calls_map[idx]
             args_raw = tc["arguments"] or "{}"
@@ -332,8 +465,13 @@ class OpenAICompatibleProvider(ModelProvider):
                 args = json.loads(args_raw) if args_raw else {}
             except (json.JSONDecodeError, TypeError):
                 args = {"_raw": args_raw}
+            # 网关偶发返回空/重复 id：uuid 兜底并去重，保证全局唯一
+            call_id = tc["id"] or _new_call_id()
+            if call_id in _seen_ids:
+                call_id = _new_call_id()
+            _seen_ids.add(call_id)
             tool_calls.append({
-                "id": tc["id"] or f"call_{idx:02d}",
+                "id": call_id,
                 "name": tc["name"],
                 "arguments": args,
             })
@@ -389,13 +527,20 @@ class OpenAICompatibleProvider(ModelProvider):
                                "content": m.content or ""})
             elif m.role == "assistant" and m.tool_calls:
                 # assistant 带 tool_calls
+                # 兜底 id 必须非空且同消息内唯一（旧实现 "call_default" 在多条
+                # 无 id 调用时重复 → Gemini 400 "called exactly once"）
                 tc_list = []
+                _seen_ids: set[str] = set()
                 for tc in m.tool_calls:
                     fn_args = tc.get("arguments", {})
                     if isinstance(fn_args, dict):
                         fn_args = json.dumps(fn_args, ensure_ascii=False)
+                    call_id = tc.get("id") or _new_call_id()
+                    if call_id in _seen_ids:
+                        call_id = _new_call_id()
+                    _seen_ids.add(call_id)
                     tc_list.append({
-                        "id": tc.get("id") or "call_default",
+                        "id": call_id,
                         "type": "function",
                         "function": {
                             "name": tc.get("name", ""),
@@ -404,7 +549,9 @@ class OpenAICompatibleProvider(ModelProvider):
                     })
                 result.append({
                     "role": "assistant",
-                    "content": m.content,  # None 时 SDK 处理为 null
+                    # v21: 纯 tool_call 回合 content 发空串而非 null（对齐 deepseek-harness
+                    # serializeAssistant：部分网关（DeepSeek 系）直接 reject null content）
+                    "content": m.content or "",
                     "tool_calls": tc_list,
                     # v1.2: thinking 模式网关（DeepSeek/GLM 经 LiteLLM）要求把
                     # 历史 assistant 的 reasoning_content 原样回传，否则 400
@@ -506,7 +653,7 @@ def _parse_dsml_tool_calls(content: str) -> list[dict]:
                     args[p_name] = p_value
 
         calls.append({
-            "id": f"dsml_{len(calls):02d}_{tool_name}",
+            "id": _new_call_id(),
             "name": tool_name,
             "arguments": args,
         })
@@ -591,7 +738,7 @@ def _parse_degraded_tool_calls(content: str) -> list[dict]:
         except (json.JSONDecodeError, TypeError):
             args = {}
         calls.append({
-            "id": f"degraded_json_{len(calls):02d}",
+            "id": _new_call_id(),
             "name": tool_name,
             "arguments": args,
         })
@@ -606,7 +753,7 @@ def _parse_degraded_tool_calls(content: str) -> list[dict]:
         args = _coerce_simple_args(tool_name, params_str)
         if args is not None:
             calls.append({
-                "id": f"degraded_{len(calls):02d}",
+                "id": _new_call_id(),
                 "name": tool_name,
                 "arguments": args,
             })
@@ -623,7 +770,7 @@ def _parse_degraded_tool_calls(content: str) -> list[dict]:
         # 多条命令行用 " && " 连接（terminal_exec 支持命令链）
         full_cmd = " && ".join(cmd_lines)
         calls.append({
-            "id": f"degraded_cmd_{len(calls):02d}",
+            "id": _new_call_id(),
             "name": "terminal_exec",
             "arguments": {"command": full_cmd},
         })
@@ -644,7 +791,7 @@ def _parse_degraded_tool_calls(content: str) -> list[dict]:
                     if tool_name in ("fs_list",):
                         args = {"path": str(path_match.group(0)).rsplit("/", 1)[0] or "."}
                     calls.append({
-                        "id": f"degraded_intent_{len(calls):02d}",
+                        "id": _new_call_id(),
                         "name": tool_name,
                         "arguments": args,
                     })

@@ -1,8 +1,10 @@
-/** 右侧面板（v5）：多标签页 + 全屏按钮 + 加号菜单修复。 */
-import { useState } from "react";
+/** 右侧面板（v5）：多标签页 + 全屏按钮 + 加号菜单修复。
+ * v19: 标签溢出治理——tab 不再被 flex 压缩（flex-shrink:0 + 文字省略），
+ *      支持滚轮横滚；溢出时头部出现「全部标签」下拉，可直接跳转/关闭。 */
+import { useEffect, useRef, useState } from "react";
 import { usePanelStore } from "../../store/panel";
 import type { PanelTab, PanelTabId } from "../../store/panel";
-import { IconArrowToggle, IconFolder, IconGlobe, IconTerminal, IconX, IconPlus, IconMaximize, IconMinus } from "../icons";
+import { IconArrowToggle, IconChevronDown, IconFolder, IconGlobe, IconTerminal, IconX, IconPlus, IconMaximize, IconMinus } from "../icons";
 import { TaskSummaryPanel } from "./TaskSummaryPanel";
 import { BrowserPanel } from "./BrowserPanel";
 import { FileTreePanel } from "./FileTreePanel";
@@ -41,6 +43,28 @@ export function RightPanel() {
   const fullscreen = usePanelStore((s) => s.fullscreen);
   const toggleFullscreen = usePanelStore((s) => s.toggleFullscreen);
   const [showAddMenu, setShowAddMenu] = useState(false);
+  const [showTabsMenu, setShowTabsMenu] = useState(false);
+  const tabsRef = useRef<HTMLDivElement>(null);
+  const [tabsOverflow, setTabsOverflow] = useState(false);
+
+  // 标签条溢出检测（scrollWidth > clientWidth 时展示「全部标签」入口）
+  useEffect(() => {
+    const el = tabsRef.current;
+    if (!el) return;
+    const check = () => setTabsOverflow(el.scrollWidth > el.clientWidth + 2);
+    check();
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [tabs.length]);
+
+  // 滚轮纵转横：标签过多时直接滚轮浏览
+  const onTabsWheel = (e: React.WheelEvent) => {
+    const el = tabsRef.current;
+    if (!el || el.scrollWidth <= el.clientWidth) return;
+    e.preventDefault();
+    el.scrollLeft += e.deltaY;
+  };
 
   const handleAdd = (id: PanelTabId) => { openTab(id); setShowAddMenu(false); };
   // v2.2 (对齐 zcode 3.15): 终端每次新建实例（多终端标签并存）
@@ -49,7 +73,7 @@ export function RightPanel() {
   return (
     <div className="right-panel">
       <div className="rp-head">
-        <div className="rp-tabs">
+        <div className="rp-tabs" ref={tabsRef} onWheel={onTabsWheel}>
           {tabs.map((t) => {
             const key = `${t.id}-${t.instance}`;
             const meta = TAB_META[t.id];
@@ -57,7 +81,7 @@ export function RightPanel() {
               ? t.meta.agentName.slice(0, 10)
               : t.instance > 1 ? `${meta.label} ${t.instance}` : meta.label;
             return (
-              <div key={key} className={`rp-tab${activeKey === key ? " active" : ""}`} onClick={() => setActiveTab(key)}>
+              <div key={key} className={`rp-tab${activeKey === key ? " active" : ""}`} title={label} onClick={() => setActiveTab(key)}>
                 {meta.icon}
                 <span>{label}</span>
                 <button className="rp-tab-close" onClick={(e) => { e.stopPropagation(); closeTab(key); }}><IconX size={10} /></button>
@@ -67,7 +91,28 @@ export function RightPanel() {
           {tabs.length === 0 && <div className="rp-tabs-empty">点击 + 打开面板</div>}
         </div>
         <div className="rp-head-actions">
-          <button className="rp-add-btn" onClick={() => setShowAddMenu(!showAddMenu)} title="新增标签"><IconPlus size={14} /></button>
+          {tabsOverflow && (
+            <button className="rp-add-btn" onClick={() => { setShowTabsMenu(!showTabsMenu); setShowAddMenu(false); }} title="全部标签">
+              <IconChevronDown size={14} />
+            </button>
+          )}
+          {showTabsMenu && (
+            <div className="rp-add-menu" onClick={() => setShowTabsMenu(false)}>
+              {tabs.map((t) => {
+                const key = `${t.id}-${t.instance}`;
+                const meta = TAB_META[t.id];
+                const label = t.id === "subagent" && t.meta?.agentName
+                  ? t.meta.agentName.slice(0, 10)
+                  : t.instance > 1 ? `${meta.label} ${t.instance}` : meta.label;
+                return (
+                  <button key={key} className={activeKey === key ? "active" : ""} onClick={() => setActiveTab(key)}>
+                    {meta.icon} <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          <button className="rp-add-btn" onClick={() => { setShowAddMenu(!showAddMenu); setShowTabsMenu(false); }} title="新增标签"><IconPlus size={14} /></button>
           {showAddMenu && (
             <div className="rp-add-menu" onClick={() => setShowAddMenu(false)}>
               <button onClick={() => handleAdd("task-summary")}>任务摘要</button>

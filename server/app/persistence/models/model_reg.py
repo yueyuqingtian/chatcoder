@@ -25,6 +25,9 @@ class Provider(Base):
     api_key: Mapped[str | None] = mapped_column(String(500))
     api_format: Mapped[str] = mapped_column(String(20), default="openai")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # v23: ta3 供应商登录态（auth_status: pending | logged_in；account_label: 账号显示名）
+    auth_status: Mapped[str | None] = mapped_column(String(20))
+    account_label: Mapped[str | None] = mapped_column(String(120))
     created_at: Mapped[str] = mapped_column(server_default=func.now())
 
 
@@ -51,4 +54,13 @@ class Model(Base):
     api_key: Mapped[str | None] = mapped_column(String(500))
     # v4: 模型支持的推理深度档位列表(如 ["minimal","low","medium","high"])
     reasoning_efforts: Mapped[list | None] = mapped_column(JSON, default=list)
+    # v23: ta3 模型远端元数据（list-assistants 下发）：
+    # {systemMessage, anthropic, provider, completionOptions, requestHeaders, title, orgId, profileId}
+    ta3_meta: Mapped[dict | None] = mapped_column(JSON)
+    # v24: workbuddy 模型元数据（/v3/config 下发）：
+    # {title, credits, vendor, tags, maxOutputTokens, supportsReasoning, onlyReasoning, reasoning, temperature}
+    workbuddy_meta: Mapped[dict | None] = mapped_column(JSON)
+    # v25: trae 模型元数据（batch_get_detail_param 下发）：
+    # {config_name, title, functions, prompt_max_tokens, max_tokens, multimodal, model_extra_config}
+    trae_meta: Mapped[dict | None] = mapped_column(JSON)
     created_at: Mapped[str] = mapped_column(server_default=func.now())

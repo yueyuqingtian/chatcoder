@@ -12,7 +12,7 @@ from app.gateway.schemas import (ArtifactOut, FileChangeOut, FileDiffOut, Messag
                                  RollbackResult, TaskConfirmBody, TaskOut, TurnCreate, TurnOut, TurnSnapshotOut)
 from app.orchestration import engine
 from app.persistence.database import get_db
-from app.services import message_service, rollback_service, session_service, task_service, turn_service
+from app.services import message_service, project_service, rollback_service, session_service, task_service, turn_service
 
 router = APIRouter(prefix="/turns", tags=["turns"])
 
@@ -42,7 +42,36 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
     # 回填用户消息的 turn_id：保证前端按 turn 分组时用户消息归入该 turn，
     # 且（消息按 id 升序）用户消息排在 AI 回复之前（修复消息顺序颠倒）
     user_msg.turn_id = turn.id
+    generated_title = await session_service.auto_title_session(db, session, body.content)
     await db.commit()
+
+    # plan-95: 快照在 turn 创建时同步落库（create_turn_snapshot 幂等）——此前快照由
+    # 后台 engine 创建，用户"发送后立即停止"时后台任务可能在建快照前被取消，
+    # 快照永久缺失，回滚预览报「该 turn 无快照」。turn 从创建起即有快照兜底。
+    try:
+        ws_path = session.worktree_path or ""
+        if not ws_path and session.project_id:
+            _project = await project_service.get_project(db, session.project_id)
+            ws_path = _project.path if _project else ""
+        if ws_path:
+            await rollback_service.create_turn_snapshot(
+                db, session_id=body.session_id, turn_id=turn.id,
+                workspace=ws_path, user_message_id=user_msg.id,
+            )
+            await db.commit()
+    except Exception:
+        logger.debug("turn 快照预创建失败(非阻塞)", exc_info=True)
+
+    # 标题在用户消息入库后立即同步，不依赖后台 turn 是否成功完成。
+    if generated_title:
+        try:
+            from app.orchestration.agent_events import broadcast
+            await broadcast(body.session_id, {
+                "event": "session.updated",
+                "payload": {"session_id": body.session_id, "title": generated_title},
+            })
+        except Exception:
+            logger.debug("会话标题广播失败", exc_info=True)
 
     # 广播用户消息到前端（带 turn_id），实现即时显示
     try:
@@ -77,8 +106,13 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
                     })
                 except Exception:
                     logger.debug("turn 异常态落库失败", exc_info=True)
+            finally:
+                from app.orchestration.engine import _turn_tasks
+                _turn_tasks.pop(turn.id, None)
 
-    asyncio.get_event_loop().create_task(_run())
+    task = asyncio.get_event_loop().create_task(_run())
+    from app.orchestration.engine import _turn_tasks
+    _turn_tasks[turn.id] = task
     return turn
 
 
@@ -169,7 +203,7 @@ async def rollback_preview(turn_id: int, db: AsyncSession = Depends(get_db)):
         if not writes or not workspace:
             files: list[RollbackPreviewFile] = []
         else:
-            files = [RollbackPreviewFile(**f) for f in await rollback_service.preview_turn_files(workspace, writes)]
+            files = [RollbackPreviewFile(**f) for f in await rollback_service.preview_turn_files(workspace, writes, snap)]
         # v12: 连带影响统计（该 turn 及其之后将被取消的任务/软删的消息）
         affected = await rollback_service.count_rollback_affected(db, snap.session_id, turn_id)
         return RollbackPreviewOut(ok=True, turn_id=turn_id, files=files,
@@ -299,7 +333,7 @@ async def list_session_subagents(session_id: int, turn_id: int | None = None,
             "turn_id": agent.turn_id,
             "task_id": task.id if task else None,
             "task_title": task.title if task else None,
-            "status": (task.status if task else None) or "running",
+            "status": (task.status if task else None) or ({"running": "running", "done": "done", "failed": "failed", "terminated": "terminated"}.get(agent.status, agent.status or "terminated")),
         })
     return out
 
@@ -433,6 +467,18 @@ async def confirm_task_plan(turn_id: int, group_id: int, body: TaskConfirmBody,
     if request_task is None:
         raise HTTPException(400, "任务提案缺少请求任务")
 
+    # 确认执行 = 用户授权完全访问：计划模式会话切换为 accept_edits，
+    # 使后续执行 turn（direct / split）不再被 plan 写盘拦截。
+    # v26: 仅「接受提案」时切换权限；「取消」= 停止任务，会话保持 plan 模式。
+    _session = await session_service.get_session(db, turn.session_id)
+    _permission_mode = None
+    if body.accepted and _session is not None and _session.permission_mode == "plan":
+        _session.permission_mode = "accept_edits"
+        # v2.2 (plan-88): 标记执行结束后恢复 plan 模式（保持"先规划后执行"粘性）
+        _session.plan_restore_after_turn = True
+        await db.flush()
+        _permission_mode = "accept_edits"
+
     # 调整只允许编辑可见标题和顺序；隐藏字段仍由后端保留。
     if body.steps is not None:
         submitted = [item for item in body.steps if item.title.strip()]
@@ -464,30 +510,26 @@ async def confirm_task_plan(turn_id: int, group_id: int, body: TaskConfirmBody,
                 step.status = "cancelled"
 
     if not body.accepted:
+        # v26: 用户拒绝/取消提案 = 任务停止（此前为"拒绝后直接执行"，
+        # 与用户预期"取消即停止"不符）。提案作废、任务取消、turn 置 cancelled，
+        # 不再启动任何执行。
         group.status = "cancelled"
         group.is_hidden = True
         for step in steps:
             step.status = "cancelled"
             step.is_hidden = True
-        request_task.status = "running"
-        await turn_service.update_turn_status(db, turn_id, "running")
+        request_task.status = "cancelled"
+        await turn_service.update_turn_status(
+            db, turn_id, "cancelled", summary="方案已取消，任务停止", completed=True,
+        )
         await db.commit()
-
-        async def _run_direct():
-            from app.persistence.database import async_session_factory
-            async with async_session_factory() as session_db:
-                try:
-                    await engine.start_turn(
-                        session_db, turn_id=turn_id, existing_task_id=request_task.id,
-                        force_direct=True,
-                    )
-                    await session_db.commit()
-                except Exception:
-                    await session_db.rollback()
-                    logger.exception("直接执行提案失败 turn=%s", turn_id)
-
-        asyncio.get_event_loop().create_task(_run_direct())
-        return {"ok": True, "mode": "direct"}
+        from app.orchestration.agent_events import broadcast, broadcast_turn_updated
+        await broadcast_turn_updated(turn.session_id, turn_id, "cancelled")
+        await broadcast(turn.session_id, {
+            "event": "task.updated",
+            "payload": {"task_id": request_task.id, "status": "cancelled"},
+        })
+        return {"ok": True, "mode": "cancelled", "permission_mode": _permission_mode}
 
     group.status = "pending"
     group.is_hidden = False
@@ -509,7 +551,7 @@ async def confirm_task_plan(turn_id: int, group_id: int, body: TaskConfirmBody,
                 logger.exception("确认任务执行失败 turn=%s group=%s", turn_id, group_id)
 
     asyncio.get_event_loop().create_task(_run_plan())
-    return {"ok": True, "mode": "split"}
+    return {"ok": True, "mode": "split", "permission_mode": _permission_mode}
 
 
 @router.get("/sessions/{session_id}/artifacts", response_model=list[ArtifactOut])

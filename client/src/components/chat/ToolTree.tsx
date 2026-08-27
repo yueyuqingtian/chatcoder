@@ -17,7 +17,7 @@ function parseGrepLines(output: string): Array<{ path: string; line: number; res
 }
 import { memo, useEffect, useMemo, useState } from "react";
 import type { ToolLeaf, ToolNode } from "./timeline";
-import { WRITE_TOOLS, SEARCH_TOOLS, RUN_TOOLS } from "./timeline";
+import { SEARCH_TOOLS, RUN_TOOLS, isWriteLeaf } from "./timeline";
 import { api } from "../../api/client";
 import { usePanelStore } from "../../store/panel";
 import { FileBadge, splitFilePath } from "./FileBadge";
@@ -82,6 +82,8 @@ function leafPath(leaf: ToolLeaf): string | null {
   if (typeof p === "string" && p) return p;
   const file = leaf.args?.file_path;
   if (typeof file === "string" && file) return file;
+  // v25: 工具伪装写盘（terminal_exec 等）路径来自 change_stat
+  if (leaf.changeStat?.path) return leaf.changeStat.path;
   return null;
 }
 
@@ -172,7 +174,8 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
   const [expanded, setExpanded] = useState(false);
   const path = leafPath(leaf);
   const ok = leaf.ok;
-  const isWrite = WRITE_TOOLS.has(leaf.tool);
+  // v25: 工具伪装写盘（terminal_exec 等带 change_stat）按写操作渲染——可展开行内 diff
+  const isWrite = isWriteLeaf(leaf);
   const hasOutput = (leaf.output && leaf.output.length > 0) || !!leaf.error;
   const expandable = hasOutput || isWrite;
   const grepHits = leaf.tool === "fs_grep" && leaf.output ? parseGrepLines(leaf.output) : [];

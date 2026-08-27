@@ -166,6 +166,17 @@ async def update_mcp_server(db: AsyncSession, server_id: int, **kwargs: Any) -> 
     for key, val in kwargs.items():
         if val is not None and hasattr(srv, key):
             setattr(srv, key, val)
+    # 若当前启用了 stdio 类型的 MCP 但尚未抓取 tools 列表，自动握手获取一次
+    if srv.is_active and not srv.tools and srv.transport == "stdio" and srv.command:
+        try:
+            from app.orchestration.skill_scanner import fetch_mcp_tools
+            fetched = await fetch_mcp_tools(
+                srv.command, srv.args or [], srv.env or {}, root_path=srv.path,
+            )
+            if fetched:
+                srv.tools = fetched
+        except Exception:
+            pass
     await db.flush()
     return srv
 

@@ -109,6 +109,14 @@ def load_persisted_workspace() -> None:
         settings.show_todos = bool(data["show_todos"])
     if "show_reasoning" in data:
         settings.show_reasoning = bool(data["show_reasoning"])
+    if "memory_enabled" in data:
+        settings.auto_memory_enabled = bool(data["memory_enabled"])
+    if "plan_mode_allow_outside_access" in data:
+        settings.plan_mode_allow_outside_access = bool(data["plan_mode_allow_outside_access"])
+    if "sandbox_mode" in data:
+        _sm = str(data["sandbox_mode"])
+        if _sm in ("workspace-write", "read-only", "danger-full-access"):
+            settings.sandbox_mode = _sm
 
 
 @router.get("/settings/workspace", response_model=WorkspaceOut)
@@ -144,6 +152,10 @@ class GlobalSettingsOut(BaseModel):
     enhanced_search: bool = True  # ripgrep 增强搜索
     show_todos: bool = True  # 消息流显示 todos 卡片
     show_reasoning: bool = True  # 消息流显示 reasoning 块
+    # v3.0 (plan-88): 计划模式允许访问工作区外路径
+    plan_mode_allow_outside_access: bool = False
+    # v32 (plan-89): 沙箱模式（三态：workspace-write / read-only / danger-full-access）
+    sandbox_mode: str = "workspace-write"
 
 
 class GlobalSettingsIn(BaseModel):
@@ -162,6 +174,8 @@ class GlobalSettingsIn(BaseModel):
     enhanced_search: bool | None = None
     show_todos: bool | None = None
     show_reasoning: bool | None = None
+    plan_mode_allow_outside_access: bool | None = None
+    sandbox_mode: str | None = None
 
 
 @router.get("/settings/global", response_model=GlobalSettingsOut)
@@ -183,6 +197,8 @@ async def get_global_settings() -> GlobalSettingsOut:
         enhanced_search=data.get("enhanced_search", True),
         show_todos=data.get("show_todos", True),
         show_reasoning=data.get("show_reasoning", True),
+        plan_mode_allow_outside_access=data.get("plan_mode_allow_outside_access", False),
+        sandbox_mode=data.get("sandbox_mode", settings.sandbox_mode),
     )
 
 
@@ -230,6 +246,16 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
     if body.show_reasoning is not None:
         data["show_reasoning"] = body.show_reasoning
         settings.show_reasoning = body.show_reasoning
+    if body.plan_mode_allow_outside_access is not None:
+        data["plan_mode_allow_outside_access"] = body.plan_mode_allow_outside_access
+        settings.plan_mode_allow_outside_access = body.plan_mode_allow_outside_access
+    if body.sandbox_mode is not None:
+        if body.sandbox_mode in ("workspace-write", "read-only", "danger-full-access"):
+            data["sandbox_mode"] = body.sandbox_mode
+            settings.sandbox_mode = body.sandbox_mode
+    if body.memory_enabled is not None:
+        data["memory_enabled"] = body.memory_enabled
+        settings.auto_memory_enabled = body.memory_enabled
     _save_config(data)
     # 运行时更新 context compaction 设置
     if body.auto_compact_enabled is not None:
@@ -249,6 +275,8 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         enhanced_search=data.get("enhanced_search", True),
         show_todos=data.get("show_todos", True),
         show_reasoning=data.get("show_reasoning", True),
+        plan_mode_allow_outside_access=data.get("plan_mode_allow_outside_access", False),
+        sandbox_mode=data.get("sandbox_mode", settings.sandbox_mode),
     )
 
 

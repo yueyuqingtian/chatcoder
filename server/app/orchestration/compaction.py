@@ -125,6 +125,76 @@ class DiminishingReturnsDetector:
 # 消息规范化（每轮调用前执行，纯内存操作，无 LLM 开销）
 # ---------------------------------------------------------------------------
 
+def repair_tool_call_ids(messages: list[ChatMessage]) -> list[ChatMessage]:
+    """重分配重复/缺失的 tool_call id（在 ensure_tool_pairing 之前调用）。
+
+    Gemini 等严格网关要求 function call id 在整段对话中唯一且非空：
+    - 旧版 provider 用 f"call_{idx:02d}" 兜底生成 id，idx 每轮从 0 开始，
+      跨轮次重复 → 网关 400 "Please ensure that function call `X` has been
+      called exactly once"
+    - 网关偶发返回空 id 落库后，重建上下文时出现空 id / 重复空 id
+
+    处理：
+    1. assistant(tool_calls) 中缺失的 id 分配 uuid
+    2. 跨消息重复的 id 重分配为 uuid（保留首次出现的 id 及其 tool 配对）
+    3. 按"同 id 出现次序"同步改写后续重复的 tool 消息 tool_call_id，
+       保持 assistant(tool_calls) 与 tool 消息的配对一致
+    """
+    if not messages:
+        return messages
+
+    import uuid as _uuid
+
+    # 第一遍：assistant(tool_calls) —— 统计 id 出现次数，重命名重复/空 id
+    id_count: dict[str, int] = {}          # id → assistant 中出现次数
+    rename_queue: dict[str, list[str]] = {}  # 旧id → 第2、3...次的替换 id
+    empty_queue: list[str] = []               # 空 id 的替换 id（按顺序）
+    for m in messages:
+        if m.role == "assistant" and m.tool_calls:
+            for tc in m.tool_calls:
+                tc_id = tc.get("id")
+                if not tc_id:
+                    new_id = "call_" + _uuid.uuid4().hex[:12]
+                    empty_queue.append(new_id)
+                    tc["id"] = new_id
+                else:
+                    n = id_count.get(tc_id, 0) + 1
+                    id_count[tc_id] = n
+                    if n > 1:
+                        new_id = "call_" + _uuid.uuid4().hex[:12]
+                        rename_queue.setdefault(tc_id, []).append(new_id)
+                        tc["id"] = new_id
+
+    if not rename_queue and not empty_queue:
+        return messages
+
+    # 第二遍：tool 消息 —— 首次出现的 id 保持不动；
+    # 第 n 次（n>1）出现的 id 改写成 rename_queue 中第 n-1 个替换 id；
+    # 空 tool_call_id 依次消费 empty_queue。
+    seen_tool: dict[str, int] = {}
+    renamed = 0
+    for m in messages:
+        if m.role != "tool":
+            continue
+        tc_id = m.tool_call_id
+        if not tc_id:
+            if empty_queue:
+                m.tool_call_id = empty_queue.pop(0)
+                renamed += 1
+            continue
+        n = seen_tool.get(tc_id, 0) + 1
+        seen_tool[tc_id] = n
+        q = rename_queue.get(tc_id)
+        if q and n > 1 and n - 1 <= len(q):
+            m.tool_call_id = q[n - 2]
+            renamed += 1
+
+    if renamed:
+        logger.info("[normalize] repair_tool_call_ids 重分配 %d 个 tool_call id", renamed)
+
+    return messages
+
+
 def ensure_tool_pairing(messages: list[ChatMessage]) -> list[ChatMessage]:
     """确保 tool_call/tool_result 配对完整。
 
@@ -521,6 +591,7 @@ async def auto_compact(
     result = system_msgs + [boundary_msg, summary_msg] + [m for r in keep_rounds_data for m in r]
     if readstate_msg is not None:
         result = [readstate_msg] + result
+    result = repair_tool_call_ids(result)
     result = ensure_tool_pairing(result)
     result = pre_boundary + result
 
@@ -626,7 +697,8 @@ def emergency_compact(messages: list[ChatMessage], context_window: int) -> list[
     # 组装：system(原) + summary + 最近回合
     result = system_msgs + [summary_msg] + [m for r in keep_rounds_data for m in r]
 
-    # 确保配对完整
+    # 确保配对完整（先修复重复/空 id，避免 Gemini 等网关 400）
+    result = repair_tool_call_ids(result)
     result = ensure_tool_pairing(result)
 
     logger.info(

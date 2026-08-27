@@ -110,11 +110,25 @@ export interface SessionOut {
   model_id: number | null;
   status: string; // active / archived
   pinned: boolean;
+  permission_mode?: "default" | "accept_edits" | "plan" | "readonly";
   fork_parent_id: number | null;
   worktree_path: string | null;
   has_running?: boolean;
   has_interrupted_turn?: boolean;
   last_activity_at?: string | null;
+}
+
+/** v30.1: 压缩块索引（AI/前端定位压缩前会话的索引条目）。 */
+export interface CompactionIndexOut {
+  index: number | null;
+  compaction_id: string | null;
+  summary_message_id: number | null;
+  shadowed_ids: number[];
+  shadowed_tokens: number;
+  saved_tokens: number;
+  trigger: string;
+  created_at: string | null;
+  summary_preview: string;
 }
 
 export interface TurnOut {
@@ -207,6 +221,8 @@ export interface ExecPolicyRuleOut {
   command_pattern: string;
   decision: string;
   justification: string | null;
+  /** 工具级规则：非空 = 作用于工具本身（command_pattern 存 "(tool)xxx"） */
+  tool_name: string | null;
 }
 
 export interface HookConfigOut {
@@ -242,6 +258,11 @@ export interface ModelOut {
   source_type: string;
   has_api_key: boolean;
   reasoning_efforts: string[];
+  // trae 供应商扩展（源自 trae_meta）
+  trae_max_context?: number | null;        // max 档上下文（如 1000000 = 1M）
+  trae_consumption_rate?: number | null;   // 积分消耗倍率（max 档更快）
+  trae_available?: boolean;                // TRAE 客户端实际可用
+  trae_thinking?: boolean;                 // 支持思考档位
 }
 
 export interface ProviderOut {
@@ -252,6 +273,9 @@ export interface ProviderOut {
   is_active: boolean;
   has_api_key: boolean;
   model_count: number;
+  // v23: ta3 供应商登录态
+  auth_status?: string | null;
+  account_label?: string | null;
   created_at: string | null;
 }
 
@@ -279,6 +303,8 @@ export interface RollbackResult {
   rolled_back_msgs: number;
   file_recovery: Record<string, unknown>;
   user_message: string | null;
+  /** restore_to_composer=True 时回填的附件（图片等），供输入框恢复展示与重发 */
+  user_attachments?: Array<Record<string, unknown>> | null;
 }
 
 /** 回滚预览：单个文件回滚前后的内容对比（供用户审核确认）。 */
@@ -331,6 +357,8 @@ export interface FileDiffOut {
   after: string | null;
   /** 变更行数超限已截断 */
   truncated: boolean;
+  /** 二进制/大文件说明（不展示文本 diff） */
+  reason?: string | null;
 }
 
 // ── WebSocket 事件 ──
@@ -350,6 +378,8 @@ export type ServerWsEvent =
   | { event: "thinking.done"; payload: { agent_id: number; turn_id: number | null; full_text: string } }
   | { event: "token.delta"; payload: { agent_id: number; turn_id: number | null; delta: string } }
   | { event: "token.done"; payload: { agent_id: number; turn_id: number | null; full_text: string } }
+  /** v35: turn 级瞬态状态（重试/恢复提示），前端流式状态行展示；text 空串 = 清除 */
+  | { event: "turn.status"; payload: { turn_id: number; thread_id?: number | null; text: string } }
   | { event: "tool.call"; payload: { turn_id: number; agent_id: number; tool: string; args_preview: string } }
   | { event: "tool.result"; payload: { turn_id: number; tool: string; ok: boolean; duration_ms: number; output_preview: string } }
   | { event: "task.updated"; payload: { task_id: number; status: string; note?: string } }

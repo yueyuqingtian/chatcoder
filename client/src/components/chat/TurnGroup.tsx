@@ -4,9 +4,9 @@
  *   用户消息项靠右、AI 回复项靠左（对应各自消息的展示方向）
  * - 运行中（AI 正在回复）不渲染操作行，避免 hover 浮现显得杂乱
  */
-import { useCallback, memo, useEffect, useState } from "react";
+import { Fragment, useCallback, memo, useEffect, useState } from "react";
 import { ArtifactList } from "./ArtifactList";
-import { ReviewCard } from "./ReviewCard";
+import { CompactCard } from "./CompactCard";
 import { MessageActions } from "./MessageActions";
 import type { SubagentMetaLite } from "./SubagentCard";
 import { PluginSlot } from "../../plugins/registry";
@@ -18,7 +18,7 @@ import { useChatStore } from "../../store/chat";
 import { parseUtc } from "../../utils/time";
 import { AttachmentCard, attachmentsOf } from "./AttachmentCard";
 
-/** 「已工作 X 分 X 秒」计时条（对齐 zcode turn 头部） */
+/** 「已工作 X 分 X 秒」计时条（v25: 位于 AI 回复最上方，与消息/工具块一致左对齐） */
 function WorkTimer({ turnId, isRunning }: { turnId: number | null; isRunning: boolean }) {
   const turn = useChatStore((s) => s.turns.find((t) => t.id === turnId));
   const [, tick] = useState(0);
@@ -29,8 +29,13 @@ function WorkTimer({ turnId, isRunning }: { turnId: number | null; isRunning: bo
   }, [isRunning]);
   if (!turn?.started_at) return null;
   const start = parseUtc(turn.started_at);
-  const end = turn.completed_at ? parseUtc(turn.completed_at) : Date.now();
   if (!start) return null;
+  // 运行中始终按当前时刻计时；结束后固定使用 completed_at，避免恢复运行时停在旧耗时。
+  let end = Date.now();
+  if (!isRunning && turn.completed_at) {
+    const completed = parseUtc(turn.completed_at);
+    if (completed > 0) end = completed;
+  }
   const sec = Math.max(0, Math.round((end - start) / 1000));
   const min = Math.floor(sec / 60);
   const label = min > 0 ? `${min} 分 ${sec % 60} 秒` : `${sec} 秒`;
@@ -73,15 +78,30 @@ export const TurnGroup = memo(function TurnGroup({ entry, isRunning, rolledBack 
   for (let k = items.length - 1; k >= 0; k--) {
     if (items[k].kind === "text") { lastTextIdx = k; break; }
   }
-  // v13: 「已工作」计时条位于用户消息之后（对齐 zcode）
+  // v25: 「已工作」计时条作为 AI 回复顶部状态块（用户消息之后、工具/文本之前）
   let firstUserIdx = -1;
   for (let k = 0; k < items.length; k++) {
     if (items[k].kind === "user") { firstUserIdx = k; break; }
   }
 
-  const subagentNode = subagents && subagents.length > 0 ? (
+  // v22: 收集已在时间线中 inline 渲染的子代理名称/标题，避免顶部重复展示
+  const renderedSubagentNames = new Set<string>();
+  for (const it of items) {
+    if (it.kind === "subagent") {
+      const args = (it.msg.content as Record<string, unknown>)?.args as Record<string, unknown> | undefined;
+      const title = String(args?.task_title ?? "");
+      if (title) renderedSubagentNames.add(title);
+    }
+  }
+
+  // 仅在时间线无对应 tool_call 消息时（如历史旧数据）才在顶部兜底展示
+  const unplacedSubagents = (subagents || []).filter(
+    (sa) => !renderedSubagentNames.has(sa.name) && !renderedSubagentNames.has(sa.name.replace(/^探索[·:：\s]*/, ""))
+  );
+
+  const subagentNode = unplacedSubagents.length > 0 ? (
     <div className="turn-subagents">
-      {subagents.map((sa) => <PluginSlot key={sa.agentId} slot="subagent-card" meta={sa} />)}
+      {unplacedSubagents.map((sa) => <PluginSlot key={sa.agentId} slot="subagent-card" meta={sa} />)}
     </div>
   ) : null;
 
@@ -104,26 +124,33 @@ export const TurnGroup = memo(function TurnGroup({ entry, isRunning, rolledBack 
           </div>
         </>
       )}
+      {firstUserIdx < 0 && <WorkTimer turnId={turnId} isRunning={isRunning} />}
       {items.map((item, i) => {
         switch (item.kind) {
           case "user":
             return (
-              <div key={i} className="turn-item turn-item-user">
-                <div className="turn-user-bubble">
-                  {msgText(item.msg.content) && <div className="turn-user-text">{msgText(item.msg.content)}</div>}
-                  {/* v14: 用户消息中的附件以文件卡片展示，点击可预览 */}
-                  {attachmentsOf(item.msg.content).map((a) => (
-                    <AttachmentCard key={a.file_id || a.url} att={a} />
-                  ))}
+              <Fragment key={i}>
+                <div className="turn-item turn-item-user">
+                  <div className="turn-user-bubble">
+                    {msgText(item.msg.content) && <div className="turn-user-text">{msgText(item.msg.content)}</div>}
+                    {/* v14: 用户消息中的附件以文件卡片展示，点击可预览 */}
+                    {attachmentsOf(item.msg.content).map((a) => (
+                      <AttachmentCard key={a.file_id || a.url} att={a} />
+                    ))}
+                  </div>
+                  {/* v10: 用户消息按钮放气泡下方（流内、不重叠文字），
+                      鼠标聚焦消息时显示复制/回滚；各自归属自己的消息，不会错位 */}
+                  {!isRunning && (
+                    <MessageActions entry={entry} onRollback={onRollback} scope="user" actions={actions} />
+                  )}
                 </div>
-                {/* v10: 用户消息按钮放气泡下方（流内、不重叠文字），
-                    鼠标聚焦消息时显示复制/回滚；各自归属自己的消息，不会错位 */}
-                {!isRunning && (
-                  <MessageActions entry={entry} onRollback={onRollback} scope="user" actions={actions} />
+                {i === firstUserIdx && (
+                  <>
+                    <WorkTimer turnId={turnId} isRunning={isRunning} />
+                    {subagentNode}
+                  </>
                 )}
-                {i === firstUserIdx && <WorkTimer turnId={turnId} isRunning={isRunning} />}
-                {i === firstUserIdx && subagentNode}
-              </div>
+              </Fragment>
             );
           case "thinking":
             return (
@@ -151,9 +178,33 @@ export const TurnGroup = memo(function TurnGroup({ entry, isRunning, rolledBack 
             );
           case "tools":
             return <PluginSlot key={i} slot="tool-tree" nodes={item.nodes} />;
+          case "subagent": {
+            // v22: 消息流时间轴精准穿插子代理卡片（按 spawn_subagent 调用的实际时机渲染）
+            const c = item.msg.content as Record<string, unknown>;
+            const args = (c?.args && typeof c.args === "object" ? c.args : {}) as Record<string, unknown>;
+            const taskTitle = String(args.task_title ?? "子代理");
+            // 从 subagents 列表按名称匹配当前子代理元信息（状态、agentId）
+            const matched = (subagents || []).find(
+              (sa) => sa.name === taskTitle || sa.name === `探索·${taskTitle}` || sa.name.includes(taskTitle)
+            );
+            const meta: SubagentMetaLite = matched || {
+              agentId: Number(item.msg.sender_id ?? item.msg.id),
+              name: taskTitle,
+              status: "running",
+            };
+            return (
+              <div key={i} className="turn-item turn-item-subagent" style={{ margin: "6px 0 6px 28px" }}>
+                <PluginSlot slot="subagent-card" meta={meta} />
+              </div>
+            );
+          }
           case "artifacts":
             return <ArtifactList key={i} msgs={item.msgs} turnId={turnId} rolledBack={rolledBack} />;
           case "summary":
+            // v30: checkpoint 压缩摘要渲染为压缩卡片；普通摘要保持原样式
+            if ((item.msg.content as Record<string, unknown>).checkpoint === true) {
+              return <CompactCard key={i} msg={item.msg} />;
+            }
             return (
               <div key={i} className="turn-item turn-item-summary">
                 <MarkdownContent>{msgText(item.msg.content)}</MarkdownContent>
@@ -197,9 +248,6 @@ export const TurnGroup = memo(function TurnGroup({ entry, isRunning, rolledBack 
             return null;
         }
       })}
-
-      {/* v11: turn 完成后的变更审核卡片（仅在完成且有写盘变更时显示；已回滚 turn 不显示） */}
-      {!rolledBack && <ReviewCard turnId={turnId} isRunning={isRunning} onRollback={onRollback} />}
     </div>
   );
 });

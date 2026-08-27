@@ -2,8 +2,10 @@
 
 行为：
 - 校验：1~12 项、content 非空、至多 1 个 in_progress；
-- 若当前 turn 存在引擎管理的任务区块（拆分提案产生的 group），仅广播
-  todo.updated 事件作为前端投影，不写 DB，避免与引擎双写冲突；
+- 若当前 turn 存在引擎管理的任务区块（拆分提案产生的 group），v23 起不再跳过：
+  按标题匹配（精确优先、互相包含兜底）把清单状态同步到引擎步骤并广播 task.updated，
+  让任务卡/贴条实时反映主代理的真实实现进度（替代已移除的探索子代理驱动）；
+  引擎步骤只更新状态，不新增、不隐藏（拆分区块是权威计划）；
 - 否则持久化到 Task 表：自建 kind=group、标题「任务清单」的区块，
   steps 按 title 匹配更新，消失的项标记隐藏，状态映射
   pending→pending / in_progress→running / completed→done，
@@ -11,6 +13,7 @@
 """
 from typing import Any
 import logging
+import re
 
 from sqlalchemy import select
 
@@ -23,6 +26,11 @@ logger = logging.getLogger(__name__)
 _TODO_GROUP_TITLE = "任务清单"
 _MAX_TODOS = 12
 _STATUS_MAP = {"pending": "pending", "in_progress": "running", "completed": "done"}
+
+
+def _norm_title(s: str) -> str:
+    """标题归一化：去全部空白并转小写，用于清单项 ↔ 引擎步骤的匹配。"""
+    return re.sub(r"\s+", "", (s or "").strip().lower())
 
 
 class TodoWriteTool(Tool):
@@ -78,8 +86,8 @@ class TodoWriteTool(Tool):
             return ToolResult(ok=False, output="", error=f"清单最多 {_MAX_TODOS} 项")
 
         todos: list[dict[str, str]] = []
-        in_progress_count = 0
         seen: set[str] = set()
+        seen_in_progress = False
         for item in raw:
             if not isinstance(item, dict):
                 return ToolResult(ok=False, output="", error="清单项格式错误")
@@ -92,15 +100,17 @@ class TodoWriteTool(Tool):
             if content in seen:
                 continue
             seen.add(content)
+            # 宽容处理：多个 in_progress 时仅保留第一个，其余降为 pending，
+            # 避免整体拒绝导致前端清单缺失（todo.updated 未广播、无转圈动画）。
             if status == "in_progress":
-                in_progress_count += 1
+                if seen_in_progress:
+                    status = "pending"
+                seen_in_progress = True
             todos.append({
                 "content": content[:200],
                 "activeForm": str(item.get("activeForm", "")).strip()[:200],
                 "status": status,
             })
-        if in_progress_count > 1:
-            return ToolResult(ok=False, output="", error="同一时间只能有一个 in_progress 项")
 
         turn_id = ctx.task_id  # ToolContext.task_id 传入的是 turn_id
         persisted = False
@@ -140,8 +150,40 @@ class TodoWriteTool(Tool):
             todo_group = next((g for g in groups if g.title == _TODO_GROUP_TITLE), None)
             engine_group = next((g for g in groups if g.title != _TODO_GROUP_TITLE), None)
             if engine_group is not None and todo_group is None:
-                # 引擎管理的拆分区块是权威，todo 仅作前端投影
-                return False
+                # v23: 引擎拆分区块——清单状态按标题匹配同步到引擎步骤（只改状态，不增删步骤），
+                # 拆分路径的每步进度由主代理真实实现进度驱动（替代已移除的探索子代理驱动）。
+                eng_steps = list((await db.execute(
+                    select(Task).where(
+                        Task.parent_task_id == engine_group.id, Task.is_hidden == False,  # noqa: E712
+                    ).order_by(Task.priority.asc(), Task.id.asc())
+                )).scalars().all())
+                by_exact = {_norm_title(s.title): s for s in eng_steps}
+                eng_changed: list[Task] = []
+                matched_ids: set[int] = set()
+                for todo in todos:
+                    key = _norm_title(todo["content"])
+                    step = by_exact.get(key)
+                    if step is None or step.id in matched_ids:
+                        step = next(
+                            (s for s in eng_steps
+                             if s.id not in matched_ids
+                             and _norm_title(s.title) and key
+                             and (_norm_title(s.title) in key or key in _norm_title(s.title))),
+                            None,
+                        )
+                    if step is None or step.id in matched_ids:
+                        continue
+                    matched_ids.add(step.id)
+                    new_status = _STATUS_MAP[todo["status"]]
+                    if step.status != new_status:
+                        step.status = new_status
+                        eng_changed.append(step)
+                if eng_changed:
+                    engine_group.status = (
+                        "done" if eng_steps and all(s.status == "done" for s in eng_steps) else "running"
+                    )
+                    await db.commit()
+                return eng_changed
 
             if todo_group is None:
                 request_task = (await db.execute(

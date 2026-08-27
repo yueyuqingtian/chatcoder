@@ -14,6 +14,7 @@ from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.schemas import ChatMessage
 from app.orchestration.prompts import build_main_system_prompt, build_subagent_system_prompt
 from app.orchestration.rules_loader import load_session_rules, project_structure_brief
@@ -29,6 +30,20 @@ _ATT_TYPE_LABEL = {
     "document": "文档",
     "unsupported": "附件",
 }
+
+
+def _attachment_abs_path(rel: str) -> str:
+    """把附件相对路径（`{file_id}/{filename}`）转换为服务器绝对路径。
+
+    v33: AI 看到附件时直接给出磁盘绝对路径，避免模型对相对路径/上传目录
+    的猜测（read_attachment 同时兼容绝对与相对两种入参）。
+    """
+    if not rel:
+        return ""
+    try:
+        return str((Path(settings.uploads_dir).resolve() / rel).resolve())
+    except (OSError, ValueError):
+        return rel
 
 
 @dataclass
@@ -88,16 +103,21 @@ async def _load_memories(db: AsyncSession, session_id: int) -> str:
 
 
 async def _session_memory_summary(db: AsyncSession, session_id: int) -> str:
-    """turn 级分层记忆摘要（最近 N 轮）。"""
+    """turn 级分层记忆摘要（最近 N 轮）。
+
+    v21: 条数 5→8、单条 150→300 字符 —— 旧值信息量太少，
+    早期上下文被预算截断后模型几乎只剩"最近几行"可依，多轮任务失忆。
+    对齐 deepseek-harness 长会话保持策略。
+    """
     try:
         from sqlalchemy import select
         from app.persistence.models.turn import Turn
         res = await db.execute(
             select(Turn).where(Turn.session_id == session_id, Turn.status == "completed")
-            .order_by(Turn.id.desc()).limit(5)
+            .order_by(Turn.id.desc()).limit(8)
         )
         turns = list(res.scalars().all())
-        lines = [f"- Turn {t.id}: {(t.summary or '')[:150]}" for t in reversed(turns) if t.summary]
+        lines = [f"- Turn {t.id}: {(t.summary or '')[:300]}" for t in reversed(turns) if t.summary]
         return "\n".join(lines) if lines else ""
     except Exception:
         logger.warning("[context] 会话记忆摘要失败 session=%s", session_id, exc_info=True)
@@ -156,17 +176,64 @@ def _load_inline_image_blocks(attachments: list[dict]) -> tuple[list[dict], list
     return blocks, notes
 
 
+async def _resolve_ta3_model_meta(db: AsyncSession, agent, session) -> dict | None:
+    """会话/代理绑定的模型为 ta3 供应商时返回其远端元数据，否则 None。
+
+    ta3 模型使用还原版系统提示词（远端 baseAgentSystemMessage + ta3 纪律段落 +
+    当前项目流程规范）；其余模型沿用当前项目英文系统提示词。
+    """
+    try:
+        model_id = getattr(session, "model_id", None) or getattr(agent, "model_id", None)
+        if not model_id:
+            return None
+        from app.persistence.models.model_reg import Model, Provider
+
+        model = await db.get(Model, model_id)
+        if model is None or (getattr(model, "api_format", None) or "") != "ta3":
+            return None
+        provider = await db.get(Provider, model.provider_id) if model.provider_id else None
+        if provider is None or (provider.api_format or "") != "ta3":
+            return None
+        return model.ta3_meta or {}
+    except Exception:
+        logger.debug("[context] ta3 模型元数据解析失败(非阻塞)", exc_info=True)
+        return None
+
+
 async def build_main_context(
     db: AsyncSession, *, agent, session, project, turn, user_message: str,
     attachments: list[dict] | None = None,
     multimodal: bool = False,
+    enable_subagents: bool = True,
 ) -> ContextBundle:
     """构建主代理上下文。"""
     workspace = session.worktree_path or (project.path if project else "")
+    # v23: ta3 供应商模型 → 还原式系统提示词（远端主体 + ta3 纪律 + 当前项目规范）
+    ta3_meta = await _resolve_ta3_model_meta(db, agent, session)
+    if ta3_meta is not None:
+        from app.orchestration.prompts.ta3_fusion import build_ta3_system_prompt
+        system_prompt = build_ta3_system_prompt(
+            ta3_meta, workspace=workspace, enable_subagents=enable_subagents,
+        )
+        logger.info("[context] 会话 %s 使用 ta3 还原式系统提示词", session.id if session else "-")
+    else:
+        system_prompt = build_main_system_prompt(enable_subagents=enable_subagents)
     bundle = ContextBundle(
-        system=build_main_system_prompt(),
+        system=system_prompt,
         instruction=user_message,
     )
+    # v21: 主路径接入摘要系统 —— 未摘要历史超过窗口阈值(0.35×ctx)时先压缩为
+    # LLM 摘要并落库（session.shared_context），再往下做窗口截断。
+    # 修复：此前 maybe_summarize_main_session 只在旧群聊路径被调用，主 turn 路径
+    # 完全无摘要兜底，超过窗口预算(0.30×ctx)的旧消息被静默丢弃。
+    try:
+        from app.orchestration.context_memory import (
+            _resolve_leader_context_window, maybe_summarize_main_session,
+        )
+        _summary_window = await _resolve_leader_context_window(db, session)
+        await maybe_summarize_main_session(db, session, context_window=_summary_window)
+    except Exception:
+        logger.warning("[context] 主会话摘要更新失败(非阻塞)", exc_info=True)
     # 1. Current Goal
     bundle.developer_parts.append(f"## Current Goal\n{user_message[:2000]}")
     # 2. Working Directory & Tool Rules
@@ -183,10 +250,28 @@ async def build_main_context(
     structure = await project_structure_brief(workspace)
     if structure:
         bundle.developer_parts.append(f"## Project Structure\n{structure}")
-    # 4. Project Rules
-    rules = await load_session_rules(workspace, project.rules_docs if project else None)
-    if rules:
-        bundle.developer_parts.append(f"## Project Rules\n{rules}")
+    # 4. Project Rules（工作区规则文档 + 用户设置的工作目录规则）
+    rules_parts: list[str] = []
+    _docs = await load_session_rules(workspace, project.rules_docs if project else None)
+    if _docs:
+        rules_parts.append(_docs)
+    try:
+        from app.orchestration.user_rules_loader import load_workdir_rules
+        _wd = load_workdir_rules(workspace)
+        if _wd:
+            rules_parts.append(_wd)
+    except Exception:
+        logger.debug("[context] 工作目录规则加载失败(非阻塞)", exc_info=True)
+    if rules_parts:
+        bundle.developer_parts.append(f"## Project Rules\n{'\n\n'.join(rules_parts)}")
+    # 4.1 Global Rules（用户全局规则，对所有项目生效，优先级最高）
+    try:
+        from app.orchestration.user_rules_loader import load_global_rules
+        _gr = load_global_rules()
+        if _gr:
+            bundle.developer_parts.append(f"## Global Rules\n{_gr}")
+    except Exception:
+        logger.debug("[context] 全局规则加载失败(非阻塞)", exc_info=True)
     # 5. Session Memory（turn 摘要 + 记忆条目）
     mem_summary = await _session_memory_summary(db, session.id)
     if mem_summary:
@@ -194,6 +279,57 @@ async def build_main_context(
     memories = await _load_memories(db, session.id)
     if memories:
         bundle.developer_parts.append(f"## Your Memory (from previous tasks)\n{memories}")
+    # v21: 注入主会话 LLM 摘要（被压缩的早期历史）——此前 shared_context 不落库
+    # 且主路径不注入，压缩产物对主代理不可见；现在落库并注入，窗口截断的信息不丢失。
+    _ctx = getattr(session, "shared_context", None) or {}
+    if isinstance(_ctx, dict):
+        _summary = (_ctx.get("summary") or "").strip()
+        if _summary:
+            bundle.developer_parts.append(
+                f"## Session Summary (earlier conversation compressed)\n{_summary[:4000]}"
+            )
+        # v30: 注入压缩 checkpoint（context_compressor 落库的 SUMMARY 消息摘要）。
+        # 与 shared_context.summary（context_memory 后台渐进摘要）不同，checkpoint 是
+        # 按 token 预算选定范围的压缩产物，按压缩发生顺序注入，且只注入一次
+        # （已注入的 compaction_id 记录在 _injected_compactions，跨轮不重复）。
+        try:
+            from app.persistence.models.message import Message as _Msg
+            _compactions = _ctx.get("compactions") or []
+            _injected = set(_ctx.get("injected_compactions") or [])
+            _checkpoint_parts: list[str] = []
+            _new_injected: list[str] = []
+            for _cmp in _compactions:
+                _cid = str(_cmp.get("compaction_id") or "")
+                # v33: 已还原的压缩块不再注入 checkpoint（原文已回到上下文，重复注入冗余）
+                if not _cid or _cid in _injected or _cmp.get("restored"):
+                    continue
+                _msg_id = _cmp.get("summary_message_id")
+                if not _msg_id:
+                    continue
+                _m = await db.get(_Msg, _msg_id)
+                if _m is None or not isinstance(_m.content, dict):
+                    continue
+                _text = (_m.content.get("text") or "").strip()
+                if not _text:
+                    continue
+                _checkpoint_parts.append(_text[:3000])
+                _new_injected.append(_cid)
+            if _checkpoint_parts:
+                bundle.developer_parts.append(
+                    "## Conversation Checkpoints (compacted spans)\n"
+                    + "\n\n".join(_checkpoint_parts)
+                )
+                if _new_injected:
+                    _ctx = dict(_ctx)
+                    _ctx["injected_compactions"] = list(_injected) + _new_injected
+                    session.shared_context = _ctx
+                    await db.flush()
+                    logger.info(
+                        "[context] session=%s 注入压缩 checkpoint %d 条并标记已注入",
+                        session.id, len(_new_injected),
+                    )
+        except Exception:
+            logger.debug("[context] 压缩 checkpoint 注入失败(非阻塞)", exc_info=True)
 
     # v6.4: 注入历史消息窗口 —— 修复上下文丢失问题
     # 根因：build_main_context 原本只注入 turn 摘要，不注入历史消息，
@@ -216,10 +352,14 @@ async def build_main_context(
         if not isinstance(ctx, dict):
             ctx = {}
         summarized_ids = set(ctx.get("summarized_ids") or [])
+        # v30: 压缩遮蔽消息（context_compressor 落库的 compacted_ids）不注入历史——
+        # 其内容已被 checkpoint 摘要承载，重复注入等于未压缩。
+        compacted_ids = set(ctx.get("compacted_ids") or [])
 
         # v6.4: 提高limit到2000，覆盖全部历史消息（原来200条会丢失早期对话）
         all_msgs = await _fetch_main_messages(db, session.id, limit=2000)
-        unsummarized = [m for m in all_msgs if m.id not in summarized_ids]
+        unsummarized = [m for m in all_msgs
+                        if m.id not in summarized_ids and m.id not in compacted_ids]
 
         # v6.5: 保留 text + tool_call + tool_result（过滤 thinking/plan 等非对话类型）。
         # 旧版只保留 text，导致 AI 看不到工具调用历史，上下文严重偏低且无法复用工具结果。
@@ -235,16 +375,9 @@ async def build_main_context(
             unsummarized, window_budget, min_keep=MIN_MESSAGES_KEEP,
         )
 
-        # v6.5: 在历史前插入明确标记，让AI知道这是完整历史对话而非摘要
-        if recent:
-            bundle.history.append(_CM(
-                role="user",
-                content="## Conversation History\nBelow is our conversation history. Text messages are shown in full; tool results are the actual outputs as recorded (very long tool outputs may be truncated). You can reference all of it."
-            ))
-            bundle.history.append(_CM(
-                role="assistant",
-                content="Understood. I can see the conversation history below and will reference it as needed."
-            ))
+        # v21: 移除 v6.5 注入的假历史标记消息（user "## Conversation History" +
+        # assistant "Understood..."）——它们浪费 token 且干扰模型对消息角色的理解，
+        # 对齐 deepseek-harness：历史直接以真实 user/assistant/tool 消息回放。
 
         # v6.5: 转成 ChatMessage，正确处理 text/tool_call/tool_result 三种类型。
         # tool_call -> assistant 带 tool_calls；tool_result -> tool 角色消息。
@@ -281,8 +414,9 @@ async def build_main_context(
                 atts = m.content.get("attachments") or []
                 att_note = ""
                 if atts and isinstance(atts, list):
+                    # v33: 历史附件同样注入绝对路径（read_attachment 对绝对/相对路径均可解析）
                     att_note = "\n".join(
-                        f"- {a.get('filename') or '(未命名)'}: path=`{a.get('path') or ''}`"
+                        f"- {a.get('filename') or '(未命名)'}: path=`{_attachment_abs_path(str(a.get('path') or ''))}`"
                         for a in atts if isinstance(a, dict) and a.get("path")
                     )
                     if att_note:
@@ -343,9 +477,9 @@ async def build_main_context(
         _flush_agent_text()
 
         logger.info(
-            "[context] session=%s 注入历史消息 %d 条 (window=%dK, budget=%d tokens, summarized=%d, recent=%d)",
+            "[context] session=%s 注入历史消息 %d 条 (window=%dK, budget=%d tokens, summarized=%d, compacted=%d, recent=%d)",
             session.id, len(bundle.history),
-            context_window // 1000, window_budget, len(summarized_ids), len(recent),
+            context_window // 1000, window_budget, len(summarized_ids), len(compacted_ids), len(recent),
         )
         # v6.4 诊断：打印前3条和后3条历史消息的摘要
         for _i, _m in enumerate(recent[:3] + recent[-3:]):
@@ -362,18 +496,18 @@ async def build_main_context(
         bundle.developer_parts.append(f"## Available MCP Servers\n{mcp}")
     # 附件注入（v14: 附件已统一为文件地址，注入路径清单 + 读取工具说明，
     # AI 通过 read_attachment 工具按 path 读取图片/文档内容）
-    # v15: 多模态模型时图片直接以 image_url 内容块注入当前用户消息，
-    # AI 无需工具调用即可看图；非图片/非多模态仍走 read_attachment。
+    # v33: 注入绝对路径（_attachment_abs_path）——AI 直接拿到磁盘真实路径，
+    # 不再猜测相对路径/上传目录；read_attachment 对绝对/相对路径均可解析。
     if attachments:
         att_lines = [
             f"- {a.get('filename') or '(未命名)'}（{_ATT_TYPE_LABEL.get(a.get('type'), a.get('mime_type') or '附件')}）: "
-            f"path=`{a.get('path') or ''}`"
+            f"path=`{_attachment_abs_path(str(a.get('path') or ''))}`"
             for a in attachments if isinstance(a, dict) and a.get("path")
         ]
         if att_lines:
             hint = (
                 "## 用户上传的附件\n"
-                "用户消息附带了以下文件（已保存到服务器，path 为附件实际地址）：\n"
+                "用户消息附带了以下文件（path 为服务器磁盘绝对路径，可直接传给 read_attachment 读取）：\n"
                 + "\n".join(att_lines)
             )
             if multimodal:
@@ -388,13 +522,12 @@ async def build_main_context(
                     hint += "\n以下图片未能直接附带：\n" + "\n".join(notes)
                 hint += (
                     "\n\n其他文件（docx/pdf/xlsx/txt 等）阅读方法：调用 read_attachment 工具读取，"
-                    "参数 path 使用上面的附件路径，返回解析文本。"
+                    "参数 path 使用上面的附件绝对路径，返回解析文本。"
                 )
             else:
                 hint += (
-                    "\n\n阅读方法：调用 read_attachment 工具读取，参数 path 使用上面的附件路径"
-                    "（如 `1a2b3c/报告.docx`，不要自行猜测绝对路径）。"
-                    "docx/pdf/xlsx/txt 等返回解析文本。"
+                    "\n\n阅读方法：调用 read_attachment 工具读取，参数 path 直接使用上面的"
+                    "附件绝对路径（不要改写、不要加引号），docx/pdf/xlsx/txt 等返回解析文本。"
                 )
             bundle.developer_parts.append(hint)
     return bundle
@@ -443,4 +576,14 @@ async def build_subagent_context(
     rules = await load_session_rules(workspace, project.rules_docs if project else None)
     if rules:
         bundle.developer_parts.append(f"## Project Rules\n{rules}")
+    try:
+        from app.orchestration.user_rules_loader import load_global_rules, load_workdir_rules
+        _wd = load_workdir_rules(workspace)
+        if _wd:
+            bundle.developer_parts.append(f"## Project Rules (workdir)\n{_wd}")
+        _gr = load_global_rules()
+        if _gr:
+            bundle.developer_parts.append(f"## Global Rules\n{_gr}")
+    except Exception:
+        logger.debug("[context] 用户规则加载失败(非阻塞)", exc_info=True)
     return bundle

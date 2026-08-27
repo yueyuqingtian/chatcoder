@@ -1,7 +1,8 @@
-/** 命令中心（v7 完全对齐 ZCode）：Cmd/Ctrl+K。
+﻿/** 命令中心（v7 完全对齐 ZCode）：Cmd/Ctrl+K。
  * 结构：搜索框 + Tab（全部/操作/任务/文件）+ 分组列表
  * 分组：最近任务（相对时间）/ 建议（新任务、打开工作区、设置）/ 面板（侧边栏、终端）
- * 查询时追加斜杠命令与设置项（归入"操作"）。 */
+ * 查询时追加斜杠命令与设置项（归入"操作"）。
+ */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useChatStore } from "../store/chat";
 import { usePanelStore } from "../store/panel";
@@ -17,7 +18,7 @@ const SLASH_COMMANDS = [
   { cmd: "/chat", desc: "只读审阅模式" },
   { cmd: "/clear", desc: "清空当前对话" },
   { cmd: "/compact", desc: "压缩上下文" },
-  { cmd: "/init", desc: "初始化项目文档" },
+  { cmd: "/init", desc: "初始化项目文件" },
 ];
 
 type TabKey = "all" | "action" | "task" | "file";
@@ -55,6 +56,7 @@ export function CommandCenter() {
   const [tab, setTab] = useState<TabKey>("all");
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const wasComposerFocusedRef = useRef(false);
   const sessions = useChatStore((s) => s.sessions);
   const switchSession = useChatStore((s) => s.switchSession);
   const currentSessionId = useChatStore((s) => s.currentSessionId);
@@ -78,9 +80,20 @@ export function CommandCenter() {
   }, []);
 
   useEffect(() => {
-    if (open) setTimeout(() => inputRef.current?.focus(), 10);
-    else setQuery("");
+    if (open) {
+      // 记录打开前焦点是否在输入框：关闭后按需恢复，避免打开过命令中心后点击输入框需两次
+      const el = document.activeElement;
+      wasComposerFocusedRef.current = !!(el && el.tagName === "TEXTAREA" && el.closest(".composer-input"));
+      setTimeout(() => inputRef.current?.focus(), 10);
+    } else setQuery("");
   }, [open]);
+
+  const closeAndRestoreFocus = () => {
+    setOpen(false);
+    if (wasComposerFocusedRef.current) {
+      window.dispatchEvent(new CustomEvent("chatcoder:focus-composer"));
+    }
+  };
 
   const groups = useMemo<Group[]>(() => {
     const q = query.trim().toLowerCase();
@@ -160,7 +173,7 @@ export function CommandCenter() {
   if (!open) return null;
   let rowIdx = -1;
   return (
-    <div className="cmd-center-overlay" onMouseDown={() => setOpen(false)}>
+    <div className="cmd-center-overlay" onMouseDown={closeAndRestoreFocus}>
       <div className="cmd-center" onMouseDown={(e) => e.stopPropagation()}>
         <div className="cmd-center-input-wrap">
           <IconSearch size={14} />
@@ -171,10 +184,10 @@ export function CommandCenter() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Escape") { e.preventDefault(); setOpen(false); return; }
+              if (e.key === "Escape") { e.preventDefault(); closeAndRestoreFocus(); return; }
               if (e.key === "ArrowDown") { e.preventDefault(); setActive((i) => Math.min(flat.length - 1, i + 1)); return; }
               if (e.key === "ArrowUp") { e.preventDefault(); setActive((i) => Math.max(0, i - 1)); return; }
-              if (e.key === "Enter" && flat[active]) { e.preventDefault(); setOpen(false); flat[active].run(); return; }
+              if (e.key === "Enter" && flat[active]) { e.preventDefault(); closeAndRestoreFocus(); flat[active].run(); return; }
             }}
           />
         </div>
@@ -190,24 +203,35 @@ export function CommandCenter() {
           ))}
         </div>
         <div className="cmd-center-list">
-          {tab === "file" && <div className="cmd-center-empty">输入以搜索文件（暂未索引）</div>}
-          {tab !== "file" && flat.length === 0 && <div className="cmd-center-empty">无匹配结果</div>}
-          {tab !== "file" && groups.map((g) => (
-            <div key={g.title} className="cmd-center-group">
-              <div className="cmd-center-group-title">{g.title}</div>
-              {g.items.map((item) => {
-                rowIdx += 1;
-                const idx = rowIdx;
-                return (
-                  <div key={`${g.title}-${idx}`} className={"cmd-center-item" + (idx === active ? " active" : "")} onMouseEnter={() => setActive(idx)} onClick={() => { setOpen(false); item.run(); }}>
-                    <span className="cmd-center-item-icon">{item.icon}</span>
-                    <span className="cmd-center-item-label">{highlight(item.label, query.trim())}</span>
-                    {item.hint && <span className="cmd-center-item-hint">{item.hint}</span>}
-                  </div>
-                );
-              })}
-            </div>
-          ))}
+          {tab === "file" && (
+            <div className="cmd-center-empty">文件搜索功能尚未实现</div>
+          )}
+          {tab !== "file" && (
+            groups.map((g) => (
+              <div className="cmd-center-group" key={g.title}>
+                <div className="cmd-center-group-title">{g.title}</div>
+                {g.items.map((item) => {
+                  rowIdx++;
+                  const idx = rowIdx;
+                  return (
+                    <div
+                      key={idx}
+                      className={`cmd-center-item${idx === active ? " active" : ""}`}
+                      onMouseEnter={() => setActive(idx)}
+                      onClick={() => { setOpen(false); item.run(); }}
+                    >
+                      <span className="cmd-center-item-icon">{item.icon}</span>
+                      <span className="cmd-center-item-label">{highlight(item.label, query.trim())}</span>
+                      {item.hint && <span className="cmd-center-item-hint">{item.hint}</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            ))
+          )}
+          {tab !== "file" && flat.length === 0 && (
+            <div className="cmd-center-empty">没有匹配结果</div>
+          )}
         </div>
       </div>
     </div>

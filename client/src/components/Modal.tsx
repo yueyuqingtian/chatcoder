@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { IconChevronLeft, IconX } from "./icons";
 
 interface ModalProps {
@@ -14,17 +14,28 @@ interface ModalProps {
 }
 
 export function Modal({ open, onClose, title, subtitle, actions, children, width = 720, height, showBack = false }: ModalProps) {
+  const rootRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
+
+  // 打开时聚焦首个输入控件；关闭时把焦点还给触发按钮（避免焦点滞留已卸载元素）
+  useEffect(() => {
+    if (!open) return;
+    requestAnimationFrame(() => {
+      const field = rootRef.current?.querySelector<HTMLElement>("input, textarea, select, [contenteditable='true']");
+      try { field?.focus({ preventScroll: true }); } catch { field?.focus(); }
+    });
+  }, [open]);
+
   if (!open) return null;
   const winStyle: React.CSSProperties = { width: `min(${width}px, 92vw)` };
   if (height !== undefined) winStyle.height = typeof height === "number" ? `min(${height}px, 86vh)` : height;
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <div className="modal-overlay" onClick={onClose} ref={rootRef}>
       <div className="modal-window" style={winStyle} onClick={(e) => e.stopPropagation()}>
         <header className="modal-header">
           <div className="modal-title-wrap">

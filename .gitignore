@@ -174,6 +174,7 @@ server/workspace/
 # ========================================
 # 临时分析产物 & 一次性脚本（仓库清理后禁止再次入库）
 # ========================================
+.commandcode/
 /nls
 /remote_files.txt
 /status_out.txt
@@ -183,11 +184,20 @@ server/workspace/
 /paste-*.png
 /main.cjs
 /research.md
+/http.js
+/index.js
+/runtime-http.js
+/showctx.ps1
+/_trae_catalog_raw.json
+/Q
 ai/
+scripts/
 dist_log.txt
 client/build_out.txt
 client/vite.config.js
 client/vite.config.d.ts
+client/src/components/chat/*.restored
+server/_*
 server/_deploy_exe.ps1
 server/_pytest_out.txt
 server/build_log.txt

@@ -268,7 +268,11 @@ def _ratio(name: str, default: float) -> float:
     return float(getattr(settings, name, default))
 
 AGENT_LOOP_COMPACT_RATIO = 0.90
-MAIN_SUMMARIZE_RATIO = 0.85       # v6.3: 从 0.15 提升到 0.85，达到阈值才摘要压缩
+# v21: 摘要触发阈值 0.85 → 0.35 —— 与主路径历史窗口预算(0.30)匹配。
+# 旧值 0.85 意味着未摘要历史要占到窗口 85% 才触发摘要，而跨轮重建只注入 30%，
+# 30%~85% 之间的旧消息既不在窗口里、也没被摘要 → 阈值前静默丢失。
+# 降到 0.35 后，未摘要历史超过 35% 窗口即先压缩为摘要，窗口截断前信息先被保留。
+MAIN_SUMMARIZE_RATIO = 0.35
 MAIN_WINDOW_RATIO = 0.80          # v6.3: 从 0.08 提升到 0.80，保留更多上下文窗口
 MAIN_SUMMARIZE_BATCH_RATIO = 0.35  # v6.3: 从 0.06 提升到 0.35，一次摘要更多
 THREAD_WINDOW_RATIO = 0.85        # v6.3: 从 0.15 提升到 0.85，线程窗口保留更多历史

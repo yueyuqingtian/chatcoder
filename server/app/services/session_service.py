@@ -21,6 +21,18 @@ async def get_session(db: AsyncSession, session_id: int) -> Session | None:
     return await db.get(Session, session_id)
 
 
+async def auto_title_session(db: AsyncSession, session: Session, first_text: str) -> str | None:
+    """为尚未命名的会话生成首条用户消息标题。"""
+    if session.title:
+        return None
+    title = first_text.strip().replace("\n", " ")[:30]
+    if not title:
+        return None
+    session.title = title
+    await db.flush()
+    return title
+
+
 async def list_sessions(db: AsyncSession, project_id: int | None = None,
                         include_archived: bool = False) -> list[Session]:
     stmt = select(Session)
@@ -36,9 +48,18 @@ async def update_session(db: AsyncSession, session_id: int, **kwargs) -> Session
     session = await db.get(Session, session_id)
     if session is None:
         return None
+    old_pm = session.permission_mode
     for k, v in kwargs.items():
         if v is not None:
             setattr(session, k, v)
+    # v2.2 (plan-88): plan 会话模式粘性——权限从 plan 切出（accept_edits/default，
+    # 通常是确认执行）时标记执行结束后恢复 plan；切回 plan/readonly 时清除标记。
+    pm = kwargs.get("permission_mode")
+    if pm is not None and old_pm != pm:
+        if old_pm == "plan" and pm in ("accept_edits", "default"):
+            session.plan_restore_after_turn = True
+        elif pm in ("plan", "readonly"):
+            session.plan_restore_after_turn = False
     await db.flush()
     return session
 

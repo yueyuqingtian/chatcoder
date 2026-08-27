@@ -260,6 +260,20 @@ function createWindow() {
     return { action: "allow" };
   });
 
+  // 窗口重新获得焦点时强制同步 Chromium 焦点：
+  // 打开系统浏览器（shell.openExternal）或 window.alert 原生对话框后，
+  // Electron 窗口可能在 OS 层已激活但 renderer 的 document.hasFocus() 仍为 false，
+  // 此时点击输入框的 focus() 被吞 → "无法聚焦"。此处强制同步。
+  mainWindow.on("focus", () => {
+    try {
+      mainWindow.focus();
+      mainWindow.webContents.focus({ focusOnWebView: true });
+      // webContents.focus() 只恢复原生 renderer 焦点；通知前端在下一帧同步
+      // document/DOM。是否恢复具体输入框由 renderer 自己根据焦点历史决定。
+      mainWindow.webContents.send("window:renderer-focus");
+    } catch { /* 窗口销毁竞态 */ }
+  });
+
   mainWindow.on("closed", () => { mainWindow = null; });
 }
 
@@ -351,6 +365,10 @@ ipcMain.handle("shell:openPath", (_event, p) => {
 ipcMain.handle("shell:showItemInFolder", (_event, p) => {
   if (p) shell.showItemInFolder(p);
 });
+// v23: 打开外部 URL（ta3 登录授权跳转，走系统默认浏览器）
+ipcMain.handle("shell:openExternal", (_event, url) => {
+  if (url && /^https?:\/\//i.test(String(url))) shell.openExternal(String(url));
+});
 
 // ── IPC:窗口控制 ──
 ipcMain.on("window:minimize", () => { if (mainWindow) mainWindow.minimize(); });
@@ -360,6 +378,22 @@ ipcMain.on("window:maximizeToggle", () => {
   else mainWindow.maximize();
 });
 ipcMain.on("window:close", () => { if (mainWindow) mainWindow.close(); });
+
+// ── IPC:修复文本输入状态（输入框"能删不能输"卡死的兜底）──
+// 渲染层 IME/焦点状态与 Chromium 脱节时，重新同步 browser<->renderer 焦点，
+// 强制渲染器重建 TextInputState。前端 focusGuard 检测到输入失败时调用。
+ipcMain.handle("window:fixTextInput", () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  try {
+    if (!mainWindow.isFocused()) mainWindow.focus();
+    mainWindow.webContents.focus({ focusOnWebView: true });
+    log("[chatcoder] fixTextInput: focus resync requested");
+    return true;
+  } catch (e) {
+    logErr("[chatcoder] fixTextInput failed:", e && e.message);
+    return false;
+  }
+});
 
 // ── IPC:保持唤醒（对齐 zcode「运行会话时保持电脑唤醒」）──
 let _psbId = null;

@@ -147,7 +147,7 @@ export function FileTreePanel() {
   const loadTree = async () => {
     if (!currentProjectId) return;
     try {
-      const data = await api.getProjectTree(currentProjectId, 3);
+      const data = await api.getProjectTree(currentProjectId, 8);
       setTree(data.children ?? []);
     } catch { /* ignore */ }
   };
@@ -244,7 +244,9 @@ export function FileTreePanel() {
             <div className="ft-preview-head">
               <span className="ft-preview-path">{previewPath.split("/").pop()}</span>
               <div className="ft-diff-toggle">
-                <button className={viewMode === "diff" ? "active" : ""} onClick={() => setViewMode("diff")}>变更对比</button>
+                {diffPreview != null && diffPreview.path === previewPath && (
+                  <button className={viewMode === "diff" ? "active" : ""} onClick={() => setViewMode("diff")}>变更对比</button>
+                )}
                 <button className={viewMode === "content" ? "active" : ""} onClick={() => setViewMode("content")}>当前内容</button>
               </div>
               {/\.(md|markdown)$/i.test(previewPath) && (

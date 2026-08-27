@@ -24,8 +24,9 @@ async def create_project(body: ProjectCreate, db: AsyncSession = Depends(get_db)
 
 
 @router.get("", response_model=list[ProjectOut])
-async def list_projects(db: AsyncSession = Depends(get_db)):
-    return await project_service.list_projects(db)
+async def list_projects(include_archived: bool = False, db: AsyncSession = Depends(get_db)):
+    """项目列表；include_archived=true 时返回含归档项目（归档恢复面板用）。"""
+    return await project_service.list_projects(db, include_archived=include_archived)
 
 
 @router.get("/{project_id}", response_model=ProjectOut)
@@ -94,7 +95,7 @@ async def project_read_file(project_id: int, path: str,
 
 
 @router.get("/{project_id}/tree", response_model=dict)
-async def project_tree(project_id: int, depth: int = Query(2, ge=1, le=4),
+async def project_tree(project_id: int, depth: int = Query(2, ge=1, le=8),
                        db: AsyncSession = Depends(get_db)):
     """项目目录树（供右侧文件管理面板）。"""
     project = await project_service.get_project(db, project_id)
@@ -114,9 +115,9 @@ def _build_tree(root: str, max_depth: int) -> dict:
         except OSError:
             return []
         out = []
-        for e in entries[:200]:
-            if e.name.startswith(".") or e.name == "node_modules":
-                continue
+        # 先排除不可引用的目录，再限制数量，避免无关条目占满前 200 项。
+        visible = [e for e in entries if not e.name.startswith(".") and e.name != "node_modules"]
+        for e in visible[:200]:
             node = {"name": e.name, "type": "dir" if e.is_dir() else "file",
                     "path": e.path.replace("\\", "/")}
             if e.is_dir():

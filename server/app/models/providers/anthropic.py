@@ -119,13 +119,19 @@ class AnthropicProvider(ModelProvider):
             payload["temperature"] = request.temperature
         # v6.0: extended thinking（对齐 claude code），reasoning_effort 非 none 时启用
         if request.reasoning_effort and request.reasoning_effort != "none":
-            budget = {"low": 2048, "medium": 8192, "high": 16384}.get(
+            budget = {"low": 2048, "medium": 8192, "high": 16384, "xhigh": 32768, "max": 32768}.get(
                 request.reasoning_effort, 8192
             )
-            payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            # v23.1: 中转网关（如 9router）对 Anthropic 请求体做严格白名单校验，
+            # thinking.budget_tokens 不在其中会直接 400 UNKNOWN_FIELD；
+            # 官方 api.anthropic.com 的 extended thinking 原生要求该字段，仅官方网关携带。
+            _official = "api.anthropic.com" in self._base_url.lower()
+            payload["thinking"] = (
+                {"type": "enabled", "budget_tokens": budget} if _official else {"type": "enabled"}
+            )
             # Anthropic thinking 要求 temperature=1，且 max_tokens > budget_tokens
             payload["temperature"] = 1
-            if payload.get("max_tokens", 0) <= budget:
+            if _official and payload.get("max_tokens", 0) <= budget:
                 payload["max_tokens"] = budget + 4096
         if request.tools:
             payload["tools"] = [

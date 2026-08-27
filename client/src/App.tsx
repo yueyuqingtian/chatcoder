@@ -1,5 +1,5 @@
-/** 应用根（v5）：三栏骨架 + 右面板最大宽度限制 + 全屏模式。 */
-import { useEffect, useRef, useState } from "react";
+﻿/** 应用根（v5）：三栏骨架 + 右面板最大宽度限制 + 全屏模式。 */
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { NavKey } from "./components/Sidebar";
 import { Workspace } from "./components/Workspace";
 import { RollbackConfirmModal } from "./components/chat/RollbackConfirmModal";
@@ -14,15 +14,16 @@ import { useUiStore, initUi } from "./store/ui";
 import { usePanelStore } from "./store/panel";
 import { useChatStore } from "./store/chat";
 import { initTheme } from "./store/theme";
+import { installFocusGuard } from "./utils/focusGuard";
 
 export default function App() {
   const [showSplash, setShowSplash] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [nav, setNav] = useState<NavKey | null>(null);
-  // 进入设置前的工作区导航状态：退出设置时原路返回（首页/会话/自动化/技能等）
-  const [returnNav, setReturnNav] = useState<NavKey | null>(null);
+  // 进入设置前的位置：首页用 null + 空会话 ID 与消息页区分。
+  const [returnLocation, setReturnLocation] = useState<{ nav: NavKey | null; sessionId: number | null }>({ nav: null, sessionId: null });
   const [settingsTab, setSettingsTab] = useState<string | undefined>(undefined);
-  // v19: 设置页当前 tab（左栏 SettingsSidebar 与内容区共享）
+  // v19: 设置页当前 tab（左侧 SettingsSidebar 与内容区共享）。
   const [settingsActiveTab, setSettingsActiveTab] = useState<SettingsTab>("general");
   const leftPanelWidth = useUiStore((s) => s.leftPanelWidth);
   const setLeftPanelWidth = useUiStore((s) => s.setLeftPanelWidth);
@@ -31,7 +32,20 @@ export default function App() {
   const rightFullscreen = usePanelStore((s) => s.fullscreen);
   const setRightPanelWidth = usePanelStore((s) => s.setWidth);
 
-  useEffect(() => { initTheme(); initUi(); }, []);
+  useEffect(() => {
+    initTheme(); initUi();
+    // 全局焦点保护：覆盖"切换页面后输入框无法聚焦/IME 卡死"的兜底逻辑
+    const guard = installFocusGuard();
+    const unsubscribeRendererFocus = window.chatcoderAPI?.onRendererFocus?.(() => {
+      // 主进程 webContents.focus() 完成后，DOM focus 必须在下一帧重试；
+      // 窗口句柄焦点与 renderer 文档焦点是两个独立状态。
+      window.dispatchEvent(new Event("focus"));
+    });
+    return () => {
+      unsubscribeRendererFocus?.();
+      guard.dispose();
+    };
+  }, []);
 
   // Ctrl+B 切换侧栏（对齐 zcode）
   useEffect(() => {
@@ -49,31 +63,51 @@ export default function App() {
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
+  const openSettings = useCallback((tab?: string) => {
+    const { currentSessionId } = useChatStore.getState();
+    setReturnLocation({ nav, sessionId: currentSessionId });
+    if (tab) setSettingsActiveTab(tab as SettingsTab);
+    setSettingsTab(tab);
+    setNav("settings");
+    setSidebarCollapsed(false);
+  }, [nav]);
+
+  const leaveSettings = useCallback(() => {
+    const target = returnLocation;
+    setNav(target.nav);
+    if (target.sessionId === null) {
+      useChatStore.setState({ currentSessionId: null, ...{
+        messages: [], turns: [], tasks: [], runningTurnId: null, isRunning: false,
+        interruptedTurnId: null, streamingBuffers: {}, thinkingBuffers: {}, usage: null,
+        pendingApproval: null, pendingPlan: null, reviewedFiles: {}, composerDraft: "", composerAttachments: [],
+      } });
+    }
+    // 从设置页返回会话页后主动聚焦输入框（登录/配置期间 textarea 已卸载重挂，
+    // 不恢复焦点则用户点击会被"窗口未聚焦"或卸载竞态吞掉）
+    window.setTimeout(() => {
+      window.dispatchEvent(new CustomEvent("chatcoder:focus-composer"));
+    }, 50);
+  }, [returnLocation]);
+
   // v16: 模型选择器「管理模型」入口 —— 打开设置页并定位到模型 tab
   useEffect(() => {
     const handler = (e: Event) => {
       const tab = (e as CustomEvent<{ tab?: string }>).detail?.tab;
-      if (tab) setSettingsActiveTab(tab as SettingsTab);
-      setSettingsTab(tab);
-      setNav("settings");
-      setSidebarCollapsed(false);
+      openSettings(tab);
     };
     window.addEventListener("chatcoder:open-settings", handler);
     return () => window.removeEventListener("chatcoder:open-settings", handler);
-  }, []);
+  }, [openSettings]);
   // v19: 命令中心跳转设置 tab 同步
   useEffect(() => {
     if (settingsTab && nav === "settings") setSettingsActiveTab(settingsTab as SettingsTab);
   }, [settingsTab, nav]);
-  // 记录最近一次非设置页的导航位置，设置页退出时原路返回
-  useEffect(() => {
-    if (nav !== "settings") setReturnNav(nav);
-  }, [nav]);
+  // 设置入口由 openSettings 捕获，避免 nav 变化后覆盖首页的会话 ID。
 
   const leftPanelElRef = useRef<HTMLDivElement>(null);
   const rightPanelElRef = useRef<HTMLDivElement>(null);
 
-  // 左栏折叠 = 0px 隐藏（展开按钮移到标题栏左侧，与 logo/导航箭头一起）
+  // 左栏折叠 = 0px 隐藏（展开按钮移到标题栏左侧，和 logo/导航箭头一起）
   useEffect(() => {
     const el = leftPanelElRef.current;
     if (!el) return;
@@ -97,18 +131,18 @@ export default function App() {
         <RollbackConfirmModal />
         <CommandCenter />
         {/* v18 布局重构（对齐 zcode）：左侧栏全高（含 logo/导航箭头），
-            右侧列 = 顶部标题栏 + 内容行（消息流 + 右侧面板） */}
+            右侧 = 顶部标题栏 + 内容行（消息流 + 右侧面板）。 */}
         <div ref={leftPanelElRef} className={`app-pane app-pane-left collapsible${sidebarCollapsed ? " collapsed" : ""}`} style={sidebarCollapsed ? { width: "0px", flexBasis: "0px" } : { width: `${leftPanelWidth}px`, flexBasis: `${leftPanelWidth}px` }}>
           {nav === "settings" ? (
-            /* v19: 设置侧栏经插件 slot 渲染（与外部侧栏共用壳与宽度） */
-            <PluginSlot slot="settings-sidebar" tab={settingsActiveTab} onTab={setSettingsActiveTab} onBack={() => setNav(returnNav)} collapsed={sidebarCollapsed} />
+            /* v19: 设置侧栏经插件 slot 渲染（与外部侧栏共用壳与宽度）。 */
+            <PluginSlot slot="settings-sidebar" tab={settingsActiveTab} onTab={setSettingsActiveTab} onBack={leaveSettings} collapsed={sidebarCollapsed} />
           ) : (
-            <PluginSlot slot="sidebar" active={nav} onChange={(k: NavKey) => { setNav(k); if (k === "settings") setSidebarCollapsed(false); if (k === "chat") { useChatStore.setState({ currentSessionId: null, messages: [], turns: [], tasks: [], runningTurnId: null, isRunning: false, interruptedTurnId: null, streamingBuffers: {}, thinkingBuffers: {}, usage: null, pendingApproval: null, pendingPlan: null, reviewedFiles: {}, composerDraft: "" }); } }} onSessionFocus={() => setNav(null)} collapsed={sidebarCollapsed} onToggleCollapse={() => setSidebarCollapsed((v) => !v)} />
+            <PluginSlot slot="sidebar" active={nav} onChange={(k: NavKey) => { if (k === "settings") { openSettings(); return; } setNav(k); if (k === "chat") { useChatStore.setState({ currentSessionId: null, messages: [], turns: [], tasks: [], runningTurnId: null, isRunning: false, interruptedTurnId: null, streamingBuffers: {}, thinkingBuffers: {}, usage: null, pendingApproval: null, pendingPlan: null, reviewedFiles: {}, composerDraft: "" }); } }} onSessionFocus={() => setNav(null)} collapsed={sidebarCollapsed} onToggleCollapse={() => setSidebarCollapsed((v) => !v)} />
           )}
         </div>
-        {!sidebarCollapsed && <ResizeHandle side="left" baseWidth={leftPanelWidth} minWidth={200} maxWidth={480} panelEl={leftPanelElRef} onCommit={setLeftPanelWidth} />}
+        {!sidebarCollapsed && <ResizeHandle side="left" baseWidth={leftPanelWidth} minWidth={200} maxWidth={480} reservePx={370} panelEl={leftPanelElRef} onCommit={setLeftPanelWidth} />}
         <div className="app-right">
-          {/* v19: 标题栏/右面板经插件 slot 渲染 */}
+          {/* v19: 标题栏与右面板经插件 slot 渲染 */}
           <PluginSlot slot="titlebar" leftCollapsed={sidebarCollapsed} rightCollapsed={!rightExpanded} onToggleLeft={() => setSidebarCollapsed((v) => !v)} onToggleRight={() => usePanelStore.getState().togglePanel()} />
           <div className="app-body">
             <main className={`app-main${!rightExpanded ? " right-panel-collapsed" : ""}`}>
@@ -116,7 +150,8 @@ export default function App() {
                 ? <SettingsContent tab={settingsActiveTab} />
                 : <Workspace nav={nav} onSessionStart={() => setNav(null)} />}
             </main>
-            {rightExpanded && !rightFullscreen && <ResizeHandle side="right" baseWidth={rightPanelWidth} minWidth={280} maxWidth={1200} panelEl={rightPanelElRef} onCommit={setRightPanelWidth} />}
+            {/* plan-95: reservePx=主区 min-width 480 + 手柄宽 10，动态上限防溢出裁剪 */}
+            {rightExpanded && !rightFullscreen && <ResizeHandle side="right" baseWidth={rightPanelWidth} minWidth={280} maxWidth={1200} reservePx={490} panelEl={rightPanelElRef} onCommit={setRightPanelWidth} />}
             <div ref={rightPanelElRef} className={`app-pane app-pane-right${rightExpanded ? "" : " collapsed"}${rightFullscreen ? " fullscreen" : ""}`} style={{ width: rightExpanded ? (rightFullscreen ? "100%" : `${rightPanelWidth}px`) : "0px", flexBasis: rightExpanded ? (rightFullscreen ? "100%" : `${rightPanelWidth}px`) : "0px" }}>
               {rightExpanded && <PluginSlot slot="right-panel" />}
             </div>

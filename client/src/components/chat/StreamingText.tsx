@@ -19,9 +19,11 @@ export interface StreamingTextProps {
   processingLabel?: string;
   /** 无任何内容时的等待文案（默认「等待响应…」） */
   waitingLabel?: string;
+  /** v35: turn 级瞬态状态提示（如「调用异常，正在重试 1/2…」）；设置时优先展示，覆盖默认文案 */
+  statusLabel?: string;
 }
 
-export function StreamingText({ active, thinking, text, processingLabel = "处理中…", waitingLabel = "等待响应…" }: StreamingTextProps) {
+export function StreamingText({ active, thinking, text, processingLabel = "处理中…", waitingLabel = "等待响应…", statusLabel }: StreamingTextProps) {
   const bodyRef = useRef<HTMLDivElement>(null);
   const thinkingText = thinking.trim();
 
@@ -61,12 +63,18 @@ export function StreamingText({ active, thinking, text, processingLabel = "处�
           </div>
         </div>
       )}
-      {!thinkingText && (
+      {statusLabel ? (
+        // v35: 重试/恢复等瞬态状态——无论有无思考/正文都展示在状态行
+        <div className="turn-status-line">
+          <span className="thinking-block-breath" style={{ marginRight: 6 }} />
+          <span className="thinking-block-status">{statusLabel}</span>
+        </div>
+      ) : (!thinkingText && (
         <div className="turn-status-line">
           <span className="thinking-block-breath" style={{ marginRight: 6 }} />
           <span className="thinking-block-status">{text ? processingLabel : waitingLabel}</span>
         </div>
-      )}
+      ))}
     </div>
   );
 }

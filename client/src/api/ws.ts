@@ -2,6 +2,7 @@
  *
  * v1.0: 指数退避重连 + 断线补偿 + handler 清理。
  * v2.1: 会话级事件序号跟踪（lastSeq），重连后发 sync.request 补发断线期间事件。
+ * v2.2: 只派发当前 socket 的事件——旧连接 close() 前已入队的迟到消息不得串到新会话。
  */
 
 export interface ServerEvent {
@@ -40,12 +41,15 @@ export class WsClient {
     // v6.4: 开发模式直连后端，绕过 vite ws 代理
     // v2.1: 打包版端口由主进程透传（getBackendPort），端口冲突自动换空闲端口
     const isElectron = typeof window !== "undefined" && Boolean((window as Window).chatcoderAPI);
-    const isDev = import.meta.env.DEV;
+    // v2.2: 防御性访问 import.meta.env（非 Vite 环境如 Node 测试/打包变体下 env 不存在）
+    const isDev = Boolean((import.meta as { env?: { DEV?: boolean } }).env?.DEV);
     const portPromise = isElectron
       ? (window as Window).chatcoderAPI?.getBackendPort?.() ?? Promise.resolve(8000)
       : Promise.resolve(8000);
     void portPromise
       .then((port) => {
+        // v2.2: 端口解析期间若已切换会话，丢弃旧会话的连接（避免打开旧通道）
+        if (this.currentSessionId !== sessionId) return;
         if (!Number.isFinite(port) || port <= 0) port = 8000;
         const wsUrl = (isElectron || isDev)
           ? `ws://127.0.0.1:${port}/ws/sessions/${sessionId}`
@@ -53,22 +57,31 @@ export class WsClient {
         this._open(sessionId, wsUrl);
       })
       .catch(() => {
+        if (this.currentSessionId !== sessionId) return;
         const wsUrl = `ws://127.0.0.1:8000/ws/sessions/${sessionId}`;
         this._open(sessionId, wsUrl);
       });
   }
 
   private _open(sessionId: number, wsUrl: string) {
-    this.ws = new WebSocket(wsUrl);
+    const sock = new WebSocket(wsUrl);
+    this.ws = sock;
 
-    this.ws.onopen = () => {
+    sock.onopen = () => {
+      // 只处理当前连接的会话（切换/重连后旧 socket 的 onopen 忽略）
+      if (this.ws !== sock || this.currentSessionId !== sessionId) return;
       // v1.0: 重连成功，重置计数
       this.reconnectAttempt = 0;
       // v2.1: 断线补偿——请求补发 lastSeq 之后的事件
       this.send("sync.request", { last_seq: this.lastSeq });
     };
 
-    this.ws.onmessage = (e) => {
+    sock.onmessage = (e) => {
+      // v2.2: 只派发当前 socket 的事件——切会话/重连后，旧连接在 close() 前
+      // 已收到但尚未派发的消息（事件循环中排队的 macrotask）会被浏览器继续回调，
+      // 若放行会把旧会话的 turn.completed/session.completed 等事件串到新会话，
+      // 导致"新会话刚发消息，运行态却被旧会话结束事件清掉"。
+      if (this.ws !== sock || this.currentSessionId !== sessionId) return;
       try {
         const data = JSON.parse(e.data) as ServerEvent;
         // v2.1: 推进事件序号（sync.response 的 seq=0 不参与推进）
@@ -81,9 +94,11 @@ export class WsClient {
       }
     };
 
-    this.ws.onclose = () => {
+    sock.onclose = () => {
       // v1.0: 指数退避重连 + 随机抖动
       if (this.intentionalClose) return;
+      // v2.2: 旧连接（已被切换/替换）的 close 事件不触发重连
+      if (this.ws !== sock || this.currentSessionId !== sessionId) return;
       this.reconnectAttempt++;
       const delay = Math.min(
         _BASE_DELAY * Math.pow(2, this.reconnectAttempt - 1),

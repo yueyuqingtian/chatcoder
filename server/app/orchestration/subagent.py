@@ -64,11 +64,17 @@ class SubagentManager:
                     db, self.session_id, task.id,
                     "done" if handle.status == "done" else "failed",
                     (out.text or "")[:300] or None,
+                    agent_id=agent.id,
                 )
+            except asyncio.CancelledError:
+                handle.status = "cancelled"
+                handle.error = "用户中断"
+                await _sync_task_status(db, self.session_id, task.id, "cancelled", "用户中断", agent_id=agent.id)
+                raise
             except Exception as e:
                 handle.status = "failed"
                 handle.error = str(e)
-                await _sync_task_status(db, self.session_id, task.id, "failed", f"执行异常: {str(e)[:200]}")
+                await _sync_task_status(db, self.session_id, task.id, "failed", f"执行异常: {str(e)[:200]}", agent_id=agent.id)
                 logger.exception("[subagent] %s 异常", agent.id)
             logger.info("[subagent] %s 完成 status=%s", agent.id, handle.status)
 
@@ -112,6 +118,18 @@ class SubagentManager:
     def pending_count(self) -> int:
         return sum(1 for h in self._handles.values() if h.status == "running")
 
+    async def cancel_all(self) -> None:
+        """取消并等待该会话所有尚未结束的子代理任务。"""
+        pending = [h.task for h in self._handles.values() if h.task is not None and not h.task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        for handle in self._handles.values():
+            if handle.status == "running":
+                handle.status = "cancelled"
+
+
 
 # 会话级 manager 注册表
 _managers: dict[int, SubagentManager] = {}
@@ -127,11 +145,15 @@ def cleanup(session_id: int) -> None:
     _managers.pop(session_id, None)
 
 
-async def _sync_task_status(db, session_id: int, task_id: int, status: str, note: str | None) -> None:
+async def _sync_task_status(db, session_id: int, task_id: int, status: str, note: str | None,
+                            agent_id: int | None = None) -> None:
     """更新子任务状态并广播，前端任务面板据此实时刷新步骤与执行情况。
 
     先提交（子任务与主代理共享 session，创建任务的 flush 需随 commit 落库，
     否则前端 refreshTasks 通过 HTTP 查询时看不到新任务），再广播 task.updated。
+    agent_id 传入时在终态（done/failed）附带 agent.completed 事件，
+    前端消息流子代理卡片据此摘除转圈（此前仅靠 task.updated，探索期任务被置 running
+    导致已完成卡片被 REST 回退成转圈）。
     """
     try:
         from app.orchestration.agent_events import broadcast
@@ -142,5 +164,10 @@ async def _sync_task_status(db, session_id: int, task_id: int, status: str, note
             "event": "task.updated",
             "payload": {"task_id": task_id, "status": status, "note": note or ""},
         })
+        if agent_id is not None and status in ("done", "failed", "cancelled"):
+            await broadcast(session_id, {
+                "event": "agent.completed",
+                "payload": {"agent_id": agent_id, "status": status},
+            })
     except Exception:
         logger.debug("[subagent] 子任务状态同步失败(非阻塞)", exc_info=True)

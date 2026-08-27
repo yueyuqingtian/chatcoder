@@ -95,6 +95,7 @@ class McpCreate(BaseModel):
     env: dict[str, str] | None = None
     url: str | None = None
     is_active: bool = True
+    path: str | None = None
 
 
 class McpUpdate(BaseModel):
@@ -171,7 +172,7 @@ async def create_mcp(body: McpCreate, db: AsyncSession = Depends(get_db)):
         db, name=body.name, display_name=body.display_name,
         description=body.description, source=body.source, transport=body.transport,
         command=body.command, args=body.args, env=body.env, url=body.url,
-        is_active=body.is_active,
+        is_active=body.is_active, path=body.path,
         # v6.5: 导入（is_active=false）不阻塞握手；仅手动创建并直接启用时才拉取工具列表
         fetch_tools=body.is_active,
     )

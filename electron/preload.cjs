@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
   // 系统集成
   openPath: (p) => ipcRenderer.invoke("shell:openPath", p),
   showItemInFolder: (p) => ipcRenderer.invoke("shell:showItemInFolder", p),
+  // v23: 打开外部 URL（ta3 登录授权跳转，走系统默认浏览器）
+  openExternal: (url) => ipcRenderer.invoke("shell:openExternal", url),
   // 终端 PTY
   ptySpawn: (opts) => ipcRenderer.invoke("pty:spawn", opts),
   ptyWrite: (id, data) => ipcRenderer.send("pty:write", id, data),
@@ -36,6 +38,14 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
   minimizeWindow: () => ipcRenderer.send("window:minimize"),
   toggleMaximize: () => ipcRenderer.send("window:maximizeToggle"),
   closeWindow: () => ipcRenderer.send("window:close"),
+  // 修复文本输入状态（输入框"能删不能输"卡死的兜底：主进程重新同步焦点）
+  fixTextInput: () => ipcRenderer.invoke("window:fixTextInput"),
+  // 主进程完成 WebContents 焦点同步后通知渲染层重试 DOM 输入框聚焦。
+  onRendererFocus: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on("window:renderer-focus", handler);
+    return () => ipcRenderer.removeListener("window:renderer-focus", handler);
+  },
   // 外部穿透开关（透桌面/其他软件颜色）
   setExternalBackdrop: (on) => ipcRenderer.send("window:setExternalBackdrop", !!on),
   // 当前系统用户名（侧栏底部用户条展示，对齐 zcode）
