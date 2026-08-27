@@ -23,6 +23,10 @@ dependencies = [
     "orjson>=3.10.0",
     "openpyxl>=3.1.0",
     "python-multipart>=0.0.9",
+    "aiohttp>=3.9.0",
+    "Pillow>=10.0.0",
+    "python-docx>=1.1.0",
+    "pypdf>=4.0.0",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +41,9 @@ dev = [
 browser = [
     "playwright>=1.45.0",
 ]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
 
 [tool.ruff]
 line-length = 100
