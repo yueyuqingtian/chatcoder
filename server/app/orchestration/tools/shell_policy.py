@@ -130,6 +130,10 @@ def analyze(command: str) -> tuple[str, str]:
         # 去掉 && / ; 串联（串联命令一律按 ask 处理，防止白名单命令夹带写操作）
         if "&&" in seg or ";" in seg:
             return "ask", "命令含串联操作符"
+        # 拦截输出重定向（> 或 >> 写入文件，除 > $null / > nul / 2>&1 等安全静默输出外）
+        clean_seg = re.sub(r">\s*(?:\$null|nul|&\d+)", "", seg, flags=re.I)
+        if ">" in clean_seg:
+            return "ask", "命令包含写入重定向 (> 或 >>)"
         tokens = seg.split()
         if not tokens:
             continue

@@ -21,6 +21,7 @@ datas = [
 ]
 
 hiddenimports = [
+    "sqlite3",
     "uvicorn.logging",
     "uvicorn.loops",
     "uvicorn.loops.auto",

@@ -12,7 +12,7 @@ import { useChatStore } from "../store/chat";
 import { formatRelativeTime, parseUtc } from "../utils/time";
 import { ConfirmDialog } from "./ConfirmDialog";
 import {
-  IconCalendar, IconChevronLeft, IconChevronRight, IconPanelLeft,
+  IconCalendar, IconChevronDown, IconChevronLeft, IconChevronRight, IconPanelLeft,
   IconFolder, IconHash, IconListFilter,
   IconMoreHorizontal, IconPin, IconPlus, IconSearch, IconSettings,
   IconSquarePlus, IconZap,
@@ -84,9 +84,10 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
   const [projectMenuFor, setProjectMenuFor] = useState<number | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<SessionOut | null>(null);
   const [renaming, setRenaming] = useState<{ id: number; value: string } | null>(null);
-  // v24: 项目展开/折叠只由用户手动控制并持久化到 localStorage：
-  // 记录为 true 的项目保持折叠，其它项目保持展开；组件重新挂载或切换会话绝不重置或莫名其妙展开。
+  // v24: 项目展开/折叠只由用户手动控制并持久化到 localStorage
   const [collapsedProjects, setCollapsedProjects] = useState<Record<number, boolean>>(() => loadCollapsedProjects());
+  // v32: 每个项目当前展示的会话数量，默认 5，点击「显示更多」+5，折叠后再展开重置为 5
+  const [projectLimits, setProjectLimits] = useState<Record<number, number>>({});
 
   useEffect(() => { loadBootstrap(); }, [loadBootstrap]);
 
@@ -119,7 +120,20 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
     return () => document.removeEventListener("mousedown", handler);
   }, [sortMenuOpen, menuFor, projectMenuFor]);
 
-  const visibleProjects = useMemo(() => projects.filter((p) => !p.archived), [projects]);
+  const visibleProjects = useMemo(() => {
+    const list = projects.filter((p) => !p.archived);
+    return [...list].sort((a, b) => {
+      if (sort === "name") return (a.name || "").localeCompare(b.name || "") || a.id - b.id;
+      // 需求 3：按最近时，项目间按照项目的创建时间来排序（置顶优先）
+      if (sort === "recent") {
+        const pinDiff = Number(b.pinned) - Number(a.pinned);
+        if (pinDiff !== 0) return pinDiff;
+        const timeDiff = parseUtc(b.created_at || "") - parseUtc(a.created_at || "");
+        return timeDiff || b.id - a.id;
+      }
+      return Number(b.pinned) - Number(a.pinned) || b.id - a.id;
+    });
+  }, [projects, sort]);
 
   const filteredSessions = useMemo(() => {
     const list = sessions.filter((s) => s.status !== "archived");
@@ -131,16 +145,24 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
   }, [sessions, sort]);
 
   const isProjectOpen = (p: ProjectOut) => !collapsedProjects[p.id];
-  const toggleProject = (id: number) => setCollapsedProjects((prev) => {
-    const next = { ...prev };
-    if (next[id]) {
-      delete next[id]; // 展开：清除显式折叠记录
-    } else {
-      next[id] = true; // 折叠：记录显式折叠
-    }
-    saveCollapsedProjects(next);
-    return next;
-  });
+  const toggleProject = (id: number) => {
+    // 需求 2：项目折叠后再展开，还是只展示 5 个，重置分页上限
+    setProjectLimits((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    setCollapsedProjects((prev) => {
+      const next = { ...prev };
+      if (next[id]) {
+        delete next[id]; // 展开：清除显式折叠记录
+      } else {
+        next[id] = true; // 折叠：记录显式折叠
+      }
+      saveCollapsedProjects(next);
+      return next;
+    });
+  };
 
   const handleNewProject = async () => {
     const dir = await window.chatcoderAPI?.selectDirectory?.();
@@ -253,7 +275,38 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
                           </div>
                         )}
                       </div>
-                      {open && <div className="sb-project-children">{projSessions.map(renderSession)}</div>}
+                      {open && (
+                        <div className="sb-project-children">
+                          {(() => {
+                            const limit = projectLimits[p.id] || 5;
+                            const shown = projSessions.slice(0, limit);
+                            const remaining = projSessions.length - limit;
+                            return (
+                              <>
+                                {shown.map(renderSession)}
+                                {remaining > 0 && (
+                                  <div className="sb-more-wrapper">
+                                    <button
+                                      type="button"
+                                      className="sb-more-btn"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setProjectLimits((prev) => ({
+                                          ...prev,
+                                          [p.id]: (prev[p.id] || 5) + 5,
+                                        }));
+                                      }}
+                                    >
+                                      <IconChevronDown size={12} />
+                                      <span>显示更多（剩余 {remaining} 项）</span>
+                                    </button>
+                                  </div>
+                                )}
+                              </>
+                            );
+                          })()}
+                        </div>
+                      )}
                     </div>
                   );
                 })}

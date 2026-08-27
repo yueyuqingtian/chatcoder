@@ -101,6 +101,8 @@ export interface ProjectOut {
   auto_scan_rules: boolean;
   pinned: boolean;
   archived: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
 }
 
 export interface SessionOut {

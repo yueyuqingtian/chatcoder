@@ -53,10 +53,12 @@ win-unpacked/
 builder-debug.yml
 v1/
 v2/
+v3/
 v4/
 v5/
+v6/
+v*/
 releasev1/
-v3/
 
 # 第三方参考仓库（deepseek-harness 等）
 /deepseek-harness/

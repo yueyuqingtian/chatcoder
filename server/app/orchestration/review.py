@@ -215,11 +215,12 @@ async def _run_review_loop(
 
     ws_root = resolve_workspace_root(getattr(session, "workspace_root", None))
 
-    # v3.5: 不再限制参数，全面释放模型能力
-    max_steps = settings.agent_max_steps
+    # v3.5: 不再限制参数，全面释放模型能力（<=0 表示不限步数）
+    raw_max_steps = settings.agent_max_steps
+    review_step_limit = 1000 if raw_max_steps <= 0 else raw_max_steps
 
     last_text = ""
-    for _ in range(max_steps):
+    for _ in range(review_step_limit):
         # v1.0: 中断检查
         if cancel_event and cancel_event.is_set():
             logger.warning("审查循环被中断 task=%s", task.id)

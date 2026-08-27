@@ -1,7 +1,7 @@
 /** v2 会话状态管理（zustand）：项目 / 会话 / turn 任务驱动。 */
 import { create } from "zustand";
 import { api } from "../api/client";
-import type { ArtifactOut, AttachmentInfo, FileChangeOut, MessageOut, ProjectOut, RollbackAffected, RollbackPreviewFile, SessionOut, TaskOut, TurnOut } from "../api/client";
+import type { ArtifactOut, AttachmentInfo, FileChangeOut, MessageOut, ModelOut, ProjectOut, ProviderOut, RollbackAffected, RollbackPreviewFile, SessionOut, TaskOut, TurnOut } from "../api/client";
 import { wsClient } from "../api/ws";
 import type { ServerEventName } from "@chatcoder/shared/events";
 import type { CompactSummaryPayload } from "@chatcoder/shared/events";
@@ -105,6 +105,8 @@ function _sliceToView(slice: SessionSlice | undefined): Partial<ChatState> {
 interface ChatState {
   projects: ProjectOut[];
   sessions: SessionOut[];
+  models: ModelOut[];
+  providers: ProviderOut[];
   currentProjectId: number | null;
   currentSessionId: number | null;
   /** v2.2 分桶：按 sessionId 隔离的会话状态（切换零重载 + 状态不串）。 */
@@ -179,6 +181,7 @@ interface ChatState {
 
   // 动作
   loadBootstrap: () => Promise<void>;
+  loadModels: () => Promise<void>;
   createProject: (path: string, name?: string) => Promise<ProjectOut | null>;
   selectProject: (projectId: number) => Promise<void>;
   createSession: (projectId: number, title?: string) => Promise<number | null>;
@@ -218,6 +221,7 @@ resumeTurn: () => Promise<void>;
   /** v12: 刷新当前会话产物聚合（随 refreshTasks 一并拉取）。 */
   refreshArtifacts: () => Promise<void>;
   setComposerDraft: (text: string) => void;
+  appendComposerDraft: (text: string) => void;
   clearError: () => void;
   addMessage: (msg: MessageOut) => void;
   /** v2.2: 请求消息流滚动到某子代理线程首条消息（任务卡步骤穿透）。 */
@@ -404,6 +408,8 @@ function _resetSessionState(): Partial<ChatState> {
 export const useChatStore = create<ChatState>((set, get) => ({
   projects: [],
   sessions: [],
+  models: [],
+  providers: [],
   currentProjectId: null,
   currentSessionId: null,
   sessionHist: [],
@@ -453,10 +459,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
   error: null,
   wsConnected: false,
 
+  loadModels: async () => {
+    try {
+      const [models, providers] = await Promise.all([
+        api.listModels().catch(() => []),
+        api.listProviders().catch(() => []),
+      ]);
+      if (models.length > 0 || providers.length > 0) {
+        set({ models, providers });
+      }
+    } catch {}
+  },
+
   loadBootstrap: async () => {
     set({ loading: true, error: null });
     try {
-      const [projects, sessions] = await Promise.all([api.listProjects(), api.listSessions()]);
+      const [projects, sessions, models, providers] = await Promise.all([
+        api.listProjects(),
+        api.listSessions(),
+        api.listModels().catch(() => []),
+        api.listProviders().catch(() => []),
+      ]);
       // 自动选中第一个活跃项目/会话，并清理已归档或已删除的旧项目 ID。
       const activeProjects = projects.filter((p) => !p.archived);
       const activeSessions = sessions.filter((s) => s.status !== "archived");
@@ -468,6 +491,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({
         projects,
         sessions,
+        models: models.length > 0 ? models : get().models,
+        providers: providers.length > 0 ? providers : get().providers,
         loading: false,
         currentProjectId: currentProject?.id ?? sessionProject?.id ?? activeProjects[0]?.id ?? null,
       });
@@ -1112,6 +1137,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   setComposerDraft: (text) => set({ composerDraft: text }),
+  appendComposerDraft: (text) => {
+    const toAppend = (text || "").trim();
+    if (!toAppend) return;
+    set((s) => {
+      const cur = (s.composerDraft || "").trim();
+      const next = cur ? `${cur}\n\n${toAppend}` : toAppend;
+      return { composerDraft: next };
+    });
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("chatcoder:focus-composer"));
+    }
+  },
   clearError: () => set({ error: null }),
 
   requestScrollTo: (target) => set({ scrollTarget: { ...target } }),

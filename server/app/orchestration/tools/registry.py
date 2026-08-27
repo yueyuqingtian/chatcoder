@@ -3,6 +3,14 @@ from functools import lru_cache
 
 from app.orchestration.tools.base import Tool
 from app.orchestration.tools.ask_user import AskUserQuestionTool
+from app.orchestration.tools.browser import (
+    BrowserNavigateTool,
+    BrowserScreenshotTool,
+    BrowserClickTool,
+    BrowserTypeTool,
+    BrowserSnapshotTool,
+    BrowserEvaluateTool,
+)
 from app.orchestration.tools.ci import CiRunTool
 from app.orchestration.tools.codebase_search import CodebaseSearchTool
 from app.orchestration.tools.compaction_view import CompactionIndexTool, CompactionViewTool
@@ -75,6 +83,9 @@ def _build_default_registry() -> ToolRegistry:
         MultiFileEditTool, GitTool, CodebaseSearchTool, AskUserQuestionTool,
         # v30.1: 压缩索引查看（AI 按需查看压缩前会话）
         CompactionIndexTool, CompactionViewTool,
+        # v32: 浏览器工具套件（Playwright / DOM快照 / 截图 / 点击 / 填写）
+        BrowserNavigateTool, BrowserScreenshotTool, BrowserClickTool,
+        BrowserTypeTool, BrowserSnapshotTool, BrowserEvaluateTool,
     ):
         reg.register(tool_cls())
     return reg

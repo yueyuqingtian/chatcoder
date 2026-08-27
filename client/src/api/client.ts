@@ -550,6 +550,9 @@ export interface GlobalSettingsOut {
   plan_mode_allow_outside_access: boolean;
   /** v32 (plan-89): 沙箱模式（workspace-write / read-only / danger-full-access） */
   sandbox_mode: string;
+  agent_max_steps?: number;
+  browser_enabled?: boolean;
+  browser_headless?: boolean;
 }
 
 export type GlobalSettingsIn = Partial<Omit<GlobalSettingsOut, never>>;

@@ -28,12 +28,14 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
     ipcRenderer.on("pty:exit", handler);
     return () => ipcRenderer.removeListener("pty:exit", handler);
   },
-  // webview 元素标注回传
+  // webview 元素标注回传与 DevTools/截图
   onBrowserAnnotation: (cb) => {
     const handler = (_e, payload) => cb(payload);
     ipcRenderer.on("browser:annotation", handler);
     return () => ipcRenderer.removeListener("browser:annotation", handler);
   },
+  openBrowserDevTools: (webContentsId) => ipcRenderer.invoke("browser:openDevTools", webContentsId),
+  captureBrowserPage: (webContentsId) => ipcRenderer.invoke("browser:capturePage", webContentsId),
   // 窗口控制
   minimizeWindow: () => ipcRenderer.send("window:minimize"),
   toggleMaximize: () => ipcRenderer.send("window:maximizeToggle"),

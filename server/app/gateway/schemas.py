@@ -39,6 +39,8 @@ class ProjectOut(BaseModel):
     auto_scan_rules: bool = True
     pinned: bool = False
     archived: bool = False
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
 # ── 会话 ──

@@ -56,8 +56,11 @@ class Settings(BaseSettings):
     approval_timeout_sec: int = 300
     # v0.3: agent loop 单任务最大步数（仅作为绝对兜底防死循环的熔断值）
     # v3.5: 不再用固定步数限制，改为边际效应递减检测 + token 预算驱动
-    # 此值仅在递减检测失效时作为最后保险触发
+    # 0 或负数表示不限制步数
     agent_max_steps: int = 1000
+    # 浏览器自动化开关（可通过设置中心持久化配置，0.5 默认关闭，开启后注册浏览器工具集）
+    browser_enabled: bool = False
+    browser_headless: bool = True
     # 验证模式:自动批准副作用工具(fs.write/terminal.exec 等),跳过人工审批门
     # v1.0: 默认关闭，高风险工具始终需要审批
     auto_approve_tools: bool = False
@@ -163,6 +166,10 @@ class Settings(BaseSettings):
 
     # v1.1: 增强搜索（ripgrep）；关闭或无 rg 时 fs_grep 回退纯 Python 逐行匹配
     enhanced_search: bool = True
+    # v31.2: 代理（HTTP/HTTPS），用于搜索引擎等 web 工具的网络请求；
+    # 来源：设置面板 http_proxy 字段（持久化在 ~/.chatcoder/config.json），
+    # 运行时写入本字段；启动时从 config 恢复。优先于环境变量 HTTP_PROXY/HTTPS_PROXY。
+    http_proxy: str = ""
     # v1.1: 消息流展示开关（后端缓存值，前端启动时拉取）
     show_todos: bool = True
     show_reasoning: bool = True

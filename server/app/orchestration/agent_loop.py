@@ -444,6 +444,9 @@ async def run_agent_loop(
 
     if max_steps is None:
         max_steps = settings.agent_max_steps
+    # 0 或负数表示不限制步数（使用大数值兜底循环安全）
+    is_unlimited_steps = (max_steps <= 0)
+    loop_step_limit = 10_000_000 if is_unlimited_steps else max_steps
 
     # v6.4: 启动时打印压缩阈值诊断日志
     try:
@@ -495,7 +498,7 @@ async def run_agent_loop(
     _tool_executed = False
 
     try:
-        for step in range(1, max_steps + 1):
+        for step in range(1, loop_step_limit + 1):
             if cancel_event and cancel_event.is_set():
                 logger.warning("[agent] task turn=%s 收到中断信号", turn_id)
                 return AgentOutput(kind="cancelled", error="任务被用户中断")
@@ -715,10 +718,19 @@ async def run_agent_loop(
                         or "role 'tool' must be a response" in _err_msg
                     )
                     if _fc_400:
-                        from app.orchestration.compaction import repair_tool_call_ids as _repair_fc
+                        from app.orchestration.compaction import (
+                            build_api_copy as _build_api_fc,
+                            ensure_tool_pairing as _ensure_pairing,
+                            normalize_tool_sequence as _norm_fc,
+                            repair_tool_call_ids as _repair_fc,
+                        )
                         messages = _repair_fc(messages)
+                        messages = _ensure_pairing(messages)
+                        messages = _norm_fc(messages)
+                        # v37: 重试发送前同样构建符合预算的 api_messages 副本
+                        _retry_api_messages = _build_api_fc(messages, fold_budget_tokens=_fold_budget if "_fold_budget" in locals() else None)
                         request = ChatRequest(
-                            messages=messages, model="", tools=tool_schemas or None,
+                            messages=_retry_api_messages, model="", tools=tool_schemas or None,
                             temperature=settings.agent_tool_temperature if tool_schemas else settings.agent_text_temperature,
                             max_tokens=settings.agent_max_output_tokens or None,
                             session_id=str(session_id),
@@ -1254,6 +1266,20 @@ async def run_agent_loop(
 
             # 最终文本
             final_text = response.content or ""
+            if permission_mode == "plan" and not any(p.replace("\\", "/").startswith("ai/chatcoder-plan") or "/ai/chatcoder-plan" in p.replace("\\", "/") for p in write_paths):
+                if not getattr(agent_loop_context, "_plan_correction_tried", False):
+                    setattr(agent_loop_context, "_plan_correction_tried", True)
+                    logger.info("[agent] turn=%s 处于规划模式且尚未写入 ai/ 计划文档，自动触发纠偏促使模型写盘", turn_id)
+                    messages.append(ChatMessage(
+                        role="assistant",
+                        content=final_text,
+                    ))
+                    messages.append(ChatMessage(
+                        role="user",
+                        content="[系统提醒] 当前处于【规划模式】，你尚未创建/写入方案文档！请立即调用 fs_write 工具将完整的方案规划内容写入 `ai/chatcoder-plan-xxx.md` 文件（如 `ai/chatcoder-plan-1.md`），不要仅在对话中回复文字。",
+                    ))
+                    continue
+
             if final_text:
                 await _emit_agent_msg(db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
                                       agent_id=agent_id, agent_name=agent_name,
@@ -1265,11 +1291,12 @@ async def run_agent_loop(
             final_text = response.content if "response" in locals() else ""
             if not final_text and not _tool_executed:
                 # v31 (plan-89): 零产出 + 耗尽步数 = 真实失败（保持 error）
+                _limit_desc = "不限制" if is_unlimited_steps else str(max_steps)
                 await _emit_agent_msg(db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
                                       agent_id=agent_id, agent_name=agent_name,
                                       msg_type=MsgType.ERROR,
-                                      content={"text": f"达到步数上限({max_steps})，任务未完成", "agent_name": agent_name})
-                return AgentOutput(kind="error", error=f"达到步数上限({max_steps})")
+                                      content={"text": f"达到步数上限({_limit_desc})，任务未完成", "agent_name": agent_name})
+                return AgentOutput(kind="error", error=f"达到步数上限({_limit_desc})")
             # v31 (plan-89): 对齐 zcode/AI SDK stepCountIs 语义——步数上限是停止
             # 条件而非失败条件：本 turn 已有产出或已有内容时正常结束，落非错误提示。
             if final_text:
@@ -1277,10 +1304,11 @@ async def run_agent_loop(
                                       agent_id=agent_id, agent_name=agent_name,
                                       msg_type=MsgType.TEXT,
                                       content={"text": final_text, "agent_name": agent_name})
+            _limit_desc = "不限制" if is_unlimited_steps else str(max_steps)
             await _emit_agent_msg(db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
                                   agent_id=agent_id, agent_name=agent_name,
                                   msg_type=MsgType.TEXT,
-                                  content={"text": f"已达步数上限({max_steps})，以上为已完成的执行进度",
+                                  content={"text": f"已达步数上限({_limit_desc})，以上为已完成的执行进度",
                                            "agent_name": agent_name})
 
         # 产物抽取（v7: 关联到主 turn 对应的任务；task_id 为空时兜底用 turn_id）

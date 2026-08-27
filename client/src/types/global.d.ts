@@ -15,6 +15,8 @@ declare global {
       onPtyData?: (cb: (id: number, data: string) => void) => () => void;
       onPtyExit?: (cb: (id: number, code: number) => void) => () => void;
       onBrowserAnnotation?: (cb: (payload: unknown) => void) => () => void;
+      openBrowserDevTools?: (webContentsId?: number) => Promise<boolean>;
+      captureBrowserPage?: (webContentsId?: number) => Promise<string | null>;
       minimizeWindow?: () => void;
       toggleMaximize?: () => void;
       closeWindow?: () => void;

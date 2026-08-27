@@ -79,7 +79,15 @@ export function ComposerCore({ variant, onStarted }: {
   const [attachments, setAttachments] = useState<AttachmentInfo[]>([]);
   const [preview, setPreview] = useState<AttachmentInfo | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [models, setModels] = useState<ModelOut[]>([]);
+  const storeModels = useChatStore((s) => s.models);
+  const [models, setModels] = useState<ModelOut[]>(() => storeModels);
+
+  // 同步全局 store 中的模型列表
+  useEffect(() => {
+    if (storeModels.length > 0) {
+      setModels(storeModels);
+    }
+  }, [storeModels]);
   const [sessionModelId, setSessionModelId] = useState<number | null>(null);
   const [reasoningEffort, setReasoningEffort] = useState<string | null>(null);
   const [showModels, setShowModels] = useState(false);
@@ -138,9 +146,14 @@ export function ComposerCore({ variant, onStarted }: {
     let cancelled = false;
     (async () => {
       try {
-        const ms = await api.listModels();
+        let ms = storeModels;
+        if (!ms || ms.length === 0) {
+          ms = await api.listModels();
+        }
         if (cancelled) return;
-        setModels(ms);
+        if (ms && ms.length > 0) {
+          setModels(ms);
+        }
         if (!currentSessionId) {
           const saved = localStorage.getItem(MODEL_STORAGE_PREFIX + "home");
           const savedId = saved ? Number(saved) : null;
@@ -155,7 +168,7 @@ export function ComposerCore({ variant, onStarted }: {
       } catch { /* ignore */ }
     })();
     return () => { cancelled = true; };
-  }, [currentSessionId, isHome]);
+  }, [currentSessionId, isHome, storeModels]);
 
   // 加载技能列表（用于 / 命令菜单展示）
   useEffect(() => {

@@ -232,6 +232,7 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      webviewTag: true,
     },
   });
 
@@ -461,10 +462,57 @@ ipcMain.on("pty:kill", (_event, id) => {
   }
 });
 
-// ── IPC:webview 元素标注回传 ──
+// ── IPC:webview 元素标注与开发者工具 ──
 ipcMain.on("webview:annotate", (_event, payload) => {
   // 转发给渲染进程（主窗口），由前端写入 Composer 草稿
   if (mainWindow) mainWindow.webContents.send("browser:annotation", payload);
+});
+
+ipcMain.handle("browser:openDevTools", (_event, targetWebContentsId) => {
+  try {
+    const { webContents } = require("electron");
+    if (targetWebContentsId) {
+      const wc = webContents.fromId(targetWebContentsId);
+      if (wc) {
+        wc.openDevTools({ mode: "detach" });
+        return true;
+      }
+    }
+    // 降级：如果未指定 targetWebContentsId，默认查找所有非主窗口的 webContents
+    const all = webContents.getAllWebContents();
+    const guest = all.find((w) => mainWindow && w.id !== mainWindow.webContents.id);
+    if (guest) {
+      guest.openDevTools({ mode: "detach" });
+      return true;
+    }
+    if (mainWindow) {
+      mainWindow.webContents.openDevTools({ mode: "detach" });
+      return true;
+    }
+  } catch (err) {
+    logErr("[chatcoder] browser:openDevTools 失败:", err);
+  }
+  return false;
+});
+
+ipcMain.handle("browser:capturePage", async (_event, targetWebContentsId) => {
+  try {
+    const { webContents } = require("electron");
+    let wc = null;
+    if (targetWebContentsId) {
+      wc = webContents.fromId(targetWebContentsId);
+    } else {
+      const all = webContents.getAllWebContents();
+      wc = all.find((w) => mainWindow && w.id !== mainWindow.webContents.id) || (mainWindow ? mainWindow.webContents : null);
+    }
+    if (wc) {
+      const image = await wc.capturePage();
+      return image.toDataURL(); // 返回 base64 data url
+    }
+  } catch (err) {
+    logErr("[chatcoder] browser:capturePage 失败:", err);
+  }
+  return null;
 });
 
 // ── 确保单实例 ──

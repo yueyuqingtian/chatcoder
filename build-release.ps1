@@ -24,6 +24,6 @@ Write-Host "=== [3/4] 打包桌面应用(electron-builder) ===" -ForegroundColor
 if ($LASTEXITCODE -ne 0) { throw "electron-builder 打包失败" }
 
 Write-Host "=== [4/4] 完成 ===" -ForegroundColor Green
-Get-ChildItem "$root\release\*.exe" | ForEach-Object {
+Get-ChildItem "$root\v5\*.exe" | ForEach-Object {
     Write-Host ("产物: " + $_.Name + " (" + [math]::Round($_.Length/1MB,1) + " MB)") -ForegroundColor Yellow
 }

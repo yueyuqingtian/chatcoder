@@ -6,7 +6,19 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { useChatStore } from "../../store/chat";
-import { IconArrowLeft, IconArrowRight, IconRefresh, IconGlobe, IconTarget, IconArrowUp, IconX } from "../icons";
+import { useBrowserStore } from "../../store/browser";
+import {
+  IconArrowLeft,
+  IconArrowRight,
+  IconRefresh,
+  IconGlobe,
+  IconTarget,
+  IconArrowUp,
+  IconX,
+  IconCode,
+  IconBug,
+  IconTerminal,
+} from "../icons";
 
 /** 选中元素的 devtools 风格信息。 */
 interface ElementInfo {
@@ -35,6 +47,7 @@ export function BrowserPanel() {
   const [selecting, setSelecting] = useState(false);
   const [annotState, setAnnotState] = useState<{ x: number; y: number; source: string; info: ElementInfo | null } | null>(null);
   const [annotText, setAnnotText] = useState("");
+  const isElectron = typeof window !== "undefined" && Boolean(window.chatcoderAPI?.openBrowserDevTools || (window as any).process?.versions?.electron);
   const [sentMsg, setSentMsg] = useState(false);
   // 悬停元素的光标跟随标签（devtools 风格：<tag> W×H）
   const [hoverTag, setHoverTag] = useState<{ x: number; y: number; text: string } | null>(null);
@@ -65,8 +78,15 @@ export function BrowserPanel() {
     };
   };
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const webviewRef = useRef<any>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
-  const setComposerDraft = useChatStore((s) => s.setComposerDraft);
+  const appendComposerDraft = useChatStore((s) => s.appendComposerDraft);
+  const activeSessionId = useChatStore((s) => s.currentSessionId);
+  const browserState = useBrowserStore((s) => s.getSessionState(activeSessionId));
+  const updateSessionState = useBrowserStore((s) => s.updateSessionState);
+
+  const tabView = browserState.tabView;
+  const domSnapshot = browserState.domSnapshot;
 
   const navigate = (target: string) => {
     let t = target.trim();
@@ -143,29 +163,66 @@ export function BrowserPanel() {
     }
   };
 
-  const handleOverlayClick = (e: React.MouseEvent) => {
+  const handleOverlayClick = async (e: React.MouseEvent) => {
     const rect = viewportRef.current?.getBoundingClientRect();
     if (!rect) return;
     const localX = e.clientX - rect.left;
     const localY = e.clientY - rect.top;
     let source = "";
     let info: ElementInfo | null = null;
-    const doc = getIframeDoc();
-    if (doc) {
-      const iframe = iframeRef.current;
-      if (iframe) {
-        // 将浏览器视口坐标转换为 iframe 内部视口坐标
-        const iframeRect = iframe.getBoundingClientRect();
-        const elX = e.clientX - iframeRect.left;
-        const elY = e.clientY - iframeRect.top;
-        const el = doc.elementFromPoint(elX, elY) as HTMLElement | null;
-        if (el) {
-          source = el.outerHTML.slice(0, 600);
-          try { info = getElementInfo(el); } catch {}
+
+    const wv = webviewRef.current;
+    if (wv && typeof wv.executeJavaScript === "function") {
+      try {
+        const res = await wv.executeJavaScript(`(() => {
+          const el = document.elementFromPoint(${localX}, ${localY});
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          const s = window.getComputedStyle(el);
+          return {
+            source: el.outerHTML.slice(0, 800),
+            info: {
+              tag: el.tagName.toLowerCase(),
+              id: el.id,
+              className: el.className ? (typeof el.className === "string" ? el.className : el.className.baseVal || "") : "",
+              width: Math.round(r.width),
+              height: Math.round(r.height),
+              x: Math.round(r.left),
+              y: Math.round(r.top),
+              display: s.display,
+              color: s.color,
+              background: s.backgroundColor,
+              fontSize: s.fontSize,
+              text: (el.textContent || "").trim().slice(0, 100)
+            }
+          };
+        })()`);
+        if (res) {
+          source = res.source;
+          info = res.info;
+        }
+      } catch (err) {
+        console.warn("webview inspect error:", err);
+      }
+    }
+
+    if (!source) {
+      const doc = getIframeDoc();
+      if (doc) {
+        const iframe = iframeRef.current;
+        if (iframe) {
+          const iframeRect = iframe.getBoundingClientRect();
+          const elX = e.clientX - iframeRect.left;
+          const elY = e.clientY - iframeRect.top;
+          const el = doc.elementFromPoint(elX, elY) as HTMLElement | null;
+          if (el) {
+            source = el.outerHTML.slice(0, 800);
+            try { info = getElementInfo(el); } catch {}
+          }
         }
       }
     }
-    if (!source) source = `页面坐标 (${Math.round(localX)}, ${Math.round(localY)}) - 跨域页面无法获取元素`;
+    if (!source) source = `页面坐标 (${Math.round(localX)}, ${Math.round(localY)})`;
     clearHighlight();
     // 标注卡定位：贴点击点展开，触及视口右/下边缘时翻转到左/上侧，保证不溢出
     const CARD_W = 300, CARD_H = 300;
@@ -177,10 +234,69 @@ export function BrowserPanel() {
     setAnnotText("");
   };
 
-  const sendToChat = () => {
+  const openDevTools = async () => {
+    try {
+      const wv = webviewRef.current;
+      if (wv && typeof wv.openDevTools === "function") {
+        wv.openDevTools();
+        return;
+      }
+      if (wv && typeof wv.getWebContentsId === "function") {
+        const id = wv.getWebContentsId();
+        if (window.chatcoderAPI?.openBrowserDevTools) {
+          await window.chatcoderAPI.openBrowserDevTools(id);
+          return;
+        }
+      }
+      if (window.chatcoderAPI?.openBrowserDevTools) {
+        await window.chatcoderAPI.openBrowserDevTools();
+      }
+    } catch (e) {
+      console.warn("openDevTools error:", e);
+    }
+  };
+
+  const sendToChat = async () => {
     if (!annotState) return;
-    const payload = `【浏览器标注】\n页面: ${current}\n${annotState.source}\n\n【标注说明】${annotText}`;
-    setComposerDraft(payload);
+    let screenshotBase64 = "";
+    try {
+      const wv = webviewRef.current;
+      if (wv && typeof wv.capturePage === "function") {
+        const img = await wv.capturePage();
+        if (img && typeof img.toDataURL === "function") {
+          screenshotBase64 = img.toDataURL();
+        }
+      } else if (wv && typeof wv.getWebContentsId === "function") {
+        const id = wv.getWebContentsId();
+        if (window.chatcoderAPI?.captureBrowserPage) {
+          screenshotBase64 = (await window.chatcoderAPI.captureBrowserPage(id)) || "";
+        }
+      } else if (window.chatcoderAPI?.captureBrowserPage) {
+        screenshotBase64 = (await window.chatcoderAPI.captureBrowserPage()) || "";
+      }
+    } catch (e) {
+      console.warn("capturePage error:", e);
+    }
+
+    let payload = `【浏览器元素标注】\n- 页面地址: ${current}\n`;
+    if (annotState.info) {
+      const inf = annotState.info;
+      payload += `- 元素标签: <${inf.tag}> ${inf.id ? '#' + inf.id : ''} ${inf.className ? '.' + inf.className.split(' ').join('.') : ''}\n`;
+      payload += `- 元素尺寸: ${inf.width} × ${inf.height} px (坐标: x=${inf.x}, y=${inf.y})\n`;
+      payload += `- 样式概览: display=${inf.display}, color=${inf.color}, background=${inf.background}, font=${inf.fontSize}\n`;
+      if (inf.text) payload += `- 包含文本: "${inf.text}"\n`;
+    }
+    if (annotState.source) {
+      payload += `\n\`\`\`html\n${annotState.source}\n\`\`\`\n`;
+    }
+    if (screenshotBase64) {
+      payload += `\n- 页面截图已生成 (Base64 元数据就绪)\n`;
+    }
+    if (annotText.trim()) {
+      payload += `\n【标注说明】\n${annotText.trim()}`;
+    }
+
+    appendComposerDraft(payload);
     setSentMsg(true);
     clearHighlight();
     setAnnotState(null);
@@ -195,13 +311,81 @@ export function BrowserPanel() {
         <button className="browser-btn" onClick={goForward} disabled={hIdx >= history.length - 1} title="前进"><IconArrowRight size={13} /></button>
         <button className="browser-btn" onClick={() => setCurrent(url)} title="刷新"><IconRefresh size={13} /></button>
         <div className="browser-url"><IconGlobe size={12} /><input value={url} onChange={(e) => setUrl(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") navigate(url); }} spellCheck={false} /></div>
+        <button className={`browser-btn${tabView === "preview" ? " active" : ""}`} onClick={() => updateSessionState(activeSessionId, { tabView: "preview" })} title="预览模式"><IconGlobe size={13} /></button>
+        <button className={`browser-btn${tabView === "dom" ? " active" : ""}`} onClick={() => updateSessionState(activeSessionId, { tabView: "dom" })} title="DOM 检查"><IconCode size={13} /></button>
+        <button className={`browser-btn${tabView === "console" ? " active" : ""}`} onClick={() => updateSessionState(activeSessionId, { tabView: "console" })} title="控制台"><IconTerminal size={13} /></button>
         <button className={`browser-btn${selecting ? " active" : ""}`} onClick={toggleSelect} title={selecting ? "取消选择" : "选择元素标注"}><IconTarget size={13} /></button>
+        <button className="browser-btn" onClick={openDevTools} title="打开原生开发者工具 (F12)"><IconBug size={13} /></button>
       </div>
 
       {sentMsg && <div style={{ padding: "6px 12px", background: "var(--success-soft)", color: "var(--success)", fontSize: 12 }}>已发送到主对话输入框</div>}
 
       <div className="browser-viewport" ref={viewportRef} style={{ cursor: selecting ? "crosshair" : "default" }}>
-        <iframe ref={iframeRef} src={current} sandbox="allow-scripts allow-same-origin allow-forms allow-popups" title="browser" />
+        {tabView === "preview" && (
+          isElectron ? (
+            <webview
+              ref={webviewRef}
+              src={current}
+              style={{ width: "100%", height: "100%", border: "none" }}
+            />
+          ) : (
+            <iframe ref={iframeRef} src={current} sandbox="allow-scripts allow-same-origin allow-forms allow-popups" title="browser" />
+          )
+        )}
+        {tabView === "dom" && (
+          <div className="browser-subview browser-dom-view" style={{ width: "100%", height: "100%", overflow: "auto", padding: 12, fontSize: 11, fontFamily: "var(--font-mono)", background: "var(--bg-primary)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <span style={{ fontWeight: 600, color: "var(--text-1)" }}>DOM 结构快照</span>
+              <button className="btn btn-ghost btn-sm" onClick={async () => {
+                let snapshot = "";
+                try {
+                  const wv = webviewRef.current;
+                  if (wv && typeof wv.executeJavaScript === "function") {
+                    snapshot = await wv.executeJavaScript("document.documentElement.outerHTML");
+                  }
+                } catch {}
+                if (!snapshot) {
+                  const doc = getIframeDoc();
+                  snapshot = doc ? doc.documentElement.outerHTML : "";
+                }
+                const truncated = (snapshot || `[跨域页面: ${current}]`).substring(0, 4000);
+                updateSessionState(activeSessionId, { domSnapshot: truncated });
+                appendComposerDraft(`【浏览器页面 DOM 快照】\n[页面: ${current}]\n\`\`\`html\n${truncated}\n\`\`\``);
+              }}>发送快照到输入框</button>
+            </div>
+            <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-all", color: "var(--text-2)" }}>{domSnapshot || "暂无快照，点击上方按钮捕获当前页面 DOM"}</pre>
+          </div>
+        )}
+        {tabView === "console" && (
+          <div className="browser-subview browser-console-view" style={{ width: "100%", height: "100%", overflow: "auto", padding: 12, fontSize: 11, fontFamily: "var(--font-mono)", background: "var(--bg-primary)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <span style={{ fontWeight: 600, color: "var(--text-1)" }}>控制台执行与求值</span>
+            </div>
+            <div style={{ color: "var(--text-3)", padding: "12px 0" }}>可通过右上角「原生开发者工具 (F12)」或下方快速执行 JS 表达式</div>
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <input
+                style={{ flex: 1, padding: "4px 8px", background: "var(--bg-hover)", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text-1)", fontFamily: "var(--font-mono)", fontSize: 12 }}
+                placeholder="例如: location.href 或 document.title"
+                onKeyDown={async (e) => {
+                  if (e.key === "Enter") {
+                    const code = (e.target as HTMLInputElement).value;
+                    if (!code) return;
+                    let res = "";
+                    try {
+                      const wv = webviewRef.current;
+                      if (wv && typeof wv.executeJavaScript === "function") {
+                        res = String(await wv.executeJavaScript(code));
+                      }
+                    } catch (err: any) {
+                      res = `Error: ${err.message || err}`;
+                    }
+                    appendComposerDraft(`【控制台求值结果】\n> ${code}\n\`\`\`\n${res}\n\`\`\``);
+                  }
+                }}
+              />
+            </div>
+          </div>
+        )}
         {selecting && (
           <div
             className="browser-annot-overlay active"

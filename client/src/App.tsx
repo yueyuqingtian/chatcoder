@@ -34,6 +34,9 @@ export default function App() {
 
   useEffect(() => {
     initTheme(); initUi();
+    // 启动时立即触发 Bootstrap（加载项目、会话、模型与提供商列表）
+    void useChatStore.getState().loadBootstrap();
+
     // 全局焦点保护：覆盖"切换页面后输入框无法聚焦/IME 卡死"的兜底逻辑
     const guard = installFocusGuard();
     const unsubscribeRendererFocus = window.chatcoderAPI?.onRendererFocus?.(() => {
@@ -82,6 +85,9 @@ export default function App() {
         pendingApproval: null, pendingPlan: null, reviewedFiles: {}, composerDraft: "", composerAttachments: [],
       } });
     }
+    // 退出设置页后自动刷新模型列表
+    void useChatStore.getState().loadModels();
+
     // 从设置页返回会话页后主动聚焦输入框（登录/配置期间 textarea 已卸载重挂，
     // 不恢复焦点则用户点击会被"窗口未聚焦"或卸载竞态吞掉）
     window.setTimeout(() => {

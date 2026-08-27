@@ -21,6 +21,13 @@ const SANDBOX_MODES = [
   { value: "danger-full-access", label: "危险全访问（免审批）" },
 ];
 
+const MAX_STEPS_OPTIONS = [
+  { value: 200, label: "200 步" },
+  { value: 500, label: "500 步" },
+  { value: 1000, label: "1000 步（默认）" },
+  { value: 0, label: "不限制步数" },
+];
+
 export function GeneralPanel() {
   const ui = useUiStore();
   const [cfg, setCfg] = useState({
@@ -30,6 +37,9 @@ export function GeneralPanel() {
     memory_enabled: true,
     plan_mode_allow_outside_access: false,
     sandbox_mode: "workspace-write",
+    agent_max_steps: 1000,
+    browser_enabled: false,
+    browser_headless: true,
   });
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -48,6 +58,9 @@ export function GeneralPanel() {
         memory_enabled: g.memory_enabled !== false,
         plan_mode_allow_outside_access: g.plan_mode_allow_outside_access === true,
         sandbox_mode: g.sandbox_mode || "workspace-write",
+        agent_max_steps: typeof g.agent_max_steps === "number" ? g.agent_max_steps : 1000,
+        browser_enabled: g.browser_enabled === true,
+        browser_headless: g.browser_headless !== false,
       });
     } catch {}
   }, []);
@@ -69,6 +82,9 @@ export function GeneralPanel() {
         memory_enabled: cfg.memory_enabled,
         plan_mode_allow_outside_access: cfg.plan_mode_allow_outside_access,
         sandbox_mode: cfg.sandbox_mode,
+        agent_max_steps: cfg.agent_max_steps,
+        browser_enabled: cfg.browser_enabled,
+        browser_headless: cfg.browser_headless,
       });
       // v1.1: 保存即生效——刷新 todos/reasoning 显示开关
       await useUiStore.getState().refreshGlobalFlags();
@@ -87,7 +103,7 @@ export function GeneralPanel() {
             <option value="en">English</option>
           </select>
         </Row>
-        <Row title="HTTP 代理" desc="全局 HTTP/HTTPS 代理（写入后端环境变量，立即生效）">
+        <Row title="HTTP 代理" desc="全局 HTTP/HTTPS 代理，搜索引擎（Google/DuckDuckGo 等）与 web 工具自动走此代理，立即生效">
           <input className="ui-input" placeholder="如 http://127.0.0.1:7890" value={cfg.http_proxy} onChange={(e) => patch({ http_proxy: e.target.value })} />
         </Row>
         <Row title="集成终端 Shell" desc="新终端标签使用的 Shell（重启终端生效）">
@@ -125,6 +141,45 @@ export function GeneralPanel() {
             {SANDBOX_MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
           </select>
         </Row>
+        <Row title="AI 最大执行步数" desc="单轮对话中模型可调用的最大工具步数。可选 200、500、1000（推荐）或不限制步数">
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <select
+              className="ui-select"
+              style={{ minWidth: 140 }}
+              value={[200, 500, 1000, 0].includes(cfg.agent_max_steps) ? cfg.agent_max_steps : "custom"}
+              onChange={(e) => {
+                const val = e.target.value;
+                if (val === "custom") return;
+                patch({ agent_max_steps: Number(val) });
+              }}
+            >
+              {MAX_STEPS_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+              {![200, 500, 1000, 0].includes(cfg.agent_max_steps) && (
+                <option value="custom">自定义 ({cfg.agent_max_steps} 步)</option>
+              )}
+            </select>
+            {![200, 500, 1000, 0].includes(cfg.agent_max_steps) && (
+              <input
+                type="number"
+                className="ui-input"
+                style={{ width: 90 }}
+                min={0}
+                value={cfg.agent_max_steps}
+                onChange={(e) => patch({ agent_max_steps: Math.max(0, parseInt(e.target.value) || 0) })}
+              />
+            )}
+          </div>
+        </Row>
+        <Row title="开启内置浏览器工具" desc="允许 AI 调用浏览器进行网页访问、点击、填表、DOM 解析与多模态页面截图">
+          <Sw checked={cfg.browser_enabled} onChange={(v) => patch({ browser_enabled: v })} />
+        </Row>
+        {cfg.browser_enabled && (
+          <Row title="浏览器后台无头模式" desc="开启后 Playwright/Chromium 在后台静默运行；关闭后显示可视浏览器窗口">
+            <Sw checked={cfg.browser_headless} onChange={(v) => patch({ browser_headless: v })} />
+          </Row>
+        )}
         <Row title="计划模式允许访问工作区外" desc="开启后「计划模式」会话中的 AI 可执行命令访问工作区外的目录（默认关闭，越界 cwd 回退工作区）；只读沙箱下非只读命令仍会被拦截">
           <Sw checked={cfg.plan_mode_allow_outside_access} onChange={(v) => patch({ plan_mode_allow_outside_access: v })} />
         </Row>

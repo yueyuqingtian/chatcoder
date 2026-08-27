@@ -259,39 +259,37 @@ def ensure_tool_pairing(messages: list[ChatMessage]) -> list[ChatMessage]:
 
 
 def normalize_tool_sequence(messages: list[ChatMessage]) -> list[ChatMessage]:
-    """v8 根治：强制 OpenAI 协议 —— assistant(tool_calls) 后必须紧跟对应的 tool 消息。
-
-    背景：context_manager 重建历史 / 截断 / 压缩后，可能出现
-    - assistant(tool_calls) 与 tool 之间夹着 assistant 文本等非 tool 消息 → 网关 400
-      "An assistant message with 'tool_calls' must be followed by tool messages"
-    - 孤立的 tool 消息（无前置 assistant(tool_calls)）→ 网关 400
-      "Messages with role 'tool' must be a response to a preceding message with 'tool_calls'"
-
-    策略（在 ensure_tool_pairing 之后调用）：
-    1. 遇到 assistant(tool_calls)：进入"等待 tool 结果"状态，记录所有 tool_call id
-    2. 等待期间：
-       - tool 消息且 id 匹配 → 直接通过；全部匹配后放回延迟的消息
-       - tool 消息但 id 不匹配（孤立）→ 丢弃
-       - 其他消息（assistant 文本等）→ 延迟到该组 tool 结果全部匹配之后再放回
-    3. 保证任何非 tool 消息都不会出现在 assistant(tool_calls) 与其 tool 结果之间。
+    """v8 + v36 + v37 根治：强制 OpenAI & Gemini 协议合规。
+    
+    规则：
+    1. assistant(tool_calls) 必须紧跟对应的 tool 消息，中间不得夹杂任何非 tool 消息。
+    2. tool 消息必须有前置的 assistant(tool_calls)，孤立的 tool 消息将被丢弃。
+    3. 消除非法相邻同角色消息：
+       - 连续 assistant 消息（纯文本、思考内容、tool_calls）进行智能合并，防止 Gemini 等网关报错：
+         "Please ensure that function call turn comes immediately after a user turn or after a function response turn."
+       - 连续 user 消息合并为单条。
+    4. 确保 assistant(tool_calls) 的直接前驱必须是 user 或 tool 消息：
+       - 若历史被截断/压缩导致 assistant(tool_calls) 紧随 system 消息或出现在开头，
+         自动在前置插入合成 user 消息，保证 Gemini 校验通过。
     """
     if not messages:
         return messages
 
-    result: list[ChatMessage] = []
+    # 第一阶段：消除工具调用与对应结果之间的夹层消息
+    first_pass: list[ChatMessage] = []
     pending_ids: list[str] = []
     deferred: list[ChatMessage] = []
 
     def _flush_deferred() -> None:
         nonlocal deferred
         if deferred:
-            result.extend(deferred)
+            first_pass.extend(deferred)
             deferred = []
 
     for m in messages:
         if pending_ids:
             if m.role == "tool" and m.tool_call_id in pending_ids:
-                result.append(m)
+                first_pass.append(m)
                 pending_ids.remove(m.tool_call_id)
                 if not pending_ids:
                     _flush_deferred()
@@ -303,12 +301,65 @@ def normalize_tool_sequence(messages: list[ChatMessage]) -> list[ChatMessage]:
             # 非 tool 消息夹在 assistant(tool_calls) 与 tool 之间 → 延迟
             deferred.append(m)
             continue
-        result.append(m)
+        first_pass.append(m)
         if m.role == "assistant" and m.tool_calls:
             pending_ids = [tc.get("id") for tc in m.tool_calls if tc.get("id")]
 
     _flush_deferred()
-    return result
+
+    # 第二阶段：智能合并相邻的相同角色消息（解决 Gemini 400 校验限制）
+    normalized: list[ChatMessage] = []
+    for m in first_pass:
+        if not normalized:
+            normalized.append(m)
+            continue
+
+        prev = normalized[-1]
+
+        # 连续两个 assistant 消息的处理
+        if prev.role == "assistant" and m.role == "assistant":
+            parts = [p for p in [prev.content, m.content] if p]
+            new_content = "\n\n".join(parts) if parts else None
+
+            r_parts = [r for r in [prev.reasoning_content, m.reasoning_content] if r]
+            new_reasoning = "\n\n".join(r_parts) if r_parts else None
+
+            new_tcs = None
+            if prev.tool_calls or m.tool_calls:
+                new_tcs = (prev.tool_calls or []) + (m.tool_calls or [])
+
+            normalized[-1] = ChatMessage(
+                role="assistant",
+                content=new_content,
+                tool_calls=new_tcs,
+                reasoning_content=new_reasoning,
+            )
+            continue
+
+        # 连续两个 user 消息的处理：合并文本
+        if prev.role == "user" and m.role == "user":
+            parts = [p for p in [prev.content, m.content] if p]
+            new_content = "\n\n".join(parts) if parts else None
+            normalized[-1] = ChatMessage(
+                role="user",
+                content=new_content,
+            )
+            continue
+
+        normalized.append(m)
+
+    # 第三阶段：确保 assistant(tool_calls) 紧跟在 user 或 tool 之后（Gemini 协议硬性要求）
+    final_msgs: list[ChatMessage] = []
+    for m in normalized:
+        if m.role == "assistant" and m.tool_calls:
+            # 查找直接前驱消息
+            if not final_msgs or final_msgs[-1].role not in ("user", "tool"):
+                # 前驱是 system 或为空，插入合成 user 消息以满足协议
+                logger.info("[normalize] assistant(tool_calls) 直接前驱不是 user/tool (当前为 %s)，自动插入上下文合成 user 消息", final_msgs[-1].role if final_msgs else "None")
+                final_msgs.append(ChatMessage(role="user", content="[上下文历史记录]"))
+        final_msgs.append(m)
+
+    return final_msgs
 
 
 # ---------------------------------------------------------------------------

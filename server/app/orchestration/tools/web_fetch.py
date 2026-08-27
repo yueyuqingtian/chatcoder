@@ -7,8 +7,7 @@ import socket
 from typing import Any
 from urllib.parse import urlparse
 
-import httpx
-
+from app.core.http_client import build_http_client
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 
 _TIMEOUT_SEC = 15
@@ -100,7 +99,10 @@ class WebFetchTool(Tool):
             return ToolResult(ok=False, output="", error=f"[SSRF 防护] {err}")
 
         try:
-            async with httpx.AsyncClient(timeout=_TIMEOUT_SEC, follow_redirects=True, headers={"Accept-Encoding": "gzip, deflate"}) as client:
+            async with build_http_client(
+                timeout=_TIMEOUT_SEC, follow_redirects=True,
+                headers={"Accept-Encoding": "gzip, deflate"},
+            ) as client:
                 resp = await client.get(url, headers={"User-Agent": "chatcoder/1.0"})
                 text = resp.text
         except Exception as e:

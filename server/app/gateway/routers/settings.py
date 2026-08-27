@@ -111,6 +111,22 @@ def load_persisted_workspace() -> None:
         settings.show_reasoning = bool(data["show_reasoning"])
     if "memory_enabled" in data:
         settings.auto_memory_enabled = bool(data["memory_enabled"])
+    if "agent_max_steps" in data:
+        try:
+            settings.agent_max_steps = int(data["agent_max_steps"])
+        except (TypeError, ValueError):
+            pass
+    if "browser_enabled" in data:
+        settings.browser_enabled = bool(data["browser_enabled"])
+    if "browser_headless" in data:
+        settings.browser_headless = bool(data["browser_headless"])
+    # v31.2: 启动时恢复代理设置（运行时字段 + 环境变量，供 web 工具走代理）
+    if "http_proxy" in data:
+        _proxy = str(data["http_proxy"] or "")
+        settings.http_proxy = _proxy
+        if _proxy:
+            os.environ["HTTP_PROXY"] = _proxy
+            os.environ["HTTPS_PROXY"] = _proxy
     if "plan_mode_allow_outside_access" in data:
         settings.plan_mode_allow_outside_access = bool(data["plan_mode_allow_outside_access"])
     if "sandbox_mode" in data:
@@ -156,6 +172,11 @@ class GlobalSettingsOut(BaseModel):
     plan_mode_allow_outside_access: bool = False
     # v32 (plan-89): 沙箱模式（三态：workspace-write / read-only / danger-full-access）
     sandbox_mode: str = "workspace-write"
+    # Agent 最大步数（200 / 500 / 1000 / 0=不限制）
+    agent_max_steps: int = 1000
+    # 浏览器自动化开关与无头模式
+    browser_enabled: bool = False
+    browser_headless: bool = True
 
 
 class GlobalSettingsIn(BaseModel):
@@ -176,6 +197,9 @@ class GlobalSettingsIn(BaseModel):
     show_reasoning: bool | None = None
     plan_mode_allow_outside_access: bool | None = None
     sandbox_mode: str | None = None
+    agent_max_steps: int | None = None
+    browser_enabled: bool | None = None
+    browser_headless: bool | None = None
 
 
 @router.get("/settings/global", response_model=GlobalSettingsOut)
@@ -199,6 +223,9 @@ async def get_global_settings() -> GlobalSettingsOut:
         show_reasoning=data.get("show_reasoning", True),
         plan_mode_allow_outside_access=data.get("plan_mode_allow_outside_access", False),
         sandbox_mode=data.get("sandbox_mode", settings.sandbox_mode),
+        agent_max_steps=data.get("agent_max_steps", settings.agent_max_steps),
+        browser_enabled=data.get("browser_enabled", settings.browser_enabled),
+        browser_headless=data.get("browser_headless", settings.browser_headless),
     )
 
 
@@ -231,6 +258,8 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         data["terminal_font"] = body.terminal_font
     if body.http_proxy is not None:
         data["http_proxy"] = body.http_proxy
+        # v31.2: 同步运行时 settings（http_client 显式读取，不依赖 trust_env）
+        settings.http_proxy = body.http_proxy
         if body.http_proxy:
             os.environ["HTTP_PROXY"] = body.http_proxy
             os.environ["HTTPS_PROXY"] = body.http_proxy
@@ -256,6 +285,15 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
     if body.memory_enabled is not None:
         data["memory_enabled"] = body.memory_enabled
         settings.auto_memory_enabled = body.memory_enabled
+    if body.agent_max_steps is not None:
+        data["agent_max_steps"] = int(body.agent_max_steps)
+        settings.agent_max_steps = int(body.agent_max_steps)
+    if body.browser_enabled is not None:
+        data["browser_enabled"] = bool(body.browser_enabled)
+        settings.browser_enabled = bool(body.browser_enabled)
+    if body.browser_headless is not None:
+        data["browser_headless"] = bool(body.browser_headless)
+        settings.browser_headless = bool(body.browser_headless)
     _save_config(data)
     # 运行时更新 context compaction 设置
     if body.auto_compact_enabled is not None:
@@ -277,6 +315,9 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         show_reasoning=data.get("show_reasoning", True),
         plan_mode_allow_outside_access=data.get("plan_mode_allow_outside_access", False),
         sandbox_mode=data.get("sandbox_mode", settings.sandbox_mode),
+        agent_max_steps=data.get("agent_max_steps", settings.agent_max_steps),
+        browser_enabled=data.get("browser_enabled", settings.browser_enabled),
+        browser_headless=data.get("browser_headless", settings.browser_headless),
     )
 
 

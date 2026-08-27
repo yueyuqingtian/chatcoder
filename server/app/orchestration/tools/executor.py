@@ -20,19 +20,29 @@ logger = logging.getLogger(__name__)
 
 def _is_plan_doc_path(ctx: ToolContext, args: dict) -> bool:
     """规划模式放行判定：写入目标为 workspace/ai/ 下的 .md 计划文档。"""
-    raw = args.get("path") or args.get("file_path") or ""
+    raw = args.get("path") or args.get("file_path") or args.get("filepath") or ""
     if not isinstance(raw, str) or not raw.strip():
         return False
     try:
         from pathlib import Path
         from app.orchestration.tools.safe_path import safe_resolve, safe_resolve_parent
-        root = Path(ctx.workspace_root).resolve()
+        root_dir = ctx.workspace_root if (ctx.workspace_root and str(ctx.workspace_root).strip()) else "."
+        root = Path(root_dir).resolve()
         target = safe_resolve(str(root), raw) or safe_resolve_parent(str(root), raw)
         if target is None:
+            # 尝试直接使用 Path 解析
+            p = Path(raw)
+            if p.is_absolute():
+                target = p.resolve()
+            else:
+                target = (root / p).resolve()
+        else:
+            target = target.resolve()
+        rel = target.relative_to(root) if target.is_relative_to(root) else None
+        if rel is None:
             return False
-        rel = target.resolve().relative_to(root) if target.is_absolute() else target
         parts = rel.parts
-        return len(parts) == 2 and parts[0] == "ai" and parts[1].lower().endswith(".md")
+        return len(parts) == 2 and parts[0].lower() == "ai" and parts[1].lower().endswith(".md")
     except Exception:
         return False
 
@@ -173,13 +183,22 @@ class ServerToolExecutor(ToolExecutor):
         except Exception:
             logger.warning("工具 %s approval_precheck 异常(忽略)", tool_name, exc_info=True)
 
-        # 2. 权限模式三态
+        # 2. 权限模式三态与规划模式命令防篡改拦截
         pm = getattr(ctx, "permission_mode", "default") or "default"
         if pm in ("plan", "readonly") and tool_name in _WRITE_TOOLS:
             # 规划模式放行计划文档写入（ai/*.md），其余写盘仍拒绝
             if pm == "plan" and tool_name == "fs_write" and _is_plan_doc_path(ctx, args):
                 return True, ""
             return False, f"{'规划' if pm == 'plan' else '只读'}模式不允许写盘工具"
+        if pm in ("plan", "readonly") and tool_name == "terminal_exec":
+            # 规划模式/只读模式下严禁使用命令行修改或创建任何文件
+            from app.orchestration.tools.shell_policy import analyze as _analyze_shell
+            cmd_str = str(args.get("command", "") or "")
+            verdict, reason = _analyze_shell(cmd_str)
+            if verdict != "allow":
+                return False, f"{'规划' if pm == 'plan' else '只读'}模式仅允许只读命令，禁止通过终端修改/写入文件: {reason or cmd_str}"
+            # 即使命令本身在只读白名单中，也严格放行且无需人工审批
+            return True, ""
         if pm == "accept_edits" and tool_name in _WRITE_TOOLS:
             return True, ""
 
