@@ -213,11 +213,25 @@ class Settings(BaseSettings):
     # v2.2 (对齐 zcode 3.9): todo 提醒间隔——模型维护的执行清单连续 N 步未更新时
     # 注入 system 提醒（防"开清单后跑偏"，对齐 ZCode buildTodoReminderBody）
     todo_reminder_interval: int = 3
+    # plan-547 C1: 进度提醒间隔——连续 N 步没有面向用户的文字输出时注入 system 提醒
+    # （防"长时间静默执行"，用户看不到进展）；0 = 禁用。
+    agent_progress_reminder_interval: int = 8
     complexity_direct_max_chars: int = 15
     complexity_llm_timeout: float = 15.0
     task_fail_policy: str = "continue"  # continue | abort
     task_retry_count: int = 1
     plan_mode_auto_split: bool = True
+    # plan-644: plan 模式每轮注入的"计划需求全集"字符上限（Plan History，
+    # 含各轮用户需求与文档正文；超限从最早轮次开始降级）。0 = 禁用注入。
+    plan_history_inject_chars: int = 8000
+
+    # 目标模式（对齐 zcode goal-continuation）：
+    # - goal_mode_enabled: 总开关，关闭后 turn 完成不再自动续跑
+    # - goal_max_continuation_turns: 单目标最大自动续跑轮次（防失控）
+    # - goal_continuation_interval_sec: 续跑前间隔（给前端喘息与用户可停窗口）
+    goal_mode_enabled: bool = True
+    goal_max_continuation_turns: int = 10
+    goal_continuation_interval_sec: float = 2.0
 
     # v23: ta3（Ta+3 牛码）供应商 —— Electron 同族 UA（风控伪装，可覆盖）
     ta3_user_agent: str = (

@@ -12,7 +12,8 @@ from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 
 logger = logging.getLogger(__name__)
 
-_TIMEOUT = 15
+# v1.0 (plan-153-705): 15s → 60s——大仓库 git status/log/blame 会超 15s
+_TIMEOUT = 60
 _MAX_OUTPUT = 6000
 
 

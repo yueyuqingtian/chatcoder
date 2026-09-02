@@ -76,6 +76,20 @@ async def cancel_turn_tasks(db: AsyncSession, session_id: int, turn_id: int) -> 
     return count
 
 
+async def create_artifact(db: AsyncSession, *, task_id: int | None = None,
+                          type: str | None = None, title: str | None = None,
+                          storage_ref: str | None = None, summary: str | None = None,
+                          files: list[str] | None = None,
+                          git_baseline: str | None = None) -> Artifact:
+    art = Artifact(
+        task_id=task_id, type=type, title=title, storage_ref=storage_ref,
+        summary=summary, files=files, git_baseline=git_baseline,
+    )
+    db.add(art)
+    await db.flush()
+    return art
+
+
 async def list_artifacts(db: AsyncSession, session_id: int) -> list[Artifact]:
     from app.persistence.models.task import Task
     res = await db.execute(

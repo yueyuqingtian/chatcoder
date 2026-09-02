@@ -22,12 +22,24 @@ ws_router = APIRouter()
 # 断线补偿缓冲区容量（per session）
 _EVENT_BUFFER_SIZE = 500
 
+# v37: 全局通道转发的事件白名单——仅转发「跨会话可见」的状态类事件。
+# 高频流式事件（token/thinking/tool）绝不转发，避免全局连接被长任务淹没。
+_GLOBAL_FORWARD_EVENTS = frozenset({
+    "session.completed",
+    "session.updated",
+    "turn.completed",
+    "turn.updated",
+    "message.created",
+})
+
 
 class ConnectionManager:
     """管理每个 session 的 WebSocket 连接。"""
 
     def __init__(self) -> None:
         self._conns: dict[int, set[WebSocket]] = defaultdict(set)
+        # v37: 全局连接（不分会话）——侧栏需要感知「非当前会话」的运行状态与时间
+        self._global_conns: set[WebSocket] = set()
         # v2.1: 会话级事件序号计数器（内存，进程重启归零——重启后客户端重建状态即可）
         self._seqs: dict[int, int] = defaultdict(int)
         # v2.1: 会话级事件环形缓冲区（断线补偿补发源）
@@ -41,6 +53,48 @@ class ConnectionManager:
         self._conns[session_id].discard(ws)
         if not self._conns[session_id]:
             self._conns.pop(session_id, None)
+
+    def connect_global(self, ws: WebSocket) -> None:
+        """v37: 登记全局连接（侧栏跨会话状态通道）。"""
+        self._global_conns.add(ws)
+
+    def disconnect_global(self, ws: WebSocket) -> None:
+        self._global_conns.discard(ws)
+
+    async def broadcast_global(self, event: dict) -> None:
+        """v37: 向全部全局连接广播；发送失败的连接直接剔除。
+
+        失败静默——全局通道只服务侧栏展示，不得影响业务主流程。
+        """
+        if not self._global_conns:
+            return
+        try:
+            raw = json.dumps(event, ensure_ascii=False)
+        except (TypeError, ValueError):
+            logger.warning("[ws] 全局事件序列化失败: %r", event.get("event"))
+            return
+        dead: list[WebSocket] = []
+        for ws in list(self._global_conns):
+            try:
+                await asyncio.wait_for(ws.send_text(raw), timeout=5.0)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self._global_conns.discard(ws)
+
+    async def _forward_global(self, session_id: int, event: dict) -> None:
+        """v37: 白名单事件转发到全局通道，payload 注入 session_id 供前端定位会话。"""
+        if event.get("event") not in _GLOBAL_FORWARD_EVENTS:
+            return
+        payload = event.get("payload")
+        forwarded = {
+            "event": event["event"],
+            "payload": {**(payload if isinstance(payload, dict) else {}), "session_id": session_id},
+        }
+        try:
+            await self.broadcast_global(forwarded)
+        except Exception:
+            logger.debug("[ws] 全局通道转发失败(非阻塞): %s", event.get("event"), exc_info=True)
 
     def next_seq(self, session_id: int) -> int:
         self._seqs[session_id] += 1
@@ -73,6 +127,8 @@ class ConnectionManager:
                 dead.append(ws)
         for ws in dead:
             self._conns[session_id].discard(ws)
+        # v37: 白名单事件同步转发到全局通道（侧栏感知非当前会话的状态变化）
+        await self._forward_global(session_id, event)
 
     def replay_since(self, session_id: int, last_seq: int) -> list[dict]:
         """取 seq > last_seq 的缓冲事件（断线补偿）。"""
@@ -80,6 +136,27 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+
+
+@ws_router.websocket("/ws/global")
+async def ws_global_endpoint(ws: WebSocket) -> None:
+    """v37: 全局状态通道——侧向栏感知「非当前会话」的运行状态与最新活动时间。
+
+    会话级通道只给聚焦会话派发事件，后台会话结束后侧栏无从得知，
+    运行标记只能靠整表刷新修正。本通道转发白名单内的状态类事件
+    （session.completed / session.updated / turn.* / message.created），
+    payload 统一注入 session_id；不接收任何业务指令，仅维持心跳。
+    """
+    await ws.accept()
+    manager.connect_global(ws)
+    try:
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect_global(ws)
+    except Exception:
+        logger.debug("[ws] 全局连接异常关闭", exc_info=True)
+        manager.disconnect_global(ws)
 
 
 @ws_router.websocket("/ws/sessions/{session_id}")

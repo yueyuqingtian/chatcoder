@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
   // 系统集成
   openPath: (p) => ipcRenderer.invoke("shell:openPath", p),
   showItemInFolder: (p) => ipcRenderer.invoke("shell:showItemInFolder", p),
+  openInApp: (target, p) => ipcRenderer.invoke("shell:openInApp", target, p),
   // v23: 打开外部 URL（ta3 登录授权跳转，走系统默认浏览器）
   openExternal: (url) => ipcRenderer.invoke("shell:openExternal", url),
   // 终端 PTY
@@ -50,6 +51,8 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
   },
   // 外部穿透开关（透桌面/其他软件颜色）
   setExternalBackdrop: (on) => ipcRenderer.send("window:setExternalBackdrop", !!on),
+  // plan-546: 毛玻璃模式（Win11 acrylic 真磨砂；不支持时降级 CSS 半透明）
+  setGlassMode: (on) => ipcRenderer.invoke("window:setGlass", !!on),
   // 当前系统用户名（侧栏底部用户条展示，对齐 zcode）
   getUsername: () => {
     try { return Promise.resolve(require("os").userInfo().username || ""); }
@@ -59,6 +62,17 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
   setKeepAwake: (on) => ipcRenderer.invoke("power:setKeepAwake", !!on),
   // v19: 外挂插件列表（manifest + 源码文本）
   listUserPlugins: () => ipcRenderer.invoke("plugins:list"),
+  // 自动更新（electron-updater + GitHub Releases）
+  checkForUpdates: () => ipcRenderer.invoke("app:checkForUpdates"),
+  getUpdateState: () => ipcRenderer.invoke("app:getUpdateState"),
+  downloadUpdate: () => ipcRenderer.invoke("app:downloadUpdate"),
+  installUpdate: () => ipcRenderer.invoke("app:installUpdate"),
+  getAppVersion: () => ipcRenderer.invoke("app:getVersion"),
+  onUpdateStatus: (cb) => {
+    const handler = (_e, state) => cb(state);
+    ipcRenderer.on("app:updateStatus", handler);
+    return () => ipcRenderer.removeListener("app:updateStatus", handler);
+  },
 });
 
 // 注入平台到 <html data-platform>，供 CSS 平台感知样式（如 Win11 微圆角+四角透桌面）使用

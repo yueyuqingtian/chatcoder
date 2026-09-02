@@ -1,8 +1,8 @@
-/** v2 会话状态管理（zustand）：项目 / 会话 / turn 任务驱动。 */
+﻿/** v2 会话状态管理（zustand）：项目 / 会话 / turn 任务驱动。 */
 import { create } from "zustand";
 import { api } from "../api/client";
 import type { ArtifactOut, AttachmentInfo, FileChangeOut, MessageOut, ModelOut, ProjectOut, ProviderOut, RollbackAffected, RollbackPreviewFile, SessionOut, TaskOut, TurnOut } from "../api/client";
-import { wsClient } from "../api/ws";
+import { wsClient, globalWsClient } from "../api/ws";
 import type { ServerEventName } from "@chatcoder/shared/events";
 import type { CompactSummaryPayload } from "@chatcoder/shared/events";
 
@@ -35,6 +35,50 @@ export interface QueuedInput {
   attachments?: Record<string, unknown>[];
   reasoningEffort?: string;
   mode?: "readonly" | "plan" | null;
+  /** plan-547: 点击"立即发送"后的注入中状态（等待 user_input.injected 事件确认后移除） */
+  flushing?: boolean;
+}
+
+/** v42: "立即发送"注入分割标记。
+ * 注入时刻 AI 恰在流式输出时，该流式段（跨界段）尚未落库、落库后 id 会大于
+ * 注入消息--按 id 序渲染会掉到注入消息下方。注入时快照流式中的 agent，
+ * 其当前段落库后绑定 crossoverId，渲染时该段固定前移到注入消息上方：
+ * 注入消息成为时间分割点（上方=注入前内容含跨界段，下方=注入后新输出）。 */
+export interface InjectMark {
+  /** 注入消息所属 turn */
+  turnId: number;
+  /** 注入的用户消息 id（渲染分割点） */
+  injectId: number;
+  /** 注入时刻正在流式输出的 agent（跨界段落库绑定后清空） */
+  pendingAgents: number[];
+  /** 注入时刻流式中的段完成落库后的消息 id（前移到注入消息上方）；null=尚未落库 */
+  crossoverId: number | null;
+}
+
+/** 浏览器引用贴条（元素标注 / 网页截图 / DOM 快照 / 控制台求值）。 */
+export interface BrowserRef {
+  id: string;
+  kind: "element" | "screenshot" | "dom" | "console";
+  url: string;
+  pageTitle: string;
+  selector?: string;
+  bbox?: { x: number; y: number; width: number; height: number };
+  styleDigest?: string;
+  text?: string;
+  note?: string;
+  thumbUrl?: string;
+  createdAt?: number;
+}
+
+/** 计划卡片持久化信息（按时间线固定展示，执行时不消失） */
+export interface PlanCardInfo {
+  turnId: number;
+  task: string;
+  planDocPath: string;
+  status: "awaiting_confirmation" | "confirmed" | "cancelled" | "completed" | "superseded";
+  createdAt?: number;
+  /** plan-604: 锚定消息 id（方案汇报正文；缺省兜底 turn 内最后一条 AI 消息）——锚点及之前为规划段，计划卡渲染在规划段末尾 */
+  anchorMsgId?: number | null;
 }
 
 /**
@@ -55,10 +99,12 @@ export interface SessionSlice {
   usage: UsageDetail | null;
   isCompacting: boolean;
   pendingApproval: { approvalId: string; detail: Record<string, unknown> } | null;
-  /** plan-95: turnId 标记计划卡归属的 turn，消息流据此把卡片内嵌到对应位置 */
-  pendingPlan: { task: string; turnId?: number } | null;
+  /** plan-95/v38: turnId 标记计划卡归属 turn；planDocPath 为后端广播的实际文档路径。
+   *  task.proposed 与旧 /plan 流程统一由本状态渲染确认卡（不再有独立 pendingSplit）。 */
+  pendingPlan: { task: string; turnId?: number; planDocPath?: string } | null;
   pendingPlanTurn: { turnId: number; task: string } | null;
-  pendingSplit: { turnId: number; requestTaskId: number; groupTaskId: number; reasons: string[]; planDocPath?: string } | null;
+  /** 计划卡片按 turnId 持久化字典：按时间线固定展示，执行与完成后不消失 */
+  plansByTurn: Record<number, PlanCardInfo>;
   reviewedFiles: Record<string, boolean>;
   rollbackPending: { turnId: number; files: RollbackPreviewFile[]; affected: RollbackAffected } | null;
   turnChanges: Record<number, FileChangeOut[]>;
@@ -66,6 +112,8 @@ export interface SessionSlice {
   todoPersisted: boolean;
   agentActivity: Record<number, string>;
   queuedInputs: QueuedInput[];
+  /** v42: 注入分割标记（会话级，跨 turn 在 turn.started 清空） */
+  injectMarks: InjectMark[];
 }
 
 /** 视图 → slice 快照（切换会话前保存当前会话状态）。 */
@@ -85,7 +133,7 @@ function _snapshotSlice(s: ChatState): SessionSlice {
     pendingApproval: s.pendingApproval,
     pendingPlan: s.pendingPlan,
     pendingPlanTurn: s.pendingPlanTurn,
-    pendingSplit: s.pendingSplit,
+    plansByTurn: s.plansByTurn || {},
     reviewedFiles: s.reviewedFiles,
     rollbackPending: s.rollbackPending,
     turnChanges: s.turnChanges,
@@ -93,6 +141,7 @@ function _snapshotSlice(s: ChatState): SessionSlice {
     todoPersisted: s.todoPersisted,
     agentActivity: s.agentActivity,
     queuedInputs: s.queuedInputs,
+    injectMarks: s.injectMarks,
   };
 }
 
@@ -138,16 +187,17 @@ interface ChatState {
   lastCompact: CompactSummaryPayload | null;
   /** 待审批请求。 */
   pendingApproval: { approvalId: string; detail: Record<string, unknown> } | null;
-  /** 回滚/撤销后回填输入框的草稿。 */
-  composerDraft: string;
-  /** v2.2: 回滚/撤销后回填输入框的附件（图片等），一次性消费，ComposerCore 回填后清空。 */
-  composerAttachments: AttachmentInfo[];
-  /** v6: /plan 计划确认弹窗（plan turn 完成后触发，task 为待执行任务）。plan-95: turnId 用于消息流内嵌定位。 */
-  pendingPlan: { task: string; turnId?: number } | null;
+  /** 回滚/撤销后回填输入框的草稿（v40 按 key 隔离：key="home"|"new"|sessionId，
+   * 仅 draftKey 匹配的 Composer 实例消费一次，避免跨会话/首页串扰）。 */
+  composerBackfill: { key: string; text: string; attachments: AttachmentInfo[] } | null;
+  /** 浏览器标注/截图贴条列表。 */
+  composerBrowserRefs: BrowserRef[];
+  /** v6/v38: 计划确认状态（方案文档生成后等待确认，含任务标题、归属 turnId 与文档路径）。 */
+  pendingPlan: { task: string; turnId?: number; planDocPath?: string } | null;
   /** v7: /plan 待确认的 plan turn（旧兼容字段）。 */
   pendingPlanTurn: { turnId: number; task: string } | null;
-  /** v13: 后端任务拆分提案所在区块。 */
-  pendingSplit: { turnId: number; requestTaskId: number; groupTaskId: number; reasons: string[]; planDocPath?: string } | null;
+  /** 计划卡片按 turnId 持久化字典：按时间线固定展示，执行与完成后不消失 */
+  plansByTurn: Record<number, PlanCardInfo>;
   /** v6: 已审查的产物文件（path -> true），用于审查清单展示。 */
   reviewedFiles: Record<string, boolean>;
   /** v9: 回滚确认弹窗数据（点击回滚先预览，确认后执行）。v12: 含连带影响统计。 */
@@ -173,8 +223,12 @@ interface ChatState {
   scrollTarget: { threadId?: number; turnId?: number } | null;
   /** v18: 全局最近选择的思考深度档位（空态首页选择跨入会话后由 ComposerBox 承接）。 */
   lastReasoningEffort: string | null;
+  /** plan-546: 全局最近使用的模型 id（新空态首页默认模型 = 最近一次会话/首页所用模型）。 */
+  lastModelId: number | null;
   /** v2.2 (对齐 zcode 3.8): 输入队列——运行中发送的消息排队，turn 完成后自动续发。 */
   queuedInputs: QueuedInput[];
+  /** v42: 注入分割标记（见 InjectMark） */
+  injectMarks: InjectMark[];
   loading: boolean;
   error: string | null;
   wsConnected: boolean;
@@ -184,7 +238,7 @@ interface ChatState {
   loadModels: () => Promise<void>;
   createProject: (path: string, name?: string) => Promise<ProjectOut | null>;
   selectProject: (projectId: number) => Promise<void>;
-  createSession: (projectId: number, title?: string) => Promise<number | null>;
+  createSession: (projectId: number, title?: string, opts?: { model_id?: number | null; permission_mode?: "default" | "accept_edits" | "plan" | "readonly"; goal_text?: string | null }) => Promise<number | null>;
   switchSession: (sessionId: number, fromHist?: boolean) => Promise<void>;
   /** 会话前进/后退历史（侧栏 logo 区与折叠态标题栏共用，zcode 顶部导航箭头） */
   sessionHist: number[];
@@ -193,7 +247,8 @@ interface ChatState {
   deleteSession: (sessionId: number) => Promise<void>;
   renameSession: (sessionId: number, title: string) => Promise<void>;
   forkSession: (sessionId: number) => Promise<void>;
-sendTurn: (content: string, attachments?: Record<string, unknown>[], reasoningEffort?: string, mode?: "readonly" | "plan" | null) => Promise<void>;
+/** plan-547: 返回新 turn id（null=未创建，如运行中入队/发送失败），供队列续发失败回队判断。 */
+sendTurn: (content: string, attachments?: Record<string, unknown>[], reasoningEffort?: string, mode?: "readonly" | "plan" | null) => Promise<number | null>;
 cancelTurn: () => Promise<void>;
   forceStop: () => Promise<void>;
 resumeTurn: () => Promise<void>;
@@ -205,7 +260,8 @@ resumeTurn: () => Promise<void>;
   /** v9: 取消回滚（关闭弹窗）。 */
   cancelRollback: () => void;
   confirmPlan: (task: string) => Promise<void>;
-  confirmTaskSplit: (accepted: boolean, steps?: Array<{ task_id?: number; title: string }>) => Promise<void>;
+  /** v38 (plan-482): 确认/取消方案文档（不再涉及 group/steps 编辑）。 */
+  confirmPlanTurn: (accepted: boolean) => Promise<void>;
   /** v15: 重试失败/已取消的步骤。 */
   retryTask: (taskId: number) => Promise<void>;
   dismissPlan: () => void;
@@ -220,8 +276,14 @@ resumeTurn: () => Promise<void>;
   refreshTasks: () => Promise<void>;
   /** v12: 刷新当前会话产物聚合（随 refreshTasks 一并拉取）。 */
   refreshArtifacts: () => Promise<void>;
-  setComposerDraft: (text: string) => void;
+  setComposerDraft: (key: string, text: string) => void;
   appendComposerDraft: (text: string) => void;
+  /** 添加浏览器标注引用。 */
+  addComposerBrowserRef: (ref: BrowserRef) => void;
+  /** 移除单个浏览器标注引用。 */
+  removeComposerBrowserRef: (id: string) => void;
+  /** 清空所有浏览器标注引用。 */
+  clearComposerBrowserRefs: () => void;
   clearError: () => void;
   addMessage: (msg: MessageOut) => void;
   /** v2.2: 请求消息流滚动到某子代理线程首条消息（任务卡步骤穿透）。 */
@@ -229,17 +291,29 @@ resumeTurn: () => Promise<void>;
   clearScrollTarget: () => void;
   /** v2.2: 更新/删除排队输入（patch=null 表示删除）。 */
   updateQueuedInput: (id: string, patch: Partial<QueuedInput> | null) => void;
+  /** plan-547: 立即发送排队项——经注入 API 在运行 turn 的下次 LLM 调用前传达给 AI。 */
+  flushQueuedInput: (id: string) => Promise<void>;
   /** v2.2: turn 结束后自动续发队列头（内部调用）。 */
   _drainQueue: () => Promise<void>;
   handleWs: (event: string, payload: Record<string, unknown>) => void;
+  /** v37: 订阅全局状态通道（跨会话运行态/活动时间），侧栏实时更新。 */
+  connectGlobalEvents: () => void;
+  /** v37: 断开全局通道订阅（应用卸载时调用）。 */
+  disconnectGlobalEvents: () => void;
 }
 
 let _sendingGuard = false;
 let _drainingQueue = false;
 let _wsUnsub: (() => void) | null = null;
+/** v37: 全局通道订阅的清理函数（与 App 生命周期绑定） */
+let _globalWsUnsub: (() => void) | null = null;
 let _heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
 const HEARTBEAT_TIMEOUT = 60_000; // 60s 无事件超时兜底复位
 let _stoppingTurnId: number | null = null;
+/** plan-546: bootstrap 自动选中会话仅允许冷启动首次执行；
+ * 此后 currentSessionId=null 表示用户主动停留空态首页（新建任务），
+ * 任何后续 loadBootstrap（退出设置侧栏重挂载/设置面板刷新等）不得再把用户拉进会话。 */
+let _autoSelectedOnce = false;
 
 /** 启动/重置心跳计时器：60s 内无任何 WS 事件则强制复位 isRunning */
 function _startHeartbeat() {
@@ -252,6 +326,8 @@ function _startHeartbeat() {
       useChatStore.setState({ isRunning: false, runningTurnId: null });
     }).finally(() => {
       if (useChatStore.getState().isRunning) _startHeartbeat();
+      // plan-547: 心跳判定 turn 已结束（结束事件丢失场景）后续发排队输入
+      else void useChatStore.getState()._drainQueue();
     });
   }, HEARTBEAT_TIMEOUT);
 }
@@ -367,6 +443,12 @@ function _sameUserContent(a: Record<string, unknown> | undefined, b: Record<stri
   return fa !== "" && fa === fb;
 }
 
+/** v38 (plan-482): task.proposed 处理中按 request_task_id 取请求任务标题作卡片文案。 */
+function _pendingPlanTaskIdToTitle(s: { tasks: TaskOut[] }, requestTaskId: number): string {
+  const t = s.tasks.find((x) => x.id === requestTaskId);
+  return t?.title || "任务执行计划";
+}
+
 /** 统一清理所有会话级字段（§9.1 #18：防止切换会话后残留）。v2.2: 并入分桶重置。 */
 function _resetSessionState(): Partial<ChatState> {
   _clearHeartbeat();
@@ -389,7 +471,7 @@ function _resetSessionState(): Partial<ChatState> {
     pendingApproval: null,
     pendingPlan: null,
     pendingPlanTurn: null,
-    pendingSplit: null,
+    plansByTurn: {},
     reviewedFiles: {},
     rollbackPending: null,
     turnChanges: {},
@@ -402,6 +484,7 @@ function _resetSessionState(): Partial<ChatState> {
     subagentThinking: {},
     scrollTarget: null,
     queuedInputs: [],
+    injectMarks: [],
   };
 }
 
@@ -439,7 +522,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pendingApproval: null,
   pendingPlan: null,
   pendingPlanTurn: null,
-  pendingSplit: null,
+  plansByTurn: {},
   reviewedFiles: {},
   rollbackPending: null,
   turnChanges: {},
@@ -452,9 +535,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   subagentThinking: {},
   scrollTarget: null,
   queuedInputs: [],
-  composerDraft: "",
-  composerAttachments: [],
+  injectMarks: [],
+  composerBackfill: null,
+  composerBrowserRefs: [],
   lastReasoningEffort: null,
+  lastModelId: null,
   loading: false,
   error: null,
   wsConnected: false,
@@ -496,7 +581,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         loading: false,
         currentProjectId: currentProject?.id ?? sessionProject?.id ?? activeProjects[0]?.id ?? null,
       });
-      if (!get().currentSessionId && activeSessions.length > 0) {
+      // plan-546: 自动选中仅冷启动首次；之后 null=用户停留在空态首页，不再自动跳入会话
+      if (!_autoSelectedOnce && !get().currentSessionId && activeSessions.length > 0) {
+        _autoSelectedOnce = true;
         const first = activeSessions[0];
         const proj = activeProjects.find((p) => p.id === first.project_id) || null;
         set({
@@ -542,9 +629,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  createSession: async (projectId, title) => {
+  createSession: async (projectId, title, opts) => {
     try {
-      const session = await api.createSession({ project_id: projectId, title });
+      // plan-547: 模型与权限模式在创建时一次落准（避免事后 updateSession 竞态与 UI 不同步）
+      // plan-676: 首页目标同样随创建一次落准
+      const session = await api.createSession({
+        project_id: projectId,
+        title,
+        model_id: opts?.model_id ?? undefined,
+        permission_mode: opts?.permission_mode ?? undefined,
+        goal_text: opts?.goal_text ?? undefined,
+      });
       set((s) => ({ sessions: [session, ...s.sessions] }));
       await get().switchSession(session.id);
       return session.id;
@@ -585,6 +680,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
     const session = get().sessions.find((s) => s.id === sessionId);
     if (session?.project_id) set({ currentProjectId: session.project_id });
+    // plan-546: 会话模型作为"最近使用模型"，供新空态首页默认承接
+    if (session?.model_id != null) set({ lastModelId: session.model_id });
 
     // WS 连接 + 事件监听（保存 cleanup 函数）
     wsClient.connect(sessionId);
@@ -612,6 +709,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }).catch(() => {});
       // v19: 缓存切换同样重建子代理卡片
       void get().loadSessionSubagents();
+      // plan-547: 切回会话若已空闲且存在排队输入，立即续发（切走期间 turn 结束事件已丢失）
+      if (!get().isRunning) void get()._drainQueue();
       return;
     }
 
@@ -660,10 +759,77 @@ export const useChatStore = create<ChatState>((set, get) => ({
         get().loadTurnChanges(id);
       }
 
+      // v38 (plan-533/538): 从历史轮次中重建 plansByTurn 计划卡字典。
+      // plan-624 修订: completed turn 恢复注册——普通模式写计划文档的 turn（如
+      // "调研与规划已完成"）状态就是 completed，删除分支会让这些历史卡片全部消失；
+      // 但 completed 仅在消息真实引用计划文档路径时注册（普通执行 turn 不误挂），
+      // awaiting_confirmation/confirmed 为确认流程专属状态，路径未命中也用约定路径兜底。
+      const recoveredPlans: Record<number, PlanCardInfo> = {};
+      const planPathRe = /ai\/chatcoder-plan-[^\s)"'<>]*\.md/i;
+      // plan-604: 方案文档路径被 AI 消息引用处即方案汇报正文——锚定该消息
+      // （与 task.proposed 实时锚定同源），卡片位置刷新前后不漂移。
+      // plan-624: 只认 text 消息——thinking 是内部推理，其文本也会提前引用计划
+      // 文档路径（如"先更新计划文档 ai/chatcoder-plan-92.md"），命中会把锚点
+      // 拉到 turn 开头，卡片插到规划段前面（紧跟「已工作」计时条）。
+      // 取最后一条命中而非第一条：方案正文/执行汇报都是收尾 text，锚点落在
+      // turn 末尾引用处，卡片渲染在规划段/执行内容之后，不再插到过程中间。
+      const findTurnPlan = (turnId: number): { path: string; msgId: number | null } | null => {
+        let out: { path: string; msgId: number } | null = null;
+        for (const m of messages) {
+          if (m.turn_id !== turnId || m.sender_type === "user") continue;
+          if (m.msg_type === "thinking" || (m.content as Record<string, unknown> | undefined)?.thinking === true) continue;
+          const text = typeof m.content?.text === "string" ? m.content.text : "";
+          const hit = text.match(planPathRe);
+          if (hit) out = { path: hit[0], msgId: m.id };
+        }
+        return out;
+      };
+        // plan-644: 状态映射--后端 turn.plan_status 为真值源（全生命周期
+        // proposed/confirmed/done/cancelled/superseded）；旧数据无该字段时
+        // 沿用 turn.status 推断。plan_doc_path 主路径（全生命周期卡片恢复，
+        // 含执行完成与被新方案取代的轮次），旧数据回退正则+约定名兜底。
+        const planStatusToCard: Record<string, PlanCardInfo["status"]> = {
+          proposed: "awaiting_confirmation",
+          confirmed: "confirmed",
+          done: "confirmed",
+          cancelled: "cancelled",
+          superseded: "superseded",
+        };
+      for (const t of turns) {
+        const found = findTurnPlan(t.id);
+        const planDocPath = t.plan_doc_path || found?.path
+          || (t.status === "awaiting_confirmation" || t.status === "confirmed"
+              ? `ai/chatcoder-plan-${sessionId}-${t.id}.md`
+              : null);
+        if (!planDocPath) continue;
+        const planMsgId = found?.msgId ?? null;
+        const reqTask = tasks.find((tk) => tk.turn_id === t.id && tk.kind === "request");
+        // 锚点兜底：消息中未见路径引用（默认约定路径命中）时退回 turn 内最后一条 text 消息
+        // （plan-624: 同样只认 text，与 findTurnPlan 口径一致）
+        const anchorMsgId = planMsgId ?? messages.reduce<number | null>((acc, m) => (
+          m.turn_id === t.id && m.sender_type !== "user"
+          && m.msg_type === "text" && (m.content as Record<string, unknown> | undefined)?.thinking !== true
+          && (acc == null || m.id > acc) ? m.id : acc
+        ), null);
+        recoveredPlans[t.id] = {
+          turnId: t.id,
+          task: reqTask?.title || t.summary || "任务执行计划",
+          planDocPath,
+          status: (t.plan_status && planStatusToCard[t.plan_status]) || (t.status === "awaiting_confirmation" ? "awaiting_confirmation" : "confirmed"),
+          createdAt: t.started_at ? new Date(t.started_at).getTime() : Date.now(),
+          anchorMsgId,
+        };
+      }
+      if (Object.keys(recoveredPlans).length > 0) {
+        set((s) => ({ plansByTurn: { ...recoveredPlans, ...s.plansByTurn } }));
+      }
+
       // 如果有运行中的 turn，启动心跳超时兜底（§9.1 #3）
       if (running) _startHeartbeat();
       // v19: 重建子代理卡片（历史会话刷新后可点击进右面板）
       void get().loadSessionSubagents();
+      // plan-547: 切回会话若已空闲且存在排队输入，立即续发
+      if (!get().isRunning) void get()._drainQueue();
     } catch (e) {
       set({ loading: false, error: String(e) });
     }
@@ -711,7 +877,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   sendTurn: async (content, attachments, reasoningEffort, mode) => {
     const { currentSessionId, isRunning } = get();
-    if (!currentSessionId) return;
+    if (!currentSessionId) return null;
     // 空态新会话可能在 WS 建连前就收到首条消息，先本地投影标题，避免等待事件丢失。
     const currentSession = get().sessions.find((x) => x.id === currentSessionId);
     if (currentSession && !currentSession.title && get().messages.length === 0 && content.trim()) {
@@ -721,7 +887,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // v14: 支持「只发附件不带文字」——只要 content 或 attachments 有其一即可发送
     const hasText = Boolean(content && content.trim());
     const hasAtts = Array.isArray(attachments) && attachments.length > 0;
-    if (!hasText && !hasAtts) return;
+    if (!hasText && !hasAtts) return null;
     // v2.2: 输入队列——运行中发送的消息进入队列，当前 turn 完成后自动续发
     if (_sendingGuard) {
       // 并发保护（如 turn 结束事件连续触发）：放回队头不丢失
@@ -731,7 +897,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           content, attachments, reasoningEffort, mode,
         }, ...s.queuedInputs],
       }));
-      return;
+      return null;
     }
     if (isRunning) {
       set((s) => ({
@@ -743,7 +909,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           mode,
         }],
       }));
-      return;
+      return null;
     }
     _sendingGuard = true;
     // 立即添加用户消息到本地状态，实现即时显示（流式体验）
@@ -760,14 +926,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
       created_at: new Date().toISOString(),
     };
     get().addMessage(optimisticUserMsg);
-    // v23: 乐观置运行态——左侧会话立即转圈，不等 createTurn REST 往返；失败时回退
+    // v26/v38: 新消息开始 = 旧方案提案失效（但旧计划卡片仍保留在 plansByTurn 时间线上，不被随意覆盖）
+    const prevPending = get().pendingPlan;
     set((s) => ({
       isRunning: true,
-      // v26: 新消息开始 = 旧方案提案失效，隐藏旧方案卡片（等新 turn 完成生成新提案后再展示）
       pendingPlan: null,
       pendingPlanTurn: null,
-      pendingSplit: null,
-      sessions: s.sessions.map((x) => (x.id === currentSessionId ? { ...x, has_running: true } : x)),
+      ...(prevPending?.turnId != null && s.plansByTurn[prevPending.turnId]
+        ? {
+            plansByTurn: {
+              ...s.plansByTurn,
+              [prevPending.turnId]: {
+                ...s.plansByTurn[prevPending.turnId],
+                // 若之前未确认，标记为已调整/取消；已确认/已完成的保持原状态不变
+                status: s.plansByTurn[prevPending.turnId].status === "awaiting_confirmation" ? "cancelled" : s.plansByTurn[prevPending.turnId].status,
+              },
+            },
+          }
+        : {}),
+      sessions: s.sessions.map((x) => (x.id === currentSessionId
+        ? { ...x, has_running: true, last_activity_at: new Date().toISOString() }
+        : x)),
     }));
     _startHeartbeat();
     try {
@@ -785,6 +964,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ...(mode === "plan" ? { pendingPlanTurn: { turnId: turn.id, task: content } } : {}),
       }));
       _startHeartbeat();
+      return turn.id;
     } catch (e) {
       // v23: 发送失败回退乐观运行态（左侧转圈同步摘除）
       _clearHeartbeat();
@@ -792,6 +972,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         error: String(e), isRunning: false, runningTurnId: null, pendingPlan: null, pendingPlanTurn: null,
         sessions: s.sessions.map((x) => (x.id === currentSessionId ? { ...x, has_running: false } : x)),
       }));
+      return null;
     } finally {
       _sendingGuard = false;
     }
@@ -805,34 +986,96 @@ export const useChatStore = create<ChatState>((set, get) => ({
       await api.updateSession(currentSessionId, { permission_mode: "accept_edits" });
       set((s) => ({ sessions: s.sessions.map((x) => (x.id === currentSessionId ? { ...x, permission_mode: "accept_edits" } : x)) }));
     } catch { /* 权限切换失败不阻断发送 */ }
-    // 清空确认状态后，按计划执行任务（正常模式，agent 将读取 ai/chatcoder-plan-<sid>.md 执行）
+    const pending = get().pendingPlan;
+    if (pending?.turnId != null) {
+      const tid = pending.turnId;
+      set((s) => ({
+        plansByTurn: {
+          ...s.plansByTurn,
+          [tid]: {
+            ...s.plansByTurn[tid],
+            turnId: tid,
+            task: pending.task,
+            planDocPath: pending.planDocPath || s.plansByTurn[tid]?.planDocPath || "",
+            status: "confirmed",
+          },
+        },
+      }));
+    }
     set({ pendingPlan: null });
+    // v42: 计划确认执行 → 输入框显式切回完全访问（唯一允许的自动切换，其余情况不再自动改模式）
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("chatcoder:composer-mode", { detail: { mode: "default" } }));
+    }
     await get().sendTurn(task);
   },
 
-  dismissPlan: () => set({ pendingPlan: null, pendingPlanTurn: null }),
+  dismissPlan: () => {
+    const pending = get().pendingPlan;
+    if (pending?.turnId != null) {
+      const tid = pending.turnId;
+      set((s) => ({
+        plansByTurn: {
+          ...s.plansByTurn,
+          [tid]: {
+            ...s.plansByTurn[tid],
+            turnId: tid,
+            task: pending.task,
+            planDocPath: pending.planDocPath || s.plansByTurn[tid]?.planDocPath || "",
+            status: "cancelled",
+          },
+        },
+      }));
+    }
+    set({ pendingPlan: null, pendingPlanTurn: null });
+    const { currentSessionId } = get();
+    if (currentSessionId != null) {
+      const slice = _snapshotSlice(get());
+      set((s) => ({ sessionState: { ...s.sessionState, [currentSessionId]: slice } }));
+    }
+  },
 
-  confirmTaskSplit: async (accepted, steps) => {
-    const pending = get().pendingSplit;
-    if (!pending) return;
-    // v26: 点击后立即隐藏卡片——提案处理中/已处理均不再展示，
-    // 避免用户重复点击（或反复调整方案后点旧卡片）触发 409「已处理或不在待确认状态」。
-    set({ pendingSplit: null });
+  /** v38 (plan-482): 确认/取消方案文档（不再涉及 group/steps）。 */
+  confirmPlanTurn: async (accepted) => {
+    const pending = get().pendingPlan;
+    if (!pending || pending.turnId == null) return;
+    const tid = pending.turnId;
+    // 更新 plansByTurn 对应卡片的状态为 confirmed 或 cancelled，保留卡片在时间线上
+    set((s) => ({
+      plansByTurn: {
+        ...s.plansByTurn,
+        [tid]: {
+          ...s.plansByTurn[tid],
+          turnId: tid,
+          task: pending.task,
+          planDocPath: pending.planDocPath || s.plansByTurn[tid]?.planDocPath || "",
+          status: accepted ? "confirmed" : "cancelled",
+        },
+      },
+      pendingPlan: null,
+      pendingPlanTurn: null,
+    }));
+    const { currentSessionId } = get();
+    if (currentSessionId != null) {
+      const slice = _snapshotSlice(get());
+      set((s) => ({ sessionState: { ...s.sessionState, [currentSessionId]: slice } }));
+    }
     try {
-      const res = await api.confirmTaskPlan(pending.turnId, pending.groupTaskId, { accepted, steps });
-      // 确认执行（accepted=true）后端已把 plan 会话切换为 accept_edits，本地同步权限标识
+      const res = await api.confirmPlanTurn(pending.turnId, { accepted });
       const pm = res?.permission_mode;
       if (pm === "accept_edits" || pm === "plan" || pm === "readonly" || pm === "default") {
-        const { currentSessionId } = get();
         if (currentSessionId != null) {
           set((s) => ({ sessions: s.sessions.map((x) => (x.id === currentSessionId ? { ...x, permission_mode: pm } : x)) }));
         }
+      }
+      // v42: 计划「确认执行」→ 输入框显式切回完全访问（唯一允许的自动切换，其余情况不再自动改模式）
+      if (accepted && typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("chatcoder:composer-mode", { detail: { mode: "default" } }));
       }
       await get().refreshTasks();
       if (!accepted) await get().refreshTurns();
     } catch (e) {
       const msg = String(e);
-      // v26: 提案已处理/过期（旧卡片、反复调整场景）静默处理：卡片已隐藏，仅刷新状态
       if (msg.includes("已处理或不在待确认状态")) {
         await get().refreshTasks();
         await get().refreshTurns();
@@ -968,14 +1211,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({
         messages, turns, tasks,
         isRunning: false, runningTurnId: null,
-        // 回填原文与附件到输入框，供用户修改后重发（v2.2: 图片等附件一并撤回）
+        // 回填原文与附件到「本会话」输入框，供用户修改后重发（v40: 按 key 隔离，不串扰首页/其它会话）
         ...(restoreToComposer && (result.user_message || restoredAttachments.length > 0)
           ? {
-              composerDraft: result.user_message ?? "",
-              composerAttachments: restoredAttachments,
+              composerBackfill: {
+                key: String(currentSessionId),
+                text: result.user_message ?? "",
+                attachments: restoredAttachments,
+              },
             }
           : {}),
       });
+      // v38: 回滚完成后同步快照到 sessionState 分桶，避免切走再切回时闪现已撤销消息
+      const slice = _snapshotSlice(get());
+      set((s) => ({ sessionState: { ...s.sessionState, [currentSessionId]: slice } }));
     } catch (e) {
       set({ error: String(e) });
     }
@@ -1077,47 +1326,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       const tasks = await api.listSessionTasks(currentSessionId);
       if (get().currentSessionId !== currentSessionId) return;
-       const visible = tasks.filter((task) => !task.is_hidden);
-      const proposedGroup = visible.find((task) => task.kind === "group" && task.status === "proposed");
-      const requestTask = proposedGroup
-        ? visible.find((task) => task.id === proposedGroup.parent_task_id)
-        : undefined;
-      // plan-95: 提案卡展示守卫——仅当提案所属 turn 处于 awaiting_confirmation 时才
-      // （重建）pendingSplit；同组已有卡片时合并保留 planDocPath 不整条覆盖。
-      // 此前只要存在 proposed group 就无条件复活卡片，是"不该展示时展示"的根因之一。
-      let splitPatch: Partial<ChatState> = {};
-      if (proposedGroup && requestTask && proposedGroup.turn_id != null) {
-        // plan-95: 判定必须基于新鲜的 turn 状态——本地 turns 可能滞后
-        // （task.proposed 先于 turn.updated 到达、切换会话时与 refreshTurns 并发），
-        // 用滞后状态误判会把刚弹出的卡片立刻清掉
-        let ownerStatus: string | undefined;
-        try {
-          const freshTurns = await api.listTurns(currentSessionId);
-          if (get().currentSessionId !== currentSessionId) return;
-          set({ turns: freshTurns });
-          ownerStatus = freshTurns.find((t) => t.id === proposedGroup.turn_id)?.status;
-        } catch { /* 判定降级：不改动卡片状态 */ }
-        if (ownerStatus === "awaiting_confirmation") {
-          const prevSplit = get().pendingSplit;
-          splitPatch = {
-            pendingSplit: prevSplit && prevSplit.groupTaskId === proposedGroup.id
-              ? { ...prevSplit, turnId: proposedGroup.turn_id, requestTaskId: requestTask.id }
-              : {
-                  turnId: proposedGroup.turn_id,
-                  requestTaskId: requestTask.id,
-                  groupTaskId: proposedGroup.id,
-                  reasons: [],
-                },
-          };
-        } else if (ownerStatus != null) {
-          // 提案所属 turn 已非待确认（新消息已作废旧提案）：清除残留卡片
-          splitPatch = { pendingSplit: null };
-        }
-      } else if (get().pendingSplit) {
-        // 已无任何 proposed group，现存卡片必为残留
-        splitPatch = { pendingSplit: null };
-      }
-      set({ tasks, ...splitPatch });
+      // v38 (plan-482): 系统不再预拆分（无 proposed group），任务卡由 todo_write 清单驱动
+      set({ tasks });
     } catch (e) {
       set({ error: String(e) });
     }
@@ -1136,19 +1346,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  setComposerDraft: (text) => set({ composerDraft: text }),
+  // v40: 回填通道按 key（"home"/"new"/sessionId）隔离——仅目标输入框实例消费一次
+  setComposerDraft: (key, text) => set({ composerBackfill: { key, text, attachments: [] } }),
   appendComposerDraft: (text) => {
     const toAppend = (text || "").trim();
     if (!toAppend) return;
-    set((s) => {
-      const cur = (s.composerDraft || "").trim();
-      const next = cur ? `${cur}\n\n${toAppend}` : toAppend;
-      return { composerDraft: next };
-    });
+    const sid = get().currentSessionId;
+    const key = sid != null ? String(sid) : "home";
+    const prev = get().composerBackfill;
+    const base = prev && prev.key === key ? prev : { key, text: "", attachments: [] as AttachmentInfo[] };
+    const merged = base.text.trim() ? `${base.text.trim()}\n\n${toAppend}` : toAppend;
+    set({ composerBackfill: { ...base, text: merged } });
     if (typeof window !== "undefined") {
       window.dispatchEvent(new CustomEvent("chatcoder:focus-composer"));
     }
   },
+  addComposerBrowserRef: (ref) => set((s) => ({ composerBrowserRefs: [...s.composerBrowserRefs, ref] })),
+  removeComposerBrowserRef: (id) => set((s) => ({ composerBrowserRefs: s.composerBrowserRefs.filter((r) => r.id !== id) })),
+  clearComposerBrowserRefs: () => set({ composerBrowserRefs: [] }),
   clearError: () => set({ error: null }),
 
   requestScrollTo: (target) => set({ scrollTarget: { ...target } }),
@@ -1162,17 +1377,54 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
   },
 
+  /** plan-547: 立即发送——注入运行中的 turn（下次 LLM 调用前传达）；
+   * 无运行 turn 时等效出队直发；注入失败保留队列走 turn 结束续发兜底。 */
+  flushQueuedInput: async (id) => {
+    const st = get();
+    const q = st.queuedInputs.find((x) => x.id === id);
+    if (!q || q.flushing) return;
+    if (st.runningTurnId == null) {
+      set((s) => ({ queuedInputs: s.queuedInputs.filter((x) => x.id !== id) }));
+      await get().sendTurn(q.content, q.attachments, q.reasoningEffort, q.mode);
+      return;
+    }
+    set((s) => ({
+      queuedInputs: s.queuedInputs.map((x) => (x.id === id ? { ...x, flushing: true } : x)),
+    }));
+    try {
+      await api.injectTurnInput(st.runningTurnId, {
+        request_id: q.id,
+        content: q.content,
+        attachments: q.attachments,
+      });
+      // 注入成功由 user_input.injected 事件从队列移除（避免双发）
+    } catch (e) {
+      set((s) => ({
+        queuedInputs: s.queuedInputs.map((x) => (x.id === id ? { ...x, flushing: false } : x)),
+      }));
+      set({ error: `立即发送失败：${String(e)}（已保留队列，任务结束后自动发送）` });
+    }
+  },
+
   _drainQueue: async () => {
     if (_drainingQueue) return;
     _drainingQueue = true;
     try {
-      const { queuedInputs, isRunning, currentSessionId, pendingPlan } = get();
-      // 计划等待确认不是结束态，不能提前消费后续消息。
-      if (!currentSessionId || isRunning || pendingPlan || _sendingGuard) return;
-      const next = queuedInputs[0];
-      if (!next) return;
-      set((s) => ({ queuedInputs: s.queuedInputs.slice(1) }));
-      await get().sendTurn(next.content, next.attachments, next.reasoningEffort, next.mode);
+      // plan-547: 循环 drain——发送成功后 isRunning=true 自然退出；
+      // 发送失败（返回 null）时队头放回并停止，等待下次触发，消息不丢。
+      for (;;) {
+        const { queuedInputs, isRunning, currentSessionId, pendingPlan } = get();
+        // 计划等待确认不是结束态，不能提前消费后续消息。
+        if (!currentSessionId || isRunning || pendingPlan || _sendingGuard) return;
+        const next = queuedInputs[0];
+        if (!next) return;
+        set((s) => ({ queuedInputs: s.queuedInputs.slice(1) }));
+        const turnId = await get().sendTurn(next.content, next.attachments, next.reasoningEffort, next.mode);
+        if (turnId == null) {
+          set((s) => ({ queuedInputs: [next, ...s.queuedInputs] }));
+          return;
+        }
+      }
     } finally {
       _drainingQueue = false;
     }
@@ -1269,13 +1521,51 @@ export const useChatStore = create<ChatState>((set, get) => ({
               delete newStreaming[sid];
             }
           }
-          return { messages: newMessages, streamingBuffers: newStreaming, thinkingBuffers: newThinking };
+          // v42: 注入分割标记（见 InjectMark）——注入的用户消息快照流式中的 agent；
+          // 该流式段（思考/正文）落库时绑定 crossoverId，渲染层据此做时间分割
+          let newMarks = state.injectMarks;
+          if (isUserMsg && state.isRunning && rawMsg.turn_id != null && rawMsg.turn_id === state.runningTurnId) {
+            // 注入判定：本条之前该 turn 已有用户消息（首条为触发消息，后续为注入）
+            const hadUser = state.messages.some(
+              (m) => m.sender_type === "user" && m.turn_id === state.runningTurnId,
+            );
+            const pendingAgents = [
+              ...Object.entries(state.streamingBuffers).filter(([, v]) => v).map(([k]) => Number(k)),
+              ...Object.entries(state.thinkingBuffers).filter(([, v]) => v).map(([k]) => Number(k)),
+            ];
+            if (hadUser && pendingAgents.length > 0) {
+              newMarks = [...state.injectMarks, {
+                turnId: state.runningTurnId,
+                injectId: rawMsg.id,
+                pendingAgents,
+                crossoverId: null,
+              }];
+            }
+          } else if (!isUserMsg && sid) {
+            // AI 思考/正文落库 -> 若存在注入时刻流式中的 pending 标记，本条即跨界段
+            const mt = String(rawMsg.msg_type ?? "");
+            const isStreamMsg = mt === "text" || mt === "thinking" || isThinking;
+            if (state.isRunning && rawMsg.turn_id === state.runningTurnId && isStreamMsg
+              && state.injectMarks.some((mk) => mk.crossoverId == null && mk.pendingAgents.includes(sid))) {
+              newMarks = state.injectMarks.map((mk) =>
+                mk.crossoverId == null && mk.pendingAgents.includes(sid)
+                  ? { ...mk, crossoverId: rawMsg.id, pendingAgents: [] }
+                  : mk,
+              );
+            }
+          }
+          return {
+            messages: newMessages,
+            streamingBuffers: newStreaming,
+            thinkingBuffers: newThinking,
+            injectMarks: newMarks,
+          };
         });
         break;
       }
       case "turn.started": {
         const startedTurnId = Number(payload.turn_id);
-        const activeSid = get().currentSessionId;
+        const activeSid = Number(payload.session_id ?? 0) || get().currentSessionId;
         // v2.2: 只让"当前运行 turn 或更新的 turn"接管运行态——断线补发/迟到事件中
         // 旧 turn 的 turn.started 不得覆盖新 turn（同一会话内 turn id 单调递增）。
         const takesOver = (s: ChatState) => s.runningTurnId == null || startedTurnId >= s.runningTurnId;
@@ -1292,9 +1582,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
             todoPersisted: false,
             // v35: 新 turn 开始时清掉上一轮残留的重试状态提示
             turnStatus: null,
+            // v42: 新 turn 清空上一 turn 的注入分割标记（渲染回归纯 id 序）
+            injectMarks: [],
             // v26: 新 turn 开始 = 旧方案提案失效，隐藏旧方案卡片（task.proposed 后再展示新卡片）
             pendingPlan: null,
-            pendingSplit: null,
+            pendingPlanTurn: null,
             sessions: s.sessions.map((x) => (x.id === activeSid ? { ...x, has_running: true } : x)),
           };
         });
@@ -1304,10 +1596,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
         void get().refreshTasks();
         break;
       }
+      case "user_input.injected": {
+        // plan-547: 注入成功确认——按 request_id 移除排队项，turn 结束后不再续发同一条
+        const injectedReqId = String(payload.request_id ?? "");
+        if (injectedReqId) {
+          set((s) => ({ queuedInputs: s.queuedInputs.filter((q) => q.id !== injectedReqId) }));
+        }
+        break;
+      }
       case "turn.updated": {
         const turnId = Number(payload.turn_id);
         const status = String(payload.status ?? "");
-        const activeSid = get().currentSessionId;
+        const activeSid = Number(payload.session_id ?? 0) || get().currentSessionId;
         set((s) => {
           const ended = status === "completed" || status === "failed" || status === "cancelled" || status === "interrupted" || status === "blocked" || status === "awaiting_confirmation";
           if (ended && _stoppingTurnId === turnId) _stoppingTurnId = null;
@@ -1356,17 +1656,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       case "turn.completed": {
         const turnId = Number(payload.turn_id);
+        const turnCompletedSid = Number(payload.session_id ?? 0) || get().currentSessionId;
         // v2.2: 仅当前运行 turn 完成时才清残留 delta（迟到/旧 turn 的 completed 不干扰新 turn 流式）
         if (get().runningTurnId == null || get().runningTurnId === turnId) _clearPendingDeltas();
         set((s) => {
-          // v13: 任务拆分提案由 task.proposed 驱动；保留旧 /plan 弹窗兼容历史事件。
-          // plan-95: 转换带上 turnId（消息流内嵌定位）；且仅当该 turn 没有拆分提案时
-          // 才走遗留弹卡（auto-split 主流程由 task.proposed 驱动，避免双卡/无文档幽灵卡）。
+          // v38 (plan-482): 方案文档已由 task.proposed 驱动；遗留 plan turn 结束时
+          // 仅清理 pendingPlanTurn 标记（不再有 proposed group 兜底）。
           let pendingPlan = s.pendingPlan;
           let pendingPlanTurn = s.pendingPlanTurn;
           if (pendingPlanTurn && pendingPlanTurn.turnId === turnId) {
-            const hasProposal = s.tasks.some((t) => t.kind === "group" && t.status === "proposed" && t.turn_id === turnId);
-            if (!hasProposal) pendingPlan = { task: pendingPlanTurn.task, turnId };
             pendingPlanTurn = null;
           }
           // v2.2: 仅当完成的就是当前运行 turn（或当前无运行 turn）才复位运行态/清流式缓冲，
@@ -1386,8 +1684,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   runningTurnId: null, isRunning: false,
                   streamingBuffers: {}, thinkingBuffers: {},  // v1.3: turn 结束兜底清空
                   subagentStreams: {}, subagentThinking: {},  // v19: 子代理流式缓冲同样兜底清空
-                  // v1.1: 本地摘除会话转圈标记（双保险，与 session.completed 同写法）
-                  sessions: s.sessions.map((x) => (x.id === s.currentSessionId ? { ...x, has_running: false } : x)),
+                  // v1.1/v37: 本地摘除会话转圈标记（按事件携带的 session_id 精确复位，切会话不串）
+                  sessions: s.sessions.map((x) => (x.id === turnCompletedSid ? { ...x, has_running: false } : x)),
                 }
               : {}),
             pendingPlan,
@@ -1569,27 +1867,36 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break;
       }
       case "task.proposed": {
+        // v38 (plan-482): 事件仅表示"方案文档已生成、等待用户确认"，
+        // 统一走 pendingPlan（含文档路径），由 PlanCard 渲染确认卡。
         const turnId = Number(payload.turn_id ?? 0);
-        const requestTaskId = Number(payload.request_task_id ?? 0);
-        const groupTaskId = Number(payload.group_task_id ?? 0);
-        const reasons = Array.isArray(payload.reasons) ? payload.reasons.map(String) : [];
-        // v2.2: 仅当提案属于当前运行 turn 才复位运行态（旧 turn 的迟到提案不串扰新 turn）
+        const planDocPath = payload.plan_doc_path != null ? String(payload.plan_doc_path) : undefined;
         set((s) => {
           const clearsRunning = s.runningTurnId == null || s.runningTurnId === turnId;
+          const taskTitle = _pendingPlanTaskIdToTitle(s, Number(payload.request_task_id ?? 0));
+          // plan-547/624: 锚定到该 turn 最后一条 text 消息（方案汇报正文），计划卡紧跟其后渲染。
+          // 只认 text 不认 thinking——思考文本也会引用计划路径，会把锚点拉到 turn 开头、
+          // 卡片插到规划段开头（与历史恢复 findTurnPlan 口径一致）。
+          const anchorMsgId = s.messages.reduce<number | null>((acc, m) => (
+            m.turn_id === turnId && m.sender_type !== "user"
+            && m.msg_type === "text" && (m.content as Record<string, unknown> | undefined)?.thinking !== true
+            && (acc == null || m.id > acc) ? m.id : acc
+          ), null);
+          const planInfo: PlanCardInfo = {
+            turnId,
+            task: taskTitle,
+            planDocPath: planDocPath || `ai/chatcoder-plan-${s.currentSessionId}.md`,
+            status: "awaiting_confirmation",
+            createdAt: Date.now(),
+            anchorMsgId,
+          };
           return {
-            pendingSplit: {
-              turnId, requestTaskId, groupTaskId, reasons,
-              planDocPath: payload.plan_doc_path != null ? String(payload.plan_doc_path) : undefined,
-            },
+            pendingPlan: { task: taskTitle, turnId, planDocPath },
+            plansByTurn: { ...s.plansByTurn, [turnId]: planInfo },
             ...(clearsRunning ? { isRunning: false, runningTurnId: null } : {}),
-            // plan-95: 后端在广播提案前已提交 awaiting_confirmation，本地同步该 turn 状态，
-            // 避免紧随其后的 refreshTasks 守卫读到滞后的旧状态而清掉刚弹出的卡片
             turns: s.turns.map((t) => (t.id === turnId ? { ...t, status: "awaiting_confirmation" } : t)),
           };
         });
-        // 提案事件只携带轻量步骤摘要，完整字段通过 REST 拉取，避免协议中泄露执行细节。
-        get().refreshTasks();
-        // v26: 提案生成 = 方案文档已写盘，刷新变更清单（贴条即时展示方案文档变更）
         if (turnId) void get().loadTurnChanges(turnId);
         break;
       }
@@ -1724,6 +2031,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }).catch(() => { /* 标题刷新失败不影响已完成的会话 */ });
         break;
       }
+      case "goal.updated":
+      case "goal.completed":
+      case "goal.continued":
+      case "goal.stopped": {
+        // plan-671: 目标模式事件（会话通道，作用于当前会话）——
+        // goal.continued 后随后的 turn.started 接管运行态，此处只同步目标状态。
+        const sid = get().currentSessionId;
+        if (sid == null) break;
+        const goalStatus = String(payload.status ?? "");
+        const turnsUsed = Number(payload.turns_used ?? 0);
+        set((s) => ({
+          sessions: s.sessions.map((x) => (x.id === sid
+            ? {
+                ...x,
+                ...(goalStatus === "active" || goalStatus === "completed" || goalStatus === "cancelled"
+                  ? { goal_status: goalStatus } : {}),
+                ...(typeof payload.text === "string" ? { goal_text: payload.text } : {}),
+                ...(payload.turns_used != null ? { goal_turns_used: turnsUsed } : {}),
+              }
+            : x)),
+        }));
+        break;
+      }
       case "error":
         set({ error: String((payload as { message?: string }).message ?? "未知错误") });
         break;
@@ -1748,5 +2078,65 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     }
     void st;
+  },
+
+  connectGlobalEvents: () => {
+    if (_globalWsUnsub) return;
+    globalWsClient.connect();
+    _globalWsUnsub = globalWsClient.on((ev) => {
+      const p = ev.payload as Record<string, unknown>;
+      const sid = Number(p.session_id ?? 0);
+      if (!sid) return;
+      const event = ev.event as ServerEventName;
+      if (event === "session.completed") {
+        const ts = typeof p.last_activity_at === "string" ? p.last_activity_at : null;
+        set((s) => {
+          if (!s.sessions.some((x) => x.id === sid)) return {};
+          return {
+            sessions: s.sessions.map((x) => (x.id === sid
+              ? { ...x, has_running: false, ...(ts ? { last_activity_at: ts } : {}) }
+              : x)),
+            ...(s.currentSessionId === sid ? { isRunning: false, runningTurnId: null } : {}),
+          };
+        });
+        return;
+      }
+      if (event === "session.updated") {
+        const title = typeof p.title === "string" ? p.title : null;
+        const ts = typeof p.last_activity_at === "string" ? p.last_activity_at : null;
+        const pm = p.permission_mode;
+        const permissionMode = pm === "plan" || pm === "default" || pm === "accept_edits" || pm === "readonly" ? pm : null;
+        if (!title && !ts && !permissionMode) return;
+        set((s) => {
+          if (!s.sessions.some((x) => x.id === sid)) return {};
+          return {
+            sessions: s.sessions.map((x) => (x.id === sid
+              ? { ...x, ...(title ? { title } : {}), ...(ts ? { last_activity_at: ts } : {}),
+                  ...(permissionMode ? { permission_mode: permissionMode } : {}) }
+              : x)),
+          };
+        });
+        return;
+      }
+      if (event === "message.created") {
+        const msg = p.msg as Record<string, unknown> | undefined;
+        const ts = typeof msg?.created_at === "string" ? msg.created_at : null;
+        if (!ts) return;
+        set((s) => {
+          if (!s.sessions.some((x) => x.id === sid)) return {};
+          return {
+            sessions: s.sessions.map((x) => (x.id === sid ? { ...x, last_activity_at: ts } : x)),
+          };
+        });
+      }
+    });
+  },
+
+  disconnectGlobalEvents: () => {
+    if (_globalWsUnsub) {
+      _globalWsUnsub();
+      _globalWsUnsub = null;
+    }
+    globalWsClient.disconnect();
   },
 }));

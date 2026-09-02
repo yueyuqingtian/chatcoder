@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from urllib.parse import urlencode
 
 import httpx
@@ -87,6 +88,57 @@ def _is_anthropic(model: dict) -> bool:
     )
 
 
+# plan-147-674: 视觉系模型 identity 兜底——上游目录缺 isMultimodal 字段时，
+# 按模型名/供应商名识别多模态能力（对齐 BYOK MODEL_CATALOG 的兜底思路）。
+# plan-156-739: 补齐新式多模态模型家族——glm-5.x（内置目录 glm-5.1/5.2=True）、
+# Doubao Seed 家族（doubao-seed-1.6=True）、MiniMax（M3 为官方多模态模型）。
+# kimi 系版本能力未确证（kimi-k2.7-code 为代码变体），不在此兜底，由用户手动配置（Step 1 已保证持久化）。
+_VISION_IDENTITY_RE = re.compile(
+    r"gpt-4o|gpt-4\.1|gpt-5|claude|gemini|qwen[\w.-]*vl|glm-4v|glm-5|doubao[\w.-]*vision"
+    r"|doubao(?:[\w.-]+)?seed|minimax[\w.-]*m3|vision|pixtral|llava"
+    r"|llama[\w.-]*vision|internvl|grok[\w.-]*vision"
+)
+
+
+def _is_vision_identity(model: dict) -> bool:
+    """identity（provider+各名称字段）命中视觉系关键词 → 视为多模态。"""
+    identity = " ".join(str(model.get(k) or "") for k in (
+        "provider", "providerName", "modelProvider", "model", "modelName", "modelId",
+        "name", "title", "id",
+    )).lower()
+    return bool(_VISION_IDENTITY_RE.search(identity))
+
+
+def _is_multimodal_model(model: dict) -> bool:
+    """多模态判定：显式字段优先（对齐 workbuddy supportsImages / trae display.multimodal
+    的字段命名差异），字段缺失时按内置目录兜底，最后按 identity 关键词兜底。
+
+    plan-156-739: 内置目录（models.catalog.MODEL_CATALOG）优先于 identity 正则——ta3 目录
+    的新式模型（glm-5.x / doubao-seed / kimi 等）不被身份正则覆盖，而内置目录对同家族
+    （glm-5.1/5.2、doubao-seed-1.6、kimi-k2.5）已标 multimodal=True，作为权威兜底。
+    """
+    display = model.get("displayConfig") or {}
+    for v in (
+        model.get("isMultimodal"), model.get("multimodal"),
+        model.get("supportsImages"), model.get("supports_images"),
+        model.get("vision"),
+        display.get("multimodal") if isinstance(display, dict) else None,
+    ):
+        if v is not None:
+            return bool(v)
+    # 内置目录兜底（对齐 BYOK apply_metadata 语义；函数内 import 避免循环依赖）
+    try:
+        from app.models.catalog import lookup
+        name = _request_name(model)
+        if name:
+            meta = lookup(name)
+            if meta is not None:
+                return bool(meta.get("multimodal", False))
+    except Exception:
+        logger.debug("[ta3] 内置目录多模态判定失败(非阻塞)", exc_info=True)
+    return _is_vision_identity(model)
+
+
 def _extract_models(assistant: dict) -> list[dict]:
     """从 assistant 提取模型列表（对齐 auth/catalog.ts normalizeAssistant + modelsByRoleFromConfigModels）。"""
     config = assistant.get("configResult") or {}
@@ -157,7 +209,7 @@ def _parse_config_models(assistant: dict) -> list[dict]:
             "provider": m.get("provider") or m.get("providerName") or "",
             "title": m.get("title") or name,
             "context_window": _context_window(completion_opts, m),
-            "is_multimodal": bool(m.get("isMultimodal") or m.get("multimodal")),
+            "is_multimodal": _is_multimodal_model(m),
         })
     return entries
 
@@ -356,11 +408,20 @@ async def sync_ta3_models(db: AsyncSession, provider, api_base: str) -> list[dic
         m.api_key = entry.get("api_key") or None
         m.base_url = entry.get("base_url") or None
         m.context_window = entry.get("context_window") or 200000
-        m.is_multimodal = bool(entry.get("is_multimodal"))
+        # plan-147-674: 用户手动设置过多模态标记（meta.multimodal_override）时
+        # 目录同步不覆盖，避免每次登录同步冲掉 UI 上的手动修正
+        meta = dict(m.ta3_meta or {})
+        if meta.get("multimodal_override"):
+            if bool(entry.get("is_multimodal")) != bool(m.is_multimodal):
+                logger.info(
+                    "[ta3] model=%s 保留用户手动设置 is_multimodal=%s（目录识别=%s）",
+                    name, m.is_multimodal, entry.get("is_multimodal"),
+                )
+        else:
+            m.is_multimodal = bool(entry.get("is_multimodal"))
         m.api_format = "ta3"
         # 必须复制新 dict 再赋回：SQLAlchemy 对可变 JSON 列赋同一对象引用
         # 不触发 change detection，原地 update 会导致 meta 更新不落库
-        meta = dict(m.ta3_meta or {})
         meta.update({
             "systemMessage": entry.get("system_message") or "",
             "anthropic": bool(entry.get("anthropic")),

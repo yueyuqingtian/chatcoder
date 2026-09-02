@@ -1,19 +1,17 @@
 """todo_write 工具：模型执行中自主维护任务清单（对齐 Codex update_plan）。
 
+plan-482: 分步决策权完全在模型——本工具只做清单存取，不做任何"智能匹配/
+自动拆分/标题对齐引擎步骤"的加工。模型提交什么清单，任务卡就显示什么。
+
 行为：
-- 校验：1~12 项、content 非空、至多 1 个 in_progress；
-- 若当前 turn 存在引擎管理的任务区块（拆分提案产生的 group），v23 起不再跳过：
-  按标题匹配（精确优先、互相包含兜底）把清单状态同步到引擎步骤并广播 task.updated，
-  让任务卡/贴条实时反映主代理的真实实现进度（替代已移除的探索子代理驱动）；
-  引擎步骤只更新状态，不新增、不隐藏（拆分区块是权威计划）；
-- 否则持久化到 Task 表：自建 kind=group、标题「任务清单」的区块，
-  steps 按 title 匹配更新，消失的项标记隐藏，状态映射
-  pending→pending / in_progress→running / completed→done，
-  并广播 task.updated 让任务卡片实时刷新。
+- 校验：1~12 项、content 非空、至多 1 个 in_progress（多余降级为 pending）；
+- 落库到 Task 表：自建 kind=group、标题「任务清单」的区块，steps 按模型提交的
+  content 一字不差增删改（消失的项标记隐藏），状态映射
+  pending→pending / in_progress→running / completed→done；
+- 广播 todo.updated（前端清单/贴条）与 task.updated（任务卡实时刷新）。
 """
 from typing import Any
 import logging
-import re
 
 from sqlalchemy import select
 
@@ -28,17 +26,15 @@ _MAX_TODOS = 12
 _STATUS_MAP = {"pending": "pending", "in_progress": "running", "completed": "done"}
 
 
-def _norm_title(s: str) -> str:
-    """标题归一化：去全部空白并转小写，用于清单项 ↔ 引擎步骤的匹配。"""
-    return re.sub(r"\s+", "", (s or "").strip().lower())
-
-
 class TodoWriteTool(Tool):
     name = "todo_write"
     risk_level = "low"
     description = (
-        "维护当前任务的分步执行清单。复杂任务开始时创建清单；每完成一步立即更新状态；"
-        "计划理解发生变化时先更新清单再继续执行。简单任务（一两次工具调用可完成）不要使用。"
+        "维护当前任务的分步执行清单，是否分步与分几步由你自主判断："
+        "预计需要 3 步以上、跨多个文件、或需要边改边验证的任务，动手前先建清单；"
+        "一两次工具调用就能完成的简单任务直接做，不要建清单（否则只是噪音）。"
+        "执行中理解发生变化时先更新清单再继续——可以拆分、合并、重排或新增条目；"
+        "每完成一步立即更新状态，不要事后批量补标。"
     )
 
     def function_schema(self) -> dict:
@@ -58,7 +54,10 @@ class TodoWriteTool(Tool):
                                 "properties": {
                                     "content": {
                                         "type": "string",
-                                        "description": "步骤描述，一句话，建议「文件: 动作」格式",
+                                        "description": (
+                                            "步骤描述，一句话，建议「文件: 动作」格式；"
+                                            "每条对应一个可独立验证的交付物"
+                                        ),
                                     },
                                     "activeForm": {
                                         "type": "string",
@@ -133,58 +132,23 @@ class TodoWriteTool(Tool):
         )
 
     async def _sync_to_db(self, ctx: ToolContext, turn_id: int, todos: list[dict[str, str]]) -> bool:
-        """把清单写入 Task 表；存在引擎管理 group 时跳过（返回 False）。
+        """把模型提交的清单如实写入 Task 表。
 
         P0 修复 A: 优先用 ctx.db（与 turn 主循环同连接，避免 SQLite 跨连接写锁），
         写入后立即 commit（对齐 engine v9 立即提交模式，前端 refreshTasks 立刻可查）；
         ctx.db 为空时回退独立 session（兼容 review/子代理等路径）。
+
+        plan-482: 删除"与引擎 group 按标题匹配/追加步骤"的加工逻辑——
+        系统不再预拆分，清单即权威，模型提交什么就落什么。
         """
         from app.persistence.models.task import Task
 
-        async def _do_sync(db) -> bool:
-            groups = list((await db.execute(
+        async def _do_sync(db) -> list[Task]:
+            todo_group = (await db.execute(
                 select(Task).where(
-                    Task.turn_id == turn_id, Task.kind == "group", Task.is_hidden == False,  # noqa: E712
-                ).order_by(Task.id.asc())
-            )).scalars().all())
-            todo_group = next((g for g in groups if g.title == _TODO_GROUP_TITLE), None)
-            engine_group = next((g for g in groups if g.title != _TODO_GROUP_TITLE), None)
-            if engine_group is not None and todo_group is None:
-                # v23: 引擎拆分区块——清单状态按标题匹配同步到引擎步骤（只改状态，不增删步骤），
-                # 拆分路径的每步进度由主代理真实实现进度驱动（替代已移除的探索子代理驱动）。
-                eng_steps = list((await db.execute(
-                    select(Task).where(
-                        Task.parent_task_id == engine_group.id, Task.is_hidden == False,  # noqa: E712
-                    ).order_by(Task.priority.asc(), Task.id.asc())
-                )).scalars().all())
-                by_exact = {_norm_title(s.title): s for s in eng_steps}
-                eng_changed: list[Task] = []
-                matched_ids: set[int] = set()
-                for todo in todos:
-                    key = _norm_title(todo["content"])
-                    step = by_exact.get(key)
-                    if step is None or step.id in matched_ids:
-                        step = next(
-                            (s for s in eng_steps
-                             if s.id not in matched_ids
-                             and _norm_title(s.title) and key
-                             and (_norm_title(s.title) in key or key in _norm_title(s.title))),
-                            None,
-                        )
-                    if step is None or step.id in matched_ids:
-                        continue
-                    matched_ids.add(step.id)
-                    new_status = _STATUS_MAP[todo["status"]]
-                    if step.status != new_status:
-                        step.status = new_status
-                        eng_changed.append(step)
-                if eng_changed:
-                    engine_group.status = (
-                        "done" if eng_steps and all(s.status == "done" for s in eng_steps) else "running"
-                    )
-                    await db.commit()
-                return eng_changed
-
+                    Task.turn_id == turn_id, Task.kind == "group", Task.title == _TODO_GROUP_TITLE,
+                ).order_by(Task.id.asc()).limit(1)
+            )).scalars().first()
             if todo_group is None:
                 request_task = (await db.execute(
                     select(Task).where(
@@ -238,8 +202,6 @@ class TodoWriteTool(Tool):
 
         if ctx.db is not None:
             changed = await _do_sync(ctx.db)
-            if changed is False:
-                return False
             for step in changed:
                 await broadcast(ctx.session_id, {
                     "event": "task.updated",
@@ -251,8 +213,6 @@ class TodoWriteTool(Tool):
         # 回退路径：独立 session（review/子代理等无 ctx.db 场景）
         async with async_session_factory() as db:
             changed = await _do_sync(db)
-            if changed is False:
-                return False
             for step in changed:
                 await broadcast(ctx.session_id, {
                     "event": "task.updated",

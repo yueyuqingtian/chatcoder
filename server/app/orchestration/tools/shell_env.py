@@ -116,7 +116,10 @@ def shell_hint() -> str:
         "\n## Shell 环境\n"
         f"- 当前 shell: {shell_label()}。命令会按该 shell 的真实语法执行，请勿假设是 bash。\n"
         "- 内容搜索请优先使用 fs_grep 工具（支持正则、可过滤目录/扩展名），"
-        "不要在终端里依赖 grep/ripgrep——Windows 机器通常没有这些命令。"
+        "不要在终端里依赖 grep/ripgrep——Windows 机器通常没有这些命令。\n"
+        "- 长驻进程（dev server、watch、后端服务）用 terminal_exec 的 waitForCompletion=false "
+        "后台启动（返回 shell_id），用 terminal_bg_status 查日志、terminal_bg_kill 终止；"
+        "长命令（安装/构建/测试）用 timeout 参数延长等待。"
     )
     if kind in ("pwsh", "powershell"):
         return common + (

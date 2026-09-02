@@ -1,192 +1,201 @@
-/** 设置中心：用量统计（v1.1 重写：全软件 token 总量 + 分模型 + 会话上下文占用）。
- * 三段式：
- * 1. 总览卡：总输入/总输出/推理/缓存命中/调用次数
- * 2. 按模型分组列表：模型名 + 调用次数 + 输入/输出 + 占比条
- * 3. 会话上下文占用（折叠区）：各会话当前窗口占用估算
+/** 设置中心：用量统计（plan-152-704 重写，严格按图二图三设计）。
+ * 自上而下：统计卡片行 → Token 活动热力图（每日/每周/累计）→ 时间范围（近7日/近30日/自定义）→
+ * 每日 Token 趋势折线图（多模型）→ 模型用量环形图 → 刷新按钮。
+ * 移除原"会话上下文占用"折叠区。模型显示"供应商/模型名"以区分同名模型。
  */
-import { useCallback, useEffect, useState } from "react";
-import { api, type SessionOut, type UsageSummaryOut } from "../../api/client";
-import { IconRefresh, IconChevronDown } from "../icons";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { api, type UsageStatsOut } from "../../api/client";
+import { IconRefresh } from "../icons";
+import { UsageHeatmap } from "./usage/UsageHeatmap";
+import { UsageTrendChart, type TrendSeries } from "./usage/UsageTrendChart";
+import { UsageDonutChart, type DonutSeg } from "./usage/UsageDonutChart";
+import { fmtTokens, modelColor } from "./usage/chartUtils";
 
-interface UsageRow {
-  sessionId: number;
-  title: string;
-  total: number;
-  context_window: number;
-  message_count: number;
-}
+type RangeMode = "7" | "30" | "custom";
 
-const RANGE_OPTIONS = [
-  { label: "全部", days: 0 },
-  { label: "近 7 天", days: 7 },
-  { label: "近 30 天", days: 30 },
+const RANGE_OPTS: Array<{ mode: RangeMode; label: string }> = [
+  { mode: "7", label: "近 7 日" },
+  { mode: "30", label: "近 30 日" },
+  { mode: "custom", label: "自定义" },
 ];
 
-function fmtTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
-  return String(n);
+function buildRangeParams(mode: RangeMode, start: string, end: string): { start?: string; end?: string; days?: number } {
+  if (mode === "7") return { days: 7 };
+  if (mode === "30") return { days: 30 };
+  if (start && end) return { start, end };
+  return { days: 30 };
 }
 
 export function UsagePanel() {
-  const [summary, setSummary] = useState<UsageSummaryOut | null>(null);
-  const [days, setDays] = useState(0);
+  const [stats, setStats] = useState<UsageStatsOut | null>(null);
+  const [rangeMode, setRangeMode] = useState<RangeMode>("30");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // 会话上下文占用（保留原逻辑，折叠展示）
-  const [rows, setRows] = useState<UsageRow[]>([]);
-  const [showSessions, setShowSessions] = useState(false);
 
-  const load = useCallback(async (d: number) => {
-    setLoading(true); setError(null);
+  const load = useCallback(async (mode: RangeMode, start: string, end: string) => {
+    setLoading(true);
+    setError(null);
     try {
-      const sum = await api.getUsageSummary(d);
-      setSummary(sum);
-    } catch (e) { setError(String(e)); }
-    finally { setLoading(false); }
+      const s = await api.getUsageStats(buildRangeParams(mode, start, end));
+      setStats(s);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  const loadSessions = useCallback(async () => {
-    try {
-      const sessions: SessionOut[] = await api.listSessions();
-      const entries = await Promise.all(
-        sessions.slice(0, 30).map(async (s) => {
-          try {
-            const u = await api.getSessionUsage(s.id);
-            return { sessionId: s.id, title: s.title || `#${s.id}`, total: u.total, context_window: u.context_window, message_count: u.message_count };
-          } catch { return null; }
-        })
-      );
-      const valid = entries.filter((x): x is UsageRow => x != null);
-      valid.sort((a, b) => b.total - a.total);
-      setRows(valid);
-    } catch { /* 会话占用加载失败不阻塞主统计 */ }
-  }, []);
+  useEffect(() => { void load("30", "", ""); }, [load]);
 
-  useEffect(() => { load(0); }, [load]);
-  useEffect(() => { if (showSessions) loadSessions(); }, [showSessions, loadSessions]);
+  const applyRange = (mode: RangeMode, start = customStart, end = customEnd) => {
+    if (mode === "custom" && (!start || !end)) return; // 起止未填全则不刷新
+    setRangeMode(mode);
+    void load(mode, start, end);
+  };
 
-  const total = summary?.total;
-  const byModel = summary?.by_model ?? [];
-  const grandTotal = Math.max(1, total?.total ?? 1);
-  const maxTotal = Math.max(1, ...rows.map((r) => r.total));
+  // ── 由 stats 派生的展示数据 ──
+  const total = stats?.total;
+  const byModel = stats?.by_model ?? [];
+  const totalTokens = total?.total ?? 0;
+
+  const trendSeries = useMemo<TrendSeries[]>(() => {
+    if (!stats) return [];
+    const dateKey = new Set(stats.daily.map((d) => d.date));
+    const recordByKey: Record<string, Record<string, number>> = {};
+    for (const d of stats.daily_by_model) {
+      if (!dateKey.has(d.date)) continue;
+      (recordByKey[d.key] ??= {})[d.date] = (recordByKey[d.key]?.[d.date] ?? 0) + d.tokens;
+    }
+    const top = byModel.slice(0, 5);
+    const otherKeys = new Set(byModel.slice(5).map((b) => b.key));
+    const otherRecord: Record<string, number> = {};
+    for (const d of stats.daily_by_model) {
+      if (otherKeys.has(d.key)) otherRecord[d.date] = (otherRecord[d.date] ?? 0) + d.tokens;
+    }
+    const res: TrendSeries[] = top.map((b, i) => ({
+      display_name: b.display_name,
+      color: modelColor(i),
+      record: recordByKey[b.key] ?? {},
+    }));
+    if (otherKeys.size > 0) {
+      res.push({ display_name: "其他", color: modelColor(top.length), record: otherRecord });
+    }
+    return res;
+  }, [stats, byModel]);
+
+  const donutSegs = useMemo<DonutSeg[]>(() => {
+    const t = Math.max(1, totalTokens);
+    const top8 = byModel.slice(0, 8);
+    const rest = byModel.slice(8).reduce((s, b) => s + b.total, 0);
+    const res: DonutSeg[] = top8.map((b, i) => ({
+      label: b.display_name,
+      value: b.total,
+      color: modelColor(i),
+      pct: Math.round((b.total / t) * 100),
+    }));
+    if (byModel.length > 8) {
+      res.push({ label: "其他", value: rest, color: modelColor(8), pct: Math.round((rest / t) * 100) });
+    }
+    return res;
+  }, [byModel, totalTokens]);
+
+  const dates = stats?.daily.map((d) => d.date) ?? [];
 
   return (
-    <div>
-      <div style={{ display: "flex", gap: 8, justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-        <div style={{ display: "flex", gap: 4 }}>
-          {RANGE_OPTIONS.map((opt) => (
+    <div className="usage-panel">
+      {/* 时间范围 + 刷新 */}
+      <div className="usage-toolbar">
+        <div className="usage-range">
+          {RANGE_OPTS.map((o) => (
             <button
-              key={opt.days}
-              className={`btn btn-sm ${days === opt.days ? "btn-primary" : "btn-ghost"}`}
-              onClick={() => { setDays(opt.days); load(opt.days); }}
+              key={o.mode}
+              className={`btn btn-sm ${rangeMode === o.mode ? "btn-primary" : "btn-ghost"}`}
               disabled={loading}
+              onClick={() => applyRange(o.mode)}
             >
-              {opt.label}
+              {o.label}
             </button>
           ))}
+          {rangeMode === "custom" && (
+            <span className="usage-range-custom">
+              <input
+                type="date"
+                value={customStart}
+                max={customEnd || undefined}
+                onChange={(e) => setCustomStart(e.target.value)}
+                onBlur={() => applyRange("custom")}
+                className="sp-input usage-date-input"
+              />
+              <span className="usage-range-sep">至</span>
+              <input
+                type="date"
+                value={customEnd}
+                min={customStart || undefined}
+                onChange={(e) => setCustomEnd(e.target.value)}
+                onBlur={() => applyRange("custom")}
+                className="sp-input usage-date-input"
+              />
+            </span>
+          )}
         </div>
-        <button className="btn btn-ghost btn-sm" onClick={() => load(days)} disabled={loading}>
+        <button className="btn btn-ghost btn-sm" onClick={() => applyRange(rangeMode)} disabled={loading}>
           <IconRefresh size={13} /> {loading ? "加载中…" : "刷新"}
         </button>
       </div>
 
       {error && <div className="navpage-empty" style={{ color: "var(--error)" }}>加载失败：{error}</div>}
 
-      {/* 1. 总览卡 */}
+      {/* 统计卡片行 */}
       {total && (
-        <div className="usage-overview-grid">
-          <div className="usage-overview-card">
-            <div className="usage-overview-label">总输入</div>
-            <div className="usage-overview-value">{fmtTokens(total.prompt)}</div>
+        <div className="usage-cards">
+          <div className="usage-card">
+            <div className="usage-card-value">{fmtTokens(total.total)}</div>
+            <div className="usage-card-label">累计 Token</div>
+            <div className="usage-card-sub">输入 {fmtTokens(total.prompt)} · 输出 {fmtTokens(total.completion)} · 缓存 {fmtTokens(total.cached)}</div>
           </div>
-          <div className="usage-overview-card">
-            <div className="usage-overview-label">总输出</div>
-            <div className="usage-overview-value">{fmtTokens(total.completion)}</div>
+          <div className="usage-card">
+            <div className="usage-card-value">{fmtTokens(stats?.peak_tokens ?? 0)}</div>
+            <div className="usage-card-label">峰值 Token（单日最高）</div>
           </div>
-          <div className="usage-overview-card">
-            <div className="usage-overview-label">推理</div>
-            <div className="usage-overview-value">{fmtTokens(total.reasoning)}</div>
+          <div className="usage-card">
+            <div className="usage-card-value">{total.calls.toLocaleString()}</div>
+            <div className="usage-card-label">调用次数</div>
           </div>
-          <div className="usage-overview-card">
-            <div className="usage-overview-label">缓存命中</div>
-            <div className="usage-overview-value">{fmtTokens(total.cached)}</div>
+          <div className="usage-card">
+            <div className="usage-card-value">{stats?.streak_current ?? 0} 天</div>
+            <div className="usage-card-label">当前连续天数</div>
           </div>
-          <div className="usage-overview-card">
-            <div className="usage-overview-label">调用次数</div>
-            <div className="usage-overview-value">{total.calls.toLocaleString()}</div>
+          <div className="usage-card">
+            <div className="usage-card-value">{stats?.streak_longest ?? 0} 天</div>
+            <div className="usage-card-label">最长连续天数</div>
           </div>
         </div>
       )}
 
-      {/* 2. 按模型分组 */}
-      {byModel.length > 0 && (
-        <div className="usage-section">
-          <div className="usage-section-title">按模型分布</div>
-          <div className="settings-resource-list">
-            {byModel.map((m) => {
-              const pct = Math.min(100, Math.round((m.total / grandTotal) * 100));
-              return (
-                <div key={m.model} className="settings-resource-item">
-                  <div className="settings-resource-info">
-                    <div className="settings-resource-name">{m.model}</div>
-                    <div className="settings-resource-desc">
-                      <span>{m.calls} 次调用</span>
-                      <span>输入 {fmtTokens(m.prompt)} / 输出 {fmtTokens(m.completion)}</span>
-                      {m.cached > 0 && <span>缓存 {fmtTokens(m.cached)}</span>}
-                    </div>
-                    <div className="usage-bar-wrap" style={{ marginTop: 6, width: "100%" }}>
-                      <div className="usage-bar" style={{ width: `${pct}%`, background: "var(--accent)" }} />
-                      <span className="usage-bar-label">{fmtTokens(m.total)} tokens（{pct}%）</span>
-                    </div>
-                  </div>
-                  <div style={{ flexShrink: 0, fontSize: 11, color: "var(--text-2)", fontFamily: "var(--font-mono)" }}>
-                    {pct}%
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+      {/* Token 活动热力图 */}
+      {stats && <UsageHeatmap daily_all={stats.daily_all} />}
+
+      {/* 每日 Token 趋势 */}
+      {trendSeries.length > 0 && (
+        <div className="usage-section-block">
+          <div className="usage-section-title">每日 Token 趋势</div>
+          <UsageTrendChart series={trendSeries} dates={dates} />
+        </div>
+      )}
+
+      {/* 模型用量环形图 */}
+      {donutSegs.length > 0 && (
+        <div className="usage-section-block">
+          <div className="usage-section-title">模型用量</div>
+          <UsageDonutChart segments={donutSegs} centerValue={totalTokens} />
         </div>
       )}
 
       {!loading && !error && !total && byModel.length === 0 && (
         <div className="navpage-empty">暂无用量数据，发送消息后统计</div>
       )}
-
-      {/* 3. 会话上下文占用（折叠） */}
-      <div className="usage-section">
-        <button className="usage-collapse-btn" onClick={() => setShowSessions((v) => !v)}>
-          <IconChevronDown size={13} style={{ transform: showSessions ? "rotate(180deg)" : "none", transition: "transform 0.2s" }} />
-          会话上下文占用
-        </button>
-        {showSessions && (
-          <div className="settings-resource-list" style={{ marginTop: 8 }}>
-            {rows.length === 0 && <div className="navpage-empty">暂无会话数据</div>}
-            {rows.map((r) => {
-              const pct = Math.min(100, Math.round((r.total / r.context_window) * 100));
-              return (
-                <div key={r.sessionId} className="settings-resource-item">
-                  <div className="settings-resource-info">
-                    <div className="settings-resource-name">{r.title}</div>
-                    <div className="settings-resource-desc">
-                      <span className="settings-resource-tag">#{r.sessionId}</span>
-                      <span>{r.message_count} 条消息</span>
-                    </div>
-                    <div className="usage-bar-wrap" style={{ marginTop: 6, width: "100%" }}>
-                      <div className="usage-bar" style={{ width: `${pct}%`, background: pct > 80 ? "var(--warning)" : "var(--accent)" }} />
-                      <span className="usage-bar-label">{Math.round(r.total).toLocaleString()} / {Math.round(r.context_window).toLocaleString()} tokens（{pct}%）</span>
-                    </div>
-                  </div>
-                  <div style={{ flexShrink: 0, fontSize: 11, color: pct > 80 ? "var(--warning)" : "var(--text-2)", fontFamily: "var(--font-mono)" }}>
-                    {Math.round((r.total / maxTotal) * 100)}%
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
     </div>
   );
 }

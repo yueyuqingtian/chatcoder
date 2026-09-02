@@ -338,7 +338,30 @@ class Ta3Provider(ModelProvider):
                     blocks = []
                     if m.content:
                         blocks.append({"type": "text", "text": m.content})
-                    blocks.extend(m.content_blocks or [])
+                    # plan-147-674: OpenAI image_url 块 → Anthropic image 块（data URI
+                    # 解析对齐 anthropic.py 既有实现）。此前原样透传 image_url，
+                    # claude/kimi 系网关拒绝或忽略，多模态图片注入静默失效。
+                    for block in m.content_blocks or []:
+                        if block.get("type") == "image_url":
+                            img_data = (block.get("image_url") or {}).get("url", "")
+                            media_type = "image/png"
+                            raw_data = ""
+                            if img_data.startswith("data:"):
+                                header, _, raw_data = img_data.partition(",")
+                                if ";" in header:
+                                    media_type = header.split(":", 1)[1].split(";", 1)[0]
+                            else:
+                                raw_data = img_data
+                            blocks.append({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": raw_data,
+                                },
+                            })
+                        else:
+                            blocks.append(block)
                     converted.append({"role": "user", "content": blocks})
                 else:
                     converted.append({"role": "user", "content": m.content or ""})
@@ -627,20 +650,6 @@ class Ta3Provider(ModelProvider):
                 if real is not None:
                     args = restore_args(name, args)
                 tool_calls.append({"id": slot["id"], "name": real or name, "arguments": args})
-
-        # 退化文本兜底解析（复用 openai_compatible 的 DSML/文本意图解析）
-        if not tool_calls and content:
-            from app.models.providers.openai_compatible import (
-                _parse_degraded_tool_calls, _parse_dsml_tool_calls,
-            )
-            degraded = _parse_dsml_tool_calls(content) if "DSML" in content else []
-            if not degraded:
-                degraded = _parse_degraded_tool_calls(content)
-            if degraded:
-                logger.info("[ta3] 退化文本解析出 %d 个工具调用", len(degraded))
-                tool_calls = degraded
-                content = None
-                monitor["finish_reason"] = "tool_calls"
 
         # v28: 流式耗时/产出统计 + 空响应兜底日志（诊断"突然停止"现场）
         _usage_desc = (

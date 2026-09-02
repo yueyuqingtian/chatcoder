@@ -3,49 +3,72 @@
 v2.5: 修复多 git 仓库 cwd 探测冲突 + cd && 链重复执行问题。
 v1.0: 超时后 kill 子进程 + cwd 路径穿越防护。
 v1.2: 按 terminal_shell 设置解析执行 shell（PowerShell/Git Bash/cmd），
-     与交互终端保持一致；输出解码兼容 GBK（中文 Windows 下 cmd/PowerShell 输出 GBK）。
+      与交互终端保持一致；输出解码兼容 GBK（中文 Windows 下 cmd/PowerShell 输出 GBK）。
+v1.0 (plan-153-705): waitForCompletion=false 后台执行（注册到 bg_process，
+      立即返回 shell_id，用 terminal_bg_status/terminal_bg_kill 管理生命周期）
+      + timeout 参数（默认 120s，替代 30s 硬编码，上限钳制 tool_exec_timeout_sec）
+      + 输出上限改读 settings.tool_output_chars_terminal。
 """
 import asyncio
 import logging
+import os
+import time
 import re
 from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
+from app.orchestration.tools.bg_process import (
+    bg_process_registry, decode_output, kill_process_tree,
+)
 from app.orchestration.tools.git_root import resolve_repo_for_cwd, list_git_repos
 from app.orchestration.tools.shell_env import resolve_shell, shell_kind
 
 logger = logging.getLogger(__name__)
 
-_TIMEOUT_SEC = 30
-_MAX_OUTPUT = 8000
+# v1.0 (plan-153-705): 同步等待默认超时（秒），可被 timeout 参数覆盖；
+# 上限钳制到 settings.tool_exec_timeout_sec（executor/agent_loop 外层同源）。
+_DEFAULT_TIMEOUT_SEC = 120
+_MIN_TIMEOUT_SEC = 5
 
 
 def _decode_output(data: bytes) -> str:
-    """优先 UTF-8，失败回退 GBK：cmd/PowerShell 在中文 Windows 上输出 GBK，
-    直接按 UTF-8 解码会得到乱码（如 "'Get-ChildItem' 不是内部或外部命令" 变问号）。"""
-    if not data:
-        return ""
-    for enc in ("utf-8", "gbk"):
-        try:
-            return data.decode(enc)
-        except UnicodeDecodeError:
-            continue
-    return data.decode("utf-8", errors="replace")
+    """兼容旧引用：解码逻辑已提取到 bg_process.decode_output（后台收集共用）。"""
+    return decode_output(data)
+
+
+def _parse_wait_for_completion(raw: Any) -> bool:
+    """解析 waitForCompletion 参数；容错模型输出的字符串 "false"/"true"。"""
+    if isinstance(raw, str):
+        return raw.strip().lower() not in ("false", "0", "no")
+    return bool(raw) if raw is not None else True
+
+
+def _parse_timeout(raw: Any) -> int:
+    """解析 timeout 参数（秒），钳制 [5, settings.tool_exec_timeout_sec]。"""
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        val = _DEFAULT_TIMEOUT_SEC
+    upper = int(settings.tool_exec_timeout_sec)
+    return max(_MIN_TIMEOUT_SEC, min(val, upper))
 
 
 class TerminalExecTool(Tool):
     name = "terminal_exec"
     risk_level = "high"
     description = (
-        "在工作区目录内执行 shell 命令(超时 30s)。\n"
+        "在工作区目录内执行 shell 命令(默认超时 120s,可用 timeout 参数延长)。\n"
         "当前 shell 见系统提示的「Shell 环境」——Windows 上通常是 PowerShell 或 cmd.exe，不是 bash，\n"
         "请按该 shell 的语法写命令（如 Get-ChildItem 仅 PowerShell 可用，grep/find 通常不存在）。\n"
         "只读安全命令(如 git status/findstr/dir)免审批直接执行；危险命令被安全策略直接拒绝。\n"
         "重要: 每次调用是全新的 shell 进程,cd 不会跨调用持久化。\n"
         "如需在特定子目录执行,请用 cwd 参数指定,而不是 cd 命令。\n"
-        '例: {"command": "git diff", "cwd": "clinic"}'
+        "启动 dev server、watch、后端服务等长驻进程时,将 waitForCompletion 设为 false,\n"
+        "命令进入后台运行并立即返回 shell_id,用 terminal_bg_status 查日志、terminal_bg_kill 终止。\n"
+        '例: {"command": "git diff", "cwd": "clinic"}；'
+        '后台例: {"command": "npm run dev", "waitForCompletion": false}'
     )
 
     def function_schema(self) -> dict:
@@ -63,6 +86,20 @@ class TerminalExecTool(Tool):
                             "description": (
                                 "执行命令的工作目录,相对工作根的路径(如 'clinic' 或 'clinicFrontEnd')。"
                                 "多 git 仓库时必须指定此参数!"
+                            ),
+                        },
+                        "waitForCompletion": {
+                            "type": "boolean",
+                            "description": (
+                                "是否等待命令完成。默认 true；启动 dev server、watch、后端服务等"
+                                "长驻进程时必须设为 false，命令会进入后台运行并返回 shell_id。"
+                            ),
+                        },
+                        "timeout": {
+                            "type": "integer",
+                            "description": (
+                                "同步等待超时(秒),默认 120,范围 5~"
+                                f"{settings.tool_exec_timeout_sec}。长命令(安装/构建/测试)按需调大。"
                             ),
                         },
                     },
@@ -145,6 +182,16 @@ class TerminalExecTool(Tool):
         #    cmd 及其他走 create_subprocess_shell 默认解析）
         shell = resolve_shell()
         kind = shell_kind()
+        wait_for_completion = _parse_wait_for_completion(args.get("waitForCompletion"))
+        timeout_sec = _parse_timeout(args.get("timeout"))
+        _t0 = time.monotonic()
+        # v36: 执行前留痕。打包后 shell 解析依赖 PATH/SystemRoot，
+        # 环境缺失会静默退化成错误 shell，导致命令全部失败且难以查证。
+        logger.info(
+            "[term.start] cmd=%r cwd=%s shell=%s kind=%s workspace=%s bg=%s timeout=%s",
+            command[:300], resolved_cwd, shell, kind, ctx.workspace_root,
+            not wait_for_completion, timeout_sec,
+        )
         try:
             if kind in ("pwsh", "powershell"):
                 proc = await asyncio.create_subprocess_exec(
@@ -167,12 +214,45 @@ class TerminalExecTool(Tool):
                     stderr=asyncio.subprocess.PIPE,
                     cwd=resolved_cwd,
                 )
-            communicate_task = asyncio.create_task(proc.communicate())
-            deadline = asyncio.get_running_loop().time() + _TIMEOUT_SEC
+        except OSError as e:
+            # v36: 启动失败多因 shell 路径不存在或打包环境缺依赖，
+            # 记录 shell 与 PATH 片段，便于判断是环境问题还是命令问题。
+            logger.error(
+                "[term.spawn_error] cmd=%r cwd=%s shell=%s kind=%s "
+                "exc_type=%s exc=%s path_prefix=%s",
+                command[:300], resolved_cwd, shell, kind,
+                type(e).__name__, e, (os.environ.get("PATH") or "")[:300],
+            )
+            return ToolResult(ok=False, output="", error=f"执行失败: {type(e).__name__}: {e}")
+
+        # v1.0 (plan-153-705): 后台模式——注册到 bg_process 立即返回 shell_id。
+        # 后台进程不随 cancel_event 终止（dev server 需跨 turn 存活）。
+        if not wait_for_completion:
+            shell_id = bg_process_registry.register(
+                proc, command, resolved_cwd, ctx.session_id,
+            )
+            return ToolResult(
+                ok=True,
+                output=(
+                    f"命令已进入后台运行。\n"
+                    f"shell_id: {shell_id}\n"
+                    f"命令: {command}\n"
+                    f"工作目录: {resolved_cwd}\n"
+                    f"用 terminal_bg_status 查询状态与日志(offset 增量读取),"
+                    f"terminal_bg_kill 终止。"
+                ),
+                data={"shell_id": shell_id, "background": True,
+                      "command": command, "cwd": resolved_cwd},
+            )
+
+        # 同步模式：等待完成，超时 kill
+        communicate_task = asyncio.create_task(proc.communicate())
+        deadline = asyncio.get_running_loop().time() + timeout_sec
+        try:
             while not communicate_task.done():
                 if ctx.cancel_event and ctx.cancel_event.is_set():
-                    proc.kill()
-                    await proc.wait()
+                    # 取消：整树终止（孤儿子进程持管道会让 wait() 挂起，见 kill_process_tree）
+                    await kill_process_tree(proc)
                     communicate_task.cancel()
                     return ToolResult(ok=False, output="", error="已被用户中断")
                 if asyncio.get_running_loop().time() >= deadline:
@@ -180,26 +260,41 @@ class TerminalExecTool(Tool):
                 await asyncio.sleep(0.2)
             stdout, stderr = await communicate_task
         except asyncio.TimeoutError:
-            # v1.0: 超时后强制 kill 子进程，避免资源耗尽/后台恶意进程
-            try:
-                proc.kill()
-                await proc.wait()
-            except (ProcessLookupError, OSError):
-                pass
-            logger.warning("terminal.exec 超时已 kill: cmd=%r cwd=%s", command, resolved_cwd)
-            return ToolResult(ok=False, output="", error=f"超时(>{_TIMEOUT_SEC}s)，进程已强制终止")
-        except OSError as e:
-            return ToolResult(ok=False, output="", error=f"执行失败: {e}")
+            # v1.0: 超时后整树终止子进程，避免资源耗尽/后台恶意进程；
+            # Windows 上仅 kill shell 会让 wait() 挂到孤儿子进程退出（实测 57s）
+            await kill_process_tree(proc)
+            # v36: 超时现场——区分「命令本身慢」「shell 启动卡死」「子进程不退出」。
+            logger.error(
+                "[term.timeout] cmd=%r cwd=%s shell=%s kind=%s timeout=%ss "
+                "elapsed=%.1fs pid=%s",
+                command[:300], resolved_cwd, shell, kind, timeout_sec,
+                time.monotonic() - _t0, getattr(proc, "pid", None),
+            )
+            return ToolResult(
+                ok=False, output="",
+                error=(
+                    f"超时(>{timeout_sec}s)，进程已强制终止。"
+                    f"长命令可用 timeout 参数延长等待,或 waitForCompletion=false 转后台运行。"
+                ),
+            )
 
         out = _decode_output(stdout or b"")
         err = _decode_output(stderr or b"")
         combined = out
         if err:
             combined += ("\n-- stderr --\n" + err) if combined else err
-        if len(combined) > _MAX_OUTPUT:
-            combined = combined[:_MAX_OUTPUT] + "\n...(已截断)"
+        max_output = int(settings.tool_output_chars_terminal)
+        if len(combined) > max_output:
+            combined = combined[:max_output] + "\n...(已截断)"
 
-        logger.debug("terminal.exec cmd=%r cwd=%s rc=%s", command, resolved_cwd, proc.returncode)
+        # v36: 从 debug 提到 info——生产默认 INFO，出问题时才有据可查；
+        # 输出长度与退出码是判断「命令是否真的生效」的关键。
+        logger.info(
+            "[term.done] rc=%s elapsed=%.1fs cmd=%r cwd=%s out_len=%s err_len=%s "
+            "err_prefix=%s",
+            proc.returncode, time.monotonic() - _t0, command[:300],
+            resolved_cwd, len(out), len(err), err[:200],
+        )
         data: dict[str, Any] = {"returncode": proc.returncode, "cwd": resolved_cwd, "cmd": command}
         if allow_outside:
             # 审计标记：放行后实际 cwd 落在工作区外时记录，供回放/审计识别越界访问

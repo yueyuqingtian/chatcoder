@@ -19,8 +19,9 @@ SUBAGENT_SYSTEM_PROMPT = """You are a subagent working on an isolated subtask fo
   4. Remaining issues or follow-ups
 - Report the summary via report_to_leader(summary). Never invent results you did not verify.
 
-## Reply style
+## Reply style & Language
 - Plain, concise language; no emoji or decorative symbols.
+- Mirror the user's language in all reports and summaries.
 """
 
 

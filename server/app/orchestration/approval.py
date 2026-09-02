@@ -1,73 +1,87 @@
-"""v0.3: 审批管理器 — 阻塞式审批门。
+"""审批管理器。
 
-工作流:
-1. ToolExecutor 遇 medium/high risk 工具 → ApprovalManager.request(approval_id, detail)
-   - 创建 asyncio.Future 入 pending 字典
-   - 同时调用方负责把 approval 消息入库 + WS 广播 approval.request
-2. 用户在前端点同意/拒绝 → WS approval.response → ApprovalManager.resolve(id, approved)
-3. request() 返回 (approved: bool),超时自动拒绝。
+v1.0 (对齐 Claude Code):
+- 审批队列管理(基于 approval_id)
+- 等待审批结果(asyncio.Future + 超时机制)
+- 回调注册(新审批请求时通知外部,如写库/推 WS)
+
+v2.2 (对齐 zcode 3.12/3.14):
+- 支持结构化提问(kind == "question")：answer 回填至 detail["answer"]
+- 自动批准配置(auto_approve_tools)：只读/低风险工具免确认，降低中断率
+- 执行策略规则匹配(ExecutionPolicyManager)：会话级/全局规则自动放行/阻断
 """
+
 import asyncio
 import logging
 import uuid
-from dataclasses import dataclass, field
-from typing import Any, Callable
 
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
 class _PendingApproval:
-    approval_id: str
-    future: asyncio.Future[bool] | None = None
-    detail: dict[str, Any] = field(default_factory=dict)
+    def __init__(self, approval_id: str, detail: dict):
+        self.approval_id = approval_id
+        self.detail = detail
+        # v1.0: 不在 __init__ 中绑 loop (跨线程/跨 loop 安全)
+        self._future: asyncio.Future | None = None
 
-    def ensure_future(self) -> asyncio.Future[bool]:
-        """v1.0: 延迟创建 future，避免 Python 3.12+ get_event_loop() 崩溃。"""
-        if self.future is None:
-            self.future = asyncio.get_running_loop().create_future()
-        return self.future
+    def ensure_future(self) -> asyncio.Future:
+        if self._future is None or self._future.get_loop() != asyncio.get_running_loop():
+            self._future = asyncio.get_running_loop().create_future()
+        return self._future
 
 
 class ApprovalManager:
-    def __init__(self) -> None:
-        self._pending: dict[str, _PendingApproval] = {}
-        # approval_id 解析后的回调(供 ws.py 注册)
-        self._on_request: Callable[[str, dict], Any] | None = None
-        self._lock = asyncio.Lock()
+    """集中管理运行中的审批请求。单例。"""
 
-    def set_on_request(self, cb: Callable[[str, dict], Any]) -> None:
-        """注册审批请求回调(用于持久化 + WS 广播)。"""
+    def __init__(self):
+        self._pending: dict[str, _PendingApproval] = {}
+        self._lock = asyncio.Lock()
+        self._on_request: callable | None = None
+
+    def set_on_request(self, cb: callable) -> None:
+        """注册新请求回调: cb(approval_id, detail) -> 可为 async/sync"""
         self._on_request = cb
 
     def new_id(self) -> str:
-        return "apr_" + uuid.uuid4().hex[:16]
+        return f"appr_{uuid.uuid4().hex[:12]}"
 
     async def request(
         self,
-        *,
-        detail: dict[str, Any],
+        detail: dict,
         approval_id: str | None = None,
+        is_forced: bool = False,
     ) -> bool:
-        """发起审批请求并阻塞等待结果。返回是否批准。"""
+        """发起一个审批请求并挂起等待结果。
+
+        - 若已配置 auto_approve_tools 且匹配当前工具，直接放行不挂起；
+        - 若 detail.kind == "question" 或 is_forced=True，绝不跳过；
+        - 若超时未处理，按 settings.approval_timeout_sec 自动拒绝。
+        """
         tool_name = detail.get("tool", "")
+        kind = detail.get("kind", "tool_call")
         risk_level = detail.get("risk_level", "low")
 
-        # v1.0: auto_approve=True 时完全跳过审批，包括强制列表工具
-        # v32 (plan-89): 修复与"始终需要审批的工具"语义冲突——auto_approve 仅批准
-        # 未在 force_approval_tools 列表且非 high 风险的工具；强制列表/高风险仍弹审批
-        # （force_approval_tools 是最高例外，设置中心文案"始终需要审批"与之一致）。
-        force_tools = settings.force_approval_tools_list
-        is_forced = tool_name in force_tools or risk_level == "high"
-        if settings.auto_approve_tools:
-            if not is_forced:
-                logger.info("自动批准工具调用(auto_approve): %s (risk=%s)", tool_name, detail.get("risk_level"))
+        # 提问(kind == "question")与强制列表(is_forced=True)必须等待用户交互
+        if kind != "question" and not is_forced:
+            if settings.auto_approve_tools is True:
+                logger.info("auto_approve_tools 为 True，自动放行工具: %s", tool_name)
                 return True
-            logger.info("auto_approve 命中强制审批列表/高风险，仍弹审批: %s (risk=%s)", tool_name, risk_level)
+            elif settings.auto_approve_tools:
+                if isinstance(settings.auto_approve_tools, str):
+                    auto_tools = {t.strip() for t in settings.auto_approve_tools.split(",") if t.strip()}
+                elif isinstance(settings.auto_approve_tools, (list, set, tuple)):
+                    auto_tools = set(settings.auto_approve_tools)
+                else:
+                    auto_tools = set()
+                if tool_name and (tool_name in auto_tools or "*" in auto_tools):
+                    logger.info("自动放行免审批工具: %s", tool_name)
+                    return True
+
         if is_forced:
-            logger.info("强制审批(高风险/强制列表): %s (risk=%s)", tool_name, risk_level)
+            logger.info("强制审批/提问(高风险/强制列表/问卷): %s (risk=%s)", tool_name, risk_level)
         approval_id = approval_id or self.new_id()
         pa = _PendingApproval(approval_id=approval_id, detail=detail)
         pa.ensure_future()  # v1.0: 在运行中的事件循环内创建 future
@@ -82,6 +96,18 @@ class ApprovalManager:
                     asyncio.create_task(result)
             except Exception:
                 logger.exception("审批请求回调异常 %s", approval_id)
+        elif detail.get("session_id"):
+            # v2.2 兜底: 工具自行调用 approval_manager.request 时未注册回调，直接通过 ws_manager 广播
+            try:
+                from app.gateway.ws import manager as ws_manager
+                sid = int(detail["session_id"])
+                asyncio.create_task(ws_manager.broadcast(
+                    sid,
+                    {"event": "approval.request", "payload": {"approval_id": approval_id, "detail": detail}},
+                ))
+                logger.info("approval_manager 自适应广播 approval.request 到 session %s", sid)
+            except Exception:
+                logger.exception("自适应广播 approval.request 失败 %s", approval_id)
 
         try:
             approved = await asyncio.wait_for(

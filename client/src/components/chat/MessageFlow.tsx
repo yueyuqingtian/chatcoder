@@ -7,18 +7,31 @@
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, memo, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import type { TimelineEntry } from "./timeline";
+import type { TimelineEntry, ToolNode, TurnItem } from "./timeline";
 import { buildTimeline, msgText } from "./timeline";
 import { TurnGroup } from "./TurnGroup";
 import { JumpDots } from "./JumpDots";
 import { CompactingCard } from "./CompactCard";
 import { StreamingText } from "./StreamingText";
-import { IconSearch, IconChevronUp, IconChevronDown, IconX, IconArrowDown, IconClipboard } from "../icons";
+import { IconSearch, IconChevronUp, IconChevronDown, IconX, IconArrowDown } from "../icons";
 import { MarkdownContent } from "../MarkdownContent";
 import { MsgType } from "@chatcoder/shared";
 import { useChatStore } from "../../store/chat";
-import { usePanelStore } from "../../store/panel";
-import { api, type MessageOut } from "../../api/client";
+import type { MessageOut } from "../../api/client";
+import { AttachmentCard, attachmentsOf } from "./AttachmentCard";
+
+/** 工具节点可搜索文本（group 取聚合工具名；其余取各 leaf 工具名） */
+function nodeToolText(n: ToolNode): string {
+  if (n.kind === "group") return n.tool;
+  if (n.kind === "leaf") return n.leaf.tool;
+  return n.leaves.map((l) => l.tool).join(" ");
+}
+
+/** turn 条目可搜索文本 */
+function itemText(it: TurnItem): string {
+  if (it.kind === "tools") return "";
+  return msgText(it.msg.content);
+}
 
 /** v20: message-flow 插件数据契约——宿主（中间面板/右面板）经 PluginSlot props 注入。 */
 export interface MessageStreamProps {
@@ -34,19 +47,21 @@ export interface MessageStreamProps {
     /** 消息操作行能力：full=完整（赞踩/重试/回滚）；copy-only=仅复制；none=无操作行 */
     actions?: "full" | "copy-only" | "none";
   };
-  /** 容器附加类名（子代理面板窄版适配） */
+  /** 滚动目标：当外部点击任务卡时传 { turnId } 或 { threadId }，滚动到对应节点 */
+  scrollTarget?: { threadId?: number; turnId?: number } | null;
+  clearScrollTarget?: () => void;
   className?: string;
 }
 
-const StandaloneEntry = memo(function StandaloneEntry({ entry }: { entry: Extract<TimelineEntry, { kind: "standalone" }> }) {
-  // 系统消息（模型切换 divider 等，前方没有任何 turn 时落到这里）：渲染为分割线
-  if (entry.msg.msg_type === MsgType.System) {
+/** 独立非 turn 消息条目（如 system/error 等非结构化消息） */
+const StandaloneEntry = memo(function StandaloneEntry({ entry }: { entry: TimelineEntry }) {
+  if (entry.kind === "turn") return null;
+  // 压缩块摘要（SUMMARY + checkpoint）独立成卡片，其余按普通文本渲染
+  if (entry.msg.msg_type === MsgType.Summary && (entry.msg.content as Record<string, unknown>).checkpoint === true) {
     return (
       <div className="turn-group">
-        <div className="turn-item turn-item-divider">
-          <span className="turn-divider-line" />
-          <span className="turn-divider-text">{msgText(entry.msg.content)}</span>
-          <span className="turn-divider-line" />
+        <div className="turn-item turn-item-summary">
+          <MarkdownContent>{msgText(entry.msg.content)}</MarkdownContent>
         </div>
       </div>
     );
@@ -62,80 +77,6 @@ const StandaloneEntry = memo(function StandaloneEntry({ entry }: { entry: Extrac
   );
 });
 
-/** 计划确认卡（主界面专属）：plan 模式 turn 完成后内嵌在其所属 turn 行尾展示。 */
-function PlanCard() {
-  const [expanded, setExpanded] = useState(false);
-  const pendingPlan = useChatStore((s) => s.pendingPlan);
-  const pendingSplit = useChatStore((s) => s.pendingSplit);
-  const tasks = useChatStore((s) => s.tasks);
-  const currentSessionId = useChatStore((s) => s.currentSessionId);
-  const confirmPlan = useChatStore((s) => s.confirmPlan);
-  const confirmTaskSplit = useChatStore((s) => s.confirmTaskSplit);
-  const dismissPlan = useChatStore((s) => s.dismissPlan);
-  const splitSteps = pendingSplit
-    ? tasks.filter((task) => task.parent_task_id === pendingSplit.groupTaskId && !task.is_hidden)
-    : [];
-  if (!pendingPlan && !pendingSplit) return null;
-  // plan-95: 展示守卫——提案组已不是 proposed（已确认/已取消）时不渲染，
-  // 防止 tasks 刷新滞后导致旧卡短暂复现
-  if (pendingSplit) {
-    const group = tasks.find((t) => t.id === pendingSplit.groupTaskId);
-    if (group && group.status !== "proposed") return null;
-  }
-  // 计划文档与会话绑定：优先使用后端广播的实际文档路径（AI 可能写时间戳文件名），
-  // 缺省回退约定名 ai/chatcoder-plan-<sessionId>.md。
-  const planDocPath = pendingSplit?.planDocPath
-    ?? (currentSessionId != null ? `ai/chatcoder-plan-${currentSessionId}.md` : "ai/chatcoder-plan.md");
-  const title = pendingPlan?.task
-    ?? tasks.find((task) => task.id === pendingSplit?.requestTaskId)?.title
-    ?? "任务执行计划";
-  const confirm = () => {
-    if (pendingSplit) {
-      void confirmTaskSplit(true, splitSteps.map((step) => ({ task_id: step.id, title: step.title })));
-    } else if (pendingPlan) {
-      void confirmPlan(pendingPlan.task);
-    }
-  };
-  const cancel = () => {
-    if (pendingSplit) void confirmTaskSplit(false);
-    else dismissPlan();
-  };
-  return (
-    <div className="turn-group">
-      <div className="plan-inline-card">
-        <div className="plan-inline-head">
-          <IconClipboard size={13} /> 计划
-        </div>
-        <button type="button" className="plan-inline-title" onClick={() => setExpanded((v) => !v)} aria-expanded={expanded}>{title}</button>
-        {expanded && <div className="plan-inline-preview"><code>{planDocPath}</code><br />展开右侧文件面板可查看完整计划内容。</div>}
-        <div className="plan-inline-desc">
-          AI 已在项目根目录 <code>ai/</code> 目录生成计划文档 <code>{planDocPath}</code>，请审阅后确认是否按计划执行。
-        </div>
-        <div className="plan-inline-actions">
-          <button
-            className="plan-inline-view"
-            onClick={() => {
-              usePanelStore.getState().setPreviewPath(planDocPath);
-              usePanelStore.getState().openPanel();
-              usePanelStore.getState().openTab("files");
-            }}
-          >
-            查看完整计划 →
-          </button>
-          <span className="plan-inline-spacer" />
-          {splitSteps.length > 0 && expanded && (
-            <div className="plan-inline-steps">
-              {splitSteps.map((step, index) => <div key={step.id}>{index + 1}. {step.title}</div>)}
-            </div>
-          )}
-          <button className="btn-ghost" onClick={cancel}>取消</button>
-          <button className="plan-inline-confirm" onClick={confirm}>确认执行</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 /** v20: 消息流共享内核——虚拟化 + 贴底滚动跟随 + 跳底按钮 + 入场动画 + 搜索 + JumpDots。
  * 主会话与子代理面板共用；宿主差异（数据源/功能开关/空态文案）经 props 注入。 */
 interface MessageFlowCoreProps {
@@ -146,254 +87,269 @@ interface MessageFlowCoreProps {
   renderEntry: (entry: TimelineEntry, index: number) => ReactNode;
   /** 运行中尾部（StreamingText），占虚拟列表最后一项 */
   streamingNode: ReactNode | null;
-  /** 额外尾部（如计划卡），占最后一项 */
+  /** v41: 运行中注入的用户消息（"立即发送"），占流式段之后的槽位--时间直觉上位于实时内容下方 */
+  injectedNode?: ReactNode | null;
+  /** 额外尾部（如压缩中卡片），占最后一项 */
   trailingNode?: ReactNode | null;
   /** 会话标识：变化时强制跳底（主界面传 currentSessionId，子代理传 threadId） */
   sessionKey: string | number;
-  /** 流式信号：内容变化时贴底跟随（避免整对象依赖） */
-  streamSignal: string;
+  /** 流式信号：内容变化时贴底跟随（避免整对象依赖；v40 允许数字——缓冲长度即可） */
+  streamSignal: string | number;
   /** 功能开关（默认按模式由外层传入） */
   jumpDots?: boolean;
   search?: boolean;
   /** 滚动目标（主界面任务卡点击穿透 / turn 导航） */
   scrollTarget?: { threadId?: number; turnId?: number } | null;
   clearScrollTarget?: () => void;
-  /** 容器附加类名 */
   className?: string;
-  /** 空态文案（entries 为空且未运行） */
-  emptyText: string;
+  emptyText?: string;
 }
 
 function MessageFlowCore({
-  entries, running, renderEntry, streamingNode, trailingNode = null,
-  sessionKey, streamSignal, jumpDots = true, search = true,
-  scrollTarget = null, clearScrollTarget, className, emptyText,
+  entries,
+  running,
+  renderEntry,
+  streamingNode,
+  injectedNode,
+  trailingNode,
+  sessionKey,
+  streamSignal,
+  jumpDots = true,
+  search = true,
+  scrollTarget,
+  clearScrollTarget,
+  className,
+  emptyText = "暂无消息",
 }: MessageFlowCoreProps) {
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const parentRef = useRef<HTMLDivElement>(null);
+  /** plan-547: 虚拟内容容器（RO 监听测高变化保持贴底） */
+  const innerRef = useRef<HTMLDivElement>(null);
+  const [autoScroll, setAutoScroll] = useState(true);
+  /** autoScroll 的 ref 镜像：ResizeObserver 回调读取，避免每次回调 setState */
+  const autoScrollRef = useRef(true);
+  /** 程序补滚标记：补滚期间 onScroll 不翻转跟随状态 */
+  const programmaticScrollRef = useRef(false);
+  const [showScrollBottom, setShowScrollBottom] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  const [matchIdx, setMatchIdx] = useState(0);
-  const [nearBottom, setNearBottom] = useState(true);
-  const seenKeysRef = useRef<Set<string>>(new Set());
+  const [searchKeyword, setSearchKeyword] = useState("");
+  const [activeMatchIndex, setActiveMatchIndex] = useState(0);
 
-  // 虚拟化：count = entries + 运行中 StreamingText 占位 + 额外尾部占位
-  const count = entries.length + (running ? 1 : 0) + (trailingNode ? 1 : 0);
-
-  const entryKeyAt = useCallback((index: number): string =>
-    index < entries.length
-      ? (entries[index].kind === "turn" ? `turn-${entries[index].turnId ?? index}` : `std-${entries[index].msg.id ?? index}`)
-      : (index === entries.length && running ? "streaming" : "trailing"),
-  [entries, running]);
+  const hasStreaming = Boolean(running && streamingNode);
+  const hasInjected = Boolean(injectedNode);
+  const hasTrailing = Boolean(trailingNode);
+  const totalCount =
+    entries.length + (hasStreaming ? 1 : 0) + (hasInjected ? 1 : 0) + (hasTrailing ? 1 : 0);
 
   const virtualizer = useVirtualizer({
-    count,
-    getScrollElement: () => scrollRef.current,
-    estimateSize: () => 120,
-    overscan: 8,
-    getItemKey: entryKeyAt,
+    count: totalCount,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 140,
+    overscan: 6,
   });
 
-  // 统一滚动管理：靠近底部自动跟随，否则由用户滚动
-  const prevCount = useRef(0);
-  const prevRunning = useRef(false);
-  const prevSessionRef = useRef<string | number | null>(null);
-  const nearBottomRef = useRef(true);
-  const lastScrollTsRef = useRef(0);
-
-  const scrollToBottom = useCallback(() => {
-    if (entries.length === 0) return;
-    nearBottomRef.current = true; // 锁定贴底
-    setNearBottom(true);
-    virtualizer.scrollToIndex(entries.length - 1, { align: "end" });
-    requestAnimationFrame(() => {
-      const el = scrollRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
-    });
-  }, [entries.length, virtualizer]);
-
-  const handleScroll = useCallback(() => {
-    const el = scrollRef.current;
+  const scrollToBottom = useCallback((smooth = false) => {
+    const el = parentRef.current;
     if (!el) return;
-    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-    nearBottomRef.current = near;
-    setNearBottom((prev) => (prev === near ? prev : near));
-  }, []);
-
-  // 虚拟列表测量更新时保持贴底（进入会话即显示最底部，全程无滚动动画）
-  const totalSize = virtualizer.getTotalSize();
-  useLayoutEffect(() => {
-    if (nearBottomRef.current && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [totalSize]);
-
-  useLayoutEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-
-    if (prevSessionRef.current !== sessionKey) {
-      prevSessionRef.current = sessionKey;
-      prevCount.current = entries.length;
-      prevRunning.current = running;
-      scrollToBottom();
-      return;
-    }
-
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-    nearBottomRef.current = nearBottom;
-
-    const newEntries = entries.length > prevCount.current;
-    const justStarted = running && !prevRunning.current;
-    const streaming = running && nearBottom;
-
-    if (streaming) {
-      const now = performance.now();
-      if (now - lastScrollTsRef.current >= 16) {
-        lastScrollTsRef.current = now;
-        el.scrollTop = el.scrollHeight;
-      }
-    } else if (newEntries || justStarted) {
-      if (prevCount.current === 0) {
-        scrollToBottom();
-      } else {
+    if (smooth) {
+      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    } else {
+      programmaticScrollRef.current = true;
+      el.scrollTop = el.scrollHeight;
+      // plan-547: 双帧补滚——虚拟列表动态测量在渲染后才把总高度撑大，
+      // 立即设置的 scrollTop 会"离底"，复查两帧保证贴底（消除滚动往返抖动）
+      requestAnimationFrame(() => {
         requestAnimationFrame(() => {
-          if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-        });
-      }
-    }
-
-    prevCount.current = entries.length;
-    prevRunning.current = running;
-  }, [sessionKey, entries.length, running, streamSignal, virtualizer, scrollToBottom]);
-
-  const jumpToEntry = useCallback((entry: TimelineEntry) => {
-    const idx = entries.findIndex((e) => e === entry);
-    if (idx >= 0) virtualizer.scrollToIndex(idx, { align: "start" });
-  }, [entries, virtualizer]);
-
-  const matches = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return [] as number[];
-    const out: number[] = [];
-    entries.forEach((e, i) => {
-      const text = e.kind === "turn"
-        ? e.items.map((it) => (it.kind === "user" || it.kind === "text" || it.kind === "summary" || it.kind === "thinking" ? msgText(it.msg.content) : "")).join(" ")
-        : msgText(e.msg.content);
-      if (text.toLowerCase().includes(q)) out.push(i);
-    });
-    return out;
-  }, [entries, query]);
-
-  const gotoMatch = (dir: 1 | -1) => {
-    if (matches.length === 0) return;
-    setMatchIdx((prev) => {
-      const next = (prev + dir + matches.length) % matches.length;
-      virtualizer.scrollToIndex(matches[next], { align: "start" });
-      return next;
-    });
-  };
-
-  // 滚动目标：任务卡步骤点击穿透 / turn 导航
-  useEffect(() => {
-    if (!scrollTarget) return;
-    const { threadId, turnId } = scrollTarget;
-    let idx = -1;
-    if (threadId != null) {
-      idx = entries.findIndex((e) => {
-        if (e.kind !== "turn") return false;
-        return e.items.some((it) => {
-          if ("msg" in it) return it.msg.thread_id === threadId;
-          if (it.kind === "tools") {
-            return it.nodes.some((n) =>
-              n.kind === "leaf" ? n.leaf.threadId === threadId : n.leaves.some((leaf) => leaf.threadId === threadId),
-            );
-          }
-          return false;
+          const el2 = parentRef.current;
+          if (el2) el2.scrollTop = el2.scrollHeight;
+          programmaticScrollRef.current = false;
         });
       });
-    } else if (turnId != null) {
-      idx = entries.findIndex((e) => e.kind === "turn" && e.turnId === turnId);
     }
-    if (idx >= 0) {
-      virtualizer.scrollToIndex(idx, { align: "start" });
-      window.setTimeout(() => clearScrollTarget?.(), 800);
-    } else {
-      clearScrollTarget?.();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scrollTarget]);
+    setAutoScroll(true);
+    autoScrollRef.current = true;
+    setShowScrollBottom(false);
+  }, []);
+
+  const onScroll = useCallback(() => {
+    // plan-547: 程序补滚产生的 scroll 事件不参与跟随判定
+    if (programmaticScrollRef.current) return;
+    const el = parentRef.current;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const isNearBottom = distance < 60;
+    setAutoScroll(isNearBottom);
+    autoScrollRef.current = isNearBottom;
+    setShowScrollBottom(distance > 120);
+  }, []);
+
+  /** plan-547: 内容总高度变化（虚拟测量/图片加载/展开）时若处于跟随态则保持贴底 */
+  const hasContent = totalCount > 0;
+  useEffect(() => {
+    if (!hasContent) return;
+    const inner = innerRef.current;
+    const el = parentRef.current;
+    if (!inner || !el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => {
+      if (!autoScrollRef.current) return;
+      el.scrollTop = el.scrollHeight;
+    });
+    ro.observe(inner);
+    return () => ro.disconnect();
+  }, [hasContent]);
+
+  useLayoutEffect(() => {
+    scrollToBottom(false);
+  }, [sessionKey, scrollToBottom]);
 
   useEffect(() => {
-    if (!search) return;
-    const handler = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
-        e.preventDefault();
-        setSearchOpen(true);
-      }
-      if (e.key === "Escape") setSearchOpen(false);
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [search]);
+    if (autoScroll) scrollToBottom(false);
+  }, [streamSignal, autoScroll, scrollToBottom]);
 
-  const renderRow = (index: number) => {
-    if (index < entries.length) return renderEntry(entries[index], index);
-    if (index === entries.length && running) return streamingNode;
-    return trailingNode;
+  useEffect(() => {
+    if (autoScroll) scrollToBottom(false);
+  }, [entries.length, autoScroll, scrollToBottom]);
+
+  const matchedIndices = useMemo(() => {
+    const kw = searchKeyword.trim().toLowerCase();
+    if (!kw) return [];
+    const result: number[] = [];
+    entries.forEach((e, idx) => {
+      if (e.kind === "turn") {
+        const hit = e.items.some((it) => {
+          if (it.kind === "tools") return it.nodes.some((n) => nodeToolText(n).toLowerCase().includes(kw));
+          return itemText(it).toLowerCase().includes(kw);
+        });
+        if (hit) result.push(idx);
+      } else {
+        if (msgText(e.msg.content).toLowerCase().includes(kw)) result.push(idx);
+      }
+    });
+    return result;
+  }, [entries, searchKeyword]);
+
+  useEffect(() => {
+    setActiveMatchIndex(0);
+    if (matchedIndices.length > 0) {
+      virtualizer.scrollToIndex(matchedIndices[0], { align: "center", behavior: "smooth" });
+    }
+  }, [matchedIndices, virtualizer]);
+
+  const jumpMatch = (dir: 1 | -1) => {
+    if (matchedIndices.length === 0) return;
+    const next = (activeMatchIndex + dir + matchedIndices.length) % matchedIndices.length;
+    setActiveMatchIndex(next);
+    virtualizer.scrollToIndex(matchedIndices[next], { align: "center", behavior: "smooth" });
   };
 
-  return (
-    <div className={"message-flow-wrap" + (className ? ` ${className}` : "")}>
-      {jumpDots && <JumpDots entries={entries} onJump={jumpToEntry} />}
+  useEffect(() => {
+    if (!scrollTarget) return;
+    if (scrollTarget.turnId != null) {
+      const idx = entries.findIndex((e) => e.kind === "turn" && e.turnId === scrollTarget.turnId);
+      if (idx >= 0) {
+        virtualizer.scrollToIndex(idx, { align: "start", behavior: "smooth" });
+        clearScrollTarget?.();
+      }
+    }
+  }, [scrollTarget, entries, virtualizer, clearScrollTarget]);
 
-      {search && searchOpen && (
-        <div className="mf-search">
-          <IconSearch size={12} />
-          <input
-            autoFocus
-            placeholder="搜索消息内容…"
-            value={query}
-            onChange={(e) => { setQuery(e.target.value); setMatchIdx(0); }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") gotoMatch(e.shiftKey ? -1 : 1);
-            }}
-          />
-          {matches.length > 0 && (
-            <span className="mf-search-count">{matchIdx + 1}/{matches.length}</span>
+  return (
+    <div className={`message-flow-outer ${className || ""}`}>
+      {search && (
+        <div className="flow-search-toggle">
+          {!searchOpen ? (
+            <button
+              type="button"
+              className="flow-search-btn"
+              onClick={() => setSearchOpen(true)}
+              title="搜索消息 (Ctrl+F)"
+              aria-label="搜索消息"
+            >
+              <IconSearch size={14} />
+            </button>
+          ) : (
+            <div className="flow-search-bar">
+              <IconSearch size={13} />
+              <input
+                autoFocus
+                value={searchKeyword}
+                onChange={(e) => setSearchKeyword(e.target.value)}
+                placeholder="搜索消息内容…"
+              />
+              {matchedIndices.length > 0 && (
+                <span className="flow-search-count">
+                  {activeMatchIndex + 1}/{matchedIndices.length}
+                </span>
+              )}
+              <button type="button" onClick={() => jumpMatch(-1)} disabled={matchedIndices.length === 0} title="上一个">
+                <IconChevronUp size={12} />
+              </button>
+              <button type="button" onClick={() => jumpMatch(1)} disabled={matchedIndices.length === 0} title="下一个">
+                <IconChevronDown size={12} />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchOpen(false);
+                  setSearchKeyword("");
+                }}
+                title="关闭搜索"
+              >
+                <IconX size={12} />
+              </button>
+            </div>
           )}
-          <button className="mf-search-nav" onClick={() => gotoMatch(-1)} title="上一个">
-            <IconChevronUp size={12} />
-          </button>
-          <button className="mf-search-nav" onClick={() => gotoMatch(1)} title="下一个">
-            <IconChevronDown size={12} />
-          </button>
-          <button className="mf-search-nav" onClick={() => { setSearchOpen(false); setQuery(""); }} title="关闭">
-            <IconX size={12} />
-          </button>
         </div>
       )}
 
-      <div className="message-flow" ref={scrollRef} onScroll={handleScroll}>
-        {entries.length === 0 && !running ? (
-          <div className="mf-empty">
-            <p>{emptyText}</p>
-          </div>
+      {jumpDots && <JumpDots entries={entries} onJump={(entry) => virtualizer.scrollToIndex(entries.indexOf(entry), { align: "start", behavior: "smooth" })} />}
+
+      <div ref={parentRef} className="message-flow" onScroll={onScroll}>
+        {totalCount === 0 ? (
+          <div className="flow-empty">{emptyText}</div>
         ) : (
-          <div className="mf-virtual" style={{ height: virtualizer.getTotalSize(), position: "relative", width: "100%" }}>
-            {virtualizer.getVirtualItems().map((vi) => {
-              // 新条目入场动画：仅首次出现的 key 挂动画类，虚拟列表滚动重挂载不重播
-              const k = String(vi.key);
-              const seen = seenKeysRef.current;
-              const isNew = vi.index < entries.length && !seen.has(k);
-              if (!seen.has(k)) seen.add(k);
+          <div
+            ref={innerRef}
+            className="message-flow-virtual-inner"
+            style={{
+              height: `${virtualizer.getTotalSize()}px`,
+              position: "relative",
+              width: "100%",
+            }}
+          >
+            {virtualizer.getVirtualItems().map((item) => {
+              // v41 槽位顺序：已落库 entries -> 流式段 -> 注入用户消息 -> 尾部卡片
+              const streamStart = entries.length;
+              const injectedStart = streamStart + (hasStreaming ? 1 : 0);
+              const trailingStart = injectedStart + (hasInjected ? 1 : 0);
+              const isStreamSlot = hasStreaming && item.index === streamStart;
+              const isInjectedSlot = hasInjected && item.index === injectedStart;
+              const isTrailingSlot = hasTrailing && item.index === trailingStart;
+              let node: ReactNode;
+              if (isStreamSlot) {
+                node = streamingNode;
+              } else if (isInjectedSlot) {
+                node = injectedNode;
+              } else if (isTrailingSlot) {
+                node = trailingNode;
+              } else {
+                const entry = entries[item.index];
+                node = entry ? renderEntry(entry, item.index) : null;
+              }
               return (
                 <div
-                  key={vi.key}
-                  data-index={vi.index}
+                  key={item.key}
+                  data-index={item.index}
                   ref={virtualizer.measureElement}
-                  style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${vi.start}px)` }}
+                  className="message-flow-virtual-item"
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "100%",
+                    transform: `translateY(${item.start}px)`,
+                  }}
                 >
-                  <div className={"mf-list" + (isNew ? " mf-entry-new" : "")}>{renderRow(vi.index)}</div>
+                  <div className="mf-list">{node}</div>
                 </div>
               );
             })}
@@ -401,9 +357,14 @@ function MessageFlowCore({
         )}
       </div>
 
-      {/* 跳转底部：用户向上翻阅历史时出现，点击回到最新消息并恢复自动跟随 */}
-      {!nearBottom && (entries.length > 0 || running) && (
-        <button className="mf-jump-bottom" onClick={scrollToBottom} title="回到底部">
+      {showScrollBottom && (
+        <button
+          type="button"
+          className="flow-scroll-bottom-btn"
+          onClick={() => scrollToBottom(true)}
+          title="回到底部"
+          aria-label="回到底部"
+        >
           <IconArrowDown size={14} />
         </button>
       )}
@@ -411,22 +372,29 @@ function MessageFlowCore({
   );
 }
 
-/** 主会话数据源（source="main"）：读全局 store，行为与 v19 一致。 */
-function MainMessageFlow({ className }: { className?: string }) {
+/** 主会话数据源（source="main"）：全局 store 驱动，完整功能。 */
+function MainMessageFlow({
+  actions,
+  scrollTarget,
+  clearScrollTarget,
+  className,
+}: {
+  actions?: "full" | "copy-only" | "none";
+  scrollTarget?: { threadId?: number; turnId?: number } | null;
+  clearScrollTarget?: () => void;
+  className?: string;
+}) {
   const messages = useChatStore((s) => s.messages);
-  const currentSessionId = useChatStore((s) => s.currentSessionId);
-  const runningTurnId = useChatStore((s) => s.runningTurnId);
-  const isRunning = useChatStore((s) => s.isRunning);
-  const scrollTarget = useChatStore((s) => s.scrollTarget);
-  const clearScrollTarget = useChatStore((s) => s.clearScrollTarget);
   const turns = useChatStore((s) => s.turns);
+  const isRunning = useChatStore((s) => s.isRunning);
+  const runningTurnId = useChatStore((s) => s.runningTurnId);
+  const currentSessionId = useChatStore((s) => s.currentSessionId);
   const subagentMeta = useChatStore((s) => s.subagentMeta);
   const streamingBuffers = useChatStore((s) => s.streamingBuffers);
   const thinkingBuffers = useChatStore((s) => s.thinkingBuffers);
-  const hasPlanCard = useChatStore((s) => s.pendingPlan != null || s.pendingSplit != null);
   // plan-95: 计划卡归属 turn——卡片内嵌到该 turn 行尾随时间线滚动，
   // 不再固定在消息流最底部（与后续新消息脱节）
-  const planTurnId = useChatStore((s) => s.pendingSplit?.turnId ?? s.pendingPlan?.turnId ?? null);
+  const planTurnId = useChatStore((s) => s.pendingPlan?.turnId ?? null);
   // v30: 压缩中进度（compact.started 载荷）——消息流尾部渲染"压缩中"卡片
   const isCompacting = useChatStore((s) => s.isCompacting);
   const compactingInfo = useChatStore((s) => s.compactingInfo);
@@ -442,31 +410,101 @@ function MainMessageFlow({ className }: { className?: string }) {
     return map;
   }, [subagentMeta]);
 
-  // v30: 被压缩的消息保留在时间线上（不隐藏）；压缩块卡由 SUMMARY 消息渲染
-  const entries = useMemo(() => buildTimeline(messages), [messages]);
+  // v42: 注入分割渲染（"立即发送"的消息是时间分割点）：
+  // - pending 注入（注入时刻正在流式的段尚未落库）：注入消息剥离出时间线，
+  //   渲染到流式段之后--消息流是两段式（已落库 entries + 未落库流式段），
+  //   流式段固定在 entries 之后，留在 entries 内会显示在实时内容上方；
+  // - 跨界段（注入时刻流式中、之后落库的消息，mark.crossoverId）：前移到
+  //   对应注入消息之前--其 id 大于注入消息，按 id 序会错误地掉到注入下方。
+  // 其余消息按 id 序：注入前内容天然在注入上方，注入后新刷新的工具调用
+  // 与消息天然在注入下方。turn 结束后标记保留（顺序不跳变），新 turn 开始清空。
+  const injectMarks = useChatStore((s) => s.injectMarks);
 
-  const renderEntry = useCallback((entry: TimelineEntry) => {
-    if (entry.kind !== "turn") return <StandaloneEntry entry={entry} />;
-    // v12: 已回滚 turn 显示专用横幅（回滚后消息被软删，以此占位区分「回滚了」与「没执行」）
-    const rolledBack = turns.find((t) => t.id === entry.turnId)?.status === "rolled_back";
-    // plan-95: 计划卡内嵌到其归属 turn 的行尾（同工具调用一样按时间线定位）
-    const planCardHere = entry.turnId != null && entry.turnId === planTurnId;
-    return (
-      <>
+  // pending 注入仅运行中生效：turn 结束后流式槽消失，注入消息回归时间线
+  // id 序位置（跨界段已有 crossoverId 绑定的仍前移，顺序不跳变）
+  const pendingInjectIds = useMemo(
+    () =>
+      new Set(
+        isRunning
+          ? injectMarks
+              .filter((mk) => mk.crossoverId == null && mk.pendingAgents.length > 0)
+              .map((mk) => mk.injectId)
+          : [],
+      ),
+    [injectMarks, isRunning],
+  );
+
+  const timelineMessages = useMemo(() => {
+    // 跨界段 -> 前移目标注入消息（同一跨界段绑定多条注入时取最小 injectId）
+    const crossoverTarget = new Map<number, number>();
+    for (const mk of injectMarks) {
+      if (mk.crossoverId == null) continue;
+      const prev = crossoverTarget.get(mk.crossoverId);
+      if (prev == null || mk.injectId < prev) crossoverTarget.set(mk.crossoverId, mk.injectId);
+    }
+    if (pendingInjectIds.size === 0 && crossoverTarget.size === 0) return messages;
+    const msgById = new Map(messages.map((m) => [m.id, m]));
+    // 目注入消息 -> 前移插入的跨界段列表（按 id 升序）
+    const crossoversByTarget = new Map<number, MessageOut[]>();
+    for (const crossoverId of crossoverTarget.keys()) {
+      const msg = msgById.get(crossoverId);
+      if (!msg) continue;
+      const target = crossoverTarget.get(crossoverId)!;
+      const list = crossoversByTarget.get(target) ?? [];
+      list.push(msg);
+      crossoversByTarget.set(target, list);
+    }
+    for (const list of crossoversByTarget.values()) list.sort((a, b) => a.id - b.id);
+    const out: MessageOut[] = [];
+    for (const m of messages) {
+      if (pendingInjectIds.has(m.id) || crossoverTarget.has(m.id)) continue;
+      const cs = crossoversByTarget.get(m.id);
+      if (cs) out.push(...cs);
+      out.push(m);
+    }
+    return out;
+  }, [messages, injectMarks, pendingInjectIds]);
+
+  // pending 注入消息（跨界段还在流式）：渲染在流式段之后的独立槽位；
+  // turn 结束（isRunning=false）后回归时间线（流式槽已消失，无需让位）
+  const injectedMsgs = useMemo(
+    () => (isRunning ? messages.filter((m) => pendingInjectIds.has(m.id)) : []),
+    [messages, pendingInjectIds, isRunning],
+  );
+
+  // v30: 被压缩的消息保留在时间线上（不隐藏）；压缩块卡由 SUMMARY 消息渲染
+  const entries = useMemo(() => buildTimeline(timelineMessages), [timelineMessages]);
+
+  const plansByTurn = useChatStore((s) => s.plansByTurn);
+
+  const renderEntry = useCallback(
+    (entry: TimelineEntry) => {
+      if (entry.kind !== "turn") return <StandaloneEntry entry={entry} />;
+      // v12: 已回滚 turn 显示专用横幅（回滚后消息被软删，以此占位区分「回滚了」与「没执行」）
+      const rolledBack = turns.find((t) => t.id === entry.turnId)?.status === "rolled_back";
+      // 计划卡内嵌到其归属 turn 内部规划说明之后、执行操作之前（彻底根治时序倒挂沉底 Bug）
+      const hasTurnPlan = entry.turnId != null && (plansByTurn[entry.turnId] != null || entry.turnId === planTurnId);
+      return (
         <TurnGroup
           entry={entry}
           isRunning={runningTurnId === entry.turnId}
           rolledBack={rolledBack}
           subagents={entry.turnId != null ? subagentsByTurn.get(entry.turnId) : undefined}
+          actions={actions}
+          hasPlan={hasTurnPlan}
+          planAnchorMsgId={entry.turnId != null ? plansByTurn[entry.turnId]?.anchorMsgId ?? null : null}
         />
-        {planCardHere && <PlanCard />}
-      </>
-    );
-  }, [turns, runningTurnId, subagentsByTurn, planTurnId]);
+      );
+    },
+    [turns, runningTurnId, subagentsByTurn, planTurnId, plansByTurn, actions]
+  );
 
+  // v40: 流式信号只取缓冲长度（数字），避免每次渲染把全量流式文本 join 成大字符串造成 GC 抖动
   const streamSignal = useMemo(
-    () => Object.values(streamingBuffers).join("") + "|" + Object.values(thinkingBuffers).join(""),
-    [streamingBuffers, thinkingBuffers],
+    () =>
+      Object.values(streamingBuffers).reduce((n, s) => n + s.length, 0) +
+      Object.values(thinkingBuffers).reduce((n, s) => n + s.length, 0),
+    [streamingBuffers, thinkingBuffers]
   );
   const thinkingText = Object.values(thinkingBuffers).join("").trim();
   const text = Object.values(streamingBuffers).join("");
@@ -477,14 +515,31 @@ function MainMessageFlow({ className }: { className?: string }) {
       entries={entries}
       running={isRunning}
       renderEntry={renderEntry}
-      streamingNode={<StreamingText active={Boolean(isRunning && runningTurnId)} thinking={thinkingText} text={text} statusLabel={turnStatus ?? undefined} />}
-      trailingNode={
-        <>
-          {/* plan-95: 归属 turn 不在时间线上时兑底渲染到尾部；正常情况内嵌于 turn 行 */}
-          {hasPlanCard && planTurnId == null && <PlanCard />}
-          {isCompacting && <CompactingCard info={compactingInfo} />}
-        </>
+      streamingNode={
+        <StreamingText
+          active={Boolean(isRunning && runningTurnId)}
+          thinking={thinkingText}
+          text={text}
+          statusLabel={turnStatus ?? undefined}
+        />
       }
+      injectedNode={
+        injectedMsgs.length > 0 ? (
+          <div className="turn-group">
+            {injectedMsgs.map((m) => (
+              <div key={m.id} className="turn-item turn-item-user">
+                <div className="turn-user-bubble">
+                  {msgText(m.content) && <div className="turn-user-text">{msgText(m.content)}</div>}
+                  {attachmentsOf(m.content).map((a) => (
+                    <AttachmentCard key={a.file_id || a.url} att={a} />
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null
+      }
+      trailingNode={isCompacting ? <CompactingCard info={compactingInfo} /> : null}
       sessionKey={currentSessionId ?? 0}
       streamSignal={streamSignal}
       jumpDots
@@ -498,89 +553,76 @@ function MainMessageFlow({ className }: { className?: string }) {
 }
 
 /** 子代理数据源（source="subagent"）：store 消息桶 + REST 历史合并去重，流式尾部用线程缓冲。 */
-function SubagentMessageFlow({ threadId, actions, className }: {
+function SubagentMessageFlow({
+  threadId,
+  actions,
+  className,
+}: {
   threadId?: number;
   actions?: "full" | "copy-only" | "none";
   className?: string;
 }) {
   const currentSessionId = useChatStore((s) => s.currentSessionId);
-  const liveMessages = useChatStore((s) => (threadId != null ? s.subagentMessages[threadId] : undefined));
-  const meta = useChatStore((s) => (threadId != null ? s.subagentMeta[threadId] : undefined));
-  const thinking = useChatStore((s) => (threadId != null ? s.subagentThinking[threadId] ?? "" : ""));
-  const stream = useChatStore((s) => (threadId != null ? s.subagentStreams[threadId] ?? "" : ""));
-  const [history, setHistory] = useState<MessageOut[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const storeMessages = useChatStore((s) => (threadId != null ? s.subagentMessages[threadId] || [] : []));
+  const thinkingBuffer = useChatStore((s) => (threadId != null ? s.subagentThinking[threadId] || "" : ""));
+  const streamingBuffer = useChatStore((s) => (threadId != null ? s.subagentStreams[threadId] || "" : ""));
+  const subagentMeta = useChatStore((s) => (threadId != null ? s.subagentMeta[threadId] : undefined));
 
-  // 首次挂载拉取历史消息（实时桶增量追加，合并去重）
-  useEffect(() => {
-    if (!currentSessionId || threadId == null) return;
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    api.listSessionMessages(currentSessionId, threadId)
-      .then((msgs) => { if (!cancelled) setHistory(msgs); })
-      .catch((e) => { if (!cancelled) setError(String(e)); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
-  }, [currentSessionId, threadId]);
+  const isRunning = subagentMeta?.status === "running";
 
-  const messages = useMemo(() => {
-    const seen = new Set<number>();
-    const out: MessageOut[] = [];
-    for (const m of [...(history ?? []), ...(liveMessages ?? [])]) {
-      if (seen.has(m.id)) continue;
-      seen.add(m.id);
-      out.push(m);
-    }
-    out.sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
-    return out;
-  }, [history, liveMessages]);
+  // 将子代理消息按 timeline 构建（子代理消息通常是平铺的 tool/text/thinking）
+  const entries = useMemo(() => buildTimeline(storeMessages), [storeMessages]);
 
-  const entries = useMemo(() => buildTimeline(messages), [messages]);
-  const running = meta?.status === "running" || meta?.status === "in_progress";
+  const renderEntry = useCallback(
+    (entry: TimelineEntry) => {
+      if (entry.kind !== "turn") return <StandaloneEntry entry={entry} />;
+      return <TurnGroup entry={entry} isRunning={isRunning} actions={actions || "copy-only"} />;
+    },
+    [isRunning, actions]
+  );
 
-  const renderEntry = useCallback((entry: TimelineEntry, index: number) => {
-    if (entry.kind !== "turn") return <StandaloneEntry entry={entry} />;
-    return (
-      <TurnGroup
-        entry={entry}
-        isRunning={running && index === entries.length - 1}
-        actions={actions ?? "copy-only"}
-      />
-    );
-  }, [running, entries.length, actions]);
-
-  if (threadId == null) return <div className="mf-empty"><p>未指定子代理</p></div>;
-  if (loading && messages.length === 0) return <div className="mf-empty"><p>加载子代理消息流…</p></div>;
-  if (error && messages.length === 0) return <div className="mf-empty"><p>加载失败：{error}</p></div>;
+  const streamSignal = (thinkingBuffer?.length || 0) + (streamingBuffer?.length || 0);
 
   return (
     <MessageFlowCore
       entries={entries}
-      running={running}
+      running={isRunning}
       renderEntry={renderEntry}
-      streamingNode={running ? <StreamingText active thinking={thinking} text={stream} /> : null}
-      sessionKey={threadId}
-      streamSignal={thinking + "|" + stream}
+      streamingNode={
+        <StreamingText
+          active={isRunning}
+          thinking={thinkingBuffer}
+          text={streamingBuffer}
+          statusLabel={isRunning ? "子代理执行中…" : undefined}
+        />
+      }
+      sessionKey={`${currentSessionId ?? 0}:${threadId ?? 0}`}
+      streamSignal={streamSignal}
       jumpDots={false}
       search={false}
       className={className}
-      emptyText="该子代理暂无消息"
+      emptyText="子代理尚未产生输出"
     />
   );
 }
 
-/** 插件入口：按 source 分发数据源（主会话全局 store / 子代理线程桶）。 */
+/** 统一对外组件：根据 props.source 分流。 */
 export function MessageFlow(props: MessageStreamProps) {
   if (props.source === "subagent") {
     return (
       <SubagentMessageFlow
         threadId={props.threadId}
-        actions={props.features?.actions}
+        actions={props.features?.actions ?? "copy-only"}
         className={props.className}
       />
     );
   }
-  return <MainMessageFlow className={props.className} />;
+  return (
+    <MainMessageFlow
+      actions={props.features?.actions ?? "full"}
+      scrollTarget={props.scrollTarget}
+      clearScrollTarget={props.clearScrollTarget}
+      className={props.className}
+    />
+  );
 }

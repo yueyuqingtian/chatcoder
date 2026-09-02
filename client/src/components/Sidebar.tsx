@@ -9,13 +9,15 @@ import { useEffect, useMemo, useState } from "react";
 import type { ProjectOut, SessionOut } from "../api/client";
 import { api } from "../api/client";
 import { useChatStore } from "../store/chat";
+import { useDraftsStore } from "../store/drafts";
+import { useUpdaterStore } from "../store/updater";
 import { formatRelativeTime, parseUtc } from "../utils/time";
 import { ConfirmDialog } from "./ConfirmDialog";
 import {
   IconCalendar, IconChevronDown, IconChevronLeft, IconChevronRight, IconPanelLeft,
-  IconFolder, IconHash, IconListFilter,
+  IconFolder, IconFolderDynamic, IconHash, IconListFilter,
   IconMoreHorizontal, IconPin, IconPlus, IconSearch, IconSettings,
-  IconSquarePlus, IconZap,
+  IconSquarePlus, IconZap, IconDownload,
 } from "./icons";
 
 export type NavKey = "chat" | "scheduled" | "skills" | "mcp" | "settings";
@@ -36,6 +38,32 @@ const NAV_ITEMS: { key: NavKey | "search"; label: string; icon: React.ReactNode;
 ];
 
 const STORAGE_KEY_COLLAPSED_PROJECTS = "chatcoder:collapsed-projects";
+
+/** 更新徽标：主进程发现新版本时在设置按钮右侧出现。
+ * available 点击开始下载 → downloading 显示进度 → downloaded 点击重启安装。 */
+function UpdateBadge() {
+  const status = useUpdaterStore((s) => s.status);
+  const downloadUpdate = useUpdaterStore((s) => s.downloadUpdate);
+  const installUpdate = useUpdaterStore((s) => s.installUpdate);
+  const visible = status.state === "available" || status.state === "downloading" || status.state === "downloaded";
+  if (!visible) return null;
+  if (status.state === "downloading") {
+    return (
+      <button className="sb-update-btn" title={`正在下载更新 ${status.percent}%`} disabled>
+        <span className="sb-update-progress">{status.percent}%</span>
+      </button>
+    );
+  }
+  return (
+    <button
+      className="sb-update-btn"
+      title={status.state === "downloaded" ? `新版本 v${status.version} 已就绪，点击重启安装` : `发现新版本 v${status.version}，点击下载`}
+      onClick={() => { void (status.state === "downloaded" ? installUpdate() : downloadUpdate()); }}
+    >
+      <IconDownload size={15} color="#fff" />
+    </button>
+  );
+}
 
 function loadCollapsedProjects(): Record<number, boolean> {
   try {
@@ -169,6 +197,14 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
     if (dir) { await createProject(dir); }
   };
 
+  /** plan-546: 项目行"+"——等同新建任务并把空态首页工作目录切到该项目；
+   * 只改 home 草稿的 projectId，其余字段（文字/模型/深度/模式）全部保留。 */
+  const handleNewTaskAt = (projectId: number) => {
+    useDraftsStore.getState().patchDraft("home", { projectId });
+    useChatStore.setState({ currentProjectId: projectId });
+    onChange("chat");
+  };
+
   const renderSession = (s: SessionOut) => {
     const isCurrent = s.id === currentSessionId;
     return (
@@ -208,7 +244,7 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
       {/* 头部：logo + 折叠按钮 + 前进/后退（v19: 折叠入口移入侧栏头部左侧） */}
       <div className="sb-head title-drag-region">
         <span className="sb-logo title-no-drag" title="chatcoder">C</span>
-        <button className="sb-nav-arrow title-no-drag" onClick={onToggleCollapse} title="折叠侧栏 (Ctrl+B)"><IconPanelLeft size={15} /></button>
+        <button className="sb-nav-arrow title-no-drag" onClick={onToggleCollapse} title="折叠侧栏 (Ctrl+B)"><IconPanelLeft size={15} open={!collapsed} /></button>
         <button className="sb-nav-arrow title-no-drag" disabled={!canBack} onClick={() => histGo(-1)} title="后退"><IconChevronLeft size={15} /></button>
         <button className="sb-nav-arrow title-no-drag" disabled={!canForward} onClick={() => histGo(1)} title="前进"><IconChevronRight size={15} /></button>
       </div>
@@ -262,8 +298,16 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
                       <div className={`sb-project${isCurrent ? " current" : ""}`}
                         onClick={() => toggleProject(p.id)}>
                         <span className={`sb-project-chevron${open ? " open" : ""}`} aria-hidden="true"><IconChevronRight size={13} /></span>
-                        <IconFolder size={14} />
+                        <IconFolderDynamic open={open} size={14} />
                         <span className="sb-project-name" title={p.path}>{p.name || shortPath(p.path)}</span>
+                        {/* plan-546: 三点左侧"新建任务"入口——hover/聚焦显示，点击切首页工作目录且不动草稿 */}
+                        <span
+                          className="sb-project-actions sb-project-new"
+                          title="为此项目新建任务（保留首页未发送内容）"
+                          onClick={(e) => { e.stopPropagation(); handleNewTaskAt(p.id); }}
+                        >
+                          <IconPlus size={12} />
+                        </span>
                         <span className="sb-project-actions" onClick={(e) => { e.stopPropagation(); setProjectMenuFor(projectMenuFor === p.id ? null : p.id); }}>
                           <IconMoreHorizontal size={13} />
                         </span>
@@ -333,9 +377,11 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
         </>
       )}
 
-      {/* v19: 底部仅保留设置入口（头像/昵称/终端入口移除，终端移至顶栏右上） */}
+      {/* v19: 底部仅保留设置入口（头像/昵称/终端入口移除，终端移至顶栏右上）
+          更新按钮：有新版本时在设置右侧出现（深绿底 + 白下载图标） */}
       <div className="sb-userbar">
         <button className={`sb-user-settings${active === "settings" ? " active" : ""}`} title="设置" onClick={() => onChange("settings")}><IconSettings size={16} />{!collapsed && <span>设置</span>}</button>
+        <UpdateBadge />
       </div>
 
       <ConfirmDialog open={confirmDelete !== null} title="删除会话" message={`确定删除「${confirmDelete?.title || "会话"}」吗？删除后将归档，不可恢复。`} confirmLabel="删除" danger

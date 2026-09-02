@@ -56,6 +56,8 @@ MODEL_CATALOG: dict[str, dict] = {
     "glm-4.7": {"context_window": 200000, "multimodal": True, "reasoning_efforts": ["low", "medium", "high"]},
     "glm-5.1": {"context_window": 200000, "multimodal": True, "reasoning_efforts": ["low", "medium", "high"]},
     "glm-5.2": {"context_window": 200000, "multimodal": True, "reasoning_efforts": ["low", "medium", "high"]},
+    # plan-156-739: 对齐 ta3/火山编码目录（同家族 glm-5.1/5.2 支持图像输入）
+    "glm-5.3": {"context_window": 200000, "multimodal": True, "reasoning_efforts": ["low", "medium", "high"]},
     # ── DeepSeek ──
     # v21: deepseek-chat(V3.2+)/v3.2/reasoner/r1 均支持 thinking 模式（thinking:{type:"enabled"}），
     # reasoning_efforts 不再为空；新增 deepseek-v4-flash/v4-pro（对齐 zcode 模型目录：
@@ -87,6 +89,8 @@ MODEL_CATALOG: dict[str, dict] = {
     "kimi-k2.5": {"context_window": 131072, "multimodal": True, "reasoning_efforts": ["low", "medium", "high"]},
     # ── MiniMax ──
     "minimax-text-01": {"context_window": 1000000, "multimodal": False, "reasoning_efforts": []},
+    # plan-156-739: MiniMax M3 为官方多模态模型（支持图像识别，MiniMax Agent 基于其多模态能力）
+    "minimax-m3": {"context_window": 1000000, "multimodal": True, "reasoning_efforts": ["low", "medium", "high"]},
     "abab6.5s-chat": {"context_window": 245000, "multimodal": False, "reasoning_efforts": []},
     # ── 其他国内 ──
     "ernie-4.0-turbo": {"context_window": 128000, "multimodal": True, "reasoning_efforts": []},
@@ -94,6 +98,11 @@ MODEL_CATALOG: dict[str, dict] = {
     "doubao-1.5-pro-32k": {"context_window": 32000, "multimodal": True, "reasoning_efforts": []},
     "doubao-1.5-pro-256k": {"context_window": 256000, "multimodal": True, "reasoning_efforts": []},
     "doubao-seed-1.6": {"context_window": 256000, "multimodal": True, "reasoning_efforts": []},
+    # plan-156-739: 对齐 ta3/火山编码目录（同家族 doubao-seed-1.6 支持图像输入；
+    # lookup 前缀匹配可覆盖带日期后缀的底层名，如 doubao-seed-2-1-pro-260628）
+    "doubao-seed-2.1-pro": {"context_window": 256000, "multimodal": True, "reasoning_efforts": []},
+    "doubao-seed-2.1-turbo": {"context_window": 256000, "multimodal": True, "reasoning_efforts": []},
+    "doubao-seed-evolving": {"context_window": 256000, "multimodal": True, "reasoning_efforts": []},
     # ── 本地/开源（ollama/vllm 常见名）──
     "qwen2.5-coder-32b": {"context_window": 32768, "multimodal": False, "reasoning_efforts": []},
     "deepseek-coder-v2": {"context_window": 128000, "multimodal": False, "reasoning_efforts": []},

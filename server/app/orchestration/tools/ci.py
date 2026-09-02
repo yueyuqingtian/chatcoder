@@ -6,9 +6,8 @@
 import asyncio
 from typing import Any
 
+from app.core.config import settings
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
-
-_TIMEOUT_SEC = 60
 
 
 class CiRunTool(Tool):
@@ -51,6 +50,9 @@ class CiRunTool(Tool):
                 error=f"工作区未配置 {check} 命令(无 package.json/pyproject.toml/Makefile)",
             )
 
+        # v1.0 (plan-153-705): 60s 硬编码 → settings.tool_exec_timeout_sec（默认 600s），
+        # npm test / pytest 等长测试不再被误杀。
+        _timeout_sec = int(settings.tool_exec_timeout_sec)
         try:
             proc = await asyncio.create_subprocess_shell(
                 command,
@@ -63,12 +65,12 @@ class CiRunTool(Tool):
             try:
                 stdout, stderr = await asyncio.wait_for(
                     asyncio.shield(_poll_ci(communicate_task, ctx)),
-                    timeout=_TIMEOUT_SEC,
+                    timeout=_timeout_sec,
                 )
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
-                return ToolResult(ok=False, output="", error=f"CI {check} 超时(>{_TIMEOUT_SEC}s)")
+                return ToolResult(ok=False, output="", error=f"CI {check} 超时(>{_timeout_sec}s)")
             except asyncio.CancelledError:
                 proc.kill()
                 await proc.wait()

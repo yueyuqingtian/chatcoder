@@ -1,4 +1,4 @@
-"""Agent 推理循环（v2：主/子代理统一，当前实际生效实现）。
+﻿"""Agent 推理循环（v2：主/子代理统一，当前实际生效实现）。
 
 职责：流式模型调用 + 思考/文本广播 + 工具执行 + token 预算 + 产物抽取 + 回滚写盘埋点。
 由 engine.start_turn（主代理）与 subagent.SubagentManager（子代理）统一调用。
@@ -10,6 +10,7 @@ import logging
 import re
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from sqlalchemy import select
@@ -21,6 +22,7 @@ from app.gateway.ws import manager as ws_manager
 from app.models.registry import get_model_registry
 from app.models.schemas import ChatMessage, ChatRequest
 from app.orchestration.agent_events import broadcast
+from app._diag import log_tool_error, summarize_args  # v36: 工具错误诊断日志
 from app.orchestration.tools import ToolContext, tool_executor
 from app.orchestration.tools.registry import tool_registry
 from app.services import message_service, rollback_service, task_service
@@ -31,11 +33,19 @@ MAX_TOOL_OUTPUT_CHARS = 16000  # v15: 与 fs_read 上限(settings.tool_output_ch
 _STREAM_CHUNK_SIZE = 80
 _STREAM_INTERVAL = 0.01
 
+# v3.1 (plan-102): 规划模式纠偏参数——模型未写 ai/chatcoder-plan-*.md 时的重试上限，
+# 及注入纠偏消息的思考草稿字符上限（防止思考过长撑爆上下文）。
+_PLAN_CORRECTION_MAX = 3
+_PLAN_CORRECTION_DRAFT_CHARS = 8000
+
 # v9: 写盘工具集合——执行时记录前后内容（精确回滚依据）
 _WRITE_TOOLS = ("fs_write", "editor_apply_diff", "multi_file_edit")
 
 # v34: 只读路径类工具——退化调用过滤范围（误执行无副作用，丢弃安全）
 _READ_PATH_TOOLS = ("fs_read", "view_image", "read_attachment")
+# v35: 写工具的必需参数——模型误发缺参调用（如 fs_write 无 content）时
+# 必然失败或写空文件，过滤器直接丢弃（见 _filter_degenerate_tool_calls）
+_WRITE_TOOL_REQUIRED_ARGS = {"fs_write": ("content",)}
 _PATH_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,6}$")
 
 
@@ -69,7 +79,7 @@ async def _wait_retry_interval(cancel_event: asyncio.Event | None) -> bool:
 
 
 def _filter_degenerate_tool_calls(response) -> None:
-    """就地丢弃退化工具调用：模型把自身正文片段误发成只读工具参数的毛刺。
+    """就地丢弃退化工具调用：模型把自身正文片段误发成工具参数的毛刺。
 
     真实案例（msg 44680）：模型输出总结正文后附带
     fs_read(path="视角(工作区根解析相对路径): 文件不存在 → 即原失败根因")，
@@ -79,17 +89,34 @@ def _filter_degenerate_tool_calls(response) -> None:
     只读路径类工具；path ≥16 字符且逐字出现在同响应正文中；
     不含路径分隔符与文件扩展名；含空白与 CJK 字符（正文特征）。
     真实路径要么带分隔符/扩展名，要么是短文件名，均不会命中。
+
+    v35: 写工具缺必需参数的退化调用同样丢弃（真实案例 msg 46408/46410：
+    模型输出总结正文时误发 fs_write(path="工具写文件**")、
+    fs_write(path="写入才算完成")——参数为正文片段且无 content 键，
+    执行后 0 字节文件被真实创建，并渲染出误导性工具卡片）。
+    缺 schema required 参数的调用必然失败或产生空写入，丢弃安全：
+    模型下一步会重新正确调用。
     """
     calls = response.tool_calls
-    if not calls or not response.content:
+    if not calls:
         return
     kept = []
     for tc in calls:
-        path = (tc.get("arguments") or {}).get("path")
+        args = tc.get("arguments") or {}
+        # v35: 写工具缺必需参数（如 fs_write 无 content）→ 必然失败/写空文件
+        if any(k not in args for k in _WRITE_TOOL_REQUIRED_ARGS.get(tc.get("name"), ())):
+            logger.warning(
+                "[agent] 丢弃退化工具调用 %s(args=%r) —— 缺少必需参数 %s，"
+                "疑似模型把正文片段误发成工具调用",
+                tc.get("name"), str(args)[:80],
+                _WRITE_TOOL_REQUIRED_ARGS.get(tc.get("name"), ()),
+            )
+            continue
+        path = args.get("path")
         if (tc.get("name") in _READ_PATH_TOOLS
                 and isinstance(path, str)
                 and len(path) >= 16
-                and path in response.content
+                and response.content and path in response.content
                 and "/" not in path and "\\" not in path
                 and not _PATH_EXT_RE.search(path)
                 and re.search(r"\s", path)
@@ -372,6 +399,8 @@ async def run_agent_loop(
     cancel_event: asyncio.Event | None = None,
     token_budget: int | None = None,
     subagent_context: dict | None = None,
+    # plan-547: 运行中注入的用户消息提供方（每次 LLM 调用前 drain，返回注入项列表）
+    injected_inputs_provider: Callable[[], list[dict]] | None = None,
     reasoning_effort: str | None = None,
     task_id: int | None = None,
     model_id: int | None = None,
@@ -484,6 +513,11 @@ async def run_agent_loop(
     # v2.2 (对齐 zcode 3.9): todo 提醒机制——模型维护的执行清单连续 N 步未更新时注入提醒
     _todo_active = False       # 本 turn 是否已创建过清单
     _todo_updated_at_step = 0  # 清单最后一次更新的步数
+    # v3.0 (plan-88): 规划模式纠偏提醒——模型未写入 ai/chatcoder-plan-*.md 时
+    # 注入系统提醒。v3.1 (plan-102): 纠偏允许重试最多 _PLAN_CORRECTION_MAX 次
+    # （部分 thinking 模型把方案写进思考内容后直接结束，从不调用 fs_write，
+    #  一次提示往往不够）。
+    _plan_correction_tries = 0
     # v6.5: 估算校准系数 -- 用 API 真实 prompt_tokens 动态校准估算值。
     # 字节/4 对中文偏高，不同模型/网关分词差异大，静态常量无法精准。
     # 每次拿到 API 真实值就更新系数，用于前置压缩估算，实现自适应精准压缩。
@@ -496,6 +530,10 @@ async def run_agent_loop(
     # 已有产出时 finish=stop 空响应 = 任务完成正常结束（对齐 zcode/AI SDK），
     # 不重试不报错；零产出时保留重试兜底瞬时故障。
     _tool_executed = False
+    # plan-547 C1: 进度提醒计数——连续 N 步无面向用户的文字输出时注入提醒
+    _steps_since_last_text = 0
+    # plan-547 C3: 最近一次 todo_write 的清单全集（plan 模式每步注入状态标记）
+    _last_todos: list[dict] = []
 
     try:
         for step in range(1, loop_step_limit + 1):
@@ -504,6 +542,19 @@ async def run_agent_loop(
                 return AgentOutput(kind="cancelled", error="任务被用户中断")
 
             await asyncio.sleep(0)
+
+            # plan-547: drain 运行中注入的用户消息（前端"立即发送"），
+            # 作为 user 消息进入本次调用的上下文——下次 AI 调用前传达
+            if injected_inputs_provider is not None:
+                try:
+                    for _inj in injected_inputs_provider():
+                        _txt = str(_inj.get("content") or "").strip()
+                        if not _txt:
+                            continue
+                        messages.append(ChatMessage(role="user", content=_txt))
+                        logger.info("[agent] turn=%s step=%s 注入用户消息 (%d chars)", turn_id, step, len(_txt))
+                except Exception:
+                    logger.warning("[agent] turn=%s 注入消息 drain 失败(非阻塞)", turn_id, exc_info=True)
 
             # 上下文压缩（v6.4: 移除每步开头的估算式 should_auto_compact 检查）
             # 根因：估算 token 与 API 真实 prompt_tokens 偏差大，且当 model.context_window
@@ -580,6 +631,23 @@ async def run_agent_loop(
                     ChatMessage(role="system", content=r) for r in _pending_reminders
                 ]]
                 _pending_reminders = []
+
+            # plan-547 C3: plan 模式每次调用注入计划全集与状态标记——
+            # 模型在任意一步都看得到完整清单与进度，防止长规划跑偏或遗漏步骤
+            if permission_mode == "plan" and _last_todos:
+                _plan_lines = []
+                for _t in _last_todos:
+                    _c_item = str(_t.get("content") or "").strip()
+                    if _c_item:
+                        _plan_lines.append(f"- [{_t.get('status', 'pending')}] {_c_item}")
+                if _plan_lines:
+                    api_messages = [*api_messages, ChatMessage(
+                        role="system",
+                        content="[计划状态全集] 当前执行清单（plan 模式，每步随请求提供）：\n"
+                                + "\n".join(_plan_lines)
+                                + "\n请对照清单继续：完成一项立即用 todo_write 标记 completed；"
+                                  "全部完成后输出方案总结并结束本轮。",
+                    )]
 
             request = ChatRequest(
                 messages=api_messages, model="",
@@ -898,13 +966,18 @@ async def run_agent_loop(
             try:
                 from app.persistence.models.usage_record import UsageRecord
                 _model_name = ""
+                _provider_name = ""
                 if model_id is not None:
-                    from app.persistence.models.model_reg import Model
+                    from app.persistence.models.model_reg import Model, Provider
                     _m = await db.get(Model, model_id)
                     _model_name = _m.name if _m else ""
+                    # plan-152-704: 供应商显示名，区分不同供应商的同名模型
+                    if _m is not None and _m.provider_id is not None:
+                        _p = await db.get(Provider, _m.provider_id)
+                        _provider_name = _p.name if _p else ""
                 db.add(UsageRecord(
                     session_id=session_id, turn_id=turn_id, agent_id=agent_id,
-                    model_id=model_id, model_name=_model_name,
+                    model_id=model_id, model_name=_model_name, provider_name=_provider_name,
                     prompt_tokens=_final_prompt, completion_tokens=_final_completion,
                     reasoning_tokens=(getattr(response.usage, "reasoning_tokens", 0) or 0) if response.usage else 0,
                     cached_tokens=(getattr(response.usage, "cached_input_tokens", 0) or 0) if response.usage else 0,
@@ -964,6 +1037,21 @@ async def run_agent_loop(
                         turn_id, step, _real_ratio * 100, _final_prompt,
                         agent_window, _threshold * 100,
                     )
+
+            # plan-547 C1: 进度提醒——连续多步只有工具调用、没有面向用户的文字时注入提醒
+            if settings.agent_progress_reminder_interval > 0:
+                if str(response.content or "").strip():
+                    _steps_since_last_text = 0
+                else:
+                    _steps_since_last_text += 1
+                    if _steps_since_last_text >= settings.agent_progress_reminder_interval:
+                        _pending_reminders.append(
+                            "[进度提醒] 已连续多步执行工具而未向用户输出任何文字。"
+                            "请在继续执行的同时，用一两句话向用户简报当前进展与下一步计划。"
+                        )
+                        _steps_since_last_text = 0
+                        logger.info("[agent] turn=%s step=%s 注入进度提醒（连续 %d 步无文字输出）",
+                                    turn_id, step, settings.agent_progress_reminder_interval)
 
             # 思考写入消息
             if response.thinking:
@@ -1108,13 +1196,28 @@ async def run_agent_loop(
                     except asyncio.TimeoutError:
                         _exec_task.cancel()
                         from app.orchestration.tools.base import ToolResult
+                        logger.error(
+                            "[tool.error] phase=timeout turn=%s step=%s tool=%s call_key=%s 超时(%ss) args=%s",
+                            turn_id, step, tool_name, call_key,
+                            settings.tool_exec_timeout_sec, summarize_args(args),
+                        )
                         result = ToolResult(ok=False, output="", error=f"[工具执行超时({settings.tool_exec_timeout_sec}s)] {tool_name}")
                     except asyncio.CancelledError:
                         from app.orchestration.tools.base import ToolResult
                         result = ToolResult(ok=False, output="", error="[已被用户中断]")
                     except Exception as exc:
                         from app.orchestration.tools.base import ToolResult
-                        result = ToolResult(ok=False, output="", error=f"[工具执行异常] {exc}")
+                        # v36: 此前 f"[工具执行异常] {exc}" 丢弃 traceback，
+                        # 事后只剩一行消息，无法定位抛错代码行。这里记录完整堆栈、
+                        # 异常类型与调用参数，并把类型前缀保留给用户可见的 error。
+                        log_tool_error(
+                            turn_id=turn_id, step=step, tool_name=tool_name,
+                            call_key=call_key, exc=exc, args=args, phase="execute",
+                        )
+                        result = ToolResult(
+                            ok=False, output="",
+                            error=f"[工具执行异常] {type(exc).__name__}: {exc}",
+                        )
                     _dur = int((time.monotonic() - _ts0) * 1000)
                     # v31 (plan-89): 工具已执行（无论成败）即视为有产出——后续空响应
                     # 判定据此豁免 stop 空响应的 fatal，避免"任务完成后误报异常"。
@@ -1122,6 +1225,16 @@ async def run_agent_loop(
 
                     # 写盘工具：登记路径 + 记录 before/after（v9 精确回滚依据）
                     _change_stat = None
+                    # v36: 写盘结果留痕——写盘记录只在 result.ok 时生成，
+                    # 失败即无记录，前端展开便报「该 turn 无此文件的写盘记录」。
+                    if tool_name in _WRITE_TOOLS:
+                        logger.info(
+                            "[write.result] turn=%s step=%s tool=%s call_key=%s ok=%s "
+                            "paths=%s error=%s dur_ms=%s",
+                            turn_id, step, tool_name, call_key, result.ok,
+                            _pre_paths, (result.error or "")[:300],
+                            int((time.monotonic() - _ts0) * 1000),
+                        )
                     if tool_name in _WRITE_TOOLS and result.ok:
                         _total_add = 0
                         _total_del = 0
@@ -1230,6 +1343,23 @@ async def run_agent_loop(
                                     "output_preview": (result.output or result.error)[:300],
                                     **({"change_stat": _change_stat} if _change_stat else {})},
                     })
+
+                    # v32: 当 AI 调用 browser_* 工具成功时，向前端广播 browser.mirror 事件，驱动右侧面板自动打开与可视化
+                    if tool_name.startswith("browser_") and result.ok:
+                        _b_action = tool_name.replace("browser_", "")
+                        _b_args = tool_args if isinstance(tool_args, dict) else {}
+                        await broadcast(session_id, {
+                            "event": "browser.mirror",
+                            "payload": {
+                                "session_id": session_id,
+                                "action": _b_action,
+                                "url": _b_args.get("url"),
+                                "selector": _b_args.get("selector"),
+                                "text": _b_args.get("text"),
+                                "summary": (result.output or "")[:120].split("\n")[0],
+                                "ok": result.ok,
+                            },
+                        })
                     await message_service.create_message(
                         db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
                         sender_type=SenderType.AGENT.value, sender_id=agent_id,
@@ -1248,6 +1378,9 @@ async def run_agent_loop(
                     if tool_name == "todo_write" and result.ok:
                         _todo_active = True
                         _todo_updated_at_step = step
+                        # plan-547 C3: 保存清单全集，供 plan 模式每步注入状态标记
+                        _raw_todos = args.get("todos") if isinstance(args, dict) else None
+                        _last_todos = [t for t in _raw_todos if isinstance(t, dict)] if isinstance(_raw_todos, list) else []
                     # v15: 图片类工具结果 → 多模态模型追加 image_url 消息，让模型真正看到图片。
                     # （此前 base64 只放在 ToolResult.data，从未进入对话，模型只能看到
                     #   "Base64 length: N" 文本，被迫转向 OCR/命令行猜图）
@@ -1267,16 +1400,35 @@ async def run_agent_loop(
             # 最终文本
             final_text = response.content or ""
             if permission_mode == "plan" and not any(p.replace("\\", "/").startswith("ai/chatcoder-plan") or "/ai/chatcoder-plan" in p.replace("\\", "/") for p in write_paths):
-                if not getattr(agent_loop_context, "_plan_correction_tried", False):
-                    setattr(agent_loop_context, "_plan_correction_tried", True)
-                    logger.info("[agent] turn=%s 处于规划模式且尚未写入 ai/ 计划文档，自动触发纠偏促使模型写盘", turn_id)
+                if _plan_correction_tries < _PLAN_CORRECTION_MAX:
+                    _plan_correction_tries += 1
+                    _draft = (response.thinking or "")[:_PLAN_CORRECTION_DRAFT_CHARS]
+                    _reminder = (
+                        "[系统提醒] 当前处于【规划模式】，你尚未创建/写入方案文档！\n"
+                        "注意：你刚才的思考/回复内容【不会】被自动保存为方案文档，"
+                        "只有通过 fs_write 工具把内容写入 `ai/chatcoder-plan-"
+                        f"{session_id}-{turn_id}.md` 文件才算完成。\n"
+                        "请立即调用 fs_write 工具，将完整的方案规划内容写入该文件，"
+                        "不要仅在对话中回复文字或思考。"
+                    )
+                    if _draft.strip():
+                        _reminder += (
+                            "\n\n【你的思考草稿（可直接整理为文档内容，"
+                            "但必须通过 fs_write 写入才算完成）】\n"
+                            + _draft
+                        )
+                    logger.info(
+                        "[agent] turn=%s 规划模式纠偏 %d/%d 次（模型未写 ai/ 计划文档，"
+                        "注入思考草稿 %d 字符）",
+                        turn_id, _plan_correction_tries, _PLAN_CORRECTION_MAX, len(_draft),
+                    )
                     messages.append(ChatMessage(
                         role="assistant",
                         content=final_text,
                     ))
                     messages.append(ChatMessage(
                         role="user",
-                        content="[系统提醒] 当前处于【规划模式】，你尚未创建/写入方案文档！请立即调用 fs_write 工具将完整的方案规划内容写入 `ai/chatcoder-plan-xxx.md` 文件（如 `ai/chatcoder-plan-1.md`），不要仅在对话中回复文字。",
+                        content=_reminder,
                     ))
                     continue
 

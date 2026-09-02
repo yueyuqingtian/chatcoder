@@ -24,7 +24,7 @@ import { FileBadge, splitFilePath } from "./FileBadge";
 import {
   IconFileRead, IconFileWrite, IconFolder, IconGlobe, IconSearch, IconTerminal,
   IconUsers, IconBox, IconZap, IconFlask, IconGitBranch, IconBrain,
-  IconSpinner, IconX, IconDiff, IconImage, IconChevronRight,
+  IconSpinner, IconX, IconDiff, IconImage, IconChevronRight, IconCheckSquare,
 } from "../icons";
 
 /** 工具 → 中文动作动词（对齐 zcode 行首文案） */
@@ -46,6 +46,8 @@ const TOOL_VERBS: Record<string, string> = {
   ci_run: "已运行 CI",
   memory_search: "已搜索记忆",
   view_image: "已查看图片",
+  todo_write: "已更新任务清单",
+  ask_user_question: "已询问用户",
   mcp: "已调用",
 };
 
@@ -66,6 +68,8 @@ const TOOL_ICONS: Record<string, React.ReactNode> = {
   memory_search: <IconBrain size={13} />,
   editor_apply_diff: <IconDiff size={13} />,
   view_image: <IconImage size={13} />,
+  todo_write: <IconCheckSquare size={13} />,
+  ask_user_question: <IconBrain size={13} />,
   mcp: <IconBox size={13} />,
 };
 
@@ -87,8 +91,18 @@ function leafPath(leaf: ToolLeaf): string | null {
   return null;
 }
 
-/** 非文件类工具的行内摘要（命令/查询词）——完整展示首行，仅由 CSS 截断 */
+/** 非文件类工具的行内摘要（命令/查询词/清单步骤）——完整展示首行，仅由 CSS 截断 */
 function leafSummary(leaf: ToolLeaf): string {
+  if (leaf.tool === "todo_write") {
+    const todos = (leaf.args?.todos as Array<{ content?: string; status?: string }> | undefined) || [];
+    const activeTodo = todos.find((t) => t.status === "in_progress") || todos.find((t) => t.status === "pending") || todos[0];
+    if (activeTodo?.content) return activeTodo.content.split("\n")[0];
+    return `共 ${todos.length} 项清单`;
+  }
+  if (leaf.tool === "ask_user_question") {
+    const qs = (leaf.args?.questions as Array<{ question?: string }> | undefined) || [];
+    return qs.length > 0 ? `已询问 ${qs.length} 个问题` : "向用户发起询问";
+  }
   const cmd = leaf.args?.command ?? leaf.args?.cmd;
   if (typeof cmd === "string" && cmd) return cmd.split("\n")[0];
   const q = leaf.args?.query ?? leaf.args?.pattern ?? leaf.args?.url;
@@ -218,7 +232,7 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
           </span>
         )}
         {path && dir && <span className="tc-dir" title={path}>{dir}</span>}
-        {!path && <span className="tc-tool-name" title={leaf.tool}>{leaf.tool}</span>}
+        {!path && !TOOL_VERBS[leaf.tool] && <span className="tc-tool-name" title={leaf.tool}>{leaf.tool}</span>}
         {!path && summary && <span className="tc-query" title={summary}>{summary}</span>}
         {leaf.changeStat && ok && <ChangeStat additions={leaf.changeStat.additions} deletions={leaf.changeStat.deletions} />}
         {ok === null && <span className="tc-status wait"><IconSpinner size={11} /></span>}
@@ -243,6 +257,59 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
                     </button>
                   ))}
                 </div>
+              )}
+              {/* 对齐图四、图五：ask_user_question 展开为结构化问答详情 */}
+              {leaf.tool === "ask_user_question" && (
+                (() => {
+                  const qs = (leaf.args?.questions as Array<{ question?: string }> | undefined) || [];
+                  let answerMap: Record<string, string> = {};
+                  try {
+                    if (leaf.output) {
+                      const jsonMatch = leaf.output.match(/\{[\s\S]*\}/);
+                      if (jsonMatch) answerMap = JSON.parse(jsonMatch[0]);
+                    }
+                  } catch { /* ignore */ }
+                  return (
+                    <div className="tc-question-qa-list">
+                      {qs.map((q, idx) => {
+                        const val = answerMap[String(idx)] ?? answerMap[String(idx + 1)] ?? leaf.output?.slice(0, 100) ?? "已回答";
+                        return (
+                          <div key={idx} className="tc-question-qa-item">
+                            <div className="tc-question-qa-q">问题 {idx + 1}：{q.question || ""}</div>
+                            <div className="tc-question-qa-a">
+                              回答：<span className="tc-qa-val">{String(val)}</span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()
+              )}
+              {/* v32: 浏览器截图工具调用展开直接渲染图片预览 */}
+              {leaf.tool === "browser_screenshot" && (
+                (() => {
+                  const m = leaf.output?.match(/path=`([^`]+)`/);
+                  const screenshotPath = m ? m[1] : null;
+                  if (screenshotPath) {
+                    const norm = screenshotPath.replace(/\\/g, "/");
+                    const idx = norm.indexOf("uploads/");
+                    const rel = idx >= 0 ? norm.slice(idx + 8) : "";
+                    const imgUrl = rel ? `/api/uploads/${rel}` : null;
+                    if (imgUrl) {
+                      return (
+                        <div style={{ padding: "8px 0" }}>
+                          <img
+                            src={imgUrl}
+                            alt="Browser Screenshot"
+                            style={{ maxWidth: "100%", maxHeight: 320, borderRadius: 6, border: "1px solid var(--border)", objectFit: "contain" }}
+                          />
+                        </div>
+                      );
+                    }
+                  }
+                  return null;
+                })()
               )}
               {leaf.output && (path && /\.(ts|tsx|js|jsx|py|json|md|css|html|go|rs|java|c|cpp|sh)$/i.test(path) ? (
                 <pre className="tc-code"><code>{leaf.output}</code></pre>

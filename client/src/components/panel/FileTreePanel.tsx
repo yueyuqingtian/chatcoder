@@ -118,6 +118,12 @@ export function FileTreePanel() {
   const previewLine = usePanelStore((s) => s.previewLine);
   const setPreviewPath = usePanelStore((s) => s.setPreviewPath);
   const diffPreview = usePanelStore((s) => s.diffPreview);
+  const streamingBuffers = useChatStore((s) => s.streamingBuffers);
+  const isRunning = useChatStore((s) => s.isRunning);
+  const turnChanges = useChatStore((s) => s.turnChanges);
+  const runningTurnId = useChatStore((s) => s.runningTurnId);
+  const plansByTurn = useChatStore((s) => s.plansByTurn);
+  const pendingPlan = useChatStore((s) => s.pendingPlan);
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [openPaths, setOpenPaths] = useState<Set<string>>(new Set());
   const [content, setContent] = useState<string>("");
@@ -154,24 +160,43 @@ export function FileTreePanel() {
 
   useEffect(() => { loadTree(); }, [currentProjectId]);
 
- // 预览文件
- const loadFile = async (path: string) => {
-   if (!currentProjectId) return;
-   setContentError(null);
-   try {
-     const data = await api.readProjectFile(currentProjectId, path);
-     setContent(data.content);
+  // 预览文件
+  const loadFile = async (path: string) => {
+    if (!currentProjectId) return;
+    setContentError(null);
+    try {
+      const data = await api.readProjectFile(currentProjectId, path);
+      setContent(data.content);
       setContentLang(toMonacoLang(data.language, path));
-     if (data.truncated) setContentError("文件过大，已截断预览");
-   } catch (e) {
-     setContentError(String(e));
-     setContent("");
-   }
- };
+      if (data.truncated) setContentError("文件过大，已截断预览");
+    } catch (e) {
+      setContentError(String(e));
+      setContent("");
+    }
+  };
 
- useEffect(() => {
-   if (previewPath) loadFile(previewPath);
- }, [previewPath]);
+  useEffect(() => {
+    if (previewPath) loadFile(previewPath);
+  }, [previewPath, turnChanges]);
+
+  // 计划文档流式刷新仅限「规划阶段」：当前 running turn 的计划尚未确认/取消时，
+  // 流式缓冲即规划文本（实时刷新计划文档）；确认后进入执行阶段，流式缓冲变成
+  // 消息流的执行文本，不得覆盖计划文档（与 PlanCard plan-633 同口径）。
+  // 执行阶段计划文档的更新由下方 turnChanges 依赖重读磁盘内容兜底。
+  const isPlanDoc = Boolean(previewPath && /ai\/chatcoder-plan-.*\.md$/i.test(previewPath));
+  const planForTurn =
+    runningTurnId != null
+      ? (plansByTurn[runningTurnId] ??
+        (pendingPlan && pendingPlan.turnId === runningTurnId ? pendingPlan : null))
+      : null;
+  const planSettled =
+    planForTurn != null &&
+    "status" in planForTurn &&
+    (planForTurn.status === "confirmed" || planForTurn.status === "cancelled");
+  const activeStream = isRunning && isPlanDoc && !planSettled
+    ? Object.values(streamingBuffers).join("")
+    : "";
+  const displayContent = (activeStream && mdView === "preview") ? activeStream : content;
 
   // v2.2 (对齐 zcode 3.14.2): grep path:line 跳转 → Monaco 定位到行
   useEffect(() => {
@@ -205,8 +230,17 @@ export function FileTreePanel() {
     return () => clearTimeout(t);
   }, [previewPath, tree]);
 
-  const openExternal = (path: string) => {
-    window.chatcoderAPI?.openPath?.(path);
+  const openExternal = (relOrAbsPath: string) => {
+    if (!relOrAbsPath) return;
+    let full = relOrAbsPath;
+    if (project?.path) {
+      const pRoot = project.path.replace(/\\/g, "/").replace(/\/$/, "");
+      const cleanRel = relOrAbsPath.replace(/\\/g, "/").replace(/^\.\//, "");
+      if (!cleanRel.startsWith(pRoot) && !/^[A-Za-z]:\//.test(cleanRel) && !cleanRel.startsWith("/")) {
+        full = `${pRoot}/${cleanRel}`;
+      }
+    }
+    window.chatcoderAPI?.openPath?.(full);
   };
 
   return (
@@ -276,7 +310,7 @@ export function FileTreePanel() {
               </div>
             ) : /\.(md|markdown)$/i.test(previewPath) && mdView === "preview" ? (
               <div className="ft-md-preview">
-                <MarkdownContent>{content}</MarkdownContent>
+                <MarkdownContent>{displayContent}</MarkdownContent>
               </div>
             ) : (
               <Editor

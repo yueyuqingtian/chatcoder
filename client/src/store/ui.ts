@@ -114,11 +114,19 @@ export function applyUiVars(p: UiPrefs) {
   else root.style.removeProperty("--sidebar-focus");
   root.style.fontSize = `${p.uiBaseFontSize}px`;
   root.setAttribute("data-glass", p.glassmorphism ? "on" : "off");
+  // plan-546: 通知主进程切换 Win11 acrylic 真磨砂（不支持时静默降级 CSS 半透明）；
+  // 浏览器/开发模式无 chatcoderAPI 时仅走 CSS 效果。
+  try {
+    void window.chatcoderAPI?.setGlassMode?.(p.glassmorphism);
+  } catch { /* ignore */ }
   // v15: 外部穿透已移除；清理旧版本可能遗留的 DOM 属性。
   root.removeAttribute("data-external");
   // 玻璃强度:0=0.5x 1=1x 2=1.6x 模糊
   const strength = p.glassStrength === 2 ? 1.6 : p.glassStrength === 0 ? 0.5 : 1;
   root.style.setProperty("--glass-strength", String(strength));
+  // plan-548: 侧栏透出桌面的比例随玻璃强度变化（叠在 DWM acrylic 之上的侧栏底色不透明度）
+  const sidebarAlpha = p.glassStrength === 2 ? 0.58 : p.glassStrength === 0 ? 0.78 : 0.68;
+  root.style.setProperty("--glass-sidebar-alpha", String(sidebarAlpha));
   // 玻璃渐变主色（空则使用主题默认）
   if (p.glassGradientC1) root.style.setProperty("--ambient-c1", p.glassGradientC1);
   else root.style.removeProperty("--ambient-c1");

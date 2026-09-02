@@ -34,8 +34,6 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("sessions", "updated_at", "VARCHAR"),
     # ========== sessions（v2.2 对齐 zcode 3.12：权限模式）==========
     ("sessions", "permission_mode", "VARCHAR(20) DEFAULT 'default' NOT NULL"),
-    # ========== sessions（plan-88：确认执行后恢复 plan 模式标记）==========
-    ("sessions", "plan_restore_after_turn", "BOOLEAN DEFAULT 0 NOT NULL"),
     # ========== sessions（v1.1：最后一次 API 真实上下文占用）==========
     ("sessions", "last_prompt_tokens", "INTEGER DEFAULT 0 NOT NULL"),
     ("sessions", "last_usage_at", "VARCHAR(40)"),
@@ -83,6 +81,16 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("team_agents", "mcp_server_ids", "JSON"),
     # ========== rollback_writes（plan-88：二进制/超限文件只走 checkpoint 恢复）==========
     ("rollback_writes", "binary", "BOOLEAN DEFAULT 0 NOT NULL"),
+    # ========== turns（plan-644：计划模式字段持久化，多轮迭代需求全集与卡片恢复的数据源）==========
+    ("turns", "plan_doc_path", "VARCHAR(512)"),
+    ("turns", "plan_status", "VARCHAR(20)"),
+    # ========== sessions（目标模式：持久目标与续跑状态）==========
+    ("sessions", "goal_text", "VARCHAR(2000)"),
+    ("sessions", "goal_status", "VARCHAR(20) DEFAULT 'none' NOT NULL"),
+    ("sessions", "goal_turns_used", "INTEGER DEFAULT 0 NOT NULL"),
+    ("sessions", "goal_created_at", "VARCHAR(40)"),
+    # ========== usage_records（plan-152-704：供应商显示名）==========
+    ("usage_records", "provider_name", "VARCHAR(120) DEFAULT ''"),
 ]
 
 

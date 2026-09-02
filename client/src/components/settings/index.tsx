@@ -17,6 +17,8 @@ import { UsagePanel } from "./UsagePanel";
 import { DiagnosticsPanel } from "./DiagnosticsPanel";
 import { PluginsPanel } from "./PluginsPanel";
 import { ArchivedPanel } from "./ArchivedPanel";
+import { IconDownload, IconRefresh } from "../icons";
+import { useUpdaterStore } from "../../store/updater";
 import {
   IconAnchor, IconBarChart, IconBookOpen, IconBrain, IconCalendar,
   IconCpu, IconInfo, IconPalette, IconPlug, IconRotateCcw, IconSettings,
@@ -65,7 +67,49 @@ export const NAV_GROUPS: Array<{ id: SettingsIndexItem["group"]; label: string }
 ];
 
 function AboutPanel() {
-  return <div className="settings-card"><RowItem title="ChatCoder" desc="项目任务驱动的 AI 编码工作台" /></div>;
+  const status = useUpdaterStore((s) => s.status);
+  const appVersion = useUpdaterStore((s) => s.appVersion);
+  const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
+  const downloadUpdate = useUpdaterStore((s) => s.downloadUpdate);
+  const installUpdate = useUpdaterStore((s) => s.installUpdate);
+
+  // dev 模式无 preload 更新 API，显示纯静态信息
+  const supported = status.state !== "unsupported";
+  const hint =
+    status.state === "checking" ? "正在检查更新…" :
+    status.state === "available" ? `发现新版本 v${status.version}（当前 v${appVersion}）` :
+    status.state === "downloading" ? `正在下载更新 ${status.percent}%…` :
+    status.state === "downloaded" ? `新版本 v${status.version} 已就绪` :
+    status.state === "none" ? `已是最新版本（v${appVersion}）` :
+    status.state === "error" ? `检查更新失败：${status.message}` : "";
+
+  const updateBtn =
+    status.state === "downloaded" ? (
+      <button className="btn btn-primary btn-sm" onClick={() => void installUpdate()}><IconDownload size={13} /> 重启更新</button>
+    ) : status.state === "available" ? (
+      <button className="btn btn-primary btn-sm" onClick={() => void downloadUpdate()}><IconDownload size={13} /> 下载更新</button>
+    ) : status.state === "downloading" ? (
+      <button className="btn btn-sm" disabled>{status.percent}%</button>
+    ) : null;
+
+  return (
+    <div className="settings-card">
+      <RowItem title="ChatCoder" desc="项目任务驱动的 AI 编码工作台" />
+      <RowItem title="当前版本" desc={appVersion ? `v${appVersion}` : "v0.1.0"} />
+      {supported && (
+        <div className="settings-row">
+          <div className="settings-row-info">
+            <div className="settings-row-title">软件更新</div>
+            <div className="settings-row-desc">{hint || "从 GitHub Releases 自动检查新版本"}</div>
+          </div>
+          <div className="settings-row-control">
+            {updateBtn}
+            <button className="btn btn-ghost btn-sm" disabled={status.state === "checking" || status.state === "downloading"} onClick={() => void checkForUpdates()}><IconRefresh size={13} /> 检查更新</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 function RowItem({ title, desc }: { title: string; desc: string }) {
   return <div className="settings-row"><div className="settings-row-info"><div className="settings-row-title">{title}</div><div className="settings-row-desc">{desc}</div></div><div className="settings-row-control" /></div>;
@@ -84,7 +128,7 @@ function Panel({ tab }: { tab: SettingsTab }) {
     case "scheduled": return <div className="settings-content-inner"><div className="settings-page-title">定时任务</div><div className="settings-card"><ScheduledPanel /></div></div>;
     case "hooks": return <div className="settings-content-inner"><div className="settings-page-title">钩子</div><div className="settings-card"><HooksPanel /></div></div>;
     case "memory": return <div className="settings-content-inner"><div className="settings-page-title">记忆</div><div className="settings-card"><MemoryPanel /></div></div>;
-    case "usage": return <div className="settings-content-inner"><div className="settings-page-title">用量统计</div><div className="settings-page-subtitle">整个软件的 token 用量：总数与各模型分布</div><div className="settings-card"><UsagePanel /></div></div>;
+    case "usage": return <div className="settings-content-inner-wide"><div className="settings-page-title">用量统计</div><div className="settings-page-subtitle">整个软件的 token 用量：总数、趋势与各模型分布</div><div className="settings-card"><UsagePanel /></div></div>;
     case "diagnostics": return <div className="settings-content-inner"><div className="settings-page-title">诊断</div><div className="settings-page-subtitle">系统健康检查</div><div className="settings-card"><DiagnosticsPanel /></div></div>;
     case "archive": return <div className="settings-content-inner"><div className="settings-page-title">归档恢复</div><div className="settings-page-subtitle">已归档的项目与会话，支持一键恢复</div><div className="settings-card"><ArchivedPanel /></div></div>;
     case "plugins": return <div className="settings-content-inner"><div className="settings-page-title">插件</div><div className="settings-page-subtitle">系统组件插件化：查看可替换的 slot 组件，像拼积木一样替换内置/外挂组件</div><div className="settings-card"><PluginsPanel /></div></div>;

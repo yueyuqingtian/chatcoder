@@ -42,6 +42,13 @@ class FsWriteTool(Tool):
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         path = args.get("path", "")
+        # v35: content 缺失时报错而非静默写空文件——schema 声明 required，
+        # 缺参即模型毛刺（真实案例：误创建 0 字节文件"写入才算完成"）
+        if "content" not in args:
+            return ToolResult(
+                ok=False, output="",
+                error="content 参数缺失：fs_write 必须提供要写入的文本内容",
+            )
         content = args.get("content", "")
         if not path:
             return ToolResult(ok=False, output="", error="path 不能为空")

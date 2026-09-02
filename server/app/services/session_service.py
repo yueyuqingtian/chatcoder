@@ -7,10 +7,25 @@ from app.persistence.models.turn import Turn
 
 
 async def create_session(db: AsyncSession, *, project_id: int, title: str | None = None,
-                         model_id: int | None = None, fork_parent_id: int | None = None) -> Session:
+                         model_id: int | None = None, fork_parent_id: int | None = None,
+                         permission_mode: str | None = None,
+                         goal_text: str | None = None) -> Session:
+    from datetime import datetime, timezone
+
     session = Session(
         project_id=project_id, title=title or None,
         model_id=model_id, fork_parent_id=fork_parent_id,
+        # plan-547: 首页所选模式随创建落库，会话输入框立即显示与实际运行一致
+        permission_mode=permission_mode or "default",
+        # plan-676: 首页目标随创建一次落准（对齐 set_goal 端点写法；空时维持默认 none）
+        **(
+            {
+                "goal_text": goal_text.strip()[:2000],
+                "goal_status": "active",
+                "goal_created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if goal_text and goal_text.strip() else {}
+        ),
     )
     db.add(session)
     await db.flush()
@@ -48,18 +63,9 @@ async def update_session(db: AsyncSession, session_id: int, **kwargs) -> Session
     session = await db.get(Session, session_id)
     if session is None:
         return None
-    old_pm = session.permission_mode
     for k, v in kwargs.items():
         if v is not None:
             setattr(session, k, v)
-    # v2.2 (plan-88): plan 会话模式粘性——权限从 plan 切出（accept_edits/default，
-    # 通常是确认执行）时标记执行结束后恢复 plan；切回 plan/readonly 时清除标记。
-    pm = kwargs.get("permission_mode")
-    if pm is not None and old_pm != pm:
-        if old_pm == "plan" and pm in ("accept_edits", "default"):
-            session.plan_restore_after_turn = True
-        elif pm in ("plan", "readonly"):
-            session.plan_restore_after_turn = False
     await db.flush()
     return session
 

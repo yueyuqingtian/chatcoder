@@ -20,10 +20,10 @@ export interface WsEnvelope {
 
 export type ServerWsEvent =
   | { event: "message.created"; payload: { msg: Record<string, unknown> } }
-  | { event: "turn.started"; payload: { turn_id: number } }
-  | { event: "turn.updated"; payload: { turn_id: number; status: string } }
-  | { event: "turn.completed"; payload: { turn_id: number; summary?: string | null; artifact_ids?: number[] } }
-  | { event: "turn.interrupted"; payload: { turn_id: number; last_message_id?: number | null } }
+  | { event: "turn.started"; payload: { turn_id: number; session_id?: number } }
+  | { event: "turn.updated"; payload: { turn_id: number; status: string; session_id?: number } }
+  | { event: "turn.completed"; payload: { turn_id: number; summary?: string | null; artifact_ids?: number[]; session_id?: number } }
+  | { event: "turn.interrupted"; payload: { turn_id: number; last_message_id?: number | null; session_id?: number } }
   | { event: "turn.rolled_back"; payload: { turn_id: number; rolled_back_msgs?: number; file_recovery?: Record<string, unknown> } }
   | { event: "agent.started"; payload: { agent_id: number; kind?: string; name?: string; turn_id?: number | null } }
   | { event: "agent.updated"; payload: { agent_id: number; status?: string; tool?: string; step?: number } }
@@ -38,7 +38,9 @@ export type ServerWsEvent =
   | { event: "tool.result"; payload: { turn_id: number; tool: string; ok: boolean; duration_ms?: number; output_preview?: string; change_stat?: { path: string; additions: number; deletions: number } } }
   | { event: "file.change"; payload: { turn_id: number; path?: string } }
   | { event: "todo.updated"; payload: { turn_id: number; todos: unknown[]; persisted: boolean } }
-  | { event: "task.proposed"; payload: { turn_id: number; request_task_id?: number; group_task_id?: number; reasons?: string[]; plan_doc_path?: string } }
+  /** v38 (plan-482): 语义改为「方案文档已生成、等待用户确认」——
+   *  不再携带拆分步骤（steps 恒为空，保留字段避免老前端断协议）。 */
+  | { event: "task.proposed"; payload: { turn_id: number; request_task_id?: number; group_task_id?: number; reasons?: string[]; plan_doc_path?: string; steps?: unknown[] } }
   | { event: "task.planned"; payload: { turn_id: number; steps?: unknown[] } }
   | { event: "task.updated"; payload: { task_id: number; status?: string; note?: string | null } }
   | { event: "usage.update"; payload: Record<string, unknown> }
@@ -50,8 +52,16 @@ export type ServerWsEvent =
   | { event: "api.retry"; payload: { attempt: number; wait_ms: number; reason?: string } }
   | { event: "config.changed"; payload: { profile_id: number; changed_keys: string[] } }
   | { event: "scheduled.triggered"; payload: { task_id: number; turn_id: number } }
-  | { event: "session.updated"; payload: { session_id: number; title?: string; permission_mode?: string } }
-  | { event: "session.completed"; payload: { session_id: number } }
+  | { event: "session.updated"; payload: { session_id: number; title?: string; permission_mode?: string; last_activity_at?: string | null } }
+  /** plan-547: 运行中 turn 的用户消息注入确认（前端按 request_id 移除排队项） */
+  | { event: "user_input.injected"; payload: { turn_id: number; request_id?: string | null } }
+  /** plan-671: 目标模式（对齐 zcode goal-continuation）——目标设定/取消/完成/续跑/停止 */
+  | { event: "goal.updated"; payload: { text?: string | null; status: string; turns_used?: number } }
+  | { event: "goal.completed"; payload: { turn_id?: number | null; summary?: string } }
+  | { event: "goal.continued"; payload: { turn_id: number; prev_turn_id?: number; turns_used: number } }
+  | { event: "goal.stopped"; payload: { turn_id?: number | null; reason?: string; max_turns?: number } }
+  /** v37: turn 结束即摘除会话运行标记；last_activity_at 供侧栏按最近活动重排 */
+  | { event: "session.completed"; payload: { session_id: number; last_activity_at?: string | null } }
   | { event: "error"; payload: { code?: string; message?: string } }
   /** 服务端对客户端请求的确认（approval/cancel/sync 等） */
   | { event: "ack"; payload: { ref: string; ok?: boolean; resolved?: boolean } }

@@ -124,6 +124,127 @@ async def _session_memory_summary(db: AsyncSession, session_id: int) -> str:
         return ""
 
 
+# plan-644: 计划轮状态 -> 注入文本语义标注（直接写进 Plan History，模型据此
+# 累积未完成项、剔除已完成项；数据库 plan_status 为真值源）
+_PLAN_STATUS_LABELS = {
+    "proposed": "待确认（未执行，其中未完成需求必须完整纳入新方案）",
+    "confirmed": "已确认执行（未完成部分仍需纳入新方案）",
+    "done": "已执行完成（已完成项禁止重复列入新方案；未竟事项仍需继承）",
+    "cancelled": "已取消（除非用户明确重提，不再列入新方案）",
+    "superseded": "已被更新方案取代（若含未被后续方案继承的条目，需并入新方案）",
+}
+
+
+async def _collect_plan_history(db: AsyncSession, session, workspace: str) -> str:
+    """plan-644: 收集本会话此前各轮计划需求全集（仅 plan 模式注入）。
+
+    每轮输出：turn id / plan_status 语义 / 文档路径 / 该轮用户原始需求 / 文档正文。
+    正文策略：未完结轮（proposed/confirmed/superseded）最近 3 轮给全文，更早
+    与已完结轮（done/cancelled）仅首个 # 标题；总量上限
+    settings.plan_history_inject_chars，超限时从最早轮次开始降级（保留
+    状态行与需求行，正文提示用 fs_read 读取）。失败返回空串（非阻塞）。
+    """
+    if not workspace or session is None:
+        return ""
+    try:
+        from pathlib import Path as _Path
+
+        from sqlalchemy import select
+
+        from app.persistence.models.task import Task
+        from app.persistence.models.turn import Turn as _Turn
+        res = await db.execute(
+            select(_Turn).where(
+                _Turn.session_id == session.id,
+                _Turn.plan_doc_path.is_not(None),
+            ).order_by(_Turn.id.asc())
+        )
+        plan_turns = list(res.scalars().all())
+        if not plan_turns:
+            return ""
+
+        # 各轮用户原始需求：request task（title+description），缺则 turn 内首条用户消息
+        req_map: dict[int, str] = {}
+        task_res = await db.execute(
+            select(Task).where(
+                Task.session_id == session.id,
+                Task.kind == "request",
+                Task.turn_id.in_([t.id for t in plan_turns]),
+            ).order_by(Task.id.asc())
+        )
+        for tk in task_res.scalars().all():
+            if tk.turn_id is not None and tk.turn_id not in req_map:
+                req_map[tk.turn_id] = f"{tk.title or ''}\n{tk.description or ''}".strip()[:1500]
+        for t in plan_turns:
+            if t.id in req_map:
+                continue
+            req_map[t.id] = ""
+            try:
+                from app.persistence.models.message import Message
+                m_res = await db.execute(
+                    select(Message).where(
+                        Message.session_id == session.id,
+                        Message.turn_id == t.id,
+                        Message.sender_type == "user",
+                    ).order_by(Message.id.asc()).limit(1)
+                )
+                m = m_res.scalars().first()
+                if m is not None and isinstance(m.content, dict):
+                    req_map[t.id] = str(m.content.get("text") or "")[:1500]
+            except Exception:
+                logger.debug("[context] Plan History 用户需求兜底失败 turn=%s", t.id, exc_info=True)
+
+        root = _Path(workspace).resolve()
+        # 未完结轮最近 3 轮给全文
+        open_turns = [t for t in plan_turns if (t.plan_status or "") in ("proposed", "confirmed", "superseded")]
+        full_idx = {t.id for t in open_turns[-3:]}
+
+        blocks: list[str] = []
+        for t in plan_turns:
+            status = t.plan_status or "unknown"
+            label = _PLAN_STATUS_LABELS.get(status, status)
+            header = f"### Turn {t.id} [{status}] {t.plan_doc_path}（{label}）"
+            req = req_map.get(t.id, "")
+            req_part = f"用户需求：{req}" if req else "用户需求：（未能恢复）"
+            body = ""
+            try:
+                target = (root / str(t.plan_doc_path)).resolve()
+                if target.is_file() and root in target.parents:
+                    text = target.read_text(encoding="utf-8", errors="replace")
+                    if t.id in full_idx:
+                        body = text[:3000]
+                    else:
+                        first = next((ln for ln in text.splitlines() if ln.startswith("#")), "")
+                        body = first[:200] if first else "(无标题)"
+            except OSError:
+                body = "(读取失败)"
+            blocks.append(f"{header}\n{req_part}\n文档：{body}" if body else f"{header}\n{req_part}")
+
+        # 预算：从最新轮次向前保留完整块；更早轮次降级为状态行+需求行
+        budget = max(1000, int(getattr(settings, "plan_history_inject_chars", 8000) or 8000))
+        kept: set[int] = set()
+        total = 0
+        for i in range(len(blocks) - 1, -1, -1):
+            if total + len(blocks[i]) <= budget:
+                kept.add(i)
+                total += len(blocks[i])
+            else:
+                break
+        parts: list[str] = []
+        for i, blk in enumerate(blocks):
+            if i in kept:
+                parts.append(blk)
+            else:
+                lines = blk.splitlines()
+                header = lines[0] if lines else ""
+                req_line = next((ln for ln in lines if ln.startswith("用户需求")), "")
+                parts.append(f"{header}\n{req_line}\n（正文因注入预算截断，可 fs_read 该文档路径查看全文）")
+        return "\n\n".join(parts)
+    except Exception:
+        logger.warning("[context] Plan History 收集失败(非阻塞)", exc_info=True)
+        return ""
+
+
 # v15: 多模态图片注入上限（防单次请求过大）
 _MAX_INLINE_IMAGES = 4
 _MAX_INLINE_IMAGE_BYTES = 4 * 1024 * 1024  # 4MB/张
@@ -205,8 +326,24 @@ async def build_main_context(
     attachments: list[dict] | None = None,
     multimodal: bool = False,
     enable_subagents: bool = True,
+    plan_history: str = "",
+    goal: dict | None = None,
+    available_tools: set[str] | None = None,
 ) -> ContextBundle:
-    """构建主代理上下文。"""
+    """构建主代理上下文。
+
+    plan_history（plan-644）：本会话此前各轮计划需求全集，仅 plan 模式
+    由调用方收集传入；非空时作为 developer 片段注入（多轮迭代零丢失的
+    机制保证）。
+
+    goal（plan-671）：会话目标快照 {text, turns_used}；目标激活时
+    Current Goal 段为持久目标文本，本轮用户消息降级为 Current Task 段。
+
+    available_tools（plan-147-674）：当前会话实际暴露给模型的工具名集合
+    （经模式白名单与供应商伪装层过滤后）。None 表示未知（按全量处理）；
+    集合中无 read_attachment 时附件引导文案降级为通用表述，避免提示词
+    引导模型调用不存在的工具。
+    """
     workspace = session.worktree_path or (project.path if project else "")
     # v23: ta3 供应商模型 → 还原式系统提示词（远端主体 + ta3 纪律 + 当前项目规范）
     ta3_meta = await _resolve_ta3_model_meta(db, agent, session)
@@ -234,8 +371,15 @@ async def build_main_context(
         await maybe_summarize_main_session(db, session, context_window=_summary_window)
     except Exception:
         logger.warning("[context] 主会话摘要更新失败(非阻塞)", exc_info=True)
-    # 1. Current Goal
-    bundle.developer_parts.append(f"## Current Goal\n{user_message[:2000]}")
+    # 1. Current Goal（plan-671：目标激活时为持久目标，本轮消息降级为 Current Task）
+    if goal and goal.get("text"):
+        bundle.developer_parts.append(
+            f"## Current Goal\n{goal['text'][:2000]}\n"
+            f"（目标模式激活：持续朝该目标工作，完成时调用 goal_complete；已续跑 {goal.get('turns_used', 0)} 轮）"
+        )
+        bundle.developer_parts.append(f"## Current Task\n{user_message[:2000]}")
+    else:
+        bundle.developer_parts.append(f"## Current Goal\n{user_message[:2000]}")
     # 2. Working Directory & Tool Rules
     ws_ctx = f"Working directory: {workspace}"
     ws_ctx += (
@@ -273,6 +417,14 @@ async def build_main_context(
     except Exception:
         logger.debug("[context] 全局规则加载失败(非阻塞)", exc_info=True)
     # 5. Session Memory（turn 摘要 + 记忆条目）
+    # plan-644: Plan History（会话级计划需求全集）置于 Session Memory 之前--
+    # 多轮 /plan 迭代时模型不可能遗忘未完成需求（机制保证，非纯提示词）
+    if plan_history.strip():
+        bundle.developer_parts.append(
+            "## Plan History (all previous plan rounds of this session)\n"
+            "The new plan document MUST cover every unexecuted item below and MUST NOT "
+            "repeat items already implemented and delivered.\n\n" + plan_history
+        )
     mem_summary = await _session_memory_summary(db, session.id)
     if mem_summary:
         bundle.developer_parts.append(f"## Session Memory\n{mem_summary}")
@@ -420,15 +572,32 @@ async def build_main_context(
                         for a in atts if isinstance(a, dict) and a.get("path")
                     )
                     if att_note:
-                        att_note = "（该消息附带附件：\n" + att_note + "\n如需内容请调用 read_attachment 读取 path）"
+                        # plan-147-674: 工具集不含 read_attachment 时降级为通用表述
+                        _read_hint = (
+                            "如需内容请将附件 path 交给当前可用的文件读取工具读取"
+                            if available_tools is not None and "read_attachment" not in available_tools
+                            else "如需内容请调用 read_attachment 读取 path"
+                        )
+                        att_note = "（该消息附带附件：\n" + att_note + f"\n{_read_hint}）"
                 if m.sender_type == "user":
                     # v14: 历史用户消息若带附件（文件地址），把路径一并注入，
                     # AI 可随时通过 read_attachment 回读附件内容；仅附件无文字的消息也注入
                     if not text and not att_note:
                         continue
+                    # plan-156-739: 多模态模型历史消息重建时恢复图片 image_url 块——
+                    # 否则首轮图片可见、第二轮起历史只剩路径文本，图片"消失"，
+                    # 模型被迫再次走工具读图却只拿到元信息。限制复用注入常量。
+                    _img_blocks = None
+                    if multimodal and atts and isinstance(atts, list):
+                        _img_blocks, _ = _load_inline_image_blocks(atts)
+                        if not _img_blocks:
+                            _img_blocks = None
                     text = f"{text}\n{att_note}" if att_note else text
                     _flush_agent_text()
-                    bundle.history.append(_CM(role="user", content=text))
+                    _cm = _CM(role="user", content=text)
+                    if _img_blocks:
+                        _cm.content_blocks = _img_blocks
+                    bundle.history.append(_cm)
                 else:
                     # 暂存 agent 文本，等待下一个 tool_call 合并
                     _pending_agent_text = text
@@ -505,6 +674,8 @@ async def build_main_context(
             for a in attachments if isinstance(a, dict) and a.get("path")
         ]
         if att_lines:
+            # plan-147-674: 工具集不含 read_attachment 时引导文案降级（不硬编码工具存在性）
+            _has_ra = available_tools is None or "read_attachment" in available_tools
             hint = (
                 "## 用户上传的附件\n"
                 "用户消息附带了以下文件（path 为服务器磁盘绝对路径，可直接传给 read_attachment 读取）：\n"
@@ -523,11 +694,27 @@ async def build_main_context(
                 hint += (
                     "\n\n其他文件（docx/pdf/xlsx/txt 等）阅读方法：调用 read_attachment 工具读取，"
                     "参数 path 使用上面的附件绝对路径，返回解析文本。"
+                    if _has_ra else
+                    "\n\n其他文件（docx/pdf/xlsx/txt 等）：请将附件 path 交给当前可用的文件读取工具读取。"
                 )
             else:
+                # plan-156-739: 非多模态模型收到图片附件时明确告知，避免模型
+                # "假装看图 / 只报元信息 / 猜测尺寸"，并引导用户开启模型多模态。
+                _has_img = any(
+                    isinstance(a, dict) and a.get("type") == "image"
+                    for a in attachments
+                )
+                if _has_img:
+                    hint += (
+                        "\n\n【注意】当前模型未启用多模态（模型设置 → 编辑模型 → 多模态开关），"
+                        "图片仅提供上面的路径，无法直接查看像素内容；如需看图请在模型设置开启多模态后重试。"
+                    )
                 hint += (
                     "\n\n阅读方法：调用 read_attachment 工具读取，参数 path 直接使用上面的"
                     "附件绝对路径（不要改写、不要加引号），docx/pdf/xlsx/txt 等返回解析文本。"
+                    if _has_ra else
+                    "\n\n阅读方法：请将附件 path 交给当前可用的文件读取工具读取"
+                    "（不要改写、不要加引号）。"
                 )
             bundle.developer_parts.append(hint)
     return bundle

@@ -118,6 +118,19 @@ export interface SessionOut {
   has_running?: boolean;
   has_interrupted_turn?: boolean;
   last_activity_at?: string | null;
+  /** plan-671: 目标模式状态（前端恢复目标胶囊） */
+  goal_text?: string | null;
+  goal_status?: "none" | "active" | "completed" | "cancelled";
+  goal_turns_used?: number;
+}
+
+/** plan-671: 目标模式（对齐 zcode goal-continuation）。 */
+export interface GoalOut {
+  text: string | null;
+  status: "none" | "active" | "completed" | "cancelled";
+  turns_used: number;
+  max_turns: number;
+  created_at: string | null;
 }
 
 /** v30.1: 压缩块索引（AI/前端定位压缩前会话的索引条目）。 */
@@ -142,6 +155,10 @@ export interface TurnOut {
   token_usage: number;
   started_at: string | null;
   completed_at: string | null;
+  /** plan-644: 本 turn 产出的方案文档路径（相对工作区；null = 与计划流程无关） */
+  plan_doc_path?: string | null;
+  /** plan-644: 计划生命周期（proposed/confirmed/done/cancelled/superseded） */
+  plan_status?: string | null;
 }
 
 export interface AgentOut {

@@ -21,6 +21,7 @@ import type {
   RollbackPreviewOut,
   RollbackResult,
   ScheduledTaskOut,
+  GoalOut,
   SessionOut,
   TaskOut,
   TurnOut,
@@ -242,16 +243,23 @@ export interface ScanResult {
   total_scanned: number;
 }
 
-/** v1.1: 全软件 token 用量汇总（/api/usage/summary） */
-export interface UsageSummaryOut {
+/** plan-152-704: 全软件 token 用量统计（/api/usage/stats） */
+export interface UsageStatsOut {
   total: {
     prompt: number; completion: number; reasoning: number; cached: number;
     total: number; calls: number;
   };
   by_model: Array<{
-    model: string; prompt: number; completion: number; reasoning: number;
-    cached: number; calls: number; total: number;
+    key: string; model: string; provider_name: string; display_name: string;
+    prompt: number; completion: number; reasoning: number; cached: number;
+    calls: number; total: number;
   }>;
+  daily: Array<{ date: string; tokens: number; calls: number }>;
+  daily_by_model: Array<{ date: string; key: string; display_name: string; tokens: number }>;
+  daily_all: Array<{ date: string; tokens: number }>;
+  peak_tokens: number;
+  streak_current: number;
+  streak_longest: number;
 }
 
 export const api = {
@@ -277,13 +285,19 @@ export const api = {
       .filter(Boolean).join("&");
     return get<SessionOut[]>(`/sessions${q ? `?${q}` : ""}`);
   },
-  createSession: (data: { project_id: number; title?: string; model_id?: number }) =>
+  createSession: (data: { project_id: number; title?: string; model_id?: number; permission_mode?: "default" | "accept_edits" | "plan" | "readonly"; goal_text?: string }) =>
     post<SessionOut>("/sessions", data),
   getSession: (id: number) => get<SessionOut>(`/sessions/${id}`),
   updateSession: (id: number, data: { title?: string; model_id?: number; pinned?: boolean; status?: string; permission_mode?: "default" | "accept_edits" | "plan" | "readonly" }) =>
     patch<SessionOut>(`/sessions/${id}`, data),
   /** 删除 = 归档 */
   deleteSession: (id: number) => del<{ ok: boolean }>(`/sessions/${id}`),
+  // ── 目标模式（plan-671）──
+  getSessionGoal: (id: number) => get<GoalOut>(`/sessions/${id}/goal`),
+  setSessionGoal: (id: number, text: string) => post<GoalOut>(`/sessions/${id}/goal`, { text }),
+  cancelSessionGoal: (id: number) => del<GoalOut>(`/sessions/${id}/goal`),
+  /** 用户确认目标完成（goal_complete 工具的同义用户路径） */
+  completeSessionGoal: (id: number) => del<GoalOut>(`/sessions/${id}/goal?complete=true`),
   forkSession: (id: number) => post<SessionOut>(`/sessions/${id}/fork`),
   renameSession: (id: number, title: string) =>
     post<SessionOut>(`/sessions/${id}/rename?title=${encodeURIComponent(title)}`),
@@ -294,6 +308,9 @@ export const api = {
 
   // ── 轮次（turn）──
   createTurn: (body: TurnCreateBody) => post<TurnOut>("/turns", body),
+  /** plan-547: 向运行中的 turn 注入用户消息（下次 LLM 调用前传达，不新开 turn） */
+  injectTurnInput: (turnId: number, body: { request_id?: string; content: string; attachments?: Record<string, unknown>[] }) =>
+    post<{ ok: boolean; queued: boolean; error?: string }>(`/turns/${turnId}/inputs`, body),
   listTurns: (sessionId: number) => get<TurnOut[]>(`/turns/sessions/${sessionId}`),
   cancelTurn: (turnId: number) => post<{ ok: boolean }>(`/turns/${turnId}/cancel`),
   resumeTurn: (turnId: number) => post<TurnOut>(`/turns/${turnId}/resume`),
@@ -325,8 +342,9 @@ export const api = {
   listSessionSubagents: (sessionId: number) =>
     get<Array<{ agent_id: number; name: string; turn_id: number | null; task_id: number | null; task_title: string | null; status: string }>>(`/turns/sessions/${sessionId}/subagents`),
   listSessionTasks: (sessionId: number) => get<TaskOut[]>(`/turns/sessions/${sessionId}/tasks`),
-  confirmTaskPlan: (turnId: number, groupId: number, data: { accepted: boolean; steps?: Array<{ task_id?: number; title: string }> }) =>
-    post<{ ok: boolean; permission_mode?: string }>(`/turns/${turnId}/tasks/${groupId}/confirm`, data),
+  /** v38 (plan-482): 确认/取消方案文档（不再涉及 group/steps）。 */
+  confirmPlanTurn: (turnId: number, data: { accepted: boolean }) =>
+    post<{ ok: boolean; permission_mode?: string }>(`/turns/${turnId}/plan/confirm`, data),
   retryTask: (turnId: number, taskId: number) =>
     post<{ ok: boolean }>(`/turns/${turnId}/tasks/${taskId}/retry`, {}),
   listSessionArtifacts: (sessionId: number) => get<ArtifactOut[]>(`/turns/sessions/${sessionId}/artifacts`),
@@ -338,7 +356,14 @@ export const api = {
     agent_name: string;
     source?: string;  // v1.1: api_last=最后一次 API 真实占用 / est=本地估算
   }>(`/turns/sessions/${sessionId}/usage`),
-  getUsageSummary: (days = 0) => get<UsageSummaryOut>(`/usage/summary${days ? `?days=${days}` : ""}`),
+  getUsageStats: (params?: { start?: string; end?: string; days?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.start) q.set("start", params.start);
+    if (params?.end) q.set("end", params.end);
+    if (params?.days) q.set("days", String(params.days));
+    const qs = q.toString();
+    return get<UsageStatsOut>(`/usage/stats${qs ? `?${qs}` : ""}`);
+  },
 
   // ── 定时任务 ──
   listScheduledTasks: () => get<ScheduledTaskOut[]>("/scheduled-tasks"),

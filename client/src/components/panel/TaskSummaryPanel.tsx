@@ -22,9 +22,9 @@ export function TaskSummaryPanel() {
   const tasks = useChatStore((state) => state.tasks);
   const todos = useChatStore((state) => state.todos);
   const messages = useChatStore((state) => state.messages);
-  const pendingSplit = useChatStore((state) => state.pendingSplit);
+  // v38 (plan-482): 方案文档确认入口——等待确认时在任务面板提供确认/停止按钮
   const hasPendingPlan = useChatStore((state) => state.pendingPlan != null);
-  const confirmTaskSplit = useChatStore((state) => state.confirmTaskSplit);
+  const confirmPlanTurn = useChatStore((state) => state.confirmPlanTurn);
   const refreshTasks = useChatStore((state) => state.refreshTasks);
   const reviewedFiles = useChatStore((state) => state.reviewedFiles);
   const markFileReviewed = useChatStore((state) => state.markFileReviewed);
@@ -54,11 +54,8 @@ export function TaskSummaryPanel() {
 
   const requestTask = currentTasks.find((task) => task.kind === "request" || (task.kind == null && task.parent_task_id == null));
   const isStep = (task: TaskOut) => task.kind === "step" || (task.parent_task_id != null && task.kind !== "group");
-  const proposedGroup = currentTasks.find((task) => task.kind === "group" && task.status === "proposed");
-  const steps = useMemo(() => {
-    if (proposedGroup) return currentTasks.filter((task) => isStep(task) && task.parent_task_id === proposedGroup.id && !task.is_hidden);
-    return currentTasks.filter((task) => isStep(task) && !task.is_hidden);
-  }, [currentTasks, proposedGroup]);
+  // v38 (plan-482): 系统不再预拆分（无 proposed group），步骤仅来自 todo_write 清单落库。
+  const steps = useMemo(() => currentTasks.filter((task) => isStep(task) && !task.is_hidden), [currentTasks]);
 
   const groups = useMemo(() => {
     // 排除 todo 持久化的「任务清单」区块（后端 _TODO_GROUP_TITLE），避免与任务进度重复展示
@@ -152,7 +149,7 @@ export function TaskSummaryPanel() {
       <section className="ts-summary-head">
         <div className="ts-summary-kicker">当前任务</div>
         <div className="ts-summary-title">{requestTask?.title || "暂无任务"}</div>
-        {pendingSplit && <div className="ts-summary-hint">任务步骤待确认</div>}
+        {hasPendingPlan && <div className="ts-summary-hint">方案文档待确认</div>}
       </section>
 
       {progressRows.length > 0 && (
@@ -183,10 +180,10 @@ export function TaskSummaryPanel() {
         </section>
       )}
 
-      {pendingSplit && !hasPendingPlan && (
+      {hasPendingPlan && (
         <div className="ts-proposal-actions">
-          <button className="ts-proposal-primary" onClick={() => confirmTaskSplit(true)} type="button">接受拆分</button>
-          <button onClick={() => confirmTaskSplit(false)} type="button">停止任务</button>
+          <button className="ts-proposal-primary" onClick={() => confirmPlanTurn(true)} type="button">确认执行</button>
+          <button onClick={() => confirmPlanTurn(false)} type="button">停止任务</button>
         </div>
       )}
 

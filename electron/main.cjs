@@ -3,6 +3,7 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
+const os = require("os");
 const http = require("http");
 const net = require("net");
 const fs = require("fs");
@@ -114,13 +115,21 @@ function startBackend() {
       stdio: ["ignore", "pipe", "pipe"],
     });
 
+    // v36: 用 StringDecoder 按 UTF-8 分块解码，正确处理跨 chunk 的多字节字符边界。
+    // 此前 d.toString() 在无编码参数时同样按 utf8，但与后端实际编码不一致会产生乱码；
+    // 配合后端 logging.py 强制 UTF-8 输出，保证 backend.log 中文可读。
+    const { StringDecoder } = require("string_decoder");
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
     backendProcess.stdout.on("data", (d) => {
-      const text = d.toString();
+      const text = stdoutDecoder.write(d);
+      if (!text) return;
       try { if (process.stdout && process.stdout.writable) process.stdout.write(text); } catch {}
       try { backendLogStream.write(text); } catch {}
     });
     backendProcess.stderr.on("data", (d) => {
-      const text = d.toString();
+      const text = stderrDecoder.write(d);
+      if (!text) return;
       try { if (process.stderr && process.stderr.writable) process.stderr.write(text); } catch {}
       try { backendLogStream.write(text); } catch {}
     });
@@ -179,16 +188,27 @@ function waitForBackend(maxAttempts = 120, intervalMs = 500) {
       const req = http.get(
         { host: "127.0.0.1", port: BACKEND_PORT, path: "/api/health", timeout: 2000 },
         (res) => {
-          res.resume();
-          if (res.statusCode === 200) {
-            clearInterval(checkInterval);
-            resolve();
-          } else if (attempts >= maxAttempts) {
-            clearInterval(checkInterval);
-            reject(new Error("后端健康检查失败"));
-          } else {
-            setTimeout(check, intervalMs);
-          }
+          // 只认 JSON 响应：8000 端口可能被 CLodop 打印服务等占用，
+          // 它会对任意路径返回 200 HTML，误判后端就绪会导致前端请求打到 HTML 上。
+          const chunks = [];
+          res.on("data", (c) => chunks.push(c));
+          res.on("end", () => {
+            const body = Buffer.concat(chunks).toString("utf8");
+            let isJson = false;
+            try {
+              const ct = res.headers["content-type"] || "";
+              isJson = ct.includes("application/json") || (body.trim().startsWith("{") && JSON.parse(body).status === "ok");
+            } catch { isJson = false; }
+            if (res.statusCode === 200 && isJson) {
+              clearInterval(checkInterval);
+              resolve();
+            } else if (attempts >= maxAttempts) {
+              clearInterval(checkInterval);
+              reject(new Error("后端健康检查失败"));
+            } else {
+              setTimeout(check, intervalMs);
+            }
+          });
         }
       );
       req.on("error", () => {
@@ -214,16 +234,45 @@ function waitForBackend(maxAttempts = 120, intervalMs = 500) {
   });
 }
 
+// ── 毛玻璃（plan-548）──
+// Win11 才支持 DWM backgroundMaterial(acrylic)，且与 transparent: true 互斥——
+// Win11 必须建非透明窗口走系统材质；Win10/mac 保持透明窗口 + CSS 半透明降级。
+function isWin11Plus() {
+  if (process.platform !== "win32") return false;
+  const m = /^10\.0\.(\d+)/.exec(os.release());
+  return !!m && Number(m[1]) >= 22000;
+}
+
+// 玻璃偏好落盘：渲染进程偏好存 localStorage 主进程读不到，而 acrylic 材质必须
+// 在窗口显示前（构造参数）决定，因此主进程侧在 IPC 时另存一份供下次启动读取。
+const GLASS_PREF_FILE = path.join(app.getPath("userData"), "glass-pref.json");
+function readGlassPref() {
+  try {
+    return JSON.parse(fs.readFileSync(GLASS_PREF_FILE, "utf8")).on === true;
+  } catch { return false; }
+}
+function writeGlassPref(on) {
+  try { fs.writeFileSync(GLASS_PREF_FILE, JSON.stringify({ on: !!on })); } catch {}
+}
+
 // ── 创建主窗口 ──
 function createWindow() {
+  const win11 = isWin11Plus();
+  const glassOn = win11 && readGlassPref();
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 820,
     minWidth: 960,
     minHeight: 640,
     frame: false,
-    backgroundColor: "#16181d",
-    show: true,
+    // plan-548: Win11 非透明窗口 + DWM acrylic（与 transparent 互斥）；glass off 时
+    // 显式 "none"（默认 auto 可能被 DWM 施加 Mica）；Win10/mac 维持透明窗口原状。
+    transparent: !win11,
+    backgroundMaterial: win11 ? (glassOn ? "acrylic" : "none") : undefined,
+    backgroundColor: win11 ? (glassOn ? "#00000000" : "#16181d") : undefined,
+    // plan-548: 延迟到首帧就绪再显示——acrylic 需在窗口可见前应用，
+    // 创建即显示会导致 backgroundMaterial 初始化失败（electron#38466）。
+    show: false,
     titleBarStyle: "hidden",
     autoHideMenuBar: true,
     icon: resolveIconPath(),
@@ -234,6 +283,10 @@ function createWindow() {
       sandbox: false,
       webviewTag: true,
     },
+  });
+  mainWindow.once("ready-to-show", () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.show();
   });
 
   // 先加载本地 loading.html(不用 data: URL)
@@ -261,18 +314,11 @@ function createWindow() {
     return { action: "allow" };
   });
 
-  // 窗口重新获得焦点时强制同步 Chromium 焦点：
-  // 打开系统浏览器（shell.openExternal）或 window.alert 原生对话框后，
-  // Electron 窗口可能在 OS 层已激活但 renderer 的 document.hasFocus() 仍为 false，
-  // 此时点击输入框的 focus() 被吞 → "无法聚焦"。此处强制同步。
+  // 窗口重新获得焦点：交由 OS 与 Chromium 自动恢复文档焦点，绝不手动抢焦点
   mainWindow.on("focus", () => {
-    try {
-      mainWindow.focus();
-      mainWindow.webContents.focus({ focusOnWebView: true });
-      // webContents.focus() 只恢复原生 renderer 焦点；通知前端在下一帧同步
-      // document/DOM。是否恢复具体输入框由 renderer 自己根据焦点历史决定。
-      mainWindow.webContents.send("window:renderer-focus");
-    } catch { /* 窗口销毁竞态 */ }
+    // 不再调用 webContents.focus()：会与 <webview> guest 焦点协商并重置
+    // Windows TSF/IME 关联，导致输入框光标高频闪烁与全局输入卡死。
+    try { /* 保留空回调，仅消费事件 */ } catch { /* 窗口销毁竞态 */ }
   });
 
   mainWindow.on("closed", () => { mainWindow = null; });
@@ -366,6 +412,43 @@ ipcMain.handle("shell:openPath", (_event, p) => {
 ipcMain.handle("shell:showItemInFolder", (_event, p) => {
   if (p) shell.showItemInFolder(p);
 });
+// 在特定外部应用中打开目录（explorer / vscode / idea / terminal）
+ipcMain.handle("shell:openInApp", (_event, target, projectPath) => {
+  if (!projectPath) return false;
+  try {
+    const p = path.normalize(projectPath);
+    if (target === "explorer") {
+      shell.openPath(p);
+      return true;
+    }
+    if (target === "vscode") {
+      const { spawn } = require("child_process");
+      spawn("code", [p], { shell: true, detached: true });
+      return true;
+    }
+    if (target === "idea") {
+      const { spawn } = require("child_process");
+      spawn("idea", [p], { shell: true, detached: true, windowsHide: true });
+      return true;
+    }
+    if (target === "terminal") {
+      const { spawn } = require("child_process");
+      if (process.platform === "win32") {
+        spawn("wt.exe", ["-d", p], { shell: true, detached: true }).on("error", () => {
+          spawn("cmd.exe", ["/c", "start", "powershell.exe", "-NoExit", "-Command", `Set-Location '${p}'`], { shell: true, detached: true });
+        });
+      } else {
+        shell.openPath(p);
+      }
+      return true;
+    }
+    shell.openPath(p);
+    return true;
+  } catch (e) {
+    logErr("[shell:openInApp] 失败: " + e.message);
+    return false;
+  }
+});
 // v23: 打开外部 URL（ta3 登录授权跳转，走系统默认浏览器）
 ipcMain.handle("shell:openExternal", (_event, url) => {
   if (url && /^https?:\/\//i.test(String(url))) shell.openExternal(String(url));
@@ -381,19 +464,33 @@ ipcMain.on("window:maximizeToggle", () => {
 ipcMain.on("window:close", () => { if (mainWindow) mainWindow.close(); });
 
 // ── IPC:修复文本输入状态（输入框"能删不能输"卡死的兜底）──
-// 渲染层 IME/焦点状态与 Chromium 脱节时，重新同步 browser<->renderer 焦点，
-// 强制渲染器重建 TextInputState。前端 focusGuard 检测到输入失败时调用。
+// 保留 API 兼容与节流，但不再触碰任何焦点：调用 webContents.focus() 会与
+// <webview> guest 协商焦点并反复重置 Windows TSF/IME 关联（卡死根因之一）。
+let _lastFixTextTime = 0;
 ipcMain.handle("window:fixTextInput", () => {
   if (!mainWindow || mainWindow.isDestroyed()) return false;
+  const now = Date.now();
+  if (now - _lastFixTextTime < 300) return true; // 300ms 节流防风暴
+  _lastFixTextTime = now;
+  log("[chatcoder] fixTextInput: requested (no-op: focus managed by OS/Chromium)");
+  return true;
+});
+
+// ── IPC:毛玻璃模式（plan-546 / plan-548）──
+// Win11：切换 DWM acrylic 真磨砂（非透明窗口，运行时双向切换有效）；
+// Win10/老版：setBackgroundMaterial 不可用或无效，静默降级为 CSS 半透明（透明窗口已开）。
+ipcMain.handle("window:setGlass", (_e, on) => {
+  writeGlassPref(!!on); // plan-548: 落盘，下次启动直接以正确材质建窗（见 createWindow）
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
   try {
-    if (!mainWindow.isFocused()) mainWindow.focus();
-    mainWindow.webContents.focus({ focusOnWebView: true });
-    log("[chatcoder] fixTextInput: focus resync requested");
-    return true;
-  } catch (e) {
-    logErr("[chatcoder] fixTextInput failed:", e && e.message);
-    return false;
+    if (typeof mainWindow.setBackgroundMaterial === "function") {
+      mainWindow.setBackgroundMaterial(on ? "acrylic" : "none");
+      log("[chatcoder] glass: material =", on ? "acrylic" : "none");
+    }
+  } catch (err) {
+    log("[chatcoder] glass: setBackgroundMaterial unavailable, fallback to CSS alpha:", err && err.message);
   }
+  return true;
 });
 
 // ── IPC:保持唤醒（对齐 zcode「运行会话时保持电脑唤醒」）──
@@ -515,6 +612,94 @@ ipcMain.handle("browser:capturePage", async (_event, targetWebContentsId) => {
   return null;
 });
 
+// ── 自动更新（electron-updater + GitHub Releases）──
+// 仅打包版启用：dev 模式无 app-update.yml，检查会直接失败。
+// 状态机: idle → checking → available|none → downloading → downloaded → (quitAndInstall) / error
+let autoUpdater = null;
+let updateState = { state: "idle" };
+
+function pushUpdateState() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try { mainWindow.webContents.send("app:updateStatus", updateState); } catch {}
+  }
+}
+
+function initAutoUpdater() {
+  if (!app.isPackaged) return;
+  try {
+    ({ autoUpdater } = require("electron-updater"));
+  } catch (e) {
+    logErr("[updater] require electron-updater 失败:", e && e.message);
+    return;
+  }
+  // 手动触发才下载（用户点击侧栏更新按钮后开始），避免后台上传/下载占用带宽
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
+  autoUpdater.on("checking-for-update", () => {
+    updateState = { state: "checking" };
+    log("[updater] checking-for-update");
+    pushUpdateState();
+  });
+  autoUpdater.on("update-available", (info) => {
+    updateState = { state: "available", version: info.version };
+    log("[updater] update-available:", info.version, "current:", app.getVersion());
+    pushUpdateState();
+  });
+  autoUpdater.on("update-not-available", (info) => {
+    updateState = { state: "none", version: info && info.version };
+    log("[updater] update-not-available");
+    pushUpdateState();
+  });
+  autoUpdater.on("download-progress", (p) => {
+    updateState = { state: "downloading", percent: Math.round(p.percent || 0), transferred: p.transferred || 0, total: p.total || 0 };
+    pushUpdateState();
+  });
+  autoUpdater.on("update-downloaded", (info) => {
+    updateState = { state: "downloaded", version: info.version };
+    log("[updater] update-downloaded:", info.version);
+    pushUpdateState();
+  });
+  autoUpdater.on("error", (err) => {
+    updateState = { state: "error", message: String((err && err.message) || err) };
+    logErr("[updater] error:", updateState.message);
+    pushUpdateState();
+  });
+
+  // 启动 30s 后首次检查,之后每 4 小时一次（GitHub 匿名 API 限流 60 次/小时,量级安全）
+  setTimeout(() => { autoUpdater.checkForUpdates().catch(() => {}); }, 30 * 1000);
+  setInterval(() => { autoUpdater.checkForUpdates().catch(() => {}); }, 4 * 60 * 60 * 1000);
+}
+
+// ── IPC:更新操作（手动检查 / 立即安装 / 查询状态 / 当前版本）──
+ipcMain.handle("app:checkForUpdates", async () => {
+  if (!autoUpdater) return { state: "unsupported" };
+  try {
+    return await autoUpdater.checkForUpdates();
+  } catch (e) {
+    updateState = { state: "error", message: String((e && e.message) || e) };
+    pushUpdateState();
+    return updateState;
+  }
+});
+ipcMain.handle("app:getUpdateState", () => updateState);
+ipcMain.handle("app:downloadUpdate", async () => {
+  if (!autoUpdater || updateState.state !== "available") return updateState;
+  try {
+    await autoUpdater.downloadUpdate();
+  } catch (e) {
+    updateState = { state: "error", message: String((e && e.message) || e) };
+    pushUpdateState();
+  }
+  return updateState;
+});
+ipcMain.handle("app:installUpdate", () => {
+  if (!autoUpdater || updateState.state !== "downloaded") return false;
+  log("[updater] quitAndInstall ->", updateState.version);
+  setImmediate(() => { try { autoUpdater.quitAndInstall(); } catch (e) { logErr("[updater] quitAndInstall 失败:", e); } });
+  return true;
+});
+ipcMain.handle("app:getVersion", () => app.getVersion());
+
 // ── 确保单实例 ──
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -573,6 +758,9 @@ app.whenReady().then(async () => {
   } catch (err) {
     logErr("[chatcoder] loadFrontend 失败:", err);
   }
+
+  // 6. 初始化自动更新（含定时检查,仅打包版）
+  initAutoUpdater();
 });
 
 app.on("window-all-closed", () => {

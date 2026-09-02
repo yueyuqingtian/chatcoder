@@ -12,7 +12,8 @@ import {
   IconMinus, IconSquare, IconX, IconFolder,
   IconGitBranch, IconTerminal,
   IconMoreHorizontal, IconPanelLeft, IconPanelRight,
-  IconChevronLeft, IconChevronRight,
+  IconChevronLeft, IconChevronRight, IconChevronDown, IconCheck,
+  IconBrandExplorer, IconBrandVSCode, IconBrandIdea, IconBrandWindowsTerminal,
 } from "./icons";
 
 interface TitleBarProps {
@@ -35,9 +36,15 @@ export function TitleBar({ leftCollapsed, rightCollapsed, onToggleLeft, onToggle
   const winApi = window.chatcoderAPI;
 
   const [menuOpen, setMenuOpen] = useState(false);
+  const [folderMenuOpen, setFolderMenuOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
+  const [openTarget, setOpenTarget] = useState<string>(() => {
+    try { return localStorage.getItem("chatcoder.preferred_open_target") || "explorer"; }
+    catch { return "explorer"; }
+  });
   const menuRef = useRef<HTMLDivElement>(null);
+  const folderMenuRef = useRef<HTMLDivElement>(null);
 
   // 会话前进/后退历史（共享 store 栈；侧栏展开时在侧栏头部展示，折叠时移到这里）
   const sessionHist = useChatStore((s) => s.sessionHist);
@@ -47,22 +54,49 @@ export function TitleBar({ leftCollapsed, rightCollapsed, onToggleLeft, onToggle
   const canForward = sessionHistIdx >= 0 && sessionHistIdx < sessionHist.length - 1;
 
   useEffect(() => {
-    if (!menuOpen) return;
+    if (!menuOpen && !folderMenuOpen) return;
     const handler = (e: MouseEvent) => {
-      if (!menuRef.current?.contains(e.target as Node)) setMenuOpen(false);
+      if (menuOpen && !menuRef.current?.contains(e.target as Node)) setMenuOpen(false);
+      if (folderMenuOpen && !folderMenuRef.current?.contains(e.target as Node)) setFolderMenuOpen(false);
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
-  }, [menuOpen]);
+  }, [menuOpen, folderMenuOpen]);
 
   const projectName = project?.path
     ? project.path.replace(/\\/g, "/").replace(/\/$/, "").split("/").pop() || project.path
     : "";
 
-  const openWorkspaceFolder = () => {
+  const handleOpenInApp = (target: string) => {
     if (!project?.path) return;
-    if (winApi?.showItemInFolder) void winApi.showItemInFolder(project.path);
-    else void winApi?.openPath?.(project.path);
+    setOpenTarget(target);
+    try { localStorage.setItem("chatcoder.preferred_open_target", target); } catch {}
+    setFolderMenuOpen(false);
+
+    if (winApi?.openInApp) {
+      void winApi.openInApp(target, project.path);
+      return;
+    }
+
+    // Web 模式兜底
+    if (target === "vscode") {
+      window.open(`vscode://file/${project.path.replace(/\\/g, "/")}`);
+    } else if (target === "idea") {
+      window.open(`idea://open?file=${project.path.replace(/\\/g, "/")}`);
+    } else if (winApi?.openPath) {
+      void winApi.openPath(project.path);
+    }
+  };
+
+  const renderOpenTargetIcon = (target: string, size = 14) => {
+    switch (target) {
+      case "vscode": return <IconBrandVSCode size={size} />;
+      case "idea": return <IconBrandIdea size={size} />;
+      case "terminal": return <IconBrandWindowsTerminal size={size} />;
+      case "explorer":
+      default:
+        return <IconBrandExplorer size={size} />;
+    }
   };
 
   return (
@@ -115,11 +149,24 @@ export function TitleBar({ leftCollapsed, rightCollapsed, onToggleLeft, onToggle
         )}
         {session && (
           <div className="titlebar-more" ref={menuRef}>
-            <button className="titlebar-btn" title="会话操作" onClick={() => setMenuOpen(!menuOpen)}>
+            <button
+              className="titlebar-btn titlebar-more-btn"
+              title="会话操作"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                setMenuOpen((v) => !v);
+              }}
+              type="button"
+            >
               <IconMoreHorizontal size={15} />
             </button>
             {menuOpen && (
-              <div className="context-menu titlebar-menu" onClick={() => setMenuOpen(false)}>
+              <div
+                className="context-menu titlebar-menu"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={() => setMenuOpen(false)}
+              >
                 <div className="context-menu-item" onClick={() => setRenaming(session.title || "")}>重命名</div>
                 <div className="context-menu-item" onClick={() => { void api.updateSession(session.id, { status: "archived" }).then(() => loadBootstrap()); }}>归档</div>
                 <div className="context-menu-divider" />
@@ -133,9 +180,59 @@ export function TitleBar({ leftCollapsed, rightCollapsed, onToggleLeft, onToggle
       <div className="titlebar-mid" />
 
       <div className="titlebar-right title-no-drag">
-        <button className="titlebar-btn titlebar-folder" onClick={openWorkspaceFolder} title="打开工作区目录" disabled={!project?.path}>
-          <IconFolder size={15} />
-        </button>
+        {/* 打开工作区下拉菜单（对齐图二，带品牌图标与当前激活联动） */}
+        <div className="titlebar-folder-dropdown-wrap" ref={folderMenuRef}>
+          <button
+            className="titlebar-btn titlebar-folder-combo"
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              setFolderMenuOpen((v) => !v);
+            }}
+            title="在外部打开项目（支持资源管理器、VS Code、IntelliJ IDEA、Windows 终端）"
+            disabled={!project?.path}
+            type="button"
+          >
+            {renderOpenTargetIcon(openTarget, 15)}
+            <IconChevronDown size={10} className="titlebar-folder-caret" />
+          </button>
+          {folderMenuOpen && (
+            <div
+              className="context-menu titlebar-folder-menu"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={() => setFolderMenuOpen(false)}
+            >
+              <div className={`context-menu-item titlebar-folder-menu-item${openTarget === "explorer" ? " active" : ""}`} onClick={() => handleOpenInApp("explorer")}>
+                <div className="titlebar-folder-menu-item-left">
+                  <IconBrandExplorer size={15} />
+                  <span>在文件资源管理器中打开</span>
+                </div>
+                {openTarget === "explorer" && <IconCheck size={13} className="titlebar-folder-menu-check" />}
+              </div>
+              <div className={`context-menu-item titlebar-folder-menu-item${openTarget === "idea" ? " active" : ""}`} onClick={() => handleOpenInApp("idea")}>
+                <div className="titlebar-folder-menu-item-left">
+                  <IconBrandIdea size={15} />
+                  <span>在 IntelliJ IDEA 中打开</span>
+                </div>
+                {openTarget === "idea" && <IconCheck size={13} className="titlebar-folder-menu-check" />}
+              </div>
+              <div className={`context-menu-item titlebar-folder-menu-item${openTarget === "terminal" ? " active" : ""}`} onClick={() => handleOpenInApp("terminal")}>
+                <div className="titlebar-folder-menu-item-left">
+                  <IconBrandWindowsTerminal size={15} />
+                  <span>在 Windows 终端中打开</span>
+                </div>
+                {openTarget === "terminal" && <IconCheck size={13} className="titlebar-folder-menu-check" />}
+              </div>
+              <div className={`context-menu-item titlebar-folder-menu-item${openTarget === "vscode" ? " active" : ""}`} onClick={() => handleOpenInApp("vscode")}>
+                <div className="titlebar-folder-menu-item-left">
+                  <IconBrandVSCode size={15} />
+                  <span>在 Visual Studio Code 中打开</span>
+                </div>
+                {openTarget === "vscode" && <IconCheck size={13} className="titlebar-folder-menu-check" />}
+              </div>
+            </div>
+          )}
+        </div>
         {/* v19: 终端入口移至顶栏右上 */}
         <button className="titlebar-btn" onClick={() => usePanelStore.getState().openNewTab("terminal")} title="打开终端 (Ctrl+J)">
           <IconTerminal size={14} />

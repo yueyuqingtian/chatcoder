@@ -340,21 +340,6 @@ class WorkBuddyProvider(ModelProvider):
                 "arguments": args,
             })
 
-        # 退化文本兜底解析（复用 openai_compatible 的 DSML/文本意图解析）
-        if not tool_calls and content:
-            from app.models.providers.openai_compatible import (
-                _parse_degraded_tool_calls,
-                _parse_dsml_tool_calls,
-            )
-            degraded = _parse_dsml_tool_calls(content) if "DSML" in content else []
-            if not degraded:
-                degraded = _parse_degraded_tool_calls(content)
-            if degraded:
-                logger.info("[workbuddy] 退化文本解析出 %d 个工具调用", len(degraded))
-                tool_calls = degraded
-                content = None
-                monitor["finish_reason"] = "tool_calls"
-
         yield {
             "type": "done",
             "content": content,

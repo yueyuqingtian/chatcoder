@@ -207,3 +207,14 @@ server/verify_model_override.py
 server/*_out.txt
 *_out.txt
 *_log.txt
+
+# 本地进程快照 / 构建辅助产物（不入库）
+/cc_procs.json
+/electron_procs.json
+/pkg_build.json
+/v4_server_files.json
+/client/locate-tdz.cjs
+/client/locate-tdz2.cjs
+/client/madge.json
+/client/run-unmin.cjs
+/client/tmp-debug-main.cjs

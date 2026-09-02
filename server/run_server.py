@@ -67,8 +67,31 @@ def _setup_logging(data_dir: Path) -> None:
         for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
             lg = logging.getLogger(name)
             lg.propagate = True
+
+        # v36: 诊断日志（工具异常 + traceback）独立落盘。
+        # 打包后 root logger 在此单点配置，app.main 里的 setup_logging
+        # 会因幂等标志被跳过，必须在此显式挂载，否则 diagnostics.log 丢失。
+        try:
+            from app._diag import log_tool_error  # noqa: F401  仅校验可导入
+            from app.core.logging import ensure_diagnostics_logger
+            ensure_diagnostics_logger(log_dir)
+        except Exception as _diag_exc:
+            print(f"[chatcoder-server] diagnostics 日志挂载失败: {_diag_exc}")
     except Exception:
         pass  # 日志配置失败不影响启动
+
+    # v36: 启动环境快照——打包后与开发态的环境差异是故障高发来源，
+    # 先把基线写入日志，便于事后比对（frozen/cwd/平台/Python 版本）。
+    try:
+        import platform
+
+        logging.getLogger("app.diagnostics").info(
+            "[boot.env] frozen=%s platform=%s python=%s cwd=%s data_dir=%s exe=%s",
+            getattr(sys, "frozen", False), platform.platform(),
+            sys.version.split()[0], os.getcwd(), data_dir, sys.executable,
+        )
+    except Exception:
+        pass
 
 
 def _write_crash_log(exc: BaseException) -> None:

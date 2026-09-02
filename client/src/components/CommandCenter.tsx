@@ -124,7 +124,7 @@ export function CommandCenter() {
         {
           icon: <IconPlus size={14} />, label: "新任务", hint: "Ctrl+N",
           run: () => {
-            useChatStore.setState({ currentSessionId: null, messages: [], turns: [], tasks: [], runningTurnId: null, isRunning: false, interruptedTurnId: null, streamingBuffers: {}, thinkingBuffers: {}, usage: null, pendingApproval: null, pendingPlan: null, reviewedFiles: {} });
+            useChatStore.setState({ currentSessionId: null, messages: [], turns: [], tasks: [], runningTurnId: null, isRunning: false, interruptedTurnId: null, streamingBuffers: {}, thinkingBuffers: {}, usage: null, pendingApproval: null, pendingPlan: null, reviewedFiles: {}, injectMarks: [] });
           },
         },
         { icon: <IconFolderOpen size={14} />, label: "打开工作区", hint: "Ctrl+O", run: () => { void openWorkspace(); } },

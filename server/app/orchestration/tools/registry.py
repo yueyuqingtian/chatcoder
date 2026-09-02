@@ -3,6 +3,7 @@ from functools import lru_cache
 
 from app.orchestration.tools.base import Tool
 from app.orchestration.tools.ask_user import AskUserQuestionTool
+from app.orchestration.tools.bg_process import TerminalBgStatusTool, TerminalBgKillTool
 from app.orchestration.tools.browser import (
     BrowserNavigateTool,
     BrowserScreenshotTool,
@@ -20,6 +21,7 @@ from app.orchestration.tools.fs_read import FsReadTool
 from app.orchestration.tools.fs_write import FsWriteTool
 from app.orchestration.tools.git import GitTool
 from app.orchestration.tools.git_diff import GitDiffTool
+from app.orchestration.tools.goal import GoalCompleteTool
 from app.orchestration.tools.grep import GrepTool
 from app.orchestration.tools.memory_search import MemorySearchTool
 from app.orchestration.tools.multi_edit import MultiFileEditTool
@@ -86,6 +88,10 @@ def _build_default_registry() -> ToolRegistry:
         # v32: 浏览器工具套件（Playwright / DOM快照 / 截图 / 点击 / 填写）
         BrowserNavigateTool, BrowserScreenshotTool, BrowserClickTool,
         BrowserTypeTool, BrowserSnapshotTool, BrowserEvaluateTool,
+        # 目标模式（plan-671）：模型标记会话目标完成，停止自动续跑
+        GoalCompleteTool,
+        # v1.0 (plan-153-705): 后台进程查询/终止（配合 terminal_exec waitForCompletion=false）
+        TerminalBgStatusTool, TerminalBgKillTool,
     ):
         reg.register(tool_cls())
     return reg

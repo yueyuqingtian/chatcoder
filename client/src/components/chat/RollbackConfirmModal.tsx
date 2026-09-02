@@ -97,10 +97,16 @@ export function RollbackConfirmModal() {
           <button className="rc-close" onClick={cancelRollback} title="取消">×</button>
         </header>
         <div className="rc-body">
-          <p className="rc-desc">
-            将回滚 <b>turn #{turnId}</b> 及其后的更改（撤销 AI 的改动，保留你的手动改动）。
-            共涉及 <b>{files.length}</b> 个文件：
-          </p>
+          {files.length === 0 ? (
+            <p className="rc-desc">
+              将撤回 <b>turn #{turnId}</b> 及其后的对话（<b>本次不修改任何代码文件</b>）。
+            </p>
+          ) : (
+            <p className="rc-desc">
+              将回滚 <b>turn #{turnId}</b> 及其后的更改（撤销 AI 的改动，保留你的手动改动）。
+              共涉及 <b>{files.length}</b> 个文件：
+            </p>
+          )}
           {(affected.tasks > 0 || affected.messages > 0) && (
             <p className="rc-conflict-note" style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
               <IconAlertTriangle size={13} style={{ flexShrink: 0, marginTop: 1 }} />
@@ -120,7 +126,7 @@ export function RollbackConfirmModal() {
             </p>
           )}
           <div className="rc-file-list">
-            {files.length === 0 && <div className="rc-empty">该 turn 无文件写入记录，仅回滚消息。</div>}
+            {files.length === 0 && <div className="rc-empty">该轮次无文件写盘记录，工作区代码将 100% 保持原样。</div>}
             {files.map((f) => (
               <div key={f.path} className={`rc-file${f.conflict ? " conflict" : ""}`}>
                 <div className="rc-file-head" onClick={() => setExpanded(expanded === f.path ? null : f.path)}>
@@ -147,7 +153,7 @@ export function RollbackConfirmModal() {
               setConfirming(false);
             }}
           >
-            {confirming ? "回滚中…" : "确认回滚"}
+            {confirming ? (files.length === 0 ? "撤回中…" : "回滚中…") : (files.length === 0 ? "确认撤回" : "确认回滚")}
           </button>
         </footer>
       </div>

@@ -11,7 +11,8 @@ import shutil
 import time as _time
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -321,18 +322,21 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
     if writes and workspace:
         file_result = await _rollback_turn_files_precise(workspace, writes, snap)
     else:
-        # v26: 无精确写盘记录 → 优先 checkpoint 恢复（不依赖 git，非 git 仓库可用）。
-        # 快照登记的 checkpoint = 该 turn 写盘前文件内容，直接复制还原；新建文件删除。
+        # 无写盘记录：优先从快照显式登记的 checkpoint 恢复（不依赖 git，非 git 仓库可用）。
         ckpt_result = await _restore_checkpoints_for_turn(workspace, snap)
         if ckpt_result.get("restored") or ckpt_result.get("deleted"):
             file_result = ckpt_result
         else:
-            # 旧数据无写盘记录：降级为按路径 git 单文件恢复（仍不全局回滚）
-            written_paths = await _turn_written_paths(db, snap.session_id, turn_id)
-            file_result = {"ok": True, "skipped": not written_paths, "restored": 0, "deleted": 0, "failed": 0,
-                           "reason": "该 turn 无精确写盘记录，降级恢复" if written_paths else "该 turn 无文件写入记录，无需恢复"}
-            if written_paths and workspace:
-                file_result = await _rollback_turn_files(workspace, written_paths)
+            # 安全准则（v38）：无写盘记录且无 checkpoint 时严格跳过文件操作，
+            # 绝对严禁隐式执行 `git checkout HEAD`（Git HEAD 往往落后多轮，会导致近期修改意外被抹杀）。
+            file_result = {
+                "ok": True,
+                "skipped": True,
+                "restored": 0,
+                "deleted": 0,
+                "failed": 0,
+                "reason": "该 turn 无文件写入记录，无需恢复",
+            }
 
     # v2.2 (plan-88): 回滚完成后清理该 turn 的 checkpoint 文件（配置开启时）。
     # 备份已完成使命（精确回滚用写盘记录，checkpoint 仅兜底），删除磁盘文件并
@@ -358,6 +362,15 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
             logger.info("[rollback] turn=%s 回滚后清理 checkpoint %d 个", turn_id, _deleted_ckpts)
         snap.file_list = []
         await db.flush()
+
+    # 回滚成功后，物理清理该 turn 及其之后的写盘记录，避免已回滚的脏记录在后续回滚/变更审核中残留
+    await db.execute(
+        delete(RollbackWrite).where(
+            RollbackWrite.session_id == snap.session_id,
+            RollbackWrite.turn_id >= turn_id,
+        )
+    )
+    await db.flush()
 
     # 3. 消息软删：软删主线程「本 turn 及其之后」的消息，同时软删该 turn 及其之后
     #    子代理线程（thread_id 属于 kind=sub 的 agent）的消息——子代理消息也是该 turn 的
@@ -478,10 +491,12 @@ def resolve_write_paths(tool: str, args: dict) -> list[str]:
     args = args or {}
     if tool == "multi_file_edit":
         paths: list[str] = []
-        for e in args.get("edits") or []:
-            p = e.get("path") if isinstance(e, dict) else None
-            if isinstance(p, str) and p.strip():
-                paths.append(p.strip())
+        edits = args.get("edits")
+        if isinstance(edits, list):
+            for e in edits:
+                p = e.get("path") if isinstance(e, dict) else None
+                if isinstance(p, str) and p.strip():
+                    paths.append(p.strip())
         return paths
     p = args.get("path")
     return [p.strip()] if isinstance(p, str) and p.strip() else []
@@ -737,15 +752,26 @@ async def get_file_diff(db: AsyncSession, *, session_id: int, turn_id: int,
     """单文件 diff：before=首条写盘前内容，after=当前磁盘内容（大文件截断）。
 
     返回 None 表示该 turn 无此文件写盘记录。
+    兼容正反斜杠与工作区相对/绝对路径归一化匹配。
     """
     res = await db.execute(
         select(RollbackWrite).where(
             RollbackWrite.session_id == session_id,
             RollbackWrite.turn_id == turn_id,
-            RollbackWrite.path == path,
         ).order_by(RollbackWrite.id.asc())
     )
-    writes = list(res.scalars().all())
+    all_writes = list(res.scalars().all())
+    if not all_writes:
+        return None
+
+    def _norm(p: str) -> str:
+        return (p or "").replace("\\", "/").strip().lstrip("./")
+
+    target_norm = _norm(path)
+    writes = [w for w in all_writes if _norm(w.path) == target_norm]
+    if not writes:
+        # 兼容尾部子路径匹配（如相对路径匹配绝对路径记录）
+        writes = [w for w in all_writes if _norm(w.path).endswith(target_norm) or target_norm.endswith(_norm(w.path))]
     if not writes:
         return None
 
@@ -779,34 +805,30 @@ async def reviewed_paths(db: AsyncSession, turn_id: int) -> dict[str, bool]:
 
 async def upsert_file_reviews(db: AsyncSession, *, turn_id: int,
                               paths: list[str], reviewed: bool) -> int:
-    """幂等写入审核记录（turn_id+path 唯一键 upsert），返回变更条数。
+    """幂等写入审核记录（turn_id+path 唯一键原子 upsert），返回变更条数。
 
     reviewed=False 时仅更新已存在记录为未审，不删除记录（保证状态可追溯）。
+    必须用 ON CONFLICT 原子 upsert 而非先查后插：前端对同一 turn 的重复/并发
+    请求会在"查不到→INSERT"窗口内双双判不存在，触发 uq_file_review_turn_path
+    唯一约束冲突（server.log 2026-08-31 turn=631/632 实例）。
     """
-    updated = 0
-    paths = [p for p in (paths or []) if isinstance(p, str) and p.strip()]
-    if not paths:
+    # 保序去重：批内重复路径会在同一条多行 INSERT 内自撞唯一键
+    unique_paths = list(dict.fromkeys(
+        p for p in (paths or []) if isinstance(p, str) and p.strip()
+    ))
+    if not unique_paths:
         return 0
-    existing: dict[str, FileReview] = {}
-    res = await db.execute(
-        select(FileReview).where(
-            FileReview.turn_id == turn_id,
-            FileReview.path.in_(paths),
-        )
+    stmt = sqlite_insert(FileReview).values(
+        [{"turn_id": turn_id, "path": p, "reviewed": reviewed} for p in unique_paths]
     )
-    for r in res.scalars().all():
-        existing[r.path] = r
-    for p in paths:
-        rec = existing.get(p)
-        if rec is None:
-            db.add(FileReview(turn_id=turn_id, path=p, reviewed=reviewed))
-            updated += 1
-        elif rec.reviewed != reviewed:
-            rec.reviewed = reviewed
-            updated += 1
-    if updated:
-        await db.flush()
-    return updated
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[FileReview.turn_id, FileReview.path],
+        set_={"reviewed": stmt.excluded.reviewed},
+        # reviewed 未变化的行不更新也不返回，保持"变更条数"语义与幂等性
+        where=FileReview.reviewed != stmt.excluded.reviewed,
+    ).returning(FileReview.id)
+    res = await db.execute(stmt)
+    return len(res.all())
 
 
 async def resolve_turn_workspace(db: AsyncSession, turn_id: int) -> tuple[int | None, str]:
@@ -1163,10 +1185,12 @@ async def _turn_written_paths(db: AsyncSession, session_id: int, turn_id: int) -
         args = c.get("args") or {}
         if tool == "multi_file_edit":
             # 多文件编辑：路径在 edits[].path
-            for e in args.get("edits") or []:
-                p = e.get("path") if isinstance(e, dict) else None
-                if isinstance(p, str) and p.strip():
-                    paths.append(p.strip())
+            edits = args.get("edits")
+            if isinstance(edits, list):
+                for e in edits:
+                    p = e.get("path") if isinstance(e, dict) else None
+                    if isinstance(p, str) and p.strip():
+                        paths.append(p.strip())
         else:
             p = args.get("path")
             if isinstance(p, str) and p.strip():

@@ -68,13 +68,6 @@ export function turnToMarkdown(entry: TimelineEntry): string {
       case "tools":
         parts.push(toolNodesToMd(item.nodes, 0));
         break;
-      case "artifacts":
-        parts.push("**产物**");
-        for (const a of item.msgs) {
-          const c = a.content as Record<string, unknown>;
-          if (typeof c.text === "string") parts.push(c.text);
-        }
-        break;
       case "summary":
         parts.push(`> ${msgText(item.msg.content)}`);
         break;
@@ -128,13 +121,6 @@ export function turnToPlainText(entry: TimelineEntry): string {
         walk(item.nodes, 0);
         break;
       }
-      case "artifacts": {
-        for (const a of item.msgs) {
-          const c = a.content as Record<string, unknown>;
-          if (typeof c.text === "string") parts.push(c.text);
-        }
-        break;
-      }
       case "summary":
         parts.push(msgText(item.msg.content));
         break;
@@ -186,13 +172,6 @@ export function turnPartToPlainText(entry: TimelineEntry, part: "user" | "ai"): 
           }
         };
         walk(item.nodes, 0);
-        break;
-      }
-      case "artifacts": {
-        for (const a of item.msgs) {
-          const c = a.content as Record<string, unknown>;
-          if (typeof c.text === "string") parts.push(c.text);
-        }
         break;
       }
       case "error":

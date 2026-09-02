@@ -13,6 +13,8 @@ class UsageRecord(Base):
     agent_id = Column(Integer, nullable=True)
     model_id = Column(Integer, index=True, nullable=True)
     model_name = Column(String(200), default="")
+    # v1.2 (plan-152-704): 供应商显示名，用于区分不同供应商的同名模型
+    provider_name = Column(String(120), default="")
     prompt_tokens = Column(BigInteger, default=0)
     completion_tokens = Column(BigInteger, default=0)
     reasoning_tokens = Column(BigInteger, default=0)

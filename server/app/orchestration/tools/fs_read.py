@@ -63,8 +63,19 @@ class FsReadTool(Tool):
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         path = args.get("path", "")
-        offset = max(1, args.get("offset", 1))
-        limit = min(_MAX_LINES, args.get("limit", _MAX_LINES))
+        # offset/limit 安全解析：模型偶发输出字符串数字或越界值，
+        # 直接 max/min 会在 str vs int 比较时抛 TypeError（plan-645）
+        try:
+            offset = max(1, int(args.get("offset") or 1))
+        except (TypeError, ValueError):
+            offset = 1
+        try:
+            # limit=0 是非法值（读 0 行），钳到 1；缺失/None 才回退默认——
+            # 不能写 int(args.get("limit") or _MAX_LINES)，0 会被 or 短路成默认
+            raw_limit = args.get("limit")
+            limit = max(1, min(_MAX_LINES, int(raw_limit) if raw_limit is not None else _MAX_LINES))
+        except (TypeError, ValueError):
+            limit = _MAX_LINES
 
         # 附件目录兜底：用户消息附件在工作区外的 uploads 目录，允许只读
         target = safe_resolve_read(ctx.workspace_root, path)

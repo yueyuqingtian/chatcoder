@@ -18,6 +18,14 @@ WORKFLOW_COMMON = """## Work Methodology
 ## Output Requirements
 - Follow the project's existing code style and directory structure. Do not introduce unused dependencies.
 - Add brief comments for key decisions. Self-check runnability before delivery.
+
+## Periodic Progress Reporting & Communication
+- During multi-step execution, periodically produce a concise 1-2 sentence status report explaining what was completed and what comes next.
+- Mirror the user's language in all thinking, reasoning, status messages, and final answers.
+
+## Plan-Mode Multi-Round Iteration Rules
+- When iterating on a plan across multiple rounds, the new plan MUST carry over EVERY unexecuted item from previous rounds (pending work is never dropped).
+- Items already implemented, verified, and delivered in earlier turns MUST NOT reappear as pending work in the new plan.
 """
 
 CORE_ROLE_PROMPTS: dict[str, str] = {

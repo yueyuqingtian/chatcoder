@@ -8,6 +8,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
+from app._diag import log_tool_error  # v36: 审批/执行异常诊断日志
 from app.orchestration.approval import approval_manager
 from app.orchestration.tools.base import ToolContext, ToolResult
 from app.orchestration.tools.registry import tool_registry
@@ -136,21 +137,29 @@ class ServerToolExecutor(ToolExecutor):
 
         # 执行
         try:
-            # v4.8.2: 工具执行加 60 秒超时，防止同步 I/O 挂起
+            # v4.8.2: 工具执行加超时，防止同步 I/O 挂起
+            # v1.0 (plan-153-705): 60s 硬编码 → settings.tool_exec_timeout_sec（默认 600s），
+            # 与 agent_loop 外层超时同源；长编译/测试/安装不再被内层提前误杀。
             # v2.2: ask_user_question 需要等用户回答，超时放宽到审批超时 + 30s
             import asyncio
-            _timeout = 60.0
+            from app.core.config import settings as _settings
+            _timeout = float(_settings.tool_exec_timeout_sec)
             if tool_name == "ask_user_question":
-                from app.core.config import settings as _settings
                 _timeout = float(_settings.approval_timeout_sec) + 30.0
             result = await asyncio.wait_for(tool.run(args, ctx), timeout=_timeout)
             return result
         except asyncio.TimeoutError:
             logger.error("工具执行超时 %s", tool_name)
-            return ToolResult(ok=False, output="", error=f"工具执行超时(60s): {tool_name}")
+            return ToolResult(ok=False, output="", error=f"工具执行超时({_timeout:.0f}s): {tool_name}")
         except Exception as e:
-            logger.exception("工具执行异常 %s", tool_name)
-            return ToolResult(ok=False, output="", error=f"工具异常: {e}")
+            # v36: 记录完整堆栈（含异常链），并保留异常类型——
+            # 仅凭 "工具异常: <msg>" 无法定位抛错文件与行号。
+            log_tool_error(
+                turn_id=getattr(ctx, "task_id", None), step=None,
+                tool_name=tool_name, call_key=call_key, exc=e,
+                args=args, phase="run",
+            )
+            return ToolResult(ok=False, output="", error=f"工具异常: {type(e).__name__}: {e}")
 
     async def _precheck_approval(self, tool, tool_name: str, args: dict, ctx: ToolContext,
                                  detail: dict) -> tuple[bool, str]:
@@ -180,8 +189,16 @@ class ServerToolExecutor(ToolExecutor):
             skip, reason = tool.approval_precheck(args, ctx)
             if skip:
                 return True, ""
-        except Exception:
-            logger.warning("工具 %s approval_precheck 异常(忽略)", tool_name, exc_info=True)
+        except Exception as exc:
+            # v36: approval_precheck 必须返回 (skip_approval, reason) 二元组；
+            # 返回值契约被破坏时（如返回单个 bool）会在解包处抛
+            # TypeError: 'bool' object is not iterable。记录完整堆栈与返回值，
+            # 便于区分「工具钩子内部报错」与「返回值契约不符」。
+            log_tool_error(
+                turn_id=getattr(ctx, "task_id", None), step=None,
+                tool_name=tool_name, call_key=detail.get("call_key", ""),
+                exc=exc, args=args, phase="approval_precheck",
+            )
 
         # 2. 权限模式三态与规划模式命令防篡改拦截
         pm = getattr(ctx, "permission_mode", "default") or "default"
@@ -232,6 +249,13 @@ class ServerToolExecutor(ToolExecutor):
                             getattr(ctx, "permission_mode", "default"))
                 return True, ""
 
+        # v36: 需人工审批时留痕（此前无任何日志，无法判断工具是卡在审批还是执行）。
+        # 注意本方法签名无 call_key，审批标识取 detail["approval_id"]。
+        logger.info(
+            "[tool.gate] tool=%s approval_id=%s 需人工审批(sandbox=%s pm=%s)",
+            tool_name, detail.get("approval_id", "-"), sandbox,
+            getattr(ctx, "permission_mode", "default"),
+        )
         return False, ""
 
 

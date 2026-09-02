@@ -13,6 +13,7 @@ import { PluginSlot } from "./plugins/registry";
 import { useUiStore, initUi } from "./store/ui";
 import { usePanelStore } from "./store/panel";
 import { useChatStore } from "./store/chat";
+import { useUpdaterStore } from "./store/updater";
 import { initTheme } from "./store/theme";
 import { installFocusGuard } from "./utils/focusGuard";
 
@@ -34,19 +35,18 @@ export default function App() {
 
   useEffect(() => {
     initTheme(); initUi();
+    // 更新状态通道：订阅主进程推送（侧栏/关于页共享）
+    useUpdaterStore.getState().init();
+    // 启动全局状态通道：跨会话运行态/活动时间（侧栏实时化，不随会话切换重建）
+    useChatStore.getState().connectGlobalEvents();
     // 启动时立即触发 Bootstrap（加载项目、会话、模型与提供商列表）
     void useChatStore.getState().loadBootstrap();
 
     // 全局焦点保护：覆盖"切换页面后输入框无法聚焦/IME 卡死"的兜底逻辑
     const guard = installFocusGuard();
-    const unsubscribeRendererFocus = window.chatcoderAPI?.onRendererFocus?.(() => {
-      // 主进程 webContents.focus() 完成后，DOM focus 必须在下一帧重试；
-      // 窗口句柄焦点与 renderer 文档焦点是两个独立状态。
-      window.dispatchEvent(new Event("focus"));
-    });
     return () => {
-      unsubscribeRendererFocus?.();
       guard.dispose();
+      useChatStore.getState().disconnectGlobalEvents();
     };
   }, []);
 
@@ -82,7 +82,7 @@ export default function App() {
       useChatStore.setState({ currentSessionId: null, ...{
         messages: [], turns: [], tasks: [], runningTurnId: null, isRunning: false,
         interruptedTurnId: null, streamingBuffers: {}, thinkingBuffers: {}, usage: null,
-        pendingApproval: null, pendingPlan: null, reviewedFiles: {}, composerDraft: "", composerAttachments: [],
+        pendingApproval: null, pendingPlan: null, reviewedFiles: {}, injectMarks: [],
       } });
     }
     // 退出设置页后自动刷新模型列表
@@ -143,7 +143,7 @@ export default function App() {
             /* v19: 设置侧栏经插件 slot 渲染（与外部侧栏共用壳与宽度）。 */
             <PluginSlot slot="settings-sidebar" tab={settingsActiveTab} onTab={setSettingsActiveTab} onBack={leaveSettings} collapsed={sidebarCollapsed} />
           ) : (
-            <PluginSlot slot="sidebar" active={nav} onChange={(k: NavKey) => { if (k === "settings") { openSettings(); return; } setNav(k); if (k === "chat") { useChatStore.setState({ currentSessionId: null, messages: [], turns: [], tasks: [], runningTurnId: null, isRunning: false, interruptedTurnId: null, streamingBuffers: {}, thinkingBuffers: {}, usage: null, pendingApproval: null, pendingPlan: null, reviewedFiles: {}, composerDraft: "" }); } }} onSessionFocus={() => setNav(null)} collapsed={sidebarCollapsed} onToggleCollapse={() => setSidebarCollapsed((v) => !v)} />
+            <PluginSlot slot="sidebar" active={nav} onChange={(k: NavKey) => { if (k === "settings") { openSettings(); return; } setNav(k); if (k === "chat") { useChatStore.setState({ currentSessionId: null, messages: [], turns: [], tasks: [], runningTurnId: null, isRunning: false, interruptedTurnId: null, streamingBuffers: {}, thinkingBuffers: {}, usage: null, pendingApproval: null, pendingPlan: null, reviewedFiles: {} }); } }} onSessionFocus={() => setNav(null)} collapsed={sidebarCollapsed} onToggleCollapse={() => setSidebarCollapsed((v) => !v)} />
           )}
         </div>
         {!sidebarCollapsed && <ResizeHandle side="left" baseWidth={leftPanelWidth} minWidth={200} maxWidth={480} reservePx={370} panelEl={leftPanelElRef} onCommit={setLeftPanelWidth} />}

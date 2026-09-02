@@ -8,7 +8,7 @@
   "scripts": {
     "start": "electron electron/main.cjs",
     "build:frontend": "cd client && npm run build",
-    "build:backend": "cd server && .venv\\Scripts\\pyinstaller.exe chatcoder-server.spec --noconfirm",
+    "build:backend": "cd server && .venv\\Scripts\\pyinstaller.exe chatcoder-server.spec --noconfirm --clean",
     "build:all": "npm run build:frontend && npm run build:backend && npm run dist",
     "dist": "electron-builder --win",
     "dist:dir": "electron-builder --win --dir",
@@ -27,7 +27,7 @@
     "productName": "chatcoder",
     "copyright": "Copyright © 2026 chatcoder",
     "directories": {
-      "output": "v5",
+      "output": "v7",
       "buildResources": "electron/build"
     },
     "files": [
@@ -78,7 +78,18 @@
       "shortcutName": "chatcoder",
       "deleteAppDataOnUninstall": false,
       "displayLanguageSelector": false,
-      "language": "2052"
-    }
+      "language": "2052",
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "yueyuqingtian",
+        "repo": "chatcoder"
+      }
+    ]
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
   }
 }

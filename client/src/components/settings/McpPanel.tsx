@@ -5,6 +5,7 @@ import { api, type McpServerOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { IconRefresh, IconPlus, IconX } from "../icons";
 import { ConfirmDialog } from "../ConfirmDialog";
+import { Modal } from "../Modal";
 import { Sw } from "./shared";
 
 export function McpPanel() {
@@ -51,6 +52,47 @@ export function McpPanel() {
       setImporting(null);
     }
   };
+  const [showJsonModal, setShowJsonModal] = useState(false);
+  const [jsonText, setJsonText] = useState("");
+  const [jsonError, setJsonError] = useState<string | null>(null);
+
+  const handleJsonImport = async () => {
+    if (!jsonText.trim()) return;
+    setJsonError(null);
+    try {
+      const parsed = JSON.parse(jsonText);
+      const mcpServers = parsed.mcpServers || parsed;
+      if (typeof mcpServers !== "object" || mcpServers === null) {
+        throw new Error("无效的 MCP 配置，必须包含 mcpServers 键或对象定义");
+      }
+      let count = 0;
+      for (const [name, config] of Object.entries(mcpServers)) {
+        if (!config || typeof config !== "object") continue;
+        const c = config as Record<string, unknown>;
+        const command = typeof c.command === "string" ? c.command : undefined;
+        const args = Array.isArray(c.args) ? c.args.map(String) : undefined;
+        const env = typeof c.env === "object" && c.env !== null ? (c.env as Record<string, string>) : undefined;
+        const url = typeof c.url === "string" ? c.url : undefined;
+        const transport = url ? "sse" : "stdio";
+        await api.createMcpServer({
+          name,
+          transport,
+          command,
+          args,
+          env,
+          url,
+          is_active: true,
+        });
+        count++;
+      }
+      setShowJsonModal(false);
+      setJsonText("");
+      load();
+    } catch (e: any) {
+      setJsonError(e.message || String(e));
+    }
+  };
+
   const handleCreate = async () => {
     if (!form.name.trim()) return;
     try {
@@ -64,6 +106,7 @@ export function McpPanel() {
     <div>
       <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginBottom: 12 }}>
         <button className="btn btn-ghost btn-sm" onClick={handleScan} disabled={scanning}><IconRefresh size={13} /> {scanning ? "扫描中…" : "自动扫描本机"}</button>
+        <button className="btn btn-ghost btn-sm" onClick={() => setShowJsonModal(true)}>导入 JSON 配置</button>
         <button className="btn btn-primary btn-sm" onClick={() => setShowCreate(!showCreate)}><IconPlus size={13} /> 手动创建</button>
       </div>
       {showCreate && (
@@ -121,6 +164,35 @@ export function McpPanel() {
           ))}
         </div>
       )}
+
+      <Modal
+        open={showJsonModal}
+        onClose={() => { setShowJsonModal(false); setJsonError(null); }}
+        title="导入 MCP JSON 配置"
+        subtitle="支持粘贴标准 Claude / Cursor 的 mcpServers JSON 格式"
+        width={640}
+        actions={
+          <>
+            <button className="btn btn-ghost" onClick={() => setShowJsonModal(false)}>取消</button>
+            <button className="btn btn-primary" onClick={handleJsonImport} disabled={!jsonText.trim()}>确认导入</button>
+          </>
+        }
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {jsonError && (
+            <div style={{ color: "var(--error)", fontSize: 12, padding: "6px 10px", background: "color-mix(in srgb, var(--error) 10%, transparent)", borderRadius: 6 }}>
+              {jsonError}
+            </div>
+          )}
+          <textarea
+            className="ui-textarea"
+            style={{ minHeight: 200, fontFamily: "var(--font-mono)", fontSize: 12 }}
+            placeholder={`{\n  "mcpServers": {\n    "memory": {\n      "command": "npx",\n      "args": ["-y", "@modelcontextprotocol/server-memory"]\n    }\n  }\n}`}
+            value={jsonText}
+            onChange={(e) => setJsonText(e.target.value)}
+          />
+        </div>
+      </Modal>
     </div>
   );
 }

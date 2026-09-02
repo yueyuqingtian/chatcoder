@@ -158,6 +158,12 @@ async def bulk_upsert_models(db: AsyncSession, provider_id: int, items: list[dic
         m.is_multimodal = bool(_meta.get("is_multimodal", False))
         if _meta.get("reasoning_efforts") is not None:
             m.reasoning_efforts = _meta["reasoning_efforts"]
+        # plan-147-674: ta3 模型的手动多模态设置打 override 标记，
+        # 目录重新同步时保留用户修正（catalog.py 同步逻辑读取该标记）
+        if provider.api_format == "ta3":
+            meta = dict(m.ta3_meta or {})
+            meta["multimodal_override"] = True
+            m.ta3_meta = meta
     await db.flush()
 
     res = await db.execute(select(Model).where(Model.provider_id == provider_id).order_by(Model.name.asc()))

@@ -182,14 +182,38 @@ class BrowserScreenshotTool(Tool):
             title = await page.title()
             screenshot_bytes = await page.screenshot(full_page=full_page, type="png")
             b64 = base64.b64encode(screenshot_bytes).decode("ascii")
+
+            # v32: 截图同时持久化落盘到 uploads/browser-shots 目录，使非多模态模型可通过 read_attachment/view_image 读取
+            screenshot_rel_path = ""
+            abs_path_str = ""
+            try:
+                from pathlib import Path
+                import time
+                import uuid
+                uploads_root = Path(settings.uploads_dir).resolve()
+                shot_dir = uploads_root / "browser-shots"
+                shot_dir.mkdir(parents=True, exist_ok=True)
+                shot_name = f"shot_{int(time.time())}_{uuid.uuid4().hex[:6]}.png"
+                shot_file = shot_dir / shot_name
+                shot_file.write_bytes(screenshot_bytes)
+                screenshot_rel_path = f"browser-shots/{shot_name}"
+                abs_path_str = str(shot_file).replace("\\", "/")
+            except Exception as se:
+                logger.warning("save screenshot file failed: %s", se)
             
+            output_msg = f"截图成功: {current_url} ({title})\n图片大小: {len(screenshot_bytes)} 字节"
+            if abs_path_str:
+                output_msg += f"\n- 图片已保存: path=`{abs_path_str}` (如模型不支持识图，可通过 read_attachment 或 view_image 工具读取该路径)"
+
             return ToolResult(
                 ok=True,
-                output=f"截图成功: {current_url} ({title})\n图片大小: {len(screenshot_bytes)} 字节\nBase64 预览: data:image/png;base64,{b64[:60]}...",
+                output=output_msg,
                 data={
                     "url": current_url,
                     "title": title,
                     "screenshot_base64": b64,
+                    "screenshot_path": screenshot_rel_path,
+                    "abs_path": abs_path_str,
                     "mime_type": "image/png",
                     "bytes_len": len(screenshot_bytes),
                 },

@@ -111,14 +111,27 @@ async def create_mcp_server(
     meta: dict | None = None, fetch_tools: bool = True,
 ) -> McpServer:
     """创建 MCP Server 配置。"""
+    # 智能切分：如果 command 中包含空格且 args 为空，自动通过 shlex.split 分离
+    norm_cmd = command.strip() if command else None
+    norm_args = list(args) if args else []
+    if norm_cmd and not norm_args and " " in norm_cmd:
+        import shlex
+        try:
+            tokens = shlex.split(norm_cmd, posix=False)
+            if tokens:
+                norm_cmd = tokens[0]
+                norm_args = tokens[1:]
+        except Exception:
+            pass
+
     srv = McpServer(
         name=name,
         display_name=display_name or name,
         description=description,
         source=source,
         transport=transport,
-        command=command,
-        args=args,
+        command=norm_cmd,
+        args=norm_args,
         env=env,
         url=url,
         tools=tools,

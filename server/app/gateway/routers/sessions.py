@@ -4,7 +4,10 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.gateway.schemas import CompactionIndexOut, MessageOut, SessionCreate, SessionOut, SessionUpdate
+from app.gateway.schemas import (
+    CompactionIndexOut, GoalOut, GoalSetBody, MessageOut, SessionCreate, SessionOut, SessionUpdate,
+)
+from app.orchestration.agent_events import broadcast
 from app.persistence.database import get_db
 from app.services import compression_service, session_service, worktree_service
 
@@ -21,6 +24,9 @@ async def _to_out(db: AsyncSession, s) -> SessionOut:
         has_running=await session_service.has_running_turn(db, s.id),
         has_interrupted_turn=await session_service.has_interrupted_turn(db, s.id),
         last_activity_at=await session_service.last_activity_at(db, s.id),
+        goal_text=s.goal_text,
+        goal_status=s.goal_status or "none",
+        goal_turns_used=s.goal_turns_used or 0,
     )
 
 
@@ -28,6 +34,8 @@ async def _to_out(db: AsyncSession, s) -> SessionOut:
 async def create_session(body: SessionCreate, db: AsyncSession = Depends(get_db)):
     session = await session_service.create_session(
         db, project_id=body.project_id, title=body.title, model_id=body.model_id,
+        permission_mode=body.permission_mode,
+        goal_text=body.goal_text,
     )
     await db.commit()
     return await _to_out(db, session)
@@ -129,6 +137,67 @@ async def remove_worktree(session_id: int, db: AsyncSession = Depends(get_db)):
         return result
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+# ── 目标模式（plan-671，对齐 zcode goal-continuation）──
+
+def _goal_out(s) -> GoalOut:
+    from app.core.config import settings
+    return GoalOut(
+        text=s.goal_text,
+        status=s.goal_status or "none",
+        turns_used=s.goal_turns_used or 0,
+        max_turns=settings.goal_max_continuation_turns,
+        created_at=s.goal_created_at,
+    )
+
+
+@router.get("/{session_id}/goal", response_model=GoalOut)
+async def get_goal(session_id: int, db: AsyncSession = Depends(get_db)):
+    session = await session_service.get_session(db, session_id)
+    if session is None:
+        raise HTTPException(404, "会话不存在")
+    return _goal_out(session)
+
+
+@router.post("/{session_id}/goal", response_model=GoalOut)
+async def set_goal(session_id: int, body: GoalSetBody, db: AsyncSession = Depends(get_db)):
+    """设定/替换目标：覆盖时旧目标自然失效（新状态直接覆盖）。"""
+    from datetime import datetime, timezone
+
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(400, "目标文本不能为空")
+    session = await session_service.get_session(db, session_id)
+    if session is None:
+        raise HTTPException(404, "会话不存在")
+    session.goal_text = text[:2000]
+    session.goal_status = "active"
+    session.goal_turns_used = 0
+    session.goal_created_at = datetime.now(timezone.utc).isoformat()
+    await db.commit()
+    await broadcast(session_id, {
+        "event": "goal.updated",
+        "payload": {"text": session.goal_text, "status": "active", "turns_used": 0},
+    })
+    return _goal_out(session)
+
+
+@router.delete("/{session_id}/goal", response_model=GoalOut)
+async def cancel_goal(session_id: int, complete: bool = False, db: AsyncSession = Depends(get_db)):
+    """取消目标；complete=true 时由用户确认完成（goal_complete 工具的同义用户路径）。"""
+    session = await session_service.get_session(db, session_id)
+    if session is None:
+        raise HTTPException(404, "会话不存在")
+    if session.goal_status == "active":
+        session.goal_status = "completed" if complete else "cancelled"
+        await db.commit()
+        await broadcast(session_id, {
+            "event": "goal.updated",
+            "payload": {"text": session.goal_text, "status": session.goal_status,
+                        "turns_used": session.goal_turns_used or 0},
+        })
+    return _goal_out(session)
 
 
 # ── v30.1: 压缩块索引 / 原文还原 ──

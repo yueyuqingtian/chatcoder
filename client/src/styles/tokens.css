@@ -69,7 +69,7 @@
   --color-background: var(--color-neutral-50);
   --color-background-alt: color-mix(in oklab, var(--color-neutral-100) 60%, transparent);
   --color-background-win-alt: var(--color-neutral-200);
-  --color-sidebar: var(--color-neutral-100);
+  --color-sidebar: #ECECEF;
   --color-header: var(--color-neutral-100);
   --color-panel: var(--color-neutral-50);
   --color-card: var(--color-white);
@@ -269,6 +269,8 @@
   --glass-border: var(--color-border);
   --glass-shadow: 0 8px 24px rgba(0, 0, 0, 0.12), 0 4px 8px rgba(0, 0, 0, 0.08);
   --glass-strength: 1;
+  /* plan-548: 玻璃开启时侧栏底色不透明度（叠在 DWM acrylic 之上），由 ui.ts 按玻璃强度覆写 */
+  --glass-sidebar-alpha: 0.68;
   --ambient-c1: var(--color-background);
   --ambient-c2: var(--color-background);
   --bg-ambient: none;
@@ -358,7 +360,12 @@
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   /* zcode 消息流阅读列宽 */
   --content-max-w: 768px;
-  --chat-line-height: 1.625;
+  /* v40.1: 消息流统一垂直节奏——工具/思考行高直接取正文行高（同一 token 派生），
+     项间距随字号缩放；运行时 applyUiVars 会用外观设置覆盖 --fs-md/--chat-line-height，
+     行与文本始终等高、间距始终一致（节距 = 行高 + --flow-gap = 段落节奏）。
+     注意 --chat-line-height 是无单位倍率（与外观设置语义一致）。 */
+  --chat-line-height: 1.7;
+  --flow-gap: calc(var(--fs-md, 13px) * 0.62);
   --sidebar-fs: 13px;
   --sidebar-icon: 16px;
   --sidebar-focus: var(--text-1);

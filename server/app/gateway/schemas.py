@@ -48,6 +48,10 @@ class SessionCreate(BaseModel):
     project_id: int
     title: str | None = None
     model_id: int | None = None
+    # plan-547: 首页计划模式发送时随创建一次落准（default / accept_edits / plan / readonly）
+    permission_mode: str | None = None
+    # plan-676: 首页目标模式发送时随创建一次落准（非空即 goal_status=active）
+    goal_text: str | None = None
 
 
 class CompactionIndexOut(BaseModel):
@@ -84,6 +88,23 @@ class SessionOut(BaseModel):
     has_running: bool = False
     has_interrupted_turn: bool = False
     last_activity_at: str | None = None  # 最近一条消息时间（侧栏相对时间展示）
+    # 目标模式（plan-671）：会话目标状态（前端恢复目标胶囊）
+    goal_text: str | None = None
+    goal_status: str = "none"  # none / active / completed / cancelled
+    goal_turns_used: int = 0
+
+
+# ── 目标（plan-671，对齐 zcode goal-continuation）──
+class GoalSetBody(BaseModel):
+    text: str
+
+
+class GoalOut(BaseModel):
+    text: str | None = None
+    status: str = "none"  # none / active / completed / cancelled
+    turns_used: int = 0
+    max_turns: int = 10
+    created_at: str | None = None
 
 
 # ── 轮次 ──
@@ -96,6 +117,13 @@ class TurnCreate(BaseModel):
     mode: str | None = None  # v6: 命令模式: readonly(只读审阅) / plan(先规划后执行)
 
 
+class TurnInjectBody(BaseModel):
+    # plan-547: 运行中 turn 的用户消息注入（立即发送）
+    request_id: str | None = None  # 前端排队项 id，user_input.injected 事件回传用于移除队列
+    content: str
+    attachments: list[dict[str, Any]] | None = None
+
+
 class TurnOut(BaseModel):
     id: int
     session_id: int
@@ -105,6 +133,10 @@ class TurnOut(BaseModel):
     token_usage: int = 0
     started_at: str | None = None
     completed_at: str | None = None
+    # plan-644: 计划模式字段--本 turn 产出的方案文档路径与生命周期状态
+    #（proposed/confirmed/done/cancelled/superseded；None = 与计划流程无关）
+    plan_doc_path: str | None = None
+    plan_status: str | None = None
 
 
 # ── 代理 ──
@@ -155,14 +187,9 @@ class TaskOut(BaseModel):
     note: str | None = None
 
 
-class TaskConfirmStep(BaseModel):
-    task_id: int | None = None
-    title: str
-
-
 class TaskConfirmBody(BaseModel):
+    """v38 (plan-482): 方案文档确认请求体——仅 accepted，不再携带步骤编辑。"""
     accepted: bool
-    steps: list[TaskConfirmStep] | None = None
 
 
 class ArtifactOut(BaseModel):

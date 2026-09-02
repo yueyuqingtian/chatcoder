@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.enums import MsgType, SenderType
 from app.gateway.schemas import (ArtifactOut, FileChangeOut, FileDiffOut, MessageOut, ReviewBatchBody,
                                  RollbackPreviewFile, RollbackPreviewOut,
-                                 RollbackResult, TaskConfirmBody, TaskOut, TurnCreate, TurnOut, TurnSnapshotOut)
+                                 RollbackResult, TaskConfirmBody, TaskOut, TurnCreate, TurnInjectBody, TurnOut, TurnSnapshotOut)
 from app.orchestration import engine
 from app.persistence.database import get_db
 from app.services import message_service, project_service, rollback_service, session_service, task_service, turn_service
@@ -44,6 +44,9 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
     user_msg.turn_id = turn.id
     generated_title = await session_service.auto_title_session(db, session, body.content)
     await db.commit()
+    await db.refresh(user_msg)
+    # v37: 用户消息落库时间即会话最新活动时间（侧栏排序依据）
+    _last_activity = str(user_msg.created_at) if user_msg.created_at is not None else None
 
     # plan-95: 快照在 turn 创建时同步落库（create_turn_snapshot 幂等）——此前快照由
     # 后台 engine 创建，用户"发送后立即停止"时后台任务可能在建快照前被取消，
@@ -63,12 +66,18 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
         logger.debug("turn 快照预创建失败(非阻塞)", exc_info=True)
 
     # 标题在用户消息入库后立即同步，不依赖后台 turn 是否成功完成。
-    if generated_title:
+    if generated_title or _last_activity:
         try:
             from app.orchestration.agent_events import broadcast
             await broadcast(body.session_id, {
                 "event": "session.updated",
-                "payload": {"session_id": body.session_id, "title": generated_title},
+                # v37: last_activity_at 让侧栏「按最近活动」排序即时生效——
+                # 此前只有整表刷新（进/出设置页）才更新，表现为"发消息后会话不上移"。
+                "payload": {
+                    "session_id": body.session_id,
+                    **({"title": generated_title} if generated_title else {}),
+                    **({"last_activity_at": _last_activity} if _last_activity else {}),
+                },
             })
         except Exception:
             logger.debug("会话标题广播失败", exc_info=True)
@@ -119,6 +128,56 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
 @router.get("/sessions/{session_id}", response_model=list[TurnOut])
 async def list_turns(session_id: int, db: AsyncSession = Depends(get_db)):
     return await turn_service.list_turns(db, session_id)
+
+
+@router.post("/{turn_id}/inputs", response_model=dict)
+async def inject_turn_input(turn_id: int, body: TurnInjectBody, db: AsyncSession = Depends(get_db)):
+    """plan-547: 向运行中的 turn 注入用户消息（下次 LLM 调用前传达，不新开 turn）。
+
+    turn 未在运行时返回 queued=false，前端走出队直发兜底。
+    """
+    turn = await turn_service.get_turn(db, turn_id)
+    if turn is None:
+        raise HTTPException(404, "turn 不存在")
+    # 先判定运行态再入库：未运行时不落消息，交由前端常规发送路径处理（避免重复消息）
+    if not engine.inject_input(turn_id, {
+        "request_id": body.request_id,
+        "content": body.content,
+        "attachments": body.attachments or [],
+    }):
+        return {"ok": False, "queued": False, "error": "turn_not_running"}
+    # 用户消息立即入库并广播（消息流即时显示；注入内容在下次 LLM 调用前进入上下文）
+    user_content: dict = {"text": body.content}
+    if body.attachments:
+        user_content["attachments"] = body.attachments
+    user_msg = await message_service.create_message(
+        db, session_id=turn.session_id,
+        sender_type=SenderType.USER.value,
+        msg_type=MsgType.TEXT.value,
+        content=user_content,
+        broadcast=False,
+    )
+    user_msg.turn_id = turn_id
+    await db.commit()
+    await db.refresh(user_msg)
+    try:
+        from app.gateway.ws import manager as ws_manager
+        from app.services.message_service import _to_out
+        await ws_manager.broadcast(turn.session_id, {
+            "event": "message.created",
+            "payload": {"msg": _to_out(user_msg).model_dump()},
+        })
+    except Exception:
+        logger.debug("注入消息广播失败(非阻塞)", exc_info=True)
+    try:
+        from app.orchestration.agent_events import broadcast as agent_broadcast
+        await agent_broadcast(turn.session_id, {
+            "event": "user_input.injected",
+            "payload": {"turn_id": turn_id, "request_id": body.request_id},
+        })
+    except Exception:
+        logger.debug("user_input.injected 广播失败(非阻塞)", exc_info=True)
+    return {"ok": True, "queued": True}
 
 
 @router.post("/{turn_id}/cancel", response_model=dict)
@@ -247,6 +306,26 @@ async def get_change_diff(turn_id: int, path: str, db: AsyncSession = Depends(ge
             db, session_id=session_id, turn_id=turn_id, workspace=workspace, path=path,
         )
         if diff is None:
+            # v36: 区分三种成因——该 turn 完全无写盘记录 / 有记录但路径不匹配。
+            # 无此日志时只能看到前端一行报错，无法判断是写盘失败还是路径归一化问题。
+            from app.persistence.models.rollback import RollbackWrite
+            from sqlalchemy import select as _select
+            _res = await db.execute(
+                _select(RollbackWrite.path).where(RollbackWrite.turn_id == turn_id)
+            )
+            _recorded = [r[0] for r in _res.all()]
+            if not _recorded:
+                logger.warning(
+                    "[review.diff404] turn=%s path=%s 成因=该 turn 无任何写盘记录"
+                    "（写盘工具执行失败或未成功落盘），workspace=%s",
+                    turn_id, path, workspace,
+                )
+            else:
+                logger.warning(
+                    "[review.diff404] turn=%s path=%s 成因=路径不匹配；"
+                    "该 turn 已记录路径=%s",
+                    turn_id, path, _recorded[:20],
+                )
             raise HTTPException(404, "该 turn 无此文件的写盘记录")
         logger.info("[review] diff: turn=%s file=%s truncated=%s",
                     turn_id, path, diff["truncated"])
@@ -446,97 +525,55 @@ async def retry_task_step(turn_id: int, task_id: int, db: AsyncSession = Depends
     return {"ok": True}
 
 
-@router.post("/{turn_id}/tasks/{group_id}/confirm", response_model=dict)
-async def confirm_task_plan(turn_id: int, group_id: int, body: TaskConfirmBody,
+@router.post("/{turn_id}/plan/confirm", response_model=dict)
+async def confirm_plan_turn(turn_id: int, body: TaskConfirmBody,
                             db: AsyncSession = Depends(get_db)):
-    """确认/拒绝任务拆分提案；确认后在后台启动真实执行。"""
-    from app.persistence.models.task import Task
-    from sqlalchemy import select
+    """v38 (plan-482): 确认/取消方案文档；不再涉及任何 group/steps。
 
+    步骤由主代理在确认后用 todo_write 自主重建（见 engine.execute_confirmed_plan），
+    系统不再预生成待确认的步骤列表。
+    """
     turn = await turn_service.get_turn(db, turn_id)
-    group = await db.get(Task, group_id)
-    if turn is None or group is None or group.turn_id != turn_id or group.kind != "group":
-        raise HTTPException(404, "任务拆分提案不存在")
-    if turn.status != "awaiting_confirmation" or group.status != "proposed":
-        raise HTTPException(409, "该任务提案已处理或不在待确认状态")
-
-    steps = list((await db.execute(
-        select(Task).where(Task.parent_task_id == group.id).order_by(Task.priority.asc(), Task.id.asc())
-    )).scalars().all())
-    request_task = await db.get(Task, group.parent_task_id) if group.parent_task_id else None
-    if request_task is None:
-        raise HTTPException(400, "任务提案缺少请求任务")
+    if turn is None:
+        raise HTTPException(404, "turn 不存在")
+    if turn.status != "awaiting_confirmation":
+        raise HTTPException(409, "该方案已处理或不在待确认状态")
 
     # 确认执行 = 用户授权完全访问：计划模式会话切换为 accept_edits，
-    # 使后续执行 turn（direct / split）不再被 plan 写盘拦截。
-    # v26: 仅「接受提案」时切换权限；「取消」= 停止任务，会话保持 plan 模式。
+    # 使后续执行 turn 不再被 plan 写盘拦截。
+    # v26: 仅「接受」时切换权限；「取消」= 停止任务，会话保持 plan 模式。
+    # plan_restore_after_turn 粘性机制已移除：确认后的 accept_edits 保持到手动切换。
     _session = await session_service.get_session(db, turn.session_id)
     _permission_mode = None
     if body.accepted and _session is not None and _session.permission_mode == "plan":
         _session.permission_mode = "accept_edits"
-        # v2.2 (plan-88): 标记执行结束后恢复 plan 模式（保持"先规划后执行"粘性）
-        _session.plan_restore_after_turn = True
         await db.flush()
         _permission_mode = "accept_edits"
 
-    # 调整只允许编辑可见标题和顺序；隐藏字段仍由后端保留。
-    if body.steps is not None:
-        submitted = [item for item in body.steps if item.title.strip()]
-        if not submitted:
-            raise HTTPException(400, "至少保留一个任务步骤")
-        by_id = {step.id: step for step in steps}
-        used: set[int] = set()
-        for index, item in enumerate(submitted[:12]):
-            target = by_id.get(item.task_id) if item.task_id is not None else None
-            if target is None:
-                target = next((step for step in steps if step.id not in used), None)
-            if target is None:
-                # 调整新增的小点只继承区块的真实执行上下文，不接收用户提交的隐藏字段。
-                target = Task(
-                    session_id=turn.session_id, turn_id=turn_id, parent_task_id=group.id,
-                    kind="step", status="proposed", priority=index,
-                    title=item.title.strip()[:200], description=item.title.strip()[:1000],
-                )
-                db.add(target)
-                await db.flush()
-            target.title = item.title.strip()[:200]
-            target.priority = index
-            target.status = "proposed"
-            target.is_hidden = False
-            used.add(target.id)
-        for step in steps:
-            if step.id not in used:
-                step.is_hidden = True
-                step.status = "cancelled"
+    # plan-644: 计划生命周期流转（数据库为真值源，文档头元数据行冗余标注）
+    _workspace = ""
+    try:
+        _ws = _session.worktree_path if _session else ""
+        if not _ws and _session is not None and _session.project_id:
+            _project = await project_service.get_project(db, _session.project_id)
+            _ws = _project.path if _project else ""
+        _workspace = _ws or ""
+    except Exception:
+        _workspace = ""
+    turn.plan_status = "confirmed" if body.accepted else "cancelled"
+    engine._stamp_plan_doc(_workspace, turn.plan_doc_path, turn.plan_status)
 
     if not body.accepted:
-        # v26: 用户拒绝/取消提案 = 任务停止（此前为"拒绝后直接执行"，
-        # 与用户预期"取消即停止"不符）。提案作废、任务取消、turn 置 cancelled，
-        # 不再启动任何执行。
-        group.status = "cancelled"
-        group.is_hidden = True
-        for step in steps:
-            step.status = "cancelled"
-            step.is_hidden = True
-        request_task.status = "cancelled"
+        # 取消 = 停止任务：turn 置 cancelled，不启动任何执行。
         await turn_service.update_turn_status(
             db, turn_id, "cancelled", summary="方案已取消，任务停止", completed=True,
         )
+        await task_service.cancel_turn_tasks(db, turn.session_id, turn_id)
         await db.commit()
         from app.orchestration.agent_events import broadcast, broadcast_turn_updated
         await broadcast_turn_updated(turn.session_id, turn_id, "cancelled")
-        await broadcast(turn.session_id, {
-            "event": "task.updated",
-            "payload": {"task_id": request_task.id, "status": "cancelled"},
-        })
         return {"ok": True, "mode": "cancelled", "permission_mode": _permission_mode}
 
-    group.status = "pending"
-    group.is_hidden = False
-    for step in steps:
-        if not step.is_hidden:
-            step.status = "pending"
-    request_task.status = "running"
     await turn_service.update_turn_status(db, turn_id, "running")
     await db.commit()
 
@@ -544,14 +581,13 @@ async def confirm_task_plan(turn_id: int, group_id: int, body: TaskConfirmBody,
         from app.persistence.database import async_session_factory
         async with async_session_factory() as session_db:
             try:
-                # v20: 拆分确认后走"探索并行 + 主代理串行"编排
-                await engine.execute_split_then_main(session_db, turn_id=turn_id, group_id=group_id)
+                await engine.execute_confirmed_plan(session_db, turn_id=turn_id)
             except Exception:
                 await session_db.rollback()
-                logger.exception("确认任务执行失败 turn=%s group=%s", turn_id, group_id)
+                logger.exception("确认方案执行失败 turn=%s", turn_id)
 
     asyncio.get_event_loop().create_task(_run_plan())
-    return {"ok": True, "mode": "split", "permission_mode": _permission_mode}
+    return {"ok": True, "mode": "confirmed", "permission_mode": _permission_mode}
 
 
 @router.get("/sessions/{session_id}/artifacts", response_model=list[ArtifactOut])

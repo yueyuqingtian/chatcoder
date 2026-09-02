@@ -50,13 +50,30 @@ export function IconSettings({ size = 18, color = "currentColor", strokeWidth = 
   );
 }
 
-/** 工作目录(文件夹) */
+/** 工作目录(文件夹，闭合态，对齐图 2) */
 export function IconFolder({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
     <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+      <path d="M3 6.5C3 5.39543 3.89543 4.5 5 4.5H9.17157C9.70201 4.5 10.2107 4.71071 10.5858 5.08579L12.4142 6.91421C12.7893 7.28929 13.298 7.5 13.8284 7.5H19C20.1046 7.5 21 8.39543 21 9.5V17.5C21 18.6046 20.1046 19.5 19 19.5H5C3.89543 19.5 3 18.6046 3 17.5V6.5Z" />
     </svg>
   );
+}
+
+/** 打开的工作目录(文件夹，透视开口态，对齐图 3) */
+export function IconFolderOpen({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <path d="M3 6.5C3 5.39543 3.89543 4.5 5 4.5H9.17C9.7 4.5 10.21 4.71 10.59 5.09L12.41 6.91C12.79 7.29 13.3 7.5 13.83 7.5H19C20.1 7.5 21 8.4 21 9.5V11H4.5" />
+      <path d="M2.5 11.5L4.7 18.2C4.9 18.9 5.5 19.5 6.3 19.5H19.5C20.5 19.5 21.3 18.6 21.1 17.6L19.8 11.5H2.5Z" />
+    </svg>
+  );
+}
+
+/** 动态文件夹（按 open 属性自动切换闭合/打开状态） */
+export function IconFolderDynamic({ open, size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps & { open?: boolean }) {
+  return open
+    ? <IconFolderOpen size={size} color={color} strokeWidth={strokeWidth} {...rest} />
+    : <IconFolder size={size} color={color} strokeWidth={strokeWidth} {...rest} />;
 }
 
 /** 新建 + */
@@ -106,22 +123,34 @@ export function IconChevronLeft({ size = 14, color = "currentColor", strokeWidth
   );
 }
 
-/** 左面板 */
-export function IconPanelLeft({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+/** 左面板切换（支持 open 状态微形变：展开为图 4 实心指示块，折叠为图 5 细线框） */
+export function IconPanelLeft({ size = 18, color = "currentColor", strokeWidth = 1.75, open = false, ...rest }: IconProps & { open?: boolean }) {
   return (
     <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <rect x="3" y="4" width="18" height="16" rx="2" ry="2" />
+      <rect x="3" y="4" width="18" height="16" rx="3" ry="3" />
       <line x1="9" y1="4" x2="9" y2="20" />
+      {open ? (
+        /* 图 4：展开态，左侧实心块 */
+        <rect x="4.25" y="5.25" width="3.5" height="13.5" rx="1.5" fill={color || "currentColor"} stroke="none" />
+      ) : (
+        /* 图 5：折叠态，左侧细空心框 */
+        <rect x="4.75" y="6" width="2.5" height="12" rx="1" strokeWidth={1.2} strokeDasharray="1 1" opacity={0.6} />
+      )}
     </svg>
   );
 }
 
-/** 右面板 */
-export function IconPanelRight({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+/** 右面板切换（支持 open 状态微形变） */
+export function IconPanelRight({ size = 18, color = "currentColor", strokeWidth = 1.75, open = false, ...rest }: IconProps & { open?: boolean }) {
   return (
     <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <rect x="3" y="4" width="18" height="16" rx="2" ry="2" />
+      <rect x="3" y="4" width="18" height="16" rx="3" ry="3" />
       <line x1="15" y1="4" x2="15" y2="20" />
+      {open ? (
+        <rect x="16.25" y="5.25" width="3.5" height="13.5" rx="1.5" fill={color || "currentColor"} stroke="none" />
+      ) : (
+        <rect x="16.75" y="6" width="2.5" height="12" rx="1" strokeWidth={1.2} strokeDasharray="1 1" opacity={0.6} />
+      )}
     </svg>
   );
 }
@@ -774,16 +803,6 @@ export function IconTarget({ size = 18, color = "currentColor", strokeWidth = 1.
   );
 }
 
-/** 打开的文件夹 */
-export function IconFolderOpen({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
-  return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v1H3z" />
-      <path d="M3 10h18l-2 8a2 2 0 0 1-2 1.5H7A2 2 0 0 1 5 18z" />
-    </svg>
-  );
-}
-
 /** 点赞（大拇指向上） */
 export function IconThumbsUp({ size = 16, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
@@ -1001,6 +1020,60 @@ export function IconSquarePlus({ size = 18, color = "currentColor", strokeWidth 
       <rect x="3" y="3" width="18" height="18" rx="4" />
       <line x1="12" y1="8" x2="12" y2="16" />
       <line x1="8" y1="12" x2="16" y2="12" />
+    </svg>
+  );
+}
+
+/* ── 打开方式品牌专属彩色图标（对齐图二） ──────────────────────────────────── */
+
+/** 品牌图标：Windows 文件资源管理器（黄蓝夹心文件夹） */
+export function IconBrandExplorer({ size = 16, className }: { size?: number; className?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      <path d="M2.5 7C2.5 5.6 3.6 4.5 5 4.5H9.5L12 7.5H19C20.4 7.5 21.5 8.6 21.5 10V18C21.5 19.4 20.4 20.5 19 20.5H5C3.6 20.5 2.5 19.4 2.5 18V7Z" fill="#F5BA31" />
+      <path d="M2.5 10.5C2.5 9.5 3.3 8.7 4.3 8.7H19.7C20.7 8.7 21.5 9.5 21.5 10.5V18C21.5 19.4 20.4 20.5 19 20.5H5C3.6 20.5 2.5 19.4 2.5 18V10.5Z" fill="#F8D147" />
+      <path d="M2 13H22V17.5C22 18.9 20.9 20 19.5 20H4.5C3.1 20 2 18.9 2 17.5V13Z" fill="#0078D4" fillOpacity="0.88" />
+    </svg>
+  );
+}
+
+/** 品牌图标：Visual Studio Code（经典蓝蝴蝶结折角） */
+export function IconBrandVSCode({ size = 16, className }: { size?: number; className?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      <path d="M17.5 2.5L7.5 10.2L3.8 7.3C3.3 6.9 2.5 7.2 2.5 7.8V16.2C2.5 16.8 3.3 17.1 3.8 16.7L7.5 13.8L17.5 21.5C18.2 22 19.2 21.6 19.4 20.7L21.8 4.3C22 3.4 21.1 2.7 20.3 3L17.5 2.5Z" fill="#0066B8" />
+      <path d="M17.5 2.5L6.8 12L17.5 21.5L21.5 19.5V4.5L17.5 2.5Z" fill="#007ACC" />
+      <path d="M17.5 2.5L13.5 12L17.5 21.5L21.5 19.5V4.5L17.5 2.5Z" fill="#1F9CF0" />
+      <path d="M3.8 7.3L13.8 15.5L17.5 12.5L7.5 4.8L3.8 7.3Z" fill="#0065A9" />
+    </svg>
+  );
+}
+
+/** 品牌图标：IntelliJ IDEA（经典黑底色块方框 + 彩条） */
+export function IconBrandIdea({ size = 16, className }: { size?: number; className?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      <rect x="2" y="2" width="20" height="20" rx="4" fill="#21D789" />
+      <path d="M18 2H6C3.8 2 2 3.8 2 6V18C2 20.2 3.8 22 6 22H18C20.2 22 22 20.2 22 18V6C22 3.8 20.2 2 18 2Z" fill="#000000" />
+      <path d="M4 18.5L8.5 15L6 20H4V18.5Z" fill="#FE2857" />
+      <path d="M14 4L20 8L16.5 12L12 9L14 4Z" fill="#007ACC" />
+      <path d="M20 18L15 20L13 16L18 14L20 18Z" fill="#FC801D" />
+      <path d="M4 6L9 4L11 8L6 10L4 6Z" fill="#36D468" />
+      <rect x="4.5" y="4.5" width="15" height="15" rx="2" fill="#000000" fillOpacity="0.88" />
+      <text x="6" y="14" fill="#FFFFFF" fontSize="7.5" fontWeight="900" fontFamily="sans-serif">IJ</text>
+      <rect x="6" y="15.5" width="7" height="1.5" fill="#FFFFFF" />
+    </svg>
+  );
+}
+
+/** 品牌图标：Windows 终端（黑框灰底 + 蓝色命令提示符方块） */
+export function IconBrandWindowsTerminal({ size = 16, className }: { size?: number; className?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      <rect x="2" y="3" width="20" height="18" rx="3" fill="#1C1C1C" />
+      <rect x="2" y="3" width="20" height="18" rx="3" stroke="#4F4F4F" strokeWidth="1" />
+      <path d="M6 8L10 12L6 16" stroke="#4CC2FF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      <line x1="12" y1="16" x2="17" y2="16" stroke="#FFFFFF" strokeWidth="2" strokeLinecap="round" />
     </svg>
   );
 }

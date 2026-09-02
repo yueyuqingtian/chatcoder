@@ -144,3 +144,101 @@ export class WsClient {
 }
 
 export const wsClient = new WsClient();
+
+/**
+ * 全局状态客户端（v37）：连接 /ws/global，接收跨会话状态事件。
+ *
+ * 会话级 WsClient 只为「当前聚焦会话」派发事件（切会话即 disconnect 重建），
+ * 因此后台会话的 session.completed / turn.completed 前端收不到——
+ * 侧栏 has_running 一直停在 sendTurn 乐观置的 true，只能靠整表刷新修正。
+ *
+ * 本类与会话级客户端完全解耦：不共享 lastSeq、不共享 handlers、不影响
+ * ws-concurrency 测试断言的会话级隔离语义。只做指数退避重连与 handler 派发。
+ */
+export class GlobalWsClient {
+  private ws: WebSocket | null = null;
+  private handlers: Set<Handler> = new Set();
+  private reconnectTimer: number | null = null;
+  private reconnectAttempt = 0;
+  private intentionalClose = false;
+
+  connect() {
+    if (this.ws) return;
+    this.intentionalClose = false;
+    this.reconnectAttempt = 0;
+    this._doConnect();
+  }
+
+  private _doConnect() {
+    const isElectron = typeof window !== "undefined" && Boolean((window as Window).chatcoderAPI);
+    const isDev = Boolean((import.meta as { env?: { DEV?: boolean } }).env?.DEV);
+    const portPromise = isElectron
+      ? (window as Window).chatcoderAPI?.getBackendPort?.() ?? Promise.resolve(8000)
+      : Promise.resolve(8000);
+    void portPromise
+      .then((port) => {
+        if (this.ws) return;
+        if (!Number.isFinite(port) || port <= 0) port = 8000;
+        const wsUrl = (isElectron || isDev)
+          ? `ws://127.0.0.1:${port}/ws/global`
+          : `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws/global`;
+        this._open(wsUrl);
+      })
+      .catch(() => {
+        if (this.ws) return;
+        this._open(`ws://127.0.0.1:8000/ws/global`);
+      });
+  }
+
+  private _open(wsUrl: string) {
+    const sock = new WebSocket(wsUrl);
+    this.ws = sock;
+
+    sock.onopen = () => {
+      if (this.ws !== sock) return;
+      this.reconnectAttempt = 0;
+    };
+
+    sock.onmessage = (e) => {
+      if (this.ws !== sock) return;
+      try {
+        const data = JSON.parse(e.data) as ServerEvent;
+        this.handlers.forEach((h) => h(data));
+      } catch {
+        // ignore invalid
+      }
+    };
+
+    sock.onclose = () => {
+      if (this.intentionalClose) return;
+      if (this.ws !== sock) return;
+      this.ws = null;
+      this.reconnectAttempt++;
+      const delay = Math.min(
+        _BASE_DELAY * Math.pow(2, this.reconnectAttempt - 1),
+        _MAX_DELAY,
+      ) + Math.random() * _MAX_JITTER;
+      this.reconnectTimer = window.setTimeout(() => {
+        if (!this.intentionalClose) this._doConnect();
+      }, delay);
+    };
+  }
+
+  disconnect() {
+    this.intentionalClose = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.ws?.close();
+    this.ws = null;
+    this.handlers.clear();
+  }
+
+  on(handler: Handler) {
+    this.handlers.add(handler);
+    return () => this.handlers.delete(handler);
+  }
+}
+
+export const globalWsClient = new GlobalWsClient();

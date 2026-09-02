@@ -70,7 +70,7 @@ npm run dev                     # http://localhost:5173
 ```powershell
 # 一键脚本：构建前端 -> PyInstaller 打包后端 -> electron-builder 出 NSIS 安装包
 powershell -ExecutionPolicy Bypass -File build-release.ps1
-# 产物: release/chatcoder Setup <version>.exe
+# 产物: v6/chatcoder-Setup-<version>.exe + latest.yml + .blockmap
 ```
 
 或分步执行：
@@ -81,9 +81,34 @@ npm install
 npm run build:frontend
 # 打包后端（需 server/.venv 已安装 pyinstaller）
 npm run build:backend
-# 打包桌面应用（release/ 目录）
+# 打包桌面应用（v6/ 目录）
 npm run dist
 ```
+
+## 自动更新（GitHub Releases）
+
+桌面端已内置自动更新（electron-updater）：启动 30 秒后检查、之后每 4 小时检查一次；
+侧栏设置按钮右侧在发现新版本时出现深绿更新徽标，设置「关于」页可手动检查并一键安装。
+
+发布新版本（**必须先把 package.json 的 version 递增**，打 tag 为 `v<version>`）：
+
+```powershell
+# 方式一：一键脚本打包并发布（需 gh CLI 已登录：gh auth login）
+powershell -ExecutionPolicy Bypass -File build-release.ps1 -Publish
+
+# 方式二：先手动打包，再单独发布
+powershell -ExecutionPolicy Bypass -File build-release.ps1
+gh release create v<version> `
+  v6/chatcoder-Setup-<version>.exe v6/latest.yml v6/chatcoder-Setup-<version>.exe.blockmap `
+  --title "v<version>" --notes "ChatCoder v<version>"
+```
+
+注意：
+
+- Release 资产必须包含 `latest.yml`、`.exe`、`.blockmap` 三件套，且资产名与
+  `latest.yml` 中 `url` 一致（package.json `nsis.artifactName` 已保证无空格，勿改回）。
+- 更新检查走 GitHub 公开 API（匿名限流 60 次/小时），请勿把检查间隔改得过密。
+- 安装包未签名时，用户首次安装/更新会触发 Windows SmartScreen 提示（与手动下载一致）。
 
 ## 隐私说明
 

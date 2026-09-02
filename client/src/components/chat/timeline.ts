@@ -4,7 +4,8 @@
  * 核心规则：
  * - 按 turn_id 分组；turn 出现顺序由该组首条消息在输入数组中的位置决定（非 turn_id 数值大小）
  *   —— 这修复了"AI 回复显示在用户消息上方"的顺序 bug（§9.1）
- * - turn 内：用户消息排在开头（用户提问在前，AI 回复在后）
+ * - turn 内：消息严格按落库时间序（id 升序）渲染——正常 turn 用户消息天然在开头；
+ *   任务执行中注入（排队发送）的用户消息落在实际发送位置，不再强制提升到 turn 顶部
  * - 相邻 tool_call/tool_result 合并为 tool-cluster；AI 文字切段时新开 cluster
  * - tool_tree 中同工具连续 ≥2 次聚为 group 节点
  * - 思考内容（thinking）不进入主消息流文本，由 ThinkingBlock 独立消费
@@ -60,11 +61,12 @@ export type TurnItem =
   | { kind: "text"; msg: MessageOut }
   | { kind: "tools"; nodes: ToolNode[] }
   | { kind: "subagent"; msg: MessageOut }
-  | { kind: "artifacts"; msgs: MessageOut[] }
   | { kind: "summary"; msg: MessageOut }
   | { kind: "error"; msg: MessageOut }
   /** v2.2 (对齐 zcode 3.11): 系统分割线（模型切换等 divider） */
-  | { kind: "divider"; msg: MessageOut };
+  | { kind: "divider"; msg: MessageOut }
+  /** plan-671: 目标续跑消息（zcode model-only 语义）——渲染为细分隔线而非用户气泡 */
+  | { kind: "goal-continuation"; msg: MessageOut };
 
 export type TimelineEntry =
   | { kind: "turn"; turnId: number | null; items: TurnItem[] }
@@ -97,7 +99,8 @@ function buildLeaf(call: MessageOut, result?: MessageOut): ToolLeaf {
   };
 }
 
-function leafPathOf(leaf: ToolLeaf): string {
+/** plan-547: 导出供锚定/展示复用——从工具 leaf 提取规范化的目标路径（正斜杠）。 */
+export function leafPathOf(leaf: ToolLeaf): string {
   const p = leaf.args?.path;
   if (typeof p === "string" && p) return p.replace(/\\/g, "/");
   const f = leaf.args?.file_path;
@@ -196,14 +199,12 @@ export function buildTimeline(messages: MessageOut[]): TimelineEntry[] {
   return entries;
 }
 
-/** turn 内消息归类：用户消息在开头；相邻 tool_call 合并 cluster；系统消息 → divider。 */
+/** turn 内消息归类：严格按消息时间序；相邻 tool_call 合并 cluster；系统消息 → divider。 */
 function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
   // §3.3: 相邻 tool_call 合并为 tool-cluster，AI 文字切段时新开 cluster
   const items: TurnItem[] = [];
   const pendingTools: MessageOut[] = [];
   const resultsByKey = new Map<string, MessageOut>();
-  const pendingArtifacts: MessageOut[] = [];
-  let hasArtifacts = false;
 
   // flush 待处理工具调用为一个 tools item（cluster）
   const flushTools = () => {
@@ -214,15 +215,18 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
     }
   };
 
-  // §3.3: 用户消息排在 turn 开头（用户提问在前，AI 回复在后）
-  const userMsgs = msgs.filter((m) => m.sender_type === SenderType.User);
-  for (const u of userMsgs) {
-    items.push({ kind: "user", msg: u });
-  }
-
-  // AI 消息按顺序归类
+  // §3.3 (plan-548): 全部消息按时间序归类。用户消息不再强制提升到 turn 开头——
+  // 正常 turn 其 id 最小天然在前；任务执行中排队注入的消息（id 更大）落在实际发送位置
   for (const m of msgs) {
-    if (m.sender_type === SenderType.User) continue; // 跳过用户消息（已处理）
+    if (m.sender_type === SenderType.User) {
+      flushTools();
+      // plan-671: 目标续跑消息不渲染为用户气泡（对齐 zcode providerContextOnly）
+      const uc = m.content as Record<string, unknown>;
+      items.push(uc.goal_continuation === true
+        ? { kind: "goal-continuation", msg: m }
+        : { kind: "user", msg: m });
+      continue;
+    }
     const c = m.content as Record<string, unknown>;
     if (m.msg_type === MsgType.ToolCall) {
       if (c.tool === "spawn_subagent") {
@@ -257,9 +261,8 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
       flushTools();
       items.push({ kind: "divider", msg: m });
     } else if (m.msg_type === MsgType.Artifact) {
-      flushTools();
-      pendingArtifacts.push(m);
-      hasArtifacts = true;
+      // plan-548: 产物变更统一在输入框上方任务面板（TaskStatusPanel）展示，消息流不再渲染
+      continue;
     } else if (m.msg_type === MsgType.Text) {
       flushTools();
       items.push({ kind: "text", msg: m });
@@ -274,11 +277,6 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
 
   // 3. flush 剩余工具调用
   flushTools();
-
-  // 4. 产物聚合到 turn 末尾
-  if (hasArtifacts && pendingArtifacts.length > 0) {
-    items.push({ kind: "artifacts", msgs: pendingArtifacts });
-  }
 
   return items;
 }
