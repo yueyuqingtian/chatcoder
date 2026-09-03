@@ -198,7 +198,12 @@ class TraeProvider(ModelProvider):
         return {k: v for k, v in body.items() if v is not None}
 
     def _convert_message(self, m: ChatMessage) -> dict:
-        """ChatMessage → TRAE 消息 dict（OpenAI 风格 role/content）。"""
+        """ChatMessage → TRAE 消息 dict（OpenAI 风格 role/content）。
+
+        plan-166-767: 多模态图片块处理——TRAE query 块协议（text 类型）未确认支持
+        image 直传，无法保证图片块透传；此处降级为「图片已附加 + read_attachment 提示」
+        并保留文本 content，禁止图片在序列化时静默丢失。
+        """
         out: dict = {"role": m.role, "content": m.content or ""}
         if m.role in ("system", "developer"):
             out["role"] = "system"
@@ -221,6 +226,18 @@ class TraeProvider(ModelProvider):
         elif m.role == "tool":
             out["role"] = "tool"
             out["tool_call_id"] = m.tool_call_id or ""
+        # plan-166-767: 图片内容块降级提示（TRAE 通道暂不支持图片直传）
+        if m.content_blocks:
+            _img_count = sum(
+                1 for b in m.content_blocks
+                if isinstance(b, dict) and b.get("type") == "image_url"
+            )
+            if _img_count:
+                _hint = (
+                    f"\n[系统] 本条消息附带 {_img_count} 张图片。当前 TRAE 通道暂无法直接传输图片，"
+                    "如需查看图片内容，请调用 read_attachment 工具读取该图片的 path。"
+                )
+                out["content"] = ((out.get("content") or "") + _hint).strip()
         return out
 
     # ─────────────────────────── SSE 解析 ───────────────────────────

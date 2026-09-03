@@ -329,6 +329,9 @@ async def build_main_context(
     plan_history: str = "",
     goal: dict | None = None,
     available_tools: set[str] | None = None,
+    # plan-166-767: 请求携带的权威模型（切换模型后立即发送时优先），
+    # 决定摘要阈值/注入预算按「目标模型窗口」计算。
+    effective_model_id: int | None = None,
 ) -> ContextBundle:
     """构建主代理上下文。
 
@@ -367,7 +370,7 @@ async def build_main_context(
         from app.orchestration.context_memory import (
             _resolve_leader_context_window, maybe_summarize_main_session,
         )
-        _summary_window = await _resolve_leader_context_window(db, session)
+        _summary_window = await _resolve_leader_context_window(db, session, model_id=effective_model_id)
         await maybe_summarize_main_session(db, session, context_window=_summary_window)
     except Exception:
         logger.warning("[context] 主会话摘要更新失败(非阻塞)", exc_info=True)
@@ -496,7 +499,7 @@ async def build_main_context(
         )
         from app.models.schemas import ChatMessage as _CM
 
-        context_window = await _resolve_leader_context_window(db, session)
+        context_window = await _resolve_leader_context_window(db, session, model_id=effective_model_id)
         window_budget = get_main_window_budget(context_window)
 
         # v6.4: shared_context 是动态属性，可能不存在，用 getattr 安全访问

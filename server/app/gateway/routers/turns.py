@@ -98,7 +98,7 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
         from app.persistence.database import async_session_factory
         async with async_session_factory() as s:
             try:
-                await engine.start_turn(s, turn_id=turn.id, attachments=body.attachments, reasoning_effort=body.reasoning_effort, mode=body.mode)
+                await engine.start_turn(s, turn_id=turn.id, attachments=body.attachments, reasoning_effort=body.reasoning_effort, mode=body.mode, model_id=body.model_id)
                 await s.commit()
             except Exception:
                 await s.rollback()
@@ -144,6 +144,7 @@ async def inject_turn_input(turn_id: int, body: TurnInjectBody, db: AsyncSession
         "request_id": body.request_id,
         "content": body.content,
         "attachments": body.attachments or [],
+        "model_id": body.model_id,
     }):
         return {"ok": False, "queued": False, "error": "turn_not_running"}
     # 用户消息立即入库并广播（消息流即时显示；注入内容在下次 LLM 调用前进入上下文）

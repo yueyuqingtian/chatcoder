@@ -5,7 +5,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, type UsageStatsOut } from "../../api/client";
-import { IconRefresh } from "../icons";
+import { IconAlertTriangle, IconBarChart, IconCalendar, IconDatabase, IconHash, IconRefresh, IconZap } from "../icons";
 import { UsageHeatmap } from "./usage/UsageHeatmap";
 import { UsageTrendChart, type TrendSeries } from "./usage/UsageTrendChart";
 import { UsageDonutChart, type DonutSeg } from "./usage/UsageDonutChart";
@@ -50,8 +50,11 @@ export function UsagePanel() {
   useEffect(() => { void load("30", "", ""); }, [load]);
 
   const applyRange = (mode: RangeMode, start = customStart, end = customEnd) => {
-    if (mode === "custom" && (!start || !end)) return; // 起止未填全则不刷新
-    setRangeMode(mode);
+    setRangeMode(mode); // 先切换模式（自定义时立即渲染起止输入框）
+    if (mode === "custom") {
+      if (start && end) void load("custom", start, end); // 填全才刷新
+      return;
+    }
     void load(mode, start, end);
   };
 
@@ -88,15 +91,31 @@ export function UsagePanel() {
   const donutSegs = useMemo<DonutSeg[]>(() => {
     const t = Math.max(1, totalTokens);
     const top8 = byModel.slice(0, 8);
-    const rest = byModel.slice(8).reduce((s, b) => s + b.total, 0);
     const res: DonutSeg[] = top8.map((b, i) => ({
       label: b.display_name,
       value: b.total,
       color: modelColor(i),
       pct: Math.round((b.total / t) * 100),
+      calls: b.calls,
     }));
     if (byModel.length > 8) {
-      res.push({ label: "其他", value: rest, color: modelColor(8), pct: Math.round((rest / t) * 100) });
+      const rest = byModel.slice(8);
+      const restValue = rest.reduce((s, b) => s + b.total, 0);
+      const restCalls = rest.reduce((s, b) => s + b.calls, 0);
+      res.push({
+        label: "其他",
+        value: restValue,
+        color: modelColor(8),
+        pct: Math.round((restValue / t) * 100),
+        calls: restCalls,
+        children: rest.map((b, i) => ({
+          label: b.display_name,
+          value: b.total,
+          color: modelColor(8 + i),
+          pct: Math.round((b.total / t) * 100),
+          calls: b.calls,
+        })),
+      });
     }
     return res;
   }, [byModel, totalTokens]);
@@ -107,11 +126,11 @@ export function UsagePanel() {
     <div className="usage-panel">
       {/* 时间范围 + 刷新 */}
       <div className="usage-toolbar">
-        <div className="usage-range">
+        <div className="usage-range usage-seg-toggle">
           {RANGE_OPTS.map((o) => (
             <button
               key={o.mode}
-              className={`btn btn-sm ${rangeMode === o.mode ? "btn-primary" : "btn-ghost"}`}
+              className={`usage-seg-btn ${rangeMode === o.mode ? "active" : ""}`}
               disabled={loading}
               onClick={() => applyRange(o.mode)}
             >
@@ -140,34 +159,65 @@ export function UsagePanel() {
             </span>
           )}
         </div>
-        <button className="btn btn-ghost btn-sm" onClick={() => applyRange(rangeMode)} disabled={loading}>
+        <button
+          className="btn btn-ghost btn-sm"
+          onClick={() => applyRange(rangeMode)}
+          disabled={loading}
+          title={rangeMode === "custom" && (!customStart || !customEnd) ? "请先选择起止日期" : undefined}
+        >
           <IconRefresh size={13} /> {loading ? "加载中…" : "刷新"}
         </button>
       </div>
 
-      {error && <div className="navpage-empty" style={{ color: "var(--error)" }}>加载失败：{error}</div>}
+      {error && (
+        <div className="usage-error">
+          <IconAlertTriangle size={16} />
+          <span>加载失败：{error}</span>
+        </div>
+      )}
+
+      {/* 首屏加载骨架 */}
+      {stats === null && loading && (
+        <div className="usage-skeleton">
+          <div className="usage-skeleton-cards">
+            <div className="usage-skeleton-card" />
+            <div className="usage-skeleton-card" />
+            <div className="usage-skeleton-card" />
+          </div>
+          <div className="usage-skeleton-block" />
+        </div>
+      )}
 
       {/* 统计卡片行 */}
       {total && (
         <div className="usage-cards">
-          <div className="usage-card">
+          <div className="usage-card usage-card-accent">
+            <div className="usage-card-icon"><IconDatabase size={18} /></div>
             <div className="usage-card-value">{fmtTokens(total.total)}</div>
             <div className="usage-card-label">累计 Token</div>
-            <div className="usage-card-sub">输入 {fmtTokens(total.prompt)} · 输出 {fmtTokens(total.completion)} · 缓存 {fmtTokens(total.cached)}</div>
+            <div className="usage-card-sub">
+              <span className="k">输入</span><span className="v">{fmtTokens(total.prompt)}</span>
+              <span className="k">输出</span><span className="v">{fmtTokens(total.completion)}</span>
+              <span className="k">缓存</span><span className="v">{fmtTokens(total.cached)}</span>
+            </div>
           </div>
           <div className="usage-card">
+            <div className="usage-card-icon"><IconZap size={18} /></div>
             <div className="usage-card-value">{fmtTokens(stats?.peak_tokens ?? 0)}</div>
             <div className="usage-card-label">峰值 Token（单日最高）</div>
           </div>
           <div className="usage-card">
+            <div className="usage-card-icon"><IconHash size={18} /></div>
             <div className="usage-card-value">{total.calls.toLocaleString()}</div>
             <div className="usage-card-label">调用次数</div>
           </div>
           <div className="usage-card">
+            <div className="usage-card-icon"><IconCalendar size={18} /></div>
             <div className="usage-card-value">{stats?.streak_current ?? 0} 天</div>
             <div className="usage-card-label">当前连续天数</div>
           </div>
           <div className="usage-card">
+            <div className="usage-card-icon"><IconCalendar size={18} /></div>
             <div className="usage-card-value">{stats?.streak_longest ?? 0} 天</div>
             <div className="usage-card-label">最长连续天数</div>
           </div>
@@ -180,7 +230,13 @@ export function UsagePanel() {
       {/* 每日 Token 趋势 */}
       {trendSeries.length > 0 && (
         <div className="usage-section-block">
-          <div className="usage-section-title">每日 Token 趋势</div>
+          <div className="usage-block-head">
+            <IconBarChart size={16} />
+            <div className="usage-block-titles">
+              <div className="usage-section-title">每日 Token 趋势</div>
+              <div className="usage-block-sub">区间内按日汇总</div>
+            </div>
+          </div>
           <UsageTrendChart series={trendSeries} dates={dates} />
         </div>
       )}
@@ -188,13 +244,22 @@ export function UsagePanel() {
       {/* 模型用量环形图 */}
       {donutSegs.length > 0 && (
         <div className="usage-section-block">
-          <div className="usage-section-title">模型用量</div>
+          <div className="usage-block-head">
+            <IconDatabase size={16} />
+            <div className="usage-block-titles">
+              <div className="usage-section-title">模型用量</div>
+              <div className="usage-block-sub">区间内模型分布</div>
+            </div>
+          </div>
           <UsageDonutChart segments={donutSegs} centerValue={totalTokens} />
         </div>
       )}
 
       {!loading && !error && !total && byModel.length === 0 && (
-        <div className="navpage-empty">暂无用量数据，发送消息后统计</div>
+        <div className="usage-empty">
+          <IconBarChart size={32} />
+          <span>暂无用量数据，发送消息后统计</span>
+        </div>
       )}
     </div>
   );

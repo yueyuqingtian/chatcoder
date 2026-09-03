@@ -249,7 +249,10 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                      reasoning_effort: str | None = None,
                      mode: str | None = None,
                      existing_task_id: int | None = None,
-                     force_direct: bool = False) -> dict:
+                     force_direct: bool = False,
+                     # plan-166-767: 请求携带的权威模型（切换模型后立即发送时优先），
+                     # 避免 PATCH 与 POST 竞态导致后端仍用旧模型处理该轮。
+                     model_id: int | None = None) -> dict:
     """执行一个 turn。turn 与用户消息已由路由创建。
 
     mode: readonly(只读审阅) / plan(先规划后执行) / None(默认)。
@@ -367,7 +370,14 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         # v38 (plan-482): 删除系统预拆分——是否分步、分几步完全由主代理通过
         # todo_write 自主决定（系统提示词已明确该职责）。此前由 evaluate_complexity +
         # decompose_request 生成 group/steps，该链路长期失败且违背"决策权在模型"原则。
-        effective_model_id = session.model_id or main_agent.model_id
+        # plan-166-767: 有效模型优先级 = 请求携带 model_id → session.model_id → main_agent.model_id。
+        # 记录来源，便于验证「切换后立即发送用新模型」；is_multimodal/摘要窗口/注入全部基于同一 effective_model_id。
+        _model_source = "request" if model_id else ("session" if session.model_id else "agent")
+        effective_model_id = model_id or session.model_id or main_agent.model_id
+        logger.info(
+            "[engine] turn=%s effective_model_id=%s source=%s",
+            turn_id, effective_model_id, _model_source,
+        )
         from app.models.registry import get_model_registry
         from app.persistence.models.model_reg import Model
         selected_model = await db.get(Model, effective_model_id) if effective_model_id else None
@@ -437,6 +447,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             goal={"text": session.goal_text, "turns_used": session.goal_turns_used or 0}
             if (session.goal_status or "none") == "active" and session.goal_text else None,
             available_tools=_available_tools,
+            effective_model_id=effective_model_id,
         )
 
         # 命令模式：注入模式指令（/chat 只读、/plan 先规划后执行）
@@ -925,7 +936,16 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         workspace = _resolve_workspace(session, project)
         manager = get_subagent_manager(session.id)
         _turn_managers[turn_id] = manager
+        # plan-166-767: confirm 执行路径与 start_turn 对齐——按有效模型解析多模态/窗口。
         effective_model_id = session.model_id or main_agent.model_id
+        _model_source = "session" if session.model_id else "agent"
+        logger.info(
+            "[engine:confirm] turn=%s effective_model_id=%s source=%s",
+            turn_id, effective_model_id, _model_source,
+        )
+        from app.persistence.models.model_reg import Model as _Model
+        _sel_model = await db.get(_Model, effective_model_id) if effective_model_id else None
+        _is_multimodal = bool(getattr(_sel_model, "is_multimodal", False)) if _sel_model else False
         await broadcast(session.id, {"event": "turn.started", "payload": {"turn_id": turn_id, "session_id": session.id}})
         if request_task:
             request_task.status = "running"
@@ -966,6 +986,8 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         bundle = await build_main_context(
             db, agent=main_agent, session=session, project=project, turn=turn,
             user_message=original_request,
+            multimodal=_is_multimodal,
+            effective_model_id=effective_model_id,
         )
         bundle.instruction = (
             "用户已确认以下方案文档，现在按它执行：\n\n"
@@ -1003,6 +1025,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             cancel_event=cancel_event,
             task_id=request_task.id if request_task else None,
             model_id=effective_model_id,
+            multimodal=_is_multimodal,
             subagent_context={
                 "manager": mgr, "session": session, "project": project,
                 "cancel_event": cancel_event,

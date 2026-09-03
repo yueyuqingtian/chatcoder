@@ -178,6 +178,8 @@ export interface TurnCreateBody {
   scheduled_task_id?: number;
   reasoning_effort?: string;
   mode?: "readonly" | "plan" | null;
+  // plan-166-767: 发送请求携带当前会话选中模型，后端据此优先解析（切换后立即发送用新模型）
+  model_id?: number;
 }
 
 export interface RollbackParams {

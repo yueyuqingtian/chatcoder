@@ -229,22 +229,60 @@ async def _compress_super_summary(summaries: list[dict]) -> list[dict]:
     return [compressed] + latest
 
 
-async def _resolve_leader_context_window(db: AsyncSession, session: "Session") -> int:
+async def _resolve_leader_context_window(db: AsyncSession, session: "Session", model_id: int | None = None) -> int:
     """解析主代理（会话绑定模型）的上下文窗口大小。
 
-    v19: 优先取会话绑定模型的 context_window（>0 时采用），保证压缩阈值与
-    占用分母按真实窗口计算；未配置时回退默认上下文窗口。
+    plan-166-767: 回退顺序（显式 model_id）→ session.model_id → main_agent.model_id → 默认兜底，
+    与 engine.start_turn 的 effective_model_id（请求 model_id or session.model_id or agent.model_id）
+    语义一致。否则「会话跟随默认模型（session.model_id=None）」时窗口按 500K 虚高，
+    摘要永不触发、消息塞爆小窗口后又被预算截断而无摘要兜底；切换模型后立即发送时
+    请求携带的 model_id 也能正确决定「目标模型窗口」。
     """
+    from sqlalchemy import select
+    from app.persistence.models.model_reg import Model
+    from app.persistence.models.agent import Agent
+
     try:
+        if model_id:
+            model = await db.get(Model, model_id)
+            if model and model.context_window and model.context_window > 0:
+                return int(model.context_window)
         model_id = getattr(session, "model_id", None)
         if model_id:
-            from app.persistence.models.model_reg import Model
             model = await db.get(Model, model_id)
+            if model and model.context_window and model.context_window > 0:
+                return int(model.context_window)
+        # 回退到 main agent 默认模型（对齐 engine effective_model_id）
+        main_agent = (await db.execute(
+            select(Agent).where(Agent.kind == "main").limit(1)
+        )).scalars().first()
+        if main_agent and getattr(main_agent, "model_id", None):
+            model = await db.get(Model, main_agent.model_id)
             if model and model.context_window and model.context_window > 0:
                 return int(model.context_window)
     except Exception:
         logger.debug("[context] 解析会话模型窗口失败，回退默认", exc_info=True)
     return _DEFAULT_CTX_WINDOW_FALLBACK
+
+
+def _is_image_message(m) -> bool:
+    """plan-166-767: 判断消息是否含图片附件（直注入/历史恢复的对象）。
+
+    带图用户消息不进入渐进摘要候选，保证切回多模态模型后历史图片块可恢复
+    （context_manager 历史重建只看未摘要消息）。
+    """
+    from app.services.doc_parser import is_image
+    content = m.content
+    if not isinstance(content, dict):
+        return False
+    for a in content.get("attachments") or []:
+        if not isinstance(a, dict):
+            continue
+        if a.get("type") == "image":
+            return True
+        if is_image(str(a.get("filename") or a.get("path") or "")):
+            return True
+    return False
 
 
 async def maybe_summarize_main_session(
@@ -280,15 +318,16 @@ async def maybe_summarize_main_session(
     for _cmp in ctx.get("compactions") or []:
         if _cmp.get("restored"):
             restored_ids.update(_cmp.get("shadowed_ids") or [])
-    # 只看未摘要、未压缩、未还原的消息
+    # 只看未摘要、未压缩、未还原、且不含图片附件的消息
+    # plan-166-767 F4: 带图消息不进候选，保证历史图片块始终可恢复（不被摘要吞噬）
     candidates = [
         m for m in messages
         if m.id not in summarized_ids and m.id not in compacted_ids and m.id not in restored_ids
+        and not _is_image_message(m)
     ]
 
     # v3.3: 按 token 触发，而非按条数
     candidates_tokens = messages_token_total(candidates)
-    # v6.4: 诊断日志 —— 打印主会话摘要判断的实际值
     logger.info(
         "[main_summary] session=%s context_window=%d threshold=%d candidates_tokens=%d (ratio=%.1f%%) %s",
         session.id, context_window, summarize_threshold, candidates_tokens,
@@ -298,64 +337,74 @@ async def maybe_summarize_main_session(
     if candidates_tokens <= summarize_threshold:
         return
 
-    # 按 token 批量选取（从最早的开始，直到达到 batch_tokens 目标）
-    to_summarize: list = []
-    accumulated = 0
-    for m in candidates:
-        msg_tokens = estimate_message_tokens_from_model(m)
-        to_summarize.append(m)
-        accumulated += msg_tokens
-        if accumulated >= batch_tokens:
+    # plan-166-767 F4: 循环摘要直到未摘要 token ≤ 阈值（每批 batch_tokens），
+    # 上限保护防死循环（每批 0.35×ctx，6 批覆盖 2.1×ctx 足够）。
+    MAX_SUMMARY_ROUNDS = 6
+    summary_rounds = 0
+    while candidates_tokens > summarize_threshold and summary_rounds < MAX_SUMMARY_ROUNDS:
+        # 按 token 批量选取（从最早的开始，直到达到 batch_tokens 目标）
+        to_summarize: list = []
+        accumulated = 0
+        for m in candidates:
+            msg_tokens = estimate_message_tokens_from_model(m)
+            to_summarize.append(m)
+            accumulated += msg_tokens
+            if accumulated >= batch_tokens:
+                break
+
+        if len(to_summarize) < 3:
             break
 
-    if len(to_summarize) < 3:
-        return
+        summary_text = await _summarize_messages(to_summarize)
+        if not summary_text:
+            break
 
-    summary_text = await _summarize_messages(to_summarize)
-    if not summary_text:
-        return
+        # v3.1: 乐观锁 —— 写入前重读 session 最新状态，避免并发覆盖
+        await db.refresh(session)
+        latest_ctx = session.shared_context or {}
+        if not isinstance(latest_ctx, dict):
+            latest_ctx = {}
 
-    # v3.1: 乐观锁 —— 写入前重读 session 最新状态，避免并发覆盖
-    await db.refresh(session)
-    latest_ctx = session.shared_context or {}
-    if not isinstance(latest_ctx, dict):
-        latest_ctx = {}
+        latest_summarized_ids = set(latest_ctx.get("summarized_ids") or [])
+        our_ids = set(m.id for m in to_summarize)
+        # 如果这批消息已被其他进程摘要 → 停止本轮，避免重复摘要竞态
+        if our_ids.issubset(latest_summarized_ids):
+            logger.debug("消息已被其他进程摘要,停止 session=%s", session.id)
+            break
 
-    latest_summarized_ids = set(latest_ctx.get("summarized_ids") or [])
-    our_ids = set(m.id for m in to_summarize)
-    # 如果这批消息已被其他进程摘要 → 跳过
-    if our_ids.issubset(latest_summarized_ids):
-        logger.debug("消息已被其他进程摘要,跳过 session=%s", session.id)
-        return
+        # 合并：在最新数据基础上追加我们的摘要
+        summaries: list[dict] = list(latest_ctx.get("summaries") or [])
+        summaries.append({
+            "text": summary_text,
+            "range": [to_summarize[0].id, to_summarize[-1].id],
+            "count": len(to_summarize),
+            "tokens": accumulated,
+        })
 
-    # 合并：在最新数据基础上追加我们的摘要
-    summaries: list[dict] = list(latest_ctx.get("summaries") or [])
-    summaries.append({
-        "text": summary_text,
-        "range": [to_summarize[0].id, to_summarize[-1].id],
-        "count": len(to_summarize),
-        "tokens": accumulated,
-    })
+        # v3.1: 超级摘要压缩（替代直接截断丢弃）
+        if len(summaries) > SUPER_SUMMARY_TRIGGER:
+            summaries = await _compress_super_summary(summaries)
 
-    # v3.1: 超级摘要压缩（替代直接截断丢弃）
-    if len(summaries) > SUPER_SUMMARY_TRIGGER:
-        summaries = await _compress_super_summary(summaries)
+        latest_summarized_ids.update(our_ids)
 
-    latest_summarized_ids.update(our_ids)
+        # v30.1: 拷贝新 dict 再赋值——JSON 列同引用赋值不触发 UPDATE（SQLAlchemy 按 identity 检测 dirty）
+        new_ctx = dict(latest_ctx)
+        new_ctx["summaries"] = summaries
+        new_ctx["summarized_ids"] = list(latest_summarized_ids)
+        # 拼接总摘要供 _layer1 使用
+        new_ctx["summary"] = "\n\n".join(s["text"] for s in summaries)
+        session.shared_context = new_ctx
+        await db.flush()
+        summary_rounds += 1
+        logger.info(
+            "会话 %s 生成摘要(第%d批): %d 条消息 %d tokens -> %d 字符 (摘要总数=%d, 窗口=%dK)",
+            session.id, summary_rounds, len(to_summarize), accumulated, len(summary_text),
+            len(summaries), context_window // 1000,
+        )
 
-    # v30.1: 拷贝新 dict 再赋值——JSON 列同引用赋值不触发 UPDATE（SQLAlchemy 按 identity 检测 dirty）
-    new_ctx = dict(latest_ctx)
-    new_ctx["summaries"] = summaries
-    new_ctx["summarized_ids"] = list(latest_summarized_ids)
-    # 拼接总摘要供 _layer1 使用
-    new_ctx["summary"] = "\n\n".join(s["text"] for s in summaries)
-    session.shared_context = new_ctx
-    await db.flush()
-    logger.info(
-        "会话 %s 生成摘要: %d 条消息 %d tokens -> %d 字符 (摘要总数=%d, 窗口=%dK)",
-        session.id, len(to_summarize), accumulated, len(summary_text),
-        len(summaries), context_window // 1000,
-    )
+        # 从候选移除已摘要消息并重算 token，继续下一轮（直到 ≤ 阈值）
+        candidates = [c for c in candidates if c.id not in our_ids]
+        candidates_tokens = messages_token_total(candidates)
 
 
 async def build_main_chat_context(

@@ -549,10 +549,35 @@ async def run_agent_loop(
                 try:
                     for _inj in injected_inputs_provider():
                         _txt = str(_inj.get("content") or "").strip()
-                        if not _txt:
+                        _atts = _inj.get("attachments") or []
+                        _blocks = None
+                        _suffix = ""
+                        if _atts and isinstance(_atts, list):
+                            # plan-166-767: 注入路径直注入图片——复用 context_manager 的图片块实现，
+                            # 否则运行中「立即发送」带图消息图片被静默丢弃（此前只取 content 文本）。
+                            if multimodal:
+                                from app.orchestration.context_manager import _load_inline_image_blocks
+                                _blocks, _notes = _load_inline_image_blocks(_atts)
+                                if _blocks:
+                                    _suffix = f"\n（注入消息附带的 {len(_blocks)} 张图片已直接附在消息中，请直接查看）"
+                            # 无论是否多模态都附上附件路径文本（read_attachment 可读），不丢信息
+                            _paths = [
+                                f"- {a.get('filename') or '(未命名)'}: path=`{a.get('path') or ''}`"
+                                for a in _atts if isinstance(a, dict) and a.get("path")
+                            ]
+                            if _paths:
+                                _suffix += "\n以下附件路径均可通过 read_attachment 读取：\n" + "\n".join(_paths)
+                        # plan-166-767: 纯图片（无文字）注入项只要有图片块即保留，不再被 continue 丢弃
+                        if not _txt and not _blocks:
                             continue
-                        messages.append(ChatMessage(role="user", content=_txt))
-                        logger.info("[agent] turn=%s step=%s 注入用户消息 (%d chars)", turn_id, step, len(_txt))
+                        _msg = ChatMessage(role="user", content=(_txt + _suffix).strip() or None)
+                        if _blocks:
+                            _msg.content_blocks = _blocks
+                        messages.append(_msg)
+                        logger.info(
+                            "[agent] turn=%s step=%s 注入用户消息 (%d chars, images=%d, model_id=%s)",
+                            turn_id, step, len(_txt), len(_blocks or []), _inj.get("model_id"),
+                        )
                 except Exception:
                     logger.warning("[agent] turn=%s 注入消息 drain 失败(非阻塞)", turn_id, exc_info=True)
 

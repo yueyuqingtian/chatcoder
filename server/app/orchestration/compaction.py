@@ -340,9 +340,14 @@ def normalize_tool_sequence(messages: list[ChatMessage]) -> list[ChatMessage]:
         if prev.role == "user" and m.role == "user":
             parts = [p for p in [prev.content, m.content] if p]
             new_content = "\n\n".join(parts) if parts else None
+            # plan-166-767: 合并时保留图片内容块（否则「注入 user 消息紧贴带图 user 消息」会被并掉图片）
+            new_blocks = None
+            if prev.content_blocks or m.content_blocks:
+                new_blocks = (prev.content_blocks or []) + (m.content_blocks or [])
             normalized[-1] = ChatMessage(
                 role="user",
                 content=new_content,
+                content_blocks=new_blocks,
             )
             continue
 
@@ -559,6 +564,22 @@ async def auto_compact(
 
     keep_rounds_data = rounds[-keep_rounds:]
     old_rounds = rounds[:-keep_rounds]
+
+    # plan-166-767: 含图片块的历史 round 不折叠——图片一旦压缩为摘要不可恢复，
+    # 切回多模态模型后历史图片块将丢失；强制保留到尾部（时间序早于 keep_rounds）。
+    def _round_has_image(r) -> bool:
+        for m in r:
+            if m.content_blocks:
+                for b in m.content_blocks:
+                    if isinstance(b, dict) and b.get("type") == "image_url":
+                        return True
+        return False
+
+    if any(_round_has_image(r) for r in old_rounds):
+        _img_rounds = [r for r in old_rounds if _round_has_image(r)]
+        old_rounds = [r for r in old_rounds if not _round_has_image(r)]
+        keep_rounds_data = _img_rounds + keep_rounds_data
+
     old_messages_flat = [m for r in old_rounds for m in r]
 
     # 收益检查：较早回合 token 量不足则跳过

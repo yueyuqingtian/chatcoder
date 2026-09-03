@@ -1,10 +1,13 @@
 /** Token 活动热力图：GitHub 风格贡献图，支持 每日/每周/累计 三种粒度。纯 SVG/div，无依赖。 */
-import { useMemo, useState, type CSSProperties } from "react";
+import { useMemo, useRef, useState, type CSSProperties, type MouseEvent } from "react";
 import { addDays, parseDate, toISO, fmtTokens } from "./chartUtils";
+import { IconLayoutGrid } from "../../icons";
 
 type Mode = "daily" | "weekly" | "cum";
 
 interface HmPoint { date: string; tokens: number; }
+
+interface HmTip { x: number; y: number; title: string; sub: string; }
 
 const CELL = 12;
 const GAP = 2;
@@ -21,6 +24,18 @@ function tier(value: number, max: number): number {
 
 export function UsageHeatmap({ daily_all }: { daily_all: HmPoint[] }) {
   const [mode, setMode] = useState<Mode>("daily");
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const [tip, setTip] = useState<HmTip | null>(null);
+
+  const showTip = (e: MouseEvent<HTMLElement>, title: string, sub: string) => {
+    const wrap = wrapRef.current;
+    const el = e.currentTarget;
+    if (!wrap) return;
+    const wr = wrap.getBoundingClientRect();
+    const er = el.getBoundingClientRect();
+    setTip({ x: er.left - wr.left + er.width / 2, y: er.top - wr.top, title, sub });
+  };
+  const hideTip = () => setTip(null);
 
   const model = useMemo(() => {
     const byDate: Record<string, number> = {};
@@ -105,9 +120,15 @@ export function UsageHeatmap({ daily_all }: { daily_all: HmPoint[] }) {
   };
 
   return (
-    <div className="usage-heatmap">
+    <div className="usage-heatmap" ref={wrapRef} onMouseLeave={hideTip}>
       <div className="usage-heatmap-head">
-        <span className="usage-heatmap-title">Token 活动</span>
+        <div className="usage-block-head">
+          <IconLayoutGrid size={16} />
+          <div className="usage-block-titles">
+            <span className="usage-heatmap-title">Token 活动</span>
+            <span className="usage-block-sub">近 12 个月</span>
+          </div>
+        </div>
         <div className="usage-seg-toggle">
           {(["daily", "weekly", "cum"] as Mode[]).map((m) => (
             <button
@@ -147,6 +168,7 @@ export function UsageHeatmap({ daily_all }: { daily_all: HmPoint[] }) {
                 key={ci}
                 className={`usage-hm-cell usage-hm-${tier(v, maxValue)}`}
                 title={`第 ${ci + 1} 周：${fmtTokens(v)} tokens`}
+                onMouseEnter={(e) => showTip(e, `第 ${ci + 1} 周`, `${fmtTokens(v)} tokens`)}
               />
             ))}
           </div>
@@ -160,6 +182,7 @@ export function UsageHeatmap({ daily_all }: { daily_all: HmPoint[] }) {
                     key={`${ci}-${ri}`}
                     className={`usage-hm-cell usage-hm-${tier(valueOf(c.date), maxValue)}`}
                     title={`${c.date}：${fmtTokens(c.tokens)} tokens`}
+                    onMouseEnter={(e) => showTip(e, c.date, `${fmtTokens(valueOf(c.date))} tokens`)}
                   />
                 );
               }),
@@ -167,6 +190,22 @@ export function UsageHeatmap({ daily_all }: { daily_all: HmPoint[] }) {
           </div>
         )}
       </div>
+      {tip && (
+        <div
+          className="usage-hm-tip"
+          style={{
+            left: tip.x,
+            top: tip.y,
+            transform: tip.y < 44 ? "translate(-50%, 12px)" : "translate(-50%, calc(-100% - 6px))",
+          }}
+        >
+          <div className="usage-tip-date">{tip.title}</div>
+          <div className="usage-tip-row">
+            <span className="usage-tip-name">tokens</span>
+            <span className="usage-tip-val">{tip.sub}</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

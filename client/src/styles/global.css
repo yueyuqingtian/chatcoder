@@ -1572,17 +1572,27 @@ a { color: var(--accent); text-decoration: none; }
 .usage-range-sep { font-size: 12px; color: var(--text-3); }
 .usage-date-input { width: 132px; font-size: 12px; }
 
-.usage-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
-.usage-card { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
-.usage-card-value { font-size: 22px; font-weight: 700; color: var(--text-1); font-family: var(--font-mono); }
+.usage-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; }
+.usage-card { position: relative; display: flex; flex-direction: column; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 12px; padding: 14px; transition: transform var(--dur-fast), border-color var(--dur-fast), box-shadow var(--dur-fast); }
+.usage-card:hover { transform: translateY(-2px); border-color: var(--border-strong); box-shadow: var(--glass-shadow); }
+.usage-card-accent { background: var(--accent-soft); border-color: color-mix(in oklab, var(--accent) 30%, var(--border)); }
+.usage-card-icon { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 10px; background: var(--bg-hover); color: var(--text-2); margin-bottom: 10px; }
+.usage-card-accent .usage-card-icon { background: color-mix(in oklab, var(--accent) 14%, var(--bg-elevated)); color: var(--accent); }
+.usage-card-accent .usage-card-value { color: var(--accent); }
+.usage-card-value { font-size: 24px; font-weight: 700; color: var(--text-1); font-family: var(--font-mono); }
 .usage-card-label { font-size: 12px; color: var(--text-3); margin-top: 4px; }
-.usage-card-sub { font-size: 11px; color: var(--text-2); margin-top: 6px; line-height: 1.5; }
+.usage-card-sub { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; font-size: 11px; margin-top: auto; line-height: 1.5; }
+.usage-card-sub .k { color: var(--text-3); }
+.usage-card-sub .v { color: var(--text-2); font-family: var(--font-mono); text-align: right; }
 
-.usage-section-block { display: flex; flex-direction: column; gap: 10px; }
+.usage-section-block { display: flex; flex-direction: column; gap: 12px; }
+.usage-block-head { display: flex; align-items: center; gap: 8px; color: var(--text-2); }
+.usage-block-titles { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.usage-block-sub { font-size: 11px; color: var(--text-3); }
 .usage-section-title { font-size: 14px; font-weight: 600; color: var(--text-1); }
 
 /* Token 活动热力图 */
-.usage-heatmap { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--border); border-radius: 12px; padding: 14px; background: var(--bg-elevated); }
+.usage-heatmap { position: relative; display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--border); border-radius: 12px; padding: 16px; background: var(--bg-elevated); }
 .usage-heatmap-head { display: flex; align-items: center; justify-content: space-between; }
 .usage-heatmap-title { font-size: 14px; font-weight: 600; color: var(--text-1); }
 .usage-seg-toggle { display: inline-flex; gap: 2px; background: var(--bg-hover); border-radius: 8px; padding: 2px; }
@@ -1593,7 +1603,8 @@ a { color: var(--accent); text-decoration: none; }
 .usage-heatmap-body { display: flex; gap: 4px; overflow-x: auto; }
 .usage-heatmap-weekdays { display: flex; flex-direction: column; gap: 2px; margin-top: 0; }
 .usage-heatmap-weekdays span { font-size: 9px; color: var(--text-3); line-height: 12px; text-align: center; }
-.usage-hm-cell { width: 12px; height: 12px; border-radius: 2px; }
+.usage-hm-cell { width: 12px; height: 12px; border-radius: 3px; transition: outline-color var(--dur-fast); }
+.usage-hm-cell:hover { outline: 1px solid var(--border-strong); }
 .usage-hm-0 { background: var(--bg-hover); }
 .usage-hm-1 { background: rgba(34, 197, 94, 0.25); }
 .usage-hm-2 { background: rgba(34, 197, 94, 0.5); }
@@ -1601,7 +1612,7 @@ a { color: var(--accent); text-decoration: none; }
 .usage-hm-4 { background: rgba(21, 128, 61, 1); }
 
 /* 每日 Token 趋势折线图 */
-.usage-trend { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--border); border-radius: 12px; padding: 14px; background: var(--bg-elevated); }
+.usage-trend { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--border); border-radius: 12px; padding: 16px; background: var(--bg-elevated); }
 .usage-trend-legend { display: flex; flex-wrap: wrap; gap: 12px; }
 .usage-trend-legend-item { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); }
 .usage-trend-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
@@ -1612,15 +1623,52 @@ a { color: var(--accent); text-decoration: none; }
 /* 模型用量环形图 */
 .usage-donut-wrap { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; border: 1px solid var(--border); border-radius: 12px; padding: 16px; background: var(--bg-elevated); }
 .usage-donut { position: relative; flex-shrink: 0; }
-.usage-donut-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; }
-.usage-donut-value { font-size: 20px; font-weight: 700; color: var(--text-1); font-family: var(--font-mono); }
+.usage-donut-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; pointer-events: none; }
+.usage-donut-value { font-size: 22px; font-weight: 700; color: var(--text-1); font-family: var(--font-mono); }
 .usage-donut-unit { font-size: 11px; color: var(--text-3); }
-.usage-donut-legend { display: flex; flex-direction: column; gap: 8px; flex: 1; min-width: 220px; max-height: 220px; overflow-y: auto; }
+.usage-donut-legend { display: flex; flex-direction: column; gap: 8px; flex: 1; min-width: 220px; max-height: 220px; overflow-y: auto; scrollbar-width: thin; }
+.usage-donut-legend::-webkit-scrollbar { width: 8px; }
+.usage-donut-legend::-webkit-scrollbar-thumb { background: var(--border); border-radius: 6px; }
+.usage-donut-legend::-webkit-scrollbar-track { background: transparent; }
 .usage-donut-legend-item { display: flex; align-items: center; gap: 8px; }
 .usage-donut-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
 .usage-donut-legend-name { flex: 1; min-width: 0; font-size: 12px; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .usage-donut-legend-pct { font-size: 12px; color: var(--text-2); width: 40px; text-align: right; }
 .usage-donut-legend-val { font-size: 12px; color: var(--text-3); font-family: var(--font-mono); width: 60px; text-align: right; }
+/* 用量图表悬停 tooltip 与交互（plan-165-757） */
+.usage-trend-chart { position: relative; }
+.usage-trend-svg { cursor: crosshair; }
+.usage-trend-hover-line { stroke: var(--text-3); stroke-width: 1; stroke-dasharray: 3 3; }
+.usage-trend-hover-dot { stroke: var(--bg-elevated); stroke-width: 1.5; }
+.usage-trend-tip,
+.usage-donut-tip,
+.usage-hm-tip {
+  position: absolute; z-index: 50; pointer-events: none;
+  min-width: 130px; max-width: 240px; padding: 8px 10px;
+  background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  font-size: 12px; color: var(--text-1); line-height: 1.5;
+}
+.usage-donut-tip { min-width: 140px; max-height: 220px; overflow-y: auto; }
+.usage-tip-sub { font-size: 11px; color: var(--text-3); margin: 2px 0 4px; }
+.usage-tip-date { font-weight: 600; color: var(--text-1); margin-bottom: 4px; }
+.usage-tip-row { display: flex; align-items: center; gap: 6px; }
+.usage-tip-name { flex: 1; min-width: 0; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-tip-val { font-family: var(--font-mono); color: var(--text-1); white-space: nowrap; }
+.usage-tip-sep { height: 1px; background: var(--border); margin: 4px 0; }
+.usage-tip-total .usage-tip-name { color: var(--text-1); font-weight: 600; }
+.usage-donut-legend-item { border-radius: 6px; padding: 2px 6px; transition: background var(--dur-fast); }
+.usage-donut-legend-item:hover,
+.usage-donut-legend-item.active { background: var(--bg-hover); }
+/* 用量统计 加载/错误/空态（plan-165-765） */
+.usage-error { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border: 1px solid var(--error); background: color-mix(in oklab, var(--error) 10%, var(--bg-elevated)); color: var(--error); border-radius: 12px; font-size: 13px; }
+.usage-skeleton { display: flex; flex-direction: column; gap: 14px; }
+.usage-skeleton-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; }
+.usage-skeleton-card { height: 100px; border-radius: 12px; background: var(--bg-hover); animation: usage-pulse 1.4s ease-in-out infinite; }
+.usage-skeleton-block { height: 220px; border-radius: 12px; background: var(--bg-hover); animation: usage-pulse 1.4s ease-in-out infinite; }
+.usage-empty { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 48px 0; color: var(--text-3); font-size: 13px; text-align: center; }
+.usage-empty svg { opacity: 0.6; }
+@keyframes usage-pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 0.3; } }
 /* v2.2 (对齐 zcode 3.8.3): 命令中心（Cmd+K） */
 .cmd-center-overlay { position: fixed; inset: 0; z-index: 300; background: rgba(0, 0, 0, 0.45); display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; }
 .cmd-center { width: 640px; max-width: 92vw; background: var(--color-popover); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 16px 48px rgba(0,0,0,0.18); overflow: hidden; }

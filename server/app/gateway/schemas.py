@@ -115,6 +115,9 @@ class TurnCreate(BaseModel):
     scheduled_task_id: int | None = None  # 定时任务触发
     reasoning_effort: str | None = None  # v4: turn 级推理深度覆盖
     mode: str | None = None  # v6: 命令模式: readonly(只读审阅) / plan(先规划后执行)
+    # plan-166-767: 请求携带的权威模型 id（切换模型后立即发送时优先），
+    # 消除 PATCH/POST 竞态导致后端仍按旧模型处理。
+    model_id: int | None = None
 
 
 class TurnInjectBody(BaseModel):
@@ -122,6 +125,8 @@ class TurnInjectBody(BaseModel):
     request_id: str | None = None  # 前端排队项 id，user_input.injected 事件回传用于移除队列
     content: str
     attachments: list[dict[str, Any]] | None = None
+    # plan-166-767: 透传当前会话模型（供注入项记录，不改变运行中 turn 的模型）
+    model_id: int | None = None
 
 
 class TurnOut(BaseModel):

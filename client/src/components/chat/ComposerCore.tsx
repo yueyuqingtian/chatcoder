@@ -523,16 +523,24 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
 
   const changeModel = (modelId: number) => {
     if (!isHome && currentSessionId != null) {
-      void api.updateSession(currentSessionId, { model_id: modelId });
-      useChatStore.setState((s) => ({
-        sessions: s.sessions.map((x) => (x.id === currentSessionId ? { ...x, model_id: modelId } : x)),
-        lastModelId: modelId,
-      }));
+      // plan-166-767: 切换模型等待后端落库成功后再更新本地 state；失败回滚提示。
+      // 配合发送请求携带 model_id（权威值），消除「前端已切、后端未变」竞态。
+      setShowModels(false);
+      void api.updateSession(currentSessionId, { model_id: modelId })
+        .then(() => {
+          useChatStore.setState((s) => ({
+            sessions: s.sessions.map((x) => (x.id === currentSessionId ? { ...x, model_id: modelId } : x)),
+            lastModelId: modelId,
+          }));
+        })
+        .catch(() => {
+          useChatStore.setState({ error: "切换模型失败，请重试" });
+        });
     } else {
       setHomeModelId(modelId);
       useChatStore.setState({ lastModelId: modelId });
+      setShowModels(false);
     }
-    setShowModels(false);
   };
 
   const changeReasoning = (e: string | null) => {
@@ -594,7 +602,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
         useDraftsStore.getState().patchDraft(`s${sessionId}`, { reasoningEffort: sendEffort ?? null });
         if (usedModelId != null) useChatStore.setState({ lastModelId: usedModelId });
         const sendMode = (mode === "plan" || mode === "readonly") ? mode : null;
-        await sendTurn(content, attachmentPayload, sendEffort, sendMode);
+        await sendTurn(content, attachmentPayload, sendEffort, sendMode, usedModelId);
         skipDraftSyncRef.current = true;
         setInput("");
         setAttachments([]);
@@ -614,7 +622,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     }
     // 运行中发送 → sendTurn 内部入队，turn 完成后自动续发
     const sendMode = (mode === "plan" || mode === "readonly") ? mode : null;
-        await sendTurn(content, attachmentPayload, sendEffort, sendMode);
+        await sendTurn(content, attachmentPayload, sendEffort, sendMode, sessionModelId);
     skipDraftSyncRef.current = true;
     setInput("");
     setAttachments([]);

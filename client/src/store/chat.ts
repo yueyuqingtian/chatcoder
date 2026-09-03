@@ -248,7 +248,7 @@ interface ChatState {
   renameSession: (sessionId: number, title: string) => Promise<void>;
   forkSession: (sessionId: number) => Promise<void>;
 /** plan-547: 返回新 turn id（null=未创建，如运行中入队/发送失败），供队列续发失败回队判断。 */
-sendTurn: (content: string, attachments?: Record<string, unknown>[], reasoningEffort?: string, mode?: "readonly" | "plan" | null) => Promise<number | null>;
+sendTurn: (content: string, attachments?: Record<string, unknown>[], reasoningEffort?: string, mode?: "readonly" | "plan" | null, modelId?: number | null) => Promise<number | null>;
 cancelTurn: () => Promise<void>;
   forceStop: () => Promise<void>;
 resumeTurn: () => Promise<void>;
@@ -875,7 +875,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  sendTurn: async (content, attachments, reasoningEffort, mode) => {
+  sendTurn: async (content, attachments, reasoningEffort, mode, modelId) => {
     const { currentSessionId, isRunning } = get();
     if (!currentSessionId) return null;
     // 空态新会话可能在 WS 建连前就收到首条消息，先本地投影标题，避免等待事件丢失。
@@ -950,7 +950,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
     _startHeartbeat();
     try {
-      const turn = await api.createTurn({ session_id: currentSessionId, content, attachments, reasoning_effort: reasoningEffort, mode });
+      const turn = await api.createTurn({ session_id: currentSessionId, content, attachments, reasoning_effort: reasoningEffort, mode, model_id: modelId ?? undefined });
       _clearPendingDeltas(); // v6.5: 新 turn 清掉上一轮残留的完成标记，保证思考/正文从头实时流式
       set((s) => ({
         turns: [...s.turns, turn],

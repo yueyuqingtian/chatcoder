@@ -306,7 +306,7 @@ async def compact_session(
         压缩结果 dict（含 compaction_id / shadowed_ids / saved_tokens 等），
         无可压缩范围或收益不足时返回 None。
     """
-    from app.orchestration.context_memory import _fetch_main_messages
+    from app.orchestration.context_memory import _fetch_main_messages, _is_image_message
     from app.orchestration.token_counter import get_main_summarize_threshold
 
     ctx = session.shared_context or {}
@@ -317,10 +317,13 @@ async def compact_session(
 
     all_msgs = await _fetch_main_messages(db, session.id, limit=2000)
     # 候选 = 未摘要未压缩、类型可压缩的主线程消息
+    # plan-166-767: 跳过含图片附件的消息——图片一旦被遮蔽（compacted_ids）无法恢复，
+    # 切回多模态模型后历史图片块将丢失。
     candidates = [
         m for m in all_msgs
         if m.id not in summarized_ids and m.id not in compacted_ids
         and m.msg_type in _COMPACT_KEEP_TYPES
+        and not _is_image_message(m)
     ]
     if len(candidates) < 4:
         logger.debug("[compressor] session=%s 候选消息 %d 条过少，跳过压缩", session.id, len(candidates))
