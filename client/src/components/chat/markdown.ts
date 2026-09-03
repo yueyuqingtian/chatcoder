@@ -12,9 +12,11 @@ function attachmentsToText(content: unknown, heading: string): string {
     if (!a || typeof a !== "object") continue;
     const rec = a as Record<string, unknown>;
     const name = String(rec.filename ?? "(未命名)");
+    // 问题15: 优先使用后端回填的服务器绝对路径，缺失时回退 path/url
+    const absPath = String(rec.abs_path ?? "");
     const path = String(rec.path ?? "");
     const url = String(rec.url ?? "");
-    const loc = path || url;
+    const loc = absPath || path || url;
     lines.push(`- ${name}${loc ? ` (${loc})` : ""}`);
   }
   return `\n${heading}\n${lines.join("\n")}`;

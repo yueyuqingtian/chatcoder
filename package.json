@@ -1,6 +1,6 @@
 {
   "name": "chatcoder",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "chatcoder - AI 多 Agent 协同编码工作台(桌面版)",
   "author": "chatcoder",
   "license": "UNLICENSED",
@@ -27,7 +27,7 @@
     "productName": "chatcoder",
     "copyright": "Copyright © 2026 chatcoder",
     "directories": {
-      "output": "v7",
+      "output": "v6",
       "buildResources": "electron/build"
     },
     "files": [

@@ -46,7 +46,7 @@ class ApprovalManager:
         self._on_request = cb
 
     def new_id(self) -> str:
-        return f"appr_{uuid.uuid4().hex[:12]}"
+        return f"apr_{uuid.uuid4().hex[:12]}"
 
     async def request(
         self,
@@ -63,6 +63,16 @@ class ApprovalManager:
         tool_name = detail.get("tool", "")
         kind = detail.get("kind", "tool_call")
         risk_level = detail.get("risk_level", "low")
+
+        # v32 (plan-89)/问题9 修复: auto_approve 不可绕过"始终需要审批的工具"与高风险工具。
+        # 调用方 is_forced 之外，再结合配置列表与风险等级判定强制审批（executor/ask_user 均不传 is_forced）。
+        if not is_forced and kind != "question":
+            try:
+                forced = list(settings.force_approval_tools_list or [])
+            except Exception:
+                forced = [t.strip() for t in str(getattr(settings, "force_approval_tools", "")).split(",") if t.strip()]
+            if tool_name and (tool_name in forced or risk_level == "high"):
+                is_forced = True
 
         # 提问(kind == "question")与强制列表(is_forced=True)必须等待用户交互
         if kind != "question" and not is_forced:

@@ -19,6 +19,7 @@ import { PluginsPanel } from "./PluginsPanel";
 import { ArchivedPanel } from "./ArchivedPanel";
 import { IconDownload, IconRefresh } from "../icons";
 import { useUpdaterStore } from "../../store/updater";
+import { useI18n } from "../../store/i18n";
 import {
   IconAnchor, IconBarChart, IconBookOpen, IconBrain, IconCalendar,
   IconCpu, IconInfo, IconPalette, IconPlug, IconRotateCcw, IconSettings,
@@ -116,23 +117,26 @@ function RowItem({ title, desc }: { title: string; desc: string }) {
 }
 
 function Panel({ tab }: { tab: SettingsTab }) {
+  const { t } = useI18n();
+  const title = t(`settings.pt.${tab}`);
+  const sub = t(`settings.ps.${tab}`);
   switch (tab) {
-    case "general": return <div className="settings-content-inner"><div className="settings-page-title">常规</div><div className="settings-page-subtitle">语言、代理、终端与显示选项</div><GeneralPanel /></div>;
-    case "appearance": return <div className="settings-content-inner"><div className="settings-page-title">外观</div><div className="settings-page-subtitle">主题、毛玻璃、布局与个性化外观</div><AppearancePanel /></div>;
-    case "models": return <div className="settings-content-inner"><div className="settings-page-title">模型管理</div><div className="settings-page-subtitle">按供应商配置模型：填 URL/Key 后扫描，勾选启用并设置上下文 / 多模态</div><div className="settings-card"><ModelsPanel /></div></div>;
-    case "skills": return <div className="settings-content-inner"><div className="settings-page-title">技能管理</div><div className="settings-page-subtitle">可被 Agent 加载的 Skill 资源</div><div className="settings-card"><SkillsPanel /></div></div>;
-    case "subagents": return <div className="settings-content-inner"><div className="settings-page-title">子代理</div><div className="settings-page-subtitle">子代理类型配置：工具白名单、模型覆盖与系统提示词</div><div className="settings-card"><SubagentsPanel /></div></div>;
-    case "mcp": return <div className="settings-content-inner"><div className="settings-page-title">MCP 服务器</div><div className="settings-page-subtitle">连接外部工具与数据源</div><div className="settings-card"><McpPanel /></div></div>;
-    case "rules": return <div className="settings-content-inner"><div className="settings-page-title">AI 规则</div><div className="settings-page-subtitle">全局 / 项目规则，以及多 AI 软件规则文档的扫描与启用</div><div className="settings-card"><RulesPanel /></div></div>;
-    case "policy": return <div className="settings-content-inner"><div className="settings-page-title">执行策略</div><div className="settings-page-subtitle">控制命令执行审批规则，allow 放行 / deny 拒绝 / ask 需审批</div><div className="settings-card"><PolicyPanel /></div></div>;
-    case "scheduled": return <div className="settings-content-inner"><div className="settings-page-title">定时任务</div><div className="settings-card"><ScheduledPanel /></div></div>;
-    case "hooks": return <div className="settings-content-inner"><div className="settings-page-title">钩子</div><div className="settings-card"><HooksPanel /></div></div>;
-    case "memory": return <div className="settings-content-inner"><div className="settings-page-title">记忆</div><div className="settings-card"><MemoryPanel /></div></div>;
-    case "usage": return <div className="settings-content-inner-wide"><div className="settings-page-title">用量统计</div><div className="settings-page-subtitle">整个软件的 token 用量：总数、趋势与各模型分布</div><div className="settings-card"><UsagePanel /></div></div>;
-    case "diagnostics": return <div className="settings-content-inner"><div className="settings-page-title">诊断</div><div className="settings-page-subtitle">系统健康检查</div><div className="settings-card"><DiagnosticsPanel /></div></div>;
-    case "archive": return <div className="settings-content-inner"><div className="settings-page-title">归档恢复</div><div className="settings-page-subtitle">已归档的项目与会话，支持一键恢复</div><div className="settings-card"><ArchivedPanel /></div></div>;
-    case "plugins": return <div className="settings-content-inner"><div className="settings-page-title">插件</div><div className="settings-page-subtitle">系统组件插件化：查看可替换的 slot 组件，像拼积木一样替换内置/外挂组件</div><div className="settings-card"><PluginsPanel /></div></div>;
-    case "about": return <div className="settings-content-inner"><div className="settings-page-title">关于</div><div className="settings-card"><AboutPanel /></div></div>;
+    case "general": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><GeneralPanel /></div>;
+    case "appearance": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><AppearancePanel /></div>;
+    case "models": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><ModelsPanel /></div></div>;
+    case "skills": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><SkillsPanel /></div></div>;
+    case "subagents": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><SubagentsPanel /></div></div>;
+    case "mcp": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><McpPanel /></div></div>;
+    case "rules": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><RulesPanel /></div></div>;
+    case "policy": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><PolicyPanel /></div></div>;
+    case "scheduled": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><ScheduledPanel /></div></div>;
+    case "hooks": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><HooksPanel /></div></div>;
+    case "memory": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><MemoryPanel /></div></div>;
+    case "usage": return <div className="settings-content-inner-wide"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><UsagePanel /></div></div>;
+    case "diagnostics": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><DiagnosticsPanel /></div></div>;
+    case "archive": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><ArchivedPanel /></div></div>;
+    case "plugins": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><PluginsPanel /></div></div>;
+    case "about": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-card"><AboutPanel /></div></div>;
     default: return null;
   }
 }

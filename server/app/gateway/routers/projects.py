@@ -68,6 +68,22 @@ async def project_scan_rules(project_id: int, db: AsyncSession = Depends(get_db)
     return await scan_rules_docs(project.path)
 
 
+@router.get("/{project_id}/stat", response_model=dict)
+async def project_stat(project_id: int, path: str,
+                       db: AsyncSession = Depends(get_db)):
+    """问题2: 轻量文件存在性校验（不读内容），供消息内文件链接判断是否可点击。"""
+    import os
+    project = await project_service.get_project(db, project_id)
+    if project is None:
+        raise HTTPException(404, "项目不存在")
+    root = os.path.abspath(project.path)
+    target = os.path.abspath(os.path.join(root, path.lstrip("/\\")))
+    if not target.startswith(root + os.sep) and target != root:
+        return {"exists": False, "is_dir": False}
+    is_dir = os.path.isdir(target)
+    return {"exists": os.path.exists(target), "is_dir": is_dir}
+
+
 @router.get("/{project_id}/read-file", response_model=dict)
 async def project_read_file(project_id: int, path: str,
                             db: AsyncSession = Depends(get_db)):
@@ -102,6 +118,49 @@ async def project_tree(project_id: int, depth: int = Query(2, ge=1, le=8),
     if project is None:
         raise HTTPException(404, "项目不存在")
     return _build_tree(project.path, max_depth=depth)
+
+
+# 问题13: 文件搜索排除的常见忽略目录（与消息流工具一致）
+_SEARCH_EXCLUDE_DIRS = {
+    "node_modules", ".git", "__pycache__", ".venv", "venv", "dist", "build",
+    ".next", ".nuxt", "target", ".idea", ".vscode", "logs", ".cache",
+    "coverage", ".pytest_cache", ".ruff_cache",
+}
+
+
+@router.get("/{project_id}/files/search", response_model=list[str])
+async def project_file_search(project_id: int, q: str = "", limit: int = 100,
+                              db: AsyncSession = Depends(get_db)):
+    """问题13: 按文件名/路径子串搜索项目内全部文件（不设深度限制，排除常见忽略目录）。
+
+    供输入框 @ 引用文件补全使用；空查询返回空列表。
+    """
+    import os
+    project = await project_service.get_project(db, project_id)
+    if project is None:
+        raise HTTPException(404, "项目不存在")
+    needle = q.strip().lower()
+    if not needle:
+        return []
+    root = project.path
+    results: list[str] = []
+    scanned = 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        # 原地过滤忽略目录（含隐藏目录）
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in _SEARCH_EXCLUDE_DIRS and not d.startswith(".")
+        ]
+        for fn in filenames:
+            scanned += 1
+            if scanned > 200_000:  # 防御性上限：超大仓库避免无限扫描
+                return results
+            rel = os.path.relpath(os.path.join(dirpath, fn), root).replace("\\", "/")
+            if needle in rel.lower():
+                results.append(rel)
+                if len(results) >= limit:
+                    return results
+    return results
 
 
 def _build_tree(root: str, max_depth: int) -> dict:

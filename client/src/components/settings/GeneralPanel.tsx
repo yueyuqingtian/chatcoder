@@ -1,10 +1,11 @@
 /** 设置中心：常规（v2.2 对齐 zcode 3.18）。
  * 界面语言、HTTP 代理、终端 Shell/字体、增强搜索、消息流显示开关。
  * 所有设置项走 /settings/global 持久化（config.json），重启不丢。 */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../../api/client";
 import { useUiStore } from "../../store/ui";
 import { useChatStore } from "../../store/chat";
+import { useI18n } from "../../store/i18n";
 import { Row, Sw } from "./shared";
 
 const TERMINAL_SHELLS = [
@@ -30,6 +31,7 @@ const MAX_STEPS_OPTIONS = [
 
 export function GeneralPanel() {
   const ui = useUiStore();
+  const { t } = useI18n();
   const [cfg, setCfg] = useState({
     terminal_shell: "auto", terminal_font: "", http_proxy: "",
     enhanced_search: true, show_reasoning: true,
@@ -43,6 +45,47 @@ export function GeneralPanel() {
   });
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  // 问题7/8: 终端 Shell/字体选项（后端按当前设备存在性探测）
+  const [shells, setShells] = useState(TERMINAL_SHELLS);
+  const [fonts, setFonts] = useState<{ value: string; label: string }[]>([]);
+  // 问题9: 始终需要审批的工具——可用工具列表 + 已选标签
+  const [toolNames, setToolNames] = useState<string[]>([]);
+  const [toolDraft, setToolDraft] = useState("");
+  const [toolOpen, setToolOpen] = useState(false);
+
+  useEffect(() => {
+    api.getTerminalOptions()
+      .then((o) => {
+        setFonts(o.fonts || []);
+        const avail = (o.shells || [])
+          .filter((s) => s.available || s.value === "auto")
+          .map((s) => ({ value: s.value, label: s.label }));
+        if (avail.length > 0) setShells(avail);
+      })
+      .catch(() => { /* 拉取失败沿用硬编码候选 */ });
+    api.listExecPolicyTools()
+      .then((list) => setToolNames(list.map((t) => t.name)))
+      .catch(() => { /* 失败则工具下拉为空，仅支持手动输入 */ });
+  }, []);
+
+  /** 问题9: 已选审批工具列表（以逗号字符串与 cfg.force_approval_tools 同步） */
+  const forceTools = useMemo(
+    () => cfg.force_approval_tools.split(",").map((s) => s.trim()).filter(Boolean),
+    [cfg.force_approval_tools],
+  );
+  const setForceTools = (next: string[]) => patch({ force_approval_tools: next.join(",") });
+  const addForceTool = (name: string) => {
+    const t = name.trim();
+    if (!t) return;
+    if (forceTools.includes(t)) { setToolDraft(""); return; }
+    setForceTools([...forceTools, t]);
+    setToolDraft("");
+  };
+  const removeForceTool = (name: string) => setForceTools(forceTools.filter((t) => t !== name));
+  const filteredTools = useMemo(
+    () => toolNames.filter((n) => !forceTools.includes(n) && n.toLowerCase().includes(toolDraft.trim().toLowerCase())),
+    [toolNames, forceTools, toolDraft],
+  );
 
   const load = useCallback(async () => {
     try {
@@ -97,42 +140,100 @@ export function GeneralPanel() {
   return (
     <div>
       <div className="settings-card">
-        <Row title="界面语言" desc="中文 / English">
+        <Row title={t("gp.language")} desc={t("gp.language_desc")}>
           <select className="ui-select" value={ui.language} onChange={(e) => ui.setLanguage(e.target.value as "zh" | "en")}>
             <option value="zh">中文</option>
             <option value="en">English</option>
           </select>
         </Row>
-        <Row title="HTTP 代理" desc="全局 HTTP/HTTPS 代理，搜索引擎（Google/DuckDuckGo 等）与 web 工具自动走此代理，立即生效">
+        <Row title={t("gp.http_proxy")} desc={t("gp.http_proxy_desc")}>
           <input className="ui-input" placeholder="如 http://127.0.0.1:7890" value={cfg.http_proxy} onChange={(e) => patch({ http_proxy: e.target.value })} />
         </Row>
-        <Row title="集成终端 Shell" desc="新终端标签使用的 Shell（重启终端生效）">
+        <Row title={t("gp.terminal_shell")} desc={t("gp.terminal_shell_desc")}>
           <select className="ui-select" value={cfg.terminal_shell} onChange={(e) => patch({ terminal_shell: e.target.value })}>
-            {TERMINAL_SHELLS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+            {/* 问题7: 仅列出当前设备实际存在的 Shell；已选值不在列表中时保留显示 */}
+            {!shells.some((s) => s.value === cfg.terminal_shell) && (
+              <option value={cfg.terminal_shell}>{cfg.terminal_shell}</option>
+            )}
+            {shells.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
           </select>
         </Row>
-        <Row title="终端字体" desc="留空自动继承系统终端字体">
-          <input className="ui-input" placeholder="如 Cascadia Code, monospace" value={cfg.terminal_font} onChange={(e) => patch({ terminal_font: e.target.value })} />
+        <Row title={t("gp.terminal_font")} desc={t("gp.terminal_font_desc")}>
+          <select className="ui-select" value={cfg.terminal_font} onChange={(e) => patch({ terminal_font: e.target.value })}>
+            {/* 问题8: 字体改为下拉候选；已选自定义值不在列表中时保留显示 */}
+            {!fonts.some((f) => f.value === cfg.terminal_font) && (
+              <option value={cfg.terminal_font}>{cfg.terminal_font || "继承系统终端字体"}</option>
+            )}
+            {(fonts.length ? fonts : [{ value: "", label: "继承系统终端字体" }]).map((f) => (
+              <option key={f.value} value={f.value}>{f.label}</option>
+            ))}
+          </select>
         </Row>
       </div>
 
       <div className="settings-card">
-        <Row title="增强搜索（ripgrep）" desc="使用 ripgrep 进行更快的全库文本搜索">
+        <Row title={t("gp.enhanced_search")} desc={t("gp.enhanced_search_desc")}>
           <Sw checked={cfg.enhanced_search} onChange={(v) => patch({ enhanced_search: v })} />
         </Row>
-        <Row title="AI 主动生成记忆" desc="开启后每轮对话结束时，AI 会自主提取关键事实/偏好写入记忆库；关闭则不再自动生成记忆">
+        <Row title={t("gp.memory")} desc={t("gp.memory_desc")}>
           <Sw checked={cfg.memory_enabled} onChange={(v) => patch({ memory_enabled: v })} />
         </Row>
-        <Row title="消息流显示 reasoning" desc="在消息流中渲染思考过程块（ThinkingBlock）">
+        <Row title={t("gp.reasoning")} desc={t("gp.reasoning_desc")}>
           <Sw checked={cfg.show_reasoning} onChange={(v) => patch({ show_reasoning: v })} />
         </Row>
-        <Row title="自动批准工具调用" desc="开启后自动允许工具请求（「始终需要审批」列表内的工具仍会弹审批）">
+        <Row title={t("gp.auto_approve")} desc={t("gp.auto_approve_desc")}>
           <Sw checked={cfg.auto_approve_tools} onChange={(v) => patch({ auto_approve_tools: v })} />
         </Row>
-        <Row title="始终需要审批的工具" desc="用逗号分隔工具名，例如 read_file, write_file；即使开启自动批准或危险全访问沙箱也不可跳过">
-          <input className="ui-input" placeholder="留空表示不额外强制审批" value={cfg.force_approval_tools} onChange={(e) => patch({ force_approval_tools: e.target.value })} />
+        <Row title={t("gp.force_approve")} desc={t("gp.force_approve_desc")}>
+          <div className="approval-tool-selector">
+            {forceTools.map((t) => (
+              <span key={t} className="approval-tool-chip">
+                {t}
+                <button type="button" className="approval-tool-chip-remove" onClick={() => removeForceTool(t)} title="移除">×</button>
+              </span>
+            ))}
+            <input
+              className="approval-tool-input"
+              value={toolDraft}
+              placeholder={forceTools.length ? "" : "选择或输入工具名…"}
+              onChange={(e) => { setToolDraft(e.target.value); setToolOpen(true); }}
+              onFocus={() => setToolOpen(true)}
+              onBlur={() => setTimeout(() => setToolOpen(false), 150)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === ",") {
+                  e.preventDefault();
+                  if (toolDraft.trim()) addForceTool(toolDraft);
+                } else if (e.key === "Escape") {
+                  setToolOpen(false);
+                }
+              }}
+            />
+            {toolOpen && (filteredTools.length > 0 || toolDraft.trim()) && (
+              <div className="approval-tool-dropdown">
+                {filteredTools.map((n) => (
+                  <button
+                    key={n}
+                    type="button"
+                    className="approval-tool-option"
+                    onMouseDown={() => addForceTool(n)}
+                  >
+                    {n}
+                  </button>
+                ))}
+                {toolDraft.trim() && !toolNames.includes(toolDraft.trim()) && (
+                  <button
+                    type="button"
+                    className="approval-tool-option custom"
+                    onMouseDown={() => addForceTool(toolDraft)}
+                  >
+                    添加「{toolDraft.trim()}」
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
         </Row>
-        <Row title="沙箱模式" desc="工作区写访问：写盘/命令走审批卡（默认）；只读沙箱：拒绝一切写盘与高危命令（自动批准不可绕过）；危险全访问：跳过审批卡（强制审批列表内的工具仍弹审批）。项目 .chatcoder/config.toml 显式配置时优先于此">
+        <Row title={t("gp.sandbox")} desc={t("gp.sandbox_desc")}>
           <select
             className="ui-select"
             value={cfg.sandbox_mode}
@@ -141,7 +242,7 @@ export function GeneralPanel() {
             {SANDBOX_MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
           </select>
         </Row>
-        <Row title="AI 最大执行步数" desc="单轮对话中模型可调用的最大工具步数。可选 200、500、1000（推荐）或不限制步数">
+        <Row title={t("gp.max_steps")} desc={t("gp.max_steps_desc")}>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <select
               className="ui-select"
@@ -172,18 +273,18 @@ export function GeneralPanel() {
             )}
           </div>
         </Row>
-        <Row title="开启内置浏览器工具" desc="允许 AI 调用浏览器进行网页访问、点击、填表、DOM 解析与多模态页面截图">
+        <Row title={t("gp.browser")} desc={t("gp.browser_desc")}>
           <Sw checked={cfg.browser_enabled} onChange={(v) => patch({ browser_enabled: v })} />
         </Row>
         {cfg.browser_enabled && (
-          <Row title="浏览器后台无头模式" desc="开启后 Playwright/Chromium 在后台静默运行；关闭后显示可视浏览器窗口">
+          <Row title={t("gp.browser_headless")} desc={t("gp.browser_headless_desc")}>
             <Sw checked={cfg.browser_headless} onChange={(v) => patch({ browser_headless: v })} />
           </Row>
         )}
-        <Row title="计划模式允许访问工作区外" desc="开启后「计划模式」会话中的 AI 可执行命令访问工作区外的目录（默认关闭，越界 cwd 回退工作区）；只读沙箱下非只读命令仍会被拦截">
+        <Row title={t("gp.plan_outside")} desc={t("gp.plan_outside_desc")}>
           <Sw checked={cfg.plan_mode_allow_outside_access} onChange={(v) => patch({ plan_mode_allow_outside_access: v })} />
         </Row>
-        <Row title="消息流密度" desc="思考/工具调用/文本等消息块之间的行间距（立即生效）">
+        <Row title={t("gp.density")} desc={t("gp.density_desc")}>
           <select
             className="ui-select"
             value={ui.msgDensity}
@@ -197,7 +298,7 @@ export function GeneralPanel() {
 
       <div className="settings-create-actions" style={{ marginTop: 12 }}>
         <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={saving}>
-          {saving ? "保存中…" : saved ? "已保存 ✓" : "保存设置"}
+          {saving ? t("gp.saving") : saved ? t("gp.saved") : t("gp.save")}
         </button>
       </div>
     </div>

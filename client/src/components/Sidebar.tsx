@@ -313,7 +313,9 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
                         </span>
                         {projectMenuFor === p.id && (
                           <div className="context-menu sb-context-menu" onClick={() => setProjectMenuFor(null)}>
-                            <div className="context-menu-item" onClick={() => (window.chatcoderAPI?.showItemInFolder ? window.chatcoderAPI.showItemInFolder(p.path) : window.chatcoderAPI?.openPath?.(p.path))}>在文件管理器打开</div>
+                            {/* 问题4: 在文件管理器打开 = 直接打开项目根目录本体（openPath），
+                                而非 showItemInFolder（打开父级并定位项目文件夹） */}
+                            <div className="context-menu-item" onClick={() => window.chatcoderAPI?.openPath?.(p.path)}>在文件管理器打开</div>
                             <div className="context-menu-divider" />
                             <div className="context-menu-item danger" onClick={() => { api.updateProject(p.id, { archived: true }).then(() => loadBootstrap()); }}>归档项目</div>
                           </div>

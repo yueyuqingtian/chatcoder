@@ -229,6 +229,72 @@ async def get_global_settings() -> GlobalSettingsOut:
     )
 
 
+class TerminalShellOption(BaseModel):
+    value: str
+    label: str
+    available: bool
+
+
+class TerminalFontOption(BaseModel):
+    value: str
+    label: str
+
+
+class TerminalOptionsOut(BaseModel):
+    shells: list[TerminalShellOption]
+    fonts: list[TerminalFontOption]
+
+
+def _detect_shells() -> list[TerminalShellOption]:
+    """问题7: 按当前设备实际存在性探测可用 Shell（auto 恒可用）。"""
+    import shutil
+    from pathlib import Path as _P
+    sys32 = _P(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+
+    def _exists(p: str | None) -> bool:
+        if not p:
+            return False
+        return _P(p).exists()
+
+    pwsh = shutil.which("pwsh") or str(sys32 / "pwsh.exe")
+    powershell = shutil.which("powershell") or str(sys32 / "WindowsPowerShell" / "v1.0" / "powershell.exe")
+    cmd = shutil.which("cmd") or str(sys32 / "cmd.exe")
+    git_bash = None
+    try:
+        from app.orchestration.tools.shell_env import resolve_git_bash
+        git_bash = resolve_git_bash()
+    except Exception:
+        pass
+
+    return [
+        TerminalShellOption(value="auto", label="自动（按平台默认）", available=True),
+        TerminalShellOption(value="pwsh", label="PowerShell 7 (pwsh)", available=_exists(pwsh)),
+        TerminalShellOption(value="powershell", label="Windows PowerShell", available=_exists(powershell)),
+        TerminalShellOption(value="cmd", label="命令提示符 (cmd)", available=_exists(cmd)),
+        TerminalShellOption(value="git-bash", label="Git Bash", available=bool(git_bash)),
+    ]
+
+
+def _terminal_fonts() -> list[TerminalFontOption]:
+    """问题8: 常用等宽字体候选，供终端字体下拉选择（value 传给终端渲染器）。"""
+    return [
+        TerminalFontOption(value="", label="继承系统终端字体"),
+        TerminalFontOption(value="Cascadia Code", label="Cascadia Code"),
+        TerminalFontOption(value="Consolas", label="Consolas"),
+        TerminalFontOption(value="JetBrains Mono", label="JetBrains Mono"),
+        TerminalFontOption(value="Fira Code", label="Fira Code"),
+        TerminalFontOption(value="Source Code Pro", label="Source Code Pro"),
+        TerminalFontOption(value="Sarasa Mono SC", label="Sarasa Mono SC（更纱黑体/等宽）"),
+        TerminalFontOption(value="Microsoft YaHei", label="Microsoft YaHei（微软雅黑）"),
+    ]
+
+
+@router.get("/settings/terminal/options", response_model=TerminalOptionsOut)
+async def get_terminal_options() -> TerminalOptionsOut:
+    """问题7/8: 返回当前设备实际存在的终端 Shell 与候选等宽字体。"""
+    return TerminalOptionsOut(shells=_detect_shells(), fonts=_terminal_fonts())
+
+
 @router.put("/settings/global", response_model=GlobalSettingsOut)
 async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
     """更新全局设置。"""

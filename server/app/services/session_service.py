@@ -117,6 +117,49 @@ async def create_system_message(db: AsyncSession, *, session_id: int, content: d
     await db.flush()
 
 
+async def list_main_messages(db: AsyncSession, session_id: int, limit: int | None = None) -> list[Message]:
+    """主线程消息（thread_id IS NULL），默认过滤已回滚软删消息（问题14）。
+
+    返回最近 limit 条，保持时间正序（最旧在前）；供全局摘要拼接。
+    """
+    stmt = (
+        select(Message)
+        .where(
+            Message.session_id == session_id,
+            Message.thread_id.is_(None),
+            Message.deleted == False,  # noqa: E712
+        )
+        .order_by(Message.id.desc())
+    )
+    if limit:
+        stmt = stmt.limit(limit)
+    res = await db.execute(stmt)
+    rows = list(res.scalars().all())
+    rows.reverse()  # 恢复时间正序
+    return rows
+
+
+async def list_thread_messages(db: AsyncSession, session_id: int, thread_id: int,
+                               limit: int | None = None) -> list[Message]:
+    """指定子代理线程消息，默认过滤已回滚软删消息（问题14）。
+
+    保持时间正序（最旧在前），供 build_thread_context_with_window 的 token 预算择优。
+    """
+    stmt = (
+        select(Message)
+        .where(
+            Message.session_id == session_id,
+            Message.thread_id == thread_id,
+            Message.deleted == False,  # noqa: E712
+        )
+        .order_by(Message.id.asc())
+    )
+    if limit:
+        stmt = stmt.limit(limit)
+    res = await db.execute(stmt)
+    return list(res.scalars().all())
+
+
 async def last_activity_at(db: AsyncSession, session_id: int) -> str | None:
     """最近一条未删除消息时间；无消息回退会话创建时间。"""
     res = await db.execute(

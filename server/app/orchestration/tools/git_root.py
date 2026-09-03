@@ -7,10 +7,30 @@ v2.5: 多仓库场景(workspace 下含 clinic/ + clinicFrontEnd/)不再盲目选
 而是返回所有仓库列表供上层选择;工具按 cwd 或命令上下文匹配。
 """
 import logging
+import subprocess
 from pathlib import Path
 
 _MAX_UP = 10
 logger = logging.getLogger(__name__)
+
+
+def repo_info(repo: str) -> dict:
+    """获取仓库当前分支与最近提交摘要（供上下文注入，供 AI 决策在哪个仓库执行）。
+
+    全部容错：git 缺失/超时/非仓库一律返回空信息，不中断上下文构建。
+    """
+    def _git_out(args: list[str]) -> str:
+        try:
+            r = subprocess.run(
+                ["git", "-C", repo, *args], capture_output=True, timeout=3, text=True,
+            )
+            return (r.stdout or "").strip()
+        except Exception:
+            return ""
+
+    branch = _git_out(["rev-parse", "--abbrev-ref", "HEAD"]) or "?"
+    head = _git_out(["log", "-1", "--format=%h %s"])
+    return {"branch": branch, "head": head}
 
 
 def find_git_root(start_path: str | None) -> str | None:
@@ -43,11 +63,13 @@ def find_git_root(start_path: str | None) -> str | None:
     # 向上搜不到,向下搜一级子目录
     p = Path(start_path).resolve()
     repos = list_git_repos(str(p))
-    if repos:
-        # v2.5: 多仓库时只取第一个(按字母序),但日志提示
-        if len(repos) > 1:
-            logger.debug("工作目录下有 %d 个 git 仓库: %s,默认使用第一个", len(repos), repos)
+    if len(repos) == 1:
+        # 单仓库:返回该仓库
         return repos[0]
+    if len(repos) > 1:
+        # v2.5: 多仓库不盲目锁定到第一个，返回工作目录让上层用 cwd 指定
+        logger.debug("工作目录下有 %d 个 git 仓库: %s,返回工作目录(用 cwd 指定)", len(repos), repos)
+        return str(p)
     return None
 
 

@@ -133,6 +133,8 @@ function MessageFlowCore({
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchKeyword, setSearchKeyword] = useState("");
   const [activeMatchIndex, setActiveMatchIndex] = useState(0);
+  /** 问题12: scrollspy——当前视口焦点 entry 下标，用于 JumpDots 自动聚焦对应小横条 */
+  const [activeEntryIndex, setActiveEntryIndex] = useState(0);
 
   const hasStreaming = Boolean(running && streamingNode);
   const hasInjected = Boolean(injectedNode);
@@ -170,6 +172,20 @@ function MessageFlowCore({
     setShowScrollBottom(false);
   }, []);
 
+  /** 问题12: scrollspy——取视口上 1/3 焦点线所在虚拟项，映射为 entry 下标传给 JumpDots */
+  const updateActiveEntry = useCallback((el: HTMLDivElement) => {
+    const items = virtualizer.getVirtualItems();
+    if (items.length === 0) return;
+    const focusY = el.scrollTop + el.clientHeight * 0.33;
+    let idx = items[0].index;
+    for (const it of items) {
+      if (focusY <= it.start) { idx = it.index; break; }
+      if (it.start <= focusY && focusY < it.start + it.size) { idx = it.index; break; }
+      idx = it.index;
+    }
+    setActiveEntryIndex((prev) => (prev === idx ? prev : idx));
+  }, [virtualizer]);
+
   const onScroll = useCallback(() => {
     // plan-547: 程序补滚产生的 scroll 事件不参与跟随判定
     if (programmaticScrollRef.current) return;
@@ -180,7 +196,8 @@ function MessageFlowCore({
     setAutoScroll(isNearBottom);
     autoScrollRef.current = isNearBottom;
     setShowScrollBottom(distance > 120);
-  }, []);
+    updateActiveEntry(el);
+  }, [updateActiveEntry]);
 
   /** plan-547: 内容总高度变化（虚拟测量/图片加载/展开）时若处于跟随态则保持贴底 */
   const hasContent = totalCount > 0;
@@ -208,6 +225,12 @@ function MessageFlowCore({
   useEffect(() => {
     if (autoScroll) scrollToBottom(false);
   }, [entries.length, autoScroll, scrollToBottom]);
+
+  /** 问题12: 内容/滚动变化后刷新 scrollspy 焦点，保证 JumpDots 自动跟随 */
+  useEffect(() => {
+    const el = parentRef.current;
+    if (el) updateActiveEntry(el);
+  }, [entries.length, updateActiveEntry]);
 
   const matchedIndices = useMemo(() => {
     const kw = searchKeyword.trim().toLowerCase();
@@ -301,7 +324,7 @@ function MessageFlowCore({
         </div>
       )}
 
-      {jumpDots && <JumpDots entries={entries} onJump={(entry) => virtualizer.scrollToIndex(entries.indexOf(entry), { align: "start", behavior: "smooth" })} />}
+      {jumpDots && <JumpDots entries={entries} activeIndex={activeEntryIndex} onJump={(entry) => virtualizer.scrollToIndex(entries.indexOf(entry), { align: "start", behavior: "smooth" })} />}
 
       <div ref={parentRef} className="message-flow" onScroll={onScroll}>
         {totalCount === 0 ? (

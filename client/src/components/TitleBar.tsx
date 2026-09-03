@@ -7,6 +7,8 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import { useChatStore } from "../store/chat";
 import { usePanelStore } from "../store/panel";
+import { useUiStore } from "../store/ui";
+import { translate } from "../store/i18n";
 import { ConfirmDialog } from "./ConfirmDialog";
 import {
   IconMinus, IconSquare, IconX, IconFolder,
@@ -19,15 +21,18 @@ import {
 interface TitleBarProps {
   leftCollapsed: boolean;
   rightCollapsed: boolean;
+  /** 问题1: 设置页态——不展示项目/会话/外部打开/命令行/侧边栏等信息 */
+  settings?: boolean;
   onToggleLeft: () => void;
   onToggleRight: () => void;
 }
 
-export function TitleBar({ leftCollapsed, rightCollapsed, onToggleLeft, onToggleRight }: TitleBarProps) {
+export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onToggleLeft, onToggleRight }: TitleBarProps) {
   const currentSessionId = useChatStore((s) => s.currentSessionId);
   const sessions = useChatStore((s) => s.sessions);
   const projects = useChatStore((s) => s.projects);
   const currentProjectId = useChatStore((s) => s.currentProjectId);
+  const uiLanguage = useUiStore((s) => s.language);
   const loadBootstrap = useChatStore((s) => s.loadBootstrap);
   const deleteSession = useChatStore((s) => s.deleteSession);
   const renameSession = useChatStore((s) => s.renameSession);
@@ -116,6 +121,11 @@ export function TitleBar({ leftCollapsed, rightCollapsed, onToggleLeft, onToggle
       </div>
 
       <div className="titlebar-workspace title-no-drag">
+        {settings ? (
+          /* 问题1: 设置页顶部只显示页面标题，不展示项目/会话/工作树等信息 */
+          <span className="titlebar-workspace-title">{translate("titlebar.settings", uiLanguage)}</span>
+        ) : (
+          <>
         {renaming !== null && session ? (
           <input
             className="input titlebar-rename"
@@ -175,12 +185,16 @@ export function TitleBar({ leftCollapsed, rightCollapsed, onToggleLeft, onToggle
             )}
           </div>
         )}
+          </>
+        )}
       </div>
 
       <div className="titlebar-mid" />
 
       <div className="titlebar-right title-no-drag">
         {/* 打开工作区下拉菜单（对齐图二，带品牌图标与当前激活联动） */}
+        {!settings && (
+        <>
         <div className="titlebar-folder-dropdown-wrap" ref={folderMenuRef}>
           <button
             className="titlebar-btn titlebar-folder-combo"
@@ -237,6 +251,8 @@ export function TitleBar({ leftCollapsed, rightCollapsed, onToggleLeft, onToggle
         <button className="titlebar-btn" onClick={() => usePanelStore.getState().openNewTab("terminal")} title="打开终端 (Ctrl+J)">
           <IconTerminal size={14} />
         </button>
+        </>
+        )}
         <button
           className={`app-pane-toggle titlebar-btn${rightCollapsed ? " collapsed" : ""}`}
           onClick={onToggleRight}

@@ -186,6 +186,7 @@ async def _collect_plan_history(db: AsyncSession, session, workspace: str) -> st
                         Message.session_id == session.id,
                         Message.turn_id == t.id,
                         Message.sender_type == "user",
+                        Message.deleted == False,  # noqa: E712 问题14: 排除已回滚软删
                     ).order_by(Message.id.asc()).limit(1)
                 )
                 m = m_res.scalars().first()

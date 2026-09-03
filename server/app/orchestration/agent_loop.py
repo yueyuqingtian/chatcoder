@@ -1019,6 +1019,14 @@ async def run_agent_loop(
                         await db.commit()
             except Exception:
                 logger.debug("usage 流水落库失败(非阻塞)", exc_info=True)
+                # 修复「AI 无报错中断」：commit/flush 失败(如 SQLite database is locked)
+                # 后必须 rollback 恢复 session —— 否则该 session 永久处于 rollback-only，
+                # 后续任何 create_message 都会抛 PendingRollbackError，整个 turn 以
+                # `agent loop 异常` 静默终止，且错误提示也因同一 session 无法落库。
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
 
             # v6.4: 调用后真实占用驱动压缩 -- 用 API 精确 prompt_tokens 判断
             # 替代旧的 should_auto_compact 估算检查，避免过早摘要。
@@ -1521,10 +1529,25 @@ async def run_agent_loop(
 
     except Exception as e:
         logger.exception("agent loop 异常 turn=%s agent=%s", turn_id, agent_name)
-        await _emit_agent_msg(db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
-                              agent_id=agent_id, agent_name=agent_name,
-                              msg_type=MsgType.ERROR,
-                              content={"text": f"执行异常: {str(e)[:200]}", "agent_name": agent_name})
+        # 主 db session 可能已因数据库锁冲突处于 rollback-only（见 usage 落库修复），
+        # 错误提示改由独立会话补发，确保「AI 异常终止」对用户可见而非静默中断。
+        _err_text = f"执行异常: {str(e)[:200]}"
+        try:
+            await _emit_agent_msg(db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
+                                  agent_id=agent_id, agent_name=agent_name,
+                                  msg_type=MsgType.ERROR,
+                                  content={"text": _err_text, "agent_name": agent_name})
+        except Exception:
+            try:
+                from app.persistence.database import async_session_factory
+                async with async_session_factory() as _err_db:
+                    await _emit_agent_msg(_err_db, session_id=session_id, turn_id=turn_id,
+                                          thread_id=thread_id, agent_id=agent_id,
+                                          agent_name=agent_name, msg_type=MsgType.ERROR,
+                                          content={"text": _err_text, "agent_name": agent_name})
+                    await _err_db.commit()
+            except Exception:
+                logger.error("[agent] turn=%s 错误提示落库失败: %s", turn_id, str(e)[:200])
         return AgentOutput(kind="error", error=str(e))
 
 
@@ -1862,6 +1885,7 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
                 select(Message).where(
                     Message.session_id == session_id,
                     Message.sender_type == "user",
+                    Message.deleted == False,  # noqa: E712 问题14: 排除已回滚软删
                 ).order_by(Message.id.desc()).limit(1)
             )
             _um = _ures.scalars().first()

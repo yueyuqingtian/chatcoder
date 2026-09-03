@@ -1,4 +1,4 @@
-import { memo, useState, useCallback, useRef, type ReactNode } from "react";
+import { memo, useState, useCallback, useRef, useEffect, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -7,6 +7,11 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { IconCopy, IconCheck } from "./icons";
 import { usePanelStore } from "../store/panel";
+import { useChatStore } from "../store/chat";
+import { api } from "../api/client";
+
+/** 问题2: 相对链接存在性校验缓存（path → 存在且为文件） */
+const statCache = new Map<string, boolean>();
 
 function CodeBlockWrapper({ children }: { children: ReactNode }) {
   const [copied, setCopied] = useState(false);
@@ -51,6 +56,58 @@ function CodeBlockWrapper({ children }: { children: ReactNode }) {
   );
 }
 
+/** 问题2: 文件链接——先校验项目内文件存在性；仅真实存在且为文件时允许点击打开预览，
+ * 否则渲染为普通文本（不可点击），避免点击后右侧面板报错/空白。 */
+function FileLink({ href, children }: { href?: string; children?: ReactNode }) {
+  const [stat, setStat] = useState<boolean | null>(() => {
+    if (!href) return null;
+    const clean = href.replace(/^(\.\/|\/)/, "");
+    return statCache.has(clean) ? statCache.get(clean)! : null;
+  });
+  const currentProjectId = useChatStore((s) => s.currentProjectId);
+
+  useEffect(() => {
+    if (!href) return;
+    const clean = href.replace(/^(\.\/|\/)/, "");
+    // 外部链接/绝对路径不校验（保持默认行为）
+    if (/^(https?:|mailto:|[A-Za-z]:[\\/]|\/)/i.test(clean)) { setStat(null); return; }
+    if (statCache.has(clean)) { setStat(statCache.get(clean)!); return; }
+    if (currentProjectId == null) { setStat(null); return; }
+    let dead = false;
+    api.projectStat(currentProjectId, clean)
+      .then((r) => {
+        if (dead) return;
+        const ok = r.exists && !r.is_dir;
+        statCache.set(clean, ok);
+        setStat(ok);
+      })
+      .catch(() => { if (!dead) setStat(null); });
+    return () => { dead = true; };
+  }, [href, currentProjectId]);
+
+  if (stat === false) {
+    // 不存在/目录：纯文本展示，不可点击
+    return <span className="md-a md-file-link-disabled" title="文件不存在">{children}</span>;
+  }
+  return (
+    <a
+      className="md-a md-file-link"
+      href={href}
+      onClick={(e) => {
+        e.preventDefault();
+        if (href) {
+          const clean = href.replace(/^(\.\/|\/)/, "");
+          usePanelStore.getState().setPreviewPath(clean);
+          usePanelStore.getState().openPanel();
+          usePanelStore.getState().openTab("files");
+        }
+      }}
+    >
+      {children}
+    </a>
+  );
+}
+
 /** v40: 共享 markdown 组件映射——MarkdownContent 与 StreamingMarkdown（流式增量）共用，保证渲染一致 */
 export const markdownComponents: Components = {
   code({ className, children }) {
@@ -71,23 +128,7 @@ export const markdownComponents: Components = {
     if (isExternal) {
       return <a className="md-a" href={href} target="_blank" rel="noopener noreferrer">{children}</a>;
     }
-    return (
-      <a
-        className="md-a md-file-link"
-        href={href}
-        onClick={(e) => {
-          e.preventDefault();
-          if (href) {
-            const clean = href.replace(/^(\.\/|\/)/, "");
-            usePanelStore.getState().setPreviewPath(clean);
-            usePanelStore.getState().openPanel();
-            usePanelStore.getState().openTab("files");
-          }
-        }}
-      >
-        {children}
-      </a>
-    );
+    return <FileLink href={href}>{children}</FileLink>;
   },
   blockquote({ children }) { return <blockquote className="md-blockquote">{children}</blockquote>; },
   table({ children }) { return <table className="md-table">{children}</table>; },

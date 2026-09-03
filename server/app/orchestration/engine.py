@@ -404,6 +404,10 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             await db.commit()
         except Exception:
             logger.debug("[engine] 任务创建提交失败(非阻塞)", exc_info=True)
+            try:
+                await db.rollback()  # 恢复 session，防止后续所有 DB 写抛 PendingRollbackError
+            except Exception:
+                pass
         await broadcast(session_id, {
             "event": "task.updated",
             "payload": {"task_id": main_task.id, "status": task_initial_status},
@@ -968,6 +972,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
                     select(Message).where(
                         Message.session_id == session.id,
                         Message.sender_type == "user",
+                        Message.deleted == False,  # noqa: E712 问题14: 排除已回滚软删
                     ).order_by(Message.id.desc()).limit(1)
                 )
                 _um = _ures.scalars().first()
@@ -1147,6 +1152,7 @@ async def retry_failed_step(db: AsyncSession, *, turn_id: int, task_id: int) -> 
             select(Message).where(
                 Message.session_id == session.id,
                 Message.sender_type == "user",
+                Message.deleted == False,  # noqa: E712 问题14: 排除已回滚软删
             ).order_by(Message.id.desc()).limit(1)
         )
         _um = _ures.scalars().first()

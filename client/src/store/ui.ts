@@ -134,8 +134,12 @@ export function applyUiVars(p: UiPrefs) {
   else root.style.removeProperty("--ambient-c2");
   // v1.1: 阴影强度（此前完全未应用）
   root.style.setProperty("--shadow-strength", String(p.shadowStrength));
-  // 消息流密度：舒适(默认 10px 块间距) / 紧凑(2px)
+  // 消息流密度：舒适(默认 10px 块间距) / 紧凑(2px)。
+  // 注意：AI 消息流项间距由 --flow-gap 控制（.turn-flow gap），--msg-gap 只作用于
+  // 独立消息项；密度同时覆盖两者才真正生效。
   root.style.setProperty("--msg-gap", p.msgDensity === "compact" ? "2px" : "10px");
+  if (p.msgDensity === "compact") root.style.setProperty("--flow-gap", "2px");
+  else root.style.removeProperty("--flow-gap");
   root.setAttribute("data-lang", p.language);
 }
 

@@ -9,7 +9,7 @@ from app.gateway.schemas import (
 )
 from app.orchestration.agent_events import broadcast
 from app.persistence.database import get_db
-from app.services import compression_service, session_service, worktree_service
+from app.services import compression_service, message_service, session_service, worktree_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -220,7 +220,7 @@ async def get_compacted_messages(session_id: int, compaction_id: str,
         MessageOut(
             id=m.id, session_id=m.session_id, turn_id=m.turn_id, thread_id=m.thread_id,
             sender_type=m.sender_type, sender_id=m.sender_id, msg_type=m.msg_type,
-            content=m.content or {}, token_usage=m.token_usage or 0,
+            content=message_service.enrich_content_abs_path(m.content) or {}, token_usage=m.token_usage or 0,
             created_at=str(m.created_at) if m.created_at else None,
         )
         for m in msgs

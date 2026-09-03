@@ -67,6 +67,9 @@ class TerminalExecTool(Tool):
         "如需在特定子目录执行,请用 cwd 参数指定,而不是 cd 命令。\n"
         "启动 dev server、watch、后端服务等长驻进程时,将 waitForCompletion 设为 false,\n"
         "命令进入后台运行并立即返回 shell_id,用 terminal_bg_status 查日志、terminal_bg_kill 终止。\n"
+        "重要: 等待后台命令完成时,禁止用 Start-Sleep / sleep 固定等待(无法感知真正完成,\n"
+        "且会让界面长时间无输出)。正确做法: 用 terminal_bg_status 轮询直到 running=false,\n"
+        "或直接传 wait_until_done=true 一次等待完成(后台进程结束即返回,非固定秒数)。\n"
         '例: {"command": "git diff", "cwd": "clinic"}；'
         '后台例: {"command": "npm run dev", "waitForCompletion": false}'
     )

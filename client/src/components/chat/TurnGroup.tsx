@@ -174,14 +174,6 @@ export const TurnGroup = memo(function TurnGroup({
   }, [turnId, requestRollbackPreview]);
   const onRollback = turnId != null && !rolledBack ? rollbackFn : undefined;
 
-  let lastTextIdx = -1;
-  for (let k = items.length - 1; k >= 0; k--) {
-    if (items[k].kind === "text") {
-      lastTextIdx = k;
-      break;
-    }
-  }
-
   const renderedSubagentNames = new Set<string>();
   for (const it of items) {
     if (it.kind === "subagent") {
@@ -258,9 +250,6 @@ export const TurnGroup = memo(function TurnGroup({
             <div className="turn-agent-text">
               <MarkdownContent>{msgText(item.msg.content)}</MarkdownContent>
             </div>
-            {!isRunning && i === lastTextIdx && (
-              <MessageActions entry={entry} onRollback={onRollback} scope="ai" actions={actions} />
-            )}
           </div>
         );
       case "summary":
@@ -382,6 +371,12 @@ export const TurnGroup = memo(function TurnGroup({
           {flowItems
             .filter(({ index }) => !hasProcessBeforeFinal || index >= finalReportOriginalIdx)
             .map(({ item, index }) => renderAiItem(item, index))}
+
+          {/* 问题3: AI 操作行（复制/赞踩/重试）以整个 AI 回复块为整体，展示在 turn-flow 底部。
+               历史/已结束消息始终显示；运行中不展示。任务异常中断（无最终 text）也能出现。 */}
+          {!isRunning && aiItemsWithIndex.length > 0 && (
+            <MessageActions entry={entry} onRollback={onRollback} scope="ai" actions={actions} />
+          )}
         </div>
       )}
     </div>

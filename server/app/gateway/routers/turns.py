@@ -386,7 +386,7 @@ async def list_messages(session_id: int, thread_id: int | None = None,
         MessageOut(
             id=m.id, session_id=m.session_id, turn_id=m.turn_id, thread_id=m.thread_id,
             sender_type=m.sender_type, sender_id=m.sender_id, msg_type=m.msg_type,
-            content=m.content, token_usage=m.token_usage,
+            content=message_service.enrich_content_abs_path(m.content), token_usage=m.token_usage,
             created_at=str(m.created_at) if m.created_at else None,
         ) for m in msgs
     ]

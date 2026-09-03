@@ -476,17 +476,32 @@ async def build_agent_context(
     if workspace:
         try:
             from pathlib import Path as _Path  # noqa: N813
-            ws = _Path(workspace)
+            from app.orchestration.tools.git_root import find_git_root, list_git_repos, repo_info
+            ws = _Path(workspace).resolve()
             if ws.is_dir():
-                repos = sorted(
-                    str(c.relative_to(ws))
-                    for c in ws.iterdir()
-                    if c.is_dir() and not c.name.startswith(".") and (c / ".git").exists()
-                )
-                if repos:
+                entries: list[tuple[str, str, str]] = []  # (rel_path, branch, head)
+                # 工作目录本身如果是 git 仓库，也列出（相对路径用 `.`）
+                if find_git_root(str(ws)) == str(ws):
+                    info = repo_info(str(ws))
+                    entries.append((".", info.get("branch", "?"), info.get("head", "")))
+                for abs_r in list_git_repos(str(ws)):
+                    info = repo_info(abs_r)
+                    try:
+                        rel = str(_Path(abs_r).relative_to(ws))
+                    except ValueError:
+                        rel = str(abs_r)
+                    entries.append((rel, info.get("branch", "?"), info.get("head", "")))
+                if entries:
+                    # 问题5: 明确告知仓库数量与各自信息，并指导跨仓库用 cwd 指定，避免锁定单一仓库
                     git_ctx = "## Git Repositories\n"
-                    for r in repos:
-                        git_ctx += f"- `{r}/` — independent git repo; use cwd='{r}' for git commands\n"
+                    git_ctx += f"There are {len(entries)} git repo(s) under the working directory.\n"
+                    git_ctx += "Run commands/git in a specific repo by passing `cwd=<repo>` to the tool; "
+                    git_ctx += "tools default to the repo matching cwd, do not assume a single repo.\n"
+                    for rel, branch, head in entries:
+                        line = f"- repo: `{rel}/` branch: `{branch}`"
+                        if head:
+                            line += f" head: `{head}`"
+                        git_ctx += line + "\n"
                     dev_parts.append(git_ctx)
         except OSError:
             pass

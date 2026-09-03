@@ -149,7 +149,7 @@ export default function App() {
         {!sidebarCollapsed && <ResizeHandle side="left" baseWidth={leftPanelWidth} minWidth={200} maxWidth={480} reservePx={370} panelEl={leftPanelElRef} onCommit={setLeftPanelWidth} />}
         <div className="app-right">
           {/* v19: 标题栏与右面板经插件 slot 渲染 */}
-          <PluginSlot slot="titlebar" leftCollapsed={sidebarCollapsed} rightCollapsed={!rightExpanded} onToggleLeft={() => setSidebarCollapsed((v) => !v)} onToggleRight={() => usePanelStore.getState().togglePanel()} />
+          <PluginSlot slot="titlebar" leftCollapsed={sidebarCollapsed} rightCollapsed={!rightExpanded} settings={nav === "settings"} onToggleLeft={() => setSidebarCollapsed((v) => !v)} onToggleRight={() => usePanelStore.getState().togglePanel()} />
           <div className="app-body">
             <main className={`app-main${!rightExpanded ? " right-panel-collapsed" : ""}`}>
               {nav === "settings"

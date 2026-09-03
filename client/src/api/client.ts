@@ -276,6 +276,12 @@ export const api = {
   deleteProject: (id: number) => del<{ ok: boolean }>(`/projects/${id}`),
   scanProjectRules: (id: number) => get<string[]>(`/projects/${id}/scan-rules`),
   getProjectTree: (id: number, depth = 8) => get<ProjectTreeOut>(`/projects/${id}/tree?depth=${depth}`),
+  /** 问题2: 轻量文件存在性校验（不读内容），供消息内文件链接判断是否可点击 */
+  projectStat: (id: number, path: string) =>
+    get<{ exists: boolean; is_dir: boolean }>(`/projects/${id}/stat?path=${encodeURIComponent(path)}`),
+  /** 问题13: 按路径子串搜索项目内全部文件（@ 引用文件补全） */
+  projectFileSearch: (id: number, q: string, limit = 100) =>
+    get<string[]>(`/projects/${id}/files/search?q=${encodeURIComponent(q)}&limit=${limit}`),
   readProjectFile: (id: number, path: string) =>
     get<{ path: string; content: string; size: number; truncated: boolean; language: string | null }>(
       `/projects/${id}/read-file?path=${encodeURIComponent(path)}`,
@@ -536,6 +542,8 @@ export const api = {
   // ── 全局设置（v2.2: 设置中心持久化统一）──
   getGlobalSettings: () => get<GlobalSettingsOut>("/settings/global"),
   setGlobalSettings: (data: Partial<GlobalSettingsIn>) => put<GlobalSettingsOut>("/settings/global", data),
+  /** 问题7/8: 终端 Shell 存在性探测 + 候选等宽字体 */
+  getTerminalOptions: () => get<TerminalOptionsOut>("/settings/terminal/options"),
 
   // ── 子代理类型（v2.2: 对齐 zcode 3.13）──
   listSubagents: () => get<SubagentProfileOut[]>("/subagents"),
@@ -584,6 +592,13 @@ export interface GlobalSettingsOut {
 
 export type GlobalSettingsIn = Partial<Omit<GlobalSettingsOut, never>>;
 
+/** 问题7/8: 终端 Shell 选项（available=当前设备实际存在） */
+export interface TerminalShellOption { value: string; label: string; available: boolean; }
+/** 问题7/8: 候选等宽字体 */
+export interface TerminalFontOption { value: string; label: string; }
+export interface TerminalOptionsOut { shells: TerminalShellOption[]; fonts: TerminalFontOption[]; }
+
+
 /** v3.0 (plan-88): 工具级规则候选清单项（PolicyPanel 工具下拉数据源） */
 export interface ExecPolicyToolInfo {
   name: string;
@@ -625,6 +640,8 @@ export interface AttachmentInfo {
   size: number;
   mime_type: string;
   type: string;
+  /** 问题15: 后端回填的服务器绝对路径（uploads_dir 下），复制时优先使用 */
+  abs_path?: string;
 }
 
 /** 将后端返回的相对 url 转成可直接预览的绝对地址（图片缩略图/新窗口打开）。 */

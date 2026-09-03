@@ -311,19 +311,26 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
 
   const slashVisible = showSlash && filteredSlash.length > 0;
 
-  const loadAtFiles = useCallback(async (pid: number) => {
+  /** 问题13: @ 文件搜索——按查询词走全量文件搜索接口（无深度/数量限制），防抖 250ms */
+  const atDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchAtFiles = useCallback(async (pid: number, q: string) => {
     setAtLoading(true);
     try {
-      const tree = await api.getProjectTree(pid, 6);
-      const paths: string[] = [];
-      const walk = (nodes: TreeNode[]) => {
-        for (const n of nodes) {
-          if (paths.length >= 500) return;
-          if (n.type === "file") paths.push(n.path);
-          if (n.children) walk(n.children);
-        }
-      };
-      walk(tree.children || []);
+      // 空查询：回退到项目树初始建议（仅展示用）；非空：全量路径子串搜索
+      const paths = q.trim()
+        ? await api.projectFileSearch(pid, q)
+        : await api.getProjectTree(pid, 6).then((tree) => {
+            const out: string[] = [];
+            const walk = (nodes: TreeNode[]) => {
+              for (const n of nodes) {
+                if (out.length >= 15) return;
+                if (n.type === "file") out.push(n.path.replace(/\\/g, "/"));
+                if (n.children) walk(n.children);
+              }
+            };
+            walk(tree.children || []);
+            return out;
+          });
       setAtFiles(paths);
     } catch {
       setAtFiles([]);
@@ -331,6 +338,13 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
       setAtLoading(false);
     }
   }, []);
+
+  const queueAtSearch = useCallback((pid: number, q: string) => {
+    if (atDebounceRef.current) clearTimeout(atDebounceRef.current);
+    atDebounceRef.current = setTimeout(() => void searchAtFiles(pid, q), 250);
+  }, [searchAtFiles]);
+
+  useEffect(() => () => { if (atDebounceRef.current) clearTimeout(atDebounceRef.current); }, []);
 
   const filteredAtFiles = useMemo(() => {
     if (!atQuery) return atFiles.slice(0, 15);
@@ -905,9 +919,9 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                 setShowAt(true);
                 setAtQuery(atMatch[1].toLowerCase());
                 setAtIndex(0);
-                // 触发文件树加载
+                // 问题13: 触发全量文件搜索（携带查询词，防抖）
                 const pid = isHome ? activeProjectId : currentProjectId;
-                if (pid != null) void loadAtFiles(pid);
+                if (pid != null) void queueAtSearch(pid, atMatch[1]);
               } else {
                 setShowAt(false);
                 setAtQuery("");

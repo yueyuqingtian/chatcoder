@@ -24,6 +24,15 @@ _MAX_BUFFER_CHARS = 64 * 1024
 # 单次 status 调用返回的日志上限（字符）：与 terminal_exec 输出上限同量级
 _MAX_STATUS_LOG_CHARS = 12_000
 
+# wait_until_done=true 时的轮询间隔（秒）与进度广播间隔（秒）
+_WAIT_POLL_INTERVAL = 1.0
+_WAIT_PROGRESS_INTERVAL = 5.0
+# 内部等待上限相对 tool_exec_timeout_sec 的缓冲（秒）：executor/agent_loop 外层
+# asyncio.wait_for(tool.run, timeout=tool_exec_timeout_sec) 会比内层自循环先触发
+# 超时并返回不友好的「工具执行超时」。内层先到点返回「仍在运行」明确结果，
+# 避免两层在同一点竞争导致超时误杀（见 plan-167-774）。
+_WAIT_TIMEOUT_BUFFER = 10.0
+
 
 def decode_output(data: bytes) -> str:
     """优先 UTF-8，失败回退 GBK：cmd/PowerShell 在中文 Windows 上输出 GBK，
@@ -36,6 +45,27 @@ def decode_output(data: bytes) -> str:
         except UnicodeDecodeError:
             continue
     return data.decode("utf-8", errors="replace")
+
+
+def _parse_bool(raw: Any) -> bool:
+    """解析布尔参数；容错模型输出的字符串 "false"/"true"。"""
+    if isinstance(raw, str):
+        return raw.strip().lower() not in ("false", "0", "no", "")
+    return bool(raw) if raw is not None else False
+
+
+def _parse_wait_timeout(raw: Any) -> int:
+    """解析 wait_timeout（秒），钳制到 [5, tool_exec_timeout_sec - 缓冲]。
+
+    缓冲内层先于外层 asyncio.wait_for 返回，返回「仍在运行」明确结果而非超时误杀。
+    """
+    from app.core.config import settings
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        val = int(settings.tool_exec_timeout_sec)
+    upper = max(5, int(settings.tool_exec_timeout_sec) - int(_WAIT_TIMEOUT_BUFFER))
+    return max(5, min(val, upper))
 
 
 async def kill_process_tree(proc: asyncio.subprocess.Process, timeout: float = 15) -> None:
@@ -223,14 +253,22 @@ bg_process_registry = BgProcessRegistry()
 
 
 class TerminalBgStatusTool(Tool):
-    """查询后台进程状态与增量日志（waitForCompletion=false 启动的命令）。"""
+    """查询后台进程状态与增量日志（waitForCompletion=false 启动的命令）。
+
+    wait_until_done=true 时内置动态等待：后台进程结束即返回最终状态（非固定等待），
+    等待期间周期性广播进度；超时返回「仍在运行 + 当前日志 + next_offset」明确结果。
+    """
 
     name = "terminal_bg_status"
     risk_level = "low"
     description = (
         "查询后台命令的运行状态与增量日志。shell_id 来自 terminal_exec 以 "
         "waitForCompletion=false 启动命令时的返回。offset 传上次返回的 next_offset "
-        "可增量读取新日志；首次查询传 0（或不传）。"
+        "可增量读取新日志；首次查询传 0（或不传）。\n"
+        "等待后台命令完成的正确姿势（不要用 Start-Sleep 固定等待）：\n"
+        "1. 轮询直到 running=false；或\n"
+        "2. 直接传 wait_until_done=true 一次等待完成（后台进程结束即返回，非固定秒数）。\n"
+        "wait_timeout（秒）为最大等待时长，默认随全局工具超时，超时仍返回「仍在运行」结果。"
     )
 
     def function_schema(self) -> dict:
@@ -244,6 +282,8 @@ class TerminalBgStatusTool(Tool):
                     "properties": {
                         "shell_id": {"type": "string", "description": "后台命令标识（bg_ 开头）"},
                         "offset": {"type": "integer", "description": "日志起始字符偏移（默认 0，增量读取传上次 next_offset）"},
+                        "wait_until_done": {"type": "boolean", "description": "是否等待后台命令结束再返回（默认 false）。true 时进程结束即返回最终状态，非固定等待"},
+                        "wait_timeout": {"type": "integer", "description": "最大等待秒数（默认取全局工具超时，钳制到其上限，避免与外层超时竞争）；超时返回「仍在运行」结果"},
                     },
                     "required": ["shell_id"],
                 },
@@ -258,9 +298,22 @@ class TerminalBgStatusTool(Tool):
             offset = int(args.get("offset") or 0)
         except (TypeError, ValueError):
             offset = 0
-        info = bg_process_registry.status(shell_id, offset)
-        if info is None:
+        wait_until_done = _parse_bool(args.get("wait_until_done"))
+
+        # 先校验 shell_id 已知（未知就立即报错，避免 wait 分支死等）
+        first = bg_process_registry.status(shell_id, offset)
+        if first is None:
             return ToolResult(ok=False, output="", error=f"未知 shell_id: {shell_id}（服务重启后后台进程记录会失效）")
+
+        # plan-167-774: 动态等待——后台进程结束即返回，等待期广播进度，超时返回明确结果
+        if wait_until_done:
+            wait_timeout = _parse_wait_timeout(args.get("wait_timeout"))
+            info = await self._wait_until_done(shell_id, offset, wait_timeout, ctx)
+            if info is None:
+                return ToolResult(ok=False, output="", error=f"未知 shell_id: {shell_id}（进程记录已失效）")
+        else:
+            info = first
+
         lines = [
             f"shell_id: {info['shell_id']}",
             f"状态: {'运行中' if info['running'] else '已退出'}"
@@ -268,6 +321,8 @@ class TerminalBgStatusTool(Tool):
             f"命令: {info['command']}",
             f"工作目录: {info['cwd'] or '(工作区根)'}",
         ]
+        if wait_until_done and info["running"]:
+            lines.append("（已到 wait_timeout 上限，任务仍在运行，可用更大 offset 继续查询或再 wait_until_done=true 等待）")
         log = info["log"]
         if log:
             lines.append(f"-- 日志(offset {offset} → {info['next_offset']}) --")
@@ -279,6 +334,52 @@ class TerminalBgStatusTool(Tool):
             output="\n".join(lines),
             data=info,
         )
+
+    async def _wait_until_done(
+        self, shell_id: str, offset: int, wait_timeout: int, ctx: ToolContext,
+    ) -> dict[str, Any] | None:
+        """等待后台进程结束，返回最终状态 dict。
+
+        - 循环轮询 registry.status：running=False 即返回最终状态（动态，非固定等待）。
+        - 等待期间每 _WAIT_PROGRESS_INTERVAL 秒广播一次 turn.status 进度，避免前端
+          「无输出像卡死」的观感。
+        - 累计等待超过 wait_timeout 时返回当前快照（仍在运行），由调用方输出「仍在运行」。
+        - 用户中断（cancel_event 置位）时抛 asyncio.CancelledError，与 agent_loop 的
+          取消语义一致（_poll_cancel 会取消本工具调用，表现为「已被用户中断」）。
+        - 返回 None 表示 shell_id 已失效（进程记录被清除）。
+        """
+        from app.orchestration.agent_events import broadcast
+
+        wait_start = asyncio.get_running_loop().time()
+        deadline = wait_start + wait_timeout
+        next_progress = 0.0
+        while True:
+            info = bg_process_registry.status(shell_id, offset)
+            if info is None:
+                return info  # 进程记录失效
+            if not info["running"]:
+                return info  # 进程结束，立即返回最终状态
+            now = asyncio.get_running_loop().time()
+            if ctx.cancel_event and ctx.cancel_event.is_set():
+                logger.warning("[bg.wait] shell_id=%s 等待期间收到中断信号", shell_id)
+                raise asyncio.CancelledError("bg wait cancelled by user")
+            if now >= deadline:
+                logger.info("[bg.wait] shell_id=%s 超时仍未结束 elapsed=%.1fs", shell_id, wait_timeout)
+                return info
+            if now >= next_progress:
+                next_progress = now + _WAIT_PROGRESS_INTERVAL
+                try:
+                    await broadcast(ctx.session_id, {
+                        "event": "turn.status",
+                        "payload": {
+                            "turn_id": ctx.task_id,
+                            "thread_id": None,
+                            "text": f"等待后台任务 {shell_id} 完成，已 {now - wait_start:.0f}s",
+                        },
+                    })
+                except Exception:  # noqa: BLE001 - 广播失败不能影响等待主流程
+                    logger.debug("[bg.wait] 进度广播失败(非阻塞)", exc_info=True)
+            await asyncio.sleep(_WAIT_POLL_INTERVAL)
 
 
 class TerminalBgKillTool(Tool):
