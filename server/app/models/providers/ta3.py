@@ -573,13 +573,10 @@ class Ta3Provider(ModelProvider):
         sent_thinking = 0
         sent_content = 0
         _started_at = time.monotonic()
-        # v29 (plan-78): 思考看门狗——思考阶段（已收到 thinking 帧、未产出 content/tool）
-        # 连续空闲超过 ta3_thinking_watchdog（默认 240s，v28.1 由 120s 放宽以兼容
-        # 更长思考链）主动终止，避免 kimi 长思考被网关静默断流后空转等待；
-        # 终止后 finish_reason=thinking_timeout，agent_loop 走空响应重试降级。
-        _watchdog = float(getattr(settings, "ta3_thinking_watchdog", 240) or 240)
-        _thinking_seen = False
-        _content_seen = False
+        # plan-838: 移除思考看门狗——此前思考阶段（已收 thinking 帧、未产出 content/tool）
+        # 使用更短的 ta3_thinking_watchdog(240s) 主动掐断，导致 kimi-k3 长思考被提前终止后
+        # 带 thinking 的 thinking_timeout 被上层判为"健康"而静默结束任务。
+        # 现与 TA3 其它模型完全一致：全程统一使用 ta3_stream_idle_timeout(默认 300s) 空闲超时。
         try:
             async with self._client.stream("POST", url, json=body, headers=headers) as resp:
                 if resp.status_code != 200:
@@ -587,22 +584,15 @@ class Ta3Provider(ModelProvider):
                     raise RuntimeError(f"模型请求失败 {resp.status_code}：{text}")
                 _lines = resp.aiter_lines()
                 while True:
-                    # 思考阶段用更短的看门狗超时；其他阶段用 httpx read 空闲超时兜底
-                    _stage_timeout = (
-                        _watchdog if (_thinking_seen and not _content_seen)
-                        else self._stream_idle_timeout
-                    )
                     try:
-                        line = await asyncio.wait_for(_lines.__anext__(), timeout=_stage_timeout)
+                        line = await asyncio.wait_for(_lines.__anext__(), timeout=self._stream_idle_timeout)
                     except StopAsyncIteration:
                         break
                     except asyncio.TimeoutError:
-                        _in_thinking = _thinking_seen and not _content_seen
-                        monitor["finish_reason"] = "thinking_timeout" if _in_thinking else "timeout"
+                        monitor["finish_reason"] = "timeout"
                         logger.warning(
-                            "[ta3] model=%s %s超时: thinking=%d content=%d tools=%d, 耗时 %.1fs",
+                            "[ta3] model=%s 空闲超时: thinking=%d content=%d tools=%d, 耗时 %.1fs",
                             request.model or self._model_name,
-                            "思考看门狗" if _in_thinking else "空闲",
                             len(monitor["thinking_parts"]), len(monitor["content_parts"]),
                             len(monitor["tool_calls"]) + len(monitor["anthropic_tools"]),
                             time.monotonic() - _started_at,
@@ -617,10 +607,6 @@ class Ta3Provider(ModelProvider):
                     while len(monitor["content_parts"]) > sent_content:
                         yield {"type": "content", "delta": monitor["content_parts"][sent_content]}
                         sent_content += 1
-                    if monitor["thinking_parts"]:
-                        _thinking_seen = True
-                    if monitor["content_parts"] or monitor["tool_calls"] or monitor["anthropic_tools"]:
-                        _content_seen = True
                     if terminal:
                         break
         except asyncio.CancelledError:

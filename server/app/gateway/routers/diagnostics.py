@@ -106,4 +106,4 @@ async def cleanup_checkpoints(workspace: str | None = None,
 @router.get("/update-check", response_model=dict)
 async def update_check():
     """版本检查（占位：读内置版本源）。"""
-    return {"ok": True, "current": "0.2.0", "latest": None, "has_update": False}
+    return {"ok": True, "current": "0.4.0", "latest": None, "has_update": False}

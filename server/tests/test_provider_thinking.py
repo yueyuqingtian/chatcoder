@@ -33,6 +33,19 @@ class TestApplyThinking:
             thinking=True,
         ))
         assert kwargs["extra_body"]["thinking"]["type"] == "enabled"
+        # v23.1: budget_tokens 仅发给官方 Anthropic 网关--轻量网关
+        # （bigmodel 中转/LiteLLM 等）不认识该字段会 400 UNKNOWN_FIELD
+        assert "budget_tokens" not in kwargs["extra_body"]["thinking"]
+        assert "temperature" not in kwargs
+
+    def test_anthropic_gateway_gets_budget_tokens(self):
+        """v23.1: 官方 Anthropic 网关（extended thinking 协议）仍携带 budget_tokens。"""
+        p = _provider(base_url="https://api.anthropic.com")
+        kwargs = {"model": "m", "temperature": 0.3, "messages": []}
+        p._apply_thinking(kwargs, ChatRequest(
+            messages=[], model="m", temperature=0.3, reasoning_effort="high",
+            thinking=True,
+        ))
         assert kwargs["extra_body"]["thinking"]["budget_tokens"] > 0
         assert "temperature" not in kwargs
 

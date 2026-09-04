@@ -133,14 +133,15 @@ class Settings(BaseSettings):
     #   空项表示不传 effort；"none" 表示关闭 thinking）
     # - ta3_kimi_thinking_effort: kimi 系思考档位兜底（kimi 官方档位 low/high/max，
     #   默认保守取 low，避免 high/max 长思考放大网关断流概率）
-    # - ta3_thinking_watchdog: 思考看门狗（秒）——思考阶段（已收到 thinking 帧、
-    #   尚未收到 content/tool 帧）连续空闲超过此值主动终止并走重试降级，
-    #   对齐参考项目 ta3-new-coder 的 thinking 看门狗 120s。
+    # - (deprecated) ta3_thinking_watchdog: plan-838 起不再读取——思考/空闲统一使用
+    #   ta3_stream_idle_timeout。
     agent_empty_response_retries: int = 2
     agent_empty_retry_efforts: str = "low,none"
     # v35: 重试间隔（秒）——空响应/瞬时故障重试前等待，避免背靠背重试打爆网关
     agent_retry_interval_seconds: float = 10.0
     ta3_kimi_thinking_effort: str = "low"
+    # DEPRECATED (plan-838): 思考看门狗已移除——kimi-k3 与 TA3 其它模型统一使用
+    # ta3_stream_idle_timeout(300s) 空闲超时，此字段仅保留以兼容旧配置文件，不再被读取。
     ta3_thinking_watchdog: int = 240
 
     # v21: thinking 模式（对齐 deepseek-harness serialize.ts / zcode）

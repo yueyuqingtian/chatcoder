@@ -285,7 +285,10 @@ def _line_change_stat(before: str | None, after: str | None) -> tuple[int, int]:
 
     返回 (additions, deletions)：按行 diff 计数（SequenceMatcher opcode 聚合）。
     """
-    if before is None or after is None:
+    if before is None:
+        # 问题1: 新增文件（before 为空、after 有内容）→ 全量计为 additions
+        return (len((after or "").splitlines()), 0)
+    if after is None:
         return (0, 0)
     try:
         import difflib
@@ -1600,9 +1603,9 @@ def _response_failure_reason(response, has_progress: bool = False) -> tuple[str,
     if not response.content and not response.thinking and not response.tool_calls:
         if finish == "timeout":
             return "模型响应因网关空闲超时中断，未生成任何内容", True
-        # v29 (plan-78): ta3 思考看门狗超时（长思考模型被网关静默断流前的主动终止）
-        if finish == "thinking_timeout":
-            return "模型思考超时被中断，未生成内容或工具调用", True
+        # v31 (plan-89): 对齐 zcode/AI SDK 语义——本 turn 已有工具产出（has_progress）
+        # 时，finish_reason=stop 的空响应是模型"任务已完成、主动结束对话"的正常信号，
+        # 视为健康直接结束，不触发重试/报错（任务完成后误报"模型返回空响应"的根因）。
         if finish == "stop" and has_progress:
             return None
         return f"模型返回空响应 (finish_reason={finish})，未生成内容或工具调用", True
@@ -1611,6 +1614,65 @@ def _response_failure_reason(response, has_progress: bool = False) -> tuple[str,
     if finish in ("max_tokens", "length") and not response.tool_calls:
         return "输出达到 token 上限，可能不完整", False
     return None
+
+
+async def _anext_with_cancel(stream, cancel_event: asyncio.Event | None):
+    """逐项拉取流式事件；等待下一个事件期间可被 cancel_event 即时中断（问题5）。
+
+    原实现 `async for event in provider.stream_structured(request)` 只在拿到事件后检查
+    cancel_event——等待下一个 chunk（LLM 长思考/网关排队/网络空闲）期间取消不可达，
+    停止要等一个 chunk 或 idle 超时。此处用 asyncio.wait 把「取下一事件」与
+    cancel_event.wait() 竞速，cancel 命中即中断迭代（循环正常结束，由调用方根据
+    cancel_event.is_set() 判定走 cancelled 收尾）。
+    取消未完成的取事件任务会让底层 httpx 流在 CancelledError 时关闭连接。
+    """
+    it = stream.__aiter__()
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            return
+        next_task = asyncio.ensure_future(it.__anext__())
+        cancel_task = asyncio.ensure_future(cancel_event.wait()) if cancel_event is not None else None
+        try:
+            wait_tasks = [t for t in (next_task, cancel_task) if t is not None]
+            done, _ = await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)
+            if cancel_task is not None and cancel_task in done:
+                if not next_task.done():
+                    next_task.cancel()
+                try:
+                    await next_task
+                except BaseException:
+                    pass
+                return
+            yield next_task.result()
+        except StopAsyncIteration:
+            return
+        finally:
+            if cancel_task is not None and not cancel_task.done():
+                cancel_task.cancel()
+
+
+async def _chat_with_cancel(provider, request, cancel_event: asyncio.Event | None):
+    """非流式调用 provider.chat，等待期间可被 cancel_event 即时中断（问题5）。
+
+    中断返回 None（调用方据此走 cancelled 收尾）；正常返回 ChatResponse。
+    """
+    if cancel_event is None:
+        return await provider.chat(request)
+    chat_task = asyncio.ensure_future(provider.chat(request))
+    cancel_task = asyncio.ensure_future(cancel_event.wait())
+    try:
+        done, _ = await asyncio.wait({chat_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
+        if cancel_task in done:
+            chat_task.cancel()
+            try:
+                await chat_task
+            except BaseException:
+                pass
+            return None
+        return chat_task.result()
+    finally:
+        if not cancel_task.done():
+            cancel_task.cancel()
 
 
 async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, agent_id, agent_name,
@@ -1635,8 +1697,8 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
     # 最终全量内容仍由下方 _split_inline_thinking 兜底（幂等），保证不重复计入。
     _splitter = _InlineThinkingStreamSplitter()
     try:
-        async for event in provider.stream_structured(request):
-            # v6.4: 流式输出中检查中断信号，立即停止
+        async for event in _anext_with_cancel(provider.stream_structured(request), cancel_event):
+            # v6.4: 流式输出中检查中断信号，立即停止（竞速后为幂等兜底）
             if cancel_event and cancel_event.is_set():
                 logger.warning("[agent] turn=%s 流式输出中收到中断信号，停止接收", turn_id)
                 _cancelled = True
@@ -1688,6 +1750,11 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
                 finish_reason = event.get("finish_reason", "stop")
                 usage = event.get("usage", UsageModel())
                 break
+        # 问题5: 若中断发生在「等待下一事件」窗口（_anext_with_cancel 正常结束迭代而非 break），
+        # 循环退出时 cancel_event 已置位——此处统一判定，保证走 cancelled 收尾
+        if not _cancelled and cancel_event is not None and cancel_event.is_set():
+            _cancelled = True
+            finish_reason = "cancelled"
     except Exception as e:
         if _cancelled:
             pass  # 中断导致的异常，忽略
@@ -1706,12 +1773,18 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
             )
         else:
             logger.exception("[agent] turn=%s 流式调用异常，回退非流式", turn_id)
-            response = await provider.chat(request)
-            full_content = response.content or ""
-            full_thinking = response.thinking or ""
-            tool_calls = response.tool_calls or []
-            finish_reason = response.finish_reason
-            usage = response.usage
+            # 问题5: 非流式回退也可取消——与 cancel_event 竞速，命中即中断该请求
+            response = await _chat_with_cancel(provider, request, cancel_event)
+            if response is None:
+                logger.warning("[agent] turn=%s 非流式回退被用户中断", turn_id)
+                _cancelled = True
+                finish_reason = "cancelled"
+            else:
+                full_content = response.content or ""
+                full_thinking = response.thinking or ""
+                tool_calls = response.tool_calls or []
+                finish_reason = response.finish_reason
+                usage = response.usage
 
     # v19: 剥离正文中的内联思考标签（部分网关把思考写进 content）
     if full_content:

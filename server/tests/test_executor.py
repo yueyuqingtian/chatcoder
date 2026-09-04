@@ -223,3 +223,56 @@ async def test_workspace_write_keeps_approval(tmp_path, isolated_executor):
     )
     assert r.ok is True
     assert r.output == "high-ok"
+
+
+# ───────────────── plan-153-705: executor 超时读配置 ─────────────────
+
+
+class _FakeSlowTool(Tool):
+    """sleep 指定秒数后返回，用于验证 executor 超时。"""
+    name = "fake.slow"
+    risk_level = "low"
+    description = "test slow"
+
+    def function_schema(self) -> dict:
+        return {"type": "function", "function": {"name": self.name, "description": "", "parameters": {"type": "object", "properties": {}}}}
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        await asyncio.sleep(float(args.get("sec", 10)))
+        return ToolResult(ok=True, output="slow-done")
+
+
+@pytest.mark.asyncio
+async def test_executor_timeout_reads_settings(tmp_path, isolated_executor, monkeypatch):
+    """executor 超时 = settings.tool_exec_timeout_sec（不再是 60s 硬编码）。"""
+    from app.core.config import settings
+    executor, _ = isolated_executor
+    from app.orchestration.tools import executor as exec_mod
+    reg = exec_mod.tool_registry
+    reg.register(_FakeSlowTool())
+
+    monkeypatch.setattr(settings, "tool_exec_timeout_sec", 1)
+    r = await executor.execute(
+        tool_name="fake.slow", args={"sec": 30}, call_key="k7",
+        agent=_FakeAgent(), ctx=_ctx(tmp_path),
+    )
+    assert r.ok is False
+    assert "工具执行超时(1s)" in r.error
+
+
+@pytest.mark.asyncio
+async def test_executor_long_tool_survives_old_60s_limit(tmp_path, isolated_executor, monkeypatch):
+    """配置 600s 时，超过旧 60s 硬编码的工具不再被 executor 误杀（快速验证：sleep 2s 正常完成）。"""
+    from app.core.config import settings
+    executor, _ = isolated_executor
+    from app.orchestration.tools import executor as exec_mod
+    reg = exec_mod.tool_registry
+    reg.register(_FakeSlowTool())
+
+    monkeypatch.setattr(settings, "tool_exec_timeout_sec", 600)
+    r = await executor.execute(
+        tool_name="fake.slow", args={"sec": 2}, call_key="k8",
+        agent=_FakeAgent(), ctx=_ctx(tmp_path),
+    )
+    assert r.ok is True
+    assert r.output == "slow-done"

@@ -162,7 +162,15 @@ function MessageFlowCore({
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           const el2 = parentRef.current;
-          if (el2) el2.scrollTop = el2.scrollHeight;
+          if (!el2) { programmaticScrollRef.current = false; return; }
+          // 问题4: 补滚窗口内用户已滚动（scrollTop 偏离贴底值）→ 放弃补滚，尊重用户上滑
+          if (el2.scrollTop !== el2.scrollHeight) {
+            programmaticScrollRef.current = false;
+            autoScrollRef.current = false;
+            setAutoScroll(false);
+            return;
+          }
+          el2.scrollTop = el2.scrollHeight;
           programmaticScrollRef.current = false;
         });
       });
@@ -208,6 +216,14 @@ function MessageFlowCore({
     if (!inner || !el || typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver(() => {
       if (!autoScrollRef.current) return;
+      // 问题4: 内容变化但用户已滚离底部（距底 > 60px，与 onScroll 判定同口径）→
+      // 不再强制贴底，尊重用户上滑（此前 autoScrollRef 未及时翻转导致被拽回抖动）
+      const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (dist > 60) {
+        autoScrollRef.current = false;
+        setAutoScroll(false);
+        return;
+      }
       el.scrollTop = el.scrollHeight;
     });
     ro.observe(inner);
@@ -219,7 +235,18 @@ function MessageFlowCore({
   }, [sessionKey, scrollToBottom]);
 
   useEffect(() => {
-    if (autoScroll) scrollToBottom(false);
+    // 问题4: 流式内容变化时仅当用户确实位于底部附近才贴底；若 autoScroll 状态滞后
+    // 仍为 true 而用户已滚离（距底 > 60px），立即识别并停止贴底，避免被拽回抖动
+    if (!autoScroll) return;
+    const el = parentRef.current;
+    if (!el) return;
+    const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (dist > 60) {
+      autoScrollRef.current = false;
+      setAutoScroll(false);
+      return;
+    }
+    scrollToBottom(false);
   }, [streamSignal, autoScroll, scrollToBottom]);
 
   useEffect(() => {

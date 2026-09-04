@@ -73,7 +73,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(
         title="chatcoder API",
-        version="0.2.0",
+        version="0.4.0",
         description="AI 编码代理工作台 - 服务端（v2 项目任务驱动）",
         lifespan=lifespan,
         debug=settings.debug,
@@ -145,7 +145,7 @@ def create_app() -> FastAPI:
     # 健康检查
     @app.get("/api/health", tags=["health"])
     async def health():
-        return {"status": "ok", "version": "0.2.0"}
+        return {"status": "ok", "version": "0.4.0"}
 
     return app
 

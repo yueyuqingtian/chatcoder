@@ -665,9 +665,14 @@ function initAutoUpdater() {
     pushUpdateState();
   });
 
-  // 启动 30s 后首次检查,之后每 4 小时一次（GitHub 匿名 API 限流 60 次/小时,量级安全）
-  setTimeout(() => { autoUpdater.checkForUpdates().catch(() => {}); }, 30 * 1000);
-  setInterval(() => { autoUpdater.checkForUpdates().catch(() => {}); }, 4 * 60 * 60 * 1000);
+  // 打开软件 3s 内立即检查一次，之后每 30 分钟自动检测一次
+  // （GitHub 匿名 API 限流 60 次/小时，30 分钟间隔量级安全）
+  setTimeout(() => {
+    autoUpdater.checkForUpdates().catch((e) => logErr("[updater] 自动检查失败(启动后首查):", e && e.message));
+  }, 3 * 1000);
+  setInterval(() => {
+    autoUpdater.checkForUpdates().catch((e) => logErr("[updater] 自动检查失败(定时):", e && e.message));
+  }, 30 * 60 * 1000);
 }
 
 // ── IPC:更新操作（手动检查 / 立即安装 / 查询状态 / 当前版本）──

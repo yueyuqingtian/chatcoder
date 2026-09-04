@@ -16,7 +16,7 @@ from app.services import rollback_service
 
 
 @pytest.fixture
-async def db():
+async def db(monkeypatch):
     engine = create_async_engine(
         "sqlite+aiosqlite://",
         poolclass=StaticPool,
@@ -25,6 +25,10 @@ async def db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
+    # plan-644: rollback_turn -> engine.cancel_turn 内部用全局
+    # async_session_factory 连库（此前误连真实库文件的旧 schema，模型加列后暴露）；
+    # 测试统一指回内存库，保证隔离。
+    monkeypatch.setattr("app.persistence.database.async_session_factory", factory)
     async with factory() as session:
         yield session
     await engine.dispose()

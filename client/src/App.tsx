@@ -26,6 +26,8 @@ export default function App() {
   const [settingsTab, setSettingsTab] = useState<string | undefined>(undefined);
   // v19: 设置页当前 tab（左侧 SettingsSidebar 与内容区共享）。
   const [settingsActiveTab, setSettingsActiveTab] = useState<SettingsTab>("general");
+  // 问题1: 进入设置前记录右面板展开状态，离开时恢复（设置页内折叠右面板）
+  const settingsPanelExpandedRef = useRef(false);
   const leftPanelWidth = useUiStore((s) => s.leftPanelWidth);
   const setLeftPanelWidth = useUiStore((s) => s.setLeftPanelWidth);
   const rightExpanded = usePanelStore((s) => s.expanded);
@@ -73,10 +75,15 @@ export default function App() {
     setSettingsTab(tab);
     setNav("settings");
     setSidebarCollapsed(false);
+    // 问题1: 进入设置页自动折叠右面板（记录展开态，离开时恢复）
+    settingsPanelExpandedRef.current = usePanelStore.getState().expanded;
+    usePanelStore.getState().closePanel();
   }, [nav]);
 
   const leaveSettings = useCallback(() => {
     const target = returnLocation;
+    // 问题1: 离开设置页恢复右面板展开态
+    if (settingsPanelExpandedRef.current) usePanelStore.getState().openPanel();
     setNav(target.nav);
     if (target.sessionId === null) {
       useChatStore.setState({ currentSessionId: null, ...{

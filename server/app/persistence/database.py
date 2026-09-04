@@ -1,7 +1,9 @@
 """SQLAlchemy 异步引擎与会话。"""
+import asyncio
 from collections.abc import AsyncGenerator
 
 from sqlalchemy import event
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -29,7 +31,8 @@ def _connect_args(url: str) -> dict:
 engine = create_async_engine(
     settings.database_url,
     echo=settings.debug,
-    pool_pre_ping=True,
+    # 问题3: SQLite 用 pool_pre_ping 无意义（每次取连接多一次 SELECT 1），仅对非 SQLite 启用
+    pool_pre_ping=not settings.database_url.startswith("sqlite"),
     connect_args=_connect_args(settings.database_url),
     **_pool_kwargs(settings.database_url),
 )
@@ -46,7 +49,46 @@ if settings.database_url.startswith("sqlite"):
         cursor.close()
 
 
-async_session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+# 问题3: SQLite 单写者——进程内写锁串行化所有 commit，避免多会话/主子代理并发写
+# 击穿 busy_timeout 报 "database is locked"。WAL 下读不需锁，仅锁写提交。
+# 通过自定义 AsyncSession 覆盖 commit() 自动加锁：所有经 async_session_factory /
+# get_db 得到的会话写提交全被串行化，无需逐点替换调用处的 commit。
+_db_write_lock = asyncio.Lock()
+
+
+class LockedAsyncSession(AsyncSession):
+    """commit 自动串行化的 AsyncSession——写提交经进程内写锁，防 SQLite 单写者竞争。"""
+
+    async def commit(self) -> None:
+        async with _db_write_lock:
+            await super().commit()
+
+
+async_session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=LockedAsyncSession)
+
+
+async def db_commit(db: AsyncSession) -> None:
+    """写提交入口（锁已由 LockedAsyncSession.commit 串行化，此处不再重复加锁）。"""
+    await db.commit()
+
+
+async def commit_with_retry(db: AsyncSession, retries: int = 3) -> None:
+    """serially commit with bounded exponential backoff on SQLite lock errors.
+
+    message_service 原有 4 次退避重试范式上提：OperationalError locked 为瞬时写竞争，
+    退避后重试通常一次即成功。适用于 todo/task/turn 状态/usage 等写路径。
+    """
+    for attempt in range(retries):
+        try:
+            await db_commit(db)
+            return
+        except OperationalError as exc:
+            msg = str(getattr(exc, "orig", None) or exc).lower()
+            if "locked" not in msg:
+                raise
+            if attempt >= retries - 1:
+                raise
+            await asyncio.sleep(0.1 * (1 << attempt))
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

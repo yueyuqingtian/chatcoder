@@ -229,6 +229,18 @@ a { color: var(--accent); text-decoration: none; }
 .sb-update-btn:disabled { cursor: default; opacity: 0.95; }
 .sb-update-btn svg { display: block; }
 .sb-update-progress { font-size: 10px; font-weight: 600; color: #fff; white-space: nowrap; }
+/* 下载完成后的重启按钮：绿底白字、带弧度（点击退出应用并安装新版本） */
+.sb-update-restart {
+  display: flex; align-items: center; justify-content: center;
+  height: 26px; padding: 0 12px; flex-shrink: 0; gap: 4px;
+  border: none; border-radius: 13px;
+  background: #1e7a3c; color: #fff;
+  font-size: 12px; font-weight: 600; cursor: pointer;
+  transition: background 0.15s;
+}
+.sb-update-restart:hover { background: #268c47; }
+.sb-update-restart svg { display: block; }
+.sidebar.collapsed .sb-update-restart { padding: 0; width: 26px; border-radius: var(--r-sm); }
 .sidebar.collapsed .sb-user-settings { justify-content: center; padding: 0; }
 .sb-user { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .sb-avatar { width: 24px; height: 24px; border-radius: 50%; background: linear-gradient(135deg, #d9a05b, #b4622d); color: #fff; font-size: 11px; font-weight: 600; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
@@ -441,21 +453,21 @@ a { color: var(--accent); text-decoration: none; }
 }
 .turn-item-text:hover .msg-actions .msg-action-hover,
 .turn-item-text:focus-within .msg-actions .msg-action-hover { opacity: 1; pointer-events: auto; }
-/* 问题3: AI 操作行以整个回复块为整体，展示在 turn-flow 底部（不在单个 text 项内） */
+/* 问题: AI 操作行以整个回复块为整体，展示在 turn-flow 底部（不在单个 text 项内） */
 .turn-flow > .msg-actions {
   display: flex;
   align-items: center;
   gap: 1px;
   margin: 0;
 }
+/* 已完成消息始终展示全部按钮（赞/踩/重试/复制）；未完成消息由 TurnGroup 不渲染操作行 */
 .turn-flow > .msg-actions .msg-action-hover {
-  opacity: 0;
-  pointer-events: none;
+  opacity: 1;
+  pointer-events: auto;
   transition: opacity var(--dur-fast);
 }
 .turn-flow:hover > .msg-actions .msg-action-hover,
-.turn-flow:focus-within > .msg-actions .msg-action-hover { opacity: 1; pointer-events: auto; }
-.msg-action {
+.turn-flow:focus-within > .msg-actions .msg-action-hover { opacity: 1; pointer-events: auto; }.msg-action {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -3083,12 +3095,22 @@ body.panel-dragging .app-pane { transition: none; }
 .turn-flow > .turn-process-container.collapsed { margin: calc(var(--flow-gap) / -2) 0; } /* 折叠后不叠加双倍间隙 */
 .turn-group .tc-row { color: var(--text-2); }
 
+/* 问题2: 文本块首末块级元素 margin 归零——间距只由 --flow-gap 控制，
+   消除"文本块↔工具/思考块/文本块"与"工具↔工具"之间的视觉差异
+   （md-p/h1~h6/ul/ol/代码块等首末元素统一处理，流式 tail 与落库共用） */
+.turn-flow .turn-item-text .md-body > :first-child { margin-top: 0; }
+.turn-flow .turn-item-text .md-body > :last-child { margin-bottom: 0; }
+
 /* v19: 操作合并行——运行中动词滚动动效 */
 .tc-verb-roll { display: inline-flex; overflow: hidden; max-width: 60%; animation: tc-roll-in .28s ease; }
 @keyframes tc-roll-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
-/* v19: +N -M 数字滚动动效 */
-.tc-stat-roll { display: inline-flex; overflow: hidden; animation: tc-roll-in .28s ease; }
+/* v19: +N -M 数字滚动动效（问题1：方向区分——add 往上滚 / del 往下滚） */
+.tc-stat-roll { display: inline-flex; overflow: hidden; }
+.tc-stat-roll.tc-roll-up { animation: tc-roll-up .28s ease; }
+.tc-stat-roll.tc-roll-down { animation: tc-roll-down .28s ease; }
+@keyframes tc-roll-up { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+@keyframes tc-roll-down { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: none; } }
 .tc-change-stat { display: inline-flex; gap: 5px; align-items: center; flex-shrink: 0; }
 
 /* v19: 内联 diff（写操作行展开） */

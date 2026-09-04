@@ -59,6 +59,58 @@ async def test_fs_read_truncates_large_file(workspace):
     assert r.data["total_lines"] == 1
 
 
+@pytest.mark.asyncio
+async def test_fs_read_offset_limit_window(workspace):
+    """plan-645: offset/limit 生效——从指定行开始读指定行数。"""
+    f = workspace / "multi.txt"
+    f.write_text("line1\nline2\nline3\nline4\nline5\n", encoding="utf-8")
+    tool = FsReadTool()
+    r = await tool.run({"path": "multi.txt", "offset": 2, "limit": 2}, _ctx(workspace))
+    assert r.ok is True
+    assert "2: line2" in r.output
+    assert "3: line3" in r.output
+    assert "1: line1" not in r.output
+    assert "4: line4" not in r.output
+    assert r.data["shown_lines"] == "2-3"
+
+
+@pytest.mark.asyncio
+async def test_fs_read_offset_beyond_eof(workspace):
+    """plan-645: offset 超出文件总行数时不崩溃，返回空窗口。"""
+    f = workspace / "multi.txt"
+    f.write_text("line1\nline2\nline3\n", encoding="utf-8")
+    tool = FsReadTool()
+    r = await tool.run({"path": "multi.txt", "offset": 100, "limit": 2}, _ctx(workspace))
+    assert r.ok is True
+    assert "1: line1" not in r.output
+
+
+@pytest.mark.asyncio
+async def test_fs_read_numeric_string_args(workspace):
+    """plan-645: 模型输出字符串数字（"2"）时容错，不抛 TypeError。"""
+    f = workspace / "multi.txt"
+    f.write_text("line1\nline2\nline3\n", encoding="utf-8")
+    tool = FsReadTool()
+    r = await tool.run({"path": "multi.txt", "offset": "2", "limit": "1"}, _ctx(workspace))
+    assert r.ok is True
+    assert "2: line2" in r.output
+    assert "1: line1" not in r.output
+
+
+@pytest.mark.asyncio
+async def test_fs_read_limit_clamped(workspace):
+    """plan-645: limit 超上限钳到 400，传 0/负数钳到 1。"""
+    f = workspace / "many.txt"
+    f.write_text("\n".join(f"line{i}" for i in range(1, 451)) + "\n", encoding="utf-8")
+    tool = FsReadTool()
+    r = await tool.run({"path": "many.txt", "limit": 99999}, _ctx(workspace))
+    assert r.ok is True
+    assert r.data["shown_lines"] == "1-400"
+    r0 = await tool.run({"path": "many.txt", "limit": 0}, _ctx(workspace))
+    assert r0.ok is True
+    assert r0.data["shown_lines"] == "1-1"
+
+
 # ───────────────── fs.list ─────────────────
 
 

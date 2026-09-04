@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.orchestration.agent_loop import run_agent_loop
 from app.orchestration.tools.registry import tool_registry
+from app.persistence.database import async_session_factory, db_commit
 
 logger = logging.getLogger(__name__)
 
@@ -43,38 +44,43 @@ class SubagentManager:
 
         async def _run():
             try:
-                # v9: 子任务启动即广播 in_progress（提交任务创建 + 状态），
-                # 前端任务面板/右上角卡片实时展示新任务的拆分步骤与执行情况。
-                # 此前子任务创建后从不更新状态，前端看不到子任务步骤执行进度。
-                await _sync_task_status(db, self.session_id, task.id, "in_progress", None)
-                out = await run_agent_loop(
-                    db, session_id=self.session_id, turn_id=turn_id,
-                    agent=agent, context_messages=context_bundle.to_messages(),
-                    tool_schemas=tool_schemas, workspace=workspace,
-                    cancel_event=cancel_event, token_budget=token_budget,
-                    task_id=getattr(task, "id", None), model_id=getattr(agent, "model_id", None),
-                )
-                handle.status = "done" if out.kind == "message" else "failed"
-                handle.summary = out.text or ""
-                handle.error = out.error or ""
-                handle.artifact_ids = list(out.artifact_ids or [])
-                # v20: 探索子代理最终输出即结论文本（供主代理 wait 后直接整合）
-                handle.findings = out.text or ""
-                await _sync_task_status(
-                    db, self.session_id, task.id,
-                    "done" if handle.status == "done" else "failed",
-                    (out.text or "")[:300] or None,
-                    agent_id=agent.id,
-                )
+                # 问题3: 子代理用独立 AsyncSession —— 不再与主代理共享 session，
+                # 避免多任务交错 flush/commit 踩踏产生 SQLite database is locked / PendingRollbackError。
+                async with async_session_factory() as s:
+                    # v9: 子任务启动即广播 in_progress（提交任务创建 + 状态），
+                    # 前端任务面板/右上角卡片实时展示新任务的拆分步骤与执行情况。
+                    # 此前子任务创建后从不更新状态，前端看不到子任务步骤执行进度。
+                    await _sync_task_status(s, self.session_id, task.id, "in_progress", None)
+                    out = await run_agent_loop(
+                        s, session_id=self.session_id, turn_id=turn_id,
+                        agent=agent, context_messages=context_bundle.to_messages(),
+                        tool_schemas=tool_schemas, workspace=workspace,
+                        cancel_event=cancel_event, token_budget=token_budget,
+                        task_id=getattr(task, "id", None), model_id=getattr(agent, "model_id", None),
+                    )
+                    handle.status = "done" if out.kind == "message" else "failed"
+                    handle.summary = out.text or ""
+                    handle.error = out.error or ""
+                    handle.artifact_ids = list(out.artifact_ids or [])
+                    # v20: 探索子代理最终输出即结论文本（供主代理 wait 后直接整合）
+                    handle.findings = out.text or ""
+                    await _sync_task_status(
+                        s, self.session_id, task.id,
+                        "done" if handle.status == "done" else "failed",
+                        (out.text or "")[:300] or None,
+                        agent_id=agent.id,
+                    )
             except asyncio.CancelledError:
                 handle.status = "cancelled"
                 handle.error = "用户中断"
-                await _sync_task_status(db, self.session_id, task.id, "cancelled", "用户中断", agent_id=agent.id)
+                async with async_session_factory() as s:
+                    await _sync_task_status(s, self.session_id, task.id, "cancelled", "用户中断", agent_id=agent.id)
                 raise
             except Exception as e:
                 handle.status = "failed"
                 handle.error = str(e)
-                await _sync_task_status(db, self.session_id, task.id, "failed", f"执行异常: {str(e)[:200]}", agent_id=agent.id)
+                async with async_session_factory() as s:
+                    await _sync_task_status(s, self.session_id, task.id, "failed", f"执行异常: {str(e)[:200]}", agent_id=agent.id)
                 logger.exception("[subagent] %s 异常", agent.id)
             logger.info("[subagent] %s 完成 status=%s", agent.id, handle.status)
 
@@ -159,7 +165,7 @@ async def _sync_task_status(db, session_id: int, task_id: int, status: str, note
         from app.orchestration.agent_events import broadcast
         from app.services import task_service
         await task_service.update_task_status(db, task_id, status, note=note)
-        await db.commit()
+        await db_commit(db)
         await broadcast(session_id, {
             "event": "task.updated",
             "payload": {"task_id": task_id, "status": status, "note": note or ""},

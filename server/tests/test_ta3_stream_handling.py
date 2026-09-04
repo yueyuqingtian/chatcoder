@@ -244,6 +244,55 @@ def test_anthropic_message_delta_thinking_variant():
     assert monitor["thinking_parts"] == ["tail"]
 
 
+# ── plan-147-674: Anthropic 协议 image_url 块转换 ──
+
+def test_anthropic_user_image_url_block_converted():
+    """user 消息的 OpenAI image_url 块 → Anthropic image base64 source 块。"""
+    from app.models.schemas import ChatMessage
+
+    p = _provider(anthropic=True, provider="kimi")
+    _, converted = p._convert_anthropic_messages([
+        ChatMessage(
+            role="user", content="看这张图",
+            content_blocks=[{"type": "image_url",
+                             "image_url": {"url": "data:image/jpeg;base64,QUJD"}}],
+        ),
+    ])
+    content = converted[0]["content"]
+    assert content[0] == {"type": "text", "text": "看这张图"}
+    assert content[1] == {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/jpeg", "data": "QUJD"},
+    }
+
+
+def test_anthropic_user_non_image_blocks_passthrough():
+    """非 image_url 块（text 等）原样保留，不误转换。"""
+    from app.models.schemas import ChatMessage
+
+    p = _provider(anthropic=True, provider="kimi")
+    _, converted = p._convert_anthropic_messages([
+        ChatMessage(role="user", content=None,
+                    content_blocks=[{"type": "text", "text": "纯文本块"}]),
+    ])
+    assert converted[0]["content"] == [{"type": "text", "text": "纯文本块"}]
+
+
+def test_anthropic_user_image_block_without_data_uri():
+    """非 data URI 的 image_url（裸 base64）→ media_type 兜底 png。"""
+    from app.models.schemas import ChatMessage
+
+    p = _provider(anthropic=True, provider="kimi")
+    _, converted = p._convert_anthropic_messages([
+        ChatMessage(role="user", content=None,
+                    content_blocks=[{"type": "image_url",
+                                     "image_url": {"url": "QUJD"}}]),
+    ])
+    assert converted[0]["content"][0]["source"] == {
+        "type": "base64", "media_type": "image/png", "data": "QUJD",
+    }
+
+
 # ── v29 (plan-78): 思考看门狗 ──
 
 class _FakeStreamingResponse:

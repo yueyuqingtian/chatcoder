@@ -7,8 +7,6 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import { useChatStore } from "../store/chat";
 import { usePanelStore } from "../store/panel";
-import { useUiStore } from "../store/ui";
-import { translate } from "../store/i18n";
 import { ConfirmDialog } from "./ConfirmDialog";
 import {
   IconMinus, IconSquare, IconX, IconFolder,
@@ -32,7 +30,6 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
   const sessions = useChatStore((s) => s.sessions);
   const projects = useChatStore((s) => s.projects);
   const currentProjectId = useChatStore((s) => s.currentProjectId);
-  const uiLanguage = useUiStore((s) => s.language);
   const loadBootstrap = useChatStore((s) => s.loadBootstrap);
   const deleteSession = useChatStore((s) => s.deleteSession);
   const renameSession = useChatStore((s) => s.renameSession);
@@ -122,8 +119,8 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
 
       <div className="titlebar-workspace title-no-drag">
         {settings ? (
-          /* 问题1: 设置页顶部只显示页面标题，不展示项目/会话/工作树等信息 */
-          <span className="titlebar-workspace-title">{translate("titlebar.settings", uiLanguage)}</span>
+          /* 设置页顶部不显示页面标题（问题1：移除「偏好设置」） */
+          null
         ) : (
           <>
         {renaming !== null && session ? (
@@ -253,6 +250,8 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
         </button>
         </>
         )}
+        {/* 问题1: 设置页不显示右侧面板折叠/展开按钮，仅保留窗口控制 */}
+        {!settings && (
         <button
           className={`app-pane-toggle titlebar-btn${rightCollapsed ? " collapsed" : ""}`}
           onClick={onToggleRight}
@@ -260,6 +259,7 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
         >
           <IconPanelRight size={14} />
         </button>
+        )}
         <span className="titlebar-sep" />
         <button className="titlebar-btn" onClick={() => winApi?.minimizeWindow?.()} title="最小化" disabled={!winApi}>
           <IconMinus size={14} />

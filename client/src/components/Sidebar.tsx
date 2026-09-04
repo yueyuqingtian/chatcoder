@@ -16,7 +16,7 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import {
   IconCalendar, IconChevronDown, IconChevronLeft, IconChevronRight, IconPanelLeft,
   IconFolder, IconFolderDynamic, IconHash, IconListFilter,
-  IconMoreHorizontal, IconPin, IconPlus, IconSearch, IconSettings,
+  IconMoreHorizontal, IconPin, IconPlus, IconRefresh, IconSearch, IconSettings,
   IconSquarePlus, IconZap, IconDownload,
 } from "./icons";
 
@@ -40,8 +40,8 @@ const NAV_ITEMS: { key: NavKey | "search"; label: string; icon: React.ReactNode;
 const STORAGE_KEY_COLLAPSED_PROJECTS = "chatcoder:collapsed-projects";
 
 /** 更新徽标：主进程发现新版本时在设置按钮右侧出现。
- * available 点击开始下载 → downloading 显示进度 → downloaded 点击重启安装。 */
-function UpdateBadge() {
+ * available 点击开始下载 → downloading 显示进度 → downloaded 显示绿底白字「重启」按钮，点击退出并安装。 */
+function UpdateBadge({ collapsed = false }: { collapsed?: boolean }) {
   const status = useUpdaterStore((s) => s.status);
   const downloadUpdate = useUpdaterStore((s) => s.downloadUpdate);
   const installUpdate = useUpdaterStore((s) => s.installUpdate);
@@ -54,11 +54,24 @@ function UpdateBadge() {
       </button>
     );
   }
+  if (status.state === "downloaded") {
+    // 下载完成：绿底白字带弧度「重启」按钮（点击退出应用并安装新版本）
+    return (
+      <button
+        className="sb-update-restart"
+        title={`新版本 v${status.version} 已就绪，点击重启安装`}
+        onClick={() => { void installUpdate(); }}
+      >
+        {!collapsed && <span>重启</span>}
+        {collapsed && <IconRefresh size={14} color="#fff" />}
+      </button>
+    );
+  }
   return (
     <button
       className="sb-update-btn"
-      title={status.state === "downloaded" ? `新版本 v${status.version} 已就绪，点击重启安装` : `发现新版本 v${status.version}，点击下载`}
-      onClick={() => { void (status.state === "downloaded" ? installUpdate() : downloadUpdate()); }}
+      title={`发现新版本 v${status.version}，点击下载`}
+      onClick={() => { void downloadUpdate(); }}
     >
       <IconDownload size={15} color="#fff" />
     </button>
@@ -383,7 +396,7 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
           更新按钮：有新版本时在设置右侧出现（深绿底 + 白下载图标） */}
       <div className="sb-userbar">
         <button className={`sb-user-settings${active === "settings" ? " active" : ""}`} title="设置" onClick={() => onChange("settings")}><IconSettings size={16} />{!collapsed && <span>设置</span>}</button>
-        <UpdateBadge />
+        <UpdateBadge collapsed={collapsed} />
       </div>
 
       <ConfirmDialog open={confirmDelete !== null} title="删除会话" message={`确定删除「${confirmDelete?.title || "会话"}」吗？删除后将归档，不可恢复。`} confirmLabel="删除" danger

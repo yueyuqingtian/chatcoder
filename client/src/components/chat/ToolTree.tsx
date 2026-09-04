@@ -114,10 +114,10 @@ function leafSummary(leaf: ToolLeaf): string {
 const ChangeStat = memo(function ChangeStat({ additions, deletions }: { additions: number; deletions: number }) {
   return (
     <span className="tc-change-stat">
-      <span className="tc-stat-roll" key={`a${additions}`}>
+      <span className="tc-stat-roll tc-roll-up" key={`a${additions}`}>
         <span className="tc-add">+{additions}</span>
       </span>
-      <span className="tc-stat-roll" key={`d${deletions}`}>
+      <span className="tc-stat-roll tc-roll-down" key={`d${deletions}`}>
         <span className="tc-del">-{deletions}</span>
       </span>
     </span>
@@ -234,7 +234,7 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
         {path && dir && <span className="tc-dir" title={path}>{dir}</span>}
         {!path && !TOOL_VERBS[leaf.tool] && <span className="tc-tool-name" title={leaf.tool}>{leaf.tool}</span>}
         {!path && summary && <span className="tc-query" title={summary}>{summary}</span>}
-        {leaf.changeStat && ok && <ChangeStat additions={leaf.changeStat.additions} deletions={leaf.changeStat.deletions} />}
+        {leaf.changeStat && <ChangeStat additions={leaf.changeStat.additions} deletions={leaf.changeStat.deletions} />}
         {ok === null && <span className="tc-status wait"><IconSpinner size={11} /></span>}
         {ok === false && <span className="tc-status fail"><IconX size={11} /></span>}
         {expandable ? (
@@ -332,6 +332,9 @@ const ActionClusterRow = memo(function ActionClusterRow({ leaves }: { leaves: To
   const [expanded, setExpanded] = useState(false);
   const running = leaves.some((l) => l.ok === null);
   const failed = leaves.some((l) => l.ok === false);
+  // 问题2: 轮播只在未执行完成的命令（ok===null）间切换，不再切到已完成命令
+  const runningLeaves = leaves.filter((l) => l.ok === null);
+  const rollingPool = runningLeaves.length > 0 ? runningLeaves : leaves;
   // 轮播索引：运行中循环展示最近若干条
   const [tick, setTick] = useState(0);
   useEffect(() => {
@@ -353,7 +356,7 @@ const ActionClusterRow = memo(function ActionClusterRow({ leaves }: { leaves: To
     return parts.join(", ") || `${leaves.length} 次调用`;
   }, [leaves]);
 
-  const rolling = leaves[Math.min(tick % Math.max(1, leaves.length), leaves.length - 1)];
+  const rolling = rollingPool[Math.min(tick % Math.max(1, rollingPool.length), rollingPool.length - 1)];
   const rollingPath = rolling ? leafPath(rolling) : null;
   const rollingText = rolling
     ? `${toolVerb(rolling.tool).replace("已", "正在")} ${rollingPath ? splitFilePath(rollingPath).name : leafSummary(rolling)}`.trim()
