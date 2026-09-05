@@ -22,7 +22,7 @@ from app.gateway.schemas import (
     TraeLoginStatusOut,
     TraeSyncOut,
 )
-from app.persistence.database import get_db
+from app.persistence.database import commit_with_retry, get_db
 from app.services import provider_service
 
 logger = logging.getLogger(__name__)
@@ -111,7 +111,7 @@ async def trae_logout(provider_id: int, db: AsyncSession = Depends(get_db)):
     provider.auth_status = "pending"
     provider.account_label = None
     await db.flush()
-    await db.commit()
+    await commit_with_retry(db)
     return {"ok": True}
 
 
@@ -139,5 +139,7 @@ async def trae_sync(provider_id: int, db: AsyncSession = Depends(get_db)):
         label = account.get("label") or account.get("name") or account.get("user_id") or ""
         provider.account_label = str(label)[:80] or None
     await db.flush()
-    await db.commit()
+    await commit_with_retry(db)
     return TraeSyncOut(synced=len(entries), models=entries)
+
+

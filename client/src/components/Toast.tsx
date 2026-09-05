@@ -37,11 +37,12 @@ export function Toast() {
         .toast {
           position: fixed; top: 54px; right: 20px; z-index: 2000;
           display: flex; align-items: center; gap: 10px;
-          padding: 12px 14px 12px 16px; border-radius: var(--radius);
-          background: var(--bg-muted); border: 1px solid var(--border-light);
-          border-left: 3px solid var(--error);
+          padding: 10px 12px 10px 12px; border-radius: var(--r-md);
+          /* 与消息流错误卡片（turn-item-error）视觉统一：error 软底 + error 描边 */
+          background: color-mix(in srgb, var(--error) 5%, var(--bg-elevated, transparent));
+          border: 1px solid color-mix(in srgb, var(--error) 22%, transparent);
           box-shadow: var(--shadow-lg);
-          font-size: var(--fs-sm); color: var(--text);
+          font-size: 12px; line-height: 1.55; color: var(--text-1);
           max-width: 380px; word-break: break-word;
           animation: toast-in var(--dur-normal) var(--ease-out);
         }
@@ -51,11 +52,11 @@ export function Toast() {
         .toast-close {
           flex-shrink: 0; width: 24px; height: 24px; padding: 0;
           display: flex; align-items: center; justify-content: center;
-          color: var(--text-muted); border-radius: var(--radius-xs);
+          color: var(--text-3); border-radius: var(--r-xs);
           transition: background var(--dur-fast) var(--ease-out),
                       color var(--dur-fast) var(--ease-out);
         }
-        .toast-close:hover { background: var(--bg-hover); color: var(--text); transform: none; }
+        .toast-close:hover { background: var(--bg-hover); color: var(--text-1); transform: none; }
         @keyframes toast-in {
           from { opacity: 0; transform: translateX(16px); }
           to { opacity: 1; transform: translateX(0); }

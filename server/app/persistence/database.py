@@ -57,11 +57,22 @@ _db_write_lock = asyncio.Lock()
 
 
 class LockedAsyncSession(AsyncSession):
-    """commit 自动串行化的 AsyncSession——写提交经进程内写锁，防 SQLite 单写者竞争。"""
+    """commit/flush 自动串行化的 AsyncSession——写提交与写 SQL 均经进程内写锁。
+
+    v0.3.1: flush 同样持锁——SQLite 的写事务始于第一条 INSERT/UPDATE（flush），
+    此前仅锁 commit 时，多会话并发 flush 仍会"database is locked"（busy_timeout 等待
+    超时后抛错），触发 create_message/usage 落库失败 → rollback 主 db 会话 → 该会话上
+    agent/session/turn 等已加载对象全部过期 → 后续属性访问在 asyncio 上下文走同步 reload
+    抛 MissingGreenlet（SQLAlchemy xd2s）。锁覆盖 flush 后并发写冲突从源头消除。
+    """
 
     async def commit(self) -> None:
         async with _db_write_lock:
             await super().commit()
+
+    async def flush(self) -> None:
+        async with _db_write_lock:
+            await super().flush()
 
 
 async_session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=LockedAsyncSession)

@@ -50,6 +50,36 @@ CHATCODER_ADDENDUM = """## 流程规范（本环境附加）
 6. 执行类任务按步骤推进：探索 → 小步修改 → 验证 → 汇报；失败时先读完整错误定位根因，不要盲目重试。
 7. 最终结论在主窗口以清晰摘要汇报：改了什么、如何验证。回复用简体中文、简洁直接，不使用表情符号或装饰符号。"""
 
+# 完全访问模式（danger-full-access）：免审批直接执行——流程规范去掉"默认需审批"条款，
+# 与用户选择的完全访问语义一致（此前恒注入审批说明导致"完全访问仍像要审批"的观感）。
+CHATCODER_ADDENDUM_FULL_ACCESS = """## 流程规范（本环境附加）
+1. 本环境由 chatcoder 工作台托管：任务拆解、上下文压缩由平台自动完成。
+2. 当前为【完全访问模式】：Write/Edit/Bash 等写操作与命令执行无需审批，直接生效；仍须对改动负责、避免越权操作与破坏性动作。
+3. 修改文件后应复查关键变更（重新 Read 确认），并遵循项目现有代码风格与目录结构，不引入未使用的依赖。
+4. 重要决策与关键改动添加简短注释；交付前自查可运行性（编译/测试）。
+5. 长驻进程（dev server、watch、后端服务）必须以后台模式启动（Bash 的 waitForCompletion=false）。
+6. 执行类任务按步骤推进：探索 → 小步修改 → 验证 → 汇报；失败时先读完整错误定位根因，不要盲目重试。
+7. 最终结论在主窗口以清晰摘要汇报：改了什么、如何验证。回复用简体中文、简洁直接，不使用表情符号或装饰符号。"""
+
+# 只读模式（read-only）：仅允许查看/搜索/分析
+CHATCODER_ADDENDUM_READONLY = """## 流程规范（本环境附加）
+1. 本环境由 chatcoder 工作台托管：任务拆解、上下文压缩由平台自动完成。
+2. 当前为【只读模式】：仅允许读取、搜索、分析代码或文档；禁止写入文件、运行命令、应用补丁。
+3. 修改文件后应复查关键变更（重新 Read 确认），并遵循项目现有代码风格与目录结构，不引入未使用的依赖。
+4. 重要决策与关键改动添加简短注释；交付前自查可运行性（编译/测试）。
+5. 长驻进程（dev server、watch、后端服务）必须以后台模式启动（Bash 的 waitForCompletion=false）。
+6. 执行类任务按步骤推进：探索 → 小步修改 → 验证 → 汇报；失败时先读完整错误定位根因，不要盲目重试。
+7. 最终结论在主窗口以清晰摘要汇报：改了什么、如何验证。回复用简体中文、简洁直接，不使用表情符号或装饰符号。"""
+
+
+def _build_addendum(sandbox_mode: str) -> str:
+    """按沙箱模式选择流程规范段：完全访问/只读使用对应文案，其余保持默认。"""
+    if sandbox_mode == "danger-full-access":
+        return CHATCODER_ADDENDUM_FULL_ACCESS
+    if sandbox_mode == "read-only":
+        return CHATCODER_ADDENDUM_READONLY
+    return CHATCODER_ADDENDUM
+
 # 子代理引导（启用子代理时追加）
 SUBAGENT_GUIDE_SECTION = """## 子代理使用
 SubAgent 用于并行调研多个相互独立的课题（如前端 + 后端 + 协议同时排查）。同一轮最多 2-3 个，
@@ -73,8 +103,13 @@ def build_runtime_snapshot(workspace: str = "") -> str:
 
 
 def build_ta3_system_prompt(model_meta: dict | None, workspace: str = "",
-                            enable_subagents: bool = True) -> str:
-    """组装 ta3 模式系统提示词（见模块 docstring 结构）。"""
+                            enable_subagents: bool = True,
+                            sandbox_mode: str = "workspace-write") -> str:
+    """组装 ta3 模式系统提示词（见模块 docstring 结构）。
+
+    sandbox_mode：完全访问(danger-full-access)/只读(read-only)时流程规范段
+    按对应语义生成（免审批/仅读），避免注入与所选模式矛盾的审批条款。
+    """
     model_meta = model_meta or {}
     sections = [
         (model_meta.get("systemMessage") or "").strip(),
@@ -84,5 +119,5 @@ def build_ta3_system_prompt(model_meta: dict | None, workspace: str = "",
     ]
     if enable_subagents:
         sections.append(SUBAGENT_GUIDE_SECTION)
-    sections.append(CHATCODER_ADDENDUM)
+    sections.append(_build_addendum(sandbox_mode))
     return "\n\n".join(s for s in sections if s)

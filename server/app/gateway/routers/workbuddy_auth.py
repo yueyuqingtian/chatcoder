@@ -22,7 +22,7 @@ from app.gateway.schemas import (
     WorkBuddyLoginStatusOut,
     WorkBuddySyncOut,
 )
-from app.persistence.database import get_db
+from app.persistence.database import commit_with_retry, get_db
 from app.services import provider_service
 
 logger = logging.getLogger(__name__)
@@ -56,7 +56,7 @@ async def workbuddy_login_start(provider_id: int, db: AsyncSession = Depends(get
         label = account.get("label") or account.get("nickname") or account.get("id") or ""
         provider.account_label = str(label)[:80] or None
         await db.flush()
-        await db.commit()
+        await commit_with_retry(db)
     return WorkBuddyLoginStartOut(**result)
 
 
@@ -88,7 +88,7 @@ async def workbuddy_logout(provider_id: int, db: AsyncSession = Depends(get_db))
     provider.auth_status = "pending"
     provider.account_label = None
     await db.flush()
-    await db.commit()
+    await commit_with_retry(db)
     return {"ok": True}
 
 
@@ -116,5 +116,7 @@ async def workbuddy_sync(provider_id: int, db: AsyncSession = Depends(get_db)):
         label = account.get("label") or account.get("nickname") or account.get("id") or ""
         provider.account_label = str(label)[:80] or None
     await db.flush()
-    await db.commit()
+    await commit_with_retry(db)
     return WorkBuddySyncOut(synced=len(entries), models=entries)
+
+

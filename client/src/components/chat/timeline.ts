@@ -66,7 +66,9 @@ export type TurnItem =
   /** v2.2 (对齐 zcode 3.11): 系统分割线（模型切换等 divider） */
   | { kind: "divider"; msg: MessageOut }
   /** plan-671: 目标续跑消息（zcode model-only 语义）——渲染为细分隔线而非用户气泡 */
-  | { kind: "goal-continuation"; msg: MessageOut };
+  | { kind: "goal-continuation"; msg: MessageOut }
+  /** plan-865: 计划预览/确认消息——按数据库时间线位置渲染计划卡 */
+  | { kind: "plan"; msg: MessageOut };
 
 export type TimelineEntry =
   | { kind: "turn"; turnId: number | null; items: TurnItem[] }
@@ -267,8 +269,9 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
       flushTools();
       items.push({ kind: "text", msg: m });
     } else if (m.msg_type === MsgType.Plan) {
+      // plan-865: 计划预览/确认消息——时间线独立条目，按数据库位置渲染计划卡
       flushTools();
-      items.push({ kind: "text", msg: m });
+      items.push({ kind: "plan", msg: m });
     } else {
       flushTools();
       items.push({ kind: "text", msg: m });

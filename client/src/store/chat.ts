@@ -771,8 +771,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // plan-624: 只认 text 消息——thinking 是内部推理，其文本也会提前引用计划
       // 文档路径（如"先更新计划文档 ai/chatcoder-plan-92.md"），命中会把锚点
       // 拉到 turn 开头，卡片插到规划段前面（紧跟「已工作」计时条）。
-      // 取最后一条命中而非第一条：方案正文/执行汇报都是收尾 text，锚点落在
-      // turn 末尾引用处，卡片渲染在规划段/执行内容之后，不再插到过程中间。
+      // plan-865: 取第一条命中而非最后一条——执行汇报引用路径会把锚点推到 turn
+      // 末尾导致卡片沉底；第一条命中即方案汇报位置（仅服务无 PLAN 消息的旧会话
+      // 兜底，新会话由数据库 PLAN 消息按时间线渲染）。
       const findTurnPlan = (turnId: number): { path: string; msgId: number | null } | null => {
         let out: { path: string; msgId: number } | null = null;
         for (const m of messages) {
@@ -780,7 +781,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           if (m.msg_type === "thinking" || (m.content as Record<string, unknown> | undefined)?.thinking === true) continue;
           const text = typeof m.content?.text === "string" ? m.content.text : "";
           const hit = text.match(planPathRe);
-          if (hit) out = { path: hit[0], msgId: m.id };
+          if (hit && !out) { out = { path: hit[0], msgId: m.id }; break; }
         }
         return out;
       };

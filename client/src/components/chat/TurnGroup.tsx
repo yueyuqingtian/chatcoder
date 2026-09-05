@@ -78,7 +78,6 @@ export const TurnGroup = memo(function TurnGroup({
   subagents,
   actions = "full",
   hasPlan = false,
-  planAnchorMsgId = null,
 }: {
   entry: Extract<TimelineEntry, { kind: "turn" }>;
   isRunning: boolean;
@@ -86,8 +85,6 @@ export const TurnGroup = memo(function TurnGroup({
   subagents?: SubagentMetaLite[];
   actions?: "full" | "copy-only" | "none";
   hasPlan?: boolean;
-  /** plan-604: 锚定消息 id（方案汇报正文）——锚点及之前的 AI 项为「规划段」，计划卡渲染在规划段末尾 */
-  planAnchorMsgId?: number | null;
 }) {
   const requestRollbackPreview = useChatStore((s) => s.requestRollbackPreview);
   const items = entry.items;
@@ -112,54 +109,39 @@ export const TurnGroup = memo(function TurnGroup({
     }
   }
 
-  // plan-604: 计划卡固定化——以锚定消息（方案汇报正文；task.proposed 实时锚定与历史恢复同源）
-  // 为界把 AI 项切成两段：锚点及之前的「规划段」（含思考/工具/方案文本）始终展开；
-  // 锚点未命中时回退 plan-538 口径（开头连续 text 项为规划方案文本），卡片位置仍确定不漂移。
-  const planSplitIdx = useMemo(() => {
-    if (!hasPlan || planAnchorMsgId == null) return -1;
-    for (const { item, index } of aiItemsWithIndex) {
-      const mid = "msg" in item ? (item as { msg: { id: number } }).msg.id : null;
-      if (mid === planAnchorMsgId) return index;
-    }
-    return -1;
-  }, [hasPlan, planAnchorMsgId, aiItemsWithIndex]);
+  // plan-865: 规划段/执行段统一为「执行过程」折叠（见 processItems）——不再按锚点切分，
+  // 计划卡由时间线 PLAN 消息（case "plan"）或旧会话 plansByTurn 兜底渲染。
 
-  const planningItems = useMemo(() => {
-    if (!hasPlan) return [];
-    if (planSplitIdx >= 0) return aiItemsWithIndex.filter(({ index }) => index <= planSplitIdx);
-    const out: typeof aiItemsWithIndex = [];
-    for (const e of aiItemsWithIndex) {
-      if (e.item.kind === "text") out.push(e);
-      else break;
-    }
-    return out;
-  }, [hasPlan, planSplitIdx, aiItemsWithIndex]);
+  // plan-865 折叠口径：只折叠「最终汇报（最后一条 text）之前」的 AI 执行过程
+  // （思考/工具/中间说明/计划预览消息及计划卡）；最终汇报与操作行始终展示。
+  // 异常中断（interrupted/failed/rolled_back）不折叠（错误与过程必须可见）。
+  const turnRowStatus = useChatStore((s) =>
+    entry.turnId != null ? s.turns.find((t) => t.id === entry.turnId)?.status : undefined
+  );
+  const abnormalTurn = turnRowStatus === "interrupted" || turnRowStatus === "failed" || turnRowStatus === "rolled_back";
 
-  // v41: flowItems = 除首条用户消息与规划段外的全部 items（含注入用户消息，按落库位置
-  // 就地渲染）；此前注入消息被集中提升到 turn 顶部用户消息区，与实际发送位置不符。
-  const flowItems = useMemo(() => {
-    const skip = new Set(planningItems.map(({ index }) => index));
-    return items
-      .map((item, index) => ({ item, index }))
-      .filter(({ index }) => index !== firstUserIdx && !skip.has(index));
-  }, [items, firstUserIdx, planningItems]);
+  // 执行过程项 = 除首条用户消息外、位于最终汇报之前的所有 AI 项
+  const processItems = useMemo(
+    () => (finalReportOriginalIdx >= 0
+      ? items
+          .map((item, index) => ({ item, index }))
+          .filter(({ index }) => index !== firstUserIdx && index < finalReportOriginalIdx)
+      : []),
+    [items, firstUserIdx, finalReportOriginalIdx]
+  );
+  // v0.3.1: 仅当存在过程项且存在最终汇报文本且非异常时才形成「折叠过程 + 直显汇报」结构；
+  // 若无最终汇报文本（运行中/异常中断/纯工具调用无 text 总结），所有项全部直显展开，绝不误折叠/误吞
+  const hasProcess = processItems.length > 0 && finalReportOriginalIdx >= 0 && !abnormalTurn;
 
-  const hasProcessBeforeFinal = useMemo(() => {
-    if (finalReportOriginalIdx < 0) return false;
-    return flowItems.some(({ index }) => index < finalReportOriginalIdx);
-  }, [flowItems, finalReportOriginalIdx]);
-
-  // plan-655: 统一折叠口径——计划 turn 完成后，规划段（探索/方案编写）与执行段
-  // 过程一起折叠，消除"上面展开、中间折叠"的割裂；无最终汇报（异常结束）时
-  // 全部展开，保证错误与过程可见。
-  const hasPlanningProcess = planningItems.length > 0;
-  const hasProcess =
-    hasProcessBeforeFinal || (finalReportOriginalIdx >= 0 && hasPlanningProcess);
-
-  // 任务完成且有最终汇报时，工作过程自动折叠；运行中默认展开
+  // 任务完成且有最终汇报时，工作过程自动折叠；运行中默认展开。
+  // v0.3.1 (plan-190-898): 方案等待用户确认阶段（awaiting_confirmation）必须保持展开，
+  // 确保计划卡预览在规划阶段完成后始终展现在最底部；用户手动点击计时条折叠时才尊重手动状态。
+  const isAwaitingConfirmation = turnRowStatus === "awaiting_confirmation";
   const [userToggledCollapsed, setUserToggledCollapsed] = useState<boolean | null>(null);
   const processCollapsed =
-    userToggledCollapsed !== null ? userToggledCollapsed : !isRunning && hasProcess;
+    userToggledCollapsed !== null
+      ? userToggledCollapsed
+      : (!isRunning && hasProcess && !isAwaitingConfirmation);
 
   let lastThinkingIdx = -1;
   for (let k = items.length - 1; k >= 0; k--) {
@@ -168,6 +150,14 @@ export const TurnGroup = memo(function TurnGroup({
       break;
     }
   }
+
+  // plan-865: 时间线 PLAN 消息（预览/确认）——最后一条位置渲染计划卡；
+  // hasPlanMsg=true 时不再走 plansByTurn 兜底渲染位，避免重复卡片
+  let lastPlanItemIdx = -1;
+  for (let k = items.length - 1; k >= 0; k--) {
+    if (items[k].kind === "plan") { lastPlanItemIdx = k; break; }
+  }
+  const hasPlanMsg = lastPlanItemIdx >= 0;
 
   const rollbackFn = useCallback(() => {
     if (turnId != null) requestRollbackPreview(turnId);
@@ -197,6 +187,10 @@ export const TurnGroup = memo(function TurnGroup({
         ))}
       </div>
     ) : null;
+
+  // v0.3.1: 外层容器渲染守卫——只要存在任何非首条用户消息的项、计划卡或子代理，必须完整渲染 AI 回复区
+  const hasAnyAiContent =
+    items.some((_, index) => index !== firstUserIdx) || hasPlan || subagentNode != null;
 
   const renderAiItem = (item: TurnItem, i: number) => {
     switch (item.kind) {
@@ -276,6 +270,18 @@ export const TurnGroup = memo(function TurnGroup({
             </div>
           </div>
         );
+      case "plan": {
+        // plan-865: 计划预览/确认消息——按数据库时间线位置渲染；同 turn 多条 plan 消息
+        // 只在最后一条位置渲染卡片（携带最新状态），之前的渲染为细提示行
+        const isLastPlan = i === lastPlanItemIdx;
+        return isLastPlan ? (
+          <PlanCard key={i} turnId={entry.turnId ?? undefined} embedded msg={item.msg} />
+        ) : (
+          <div key={i} className="turn-item plan-msg-item">
+            <span>{msgText(item.msg.content)}</span>
+          </div>
+        );
+      }
       // v2.2 (对齐 zcode 3.11): 系统分割线（模型切换 / 目标停止提示等）
       case "divider":
         return (
@@ -333,44 +339,48 @@ export const TurnGroup = memo(function TurnGroup({
       })()}
 
       {/* AI 执行区与工作计时条：v40 统一放入单一 flex 容器（.turn-flow gap 节奏），
-          工作过程折叠容器只负责隐藏/展开，不再叠加第二套 margin。
-          plan-604: 「已工作」计时条回归 AI 回复顶部状态块（v25 口径，计划 turn 与普通 turn 一致）；
-          规划段 + 计划卡固定渲染在计时条之下、执行折叠流之上——卡片不再悬在「已工作」上方。
-          v41: flowItems 含注入用户消息--AI 尚无落库项但已有注入时也渲染本容器；
-          仅剩计划卡（turn 尚无 AI 项）时同样渲染，卡片不再有 turn-flow 外的第二渲染位 */}
-      {(flowItems.length > 0 || planningItems.length > 0 || hasPlan) && (
+          plan-865/v0.3.1 折叠口径：有最终汇报时，折叠容器只收「最终汇报之前的 AI 执行过程」
+          （思考/工具/中间说明/计划预览消息及卡片），最终汇报与操作行始终展示；
+          无最终汇报（纯工具、执行中、异常中断等）时全量直显，绝对不吞工具调用与思考块。 */}
+      {hasAnyAiContent && (
         <div className="turn-flow">
-          <WorkTimer
-            turnId={turnId}
-            isRunning={isRunning}
-            hasProcess={hasProcess}
-            collapsed={processCollapsed}
-            onToggleCollapsed={() => setUserToggledCollapsed(!processCollapsed)}
-          />
+          {hasProcess && (
+            <WorkTimer
+              turnId={turnId}
+              isRunning={isRunning}
+              hasProcess={hasProcess}
+              collapsed={processCollapsed}
+              onToggleCollapsed={() => setUserToggledCollapsed(!processCollapsed)}
+            />
+          )}
 
-          {/* 规划段（锚点及之前的 AI 项：方案说明文本与规划期思考/工具）——plan-655
-              纳入工作过程折叠容器，与执行段共享折叠状态；计划卡与最终汇报始终展示 */}
-          {hasPlanningProcess && (
+          {/* 1. 有最终汇报时：过程项进入可折叠容器 */}
+          {hasProcess && (
             <div className={`turn-process-container${processCollapsed ? " collapsed" : ""}`}>
-              {planningItems.map(({ item, index }) => renderAiItem(item, index))}
+              {processItems.map(({ item, index }) => renderAiItem(item, index))}
+              {hasPlan && !hasPlanMsg && <PlanCard turnId={turnId} embedded />}
+              {subagentNode}
             </div>
           )}
 
-          {/* 计划卡：紧随规划段，位置固定（task.proposed 实时锚定 = 历史恢复锚定，刷新前后不漂移） */}
-          {hasPlan && <PlanCard turnId={turnId} embedded />}
-          {subagentNode}
-
-          {/* 工作过程时间线保序折叠：将最终汇报前的所有思考、工具与中间过程说明按原始时间先后顺序折叠（对齐图 8） */}
-          {hasProcessBeforeFinal && (
-            <div className={`turn-process-container${processCollapsed ? " collapsed" : ""}`}>
-              {flowItems.filter(({ index }) => index < finalReportOriginalIdx).map(({ item, index }) => renderAiItem(item, index))}
+          {/* 2. 无最终汇报时（运行中/异常/纯工具调用无 text 总结）：所有项直显展开，杜绝隐形 */}
+          {!hasProcess && (
+            <div className="turn-process-container">
+              {items.map((item, index) =>
+                index !== firstUserIdx ? renderAiItem(item, index) : null
+              )}
+              {hasPlan && !hasPlanMsg && <PlanCard turnId={turnId} embedded />}
+              {subagentNode}
             </div>
           )}
 
-          {/* 最终结果与汇报（最终 Markdown 文本、产物、摘要等），折叠时始终展示在下方 */}
-          {flowItems
-            .filter(({ index }) => !hasProcessBeforeFinal || index >= finalReportOriginalIdx)
-            .map(({ item, index }) => renderAiItem(item, index))}
+          {/* 3. 最终汇报（最终 text）与其后的确认/分割线等：有过程时直显在折叠条下方 */}
+          {hasProcess &&
+            items.map((item, index) =>
+              index !== firstUserIdx && index >= finalReportOriginalIdx
+                ? renderAiItem(item, index)
+                : null
+            )}
 
           {/* 问题3: AI 操作行（复制/赞踩/重试）以整个 AI 回复块为整体，展示在 turn-flow 底部。
                历史/已结束消息始终显示；运行中不展示。任务异常中断（无最终 text）也能出现。 */}

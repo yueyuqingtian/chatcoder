@@ -416,6 +416,8 @@ a { color: var(--accent); text-decoration: none; }
 .turn-item-summary { padding: 5px 10px; border-radius: var(--r-sm); background: var(--bg-elevated); color: var(--text-2); font-size: 12px; margin: 2px 0; }
 .turn-item-error { display: flex; gap: 8px; align-items: flex-start; padding: 10px 12px; border-radius: var(--r-md); background: color-mix(in srgb, var(--error) 5%, var(--bg-elevated, transparent)); border: 1px solid color-mix(in srgb, var(--error) 22%, transparent); color: var(--text-primary); font-size: 12px; line-height: 1.55; margin: 2px 0; }
 .turn-item-error .err-icon { flex-shrink: 0; margin-top: 2px; color: var(--error); }
+/* plan-865: 计划消息提示行（同 turn 多条 PLAN 消息时，非最后一条渲染为细提示） */
+.plan-msg-item { font-size: 12px; color: var(--text-3); padding: 0; }
 .turn-item-error .err-body { min-width: 0; flex: 1; }
 .turn-item-error .err-title { font-weight: 600; color: var(--error); margin-bottom: 2px; }
 .turn-item-error .err-msg { color: var(--text-secondary); word-break: break-word; font-family: var(--font-mono, ui-monospace, Consolas, monospace); font-size: 11.5px; }
@@ -731,8 +733,14 @@ a { color: var(--accent); text-decoration: none; }
   color: var(--text-2);
   cursor: default;
   border-radius: var(--r-xs);
-  min-height: calc(var(--fs-md, 13px) * 1.4);
+  /* 行盒底线 = 正文行高：进行态（ticker/滚动动词/spinner）与完成态行高严格一致，
+     杜绝"正在思考/正在执行"行被内容撑高造成上下间距偏大 */
+  min-height: calc(var(--fs-md, 13px) * var(--chat-line-height, 1.7));
 }
+/* 进行态内容高度约束：不高于行盒（ticker 单行 18px / 动词滚动视口），
+   与完成态行共享同一高度，保证执行过程各行间距一致 */
+.tc-row .thinking-ticker-wrap,
+.tc-row .tc-verb-roll { max-height: calc(var(--fs-md, 13px) * var(--chat-line-height, 1.7)); }
 .tc-row.has-output { cursor: pointer; }
 /* v19: hover 不变色，仅显示展开箭头 */
 .tc-icon { display: inline-flex; color: var(--text-3); flex-shrink: 0; }
@@ -3094,6 +3102,10 @@ body.panel-dragging .app-pane { transition: none; }
 .turn-flow .turn-item-error { margin: 0; }
 .turn-flow > .turn-process-container.collapsed { margin: calc(var(--flow-gap) / -2) 0; } /* 折叠后不叠加双倍间隙 */
 .turn-group .tc-row { color: var(--text-2); }
+
+/* 流式尾部（StreamingText）首行间距与消息流内行间距一致：
+   上方 turn 的 padding-bottom(12px)+margin(4px)=16px，扣回 8px 后净间距=--flow-gap */
+.turn-flow.streaming-tail { margin-top: calc(-1 * var(--flow-gap)); }
 
 /* 问题2: 文本块首末块级元素 margin 归零——间距只由 --flow-gap 控制，
    消除"文本块↔工具/思考块/文本块"与"工具↔工具"之间的视觉差异

@@ -18,7 +18,7 @@ from app.auth.ta3 import oauth as ta3_oauth
 from app.auth.ta3 import session as ta3_session
 from app.auth.ta3.oauth import DEFAULT_TA3_API_BASE
 from app.gateway.schemas import Ta3LoginStartOut, Ta3LoginStatusOut, Ta3SyncOut
-from app.persistence.database import get_db
+from app.persistence.database import commit_with_retry, get_db
 from app.services import provider_service
 
 logger = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ async def ta3_login_start(provider_id: int, db: AsyncSession = Depends(get_db)):
         account = result.get("account") or {}
         provider.account_label = str(account.get("label") or account.get("id") or "")[:80] or None
         await db.flush()
-        await db.commit()
+        await commit_with_retry(db)
     return Ta3LoginStartOut(**result)
 
 
@@ -84,7 +84,7 @@ async def ta3_logout(provider_id: int, db: AsyncSession = Depends(get_db)):
     provider.auth_status = "pending"
     provider.account_label = None
     await db.flush()
-    await db.commit()
+    await commit_with_retry(db)
     return {"ok": True}
 
 
@@ -111,5 +111,6 @@ async def ta3_sync(provider_id: int, db: AsyncSession = Depends(get_db)):
         account = auth.account or {}
         provider.account_label = str(account.get("label") or account.get("id") or "")[:80] or None
     await db.flush()
-    await db.commit()
+    await commit_with_retry(db)
     return Ta3SyncOut(synced=len(entries), models=entries)
+

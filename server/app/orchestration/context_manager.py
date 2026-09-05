@@ -349,12 +349,24 @@ async def build_main_context(
     引导模型调用不存在的工具。
     """
     workspace = session.worktree_path or (project.path if project else "")
+    # 沙箱模式解析（与 engine/run_agent_loop 同口径：项目配置 > 全局设置 > 默认）
+    _sandbox = "workspace-write"
+    try:
+        from app.services import config_service
+        _eff = await config_service.effective_config(db, project_path=workspace)
+        _sandbox = str(_eff.get("sandbox_mode") or "workspace-write")
+        from app.core.config import settings as _st
+        if _sandbox == "workspace-write" and _st.sandbox_mode != "workspace-write":
+            _sandbox = _st.sandbox_mode
+    except Exception:
+        logger.debug("[context] 沙箱模式读取失败，用 workspace-write", exc_info=True)
     # v23: ta3 供应商模型 → 还原式系统提示词（远端主体 + ta3 纪律 + 当前项目规范）
     ta3_meta = await _resolve_ta3_model_meta(db, agent, session)
     if ta3_meta is not None:
         from app.orchestration.prompts.ta3_fusion import build_ta3_system_prompt
         system_prompt = build_ta3_system_prompt(
             ta3_meta, workspace=workspace, enable_subagents=enable_subagents,
+            sandbox_mode=_sandbox,
         )
         logger.info("[context] 会话 %s 使用 ta3 还原式系统提示词", session.id if session else "-")
     else:

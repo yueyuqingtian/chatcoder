@@ -93,36 +93,71 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
     except Exception:
         pass
 
+    # v0.3.1 (plan-190-898): 提前将全部 ORM 字段解构成纯 Python 标量变量。
+    # 彻底杜绝两大致命错误：
+    # 1. 后台异步任务 _run() 中穿透引用当前请求会话 db 中的 turn 对象。当前请求返回后会话已关闭，
+    #    _run 在事件循环调度时访问 turn.id 会触发同步 reload 抛 MissingGreenlet 导致后台任务暴毙（前端永远等待响应）；
+    # 2. 响应返回给 FastAPI 序列化时访问已过期 ORM 实例属性触发 MissingGreenlet 500 报错。
+    turn_id = int(turn.id)
+    session_id = int(body.session_id)
+    user_msg_id = turn.user_message_id
+    turn_status = turn.status
+    turn_summary = turn.summary
+    token_usage = turn.token_usage or 0
+    started_at = turn.started_at
+    completed_at = turn.completed_at
+    plan_doc_path = turn.plan_doc_path
+    plan_status = turn.plan_status
+    attachments = body.attachments
+    reasoning_effort = body.reasoning_effort
+    mode = body.mode
+    model_id = body.model_id
+
     # 异步执行 turn（后台任务）
     async def _run():
         from app.persistence.database import async_session_factory
         async with async_session_factory() as s:
             try:
-                await engine.start_turn(s, turn_id=turn.id, attachments=body.attachments, reasoning_effort=body.reasoning_effort, mode=body.mode, model_id=body.model_id)
+                await engine.start_turn(
+                    s, turn_id=turn_id, attachments=attachments,
+                    reasoning_effort=reasoning_effort, mode=mode, model_id=model_id,
+                )
                 await s.commit()
             except Exception:
                 await s.rollback()
                 # v1.1: 异常也必须关 turn——否则 DB 永远 running，左侧会话永远转圈
-                logger.exception("turn 执行异常 turn=%s", turn.id)
+                logger.exception("turn 执行异常 turn=%s", turn_id)
                 try:
-                    await turn_service.update_turn_status(s, turn.id, "failed",
+                    await turn_service.update_turn_status(s, turn_id, "failed",
                                                           summary="执行异常", completed=True)
                     await s.commit()
                     from app.gateway.ws import manager as ws_manager
-                    await ws_manager.broadcast(body.session_id, {
+                    await ws_manager.broadcast(session_id, {
                         "event": "turn.updated",
-                        "payload": {"turn_id": turn.id, "status": "failed"},
+                        "payload": {"turn_id": turn_id, "status": "failed"},
                     })
                 except Exception:
                     logger.debug("turn 异常态落库失败", exc_info=True)
             finally:
                 from app.orchestration.engine import _turn_tasks
-                _turn_tasks.pop(turn.id, None)
+                _turn_tasks.pop(turn_id, None)
 
     task = asyncio.get_event_loop().create_task(_run())
     from app.orchestration.engine import _turn_tasks
-    _turn_tasks[turn.id] = task
-    return turn
+    _turn_tasks[turn_id] = task
+
+    return TurnOut(
+        id=turn_id,
+        session_id=session_id,
+        user_message_id=user_msg_id,
+        status=turn_status,
+        summary=turn_summary,
+        token_usage=token_usage,
+        started_at=started_at,
+        completed_at=completed_at,
+        plan_doc_path=plan_doc_path,
+        plan_status=plan_status,
+    )
 
 
 @router.get("/sessions/{session_id}", response_model=list[TurnOut])
@@ -202,6 +237,15 @@ async def resume_turn(turn_id: int, db: AsyncSession = Depends(get_db)):
     await turn_service.update_turn_status(db, turn_id, "running")
     await db.commit()
 
+    # v0.3.1: 提取纯标量变量，禁止闭包在请求返回后访问已关闭会话的 ORM 属性
+    session_id = int(turn.session_id)
+    user_msg_id = turn.user_message_id
+    started_at = turn.started_at
+    completed_at = turn.completed_at
+    plan_doc_path = turn.plan_doc_path
+    plan_status = turn.plan_status
+    token_usage = turn.token_usage or 0
+
     async def _run():
         from app.persistence.database import async_session_factory
         async with async_session_factory() as s:
@@ -217,7 +261,7 @@ async def resume_turn(turn_id: int, db: AsyncSession = Depends(get_db)):
                                                           summary="执行异常", completed=True)
                     await s.commit()
                     from app.gateway.ws import manager as ws_manager
-                    await ws_manager.broadcast(turn.session_id, {
+                    await ws_manager.broadcast(session_id, {
                         "event": "turn.updated",
                         "payload": {"turn_id": turn_id, "status": "failed"},
                     })
@@ -225,7 +269,19 @@ async def resume_turn(turn_id: int, db: AsyncSession = Depends(get_db)):
                     logger.debug("turn 异常态落库失败", exc_info=True)
 
     asyncio.get_event_loop().create_task(_run())
-    return turn
+    # v0.3.1: 绝杀 MissingGreenlet——显式构造纯 Pydantic DTO 返回
+    return TurnOut(
+        id=turn_id,
+        session_id=session_id,
+        user_message_id=user_msg_id,
+        status="running",
+        summary=turn.summary,
+        token_usage=token_usage,
+        started_at=started_at,
+        completed_at=completed_at,
+        plan_doc_path=plan_doc_path,
+        plan_status=plan_status,
+    )
 
 
 @router.post("/{turn_id}/rollback", response_model=RollbackResult)
@@ -563,6 +619,20 @@ async def confirm_plan_turn(turn_id: int, body: TaskConfirmBody,
         _workspace = ""
     turn.plan_status = "confirmed" if body.accepted else "cancelled"
     engine._stamp_plan_doc(_workspace, turn.plan_doc_path, turn.plan_status)
+
+    # plan-865: 计划确认/取消消息落库——数据库时间线的"确认"位置，前端计划卡原位更新状态
+    try:
+        await message_service.create_message(
+            db, session_id=turn.session_id, turn_id=turn_id,
+            sender_type=SenderType.SYSTEM.value, msg_type=MsgType.PLAN.value,
+            content={
+                "plan_doc_path": turn.plan_doc_path or "",
+                "plan_status": turn.plan_status or "",
+                "text": "方案已确认，开始执行" if body.accepted else "方案已取消，任务停止",
+            },
+        )
+    except Exception:
+        logger.debug("[confirm] PLAN 确认消息落库失败(非阻塞)", exc_info=True)
 
     if not body.accepted:
         # 取消 = 停止任务：turn 置 cancelled，不启动任何执行。

@@ -437,7 +437,21 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         # plan-644: plan 模式收集本会话此前各轮计划需求全集并注入（多轮迭代
         # 零丢失的机制保证）；非 plan 模式不注入、零开销
         _plan_history = ""
-        if mode == "plan" and settings.plan_history_inject_chars > 0:
+        # 沙箱模式解析（与 run_agent_loop 同口径：项目配置 > 全局设置 > 默认）
+        _eff_sandbox = "workspace-write"
+        try:
+            from app.services import config_service
+            _eff = await config_service.effective_config(db, project_path=workspace)
+            _eff_sandbox = str(_eff.get("sandbox_mode") or "workspace-write")
+            if _eff_sandbox == "workspace-write" and settings.sandbox_mode != "workspace-write":
+                _eff_sandbox = settings.sandbox_mode
+        except Exception:
+            logger.debug("[engine] turn=%s 读取沙箱模式失败，用 workspace-write", turn_id, exc_info=True)
+        # 完全访问模式（danger-full-access）：免审批、直接执行——
+        # 不注入规划/审阅模式说明，工具全量放行（用户要求"完全访问"不再被规划流程限制）
+        _full_access = _eff_sandbox == "danger-full-access"
+
+        if mode == "plan" and not _full_access and settings.plan_history_inject_chars > 0:
             _plan_history = await _collect_plan_history(db, session, workspace)
             if _plan_history:
                 logger.info("[engine] turn=%s 注入 Plan History %d 字符", turn_id, len(_plan_history))
@@ -454,8 +468,8 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             effective_model_id=effective_model_id,
         )
 
-        # 命令模式：注入模式指令（/chat 只读、/plan 先规划后执行）
-        if mode in _MODE_HINTS:
+        # 命令模式：注入模式指令（/chat 只读、/plan 先规划后执行）；完全访问下跳过
+        if not _full_access and mode in _MODE_HINTS:
             hint = _MODE_HINTS[mode]
             if mode == "plan":
                 # plan-95: 提示词含 {session_id}/{turn_id} 占位符——文档按 turn 唯一命名，
@@ -463,13 +477,47 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                 hint = hint.format(session_id=session_id, turn_id=turn_id)
             bundle.instruction = (hint + "\n\n" + bundle.instruction).strip() if bundle.instruction else hint
 
-        # 2. 工具 schemas（按模式过滤 + 子代理工具）
-        if mode == "readonly":
+        # 2. 工具 schemas（按模式过滤 + 子代理工具；完全访问 = 全量工具）
+        if _full_access:
+            tool_schemas = tool_registry.all_schemas()
+            # v6: 主 turn 路径 MCP 注入（修复：导入的 MCP 工具未注册导致 AI 无法使用）
+            # 对齐 agent_runtime 的 per-agent scope 模式，仅当全局 registry 无同名工具时注册。
+            try:
+                from app.services.skill_service import get_agent_mcp_servers
+                from app.orchestration.tools.mcp_wrapper import build_mcp_tools_for_agent
+                mcp_servers = await get_agent_mcp_servers(db, main_agent)
+                if mcp_servers:
+                    _mcp_tools = build_mcp_tools_for_agent(mcp_servers)
+                    for mt in _mcp_tools:
+                        # v10: 仅当全局 registry 无同名工具时才注册并追加到 schemas。
+                        # tool_schemas 已由 all_schemas() 包含已注册工具，若无条件 append，
+                        # 第二次 turn 会产生重复工具名，LLM 报 "Tool names must be unique" (HTTP 400)。
+                        if not tool_registry.get(mt.name):
+                            tool_schemas.append(mt.function_schema())
+                            tool_registry.register(mt)
+                    logger.info("[engine] turn=%s 注入 %d 个 MCP 工具", turn_id, len(_mcp_tools))
+            except Exception:
+                logger.debug("[engine] turn=%s MCP 工具注入失败(非阻塞)", turn_id, exc_info=True)
+        elif mode == "readonly":
             tool_schemas = tool_registry.all_schemas(_READONLY_TOOLS)
         elif mode == "plan":
             tool_schemas = tool_registry.all_schemas(_PLAN_TOOLS)
         else:
             tool_schemas = tool_registry.all_schemas()
+            # v6: 主 turn 路径 MCP 注入（修复：导入的 MCP 工具未注册导致 AI 无法使用）
+            try:
+                from app.services.skill_service import get_agent_mcp_servers
+                from app.orchestration.tools.mcp_wrapper import build_mcp_tools_for_agent
+                mcp_servers = await get_agent_mcp_servers(db, main_agent)
+                if mcp_servers:
+                    _mcp_tools = build_mcp_tools_for_agent(mcp_servers)
+                    for mt in _mcp_tools:
+                        if not tool_registry.get(mt.name):
+                            tool_schemas.append(mt.function_schema())
+                            tool_registry.register(mt)
+                    logger.info("[engine] turn=%s 注入 %d 个 MCP 工具", turn_id, len(_mcp_tools))
+            except Exception:
+                logger.debug("[engine] turn=%s MCP 工具注入失败(非阻塞)", turn_id, exc_info=True)
             # v6: 主 turn 路径 MCP 注入（修复：导入的 MCP 工具未注册导致 AI 无法使用）
             # 对齐 agent_runtime 的 per-agent scope 模式，仅当全局 registry 无同名工具时注册。
             try:
@@ -574,14 +622,28 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             _stamp_plan_doc(workspace, _plan_rel, "proposed")
             await _supersede_stale_proposed(db, session_id, turn_id, workspace)
             main_task.status = "awaiting_confirmation"
-            await db.flush()
+
+            # v0.3.1 (plan-190-898): 规划阶段完成第一时间落库 PLAN 消息并提交（用户要求：
+            # 计划卡预览在规划阶段完成后显示在底部，在此刻完成写库，确认后再继续在后面刷消息/写库）。
+            # 作为规划阶段的收尾项落库，保证物理时间线上排在规划总结之后、执行阶段之前。
+            try:
+                await message_service.create_message(
+                    db, session_id=session_id, turn_id=turn_id,
+                    sender_type=SenderType.SYSTEM.value, msg_type=MsgType.PLAN.value,
+                    content={"plan_doc_path": _plan_rel, "plan_status": "proposed",
+                             "text": "方案已生成，请确认后执行", "agent_name": main_agent.name},
+                    broadcast=True,  # 立即广播 message.created，前端流式底部即刻渲染计划卡
+                )
+            except Exception:
+                logger.warning("[engine] PLAN 预览消息落库失败", exc_info=True)
+
             await turn_service.update_turn_status(
                 db, turn_id, "awaiting_confirmation",
                 summary="方案文档已生成，等待用户确认", completed=True,
             )
             await db.commit()
-            # v26: 广播实际命中的计划文档路径（AI 可能写时间戳文件名），
-            # 前端方案卡"查看完整计划"打开真实文件而非约定名。
+
+            # v26: 广播实际命中的计划文档路径与待确认状态
             await broadcast(session_id, {
                 "event": "task.proposed",
                 "payload": {
@@ -589,7 +651,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                     "request_task_id": main_task.id,
                     "group_task_id": 0,
                     "reasons": [],
-                    "plan_doc_path": str(_plan_path.relative_to(Path(workspace).resolve()).as_posix()),
+                    "plan_doc_path": _plan_rel,
                     "steps": [],
                 },
             })
@@ -928,6 +990,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             return {"ok": False, "error": "turn not found"}
         session = await session_service.get_session(db, turn.session_id)
         _session_id = session.id if session else turn.session_id
+        _session_model_id = getattr(session, "model_id", None) if session else None
         project = await project_service.get_project(db, session.project_id) if session and session.project_id else None
         if session is None or project is None:
             return {"ok": False, "error": "session/project not found"}
@@ -938,11 +1001,11 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         if main_agent is None:
             return {"ok": False, "error": "主代理未初始化"}
         workspace = _resolve_workspace(session, project)
-        manager = get_subagent_manager(session.id)
+        manager = get_subagent_manager(_session_id)
         _turn_managers[turn_id] = manager
         # plan-166-767: confirm 执行路径与 start_turn 对齐——按有效模型解析多模态/窗口。
-        effective_model_id = session.model_id or main_agent.model_id
-        _model_source = "session" if session.model_id else "agent"
+        effective_model_id = _session_model_id or main_agent.model_id
+        _model_source = "session" if _session_model_id else "agent"
         logger.info(
             "[engine:confirm] turn=%s effective_model_id=%s source=%s",
             turn_id, effective_model_id, _model_source,
@@ -950,7 +1013,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         from app.persistence.models.model_reg import Model as _Model
         _sel_model = await db.get(_Model, effective_model_id) if effective_model_id else None
         _is_multimodal = bool(getattr(_sel_model, "is_multimodal", False)) if _sel_model else False
-        await broadcast(session.id, {"event": "turn.started", "payload": {"turn_id": turn_id, "session_id": session.id}})
+        await broadcast(_session_id, {"event": "turn.started", "payload": {"turn_id": turn_id, "session_id": _session_id}})
         if request_task:
             request_task.status = "running"
         await db.commit()
@@ -1060,23 +1123,24 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             if out.kind == "message" and out.artifact_ids:
                 await task_service.attach_artifacts(db, request_task.id, out.artifact_ids)
         await db.commit()
-        await broadcast_turn_updated(session.id, turn_id, final_status)
-        await broadcast(session.id, {
+        # v0.3.1: 使用提前缓存的标量 _session_id/_session_model_id，禁止在 commit 之后点 session.id
+        await broadcast_turn_updated(_session_id, turn_id, final_status)
+        await broadcast(_session_id, {
             "event": "turn.completed" if final_status == "completed" else "turn.interrupted",
             "payload": {"turn_id": turn_id, "status": final_status, "summary": summary,
-                        "artifact_ids": out.artifact_ids, "session_id": session.id},
+                        "artifact_ids": out.artifact_ids, "session_id": _session_id},
         })
         if request_task is not None:
-            await broadcast(session.id, {"event": "task.updated", "payload": {
+            await broadcast(_session_id, {"event": "task.updated", "payload": {
                 "task_id": request_task.id, "status": request_task.status}})
         if out.kind == "message" and (summary or (request_task.title if request_task else "")):
             await _spawn_memory_extract(
                 db,
-                session_id=session.id,
+                session_id=_session_id,
                 turn_id=turn_id,
                 prompt=(request_task.title if request_task else "") or "",
                 summary=summary or "",
-                model_id=getattr(session, "model_id", None),
+                model_id=_session_model_id,
             )
         # plan_restore_after_turn 粘性机制已移除：确认执行后的权限模式保持到手动切换
         return {"ok": True, "kind": out.kind, "summary": summary}

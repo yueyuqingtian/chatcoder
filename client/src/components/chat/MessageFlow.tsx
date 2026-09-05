@@ -157,20 +157,12 @@ function MessageFlowCore({
     } else {
       programmaticScrollRef.current = true;
       el.scrollTop = el.scrollHeight;
-      // plan-547: 双帧补滚——虚拟列表动态测量在渲染后才把总高度撑大，
-      // 立即设置的 scrollTop 会"离底"，复查两帧保证贴底（消除滚动往返抖动）
+      // plan-547/v0.3.1 (对齐 v0.2.0)：双帧补滚——虚拟列表动态测量在渲染后才把总高度撑大，
+      // 首帧撑开排版，次帧补齐 TanStack Virtual 测量差额坚决贴底（彻底删除 anchor 误杀拦截）
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           const el2 = parentRef.current;
-          if (!el2) { programmaticScrollRef.current = false; return; }
-          // 问题4: 补滚窗口内用户已滚动（scrollTop 偏离贴底值）→ 放弃补滚，尊重用户上滑
-          if (el2.scrollTop !== el2.scrollHeight) {
-            programmaticScrollRef.current = false;
-            autoScrollRef.current = false;
-            setAutoScroll(false);
-            return;
-          }
-          el2.scrollTop = el2.scrollHeight;
+          if (el2) el2.scrollTop = el2.scrollHeight;
           programmaticScrollRef.current = false;
         });
       });
@@ -200,6 +192,7 @@ function MessageFlowCore({
     const el = parentRef.current;
     if (!el) return;
     const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    // 恢复 v0.2.0 贴底阈值 60px（抵抗高 DPI 缩放浮点舍入与末尾元素 margin/padding 波动）
     const isNearBottom = distance < 60;
     setAutoScroll(isNearBottom);
     autoScrollRef.current = isNearBottom;
@@ -215,15 +208,10 @@ function MessageFlowCore({
     const el = parentRef.current;
     if (!inner || !el || typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver(() => {
+      // 问题4 回退：内容高度变化时若处于跟随态直接贴底；用户上滑已由 onScroll
+      // 关闭 autoScroll（补滚窗口内则靠 scrollToBottom 的「用户已滚动则放弃」兜底），
+      // 无需在 RO 内重复判定（内容增长后 scrollHeight 先变大，dist 判定会误关 autoScroll）。
       if (!autoScrollRef.current) return;
-      // 问题4: 内容变化但用户已滚离底部（距底 > 60px，与 onScroll 判定同口径）→
-      // 不再强制贴底，尊重用户上滑（此前 autoScrollRef 未及时翻转导致被拽回抖动）
-      const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-      if (dist > 60) {
-        autoScrollRef.current = false;
-        setAutoScroll(false);
-        return;
-      }
       el.scrollTop = el.scrollHeight;
     });
     ro.observe(inner);
@@ -231,27 +219,64 @@ function MessageFlowCore({
   }, [hasContent]);
 
   useLayoutEffect(() => {
-    scrollToBottom(false);
-  }, [sessionKey, scrollToBottom]);
-
-  useEffect(() => {
-    // 问题4: 流式内容变化时仅当用户确实位于底部附近才贴底；若 autoScroll 状态滞后
-    // 仍为 true 而用户已滚离（距底 > 60px），立即识别并停止贴底，避免被拽回抖动
-    if (!autoScroll) return;
-    const el = parentRef.current;
-    if (!el) return;
-    const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-    if (dist > 60) {
-      autoScrollRef.current = false;
-      setAutoScroll(false);
-      return;
+    // v0.3.1: 长会话切换时优先将虚拟列表定位到最后一条（end），再执行贴底双帧补滚，
+    // 彻底解决由于消息过多、初始估算高度误差导致切换会话后停在中间的 Bug
+    if (totalCount > 0) {
+      virtualizer.scrollToIndex(totalCount - 1, { align: "end" });
     }
     scrollToBottom(false);
-  }, [streamSignal, autoScroll, scrollToBottom]);
+  }, [sessionKey, scrollToBottom, totalCount, virtualizer]);
+
+  // v0.3.1: 对话启动（running 由 false -> true）时强制滚到底部并恢复跟随
+  const prevRunningRef = useRef(running);
+  useEffect(() => {
+    if (running && !prevRunningRef.current) {
+      scrollToBottom(false);
+    }
+    prevRunningRef.current = running;
+  }, [running, scrollToBottom]);
+
+  // 用户发送消息（时间线末尾新增"以用户消息开头"的新 turn）→ 无条件滚底，
+  // 不受 autoScroll 影响（此前上滑过则发送后不滚底）
+  const prevEntryLenRef = useRef(entries.length);
+  useEffect(() => {
+    const grew = entries.length > prevEntryLenRef.current;
+    prevEntryLenRef.current = entries.length;
+    if (!grew) return;
+    const last = entries[entries.length - 1];
+    const lastStartsUser = last != null && last.kind === "turn"
+      && last.items.length > 0 && last.items[0].kind === "user";
+    if (lastStartsUser) scrollToBottom(false);
+  }, [entries, scrollToBottom]);
 
   useEffect(() => {
+    // 问题4 回退：流式内容变化时在跟随态（autoScroll）下直接贴底。
+    // autoScroll 由 onScroll（用户滚动）与补滚的「用户已滚动则放弃」判定维护——
+    // 此处不另设距底判定，否则内容增长后 scrollHeight 先变大、scrollTop 未贴底的
+    // 时序会误判 dist>60 而误关 autoScroll，导致"已在底部却不自动滚动"。
     if (autoScroll) scrollToBottom(false);
-  }, [entries.length, autoScroll, scrollToBottom]);
+  }, [streamSignal, autoScroll, scrollToBottom]);
+
+  // v0.3.1: 内容整表替换（refreshMessages 等 REST 刷新/回滚/压缩）后同样贴底——
+  // 依赖 entries 引用而非 length：REST 刷新常使 entries 重建但长度不变，
+  // 旧实现（entries.length）不触发，刷新后 scrollTop 因虚拟测量/高度变化离底，
+  // 表现为"刷新前在底部、刷新后有时在底部有时不在"。上滑用户（autoScroll=false）不受打扰。
+  useEffect(() => {
+    if (autoScroll) scrollToBottom(false);
+  }, [entries, autoScroll, scrollToBottom]);
+
+  // v0.3.1: 注入消息（"立即发送"）从 entries 抽离到 injectedNode 时 entries 长度不变，
+  // 任何现有触发都不生效，用户发送后停在原位。injectedNode 出现（0→1）→ 无条件滚底，
+  // 与发送意图一致（turn 结束注入消息回归时间线时仅复位标记，不滚底）。
+  const hadInjectedRef = useRef(false);
+  useEffect(() => {
+    if (injectedNode && !hadInjectedRef.current) {
+      hadInjectedRef.current = true;
+      scrollToBottom(false);
+    } else if (!injectedNode) {
+      hadInjectedRef.current = false;
+    }
+  }, [injectedNode, scrollToBottom]);
 
   /** 问题12: 内容/滚动变化后刷新 scrollspy 焦点，保证 JumpDots 自动跟随 */
   useEffect(() => {
@@ -542,7 +567,6 @@ function MainMessageFlow({
           subagents={entry.turnId != null ? subagentsByTurn.get(entry.turnId) : undefined}
           actions={actions}
           hasPlan={hasTurnPlan}
-          planAnchorMsgId={entry.turnId != null ? plansByTurn[entry.turnId]?.anchorMsgId ?? null : null}
         />
       );
     },
@@ -562,6 +586,7 @@ function MainMessageFlow({
 
   return (
     <MessageFlowCore
+      key={currentSessionId}
       entries={entries}
       running={isRunning}
       renderEntry={renderEntry}
@@ -635,6 +660,7 @@ function SubagentMessageFlow({
 
   return (
     <MessageFlowCore
+      key={threadId ?? "subagent-default"}
       entries={entries}
       running={isRunning}
       renderEntry={renderEntry}

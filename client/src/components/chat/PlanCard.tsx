@@ -4,17 +4,20 @@ import { IconClipboard } from "../icons";
 import { MarkdownContent } from "../MarkdownContent";
 import { useChatStore } from "../../store/chat";
 import { usePanelStore } from "../../store/panel";
-import { api } from "../../api/client";
+import { api, type MessageOut } from "../../api/client";
 
 export const PlanCard = memo(function PlanCard({
   turnId,
   fallbackPlan,
   embedded = false,
+  msg,
 }: {
   turnId?: number | null;
   fallbackPlan?: any;
   /** 是否内嵌在 TurnGroup 内部（为 true 时外层不带 .turn-group 容器避免重复间距） */
   embedded?: boolean;
+  /** plan-865: 时间线 PLAN 消息（预览/确认）——按数据库位置直驱卡片，无需 plansByTurn 兜底 */
+  msg?: MessageOut | null;
 }) {
   const plansByTurn = useChatStore((s) => s.plansByTurn);
   const pendingPlan = useChatStore((s) => s.pendingPlan);
@@ -22,8 +25,26 @@ export const PlanCard = memo(function PlanCard({
   const runningTurnId = useChatStore((s) => s.runningTurnId);
   const streamingBuffers = useChatStore((s) => s.streamingBuffers);
 
+  // 时间线消息兜底：content 提供 plan_doc_path/plan_status（历史消息无卡片数据时卡片仍可渲染）
+  const msgPlan = msg
+    ? (() => {
+        const c = (msg.content ?? {}) as Record<string, unknown>;
+        const st = String(c.plan_status ?? "");
+        const mStatus: "awaiting_confirmation" | "confirmed" | "cancelled" | "superseded" =
+          st === "confirmed" ? "confirmed" : st === "cancelled" ? "cancelled"
+          : st === "superseded" ? "superseded" : "awaiting_confirmation";
+        return {
+          turnId,
+          task: "任务执行计划",
+          planDocPath: String(c.plan_doc_path ?? ""),
+          status: mStatus,
+        };
+      })()
+    : null;
+
   const plan =
     (turnId != null ? plansByTurn[turnId] : null) ||
+    msgPlan ||
     fallbackPlan ||
     (pendingPlan?.turnId === turnId ? pendingPlan : null);
 

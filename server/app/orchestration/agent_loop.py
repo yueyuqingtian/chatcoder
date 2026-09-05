@@ -23,6 +23,7 @@ from app.models.registry import get_model_registry
 from app.models.schemas import ChatMessage, ChatRequest
 from app.orchestration.agent_events import broadcast
 from app._diag import log_tool_error, summarize_args  # v36: 工具错误诊断日志
+from app.persistence.database import async_session_factory
 from app.orchestration.tools import ToolContext, tool_executor
 from app.orchestration.tools.registry import tool_registry
 from app.services import message_service, rollback_service, task_service
@@ -418,7 +419,12 @@ async def run_agent_loop(
     """
     agent_id = agent.id
     agent_name = agent.name
-    thread_id = None if agent.kind == "main" else agent.id  # 子代理消息进自己的线程
+    # v0.3.1: 缓存 agent 标量属性——写失败恢复路径会 rollback 主 db 会话使 agent 对象过期，
+    # 之后任何属性访问都会触发同步 reload 抛 MissingGreenlet（SQLAlchemy xd2s）。
+    # 提前取为局部变量双保险（agent_id/agent_name 原已有缓存）。
+    agent_kind = agent.kind
+    agent_model_id = getattr(agent, "model_id", None)
+    thread_id = None if agent_kind == "main" else agent_id  # 子代理消息进自己的线程
 
     # v2.2 (对齐 zcode 3.12): 会话权限模式（executor 审批门前决策）
     permission_mode = "default"
@@ -501,7 +507,7 @@ async def run_agent_loop(
 
     await broadcast(session_id, {
         "event": "agent.started",
-        "payload": {"agent_id": agent_id, "kind": agent.kind, "name": agent_name,
+        "payload": {"agent_id": agent_id, "kind": agent_kind, "name": agent_name,
                     "turn_id": turn_id},
     })
     await broadcast(session_id, {
@@ -629,7 +635,7 @@ async def run_agent_loop(
                     api_messages = build_api_copy(messages, fold_budget_tokens=int(agent_window * settings.api_copy_fold_ratio))
                     _est_after = int(_est_tokens(api_messages) * _calib_factor)
                     logger.info("[agent] turn=%s step=%s 前置压缩后 prompt=%d -> %d (persistent=%s)", turn_id, step, _est_prompt, _est_after, bool(_cc_pre))
-                    await broadcast(session_id, {"event": "usage.update", "payload": {"agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id, "prompt_tokens": _est_after, "completion_tokens": 0, "total_tokens": _est_after, "context_window": agent_window, "usage_source": "est_after_compact", "cached_input_tokens": 0, "reasoning_tokens": 0, "agent_kind": agent.kind}})
+                    await broadcast(session_id, {"event": "usage.update", "payload": {"agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id, "prompt_tokens": _est_after, "completion_tokens": 0, "total_tokens": _est_after, "context_window": agent_window, "usage_source": "est_after_compact", "cached_input_tokens": 0, "reasoning_tokens": 0, "agent_kind": agent_kind}})
                     await broadcast(session_id, {"event": "compact.completed", "payload": {"agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id, **(_cc_pre or {})}})
                 else:
                     logger.debug("[agent] turn=%s step=%s 前置估算 prompt=%d (raw=%d calib=%.3f) < 阈值 %d，不压缩", turn_id, step, _est_prompt, _est_raw, _calib_factor, _pre_threshold)
@@ -981,7 +987,7 @@ async def run_agent_loop(
                     "reasoning_tokens": getattr(response.usage, 'reasoning_tokens', 0) or 0 if response.usage else 0,
                     "breakdown": _breakdown,
                     # v19: 前端圆环仅统计主代理占用，子代理不覆盖
-                    "agent_kind": agent.kind,
+                    "agent_kind": agent_kind,
                 },
             })
             logger.info(
@@ -991,45 +997,42 @@ async def run_agent_loop(
             )
 
             # v1.1: 用量流水落库（全软件统计的数据源），失败不阻断主流程
+            # v0.3.1: 改用独立会话——此前在主 db 上 commit 失败 → rollback 主 db，
+            # 主 db 会话上已加载对象（agent/session/turn）全部过期，后续属性访问
+            # 触发同步 reload 抛 MissingGreenlet（SQLAlchemy xd2s）。独立会话失败
+            # 只回滚自身，主 db 及其对象不受影响。
             try:
-                from app.persistence.models.usage_record import UsageRecord
-                _model_name = ""
-                _provider_name = ""
-                if model_id is not None:
-                    from app.persistence.models.model_reg import Model, Provider
-                    _m = await db.get(Model, model_id)
-                    _model_name = _m.name if _m else ""
-                    # plan-152-704: 供应商显示名，区分不同供应商的同名模型
-                    if _m is not None and _m.provider_id is not None:
-                        _p = await db.get(Provider, _m.provider_id)
-                        _provider_name = _p.name if _p else ""
-                db.add(UsageRecord(
-                    session_id=session_id, turn_id=turn_id, agent_id=agent_id,
-                    model_id=model_id, model_name=_model_name, provider_name=_provider_name,
-                    prompt_tokens=_final_prompt, completion_tokens=_final_completion,
-                    reasoning_tokens=(getattr(response.usage, "reasoning_tokens", 0) or 0) if response.usage else 0,
-                    cached_tokens=(getattr(response.usage, "cached_input_tokens", 0) or 0) if response.usage else 0,
-                    usage_source=_usage_source,
-                ))
-                await db.commit()
-                # v1.1: 主代理同步持久化最后一次真实占用（重启/切会话后圆环口径一致）
-                if thread_id is None and _final_prompt > 0:
-                    _srow = await db.get(_Session, session_id)
-                    if _srow is not None:
-                        from datetime import datetime
-                        _srow.last_prompt_tokens = _final_prompt
-                        _srow.last_usage_at = str(datetime.utcnow())
-                        await db.commit()
+                async with async_session_factory() as _usage_db:
+                    from app.persistence.models.usage_record import UsageRecord
+                    _model_name = ""
+                    _provider_name = ""
+                    if model_id is not None:
+                        from app.persistence.models.model_reg import Model, Provider
+                        _m = await _usage_db.get(Model, model_id)
+                        _model_name = _m.name if _m else ""
+                        # plan-152-704: 供应商显示名，区分不同供应商的同名模型
+                        if _m is not None and _m.provider_id is not None:
+                            _p = await _usage_db.get(Provider, _m.provider_id)
+                            _provider_name = _p.name if _p else ""
+                    _usage_db.add(UsageRecord(
+                        session_id=session_id, turn_id=turn_id, agent_id=agent_id,
+                        model_id=model_id, model_name=_model_name, provider_name=_provider_name,
+                        prompt_tokens=_final_prompt, completion_tokens=_final_completion,
+                        reasoning_tokens=(getattr(response.usage, "reasoning_tokens", 0) or 0) if response.usage else 0,
+                        cached_tokens=(getattr(response.usage, "cached_input_tokens", 0) or 0) if response.usage else 0,
+                        usage_source=_usage_source,
+                    ))
+                    await _usage_db.commit()
+                    # v1.1: 主代理同步持久化最后一次真实占用（重启/切会话后圆环口径一致）
+                    if thread_id is None and _final_prompt > 0:
+                        _srow = await _usage_db.get(_Session, session_id)
+                        if _srow is not None:
+                            from datetime import datetime
+                            _srow.last_prompt_tokens = _final_prompt
+                            _srow.last_usage_at = str(datetime.utcnow())
+                            await _usage_db.commit()
             except Exception:
                 logger.debug("usage 流水落库失败(非阻塞)", exc_info=True)
-                # 修复「AI 无报错中断」：commit/flush 失败(如 SQLite database is locked)
-                # 后必须 rollback 恢复 session —— 否则该 session 永久处于 rollback-only，
-                # 后续任何 create_message 都会抛 PendingRollbackError，整个 turn 以
-                # `agent loop 异常` 静默终止，且错误提示也因同一 session 无法落库。
-                try:
-                    await db.rollback()
-                except Exception:
-                    pass
 
             # v6.4: 调用后真实占用驱动压缩 -- 用 API 精确 prompt_tokens 判断
             # 替代旧的 should_auto_compact 估算检查，避免过早摘要。
@@ -1151,6 +1154,10 @@ async def run_agent_loop(
                             session_id=session_id, turn_id=turn_id,
                             agent=agent, workspace=workspace,
                             subagent_context=subagent_context,
+                            # v0.3.1: 传入缓存值——主 db 会话 rollback 后 agent 对象过期，
+                            # 直接读 agent.model_id/agent.id 会抛 MissingGreenlet
+                            agent_model_id=agent_model_id,
+                            parent_agent_id=agent_id,
                         )
                         messages.append(ChatMessage(
                             role="tool", content=tool_output,
@@ -1192,68 +1199,72 @@ async def run_agent_loop(
                                  "agent_name": agent_name},
                     )
 
-                    ctx = ToolContext(
-                        workspace_root=workspace, session_id=session_id,
-                        task_id=turn_id, agent_id=agent_id, agent_name=agent_name,
-                        cancel_event=cancel_event,
-                        db=db,
-                        permission_mode=permission_mode,
-                        sandbox_mode=sandbox_mode,
-                    )
-                    _ts0 = time.monotonic()
-                    # v9: 写盘工具执行前读取原文件内容（精确回滚依据：只撤销 AI 改动部分）
-                    _pre_paths = rollback_service.resolve_write_paths(tool_name, args) if tool_name in _WRITE_TOOLS else []
-                    _pre_before = {p: rollback_service._read_file_text(workspace, p) for p in _pre_paths}
-                    # v2.2 (plan-88): 写盘前二进制/超限判定——此类文件回滚走 checkpoint 恢复，
-                    # 不存文本前后内容（防乱码损坏文件 / DB 膨胀）
-                    _pre_bin = {p: rollback_service._is_binary_path(workspace, p, settings.rollback_record_max_bytes)
-                                for p in _pre_paths}
-                    # v25: 工具伪装兜底——非白名单写盘工具（terminal_exec 等）从命令解析候选写盘路径
-                    # （重定向 / Set-Content / Out-File / python open 等），执行前后对比内容识别真实变更，
-                    # 使"改文件"在工具卡展开/输入框贴条中可见，且回滚记录完整。
-                    _guess_paths = (rollback_service.resolve_command_write_paths(tool_name, args, workspace)
-                                    if tool_name not in _WRITE_TOOLS else [])
-                    _guess_before = {p: rollback_service._read_file_text(workspace, p) for p in _guess_paths}
-                    _guess_bin = {p: rollback_service._is_binary_path(workspace, p, settings.rollback_record_max_bytes)
-                                  for p in _guess_paths}
-                    # v10: 对已存在的目标文件额外建立磁盘 checkpoint（.chatcoder/checkpoints 兜底备份），
-                    # 与精确回滚的 before/after 记录双保险，防数据库记录异常时无法恢复。
-                    # v1.1: 取消穿透——长工具执行期间轮询 cancel_event，命中即取消底层任务
-                    _exec_task = asyncio.ensure_future(tool_executor.execute(
-                        tool_name=tool_name, args=args, call_key=call_key,
-                        agent=agent, ctx=ctx,
-                        on_approval_request=_make_approval_emitter(session_id),
-                    ))
-                    try:
-                        result = await asyncio.wait_for(
-                            asyncio.shield(_poll_cancel(_exec_task, cancel_event)),
-                            timeout=settings.tool_exec_timeout_sec,  # v21: 120s → 可配置(默认600s)，长编译/测试不再被误杀
+                    # plan-865: 工具执行使用独立 AsyncSession——不再与主循环共享 db，
+                    # 消除同 session 并发 IO 触发 greenlet_spawn（SQLAlchemy xd2s）；
+                    # 工具内写库 commit 经 LockedAsyncSession 全局写锁串行化
+                    async with async_session_factory() as tdb:
+                        ctx = ToolContext(
+                            workspace_root=workspace, session_id=session_id,
+                            task_id=turn_id, agent_id=agent_id, agent_name=agent_name,
+                            cancel_event=cancel_event,
+                            db=tdb,
+                            permission_mode=permission_mode,
+                            sandbox_mode=sandbox_mode,
                         )
-                    except asyncio.TimeoutError:
-                        _exec_task.cancel()
-                        from app.orchestration.tools.base import ToolResult
-                        logger.error(
-                            "[tool.error] phase=timeout turn=%s step=%s tool=%s call_key=%s 超时(%ss) args=%s",
-                            turn_id, step, tool_name, call_key,
-                            settings.tool_exec_timeout_sec, summarize_args(args),
-                        )
-                        result = ToolResult(ok=False, output="", error=f"[工具执行超时({settings.tool_exec_timeout_sec}s)] {tool_name}")
-                    except asyncio.CancelledError:
-                        from app.orchestration.tools.base import ToolResult
-                        result = ToolResult(ok=False, output="", error="[已被用户中断]")
-                    except Exception as exc:
-                        from app.orchestration.tools.base import ToolResult
-                        # v36: 此前 f"[工具执行异常] {exc}" 丢弃 traceback，
-                        # 事后只剩一行消息，无法定位抛错代码行。这里记录完整堆栈、
-                        # 异常类型与调用参数，并把类型前缀保留给用户可见的 error。
-                        log_tool_error(
-                            turn_id=turn_id, step=step, tool_name=tool_name,
-                            call_key=call_key, exc=exc, args=args, phase="execute",
-                        )
-                        result = ToolResult(
-                            ok=False, output="",
-                            error=f"[工具执行异常] {type(exc).__name__}: {exc}",
-                        )
+                        _ts0 = time.monotonic()
+                        # v9: 写盘工具执行前读取原文件内容（精确回滚依据：只撤销 AI 改动部分）
+                        _pre_paths = rollback_service.resolve_write_paths(tool_name, args) if tool_name in _WRITE_TOOLS else []
+                        _pre_before = {p: rollback_service._read_file_text(workspace, p) for p in _pre_paths}
+                        # v2.2 (plan-88): 写盘前二进制/超限判定——此类文件回滚走 checkpoint 恢复，
+                        # 不存文本前后内容（防乱码损坏文件 / DB 膨胀）
+                        _pre_bin = {p: rollback_service._is_binary_path(workspace, p, settings.rollback_record_max_bytes)
+                                    for p in _pre_paths}
+                        # v25: 工具伪装兜底——非白名单写盘工具（terminal_exec 等）从命令解析候选写盘路径
+                        # （重定向 / Set-Content / Out-File / python open 等），执行前后对比内容识别真实变更，
+                        # 使"改文件"在工具卡展开/输入框贴条中可见，且回滚记录完整。
+                        _guess_paths = (rollback_service.resolve_command_write_paths(tool_name, args, workspace)
+                                        if tool_name not in _WRITE_TOOLS else [])
+                        _guess_before = {p: rollback_service._read_file_text(workspace, p) for p in _guess_paths}
+                        _guess_bin = {p: rollback_service._is_binary_path(workspace, p, settings.rollback_record_max_bytes)
+                                      for p in _guess_paths}
+                        # v10: 对已存在的目标文件额外建立磁盘 checkpoint（.chatcoder/checkpoints 兜底备份），
+                        # 与精确回滚的 before/after 记录双保险，防数据库记录异常时无法恢复。
+                        # v1.1: 取消穿透——长工具执行期间轮询 cancel_event，命中即取消底层任务
+                        _exec_task = asyncio.ensure_future(tool_executor.execute(
+                            tool_name=tool_name, args=args, call_key=call_key,
+                            agent=agent, ctx=ctx,
+                            on_approval_request=_make_approval_emitter(session_id),
+                        ))
+                        try:
+                            result = await asyncio.wait_for(
+                                asyncio.shield(_poll_cancel(_exec_task, cancel_event)),
+                                timeout=settings.tool_exec_timeout_sec,  # v21: 120s → 可配置(默认600s)，长编译/测试不再被误杀
+                            )
+                        except asyncio.TimeoutError:
+                            _exec_task.cancel()
+                            from app.orchestration.tools.base import ToolResult
+                            logger.error(
+                                "[tool.error] phase=timeout turn=%s step=%s tool=%s call_key=%s 超时(%ss) args=%s",
+                                turn_id, step, tool_name, call_key,
+                                settings.tool_exec_timeout_sec, summarize_args(args),
+                            )
+                            result = ToolResult(ok=False, output="", error=f"[工具执行超时({settings.tool_exec_timeout_sec}s)] {tool_name}")
+                        except asyncio.CancelledError:
+                            from app.orchestration.tools.base import ToolResult
+                            result = ToolResult(ok=False, output="", error="[已被用户中断]")
+                        except Exception as exc:
+                            from app.orchestration.tools.base import ToolResult
+                            # v36: 此前 f"[工具执行异常] {exc}" 丢弃 traceback，
+                            # 事后只剩一行消息，无法定位抛错代码行。这里记录完整堆栈、
+                            # 异常类型与调用参数，并把类型前缀保留给用户可见的 error。
+                            log_tool_error(
+                                turn_id=turn_id, step=step, tool_name=tool_name,
+                                call_key=call_key, exc=exc, args=args, phase="execute",
+                            )
+                            result = ToolResult(
+                                ok=False, output="",
+                                error=f"[工具执行异常] {type(exc).__name__}: {exc}",
+                            )
                     _dur = int((time.monotonic() - _ts0) * 1000)
                     # v31 (plan-89): 工具已执行（无论成败）即视为有产出——后续空响应
                     # 判定据此豁免 stop 空响应的 fatal，避免"任务完成后误报异常"。
@@ -1511,7 +1522,7 @@ async def run_agent_loop(
                 logger.warning("[agent] 产物抽取失败(非阻塞)", exc_info=True)
 
         # 主代理最终文字与产物也写入主线程（子代理已写 thread）
-        if agent.kind == "main" and artifact_ids:
+        if agent_kind == "main" and artifact_ids:
             await message_service.create_message(
                 db, session_id=session_id, turn_id=turn_id, thread_id=None,
                 sender_type=SenderType.AGENT.value, sender_id=agent_id,
@@ -1542,7 +1553,6 @@ async def run_agent_loop(
                                   content={"text": _err_text, "agent_name": agent_name})
         except Exception:
             try:
-                from app.persistence.database import async_session_factory
                 async with async_session_factory() as _err_db:
                     await _emit_agent_msg(_err_db, session_id=session_id, turn_id=turn_id,
                                           thread_id=thread_id, agent_id=agent_id,
@@ -1826,7 +1836,8 @@ def _make_approval_emitter(session_id: int):
 # ── 子代理工具处理 ──
 
 async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent, workspace,
-                             subagent_context) -> str:
+                             subagent_context, agent_model_id: int | None = None,
+                             parent_agent_id: int | None = None) -> str:
     """spawn_subagent / collect_results 工具实现。
 
     返回给模型的文本结果。
@@ -1911,9 +1922,9 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         from app.core.enums import AgentKind
         from app.persistence.models.agent import Agent
         sub_agent = Agent(kind=AgentKind.SUB.value, name=task_title[:40],
-                          model_id=subagent_context.get("model_id") or agent.model_id,
+                          model_id=subagent_context.get("model_id") or agent_model_id,
                           session_id=session_id,
-                          turn_id=turn_id, parent_agent_id=agent.id)
+                          turn_id=turn_id, parent_agent_id=parent_agent_id)
         db.add(sub_agent)
         await db.flush()
 
