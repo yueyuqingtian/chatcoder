@@ -280,12 +280,16 @@ export function IconBookOpen({ size = 18, color = "currentColor", strokeWidth = 
   );
 }
 
-/** 记忆 / 大脑 */
+/** 记忆 / 大脑（精修现代高光双半球智力回路，简化内部曲折碎线，在 13px 行高下通透无粘连） */
 export function IconBrain({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
     <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2z" />
-      <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2z" />
+      {/* 左半球 */}
+      <path d="M9.5 4a3.5 3.5 0 0 0-3.5 3.5c0 .46.09.9.25 1.3A3.5 3.5 0 0 0 4 12a3.5 3.5 0 0 0 2.25 3.25A3.5 3.5 0 0 0 9.5 20H11V4H9.5z" />
+      {/* 右半球 */}
+      <path d="M14.5 4a3.5 3.5 0 0 1 3.5 3.5c0 .46-.09.9-.25 1.3A3.5 3.5 0 0 1 20 12a3.5 3.5 0 0 1-2.25 3.25A3.5 3.5 0 0 1 14.5 20H13V4h1.5z" />
+      {/* 内部神经智力传导微刻线 */}
+      <path d="M7 12h4M13 12h4" strokeWidth={1.3} />
     </svg>
   );
 }
@@ -446,14 +450,17 @@ export function IconMaximize({ size = 14, color = "currentColor", strokeWidth = 
   );
 }
 
-/** 日历 / 安排 */
+/** 自动化调度（日历外框 + 底部调度循环齿轮/脉冲回路） */
 export function IconCalendar({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
     <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
-      <line x1="16" y1="2" x2="16" y2="6" />
-      <line x1="8" y1="2" x2="8" y2="6" />
-      <line x1="3" y1="10" x2="21" y2="10" />
+      <rect x="3" y="4" width="18" height="17" rx="3" ry="3" />
+      <line x1="16" y1="2" x2="16" y2="5.5" />
+      <line x1="8" y1="2" x2="8" y2="5.5" />
+      <line x1="3" y1="9.5" x2="21" y2="9.5" />
+      {/* 底部自动化循环箭头轨迹 */}
+      <path d="M14.5 14.5a3 3 0 1 0-1.8 2.75" />
+      <polyline points="14.5 12.5 14.5 14.5 16.5 14.5" />
     </svg>
   );
 }
@@ -561,23 +568,85 @@ export function IconGripVertical({ size = 14, color = "currentColor", strokeWidt
   );
 }
 
-/** 文件读取(打开) */
+/** 文件读取（精修：文件外框 + 居中透视眼睛/水平扫描视线，彻底消除对勾造成的任务完成误判） */
 export function IconFileRead({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
     <svg {...baseProps(size, color, strokeWidth, rest)}>
       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
       <polyline points="14 2 14 8 20 8" />
-      <path d="M9 13l2 2 4-4" />
+      {/* 居中检视透视眼 */}
+      <path d="M7.5 15s1.8-2.5 4.5-2.5 4.5 2.5 4.5 2.5-1.8 2.5-4.5 2.5-4.5-2.5-4.5-2.5z" strokeWidth={1.4} />
+      <circle cx="12" cy="15" r="1.1" fill={color || "currentColor"} stroke="none" />
     </svg>
   );
 }
 
-/** 文件写入(铅笔) */
+/** 文件写入（精修：圆角折角纸张 + 底部精准 45° 笔尖写入接触线，比例舒展和谐） */
 export function IconFileWrite({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
     <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-      <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+      <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9" />
+      <polyline points="13 2 13 8 19 8" />
+      {/* 底部雕刻笔身与笔尖 */}
+      <path d="M10 18l5-5 2.5 2.5-5 5L9 21l1-3z" strokeWidth={1.4} />
+    </svg>
+  );
+}
+
+/** 文件补丁 / 差异修补（代码文件折角框 + 内部横向增删差分指示微条 +/-） */
+export function IconFilePatch({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <polyline points="14 2 14 8 20 8" />
+      {/* 加号 + 刻线 */}
+      <line x1="12" y1="12" x2="12" y2="16" strokeWidth={1.5} />
+      <line x1="10" y1="14" x2="14" y2="14" strokeWidth={1.5} />
+      {/* 减号 - 刻线 */}
+      <line x1="9" y1="18" x2="15" y2="18" strokeWidth={1.5} />
+    </svg>
+  );
+}
+
+/** 复合操作聚合流（专为 ActionClusterRow 设计：多层卡片流水线与执行光芒，替代突兀的放大镜） */
+export function IconOperationCluster({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <rect x="3" y="4" width="13" height="13" rx="2" />
+      <path d="M7 20h11a2 2 0 0 0 2-2V7" />
+      {/* 内部操作流水线指示齿/执行符 */}
+      <polyline points="7 9 10 12 13 8" strokeWidth={1.5} />
+    </svg>
+  );
+}
+
+/** 任务分步执行清单（todo_write 专属：任务纸板 + 对齐步骤条目与勾选标） */
+export function IconChecklist({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <rect x="3" y="3" width="18" height="18" rx="3" />
+      {/* 步骤 1：对勾 + 横线 */}
+      <path d="M7 8l1.5 1.5 3-3" strokeWidth={1.5} />
+      <line x1="14" y1="8" x2="17" y2="8" strokeWidth={1.5} />
+      {/* 步骤 2：点 + 横线 */}
+      <circle cx="8" cy="13" r="1" fill={color || "currentColor"} stroke="none" />
+      <line x1="11" y1="13" x2="17" y2="13" strokeWidth={1.5} />
+      {/* 步骤 3：点 + 横线 */}
+      <circle cx="8" cy="17" r="1" fill={color || "currentColor"} stroke="none" />
+      <line x1="11" y1="17" x2="17" y2="17" strokeWidth={1.5} />
+    </svg>
+  );
+}
+
+/** 代码行级/全库搜索特化放大镜（放大镜内嵌代码尖括号刻度点，强化代码检索属性） */
+export function IconFileSearch({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <circle cx="10.5" cy="10.5" r="7.5" />
+      <line x1="21" y1="21" x2="15.8" y2="15.8" />
+      {/* 镜面内嵌代码刻度点/尖角 */}
+      <path d="M9 8.5L7 10.5L9 12.5" strokeWidth={1.3} />
+      <path d="M12 8.5L14 10.5L12 12.5" strokeWidth={1.3} />
     </svg>
   );
 }
@@ -770,12 +839,12 @@ export function IconClock({ size = 18, color = "currentColor", strokeWidth = 1.7
   );
 }
 
-/** 图钉（置顶排序）：细线、对称轮廓，避免旧版不规则厚重感。 */
+/** 图钉（置顶排序）：45° 现代纤细倾斜图钉，精修针尖与重心比例 */
 export function IconPin({ size = 18, color = "currentColor", strokeWidth = 1.6, ...rest }: IconProps) {
   return (
     <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <path d="M8.5 3.5h7l-.8 4.1 2.8 3.1v1.3H6.5v-1.3l2.8-3.1z" />
-      <path d="M12 12v8.5M9.5 20.5h5" />
+      <line x1="12" y1="17" x2="12" y2="22" />
+      <path d="M5 17h14v-2l-2-2V7a5 5 0 0 0-10 0v6l-2 2v2z" />
     </svg>
   );
 }
@@ -882,11 +951,13 @@ export function IconCheckCircle({ size = 16, color = "currentColor", strokeWidth
   );
 }
 
-/** 盾牌（权限/完全访问标识，对齐 zcode 输入框左侧） */
+/** 盾牌（权限/完全访问标识，精修外轮廓 + 内部安全核刻线） */
 export function IconShield({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
     <svg {...baseProps(size, color, strokeWidth, rest)}>
       <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+      <path d="M12 8v5" />
+      <circle cx="12" cy="16" r="1" fill={color || "currentColor"} stroke="none" />
     </svg>
   );
 }
@@ -937,19 +1008,34 @@ export function IconBarChart({ size = 18, color = "currentColor", strokeWidth = 
   );
 }
 
-/** 井号（分组视图切换，对齐 zcode 侧栏） */
-export function IconHash({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+/** 图层/分组（替代旧版井号，直观传达分组归纳与层级收拢） */
+export function IconLayers({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
     <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <line x1="4" y1="9" x2="20" y2="9" />
-      <line x1="4" y1="15" x2="20" y2="15" />
-      <line x1="10" y1="3" x2="8" y2="21" />
-      <line x1="16" y1="3" x2="14" y2="21" />
+      <polygon points="12 2 2 7 12 12 22 7 12 2" />
+      <polyline points="2 12 12 17 22 12" />
+      <polyline points="2 17 12 22 22 17" />
     </svg>
   );
 }
 
-/** 列表筛选（排序按钮，对齐 zcode：三条横线带圆点） */
+/** 井号（兼容旧导出，底层映射为图层分组） */
+export const IconHash = IconLayers;
+
+/** 排序切换（阶梯降序横线 + 垂直升降上下微双向箭头，消除筛选歧义） */
+export function IconSortDesc({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <line x1="3" y1="6" x2="13" y2="6" />
+      <line x1="3" y1="12" x2="10" y2="12" />
+      <line x1="3" y1="18" x2="7" y2="18" />
+      {/* 右侧垂直排序指示箭头 */}
+      <path d="M17 7v11M14 15l3 3 3-3" />
+    </svg>
+  );
+}
+
+/** 列表筛选（保留兼容，但优先推荐 IconSortDesc） */
 export function IconListFilter({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
     <svg {...baseProps(size, color, strokeWidth, rest)}>
@@ -1013,16 +1099,19 @@ export function IconCamera({ size = 18, color = "currentColor", strokeWidth = 1.
   );
 }
 
-/** 方形加号（新建项目，对齐 zcode 侧栏操作位） */
-export function IconSquarePlus({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+/** 新建项目文件夹（圆润文件夹轮廓 + 右下角悬浮精巧加号微章，消除方框加号歧义） */
+export function IconFolderPlus({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
     <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <rect x="3" y="3" width="18" height="18" rx="4" />
-      <line x1="12" y1="8" x2="12" y2="16" />
-      <line x1="8" y1="12" x2="16" y2="12" />
+      <path d="M12 19H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h4.5l2 2.5H19a2 2 0 0 1 2 2v2.5" />
+      <line x1="18" y1="14" x2="18" y2="20" />
+      <line x1="15" y1="17" x2="21" y2="17" />
     </svg>
   );
 }
+
+/** 方形加号（兼容旧导出，映射为 IconFolderPlus） */
+export const IconSquarePlus = IconFolderPlus;
 
 /* ── 打开方式品牌专属彩色图标（对齐图二） ──────────────────────────────────── */
 

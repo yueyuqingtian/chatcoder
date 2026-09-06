@@ -48,7 +48,7 @@ export const ThinkingBlock = memo(function ThinkingBlock({ text, active, turnId,
         className={`tc-row has-output thinking-row${open ? " expanded" : ""}${active ? " active" : ""}`}
         onClick={() => setOpen(!open)}
       >
-        <span className="tc-icon"><IconBrain size={13} /></span>
+        <span className="tc-icon"><IconBrain size={16} /></span>
         <span className="tc-verb">
           {isThinking ? "正在思考" : "思考过程"}
         </span>

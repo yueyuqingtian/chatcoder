@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import { useChatStore } from "../store/chat";
 import { usePanelStore } from "../store/panel";
+import { useI18n } from "../store/i18n";
 import { ConfirmDialog } from "./ConfirmDialog";
 import {
   IconMinus, IconSquare, IconX, IconFolder,
@@ -19,13 +20,14 @@ import {
 interface TitleBarProps {
   leftCollapsed: boolean;
   rightCollapsed: boolean;
-  /** 问题1: 设置页态——不展示项目/会话/外部打开/命令行/侧边栏等信息 */
+  /** 设置页态——不展示项目/会话/外部打开/命令行/侧边栏等信息 */
   settings?: boolean;
   onToggleLeft: () => void;
   onToggleRight: () => void;
 }
 
 export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onToggleLeft, onToggleRight }: TitleBarProps) {
+  const { t } = useI18n();
   const currentSessionId = useChatStore((s) => s.currentSessionId);
   const sessions = useChatStore((s) => s.sessions);
   const projects = useChatStore((s) => s.projects);
@@ -108,18 +110,17 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
         {leftCollapsed && (
           <>
             <span className="sb-logo" title="chatcoder">C</span>
-            <button className="titlebar-btn collapsed" onClick={onToggleLeft} title="展开侧栏 (Ctrl+B)">
+            <button className="titlebar-btn collapsed" onClick={onToggleLeft} title={t("sidebar.expand_tip")}>
               <IconPanelLeft size={15} />
             </button>
-            <button className="sb-nav-arrow" disabled={!canBack} onClick={() => histGo(-1)} title="后退"><IconChevronLeft size={15} /></button>
-            <button className="sb-nav-arrow" disabled={!canForward} onClick={() => histGo(1)} title="前进"><IconChevronRight size={15} /></button>
+            <button className="sb-nav-arrow" disabled={!canBack} onClick={() => histGo(-1)} title={t("sidebar.history_back")}><IconChevronLeft size={15} /></button>
+            <button className="sb-nav-arrow" disabled={!canForward} onClick={() => histGo(1)} title={t("sidebar.history_forward")}><IconChevronRight size={15} /></button>
           </>
         )}
       </div>
 
       <div className="titlebar-workspace title-no-drag">
         {settings ? (
-          /* 设置页顶部不显示页面标题（问题1：移除「偏好设置」） */
           null
         ) : (
           <>
@@ -142,7 +143,7 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
             }}
           />
         ) : (
-          <span className="titlebar-workspace-title">{currentSessionId ? (session?.title || "新任务") : "新任务"}</span>
+          <span className="titlebar-workspace-title">{currentSessionId ? (session?.title || t("titlebar.new_task")) : t("titlebar.new_task")}</span>
         )}
         {projectName && (
           <span className="titlebar-workspace-project" title={project?.path}>
@@ -151,14 +152,14 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
         )}
         {session?.worktree_path && (
           <span className="titlebar-workspace-project" title={session.worktree_path}>
-            <IconGitBranch size={13} /> 工作树
+            <IconGitBranch size={13} /> {t("titlebar.worktree")}
           </span>
         )}
         {session && (
           <div className="titlebar-more" ref={menuRef}>
             <button
               className="titlebar-btn titlebar-more-btn"
-              title="会话操作"
+              title={t("titlebar.session_actions")}
               onMouseDown={(e) => e.stopPropagation()}
               onClick={(e) => {
                 e.stopPropagation();
@@ -174,10 +175,10 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={() => setMenuOpen(false)}
               >
-                <div className="context-menu-item" onClick={() => setRenaming(session.title || "")}>重命名</div>
-                <div className="context-menu-item" onClick={() => { void api.updateSession(session.id, { status: "archived" }).then(() => loadBootstrap()); }}>归档</div>
+                <div className="context-menu-item" onClick={() => setRenaming(session.title || "")}>{t("sidebar.ctx_rename")}</div>
+                <div className="context-menu-item" onClick={() => { void api.updateSession(session.id, { status: "archived" }).then(() => loadBootstrap()); }}>{t("sidebar.ctx_archive")}</div>
                 <div className="context-menu-divider" />
-                <div className="context-menu-item danger" onClick={() => setConfirmDelete(true)}>删除</div>
+                <div className="context-menu-item danger" onClick={() => setConfirmDelete(true)}>{t("sidebar.ctx_delete")}</div>
               </div>
             )}
           </div>
@@ -189,7 +190,7 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
       <div className="titlebar-mid" />
 
       <div className="titlebar-right title-no-drag">
-        {/* 打开工作区下拉菜单（对齐图二，带品牌图标与当前激活联动） */}
+        {/* 打开工作区下拉菜单 */}
         {!settings && (
         <>
         <div className="titlebar-folder-dropdown-wrap" ref={folderMenuRef}>
@@ -200,7 +201,7 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
               e.stopPropagation();
               setFolderMenuOpen((v) => !v);
             }}
-            title="在外部打开项目（支持资源管理器、VS Code、IntelliJ IDEA、Windows 终端）"
+            title={t("titlebar.open_external_tip")}
             disabled={!project?.path}
             type="button"
           >
@@ -216,67 +217,67 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
               <div className={`context-menu-item titlebar-folder-menu-item${openTarget === "explorer" ? " active" : ""}`} onClick={() => handleOpenInApp("explorer")}>
                 <div className="titlebar-folder-menu-item-left">
                   <IconBrandExplorer size={15} />
-                  <span>在文件资源管理器中打开</span>
+                  <span>{t("titlebar.open_explorer")}</span>
                 </div>
                 {openTarget === "explorer" && <IconCheck size={13} className="titlebar-folder-menu-check" />}
               </div>
               <div className={`context-menu-item titlebar-folder-menu-item${openTarget === "idea" ? " active" : ""}`} onClick={() => handleOpenInApp("idea")}>
                 <div className="titlebar-folder-menu-item-left">
                   <IconBrandIdea size={15} />
-                  <span>在 IntelliJ IDEA 中打开</span>
+                  <span>{t("titlebar.open_idea")}</span>
                 </div>
                 {openTarget === "idea" && <IconCheck size={13} className="titlebar-folder-menu-check" />}
               </div>
               <div className={`context-menu-item titlebar-folder-menu-item${openTarget === "terminal" ? " active" : ""}`} onClick={() => handleOpenInApp("terminal")}>
                 <div className="titlebar-folder-menu-item-left">
                   <IconBrandWindowsTerminal size={15} />
-                  <span>在 Windows 终端中打开</span>
+                  <span>{t("titlebar.open_terminal")}</span>
                 </div>
                 {openTarget === "terminal" && <IconCheck size={13} className="titlebar-folder-menu-check" />}
               </div>
               <div className={`context-menu-item titlebar-folder-menu-item${openTarget === "vscode" ? " active" : ""}`} onClick={() => handleOpenInApp("vscode")}>
                 <div className="titlebar-folder-menu-item-left">
                   <IconBrandVSCode size={15} />
-                  <span>在 Visual Studio Code 中打开</span>
+                  <span>{t("titlebar.open_vscode")}</span>
                 </div>
                 {openTarget === "vscode" && <IconCheck size={13} className="titlebar-folder-menu-check" />}
               </div>
             </div>
           )}
         </div>
-        {/* v19: 终端入口移至顶栏右上 */}
-        <button className="titlebar-btn" onClick={() => usePanelStore.getState().openNewTab("terminal")} title="打开终端 (Ctrl+J)">
+        {/* 终端入口移至顶栏右上 */}
+        <button className="titlebar-btn" onClick={() => usePanelStore.getState().openNewTab("terminal")} title={t("titlebar.terminal_btn")}>
           <IconTerminal size={14} />
         </button>
         </>
         )}
-        {/* 问题1: 设置页不显示右侧面板折叠/展开按钮，仅保留窗口控制 */}
         {!settings && (
         <button
           className={`app-pane-toggle titlebar-btn${rightCollapsed ? " collapsed" : ""}`}
           onClick={onToggleRight}
-          title={rightCollapsed ? "展开任务栏" : "收起任务栏"}
+          title={rightCollapsed ? t("titlebar.panel_expand") : t("titlebar.panel_collapse")}
         >
           <IconPanelRight size={14} />
         </button>
         )}
         <span className="titlebar-sep" />
-        <button className="titlebar-btn" onClick={() => winApi?.minimizeWindow?.()} title="最小化" disabled={!winApi}>
+        <button className="titlebar-btn" onClick={() => winApi?.minimizeWindow?.()} title={t("titlebar.min")} disabled={!winApi}>
           <IconMinus size={14} />
         </button>
-        <button className="titlebar-btn" onClick={() => winApi?.toggleMaximize?.()} title="最大化/还原" disabled={!winApi}>
+        <button className="titlebar-btn" onClick={() => winApi?.toggleMaximize?.()} title={t("titlebar.max")} disabled={!winApi}>
           <IconSquare size={12} />
         </button>
-        <button className="titlebar-btn titlebar-close" onClick={() => winApi?.closeWindow?.()} title="关闭" disabled={!winApi}>
+        <button className="titlebar-btn titlebar-close" onClick={() => winApi?.closeWindow?.()} title={t("titlebar.close")} disabled={!winApi}>
           <IconX size={14} />
         </button>
       </div>
 
       <ConfirmDialog
         open={confirmDelete}
-        title="删除会话"
-        message={`确定删除「${session?.title || "会话"}」吗？删除后将归档，不可恢复。`}
-        confirmLabel="删除"
+        title={t("common.delete_session_title")}
+        message={t("common.delete_session_msg", { title: session?.title || t("titlebar.new_task") })}
+        confirmLabel={t("common.delete")}
+        cancelLabel={t("common.cancel")}
         danger
         onConfirm={async () => { if (session) await deleteSession(session.id); setConfirmDelete(false); }}
         onCancel={() => setConfirmDelete(false)}

@@ -6,6 +6,7 @@ import type { NavKey } from "./Sidebar";
 import { ChatPanel } from "./ChatPanel";
 import { ScheduledPage, SkillsPage, McpPage } from "./NavPages";
 import { useChatStore } from "../store/chat";
+import { useI18n } from "../store/i18n";
 import { ComposerCore } from "./chat/ComposerCore";
 import { PluginSlot } from "../plugins/registry";
 
@@ -46,22 +47,23 @@ export function Workspace({ nav, onSessionStart }: {
   );
 }
 
-/** 时段问候语（对齐 zcode 空态首页） */
-function greeting(): string {
+/** 时段问候语（对齐 zcode 空态首页，支持双语） */
+function getGreetingKey(): string {
   const h = new Date().getHours();
-  if (h >= 23 || h < 5) return "夜深啦，别忘了照顾好自己哦";
-  if (h < 9) return "早上好";
-  if (h < 12) return "上午好";
-  if (h < 14) return "中午好";
-  if (h < 18) return "下午好";
-  return "晚上好";
+  if (h >= 23 || h < 5) return "workspace.greet_night";
+  if (h < 9) return "workspace.greet_morning";
+  if (h < 12) return "workspace.greet_forenoon";
+  if (h < 14) return "workspace.greet_noon";
+  if (h < 18) return "workspace.greet_afternoon";
+  return "workspace.greet_evening";
 }
 
 /** 空态首页（v19：问候语 + 共用 ComposerCore home 变体） */
 export function EmptyState({ onStarted }: { onStarted?: () => void }) {
+  const { t } = useI18n();
   return (
     <div className="empty-state">
-      <div className="empty-state-greeting">{greeting()}</div>
+      <div className="empty-state-greeting">{t(getGreetingKey())}</div>
       <div className="empty-state-card">
         <ComposerCore variant="home" onStarted={onStarted} />
       </div>

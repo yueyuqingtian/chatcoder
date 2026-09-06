@@ -74,7 +74,7 @@ export function StreamingText({ active, thinking, text, processingLabel = "处�
             className={`tc-row has-output thinking-row${tailOpen ? " expanded" : ""} active`}
             onClick={() => setTailOpen((v) => !v)}
           >
-            <span className="tc-icon"><IconBrain size={13} /></span>
+            <span className="tc-icon"><IconBrain size={16} /></span>
             <span className="tc-verb">正在思考</span>
             {!tailOpen && (
               <span className="thinking-ticker-wrap">

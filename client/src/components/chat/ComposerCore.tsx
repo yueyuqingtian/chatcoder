@@ -38,6 +38,7 @@ import { Modal } from "../Modal";
 import { ModelPicker } from "./ModelPicker";
 import { useChatStore, type UsageDetail } from "../../store/chat";
 import { useDraftsStore } from "../../store/drafts";
+import { useI18n } from "../../store/i18n";
 import { api, resolveFileUrl, type AttachmentInfo, type TreeNode } from "../../api/client";
 
 export interface ComposerCoreProps {
@@ -49,6 +50,7 @@ export interface ComposerCoreProps {
 }
 
 export function ComposerCore({ variant = "default", onStarted }: ComposerCoreProps) {
+  const { t } = useI18n();
   const isHome = variant === "home";
   const taRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -648,12 +650,12 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
 
   const modeLabel =
     composerMode === "default"
-      ? "完全访问"
+      ? t("composer.mode_full")
       : composerMode === "plan"
-      ? "计划模式"
+      ? t("composer.mode_plan")
       : composerMode === "accept_edits"
-      ? "计划执行"
-      : "只读模式";
+      ? t("composer.mode_plan_exec")
+      : t("composer.mode_readonly");
 
   // 是否处于 AI 结构化提问阶段（直接替换输入框主体）
   const isQuestionMode = !isHome && pendingApproval?.detail?.kind === "question";
@@ -676,10 +678,10 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
           <button
             className="es-project-trigger"
             onClick={() => setShowProjectMenu(!showProjectMenu)}
-            title={activeProject?.path ?? "选择项目"}
+            title={activeProject?.path ?? t("composer.select_project")}
           >
             <IconFolder size={13} />
-            <span className="es-project-name">{activeProject ? shortPathName(activeProject.path) : "选择项目…"}</span>
+            <span className="es-project-name">{activeProject ? shortPathName(activeProject.path) : t("composer.select_project")}</span>
             <IconChevronDown size={11} />
           </button>
           {showProjectMenu && (
@@ -690,7 +692,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                   void handleAddDirectory();
                 }}
               >
-                <IconFolder size={12} /> <span>{addingDir ? "添加中…" : "选择本地目录…"}</span>
+                <IconFolder size={12} /> <span>{addingDir ? t("composer.adding_dir") : t("composer.choose_local_dir")}</span>
               </div>
               {activeProjects.length > 0 && <div className="context-menu-divider" />}
               {activeProjects.map((p) => (
@@ -715,15 +717,15 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
         <div className="composer-plan-bar">
           <div className="composer-plan-bar-left">
             <IconClipboard size={13} />
-            <span className="composer-plan-bar-title">计划已就绪：{pendingPlan.task || "任务执行计划"}</span>
-            <span className="composer-plan-bar-hint">（点击【确认执行】或直接在下方输入修改意见）</span>
+            <span className="composer-plan-bar-title">{t("composer.plan_ready", { task: pendingPlan.task || "..." })}</span>
+            <span className="composer-plan-bar-hint">{t("composer.plan_ready_hint")}</span>
           </div>
           <div className="composer-plan-bar-actions">
             <button type="button" className="btn-ghost" onClick={() => void dismissPlan()}>
-              取消
+              {t("common.cancel")}
             </button>
             <button type="button" className="plan-inline-confirm" onClick={() => void confirmPlanTurn(true)}>
-              确认执行
+              {t("composer.confirm_exec")}
             </button>
           </div>
         </div>
@@ -851,7 +853,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                 <button
                   className="goal-pill-btn"
                   onClick={cancelGoal}
-                  title={isHome ? "移除目标" : "取消目标"}
+                  title={isHome ? t("composer.remove_goal") : t("composer.cancel_goal")}
                   type="button"
                 >
                   <IconX size={11} />
@@ -864,7 +866,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
             <div className="composer-queue-pills">
               {queuedInputs.map((q) => (
                 <div key={q.id} className={`composer-queue-pill${q.flushing ? " flushing" : ""}`} title={q.content}>
-                  <span className="cq-pill-label">{q.flushing ? "发送中" : "排队"}</span>
+                  <span className="cq-pill-label">{q.flushing ? t("composer.queue_sending") : t("composer.queue_label")}</span>
                   <span className="cq-pill-text">
                     {q.content || (q.attachments?.length ? `附件 × ${q.attachments.length}` : "")}
                   </span>
@@ -873,7 +875,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                   <button
                     className="cq-pill-send"
                     onClick={() => void flushQueuedInput(q.id)}
-                    title="立即发送（下一次 AI 调用前传达）"
+                    title={t("composer.queue_flush_now")}
                     type="button"
                   >
                     <IconArrowUp size={10} />
@@ -881,7 +883,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                   <button
                     className="cq-pill-remove"
                     onClick={() => updateQueuedInput(q.id, null)}
-                    title="移出队列"
+                    title={t("composer.queue_remove")}
                     type="button"
                   >
                     <IconX size={10} />
@@ -895,10 +897,10 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
             className="composer-input"
             placeholder={
               isHome
-                ? "向 ChatCoder 提问，使用 @ 添加上下文，使用 / 选择命令或能力"
+                ? t("composer.placeholder_home")
                 : pendingPlan
-                ? "输入文字提出修改意见，回车继续迭代方案…"
-                : "提出后续修改要求"
+                ? t("composer.placeholder_plan")
+                : t("composer.placeholder_followup")
             }
             value={input}
             rows={1}
@@ -984,7 +986,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
           />
           <div className="composer-toolbar">
             <div className="composer-tools-left">
-              <button className="composer-attach" title="添加附件" onClick={() => fileRef.current?.click()}>
+              <button className="composer-attach" title={t("composer.attach_tip")} onClick={() => fileRef.current?.click()}>
                 <IconPlus size={16} />
               </button>
               <div className="composer-mode-wrap">
@@ -995,7 +997,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                     setShowModels(false);
                     setShowReasoning(false);
                   }}
-                  title="权限模式"
+                  title={t("composer.mode_title")}
                 >
                   <IconShield size={13} />
                   {modeLabel}
@@ -1003,24 +1005,24 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                 </button>
                 {showModeMenu && (
                   <div className="composer-menu composer-mode-menu">
-                    <div className="composer-menu-title">权限模式</div>
+                    <div className="composer-menu-title">{t("composer.mode_title")}</div>
                     <button
                       className={composerMode === "default" ? "active" : ""}
                       onClick={() => setMode("default")}
                     >
-                      完全访问
+                      {t("composer.mode_full")}
                     </button>
                     <button
                       className={composerMode === "plan" ? "active" : ""}
                       onClick={() => setMode("plan")}
                     >
-                      计划模式
+                      {t("composer.mode_plan")}
                     </button>
                     <button
                       className={composerMode === "readonly" ? "active" : ""}
                       onClick={() => setMode("readonly")}
                     >
-                      只读模式
+                      {t("composer.mode_readonly")}
                     </button>
                     {/* plan-671/676: 目标模式入口（会话内与空态首页均可用） */}
                     {(currentSessionId != null || isHome) && (
@@ -1034,12 +1036,12 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                           }}
                         >
                           <IconTarget size={12} />
-                          {goalStatus === "active" ? "修改目标…" : "设定目标…"}
+                          {goalStatus === "active" ? t("composer.edit_goal") : t("composer.set_goal")}
                         </button>
                         {goalStatus === "active" && (
                           <button onClick={cancelGoal}>
                             <IconX size={12} />
-                            {isHome ? "移除目标" : "取消目标"}
+                            {isHome ? t("composer.remove_goal") : t("composer.cancel_goal")}
                           </button>
                         )}
                       </>
@@ -1077,14 +1079,14 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                       setShowReasoning((v) => !v);
                       setShowModels(false);
                     }}
-                    title="思考深度"
+                    title={t("composer.reasoning_depth")}
                   >
                     <IconBrain size={11} />
-                    {activeEffort || "默认"}
+                    {activeEffort || t("composer.reasoning_default")}
                   </button>
                   {showReasoning && (
                     <div className="composer-menu composer-reasoning-menu">
-                      <div className="composer-menu-title">思考深度</div>
+                      <div className="composer-menu-title">{t("composer.reasoning_depth")}</div>
                       {activeModel!.reasoning_efforts.map((effort) => (
                         <button
                           key={effort}
@@ -1098,7 +1100,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                         className={activeEffort == null ? "active" : ""}
                         onClick={() => changeReasoning(null)}
                       >
-                        默认
+                        {t("composer.reasoning_default")}
                       </button>
                     </div>
                   )}

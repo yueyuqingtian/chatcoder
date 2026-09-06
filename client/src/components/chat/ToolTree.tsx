@@ -22,9 +22,10 @@ import { api } from "../../api/client";
 import { usePanelStore } from "../../store/panel";
 import { FileBadge, splitFilePath } from "./FileBadge";
 import {
-  IconFileRead, IconFileWrite, IconFolder, IconGlobe, IconSearch, IconTerminal,
+  IconFileRead, IconFileWrite, IconFolder, IconGlobe, IconTerminal,
   IconUsers, IconBox, IconZap, IconFlask, IconGitBranch, IconBrain,
-  IconSpinner, IconX, IconDiff, IconImage, IconChevronRight, IconCheckSquare,
+  IconSpinner, IconX, IconImage, IconChevronRight,
+  IconFilePatch, IconFileSearch, IconOperationCluster, IconChecklist,
 } from "../icons";
 
 /** 工具 → 中文动作动词（对齐 zcode 行首文案） */
@@ -52,29 +53,30 @@ const TOOL_VERBS: Record<string, string> = {
 };
 
 const TOOL_ICONS: Record<string, React.ReactNode> = {
-  fs_read: <IconFileRead size={13} />,
-  fs_write: <IconFileWrite size={13} />,
-  fs_list: <IconFolder size={13} />,
-  fs_grep: <IconSearch size={13} />,
-  terminal_exec: <IconTerminal size={13} />,
-  web_fetch: <IconGlobe size={13} />,
-  web_search: <IconSearch size={13} />,
-  git_diff: <IconGitBranch size={13} />,
-  git_root: <IconGitBranch size={13} />,
-  spawn_subagent: <IconUsers size={13} />,
-  ask_subagent: <IconBrain size={13} />,
-  collect_results: <IconBox size={13} />,
-  ci_run: <IconFlask size={13} />,
-  memory_search: <IconBrain size={13} />,
-  editor_apply_diff: <IconDiff size={13} />,
-  view_image: <IconImage size={13} />,
-  todo_write: <IconCheckSquare size={13} />,
-  ask_user_question: <IconBrain size={13} />,
-  mcp: <IconBox size={13} />,
+  fs_read: <IconFileRead size={16} />,
+  fs_write: <IconFileWrite size={16} />,
+  fs_list: <IconFolder size={16} />,
+  fs_grep: <IconFileSearch size={16} />,
+  terminal_exec: <IconTerminal size={16} />,
+  web_fetch: <IconGlobe size={16} />,
+  web_search: <IconFileSearch size={16} />,
+  codebase_search: <IconFileSearch size={16} />,
+  git_diff: <IconGitBranch size={16} />,
+  git_root: <IconGitBranch size={16} />,
+  spawn_subagent: <IconUsers size={16} />,
+  ask_subagent: <IconBrain size={16} />,
+  collect_results: <IconBox size={16} />,
+  ci_run: <IconFlask size={16} />,
+  memory_search: <IconBrain size={16} />,
+  editor_apply_diff: <IconFilePatch size={16} />,
+  view_image: <IconImage size={16} />,
+  todo_write: <IconChecklist size={16} />,
+  ask_user_question: <IconBrain size={16} />,
+  mcp: <IconBox size={16} />,
 };
 
 function toolIcon(tool: string): React.ReactNode {
-  return TOOL_ICONS[tool] ?? <IconZap size={13} />;
+  return TOOL_ICONS[tool] ?? <IconZap size={16} />;
 }
 
 function toolVerb(tool: string): string {
@@ -365,7 +367,7 @@ const ActionClusterRow = memo(function ActionClusterRow({ leaves }: { leaves: To
   return (
     <div className="tc-node tc-explore">
       <div className={"tc-row has-output tc-explore-row" + (expanded ? " expanded" : "")} onClick={() => setExpanded(!expanded)}>
-        <span className="tc-icon"><IconSearch size={13} /></span>
+        <span className="tc-icon"><IconOperationCluster size={16} /></span>
         {running ? (
           <span className="tc-verb-roll" key={tick}>
             <span className="tc-verb text-shine">{rollingText || "正在执行"}</span>
@@ -402,7 +404,7 @@ const WriteMergedRow = memo(function WriteMergedRow({ leaves }: { leaves: ToolLe
   return (
     <div className="tc-node">
       <div className={"tc-row has-output tc-write" + (expanded ? " expanded" : "")} onClick={() => setExpanded(!expanded)}>
-        <span className="tc-icon"><IconFileWrite size={13} /></span>
+        <span className="tc-icon"><IconFileWrite size={16} /></span>
         <span className={"tc-verb" + (running ? " text-shine" : "")}>{running ? "正在编辑" : `已编辑 ×${leaves.length}`}</span>
         {path && (
           <span className="tc-filelink">

@@ -118,12 +118,7 @@ export function FileTreePanel() {
   const previewLine = usePanelStore((s) => s.previewLine);
   const setPreviewPath = usePanelStore((s) => s.setPreviewPath);
   const diffPreview = usePanelStore((s) => s.diffPreview);
-  const streamingBuffers = useChatStore((s) => s.streamingBuffers);
-  const isRunning = useChatStore((s) => s.isRunning);
   const turnChanges = useChatStore((s) => s.turnChanges);
-  const runningTurnId = useChatStore((s) => s.runningTurnId);
-  const plansByTurn = useChatStore((s) => s.plansByTurn);
-  const pendingPlan = useChatStore((s) => s.pendingPlan);
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [openPaths, setOpenPaths] = useState<Set<string>>(new Set());
   const [content, setContent] = useState<string>("");
@@ -179,24 +174,10 @@ export function FileTreePanel() {
     if (previewPath) loadFile(previewPath);
   }, [previewPath, turnChanges]);
 
-  // 计划文档流式刷新仅限「规划阶段」：当前 running turn 的计划尚未确认/取消时，
-  // 流式缓冲即规划文本（实时刷新计划文档）；确认后进入执行阶段，流式缓冲变成
-  // 消息流的执行文本，不得覆盖计划文档（与 PlanCard plan-633 同口径）。
-  // 执行阶段计划文档的更新由下方 turnChanges 依赖重读磁盘内容兜底。
-  const isPlanDoc = Boolean(previewPath && /ai\/chatcoder-plan-.*\.md$/i.test(previewPath));
-  const planForTurn =
-    runningTurnId != null
-      ? (plansByTurn[runningTurnId] ??
-        (pendingPlan && pendingPlan.turnId === runningTurnId ? pendingPlan : null))
-      : null;
-  const planSettled =
-    planForTurn != null &&
-    "status" in planForTurn &&
-    (planForTurn.status === "confirmed" || planForTurn.status === "cancelled");
-  const activeStream = isRunning && isPlanDoc && !planSettled
-    ? Object.values(streamingBuffers).join("")
-    : "";
-  const displayContent = (activeStream && mdView === "preview") ? activeStream : content;
+  // v19.2 (plan-917): 彻底隔离右侧文件面板与主会话流式输出。
+  // 文件面板永远展示磁盘真实文件内容，绝不被 streamingBuffers 覆盖。
+  // 文件落盘或修改后通过 turnChanges 重新加载最新磁盘文件。
+  const displayContent = content;
 
   // v2.2 (对齐 zcode 3.14.2): grep path:line 跳转 → Monaco 定位到行
   useEffect(() => {
