@@ -8,11 +8,57 @@
 - 崩溃时写错误日志到数据目录,便于诊断
 """
 import logging
+import atexit
 import logging.handlers
 import os
 import sys
 import traceback
 from pathlib import Path
+
+
+_instance_lock_handle = None
+
+
+def _acquire_instance_lock(data_dir: Path) -> None:
+    """同一数据目录只允许一个打包后端，避免多个进程同时写 SQLite。"""
+    global _instance_lock_handle
+    lock_path = data_dir / "backend.instance.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(lock_path, "a+b")
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            handle.seek(0)
+            handle.write(b"0")
+            handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError) as exc:
+        handle.close()
+        raise RuntimeError(f"ChatCoder 后端已在运行，数据目录被占用: {data_dir}") from exc
+    handle.seek(0)
+    handle.truncate()
+    handle.write(f"pid={os.getpid()}\n".encode("utf-8"))
+    handle.flush()
+    _instance_lock_handle = handle
+    atexit.register(_release_instance_lock)
+
+
+def _release_instance_lock() -> None:
+    global _instance_lock_handle
+    if _instance_lock_handle is None:
+        return
+    try:
+        if sys.platform != "win32":
+            import fcntl
+            fcntl.flock(_instance_lock_handle.fileno(), fcntl.LOCK_UN)
+        _instance_lock_handle.close()
+    except OSError:
+        pass
+    _instance_lock_handle = None
 
 
 def _resolve_data_dir() -> Path:
@@ -142,6 +188,7 @@ def _load_env_from_exe_dir() -> None:
 def _setup_env() -> None:
     """设置环境变量,确保所有写操作落到可写目录。"""
     data_dir = _resolve_data_dir()
+    _acquire_instance_lock(data_dir)
     _setup_logging(data_dir)
 
     # 关键: 在 chdir 之前加载 .env 到环境变量,确保 Settings 能读到配置

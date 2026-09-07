@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.orchestration.agent_loop import run_agent_loop
 from app.orchestration.tools.registry import tool_registry
-from app.persistence.database import async_session_factory, db_commit
+from app.persistence.database import async_session_factory, commit_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +165,7 @@ async def _sync_task_status(db, session_id: int, task_id: int, status: str, note
         from app.orchestration.agent_events import broadcast
         from app.services import task_service
         await task_service.update_task_status(db, task_id, status, note=note)
-        await db_commit(db)
+        await commit_with_retry(db, label=f"subagent.task.{status}")
         await broadcast(session_id, {
             "event": "task.updated",
             "payload": {"task_id": task_id, "status": status, "note": note or ""},

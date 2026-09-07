@@ -11,7 +11,7 @@ from app.gateway.schemas import (ArtifactOut, FileChangeOut, FileDiffOut, Messag
                                  RollbackPreviewFile, RollbackPreviewOut,
                                  RollbackResult, TaskConfirmBody, TaskOut, TurnCreate, TurnInjectBody, TurnOut, TurnSnapshotOut)
 from app.orchestration import engine
-from app.persistence.database import get_db
+from app.persistence.database import commit_with_retry, get_db
 from app.services import message_service, project_service, rollback_service, session_service, task_service, turn_service
 
 router = APIRouter(prefix="/turns", tags=["turns"])
@@ -43,7 +43,7 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
     # 且（消息按 id 升序）用户消息排在 AI 回复之前（修复消息顺序颠倒）
     user_msg.turn_id = turn.id
     generated_title = await session_service.auto_title_session(db, session, body.content)
-    await db.commit()
+    await commit_with_retry(db, label="turn.create")
     await db.refresh(user_msg)
     # v37: 用户消息落库时间即会话最新活动时间（侧栏排序依据）
     _last_activity = str(user_msg.created_at) if user_msg.created_at is not None else None
@@ -61,7 +61,7 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
                 db, session_id=body.session_id, turn_id=turn.id,
                 workspace=ws_path, user_message_id=user_msg.id,
             )
-            await db.commit()
+            await commit_with_retry(db, label="turn.snapshot")
     except Exception:
         logger.debug("turn 快照预创建失败(非阻塞)", exc_info=True)
 
@@ -194,7 +194,7 @@ async def inject_turn_input(turn_id: int, body: TurnInjectBody, db: AsyncSession
         broadcast=False,
     )
     user_msg.turn_id = turn_id
-    await db.commit()
+    await commit_with_retry(db, label="turn.inject_input")
     await db.refresh(user_msg)
     try:
         from app.gateway.ws import manager as ws_manager
@@ -235,7 +235,7 @@ async def resume_turn(turn_id: int, db: AsyncSession = Depends(get_db)):
     if turn.status != "interrupted":
         raise HTTPException(400, "仅 interrupted 状态的 turn 可续跑")
     await turn_service.update_turn_status(db, turn_id, "running")
-    await db.commit()
+    await commit_with_retry(db, label="turn.resume")
 
     # v0.3.1: 提取纯标量变量，禁止闭包在请求返回后访问已关闭会话的 ORM 属性
     session_id = int(turn.session_id)
@@ -268,7 +268,9 @@ async def resume_turn(turn_id: int, db: AsyncSession = Depends(get_db)):
                 except Exception:
                     logger.debug("turn 异常态落库失败", exc_info=True)
 
-    asyncio.get_event_loop().create_task(_run())
+    from app.orchestration.engine import _turn_tasks
+    task = asyncio.get_event_loop().create_task(_run())
+    _turn_tasks[turn_id] = task
     # v0.3.1: 绝杀 MissingGreenlet——显式构造纯 Pydantic DTO 返回
     return TurnOut(
         id=turn_id,
@@ -292,7 +294,7 @@ async def rollback(turn_id: int, restore_to_composer: bool = True,
         result = await rollback_service.rollback_turn(
             db, turn_id=turn_id, restore_to_composer=restore_to_composer,
         )
-        await db.commit()
+        await commit_with_retry(db, label="turn.rollback")
         if not result.get("ok"):
             raise HTTPException(400, result.get("reason", "回滚失败"))
         return result
@@ -401,7 +403,7 @@ async def set_reviews(turn_id: int, body: ReviewBatchBody, db: AsyncSession = De
         updated = await rollback_service.upsert_file_reviews(
             db, turn_id=turn_id, paths=body.paths, reviewed=body.reviewed,
         )
-        await db.commit()
+        await commit_with_retry(db, label="turn.reviews")
         logger.info("[review] upsert: turn=%s paths=%s reviewed=%s updated=%s",
                     turn_id, len(body.paths), body.reviewed, updated)
         return {"ok": True, "updated": updated}
@@ -640,13 +642,13 @@ async def confirm_plan_turn(turn_id: int, body: TaskConfirmBody,
             db, turn_id, "cancelled", summary="方案已取消，任务停止", completed=True,
         )
         await task_service.cancel_turn_tasks(db, turn.session_id, turn_id)
-        await db.commit()
+        await commit_with_retry(db, label="plan.cancel")
         from app.orchestration.agent_events import broadcast, broadcast_turn_updated
         await broadcast_turn_updated(turn.session_id, turn_id, "cancelled")
         return {"ok": True, "mode": "cancelled", "permission_mode": _permission_mode}
 
     await turn_service.update_turn_status(db, turn_id, "running")
-    await db.commit()
+    await commit_with_retry(db, label="plan.confirm")
 
     async def _run_plan():
         from app.persistence.database import async_session_factory
@@ -657,7 +659,8 @@ async def confirm_plan_turn(turn_id: int, body: TaskConfirmBody,
                 await session_db.rollback()
                 logger.exception("确认方案执行失败 turn=%s", turn_id)
 
-    asyncio.get_event_loop().create_task(_run_plan())
+    from app.orchestration.engine import _turn_tasks
+    _turn_tasks[turn_id] = asyncio.get_event_loop().create_task(_run_plan())
     return {"ok": True, "mode": "confirmed", "permission_mode": _permission_mode}
 
 

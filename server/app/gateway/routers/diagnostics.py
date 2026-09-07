@@ -16,8 +16,10 @@ router = APIRouter(tags=["diagnostics"])
 
 @router.get("/diagnostics", response_model=dict)
 async def diagnostics():
-    """环境诊断：git、后端、模型连通、目录权限。"""
+    """环境诊断：git、后端、模型连通、目录权限和数据库实例归属。"""
     result: dict = {"ok": True, "checks": {}}
+    from app.persistence.database import database_info
+    result["database"] = database_info()
 
     # git
     try:

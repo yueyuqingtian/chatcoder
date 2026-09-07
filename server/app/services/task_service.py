@@ -1,5 +1,5 @@
 """任务服务（v2：子代理承载的工作项）。"""
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.task import Artifact, Task
@@ -60,20 +60,20 @@ async def attach_artifacts(db: AsyncSession, task_id: int, artifact_ids: list[in
     await db.flush()
 
 
-async def cancel_turn_tasks(db: AsyncSession, session_id: int, turn_id: int) -> int:
-    """回滚/取消时，将该 turn 之后运行中的任务置 cancelled。"""
-    res = await db.execute(
-        select(Task).where(
+async def cancel_turn_tasks(db: AsyncSession, session_id: int, turn_id: int | None) -> int:
+    """批量取消未完成任务，避免先查询对象触发隐式 autoflush。"""
+    stmt = (
+        update(Task)
+        .where(
             Task.session_id == session_id,
-            Task.status.in_(["proposed", "pending", "running"]),
+            Task.status.in_(["proposed", "pending", "running", "in_progress"]),
         )
+        .values(status="cancelled")
     )
-    count = 0
-    for t in res.scalars().all():
-        if turn_id is None or (t.turn_id or 0) >= turn_id:
-            t.status = "cancelled"
-            count += 1
-    return count
+    if turn_id is not None:
+        stmt = stmt.where(Task.turn_id >= turn_id)
+    result = await db.execute(stmt)
+    return int(result.rowcount or 0)
 
 
 async def create_artifact(db: AsyncSession, *, task_id: int | None = None,

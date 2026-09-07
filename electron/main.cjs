@@ -18,18 +18,45 @@ function probePort(port) {
   });
 }
 
+function probeChatCoder(port) {
+  return new Promise((resolve) => {
+    const req = http.get(
+      { host: "127.0.0.1", port, path: "/api/health", timeout: 700 },
+      (res) => {
+        const chunks = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () => {
+          try {
+            const data = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+            resolve(res.statusCode === 200 && data.status === "ok" && data.service === "chatcoder");
+          } catch { resolve(false); }
+        });
+      },
+    );
+    req.on("error", () => resolve(false));
+    req.on("timeout", () => { req.destroy(); resolve(false); });
+  });
+}
+
 async function pickBackendPort() {
   const base = Number(process.env.CHATCODER_PORT || 8000);
-  // 探活：端口已被占用则向后找空闲端口（上限 +50）
+  // 已有 ChatCoder 后端优先复用，不能因端口冲突再启动第二个共享 SQLite 的进程。
   for (let p = base; p < base + 50; p++) {
-    // 8000 可能被 CLodop 打印服务占用（已知共存场景），跳过占用的端口即可
+    if (await probeChatCoder(p)) {
+      log("[chatcoder] 复用已有后端端口:", p);
+      return p;
+    }
+  }
+  // 只有确认不是 ChatCoder 的服务占用端口时，才寻找空闲端口。
+  for (let p = base; p < base + 50; p++) {
     if (await probePort(p)) return p;
   }
-  return base; // 全部被占时退回默认，交给后端报错
+  return base;
 }
 
 let BACKEND_PORT = Number(process.env.CHATCODER_PORT || 8000);
 let backendProcess = null;
+let backendReused = false;
 let mainWindow = null;
 let backendReady = false;
 
@@ -86,8 +113,13 @@ function resolveFrontendDir() {
 }
 
 // ── 启动后端 ──
-function startBackend() {
+async function startBackend() {
   try {
+    if (await probeChatCoder(BACKEND_PORT)) {
+      backendReused = true;
+      log("[chatcoder] 使用已运行的 ChatCoder 后端:", BACKEND_PORT);
+      return null;
+    }
     const dir = resolveBackendDir();
     const exe = path.join(dir, "chatcoder-server.exe");
     if (!fs.existsSync(exe)) {
@@ -194,12 +226,12 @@ function waitForBackend(maxAttempts = 120, intervalMs = 500) {
           res.on("data", (c) => chunks.push(c));
           res.on("end", () => {
             const body = Buffer.concat(chunks).toString("utf8");
-            let isJson = false;
+            let isChatCoder = false;
             try {
-              const ct = res.headers["content-type"] || "";
-              isJson = ct.includes("application/json") || (body.trim().startsWith("{") && JSON.parse(body).status === "ok");
-            } catch { isJson = false; }
-            if (res.statusCode === 200 && isJson) {
+              const data = JSON.parse(body);
+              isChatCoder = data.status === "ok" && data.service === "chatcoder";
+            } catch { isChatCoder = false; }
+            if (res.statusCode === 200 && isChatCoder) {
               clearInterval(checkInterval);
               resolve();
             } else if (attempts >= maxAttempts) {
@@ -735,18 +767,23 @@ app.whenReady().then(async () => {
     log("[chatcoder] 默认端口被占用，改用端口:", BACKEND_PORT);
   }
 
-  // 3. 后台启动后端
+  // 3. 后台启动后端；若已有 ChatCoder 服务则复用，不再启动第二个 SQLite owner。
   try {
-    startBackend();
+    await startBackend();
   } catch (err) {
     logErr("[chatcoder] startBackend 失败:", err);
   }
 
   // 4. 等待后端就绪
   try {
-    await waitForBackend();
-    backendReady = true;
-    log("[chatcoder] 后端就绪");
+    if (backendReused) {
+      backendReady = true;
+      log("[chatcoder] 已复用后端，跳过启动等待");
+    } else {
+      await waitForBackend();
+      backendReady = true;
+      log("[chatcoder] 后端就绪");
+    }
   } catch (e) {
     logErr("[chatcoder] 后端未就绪:", e.message);
     // 后端崩溃,显示错误信息在加载页

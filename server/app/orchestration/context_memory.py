@@ -397,6 +397,8 @@ async def maybe_summarize_main_session(
         new_ctx["summary"] = "\n\n".join(s["text"] for s in summaries)
         session.shared_context = new_ctx
         await db.flush()
+        # 摘要批次必须在批次边界提交，不能持有写事务跨下一轮计算。
+        await db.commit()
         summary_rounds += 1
         logger.info(
             "会话 %s 生成摘要(第%d批): %d 条消息 %d tokens -> %d 字符 (摘要总数=%d, 窗口=%dK)",

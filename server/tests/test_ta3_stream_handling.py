@@ -328,10 +328,11 @@ async def _collect_stream(p: Ta3Provider, request: ChatRequest):
     return events
 
 
-def test_thinking_watchdog_triggers(monkeypatch):
+def test_thinking_stream_uses_idle_timeout(monkeypatch):
+    """当前契约：思考阶段不再使用独立 watchdog，统一由流空闲超时收尾。"""
     from app.core.config import settings
     p = _provider(anthropic=True, provider="kimi")
-    p._stream_idle_timeout = 180  # 保证触发的是思考看门狗而非空闲超时
+    p._stream_idle_timeout = 0.1
     monkeypatch.setattr(settings, "ta3_thinking_watchdog", 0.1)
     _orig_stream = p._client.stream
     _fake = _FakeStreamingResponse([
@@ -344,6 +345,6 @@ def test_thinking_watchdog_triggers(monkeypatch):
     finally:
         p._client.stream = _orig_stream
     done = [e for e in events if e["type"] == "done"][0]
-    assert done["finish_reason"] == "thinking_timeout"
+    assert done["finish_reason"] == "timeout"
     assert done["thinking"] == "ponder..."
     assert done["content"] is None

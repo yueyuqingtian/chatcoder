@@ -97,15 +97,16 @@ async def create_message(
         _tries_used = _attempt + 1
         try:
             db.add(msg)
+            # 全局会话关闭 autoflush 后，消息主键和 created_at 需要显式 flush。
             await db.flush()
             await db.commit()
             break
         except Exception as exc:  # noqa: BLE001
-            await db.rollback()  # 无论何种异常先恢复 session，避免残留 rollback-only 状态
+            await db.rollback()  # 清掉失败事务，禁止在 rollback-only 会话上重试
             if _attempt >= _MESSAGE_WRITE_RETRIES - 1 or not _is_db_lock_error(exc):
                 raise
-            # 锁竞争通常为毫秒级，退避后重试（同一 msg 实例 rollback 后回到 transient 可再次 add）
-            await asyncio.sleep(0.1 * (1 << _attempt))
+            # 锁竞争通常为毫秒级；下一轮重新 add 同一个已回滚对象。
+            await asyncio.sleep(0.05 * (2 ** _attempt))
     if _tries_used > 1:
         logger.debug("message 落库重试 %d 次后成功", _tries_used)
     if broadcast:

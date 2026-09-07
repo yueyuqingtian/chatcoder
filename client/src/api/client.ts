@@ -114,6 +114,20 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+/** 取消是控制信号，不应继承普通 POST 的 10 分钟 LLM 超时。 */
+async function postCancel<T>(path: string): Promise<T> {
+  const res = await fetch(`${await baseForFetch()}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal: AbortSignal.timeout(2500),
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(errorMessage(res, detail));
+  }
+  return res.json() as Promise<T>;
+}
+
 async function get<T>(path: string): Promise<T> {
   const res = await fetchWithRetry(`${await baseForFetch()}${path}`);
   if (!res.ok) {
@@ -320,7 +334,7 @@ export const api = {
   injectTurnInput: (turnId: number, body: { request_id?: string; content: string; attachments?: Record<string, unknown>[] }) =>
     post<{ ok: boolean; queued: boolean; error?: string }>(`/turns/${turnId}/inputs`, body),
   listTurns: (sessionId: number) => get<TurnOut[]>(`/turns/sessions/${sessionId}`),
-  cancelTurn: (turnId: number) => post<{ ok: boolean }>(`/turns/${turnId}/cancel`),
+  cancelTurn: (turnId: number) => postCancel<{ ok: boolean }>(`/turns/${turnId}/cancel`),
   resumeTurn: (turnId: number) => post<TurnOut>(`/turns/${turnId}/resume`),
   rollbackTurn: (turnId: number, params: RollbackParams = {}) => {
     const q = params.restore_to_composer === false ? "?restore_to_composer=false" : "";

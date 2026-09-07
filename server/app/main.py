@@ -1,4 +1,5 @@
 """FastAPI 应用工厂（v2）。"""
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -145,7 +146,16 @@ def create_app() -> FastAPI:
     # 健康检查
     @app.get("/api/health", tags=["health"])
     async def health():
-        return {"status": "ok", "version": "0.4.0"}
+        # Electron 用稳定标识区分 ChatCoder 后端与同端口的其它本地服务。
+        from app.persistence.database import database_info
+        info = database_info()
+        return {
+            "status": "ok",
+            "service": "chatcoder",
+            "version": "0.4.0",
+            "pid": os.getpid(),
+            "database": info,
+        }
 
     return app
 

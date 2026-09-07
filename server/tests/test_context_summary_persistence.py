@@ -70,10 +70,11 @@ class TestSharedContextPersisted:
 class TestSummarizeWritesContext:
     async def test_over_threshold_summarizes_and_marks_ids(self, db: AsyncSession):
         s = await _mk_session(db)
-        # 阈值 = max(6000, 0.35×80000) = 28000；制造 20×6000 字符 = 120KB ≈ 3 万 token → 超阈值
+        # 当前摘要阈值为 0.85×窗口；20×6000 字符约 3 万 token，使用 30K 窗口
+        # 明确覆盖阈值，避免测试依赖旧版 0.35 比例。
         msgs = await _mk_text_messages(db, s.id, 20, "x" * 6000)
 
-        await maybe_summarize_main_session(db, s, context_window=80_000)
+        await maybe_summarize_main_session(db, s, context_window=30_000)
 
         ctx = s.shared_context or {}
         assert ctx.get("summary"), "摘要应写入 shared_context"
@@ -94,9 +95,9 @@ class TestSummarizeWritesContext:
         """v33: 已还原压缩块的消息不进入渐进摘要——还原后立即被摘要吞掉是
         "还原后 AI 仍看不到原文"的根因，必须排除。"""
         s = await _mk_session(db)
-        # 14 条 × 6000 字符 ≈ 2.1 万 token；阈值(80k×0.35)=28k，
-        # 排除前 7 条已还原消息后剩余 7 条 ≈ 1.05 万 token × ... 需确保剩余部分也超阈值
-        msgs = await _mk_text_messages(db, s.id, 14, "x" * 8000)
+        # 当前摘要比例为 0.85；用 14 条中等长度消息，并只排除前 7 条，
+        # 让剩余候选既超过阈值，又能满足每批至少 3 条的保护条件。
+        msgs = await _mk_text_messages(db, s.id, 14, "x" * 4000)
         restored_ids = [m.id for m in msgs[:7]]
 
         ctx = dict(s.shared_context or {})
@@ -109,9 +110,8 @@ class TestSummarizeWritesContext:
         s.shared_context = ctx
         await db.flush()
 
-        # 候选 = 后 7 条 ≈ 7×6000 字节 = 42KB ≈ 10500 token < 28k 阈值？——
-        # 直接用更小窗口保证候选超阈值
-        await maybe_summarize_main_session(db, s, context_window=20_000)
+        # 候选为后 7 条，使用 5K 窗口确保剩余候选超过当前 0.85 阈值。
+        await maybe_summarize_main_session(db, s, context_window=5_000)
 
         after = s.shared_context or {}
         summarized_ids = set(after.get("summarized_ids") or [])

@@ -17,7 +17,7 @@ from sqlalchemy import select
 
 from app.orchestration.agent_events import broadcast
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
-from app.persistence.database import async_session_factory
+from app.persistence.database import async_session_factory, commit_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -196,8 +196,9 @@ class TodoWriteTool(Tool):
 
             done_count = sum(1 for t in todos if t["status"] == "completed")
             todo_group.status = "done" if done_count == len(todos) else "running"
-            # P0 修复 A: 立即提交（同连接场景同时提交 turn 主循环 flush 的数据，幂等安全）
-            await db.commit()
+            # autoflush 已关闭；此处显式 flush 后短事务提交，广播放在提交之后。
+            await db.flush()
+            await commit_with_retry(db, label="todo.write")
             return changed
 
         if ctx.db is not None:

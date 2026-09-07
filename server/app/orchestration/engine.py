@@ -32,6 +32,7 @@ _running_turns: set[int] = set()
 _cancel_events: dict[int, asyncio.Event] = {}
 _turn_managers: dict[int, object] = {}
 _turn_tasks: dict[int, asyncio.Task] = {}
+_cancel_finalizers: dict[int, asyncio.Task] = {}
 # plan-547: 运行中 turn 的用户消息注入队列（turn_id -> 待注入项）。
 # 注入项在 agent_loop 每次 LLM 调用前被 drain 进上下文（下次调用前传达给 AI）。
 _pending_inputs: dict[int, list[dict]] = {}
@@ -749,40 +750,80 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
 
 
 async def cancel_turn(turn_id: int) -> bool:
-    """Signal a running turn and durably mark its unfinished work interrupted."""
+    """立即发出取消信号，数据库终态由唯一后台 finalizer 完成。"""
     ev = _cancel_events.get(turn_id)
+    manager = _turn_managers.get(turn_id)
+    main_task = _turn_tasks.get(turn_id)
+    if ev is None and manager is None and main_task is None:
+        # 非运行态也返回真实存在性，避免前端把不存在的 turn 当成已取消。
+        from app.persistence.database import async_session_factory
+        async with async_session_factory() as db:
+            return await turn_service.get_turn(db, turn_id) is not None
+
     if ev is not None:
         ev.set()
-        manager = _turn_managers.get(turn_id)
-        if manager is not None:
-            await manager.cancel_all()
+    if manager is not None:
+        # cancel_all 会取消子任务，但不在 HTTP 请求中等待其数据库收尾。
+        pending = [h.task for h in manager._handles.values()
+                   if h.task is not None and not h.task.done()]
+        for task in pending:
+            task.cancel()
+    if main_task is not None and main_task is not asyncio.current_task() and not main_task.done():
+        main_task.cancel()
 
-    from app.persistence.database import async_session_factory
+    existing = _cancel_finalizers.get(turn_id)
+    if existing is None or existing.done():
+        finalizer = asyncio.create_task(_finalize_cancelled_turn(turn_id))
+        _cancel_finalizers[turn_id] = finalizer
+    return True
+
+
+async def _finalize_cancelled_turn(turn_id: int) -> None:
+    """取消后台收尾：短事务、条件更新、有限重试，不阻塞 Stop 请求。"""
+    from sqlalchemy import update
+    from app.persistence.database import run_write_transaction
     from app.persistence.models.agent import Agent
-    from app.persistence.models.task import Task
-    from sqlalchemy import select
+    from app.persistence.models.turn import Turn
 
-    async with async_session_factory() as db:
+    async def _persist_cancel(db):
         turn = await turn_service.get_turn(db, turn_id)
         if turn is None:
-            return False
-        active = turn.status not in ("completed", "failed", "cancelled", "interrupted", "rolled_back")
-        if active:
-            turn.status = "interrupted"
-            turn.summary = turn.summary or "用户中断"
-            turn.completed_at = turn.completed_at or datetime.now(timezone.utc).isoformat()
-            await task_service.cancel_turn_tasks(db, turn.session_id, turn_id)
-            agents = await db.execute(select(Agent).where(Agent.turn_id == turn_id, Agent.status == "running"))
-            for agent in agents.scalars().all():
-                agent.status = "terminated"
-            await db.commit()
-            await broadcast_turn_updated(turn.session_id, turn_id, "interrupted")
-            await broadcast(turn.session_id, {"event": "turn.interrupted", "payload": {"turn_id": turn_id, "status": "interrupted", "summary": turn.summary or "用户中断", "session_id": turn.session_id}})
-            await broadcast_session_completed(turn.session_id, db)
-        main_task = _turn_tasks.pop(turn_id, None)
-        if main_task is not None and main_task is not asyncio.current_task() and not main_task.done():
-            main_task.cancel()
-        return True
+            return None
+        session_id = int(turn.session_id)
+        terminal = ("completed", "failed", "cancelled", "interrupted", "rolled_back")
+        if turn.status in terminal:
+            return {"session_id": session_id, "active": False, "summary": turn.summary or ""}
+        turn.status = "interrupted"
+        turn.summary = turn.summary or "用户中断"
+        turn.completed_at = turn.completed_at or datetime.now(timezone.utc).isoformat()
+        await task_service.cancel_turn_tasks(db, session_id, turn_id)
+        await db.execute(
+            update(Agent).where(Agent.turn_id == turn_id, Agent.status == "running")
+            .values(status="terminated")
+        )
+        return {"session_id": session_id, "active": True, "summary": turn.summary}
+
+    try:
+        result = await run_write_transaction(
+            _persist_cancel, label=f"turn.cancel.{turn_id}", retries=3,
+        )
+        if result and result.get("active"):
+            session_id = int(result["session_id"])
+            await broadcast_turn_updated(session_id, turn_id, "interrupted")
+            await broadcast(session_id, {
+                "event": "turn.interrupted",
+                "payload": {"turn_id": turn_id, "status": "interrupted",
+                            "summary": result.get("summary") or "用户中断",
+                            "session_id": session_id},
+            })
+            await broadcast_session_completed(session_id)
+    except asyncio.CancelledError:
+        logger.info("[cancel] finalizer cancelled turn=%s", turn_id)
+    except Exception:
+        logger.exception("[cancel] finalizer failed turn=%s", turn_id)
+        # finalizer 失败不能把 turn 留在 running；下一次健康检查/重启自愈仍可处理。
+    finally:
+        _cancel_finalizers.pop(turn_id, None)
 
 
 def _resolve_workspace(session, project) -> str:

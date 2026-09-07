@@ -1,13 +1,4 @@
-"""pytest 全局配置。
-
-测试范围:
-- 纯逻辑层单测(无需 DB):DAG、scheduler、tools、approval、artifacts、context。
-- 配置隔离:通过 monkeypatch settings,避免读到 .env 真实配置。
-
-不包含:
-- 真实 DB 集成测试(留 v0.5 加 testcontainers/PG)。
-- 真实 LLM 调用(用 mock provider)。
-"""
+"""pytest 全局配置与隔离数据库初始化。"""
 import os
 import sys
 from pathlib import Path
@@ -16,18 +7,32 @@ from pathlib import Path
 SERVER_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SERVER_DIR))
 
-# 测试用环境变量(在 settings 加载前设置)
-os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
-os.environ.setdefault("REDIS_URL", "redis://localhost:6379/15")  # 测试库
-os.environ.setdefault("QDRANT_URL", "http://localhost:6333")
-os.environ.setdefault("WORKSPACE_ROOT", "./workspace_test")
-os.environ.setdefault("AUTO_CONFIRM_PLAN", "false")
-os.environ["AUTO_APPROVE_TOOLS"] = "false"  # v1.1: 必须覆盖本机残留的 true 环境变量,测试不走自动批准
-os.environ.setdefault("APPROVAL_TIMEOUT_SEC", "2")  # 测试用短超时
-os.environ.setdefault("AGENT_MAX_STEPS", "3")
-os.environ.setdefault("JWT_SECRET", "test-secret")
+# 测试必须强制使用隔离配置，不能被本机 .env/打包运行环境污染。
+os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
+os.environ["REDIS_URL"] = "redis://localhost:6379/15"
+os.environ["QDRANT_URL"] = "http://localhost:6333"
+os.environ["WORKSPACE_ROOT"] = "./workspace_test"
+os.environ["AUTO_CONFIRM_PLAN"] = "false"
+os.environ["AUTO_APPROVE_TOOLS"] = "false"
+os.environ["APPROVAL_TIMEOUT_SEC"] = "2"
+os.environ["AGENT_MAX_STEPS"] = "3"
+os.environ["JWT_SECRET"] = "test-secret"
 
 import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+async def _reset_shared_test_db():
+    """为使用全局 async_session_factory 的旧测试重建内存库表。"""
+    from app.persistence.database import Base, engine
+    from app.persistence import models  # noqa: F401
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+    yield
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
 
 
 @pytest.fixture

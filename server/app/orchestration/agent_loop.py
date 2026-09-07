@@ -1611,8 +1611,9 @@ def _response_failure_reason(response, has_progress: bool = False) -> tuple[str,
     """
     finish = response.finish_reason or "stop"
     if not response.content and not response.thinking and not response.tool_calls:
-        if finish == "timeout":
-            return "模型响应因网关空闲超时中断，未生成任何内容", True
+        if finish in ("timeout", "thinking_timeout"):
+            return ("模型思考超时，未生成任何内容" if finish == "thinking_timeout"
+                    else "模型响应因网关空闲超时中断，未生成任何内容"), True
         # v31 (plan-89): 对齐 zcode/AI SDK 语义——本 turn 已有工具产出（has_progress）
         # 时，finish_reason=stop 的空响应是模型"任务已完成、主动结束对话"的正常信号，
         # 视为健康直接结束，不触发重试/报错（任务完成后误报"模型返回空响应"的根因）。

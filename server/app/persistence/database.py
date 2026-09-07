@@ -1,6 +1,14 @@
-"""SQLAlchemy 异步引擎与会话。"""
+"""SQLAlchemy 异步引擎与会话。
+
+SQLite 在桌面端是单写者数据库。这里统一关闭隐式 autoflush，并把所有
+显式 flush/commit 经过同一个进程内协调器；业务代码不得依赖查询触发写入。
+"""
 import asyncio
-from collections.abc import AsyncGenerator
+import logging
+import time
+import weakref
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from typing import TypeVar
 
 from sqlalchemy import event
 from sqlalchemy.exc import OperationalError
@@ -9,9 +17,30 @@ from sqlalchemy.orm import DeclarativeBase
 
 from app.core.config import settings
 
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
 
 class Base(DeclarativeBase):
     """所有 ORM 模型的基类。"""
+
+
+def database_info() -> dict[str, object]:
+    """返回不含密钥的数据库运行信息，供健康检查/诊断页确认实例归属。"""
+    url = settings.database_url
+    if url.startswith("sqlite"):
+        from pathlib import Path
+        raw_path = url.rsplit("///", 1)[-1]
+        path = str(Path(raw_path).resolve())
+        return {
+            "kind": "sqlite",
+            "path": path,
+            "wal": True,
+            "busy_timeout_ms": 10000,
+            "autoflush": False,
+        }
+    return {"kind": "postgresql", "path": "", "autoflush": False}
 
 
 def _pool_kwargs(url: str) -> dict:
@@ -22,9 +51,9 @@ def _pool_kwargs(url: str) -> dict:
 
 
 def _connect_args(url: str) -> dict:
-    """SQLite: busy_timeout 让写操作排队等待,避免立即报锁错误。"""
+    """SQLite 连接参数；busy_timeout 只是跨进程锁的最后一道兜底。"""
     if url.startswith("sqlite"):
-        return {"timeout": 30, "check_same_thread": False}
+        return {"timeout": 10, "check_same_thread": False}
     return {}
 
 
@@ -41,65 +70,190 @@ engine = create_async_engine(
 if settings.database_url.startswith("sqlite"):
     @event.listens_for(engine.sync_engine, "connect")
     def _set_sqlite_pragma(dbapi_conn, conn_record):
-        """SQLite 优化:WAL 提升并发读,busy_timeout=30s 让写操作排队等待(配合串行调度)。"""
+        """WAL 提升读并发；连接级 busy_timeout 仅兜底跨进程竞争。"""
         cursor = dbapi_conn.cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.execute("PRAGMA busy_timeout=10000")
         cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 
 
-# 问题3: SQLite 单写者——进程内写锁串行化所有 commit，避免多会话/主子代理并发写
-# 击穿 busy_timeout 报 "database is locked"。WAL 下读不需锁，仅锁写提交。
-# 通过自定义 AsyncSession 覆盖 commit() 自动加锁：所有经 async_session_factory /
-# get_db 得到的会话写提交全被串行化，无需逐点替换调用处的 commit。
-_db_write_lock = asyncio.Lock()
+# SQLite 的跨进程写锁由文件数据库自身负责；进程内只在真正 commit 的短窗口
+# 串行化，避免 A flush 后等待其它协程、B 又无法推进 A commit。
+# 按 event loop 保存锁，防止 pytest/重载的旧 asyncio.Lock 被新 loop 复用。
+_commit_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = weakref.WeakKeyDictionary()
+_flush_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = weakref.WeakKeyDictionary()
+
+
+def _loop_lock(store: weakref.WeakKeyDictionary) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = store.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        store[loop] = lock
+    return lock
+
+
+def _commit_lock() -> asyncio.Lock:
+    return _loop_lock(_commit_locks)
+
+
+def _flush_lock() -> asyncio.Lock:
+    return _loop_lock(_flush_locks)
+
+
+def _is_sqlite_lock_error(exc: BaseException) -> bool:
+    """只把 SQLite 锁冲突视为可诊断的瞬时竞争。"""
+    if not isinstance(exc, OperationalError):
+        return False
+    message = str(getattr(exc, "orig", None) or exc).lower()
+    return "database is locked" in message or "database table is locked" in message
+
+
+def _is_write_statement(statement) -> bool:
+    """识别直接 execute 的 DML/DDL，避免绕过 flush 协调器。"""
+    if getattr(statement, "is_dml", False) or getattr(statement, "is_ddl", False):
+        return True
+    sql = str(statement).lstrip().upper()
+    return sql.startswith(("INSERT ", "UPDATE ", "DELETE ", "REPLACE ", "ALTER ", "CREATE ", "DROP "))
 
 
 class LockedAsyncSession(AsyncSession):
-    """commit/flush 自动串行化的 AsyncSession——写提交与写 SQL 均经进程内写锁。
+    """关闭隐式 autoflush，并记录显式 flush/commit 耗时。"""
 
-    v0.3.1: flush 同样持锁——SQLite 的写事务始于第一条 INSERT/UPDATE（flush），
-    此前仅锁 commit 时，多会话并发 flush 仍会"database is locked"（busy_timeout 等待
-    超时后抛错），触发 create_message/usage 落库失败 → rollback 主 db 会话 → 该会话上
-    agent/session/turn 等已加载对象全部过期 → 后续属性访问在 asyncio 上下文走同步 reload
-    抛 MissingGreenlet（SQLAlchemy xd2s）。锁覆盖 flush 后并发写冲突从源头消除。
-    """
+    async def execute(self, statement, params=None, *, execution_options=None,
+                      bind_arguments=None, **kwargs):
+        if settings.database_url.startswith("sqlite") and _is_write_statement(statement):
+            lock = _flush_lock()
+            await lock.acquire()
+            try:
+                return await super().execute(
+                    statement, params, execution_options=execution_options,
+                    bind_arguments=bind_arguments, **kwargs,
+                )
+            finally:
+                lock.release()
+        return await super().execute(
+            statement, params, execution_options=execution_options,
+            bind_arguments=bind_arguments, **kwargs,
+        )
 
     async def commit(self) -> None:
-        async with _db_write_lock:
+        started = time.monotonic()
+        lock = _commit_lock()
+        wait_started = time.monotonic()
+        await lock.acquire()
+        waited = time.monotonic() - wait_started
+        if waited >= 0.05:
+            logger.info("[db.lock.wait] commit_wait=%.3fs", waited)
+        try:
             await super().commit()
+        except Exception:
+            try:
+                await super().rollback()
+            except Exception:
+                logger.debug("[db.commit] rollback failed", exc_info=True)
+            raise
+        finally:
+            lock.release()
+            elapsed = time.monotonic() - started
+            if elapsed >= 0.05:
+                logger.debug("[db.commit] elapsed=%.3fs", elapsed)
 
-    async def flush(self) -> None:
-        async with _db_write_lock:
-            await super().flush()
+    async def flush(self, objects=None) -> None:
+        started = time.monotonic()
+        lock = _flush_lock()
+        await lock.acquire()
+        try:
+            if objects is None:
+                await super().flush()
+            else:
+                await super().flush(objects=objects)
+        except Exception:
+            try:
+                await super().rollback()
+            except Exception:
+                logger.debug("[db.flush] rollback failed", exc_info=True)
+            raise
+        finally:
+            lock.release()
+            elapsed = time.monotonic() - started
+            if elapsed >= 0.05:
+                logger.debug("[db.flush] elapsed=%.3fs", elapsed)
 
 
-async_session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=LockedAsyncSession)
+# SQLAlchemy 2.x 的 AsyncSession 不提供 expire_on_rollback 参数；
+# 回滚后的 ORM 属性不能作为可靠数据源，业务代码必须使用预先缓存的标量或重新查询。
+async_session_factory = async_sessionmaker(
+    engine,
+    autoflush=False,
+    expire_on_commit=False,
+    class_=LockedAsyncSession,
+)
 
 
 async def db_commit(db: AsyncSession) -> None:
-    """写提交入口（锁已由 LockedAsyncSession.commit 串行化，此处不再重复加锁）。"""
+    """统一提交入口。调用方应先显式 flush，且不得跨长 IO 持有脏事务。"""
     await db.commit()
 
 
-async def commit_with_retry(db: AsyncSession, retries: int = 3) -> None:
-    """serially commit with bounded exponential backoff on SQLite lock errors.
+async def rollback_safely(db: AsyncSession) -> None:
+    """回滚并清理事务状态；回滚失败不覆盖原始异常。"""
+    try:
+        await db.rollback()
+    except Exception:
+        logger.debug("[db.rollback] rollback failed", exc_info=True)
 
-    message_service 原有 4 次退避重试范式上提：OperationalError locked 为瞬时写竞争，
-    退避后重试通常一次即成功。适用于 todo/task/turn 状态/usage 等写路径。
+
+async def commit_with_retry(db: AsyncSession, retries: int = 3, label: str = "db") -> None:
+    """提交当前短事务；锁冲突只做有界等待，不在回滚后假装重试 ORM 对象。"""
+    started = time.monotonic()
+    try:
+        await db_commit(db)
+    except Exception as exc:
+        if _is_sqlite_lock_error(exc):
+            logger.error(
+                "[db.commit.locked] label=%s retries=%d elapsed=%.3fs; "
+                "caller must rebuild the short transaction",
+                label, retries, time.monotonic() - started,
+            )
+        raise
+
+
+async def run_write_transaction(
+    operation: Callable[[AsyncSession], Awaitable[T]], *,
+    label: str = "db",
+    retries: int = 3,
+) -> T:
+    """执行可重放的短写事务，锁失败时重建 Session 和 ORM 状态再重试。
+
+    operation 必须只包含内存组装、显式数据库读写和必要的 flush，禁止包含
+    LLM/文件/网络长 IO。这样 rollback 后不会复用已经失效的 ORM 对象。
     """
-    for attempt in range(retries):
-        try:
-            await db_commit(db)
-            return
-        except OperationalError as exc:
-            msg = str(getattr(exc, "orig", None) or exc).lower()
-            if "locked" not in msg:
-                raise
-            if attempt >= retries - 1:
-                raise
-            await asyncio.sleep(0.1 * (1 << attempt))
+    from app.persistence.database import async_session_factory
+
+    attempts = max(1, int(retries))
+    for attempt in range(attempts):
+        started = time.monotonic()
+        async with async_session_factory() as db:
+            try:
+                result = await operation(db)
+                await db.flush()
+                await db_commit(db)
+                if attempt:
+                    logger.info("[db.write.retry] label=%s attempts=%d elapsed=%.3fs",
+                                label, attempt + 1, time.monotonic() - started)
+                return result
+            except Exception as exc:
+                await rollback_safely(db)
+                if not _is_sqlite_lock_error(exc) or attempt >= attempts - 1:
+                    raise
+                delay = 0.05 * (2 ** attempt)
+                logger.warning("[db.write.retry] label=%s attempt=%d delay=%.2fs",
+                               label, attempt + 1, delay)
+        await asyncio.sleep(delay)
+    raise RuntimeError(f"数据库写事务失败: {label}")  # pragma: no cover
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

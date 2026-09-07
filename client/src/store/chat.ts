@@ -309,7 +309,7 @@ let _wsUnsub: (() => void) | null = null;
 let _globalWsUnsub: (() => void) | null = null;
 let _heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
 const HEARTBEAT_TIMEOUT = 60_000; // 60s 无事件超时兜底复位
-let _stoppingTurnId: number | null = null;
+const _stoppingTurnIds = new Set<number>();
 /** plan-546: bootstrap 自动选中会话仅允许冷启动首次执行；
  * 此后 currentSessionId=null 表示用户主动停留空态首页（新建任务），
  * 任何后续 loadBootstrap（退出设置侧栏重挂载/设置面板刷新等）不得再把用户拉进会话。 */
@@ -1146,24 +1146,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-   cancelTurn: async () => {
+  cancelTurn: async () => {
     const { runningTurnId } = get();
-    if (!runningTurnId || _stoppingTurnId === runningTurnId) return;
-    _stoppingTurnId = runningTurnId;
-    try { await api.cancelTurn(runningTurnId); }
-    catch (e) { set({ error: String(e) }); }
-    finally {
-      if (_stoppingTurnId === runningTurnId) _stoppingTurnId = null;
-      const sid = get().currentSessionId;
-      if (sid) { try { await get().refreshTurns(); } catch { /* ignore */ } }
-    }
-  },
-  forceStop: async () => {
-    const { runningTurnId } = get();
-    if (!runningTurnId || _stoppingTurnId === runningTurnId) return;
+    if (!runningTurnId || _stoppingTurnIds.has(runningTurnId)) return;
     const turnId = runningTurnId;
-    _stoppingTurnId = turnId;
+    _stoppingTurnIds.add(turnId);
     _clearHeartbeat();
+    // 停止是用户明确的本地控制操作：先清理 UI，再等待后端信号/落库。
     set((s) => ({
       runningTurnId: null,
       isRunning: false,
@@ -1171,9 +1160,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
       turns: s.turns.map((t) => (t.id === turnId ? { ...t, status: "interrupted" } : t)),
       streamingBuffers: {},
       thinkingBuffers: {},
+      subagentStreams: {},
+      subagentThinking: {},
+      pendingApproval: null,
+      sessions: s.sessions.map((x) => (x.id === s.currentSessionId ? { ...x, has_running: false } : x)),
     }));
-    void api.cancelTurn(turnId).catch(() => { /* 后端可能已结束 */ });
-  },resumeTurn: async () => {
+    // 取消接口有专用短超时；失败不覆盖已经完成的本地停止。
+    void api.cancelTurn(turnId).catch(() => { /* 后端可能正在异步收尾 */ });
+  },
+  forceStop: async () => {
+    // 保留兼容入口，统一走同一套乐观停止逻辑，避免两套状态清理漂移。
+    await get().cancelTurn();
+  },
+  resumeTurn: async () => {
     const { interruptedTurnId, currentSessionId } = get();
     if (!interruptedTurnId || !currentSessionId) return;
     try {
@@ -1308,13 +1307,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       const turns = await api.listTurns(currentSessionId);
       if (get().currentSessionId !== currentSessionId) return;
-       const running = turns.find((t) => t.status === "running");
+      const stopping = new Set(turns.filter((t) => _stoppingTurnIds.has(t.id)).map((t) => t.id));
+      const running = turns.find((t) => t.status === "running" && !stopping.has(t.id));
       const interrupted = turns.find((t) => t.status === "interrupted");
       set({
-        turns,
+        turns: turns.map((t) => (stopping.has(t.id) && t.status === "running"
+          ? { ...t, status: "interrupted" }
+          : t)),
         runningTurnId: running?.id ?? null,
         isRunning: Boolean(running),
-        interruptedTurnId: interrupted?.id ?? null,
+        interruptedTurnId: interrupted?.id ?? (stopping.size ? [...stopping][0] : null),
       });
     } catch (e) {
       set({ error: String(e) });
@@ -1611,7 +1613,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const activeSid = Number(payload.session_id ?? 0) || get().currentSessionId;
         set((s) => {
           const ended = status === "completed" || status === "failed" || status === "cancelled" || status === "interrupted" || status === "blocked" || status === "awaiting_confirmation";
-          if (ended && _stoppingTurnId === turnId) _stoppingTurnId = null;
+          if (ended) _stoppingTurnIds.delete(turnId);
           // plan turn 异常结束（未生成 plan）时清除待确认记录
           const clearPlanTurn = ended && status !== "completed" && s.pendingPlanTurn?.turnId === turnId;
           // v2.2: 仅当结束的 turn 就是当前运行中的 turn（或当前无运行 turn）时才复位运行态。
@@ -1625,7 +1627,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // v35: turn 结束时清掉残留的重试状态提示
             ...(ended && s.turnStatus != null ? { turnStatus: null } : {}),
             // 停止请求完成前忽略后端残留的 running 回跳，避免按钮再次恢复为运行态。
-            ...(status === "running" && _stoppingTurnId !== turnId && (s.runningTurnId == null || s.runningTurnId === turnId)
+            ...(status === "running" && !_stoppingTurnIds.has(turnId) && (s.runningTurnId == null || s.runningTurnId === turnId)
               ? {
                   runningTurnId: turnId,
                   isRunning: true,
@@ -1697,8 +1699,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         get().refreshTasks();
         // v11: turn 完成后拉取变更审核清单（写盘变更 + 持久化审核状态）
         get().loadTurnChanges(turnId);
-        // v2.2: turn 结束 → 自动续发排队输入
-        void get()._drainQueue();
+        // 正常完成才自动续发队列；用户主动 Stop 后队列保留，避免误发。
+        if (!_stoppingTurnIds.has(turnId)) void get()._drainQueue();
         break;
       }
       case "turn.interrupted": {
@@ -1715,6 +1717,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         get().refreshMessages();
         get().refreshTasks();
         void get().loadSessionSubagents();
+        // interrupted 由用户停止，不自动消费队列。
         break;
       }
       case "turn.rolled_back": {

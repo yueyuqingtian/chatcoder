@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 # v1.0 (plan-153-705): 同步等待默认超时（秒），可被 timeout 参数覆盖；
 # 上限钳制到 settings.tool_exec_timeout_sec（executor/agent_loop 外层同源）。
 _DEFAULT_TIMEOUT_SEC = 120
+# 兼容历史诊断测试/插件引用；实际解析统一走 _parse_timeout。
+_TIMEOUT_SEC = _DEFAULT_TIMEOUT_SEC
 _MIN_TIMEOUT_SEC = 5
 
 
@@ -50,7 +52,7 @@ def _parse_timeout(raw: Any) -> int:
     try:
         val = int(raw)
     except (TypeError, ValueError):
-        val = _DEFAULT_TIMEOUT_SEC
+        val = _TIMEOUT_SEC
     upper = int(settings.tool_exec_timeout_sec)
     return max(_MIN_TIMEOUT_SEC, min(val, upper))
 

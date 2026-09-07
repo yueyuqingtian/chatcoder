@@ -491,7 +491,10 @@ async def build_main_context(
                     _ctx = dict(_ctx)
                     _ctx["injected_compactions"] = list(_injected) + _new_injected
                     session.shared_context = _ctx
+                    # 关闭 autoflush 后显式提交 checkpoint 注入状态；否则该 flush 会
+                    # 把 SQLite 写事务一直带进后续 LLM 请求，长期占用文件写锁。
                     await db.flush()
+                    await db.commit()
                     logger.info(
                         "[context] session=%s 注入压缩 checkpoint %d 条并标记已注入",
                         session.id, len(_new_injected),

@@ -13,7 +13,8 @@ async def test_approval_manager_with_bool_auto_approve():
     """验证 settings.auto_approve_tools 为 True 时，不会抛出 'bool' object is not iterable。"""
     settings.auto_approve_tools = True
     approved = await approval_manager.request(
-        detail={"tool": "fs_write", "kind": "tool_call", "risk_level": "high"}
+        # 高风险工具即使 auto_approve=True 也必须审批；本测试只验证 bool 配置不触发迭代 TypeError。
+        detail={"tool": "fs_write", "kind": "tool_call", "risk_level": "medium"}
     )
     assert approved is True
 
@@ -49,8 +50,11 @@ async def test_task_service_create_artifact():
 async def test_get_file_diff_path_normalization():
     """验证 get_file_diff 对正反斜杠的容错匹配。"""
     async with async_session_factory() as db:
+        session = Session(project_id=None, permission_mode="default")
+        db.add(session)
+        await db.flush()
         rw = RollbackWrite(
-            session_id=1,
+            session_id=session.id,
             turn_id=1,
             tool="fs_write",
             path="src\\components\\App.tsx",
