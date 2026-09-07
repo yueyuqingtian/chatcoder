@@ -33,6 +33,8 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
     set({ theme: t });
     localStorage.setItem(STORAGE_KEY, t);
     applyTheme(t);
+    // 同步主进程落盘：下次启动 loading 页按此适配深浅色（localStorage 主进程读不到）
+    try { window.chatcoderAPI?.setThemePref?.(t); } catch { /* 非桌面环境忽略 */ }
   },
   toggle: () => {
     const next = get().theme === "dark" ? "light" : "dark";
@@ -48,4 +50,6 @@ export function initTheme() {
     localStorage.setItem(STORAGE_KEY, getInitialTheme());
   }
   applyTheme(useThemeStore.getState().theme);
+  // 首次把当前主题同步给主进程（老用户无 theme-pref.json 时补齐）
+  try { window.chatcoderAPI?.setThemePref?.(useThemeStore.getState().theme); } catch { /* 非桌面环境忽略 */ }
 }

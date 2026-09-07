@@ -67,6 +67,8 @@ export interface BrowserRef {
   text?: string;
   note?: string;
   thumbUrl?: string;
+  /** 完整上传结果：发送时必须转为消息附件，否则标注/截图内容不会传给 AI。 */
+  attachment?: AttachmentInfo;
   createdAt?: number;
 }
 
@@ -325,10 +327,6 @@ let _globalWsUnsub: (() => void) | null = null;
 let _heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
 const HEARTBEAT_TIMEOUT = 60_000; // 60s 无事件超时兜底复位
 const _stoppingTurnIds = new Set<number>();
-/** plan-546: bootstrap 自动选中会话仅允许冷启动首次执行；
- * 此后 currentSessionId=null 表示用户主动停留空态首页（新建任务），
- * 任何后续 loadBootstrap（退出设置侧栏重挂载/设置面板刷新等）不得再把用户拉进会话。 */
-let _autoSelectedOnce = false;
 
 /** 启动/重置心跳计时器：60s 内无任何 WS 事件则强制复位 isRunning */
 function _startHeartbeat() {
@@ -624,9 +622,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         api.listModels().catch(() => []),
         api.listProviders().catch(() => []),
       ]);
-      // 自动选中第一个活跃项目/会话，并清理已归档或已删除的旧项目 ID。
+      // 清理已归档或已删除的旧项目 ID。
       const activeProjects = projects.filter((p) => !p.archived);
-      const activeSessions = sessions.filter((s) => s.status !== "archived");
       const current = get();
       const currentProject = activeProjects.find((p) => p.id === current.currentProjectId);
       const sessionProject = current.currentSessionId == null
@@ -640,18 +637,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         loading: false,
         currentProjectId: currentProject?.id ?? sessionProject?.id ?? activeProjects[0]?.id ?? null,
       });
-      // plan-546: 自动选中仅冷启动首次；之后 null=用户停留在空态首页，不再自动跳入会话
-      if (!_autoSelectedOnce && !get().currentSessionId && activeSessions.length > 0) {
-        _autoSelectedOnce = true;
-        const first = activeSessions[0];
-        const proj = activeProjects.find((p) => p.id === first.project_id) || null;
-        set({
-          currentProjectId: proj?.id ?? null,
-          currentSessionId: first.id,
-          ...(proj ? { projects: [proj, ...projects.filter((x) => x.id !== proj.id)] } : {}),
-        });
-        await get().switchSession(first.id);
-      } else if (activeProjects.length > 0 && !get().currentProjectId) {
+      // 用户要求：启动后默认停留空态首页（新建任务），不自动进入最近会话
+      if (activeProjects.length > 0 && !get().currentProjectId) {
         set({ currentProjectId: activeProjects[0].id });
       }
     } catch (e) {

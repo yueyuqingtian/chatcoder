@@ -14,6 +14,7 @@ import { useUpdaterStore } from "../store/updater";
 import { useI18n } from "../store/i18n";
 import { formatRelativeTime, parseUtc } from "../utils/time";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { AppLogo } from "./AppLogo";
 import {
   IconCalendar, IconChevronDown, IconChevronLeft, IconChevronRight, IconPanelLeft,
   IconFolder, IconFolderDynamic, IconLayers, IconSortDesc,
@@ -246,7 +247,7 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
     <nav className={`sidebar sb${collapsed ? " collapsed" : ""}`}>
       {/* 头部：logo + 折叠按钮 + 前进/后退 */}
       <div className="sb-head title-drag-region">
-        <span className="sb-logo title-no-drag" title="chatcoder">C</span>
+        <AppLogo size={20} className="sb-logo-img" />
         <button className="sb-nav-arrow title-no-drag" onClick={onToggleCollapse} title={collapsed ? t("sidebar.expand_tip") : t("sidebar.collapse_tip")}><IconPanelLeft size={15} open={!collapsed} /></button>
         <button className="sb-nav-arrow title-no-drag" disabled={!canBack} onClick={() => histGo(-1)} title={t("sidebar.history_back")}><IconChevronLeft size={15} /></button>
         <button className="sb-nav-arrow title-no-drag" disabled={!canForward} onClick={() => histGo(1)} title={t("sidebar.history_forward")}><IconChevronRight size={15} /></button>

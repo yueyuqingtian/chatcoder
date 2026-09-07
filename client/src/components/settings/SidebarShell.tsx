@@ -3,6 +3,7 @@
  */
 import type { ReactNode } from "react";
 import { IconArrowLeft } from "../icons";
+import { AppLogo } from "../AppLogo";
 import { NAV_GROUPS, SETTINGS_INDEX, type SettingsTab } from "./index";
 import { useI18n } from "../../store/i18n";
 
@@ -30,7 +31,7 @@ export function SettingsSidebar({ tab, onTab, onBack, collapsed }: {
   return (
     <SidebarShell collapsed={collapsed}>
       <div className="sb-head title-drag-region">
-        <span className="sb-logo title-no-drag" title="chatcoder">C</span>
+        <AppLogo size={20} className="sb-logo-img" />
         {collapsed && (
           <button className="sb-nav-arrow title-no-drag" onClick={onBack} title={t("titlebar.back")} type="button">
             <IconArrowLeft size={15} />

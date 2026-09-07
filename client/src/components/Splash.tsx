@@ -1,5 +1,7 @@
-/** 启动蒙层：Logo 渐变缩放 0.9->1 + 淡入 400ms -> 主界面淡入。 */
+/** 启动蒙层：Logo 渐变缩放 0.9->1 + 淡入 400ms -> 主界面淡入。
+ * 背景用 var(--bg-main) 跟随应用深浅色主题；图标与桌面图标同设计（AppLogo）。 */
 import { useEffect, useState } from "react";
+import { AppLogo } from "./AppLogo";
 
 export function Splash({ onDone }: { onDone: () => void }) {
   const [phase, setPhase] = useState<"in" | "out">("in");
@@ -13,16 +15,7 @@ export function Splash({ onDone }: { onDone: () => void }) {
   return (
     <div className={`splash ${phase === "out" ? "splash-out" : ""}`}>
       <div className="splash-logo">
-        <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
-          <rect x="6" y="6" width="36" height="36" rx="10" fill="url(#splash-grad)" />
-          <path d="M18 20l-4 4 4 4M30 20l4 4-4 4M26 16l-4 16" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-          <defs>
-            <linearGradient id="splash-grad" x1="6" y1="6" x2="42" y2="42" gradientUnits="userSpaceOnUse">
-              <stop stopColor="#4836FF" />
-              <stop offset="1" stopColor="#CE53FF" />
-            </linearGradient>
-          </defs>
-        </svg>
+        <AppLogo size={48} />
         <span className="splash-text">ChatCoder</span>
       </div>
       <style>{`

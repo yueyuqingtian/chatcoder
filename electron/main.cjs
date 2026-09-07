@@ -1,6 +1,6 @@
 // chatcoder 桌面主进程 (v3 — 健壮启动版)
 // 修复: data: URL → loadFile / stdout 安全 / 全局错误捕获 / 图标
-const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const os = require("os");
@@ -287,10 +287,26 @@ function writeGlassPref(on) {
   try { fs.writeFileSync(GLASS_PREF_FILE, JSON.stringify({ on: !!on })); } catch {}
 }
 
+// 主题偏好落盘（同 glass-pref 机制）：启动动画 loading.html 在前端加载前显示，
+// 读不到 localStorage，因此渲染进程切主题时经 IPC 另存一份，启动时注入 loading 页。
+const THEME_PREF_FILE = path.join(app.getPath("userData"), "theme-pref.json");
+function readThemePref() {
+  try {
+    const t = JSON.parse(fs.readFileSync(THEME_PREF_FILE, "utf8")).theme;
+    return t === "light" || t === "dark" ? t : null;
+  } catch { return null; }
+}
+function writeThemePref(theme) {
+  try { fs.writeFileSync(THEME_PREF_FILE, JSON.stringify({ theme: theme === "light" ? "light" : "dark" })); } catch {}
+}
+
 // ── 创建主窗口 ──
 function createWindow() {
   const win11 = isWin11Plus();
   const glassOn = win11 && readGlassPref();
+  // 启动期主题：优先用户上次偏好，否则跟随系统（loading 页与窗口底色保持一致，避免闪色）
+  const themePref = readThemePref();
+  const lightStart = themePref ? themePref === "light" : !nativeTheme.shouldUseDarkColors;
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -301,7 +317,7 @@ function createWindow() {
     // 显式 "none"（默认 auto 可能被 DWM 施加 Mica）；Win10/mac 维持透明窗口原状。
     transparent: !win11,
     backgroundMaterial: win11 ? (glassOn ? "acrylic" : "none") : undefined,
-    backgroundColor: win11 ? (glassOn ? "#00000000" : "#16181d") : undefined,
+    backgroundColor: win11 ? (glassOn ? "#00000000" : (lightStart ? "#f2f3f7" : "#16181d")) : undefined,
     // plan-548: 延迟到首帧就绪再显示——acrylic 需在窗口可见前应用，
     // 创建即显示会导致 backgroundMaterial 初始化失败（electron#38466）。
     show: false,
@@ -321,10 +337,10 @@ function createWindow() {
     mainWindow.show();
   });
 
-  // 先加载本地 loading.html(不用 data: URL)
+  // 先加载本地 loading.html(不用 data: URL)；query 注入主题供启动页深浅色适配
   const loadingPath = path.join(__dirname, "loading.html");
   if (fs.existsSync(loadingPath)) {
-    mainWindow.loadFile(loadingPath);
+    mainWindow.loadFile(loadingPath, { query: { theme: lightStart ? "light" : "dark" } });
   }
 
   // 诊断
@@ -538,6 +554,9 @@ ipcMain.handle("power:setKeepAwake", (_e, on) => {
   return _psbId !== null;
 });
 
+// ── IPC:主题偏好落盘（渲染进程切主题时同步，下次启动 loading 页按此适配深浅色）──
+ipcMain.on("theme:setPref", (_e, theme) => { writeThemePref(theme); });
+
 // ── IPC:终端 PTY（v2.2: node-pty 真 PTY，支持 resize/全屏程序；加载失败回退 spawn）──
 const { createPty, usingNodePty } = require("./pty.cjs");
 const ptyProcs = new Map(); // id -> pty handle
@@ -668,16 +687,22 @@ function initAutoUpdater() {
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.on("checking-for-update", () => {
+    // 已下载完成待安装时，后续检查不得把状态冲回（否则侧栏「重启」按钮会闪回「下载」）
+    if (updateState.state === "downloaded") return;
     updateState = { state: "checking" };
     log("[updater] checking-for-update");
     pushUpdateState();
   });
   autoUpdater.on("update-available", (info) => {
+    // 已下载完成（同版本已就绪）时保持 downloaded，避免定时检查把按钮冲回「下载」
+    if (updateState.state === "downloaded" && updateState.version === info.version) return;
     updateState = { state: "available", version: info.version };
     log("[updater] update-available:", info.version, "current:", app.getVersion());
     pushUpdateState();
   });
   autoUpdater.on("update-not-available", (info) => {
+    // 已下载完成时保持 downloaded（理论上不会触发，防御性保护）
+    if (updateState.state === "downloaded") return;
     updateState = { state: "none", version: info && info.version };
     log("[updater] update-not-available");
     pushUpdateState();
@@ -697,14 +722,16 @@ function initAutoUpdater() {
     pushUpdateState();
   });
 
-  // 打开软件 3s 内立即检查一次，之后每 30 分钟自动检测一次
-  // （GitHub 匿名 API 限流 60 次/小时，30 分钟间隔量级安全）
+  // 打开软件 3s 内立即检查一次，之后每 20 分钟自动检测一次
+  // （GitHub 匿名 API 限流 60 次/小时，20 分钟间隔量级安全）
   setTimeout(() => {
     autoUpdater.checkForUpdates().catch((e) => logErr("[updater] 自动检查失败(启动后首查):", e && e.message));
   }, 3 * 1000);
   setInterval(() => {
+    // 下载中/已下载完成时跳过自动检查：避免 update-available 事件把 downloaded 状态冲回 available
+    if (updateState.state === "downloading" || updateState.state === "downloaded") return;
     autoUpdater.checkForUpdates().catch((e) => logErr("[updater] 自动检查失败(定时):", e && e.message));
-  }, 30 * 60 * 1000);
+  }, 20 * 60 * 1000);
 }
 
 // ── IPC:更新操作（手动检查 / 立即安装 / 查询状态 / 当前版本）──

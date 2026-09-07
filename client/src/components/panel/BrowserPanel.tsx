@@ -12,7 +12,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useChatStore } from "../../store/chat";
 import { useBrowserStore, type ElementInfo } from "../../store/browser";
-import { api } from "../../api/client";
+import { api, type UploadOut } from "../../api/client";
 import { ElementInspector } from "./ElementInspector";
 import { BrowserStartPage } from "./BrowserStartPage";
 import {
@@ -418,6 +418,16 @@ export function BrowserPanel() {
         pageTitle: activeTab?.title || "网页截图",
         url: activeTab?.current || activeTab?.url || "about:blank",
         thumbUrl: uploaded.url,
+        // 保存完整上传结果，发送时转换为消息附件（仅 thumbUrl 会导致 AI 收不到图片）
+        attachment: {
+          file_id: uploaded.file_id,
+          filename: uploaded.filename,
+          path: uploaded.path,
+          url: uploaded.url,
+          size: uploaded.size,
+          mime_type: uploaded.mime_type,
+          type: uploaded.type,
+        },
         createdAt: Date.now(),
       });
 
@@ -433,7 +443,7 @@ export function BrowserPanel() {
   // 截图/元素信息/备注全部收进一张内嵌标注块卡片）
   const handleSendAnnotToChat = async () => {
     if (!annotState) return;
-    let shotUrl = "";
+    let shot: UploadOut | null = null;
 
     if (annotState.screenshotDataUrl) {
       try {
@@ -441,8 +451,7 @@ export function BrowserPanel() {
         const blob = await res.blob();
         const filename = `annot-${Date.now().toString().slice(-6)}.png`;
         const file = new File([blob], filename, { type: "image/png" });
-        const uploaded = await api.uploadFile(file);
-        shotUrl = uploaded.url;
+        shot = await api.uploadFile(file);
       } catch (e) {
         console.warn("annot screenshot upload failed:", e);
       }
@@ -461,7 +470,19 @@ export function BrowserPanel() {
       styleDigest: inf ? `color: ${inf.color}; bg: ${inf.backgroundColor}; font: ${inf.fontSize}` : undefined,
       text: inf?.text || undefined,
       note: annotText.trim() || undefined,
-      thumbUrl: shotUrl || undefined,
+      thumbUrl: shot?.url || undefined,
+      // 保存完整上传结果，发送时转换为消息附件（仅 thumbUrl 会导致 AI 收不到图片）
+      attachment: shot
+        ? {
+            file_id: shot.file_id,
+            filename: shot.filename,
+            path: shot.path,
+            url: shot.url,
+            size: shot.size,
+            mime_type: shot.mime_type,
+            type: shot.type,
+          }
+        : undefined,
       createdAt: Date.now(),
     });
 

@@ -60,6 +60,8 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
   },
   // 保持唤醒开关（powerSaveBlocker）
   setKeepAwake: (on) => ipcRenderer.invoke("power:setKeepAwake", !!on),
+  // 主题偏好同步（主进程落盘，下次启动 loading 页按此适配深浅色）
+  setThemePref: (theme) => ipcRenderer.send("theme:setPref", theme === "light" ? "light" : "dark"),
   // v19: 外挂插件列表（manifest + 源码文本）
   listUserPlugins: () => ipcRenderer.invoke("plugins:list"),
   // 自动更新（electron-updater + GitHub Releases）

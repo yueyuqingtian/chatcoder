@@ -27,6 +27,8 @@ declare global {
       onRendererFocus?: (cb: () => void) => () => void;
       getUsername?: () => Promise<string>;
       setKeepAwake?: (on: boolean) => Promise<boolean>;
+      /** 主题偏好同步（主进程落盘，下次启动 loading 页按此适配深浅色） */
+      setThemePref?: (theme: "light" | "dark") => void;
       /** 自动更新：检查 / 状态 / 下载 / 安装 / 版本（electron-updater） */
       checkForUpdates?: () => Promise<unknown>;
       getUpdateState?: () => Promise<unknown>;

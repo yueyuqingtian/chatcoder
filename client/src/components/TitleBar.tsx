@@ -9,6 +9,7 @@ import { useChatStore } from "../store/chat";
 import { usePanelStore } from "../store/panel";
 import { useI18n } from "../store/i18n";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { AppLogo } from "./AppLogo";
 import {
   IconMinus, IconSquare, IconX, IconFolder,
   IconGitBranch, IconTerminal,
@@ -109,7 +110,7 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
         {/* 侧栏折叠时：logo 与前进/后退 + 展开按钮移到标题栏左侧（展开态折叠入口在侧栏头部） */}
         {leftCollapsed && (
           <>
-            <span className="sb-logo" title="chatcoder">C</span>
+            <AppLogo size={20} className="sb-logo-img" />
             <button className="titlebar-btn collapsed" onClick={onToggleLeft} title={t("sidebar.expand_tip")}>
               <IconPanelLeft size={15} />
             </button>

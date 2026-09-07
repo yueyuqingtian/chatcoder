@@ -592,8 +592,31 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   const handleSend = async () => {
     if (!canSend || sending) return;
     setSending(true);
-    const content = input.trim();
-    const attachmentPayload = attachments.map((a) => ({ ...a }));
+    // 浏览器标注/截图引用 → 转换为消息附件 + 结构化文本，随消息一并发送
+    // （此前仅 clearComposerBrowserRefs() 丢弃引用，导致标注既不在消息里、AI 也收不到）
+    const refAttachments: Record<string, unknown>[] = [];
+    const refTextParts: string[] = [];
+    for (const ref of composerBrowserRefs) {
+      if (ref.attachment) refAttachments.push({ ...ref.attachment });
+      const lines: string[] = [];
+      lines.push(`[浏览器标注 · ${ref.pageTitle}] 页面: ${ref.url}`);
+      if (ref.kind === "element") {
+        if (ref.selector) lines.push(`元素: ${ref.selector}`);
+        if (ref.bbox) lines.push(`位置: (${ref.bbox.x}, ${ref.bbox.y}) 尺寸: ${ref.bbox.width}×${ref.bbox.height}px`);
+        if (ref.styleDigest) lines.push(`样式: ${ref.styleDigest}`);
+        if (ref.text) lines.push(`内容: ${ref.text}`);
+        if (ref.note) lines.push(`说明: ${ref.note}`);
+        if (ref.thumbUrl) lines.push(`截图: ${ref.thumbUrl}`);
+      } else if (ref.kind === "dom" && ref.text) {
+        lines.push(`快照: ${ref.text}`);
+      } else if (ref.kind === "console" && ref.text) {
+        lines.push(`求值: ${ref.text}`);
+      }
+      refTextParts.push(lines.join("\n"));
+    }
+    const content = (input.trim() ? input.trim() : "") +
+      (refTextParts.length ? `${input.trim() ? "\n\n" : ""}${refTextParts.join("\n\n")}` : "");
+    const attachmentPayload = [...attachments.map((a) => ({ ...a })), ...refAttachments];
     const mode = composerMode;
 
     if (composerBrowserRefs.length > 0) {
@@ -609,7 +632,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
         if (pId == null) return;
         // plan-546/547: 模型与模式随创建一次落准；深度写入新会话草稿；全局最近值同步
         // plan-676: 首页目标同样随创建一次落准（goal_status=active）
-        const sessionId = await useChatStore.getState().createSession(pId, content.slice(0, 30) || "新对话", {
+        const sessionId = await useChatStore.getState().createSession(pId, input.trim().slice(0, 30) || "新对话", {
           model_id: usedModelId,
           permission_mode: mode,
           goal_text: homeGoalText,

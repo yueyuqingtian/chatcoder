@@ -160,6 +160,8 @@ a { color: var(--accent); text-decoration: none; }
 .sidebar { display: flex; flex-direction: column; height: 100%; flex: 1; min-height: 0; background: var(--bg-sidebar); overflow: hidden; }
 /* 顶部 logo（标题栏左区） */
 .sb-logo { width: 20px; height: 20px; border-radius: 5px; background: var(--text-1); color: var(--bg-sidebar); font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin: 0 4px 0 6px; }
+/* 新版应用 Logo（AppLogo SVG，与桌面图标同设计）：布局对齐旧字母 logo */
+.sb-logo-img { display: block; flex-shrink: 0; margin: 0 4px 0 6px; border-radius: 5px; -webkit-app-region: no-drag; }
 .sb-nav-arrow { width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border-radius: var(--r-sm); color: var(--text-2); transition: all var(--dur-fast); }
 .sb-nav-arrow:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-1); }
 .sb-nav-arrow:disabled { opacity: 0.35; cursor: default; }

@@ -18,6 +18,7 @@ import { DiagnosticsPanel } from "./DiagnosticsPanel";
 import { PluginsPanel } from "./PluginsPanel";
 import { ArchivedPanel } from "./ArchivedPanel";
 import { IconDownload, IconRefresh } from "../icons";
+import { AppLogo } from "../AppLogo";
 import { useUpdaterStore } from "../../store/updater";
 import { useI18n } from "../../store/i18n";
 import {
@@ -95,7 +96,16 @@ function AboutPanel() {
 
   return (
     <div className="settings-card">
-      <RowItem title="ChatCoder" desc="项目任务驱动的 AI 编码工作台" />
+      <div className="settings-row">
+        <div className="settings-row-info" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <AppLogo size={36} />
+          <div>
+            <div className="settings-row-title">ChatCoder</div>
+            <div className="settings-row-desc">项目任务驱动的 AI 编码工作台</div>
+          </div>
+        </div>
+        <div className="settings-row-control" />
+      </div>
       <RowItem title="当前版本" desc={appVersion ? `v${appVersion}` : "v0.1.0"} />
       {supported && (
         <div className="settings-row">
