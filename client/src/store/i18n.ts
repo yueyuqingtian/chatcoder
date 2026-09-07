@@ -79,6 +79,7 @@ const DICT: Dict = {
   "titlebar.min":                 ["最小化", "Minimize"],
   "titlebar.max":                 ["最大化/还原", "Maximize / Restore"],
   "titlebar.close":               ["关闭", "Close"],
+  "titlebar.back":                ["返回工作区", "Back to Workspace"],
 
   // ── 空态首页与时段问候 ──
   "workspace.greet_night":        ["夜深啦，别忘了照顾好自己哦", "Late night, remember to rest"],
@@ -181,6 +182,41 @@ const DICT: Dict = {
   "settings.tab.diagnostics":     ["诊断", "Diagnostics"],
   "settings.tab.archive":         ["归档恢复", "Archive"],
   "settings.tab.about":           ["关于", "About"],
+
+  // ── 设置页：页面标题 ──
+  "settings.pt.general":    ["常规", "General"],
+  "settings.pt.appearance": ["外观", "Appearance"],
+  "settings.pt.models":     ["模型管理", "Model Management"],
+  "settings.pt.skills":     ["技能管理", "Skills"],
+  "settings.pt.subagents":  ["子代理", "Subagents"],
+  "settings.pt.mcp":        ["MCP 服务器", "MCP Servers"],
+  "settings.pt.rules":      ["AI 规则", "AI Rules"],
+  "settings.pt.policy":     ["执行策略", "Execution Policy"],
+  "settings.pt.usage":      ["用量统计", "Usage Stats"],
+  "settings.pt.diagnostics":["诊断", "Diagnostics"],
+  "settings.pt.archive":    ["归档恢复", "Archive"],
+  "settings.pt.plugins":    ["插件", "Plugins"],
+  "settings.pt.scheduled":  ["定时任务", "Scheduled Tasks"],
+  "settings.pt.hooks":      ["钩子", "Hooks"],
+  "settings.pt.memory":     ["记忆", "Memory"],
+  "settings.pt.about":      ["关于", "About"],
+
+  // ── 设置页：页面副标题 ──
+  "settings.ps.general":    ["语言、代理、终端与显示选项", "Language, proxy, terminal & display options"],
+  "settings.ps.appearance": ["主题、毛玻璃、布局与个性化外观", "Theme, glassmorphism, layout & appearance"],
+  "settings.ps.models":     ["按供应商配置模型：填 URL/Key 后扫描，勾选启用", "Configure models per provider: fill URL/Key, scan and enable"],
+  "settings.ps.skills":     ["可被 Agent 加载的 Skill 资源", "Skill resources loadable by agents"],
+  "settings.ps.subagents":  ["子代理类型配置：工具白名单、模型覆盖与系统提示词", "Subagent profiles: tool whitelist, model override & system prompt"],
+  "settings.ps.mcp":        ["连接外部工具与数据源", "Connect external tools & data sources"],
+  "settings.ps.rules":      ["全局 / 项目规则，以及多 AI 软件规则文档的扫描与启用", "Global/project rules and scanning AI software rule docs"],
+  "settings.ps.policy":     ["控制命令执行审批规则", "Command approval rules"],
+  "settings.ps.usage":      ["整个软件的 token 用量：总数、趋势与各模型分布", "Global token usage: totals, trends & model distribution"],
+  "settings.ps.diagnostics":["系统健康检查", "System health check"],
+  "settings.ps.archive":    ["已归档的项目与会话，支持一键恢复", "Archived projects & sessions, one-click restore"],
+  "settings.ps.plugins":    ["系统组件插件化：查看可替换的 slot 组件", "Plugins: replaceable slot components"],
+  "settings.ps.scheduled":  ["定时任务的创建、编辑与自动触发配置", "Scheduled task creation, editing & auto-trigger"],
+  "settings.ps.hooks":      ["事件回调：在关键流程节点注入自定义逻辑", "Event hooks: inject custom logic at key workflow points"],
+  "settings.ps.memory":     ["AI 记忆库：关键事实、偏好与历史上下文召回", "AI memory: key facts, preferences & context recall"],
 
   // ── 通用设置面板 ──
   "gp.language":                  ["界面语言", "Interface Language"],
