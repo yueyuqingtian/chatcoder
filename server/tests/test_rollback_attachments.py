@@ -16,22 +16,22 @@ from app.services import rollback_service
 
 
 @pytest.fixture
-async def db(monkeypatch):
-    engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
+async def db(monkeypatch, tmp_path):
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/rb_at.db"
+    engine = create_async_engine(db_url)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     # plan-644: rollback_turn -> engine.cancel_turn 内部用全局
     # async_session_factory 连库（此前误连真实库文件的旧 schema，模型加列后暴露）；
-    # 测试统一指回内存库，保证隔离。
+    # 测试统一指回测试库，保证隔离。
     monkeypatch.setattr("app.persistence.database.async_session_factory", factory)
+    from app.persistence import write_engine as _we
+    _we.configure(db_url, foreign_keys=False)  # 写引擎（单写线程）与测试库同源
     async with factory() as session:
         yield session
     await engine.dispose()
+    _we.configure(None)
 
 
 ATTACHMENTS = [

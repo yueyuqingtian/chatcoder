@@ -18,12 +18,11 @@ async def list_tasks(db: AsyncSession = Depends(get_db)):
 @router.post("", response_model=ScheduledTaskOut)
 async def create_task(body: ScheduledTaskCreate, db: AsyncSession = Depends(get_db)):
     try:
-        st = await scheduled_service.create_scheduled(
+        sid = await scheduled_service.create_scheduled(
             db, session_id=body.session_id, name=body.name,
             cron=body.cron, prompt=body.prompt,
         )
-        await db.commit()
-        return st
+        return await scheduled_service.get_scheduled(db, sid)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -31,16 +30,15 @@ async def create_task(body: ScheduledTaskCreate, db: AsyncSession = Depends(get_
 @router.patch("/{task_id}", response_model=ScheduledTaskOut)
 async def update_task(task_id: int, body: ScheduledTaskUpdate, db: AsyncSession = Depends(get_db)):
     try:
-        st = await scheduled_service.update_scheduled(
+        ok = await scheduled_service.update_scheduled(
             db, task_id, name=body.name, cron=body.cron,
             prompt=body.prompt, enabled=body.enabled,
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
-    if st is None:
+    if not ok:
         raise HTTPException(404, "定时任务不存在")
-    await db.commit()
-    return st
+    return await scheduled_service.get_scheduled(db, task_id)
 
 
 @router.delete("/{task_id}", response_model=dict)
@@ -48,5 +46,4 @@ async def delete_task(task_id: int, db: AsyncSession = Depends(get_db)):
     ok = await scheduled_service.delete_scheduled(db, task_id)
     if not ok:
         raise HTTPException(404, "定时任务不存在")
-    await db.commit()
     return {"ok": True}

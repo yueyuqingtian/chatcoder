@@ -50,11 +50,19 @@ async def ta3_login_start(provider_id: int, db: AsyncSession = Depends(get_db)):
     result = await ta3_oauth.start_login(db, provider_id, api_base)
     if result.get("status") == "logged_in":
         # 登录态立即回写供应商（IM 静默登录路径：前端无需打开浏览器即可见已登录）
-        provider.auth_status = "logged_in"
         account = result.get("account") or {}
-        provider.account_label = str(account.get("label") or account.get("id") or "")[:80] or None
-        await db.flush()
-        await commit_with_retry(db)
+        _label = str(account.get("label") or account.get("id") or "")[:80] or None
+        from app.persistence.database import run_write_locked
+
+        def _p(s):
+            from app.persistence.models.model_reg import Provider
+            row = s.get(Provider, provider_id)
+            if row is not None:
+                row.auth_status = "logged_in"
+                row.account_label = _label
+            s.commit()
+
+        await run_write_locked(_p, label=f"ta3.login_state.{provider_id}")
     return Ta3LoginStartOut(**result)
 
 
@@ -74,17 +82,23 @@ async def ta3_login_status(provider_id: int, db: AsyncSession = Depends(get_db))
 @router.post("/providers/{provider_id}/ta3/logout")
 async def ta3_logout(provider_id: int, db: AsyncSession = Depends(get_db)):
     """退出登录：清 ta3_auth、清模型 llm-key、复位供应商登录态。"""
-    provider = await _get_ta3_provider(db, provider_id)
-    from sqlalchemy import select, update
+    from sqlalchemy import update
 
+    from app.persistence.database import run_write_locked
     from app.persistence.models.model_reg import Model
 
     await ta3_session.clear_auth(db, provider_id)
-    await db.execute(update(Model).where(Model.provider_id == provider_id).values(api_key=None))
-    provider.auth_status = "pending"
-    provider.account_label = None
-    await db.flush()
-    await commit_with_retry(db)
+
+    def _p(s):
+        from app.persistence.models.model_reg import Provider
+        row = s.get(Provider, provider_id)
+        if row is not None:
+            row.auth_status = "pending"
+            row.account_label = None
+        s.execute(update(Model).where(Model.provider_id == provider_id).values(api_key=None))
+        s.commit()
+
+    await run_write_locked(_p, label=f"ta3.logout.{provider_id}")
     return {"ok": True}
 
 
@@ -107,10 +121,18 @@ async def ta3_sync(provider_id: int, db: AsyncSession = Depends(get_db)):
     # 登录态刷新（目录同步成功即视为已登录）
     auth = await ta3_session.load_auth(db, provider_id)
     if auth and auth.access_token:
-        provider.auth_status = "logged_in"
         account = auth.account or {}
-        provider.account_label = str(account.get("label") or account.get("id") or "")[:80] or None
-    await db.flush()
-    await commit_with_retry(db)
+        _label = str(account.get("label") or account.get("id") or "")[:80] or None
+        from app.persistence.database import run_write_locked
+
+        def _p(s):
+            from app.persistence.models.model_reg import Provider
+            row = s.get(Provider, provider_id)
+            if row is not None:
+                row.auth_status = "logged_in"
+                row.account_label = _label
+            s.commit()
+
+        await run_write_locked(_p, label=f"ta3.sync_state.{provider_id}")
     return Ta3SyncOut(synced=len(entries), models=entries)
 

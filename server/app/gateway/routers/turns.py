@@ -38,13 +38,12 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
         content=user_content,
         broadcast=False,
     )
-    turn = await turn_service.create_turn(db, session_id=body.session_id, user_message_id=user_msg.id)
+    turn_id = await turn_service.create_turn(db, session_id=body.session_id, user_message_id=user_msg.id)
     # 回填用户消息的 turn_id：保证前端按 turn 分组时用户消息归入该 turn，
     # 且（消息按 id 升序）用户消息排在 AI 回复之前（修复消息顺序颠倒）
-    user_msg.turn_id = turn.id
+    # ——经写引擎单写线程补丁（无锁单写者）
+    await message_service.patch_message(user_msg.id, turn_id=turn_id)
     generated_title = await session_service.auto_title_session(db, session, body.content)
-    await commit_with_retry(db, label="turn.create")
-    await db.refresh(user_msg)
     # v37: 用户消息落库时间即会话最新活动时间（侧栏排序依据）
     _last_activity = str(user_msg.created_at) if user_msg.created_at is not None else None
 
@@ -58,10 +57,9 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
             ws_path = _project.path if _project else ""
         if ws_path:
             await rollback_service.create_turn_snapshot(
-                db, session_id=body.session_id, turn_id=turn.id,
+                db, session_id=body.session_id, turn_id=turn_id,
                 workspace=ws_path, user_message_id=user_msg.id,
             )
-            await commit_with_retry(db, label="turn.snapshot")
     except Exception:
         logger.debug("turn 快照预创建失败(非阻塞)", exc_info=True)
 
@@ -98,16 +96,16 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
     # 1. 后台异步任务 _run() 中穿透引用当前请求会话 db 中的 turn 对象。当前请求返回后会话已关闭，
     #    _run 在事件循环调度时访问 turn.id 会触发同步 reload 抛 MissingGreenlet 导致后台任务暴毙（前端永远等待响应）；
     # 2. 响应返回给 FastAPI 序列化时访问已过期 ORM 实例属性触发 MissingGreenlet 500 报错。
-    turn_id = int(turn.id)
+    _new_turn = await turn_service.get_turn(db, turn_id)  # async 只读换取标量
     session_id = int(body.session_id)
-    user_msg_id = turn.user_message_id
-    turn_status = turn.status
-    turn_summary = turn.summary
-    token_usage = turn.token_usage or 0
-    started_at = turn.started_at
-    completed_at = turn.completed_at
-    plan_doc_path = turn.plan_doc_path
-    plan_status = turn.plan_status
+    user_msg_id = _new_turn.user_message_id
+    turn_status = _new_turn.status
+    turn_summary = _new_turn.summary
+    token_usage = _new_turn.token_usage or 0
+    started_at = _new_turn.started_at
+    completed_at = _new_turn.completed_at
+    plan_doc_path = _new_turn.plan_doc_path
+    plan_status = _new_turn.plan_status
     attachments = body.attachments
     reasoning_effort = body.reasoning_effort
     mode = body.mode
@@ -193,9 +191,7 @@ async def inject_turn_input(turn_id: int, body: TurnInjectBody, db: AsyncSession
         content=user_content,
         broadcast=False,
     )
-    user_msg.turn_id = turn_id
-    await commit_with_retry(db, label="turn.inject_input")
-    await db.refresh(user_msg)
+    await message_service.patch_message(user_msg.id, turn_id=turn_id)
     try:
         from app.gateway.ws import manager as ws_manager
         from app.services.message_service import _to_out
@@ -235,7 +231,6 @@ async def resume_turn(turn_id: int, db: AsyncSession = Depends(get_db)):
     if turn.status != "interrupted":
         raise HTTPException(400, "仅 interrupted 状态的 turn 可续跑")
     await turn_service.update_turn_status(db, turn_id, "running")
-    await commit_with_retry(db, label="turn.resume")
 
     # v0.3.1: 提取纯标量变量，禁止闭包在请求返回后访问已关闭会话的 ORM 属性
     session_id = int(turn.session_id)
@@ -294,7 +289,6 @@ async def rollback(turn_id: int, restore_to_composer: bool = True,
         result = await rollback_service.rollback_turn(
             db, turn_id=turn_id, restore_to_composer=restore_to_composer,
         )
-        await commit_with_retry(db, label="turn.rollback")
         if not result.get("ok"):
             raise HTTPException(400, result.get("reason", "回滚失败"))
         return result
@@ -403,12 +397,10 @@ async def set_reviews(turn_id: int, body: ReviewBatchBody, db: AsyncSession = De
         updated = await rollback_service.upsert_file_reviews(
             db, turn_id=turn_id, paths=body.paths, reviewed=body.reviewed,
         )
-        await commit_with_retry(db, label="turn.reviews")
         logger.info("[review] upsert: turn=%s paths=%s reviewed=%s updated=%s",
                     turn_id, len(body.paths), body.reviewed, updated)
         return {"ok": True, "updated": updated}
     except Exception as e:
-        await db.rollback()
         logger.warning("[review] upsert 失败: turn=%s err=%s", turn_id, e, exc_info=True)
         raise HTTPException(500, str(e))
 
@@ -605,8 +597,7 @@ async def confirm_plan_turn(turn_id: int, body: TaskConfirmBody,
     _session = await session_service.get_session(db, turn.session_id)
     _permission_mode = None
     if body.accepted and _session is not None and _session.permission_mode == "plan":
-        _session.permission_mode = "accept_edits"
-        await db.flush()
+        await session_service.patch_session(_session.id, permission_mode="accept_edits")
         _permission_mode = "accept_edits"
 
     # plan-644: 计划生命周期流转（数据库为真值源，文档头元数据行冗余标注）
@@ -619,8 +610,10 @@ async def confirm_plan_turn(turn_id: int, body: TaskConfirmBody,
         _workspace = _ws or ""
     except Exception:
         _workspace = ""
-    turn.plan_status = "confirmed" if body.accepted else "cancelled"
-    engine._stamp_plan_doc(_workspace, turn.plan_doc_path, turn.plan_status)
+    await turn_service.patch_turn(turn_id, plan_status="confirmed" if body.accepted else "cancelled")
+    _plan_status = "confirmed" if body.accepted else "cancelled"
+    if _workspace and turn.plan_doc_path:
+        engine._stamp_plan_doc(_workspace, turn.plan_doc_path, _plan_status)
 
     # plan-865: 计划确认/取消消息落库——数据库时间线的"确认"位置，前端计划卡原位更新状态
     try:
@@ -629,7 +622,7 @@ async def confirm_plan_turn(turn_id: int, body: TaskConfirmBody,
             sender_type=SenderType.SYSTEM.value, msg_type=MsgType.PLAN.value,
             content={
                 "plan_doc_path": turn.plan_doc_path or "",
-                "plan_status": turn.plan_status or "",
+                "plan_status": _plan_status,
                 "text": "方案已确认，开始执行" if body.accepted else "方案已取消，任务停止",
             },
         )
@@ -642,13 +635,11 @@ async def confirm_plan_turn(turn_id: int, body: TaskConfirmBody,
             db, turn_id, "cancelled", summary="方案已取消，任务停止", completed=True,
         )
         await task_service.cancel_turn_tasks(db, turn.session_id, turn_id)
-        await commit_with_retry(db, label="plan.cancel")
         from app.orchestration.agent_events import broadcast, broadcast_turn_updated
         await broadcast_turn_updated(turn.session_id, turn_id, "cancelled")
         return {"ok": True, "mode": "cancelled", "permission_mode": _permission_mode}
 
     await turn_service.update_turn_status(db, turn_id, "running")
-    await commit_with_retry(db, label="plan.confirm")
 
     async def _run_plan():
         from app.persistence.database import async_session_factory

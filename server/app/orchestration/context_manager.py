@@ -490,11 +490,17 @@ async def build_main_context(
                 if _new_injected:
                     _ctx = dict(_ctx)
                     _ctx["injected_compactions"] = list(_injected) + _new_injected
-                    session.shared_context = _ctx
-                    # 关闭 autoflush 后显式提交 checkpoint 注入状态；否则该 flush 会
-                    # 把 SQLite 写事务一直带进后续 LLM 请求，长期占用文件写锁。
-                    await db.flush()
-                    await db.commit()
+                    # checkpoint 注入状态经写引擎单写线程提交（不持有 async 写事务）
+                    from app.persistence.database import run_write_locked
+
+                    def _p(s):
+                        from app.persistence.models.message import Session as _Sess
+                        row = s.get(_Sess, session.id)
+                        if row is not None:
+                            row.shared_context = _ctx
+                        s.commit()
+
+                    await run_write_locked(_p, label="context.inject_checkpoint")
                     logger.info(
                         "[context] session=%s 注入压缩 checkpoint %d 条并标记已注入",
                         session.id, len(_new_injected),

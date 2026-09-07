@@ -63,3 +63,6 @@ class ChatResponse(BaseModel):
     model: str = ""
     # v4.3: 模型的推理/思考内容（DeepSeek reasoning_content / Claude thinking）
     thinking: str | None = None
+    # v966: 本次流式响应收到的数据帧数（0 = 网关未下发任何帧=断流，用于空响应
+    # 判定重试；None = provider 未提供该信号，保持旧判定逻辑）
+    frames_received: int | None = None

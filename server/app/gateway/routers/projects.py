@@ -13,11 +13,11 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 @router.post("", response_model=ProjectOut)
 async def create_project(body: ProjectCreate, db: AsyncSession = Depends(get_db)):
     try:
-        project = await project_service.create_project(
+        pid = await project_service.create_project(
             db, path=body.path, name=body.name,
             rules_docs=body.rules_docs, auto_scan_rules=body.auto_scan_rules,
         )
-        await db.commit()
+        project = await project_service.get_project(db, pid)  # async 只读
         return project
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -39,14 +39,14 @@ async def get_project(project_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.patch("/{project_id}", response_model=ProjectOut)
 async def update_project(project_id: int, body: ProjectUpdate, db: AsyncSession = Depends(get_db)):
-    project = await project_service.update_project(
+    ok = await project_service.update_project(
         db, project_id,
         name=body.name, rules_docs=body.rules_docs, auto_scan_rules=body.auto_scan_rules,
         pinned=body.pinned, archived=body.archived,
     )
-    if project is None:
+    if ok is None:
         raise HTTPException(404, "项目不存在")
-    await db.commit()
+    project = await project_service.get_project(db, project_id)
     return project
 
 
@@ -55,7 +55,6 @@ async def delete_project(project_id: int, db: AsyncSession = Depends(get_db)):
     ok = await project_service.delete_project(db, project_id)
     if not ok:
         raise HTTPException(404, "项目不存在")
-    await db.commit()
     return {"ok": True}
 
 

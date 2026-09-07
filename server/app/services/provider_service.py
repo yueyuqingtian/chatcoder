@@ -12,11 +12,18 @@ logger = logging.getLogger(__name__)
 SCAN_TIMEOUT = 20.0
 
 
-async def create_provider(db: AsyncSession, **kwargs) -> Provider:
-    provider = Provider(tenant_id=1, **kwargs)
-    db.add(provider)
-    await db.flush()
-    return provider
+async def create_provider(db: AsyncSession, **kwargs) -> int:
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        provider = Provider(tenant_id=1, **kwargs)
+        s.add(provider)
+        s.flush()
+        pid = provider.id
+        s.commit()
+        return pid
+
+    return await run_write_locked(patch, label="provider.create")
 
 
 async def get_provider(db: AsyncSession, provider_id: int) -> Provider | None:
@@ -28,33 +35,44 @@ async def list_providers(db: AsyncSession) -> list[Provider]:
     return list(res.scalars().all())
 
 
-async def update_provider(db: AsyncSession, provider_id: int, **kwargs) -> Provider | None:
-    """更新供应商字段(只更新非 None 字段)。api_key 空字符串 = 清除。"""
-    provider = await db.get(Provider, provider_id)
-    if provider is None:
-        return None
-    for k, v in kwargs.items():
-        if v is None:
-            continue
-        if k == "api_key" and v == "":
-            setattr(provider, k, None)
-        else:
-            setattr(provider, k, v)
-    await db.flush()
-    return provider
+async def update_provider(db: AsyncSession, provider_id: int, **kwargs) -> bool:
+    """更新供应商字段(只更新非 None 字段；写引擎单写线程)。api_key 空字符串 = 清除。"""
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        provider = s.get(Provider, provider_id)
+        if provider is None:
+            return False
+        for k, v in kwargs.items():
+            if v is None:
+                continue
+            if k == "api_key" and v == "":
+                setattr(provider, k, None)
+            else:
+                setattr(provider, k, v)
+        s.commit()
+        return True
+
+    return await run_write_locked(patch, label=f"provider.update.{provider_id}")
 
 
 async def delete_provider(db: AsyncSession, provider_id: int) -> bool:
-    """删除供应商，并级联删除其下模型（会话 model_id 会悬空，前端选择器自动忽略）。"""
-    provider = await db.get(Provider, provider_id)
-    if provider is None:
-        return False
-    models = (await db.execute(select(Model).where(Model.provider_id == provider_id))).scalars().all()
-    for m in models:
-        await db.delete(m)
-    await db.delete(provider)
-    await db.flush()
-    return True
+    """删除供应商，并级联删除其下模型（写引擎单写线程）。
+    会话 model_id 会悬空，前端选择器自动忽略。"""
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        provider = s.get(Provider, provider_id)
+        if provider is None:
+            return False
+        models = list(s.execute(select(Model).where(Model.provider_id == provider_id)).scalars().all())
+        for m in models:
+            s.delete(m)
+        s.delete(provider)
+        s.commit()
+        return True
+
+    return await run_write_locked(patch, label=f"provider.delete.{provider_id}")
 
 
 async def scan_models(db: AsyncSession, provider_id: int) -> list[dict]:
@@ -122,52 +140,59 @@ async def scan_models(db: AsyncSession, provider_id: int) -> list[dict]:
     return out
 
 
-async def bulk_upsert_models(db: AsyncSession, provider_id: int, items: list[dict]) -> list[Model]:
-    """按 (provider_id, name) upsert 模型配置；返回该供应商下全部模型。"""
-    provider = await db.get(Provider, provider_id)
-    if provider is None:
-        raise ValueError("provider not found")
+async def bulk_upsert_models(db: AsyncSession, provider_id: int, items: list[dict]) -> list[int]:
+    """按 (provider_id, name) upsert 模型配置（写引擎单写线程）；返回该供应商模型 id 列表。"""
+    from app.persistence.database import run_write_locked
 
-    existing = (await db.execute(
-        select(Model).where(Model.provider_id == provider_id)
-    )).scalars().all()
-    by_name = {m.name: m for m in existing}
+    def patch(s):
+        provider = s.get(Provider, provider_id)
+        if provider is None:
+            raise ValueError("provider not found")
 
-    for item in items:
-        name = (item.get("name") or "").strip()
-        if not name:
-            continue
-        # v2.2 (对齐 zcode 3.11): 目录补全——用户未填元数据时自动补全
-        from app.models.catalog import apply_metadata
-        _meta = apply_metadata(
-            name,
-            context_window=item.get("context_window"),
-            is_multimodal=bool(item.get("is_multimodal", False)),
-            reasoning_efforts=item.get("reasoning_efforts"),
-        )
-        m = by_name.get(name)
-        if m is None:
-            m = Model(tenant_id=1, name=name, provider_id=provider_id, source_type="byok")
-            db.add(m)
-            by_name[name] = m
-        m.is_active = bool(item.get("is_active", True))
-        if _meta.get("context_window"):
-            m.context_window = _meta["context_window"]
-        elif m.context_window is None:
-            m.context_window = 200000
-        m.is_multimodal = bool(_meta.get("is_multimodal", False))
-        if _meta.get("reasoning_efforts") is not None:
-            m.reasoning_efforts = _meta["reasoning_efforts"]
-        # plan-147-674: ta3 模型的手动多模态设置打 override 标记，
-        # 目录重新同步时保留用户修正（catalog.py 同步逻辑读取该标记）
-        if provider.api_format == "ta3":
-            meta = dict(m.ta3_meta or {})
-            meta["multimodal_override"] = True
-            m.ta3_meta = meta
-    await db.flush()
+        existing = list(s.execute(
+            select(Model).where(Model.provider_id == provider_id)
+        ).scalars().all())
+        by_name = {m.name: m for m in existing}
 
-    res = await db.execute(select(Model).where(Model.provider_id == provider_id).order_by(Model.name.asc()))
-    return list(res.scalars().all())
+        for item in items:
+            name = (item.get("name") or "").strip()
+            if not name:
+                continue
+            # v2.2 (对齐 zcode 3.11): 目录补全——用户未填元数据时自动补全
+            from app.models.catalog import apply_metadata
+            _meta = apply_metadata(
+                name,
+                context_window=item.get("context_window"),
+                is_multimodal=bool(item.get("is_multimodal", False)),
+                reasoning_efforts=item.get("reasoning_efforts"),
+            )
+            m = by_name.get(name)
+            if m is None:
+                m = Model(tenant_id=1, name=name, provider_id=provider_id, source_type="byok")
+                s.add(m)
+                by_name[name] = m
+            m.is_active = bool(item.get("is_active", True))
+            if _meta.get("context_window"):
+                m.context_window = _meta["context_window"]
+            elif m.context_window is None:
+                m.context_window = 200000
+            m.is_multimodal = bool(_meta.get("is_multimodal", False))
+            if _meta.get("reasoning_efforts") is not None:
+                m.reasoning_efforts = _meta["reasoning_efforts"]
+            # plan-147-674: ta3 模型的手动多模态设置打 override 标记，
+            # 目录重新同步时保留用户修正（catalog.py 同步逻辑读取该标记）
+            if provider.api_format == "ta3":
+                meta = dict(m.ta3_meta or {})
+                meta["multimodal_override"] = True
+                m.ta3_meta = meta
+        s.flush()
+        ids = [m.id for m in s.execute(
+            select(Model).where(Model.provider_id == provider_id).order_by(Model.name.asc())
+        ).scalars().all()]
+        s.commit()
+        return ids
+
+    return await run_write_locked(patch, label="provider.bulk_upsert")
 
 
 async def count_models(db: AsyncSession, provider_id: int) -> int:

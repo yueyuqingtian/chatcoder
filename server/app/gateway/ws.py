@@ -22,6 +22,11 @@ ws_router = APIRouter()
 # 断线补偿缓冲区容量（per session）
 _EVENT_BUFFER_SIZE = 500
 
+# v967: 高频流式增量事件不入补偿缓冲、不占 seq——避免挤占 500 条环形缓冲，
+# 使 sync.request 断线补偿对关键事件（message.created/turn.*/task.updated/done 类）有效。
+# 这些增量由 done 事件（带 full_text）与前端切回刷新消息兜底，不影响最终一致性。
+_STREAM_NO_BUFFER_EVENTS = frozenset({"token.delta", "thinking.delta"})
+
 # v37: 全局通道转发的事件白名单——仅转发「跨会话可见」的状态类事件。
 # 高频流式事件（token/thinking/tool）绝不转发，避免全局连接被长任务淹没。
 _GLOBAL_FORWARD_EVENTS = frozenset({
@@ -114,7 +119,9 @@ class ConnectionManager:
             except Exception:
                 logger.warning("[ws] 事件 %s payload 校验失败: %s", _name, exc_info=True)
         # v2.1: 注入会话级单调 seq 并写入补偿缓冲区（仅对可重放事件计数）
-        if "seq" not in event:
+        # v967: 高频流式增量事件（token/thinking delta）不入缓冲、不占 seq——
+        #       防止 500 条环形缓冲被增量挤占，保证关键事件可被 sync.request 补发。
+        if event.get("event") not in _STREAM_NO_BUFFER_EVENTS and "seq" not in event:
             event["seq"] = self.next_seq(session_id)
             self._buffers[session_id].append(event)
         dead: list[WebSocket] = []

@@ -23,6 +23,7 @@ from app.orchestration.context_manager import (
 from app.orchestration.subagent import cleanup, get_subagent_manager
 from app.orchestration.subagent_tools import append_subagent_tools, load_subagent_type_states
 from app.orchestration.tools.registry import tool_registry
+from app.persistence.write_behind import write_behind
 from app.services import audit_service, message_service, project_service, rollback_service, session_service, task_service, turn_service
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,136 @@ _running_turns: set[int] = set()
 _cancel_events: dict[int, asyncio.Event] = {}
 _turn_managers: dict[int, object] = {}
 _turn_tasks: dict[int, asyncio.Task] = {}
+
+
+async def _flush_turn_buffer(session_id: int, turn_id: int) -> None:
+    """在 turn 结束/状态直写前排空 write-behind 缓冲，并释放该 turn 的缓冲槽。"""
+    if turn_id is None:
+        return
+    try:
+        buf = write_behind.get(session_id, turn_id)
+        await buf.flush()
+        await write_behind.detach(session_id, turn_id)  # turn 收尾后释放，防注册表累积
+    except Exception:
+        logger.debug("[engine] flush turn buffer failed turn=%s", turn_id, exc_info=True)
+
+
+async def _patch_turn(turn_id: int, **fields) -> None:
+    """以写引擎单写线程提交 Turn 字段补丁（无锁单写者；None 值跳过，status 除外）。"""
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        from app.persistence.models.turn import Turn
+        t = s.get(Turn, turn_id)
+        if t is None:
+            return
+        for k, v in fields.items():
+            if v is not None or k == "status":
+                setattr(t, k, v)
+        s.commit()
+
+    await run_write_locked(patch, label=f"turn.patch.{turn_id}")
+
+
+async def _patch_task(task_id: int, **fields) -> None:
+    """以写引擎单写线程提交 Task 字段补丁。"""
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        from app.persistence.models.task import Task
+        t = s.get(Task, task_id)
+        if t is None:
+            return
+        for k, v in fields.items():
+            if v is not None or k == "status":
+                setattr(t, k, v)
+        s.commit()
+
+    await run_write_locked(patch, label=f"task.patch.{task_id}")
+
+
+async def _patch_turn_bulk(turn_ids: list[int], **fields) -> None:
+    """以写引擎单写线程对多个 Turn 应用同一字段补丁（如批量 superseded）。"""
+    if not turn_ids:
+        return
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        from app.persistence.models.turn import Turn
+        rows = s.query(Turn).filter(Turn.id.in_(turn_ids)).all()
+        for t in rows:
+            for k, v in fields.items():
+                if v is not None or k == "status":
+                    setattr(t, k, v)
+        s.commit()
+
+    await run_write_locked(patch, label="turn.patch.bulk")
+
+
+async def _patch_task_bulk(task_ids: list[int], **fields) -> None:
+    """以写引擎单写线程对多个 Task 应用同一字段补丁（如批量 cancelled）。"""
+    if not task_ids:
+        return
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        from app.persistence.models.task import Task
+        rows = s.query(Task).filter(Task.id.in_(task_ids)).all()
+        for t in rows:
+            for k, v in fields.items():
+                if v is not None or k == "status":
+                    setattr(t, k, v)
+        s.commit()
+
+    await run_write_locked(patch, label="task.patch.bulk")
+
+
+async def _patch_message(message_id: int, **fields) -> None:
+    """写引擎单写线程提交 Message 字段补丁（如 turn_id 回填）。"""
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        from app.persistence.models.message import Message
+        m = s.get(Message, message_id)
+        if m is None:
+            return
+        for k, v in fields.items():
+            setattr(m, k, v)
+        s.commit()
+
+    await run_write_locked(patch, label=f"message.patch.{message_id}")
+
+
+async def _patch_session(session_id: int, **fields) -> None:
+    """写引擎单写线程提交 Session 字段补丁（如 goal_turns_used）。"""
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        from app.persistence.models.message import Session as _Sess
+        row = s.get(_Sess, session_id)
+        if row is None:
+            return
+        for k, v in fields.items():
+            setattr(row, k, v)
+        s.commit()
+
+    await run_write_locked(patch, label=f"session.patch.{session_id}")
+
+
+async def _patch_turn_cancel(turn_rows: list, turn_ids: list[int]) -> None:
+    """批量置 cancelled：status=cancelled，completed_at 缺失时补当前时间（写引擎内）。"""
+    from datetime import datetime, timezone
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        from app.persistence.models.turn import Turn
+        rows = s.query(Turn).filter(Turn.id.in_(turn_ids)).all()
+        for t in rows:
+            t.status = "cancelled"
+            t.completed_at = t.completed_at or datetime.now(timezone.utc).isoformat()
+        s.commit()
+
+    await run_write_locked(patch, label="turn.patch.cancel")
 _cancel_finalizers: dict[int, asyncio.Task] = {}
 # plan-547: 运行中 turn 的用户消息注入队列（turn_id -> 待注入项）。
 # 注入项在 agent_loop 每次 LLM 调用前被 drain 进上下文（下次调用前传达给 AI）。
@@ -196,32 +327,33 @@ async def _continue_goal_turn(session_id: int, prev_turn_id: int) -> None:
                          "goal_turn": next_n, "goal_max_turns": max_turns},
                 broadcast=True,
             )
-            turn = await turn_service.create_turn(db, session_id=session_id, user_message_id=user_msg.id)
-            user_msg.turn_id = turn.id
-            session.goal_turns_used = next_n
-            await db.commit()
-            logger.info("[goal] 续跑 turn=%s 创建（第 %d/%d 轮）session=%s", turn.id, next_n, max_turns, session_id)
+            turn_id_new = await turn_service.create_turn(
+                db, session_id=session_id, user_message_id=user_msg.id,
+            )
+            await _patch_message(user_msg.id, turn_id=turn_id_new)
+            await _patch_session(session_id, goal_turns_used=next_n)
+            logger.info("[goal] 续跑 turn=%s 创建（第 %d/%d 轮）session=%s", turn_id_new, next_n, max_turns, session_id)
             await broadcast(session_id, {
                 "event": "goal.continued",
-                "payload": {"turn_id": turn.id, "prev_turn_id": prev_turn_id, "turns_used": next_n},
+                "payload": {"turn_id": turn_id_new, "prev_turn_id": prev_turn_id, "turns_used": next_n},
             })
 
             async def _run():
                 async with async_session_factory() as s:
                     try:
-                        await start_turn(s, turn_id=turn.id)
+                        await start_turn(s, turn_id=turn_id_new)
                         await s.commit()
                     except Exception:
                         await s.rollback()
                         logger.warning("[goal] 续跑 turn=%s 执行异常", turn.id, exc_info=True)
                         try:
-                            await turn_service.update_turn_status(s, turn.id, "failed", summary="续跑执行异常", completed=True)
+                            await turn_service.update_turn_status(s, turn_id_new, "failed", summary="续跑执行异常", completed=True)
                             await s.commit()
-                            await broadcast_turn_updated(session_id, turn.id, "failed")
+                            await broadcast_turn_updated(session_id, turn_id_new, "failed")
                         except Exception:
                             pass
 
-            _turn_tasks[turn.id] = asyncio.get_event_loop().create_task(_run())
+            _turn_tasks[turn_id_new] = asyncio.get_event_loop().create_task(_run())
         except Exception:
             await db.rollback()
             logger.warning("[goal] 续跑 turn 创建失败 session=%s", session_id, exc_info=True)
@@ -300,16 +432,13 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             stale_turn_ids: set[int] = {g.turn_id for g in stale_groups if g.turn_id is not None}
             if stale_groups:
                 group_ids = [g.id for g in stale_groups]
-                for g in stale_groups:
-                    g.status = "cancelled"
-                    g.is_hidden = True
                 step_res = await db.execute(_select(_Task).where(
                     _Task.parent_task_id.in_(group_ids),
                 ))
-                for st in step_res.scalars().all():
-                    if st.status == "proposed":
-                        st.status = "cancelled"
-                        st.is_hidden = True
+                step_ids = [st.id for st in step_res.scalars().all() if st.status == "proposed"]
+                if step_ids:
+                    await _patch_task_bulk(step_ids, status="cancelled", is_hidden=True)
+                await _patch_task_bulk(group_ids, status="cancelled", is_hidden=True)
                 logger.info("[engine] turn=%s 作废旧提案 groups=%s", turn_id, group_ids)
             # plan-95: 同步关闭旧 turn 的待确认态——前端 refreshTasks 以 turn 状态为
             # 展示守卫，旧 turn 不再是 awaiting_confirmation 后旧卡无法复活
@@ -319,12 +448,10 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                 _Turn.id < turn_id,
             ))
             stale_turns = list(stale_turn_res.scalars().all())
-            for t in stale_turns:
-                t.status = "cancelled"
-                t.completed_at = t.completed_at or datetime.now(timezone.utc).isoformat()
-                stale_turn_ids.add(t.id)
+            if stale_turns:
+                await _patch_turn_cancel(stale_turns, [t.id for t in stale_turns])
+                stale_turn_ids.update(t.id for t in stale_turns)
             if stale_groups or stale_turns:
-                await db.commit()
                 for stale_tid in sorted(stale_turn_ids):
                     try:
                         await broadcast_turn_updated(session_id, stale_tid, "cancelled")
@@ -389,26 +516,16 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             main_task = await task_service.get_task(db, existing_task_id)
             if main_task is None or main_task.session_id != session_id or main_task.turn_id != turn_id:
                 return {"ok": False, "error": "任务不存在或不属于当前 turn"}
-            main_task.status = "running"
-            main_task.is_hidden = False
-            await db.flush()
+            await _patch_task(existing_task_id, status="running", is_hidden=False)
         else:
-            main_task = await task_service.create_task(
+            _main_task_id = await task_service.create_task(
                 db, session_id=session_id, turn_id=turn_id,
                 title=(user_text.strip().replace("\n", " ") or "任务")[:60],
                 description=user_text, kind="request", status=task_initial_status,
             )
-        # v9: 立即提交，保证前端任务面板/右上角卡片实时拉取到新任务步骤
-        # （此前仅 flush，turn 结束才 commit，前端 refreshTasks 查不到新任务，
-        #   表现为"新任务开始后未展示步骤与执行情况"）
-        try:
-            await db.commit()
-        except Exception:
-            logger.debug("[engine] 任务创建提交失败(非阻塞)", exc_info=True)
-            try:
-                await db.rollback()  # 恢复 session，防止后续所有 DB 写抛 PendingRollbackError
-            except Exception:
-                pass
+            main_task = await task_service.get_task(db, _main_task_id)  # async 只读对象
+        # v9: 立即提交（写引擎单写线程内完成；前端任务面板/右上角卡片实时拉取）
+        # get_task/create_task 已写引擎提交，此处不再需要 async 主 db commit。
         await broadcast(session_id, {
             "event": "task.updated",
             "payload": {"task_id": main_task.id, "status": task_initial_status},
@@ -592,9 +709,11 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                         msg_type=MsgType.ERROR.value,
                         content={"text": f"{reason}，任务已终止。{user_hint} 请重试或检查执行过程后再次发送。",
                                  "agent_name": main_agent.name},
+                        buffered=True,
                     )
                 except Exception:
                     logger.debug("[engine] plan 失败提示消息写入失败(非阻塞)", exc_info=True)
+                await _flush_turn_buffer(session_id, turn_id)
                 await db.commit()
                 await broadcast_turn_updated(session_id, turn_id, "failed")
                 return {"ok": True, "failed": True, "reason": reason}
@@ -618,11 +737,10 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             # 前端卡片恢复与多轮 Plan History 需求全集注入的数据源；
             # 同会话旧 proposed 方案随之标记 superseded（被本轮取代）。
             _plan_rel = str(_plan_path.relative_to(Path(workspace).resolve()).as_posix())
-            turn.plan_doc_path = _plan_rel
-            turn.plan_status = "proposed"
+            await _patch_turn(turn_id, plan_doc_path=_plan_rel, plan_status="proposed")
             _stamp_plan_doc(workspace, _plan_rel, "proposed")
             await _supersede_stale_proposed(db, session_id, turn_id, workspace)
-            main_task.status = "awaiting_confirmation"
+            await _patch_task(main_task.id, status="awaiting_confirmation")
 
             # v0.3.1 (plan-190-898): 规划阶段完成第一时间落库 PLAN 消息并提交（用户要求：
             # 计划卡预览在规划阶段完成后显示在底部，在此刻完成写库，确认后再继续在后面刷消息/写库）。
@@ -633,7 +751,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                     sender_type=SenderType.SYSTEM.value, msg_type=MsgType.PLAN.value,
                     content={"plan_doc_path": _plan_rel, "plan_status": "proposed",
                              "text": "方案已生成，请确认后执行", "agent_name": main_agent.name},
-                    broadcast=True,  # 立即广播 message.created，前端流式底部即刻渲染计划卡
+                    buffered=True,  # 立即广播 message.created，前端流式底部即刻渲染计划卡
                 )
             except Exception:
                 logger.warning("[engine] PLAN 预览消息落库失败", exc_info=True)
@@ -642,6 +760,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                 db, turn_id, "awaiting_confirmation",
                 summary="方案文档已生成，等待用户确认", completed=True,
             )
+            await _flush_turn_buffer(session_id, turn_id)
             await db.commit()
 
             # v26: 广播实际命中的计划文档路径与待确认状态
@@ -669,6 +788,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             db, turn_id, final_status,
             summary=summary[:500] or ("用户中断" if final_status == "interrupted" else None), completed=True,
         )
+        await _flush_turn_buffer(session_id, turn_id)
         await db.commit()
         await broadcast_turn_updated(session_id, turn_id, final_status)
         await broadcast(session_id, {
@@ -779,34 +899,41 @@ async def cancel_turn(turn_id: int) -> bool:
 
 
 async def _finalize_cancelled_turn(turn_id: int) -> None:
-    """取消后台收尾：短事务、条件更新、有限重试，不阻塞 Stop 请求。"""
-    from sqlalchemy import update
-    from app.persistence.database import run_write_transaction
+    """取消后台收尾：短事务（写引擎单写线程）、条件更新、有限重试，不阻塞 Stop 请求。"""
+    from datetime import datetime, timezone
+    from app.persistence.database import run_write_locked
     from app.persistence.models.agent import Agent
-    from app.persistence.models.turn import Turn
 
     async def _persist_cancel(db):
-        turn = await turn_service.get_turn(db, turn_id)
-        if turn is None:
-            return None
-        session_id = int(turn.session_id)
-        terminal = ("completed", "failed", "cancelled", "interrupted", "rolled_back")
-        if turn.status in terminal:
-            return {"session_id": session_id, "active": False, "summary": turn.summary or ""}
-        turn.status = "interrupted"
-        turn.summary = turn.summary or "用户中断"
-        turn.completed_at = turn.completed_at or datetime.now(timezone.utc).isoformat()
-        await task_service.cancel_turn_tasks(db, session_id, turn_id)
-        await db.execute(
-            update(Agent).where(Agent.turn_id == turn_id, Agent.status == "running")
-            .values(status="terminated")
-        )
-        return {"session_id": session_id, "active": True, "summary": turn.summary}
+        status_before = None  # 兼容旧签名；读取与写入统一在写引擎事务内完成
+
+        def patch(s):
+            from sqlalchemy import update as _update
+            from app.persistence.models.turn import Turn
+            t = s.get(Turn, turn_id)
+            if t is None:
+                return None
+            session_id = int(t.session_id)
+            terminal = ("completed", "failed", "cancelled", "interrupted", "rolled_back")
+            if t.status in terminal:
+                return {"session_id": session_id, "active": False, "summary": t.summary or ""}
+            t.status = "interrupted"
+            t.summary = t.summary or "用户中断"
+            t.completed_at = t.completed_at or datetime.now(timezone.utc).isoformat()
+            s.execute(
+                _update(Agent).where(Agent.turn_id == turn_id, Agent.status == "running")
+                .values(status="terminated")
+            )
+            s.commit()
+            return {"session_id": session_id, "active": True, "summary": t.summary}
+
+        result = await run_write_locked(patch, label=f"turn.cancel.{turn_id}")
+        if result and result.get("active"):
+            await task_service.cancel_turn_tasks(db, int(result["session_id"]), turn_id)
+        return result
 
     try:
-        result = await run_write_transaction(
-            _persist_cancel, label=f"turn.cancel.{turn_id}", retries=3,
-        )
+        result = await _persist_cancel(None)
         if result and result.get("active"):
             session_id = int(result["session_id"])
             await broadcast_turn_updated(session_id, turn_id, "interrupted")
@@ -975,10 +1102,10 @@ async def _supersede_stale_proposed(db: AsyncSession, session_id: int,
         _Turn.plan_status == "proposed",
     ))
     stale = list(res.scalars().all())
-    for t in stale:
-        t.plan_status = "superseded"
-        _stamp_plan_doc(workspace, t.plan_doc_path, "superseded", f" by turn {new_turn_id}")
     if stale:
+        for t in stale:
+            _stamp_plan_doc(workspace, t.plan_doc_path, "superseded", f" by turn {new_turn_id}")
+        await _patch_turn_bulk([t.id for t in stale], plan_status="superseded")
         logger.info("[engine] turn=%s 取代旧待确认方案 turns=%s",
                     new_turn_id, [t.id for t in stale])
 
@@ -1056,8 +1183,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         _is_multimodal = bool(getattr(_sel_model, "is_multimodal", False)) if _sel_model else False
         await broadcast(_session_id, {"event": "turn.started", "payload": {"turn_id": turn_id, "session_id": _session_id}})
         if request_task:
-            request_task.status = "running"
-        await db.commit()
+            await _patch_task(request_task.id, status="running")
 
         # 目标流程第 4 步：确认执行即清空分析阶段的调研清单，
         # 主代理随后按方案文档重建执行清单（避免旧清单与新执行清单混杂）。
@@ -1156,13 +1282,15 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         # plan-644: 执行成功 -> 计划生命周期收口 done；失败/中断保持 confirmed
         # （已确认但未完成，其中未完成需求由后续轮次的 Plan History 继承）。
         if out.kind == "message":
-            turn.plan_status = "done"
+            await _patch_turn(turn_id, plan_status="done")
             _stamp_plan_doc(workspace, getattr(turn, "plan_doc_path", None), "done")
         if request_task is not None:
-            request_task.status = "cancelled" if final_status == "interrupted" else (
-                "done" if out.kind == "message" else "failed")
+            await _patch_task(request_task.id, status=(
+                "cancelled" if final_status == "interrupted" else (
+                    "done" if out.kind == "message" else "failed")))
             if out.kind == "message" and out.artifact_ids:
                 await task_service.attach_artifacts(db, request_task.id, out.artifact_ids)
+        await _flush_turn_buffer(_session_id, turn_id)
         await db.commit()
         # v0.3.1: 使用提前缓存的标量 _session_id/_session_model_id，禁止在 commit 之后点 session.id
         await broadcast_turn_updated(_session_id, turn_id, final_status)
@@ -1189,6 +1317,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         logger.exception("确认后执行失败 turn=%s", turn_id)
         try:
             await db.rollback()
+            await _flush_turn_buffer(_session_id, turn_id)
             await turn_service.update_turn_status(db, turn_id, "failed", summary=str(exc)[:500], completed=True)
             await db.commit()
             await broadcast_turn_updated(_session_id or 0, turn_id, "failed")
@@ -1241,12 +1370,30 @@ async def retry_failed_step(db: AsyncSession, *, turn_id: int, task_id: int) -> 
         kind="sub", name=step.title[:40], model_id=effective_model_id,
         session_id=session.id, turn_id=turn_id, parent_agent_id=main_agent.id,
     )
-    db.add(sub_agent)
-    await db.flush()
-    step.agent_id = sub_agent.id
-    step.status = "running"
-    step.note = None
-    await db.commit()
+    # 子代理创建 + step 状态（写引擎单写线程，一次事务返回创建后的 Agent id）
+    from app.persistence.database import run_write_locked
+
+    def _persist_agent(s):
+        from app.persistence.models.agent import Agent as _Agent
+        from app.persistence.models.task import Task as _Task
+        sa = _Agent(
+            kind="sub", name=step.title[:40], model_id=effective_model_id,
+            session_id=session.id, turn_id=turn_id, parent_agent_id=main_agent.id,
+        )
+        s.add(sa)
+        s.flush()
+        aid = sa.id
+        st = s.get(_Task, task_id)
+        if st is not None:
+            st.agent_id = aid
+            st.status = "running"
+            st.note = None
+        s.commit()
+        return aid
+
+    agent_id = await run_write_locked(_persist_agent, label="subagent.retry.create")
+    step = await task_service.get_task(db, task_id)  # async 只读对象（保持后续 step 属性读取）
+    sub_agent.id = agent_id
     await broadcast(session.id, {"event": "task.updated", "payload": {"task_id": step.id, "status": "running"}})
     handoff = step.description or step.title
     # v19: 重试步骤同样继承用户原始请求
@@ -1290,12 +1437,12 @@ async def retry_failed_step(db: AsyncSession, *, turn_id: int, task_id: int) -> 
     if ok:
         if handle.artifact_ids:
             await task_service.attach_artifacts(db, step.id, handle.artifact_ids)
-        step.status = "done"
-        step.note = (handle.summary or "")[:300] or None
+        await _patch_task(step.id, status="done",
+                          note=(handle.summary or "")[:300] or None)
     else:
-        step.status = "failed"
-        step.note = (handle.error if handle else "子代理未返回结果")[:500]
-    await db.commit()
+        await _patch_task(step.id, status="failed",
+                          note=(handle.error if handle else "子代理未返回结果")[:500])
+    step = await task_service.get_task(db, task_id)
     await broadcast(session.id, {"event": "task.updated", "payload": {
         "task_id": step.id, "status": step.status, "note": step.note or ""}})
     return {"ok": ok, "status": step.status}

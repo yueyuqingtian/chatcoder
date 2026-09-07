@@ -103,18 +103,18 @@ def test_read_plan_document_exact_rejects_bad_path(workspace):
 
 
 @pytest.fixture
-async def db():
-    engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
+async def db(tmp_path):
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/plan644.db"
+    engine = create_async_engine(db_url)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    from app.persistence import write_engine as _we
+    _we.configure(db_url, foreign_keys=False)  # 写引擎（单写线程）与测试库同源
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
         yield session
     await engine.dispose()
+    _we.configure(None)
 
 
 async def _mk_plan_turn(db, session_id, turn_id, plan_status, doc_path=None):

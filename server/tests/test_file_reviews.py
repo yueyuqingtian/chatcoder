@@ -25,19 +25,19 @@ from app.services import rollback_service
 
 
 @pytest.fixture
-async def db():
-    # StaticPool：所有 session 共享同一份内存库，模拟同一服务的多次请求
-    engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
+async def db(tmp_path):
+    # 临时文件库：所有 session 与写引擎共享同一份库（plan-206-975 无锁单写者）
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/reviews.db"
+    engine = create_async_engine(db_url)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    from app.persistence import write_engine as _we
+    _we.configure(db_url, foreign_keys=False)  # 写引擎（单写线程）与测试库同源
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as s:
         yield s
     await engine.dispose()
+    _we.configure(None)
 
 
 async def _rows(db: AsyncSession, turn_id: int) -> list[FileReview]:

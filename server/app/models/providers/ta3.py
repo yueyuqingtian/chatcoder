@@ -276,6 +276,7 @@ class Ta3Provider(ModelProvider):
             payload = json.loads(data)
         except ValueError:
             return False
+        monitor["frames"] += 1
         # usage（含 reasoning/cached 明细）
         usage = payload.get("usage")
         if isinstance(usage, dict):
@@ -465,6 +466,7 @@ class Ta3Provider(ModelProvider):
             payload = json.loads(data)
         except ValueError:
             return False
+        monitor["frames"] += 1
         etype = payload.get("type")
         if etype == "message_start":
             # v28: Anthropic 协议的 input_tokens 在 message_start，补全 usage
@@ -551,6 +553,10 @@ class Ta3Provider(ModelProvider):
             "anthropic_tools": {},     # Anthropic 增量
             "usage": Usage(),
             "last_heartbeat_at": None,  # v28: Anthropic ping 心跳时间（诊断用）
+            # v966: 成功解析的数据帧计数（不含空行/[DONE]）。0 = 网关连一个
+            # 数据帧都没下发（网络卡顿/服务器处理慢/网关断流），不能判定为
+            # "模型主动结束"，上层据此走重试而非静默收尾。
+            "frames": 0,
         }
 
     async def _stream_llm(self, request: ChatRequest,
@@ -648,10 +654,19 @@ class Ta3Provider(ModelProvider):
             len(thinking or ""), len(content or ""), len(tool_calls),
             _usage_desc, time.monotonic() - _started_at,
         )
+        # v966: 零帧断流比"空响应"更精确——网关未下发任何数据帧即结束
+        # （HTTP 200 + 空流/DONE），说明请求期间网络卡顿或网关处理超时，
+        # 必须区别于"模型已应答但主动无输出"（后者有帧，见 finish_reason）。
+        if monitor["frames"] == 0 and monitor["finish_reason"] == "stop":
+            logger.warning(
+                "[ta3] model=%s 零帧断流: 未收到任何数据帧, 耗时 %.1fs (网关空流/网络异常)",
+                request.model or self._model_name, time.monotonic() - _started_at,
+            )
         if not content and not thinking and not tool_calls and monitor["finish_reason"] == "stop":
             logger.warning(
-                "[ta3] model=%s 空响应流: 无 content/thinking/tool_calls, finish=stop, 耗时 %.1fs",
-                request.model or self._model_name, time.monotonic() - _started_at,
+                "[ta3] model=%s 空响应流: 无 content/thinking/tool_calls, finish=stop, frames=%d, 耗时 %.1fs",
+                request.model or self._model_name, monitor["frames"],
+                time.monotonic() - _started_at,
             )
 
         yield {
@@ -661,6 +676,7 @@ class Ta3Provider(ModelProvider):
             "tool_calls": tool_calls,
             "finish_reason": monitor["finish_reason"],
             "usage": monitor["usage"],
+            "frames": monitor["frames"],
         }
 
     async def stream_structured(self, request: ChatRequest) -> AsyncIterator[dict]:

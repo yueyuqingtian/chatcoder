@@ -1,6 +1,7 @@
 """pytest 全局配置与隔离数据库初始化。"""
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 # 把 server/ 加入 sys.path,使测试能 import app.*
@@ -8,7 +9,11 @@ SERVER_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SERVER_DIR))
 
 # 测试必须强制使用隔离配置，不能被本机 .env/打包运行环境污染。
-os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
+# 文件库（临时目录）而非 :memory:——WriteEngine（同步 pysqlite 单写线程）与异步读
+# 引擎必须连同一数据库文件（plan-206-975 无锁单写者；:memory: 下两个 engine 各是
+# 独立内存库，写引擎会写错库）。测试间由 _reset_shared_test_db 重建表隔离。
+os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///" + os.path.join(
+    tempfile.gettempdir(), "chatcoder_pytest.db")
 os.environ["REDIS_URL"] = "redis://localhost:6379/15"
 os.environ["QDRANT_URL"] = "http://localhost:6333"
 os.environ["WORKSPACE_ROOT"] = "./workspace_test"

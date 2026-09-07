@@ -15,25 +15,25 @@ from app.services.turn_service import create_turn, update_turn_status
 
 
 @pytest.fixture
-async def db():
-    # 独立内存引擎 + StaticPool：所有会话共享同一份内存库（默认 QueuePool 会按连接分库）
-    engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
+async def db(tmp_path):
+    # 独立临时文件库：所有会话与写引擎共享同一份库（plan-206-975 无锁单写者）
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/turns.db"
+    engine = create_async_engine(db_url)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    from app.persistence import write_engine as _we
+    _we.configure(db_url, foreign_keys=False)  # 写引擎（单写线程）与测试库同源
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
         yield session
     await engine.dispose()
+    _we.configure(None)
 
 
 async def test_completed_at_is_real_timestamp(db):
-    turn = await create_turn(db, session_id=1)
-    await update_turn_status(db, turn.id, "completed", completed=True)
-    await db.commit()
+    turn_id = await create_turn(db, session_id=1)
+    await update_turn_status(db, turn_id, "completed", completed=True)
+    turn = await db.get(Turn, turn_id)
     await db.refresh(turn)
 
     assert turn.started_at is not None
@@ -46,8 +46,8 @@ async def test_completed_at_is_real_timestamp(db):
 
 
 async def test_completed_false_keeps_completed_at_null(db):
-    turn = await create_turn(db, session_id=1)
-    await update_turn_status(db, turn.id, "running")
-    await db.commit()
+    turn_id = await create_turn(db, session_id=1)
+    await update_turn_status(db, turn_id, "running")
+    turn = await db.get(Turn, turn_id)
     await db.refresh(turn)
     assert turn.completed_at is None

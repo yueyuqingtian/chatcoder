@@ -65,7 +65,7 @@ def _mcp_to_out(m) -> McpServerOut:
 
 @router.post("/skills", response_model=SkillOut)
 async def create_skill(body: SkillCreate, db: AsyncSession = Depends(get_db)):
-    skill = await skill_service.create_skill(
+    sid = await skill_service.create_skill(
         db,
         name=body.name,
         display_name=body.display_name,
@@ -77,7 +77,7 @@ async def create_skill(body: SkillCreate, db: AsyncSession = Depends(get_db)):
         tags=body.tags,
         auto_load=body.auto_load,
     )
-    await db.commit()
+    skill = await skill_service.get_skill(db, sid)  # async 只读
     return _skill_to_out(skill)
 
 
@@ -100,7 +100,7 @@ async def get_skill(skill_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.put("/skills/{skill_id}", response_model=SkillOut)
 async def update_skill(skill_id: int, body: SkillUpdate, db: AsyncSession = Depends(get_db)):
-    skill = await skill_service.update_skill(
+    ok = await skill_service.update_skill(
         db, skill_id,
         display_name=body.display_name,
         description=body.description,
@@ -111,9 +111,9 @@ async def update_skill(skill_id: int, body: SkillUpdate, db: AsyncSession = Depe
         is_active=body.is_active,
         auto_load=body.auto_load,
     )
-    if skill is None:
+    if not ok:
         raise HTTPException(404, "skill not found")
-    await db.commit()
+    skill = await skill_service.get_skill(db, skill_id)  # async 只读
     return _skill_to_out(skill)
 
 
@@ -122,7 +122,6 @@ async def delete_skill(skill_id: int, db: AsyncSession = Depends(get_db)):
     ok = await skill_service.delete_skill(db, skill_id)
     if not ok:
         raise HTTPException(404, "skill not found")
-    await db.commit()
     return {"ok": True}
 
 
@@ -130,7 +129,6 @@ async def delete_skill(skill_id: int, db: AsyncSession = Depends(get_db)):
 async def scan_skills(db: AsyncSession = Depends(get_db)):
     """扫描外部工具（Codex/CodeBuddy/Qoder/Trae）的技能文件，同步入库。"""
     result = await skill_service.sync_scanned_skills(db, settings.workspace_root)
-    await db.commit()
     return ScanResult(**result)
 
 
@@ -140,7 +138,7 @@ async def scan_skills(db: AsyncSession = Depends(get_db)):
 
 @router.post("/mcp-servers", response_model=McpServerOut)
 async def create_mcp_server(body: McpServerCreate, db: AsyncSession = Depends(get_db)):
-    srv = await skill_service.create_mcp_server(
+    sid = await skill_service.create_mcp_server(
         db,
         name=body.name,
         display_name=body.display_name,
@@ -153,7 +151,7 @@ async def create_mcp_server(body: McpServerCreate, db: AsyncSession = Depends(ge
         url=body.url,
         is_active=body.is_active,
     )
-    await db.commit()
+    srv = await skill_service.get_mcp_server(db, sid)  # async 只读
     return _mcp_to_out(srv)
 
 
@@ -176,7 +174,7 @@ async def get_mcp_server(server_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.put("/mcp-servers/{server_id}", response_model=McpServerOut)
 async def update_mcp_server(server_id: int, body: McpServerUpdate, db: AsyncSession = Depends(get_db)):
-    srv = await skill_service.update_mcp_server(
+    ok = await skill_service.update_mcp_server(
         db, server_id,
         display_name=body.display_name,
         description=body.description,
@@ -187,9 +185,9 @@ async def update_mcp_server(server_id: int, body: McpServerUpdate, db: AsyncSess
         url=body.url,
         is_active=body.is_active,
     )
-    if srv is None:
+    if not ok:
         raise HTTPException(404, "mcp server not found")
-    await db.commit()
+    srv = await skill_service.get_mcp_server(db, server_id)  # async 只读
     return _mcp_to_out(srv)
 
 
@@ -198,7 +196,6 @@ async def delete_mcp_server(server_id: int, db: AsyncSession = Depends(get_db)):
     ok = await skill_service.delete_mcp_server(db, server_id)
     if not ok:
         raise HTTPException(404, "mcp server not found")
-    await db.commit()
     return {"ok": True}
 
 
@@ -206,7 +203,6 @@ async def delete_mcp_server(server_id: int, db: AsyncSession = Depends(get_db)):
 async def scan_mcp_servers(db: AsyncSession = Depends(get_db)):
     """扫描外部工具的 MCP 配置文件，同步入库。"""
     result = await skill_service.sync_scanned_mcp_servers(db, settings.workspace_root)
-    await db.commit()
     return ScanResult(**result)
 
 
@@ -251,11 +247,15 @@ async def update_agent_bindings(
         raise HTTPException(404, "agent not found")
 
     if body.skill_ids is not None:
-        agent = await skill_service.bind_agent_skills(db, agent_id, body.skill_ids)
+        ok1 = await skill_service.bind_agent_skills(db, agent_id, body.skill_ids)
+        if not ok1:
+            raise HTTPException(404, "agent not found")
     if body.mcp_server_ids is not None:
-        agent = await skill_service.bind_agent_mcp_servers(db, agent_id, body.mcp_server_ids)
+        ok2 = await skill_service.bind_agent_mcp_servers(db, agent_id, body.mcp_server_ids)
+        if not ok2:
+            raise HTTPException(404, "agent not found")
 
-    await db.commit()
+    agent = await db.get(Agent, agent_id)
     return {
         "ok": True,
         "skill_ids": agent.skill_ids or [],

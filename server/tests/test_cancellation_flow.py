@@ -49,11 +49,12 @@ async def test_cancel_finalizer_marks_active_work_and_preserves_completed(tmp_pa
     db_path = tmp_path / "cancel.db"
     db_engine = create_async_engine(
         f"sqlite+aiosqlite:///{db_path}",
-        poolclass=StaticPool,
         connect_args={"check_same_thread": False},
     )
     async with db_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    from app.persistence import write_engine as _we
+    _we.configure(f"sqlite+aiosqlite:///{db_path}", foreign_keys=False)  # 写引擎（单写线程）与测试库同源
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
     monkeypatch.setattr("app.persistence.database.async_session_factory", factory)
 

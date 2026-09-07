@@ -17,18 +17,18 @@ from app.services import rollback_service
 
 
 @pytest.fixture
-async def db():
-    engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
+async def db(tmp_path):
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/rb.db"
+    engine = create_async_engine(db_url)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    from app.persistence import write_engine as _we
+    _we.configure(db_url, foreign_keys=False)  # 写引擎（单写线程）与测试库同源
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
         yield session
     await engine.dispose()
+    _we.configure(None)
 
 
 # ── 二进制判定 ──
@@ -66,21 +66,25 @@ async def test_checkpoint_dedup_same_path(db, workspace):
     snap = TurnSnapshot(session_id=1, turn_id=1, file_list=[], new_files=[])
     db.add(snap)
     await db.flush()
+    await db.commit()  # 提交快照（record_checkpoint 经写引擎独立连接写入，需先提交）
     await rollback_service.record_checkpoint_for_turn(db, 1, "/ckpt/first", "src/a.py")
     await rollback_service.record_checkpoint_for_turn(db, 1, "/ckpt/second", "src/a.py")
-    await db.refresh(snap)
-    assert len(snap.file_list) == 1
-    assert snap.file_list[0]["ckpt"] == "/ckpt/first"
+    ref = await db.get(TurnSnapshot, snap.id)
+    await db.refresh(ref)  # 写引擎独立连接提交，重读最新
+    assert len(ref.file_list) == 1
+    assert ref.file_list[0]["ckpt"] == "/ckpt/first"
 
 
 async def test_checkpoint_dedup_keeps_distinct_paths(db, workspace):
     snap = TurnSnapshot(session_id=1, turn_id=1, file_list=[], new_files=[])
     db.add(snap)
     await db.flush()
+    await db.commit()  # 提交快照（record_checkpoint 经写引擎独立连接写入，需先提交）
     await rollback_service.record_checkpoint_for_turn(db, 1, "/ckpt/a", "src/a.py")
     await rollback_service.record_checkpoint_for_turn(db, 1, "/ckpt/b", "src/b.py")
-    await db.refresh(snap)
-    assert len(snap.file_list) == 2
+    ref = await db.get(TurnSnapshot, snap.id)
+    await db.refresh(ref)  # 写引擎独立连接提交，重读最新
+    assert len(ref.file_list) == 2
 
 
 # ── binary 写盘记录走 checkpoint 恢复 ──

@@ -24,23 +24,26 @@ async def test_approval_manager_with_bool_auto_approve():
 
 @pytest.mark.asyncio
 async def test_task_service_create_artifact():
-    """验证 task_service.create_artifact 可正常创建产物。"""
+    """验证 task_service.create_artifact 可正常创建产物（写引擎单写线程）。"""
+    from app.persistence.models.task import Artifact
     async with async_session_factory() as db:
         session = Session(project_id=None, permission_mode="default")
         db.add(session)
-        await db.flush()
+        await db.commit()  # 提交数据（create_task 经写引擎独立连接写入，需先提交）
 
-        task = await task_service.create_task(db, session_id=session.id, title="测试产物任务")
-        art = await task_service.create_artifact(
+        task_id = await task_service.create_task(db, session_id=session.id, title="测试产物任务")
+        art_id = await task_service.create_artifact(
             db,
-            task_id=task.id,
+            task_id=task_id,
             type="code",
             title="测试代码块",
             storage_ref="inline://test/1",
             summary="测试 summary",
             files=["test.py"],
         )
-        assert art.id is not None
+        assert art_id is not None
+        art = await db.get(Artifact, art_id)
+        await db.refresh(art)  # 写引擎独立连接提交，重读最新
         assert art.type == "code"
         assert art.title == "测试代码块"
         await db.rollback()

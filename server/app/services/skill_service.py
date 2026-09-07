@@ -37,25 +37,32 @@ async def create_skill(
     trigger: str | None = None, tools: list[str] | None = None,
     tags: list[str] | None = None, is_active: bool = True,
     auto_load: bool = True, meta: dict | None = None,
-) -> Skill:
-    """创建技能。"""
-    skill = Skill(
-        name=name,
-        display_name=display_name or name,
-        description=description,
-        content=content,
-        source=source,
-        path=path,
-        trigger=trigger,
-        tools=tools,
-        tags=tags,
-        is_active=is_active,
-        auto_load=auto_load,
-        meta=meta,
-    )
-    db.add(skill)
-    await db.flush()
-    return skill
+) -> int:
+    """创建技能（写引擎单写线程），返回 skill id。"""
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        skill = Skill(
+            name=name,
+            display_name=display_name or name,
+            description=description,
+            content=content,
+            source=source,
+            path=path,
+            trigger=trigger,
+            tools=tools,
+            tags=tags,
+            is_active=is_active,
+            auto_load=auto_load,
+            meta=meta,
+        )
+        s.add(skill)
+        s.flush()
+        sid = skill.id
+        s.commit()
+        return sid
+
+    return await run_write_locked(patch, label="skill.create")
 
 
 async def list_skills(db: AsyncSession, source: str | None = None) -> list[Skill]:
@@ -76,25 +83,35 @@ async def get_skill_by_name(db: AsyncSession, name: str) -> Skill | None:
     return res.scalars().first()
 
 
-async def update_skill(db: AsyncSession, skill_id: int, **kwargs: Any) -> Skill | None:
-    """更新技能字段。"""
-    skill = await db.get(Skill, skill_id)
-    if skill is None:
-        return None
-    for key, val in kwargs.items():
-        if val is not None and hasattr(skill, key):
-            setattr(skill, key, val)
-    await db.flush()
-    return skill
+async def update_skill(db: AsyncSession, skill_id: int, **kwargs: Any) -> bool:
+    """更新技能字段（写引擎单写线程）。返回可否找到。"""
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        skill = s.get(Skill, skill_id)
+        if skill is None:
+            return False
+        for key, val in kwargs.items():
+            if val is not None and hasattr(skill, key):
+                setattr(skill, key, val)
+        s.commit()
+        return True
+
+    return await run_write_locked(patch, label=f"skill.update.{skill_id}")
 
 
 async def delete_skill(db: AsyncSession, skill_id: int) -> bool:
-    skill = await db.get(Skill, skill_id)
-    if skill is None:
-        return False
-    await db.delete(skill)
-    await db.flush()
-    return True
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        skill = s.get(Skill, skill_id)
+        if skill is None:
+            return False
+        s.delete(skill)
+        s.commit()
+        return True
+
+    return await run_write_locked(patch, label=f"skill.delete.{skill_id}")
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -109,8 +126,10 @@ async def create_mcp_server(
     url: str | None = None, tools: list | None = None,
     is_active: bool = True, path: str | None = None,
     meta: dict | None = None, fetch_tools: bool = True,
-) -> McpServer:
-    """创建 MCP Server 配置。"""
+) -> int:
+    """创建 MCP Server 配置（握手在 async 侧完成，写入经写引擎单写线程），返回 id。"""
+    from app.persistence.database import run_write_locked
+
     # 智能切分：如果 command 中包含空格且 args 为空，自动通过 shlex.split 分离
     norm_cmd = command.strip() if command else None
     norm_args = list(args) if args else []
@@ -124,39 +143,46 @@ async def create_mcp_server(
         except Exception:
             pass
 
-    srv = McpServer(
-        name=name,
-        display_name=display_name or name,
-        description=description,
-        source=source,
-        transport=transport,
-        command=norm_cmd,
-        args=norm_args,
-        env=env,
-        url=url,
-        tools=tools,
-        is_active=is_active,
-        path=path,
-        meta=meta,
-    )
+    fetched_tools: list | None = None
     # v6: 创建/导入时若未提供 tools，自动握手获取真实工具列表，
     # 避免 build_mcp_tools_for_agent 退化为不可用的通用 call 工具（修复 agent 无法使用 MCP）。
     # v6.5: fetch_tools=False 时（导入未启用的 server）跳过握手，避免 codegraph 等
     # 不响应 MCP 的进程把创建请求挂死。
-    if fetch_tools and not srv.tools and srv.transport == "stdio" and srv.command:
+    if fetch_tools and not tools and transport == "stdio" and norm_cmd:
         try:
             from app.orchestration.skill_scanner import fetch_mcp_tools
             # v6: 传入项目路径(rootUri)，codegraph 等 server 依赖它定位项目才能响应握手
             fetched = await fetch_mcp_tools(
-                srv.command, srv.args or [], srv.env or {}, root_path=srv.path,
+                norm_cmd, norm_args or [], env or {}, root_path=path,
             )
             if fetched:
-                srv.tools = fetched
+                fetched_tools = fetched
         except Exception:
             pass
-    db.add(srv)
-    await db.flush()
-    return srv
+
+    def patch(s):
+        srv = McpServer(
+            name=name,
+            display_name=display_name or name,
+            description=description,
+            source=source,
+            transport=transport,
+            command=norm_cmd,
+            args=norm_args,
+            env=env,
+            url=url,
+            tools=fetched_tools or tools,
+            is_active=is_active,
+            path=path,
+            meta=meta,
+        )
+        s.add(srv)
+        s.flush()
+        sid = srv.id
+        s.commit()
+        return sid
+
+    return await run_write_locked(patch, label="mcp.create")
 
 
 async def list_mcp_servers(db: AsyncSession, source: str | None = None) -> list[McpServer]:
@@ -172,35 +198,49 @@ async def get_mcp_server(db: AsyncSession, server_id: int) -> McpServer | None:
     return await db.get(McpServer, server_id)
 
 
-async def update_mcp_server(db: AsyncSession, server_id: int, **kwargs: Any) -> McpServer | None:
-    srv = await db.get(McpServer, server_id)
-    if srv is None:
-        return None
-    for key, val in kwargs.items():
-        if val is not None and hasattr(srv, key):
-            setattr(srv, key, val)
-    # 若当前启用了 stdio 类型的 MCP 但尚未抓取 tools 列表，自动握手获取一次
-    if srv.is_active and not srv.tools and srv.transport == "stdio" and srv.command:
+async def update_mcp_server(db: AsyncSession, server_id: int, **kwargs: Any) -> bool:
+    """更新 MCP Server 字段（异步握手 + 写引擎单写线程）。返回可否找到。"""
+    from app.persistence.database import run_write_locked
+
+    _existing = await get_mcp_server(db, server_id)
+    if _existing is None:
+        return False
+    if _existing.is_active and not _existing.tools and _existing.transport == "stdio" and _existing.command:
         try:
             from app.orchestration.skill_scanner import fetch_mcp_tools
             fetched = await fetch_mcp_tools(
-                srv.command, srv.args or [], srv.env or {}, root_path=srv.path,
+                _existing.command, _existing.args or [], _existing.env or {}, root_path=_existing.path,
             )
             if fetched:
-                srv.tools = fetched
+                kwargs["tools"] = fetched
         except Exception:
             pass
-    await db.flush()
-    return srv
+
+    def patch(s):
+        srv = s.get(McpServer, server_id)
+        if srv is None:
+            return False
+        for key, val in kwargs.items():
+            if val is not None and hasattr(srv, key):
+                setattr(srv, key, val)
+        s.commit()
+        return True
+
+    return await run_write_locked(patch, label=f"mcp.update.{server_id}")
 
 
 async def delete_mcp_server(db: AsyncSession, server_id: int) -> bool:
-    srv = await db.get(McpServer, server_id)
-    if srv is None:
-        return False
-    await db.delete(srv)
-    await db.flush()
-    return True
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        srv = s.get(McpServer, server_id)
+        if srv is None:
+            return False
+        s.delete(srv)
+        s.commit()
+        return True
+
+    return await run_write_locked(patch, label=f"mcp.delete.{server_id}")
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -210,7 +250,7 @@ async def delete_mcp_server(db: AsyncSession, server_id: int) -> bool:
 async def sync_scanned_skills(
     db: AsyncSession, workspace_root: str | None = None,
 ) -> dict:
-    """扫描外部工具的技能文件，同步到数据库。
+    """扫描外部工具的技能文件，同步到数据库（写引擎单写线程内批量 upsert）。
 
     - 新发现的技能：创建记录
     - 已存在的技能（按 name 匹配）：更新 content/path
@@ -219,126 +259,137 @@ async def sync_scanned_skills(
     Returns:
         {"added": int, "updated": int, "unchanged": int, "total_scanned": int}
     """
-    scanned = scan_all_skills(workspace_root)
-    added = 0
-    updated = 0
-    unchanged = 0
+    from app.persistence.database import run_write_locked
 
-    for item in scanned:
-        existing = await get_skill_by_name(db, item.name)
-        if existing is None:
-            # 新增
-            await create_skill(
-                db,
-                name=item.name,
-                display_name=item.display_name,
-                description=item.description,
-                content=item.content,
-                source=item.source,
-                path=item.path,
-                trigger=item.trigger,
-                tools=item.tools,
-                tags=item.tags,
-                meta=item.meta,
-            )
-            added += 1
-        elif existing.source != "custom":
-            # 更新（非 custom 来源才覆盖）
-            changed = False
-            if existing.content != item.content:
-                existing.content = item.content
-                changed = True
-            if existing.path != item.path:
-                existing.path = item.path
-                changed = True
-            if existing.display_name != item.display_name:
-                existing.display_name = item.display_name
-                changed = True
-            if changed:
-                updated += 1
+    scanned = scan_all_skills(workspace_root)
+
+    def patch(s):
+        added = 0
+        updated = 0
+        unchanged = 0
+        for item in scanned:
+            existing = s.execute(select(Skill).where(Skill.name == item.name)).scalars().first()
+            if existing is None:
+                s.add(Skill(
+                    name=item.name,
+                    display_name=item.display_name,
+                    description=item.description,
+                    content=item.content,
+                    source=item.source,
+                    path=item.path,
+                    trigger=item.trigger,
+                    tools=item.tools,
+                    tags=item.tags,
+                    meta=item.meta,
+                ))
+                added += 1
+            elif existing.source != "custom":
+                changed = False
+                if existing.content != item.content:
+                    existing.content = item.content
+                    changed = True
+                if existing.path != item.path:
+                    existing.path = item.path
+                    changed = True
+                if existing.display_name != item.display_name:
+                    existing.display_name = item.display_name
+                    changed = True
+                if changed:
+                    updated += 1
+                else:
+                    unchanged += 1
             else:
                 unchanged += 1
-        else:
-            unchanged += 1
+        s.commit()
+        return {
+            "added": added, "updated": updated,
+            "unchanged": unchanged, "total_scanned": len(scanned),
+        }
 
-    await db.flush()
+    result = await run_write_locked(patch, label="skill.sync")
     logger.info(
         "技能扫描同步完成: 扫描=%d 新增=%d 更新=%d 未变=%d",
-        len(scanned), added, updated, unchanged,
+        result["total_scanned"], result["added"], result["updated"], result["unchanged"],
     )
-    return {
-        "added": added, "updated": updated,
-        "unchanged": unchanged, "total_scanned": len(scanned),
-    }
+    return result
 
 
 async def sync_scanned_mcp_servers(
     db: AsyncSession, workspace_root: str | None = None,
 ) -> dict:
-    """扫描外部工具的 MCP 配置，同步到数据库。
+    """扫描外部工具的 MCP 配置，同步到数据库（写引擎单写线程内批量 upsert）。
 
     Returns:
         {"added": int, "updated": int, "unchanged": int, "total_scanned": int}
     """
+    from app.persistence.database import run_write_locked
+
     scanned = scan_all_mcp_servers(workspace_root)
-    added = 0
-    updated = 0
-    unchanged = 0
-
+    # 扫描时获取 tools/list 填充到数据库（网络在 async 侧完成，写线程内仅 DB）
+    fetched_tools: dict[str, list] = {}
     for item in scanned:
-        # 按 name 查找已有记录
-        res = await db.execute(select(McpServer).where(McpServer.name == item.name))
-        existing = res.scalars().first()
+        if item.command:
+            try:
+                fetched = await fetch_mcp_tools(item.command, item.args, item.env)
+                if fetched:
+                    fetched_tools[item.name] = fetched
+            except Exception:
+                pass
 
-        if existing is None:
-            # v4.8: 扫描时获取 tools/list 填充到数据库
-            tools = await fetch_mcp_tools(item.command, item.args, item.env) if item.command else []
-            await create_mcp_server(
-                db,
-                name=item.name,
-                display_name=item.display_name,
-                description=item.description,
-                source=item.source,
-                transport=item.transport,
-                command=item.command,
-                args=item.args,
-                env=item.env,
-                url=item.url,
-                tools=tools,
-                path=item.path,
-                meta=item.meta,
-            )
-            added += 1
-        elif existing.source != "custom":
-            changed = False
-            if existing.command != item.command:
-                existing.command = item.command
-                changed = True
-            if existing.args != item.args:
-                existing.args = item.args
-                changed = True
-            if existing.env != item.env:
-                existing.env = item.env
-                changed = True
-            if existing.url != item.url:
-                existing.url = item.url
-                changed = True
-            if changed:
-                updated += 1
+    def patch(s):
+        added = 0
+        updated = 0
+        unchanged = 0
+        for item in scanned:
+            existing = s.execute(select(McpServer).where(McpServer.name == item.name)).scalars().first()
+            if existing is None:
+                s.add(McpServer(
+                    name=item.name,
+                    display_name=item.display_name,
+                    description=item.description,
+                    source=item.source,
+                    transport=item.transport,
+                    command=item.command,
+                    args=item.args,
+                    env=item.env,
+                    url=item.url,
+                    tools=fetched_tools.get(item.name),
+                    path=item.path,
+                    meta=item.meta,
+                ))
+                added += 1
+            elif existing.source != "custom":
+                changed = False
+                if existing.command != item.command:
+                    existing.command = item.command
+                    changed = True
+                if existing.args != item.args:
+                    existing.args = item.args
+                    changed = True
+                if existing.env != item.env:
+                    existing.env = item.env
+                    changed = True
+                if existing.url != item.url:
+                    existing.url = item.url
+                    changed = True
+                if changed:
+                    updated += 1
+                else:
+                    unchanged += 1
             else:
                 unchanged += 1
-        else:
-            unchanged += 1
+        s.commit()
+        return {
+            "added": added, "updated": updated,
+            "unchanged": unchanged, "total_scanned": len(scanned),
+        }
 
-    await db.flush()
+    result = await run_write_locked(patch, label="mcp.sync")
     logger.info(
         "MCP 扫描同步完成: 扫描=%d 新增=%d 更新=%d 未变=%d",
-        len(scanned), added, updated, unchanged,
+        result["total_scanned"], result["added"], result["updated"], result["unchanged"],
     )
-    return {
-        "added": added, "updated": updated,
-        "unchanged": unchanged, "total_scanned": len(scanned),
-    }
+    return result
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -347,26 +398,36 @@ async def sync_scanned_mcp_servers(
 
 async def bind_agent_skills(
     db: AsyncSession, agent_id: int, skill_ids: list[int],
-) -> Agent | None:
-    """设置 Agent 绑定的技能列表。"""
-    agent = await db.get(Agent, agent_id)
-    if agent is None:
-        return None
-    agent.skill_ids = skill_ids
-    await db.flush()
-    return agent
+) -> bool:
+    """设置 Agent 绑定的技能列表（写引擎单写线程）。返回可否找到。"""
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        agent = s.get(Agent, agent_id)
+        if agent is None:
+            return False
+        agent.skill_ids = skill_ids
+        s.commit()
+        return True
+
+    return await run_write_locked(patch, label=f"agent.bind.skills.{agent_id}")
 
 
 async def bind_agent_mcp_servers(
     db: AsyncSession, agent_id: int, mcp_server_ids: list[int],
-) -> Agent | None:
-    """设置 Agent 绑定的 MCP Server 列表。"""
-    agent = await db.get(Agent, agent_id)
-    if agent is None:
-        return None
-    agent.mcp_server_ids = mcp_server_ids
-    await db.flush()
-    return agent
+) -> bool:
+    """设置 Agent 绑定的 MCP Server 列表（写引擎单写线程）。返回可否找到。"""
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        agent = s.get(Agent, agent_id)
+        if agent is None:
+            return False
+        agent.mcp_server_ids = mcp_server_ids
+        s.commit()
+        return True
+
+    return await run_write_locked(patch, label=f"agent.bind.mcp.{agent_id}")
 
 
 async def get_agent_skills(db: AsyncSession, agent: Agent) -> list[Skill]:

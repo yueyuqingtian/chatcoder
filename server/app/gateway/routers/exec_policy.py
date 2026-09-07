@@ -40,13 +40,14 @@ async def list_rules(db: AsyncSession = Depends(get_db)):
 @router.post("", response_model=ExecPolicyRuleOut)
 async def create_rule(body: ExecPolicyRuleCreate, db: AsyncSession = Depends(get_db)):
     try:
-        rule = await exec_policy_service.create_rule(
+        rid = await exec_policy_service.create_rule(
             db, command_pattern=body.command_pattern, decision=body.decision,
             session_id=body.session_id, justification=body.justification,
             tool_name=body.tool_name,
         )
-        await db.commit()
-        return rule
+        from sqlalchemy import select
+        from app.persistence.models.exec_policy import ExecPolicyRule
+        return (await db.execute(select(ExecPolicyRule).where(ExecPolicyRule.id == rid))).scalars().first()
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -56,5 +57,4 @@ async def delete_rule(rule_id: int, db: AsyncSession = Depends(get_db)):
     ok = await exec_policy_service.delete_rule(db, rule_id)
     if not ok:
         raise HTTPException(404, "规则不存在")
-    await db.commit()
     return {"ok": True}

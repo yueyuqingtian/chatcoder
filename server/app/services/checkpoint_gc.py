@@ -102,8 +102,10 @@ async def cleanup(db: AsyncSession, workspace: str) -> dict:
             pass
 
     # 同步清理 DB 登记：被删除但仍被快照引用的 {ckpt, path} 条目
+    # （async 侧只读收集 → 写引擎单写线程批量更新）
     try:
         snap_res = await db.execute(select(TurnSnapshot))
+        patches: list[tuple[int, list]] = []
         for snap in snap_res.scalars().all():
             items = list(snap.file_list or [])
             kept: list = []
@@ -115,8 +117,18 @@ async def cleanup(db: AsyncSession, workspace: str) -> dict:
                     continue
                 kept.append(item)
             if changed:
-                snap.file_list = kept
-        await db.flush()
+                patches.append((snap.id, kept))
+        if patches:
+            from app.persistence.database import run_write_locked
+
+            def _persist(s):
+                for snap_id, kept in patches:
+                    row = s.get(TurnSnapshot, snap_id)
+                    if row is not None:
+                        row.file_list = kept
+                s.commit()
+
+            await run_write_locked(_persist, label="checkpoint_gc.snaps")
     except Exception:
         logger.debug("[checkpoint_gc] DB 登记清理失败(非阻塞)", exc_info=True)
 

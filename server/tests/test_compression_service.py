@@ -18,14 +18,18 @@ from app.services import compression_service
 
 
 @pytest.fixture
-async def db():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+async def db(tmp_path):
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/compression.db"
+    engine = create_async_engine(db_url)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    from app.persistence import write_engine as _we
+    _we.configure(db_url, foreign_keys=False)  # 写引擎（单写线程）与测试库同源
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as s:
         yield s
     await engine.dispose()
+    _we.configure(None)
 
 
 async def _mk_session(db: AsyncSession) -> Session:
@@ -158,6 +162,7 @@ class TestRestore:
         # SUMMARY 消息标记 restored
         res = await db.execute(select(Message).where(Message.id == summary.id))
         m = res.scalar_one()
+        await db.refresh(m)  # 写引擎独立连接提交，重读最新
         assert m.content.get("restored") is True
         # 还原后原文仍可按压缩块 id 查询
         got = await compression_service.get_compacted_messages(db, s.id, "cp-test-1")

@@ -29,13 +29,21 @@ def parse_cron(cron: str) -> list[int] | None:
 
 
 async def create_scheduled(db: AsyncSession, *, session_id: int, name: str,
-                           cron: str, prompt: str) -> ScheduledTask:
+                           cron: str, prompt: str) -> int:
+    from app.persistence.database import run_write_locked
+
     if parse_cron(cron) is None:
         raise ValueError(f"非法 cron 表达式: {cron}")
-    st = ScheduledTask(session_id=session_id, name=name, cron=cron, prompt=prompt)
-    db.add(st)
-    await db.flush()
-    return st
+
+    def patch(s):
+        st = ScheduledTask(session_id=session_id, name=name, cron=cron, prompt=prompt)
+        s.add(st)
+        s.flush()
+        sid = st.id
+        s.commit()
+        return sid
+
+    return await run_write_locked(patch, label="scheduled.create")
 
 
 async def list_scheduled(db: AsyncSession) -> list[ScheduledTask]:
@@ -47,23 +55,33 @@ async def get_scheduled(db: AsyncSession, task_id: int) -> ScheduledTask | None:
     return await db.get(ScheduledTask, task_id)
 
 
-async def update_scheduled(db: AsyncSession, task_id: int, **kwargs) -> ScheduledTask | None:
-    st = await db.get(ScheduledTask, task_id)
-    if st is None:
-        return None
-    if kwargs.get("cron") and parse_cron(kwargs["cron"]) is None:
-        raise ValueError(f"非法 cron 表达式: {kwargs['cron']}")
-    for k, v in kwargs.items():
-        if v is not None:
-            setattr(st, k, v)
-    await db.flush()
-    return st
+async def update_scheduled(db: AsyncSession, task_id: int, **kwargs) -> bool:
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        st = s.get(ScheduledTask, task_id)
+        if st is None:
+            return False
+        if kwargs.get("cron") and parse_cron(kwargs["cron"]) is None:
+            raise ValueError(f"非法 cron 表达式: {kwargs['cron']}")
+        for k, v in kwargs.items():
+            if v is not None:
+                setattr(st, k, v)
+        s.commit()
+        return True
+
+    return await run_write_locked(patch, label=f"scheduled.update.{task_id}")
 
 
 async def delete_scheduled(db: AsyncSession, task_id: int) -> bool:
-    st = await db.get(ScheduledTask, task_id)
-    if st is None:
-        return False
-    await db.delete(st)
-    await db.flush()
-    return True
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        st = s.get(ScheduledTask, task_id)
+        if st is None:
+            return False
+        s.delete(st)
+        s.commit()
+        return True
+
+    return await run_write_locked(patch, label=f"scheduled.delete.{task_id}")

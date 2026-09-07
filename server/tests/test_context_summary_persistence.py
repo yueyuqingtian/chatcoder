@@ -18,14 +18,18 @@ from app.persistence.models.message import Message, Session
 
 
 @pytest.fixture
-async def db():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+async def db(tmp_path):
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/ctx_summary.db"
+    engine = create_async_engine(db_url)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    from app.persistence import write_engine as _we
+    _we.configure(db_url, foreign_keys=False)  # 写引擎（单写线程）与测试库同源
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as s:
         yield s
     await engine.dispose()
+    _we.configure(None)
 
 
 async def _mk_session(db: AsyncSession) -> Session:
@@ -73,9 +77,11 @@ class TestSummarizeWritesContext:
         # 当前摘要阈值为 0.85×窗口；20×6000 字符约 3 万 token，使用 30K 窗口
         # 明确覆盖阈值，避免测试依赖旧版 0.35 比例。
         msgs = await _mk_text_messages(db, s.id, 20, "x" * 6000)
+        await db.commit()  # 提交数据（maybe_summarize 经写引擎独立连接写入，避免快照隔离）
 
         await maybe_summarize_main_session(db, s, context_window=30_000)
 
+        await db.refresh(s)  # 写引擎独立连接提交，重读最新
         ctx = s.shared_context or {}
         assert ctx.get("summary"), "摘要应写入 shared_context"
         summarized_ids = set(ctx.get("summarized_ids") or [])
@@ -108,11 +114,12 @@ class TestSummarizeWritesContext:
             "trigger": "context-overflow", "restored": True,
         }]
         s.shared_context = ctx
-        await db.flush()
+        await db.commit()  # 提交数据（maybe_summarize 经写引擎独立连接写入，避免快照隔离）
 
         # 候选为后 7 条，使用 5K 窗口确保剩余候选超过当前 0.85 阈值。
         await maybe_summarize_main_session(db, s, context_window=5_000)
 
+        await db.refresh(s)  # 写引擎独立连接提交，重读最新
         after = s.shared_context or {}
         summarized_ids = set(after.get("summarized_ids") or [])
         # 已还原的消息不得被摘要标记

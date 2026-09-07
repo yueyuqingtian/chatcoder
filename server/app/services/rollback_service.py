@@ -183,28 +183,40 @@ async def _restore_checkpoints_for_turn(workspace: str, snap: TurnSnapshot) -> d
 # ── 快照创建 ──
 
 async def create_turn_snapshot(db: AsyncSession, *, session_id: int, turn_id: int,
-                               workspace: str, user_message_id: int | None = None) -> TurnSnapshot | None:
-    """turn 开始前创建快照（幂等 get-or-create）。
+                               workspace: str, user_message_id: int | None = None) -> int | None:
+    """turn 开始前创建快照（幂等 get-or-create，写引擎单写线程内完成）。
 
     plan-95: 路由层在 turn 创建时提前调用一次，引擎内再调用时直接返回已有快照——
     保证"发送后立即停止"等任何路径下 turn 都有快照可回滚。
+    返回快照 id（已存在/新建；None 表示未创建成功）。
     """
-    res = await db.execute(select(TurnSnapshot).where(TurnSnapshot.turn_id == turn_id))
-    existing = res.scalars().first()
-    if existing is not None:
-        return existing
+    from app.persistence.database import run_write_locked
+
     try:
         git_head = await _get_git_head(workspace)
     except Exception:
         git_head = None
-    snap = TurnSnapshot(
-        session_id=session_id, turn_id=turn_id,
-        user_message_id=user_message_id, git_head=git_head,
-        file_list=[], new_files=[],
-    )
-    db.add(snap)
-    await db.flush()
-    return snap
+
+    def patch(s):
+        from sqlalchemy import select as _select
+        from app.persistence.models.rollback import TurnSnapshot
+        existing = s.execute(
+            _select(TurnSnapshot).where(TurnSnapshot.turn_id == turn_id)
+        ).scalars().first()
+        if existing is not None:
+            return existing.id
+        snap = TurnSnapshot(
+            session_id=session_id, turn_id=turn_id,
+            user_message_id=user_message_id, git_head=git_head,
+            file_list=[], new_files=[],
+        )
+        s.add(snap)
+        s.flush()
+        sid = snap.id
+        s.commit()
+        return sid
+
+    return await run_write_locked(patch, label=f"turn.snapshot.{turn_id}")
 
 
 def record_checkpoint(snap: TurnSnapshot, checkpoint_path: str, new_file: str | None = None) -> None:
@@ -219,32 +231,42 @@ def record_checkpoint(snap: TurnSnapshot, checkpoint_path: str, new_file: str | 
 
 async def record_checkpoint_for_turn(db: AsyncSession, turn_id: int, checkpoint_path: str,
                                      rel_path: str, new_file: str | None = None) -> None:
-    """按 turn 登记 checkpoint（内部查快照并追加 file_list/new_files）。失败非阻塞。
+    """按 turn 登记 checkpoint（写线程内查快照并追加 file_list/new_files）。失败非阻塞。
 
     rel_path：原文件相对工作区的路径（恢复时反查目标）。
     v2.2 (plan-88): 同 turn 同文件去重——首次写盘前备份一次即可恢复整个 turn，
     后续重复写盘跳过备份，避免 checkpoint 目录膨胀。
+    v975：经 WriteEngine 单写线程（读-改-写在写线程内一条事务，去重可靠；
+    async 侧不再持有 checkpoint 写事务，消除"写后悬挂"长持锁）。
     """
     if not checkpoint_path and not new_file:
         return
     try:
-        snap_res = await db.execute(select(TurnSnapshot).where(TurnSnapshot.turn_id == turn_id))
-        snap = snap_res.scalars().first()
-        if snap is None:
-            return
-        if new_file:
-            files = list(snap.new_files or [])
-            if new_file not in files:
-                files.append(new_file)
-                snap.new_files = files
-        elif checkpoint_path:
-            entry = {"ckpt": checkpoint_path, "path": rel_path}
-            items = list(snap.file_list or [])
-            if any(isinstance(it, dict) and it.get("path") == rel_path for it in items):
-                return  # 该文件本 turn 已备份，无需重复
-            items.append(entry)
-            snap.file_list = items
-        await db.flush()
+        from app.persistence.database import run_write_locked
+
+        def _persist(s):
+            from sqlalchemy import select as _select
+            from app.persistence.models.rollback import TurnSnapshot
+            snap = s.execute(
+                _select(TurnSnapshot).where(TurnSnapshot.turn_id == turn_id)
+            ).scalars().first()
+            if snap is None:
+                return
+            if new_file:
+                files = list(snap.new_files or [])
+                if new_file not in files:
+                    files.append(new_file)
+                    snap.new_files = files
+            else:
+                entry = {"ckpt": checkpoint_path, "path": rel_path}
+                items = list(snap.file_list or [])
+                if any(isinstance(it, dict) and it.get("path") == rel_path for it in items):
+                    return  # 该文件本 turn 已备份，无需重复
+                items.append(entry)
+                snap.file_list = items
+            s.commit()
+
+        await run_write_locked(_persist, label=f"rollback.ckpt.{turn_id}")
     except Exception:
         logger.debug("[checkpoint] 登记失败(非阻塞): turn=%s %s", turn_id, rel_path, exc_info=True)
 
@@ -288,9 +310,8 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
     from app.services import task_service, turn_service
     await task_service.cancel_turn_tasks(db, snap.session_id, turn_id)
 
-    # 1.2 产物清扫（v12）：该 turn 及其之后任务的 artifact_ids 置空。
-    #     Artifact 表 task_id 置 NULL（保留行，前端不再按任务展示），
-    #     该 turn 的 FileReview 审核记录作废删除——回滚后产物区不残留已撤销文件。
+    # 1.2 产物清扫（v12）：收集该 turn 及其之后任务/产物的清理项（写统一在下方
+    #     一次写引擎事务内提交，保持原子性；此处只读不写）。
     from app.persistence.models.task import Artifact, Task
     task_res = await db.execute(
         select(Task).where(
@@ -301,20 +322,11 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
     rollback_task_ids: list[int] = []
     for t in task_res.scalars().all():
         if t.artifact_ids:
-            t.artifact_ids = []
             rollback_task_ids.append(t.id)
-    if rollback_task_ids:
-        art_res = await db.execute(
-            select(Artifact).where(Artifact.task_id.in_(rollback_task_ids))
-        )
-        for a in art_res.scalars().all():
-            a.task_id = None
     review_res = await db.execute(
         select(FileReview).where(FileReview.turn_id == turn_id)
     )
-    for rv in review_res.scalars().all():
-        await db.delete(rv)
-    await db.flush()
+    review_ids = [rv.id for rv in review_res.scalars().all()]
 
     # 2. 文件回滚（v9 精确回滚：只撤销 AI 改动的那部分，保留用户手动改动；
     #    绝不全局 git 恢复，避免误伤非当前 turn 的改动）
@@ -341,6 +353,7 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
     # v2.2 (plan-88): 回滚完成后清理该 turn 的 checkpoint 文件（配置开启时）。
     # 备份已完成使命（精确回滚用写盘记录，checkpoint 仅兜底），删除磁盘文件并
     # 同步清空快照 file_list 登记，避免 .chatcoder/checkpoints 无限膨胀。
+    _clear_ckpt_list = False
     if settings.checkpoint_cleanup_on_rollback and snap.file_list:
         _deleted_ckpts = 0
         for item in snap.file_list:
@@ -360,17 +373,10 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
                 pass
         if _deleted_ckpts:
             logger.info("[rollback] turn=%s 回滚后清理 checkpoint %d 个", turn_id, _deleted_ckpts)
-        snap.file_list = []
-        await db.flush()
+        _clear_ckpt_list = True
 
     # 回滚成功后，物理清理该 turn 及其之后的写盘记录，避免已回滚的脏记录在后续回滚/变更审核中残留
-    await db.execute(
-        delete(RollbackWrite).where(
-            RollbackWrite.session_id == snap.session_id,
-            RollbackWrite.turn_id >= turn_id,
-        )
-    )
-    await db.flush()
+    # （删除在下方统一写引擎事务内执行）
 
     # 3. 消息软删：软删主线程「本 turn 及其之后」的消息，同时软删该 turn 及其之后
     #    子代理线程（thread_id 属于 kind=sub 的 agent）的消息——子代理消息也是该 turn 的
@@ -404,22 +410,46 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
             # v2.2: 回滚撤销时同时回填文字与附件（图片等），前端可修改后直接重发
             user_text = str((m.content or {}).get("text", ""))
             user_attachments = (m.content or {}).get("attachments")
-        m.deleted = True
+    soft_msg_ids = [m.id for m in msgs]
+    sub_agent_ids = [a.id for a in sub_agents]
 
     # 3.1 子代理 Agent 记录置为 terminated（保留历史，明确已随 turn 回滚终止）。
     from app.orchestration.agent_events import broadcast
     for a in sub_agents:
         if a.status in ("running", "done", "failed"):
-            a.status = "terminated"
             await broadcast(snap.session_id, {
                 "event": "agent.updated",
                 "payload": {"agent_id": a.id, "status": "terminated"},
             })
 
-    # 4. 状态标记
-    snap.rolled_back = True
-    await turn_service.update_turn_status(db, turn_id, "rolled_back")
-    await db.flush()
+    # 4. 状态标记 + 全部 DB 写入统一在一个写引擎事务内提交（原子性保持）
+    from sqlalchemy import delete, update as _update
+    from app.persistence.database import run_write_locked
+
+    def _persist(s):
+        from app.persistence.models.turn import Turn as _Turn
+        if rollback_task_ids:
+            s.execute(_update(Task).where(Task.id.in_(rollback_task_ids)).values(artifact_ids=[]))
+            s.execute(_update(Artifact).where(Artifact.task_id.in_(rollback_task_ids)).values(task_id=None))
+        if review_ids:
+            s.execute(delete(FileReview).where(FileReview.id.in_(review_ids)))
+        snap_row = s.get(TurnSnapshot, snap.id)
+        if snap_row is not None:
+            if _clear_ckpt_list:
+                snap_row.file_list = []
+            snap_row.rolled_back = True
+        s.execute(delete(RollbackWrite).where(
+            RollbackWrite.session_id == snap.session_id,
+            RollbackWrite.turn_id >= turn_id,
+        ))
+        if soft_msg_ids:
+            s.execute(_update(Message).where(Message.id.in_(soft_msg_ids)).values(deleted=True))
+        if sub_agent_ids:
+            s.execute(_update(Agent).where(Agent.id.in_(sub_agent_ids)).values(status="terminated"))
+        s.execute(_update(_Turn).where(_Turn.id == turn_id).values(status="rolled_back"))
+        s.commit()
+
+    await run_write_locked(_persist, label=f"rollback.persist.{turn_id}")
 
     # 5. 审计
     from app.services import audit_service
@@ -645,11 +675,18 @@ async def record_turn_write(db: AsyncSession, *, session_id: int, turn_id: int,
     """记录一次写盘操作的前后内容（精确回滚依据）。失败不阻塞（非关键路径）。
 
     binary=True 表示二进制/超限文件：不存文本前后内容，回滚走 checkpoint 备份恢复。
+    v975：经 WriteEngine 单写线程（写事务不阻塞事件循环、无锁单写者）。
     """
     try:
-        db.add(RollbackWrite(session_id=session_id, turn_id=turn_id, tool=tool,
-                             path=path, old_content=before, new_content=after, binary=binary))
-        await db.flush()
+        from app.persistence.database import run_write_locked
+
+        def _persist(s):
+            from app.persistence.models.rollback import RollbackWrite
+            s.add(RollbackWrite(session_id=session_id, turn_id=turn_id, tool=tool,
+                                path=path, old_content=before, new_content=after, binary=binary))
+            s.commit()
+
+        await run_write_locked(_persist, label=f"rollback.write.{turn_id}")
     except Exception:
         logger.debug("[rollback] 写盘记录失败(非阻塞): %s %s", tool, path, exc_info=True)
 
@@ -818,17 +855,24 @@ async def upsert_file_reviews(db: AsyncSession, *, turn_id: int,
     ))
     if not unique_paths:
         return 0
-    stmt = sqlite_insert(FileReview).values(
-        [{"turn_id": turn_id, "path": p, "reviewed": reviewed} for p in unique_paths]
-    )
-    stmt = stmt.on_conflict_do_update(
-        index_elements=[FileReview.turn_id, FileReview.path],
-        set_={"reviewed": stmt.excluded.reviewed},
-        # reviewed 未变化的行不更新也不返回，保持"变更条数"语义与幂等性
-        where=FileReview.reviewed != stmt.excluded.reviewed,
-    ).returning(FileReview.id)
-    res = await db.execute(stmt)
-    return len(res.all())
+
+    from app.persistence.database import run_write_locked
+
+    def _persist(s):
+        stmt = sqlite_insert(FileReview).values(
+            [{"turn_id": turn_id, "path": p, "reviewed": reviewed} for p in unique_paths]
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[FileReview.turn_id, FileReview.path],
+            set_={"reviewed": stmt.excluded.reviewed},
+            # reviewed 未变化的行不更新也不返回，保持"变更条数"语义与幂等性
+            where=FileReview.reviewed != stmt.excluded.reviewed,
+        ).returning(FileReview.id)
+        rows = s.execute(stmt).all()  # 先消费结果再 commit（SQLite 不允许有未读结果时提交）
+        s.commit()
+        return len(rows)
+
+    return await run_write_locked(_persist, label="review.upsert")
 
 
 async def resolve_turn_workspace(db: AsyncSession, turn_id: int) -> tuple[int | None, str]:

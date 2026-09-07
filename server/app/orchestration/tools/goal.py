@@ -50,25 +50,20 @@ class GoalCompleteTool(Tool):
             return ToolResult(ok=False, output="", error="summary 不能为空")
 
         from app.persistence.models.message import Session
+        from app.persistence.database import run_write_locked
 
-        async def _do_complete(db) -> Session | None:
-            session = (await db.execute(
+        def _do_complete(s) -> bool:
+            session = s.execute(
                 select(Session).where(Session.id == ctx.session_id)
-            )).scalars().first()
+            ).scalars().first()
             if session is None or session.goal_status != "active":
-                return None
+                return False
             session.goal_status = "completed"
-            await db.commit()
-            return session
+            s.commit()
+            return True
 
-        # 优先 ctx.db（与 turn 主循环同连接，避免 SQLite 跨连接写锁），回退独立 session
-        if ctx.db is not None:
-            session = await _do_complete(ctx.db)
-        else:
-            async with async_session_factory() as db:
-                session = await _do_complete(db)
-
-        if session is None:
+        ok = await run_write_locked(_do_complete, label="goal.complete")
+        if not ok:
             return ToolResult(
                 ok=False,
                 output="",

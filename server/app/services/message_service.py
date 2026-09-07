@@ -81,34 +81,61 @@ async def create_message(
     thread_id: int | None = None,
     token_usage: int = 0,
     broadcast: bool = True,
+    buffered: bool = False,
 ) -> Message:
     """创建消息并广播 message.created（可选）。
 
     SQLite 并发写冲突（database is locked / 前一失败导致的 PendingRollbackError）
     是瞬时性的：回滚后短暂退避重试可显著降低「消息落库失败 → 整个 turn 中断」的概率。
+
+    `buffered=True`：进入 write-behind 缓冲（热路径），落库与广播由 Flusher 批量完成——
+    调用方不应依赖返回值的 id（未落库，id=None）；`turn_id` 必须非空，否则回退直写。
+    依赖即时 id 的路径（如 turn 创建的用户消息）必须保持 buffered=False（直写）。
     """
+    content = content or {}
+    if buffered and turn_id is not None:
+        from app.persistence.write_behind import WriteItem, write_behind
+        buf = write_behind.get(session_id, turn_id)
+        buf.enqueue(WriteItem("message", {
+            "session_id": session_id, "turn_id": turn_id, "thread_id": thread_id,
+            "sender_type": sender_type, "sender_id": sender_id, "msg_type": msg_type,
+            "content": content, "token_usage": token_usage,
+        }))
+        return Message(
+            session_id=session_id, turn_id=turn_id, thread_id=thread_id,
+            sender_type=sender_type, sender_id=sender_id, msg_type=msg_type,
+            content=content, token_usage=token_usage,
+        )
+
     msg = Message(
         session_id=session_id, turn_id=turn_id, thread_id=thread_id,
         sender_type=sender_type, sender_id=sender_id,
-        msg_type=msg_type, content=content or {}, token_usage=token_usage,
+        msg_type=msg_type, content=content, token_usage=token_usage,
     )
-    _tries_used = 1
-    for _attempt in range(_MESSAGE_WRITE_RETRIES):
-        _tries_used = _attempt + 1
-        try:
-            db.add(msg)
-            # 全局会话关闭 autoflush 后，消息主键和 created_at 需要显式 flush。
-            await db.flush()
-            await db.commit()
-            break
-        except Exception as exc:  # noqa: BLE001
-            await db.rollback()  # 清掉失败事务，禁止在 rollback-only 会话上重试
-            if _attempt >= _MESSAGE_WRITE_RETRIES - 1 or not _is_db_lock_error(exc):
-                raise
-            # 锁竞争通常为毫秒级；下一轮重新 add 同一个已回滚对象。
-            await asyncio.sleep(0.05 * (2 ** _attempt))
-    if _tries_used > 1:
-        logger.debug("message 落库重试 %d 次后成功", _tries_used)
+    # 直写路径：经 WriteEngine 单写线程（无锁单写者）；返回"展示对象"（id/created_at
+    # 已在写线程内确定，属性可读；跨层不绑定 async 会话）。
+    from app.persistence.database import run_write_locked
+
+    def _persist(s):
+        m = Message(
+            session_id=session_id, turn_id=turn_id, thread_id=thread_id,
+            sender_type=sender_type, sender_id=sender_id,
+            msg_type=msg_type, content=content, token_usage=token_usage,
+        )
+        s.add(m)
+        s.flush()
+        mid = m.id
+        created = str(m.created_at) if m.created_at else None
+        s.commit()
+        return mid, created
+
+    try:
+        mid, created = await run_write_locked(_persist, label="message.create")
+    except Exception:
+        logger.error("[message] 直写落库失败（无锁单写者）", exc_info=True)
+        raise
+    msg.id = mid
+    msg.created_at = created
     if broadcast:
         try:
             from app.gateway.ws import manager as ws_manager
@@ -143,3 +170,18 @@ async def list_messages(
 
 async def get_message(db: AsyncSession, message_id: int) -> Message | None:
     return await db.get(Message, message_id)
+
+
+async def patch_message(message_id: int, **fields) -> None:
+    """写引擎单写线程提交 Message 字段补丁（无锁单写者；如 turn_id 回填）。"""
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        m = s.get(Message, message_id)
+        if m is None:
+            return
+        for k, v in fields.items():
+            setattr(m, k, v)
+        s.commit()
+
+    await run_write_locked(patch, label=f"message.patch.{message_id}")

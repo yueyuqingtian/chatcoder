@@ -17,24 +17,37 @@ async def list_rules(db: AsyncSession, session_id: int | None = None) -> list[Ex
 
 async def create_rule(db: AsyncSession, *, command_pattern: str, decision: str,
                       session_id: int | None = None, justification: str | None = None,
-                      tool_name: str | None = None) -> ExecPolicyRule:
+                      tool_name: str | None = None) -> int:
+    from app.persistence.database import run_write_locked
+
     if decision not in ("allow", "deny", "ask"):
         raise ValueError("decision 必须为 allow/deny/ask")
-    rule = ExecPolicyRule(command_pattern=command_pattern, decision=decision,
-                          session_id=session_id, justification=justification,
-                          tool_name=tool_name)
-    db.add(rule)
-    await db.flush()
-    return rule
+
+    def patch(s):
+        rule = ExecPolicyRule(command_pattern=command_pattern, decision=decision,
+                              session_id=session_id, justification=justification,
+                              tool_name=tool_name)
+        s.add(rule)
+        s.flush()
+        rid = rule.id
+        s.commit()
+        return rid
+
+    return await run_write_locked(patch, label="rule.create")
 
 
 async def delete_rule(db: AsyncSession, rule_id: int) -> bool:
-    rule = await db.get(ExecPolicyRule, rule_id)
-    if rule is None:
-        return False
-    await db.delete(rule)
-    await db.flush()
-    return True
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        rule = s.get(ExecPolicyRule, rule_id)
+        if rule is None:
+            return False
+        s.delete(rule)
+        s.commit()
+        return True
+
+    return await run_write_locked(patch, label=f"rule.delete.{rule_id}")
 
 
 def match_rule(rules: list[ExecPolicyRule], command: str) -> tuple[str | None, str | None]:

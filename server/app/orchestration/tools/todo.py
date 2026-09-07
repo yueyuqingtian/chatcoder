@@ -132,44 +132,41 @@ class TodoWriteTool(Tool):
         )
 
     async def _sync_to_db(self, ctx: ToolContext, turn_id: int, todos: list[dict[str, str]]) -> bool:
-        """把模型提交的清单如实写入 Task 表。
-
-        P0 修复 A: 优先用 ctx.db（与 turn 主循环同连接，避免 SQLite 跨连接写锁），
-        写入后立即 commit（对齐 engine v9 立即提交模式，前端 refreshTasks 立刻可查）；
-        ctx.db 为空时回退独立 session（兼容 review/子代理等路径）。
+        """把模型提交的清单如实写入 Task 表（WriteEngine 单写线程，无锁单写者）。
 
         plan-482: 删除"与引擎 group 按标题匹配/追加步骤"的加工逻辑——
         系统不再预拆分，清单即权威，模型提交什么就落什么。
         """
-        from app.persistence.models.task import Task
+        from app.persistence.database import run_write_locked
 
-        async def _do_sync(db) -> list[Task]:
-            todo_group = (await db.execute(
+        def _do(s) -> list[tuple]:
+            from app.persistence.models.task import Task
+
+            todo_group = s.execute(
                 select(Task).where(
                     Task.turn_id == turn_id, Task.kind == "group", Task.title == _TODO_GROUP_TITLE,
                 ).order_by(Task.id.asc()).limit(1)
-            )).scalars().first()
+            ).scalars().first()
             if todo_group is None:
-                request_task = (await db.execute(
-                    select(Task).where(
-                        Task.turn_id == turn_id, Task.kind == "request",
-                    ).order_by(Task.id.asc()).limit(1)
-                )).scalars().first()
+                request_task = s.execute(
+                    select(Task).where(Task.turn_id == turn_id, Task.kind == "request")
+                    .order_by(Task.id.asc()).limit(1)
+                ).scalars().first()
                 todo_group = Task(
                     session_id=ctx.session_id, turn_id=turn_id,
                     title=_TODO_GROUP_TITLE, description="模型自主维护的执行清单",
                     parent_task_id=request_task.id if request_task else None,
                     kind="group", status="running", priority=0,
                 )
-                db.add(todo_group)
-                await db.flush()
+                s.add(todo_group)
+                s.flush()
 
-            steps = list((await db.execute(
+            steps = list(s.execute(
                 select(Task).where(Task.parent_task_id == todo_group.id).order_by(Task.priority.asc(), Task.id.asc())
-            )).scalars().all())
-            by_title = {s.title: s for s in steps}
+            ).scalars().all())
+            by_title = {st.title: st for st in steps}
             used: set[int] = set()
-            changed: list[Task] = []
+            changed: list[tuple] = []
             for index, todo in enumerate(todos):
                 step = by_title.get(todo["content"])
                 new_status = _STATUS_MAP[todo["status"]]
@@ -179,45 +176,34 @@ class TodoWriteTool(Tool):
                         parent_task_id=todo_group.id, kind="step",
                         title=todo["content"], priority=index, status=new_status,
                     )
-                    db.add(step)
-                    await db.flush()
+                    s.add(step)
+                    s.flush()
                 else:
                     step.priority = index
                     step.is_hidden = False
                     if step.status != new_status:
                         step.status = new_status
                 used.add(step.id)
-                changed.append(step)
+                changed.append((step.id, step.status, step.note or ""))
             for step in steps:
                 if step.id not in used and not step.is_hidden:
                     step.is_hidden = True
                     step.status = "cancelled"
-                    changed.append(step)
+                    changed.append((step.id, step.status, step.note or ""))
 
             done_count = sum(1 for t in todos if t["status"] == "completed")
             todo_group.status = "done" if done_count == len(todos) else "running"
-            # autoflush 已关闭；此处显式 flush 后短事务提交，广播放在提交之后。
-            await db.flush()
-            await commit_with_retry(db, label="todo.write")
+            s.commit()
             return changed
 
-        if ctx.db is not None:
-            changed = await _do_sync(ctx.db)
-            for step in changed:
-                await broadcast(ctx.session_id, {
-                    "event": "task.updated",
-                    "payload": {"task_id": step.id, "status": step.status, "note": step.note or ""},
-                })
-            logger.info("[todo] _sync_to_db 同连接落库成功 turn=%s items=%d", turn_id, len(todos))
-            return True
-
-        # 回退路径：独立 session（review/子代理等无 ctx.db 场景）
-        async with async_session_factory() as db:
-            changed = await _do_sync(db)
-            for step in changed:
-                await broadcast(ctx.session_id, {
-                    "event": "task.updated",
-                    "payload": {"task_id": step.id, "status": step.status, "note": step.note or ""},
-                })
-            logger.info("[todo] _sync_to_db 独立连接落库成功 turn=%s items=%d", turn_id, len(todos))
-            return True
+        try:
+            changed = await run_write_locked(_do, label="todo.write")
+        except Exception:
+            raise
+        for tid, status, note in changed:
+            await broadcast(ctx.session_id, {
+                "event": "task.updated",
+                "payload": {"task_id": tid, "status": status, "note": note},
+            })
+        logger.info("[todo] _sync_to_db 写引擎落库成功 turn=%s items=%d", turn_id, len(todos))
+        return True

@@ -61,7 +61,6 @@ async def start_login(db: AsyncSession, provider_id: int, api_base: str,
             refresh_token=None,  # IM 路径无 refresh_token（对齐参考项目，过期重走登录）
             account=im_result.account,
         )
-        await db.commit()
         return {"status": "logged_in", "account": im_result.account, "source": "im"}
 
     return await start_browser_login(db, provider_id, api_base, timeout_ms=timeout_ms)

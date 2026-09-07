@@ -67,6 +67,45 @@ def test_anthropic_message_stop_is_terminal():
     assert monitor["terminal"] is True
 
 
+# ── v966: 帧计数（零帧=网关断流，区别于模型主动结束） ──
+
+def test_openai_data_frames_are_counted():
+    p = _provider(provider="glm")
+    monitor = p._new_monitor()
+    p._parse_openai_frame('data: {"choices":[{"delta":{"content":"你"}}]}', monitor)
+    p._parse_openai_frame('data: {"choices":[{"delta":{"content":"好"}}]}', monitor)
+    p._parse_openai_frame('data: {"usage":{"prompt_tokens":10,"total_tokens":10}}', monitor)
+    assert monitor["frames"] == 3
+
+
+def test_openai_done_and_blank_are_not_counted():
+    p = _provider(provider="glm")
+    monitor = p._new_monitor()
+    assert p._parse_openai_frame("data: [DONE]", monitor) is True
+    assert p._parse_openai_frame("data:", monitor) is False
+    assert p._parse_openai_frame(": keep-alive", monitor) is False
+    assert monitor["frames"] == 0
+
+
+def test_anthropic_data_frames_are_counted():
+    p = _provider(anthropic=True, provider="kimi")
+    monitor = p._new_monitor()
+    p._parse_anthropic_frame('data: {"type":"ping"}', monitor)
+    p._parse_anthropic_frame(
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}',
+        monitor,
+    )
+    assert p._parse_anthropic_frame("data: [DONE]", monitor) is True
+    assert monitor["frames"] == 2
+
+
+def test_zero_frame_stream_is_reported_in_done_event():
+    """零帧断流时 done 事件携带 frames=0，供上层判定重试。"""
+    p = _provider(provider="glm")
+    monitor = p._new_monitor()
+    assert monitor["frames"] == 0
+
+
 # ── Anthropic max_tokens 对齐 ──
 
 def test_anthropic_max_tokens_capped_by_catalog():

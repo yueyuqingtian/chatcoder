@@ -179,15 +179,31 @@ async def restore_compaction(
     msg_id = target.get("summary_message_id")
     if msg_id:
         try:
-            m = await db.get(Message, msg_id)
+            from app.persistence.models.message import Message as _Msg
+            m = await db.get(_Msg, msg_id)
             if m is not None and isinstance(m.content, dict):
-                m.content = {**m.content, "restored": True}
+                _restore_content = {**m.content, "restored": True}
+                from app.persistence.database import run_write_locked
+
+                def _p_restore(s):
+                    row = s.get(_Msg, msg_id)
+                    if row is not None:
+                        row.content = _restore_content
+                    s.commit()
+
+                await run_write_locked(_p_restore, label=f"compaction.restore.msg.{msg_id}")
         except Exception:
             logger.debug("[compression] SUMMARY 标记 restored 失败(非阻塞)", exc_info=True)
 
-    session.shared_context = new_ctx
-    await db.flush()
-    await db.commit()
+    from app.persistence.database import run_write_locked
+
+    def _p_ctx(s):
+        row = s.get(Session, session_id)
+        if row is not None:
+            row.shared_context = new_ctx
+        s.commit()
+
+    await run_write_locked(_p_ctx, label=f"compaction.restore.ctx.{session_id}")
     logger.info("[compression] session=%s 还原压缩块 %s: %d 条消息恢复上下文",
                 session_id, compaction_id, len(shadowed_ids))
     return len(shadowed_ids)

@@ -197,7 +197,6 @@ async def start_login(db: AsyncSession, provider_id: int, api_base: str) -> dict
             refresh_token=refresh_token or None,
             account=account,
         )
-        await db.commit()
         logger.info("[workbuddy] provider=%s 浏览器登录完成", provider_id)
         return {"status": "logged_in", "account": account}
 

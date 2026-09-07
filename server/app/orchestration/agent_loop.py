@@ -998,39 +998,39 @@ async def run_agent_loop(
 
             # v1.1: 用量流水落库（全软件统计的数据源），失败不阻断主流程
             # v0.3.1: 改用独立会话——此前在主 db 上 commit 失败 → rollback 主 db，
-            # 主 db 会话上已加载对象（agent/session/turn）全部过期，后续属性访问
-            # 触发同步 reload 抛 MissingGreenlet（SQLAlchemy xd2s）。独立会话失败
-            # 只回滚自身，主 db 及其对象不受影响。
+            # 主 db 会话上已加载对象全部过期，后续属性访问触发同步 reload 抛
+            # MissingGreenlet。write-behind 缓冲项只带标量，天然规避该问题。
             try:
-                async with async_session_factory() as _usage_db:
-                    from app.persistence.models.usage_record import UsageRecord
-                    _model_name = ""
-                    _provider_name = ""
-                    if model_id is not None:
-                        from app.persistence.models.model_reg import Model, Provider
-                        _m = await _usage_db.get(Model, model_id)
-                        _model_name = _m.name if _m else ""
-                        # plan-152-704: 供应商显示名，区分不同供应商的同名模型
-                        if _m is not None and _m.provider_id is not None:
-                            _p = await _usage_db.get(Provider, _m.provider_id)
-                            _provider_name = _p.name if _p else ""
-                    _usage_db.add(UsageRecord(
-                        session_id=session_id, turn_id=turn_id, agent_id=agent_id,
-                        model_id=model_id, model_name=_model_name, provider_name=_provider_name,
-                        prompt_tokens=_final_prompt, completion_tokens=_final_completion,
-                        reasoning_tokens=(getattr(response.usage, "reasoning_tokens", 0) or 0) if response.usage else 0,
-                        cached_tokens=(getattr(response.usage, "cached_input_tokens", 0) or 0) if response.usage else 0,
-                        usage_source=_usage_source,
-                    ))
-                    await _usage_db.commit()
-                    # v1.1: 主代理同步持久化最后一次真实占用（重启/切会话后圆环口径一致）
-                    if thread_id is None and _final_prompt > 0:
-                        _srow = await _usage_db.get(_Session, session_id)
-                        if _srow is not None:
-                            from datetime import datetime
-                            _srow.last_prompt_tokens = _final_prompt
-                            _srow.last_usage_at = str(datetime.utcnow())
-                            await _usage_db.commit()
+                from app.persistence.models.usage_record import UsageRecord  # noqa: F401
+                _model_name = ""
+                _provider_name = ""
+                if model_id is not None:
+                    from app.persistence.models.model_reg import Model, Provider
+                    _m = await db.get(Model, model_id)
+                    _model_name = _m.name if _m else ""
+                    # plan-152-704: 供应商显示名，区分不同供应商的同名模型
+                    if _m is not None and _m.provider_id is not None:
+                        _p = await db.get(Provider, _m.provider_id)
+                        _provider_name = _p.name if _p else ""
+                from app.persistence.write_behind import WriteItem, write_behind
+                _buf = write_behind.get(session_id, turn_id)
+                _buf.enqueue(WriteItem("usage", {
+                    "session_id": session_id, "turn_id": turn_id, "agent_id": agent_id,
+                    "model_id": model_id, "model_name": _model_name,
+                    "provider_name": _provider_name,
+                    "prompt_tokens": _final_prompt, "completion_tokens": _final_completion,
+                    "reasoning_tokens": (getattr(response.usage, "reasoning_tokens", 0) or 0) if response.usage else 0,
+                    "cached_tokens": (getattr(response.usage, "cached_input_tokens", 0) or 0) if response.usage else 0,
+                    "usage_source": _usage_source,
+                }))
+                # v1.1: 主代理同步持久化最后一次真实占用（重启/切会话后圆环口径一致）
+                if thread_id is None and _final_prompt > 0:
+                    from datetime import datetime
+                    _buf.enqueue(WriteItem("session_usage", {
+                        "session_id": session_id,
+                        "last_prompt_tokens": _final_prompt,
+                        "last_usage_at": str(datetime.utcnow()),
+                    }))
             except Exception:
                 logger.debug("usage 流水落库失败(非阻塞)", exc_info=True)
 
@@ -1174,6 +1174,7 @@ async def run_agent_loop(
                             msg_type=MsgType.TOOL_CALL.value,
                             content={"tool": tool_name, "args": args, "call_key": tc.get("id", ""),
                                      "agent_name": agent_name},
+                            buffered=True,
                         )
                         await message_service.create_message(
                             db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
@@ -1182,6 +1183,7 @@ async def run_agent_loop(
                             content={"tool": tool_name, "call_key": tc.get("id", ""),
                                      "ok": True, "output": tool_output[:MAX_TOOL_OUTPUT_CHARS],
                                      "error": "", "agent_name": agent_name},
+                            buffered=True,
                         )
                         _tool_executed = True
                         continue
@@ -1197,6 +1199,7 @@ async def run_agent_loop(
                         msg_type=MsgType.TOOL_CALL.value,
                         content={"tool": tool_name, "args": args, "call_key": call_key,
                                  "agent_name": agent_name},
+                        buffered=True,
                     )
 
                     # plan-865: 工具执行使用独立 AsyncSession——不再与主循环共享 db，
@@ -1416,11 +1419,19 @@ async def run_agent_loop(
                                  "error": result.error, "duration_ms": _dur,
                                  "agent_name": agent_name,
                                  **({"change_stat": _change_stat} if _change_stat else {})},
+                        buffered=True,
                     )
                     messages.append(ChatMessage(
                         role="tool", content=_truncate_output(result.output or result.error),
                         name=tool_name, tool_call_id=tc.get("id", ""),
                     ))
+                    # 步级提交：结束主 db 零星写（checkpoint/任务态）形成短事务边界，
+                    # 避免消息缓冲化后主 db 长事务悬挂（违背短事务原则）。
+                    try:
+                        await db.commit()
+                    except Exception:
+                        await db.rollback()
+                        logger.debug("[agent] 步级提交失败 turn=%s tool=%s", turn_id, tool_name, exc_info=True)
                     # v2.2: todo_write 成功 → 重置 todo 提醒计数
                     if tool_name == "todo_write" and result.ok:
                         _todo_active = True
@@ -1582,6 +1593,7 @@ async def _emit_agent_msg(db, *, session_id, turn_id, thread_id, agent_id, agent
         db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
         sender_type=SenderType.AGENT.value, sender_id=agent_id,
         msg_type=msg_type.value, content=content,
+        buffered=True,  # 热路径消息走 write-behind 批量落库
     )
 
 
@@ -1608,9 +1620,20 @@ def _response_failure_reason(response, has_progress: bool = False) -> tuple[str,
     v31 (plan-89): 对齐 zcode/AI SDK 语义——本 turn 已有工具产出（has_progress）
     时，finish_reason=stop 的空响应是模型"任务已完成、主动结束对话"的正常信号，
     视为健康直接结束，不触发重试/报错（任务完成后误报"模型返回空响应"的根因）。
+    v966: 上述豁免仅适用于"网关已下发数据帧"的应答。若 provider 报告零帧
+    （frames_received == 0，如 ta3 网关 HTTP 200 空流/仅 [DONE]），说明请求期间
+    网络卡顿或服务器处理超时——模型根本没有应答，不能判定为"结束"，
+    必须 fatal 走多次重试（与访问异常重试一致），否则任务会静默中断。
+    frames_received=None（provider 未提供信号）时保持旧逻辑不变。
     """
     finish = response.finish_reason or "stop"
     if not response.content and not response.thinking and not response.tool_calls:
+        # v966: 零帧断流优先判定（即使 finish=stop/有产出）——网关未应答即异常
+        if response.frames_received == 0:
+            return (
+                "模型长时间未返回任何数据（网关断流或网络异常），任务未完成",
+                True,
+            )
         if finish in ("timeout", "thinking_timeout"):
             return ("模型思考超时，未生成任何内容" if finish == "thinking_timeout"
                     else "模型响应因网关空闲超时中断，未生成任何内容"), True
@@ -1704,6 +1727,8 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
     finish_reason = "stop"
     usage = UsageModel()
     _cancelled = False
+    # v966: provider 报告的数据帧数（None=未提供信号，如非流式回退/其他 provider）
+    frames_received: int | None = None
     # v27: 流式实时剥离正文内联思考标签——否则前端流式过程中会看到 <thinking> 原文。
     # 最终全量内容仍由下方 _split_inline_thinking 兜底（幂等），保证不重复计入。
     _splitter = _InlineThinkingStreamSplitter()
@@ -1760,6 +1785,7 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
                 tool_calls = event.get("tool_calls", [])
                 finish_reason = event.get("finish_reason", "stop")
                 usage = event.get("usage", UsageModel())
+                frames_received = event.get("frames")
                 break
         # 问题5: 若中断发生在「等待下一事件」窗口（_anext_with_cancel 正常结束迭代而非 break），
         # 循环退出时 cancel_event 已置位——此处统一判定，保证走 cancelled 收尾
@@ -1819,6 +1845,7 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
     return ChatResponse(
         content=full_content or None, thinking=full_thinking or None,
         tool_calls=tool_calls, finish_reason=finish_reason, usage=usage,
+        frames_received=frames_received,
     )
 
 
@@ -1919,32 +1946,45 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
                 "with collect_results, or perform the remaining work yourself directly."
             )
 
-        # 创建子代理 Agent + Task
+        # 创建子代理 Agent + Task（写引擎单写线程一次事务：Agent 创建 → Task 创建 →
+        # 立即提交；返回 agent_id/task_id 供后续 thread_id=sub_agent.id 等 id 链使用）。
         from app.core.enums import AgentKind
+        from app.persistence.database import run_write_locked
+
+        def _persist_spawn(s):
+            from app.persistence.models.agent import Agent as _Agent
+            from app.persistence.models.task import Task as _Task
+            sa = _Agent(kind=AgentKind.SUB.value, name=task_title[:40],
+                        model_id=subagent_context.get("model_id") or agent_model_id,
+                        session_id=session_id,
+                        turn_id=turn_id, parent_agent_id=parent_agent_id)
+            s.add(sa)
+            s.flush()
+            aid = sa.id
+            task_row = _Task(
+                session_id=session_id, turn_id=turn_id,
+                title=task_title, description=task_desc,
+                acceptance_criteria=acceptance, agent_id=aid,
+                parent_task_id=main_task_id or turn_id, priority=1,
+                kind="step", status="pending",
+            )
+            s.add(task_row)
+            s.flush()
+            tid = task_row.id
+            s.commit()
+            return aid, tid
+
+        _agent_id, task_id = await run_write_locked(_persist_spawn, label="subagent.spawn")
         from app.persistence.models.agent import Agent
-        sub_agent = Agent(kind=AgentKind.SUB.value, name=task_title[:40],
-                          model_id=subagent_context.get("model_id") or agent_model_id,
-                          session_id=session_id,
-                          turn_id=turn_id, parent_agent_id=parent_agent_id)
-        db.add(sub_agent)
-        await db.flush()
-
-        task = await task_service.create_task(
-            db, session_id=session_id, turn_id=turn_id,
-            title=task_title, description=task_desc,
-            acceptance_criteria=acceptance, agent_id=sub_agent.id,
-            parent_task_id=main_task_id or turn_id, priority=1,
-        )
-        await db.flush()
-
-        # v10: 子任务创建后立即提交并广播，前端任务卡实时展示拆分步骤
-        # （此前仅 flush，前端 refreshTasks 查不到新子任务，任务卡无新步骤）
+        sub_agent = Agent(kind=AgentKind.SUB.value, id=_agent_id,
+                          name=task_title[:40])  # 展示对象（id 已定，供 thread_id 链）
+        task = await task_service.get_task(db, task_id)  # async 只读对象（后续仅读属性）
+        # v10: 子任务创建后立即提交（写引擎内已提交）并广播
         from app.orchestration.agent_events import broadcast
         try:
-            await db.commit()
             await broadcast(session_id, {
                 "event": "task.updated",
-                "payload": {"task_id": task.id, "status": "pending", "note": (task_desc or "")[:200]},
+                "payload": {"task_id": task_id, "status": "pending", "note": (task_desc or "")[:200]},
             })
         except Exception:
             logger.warning("[agent] 子任务创建提交/广播失败(非阻塞)", exc_info=True)

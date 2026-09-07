@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.ta3 import session as ta3_session
+from app.persistence.models.ta3_auth import Ta3Auth
 
 logger = logging.getLogger(__name__)
 
@@ -398,45 +399,6 @@ async def sync_ta3_models(db: AsyncSession, provider, api_base: str) -> list[dic
     by_name = {m.name: m for m in existing}
     updated = 0
     created = 0
-    for name, entry in entries.items():
-        m = by_name.get(name)
-        if m is None:
-            m = Model(tenant_id=1, name=name, provider_id=provider.id, source_type="byok")
-            db.add(m)
-            by_name[name] = m
-            created += 1
-        m.api_key = entry.get("api_key") or None
-        m.base_url = entry.get("base_url") or None
-        m.context_window = entry.get("context_window") or 200000
-        # plan-147-674: 用户手动设置过多模态标记（meta.multimodal_override）时
-        # 目录同步不覆盖，避免每次登录同步冲掉 UI 上的手动修正
-        meta = dict(m.ta3_meta or {})
-        if meta.get("multimodal_override"):
-            if bool(entry.get("is_multimodal")) != bool(m.is_multimodal):
-                logger.info(
-                    "[ta3] model=%s 保留用户手动设置 is_multimodal=%s（目录识别=%s）",
-                    name, m.is_multimodal, entry.get("is_multimodal"),
-                )
-        else:
-            m.is_multimodal = bool(entry.get("is_multimodal"))
-        m.api_format = "ta3"
-        # 必须复制新 dict 再赋回：SQLAlchemy 对可变 JSON 列赋同一对象引用
-        # 不触发 change detection，原地 update 会导致 meta 更新不落库
-        meta.update({
-            "systemMessage": entry.get("system_message") or "",
-            "anthropic": bool(entry.get("anthropic")),
-            "provider": entry.get("provider") or "",
-            "completionOptions": entry.get("completion_options") or {},
-            "requestHeaders": entry.get("request_headers") or {},
-            "title": entry.get("title") or name,
-            "orgId": entry.get("org_id") or "",
-            "orgName": entry.get("org_name") or "",
-            "profileId": entry.get("profile_id") or "",
-        })
-        m.ta3_meta = meta
-        updated += 1
-    await db.flush()
-
     # 缓存目录原文（脱敏：key 只留前 8 位）
     def _mask(v: str) -> str:
         return (v[:8] + "…") if v else ""
@@ -448,8 +410,48 @@ async def sync_ta3_models(db: AsyncSession, provider, api_base: str) -> list[dic
             for e in entries.values()
         ],
     }
-    auth = await ta3_session.get_auth_row(db, provider.id)
-    auth.catalog = sanitized
-    await db.flush()
+
+    from app.persistence.database import run_write_locked
+
+    def _persist(s):
+        by_name_local = dict(by_name)
+        created_local = 0
+        updated_local = 0
+        for name, entry in entries.items():
+            m = by_name_local.get(name)
+            if m is None:
+                m = Model(tenant_id=1, name=name, provider_id=provider.id, source_type="byok")
+                s.add(m)
+                by_name_local[name] = m
+                created_local += 1
+            m.api_key = entry.get("api_key") or None
+            m.base_url = entry.get("base_url") or None
+            m.context_window = entry.get("context_window") or 200000
+            # plan-147-674: 用户手动设置过多模态标记（meta.multimodal_override）时
+            # 目录同步不覆盖，避免每次登录同步冲掉 UI 上的手动修正
+            meta = dict(m.ta3_meta or {})
+            if not meta.get("multimodal_override"):
+                m.is_multimodal = bool(entry.get("is_multimodal"))
+            m.api_format = "ta3"
+            meta.update({
+                "systemMessage": entry.get("system_message") or "",
+                "anthropic": bool(entry.get("anthropic")),
+                "provider": entry.get("provider") or "",
+                "completionOptions": entry.get("completion_options") or {},
+                "requestHeaders": entry.get("request_headers") or {},
+                "title": entry.get("title") or name,
+                "orgId": entry.get("org_id") or "",
+                "orgName": entry.get("org_name") or "",
+                "profileId": entry.get("profile_id") or "",
+            })
+            m.ta3_meta = meta
+            updated_local += 1
+        auth_row = s.get(Ta3Auth, provider.id)
+        if auth_row is not None:
+            auth_row.catalog = sanitized
+        s.commit()
+        return created_local, updated_local
+
+    created, updated = await run_write_locked(_persist, label="ta3.catalog.sync")
 
     return [{"name": k, **v} for k, v in entries.items()]

@@ -19,18 +19,18 @@ from app.services import checkpoint_gc, rollback_service
 
 
 @pytest.fixture
-async def db():
-    engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
+async def db(tmp_path):
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/gck.db"
+    engine = create_async_engine(db_url)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    from app.persistence import write_engine as _we
+    _we.configure(db_url, foreign_keys=False)  # 写引擎（单写线程）与测试库同源
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
         yield session
     await engine.dispose()
+    _we.configure(None)
 
 
 # ── 目录结构化 ──

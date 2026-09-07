@@ -114,6 +114,10 @@ export interface SessionSlice {
   queuedInputs: QueuedInput[];
   /** v42: 注入分割标记（会话级，跨 turn 在 turn.started 清空） */
   injectMarks: InjectMark[];
+  /** v967: 切换瞬间尚未 flush 到 streaming/thinking 缓冲的增量尾巴（不随切走丢失） */
+  pendingStreamDeltas: Record<number, string>;
+  pendingThinkingDeltas: Record<number, string>;
+  pendingThreads: Record<number, number>;
 }
 
 /** 视图 → slice 快照（切换会话前保存当前会话状态）。 */
@@ -142,7 +146,18 @@ function _snapshotSlice(s: ChatState): SessionSlice {
     agentActivity: s.agentActivity,
     queuedInputs: s.queuedInputs,
     injectMarks: s.injectMarks,
+    pendingStreamDeltas: { ..._pendingToken },
+    pendingThinkingDeltas: { ..._pendingThinking },
+    pendingThreads: { ..._pendingThread },
   };
+}
+
+/** v967: 切回会话时把快照里的增量尾巴写回模块级 pending，并调度一次 flush 合并进缓冲。 */
+function _restorePendingDeltas(slice: SessionSlice) {
+  _pendingToken = { ...(slice.pendingStreamDeltas || {}) };
+  _pendingThinking = { ...(slice.pendingThinkingDeltas || {}) };
+  _pendingThread = { ...(slice.pendingThreads || {}) };
+  _scheduleDeltaFlush();
 }
 
 /** slice → 视图投影（切换会话时恢复缓存，跳过重复 REST 拉取）。 */
@@ -351,6 +366,8 @@ let _pendingThinking: Record<number, string> = {};
 let _pendingThread: Record<number, number> = {};
 let _streamDoneText: Record<string, string> = {};
 let _flushScheduled = false;
+// v967: 切回会话后短暂窗口（1s）内忽略 sync 重放的 delta 增量，避免旧增量累加到已恢复的缓冲上。
+let _replayGuardUntil = 0;
 
 function _clearPendingDeltas() {
   _pendingToken = {};
@@ -441,6 +458,48 @@ function _sameUserContent(a: Record<string, unknown> | undefined, b: Record<stri
     ? (b.attachments as { file_id?: unknown }[]).map((x) => String(x.file_id ?? "")).join(",")
     : "";
   return fa !== "" && fa === fb;
+}
+
+/** v967: 合并「快照已有消息」与「DB 拉取的最新消息」：按 id 去重、乐观消息 content 匹配替换、保持升序。 */
+function _mergeMessages(existing: MessageOut[], fetched: MessageOut[]): MessageOut[] {
+  const out = new Map<number, MessageOut>();
+  // DB 权威结果优先；仅纳入已确认 id（≤1e12）
+  for (const m of fetched) {
+    const id = Number(m.id) || 0;
+    if (id > 0 && id <= 1e12) out.set(id, m);
+  }
+  for (const m of existing) {
+    const id = Number(m.id) || 0;
+    if (id > 1e12) {
+      // 乐观消息（user 占位）：尝试按 content 匹配 DB 中真实 user 消息替换
+      const replaced = fetched.find((fm) =>
+        fm.sender_type === "user" && _sameUserContent(fm.content, m.content));
+      if (replaced) {
+        const rid = Number(replaced.id) || 0;
+        if (rid > 0) out.set(rid, replaced);
+      } else {
+        out.set(id, m); // 后端尚未落库：保留乐观占位
+      }
+    } else if (!out.has(id)) {
+      out.set(id, m); // 未在 DB 结果的已确认消息（去重兜底）
+    }
+  }
+  return [...out.values()].sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
+}
+
+/** v967: cached 切回时刷新 messages（DB 最新），与快照去重合并——补齐切走期间已落库但未收到广播的消息。 */
+async function refreshAndMergeMessages(sessionId: number): Promise<void> {
+  const cur = useChatStore.getState();
+  if (cur.currentSessionId !== sessionId) return;
+  let fetched: MessageOut[] = [];
+  try {
+    fetched = await api.listSessionMessages(sessionId);
+  } catch {
+    return; // 拉取失败不阻塞切换（保留快照）
+  }
+  const now = useChatStore.getState();
+  if (now.currentSessionId !== sessionId) return;
+  useChatStore.setState({ messages: _mergeMessages(now.messages, fetched), loading: false });
 }
 
 /** v38 (plan-482): task.proposed 处理中按 request_task_id 取请求任务标题作卡片文案。 */
@@ -694,9 +753,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // v2.2: 缓存命中——零重载切换，静默补齐运行状态与任务（后台期间可能已变化）
       if (cached.isRunning || cached.runningTurnId) {
         _startHeartbeat();
+        // v967: 恢复流式缓冲显示"正在恢复"；后续流式/落库事件会清除该状态提示
+        if ((cached.streamingBuffers && Object.keys(cached.streamingBuffers).length > 0) ||
+            (cached.thinkingBuffers && Object.keys(cached.thinkingBuffers).length > 0)) {
+          set({ turnStatus: "正在恢复会话…" });
+        }
       }
       void get().refreshTurns();
       void get().refreshTasks();
+      // v967: 恢复切走瞬间未 flush 的增量尾巴（避免最后一段流式内容丢失）
+      _restorePendingDeltas(cached);
+      // v967: 短暂窗口内忽略 sync 重放的旧 delta 增量，避免重复累加到已恢复的缓冲
+      _replayGuardUntil = Date.now() + 1000;
+      // v967: 主动拉取 DB 最新消息并与快照去重合并——补齐切走期间已落库但未收到广播的消息
+      void refreshAndMergeMessages(sessionId);
       // v1.1: 缓存切换也要刷新占用（后台会话可能已运行/压缩过）
       void api.getSessionUsage(sessionId).then((u) => {
         if (get().currentSessionId !== sessionId) return;
@@ -1787,7 +1857,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const tid = payload.thread_id != null ? Number(payload.thread_id) : null;
         // v35: 流式恢复 = 重试已成功，自动清除状态行提示
         if (get().turnStatus != null) set({ turnStatus: null });
-        if (aid && delta && !_streamDoneText[`thinking:${tid ?? aid}`]) {
+        if (aid && delta && !_streamDoneText[`thinking:${tid ?? aid}`] && Date.now() >= _replayGuardUntil) {
           _pendingThinking[aid] = (_pendingThinking[aid] || "") + delta;
           // v19: 记录 thread_id，flush 时按主/子分桶
 
@@ -1814,7 +1884,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const tid = payload.thread_id != null ? Number(payload.thread_id) : null;
         // v35: 流式恢复 = 重试已成功，自动清除状态行提示
         if (get().turnStatus != null) set({ turnStatus: null });
-        if (aid && delta && !_streamDoneText[`token:${tid ?? aid}`]) {
+        if (aid && delta && !_streamDoneText[`token:${tid ?? aid}`] && Date.now() >= _replayGuardUntil) {
           _pendingToken[aid] = (_pendingToken[aid] || "") + delta;
 
           if (tid != null) _pendingThread[aid] = tid;

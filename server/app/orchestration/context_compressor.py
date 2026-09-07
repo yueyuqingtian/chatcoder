@@ -418,9 +418,17 @@ async def compact_session(
     new_ctx = dict(latest_ctx)
     new_ctx["compacted_ids"] = sorted(latest_compacted)
     new_ctx["compactions"] = latest_compactions
-    session.shared_context = new_ctx
-    await db.flush()
-    await db.commit()
+    # shared_context 写入经 WriteEngine 单写线程（无锁单写者；async db 不再持有写事务）
+    from app.persistence.database import run_write_locked
+
+    def _persist_ctx(s):
+        from app.persistence.models.message import Session as _Sess
+        row = s.get(_Sess, session.id)
+        if row is not None:
+            row.shared_context = new_ctx
+            s.commit()
+
+    await run_write_locked(_persist_ctx, label="compact.shared_ctx")
 
     result = {
         "compaction_id": compaction_id,
@@ -566,9 +574,17 @@ async def _commit_compaction(
     new_ctx = dict(latest_ctx)
     new_ctx["compacted_ids"] = sorted(latest_compacted)
     new_ctx["compactions"] = latest_compactions
-    session.shared_context = new_ctx
-    await db.flush()
-    await db.commit()
+    # shared_context 写入经 WriteEngine 单写线程（无锁单写者；async db 不再持有写事务）
+    from app.persistence.database import run_write_locked
+
+    def _persist_ctx(s):
+        from app.persistence.models.message import Session as _Sess
+        row = s.get(_Sess, session.id)
+        if row is not None:
+            row.shared_context = new_ctx
+            s.commit()
+
+    await run_write_locked(_persist_ctx, label="compact.shared_ctx")
 
     result = {
         "compaction_id": compaction_id,

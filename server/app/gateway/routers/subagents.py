@@ -46,38 +46,64 @@ async def create_profile(body: SubagentProfileIn, db: AsyncSession = Depends(get
     )).scalars().first()
     if exists:
         raise HTTPException(409, "同名子代理类型已存在")
-    p = SubagentProfile(
-        name=name, description=body.description,
-        tools_whitelist=body.tools_whitelist, model_id=body.model_id,
-        system_prompt=body.system_prompt, is_active=body.is_active,
-    )
-    db.add(p)
-    await db.commit()
-    return _to_out(p)
+    from app.persistence.database import run_write_locked
+
+    def _p(s):
+        obj = SubagentProfile(
+            name=name, description=body.description,
+            tools_whitelist=body.tools_whitelist, model_id=body.model_id,
+            system_prompt=body.system_prompt, is_active=body.is_active,
+        )
+        s.add(obj)
+        s.flush()
+        oid = obj.id
+        s.commit()
+        return oid
+
+    pid = await run_write_locked(_p, label="subagent.profile.create")
+    created = (await db.execute(select(SubagentProfile).where(SubagentProfile.id == pid))).scalars().first()
+    return _to_out(created)
 
 
 @router.patch("/{profile_id}", response_model=dict)
 async def update_profile(profile_id: int, body: SubagentProfileIn,
                          db: AsyncSession = Depends(get_db)):
-    p = await db.get(SubagentProfile, profile_id)
-    if p is None:
+    from app.persistence.database import run_write_locked
+
+    def _p(s):
+        p = s.get(SubagentProfile, profile_id)
+        if p is None:
+            return False
+        if body.name and body.name.strip():
+            p.name = body.name.strip()
+        p.description = body.description
+        p.tools_whitelist = body.tools_whitelist
+        p.model_id = body.model_id
+        p.system_prompt = body.system_prompt
+        p.is_active = body.is_active
+        s.commit()
+        return True
+
+    ok = await run_write_locked(_p, label=f"subagent.profile.update.{profile_id}")
+    if not ok:
         raise HTTPException(404, "子代理类型不存在")
-    if body.name and body.name.strip():
-        p.name = body.name.strip()
-    p.description = body.description
-    p.tools_whitelist = body.tools_whitelist
-    p.model_id = body.model_id
-    p.system_prompt = body.system_prompt
-    p.is_active = body.is_active
-    await db.commit()
+    p = (await db.execute(select(SubagentProfile).where(SubagentProfile.id == profile_id))).scalars().first()
     return _to_out(p)
 
 
 @router.delete("/{profile_id}", response_model=dict)
 async def delete_profile(profile_id: int, db: AsyncSession = Depends(get_db)):
-    p = await db.get(SubagentProfile, profile_id)
-    if p is None:
+    from app.persistence.database import run_write_locked
+
+    def _p(s):
+        p = s.get(SubagentProfile, profile_id)
+        if p is None:
+            return False
+        s.delete(p)
+        s.commit()
+        return True
+
+    ok = await run_write_locked(_p, label=f"subagent.profile.delete.{profile_id}")
+    if not ok:
         raise HTTPException(404, "子代理类型不存在")
-    await db.delete(p)
-    await db.commit()
     return {"ok": True}

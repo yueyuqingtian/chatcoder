@@ -41,7 +41,7 @@ def _to_out(m, provider_name: str | None = None) -> ModelOut:
 
 @router.post("/models", response_model=ModelOut)
 async def create_model(body: ModelCreate, db: AsyncSession = Depends(get_db)):
-    model = await model_service.create_model(
+    model_id = await model_service.create_model(
         db,
         name=body.name,
         provider=body.provider,
@@ -61,9 +61,8 @@ async def create_model(body: ModelCreate, db: AsyncSession = Depends(get_db)):
         res = await db.execute(select(Agent).where(Agent.kind == "main").limit(1))
         main_agent = res.scalars().first()
         if main_agent and not main_agent.model_id:
-            main_agent.model_id = model.id
-            await db.flush()
-    await db.commit()
+            await _patch_main_agent_model(main_agent.id, model_id)
+    model = await model_service.get_model(db, model_id)  # async 只读
     return _to_out(model)
 
 
@@ -83,7 +82,7 @@ async def list_models(db: AsyncSession = Depends(get_db)):
 @router.patch("/models/{model_id}", response_model=ModelOut)
 async def update_model(model_id: int, body: ModelUpdate, db: AsyncSession = Depends(get_db)):
     """编辑模型配置。api_key 传空字符串则清除。"""
-    model = await model_service.update_model(
+    ok = await model_service.update_model(
         db, model_id,
         name=body.name,
         provider=body.provider,
@@ -97,9 +96,9 @@ async def update_model(model_id: int, body: ModelUpdate, db: AsyncSession = Depe
         api_key=body.api_key,
         reasoning_efforts=body.reasoning_efforts,
     )
-    if model is None:
+    if not ok:
         raise HTTPException(404, "model not found")
-    await db.commit()
+    model = await model_service.get_model(db, model_id)  # async 只读
     return _to_out(model)
 
 
@@ -108,5 +107,18 @@ async def delete_model(model_id: int, db: AsyncSession = Depends(get_db)):
     ok = await model_service.delete_model(db, model_id)
     if not ok:
         raise HTTPException(404, "model not found")
-    await db.commit()
     return {"ok": True}
+
+
+async def _patch_main_agent_model(agent_id: int, model_id: int) -> None:
+    """写引擎单写线程绑定 main agent 的 model_id。"""
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        from app.persistence.models.agent import Agent
+        a = s.get(Agent, agent_id)
+        if a is not None:
+            a.model_id = model_id
+            s.commit()
+
+    await run_write_locked(patch, label="agent.bind_model")

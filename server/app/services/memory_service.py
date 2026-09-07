@@ -14,8 +14,9 @@ _TOP_N = 10
 
 async def save_memories(db: AsyncSession, *, session_id: int, turn_id: int | None,
                         memories: list[dict]) -> int:
-    """批量写入记忆（memory_entries 表）。"""
+    """批量写入记忆（memory_entries 表；去重 + 写引擎单写线程）。"""
     count = 0
+    _new_entries: list = []
     for m in memories:
         text = str(m.get("text", "")).strip()
         if not text or len(text) < 8:
@@ -33,9 +34,17 @@ async def save_memories(db: AsyncSession, *, session_id: int, turn_id: int | Non
         existing = await db.execute(select(MemoryEntry).where(MemoryEntry.session_id == session_id))
         if any(" ".join(str(entry.text).casefold().split()) == normalized for entry in existing.scalars()):
             continue
-        db.add(MemoryEntry(session_id=session_id, turn_id=turn_id, text=text[:500], kind=kind))
+        _new_entries.append(MemoryEntry(session_id=session_id, turn_id=turn_id, text=text[:500], kind=kind))
         count += 1
-    await db.flush()
+    if _new_entries:
+        from app.persistence.database import run_write_locked
+
+        def _persist(s):
+            for e in _new_entries:
+                s.add(e)
+            s.commit()
+
+        await run_write_locked(_persist, label="memory.consolidate_add")
     return count
 
 
@@ -50,12 +59,18 @@ async def load_memories(db: AsyncSession, session_id: int, top_n: int = _TOP_N) 
     if entries:
         from sqlalchemy import func
         ids = [e.id for e in entries]
-        await db.execute(
-            update(MemoryEntry)
-            .where(MemoryEntry.id.in_(ids))
-            .values(usage_count=MemoryEntry.usage_count + 1, last_usage_at=str(func.now()))
-        )
-        await db.flush()
+        from app.persistence.database import run_write_locked
+
+        def _persist(s):
+            rows = list(s.execute(
+                select(MemoryEntry).where(MemoryEntry.id.in_(ids))
+            ).scalars().all())
+            for r in rows:
+                r.usage_count = (r.usage_count or 0) + 1
+                r.last_usage_at = str(func.now())
+            s.commit()
+
+        await run_write_locked(_persist, label="memory.usage_touch")
     return entries
 
 
@@ -68,12 +83,17 @@ async def list_memories(db: AsyncSession, session_id: int | None = None) -> list
 
 
 async def delete_memory(db: AsyncSession, memory_id: int) -> bool:
-    entry = await db.get(MemoryEntry, memory_id)
-    if entry is None:
-        return False
-    await db.delete(entry)
-    await db.flush()
-    return True
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        entry = s.get(MemoryEntry, memory_id)
+        if entry is None:
+            return False
+        s.delete(entry)
+        s.commit()
+        return True
+
+    return await run_write_locked(patch, label=f"memory.delete.{memory_id}")
 
 
 async def consolidate(db: AsyncSession, session_id: int) -> str:

@@ -33,36 +33,55 @@ async def load_auth(db: AsyncSession, provider_id: int) -> Ta3Auth | None:
 
 
 async def get_auth_row(db: AsyncSession, provider_id: int) -> Ta3Auth:
-    """取或建（惰性创建）登录态行。"""
-    row = await load_auth(db, provider_id)
-    if row is None:
-        row = Ta3Auth(provider_id=provider_id, updated_at=_now())
-        db.add(row)
-        await db.flush()
-    return row
+    """取或建（惰性创建）登录态行（写引擎单写线程）。"""
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        row = s.get(Ta3Auth, provider_id)
+        if row is None:
+            row = Ta3Auth(provider_id=provider_id, updated_at=_now())
+            s.add(row)
+            s.flush()
+            s.commit()
+        return True
+
+    await run_write_locked(patch, label=f"ta3.auth.row.{provider_id}")
+    return await load_auth(db, provider_id)
 
 
 async def save_auth(db: AsyncSession, provider_id: int, *, access_token: str,
                     refresh_token: str | None = None, account: dict | None = None,
-                    catalog: dict | None = None) -> Ta3Auth:
-    row = await get_auth_row(db, provider_id)
-    row.access_token = access_token
-    if refresh_token is not None:
-        row.refresh_token = refresh_token
-    if account is not None:
-        row.account = account
-    if catalog is not None:
-        row.catalog = catalog
-    row.updated_at = _now()
-    await db.flush()
-    return row
+                    catalog: dict | None = None) -> None:
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        row = s.get(Ta3Auth, provider_id)
+        if row is None:
+            row = Ta3Auth(provider_id=provider_id, updated_at=_now())
+            s.add(row)
+        row.access_token = access_token
+        if refresh_token is not None:
+            row.refresh_token = refresh_token
+        if account is not None:
+            row.account = account
+        if catalog is not None:
+            row.catalog = catalog
+        row.updated_at = _now()
+        s.commit()
+
+    await run_write_locked(patch, label=f"ta3.auth.save.{provider_id}")
 
 
 async def clear_auth(db: AsyncSession, provider_id: int) -> None:
-    row = await load_auth(db, provider_id)
-    if row is not None:
-        await db.delete(row)
-        await db.flush()
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        row = s.get(Ta3Auth, provider_id)
+        if row is not None:
+            s.delete(row)
+            s.commit()
+
+    await run_write_locked(patch, label=f"ta3.auth.clear.{provider_id}")
 
 
 async def get_access_token(db: AsyncSession, provider_id: int) -> str | None:
@@ -149,24 +168,29 @@ async def ensure_token(db: AsyncSession, provider_id: int, api_base: str) -> str
         except Ta3AuthError as e:
             if e.kind == "login_required":
                 await clear_auth(db, provider_id)
-                await db.commit()
             raise
-        row.access_token = result["accessToken"]
-        if result.get("refreshToken"):
-            row.refresh_token = result["refreshToken"]
-        account = dict(row.account or {})
-        for key, src in (("id", "loginId"), ("label", "userName")):
-            if result.get(src):
-                account[key] = result[src]
-        row.account = account
-        row.updated_at = _now()
-        await db.flush()
-        await db.commit()
-        logger.info("[ta3] provider=%s token 已刷新", provider_id)
-        return row.access_token
+        from app.persistence.database import run_write_locked
+
+        def _persist(s):
+            r = s.get(Ta3Auth, provider_id)
+            if r is None:
+                s.commit()
+                return
+            r.access_token = result["accessToken"]
+            if result.get("refreshToken"):
+                r.refresh_token = result["refreshToken"]
+            account = dict(r.account or {})
+            for key, src in (("id", "loginId"), ("label", "userName")):
+                if result.get(src):
+                    account[key] = result[src]
+            r.account = account
+            r.updated_at = _now()
+            s.commit()
+
+        await run_write_locked(_persist, label=f"ta3.auth.refresh.{provider_id}")
+        return result["accessToken"]
 
 
 async def mark_login_required(db: AsyncSession, provider_id: int) -> None:
     """业务请求返回 401 且无 refresh_token 可用时，清会话要求重登。"""
     await clear_auth(db, provider_id)
-    await db.commit()

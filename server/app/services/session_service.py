@@ -1,4 +1,8 @@
-"""会话 CRUD（v2：项目下多会话，支持 fork/重命名/置顶/归档）。"""
+"""会话 CRUD（v2：项目下多会话，支持 fork/重命名/置顶/归档）。
+
+plan-206-975：写操作经 WriteEngine 单写线程（无锁单写者）；读保留 async 会话。
+写函数返回标量（id/title/status 等），不返回跨层 ORM 对象。
+"""
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,27 +13,34 @@ from app.persistence.models.turn import Turn
 async def create_session(db: AsyncSession, *, project_id: int, title: str | None = None,
                          model_id: int | None = None, fork_parent_id: int | None = None,
                          permission_mode: str | None = None,
-                         goal_text: str | None = None) -> Session:
+                         goal_text: str | None = None) -> int:
     from datetime import datetime, timezone
 
-    session = Session(
-        project_id=project_id, title=title or None,
-        model_id=model_id, fork_parent_id=fork_parent_id,
-        # plan-547: 首页所选模式随创建落库，会话输入框立即显示与实际运行一致
-        permission_mode=permission_mode or "default",
-        # plan-676: 首页目标随创建一次落准（对齐 set_goal 端点写法；空时维持默认 none）
-        **(
-            {
-                "goal_text": goal_text.strip()[:2000],
-                "goal_status": "active",
-                "goal_created_at": datetime.now(timezone.utc).isoformat(),
-            }
-            if goal_text and goal_text.strip() else {}
-        ),
-    )
-    db.add(session)
-    await db.flush()
-    return session
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        session = Session(
+            project_id=project_id, title=title or None,
+            model_id=model_id, fork_parent_id=fork_parent_id,
+            # plan-547: 首页所选模式随创建落库，会话输入框立即显示与实际运行一致
+            permission_mode=permission_mode or "default",
+            # plan-676: 首页目标随创建一次落准（对齐 set_goal 端点写法；空时维持默认 none）
+            **(
+                {
+                    "goal_text": goal_text.strip()[:2000],
+                    "goal_status": "active",
+                    "goal_created_at": datetime.now(timezone.utc).isoformat(),
+                }
+                if goal_text and goal_text.strip() else {}
+            ),
+        )
+        s.add(session)
+        s.flush()
+        sid = session.id
+        s.commit()
+        return sid
+
+    return await run_write_locked(patch, label="session.create")
 
 
 async def get_session(db: AsyncSession, session_id: int) -> Session | None:
@@ -37,15 +48,30 @@ async def get_session(db: AsyncSession, session_id: int) -> Session | None:
 
 
 async def auto_title_session(db: AsyncSession, session: Session, first_text: str) -> str | None:
-    """为尚未命名的会话生成首条用户消息标题。"""
+    """为尚未命名的会话生成首条用户消息标题（写引擎单写线程）。"""
     if session.title:
         return None
     title = first_text.strip().replace("\n", " ")[:30]
     if not title:
         return None
-    session.title = title
-    await db.flush()
+    await patch_session(session.id, title=title)
     return title
+
+
+async def patch_session(session_id: int, **fields) -> None:
+    """写引擎单写线程提交 Session 字段补丁（无锁单写者；None 跳过）。"""
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        row = s.get(Session, session_id)
+        if row is None:
+            return
+        for k, v in fields.items():
+            if v is not None:
+                setattr(row, k, v)
+        s.commit()
+
+    await run_write_locked(patch, label=f"session.patch.{session_id}")
 
 
 async def list_sessions(db: AsyncSession, project_id: int | None = None,
@@ -59,62 +85,81 @@ async def list_sessions(db: AsyncSession, project_id: int | None = None,
     return list(res.scalars().all())
 
 
-async def update_session(db: AsyncSession, session_id: int, **kwargs) -> Session | None:
-    session = await db.get(Session, session_id)
-    if session is None:
-        return None
-    for k, v in kwargs.items():
-        if v is not None:
-            setattr(session, k, v)
-    await db.flush()
-    return session
+async def update_session(db: AsyncSession, session_id: int, **kwargs) -> str | None:
+    """更新会话字段（写引擎单写线程）。返回 None（无对象）/ 任意标量（成功）。"""
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        session = s.get(Session, session_id)
+        if session is None:
+            return None
+        for k, v in kwargs.items():
+            if v is not None:
+                setattr(session, k, v)
+        s.commit()
+        return session.status
+
+    return await run_write_locked(patch, label=f"session.update.{session_id}")
 
 
-async def fork_session(db: AsyncSession, session_id: int, title: str | None = None) -> Session:
-    """复制会话（仅复制元数据与消息，任务/子代理不复制）。"""
-    src = await db.get(Session, session_id)
-    if src is None:
-        raise ValueError("session not found")
-    new_session = Session(
-        project_id=src.project_id,
-        title=title or f"{src.title or '会话'} · 分支",
-        model_id=src.model_id,
-        fork_parent_id=session_id,
-        status="active",
-    )
-    db.add(new_session)
-    await db.flush()
-    # 复制消息
-    from app.persistence.models.message import Message
-    res = await db.execute(
-        select(Message).where(Message.session_id == session_id, Message.deleted == False)  # noqa: E712
-    )
-    for m in res.scalars().all():
-        db.add(Message(
-            session_id=new_session.id,
-            turn_id=None,
-            thread_id=None,
-            sender_type=m.sender_type,
-            sender_id=m.sender_id,
-            msg_type=m.msg_type,
-            content=m.content,
-            token_usage=m.token_usage,
-        ))
-    await db.flush()
-    return new_session
+async def fork_session(db: AsyncSession, session_id: int, title: str | None = None) -> int:
+    """复制会话（仅复制元数据与消息，任务/子代理不复制；写引擎单写线程）。"""
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        src = s.get(Session, session_id)
+        if src is None:
+            raise ValueError("session not found")
+        new_session = Session(
+            project_id=src.project_id,
+            title=title or f"{src.title or '会话'} · 分支",
+            model_id=src.model_id,
+            fork_parent_id=session_id,
+            status="active",
+        )
+        s.add(new_session)
+        s.flush()
+        # 复制消息
+        rows = s.execute(
+            select(Message).where(Message.session_id == session_id, Message.deleted == False)  # noqa: E712
+        ).scalars().all()
+        for m in rows:
+            s.add(Message(
+                session_id=new_session.id,
+                turn_id=None,
+                thread_id=None,
+                sender_type=m.sender_type,
+                sender_id=m.sender_id,
+                msg_type=m.msg_type,
+                content=m.content,
+                token_usage=m.token_usage,
+            ))
+        s.commit()
+        return new_session.id
+
+    return await run_write_locked(patch, label="session.fork")
 
 
-async def create_system_message(db: AsyncSession, *, session_id: int, content: dict) -> None:
-    """v2.2 (对齐 zcode 3.11): 写一条系统消息（模型切换 divider 等）。"""
+async def create_system_message(db: AsyncSession, *, session_id: int, content: dict) -> int:
+    """v2.2 (对齐 zcode 3.11): 写一条系统消息（模型切换 divider 等，写引擎单写线程）。"""
     from app.core.enums import MsgType, SenderType
 
-    from app.persistence.models.message import Message
-    db.add(Message(
-        session_id=session_id, turn_id=None, thread_id=None,
-        sender_type=SenderType.SYSTEM.value, sender_id=None,
-        msg_type=MsgType.SYSTEM.value, content=content,
-    ))
-    await db.flush()
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        from app.persistence.models.message import Message as _Msg
+        m = _Msg(
+            session_id=session_id, turn_id=None, thread_id=None,
+            sender_type=SenderType.SYSTEM.value, sender_id=None,
+            msg_type=MsgType.SYSTEM.value, content=content,
+        )
+        s.add(m)
+        s.flush()
+        mid = m.id
+        s.commit()
+        return mid
+
+    return await run_write_locked(patch, label="session.sysmsg")
 
 
 async def list_main_messages(db: AsyncSession, session_id: int, limit: int | None = None) -> list[Message]:
@@ -129,21 +174,19 @@ async def list_main_messages(db: AsyncSession, session_id: int, limit: int | Non
             Message.thread_id.is_(None),
             Message.deleted == False,  # noqa: E712
         )
-        .order_by(Message.id.desc())
+        .order_by(Message.id.asc())
     )
     if limit:
         stmt = stmt.limit(limit)
     res = await db.execute(stmt)
-    rows = list(res.scalars().all())
-    rows.reverse()  # 恢复时间正序
-    return rows
+    return list(res.scalars().all())
 
 
 async def list_thread_messages(db: AsyncSession, session_id: int, thread_id: int,
                                limit: int | None = None) -> list[Message]:
     """指定子代理线程消息，默认过滤已回滚软删消息（问题14）。
 
-    保持时间正序（最旧在前），供 build_thread_context_with_window 的 token 预算择优。
+    保持时间正序（最旧在前），供 build_thread_context_with_window 按 token 预算择优。
     """
     stmt = (
         select(Message)

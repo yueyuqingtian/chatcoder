@@ -395,10 +395,17 @@ async def maybe_summarize_main_session(
         new_ctx["summarized_ids"] = list(latest_summarized_ids)
         # 拼接总摘要供 _layer1 使用
         new_ctx["summary"] = "\n\n".join(s["text"] for s in summaries)
-        session.shared_context = new_ctx
-        await db.flush()
-        # 摘要批次必须在批次边界提交，不能持有写事务跨下一轮计算。
-        await db.commit()
+        # 摘要批次提交经写引擎单写线程（不再持有 async 写事务跨下一轮计算）
+        from app.persistence.database import run_write_locked
+
+        def _p(s):
+            from app.persistence.models.message import Session as _Sess
+            row = s.get(_Sess, session.id)
+            if row is not None:
+                row.shared_context = new_ctx
+            s.commit()
+
+        await run_write_locked(_p, label="context.summary.commit")
         summary_rounds += 1
         logger.info(
             "会话 %s 生成摘要(第%d批): %d 条消息 %d tokens -> %d 字符 (摘要总数=%d, 窗口=%dK)",

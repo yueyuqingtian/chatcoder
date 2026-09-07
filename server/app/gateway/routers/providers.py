@@ -43,7 +43,7 @@ async def list_providers(db: AsyncSession = Depends(get_db)):
 
 @router.post("/providers", response_model=ProviderOut)
 async def create_provider(body: ProviderCreate, db: AsyncSession = Depends(get_db)):
-    provider = await provider_service.create_provider(
+    pid = await provider_service.create_provider(
         db,
         name=body.name.strip(),
         base_url=body.base_url,
@@ -51,13 +51,13 @@ async def create_provider(body: ProviderCreate, db: AsyncSession = Depends(get_d
         api_format=body.api_format,
         is_active=body.is_active,
     )
-    await db.commit()
+    provider = await provider_service.get_provider(db, pid)  # async 只读
     return await _to_out(db, provider)
 
 
 @router.patch("/providers/{provider_id}", response_model=ProviderOut)
 async def update_provider(provider_id: int, body: ProviderUpdate, db: AsyncSession = Depends(get_db)):
-    provider = await provider_service.update_provider(
+    ok = await provider_service.update_provider(
         db, provider_id,
         name=body.name.strip() if body.name else None,
         base_url=body.base_url,
@@ -65,9 +65,9 @@ async def update_provider(provider_id: int, body: ProviderUpdate, db: AsyncSessi
         api_format=body.api_format,
         is_active=body.is_active,
     )
-    if provider is None:
+    if not ok:
         raise HTTPException(404, "provider not found")
-    await db.commit()
+    provider = await provider_service.get_provider(db, provider_id)  # async 只读
     return await _to_out(db, provider)
 
 
@@ -76,7 +76,6 @@ async def delete_provider(provider_id: int, db: AsyncSession = Depends(get_db)):
     ok = await provider_service.delete_provider(db, provider_id)
     if not ok:
         raise HTTPException(404, "provider not found")
-    await db.commit()
     return {"ok": True}
 
 
@@ -161,12 +160,14 @@ async def list_provider_models(provider_id: int, db: AsyncSession = Depends(get_
 
 @router.post("/providers/{provider_id}/models", response_model=list[ModelOut])
 async def bulk_save_provider_models(provider_id: int, body: ProviderModelsBulkIn, db: AsyncSession = Depends(get_db)):
-    """批量保存扫描结果中用户勾选的模型配置（upsert）。"""
+    """批量保存扫描结果中用户勾选的模型配置（upsert，写引擎单写线程）。"""
     try:
-        models = await provider_service.bulk_upsert_models(
+        await provider_service.bulk_upsert_models(
             db, provider_id, [item.model_dump() for item in body.models],
         )
     except ValueError as e:
         raise HTTPException(404, str(e))
-    await db.commit()
-    return [_model_to_out(m) for m in models]
+    from sqlalchemy import select
+    from app.persistence.models.model_reg import Model
+    res = await db.execute(select(Model).where(Model.provider_id == provider_id).order_by(Model.name.asc()))
+    return [_model_to_out(m) for m in res.scalars().all()]

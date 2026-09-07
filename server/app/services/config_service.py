@@ -30,38 +30,59 @@ async def list_profiles(db: AsyncSession, project_id: int | None = None) -> list
 
 
 async def create_profile(db: AsyncSession, *, name: str, scope: str = "global",
-                         project_id: int | None = None, data: dict | None = None) -> ConfigProfile:
-    profile = ConfigProfile(name=name, scope=scope, project_id=project_id,
-                            data=data or {}, is_active=False)
-    db.add(profile)
-    await db.flush()
-    return profile
+                         project_id: int | None = None, data: dict | None = None) -> int:
+    """创建 profile（写引擎单写线程），返回 id。"""
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        profile = ConfigProfile(name=name, scope=scope, project_id=project_id,
+                                data=data or {}, is_active=False)
+        s.add(profile)
+        s.flush()
+        pid = profile.id
+        s.commit()
+        return pid
+
+    return await run_write_locked(patch, label="profile.create")
 
 
-async def update_profile(db: AsyncSession, profile_id: int, **kwargs) -> ConfigProfile | None:
-    profile = await db.get(ConfigProfile, profile_id)
-    if profile is None:
-        return None
-    if kwargs.get("data") is not None:
-        profile.data = {**profile.data, **kwargs["data"]}
-    if kwargs.get("is_active") is not None:
-        # 激活时取消同 scope 其他 profile
-        if kwargs["is_active"]:
-            res = await db.execute(select(ConfigProfile).where(ConfigProfile.scope == profile.scope))
-            for p in res.scalars().all():
-                p.is_active = False
-        profile.is_active = kwargs["is_active"]
-    await db.flush()
-    return profile
+async def update_profile(db: AsyncSession, profile_id: int, **kwargs) -> bool:
+    """更新 profile（写引擎单写线程；激活时同 scope 其它 profile 取消激活）。
+    返回可否找到。"""
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        profile = s.get(ConfigProfile, profile_id)
+        if profile is None:
+            return False
+        if kwargs.get("data") is not None:
+            profile.data = {**profile.data, **kwargs["data"]}
+        if kwargs.get("is_active") is not None:
+            # 激活时取消同 scope 其他 profile
+            if kwargs["is_active"]:
+                res = s.execute(select(ConfigProfile).where(ConfigProfile.scope == profile.scope))
+                for p in res.scalars().all():
+                    p.is_active = False
+            profile.is_active = kwargs["is_active"]
+        s.commit()
+        return True
+
+    return await run_write_locked(patch, label=f"profile.update.{profile_id}")
 
 
 async def delete_profile(db: AsyncSession, profile_id: int) -> bool:
-    profile = await db.get(ConfigProfile, profile_id)
-    if profile is None:
-        return False
-    await db.delete(profile)
-    await db.flush()
-    return True
+    """删除 profile（写引擎单写线程）。返回可否找到。"""
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        profile = s.get(ConfigProfile, profile_id)
+        if profile is None:
+            return False
+        s.delete(profile)
+        s.commit()
+        return True
+
+    return await run_write_locked(patch, label=f"profile.delete.{profile_id}")
 
 
 def _load_project_toml(project_path: str) -> dict:

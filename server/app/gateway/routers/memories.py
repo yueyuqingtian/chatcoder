@@ -19,7 +19,6 @@ async def delete_memory(memory_id: int, db: AsyncSession = Depends(get_db)):
     ok = await memory_service.delete_memory(db, memory_id)
     if not ok:
         raise HTTPException(404, "记忆不存在")
-    await db.commit()
     return {"ok": True}
 
 

@@ -7,11 +7,18 @@ from app.persistence.models.knowledge import KnowledgeBase, KnowledgeDoc
 
 async def create_knowledge_base(
     db: AsyncSession, *, name: str, kb_type: str = "project", tenant_id: int = 1
-) -> KnowledgeBase:
-    kb = KnowledgeBase(name=name, type=kb_type, tenant_id=tenant_id)
-    db.add(kb)
-    await db.flush()
-    return kb
+) -> int:
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        kb = KnowledgeBase(name=name, type=kb_type, tenant_id=tenant_id)
+        s.add(kb)
+        s.flush()
+        kid = kb.id
+        s.commit()
+        return kid
+
+    return await run_write_locked(patch, label="kb.create")
 
 
 async def get_knowledge_base(db: AsyncSession, kb_id: int) -> KnowledgeBase | None:
@@ -28,11 +35,17 @@ async def list_knowledge_bases(db: AsyncSession, tenant_id: int = 1) -> list[Kno
 
 
 async def delete_knowledge_base(db: AsyncSession, kb_id: int) -> bool:
-    kb = await db.get(KnowledgeBase, kb_id)
-    if kb is None:
-        return False
-    await db.delete(kb)
-    return True
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        kb = s.get(KnowledgeBase, kb_id)
+        if kb is None:
+            return False
+        s.delete(kb)
+        s.commit()
+        return True
+
+    return await run_write_locked(patch, label=f"kb.delete.{kb_id}")
 
 
 async def add_doc(
@@ -43,17 +56,24 @@ async def add_doc(
     content: str,
     meta: dict | None = None,
     vector_id: str | None = None,
-) -> KnowledgeDoc:
-    doc = KnowledgeDoc(
-        kb_id=kb_id,
-        title=title,
-        content=content,
-        meta=meta,
-        vector_id=vector_id,
-    )
-    db.add(doc)
-    await db.flush()
-    return doc
+) -> int:
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        doc = KnowledgeDoc(
+            kb_id=kb_id,
+            title=title,
+            content=content,
+            meta=meta,
+            vector_id=vector_id,
+        )
+        s.add(doc)
+        s.flush()
+        did = doc.id
+        s.commit()
+        return did
+
+    return await run_write_locked(patch, label="kb.doc.create")
 
 
 async def get_doc(db: AsyncSession, doc_id: int) -> KnowledgeDoc | None:
@@ -70,11 +90,17 @@ async def list_docs(db: AsyncSession, kb_id: int) -> list[KnowledgeDoc]:
 
 
 async def delete_doc(db: AsyncSession, doc_id: int) -> bool:
-    doc = await db.get(KnowledgeDoc, doc_id)
-    if doc is None:
-        return False
-    await db.delete(doc)
-    return True
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        doc = s.get(KnowledgeDoc, doc_id)
+        if doc is None:
+            return False
+        s.delete(doc)
+        s.commit()
+        return True
+
+    return await run_write_locked(patch, label=f"kb.doc.delete.{doc_id}")
 
 
 async def search_docs_by_keyword(

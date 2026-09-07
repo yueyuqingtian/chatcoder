@@ -32,12 +32,12 @@ async def _to_out(db: AsyncSession, s) -> SessionOut:
 
 @router.post("", response_model=SessionOut)
 async def create_session(body: SessionCreate, db: AsyncSession = Depends(get_db)):
-    session = await session_service.create_session(
+    sid = await session_service.create_session(
         db, project_id=body.project_id, title=body.title, model_id=body.model_id,
         permission_mode=body.permission_mode,
         goal_text=body.goal_text,
     )
-    await db.commit()
+    session = await session_service.get_session(db, sid)  # async 只读
     return await _to_out(db, session)
 
 
@@ -65,13 +65,14 @@ async def update_session(session_id: int, body: SessionUpdate, db: AsyncSession 
     if body.model_id is not None:
         old = await session_service.get_session(db, session_id)
         old_model_id = old.model_id if old else None
-    session = await session_service.update_session(
+    result_status = await session_service.update_session(
         db, session_id,
         title=body.title, model_id=body.model_id, pinned=body.pinned, status=body.status,
         permission_mode=body.permission_mode,
     )
-    if session is None:
+    if result_status is None:
         raise HTTPException(404, "会话不存在")
+    session = await session_service.get_session(db, session_id)
     # v2.2 (对齐 zcode 3.11): 模型切换 divider——换模型时写一条 SYSTEM 分割消息
     if body.model_id is not None and old_model_id is not None and old_model_id != body.model_id:
         try:
@@ -86,24 +87,22 @@ async def update_session(session_id: int, body: SessionUpdate, db: AsyncSession 
             )
         except Exception:
             logger.warning("[sessions] 模型切换消息写入失败(非阻塞)", exc_info=True)
-    await db.commit()
     return await _to_out(db, session)
 
 
 @router.delete("/{session_id}", response_model=dict)
 async def delete_session(session_id: int, db: AsyncSession = Depends(get_db)):
-    session = await session_service.update_session(db, session_id, status="archived")
-    if session is None:
+    status = await session_service.update_session(db, session_id, status="archived")
+    if status is None:
         raise HTTPException(404, "会话不存在")
-    await db.commit()
     return {"ok": True}
 
 
 @router.post("/{session_id}/fork", response_model=SessionOut)
 async def fork_session(session_id: int, db: AsyncSession = Depends(get_db)):
     try:
-        session = await session_service.fork_session(db, session_id)
-        await db.commit()
+        sid = await session_service.fork_session(db, session_id)
+        session = await session_service.get_session(db, sid)
         return await _to_out(db, session)
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -111,10 +110,10 @@ async def fork_session(session_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.post("/{session_id}/rename", response_model=SessionOut)
 async def rename_session(session_id: int, title: str, db: AsyncSession = Depends(get_db)):
-    session = await session_service.update_session(db, session_id, title=title)
-    if session is None:
+    status = await session_service.update_session(db, session_id, title=title)
+    if status is None:
         raise HTTPException(404, "会话不存在")
-    await db.commit()
+    session = await session_service.get_session(db, session_id)
     return await _to_out(db, session)
 
 
@@ -171,14 +170,14 @@ async def set_goal(session_id: int, body: GoalSetBody, db: AsyncSession = Depend
     session = await session_service.get_session(db, session_id)
     if session is None:
         raise HTTPException(404, "会话不存在")
-    session.goal_text = text[:2000]
-    session.goal_status = "active"
-    session.goal_turns_used = 0
-    session.goal_created_at = datetime.now(timezone.utc).isoformat()
-    await db.commit()
+    await session_service.patch_session(session_id,
+                                        goal_text=text[:2000], goal_status="active",
+                                        goal_turns_used=0,
+                                        goal_created_at=datetime.now(timezone.utc).isoformat())
+    await db.refresh(session)  # 强制从 DB 读最新（identity map 可能缓存旧值）
     await broadcast(session_id, {
         "event": "goal.updated",
-        "payload": {"text": session.goal_text, "status": "active", "turns_used": 0},
+        "payload": {"text": text[:2000], "status": "active", "turns_used": 0},
     })
     return _goal_out(session)
 
@@ -190,11 +189,12 @@ async def cancel_goal(session_id: int, complete: bool = False, db: AsyncSession 
     if session is None:
         raise HTTPException(404, "会话不存在")
     if session.goal_status == "active":
-        session.goal_status = "completed" if complete else "cancelled"
-        await db.commit()
+        await session_service.patch_session(session_id,
+                                            goal_status="completed" if complete else "cancelled")
+        await db.refresh(session)  # 强制从 DB 读最新（identity map 可能缓存旧值）
         await broadcast(session_id, {
             "event": "goal.updated",
-            "payload": {"text": session.goal_text, "status": session.goal_status,
+            "payload": {"text": session.goal_text, "status": "completed" if complete else "cancelled",
                         "turns_used": session.goal_turns_used or 0},
         })
     return _goal_out(session)

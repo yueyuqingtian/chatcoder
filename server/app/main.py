@@ -51,24 +51,46 @@ async def lifespan(app: FastAPI):
             from app.persistence.models.task import Task
             from app.persistence.models.agent import Agent
             from datetime import datetime, timezone
+
             stale = list((await db.execute(select(Turn).where(Turn.status == "running"))).scalars().all())
-            for turn in stale:
-                turn.status = "interrupted"
-                turn.summary = turn.summary or "应用关闭时任务已停止"
-                turn.completed_at = turn.completed_at or datetime.now(timezone.utc).isoformat()
-                rows = (await db.execute(select(Task).where(Task.turn_id == turn.id, Task.status.in_(["proposed", "pending", "running", "in_progress"]))))
-                for task in rows.scalars().all():
-                    task.status = "cancelled"
-                    task.note = task.note or "应用关闭时任务已停止"
-                agents = (await db.execute(select(Agent).where(Agent.turn_id == turn.id, Agent.status == "running")))
-                for agent in agents.scalars().all():
-                    agent.status = "terminated"
-            await db.commit()
+            if stale:
+                # 启动修复：running → interrupted / 任务 cancelled / agent terminated
+                # 经 WriteEngine 单写线程（无锁单写者；async db 仅读）
+                from app.persistence.database import run_write_locked
+
+                def _persist(s):
+                    for turn in stale:
+                        t = s.get(Turn, turn.id)
+                        if t is None:
+                            continue
+                        t.status = "interrupted"
+                        t.summary = t.summary or "应用关闭时任务已停止"
+                        t.completed_at = t.completed_at or datetime.now(timezone.utc).isoformat()
+                        rows = s.execute(select(Task).where(
+                            Task.turn_id == turn.id,
+                            Task.status.in_(["proposed", "pending", "running", "in_progress"]),
+                        ))
+                        for task in rows.scalars().all():
+                            if task.status != "cancelled":
+                                task.status = "cancelled"
+                                task.note = task.note or "应用关闭时任务已停止"
+                        agents = s.execute(select(Agent).where(Agent.turn_id == turn.id, Agent.status == "running"))
+                        for agent in agents.scalars().all():
+                            agent.status = "terminated"
+                    s.commit()
+
+                await run_write_locked(_persist, label="startup.repair")
         await seed()
     except Exception as e:  # noqa: BLE001
         import logging
         logging.getLogger(__name__).exception("数据库初始化失败: %s", e)
     yield
+    # 优雅关停：排空 write-behind 缓冲，避免未落库消息在进程退出时丢失。
+    try:
+        from app.persistence.write_behind import write_behind
+        await write_behind.shutdown()
+    except Exception:
+        logging.getLogger(__name__).debug("shutdown drain write-behind failed", exc_info=True)
 
 
 def create_app() -> FastAPI:

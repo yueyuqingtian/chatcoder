@@ -39,6 +39,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.trae import session as trae_session
+from app.persistence.models.trae_auth import TraeAuth
 from app.auth.trae.business import build_business_headers
 from app.core.config import settings
 
@@ -299,63 +300,71 @@ async def sync_trae_models(db: AsyncSession, provider, agent_host: str) -> list[
         select(Model).where(Model.provider_id == provider.id)
     )).scalars().all()
     by_name = {m.name: m for m in existing}
-    updated = 0
-    created = 0
-    for name, entry in entries.items():
-        m = by_name.get(name)
-        if m is None:
-            m = Model(tenant_id=1, name=name, provider_id=provider.id, source_type="byok")
-            db.add(m)
-            by_name[name] = m
-            created += 1
-        m.api_key = "__trae_session__"  # 占位：真实 token 由 registry 从 trae_auth 动态取
-        m.base_url = agent_host
-        m.context_window = entry.get("context_window") or 200000
-        m.is_multimodal = bool(entry.get("is_multimodal"))
-        m.api_format = "trae"
-        # 思考档位：归一化 options；仅当模型本身支持思考（options 非空）时追加 max 档。
-        # 目录里部分模型 max_mode=True 但无 reasoning_effort_config（如 DeepSeek-V4-Flash /
-        # Doubao-Seed-Evolving），客户端不显示思考档位，不能把 max 混入。
-        reasoning = list(entry.get("reasoning_options") or [])
-        if entry.get("max_mode") and reasoning and "max" not in reasoning:
-            reasoning.append("max")
-        m.reasoning_efforts = reasoning or None
-        meta2 = dict(m.trae_meta or {})
-        meta2.update({
-            "config_name": entry.get("config_name") or name,
-            # model_name 存纯配置名（展示/选择用）；档位名（__dev）存
-            # provider_model_name，供 TraeProvider 构造请求 model_name。
-            "model_name": entry.get("model_name") or name,
-            "provider_model_name": entry.get("provider_model_name"),
-            "title": entry.get("title") or name,
-            "functions": entry.get("functions") or [],
-            "max_output_tokens": entry.get("max_output_tokens"),
-            "model_extra_config": entry.get("extra_config"),
-            "model_capability": entry.get("model_capability") or "",
-            "max_mode": entry.get("max_mode"),
-            # max 档位上下文（如 1000000 = 1M，模型 meta 供 max 档请求使用）
-            "context_window_max": entry.get("context_window_max"),
-            "thinking": entry.get("thinking"),
-            # 积分消耗倍率（consumption_rate.data.rate）：max 档消耗更快
-            "consumption_rate": entry.get("consumption_rate"),
-            # 客户端实际可用模型标记（前端模型选择器按此过滤）
-            "is_available": bool(entry.get("is_available")),
-        })
-        # 必须复制新 dict 再赋回：SQLAlchemy 对可变 JSON 列赋同一对象引用不触发 change detection
-        m.trae_meta = meta2
-        updated += 1
-    await db.flush()
-
     # 缓存目录原文（不含敏感字段）
-    auth = await trae_session.get_auth_row(db, provider.id)
-    auth.catalog = {
+    sanitized_catalog = {
         "models": [
             {"name": e["name"], "config_name": e["config_name"], "title": e["title"],
              "functions": e["functions"], "context_window": e["context_window"]}
             for e in entries.values()
         ],
     }
-    await db.flush()
+
+    from app.persistence.database import run_write_locked
+
+    def _persist(s):
+        by_name_local = dict(by_name)
+        created_local = 0
+        updated_local = 0
+        for name, entry in entries.items():
+            m = by_name_local.get(name)
+            if m is None:
+                m = Model(tenant_id=1, name=name, provider_id=provider.id, source_type="byok")
+                s.add(m)
+                by_name_local[name] = m
+                created_local += 1
+            m.api_key = "__trae_session__"  # 占位：真实 token 由 registry 从 trae_auth 动态取
+            m.base_url = agent_host
+            m.context_window = entry.get("context_window") or 200000
+            m.is_multimodal = bool(entry.get("is_multimodal"))
+            m.api_format = "trae"
+            # 思考档位：归一化 options；仅当模型本身支持思考（options 非空）时追加 max 档。
+            # 目录里部分模型 max_mode=True 但无 reasoning_effort_config（如 DeepSeek-V4-Flash /
+            # Doubao-Seed-Evolving），客户端不显示思考档位，不能把 max 混入。
+            reasoning = list(entry.get("reasoning_options") or [])
+            if entry.get("max_mode") and reasoning and "max" not in reasoning:
+                reasoning.append("max")
+            m.reasoning_efforts = reasoning or None
+            meta2 = dict(m.trae_meta or {})
+            meta2.update({
+                "config_name": entry.get("config_name") or name,
+                # model_name 存纯配置名（展示/选择用）；档位名（__dev）存
+                # provider_model_name，供 TraeProvider 构造请求 model_name。
+                "model_name": entry.get("model_name") or name,
+                "provider_model_name": entry.get("provider_model_name"),
+                "title": entry.get("title") or name,
+                "functions": entry.get("functions") or [],
+                "max_output_tokens": entry.get("max_output_tokens"),
+                "model_extra_config": entry.get("extra_config"),
+                "model_capability": entry.get("model_capability") or "",
+                "max_mode": entry.get("max_mode"),
+                # max 档位上下文（如 1000000 = 1M，模型 meta 供 max 档请求使用）
+                "context_window_max": entry.get("context_window_max"),
+                "thinking": entry.get("thinking"),
+                # 积分消耗倍率（consumption_rate.data.rate）：max 档消耗更快
+                "consumption_rate": entry.get("consumption_rate"),
+                # 客户端实际可用模型标记（前端模型选择器按此过滤）
+                "is_available": bool(entry.get("is_available")),
+            })
+            # 必须复制新 dict 再赋回：SQLAlchemy 对可变 JSON 列赋同一对象引用不触发 change detection
+            m.trae_meta = meta2
+            updated_local += 1
+        auth_row = s.get(TraeAuth, provider.id)
+        if auth_row is not None:
+            auth_row.catalog = sanitized_catalog
+        s.commit()
+        return created_local, updated_local
+
+    created, updated = await run_write_locked(_persist, label="trae.catalog.sync")
 
     logger.info("[trae] provider=%s 同步 %d 个对话模型（新增 %d，更新 %d）",
                 provider.id, len(entries), created, updated)

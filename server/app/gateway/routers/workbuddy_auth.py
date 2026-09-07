@@ -51,12 +51,20 @@ async def workbuddy_login_start(provider_id: int, db: AsyncSession = Depends(get
     api_base = _resolve_api_base(provider)
     result = await workbuddy_oauth.start_login(db, provider_id, api_base)
     if result.get("status") == "logged_in":
-        provider.auth_status = "logged_in"
         account = result.get("account") or {}
         label = account.get("label") or account.get("nickname") or account.get("id") or ""
-        provider.account_label = str(label)[:80] or None
-        await db.flush()
-        await commit_with_retry(db)
+        _label = str(label)[:80] or None
+        from app.persistence.database import run_write_locked
+
+        def _p(s):
+            from app.persistence.models.model_reg import Provider
+            row = s.get(Provider, provider_id)
+            if row is not None:
+                row.auth_status = "logged_in"
+                row.account_label = _label
+            s.commit()
+
+        await run_write_locked(_p, label=f"workbuddy.login_state.{provider_id}")
     return WorkBuddyLoginStartOut(**result)
 
 
@@ -84,11 +92,19 @@ async def workbuddy_logout(provider_id: int, db: AsyncSession = Depends(get_db))
 
     await workbuddy_oauth.cancel_login(db, provider_id)
     await workbuddy_session.clear_auth(db, provider_id)
-    await db.execute(update(Model).where(Model.provider_id == provider_id).values(api_key=None))
-    provider.auth_status = "pending"
-    provider.account_label = None
-    await db.flush()
-    await commit_with_retry(db)
+
+    from app.persistence.database import run_write_locked
+
+    def _p(s):
+        from app.persistence.models.model_reg import Provider
+        row = s.get(Provider, provider_id)
+        if row is not None:
+            row.auth_status = "pending"
+            row.account_label = None
+        s.execute(update(Model).where(Model.provider_id == provider_id).values(api_key=None))
+        s.commit()
+
+    await run_write_locked(_p, label=f"workbuddy.logout.{provider_id}")
     return {"ok": True}
 
 
@@ -111,12 +127,20 @@ async def workbuddy_sync(provider_id: int, db: AsyncSession = Depends(get_db)):
     # 登录态刷新（目录同步成功即视为已登录）
     auth = await workbuddy_session.load_auth(db, provider_id)
     if auth and auth.access_token:
-        provider.auth_status = "logged_in"
         account = auth.account or {}
         label = account.get("label") or account.get("nickname") or account.get("id") or ""
-        provider.account_label = str(label)[:80] or None
-    await db.flush()
-    await commit_with_retry(db)
+        _label = str(label)[:80] or None
+        from app.persistence.database import run_write_locked
+
+        def _p(s):
+            from app.persistence.models.model_reg import Provider
+            row = s.get(Provider, provider_id)
+            if row is not None:
+                row.auth_status = "logged_in"
+                row.account_label = _label
+            s.commit()
+
+        await run_write_locked(_p, label=f"workbuddy.sync_state.{provider_id}")
     return WorkBuddySyncOut(synced=len(entries), models=entries)
 
 

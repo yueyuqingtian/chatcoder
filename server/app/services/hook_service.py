@@ -20,33 +20,51 @@ async def list_hooks(db: AsyncSession) -> list[HookConfig]:
 
 
 async def create_hook(db: AsyncSession, *, event: str, command: str,
-                      matcher: str | None = None, enabled: bool = True) -> HookConfig:
+                      matcher: str | None = None, enabled: bool = True) -> int:
+    from app.persistence.database import run_write_locked
+
     if event not in [e.value for e in HookEvent]:
         raise ValueError(f"未知钩子事件: {event}")
-    hook = HookConfig(event=event, command=command, matcher=matcher, enabled=enabled)
-    db.add(hook)
-    await db.flush()
-    return hook
+
+    def patch(s):
+        hook = HookConfig(event=event, command=command, matcher=matcher, enabled=enabled)
+        s.add(hook)
+        s.flush()
+        hid = hook.id
+        s.commit()
+        return hid
+
+    return await run_write_locked(patch, label="hook.create")
 
 
-async def update_hook(db: AsyncSession, hook_id: int, **kwargs) -> HookConfig | None:
-    hook = await db.get(HookConfig, hook_id)
-    if hook is None:
-        return None
-    for k, v in kwargs.items():
-        if v is not None:
-            setattr(hook, k, v)
-    await db.flush()
-    return hook
+async def update_hook(db: AsyncSession, hook_id: int, **kwargs) -> bool:
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        hook = s.get(HookConfig, hook_id)
+        if hook is None:
+            return False
+        for k, v in kwargs.items():
+            if v is not None:
+                setattr(hook, k, v)
+        s.commit()
+        return True
+
+    return await run_write_locked(patch, label=f"hook.update.{hook_id}")
 
 
 async def delete_hook(db: AsyncSession, hook_id: int) -> bool:
-    hook = await db.get(HookConfig, hook_id)
-    if hook is None:
-        return False
-    await db.delete(hook)
-    await db.flush()
-    return True
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        hook = s.get(HookConfig, hook_id)
+        if hook is None:
+            return False
+        s.delete(hook)
+        s.commit()
+        return True
+
+    return await run_write_locked(patch, label=f"hook.delete.{hook_id}")
 
 
 async def run_hooks(db: AsyncSession, event: str, payload: dict,

@@ -6,14 +6,13 @@ SQLite 在桌面端是单写者数据库。这里统一关闭隐式 autoflush，
 import asyncio
 import logging
 import time
-import weakref
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from sqlalchemy import event
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.orm import DeclarativeBase, Session
 
 from app.core.config import settings
 
@@ -79,28 +78,10 @@ if settings.database_url.startswith("sqlite"):
         cursor.close()
 
 
-# SQLite 的跨进程写锁由文件数据库自身负责；进程内只在真正 commit 的短窗口
-# 串行化，避免 A flush 后等待其它协程、B 又无法推进 A commit。
-# 按 event loop 保存锁，防止 pytest/重载的旧 asyncio.Lock 被新 loop 复用。
-_commit_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = weakref.WeakKeyDictionary()
-_flush_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = weakref.WeakKeyDictionary()
-
-
-def _loop_lock(store: weakref.WeakKeyDictionary) -> asyncio.Lock:
-    loop = asyncio.get_running_loop()
-    lock = store.get(loop)
-    if lock is None:
-        lock = asyncio.Lock()
-        store[loop] = lock
-    return lock
-
-
-def _commit_lock() -> asyncio.Lock:
-    return _loop_lock(_commit_locks)
-
-
-def _flush_lock() -> asyncio.Lock:
-    return _loop_lock(_flush_locks)
+# plan-206-975：无锁单写者架构（对齐 deepseek-harness）。
+# 所有写路径经 WriteEngine 单写线程（唯一物理写者，FIFO 串行，天然无锁）；
+# 进程内 asyncio 写锁已删除（_write_lock/_write_locks 移除）。
+# async session 仅用于读；busy_timeout 仅作跨进程/旧实例兜底。
 
 
 def _is_sqlite_lock_error(exc: BaseException) -> bool:
@@ -120,51 +101,21 @@ def _is_write_statement(statement) -> bool:
 
 
 class LockedAsyncSession(AsyncSession):
-    """关闭隐式 autoflush，并记录显式 flush/commit 耗时。"""
+    """关闭隐式 autoflush 的异步会话（仅读；写一律经 WriteEngine）。
+
+    plan-206-975：事务级全局写锁已删除——async 会话不再持有写事务；
+    名称保留兼容（async_session_factory 与调用方零改动）。
+    """
 
     async def execute(self, statement, params=None, *, execution_options=None,
                       bind_arguments=None, **kwargs):
-        if settings.database_url.startswith("sqlite") and _is_write_statement(statement):
-            lock = _flush_lock()
-            await lock.acquire()
-            try:
-                return await super().execute(
-                    statement, params, execution_options=execution_options,
-                    bind_arguments=bind_arguments, **kwargs,
-                )
-            finally:
-                lock.release()
         return await super().execute(
             statement, params, execution_options=execution_options,
             bind_arguments=bind_arguments, **kwargs,
         )
 
-    async def commit(self) -> None:
-        started = time.monotonic()
-        lock = _commit_lock()
-        wait_started = time.monotonic()
-        await lock.acquire()
-        waited = time.monotonic() - wait_started
-        if waited >= 0.05:
-            logger.info("[db.lock.wait] commit_wait=%.3fs", waited)
-        try:
-            await super().commit()
-        except Exception:
-            try:
-                await super().rollback()
-            except Exception:
-                logger.debug("[db.commit] rollback failed", exc_info=True)
-            raise
-        finally:
-            lock.release()
-            elapsed = time.monotonic() - started
-            if elapsed >= 0.05:
-                logger.debug("[db.commit] elapsed=%.3fs", elapsed)
-
     async def flush(self, objects=None) -> None:
         started = time.monotonic()
-        lock = _flush_lock()
-        await lock.acquire()
         try:
             if objects is None:
                 await super().flush()
@@ -177,10 +128,36 @@ class LockedAsyncSession(AsyncSession):
                 logger.debug("[db.flush] rollback failed", exc_info=True)
             raise
         finally:
-            lock.release()
             elapsed = time.monotonic() - started
             if elapsed >= 0.05:
                 logger.debug("[db.flush] elapsed=%.3fs", elapsed)
+
+    async def commit(self) -> None:
+        started = time.monotonic()
+        try:
+            await super().commit()
+        except Exception:
+            try:
+                await super().rollback()
+            except Exception:
+                logger.debug("[db.commit] rollback failed", exc_info=True)
+            raise
+        finally:
+            elapsed = time.monotonic() - started
+            if elapsed >= 0.05:
+                logger.debug("[db.commit] elapsed=%.3fs", elapsed)
+
+    async def rollback(self) -> None:
+        started = time.monotonic()
+        try:
+            await super().rollback()
+        finally:
+            elapsed = time.monotonic() - started
+            if elapsed >= 0.05:
+                logger.debug("[db.rollback] elapsed=%.3fs", elapsed)
+
+    async def close(self) -> None:
+        await super().close()
 
 
 # SQLAlchemy 2.x 的 AsyncSession 不提供 expire_on_rollback 参数；
@@ -206,19 +183,90 @@ async def rollback_safely(db: AsyncSession) -> None:
         logger.debug("[db.rollback] rollback failed", exc_info=True)
 
 
+# 跨进程兜底重试的语义：进程内写已被全局写锁串行化，锁冲突理论上只剩
+# 「另一进程/旧实例写同一数据库文件」这一种来源，busy_timeout 兜底 + 有限重试。
 async def commit_with_retry(db: AsyncSession, retries: int = 3, label: str = "db") -> None:
-    """提交当前短事务；锁冲突只做有界等待，不在回滚后假装重试 ORM 对象。"""
+    """提交当前短事务；锁冲突只做有界等待，跨进程兜底（不再重试 ORM 对象）。"""
     started = time.monotonic()
     try:
         await db_commit(db)
     except Exception as exc:
         if _is_sqlite_lock_error(exc):
-            logger.error(
-                "[db.commit.locked] label=%s retries=%d elapsed=%.3fs; "
-                "caller must rebuild the short transaction",
+            logger.warning(
+                "[db.commit.locked] label=%s retries=%d elapsed=%.3fs "
+                "(cross-process lock fallback; caller must rebuild the short transaction)",
                 label, retries, time.monotonic() - started,
             )
         raise
+
+
+async def write_tx(operation: Callable[[Session], Any], *, label: str = "db",
+                   retries: int = 2) -> Any:
+    """短写事务：经 WriteEngine 单写线程执行（plan-206-975 无锁单写者）。
+
+    `operation(sync_session)` 内做同步 add/flush/commit，返回任意值（如落库后需
+    广播的事件列表）。因为闭包是同步函数、无法 await，且运行在写引擎专用线程中
+    同步执行——事务内无异步 IO（架构保证）；事件循环不被写事务阻塞。
+    """
+    from app.persistence.write_engine import run_write
+
+    return await run_write(operation, label=label, retries=retries)
+
+
+async def run_write_locked(operation: Callable[[Session], Any], *, label: str = "db",
+                           retries: int = 2) -> Any:
+    """经 WriteEngine 单写线程执行（无锁单写者）。
+
+    plan-206-975：进程内写锁已删除——写引擎是唯一物理写者（单连接 + 单 worker
+    线程 FIFO 串行），async 侧不再需要任何锁协调。名称保留兼容（所有迁移点
+    零改动）。
+    """
+    from app.persistence.write_engine import run_write
+
+    return await run_write(operation, label=label, retries=retries)
+
+
+async def orm_add(model_cls, *, label: str | None = None, **fields) -> int:
+    """通用写引擎创建（None 字段跳过），返回新行 id。"""
+    def _p(s):
+        obj = model_cls(**{k: v for k, v in fields.items() if v is not None})
+        s.add(obj)
+        s.flush()
+        oid = obj.id
+        s.commit()
+        return oid
+
+    return await run_write_locked(_p, label=label or model_cls.__name__)
+
+
+async def orm_update(model_cls, pk_value: int, *, label: str | None = None, **fields) -> None:
+    """通用写引擎更新（None 字段跳过）。"""
+    from app.persistence.database import run_write_locked as _r
+
+    def _p(s):
+        obj = s.get(model_cls, pk_value)
+        if obj is None:
+            return
+        for k, v in fields.items():
+            if v is not None:
+                setattr(obj, k, v)
+        s.commit()
+
+    await _r(_p, label=label or f"update.{model_cls.__name__}")
+
+
+async def orm_delete(model_cls, pk_value: int, *, label: str | None = None) -> None:
+    """通用写引擎删除（不存在则静默）。"""
+    from app.persistence.database import run_write_locked as _r
+
+    def _p(s):
+        obj = s.get(model_cls, pk_value)
+        if obj is None:
+            return
+        s.delete(obj)
+        s.commit()
+
+    await _r(_p, label=label or f"delete.{model_cls.__name__}")
 
 
 async def run_write_transaction(
@@ -230,6 +278,8 @@ async def run_write_transaction(
 
     operation 必须只包含内存组装、显式数据库读写和必要的 flush，禁止包含
     LLM/文件/网络长 IO。这样 rollback 后不会复用已经失效的 ORM 对象。
+    flusher / finalizer 等基于独立 session 的异步事务走此函数（其 flush/commit
+    由 LockedAsyncSession 的事务级锁保护）。
     """
     from app.persistence.database import async_session_factory
 

@@ -17,21 +17,23 @@ async def list_profiles(project_id: int | None = None, db: AsyncSession = Depend
 
 @router.post("", response_model=ConfigProfileOut)
 async def create_profile(body: ConfigProfileCreate, db: AsyncSession = Depends(get_db)):
-    profile = await config_service.create_profile(
+    pid = await config_service.create_profile(
         db, name=body.name, scope=body.scope, project_id=body.project_id, data=body.data,
     )
-    await db.commit()
-    return profile
+    profile = (await config_service.list_profiles(db, body.project_id) or [])
+    return next((p for p in profile if p.id == pid), None)
 
 
 @router.patch("/{profile_id}", response_model=ConfigProfileOut)
 async def update_profile(profile_id: int, body: ConfigProfileUpdate, db: AsyncSession = Depends(get_db)):
-    profile = await config_service.update_profile(
+    ok = await config_service.update_profile(
         db, profile_id, data=body.data, is_active=body.is_active,
     )
-    if profile is None:
+    if not ok:
         raise HTTPException(404, "profile 不存在")
-    await db.commit()
+    from sqlalchemy import select
+    from app.persistence.models.config import ConfigProfile
+    profile = (await db.execute(select(ConfigProfile).where(ConfigProfile.id == profile_id))).scalars().first()
     return profile
 
 
@@ -40,19 +42,19 @@ async def delete_profile(profile_id: int, db: AsyncSession = Depends(get_db)):
     ok = await config_service.delete_profile(db, profile_id)
     if not ok:
         raise HTTPException(404, "profile 不存在")
-    await db.commit()
     return {"ok": True}
 
 
 @router.post("/sessions/{session_id}/profile", response_model=dict)
 async def switch_session_profile(session_id: int, profile_id: int, db: AsyncSession = Depends(get_db)):
     """将会话激活指定 profile。"""
-    from app.gateway.routers.sessions import _to_out
     from app.orchestration.agent_events import broadcast
-    profile = await config_service.update_profile(db, profile_id, is_active=True)
-    if profile is None:
+    ok = await config_service.update_profile(db, profile_id, is_active=True)
+    if not ok:
         raise HTTPException(404, "profile 不存在")
-    await db.commit()
+    from sqlalchemy import select
+    from app.persistence.models.config import ConfigProfile
+    profile = (await db.execute(select(ConfigProfile).where(ConfigProfile.id == profile_id))).scalars().first()
     await broadcast(session_id, {
         "event": "config.changed",
         "payload": {"profile_id": profile_id, "changed_keys": list((profile.data or {}).keys())},

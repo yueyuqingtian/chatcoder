@@ -16,10 +16,10 @@ router = APIRouter()
 
 @router.post("/knowledge-bases", response_model=KnowledgeBaseOut)
 async def create_kb(body: KnowledgeBaseCreate, db: AsyncSession = Depends(get_db)):
-    kb = await knowledge_service.create_knowledge_base(
+    kid = await knowledge_service.create_knowledge_base(
         db, name=body.name, kb_type=body.type
     )
-    await db.commit()
+    kb = await knowledge_service.get_knowledge_base(db, kid)  # async 只读
     return KnowledgeBaseOut(id=kb.id, name=kb.name or "", type=kb.type or "")
 
 
@@ -45,7 +45,6 @@ async def delete_kb(kb_id: int, db: AsyncSession = Depends(get_db)):
     ok = await knowledge_service.delete_knowledge_base(db, kb_id)
     if not ok:
         raise HTTPException(404, "knowledge base not found")
-    await db.commit()
     return {"ok": True}
 
 
@@ -56,14 +55,14 @@ async def add_doc(
     kb = await knowledge_service.get_knowledge_base(db, kb_id)
     if kb is None:
         raise HTTPException(404, "knowledge base not found")
-    doc = await knowledge_service.add_doc(
+    did = await knowledge_service.add_doc(
         db,
         kb_id=kb_id,
         title=body.title,
         content=body.content,
         meta=body.meta,
     )
-    await db.commit()
+    doc = await knowledge_service.get_doc(db, did)  # async 只读
     return KnowledgeDocOut(
         id=doc.id,
         kb_id=doc.kb_id or 0,
@@ -129,5 +128,4 @@ async def delete_doc(kb_id: int, doc_id: int, db: AsyncSession = Depends(get_db)
     if doc is None or doc.kb_id != kb_id:
         raise HTTPException(404, "doc not found")
     ok = await knowledge_service.delete_doc(db, doc_id)
-    await db.commit()
     return {"ok": ok}

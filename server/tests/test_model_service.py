@@ -16,18 +16,18 @@ from app.services import model_service
 
 
 @pytest.fixture
-async def db():
-    engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
+async def db(tmp_path):
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/model.db"
+    engine = create_async_engine(db_url)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    from app.persistence import write_engine as _we
+    _we.configure(db_url, foreign_keys=False)  # 写引擎（单写线程）与测试库同源
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
         yield session
     await engine.dispose()
+    _we.configure(None)
 
 
 async def test_update_ta3_model_writes_override(db):
@@ -35,9 +35,13 @@ async def test_update_ta3_model_writes_override(db):
               api_format="ta3", is_multimodal=False, ta3_meta={"provider": "ta3"})
     db.add(m)
     await db.flush()
-    updated = await model_service.update_model(db, m.id, is_multimodal=True)
-    assert updated.is_multimodal is True
-    assert (updated.ta3_meta or {}).get("multimodal_override") is True
+    await db.commit()
+    ok = await model_service.update_model(db, m.id, is_multimodal=True)
+    assert ok is True
+    ref = await db.get(Model, m.id)
+    await db.refresh(ref)  # 写引擎独立连接提交，重读最新
+    assert ref.is_multimodal is True
+    assert (ref.ta3_meta or {}).get("multimodal_override") is True
 
 
 async def test_update_non_ta3_model_does_not_write_override(db):
@@ -45,15 +49,20 @@ async def test_update_non_ta3_model_does_not_write_override(db):
               api_format="openai", is_multimodal=False)
     db.add(m)
     await db.flush()
-    updated = await model_service.update_model(db, m.id, is_multimodal=True)
-    assert updated.is_multimodal is True
-    assert (updated.ta3_meta or {}).get("multimodal_override") is not True
+    await db.commit()
+    ok = await model_service.update_model(db, m.id, is_multimodal=True)
+    assert ok is True
+    ref = await db.get(Model, m.id)
+    await db.refresh(ref)  # 写引擎独立连接提交，重读最新
+    assert ref.is_multimodal is True
+    assert (ref.ta3_meta or {}).get("multimodal_override") is not True
 
 
 async def test_create_ta3_multimodal_model_marks_override(db):
-    created = await model_service.create_model(
+    created_id = await model_service.create_model(
         db, name="minimax-m3", provider_id=1, source_type="byok",
         api_format="ta3", is_multimodal=True,
     )
-    assert created.is_multimodal is True
-    assert (created.ta3_meta or {}).get("multimodal_override") is True
+    ref = await db.get(Model, created_id)
+    assert ref.is_multimodal is True
+    assert (ref.ta3_meta or {}).get("multimodal_override") is True

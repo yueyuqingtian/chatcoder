@@ -29,19 +29,19 @@ from app.persistence.models.message import Session as SessionModel
 
 
 @pytest.fixture
-async def db_env():
-    """内存库 + 会话工厂（工厂供 _continue_goal_turn 的独立连接路径复用）。"""
-    eng = create_async_engine(
-        "sqlite+aiosqlite://",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
+async def db_env(tmp_path):
+    """临时文件库 + 会话工厂（工厂供 _continue_goal_turn 的独立连接路径复用）。"""
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/goal.db"
+    eng = create_async_engine(db_url)
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    from app.persistence import write_engine as _we
+    _we.configure(db_url, foreign_keys=False)  # 写引擎（单写线程）与测试库同源
     factory = async_sessionmaker(eng, expire_on_commit=False)
     async with factory() as session:
         yield session, factory
     await eng.dispose()
+    _we.configure(None)
 
 
 @pytest.fixture
@@ -252,19 +252,22 @@ async def test_create_session_with_goal(db_env):
     db, _ = db_env
     from app.services import session_service
 
-    s = await session_service.create_session(
+    s_id = await session_service.create_session(
         db, project_id=None, goal_text="修复登录页深色主题样式",
     )
+    s = await session_service.get_session(db, s_id)
     assert s.goal_status == "active"
     assert s.goal_text == "修复登录页深色主题样式"
     assert s.goal_created_at  # 非空 ISO 时间戳
 
     # 超长截断 2000
-    long_s = await session_service.create_session(db, project_id=None, goal_text="x" * 3000)
+    sid2 = await session_service.create_session(db, project_id=None, goal_text="x" * 3000)
+    long_s = await session_service.get_session(db, sid2)
     assert len(long_s.goal_text) == 2000
 
     # 空白文本视为未设定
-    blank = await session_service.create_session(db, project_id=None, goal_text="   ")
+    sid3 = await session_service.create_session(db, project_id=None, goal_text="   ")
+    blank = await session_service.get_session(db, sid3)
     assert blank.goal_status == "none"
 
 
@@ -273,7 +276,8 @@ async def test_create_session_without_goal_default(db_env):
     db, _ = db_env
     from app.services import session_service
 
-    s = await session_service.create_session(db, project_id=None)
+    sid = await session_service.create_session(db, project_id=None)
+    s = await session_service.get_session(db, sid)
     assert s.goal_status == "none"
     assert s.goal_text is None
     assert s.goal_turns_used == 0

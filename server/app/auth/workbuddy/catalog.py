@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.workbuddy import session as wb_session
+from app.persistence.models.workbuddy_auth import WorkBuddyAuth
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -174,50 +175,58 @@ async def sync_workbuddy_models(db: AsyncSession, provider, api_base: str) -> li
         select(Model).where(Model.provider_id == provider.id)
     )).scalars().all()
     by_name = {m.name: m for m in existing}
-    updated = 0
-    created = 0
-    for name, entry in entries.items():
-        m = by_name.get(name)
-        if m is None:
-            m = Model(tenant_id=1, name=name, provider_id=provider.id, source_type="byok")
-            db.add(m)
-            by_name[name] = m
-            created += 1
-        m.api_key = "__workbuddy_session__"  # 占位：真实 token 由 registry 从 auth 表动态取
-        m.base_url = api_base
-        m.context_window = entry.get("context_window") or 200000
-        m.is_multimodal = bool(entry.get("is_multimodal"))
-        m.api_format = "workbuddy"
-        efforts = entry.get("reasoning_efforts") or []
-        m.reasoning_efforts = efforts if efforts else None
-        # 必须复制新 dict 再赋回：SQLAlchemy 对可变 JSON 列赋同一对象引用
-        # 不触发 change detection，原地 update 会导致 meta 更新不落库
-        meta = dict(m.workbuddy_meta or {})
-        meta.update({
-            "title": entry.get("title") or name,
-            "credits": entry.get("credits") or "",
-            "vendor": entry.get("vendor") or "",
-            "tags": entry.get("tags") or [],
-            "maxOutputTokens": entry.get("max_output_tokens"),
-            "supportsReasoning": entry.get("supports_reasoning"),
-            "onlyReasoning": entry.get("only_reasoning"),
-            "reasoning": entry.get("reasoning") or {},
-            "temperature": entry.get("temperature"),
-        })
-        m.workbuddy_meta = meta
-        updated += 1
-    await db.flush()
-
     # 缓存目录原文（不含敏感字段）
-    auth = await wb_session.get_auth_row(db, provider.id)
-    auth.catalog = {
+    sanitized_catalog = {
         "models": [
             {"id": e["name"], "title": e["title"], "credits": e["credits"],
              "contextWindow": e["context_window"], "reasoning": e["reasoning"]}
             for e in entries.values()
         ],
     }
-    await db.flush()
+
+    from app.persistence.database import run_write_locked
+
+    def _persist(s):
+        by_name_local = dict(by_name)
+        created_local = 0
+        updated_local = 0
+        for name, entry in entries.items():
+            m = by_name_local.get(name)
+            if m is None:
+                m = Model(tenant_id=1, name=name, provider_id=provider.id, source_type="byok")
+                s.add(m)
+                by_name_local[name] = m
+                created_local += 1
+            m.api_key = "__workbuddy_session__"  # 占位：真实 token 由 registry 从 auth 表动态取
+            m.base_url = api_base
+            m.context_window = entry.get("context_window") or 200000
+            m.is_multimodal = bool(entry.get("is_multimodal"))
+            m.api_format = "workbuddy"
+            efforts = entry.get("reasoning_efforts") or []
+            m.reasoning_efforts = efforts if efforts else None
+            # 必须复制新 dict 再赋回：SQLAlchemy 对可变 JSON 列赋同一对象引用
+            # 不触发 change detection，原地 update 会导致 meta 更新不落库
+            meta = dict(m.workbuddy_meta or {})
+            meta.update({
+                "title": entry.get("title") or name,
+                "credits": entry.get("credits") or "",
+                "vendor": entry.get("vendor") or "",
+                "tags": entry.get("tags") or [],
+                "maxOutputTokens": entry.get("max_output_tokens"),
+                "supportsReasoning": entry.get("supports_reasoning"),
+                "onlyReasoning": entry.get("only_reasoning"),
+                "reasoning": entry.get("reasoning") or {},
+                "temperature": entry.get("temperature"),
+            })
+            m.workbuddy_meta = meta
+            updated_local += 1
+        auth_row = s.get(WorkBuddyAuth, provider.id)
+        if auth_row is not None:
+            auth_row.catalog = sanitized_catalog
+        s.commit()
+        return created_local, updated_local
+
+    created, updated = await run_write_locked(_persist, label="workbuddy.catalog.sync")
 
     logger.info("[workbuddy] provider=%s 同步 %d 个对话模型（新增 %d，更新 %d）",
                 provider.id, len(entries), created, updated)

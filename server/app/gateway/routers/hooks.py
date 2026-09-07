@@ -17,23 +17,25 @@ async def list_hooks(db: AsyncSession = Depends(get_db)):
 @router.post("", response_model=HookConfigOut)
 async def create_hook(body: HookConfigCreate, db: AsyncSession = Depends(get_db)):
     try:
-        hook = await hook_service.create_hook(
+        hid = await hook_service.create_hook(
             db, event=body.event, command=body.command,
             matcher=body.matcher, enabled=body.enabled,
         )
-        await db.commit()
-        return hook
+        from sqlalchemy import select
+        from app.persistence.models.hook import HookConfig
+        return (await db.execute(select(HookConfig).where(HookConfig.id == hid))).scalars().first()
     except ValueError as e:
         raise HTTPException(400, str(e))
 
 
 @router.patch("/{hook_id}", response_model=HookConfigOut)
 async def update_hook(hook_id: int, body: dict, db: AsyncSession = Depends(get_db)):
-    hook = await hook_service.update_hook(db, hook_id, **body)
-    if hook is None:
+    ok = await hook_service.update_hook(db, hook_id, **body)
+    if not ok:
         raise HTTPException(404, "钩子不存在")
-    await db.commit()
-    return hook
+    from sqlalchemy import select
+    from app.persistence.models.hook import HookConfig
+    return (await db.execute(select(HookConfig).where(HookConfig.id == hook_id))).scalars().first()
 
 
 @router.delete("/{hook_id}", response_model=dict)
@@ -41,5 +43,4 @@ async def delete_hook(hook_id: int, db: AsyncSession = Depends(get_db)):
     ok = await hook_service.delete_hook(db, hook_id)
     if not ok:
         raise HTTPException(404, "钩子不存在")
-    await db.commit()
     return {"ok": True}

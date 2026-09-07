@@ -55,8 +55,16 @@ async def create_worktree(db: AsyncSession, session_id: int, *, branch: str | No
     if not ok:
         raise ValueError(f"创建工作树失败: {(err or out)[:200]}")
 
-    session.worktree_path = str(wt_path)
-    await db.flush()
+    from app.persistence.database import run_write_locked
+
+    def _persist_path(s, value: str | None):
+        from app.persistence.models.message import Session as _Sess
+        row = s.get(_Sess, session_id)
+        if row is not None:
+            row.worktree_path = value
+        s.commit()
+
+    await run_write_locked(lambda s: _persist_path(s, str(wt_path)), label=f"worktree.create.{session_id}")
     logger.info("会话 %s 创建 worktree: %s (branch=%s)", session_id, wt_path, branch_name)
     return {"ok": True, "path": str(wt_path), "branch": branch_name}
 
@@ -79,7 +87,15 @@ async def remove_worktree(db: AsyncSession, session_id: int) -> dict:
     ok, out, err = await _git(repo, "worktree", "remove", wt, "--force")
     if not ok:
         raise ValueError(f"移除工作树失败: {(err or out)[:200]}")
-    session.worktree_path = None
-    await db.flush()
+    from app.persistence.database import run_write_locked
+
+    def _persist_path(s, value: str | None):
+        from app.persistence.models.message import Session as _Sess
+        row = s.get(_Sess, session_id)
+        if row is not None:
+            row.worktree_path = value
+        s.commit()
+
+    await run_write_locked(lambda s: _persist_path(s, None), label=f"worktree.remove.{session_id}")
     logger.info("会话 %s 移除 worktree: %s", session_id, wt)
     return {"ok": True}

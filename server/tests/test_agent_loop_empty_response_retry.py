@@ -80,6 +80,60 @@ def test_timeout_empty_fatal_regardless_of_progress():
     assert fatal is True
 
 
+# ── v966: 零帧断流（网关未下发任何数据帧）不再被 has_progress 豁免 ──
+
+def test_zero_frame_stop_empty_is_fatal_even_with_progress():
+    """网关零帧空流（网络卡顿/服务器处理慢）不能判定为结束——即使本 turn
+    已有产出，也必须 fatal 走多次重试，避免任务在模型未应答时静默中断。"""
+    reason, fatal = _response_failure_reason(
+        ChatResponse(content=None, finish_reason="stop", frames_received=0),
+        has_progress=True,
+    )
+    assert fatal is True
+    assert "未返回任何数据" in reason
+
+
+def test_zero_frame_stop_empty_is_fatal_without_progress():
+    reason, fatal = _response_failure_reason(
+        ChatResponse(content=None, finish_reason="stop", frames_received=0),
+        has_progress=False,
+    )
+    assert fatal is True
+
+
+def test_zero_frame_timeout_empty_is_fatal():
+    reason, fatal = _response_failure_reason(
+        ChatResponse(content=None, finish_reason="timeout", frames_received=0),
+        has_progress=True,
+    )
+    assert fatal is True
+
+
+def test_frames_received_stop_empty_with_progress_is_healthy():
+    """模型已应答（收到帧）但主动无输出 + 已有产出 → 保留 v31 豁免语义。"""
+    assert _response_failure_reason(
+        ChatResponse(content=None, finish_reason="stop", frames_received=2),
+        has_progress=True,
+    ) is None
+
+
+def test_frames_received_stop_empty_without_progress_is_fatal():
+    reason, fatal = _response_failure_reason(
+        ChatResponse(content=None, finish_reason="stop", frames_received=2),
+        has_progress=False,
+    )
+    assert fatal is True
+    assert "空响应" in reason
+
+
+def test_frames_received_none_keeps_legacy_logic():
+    """provider 未提供 frames 信号（None）时保持旧判定：有产出+stop 空响应豁免。"""
+    assert _response_failure_reason(
+        ChatResponse(content=None, finish_reason="stop", frames_received=None),
+        has_progress=True,
+    ) is None
+
+
 # ── 非 fatal 不进入重试路径 ──
 
 def test_truncation_not_fatal():

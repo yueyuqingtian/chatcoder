@@ -129,26 +129,26 @@ async def list_skills(source: str | None = None, db: AsyncSession = Depends(get_
 
 @router.post("/skills", response_model=dict)
 async def create_skill(body: SkillCreate, db: AsyncSession = Depends(get_db)):
-    skill = await skill_service.create_skill(
+    sid = await skill_service.create_skill(
         db, name=body.name, display_name=body.display_name,
         description=body.description, content=body.content, source=body.source,
         trigger=body.trigger, tools=body.tools, tags=body.tags, auto_load=body.auto_load,
     )
-    await db.commit()
+    skill = await skill_service.get_skill(db, sid)  # async 只读
     return skill_to_dict(skill)
 
 
 @router.patch("/skills/{skill_id}", response_model=dict)
 async def update_skill(skill_id: int, body: SkillUpdate, db: AsyncSession = Depends(get_db)):
-    skill = await skill_service.update_skill(
+    ok = await skill_service.update_skill(
         db, skill_id,
         display_name=body.display_name, description=body.description,
         content=body.content, trigger=body.trigger, tools=body.tools,
         tags=body.tags, is_active=body.is_active, auto_load=body.auto_load,
     )
-    if skill is None:
+    if not ok:
         raise HTTPException(404, "skill not found")
-    await db.commit()
+    skill = await skill_service.get_skill(db, skill_id)  # async 只读
     return skill_to_dict(skill)
 
 
@@ -157,7 +157,6 @@ async def delete_skill(skill_id: int, db: AsyncSession = Depends(get_db)):
     ok = await skill_service.delete_skill(db, skill_id)
     if not ok:
         raise HTTPException(404, "skill not found")
-    await db.commit()
     return {"ok": True}
 
 
@@ -168,7 +167,7 @@ async def list_mcp(source: str | None = None, db: AsyncSession = Depends(get_db)
 
 @router.post("/mcp-servers", response_model=dict)
 async def create_mcp(body: McpCreate, db: AsyncSession = Depends(get_db)):
-    server = await skill_service.create_mcp_server(
+    sid = await skill_service.create_mcp_server(
         db, name=body.name, display_name=body.display_name,
         description=body.description, source=body.source, transport=body.transport,
         command=body.command, args=body.args, env=body.env, url=body.url,
@@ -176,21 +175,21 @@ async def create_mcp(body: McpCreate, db: AsyncSession = Depends(get_db)):
         # v6.5: 导入（is_active=false）不阻塞握手；仅手动创建并直接启用时才拉取工具列表
         fetch_tools=body.is_active,
     )
-    await db.commit()
+    server = await skill_service.get_mcp_server(db, sid)  # async 只读
     return mcp_to_dict(server)
 
 
 @router.patch("/mcp-servers/{server_id}", response_model=dict)
 async def update_mcp(server_id: int, body: McpUpdate, db: AsyncSession = Depends(get_db)):
-    server = await skill_service.update_mcp_server(
+    ok = await skill_service.update_mcp_server(
         db, server_id,
         display_name=body.display_name, description=body.description,
         transport=body.transport, command=body.command, args=body.args,
         env=body.env, url=body.url, is_active=body.is_active,
     )
-    if server is None:
+    if not ok:
         raise HTTPException(404, "mcp server not found")
-    await db.commit()
+    server = await skill_service.get_mcp_server(db, server_id)  # async 只读
     return mcp_to_dict(server)
 
 
@@ -199,7 +198,6 @@ async def delete_mcp(server_id: int, db: AsyncSession = Depends(get_db)):
     ok = await skill_service.delete_mcp_server(db, server_id)
     if not ok:
         raise HTTPException(404, "mcp server not found")
-    await db.commit()
     return {"ok": True}
 
 
@@ -255,7 +253,7 @@ async def import_local_skill(body: SkillImportLocal, db: AsyncSession = Depends(
         if existing is not None:
             skipped.append(name)  # 重名跳过，避免覆盖
             continue
-        skill = await skill_service.create_skill(
+        sid = await skill_service.create_skill(
             db, name=name,
             display_name=meta.get("display_name") or name.replace("_", " ").replace("-", " ").title(),
             description=meta.get("description") or "",
@@ -264,8 +262,7 @@ async def import_local_skill(body: SkillImportLocal, db: AsyncSession = Depends(
             trigger=meta.get("trigger"), tools=meta.get("tools"),
             is_active=True, auto_load=bool(meta.get("auto_load", True)),
         )
-        imported.append(skill.name)
-    await db.commit()
+        imported.append(name)
     return {"ok": True, "imported": imported, "skipped": skipped, "count": len(imported)}
 
 
@@ -337,14 +334,13 @@ async def import_repo_skill(body: SkillRepoImport, db: AsyncSession = Depends(ge
     existing = await skill_service.get_skill_by_name(db, target["name"])
     if existing is not None:
         raise HTTPException(400, f"技能 {target['name']} 已存在")
-    skill = await skill_service.create_skill(
+    sid = await skill_service.create_skill(
         db, name=target["name"], display_name=target["display_name"],
         description=target["description"], content=target["content"],
         source="repo", path=target["path"], trigger=target["trigger"],
         tools=target["tools"], is_active=True, auto_load=True,
     )
-    await db.commit()
-    return {"ok": True, "id": skill.id}
+    return {"ok": True, "id": sid}
 
 
 @router.delete("/skills/repos/{repo_id}", response_model=dict)

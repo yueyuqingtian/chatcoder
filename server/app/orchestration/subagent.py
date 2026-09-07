@@ -82,6 +82,12 @@ class SubagentManager:
                 async with async_session_factory() as s:
                     await _sync_task_status(s, self.session_id, task.id, "failed", f"执行异常: {str(e)[:200]}", agent_id=agent.id)
                 logger.exception("[subagent] %s 异常", agent.id)
+            # v956：子代理 loop 结束前 flush 其消息（与主代理共用 turn buffer）
+            try:
+                from app.persistence.write_behind import write_behind
+                await write_behind.get(self.session_id, turn_id).flush()
+            except Exception:
+                logger.debug("[subagent] flush turn buffer failed agent=%s", agent.id, exc_info=True)
             logger.info("[subagent] %s 完成 status=%s", agent.id, handle.status)
 
         handle.task = asyncio.create_task(_run())
@@ -164,8 +170,9 @@ async def _sync_task_status(db, session_id: int, task_id: int, status: str, note
     try:
         from app.orchestration.agent_events import broadcast
         from app.services import task_service
+        # update_task_status 已经 WriteEngine 单写线程提交（无锁单写者），
+        # 此处不再需要 async commit_with_retry（db 无未决写）。
         await task_service.update_task_status(db, task_id, status, note=note)
-        await commit_with_retry(db, label=f"subagent.task.{status}")
         await broadcast(session_id, {
             "event": "task.updated",
             "payload": {"task_id": task_id, "status": status, "note": note or ""},

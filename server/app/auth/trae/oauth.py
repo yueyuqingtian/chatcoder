@@ -273,7 +273,6 @@ async def start_login(db: AsyncSession, provider_id: int, *, api_host: str,
                 device_id=device_id,
                 machine_id=machine_id,
             )
-            await db.commit()
             return {"status": "logged_in", "account": account,
                     "access_token": login.access_token[:24] + "…"}
         except Exception as e:  # noqa: BLE001
