@@ -8,7 +8,9 @@ const http = require("http");
 const net = require("net");
 const fs = require("fs");
 
-// ── 后端端口选择（v2.1: 冲突时自动选空闲端口）──
+// ── 后端端口选择（默认不常用端口 12973，避免冲突）──
+const DEFAULT_PORT = 12973;
+
 function probePort(port) {
   return new Promise((resolve) => {
     const srv = net.createServer();
@@ -18,45 +20,43 @@ function probePort(port) {
   });
 }
 
-function probeChatCoder(port) {
+/**
+ * 杀死当前软件对应的所有旧后端进程及可能残留占用 12973 端口的孤儿进程。
+ * 保证每次启动都是一个全新的当前版本后端，杜绝复用历史旧进程导致的代码未生效。
+ */
+function killExistingBackendProcesses(targetPort = DEFAULT_PORT) {
   return new Promise((resolve) => {
-    const req = http.get(
-      { host: "127.0.0.1", port, path: "/api/health", timeout: 700 },
-      (res) => {
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => {
-          try {
-            const data = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-            resolve(res.statusCode === 200 && data.status === "ok" && data.service === "chatcoder");
-          } catch { resolve(false); }
+    log("[chatcoder] 检查并清理历史残留后端进程与端口占用...");
+    if (process.platform === "win32") {
+      const { exec } = require("child_process");
+      // 1. 强杀所有历史 chatcoder-server.exe
+      exec("taskkill /F /IM chatcoder-server.exe /T", () => {
+        // 2. 检查并强杀可能占用 targetPort 的任何孤儿进程
+        const killPortCmd = `powershell -NoProfile -NonInteractive -Command "Get-NetTCPConnection -LocalPort ${targetPort} -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }"`;
+        exec(killPortCmd, () => {
+          setTimeout(resolve, 800); // 留出 800ms 保证操作系统完全释放文件锁与端口
         });
-      },
-    );
-    req.on("error", () => resolve(false));
-    req.on("timeout", () => { req.destroy(); resolve(false); });
+      });
+    } else {
+      const { exec } = require("child_process");
+      exec("pkill -9 -f chatcoder-server || true", () => {
+        setTimeout(resolve, 500);
+      });
+    }
   });
 }
 
 async function pickBackendPort() {
-  const base = Number(process.env.CHATCODER_PORT || 8000);
-  // 已有 ChatCoder 后端优先复用，不能因端口冲突再启动第二个共享 SQLite 的进程。
-  for (let p = base; p < base + 50; p++) {
-    if (await probeChatCoder(p)) {
-      log("[chatcoder] 复用已有后端端口:", p);
-      return p;
-    }
-  }
-  // 只有确认不是 ChatCoder 的服务占用端口时，才寻找空闲端口。
+  const base = Number(process.env.CHATCODER_PORT || DEFAULT_PORT);
+  // 清理完旧进程后，优先使用默认基准端口；若被占用则向后顺延寻找空闲端口
   for (let p = base; p < base + 50; p++) {
     if (await probePort(p)) return p;
   }
   return base;
 }
 
-let BACKEND_PORT = Number(process.env.CHATCODER_PORT || 8000);
+let BACKEND_PORT = Number(process.env.CHATCODER_PORT || DEFAULT_PORT);
 let backendProcess = null;
-let backendReused = false;
 let mainWindow = null;
 let backendReady = false;
 
@@ -115,18 +115,13 @@ function resolveFrontendDir() {
 // ── 启动后端 ──
 async function startBackend() {
   try {
-    if (await probeChatCoder(BACKEND_PORT)) {
-      backendReused = true;
-      log("[chatcoder] 使用已运行的 ChatCoder 后端:", BACKEND_PORT);
-      return null;
-    }
     const dir = resolveBackendDir();
     const exe = path.join(dir, "chatcoder-server.exe");
     if (!fs.existsSync(exe)) {
       logErr("[chatcoder] 后端可执行文件不存在:", exe);
       return null;
     }
-    log("[chatcoder] 启动后端:", exe);
+    log("[chatcoder] 启动新后端进程:", exe, "端口:", BACKEND_PORT);
 
     // 把后端输出写到文件,便于诊断
     const backendLogPath = path.join(LOG_DIR, "backend.log");
@@ -788,29 +783,31 @@ app.whenReady().then(async () => {
     logErr("[chatcoder] createWindow 失败:", err);
   }
 
-  // 2. 端口探活（8000 被打印服务等占用时自动换空闲端口）
+  // 2. 彻底清理所有历史残留的旧后端进程并释放端口，杜绝复用旧版本进程
+  try {
+    await killExistingBackendProcesses(DEFAULT_PORT);
+  } catch (err) {
+    logErr("[chatcoder] killExistingBackendProcesses 警告:", err);
+  }
+
+  // 3. 确定最终监听端口
   BACKEND_PORT = await pickBackendPort();
-  if (BACKEND_PORT !== Number(process.env.CHATCODER_PORT || 8000)) {
+  if (BACKEND_PORT !== Number(process.env.CHATCODER_PORT || DEFAULT_PORT)) {
     log("[chatcoder] 默认端口被占用，改用端口:", BACKEND_PORT);
   }
 
-  // 3. 后台启动后端；若已有 ChatCoder 服务则复用，不再启动第二个 SQLite owner。
+  // 4. 后台启动新后端进程
   try {
     await startBackend();
   } catch (err) {
     logErr("[chatcoder] startBackend 失败:", err);
   }
 
-  // 4. 等待后端就绪
+  // 5. 等待后端就绪
   try {
-    if (backendReused) {
-      backendReady = true;
-      log("[chatcoder] 已复用后端，跳过启动等待");
-    } else {
-      await waitForBackend();
-      backendReady = true;
-      log("[chatcoder] 后端就绪");
-    }
+    await waitForBackend();
+    backendReady = true;
+    log("[chatcoder] 后端就绪，端口:", BACKEND_PORT);
   } catch (e) {
     logErr("[chatcoder] 后端未就绪:", e.message);
     // 后端崩溃,显示错误信息在加载页
@@ -842,7 +839,14 @@ process.on("exit", () => { killBackend(); });
 
 function killBackend() {
   if (backendProcess) {
-    try { backendProcess.kill("SIGTERM"); } catch {}
+    try {
+      if (process.platform === "win32" && backendProcess.pid) {
+        const { execSync } = require("child_process");
+        try { execSync(`taskkill /F /PID ${backendProcess.pid} /T >nul 2>nul`); } catch {}
+      } else {
+        backendProcess.kill("SIGKILL");
+      }
+    } catch {}
     backendProcess = null;
   }
 }

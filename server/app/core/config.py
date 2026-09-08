@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     server_host: str = "0.0.0.0"
-    server_port: int = 8000
+    server_port: int = 12973
     debug: bool = True
 
     database_url: str = "postgresql+asyncpg://chatcoder:chatcoder_dev@localhost:5432/chatcoder"

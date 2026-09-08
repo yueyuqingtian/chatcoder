@@ -89,8 +89,26 @@ async def scan_models(db: AsyncSession, provider_id: int) -> list[dict]:
         raise ValueError("供应商未配置 Base URL")
 
     base = provider.base_url.rstrip("/")
-    url = f"{base}/models"
     api_format = (provider.api_format or "openai").lower()
+
+    # CommandCode 无 /models 接口，返回官方预设支持模型
+    if api_format == "commandcode":
+        cmc_models = [
+            {"id": "deepseek/deepseek-v4-pro", "context_window": 1000000, "is_multimodal": False, "reasoning_efforts": ["low", "medium", "high", "max"]},
+            {"id": "deepseek/deepseek-v4-flash", "context_window": 1000000, "is_multimodal": False, "reasoning_efforts": ["low", "medium", "high", "max"]},
+            {"id": "zai-org/GLM-5.1", "context_window": 200000, "is_multimodal": True, "reasoning_efforts": ["low", "medium", "high"]},
+            {"id": "zai-org/GLM-5", "context_window": 200000, "is_multimodal": True, "reasoning_efforts": ["low", "medium", "high"]},
+            {"id": "moonshotai/Kimi-K2.6", "context_window": 200000, "is_multimodal": True, "reasoning_efforts": ["low", "high", "max"]},
+            {"id": "moonshotai/Kimi-K2.5", "context_window": 200000, "is_multimodal": True, "reasoning_efforts": ["low", "high", "max"]},
+            {"id": "MiniMaxAI/MiniMax-M2.7", "context_window": 200000, "is_multimodal": False, "reasoning_efforts": []},
+            {"id": "MiniMaxAI/MiniMax-M2.5", "context_window": 200000, "is_multimodal": False, "reasoning_efforts": []},
+            {"id": "Qwen/Qwen3.6-Max-Preview", "context_window": 200000, "is_multimodal": True, "reasoning_efforts": []},
+            {"id": "Qwen/Qwen3.6-Plus", "context_window": 200000, "is_multimodal": True, "reasoning_efforts": []},
+            {"id": "stepfun/Step-3.5-Flash", "context_window": 200000, "is_multimodal": False, "reasoning_efforts": []},
+        ]
+        return cmc_models
+
+    url = f"{base}/models"
 
     headers: dict[str, str] = {}
     if api_format == "anthropic":

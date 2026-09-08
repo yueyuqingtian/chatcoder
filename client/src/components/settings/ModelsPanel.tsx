@@ -17,21 +17,34 @@ function notify(msg: string) {
 }
 
 const REASONING_OPTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
-const PROVIDER_OPTS = ["openai", "anthropic", "openai_compatible", "azure_openai", "google", "deepseek", "qwen", "zhipu", "moonshot", "yi", "baichuan", "minimax", "custom"];
+const PROVIDER_OPTS = ["openai", "anthropic", "commandcode", "openai_compatible", "azure_openai", "google", "deepseek", "qwen", "zhipu", "moonshot", "yi", "baichuan", "minimax", "custom"];
 
-function ModelFormModal({ open, editing, onClose, onSaved }: { open: boolean; editing: ModelOut | null; onClose: () => void; onSaved: () => void }) {
+function ModelFormModal({ open, editing, targetProvider, onClose, onSaved }: { open: boolean; editing: ModelOut | null; targetProvider?: ProviderOut | null; onClose: () => void; onSaved: () => void }) {
   const [form, setForm] = useState({ name: "", provider: "openai_compatible", base_url: "", api_key: "", context_window: "200000", reasoning_efforts: [] as string[], is_active: true, is_multimodal: false });
   useEffect(() => {
     if (editing) {
       setForm({ name: editing.name, provider: editing.provider || "openai_compatible", base_url: editing.base_url || "", api_key: "", context_window: String(editing.context_window || 200000), reasoning_efforts: editing.reasoning_efforts || [], is_active: editing.is_active, is_multimodal: editing.is_multimodal });
+    } else if (targetProvider) {
+      setForm({ name: "", provider: targetProvider.api_format || "openai_compatible", base_url: targetProvider.base_url || "", api_key: "", context_window: "200000", reasoning_efforts: ["low", "medium", "high"], is_active: true, is_multimodal: false });
     } else {
       setForm({ name: "", provider: "openai_compatible", base_url: "", api_key: "", context_window: "200000", reasoning_efforts: [], is_active: true, is_multimodal: false });
     }
-  }, [editing, open]);
+  }, [editing, targetProvider, open]);
   const handleSave = async () => {
     if (!form.name.trim()) return;
     try {
-      const data: Record<string, unknown> = { name: form.name.trim(), provider: form.provider, base_url: form.base_url || undefined, context_window: Number(form.context_window) || undefined, is_active: form.is_active, is_multimodal: form.is_multimodal };
+      const data: Record<string, unknown> = {
+        name: form.name.trim(),
+        provider: targetProvider ? (targetProvider.api_format || "openai_compatible") : form.provider,
+        base_url: targetProvider ? targetProvider.base_url : (form.base_url || undefined),
+        context_window: Number(form.context_window) || undefined,
+        is_active: form.is_active,
+        is_multimodal: form.is_multimodal,
+      };
+      if (targetProvider) {
+        data.provider_id = targetProvider.id;
+        data.api_format = targetProvider.api_format;
+      }
       if (form.api_key) data.api_key = form.api_key;
       if (form.reasoning_efforts.length > 0) data.reasoning_efforts = form.reasoning_efforts;
       if (editing) await api.updateModel(editing.id, data);
@@ -40,12 +53,13 @@ function ModelFormModal({ open, editing, onClose, onSaved }: { open: boolean; ed
       onClose();
     } catch (e) { notify(String(e)); }
   };
-  const underProvider = !!editing?.provider_id;
+  const underProvider = !!editing?.provider_id || !!targetProvider;
+  const currentProviderName = editing?.provider_name || targetProvider?.name || (editing?.provider_id ? `#${editing?.provider_id}` : "");
   return (
-    <Modal open={open} onClose={onClose} title={editing ? "编辑模型" : "新建模型"} width={520} height="auto">
+    <Modal open={open} onClose={onClose} title={editing ? "编辑模型" : (targetProvider ? `添加模型（${targetProvider.name}）` : "新建模型")} width={520} height="auto">
       <div className="settings-modal-form" style={{ padding: 18 }}>
-        {underProvider && <div className="settings-modal-form-row"><label>所属供应商</label><span style={{ fontSize: 12, color: "var(--text-2)" }}>{editing!.provider_name || `#${editing!.provider_id}`}（连接配置继承供应商）</span></div>}
-        <div className="settings-modal-form-row"><label>模型名称</label><input className="ui-input" placeholder="如 glm-5.2" value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} /></div>
+        {underProvider && <div className="settings-modal-form-row"><label>所属供应商</label><span style={{ fontSize: 12, color: "var(--text-2)" }}>{currentProviderName}（继承供应商连接与认证）</span></div>}
+        <div className="settings-modal-form-row"><label>模型名称 / ID</label><input className="ui-input" placeholder={targetProvider?.api_format === "commandcode" ? "如 zai-org/GLM-5.1 或 deepseek/deepseek-v4-pro" : "如 glm-5.2"} value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} /></div>
         {!underProvider && <div className="settings-modal-form-row"><label>协议 / Provider</label><select className="ui-select" value={form.provider} onChange={(e) => setForm((p) => ({ ...p, provider: e.target.value }))}>{PROVIDER_OPTS.map((p) => <option key={p} value={p}>{p}</option>)}</select></div>}
         {!underProvider && <div className="settings-modal-form-row"><label>Base URL</label><input className="ui-input" placeholder="https://..." value={form.base_url} onChange={(e) => setForm((p) => ({ ...p, base_url: e.target.value }))} /></div>}
         {!underProvider && <div className="settings-modal-form-row"><label>API Key {editing && "(留空不修改)"}</label><input className="ui-input" placeholder="sk-..." type="password" value={form.api_key} onChange={(e) => setForm((p) => ({ ...p, api_key: e.target.value }))} /></div>}
@@ -77,10 +91,14 @@ function ProviderFormModal({ open, editing, onClose, onSaved }: { open: boolean;
         ta3: "https://lc.yinhaiyun.com/newcoder",
         workbuddy: "https://copilot.tencent.com",
         trae: "https://trae-api-cn.mchost.guru",
+        commandcode: "https://api.commandcode.ai",
       };
+      const finalBase = form.api_format === "commandcode" && !form.base_url.trim()
+        ? defaultBase.commandcode
+        : (isOAuthFormat ? defaultBase[form.api_format] : form.base_url.trim());
       const data: Record<string, unknown> = {
         name: form.name.trim(),
-        base_url: isOAuthFormat ? defaultBase[form.api_format] : form.base_url.trim(),
+        base_url: finalBase,
         api_format: form.api_format,
         is_active: form.is_active,
       };
@@ -95,16 +113,17 @@ function ProviderFormModal({ open, editing, onClose, onSaved }: { open: boolean;
     <Modal open={open} onClose={onClose} title={editing ? "编辑供应商" : "添加供应商"} width={520} height="auto">
       <div className="settings-modal-form" style={{ padding: 18 }}>
         <div className="settings-modal-form-row"><label>供应商名称</label><input className="ui-input" placeholder="如 Ta+3 牛码" value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} /></div>
-        {!isOAuthFormat && <div className="settings-modal-form-row"><label>Base URL</label><input className="ui-input" placeholder="https://.../v1" value={form.base_url} onChange={(e) => setForm((p) => ({ ...p, base_url: e.target.value }))} /></div>}
-        {!isOAuthFormat && <div className="settings-modal-form-row"><label>API Key {editing && "(留空不修改)"}</label><input className="ui-input" placeholder="sk-..." type="password" value={form.api_key} onChange={(e) => setForm((p) => ({ ...p, api_key: e.target.value }))} /></div>}
-        <div className="settings-modal-form-row"><label>API 格式</label><select className="ui-select" value={form.api_format} onChange={(e) => setForm((p) => ({ ...p, api_format: e.target.value }))}><option value="openai">openai（兼容接口）</option><option value="anthropic">anthropic</option><option value="ta3">ta3（Ta+3 牛码）</option><option value="workbuddy">workbuddy（腾讯 CodeBuddy）</option><option value="trae">trae（TRAE SOLO）</option></select></div>
+        {!isOAuthFormat && <div className="settings-modal-form-row"><label>Base URL</label><input className="ui-input" placeholder={form.api_format === "commandcode" ? "https://api.commandcode.ai" : "https://.../v1"} value={form.base_url} onChange={(e) => setForm((p) => ({ ...p, base_url: e.target.value }))} /></div>}
+        {!isOAuthFormat && <div className="settings-modal-form-row"><label>API Key {editing && "(留空不修改)"}</label><input className="ui-input" placeholder={form.api_format === "commandcode" ? "user_..." : "sk-..."} type="password" value={form.api_key} onChange={(e) => setForm((p) => ({ ...p, api_key: e.target.value }))} /></div>}
+        <div className="settings-modal-form-row"><label>API 格式</label><select className="ui-select" value={form.api_format} onChange={(e) => setForm((p) => ({ ...p, api_format: e.target.value, base_url: e.target.value === "commandcode" && !p.base_url ? "https://api.commandcode.ai" : p.base_url }))}><option value="openai">openai（兼容接口）</option><option value="anthropic">anthropic</option><option value="commandcode">commandcode（CommandCode）</option><option value="ta3">ta3（Ta+3 牛码）</option><option value="workbuddy">workbuddy（腾讯 CodeBuddy）</option><option value="trae">trae（TRAE SOLO）</option></select></div>
+        {form.api_format === "commandcode" && <div style={{ fontSize: 12, color: "var(--text-3)", padding: "0 2px 8px" }}>CommandCode 直连模式，API Key 为以 user_ 开头的密钥（可从 ~/.commandcode/auth.json 或 commandcode.ai/studio 获取）。</div>}
         {isOAuthFormat && <div style={{ fontSize: 12, color: "var(--text-3)", padding: "0 2px 8px" }}>{form.api_format === "ta3"
           ? "ta3 类型使用账号登录获取模型，服务端地址已内置（lc.yinhaiyun.com/newcoder），无需配置；保存后点击卡片上的「登录 Ta+3 账号」。"
           : form.api_format === "workbuddy"
             ? "workbuddy 类型使用账号登录获取模型，服务端地址已内置（copilot.tencent.com），无需配置；保存后点击卡片上的「登录 WorkBuddy 账号」。"
             : "trae 类型使用账号登录获取模型，服务端地址已内置（trae-api-cn.mchost.guru）；保存后点击卡片上的「登录 TRAE 账号」。"}</div>}
         <div className="settings-modal-form-row"><label>启用状态</label><Sw checked={form.is_active} onChange={(v) => setForm((p) => ({ ...p, is_active: v }))} /></div>
-        <div className="settings-create-actions"><button className="btn btn-ghost btn-sm" onClick={onClose}>取消</button><button className="btn btn-primary btn-sm" onClick={handleSave} disabled={!form.name.trim() || (!isOAuthFormat && !form.base_url.trim())}>{editing ? "保存" : "创建"}</button></div>
+        <div className="settings-create-actions"><button className="btn btn-ghost btn-sm" onClick={onClose}>取消</button><button className="btn btn-primary btn-sm" onClick={handleSave} disabled={!form.name.trim() || (!isOAuthFormat && form.api_format !== "commandcode" && !form.base_url.trim())}>{editing ? "保存" : "创建"}</button></div>
       </div>
     </Modal>
   );
@@ -203,6 +222,7 @@ export function ModelsPanel() {
   const [editingProvider, setEditingProvider] = useState<ProviderOut | null>(null);
   const [scanningProvider, setScanningProvider] = useState<ProviderOut | null>(null);
   const [editingModel, setEditingModel] = useState<ModelOut | null>(null);
+  const [targetProviderForModel, setTargetProviderForModel] = useState<ProviderOut | null>(null);
   const [showModelForm, setShowModelForm] = useState(false);
   // v23: ta3 登录状态（providerId → {phase, label?, error?}）
   const [ta3Status, setTa3Status] = useState<Record<number, { phase: "idle" | "pending" | "done" | "failed"; label?: string; error?: string }>>({});
@@ -416,6 +436,7 @@ export function ModelsPanel() {
     <div>
       <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginBottom: 12 }}>
         <button className="btn btn-ghost btn-sm" onClick={load}><IconRefresh size={13} /> 刷新</button>
+        <button className="btn btn-ghost btn-sm" onClick={() => { setEditingModel(null); setTargetProviderForModel(null); setShowModelForm(true); }}><IconPlus size={13} /> 添加独立模型</button>
         <button className="btn btn-primary btn-sm" onClick={() => { setEditingProvider(null); setShowProviderForm(true); }}><IconPlus size={13} /> 添加供应商</button>
       </div>
 
@@ -494,7 +515,13 @@ export function ModelsPanel() {
             </div>
             {expandedId === p.id && (
               <div className="provider-models-sub">
-                {expandedModels.length === 0 && <div className="navpage-empty">{(isTa3(p) || isWb(p) || isTrae(p)) ? "暂无模型，请先登录账号并点击「同步模型」" : "暂无模型，点击「扫描模型」获取"}</div>}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 8px 10px", borderBottom: "1px solid var(--border-subtle, rgba(255,255,255,0.06))", marginBottom: 6 }}>
+                  <span style={{ fontSize: 12, color: "var(--text-3)" }}>已配置 {expandedModels.length} 个模型</span>
+                  <button className="btn btn-ghost btn-xs" onClick={() => { setTargetProviderForModel(p); setEditingModel(null); setShowModelForm(true); }}>
+                    <IconPlus size={12} /> 手动添加模型
+                  </button>
+                </div>
+                {expandedModels.length === 0 && <div className="navpage-empty">{(isTa3(p) || isWb(p) || isTrae(p)) ? "暂无模型，请先登录账号并点击「同步模型」" : "暂无模型，点击「扫描模型」或「手动添加模型」获取"}</div>}
                 {expandedModels.map((m) => (
                   <div key={m.id} className="settings-resource-item">
                     <div className="settings-resource-info">
@@ -556,7 +583,7 @@ export function ModelsPanel() {
 
       <ProviderFormModal open={showProviderForm} editing={editingProvider} onClose={() => setShowProviderForm(false)} onSaved={load} />
       <ScanModelsModal open={!!scanningProvider} provider={scanningProvider} onClose={() => setScanningProvider(null)} onSaved={load} />
-      <ModelFormModal open={showModelForm} editing={editingModel} onClose={() => setShowModelForm(false)} onSaved={async () => { load(); if (expandedId != null) { try { setExpandedModels(await api.listProviderModels(expandedId)); } catch {} } }} />
+      <ModelFormModal open={showModelForm} editing={editingModel} targetProvider={targetProviderForModel} onClose={() => { setShowModelForm(false); setTargetProviderForModel(null); }} onSaved={async () => { load(); if (expandedId != null) { try { setExpandedModels(await api.listProviderModels(expandedId)); } catch {} } }} />
       <ConfirmDialog
         open={confirmDialog.open}
         title={confirmDialog.title}

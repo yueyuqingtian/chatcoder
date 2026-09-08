@@ -37,6 +37,8 @@ TO_TA3: dict[str, str] = {
     # shell_id → shellId 键名适配见 ARGS_* 表
     "terminal_bg_status": "BashStatus",    # shell_id→shellId / offset ✓
     "terminal_bg_kill": "BashKill",        # shell_id→shellId
+    # 会话目标管理工具
+    "goal_complete": "CompleteGoal",       # summary ✓
 }
 
 # 伪装名 → 真实执行名（反查）

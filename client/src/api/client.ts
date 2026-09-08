@@ -28,7 +28,7 @@ import type {
   TurnSnapshotOut,
 } from "@chatcoder/shared";
 
-/** 后端 API 基址:桌面版直连 127.0.0.1:8000,网页版用相对路径走代理。
+/** 后端 API 基址:桌面版直连 127.0.0.1:12973,网页版用相对路径走代理。
  * v6.4: 开发模式直连后端，绕过 vite 代理（Node 18+ Happy Eyeballs IPv6 问题）。
  * v2.1: 打包版端口由主进程探活后透传（getBackendPort），端口冲突自动换空闲端口。 */
 const IS_ELECTRON = typeof window !== "undefined" && Boolean((window as Window).chatcoderAPI);
@@ -39,21 +39,21 @@ let _backendPortPromise: Promise<number> | null = null;
 function backendPort(): Promise<number> {
   if (!_backendPortPromise) {
     const api = (window as Window).chatcoderAPI as { getBackendPort?: () => Promise<number> };
-    _backendPortPromise = (api?.getBackendPort?.() ?? Promise.resolve(8000))
-      .then((p) => (Number.isFinite(p) && p > 0 ? p : 8000))
-      .catch(() => 8000);
+    _backendPortPromise = (api?.getBackendPort?.() ?? Promise.resolve(12973))
+      .then((p) => (Number.isFinite(p) && p > 0 ? p : 12973))
+      .catch(() => 12973);
   }
   return _backendPortPromise;
 }
 
 /** 桌面版/开发模式的 API 基址（异步解析端口） */
 async function directBase(): Promise<string> {
-  const port = IS_ELECTRON ? await backendPort() : 8000;
+  const port = IS_ELECTRON ? await backendPort() : 12973;
   return `http://127.0.0.1:${port}/api`;
 }
 
-/** 默认基址：同步兜底（8000），实际请求前会用 directBase 修正 */
-const BASE = (IS_ELECTRON || IS_DEV) ? "http://127.0.0.1:8000/api" : "/api";
+/** 默认基址：同步兜底（12973），实际请求前会用 directBase 修正 */
+const BASE = (IS_ELECTRON || IS_DEV) ? "http://127.0.0.1:12973/api" : "/api";
 
 /** 已解析的直接基址缓存 */
 let _directBase: string | null = null;

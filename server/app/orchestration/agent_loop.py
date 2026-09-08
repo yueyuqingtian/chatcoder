@@ -1627,6 +1627,14 @@ def _response_failure_reason(response, has_progress: bool = False) -> tuple[str,
     frames_received=None（provider 未提供信号）时保持旧逻辑不变。
     """
     finish = response.finish_reason or "stop"
+
+    # 畸形流检测：网关声明 finish_reason=tool_calls 但工具调用为空，或流截断只返回极短思考
+    if finish == "tool_calls" and not response.tool_calls:
+        return "网关响应异常 (finish_reason=tool_calls 但无工具调用数据，流丢帧)", True
+
+    if not response.content and not response.tool_calls and response.thinking and len(response.thinking.strip()) <= 10:
+        return "网关流式输出异常截断 (仅返回残缺思考片段)", True
+
     if not response.content and not response.thinking and not response.tool_calls:
         # v966: 零帧断流优先判定（即使 finish=stop/有产出）——网关未应答即异常
         if response.frames_received == 0:

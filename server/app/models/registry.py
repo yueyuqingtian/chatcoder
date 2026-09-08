@@ -36,6 +36,10 @@ def _build_provider(
         from app.models.providers.anthropic import AnthropicProvider
 
         return AnthropicProvider(api_key=api_key, base_url=base_url, model=model)
+    if api_format == "commandcode":
+        from app.models.providers.commandcode import CommandCodeProvider
+
+        return CommandCodeProvider(api_key=api_key, base_url=base_url, model=model)
     return OpenAICompatibleProvider(api_key=api_key, base_url=base_url, model=model)
 
 

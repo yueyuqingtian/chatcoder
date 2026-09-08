@@ -212,7 +212,7 @@ def _setup_env() -> None:
     # ── 其他默认 ──
     os.environ.setdefault("DEBUG", "false")
     os.environ.setdefault("SERVER_HOST", "127.0.0.1")
-    os.environ.setdefault("SERVER_PORT", "8000")
+    os.environ.setdefault("SERVER_PORT", "12973")
 
     # 切换到数据目录(确保相对路径写操作都落到可写位置)
     os.chdir(data_dir)

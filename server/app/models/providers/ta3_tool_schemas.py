@@ -223,9 +223,19 @@ _BACKGROUND: list[dict] = [
     }),
 ]
 
+# ── goal（会话目标管理）──
+_GOAL: list[dict] = [
+    _f("CompleteGoal", "标记当前会话目标已达成。仅当目标描述的工作已全部完成时调用。", {
+        "type": "object", "required": ["summary"],
+        "properties": {
+            "summary": {"type": "string", "description": "完成总结：目标达成的关键结果与验证方式"},
+        },
+    }),
+]
+
 TA3_NATIVE_SCHEMAS: dict[str, dict] = {
     s["function"]["name"]: s for s in [
-        *_CORE, *_EDIT, *_TASK, *_WEB_SEARCH, *_ATTACHMENT, *_BACKGROUND,
+        *_CORE, *_EDIT, *_TASK, *_WEB_SEARCH, *_ATTACHMENT, *_BACKGROUND, *_GOAL,
     ]
 }
 

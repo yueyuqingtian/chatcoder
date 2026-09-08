@@ -44,13 +44,13 @@ export class WsClient {
     // v2.2: 防御性访问 import.meta.env（非 Vite 环境如 Node 测试/打包变体下 env 不存在）
     const isDev = Boolean((import.meta as { env?: { DEV?: boolean } }).env?.DEV);
     const portPromise = isElectron
-      ? (window as Window).chatcoderAPI?.getBackendPort?.() ?? Promise.resolve(8000)
-      : Promise.resolve(8000);
+      ? (window as Window).chatcoderAPI?.getBackendPort?.() ?? Promise.resolve(12973)
+      : Promise.resolve(12973);
     void portPromise
       .then((port) => {
         // v2.2: 端口解析期间若已切换会话，丢弃旧会话的连接（避免打开旧通道）
         if (this.currentSessionId !== sessionId) return;
-        if (!Number.isFinite(port) || port <= 0) port = 8000;
+        if (!Number.isFinite(port) || port <= 0) port = 12973;
         const wsUrl = (isElectron || isDev)
           ? `ws://127.0.0.1:${port}/ws/sessions/${sessionId}`
           : `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws/sessions/${sessionId}`;
@@ -58,7 +58,7 @@ export class WsClient {
       })
       .catch(() => {
         if (this.currentSessionId !== sessionId) return;
-        const wsUrl = `ws://127.0.0.1:8000/ws/sessions/${sessionId}`;
+        const wsUrl = `ws://127.0.0.1:12973/ws/sessions/${sessionId}`;
         this._open(sessionId, wsUrl);
       });
   }
@@ -173,12 +173,12 @@ export class GlobalWsClient {
     const isElectron = typeof window !== "undefined" && Boolean((window as Window).chatcoderAPI);
     const isDev = Boolean((import.meta as { env?: { DEV?: boolean } }).env?.DEV);
     const portPromise = isElectron
-      ? (window as Window).chatcoderAPI?.getBackendPort?.() ?? Promise.resolve(8000)
-      : Promise.resolve(8000);
+      ? (window as Window).chatcoderAPI?.getBackendPort?.() ?? Promise.resolve(12973)
+      : Promise.resolve(12973);
     void portPromise
       .then((port) => {
         if (this.ws) return;
-        if (!Number.isFinite(port) || port <= 0) port = 8000;
+        if (!Number.isFinite(port) || port <= 0) port = 12973;
         const wsUrl = (isElectron || isDev)
           ? `ws://127.0.0.1:${port}/ws/global`
           : `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws/global`;
@@ -186,7 +186,7 @@ export class GlobalWsClient {
       })
       .catch(() => {
         if (this.ws) return;
-        this._open(`ws://127.0.0.1:8000/ws/global`);
+        this._open(`ws://127.0.0.1:12973/ws/global`);
       });
   }
 

@@ -1,5 +1,5 @@
 ﻿# chatcoder 一键打包脚本(Windows)
-# 产物:v6/chatcoder-Setup-<version>.exe（electron-builder 输出目录见 package.json build.directories.output）
+# 产物:v7/chatcoder-Setup-<version>.exe（electron-builder 输出目录见 package.json build.directories.output）
 # 用法:powershell -ExecutionPolicy Bypass -File build-release.ps1 [-Publish]
 #   -Publish: 打包后自动创建 GitHub Release 并上传产物（需 gh CLI 已登录，见 README 发布章节）
 param(
@@ -30,17 +30,16 @@ if (-not (Test-Path $serverExe)) { throw "打包产物缺失: $serverExe" }
 $serverExeItem = Get-Item $serverExe
 Write-Host ("后端产物: {0} ({1:N1} MB, {2})" -f $serverExe, ($serverExeItem.Length/1MB), $serverExeItem.LastWriteTime) -ForegroundColor Yellow
 
-Write-Host "=== [3/5] 部署后端到运行目录并重启服务 ===" -ForegroundColor Cyan
-# electron-builder 输出目录(v6)与实际运行目录(v4\win-unpacked)脱节，必须显式同步，
-# 否则打包成功但跑的还是旧版（本次事故根因之一）
-& "$root\deploy-server.ps1" -Restart
+Write-Host "=== [3/5] 部署后端到运行目录 ===" -ForegroundColor Cyan
+# 同步产物到目标目录，不重启任何正在运行的进程
+& "$root\deploy-server.ps1"
 
 Write-Host "=== [4/5] 打包桌面应用(electron-builder) ===" -ForegroundColor Cyan
 & npx electron-builder --win
 if ($LASTEXITCODE -ne 0) { throw "electron-builder 打包失败" }
 
 Write-Host "=== [5/5] 完成 ===" -ForegroundColor Green
-Get-ChildItem "$root\v6\*.exe" | ForEach-Object {
+Get-ChildItem "$root\v7\*.exe" | ForEach-Object {
     Write-Host ("产物: " + $_.Name + " (" + [math]::Round($_.Length/1MB,1) + " MB)") -ForegroundColor Yellow
 }
 
@@ -51,7 +50,7 @@ if ($Publish) {
     Write-Host "=== 发布 $tag 到 GitHub Releases ===" -ForegroundColor Cyan
     # electron-updater 检查的是 latest 这个 tag 的动态链接，tag 名不影响检查；
     # 资产名必须与 latest.yml 中 url 一致（package.json nsis.artifactName 已保证无空格）。
-    gh release create $tag "$root\v6\chatcoder-Setup-$version.exe" "$root\v6\latest.yml" "$root\v6\chatcoder-Setup-$version.exe.blockmap" --title $tag --notes "ChatCoder $tag"
+    gh release create $tag "$root\v7\chatcoder-Setup-$version.exe" "$root\v7\latest.yml" "$root\v7\chatcoder-Setup-$version.exe.blockmap" --title $tag --notes "ChatCoder $tag"
     if ($LASTEXITCODE -ne 0) { throw "gh release create 失败" }
     Write-Host "发布完成: https://github.com/yueyuqingtian/chatcoder/releases/tag/$tag" -ForegroundColor Green
 }
