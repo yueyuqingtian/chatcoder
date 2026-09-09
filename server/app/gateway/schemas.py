@@ -82,6 +82,8 @@ class SessionOut(BaseModel):
     model_id: int | None = None
     status: str = "active"
     pinned: bool = False
+    # v7: 置顶时间——前端"后置顶在上"排序依据
+    pinned_at: str | None = None
     permission_mode: str = "default"  # v2.2: default / accept_edits / plan
     fork_parent_id: int | None = None
     worktree_path: str | None = None

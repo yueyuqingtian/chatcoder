@@ -19,6 +19,7 @@ async def _to_out(db: AsyncSession, s) -> SessionOut:
     return SessionOut(
         id=s.id, project_id=s.project_id, title=s.title, model_id=s.model_id,
         status=s.status, pinned=s.pinned, permission_mode=s.permission_mode,
+        pinned_at=getattr(s, "pinned_at", None),
         fork_parent_id=s.fork_parent_id,
         worktree_path=s.worktree_path,
         has_running=await session_service.has_running_turn(db, s.id),

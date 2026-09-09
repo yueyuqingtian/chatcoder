@@ -67,6 +67,8 @@ interface DraftsState {
   patchDraft: (key: string, patch: Partial<Omit<ComposerDraft, "updatedAt">>) => void;
   /** 清空草稿（发送成功后调用） */
   clearDraft: (key: string) => void;
+  /** 仅清空文字/附件，保留输入框配置（思考深度/模型/模式等）——发送后深度选择不丢 */
+  clearDraftText: (key: string) => void;
 }
 
 export const useDraftsStore = create<DraftsState>((set, get) => ({
@@ -103,5 +105,12 @@ export const useDraftsStore = create<DraftsState>((set, get) => ({
     delete all[key];
     set({ drafts: all });
     scheduleSave(all);
+  },
+
+  /** v7: 发送成功后仅清文字/附件，保留思考深度等输入框配置（会话内深度跨发送存活） */
+  clearDraftText: (key) => {
+    const prev = get().drafts[key];
+    if (!prev) return;
+    get().patchDraft(key, { text: "", attachments: [] });
   },
 }));

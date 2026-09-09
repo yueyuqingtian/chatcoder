@@ -250,25 +250,51 @@ class TerminalExecTool(Tool):
                       "command": command, "cwd": resolved_cwd},
             )
 
-        # 同步模式：等待完成，超时 kill
-        communicate_task = asyncio.create_task(proc.communicate())
+        # 同步模式：增量读取 stdout/stderr 并逐帧上报（v7(B)），保持 cancel/timeout 响应。
+        # 不再用 proc.communicate() 一次性取——长命令执行期间前端可实时看到输出。
+        # 两个常驻 reader task 并发泵出（避免一端写满阻塞），主循环只负责 cancel/timeout/退出观测。
+        max_output = int(settings.tool_output_chars_terminal)
         deadline = asyncio.get_running_loop().time() + timeout_sec
+        out_parts: list[str] = []
+        err_parts: list[str] = []
+
+        async def _pump(stream, sink: list[str]) -> None:
+            try:
+                while True:
+                    chunk = await stream.read(4096)
+                    if not chunk:
+                        break
+                    text = decode_output(chunk)
+                    if not text:
+                        continue
+                    sink.append(text)
+                    if ctx.on_tool_output is not None:
+                        try:
+                            await ctx.on_tool_output(text)
+                        except Exception:
+                            logger.debug("[term] on_tool_output 回调失败(非阻塞)", exc_info=True)
+                    # 防内存无限膨胀：仅保留尾部若干字符（与最终截断口径一致）
+                    if len("".join(sink)) > max_output * 2:
+                        sink[:] = ["".join(sink)[-max_output:]]
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("[term] 输出泵异常(非阻塞)", exc_info=True)
+
+        out_task = asyncio.create_task(_pump(proc.stdout, out_parts))
+        err_task = asyncio.create_task(_pump(proc.stderr, err_parts))
         try:
-            while not communicate_task.done():
+            # 收敛条件：进程退出（returncode 非 None）或两个 reader 均读到 EOF
+            while proc.returncode is None and not (out_task.done() and err_task.done()):
                 if ctx.cancel_event and ctx.cancel_event.is_set():
-                    # 取消：整树终止（孤儿子进程持管道会让 wait() 挂起，见 kill_process_tree）
                     await kill_process_tree(proc)
-                    communicate_task.cancel()
                     return ToolResult(ok=False, output="", error="已被用户中断")
                 if asyncio.get_running_loop().time() >= deadline:
                     raise asyncio.TimeoutError
-                await asyncio.sleep(0.2)
-            stdout, stderr = await communicate_task
+                # 主循环只轮询，不等待输出（reader task 常驻）
+                await asyncio.sleep(0.1)
         except asyncio.TimeoutError:
-            # v1.0: 超时后整树终止子进程，避免资源耗尽/后台恶意进程；
-            # Windows 上仅 kill shell 会让 wait() 挂到孤儿子进程退出（实测 57s）
             await kill_process_tree(proc)
-            # v36: 超时现场——区分「命令本身慢」「shell 启动卡死」「子进程不退出」。
             logger.error(
                 "[term.timeout] cmd=%r cwd=%s shell=%s kind=%s timeout=%ss "
                 "elapsed=%.1fs pid=%s",
@@ -282,13 +308,18 @@ class TerminalExecTool(Tool):
                     f"长命令可用 timeout 参数延长等待,或 waitForCompletion=false 转后台运行。"
                 ),
             )
+        finally:
+            # 兜底：若仍有余留 reader（如进程退出但管道未 EOF），取消并回收
+            for t in (out_task, err_task):
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(out_task, err_task, return_exceptions=True)
 
-        out = _decode_output(stdout or b"")
-        err = _decode_output(stderr or b"")
+        out = "".join(out_parts)
+        err = "".join(err_parts)
         combined = out
         if err:
             combined += ("\n-- stderr --\n" + err) if combined else err
-        max_output = int(settings.tool_output_chars_terminal)
         if len(combined) > max_output:
             combined = combined[:max_output] + "\n...(已截断)"
 

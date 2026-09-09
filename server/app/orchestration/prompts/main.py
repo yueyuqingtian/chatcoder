@@ -65,15 +65,13 @@ You have the `todo_write` tool to maintain a visible step-by-step checklist. **W
 2. When research is done, write the plan document with fs_write; the turn ends there and the user confirms.
 3. After the user confirms, your old checklist is cleared — rebuild an execution checklist from the confirmed document with todo_write, then execute it step by step.
 
-### Plan-Mode Multi-Round Iteration Rules
-When the user asks you to refine, modify, or add requirements across multiple plan-mode rounds:
-1. **Accumulate All Unexecuted Plan Items (No Loss of Pending Work)**:
-   - If previous refinement rounds contained unexecuted items (e.g. items [5, 6]), and the user now adds new items (e.g. items [7, 8]), your new plan document and plan card MUST contain the FULL cumulative set of pending requirements: [5, 6, 7, 8].
-   - Never drop unexecuted items from previous refinement rounds unless the user explicitly asks to remove or replace them.
-2. **Strictly Exclude Already Completed Work (No Duplicate Planning)**:
-   - Inspect the current codebase and session history before drafting the plan. If previous items (e.g. items [1, 2, 3]) have already been implemented, verified, and delivered in earlier turns, they MUST NOT appear as pending action items in the new plan document.
-   - The new plan document must solely focus on what remains to be built or fixed.
-3. **Plan History is authoritative input**: The system injects a `## Plan History` section containing every previous plan round of this session (with per-round status). The new plan document MUST cover all its unexecuted items and exclude completed ones; read each round's status label carefully before drafting.
+### Plan-Mode Multi-Round Iteration Rules (Collect → Merge → Replan)
+When the session already has prior plan rounds (the system injects a `## Plan History` section listing every previous plan turn with its status), the new plan document MUST be produced by these three steps:
+1. **Collect**: read every round in Plan History and gather the still-unfinished requirements from all unfinished rounds (proposed / confirmed / superseded). Do not re-list work already completed in `done` rounds; do not re-list `cancelled` items unless the user re-raises them in the current message.
+2. **Merge**: combine those unfinished items with the NEW requirements from the user's current message into one unified requirement set. If the same requirement appears in several rounds, merge it and keep the latest wording; only drop an item when the user explicitly removed it.
+3. **Replan**: re-plan the WHOLE work from the merged set — new goal, new step breakdown, new order, files and acceptance criteria — and write it as a brand-new plan document. Do not patch the old document and do not write only an increment around the new asks.
+Plan documents vary in form — never rely on textual matching; inherit by understanding the semantics of each unfinished item.
+After executing a confirmed plan, state in the recap any items left unfinished or deferred; subsequent plan rounds inherit them from the Plan History `confirmed` round ("unfinished parts must be carried into the new plan").
 
 ### Decide before you start
 - Ask yourself: will this take 3+ distinct steps? Does it touch multiple files? Will I need to verify one part before moving to the next? If yes to any, create the checklist BEFORE your first edit.
@@ -116,12 +114,30 @@ Produce the final result in the main window with a clear summary of what changed
 """
 
 
-def build_main_system_prompt(extra_context: str = "", enable_subagents: bool = True) -> str:
+def build_main_system_prompt(extra_context: str = "", enable_subagents: bool = True,
+                             plan_flow_enabled: bool = False) -> str:
     """构建主代理系统提示词。
 
     如果用户关闭了子代理，剔除关于 spawn_subagent 的引导与决策章节。
+    plan_flow_enabled=False（非计划模式）：剔除"规划模式工作流/多轮迭代"两节，
+    替换为"直接执行、除非用户明示否则不要编写计划文档"的简明指引——保证模式遵循度。
     """
     prompt = MAIN_SYSTEM_PROMPT
+    if not plan_flow_enabled:
+        # 非计划模式：移除规划文档工作流与多轮迭代章节（Collect→Merge→Replan），
+        # 换为直接执行指引。边界：从 "## Planning — decide for yourself" 段内
+        # "### Plan-mode workflow" 起，到 "### Decide before you start" 前截止。
+        if "### Plan-mode workflow" in prompt and "### Decide before you start" in prompt:
+            parts = prompt.split("### Plan-mode workflow")
+            head = parts[0]
+            tail = parts[1].split("### Decide before you start")
+            plan_replacement = (
+                "### Mode adherence\n"
+                "You are NOT in plan mode. Do not create or write plan documents "
+                "(e.g. `ai/chatcoder-plan-*.md`) unless the user explicitly asks for a plan first. "
+                "Proceed directly to executing the request by exploring, editing, and verifying.\n\n"
+            )
+            prompt = head + plan_replacement + "### Decide before you start" + tail[1]
     if not enable_subagents:
         prompt = (
             prompt.replace(

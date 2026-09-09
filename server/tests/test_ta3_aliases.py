@@ -20,6 +20,8 @@ def test_direct_mappings():
     # plan-147-674: 附件/图片读取工具补映射（此前被伪装层剔除导致多模态图片只能读二进制）
     assert TO_TA3["read_attachment"] == "ReadAttachment"
     assert TO_TA3["view_image"] == "ViewImage"
+    # v7: 通用提问工具映射（四种模式均可用；参数 questions 键名一致无需适配）
+    assert TO_TA3["ask_user_question"] == "AskUser"
 
 
 def test_reverse_mapping_is_consistent():
@@ -31,17 +33,19 @@ def test_disguise_tools_drops_unmapped():
     schemas = [
         {"type": "function", "function": {"name": "fs_read", "parameters": {}}},
         {"type": "function", "function": {"name": "fs_write", "parameters": {}}},
+        # v7: 有映射的通用提问工具 → 伪装保留
+        {"type": "function", "function": {"name": "ask_user_question", "parameters": {}}},
         # 无映射工具 → 剔除
         {"type": "function", "function": {"name": "web_fetch", "parameters": {}}},
         {"type": "function", "function": {"name": "collect_results", "parameters": {}}},
-        {"type": "function", "function": {"name": "ask_user_question", "parameters": {}}},
         {"type": "function", "function": {"name": "mcp_something", "parameters": {}}},
     ]
     out = disguise_tools(schemas)
     names = [s["function"]["name"] for s in out]
-    assert names == ["Read", "Write"]
+    assert names == ["Read", "Write", "AskUser"]
     # 原生 schema 中文 description 完整还原
     assert out[0]["function"]["description"].startswith("读取工作区内指定文件内容")
+    assert out[2]["function"]["description"].startswith("向用户发起结构化提问")
 
 
 def test_disguise_tools_keeps_attachment_tools():

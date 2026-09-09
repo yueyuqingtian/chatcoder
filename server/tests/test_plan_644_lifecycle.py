@@ -175,11 +175,14 @@ async def test_collect_plan_history_full_and_budget(db, workspace, monkeypatch):
     assert "特性C" in history               # proposed 轮全文
     assert "优化B" in history               # superseded 轮全文
 
-    # 小预算：从最早轮次开始降级（正文截断提示），最新轮全文保留
+    # plan-1075 策略反转：小预算下未完结轮全文优先（突破预算整体注入），
+    # 不再出现旧的"注入预算截断"降级提示；done 轮块小仍保留
     monkeypatch.setattr(app_settings, "plan_history_inject_chars", 1200, raising=False)
     history_small = await _collect_plan_history(db, sess, str(workspace))
-    assert "特性C" in history_small          # 最新轮保全文
-    assert "注入预算截断" in history_small    # 早轮降级提示
+    assert "特性C" in history_small          # proposed 轮全文（永不因预算截断）
+    assert "优化B" in history_small          # superseded 轮全文（永不因预算截断）
+    assert "注入预算截断" not in history_small  # 旧降级提示已废弃
+    assert "【继承规则】" in history_small     # plan-1075 头部继承规则行
 
     # 无计划轮 -> 空串
     empty = await _collect_plan_history(db, SimpleNamespace(id=6), str(workspace))

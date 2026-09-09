@@ -13,6 +13,8 @@ from app.orchestration.tools.safe_path import safe_resolve, safe_resolve_parent
 logger = logging.getLogger(__name__)
 
 _MAX_EDITS = 20  # 单次最多编辑文件数
+# plan-1085: data 带回单文件新内容上限（对齐 agent_loop.MAX_TOOL_OUTPUT_CHARS）
+_NEW_CONTENT_MAX_CHARS = 16000
 
 
 class MultiFileEditTool(Tool):
@@ -116,6 +118,7 @@ class MultiFileEditTool(Tool):
         # Phase 2: 原子性写入（先备份，全部成功或回滚）
         backups: list[tuple[Path, str]] = []
         applied: list[str] = []
+        new_contents: dict[str, str] = {}  # plan-1085: 各文件写后新内容（统计/回滚兜底数据源）
 
         try:
             for resolved, old_text, new_text in validated:
@@ -126,7 +129,10 @@ class MultiFileEditTool(Tool):
                 # 执行替换
                 new_content = original.replace(old_text, new_text, 1)
                 resolved.write_text(new_content, encoding="utf-8")
-                applied.append(str(resolved.relative_to(ctx.workspace_root)))
+                _rel = str(resolved.relative_to(ctx.workspace_root))
+                applied.append(_rel)
+                if len(new_content) <= _NEW_CONTENT_MAX_CHARS:
+                    new_contents[_rel] = new_content
 
         except Exception as e:
             # 回滚所有已写入的文件
@@ -143,5 +149,5 @@ class MultiFileEditTool(Tool):
         return ToolResult(
             ok=True,
             output=f"成功编辑 {len(applied)} 个文件:\n" + "\n".join(f"  - {p}" for p in applied),
-            data={"files": applied, "count": len(applied)},
+            data={"files": applied, "count": len(applied), "new_contents": new_contents},
         )

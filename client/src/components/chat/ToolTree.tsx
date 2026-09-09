@@ -20,6 +20,7 @@ import type { ToolLeaf, ToolNode } from "./timeline";
 import { SEARCH_TOOLS, RUN_TOOLS, isWriteLeaf } from "./timeline";
 import { api } from "../../api/client";
 import { usePanelStore } from "../../store/panel";
+import { useChatStore } from "../../store/chat";
 import { FileBadge, splitFilePath } from "./FileBadge";
 import {
   IconFileRead, IconFileWrite, IconFolder, IconGlobe, IconTerminal,
@@ -156,8 +157,9 @@ function simpleLineDiff(before: string, after: string): Array<{ type: "add" | "d
   return out;
 }
 
-/** v19: 内联 diff 块（写操作行展开内容） */
-function InlineDiff({ turnId, path }: { turnId: number | null; path: string }) {
+/** v19: 内联 diff 块（写操作行展开内容）。v7(H): 运行中 diff 尚未落库（404）时，
+ *  用 liveArgContent（fs_write args.content 等临时内容）兜底展示，落库后权威 diff 覆盖。 */
+function InlineDiff({ turnId, path, liveArgContent }: { turnId: number | null; path: string; liveArgContent?: string | null }) {
   const [state, setState] = useState<{ kind: "loading" } | { kind: "error"; msg: string } | { kind: "ok"; lines: Array<{ type: "add" | "del" | "ctx"; text: string }>; truncated: boolean }>({ kind: "loading" });
   useEffect(() => {
     let cancelled = false;
@@ -167,9 +169,18 @@ function InlineDiff({ turnId, path }: { turnId: number | null; path: string }) {
         if (cancelled) return;
         setState({ kind: "ok", lines: simpleLineDiff(d.before ?? "", d.after ?? ""), truncated: d.truncated });
       })
-      .catch((e) => { if (!cancelled) setState({ kind: "error", msg: String(e) }); });
+      .catch((e) => {
+        if (cancelled) return;
+        // v7(H): diff 记录尚未落库（运行中）时用临时内容兜底，避免"展开空白"
+        if (liveArgContent != null && liveArgContent.length > 0) {
+          setState({ kind: "ok", lines: simpleLineDiff("", liveArgContent), truncated: false });
+        } else {
+          setState({ kind: "error", msg: String(e) });
+        }
+      });
     return () => { cancelled = true; };
-  }, [turnId, path]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [turnId, path, liveArgContent]);
   if (state.kind === "loading") return <pre className="tc-plain">加载变更…</pre>;
   if (state.kind === "error") return <pre className="tc-plain">变更加载失败：{state.msg}</pre>;
   return (
@@ -182,18 +193,41 @@ function InlineDiff({ turnId, path }: { turnId: number | null; path: string }) {
   );
 }
 
+/** v7(H): 从工具 args 提取写入的新内容（临时 diff 兜底数据源） */
+function leafArgsContent(leaf: ToolLeaf): string | null {
+  const a = (leaf.args ?? {}) as Record<string, unknown>;
+  if (leaf.tool === "fs_write") {
+    const c = a.content;
+    return typeof c === "string" && c ? c : null;
+  }
+  if (leaf.tool === "multi_file_edit") {
+    const edits = a.edits as Array<{ path?: unknown; new_text?: unknown; content?: unknown }> | undefined;
+    if (Array.isArray(edits)) {
+      const rel = (leafPath(leaf) || "").replace(/\\/g, "/");
+      const hit = edits.find((e) => (typeof e.path === "string" ? e.path.replace(/\\/g, "/") : "").endsWith(rel));
+      const body = hit?.new_text ?? hit?.content;
+      return typeof body === "string" && body ? body : null;
+    }
+  }
+  return null;
+}
+
 const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
   const setPreviewPath = usePanelStore((s) => s.setPreviewPath);
   const setDiffPreview = usePanelStore((s) => s.setDiffPreview);
   const openPanel = usePanelStore((s) => s.openPanel);
   const openTab = usePanelStore((s) => s.openTab);
+  // v7(B/H): 订阅运行中实时输出/结果（按 call_key 索引），运行中即可展开看到内容
+  const liveOutput = useChatStore((s) => s.runningToolOutput[leaf.callKey]);
+  const liveResult = useChatStore((s) => s.runningToolResults[leaf.callKey]);
   const [expanded, setExpanded] = useState(false);
   const path = leafPath(leaf);
   const ok = leaf.ok;
   // v25: 工具伪装写盘（terminal_exec 等带 change_stat）按写操作渲染——可展开行内 diff
   const isWrite = isWriteLeaf(leaf);
   const hasOutput = (leaf.output && leaf.output.length > 0) || !!leaf.error;
-  const expandable = hasOutput || isWrite;
+  // v7(B): 运行中（ok===null）恒可展开——即使 output 尚未落库，也能看实时输出
+  const expandable = hasOutput || isWrite || leaf.ok === null;
   const grepHits = leaf.tool === "fs_grep" && leaf.output ? parseGrepLines(leaf.output) : [];
   const summary = path ? "" : leafSummary(leaf);
 
@@ -236,7 +270,13 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
         {path && dir && <span className="tc-dir" title={path}>{dir}</span>}
         {!path && !TOOL_VERBS[leaf.tool] && <span className="tc-tool-name" title={leaf.tool}>{leaf.tool}</span>}
         {!path && summary && <span className="tc-query" title={summary}>{summary}</span>}
-        {leaf.changeStat && <ChangeStat additions={leaf.changeStat.additions} deletions={leaf.changeStat.deletions} />}
+        {/* v7(H): 写操作运行中 changeStat 未落库时回退到实时结果 */}
+        {leaf.changeStat || liveResult?.change_stat
+          ? <ChangeStat
+              additions={leaf.changeStat?.additions ?? liveResult?.change_stat?.additions ?? 0}
+              deletions={leaf.changeStat?.deletions ?? liveResult?.change_stat?.deletions ?? 0}
+            />
+          : null}
         {ok === null && <span className="tc-status wait"><IconSpinner size={11} /></span>}
         {ok === false && <span className="tc-status fail"><IconX size={11} /></span>}
         {expandable ? (
@@ -246,9 +286,17 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
       {expanded && (
         <div className="tc-output">
           {isWrite && path ? (
-            <InlineDiff turnId={leaf.turnId} path={path} />
+            <InlineDiff turnId={leaf.turnId} path={path} liveArgContent={leafArgsContent(leaf)} />
           ) : (
             <>
+              {/* v7(H): 写操作但无 path（如 change_stat 路径缺失）时显示实时结果概要 */}
+              {isWrite && path == null && liveResult?.change_stat && (
+                <pre className="tc-plain tc-live">已变更 +{liveResult.change_stat.additions} -{liveResult.change_stat.deletions}</pre>
+              )}
+              {/* v7(B): 运行中命令行的实时输出 */}
+              {leaf.ok === null && liveOutput != null && liveOutput.length > 0 && (
+                <pre className="tc-plain tc-live">{liveOutput}</pre>
+              )}
               {grepHits.length > 0 && (
                 <div className="tc-grep-hits">
                   {grepHits.slice(0, 20).map((hit, i) => (

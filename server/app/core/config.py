@@ -223,8 +223,13 @@ class Settings(BaseSettings):
     task_retry_count: int = 1
     plan_mode_auto_split: bool = True
     # plan-644: plan 模式每轮注入的"计划需求全集"字符上限（Plan History，
-    # 含各轮用户需求与文档正文；超限从最早轮次开始降级）。0 = 禁用注入。
+    # 含各轮用户需求与文档正文）。0 = 禁用注入。
+    # plan-1075: 预算超限时先降级已完结轮正文；未完结轮全文永不因预算截断
+    # （必要时突破该预算整体注入——未完成内容零丢失优先于 token 预算）。
     plan_history_inject_chars: int = 8000
+    # plan-1075: Plan History 单个未完结轮（proposed/confirmed/superseded）文档正文
+    # 全文上限；超限从尾部截断并标注可 fs_read 原文档补齐。仅对未完结轮生效。
+    plan_history_open_doc_chars: int = 12000
 
     # 目标模式（对齐 zcode goal-continuation）：
     # - goal_mode_enabled: 总开关，关闭后 turn 完成不再自动续跑

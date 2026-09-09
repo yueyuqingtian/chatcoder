@@ -39,6 +39,8 @@ TO_TA3: dict[str, str] = {
     "terminal_bg_kill": "BashKill",        # shell_id→shellId
     # 会话目标管理工具
     "goal_complete": "CompleteGoal",       # summary ✓
+    # 通用提问工具（需求澄清）——四种模式均可用；参数 questions 键名一致，无需 ARGS 适配
+    "ask_user_question": "AskUser",        # questions/allow_custom ✓
 }
 
 # 伪装名 → 真实执行名（反查）

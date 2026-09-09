@@ -14,6 +14,8 @@ class Session(Base):
     model_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("models.id"))  # 会话级模型
     status: Mapped[str] = mapped_column(String(20), default="active")  # active / archived
     pinned: Mapped[bool] = mapped_column(Boolean, default=False)
+    # v7: 置顶时间（VARCHAR 与 created_at 口径一致）——“后置顶在上”的稳定排序依据
+    pinned_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
     # v2.2 (对齐 zcode 3.12): 权限模式 default/accept_edits/plan
     permission_mode: Mapped[str] = mapped_column(String(20), default="default")
     fork_parent_id: Mapped[int | None] = mapped_column(BigInteger)  # 分支来源会话 id

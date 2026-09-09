@@ -849,6 +849,17 @@ export function IconPin({ size = 18, color = "currentColor", strokeWidth = 1.6, 
   );
 }
 
+/** 归档（盒子+盖+横线）——左侧会话行一键归档（v7） */
+export function IconArchive({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <rect x="3" y="4" width="18" height="4" rx="1" />
+      <path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8" />
+      <line x1="9" y1="12" x2="15" y2="12" />
+    </svg>
+  );
+}
+
 /** 字母排序（AZ） */
 export function IconSortAlpha({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (

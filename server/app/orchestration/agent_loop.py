@@ -309,6 +309,60 @@ def _line_change_stat(before: str | None, after: str | None) -> tuple[int, int]:
         return (0, 0)
 
 
+def _fallback_after_text(result, target) -> str | None:
+    """plan-1085: 磁盘读取失败时从工具结果 data 取兜底新内容。
+
+    Windows 杀软/EDR 可能对刚写盘文件瞬时加锁，导致 agent_loop 写后读盘
+    失败；写工具（editor_apply_diff/fs_write/multi_file_edit）在
+    ToolResult.data 带回其写入的新内容（new_content / new_contents），
+    此处用作 change_stat 与 rollback 记录的兜底数据源。data 不进模型上下文。
+    """
+    data = getattr(result, "data", None)
+    if not isinstance(data, dict):
+        return None
+    nc = data.get("new_content")
+    if isinstance(nc, str):
+        return nc
+    ncs = data.get("new_contents")
+    if isinstance(ncs, dict):
+        tn = str(target).replace("\\", "/")
+        for k, v in ncs.items():
+            if isinstance(k, str) and isinstance(v, str) and k.replace("\\", "/") == tn:
+                return v
+    return None
+
+
+def _resolve_write_record(*, bin_pre: bool | None, bin_post: bool | None,
+                          disk_after: str | None, result, target,
+                          turn_id: int, tool_name: str) -> tuple[bool, str | None]:
+    """plan-1085: 写盘记录 binary 归属与 after 内容的三态归并。
+
+    bin_pre/bin_post 为写前/写后 _is_binary_path 三态结果（True 二进制 /
+    False 文本 / None 读取失败）；任一为 True 即按二进制记录（checkpoint 兜底）。
+    文本归属时 after 优先磁盘内容；磁盘读取失败（杀软/EDR 瞬时锁）时回退工具
+    返回的 new_content；仍不可得且写后读取失败未知时降级二进制记录并 warning。
+    """
+    is_bin = bin_pre is True or bin_post is True
+    after = None if is_bin else disk_after
+    if not is_bin and after is None:
+        fb = _fallback_after_text(result, target)
+        if isinstance(fb, str):
+            after = fb
+            logger.warning(
+                "[write.result] turn=%s tool=%s path=%s 磁盘读取失败，"
+                "用工具返回 new_content 兜底统计与记录",
+                turn_id, tool_name, target,
+            )
+        elif bin_post is None:
+            logger.warning(
+                "[write.result] turn=%s tool=%s path=%s before/after 均不可得，"
+                "按二进制记录",
+                turn_id, tool_name, target,
+            )
+            is_bin = True
+    return is_bin, after
+
+
 @dataclass
 class AgentOutput:
     kind: str  # message | done | error | cancelled | skipped
@@ -1206,6 +1260,26 @@ async def run_agent_loop(
                     # 消除同 session 并发 IO 触发 greenlet_spawn（SQLAlchemy xd2s）；
                     # 工具内写库 commit 经 LockedAsyncSession 全局写锁串行化
                     async with async_session_factory() as tdb:
+                        # v7(B): 注入运行时输出回调——工具每帧上报增量，广播 tool.output 前端实时展示。
+                        # 累积上限钳制在 tool_output_chars_terminal，超量后停止转发（后续仍随最终结果返回）。
+                        _out_sent = {"len": 0}
+                        _out_limit = int(getattr(settings, "tool_output_chars_terminal", 12_000))
+
+                        async def _emit_tool_output(chunk: str) -> None:
+                            if not chunk:
+                                return
+                            _out_sent["len"] += len(chunk)
+                            if _out_sent["len"] > _out_limit:
+                                return
+                            try:
+                                await broadcast(session_id, {
+                                    "event": "tool.output",
+                                    "payload": {"turn_id": turn_id, "call_key": call_key,
+                                                "tool": tool_name, "chunk": chunk},
+                                })
+                            except Exception:
+                                logger.debug("[agent] tool.output 广播失败(非阻塞)", exc_info=True)
+
                         ctx = ToolContext(
                             workspace_root=workspace, session_id=session_id,
                             task_id=turn_id, agent_id=agent_id, agent_name=agent_name,
@@ -1213,6 +1287,7 @@ async def run_agent_loop(
                             db=tdb,
                             permission_mode=permission_mode,
                             sandbox_mode=sandbox_mode,
+                            on_tool_output=_emit_tool_output,
                         )
                         _ts0 = time.monotonic()
                         # v9: 写盘工具执行前读取原文件内容（精确回滚依据：只撤销 AI 改动部分）
@@ -1294,8 +1369,16 @@ async def run_agent_loop(
                             # v26: 登记 {ckpt, path} 到 turn 快照——非 git 仓库回滚也可恢复
                             _target_rel = rollback_service.normalize_workspace_path(workspace, target)
                             # v2.2 (plan-88): 二进制/超限文件只做 checkpoint 备份，不存文本前后内容
-                            _is_bin = _pre_bin.get(target, False) or rollback_service._is_binary_path(
+                            # plan-1085 三态：pre/post 任一 True→二进制；post False→文本；
+                            # post None(读取失败)时磁盘内容+工具兜底均不可得才降级二进制并 warning
+                            _bin_post = rollback_service._is_binary_path(
                                 workspace, target, settings.rollback_record_max_bytes)
+                            _is_bin, _after_text = _resolve_write_record(
+                                bin_pre=_pre_bin.get(target), bin_post=_bin_post,
+                                disk_after=rollback_service._read_file_text(workspace, target),
+                                result=result, target=target,
+                                turn_id=turn_id, tool_name=tool_name,
+                            )
                             if _pre_before.get(target) is not None:
                                 _ckpt = rollback_service.checkpoint_file(workspace, target,
                                                                         session_id=session_id, turn_id=turn_id)
@@ -1310,15 +1393,12 @@ async def run_agent_loop(
                                 db, session_id=session_id, turn_id=turn_id, tool=tool_name,
                                 path=target,
                                 before=None if _is_bin else _pre_before.get(target),
-                                after=None if _is_bin else rollback_service._read_file_text(workspace, target),
+                                after=None if _is_bin else _after_text,
                                 binary=_is_bin,
                             )
                             # v2.2 (对齐 zcode 3.7): 行级变更统计（+N -M），工具卡摘要展示
                             if not _is_bin:
-                                _add, _del = _line_change_stat(
-                                    _pre_before.get(target),
-                                    rollback_service._read_file_text(workspace, target),
-                                )
+                                _add, _del = _line_change_stat(_pre_before.get(target), _after_text)
                             else:
                                 _add = _del = 0
                             _total_add += _add
@@ -1351,8 +1431,14 @@ async def run_agent_loop(
                             # v26: 伪装写盘同样登记 checkpoint 到 turn 快照
                             _target_rel = rollback_service.normalize_workspace_path(workspace, target)
                             # v2.2 (plan-88): 二进制/超限文件只做 checkpoint 备份
-                            _is_bin = _guess_bin.get(target, False) or rollback_service._is_binary_path(
+                            # plan-1085 三态：与精确写盘分支同口径
+                            _bin_post_g = rollback_service._is_binary_path(
                                 workspace, target, settings.rollback_record_max_bytes)
+                            _is_bin, _after = _resolve_write_record(
+                                bin_pre=_guess_bin.get(target), bin_post=_bin_post_g,
+                                disk_after=_after, result=result, target=target,
+                                turn_id=turn_id, tool_name=tool_name,
+                            )
                             if _guess_before.get(target) is not None:
                                 _ckpt = rollback_service.checkpoint_file(workspace, target,
                                                                         session_id=session_id, turn_id=turn_id)
@@ -1388,7 +1474,8 @@ async def run_agent_loop(
 
                     await broadcast(session_id, {
                         "event": "tool.result",
-                        "payload": {"turn_id": turn_id, "tool": tool_name,
+                        # v7(H): 补 call_key——前端据此精确关联写操作/命令行，运行中即可展示 +N-M/diff
+                        "payload": {"turn_id": turn_id, "tool": tool_name, "call_key": call_key,
                                     "ok": result.ok, "duration_ms": _dur,
                                     "output_preview": (result.output or result.error)[:300],
                                     **({"change_stat": _change_stat} if _change_stat else {})},

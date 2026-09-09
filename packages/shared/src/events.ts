@@ -35,7 +35,9 @@ export type ServerWsEvent =
   /** v35: turn 级瞬态状态（重试/恢复提示），前端流式状态行展示；text 空串 = 清除 */
   | { event: "turn.status"; payload: { turn_id: number; thread_id?: number | null; text: string } }
   | { event: "tool.call"; payload: { turn_id: number; agent_id: number; tool: string; args_preview?: string; args_partial?: string } }
-  | { event: "tool.result"; payload: { turn_id: number; tool: string; ok: boolean; duration_ms?: number; output_preview?: string; change_stat?: { path: string; additions: number; deletions: number } } }
+  | { event: "tool.result"; payload: { turn_id: number; tool: string; ok: boolean; duration_ms?: number; output_preview?: string; change_stat?: { path: string; additions: number; deletions: number }; call_key?: string } }
+  /** v7(B): 运行中工具（terminal_exec 等）逐帧增量输出——前端实时展示 */
+  | { event: "tool.output"; payload: { turn_id: number; tool: string; call_key?: string; chunk: string } }
   | { event: "file.change"; payload: { turn_id: number; path?: string } }
   | { event: "todo.updated"; payload: { turn_id: number; todos: unknown[]; persisted: boolean } }
   /** v38 (plan-482): 语义改为「方案文档已生成、等待用户确认」——

@@ -134,15 +134,40 @@ _PLAN_STATUS_LABELS = {
     "superseded": "已被更新方案取代（若含未被后续方案继承的条目，需并入新方案）",
 }
 
+# plan-1075: 未完结状态集合——正文全文优先注入的轮次
+_PLAN_OPEN_STATUSES = ("proposed", "confirmed", "superseded")
 
-async def _collect_plan_history(db: AsyncSession, session, workspace: str) -> str:
+# plan-1075: 注入头部继承规则行——继承与合并交给 AI 语义理解完成，
+# 系统不做任何计划文档内容识别/文本匹配
+_PLAN_HISTORY_RULE_HEADER = (
+    "【继承规则】新方案必须完整覆盖以下所有未完结轮的未完成内容，"
+    "并与本轮新增需求合并重新完整规划；已完结轮仅作背景参考，"
+    "其已完成条目禁止重复列入新方案。条目表述可改写，语义必须在。"
+)
+
+
+async def _collect_plan_history(
+    db: AsyncSession, session, workspace: str, *,
+    summary_only: bool = False, exclude_turn_id: int | None = None,
+) -> str:
     """plan-644: 收集本会话此前各轮计划需求全集（仅 plan 模式注入）。
 
-    每轮输出：turn id / plan_status 语义 / 文档路径 / 该轮用户原始需求 / 文档正文。
-    正文策略：未完结轮（proposed/confirmed/superseded）最近 3 轮给全文，更早
-    与已完结轮（done/cancelled）仅首个 # 标题；总量上限
-    settings.plan_history_inject_chars，超限时从最早轮次开始降级（保留
-    状态行与需求行，正文提示用 fs_read 读取）。失败返回空串（非阻塞）。
+    plan-1075 重构——"AI 语义继承"策略：系统不解析、不校验计划文档内容，
+    只负责把历史材料完整喂进上下文；找未完成项、并入新需求、合并重规划
+    全部由模型在生成新文档时完成。注入策略：
+
+    - 未完结轮（proposed/confirmed/superseded）：状态行 + 用户需求 + 文档正文
+      全文，仅受单轮上限 settings.plan_history_open_doc_chars（尾部截断并
+      标注 fs_read 补齐）；预算不足时突破 settings.plan_history_inject_chars
+      整体注入（上限提高为未完结轮全集 + 1000）——未完成内容零丢失优先于
+      token 预算。
+    - 已完结轮（done/cancelled）：状态行 + 用户需求 + 首个 # 标题（现状保留）；
+      预算放不下时从最早的已完结轮开始整块丢弃。
+    - summary_only=True（确认执行阶段复用）：所有轮仅状态行+用户需求行，
+      不含文档正文，防止执行上下文被历史正文撑爆。
+
+    每轮输出：turn id / plan_status 语义 / 文档路径 / 用户需求 / 正文。
+    失败返回空串（非阻塞）。
     """
     if not workspace or session is None:
         return ""
@@ -159,7 +184,10 @@ async def _collect_plan_history(db: AsyncSession, session, workspace: str) -> st
                 _Turn.plan_doc_path.is_not(None),
             ).order_by(_Turn.id.asc())
         )
-        plan_turns = list(res.scalars().all())
+        plan_turns = [
+            t for t in res.scalars().all()
+            if exclude_turn_id is None or t.id != exclude_turn_id
+        ]
         if not plan_turns:
             return ""
 
@@ -196,50 +224,81 @@ async def _collect_plan_history(db: AsyncSession, session, workspace: str) -> st
                 logger.debug("[context] Plan History 用户需求兜底失败 turn=%s", t.id, exc_info=True)
 
         root = _Path(workspace).resolve()
-        # 未完结轮最近 3 轮给全文
-        open_turns = [t for t in plan_turns if (t.plan_status or "") in ("proposed", "confirmed", "superseded")]
-        full_idx = {t.id for t in open_turns[-3:]}
+        open_doc_chars = max(
+            2000, int(getattr(settings, "plan_history_open_doc_chars", 12000) or 12000)
+        )
 
-        blocks: list[str] = []
+        def _read_doc(t) -> str | None:
+            """读文档全文；不可读返回 None。"""
+            try:
+                target = (root / str(t.plan_doc_path)).resolve()
+                if target.is_file() and root in target.parents:
+                    return target.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+            return None
+
+        # 组块（按 turn id 升序保持时间线）：未完结轮全文，其余摘要
+        blocks: dict[int, str] = {}
         for t in plan_turns:
             status = t.plan_status or "unknown"
             label = _PLAN_STATUS_LABELS.get(status, status)
             header = f"### Turn {t.id} [{status}] {t.plan_doc_path}（{label}）"
             req = req_map.get(t.id, "")
             req_part = f"用户需求：{req}" if req else "用户需求：（未能恢复）"
-            body = ""
-            try:
-                target = (root / str(t.plan_doc_path)).resolve()
-                if target.is_file() and root in target.parents:
-                    text = target.read_text(encoding="utf-8", errors="replace")
-                    if t.id in full_idx:
-                        body = text[:3000]
-                    else:
-                        first = next((ln for ln in text.splitlines() if ln.startswith("#")), "")
-                        body = first[:200] if first else "(无标题)"
-            except OSError:
-                body = "(读取失败)"
-            blocks.append(f"{header}\n{req_part}\n文档：{body}" if body else f"{header}\n{req_part}")
+            is_open = status in _PLAN_OPEN_STATUSES
+            if summary_only or not is_open:
+                # 摘要块：已完结轮附首个 # 标题；summary_only 一律只给状态行+需求行
+                first = ""
+                if not summary_only:
+                    doc = _read_doc(t)
+                    if doc is not None:
+                        found = next((ln for ln in doc.splitlines() if ln.startswith("#")), "")
+                        first = found[:200] if found else "(无标题)"
+                blocks[t.id] = f"{header}\n{req_part}" + (f"\n文档：{first}" if first else "")
+            else:
+                # plan-1075: 未完结轮全文（单轮上限内），超限尾部截断并标注
+                doc = _read_doc(t)
+                if doc is None:
+                    body = "(文档不存在或读取失败，可 fs_read 该路径确认)"
+                elif len(doc) > open_doc_chars:
+                    body = doc[:open_doc_chars] + "\n（正文因超限截断，可 fs_read 原文档补齐）"
+                else:
+                    body = doc
+                blocks[t.id] = f"{header}\n{req_part}\n文档：\n{body}"
 
-        # 预算：从最新轮次向前保留完整块；更早轮次降级为状态行+需求行
+        if summary_only:
+            parts = [_PLAN_HISTORY_RULE_HEADER] + [blocks[t.id] for t in plan_turns]
+            return "\n\n".join(parts)
+
+        # 预算分配（plan-1075 降级顺序反转）：未完结轮全文无条件保留；
+        # 剩余空间给已完结轮摘要（最新优先保留），放不下的从最早的开始整块丢弃；
+        # 未完结轮全集本身超出预算时，注入上限直接提高为"未完结轮全集 + 1000"
+        open_set = {t.id for t in plan_turns if (t.plan_status or "") in _PLAN_OPEN_STATUSES}
+        closed_turns = [t for t in plan_turns if t.id not in open_set]
+        open_total = sum(len(blocks[t.id]) for t in plan_turns if t.id in open_set)
         budget = max(1000, int(getattr(settings, "plan_history_inject_chars", 8000) or 8000))
-        kept: set[int] = set()
-        total = 0
-        for i in range(len(blocks) - 1, -1, -1):
-            if total + len(blocks[i]) <= budget:
-                kept.add(i)
-                total += len(blocks[i])
-            else:
-                break
-        parts: list[str] = []
-        for i, blk in enumerate(blocks):
-            if i in kept:
-                parts.append(blk)
-            else:
-                lines = blk.splitlines()
-                header = lines[0] if lines else ""
-                req_line = next((ln for ln in lines if ln.startswith("用户需求")), "")
-                parts.append(f"{header}\n{req_line}\n（正文因注入预算截断，可 fs_read 该文档路径查看全文）")
+        if open_total + 1000 > budget:
+            # plan-1075: 未完结轮全文优先于 token 预算——注入上限直接提高为
+            # "未完结轮全集 + 1000"，剩余空间仍尽量给已完结轮摘要
+            logger.info(
+                "[context] Plan History 未完结轮全文 %d 字符超出预算 %d，突破预算整体注入",
+                open_total, budget,
+            )
+            effective_budget = open_total + 1000
+        else:
+            effective_budget = budget
+        remaining = effective_budget - open_total
+        kept_closed: set[int] = set()
+        for t in reversed(closed_turns):
+            blk = blocks[t.id]
+            if len(blk) <= remaining:
+                kept_closed.add(t.id)
+                remaining -= len(blk)
+        parts = [_PLAN_HISTORY_RULE_HEADER]
+        for t in plan_turns:
+            if t.id in open_set or t.id in kept_closed:
+                parts.append(blocks[t.id])
         return "\n\n".join(parts)
     except Exception:
         logger.warning("[context] Plan History 收集失败(非阻塞)", exc_info=True)
@@ -362,6 +421,9 @@ async def build_main_context(
         logger.debug("[context] 沙箱模式读取失败，用 workspace-write", exc_info=True)
     # v23: ta3 供应商模型 → 还原式系统提示词（远端主体 + ta3 纪律 + 当前项目规范）
     ta3_meta = await _resolve_ta3_model_meta(db, agent, session)
+    # v7: 非 plan 模式下裁剪系统提示词的规划工作流，避免模型自发写计划文档索要确认
+    _perm_mode = str(getattr(session, "permission_mode", None) or "default")
+    _is_plan_mode = _perm_mode == "plan"
     if ta3_meta is not None:
         from app.orchestration.prompts.ta3_fusion import build_ta3_system_prompt
         system_prompt = build_ta3_system_prompt(
@@ -370,7 +432,8 @@ async def build_main_context(
         )
         logger.info("[context] 会话 %s 使用 ta3 还原式系统提示词", session.id if session else "-")
     else:
-        system_prompt = build_main_system_prompt(enable_subagents=enable_subagents)
+        system_prompt = build_main_system_prompt(enable_subagents=enable_subagents,
+                                                 plan_flow_enabled=_is_plan_mode)
     bundle = ContextBundle(
         system=system_prompt,
         instruction=user_message,

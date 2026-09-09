@@ -199,6 +199,8 @@ a { color: var(--accent); text-decoration: none; }
 .sb-project-actions, .sb-session-actions { display: none; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 4px; color: var(--text-3); flex-shrink: 0; }
 .sb-project:hover .sb-project-actions, .sb-session:hover .sb-session-actions { display: flex; }
 .sb-project-actions:hover, .sb-session-actions:hover { background: var(--bg-active); color: var(--text-1); }
+/* v7: 左侧会话行一键归档按钮——运行中禁用 */
+.sb-session-archive.disabled { opacity: .4; cursor: not-allowed; pointer-events: none; }
 .sb-session { display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 6px 0 8px; border-radius: var(--r-sm); font-size: var(--sidebar-fs, 13px); color: var(--text-1); cursor: pointer; position: relative;transition: background var(--dur-fast); }
 .sb-session:hover { background: var(--bg-hover); color: var(--text-1); }
 .sb-session.active { background: var(--bg-active); color: var(--text-1); font-weight: 500; }
@@ -259,9 +261,38 @@ a { color: var(--accent); text-decoration: none; }
 .ws-navpage { flex: 1; overflow-y: auto; }
 .ws-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 40px; }
 /* ── 空态首页 ── */
-.empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 24px; width: 100%; height: 100%; }
-.empty-state-greeting { font-size: 24px; font-weight: 600; color: var(--text-1); letter-spacing: -0.3px; }
+.empty-state { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; width: 100%; height: 100%; }
+/* plan-219: 大号 logo 水印垫底（ZCode 风格），不拦截交互
+ * plan-1092: 改为描边线稿（AppLogo variant="outline"，笔画走 currentColor）——
+ * 实心底在低透明度下仍会叠加成可见色块；线稿 + 主题色低透明度与背景融合。
+ * 偏上定位（图二位置），矮窗口下不与输入卡大面积重叠。 */
+.empty-state-watermark {
+  position: absolute; inset: 0; display: flex; align-items: flex-start; justify-content: center;
+  padding-top: clamp(24px, 12vh, 140px);
+  pointer-events: none; user-select: none; overflow: hidden; z-index: 0;
+}
+.empty-state-watermark svg { color: var(--text-2); opacity: 0.10; }
+:root[data-theme="dark"] .empty-state-watermark svg { color: var(--text-2); opacity: 0.14; }
+.empty-state > *:not(.empty-state-watermark) { position: relative; z-index: 1; }
+.empty-state-greeting { font-size: 26px; font-weight: 600; color: var(--text-1); letter-spacing: -0.3px; }
+.empty-state-subtitle { font-size: 14px; color: var(--text-3); margin-top: -12px; }
 .empty-state-card { width: min(720px, 90%); display: flex; flex-direction: column; border-radius: 16px; background: var(--bg-elevated); border: 1px solid var(--border); border-top: none; box-shadow: 0 2px 8px rgba(0,0,0,0.04); overflow: visible; }
+/* plan-219: 快捷动作 chips（ZCode 风格） */
+.empty-state-quick { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: -4px; }
+.es-quick-chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px;
+  border-radius: 999px; border: 1px solid var(--border); background: var(--bg-elevated);
+  color: var(--text-2); font-size: 13px; transition: all var(--dur-fast);
+}
+.es-quick-chip:hover { color: var(--text-1); border-color: var(--text-3); background: var(--bg-hover); transform: translateY(-1px); }
+/* plan-219: 技能 chips（WorkBuddy 风格，来自已启用技能） */
+.empty-state-skills { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; max-width: min(720px, 90%); }
+.es-skill-chip {
+  display: inline-flex; align-items: center; gap: 5px; padding: 5px 12px;
+  border-radius: 999px; border: 1px dashed var(--border); background: transparent;
+  color: var(--text-3); font-size: 12px; transition: all var(--dur-fast);
+}
+.es-skill-chip:hover { color: var(--text-1); border-color: var(--text-3); background: var(--bg-hover); }
 .es-card-project { position: relative; display: flex; padding: 10px 12px 0; }
 .empty-state-textarea { width: 100%; border: none; outline: none; resize: none; padding: 12px 16px 8px; font-size: 14px; color: var(--text-1); background: transparent; font-family: inherit; line-height: 1.5; min-height: 44px; max-height: 400px; overflow-y: auto; overscroll-behavior: contain; box-sizing: border-box; }
 .empty-state-textarea::placeholder { color: var(--text-3); }
@@ -780,6 +811,8 @@ a { color: var(--accent); text-decoration: none; }
 .tc-output { margin: 2px 0 4px 0; padding: 6px 10px; border-radius: var(--r-sm); background: var(--bg-elevated); border: 1px solid var(--border); max-height: 280px; overflow-y: auto; }
 .tc-code { margin: 0; font-family: var(--font-mono); font-size: 11px; color: var(--text-1); white-space: pre-wrap; word-break: break-word; line-height: 1.4; }
 .tc-plain { margin: 0; font-family: var(--font-mono); font-size: 11px; color: var(--text-2); white-space: pre-wrap; word-break: break-word; line-height: 1.4; }
+/* v7: 运行中命令行/工具输出的实时区——略浅前景 + 首帧上边距，避免与图标行贴死 */
+.tc-live { color: var(--text-3); padding-top: 2px; }
 /* v2.2 (对齐 zcode 3.14.2): grep 命中行可点击跳转 */
 .tc-grep-hits { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px dashed var(--border); }
 .tc-grep-hit { display: flex; align-items: center; gap: 6px; padding: 3px 6px; border-radius: var(--r-sm); background: transparent; border: none; cursor: pointer; text-align: left; font-size: 11px; font-family: var(--font-mono); transition: background var(--dur-fast); }
@@ -1537,6 +1570,7 @@ a { color: var(--accent); text-decoration: none; }
 .context-menu-item:hover { background: var(--bg-hover); }
 .context-menu-item.danger { color: var(--error); }
 .context-menu-item.danger:hover { background: var(--error-soft); }
+.context-menu-item.disabled { opacity: .45; cursor: not-allowed; pointer-events: none; }
 .context-menu-item.active { background: var(--bg-active); color: var(--text-1); font-weight: 500; }
 .context-menu-divider { height: 1px; background: var(--border); margin: 4px 0; }
 /* NavPages 表单组件 */
@@ -2263,40 +2297,41 @@ a { color: var(--accent); text-decoration: none; }
 :root[data-theme="dark"] .md-body .katex,
 :root[data-theme="dark"] .md-body .katex-display { color: var(--text-1); }
 :root[data-theme="dark"] .md-body .katex * { color: inherit; }
-:root[data-theme="dark"] .md-code-pre,
-:root[data-theme="dark"] .md-code-pre code { color: var(--text-1); }
-:root[data-theme="dark"] .md-code-pre code .hljs-comment,
-:root[data-theme="dark"] .md-code-pre code .hljs-quote { color: var(--color-code-comment); }
-:root[data-theme="dark"] .md-code-pre code .hljs-keyword,
-:root[data-theme="dark"] .md-code-pre code .hljs-selector-tag,
-:root[data-theme="dark"] .md-code-pre code .hljs-subst { color: var(--color-code-keyword); }
-:root[data-theme="dark"] .md-code-pre code .hljs-string,
-:root[data-theme="dark"] .md-code-pre code .hljs-regexp,
-:root[data-theme="dark"] .md-code-pre code .hljs-addition,
-:root[data-theme="dark"] .md-code-pre code .hljs-attribute { color: var(--color-code-string); }
-:root[data-theme="dark"] .md-code-pre code .hljs-number,
-:root[data-theme="dark"] .md-code-pre code .hljs-literal { color: var(--color-code-number); }
-:root[data-theme="dark"] .md-code-pre code .hljs-title,
-:root[data-theme="dark"] .md-code-pre code .hljs-title.function_,
-:root[data-theme="dark"] .md-code-pre code .hljs-built_in { color: var(--color-code-title); }
-:root[data-theme="dark"] .md-code-pre code .hljs-variable,
-:root[data-theme="dark"] .md-code-pre code .hljs-template-variable,
-:root[data-theme="dark"] .md-code-pre code .hljs-params { color: var(--color-code-variable); }
-:root[data-theme="dark"] .md-code-pre code .hljs-type,
-:root[data-theme="dark"] .md-code-pre code .hljs-class,
-:root[data-theme="dark"] .md-code-pre code .hljs-title.class_ { color: var(--color-code-variable); }
-:root[data-theme="dark"] .md-code-pre code .hljs-tag,
-:root[data-theme="dark"] .md-code-pre code .hljs-name,
-:root[data-theme="dark"] .md-code-pre code .hljs-selector-id,
-:root[data-theme="dark"] .md-code-pre code .hljs-selector-class { color: var(--color-code-tag); }
-:root[data-theme="dark"] .md-code-pre code .hljs-meta,
-:root[data-theme="dark"] .md-code-pre code .hljs-meta .hljs-keyword { color: var(--color-code-keyword); }
-:root[data-theme="dark"] .md-code-pre code .hljs-deletion { color: var(--color-code-keyword); }
-:root[data-theme="dark"] .md-code-pre code .hljs-section,
-:root[data-theme="dark"] .md-code-pre code .hljs-symbol,
-:root[data-theme="dark"] .md-code-pre code .hljs-bullet { color: var(--color-code-variable); }
-:root[data-theme="dark"] .md-code-pre code .hljs-emphasis { font-style: italic; }
-:root[data-theme="dark"] .md-code-pre code .hljs-strong { font-weight: 600; }
+/* v7: 代码高亮 token 用 CSS 变量驱动——浅/深主题自动取 --color-code-* ——不再限定 dark */
+.md-code-pre,
+.md-code-pre code { color: var(--text-1); }
+.md-code-pre code .hljs-comment,
+.md-code-pre code .hljs-quote { color: var(--color-code-comment); }
+.md-code-pre code .hljs-keyword,
+.md-code-pre code .hljs-selector-tag,
+.md-code-pre code .hljs-subst { color: var(--color-code-keyword); }
+.md-code-pre code .hljs-string,
+.md-code-pre code .hljs-regexp,
+.md-code-pre code .hljs-addition,
+.md-code-pre code .hljs-attribute { color: var(--color-code-string); }
+.md-code-pre code .hljs-number,
+.md-code-pre code .hljs-literal { color: var(--color-code-number); }
+.md-code-pre code .hljs-title,
+.md-code-pre code .hljs-title.function_,
+.md-code-pre code .hljs-built_in { color: var(--color-code-title); }
+.md-code-pre code .hljs-variable,
+.md-code-pre code .hljs-template-variable,
+.md-code-pre code .hljs-params { color: var(--color-code-variable); }
+.md-code-pre code .hljs-type,
+.md-code-pre code .hljs-class,
+.md-code-pre code .hljs-title.class_ { color: var(--color-code-variable); }
+.md-code-pre code .hljs-tag,
+.md-code-pre code .hljs-name,
+.md-code-pre code .hljs-selector-id,
+.md-code-pre code .hljs-selector-class { color: var(--color-code-tag); }
+.md-code-pre code .hljs-meta,
+.md-code-pre code .hljs-meta .hljs-keyword { color: var(--color-code-keyword); }
+.md-code-pre code .hljs-deletion { color: var(--color-code-keyword); }
+.md-code-pre code .hljs-section,
+.md-code-pre code .hljs-symbol,
+.md-code-pre code .hljs-bullet { color: var(--color-code-variable); }
+.md-code-pre code .hljs-emphasis { font-style: italic; }
+.md-code-pre code .hljs-strong { font-weight: 600; }
 .settings-pill { padding: 4px 12px; border-radius: var(--r-sm); border: 1px solid var(--border); background: transparent; color: var(--text-2); font-size: 12px; cursor: pointer; transition: all var(--dur-fast); }
 .settings-pill:hover { border-color: var(--text-2); }
 .settings-pill.active { background: var(--bg-active); border-color: var(--text-1); color: var(--text-1); }

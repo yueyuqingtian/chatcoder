@@ -39,6 +39,8 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("sessions", "last_usage_at", "VARCHAR(40)"),
     # ========== sessions（v21：主会话上下文摘要持久化）==========
     ("sessions", "shared_context", "JSON"),
+    # ========== sessions（v7：置顶时间——"后置顶在上"排序依据）==========
+    ("sessions", "pinned_at", "VARCHAR(40)"),
     # ========== exec_policy_rules（v2.2：工具级规则）==========
     ("exec_policy_rules", "tool_name", "VARCHAR(60)"),
     # ========== messages（v1 缺 turn_id）==========

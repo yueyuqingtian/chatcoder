@@ -81,18 +81,29 @@ async def list_sessions(db: AsyncSession, project_id: int | None = None,
         stmt = stmt.where(Session.project_id == project_id)
     if not include_archived:
         stmt = stmt.where(Session.status != "archived")
-    res = await db.execute(stmt.order_by(Session.pinned.desc(), Session.updated_at.desc()))
+    res = await db.execute(stmt.order_by(Session.pinned.desc(), Session.pinned_at.desc(), Session.updated_at.desc()))
     return list(res.scalars().all())
 
 
 async def update_session(db: AsyncSession, session_id: int, **kwargs) -> str | None:
-    """更新会话字段（写引擎单写线程）。返回 None（无对象）/ 任意标量（成功）。"""
+    """更新会话字段（写引擎单写线程）。返回 None（无对象）/ 任意标量（成功）。
+
+    v7: pinned 状态变化时同步维护 pinned_at——置顶写当前时间（"后置顶在上"依据），
+    取消置顶清空。仅在 pinned 有值且与旧值不同时才触碰（避免无关更新刷新置顶序）。
+    """
+    from datetime import datetime, timezone
     from app.persistence.database import run_write_locked
 
     def patch(s):
         session = s.get(Session, session_id)
         if session is None:
             return None
+        new_pinned = kwargs.get("pinned")
+        if new_pinned is not None and new_pinned != session.pinned:
+            if new_pinned:
+                session.pinned_at = datetime.now(timezone.utc).isoformat()
+            else:
+                session.pinned_at = None
         for k, v in kwargs.items():
             if v is not None:
                 setattr(session, k, v)

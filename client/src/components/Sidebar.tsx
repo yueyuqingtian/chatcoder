@@ -19,7 +19,7 @@ import {
   IconCalendar, IconChevronDown, IconChevronLeft, IconChevronRight, IconPanelLeft,
   IconFolder, IconFolderDynamic, IconLayers, IconSortDesc,
   IconMoreHorizontal, IconPin, IconPlus, IconRefresh, IconSearch, IconSettings,
-  IconFolderPlus, IconZap, IconDownload,
+  IconFolderPlus, IconZap, IconDownload, IconArchive,
 } from "./icons";
 
 export type NavKey = "chat" | "scheduled" | "skills" | "mcp" | "settings";
@@ -165,9 +165,15 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
 
   const filteredSessions = useMemo(() => {
     const list = sessions.filter((s) => s.status !== "archived");
+    // v7: 置顶会话恒在顶部（与所选排序无关）；置顶组内按 pinned_at 倒序（后置顶在上）
+    const pinnable = (s: SessionOut) => parseUtc(s.pinned_at) || 0;
     return list.sort((a, b) => {
-      if (sort === "pinned") {
-        if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+      if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+      if (a.pinned && b.pinned) {
+        // 后置顶在上；pinned_at 缺失时回退 updated/last_activity
+        const pa = pinnable(a) || parseUtc(a.last_activity_at);
+        const pb = pinnable(b) || parseUtc(b.last_activity_at);
+        if (pb !== pa) return pb - pa;
       }
       if (sort === "name") {
         return (a.title || "").localeCompare(b.title || "");
@@ -225,6 +231,18 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
         )}
         {s.has_running && <span className="sb-session-pulse" />}
         <span className="sb-session-time">{formatRelativeTime(s.last_activity_at, language)}</span>
+        {/* v7: 一键归档（三点菜单图标左侧）。运行中的会话禁止归档 */}
+        <span
+          className={"sb-session-actions sb-session-archive" + (s.has_running ? " disabled" : "")}
+          title={s.has_running ? t("sidebar.archive_disabled") : t("sidebar.ctx_archive")}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (s.has_running) return;
+            api.updateSession(s.id, { status: "archived" }).then(() => loadBootstrap());
+          }}
+        >
+          <IconArchive size={14} />
+        </span>
         <span className="sb-session-actions" onClick={(e) => { e.stopPropagation(); setMenuFor(menuFor === s.id ? null : s.id); }}>
           <IconMoreHorizontal size={14} />
         </span>
@@ -234,7 +252,15 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
             <div className="context-menu-item" onClick={() => { forkSession(s.id); onSessionFocus(); setMenuFor(null); }}>{t("sidebar.ctx_fork")}</div>
             <div className="context-menu-item" onClick={() => { api.updateSession(s.id, { pinned: !s.pinned }).then(() => loadBootstrap()); setMenuFor(null); }}>{s.pinned ? t("sidebar.ctx_unpin") : t("sidebar.ctx_pin")}</div>
             <div className="context-menu-item" onClick={() => { api.createWorktree(s.id); setMenuFor(null); }}>{t("sidebar.ctx_worktree")}</div>
-            <div className="context-menu-item" onClick={() => { api.updateSession(s.id, { status: "archived" }).then(() => loadBootstrap()); setMenuFor(null); }}>{t("sidebar.ctx_archive")}</div>
+            <div
+              className={"context-menu-item" + (s.has_running ? " disabled" : "")}
+              title={s.has_running ? t("sidebar.archive_disabled") : ""}
+              onClick={() => {
+                setMenuFor(null);
+                if (s.has_running) return;
+                api.updateSession(s.id, { status: "archived" }).then(() => loadBootstrap());
+              }}
+            >{t("sidebar.ctx_archive")}</div>
             <div className="context-menu-divider" />
             <div className="context-menu-item danger" onClick={() => { setConfirmDelete(s); setMenuFor(null); }}>{t("sidebar.ctx_delete")}</div>
           </div>

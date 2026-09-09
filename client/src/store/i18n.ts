@@ -33,6 +33,7 @@ const DICT: Dict = {
   "sidebar.ctx_unpin":            ["取消置顶", "Unpin"],
   "sidebar.ctx_worktree":         ["创建工作树", "Create Worktree"],
   "sidebar.ctx_archive":          ["归档", "Archive"],
+  "sidebar.archive_disabled":     ["运行中的会话不可归档", "Cannot archive a running session"],
   "sidebar.ctx_archive_project":  ["归档项目", "Archive Project"],
   "sidebar.ctx_delete":           ["删除", "Delete"],
   "sidebar.ctx_open_in_folder":   ["在文件管理器打开", "Reveal in File Manager"],
@@ -88,6 +89,16 @@ const DICT: Dict = {
   "workspace.greet_noon":         ["中午好", "Good afternoon"],
   "workspace.greet_afternoon":    ["下午好", "Good afternoon"],
   "workspace.greet_evening":      ["晚上好", "Good evening"],
+  // plan-219: 空态首页副标题与快捷动作 chips
+  "workspace.subtitle":           ["今天想让我帮你做点什么？", "What can I help you with today?"],
+  "workspace.quick_fix":          ["修复报错", "Fix a bug"],
+  "workspace.quick_fix_prompt":   ["帮我修复以下报错，先定位根因再给出修复方案：\n", "Help me fix the following error. Locate the root cause first, then propose a fix:\n"],
+  "workspace.quick_test":         ["写单测", "Write tests"],
+  "workspace.quick_test_prompt":  ["为以下代码编写单元测试，覆盖边界情况：\n", "Write unit tests for the following code, covering edge cases:\n"],
+  "workspace.quick_review":       ["代码审查", "Code review"],
+  "workspace.quick_review_prompt": ["请审查以下代码，指出问题与改进建议：\n", "Review the following code and point out issues and improvements:\n"],
+  "workspace.quick_explain":      ["解释代码", "Explain code"],
+  "workspace.quick_explain_prompt": ["请解释以下代码的作用与实现思路：\n", "Explain what the following code does and how it works:\n"],
 
   // ── 输入框 ComposerCore ──
   "composer.select_project":      ["选择项目…", "Select project…"],

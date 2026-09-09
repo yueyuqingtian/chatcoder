@@ -45,6 +45,10 @@ hiddenimports = [
     "email_validator",
     "multipart",
     "python_multipart",
+    # plan-219: 浏览器自动化——playwright 延迟导入于 tools/browser.py，需显式声明；
+    # driver 数据(node 子进程+JS)由 pyinstaller-hooks-contrib 的 playwright hook 收集
+    "playwright",
+    "playwright.async_api",
 ]
 
 a = Analysis(

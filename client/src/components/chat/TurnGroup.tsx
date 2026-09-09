@@ -342,9 +342,13 @@ export const TurnGroup = memo(function TurnGroup({
           plan-865/v0.3.1 折叠口径：有最终汇报时，折叠容器只收「最终汇报之前的 AI 执行过程」
           （思考/工具/中间说明/计划预览消息及卡片），最终汇报与操作行始终展示；
           无最终汇报（纯工具、执行中、异常中断等）时全量直显，绝对不吞工具调用与思考块。 */}
-      {hasAnyAiContent && (
+      {/* plan-1094: 运行中即使尚无任何 AI 内容落库（发送初期/纯思考阶段）
+          也渲染 turn-flow，保证「已工作 N 秒」计时条不缺失 */}
+      {(hasAnyAiContent || isRunning) && (
         <div className="turn-flow">
-          {hasProcess && (
+          {/* plan-1094: 运行中即使尚无最终汇报文本（hasProcess=false）也必须渲染
+              WorkTimer，否则发送初期/纯思考阶段「已工作 N 秒」计时条缺失 */}
+          {(hasProcess || isRunning) && (
             <WorkTimer
               turnId={turnId}
               isRunning={isRunning}

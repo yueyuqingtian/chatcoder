@@ -187,17 +187,19 @@ def discard_injected_inputs(turn_id: int) -> None:
     _pending_inputs.pop(turn_id, None)
 
 # 命令模式：只读审阅（/chat）工具白名单
+# v7: 追加 ask_user_question/todo_write 为通用工具——四种模式（只读/计划/完全访问/计划执行）
+# 全部可用：结构化提问（需求澄清）与执行清单是通用能力，不因模式受限。
 _READONLY_TOOLS = [
     "fs_read", "fs_list", "fs_grep", "git_diff",
     "memory_search", "web_fetch", "web_search", "view_image",
     "read_attachment", "codebase_search",
+    "ask_user_question", "todo_write",
 ]
-# 规划模式（/plan）：只读 + 允许写计划文档 + 命令行 + 执行清单
+# 规划模式（/plan）：只读 + 允许写计划文档 + 命令行
 # v3.0 (plan-88): 追加 terminal_exec——计划模式 AI 可执行命令（只读命令免审批，
 # 其余走审批卡；cwd 是否可越出工作区由 plan_mode_allow_outside_access 开关控制）。
-# v38 (plan-482): 追加 todo_write——分步决策权归 AI，规划阶段需自行建立调研清单
-# 并逐项标记完成（此前规划模式无清单工具，目标流程第 1 步根本无法执行）。
-_PLAN_TOOLS = _READONLY_TOOLS + ["fs_write", "terminal_exec", "todo_write"]
+# todo_write/ask_user_question 已属通用工具（见 _READONLY_TOOLS），此处不再重复。
+_PLAN_TOOLS = _READONLY_TOOLS + ["fs_write", "terminal_exec"]
 
 _MODE_HINTS = {
     "readonly": (
@@ -210,8 +212,15 @@ _MODE_HINTS = {
         "执行流程：\n"
         "1. 先用 todo_write 建立调研清单（要改哪些文件、要先查清哪些事实），"
         "再按清单逐项探索；每完成一项立即标记为 completed。\n"
-        "1a. 若上下文提供「Plan History」（本会话此前各轮计划与状态）：先逐轮阅读，"
-        "新方案文档必须完整继承其中所有未完成项，并剔除已执行完成的条目。\n"
+        "1a. 若上下文提供「Plan History」（本会话此前各轮计划与状态），"
+        "按 Collect → Merge → Replan 三步产出新方案：Collect——逐轮读取，"
+        "找出所有未完结轮中尚未完成的需求（done/cancelled 轮的已完成内容"
+        "不重复列入，cancelled 除非用户本轮重提）；Merge——把历史未完成项"
+        "与本轮新增需求合并为统一需求全集，同一需求多轮出现时合并去重、"
+        "以最新表述为准，仅用户明确移除的才剔除；Replan——以合并后的全集"
+        "重新完整规划（目标、步骤、顺序、涉及文件、验收标准），生成全新"
+        "文档，不在旧文档上打补丁、不只写新需求增量。计划文档形态多变，"
+        "禁止文本匹配比对，按语义继承每个未完成项。\n"
         "2. 探索完成后，在项目根目录创建 ai/ 目录，用 fs_write 编写本计划文档 "
         "ai/chatcoder-plan-{session_id}-{turn_id}.md，"
         "必须严格使用这个文件名，不要自行改名或加序号/时间戳。"
@@ -1134,11 +1143,14 @@ def _resolve_plan_doc(workspace: str, session_id: int, out_kind: str,
 async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
     """v38 (plan-482): 用户确认方案文档后执行——清理分析阶段清单，按文档重建执行清单。
 
-    取代旧 execute_split_then_main（按系统预拆分的 group/steps 编排）。核心改动：
-    1. 不再读取任何 group/steps 记录——系统已不生成它们；
-    2. 确认瞬间广播空 todo.updated，清掉规划阶段遗留的调研清单（目标流程第 4 步）；
-    3. 把方案文档正文注入 instruction，要求主代理自行重建执行清单后逐步执行
-       （目标流程第 5 步），每完成一步用 todo_write 标记。
+        docstring 注明）。核心改动：
+   1. 不再读取任何 group/steps 记录——系统已不生成它们；
+   2. 确认瞬间广播空 todo.updated，清掉规划阶段遗留的调研清单（目标流程第 4 步）；
+   3. 把方案文档正文注入 instruction，要求主代理自行重建执行清单后逐步执行
+      （目标流程第 5 步），每完成一步用 todo_write 标记。
+   plan-1075: 注入 Plan History 历史未完结轮摘要（状态行+用户需求行，不含正文）
+   ——多轮迭代中确认执行的方案应已由 AI 合并历史未完成项，执行阶段让模型
+   仍能看到全集，发现遗漏时显式指出差异而非静默丢弃。
     """
     if turn_id in _running_turns:
         return {"ok": False, "error": "turn already running"}
@@ -1218,6 +1230,20 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         plan_doc = _read_plan_document_exact(workspace, getattr(turn, "plan_doc_path", None))
         if not plan_doc:
             plan_doc = _read_plan_document(workspace, session.id)[:16000]
+        # plan-1075: 历史未完结轮摘要（状态行+用户需求行，不含正文；排除本 turn
+        # ——其文档已全文注入）。失败非阻塞：拿不到就不注入，行为同旧版。
+        _open_summary = ""
+        try:
+            _open_summary = await _collect_plan_history(
+                db, session, workspace, summary_only=True, exclude_turn_id=turn_id,
+            )
+        except Exception:
+            logger.debug("[engine:confirm] Plan History 摘要注入失败(非阻塞)", exc_info=True)
+        _open_section = (
+            "\n\n【历史未完结计划轮（Plan History 摘要）】\n" + _open_summary
+            + "\n若发现上方方案文档未覆盖其中的历史未完成需求，在总结中明确指出差异，不要静默丢弃。"
+            if _open_summary.strip() else ""
+        )
         bundle = await build_main_context(
             db, agent=main_agent, session=session, project=project, turn=turn,
             user_message=original_request,
@@ -1235,6 +1261,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             " in_progress，不要事后批量补标。\n"
             "4. 执行中发现划分不合理时，先更新清单再继续。\n"
             "5. 完成后用一段话总结改动与验证结果。"
+            + _open_section
         )
         main_tools = tool_registry.all_schemas()
         try:

@@ -112,6 +112,8 @@ export interface SessionOut {
   model_id: number | null;
   status: string; // active / archived
   pinned: boolean;
+  /** v7: 置顶时间——前端"后置顶在上"排序依据 */
+  pinned_at?: string | null;
   permission_mode?: "default" | "accept_edits" | "plan" | "readonly";
   fork_parent_id: number | null;
   worktree_path: string | null;

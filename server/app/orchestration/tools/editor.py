@@ -8,6 +8,9 @@ from typing import Any
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 from app.orchestration.tools.safe_path import safe_resolve
 
+# plan-1085: data 带回新内容上限（对齐 agent_loop.MAX_TOOL_OUTPUT_CHARS）；超限不带，走磁盘读取兜底路径
+_NEW_CONTENT_MAX_CHARS = 16000
+
 
 class EditorApplyDiffTool(Tool):
     name = "editor_apply_diff"
@@ -59,8 +62,8 @@ class EditorApplyDiffTool(Tool):
             target.write_text(new_content, encoding="utf-8")
         except OSError as e:
             return ToolResult(ok=False, output="", error=f"写入失败: {e}")
-        return ToolResult(
-            ok=True,
-            output=f"已应用 diff 到 {path}",
-            data={"path": path, "delta": len(new_text) - len(old_text)},
-        )
+        # plan-1085: data 带回新内容，供 agent_loop 磁盘读取失败时兜底统计/记录（不进模型上下文）
+        _data: dict[str, Any] = {"path": path, "delta": len(new_text) - len(old_text)}
+        if len(new_content) <= _NEW_CONTENT_MAX_CHARS:
+            _data["new_content"] = new_content
+        return ToolResult(ok=True, output=f"已应用 diff 到 {path}", data=_data)

@@ -44,10 +44,18 @@ class _BrowserSessionManager:
                 from playwright.async_api import async_playwright
                 cls._pw = await async_playwright().start()
             if cls._browser is None or not cls._browser.is_connected():
-                cls._browser = await cls._pw.chromium.launch(
-                    headless=headless,
-                    args=["--disable-web-security", "--no-sandbox", "--disable-setuid-sandbox"],
-                )
+                try:
+                    cls._browser = await cls._pw.chromium.launch(
+                        headless=headless,
+                        args=["--disable-web-security", "--no-sandbox", "--disable-setuid-sandbox"],
+                    )
+                except Exception as launch_err:
+                    # plan-219: 区分「chromium 浏览器未安装」与「playwright 模块缺失」，避免误导用户重装 pip 包
+                    if "Executable doesn't exist" in str(launch_err) or "looks like Playwright was just installed" in str(launch_err):
+                        raise RuntimeError(
+                            "Chromium 浏览器未安装。请在服务端运行: playwright install chromium"
+                        ) from launch_err
+                    raise
                 cls._context = await cls._browser.new_context(
                     viewport={"width": 1280, "height": 800},
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 ChatCoder/1.0",

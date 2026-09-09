@@ -36,10 +36,23 @@ import {
 } from "../icons";
 import { Modal } from "../Modal";
 import { ModelPicker } from "./ModelPicker";
-import { useChatStore, type UsageDetail } from "../../store/chat";
+import { useChatStore, persistLastReasoning, type UsageDetail } from "../../store/chat";
 import { useDraftsStore } from "../../store/drafts";
 import { useI18n } from "../../store/i18n";
 import { api, resolveFileUrl, type AttachmentInfo, type TreeNode } from "../../api/client";
+
+/** v7: 思考深度档位高低序——与 ModelsPanel REASONING_OPTS 对齐，用于取模型最高档兜底 */
+const EFFORT_RANK: Record<string, number> = {
+  none: 0, minimal: 1, low: 2, medium: 3, high: 4, xhigh: 5, max: 6,
+};
+
+/** v7: 取模型支持的最高思考档位（无支持返回 null）——新建任务冷启动默认 */
+function maxEffortOf(reasoningEfforts?: string[] | null): string | null {
+  if (!reasoningEfforts || reasoningEfforts.length === 0) return null;
+  return reasoningEfforts.reduce((best, cur) =>
+    (EFFORT_RANK[cur] ?? -1) > (EFFORT_RANK[best] ?? -1) ? cur : best,
+  );
+}
 
 export interface ComposerCoreProps {
   variant?: "default" | "chat" | "home" | "compact";
@@ -168,8 +181,8 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   const [attachments, setAttachments] = useState<AttachmentInfo[]>(() => initialDraft?.attachments ?? []);
   /** 本会话/首页独立的思考深度（null=跟随全局最近值） */
   const [effort, setEffort] = useState<string | null>(() => initialDraft?.reasoningEffort ?? null);
-  /** 展示与发送用的档位：本 key 草稿 → 全局最近 → 默认 */
-  const activeEffort = effort ?? lastReasoningEffort ?? null;
+  /** 展示与发送用的档位：本 key 草稿 → 全局最近 → 冷启动模型最高档（activeModel 就绪后计算，见下方） */
+  // activeEffort 在 activeModel 定义之后计算（需依赖 sessionModelId 所选模型的档位）
 
   /** 首页变体在会话创建前暂存的模型选择（发送时写入新会话） */
   const [homeModelId, setHomeModelId] = useState<number | null>(() => initialDraft?.modelId ?? null);
@@ -193,6 +206,18 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     };
     window.addEventListener("chatcoder:composer-mode", onComposerModeEvt);
     return () => window.removeEventListener("chatcoder:composer-mode", onComposerModeEvt);
+  }, []);
+
+  // plan-219: 空态首页快捷 chips 预填输入框（detail.text 非空时写入并聚焦）
+  useEffect(() => {
+    const onPrefillEvt = (e: Event) => {
+      const text = (e as CustomEvent<{ text?: string }>).detail?.text;
+      if (!text) return;
+      setInput(text);
+      taRef.current?.focus();
+    };
+    window.addEventListener("chatcoder:composer-prefill", onPrefillEvt);
+    return () => window.removeEventListener("chatcoder:composer-prefill", onPrefillEvt);
   }, []);
 
   const sendTurn = useChatStore((s) => s.sendTurn);
@@ -283,6 +308,9 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     : currentSession?.model_id ?? homeModelId ?? lastModelId ?? fallbackModelId;
   const activeModel = models.find((m) => m.id === sessionModelId) ?? null;
   const supportsReasoning = (activeModel?.reasoning_efforts?.length ?? 0) > 0;
+  /** v7: 展示/发送档位——本 key 草稿 → 全局最近 → 冷启动无历史时取所选模型最高档兜底 */
+  const activeEffort = effort ?? lastReasoningEffort
+    ?? (supportsReasoning ? maxEffortOf(activeModel?.reasoning_efforts) : null);
 
   /** 上下文占用百分比（usage.total / context_window） */
   const usagePct = useMemo(() => {
@@ -561,8 +589,10 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
 
   const changeReasoning = (e: string | null) => {
     // plan-546: 深度双写——本 key 草稿隔离 + 全局最近值（新会话/新首页默认承接）
+    // v7: 全局最近值同时落 localStorage，重启后可恢复上次选择（新建任务默认跟随全局）
     setEffort(e);
     useChatStore.setState({ lastReasoningEffort: e });
+    persistLastReasoning(e);
     setShowReasoning(false);
   };
 
@@ -667,7 +697,8 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     setAttachments([]);
     setShowSlash(false);
     setShowAt(false);
-    if (draftKey !== "new") useDraftsStore.getState().clearDraft(draftKey);
+    // v7: 发送后仅清文字/附件，保留思考深度等输入框配置——深度按会话持久化（重进/重启不丢）
+    if (draftKey !== "new") useDraftsStore.getState().clearDraftText(draftKey);
     setSending(false);
   };
 

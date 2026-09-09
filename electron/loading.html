@@ -28,7 +28,12 @@
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
   }
-  body.light .spinner { border-color: rgba(30, 34, 60, 0.12); }
+  body.light .spinner {
+    border-color: rgba(30, 34, 60, 0.12);
+    /* 上面的 border-color 简写会连 top 一起覆盖成轨道灰，导致四边同色、
+       spin 动画虽在跑但视觉完全不可见；必须显式补回 accent 弧光 */
+    border-top-color: #6366f1;
+  }
   @keyframes spin { to { transform: rotate(360deg); } }
   .text { margin-top: 16px; font-size: 13px; color: #8b8fa3; }
   body.light .text { color: #6b7080; }

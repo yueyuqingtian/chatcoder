@@ -2,7 +2,7 @@
 import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +28,9 @@ class ToolContext:
     # v3.0 (plan-88): 沙箱模式 read-only / workspace-write / danger-full-access
     # （P0：executor 审批门消费；P1/P2：进程与文件系统隔离，见 docs/sandbox-design.md）
     sandbox_mode: str = "workspace-write"
+    # v7(B): 运行时输出回调——长命令（terminal_exec 同步模式）执行期间逐帧上报增量输出，
+    # 由 agent_loop 注入闭包并广播 tool.output WS 事件（前端运行中实时展示）。
+    on_tool_output: Callable[[str], Awaitable[None]] | None = None
 
 
 @dataclass

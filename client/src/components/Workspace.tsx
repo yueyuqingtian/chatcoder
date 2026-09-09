@@ -1,14 +1,19 @@
 /** 工作区（v19）：ws-header + 聊天面板 + 导航页。
  * RightPanel 由 App.tsx 三栏骨架渲染，不再内嵌于此。
  * v19: 空态首页输入框与消息页输入框共用 ComposerCore（插件 slot: composer/empty-state）。
+ * plan-219: 空态首页增强——水印背景 + 副标题 + 快捷动作 chips + 技能 chips（对齐 ZCode/WorkBuddy）。
  */
+import { useEffect, useState } from "react";
 import type { NavKey } from "./Sidebar";
 import { ChatPanel } from "./ChatPanel";
 import { ScheduledPage, SkillsPage, McpPage } from "./NavPages";
 import { useChatStore } from "../store/chat";
 import { useI18n } from "../store/i18n";
+import { api, type SkillOut } from "../api/client";
 import { ComposerCore } from "./chat/ComposerCore";
 import { PluginSlot } from "../plugins/registry";
+import { AppLogo } from "./AppLogo";
+import { IconAlertTriangle, IconBox, IconBookOpen, IconCheckSquare, IconSearch } from "./icons";
 
 export function Workspace({ nav, onSessionStart }: {
   nav: NavKey | null;
@@ -58,15 +63,62 @@ function getGreetingKey(): string {
   return "workspace.greet_evening";
 }
 
-/** 空态首页（v19：问候语 + 共用 ComposerCore home 变体） */
+/** plan-219: 快捷动作 chips（编码场景，点击预填输入框） */
+const QUICK_ACTIONS = [
+  { icon: IconAlertTriangle, labelKey: "workspace.quick_fix", promptKey: "workspace.quick_fix_prompt" },
+  { icon: IconCheckSquare, labelKey: "workspace.quick_test", promptKey: "workspace.quick_test_prompt" },
+  { icon: IconSearch, labelKey: "workspace.quick_review", promptKey: "workspace.quick_review_prompt" },
+  { icon: IconBookOpen, labelKey: "workspace.quick_explain", promptKey: "workspace.quick_explain_prompt" },
+];
+
+/** 空态首页（plan-219：水印 + 问候语 + 副标题 + 输入卡片 + 快捷 chips + 技能 chips） */
 export function EmptyState({ onStarted }: { onStarted?: () => void }) {
   const { t } = useI18n();
+  const [skills, setSkills] = useState<SkillOut[]>([]);
+
+  // 拉取已启用技能（最多 8 个），失败静默——技能行整体不渲染
+  useEffect(() => {
+    let cancelled = false;
+    api.listSkills()
+      .then((items) => { if (!cancelled) setSkills(items.filter((s) => s.is_active).slice(0, 8)); })
+      .catch(() => { /* ignore */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  const prefill = (text: string) =>
+    window.dispatchEvent(new CustomEvent("chatcoder:composer-prefill", { detail: { text } }));
+
   return (
     <div className="empty-state">
+      <div className="empty-state-watermark" aria-hidden>
+        <AppLogo variant="outline" size={320} />
+      </div>
       <div className="empty-state-greeting">{t(getGreetingKey())}</div>
+      <div className="empty-state-subtitle">{t("workspace.subtitle")}</div>
       <div className="empty-state-card">
         <ComposerCore variant="home" onStarted={onStarted} />
       </div>
+      <div className="empty-state-quick">
+        {QUICK_ACTIONS.map((a) => (
+          <button key={a.labelKey} className="es-quick-chip" type="button"
+            onClick={() => prefill(t(a.promptKey))}>
+            <a.icon size={14} />
+            {t(a.labelKey)}
+          </button>
+        ))}
+      </div>
+      {skills.length > 0 && (
+        <div className="empty-state-skills">
+          {skills.map((s) => (
+            <button key={s.id} className="es-skill-chip" type="button"
+              title={s.description || s.name}
+              onClick={() => prefill(`$${s.name} `)}>
+              <IconBox size={13} />
+              {s.display_name || s.name}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

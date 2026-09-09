@@ -6,6 +6,34 @@ import { wsClient, globalWsClient } from "../api/ws";
 import type { ServerEventName } from "@chatcoder/shared/events";
 import type { CompactSummaryPayload } from "@chatcoder/shared/events";
 
+/** v7: 全局最近选择思考深度的 localStorage 持久化 key——重启后仍能恢复上次选择 */
+const LAST_REASONING_KEY = "chatcoder.lastReasoningEffort";
+
+function loadLastReasoning(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(LAST_REASONING_KEY);
+    return raw || null;
+  } catch {
+    return null;
+  }
+}
+
+function saveLastReasoning(value: string | null) {
+  if (typeof window === "undefined") return;
+  try {
+    if (value) localStorage.setItem(LAST_REASONING_KEY, value);
+    else localStorage.removeItem(LAST_REASONING_KEY);
+  } catch {
+    /* localStorage 不可用时静默忽略，仅影响重启后默认档位回退 */
+  }
+}
+
+/** v7: 导出——ComposerCore 在 changeReasoning/发送时持久化全局最近思考深度 */
+export function persistLastReasoning(value: string | null) {
+  saveLastReasoning(value);
+}
+
 /** 上下文占用详情（输入框圆环）。 */
 export interface UsageDetail {
   input: number;
@@ -26,6 +54,14 @@ export interface TodoItem {
   content: string;
   activeForm?: string;
   status: "pending" | "in_progress" | "completed";
+}
+
+/** v7(H): 运行中工具结果实时视图（tool.result 事件投影，含 change_stat） */
+export interface RunningToolResult {
+  ok: boolean;
+  output_preview?: string;
+  change_stat?: { path: string; additions: number; deletions: number };
+  duration_ms?: number;
 }
 
 /** v2.2: 排队输入项（运行中发送的消息进入队列，turn 完成后自动续发）。 */
@@ -227,6 +263,10 @@ interface ChatState {
   todoPersisted: boolean;
   /** v15: 子代理实时活动（agentId -> 最新工具调用摘要，来自 tool.call 事件）。 */
   agentActivity: Record<number, string>;
+  /** v7(B): 运行中命令/工具的实时输出（call_key -> 累积文本，来自 tool.output 事件） */
+  runningToolOutput: Record<string, string>;
+  /** v7(H): 运行中工具结果实时视图（call_key -> 摘要，来自 tool.result 事件，含 change_stat） */
+  runningToolResults: Record<string, RunningToolResult>;
   /** v19: 子代理元信息（agentId -> 名称/turn/任务/状态）——消息流子代理卡片数据源。 */
   subagentMeta: Record<number, { name: string; turnId: number | null; taskId: number | null; status: string }>;
   /** v19: 子代理线程消息桶（threadId=agentId -> 落库消息），右面板完整会话数据源。 */
@@ -535,6 +575,8 @@ function _resetSessionState(): Partial<ChatState> {
     todos: null,
     todoPersisted: false,
     agentActivity: {},
+    runningToolOutput: {},
+    runningToolResults: {},
     subagentMeta: {},
     subagentMessages: {},
     subagentStreams: {},
@@ -586,6 +628,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   todos: null,
   todoPersisted: false,
   agentActivity: {},
+  runningToolOutput: {},
+  runningToolResults: {},
   subagentMeta: {},
   subagentMessages: {},
   subagentStreams: {},
@@ -595,7 +639,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   injectMarks: [],
   composerBackfill: null,
   composerBrowserRefs: [],
-  lastReasoningEffort: null,
+  lastReasoningEffort: loadLastReasoning(),
   lastModelId: null,
   loading: false,
   error: null,
@@ -1265,8 +1309,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
         api.listTurns(currentSessionId),
         api.listSessionTasks(currentSessionId),
       ]);
+      // plan-1094: 回滚成功后立即清掉该 turn 及其之后的待审缓存——后端已物理删除
+      // RollbackWrite(turn_id >= turn_id)，前端缓存残留会让贴条持续显示「N 待审」
+      const nextChanges = { ...get().turnChanges };
+      for (const k of Object.keys(nextChanges)) {
+        if (Number(k) >= turnId) delete nextChanges[Number(k)];
+      }
       set({
         messages, turns, tasks,
+        turnChanges: nextChanges,
         isRunning: false, runningTurnId: null,
         // 回填原文与附件到「本会话」输入框，供用户修改后重发（v40: 按 key 隔离，不串扰首页/其它会话）
         ...(restoreToComposer && (result.user_message || restoredAttachments.length > 0)
@@ -1638,6 +1689,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
             runningTurnId: startedTurnId,
             isRunning: true,
             agentActivity: {},
+            // v7(B/H): 新 turn 清空上一轮运行中的工具实时输出/结果缓存
+            runningToolOutput: {},
+            runningToolResults: {},
             todos: null,
             todoPersisted: false,
             // v35: 新 turn 开始时清掉上一轮残留的重试状态提示
@@ -1779,12 +1833,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       case "turn.rolled_back": {
         // v11: 已回滚 turn 的变更已撤销，清掉其审核卡片
+        // plan-1094: 回滚语义为撤销该 turn 及其之后的写盘（后端删除 turn_id >= turn_id
+        // 的 RollbackWrite），缓存清理同口径 >=；该事件由后端 rollback_service 补广播
         const rollbackTurnId = Number((payload as { turn_id?: unknown }).turn_id ?? 0);
         set((s) => {
-          if (!rollbackTurnId || !s.turnChanges[rollbackTurnId]) return {};
+          if (!rollbackTurnId) return {};
           const next = { ...s.turnChanges };
-          delete next[rollbackTurnId];
-          return { turnChanges: next };
+          let changed = false;
+          for (const k of Object.keys(next)) {
+            if (Number(k) >= rollbackTurnId) {
+              delete next[Number(k)];
+              changed = true;
+            }
+          }
+          return changed ? { turnChanges: next } : {};
         });
         get().refreshMessages();
         get().refreshTurns();
@@ -1901,9 +1963,40 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
         break;
       }
-      case "tool.result":
-        // 工具调用由 message.created 落库驱动展示；此处仅触发消息刷新兜底
+      case "tool.output": {
+        // v7(B): 运行中命令/工具的实时输出增量——按 call_key 累积，ToolTree 展开时实时渲染
+        const ok = String(payload.call_key ?? "");
+        const chunk = String(payload.chunk ?? "");
+        if (ok && chunk) {
+          set((s) => ({
+            runningToolOutput: {
+              ...s.runningToolOutput,
+              [ok]: (s.runningToolOutput[ok] || "") + chunk,
+            },
+          }));
+        }
         break;
+      }
+      case "tool.result": {
+        // v7(H): 实时消费工具结果（含 change_stat/duration_ms）——运行中即可展示写操作 +N-M；
+        // 落库 message.created 后由 timeline 的权威 output/changeStat 覆盖，此处仅作过渡。
+        const rk = String(payload.call_key ?? "");
+        if (rk) {
+          const prev = get().runningToolResults[rk];
+          const nextResult: RunningToolResult = {
+            ok: Boolean(payload.ok),
+            output_preview: (typeof payload.output_preview === "string" ? payload.output_preview : prev?.output_preview),
+            change_stat: (payload.change_stat && typeof (payload.change_stat as { additions?: unknown }).additions === "number"
+              ? (payload.change_stat as RunningToolResult["change_stat"])
+              : prev?.change_stat),
+            duration_ms: (typeof payload.duration_ms === "number" ? payload.duration_ms : prev?.duration_ms),
+          };
+          set((s) => ({
+            runningToolResults: { ...s.runningToolResults, [rk]: nextResult },
+          }));
+        }
+        break;
+      }
       case "file.change": {
         // v24: 写盘实时广播——立即拉取该 turn 最新变更清单（含持久化审核状态），
         // 使输入框贴条"文件变更"在任务执行期间实时刷新。

@@ -30,11 +30,19 @@ _BINARY_SNIFF_BYTES = 8192  # 二进制判定采样字节数
 _WRITE_TOOLS = ("fs_write", "editor_apply_diff", "multi_file_edit")
 
 
-def _is_binary_path(workspace: str, rel: str, max_bytes: int = 0) -> bool:
+# plan-1085: 读取瞬时失败的重试参数（吸收 Windows 杀软/EDR 对刚写盘文件的瞬时锁）
+_BINARY_SNIFF_RETRIES = 3
+_BINARY_SNIFF_RETRY_SEC = 0.08
+
+
+def _is_binary_path(workspace: str, rel: str, max_bytes: int = 0) -> bool | None:
     """写盘文件是否为二进制或超限：是则只做 checkpoint 备份，不存文本前后内容。
 
-    判定规则：含 NUL 字节 / 非 UTF-8 解码失败 / 超过 max_bytes（0=不限制）。
-    读取失败也视为二进制（走 checkpoint 二进制兜底，避免损坏文件）。
+    判定规则：含 NUL 字节 / 非 UTF-8 解码失败 / 超过 max_bytes（0=不限制）→ True。
+    plan-1085 三态：读取 OSError（含 PermissionError/共享冲突，Windows 杀软/EDR
+    会对刚写盘文件短暂持有扫描句柄）先短重试退避；重试仍失败返回 None（未知/
+    读取失败）并 warning 留痕，不再误判为二进制——由调用方（agent_loop）用内存
+    before/工具返回 new_content 兜底统计与记录。仅基于内容证据才判二进制。
     """
     p = _fs_path(workspace, rel)
     try:
@@ -42,14 +50,28 @@ def _is_binary_path(workspace: str, rel: str, max_bytes: int = 0) -> bool:
             return False
         if max_bytes > 0 and p.stat().st_size > max_bytes:
             return True
-        with open(p, "rb") as f:
-            sample = f.read(_BINARY_SNIFF_BYTES)
-        if b"\x00" in sample:
-            return True
-        sample.decode("utf-8")
-        return False
-    except (OSError, UnicodeDecodeError):
-        return True
+    except OSError as e:
+        logger.warning("[rollback] 文件 stat 失败(判未知) %s: %s", rel, e)
+        return None
+    last_err: OSError | None = None
+    for attempt in range(_BINARY_SNIFF_RETRIES):
+        try:
+            with open(p, "rb") as f:
+                sample = f.read(_BINARY_SNIFF_BYTES)
+            if b"\x00" in sample:
+                return True
+            sample.decode("utf-8")
+            return False
+        except UnicodeDecodeError:
+            return True  # 内容证据：非 UTF-8
+        except OSError as e:
+            last_err = e
+            if attempt + 1 < _BINARY_SNIFF_RETRIES:
+                _time.sleep(_BINARY_SNIFF_RETRY_SEC)
+    logger.warning(
+        "[rollback] 文件读取失败(判未知而非二进制) %s: %s", rel, last_err,
+    )
+    return None
 
 
 # ── git 基础操作 ──
@@ -451,6 +473,13 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
 
     await run_write_locked(_persist, label=f"rollback.persist.{turn_id}")
 
+    # plan-1094: 广播回滚完成——前端据此清除该 turn 及其之后的待审缓存。
+    # 历史上该事件仅在 schemas 登记、从未广播，导致回滚后审核贴条残留。
+    await broadcast(snap.session_id, {
+        "event": "turn.rolled_back",
+        "payload": {"turn_id": turn_id, "session_id": snap.session_id},
+    })
+
     # 5. 审计
     from app.services import audit_service
     await audit_service.log(db, action="rollback", session_id=snap.session_id,
@@ -813,6 +842,20 @@ async def get_file_diff(db: AsyncSession, *, session_id: int, turn_id: int,
         return None
 
     if writes[0].binary:
+        # plan-1085: 历史污染轮降级——同 turn 同文件存在带内容的 bin=0 记录时，
+        # 用其 old_content 作 before、当前磁盘作 after 返回文本 diff，避免瞬时
+        # 读取失败误判导致整轮展示丢失；真二进制文件仍走原 reason 分支。
+        _fb = next((w for w in writes if not w.binary and w.old_content is not None), None)
+        _after_now = _read_file_text(workspace, path)
+        if _fb is not None and _after_now is not None:
+            _add_f, _del_f = _diff_stats(_fb.old_content, _after_now)
+            return {
+                "path": path,
+                "before": _truncate_lines(_fb.old_content),
+                "after": _truncate_lines(_after_now),
+                "truncated": (_add_f + _del_f) > _MAX_DIFF_CHANGE_LINES,
+                "reason": "该轮部分编辑文件读取失败，已降级展示最近可用版本 diff",
+            }
         # 二进制/大文件：不展示文本 diff，提示按写盘前备份恢复
         return {
             "path": path,
@@ -949,15 +992,24 @@ def _read_file_text(workspace: str, rel: str, max_bytes: int = 0) -> str | None:
     """读取文本文件内容。
 
     max_bytes>0 且文件超过该大小时返回 None（调用方视为超限走 checkpoint 兜底）。
+    plan-1085: 读取 OSError（杀软/EDR 瞬时锁）短重试退避后再放弃，
+    减少瞬时读取失败导致的 diff/统计丢失。
     """
     try:
         p = _fs_path(workspace, rel)
         if p.exists() and p.is_file():
             if max_bytes > 0 and p.stat().st_size > max_bytes:
                 return None
-            return p.read_text(encoding="utf-8", errors="replace")
+        else:
+            return None
     except OSError:
-        pass
+        return None
+    for attempt in range(_BINARY_SNIFF_RETRIES):
+        try:
+            return p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            if attempt + 1 < _BINARY_SNIFF_RETRIES:
+                _time.sleep(_BINARY_SNIFF_RETRY_SEC)
     return None
 
 

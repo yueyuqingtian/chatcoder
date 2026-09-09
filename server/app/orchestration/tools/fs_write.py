@@ -7,6 +7,9 @@ from typing import Any
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 from app.orchestration.tools.safe_path import safe_resolve_parent
 
+# plan-1085: data 带回写入内容上限（对齐 agent_loop.MAX_TOOL_OUTPUT_CHARS）；超限不带，走磁盘读取兜底路径
+_NEW_CONTENT_MAX_CHARS = 16000
+
 
 class FsWriteTool(Tool):
     name = "fs_write"
@@ -75,8 +78,12 @@ class FsWriteTool(Tool):
         except ValueError:
             display = str(target)
 
+        # plan-1085: data 带回写入内容，供 agent_loop 磁盘读取失败时兜底统计/记录（不进模型上下文）
+        _data: dict[str, Any] = {"path": display, "bytes": len(content.encode("utf-8"))}
+        if len(content) <= _NEW_CONTENT_MAX_CHARS:
+            _data["new_content"] = content
         return ToolResult(
             ok=True,
             output=f"已写入 {len(content)} 字符到 {display}",
-            data={"path": display, "bytes": len(content.encode("utf-8"))},
+            data=_data,
         )

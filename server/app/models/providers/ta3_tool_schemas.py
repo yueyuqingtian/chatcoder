@@ -233,9 +233,30 @@ _GOAL: list[dict] = [
     }),
 ]
 
+# ── ask（通用提问，当前项目补充——需求澄清，四种模式均可用）──
+_ASK: list[dict] = [
+    _f("AskUser", "向用户发起结构化提问（用于需求澄清）。"
+        "当任务的意图、范围或验收标准不明确、存在多种可行设计、或选择取决于用户偏好时，"
+        "在动手实现之前使用此工具——避免猜测用户意图导致方向性返工。"
+        "能从代码库/文档/会话历史中查到的事实不要问（先自行探索）；只问真正的决策点。"
+        "问题必须简洁、选项互斥且覆盖主要可能，相关的问题合并到一次调用中（最多 4 个），"
+        "不要反复打断用户；allow_custom 为 true 时用户可自由输入选项之外的答案。", {
+        "type": "object", "required": ["questions"],
+        "properties": {
+            "questions": {"type": "array", "description": "问题列表（1-4 个）。每个问题包含 question 文本与 options 选项数组；allow_custom 为 true 时用户可自由输入答案。",
+                          "items": {"type": "object", "required": ["question"],
+                                    "properties": {
+                                        "question": {"type": "string"},
+                                        "options": {"type": "array", "items": {"type": "string"}},
+                                        "allow_custom": {"type": "boolean"},
+                                    }}},
+        },
+    }),
+]
+
 TA3_NATIVE_SCHEMAS: dict[str, dict] = {
     s["function"]["name"]: s for s in [
-        *_CORE, *_EDIT, *_TASK, *_WEB_SEARCH, *_ATTACHMENT, *_BACKGROUND, *_GOAL,
+        *_CORE, *_EDIT, *_TASK, *_WEB_SEARCH, *_ATTACHMENT, *_BACKGROUND, *_GOAL, *_ASK,
     ]
 }
 
