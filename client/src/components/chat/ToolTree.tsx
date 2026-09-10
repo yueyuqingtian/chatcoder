@@ -167,7 +167,12 @@ function InlineDiff({ turnId, path, liveArgContent }: { turnId: number | null; p
     api.getFileDiff(turnId, path)
       .then((d) => {
         if (cancelled) return;
-        setState({ kind: "ok", lines: simpleLineDiff(d.before ?? "", d.after ?? ""), truncated: d.truncated });
+        // 行级 diff 优先（服务端 SequenceMatcher 预计算，与徽标 +N -M 同源一致，
+        // 避免大文件本地 LCS 命中 1600 行阈值退化为全量 -/+）；无 lines 时回退本地 LCS
+        const rendered = d.lines && d.lines.length > 0
+          ? d.lines.map((l) => ({ type: l.type, text: l.text }))
+          : simpleLineDiff(d.before ?? "", d.after ?? "");
+        setState({ kind: "ok", lines: rendered, truncated: d.truncated });
       })
       .catch((e) => {
         if (cancelled) return;

@@ -369,6 +369,15 @@ export interface FileChangeOut {
   reviewed: boolean;
 }
 
+/** 行级 diff（服务端用 SequenceMatcher 预计算，保证与 +N -M 徽标同源一致）。
+ * type: add=新增 del=删除 ctx=上下文；old_no/new_no 为变更前后行号（1-based，ctx 两值相同）。 */
+export interface DiffLine {
+  type: "add" | "del" | "ctx";
+  text: string;
+  old_no?: number | null;
+  new_no?: number | null;
+}
+
 /** 变更审核：单文件 diff（按需拉取，大文件截断）。 */
 export interface FileDiffOut {
   path: string;
@@ -380,6 +389,8 @@ export interface FileDiffOut {
   truncated: boolean;
   /** 二进制/大文件说明（不展示文本 diff） */
   reason?: string | null;
+  /** 行级 diff（服务端预计算，优先于 before/after 本地 LCS） */
+  lines?: DiffLine[] | null;
 }
 
 // ── WebSocket 事件 ──

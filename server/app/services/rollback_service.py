@@ -763,6 +763,77 @@ def _truncate_lines(text: str | None, limit: int = _MAX_DIFF_CHANGE_LINES) -> st
     return "\n".join(lines[:limit]) + "\n…(内容过长，已截断)"
 
 
+def _diff_lines(before: str | None, after: str | None, context: int = 3) -> list[dict]:
+    """行级 diff（SequenceMatcher opcodes，与 _diff_stats / _line_change_stat 同源算法）。
+
+    仅保留变更块与其前后各 context 行，返回 [{type, text, old_no, new_no}]：
+    - type: "add"（新增）/ "del"（删除）/ "ctx"（上下文）
+    - old_no / new_no 为 1-based 行号（add 无 old_no，del 无 new_no，ctx 两值相同）
+    全量替换/新增/删除文件（a 或 b 为空）时同样适用。
+    """
+    b = (before or "").splitlines()
+    a = (after or "").splitlines()
+    sm = difflib.SequenceMatcher(None, b, a)
+    opcodes = sm.get_opcodes()
+    n = len(opcodes)
+    out: list[dict] = []
+    for k, (tag, i1, i2, j1, j2) in enumerate(opcodes):
+        if tag == "equal":
+            continue
+        # 前置上下文：取前一个 equal 块尾部 context 行
+        if k > 0 and opcodes[k - 1][0] == "equal":
+            _pi1, _pi2 = opcodes[k - 1][1], opcodes[k - 1][2]
+            start = max(_pi1, _pi2 - context)
+            for t in range(start, _pi2):
+                out.append({"type": "ctx", "text": b[t], "old_no": t + 1, "new_no": t + 1})
+        # 变更行
+        if tag == "replace":
+            for t in range(i1, i2):
+                out.append({"type": "del", "text": b[t], "old_no": t + 1, "new_no": None})
+            for t in range(j1, j2):
+                out.append({"type": "add", "text": a[t], "old_no": None, "new_no": t + 1})
+        elif tag == "delete":
+            for t in range(i1, i2):
+                out.append({"type": "del", "text": b[t], "old_no": t + 1, "new_no": None})
+        elif tag == "insert":
+            for t in range(j1, j2):
+                out.append({"type": "add", "text": a[t], "old_no": None, "new_no": t + 1})
+        # 后置上下文：取后一个 equal 块头部 context 行
+        if k + 1 < n and opcodes[k + 1][0] == "equal":
+            _ni1, _ni2 = opcodes[k + 1][1], opcodes[k + 1][2]
+            end = min(_ni2, _ni1 + context)
+            for t in range(_ni1, end):
+                out.append({"type": "ctx", "text": b[t], "old_no": t + 1, "new_no": t + 1})
+    return out
+
+
+def _truncate_window(before: str | None, after: str | None, context: int = 50) -> tuple[str | None, str | None]:
+    """按变更窗口截断 before/after（覆盖全部变更区，前后各 context 行）。
+
+    用于大文本 diff 展示（Monaco DiffEditor 直接吃 before/after），避免整文件下发
+    导致前端前端 simpleLineDiff 命中 1600 行阈值退化为全量 -/+。
+    窗口覆盖全文件或前后相同（无变更）时返回原文本。
+    """
+    b = (before or "").splitlines()
+    a = (after or "").splitlines()
+    if b == a:
+        return before, after
+    sm = difflib.SequenceMatcher(None, b, a, autojunk=False)
+    changes = [(i1, i2, j1, j2) for tag, i1, i2, j1, j2 in sm.get_opcodes() if tag != "equal"]
+    if not changes:
+        return before, after
+    b_lo = max(0, min(c[0] for c in changes) - context)
+    b_hi = min(len(b), max(c[1] for c in changes) + context)
+    a_lo = max(0, min(c[2] for c in changes) - context)
+    a_hi = min(len(a), max(c[3] for c in changes) + context)
+    # 完整覆盖 → 原样返回
+    if b_lo <= 0 and b_hi >= len(b) and a_lo <= 0 and a_hi >= len(a):
+        return before, after
+    b_slice = "\n".join(b[b_lo:b_hi])
+    a_slice = "\n".join(a[a_lo:a_hi])
+    return b_slice, a_slice
+
+
 async def list_turn_changes(db: AsyncSession, *, session_id: int, turn_id: int,
                             workspace: str) -> list[dict]:
     """聚合该 turn 的全部写盘记录为变更清单（不含文件全文）。
@@ -849,12 +920,14 @@ async def get_file_diff(db: AsyncSession, *, session_id: int, turn_id: int,
         _after_now = _read_file_text(workspace, path)
         if _fb is not None and _after_now is not None:
             _add_f, _del_f = _diff_stats(_fb.old_content, _after_now)
+            b_disp, a_disp = _truncate_window(_fb.old_content, _after_now)
             return {
                 "path": path,
-                "before": _truncate_lines(_fb.old_content),
-                "after": _truncate_lines(_after_now),
+                "before": b_disp,
+                "after": a_disp,
                 "truncated": (_add_f + _del_f) > _MAX_DIFF_CHANGE_LINES,
                 "reason": "该轮部分编辑文件读取失败，已降级展示最近可用版本 diff",
+                "lines": _diff_lines(_fb.old_content, _after_now),
             }
         # 二进制/大文件：不展示文本 diff，提示按写盘前备份恢复
         return {
@@ -863,17 +936,20 @@ async def get_file_diff(db: AsyncSession, *, session_id: int, turn_id: int,
             "after": None,
             "truncated": False,
             "reason": "二进制/大文件，不展示文本 diff，回滚按写盘前备份恢复",
+            "lines": None,
         }
 
     before = writes[0].old_content
     after = _read_file_text(workspace, path)
     add, dele = _diff_stats(before, after)
     truncated = (add + dele) > _MAX_DIFF_CHANGE_LINES
+    b_disp, a_disp = _truncate_window(before, after)
     return {
         "path": path,
-        "before": _truncate_lines(before),
-        "after": _truncate_lines(after),
+        "before": b_disp,
+        "after": a_disp,
         "truncated": truncated,
+        "lines": _diff_lines(before, after),
     }
 
 

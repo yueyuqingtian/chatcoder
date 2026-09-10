@@ -8,7 +8,8 @@ import "katex/dist/katex.min.css";
 import { IconCopy, IconCheck } from "./icons";
 import { usePanelStore } from "../store/panel";
 import { useChatStore } from "../store/chat";
-import { api } from "../api/client";
+import { api, resolveFileUrl } from "../api/client";
+import { openGallery } from "../store/gallery";
 
 /** 问题2: 相对链接存在性校验缓存（path → 存在且为文件） */
 const statCache = new Map<string, boolean>();
@@ -129,6 +130,21 @@ export const markdownComponents: Components = {
       return <a className="md-a" href={href} target="_blank" rel="noopener noreferrer">{children}</a>;
     }
     return <FileLink href={href}>{children}</FileLink>;
+  },
+  /** 会话 229: markdown 图片点击打开全局查看器（与消息附件/输入框附件共用） */
+  img({ src, alt }) {
+    const url = src ? resolveFileUrl(src) : "";
+    return (
+      <img
+        className="md-img"
+        src={url}
+        alt={alt || ""}
+        loading="lazy"
+        onClick={() => {
+          if (url) openGallery([{ url, name: alt || "image" }], 0);
+        }}
+      />
+    );
   },
   blockquote({ children }) { return <blockquote className="md-blockquote">{children}</blockquote>; },
   table({ children }) { return <table className="md-table">{children}</table>; },

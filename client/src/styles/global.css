@@ -277,6 +277,8 @@ a { color: var(--accent); text-decoration: none; }
 .empty-state-greeting { font-size: 26px; font-weight: 600; color: var(--text-1); letter-spacing: -0.3px; }
 .empty-state-subtitle { font-size: 14px; color: var(--text-3); margin-top: -12px; }
 .empty-state-card { width: min(720px, 90%); display: flex; flex-direction: column; border-radius: 16px; background: var(--bg-elevated); border: 1px solid var(--border); border-top: none; box-shadow: 0 2px 8px rgba(0,0,0,0.04); overflow: visible; }
+/* 修复：项目下拉菜单在首页向下溢出卡片时须盖住下方快捷/技能 chips（同为 z-index:1 兄弟，DOM 靠后者被绘制在上层） */
+.empty-state > .empty-state-card { z-index: 2; }
 /* plan-219: 快捷动作 chips（ZCode 风格） */
 .empty-state-quick { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: -4px; }
 .es-quick-chip {
@@ -3290,3 +3292,79 @@ body.panel-dragging .app-pane { transition: none; }
   border: none; background: transparent;
 }
 .compact-card.compacting .thinking-block-breath { margin-left: auto; }
+
+/* ══════════ 会话 229：图片展示 / 标签化输入 / 全局图片查看器 ══════════ */
+
+/* 1) 消息内图片缩略图网格（会话 228-1142: 渲染在用户气泡外部、靠右；下方 6px 间距衔接气泡） */
+.msg-image-grid { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 6px; max-width: 100%; }
+.msg-image-thumb {
+  width: 150px; height: 110px; object-fit: cover; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--bg-muted);
+  cursor: zoom-in; transition: border-color var(--dur-fast), transform var(--dur-fast);
+}
+.msg-image-thumb:hover { border-color: var(--text-3); transform: translateY(-1px); }
+
+/* 2) Markdown 图片（点击进全局查看器） */
+.md-img { max-width: 100%; border-radius: 6px; cursor: zoom-in; }
+
+/* 3) 输入框标签高亮层：$技能 / @文件 以彩色标签展示（textarea 文字透明，本层绘制） */
+.composer-input-wrap { position: relative; display: flex; flex-direction: column; min-width: 0; }
+.composer-input-tokens {
+  position: absolute; inset: 0; box-sizing: border-box;
+  padding: 4px 4px 6px; font-size: 13px; line-height: 1.5; font-family: inherit;
+  color: var(--text-1);
+  white-space: pre-wrap; overflow-wrap: break-word;
+  pointer-events: none; user-select: none; overflow: hidden; z-index: 0;
+}
+.composer-input.tokenized { position: relative; z-index: 1; color: transparent; caret-color: var(--text-1); }
+.composer-input.tokenized::placeholder { color: transparent; }
+.composer-input.tokenized::selection { background: color-mix(in srgb, var(--accent) 32%, transparent); }
+.tok-placeholder { color: var(--text-3); }
+.tok-chip {
+  /* 会话 228-1142: 等宽化——不用 inline-flex/padding/margin/图标，宽度与 textarea 文本完全一致，光标精确对齐 */
+  display: inline; padding: 0; margin: 0;
+  border-radius: 4px; font-weight: 500;
+}
+.tok-chip.tok-skill { color: #8b5cf6; background: color-mix(in srgb, #8b5cf6 15%, transparent); }
+.tok-chip.tok-file { color: #3b82f6; background: color-mix(in srgb, #3b82f6 13%, transparent); }
+/* 首页变体输入框字号/内边距不同，标签层需同步（对齐 .empty-state-card > .composer-home .composer-input） */
+.empty-state-card > .composer-home .composer-input-tokens { padding: 10px 4px 8px; font-size: 14px; }
+
+/* 4) 全局图片查看器（ImageGallery）：左右切换 / 底部缩放条 / 右上角下载与关闭 */
+.gallery-overlay { position: fixed; inset: 0; z-index: 9999; background: rgba(0, 0, 0, 0.86); }
+.gallery-topbar { position: absolute; top: 14px; right: 16px; display: flex; align-items: center; gap: 8px; z-index: 2; }
+.gallery-btn {
+  width: 34px; height: 34px; display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; border: none; background: rgba(255, 255, 255, 0.12); color: #fff;
+  cursor: pointer; transition: background var(--dur-fast);
+}
+.gallery-btn:hover { background: rgba(255, 255, 255, 0.26); }
+.gallery-stage { position: absolute; inset: 0; display: flex; overflow: hidden; }
+.gallery-stage.zoomed { overflow: auto; cursor: grab; }
+.gallery-stage.zoomed.dragging { cursor: grabbing; }
+.gallery-img { margin: auto; display: block; user-select: none; }
+.gallery-nav {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  width: 42px; height: 42px; display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; border: none; background: rgba(255, 255, 255, 0.14); color: #fff;
+  cursor: pointer; z-index: 2; transition: background var(--dur-fast);
+}
+.gallery-nav:hover { background: rgba(255, 255, 255, 0.3); }
+.gallery-nav.prev { left: 18px; }
+.gallery-nav.next { right: 18px; }
+.gallery-zoom-bar {
+  position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 2px; padding: 4px 8px; border-radius: 999px;
+  background: rgba(28, 28, 30, 0.85); color: #fff; z-index: 2;
+}
+.gallery-zoom-btn {
+  width: 26px; height: 26px; display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; border: none; background: transparent; color: #fff; cursor: pointer;
+}
+.gallery-zoom-btn:hover { background: rgba(255, 255, 255, 0.16); }
+.gallery-zoom-pct {
+  min-width: 54px; padding: 0 4px; border: none; background: transparent;
+  color: #fff; font-size: 12px; cursor: pointer;
+}
+.gallery-zoom-pct:hover { color: var(--accent); }
+.gallery-counter { position: absolute; bottom: 24px; right: 22px; color: rgba(255, 255, 255, 0.75); font-size: 12px; z-index: 2; }

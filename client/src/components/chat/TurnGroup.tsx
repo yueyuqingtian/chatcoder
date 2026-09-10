@@ -19,7 +19,7 @@ import type { TimelineEntry, TurnItem } from "./timeline";
 import { msgText } from "./timeline";
 import { useChatStore } from "../../store/chat";
 import { parseUtc } from "../../utils/time";
-import { AttachmentCard, attachmentsOf } from "./AttachmentCard";
+import { MessageImageGrid, MessageFileCards, TokenText, attachmentsOf } from "./AttachmentCard";
 
 /** 「已工作 X 分 X 秒」计时条与工作过程折叠切换（对齐图 8） */
 function WorkTimer({
@@ -199,11 +199,13 @@ export const TurnGroup = memo(function TurnGroup({
       case "user":
         return (
           <div key={i} className="turn-item turn-item-user">
+            {/* 会话 228-1142: 图片网格在气泡外部、靠右（对齐参考图 1）；文件卡与文本留在气泡内 */}
+            <MessageImageGrid atts={attachmentsOf(item.msg.content)} />
             <div className="turn-user-bubble">
-              {msgText(item.msg.content) && <div className="turn-user-text">{msgText(item.msg.content)}</div>}
-              {attachmentsOf(item.msg.content).map((a) => (
-                <AttachmentCard key={a.file_id || a.url} att={a} />
-              ))}
+              <MessageFileCards atts={attachmentsOf(item.msg.content)} />
+              {msgText(item.msg.content) && (
+                <div className="turn-user-text"><TokenText text={msgText(item.msg.content)} /></div>
+              )}
             </div>
           </div>
         );
@@ -323,13 +325,13 @@ export const TurnGroup = memo(function TurnGroup({
         if (!firstUser || firstUser.kind !== "user") return null;
         return (
           <div className="turn-item turn-item-user">
+            {/* 会话 228-1142: 图片网格在气泡外部、靠右（对齐参考图 1）；文件卡与文本留在气泡内 */}
+            <MessageImageGrid atts={attachmentsOf(firstUser.msg.content)} />
             <div className="turn-user-bubble">
+              <MessageFileCards atts={attachmentsOf(firstUser.msg.content)} />
               {msgText(firstUser.msg.content) && (
-                <div className="turn-user-text">{msgText(firstUser.msg.content)}</div>
+                <div className="turn-user-text"><TokenText text={msgText(firstUser.msg.content)} /></div>
               )}
-              {attachmentsOf(firstUser.msg.content).map((a) => (
-                <AttachmentCard key={a.file_id || a.url} att={a} />
-              ))}
             </div>
             {!isRunning && (
               <MessageActions entry={entry} onRollback={onRollback} scope="user" actions={actions} />

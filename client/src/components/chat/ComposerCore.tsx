@@ -33,13 +33,16 @@ import {
   IconCode,
   IconTerminal,
   IconClipboard,
+  IconBox,
 } from "../icons";
 import { Modal } from "../Modal";
 import { ModelPicker } from "./ModelPicker";
 import { useChatStore, persistLastReasoning, type UsageDetail } from "../../store/chat";
 import { useDraftsStore } from "../../store/drafts";
 import { useI18n } from "../../store/i18n";
-import { api, resolveFileUrl, type AttachmentInfo, type TreeNode } from "../../api/client";
+import { api, resolveFileUrl, type AttachmentInfo, type SkillOut, type TreeNode } from "../../api/client";
+import { tokenize, tokenDisplayName, tokenRangeAt } from "../../utils/tokens";
+import { openGallery } from "../../store/gallery";
 
 /** v7: 思考深度档位高低序——与 ModelsPanel REASONING_OPTS 对齐，用于取模型最高档兜底 */
 const EFFORT_RANK: Record<string, number> = {
@@ -67,6 +70,8 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   const isHome = variant === "home";
   const taRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  /** 会话 229: 标签高亮层（与 textarea 同步滚动，见 .composer-input-tokens） */
+  const tokenLayerRef = useRef<HTMLDivElement>(null);
 
   const isRunning = useChatStore((s) => s.isRunning);
   const currentSessionId = useChatStore((s) => s.currentSessionId);
@@ -220,6 +225,15 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     return () => window.removeEventListener("chatcoder:composer-prefill", onPrefillEvt);
   }, []);
 
+  // 会话 229: 拉取可用技能（失败静默——技能菜单/分区整体不渲染）
+  useEffect(() => {
+    let cancelled = false;
+    api.listSkills()
+      .then((items) => { if (!cancelled) setSkills(items.filter((s) => s.is_active)); })
+      .catch(() => { /* ignore */ });
+    return () => { cancelled = true; };
+  }, []);
+
   const sendTurn = useChatStore((s) => s.sendTurn);
   const cancelTurn = useChatStore((s) => s.cancelTurn);
   const updateQueuedInput = useChatStore((s) => s.updateQueuedInput);
@@ -233,7 +247,6 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
 
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
-  const [preview, setPreview] = useState<AttachmentInfo | null>(null);
   const [showModels, setShowModels] = useState(false);
   const [showReasoning, setShowReasoning] = useState(false);
   const [showSlash, setShowSlash] = useState(false);
@@ -247,6 +260,11 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   const [atQuery, setAtQuery] = useState("");
   const [atFiles, setAtFiles] = useState<string[]>([]);
   const [atLoading, setAtLoading] = useState(false);
+  // 会话 229: 技能列表（/ 菜单技能区 + $ 补全菜单共用）
+  const [skills, setSkills] = useState<SkillOut[]>([]);
+  const [showSkills, setShowSkills] = useState(false);
+  const [skillIndex, setSkillIndex] = useState(0);
+  const [skillQuery, setSkillQuery] = useState("");
   const recognitionRef = useRef<any>(null);
 
   const prevApprovalRef = useRef(pendingApproval);
@@ -339,7 +357,36 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     return slashCommands.filter((s) => s.cmd.slice(1).toLowerCase().includes(query));
   }, [input, slashCommands]);
 
-  const slashVisible = showSlash && filteredSlash.length > 0;
+  /** 会话 229: / 菜单技能区（与快捷命令共用 "/" 前缀过滤词） */
+  const filteredSlashSkills = useMemo(() => {
+    const match = input.match(/(?:^|\s)\/([^\s]*)$/);
+    if (!match) return [];
+    const q = match[1].toLowerCase();
+    if (!q) return skills;
+    return skills.filter(
+      (s) => s.name.toLowerCase().includes(q) || (s.display_name ?? "").toLowerCase().includes(q)
+    );
+  }, [input, skills]);
+
+  /** 会话 229: $ 补全菜单技能过滤（仅技能） */
+  const filteredSkills = useMemo(() => {
+    const q = skillQuery;
+    if (!q) return skills;
+    return skills.filter(
+      (s) => s.name.toLowerCase().includes(q) || (s.display_name ?? "").toLowerCase().includes(q)
+    );
+  }, [skills, skillQuery]);
+
+  /** 会话 229: / 菜单扁平项（命令 + 技能，键盘导航共用同一索引） */
+  const slashItems = useMemo(
+    () => [
+      ...filteredSlash.map((s) => ({ kind: "cmd" as const, key: s.cmd })),
+      ...filteredSlashSkills.map((s) => ({ kind: "skill" as const, key: s.name })),
+    ],
+    [filteredSlash, filteredSlashSkills]
+  );
+
+  const slashVisible = showSlash && slashItems.length > 0;
 
   /** 问题13: @ 文件搜索——按查询词走全量文件搜索接口（无深度/数量限制），防抖 250ms */
   const atDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -429,6 +476,15 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     }
   };
 
+  /** 会话 229: 打开输入框图片附件的全局查看器（多图可左右切换；非图片新窗口打开） */
+  const openAttachmentPreview = (att: AttachmentInfo) => {
+    const imgs = attachments.filter((a) => a.type === "image" || a.mime_type.startsWith("image/"));
+    if (imgs.length === 0) return;
+    const list = imgs.map((a) => ({ url: resolveFileUrl(a.url), name: a.filename, size: a.size }));
+    const idx = imgs.indexOf(att);
+    openGallery(list, idx < 0 ? 0 : idx);
+  };
+
   const addFiles = useCallback(
     async (fileList: FileList | File[]) => {
       const arr = Array.from(fileList);
@@ -483,6 +539,34 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     },
     [addFiles]
   );
+
+  /** 会话 229: 把输入框中触发菜单的前缀片段替换为插入文本（保留前导空白，光标落在插入文本后） */
+  const insertMenuItem = (pattern: RegExp, build: (ws: string) => string) => {
+    const pos = taRef.current?.selectionStart ?? input.length;
+    const before = input.slice(0, pos).replace(pattern, (_m: string, ws?: string) => build(ws ?? ""));
+    const next = before + input.slice(pos);
+    setInput(next);
+    setTimeout(() => {
+      if (taRef.current) {
+        taRef.current.focus();
+        taRef.current.selectionStart = taRef.current.selectionEnd = before.length;
+        resizeTextarea(taRef.current);
+      }
+    }, 0);
+  };
+
+  /** 会话 229: 选择技能（/ 菜单或 $ 菜单）→ 把触发片段替换为 `$name ` */
+  const insertSkill = (name: string, fromSlash: boolean) => {
+    insertMenuItem(fromSlash ? /(^|\s)\/[^\s]*$/ : /(^|\s)\$[^\s]*$/, (ws) => `${ws}$${name} `);
+    setShowSlash(false);
+    setShowSkills(false);
+  };
+
+  /** 会话 229: / 菜单项选择（命令走原逻辑，技能走插入） */
+  const pickSlashItem = (item: { kind: "cmd" | "skill"; key: string }) => {
+    if (item.kind === "cmd") pickSlash(item.key);
+    else insertSkill(item.key, true);
+  };
 
   const pickSlash = (cmd: string) => {
     if (cmd === "/clear") {
@@ -714,6 +798,13 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   // 是否处于 AI 结构化提问阶段（直接替换输入框主体）
   const isQuestionMode = !isHome && pendingApproval?.detail?.kind === "question";
 
+  /** 会话 229: 输入框 placeholder（textarea 文字透明后由标签层渲染，保持视觉一致） */
+  const placeholderText = isHome
+    ? t("composer.placeholder_home")
+    : pendingPlan
+    ? t("composer.placeholder_plan")
+    : t("composer.placeholder_followup");
+
   return (
     <div
       className={`composer${dragOver ? " drag-over" : ""}${isHome ? " composer-home" : ""}`}
@@ -860,12 +951,19 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                       src={resolveFileUrl(att.url)}
                       alt={att.filename}
                       className="attach-chip-thumb"
-                      onClick={() => setPreview(att)}
+                      onClick={() => openAttachmentPreview(att)}
                     />
                   ) : (
                     <IconPaperclip size={11} />
                   )}
-                  <span className="attach-chip-name" onClick={() => setPreview(att)}>
+                  <span
+                    className="attach-chip-name"
+                    onClick={() =>
+                      att.type === "image"
+                        ? openAttachmentPreview(att)
+                        : window.open(resolveFileUrl(att.url), "_blank", "noopener")
+                    }
+                  >
                     {att.filename}
                   </span>
                   <button
@@ -946,23 +1044,37 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
               ))}
             </div>
           )}
-          <textarea
-            ref={taRef}
-            className="composer-input"
-            placeholder={
-              isHome
-                ? t("composer.placeholder_home")
-                : pendingPlan
-                ? t("composer.placeholder_plan")
-                : t("composer.placeholder_followup")
-            }
-            value={input}
-            rows={1}
-            onPaste={handlePaste}
-            onWheel={handleTextareaWheel}
-            onMouseDown={handleTextareaMouseDown}
-            onInput={(e) => resizeTextarea(e.currentTarget)}
-            onChange={(e) => {
+          <div className="composer-input-wrap">
+            <div className="composer-input-tokens" aria-hidden ref={tokenLayerRef}>
+              {input
+                ? tokenize(input).map((tk, i) =>
+                    tk.type === "text" ? (
+                      <span key={i} className="tok-text">{tk.text}</span>
+                    ) : (
+                      // 会话 228-1142: 标签不放图标——标签层宽度必须与 textarea 文本等宽，光标才能精确对齐
+                      <span key={i} className={`tok-chip ${tk.type === "skill" ? "tok-skill" : "tok-file"}`}>
+                        {tokenDisplayName(tk)}
+                      </span>
+                    ),
+                  )
+                : <span className="tok-placeholder">{placeholderText}</span>}
+            </div>
+            <textarea
+              ref={taRef}
+              className="composer-input tokenized"
+              placeholder={placeholderText}
+              spellCheck={false}
+              value={input}
+              rows={1}
+              onPaste={handlePaste}
+              onWheel={handleTextareaWheel}
+              onMouseDown={handleTextareaMouseDown}
+              onInput={(e) => resizeTextarea(e.currentTarget)}
+              onScroll={(e) => {
+                const layer = tokenLayerRef.current;
+                if (layer) layer.scrollTop = e.currentTarget.scrollTop;
+              }}
+              onChange={(e) => {
               const v = e.target.value;
               setInput(v);
               const pos = e.target.selectionStart;
@@ -982,27 +1094,82 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                 setShowAt(false);
                 setAtQuery("");
               }
+              // 会话 229: $ 技能补全菜单（与 /、@ 菜单互斥）
+              const skillMatch = v.slice(0, pos).match(/\$([^\s]*)$/);
+              if (skillMatch) {
+                setShowSkills(true);
+                setSkillQuery(skillMatch[1].toLowerCase());
+                setSkillIndex(0);
+                setShowSlash(false);
+                setShowAt(false);
+              } else {
+                setShowSkills(false);
+                setSkillQuery("");
+              }
             }}
             onKeyDown={(e) => {
+              // 会话 228-1142: Backspace/Delete 在标签内/末尾时整体删除标签（光标在标签起点时不拦截）
+              if ((e.key === "Backspace" || e.key === "Delete") && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+                const ta = taRef.current;
+                if (ta && ta.selectionStart === ta.selectionEnd) {
+                  const pos = ta.selectionStart;
+                  const range = e.key === "Backspace" ? tokenRangeAt(input, pos) : tokenRangeAt(input, pos + 1);
+                  const hit = range && (e.key === "Backspace" ? pos > range.start : pos < range.end);
+                  if (range && hit) {
+                    e.preventDefault();
+                    const next = input.slice(0, range.start) + input.slice(range.end);
+                    setInput(next);
+                    setTimeout(() => {
+                      ta.selectionStart = ta.selectionEnd = range.start;
+                      resizeTextarea(ta);
+                    }, 0);
+                    return;
+                  }
+                }
+              }
               if (slashVisible) {
                 if (e.key === "ArrowDown") {
                   e.preventDefault();
-                  setSlashIndex((i) => (i + 1) % filteredSlash.length);
+                  setSlashIndex((i) => (i + 1) % slashItems.length);
                   return;
                 }
                 if (e.key === "ArrowUp") {
                   e.preventDefault();
-                  setSlashIndex((i) => (i - 1 + filteredSlash.length) % filteredSlash.length);
+                  setSlashIndex((i) => (i - 1 + slashItems.length) % slashItems.length);
                   return;
                 }
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
-                  pickSlash(filteredSlash[Math.min(slashIndex, filteredSlash.length - 1)].cmd);
+                  pickSlashItem(slashItems[Math.min(slashIndex, slashItems.length - 1)]);
                   return;
                 }
                 if (e.key === "Escape") {
                   e.preventDefault();
                   setShowSlash(false);
+                  return;
+                }
+              }
+              // 会话 229: $ 技能补全菜单键盘导航
+              if (showSkills) {
+                const n = filteredSkills.length;
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setSkillIndex((i) => (i + 1) % Math.max(1, n));
+                  return;
+                }
+                if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setSkillIndex((i) => (i - 1 + Math.max(1, n)) % Math.max(1, n));
+                  return;
+                }
+                if (e.key === "Enter" && !e.shiftKey && n > 0) {
+                  e.preventDefault();
+                  insertSkill(filteredSkills[Math.min(skillIndex, n - 1)].name, false);
+                  return;
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setShowSkills(false);
                   return;
                 }
               }
@@ -1035,9 +1202,11 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
               if (e.key === "Escape") {
                 setShowSlash(false);
                 setShowAt(false);
+                setShowSkills(false);
               }
             }}
-          />
+            />
+          </div>
           <div className="composer-toolbar">
             <div className="composer-tools-left">
               <button className="composer-attach" title={t("composer.attach_tip")} onClick={() => fileRef.current?.click()}>
@@ -1208,20 +1377,6 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
           <span>松开以添加附件</span>
         </div>
       )}
-      <Modal
-        open={preview !== null}
-        onClose={() => setPreview(null)}
-        title={preview?.filename ?? "图片预览"}
-        width={900}
-      >
-        {preview?.type === "image" && (
-          <img
-            className="composer-image-preview"
-            src={resolveFileUrl(preview.url)}
-            alt={preview.filename}
-          />
-        )}
-      </Modal>
 
       {/* plan-671: 设定/修改目标弹层（复用 Modal 与现有输入样式） */}
       <Modal
@@ -1283,6 +1438,16 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                   src={resolveFileUrl(browserRefPreview.thumbUrl)}
                   alt="标注截图"
                   className="browser-ref-preview-shot"
+                  title="点击查看大图"
+                  onClick={() => {
+                    const u = browserRefPreview.thumbUrl;
+                    if (u) {
+                      openGallery(
+                        [{ url: resolveFileUrl(u), name: `${browserRefPreview.pageTitle || "标注"}-截图.png` }],
+                        0,
+                      );
+                    }
+                  }}
                 />
               </div>
             )}
@@ -1324,7 +1489,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
 
       {slashVisible && (
         <div className="composer-menu composer-slash">
-          <div className="composer-menu-title">快捷命令</div>
+          {filteredSlash.length > 0 && <div className="composer-menu-title">快捷命令</div>}
           {filteredSlash.map((s, idx) => (
             <button
               key={s.cmd}
@@ -1334,6 +1499,40 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
             >
               <strong>{s.cmd}</strong>
               <span>{s.desc}</span>
+            </button>
+          ))}
+          {filteredSlashSkills.length > 0 && <div className="composer-menu-title">技能（$）</div>}
+          {filteredSlashSkills.map((s, j) => {
+            const idx = filteredSlash.length + j;
+            return (
+              <button
+                key={`sk-${s.id}`}
+                className={idx === slashIndex ? "active" : ""}
+                onMouseEnter={() => setSlashIndex(idx)}
+                onClick={() => insertSkill(s.name, true)}
+              >
+                <IconBox size={12} />
+                <strong>${s.name}</strong>
+                <span>{s.display_name || s.description || ""}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {showSkills && filteredSkills.length > 0 && (
+        <div className="composer-menu composer-slash">
+          <div className="composer-menu-title">技能（$）</div>
+          {filteredSkills.map((s, idx) => (
+            <button
+              key={`s-${s.id}`}
+              className={idx === skillIndex ? "active" : ""}
+              onMouseEnter={() => setSkillIndex(idx)}
+              onClick={() => insertSkill(s.name, false)}
+            >
+              <IconBox size={12} />
+              <strong>${s.name}</strong>
+              <span>{s.display_name || s.description || ""}</span>
             </button>
           ))}
         </div>

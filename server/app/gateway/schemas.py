@@ -361,6 +361,14 @@ class FileChangeOut(BaseModel):
     reviewed: bool = False  # 后端持久化审核状态
 
 
+class DiffLineOut(BaseModel):
+    """行级 diff（服务端 SequenceMatcher 预计算，与 +N -M 徽标同源一致）。"""
+    type: str  # "add" / "del" / "ctx"
+    text: str
+    old_no: int | None = None  # 变更前行号（1-based；add 行为 None）
+    new_no: int | None = None  # 变更后行号（1-based；del 行为 None）
+
+
 class FileDiffOut(BaseModel):
     """单文件变更 diff（按需拉取，大文件截断）。"""
     path: str
@@ -368,6 +376,7 @@ class FileDiffOut(BaseModel):
     after: str | None = None   # 当前磁盘内容（已删除文件为 None）
     truncated: bool = False    # 变更行数超限已截断
     reason: str | None = None  # 二进制/大文件说明（不展示文本 diff）
+    lines: list[DiffLineOut] | None = None  # 行级 diff（优先于 before/after 本地 LCS）
 
 
 class ReviewBatchBody(BaseModel):

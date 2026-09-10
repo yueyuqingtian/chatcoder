@@ -18,7 +18,7 @@ import { MarkdownContent } from "../MarkdownContent";
 import { MsgType } from "@chatcoder/shared";
 import { useChatStore } from "../../store/chat";
 import type { MessageOut } from "../../api/client";
-import { AttachmentCard, attachmentsOf } from "./AttachmentCard";
+import { MessageImageGrid, MessageFileCards, TokenText, attachmentsOf } from "./AttachmentCard";
 
 /** 工具节点可搜索文本（group 取聚合工具名；其余取各 leaf 工具名） */
 function nodeToolText(n: ToolNode): string {
@@ -603,11 +603,13 @@ function MainMessageFlow({
           <div className="turn-group">
             {injectedMsgs.map((m) => (
               <div key={m.id} className="turn-item turn-item-user">
+                {/* 会话 228-1142: 图片网格在气泡外部、靠右；文件卡与文本留在气泡内 */}
+                <MessageImageGrid atts={attachmentsOf(m.content)} />
                 <div className="turn-user-bubble">
-                  {msgText(m.content) && <div className="turn-user-text">{msgText(m.content)}</div>}
-                  {attachmentsOf(m.content).map((a) => (
-                    <AttachmentCard key={a.file_id || a.url} att={a} />
-                  ))}
+                  <MessageFileCards atts={attachmentsOf(m.content)} />
+                  {msgText(m.content) && (
+                    <div className="turn-user-text"><TokenText text={msgText(m.content)} /></div>
+                  )}
                 </div>
               </div>
             ))}

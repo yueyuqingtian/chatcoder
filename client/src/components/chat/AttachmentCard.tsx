@@ -1,11 +1,12 @@
-/** AttachmentCard（v14）：消息中的附件卡片——图片显示缩略图，其他文件显示图标+文件名。
- * v15: 图片点击在应用内大图预览（lightbox），不再跳转浏览器下载；
- * 其他文件点击新窗口打开（后端已改 inline 预览，PDF/文本直接展示而非下载）。
+﻿/** AttachmentCard（v14）：消息中的附件卡片——图片显示缩略图，其他文件显示图标+文件名。
+ * v15: 图片点击在应用内大图预览（lightbox）。
+ * 会话 229: 统一改用全局 ImageGallery（左右切换/缩放/下载）；
+ * 并新增 MessageAttachmentList——消息内图片改为约 150px 缩略图并排展示，非图片附件保持卡片。
  */
-import { useState } from "react";
-import { createPortal } from "react-dom";
 import { IconPaperclip } from "../icons";
 import { type AttachmentInfo, resolveFileUrl } from "../../api/client";
+import { openGallery } from "../../store/gallery";
+import { tokenize, tokenDisplayName } from "../../utils/tokens";
 
 function fmtSize(n: number): string {
   if (!n || n <= 0) return "";
@@ -14,51 +15,85 @@ function fmtSize(n: number): string {
   return `${n}B`;
 }
 
+function isImageAtt(att: AttachmentInfo): boolean {
+  return att.type === "image" || att.mime_type.startsWith("image/");
+}
+
 export function AttachmentCard({ att }: { att: AttachmentInfo }) {
   const url = resolveFileUrl(att.url);
-  const isImage = att.type === "image" || att.mime_type.startsWith("image/");
-  const [preview, setPreview] = useState(false);
   const open = () => {
-    if (isImage) setPreview(true);
+    if (isImageAtt(att)) openGallery([{ url, name: att.filename, size: att.size }], 0);
     else window.open(url, "_blank", "noopener");
   };
   return (
+    <div className="attach-card" onClick={open} title={`${att.filename}（点击预览）`}>
+      {isImageAtt(att) ? (
+        <img className="attach-card-thumb" src={url} alt={att.filename} loading="lazy" />
+      ) : (
+        <span className="attach-card-icon"><IconPaperclip size={13} /></span>
+      )}
+      <span className="attach-card-name">{att.filename}</span>
+      <span className="attach-card-size">{fmtSize(att.size)}</span>
+    </div>
+  );
+}
+
+/** 消息图片网格（会话 228-1142）：渲染在用户气泡**外部**、靠右（对齐参考图 1）；
+ * 点击进全局查看器（多图可左右切换）。无图片时不渲染。 */
+export function MessageImageGrid({ atts }: { atts: AttachmentInfo[] }) {
+  const images = atts.filter(isImageAtt);
+  if (images.length === 0) return null;
+  const openImage = (att: AttachmentInfo) => {
+    const list = images.map((a) => ({
+      url: resolveFileUrl(a.url),
+      name: a.filename,
+      size: a.size,
+    }));
+    const idx = images.indexOf(att);
+    openGallery(list, idx < 0 ? 0 : idx);
+  };
+  return (
+    <div className="msg-image-grid">
+      {images.map((a) => (
+        <img
+          key={a.file_id || a.url}
+          className="msg-image-thumb"
+          src={resolveFileUrl(a.url)}
+          alt={a.filename}
+          title={`${a.filename}（点击查看大图）`}
+          loading="lazy"
+          draggable={false}
+          onClick={() => openImage(a)}
+        />
+      ))}
+    </div>
+  );
+}
+
+/** 消息内非图片附件卡（保留在气泡内，点击新窗口打开）。 */
+export function MessageFileCards({ atts }: { atts: AttachmentInfo[] }) {
+  const files = atts.filter((a) => !isImageAtt(a));
+  return (
     <>
-      <div className="attach-card" onClick={open} title={`${att.filename}（点击预览）`}>
-        {isImage ? (
-          <img className="attach-card-thumb" src={url} alt={att.filename} loading="lazy" />
+      {files.map((a) => (
+        <AttachmentCard key={a.file_id || a.url} att={a} />
+      ))}
+    </>
+  );
+}
+
+/** 会话 228-1142: 用户消息文本中的 $技能/@文件 标签化渲染（纯展示，与输入框标签层同视觉）。 */
+export function TokenText({ text }: { text: string }) {
+  return (
+    <>
+      {tokenize(text).map((tk, i) =>
+        tk.type === "text" ? (
+          <span key={i}>{tk.text}</span>
         ) : (
-          <span className="attach-card-icon"><IconPaperclip size={13} /></span>
-        )}
-        <span className="attach-card-name">{att.filename}</span>
-        <span className="attach-card-size">{fmtSize(att.size)}</span>
-      </div>
-      {preview && createPortal(
-        <div
-          onClick={() => setPreview(false)}
-          style={{
-            position: "fixed", inset: 0, zIndex: 9999,
-            background: "rgba(0,0,0,0.75)", display: "flex",
-            alignItems: "center", justifyContent: "center", cursor: "zoom-out",
-          }}
-        >
-          <img
-            src={url}
-            alt={att.filename}
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              maxWidth: "92vw", maxHeight: "92vh", objectFit: "contain",
-              borderRadius: 6, boxShadow: "0 8px 40px rgba(0,0,0,0.5)", cursor: "default",
-            }}
-          />
-          <div style={{
-            position: "absolute", bottom: 24, left: 0, right: 0, textAlign: "center",
-            color: "rgba(255,255,255,0.85)", fontSize: 13, pointerEvents: "none",
-          }}>
-            {att.filename}（{fmtSize(att.size)}）· 点击空白处关闭
-          </div>
-        </div>,
-        document.body,
+          <span key={i} className={`tok-chip ${tk.type === "skill" ? "tok-skill" : "tok-file"}`}>
+            {tokenDisplayName(tk)}
+          </span>
+        ),
       )}
     </>
   );
