@@ -4,6 +4,7 @@ import type { NavKey } from "./components/Sidebar";
 import { Workspace } from "./components/Workspace";
 import { RollbackConfirmModal } from "./components/chat/RollbackConfirmModal";
 import { ImageGallery } from "./components/chat/ImageGallery";
+import { WhatsNewModal } from "./components/WhatsNewModal";
 import { ResizeHandle } from "./components/ResizeHandle";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Toast } from "./components/Toast";
@@ -144,6 +145,7 @@ export default function App() {
         <Toast />
         <RollbackConfirmModal />
         <ImageGallery />
+        <WhatsNewModal />
         <CommandCenter />
         {/* v18 布局重构（对齐 zcode）：左侧栏全高（含 logo/导航箭头），
             右侧 = 顶部标题栏 + 内容行（消息流 + 右侧面板）。 */}

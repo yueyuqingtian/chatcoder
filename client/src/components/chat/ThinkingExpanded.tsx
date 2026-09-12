@@ -6,19 +6,43 @@
 import { useEffect, useRef } from "react";
 
 /** 用户优先的贴底滚动 hook：内容增长时若处于"吸附"状态则跟到最新；
- * scroll 事件里离底 > 24px 视为用户主动上滑 → 取消吸附；滚回底部 → 恢复吸附。 */
+ * 与 MessageFlow 主消息流同一策略（本轮优化）：
+ * - 贴底状态下检测到向上滑动（wheel，当帧生效）→ 立即取消吸附并进入"用户接管"；
+ * - 接管期间内容增长一律不打扰；用户滚回贴底（< 8px）→ 清除接管、恢复吸附；
+ * - 未接管时离底 > 24px 仍按用户主动上滑处理。 */
 function useAutoScroll<T extends HTMLElement>(dep: unknown) {
   const ref = useRef<T>(null);
   const stickRef = useRef(true);
+  /** 用户接管标记：接管期间内容增长不贴底，直到滚回底部 */
+  const userOverrideRef = useRef(false);
 
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
     const onScroll = () => {
-      stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+      const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (userOverrideRef.current) {
+        // 只有真正滚回贴底才恢复吸附（避免"还差几像素"被 24px 阈值判回跟随 → 反复拉底抖动）
+        if (distance < 8) {
+          userOverrideRef.current = false;
+          stickRef.current = true;
+        }
+        return;
+      }
+      stickRef.current = distance < 24;
+    };
+    const onWheel = (e: WheelEvent) => {
+      if (e.deltaY < 0 && !userOverrideRef.current) {
+        userOverrideRef.current = true;
+        stickRef.current = false;
+      }
     };
     el.addEventListener("scroll", onScroll, { passive: true });
-    return () => el.removeEventListener("scroll", onScroll);
+    el.addEventListener("wheel", onWheel, { passive: true, capture: true });
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      el.removeEventListener("wheel", onWheel, { capture: true });
+    };
   }, []);
 
   useEffect(() => {

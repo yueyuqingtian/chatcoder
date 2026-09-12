@@ -28,18 +28,13 @@ def _to_root_uri(root_path: str | None) -> str | None:
 
 
 def _resolve_workspace_placeholder(arg: str, workspace_root: str | None) -> str:
-    """解析命令行参数中的工作区占位符。
+    """解析命令行参数中的工作区占位符（委托 skill_scanner 的公共实现）。
 
-    VSCode 系 MCP 配置常用 ${workspaceFolder} 表示项目根；chatcoder 不做变量替换，
-    字面量会原样传给子进程，导致 codegraph 等 server 以错误路径初始化索引、
-    查询时 projectPath 不匹配而挂起直到超时。这里在 spawn 前替换为实际工作区路径；
-    无工作区上下文时返回空串（由调用方过滤，避免传空参数破坏命令行）。
+    运行时调用路径与握手路径（skill_scanner.fetch_mcp_tools）共用同一函数，
+    避免两套实现漂移——此前握手路径完全没有替换逻辑，是 codegraph 握手失败的次生原因。
     """
-    if "${workspaceFolder}" not in arg:
-        return arg
-    if not workspace_root:
-        return ""
-    return arg.replace("${workspaceFolder}", workspace_root)
+    from app.orchestration.skill_scanner import resolve_workspace_placeholder
+    return resolve_workspace_placeholder(arg, workspace_root)
 
 
 def _resolve_tool_call(args: dict, tool_name: str) -> tuple[str, dict]:

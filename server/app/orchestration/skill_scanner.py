@@ -299,23 +299,60 @@ def scan_all_mcp_servers(workspace_root: str | None = None) -> list[ScannedMcpSe
     return results
 
 
+def resolve_workspace_placeholder(arg: str, workspace_root: str | None) -> str:
+    """解析命令行参数中的工作区占位符（`${workspaceFolder}`）。
+
+    VSCode 系 MCP 配置常用 `${workspaceFolder}` 表示项目根；chatcoder 不做变量替换，
+    字面量会原样传给子进程，导致 codegraph 等 server 以错误路径初始化索引、
+    查询时 projectPath 不匹配而挂起直到超时。这里在 spawn 前替换为实际工作区路径；
+    无工作区上下文时返回空串（由调用方过滤，避免传空参数破坏命令行）。
+
+    运行时调用路径（tools/mcp_wrapper.py）与握手路径（fetch_mcp_tools）共用本函数，
+    避免两套实现漂移——此前握手路径完全没有替换逻辑，是 codegraph 握手失败的次生原因。
+    """
+    if "${workspaceFolder}" not in arg:
+        return arg
+    if not workspace_root:
+        return ""
+    return arg.replace("${workspaceFolder}", str(workspace_root))
+
+
+def resolve_workspace_args(args: list | None, workspace_root: str | None) -> list[str]:
+    """对 args 逐项做 `${workspaceFolder}` 替换，并剔除因无工作区而变空的参数。"""
+    out: list[str] = []
+    for a in args or []:
+        resolved = resolve_workspace_placeholder(str(a), workspace_root)
+        if resolved:
+            out.append(resolved)
+    return out
+
+
 async def fetch_mcp_tools(
     command: str, args: list[str], env: dict,
     root_path: str | None = None,
 ) -> list[dict]:
     """通过 stdio 与 MCP server 握手并获取 tools/list。
+
     v4.8: 扫描时填充 tools 列表，解决 agent 看不到 MCP 工具的问题。
     v6.0: 支持传入 root_path（转为 rootUri），codegraph 等 server 依赖它定位项目。
     v6.5: 整段握手加硬超时 + Windows 进程树强杀——部分 MCP server（如 codegraph）
     不响应握手且 kill 后仍有子进程持有管道，导致创建/导入接口永久挂起。
+
+    参数语义（勿混淆）：
+    - `root_path`：**项目工作区根**（如 D:\\myProject\\chatcoder），转成 rootUri 传给 server；
+    - `McpServer.path`：**原始 MCP 配置文件路径**（如 ~/.cursor/mcp.json），不能当 root_path 用。
     """
     if not command:
         return []
 
+    # 占位符替换必须发生在握手路径——codegraph 的 args 含 ${workspaceFolder}，
+    # 未替换时子进程拿到字面量字符串，无法定位项目（握手一直等待直到超时）。
+    resolved_args = resolve_workspace_args(args, root_path)
+
     full_env = {**os.environ, **env}
     try:
         proc = await asyncio.create_subprocess_exec(
-            command, *args,
+            command, *resolved_args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

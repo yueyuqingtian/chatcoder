@@ -22,6 +22,9 @@ def test_direct_mappings():
     assert TO_TA3["view_image"] == "ViewImage"
     # v7: 通用提问工具映射（四种模式均可用；参数 questions 键名一致无需适配）
     assert TO_TA3["ask_user_question"] == "AskUser"
+    # plan-238-1191: 多文件批量编辑补映射（此前缺映射被伪装层剔除，ta3 会话里
+    # 模型失去批量编辑工具、历史调用被降级为"结果已略"文本导致工作流中断）
+    assert TO_TA3["multi_file_edit"] == "MultiFileEdit"
 
 
 def test_reverse_mapping_is_consistent():
@@ -175,6 +178,44 @@ def test_unmapped_history_call_becomes_text():
     out = provider._disguise_message(m)
     assert "tool_calls" not in out
     assert "不可用" in out["content"]
+    # plan-238-1191: 提示语不得再写"结果已略"（结果会以文本形式紧随其后），
+    # 且须显式要求模型不要复述本条、继续用可用工具推进
+    assert "结果已略" not in out["content"]
+    assert "请勿复述" in out["content"]
+
+
+# ───────────────── plan-238-1191: multi_file_edit → MultiFileEdit 伪装 ─────────────────
+
+
+def test_multi_file_edit_disguise_roundtrip():
+    """multi_file_edit 出站伪装为 MultiFileEdit（edits 键名一致原样透传），
+    历史调用不再被降级成文本提示。"""
+    from app.models.providers.ta3 import Ta3Provider
+    from app.models.schemas import ChatMessage
+
+    args = {"edits": [{"path": "a.py", "old_text": "x", "new_text": "y"}]}
+    assert disguise_args("multi_file_edit", args) == args
+    assert restore_args("MultiFileEdit", args) == args
+
+    provider = Ta3Provider(api_key="llm-x", base_url="https://x", model="m")
+    m = ChatMessage(role="assistant", content=None,
+                    tool_calls=[{"id": "c1", "name": "multi_file_edit", "arguments": args}])
+    out = provider._disguise_message(m)
+    assert out["tool_calls"][0]["function"]["name"] == "MultiFileEdit"
+    assert json.loads(out["tool_calls"][0]["function"]["arguments"]) == args
+    assert "不可用" not in (out.get("content") or "")
+
+
+def test_disguise_tools_keeps_multi_file_edit():
+    """multi_file_edit 有映射与原生 schema → 伪装后保留（不再被剔除）。"""
+    schemas = [
+        {"type": "function", "function": {"name": "multi_file_edit", "parameters": {}}},
+    ]
+    out = disguise_tools(schemas)
+    names = [s["function"]["name"] for s in out]
+    assert names == ["MultiFileEdit"]
+    props = TA3_NATIVE_SCHEMAS["MultiFileEdit"]["function"]["parameters"]["properties"]
+    assert "edits" in props
 
 
 # ───────────────── plan-609: schema 参数可见性 + 参数名对齐 ─────────────────

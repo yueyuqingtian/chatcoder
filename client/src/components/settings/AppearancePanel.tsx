@@ -10,7 +10,7 @@ export function AppearancePanel() {
   const { theme, setTheme } = useThemeStore();
   const ui = useUiStore();
   return (
-    <div>
+    <div className="settings-card-stack">
       <div className="settings-card">
         <Row title="主题模式" desc="浅色 / 深色">
           <div style={{ display: "flex", gap: 6 }}>

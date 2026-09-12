@@ -233,6 +233,33 @@ _GOAL: list[dict] = [
     }),
 ]
 
+# ── multiEdit（plan-238-1191：当前项目补充——多文件批量编辑）──
+# 参考项目无对应工具；此前缺映射被伪装层整体剔除，ta3 会话下模型失去批量编辑
+# 能力、历史调用被降级为"结果已略"文本。伪装名自造（ReadAttachment/BashStatus 先例）。
+_MULTI_EDIT: list[dict] = [
+    _f("MultiFileEdit", "多文件结构化编辑。在一次调用中对多个文件执行 search-replace。\n"
+        "原子性：全部成功或全部回滚。\n"
+        "每个 edit 包含: path(文件路径), old_text(要替换的原文), new_text(替换后的文本)。\n"
+        "old_text 必须在文件中唯一匹配。new_text 为空字符串表示删除。", {
+        "type": "object", "required": ["edits"],
+        "properties": {
+            "edits": {
+                "type": "array",
+                "description": "编辑操作列表",
+                "items": {
+                    "type": "object",
+                    "required": ["path", "old_text", "new_text"],
+                    "properties": {
+                        "path": {"type": "string", "description": "文件路径(相对工作根)"},
+                        "old_text": {"type": "string", "description": "要替换的原始文本"},
+                        "new_text": {"type": "string", "description": "替换后的文本(空=删除)"},
+                    },
+                },
+            },
+        },
+    }),
+]
+
 # ── ask（通用提问，当前项目补充——需求澄清，四种模式均可用）──
 _ASK: list[dict] = [
     _f("AskUser", "向用户发起结构化提问（用于需求澄清）。"
@@ -256,7 +283,7 @@ _ASK: list[dict] = [
 
 TA3_NATIVE_SCHEMAS: dict[str, dict] = {
     s["function"]["name"]: s for s in [
-        *_CORE, *_EDIT, *_TASK, *_WEB_SEARCH, *_ATTACHMENT, *_BACKGROUND, *_GOAL, *_ASK,
+        *_CORE, *_EDIT, *_TASK, *_WEB_SEARCH, *_ATTACHMENT, *_BACKGROUND, *_GOAL, *_ASK, *_MULTI_EDIT,
     ]
 }
 

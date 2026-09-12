@@ -12,6 +12,7 @@ import { BrowserPanel } from "./BrowserPanel";
 import { FileTreePanel } from "./FileTreePanel";
 import { TerminalPanel } from "./TerminalPanel";
 import { SubagentPanel } from "./SubagentPanel";
+import { useClickOutside } from "../../hooks/useClickOutside";
 
 function PanelContent({ tab }: { tab: PanelTab }) {
   switch (tab.id) {
@@ -40,7 +41,12 @@ export function RightPanel() {
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [showTabsMenu, setShowTabsMenu] = useState(false);
   const tabsRef = useRef<HTMLDivElement>(null);
+  const headActionsRef = useRef<HTMLDivElement>(null);
   const [tabsOverflow, setTabsOverflow] = useState(false);
+  useClickOutside(headActionsRef, showAddMenu || showTabsMenu, () => {
+    setShowAddMenu(false);
+    setShowTabsMenu(false);
+  });
 
   const tabMeta: Record<PanelTabId, { label: string; icon: React.ReactNode }> = {
     "task-summary": { label: t("rp.tab_task_summary"), icon: <span className="rp-tab-dot" /> },
@@ -92,7 +98,7 @@ export function RightPanel() {
           })}
           {tabs.length === 0 && <div className="rp-tabs-empty">{t("rp.tabs_empty")}</div>}
         </div>
-        <div className="rp-head-actions">
+        <div className="rp-head-actions" ref={headActionsRef}>
           {tabsOverflow && (
             <button className="rp-add-btn" onClick={() => { setShowTabsMenu(!showTabsMenu); setShowAddMenu(false); }} title={t("rp.all_tabs")}>
               <IconChevronDown size={14} />

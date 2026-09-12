@@ -661,13 +661,66 @@ ipcMain.handle("browser:capturePage", async (_event, targetWebContentsId) => {
 // ── 自动更新（electron-updater + GitHub Releases）──
 // 仅打包版启用：dev 模式无 app-update.yml，检查会直接失败。
 // 状态机: idle → checking → available|none → downloading → downloaded → (quitAndInstall) / error
+// plan-230-1144 M4.2: 透传 releaseNotes / releaseDate；支持按版本区间拉取更新历史；
+// 记录 lastSeenVersion 供升级后首启"本次更新"弹窗判定。
 let autoUpdater = null;
 let updateState = { state: "idle" };
+
+const UPDATE_STATE_FILE = () => path.join(app.getPath("userData"), "update-state.json");
+
+function readUpdateMeta() {
+  try {
+    return JSON.parse(fs.readFileSync(UPDATE_STATE_FILE(), "utf-8")) || {};
+  } catch { return {}; }
+}
+
+function writeUpdateMeta(patch) {
+  try {
+    const cur = readUpdateMeta();
+    fs.writeFileSync(UPDATE_STATE_FILE(), JSON.stringify({ ...cur, ...patch }, null, 2), "utf-8");
+  } catch (e) { logErr("[updater] 写入 update-state.json 失败:", e && e.message); }
+}
 
 function pushUpdateState() {
   if (mainWindow && !mainWindow.isDestroyed()) {
     try { mainWindow.webContents.send("app:updateStatus", updateState); } catch {}
   }
+}
+
+/** releaseNotes 可能是 string 或 [{version, note}] 数组，统一成 Markdown 文本 */
+function normalizeReleaseNotes(notes) {
+  if (!notes) return "";
+  if (typeof notes === "string") return notes;
+  if (Array.isArray(notes)) {
+    return notes.map((n) => (typeof n === "string" ? n : (n && (n.note || n.body)) || "")).join("\n\n");
+  }
+  if (typeof notes === "object") return notes.note || notes.body || "";
+  return String(notes);
+}
+
+/** 本地打包的 CHANGELOG.md 路径（打包后位于 resources 或应用根） */
+function localChangelogPath() {
+  const candidates = [
+    path.join(process.resourcesPath || "", "CHANGELOG.md"),
+    path.join(app.getAppPath(), "..", "CHANGELOG.md"),
+    path.join(app.getAppPath(), "CHANGELOG.md"),
+  ];
+  for (const p of candidates) {
+    try { if (p && fs.existsSync(p)) return p; } catch {}
+  }
+  return "";
+}
+
+/** GitHub Releases API（owner/repo 来自 package.json build.publish） */
+const UPDATER_REPO = { owner: "yueyuqingtian", repo: "chatcoder" };
+
+async function fetchReleases(limit = 20) {
+  const url = `https://api.github.com/repos/${UPDATER_REPO.owner}/${UPDATER_REPO.repo}/releases?per_page=${limit}`;
+  const resp = await fetch(url, {
+    headers: { "Accept": "application/vnd.github+json", "User-Agent": "chatcoder-updater" },
+  });
+  if (!resp.ok) throw new Error(`GitHub API HTTP ${resp.status}`);
+  return await resp.json();
 }
 
 function initAutoUpdater() {
@@ -691,7 +744,14 @@ function initAutoUpdater() {
   autoUpdater.on("update-available", (info) => {
     // 已下载完成（同版本已就绪）时保持 downloaded，避免定时检查把按钮冲回「下载」
     if (updateState.state === "downloaded" && updateState.version === info.version) return;
-    updateState = { state: "available", version: info.version };
+    // plan-230-1144 M4.2: 透传 releaseNotes/releaseDate——此前只取 version，
+    // 前端因此看不到"更新了什么"（问题6 的直接根因）。
+    updateState = {
+      state: "available",
+      version: info.version,
+      notes: normalizeReleaseNotes(info.releaseNotes),
+      releaseDate: info.releaseDate || "",
+    };
     log("[updater] update-available:", info.version, "current:", app.getVersion());
     pushUpdateState();
   });
@@ -703,11 +763,22 @@ function initAutoUpdater() {
     pushUpdateState();
   });
   autoUpdater.on("download-progress", (p) => {
-    updateState = { state: "downloading", percent: Math.round(p.percent || 0), transferred: p.transferred || 0, total: p.total || 0 };
+    updateState = {
+      state: "downloading",
+      percent: Math.round(p.percent || 0),
+      transferred: p.transferred || 0,
+      total: p.total || 0,
+      bytesPerSecond: p.bytesPerSecond || 0,
+    };
     pushUpdateState();
   });
   autoUpdater.on("update-downloaded", (info) => {
-    updateState = { state: "downloaded", version: info.version };
+    updateState = {
+      state: "downloaded",
+      version: info.version,
+      notes: normalizeReleaseNotes(info.releaseNotes),
+      releaseDate: info.releaseDate || "",
+    };
     log("[updater] update-downloaded:", info.version);
     pushUpdateState();
   });
@@ -729,7 +800,7 @@ function initAutoUpdater() {
   }, 20 * 60 * 1000);
 }
 
-// ── IPC:更新操作（手动检查 / 立即安装 / 查询状态 / 当前版本）──
+// ── IPC:更新操作（手动检查 / 立即安装 / 查询状态 / 当前版本 / 更新历史）──
 ipcMain.handle("app:checkForUpdates", async () => {
   if (!autoUpdater) return { state: "unsupported" };
   try {
@@ -758,6 +829,66 @@ ipcMain.handle("app:installUpdate", () => {
   return true;
 });
 ipcMain.handle("app:getVersion", () => app.getVersion());
+
+// plan-230-1144 M4.2: 更新历史 —— 优先 GitHub Releases API（联网），失败回落本地 CHANGELOG.md
+ipcMain.handle("app:getReleaseNotes", async (_e, opts) => {
+  const limit = (opts && opts.limit) || 20;
+  try {
+    const releases = await fetchReleases(limit);
+    return {
+      ok: true,
+      source: "github",
+      releases: releases.map((r) => ({
+        version: String(r.tag_name || "").replace(/^v/, ""),
+        name: r.name || r.tag_name || "",
+        date: r.published_at || "",
+        notes: normalizeReleaseNotes(r.body),
+        prerelease: !!r.prerelease,
+      })),
+    };
+  } catch (e) {
+    // 网络不可用：回落本地打包 changelog（保证离线可看）
+    try {
+      const p = localChangelogPath();
+      if (p) {
+        return { ok: true, source: "local", releases: [{ version: "", name: "本地更新日志", date: "", notes: fs.readFileSync(p, "utf-8") }] };
+      }
+    } catch {}
+    return { ok: false, source: "none", error: String((e && e.message) || e), releases: [] };
+  }
+});
+
+// plan-230-1144 M4.2: 升级后首启判定 —— lastSeenVersion < 当前版本时返回 true（弹"本次更新"）
+ipcMain.handle("app:consumeWhatsNew", () => {
+  const cur = app.getVersion();
+  const meta = readUpdateMeta();
+  const lastSeen = meta.lastSeenVersion || "";
+  writeUpdateMeta({ lastSeenVersion: cur });
+  if (!lastSeen || lastSeen === cur) return { show: false, version: cur };
+  return { show: true, version: cur, from: lastSeen };
+});
+
+// plan-230-1144 M4.2: 拉取"从 fromVersion 到当前"之间各版本的更新说明（汇总展示）
+ipcMain.handle("app:getWhatsNew", async (_e, opts) => {
+  const from = (opts && opts.from) || "";
+  const to = (opts && opts.to) || app.getVersion();
+  try {
+    const releases = await fetchReleases(30);
+    const cmp = (a, b) => {
+      const pa = String(a).split(".").map((x) => parseInt(x, 10) || 0);
+      const pb = String(b).split(".").map((x) => parseInt(x, 10) || 0);
+      for (let i = 0; i < 3; i++) { if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0); }
+      return 0;
+    };
+    const picked = releases
+      .map((r) => ({ version: String(r.tag_name || "").replace(/^v/, ""), name: r.name || "", date: r.published_at || "", notes: normalizeReleaseNotes(r.body) }))
+      .filter((r) => r.version && (!from || cmp(r.version, from) > 0) && cmp(r.version, to) <= 0)
+      .sort((a, b) => cmp(b.version, a.version));
+    return { ok: true, source: "github", releases: picked };
+  } catch (e) {
+    return { ok: false, source: "none", error: String((e && e.message) || e), releases: [] };
+  }
+});
 
 // ── 确保单实例 ──
 const gotLock = app.requestSingleInstanceLock();

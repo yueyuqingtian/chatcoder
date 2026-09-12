@@ -124,9 +124,15 @@ function MessageFlowCore({
   const parentRef = useRef<HTMLDivElement>(null);
   /** plan-547: 虚拟内容容器（RO 监听测高变化保持贴底） */
   const innerRef = useRef<HTMLDivElement>(null);
+  const scrollIdleTimerRef = useRef(0);
   const [autoScroll, setAutoScroll] = useState(true);
   /** autoScroll 的 ref 镜像：ResizeObserver 回调读取，避免每次回调 setState */
   const autoScrollRef = useRef(true);
+  /** 用户接管标记（本轮优化）：用户在消息流内向上滑动（滚轮/触控板）后置位。
+   *  接管期间——无论内容多快增长、条目如何增加——都不再把视图拉回底部；
+   *  只有用户自己滚回贴底（距底 < 8px）才解除接管并恢复自动跟随。
+   *  修复"上滑一点点 → 被 60px 贴底阈值立刻判回跟随 → 内容增长又拉回底部"的鬼畜循环。 */
+  const userScrollOverrideRef = useRef(false);
   /** 程序补滚标记：补滚期间 onScroll 不翻转跟随状态 */
   const programmaticScrollRef = useRef(false);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
@@ -149,9 +155,15 @@ function MessageFlowCore({
     overscan: 6,
   });
 
-  const scrollToBottom = useCallback((smooth = false) => {
+  /** 贴底滚动。
+   *  force=false（默认）：仅在"跟随态且用户未接管"时补滚，且不改变跟随状态——
+   *    内容增长/条目增加触发的补滚不得复活被用户取消的跟随；
+   *  force=true：用户主动要求贴底（切换会话 / 发起任务 / 发送消息 / 点"回到底部"），
+   *    解除用户接管并恢复自动跟随。 */
+  const scrollToBottom = useCallback((smooth = false, force = false) => {
     const el = parentRef.current;
     if (!el) return;
+    if (!force && (!autoScrollRef.current || userScrollOverrideRef.current)) return;
     if (smooth) {
       el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
     } else {
@@ -162,14 +174,19 @@ function MessageFlowCore({
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           const el2 = parentRef.current;
-          if (el2) el2.scrollTop = el2.scrollHeight;
+          // plan-238-1188: 补滚窗口内用户若已上滚（wheel 捕获即时置 autoScrollRef=false），
+          // 放弃这次补滚——否则快速流式刷新时用户的上滚会被逐帧拉回底部（"划不动"）
+          if (el2 && autoScrollRef.current && !userScrollOverrideRef.current) el2.scrollTop = el2.scrollHeight;
           programmaticScrollRef.current = false;
         });
       });
     }
-    setAutoScroll(true);
-    autoScrollRef.current = true;
-    setShowScrollBottom(false);
+    if (force) {
+      userScrollOverrideRef.current = false;
+      setAutoScroll(true);
+      autoScrollRef.current = true;
+      setShowScrollBottom(false);
+    }
   }, []);
 
   /** 问题12: scrollspy——取视口上 1/3 焦点线所在虚拟项，映射为 entry 下标传给 JumpDots */
@@ -187,18 +204,61 @@ function MessageFlowCore({
   }, [virtualizer]);
 
   const onScroll = useCallback(() => {
+    const el = parentRef.current;
+    if (el) {
+      el.classList.add("is-scrolling");
+      window.clearTimeout(scrollIdleTimerRef.current);
+      scrollIdleTimerRef.current = window.setTimeout(() => {
+        parentRef.current?.classList.remove("is-scrolling");
+      }, 700);
+    }
     // plan-547: 程序补滚产生的 scroll 事件不参与跟随判定
     if (programmaticScrollRef.current) return;
-    const el = parentRef.current;
     if (!el) return;
     const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
     // 恢复 v0.2.0 贴底阈值 60px（抵抗高 DPI 缩放浮点舍入与末尾元素 margin/padding 波动）
     const isNearBottom = distance < 60;
-    setAutoScroll(isNearBottom);
-    autoScrollRef.current = isNearBottom;
+    if (userScrollOverrideRef.current) {
+      // 用户接管期间：只有真正滚回贴底（< 8px）才恢复跟随；否则"还差几十像素"的轻微
+      // 上滑会被 isNearBottom(60px) 立刻判回跟随 → 内容增长再拉回底部（鬼畜）
+      if (distance < 8) {
+        userScrollOverrideRef.current = false;
+        setAutoScroll(true);
+        autoScrollRef.current = true;
+      }
+    } else {
+      setAutoScroll(isNearBottom);
+      autoScrollRef.current = isNearBottom;
+    }
     setShowScrollBottom(distance > 120);
     updateActiveEntry(el);
   }, [updateActiveEntry]);
+
+  /** plan-238-1188 + 本轮优化: 用户上滚意图必须"当帧生效"。
+   *  思考内容快速刷新时，ResizeObserver / 双帧补滚都可能在 scroll 事件派发前
+   *  把 scrollTop 拉回底部，表现为"消息流往上划不动"。
+   *  在 wheel 捕获阶段同步关闭跟随（passive，不拦截默认滚动）并置"用户接管"标记：
+   *  贴底状态下检测到向上滑动立即取消贴底；此后内容增长一律不打扰，
+   *  直到用户滚回贴底由 onScroll 清除标记、自动刷新贴底跟随。 */
+  useEffect(() => {
+    const el = parentRef.current;
+    if (!el) return;
+    const onWheelCapture = (e: WheelEvent) => {
+      if (e.deltaY < 0 && !userScrollOverrideRef.current) {
+        userScrollOverrideRef.current = true;
+        autoScrollRef.current = false;
+        setAutoScroll(false);
+      }
+    };
+    el.addEventListener("wheel", onWheelCapture, { passive: true, capture: true });
+    return () => el.removeEventListener("wheel", onWheelCapture, { capture: true });
+  }, []);
+
+  // 滚动条自动隐藏的延时器不能在组件卸载后继续回写 DOM。
+  useEffect(() => () => {
+    window.clearTimeout(scrollIdleTimerRef.current);
+    parentRef.current?.classList.remove("is-scrolling");
+  }, []);
 
   /** plan-547: 内容总高度变化（虚拟测量/图片加载/展开）时若处于跟随态则保持贴底 */
   const hasContent = totalCount > 0;
@@ -211,19 +271,31 @@ function MessageFlowCore({
       // 问题4 回退：内容高度变化时若处于跟随态直接贴底；用户上滑已由 onScroll
       // 关闭 autoScroll（补滚窗口内则靠 scrollToBottom 的「用户已滚动则放弃」兜底），
       // 无需在 RO 内重复判定（内容增长后 scrollHeight 先变大，dist 判定会误关 autoScroll）。
-      if (!autoScrollRef.current) return;
+      // 本轮补充：用户接管期间（已上滑）RO 也不得贴底，否则内容增长会把视图拉回底部。
+      if (!autoScrollRef.current || userScrollOverrideRef.current) return;
       el.scrollTop = el.scrollHeight;
     });
     ro.observe(inner);
     return () => ro.disconnect();
   }, [hasContent]);
 
+  /** 已做过"会话首次填充贴底"的会话标识（切换会话时重新进入首次填充分支） */
+  const initSessionKeyRef = useRef<string | number | null>(null);
   useLayoutEffect(() => {
     // v0.3.1: 长会话切换时优先将虚拟列表定位到最后一条（end），再执行贴底双帧补滚，
-    // 彻底解决由于消息过多、初始估算高度误差导致切换会话后停在中间的 Bug
-    if (totalCount > 0) {
+    // 彻底解决由于消息过多、初始估算高度误差导致切换会话后停在中间的 Bug。
+    // 本轮修复: 原实现以 totalCount 为触发条件并无条件贴底 + 恢复跟随——任务执行期间
+    // 条目持续增加（工具节点/注入/压缩卡）会把上滑中的用户反复拉回底部（"鬼畜"）。
+    // 现在：仅"会话首次填充"强制贴底，后续条目增加只在跟随态（用户未接管）下补滚。
+    if (totalCount === 0) return;
+    if (initSessionKeyRef.current !== sessionKey) {
+      initSessionKeyRef.current = sessionKey;
       virtualizer.scrollToIndex(totalCount - 1, { align: "end" });
+      scrollToBottom(false, true);
+      return;
     }
+    if (!autoScrollRef.current || userScrollOverrideRef.current) return;
+    virtualizer.scrollToIndex(totalCount - 1, { align: "end" });
     scrollToBottom(false);
   }, [sessionKey, scrollToBottom, totalCount, virtualizer]);
 
@@ -231,7 +303,7 @@ function MessageFlowCore({
   const prevRunningRef = useRef(running);
   useEffect(() => {
     if (running && !prevRunningRef.current) {
-      scrollToBottom(false);
+      scrollToBottom(false, true);
     }
     prevRunningRef.current = running;
   }, [running, scrollToBottom]);
@@ -246,7 +318,7 @@ function MessageFlowCore({
     const last = entries[entries.length - 1];
     const lastStartsUser = last != null && last.kind === "turn"
       && last.items.length > 0 && last.items[0].kind === "user";
-    if (lastStartsUser) scrollToBottom(false);
+    if (lastStartsUser) scrollToBottom(false, true);
   }, [entries, scrollToBottom]);
 
   useEffect(() => {
@@ -272,7 +344,7 @@ function MessageFlowCore({
   useEffect(() => {
     if (injectedNode && !hadInjectedRef.current) {
       hadInjectedRef.current = true;
-      scrollToBottom(false);
+      scrollToBottom(false, true);
     } else if (!injectedNode) {
       hadInjectedRef.current = false;
     }
@@ -436,7 +508,7 @@ function MessageFlowCore({
         <button
           type="button"
           className="flow-scroll-bottom-btn"
-          onClick={() => scrollToBottom(true)}
+          onClick={() => scrollToBottom(true, true)}
           title="回到底部"
           aria-label="回到底部"
         >

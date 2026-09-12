@@ -5,6 +5,7 @@ import { api, type SkillOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { IconRefresh, IconPlus, IconX, IconFolder } from "../icons";
 import { ConfirmDialog } from "../ConfirmDialog";
+import { FormDialog } from "../ui/FormDialog";
 import { Sw } from "./shared";
 
 /** 非阻塞提示：Electron 中 window.alert 是原生模态框，关闭后会破坏窗口焦点，统一改用全局提示条。 */
@@ -23,6 +24,23 @@ export function SkillsPanel() {
   const [confirmDelete, setConfirmDelete] = useState<{ kind: "repo"; id: string; name: string } | { kind: "skill"; id: number; name: string } | null>(null);
   // v1.1: 本地导入
   const [importing, setImporting] = useState(false);
+  // plan-230-1144 M1.2: 技能详情展开 + trigger 草稿（失焦即保存）
+  const [expandedSkill, setExpandedSkill] = useState<number | null>(null);
+  const [triggerDrafts, setTriggerDrafts] = useState<Record<number, string>>({});
+
+  const saveTrigger = async (s: SkillOut) => {
+    const draft = triggerDrafts[s.id];
+    if (draft === undefined || draft === (s.trigger ?? "")) return;
+    try { await api.updateSkill(s.id, { trigger: draft }); await load(); }
+    catch (e) { notify("保存触发条件失败: " + String(e)); }
+  };
+
+  /** 复刻后端 _load_skills_and_mcp 的注入格式，让用户在 UI 上看到 AI 实际"看到"的那行字 */
+  const renderSkillPromptLine = (s: SkillOut) => {
+    const desc = (s.description || "").slice(0, 200);
+    const trig = (triggerDrafts[s.id] ?? s.trigger ?? "").slice(0, 120);
+    return `- ${s.name}: ${desc}${trig ? ` [触发条件: ${trig}]` : ""}`;
+  };
 
   const load = useCallback(async () => {
     try { setItems(await api.listSkills()); } catch {}
@@ -108,19 +126,20 @@ export function SkillsPanel() {
         <button className="btn btn-ghost btn-sm" onClick={() => void handleImportLocal()} disabled={importing}>
           <IconFolder size={13} /> {importing ? "导入中…" : "导入本地技能"}
         </button>
-        <button className="btn btn-primary btn-sm" onClick={() => setShowAddRepo(!showAddRepo)}><IconPlus size={13} /> 添加技能仓库</button>
+        <button className="btn btn-primary btn-sm" onClick={() => setShowAddRepo(true)}><IconPlus size={13} /> 添加技能仓库</button>
       </div>
 
-      {showAddRepo && (
-        <div className="settings-create-form">
-          <input className="ui-input" placeholder="Git 仓库地址 (https://…/repo.git)" value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} />
-          <input className="ui-input" placeholder="仓库名称（可选）" value={repoName} onChange={(e) => setRepoName(e.target.value)} />
-          <div className="settings-create-actions">
-            <button className="btn btn-ghost btn-sm" onClick={() => setShowAddRepo(false)}>取消</button>
-            <button className="btn btn-primary btn-sm" onClick={handleAddRepo} disabled={!repoUrl.trim()}>添加</button>
-          </div>
-        </div>
-      )}
+      <FormDialog
+        open={showAddRepo}
+        onClose={() => { setShowAddRepo(false); setRepoUrl(""); setRepoName(""); }}
+        title="添加技能仓库"
+        onSubmit={() => void handleAddRepo()}
+        submitLabel="添加"
+        submitDisabled={!repoUrl.trim()}
+      >
+        <input className="ui-input" placeholder="Git 仓库地址 (https://…/repo.git)" value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} />
+        <input className="ui-input" placeholder="仓库名称（可选）" value={repoName} onChange={(e) => setRepoName(e.target.value)} />
+      </FormDialog>
 
       {repos.length > 0 && (
         <div style={{ marginBottom: 16 }}>
@@ -165,10 +184,33 @@ export function SkillsPanel() {
 
       <div className="settings-resource-list">
         {items.map((s) => (
-          <div key={s.id} className="settings-resource-item">
+          <div key={s.id} className="settings-resource-item skill-item">
             <div className="settings-resource-info">
-              <div className="settings-resource-name">{s.display_name || s.name}</div>
+              <div className="settings-resource-name">
+                {s.display_name || s.name}
+                <button className="btn btn-ghost btn-xs skill-expand" onClick={() => setExpandedSkill(expandedSkill === s.id ? null : s.id)}>
+                  {expandedSkill === s.id ? "收起" : "详情"}
+                </button>
+              </div>
               <div className="settings-resource-desc"><span>{s.description || "无描述"}</span><span className="settings-resource-tag" title={s.path || undefined}>{s.source}</span></div>
+              {expandedSkill === s.id && (
+                <div className="skill-detail">
+                  <div className="skill-detail-field">
+                    <label className="settings-field-label">触发条件（AI 何时该用此技能）</label>
+                    <textarea
+                      className="ui-textarea" rows={2} placeholder="如：当任务涉及浏览器自动化操作时"
+                      value={triggerDrafts[s.id] ?? s.trigger ?? ""}
+                      onChange={(e) => setTriggerDrafts((p) => ({ ...p, [s.id]: e.target.value }))}
+                      onBlur={() => void saveTrigger(s)}
+                    />
+                  </div>
+                  <div className="skill-detail-field">
+                    <label className="settings-field-label">AI 可见性预览（实际注入系统提示词的内容）</label>
+                    <pre className="skill-prompt-preview">{renderSkillPromptLine(s)}</pre>
+                    <div className="skill-preview-hint">AI 通过 skill_view 工具按需加载正文（{s.content ? `正文 ${s.content.length} 字符` : "正文为空，AI 加载不到指令"}）</div>
+                  </div>
+                </div>
+              )}
             </div>
             <div className="settings-resource-actions">
               <Sw checked={s.is_active} onChange={async (v) => { try { await api.updateSkill(s.id, { is_active: v }); load(); } catch {} }} />

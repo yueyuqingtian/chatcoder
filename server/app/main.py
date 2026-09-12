@@ -16,6 +16,7 @@ from app.gateway.routers import (
     hooks,
     memories,
     models,
+    permission_profiles,
     profiles,
     projects,
     providers,
@@ -81,10 +82,25 @@ async def lifespan(app: FastAPI):
 
                 await run_write_locked(_persist, label="startup.repair")
         await seed()
+
+        # plan-230-1144 M1.1: 启动定时任务调度循环（此前该表无任何消费者，任务永不执行）
+        try:
+            from app.services import scheduler_loop
+            await scheduler_loop.start()
+        except Exception:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).exception("定时任务调度循环启动失败（不阻塞服务）")
     except Exception as e:  # noqa: BLE001
         import logging
         logging.getLogger(__name__).exception("数据库初始化失败: %s", e)
     yield
+    # plan-230-1144 M1.1: 先停调度循环，再排空写缓冲
+    try:
+        from app.services import scheduler_loop
+        await scheduler_loop.stop()
+    except Exception:
+        import logging
+        logging.getLogger(__name__).debug("shutdown scheduler loop failed", exc_info=True)
     # 优雅关停：排空 write-behind 缓冲，避免未落库消息在进程退出时丢失。
     try:
         from app.persistence.write_behind import write_behind
@@ -151,6 +167,7 @@ def create_app() -> FastAPI:
     app.include_router(providers.router, prefix="/api", tags=["providers"])
     app.include_router(scheduled.router, prefix="/api", tags=["scheduled"])
     app.include_router(profiles.router, prefix="/api", tags=["profiles"])
+    app.include_router(permission_profiles.router, prefix="/api", tags=["permission-profiles"])
     app.include_router(exec_policy.router, prefix="/api", tags=["exec-policy"])
     app.include_router(hooks.router, prefix="/api", tags=["hooks"])
     app.include_router(memories.router, prefix="/api", tags=["memories"])

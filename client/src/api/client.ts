@@ -6,6 +6,7 @@ import type {
   ArtifactOut,
   CompactionIndexOut,
   ConfigProfileOut,
+  CronValidateOut,
   ExecPolicyRuleOut,
   FileChangeOut,
   FileDiffOut,
@@ -16,6 +17,7 @@ import type {
   ProjectOut,
   ProviderOut,
   ScannedModel,
+  ScheduledMissedPolicy,
   RollbackAffected,
   RollbackPreviewFile,
   RollbackPreviewOut,
@@ -191,7 +193,8 @@ export interface TurnCreateBody {
   attachments?: Record<string, unknown>[];
   scheduled_task_id?: number;
   reasoning_effort?: string;
-  mode?: "readonly" | "plan" | null;
+  // plan-230-1144 M2: 模式名放宽为 string——自定义权限模式需透传（后端 resolve_tools 解析白名单）
+  mode?: string | null;
   // plan-166-767: 发送请求携带当前会话选中模型，后端据此优先解析（切换后立即发送用新模型）
   model_id?: number;
 }
@@ -235,6 +238,18 @@ export interface SkillOut {
   tags: string[] | null;
   is_active: boolean;
   auto_load: boolean;
+}
+
+/** plan-230-1144 M2: 权限模式（白名单+提示词） */
+export interface PermissionProfileOut {
+  name: string;
+  display_name: string;
+  kind: "full" | "readonly" | "plan";
+  builtin: boolean;
+  description: string;
+  /** 工具白名单；空数组 = 全量工具（不限制） */
+  tools: string[];
+  hint: string;
 }
 
 export interface McpServerOut {
@@ -307,10 +322,10 @@ export const api = {
       .filter(Boolean).join("&");
     return get<SessionOut[]>(`/sessions${q ? `?${q}` : ""}`);
   },
-  createSession: (data: { project_id: number; title?: string; model_id?: number; permission_mode?: "default" | "accept_edits" | "plan" | "readonly"; goal_text?: string }) =>
+  createSession: (data: { project_id: number; title?: string; model_id?: number; permission_mode?: string; goal_text?: string }) =>
     post<SessionOut>("/sessions", data),
   getSession: (id: number) => get<SessionOut>(`/sessions/${id}`),
-  updateSession: (id: number, data: { title?: string; model_id?: number; pinned?: boolean; status?: string; permission_mode?: "default" | "accept_edits" | "plan" | "readonly" }) =>
+  updateSession: (id: number, data: { title?: string; model_id?: number; pinned?: boolean; status?: string; permission_mode?: string }) =>
     patch<SessionOut>(`/sessions/${id}`, data),
   /** 删除 = 归档 */
   deleteSession: (id: number) => del<{ ok: boolean }>(`/sessions/${id}`),
@@ -387,13 +402,29 @@ export const api = {
     return get<UsageStatsOut>(`/usage/stats${qs ? `?${qs}` : ""}`);
   },
 
-  // ── 定时任务 ──
+  // ── 定时任务（plan-230-1144 M1.1：调度器落地）──
   listScheduledTasks: () => get<ScheduledTaskOut[]>("/scheduled-tasks"),
-  createScheduledTask: (data: { session_id: number; name: string; cron: string; prompt: string }) =>
+  createScheduledTask: (data: { session_id: number; name: string; cron: string; prompt: string; missed_policy?: ScheduledMissedPolicy }) =>
     post<ScheduledTaskOut>("/scheduled-tasks", data),
-  updateScheduledTask: (id: number, data: { name?: string; cron?: string; prompt?: string; enabled?: boolean }) =>
+  updateScheduledTask: (id: number, data: { name?: string; cron?: string; prompt?: string; enabled?: boolean; missed_policy?: ScheduledMissedPolicy }) =>
     patch<ScheduledTaskOut>(`/scheduled-tasks/${id}`, data),
   deleteScheduledTask: (id: number) => del<{ ok: boolean }>(`/scheduled-tasks/${id}`),
+  /** 立即试跑一次（不影响既有排程） */
+  runScheduledTask: (id: number) => post<{ ok: boolean; task_id: number; triggered_at: string }>(`/scheduled-tasks/${id}/run`, {}),
+  /** 预览接下来 N 次触发时刻 */
+  previewScheduledTask: (id: number, count = 5) =>
+    get<{ cron: string; next_runs: string[] }>(`/scheduled-tasks/${id}/preview?count=${count}`),
+  /** 表单实时校验 cron */
+  validateCron: (cron: string) =>
+    get<CronValidateOut>(`/scheduled-tasks/meta/validate?cron=${encodeURIComponent(cron)}`),
+
+  // ── 权限模式（plan-230-1144 M2：白名单+提示词外置，支持自定义模式）──
+  listPermissionProfiles: () => get<PermissionProfileOut[]>("/permission-profiles"),
+  upsertPermissionProfile: (data: {
+    name: string; display_name?: string; kind?: string;
+    description?: string; tools?: string[]; hint?: string;
+  }) => post<PermissionProfileOut>("/permission-profiles", data),
+  deletePermissionProfile: (name: string) => del<{ ok: boolean }>(`/permission-profiles/${name}`),
 
   // ── 配置 profile ──
   listProfiles: (projectId?: number) =>
@@ -422,9 +453,20 @@ export const api = {
   deleteHook: (id: number) => del<{ ok: boolean }>(`/hooks/${id}`),
 
   // ── 记忆 ──
-  listMemories: (sessionId?: number) =>
-    get<MemoryEntryOut[]>(`/memories${sessionId ? `?session_id=${sessionId}` : ""}`),
+  // plan-230-1144 M4.1: 三层化——可按 scope/project 过滤、可提升作用域
+  listMemories: (opts?: { sessionId?: number; scope?: string; projectId?: number; includeCandidate?: boolean }) => {
+    const q = new URLSearchParams();
+    if (opts?.sessionId != null) q.set("session_id", String(opts.sessionId));
+    if (opts?.scope) q.set("scope", opts.scope);
+    if (opts?.projectId != null) q.set("project_id", String(opts.projectId));
+    if (opts?.includeCandidate === false) q.set("include_candidate", "false");
+    const qs = q.toString();
+    return get<MemoryEntryOut[]>(`/memories${qs ? `?${qs}` : ""}`);
+  },
   deleteMemory: (id: number) => del<{ ok: boolean }>(`/memories/${id}`),
+  /** 提升/降级记忆作用域（session ↔ project ↔ global） */
+  promoteMemory: (id: number, targetScope: "session" | "project" | "global", projectId?: number) =>
+    post<{ ok: boolean }>(`/memories/${id}/promote`, { target_scope: targetScope, project_id: projectId }),
   consolidateMemories: (sessionId: number, projectId: number) =>
     post<{ ok: boolean; path: string; entries: number }>(`/memories/consolidate?session_id=${sessionId}&project_id=${projectId}`),
 
@@ -488,6 +530,16 @@ export const api = {
     post<{ ok: boolean; results: Array<Record<string, unknown>> }>(
       `/diagnostics/checkpoints/cleanup${workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""}`,
     ),
+  // ── plan-230-1144 M3: 符号索引状态 / 手动重建 ──
+  symbolIndexStatus: (workspace?: string) =>
+    get<{ ok: boolean; workspace?: string; available?: boolean; files?: number; symbols?: number; last_updated?: number | null; error?: string }>(
+      `/diagnostics/symbol-index${workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""}`,
+    ),
+  symbolIndexRebuild: (workspace?: string) =>
+    post<{ ok: boolean; workspace?: string; files_scanned?: number; files_updated?: number; symbols?: number; elapsed_ms?: number; error?: string }>(
+      `/diagnostics/symbol-index/rebuild${workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""}`,
+      {},
+    ),
 
   // ── 技能 ──
   listSkills: (source?: string) =>
@@ -501,6 +553,14 @@ export const api = {
     tools?: string[]; tags?: string[]; is_active?: boolean; auto_load?: boolean;
   }) => patch<SkillOut>(`/skills/${id}`, data),
   deleteSkill: (id: number) => del<{ ok: boolean }>(`/skills/${id}`),
+  // plan-230-1144 M1.3: 手动刷新 MCP 工具清单（握手失败抛 400，前端展示健康状态）
+  // plan-234-1171 R1: workspace 传项目工作区根——codegraph 依赖 rootUri 定位项目，
+  // 且 args 中的 ${workspaceFolder} 需在服务端 spawn 前替换。
+  refreshMcpTools: (id: number, workspace?: string) =>
+    post<{ ok: boolean; count: number; server: McpServerOut }>(
+      `/mcp-servers/${id}/refresh-tools${workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""}`,
+      {},
+    ),
 
   // ── MCP ──
   listMcpServers: (source?: string) =>
@@ -513,7 +573,9 @@ export const api = {
   updateMcpServer: (id: number, data: {
     display_name?: string; description?: string; transport?: string; command?: string;
     args?: string[]; env?: Record<string, string>; url?: string; is_active?: boolean;
-  }) => patch<McpServerOut>(`/mcp-servers/${id}`, data),
+  }, workspace?: string) => patch<McpServerOut>(
+    `/mcp-servers/${id}${workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""}`, data,
+  ),
  deleteMcpServer: (id: number) => del<{ ok: boolean }>(`/mcp-servers/${id}`),
   scanMcpServers: () => post<Array<{
     name: string; transport: string; command: string | null;
@@ -549,9 +611,18 @@ export const api = {
     get<Array<{ source: string; label: string; path: string; exists: boolean; kind: string }>>(
       `/settings/ai-rules/scan${path ? `?path=${encodeURIComponent(path)}` : ""}`
     ),
-  getAiRules: () => get<{ sources: Array<{ source: string; label: string; enabled: boolean }>; global_rules: string; workdir_rules: string }>("/settings/ai-rules"),
-  setAiRules: (data: { enabled_sources?: string[]; global_rules?: string; workdir_rules?: string }) =>
-    put<{ sources: Array<{ source: string; label: string; enabled: boolean }>; global_rules: string; workdir_rules: string }>("/settings/ai-rules", data),
+  getAiRules: (projectPath?: string) => get<{
+    sources: Array<{ source: string; label: string; enabled: boolean }>;
+    global_rules: string; workdir_rules: string; project_path: string;
+  }>(`/settings/ai-rules${projectPath ? `?project_path=${encodeURIComponent(projectPath)}` : ""}`),
+  // plan-234-1171 R7: project_path 决定项目规则归属；写入键与注入读取键同源
+  setAiRules: (data: {
+    enabled_sources?: string[]; global_rules?: string;
+    workdir_rules?: string; project_path?: string;
+  }) => put<{
+    sources: Array<{ source: string; label: string; enabled: boolean }>;
+    global_rules: string; workdir_rules: string; project_path: string;
+  }>("/settings/ai-rules", data),
 
   // ── 全局设置（v2.2: 设置中心持久化统一）──
   getGlobalSettings: () => get<GlobalSettingsOut>("/settings/global"),

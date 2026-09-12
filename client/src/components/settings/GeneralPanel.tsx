@@ -1,7 +1,8 @@
 /** 设置中心：常规（v2.2 对齐 zcode 3.18）。
  * 界面语言、HTTP 代理、终端 Shell/字体、增强搜索、消息流显示开关。
  * 所有设置项走 /settings/global 持久化（config.json），重启不丢。 */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useClickOutside } from "../../hooks/useClickOutside";
 import { api } from "../../api/client";
 import { useUiStore } from "../../store/ui";
 import { useChatStore } from "../../store/chat";
@@ -44,7 +45,6 @@ export function GeneralPanel() {
     browser_headless: true,
   });
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
   // 问题7/8: 终端 Shell/字体选项（后端按当前设备存在性探测）
   const [shells, setShells] = useState(TERMINAL_SHELLS);
   const [fonts, setFonts] = useState<{ value: string; label: string }[]>([]);
@@ -52,6 +52,8 @@ export function GeneralPanel() {
   const [toolNames, setToolNames] = useState<string[]>([]);
   const [toolDraft, setToolDraft] = useState("");
   const [toolOpen, setToolOpen] = useState(false);
+  const toolSelectorRef = useRef<HTMLDivElement>(null);
+  useClickOutside(toolSelectorRef, toolOpen, () => setToolOpen(false));
 
   useEffect(() => {
     api.getTerminalOptions()
@@ -131,14 +133,12 @@ export function GeneralPanel() {
       });
       // v1.1: 保存即生效——刷新 todos/reasoning 显示开关
       await useUiStore.getState().refreshGlobalFlags();
-      setSaved(true);
-      setTimeout(() => setSaved(false), 1800);
     } catch (e) { useChatStore.setState({ error: "保存失败: " + String(e) }); }
     finally { setSaving(false); }
   };
 
   return (
-    <div>
+    <div className="settings-card-stack">
       <div className="settings-card">
         <Row title={t("gp.language")} desc={t("gp.language_desc")}>
           <select className="ui-select" value={ui.language} onChange={(e) => ui.setLanguage(e.target.value as "zh" | "en")}>
@@ -185,7 +185,7 @@ export function GeneralPanel() {
           <Sw checked={cfg.auto_approve_tools} onChange={(v) => patch({ auto_approve_tools: v })} />
         </Row>
         <Row title={t("gp.force_approve")} desc={t("gp.force_approve_desc")}>
-          <div className="approval-tool-selector">
+          <div className="approval-tool-selector" ref={toolSelectorRef}>
             {forceTools.map((t) => (
               <span key={t} className="approval-tool-chip">
                 {t}
@@ -198,7 +198,6 @@ export function GeneralPanel() {
               placeholder={forceTools.length ? "" : "选择或输入工具名…"}
               onChange={(e) => { setToolDraft(e.target.value); setToolOpen(true); }}
               onFocus={() => setToolOpen(true)}
-              onBlur={() => setTimeout(() => setToolOpen(false), 150)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === ",") {
                   e.preventDefault();
@@ -276,11 +275,16 @@ export function GeneralPanel() {
         <Row title={t("gp.browser")} desc={t("gp.browser_desc")}>
           <Sw checked={cfg.browser_enabled} onChange={(v) => patch({ browser_enabled: v })} />
         </Row>
-        {cfg.browser_enabled && (
-          <Row title={t("gp.browser_headless")} desc={t("gp.browser_headless_desc")}>
-            <Sw checked={cfg.browser_headless} onChange={(v) => patch({ browser_headless: v })} />
-          </Row>
-        )}
+        <Row
+          className={cfg.browser_enabled ? undefined : "settings-row-disabled"}
+          title={t("gp.browser_headless")}
+          desc={t("gp.browser_headless_desc")}
+        >
+          <Sw
+            checked={cfg.browser_headless}
+            onChange={(v) => { if (cfg.browser_enabled) patch({ browser_headless: v }); }}
+          />
+        </Row>
         <Row title={t("gp.plan_outside")} desc={t("gp.plan_outside_desc")}>
           <Sw checked={cfg.plan_mode_allow_outside_access} onChange={(v) => patch({ plan_mode_allow_outside_access: v })} />
         </Row>
@@ -296,9 +300,9 @@ export function GeneralPanel() {
         </Row>
       </div>
 
-      <div className="settings-create-actions" style={{ marginTop: 12 }}>
-        <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={saving}>
-          {saving ? t("gp.saving") : saved ? t("gp.saved") : t("gp.save")}
+      <div className="settings-create-actions" style={{ marginTop: 0 }}>
+        <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={saving} aria-busy={saving}>
+          {t("gp.save")}
         </button>
       </div>
     </div>

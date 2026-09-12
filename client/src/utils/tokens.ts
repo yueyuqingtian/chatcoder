@@ -1,7 +1,9 @@
 /** 输入框 token 化（会话 229）：把 $技能 / @文件 从纯文本切分为可高亮片段。
  *
- * 用途：ComposerCore 输入框标签化（方案 A 高亮叠加）——标签仅是视觉高亮，
- * input 值语义仍为纯文本，发送内容与后端协议不变。
+ * 用途：**仅用于只读展示**（AttachmentCard 消息内高亮）。
+ * plan-238-1210 (A2)：输入框已改为"引用 chips 行"，不再使用本模块做输入层叠加——
+ * 双层渲染（透明 textarea + 标签高亮层）已因排版错位问题（全选/光标/滚动）整体删除；
+ * 切勿再把它接回输入层。
  */
 
 export type TokenType = "text" | "skill" | "file";
@@ -43,7 +45,10 @@ export function tokenDisplayName(tok: Token): string {
 
 /** 返回光标所在 token 的区间 [start, end)（会话 228-1142：Backspace/Delete 整体删除用）。
  * pos 为光标位置：pos-1 落在某个 token 内（含 token 末尾）时命中该 token；
- * pos 恰为 token 起点（或 pos<=0 / 无命中）时返回 null——此时应按普通字符删除。 */
+ * pos 恰为 token 起点（或 pos<=0 / 无命中）时返回 null——此时应按普通字符删除。
+ *
+ * plan-238-1210 (A2)：输入框已无内嵌 token，本函数当前**无调用方**（保留供未来
+ * 只读文本域的整词删除等场景复用，不在输入层生效）。 */
 export function tokenRangeAt(text: string, pos: number): { start: number; end: number } | null {
   if (pos <= 0) return null;
   for (const m of text.matchAll(TOKEN_RE)) {

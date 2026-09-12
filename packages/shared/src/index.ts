@@ -114,7 +114,9 @@ export interface SessionOut {
   pinned: boolean;
   /** v7: 置顶时间——前端"后置顶在上"排序依据 */
   pinned_at?: string | null;
-  permission_mode?: "default" | "accept_edits" | "plan" | "readonly";
+  // plan-230-1144 M2: 模式外置为可配置数据，自定义模式名是任意字符串——
+  // 内置 4 值（default/accept_edits/plan/readonly）仅是其中的内置项。
+  permission_mode?: string;
   fork_parent_id: number | null;
   worktree_path: string | null;
   has_running?: boolean;
@@ -216,6 +218,11 @@ export interface ArtifactOut {
   files: string[] | null;
 }
 
+/** 错过策略：skip=错过即跳过只等下一次；run_once=重启后补跑一次 */
+export type ScheduledMissedPolicy = "skip" | "run_once";
+/** 最近一次执行结果（由 scheduler_loop 回写） */
+export type ScheduledRunStatus = "triggered" | "ok" | "failed" | "skipped" | "cancelled" | "orphaned";
+
 export interface ScheduledTaskOut {
   id: number;
   session_id: number;
@@ -225,6 +232,25 @@ export interface ScheduledTaskOut {
   enabled: boolean;
   last_run_at: string | null;
   next_run_at: string | null;
+  // plan-230-1144 M1.1：调度器落地后的执行状态
+  last_status: ScheduledRunStatus | null;
+  last_error: string | null;
+  missed_policy: ScheduledMissedPolicy;
+}
+
+/** cron 实时校验结果（GET /scheduled-tasks/meta/validate） */
+export interface CronValidateOut {
+  valid: boolean;
+  error?: string;
+  next_run_at?: string | null;
+  never_fires?: boolean;
+  fields?: {
+    minutes: number[];
+    hours: number[];
+    days_of_month: number[];
+    months: number[];
+    days_of_week: number[];
+  };
 }
 
 export interface ConfigProfileOut {
@@ -263,6 +289,13 @@ export interface MemoryEntryOut {
   usage_count: number;
   last_usage_at: string | null;
   generated_at: string | null;
+  // plan-230-1144 M4.1: 三层化字段
+  scope?: "session" | "project" | "global" | string;
+  project_id?: number | null;
+  /** 候选区（低置信，未注入 prompt，可被检索） */
+  candidate?: boolean;
+  expires_at?: string | null;
+  superseded_by?: number | null;
 }
 
 export interface ModelOut {

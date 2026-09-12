@@ -124,9 +124,11 @@ class ServerToolExecutor(ToolExecutor):
                     tool_name, getattr(ctx, "permission_mode", "default"),
                 )
             else:
-                # 注册 on_request 回调(由 agent_runtime 传入,负责入库 + WS 广播)
-                if on_approval_request is not None:
-                    approval_manager.set_on_request(on_approval_request)
+                # plan-230-1144: 不再注册全局单例回调——多会话并发时后注册者会覆盖前者，
+                # 导致 A 会话的审批广播进 B 会话。approval_manager.request 现按
+                # detail.session_id 精确路由到发起会话的 WS 通道。
+                # （on_approval_request 保留形参以兼容既有调用方，其内部 emitter 已无用）
+                _ = on_approval_request  # noqa: F841 兼容保留
                 approved = await approval_manager.request(approval_id=approval_id, detail=detail)
                 if not approved:
                     return ToolResult(
@@ -140,13 +142,17 @@ class ServerToolExecutor(ToolExecutor):
             # v4.8.2: 工具执行加超时，防止同步 I/O 挂起
             # v1.0 (plan-153-705): 60s 硬编码 → settings.tool_exec_timeout_sec（默认 600s），
             # 与 agent_loop 外层超时同源；长编译/测试/安装不再被内层提前误杀。
-            # v2.2: ask_user_question 需要等用户回答，超时放宽到审批超时 + 30s
+            # plan-238-1188: ask_user_question 彻底不设超时——
+            # approval.py 的 question 无超时只覆盖"审批等待"环节，工具 run() 本身
+            # 仍被本层 wait_for(审批超时+30s) 杀掉，表现为"提问还是会超时"。
+            # 现改为无限等待（用户取消 turn 会连带取消本协程，不存在悬挂）。
             import asyncio
             from app.core.config import settings as _settings
-            _timeout = float(_settings.tool_exec_timeout_sec)
             if tool_name == "ask_user_question":
-                _timeout = float(_settings.approval_timeout_sec) + 30.0
-            result = await asyncio.wait_for(tool.run(args, ctx), timeout=_timeout)
+                result = await tool.run(args, ctx)
+            else:
+                _timeout = float(_settings.tool_exec_timeout_sec)
+                result = await asyncio.wait_for(tool.run(args, ctx), timeout=_timeout)
             return result
         except asyncio.TimeoutError:
             logger.error("工具执行超时 %s", tool_name)
@@ -218,6 +224,19 @@ class ServerToolExecutor(ToolExecutor):
             return True, ""
         if pm == "accept_edits" and tool_name in _WRITE_TOOLS:
             return True, ""
+
+        # 2b. plan-230-1144 M2: 模式白名单强制——模式定义了白名单且工具不在其中时直接拒绝。
+        # schema 层已按白名单过滤，模型理论上看不到白名单外的工具；这里是第二道闸门
+        # （新旧双跑取更严方：防模型幻觉调用未暴露工具时 executor 仍放行）。
+        try:
+            from app.services import permission_profile_service as _pps
+            _profile = _pps.get_profile(pm)
+            if _profile and _profile.get("tools") and tool_name not in _profile["tools"]:
+                return False, (
+                    f"模式「{_profile.get('display_name') or pm}」不允许工具 {tool_name}"
+                )
+        except Exception:
+            logger.debug("permission_profile 白名单强制检查失败(忽略)", exc_info=True)
 
         # 3. exec_policy 规则（工具级 + terminal 命令级；需要 ctx.db）
         if ctx.db is not None:

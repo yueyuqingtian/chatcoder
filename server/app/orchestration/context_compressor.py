@@ -443,6 +443,10 @@ async def compact_session(
         "used_tokens": used_tokens,
         "context_window": context_window,
         "ratio": round((used_tokens or 0) / context_window * 100, 1) if context_window else None,
+        # plan-238-1188: 补入 summary_tokens——下方日志引用了该键，此前缺失会在
+        # 写库全部完成后抛 KeyError，被 agent_loop 当成“落库式压缩失败”而叠加执行
+        # 内存式压缩（上下文被双重压缩、占用直接跌到 4%）。
+        "summary_tokens": max(1, len(summary_text.encode("utf-8")) // 4),
     }
     logger.info(
         "[compressor] session=%s 压缩完成: index=%d %d 条消息 %d tokens -> checkpoint(%d chars, %d tokens)，节省 %d tokens (trigger=%s)",
@@ -598,6 +602,8 @@ async def _commit_compaction(
         "used_tokens": used_tokens,
         "context_window": context_window,
         "ratio": round((used_tokens or 0) / context_window * 100, 1) if context_window else None,
+        # plan-238-1188: 同 compact_session——日志引用 summary_tokens，缺失会抛 KeyError。
+        "summary_tokens": max(1, len(summary_text.encode("utf-8")) // 4),
     }
     logger.info(
         "[compressor] session=%s %s 压缩完成: index=%d %d 条消息 %d tokens -> %d tokens，节省 %d",

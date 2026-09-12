@@ -1,13 +1,16 @@
-/** ModelPicker（v18 级联重写）：两级级联选择器（供应商 → 模型）。
- * 左栏供应商分组，右栏该供应商下的模型列表；ComposerBox / Workspace 空态输入框共用。
- * 底部「管理模型」打开设置页。
- * v19: 菜单改 fixed 定位（右缘对齐触发按钮、clamp 在视口内，窄面板不再溢出）；
- *      多模态角标改为 图标+文字 的精致药丸。
+/** ModelPicker（plan-238-1191：基于 Radix DropdownMenu 重写）：
+ * 一级 = 供应商菜单（单行名称 + 右侧 ›，当前模型所在供应商显示 ✓）；
+ * 二级 = 该供应商的模型子菜单（悬停/聚焦即滑出，选中项左侧 ✓）。
+ * 底部「管理模型」打开设置页。ComposerBox / Workspace 空态输入框共用。
+ *
+ * 视觉沿用项目设计变量（bg-elevated / border / shadow / bg-hover / accent），
+ * 弹层定位、碰撞翻转、键盘导航与 ARIA 语义由 Radix 组件库承担（替换此前
+ * 手写 portal + 坐标 clamp + 两级网格的方形弹窗）。
  */
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { useMemo } from "react";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import type { ModelOut } from "../../api/client";
-import { IconCpu, IconCheck, IconBox, IconImage } from "../icons";
+import { IconCpu, IconCheck, IconChevronRight, IconMultimodal } from "../icons";
 
 interface ModelGroup {
   name: string;
@@ -16,6 +19,21 @@ interface ModelGroup {
 
 export function openModelSettings() {
   window.dispatchEvent(new CustomEvent("chatcoder:open-settings", { detail: { tab: "models" } }));
+}
+
+/** 模型附加信息标签（长上下文 / 消耗倍率 / 多模态图标） */
+function ModelTags({ m }: { m: ModelOut }) {
+  const hasTags = Boolean(m.trae_max_context || m.trae_consumption_rate || m.is_multimodal);
+  if (!hasTags) return <span className="mp-tags" />;
+  return (
+    <span className="mp-tags">
+      {m.trae_max_context ? <span className="mp-tag">长上下文</span> : null}
+      {m.trae_consumption_rate ? <span className="mp-tag">消耗×{m.trae_consumption_rate}</span> : null}
+      {m.is_multimodal ? (
+        <span className="mp-tag mp-tag-icon" title="支持图片输入（多模态）"><IconMultimodal size={12} /></span>
+      ) : null}
+    </span>
+  );
 }
 
 export function ModelPicker({
@@ -51,52 +69,6 @@ export function ModelPicker({
   }, [models, value]);
 
   const activeModel = models.find((m) => m.id === value);
-  const [activeGroup, setActiveGroup] = useState<string | null>(null);
-  const wrapRef = useRef<HTMLDivElement>(null);
-  const [menuPos, setMenuPos] = useState<{
-    left: number;
-    top?: number;
-    bottom?: number;
-    maxHeight: number;
-  } | null>(null);
-
-  // Portal 菜单挂到 body，坐标和 getBoundingClientRect() 都使用视口坐标，避免被空态布局的 overflow 或容器查询上下文影响。
-  useLayoutEffect(() => {
-    if (!open) { setMenuPos(null); return; }
-    const calc = () => {
-      const r = wrapRef.current?.getBoundingClientRect();
-      if (!r) return;
-      const W = Math.min(460, Math.max(0, window.innerWidth - 16));
-      const left = Math.max(8, Math.min(r.right - W, window.innerWidth - W - 8));
-      const gap = 6;
-      const spaceAbove = Math.max(0, r.top - gap - 8);
-      const spaceBelow = Math.max(0, window.innerHeight - r.bottom - gap - 8);
-      // 输入框靠近底部时向上展开；可用高度不足时限制菜单内部滚动，不能溢出窗口。
-      if (spaceAbove >= 280 || spaceAbove >= spaceBelow) {
-        setMenuPos({ left, bottom: Math.max(8, window.innerHeight - r.top + gap), maxHeight: Math.max(180, spaceAbove) });
-      } else {
-        setMenuPos({ left, top: Math.max(8, r.bottom + gap), maxHeight: Math.max(180, spaceBelow) });
-      }
-    };
-    calc();
-    window.addEventListener("resize", calc);
-    window.addEventListener("scroll", calc, true);
-    return () => {
-      window.removeEventListener("resize", calc);
-      window.removeEventListener("scroll", calc, true);
-    };
-  }, [open]);
-
-  // 打开时定位到当前模型所在供应商
-  useEffect(() => {
-    if (!open) return;
-    const g = groups.find((x) => x.models.some((m) => m.id === value));
-    setActiveGroup(g?.name ?? groups[0]?.name ?? null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
-
-  const currentGroup = groups.find((g) => g.name === activeGroup) ?? groups[0];
-
   const label = activeModel
     ? activeModel.provider_name
       ? `${activeModel.provider_name}/${activeModel.name}`
@@ -104,83 +76,81 @@ export function ModelPicker({
     : "模型";
 
   return (
-    <div className="composer-model-wrap" ref={wrapRef}>
-      <button className="composer-model-badge" onClick={onToggle} title={label}>
-        <IconCpu size={13} />
-        <span className="mp-label">{label}</span>
-      </button>
-      {open && menuPos && createPortal(
-        <div
-          className="composer-menu composer-model-menu mp-menu"
-          style={{
-            position: "fixed",
-            left: menuPos.left,
-            top: menuPos.top ?? "auto",
-            bottom: menuPos.bottom ?? "auto",
-            right: "auto",
-            maxHeight: menuPos.maxHeight,
-          }}
-        >
-          <div className="composer-menu-title mp-menu-head"><span>选择模型</span><span className="mp-menu-hint">供应商 / 模型</span></div>
-          {groups.length === 0 ? (
-            <div className="composer-menu-empty">
-              <div>暂无可用模型，请先在设置中添加</div>
-              <div style={{ marginTop: 6 }}>
-                <button className="mp-manage" onClick={() => { openModelSettings(); }}>管理模型</button>
-              </div>
-            </div>
-          ) : (
-            <div className="mp-cascade">
-              <div className="mp-col mp-col-groups">
-                <div className="mp-groups-list">
-                  {groups.map((g) => (
-                    <button
-                      key={g.name}
-                      className={"mp-group" + (g.name === activeGroup ? " active" : "")}
-                      title={g.name}
-                      onClick={() => setActiveGroup(g.name)}
-                    >
-                      <IconBox size={13} className="mp-group-icon" />
-                      <span className="mp-group-name">{g.name}</span>
-                      <span className="mp-group-count">{g.models.length}</span>
-                    </button>
-                  ))}
-                </div>
-                <div className="mp-left-footer">
-                  <button className="mp-manage" onClick={() => { openModelSettings(); }}>管理模型</button>
-                </div>
-              </div>
-              <div
-                className="mp-col mp-col-models"
-                onWheel={(e) => {
-                  e.stopPropagation();
-                }}
-              >
-                {currentGroup?.models.map((m) => (
-                  <button
-                    key={m.id}
-                    className={"mp-item" + (m.id === value ? " active" : "")}
-                    title={m.name}
-                    onClick={() => onChange(m.id)}
-                  >
-                    <span className="mp-item-check">{m.id === value && <IconCheck size={12} />}</span>
-                    <span className="mp-item-name">{m.name}</span>
-                    <span className="mp-tags">
-                      {m.trae_max_context ? <span className="mp-tag">1M上下文</span> : null}
-                      {(m.reasoning_efforts?.length ?? 0) > 0 && (
-                        <span className="mp-tag">思考深度</span>
-                      )}
-                      {m.trae_consumption_rate ? <span className="mp-tag">消耗×{m.trae_consumption_rate}</span> : null}
-                      {m.is_multimodal && <span className="mp-tag"><IconImage size={9} />多模态</span>}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>,
-        document.body,
-      )}
+    <div className="composer-model-wrap">
+      <DropdownMenu.Root open={open} onOpenChange={(next) => { if (next !== open) onToggle(); }}>
+        <DropdownMenu.Trigger asChild>
+          <button className="composer-model-badge" type="button" title={label}>
+            <IconCpu size={13} />
+            <span className="mp-label">{label}</span>
+          </button>
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Portal>
+          {/* side=top：输入框贴近窗口底部，向上展开；align=start 与触发按钮左缘对齐，
+              保证菜单文本整体左对齐（plan-238-1210）；越界翻转/平移由 avoidCollisions 处理 */}
+          <DropdownMenu.Content
+            className="mp-menu"
+            side="top"
+            align="start"
+            sideOffset={6}
+            collisionPadding={8}
+          >
+            <div className="mp-menu-head">选择模型</div>
+            {groups.length === 0 ? (
+              <>
+                <div className="mp-models-empty">暂无可用模型，请先在设置中添加</div>
+                <DropdownMenu.Separator className="mp-sep" />
+                <DropdownMenu.Item className="mp-item" onSelect={() => openModelSettings()}>
+                  <span className="mp-item-check" />
+                  <span className="mp-item-name">管理模型</span>
+                </DropdownMenu.Item>
+              </>
+            ) : (
+              <>
+                {groups.map((g) => {
+                  const holdsCurrent = g.models.some((m) => m.id === value);
+                  return (
+                    <DropdownMenu.Sub key={g.name}>
+                      <DropdownMenu.SubTrigger className="mp-group">
+                        <span className="mp-group-name" title={g.name}>{g.name}</span>
+                        {holdsCurrent
+                          ? <span className="mp-group-current"><IconCheck size={12} /></span>
+                          : <span className="mp-group-arrow"><IconChevronRight size={13} /></span>}
+                      </DropdownMenu.SubTrigger>
+                      <DropdownMenu.Portal>
+                        <DropdownMenu.SubContent
+                          className="mp-menu mp-sub-menu"
+                          sideOffset={6}
+                          alignOffset={-5}
+                          collisionPadding={8}
+                        >
+                          <div className="mp-menu-head">{g.name}</div>
+                          {g.models.map((m) => (
+                            <DropdownMenu.Item
+                              key={m.id}
+                              className={"mp-item" + (m.id === value ? " active" : "")}
+                              title={m.name}
+                              onSelect={() => onChange(m.id)}
+                            >
+                              <span className="mp-item-check">{m.id === value && <IconCheck size={12} />}</span>
+                              <span className="mp-item-name">{m.name}</span>
+                              <ModelTags m={m} />
+                            </DropdownMenu.Item>
+                          ))}
+                        </DropdownMenu.SubContent>
+                      </DropdownMenu.Portal>
+                    </DropdownMenu.Sub>
+                  );
+                })}
+                <DropdownMenu.Separator className="mp-sep" />
+                <DropdownMenu.Item className="mp-item" onSelect={() => openModelSettings()}>
+                  <span className="mp-item-check" />
+                  <span className="mp-item-name">管理模型</span>
+                </DropdownMenu.Item>
+              </>
+            )}
+          </DropdownMenu.Content>
+        </DropdownMenu.Portal>
+      </DropdownMenu.Root>
     </div>
   );
 }

@@ -219,10 +219,14 @@ class Ta3Provider(ModelProvider):
                             args = {}
                     alias = TO_TA3.get(name)
                     if alias is None:
-                        # 未映射的历史调用（如 collect_results）→ 转普通文本，避免协议断裂
+                        # 未映射的历史调用（如 collect_results）→ 转普通文本，避免协议断裂。
+                        # plan-238-1191: 措辞说明"调用与结果已转为文本记录"（结果并不会
+                        # 丢失——tool 消息随后会被转成用户文本），并明确要求不要复述本条，
+                        # 避免模型把提示原样抄进回复、或误以为工具不可用而停在半途。
                         out.pop("tool_calls", None)
                         out["content"] = raw_content + (
-                            f"\n\n（历史工具调用 {name} 在当前环境不可用，结果已略）"
+                            f"\n\n（历史工具调用 {name} 在当前模型下不可用："
+                            f"调用与结果已转为文本记录，请勿复述本条提示，继续使用当前可用工具推进任务。）"
                         )
                         return out
                     clean_args = sanitize_outbound_structure(disguise_args(name, args))
@@ -533,20 +537,21 @@ class Ta3Provider(ModelProvider):
         identity = _identity(self._model_name, self._meta)
         is_kimi = any(kw in identity for kw in _KIMI_IDENT)
         # v28: max_tokens 以目录 completionOptions.maxTokens 为上限——目录声明的是
-        # 网关允许的最大值（kimi-k3=32768），全局 agent_max_output_tokens=131072
-        # 直接下发会超上限导致网关截断/异常空响应（对齐 _build_openai_body 的语义）。
+        # 网关允许的最大值（kimi-k3=32768），显式下发超上限值会触发网关截断/异常空响应
+        # （对齐 _build_openai_body 的语义）。
+        # 不限制输出：目录未声明且请求未指定时不再兜底 2048（旧值会截断长输出），
+        # 不传该字段，由网关/模型自身决定上限。
         _catalog_max = opts.get("maxTokens") or opts.get("max_tokens")
-        if _catalog_max:
-            max_tokens = int(min(request.max_tokens or _catalog_max, _catalog_max))
-        else:
-            max_tokens = request.max_tokens or 2048
         body: dict = {
             "model": request.model or self._model_name,
             "messages": messages,
             "stream": True,
             "temperature": 0.2 if is_kimi else opts.get("temperature", _DEFAULT_TEMPERATURE),
-            "max_tokens": max_tokens,
         }
+        if _catalog_max:
+            body["max_tokens"] = int(min(request.max_tokens or _catalog_max, _catalog_max))
+        elif request.max_tokens:
+            body["max_tokens"] = request.max_tokens
         if system:
             body["system"] = system
         if disguised:

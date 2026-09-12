@@ -120,10 +120,11 @@ def test_anthropic_max_tokens_uses_request_when_below_catalog():
     assert body["max_tokens"] == 5000
 
 
-def test_anthropic_max_tokens_default_2048_without_catalog():
+def test_anthropic_max_tokens_omitted_without_catalog():
+    """无目录声明且请求未指定 → 不传 max_tokens（不限制输出，由网关/模型决定上限）。"""
     p = _provider(anthropic=True, provider="kimi")
     body = p._build_anthropic_body(ChatRequest(messages=[], model="kimi-k3"), [])
-    assert body["max_tokens"] == 2048
+    assert "max_tokens" not in body
 
 
 # ── agent_loop 超时识别 ──

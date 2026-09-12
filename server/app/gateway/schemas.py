@@ -217,6 +217,7 @@ class ScheduledTaskCreate(BaseModel):
     name: str
     cron: str
     prompt: str
+    missed_policy: str = "skip"  # skip（错过即跳过）/ run_once（重启后补跑一次）
 
 
 class ScheduledTaskUpdate(BaseModel):
@@ -224,6 +225,7 @@ class ScheduledTaskUpdate(BaseModel):
     cron: str | None = None
     prompt: str | None = None
     enabled: bool | None = None
+    missed_policy: str | None = None
 
 
 class ScheduledTaskOut(BaseModel):
@@ -235,6 +237,10 @@ class ScheduledTaskOut(BaseModel):
     enabled: bool = True
     last_run_at: str | None = None
     next_run_at: str | None = None
+    # plan-230-1144 M1.1：调度器落地后的执行状态
+    last_status: str | None = None   # triggered / ok / failed / skipped / orphaned
+    last_error: str | None = None
+    missed_policy: str = "skip"
 
 
 # ── 配置 profile ──
@@ -304,6 +310,12 @@ class MemoryEntryOut(BaseModel):
     usage_count: int = 0
     last_usage_at: str | None = None
     generated_at: str | None = None
+    # plan-230-1144 M4.1: 三层化字段
+    scope: str = "session"          # session / project / global
+    project_id: int | None = None
+    candidate: bool = False         # True=候选区（低置信，未注入 prompt，可检索）
+    expires_at: str | None = None
+    superseded_by: int | None = None
 
 
 # ── 回滚 ──

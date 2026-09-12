@@ -199,22 +199,33 @@ async def get_mcp_server(db: AsyncSession, server_id: int) -> McpServer | None:
 
 
 async def update_mcp_server(db: AsyncSession, server_id: int, **kwargs: Any) -> bool:
-    """更新 MCP Server 字段（异步握手 + 写引擎单写线程）。返回可否找到。"""
+    """更新 MCP Server 字段（异步握手 + 写引擎单写线程）。返回可否找到。
+
+    plan-234-1171 R1: 修正握手调用签名。此前按 `fetch_mcp_tools(_existing)` 单参调用，
+    而定义为 `(command, args, env, root_path=None)`，TypeError 被下方 except 吞进
+    logger.debug，表现为「打开启用开关后工具清单永远为空」的静默失败。
+    `workspace` 为项目工作区根（非 ORM 字段，仅用于握手 rootUri/占位符替换）。
+    """
     from app.persistence.database import run_write_locked
+
+    workspace = kwargs.pop("workspace", None) or None
 
     _existing = await get_mcp_server(db, server_id)
     if _existing is None:
         return False
     if _existing.is_active and not _existing.tools and _existing.transport == "stdio" and _existing.command:
         try:
+            from app.core.config import settings
             from app.orchestration.skill_scanner import fetch_mcp_tools
             fetched = await fetch_mcp_tools(
-                _existing.command, _existing.args or [], _existing.env or {}, root_path=_existing.path,
+                _existing.command, _existing.args or [], _existing.env or {},
+                root_path=workspace or settings.workspace_root,
             )
             if fetched:
                 kwargs["tools"] = fetched
         except Exception:
-            pass
+            # 非阻塞语义保留，但提升到 warning：此前 debug 级别让签名类错误长期不可见
+            logger.warning("[mcp] update 时拉取工具列表失败 %s", _existing.name, exc_info=True)
 
     def patch(s):
         srv = s.get(McpServer, server_id)
@@ -325,12 +336,16 @@ async def sync_scanned_mcp_servers(
     from app.persistence.database import run_write_locked
 
     scanned = scan_all_mcp_servers(workspace_root)
-    # 扫描时获取 tools/list 填充到数据库（网络在 async 侧完成，写线程内仅 DB）
+    # 扫描时获取 tools/list 填充到数据库（网络在 async 侧完成，写线程内仅 DB）。
+    # plan-234-1171 R1: 传入工作区根——codegraph 等 server 依赖 rootUri 定位项目，
+    # 且 args 中的 ${workspaceFolder} 需在 spawn 前替换（见 fetch_mcp_tools）。
     fetched_tools: dict[str, list] = {}
     for item in scanned:
         if item.command:
             try:
-                fetched = await fetch_mcp_tools(item.command, item.args, item.env)
+                fetched = await fetch_mcp_tools(
+                    item.command, item.args, item.env, root_path=workspace_root,
+                )
                 if fetched:
                     fetched_tools[item.name] = fetched
             except Exception:

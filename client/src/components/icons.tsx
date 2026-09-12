@@ -6,12 +6,30 @@
  *  - 仅线条,无填充,统一 `currentColor`
  *  - 由父容器 color 控制颜色
  *  - 导出兼容 Feather Icons API(签名 `<Icon size color className />`)
+ *
+ * plan-230-1144 M5.2 状态协议与尺寸档位：
+ *  - `IconSize` 支持档位名（xs=12 / sm=14 / md=16 / lg=20），保留 number 兼容；
+ *  - `IconState` 声明可交互图标的状态集合（供组件按状态切换形态）；
+ *  - `IconChevron` 统一折叠/展开箭头——单一图标 + rotate 过渡，
+ *    取代"展开/折叠切换两个图标组件"的硬切；
+ *  - aria-hidden 默认 true 但可被调用方覆盖（按钮内唯一元素需可访问名）。
  */
 
 import { CSSProperties, SVGProps } from "react";
 
-export type IconSize = number;
+/** 尺寸档位：名称档位或任意数字（兼容旧调用） */
+export type IconSize = "xs" | "sm" | "md" | "lg" | number;
+/** 图标状态协议：可交互图标按状态切换形态的约定集合 */
+export type IconState = "idle" | "hover" | "active" | "focus" | "disabled" | "open" | "loading";
 export type IconColor = string;
+
+const _SIZE_TIERS: Record<string, number> = { xs: 12, sm: 14, md: 16, lg: 20 };
+
+/** 档位名 → px；数字原样返回 */
+function resolveSize(size: IconSize): number {
+  if (typeof size === "number") return size;
+  return _SIZE_TIERS[size] ?? 14;
+}
 
 interface IconProps extends Omit<SVGProps<SVGSVGElement>, "size" | "color"> {
   size?: IconSize;
@@ -26,8 +44,8 @@ const baseProps = (
   strokeWidth: number,
   rest: SVGProps<SVGSVGElement>,
 ) => ({
-  width: size,
-  height: size,
+  width: resolveSize(size),
+  height: resolveSize(size),
   viewBox: "0 0 24 24",
   fill: "none",
   stroke: color || "currentColor",
@@ -35,7 +53,7 @@ const baseProps = (
   strokeLinecap: "round" as const,
   strokeLinejoin: "round" as const,
   "aria-hidden": true,
-  ...rest,
+  ...rest, // 允许调用方覆盖 aria-hidden 等属性
 });
 
 /* ── 主图标 ──────────────────────────────────────────────── */
@@ -119,6 +137,44 @@ export function IconChevronLeft({ size = 14, color = "currentColor", strokeWidth
   return (
     <svg {...baseProps(size, color, strokeWidth, rest)}>
       <polyline points="15 18 9 12 15 6" />
+    </svg>
+  );
+}
+
+/** 统一折叠/展开箭头（plan-230-1144 M5.2）。
+ *
+ * 取代"展开→折叠时替换图标组件"的硬切方式：单一右向 chevron 通过
+ * CSS transform 旋转过渡（--dur-3），展开/折叠是连续动画。
+ *
+ * 用法：
+ *   <IconChevron open={expanded} />                 // right → rotate(90deg)=down
+ *   <IconChevron direction="down" open={expanded} /> // down → rotate(180deg)=up
+ */
+export function IconChevron({
+  direction = "right",
+  open = false,
+  size = 14,
+  color = "currentColor",
+  strokeWidth = 1.75,
+  className,
+  style,
+  ...rest
+}: IconProps & { direction?: "right" | "down" | "left"; open?: boolean }) {
+  const baseAngle = direction === "right" ? 0 : direction === "down" ? 90 : 180;
+  const openDelta = direction === "down" ? 180 : 90; // right: 0→90(down)；down: 90→270(up)
+  const angle = open ? baseAngle + openDelta : baseAngle;
+  const cls = "icon-chevron" + (className ? " " + className : "");
+  return (
+    <svg
+      {...baseProps(size, color, strokeWidth, rest)}
+      className={cls}
+      style={{
+        transition: "transform var(--dur-3) var(--ease-out)",
+        transform: `rotate(${angle}deg)`,
+        ...style,
+      }}
+    >
+      <polyline points="9 18 15 12 9 6" />
     </svg>
   );
 }
@@ -246,6 +302,15 @@ export function IconFileText({ size = 18, color = "currentColor", strokeWidth = 
       <line x1="16" y1="13" x2="8" y2="13" />
       <line x1="16" y1="17" x2="8" y2="17" />
       <polyline points="10 9 9 9 8 9" />
+    </svg>
+  );
+}
+
+/** 播放 / 试跑 */
+export function IconPlay({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <polygon points="5 3 19 12 5 21 5 3" />
     </svg>
   );
 }
@@ -929,6 +994,24 @@ export function IconImage({ size = 16, color = "currentColor", strokeWidth = 1.7
       <rect x="3" y="3" width="18" height="18" rx="2" />
       <circle cx="8.5" cy="8.5" r="1.5" />
       <polyline points="21 15 16 10 5 21" />
+    </svg>
+  );
+}
+
+/** 多模态（文本 + 图像可同时输入）——plan-238-1210:
+ *  左侧图文小卡 + 右侧文本行，语义为"图文可一起输入"，区别于 IconImage（纯图片/附件）。
+ *  12px 下仍保持清晰：只保留 3 条粗笔画，避免小尺寸糊成一团。 */
+export function IconMultimodal({ size = 14, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      {/* 左：图像卡（内嵌小太阳点） */}
+      <rect x="2.5" y="4" width="10" height="10" rx="2" />
+      <circle cx="6" cy="7.5" r="1" />
+      {/* 右：文本行 */}
+      <line x1="15" y1="7" x2="21.5" y2="7" />
+      <line x1="15" y1="11" x2="21.5" y2="11" />
+      {/* 底部：两类输入合流 */}
+      <line x1="2.5" y1="17.5" x2="21.5" y2="17.5" />
     </svg>
   );
 }

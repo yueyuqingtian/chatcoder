@@ -29,10 +29,20 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
   const startXRef = useRef(0);
   const baseWRef = useRef(baseWidth);
   const draggingRef = useRef(false);
+  const handleRef = useRef<HTMLDivElement>(null);
   // plan-95: 动态实际上限——静态 maxWidth 不考虑窗口可用空间，窄窗口下拖到
   // "拖不动"后 DOM 宽度仍超布局，溢出部分被裁剪（面板右缘图标不可见）。
   // 上限取 min(maxWidth, 容器宽 - reservePx)，到达上限后宽度与视觉完全静止。
   const effectiveMaxRef = useRef(maxWidth);
+
+  // plan-246-1236 S6: 把鼠标相对手柄的 Y 写成 CSS 变量，供渐隐细线定位（不走 React state）。
+  const setHandleY = useCallback((clientY: number) => {
+    const el = handleRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const y = Math.max(0, Math.min(rect.height, clientY - rect.top));
+    el.style.setProperty("--handle-y", `${y}px`);
+  }, []);
 
   const clampMax = useCallback(() => {
     const parent = panelEl.current?.parentElement;
@@ -50,6 +60,7 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
   const handleMouseMove = useCallback((e: MouseEvent) => {
     if (!draggingRef.current) return;
     e.preventDefault();
+    setHandleY(e.clientY);
 
     const rawDelta = e.clientX - startXRef.current;
     const effective = side === "right" ? -rawDelta : rawDelta;
@@ -57,11 +68,12 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
 
     // 直接操作 DOM — 零 React 重渲染
     applyWidth(newWidth);
-  }, [side, minWidth, applyWidth]);
+  }, [side, minWidth, applyWidth, setHandleY]);
 
   const handleMouseUp = useCallback(() => {
     if (!draggingRef.current) return;
     draggingRef.current = false;
+    handleRef.current?.classList.remove("is-dragging");
 
     document.removeEventListener("mousemove", handleMouseMove);
     document.removeEventListener("mouseup", handleMouseUp);
@@ -82,6 +94,7 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
     e.preventDefault();
     e.stopPropagation();
     draggingRef.current = true;
+    handleRef.current?.classList.add("is-dragging");
     startXRef.current = e.clientX;
     baseWRef.current = baseWidth;
     clampMax();
@@ -96,8 +109,10 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
 
   return (
     <div
+      ref={handleRef}
       className={`resize-handle resize-handle-${side}`}
       onMouseDown={handleMouseDown}
+      onMouseMove={(e) => setHandleY(e.clientY)}
       role="separator"
       aria-orientation="vertical"
     />

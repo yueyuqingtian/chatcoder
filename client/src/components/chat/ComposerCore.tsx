@@ -12,7 +12,6 @@ import {
   useMemo,
   type DragEvent,
   type WheelEvent,
-  type MouseEvent as ReactMouseEvent,
 } from "react";
 import {
   IconArrowUp,
@@ -34,15 +33,16 @@ import {
   IconTerminal,
   IconClipboard,
   IconBox,
+  IconFileText,
 } from "../icons";
 import { Modal } from "../Modal";
 import { ModelPicker } from "./ModelPicker";
 import { useChatStore, persistLastReasoning, type UsageDetail } from "../../store/chat";
 import { useDraftsStore } from "../../store/drafts";
 import { useI18n } from "../../store/i18n";
-import { api, resolveFileUrl, type AttachmentInfo, type SkillOut, type TreeNode } from "../../api/client";
-import { tokenize, tokenDisplayName, tokenRangeAt } from "../../utils/tokens";
+import { api, resolveFileUrl, type AttachmentInfo, type PermissionProfileOut, type SkillOut, type TreeNode } from "../../api/client";
 import { openGallery } from "../../store/gallery";
+import { useClickOutside } from "../../hooks/useClickOutside";
 
 /** v7: 思考深度档位高低序——与 ModelsPanel REASONING_OPTS 对齐，用于取模型最高档兜底 */
 const EFFORT_RANK: Record<string, number> = {
@@ -65,13 +65,31 @@ export interface ComposerCoreProps {
   onStarted?: () => void;
 }
 
+/** plan-238-1210 (A2): 引用 chips（@文件 / $技能）——不再内嵌进输入文本。 */
+export interface ComposerRef {
+  kind: "file" | "skill";
+  /** 原始值：文件为工作区相对路径，技能为技能名 */
+  value: string;
+  /** 展示名（文件取文件名、技能取技能名） */
+  label: string;
+}
+
+/** 引用 chips → 随消息文本追加的可读引用行（模型可见；后端仍为纯文本透传）。 */
+export function buildRefsSuffix(refs: ComposerRef[]): string {
+  if (refs.length === 0) return "";
+  const files = refs.filter((r) => r.kind === "file").map((r) => `@${r.value}`);
+  const skills = refs.filter((r) => r.kind === "skill").map((r) => `$${r.value}`);
+  const lines: string[] = [];
+  if (files.length > 0) lines.push(`引用文件：${files.join("、")}`);
+  if (skills.length > 0) lines.push(`使用技能：${skills.join("、")}`);
+  return lines.join("\n");
+}
+
 export function ComposerCore({ variant = "default", onStarted }: ComposerCoreProps) {
   const { t } = useI18n();
   const isHome = variant === "home";
   const taRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
-  /** 会话 229: 标签高亮层（与 textarea 同步滚动，见 .composer-input-tokens） */
-  const tokenLayerRef = useRef<HTMLDivElement>(null);
 
   const isRunning = useChatStore((s) => s.isRunning);
   const currentSessionId = useChatStore((s) => s.currentSessionId);
@@ -184,6 +202,10 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   // plan-546: 初值从草稿恢复（组件按会话 key 重挂载，草稿 store 保证跨导航/重启不丢）
   const [input, setInput] = useState(() => initialDraft?.text ?? "");
   const [attachments, setAttachments] = useState<AttachmentInfo[]>(() => initialDraft?.attachments ?? []);
+  /** plan-238-1210 (A2): 引用 chips（@文件 / $技能）。
+   *  不再内嵌进输入文本（那是双层高亮层错位的根源），改为输入框上方可单独删除的 chips；
+   *  发送时拼装成可读引用行追加到消息文本，保证模型仍能看到引用。 */
+  const [refs, setRefs] = useState<ComposerRef[]>(() => initialDraft?.refs ?? []);
   /** 本会话/首页独立的思考深度（null=跟随全局最近值） */
   const [effort, setEffort] = useState<string | null>(() => initialDraft?.reasoningEffort ?? null);
   /** 展示与发送用的档位：本 key 草稿 → 全局最近 → 冷启动模型最高档（activeModel 就绪后计算，见下方） */
@@ -192,15 +214,25 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   /** 首页变体在会话创建前暂存的模型选择（发送时写入新会话） */
   const [homeModelId, setHomeModelId] = useState<number | null>(() => initialDraft?.modelId ?? null);
 
-  const [composerMode, setComposerMode] = useState<"default" | "plan" | "readonly" | "accept_edits">(
+  // plan-230-1144 M2: 模式列表外置（permission_profiles API），composerMode 不再限死字面量联合
+  const [permProfiles, setPermProfiles] = useState<PermissionProfileOut[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    api.listPermissionProfiles()
+      .then((ps) => { if (!cancelled) setPermProfiles(ps); })
+      .catch(() => { /* 失败回退静态三项菜单 */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  const [composerMode, setComposerMode] = useState<string>(
     isHome
       ? initialDraft?.mode ?? "default"
-      : (currentSession?.permission_mode as "default" | "plan" | "readonly" | "accept_edits") || "default"
+      : (currentSession?.permission_mode as string) || "default"
   );
 
   useEffect(() => {
     if (currentSession?.permission_mode) {
-      setComposerMode(currentSession.permission_mode as "default" | "plan" | "readonly" | "accept_edits");
+      setComposerMode(currentSession.permission_mode as string);
     }
   }, [currentSession?.permission_mode, currentSessionId]);
 
@@ -266,6 +298,12 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   const [skillIndex, setSkillIndex] = useState(0);
   const [skillQuery, setSkillQuery] = useState("");
   const recognitionRef = useRef<any>(null);
+  const projectMenuRef = useRef<HTMLDivElement>(null);
+  const modeMenuRef = useRef<HTMLDivElement>(null);
+  const reasoningMenuRef = useRef<HTMLDivElement>(null);
+  useClickOutside(projectMenuRef, showProjectMenu, () => setShowProjectMenu(false));
+  useClickOutside(modeMenuRef, showModeMenu, () => setShowModeMenu(false));
+  useClickOutside(reasoningMenuRef, showReasoning, () => setShowReasoning(false));
 
   const prevApprovalRef = useRef(pendingApproval);
   useEffect(() => {
@@ -300,12 +338,13 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
       useDraftsStore.getState().patchDraft(draftKey, {
         text: input,
         attachments,
+        refs,
         reasoningEffort: effort,
         ...(isHome ? { modelId: homeModelId, mode: composerMode, projectId: currentProjectId } : {}),
       });
     }, 300);
     return () => clearTimeout(t);
-  }, [draftKey, input, attachments, effort, isHome, homeModelId, composerMode, currentProjectId]);
+  }, [draftKey, input, attachments, refs, effort, isHome, homeModelId, composerMode, currentProjectId]);
 
   /** plan-546: 首页挂载时若草稿记录了工作目录，恢复全局 currentProjectId（侧栏高亮同步） */
   useEffect(() => {
@@ -428,52 +467,79 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     return atFiles.filter((p) => p.toLowerCase().includes(atQuery)).slice(0, 15);
   }, [atFiles, atQuery]);
 
+  /** plan-238-1210 (A2): 选择文件 → 追加引用 chip（不再把 @路径 写回输入文本）。
+   *  同时清掉用户已敲的 `@查询词`，避免残留半截文本。 */
   const pickAtFile = (filePath: string) => {
     const pos = taRef.current?.selectionStart ?? input.length;
-    const prefix = input.slice(0, pos).replace(/@([^\s]*)$/, `@${filePath} `);
-    const next = prefix + input.slice(pos);
-    setInput(next);
+    // 去掉触发用的 `@查询词`（仅当光标前确实在输入 @ 时才替换）
+    const before = input.slice(0, pos);
+    const cleaned = before.replace(/@([^\s]*)$/, "");
+    setInput(cleaned + input.slice(pos));
+    const label = filePath.replace(/\\/g, "/").split("/").pop() || filePath;
+    setRefs((prev) => (prev.some((r) => r.kind === "file" && r.value === filePath)
+      ? prev
+      : [...prev, { kind: "file", value: filePath, label }]));
     setShowAt(false);
     setAtQuery("");
     setTimeout(() => {
       if (taRef.current) {
         taRef.current.focus();
-        taRef.current.selectionStart = taRef.current.selectionEnd = prefix.length;
+        taRef.current.selectionStart = taRef.current.selectionEnd = cleaned.length;
         resizeTextarea(taRef.current);
       }
     }, 0);
   };
 
-  const resizeTextarea = (el: HTMLTextAreaElement) => {
+  /** plan-238-1210 (A2): 输入框回归原生渲染——不再有"透明 textarea + 标签高亮层"的
+   *  双层结构（两层排版引擎必须逐像素一致，边界无穷：宽度口径/折行/字距/缩放…）。
+   *  现在 textarea 直接显示完整文本，滚动由 textarea 自身承担，高度自适应到 400px 上限。 */
+  const resizeTextarea = (el: HTMLTextAreaElement, retry = 0) => {
+    if (el.getClientRects().length === 0) {
+      // 隐藏/未挂载态 scrollHeight 不可靠，等可见后再测（rAF 有限重试）
+      if (retry < 30) requestAnimationFrame(() => resizeTextarea(el, retry + 1));
+      return;
+    }
     el.style.height = "auto";
     const clamped = Math.max(36, Math.min(el.scrollHeight, 400));
     el.style.height = `${clamped}px`;
+    // 高度收缩后清掉残留滚动，避免可视区停在中部（"原本有字的地方空白"）
+    if (el.scrollHeight <= el.clientHeight + 1 && el.scrollTop !== 0) el.scrollTop = 0;
   };
 
   useEffect(() => {
     if (taRef.current) resizeTextarea(taRef.current);
-  }, [input]);
+    // 切换会话后草稿回填/面板重新可见，必须重测高度
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [input, currentSessionId]);
 
-  const handleTextareaWheel = (e: WheelEvent<HTMLTextAreaElement>) => {
+  // 窗口/面板宽度变化会改变换行高度，同步重测
+  useEffect(() => {
+    let raf = 0;
+    const onResize = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        if (taRef.current) resizeTextarea(taRef.current);
+      });
+    };
+    window.addEventListener("resize", onResize);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", onResize);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** plan-238-1210 (A2): 滚动回到了 textarea 自身——到顶/到底时把滚轮让给外层
+   *  消息流，其余情况留在输入框内滚动（不再有 wrap 滚动容器）。 */
+  const handleComposerWheel = (e: WheelEvent<HTMLTextAreaElement>) => {
     const el = e.currentTarget;
     const { scrollTop, scrollHeight, clientHeight } = el;
-    const atTop = scrollTop === 0;
+    const atTop = scrollTop <= 0;
     const atBottom = Math.ceil(scrollTop + clientHeight) >= scrollHeight;
     if ((e.deltaY < 0 && atTop) || (e.deltaY > 0 && atBottom)) {
       return;
     }
     e.stopPropagation();
-  };
-
-  const handleTextareaMouseDown = (e: ReactMouseEvent<HTMLTextAreaElement>) => {
-    const el = e.currentTarget;
-    const isOverflowing = el.scrollHeight > el.clientHeight;
-    if (!isOverflowing) return;
-    const rect = el.getBoundingClientRect();
-    const isNearScrollbar = e.clientX >= rect.right - 14;
-    if (isNearScrollbar) {
-      e.stopPropagation();
-    }
   };
 
   /** 会话 229: 打开输入框图片附件的全局查看器（多图可左右切换；非图片新窗口打开） */
@@ -540,12 +606,12 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     [addFiles]
   );
 
-  /** 会话 229: 把输入框中触发菜单的前缀片段替换为插入文本（保留前导空白，光标落在插入文本后） */
-  const insertMenuItem = (pattern: RegExp, build: (ws: string) => string) => {
+  /** 会话 229: 清掉触发菜单的前缀片段（保留前导空白），光标落回原位置。
+   *  plan-238-1210 (A2): 技能引用改走 chips，只清触发词、不注入 `$name`。 */
+  const clearTriggerPrefix = (pattern: RegExp) => {
     const pos = taRef.current?.selectionStart ?? input.length;
-    const before = input.slice(0, pos).replace(pattern, (_m: string, ws?: string) => build(ws ?? ""));
-    const next = before + input.slice(pos);
-    setInput(next);
+    const before = input.slice(0, pos).replace(pattern, (_m: string, ws?: string) => ws ?? "");
+    setInput(before + input.slice(pos));
     setTimeout(() => {
       if (taRef.current) {
         taRef.current.focus();
@@ -555,9 +621,12 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     }, 0);
   };
 
-  /** 会话 229: 选择技能（/ 菜单或 $ 菜单）→ 把触发片段替换为 `$name ` */
+  /** 会话 229: 选择技能（/ 菜单或 $ 菜单）→ plan-238-1210 (A2): 追加引用 chip。 */
   const insertSkill = (name: string, fromSlash: boolean) => {
-    insertMenuItem(fromSlash ? /(^|\s)\/[^\s]*$/ : /(^|\s)\$[^\s]*$/, (ws) => `${ws}$${name} `);
+    clearTriggerPrefix(fromSlash ? /(^|\s)\/[^\s]*$/ : /(^|\s)\$[^\s]*$/);
+    setRefs((prev) => (prev.some((r) => r.kind === "skill" && r.value === name)
+      ? prev
+      : [...prev, { kind: "skill", value: name, label: name }]));
     setShowSlash(false);
     setShowSkills(false);
   };
@@ -680,7 +749,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     setShowReasoning(false);
   };
 
-  const setMode = (mode: "default" | "plan" | "readonly") => {
+  const setMode = (mode: string) => {
     setComposerMode(mode);
     setShowModeMenu(false);
     if (currentSessionId != null) {
@@ -728,8 +797,11 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
       }
       refTextParts.push(lines.join("\n"));
     }
+    const refsSuffix = buildRefsSuffix(refs);
+    const hasPriorText = Boolean(input.trim()) || refTextParts.length > 0;
     const content = (input.trim() ? input.trim() : "") +
-      (refTextParts.length ? `${input.trim() ? "\n\n" : ""}${refTextParts.join("\n\n")}` : "");
+      (refTextParts.length ? `${input.trim() ? "\n\n" : ""}${refTextParts.join("\n\n")}` : "") +
+      (refsSuffix ? `${hasPriorText ? "\n\n" : ""}${refsSuffix}` : "");
     const attachmentPayload = [...attachments.map((a) => ({ ...a })), ...refAttachments];
     const mode = composerMode;
 
@@ -754,11 +826,15 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
         if (sessionId == null) return;
         useDraftsStore.getState().patchDraft(`s${sessionId}`, { reasoningEffort: sendEffort ?? null });
         if (usedModelId != null) useChatStore.setState({ lastModelId: usedModelId });
-        const sendMode = (mode === "plan" || mode === "readonly") ? mode : null;
+        // plan-230-1144 M2: 除 default/accept_edits（无命令模式语义）外一律透传——
+    // 自定义模式名也要传给引擎，否则后端按 "default" 解析出全量工具集，
+    // 出现"选了受限模式但模型仍看到全量工具"的错位。
+    const sendMode = (mode === "default" || mode === "accept_edits") ? null : mode;
         await sendTurn(content, attachmentPayload, sendEffort, sendMode, usedModelId);
         skipDraftSyncRef.current = true;
         setInput("");
         setAttachments([]);
+        setRefs([]);
         setEffort(null);
         setShowSlash(false);
         setShowAt(false);
@@ -774,11 +850,15 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
       return;
     }
     // 运行中发送 → sendTurn 内部入队，turn 完成后自动续发
-    const sendMode = (mode === "plan" || mode === "readonly") ? mode : null;
+    // plan-230-1144 M2: 除 default/accept_edits（无命令模式语义）外一律透传——
+    // 自定义模式名也要传给引擎，否则后端按 "default" 解析出全量工具集，
+    // 出现"选了受限模式但模型仍看到全量工具"的错位。
+    const sendMode = (mode === "default" || mode === "accept_edits") ? null : mode;
         await sendTurn(content, attachmentPayload, sendEffort, sendMode, sessionModelId);
     skipDraftSyncRef.current = true;
     setInput("");
     setAttachments([]);
+    setRefs([]);
     setShowSlash(false);
     setShowAt(false);
     // v7: 发送后仅清文字/附件，保留思考深度等输入框配置——深度按会话持久化（重进/重启不丢）
@@ -786,14 +866,19 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     setSending(false);
   };
 
-  const modeLabel =
-    composerMode === "default"
-      ? t("composer.mode_full")
-      : composerMode === "plan"
-      ? t("composer.mode_plan")
-      : composerMode === "accept_edits"
-      ? t("composer.mode_plan_exec")
-      : t("composer.mode_readonly");
+  // plan-230-1144 M2: 模式标签——内置模式走 i18n，自定义模式用配置里的 display_name
+  const BUILTIN_MODE_KEYS: Record<string, string> = {
+    default: "composer.mode_full",
+    plan: "composer.mode_plan",
+    readonly: "composer.mode_readonly",
+    accept_edits: "composer.mode_plan_exec",
+  };
+  const modeLabel = (() => {
+    const key = BUILTIN_MODE_KEYS[composerMode];
+    if (key) return t(key);
+    const p = permProfiles.find((x) => x.name === composerMode);
+    return p ? p.display_name : composerMode;
+  })();
 
   // 是否处于 AI 结构化提问阶段（直接替换输入框主体）
   const isQuestionMode = !isHome && pendingApproval?.detail?.kind === "question";
@@ -819,7 +904,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
       onDrop={handleDrop}
     >
       {isHome && (
-        <div className="es-card-project">
+        <div className="es-card-project" ref={projectMenuRef}>
           <button
             className="es-project-trigger"
             onClick={() => setShowProjectMenu(!showProjectMenu)}
@@ -879,6 +964,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
       {/* 核心重构：AI 提问时直接将输入框主体替换为 QuestionWizardBox 卡片（对齐参考图 paste-20260829121505.png） */}
       {isQuestionMode ? (
         <QuestionWizardBox
+          approvalId={pendingApproval.approvalId}
           detail={pendingApproval.detail}
           onCancel={() => respondApproval(pendingApproval.approvalId, false)}
           onSubmit={(answers) => respondApproval(pendingApproval.approvalId, true, false, answers)}
@@ -1044,36 +1130,43 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
               ))}
             </div>
           )}
-          <div className="composer-input-wrap">
-            <div className="composer-input-tokens" aria-hidden ref={tokenLayerRef}>
-              {input
-                ? tokenize(input).map((tk, i) =>
-                    tk.type === "text" ? (
-                      <span key={i} className="tok-text">{tk.text}</span>
-                    ) : (
-                      // 会话 228-1142: 标签不放图标——标签层宽度必须与 textarea 文本等宽，光标才能精确对齐
-                      <span key={i} className={`tok-chip ${tk.type === "skill" ? "tok-skill" : "tok-file"}`}>
-                        {tokenDisplayName(tk)}
-                      </span>
-                    ),
-                  )
-                : <span className="tok-placeholder">{placeholderText}</span>}
+          {/* plan-238-1210 (A2): 引用 chips 行（@文件 / $技能）——不再内嵌进输入文本，
+              从结构上消除"透明 textarea + 标签高亮层"的排版错位问题。 */}
+          {refs.length > 0 && (
+            <div className="composer-refs">
+              {refs.map((r, i) => (
+                <span
+                  key={`${r.kind}-${r.value}-${i}`}
+                  className={`composer-ref-chip composer-ref-${r.kind}`}
+                  title={r.value}
+                >
+                  <span className="composer-ref-icon">
+                    {r.kind === "file" ? <IconFileText size={11} /> : <IconBox size={11} />}
+                  </span>
+                  <span className="composer-ref-name">{r.label}</span>
+                  <button
+                    type="button"
+                    className="composer-ref-remove"
+                    title={r.kind === "file" ? "移除文件引用" : "移除技能引用"}
+                    onClick={() => setRefs((prev) => prev.filter((_, idx) => idx !== i))}
+                  >
+                    <IconX size={10} />
+                  </button>
+                </span>
+              ))}
             </div>
+          )}
+          <div className="composer-input-wrap">
             <textarea
               ref={taRef}
-              className="composer-input tokenized"
+              className="composer-input"
               placeholder={placeholderText}
               spellCheck={false}
               value={input}
               rows={1}
               onPaste={handlePaste}
-              onWheel={handleTextareaWheel}
-              onMouseDown={handleTextareaMouseDown}
+              onWheel={handleComposerWheel}
               onInput={(e) => resizeTextarea(e.currentTarget)}
-              onScroll={(e) => {
-                const layer = tokenLayerRef.current;
-                if (layer) layer.scrollTop = e.currentTarget.scrollTop;
-              }}
               onChange={(e) => {
               const v = e.target.value;
               setInput(v);
@@ -1108,25 +1201,8 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
               }
             }}
             onKeyDown={(e) => {
-              // 会话 228-1142: Backspace/Delete 在标签内/末尾时整体删除标签（光标在标签起点时不拦截）
-              if ((e.key === "Backspace" || e.key === "Delete") && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
-                const ta = taRef.current;
-                if (ta && ta.selectionStart === ta.selectionEnd) {
-                  const pos = ta.selectionStart;
-                  const range = e.key === "Backspace" ? tokenRangeAt(input, pos) : tokenRangeAt(input, pos + 1);
-                  const hit = range && (e.key === "Backspace" ? pos > range.start : pos < range.end);
-                  if (range && hit) {
-                    e.preventDefault();
-                    const next = input.slice(0, range.start) + input.slice(range.end);
-                    setInput(next);
-                    setTimeout(() => {
-                      ta.selectionStart = ta.selectionEnd = range.start;
-                      resizeTextarea(ta);
-                    }, 0);
-                    return;
-                  }
-                }
-              }
+              // plan-238-1210 (A2): 文本中不再有 @/$ 引用片段（已改为 chips），
+              // 原"整词删除拦截"随之移除——Backspace/Delete 回归原生行为。
               if (slashVisible) {
                 if (e.key === "ArrowDown") {
                   e.preventDefault();
@@ -1212,7 +1288,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
               <button className="composer-attach" title={t("composer.attach_tip")} onClick={() => fileRef.current?.click()}>
                 <IconPlus size={16} />
               </button>
-              <div className="composer-mode-wrap">
+              <div className="composer-mode-wrap" ref={modeMenuRef}>
                 <button
                   className={`composer-mode-btn mode-${composerMode}`}
                   onClick={() => {
@@ -1229,24 +1305,25 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                 {showModeMenu && (
                   <div className="composer-menu composer-mode-menu">
                     <div className="composer-menu-title">{t("composer.mode_title")}</div>
-                    <button
-                      className={composerMode === "default" ? "active" : ""}
-                      onClick={() => setMode("default")}
-                    >
-                      {t("composer.mode_full")}
-                    </button>
-                    <button
-                      className={composerMode === "plan" ? "active" : ""}
-                      onClick={() => setMode("plan")}
-                    >
-                      {t("composer.mode_plan")}
-                    </button>
-                    <button
-                      className={composerMode === "readonly" ? "active" : ""}
-                      onClick={() => setMode("readonly")}
-                    >
-                      {t("composer.mode_readonly")}
-                    </button>
+                    {/* plan-230-1144 M2: 菜单项由 /permission-profiles 下发（内置+自定义）；
+                        API 失败时回退静态三项。accept_edits 现在也可手动选择/切回。 */}
+                    {(permProfiles.length > 0
+                      ? permProfiles
+                      : [
+                          { name: "default", display_name: t("composer.mode_full") } as PermissionProfileOut,
+                          { name: "plan", display_name: t("composer.mode_plan") } as PermissionProfileOut,
+                          { name: "readonly", display_name: t("composer.mode_readonly") } as PermissionProfileOut,
+                        ]
+                    ).map((p) => (
+                      <button
+                        key={p.name}
+                        className={composerMode === p.name ? "active" : ""}
+                        title={p.description || undefined}
+                        onClick={() => setMode(p.name)}
+                      >
+                        {BUILTIN_MODE_KEYS[p.name] ? t(BUILTIN_MODE_KEYS[p.name]) : p.display_name}
+                      </button>
+                    ))}
                     {/* plan-671/676: 目标模式入口（会话内与空态首页均可用） */}
                     {(currentSessionId != null || isHome) && (
                       <>
@@ -1295,7 +1372,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                 }}
               />
               {supportsReasoning && (
-                <div className="composer-reasoning">
+                <div className="composer-reasoning" ref={reasoningMenuRef}>
                   <button
                     className="composer-reasoning-btn"
                     onClick={() => {
@@ -1726,18 +1803,32 @@ function UsageRing({
 
 /** 直接替换输入框的向导式提问卡片组件（对齐参考图 paste-20260829121505.png） */
 function QuestionWizardBox({
+  approvalId,
   detail,
   onCancel,
   onSubmit,
 }: {
+  /** plan-238-1188: 作答草稿在 store 中按 approvalId 键控，必须显式传入。 */
+  approvalId: string;
   detail: Record<string, unknown>;
   onCancel: () => void;
   onSubmit: (answers: Record<string, unknown>) => void;
 }) {
-  const [stepIndex, setStepIndex] = useState(0);
-  const [answers, setAnswers] = useState<Record<string, string>>({});
+  // plan-238-1188: 作答草稿持久化到 store（按 approvalId 键控）。
+  // 此前 answers/stepIndex/customText 全为组件本地 state，切到设置页会卸载
+  // ComposerCore，返回后已选答案与当前题号全部丢失。
+  const questionDraft = useChatStore((s) => s.questionDraft);
+  const setQuestionDraft = useChatStore((s) => s.setQuestionDraft);
+
+  const draft = questionDraft && questionDraft.approvalId === approvalId ? questionDraft : null;
+  const stepIndex = draft?.stepIndex ?? 0;
+  const answers = draft?.answers ?? {};
   const [customText, setCustomText] = useState("");
   const customInputRef = useRef<HTMLInputElement>(null);
+
+  const writeDraft = (next: { stepIndex: number; answers: Record<string, string> }) => {
+    setQuestionDraft({ approvalId, stepIndex: next.stepIndex, answers: next.answers });
+  };
 
   const questions = (Array.isArray(detail.questions) ? detail.questions : []) as Array<{
     question?: unknown;
@@ -1757,15 +1848,17 @@ function QuestionWizardBox({
     } else {
       setCustomText("");
     }
-  }, [stepIndex, answers, currentOptions]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stepIndex, currentAnswer, currentOptions.join("\u0000")]);
 
   const handlePickOption = (opt: string) => {
     const updated = { ...answers, [String(stepIndex)]: opt };
-    setAnswers(updated);
     setCustomText("");
     if (stepIndex < total - 1) {
-      setTimeout(() => setStepIndex((s) => s + 1), 160);
+      writeDraft({ stepIndex: stepIndex + 1, answers: updated });
     } else {
+      // 末题：落盘草稿后提交（提交成功路径会清空草稿）
+      writeDraft({ stepIndex, answers: updated });
       setTimeout(() => onSubmit(updated), 180);
     }
   };
@@ -1774,11 +1867,11 @@ function QuestionWizardBox({
     const text = customText.trim() || currentAnswer;
     if (!text) return;
     const updated = { ...answers, [String(stepIndex)]: text };
-    setAnswers(updated);
     setCustomText("");
     if (stepIndex < total - 1) {
-      setStepIndex((s) => s + 1);
+      writeDraft({ stepIndex: stepIndex + 1, answers: updated });
     } else {
+      writeDraft({ stepIndex, answers: updated });
       onSubmit(updated);
     }
   };
@@ -1799,7 +1892,7 @@ function QuestionWizardBox({
             type="button"
             className="question-wizard-pager-btn"
             disabled={stepIndex === 0}
-            onClick={() => setStepIndex((s) => Math.max(0, s - 1))}
+            onClick={() => writeDraft({ stepIndex: Math.max(0, stepIndex - 1), answers })}
             title="上一题"
           >
             <IconChevronLeft size={13} />
@@ -1811,7 +1904,7 @@ function QuestionWizardBox({
             type="button"
             className="question-wizard-pager-btn"
             disabled={stepIndex >= total - 1}
-            onClick={() => setStepIndex((s) => Math.min(total - 1, s + 1))}
+            onClick={() => writeDraft({ stepIndex: Math.min(total - 1, stepIndex + 1), answers })}
             title="下一题"
           >
             <IconChevronRight size={13} />

@@ -1314,10 +1314,19 @@ async def run_agent_loop(
                             on_approval_request=_make_approval_emitter(session_id),
                         ))
                         try:
-                            result = await asyncio.wait_for(
-                                asyncio.shield(_poll_cancel(_exec_task, cancel_event)),
-                                timeout=settings.tool_exec_timeout_sec,  # v21: 120s → 可配置(默认600s)，长编译/测试不再被误杀
-                            )
+                            if tool_name == "ask_user_question":
+                                # plan-238-1188: 结构化提问彻底不设执行超时——
+                                # 等待用户回答的时长不可预估（approval.py 已对 question
+                                # 取消审批超时，但本层 tool_exec_timeout_sec 仍会杀掉
+                                # 等待中的工具，表现为"提问工具还是会超时"）。
+                                # 结束方式：用户回答，或取消 turn（_poll_cancel 命中
+                                # cancel_event 取消底层任务 → CancelledError 分支）。
+                                result = await asyncio.shield(_poll_cancel(_exec_task, cancel_event))
+                            else:
+                                result = await asyncio.wait_for(
+                                    asyncio.shield(_poll_cancel(_exec_task, cancel_event)),
+                                    timeout=settings.tool_exec_timeout_sec,  # v21: 120s → 可配置(默认600s)，长编译/测试不再被误杀
+                                )
                         except asyncio.TimeoutError:
                             _exec_task.cancel()
                             from app.orchestration.tools.base import ToolResult

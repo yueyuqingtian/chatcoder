@@ -399,3 +399,63 @@ AI 按需 ──► compaction_index / compaction_view 工具
 | `client/src/components/icons.tsx` | IconCompress |
 | `client/src/styles/global.css` | 压缩卡片样式（含原文列表/还原按钮） |
 | `docs/reference-analysis.md` | 参考项目分析 |
+
+---
+
+## 14. 记忆三层化（plan-230-1144 M4.1，v31）
+
+> 本节为压缩/记忆管线之上新增的「长期记忆」层设计，与第 1-13 节的压缩机制互补：
+> 压缩解决"上下文塞不下"，记忆解决"跨 turn / 跨会话记住什么"。
+
+### 14.1 改造前问题
+
+| 问题 | 现状（改造前） | 后果 |
+|---|---|---|
+| 无作用域概念 | `memory_entries` 只挂 `session_id` | 项目约定/全局规范无法跨会话共享，换个会话就"失忆" |
+| 低置信直接丢弃 | `importance < 0.65` 的条目 `continue` 跳过 | 高价值低置信信息（"这个坑可能要注意"）永久丢失 |
+| 去重 O(n²) | 逐条 `select` 全表比对 | 记忆条目多时写入变慢 |
+| 无主动写入 | 只有 turn 结束后 LLM 被动抽取 | AI 无法在对话中途记录"这点很重要，记下来" |
+| 检索与库脱节 | `memory_search` 只搜会话历史消息，与 `MemoryEntry` 无关 | 工具命名与语义错位；记忆库不可检索 |
+| 压缩回看受限 | `compaction_view` 输出硬截断（300/400 字）、只能顺序浏览、不在只读/计划白名单 | 计划/审阅模式无法回看压缩历史；长内容看不全 |
+
+### 14.2 三层模型
+
+| 作用域 | 语义 | 生命周期 | 典型内容 |
+|---|---|---|---|
+| `session` | 本会话事实 | 30 天过期（`expires_at`） | "用户要求提交信息用中文" |
+| `project` | 本项目约定 | 永不过期 | "本项目 pytest 用 `.venv\Scripts\pytest.exe`" |
+| `global` | 跨项目规范/偏好 | 永不过期 | "用户偏好简体中文回复" |
+
+**读取顺序**：session → project → global，各层按 usage_count 降序取 top-N，
+跨层按文本 casefold 归一化去重；prompt 注入时附层标签（`[全局]` / `[项目]`），
+模型据此调整遵循优先级。
+
+**候选区（candidate）**：`importance < 0.65` 的写入不再丢弃，而是
+`candidate=True` 落库——不注入 prompt、不参与使用计数，但可被 `memory_search`
+检索；用户/AI 可在设置页或通过工具提升为正式记忆。
+
+**作用域提升**：`promote_memory(id, target_scope)` 支持 session ↔ project ↔ global
+双向流转（提升清除 candidate 标记与过期时间；降级回 session 重新计时）。
+
+### 14.3 工具面
+
+| 工具 | 能力 |
+|---|---|
+| `memory_write`（新增） | AI 主动写入记忆，支持 scope/kind；project 作用域自动反查会话项目 |
+| `memory_search`（重写） | 三源联合检索：①记忆库（含候选区，标注来源层）②会话历史消息 ③压缩块（摘要命中或深入被遮蔽消息匹配） |
+| `compaction_view`（增强） | offset/limit 分页、keyword 过滤、`full=true` 取单条全文（解除 300/400 字硬截断） |
+
+### 14.4 文件清单
+
+| 文件 | 改动 |
+|---|---|
+| `server/app/persistence/models/memory.py` | 补列：scope / project_id / candidate / expires_at / superseded_by |
+| `server/app/persistence/migrations.py` | 对应幂等补列迁移 |
+| `server/app/services/memory_service.py` | 三层合并读取、候选区降级保存、O(n) 去重、promote_memory |
+| `server/app/orchestration/context_manager.py` | `_load_memories` 三层渲染（层标签）+ 调用点传 project_id |
+| `server/app/orchestration/tools/memory_write.py` | 新增：AI 主动写记忆 |
+| `server/app/orchestration/tools/memory_search.py` | 重写：三源联合检索 |
+| `server/app/orchestration/tools/compaction_view.py` | 增强：分页 / keyword / full |
+| `server/app/gateway/routers/memories.py` | scope/project 过滤 + promote 端点 |
+| `client/src/components/settings/MemoryPanel.tsx` | 三层分组视图 + 候选区开关 + 提升/降级 |
+| `packages/shared/src/index.ts` | MemoryEntryOut 三层字段 |

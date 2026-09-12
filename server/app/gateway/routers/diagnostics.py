@@ -109,3 +109,54 @@ async def cleanup_checkpoints(workspace: str | None = None,
 async def update_check():
     """版本检查（占位：读内置版本源）。"""
     return {"ok": True, "current": "0.4.0", "latest": None, "has_update": False}
+
+
+# ── plan-230-1144 M3: 符号索引状态与手动重建 ──
+
+@router.get("/diagnostics/symbol-index", response_model=dict)
+async def symbol_index_status(workspace: str | None = None):
+    """符号索引状态：默认返回当前工作区（或首个项目）的文件数/符号数/最后更新时间。"""
+    import asyncio
+
+    from app.persistence.database import async_session_factory
+    from app.services import symbol_index_service as sis
+
+    ws = workspace
+    if not ws:
+        try:
+            async with async_session_factory() as db:
+                projects = await project_service.list_projects(db)
+            if projects:
+                ws = projects[0].path
+        except Exception:
+            ws = None
+    if not ws:
+        return {"ok": False, "error": "无可用工作区（请传 workspace 或先创建项目）", "available": False}
+    stats = await asyncio.to_thread(sis.index_stats, ws)
+    return {"ok": True, "workspace": ws, **stats}
+
+
+@router.post("/diagnostics/symbol-index/rebuild", response_model=dict)
+async def symbol_index_rebuild(workspace: str | None = None):
+    """手动全量重建符号索引（force=True，忽略增量缓存）。"""
+    import asyncio
+
+    from app.persistence.database import async_session_factory
+    from app.services import symbol_index_service as sis
+
+    ws = workspace
+    if not ws:
+        try:
+            async with async_session_factory() as db:
+                projects = await project_service.list_projects(db)
+            if projects:
+                ws = projects[0].path
+        except Exception:
+            ws = None
+    if not ws:
+        return {"ok": False, "error": "无可用工作区"}
+
+    result = await asyncio.to_thread(sis.index_workspace, ws, force=True)
+    if result.get("error"):
+        return {"ok": False, "error": result["error"], "workspace": ws}
+    return {"ok": True, "workspace": ws, **result}

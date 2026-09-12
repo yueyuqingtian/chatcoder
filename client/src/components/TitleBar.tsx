@@ -111,8 +111,10 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
         {leftCollapsed && (
           <>
             <AppLogo size={20} className="sb-logo-img" />
+            {/* plan-234-1171 R6: 传 open 让图标随状态变形态（展开=实心块 / 折叠=虚线空框），
+                此前未传导致图标在面板开合后外观毫无变化。 */}
             <button className="titlebar-btn collapsed" onClick={onToggleLeft} title={t("sidebar.expand_tip")}>
-              <IconPanelLeft size={15} />
+              <IconPanelLeft size={15} open={false} />
             </button>
             <button className="sb-nav-arrow" disabled={!canBack} onClick={() => histGo(-1)} title={t("sidebar.history_back")}><IconChevronLeft size={15} /></button>
             <button className="sb-nav-arrow" disabled={!canForward} onClick={() => histGo(1)} title={t("sidebar.history_forward")}><IconChevronRight size={15} /></button>
@@ -258,7 +260,8 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
           onClick={onToggleRight}
           title={rightCollapsed ? t("titlebar.panel_expand") : t("titlebar.panel_collapse")}
         >
-          <IconPanelRight size={14} />
+          {/* plan-234-1171 R6: 传 open 让图标随右面板开合变形态 */}
+          <IconPanelRight size={14} open={!rightCollapsed} />
         </button>
         )}
         <span className="titlebar-sep" />

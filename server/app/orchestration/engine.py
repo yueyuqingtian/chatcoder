@@ -194,6 +194,14 @@ _READONLY_TOOLS = [
     "memory_search", "web_fetch", "web_search", "view_image",
     "read_attachment", "codebase_search",
     "ask_user_question", "todo_write",
+    # plan-230-1144 M1.2: 技能加载是纯读操作，四种模式全部可用——
+    # 只读/计划模式下 AI 同样需要查阅技能知识（如审阅规范、计划模板）。
+    "skill_view",
+    # plan-230-1144 M1.2 配套: 压缩回看同属纯读，计划/只读模式也应可检索早期上下文（问题4）
+    "compaction_index", "compaction_view",
+    # plan-230-1144 M3: 符号索引检索/文件骨架（纯读探索能力；正常路径由
+    # permission_profile_service 白名单供给，此处兜底保持行为一致）
+    "symbol_search", "outline",
 ]
 # 规划模式（/plan）：只读 + 允许写计划文档 + 命令行
 # v3.0 (plan-88): 追加 terminal_exec——计划模式 AI 可执行命令（只读命令免审批，
@@ -232,6 +240,53 @@ _MODE_HINTS = {
         "【注意】系统不会替你拆分步骤，也不会要求你确认步骤；分步完全由你通过 todo_write 决定。"
     ),
 }
+
+
+async def _inject_mcp_tools(
+    db, agent, tool_schemas: list, turn_id: int, *, readonly_only: bool = False,
+) -> int:
+    """主 turn 路径 MCP 工具注入（plan-230-1144 M1.3）。
+
+    此前同一段逻辑在 engine.py 里复制粘贴了 3 份，且 readonly/plan 分支根本不调用
+    它——导致计划/审阅模式下 MCP 工具完全不可用。现收敛为单一入口：
+
+    - 按 schema 名去重（v10 修复：无条件 append 会使第二次 turn 出现重复工具名，
+      LLM 报 "Tool names must be unique" HTTP 400）；
+    - 全局 registry 缺失时才注册，使 executor 可执行；
+    - readonly_only=True（只读/计划模式）时仅注入 low 风险（只读类）MCP 工具，
+      让 codegraph 这类检索工具在规划/审阅时同样可用；写类 MCP 仍不暴露。
+
+    失败不阻塞（返回 0）。返回实际注入数量。
+    """
+    try:
+        from app.orchestration.tools.mcp_wrapper import build_mcp_tools_for_agent
+        from app.services.skill_service import get_agent_mcp_servers
+        mcp_servers = await get_agent_mcp_servers(db, agent)
+        if not mcp_servers:
+            return 0
+        _mcp_tools = build_mcp_tools_for_agent(mcp_servers)
+        if readonly_only:
+            _mcp_tools = [t for t in _mcp_tools if getattr(t, "risk_level", "medium") == "low"]
+        existing = {str(s.get("function", {}).get("name") or "") for s in tool_schemas}
+        injected = 0
+        for mt in _mcp_tools:
+            if mt.name in existing:
+                continue
+            tool_schemas.append(mt.function_schema())
+            existing.add(mt.name)
+            if not tool_registry.get(mt.name):
+                tool_registry.register(mt)
+            injected += 1
+        if injected:
+            logger.info(
+                "[engine] turn=%s 注入 %d 个 MCP 工具%s",
+                turn_id, injected, "（仅只读类）" if readonly_only else "",
+            )
+        return injected
+    except Exception:
+        logger.debug("[engine] turn=%s MCP 工具注入失败(非阻塞)", turn_id, exc_info=True)
+        return 0
+
 
 # v2.2 (plan-88): checkpoint GC 触发倒计时——每 checkpoint_gc_interval_turns 个
 # turn 完成触发一次（当前工作区），治理 .chatcoder/checkpoints 目录膨胀。
@@ -554,7 +609,16 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                 )
         # plan-147-674: 实际暴露给模型的工具名集合（模式白名单 + ta3 伪装层过滤），
         # 供附件引导文案降级——避免提示词引导模型调用不存在的工具
-        _mode_whitelist = _READONLY_TOOLS if mode == "readonly" else (_PLAN_TOOLS if mode == "plan" else None)
+        # plan-230-1144 M2: 白名单外置到 permission_profile_service（内置 4 模式 +
+        # 用户自定义模式），支持模式自定义与自由权限分配；旧硬编码仅作兜底
+        try:
+            from app.services import permission_profile_service as _pps
+            _mode_whitelist = _pps.resolve_tools(
+                mode or "default", {t.name for t in tool_registry.all()},
+            )
+        except Exception:
+            logger.debug("[engine] turn=%s 权限配置解析失败，回退硬编码白名单", turn_id, exc_info=True)
+            _mode_whitelist = _READONLY_TOOLS if mode == "readonly" else (_PLAN_TOOLS if mode == "plan" else None)
         _available_tools = {t.name for t in tool_registry.for_agent(_mode_whitelist)}
         if selected_model is not None and getattr(selected_model, "api_format", "") == "ta3":
             from app.models.providers.ta3_tool_aliases import TO_TA3
@@ -595,74 +659,51 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             effective_model_id=effective_model_id,
         )
 
-        # 命令模式：注入模式指令（/chat 只读、/plan 先规划后执行）；完全访问下跳过
-        if not _full_access and mode in _MODE_HINTS:
-            hint = _MODE_HINTS[mode]
+        # 命令模式：注入模式指令（/chat 只读、/plan 先规划后执行）；完全访问下跳过。
+        # plan-230-1144 M2: 自定义模式的提示词从配置读取（resolve_hint），
+        # 内置模式沿用 _MODE_HINTS。
+        _mode_hint = ""
+        if not _full_access:
+            if mode in _MODE_HINTS:
+                _mode_hint = _MODE_HINTS[mode]
+            else:
+                try:
+                    from app.services import permission_profile_service as _pps
+                    _mode_hint = _pps.resolve_hint(mode or "default")
+                except Exception:
+                    logger.debug("[engine] turn=%s 自定义提示词读取失败", turn_id, exc_info=True)
+        if _mode_hint:
             if mode == "plan":
                 # plan-95: 提示词含 {session_id}/{turn_id} 占位符——文档按 turn 唯一命名，
                 # 同一会话多次规划不再互相覆盖（此前固定会话名导致解析到上一任务旧文档）
-                hint = hint.format(session_id=session_id, turn_id=turn_id)
-            bundle.instruction = (hint + "\n\n" + bundle.instruction).strip() if bundle.instruction else hint
+                _mode_hint = _mode_hint.format(session_id=session_id, turn_id=turn_id)
+            bundle.instruction = (_mode_hint + "\n\n" + bundle.instruction).strip() if bundle.instruction else _mode_hint
 
         # 2. 工具 schemas（按模式过滤 + 子代理工具；完全访问 = 全量工具）
+        # plan-230-1144 M1.3: 先按模式取内置工具集，再统一走一次 MCP 注入。
+        # plan-230-1144 M2: 白名单统一经 resolve_tools（内置 4 模式 + 自定义模式）；
+        # 只读类判定经 is_readonly_like（MCP 只放行只读工具的依据）。
+        try:
+            from app.services import permission_profile_service as _pps
+            _schema_whitelist = _pps.resolve_tools(
+                mode or "default", {t.name for t in tool_registry.all()},
+            )
+            _mode_readonly = _pps.is_readonly_like(mode or "default") and not _full_access
+        except Exception:
+            logger.debug("[engine] turn=%s 权限配置解析失败，回退硬编码", turn_id, exc_info=True)
+            _schema_whitelist = (
+                _READONLY_TOOLS if mode == "readonly"
+                else (_PLAN_TOOLS if mode == "plan" else None)
+            )
+            _mode_readonly = mode in ("readonly", "plan")
         if _full_access:
             tool_schemas = tool_registry.all_schemas()
-            # v6: 主 turn 路径 MCP 注入（修复：导入的 MCP 工具未注册导致 AI 无法使用）
-            # 对齐 agent_runtime 的 per-agent scope 模式，仅当全局 registry 无同名工具时注册。
-            try:
-                from app.services.skill_service import get_agent_mcp_servers
-                from app.orchestration.tools.mcp_wrapper import build_mcp_tools_for_agent
-                mcp_servers = await get_agent_mcp_servers(db, main_agent)
-                if mcp_servers:
-                    _mcp_tools = build_mcp_tools_for_agent(mcp_servers)
-                    for mt in _mcp_tools:
-                        # v10: 仅当全局 registry 无同名工具时才注册并追加到 schemas。
-                        # tool_schemas 已由 all_schemas() 包含已注册工具，若无条件 append，
-                        # 第二次 turn 会产生重复工具名，LLM 报 "Tool names must be unique" (HTTP 400)。
-                        if not tool_registry.get(mt.name):
-                            tool_schemas.append(mt.function_schema())
-                            tool_registry.register(mt)
-                    logger.info("[engine] turn=%s 注入 %d 个 MCP 工具", turn_id, len(_mcp_tools))
-            except Exception:
-                logger.debug("[engine] turn=%s MCP 工具注入失败(非阻塞)", turn_id, exc_info=True)
-        elif mode == "readonly":
-            tool_schemas = tool_registry.all_schemas(_READONLY_TOOLS)
-        elif mode == "plan":
-            tool_schemas = tool_registry.all_schemas(_PLAN_TOOLS)
         else:
-            tool_schemas = tool_registry.all_schemas()
-            # v6: 主 turn 路径 MCP 注入（修复：导入的 MCP 工具未注册导致 AI 无法使用）
-            try:
-                from app.services.skill_service import get_agent_mcp_servers
-                from app.orchestration.tools.mcp_wrapper import build_mcp_tools_for_agent
-                mcp_servers = await get_agent_mcp_servers(db, main_agent)
-                if mcp_servers:
-                    _mcp_tools = build_mcp_tools_for_agent(mcp_servers)
-                    for mt in _mcp_tools:
-                        if not tool_registry.get(mt.name):
-                            tool_schemas.append(mt.function_schema())
-                            tool_registry.register(mt)
-                    logger.info("[engine] turn=%s 注入 %d 个 MCP 工具", turn_id, len(_mcp_tools))
-            except Exception:
-                logger.debug("[engine] turn=%s MCP 工具注入失败(非阻塞)", turn_id, exc_info=True)
-            # v6: 主 turn 路径 MCP 注入（修复：导入的 MCP 工具未注册导致 AI 无法使用）
-            # 对齐 agent_runtime 的 per-agent scope 模式，仅当全局 registry 无同名工具时注册。
-            try:
-                from app.services.skill_service import get_agent_mcp_servers
-                from app.orchestration.tools.mcp_wrapper import build_mcp_tools_for_agent
-                mcp_servers = await get_agent_mcp_servers(db, main_agent)
-                if mcp_servers:
-                    _mcp_tools = build_mcp_tools_for_agent(mcp_servers)
-                    for mt in _mcp_tools:
-                        # v10: 仅当全局 registry 无同名工具时才注册并追加到 schemas。
-                        # tool_schemas 已由 all_schemas() 包含已注册工具，若无条件 append，
-                        # 第二次 turn 会产生重复工具名，LLM 报 "Tool names must be unique" (HTTP 400)。
-                        if not tool_registry.get(mt.name):
-                            tool_schemas.append(mt.function_schema())
-                            tool_registry.register(mt)
-                    logger.info("[engine] turn=%s 注入 %d 个 MCP 工具", turn_id, len(_mcp_tools))
-            except Exception:
-                logger.warning("[engine] MCP 工具加载失败(非阻塞)", exc_info=True)
+            tool_schemas = tool_registry.all_schemas(_schema_whitelist)
+        await _inject_mcp_tools(
+            db, main_agent, tool_schemas, turn_id,
+            readonly_only=_mode_readonly,
+        )
         # v38 (plan-482): 系统不再预拆分子任务，是否分步由主代理 todo_write 自主决定。
         # v20: 把 spawn_subagent/collect_results 暴露给主代理——
         # 需要并行调研时主代理自行 spawn 探索任务并拿回结论，再串行实现。

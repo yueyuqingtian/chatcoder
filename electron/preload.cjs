@@ -75,6 +75,10 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
     ipcRenderer.on("app:updateStatus", handler);
     return () => ipcRenderer.removeListener("app:updateStatus", handler);
   },
+  // plan-230-1144 M4.2: 更新内容可见
+  getReleaseNotes: (opts) => ipcRenderer.invoke("app:getReleaseNotes", opts || {}),
+  getWhatsNew: (opts) => ipcRenderer.invoke("app:getWhatsNew", opts || {}),
+  consumeWhatsNew: () => ipcRenderer.invoke("app:consumeWhatsNew"),
 });
 
 // 注入平台到 <html data-platform>，供 CSS 平台感知样式（如 Win11 微圆角+四角透桌面）使用

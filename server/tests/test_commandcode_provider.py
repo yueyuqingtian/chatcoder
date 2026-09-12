@@ -86,6 +86,80 @@ def test_build_payload():
     assert "input_schema" in params["tools"][0]
 
 
+def test_convert_image_block_to_native_image_part():
+    """plan-234-1171 R3: image_url 块必须转成 CommandCode 原生 image 块。
+
+    修复前该分支把图片硬编码替换为占位文本 "[image]"，base64 从未进入请求体，
+    模型永远看不到图。真实协议（api.commandcode.ai 实测命中）要求：
+      {"type": "image", "source": {"type": "url", "url": "<data URI 或 http URL>"}}
+    """
+    provider = CommandCodeProvider(api_key="user_test123", model="deepseek/deepseek-v4.1-flash")
+
+    data_uri = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="
+    messages = [
+        ChatMessage(
+            role="user",
+            content="这张图是什么？",
+            content_blocks=[{"type": "image_url", "image_url": {"url": data_uri}}],
+        ),
+    ]
+
+    _, converted = provider._convert_messages(messages)
+    assert len(converted) == 1
+    content = converted[0]["content"]
+
+    # 首块是文本，次块是图片
+    assert content[0] == {"type": "text", "text": "这张图是什么？"}
+    img = content[1]
+    assert img["type"] == "image"
+    assert img["source"]["type"] == "url"
+    assert img["source"]["url"] == data_uri
+    # 关键回归：不得再出现占位文本
+    assert "[image]" not in str(content)
+
+
+def test_convert_image_block_remote_url_and_passthrough():
+    """远程 http(s) URL 与已是原生 image 形态的块都应正确保留。"""
+    provider = CommandCodeProvider(api_key="user_test123", model="deepseek/deepseek-v4.1-flash")
+
+    messages = [
+        ChatMessage(
+            role="user",
+            content=None,
+            content_blocks=[
+                {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}},
+                {"type": "image", "source": {"type": "url", "url": "https://example.com/b.png"}},
+            ],
+        ),
+    ]
+
+    _, converted = provider._convert_messages(messages)
+    content = converted[0]["content"]
+    assert content[0] == {
+        "type": "image", "source": {"type": "url", "url": "https://example.com/a.png"},
+    }
+    # 原生块原样透传
+    assert content[1] == {
+        "type": "image", "source": {"type": "url", "url": "https://example.com/b.png"},
+    }
+
+
+def test_convert_image_block_empty_url_skipped():
+    """空 url 的 image 块被安全跳过，不产生非法 content 元素（避免 400）。"""
+    provider = CommandCodeProvider(api_key="user_test123", model="deepseek/deepseek-v4.1-flash")
+    messages = [
+        ChatMessage(
+            role="user",
+            content="hi",
+            content_blocks=[{"type": "image_url", "image_url": {"url": ""}}],
+        ),
+    ]
+    _, converted = provider._convert_messages(messages)
+    content = converted[0]["content"]
+    assert all(c.get("type") != "image" for c in content)
+    assert content == [{"type": "text", "text": "hi"}]
+
+
 @pytest.mark.asyncio
 async def test_response_failure_reason_catches_empty_tool_calls():
     from app.orchestration.agent_loop import _response_failure_reason

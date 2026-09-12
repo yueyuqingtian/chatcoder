@@ -1,0 +1,71 @@
+/* ═══════════════════════════════════════════════════════════
+ * 统一焦点系统
+ *
+ * plan-238-1210: **蓝色焦点框全量清理**——用户明确要求删除所有蓝色边框装饰，
+ * 但不得影响交互（键盘可达性、功能行为保持不变）。
+ *
+ * 改造前：:focus-visible { box-shadow: var(--focus-ring) }（品牌色 sky 2px 方环）
+ * 命中 button/菜单项时形成突兀的方形蓝框（例如选完模型后焦点停在模型按钮上）。
+ *
+ * 现在：不再有任何品牌色/浅蓝描边。
+ * 本轮: 按钮/菜单项的中性聚焦描边也全局移除——模型/权限/思考深度等选择器弹层关闭后
+ * 焦点回到触发按钮，会残留一圈边框（点击旁边才消失）；用户要求这类"选中态边框"不出现。
+ * 菜单/列表的键盘可达性改由背景高亮（data-highlighted / .active 底色）承担。
+ * ═══════════════════════════════════════════════════════════ */
+
+/* ── 1. 焦点提示：按钮与菜单项一律无描边；仅原生表单控件保留中性提示 ── */
+:focus-visible {
+  outline: none;
+}
+/* 原生控件（select/checkbox/radio）保留 outline 更可靠——用中性色而非品牌色 */
+select:focus-visible,
+input[type="checkbox"]:focus-visible,
+input[type="radio"]:focus-visible {
+  outline: 1px solid var(--text-3);
+  outline-offset: 1px;
+}
+/* 按钮/菜单项/可选行：任何聚焦态都不出现描边（含弹层关闭后焦点回到触发按钮） */
+button:focus-visible,
+[role="button"]:focus-visible,
+[role="menuitem"]:focus-visible,
+[role="menuitemradio"]:focus-visible,
+[role="menuitemcheckbox"]:focus-visible,
+[role="option"]:focus-visible,
+[role="tab"]:focus-visible {
+  outline: none;
+}
+
+/* ── 2. 输入类控件聚焦边框（中性色，无品牌色）── */
+.ui-input:focus,
+.ui-input:focus-visible,
+.ui-textarea:focus,
+.ui-textarea:focus-visible,
+.sp-input:focus,
+.sp-textarea:focus,
+.sb-rename-input:focus,
+.todo-proposal-input:focus,
+.question-custom:focus,
+.browser-start-input:focus,
+.browser-console-input:focus {
+  outline: none;
+  border-color: var(--text-2);
+}
+/* focus-within 容器同步聚焦态（中性色） */
+.approval-tool-selector:focus-within,
+.question-wizard-custom-row:focus-within {
+  border-color: var(--text-2);
+}
+
+/* ── 3. 文本输入控件不吃全局焦点装饰（含键盘导航） ── */
+input:not([type="checkbox"]):not([type="radio"]):focus-visible,
+textarea:focus-visible {
+  box-shadow: none;
+}
+
+/* ── 4. 会话输入框（composer）：聚焦零视觉变化（plan-234-1171 R2 约定）──
+ * composer 的视觉边界完全由外层 .composer-main 的边框承载，聚焦时不追加任何装饰。 */
+.composer-input:focus,
+.composer-input:focus-visible {
+  outline: none;
+  box-shadow: none;
+}

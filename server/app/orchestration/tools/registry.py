@@ -24,8 +24,11 @@ from app.orchestration.tools.git_diff import GitDiffTool
 from app.orchestration.tools.goal import GoalCompleteTool
 from app.orchestration.tools.grep import GrepTool
 from app.orchestration.tools.memory_search import MemorySearchTool
+from app.orchestration.tools.memory_write import MemoryWriteTool
 from app.orchestration.tools.multi_edit import MultiFileEditTool
 from app.orchestration.tools.read_attachment import ReadAttachmentTool
+from app.orchestration.tools.skill_view import SkillViewTool
+from app.orchestration.tools.symbol_search import OutlineTool, SymbolSearchTool
 from app.orchestration.tools.terminal import TerminalExecTool
 from app.orchestration.tools.todo import TodoWriteTool
 from app.orchestration.tools.view_image import ViewImageTool
@@ -85,6 +88,12 @@ def _build_default_registry() -> ToolRegistry:
         MultiFileEditTool, GitTool, CodebaseSearchTool, AskUserQuestionTool,
         # v30.1: 压缩索引查看（AI 按需查看压缩前会话）
         CompactionIndexTool, CompactionViewTool,
+        # plan-230-1144 M1.2: 技能正文按需加载（此前 content 从未送达模型，AI 无法主动使用技能）
+        SkillViewTool,
+        # plan-230-1144 M3: 符号索引检索与文件骨架（函数级定位，替代大范围扫描探索）
+        SymbolSearchTool, OutlineTool,
+        # plan-230-1144 M4.1: 记忆三层化——AI 主动写记忆（此前只有 turn 后被动抽取）
+        MemoryWriteTool,
         # v32: 浏览器工具套件（Playwright / DOM快照 / 截图 / 点击 / 填写）
         BrowserNavigateTool, BrowserScreenshotTool, BrowserClickTool,
         BrowserTypeTool, BrowserSnapshotTool, BrowserEvaluateTool,

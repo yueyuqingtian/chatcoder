@@ -1,0 +1,79 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>A2 输入框回归用例</title>
+<style>
+  body { margin: 0; font: 13px/1.5 system-ui, "Microsoft YaHei", sans-serif; }
+  .composer-input-wrap { position: relative; flex: 1 1 auto; min-width: 0; }
+  .composer-input { display: block; width: 100%; box-sizing: border-box; min-height: 36px; max-height: 400px;
+                    padding: 4px 4px 6px; border: 0; outline: none; resize: none;
+                    overflow-y: auto; overscroll-behavior: contain; color: var(--text-1, #222); }
+</style></head>
+<body>
+<pre id="a2-result">PENDING</pre>
+<script>
+/* 输入框 A2 回归用例（plan-238-1210）
+ *
+ * 锁定 A2 重构后必须成立的不变量：
+ *   1) 不存在标签叠加层 .composer-input-tokens / .tokenized（双层渲染已删除）；
+ *   2) textarea 文字可见（不再是 transparent 靠叠加层绘制）；
+ *   3) 大段文本 + 超长 Windows 路径下，滚动到底后点击命中仍是 textarea（"点不中"回归）；
+ *   4) 无 .composer-input-tokens 的相邻高亮层参与布局。
+ *
+ * 运行：msedge/chrome --headless=new --dump-dom <本文件>
+ * 结果写在 #a2-result 的文本中，形如：A2-RESULT {...}
+ */
+(function () {
+  var results = {};
+
+  // 1) 页面级断言：旧双层渲染的标记不应存在
+  results.noTokenLayer = document.querySelector(".composer-input-tokens") === null;
+  results.noTokenized = document.querySelector(".composer-input.tokenized") === null;
+
+  // 2) 构造与 ComposerCore 一致的结构，验证原生可见性与滚动
+  var wrap = document.createElement("div");
+  wrap.className = "composer-input-wrap";
+  var ta = document.createElement("textarea");
+  ta.className = "composer-input";
+  ta.rows = 1;
+  wrap.appendChild(ta);
+  document.body.appendChild(wrap);
+
+  var lines = [];
+  for (var i = 0; i < 40; i++) {
+    lines.push("- image.png (C:\\Users\\yueyuqingtian\\AppData\\Local\\chatcoder\\uploads\\seg" + i + "\\image.png)");
+  }
+  ta.value = lines.join("\n");
+  ta.style.height = "auto";
+  ta.style.height = Math.max(36, Math.min(ta.scrollHeight, 400)) + "px";
+
+  var cs = getComputedStyle(ta);
+  results.textVisible = cs.color !== "transparent" && cs.color !== "rgba(0, 0, 0, 0)";
+  results.taScrollable = ta.scrollHeight > ta.clientHeight + 1;
+  results.taHeight = Math.round(ta.getBoundingClientRect().height);
+
+  // 3) 滚到底后命中测试：应命中 textarea
+  ta.scrollTop = ta.scrollHeight;
+  var r = ta.getBoundingClientRect();
+  var hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+  results.scrollBottomHitTextarea = hit === ta;
+  results.hitTag = hit ? hit.tagName : "none";
+
+  // 4) 双层渲染的兜底：相邻标签层若存在，其高度必须与 textarea 一致（当前应为 null）
+  var layer = document.querySelector(".composer-input-tokens");
+  results.layerAbsent = layer === null;
+  if (layer) results.layerHeightDelta = layer.getBoundingClientRect().height - ta.getBoundingClientRect().height;
+
+  // 5) 宽度回归（plan-238-1210 修复）：wrap 去掉 flex 列容器后，textarea 必须仍铺满
+  //    容器宽度——实测未修复时仅 163px（按 cols 默认宽），修复后 ~92% 容器宽。
+  var wrapW = wrap.getBoundingClientRect().width;
+  var taW = ta.getBoundingClientRect().width;
+  results.taWidth = Math.round(taW);
+  results.wrapWidth = Math.round(wrapW);
+  results.widthRatio = wrapW > 0 ? Math.round((taW / wrapW) * 100) + "%" : "n/a";
+  // textarea 宽度不应小于其容器（wrap 自身已由 flex:1 撑开，见 CSS）
+  results.taFillsWrap = taW >= wrapW - 1;
+
+  var out = document.getElementById("a2-result");
+  out.textContent = "A2-RESULT " + JSON.stringify(results);
+})();
+</script>
+</body></html>

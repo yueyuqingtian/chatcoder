@@ -1,0 +1,59 @@
+/* ═══════════════════════════════════════════════════════════
+ * 动效统一层（plan-230-1144 M5.1）
+ *
+ * 职责：
+ * 1. 全局 prefers-reduced-motion 降级——此前仅 task-strip 等两处局部处理，
+ *    大量动画（modal/toast/spinner/pulse）在系统开启"减少动态效果"后仍播放；
+ * 2. 通用动效入口类（anim-*）的时长/曲线统一引用 token；
+ * 3. 折叠容器规范类 .collapse-grid（grid-template-rows 0fr→1fr 过渡）——
+ *    解决 max-height 过渡"要么顿、要么空"的经典问题（max-height 与内容实际
+ *    高度无关，过渡时长被浪费在空白区间）。
+ *
+ * 命名警示（真实事故回溯）：本类原名 `.collapsible`，与 App.tsx 左侧面板
+ * 既有的**标记类** `collapsible`（`app-pane app-pane-left collapsible`）
+ * 重名；本文件在 global.css 之后加载，`opacity: 0` + `grid-template-rows: 0fr`
+ * 直接命中左栏 → 整块侧栏不可见（打包后"左侧面板显示不出来"）。
+ * 教训：新增规范类一律使用不会与既有标记类撞名的前缀（xxx-yyy 两段式），
+ * 并在提交前全仓 grep 类名（含未定义的标记类，它们同样是"已占用"的）。
+ * ═══════════════════════════════════════════════════════════ */
+
+/* ── 通用动效入口类（.anim-*）已在 global.css 就地定义（2731-2734 行），
+ * 本文件不重复声明，只补充其缺失的关键帧与全局策略。── */
+
+/* 补齐历史悬空关键帧（plan-230-1144 M5.1）：
+ * .jump-dot-card 与浏览器镜像横幅长期引用 fadeIn / pulse，但两者从未定义，
+ * 动画实际从不播放。此处集中补齐（唯一引用点在 global.css）。 */
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+
+/* ── 折叠规范类：内容高度自适应过渡（替代 max-height 估算）──
+ * 用法：<div class="collapse-grid" data-open="true"><div>…内容…</div></div>
+ * 子元素只有一层，grid-template-rows 0fr ↔ 1fr 即得到真实高度过渡。 */
+.collapse-grid {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--dur-4) var(--ease-out), opacity var(--dur-3) var(--ease-out);
+  opacity: 0;
+}
+.collapse-grid[data-open="true"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+.collapse-grid > * {
+  overflow: hidden;
+  min-height: 0; /* grid 子项默认 min-height:auto 会撑开行高，必须复位 */
+}
+
+/* ── 全局 reduced-motion 降级 ──
+ * 系统"减少动态效果"开启时：终止一切 animation/transition 的时长与位移，
+ * 循环动画（spinner/pulse/breath）直接停帧，避免视觉噪声。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

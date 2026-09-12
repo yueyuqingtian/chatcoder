@@ -404,6 +404,22 @@ def _get_scope_rules_key(scope: str, key: str) -> str:
     return f"rules_{scope}_{key}"
 
 
+def _resolve_project_scope_key(project_path: str | None) -> str:
+    """把项目路径解析为作用域规则的存储键（仓库绝对路径）。
+
+    plan-234-1171 R7: 项目规则必须按"具体项目"存储，且写入键要与注入时的读取键
+    **严格同源**——注入侧 user_rules_loader.load_workdir_rules(workspace) 用的是
+    `Path(workspace).resolve()`（会话实际项目路径）。此前面板读写一律用服务端
+    settings.workspace_root，与注入侧的项目路径不一致，导致用户写的规则永远读不到。
+    未传 project_path 时保持原行为（settings.workspace_root）。
+    """
+    raw = project_path or settings.workspace_root
+    try:
+        return str(Path(raw).resolve())
+    except (OSError, ValueError):
+        return str(raw)
+
+
 @router.get("/settings/rules/{scope}/{key:path}", response_model=ScopeRulesOut)
 async def get_scope_rules(scope: str, key: str) -> ScopeRulesOut:
     """读取指定作用域的规则(scope: workdir / group, key: 路径或会话ID)。"""
@@ -428,9 +444,13 @@ async def set_scope_rules(scope: str, key: str, body: ScopeRulesIn) -> ScopeRule
 
 
 @router.get("/settings/rules/workdir", response_model=ScopeRulesOut)
-async def get_workdir_rules() -> ScopeRulesOut:
-    """读取当前工作目录的规则。"""
-    ws_key = str(Path(settings.workspace_root).resolve())
+async def get_workdir_rules(project_path: str = "") -> ScopeRulesOut:
+    """读取当前工作目录的规则。
+
+    plan-234-1171 R7: `project_path` 指定规则归属项目；未传时保持原行为
+    （settings.workspace_root），不破坏既有数据。
+    """
+    ws_key = _resolve_project_scope_key(project_path)
     data = _load_config()
     storage_key = _get_scope_rules_key("workdir", ws_key)
     rules_data = data.get(storage_key, {})
@@ -442,9 +462,9 @@ async def get_workdir_rules() -> ScopeRulesOut:
 
 
 @router.put("/settings/rules/workdir", response_model=ScopeRulesOut)
-async def set_workdir_rules(body: ScopeRulesIn) -> ScopeRulesOut:
-    """更新当前工作目录的规则。"""
-    ws_key = str(Path(settings.workspace_root).resolve())
+async def set_workdir_rules(body: ScopeRulesIn, project_path: str = "") -> ScopeRulesOut:
+    """更新当前工作目录的规则（plan-234-1171 R7: 支持按项目写入）。"""
+    ws_key = _resolve_project_scope_key(project_path)
     data = _load_config()
     storage_key = _get_scope_rules_key("workdir", ws_key)
     data[storage_key] = {"rules": body.rules, "scope": "workdir", "key": ws_key}
@@ -466,12 +486,16 @@ class AiRulesOut(BaseModel):
     sources: list[dict]  # [{source,label,enabled}]
     global_rules: str = ""
     workdir_rules: str = ""
+    # plan-234-1171 R7: 回传项目规则实际归属的路径，供前端显式展示"配的是哪个项目"
+    project_path: str = ""
 
 
 class AiRulesIn(BaseModel):
     enabled_sources: list[str] | None = None
     global_rules: str | None = None
     workdir_rules: str | None = None
+    # plan-234-1171 R7: 指定项目规则归属项目（仓库路径）；未传时回退 workspace_root
+    project_path: str | None = None
 
 
 @router.get("/settings/ai-rules/scan", response_model=list[dict])
@@ -496,10 +520,15 @@ async def scan_ai_rules(path: str = ""):
 
 
 @router.get("/settings/ai-rules", response_model=AiRulesOut)
-async def get_ai_rules() -> AiRulesOut:
-    """读取 AI 规则配置（来源启停 + 全局/项目规则）。"""
+async def get_ai_rules(project_path: str = "") -> AiRulesOut:
+    """读取 AI 规则配置（来源启停 + 全局/项目规则）。
+
+    plan-234-1171 R7: `project_path` 指定项目规则的归属项目。此前一律用服务端
+    settings.workspace_root 作键，与注入侧按会话项目路径读取的键不一致，
+    用户在面板里写的项目规则永远注入不进去。
+    """
     data = _load_config()
-    ws_key = str(Path(settings.workspace_root).resolve())
+    ws_key = _resolve_project_scope_key(project_path)
     workdir_data = data.get(_get_scope_rules_key("workdir", ws_key), {})
     workdir_rules = workdir_data.get("rules", "") if isinstance(workdir_data, dict) else str(workdir_data)
     enabled = set(data.get("ai_rules_enabled") or list(AI_RULE_SOURCES.keys()))
@@ -511,19 +540,24 @@ async def get_ai_rules() -> AiRulesOut:
         sources=sources,
         global_rules=data.get("global_rules", ""),
         workdir_rules=workdir_rules,
+        project_path=ws_key,
     )
 
 
 @router.put("/settings/ai-rules", response_model=AiRulesOut)
 async def set_ai_rules(body: AiRulesIn) -> AiRulesOut:
-    """保存 AI 规则配置。"""
+    """保存 AI 规则配置。
+
+    plan-234-1171 R7: 写入键与 get_ai_rules / user_rules_loader 严格同源，
+    保证"在这里写"与"注入时读"指向同一个项目。
+    """
     data = _load_config()
     if body.enabled_sources is not None:
         data["ai_rules_enabled"] = list(dict.fromkeys(body.enabled_sources))
     if body.global_rules is not None:
         data["global_rules"] = body.global_rules
+    ws_key = _resolve_project_scope_key(body.project_path)
     if body.workdir_rules is not None:
-        ws_key = str(Path(settings.workspace_root).resolve())
         data[_get_scope_rules_key("workdir", ws_key)] = {
             "rules": body.workdir_rules, "scope": "workdir", "key": ws_key,
         }
@@ -533,10 +567,11 @@ async def set_ai_rules(body: AiRulesIn) -> AiRulesOut:
         {"source": s, "label": cfg["label"], "enabled": s in enabled}
         for s, cfg in AI_RULE_SOURCES.items()
     ]
-    workdir_data = data.get(_get_scope_rules_key("workdir", str(Path(settings.workspace_root).resolve())), {})
+    workdir_data = data.get(_get_scope_rules_key("workdir", ws_key), {})
     workdir_rules = workdir_data.get("rules", "") if isinstance(workdir_data, dict) else str(workdir_data)
     return AiRulesOut(
         sources=sources,
         global_rules=data.get("global_rules", ""),
         workdir_rules=workdir_rules,
+        project_path=ws_key,
     )

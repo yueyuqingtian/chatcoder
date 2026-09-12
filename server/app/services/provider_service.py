@@ -96,6 +96,9 @@ async def scan_models(db: AsyncSession, provider_id: int) -> list[dict]:
         cmc_models = [
             {"id": "deepseek/deepseek-v4-pro", "context_window": 1000000, "is_multimodal": False, "reasoning_efforts": ["low", "medium", "high", "max"]},
             {"id": "deepseek/deepseek-v4-flash", "context_window": 1000000, "is_multimodal": False, "reasoning_efforts": ["low", "medium", "high", "max"]},
+            # plan-234-1171 R3: 补齐 v4.1-flash——多模态模型，此前预设目录缺失导致
+            # 扫描看不到该模型、is_multimodal 标记缺失，图片注入双路径都被跳过。
+            {"id": "deepseek/deepseek-v4.1-flash", "context_window": 1000000, "is_multimodal": True, "reasoning_efforts": ["low", "medium", "high", "max"]},
             {"id": "zai-org/GLM-5.1", "context_window": 200000, "is_multimodal": True, "reasoning_efforts": ["low", "medium", "high"]},
             {"id": "zai-org/GLM-5", "context_window": 200000, "is_multimodal": True, "reasoning_efforts": ["low", "medium", "high"]},
             {"id": "moonshotai/Kimi-K2.6", "context_window": 200000, "is_multimodal": True, "reasoning_efforts": ["low", "high", "max"]},

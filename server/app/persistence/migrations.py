@@ -93,6 +93,19 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("sessions", "goal_created_at", "VARCHAR(40)"),
     # ========== usage_records（plan-152-704：供应商显示名）==========
     ("usage_records", "provider_name", "VARCHAR(120) DEFAULT ''"),
+    # ========== scheduled_tasks（plan-230-1144 M1.1：调度器落地所需的执行状态列）==========
+    ("scheduled_tasks", "enabled", "BOOLEAN DEFAULT 1 NOT NULL"),
+    ("scheduled_tasks", "last_run_at", "VARCHAR(40)"),
+    ("scheduled_tasks", "next_run_at", "VARCHAR(40)"),
+    ("scheduled_tasks", "last_status", "VARCHAR(16)"),
+    ("scheduled_tasks", "last_error", "VARCHAR(300)"),
+    ("scheduled_tasks", "missed_policy", "VARCHAR(12) DEFAULT 'skip'"),
+    # ========== memory_entries（plan-230-1144 M4.1：记忆三层化）==========
+    ("memory_entries", "scope", "VARCHAR(12) DEFAULT 'session'"),
+    ("memory_entries", "project_id", "BIGINT"),
+    ("memory_entries", "candidate", "BOOLEAN DEFAULT 0 NOT NULL"),
+    ("memory_entries", "expires_at", "VARCHAR(40)"),
+    ("memory_entries", "superseded_by", "BIGINT"),
 ]
 
 

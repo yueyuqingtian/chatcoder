@@ -42,7 +42,12 @@ class ApprovalManager:
         self._on_request: callable | None = None
 
     def set_on_request(self, cb: callable) -> None:
-        """注册新请求回调: cb(approval_id, detail) -> 可为 async/sync"""
+        """注册新请求回调: cb(approval_id, detail) -> 可为 async/sync。
+
+        plan-230-1144: 仅作兼容保留——正常路径已改为 request() 内按
+        detail.session_id 直接广播（多会话并发时全局单例回调会被覆盖，
+        导致审批/提问串到其他会话）。
+        """
         self._on_request = cb
 
     def new_id(self) -> str:
@@ -58,7 +63,9 @@ class ApprovalManager:
 
         - 若已配置 auto_approve_tools 且匹配当前工具，直接放行不挂起；
         - 若 detail.kind == "question" 或 is_forced=True，绝不跳过；
-        - 若超时未处理，按 settings.approval_timeout_sec 自动拒绝。
+        - plan-230-1144: 结构化提问（question）**不设超时**——AI 保持暂停直到
+          用户回答（取消 turn 可结束等待）；工具审批仍按
+          settings.approval_timeout_sec 超时自动拒绝。
         """
         tool_name = detail.get("tool", "")
         kind = detail.get("kind", "tool_call")
@@ -98,31 +105,39 @@ class ApprovalManager:
         async with self._lock:
             self._pending[approval_id] = pa
 
-        if self._on_request:
+        # plan-230-1144: 按 detail.session_id 精确路由广播。
+        # 修复跨会话串线：此前优先调用全局单例 _on_request 回调（executor.set_on_request
+        # 全局注册，多会话并发时后运行的会话会覆盖前者），A 会话的提问/审批会被广播进
+        # B 会话的 WS 通道（表现为"问题在另一个会话弹出"）。
+        # 现改为：只要有 session_id 就直发对应会话通道；回调仅作为无 session_id 的兼容路径。
+        _sid = detail.get("session_id")
+        if _sid is not None:
             try:
-                # 回调内做入库 + WS 广播(可异步也可同步)
+                from app.gateway.ws import manager as ws_manager
+                asyncio.create_task(ws_manager.broadcast(
+                    int(_sid),
+                    {"event": "approval.request", "payload": {"approval_id": approval_id, "detail": detail}},
+                ))
+            except Exception:
+                logger.exception("审批请求广播失败 %s", approval_id)
+        elif self._on_request:
+            try:
+                # 兼容：无 session_id 的旧调用路径仍走注册回调
                 result = self._on_request(approval_id, detail)
                 if asyncio.iscoroutine(result):
                     asyncio.create_task(result)
             except Exception:
                 logger.exception("审批请求回调异常 %s", approval_id)
-        elif detail.get("session_id"):
-            # v2.2 兜底: 工具自行调用 approval_manager.request 时未注册回调，直接通过 ws_manager 广播
-            try:
-                from app.gateway.ws import manager as ws_manager
-                sid = int(detail["session_id"])
-                asyncio.create_task(ws_manager.broadcast(
-                    sid,
-                    {"event": "approval.request", "payload": {"approval_id": approval_id, "detail": detail}},
-                ))
-                logger.info("approval_manager 自适应广播 approval.request 到 session %s", sid)
-            except Exception:
-                logger.exception("自适应广播 approval.request 失败 %s", approval_id)
 
         try:
-            approved = await asyncio.wait_for(
-                pa.ensure_future(), timeout=settings.approval_timeout_sec
-            )
+            if kind == "question":
+                # plan-230-1144: 结构化提问不设超时——AI 保持暂停直到用户回答后继续；
+                # 用户可随时取消整个 turn 来结束等待（turn 取消会连带取消本协程）。
+                approved = await pa.ensure_future()
+            else:
+                approved = await asyncio.wait_for(
+                    pa.ensure_future(), timeout=settings.approval_timeout_sec
+                )
             return approved
         except asyncio.TimeoutError:
             logger.warning("审批超时自动拒绝 %s", approval_id)

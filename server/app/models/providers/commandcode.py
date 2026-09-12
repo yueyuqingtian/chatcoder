@@ -126,8 +126,12 @@ class CommandCodeProvider(ModelProvider):
                     if b_type == "text" and block.get("text"):
                         user_content.append({"type": "text", "text": block["text"]})
                     elif b_type == "image_url":
-                        # CommandCode 目前主要支持文本，图片先占位说明
-                        user_content.append({"type": "text", "text": "[image]"})
+                        converted = self._convert_image_block(block)
+                        if converted:
+                            user_content.append(converted)
+                    elif b_type == "image":
+                        # 已是 CommandCode 原生 image 块，原样透传
+                        user_content.append(block)
             if not user_content:
                 user_content = [{"type": "text", "text": ""}]
             out_messages.append({
@@ -137,6 +141,34 @@ class CommandCodeProvider(ModelProvider):
 
         system_prompt = "\n\n".join(system_parts) if system_parts else None
         return system_prompt, out_messages
+
+    @staticmethod
+    def _convert_image_block(block: dict) -> dict | None:
+        """OpenAI image_url 块 → CommandCode 原生 image 块。
+
+        plan-234-1171 R3: 此前这里把图片硬编码替换为占位文本 `[image]`，base64
+        从未进入请求体，模型永远看不到图（本文件是唯一直接丢弃图片的 provider）。
+
+        真实协议由 api.commandcode.ai 实测确定（400 校验提示 + 逐候选验证命中）：
+        - content 数组元素的 `type` 只接受 text|image|document|search_result|thinking；
+        - image 块必须带 `source` 对象，`source.type` 为 "url"（另有 "base64" 分支，
+          其字段名为 snake_case `media_type`）；
+        - 实测命中形态（模型正确读出测试图中已知字符串）：
+            {"type": "image", "source": {"type": "url", "url": "data:image/png;base64,..."}}
+          data URI 与远程 http(s) URL 共用该形态，故统一走这里。
+        """
+        url = ""
+        image_url = block.get("image_url")
+        if isinstance(image_url, dict):
+            url = str(image_url.get("url") or "")
+        elif isinstance(image_url, str):
+            url = image_url
+        if not url:
+            url = str(block.get("url") or "")
+        if not url:
+            return None
+        # 远程 http(s) URL 与 data URI 走同一 source.type=url 形态（实测一致）
+        return {"type": "image", "source": {"type": "url", "url": url}}
 
     def _convert_tools(self, tools: list[dict] | None) -> list[dict] | None:
         """转换工具定义为 CommandCode 要求的 input_schema 格式。"""
@@ -168,9 +200,12 @@ class CommandCodeProvider(ModelProvider):
             "model": request.model or self._default_model,
             "messages": messages,
             "stream": True,
-            "max_tokens": request.max_tokens or 8192,
             "temperature": request.temperature if request.temperature is not None else 0.3,
         }
+        # 不限制输出：未显式配置时不传 max_tokens（旧 8192 兜底会截断长输出），
+        # 由网关/模型自身决定上限。
+        if request.max_tokens:
+            params["max_tokens"] = request.max_tokens
         if system_prompt:
             params["system"] = system_prompt
         if tools:

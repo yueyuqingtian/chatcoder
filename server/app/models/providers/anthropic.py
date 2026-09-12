@@ -110,9 +110,14 @@ class AnthropicProvider(ModelProvider):
         payload: dict = {
             "model": request.model or self._default_model,
             "messages": messages,
-            "max_tokens": request.max_tokens or 4096,
             "stream": stream,
         }
+        # 不限制输出：未显式配置时不传 max_tokens，由网关/模型自身决定上限。
+        # 例外：官方 api.anthropic.com 该字段必填（缺失会 400），保留兜底值。
+        if request.max_tokens:
+            payload["max_tokens"] = request.max_tokens
+        elif "api.anthropic.com" in self._base_url.lower():
+            payload["max_tokens"] = 4096
         if system_parts:
             payload["system"] = "\n\n".join(system_parts)
         if request.temperature is not None:

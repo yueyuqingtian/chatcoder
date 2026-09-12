@@ -13,7 +13,7 @@ import type { MessageOut } from "../../api/client";
 import { api } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { MarkdownContent } from "../MarkdownContent";
-import { IconArrowToggle, IconCompress, IconRotateCcw } from "../icons";
+import { IconChevronRight, IconCompress, IconRotateCcw } from "../icons";
 
 const OPEN_TAG = "<compacted-summary>";
 const CLOSE_TAG = "</compacted-summary>";
@@ -97,23 +97,31 @@ export const CompactCard = memo(function CompactCard({ msg }: { msg: MessageOut 
 
   return (
     <div className={`compact-card${open ? " open" : ""}${restored ? " restored" : ""}`}>
-      <button type="button" className="compact-card-head" onClick={toggle}>
-        <span className="compact-card-icon"><IconCompress size={12} /></span>
-        <span className="compact-card-title">上下文压缩{index > 0 ? ` #${index}` : ""}</span>
-        <span className="compact-card-stat">
+      <div
+        className={`tc-row compact-card-row${open ? " expanded" : ""} has-output`}
+        role="button"
+        tabIndex={0}
+        onClick={toggle}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+        }}
+      >
+        <span className="tc-icon"><IconCompress size={16} /></span>
+        <span className="tc-verb">上下文压缩{index > 0 ? ` #${index}` : ""}</span>
+        <span className="tc-query">
           {shadowedIds.length > 0 && `${shadowedIds.length} 条消息 · `}
           节省 {savedTokens.toLocaleString()} tokens
         </span>
         <span className="compact-card-trigger">{restored ? "已还原" : triggerLabel}</span>
-        <span className="compact-card-chev">
-          <IconArrowToggle open={open} size={12} />
+        <span className={`tc-chevron${open ? " open" : ""}`}>
+          <IconChevronRight size={14} />
         </span>
-      </button>
+      </div>
       {open && (
         <div className="compact-card-body">
           <div className="compact-card-meta">
             {shadowedIds.length > 0 && <span>遮蔽 {shadowedIds.length} 条消息（ID {shadowedIds[0]}…{shadowedIds[shadowedIds.length - 1]}）</span>}
-            {shadowedTokens > 0 && <span>原占用 {shadowedTokens.toLocaleString()} tokens</span>}
+            {shadowedTokens > 0 && <span>被压缩消息原占用 {shadowedTokens.toLocaleString()} tokens</span>}
             {index > 0 && <span>AI 可用 compaction_view 按 # {index} 查看压缩前消息</span>}
           </div>
           {!restored && (
@@ -154,22 +162,26 @@ export const CompactCard = memo(function CompactCard({ msg }: { msg: MessageOut 
   );
 });
 
-/** v30: "压缩中"进度卡——compact.started 后消息流尾部展示，完成后消失。 */
+/** v30: "压缩中"进度卡——compact.started 后消息流尾部展示，完成后消失。
+ *  plan-238-1188: 复用工具行规格（tc-row）——16px 图标 / tc-verb 流光动词 /
+ *  tc-query 统计，与"正在执行"工具行同构，不再自成一派（原先 12px 图标 +
+ *  行尾右吊呼吸点，视觉上明显异类）。 */
 export function CompactingCard({ info }: { info: { usedTokens?: number; contextWindow?: number; ratio?: number } | null }) {
   const ratio = info?.ratio;
   const used = info?.usedTokens;
   const window_ = info?.contextWindow;
   return (
-    <div className="compact-card compacting">
-      <span className="compact-card-icon"><IconCompress size={12} /></span>
-      <span className="compact-card-title">正在压缩上下文…</span>
-      {used != null && (
-        <span className="compact-card-stat">
-          占用 {used.toLocaleString()} tokens{ratio != null ? `（${ratio}%）` : ""}
-          {window_ != null ? ` / ${window_.toLocaleString()}` : ""}
-        </span>
-      )}
-      <span className="thinking-block-breath" />
+    <div className="tc-node compacting-node">
+      <div className="tc-row compacting-row">
+        <span className="tc-icon"><IconCompress size={16} /></span>
+        <span className="tc-verb text-shine">正在压缩上下文</span>
+        {used != null && (
+          <span className="tc-query">
+            占用 {used.toLocaleString()} tokens{ratio != null ? `（${ratio}%）` : ""}
+            {window_ != null ? ` / ${window_.toLocaleString()}` : ""}
+          </span>
+        )}
+      </div>
     </div>
   );
 }

@@ -64,13 +64,14 @@ export interface RunningToolResult {
   duration_ms?: number;
 }
 
-/** v2.2: 排队输入项（运行中发送的消息进入队列，turn 完成后自动续发）。 */
+/** v2.2: 排队输入项（运行中发送的消息进入队列，turn 完成后自动续发）。
+ *  plan-230-1144 M2: mode 放宽为 string——自定义权限模式名需随队列项透传。 */
 export interface QueuedInput {
   id: string;
   content: string;
   attachments?: Record<string, unknown>[];
   reasoningEffort?: string;
-  mode?: "readonly" | "plan" | null;
+  mode?: string | null;
   /** plan-547: 点击"立即发送"后的注入中状态（等待 user_input.injected 事件确认后移除） */
   flushing?: boolean;
 }
@@ -137,6 +138,8 @@ export interface SessionSlice {
   usage: UsageDetail | null;
   isCompacting: boolean;
   pendingApproval: { approvalId: string; detail: Record<string, unknown> } | null;
+  /** plan-238-1188: 提问作答草稿随会话 slice 一起保存/恢复，切走再回来不丢。 */
+  questionDraft: { approvalId: string; stepIndex: number; answers: Record<string, string> } | null;
   /** plan-95/v38: turnId 标记计划卡归属 turn；planDocPath 为后端广播的实际文档路径。
    *  task.proposed 与旧 /plan 流程统一由本状态渲染确认卡（不再有独立 pendingSplit）。 */
   pendingPlan: { task: string; turnId?: number; planDocPath?: string } | null;
@@ -173,6 +176,7 @@ function _snapshotSlice(s: ChatState): SessionSlice {
     usage: s.usage,
     isCompacting: s.isCompacting,
     pendingApproval: s.pendingApproval,
+    questionDraft: s.questionDraft,
     pendingPlan: s.pendingPlan,
     pendingPlanTurn: s.pendingPlanTurn,
     plansByTurn: s.plansByTurn || {},
@@ -240,6 +244,12 @@ interface ChatState {
   lastCompact: CompactSummaryPayload | null;
   /** 待审批请求。 */
   pendingApproval: { approvalId: string; detail: Record<string, unknown> } | null;
+  /** plan-238-1188: AI 提问向导的作答草稿（按 approvalId 键控）。
+   *  提问卡渲染在 ComposerCore 内部（本地 state），切到设置页会卸载组件、
+   *  已选答案随之丢失；上移到 store 后返回原会话可完整恢复。
+   *  生命周期：approval.request 置 null（新提问）→ 作答过程中持续写回 →
+   *  approval.response / respondApproval / cancelTurn 清空。 */
+  questionDraft: { approvalId: string; stepIndex: number; answers: Record<string, string> } | null;
   /** 回滚/撤销后回填输入框的草稿（v40 按 key 隔离：key="home"|"new"|sessionId，
    * 仅 draftKey 匹配的 Composer 实例消费一次，避免跨会话/首页串扰）。 */
   composerBackfill: { key: string; text: string; attachments: AttachmentInfo[] } | null;
@@ -295,7 +305,7 @@ interface ChatState {
   loadModels: () => Promise<void>;
   createProject: (path: string, name?: string) => Promise<ProjectOut | null>;
   selectProject: (projectId: number) => Promise<void>;
-  createSession: (projectId: number, title?: string, opts?: { model_id?: number | null; permission_mode?: "default" | "accept_edits" | "plan" | "readonly"; goal_text?: string | null }) => Promise<number | null>;
+  createSession: (projectId: number, title?: string, opts?: { model_id?: number | null; permission_mode?: string; goal_text?: string | null }) => Promise<number | null>;
   switchSession: (sessionId: number, fromHist?: boolean) => Promise<void>;
   /** 会话前进/后退历史（侧栏 logo 区与折叠态标题栏共用，zcode 顶部导航箭头） */
   sessionHist: number[];
@@ -305,7 +315,7 @@ interface ChatState {
   renameSession: (sessionId: number, title: string) => Promise<void>;
   forkSession: (sessionId: number) => Promise<void>;
 /** plan-547: 返回新 turn id（null=未创建，如运行中入队/发送失败），供队列续发失败回队判断。 */
-sendTurn: (content: string, attachments?: Record<string, unknown>[], reasoningEffort?: string, mode?: "readonly" | "plan" | null, modelId?: number | null) => Promise<number | null>;
+sendTurn: (content: string, attachments?: Record<string, unknown>[], reasoningEffort?: string, mode?: string | null, modelId?: number | null) => Promise<number | null>;
 cancelTurn: () => Promise<void>;
   forceStop: () => Promise<void>;
 resumeTurn: () => Promise<void>;
@@ -323,6 +333,8 @@ resumeTurn: () => Promise<void>;
   retryTask: (taskId: number) => Promise<void>;
   dismissPlan: () => void;
   respondApproval: (approvalId: string, approved: boolean, remember?: boolean, answer?: Record<string, unknown>, rememberScope?: "session" | "global") => void;
+  /** plan-238-1188: 提问向导作答草稿写回（null 清空）。 */
+  setQuestionDraft: (draft: { approvalId: string; stepIndex: number; answers: Record<string, string> } | null) => void;
   markFileReviewed: (path: string, reviewed: boolean) => void;
   /** v11: 拉取指定 turn 的变更审核清单。 */
   loadTurnChanges: (turnId: number) => Promise<void>;
@@ -566,6 +578,7 @@ function _resetSessionState(): Partial<ChatState> {
     compactingInfo: null,
     lastCompact: null,
     pendingApproval: null,
+    questionDraft: null,
     pendingPlan: null,
     pendingPlanTurn: null,
     plansByTurn: {},
@@ -619,6 +632,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   compactingInfo: null,
   lastCompact: null,
   pendingApproval: null,
+  questionDraft: null,
   pendingPlan: null,
   pendingPlanTurn: null,
   plansByTurn: {},
@@ -904,6 +918,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
               ? `ai/chatcoder-plan-${sessionId}-${t.id}.md`
               : null);
         if (!planDocPath) continue;
+        // plan-238-1188: 归属校验——卡片只挂到"真正产生该计划"的轮次。
+        // 此前只要轮次正文出现过 plan 路径（例如执行汇报里写"已按
+        // ai/chatcoder-plan-<sid>-1171.md 执行"）就给该轮登记计划卡，
+        // 于是后续轮次（尤其上下文压缩后的长轮）会凭空冒出一张
+        // "很早之前的计划卡"。认定依据：turn 自带 plan_status/plan_doc_path
+        // （后端真值源），或路径正是本轮的约定文档名。
+        const ownsPlan = Boolean(t.plan_status || t.plan_doc_path)
+          || planDocPath === `ai/chatcoder-plan-${sessionId}-${t.id}.md`;
+        if (!ownsPlan) continue;
         const planMsgId = found?.msgId ?? null;
         const reqTask = tasks.find((tk) => tk.turn_id === t.id && tk.kind === "request");
         // 锚点兜底：消息中未见路径引用（默认约定路径命中）时退回 turn 内最后一条 text 消息
@@ -922,9 +945,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
           anchorMsgId,
         };
       }
-      if (Object.keys(recoveredPlans).length > 0) {
-        set((s) => ({ plansByTurn: { ...recoveredPlans, ...s.plansByTurn } }));
-      }
+      // plan-238-1188: 同时清理陈旧条目——只保留"本轮仍成立"的卡片
+      // （recovered 覆盖的、pendingPlan 归属轮、或 turn 自带 plan 字段 /
+      // 本轮约定文档名）。否则历史误登记的计划卡会在压缩刷新后继续复活。
+      set((s) => {
+        const kept: Record<number, PlanCardInfo> = {};
+        for (const [k, v] of Object.entries(s.plansByTurn || {})) {
+          const tid = Number(k);
+          if (recoveredPlans[tid]) continue; // recovered 版本更权威，直接采用
+          const owned = turns.find((t) => t.id === tid);
+          const ownByFields = Boolean(owned && (owned.plan_status || owned.plan_doc_path));
+          const ownByPath = (v as PlanCardInfo | undefined)?.planDocPath
+            === `ai/chatcoder-plan-${sessionId}-${tid}.md`;
+          if (ownByFields || ownByPath || s.pendingPlan?.turnId === tid) kept[tid] = v;
+        }
+        return { plansByTurn: { ...recoveredPlans, ...kept } };
+      });
 
       // 如果有运行中的 turn，启动心跳超时兜底（§9.1 #3）
       if (running) _startHeartbeat();
@@ -1208,8 +1244,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ...(answer ? { answer } : {}),
     });
     // 本地立即关闭横幅，避免等待广播返回造成的 UI 延迟
-    set({ pendingApproval: null });
+    set({ pendingApproval: null, questionDraft: null });
   },
+
+  /** plan-238-1188: 提问向导作答草稿写回（切设置页/换会话后仍可恢复）。 */
+  setQuestionDraft: (draft) => set({ questionDraft: draft }),
 
   markFileReviewed: (path, reviewed) => {
     set((s) => {
@@ -1264,6 +1303,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       subagentStreams: {},
       subagentThinking: {},
       pendingApproval: null,
+      questionDraft: null,
       sessions: s.sessions.map((x) => (x.id === s.currentSessionId ? { ...x, has_running: false } : x)),
     }));
     // 取消接口有专用短超时；失败不覆盖已经完成的本地停止。
@@ -2139,12 +2179,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
         void get().refreshMessages();
         break;
       }
-      case "approval.request":
-        set({ pendingApproval: { approvalId: String(payload.approval_id ?? ""), detail: (payload.detail || {}) as Record<string, unknown> } });
+      case "approval.request": {
+        // plan-230-1144: 跨会话串线双保险——服务端已按 detail.session_id 精确路由，
+        // 前端再校验一次：detail 携带的 session_id 与当前会话不一致时忽略
+        // （历史遗留事件、多窗口重放等场景下防止提问/审批弹进错误的会话）。
+        const detail = (payload.detail || {}) as Record<string, unknown>;
+        const evtSid = Number(detail.session_id ?? 0);
+        const curSid = get().currentSessionId;
+        if (evtSid > 0 && curSid != null && evtSid !== curSid) break;
+        // 新提问到达：清掉上一轮作答草稿（approvalId 键控，避免残留串答）
+        set({ pendingApproval: { approvalId: String(payload.approval_id ?? ""), detail }, questionDraft: null });
         break;
+      }
       case "approval.response":
         // 审批结果广播回前端（含其他窗口），关闭本地审批横幅
-        set({ pendingApproval: null });
+        set({ pendingApproval: null, questionDraft: null });
         break;
       case "session.updated": {
         const sid = Number(payload.session_id ?? 0);

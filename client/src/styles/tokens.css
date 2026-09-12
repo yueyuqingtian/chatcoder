@@ -94,7 +94,8 @@
   --color-border-hover: color-mix(in oklab, var(--color-neutral-950) 20%, transparent);
   --color-input-border: var(--color-border);
   --color-input-border-hover: var(--color-border-hover);
-  --color-input-border-focused: var(--color-brand);
+  /* plan-238-1210: 已删除 --color-input-border-focused（品牌色聚焦边框）——
+     用户要求清理所有蓝色边框装饰，聚焦态统一由 focus.css 的中性色承担。 */
   --color-hover: var(--color-neutral-200);
   --color-selected: color-mix(in oklab, var(--color-neutral-950) 10%, transparent);
   --color-surface: color-mix(in oklab, var(--color-neutral-950) 3%, transparent);
@@ -294,6 +295,8 @@
   --error-soft: color-mix(in oklab, var(--color-red-600) 10%, transparent);
   --info: var(--color-sky-600);
   --info-soft: var(--color-sky-50);
+  /* plan-230-1144 M5.2: 浏览器语义蓝（原散落硬编码 #3b82f6 收编为 token） */
+  --color-browser-blue: #3b82f6;
 
   --shadow-strength: 1;
   /* v1.1: 阴影强度可缩放（applyUiVars 写 --shadow-strength） */
@@ -345,17 +348,37 @@
   --r-lg: 8px;
   --r-xl: 12px;
   --r-2xl: 16px;
-  --dur-fast: 0.12s;
-  --dur-med: 0.15s;
-  --dur-normal: 0.15s;
-  --dur-slow: 0.2s;
-  --dur-view: 0.16s;
-  /* zcode 默认过渡曲线 */
+  /* plan-230-1144 M5.1: 时长阶梯重建（此前的 --dur-med/--dur-normal 同值 0.15s
+     语义重复、--dur-slow 0.2s 与 --dur-view 0.16s 差距过小，"慢"动画实际不快）。
+     新阶梯：1=微反馈 2=hover/色彩 3=展开/折叠 4=页面/模态 5=入场。 */
+  --dur-1: 80ms;
+  --dur-2: 120ms;
+  --dur-3: 180ms;
+  --dur-4: 240ms;
+  --dur-5: 360ms;
+  /* 循环动画时长（spinner/pulse/breath 等持续型动效，与交互时长阶梯分列） */
+  --dur-spin: 0.8s;
+  --dur-spin-fast: 0.7s;
+  --dur-pulse: 1.4s;
+  --dur-loop: 1.6s;
+  /* 向后兼容别名（旧类名仍引用；下一版本清理） */
+  --dur-fast: var(--dur-2);
+  --dur-med: var(--dur-3);
+  --dur-normal: var(--dur-3);
+  --dur-slow: var(--dur-4);
+  --dur-view: var(--dur-4);
+  /* zcode 默认过渡曲线；emphasize 收编原散落的 cubic-bezier(0.2,0,0,1) */
   --curve: cubic-bezier(0.4, 0, 0.2, 1);
+  --curve-emphasize: cubic-bezier(0.2, 0, 0, 1);
   --ease-out: cubic-bezier(0, 0, 0.2, 1);
   --ease-out-expo: cubic-bezier(0.19, 1, 0.22, 1);
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
   --ease-spring: cubic-bezier(0.34, 1.3, 0.44, 1);
+  /* 旋转动效专用（收编原散落的 cubic-bezier(0.45,0.15,0.55,0.85)） */
+  --ease-spin: cubic-bezier(0.45, 0.15, 0.55, 0.85);
+  /* plan-238-1210: 已删除 --focus-ring（品牌色 sky 方环）——用户要求清理所有蓝色边框装饰；
+     键盘可达性改由 focus.css 的中性 outline 承担。 */
+
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   /* zcode 消息流阅读列宽 */

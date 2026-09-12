@@ -7,8 +7,8 @@ export function Sw({ checked, onChange }: { checked: boolean; onChange: (v: bool
   return <label className="ui-switch"><input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} /><span className="ui-switch-track" /></label>;
 }
 
-export function Row({ title, desc, children }: { title: string; desc: string; children: React.ReactNode }) {
-  return <div className="settings-row"><div className="settings-row-info"><div className="settings-row-title">{title}</div><div className="settings-row-desc">{desc}</div></div><div className="settings-row-control">{children}</div></div>;
+export function Row({ title, desc, children, className }: { title: string; desc: string; children: React.ReactNode; className?: string }) {
+  return <div className={"settings-row" + (className ? " " + className : "")}><div className="settings-row-info"><div className="settings-row-title">{title}</div><div className="settings-row-desc">{desc}</div></div><div className="settings-row-control">{children}</div></div>;
 }
 
 export function CardTitle({ children }: { children: React.ReactNode }) {

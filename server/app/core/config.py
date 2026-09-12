@@ -78,12 +78,11 @@ class Settings(BaseSettings):
     agent_tool_temperature: float = 0.3
     agent_text_temperature: float = 0.7
 
-    # v6.5: 模型单次输出最大 token 数。部分网关默认值很小（如 4096），
-    # 导致长报告/多工具调用被截断。显式设置避免网关默认值截断。
-    # 设为 0 则不传（用网关默认）。
-    # 对齐 deepseek-harness（默认 256k）/zcode（deepseek-v4 默认 128k）：
-    # 默认提到 131072（glm-5.2 网关上限约 65536-131072，131072 安全）。
-    agent_max_output_tokens: int = 131072
+    # v6.5: 模型单次输出最大 token 数。
+    # 不限制输出：默认 0 = 请求不携带 max_tokens 字段，由网关/模型自身输出上限决定
+    # （修复"输出达到 token 上限，可能不完整"）。需要显式上限时（如个别网关默认值
+    # 很小导致截断）再配置具体数值。
+    agent_max_output_tokens: int = 0
 
     # v28: 模型流式响应空闲超时（秒）——SSE 流两次数据帧之间的最大间隔。
     # 根因修复：kimi-k3/grok-4.6 等长思考模型在思考阶段 SSE 可静默超过 30 秒，
@@ -108,6 +107,14 @@ class Settings(BaseSettings):
     # force_approval_tools（"始终需要审批的工具"是最高例外，仍弹审批卡）。
     # 生效优先级：项目 .chatcoder/config.toml 或 profile 显式配置 > 此处全局设置。
     sandbox_mode: str = "workspace-write"
+
+    # plan-230-1144 M1.1: 定时任务调度循环开关。
+    # 此前 scheduled_tasks 表只有 CRUD、无任何消费者，用户建的任务永不执行；
+    # 现由 services/scheduler_loop.py 的 tick 循环驱动。默认开启，
+    # 单测/CI 或只想建任务不想真跑的场合可关。
+    scheduler_enabled: bool = True
+    # 错过触发点的宽限期：过期超过该时长视为"错过"，按任务 missed_policy 决定补跑或跳过
+    scheduler_missed_grace_sec: int = 300
 
     # v2.2 (plan-88): 回滚写盘记录上限——超过该大小的文件不写入 RollbackWrite 文本
     # 前后内容（视为二进制走 checkpoint 兜底），避免大文件膨胀数据库。

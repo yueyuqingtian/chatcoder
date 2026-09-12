@@ -5,6 +5,8 @@ import { initUi, useUiStore } from "./store/ui";
 import { registerBuiltinPlugins } from "./plugins/builtin";
 import { loadExternalPlugins } from "./plugins/external";
 import "./styles/global.css";
+import "./styles/motion.css";
+import "./styles/focus.css";
 import "./styles/model-picker.css";
 
 initTheme();

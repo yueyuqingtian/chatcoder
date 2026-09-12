@@ -41,6 +41,11 @@ TO_TA3: dict[str, str] = {
     "goal_complete": "CompleteGoal",       # summary ✓
     # 通用提问工具（需求澄清）——四种模式均可用；参数 questions 键名一致，无需 ARGS 适配
     "ask_user_question": "AskUser",        # questions/allow_custom ✓
+    # plan-238-1191: 多文件批量编辑（当前项目核心写工具，此前缺映射被伪装层剔除——
+    # ta3 会话里模型既拿不到该工具、历史调用还被降级成"结果已略"提示，导致批量
+    # 编辑工作流中断）。伪装名对齐自造 PascalCase 先例（ReadAttachment 等）；
+    # edits[{path,old_text,new_text}] 键名与真实工具一致，无需 ARGS 适配。
+    "multi_file_edit": "MultiFileEdit",    # edits ✓
 }
 
 # 伪装名 → 真实执行名（反查）

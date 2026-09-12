@@ -69,6 +69,20 @@ class ContextBundle:
         return messages
 
 
+# 注入 prompt 的技能清单上限（旧值 10 会静默截断更多技能；
+# plan-230-1144 M1.2 放宽到 50，配合 skill_view 按需加载正文，列表本身只占少量 token）
+_SKILLS_LIST_MAX = 50
+
+# 行为引导段：此前 AI 只看得到技能名、拿不到正文（Skill.content 从未送达模型），
+# 也没有任何读取手段（全仓库无 skill_view 类工具），"主动使用技能"无从谈起。
+# 现配套 skill_view 工具，显式要求 AI 在任务匹配时先加载正文再动手。
+_SKILLS_GUIDANCE = (
+    "当任务与下列某个技能的描述或触发条件匹配时，必须先调用 skill_view(name=技能名) "
+    "加载该技能的完整指令并遵照执行，不要凭技能名称猜测做法；"
+    "不确定该用哪个技能时，先不带参数调用 skill_view 浏览全部技能。"
+)
+
+
 async def _load_skills_and_mcp(db: AsyncSession) -> tuple[str, str]:
     """全局技能/MCP 摘要（尽力而为，失败返回空）。"""
     skills_text = mcp_text = ""
@@ -76,8 +90,15 @@ async def _load_skills_and_mcp(db: AsyncSession) -> tuple[str, str]:
         from app.services.skill_service import get_global_skills
         skills = await get_global_skills(db)
         if skills:
-            parts = [f"- {s.display_name or s.name}: {(s.description or '')[:200]}" for s in skills[:10]]
-            skills_text = "\n".join(parts)
+            parts = []
+            for s in skills[:_SKILLS_LIST_MAX]:
+                line = f"- {s.name}: {(s.description or '')[:200]}"
+                if s.trigger:
+                    line += f" [触发条件: {str(s.trigger)[:120]}]"
+                parts.append(line)
+            if len(skills) > _SKILLS_LIST_MAX:
+                parts.append(f"（另有 {len(skills) - _SKILLS_LIST_MAX} 个技能，用 skill_view 浏览）")
+            skills_text = _SKILLS_GUIDANCE + "\n\n" + "\n".join(parts)
     except Exception:
         logger.warning("[context] 全局技能加载失败", exc_info=True)
     try:
@@ -90,13 +111,22 @@ async def _load_skills_and_mcp(db: AsyncSession) -> tuple[str, str]:
     return skills_text, mcp_text
 
 
-async def _load_memories(db: AsyncSession, session_id: int) -> str:
-    """注入记忆条目（D8）。"""
+async def _load_memories(db: AsyncSession, session_id: int, project_id: int | None = None) -> str:
+    """注入记忆条目（D8；plan-230-1144 M4.1 三层化渲染）。
+
+    读取顺序 session → project → global；渲染时按作用域加前缀标签，
+    让模型知道"这是本会话事实 / 本项目约定 / 全局规范"，据此调整遵循优先级。
+    """
     try:
         from app.services.memory_service import load_memories
-        entries = await load_memories(db, session_id)
+        entries = await load_memories(db, session_id, project_id=project_id)
         if entries:
-            return "\n".join(f"- {e.text}" for e in entries)
+            _tag = {"global": "[全局]", "project": "[项目]"}
+            return "\n".join(
+                f"- {_tag.get(e.scope or 'session', '')}{e.text}"
+                if _tag.get(e.scope or "session") else f"- {e.text}"
+                for e in entries
+            )
     except Exception:
         logger.warning("[context] 记忆加载失败 session=%s", session_id, exc_info=True)
     return ""
@@ -507,7 +537,8 @@ async def build_main_context(
     mem_summary = await _session_memory_summary(db, session.id)
     if mem_summary:
         bundle.developer_parts.append(f"## Session Memory\n{mem_summary}")
-    memories = await _load_memories(db, session.id)
+    # plan-230-1144 M4.1: 传 project_id——三层记忆（会话→项目→全局）合并注入
+    memories = await _load_memories(db, session.id, project_id=getattr(project, "id", None))
     if memories:
         bundle.developer_parts.append(f"## Your Memory (from previous tasks)\n{memories}")
     # v21: 注入主会话 LLM 摘要（被压缩的早期历史）——此前 shared_context 不落库

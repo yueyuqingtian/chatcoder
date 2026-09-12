@@ -15,6 +15,7 @@ import { useI18n } from "../store/i18n";
 import { formatRelativeTime, parseUtc } from "../utils/time";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { AppLogo } from "./AppLogo";
+import { MarkdownContent } from "./MarkdownContent";
 import {
   IconCalendar, IconChevronDown, IconChevronLeft, IconChevronRight, IconPanelLeft,
   IconFolder, IconFolderDynamic, IconLayers, IconSortDesc,
@@ -35,7 +36,8 @@ interface SidebarProps {
 const STORAGE_KEY_COLLAPSED_PROJECTS = "chatcoder:collapsed-projects";
 
 /** 更新徽标：主进程发现新版本时在设置按钮右侧出现。
- * available 点击开始下载 → downloading 显示进度 → downloaded 显示绿底白字「重启」按钮，点击退出并安装。 */
+ * available 点击开始下载 → downloading 显示环形进度 → downloaded 显示「更新」按钮；
+ * hover 弹出该版本 changelog（plan-246-1236 S4）。 */
 function UpdateBadge({ collapsed = false }: { collapsed?: boolean }) {
   const { t } = useI18n();
   const status = useUpdaterStore((s) => s.status);
@@ -43,33 +45,71 @@ function UpdateBadge({ collapsed = false }: { collapsed?: boolean }) {
   const installUpdate = useUpdaterStore((s) => s.installUpdate);
   const visible = status.state === "available" || status.state === "downloading" || status.state === "downloaded";
   if (!visible) return null;
+
+  const version = "version" in status ? status.version : "";
+  const notes = (status.state === "available" || status.state === "downloaded") ? (status.notes || "") : "";
+  const showNotes = status.state === "available" || status.state === "downloaded";
+  const percent = status.state === "downloading" ? (status.percent ?? 0) : 0;
+  const ring = 2 * Math.PI * 7;
+
+  const popover = showNotes ? (
+    <div className="sb-update-notes" role="tooltip">
+      <div className="sb-update-notes-ver">{version ? `v${version}` : t("sidebar.restart")}</div>
+      {notes
+        ? <div className="sb-update-notes-body"><MarkdownContent>{notes}</MarkdownContent></div>
+        : <div className="sb-update-notes-empty">{t("sidebar.update_notes_empty")}</div>}
+    </div>
+  ) : null;
+
   if (status.state === "downloading") {
     return (
-      <button className="sb-update-btn" title={t("sidebar.downloading_update", { percent: status.percent ?? 0 })} disabled>
-        <span className="sb-update-progress">{status.percent}%</span>
-      </button>
+      <div className="sb-update-wrap">
+        <button
+          className="sb-update-btn sb-update-btn-progress"
+          title={t("sidebar.downloading_update", { percent })}
+          disabled
+        >
+          <svg className="sb-update-ring" width="18" height="18" viewBox="0 0 18 18" aria-hidden>
+            <circle cx="9" cy="9" r="7" fill="none" stroke="rgba(255,255,255,0.28)" strokeWidth="2" />
+            <circle
+              cx="9" cy="9" r="7" fill="none" stroke="#fff" strokeWidth="2"
+              strokeLinecap="round"
+              strokeDasharray={ring}
+              strokeDashoffset={ring * (1 - percent / 100)}
+              transform="rotate(-90 9 9)"
+            />
+          </svg>
+          <span className="sb-update-progress">{percent}%</span>
+        </button>
+      </div>
     );
   }
   if (status.state === "downloaded") {
     return (
-      <button
-        className="sb-update-restart"
-        title={t("sidebar.restart_update_tip", { version: status.version ?? "" })}
-        onClick={() => { void installUpdate(); }}
-      >
-        {!collapsed && <span>{t("sidebar.restart")}</span>}
-        {collapsed && <IconRefresh size={14} color="#fff" />}
-      </button>
+      <div className="sb-update-wrap">
+        <button
+          className="sb-update-restart"
+          title={t("sidebar.restart_update_tip", { version: version ?? "" })}
+          onClick={() => { void installUpdate(); }}
+        >
+          {!collapsed && <span>{t("sidebar.restart")}</span>}
+          {collapsed && <IconRefresh size={14} color="#fff" />}
+        </button>
+        {popover}
+      </div>
     );
   }
   return (
-    <button
-      className="sb-update-btn"
-      title={t("sidebar.download_update_tip", { version: status.version ?? "" })}
-      onClick={() => { void downloadUpdate(); }}
-    >
-      <IconDownload size={15} color="#fff" />
-    </button>
+    <div className="sb-update-wrap">
+      <button
+        className="sb-update-btn"
+        title={t("sidebar.download_update_tip", { version: version ?? "" })}
+        onClick={() => { void downloadUpdate(); }}
+      >
+        <IconDownload size={16} />
+      </button>
+      {popover}
+    </div>
   );
 }
 
@@ -200,6 +240,15 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
         next[id] = false;
       }
       saveCollapsedProjects(next);
+      return next;
+    });
+    // plan-234-1171 R5: 折叠时清掉「显示更多」的条数上限——
+    // 否则重新展开后仍按之前放大的 limit 渲染，上次展开的内容原样留着，
+    // 与「重新展开应回到默认 5 条」的预期不符。
+    setProjectLimits((prev) => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
       return next;
     });
   };

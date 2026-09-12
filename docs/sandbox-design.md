@@ -43,6 +43,16 @@ Python 服务端不可直接复用，需另行选型。
 4. 会话权限模式（plan/readonly 写盘拒绝、accept_edits 写盘免审）
 5. 工具自身 approval_precheck（terminal 只读命令免审）
 
+> plan-230-1144 M2 更新（权限模型策略化）：上述 4 的"会话权限模式"从硬编码的
+> 4 个模式外置为 `permission_profile_service` 可配置模式（内置 default/readonly/
+> plan/accept_edits 可覆盖、支持自定义模式与工具白名单勾选）。新增两道闸门：
+> - **schema 层**：`engine` 按模式白名单过滤暴露给模型的工具集（`resolve_tools`）；
+> - **executor 层**：`_precheck_approval` 新增第 2b 步"模式白名单强制"——
+>   模式定义了白名单且工具不在其中时直接拒绝（防模型幻觉调用未暴露工具时仍被执行，
+>   与 schema 层构成"新旧双跑取更严方"的安全冗余）。
+> 白名单解析口径：`resolve_tools` 只从已注册工具集合中取（deny-by-default），
+> 配置里写了不存在的工具名不会产生越权。
+
 ## 4. 平台实现选型
 
 ### 4.1 Windows：Job Object（P1）

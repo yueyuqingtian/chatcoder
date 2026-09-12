@@ -2,6 +2,7 @@
  * 本文件提供设置项索引（SETTINGS_INDEX，供命令中心搜索）与右侧内容区 SettingsContent。
  * 三组：基础设置 / Agent 能力 / 数据与统计。
  */
+import { useEffect, useState } from "react";
 import { AppearancePanel } from "./AppearancePanel";
 import { GeneralPanel } from "./GeneralPanel";
 import { ModelsPanel } from "./ModelsPanel";
@@ -18,11 +19,13 @@ import { DiagnosticsPanel } from "./DiagnosticsPanel";
 import { PluginsPanel } from "./PluginsPanel";
 import { ArchivedPanel } from "./ArchivedPanel";
 import { IconDownload, IconRefresh } from "../icons";
+import { MarkdownContent } from "../MarkdownContent";
 import { AppLogo } from "../AppLogo";
 import { useUpdaterStore } from "../../store/updater";
 import { useI18n } from "../../store/i18n";
 import {
   IconAnchor, IconBarChart, IconBookOpen, IconBrain, IconCalendar,
+  IconChevronDown,
   IconCpu, IconInfo, IconPalette, IconPlug, IconRotateCcw, IconSettings,
   IconShield, IconTool, IconUsers, IconZap, IconBox,
 } from "../icons";
@@ -74,6 +77,14 @@ function AboutPanel() {
   const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
   const downloadUpdate = useUpdaterStore((s) => s.downloadUpdate);
   const installUpdate = useUpdaterStore((s) => s.installUpdate);
+  const releaseHistory = useUpdaterStore((s) => s.releaseHistory);
+  const releaseSource = useUpdaterStore((s) => s.releaseSource);
+  const loadReleaseHistory = useUpdaterStore((s) => s.loadReleaseHistory);
+  // plan-230-1144 M4.2: 更新说明展开态与历史区展开态
+  const [notesOpen, setNotesOpen] = useState<boolean>(true);
+  const [historyOpen, setHistoryOpen] = useState<boolean>(false);
+
+  useEffect(() => { void loadReleaseHistory(); }, [loadReleaseHistory]);
 
   // dev 模式无 preload 更新 API，显示纯静态信息
   const supported = status.state !== "unsupported";
@@ -85,14 +96,22 @@ function AboutPanel() {
     status.state === "none" ? `已是最新版本（v${appVersion}）` :
     status.state === "error" ? `检查更新失败：${status.message}` : "";
 
+  // plan-230-1144 M4.2: 状态机携带的 release notes（available/downloaded 时可用）
+  const activeNotes = (status.state === "available" || status.state === "downloaded") ? (status.notes || "") : "";
+  const activeVersion = (status.state === "available" || status.state === "downloaded") ? status.version : "";
+
   const updateBtn =
     status.state === "downloaded" ? (
       <button className="btn btn-primary btn-sm" onClick={() => void installUpdate()}><IconDownload size={13} /> 重启更新</button>
     ) : status.state === "available" ? (
       <button className="btn btn-primary btn-sm" onClick={() => void downloadUpdate()}><IconDownload size={13} /> 下载更新</button>
-    ) : status.state === "downloading" ? (
-      <button className="btn btn-sm" disabled>{status.percent}%</button>
     ) : null;
+
+  const fmtBytes = (n?: number) => {
+    if (!n || n <= 0) return "";
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+    return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  };
 
   return (
     <div className="settings-card">
@@ -108,16 +127,92 @@ function AboutPanel() {
       </div>
       <RowItem title="当前版本" desc={appVersion ? `v${appVersion}` : "v0.1.0"} />
       {supported && (
-        <div className="settings-row">
-          <div className="settings-row-info">
-            <div className="settings-row-title">软件更新</div>
-            <div className="settings-row-desc">{hint || "从 GitHub Releases 自动检查新版本"}</div>
+        <>
+          <div className="settings-row">
+            <div className="settings-row-info">
+              <div className="settings-row-title">软件更新</div>
+              <div className="settings-row-desc">{hint || "从 GitHub Releases 自动检查新版本"}</div>
+            </div>
+            <div className="settings-row-control">
+              {updateBtn}
+              <button className="btn btn-ghost btn-sm" disabled={status.state === "checking" || status.state === "downloading"} onClick={() => void checkForUpdates()}><IconRefresh size={13} /> 检查更新</button>
+            </div>
           </div>
-          <div className="settings-row-control">
-            {updateBtn}
-            <button className="btn btn-ghost btn-sm" disabled={status.state === "checking" || status.state === "downloading"} onClick={() => void checkForUpdates()}><IconRefresh size={13} /> 检查更新</button>
+
+          {/* 下载进度条（此前仅显示百分数文本；transferred/total/bytesPerSecond 数据主进程早已提供） */}
+          {status.state === "downloading" && (
+            <div className="upd-progress-wrap">
+              <div className="upd-progress-bar"><div className="upd-progress-fill" style={{ width: `${status.percent}%` }} /></div>
+              <div className="upd-progress-meta">
+                <span>{status.percent}%</span>
+                {status.total ? <span>{fmtBytes(status.transferred)} / {fmtBytes(status.total)}</span> : null}
+                {status.bytesPerSecond ? <span>{fmtBytes(status.bytesPerSecond)}/s</span> : null}
+              </div>
+            </div>
+          )}
+
+          {/* 更新说明：版本可用/已就绪时内联展示（问题6 核心修复——更新前可见更新内容） */}
+          {activeNotes && (
+            <div className="upd-notes">
+              <button className="upd-notes-head" onClick={() => setNotesOpen((v) => !v)}>
+                <IconChevronDown size={12} className={"upd-notes-caret" + (notesOpen ? " open" : "")} />
+                新版本 v{activeVersion} 更新内容
+              </button>
+              {notesOpen && (
+                <div className="upd-notes-body">
+                  <MarkdownContent>{activeNotes}</MarkdownContent>
+                </div>
+              )}
+            </div>
+          )}
+          {status.state === "error" && (
+            <div className="settings-row">
+              <div className="settings-row-info">
+                <div className="settings-row-desc" style={{ color: "var(--error)" }}>{status.message}</div>
+              </div>
+              <div className="settings-row-control">
+                <button className="btn btn-ghost btn-sm" onClick={() => void checkForUpdates()}><IconRefresh size={13} /> 重试</button>
+                <button className="btn btn-ghost btn-sm" onClick={() => { void navigator.clipboard.writeText(status.message).catch(() => { /* ignore */ }); }}>复制错误</button>
+              </div>
+            </div>
+          )}
+
+          {/* 完整更新历史（时间线，按版本分组；离线回落本地 CHANGELOG） */}
+          <div className="settings-row upd-history-row">
+            <div className="settings-row-info">
+              <div className="settings-row-title">更新历史</div>
+              <div className="settings-row-desc">
+                {releaseSource === "local" ? "离线模式：显示本地更新日志" :
+                 releaseSource === "none" ? "暂无法获取更新历史（网络不可用且无本地日志）" :
+                 `共 ${releaseHistory.length} 个版本`}
+              </div>
+            </div>
+            <div className="settings-row-control">
+              <button className="btn btn-ghost btn-sm" onClick={() => setHistoryOpen((v) => !v)}>
+                <IconChevronDown size={12} className={"upd-notes-caret" + (historyOpen ? " open" : "")} />
+                {historyOpen ? "收起" : "查看"}
+              </button>
+            </div>
           </div>
-        </div>
+          {historyOpen && (
+            <div className="upd-history">
+              {releaseHistory.length === 0 && <div className="navpage-empty">暂无更新历史</div>}
+              {releaseHistory.map((r, i) => {
+                const isCurrent = r.version === appVersion;
+                return (
+                  <div key={`${r.version}-${i}`} className={"upd-history-item" + (isCurrent ? " current" : "")}>
+                    <div className="upd-history-version">
+                      {r.version ? `v${r.version}` : (r.name || "更新日志")}
+                      {isCurrent && <span className="upd-history-cur">当前版本</span>}
+                      {r.date && <span className="upd-history-date">{new Date(r.date).toLocaleDateString()}</span>}
+                    </div>
+                    <div className="upd-history-notes"><MarkdownContent>{r.notes || "(无说明)"}</MarkdownContent></div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
       )}
     </div>
   );
@@ -138,7 +233,7 @@ function Panel({ tab }: { tab: SettingsTab }) {
     case "subagents": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><SubagentsPanel /></div></div>;
     case "mcp": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><McpPanel /></div></div>;
     case "rules": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><RulesPanel /></div></div>;
-    case "policy": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><PolicyPanel /></div></div>;
+    case "policy": return <div className="settings-content-inner-wide"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><PolicyPanel /></div></div>;
     case "scheduled": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><ScheduledPanel /></div></div>;
     case "hooks": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><HooksPanel /></div></div>;
     case "memory": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><MemoryPanel /></div></div>;

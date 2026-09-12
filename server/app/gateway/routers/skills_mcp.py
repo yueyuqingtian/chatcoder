@@ -180,12 +180,17 @@ async def create_mcp(body: McpCreate, db: AsyncSession = Depends(get_db)):
 
 
 @router.patch("/mcp-servers/{server_id}", response_model=dict)
-async def update_mcp(server_id: int, body: McpUpdate, db: AsyncSession = Depends(get_db)):
+async def update_mcp(
+    server_id: int, body: McpUpdate,
+    workspace: str | None = None, db: AsyncSession = Depends(get_db),
+):
+    """更新 MCP Server。plan-234-1171 R1: workspace 透传给「启用时自动拉取工具清单」路径。"""
     ok = await skill_service.update_mcp_server(
         db, server_id,
         display_name=body.display_name, description=body.description,
         transport=body.transport, command=body.command, args=body.args,
         env=body.env, url=body.url, is_active=body.is_active,
+        workspace=workspace,
     )
     if not ok:
         raise HTTPException(404, "mcp server not found")
@@ -199,6 +204,56 @@ async def delete_mcp(server_id: int, db: AsyncSession = Depends(get_db)):
     if not ok:
         raise HTTPException(404, "mcp server not found")
     return {"ok": True}
+
+
+@router.post("/mcp-servers/{server_id}/refresh-tools", response_model=dict)
+async def refresh_mcp_tools(
+    server_id: int, workspace: str | None = None, db: AsyncSession = Depends(get_db),
+):
+    """plan-230-1144 M1.3: 手动刷新该 MCP Server 的工具清单（initialize + tools/list 握手）。
+
+    返回 {"ok", "count", "tools"}。握手失败（命令不存在/超时）返回 400 并附原因，
+    前端据此显示健康状态，不再静默失败。
+
+    plan-234-1171 R1: 修复签名错误——此前按 `fetch_mcp_tools(srv)` 单参调用，
+    而定义为 `(command, args, env, root_path=None)`，TypeError 被下方 except 包成
+    400「MCP 握手失败: fetch_mcp_tools() missing 2 required positional arguments」。
+    同时补齐 root_path（项目工作区根）：codegraph 的 args 含 ${workspaceFolder}，
+    且依赖 rootUri 定位项目，两者此前均缺失导致握手必然失败。
+    """
+    from app.core.config import settings
+
+    srv = await skill_service.get_mcp_server(db, server_id)
+    if srv is None:
+        raise HTTPException(404, "mcp server not found")
+    if not (srv.command or srv.url):
+        raise HTTPException(400, "该服务器未配置 command 或 url，无法握手")
+
+    # root_path 必须是项目工作区根，不能用 srv.path（那是原始 MCP 配置文件路径）。
+    root_path = workspace or settings.workspace_root
+
+    from app.orchestration.skill_scanner import fetch_mcp_tools
+    try:
+        tools = await fetch_mcp_tools(
+            srv.command or "", srv.args or [], srv.env or {}, root_path=root_path,
+        )
+    except Exception as e:
+        raise HTTPException(400, f"MCP 握手失败: {e}") from e
+    if not tools:
+        raise HTTPException(400, "未获取到工具清单（命令可能不存在、超时或协议不兼容）")
+
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        row = s.get(type(srv), server_id)
+        if row is None:
+            return
+        row.tools = tools
+        s.commit()
+
+    await run_write_locked(patch, label=f"mcp.refresh_tools.{server_id}")
+    refreshed = await skill_service.get_mcp_server(db, server_id)
+    return {"ok": True, "count": len(tools), "server": mcp_to_dict(refreshed)}
 
 
 @router.post("/mcp-servers/scan", response_model=list[dict])

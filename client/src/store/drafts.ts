@@ -4,13 +4,27 @@
 import { create } from "zustand";
 import type { AttachmentInfo } from "../api/client";
 
-export type ComposerDraftMode = "default" | "plan" | "readonly" | "accept_edits";
+/** plan-230-1144 M2: 模式名外置为可配置数据，自定义模式是任意字符串。
+ *  内置 4 值保留为常量便于类型提示与默认值，实际取值域 = 内置 ∪ 用户自定义。 */
+export const BUILTIN_DRAFT_MODES = ["default", "plan", "readonly", "accept_edits"] as const;
+export type BuiltinDraftMode = (typeof BUILTIN_DRAFT_MODES)[number];
+export type ComposerDraftMode = string;
+
+/** plan-238-1210 (A2): 引用 chip 的可序列化形态（与 ComposerCore.ComposerRef 同构）。 */
+export interface ComposerRefDraft {
+  kind: "file" | "skill";
+  value: string;
+  label: string;
+}
 
 export interface ComposerDraft {
   /** 未发送文字 */
   text: string;
   /** 已上传附件（含服务端 url/id，可序列化） */
   attachments: AttachmentInfo[];
+  /** plan-238-1210 (A2): 引用 chips（@文件 / $技能）——不再内嵌进输入文本，
+   *  按会话 key 隔离持久化，切换会话/重启不丢。 */
+  refs?: ComposerRefDraft[];
   /** 思考深度（会话与首页均按 key 隔离；null=跟随全局最近值） */
   reasoningEffort: string | null;
   /** 仅 home 草稿使用：首页选中的模型（会话模型走服务端 session.model_id） */
@@ -81,6 +95,7 @@ export const useDraftsStore = create<DraftsState>((set, get) => ({
     const base: ComposerDraft = prev ?? {
       text: "",
       attachments: [],
+      refs: [],
       reasoningEffort: null,
       modelId: null,
       mode: "default",
@@ -107,10 +122,10 @@ export const useDraftsStore = create<DraftsState>((set, get) => ({
     scheduleSave(all);
   },
 
-  /** v7: 发送成功后仅清文字/附件，保留思考深度等输入框配置（会话内深度跨发送存活） */
+  /** v7: 发送成功后仅清文字/附件/引用，保留思考深度等输入框配置（会话内深度跨发送存活） */
   clearDraftText: (key) => {
     const prev = get().drafts[key];
     if (!prev) return;
-    get().patchDraft(key, { text: "", attachments: [] });
+    get().patchDraft(key, { text: "", attachments: [], refs: [] });
   },
 }));
