@@ -29,7 +29,8 @@ export function DiagnosticsPanel() {
     try {
       const r = await api.symbolIndexRebuild(symIdx?.workspace);
       if (r.ok) {
-        useChatStore.setState({ error: `符号索引重建完成：${r.symbols ?? 0} 个符号（${r.files_updated ?? 0} 文件更新，${r.elapsed_ms ?? 0}ms）` });
+        // plan-248-1273: 重建已提交到独立 worker 进程，不再同步等待结果
+        useChatStore.setState({ error: r.message || "重建已提交到后台独立进程，可在索引库页面查看进度" });
       } else {
         useChatStore.setState({ error: `重建失败：${r.error || "未知错误"}` });
       }
@@ -101,7 +102,8 @@ export function DiagnosticsPanel() {
           </div>
         </>
       )}
-      {/* plan-230-1144 M3: 代码符号索引（symbol_search / outline 的数据源） */}
+      {/* plan-230-1144 M3 / plan-248-1258 M3.4: 代码符号索引已迁移为独立「索引库」页面
+          （每工作区开关 + 自动增量 + 进度）。此处保留只读摘要与跳转入口。 */}
       <div className="sb-section-label" style={{ margin: "14px 0 6px" }}>代码符号索引（函数级定位）</div>
       <div className="settings-resource-list">
         <div className="settings-resource-item">
@@ -126,9 +128,15 @@ export function DiagnosticsPanel() {
                       </>
                     ) : null}
                   </>
-                : "尚未建立索引（首次调用 symbol_search 会自动建立）"}
+                : "尚未建立索引"}
             </div>
           </div>
+          <button
+            className="btn btn-ghost btn-xs"
+            onClick={() => window.dispatchEvent(new CustomEvent("chatcoder:open-settings", { detail: { tab: "index" } }))}
+          >
+            前往索引库
+          </button>
           <button className="btn btn-ghost btn-xs" disabled={rebuilding} onClick={() => void rebuildIndex()}>
             <IconRefresh size={12} /> {rebuilding ? "重建中…" : "重建索引"}
           </button>

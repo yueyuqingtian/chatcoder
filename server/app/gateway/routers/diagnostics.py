@@ -138,11 +138,14 @@ async def symbol_index_status(workspace: str | None = None):
 
 @router.post("/diagnostics/symbol-index/rebuild", response_model=dict)
 async def symbol_index_rebuild(workspace: str | None = None):
-    """手动全量重建符号索引（force=True，忽略增量缓存）。"""
-    import asyncio
+    """手动全量重建符号索引。
 
+    plan-248-1273: 提交到独立 worker 进程并即时返回，
+    不再在主服务进程内执行文件扫描与 AST 解析。
+    进度通过 WS symbol_index.progress 广播，可在索引库页面查看。
+    """
     from app.persistence.database import async_session_factory
-    from app.services import symbol_index_service as sis
+    from app.services import symbol_index_manager as sim
 
     ws = workspace
     if not ws:
@@ -156,7 +159,8 @@ async def symbol_index_rebuild(workspace: str | None = None):
     if not ws:
         return {"ok": False, "error": "无可用工作区"}
 
-    result = await asyncio.to_thread(sis.index_workspace, ws, force=True)
-    if result.get("error"):
-        return {"ok": False, "error": result["error"], "workspace": ws}
-    return {"ok": True, "workspace": ws, **result}
+    state = await sim.rebuild(ws)
+    if state.get("status") == "error":
+        return {"ok": False, "error": state.get("error") or "提交失败", "workspace": ws}
+    return {"ok": True, "workspace": ws, "submitted": True,
+            "status": state.get("status"), "message": "重建已提交到后台独立进程"}

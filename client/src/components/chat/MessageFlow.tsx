@@ -257,7 +257,30 @@ function MessageFlowCore({
   // 滚动条自动隐藏的延时器不能在组件卸载后继续回写 DOM。
   useEffect(() => () => {
     window.clearTimeout(scrollIdleTimerRef.current);
-    parentRef.current?.classList.remove("is-scrolling");
+    parentRef.current?.classList.remove("is-scrolling", "is-scrollbar-hover");
+  }, []);
+
+  /** v45: 滚动条显现的指针热区 = 消息流右侧的滚动条条带（宽 6px + 少量容差）。
+   *  旧实现用 CSS :hover 把整个消息面板当作热区，导致"只要鼠标在面板内就显示滚动条"；
+   *  这里改为按指针横坐标判定，只有真正移到滚动条上才显示。 */
+  useEffect(() => {
+    const el = parentRef.current;
+    if (!el) return;
+    const SCROLLBAR_BAND = 12; // 6px 滚动条 + 6px 容差，便于命中
+    const onMove = (e: PointerEvent) => {
+      const rect = el.getBoundingClientRect();
+      if (e.clientY < rect.top || e.clientY > rect.bottom) return;
+      const nearRight = e.clientX >= rect.right - SCROLLBAR_BAND && e.clientX <= rect.right + 2;
+      el.classList.toggle("is-scrollbar-hover", nearRight);
+    };
+    const onLeave = () => el.classList.remove("is-scrollbar-hover");
+    el.addEventListener("pointermove", onMove);
+    el.addEventListener("pointerleave", onLeave);
+    return () => {
+      el.removeEventListener("pointermove", onMove);
+      el.removeEventListener("pointerleave", onLeave);
+      el.classList.remove("is-scrollbar-hover");
+    };
   }, []);
 
   /** plan-547: 内容总高度变化（虚拟测量/图片加载/展开）时若处于跟随态则保持贴底 */

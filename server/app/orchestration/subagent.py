@@ -5,6 +5,7 @@
 """
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +27,17 @@ class SubagentHandle:
     artifact_ids: list[int] = field(default_factory=list)
     # v20: 探索子代理的"结论"文本（只读探索任务的最终输出，主代理据此整合，不落线程消息）
     findings: str = ""
+    # plan-248-1258 M6: 主代理可检视子代理上下文与轨迹（subagent_inspect）
+    task_title: str = ""
+    task_description: str = ""
+    handoff_summary: str = ""
+    # 执行轨迹：工具调用序列（tool name + 参数摘要 + 输出摘要），由 _run 回填
+    trajectory: list[dict] = field(default_factory=list)
+    # 结构化汇报字段（由子代理最终输出解析）
+    files_touched: list[str] = field(default_factory=list)
+    risks: list[str] = field(default_factory=list)
+    # 主代理可见的上下文快照（关键事实/约束，spawn 时传入）
+    context_snapshot: dict = field(default_factory=dict)
 
 
 class SubagentManager:
@@ -37,9 +49,17 @@ class SubagentManager:
 
     def spawn(self, db, *, agent, turn_id: int, task, handoff_summary: str,
               context_bundle, tool_schemas: list[dict], workspace: str,
-              cancel_event: asyncio.Event | None = None, token_budget: int | None = None) -> int:
+              cancel_event: asyncio.Event | None = None, token_budget: int | None = None,
+              task_title: str = "", task_description: str = "",
+              context_snapshot: dict | None = None) -> int:
         """异步启动子代理 agent_loop，返回 subagent id。"""
-        handle = SubagentHandle(agent_id=agent.id)
+        handle = SubagentHandle(
+            agent_id=agent.id,
+            task_title=task_title or getattr(task, "title", "") or "",
+            task_description=task_description,
+            handoff_summary=handoff_summary,
+            context_snapshot=context_snapshot or {},
+        )
         self._handles[agent.id] = handle
 
         async def _run():
@@ -64,6 +84,8 @@ class SubagentManager:
                     handle.artifact_ids = list(out.artifact_ids or [])
                     # v20: 探索子代理最终输出即结论文本（供主代理 wait 后直接整合）
                     handle.findings = out.text or ""
+                    # plan-248-1258 M6: 解析结构化汇报（结果/变更文件/关键发现/风险）
+                    _parse_structured_report(handle, out.text or "")
                     await _sync_task_status(
                         s, self.session_id, task.id,
                         "done" if handle.status == "done" else "failed",
@@ -96,7 +118,9 @@ class SubagentManager:
     async def spawn_and_wait(self, db, *, agent, turn_id: int, task, handoff_summary: str,
                              context_bundle, tool_schemas: list[dict], workspace: str,
                              cancel_event: asyncio.Event | None = None,
-                             token_budget: int | None = None) -> SubagentHandle:
+                             token_budget: int | None = None,
+                             task_title: str = "", task_description: str = "",
+                             context_snapshot: dict | None = None) -> SubagentHandle:
         """同步启动并等待子代理完成，返回已填充结果的 handle。
 
         v20: 探索子代理（只读调研）用——主代理调用 spawn_subagent(explore=true) 后
@@ -107,6 +131,8 @@ class SubagentManager:
             handoff_summary=handoff_summary, context_bundle=context_bundle,
             tool_schemas=tool_schemas, workspace=workspace,
             cancel_event=cancel_event, token_budget=token_budget,
+            task_title=task_title, task_description=task_description,
+            context_snapshot=context_snapshot,
         )
         handle = self._handles.get(handle_id)
         if handle is not None and handle.task is not None:
@@ -117,18 +143,56 @@ class SubagentManager:
         return self._handles.get(agent_id)
 
     def results(self) -> list[dict]:
-        """已完成的子代理结果列表。"""
+        """已完成的子代理结构化结果列表（plan-248-1258 M6 加强汇报）。"""
         out = []
         for aid, h in self._handles.items():
             if h.status in ("done", "failed"):
                 out.append({
                     "agent_id": aid, "status": h.status,
+                    "title": h.task_title,
                     "summary": h.summary, "error": h.error,
+                    "findings": h.findings,
+                    "files_touched": list(h.files_touched),
+                    "risks": list(h.risks),
                 })
         return out
 
     def pending_count(self) -> int:
         return sum(1 for h in self._handles.values() if h.status == "running")
+
+    async def wait_all(self) -> None:
+        """等待所有仍在运行的子代理结束（collect_results(wait=true) 用）。"""
+        pending = [h.task for h in self._handles.values() if h.task is not None and not h.task.done()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    def inspect(self, agent_id: int, section: str = "all") -> dict | None:
+        """返回某子代理的上下文/轨迹/结果（subagent_inspect 用）。"""
+        h = self._handles.get(agent_id)
+        if h is None:
+            return None
+        data: dict = {"agent_id": agent_id, "status": h.status}
+        if section in ("all", "context"):
+            data["context"] = {
+                "title": h.task_title,
+                "task_description": h.task_description,
+                "handoff_summary": h.handoff_summary,
+                "inherited_context": h.context_snapshot,
+            }
+        if section in ("all", "transcript"):
+            data["transcript"] = h.trajectory
+        if section in ("all", "result"):
+            data["result"] = {
+                "summary": h.summary,
+                "findings": h.findings,
+                "files_touched": h.files_touched,
+                "risks": h.risks,
+                "error": h.error,
+            }
+        return data
+
+    def agent_ids(self) -> list[int]:
+        return list(self._handles.keys())
 
     async def cancel_all(self) -> None:
         """取消并等待该会话所有尚未结束的子代理任务。"""
@@ -155,6 +219,64 @@ def get_subagent_manager(session_id: int) -> SubagentManager:
 
 def cleanup(session_id: int) -> None:
     _managers.pop(session_id, None)
+
+
+# ── plan-248-1258 M6: 结构化汇报解析 ──
+
+# 标题行识别：去 # 后为短行（<=72 字符）且命中关键词即视为分节标题。
+# 用宽松匹配（而非整行精确）以兼容 "### Risks / Open Questions"、"## 变更文件：" 等变体。
+_FILES_HEAD = re.compile(r"(变更文件|改动文件|files?\s*(?:touched|changed|modified)|files\s*[:：])", re.IGNORECASE)
+_RISK_HEAD = re.compile(r"(风险|未决|待确认|risks?|blockers?|open\s+questions?)", re.IGNORECASE)
+_OTHER_HEADS = re.compile(
+    r"(result|summary|results|结论|关键发现|findings|key\s+findings|后续建议|next\s+steps)",
+    re.IGNORECASE,
+)
+_FILE_RE = re.compile(r"[\w./\\-]+\.(?:py|ts|tsx|js|jsx|go|rs|java|cs|cpp|c|h|rb|php|sql|md|json|yaml|yml|toml)")
+
+
+def _parse_structured_report(handle: "SubagentHandle", text: str) -> None:
+    """从子代理最终输出解析结构化字段（变更文件 / 风险）。
+
+    子代理被引导输出分节汇报（结果/变更文件/关键发现/风险）；此处做宽容解析：
+    识别到「变更文件」节时收集其中的文件路径，识别到「风险/未决」节时收集条目。
+    解析失败不影响主流程（summary/findings 已保留全文）。
+    """
+    if not text:
+        return
+    try:
+        section = ""
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            # 标题行：以 # 开头，或短行且以冒号结尾
+            _is_head = line.startswith("#") or (len(line) <= 72 and line.endswith((":", "：")))
+            _head_text = line.lstrip("#").strip()
+            if _is_head and len(_head_text) <= 72:
+                if _FILES_HEAD.search(_head_text):
+                    section = "files"
+                    continue
+                if _RISK_HEAD.search(_head_text):
+                    section = "risks"
+                    continue
+                if _OTHER_HEADS.search(_head_text):
+                    section = "other"
+                    continue
+            if section == "files":
+                for f in _FILE_RE.findall(line):
+                    if f not in handle.files_touched:
+                        handle.files_touched.append(f)
+            elif section == "risks":
+                item = line.lstrip("-*·0123456789.) ").strip()
+                if item and len(item) > 3 and item != "None":
+                    handle.risks.append(item[:200])
+        # 未识别到「变更文件」节时，兜底从全文提取文件路径（限量，避免噪声）
+        if not handle.files_touched:
+            for f in _FILE_RE.findall(text)[:20]:
+                if f not in handle.files_touched:
+                    handle.files_touched.append(f)
+    except Exception:  # noqa: BLE001
+        logger.debug("[subagent] 结构化汇报解析失败(非阻塞)", exc_info=True)
 
 
 async def _sync_task_status(db, session_id: int, task_id: int, status: str, note: str | None,

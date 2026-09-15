@@ -41,6 +41,8 @@ export function GeneralPanel() {
     plan_mode_allow_outside_access: false,
     sandbox_mode: "workspace-write",
     agent_max_steps: 1000,
+    agent_retry_count: 3,
+    agent_retry_intervals: "10,20,30",
     browser_enabled: false,
     browser_headless: true,
   });
@@ -104,6 +106,8 @@ export function GeneralPanel() {
         plan_mode_allow_outside_access: g.plan_mode_allow_outside_access === true,
         sandbox_mode: g.sandbox_mode || "workspace-write",
         agent_max_steps: typeof g.agent_max_steps === "number" ? g.agent_max_steps : 1000,
+        agent_retry_count: typeof g.agent_retry_count === "number" ? g.agent_retry_count : 3,
+        agent_retry_intervals: typeof g.agent_retry_intervals === "string" ? g.agent_retry_intervals : "10,20,30",
         browser_enabled: g.browser_enabled === true,
         browser_headless: g.browser_headless !== false,
       });
@@ -128,6 +132,8 @@ export function GeneralPanel() {
         plan_mode_allow_outside_access: cfg.plan_mode_allow_outside_access,
         sandbox_mode: cfg.sandbox_mode,
         agent_max_steps: cfg.agent_max_steps,
+        agent_retry_count: cfg.agent_retry_count,
+        agent_retry_intervals: cfg.agent_retry_intervals,
         browser_enabled: cfg.browser_enabled,
         browser_headless: cfg.browser_headless,
       });
@@ -271,6 +277,28 @@ export function GeneralPanel() {
               />
             )}
           </div>
+        </Row>
+        {/* v45: 异常自动重试策略——任何报错按间隔依次重试，穷尽后才停止并显示报错 */}
+        <Row title={t("gp.retry_count")} desc={t("gp.retry_count_desc")}>
+          <input
+            type="number"
+            className="ui-input"
+            style={{ width: 90 }}
+            min={0}
+            max={10}
+            value={cfg.agent_retry_count}
+            onChange={(e) => patch({ agent_retry_count: Math.max(0, parseInt(e.target.value) || 0) })}
+          />
+        </Row>
+        <Row title={t("gp.retry_intervals")} desc={t("gp.retry_intervals_desc")}>
+          <input
+            type="text"
+            className="ui-input"
+            style={{ width: 160 }}
+            placeholder="10,20,30"
+            value={cfg.agent_retry_intervals}
+            onChange={(e) => patch({ agent_retry_intervals: e.target.value })}
+          />
         </Row>
         <Row title={t("gp.browser")} desc={t("gp.browser_desc")}>
           <Sw checked={cfg.browser_enabled} onChange={(v) => patch({ browser_enabled: v })} />

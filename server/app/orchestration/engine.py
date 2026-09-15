@@ -730,6 +730,10 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                 "cancel_event": cancel_event,
                 "main_task_id": main_task.id,
                 "model_id": effective_model_id,
+                # plan-248-1258 M6: 子代理继承的关键上下文（沙箱/权限模式）
+                "sandbox_mode": _eff_sandbox,
+                "permission_mode": mode,
+                "context_summary": _plan_history or "",
             },
             # plan-547: 每次 LLM 调用前 drain 运行中注入的用户消息
             injected_inputs_provider=lambda: drain_injected_inputs(turn_id),
@@ -830,22 +834,57 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
 
         # 4. turn 完成：取消是用户中断，不应伪装成失败；先落库再广播。
         summary = out.text or ""
+        _is_cancel = cancel_event.is_set() or out.kind in ("cancelled", "interrupted")
         final_status = (
-            "interrupted" if cancel_event.is_set() or out.kind in ("cancelled", "interrupted")
+            "interrupted" if _is_cancel
             else "completed" if out.kind == "message" else "failed"
         )
+        # v45: 失败原因必须对用户可见——agent_loop 的 out.error / 已有摘要择一，兜底通用文案。
+        _fail_reason = ((out.error or "").strip() or summary.strip()
+                        or "任务执行失败，未返回具体原因")[:500]
         await turn_service.update_turn_status(
             db, turn_id, final_status,
-            summary=summary[:500] or ("用户中断" if final_status == "interrupted" else None), completed=True,
+            summary=(summary[:500] or _fail_reason) if final_status != "interrupted" else (summary[:500] or "用户中断"),
+            completed=True,
         )
         await _flush_turn_buffer(session_id, turn_id)
         await db.commit()
         await broadcast_turn_updated(session_id, turn_id, final_status)
+        # v45: 失败单独事件 turn.failed（此前与中断共用 turn.interrupted，前端按"用户停止"
+        # 静默处理，用户看不到任何报错——"无报错就终止任务"的根因）。
         await broadcast(session_id, {
-            "event": "turn.completed" if final_status == "completed" else "turn.interrupted",
-            "payload": {"turn_id": turn_id, "status": final_status, "summary": summary, "artifact_ids": out.artifact_ids,
+            "event": ("turn.failed" if final_status == "failed"
+                      else "turn.completed" if final_status == "completed"
+                      else "turn.interrupted"),
+            "payload": {"turn_id": turn_id, "status": final_status, "summary": summary,
+                        "error": _fail_reason if final_status == "failed" else None,
+                        "artifact_ids": out.artifact_ids,
                         "session_id": session_id},
         })
+        # v45: 失败兜底——确认消息流内已有可见的错误消息，否则补一条，杜绝静默终止。
+        if final_status == "failed":
+            try:
+                from sqlalchemy import select as _select
+                from app.persistence.models.message import Message as _Message
+                _err_rows = (await db.execute(
+                    _select(_Message.id).where(
+                        _Message.turn_id == turn_id,
+                        _Message.msg_type == MsgType.ERROR.value,
+                    ).limit(1)
+                )).first()
+                if _err_rows is None:
+                    await message_service.create_message(
+                        db, session_id=session_id, turn_id=turn_id, thread_id=None,
+                        sender_type=SenderType.AGENT.value, sender_id=main_agent.id,
+                        msg_type=MsgType.ERROR.value,
+                        content={"text": _fail_reason, "agent_name": main_agent.name},
+                        buffered=True,
+                    )
+                    await _flush_turn_buffer(session_id, turn_id)
+                    await db.commit()
+                    await broadcast_turn_updated(session_id, turn_id, final_status)
+            except Exception:
+                logger.debug("[engine] turn 失败兜底提示写入失败(非阻塞)", exc_info=True)
         # v7: 同步任务状态（步骤进度）并挂接产物
         _task_status = "cancelled" if final_status == "interrupted" else ("done" if out.kind == "message" else "failed")
         _task_note = (summary or "").strip()[:300] or None
@@ -1339,13 +1378,18 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
 
         # —— 收尾：状态与产物 ——
         summary = out.text or ""
+        _is_cancel2 = cancel_event.is_set() or out.kind in ("cancelled", "interrupted")
         final_status = (
-            "interrupted" if cancel_event.is_set() or out.kind in ("cancelled", "interrupted")
+            "interrupted" if _is_cancel2
             else "completed" if out.kind == "message" else "failed"
         )
+        # v45: 失败原因必须可见（与主路径同口径）
+        _fail_reason2 = ((out.error or "").strip() or summary.strip()
+                         or "任务执行失败，未返回具体原因")[:500]
         await turn_service.update_turn_status(
             db, turn_id, final_status,
-            summary=summary[:500] or ("用户中断" if final_status == "interrupted" else None), completed=True,
+            summary=(summary[:500] or _fail_reason2) if final_status != "interrupted" else (summary[:500] or "用户中断"),
+            completed=True,
         )
         # plan-644: 执行成功 -> 计划生命周期收口 done；失败/中断保持 confirmed
         # （已确认但未完成，其中未完成需求由后续轮次的 Plan History 继承）。
@@ -1362,9 +1406,14 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         await db.commit()
         # v0.3.1: 使用提前缓存的标量 _session_id/_session_model_id，禁止在 commit 之后点 session.id
         await broadcast_turn_updated(_session_id, turn_id, final_status)
+        # v45: 失败单独事件 turn.failed 并携带原因（此前与中断共用 turn.interrupted，
+        # 前端按"用户停止"静默处理 → 用户看不到报错）。
         await broadcast(_session_id, {
-            "event": "turn.completed" if final_status == "completed" else "turn.interrupted",
+            "event": ("turn.failed" if final_status == "failed"
+                      else "turn.completed" if final_status == "completed"
+                      else "turn.interrupted"),
             "payload": {"turn_id": turn_id, "status": final_status, "summary": summary,
+                        "error": _fail_reason2 if final_status == "failed" else None,
                         "artifact_ids": out.artifact_ids, "session_id": _session_id},
         })
         if request_task is not None:
@@ -1387,8 +1436,26 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             await db.rollback()
             await _flush_turn_buffer(_session_id, turn_id)
             await turn_service.update_turn_status(db, turn_id, "failed", summary=str(exc)[:500], completed=True)
+            # v45: 异常路径同样要可见——补错误消息 + turn.failed 事件，杜绝静默终止。
+            try:
+                await message_service.create_message(
+                    db, session_id=_session_id or 0, turn_id=turn_id, thread_id=None,
+                    sender_type=SenderType.AGENT.value, sender_id=main_agent.id,
+                    msg_type=MsgType.ERROR.value,
+                    content={"text": f"执行异常: {str(exc)[:200]}", "agent_name": main_agent.name},
+                    buffered=True,
+                )
+                await _flush_turn_buffer(_session_id, turn_id)
+            except Exception:
+                logger.debug("[engine] 确认执行异常提示写入失败(非阻塞)", exc_info=True)
             await db.commit()
             await broadcast_turn_updated(_session_id or 0, turn_id, "failed")
+            await broadcast(_session_id or 0, {
+                "event": "turn.failed",
+                "payload": {"turn_id": turn_id, "status": "failed", "summary": "",
+                            "error": f"执行异常: {str(exc)[:200]}", "artifact_ids": [],
+                            "session_id": _session_id or 0},
+            })
         except Exception:
             pass
         return {"ok": False, "error": str(exc)}

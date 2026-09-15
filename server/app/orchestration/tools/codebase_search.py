@@ -85,8 +85,10 @@ class CodebaseSearchTool(Tool):
         if not workspace.is_dir():
             return ToolResult(ok=False, output="", error=f"工作区不存在: {ctx.workspace_root}")
 
-        # 构建/加载索引（含符号边界信息）
-        index = self._load_or_build_index(workspace)
+        # 构建/加载索引（含符号边界信息）。这是同步磁盘/解析 IO，
+        # 必须移出事件循环；大项目索引期间仍要能响应 providers/models 等请求。
+        import asyncio
+        index = await asyncio.to_thread(self._load_or_build_index, workspace)
         if not index:
             return ToolResult(ok=True, output="代码库为空或无支持的代码文件", data={"results": []})
 
@@ -203,7 +205,8 @@ class CodebaseSearchTool(Tool):
         symbols_by_file: dict[str, list[dict]] = {}
         try:
             from app.services import symbol_index_service as sis
-            sis.index_workspace(workspace)  # 增量，未变化文件零成本
+            # plan-248-1273: 不在主服务请求内触发符号索引；worker 负责维护 symbols.db。
+            # 这里仅读取当前快照，索引未就绪时回退轻量定长切块。
             for p in files:
                 rel = p.relative_to(workspace).as_posix()
                 syms = sis.outline_file(workspace, rel)

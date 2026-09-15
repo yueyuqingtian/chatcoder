@@ -75,6 +75,27 @@ async def delete_provider(db: AsyncSession, provider_id: int) -> bool:
     return await run_write_locked(patch, label=f"provider.delete.{provider_id}")
 
 
+async def _resolve_scan_key(db: AsyncSession, provider: Provider) -> str | None:
+    """plan-248-1258 M2.2: 扫描/测试用 key——优先取首个可用凭据，回落 provider.api_key。
+
+    OAuth 类供应商（workbuddy/ta3/trae）的凭据 key 来自各自 auth 表的 access_token。
+    """
+    from app.services import credential_service
+
+    creds = await credential_service.list_credentials(db, provider.id)
+    fmt = (provider.api_format or "openai").lower()
+    for c in credential_service.available_credentials(creds):
+        if c.api_key:
+            return c.api_key
+        if fmt in ("workbuddy", "ta3", "trae"):
+            from app.models.registry import _load_auth_for_credential
+
+            auth = await _load_auth_for_credential(db, fmt, provider.id, c.id)
+            if auth is not None and getattr(auth, "access_token", None):
+                return auth.access_token
+    return provider.api_key
+
+
 async def scan_models(db: AsyncSession, provider_id: int) -> list[dict]:
     """请求供应商的模型列表接口。
 
@@ -90,6 +111,8 @@ async def scan_models(db: AsyncSession, provider_id: int) -> list[dict]:
 
     base = provider.base_url.rstrip("/")
     api_format = (provider.api_format or "openai").lower()
+    # plan-248-1258: key 取自凭据（多 Key 时用首个可用）
+    _scan_key = await _resolve_scan_key(db, provider)
 
     # CommandCode 无 /models 接口，返回官方预设支持模型
     if api_format == "commandcode":
@@ -115,14 +138,23 @@ async def scan_models(db: AsyncSession, provider_id: int) -> list[dict]:
 
     headers: dict[str, str] = {}
     if api_format == "anthropic":
-        if provider.api_key:
-            headers["x-api-key"] = provider.api_key
+        if _scan_key:
+            headers["x-api-key"] = _scan_key
         headers["anthropic-version"] = "2023-06-01"
     else:
-        if provider.api_key:
-            headers["Authorization"] = f"Bearer {provider.api_key}"
+        if _scan_key:
+            headers["Authorization"] = f"Bearer {_scan_key}"
 
-    async with httpx.AsyncClient(timeout=SCAN_TIMEOUT, headers={"Accept-Encoding": "gzip, deflate"}) as client:
+    # plan-248-1258 M2.3: 扫描请求同样走该供应商的代理配置
+    from app.services.credential_service import proxy_disabled, resolve_proxy
+
+    _proxy = resolve_proxy(provider)
+    _client_opts: dict = {"timeout": SCAN_TIMEOUT, "headers": {"Accept-Encoding": "gzip, deflate"}}
+    if _proxy:
+        _client_opts["proxy"] = _proxy
+    elif proxy_disabled(provider):
+        _client_opts["trust_env"] = False
+    async with httpx.AsyncClient(**_client_opts) as client:
         resp = await client.get(url, headers=headers)
         resp.raise_for_status()
         data = resp.json()
@@ -237,24 +269,36 @@ async def test_connectivity(db: AsyncSession, provider_id: int) -> dict:
 
     base = provider.base_url.rstrip("/")
     api_format = (provider.api_format or "openai").lower()
+    # plan-248-1258: key 取自凭据（多 Key 时用首个可用）
+    _test_key = await _resolve_scan_key(db, provider)
 
     headers: dict[str, str] = {}
     if api_format == "anthropic":
-        if provider.api_key:
-            headers["x-api-key"] = provider.api_key
+        if _test_key:
+            headers["x-api-key"] = _test_key
         headers["anthropic-version"] = "2023-06-01"
     else:
-        if provider.api_key:
-            headers["Authorization"] = f"Bearer {provider.api_key}"
+        if _test_key:
+            headers["Authorization"] = f"Bearer {_test_key}"
 
     models = (await db.execute(
         select(Model).where(Model.provider_id == provider_id, Model.is_active == True)  # noqa: E712
     )).scalars().all()
     model_name = models[0].name if models else None
 
+    # plan-248-1258 M2.3: 连通性测试走该供应商的代理配置
+    from app.services.credential_service import proxy_disabled, resolve_proxy
+
+    _proxy = resolve_proxy(provider)
+    _client_opts: dict = {"timeout": 15.0}
+    if _proxy:
+        _client_opts["proxy"] = _proxy
+    elif proxy_disabled(provider):
+        _client_opts["trust_env"] = False
+
     try:
         t0 = time.monotonic()
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(**_client_opts) as client:
             if model_name and api_format != "anthropic":
                 url = f"{base}/chat/completions"
                 body = {

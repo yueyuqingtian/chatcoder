@@ -40,6 +40,44 @@ def _new_call_id() -> str:
     """
     return "call_" + uuid.uuid4().hex[:12]
 
+
+class _ContentDeduper:
+    """plan-248-1258 M7: 流式内容去重（grok 专项）。
+
+    部分网关（grok 类中转）在 SSE 中会重复投递同一段增量（整段重发或尾部重发），
+    导致前端出现"同样内容输出两遍"。本类按已累积文本做前缀/后缀重叠检测：
+    - 新增量完全被已输出文本（结尾窗口）覆盖 → 丢弃；
+    - 新增量与已输出尾部有重叠前缀 → 只保留新增部分。
+    仅对较大的块（>=16 字符）生效，避免正常逐字流式被误判（单字不重叠）。
+    """
+
+    __slots__ = ("_buf",)
+
+    def __init__(self) -> None:
+        self._buf = ""
+
+    def feed(self, delta: str) -> str:
+        if not delta:
+            return ""
+        # 短增量（逐字流式）直接透传：重叠多数是正常重复字（如 "的的"）
+        if len(delta) < 16:
+            self._buf = (self._buf + delta)[-4096:]
+            return delta
+        if self._buf:
+            # 完全重复（整段重发）
+            if delta in self._buf:
+                return ""
+            # 尾部重叠（网关把上一块末尾 + 新块一起重发）
+            tail = self._buf[-len(delta):]
+            for k in range(min(len(tail), len(delta)), 7, -1):
+                if tail[-k:] == delta[:k]:
+                    added = delta[k:]
+                    self._buf = (self._buf + added)[-4096:]
+                    return added
+        self._buf = (self._buf + delta)[-4096:]
+        return delta
+
+
 # v21: thinking 模式思考预算（对齐 anthropic provider 的 effort→budget 映射；
 # zcode 默认 budget 1024）。仅当 request.thinking=True 时使用。
 _THINKING_BUDGET_BY_EFFORT = {
@@ -62,19 +100,33 @@ class OpenAICompatibleProvider(ModelProvider):
 
     name = "openai_compatible"
 
-    def __init__(self, *, api_key: str, base_url: str, model: str):
+    def __init__(self, *, api_key: str, base_url: str, model: str,
+                 proxy: str | None = None, proxy_disabled: bool = False,
+                 proxy_configured: bool = False):
         self._default_model = model
         # v28: stream chunk 空闲超时改读配置——长思考模型（grok-4.6 等）chunk 间隔
         # 可能超过旧硬编码 30s，导致"运行中突然停止且无报错"。
         self._chunk_timeout = float(getattr(settings, "provider_stream_idle_timeout", 180) or 180)
         # v6.3: 不声明接受 br 压缩——打包版 brotlicffi 缺 Decompressor C 扩展，
         # 网关若返回 br 压缩流会直接崩，gzip/deflate 由 httpx 原生支持
+        # plan-248-1258 M2.3: 每供应商代理——显式注入 httpx client。
+        # 仅当调用方确实配置了代理语义时才注入（避免给所有 provider 套 client，
+        # 保持本地直连网关零行为变化）。
+        http_client = None
+        if proxy_configured:
+            import httpx
+
+            kwargs: dict = {"timeout": _DEFAULT_TIMEOUT, "trust_env": not proxy_disabled}
+            if proxy:
+                kwargs["proxy"] = proxy
+            http_client = httpx.AsyncClient(**kwargs)
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url.rstrip("/"),
             timeout=_DEFAULT_TIMEOUT,
             max_retries=3,
             default_headers={"Accept-Encoding": "gzip, deflate"},
+            **({"http_client": http_client} if http_client is not None else {}),
         )
         self._base_url = base_url.rstrip("/").lower()
         self._model_name = model
@@ -377,6 +429,8 @@ class OpenAICompatibleProvider(ModelProvider):
         tool_calls_map: dict[int, dict] = {}
         finish_reason = "stop"
         usage_data = Usage()
+        # plan-248-1258 M7: 内容去重（grok 类网关重复投递同段增量的修复）
+        _dedup = _ContentDeduper()
 
         # v4.8: 流式读取加 chunk 超时，防止网关半开连接导致永久挂起
         # v28: 超时值改读配置 provider_stream_idle_timeout（默认 180s，兼容长思考模型）
@@ -421,8 +475,10 @@ class OpenAICompatibleProvider(ModelProvider):
                     yield {"type": "thinking", "delta": _reasoning}
                 
                 if delta.content:
-                    content_parts.append(delta.content)
-                    yield {"type": "content", "delta": delta.content}
+                    _clean = _dedup.feed(delta.content)
+                    if _clean:
+                        content_parts.append(_clean)
+                        yield {"type": "content", "delta": _clean}
                 
                 if delta.tool_calls:
                     for tc in delta.tool_calls:

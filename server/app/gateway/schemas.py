@@ -451,6 +451,9 @@ class ModelOut(BaseModel):
     api_format: str = "openai"
     has_api_key: bool = False
     reasoning_efforts: list[str] = []
+    # plan-248-1258 M2.4: 所属供应商启用状态（false 时前端选择器需过滤；
+    # 供应商被禁用但模型仍 active 时，输入框选择器不应再显示其模型）
+    provider_active: bool = True
     # ── trae 供应商扩展（源自 trae_meta）──
     trae_max_context: int | None = None        # max 档上下文（如 1000000 = 1M）
     trae_consumption_rate: float | None = None  # 积分消耗倍率（max 档更快）
@@ -465,6 +468,9 @@ class ProviderCreate(BaseModel):
     api_key: str | None = None
     api_format: str = "openai"
     is_active: bool = True
+    # plan-248-1258 M2.3: 供应商级代理
+    proxy_mode: str = "inherit"
+    proxy_url: str | None = None
 
 
 class ProviderUpdate(BaseModel):
@@ -473,6 +479,51 @@ class ProviderUpdate(BaseModel):
     api_key: str | None = None  # 传空字符串 = 清除
     api_format: str | None = None
     is_active: bool | None = None
+    proxy_mode: str | None = None
+    proxy_url: str | None = None
+
+
+class ProviderCredentialOut(BaseModel):
+    """plan-248-1258 M2.2: 供应商凭据（多 Key/多账号）输出。"""
+    id: int
+    provider_id: int
+    label: str | None = None
+    has_api_key: bool = False
+    # 掩码后的 key 预览（如 sk-…abcd），供 UI 展示而不泄漏完整 key
+    api_key_preview: str | None = None
+    token_ref: str | None = None
+    priority: int = 0
+    is_active: bool = True
+    status: str = "ok"
+    last_error: str | None = None
+    cooldown_until: str | None = None
+    last_ok_at: str | None = None
+    credits: float | None = None
+    extra: dict | None = None
+
+
+class ProviderCredentialCreate(BaseModel):
+    label: str | None = None
+    api_key: str | None = None
+    token_ref: str | None = None
+    priority: int | None = None
+    is_active: bool = True
+    extra: dict | None = None
+
+
+class ProviderCredentialUpdate(BaseModel):
+    label: str | None = None
+    api_key: str | None = None  # 传空字符串 = 清除
+    priority: int | None = None
+    is_active: bool | None = None
+    extra: dict | None = None
+
+
+class ProviderProxyTestOut(BaseModel):
+    ok: bool
+    latency_ms: int = 0
+    proxy: str | None = None
+    error: str | None = None
 
 
 class ProviderOut(BaseModel):
@@ -487,6 +538,12 @@ class ProviderOut(BaseModel):
     auth_status: str | None = None
     account_label: str | None = None
     created_at: str | None = None
+    # plan-248-1258 M2.3: 供应商级代理
+    proxy_mode: str = "inherit"
+    proxy_url: str | None = None
+    # plan-248-1258 M2.2: 凭据数量（多 Key/多账号）
+    credential_count: int = 0
+    active_credential_count: int = 0
 
 
 # ── ta3 登录/同步（v23）──

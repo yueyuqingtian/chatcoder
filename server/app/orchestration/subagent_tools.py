@@ -27,16 +27,18 @@ SPAWN_SUBAGENT_SCHEMA = {
         "name": "spawn_subagent",
         "description": (
             "Launch an isolated subagent to work on a subtask in its own context. "
-            "Do NOT spawn sub-agents unless the user explicitly asks for sub-agents, delegation, or parallel "
-            "agent work, or the subtask is a genuinely independent research question whose parallel "
-            "investigation would materially improve speed or quality. For simple or straightforward tasks, "
-            "do the work yourself with direct tool calls instead. "
+            "DECIDE AUTONOMOUSLY: spawn one or more subagents whenever the work is naturally decomposable "
+            "into independent subtasks, or when parallel research/implementation would materially improve "
+            "speed or quality (e.g. multi-area investigation, independent module changes, broad search). "
+            "For simple or tightly sequential work, just do it yourself with direct tool calls — do NOT spawn "
+            "for trivial tasks. You may spawn several subagents in one turn; they run in parallel. "
             "Subagents never share context with each other or with you; hand off everything they need. "
             "Set explore=true for a READ-ONLY research/investigation subtask: the tool call blocks until "
             "it finishes and returns the subagent's findings directly to you. "
-            "Without explore, the subagent runs in the background; poll with collect_results. "
-            "Do not delegate the final implementation to subagents — you execute serially "
-            "and integrate their findings."
+            "Without explore, the subagent runs in the background; poll with collect_results (or wait=true). "
+            "Subagents report back a structured summary (result, files touched, findings, risks); "
+            "use subagent_inspect to read any subagent's full context and trajectory when you need details. "
+            "You remain responsible for integrating their work."
         ),
         "parameters": {
             "type": "object",
@@ -68,14 +70,48 @@ COLLECT_RESULTS_SCHEMA = {
     "function": {
         "name": "collect_results",
         "description": (
-            "Check the status and summaries of background subagents spawned this turn. "
-            "Returns finished subagent results (done/failed) and how many are still running."
+            "Check the status and structured summaries of subagents spawned this turn. "
+            "Returns each finished subagent's status, result summary, files touched, key findings, "
+            "risks/blockers, plus how many are still running. "
+            "Set wait=true to block until all subagents finish (preferred over repeated polling)."
         ),
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "wait": {
+                    "type": "boolean",
+                    "description": "True = block until all spawned subagents finish before returning. Default false.",
+                },
+            },
+            "required": [],
+        },
     },
 }
 
-SUBAGENT_TOOL_SCHEMAS = [SPAWN_SUBAGENT_SCHEMA, COLLECT_RESULTS_SCHEMA]
+SUBAGENT_INSPECT_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "subagent_inspect",
+        "description": (
+            "Inspect a specific subagent spawned this turn: its handoff input (task, inherited context), "
+            "its execution trajectory (tool-call sequence with brief outputs) and current status/result. "
+            "Use this when you need the subagent's detailed context or reasoning rather than just its summary."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "integer", "description": "Subagent agent id returned by spawn_subagent."},
+                "section": {
+                    "type": "string",
+                    "description": "Which part to read: context (handoff + inherited context), transcript (trajectory), result (final summary). Default: all.",
+                },
+            },
+            "required": ["agent_id"],
+        },
+    },
+}
+
+SUBAGENT_TOOL_SCHEMAS = [SPAWN_SUBAGENT_SCHEMA, COLLECT_RESULTS_SCHEMA, SUBAGENT_INSPECT_SCHEMA]
 
 
 def filter_tool_schemas(schemas: list[dict], whitelist: list[str] | None) -> list[dict]:
@@ -138,7 +174,7 @@ def append_subagent_tools(tool_schemas: list[dict],
     out = [
         s for s in tool_schemas
         if (allow_spawn or s.get("function", {}).get("name") != "spawn_subagent")
-        and (allow_collect or s.get("function", {}).get("name") != "collect_results")
+        and (allow_collect or s.get("function", {}).get("name") not in ("collect_results", "subagent_inspect"))
     ]
     names = {s.get("function", {}).get("name") for s in out}
 
@@ -146,5 +182,7 @@ def append_subagent_tools(tool_schemas: list[dict],
         out.append(SPAWN_SUBAGENT_SCHEMA)
     if allow_collect and COLLECT_RESULTS_SCHEMA["function"]["name"] not in names:
         out.append(COLLECT_RESULTS_SCHEMA)
+    if allow_collect and SUBAGENT_INSPECT_SCHEMA["function"]["name"] not in names:
+        out.append(SUBAGENT_INSPECT_SCHEMA)
 
     return out

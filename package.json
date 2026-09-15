@@ -1,6 +1,6 @@
 {
   "name": "chatcoder",
-  "version": "0.5.0",
+  "version": "0.5.2",
   "description": "chatcoder - AI 多 Agent 协同编码工作台(桌面版)",
   "author": "chatcoder",
   "license": "UNLICENSED",
@@ -48,6 +48,10 @@
       },
       {
         "from": "server/dist/chatcoder-server",
+        "to": "server/chatcoder-server"
+      },
+      {
+        "from": "server/dist/chatcoder-index-worker",
         "to": "server/chatcoder-server"
       },
       {

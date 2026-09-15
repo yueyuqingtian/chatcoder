@@ -11,7 +11,7 @@ from app.services import model_service
 router = APIRouter()
 
 
-def _to_out(m, provider_name: str | None = None) -> ModelOut:
+def _to_out(m, provider_name: str | None = None, provider_active: bool = True) -> ModelOut:
     tmeta = getattr(m, "trae_meta", None) or {}
     if not isinstance(tmeta, dict):
         tmeta = {}
@@ -36,6 +36,8 @@ def _to_out(m, provider_name: str | None = None) -> ModelOut:
         trae_consumption_rate=tmeta.get("consumption_rate"),
         trae_available=bool(tmeta.get("is_available")),
         trae_thinking=bool(tmeta.get("thinking")),
+        # plan-248-1258 M2.4: 供应商启用状态（禁用供应商时前端选择器过滤其模型）
+        provider_active=provider_active,
     )
 
 
@@ -70,13 +72,25 @@ async def create_model(body: ModelCreate, db: AsyncSession = Depends(get_db)):
 async def list_models(db: AsyncSession = Depends(get_db)):
     models = await model_service.list_models(db)
     # v16: 附带供应商名，前端选择器按供应商分组展示
+    # plan-248-1258 M2.4: 同时带供应商启用状态（禁用供应商的模型前端需过滤）
     from app.persistence.models.model_reg import Provider
     provider_ids = {m.provider_id for m in models if getattr(m, "provider_id", None)}
     provider_names: dict[int, str] = {}
+    provider_active: dict[int, bool] = {}
     if provider_ids:
         res = await db.execute(select(Provider).where(Provider.id.in_(provider_ids)))
-        provider_names = {p.id: p.name for p in res.scalars().all()}
-    return [_to_out(m, provider_names.get(getattr(m, "provider_id", None))) for m in models]
+        for p in res.scalars().all():
+            provider_names[p.id] = p.name
+            provider_active[p.id] = bool(p.is_active)
+    return [
+        _to_out(
+            m,
+            provider_names.get(getattr(m, "provider_id", None)),
+            # 独立模型（无供应商）默认视为可用
+            provider_active.get(getattr(m, "provider_id", None), True),
+        )
+        for m in models
+    ]
 
 
 @router.patch("/models/{model_id}", response_model=ModelOut)

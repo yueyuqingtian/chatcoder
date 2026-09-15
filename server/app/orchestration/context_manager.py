@@ -54,6 +54,8 @@ class ContextBundle:
     instruction: str = ""
     # v15: 多模态指令内容块（图片附件直接以 image_url 注入当前用户消息）
     instruction_blocks: list[dict] | None = None
+    # plan-248-1258 M7: 任务边界提示（历史与新指令之间的 system 分隔，防旧任务复述）
+    task_boundary: str = ""
 
     def to_messages(self) -> list[ChatMessage]:
         """组装 system + 合并 developer + 历史 + user 指令。"""
@@ -61,6 +63,11 @@ class ContextBundle:
         if self.developer_parts:
             messages.append(ChatMessage(role="developer", content="\n\n".join(self.developer_parts)))
         messages.extend(self.history)
+        # plan-248-1258 M7: 任务边界标记——历史与本轮新指令之间插入轻量 system 分隔。
+        # 修复 grok 类模型"新任务时复述上一任务执行结果"：旧的长执行记录紧贴新短指令，
+        # 模型倾向续写旧内容。显式声明"上一任务已结束、以下是新指令"可显著降低该倾向。
+        if self.task_boundary and self.history:
+            messages.append(ChatMessage(role="system", content=self.task_boundary))
         if self.instruction or self.instruction_blocks:
             messages.append(ChatMessage(
                 role="user", content=self.instruction,
@@ -411,6 +418,43 @@ async def _resolve_ta3_model_meta(db: AsyncSession, agent, session) -> dict | No
         return None
 
 
+async def _symbol_index_hint(workspace: str) -> str:
+    """plan-248-1258 M3.3: 生成符号索引状态提示（注入 developer 段）。
+
+    - 已开启：报告文件数/符号数与更新时间，指示主动使用 symbol_search/outline；
+    - 未开启：说明未索引，建议用户在设置-索引库开启（不自动建库）。
+    """
+    if not workspace:
+        return ""
+    import asyncio
+
+    from app.services import symbol_index_manager as sim
+
+    state = await asyncio.to_thread(sim.get_state, workspace)
+    if not state.get("enabled"):
+        return (
+            "## Code Symbol Index\n"
+            "Status: NOT ENABLED for this working directory.\n"
+            "symbol_search / outline are unavailable until the user enables indexing "
+            "(Settings → Index Library / 索引库). If the user asks for fast symbol lookup, "
+            "tell them to enable it there."
+        )
+    status = state.get("status")
+    if status == "indexing":
+        return (
+            "## Code Symbol Index\n"
+            f"Status: INDEXING (workspace: {state.get('workspace')}). "
+            "Prefer symbol_search/outline once ready; meanwhile use fs_grep/fs_read."
+        )
+    return (
+        "## Code Symbol Index\n"
+        f"Status: READY — {state.get('files', 0)} files / {state.get('symbols', 0)} symbols indexed.\n"
+        "When locating functions, classes, or exploring a file's structure, PREFER "
+        "symbol_search (by symbol name) and outline (file skeleton) before fs_grep/fs_read; "
+        "they return file:line ranges you can feed directly into fs_read."
+    )
+
+
 async def build_main_context(
     db: AsyncSession, *, agent, session, project, turn, user_message: str,
     attachments: list[dict] | None = None,
@@ -498,6 +542,14 @@ async def build_main_context(
     )
     # v1.2: 注入 shell 环境说明，避免 agent 用错 shell 语法（Get-ChildItem/grep/… 报错）
     ws_ctx += "\n\n" + shell_hint()
+    # plan-248-1258 M3.3: 注入代码符号索引状态——让 AI 在会话中自动识别项目是否已索引，
+    # 并在探索代码/文件/函数时主动使用 symbol_search / outline。
+    try:
+        _idx_hint = await _symbol_index_hint(workspace)
+        if _idx_hint:
+            ws_ctx += "\n\n" + _idx_hint
+    except Exception:
+        logger.debug("[context] 符号索引状态注入失败(非阻塞)", exc_info=True)
     bundle.developer_parts.append(ws_ctx)
     # 3. Git Repos（并入结构摘要）
     structure = await project_structure_brief(workspace)
@@ -764,6 +816,21 @@ async def build_main_context(
         # 循环结束：暂存的 agent 文本（无后续 tool_call）作为独立 assistant 消息
         _flush_agent_text()
 
+        # plan-248-1258 M7: 任务边界判定——上一任务留下大段执行记录且本轮指令较短时，
+        # 插入分隔提示，抑制 grok 类模型"复述上一任务结果"的倾向。
+        try:
+            _last_asst = next((m for m in reversed(bundle.history) if m.role == "assistant"), None)
+            _prev_len = len(_last_asst.content or "") if _last_asst is not None else 0
+            _cur_len = len((user_message or "").strip())
+            if _prev_len > 1200 and 0 < _cur_len < 600:
+                bundle.task_boundary = (
+                    "The previous task has ENDED. The user message below starts a NEW task. "
+                    "Do NOT restate, summarize, or continue the previous task's results — "
+                    "act only on the new instruction."
+                )
+        except Exception:  # noqa: BLE001
+            logger.debug("[context] 任务边界判定失败(非阻塞)", exc_info=True)
+
         logger.info(
             "[context] session=%s 注入历史消息 %d 条 (window=%dK, budget=%d tokens, summarized=%d, compacted=%d, recent=%d)",
             session.id, len(bundle.history),
@@ -892,4 +959,15 @@ async def build_subagent_context(
             bundle.developer_parts.append(f"## Global Rules\n{_gr}")
     except Exception:
         logger.debug("[context] 用户规则加载失败(非阻塞)", exc_info=True)
+    # plan-248-1258 M6: 结构化汇报要求——主代理据此精准整合（此前 free-form 汇报信息量不足）
+    bundle.developer_parts.append(
+        "## Report Back (required)\n"
+        "When you finish, reply with a STRUCTURED report so the main agent can integrate precisely. "
+        "Use exactly these section headings:\n"
+        "### Result\nOne-paragraph outcome of the subtask.\n"
+        "### Files Touched\nBullet list of every file you created or modified (full relative paths).\n"
+        "### Key Findings\nBullet list of the concrete facts the main agent must know (with file:line evidence where relevant).\n"
+        "### Risks / Open Questions\nBullet list of blockers, uncertainties, or follow-ups (write 'None' if clean).\n"
+        "Be specific and concise — no filler."
+    )
     return bundle

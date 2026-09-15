@@ -106,6 +106,14 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("memory_entries", "candidate", "BOOLEAN DEFAULT 0 NOT NULL"),
     ("memory_entries", "expires_at", "VARCHAR(40)"),
     ("memory_entries", "superseded_by", "BIGINT"),
+    # ========== providers（plan-248-1258 M2.3：供应商级代理）==========
+    ("providers", "proxy_mode", "VARCHAR(12) DEFAULT 'inherit'"),
+    ("providers", "proxy_url", "VARCHAR(255)"),
+    # ========== workbuddy_auth / ta3_auth / trae_auth（plan-248-1258 M2.2：凭据维度）==========
+    # 多账号支持：auth 行归属某条 provider_credentials（旧行迁移时挂到首条凭据）。
+    ("workbuddy_auth", "credential_id", "BIGINT"),
+    ("ta3_auth", "credential_id", "BIGINT"),
+    ("trae_auth", "credential_id", "BIGINT"),
 ]
 
 
@@ -184,6 +192,16 @@ async def run_migrations(db: AsyncSession) -> dict:
         except Exception:
             pass
 
+    # plan-248-1258 M2.1: 数据迁移 -- 供应商单 api_key 拆入首条凭据（幂等）
+    try:
+        await _migrate_provider_credentials(db)
+    except Exception as e:
+        logger.warning("供应商凭据迁移失败(非阻塞): %s", e)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
     if migrated:
         logger.info("数据库迁移完成: 新增 %d 列, 跳过 %d, 失败 %d", migrated, skipped, errors)
     return {"migrated": migrated, "skipped": skipped, "errors": errors}
@@ -254,3 +272,59 @@ async def _group_models_into_providers(db: AsyncSession) -> int:
     if grouped:
         logger.info("迁移: %d 个存量模型已归组到供应商", grouped)
     return grouped
+
+
+async def _migrate_provider_credentials(db: AsyncSession) -> int:
+    """plan-248-1258 M2.1: 幂等迁移——把 providers 的单 api_key 拆入 provider_credentials。
+
+    规则：
+    - 已有凭据的供应商跳过（不重复拆）；
+    - 无 api_key 的供应商（如未登录的 workbuddy/ta3/trae）也建一条空凭据占位，
+      以便 UI 与轮询逻辑有统一入口（api_key 为空、status=disabled）；
+    - OAuth 类 auth 表旧行（credential_id 为空）挂到该供应商的首条凭据上。
+    """
+    from app.persistence.models.model_reg import Provider, ProviderCredential
+
+    if not await _table_exists(db, "provider_credentials"):
+        return 0
+
+    providers = (await db.execute(select(Provider))).scalars().all()
+    if not providers:
+        return 0
+
+    existing = (await db.execute(select(ProviderCredential.provider_id))).scalars().all()
+    has_cred = set(existing)
+    created = 0
+    first_cred_by_provider: dict[int, int] = {}
+    for p in providers:
+        if p.id in has_cred:
+            continue
+        cred = ProviderCredential(
+            provider_id=p.id,
+            label="默认凭据",
+            api_key=p.api_key,
+            priority=0,
+            is_active=True,
+            status="ok" if p.api_key else "disabled",
+        )
+        db.add(cred)
+        await db.flush()
+        first_cred_by_provider[p.id] = cred.id
+        created += 1
+    if first_cred_by_provider:
+        # 旧 OAuth auth 行挂到首条凭据（后续多账号登录会写各自的 credential_id）
+        for table in ("workbuddy_auth", "ta3_auth", "trae_auth"):
+            if not await _table_exists(db, table):
+                continue
+            for pid, cid in first_cred_by_provider.items():
+                await db.execute(
+                    text(
+                        f"UPDATE {table} SET credential_id = :cid "
+                        "WHERE provider_id = :pid AND (credential_id IS NULL)"
+                    ),
+                    {"cid": cid, "pid": pid},
+                )
+    await db.commit()
+    if created:
+        logger.info("迁移: 为 %d 个供应商创建首条凭据", created)
+    return created

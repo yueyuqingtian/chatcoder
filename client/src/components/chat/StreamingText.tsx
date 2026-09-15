@@ -9,6 +9,7 @@ import { IconBrain, IconChevronRight } from "../icons";
 import { StreamingMarkdown } from "./StreamingMarkdown";
 import { ThinkingTicker } from "./ThinkingTicker";
 import { ThinkingExpanded } from "./ThinkingExpanded";
+import { ChatCollapse } from "./ChatCollapse";
 
 export interface StreamingTextProps {
   /** 是否处于运行中（不运行返回 null） */
@@ -86,7 +87,9 @@ export function StreamingText({ active, thinking, text, processingLabel = "处�
               <IconChevronRight size={11} />
             </span>
           </div>
-          {tailOpen && <ThinkingExpanded text={smoothThinking} />}
+          <ChatCollapse open={tailOpen}>
+            <ThinkingExpanded text={smoothThinking} />
+          </ChatCollapse>
         </div>
       )}
       {smoothBody && (

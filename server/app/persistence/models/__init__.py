@@ -7,7 +7,7 @@ from app.persistence.models.hook import HookConfig
 from app.persistence.models.knowledge import KnowledgeBase, KnowledgeDoc
 from app.persistence.models.memory import MemoryEntry
 from app.persistence.models.message import Message, Session
-from app.persistence.models.model_reg import Model, Provider
+from app.persistence.models.model_reg import Model, Provider, ProviderCredential
 from app.persistence.models.project import Project
 from app.persistence.models.review import FileReview
 from app.persistence.models.rollback import TurnSnapshot
@@ -34,6 +34,7 @@ __all__ = [
     "Artifact",
     "Model",
     "Provider",
+    "ProviderCredential",
     "ScheduledTask",
     "ConfigProfile",
     "ExecPolicyRule",

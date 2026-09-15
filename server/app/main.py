@@ -25,6 +25,7 @@ from app.gateway.routers import (
     settings as settings_routes,
     skills_mcp,
     subagents,
+    symbol_index,
     ta3_auth,
     trae_auth,
     turns,
@@ -90,6 +91,20 @@ async def lifespan(app: FastAPI):
         except Exception:  # noqa: BLE001
             import logging
             logging.getLogger(__name__).exception("定时任务调度循环启动失败（不阻塞服务）")
+        # plan-248-1258 M2.6: 启动 WorkBuddy 每日自动签到循环（打开软件后后台自动签到）
+        try:
+            from app.services import workbuddy_checkin
+            await workbuddy_checkin.start()
+        except Exception:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).exception("WorkBuddy 自动签到循环启动失败（不阻塞服务）")
+        # plan-248-1258 M3.1: 启动符号索引自动增量循环（已开启索引的工作区保持最新）
+        try:
+            from app.services import symbol_index_manager
+            await symbol_index_manager.start()
+        except Exception:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).exception("符号索引自动增量循环启动失败（不阻塞服务）")
     except Exception as e:  # noqa: BLE001
         import logging
         logging.getLogger(__name__).exception("数据库初始化失败: %s", e)
@@ -101,6 +116,20 @@ async def lifespan(app: FastAPI):
     except Exception:
         import logging
         logging.getLogger(__name__).debug("shutdown scheduler loop failed", exc_info=True)
+    # plan-248-1258 M2.6: 停止 WorkBuddy 自动签到循环
+    try:
+        from app.services import workbuddy_checkin
+        await workbuddy_checkin.stop()
+    except Exception:
+        import logging
+        logging.getLogger(__name__).debug("shutdown workbuddy checkin loop failed", exc_info=True)
+    # plan-248-1258 M3.1: 停止符号索引自动增量循环
+    try:
+        from app.services import symbol_index_manager
+        await symbol_index_manager.stop()
+    except Exception:
+        import logging
+        logging.getLogger(__name__).debug("shutdown symbol index loop failed", exc_info=True)
     # 优雅关停：排空 write-behind 缓冲，避免未落库消息在进程退出时丢失。
     try:
         from app.persistence.write_behind import write_behind
@@ -180,6 +209,8 @@ def create_app() -> FastAPI:
     app.include_router(trae_auth.router, prefix="/api", tags=["trae"])
     app.include_router(upload.router, prefix="/api", tags=["upload"])
     app.include_router(diagnostics.router, prefix="/api", tags=["diagnostics"])
+    # plan-248-1258 M3.2: 代码符号索引管理（索引库页面）
+    app.include_router(symbol_index.router, prefix="/api", tags=["symbol-index"])
     app.include_router(ws_router, tags=["websocket"])
 
     # 健康检查
@@ -188,12 +219,21 @@ def create_app() -> FastAPI:
         # Electron 用稳定标识区分 ChatCoder 后端与同端口的其它本地服务。
         from app.persistence.database import database_info
         info = database_info()
+        # plan-248-1273 M1: 诊断当前实际运行实例，避免 Electron 继续启动旧 exe/旧前端。
+        try:
+            from app.services import symbol_index_manager
+            worker_info = symbol_index_manager.worker_diagnostics()
+        except Exception:
+            worker_info = {"mode": "legacy-thread", "workers": []}
         return {
             "status": "ok",
             "service": "chatcoder",
             "version": "0.4.0",
+            "build_revision": os.environ.get("CHATCODER_BUILD_REVISION", "source"),
+            "index_worker_mode": os.environ.get("CHATCODER_INDEX_WORKER_MODE", "process"),
             "pid": os.getpid(),
             "database": info,
+            "index_worker": worker_info,
         }
 
     return app

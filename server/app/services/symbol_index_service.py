@@ -218,6 +218,10 @@ def _extract_generic(source: str, rel: str) -> list[dict]:
 def _iter_source_files(workspace: Path):
     count = 0
     for p in workspace.rglob("*"):
+        # rglob/Path stat 也可能长时间占用 GIL（尤其大型 Windows 工作区），
+        # 周期性让出执行权，避免后台索引饿死 HTTP 事件循环。
+        if count and count % 64 == 0:
+            time.sleep(0)
         if count >= _MAX_FILES:
             logger.info("[symbols] 文件数超过上限 %s，停止扫描", _MAX_FILES)
             return
@@ -238,8 +242,13 @@ def _iter_source_files(workspace: Path):
 
 # ── 索引主流程 ────────────────────────────────────────────────────────
 
-def index_workspace(workspace: str | Path, *, force: bool = False) -> dict:
-    """建立/增量更新符号索引。返回 {files_scanned, files_updated, symbols, elapsed_ms}。"""
+def index_workspace(workspace: str | Path, *, force: bool = False,
+                    cancel_file: str | None = None,
+                    progress_cb=None) -> dict:
+    """建立/增量更新符号索引。
+
+    cancel_file/progress_cb 仅供独立 worker 使用；默认保持旧同步调用契约。
+    """
     t0 = time.time()
     ws = Path(workspace)
     if not ws.is_dir():
@@ -257,6 +266,20 @@ def index_workspace(workspace: str | Path, *, force: bool = False) -> dict:
             rel = f.relative_to(ws).as_posix()
             current.add(rel)
             stats["files_scanned"] += 1
+            if cancel_file and Path(cancel_file).exists():
+                conn.rollback()
+                stats["cancelled"] = True
+                stats["progress"] = int(stats["files_scanned"] / max(1, _MAX_FILES) * 100)
+                return stats
+            if progress_cb and stats["files_scanned"] % 32 == 0:
+                try:
+                    progress_cb(min(95, stats["files_scanned"] * 100 // max(1, _MAX_FILES)), files_scanned=stats["files_scanned"])
+                except Exception:
+                    logger.debug("[symbols] progress callback failed", exc_info=True)
+            # 大型仓库的 AST/正则解析在工作线程中运行；周期性让出 GIL，避免
+            # Windows 单进程服务的其它 HTTP 协程在全量索引期间长时间得不到调度。
+            if stats["files_scanned"] % 4 == 0:
+                time.sleep(0)
             try:
                 st = f.stat()
                 raw = f.read_bytes()

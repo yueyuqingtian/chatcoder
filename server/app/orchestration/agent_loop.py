@@ -63,13 +63,15 @@ async def _broadcast_turn_status(session_id: int, turn_id: int, thread_id: int |
     })
 
 
-async def _wait_retry_interval(cancel_event: asyncio.Event | None) -> bool:
-    """v35: 重试前等待 settings.agent_retry_interval_seconds 秒。
+async def _wait_retry_interval(cancel_event: asyncio.Event | None, seconds: float | None = None) -> bool:
+    """v35/v45: 重试前等待指定秒数。
 
-    期间每 0.5s 检查一次中断信号；被中断返回 False（调用方应停止重试），
-    正常等待完成返回 True。
+    seconds=None 时取配置序列的首个间隔（兼容旧调用）；期间每 0.5s 检查一次中断信号，
+    被中断返回 False（调用方应停止重试），正常等待完成返回 True。
     """
-    total = max(0.0, float(settings.agent_retry_interval_seconds))
+    if seconds is None:
+        seconds = _retry_wait_seconds(1)
+    total = max(0.0, float(seconds))
     waited = 0.0
     while waited < total:
         if cancel_event and cancel_event.is_set():
@@ -77,6 +79,28 @@ async def _wait_retry_interval(cancel_event: asyncio.Event | None) -> bool:
         await asyncio.sleep(0.5)
         waited += 0.5
     return not (cancel_event and cancel_event.is_set())
+
+
+def _retry_wait_seconds(attempt: int) -> float:
+    """v45: 第 attempt 次重试（1-based）前的等待秒数。
+
+    取 settings.agent_retry_interval_list 的第 attempt-1 项（不足按最后一项补齐）；
+    序列为空（agent_retry_count=0 或解析失败）时回退 agent_retry_interval_seconds。
+    """
+    intervals = settings.agent_retry_interval_list
+    if not intervals:
+        return max(0.0, float(settings.agent_retry_interval_seconds or 0.0))
+    idx = min(max(int(attempt), 1), len(intervals)) - 1
+    return max(0.0, float(intervals[idx]))
+
+
+def _retry_plan() -> list[float]:
+    """v45: 统一重试计划——每次重试前的等待秒数序列（长度 = agent_retry_count）。
+
+    任何报错（模型异常 / 空响应 / 超时中断）都按该序列依次重试，穷尽后才停止并显示报错。
+    """
+    count = max(0, int(settings.agent_retry_count or 0))
+    return [_retry_wait_seconds(i) for i in range(1, count + 1)]
 
 
 def _filter_degenerate_tool_calls(response) -> None:
@@ -507,18 +531,27 @@ async def run_agent_loop(
     # 优先于 agent.model_id，解决"配置无默认模型 + 页面会话选择模型"不可用问题）
     registry = get_model_registry()
     provider, reason = None, None
+    # plan-248-1258 M2.2: 记住解析所用的 Model 行，凭据轮询时据此重建 provider
+    _cur_model = None
     if model_id is not None:
         from app.persistence.models.model_reg import Model
-        _model = await db.get(Model, model_id)
-        provider, reason = await registry.get_provider_for_model(db, _model)
+        _cur_model = await db.get(Model, model_id)
+        provider, reason = await registry.get_provider_for_model(db, _cur_model)
     if provider is None:
         provider, reason = await registry.get_provider_for_agent(db, agent)
+        if provider is not None and getattr(agent, "model_id", None):
+            from app.persistence.models.model_reg import Model as _Model
+            _cur_model = await db.get(_Model, agent.model_id)
     if provider is None:
         await _emit_agent_msg(db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
                               agent_id=agent_id, agent_name=agent_name,
                               msg_type=MsgType.ERROR,
                               content={"text": f"模型不可用({reason})", "agent_name": agent_name})
         return AgentOutput(kind="skipped", error=reason)
+
+    # plan-248-1258 M2.2: 凭据轮询状态——已失败的凭据 id 集合 + 已上报成功的集合
+    _failed_creds: set[int] = set()
+    _ok_reported: set[int] = set()
 
     # v21: thinking 模式开关 —— provider 支持 thinking 参数（DeepSeek/GLM/Kimi 系）
     # 且本轮 effort 非 none 时开启（对齐 deepseek-harness：thinking:{type:"enabled"} + effort）。
@@ -767,6 +800,15 @@ async def run_agent_loop(
                     cancel_event=cancel_event,
                     thread_id=thread_id,
                 )
+                # plan-248-1258 M2.2: 凭据调用成功 → 清冷却并刷新粘性（后续优先复用该凭据）
+                _cur_cred = getattr(provider, "credential_row_id", None)
+                if _cur_cred is not None and _cur_cred not in _ok_reported:
+                    _ok_reported.add(_cur_cred)
+                    try:
+                        from app.services import credential_service as _cred_svc
+                        await _cred_svc.mark_ok(db, _cur_cred)
+                    except Exception:
+                        logger.debug("[agent] 标记凭据成功异常(非阻塞)", exc_info=True)
                 # v19: 兜底剥离内联思考标签（流式路径已剥离则为 no-op）
                 if response.content:
                     _c, _t = _split_inline_thinking(response.content)
@@ -793,22 +835,26 @@ async def run_agent_loop(
                     # 模型思考阶段被网关提前终结 SSE 流（无任何产出帧）。旧逻辑直接 fatal
                     # 杀死整个 turn，表现为"经常中断报错"。改为按降档序列自动重试：
                     # 每次降低思考档位（默认 high→low→关闭），提高拿到内容/工具调用的概率。
-                    if _fatal and settings.agent_empty_response_retries > 0:
-                        for _ri, _eff in enumerate(
-                            settings.agent_empty_retry_effort_list[: settings.agent_empty_response_retries],
-                            start=1,
-                        ):
+                    # v45: 统一异常重试——任何 fatal 响应（空响应/超时中断/零帧断流）
+                    # 都按配置的重试计划（默认 10/20/30 秒）依次重试，穷尽后才停止并显示报错。
+                    # 重试时按降档序列降低思考强度（effort），提高拿到有效响应的概率。
+                    _retry_waits = _retry_plan()
+                    if _fatal and _retry_waits:
+                        _efforts = settings.agent_empty_retry_effort_list
+                        for _ri in range(1, len(_retry_waits) + 1):
+                            _eff = _efforts[_ri - 1] if _ri - 1 < len(_efforts) else None
+                            _wait_s = _retry_waits[_ri - 1]
                             logger.warning(
-                                "[agent] turn=%s step=%s 空响应重试 %d/%d (effort=%s): %s",
-                                turn_id, step, _ri, settings.agent_empty_response_retries,
-                                _eff or "(default)", _reason,
+                                "[agent] turn=%s step=%s 响应异常重试 %d/%d (effort=%s, wait=%.0fs): %s",
+                                turn_id, step, _ri, len(_retry_waits),
+                                _eff or "(default)", _wait_s, _reason,
                             )
                             # v35: 重试提示改为状态广播（不落库、不进消息流），并按间隔等待
                             await _broadcast_turn_status(
                                 session_id, turn_id, thread_id,
-                                f"调用异常，正在重试 {_ri}/{settings.agent_empty_response_retries}…",
+                                f"{_reason}，{_wait_s:.0f} 秒后重试 {_ri}/{len(_retry_waits)}…",
                             )
-                            if not await _wait_retry_interval(cancel_event):
+                            if not await _wait_retry_interval(cancel_event, _wait_s):
                                 logger.warning("[agent] turn=%s 重试等待期间收到中断信号，停止重试", turn_id)
                                 return AgentOutput(kind="cancelled", error="任务被用户中断")
                             _retry_req = ChatRequest(
@@ -830,7 +876,7 @@ async def run_agent_loop(
                                     thread_id=thread_id,
                                 )
                             except Exception:
-                                logger.warning("[agent] turn=%s step=%s 空响应重试调用异常，继续降档",
+                                logger.warning("[agent] turn=%s step=%s 响应异常重试调用异常，继续下一轮",
                                                turn_id, step, exc_info=True)
                                 continue
                             if _r.content:
@@ -842,14 +888,14 @@ async def run_agent_loop(
                             if _rf is None:
                                 response = _r
                                 _failure = None
-                                logger.info("[agent] turn=%s step=%s 空响应重试成功 (effort=%s)",
+                                logger.info("[agent] turn=%s step=%s 响应异常重试成功 (effort=%s)",
                                             turn_id, step, _eff or "(default)")
                                 # v35: 重试成功 → 状态行切换为恢复提示（流式 delta 到达后前端自动清除）
                                 await _broadcast_turn_status(
                                     session_id, turn_id, thread_id, "已恢复正常，继续执行…",
                                 )
                                 break
-                            logger.warning("[agent] turn=%s step=%s 空响应重试仍异常: %s",
+                            logger.warning("[agent] turn=%s step=%s 响应异常重试仍失败: %s",
                                            turn_id, step, _rf[0])
                     if _failure is not None:
                         await _emit_agent_msg(
@@ -923,28 +969,84 @@ async def run_agent_loop(
                         )
                         response = await provider.chat(request)
                     else:
-                        # v33: 429/503/连接/超时等瞬时故障——压缩无意义且会拖垮 turn，
-                        # 直接按原消息重试一次（不产生异常压缩块、不中断长任务）。
+                        # v33: 429/503/连接/超时等瞬时故障——压缩无意义且会拖垮 turn。
+                        # plan-248-1258 M2.2: 先尝试切换到「下一个可用凭据」（多 Key/多账号
+                        # 自动轮询）。
+                        # v45: 统一异常重试——任何报错都按配置的重试计划（默认 10/20/30 秒）
+                        # 依次重试，穷尽后才停止并显示报错（不再只重试一次就终止）。
                         logger.warning(
-                            "[agent] turn=%s step=%s 模型调用瞬时故障(非溢出，不压缩)直接重试: %s",
+                            "[agent] turn=%s step=%s 模型调用失败(非溢出，不压缩): %s",
                             turn_id, step, _err_msg[:200],
                         )
-                        # v35: 瞬时故障重试同样走状态广播 + 间隔等待
-                        await _broadcast_turn_status(
-                            session_id, turn_id, thread_id, "调用异常，正在重试 1/1…",
-                        )
-                        if not await _wait_retry_interval(cancel_event):
-                            logger.warning("[agent] turn=%s 重试等待期间收到中断信号，停止重试", turn_id)
-                            return AgentOutput(kind="cancelled", error="任务被用户中断")
-                        request = ChatRequest(
-                            messages=messages, model="", tools=tool_schemas or None,
-                            temperature=settings.agent_tool_temperature if tool_schemas else settings.agent_text_temperature,
-                            max_tokens=settings.agent_max_output_tokens or None,
-                            session_id=str(session_id),
-                            message_id=f"{session_id}-{turn_id}-{step}-transient-retry",
-                            thinking=_thinking_enabled or None,
-                        )
-                        response = await provider.chat(request)
+                        _cur_cred = getattr(provider, "credential_row_id", None)
+                        if _cur_cred is not None:
+                            _failed_creds.add(_cur_cred)
+                            try:
+                                from app.services import credential_service as _cred_svc
+                                if _cred_svc.is_retryable_error(_err_msg):
+                                    await _cred_svc.mark_failed(db, _cur_cred, _err_msg)
+                                    logger.warning(
+                                        "[agent] turn=%s 凭据 #%s 标记失败并进入冷却",
+                                        turn_id, _cur_cred,
+                                    )
+                            except Exception:
+                                logger.debug("[agent] 标记凭据失败异常(非阻塞)", exc_info=True)
+                        _retry_waits = _retry_plan()
+                        if not _retry_waits:
+                            raise api_err  # 未配置重试：交回外层按失败收尾
+                        _ok = False
+                        for _ri in range(1, len(_retry_waits) + 1):
+                            _wait_s = _retry_waits[_ri - 1]
+                            _switched = False
+                            if _cur_model is not None and _failed_creds:
+                                try:
+                                    _np, _nreason, _ncid = await registry.next_provider_for_model(
+                                        db, _cur_model, exclude=_failed_creds,
+                                    )
+                                    if _np is not None:
+                                        provider = _np
+                                        _switched = True
+                                        logger.warning(
+                                            "[agent] turn=%s 已切换到备用凭据 #%s（原凭据失败）",
+                                            turn_id, _ncid,
+                                        )
+                                        await _broadcast_turn_status(
+                                            session_id, turn_id, thread_id, "当前凭据不可用，已自动切换…",
+                                        )
+                                except Exception:
+                                    logger.warning("[agent] 凭据切换失败，回退原位重试", turn_id, exc_info=True)
+                            if not _switched:
+                                await _broadcast_turn_status(
+                                    session_id, turn_id, thread_id,
+                                    f"调用异常，{_wait_s:.0f} 秒后重试 {_ri}/{len(_retry_waits)}…",
+                                )
+                                if not await _wait_retry_interval(cancel_event, _wait_s):
+                                    logger.warning("[agent] turn=%s 重试等待期间收到中断信号，停止重试", turn_id)
+                                    return AgentOutput(kind="cancelled", error="任务被用户中断")
+                            request = ChatRequest(
+                                messages=messages, model="", tools=tool_schemas or None,
+                                temperature=settings.agent_tool_temperature if tool_schemas else settings.agent_text_temperature,
+                                max_tokens=settings.agent_max_output_tokens or None,
+                                session_id=str(session_id),
+                                message_id=f"{session_id}-{turn_id}-{step}-transient-retry-{_ri}",
+                                thinking=_thinking_enabled or None,
+                            )
+                            try:
+                                response = await provider.chat(request)
+                            except Exception as _retry_call_err:
+                                logger.warning(
+                                    "[agent] turn=%s step=%s 重试 %d/%d 仍失败: %s",
+                                    turn_id, step, _ri, len(_retry_waits), str(_retry_call_err)[:200],
+                                )
+                                # 重试失败同样进入凭据冷却，下一轮尝试切换
+                                _nc = getattr(provider, "credential_row_id", None)
+                                if _nc is not None:
+                                    _failed_creds.add(_nc)
+                                continue
+                            _ok = True
+                            break
+                        if not _ok:
+                            raise api_err
                         # v35: 重试成功 → 清除重试状态（下一次流式 delta 或 turn 结束也会兜底清除）
                         await _broadcast_turn_status(session_id, turn_id, thread_id, "")
                     # 重试路径同样剥离内联思考标签
@@ -1202,7 +1304,7 @@ async def run_agent_loop(
                         pass
 
                     # ── 子代理工具（主代理专用）──
-                    if subagent_context and tool_name in ("spawn_subagent", "collect_results"):
+                    if subagent_context and tool_name in ("spawn_subagent", "collect_results", "subagent_inspect"):
                         tool_output = await _run_subagent_tool(
                             db, tool_name=tool_name, args=args,
                             session_id=session_id, turn_id=turn_id,
@@ -1749,7 +1851,14 @@ def _response_failure_reason(response, has_progress: bool = False) -> tuple[str,
         return f"模型返回空响应 (finish_reason={finish})，未生成内容或工具调用", True
     if finish == "timeout":
         return "响应因网关空闲超时中断，以上为已生成的部分内容", False
-    if finish in ("max_tokens", "length") and not response.tool_calls:
+    if finish in ("max_tokens", "length"):
+        if response.tool_calls:
+            return None  # 已有工具调用，截断不影响本轮动作
+        if not response.content:
+            # v45: 截断且零正文——推理模型的 thinking 先耗尽了输出预算（实测 finish=length、
+            # content_len=0）。旧逻辑判非致命→只提示不重试，用户看到"输出达到 token 上限"后任务中断。
+            # 改为致命，交给统一重试计划（默认 10/20/30 秒）重试，通常可恢复。
+            return "输出达到 token 上限且未生成正文（推理可能已耗尽输出预算）", True
         return "输出达到 token 上限，可能不完整", False
     return None
 
@@ -1967,10 +2076,38 @@ def _make_approval_emitter(session_id: int):
 
 # ── 子代理工具处理 ──
 
+def _subagent_context_snapshot(subagent_context: dict, original_request: str = "") -> dict:
+    """plan-248-1258 M6: 汇总主代理的当前上下文快照，传给子代理并留档供 inspect。
+
+    让子代理继承任务关键上下文（原始请求、当前清单、沙箱/工作区），
+    同时主代理事后可经 subagent_inspect 回看当时交接了什么。
+    """
+    snap: dict = {}
+    try:
+        if original_request:
+            snap["original_request"] = original_request[:2000]
+        for key in ("main_task_id", "model_id", "sandbox_mode", "permission_mode"):
+            v = subagent_context.get(key)
+            if v not in (None, ""):
+                snap[key] = v
+        todos = subagent_context.get("todos")
+        if isinstance(todos, list) and todos:
+            snap["todos"] = [
+                {"content": str(t.get("content"))[:200], "status": t.get("status")}
+                for t in todos[:20] if isinstance(t, dict)
+            ]
+        summary = subagent_context.get("context_summary")
+        if summary:
+            snap["context_summary"] = str(summary)[:1500]
+    except Exception:  # noqa: BLE001
+        logger.debug("[agent] 子代理上下文快照构建失败(非阻塞)", exc_info=True)
+    return snap
+
+
 async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent, workspace,
                              subagent_context, agent_model_id: int | None = None,
                              parent_agent_id: int | None = None) -> str:
-    """spawn_subagent / collect_results 工具实现。
+    """spawn_subagent / collect_results / subagent_inspect 工具实现。
 
     返回给模型的文本结果。
     """
@@ -1980,17 +2117,53 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         manager = subagent_context.get("manager")
         if manager is None:
             return "No subagents were spawned in this turn."
+        # plan-248-1258 M6: wait=true 时阻塞等待全部子代理完成（替代反复轮询空转）
+        if bool(args.get("wait", False)) and manager.pending_count() > 0:
+            await manager.wait_all()
         results = manager.results()
         if not results:
             pending = manager.pending_count()
             return f"No subagents have finished yet ({pending} still running)."
-        lines = []
+        blocks: list[str] = []
         for r in results:
             status = "completed" if r["status"] == "done" else "failed"
-            lines.append(f"- subagent#{r['agent_id']} [{status}] {(r['summary'] or r['error'] or '')[:500]}")
+            head = f"### subagent#{r['agent_id']} [{status}]"
+            if r.get("title"):
+                head += f" — {r['title']}"
+            body_lines = [head]
+            detail = (r.get("findings") or r.get("summary") or r.get("error") or "").strip()
+            if detail:
+                # M6: 不再截 500 字符——完整 findings（上限 4000）让主代理能精准整合
+                body_lines.append(detail[:4000])
+            if r.get("error") and r.get("summary"):
+                body_lines.append(f"Error: {r['error'][:300]}")
+            if r.get("files_touched"):
+                body_lines.append("Files touched: " + ", ".join(r["files_touched"][:30]))
+            if r.get("risks"):
+                body_lines.append("Risks/blockers:\n" + "\n".join(f"- {x}" for x in r["risks"][:10]))
+            blocks.append("\n".join(body_lines))
+        tail = ""
         if manager.pending_count():
-            lines.append(f"- ({manager.pending_count()} subagents still running)")
-        return "Subagent results:\n" + "\n".join(lines)
+            tail = f"\n\n({manager.pending_count()} subagents still running — call collect_results(wait=true) to block until they finish)"
+        return "Subagent results:\n\n" + "\n\n".join(blocks) + tail
+
+    if tool_name == "subagent_inspect":
+        # plan-248-1258 M6: 主代理按需查看子代理上下文/轨迹/结果
+        manager = subagent_context.get("manager")
+        if manager is None:
+            return "No subagents were spawned in this turn."
+        try:
+            aid = int(args.get("agent_id"))
+        except (TypeError, ValueError):
+            return "Error: agent_id is required (integer)."
+        section = str(args.get("section") or "all").lower()
+        if section not in ("all", "context", "transcript", "result"):
+            section = "all"
+        data = manager.inspect(aid, section)
+        if data is None:
+            known = ", ".join(f"#{i}" for i in manager.agent_ids()) or "(none)"
+            return f"No subagent with id {aid}. Known subagents: {known}."
+        return "Subagent inspection:\n" + _json.dumps(data, ensure_ascii=False, indent=2)[:8000]
 
     if tool_name == "spawn_subagent":
         manager = subagent_context.get("manager")
@@ -2165,11 +2338,18 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
                 handoff_summary=task_desc, context_bundle=bundle,
                 tool_schemas=sub_tools, workspace=workspace,
                 cancel_event=cancel_event,
+                task_title=task_title, task_description=task_desc,
+                context_snapshot=_subagent_context_snapshot(subagent_context, _orig_req),
             )
             if handle is not None and handle.status == "done":
+                _extra = ""
+                if handle.files_touched:
+                    _extra += "\nFiles touched: " + ", ".join(handle.files_touched[:30])
+                if handle.risks:
+                    _extra += "\nRisks: " + "; ".join(handle.risks[:5])
                 return (
                     f"Exploration subagent #{sub_agent.id} finished for: {task_title}.\n"
-                    f"Findings:\n{(handle.findings or handle.summary or '')[:4000]}"
+                    f"Findings:\n{(handle.findings or handle.summary or '')[:4000]}{_extra}"
                 )
             return (
                 f"Exploration subagent #{sub_agent.id} failed for: {task_title}.\n"
@@ -2180,12 +2360,18 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
             handoff_summary=task_desc, context_bundle=bundle,
             tool_schemas=sub_tools, workspace=workspace,
             cancel_event=cancel_event,
+            task_title=task_title, task_description=task_desc,
+            context_snapshot=_subagent_context_snapshot(subagent_context, _orig_req),
         )
         await broadcast(session.id, {
             "event": "agent.started",
             "payload": {"agent_id": sub_agent_id, "kind": "sub",
                         "name": sub_agent.name, "turn_id": turn_id},
         })
-        return f"Subagent #{sub_agent_id} spawned for task: {task_title}. It runs in an isolated context. Use collect_results to gather its output."
+        return (
+            f"Subagent #{sub_agent_id} spawned for task: {task_title}. "
+            "It runs in an isolated context. Use collect_results (add wait=true to block until done) "
+            "to gather its structured report, or subagent_inspect to read its context/trajectory."
+        )
 
     return "Error: unknown subagent tool"

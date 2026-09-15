@@ -116,6 +116,14 @@ def load_persisted_workspace() -> None:
             settings.agent_max_steps = int(data["agent_max_steps"])
         except (TypeError, ValueError):
             pass
+    # v45: 启动时恢复异常自动重试策略
+    if "agent_retry_count" in data:
+        try:
+            settings.agent_retry_count = max(0, int(data["agent_retry_count"]))
+        except (TypeError, ValueError):
+            pass
+    if "agent_retry_intervals" in data:
+        settings.agent_retry_intervals = str(data["agent_retry_intervals"] or "")
     if "browser_enabled" in data:
         settings.browser_enabled = bool(data["browser_enabled"])
     if "browser_headless" in data:
@@ -174,6 +182,11 @@ class GlobalSettingsOut(BaseModel):
     sandbox_mode: str = "workspace-write"
     # Agent 最大步数（200 / 500 / 1000 / 0=不限制）
     agent_max_steps: int = 1000
+    # v45: 异常自动重试策略（任何报错都按此重试，穷尽后才停止并显示报错）
+    # agent_retry_count: 重试次数（0 = 不重试）
+    # agent_retry_intervals: 每次重试前的等待秒数（逗号分隔，默认 10,20,30）
+    agent_retry_count: int = 3
+    agent_retry_intervals: str = "10,20,30"
     # 浏览器自动化开关与无头模式
     browser_enabled: bool = False
     browser_headless: bool = True
@@ -198,6 +211,9 @@ class GlobalSettingsIn(BaseModel):
     plan_mode_allow_outside_access: bool | None = None
     sandbox_mode: str | None = None
     agent_max_steps: int | None = None
+    # v45: 异常自动重试策略
+    agent_retry_count: int | None = None
+    agent_retry_intervals: str | None = None
     browser_enabled: bool | None = None
     browser_headless: bool | None = None
 
@@ -224,6 +240,8 @@ async def get_global_settings() -> GlobalSettingsOut:
         plan_mode_allow_outside_access=data.get("plan_mode_allow_outside_access", False),
         sandbox_mode=data.get("sandbox_mode", settings.sandbox_mode),
         agent_max_steps=data.get("agent_max_steps", settings.agent_max_steps),
+        agent_retry_count=data.get("agent_retry_count", settings.agent_retry_count),
+        agent_retry_intervals=data.get("agent_retry_intervals", settings.agent_retry_intervals),
         browser_enabled=data.get("browser_enabled", settings.browser_enabled),
         browser_headless=data.get("browser_headless", settings.browser_headless),
     )
@@ -354,6 +372,15 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
     if body.agent_max_steps is not None:
         data["agent_max_steps"] = int(body.agent_max_steps)
         settings.agent_max_steps = int(body.agent_max_steps)
+    # v45: 异常自动重试策略（次数 + 间隔序列），运行时立即生效
+    if body.agent_retry_count is not None:
+        _rc = max(0, int(body.agent_retry_count))
+        data["agent_retry_count"] = _rc
+        settings.agent_retry_count = _rc
+    if body.agent_retry_intervals is not None:
+        _ri = str(body.agent_retry_intervals).strip()
+        data["agent_retry_intervals"] = _ri
+        settings.agent_retry_intervals = _ri
     if body.browser_enabled is not None:
         data["browser_enabled"] = bool(body.browser_enabled)
         settings.browser_enabled = bool(body.browser_enabled)
@@ -382,6 +409,8 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         plan_mode_allow_outside_access=data.get("plan_mode_allow_outside_access", False),
         sandbox_mode=data.get("sandbox_mode", settings.sandbox_mode),
         agent_max_steps=data.get("agent_max_steps", settings.agent_max_steps),
+        agent_retry_count=data.get("agent_retry_count", settings.agent_retry_count),
+        agent_retry_intervals=data.get("agent_retry_intervals", settings.agent_retry_intervals),
         browser_enabled=data.get("browser_enabled", settings.browser_enabled),
         browser_headless=data.get("browser_headless", settings.browser_headless),
     )

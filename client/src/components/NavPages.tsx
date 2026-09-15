@@ -1,13 +1,14 @@
-/** 左侧导航页（v7 对齐 ZCode）：自动化（定时任务）/ 技能 / MCP 管理页。 */
+/** 左侧导航页（v7 对齐 ZCode；plan-248-1258 M4 统一为「自动化」并复用共享创建弹窗）。 */
 import { useCallback, useEffect, useState } from "react";
 import { api, type McpServerOut, type ScheduledTaskOut, type SkillOut } from "../api/client";
-import { useChatStore } from "../store/chat";
 import {
   IconBox, IconCheckSquare, IconClipboard, IconFileText, IconInfo,
   IconPlus, IconRefresh, IconSearch, IconTarget, IconX, IconZap,
-  IconChevronDown, IconDownload,
+  IconDownload,
 } from "./icons";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { ScheduledTaskFormModal, cronToForm, type TaskForm } from "./settings/ScheduledTaskFormModal";
+import { useChatStore } from "../store/chat";
 
 function SwitchRow({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
   return (
@@ -46,15 +47,11 @@ function cronLabel(cron: string): string {
 
 export function ScheduledPage() {
   const [tasks, setTasks] = useState<ScheduledTaskOut[]>([]);
-  const [showCreate, setShowCreate] = useState(false);
-  const [createMenu, setCreateMenu] = useState(false);
+  const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState<ScheduledTaskOut | null>(null);
+  const [initial, setInitial] = useState<Partial<TaskForm> | null>(null);
+  const [busyId, setBusyId] = useState<number | null>(null);
   const [keepAwake, setKeepAwake] = useState(() => localStorage.getItem("chatcoder.keepAwake") === "1");
-  const [form, setForm] = useState<{ name: string; runAt: string; freq: string; weekday: string; prompt: string }>(() => {
-    const d = new Date(Date.now() + 3600000);
-    const pad = (n: number) => String(n).padStart(2, "0");
-    return { name: "", runAt: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`, freq: "daily", weekday: "1", prompt: "" };
-  });
-  const currentSessionId = useChatStore((s) => s.currentSessionId);
 
   const load = useCallback(async () => {
     try { setTasks(await api.listScheduledTasks()); } catch { /* ignore */ }
@@ -67,66 +64,27 @@ export function ScheduledPage() {
     localStorage.setItem("chatcoder.keepAwake", keepAwake ? "1" : "0");
   }, [keepAwake]);
 
-  // 点击外部关闭创建下拉
-  useEffect(() => {
-    if (!createMenu) return;
-    const handler = () => setCreateMenu(false);
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [createMenu]);
-
-  const toCron = (): string | null => {
-    if (!form.runAt) return null;
-    const d = new Date(form.runAt);
-    if (isNaN(d.getTime())) return null;
-    const min = d.getMinutes(), hour = d.getHours(), day = d.getDate(), month = d.getMonth() + 1;
-    switch (form.freq) {
-      case "once": return `${min} ${hour} ${day} ${month} *`;
-      case "daily": return `${min} ${hour} * * *`;
-      case "weekly": return `${min} ${hour} * * ${form.weekday}`;
-      case "monthly": return `${min} ${hour} ${day} * *`;
-      default: return `${min} ${hour} * * *`;
-    }
-  };
-
-  const handleCreate = async () => {
-    if (!currentSessionId || !form.name.trim() || !form.prompt.trim()) return;
-    const cron = toCron();
-    if (!cron) return;
-    try {
-      await api.createScheduledTask({ session_id: currentSessionId, name: form.name.trim(), cron, prompt: form.prompt.trim() });
-      setShowCreate(false);
-      const d = new Date(Date.now() + 3600000);
-      const pad = (n: number) => String(n).padStart(2, "0");
-      setForm((p) => ({ ...p, name: "", prompt: "", runAt: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}` }));
-      load();
-    } catch { /* ignore */ }
-  };
-
-  /** 模板 → 预填表单 */
+  /** 模板 → 打开共享弹窗并预填（plan-248-1258 M4：与设置页同一表单） */
   const applyTemplate = (tpl: { name: string; cron: string; prompt: string }) => {
-    const p = tpl.cron.split(/\s+/);
-    const [min, hour, , , dow] = p;
-    const d = new Date();
-    d.setHours(parseInt(hour, 10) || 9, parseInt(min, 10) || 0, 0, 0);
-    const pad = (n: number) => String(n).padStart(2, "0");
-    setForm({
-      name: tpl.name,
-      prompt: tpl.prompt,
-      runAt: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`,
-      freq: dow === "*" ? "daily" : "weekly",
-      weekday: dow === "*" || dow.includes("-") ? "1" : dow,
-    });
-    setShowCreate(true);
+    const parsed = cronToForm(tpl.cron);
+    setInitial({ name: tpl.name, prompt: tpl.prompt, ...parsed });
+    setEditing(null);
+    setShowForm(true);
+  };
+
+  const runNow = async (t: ScheduledTaskOut) => {
+    setBusyId(t.id);
+    try { await api.runScheduledTask(t.id); await load(); } catch { /* ignore */ }
+    finally { setBusyId(null); }
   };
 
   return (
     <div className="automation-page">
       <h1 className="automation-title">自动化</h1>
-      <p className="automation-sub">创建定时任务，或排队在闲时算力空闲时后台执行。</p>
+      <p className="automation-sub">创建自动化任务，或排队在闲时算力空闲时后台执行。</p>
 
       <div className="automation-card">
-        {tasks.length === 0 && !showCreate && <div className="automation-empty">还没有定时任务</div>}
+        {tasks.length === 0 && <div className="automation-empty">还没有自动化任务</div>}
         {tasks.length > 0 && (
           <div className="automation-list">
             {tasks.map((t) => (
@@ -136,6 +94,8 @@ export function ScheduledPage() {
                   <div className="automation-item-desc">{cronLabel(t.cron)}</div>
                 </div>
                 <div className="automation-item-actions">
+                  <button className="sb-icon-btn" title="立即试跑" disabled={busyId === t.id} onClick={() => void runNow(t)}><IconZap size={13} /></button>
+                  <button className="btn btn-ghost btn-xs" onClick={() => { setEditing(t); setInitial(null); setShowForm(true); }}>编辑</button>
                   <SwitchRow checked={t.enabled} onChange={async (v) => { try { await api.updateScheduledTask(t.id, { enabled: v }); load(); } catch { /* ignore */ } }} />
                   <button className="sb-icon-btn" title="删除" onClick={async () => { try { await api.deleteScheduledTask(t.id); load(); } catch { /* ignore */ } }}><IconX size={13} /></button>
                 </div>
@@ -143,48 +103,10 @@ export function ScheduledPage() {
             ))}
           </div>
         )}
-        {showCreate && (
-          <div className="navpage-form automation-form">
-            <input className="sp-input" placeholder="任务名称" value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} />
-            <label className="sp-label">执行时间</label>
-            <input type="datetime-local" className="sp-input" value={form.runAt} onChange={(e) => setForm((p) => ({ ...p, runAt: e.target.value }))} />
-            <label className="sp-label">重复频率</label>
-            <div className="sp-freq-row">
-              {[["once", "仅一次"], ["daily", "每天"], ["weekly", "每周"], ["monthly", "每月"]].map(([v, l]) => (
-                <button key={v} className={"sp-pill" + (form.freq === v ? " active" : "")} onClick={() => setForm((p) => ({ ...p, freq: v }))}>{l}</button>
-              ))}
-            </div>
-            {form.freq === "weekly" && (
-              <select className="sp-input" value={form.weekday} onChange={(e) => setForm((p) => ({ ...p, weekday: e.target.value }))}>
-                {[["1", "周一"], ["2", "周二"], ["3", "周三"], ["4", "周四"], ["5", "周五"], ["6", "周六"], ["0", "周日"]].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-              </select>
-            )}
-            <label className="sp-label">执行提示词</label>
-            <textarea className="sp-textarea" placeholder="执行提示词…" rows={3} value={form.prompt} onChange={(e) => setForm((p) => ({ ...p, prompt: e.target.value }))} />
-            {!currentSessionId && <div className="automation-hint">需先进入一个会话才能创建任务</div>}
-            <div className="navpage-form-actions">
-              <button className="btn-ghost" onClick={() => setShowCreate(false)}>取消</button>
-              <button className="btn-primary" onClick={handleCreate} disabled={!currentSessionId || !form.name.trim() || !form.prompt.trim()}>创建</button>
-            </div>
-          </div>
-        )}
         <div className="automation-actions">
-          <div className="automation-create-wrap">
-            <button className="automation-btn-primary" onClick={() => setShowCreate((v) => !v)}>
-              创建定时任务
-            </button>
-            <button className="automation-btn-primary automation-btn-caret" onClick={(e) => { e.stopPropagation(); setCreateMenu(!createMenu); }}>
-              <IconChevronDown size={13} />
-            </button>
-            {createMenu && (
-              <div className="context-menu automation-create-menu">
-                {[["once", "仅一次"], ["daily", "每天"], ["weekly", "每周"], ["monthly", "每月"]].map(([v, l]) => (
-                  <div key={v} className="context-menu-item" onClick={() => { setForm((p) => ({ ...p, freq: v })); setShowCreate(true); setCreateMenu(false); }}>{l}</div>
-                ))}
-              </div>
-            )}
-          </div>
-          <button className="automation-btn-ghost" onClick={() => applyTemplate(IDLE_TEMPLATES[0])}>创建闲时任务</button>
+          <button className="automation-btn-primary" onClick={() => { setEditing(null); setInitial(null); setShowForm(true); }}>
+            新建自动化
+          </button>
         </div>
       </div>
 
@@ -205,7 +127,7 @@ export function ScheduledPage() {
         ))}
       </div>
 
-      <div className="automation-section">定时任务模板</div>
+      <div className="automation-section">自动化模板</div>
       <div className="automation-grid">
         {CRON_TEMPLATES.map((t, i) => (
           <button key={`${t.name}-${i}`} className="automation-tpl" onClick={() => applyTemplate(t)}>
@@ -215,6 +137,14 @@ export function ScheduledPage() {
           </button>
         ))}
       </div>
+
+      <ScheduledTaskFormModal
+        open={showForm}
+        editing={editing}
+        initial={initial}
+        onClose={() => { setShowForm(false); setEditing(null); setInitial(null); }}
+        onSaved={() => void load()}
+      />
     </div>
   );
 }

@@ -24,10 +24,22 @@ if TYPE_CHECKING:
 
 def _build_provider(
     api_key: str, base_url: str, model: str, api_format: str = "openai",
-    meta: dict | None = None,
+    meta: dict | None = None, provider=None,
 ) -> ModelProvider:
-    """根据 api_format 构造对应的 Provider 实例。"""
+    """根据 api_format 构造对应的 Provider 实例。
+
+    plan-248-1258 M2.3: 传入 Provider 行即可启用该供应商的代理配置
+    （inherit/global/custom/direct，见 credential_service.resolve_proxy）。
+    """
     api_format = (api_format or "openai").lower()
+    from app.services.credential_service import proxy_disabled, resolve_proxy
+
+    proxy = resolve_proxy(provider) if provider is not None else None
+    # 仅当供应商确有代理语义时才注入（见 OpenAICompatibleProvider.__init__ 说明）
+    _configured = bool(provider is not None and (
+        (getattr(provider, "proxy_mode", None) or "inherit") != "inherit"
+        or (getattr(provider, "proxy_url", None) or "").strip()
+    ))
     if api_format == "ta3":
         from app.models.providers.ta3 import Ta3Provider
 
@@ -40,17 +52,21 @@ def _build_provider(
         from app.models.providers.commandcode import CommandCodeProvider
 
         return CommandCodeProvider(api_key=api_key, base_url=base_url, model=model)
-    return OpenAICompatibleProvider(api_key=api_key, base_url=base_url, model=model)
+    return OpenAICompatibleProvider(
+        api_key=api_key, base_url=base_url, model=model,
+        proxy=proxy, proxy_disabled=proxy_disabled(provider), proxy_configured=_configured,
+    )
 
 
 async def _build_trae_provider(
-    db: AsyncSession, model: "Model | None", provider=None,
+    db: AsyncSession, model: "Model | None", provider=None, credential=None,
 ) -> tuple["ModelProvider | None", str]:
     """构造 TraeProvider：token 实时取自 trae_auth 表（防过期），注入 401 刷新回调。
 
     对齐 workbuddy 模式：Model.api_key 为占位符（"__trae_session__"），
     真实 JWT 每次构造时从 trae_auth 动态加载；meta 携带设备指纹/账号信息
     供业务请求头使用（build_business_headers）。
+    plan-248-1258 M2.2: 传入 credential 时取该凭据关联的账号（多账号）。
     """
     from app.auth.trae import session as trae_session
     from app.core.config import settings as _settings
@@ -64,7 +80,10 @@ async def _build_trae_provider(
 
             provider = await db.get(_Provider, model.provider_id)
     provider_id = provider.id if provider is not None else model.provider_id
-    auth = await trae_session.load_auth(db, provider_id)
+    if credential is not None:
+        auth = await _load_auth_for_credential(db, "trae", provider_id, credential.id)
+    else:
+        auth = await trae_session.load_auth(db, provider_id)
     if auth is None or not auth.access_token:
         return None, "trae_login_required"
 
@@ -125,12 +144,13 @@ async def _build_trae_provider(
 
 
 async def _build_workbuddy_provider(
-    db: AsyncSession, model: "Model | None", provider=None,
+    db: AsyncSession, model: "Model | None", provider=None, credential=None,
 ) -> tuple["ModelProvider | None", str]:
     """构造 WorkBuddyProvider：token 实时取自 auth 表（防过期），注入 401 刷新回调。
 
     workbuddy 模型的 Model.api_key 只是占位符（"__workbuddy_session__"），
     真实 accessToken 每次构造时从 workbuddy_auth 动态加载。
+    plan-248-1258 M2.2: 传入 credential 时取该凭据关联的账号（多账号轮询）。
     """
     from app.auth.workbuddy import session as wb_session
     from app.models.providers.workbuddy import WorkBuddyProvider
@@ -143,7 +163,10 @@ async def _build_workbuddy_provider(
 
             provider = await db.get(_Provider, model.provider_id)
     provider_id = provider.id if provider is not None else model.provider_id
-    auth = await wb_session.load_auth(db, provider_id)
+    if credential is not None:
+        auth = await _load_auth_for_credential(db, "workbuddy", provider_id, credential.id)
+    else:
+        auth = await wb_session.load_auth(db, provider_id)
     if auth is None or not auth.access_token:
         return None, "workbuddy_login_required"
 
@@ -175,6 +198,76 @@ async def _build_workbuddy_provider(
         refresh_token=_refresh,
     )
     return p, "workbuddy_session"
+
+
+def _attach_credential_meta(p: ModelProvider, provider_id: int | None, credential_id: int | None) -> None:
+    """把 provider/credential 归属写到实例上，供 agent_loop 上报成功/失败（轮询用）。"""
+    try:
+        p.provider_row_id = provider_id  # type: ignore[attr-defined]
+        p.credential_row_id = credential_id  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - 属性写入失败不影响主流程
+        pass
+
+
+async def _load_auth_for_credential(db: AsyncSession, api_format: str, provider_id: int,
+                                    credential_id: int | None):
+    """按凭据取 OAuth 登录态行（workbuddy/ta3/trae 多账号）。
+
+    credential_id 为空时回落 provider 级（兼容旧单账号数据）。
+    """
+    from sqlalchemy import select
+
+    if api_format == "workbuddy":
+        from app.persistence.models.workbuddy_auth import WorkBuddyAuth as _Auth
+    elif api_format == "ta3":
+        from app.persistence.models.ta3_auth import Ta3Auth as _Auth
+    elif api_format == "trae":
+        from app.persistence.models.trae_auth import TraeAuth as _Auth
+    else:
+        return None
+    stmt = select(_Auth).where(_Auth.provider_id == provider_id)
+    if credential_id is not None:
+        stmt = stmt.where(_Auth.credential_id == credential_id)
+    else:
+        stmt = stmt.where(_Auth.credential_id.is_(None))
+    res = await db.execute(stmt)
+    row = res.scalars().first()
+    if row is None and credential_id is not None:
+        # 兼容旧安装：provider_credentials 已创建，但旧 auth 行还没有 credential_id。
+        legacy_stmt = select(_Auth).where(
+            _Auth.provider_id == provider_id,
+            _Auth.credential_id.is_(None),
+        )
+        legacy_res = await db.execute(legacy_stmt)
+        row = legacy_res.scalars().first()
+    return row
+
+
+async def _pick_credential(db: AsyncSession, provider, exclude: set[int] | None = None,
+                           db_provider_id: int | None = None):
+    """按轮询序选取可用凭据，返回 (credential | None, api_key | None)。
+
+    - API Key 供应商：直接取凭据的 api_key；
+    - OAuth 供应商（workbuddy/ta3/trae）：以凭据关联的 auth 行 access_token 作为 key；
+    - 无凭据记录时回落 provider.api_key（兼容未迁移/新建未配凭据的情况）。
+    """
+    from app.services import credential_service
+
+    exclude = exclude or set()
+    creds = await credential_service.list_credentials(db, db_provider_id or provider.id)
+    avail = [c for c in credential_service.available_credentials(creds) if c.id not in exclude]
+    fmt = (provider.api_format or "openai").lower()
+    for c in avail:
+        if c.api_key:
+            return c, c.api_key
+        if fmt in ("workbuddy", "ta3", "trae"):
+            auth = await _load_auth_for_credential(db, fmt, provider.id, c.id)
+            if auth is not None and getattr(auth, "access_token", None):
+                return c, auth.access_token
+    if not creds and provider.api_key:
+        # 尚未迁移出凭据：退回旧单 key 行为
+        return None, provider.api_key
+    return None, None
 
 
 class ModelRegistry:
@@ -235,13 +328,30 @@ class ModelRegistry:
             from app.persistence.models.model_reg import Provider
 
             provider = await db.get(Provider, provider_id)
-            if provider and provider.is_active and provider.base_url and provider.api_key:
-                api_format = (provider.api_format or getattr(model, "api_format", "openai") or "openai")
-                return (
-                    _build_provider(api_key=provider.api_key, base_url=provider.base_url, model=model.name, api_format=api_format),
-                    "provider_key",
-                )
-            return None, "provider_incomplete"
+            if provider is None:
+                return None, "provider_incomplete"
+            if not provider.is_active:
+                # plan-248-1258 M2.4: 供应商被禁用即视为模型不可用（前端选择器同步过滤）
+                return None, "provider_disabled"
+            api_format = (provider.api_format or getattr(model, "api_format", "openai") or "openai")
+            chosen, api_key = await _pick_credential(db, provider, exclude=set())
+            # OAuth 类（workbuddy/ta3/trae）：token 由各自 auth 表按凭据动态加载
+            if api_format in ("workbuddy", "trae"):
+                if api_format == "workbuddy":
+                    p, reason = await _build_workbuddy_provider(db, model, provider, chosen)
+                else:
+                    p, reason = await _build_trae_provider(db, model, provider, chosen)
+                if p is not None:
+                    _attach_credential_meta(p, provider.id, chosen.id if chosen else None)
+                return p, reason
+            if not (provider.base_url and api_key):
+                return None, "provider_incomplete"
+            p = _build_provider(
+                api_key=api_key, base_url=provider.base_url, model=model.name,
+                api_format=api_format, provider=provider,
+            )
+            _attach_credential_meta(p, provider.id, chosen.id if chosen else None)
+            return p, ("provider_credential" if chosen else "provider_key")
 
         if model.source_type == ModelSource.BYOK:
             return None, "byok_requires_client"
@@ -257,6 +367,54 @@ class ModelRegistry:
             _build_provider(api_key=api_key, base_url=base_url, model=model_name, api_format=api_format),
             "system_default",
         )
+
+    async def next_provider_for_model(
+        self, db: AsyncSession, model: "Model | None", exclude: set[int]
+    ) -> tuple[ModelProvider | None, str, int | None]:
+        """plan-248-1258 M2.2: 凭据轮询——构造「下一个未尝试凭据」的 Provider。
+
+        返回 (provider, reason, credential_id)。仅对挂在供应商下、配有多凭据的
+        模型有效；model 自带 key / system_default / 无候选时返回 (None, reason, None)，
+        调用方据此结束轮询。
+        """
+        if model is None:
+            return None, "no_model", None
+        provider_id = getattr(model, "provider_id", None)
+        if not provider_id:
+            return None, "no_provider", None
+
+        from app.persistence.models.model_reg import Provider
+
+        provider = await db.get(Provider, provider_id)
+        if provider is None or not provider.is_active:
+            return None, "provider_unavailable", None
+        chosen, api_key = await _pick_credential(db, provider, exclude=exclude)
+        if chosen is None:
+            return None, "no_more_credentials", None
+
+        api_format = (provider.api_format or getattr(model, "api_format", "openai") or "openai")
+        if api_format == "workbuddy":
+            p, reason = await _build_workbuddy_provider(db, model, provider, chosen)
+        elif api_format == "trae":
+            p, reason = await _build_trae_provider(db, model, provider, chosen)
+        elif api_format == "ta3":
+            ta3_meta = getattr(model, "ta3_meta", None) or {}
+            if not (provider.base_url and api_key):
+                return None, "provider_incomplete", None
+            p, reason = _build_provider(
+                api_key=api_key, base_url=provider.base_url, model=model.name,
+                api_format=api_format, meta=ta3_meta, provider=provider,
+            ), "provider_credential"
+        else:
+            if not (provider.base_url and api_key):
+                return None, "provider_incomplete", None
+            p, reason = _build_provider(
+                api_key=api_key, base_url=provider.base_url, model=model.name,
+                api_format=api_format, provider=provider,
+            ), "provider_credential"
+        if p is not None:
+            _attach_credential_meta(p, provider.id, chosen.id)
+        return p, reason, chosen.id
 
     async def get_provider_for_agent(
         self, db: AsyncSession, agent: "Agent"

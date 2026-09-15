@@ -94,6 +94,17 @@ class Settings(BaseSettings):
     # 的长思考模型思考阶段可静默超过 3 分钟，180s 仍会被误杀导致"长思考报错"。
     ta3_stream_idle_timeout: int = 300
     provider_stream_idle_timeout: int = 300
+    # plan-248-1258 M2.2: 供应商凭据（多 Key/多账号）失败后的冷却时长（秒）。
+    # 冷却期内该凭据被轮询跳过，到点自动恢复；避免每次都先撞已挂的 key 再切换。
+    provider_credential_cooldown_seconds: int = 300
+
+    # plan-248-1258 M2.6: WorkBuddy 每日自动签到（打开软件后后台自动签到）。
+    # 默认开启；单测/CI 可关。签到按账号每日一次，失败限次重试。
+    workbuddy_auto_checkin: bool = True
+
+    # plan-248-1258 M3.1: 已开启索引的工作区自动增量更新（后台循环）。
+    # 默认开启；sha1 短路使无变更时几乎零成本。
+    symbol_index_auto_update: bool = True
 
     # v3.0 (plan-88): 计划模式是否允许访问工作区外路径。
     # 默认关闭：plan 模式下 terminal_exec 的 cwd 被限制在工作区内，越界静默回退。
@@ -146,6 +157,13 @@ class Settings(BaseSettings):
     agent_empty_retry_efforts: str = "low,none"
     # v35: 重试间隔（秒）——空响应/瞬时故障重试前等待，避免背靠背重试打爆网关
     agent_retry_interval_seconds: float = 10.0
+    # v45: 统一异常重试策略（任何报错都重试，穷尽后才停止并显示报错）。
+    # - agent_retry_count: 重试次数（0 = 不重试，报错直接停止）
+    # - agent_retry_intervals: 每次重试前的等待秒数序列（逗号分隔）；不足时用最后一个值补齐，
+    #   为空时回退到 agent_retry_interval_seconds。默认 10,20,30 = 第 1/2/3 次重试分别等 10/20/30 秒。
+    # 二者均由设置-常规面板写入（/settings/global）并持久化到 config.json。
+    agent_retry_count: int = 3
+    agent_retry_intervals: str = "10,20,30"
     ta3_kimi_thinking_effort: str = "low"
     # DEPRECATED (plan-838): 思考看门狗已移除——kimi-k3 与 TA3 其它模型统一使用
     # ta3_stream_idle_timeout(300s) 空闲超时，此字段仅保留以兼容旧配置文件，不再被读取。
@@ -292,6 +310,36 @@ class Settings(BaseSettings):
         空项 = 不传 effort（沿用默认思考）；"none" = 关闭 thinking。
         """
         return [t.strip() for t in self.agent_empty_retry_efforts.split(",") if t.strip()]
+
+    @property
+    def agent_retry_interval_list(self) -> list[float]:
+        """v45: 解析统一重试的等待间隔序列（秒）。
+
+        返回长度 = agent_retry_count；序列项不足时用最后一项补齐，
+        序列为空/非法时回退到 agent_retry_interval_seconds（默认 10s）。
+        调用方按下标取第 i 次重试的等待秒数，越界自动取最后一项。
+        """
+        count = max(0, int(self.agent_retry_count or 0))
+        if count == 0:
+            return []
+        parsed: list[float] = []
+        for tok in str(self.agent_retry_intervals or "").split(","):
+            tok = tok.strip()
+            if not tok:
+                continue
+            try:
+                val = float(tok)
+            except (TypeError, ValueError):
+                continue
+            if val >= 0:
+                parsed.append(val)
+        if not parsed:
+            fallback = max(0.0, float(self.agent_retry_interval_seconds or 0.0))
+            parsed = [fallback]
+        # 序列不足按最后一项补齐，保证每次重试都有确定的等待时长
+        while len(parsed) < count:
+            parsed.append(parsed[-1])
+        return parsed[:count]
 
     @property
     def default_model_ready(self) -> bool:

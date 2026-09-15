@@ -1854,6 +1854,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (!_stoppingTurnIds.has(turnId)) void get()._drainQueue();
         break;
       }
+      case "turn.failed": {
+        // v45: 执行失败——必须可视化：写入全局错误横幅 + 复位运行态 + 刷新消息
+        // （后端已补错误消息；此前 failed 与中断共用事件导致静默终止）。
+        const turnId = Number(payload.turn_id);
+        const failReason = String(
+          (payload as { error?: unknown; summary?: unknown }).error
+            ?? (payload as { summary?: unknown }).summary
+            ?? "任务执行失败",
+        );
+        // v2.2: 仅当失败的就是当前运行 turn 才复位运行态（迟到事件同样不串扰）
+        const clearsRunningFail = get().runningTurnId == null || get().runningTurnId === turnId;
+        set((s) => ({
+          error: failReason,
+          turnStatus: null,
+          turns: s.turns.map((t) => (t.id === turnId
+            ? { ...t, status: "failed", summary: t.summary ?? failReason, completed_at: t.completed_at ?? new Date().toISOString() }
+            : t)),
+          ...(clearsRunningFail
+            ? { runningTurnId: null, isRunning: false, streamingBuffers: {}, thinkingBuffers: {} }
+            : {}),
+        }));
+        get().refreshMessages();
+        get().refreshTurns();
+        get().refreshTasks();
+        void get().loadSessionSubagents();
+        // 失败后不自动消费队列（避免连环失败刷屏），用户确认后手动继续。
+        break;
+      }
       case "turn.interrupted": {
         const turnId = Number(payload.turn_id);
         // v2.2: 仅当被中断的就是当前运行 turn 才复位运行态（迟到事件同理不串扰）
@@ -2288,6 +2316,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
     globalWsClient.connect();
     _globalWsUnsub = globalWsClient.on((ev) => {
       const p = ev.payload as Record<string, unknown>;
+      // plan-248-1258 M3.4: 符号索引进度（全局事件，无 session_id）——
+      // 转成 window 事件供索引库页面刷新；不进入会话状态机。
+      if (ev.event === "symbol_index.progress") {
+        try {
+          window.dispatchEvent(new CustomEvent("chatcoder:symbol-index-progress", { detail: p }));
+        } catch { /* ignore */ }
+        return;
+      }
       const sid = Number(p.session_id ?? 0);
       if (!sid) return;
       const event = ev.event as ServerEventName;

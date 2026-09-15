@@ -24,6 +24,7 @@ export type ServerWsEvent =
   | { event: "turn.updated"; payload: { turn_id: number; status: string; session_id?: number } }
   | { event: "turn.completed"; payload: { turn_id: number; summary?: string | null; artifact_ids?: number[]; session_id?: number } }
   | { event: "turn.interrupted"; payload: { turn_id: number; last_message_id?: number | null; session_id?: number } }
+  | { event: "turn.failed"; payload: { turn_id: number; status?: string; summary?: string | null; error?: string | null; session_id?: number } }
   | { event: "turn.rolled_back"; payload: { turn_id: number; rolled_back_msgs?: number; file_recovery?: Record<string, unknown> } }
   | { event: "agent.started"; payload: { agent_id: number; kind?: string; name?: string; turn_id?: number | null } }
   | { event: "agent.updated"; payload: { agent_id: number; status?: string; tool?: string; step?: number } }

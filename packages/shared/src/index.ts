@@ -312,6 +312,8 @@ export interface ModelOut {
   source_type: string;
   has_api_key: boolean;
   reasoning_efforts: string[];
+  /** plan-248-1258 M2.4: 所属供应商启用状态（false 时输入框选择器过滤该模型） */
+  provider_active?: boolean;
   // trae 供应商扩展（源自 trae_meta）
   trae_max_context?: number | null;        // max 档上下文（如 1000000 = 1M）
   trae_consumption_rate?: number | null;   // 积分消耗倍率（max 档更快）
@@ -331,6 +333,32 @@ export interface ProviderOut {
   auth_status?: string | null;
   account_label?: string | null;
   created_at: string | null;
+  /** plan-248-1258 M2.3: 供应商级代理（inherit/global/custom/direct） */
+  proxy_mode?: string;
+  proxy_url?: string | null;
+  /** plan-248-1258 M2.2: 凭据统计（多 Key/多账号） */
+  credential_count?: number;
+  active_credential_count?: number;
+}
+
+/** plan-248-1258 M2.2: 供应商凭据（多 API Key / 多登录账号） */
+export interface ProviderCredentialOut {
+  id: number;
+  provider_id: number;
+  label: string | null;
+  has_api_key: boolean;
+  api_key_preview: string | null;
+  token_ref: string | null;
+  priority: number;
+  is_active: boolean;
+  /** ok | cooldown | error | disabled */
+  status: string;
+  last_error: string | null;
+  cooldown_until: string | null;
+  last_ok_at: string | null;
+  /** workbuddy 等账号积分余额缓存 */
+  credits: number | null;
+  extra: Record<string, unknown> | null;
 }
 
 export interface ScannedModel {
@@ -435,6 +463,7 @@ export type ServerWsEvent =
   | { event: "turn.updated"; payload: { turn_id: number; status: string } }
   | { event: "turn.completed"; payload: { turn_id: number; summary: string | null; artifact_ids: number[] } }
   | { event: "turn.interrupted"; payload: { turn_id: number; last_message_id: number | null } }
+  | { event: "turn.failed"; payload: { turn_id: number; status: string; summary: string | null; error: string | null } }
   | { event: "turn.rolled_back"; payload: { turn_id: number; rolled_back_msgs: number; file_recovery: Record<string, unknown> } }
   | { event: "agent.started"; payload: { agent_id: number; kind: string; name: string; turn_id: number | null } }
   | { event: "agent.updated"; payload: { agent_id: number; status: string; tool?: string; step?: number } }

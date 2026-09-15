@@ -65,14 +65,26 @@ class SymbolSearchTool(Tool):
         if not workspace:
             return ToolResult(ok=False, output="", error="无工作区上下文")
 
-        # 首次/增量建索引（失败不阻塞：退化为空索引 + 提示）
-        try:
-            stats = await self._index_async(workspace)
-            if stats.get("error"):
-                return ToolResult(ok=False, output="", error=f"符号索引失败: {stats['error']}")
-        except Exception as e:
-            return ToolResult(ok=False, output="", error=f"符号索引异常: {e}")
+        # plan-248-1258 M3.3: 尊重「每工作区索引开关」——
+        # 已启用：增量维护后检索；未启用：不自动建库（避免"默认关闭"失效），
+        # 返回可执行的开启指引，让 AI 在会话中告知用户（需求：开启后 AI 能自动识别并使用）。
+        from app.services import symbol_index_manager as sim
 
+        state = await self._state_async(workspace)
+        if not state.get("enabled"):
+            return ToolResult(
+                ok=False, output="",
+                error=(
+                    "该项目尚未开启代码符号索引。请在「设置 → 索引库」中为该工作目录开启索引，"
+                    "开启后即可用 symbol_search/outline 快速定位函数与文件结构。"
+                ),
+                data={"index_enabled": False, "workspace": workspace},
+            )
+
+        # 索引只由独立 worker 维护；主服务只读已有 symbols.db，绝不在请求内启动扫描。
+        state = await self._state_async(workspace)
+        if state.get("status") == "indexing":
+            return ToolResult(ok=True, output="符号索引正在后台建立，请稍后重试；当前请求不会阻塞主服务。", data={"indexing": True})
         hits = await self._search_async(workspace, query, kind=kind, file_glob=file_glob, limit=limit)
 
         if not hits:
@@ -102,6 +114,12 @@ class SymbolSearchTool(Tool):
 
         from app.services import symbol_index_service as sis
         return await asyncio.to_thread(sis.index_workspace, workspace)
+
+    async def _state_async(self, workspace: str) -> dict:
+        import asyncio
+
+        from app.services import symbol_index_manager as sim
+        return await asyncio.to_thread(sim.get_state, workspace)
 
     async def _search_async(self, workspace: str, query: str, **kw):
         import asyncio
@@ -145,10 +163,19 @@ class OutlineTool(Tool):
             return ToolResult(ok=False, output="", error="无工作区上下文")
 
         import asyncio
-        import contextlib
         from pathlib import Path
 
+        from app.services import symbol_index_manager as sim
         from app.services import symbol_index_service as sis
+
+        # plan-248-1258 M3.3: 未开启索引时不自动建库，返回开启指引
+        state = await asyncio.to_thread(sim.get_state, workspace)
+        if not state.get("enabled"):
+            return ToolResult(
+                ok=False, output="",
+                error=("该项目尚未开启代码符号索引。请在「设置 → 索引库」中开启后使用 outline 查看文件结构。"),
+                data={"index_enabled": False},
+            )
 
         # 统一为工作区内相对路径（索引按相对路径存储）
         rel = path
@@ -158,10 +185,7 @@ class OutlineTool(Tool):
         except ValueError:
             rel = path.replace("\\", "/")
 
-        # 文件可能新改动：先做一次增量（仅 stat 校验 + 变化文件重解析）
-        with contextlib.suppress(Exception):
-            await asyncio.to_thread(sis.index_workspace, workspace)
-
+        # 文件变更由独立 worker 的自动增量任务处理；outline 只读取当前快照。
         syms = await asyncio.to_thread(sis.outline_file, workspace, rel)
         if not syms:
             return ToolResult(

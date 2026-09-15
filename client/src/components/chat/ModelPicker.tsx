@@ -53,6 +53,9 @@ export function ModelPicker({
     const map = new Map<string, ModelOut[]>();
     for (const m of models) {
       if (!m.is_active && m.id !== value) continue;
+      // plan-248-1258 M2.4: 供应商被禁用时其模型不进入选择器
+      //（当前选中项保留显示，避免"当前模型突然消失"造成困惑）
+      if (m.provider_active === false && m.id !== value) continue;
       // trae 供应商：TRAE 目录含大量工具/占位模型，客户端实际可用的才展示
       if (m.api_format === "trae" && !m.trae_available) continue;
       const g = m.provider_name || "独立模型";

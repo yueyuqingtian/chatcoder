@@ -22,6 +22,7 @@ import { api } from "../../api/client";
 import { usePanelStore } from "../../store/panel";
 import { useChatStore } from "../../store/chat";
 import { FileBadge, splitFilePath } from "./FileBadge";
+import { ChatCollapse } from "./ChatCollapse";
 import {
   IconFileRead, IconFileWrite, IconFolder, IconGlobe, IconTerminal,
   IconUsers, IconBox, IconZap, IconFlask, IconGitBranch, IconBrain,
@@ -288,9 +289,10 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
           <span className={"tc-chevron" + (expanded ? " open" : "")}><IconChevronRight size={11} /></span>
         ) : null}
       </div>
-      {expanded && (
-        <div className="tc-output">
-          {isWrite && path ? (
+      {expandable ? (
+        <ChatCollapse open={expanded}>
+          <div className="tc-output">
+            {isWrite && path ? (
             <InlineDiff turnId={leaf.turnId} path={path} liveArgContent={leafArgsContent(leaf)} />
           ) : (
             <>
@@ -374,8 +376,9 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
               {leaf.error && <pre className="tc-error-output">{leaf.error}</pre>}
             </>
           )}
-        </div>
-      )}
+          </div>
+        </ChatCollapse>
+      ) : null}
     </div>
   );
 });
@@ -435,11 +438,11 @@ const ActionClusterRow = memo(function ActionClusterRow({ leaves }: { leaves: To
         {!running && failed && <span className="tc-status fail"><IconX size={11} /></span>}
         <span className={"tc-chevron" + (expanded ? " open" : "")}><IconChevronRight size={11} /></span>
       </div>
-      {expanded && (
+      <ChatCollapse open={expanded} className="tc-collapse-explore">
         <div className="tc-explore-detail">
           {leaves.map((leaf, j) => <LeafRow key={j} leaf={leaf} />)}
         </div>
-      )}
+      </ChatCollapse>
     </div>
   );
 });
@@ -471,11 +474,11 @@ const WriteMergedRow = memo(function WriteMergedRow({ leaves }: { leaves: ToolLe
         {!running && failed && <span className="tc-status fail"><IconX size={11} /></span>}
         <span className={"tc-chevron" + (expanded ? " open" : "")}><IconChevronRight size={11} /></span>
       </div>
-      {expanded && (
+      <ChatCollapse open={expanded} className="tc-collapse-explore">
         <div className="tc-explore-detail">
           {leaves.map((leaf, j) => <LeafRow key={j} leaf={leaf} />)}
         </div>
-      )}
+      </ChatCollapse>
     </div>
   );
 });

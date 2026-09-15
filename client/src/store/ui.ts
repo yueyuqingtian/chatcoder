@@ -43,7 +43,11 @@ export interface UiPrefs {
   msgDensity: "comfortable" | "compact";
   /** 界面语言 */
   language: Language;
+  /** plan-248-1258 M5: 动画效果档位——full=标准 reduced=减弱(低配机省性能) off=关闭 */
+  motionLevel: MotionLevel;
 }
+
+export type MotionLevel = "full" | "reduced" | "off";
 
 const STORAGE_KEY = "chatcoder.ui-prefs";
 
@@ -66,6 +70,7 @@ const DEFAULTS: UiPrefs = {
   sidebarFocusColor: "",
   msgDensity: "comfortable",
   language: "zh",
+  motionLevel: "full",
 };
 
 const FONT_OPTIONS: Record<string, string> = {
@@ -141,6 +146,9 @@ export function applyUiVars(p: UiPrefs) {
   if (p.msgDensity === "compact") root.style.setProperty("--flow-gap", "2px");
   else root.style.removeProperty("--flow-gap");
   root.setAttribute("data-lang", p.language);
+  // plan-248-1258 M5: 动画效果档位落到根节点属性，motion.css 据此降级；
+  // 系统 prefers-reduced-motion 与「减弱」等价（在 CSS 侧已分别处理）。
+  root.setAttribute("data-motion", p.motionLevel || "full");
 }
 
 export const FONT_LABELS: Record<string, { zh: string; en: string }> = {

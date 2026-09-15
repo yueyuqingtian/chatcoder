@@ -44,6 +44,37 @@
   min-height: 0; /* grid 子项默认 min-height:auto 会撑开行高，必须复位 */
 }
 
+/* ── plan-248-1258 M1: 消息流内联折叠容器（ChatCollapse 组件专用）──
+ * 与 collapse-grid 同机制但专用类名（避免与既有标记类撞名，见文件头警示），
+ * 曲线用 emphasized-decel（入场顺滑），时长 --dur-3；位移随 --motion-dist 缩放，
+ * 关闭/减弱档下自然退化为瞬时切换。 */
+.tc-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  overflow: hidden;
+  transition:
+    grid-template-rows var(--dur-3) var(--ease-emphasized-decel),
+    opacity var(--dur-2) var(--ease-emphasized-decel);
+}
+.tc-collapse[data-open="true"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+.tc-collapse > .tc-collapse-inner {
+  overflow: hidden;
+  min-height: 0;
+  transform: translateY(calc(-3px * var(--motion-dist)));
+  transition: transform var(--dur-3) var(--ease-emphasized-decel);
+}
+.tc-collapse[data-open="true"] > .tc-collapse-inner {
+  transform: none;
+}
+/* 折叠态停止一切内部动画播放（内容不可见时不做无用功） */
+.tc-collapse[data-open="false"] .tc-collapse-inner * {
+  animation: none !important;
+}
+
 /* ── 全局 reduced-motion 降级 ──
  * 系统"减少动态效果"开启时：终止一切 animation/transition 的时长与位移，
  * 循环动画（spinner/pulse/breath）直接停帧，避免视觉噪声。 */
@@ -56,4 +87,39 @@
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* ═══════════════════════════════════════════════════════════
+ * plan-248-1258 M5: 动画效果三档（设置-外观「动画效果」）
+ *
+ * full（默认）    —— 标准动效，--motion-scale=1
+ * reduced（减弱） —— 时长 ×0.6、位移量 ×0.5，并禁用持续型循环动画
+ *                    （低配机/远程桌面场景降 CPU/GPU 占用）
+ * off（关闭）     —— 时长归零，等价系统"减少动态效果"
+ *
+ * 实现要点：tokens.css 中 --dur-* 已乘 --motion-scale，故改这一个变量
+ * 即整体降速；位移类动画统一引用 --motion-dist 缩放 translate 距离。
+ * ═══════════════════════════════════════════════════════════ */
+:root[data-motion="reduced"] {
+  --motion-scale: 0.6;
+  --motion-dist: 0.5;
+}
+:root[data-motion="off"] {
+  --motion-scale: 0;
+  --motion-dist: 0;
+}
+/* 减弱档：停止呼吸/脉冲/旋转类持续动画（spinner 保留，否则用户无法感知"进行中"） */
+:root[data-motion="reduced"] .anim-breath,
+:root[data-motion="reduced"] .anim-pulse,
+:root[data-motion="reduced"] .text-shine {
+  animation: none !important;
+}
+/* 关闭档：与系统 reduced-motion 同等降级 */
+:root[data-motion="off"] *,
+:root[data-motion="off"] *::before,
+:root[data-motion="off"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
 }

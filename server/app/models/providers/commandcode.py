@@ -31,6 +31,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "https://api.commandcode.ai"
 DEFAULT_VERSION = "0.25.7"
 
+# v45: 输出上限兜底（请求未显式指定且 settings.agent_max_output_tokens=0 时使用）。
+# 不带 max_tokens 时 CommandCode 网关套用自身较小的默认值，推理模型的 thinking 会先耗尽
+# 该预算 —— 实测 finish_reason=length 且正文为空，用户看到"输出达到 token 上限，可能不完整"。
+# 取 32768（主流模型单次输出上限的常见值），既不再被网关小默认值截断，也不会超模型上限被拒。
+DEFAULT_MAX_OUTPUT_TOKENS = 32768
+
 _DEFAULT_TIMEOUT = max(
     300.0,
     float(getattr(settings, "provider_stream_idle_timeout", 180) or 180),
@@ -202,10 +208,13 @@ class CommandCodeProvider(ModelProvider):
             "stream": True,
             "temperature": request.temperature if request.temperature is not None else 0.3,
         }
-        # 不限制输出：未显式配置时不传 max_tokens（旧 8192 兜底会截断长输出），
-        # 由网关/模型自身决定上限。
-        if request.max_tokens:
-            params["max_tokens"] = request.max_tokens
+        # v45: 显式下发充裕的输出上限。
+        # 根因：不带 max_tokens 时网关套用自身较小的默认值（实测 finish_reason=length、
+        # 正文为空）——推理模型的 thinking 会先耗尽该预算，用户看到"输出达到 token 上限，可能不完整"。
+        # 优先用请求显式值；否则用配置 agent_max_output_tokens；都为空时用常量兜底。
+        _max_out = request.max_tokens or settings.agent_max_output_tokens or DEFAULT_MAX_OUTPUT_TOKENS
+        if _max_out and _max_out > 0:
+            params["max_tokens"] = int(_max_out)
         if system_prompt:
             params["system"] = system_prompt
         if tools:

@@ -2,6 +2,7 @@
 from sqlalchemy import (
     Boolean,
     BigInteger,
+    Index,
     Integer,
     JSON,
     Numeric,
@@ -15,7 +16,14 @@ from app.persistence.database import Base
 
 
 class Provider(Base):
-    """v16: 模型供应商 —— 一个供应商(URL+Key)下挂多个模型。"""
+    """v16: 模型供应商 —— 一个供应商(URL+Key)下挂多个模型。
+
+    plan-248-1258 M2.1: 新增凭据化与代理字段：
+    - api_key 保留为「兼容字段 + 轮询兜底」——新逻辑优先读 provider_credentials；
+      迁移时旧 api_key 自动拆入首条凭据，两者并存不破坏既有行为。
+    - proxy_mode / proxy_url：每供应商独立代理（inherit=跟随全局，custom=独立地址，
+      direct=直连绕过代理，global=强制走全局代理）。
+    """
     __tablename__ = "providers"
 
     id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
@@ -28,6 +36,46 @@ class Provider(Base):
     # v23: ta3 供应商登录态（auth_status: pending | logged_in；account_label: 账号显示名）
     auth_status: Mapped[str | None] = mapped_column(String(20))
     account_label: Mapped[str | None] = mapped_column(String(120))
+    # plan-248-1258 M2.3: 供应商级代理
+    proxy_mode: Mapped[str] = mapped_column(String(12), default="inherit")
+    proxy_url: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[str] = mapped_column(server_default=func.now())
+
+
+class ProviderCredential(Base):
+    """plan-248-1258 M2.1: 供应商凭据（多 API Key / 多登录账号）。
+
+    一个供应商可挂多条凭据；请求失败（401/403/429/5xx/连接错误）时按 priority
+    轮询到下一条，实现「一个 key 挂了自动切另一个」。
+    OAuth 类供应商（workbuddy/ta3/trae）的凭据以 token_ref 关联各自 auth 表行，
+    api_key 存占位值；模型调用时按凭据取对应账号的 token。
+    """
+    __tablename__ = "provider_credentials"
+    __table_args__ = (
+        Index("idx_provider_credentials_provider", "provider_id", "priority"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    provider_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # 显示标签：账号昵称 / key 备注（如 "主号"、"备用 key"）
+    label: Mapped[str | None] = mapped_column(String(120))
+    api_key: Mapped[str | None] = mapped_column(String(500))
+    # OAuth 类账号：指向 workbuddy_auth / ta3_auth / trae_auth 的行 id（见各自表 credential_id）
+    token_ref: Mapped[str | None] = mapped_column(String(60))
+    # 轮询优先级（小的先用）
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 运行态：ok | cooldown | error | disabled
+    status: Mapped[str] = mapped_column(String(12), default="ok")
+    last_error: Mapped[str | None] = mapped_column(String(300))
+    # 冷却截止时间（ISO 字符串；status=cooldown 期间跳过该凭据）
+    cooldown_until: Mapped[str | None] = mapped_column(String(40))
+    # 最近一次成功时间（粘性优先依据）
+    last_ok_at: Mapped[str | None] = mapped_column(String(40))
+    # workbuddy 等账号的积分余额缓存（数字，可为小数）
+    credits: Mapped[float | None] = mapped_column(Numeric(12, 2))
+    # 供应商自定义扩展（如 workbuddy 账号 uid / enterpriseId 冗余快照）
+    extra: Mapped[dict | None] = mapped_column(JSON)
     created_at: Mapped[str] = mapped_column(server_default=func.now())
 
 

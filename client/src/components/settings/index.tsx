@@ -16,6 +16,7 @@ import { HooksPanel } from "./HooksPanel";
 import { MemoryPanel } from "./MemoryPanel";
 import { UsagePanel } from "./UsagePanel";
 import { DiagnosticsPanel } from "./DiagnosticsPanel";
+import { IndexLibraryPanel } from "./IndexLibraryPanel";
 import { PluginsPanel } from "./PluginsPanel";
 import { ArchivedPanel } from "./ArchivedPanel";
 import { IconDownload, IconRefresh } from "../icons";
@@ -35,6 +36,7 @@ export type SettingsTab =
   | "models" | "skills" | "subagents" | "mcp" | "rules"
   | "policy"
   | "scheduled" | "hooks" | "memory" | "usage" | "diagnostics" | "plugins" | "about"
+  | "index"
   | "archive";
 
 export interface SettingsIndexItem {
@@ -58,8 +60,9 @@ export const SETTINGS_INDEX: SettingsIndexItem[] = [
   { key: "rules", label: "AI 规则", group: "agent", keywords: "全局规则 项目规则 扫描 命令", icon: <IconBookOpen size={15} /> },
   { key: "hooks", label: "钩子", group: "agent", keywords: "hook 事件 回调", icon: <IconAnchor size={15} /> },
   { key: "policy", label: "执行策略", group: "agent", keywords: "命令 审批 allow deny ask", icon: <IconShield size={15} /> },
-  { key: "scheduled", label: "定时任务", group: "data", keywords: "cron 定时 自动化", icon: <IconCalendar size={15} /> },
+  { key: "scheduled", label: "自动化", group: "data", keywords: "cron 定时 自动化 任务", icon: <IconCalendar size={15} /> },
   { key: "usage", label: "使用统计", group: "data", keywords: "token 用量 统计 context", icon: <IconBarChart size={15} /> },
+  { key: "index", label: "索引库", group: "data", keywords: "索引 符号 codegraph symbol 代码探索", icon: <IconCpu size={15} /> },
   { key: "diagnostics", label: "诊断", group: "data", keywords: "健康检查 系统状态 索引", icon: <IconTool size={15} /> },
   { key: "archive", label: "归档恢复", group: "data", keywords: "归档 恢复 已删除 archived restore", icon: <IconRotateCcw size={15} /> },
   { key: "about", label: "关于", group: "basic", keywords: "版本 信息", icon: <IconInfo size={15} /> },
@@ -239,6 +242,7 @@ function Panel({ tab }: { tab: SettingsTab }) {
     case "memory": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><MemoryPanel /></div></div>;
     case "usage": return <div className="settings-content-inner-wide"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><UsagePanel /></div></div>;
     case "diagnostics": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><DiagnosticsPanel /></div></div>;
+    case "index": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><IndexLibraryPanel /></div></div>;
     case "archive": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><ArchivedPanel /></div></div>;
     case "plugins": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><PluginsPanel /></div></div>;
     case "about": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-card"><AboutPanel /></div></div>;

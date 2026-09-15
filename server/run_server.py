@@ -225,6 +225,14 @@ def _setup_env() -> None:
 def main() -> None:
     try:
         _setup_env()
+        # plan-248-1273 M1: 将实际运行 exe/worker 版本写入 health，避免源码与
+        # v7/win-unpacked 旧产物混用时误判修复未生效。
+        try:
+            exe_stamp = Path(sys.executable).stat().st_mtime_ns
+        except OSError:
+            exe_stamp = 0
+        os.environ.setdefault("CHATCODER_BUILD_REVISION", f"server-exe-{exe_stamp}")
+        os.environ.setdefault("CHATCODER_INDEX_WORKER_MODE", "process")
         import asyncio
 
         import uvicorn

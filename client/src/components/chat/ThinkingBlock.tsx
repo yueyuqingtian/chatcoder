@@ -9,6 +9,7 @@ import { memo, useEffect, useRef, useState } from "react";
 import { IconChevronRight, IconBrain } from "../icons";
 import { ThinkingTicker } from "./ThinkingTicker";
 import { ThinkingExpanded } from "./ThinkingExpanded";
+import { ChatCollapse } from "./ChatCollapse";
 import { useChatStore } from "../../store/chat";
 import { useUiStore } from "../../store/ui";
 
@@ -73,7 +74,9 @@ export const ThinkingBlock = memo(function ThinkingBlock({ text, active, turnId,
           <IconChevronRight size={11} />
         </span>
       </div>
-      {open && <ThinkingExpanded text={displayText} />}
+      <ChatCollapse open={open}>
+        <ThinkingExpanded text={displayText} />
+      </ChatCollapse>
     </div>
   );
 });

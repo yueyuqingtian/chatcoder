@@ -13,6 +13,7 @@ from sqlalchemy import event
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Session
+from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
 
@@ -62,6 +63,9 @@ engine = create_async_engine(
     # 问题3: SQLite 用 pool_pre_ping 无意义（每次取连接多一次 SELECT 1），仅对非 SQLite 启用
     pool_pre_ping=not settings.database_url.startswith("sqlite"),
     connect_args=_connect_args(settings.database_url),
+    # SQLite 读请求必须尽快归还连接；固定 QueuePool 在索引/长请求异常时会耗尽，
+    # 进而让 providers/models 等所有 GET 进入 pending。单写者仍由 WriteEngine 保证。
+    poolclass=NullPool if settings.database_url.startswith("sqlite") else None,
     **_pool_kwargs(settings.database_url),
 )
 

@@ -16,6 +16,8 @@ class TraeAuth(Base):
     id: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
     provider_id: Mapped[int | None] = mapped_column(BigInteger)
+    # plan-248-1258 M2.2: 归属凭据（多账号）；旧行为空，由迁移挂到首条凭据
+    credential_id: Mapped[int | None] = mapped_column(BigInteger)
     access_token: Mapped[str | None] = mapped_column(String(1000))  # JWT
     refresh_token: Mapped[str | None] = mapped_column(String(1000))
     # 设备签名材料（登录时生成，刷新 Token 必须复用同一对密钥/指纹）

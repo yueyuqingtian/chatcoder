@@ -48,6 +48,49 @@ def _is_plan_doc_path(ctx: ToolContext, args: dict) -> bool:
         return False
 
 
+# plan-248-1258 M3.1: 写盘类工具名 → 变更文件路径参数名（多个时按 args.edits[].path）
+_WRITE_TOOLS = {
+    "fs_write": ("path", "file_path", "filepath"),
+    "editor_apply_diff": ("path", "file_path", "filepath"),
+    "multi_file_edit": (),  # 路径在 edits[].path
+    "apply_patch": ("path", "file_path", "filepath"),
+}
+
+
+def _notify_symbol_index(tool_name: str, args: dict, ctx: ToolContext) -> None:
+    """写盘成功 → 通知符号索引失效该文件（已开启索引的工作区会在下一轮自动增量）。
+
+    同步、无异常外抛：索引维护绝不能影响工具结果返回。
+    """
+    workspace = getattr(ctx, "workspace_root", None)
+    if not workspace:
+        return
+    try:
+        if tool_name not in _WRITE_TOOLS:
+            return
+        from app.services import symbol_index_manager as sim
+
+        paths: list[str] = []
+        if tool_name == "multi_file_edit":
+            edits = args.get("edits")
+            if isinstance(edits, list):
+                paths = [str(e.get("path")) for e in edits
+                         if isinstance(e, dict) and e.get("path")]
+        else:
+            for key in _WRITE_TOOLS[tool_name]:
+                v = args.get(key)
+                if isinstance(v, str) and v.strip():
+                    paths.append(v.strip())
+                    break
+        if not paths:
+            sim.notify_file_changed(workspace, None)
+            return
+        for p in paths:
+            sim.notify_file_changed(workspace, p)
+    except Exception:  # noqa: BLE001
+        logger.debug("[symbols] 写盘钩子通知失败(非阻塞)", exc_info=True)
+
+
 class ToolExecutor(ABC):
     @abstractmethod
     async def execute(
@@ -153,6 +196,10 @@ class ServerToolExecutor(ToolExecutor):
             else:
                 _timeout = float(_settings.tool_exec_timeout_sec)
                 result = await asyncio.wait_for(tool.run(args, ctx), timeout=_timeout)
+            # plan-248-1258 M3.1: 写盘类工具成功后通知符号索引（失效该文件 + 标记待增量），
+            # 使已开启索引的工作区在文件变更后自动更新（需求：修改文件时自动更新）。
+            if result.ok:
+                _notify_symbol_index(tool_name, args, ctx)
             return result
         except asyncio.TimeoutError:
             logger.error("工具执行超时 %s", tool_name)

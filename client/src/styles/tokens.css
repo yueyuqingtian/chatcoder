@@ -351,11 +351,11 @@
   /* plan-230-1144 M5.1: 时长阶梯重建（此前的 --dur-med/--dur-normal 同值 0.15s
      语义重复、--dur-slow 0.2s 与 --dur-view 0.16s 差距过小，"慢"动画实际不快）。
      新阶梯：1=微反馈 2=hover/色彩 3=展开/折叠 4=页面/模态 5=入场。 */
-  --dur-1: 80ms;
-  --dur-2: 120ms;
-  --dur-3: 180ms;
-  --dur-4: 240ms;
-  --dur-5: 360ms;
+  --dur-1: calc(80ms * var(--motion-scale));
+  --dur-2: calc(120ms * var(--motion-scale));
+  --dur-3: calc(180ms * var(--motion-scale));
+  --dur-4: calc(240ms * var(--motion-scale));
+  --dur-5: calc(360ms * var(--motion-scale));
   /* 循环动画时长（spinner/pulse/breath 等持续型动效，与交互时长阶梯分列） */
   --dur-spin: 0.8s;
   --dur-spin-fast: 0.7s;
@@ -376,6 +376,19 @@
   --ease-spring: cubic-bezier(0.34, 1.3, 0.44, 1);
   /* 旋转动效专用（收编原散落的 cubic-bezier(0.45,0.15,0.55,0.85)） */
   --ease-spin: cubic-bezier(0.45, 0.15, 0.55, 0.85);
+  /* plan-248-1258 M5: 全局统一缓动组（丝滑基线）。
+     - standard：通用交互（hover/色彩/位移小距离），两端柔化；
+     - emphasized-decel：入场专用（modal/toast/列表项）——起步快、末端长缓停，
+       Material 3 "emphasized decelerate" 同款手感；
+     - emphasized-accel：退场专用（关闭/收起）——起步缓、末端加速离场。 */
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-emphasized-decel: cubic-bezier(0.05, 0.7, 0.1, 1);
+  --ease-emphasized-accel: cubic-bezier(0.3, 0, 0.8, 0.15);
+  /* plan-248-1258 M5: 动画强度系数——由外观设置「动画效果」写入
+     （full=1 / reduced=0.6 / off=0）。所有时长 token 乘该系数即可整体降速，
+     新代码应优先引用 --dur-*（已含系数），避免硬编码时长。 */
+  --motion-scale: 1;
+  --motion-dist: 1;
   /* plan-238-1210: 已删除 --focus-ring（品牌色 sky 方环）——用户要求清理所有蓝色边框装饰；
      键盘可达性改由 focus.css 的中性 outline 承担。 */
 

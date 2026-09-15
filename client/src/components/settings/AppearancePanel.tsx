@@ -1,10 +1,17 @@
 /** 设置中心：外观（v2.2 对齐 zcode 3.18）。
  * 主题模式、毛玻璃效果、布局宽度、字号、左侧面板外观。 */
 import { useThemeStore, type Theme } from "../../store/theme";
-import { useUiStore } from "../../store/ui";
+import { useUiStore, type MotionLevel } from "../../store/ui";
 import { Row, Sw } from "./shared";
 
 const THEMES: Record<Theme, string> = { light: "浅色", dark: "深色" };
+
+/** plan-248-1258 M5: 动画效果三档（低配机可减弱以提升流畅度） */
+const MOTION_LEVELS: Record<MotionLevel, { label: string; desc: string }> = {
+  full: { label: "标准", desc: "完整动效" },
+  reduced: { label: "减弱", desc: "缩短时长、禁用循环动画" },
+  off: { label: "关闭", desc: "瞬时呈现" },
+};
 
 export function AppearancePanel() {
   const { theme, setTheme } = useThemeStore();
@@ -27,6 +34,20 @@ export function AppearancePanel() {
         </Row>
         <Row title="毛玻璃效果" desc="启用窗口与侧边栏半透明磨砂背景">
           <Sw checked={ui.glassmorphism} onChange={(v) => ui.setPrefs({ glassmorphism: v })} />
+        </Row>
+        <Row title="动画效果" desc="低配置设备可选择「减弱」或「关闭」以提升流畅度">
+          <div style={{ display: "flex", gap: 6 }}>
+            {(Object.keys(MOTION_LEVELS) as MotionLevel[]).map((m) => (
+              <button
+                key={m}
+                className={"settings-pill" + ((ui.motionLevel || "full") === m ? " active" : "")}
+                title={MOTION_LEVELS[m].desc}
+                onClick={() => ui.setPrefs({ motionLevel: m })}
+              >
+                {MOTION_LEVELS[m].label}
+              </button>
+            ))}
+          </div>
         </Row>
       </div>
 

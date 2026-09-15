@@ -15,6 +15,8 @@ class WorkBuddyAuth(Base):
     id: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
     provider_id: Mapped[int | None] = mapped_column(BigInteger)
+    # plan-248-1258 M2.2: 归属凭据（多账号）；旧行为空，由迁移挂到首条凭据
+    credential_id: Mapped[int | None] = mapped_column(BigInteger)
     access_token: Mapped[str | None] = mapped_column(String(500))
     refresh_token: Mapped[str | None] = mapped_column(String(500))
     account: Mapped[dict | None] = mapped_column(JSON)

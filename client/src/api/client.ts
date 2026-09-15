@@ -16,6 +16,7 @@ import type {
   ModelOut,
   ProjectOut,
   ProviderOut,
+  ProviderCredentialOut,
   ScannedModel,
   ScheduledMissedPolicy,
   RollbackAffected,
@@ -492,6 +493,17 @@ export const api = {
     name: string; is_active?: boolean; context_window?: number; is_multimodal?: boolean; reasoning_efforts?: string[];
   }>) => post<ModelOut[]>(`/providers/${id}/models`, { models }),
 
+  // ── plan-248-1258 M2.2/M2.3: 供应商凭据（多 Key/多账号）与代理 ──
+  listProviderCredentials: (id: number) => get<ProviderCredentialOut[]>(`/providers/${id}/credentials`),
+  createProviderCredential: (id: number, data: {
+    label?: string; api_key?: string; token_ref?: string; priority?: number; is_active?: boolean;
+  }) => post<ProviderCredentialOut>(`/providers/${id}/credentials`, data),
+  updateProviderCredential: (credentialId: number, data: Record<string, unknown>) =>
+    patch<ProviderCredentialOut>(`/credentials/${credentialId}`, data),
+  deleteProviderCredential: (credentialId: number) => del<{ ok: boolean }>(`/credentials/${credentialId}`),
+  testProviderProxy: (id: number) =>
+    post<{ ok: boolean; latency_ms: number; proxy: string | null; error: string | null }>(`/providers/${id}/proxy-test`, {}),
+
   // ── ta3（Ta+3 牛码）供应商（v23）──
   ta3LoginStart: (id: number) => post<{
     status: string; authorize_url?: string; state?: string; port?: number; expires_in?: number;
@@ -511,6 +523,20 @@ export const api = {
   workbuddyLoginStatus: (id: number) => get<{ status: string; account?: Record<string, unknown> | null; error?: string | null }>(`/providers/${id}/workbuddy/login/status`),
   workbuddyLogout: (id: number) => post<{ ok: boolean }>(`/providers/${id}/workbuddy/logout`, {}),
   workbuddySync: (id: number) => post<{ synced: number; models: Array<{ name: string }> }>(`/providers/${id}/workbuddy/sync`, {}),
+  // plan-248-1258 M2.6: 积分余额查询与 Buddy 加油站签到
+  workbuddyCredits: (id: number, opts?: { credentialId?: number; refresh?: boolean }) => {
+    const qs = new URLSearchParams();
+    if (opts?.credentialId != null) qs.set("credential_id", String(opts.credentialId));
+    if (opts?.refresh) qs.set("refresh", "true");
+    const q = qs.toString();
+    return get<{ credentials: Array<{
+      credential_id: number | null; label: string | null; credits: number | null;
+      account: Record<string, unknown> | null; logged_in: boolean;
+    }> }>(`/providers/${id}/workbuddy/credits${q ? `?${q}` : ""}`);
+  },
+  workbuddyCheckin: (id: number, credentialId?: number) =>
+    post<{ results: Array<{ credential_id: number | null; label?: string | null; status: string; credit?: number | null; credits?: number | null; message?: string | null; error?: string | null }> }>(
+      `/providers/${id}/workbuddy/checkin${credentialId != null ? `?credential_id=${credentialId}` : ""}`, {}),
 
   // ── trae（TRAE SOLO CN）供应商（v25）──
   traeLoginStart: (id: number) => post<{
@@ -536,10 +562,27 @@ export const api = {
       `/diagnostics/symbol-index${workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""}`,
     ),
   symbolIndexRebuild: (workspace?: string) =>
-    post<{ ok: boolean; workspace?: string; files_scanned?: number; files_updated?: number; symbols?: number; elapsed_ms?: number; error?: string }>(
+    post<{ ok: boolean; workspace?: string; submitted?: boolean; status?: string; message?: string; error?: string }>(
       `/diagnostics/symbol-index/rebuild${workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""}`,
       {},
     ),
+
+  // ── plan-248-1258 M3.2/M3.4: 代码符号索引（每工作区开关 + 索引库页面）──
+  symbolIndexWorkspaces: () =>
+    get<{ workspaces: Array<{
+      workspace: string; name: string; enabled: boolean; status: string;
+      files: number; symbols: number; last_updated: number | null;
+      progress: number; error: string | null; exists?: boolean;
+    }> }>("/symbol-index/workspaces"),
+  symbolIndexEnable: (workspace: string) =>
+    post<{ error?: string | null }>("/symbol-index/enable", { workspace }),
+  symbolIndexDisable: (workspace: string) =>
+    post<{ error?: string | null }>("/symbol-index/disable", { workspace }),
+  symbolIndexSearch: (workspace: string, query: string, kind?: string) =>
+    get<{ hits: Array<{
+      file_path: string; kind: string; name: string; qualified_name?: string | null;
+      line_start: number; line_end: number; signature?: string | null;
+    }> }>(`/symbol-index/search?workspace=${encodeURIComponent(workspace)}&query=${encodeURIComponent(query)}${kind ? `&kind=${encodeURIComponent(kind)}` : ""}`),
 
   // ── 技能 ──
   listSkills: (source?: string) =>
@@ -645,7 +688,7 @@ export const api = {
 
 export type {
   ProjectOut, SessionOut, TurnOut, MessageOut, TaskOut, ArtifactOut, ModelOut,
-  ProviderOut, ScannedModel,
+  ProviderOut, ProviderCredentialOut, ScannedModel,
   ExecPolicyRuleOut, HookConfigOut, MemoryEntryOut, ScheduledTaskOut,
   RollbackPreviewFile, RollbackAffected, RollbackPreviewOut, FileChangeOut, FileDiffOut,
 };
@@ -671,6 +714,10 @@ export interface GlobalSettingsOut {
   /** v32 (plan-89): 沙箱模式（workspace-write / read-only / danger-full-access） */
   sandbox_mode: string;
   agent_max_steps?: number;
+  /** v45: 异常自动重试次数（0 = 不重试） */
+  agent_retry_count?: number;
+  /** v45: 每次重试前的等待秒数（逗号分隔，默认 10,20,30） */
+  agent_retry_intervals?: string;
   browser_enabled?: boolean;
   browser_headless?: boolean;
 }
