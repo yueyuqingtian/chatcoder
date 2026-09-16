@@ -113,23 +113,36 @@ async def update_check():
 
 # ── plan-230-1144 M3: 符号索引状态与手动重建 ──
 
+async def _fallback_workspace() -> str | None:
+    """无显式 workspace 时的兜底：项目列表中排序首项。
+
+    list_projects 按 (pinned desc, updated_at desc) 排序，即置顶/最近更新的项目。
+    注意：这只是兜底。前端应始终传当前项目的 workspace——此前诊断页不传参，
+    页面展示的是本项目而非用户当前所在项目（用户反馈：诊断里总是别的项目）。
+    """
+    from app.persistence.database import async_session_factory
+
+    try:
+        async with async_session_factory() as db:
+            projects = await project_service.list_projects(db)
+        if projects:
+            return getattr(projects[0], "path", None) or None
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 @router.get("/diagnostics/symbol-index", response_model=dict)
 async def symbol_index_status(workspace: str | None = None):
-    """符号索引状态：默认返回当前工作区（或首个项目）的文件数/符号数/最后更新时间。"""
+    """符号索引状态。
+
+    workspace 缺省时回退到最近使用的项目（仅兜底）；前端应传当前项目路径。
+    """
     import asyncio
 
-    from app.persistence.database import async_session_factory
     from app.services import symbol_index_service as sis
 
-    ws = workspace
-    if not ws:
-        try:
-            async with async_session_factory() as db:
-                projects = await project_service.list_projects(db)
-            if projects:
-                ws = projects[0].path
-        except Exception:
-            ws = None
+    ws = workspace or await _fallback_workspace()
     if not ws:
         return {"ok": False, "error": "无可用工作区（请传 workspace 或先创建项目）", "available": False}
     stats = await asyncio.to_thread(sis.index_stats, ws)
@@ -144,18 +157,9 @@ async def symbol_index_rebuild(workspace: str | None = None):
     不再在主服务进程内执行文件扫描与 AST 解析。
     进度通过 WS symbol_index.progress 广播，可在索引库页面查看。
     """
-    from app.persistence.database import async_session_factory
     from app.services import symbol_index_manager as sim
 
-    ws = workspace
-    if not ws:
-        try:
-            async with async_session_factory() as db:
-                projects = await project_service.list_projects(db)
-            if projects:
-                ws = projects[0].path
-        except Exception:
-            ws = None
+    ws = workspace or await _fallback_workspace()
     if not ws:
         return {"ok": False, "error": "无可用工作区"}
 

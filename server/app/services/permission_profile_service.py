@@ -178,6 +178,31 @@ def resolve_hint(mode: str) -> str:
     return ""
 
 
+def mcp_allowed_tools(mode: str) -> set[str] | None:
+    """MCP 工具的注入白名单（None = 不限制）。
+
+    MCP 工具名（`mcp_<server>_<tool>`）随用户配置动态变化，无法预先写进
+    内置模式白名单，此前 `_inject_mcp_tools` 因此对它们"无条件注入"——
+    设置页里把某个 MCP 工具排除在白名单外并不生效。现按模式类型分流：
+
+    - 只读/计划类（kind=readonly/plan）：返回 None，低风险过滤由 engine 的
+      `readonly_only` 规则承担（保持既有行为：规划/审阅时仍可用只读类 MCP 工具）；
+    - 显式勾选了工具的模式（tools 非空）：只放行其中列出的 MCP 工具，
+      未勾选即不注入——设置页勾选对 MCP 工具同样生效；
+    - default / accept_edits 等空列表（= 全量工具）：返回 None（全量注入）。
+    """
+    profile = get_profile(mode)
+    if profile is None:
+        return None
+    kind = profile.get("kind") or "full"
+    if kind in ("readonly", "plan"):
+        return None
+    tools = profile.get("tools") or []
+    if not tools:
+        return None  # 空 = 全量
+    return {str(t) for t in tools}
+
+
 def is_readonly_like(mode: str) -> bool:
     """该模式是否属于只读类（MCP 注入只放行只读工具的依据）。"""
     profile = get_profile(mode)

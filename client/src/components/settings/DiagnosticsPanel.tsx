@@ -1,43 +1,17 @@
 /** 设置中心：诊断（v2.2 对齐 zcode 3.18）。系统健康检查 + checkpoint 占用与清理。
- * plan-230-1144 M3: 新增「代码符号索引」区块——索引状态（文件数/符号数/更新时间）
- * 与手动重建入口，让"AI 探索慢"可自查（索引未建时 symbol_search 首次调用会代建）。 */
-import { useCallback, useEffect, useState } from "react";
+ * 代码符号索引的状态/开关/重建已统一收敛到「索引库」页面（本页不再展示，避免两处入口数据口径不一）。 */
+import { useState } from "react";
 import { api } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { IconRefresh, IconWrench } from "../icons";
 
 interface CheckpointStat { workspace: string; file_count: number; size_mb: number; orphan_count: number }
-interface SymbolIndexStat { workspace?: string; available?: boolean; files?: number; symbols?: number; last_updated?: number | null; error?: string }
 
 export function DiagnosticsPanel() {
   const [result, setResult] = useState<Array<{ name: string; ok: boolean; detail?: string }> | null>(null);
   const [checkpoints, setCheckpoints] = useState<CheckpointStat[] | null>(null);
   const [running, setRunning] = useState(false);
   const [cleaning, setCleaning] = useState(false);
-  // plan-230-1144 M3: 符号索引状态
-  const [symIdx, setSymIdx] = useState<SymbolIndexStat | null>(null);
-  const [rebuilding, setRebuilding] = useState(false);
-
-  const loadSymbolIndex = useCallback(async () => {
-    try { setSymIdx(await api.symbolIndexStatus()); }
-    catch (e) { setSymIdx({ error: String(e) }); }
-  }, []);
-  useEffect(() => { void loadSymbolIndex(); }, [loadSymbolIndex]);
-
-  const rebuildIndex = async () => {
-    setRebuilding(true);
-    try {
-      const r = await api.symbolIndexRebuild(symIdx?.workspace);
-      if (r.ok) {
-        // plan-248-1273: 重建已提交到独立 worker 进程，不再同步等待结果
-        useChatStore.setState({ error: r.message || "重建已提交到后台独立进程，可在索引库页面查看进度" });
-      } else {
-        useChatStore.setState({ error: `重建失败：${r.error || "未知错误"}` });
-      }
-      await loadSymbolIndex();
-    } catch (e) { useChatStore.setState({ error: String(e) }); }
-    finally { setRebuilding(false); }
-  };
 
   const run = async () => {
     setRunning(true); setResult(null);
@@ -45,7 +19,6 @@ export function DiagnosticsPanel() {
       const d = await api.runDiagnostics();
       setResult(d.checks);
       setCheckpoints(Array.isArray(d.checkpoints) ? d.checkpoints : null);
-      await loadSymbolIndex();
     } catch (e) { useChatStore.setState({ error: String(e) }); }
     finally { setRunning(false); }
   };
@@ -102,46 +75,6 @@ export function DiagnosticsPanel() {
           </div>
         </>
       )}
-      {/* plan-230-1144 M3 / plan-248-1258 M3.4: 代码符号索引已迁移为独立「索引库」页面
-          （每工作区开关 + 自动增量 + 进度）。此处保留只读摘要与跳转入口。 */}
-      <div className="sb-section-label" style={{ margin: "14px 0 6px" }}>代码符号索引（函数级定位）</div>
-      <div className="settings-resource-list">
-        <div className="settings-resource-item">
-          <div className="settings-resource-info">
-            <div className="settings-resource-name">
-              {symIdx?.workspace || "（未选择工作区）"}
-            </div>
-            <div className="settings-resource-desc">
-              {symIdx == null
-                ? "加载中…"
-                : symIdx.error
-                ? `读取失败：${symIdx.error}`
-                : symIdx.available
-                ? <>
-                    <span>{symIdx.files ?? 0} 文件</span>
-                    <span>·</span>
-                    <span>{symIdx.symbols ?? 0} 符号</span>
-                    {symIdx.last_updated ? (
-                      <>
-                        <span>·</span>
-                        <span>最后更新 {new Date(symIdx.last_updated * 1000).toLocaleString()}</span>
-                      </>
-                    ) : null}
-                  </>
-                : "尚未建立索引"}
-            </div>
-          </div>
-          <button
-            className="btn btn-ghost btn-xs"
-            onClick={() => window.dispatchEvent(new CustomEvent("chatcoder:open-settings", { detail: { tab: "index" } }))}
-          >
-            前往索引库
-          </button>
-          <button className="btn btn-ghost btn-xs" disabled={rebuilding} onClick={() => void rebuildIndex()}>
-            <IconRefresh size={12} /> {rebuilding ? "重建中…" : "重建索引"}
-          </button>
-        </div>
-      </div>
     </div>
   );
 }

@@ -12,7 +12,9 @@
   按方案既定路径降级为正则提取——精度略低但零依赖、可打包、可离线。
 
 存储：workspace 内 `.chatcoder/symbols.db`（SQLite，与 codebase_index.json 并存独立）。
-增量：files 表记录 (mtime, size, sha1)，只重解析变化文件；文件删除同步清理符号。
+增量：files 表记录 (mtime, size, sha1)，mtime+size 未变即零 IO 跳过，只重解析变化文件；
+文件删除同步清理符号（以磁盘 exists() 为准，部分扫描不会误删）。
+容量：默认不设文件数上限（大项目数万源文件全量索引）；仅逐文件 1.5MB 体积阈值跳过超大文件。
 
 对外主要接口（供 symbol_search / outline 工具与诊断面板使用）：
 - `index_workspace(workspace, force=False) -> dict`  建/更新索引，返回统计
@@ -25,8 +27,10 @@ from __future__ import annotations
 import ast
 import hashlib
 import logging
+import os
 import re
 import sqlite3
+import stat
 import time
 from pathlib import Path
 
@@ -47,8 +51,21 @@ _EXCLUDE_DIRS = {
     "dist", "build", ".next", ".nuxt", "target", ".idea", ".vscode",
     ".chatcoder", ".mypy_cache", ".ruff_cache", ".pytest_cache",
 }
-_MAX_FILE_BYTES = 1_500_000  # 超大文件跳过（避免解析卡顿）
-_MAX_FILES = 8000            # 单工作区文件上限（防极端仓库拖垮扫描）
+def _env_int(name: str, default: int) -> int:
+    """读取正整数环境变量（打包 worker 不加载 .env，故用环境变量而非 settings）。"""
+    try:
+        return int(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
+# 文件数上限：默认 0 = 不限制。
+# 大项目动辄数万源文件，硬上限会让部分文件永远进不了索引（此前 8000/20000
+# 上限叠加"删除差集"逻辑，还造成符号被轮转误删）。
+# 如遇极端仓库需要兜底，可设环境变量 CHATCODER_SYMBOL_INDEX_MAX_FILES 为正整数。
+_MAX_FILES = _env_int("CHATCODER_SYMBOL_INDEX_MAX_FILES", 0)
+# 超大单文件跳过（避免解析卡顿）；默认 1.5MB，需要索引生成型大文件时可调大。
+_MAX_FILE_BYTES = _env_int("CHATCODER_SYMBOL_INDEX_MAX_FILE_BYTES", 1_500_000)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS symbols (
@@ -159,34 +176,58 @@ def _extract_python(source: str, rel: str) -> list[dict]:
     return out
 
 
-# 通用语言签名正则：覆盖常见声明形态（捕获组 1/2 = 名字）
+# 通用语言签名正则：覆盖常见声明形态（捕获组 1 = 名字）。
+#
+# ⚠ 性能约定（务必遵守，否则会造成索引进程卡死）：
+# 1) 行内锚定一律用 [ \t] 而非 \s——\s 匹配换行，配合 re.M 会在大文件上退化成
+#    O(n²) 级扫描；
+# 2) 修饰符组不要写成 (?:kw|\s)*：\s 与后续空白类量词重叠会产生指数级回溯；
+# 3) 任何 [^x]* 都必须排除换行 (\) 并加长度上限。反例：旧 java 方法正则里的
+#    \([^;]*\) 会跨行吞掉整个文件去找 ';'——SQL 等含 '(' 但无 ';' 收尾的文件
+#    直接触发灾难性回溯（实测单文件可卡死 10+ 分钟，worker 停在 21% 不动）。
 _GENERIC_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("function", re.compile(r"^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(", re.M)),
-    ("function", re.compile(r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>", re.M)),
-    ("class", re.compile(r"^\s*(?:export\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)", re.M)),
-    ("interface", re.compile(r"^\s*(?:export\s+)?interface\s+([A-Za-z_$][\w$]*)", re.M)),
-    ("type", re.compile(r"^\s*(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\s*=", re.M)),
-    ("enum", re.compile(r"^\s*(?:export\s+)?enum\s+([A-Za-z_$][\w$]*)", re.M)),
-    ("function", re.compile(r"^\s*(?:export\s+)?func\s+(?:\([^)]*\)\s*)?([A-Za-z_][\w]*)", re.M)),          # go
-    ("function", re.compile(r"^\s*(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z_][\w]*)", re.M)),                    # rust
-    ("struct", re.compile(r"^\s*(?:pub\s+)?struct\s+([A-Za-z_][\w]*)", re.M)),                                # rust/c
-    ("enum", re.compile(r"^\s*(?:pub\s+)?enum\s+([A-Za-z_][\w]*)", re.M)),
-    ("class", re.compile(r"^\s*(?:public|private|protected|internal|open|final|abstract|static|\s)*class\s+([A-Za-z_][\w]*)", re.M)),     # java/kotlin/c#
-    ("interface", re.compile(r"^\s*(?:public|private|protected|internal|\s)*interface\s+([A-Za-z_][\w]*)", re.M)),
-    ("function", re.compile(r"^\s*(?:public|private|protected|internal|static|final|override|virtual|\s)*[\w<>\[\],\s]+\s+([A-Za-z_][\w]*)\s*\([^;]*\)\s*\{", re.M)),  # java/c# 方法（保守）
-    ("function", re.compile(r"^\s*func\s+([A-Za-z_][\w]*)", re.M)),
-    ("function", re.compile(r"^\s*def\s+([A-Za-z_][\w!?]*)", re.M)),                                          # ruby
-    ("function", re.compile(r"^\s*(?:public|private|protected|static|\s)*function\s+([A-Za-z_][\w]*)", re.M)), # php
-    ("function", re.compile(r"^\s*(?:pub\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([A-Za-z_][\w]*)", re.M)),
+    ("function", re.compile(r"^[ \t]*(?:export[ \t]+)?(?:async[ \t]+)?function[ \t]+([A-Za-z_$][\w$]*)[ \t]*\(", re.M)),
+    ("function", re.compile(r"^[ \t]*(?:export[ \t]+)?(?:const|let|var)[ \t]+([A-Za-z_$][\w$]*)[ \t]*(?::[^=\n]{0,200})?=[ \t]*(?:async[ \t]*)?(?:\([^)\n]{0,400}\)|[A-Za-z_$][\w$]*)[ \t]*=>", re.M)),
+    ("class", re.compile(r"^[ \t]*(?:export[ \t]+)?(?:abstract[ \t]+)?class[ \t]+([A-Za-z_$][\w$]*)", re.M)),
+    ("interface", re.compile(r"^[ \t]*(?:export[ \t]+)?interface[ \t]+([A-Za-z_$][\w$]*)", re.M)),
+    ("type", re.compile(r"^[ \t]*(?:export[ \t]+)?type[ \t]+([A-Za-z_$][\w$]*)[ \t]*=", re.M)),
+    ("enum", re.compile(r"^[ \t]*(?:export[ \t]+)?enum[ \t]+([A-Za-z_$][\w$]*)", re.M)),
+    ("function", re.compile(r"^[ \t]*(?:export[ \t]+)?func[ \t]+(?:\([^)\n]{0,200}\)[ \t]*)?([A-Za-z_]\w*)", re.M)),          # go
+    ("function", re.compile(r"^[ \t]*(?:pub[ \t]+)?(?:async[ \t]+)?fn[ \t]+([A-Za-z_]\w*)", re.M)),                    # rust
+    ("struct", re.compile(r"^[ \t]*(?:pub[ \t]+)?struct[ \t]+([A-Za-z_]\w*)", re.M)),                                # rust/c
+    ("enum", re.compile(r"^[ \t]*(?:pub[ \t]+)?enum[ \t]+([A-Za-z_]\w*)", re.M)),
+    ("class", re.compile(r"^[ \t]*(?:(?:public|private|protected|internal|open|final|abstract|static)[ \t]+)*class[ \t]+([A-Za-z_]\w*)", re.M)),     # java/kotlin/c#
+    ("interface", re.compile(r"^[ \t]*(?:(?:public|private|protected|internal)[ \t]+)*interface[ \t]+([A-Za-z_]\w*)", re.M)),
+    # java/c# 方法（保守）：返回类型 token 序列 + 名字 + 参数 + '{'；
+    # 参数段排除换行/括号并限长，保证线性回溯。
+    ("function", re.compile(r"^[ \t]*(?:(?:public|private|protected|internal|static|final|override|virtual)[ \t]+)*[\w<>\[\],]+(?:[ \t]+[\w<>\[\],]+)*[ \t]+([A-Za-z_]\w*)[ \t]*\([^;()\n]{0,300}\)[ \t]*\{", re.M)),
+    ("function", re.compile(r"^[ \t]*func[ \t]+([A-Za-z_]\w*)", re.M)),
+    ("function", re.compile(r"^[ \t]*def[ \t]+([A-Za-z_]\w*[!?]?)", re.M)),                                          # ruby
+    ("function", re.compile(r"^[ \t]*(?:(?:public|private|protected|static)[ \t]+)*function[ \t]+([A-Za-z_]\w*)", re.M)), # php
+    ("function", re.compile(r"^[ \t]*(?:pub[ \t]+)?(?:async[ \t]+)?(?:unsafe[ \t]+)?fn[ \t]+([A-Za-z_]\w*)", re.M)),
 ]
 
 
 def _extract_generic(source: str, rel: str) -> list[dict]:
-    """正则签名提取（非 Python）。行号精确到声明行，end 以缩进/大括号粗估。"""
+    """正则签名提取（非 Python）。行号精确到声明行，end 以缩进/大括号粗估。
+
+    性能注意：正则在整份 source 上全量 finditer。之所以不会卡死，靠的是
+    _GENERIC_PATTERNS 的性能约定（[ \\t] 行内锚定、避免空白类重叠、[^x] 排除换行并限长）——
+    Python 无法中断正在执行的正则，所以防线必须建立在正则本身的形态上。
+    此处再加一道整体预算：命中病态输入时放弃剩余模式，保住整个索引任务。
+    """
     lines = source.splitlines()
     out: list[dict] = []
     seen: set[tuple[str, int]] = set()
+    # 单文件总预算：正常文件远低于此值（实测 200KB 源码 <50ms）。
+    # 注意：这只是"兜底"。若某条正则本身发生灾难性回溯，其内部无法被打断，
+    # 真正的防线是 _GENERIC_PATTERNS 的性能约定（切勿写出重叠空白量词/
+    # 跨行的 [^x]*）。本预算能拦截的是"多条正则累计变慢"的场景。
+    deadline = time.monotonic() + 10.0
     for kind, pat in _GENERIC_PATTERNS:
+        if time.monotonic() > deadline:
+            logger.warning("[symbols] %s 正则提取超预算，跳过剩余模式", rel)
+            break
         for m in pat.finditer(source):
             name = (m.group(1) or "").strip()
             if not name or name in ("if", "for", "while", "switch", "catch", "return", "then", "constructor"):
@@ -215,29 +256,53 @@ def _extract_generic(source: str, rel: str) -> list[dict]:
     return out
 
 
-def _iter_source_files(workspace: Path):
-    count = 0
-    for p in workspace.rglob("*"):
-        # rglob/Path stat 也可能长时间占用 GIL（尤其大型 Windows 工作区），
-        # 周期性让出执行权，避免后台索引饿死 HTTP 事件循环。
-        if count and count % 64 == 0:
-            time.sleep(0)
-        if count >= _MAX_FILES:
-            logger.info("[symbols] 文件数超过上限 %s，停止扫描", _MAX_FILES)
-            return
-        try:
-            if not p.is_file():
+class _ScanCancelled(Exception):
+    """内部信号：遍历阶段检测到取消文件（让 disable 立即打断长遍历）。"""
+
+
+def _collect_source_files(workspace: Path, cancel_file: str | None = None,
+                         on_progress=None) -> list[tuple[Path, os.stat_result]]:
+    """os.walk + 目录剪枝收集源码文件（默认不设文件数上限）。
+
+    - 剪枝：排除目录直接从遍历栈移除。此前用 rglob("*") 会走进
+      node_modules/.git 再逐文件丢弃，大型前端仓库每轮扫描白走数十万项；
+    - 取消：每 128 个遍历项检查一次 cancel_file。此前只在逐文件阶段检查，
+      rglob 卡在大目录时 worker 无法退出，最终被 terminate 强杀
+      （Windows 退出码 1，被 manager 误报为 error"worker exited with code 1"）；
+    - stat 结果一并带回：调用方不必对每个文件重复 stat（数万文件时省一轮系统调用）；
+    - 返回列表而非生成器：无上限后需要先知道总量才能给出准确进度（见 index_workspace）。
+    """
+    exts = _PY_EXTS | _GENERIC_EXTS
+    found: list[tuple[Path, os.stat_result]] = []
+    walked = 0
+    for root, dirs, names in os.walk(workspace, onerror=lambda _e: None):
+        dirs[:] = [d for d in dirs if d not in _EXCLUDE_DIRS]
+        if cancel_file:
+            walked += len(dirs) + len(names)
+            if walked >= 128:
+                walked = 0
+                time.sleep(0)  # 让出 GIL，避免长遍历饿死同进程其它协程
+                if Path(cancel_file).exists():
+                    raise _ScanCancelled()
+        for name in names:
+            p = Path(root) / name
+            if p.suffix.lower() not in exts:
                 continue
-            if any(part in _EXCLUDE_DIRS for part in p.parts):
+            try:
+                st = p.stat()
+            except OSError:
                 continue
-            if p.suffix.lower() not in (_PY_EXTS | _GENERIC_EXTS):
+            if not stat.S_ISREG(st.st_mode):  # 跳过目录/设备/断链符号链接
                 continue
-            if p.stat().st_size > _MAX_FILE_BYTES:
+            if st.st_size > _MAX_FILE_BYTES:
                 continue
-        except OSError:
-            continue
-        count += 1
-        yield p
+            found.append((p, st))
+            if _MAX_FILES and len(found) >= _MAX_FILES:
+                logger.info("[symbols] 文件数达到配置上限 %s，停止收集", _MAX_FILES)
+                return found
+            if on_progress and len(found) % 512 == 0:
+                on_progress(len(found))
+    return found
 
 
 # ── 索引主流程 ────────────────────────────────────────────────────────
@@ -259,37 +324,79 @@ def index_workspace(workspace: str | Path, *, force: bool = False,
 
     stats = {"files_scanned": 0, "files_updated": 0, "symbols": 0, "removed_files": 0}
     try:
-        known = {row[0]: row[1] for row in conn.execute("SELECT file_path, sha1 FROM files")}
+        # (sha1, mtime, size)：mtime+size 未变时直接跳过，不再读文件内容算 sha1。
+        # 此前每轮增量（含自动巡检）都把全部文件完整读一遍，
+        # 大仓库仅增量空转就要读上千个文件，是"索引库耗性能"的主要来源。
+        known = {
+            row[0]: (row[1], row[2], row[3])
+            for row in conn.execute("SELECT file_path, sha1, mtime, size FROM files")
+        }
         current: set[str] = set()
 
-        for f in _iter_source_files(ws):
+        def _progress(value: int, **extra) -> None:
+            if not progress_cb:
+                return
+            try:
+                progress_cb(value, **extra)
+            except Exception:
+                logger.debug("[symbols] progress callback failed", exc_info=True)
+
+        # 两段式：先收集（phase=scanning，无上限时无法先验总量，
+        # 只报已收集文件数与前 0-10% 的估算进度），收集完成后知道 total，
+        # 解析阶段（phase=parsing）再报真实百分比（10-95%）。
+        try:
+            files = _collect_source_files(
+                ws, cancel_file=cancel_file,
+                on_progress=lambda n: _progress(
+                    min(10, 1 + n // 500), phase="scanning", files_scanned=n,
+                ),
+            )
+        except _ScanCancelled:
+            conn.rollback()
+            stats["cancelled"] = True
+            stats["progress"] = 0
+            return stats
+
+        total = len(files)
+        stats["files_total"] = total
+        # 收集完成：立即告知总数（此时切 parsing，进度从 10% 起）
+        _progress(10, phase="parsing", files_scanned=0, files_total=total)
+        for f, st in files:
             rel = f.relative_to(ws).as_posix()
             current.add(rel)
             stats["files_scanned"] += 1
-            if cancel_file and Path(cancel_file).exists():
-                conn.rollback()
-                stats["cancelled"] = True
-                stats["progress"] = int(stats["files_scanned"] / max(1, _MAX_FILES) * 100)
-                return stats
-            if progress_cb and stats["files_scanned"] % 32 == 0:
-                try:
-                    progress_cb(min(95, stats["files_scanned"] * 100 // max(1, _MAX_FILES)), files_scanned=stats["files_scanned"])
-                except Exception:
-                    logger.debug("[symbols] progress callback failed", exc_info=True)
+            if stats["files_scanned"] % 32 == 0:
+                _progress(
+                    min(95, 10 + stats["files_scanned"] * 85 // max(1, total)),
+                    phase="parsing", files_scanned=stats["files_scanned"], files_total=total,
+                )
             # 大型仓库的 AST/正则解析在工作线程中运行；周期性让出 GIL，避免
             # Windows 单进程服务的其它 HTTP 协程在全量索引期间长时间得不到调度。
             if stats["files_scanned"] % 4 == 0:
                 time.sleep(0)
+            # 逐文件取消检查降频到 64 个一次（收集阶段已有每 128 项的快速检查）
+            if cancel_file and stats["files_scanned"] % 64 == 0 and Path(cancel_file).exists():
+                conn.rollback()
+                stats["cancelled"] = True
+                stats["progress"] = min(95, 10 + stats["files_scanned"] * 85 // max(1, total))
+                return stats
+            if st.st_size > _MAX_FILE_BYTES:
+                continue
+            rec = known.get(rel)
+            if not force and rec is not None and rec[1] == st.st_mtime and rec[2] == st.st_size:
+                continue  # mtime+size 未变：零 IO 跳过（增量核心）
             try:
-                st = f.stat()
                 raw = f.read_bytes()
             except OSError:
                 continue
-            if st.st_size > _MAX_FILE_BYTES:
-                continue
             sha1 = hashlib.sha1(raw).hexdigest()
-            if not force and known.get(rel) == sha1:
-                continue  # 未变化：跳过重解析（增量核心）
+            if not force and rec is not None and rec[0] == sha1:
+                # mtime 变了但内容未变：只刷新登记（mtime/size），不重解析
+                conn.execute(
+                    "UPDATE files SET mtime = ?, size = ? WHERE file_path = ?",
+                    (st.st_mtime, st.st_size, rel),
+                )
+                continue
 
             source = raw.decode("utf-8", errors="replace")
             if f.suffix.lower() in _PY_EXTS:
@@ -306,17 +413,33 @@ def index_workspace(workspace: str | Path, *, force: bool = False,
                   s["parent_id"], sha1) for s in syms],
             )
             conn.execute(
-                "INSERT OR REPLACE INTO files (file_path, mtime, size, sha1, symbol_count, updated_at)"
+                "INSERT OR REPLACE INTO files"
+                " (file_path, mtime, size, sha1, symbol_count, updated_at)"
                 " VALUES (?,?,?,?,?,?)",
                 (rel, st.st_mtime, st.st_size, sha1, len(syms), time.time()),
             )
             stats["files_updated"] += 1
+            # 分批提交：此前整轮扫描挂在一个大写事务上直到结束才 commit，
+            # 长事务期间其它写入者（并发增量/重建）会 sqlite 超时报
+            # "索引写入失败"；分批提交把写锁窗口从分钟级压到毫秒级。
+            if stats["files_updated"] % 50 == 0:
+                conn.commit()
 
-        # 已删除文件：清理其符号
+        # 已删除文件：清理其符号。
+        # 守卫：以磁盘为准，只清理确实不存在的文件。current 可能因遍历期
+        # OSError/权限、收集阶段被跳过而漏项，直接按差集删除会把"仍存在但
+        # 本轮未扫到"的符号误删（曾表现为"重新开启索引后搜索不到函数"）。
+        removed = 0
         for rel in set(known) - current:
+            try:
+                if (ws / rel).exists():
+                    continue
+            except OSError:
+                continue
             conn.execute("DELETE FROM symbols WHERE file_path = ?", (rel,))
             conn.execute("DELETE FROM files WHERE file_path = ?", (rel,))
-            stats["removed_files"] += 1
+            removed += 1
+        stats["removed_files"] = removed
 
         conn.commit()
         stats["symbols"] = conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]

@@ -22,11 +22,15 @@ if (-not (Test-Path $pyi)) { throw "未找到 PyInstaller,请先 .venv\Scripts\p
 # --clean 必须保留：增量构建在模块列表不变时不会重建 PYZ，会把旧字节码打进 exe
 & $pyi chatcoder-server.spec --noconfirm --clean
 if ($LASTEXITCODE -ne 0) { throw "后端打包失败" }
+& $pyi chatcoder-index-worker.spec --noconfirm --clean
+if ($LASTEXITCODE -ne 0) { throw "索引 worker 打包失败" }
 Pop-Location
 
-# 产物守门：dist 里必须存在刚生成的 exe，防止静默复用旧产物
+# 产物守门：dist 里必须存在刚生成的主后端与索引 worker
 $serverExe = "$root\server\dist\chatcoder-server\chatcoder-server.exe"
+$workerExe = "$root\server\dist\chatcoder-index-worker\chatcoder-index-worker.exe"
 if (-not (Test-Path $serverExe)) { throw "打包产物缺失: $serverExe" }
+if (-not (Test-Path $workerExe)) { throw "索引 worker 产物缺失: $workerExe" }
 $serverExeItem = Get-Item $serverExe
 Write-Host ("后端产物: {0} ({1:N1} MB, {2})" -f $serverExe, ($serverExeItem.Length/1MB), $serverExeItem.LastWriteTime) -ForegroundColor Yellow
 

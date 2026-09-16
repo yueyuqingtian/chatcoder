@@ -107,6 +107,98 @@ def test_incremental_scan_updates_new_symbol(tmp_path):
     assert any(h["name"] == "epsilon" for h in hits)
 
 
+def test_progress_fields_exposed_only_while_indexing(tmp_path):
+    """进度字段（files_scanned/files_total）只在索引进行中暴露，结束后归零。
+
+    前端据此渲染「已扫描 x / 共 y 个文件」；若 ready 后仍残留上轮计数，
+    界面会显示与实际不符的陈旧数字。
+    """
+    ws = _mk_ws(tmp_path)
+    sim._write_state(ws, enabled="1", status="parsing", files_scanned=42,
+                     files_total=100, progress=35)
+    st = sim.get_state(ws)
+    assert st["files_scanned"] == 42
+    assert st["files_total"] == 100
+
+    for done in ("ready", "off", "cancelled", "error"):
+        sim._write_state(ws, status=done, files_scanned=42, files_total=100)
+        st = sim.get_state(ws)
+        assert st["files_scanned"] == 0, done
+        assert st["files_total"] == 0, done
+
+
+def test_worker_reports_files_total_during_parsing(tmp_path):
+    """worker 进入解析阶段时须写入 files_total（前端靠它显示总量）。"""
+    ws = _mk_ws(tmp_path)  # a.py + b.ts
+    state_db = sim._state_db_path(str(ws))  # .chatcoder/index_state.db
+    sim._write_state(ws, enabled="1", status="indexing")  # 模拟已开启（enable 的前置）
+
+    async def _run():
+        await sim._run_index_worker(str(ws))
+        return sim.get_state(ws)
+
+    st = asyncio.get_event_loop().run_until_complete(_run())
+    assert st["status"] == "ready"
+    assert st["files"] == 2
+    # 结束后计数归零（进行中才暴露）
+    assert st["files_total"] == 0
+    # 原始 state_db 里留有总数，证明解析阶段确实写过
+    import sqlite3
+    with sqlite3.connect(state_db) as conn:
+        raw = dict(conn.execute("SELECT key, value FROM index_state"))
+    assert int(raw.get("files_total") or 0) == 2
+
+
+def test_stalled_worker_is_terminated_by_watchdog(tmp_path, monkeypatch):
+    """停滞看门狗：worker 长时间无进度推进时必须被终止并报错。
+
+    针对性防护：正则灾难性回溯会让 worker 空转 CPU（py-spy 抓栈确认）
+    却永不更新状态，此前 UI 会永远停在某个百分比。
+    """
+    import sys
+
+    ws = _mk_ws(tmp_path)
+    sim._write_state(ws, enabled="1", status="indexing")  # 模拟已开启
+    # 假 worker：只 sleep、从不写状态 → 模拟卡死
+    monkeypatch.setattr(
+        sim, "_worker_command",
+        lambda *_a, **_k: [sys.executable, "-c", "import time; time.sleep(600)"],
+    )
+    monkeypatch.setattr(sim, "WORKER_STALL_TIMEOUT_S", 1.0)  # 缩短阈值
+
+    async def _run():
+        return await sim._run_index_worker(str(ws))
+
+    result = asyncio.get_event_loop().run_until_complete(_run())
+    assert result["status"] == "error"
+    assert "无响应" in (result.get("error") or "")
+    # 不得残留 worker 进程登记
+    assert str(ws.resolve()) not in sim._workers
+
+
+def test_disable_during_index_does_not_become_error(tmp_path):
+    """扫描中点「关闭索引」：worker 退出后状态必须是 off，不能误报 error。
+
+    旧逻辑：worker 卡在长遍历中未及时响应取消 → 被 terminate（Windows
+    退出码 1）→ manager 收尾把 off 覆盖成 error "worker exited with code 1"。
+    """
+    ws = _mk_ws(tmp_path)
+
+    async def _run():
+        await sim.enable(str(ws))
+        await asyncio.sleep(0.05)
+        await sim.disable(str(ws))
+        task = sim._index_tasks.get(str(ws.resolve()))
+        if task is not None:
+            await asyncio.wait_for(task, timeout=60)
+        return sim.get_state(ws)
+
+    st = asyncio.get_event_loop().run_until_complete(_run())
+    assert st["enabled"] is False
+    assert st["status"] in ("off", "cancelled", "ready")
+    assert not st["error"]
+
+
 def test_symbol_index_hint_not_enabled():
     from app.orchestration.context_manager import _symbol_index_hint
 

@@ -57,6 +57,29 @@ def _parse_timeout(raw: Any) -> int:
     return max(_MIN_TIMEOUT_SEC, min(val, upper))
 
 
+async def _await_returncode(proc: Any, timeout: float = 5.0) -> int | None:
+    """兜底回收进程退出码（结果组装前调用）。
+
+    竞态现场（2026-09-15 全量回归偶发 1 例）：两个输出泵都已读到 EOF、收敛循环
+    退出时，asyncio 的子进程 watcher 可能还没来得及回填 returncode，于是
+    `returncode == 0` 判等失败——命令输出明明正常（echo 有输出）却被判为
+    「退出码 None」失败。这里在组装结果前显式等待子进程被回收；
+    输出已 EOF 但进程异常残留时最多等 timeout，不做无限等待。
+    """
+    if getattr(proc, "returncode", None) is not None:
+        return proc.returncode
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "[term] 退出码回收超时(输出已 EOF 但进程未回收) pid=%s",
+            getattr(proc, "pid", None),
+        )
+    except Exception:
+        logger.debug("[term] 退出码回收失败(非阻塞)", exc_info=True)
+    return getattr(proc, "returncode", None)
+
+
 class TerminalExecTool(Tool):
     name = "terminal_exec"
     risk_level = "high"
@@ -315,6 +338,10 @@ class TerminalExecTool(Tool):
                     t.cancel()
             await asyncio.gather(out_task, err_task, return_exceptions=True)
 
+        # 输出泵 EOF 不等于 asyncio 已回收到退出码：此处兜底回收，避免 returncode
+        # 停在 None 把成功命令误判为失败（rc=None 的偶发回归现场见 _await_returncode）。
+        rc = await _await_returncode(proc)
+
         out = "".join(out_parts)
         err = "".join(err_parts)
         combined = out
@@ -328,10 +355,10 @@ class TerminalExecTool(Tool):
         logger.info(
             "[term.done] rc=%s elapsed=%.1fs cmd=%r cwd=%s out_len=%s err_len=%s "
             "err_prefix=%s",
-            proc.returncode, time.monotonic() - _t0, command[:300],
+            rc, time.monotonic() - _t0, command[:300],
             resolved_cwd, len(out), len(err), err[:200],
         )
-        data: dict[str, Any] = {"returncode": proc.returncode, "cwd": resolved_cwd, "cmd": command}
+        data: dict[str, Any] = {"returncode": rc, "cwd": resolved_cwd, "cmd": command}
         if allow_outside:
             # 审计标记：放行后实际 cwd 落在工作区外时记录，供回放/审计识别越界访问
             try:
@@ -341,10 +368,10 @@ class TerminalExecTool(Tool):
             if not _inside:
                 data["outside_access"] = True
         return ToolResult(
-            ok=proc.returncode == 0,
+            ok=rc == 0,
             output=combined or "(无输出)",
             data=data,
-            error="" if proc.returncode == 0 else f"退出码 {proc.returncode}",
+            error="" if rc == 0 else f"退出码 {rc}",
         )
 
     def approval_precheck(self, args: dict[str, Any], ctx: ToolContext) -> tuple[bool, str]:

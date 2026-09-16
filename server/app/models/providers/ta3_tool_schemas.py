@@ -80,7 +80,9 @@ _CORE: list[dict] = [
             "endLine": {"type": "number", "description": "结束行号（从1开始的整数），必须大于或等于 startLine。"},
         },
     }),
-    _f("get_file_outline", "提取文件的结构骨架，返回所有 import、class、function、method 的定义及其行号。适用于大文件的全局结构分析。", {
+    _f("get_file_outline", "提取文件的符号骨架，按定义顺序返回 class、function、method 等符号及其行号区间。"
+        "适用于大文件的全局结构分析，先看骨架再用 Read 按行精读。"
+        "索引未开启时按返回提示引导用户开启索引。", {
         "type": "object", "required": ["filepath"],
         "properties": {"filepath": {"type": "string", "description": "要分析的文件路径。可以是相对工作区根目录的路径或工作区内绝对路径。"}},
     }),
@@ -281,15 +283,44 @@ _ASK: list[dict] = [
     }),
 ]
 
+# ── symbol（plan-248-1258 M3.3：当前项目补充——符号索引检索）──
+# 参考项目无对应工具（其 core.ts 只有 get_file_outline 文件骨架），故新增
+# SymbolSearch；伪装名自造（ReadAttachment/MultiFileEdit 先例）。参数键名与真实
+# 工具 symbol_search 一致（query/kind/file_glob/limit），无需 ARGS 适配。
+# 描述与真实语义对齐：query 是符号名字符串检索（非语义向量），索引未开启时
+# 返回开启指引而非自动建库。
+_SYMBOL: list[dict] = [
+    _f("SymbolSearch", "在代码库的项目符号索引中检索符号（函数/方法/类/接口等），返回"
+        "「文件路径:符号名:起止行号 + 签名」，可直接用 Read 按行精读。"
+        "需要定位某个函数/类定义、查找某功能的实现位置时优先使用本工具，"
+        "比 Search 全库文本扫描更快更准。索引未开启时按返回提示引导用户开启。", {
+        "type": "object", "required": ["query"],
+        "properties": {
+            "query": {"type": "string", "description": "符号名（支持部分匹配，如 build_main / Session）"},
+            "kind": {"type": "string",
+                     "description": "可选过滤：function / method / class / interface / type / enum / struct"},
+            "file_glob": {"type": "string", "description": "可选文件过滤，如 *.py、src/**/*.ts"},
+            "limit": {"type": "integer", "description": "返回条数(默认 20，最大 100)"},
+        },
+    }),
+]
+
 TA3_NATIVE_SCHEMAS: dict[str, dict] = {
     s["function"]["name"]: s for s in [
         *_CORE, *_EDIT, *_TASK, *_WEB_SEARCH, *_ATTACHMENT, *_BACKGROUND, *_GOAL, *_ASK, *_MULTI_EDIT,
+        *_SYMBOL,
     ]
 }
 
 
 def disguise_tools(tool_schemas: list[dict]) -> list[dict]:
-    """当前项目工具 schema → ta3 原生 schema（无映射的工具剔除）。"""
+    """当前项目工具 schema → ta3 原生 schema（无映射的工具剔除）。
+
+    例外：MCP 工具（`mcp_<server>_<tool>`）不在静态映射表里，但名字动态、
+    无法预先枚举——统一改名为 ta3 风格伪装名并中文化描述（见 ta3_mcp），
+    不再整体剔除（此前它们被本函数丢弃，ta3 会话完全用不了 MCP）。
+    """
+    from app.models.providers.ta3_mcp import disguise_schema, is_mcp_tool
     from app.models.providers.ta3_tool_aliases import TO_TA3
 
     out: list[dict] = []
@@ -298,6 +329,8 @@ def disguise_tools(tool_schemas: list[dict]) -> list[dict]:
         real_name = function.get("name") or ""
         alias = TO_TA3.get(real_name)
         if alias is None:
+            if is_mcp_tool(real_name):
+                out.append(disguise_schema(schema))
             continue
         native = TA3_NATIVE_SCHEMAS.get(alias)
         if native is None:

@@ -28,10 +28,19 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# 自动增量扫描间隔（秒）；sha1 短路使空转成本极低
-AUTO_SCAN_INTERVAL = 30
+# 自动增量巡检间隔（秒）。
+# 仅兑底外部编辑器改动；应用内写盘由 notify_file_changed 标脏后
+# 2 秒防抖立即增量，不受此间隔影响。
+# 曾为 30：打包环境下 worker 是 onefile exe，每个开启的工作区每 30s
+# 都要解压启动一次进程（多工作区时每分钟 6+ 次进程创建），是
+# "索引库耗性能"的另一大来源；mtime 短路后单次成本已极低，拉长间隔。
+AUTO_SCAN_INTERVAL = 600
 # 写盘后延迟立即增量（避免连续写入期间反复扫描）
 DIRTY_DEBOUNCE_S = 2.0
+# worker 停滞阈值（秒）：进度长期不推进即判定卡死并终止。
+# 阈值取 180s：正常大仓库解析单文件是毫秒级、每 32 个文件必出新进度；
+# 真有病态输入（如正则灾难性回溯）时，宁可有界失败也不让 UI 无限卡住。
+WORKER_STALL_TIMEOUT_S = 180.0
 # plan-248-1273: 启动后延迟再开始自动增量，避免与应用启动请求风暴叠加
 STARTUP_DELAY_S = 30
 
@@ -135,15 +144,21 @@ def get_state(workspace: str | Path) -> dict:
     ws = _norm(workspace)
     s = _read_state(ws)
     enabled = s.get("enabled") == "1"
+    status = s.get("status") or ("ready" if enabled else "off")
+    # 进行中的实时计数（UI 展示“已扫描 x / 共 y 个文件”）；非索引期间归零，
+    # 避免完成/关闭后残留上轮扫描计数。
+    in_progress = status in ("queued", "scanning", "parsing")
     return {
         "workspace": ws,
         "enabled": enabled,
-        "status": s.get("status") or ("ready" if enabled else "off"),
+        "status": status,
         "files": int(s.get("files") or 0),
         "symbols": int(s.get("symbols") or 0),
         "last_updated": float(s["last_updated"]) if s.get("last_updated") else None,
         "progress": int(s.get("progress") or 0),
         "error": s.get("error") or None,
+        "files_scanned": int(s.get("files_scanned") or 0) if in_progress else 0,
+        "files_total": int(s.get("files_total") or 0) if in_progress else 0,
     }
 
 
@@ -182,7 +197,8 @@ async def _run_index_worker(ws: str, *, rebuild: bool = False) -> dict:
     job_id = uuid.uuid4().hex[:12]
     cancel_file = state_db.with_name(f"index-cancel-{job_id}")
     log_file = state_db.with_name(f"index-worker-{job_id}.log")
-    _write_state(ws, status="queued", progress=0, error="", worker_pid="", job_id=job_id)
+    _write_state(ws, status="queued", progress=0, error="", worker_pid="", job_id=job_id,
+                 files_scanned=0, files_total=0)
     await _broadcast(ws, {"workspace": ws, "status": "queued", "progress": 0, "job_id": job_id})
     process = None
     log_handle = None
@@ -198,25 +214,56 @@ async def _run_index_worker(ws: str, *, rebuild: bool = False) -> dict:
         _workers[ws] = process
         _worker_jobs[ws] = {"pid": process.pid, "job_id": job_id, "log": str(log_file), "cancel_file": str(cancel_file)}
         _write_state(ws, status="scanning", worker_pid=process.pid, job_id=job_id)
+        # 停滞看门狗：进度长时间不推进即判定 worker 卡死（如正则灾难性回溯），
+        # 终止它并报明确错误，避免 UI 永远停在某个百分比。正常大仓库单文件
+        # 解析是毫秒级、每 32 个文件必出新进度，该阈值留足余量。
+        last_marker: tuple | None = None
+        last_change_at = time.monotonic()
         while process.returncode is None:
             await asyncio.sleep(0.35)
             state = get_state(ws)
             await _broadcast(ws, {"workspace": ws, "status": state["status"], "progress": state["progress"],
-                                  "files": state["files"], "symbols": state["symbols"], "job_id": job_id})
+                                  "files": state["files"], "symbols": state["symbols"],
+                                  "files_scanned": state["files_scanned"],
+                                  "files_total": state["files_total"],
+                                  "job_id": job_id})
+            marker = (state["status"], state["progress"], state["files_scanned"], state["files_total"])
+            if marker != last_marker:
+                last_marker = marker
+                last_change_at = time.monotonic()
+            elif time.monotonic() - last_change_at > WORKER_STALL_TIMEOUT_S:
+                logger.warning("[symbols] worker 停滞 %ss（status=%s progress=%s scanned=%s），判定卡死并终止 ws=%s",
+                               WORKER_STALL_TIMEOUT_S, state["status"], state["progress"],
+                               state["files_scanned"], ws)
+                _write_state(ws, status="error",
+                             error=(f"索引进程无响应（停滞超过 {int(WORKER_STALL_TIMEOUT_S)}s），"
+                                    "已自动终止；可重试或排除超大文件"),
+                             worker_pid="")
+                with contextlib.suppress(ProcessLookupError, OSError):
+                    process.terminate()
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(process.wait(), timeout=3.0)
+                if process.returncode is None:
+                    with contextlib.suppress(ProcessLookupError, OSError):
+                        process.kill()
+                break
         await process.wait()
         state = get_state(ws)
-        if not state["enabled"]:
-            _write_state(ws, status="off", progress=state["progress"], worker_pid="")
-            state = get_state(ws)
-        if process.returncode == 0 and state["status"] not in ("error", "cancelled", "off"):
+        became_ready = (
+            process.returncode == 0 and state["enabled"]
+            and state["status"] not in ("error", "cancelled")
+        )
+        if became_ready:
             _write_state(ws, status="ready", progress=100, worker_pid="")
-            state = get_state(ws)
-        elif process.returncode == 2:
-            _write_state(ws, status="cancelled", worker_pid="")
-            state = get_state(ws)
-        elif state["status"] != "error":
+        elif process.returncode == 2 or not state["enabled"]:
+            # 主动取消 / 关闭索引：仍开启→cancelled；已关闭→off。
+            # 此前任何非零退出码都会把 off/cancelled 覆盖成 error——
+            # 大仓库扫描中点"关闭索引"时 worker 被 terminate（Windows 退出码 1），
+            # 页面从此一直显示「异常 worker exited with code 1」。
+            _write_state(ws, status="cancelled" if state["enabled"] else "off", worker_pid="")
+        elif state["status"] not in ("error", "cancelled", "off"):
             _write_state(ws, status="error", error=f"worker exited with code {process.returncode}", worker_pid="")
-            state = get_state(ws)
+        state = get_state(ws)
         await _broadcast(ws, {"workspace": ws, **state, "job_id": job_id})
         return {"ok": state["status"] == "ready", **state}
     except Exception as e:  # noqa: BLE001
@@ -241,7 +288,8 @@ async def _run_index(ws: str, *, rebuild: bool = False) -> dict:
 async def enable(workspace: str) -> dict:
     """开启工作区索引（后台执行）；幂等。"""
     ws = _norm(workspace)
-    _write_state(ws, enabled="1", status="indexing", progress=0, error="")
+    _write_state(ws, enabled="1", status="indexing", progress=0, error="",
+                 files_scanned=0, files_total=0)
     _registry[ws] = get_state(ws)
     running = _index_tasks.get(ws)
     if running is None or running.done():
@@ -251,10 +299,13 @@ async def enable(workspace: str) -> dict:
 
 
 async def _cancel_worker(ws: str, process: asyncio.subprocess.Process, cancel_file: str) -> None:
+    """取消 worker：先发取消文件（worker 遍历/逐文件阶段都会检查，会主动退出），
+    宽限 5s 后才 terminate。宽限过短时大目录遍历中的 worker 会被强杀
+    （Windows 退出码 1），导致 manager 把状态误报为 error。"""
     with contextlib.suppress(OSError):
         Path(cancel_file).touch()
     try:
-        await asyncio.wait_for(process.wait(), timeout=3.0)
+        await asyncio.wait_for(process.wait(), timeout=5.0)
     except asyncio.TimeoutError:
         with contextlib.suppress(ProcessLookupError, OSError):
             process.terminate()
@@ -307,7 +358,8 @@ async def rebuild(workspace: str) -> dict:
     running = _index_tasks.get(ws)
     if running is not None and not running.done():
         return get_state(ws)
-    _write_state(ws, enabled="1", status="indexing", progress=0, error="")
+    _write_state(ws, enabled="1", status="indexing", progress=0, error="",
+                 files_scanned=0, files_total=0)
     task = asyncio.create_task(_run_index_guarded(ws, rebuild=True))
     _index_tasks[ws] = task
     return get_state(ws)

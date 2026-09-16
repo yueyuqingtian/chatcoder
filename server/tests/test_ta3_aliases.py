@@ -25,6 +25,10 @@ def test_direct_mappings():
     # plan-238-1191: 多文件批量编辑补映射（此前缺映射被伪装层剔除，ta3 会话里
     # 模型失去批量编辑工具、历史调用被降级为"结果已略"文本导致工作流中断）
     assert TO_TA3["multi_file_edit"] == "MultiFileEdit"
+    # plan-248-1258 M3.3: 符号索引工具补映射（此前缺映射被伪装层剔除，系统提示词
+    # 却仍引导模型优先用 symbol_search/outline，引导落空、索引能力闲置）
+    assert TO_TA3["symbol_search"] == "SymbolSearch"
+    assert TO_TA3["outline"] == "get_file_outline"
 
 
 def test_reverse_mapping_is_consistent():
@@ -41,7 +45,6 @@ def test_disguise_tools_drops_unmapped():
         # 无映射工具 → 剔除
         {"type": "function", "function": {"name": "web_fetch", "parameters": {}}},
         {"type": "function", "function": {"name": "collect_results", "parameters": {}}},
-        {"type": "function", "function": {"name": "mcp_something", "parameters": {}}},
     ]
     out = disguise_tools(schemas)
     names = [s["function"]["name"] for s in out]
@@ -49,6 +52,26 @@ def test_disguise_tools_drops_unmapped():
     # 原生 schema 中文 description 完整还原
     assert out[0]["function"]["description"].startswith("读取工作区内指定文件内容")
     assert out[2]["function"]["description"].startswith("向用户发起结构化提问")
+
+
+def test_disguise_tools_keeps_mcp_tools():
+    """MCP 工具不再被剔除（plan-230-1144 M1.3 Phase 2）——改为 ta3 风格伪装名。
+
+    此前 mcp_* 在本用例里属于"应被剔除"，ta3 会话因此完全看不到 MCP 工具；
+    现按 ta3_mcp 改名为 PascalCase 伪装名并中文化描述，明细见 test_ta3_mcp.py。
+    """
+    schemas = [
+        {"type": "function", "function": {"name": "mcp_something", "parameters": {}}},
+        {"type": "function", "function": {"name": "mcp_codegraph_codegraph_explore",
+                                          "description": "Explore.\n[MCP Server: codegraph, Tool: codegraph_explore]",
+                                          "parameters": {"type": "object",
+                                                         "properties": {"query": {"type": "string"}}}}},
+    ]
+    out = disguise_tools(schemas)
+    assert [s["function"]["name"] for s in out] == [
+        "McpSomething", "McpCodegraphCodegraphExplore",
+    ]
+    assert "codegraph" in out[1]["function"]["description"]
 
 
 def test_disguise_tools_keeps_attachment_tools():
@@ -317,3 +340,70 @@ def test_disguise_tools_keeps_bg_tools():
     out = disguise_tools(schemas)
     names = [s["function"]["name"] for s in out]
     assert names == ["BashStatus", "BashKill"]
+
+
+# ───────────────── plan-248-1258 M3.3: 符号索引工具伪装 ─────────────────
+
+
+def test_symbol_tools_mappings():
+    """symbol_search / outline → SymbolSearch / get_file_outline 伪装映射。"""
+    assert TO_TA3["symbol_search"] == "SymbolSearch"
+    assert TO_TA3["outline"] == "get_file_outline"
+    assert FROM_TA3["SymbolSearch"] == "symbol_search"
+    assert FROM_TA3["get_file_outline"] == "outline"
+
+
+def test_symbol_tools_args_roundtrip():
+    """symbol_search 参数键名一致透传；outline 的 path ↔ filepath 双向转换。"""
+    search_args = {"query": "build_main", "kind": "function", "file_glob": "*.py", "limit": 10}
+    assert disguise_args("symbol_search", search_args) == search_args
+    assert restore_args("SymbolSearch", search_args) == search_args
+
+    outline_args = {"filepath": "server/app/main.py"}
+    assert disguise_args("outline", {"path": "server/app/main.py"}) == outline_args
+    assert restore_args("get_file_outline", outline_args) == {"path": "server/app/main.py"}
+
+
+def test_disguise_tools_keeps_symbol_tools():
+    """两个符号索引工具伪装后保留（不再被伪装层剔除）。"""
+    schemas = [
+        {"type": "function", "function": {"name": "symbol_search", "parameters": {}}},
+        {"type": "function", "function": {"name": "outline", "parameters": {}}},
+    ]
+    out = disguise_tools(schemas)
+    assert [s["function"]["name"] for s in out] == ["SymbolSearch", "get_file_outline"]
+    props = TA3_NATIVE_SCHEMAS["SymbolSearch"]["function"]["parameters"]["properties"]
+    assert {"query", "kind", "file_glob", "limit"} <= set(props)
+    outline_props = TA3_NATIVE_SCHEMAS["get_file_outline"]["function"]["parameters"]["properties"]
+    assert "filepath" in outline_props
+    # plan-609 同口径：描述不得超出真实能力——索引未开启时返开启指引，不自动建库
+    assert "自动建索引" not in TA3_NATIVE_SCHEMAS["SymbolSearch"]["function"]["description"]
+    # 骨架工具不产出 import，描述不得声明
+    assert "import" not in TA3_NATIVE_SCHEMAS["get_file_outline"]["function"]["description"]
+
+
+def test_symbol_tools_disguise_message_roundtrip():
+    """出站伪装 + 入站还原：两个符号索引工具名与参数均正确转换。"""
+    from app.models.providers.ta3 import Ta3Provider
+    from app.models.schemas import ChatMessage
+
+    provider = Ta3Provider(api_key="llm-x", base_url="https://x", model="m")
+    m = ChatMessage(role="assistant", content=None, tool_calls=[
+        {"id": "c1", "name": "symbol_search", "arguments": {"query": "SymbolSearchTool", "limit": 5}},
+        {"id": "c2", "name": "outline", "arguments": {"path": "server/app/main.py"}},
+    ])
+    out = provider._disguise_message(m)
+    assert out["tool_calls"][0]["function"]["name"] == "SymbolSearch"
+    assert json.loads(out["tool_calls"][0]["function"]["arguments"]) == {"query": "SymbolSearchTool", "limit": 5}
+    assert out["tool_calls"][1]["function"]["name"] == "get_file_outline"
+    assert json.loads(out["tool_calls"][1]["function"]["arguments"]) == {"filepath": "server/app/main.py"}
+    assert "不可用" not in (out.get("content") or "")
+
+    calls = provider._restore_tool_calls([
+        {"id": "1", "name": "SymbolSearch", "arguments": {"query": "outline", "limit": 5}},
+        {"id": "2", "name": "get_file_outline", "arguments": {"filepath": "main.cjs"}},
+    ])
+    assert calls[0]["name"] == "symbol_search"
+    assert calls[0]["arguments"] == {"query": "outline", "limit": 5}
+    assert calls[1]["name"] == "outline"
+    assert calls[1]["arguments"] == {"path": "main.cjs"}

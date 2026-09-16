@@ -5,7 +5,8 @@
  * 项目→会话两级列表（会话行带相对时间）
  * 底部用户条（设置 + 更新徽标）
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { ProjectOut, SessionOut } from "../api/client";
 import { api } from "../api/client";
 import { useChatStore } from "../store/chat";
@@ -37,13 +38,25 @@ const STORAGE_KEY_COLLAPSED_PROJECTS = "chatcoder:collapsed-projects";
 
 /** 更新徽标：主进程发现新版本时在设置按钮右侧出现。
  * available 点击开始下载 → downloading 显示环形进度 → downloaded 显示「更新」按钮；
- * hover 弹出该版本 changelog（plan-246-1236 S4）。 */
+ * hover 弹出该版本 changelog（plan-246-1236 S4）。
+ *
+ * changelog 弹窗用 Portal + fixed 定位：此前是侧栏内绝对定位，
+ * 被 .sidebar 的 overflow:hidden 裁剪、且绘制层级低于右侧面板，
+ * 表现为弹窗被中间面板遮挡/只露出一条。 */
 function UpdateBadge({ collapsed = false }: { collapsed?: boolean }) {
   const { t } = useI18n();
   const status = useUpdaterStore((s) => s.status);
   const downloadUpdate = useUpdaterStore((s) => s.downloadUpdate);
   const installUpdate = useUpdaterStore((s) => s.installUpdate);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const closeTimer = useRef<number | null>(null);
+  const [anchor, setAnchor] = useState<{ left: number; bottom: number } | null>(null);
   const visible = status.state === "available" || status.state === "downloading" || status.state === "downloaded";
+
+  useEffect(() => () => {
+    if (closeTimer.current) window.clearTimeout(closeTimer.current);
+  }, []);
+
   if (!visible) return null;
 
   const version = "version" in status ? status.version : "";
@@ -52,14 +65,36 @@ function UpdateBadge({ collapsed = false }: { collapsed?: boolean }) {
   const percent = status.state === "downloading" ? (status.percent ?? 0) : 0;
   const ring = 2 * Math.PI * 7;
 
-  const popover = showNotes ? (
-    <div className="sb-update-notes" role="tooltip">
-      <div className="sb-update-notes-ver">{version ? `v${version}` : t("sidebar.restart")}</div>
+  const openNotes = () => {
+    if (!showNotes) return;
+    if (closeTimer.current) { window.clearTimeout(closeTimer.current); closeTimer.current = null; }
+    const rect = wrapRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    // 从侧栏右缘向右弹出、底部与按钮对齐（向上生长）；右侧空间不足时向左收
+    const width = 340;
+    const left = Math.max(8, Math.min(rect.right + 10, window.innerWidth - width - 12));
+    setAnchor({ left, bottom: Math.max(8, window.innerHeight - rect.bottom) });
+  };
+  const scheduleClose = () => {
+    if (closeTimer.current) window.clearTimeout(closeTimer.current);
+    closeTimer.current = window.setTimeout(() => { setAnchor(null); closeTimer.current = null; }, 160);
+  };
+
+  const popover = showNotes && anchor ? createPortal(
+    <div className="sb-update-notes" role="tooltip" style={{ left: anchor.left, bottom: anchor.bottom }}>
+      <div className="sb-update-notes-head">
+        <span className="sb-update-notes-badge">NEW</span>
+        <span className="sb-update-notes-ver">{version ? `v${version}` : ""}</span>
+        <span className="sb-update-notes-label">{t("sidebar.update_notes")}</span>
+      </div>
       {notes
-        ? <div className="sb-update-notes-body"><MarkdownContent>{notes}</MarkdownContent></div>
+        ? <div className="sb-update-notes-body release-notes"><MarkdownContent>{notes}</MarkdownContent></div>
         : <div className="sb-update-notes-empty">{t("sidebar.update_notes_empty")}</div>}
-    </div>
+    </div>,
+    document.body,
   ) : null;
+
+  const notesHoverProps = { ref: wrapRef, onMouseEnter: openNotes, onMouseLeave: scheduleClose };
 
   if (status.state === "downloading") {
     return (
@@ -86,7 +121,7 @@ function UpdateBadge({ collapsed = false }: { collapsed?: boolean }) {
   }
   if (status.state === "downloaded") {
     return (
-      <div className="sb-update-wrap">
+      <div className="sb-update-wrap" {...notesHoverProps}>
         <button
           className="sb-update-restart"
           title={t("sidebar.restart_update_tip", { version: version ?? "" })}
@@ -100,7 +135,7 @@ function UpdateBadge({ collapsed = false }: { collapsed?: boolean }) {
     );
   }
   return (
-    <div className="sb-update-wrap">
+    <div className="sb-update-wrap" {...notesHoverProps}>
       <button
         className="sb-update-btn"
         title={t("sidebar.download_update_tip", { version: version ?? "" })}

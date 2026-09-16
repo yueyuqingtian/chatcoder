@@ -42,6 +42,7 @@ const DICT: Dict = {
   "sidebar.history_back":         ["后退", "Back"],
   "sidebar.history_forward":      ["前进", "Forward"],
   "sidebar.restart":              ["更新", "Update"],
+  "sidebar.update_notes":         ["更新内容", "What's New"],
   "sidebar.update_notes_empty":   ["暂无更新说明", "No release notes"],
   "sidebar.download_update_tip":  ["发现新版本 v{version}，点击下载", "Version v{version} available. Click to download"],
   "sidebar.downloading_update":   ["正在下载更新 {percent}%", "Downloading update {percent}%"],

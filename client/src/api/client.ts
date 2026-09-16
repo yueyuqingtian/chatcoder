@@ -557,6 +557,8 @@ export const api = {
       `/diagnostics/checkpoints/cleanup${workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""}`,
     ),
   // ── plan-230-1144 M3: 符号索引状态 / 手动重建 ──
+  /** 单工作区索引摘要。注：设置页已不再展示索引摘要（统一收敛到「索引库」），
+   * 本封装保留供诊断/排障脚本等调用；界面请用 symbolIndexWorkspaces。 */
   symbolIndexStatus: (workspace?: string) =>
     get<{ ok: boolean; workspace?: string; available?: boolean; files?: number; symbols?: number; last_updated?: number | null; error?: string }>(
       `/diagnostics/symbol-index${workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""}`,
@@ -573,6 +575,8 @@ export const api = {
       workspace: string; name: string; enabled: boolean; status: string;
       files: number; symbols: number; last_updated: number | null;
       progress: number; error: string | null; exists?: boolean;
+      /** 进行中的实时计数（仅索引中非 0） */
+      files_scanned?: number; files_total?: number;
     }> }>("/symbol-index/workspaces"),
   symbolIndexEnable: (workspace: string) =>
     post<{ error?: string | null }>("/symbol-index/enable", { workspace }),

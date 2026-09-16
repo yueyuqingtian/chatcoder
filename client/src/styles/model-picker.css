@@ -171,13 +171,36 @@
 .idx-item-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .idx-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-3); flex-shrink: 0; }
 .idx-dot.ready { background: var(--success); }
-.idx-dot.indexing { background: var(--accent, var(--color-sky-500)); animation: pulse var(--dur-loop) var(--ease-in-out) infinite; }
+.idx-dot.indexing, .idx-dot.queued, .idx-dot.scanning, .idx-dot.parsing {
+  background: var(--accent, var(--color-sky-500));
+  animation: pulse var(--dur-loop) var(--ease-in-out) infinite;
+}
+.idx-dot.cancelled { background: var(--warning, #d9a05b); }
 .idx-dot.error { background: var(--error); }
 .idx-dot.off { background: var(--text-3); opacity: 0.4; }
 .idx-badge { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: var(--bg-hover); color: var(--text-3); }
 .idx-badge.ready { background: color-mix(in oklab, var(--success) 16%, transparent); color: var(--success); }
-.idx-badge.indexing { background: color-mix(in oklab, var(--color-sky-500) 16%, transparent); color: var(--color-sky-600); }
+.idx-badge.indexing, .idx-badge.queued, .idx-badge.scanning, .idx-badge.parsing {
+  background: color-mix(in oklab, var(--color-sky-500) 16%, transparent);
+  color: var(--color-sky-600);
+}
+.idx-badge.cancelled { background: color-mix(in oklab, var(--warning, #d9a05b) 18%, transparent); color: var(--warning, #d9a05b); }
 .idx-badge.error { background: color-mix(in oklab, var(--error) 16%, transparent); color: var(--error); }
+
+/* 索引进度：进度条 + 已扫描/总文件数（进行中状态独立成行，不吃 desc 的 flex-wrap） */
+.idx-progress { display: flex; flex-direction: column; gap: 4px; margin-top: 5px; width: 100%; }
+.idx-progress-bar {
+  height: 4px; width: 100%; border-radius: 2px;
+  background: color-mix(in oklab, var(--color-sky-500) 16%, transparent);
+  overflow: hidden;
+}
+.idx-progress-fill {
+  height: 100%; border-radius: 2px;
+  background: var(--accent, var(--color-sky-500));
+  transition: width var(--dur-fast) var(--ease-out, linear);
+}
+.idx-progress-meta { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-3); }
+.idx-progress-pct { color: var(--color-sky-600); font-weight: 600; font-variant-numeric: tabular-nums; }
 
 .idx-search { margin-top: 18px; }
 .idx-search-title { font-size: 12px; font-weight: 600; color: var(--text-2); margin-bottom: 8px; }

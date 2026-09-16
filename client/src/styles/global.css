@@ -259,27 +259,29 @@ a { color: var(--accent); text-decoration: none; }
 .sb-update-restart:hover { background: #268c47; }
 .sb-update-restart svg { display: block; }
 .sidebar.collapsed .sb-update-restart { padding: 0; width: 26px; border-radius: var(--r-sm); }
+/* plan-246-1236 S4 / 重构: 更新 changelog 悬浮卡。
+ * Portal 渲染到 body + fixed 定位（坐标由 UpdateBadge 按按钮 rect 计算）：
+ * 此前是侧栏内绝对定位，被 .sidebar 的 overflow:hidden 裁剪、
+ * 且绘制层级低于右侧面板，表现为弹窗被中间面板遮挡。显隐由 React hover 态驱动。 */
 .sb-update-notes {
-  display: none;
-  position: absolute;
-  left: 0; bottom: calc(100% + 8px);
-  width: 320px; max-width: min(320px, 70vw);
-  max-height: 360px;
-  padding: 10px 12px;
+  position: fixed;
+  width: 340px; max-width: min(340px, calc(100vw - 16px));
   border-radius: var(--r-md);
   background: var(--color-popover);
   border: 1px solid var(--border);
   box-shadow: var(--shadow-lg);
-  z-index: 80;
+  z-index: 1200;
   pointer-events: none;
   overflow: hidden;
+  animation: sb-notes-in var(--dur-fast) var(--ease-out);
 }
-.sb-update-wrap:hover .sb-update-notes { display: block; }
-.sb-update-notes-ver { font-size: 12px; font-weight: 600; color: var(--text-1); margin-bottom: 6px; }
-.sb-update-notes-body { font-size: 12px; color: var(--text-2); max-height: 300px; overflow: hidden; }
-.sb-update-notes-body h1, .sb-update-notes-body h2, .sb-update-notes-body h3 { font-size: 12px; margin: 6px 0 4px; }
-.sb-update-notes-body ul, .sb-update-notes-body ol { padding-left: 16px; margin: 4px 0; }
-.sb-update-notes-empty { font-size: 12px; color: var(--text-3); }
+@keyframes sb-notes-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.sb-update-notes-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px 8px; border-bottom: 1px solid var(--border); background: var(--bg-elevated); }
+.sb-update-notes-badge { font-size: 9px; font-weight: 700; letter-spacing: 0.08em; color: #fff; background: var(--accent); border-radius: 4px; padding: 2px 5px; line-height: 1.2; }
+.sb-update-notes-ver { font-size: 13px; font-weight: 700; color: var(--text-1); }
+.sb-update-notes-label { margin-left: auto; font-size: 11px; color: var(--text-3); }
+.sb-update-notes-body { max-height: 320px; overflow-y: auto; padding: 10px 14px 12px; }
+.sb-update-notes-empty { padding: 14px; font-size: 12px; color: var(--text-3); }
 .sidebar.collapsed .sb-user-settings { justify-content: center; padding: 0; }
 .sb-user { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .sb-avatar { width: 24px; height: 24px; border-radius: 50%; background: linear-gradient(135deg, #d9a05b, #b4622d); color: #fff; font-size: 11px; font-weight: 600; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
@@ -3664,5 +3666,33 @@ body.panel-dragging .app-pane { transition: none; }
 .upd-history-date { font-size: 11px; font-weight: 400; color: var(--text-3); }
 .upd-history-notes { margin-top: 4px; font-size: 12px; color: var(--text-2); max-height: 200px; overflow-y: auto; }
 /* 升级后首启"本次更新"弹窗 */
-.whatsnew-body { max-height: 60vh; overflow-y: auto; padding-right: 4px; display: flex; flex-direction: column; gap: 14px; }
-.whatsnew-ver { font-size: 13px; font-weight: 600; color: var(--text-1); border-bottom: 1px solid var(--border); padding-bottom: 4px; margin-bottom: 4px; }
+.whatsnew-body { max-height: 60vh; overflow-y: auto; padding: 2px 4px 2px 2px; display: flex; flex-direction: column; gap: 12px; }
+/* 升级后首启「本次更新」卡片：左侧强调边 + 版本胶囊，替代原先仅靠
+ * 分隔线的素排版（此前看起来像缺了样式）。 */
+.whatsnew-item { border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: var(--r-md); padding: 12px 14px 10px; background: var(--bg-elevated); }
+.whatsnew-ver { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.whatsnew-ver-badge { font-size: 12px; font-weight: 700; color: var(--text-1); background: var(--bg-hover); border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px; line-height: 1.4; }
+.whatsnew-date { font-size: 11px; color: var(--text-3); }
+
+/* ── 发布说明 Markdown 排版（.release-notes）──
+ * .md-body 的元素级样式此前全部挂在聊天作用域（.turn-agent-text 等）下，
+ * 更新弹窗/更新历史/设置页直接复用 MarkdownContent 时标题、列表全是
+ * 浏览器默认样式（表现为“像缺失了样式”）。统一用本作用域补齐排版。 */
+.release-notes { font-size: 12.5px; line-height: 1.65; color: var(--text-2); }
+.release-notes .md-p { margin: 0.5em 0; }
+.release-notes .md-h1, .release-notes .md-h2, .release-notes .md-h3,
+.release-notes .md-h4, .release-notes .md-h5, .release-notes .md-h6 { font-size: 1.06em; font-weight: 600; color: var(--text-1); margin: 0.9em 0 0.35em; }
+.release-notes .md-p:first-child, .release-notes .md-h1:first-child,
+.release-notes .md-h2:first-child, .release-notes .md-h3:first-child { margin-top: 0; }
+.release-notes .md-ul, .release-notes .md-ol { margin: 0.35em 0; padding-left: 1.5em; }
+.release-notes .md-li { margin: 2px 0; }
+.release-notes .md-li::marker { color: var(--accent); }
+.release-notes .md-strong { color: var(--text-1); font-weight: 600; }
+.release-notes .md-inline-code { font-family: var(--font-mono); font-size: 0.9em; background: var(--bg-hover); border-radius: var(--r-xs); padding: 1px 5px; color: var(--info); }
+.release-notes .md-a { color: var(--info); }
+.release-notes .md-a:hover { text-decoration: underline; }
+.release-notes .md-blockquote { margin: 0.5em 0; padding: 2px 10px; border-left: 3px solid var(--border-strong); color: var(--text-3); background: var(--bg-hover); border-radius: 0 var(--r-xs) var(--r-xs) 0; }
+.release-notes .md-hr { border: none; border-top: 1px solid var(--border); margin: 0.8em 0; }
+.release-notes .md-code-block { margin: 0.5em 0; border: 1px solid var(--border); border-radius: var(--r-sm); overflow: hidden; }
+.release-notes .md-code-pre { margin: 0; padding: 8px 10px; overflow-x: auto; background: var(--bg-hover); font-size: 11.5px; }
+.release-notes .md-img { max-width: 100%; border-radius: var(--r-sm); }

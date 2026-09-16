@@ -30,10 +30,10 @@ export function WhatsNewModal() {
     >
       <div className="whatsnew-body">
         {(pending || []).map((r, i) => (
-          <div key={`${r.version}-${i}`}>
+          <div key={`${r.version}-${i}`} className="whatsnew-item release-notes">
             <div className="whatsnew-ver">
-              {r.version ? `v${r.version}` : "更新说明"}
-              {r.date && <span className="upd-history-date" style={{ marginLeft: 8 }}>{new Date(r.date).toLocaleDateString()}</span>}
+              <span className="whatsnew-ver-badge">{r.version ? `v${r.version}` : "更新说明"}</span>
+              {r.date && <span className="whatsnew-date">{new Date(r.date).toLocaleDateString()}</span>}
             </div>
             <MarkdownContent>{r.notes || "(无说明)"}</MarkdownContent>
           </div>

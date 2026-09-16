@@ -12,7 +12,10 @@ Set-Location $root
 
 $src = "$root\server\dist\chatcoder-server"
 $srcExe = "$src\chatcoder-server.exe"
+$workerSrc = "$root\server\dist\chatcoder-index-worker"
+$workerExe = "$workerSrc\chatcoder-index-worker.exe"
 if (-not (Test-Path $srcExe)) { throw "未找到打包产物 $srcExe，请先执行打包（build:backend 或 build-release.ps1）" }
+if (-not (Test-Path $workerExe)) { throw "未找到索引 worker $workerExe，请先执行打包" }
 
 # 1. 运行中的服务会锁住部署目录文件且继续跑旧代码，必须先停才能部署
 $conn = Get-NetTCPConnection -LocalPort 12973 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -30,6 +33,8 @@ if ($conn) {
 Write-Host "部署 $src -> $TargetDir" -ForegroundColor Cyan
 New-Item -ItemType Directory -Force -Path $TargetDir | Out-Null
 Copy-Item "$src\*" $TargetDir -Recurse -Force
+# worker 放在主 exe 同级目录，主服务按 frozen 路径查找
+Copy-Item "$workerSrc\*" $TargetDir -Recurse -Force
 
 # 3. 哈希验证：运行目录的 exe 必须与 dist 产物完全一致，防止"部署了旧版"再次发生
 $srcHash = (Get-FileHash $srcExe -Algorithm SHA256).Hash

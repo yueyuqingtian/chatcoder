@@ -244,6 +244,7 @@ _MODE_HINTS = {
 
 async def _inject_mcp_tools(
     db, agent, tool_schemas: list, turn_id: int, *, readonly_only: bool = False,
+    allowed: set[str] | None = None,
 ) -> int:
     """主 turn 路径 MCP 工具注入（plan-230-1144 M1.3）。
 
@@ -254,7 +255,9 @@ async def _inject_mcp_tools(
       LLM 报 "Tool names must be unique" HTTP 400）；
     - 全局 registry 缺失时才注册，使 executor 可执行；
     - readonly_only=True（只读/计划模式）时仅注入 low 风险（只读类）MCP 工具，
-      让 codegraph 这类检索工具在规划/审阅时同样可用；写类 MCP 仍不暴露。
+      让 codegraph 这类检索工具在规划/审阅时同样可用；写类 MCP 仍不暴露；
+    - allowed 非 None 时只注入其中列出的 MCP 工具（设置页白名单勾选对 MCP 生效，
+      由 permission_profile_service.mcp_allowed_tools 计算；None = 不限制）。
 
     失败不阻塞（返回 0）。返回实际注入数量。
     """
@@ -265,6 +268,8 @@ async def _inject_mcp_tools(
         if not mcp_servers:
             return 0
         _mcp_tools = build_mcp_tools_for_agent(mcp_servers)
+        if allowed is not None:
+            _mcp_tools = [t for t in _mcp_tools if t.name in allowed]
         if readonly_only:
             _mcp_tools = [t for t in _mcp_tools if getattr(t, "risk_level", "medium") == "low"]
         existing = {str(s.get("function", {}).get("name") or "") for s in tool_schemas}
@@ -621,8 +626,13 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             _mode_whitelist = _READONLY_TOOLS if mode == "readonly" else (_PLAN_TOOLS if mode == "plan" else None)
         _available_tools = {t.name for t in tool_registry.for_agent(_mode_whitelist)}
         if selected_model is not None and getattr(selected_model, "api_format", "") == "ta3":
+            from app.models.providers.ta3_mcp import is_mcp_tool
             from app.models.providers.ta3_tool_aliases import TO_TA3
-            _available_tools = {n for n in _available_tools if n in TO_TA3}
+            # MCP 工具名（mcp_<server>_<tool>）动态生成、不在静态映射表内，单独放行——
+            # 它们经 ta3_mcp 改名为 ta3 风格伪装名后照常下发给模型。
+            _available_tools = {
+                n for n in _available_tools if n in TO_TA3 or is_mcp_tool(n)
+            }
         _type_states = await load_subagent_type_states(db)
         _allow_subagents = bool(_type_states.get("explore", True) or _type_states.get("general", True))
         # plan-644: plan 模式收集本会话此前各轮计划需求全集并注入（多轮迭代
@@ -689,6 +699,8 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                 mode or "default", {t.name for t in tool_registry.all()},
             )
             _mode_readonly = _pps.is_readonly_like(mode or "default") and not _full_access
+            # 设置页白名单勾选对 MCP 工具同样生效（None = 不限制，见服务层口径说明）
+            _mcp_allowed = _pps.mcp_allowed_tools(mode or "default")
         except Exception:
             logger.debug("[engine] turn=%s 权限配置解析失败，回退硬编码", turn_id, exc_info=True)
             _schema_whitelist = (
@@ -696,6 +708,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                 else (_PLAN_TOOLS if mode == "plan" else None)
             )
             _mode_readonly = mode in ("readonly", "plan")
+            _mcp_allowed = None
         if _full_access:
             tool_schemas = tool_registry.all_schemas()
         else:
@@ -703,6 +716,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         await _inject_mcp_tools(
             db, main_agent, tool_schemas, turn_id,
             readonly_only=_mode_readonly,
+            allowed=_mcp_allowed,
         )
         # v38 (plan-482): 系统不再预拆分子任务，是否分步由主代理 todo_write 自主决定。
         # v20: 把 spawn_subagent/collect_results 暴露给主代理——

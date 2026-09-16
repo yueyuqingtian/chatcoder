@@ -69,11 +69,40 @@ class TraeProvider(ModelProvider):
         self._meta = meta or {}
         # 401 时调用（async 无参）→ 返回新 token；由 registry 注入（依赖 DB 会话）
         self._refresh_token = refresh_token
-        self._client = httpx.AsyncClient(
+        self._client = self._make_client()
+
+    def _make_client(self) -> httpx.AsyncClient:
+        """新建本会话的 httpx 客户端（保持与 CLI 一致的压缩协商）。"""
+        return httpx.AsyncClient(
             timeout=httpx.Timeout(connect=10.0, write=10.0, read=_STREAM_IDLE_TIMEOUT_S, pool=10.0),
             headers={"Accept-Encoding": "gzip, deflate"},
             follow_redirects=False,
         )
+
+    def _ensure_client(self) -> httpx.AsyncClient:
+        """取本次请求的 httpx 客户端；已关闭则按需重建（provider 实例可能被复用）。"""
+        client = self._client
+        if client is None or getattr(client, "is_closed", False):
+            client = self._make_client()
+            self._client = client
+        return client
+
+    async def _close_client(self) -> None:
+        """关闭本次请求的 httpx 客户端（连同其 keep-alive 连接池）。
+
+        会话隔离要点：每个会话各持一条到 TRAE 网关的长连接；此前只关响应、不关
+        client，keep-alive 连接会一直挂着——远端按账号维度限制并发流时，残留连接
+        会占住槽位，表现为「另一会话的新流拿到 200 却长时间收不到任何 chunk」
+        （2026-09-15 现场：另一会话的流空转 2 分钟后被远端掐断，降级非流式才恢复）。
+        关闭失败不阻塞（非关键路径）。
+        """
+        client = self._client
+        if client is None:
+            return
+        try:
+            await client.aclose()
+        except Exception:
+            logger.debug("[trae] 关闭 httpx 客户端失败(非阻塞)", exc_info=True)
 
     # ─────────────────────────── 请求体 ───────────────────────────
 
@@ -392,7 +421,8 @@ class TraeProvider(ModelProvider):
         while True:
             headers = build_business_headers(self._token, self._meta)
             try:
-                async with self._client.stream("POST", url, json=body, headers=headers) as resp:
+                client = self._ensure_client()
+                async with client.stream("POST", url, json=body, headers=headers) as resp:
                     if resp.status_code == 401 and attempt < 1 and await self._try_refresh_token():
                         attempt += 1
                         continue
@@ -455,6 +485,18 @@ class TraeProvider(ModelProvider):
         }
 
     async def _stream_llm(self, request: ChatRequest) -> AsyncIterator[dict]:
+        """公开入口薄包装：请求结束后（正常/异常/取消）关闭本次 httpx 客户端。
+
+        并发会话隔离——两个会话各自持一条长连接，用完即关，不让残留 keep-alive
+        连接占住远端按账号维度的并发槽（2026-09-15 实测现场见 _close_client 注释）。
+        """
+        try:
+            async for event in self._stream_llm_inner(request):
+                yield event
+        finally:
+            await self._close_client()
+
+    async def _stream_llm_inner(self, request: ChatRequest) -> AsyncIterator[dict]:
         """按已知额度选择通道：IDE 有余量走 utility，否则自动走 Work 主对话。
 
         llm_utils_chat 消费 IDE 额度，create_agent_task 消费 Work 额度；

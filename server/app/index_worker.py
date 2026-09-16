@@ -31,8 +31,11 @@ def _state_conn(path: str) -> sqlite3.Connection:
 
 
 def _write_state(path: str, **values: object) -> None:
+    conn = _state_conn(path)
+    if conn is None:
+        return
     try:
-        with _state_conn(path) as conn:
+        with conn:
             conn.executemany(
                 "INSERT INTO index_state(key,value) VALUES (?,?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -40,6 +43,8 @@ def _write_state(path: str, **values: object) -> None:
             )
     except sqlite3.Error:
         logging.getLogger(__name__).debug("worker state write failed", exc_info=True)
+    finally:
+        conn.close()
 
 
 def _cancelled(path: str | None) -> bool:
@@ -68,10 +73,19 @@ def run(args: argparse.Namespace) -> int:
     logger = logging.getLogger("chatcoder.index_worker")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     started = time.time()
-    _write_state(args.state_db, status="scanning", progress=0, error="", worker_pid=os.getpid(), job_id=args.job_id)
+    # 清零上轮残留计数：scanning 属进行中状态，不清零会让前端瞬时显示上一轮的
+    # “已扫描 x / 共 y”（尤其从 ready 再次重建时）。
+    _write_state(args.state_db, status="scanning", progress=1, error="",
+                 files_scanned=0, files_total=0,
+                 worker_pid=os.getpid(), job_id=args.job_id)
 
-    def progress(value: int, **extra: object) -> None:
-        _write_state(args.state_db, status="parsing", progress=value, **extra)
+    def progress(value: int, phase: str = "parsing", **extra: object) -> None:
+        """�v举阶段（phase=scanning）与解析阶段（parsing）分开写入。
+
+        前端据 status 展示“正在扫描/正在解析”，两阶段的百分比各自归一化，
+        避免旧实现把扫描阶段也用 parsing 状态与 10% 以下的进度混淆。
+        """
+        _write_state(args.state_db, status=phase, progress=value, worker_pid=os.getpid(), job_id=args.job_id, **extra)
 
     try:
         result = sis.index_workspace(
@@ -81,7 +95,10 @@ def run(args: argparse.Namespace) -> int:
             progress_cb=progress,
         )
         if result.get("cancelled"):
-            _write_state(args.state_db, status="cancelled", progress=progress_value(result), worker_pid=os.getpid(), elapsed_ms=int((time.time() - started) * 1000))
+            _write_state(args.state_db, status="cancelled", progress=progress_value(result),
+                         files_scanned=result.get("files_scanned", 0),
+                         files_total=result.get("files_total", 0),
+                         worker_pid=os.getpid(), elapsed_ms=int((time.time() - started) * 1000))
             return 2
         if result.get("error"):
             _write_state(args.state_db, status="error", progress=0, error=result["error"], worker_pid=os.getpid(), elapsed_ms=int((time.time() - started) * 1000))

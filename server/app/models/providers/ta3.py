@@ -28,6 +28,9 @@ import httpx
 from app.core.config import settings
 from app.models.base import ModelProvider
 from app.models.providers.ta3_tool_aliases import FROM_TA3, TO_TA3, disguise_args, restore_args
+from app.models.providers.ta3_mcp import (
+    is_mcp_alias, is_mcp_tool, mcp_alias, resolve_mcp_alias,
+)
 from app.models.providers.ta3_tool_schemas import disguise_tools
 from app.models.schemas import ChatMessage, ChatRequest, ChatResponse, Usage
 
@@ -118,14 +121,46 @@ class Ta3Provider(ModelProvider):
         self._ua = getattr(settings, "ta3_user_agent", "") or _DEFAULT_TA3_UA
         # v28: SSE 空闲超时改读配置——kimi-k3/grok-4.6 长思考时 30s 硬编码会误杀流
         self._stream_idle_timeout = float(getattr(settings, "ta3_stream_idle_timeout", 180) or 180)
-        # 禁用 httpx 自动注入的 UA/编码头之外，保持与参考项目一致的压缩协商
-        self._client = httpx.AsyncClient(
+        self._client = self._make_client()
+
+    def _make_client(self) -> httpx.AsyncClient:
+        """新建本会话的 httpx 客户端（禁用 httpx 自动注入的 UA/编码头之外，
+        保持与参考项目一致的压缩协商）。"""
+        return httpx.AsyncClient(
             timeout=httpx.Timeout(
                 connect=10.0, write=10.0, read=self._stream_idle_timeout, pool=10.0,
             ),
             headers={"Accept-Encoding": "gzip, deflate"},
             follow_redirects=False,
         )
+
+    def _ensure_client(self) -> httpx.AsyncClient:
+        """取本次请求的 httpx 客户端；已关闭则按需重建（provider 实例可能被复用）。"""
+        client = self._client
+        if client is None or getattr(client, "is_closed", False):
+            client = self._make_client()
+            self._client = client
+        return client
+
+    async def _close_client(self) -> None:
+        """关闭本次请求的 httpx 客户端（连同其 keep-alive 连接池）。
+
+        会话隔离要点：每个会话各自持有一条到网关的长连接，若请求结束不关闭，这些
+        keep-alive 连接会一直挂着（此前只关响应、不关 client）。远端按账号维度限制
+        并发流时，残留连接会占住槽位——表现为「另一会话的新流拿到 200 却长时间收不到
+        任何 chunk」，直到某个会话结束或连接被远端掐断才恢复（2026-09-15 实测现场：
+        turn=1312 的流空转 2 分钟后报 RemoteProtocolError，随后降级非流式才恢复）。
+
+        注意：这里不把 self._client 置 None——属性保留指向已关闭对象（便于诊断与
+        测试回写），下一次取用由 _ensure_client 按 is_closed 重建。关闭失败不阻塞。
+        """
+        client = self._client
+        if client is None:
+            return
+        try:
+            await client.aclose()
+        except Exception:
+            logger.debug("[ta3] 关闭 httpx 客户端失败(非阻塞)", exc_info=True)
 
     # ─────────────────────────── 请求构造 ───────────────────────────
 
@@ -218,6 +253,12 @@ class Ta3Provider(ModelProvider):
                         except (json.JSONDecodeError, TypeError):
                             args = {}
                     alias = TO_TA3.get(name)
+                    if alias is None and is_mcp_tool(name):
+                        # MCP 工具（mcp_<server>_<tool>）：不在静态映射表里，改名为
+                        # ta3 风格伪装名（ta3_mcp），参数键名由 MCP 自己定义、原样透传。
+                        # 此前这类历史调用会被下面的降级分支转成文本，导致多轮会话里
+                        # 模型看不到自己上一轮用过的 MCP 工具。
+                        alias = mcp_alias(name)
                     if alias is None:
                         # 未映射的历史调用（如 collect_results）→ 转普通文本，避免协议断裂。
                         # plan-238-1191: 措辞说明"调用与结果已转为文本记录"（结果并不会
@@ -269,6 +310,10 @@ class Ta3Provider(ModelProvider):
             real = FROM_TA3.get(name)
             if real is not None:
                 args = restore_args(name, args)
+            elif is_mcp_alias(name):
+                # MCP 伪装名 → 真实 mcp_<server>_<tool>（按 registry 反查，与 executor
+                # 查找源一致）；未命中则保持原样，由执行层报"未知工具"。
+                real = resolve_mcp_alias(name)
             out.append({
                 "id": str(tc.get("id") or ""),
                 "name": real or name,
@@ -499,6 +544,10 @@ class Ta3Provider(ModelProvider):
                     for tc in m.tool_calls or []:
                         name = str(tc.get("name") or "")
                         alias = TO_TA3.get(name)
+                        if alias is None and is_mcp_tool(name):
+                            # MCP 工具：改名为 ta3 风格伪装名（此前被整段 continue 丢弃，
+                            # Anthropic 协议下历史 MCP 调用直接消失）
+                            alias = mcp_alias(name)
                         if alias is None:
                             continue
                         args = tc.get("arguments") or {}
@@ -666,6 +715,9 @@ class Ta3Provider(ModelProvider):
             real = FROM_TA3.get(name)
             if real is not None:
                 args = restore_args(name, args)
+            elif is_mcp_alias(name):
+                # MCP 伪装名 → 真实 mcp_<server>_<tool>（按 registry 反查）
+                real = resolve_mcp_alias(name)
             out.append({"id": slot["id"], "name": real or name, "arguments": args})
         return out
 
@@ -711,8 +763,11 @@ class Ta3Provider(ModelProvider):
         # 使用更短的 ta3_thinking_watchdog(240s) 主动掐断，导致 kimi-k3 长思考被提前终止后
         # 带 thinking 的 thinking_timeout 被上层判为"健康"而静默结束任务。
         # 现与 TA3 其它模型完全一致：全程统一使用 ta3_stream_idle_timeout(默认 300s) 空闲超时。
+        # 会话隔离：本次请求用独立客户端，结束后立即关闭（含异常/取消路径），
+        # 不把 keep-alive 长连接留给下一次请求或其它会话。
+        client = self._ensure_client()
         try:
-            async with self._client.stream("POST", url, json=body, headers=headers) as resp:
+            async with client.stream("POST", url, json=body, headers=headers) as resp:
                 if resp.status_code != 200:
                     text = (await resp.aread()).decode("utf-8", errors="replace")[:400]
                     raise RuntimeError(f"模型请求失败 {resp.status_code}：{text}")
@@ -749,6 +804,10 @@ class Ta3Provider(ModelProvider):
             raise RuntimeError(f"模型请求超时：{e.__class__.__name__}") from e
         except httpx.HTTPError as e:
             raise RuntimeError(f"模型请求失败：{e.__class__.__name__}: {e}") from e
+        finally:
+            # 会话隔离：正常结束/异常/取消一律关闭本请求的客户端与 keep-alive 连接池，
+            # 不留给下一次请求或其它会话（残留长连接会占住远端并发槽）。
+            await self._close_client()
 
         # 组装结果
         content = "".join(monitor["content_parts"]) or None
@@ -769,6 +828,9 @@ class Ta3Provider(ModelProvider):
                 real = FROM_TA3.get(name)
                 if real is not None:
                     args = restore_args(name, args)
+                elif is_mcp_alias(name):
+                    # MCP 伪装名 → 真实 mcp_<server>_<tool>（按 registry 反查）
+                    real = resolve_mcp_alias(name)
                 tool_calls.append({"id": slot["id"], "name": real or name, "arguments": args})
 
         if monitor.get("error"):

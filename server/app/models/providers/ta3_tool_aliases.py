@@ -46,6 +46,15 @@ TO_TA3: dict[str, str] = {
     # 编辑工作流中断）。伪装名对齐自造 PascalCase 先例（ReadAttachment 等）；
     # edits[{path,old_text,new_text}] 键名与真实工具一致，无需 ARGS 适配。
     "multi_file_edit": "MultiFileEdit",    # edits ✓
+    # plan-248-1258 M3.3: 符号索引检索/文件骨架（此前缺映射被伪装层剔除——系统提示词
+    # 仍在引导模型"优先用 symbol_search/outline"（context_manager._symbol_index_hint），
+    # 但 ta3 会话里模型根本拿不到这两个工具，引导落空且索引能力完全闲置）。
+    # outline → 参考项目原生 get_file_outline（语义一致：文件结构骨架+行号区间），
+    # 仅键名适配 path→filepath；symbol_search 参考项目无对应工具，伪装名对齐自造
+    # PascalCase 先例（ReadAttachment/BashStatus 等），query/kind/file_glob/limit
+    # 键名与真实工具一致，无需 ARGS 适配。
+    "symbol_search": "SymbolSearch",       # query/kind/file_glob/limit ✓
+    "outline": "get_file_outline",         # path→filepath（见 ARGS_* 表）
 }
 
 # 伪装名 → 真实执行名（反查）
@@ -78,6 +87,8 @@ ARGS_TO_TA3: dict[str, dict[str, str | None]] = {
     # plan-153-705: 后台进程工具键名适配（offset 键名一致免映射）
     "terminal_bg_status": {"shell_id": "shellId"},
     "terminal_bg_kill": {"shell_id": "shellId"},
+    # plan-248-1258 M3.3: 文件骨架键名适配（参考项目原生用 filepath）
+    "outline": {"path": "filepath"},
 }
 
 # 入站参数键名适配：ta3 键 → 真实键（None = 丢弃该键）
@@ -105,6 +116,8 @@ ARGS_FROM_TA3: dict[str, dict[str, str | None]] = {
     # plan-153-705: 后台进程工具入站适配（BashStatus/BashKill）
     "BashStatus": {"shellId": "shell_id"},
     "BashKill": {"shellId": "shell_id"},
+    # plan-248-1258 M3.3: 文件骨架入站适配（filepath → path）
+    "get_file_outline": {"filepath": "path"},
 }
 
 # SubAgent 伪装后的固定附加参数（模型调用 SubAgent 时强制同步只读探索）

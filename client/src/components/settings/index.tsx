@@ -63,7 +63,7 @@ export const SETTINGS_INDEX: SettingsIndexItem[] = [
   { key: "scheduled", label: "自动化", group: "data", keywords: "cron 定时 自动化 任务", icon: <IconCalendar size={15} /> },
   { key: "usage", label: "使用统计", group: "data", keywords: "token 用量 统计 context", icon: <IconBarChart size={15} /> },
   { key: "index", label: "索引库", group: "data", keywords: "索引 符号 codegraph symbol 代码探索", icon: <IconCpu size={15} /> },
-  { key: "diagnostics", label: "诊断", group: "data", keywords: "健康检查 系统状态 索引", icon: <IconTool size={15} /> },
+  { key: "diagnostics", label: "诊断", group: "data", keywords: "健康检查 系统状态 checkpoint", icon: <IconTool size={15} /> },
   { key: "archive", label: "归档恢复", group: "data", keywords: "归档 恢复 已删除 archived restore", icon: <IconRotateCcw size={15} /> },
   { key: "about", label: "关于", group: "basic", keywords: "版本 信息", icon: <IconInfo size={15} /> },
 ];
@@ -162,7 +162,7 @@ function AboutPanel() {
                 新版本 v{activeVersion} 更新内容
               </button>
               {notesOpen && (
-                <div className="upd-notes-body">
+                <div className="upd-notes-body release-notes">
                   <MarkdownContent>{activeNotes}</MarkdownContent>
                 </div>
               )}
@@ -209,7 +209,7 @@ function AboutPanel() {
                       {isCurrent && <span className="upd-history-cur">当前版本</span>}
                       {r.date && <span className="upd-history-date">{new Date(r.date).toLocaleDateString()}</span>}
                     </div>
-                    <div className="upd-history-notes"><MarkdownContent>{r.notes || "(无说明)"}</MarkdownContent></div>
+                    <div className="upd-history-notes release-notes"><MarkdownContent>{r.notes || "(无说明)"}</MarkdownContent></div>
                   </div>
                 );
               })}

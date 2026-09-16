@@ -56,11 +56,40 @@ class WorkBuddyProvider(ModelProvider):
         self._refresh_token = refresh_token
         self._ua = getattr(settings, "workbuddy_user_agent", "") or _DEFAULT_WB_UA
         # 禁用 httpx 自动注入的 UA/编码头之外，保持与 CLI 一致的压缩协商
-        self._client = httpx.AsyncClient(
+        self._client = self._make_client()
+
+    def _make_client(self) -> httpx.AsyncClient:
+        """新建本会话的 httpx 客户端（保持与 CLI 一致的压缩协商）。"""
+        return httpx.AsyncClient(
             timeout=httpx.Timeout(connect=10.0, write=10.0, read=_STREAM_IDLE_TIMEOUT_S, pool=10.0),
             headers={"Accept-Encoding": "gzip, deflate"},
             follow_redirects=False,
         )
+
+    def _ensure_client(self) -> httpx.AsyncClient:
+        """取本次请求的 httpx 客户端；已关闭则按需重建（provider 实例可能被复用）。"""
+        client = self._client
+        if client is None or getattr(client, "is_closed", False):
+            client = self._make_client()
+            self._client = client
+        return client
+
+    async def _close_client(self) -> None:
+        """关闭本次请求的 httpx 客户端（连同其 keep-alive 连接池）。
+
+        会话隔离要点：每个会话各持一条到 WorkBuddy 网关的长连接；此前只关响应、
+        不关 client，keep-alive 连接会一直挂着——远端按账号维度限制并发流时，残留
+        连接会占住槽位，表现为「另一会话的新流拿到 200 却长时间收不到任何 chunk」
+        （2026-09-15 现场：另一会话的流空转 2 分钟后被远端掐断，降级非流式才恢复）。
+        关闭失败不阻塞（非关键路径）。
+        """
+        client = self._client
+        if client is None:
+            return
+        try:
+            await client.aclose()
+        except Exception:
+            logger.debug("[workbuddy] 关闭 httpx 客户端失败(非阻塞)", exc_info=True)
 
     # ─────────────────────────── 请求头 ───────────────────────────
 
@@ -283,6 +312,18 @@ class WorkBuddyProvider(ModelProvider):
         return False
 
     async def _stream_llm(self, request: ChatRequest) -> AsyncIterator[dict]:
+        """公开入口薄包装：请求结束后（正常/异常/取消）关闭本次 httpx 客户端。
+
+        并发会话隔离——两个会话各自持一条长连接，用完即关，不让残留 keep-alive
+        连接占住远端按账号维度的并发槽（2026-09-15 实测现场见 _close_client 注释）。
+        """
+        try:
+            async for event in self._stream_llm_inner(request):
+                yield event
+        finally:
+            await self._close_client()
+
+    async def _stream_llm_inner(self, request: ChatRequest) -> AsyncIterator[dict]:
         url = f"{self._base_url}/chat/completions"
         body = self._build_body(request)
         monitor = self._new_monitor()
@@ -293,7 +334,8 @@ class WorkBuddyProvider(ModelProvider):
         while True:
             headers = self._base_headers()
             try:
-                async with self._client.stream("POST", url, json=body, headers=headers) as resp:
+                client = self._ensure_client()
+                async with client.stream("POST", url, json=body, headers=headers) as resp:
                     if resp.status_code == 401 and attempt < 1 and await self._try_refresh_token():
                         attempt += 1
                         continue

@@ -12,7 +12,7 @@ from app.orchestration.tools.base import ToolContext
 from app.orchestration.tools.bg_process import (
     TerminalBgKillTool, TerminalBgStatusTool, bg_process_registry,
 )
-from app.orchestration.tools.terminal import TerminalExecTool
+from app.orchestration.tools.terminal import TerminalExecTool, _await_returncode
 
 
 def _ctx(workspace) -> ToolContext:
@@ -243,3 +243,46 @@ def test_web_fetch_schema_and_risk():
     schema = tool.function_schema()
     assert schema["function"]["name"] == "web_fetch"
     assert "url" in schema["function"]["parameters"]["properties"]
+
+
+# ────────── 退出码回收兜底（rc=None 偶发竞态，2026-09-15 全量回归现场） ──────────
+# 现场：echo 输出正常，但两个输出泵 EOF 后 asyncio 尚未回填 returncode，
+# `ok=returncode==0` 判等失败 → 被误判为「退出码 None」失败。修复见 _await_returncode。
+
+
+class _FakeProc:
+    """模拟 asyncio 子进程：wait() 在 delay 后回填 returncode。"""
+
+    def __init__(self, rc=None, delay: float = 0.0, final_rc: int | None = 0):
+        self.returncode = rc
+        self.pid = 4242
+        self._delay = delay
+        self._final_rc = final_rc
+        self.wait_called = 0
+
+    async def wait(self):
+        self.wait_called += 1
+        if self._delay:
+            await asyncio.sleep(self._delay)
+        self.returncode = self._final_rc
+        return self.returncode
+
+
+def test_await_returncode_returns_reaped_code_without_waiting():
+    """已回收到退出码 → 直接返回，不再等待（正常路径零开销）。"""
+    proc = _FakeProc(rc=0)
+    assert asyncio.run(_await_returncode(proc)) == 0
+    assert proc.wait_called == 0
+
+
+def test_await_returncode_reaps_pending_code():
+    """输出已 EOF 但退出码未回填 → 等回收后返回真实退出码（不再误判失败）。"""
+    proc = _FakeProc(rc=None, delay=0.01, final_rc=7)
+    assert asyncio.run(_await_returncode(proc)) == 7
+    assert proc.wait_called == 1
+
+
+def test_await_returncode_timeout_returns_none():
+    """进程异常残留（wait 不返回）→ 到点返回 None，不无限等待。"""
+    proc = _FakeProc(rc=None, delay=5, final_rc=0)
+    assert asyncio.run(_await_returncode(proc, timeout=0.05)) is None
