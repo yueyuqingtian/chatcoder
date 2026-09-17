@@ -1,8 +1,26 @@
 """模型注册 CRUD。"""
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.model_reg import Model
+
+
+def detach_model_refs(s, model_ids: list[int]) -> None:
+    """删除模型前把引用方（会话/代理/子代理配置）的 model_id 置空。
+
+    三张表以 FK 引用 models.id（sqlite 开启了外键约束），直接删除模型会抛
+    sqlite3.IntegrityError: FOREIGN KEY constraint failed。置空后引用方走
+    「跟随默认/前端选择器自动忽略」语义。
+    """
+    if not model_ids:
+        return
+    from app.persistence.models.agent import Agent
+    from app.persistence.models.message import Session
+    from app.persistence.models.subagent_profile import SubagentProfile
+
+    s.execute(update(Session).where(Session.model_id.in_(model_ids)).values(model_id=None))
+    s.execute(update(Agent).where(Agent.model_id.in_(model_ids)).values(model_id=None))
+    s.execute(update(SubagentProfile).where(SubagentProfile.model_id.in_(model_ids)).values(model_id=None))
 
 
 async def create_model(db: AsyncSession, **kwargs) -> int:
@@ -74,6 +92,7 @@ async def delete_model(db: AsyncSession, model_id: int) -> bool:
         model = s.get(Model, model_id)
         if model is None:
             return False
+        detach_model_refs(s, [model_id])
         s.delete(model)
         s.commit()
         return True

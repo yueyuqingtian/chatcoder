@@ -404,6 +404,8 @@ async def sync_ta3_models(db: AsyncSession, provider, api_base: str) -> list[dic
         return (v[:8] + "…") if v else ""
 
     sanitized = {
+        # selectedOrgId：对齐参考项目 sessionInfo.catalog.selectedOrgId（SSO/appId 透传数据源）
+        "selectedOrgId": selected_org_id,
         "organizations": catalog["organizations"],
         "models": [
             {k: (_mask(str(v)) if k == "api_key" else v) for k, v in e.items()}

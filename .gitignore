@@ -218,3 +218,7 @@ server/*_out.txt
 /client/madge.json
 /client/run-unmin.cjs
 /client/tmp-debug-main.cjs
+
+# Ta+3 参考应用解包（plan-270-1358 移植对照用，可用 tmp_extract_ta3.cjs 重新生成）
+/tmp_ta3_extract/
+/tmp_extract_ta3.cjs

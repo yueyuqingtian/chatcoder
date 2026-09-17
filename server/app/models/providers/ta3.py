@@ -17,11 +17,14 @@ httpx 裸请求完全控制头与体：
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import os
 import re
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import httpx
 
@@ -61,6 +64,120 @@ _KIMI_EFFORT_MAP = {
     "xhigh": "max",
     "max": "max",
 }
+
+# ─────────────── 工作区指纹（x-ws-id，plan-270-1358）───────────────
+# 对齐 Ta+3 v0.4.6 gitWorkspaceService.getWorkspaceFingerprint：
+# git 远端 URL 归一化（host/path 小写，四端契约逐字节一致）→ sha256 前 16 位小写 hex。
+# 平台侧用于用量统计；非仓库/无远端/格式不识别时不发送该头。结果按目录缓存（含 None）。
+_LOCAL_ORG_ID = "personal"  # 本地组织：appId 不透传（对齐参考 resolveAppId）
+_WS_FP_CACHE: dict[str, str | None] = {}
+
+_WS_SSH_RE = re.compile(r"^git@([^:]+):(.+?)(?:\.git)?$")
+_WS_URL_RE = re.compile(r"^(?:https?|ssh)://(?:[^@]+@)?([^/]+)/(.+?)(?:\.git)?$")
+_WS_REMOTE_SECTION_RE = re.compile(r'^\s*\[\s*remote\s+"?([^"\]\s]+)"?\s*\]')
+_WS_REMOTE_URL_RE = re.compile(r"^\s*url\s*=\s*(.+)$")
+
+
+def _is_local_host(host: str) -> bool:
+    host_wo_port = (host or "").split(":")[0]
+    return host_wo_port == "localhost" or bool(
+        re.match(r"^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$", host_wo_port))
+
+
+def normalize_workspace_key(url: str) -> str | None:
+    """远端 URL 归一化为 host/path 小写（与平台端契约逐字节一致）。"""
+    trimmed = (url or "").strip()
+    if not trimmed:
+        return None
+    m = _WS_SSH_RE.match(trimmed)
+    if m and m.group(1) and m.group(2):
+        return f"{m.group(1)}/{m.group(2)}".lower()
+    m = _WS_URL_RE.match(trimmed)
+    if m and m.group(1) and m.group(2):
+        host, remote_path = m.group(1), m.group(2)
+        # 本地 git 代理：旧式 .../git/owner/repo（默认 github.com）；GHE 主机编码在 path
+        if _is_local_host(host) and remote_path.startswith("git/"):
+            proxy_path = remote_path[4:]
+            segments = proxy_path.split("/")
+            if len(segments) >= 3 and "." in segments[0]:
+                return proxy_path.lower()
+            return f"github.com/{proxy_path}".lower()
+        return f"{host}/{remote_path}".lower()
+    return None
+
+
+def _parse_config_remote_urls(config_text: str) -> list[tuple[str, str]]:
+    """从 .git/config 文本解析远端 URL 列表（[remote "origin"] 优先，其次首个 remote）。"""
+    remotes: list[tuple[str, str]] = []
+    current = ""
+    for line in re.split(r"\r?\n", config_text or ""):
+        section = _WS_REMOTE_SECTION_RE.match(line)
+        if section:
+            current = section.group(1)
+            continue
+        if not current:
+            continue
+        kv = _WS_REMOTE_URL_RE.match(line)
+        if kv:
+            remotes.append((current, kv.group(1).strip()))
+    return remotes
+
+
+def _resolve_git_config_path(directory: Path) -> Path | None:
+    """定位 .git/config；worktree 的 .git 文件（gitdir: …/worktrees/<name>）回归公共 .git。"""
+    dot_git = directory / ".git"
+    if dot_git.is_dir():
+        return dot_git / "config"
+    if dot_git.is_file():
+        try:
+            content = dot_git.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return None
+        m = re.match(r"^gitdir:\s*(.+)$", content)
+        if not m:
+            return None
+        gitdir = m.group(1).strip()
+        idx = gitdir.find("/worktrees/")
+        if idx != -1:
+            gitdir = gitdir[:idx]
+        target = Path(gitdir)
+        if not target.is_absolute():
+            target = directory / target
+        return target / "config"
+    return None
+
+
+def get_workspace_fingerprint(directory: str | None) -> str | None:
+    """工作区指纹（16 位小写 hex）。None = 无指纹（不发送 x-ws-id 头）。"""
+    if not directory or not str(directory).strip():
+        return None
+    try:
+        d = Path(str(directory).strip()).resolve()
+    except OSError:
+        return None
+    key = str(d)
+    if key == os.sep:
+        return None
+    if key in _WS_FP_CACHE:
+        return _WS_FP_CACHE[key]
+    fingerprint: str | None = None
+    config_path = _resolve_git_config_path(d)
+    if config_path is not None:
+        try:
+            remotes = _parse_config_remote_urls(
+                config_path.read_text(encoding="utf-8", errors="replace"))
+            ordered = ([r for r in remotes if r[0] == "origin"]
+                       + [r for r in remotes if r[0] != "origin"])
+            for _name, url in ordered:
+                normalized = normalize_workspace_key(url)
+                if normalized:
+                    fingerprint = hashlib.sha256(
+                        normalized.encode("utf-8")).hexdigest()[:16]
+                    break
+        except OSError:
+            fingerprint = None
+    _WS_FP_CACHE[key] = fingerprint
+    return fingerprint
 
 # ─────────────────── 出站风控提示词脱敏 ───────────────────
 # 部分第三方/网关在检测到竞品 CLI 官方系统提示词签名时会以 403 routing_error
@@ -164,13 +281,24 @@ class Ta3Provider(ModelProvider):
 
     # ─────────────────────────── 请求构造 ───────────────────────────
 
-    def _base_headers(self, accept: str = "text/event-stream, application/json") -> dict:
+    def _base_headers(self, accept: str = "text/event-stream, application/json",
+                      workspace_dir: str | None = None) -> dict:
         headers: dict = {
             "Content-Type": "application/json",
             "Accept": accept,
             "X-Call-Source": "APP",
             "User-Agent": self._ua,
         }
+        # plan-270-1358: 对齐 Ta+3 v0.4.6 新增伪装头——appId 供后端按应用计费统计
+        # （resolveAppId：目录选中组织；本地组织 personal 不透传）
+        app_id = str(self._meta.get("orgId") or "").strip()
+        if app_id and app_id != _LOCAL_ORG_ID:
+            headers["lcappid"] = app_id
+            headers["x-app-id"] = app_id
+        # x-ws-id：工作区指纹（git 远端归一化 sha256[:16]），用于平台侧用量统计
+        ws_fp = get_workspace_fingerprint(workspace_dir)
+        if ws_fp:
+            headers["x-ws-id"] = ws_fp
         if self._anthropic:
             headers["anthropic-version"] = "2023-06-01"
             if self._api_key:
@@ -749,7 +877,7 @@ class Ta3Provider(ModelProvider):
         else:
             url = f"{self._base_url}/chat/completions"
             body = self._build_openai_body(request, disguised)
-        headers = self._base_headers()
+        headers = self._base_headers(workspace_dir=request.workspace_dir)
         logger.info("[ta3] model=%s protocol=%s tools=%d → %s",
                     request.model or self._model_name,
                     "anthropic" if self._anthropic else "openai",

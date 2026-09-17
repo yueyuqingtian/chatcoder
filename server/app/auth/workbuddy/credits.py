@@ -3,7 +3,12 @@
 端点来源（从本地安装 WorkBuddy 客户端 app.asar 逆向提取，src 注释明确标注）：
 
 - POST {endpoint}/billing/meter/get-user-resource-summary   积分/套餐资源聚合
-      → data.resources[] / summary（usageLeft/usageTotal/usageUsed 由前端累加）
+      → data.Packages[]{PackageCode, CycleTotalCapacity, CycleRemainCapacity,
+        CycleUsedCapacity}（数值为字符串），总积分 = 各包 CycleRemainCapacity 之和
+      （对齐客户端 parseResourceSummary + sumSummaryCapacity；resourcePrefix 为空，
+       Web/Desktop 两端都走无前缀路径）
+- POST {endpoint}/v2/billing/meter/get-enterprise-user-usage  企业账号回退
+      → data.limit_num / data.used_num（limit_num=-1 表示不限量）
 - POST {endpoint}/v2/billing/meter/checkin-activity-status  每日签到状态
 - POST {endpoint}/v2/billing/meter/daily-checkin            执行每日签到
 
@@ -28,12 +33,14 @@ logger = logging.getLogger(__name__)
 
 CHECKIN_STATUS_PATH = "/v2/billing/meter/checkin-activity-status"
 DAILY_CHECKIN_PATH = "/v2/billing/meter/daily-checkin"
-# 客户端不同发行版使用不同前缀：Web 走无前缀，Desktop/IDE 网关常走 /v2。
-# 查询时按顺序尝试，避免版本差异导致模型页永远显示空余额。
+# 资源聚合接口：WorkBuddy 客户端 resourcePrefix 为空，Web/Desktop 都走无前缀路径
+# （asar 源码注释明确「两端都走空前缀」）；/v2 前缀实测 404，仅作老网关兜底。
 RESOURCE_SUMMARY_PATHS = (
     "/billing/meter/get-user-resource-summary",
     "/v2/billing/meter/get-user-resource-summary",
 )
+# 企业账号回退（客户端 getEnterpriseUsage 同款路径，需 X-Enterprise-Id 头）
+ENTERPRISE_USAGE_PATH = "/v2/billing/meter/get-enterprise-user-usage"
 _TIMEOUT = 12.0
 
 
@@ -93,15 +100,46 @@ async def _post_json(url: str, headers: dict) -> dict:
 
 
 def _extract_credits(body: dict) -> float | None:
-    """从资源聚合响应提取可用积分（usageLeft 口径）。
+    """从资源聚合响应提取可用积分（余额口径）。
 
-    客户端在 provider 侧累加 resources 的 left 字段得到总积分；此处直接累加
-    data.resources[].left（不存在时回退 data.usageLeft/summary）。
+    真实响应（实测 + asar parseResourceSummary/sumSummaryCapacity 对齐）：
+        data.Packages[]{CycleTotalCapacity, CycleRemainCapacity, CycleUsedCapacity}
+    数值为字符串；总积分 = 各包 CycleRemainCapacity 中正值之和。
+    旧字段（resources[].left / usageLeft 等）保留兜底；企业账号走
+    limit_num - used_num（见 fetch_credits 的企业回退分支）。
     """
     data = body.get("data") if isinstance(body, dict) else None
     if not isinstance(data, dict):
         return None
-    # 新版响应可能把资源包放在 data.resources，也可能放在 data.Resources 或 data.data.resources。
+
+    def _sum_packages(packages: object) -> float | None:
+        """对齐客户端 sumSummaryCapacity：累加各资源包余量（仅计正值，缺失按 0）。"""
+        if not isinstance(packages, list) or not packages:
+            return None
+        total = 0.0
+        seen = False
+        for p in packages:
+            if not isinstance(p, dict):
+                continue
+            raw = next((p.get(k) for k in ("CycleRemainCapacity", "CycleRemain", "cycleRemain")
+                        if p.get(k) is not None), None)
+            try:
+                v = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if v > 0:
+                total += v
+                seen = True
+        return round(total, 2) if seen else None
+
+    # 首选：data.Packages（实测真实结构）；容错嵌套 data.data.Packages
+    for candidate in (data, data.get("data")):
+        if isinstance(candidate, dict):
+            credits = _sum_packages(candidate.get("Packages"))
+            if credits is not None:
+                return credits
+
+    # 兜底：老口径 resources[].left / usageLeft 等
     candidates: list[object] = [data]
     for key in ("data", "summary", "Summary", "userResource", "UserResource"):
         nested = data.get(key)
@@ -135,8 +173,46 @@ def _extract_credits(body: dict) -> float | None:
     return None
 
 
+async def _fetch_enterprise_credits(api_base: str, token: str, account: dict) -> float | None:
+    """企业账号积分：POST /v2/billing/meter/get-enterprise-user-usage。
+
+    响应 data.limit_num / data.used_num；limit_num=-1 表示不限量（返回 -1，
+    前端按「不限」展示）。对齐客户端 getEnterpriseUsage。
+    """
+    enterprise_id = str((account or {}).get("enterpriseId") or "").strip()
+    if not enterprise_id:
+        return None
+    url = f"{_root_base(api_base)}{ENTERPRISE_USAGE_PATH}"
+    headers = _headers(token, api_base, account)
+    headers["X-Enterprise-Id"] = enterprise_id
+    headers["X-Tenant-Id"] = enterprise_id
+    try:
+        result = await _post_json(url, headers)
+    except httpx.HTTPError as e:
+        logger.warning("[workbuddy] 企业积分查询网络失败: %s", e)
+        return None
+    body = result.get("body") or {}
+    data = body.get("data") if isinstance(body.get("data"), dict) else {}
+    if result.get("http_status") != 200 or body.get("code") not in (0, "0"):
+        return None
+    try:
+        limit = float(data.get("limit_num"))
+        used = float(data.get("used_num") or 0)
+    except (TypeError, ValueError):
+        return None
+    if limit == -1:
+        return -1.0
+    return round(max(0.0, limit - used), 2)
+
+
 async def fetch_credits(api_base: str, token: str, account: dict) -> float | None:
     """查询账号可用积分余额；失败返回 None（不抛错）。"""
+    # 企业账号优先走企业口径（个人聚合接口对企业账号不适用）
+    if (account or {}).get("enterpriseId"):
+        credits = await _fetch_enterprise_credits(api_base, token, account)
+        if credits is not None:
+            return credits
+
     last_result: dict | None = None
     for path in RESOURCE_SUMMARY_PATHS:
         url = f"{_root_base(api_base)}{path}"

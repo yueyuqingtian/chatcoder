@@ -58,14 +58,17 @@ async def update_provider(db: AsyncSession, provider_id: int, **kwargs) -> bool:
 
 async def delete_provider(db: AsyncSession, provider_id: int) -> bool:
     """删除供应商，并级联删除其下模型（写引擎单写线程）。
-    会话 model_id 会悬空，前端选择器自动忽略。"""
+    删除前置空会话/代理/子代理配置对这些模型的引用（FK 约束），
+    引用方 model_id 变 NULL 后前端选择器自动忽略。"""
     from app.persistence.database import run_write_locked
+    from app.services.model_service import detach_model_refs
 
     def patch(s):
         provider = s.get(Provider, provider_id)
         if provider is None:
             return False
         models = list(s.execute(select(Model).where(Model.provider_id == provider_id)).scalars().all())
+        detach_model_refs(s, [m.id for m in models])
         for m in models:
             s.delete(m)
         s.delete(provider)

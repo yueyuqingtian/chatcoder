@@ -19,6 +19,7 @@ import { IconRefresh, IconPlus, IconX, IconCpu } from "../icons";
 import { Modal } from "../Modal";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { Sw } from "./shared";
+import { Ta3QuotaSection } from "./Ta3QuotaSection";
 
 /** 非阻塞提示：Electron 中 window.alert 是原生模态框，关闭后会破坏窗口焦点
  * （返回会话后输入框无法聚焦），统一改用全局 Toast。 */
@@ -361,6 +362,10 @@ export function ModelsPanel() {
   const selected = providers.find((p) => p.id === selectedId) || null;
   const isOAuth = !!selected && OAUTH_FORMATS.has(selected.api_format);
 
+  // workbuddy 供应商级积分合计（多账号时汇总展示在详情头部；全部未知时显示 --）
+  const creditValues = credentials.map((c) => c.credits).filter((v): v is number => v != null);
+  const totalCredits = creditValues.length > 0 ? creditValues.reduce((a, b) => a + Number(b), 0) : null;
+
   // 选中供应商 → 拉取其模型与凭据。切换时保留旧详情直到新详情准备好，
   // 避免双栏右侧空白/高度跳变；requestId 防止慢响应回写到错误供应商。
   const loadDetail = useCallback(async (p: ProviderOut | null, force = false) => {
@@ -462,7 +467,7 @@ export function ModelsPanel() {
       const failed = r.results.filter((x) => !["claimed", "already_claimed"].includes(x.status));
       notify(`签到完成：成功 ${okCount} 个${already ? `，今日已签 ${already} 个` : ""}${failed.length ? `，失败 ${failed.length} 个` : ""}`);
       await loadCredits(p, true);
-      await loadDetail(p);
+      await loadDetail(p, true);
     } catch (e) { notify(String(e)); }
     finally { setBusy(false); }
   };
@@ -521,7 +526,7 @@ export function ModelsPanel() {
       const r = p.api_format === "workbuddy" ? await api.workbuddySync(p.id)
         : p.api_format === "ta3" ? await api.ta3Sync(p.id) : await api.traeSync(p.id);
       await load();
-      await loadDetail(p);
+      await loadDetail(p, true);
       if (showMsg) notify(`同步完成：${r.synced} 个模型`);
     } catch (e) { notify(String(e)); }
     finally { setSyncBusy(null); }
@@ -540,7 +545,7 @@ export function ModelsPanel() {
           else if (p.api_format === "ta3") await api.ta3Logout(p.id);
           else await api.traeLogout(p.id);
           await load();
-          await loadDetail(p);
+          await loadDetail(p, true);
         } catch (e) { notify(String(e)); }
       },
     });
@@ -629,7 +634,10 @@ export function ModelsPanel() {
               {/* 基本信息 */}
               <div className="models-field">
                 <label>Base URL</label>
+                {/* key=provider.id：defaultValue 不随 props 更新，切换供应商时必须重挂载，
+                    否则残留上一个供应商的 URL（OAuth 类禁用态下尤其误导） */}
                 <input
+                  key={`base-${selected.id}`}
                   className="ui-input"
                   defaultValue={selected.base_url || ""}
                   disabled={OAUTH_FORMATS.has(selected.api_format)}
@@ -667,6 +675,9 @@ export function ModelsPanel() {
                 </div>
               )}
 
+              {/* ta3 额度与用量（plan-270-1358：对齐 Ta+3 v0.4.6 额度查看） */}
+              {selected.api_format === "ta3" && <Ta3QuotaSection provider={selected} />}
+
               {/* 凭据管理（多 Key / 多账号） */}
               <div className="models-section">
                 <div className="models-section-title">
@@ -695,7 +706,7 @@ export function ModelsPanel() {
                             <IconRefresh size={12} />
                           </button>
                         )}
-                        <Sw checked={c.is_active} onChange={async (v) => { try { await api.updateProviderCredential(c.id, { is_active: v }); await loadDetail(selected); } catch (e) { notify(String(e)); } }} />
+                        <Sw checked={c.is_active} onChange={async (v) => { try { await api.updateProviderCredential(c.id, { is_active: v }); await loadDetail(selected, true); } catch (e) { notify(String(e)); } }} />
                         {!OAUTH_FORMATS.has(selected.api_format) && (
                           <button className="btn btn-ghost btn-xs" onClick={() => { setEditingCred(c); setShowCredForm(true); }}>编辑</button>
                         )}
@@ -706,7 +717,7 @@ export function ModelsPanel() {
                           danger: true,
                           onConfirm: async () => {
                             closeConfirm();
-                            try { await api.deleteProviderCredential(c.id); await loadDetail(selected); } catch (e) { notify(String(e)); }
+                            try { await api.deleteProviderCredential(c.id); await loadDetail(selected, true); } catch (e) { notify(String(e)); }
                           },
                         })}><IconX size={12} /></button>
                       </div>
@@ -719,6 +730,13 @@ export function ModelsPanel() {
                     <button className="btn btn-primary btn-xs" disabled={busy} onClick={() => handleCheckin(selected)}>
                       {busy ? "签到中…" : "Buddy 加油站 · 签到领取积分"}
                     </button>
+                    {/* 积分余额（多账号合计）+ 实时刷新 */}
+                    <span className="models-credits-head" title="workbuddy 积分余额（多账号时为合计）">
+                      积分 {totalCredits != null ? formatCredits(totalCredits) : "--"}
+                      <button className="btn btn-ghost btn-xs" title="刷新积分余额" onClick={() => loadCredits(selected, true)}>
+                        <IconRefresh size={12} />
+                      </button>
+                    </span>
                     <span className="models-hint" style={{ padding: 0 }}>打开软件后会自动后台签到，此处可手动补签。</span>
                   </div>
                 )}
@@ -743,6 +761,7 @@ export function ModelsPanel() {
                   <div className="models-field" style={{ marginTop: 8 }}>
                     <label>代理地址</label>
                     <input
+                      key={`proxy-${selected.id}`}
                       className="ui-input"
                       placeholder="http://127.0.0.1:7897"
                       defaultValue={selected.proxy_url || ""}
@@ -780,7 +799,7 @@ export function ModelsPanel() {
                         </div>
                       </div>
                       <div className="models-model-actions">
-                        <Sw checked={m.is_active} onChange={async (v) => { try { await api.updateModel(m.id, { is_active: v }); await loadDetail(selected); } catch { /* ignore */ } }} />
+                        <Sw checked={m.is_active} onChange={async (v) => { try { await api.updateModel(m.id, { is_active: v }); await loadDetail(selected, true); } catch (e) { notify(String(e)); } }} />
                         <button className="btn btn-ghost btn-xs" onClick={() => { setEditingModel(m); setTargetProviderForModel(selected); setShowModelForm(true); }}>编辑</button>
                         <button className="btn btn-ghost btn-xs" onClick={() => setConfirmDialog({
                           open: true,
@@ -789,7 +808,7 @@ export function ModelsPanel() {
                           danger: true,
                           onConfirm: async () => {
                             closeConfirm();
-                            try { await api.deleteModel(m.id); await loadDetail(selected); } catch { /* ignore */ }
+                            try { await api.deleteModel(m.id); await loadDetail(selected, true); } catch (e) { notify(String(e)); }
                           },
                         })}><IconX size={12} /></button>
                       </div>
@@ -806,9 +825,9 @@ export function ModelsPanel() {
       </div>
 
       <ProviderFormModal open={showProviderForm} editing={editingProvider} onClose={() => setShowProviderForm(false)} onSaved={load} />
-      <ScanModelsModal open={!!scanningProvider} provider={scanningProvider} onClose={() => setScanningProvider(null)} onSaved={async () => { await load(); await loadDetail(selected); }} />
-      <ModelFormModal open={showModelForm} editing={editingModel} targetProvider={targetProviderForModel} onClose={() => { setShowModelForm(false); setTargetProviderForModel(null); }} onSaved={async () => { await load(); await loadDetail(selected); }} />
-      <CredentialFormModal open={showCredForm} providerId={selected?.id ?? null} editing={editingCred} onClose={() => { setShowCredForm(false); setEditingCred(null); }} onSaved={async () => { await loadDetail(selected); await load(); }} />
+      <ScanModelsModal open={!!scanningProvider} provider={scanningProvider} onClose={() => setScanningProvider(null)} onSaved={async () => { await load(); await loadDetail(selected, true); }} />
+      <ModelFormModal open={showModelForm} editing={editingModel} targetProvider={targetProviderForModel} onClose={() => { setShowModelForm(false); setTargetProviderForModel(null); }} onSaved={async () => { await load(); await loadDetail(selected, true); }} />
+      <CredentialFormModal open={showCredForm} providerId={selected?.id ?? null} editing={editingCred} onClose={() => { setShowCredForm(false); setEditingCred(null); }} onSaved={async () => { await loadDetail(selected, true); await load(); }} />
       <ConfirmDialog
         open={confirmDialog.open}
         title={confirmDialog.title}

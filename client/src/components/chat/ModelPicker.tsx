@@ -7,14 +7,18 @@
  * 弹层定位、碰撞翻转、键盘导航与 ARIA 语义由 Radix 组件库承担（替换此前
  * 手写 portal + 坐标 clamp + 两级网格的方形弹窗）。
  */
-import { useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import type { ModelOut } from "../../api/client";
-import { IconCpu, IconCheck, IconChevronRight, IconMultimodal } from "../icons";
+import { api, type ModelOut } from "../../api/client";
+import { IconCpu, IconCheck, IconChevronRight, IconMultimodal, IconRefresh } from "../icons";
 
 interface ModelGroup {
   name: string;
   models: ModelOut[];
+  /** 供应商 id（独立模型为 null） */
+  providerId: number | null;
+  /** workbuddy 供应商：展示积分余额 + 刷新按钮 */
+  workbuddy: boolean;
 }
 
 export function openModelSettings() {
@@ -50,7 +54,7 @@ export function ModelPicker({
   onToggle: () => void;
 }) {
   const groups = useMemo<ModelGroup[]>(() => {
-    const map = new Map<string, ModelOut[]>();
+    const map = new Map<string, ModelGroup>();
     for (const m of models) {
       if (!m.is_active && m.id !== value) continue;
       // plan-248-1258 M2.4: 供应商被禁用时其模型不进入选择器
@@ -59,17 +63,64 @@ export function ModelPicker({
       // trae 供应商：TRAE 目录含大量工具/占位模型，客户端实际可用的才展示
       if (m.api_format === "trae" && !m.trae_available) continue;
       const g = m.provider_name || "独立模型";
-      if (!map.has(g)) map.set(g, []);
-      map.get(g)!.push(m);
+      if (!map.has(g)) {
+        map.set(g, { name: g, models: [], providerId: m.provider_id ?? null, workbuddy: m.api_format === "workbuddy" });
+      }
+      map.get(g)!.models.push(m);
     }
     // 组内按名称排序，组按名称排序（"独立模型" 排最后）
-    const arr = [...map.entries()].map(([name, ms]) => ({
-      name,
-      models: ms.sort((a, b) => a.name.localeCompare(b.name)),
+    const arr = [...map.values()].map((g) => ({
+      ...g,
+      models: g.models.sort((a, b) => a.name.localeCompare(b.name)),
     }));
     arr.sort((a, b) => (a.name === "独立模型" ? 1 : b.name === "独立模型" ? -1 : a.name.localeCompare(b.name)));
     return arr;
   }, [models, value]);
+
+  // ── workbuddy 积分余额：弹窗每次打开实时刷新；点击图标手动刷新 ──
+  const [credits, setCredits] = useState<Record<number, number | null>>({});
+  const [creditsBusy, setCreditsBusy] = useState<Record<number, boolean>>({});
+  const refreshCredits = useCallback(async (providerId: number) => {
+    setCreditsBusy((s) => ({ ...s, [providerId]: true }));
+    try {
+      const r = await api.workbuddyCredits(providerId, { refresh: true });
+      // 多账号时按合计展示（仅统计已登录且余额已知的账号）
+      const vals = r.credentials.filter((c) => c.logged_in && c.credits != null).map((c) => Number(c.credits));
+      setCredits((s) => ({ ...s, [providerId]: vals.length > 0 ? vals.reduce((a, b) => a + b, 0) : null }));
+    } catch { /* 查询失败保留旧值 */ } finally {
+      setCreditsBusy((s) => ({ ...s, [providerId]: false }));
+    }
+  }, []);
+  const wbProviderIds = useMemo(
+    () => groups.filter((g) => g.workbuddy && g.providerId != null).map((g) => g.providerId!),
+    [groups],
+  );
+  useEffect(() => {
+    if (!open) return;
+    for (const id of wbProviderIds) void refreshCredits(id);
+  }, [open, wbProviderIds, refreshCredits]);
+
+  const fmtCredits = (v: number) => v.toLocaleString("zh-CN", { maximumFractionDigits: 2 });
+  /** 积分徽标 + 刷新按钮（一级供应商行与二级菜单头共用） */
+  const renderCredits = (g: ModelGroup) => {
+    if (!g.workbuddy || g.providerId == null) return null;
+    const v = credits[g.providerId];
+    const busy = !!creditsBusy[g.providerId];
+    return (
+      <span className="mp-credits" title="workbuddy 积分余额">
+        {v != null ? `积分 ${fmtCredits(v)}` : busy ? "刷新中…" : "积分 --"}
+        <span
+          role="button"
+          className={"mp-credits-refresh" + (busy ? " busy" : "")}
+          title="刷新积分余额"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => { e.preventDefault(); e.stopPropagation(); if (!busy) void refreshCredits(g.providerId!); }}
+        >
+          <IconRefresh size={11} />
+        </span>
+      </span>
+    );
+  };
 
   const activeModel = models.find((m) => m.id === value);
   const label = activeModel
@@ -115,6 +166,7 @@ export function ModelPicker({
                     <DropdownMenu.Sub key={g.name}>
                       <DropdownMenu.SubTrigger className="mp-group">
                         <span className="mp-group-name" title={g.name}>{g.name}</span>
+                        {renderCredits(g)}
                         {holdsCurrent
                           ? <span className="mp-group-current"><IconCheck size={12} /></span>
                           : <span className="mp-group-arrow"><IconChevronRight size={13} /></span>}
@@ -126,7 +178,7 @@ export function ModelPicker({
                           alignOffset={-5}
                           collisionPadding={8}
                         >
-                          <div className="mp-menu-head">{g.name}</div>
+                          <div className="mp-menu-head">{g.name}{renderCredits(g)}</div>
                           {g.models.map((m) => (
                             <DropdownMenu.Item
                               key={m.id}

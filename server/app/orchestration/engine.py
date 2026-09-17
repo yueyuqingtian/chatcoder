@@ -12,7 +12,7 @@ from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
+from app.core.config import resolve_workspace_root, settings
 from app.core.enums import MsgType, SenderType
 from app.orchestration.agent_events import (broadcast, broadcast_session_completed,
                                             broadcast_turn_updated)
@@ -1642,6 +1642,12 @@ async def _spawn_memory_extract(
             registry = get_model_registry()
 
             async with async_session_factory() as s:
+                # plan-270-1358: ta3 x-ws-id 需要会话工作目录指纹（其它 Provider 忽略）
+                from app.persistence.models.message import Session as _SessionRow
+                _sess_row = await s.get(_SessionRow, session_id)
+                _ws_dir = (resolve_workspace_root(getattr(_sess_row, "workspace_root", None))
+                           if _sess_row is not None else None)
+
                 # 1. 尝试从 session 的 model_id 解析
                 if model_id:
                     m = await s.get(Model, model_id)
@@ -1687,6 +1693,7 @@ async def _spawn_memory_extract(
                     ChatMessage(role="user", content=text[:4500]),
                 ],
                 model=model_name or getattr(provider, "model", "") or "default",
+                workspace_dir=_ws_dir,  # plan-270-1358: ta3 x-ws-id
             )
             resp = await provider.chat(req)
             import json as _json

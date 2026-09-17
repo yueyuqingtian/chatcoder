@@ -12,9 +12,11 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.ta3 import oauth as ta3_oauth
+from app.auth.ta3 import quota as ta3_quota
 from app.auth.ta3 import session as ta3_session
 from app.auth.ta3.oauth import DEFAULT_TA3_API_BASE
 from app.gateway.schemas import Ta3LoginStartOut, Ta3LoginStatusOut, Ta3SyncOut
@@ -88,6 +90,7 @@ async def ta3_logout(provider_id: int, db: AsyncSession = Depends(get_db)):
     from app.persistence.models.model_reg import Model
 
     await ta3_session.clear_auth(db, provider_id)
+    ta3_quota.clear_cache(provider_id)  # 登出即清额度缓存，防退出后残留展示
 
     def _p(s):
         from app.persistence.models.model_reg import Provider
@@ -135,4 +138,107 @@ async def ta3_sync(provider_id: int, db: AsyncSession = Depends(get_db)):
 
         await run_write_locked(_p, label=f"ta3.sync_state.{provider_id}")
     return Ta3SyncOut(synced=len(entries), models=entries)
+
+
+# ── 额度与用量 / 模型状态 / 后台网页（对齐 Ta+3 v0.4.6 quotaService）──
+
+
+class Ta3QuotaRemarkBody(BaseModel):
+    remark: str = ""
+
+
+class Ta3QuotaResetBody(BaseModel):
+    window_type: str = "WEEKLY"
+    remark: str = ""
+
+
+def _raise_quota_http(e: Exception, provider_id: int, stage: str) -> None:
+    """额度类错误 → HTTP 映射：登录问题 401、其余 502；未知异常原样重抛。"""
+    if isinstance(e, ta3_session.Ta3AuthError):
+        if e.kind == "login_required":
+            raise HTTPException(401, str(e))
+        raise HTTPException(502, str(e))
+    if isinstance(e, ta3_quota.Ta3QuotaError):
+        logger.warning("[ta3] provider=%s %s失败: %s", provider_id, stage, e)
+        raise HTTPException(502, str(e))
+    raise
+
+
+@router.get("/providers/{provider_id}/ta3/quota")
+async def ta3_quota_get(provider_id: int, force: bool = False,
+                        db: AsyncSession = Depends(get_db)):
+    """本人额度（窗口百分比、重置时刻、可执行动作）；force=true 跳过 10s 缓存。"""
+    provider = await _get_ta3_provider(db, provider_id)
+    api_base = _resolve_api_base(provider)
+    try:
+        return await ta3_quota.get_quota(db, provider_id, api_base, force=force)
+    except Exception as e:  # noqa: BLE001
+        _raise_quota_http(e, provider_id, "额度查询")
+
+
+@router.get("/providers/{provider_id}/ta3/quota/trend")
+async def ta3_quota_trend(provider_id: int, period: str | None = None,
+                          start_date: str | None = None, end_date: str | None = None,
+                          call_source: str | None = None,
+                          db: AsyncSession = Depends(get_db)):
+    """用量趋势（DAILY/MONTHLY；单区间 ≤366 天，超限服务端返回 400 range_too_large）。"""
+    provider = await _get_ta3_provider(db, provider_id)
+    api_base = _resolve_api_base(provider)
+    try:
+        return await ta3_quota.get_quota_trend(
+            db, provider_id, api_base,
+            period=period, start_date=start_date, end_date=end_date, call_source=call_source,
+        )
+    except Exception as e:  # noqa: BLE001
+        _raise_quota_http(e, provider_id, "用量趋势查询")
+
+
+@router.post("/providers/{provider_id}/ta3/quota/overdraft")
+async def ta3_quota_overdraft(provider_id: int, body: Ta3QuotaRemarkBody,
+                              db: AsyncSession = Depends(get_db)):
+    """日窗透支（仅用户点击确认后调用；幂等性由服务端保证）。"""
+    provider = await _get_ta3_provider(db, provider_id)
+    api_base = _resolve_api_base(provider)
+    try:
+        return await ta3_quota.request_overdraft(db, provider_id, api_base, body.remark)
+    except Exception as e:  # noqa: BLE001
+        _raise_quota_http(e, provider_id, "日窗透支")
+
+
+@router.post("/providers/{provider_id}/ta3/quota/reset")
+async def ta3_quota_reset(provider_id: int, body: Ta3QuotaResetBody,
+                          db: AsyncSession = Depends(get_db)):
+    """周/月窗重置（返回 APPLIED 立即生效 / PENDING 转人工审批）。"""
+    provider = await _get_ta3_provider(db, provider_id)
+    api_base = _resolve_api_base(provider)
+    try:
+        return await ta3_quota.request_reset(db, provider_id, api_base, body.window_type, body.remark)
+    except Exception as e:  # noqa: BLE001
+        _raise_quota_http(e, provider_id, "额度重置")
+
+
+@router.get("/providers/{provider_id}/ta3/model-status")
+async def ta3_model_status(provider_id: int, model: str | None = None,
+                           protocol: str | None = None, force: bool = False,
+                           db: AsyncSession = Depends(get_db)):
+    """模型状态卡（倍率/负载/可用性）；不带 model/protocol 时可缓存 30s。"""
+    provider = await _get_ta3_provider(db, provider_id)
+    api_base = _resolve_api_base(provider)
+    try:
+        return await ta3_quota.get_model_status(
+            db, provider_id, api_base, model=model, protocol=protocol, force=force)
+    except Exception as e:  # noqa: BLE001
+        _raise_quota_http(e, provider_id, "模型状态查询")
+
+
+@router.post("/providers/{provider_id}/ta3/admin-web")
+async def ta3_admin_web(provider_id: int, db: AsyncSession = Depends(get_db)):
+    """生成「后台网页」SSO 免登链接（进入网页查看剩余额度）；前端用系统浏览器打开。"""
+    provider = await _get_ta3_provider(db, provider_id)
+    api_base = _resolve_api_base(provider)
+    try:
+        url = await ta3_quota.build_admin_web_url(db, provider_id, api_base)
+    except Exception as e:  # noqa: BLE001
+        _raise_quota_http(e, provider_id, "后台网页链接生成")
+    return {"ok": True, "url": url}
 

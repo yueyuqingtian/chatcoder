@@ -781,6 +781,8 @@ async def run_agent_loop(
                 message_id=f"{session_id}-{turn_id}-{step}",
                 # v21: thinking 模式（provider 会据此发 thinking 参数并移除 temperature）
                 thinking=_thinking_enabled or None,
+                # plan-270-1358: ta3 x-ws-id 需要工作目录指纹（其它 Provider 忽略）
+                workspace_dir=workspace or None,
             )
             # v6.4 临时诊断：打印实际发送给 API 的消息数和角色分布
             if step == 1:
@@ -866,6 +868,7 @@ async def run_agent_loop(
                                 session_id=str(session_id),
                                 message_id=f"{session_id}-{turn_id}-{step}-empty-retry-{_ri}",
                                 thinking=_eff not in (None, "", "none"),
+                                workspace_dir=workspace or None,  # plan-270-1358: ta3 x-ws-id
                             )
                             try:
                                 _r = await _stream_chat_and_broadcast(
@@ -938,6 +941,7 @@ async def run_agent_loop(
                             session_id=str(session_id),
                             message_id=f"{session_id}-{turn_id}-{step}-fc-retry",
                             thinking=_thinking_enabled or None,
+                            workspace_dir=workspace or None,  # plan-270-1358: ta3 x-ws-id
                         )
                         response = await provider.chat(request)
                         logger.info("[agent] turn=%s function-call 400 修复重试成功", turn_id)
@@ -966,6 +970,7 @@ async def run_agent_loop(
                             session_id=str(session_id),
                             message_id=f"{session_id}-{turn_id}-{step}-retry",
                             thinking=_thinking_enabled or None,  # v21: 紧急压缩重试同样保持 thinking
+                            workspace_dir=workspace or None,  # plan-270-1358: ta3 x-ws-id
                         )
                         response = await provider.chat(request)
                     else:
@@ -1030,6 +1035,7 @@ async def run_agent_loop(
                                 session_id=str(session_id),
                                 message_id=f"{session_id}-{turn_id}-{step}-transient-retry-{_ri}",
                                 thinking=_thinking_enabled or None,
+                                workspace_dir=workspace or None,  # plan-270-1358: ta3 x-ws-id
                             )
                             try:
                                 response = await provider.chat(request)
@@ -1823,6 +1829,12 @@ def _response_failure_reason(response, has_progress: bool = False) -> tuple[str,
     网络卡顿或服务器处理超时——模型根本没有应答，不能判定为"结束"，
     必须 fatal 走多次重试（与访问异常重试一致），否则任务会静默中断。
     frames_received=None（provider 未提供信号）时保持旧逻辑不变。
+    v967: "仅思考无正文"（thinking 有实质推理内容、content 为空、无 tool_calls、
+    finish=stop）不再视为健康结束。真正"任务完成主动结束"会产出最终正文；只有思考
+    说明推理结束后流被截断或输出预算被思考吃光，用户什么都没拿到。
+    纳入 fatal → 按统一重试计划重试（重试带 effort 降档，通常可恢复），穷尽后由
+    调用方显式提示异常，不做"把思考提升为正文"的兜底。>10 字符的门槛用于与上方
+    "残缺思考片段"判据互斥。
     """
     finish = response.finish_reason or "stop"
 
@@ -1832,6 +1844,14 @@ def _response_failure_reason(response, has_progress: bool = False) -> tuple[str,
 
     if not response.content and not response.tool_calls and response.thinking and len(response.thinking.strip()) <= 10:
         return "网关流式输出异常截断 (仅返回残缺思考片段)", True
+
+    # v967: 仅思考无正文——有实质推理产出，却没有任何正文/工具调用且 finish=stop。
+    # 这不是"任务完成主动结束"（那会给出最终正文），多为推理阶段结束后网关截断 SSE
+    # 或输出预算被思考吃光。此前该形态漏过上方两条判据（全空分支要求 thinking 为空），
+    # 落到函数末尾被判健康，表现为"会话突然中断且无报错"。现纳入 fatal，走统一重试计划。
+    if (finish == "stop" and not response.content and not response.tool_calls
+            and response.thinking and len(response.thinking.strip()) > 10):
+        return "模型仅生成思考未输出正文 (finish_reason=stop)，任务可能未完成", True
 
     if not response.content and not response.thinking and not response.tool_calls:
         # v966: 零帧断流优先判定（即使 finish=stop/有产出）——网关未应答即异常

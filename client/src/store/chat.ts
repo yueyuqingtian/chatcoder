@@ -660,15 +660,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   wsConnected: false,
 
   loadModels: async () => {
-    try {
-      const [models, providers] = await Promise.all([
-        api.listModels().catch(() => []),
-        api.listProviders().catch(() => []),
-      ]);
-      if (models.length > 0 || providers.length > 0) {
-        set({ models, providers });
-      }
-    } catch {}
+    // allSettled：单边请求失败时保留旧值；成功的空结果必须生效，
+    // 否则「删除/停用最后一个模型」后选择器仍展示陈旧列表。
+    const [modelsRes, providersRes] = await Promise.allSettled([api.listModels(), api.listProviders()]);
+    set({
+      models: modelsRes.status === "fulfilled" ? modelsRes.value : get().models,
+      providers: providersRes.status === "fulfilled" ? providersRes.value : get().providers,
+    });
   },
 
   loadBootstrap: async () => {

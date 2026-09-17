@@ -359,10 +359,21 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   }, []);
 
   // 模型选择：会话内跟随 session.model_id；首页优先草稿模型，其次最近使用模型，最后首个可用模型
-  const fallbackModelId = (models.find((m) => m.is_active) ?? models[0])?.id ?? null;
-  const sessionModelId = isHome
-    ? homeModelId ?? lastModelId ?? fallbackModelId
-    : currentSession?.model_id ?? homeModelId ?? lastModelId ?? fallbackModelId;
+  // 可用性口径与 ModelPicker 过滤一致：模型启用 + 供应商启用 + trae 需目录可用
+  const isUsableModel = (m: (typeof models)[number] | undefined | null): m is (typeof models)[number] =>
+    !!m && m.is_active && m.provider_active !== false && !(m.api_format === "trae" && !m.trae_available);
+  const fallbackModelId = (models.find(isUsableModel) ?? models[0])?.id ?? null;
+  const preferredModelId = isHome
+    ? homeModelId ?? lastModelId
+    : currentSession?.model_id ?? homeModelId ?? lastModelId;
+  // 所选模型被停用/删除（或供应商被禁用）后自动回落到首个可用模型，
+  // 避免选择器继续展示一个已不可用的模型（需切换一次才消失的问题）；
+  // 模型列表尚未加载完成（空数组）时保持原值，避免启动期闪烁。
+  const sessionModelId = (() => {
+    if (preferredModelId == null) return fallbackModelId;
+    if (models.length === 0) return preferredModelId;
+    return isUsableModel(models.find((m) => m.id === preferredModelId)) ? preferredModelId : fallbackModelId;
+  })();
   const activeModel = models.find((m) => m.id === sessionModelId) ?? null;
   const supportsReasoning = (activeModel?.reasoning_efforts?.length ?? 0) > 0;
   /** v7: 展示/发送档位——本 key 草稿 → 全局最近 → 冷启动无历史时取所选模型最高档兜底 */

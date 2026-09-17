@@ -513,6 +513,33 @@ export const api = {
   ta3LoginStatus: (id: number) => get<{ status: string; account?: Record<string, unknown> | null; error?: string | null }>(`/providers/${id}/ta3/login/status`),
   ta3Logout: (id: number) => post<{ ok: boolean }>(`/providers/${id}/ta3/logout`, {}),
   ta3Sync: (id: number) => post<{ synced: number; models: Array<{ name: string }> }>(`/providers/${id}/ta3/sync`, {}),
+  // ── ta3 额度与用量 / 模型状态 / 后台网页（plan-270-1358，对齐 Ta+3 v0.4.6 quotaService）──
+  ta3Quota: (id: number, opts?: { force?: boolean }) =>
+    get<Ta3QuotaOut>(`/providers/${id}/ta3/quota${opts?.force ? "?force=true" : ""}`),
+  ta3QuotaTrend: (id: number, opts?: {
+    period?: "DAILY" | "MONTHLY"; startDate?: string; endDate?: string; callSource?: string;
+  }) => {
+    const qs = new URLSearchParams();
+    if (opts?.period) qs.set("period", opts.period);
+    if (opts?.startDate) qs.set("start_date", opts.startDate);
+    if (opts?.endDate) qs.set("end_date", opts.endDate);
+    if (opts?.callSource) qs.set("call_source", opts.callSource);
+    const q = qs.toString();
+    return get<Ta3QuotaTrendOut>(`/providers/${id}/ta3/quota/trend${q ? `?${q}` : ""}`);
+  },
+  ta3QuotaOverdraft: (id: number, remark = "") =>
+    post<Ta3QuotaActionResult>(`/providers/${id}/ta3/quota/overdraft`, { remark }),
+  ta3QuotaReset: (id: number, windowType: "WEEKLY" | "MONTHLY", remark = "") =>
+    post<Ta3QuotaActionResult>(`/providers/${id}/ta3/quota/reset`, { window_type: windowType, remark }),
+  ta3ModelStatus: (id: number, opts?: { model?: string; protocol?: "OPENAI" | "ANTHROPIC"; force?: boolean }) => {
+    const qs = new URLSearchParams();
+    if (opts?.model) qs.set("model", opts.model);
+    if (opts?.protocol) qs.set("protocol", opts.protocol);
+    if (opts?.force) qs.set("force", "true");
+    const q = qs.toString();
+    return get<Ta3ModelStatusOut>(`/providers/${id}/ta3/model-status${q ? `?${q}` : ""}`);
+  },
+  ta3AdminWeb: (id: number) => post<{ ok: boolean; url: string }>(`/providers/${id}/ta3/admin-web`, {}),
 
   // ── workbuddy（腾讯 CodeBuddy/WorkBuddy）供应商（v24）──
   workbuddyLoginStart: (id: number) => post<{
@@ -751,6 +778,75 @@ export interface SubagentProfileOut {
   model_id: number | null;
   system_prompt: string | null;
   is_active: boolean;
+}
+
+/** plan-270-1358: ta3 额度与用量（字段对齐 Ta+3 quotaService / quotaView 投影）。 */
+export interface Ta3QuotaWindowOut {
+  /** 枚举：DAILY / WEEKLY / MONTHLY */
+  window?: string;
+  key?: string;
+  /** 中文展示名（仅渲染） */
+  label?: string;
+  /** null = 该窗口不限额度（不画进度条） */
+  percentUsed?: number | null;
+  windowStartEpochSeconds?: number;
+  resetEpochSeconds?: number;
+  canOverdraft?: boolean;
+  selfResetEnabled?: boolean;
+  selfResetUsed?: number;
+  selfResetMax?: number | null;
+  selfResetRemain?: number | null;
+  selfResetHint?: string;
+  resetPending?: boolean;
+}
+
+export interface Ta3QuotaOut {
+  userId?: string;
+  plan?: { planName?: string; endEpochSeconds?: number | null } | null;
+  concurrency?: { limit?: number | null } | null;
+  serverTimeEpochSeconds?: number;
+  windows?: Ta3QuotaWindowOut[];
+}
+
+export interface Ta3QuotaTrendPointOut {
+  date?: string;
+  requestCount?: number;
+  tokenCount?: number;
+  inputTokenCount?: number;
+  outputTokenCount?: number;
+  cacheTokenCount?: number;
+  reasoningTokenCount?: number;
+  avgResponseTime?: number | null;
+}
+
+export interface Ta3QuotaTrendOut {
+  period?: string;
+  startDate?: string;
+  endDate?: string;
+  points?: Ta3QuotaTrendPointOut[];
+}
+
+export interface Ta3ModelStatusModelOut {
+  model?: string;
+  displayName?: string;
+  protocols?: string[];
+  rate?: { currentMultiplier?: number | null; tier?: string; nextMultiplier?: number | null; nextChangeAt?: string; nextTier?: string } | null;
+  load?: { grade?: string; reasons?: string[]; latencyP50Ms?: number | null; requestsLastHour?: number | null } | null;
+  prices?: { currency?: string; inputPerMtok?: number | null; outputPerMtok?: number | null } | null;
+  /** off_peak_cheaper / busy_defer / unavailable */
+  hint?: string;
+}
+
+export interface Ta3ModelStatusOut {
+  generatedAt?: string;
+  cacheSeconds?: number | null;
+  models?: Ta3ModelStatusModelOut[];
+}
+
+export interface Ta3QuotaActionResult {
+  status?: string;
+  message?: string;
+  [k: string]: unknown;
 }
 
 /** v14: 上传文件返回结构（附件统一为文件地址）。 */

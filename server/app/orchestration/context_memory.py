@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import resolve_workspace_root
 from app.core.enums import MsgType, SenderType
 from app.models.schemas import ChatMessage, ChatRequest
 from app.models.registry import get_model_registry
@@ -91,7 +92,8 @@ async def _fetch_main_messages(
     return list(reversed(res.scalars().all()))
 
 
-async def _summarize_messages(messages: "list[Message]") -> str:
+async def _summarize_messages(messages: "list[Message]",
+                              workspace_dir: str | None = None) -> str:
     """调用 LLM 把一批消息压缩为结构化摘要。失败时降级为简单拼接。
 
     v3.0: 摘要质量大幅提升 —— 结构化 6 段格式，max_tokens=2048（原 500）。
@@ -161,6 +163,8 @@ async def _summarize_messages(messages: "list[Message]") -> str:
                 ChatMessage(role="user", content=transcript),
             ],
             model="",
+            # plan-270-1358: ta3 x-ws-id 需要工作目录指纹（其它 Provider 忽略）
+            workspace_dir=workspace_dir,
         )
         resp = await provider.chat(request)
         return (resp.content or "").strip()[:SUMMARY_MAX_CHARS]
@@ -174,7 +178,8 @@ async def _summarize_messages(messages: "list[Message]") -> str:
         return "历史摘要(降级):\n" + "\n".join(lines)[:SUMMARY_MAX_CHARS]
 
 
-async def _compress_super_summary(summaries: list[dict]) -> list[dict]:
+async def _compress_super_summary(summaries: list[dict],
+                                  workspace_dir: str | None = None) -> list[dict]:
     """v3.1: 当摘要超过上限时，将最旧的若干条压缩为一条超级摘要。
 
     避免直接丢弃最旧摘要导致长期记忆丢失。
@@ -205,6 +210,7 @@ async def _compress_super_summary(summaries: list[dict]) -> list[dict]:
                     ChatMessage(role="user", content=merged_text[:6000]),
                 ],
                 model="",
+                workspace_dir=workspace_dir,  # plan-270-1358: ta3 x-ws-id
             )
             resp = await provider.chat(request)
             super_text = (resp.content or "").strip()[:2000]
@@ -357,7 +363,9 @@ async def maybe_summarize_main_session(
         if len(to_summarize) < 3:
             break
 
-        summary_text = await _summarize_messages(to_summarize)
+        summary_text = await _summarize_messages(
+            to_summarize,
+            workspace_dir=resolve_workspace_root(getattr(session, "workspace_root", None)))
         if not summary_text:
             break
 
@@ -385,7 +393,9 @@ async def maybe_summarize_main_session(
 
         # v3.1: 超级摘要压缩（替代直接截断丢弃）
         if len(summaries) > SUPER_SUMMARY_TRIGGER:
-            summaries = await _compress_super_summary(summaries)
+            summaries = await _compress_super_summary(
+                summaries,
+                workspace_dir=resolve_workspace_root(getattr(session, "workspace_root", None)))
 
         latest_summarized_ids.update(our_ids)
 

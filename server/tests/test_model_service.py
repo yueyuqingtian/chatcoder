@@ -66,3 +66,73 @@ async def test_create_ta3_multimodal_model_marks_override(db):
     ref = await db.get(Model, created_id)
     assert ref.is_multimodal is True
     assert (ref.ta3_meta or {}).get("multimodal_override") is True
+
+
+# ── 删除模型/供应商时的 FK 约束（sqlite 外键开启，对齐生产）──
+
+
+@pytest.fixture
+async def db_fk(tmp_path):
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/model_fk.db"
+    engine = create_async_engine(db_url)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    from app.persistence import write_engine as _we
+    _we.configure(db_url, foreign_keys=True)  # 生产口径：开启外键约束
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        yield session
+    await engine.dispose()
+    _we.configure(None)
+
+
+async def test_delete_model_nulls_references(db_fk):
+    """模型被 sessions/agents/subagent_profiles 引用时删除不再 FK 报错，引用置空。"""
+    from sqlalchemy import select as _select
+
+    from app.persistence.models.agent import Agent
+    from app.persistence.models.message import Session
+    from app.persistence.models.subagent_profile import SubagentProfile
+
+    m = Model(tenant_id=1, name="ta3-x", provider_id=1, source_type="byok", api_format="ta3")
+    db_fk.add(m)
+    await db_fk.flush()
+    sess = Session(title="s", model_id=m.id)
+    agent = Agent(kind="main", name="main", model_id=m.id)
+    profile = SubagentProfile(name="explore", model_id=m.id)
+    db_fk.add_all([sess, agent, profile])
+    await db_fk.commit()
+
+    ok = await model_service.delete_model(db_fk, m.id)
+    assert ok is True
+    # 写引擎独立连接提交：重读验证
+    await db_fk.refresh(sess)
+    await db_fk.refresh(agent)
+    await db_fk.refresh(profile)
+    assert sess.model_id is None
+    assert agent.model_id is None
+    assert profile.model_id is None
+    gone = (await db_fk.execute(_select(Model).where(Model.id == m.id))).scalars().first()
+    assert gone is None
+
+
+async def test_delete_provider_cascade_nulls_references(db_fk):
+    """删除供应商级联删模型时同样置空会话引用（此前同 FK 报错路径）。"""
+    from app.persistence.models.message import Session
+    from app.persistence.models.model_reg import Provider
+    from app.services import provider_service
+
+    p = Provider(tenant_id=1, name="ta3", api_format="ta3")
+    db_fk.add(p)
+    await db_fk.flush()
+    m = Model(tenant_id=1, name="glm-x", provider_id=p.id, source_type="byok", api_format="ta3")
+    db_fk.add(m)
+    await db_fk.flush()
+    sess = Session(title="s", model_id=m.id)
+    db_fk.add(sess)
+    await db_fk.commit()
+
+    ok = await provider_service.delete_provider(db_fk, p.id)
+    assert ok is True
+    await db_fk.refresh(sess)
+    assert sess.model_id is None

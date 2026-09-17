@@ -23,6 +23,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import resolve_workspace_root
 from app.core.enums import MsgType, SenderType
 from app.models.schemas import ChatMessage, ChatRequest
 from app.orchestration.prompts import CHECKPOINT_PREAMBLE, COMPACTION_PROMPT, SUMMARY_CLOSE_TAG, SUMMARY_OPEN_TAG
@@ -199,7 +200,8 @@ def _build_transcript(messages: list) -> str:
     return "\n".join(lines)
 
 
-async def _summarize_with_llm(db: AsyncSession, provider, messages: list, max_chars: int = 4000) -> str:
+async def _summarize_with_llm(db: AsyncSession, provider, messages: list, max_chars: int = 4000,
+                              workspace_dir: str | None = None) -> str:
     """LLM 生成结构化 checkpoint 摘要。
 
     优先 KV 缓存复用路径：把待压缩消息结构化为 user/assistant/tool 重放序列
@@ -259,6 +261,8 @@ async def _summarize_with_llm(db: AsyncSession, provider, messages: list, max_ch
             ],
             model="",
             temperature=0.3,
+            # plan-270-1358: ta3 x-ws-id 需要工作目录指纹（其它 Provider 忽略）
+            workspace_dir=workspace_dir,
         )
         resp = await provider.chat(req)
         text = (resp.content or "").strip()
@@ -354,7 +358,9 @@ async def compact_session(
     if provider is None:
         summary_text = _fallback_summary(shadowed)
     else:
-        summary_text = await _summarize_with_llm(db, provider, shadowed, max_chars=max_summary_chars)
+        summary_text = await _summarize_with_llm(
+            db, provider, shadowed, max_chars=max_summary_chars,
+            workspace_dir=resolve_workspace_root(getattr(session, "workspace_root", None)))
         if not summary_text:
             summary_text = _fallback_summary(shadowed)
 
@@ -521,7 +527,9 @@ async def _commit_compaction(
     if provider is None:
         summary_text = _fallback_summary(shadowed)
     else:
-        summary_text = await _summarize_with_llm(db, provider, shadowed)
+        summary_text = await _summarize_with_llm(
+            db, provider, shadowed,
+            workspace_dir=resolve_workspace_root(getattr(session, "workspace_root", None)))
         if not summary_text:
             summary_text = _fallback_summary(shadowed)
     summary_text = summary_text.strip()

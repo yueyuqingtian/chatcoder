@@ -227,6 +227,8 @@ async def _run_review_loop(
             return "NEEDS_REVIEW"
         request = ChatRequest(
             messages=messages, model="", tools=tool_schemas or None,
+            # plan-270-1358: ta3 x-ws-id 需要工作目录指纹（其它 Provider 忽略）
+            workspace_dir=ws_root or None,
         )
         response = await provider.chat(request)
         if response.tool_calls:

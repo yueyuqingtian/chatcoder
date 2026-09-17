@@ -42,6 +42,9 @@ class ChatRequest(BaseModel):
     # TRAE Work 模式需要稳定的云端会话/消息标识；其它供应商忽略这些字段。
     session_id: str | None = None
     message_id: str | None = None
+    # plan-270-1358: ta3（Ta+3 牛码）x-ws-id 伪装头需要工作目录指纹；
+    # agent_loop 透传会话工作目录，其它供应商忽略。
+    workspace_dir: str | None = None
 
 
 class Usage(BaseModel):
