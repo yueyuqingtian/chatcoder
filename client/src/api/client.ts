@@ -92,14 +92,52 @@ async function fetchWithRetry(
   throw lastErr;
 }
 
-/** 统一错误解析：后端返回 {"error":{code,message}}。 */
+/** 统一错误解析：后端返回 {"error":{code,message}}（部分路由为 FastAPI 的 {"detail":...}）。 */
 function errorMessage(res: Response, raw: string): string {
-  try {
-    const data = JSON.parse(raw) as { error?: { message?: string; code?: string } };
-    if (data?.error?.message) return `${data.error.message}`;
-    if (data?.error?.code) return `[${data.error.code}]`;
-  } catch { /* 非 JSON */ }
+  const parsed = parseErrorBody(raw);
+  if (parsed?.message) return parsed.message;
+  if (parsed?.code) return `[${parsed.code}]`;
   return `HTTP ${res.status}: ${raw.slice(0, 200)}`;
+}
+
+/** plan-278-1391: 结构化解析错误响应体，供调用方按 code 分支处理（如「项目已归档」）。 */
+function parseErrorBody(raw: string): { message?: string; code?: string; data?: unknown } | null {
+  try {
+    const body = JSON.parse(raw) as {
+      error?: { message?: string; code?: string };
+      detail?: unknown;
+    };
+    if (body?.error?.message || body?.error?.code) {
+      return { message: body.error?.message, code: body.error?.code, data: body.error };
+    }
+    const d = body?.detail;
+    if (d && typeof d === "object" && !Array.isArray(d)) {
+      const dobj = d as { message?: string; code?: string };
+      return { message: dobj.message, code: dobj.code, data: d };
+    }
+    if (typeof d === "string") return { message: d, data: d };
+  } catch { /* 非 JSON */ }
+  return null;
+}
+
+/** API 错误：携带 status / code / detail，便于调用方做结构化分支。 */
+export class ApiError extends Error {
+  status: number;
+  code?: string;
+  detail?: unknown;
+  constructor(message: string, status: number, code?: string, detail?: unknown) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+    this.detail = detail;
+  }
+}
+
+/** 由响应构造 ApiError（统一入口，避免各处重复解析）。 */
+function toApiError(res: Response, raw: string): ApiError {
+  const parsed = parseErrorBody(raw);
+  return new ApiError(errorMessage(res, raw), res.status, parsed?.code, parsed?.data);
 }
 
 async function post<T>(path: string, body?: unknown): Promise<T> {
@@ -112,7 +150,7 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
   });
   if (!res.ok) {
     const detail = await res.text();
-    throw new Error(errorMessage(res, detail));
+    throw toApiError(res, detail);
   }
   return res.json() as Promise<T>;
 }
@@ -542,14 +580,22 @@ export const api = {
   ta3AdminWeb: (id: number) => post<{ ok: boolean; url: string }>(`/providers/${id}/ta3/admin-web`, {}),
 
   // ── workbuddy（腾讯 CodeBuddy/WorkBuddy）供应商（v24）──
+  // plan-271-1364: 每次 loginStart 视为「登录一个新账号」，成功后新建凭据行
   workbuddyLoginStart: (id: number) => post<{
     status: string; auth_url?: string; state?: string; expires_in?: number;
     account?: Record<string, unknown> | null;
+    credential_id?: number | null; account_label?: string | null;
   }>(`/providers/${id}/workbuddy/login/start`, {}),
   workbuddyLoginCancel: (id: number) => post<{ ok: boolean }>(`/providers/${id}/workbuddy/login/cancel`, {}),
-  workbuddyLoginStatus: (id: number) => get<{ status: string; account?: Record<string, unknown> | null; error?: string | null }>(`/providers/${id}/workbuddy/login/status`),
-  workbuddyLogout: (id: number) => post<{ ok: boolean }>(`/providers/${id}/workbuddy/logout`, {}),
-  workbuddySync: (id: number) => post<{ synced: number; models: Array<{ name: string }> }>(`/providers/${id}/workbuddy/sync`, {}),
+  workbuddyLoginStatus: (id: number) => get<{
+    status: string; account?: Record<string, unknown> | null; error?: string | null;
+    credential_id?: number | null; account_label?: string | null;
+  }>(`/providers/${id}/workbuddy/login/status`),
+  /** credentialId 给定 = 只退该账号；不传 = 退出全部账号（兼容旧行为） */
+  workbuddyLogout: (id: number, credentialId?: number) =>
+    post<{ ok: boolean }>(`/providers/${id}/workbuddy/logout${credentialId != null ? `?credential_id=${credentialId}` : ""}`, {}),
+  workbuddySync: (id: number, credentialId?: number) =>
+    post<{ synced: number; models: Array<{ name: string }> }>(`/providers/${id}/workbuddy/sync${credentialId != null ? `?credential_id=${credentialId}` : ""}`, {}),
   // plan-248-1258 M2.6: 积分余额查询与 Buddy 加油站签到
   workbuddyCredits: (id: number, opts?: { credentialId?: number; refresh?: boolean }) => {
     const qs = new URLSearchParams();
@@ -729,6 +775,8 @@ export interface GlobalSettingsOut {
   memory_enabled: boolean;
   global_rules: string;
   auto_compact_enabled: boolean;
+  /** plan-278-1391: 上下文压缩触发阈值（0.50~0.95，默认 0.90） */
+  auto_compact_threshold_ratio?: number;
   language: string;
   auto_approve_tools: boolean;
   force_approval_tools: string;

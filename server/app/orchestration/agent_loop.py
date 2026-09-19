@@ -395,6 +395,81 @@ class AgentOutput:
     artifact_ids: list[int] = field(default_factory=list)
 
 
+def _is_memory_pairing_balanced(messages: list, k: int) -> bool:
+    """内存 ChatMessage 版的「切点配对平衡」判定（逻辑对齐
+    `context_compressor._is_pairing_balanced`）。
+
+    - 压缩区 [0,k) 内每个 assistant(tool_calls) 都必须在压缩区内配对闭合；
+    - 保留区 [k:] 内不允许出现孤立 tool 消息（其 assistant(tool_calls) 落在压缩区）。
+    """
+    open_ids: set[str] = set()
+    for m in messages[:k]:
+        if m.role == "assistant" and m.tool_calls:
+            for tc in m.tool_calls:
+                tid = tc.get("id")
+                if tid:
+                    open_ids.add(str(tid))
+        elif m.role == "tool" and m.tool_call_id:
+            open_ids.discard(str(m.tool_call_id))
+    if open_ids:
+        return False
+
+    seen_calls: set[str] = set()
+    for m in messages[k:]:
+        if m.role == "assistant" and m.tool_calls:
+            for tc in m.tool_calls:
+                tid = tc.get("id")
+                if tid:
+                    seen_calls.add(str(tid))
+        elif m.role == "tool" and m.tool_call_id:
+            if str(m.tool_call_id) not in seen_calls:
+                return False
+    return True
+
+
+def _prune_messages_for_compaction(messages: list, retain_tokens: int) -> list:
+    """plan-278-1391：压缩成功后按保留预算裁剪「本轮内存消息」。
+
+    根因修复：落库式压缩把被压缩消息记入 shared_context.compacted_ids，只在**下一轮**
+    上下文重建时生效；本轮内存 messages 若不裁剪，真实 prompt 占用几乎不下降，
+    于是每步都判定「超阈值」而反复触发压缩（可压范围耗尽后收益断崖式衰减）。
+
+    策略（只扩大保留区，绝不拆散工具回合）：
+    1. 系统/开发者消息（系统提示、分层上下文）全部保留；
+    2. 其余消息从尾部向前累计 token 至 retain_tokens 得初始切点；
+    3. 切点向前回退到 tool 配对平衡位置；
+    4. 按原顺序重组（保持消息相对次序），返回裁剪后的列表。
+
+    注意：仅作用于内存，落库消息与 compacted_ids 不变，前端压缩卡片/还原不受影响。
+    """
+    from app.orchestration.token_counter import estimate_message_tokens
+
+    if len(messages) <= 1:
+        return messages
+    body = [m for m in messages if m.role not in ("system", "developer")]
+    if not body:
+        return messages
+
+    keep_from = len(body)
+    acc = 0
+    for i in range(len(body) - 1, -1, -1):
+        acc += estimate_message_tokens(body[i])
+        keep_from = i
+        if acc >= retain_tokens:
+            break
+    if keep_from == 0:
+        return messages  # 全部都在保留预算内，无需裁剪
+
+    k = keep_from
+    while k > 0 and not _is_memory_pairing_balanced(body, k):
+        k -= 1
+    if k == 0:
+        return messages
+
+    kept_ids = {id(m) for m in body[k:]}
+    return [m for m in messages if m.role in ("system", "developer") or id(m) in kept_ids]
+
+
 async def _compact_persistent_or_fallback(
     db: AsyncSession, *, session_id: int, provider, agent_window: int,
     used_tokens: int | None, agent_id: int, agent_name: str,
@@ -435,7 +510,20 @@ async def _compact_persistent_or_fallback(
         _result = None
 
     if _result is not None:
-        messages = [*messages, ChatMessage(
+        # plan-278-1391: 先裁剪本轮内存消息，再追加 checkpoint。
+        # 不裁剪的话，被压缩内容仍留在本轮 prompt 里 → 占用不降 → 每步反复触发压缩。
+        from app.orchestration.token_counter import estimate_messages_tokens
+        _before_tokens = estimate_messages_tokens(messages)
+        _retain = _result.get("retained_tokens")
+        if not isinstance(_retain, int) or _retain <= 0:
+            _retain = max(4000, int(agent_window * 0.16))  # 与 compact_session 缺省一致
+        _pruned = _prune_messages_for_compaction(messages, _retain)
+        _after_tokens = estimate_messages_tokens(_pruned)
+        logger.info(
+            "[agent] turn=%s 压缩后内存上下文 %d -> %d tokens（保留预算 %d，消息 %d -> %d 条）",
+            turn_id, _before_tokens, _after_tokens, _retain, len(messages), len(_pruned),
+        )
+        messages = [*_pruned, ChatMessage(
             role="developer",
             content=f"{CHECKPOINT_PREAMBLE}\n\n{_result['summary']}",
         )]
@@ -538,10 +626,21 @@ async def run_agent_loop(
         _cur_model = await db.get(Model, model_id)
         provider, reason = await registry.get_provider_for_model(db, _cur_model)
     if provider is None:
-        provider, reason = await registry.get_provider_for_agent(db, agent)
-        if provider is not None and getattr(agent, "model_id", None):
-            from app.persistence.models.model_reg import Model as _Model
-            _cur_model = await db.get(_Model, agent.model_id)
+        # plan-271-1364 回归修复：回落 agent 绑定模型时**不要**用它的原因覆盖已有的具体原因。
+        # 此前无条件 `provider, reason = await get_provider_for_agent(...)`，把 model_id 路径的
+        # 真实失败原因（如 workbuddy_login_required / provider_disabled）冲成
+        # no_default_configured，用户只看到误导性的"模型不可用(no_default_configured)"。
+        _primary_reason = reason
+        _fb_provider, _fb_reason = await registry.get_provider_for_agent(db, agent)
+        if _fb_provider is not None:
+            provider = _fb_provider
+            reason = _fb_reason
+            if getattr(agent, "model_id", None):
+                from app.persistence.models.model_reg import Model as _Model
+                _cur_model = await db.get(_Model, agent.model_id)
+        elif _primary_reason not in (None, ""):
+            # 回落同样失败：保留更贴近真实故障的原有原因
+            reason = _primary_reason
     if provider is None:
         await _emit_agent_msg(db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
                               agent_id=agent_id, agent_name=agent_name,

@@ -143,6 +143,43 @@ async def _build_trae_provider(
     return p, "trae_session"
 
 
+async def _first_logged_in_auth(db: AsyncSession, provider_id: int | None):
+    """取该供应商下「首个已登录账号」的 workbuddy auth 行（含带 credential_id 的新式行）。
+
+    plan-271-1364 回归修复：多账号改造后 `wb_session.load_auth(db, provider_id)`
+    只匹配 `credential_id IS NULL` 的旧式行；而 workbuddy 模型在
+    `get_provider_for_model` 中走「自带占位 api_key」分支（credential=None），
+    迁移/登录后的 auth 行都带 credential_id，于是取不到登录态、模型被判不可用。
+    此处先按凭据逐个查；凭据行缺失（迁移残留）时再直接扫描该供应商的 auth 行兜底。
+
+    Returns:
+        (auth_row, credential_id)；均无时返回 (None, None)。
+    """
+    if not provider_id:
+        return None, None
+    from app.auth.workbuddy import session as _wb_session
+    from app.services import credential_service
+
+    creds = await credential_service.list_credentials(db, provider_id)
+    for c in creds:
+        row = await _wb_session.load_auth(db, provider_id, c.id)
+        if row is not None and row.access_token:
+            return row, c.id
+
+    # 兜底：凭据行缺失/未迁移完成时，直接找该供应商任一已登录 auth 行
+    from sqlalchemy import select
+
+    from app.persistence.models.workbuddy_auth import WorkBuddyAuth as _Auth
+
+    res = await db.execute(
+        select(_Auth).where(_Auth.provider_id == provider_id).order_by(_Auth.id.asc())
+    )
+    for row in res.scalars().all():
+        if row.access_token:
+            return row, getattr(row, "credential_id", None)
+    return None, None
+
+
 async def _build_workbuddy_provider(
     db: AsyncSession, model: "Model | None", provider=None, credential=None,
 ) -> tuple["ModelProvider | None", str]:
@@ -163,10 +200,18 @@ async def _build_workbuddy_provider(
 
             provider = await db.get(_Provider, model.provider_id)
     provider_id = provider.id if provider is not None else model.provider_id
+    resolved_cred_id: int | None = None
     if credential is not None:
         auth = await _load_auth_for_credential(db, "workbuddy", provider_id, credential.id)
+        resolved_cred_id = getattr(auth, "credential_id", None) if auth is not None else credential.id
     else:
+        # 先按旧式 provider 级行取；取不到再回落到「首个已登录账号」
+        # （多账号后 auth 行都带 credential_id，只查旧式行会永远取不到登录态）
         auth = await wb_session.load_auth(db, provider_id)
+        if auth is None or not auth.access_token:
+            auth, resolved_cred_id = await _first_logged_in_auth(db, provider_id)
+        else:
+            resolved_cred_id = getattr(auth, "credential_id", None)
     if auth is None or not auth.access_token:
         return None, "workbuddy_login_required"
 
@@ -186,7 +231,11 @@ async def _build_workbuddy_provider(
     async def _refresh() -> str | None:
         try:
             # 认证接口走 endpoint（不带 /v2，refresh_session 内部拼接 /v2/plugin/...）
-            return await wb_session.refresh_session(db, provider_id, endpoint)
+            # plan-271-1364 M2.4: 按「token 实际所属的 auth 行」刷新——用 auth.credential_id
+            # 而非传入凭据 id，因为 _load_auth_for_credential 可能回落到旧式 provider 级行；
+            # 多账号下这样才不会用错账号的 refresh_token（修 D3）。
+            refresh_cred_id = getattr(auth, "credential_id", None)
+            return await wb_session.refresh_session(db, provider_id, endpoint, refresh_cred_id)
         except wb_session.WorkBuddyAuthError:
             return None
 
@@ -197,6 +246,10 @@ async def _build_workbuddy_provider(
         meta=meta,
         refresh_token=_refresh,
     )
+    # plan-271-1364 回归修复：占位 key 分支（credential=None）也要标记实际命中的凭据，
+    # 否则 agent_loop 的失败上报/凭据轮询拿不到 credential_row_id，无法切换账号。
+    if resolved_cred_id is not None:
+        _attach_credential_meta(p, provider_id, resolved_cred_id)
     return p, "workbuddy_session"
 
 
@@ -214,6 +267,11 @@ async def _load_auth_for_credential(db: AsyncSession, api_format: str, provider_
     """按凭据取 OAuth 登录态行（workbuddy/ta3/trae 多账号）。
 
     credential_id 为空时回落 provider 级（兼容旧单账号数据）。
+
+    plan-271-1364：credential_id 给定时，若该凭据尚无 auth 行，会回落到
+    `credential_id IS NULL` 的旧式 provider 级行——这是给「迁移前已登录、尚未
+    重新登录」的旧安装用的兼容路径；注意该回落命中的是 provider 级账号，
+    多账号并存后新账号都有各自 credential_id，不会再走这里。
     """
     from sqlalchemy import select
 
@@ -245,17 +303,26 @@ async def _load_auth_for_credential(db: AsyncSession, api_format: str, provider_
 
 async def _pick_credential(db: AsyncSession, provider, exclude: set[int] | None = None,
                            db_provider_id: int | None = None):
-    """按轮询序选取可用凭据，返回 (credential | None, api_key | None)。
+    """按取用策略选取可用凭据，返回 (credential | None, api_key | None)。
 
     - API Key 供应商：直接取凭据的 api_key；
     - OAuth 供应商（workbuddy/ta3/trae）：以凭据关联的 auth 行 access_token 作为 key；
     - 无凭据记录时回落 provider.api_key（兼容未迁移/新建未配凭据的情况）。
+
+    plan-271-1364 M3.1: 顺序由 provider.credential_strategy 决定——
+    sticky（默认）粘性优先；round_robin 严格按 priority 轮转，并推进进程内游标
+    （展示/计数路径不调用本函数，因此游标不会被无谓推进）。
     """
     from app.services import credential_service
 
     exclude = exclude or set()
-    creds = await credential_service.list_credentials(db, db_provider_id or provider.id)
-    avail = [c for c in credential_service.available_credentials(creds) if c.id not in exclude]
+    pid = db_provider_id or provider.id
+    creds = await credential_service.list_credentials(db, pid)
+    strategy = getattr(provider, "credential_strategy", None) or "sticky"
+    avail = credential_service.available_credentials(
+        creds, strategy=strategy, provider_id=pid, rotate=True,
+    )
+    avail = [c for c in avail if c.id not in exclude]
     fmt = (provider.api_format or "openai").lower()
     for c in avail:
         if c.api_key:
@@ -289,11 +356,12 @@ class ModelRegistry:
     ) -> tuple[ModelProvider | None, str]:
         """按 Model 记录构造 Provider。
 
-        优先级:
-        1. model.api_key 自带密钥 → 用 model.base_url 直接构造
-        2. system_default → 用 model.base_url + 服务端全局密钥
-        3. byok → 服务端无密钥,返回 None
-        4. model 为 None → 回落默认 provider
+        优先级（plan-271-1364 起）:
+        1. 模型挂在供应商下且供应商已配凭据 → 按凭据解析（启停/priority/策略生效）；
+        2. model.api_key 自带密钥 → 用 model.base_url 直接构造（独立模型兼容路径）；
+        3. system_default → 用 model.base_url + 服务端全局密钥；
+        4. byok → 服务端无密钥,返回 None；
+        5. model 为 None → 回落默认 provider。
         """
         from app.core.enums import ModelSource
 
@@ -301,8 +369,50 @@ class ModelRegistry:
             p = self.get_default_provider()
             return p, "default" if p else "no_default_configured"
 
-        # v2.0: model 自带 api_key,直接构造 provider(最高优先)
         model_api_key = getattr(model, "api_key", None)
+        provider_id = getattr(model, "provider_id", None)
+
+        # plan-271-1364 修复：挂在供应商下的模型必须优先走**凭据列表**——凭据是
+        # 密钥/账号的唯一来源，启停（is_active）、priority 与 credential_strategy 都
+        # 在凭据层生效。此前「model.api_key 自带密钥」分支优先级最高，导致停用的 key
+        # 仍被调用、优先级/策略完全不生效（用户反馈的正是这两个现象）。
+        if provider_id:
+            from app.persistence.models.model_reg import Provider
+            from app.services import credential_service
+
+            provider = await db.get(Provider, provider_id)
+            if provider is not None:
+                if not provider.is_active:
+                    # plan-248-1258 M2.4: 供应商被禁用即视为模型不可用
+                    return None, "provider_disabled"
+                # 仅当确有凭据行时才以凭据为准；否则回落旧行为（独立 key / 占位符）
+                if await credential_service.list_credentials(db, provider.id):
+                    api_format = (provider.api_format or getattr(model, "api_format", "openai") or "openai")
+                    chosen, api_key = await _pick_credential(db, provider, exclude=set())
+                    if chosen is None:
+                        # 凭据全部停用/冷却中：明确失败，绝不回落到模型行旧 key 或 auth 兜底，
+                        # 否则「停用某个 key/账号后仍被调用」（用户反馈现象）。
+                        return None, "provider_credential_unavailable"
+                    if api_format in ("workbuddy", "trae"):
+                        if api_format == "workbuddy":
+                            p, reason = await _build_workbuddy_provider(db, model, provider, chosen)
+                        else:
+                            p, reason = await _build_trae_provider(db, model, provider, chosen)
+                        if p is not None:
+                            _attach_credential_meta(p, provider.id, chosen.id)
+                        return p, reason
+                    if provider.base_url and api_key:
+                        # ta3 需要远端元数据（系统提示词/协议/目录配置），否则行为退化
+                        _meta = (getattr(model, "ta3_meta", None) or {}) if api_format == "ta3" else None
+                        p = _build_provider(
+                            api_key=api_key, base_url=provider.base_url, model=model.name,
+                            api_format=api_format, meta=_meta, provider=provider,
+                        )
+                        _attach_credential_meta(p, provider.id, chosen.id)
+                        return p, "provider_credential"
+                    return None, "provider_incomplete"
+
+        # v2.0: model 自带 api_key（独立模型 / 供应商无凭据时的兼容路径）
         if model_api_key:
             base_url = model.base_url or settings.default_llm_base_url
             model_name = model.name
@@ -321,37 +431,6 @@ class ModelRegistry:
                                     api_format=api_format, meta=ta3_meta),
                     "model_key",
                 )
-
-        # v16: 模型挂在供应商下 —— 用供应商的 base_url/api_key 构造
-        provider_id = getattr(model, "provider_id", None)
-        if provider_id:
-            from app.persistence.models.model_reg import Provider
-
-            provider = await db.get(Provider, provider_id)
-            if provider is None:
-                return None, "provider_incomplete"
-            if not provider.is_active:
-                # plan-248-1258 M2.4: 供应商被禁用即视为模型不可用（前端选择器同步过滤）
-                return None, "provider_disabled"
-            api_format = (provider.api_format or getattr(model, "api_format", "openai") or "openai")
-            chosen, api_key = await _pick_credential(db, provider, exclude=set())
-            # OAuth 类（workbuddy/ta3/trae）：token 由各自 auth 表按凭据动态加载
-            if api_format in ("workbuddy", "trae"):
-                if api_format == "workbuddy":
-                    p, reason = await _build_workbuddy_provider(db, model, provider, chosen)
-                else:
-                    p, reason = await _build_trae_provider(db, model, provider, chosen)
-                if p is not None:
-                    _attach_credential_meta(p, provider.id, chosen.id if chosen else None)
-                return p, reason
-            if not (provider.base_url and api_key):
-                return None, "provider_incomplete"
-            p = _build_provider(
-                api_key=api_key, base_url=provider.base_url, model=model.name,
-                api_format=api_format, provider=provider,
-            )
-            _attach_credential_meta(p, provider.id, chosen.id if chosen else None)
-            return p, ("provider_credential" if chosen else "provider_key")
 
         if model.source_type == ModelSource.BYOK:
             return None, "byok_requires_client"

@@ -339,6 +339,8 @@ export interface ProviderOut {
   /** plan-248-1258 M2.2: 凭据统计（多 Key/多账号） */
   credential_count?: number;
   active_credential_count?: number;
+  /** plan-271-1364: 凭据取用策略（sticky=粘性优先 | round_robin=按优先级轮转） */
+  credential_strategy?: string;
 }
 
 /** plan-248-1258 M2.2: 供应商凭据（多 API Key / 多登录账号） */

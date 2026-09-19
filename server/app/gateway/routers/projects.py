@@ -21,6 +21,16 @@ async def create_project(body: ProjectCreate, db: AsyncSession = Depends(get_db)
         return project
     except ValueError as e:
         raise HTTPException(400, str(e))
+    except project_service.ProjectArchivedError as e:
+        # plan-278-1391: 同路径项目已归档 → 409 + 结构化信息，前端提示「恢复并打开」，
+        # 不再让 UNIQUE 约束冲突冒泡成 500。
+        raise HTTPException(409, detail={
+            "code": "project_archived",
+            "message": "该项目已归档，是否恢复并打开？",
+            "project_id": e.project_id,
+            "name": e.name,
+            "path": e.path,
+        })
 
 
 @router.get("", response_model=list[ProjectOut])

@@ -45,6 +45,8 @@ export function GeneralPanel() {
     agent_retry_intervals: "10,20,30",
     browser_enabled: false,
     browser_headless: true,
+    // plan-278-1391: 上下文压缩触发阈值（占模型窗口比例，默认 0.90）
+    auto_compact_threshold_ratio: 0.90,
   });
   const [saving, setSaving] = useState(false);
   // 问题7/8: 终端 Shell/字体选项（后端按当前设备存在性探测）
@@ -110,6 +112,9 @@ export function GeneralPanel() {
         agent_retry_intervals: typeof g.agent_retry_intervals === "string" ? g.agent_retry_intervals : "10,20,30",
         browser_enabled: g.browser_enabled === true,
         browser_headless: g.browser_headless !== false,
+        // plan-278-1391: 压缩触发阈值（后端可能未返回，回退默认 0.90）
+        auto_compact_threshold_ratio: typeof g.auto_compact_threshold_ratio === "number"
+          ? g.auto_compact_threshold_ratio : 0.90,
       });
     } catch {}
   }, []);
@@ -136,6 +141,8 @@ export function GeneralPanel() {
         agent_retry_intervals: cfg.agent_retry_intervals,
         browser_enabled: cfg.browser_enabled,
         browser_headless: cfg.browser_headless,
+        // plan-278-1391: 压缩触发阈值（保留两位小数，避免浮点噪声）
+        auto_compact_threshold_ratio: Math.round(cfg.auto_compact_threshold_ratio * 100) / 100,
       });
       // v1.1: 保存即生效——刷新 todos/reasoning 显示开关
       await useUiStore.getState().refreshGlobalFlags();
@@ -276,6 +283,21 @@ export function GeneralPanel() {
                 onChange={(e) => patch({ agent_max_steps: Math.max(0, parseInt(e.target.value) || 0) })}
               />
             )}
+          </div>
+        </Row>
+        {/* plan-278-1391: 上下文压缩触发阈值——占模型上下文窗口比例，达阈值即自动压缩 */}
+        <Row title={t("gp.compact_threshold")} desc={t("gp.compact_threshold_desc")}>
+          <div className="settings-slider-wrap">
+            <input
+              type="range"
+              className="settings-slider"
+              min={50}
+              max={95}
+              step={5}
+              value={Math.round(cfg.auto_compact_threshold_ratio * 100)}
+              onChange={(e) => patch({ auto_compact_threshold_ratio: Number(e.target.value) / 100 })}
+            />
+            <span className="settings-slider-value">{Math.round(cfg.auto_compact_threshold_ratio * 100)}%</span>
           </div>
         </Row>
         {/* v45: 异常自动重试策略——任何报错按间隔依次重试，穷尽后才停止并显示报错 */}

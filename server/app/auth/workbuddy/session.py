@@ -1,6 +1,9 @@
 """workbuddy 登录态存储与会话管理。
 
-- load/save/clear：WorkBuddyAuth 表单行读写
+- load/save/clear：WorkBuddyAuth 表按「provider + credential」双维度读写。
+  plan-271-1364 M2.1：多账号支持 —— 每条登录账号对应一条 provider_credentials，
+  其 workbuddy_auth 行的 credential_id 指向该凭据；credential_id 为空表示旧式
+  provider 级单账号（兼容未迁移数据）。
 - ensure_token：返回当前 access_token（不预判过期，401 兜底刷新）
 - refresh_session：业务请求 401 时自动 refresh（带 in-flight 锁防并发 stampede，
   对齐 CodeBuddy CLI ExternalLinkAuthenticationProvider.refreshSession：
@@ -39,37 +42,68 @@ def _domain_of(api_base: str) -> str:
     return urlparse(api_base).netloc or ""
 
 
-async def load_auth(db: AsyncSession, provider_id: int) -> WorkBuddyAuth | None:
-    res = await db.execute(select(WorkBuddyAuth).where(WorkBuddyAuth.provider_id == provider_id))
+def _auth_filter(provider_id: int, credential_id: int | None):
+    """双维度定位条件：credential_id 为空 → provider 级旧行（credential_id IS NULL）。"""
+    if credential_id is None:
+        return (WorkBuddyAuth.provider_id == provider_id,
+                WorkBuddyAuth.credential_id.is_(None))
+    return (WorkBuddyAuth.provider_id == provider_id,
+            WorkBuddyAuth.credential_id == credential_id)
+
+
+def _select_auth(provider_id: int, credential_id: int | None):
+    return select(WorkBuddyAuth).where(*_auth_filter(provider_id, credential_id))
+
+
+def _select_auth_in_session(s, provider_id: int, credential_id: int | None) -> WorkBuddyAuth | None:
+    rows = s.execute(_select_auth(provider_id, credential_id)).scalars().all()
+    return rows[0] if rows else None
+
+
+async def load_auth(db: AsyncSession, provider_id: int,
+                    credential_id: int | None = None) -> WorkBuddyAuth | None:
+    """按 provider（+可选 credential）取登录态行。
+
+    credential_id 为空时只取旧式 provider 级行，避免多账号下读到别的账号。
+    """
+    res = await db.execute(_select_auth(provider_id, credential_id))
     return res.scalars().first()
 
 
-async def get_auth_row(db: AsyncSession, provider_id: int) -> WorkBuddyAuth:
-    """取或建（惰性创建）登录态行（写引擎单写线程）。"""
+async def get_auth_row(db: AsyncSession, provider_id: int,
+                       credential_id: int | None = None) -> WorkBuddyAuth | None:
+    """取或建（惰性创建）指定维度的登录态行（写引擎单写线程）。
+
+    修复 plan-271-1364 D1：旧实现用 s.get(WorkBuddyAuth, provider_id) 按主键查，
+    与 load_auth 的 WHERE provider_id= 语义不一致，provider_id 与行 id 不等时会重复建行。
+    """
     from app.persistence.database import run_write_locked
 
     def patch(s):
-        row = s.get(WorkBuddyAuth, provider_id)
+        row = _select_auth_in_session(s, provider_id, credential_id)
         if row is None:
-            row = WorkBuddyAuth(provider_id=provider_id, updated_at=_now())
+            row = WorkBuddyAuth(provider_id=provider_id, credential_id=credential_id, updated_at=_now())
             s.add(row)
             s.flush()
-            s.commit()
+        s.commit()
         return True
 
-    await run_write_locked(patch, label=f"workbuddy.auth.row.{provider_id}")
-    return await load_auth(db, provider_id)
+    label_suffix = credential_id if credential_id is not None else "legacy"
+    await run_write_locked(patch, label=f"workbuddy.auth.row.{provider_id}.{label_suffix}")
+    return await load_auth(db, provider_id, credential_id)
 
 
 async def save_auth(db: AsyncSession, provider_id: int, *, access_token: str,
                     refresh_token: str | None = None, account: dict | None = None,
-                    catalog: dict | None = None) -> None:
+                    catalog: dict | None = None,
+                    credential_id: int | None = None) -> None:
+    """写入指定维度的登录态（credential_id 给定时落该账号行，实现多账号）。"""
     from app.persistence.database import run_write_locked
 
     def patch(s):
-        row = s.get(WorkBuddyAuth, provider_id)
+        row = _select_auth_in_session(s, provider_id, credential_id)
         if row is None:
-            row = WorkBuddyAuth(provider_id=provider_id, updated_at=_now())
+            row = WorkBuddyAuth(provider_id=provider_id, credential_id=credential_id, updated_at=_now())
             s.add(row)
         row.access_token = access_token
         if refresh_token is not None:
@@ -81,38 +115,44 @@ async def save_auth(db: AsyncSession, provider_id: int, *, access_token: str,
         row.updated_at = _now()
         s.commit()
 
-    await run_write_locked(patch, label=f"workbuddy.auth.save.{provider_id}")
+    label_suffix = credential_id if credential_id is not None else "legacy"
+    await run_write_locked(patch, label=f"workbuddy.auth.save.{provider_id}.{label_suffix}")
 
 
-async def clear_auth(db: AsyncSession, provider_id: int) -> None:
+async def clear_auth(db: AsyncSession, provider_id: int,
+                     credential_id: int | None = None) -> None:
+    """清除指定维度的登录态行；credential_id 为空时只清 provider 级旧行。"""
     from app.persistence.database import run_write_locked
 
     def patch(s):
-        row = s.get(WorkBuddyAuth, provider_id)
-        if row is not None:
+        rows = s.execute(_select_auth(provider_id, credential_id)).scalars().all()
+        for row in rows:
             s.delete(row)
-            s.commit()
+        s.commit()
 
-    await run_write_locked(patch, label=f"workbuddy.auth.clear.{provider_id}")
+    label_suffix = credential_id if credential_id is not None else "legacy"
+    await run_write_locked(patch, label=f"workbuddy.auth.clear.{provider_id}.{label_suffix}")
 
 
-async def get_access_token(db: AsyncSession, provider_id: int) -> str | None:
-    row = await load_auth(db, provider_id)
+async def get_access_token(db: AsyncSession, provider_id: int,
+                           credential_id: int | None = None) -> str | None:
+    row = await load_auth(db, provider_id, credential_id)
     return row.access_token if row else None
 
 
-# refresh 续期 in-flight 锁（按 provider_id），防多个 401 并发触发 stampede
-# （refresh_token 轮转会让并发的第二次失败）
-_refresh_locks: dict[int, object] = {}
+# refresh 续期 in-flight 锁（按 provider_id + credential_id），防多个 401 并发触发
+# stampede（refresh_token 轮转会让并发的第二次失败）；按账号隔离避免不同账号互相等待。
+_refresh_locks: dict[tuple[int, int | None], object] = {}
 
 
-def _get_refresh_lock(provider_id: int):
+def _get_refresh_lock(provider_id: int, credential_id: int | None = None):
     import asyncio
 
-    lock = _refresh_locks.get(provider_id)
+    key = (provider_id, credential_id)
+    lock = _refresh_locks.get(key)
     if lock is None:
         lock = asyncio.Lock()
-        _refresh_locks[provider_id] = lock
+        _refresh_locks[key] = lock
     return lock
 
 
@@ -168,42 +208,46 @@ async def refresh_access_token(api_base: str, access_token: str, refresh_token: 
     }
 
 
-async def ensure_token(db: AsyncSession, provider_id: int, api_base: str) -> str:
+async def ensure_token(db: AsyncSession, provider_id: int, api_base: str,
+                       credential_id: int | None = None) -> str:
     """返回可用 access_token；未登录抛 WorkBuddyAuthError。
 
     不预判过期（对齐 CLI：不做定时刷新，依赖 401 兜底 refresh）。
     """
-    row = await load_auth(db, provider_id)
+    row = await load_auth(db, provider_id, credential_id)
     if row is None or not row.access_token:
         raise WorkBuddyAuthError("请先登录 WorkBuddy 账号", "login_required")
     return row.access_token
 
 
-async def refresh_session(db: AsyncSession, provider_id: int, api_base: str) -> str:
+async def refresh_session(db: AsyncSession, provider_id: int, api_base: str,
+                          credential_id: int | None = None) -> str:
     """业务请求 401 时刷新会话，返回新 access_token。
 
-    refresh_token 轮转防并发由 in-flight 锁保证；失效时清会话抛 login_required。
+    refresh_token 轮转防并发由 in-flight 锁保证；锁按 (provider_id, credential_id)
+    隔离，多账号下不会互相阻塞或用错账号的 refresh_token（修 D3）。
+    失效时清会话抛 login_required。
     """
-    row = await load_auth(db, provider_id)
+    row = await load_auth(db, provider_id, credential_id)
     if row is None or not row.access_token or not row.refresh_token:
         raise WorkBuddyAuthError("请先登录 WorkBuddy 账号", "login_required")
 
-    lock = _get_refresh_lock(provider_id)
+    lock = _get_refresh_lock(provider_id, credential_id)
     async with lock:
         # 双检：等待锁期间可能已被其它协程刷新
-        row = await load_auth(db, provider_id)
+        row = await load_auth(db, provider_id, credential_id)
         if row is None or not row.access_token or not row.refresh_token:
             raise WorkBuddyAuthError("请先登录 WorkBuddy 账号", "login_required")
         try:
             result = await refresh_access_token(api_base, row.access_token, row.refresh_token)
         except WorkBuddyAuthError as e:
             if e.kind == "login_required":
-                await clear_auth(db, provider_id)
+                await clear_auth(db, provider_id, credential_id)
             raise
         from app.persistence.database import run_write_locked
 
         def _persist(s):
-            r = s.get(WorkBuddyAuth, provider_id)
+            r = _select_auth_in_session(s, provider_id, credential_id)
             if r is None:
                 s.commit()
                 return
@@ -213,11 +257,13 @@ async def refresh_session(db: AsyncSession, provider_id: int, api_base: str) -> 
             r.updated_at = _now()
             s.commit()
 
-        await run_write_locked(_persist, label=f"workbuddy.auth.refresh.{provider_id}")
+        label_suffix = credential_id if credential_id is not None else "legacy"
+        await run_write_locked(_persist, label=f"workbuddy.auth.refresh.{provider_id}.{label_suffix}")
         return result["accessToken"]
 
 
-async def mark_login_required(db: AsyncSession, provider_id: int) -> None:
+async def mark_login_required(db: AsyncSession, provider_id: int,
+                              credential_id: int | None = None) -> None:
     """业务请求 401 且无 refresh_token 可用时，清会话要求重登。"""
-    await clear_auth(db, provider_id)
+    await clear_auth(db, provider_id, credential_id)
     await db.commit()

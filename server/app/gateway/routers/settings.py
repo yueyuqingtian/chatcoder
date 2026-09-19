@@ -141,6 +141,14 @@ def load_persisted_workspace() -> None:
         _sm = str(data["sandbox_mode"])
         if _sm in ("workspace-write", "read-only", "danger-full-access"):
             settings.sandbox_mode = _sm
+    # plan-278-1391: 启动时恢复压缩触发阈值（默认 0.90，范围 0.50~0.95）
+    if "auto_compact_threshold_ratio" in data:
+        try:
+            _ratio = float(data["auto_compact_threshold_ratio"])
+        except (TypeError, ValueError):
+            _ratio = None
+        if _ratio is not None and 0.50 <= _ratio <= 0.95:
+            settings.auto_compact_threshold_ratio = round(_ratio, 2)
 
 
 @router.get("/settings/workspace", response_model=WorkspaceOut)
@@ -164,6 +172,8 @@ class GlobalSettingsOut(BaseModel):
     memory_enabled: bool = True
     global_rules: str = ""
     auto_compact_enabled: bool = True
+    # plan-278-1391: 上下文压缩触发阈值（占模型窗口比例）。默认 0.90，可配置范围 0.50~0.95。
+    auto_compact_threshold_ratio: float = 0.90
     language: str = "zh"
     # v1.0: Agent/安全配置
     auto_approve_tools: bool = False
@@ -196,6 +206,8 @@ class GlobalSettingsIn(BaseModel):
     memory_enabled: bool | None = None
     global_rules: str | None = None
     auto_compact_enabled: bool | None = None
+    # plan-278-1391: 压缩触发阈值比例（0.50~0.95）
+    auto_compact_threshold_ratio: float | None = None
     language: str | None = None
     # v1.0: Agent/安全配置
     auto_approve_tools: bool | None = None
@@ -226,6 +238,10 @@ async def get_global_settings() -> GlobalSettingsOut:
         memory_enabled=data.get("memory_enabled", True),
         global_rules=data.get("global_rules", ""),
         auto_compact_enabled=data.get("auto_compact_enabled", True),
+        # plan-278-1391: 压缩触发阈值（默认取运行时 settings，即 0.90）
+        auto_compact_threshold_ratio=float(
+            data.get("auto_compact_threshold_ratio", settings.auto_compact_threshold_ratio)
+        ),
         language=data.get("language", "zh"),
         auto_approve_tools=data.get("auto_approve_tools", settings.auto_approve_tools),
         force_approval_tools=data.get("force_approval_tools", settings.force_approval_tools),
@@ -323,6 +339,15 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         data["global_rules"] = body.global_rules
     if body.auto_compact_enabled is not None:
         data["auto_compact_enabled"] = body.auto_compact_enabled
+    # plan-278-1391: 压缩触发阈值（夹紧到 0.50~0.95，非法值忽略），运行时立即生效
+    if body.auto_compact_threshold_ratio is not None:
+        try:
+            _ratio = float(body.auto_compact_threshold_ratio)
+        except (TypeError, ValueError):
+            _ratio = None
+        if _ratio is not None and 0.50 <= _ratio <= 0.95:
+            data["auto_compact_threshold_ratio"] = round(_ratio, 2)
+            settings.auto_compact_threshold_ratio = round(_ratio, 2)
     if body.language is not None:
         data["language"] = body.language
     # v1.0: Agent/安全配置
@@ -395,6 +420,10 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         memory_enabled=data.get("memory_enabled", True),
         global_rules=data.get("global_rules", ""),
         auto_compact_enabled=data.get("auto_compact_enabled", True),
+        # plan-278-1391: 压缩触发阈值（默认取运行时 settings，即 0.90）
+        auto_compact_threshold_ratio=float(
+            data.get("auto_compact_threshold_ratio", settings.auto_compact_threshold_ratio)
+        ),
         language=data.get("language", "zh"),
         auto_approve_tools=data.get("auto_approve_tools", settings.auto_approve_tools),
         force_approval_tools=data.get("force_approval_tools", settings.force_approval_tools),

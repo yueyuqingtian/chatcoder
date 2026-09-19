@@ -279,17 +279,19 @@ async def claim_for_credential(db: AsyncSession, provider, credential) -> dict:
     """按凭据（账号）执行一次签到，并刷新积分缓存。
 
     provider/credential 为 ORM 行；真实 token 取自该凭据关联的 workbuddy_auth。
+
+    plan-271-1364 M2.3（修 D4）：credential 给定时**不再**回落到 provider 级账号，
+    否则会拿别的账号的 token 去签到 / 查积分，导致归属错位。仅当 credential 为空
+    （旧式未迁移数据）才读 provider 级旧行。
     """
     from app.auth.workbuddy import session as wb_session
     from app.services import credential_service
 
     api_base = (getattr(provider, "base_url", None)
                 or "https://copilot.tencent.com").rstrip("/")
-    auth = None
     if credential is not None:
-        from app.models.registry import _load_auth_for_credential
-        auth = await _load_auth_for_credential(db, "workbuddy", provider.id, credential.id)
-    if auth is None:
+        auth = await wb_session.load_auth(db, provider.id, credential.id)
+    else:
         auth = await wb_session.load_auth(db, provider.id)
     if auth is None or not auth.access_token:
         return {"status": "login_required", "error": "账号未登录"}

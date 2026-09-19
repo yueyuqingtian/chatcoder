@@ -156,6 +156,10 @@ async def start_login(db: AsyncSession, provider_id: int, api_base: str) -> dict
     """登录入口：发起 state → 启动后台轮询 → 返回 pending + auth_url。
 
     前端用系统浏览器打开 auth_url 完成登录后，轮询 /login/status 取结果。
+
+    plan-271-1364 M2.2: 每次登录都视为「登录一个新账号」——轮询成功后先建一条
+    账号凭据（provider_credentials）拿到 credential_id，再把 workbuddy_auth 行挂到
+    该凭据上。旧账号行不会被覆盖，从而实现多账号并存与后续按账号轮询。
     """
     from app.auth.workbuddy import session as wb_session
 
@@ -191,14 +195,24 @@ async def start_login(db: AsyncSession, provider_id: int, api_base: str) -> dict
             "enterpriseId": account_raw.get("enterpriseId") or "",
             "label": account_raw.get("nickname") or account_raw.get("name") or "已登录",
         }
+        # M2.2: 先建账号凭据再落 token，二者通过 credential_id 绑定
+        from app.services import credential_service
+
+        label = str(account.get("label") or account.get("nickname") or "")[:80] or None
+        credential_id = await credential_service.create_account_credential(
+            db, provider_id, label=label, account=account,
+        )
         await wb_session.save_auth(
             db, provider_id,
             access_token=access_token,
             refresh_token=refresh_token or None,
             account=account,
+            credential_id=credential_id,
         )
-        logger.info("[workbuddy] provider=%s 浏览器登录完成", provider_id)
-        return {"status": "logged_in", "account": account}
+        logger.info("[workbuddy] provider=%s 浏览器登录完成 (credential=%s, account=%s)",
+                    provider_id, credential_id, label)
+        return {"status": "logged_in", "account": account,
+                "credential_id": credential_id, "account_label": label}
 
     task = asyncio.create_task(_poll_loop())
     _active_tasks[provider_id] = task
@@ -212,7 +226,11 @@ async def start_login(db: AsyncSession, provider_id: int, api_base: str) -> dict
 
 
 async def get_login_status(db: AsyncSession, provider_id: int) -> dict:
-    """查询登录状态：优先 in-flight 任务结果，其次 DB 登录态。"""
+    """查询登录状态：优先 in-flight 任务结果，其次 DB 登录态。
+
+    plan-271-1364：入参为刚创建的账号凭据（若已建立），用于回读该账号登录态；
+    调用方在登录成功后应改用凭据列表读取各账号状态。
+    """
     from app.auth.workbuddy import session as wb_session
 
     task = _active_tasks.get(provider_id)
@@ -225,10 +243,31 @@ async def get_login_status(db: AsyncSession, provider_id: int) -> dict:
                 return {"status": "failed", "error": str(e)[:300]}
         return {"status": "pending"}
 
+    # 兼容旧单账号：无 in-flight 任务时读 provider 级旧行
     row = await wb_session.load_auth(db, provider_id)
     if row and row.access_token:
         return {"status": "logged_in", "account": row.account or {}}
     return {"status": "pending", "error": "未登录"}
+
+
+async def first_logged_in_auth(db: AsyncSession, provider_id: int):
+    """返回该供应商「首个已登录账号」的 auth 行（供供应商级操作如目录同步取 token）。
+
+    plan-271-1364 M2.3：模型目录是供应商级（不按账号拆分），因此同步只需任取一个
+    可用账号；401 时按同一账号刷新，避免串号。
+    """
+    from app.auth.workbuddy import session as wb_session
+    from app.services import credential_service
+
+    creds = await credential_service.list_credentials(db, provider_id)
+    for c in creds:
+        row = await wb_session.load_auth(db, provider_id, c.id)
+        if row is not None and row.access_token:
+            return c, row
+    row = await wb_session.load_auth(db, provider_id)
+    if row is not None and row.access_token:
+        return None, row
+    return None, None
 
 
 async def cancel_login(db: AsyncSession, provider_id: int) -> None:

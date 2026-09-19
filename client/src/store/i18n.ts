@@ -51,6 +51,10 @@ const DICT: Dict = {
   // ── 通用 / 弹窗 ──
   "common.save":                  ["保存", "Save"],
   "common.cancel":                ["取消", "Cancel"],
+  // ── plan-278-1391: 归档项目提示 ──
+  "prompt.project_archived_title": ["该项目已归档", "Project archived"],
+  "prompt.project_archived_msg":   ["项目「{name}」已存在但处于归档状态。是否恢复并打开？", "Project \"{name}\" already exists but is archived. Restore and open it?"],
+  "prompt.project_archived_restore": ["恢复并打开", "Restore and open"],
   "common.create":                ["创建", "Create"],
   "common.delete":                ["删除", "Delete"],
   "common.saving":                ["保存中…", "Saving…"],
@@ -257,6 +261,9 @@ const DICT: Dict = {
   "gp.sandbox_desc":              ["工作区写访问/只读沙箱/危险全访问；项目 .chatcoder/config.toml 优先", "Write access / read-only / full access; project config takes priority"],
   "gp.max_steps":                 ["AI 最大执行步数", "Max Steps"],
   "gp.max_steps_desc":            ["单轮对话中模型可调用的最大工具步数", "Max tool steps per turn"],
+  // plan-278-1391: 上下文压缩触发阈值
+  "gp.compact_threshold":         ["上下文压缩触发阈值", "Auto Compact Threshold"],
+  "gp.compact_threshold_desc":    ["上下文占用达到该比例（默认 90%）时自动压缩历史，可调范围 50%~95%", "Auto-compact history when context usage reaches this ratio (default 90%, range 50%-95%)"],
   "gp.retry_count":               ["异常自动重试次数", "Auto Retry Count"],
   "gp.retry_count_desc":          ["任务因异常中断时自动重试的次数（0 = 不重试，直接报错停止）", "Retries when a task fails (0 = stop immediately with an error)"],
   "gp.retry_intervals":           ["重试间隔（秒）", "Retry Intervals (seconds)"],

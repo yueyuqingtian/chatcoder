@@ -1930,16 +1930,14 @@ a { color: var(--accent); text-decoration: none; }
 .settings-color-item > span { font-size: 13px; color: var(--text-1); }
 .settings-color-input { width: 32px; height: 26px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: none; cursor: pointer; }
 .composer-slash-desc { color: var(--text-3); font-size: 10px; margin-left: 6px; }
-/* 工具树中提问折叠问答列表（对齐原型图四、图五） */
-.tc-question-qa-list {
+/* 工具树中提问折叠问答列表（对齐原型图四、图五）。
+   plan-278-1391: 去掉独立卡片的边框与底色——问答直接落在通用 .tc-output 外框内，
+   与 fs_read / 文件编辑展开保持同一视觉口径（用户要求「不要用卡片包住」）。 */
+.tc-question-qa {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 8px 10px;
-  background: var(--bg);
-  border: 1px solid var(--border-subtle, var(--border));
-  border-radius: 6px;
-  margin: 4px 0;
+  padding: 2px 0;
 }
 .tc-question-qa-item {
   display: flex;
@@ -2070,6 +2068,25 @@ a { color: var(--accent); text-decoration: none; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* plan-278-1391: 选项全文浮窗——仅当选项被单行截断时才展示（悬停/键盘聚焦触发），
+   由 createPortal 渲染到 body，避免被输入框容器裁剪；位置在组件内按视口计算。 */
+.question-wizard-opt-tooltip {
+  position: fixed;
+  z-index: 3000;
+  padding: 7px 10px;
+  border-radius: var(--r-sm, 6px);
+  background: var(--bg-elevated, var(--bg));
+  border: 1px solid var(--border);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  color: var(--text-1);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow-y: auto;
+  pointer-events: none;
 }
 .question-wizard-custom-row {
   display: flex;

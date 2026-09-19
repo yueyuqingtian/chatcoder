@@ -123,21 +123,25 @@ def _default_reasoning_efforts(entry: dict) -> list:
     return entry["reasoning_efforts"]
 
 
-async def sync_workbuddy_models(db: AsyncSession, provider, api_base: str) -> list[dict]:
+async def sync_workbuddy_models(db: AsyncSession, provider, api_base: str,
+                                credential_id: int | None = None) -> list[dict]:
     """同步 /v3/config → upsert Model 表，返回新增/更新条目。
 
     401 时自动 refresh 一次后重试。
+
+    plan-271-1364 M2.3：模型目录是供应商级（不按账号拆分），因此用传入的
+    credential_id（或首个已登录账号）取 token；401 刷新也只针对该账号，避免串号。
     """
     from app.persistence.models.model_reg import Model
 
-    auth = await wb_session.load_auth(db, provider.id)
-    token = await wb_session.ensure_token(db, provider.id, api_base)
+    auth = await wb_session.load_auth(db, provider.id, credential_id)
+    token = await wb_session.ensure_token(db, provider.id, api_base, credential_id)
     account = auth.account if auth else {}
 
     try:
         config = await fetch_config_raw(api_base, token, account)
     except WorkBuddyUnauthorized:
-        token = await wb_session.refresh_session(db, provider.id, api_base)
+        token = await wb_session.refresh_session(db, provider.id, api_base, credential_id)
         config = await fetch_config_raw(api_base, token, account)
 
     models = config.get("models") or []
@@ -220,7 +224,15 @@ async def sync_workbuddy_models(db: AsyncSession, provider, api_base: str) -> li
             })
             m.workbuddy_meta = meta
             updated_local += 1
-        auth_row = s.get(WorkBuddyAuth, provider.id)
+        # plan-271-1364: 目录缓存写回该账号的 auth 行 —— 修复旧代码按主键
+        # s.get(WorkBuddyAuth, provider.id) 的误用；多账号下必须按
+        # provider + credential 定位，否则缓存会串到别的账号行。
+        auth_stmt = select(WorkBuddyAuth).where(WorkBuddyAuth.provider_id == provider.id)
+        if credential_id is None:
+            auth_stmt = auth_stmt.where(WorkBuddyAuth.credential_id.is_(None))
+        else:
+            auth_stmt = auth_stmt.where(WorkBuddyAuth.credential_id == credential_id)
+        auth_row = s.execute(auth_stmt).scalars().first()
         if auth_row is not None:
             auth_row.catalog = sanitized_catalog
         s.commit()

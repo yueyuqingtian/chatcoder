@@ -7,10 +7,40 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.persistence.models.project import Project
 
 
+class ProjectArchivedError(Exception):
+    """plan-278-1391: 同路径项目已存在且处于归档状态。
+
+    调用方（路由层）据此返回 409 + 结构化信息，前端提示用户
+    「该项目已归档，是否恢复并打开」，而不是抛 500。
+    """
+
+    def __init__(self, project_id: int, name: str, path: str):
+        super().__init__(f"项目已归档: {name}")
+        self.project_id = project_id
+        self.name = name
+        self.path = path
+
+
+async def find_by_path(db: AsyncSession, path: str) -> Project | None:
+    """按规范化绝对路径查项目（不做 resolve 之外的变形）。"""
+    p = Path(path)
+    if not p.is_dir():
+        return None
+    norm_path = str(p.resolve())
+    res = await db.execute(select(Project).where(Project.path == norm_path))
+    return res.scalars().first()
+
+
 async def create_project(db: AsyncSession, *, path: str, name: str | None = None,
                          rules_docs: list[str] | None = None, auto_scan_rules: bool = True) -> int:
     """创建项目（写引擎单写线程）。path 必须是存在的目录；name 默认取路径末段。
-    返回项目 id。"""
+    返回项目 id。
+
+    plan-278-1391: 幂等化——path 为 UNIQUE 列，直接 INSERT 在同路径第二次创建时
+    会抛 IntegrityError（500）。现改为：
+    - 已存在且未归档 → 直接返回既有项目 id（幂等，前端选中它）；
+    - 已存在但已归档 → 抛 ProjectArchivedError（前端提示恢复归档项目）。
+    """
     from app.persistence.database import run_write_locked
 
     p = Path(path)
@@ -20,7 +50,20 @@ async def create_project(db: AsyncSession, *, path: str, name: str | None = None
     if not name:
         name = p.name or norm_path
 
+    # 查重（async 只读）——正常路径下命中率高，避免无谓写事务
+    existing = await find_by_path(db, norm_path)
+    if existing is not None:
+        if getattr(existing, "archived", False):
+            raise ProjectArchivedError(int(existing.id), str(existing.name or name), norm_path)
+        return int(existing.id)
+
     def patch(s):
+        # 双保险：写线程内再查一次，避免并发下两个请求同时通过上面的检查
+        row = s.execute(select(Project).where(Project.path == norm_path)).scalars().first()
+        if row is not None:
+            if getattr(row, "archived", False):
+                raise ProjectArchivedError(int(row.id), str(row.name or name), norm_path)
+            return int(row.id)
         project = Project(name=name, path=norm_path, rules_docs=rules_docs, auto_scan_rules=auto_scan_rules)
         s.add(project)
         s.flush()

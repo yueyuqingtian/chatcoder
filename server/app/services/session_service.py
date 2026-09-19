@@ -3,11 +3,19 @@
 plan-206-975：写操作经 WriteEngine 单写线程（无锁单写者）；读保留 async 会话。
 写函数返回标量（id/title/status 等），不返回跨层 ORM 对象。
 """
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.message import Message, Session
 from app.persistence.models.turn import Turn
+
+
+def _legacy_default_for_type(type_name: str) -> object:
+    """按列类型推断兜底默认值（仅为兼容旧库遗留 NOT NULL 列的显式插入路径）。"""
+    t = (type_name or "").upper()
+    if any(k in t for k in ("INT", "BOOL", "REAL", "FLOAT", "DOUBLE", "NUMERIC", "DECIMAL")):
+        return 0
+    return ""
 
 
 async def create_session(db: AsyncSession, *, project_id: int, title: str | None = None,
@@ -19,19 +27,76 @@ async def create_session(db: AsyncSession, *, project_id: int, title: str | None
     from app.persistence.database import run_write_locked
 
     def patch(s):
+        # plan-278-1391: 旧库可能残留「模型已删除但 NOT NULL 无默认值」的列
+        # （典型：sessions.plan_restore_after_turn）。此类列不在 ORM 映射中，
+        # SQLAlchemy 生成的 INSERT 不带它 → NOT NULL 直接失败。启动迁移多数情况下
+        # 已删列/补默认值，这里作为最后一道保险：显式列出遗留列并填默认值。
+        from app.persistence.migrations import legacy_notnull_defaults
+        legacy = legacy_notnull_defaults("sessions")
+        goal_active = bool(goal_text and goal_text.strip())
+        # 只登记「明确有值」的字段；其余交给下方补齐逻辑（NOT NULL 列填默认值，
+        # 可空列保持 NULL）。避免 goal_status 等 NOT NULL 列被显式写成 NULL。
+        values: dict[str, object] = {
+            "project_id": project_id,
+            # plan-547: 首页所选模式随创建落库，会话输入框立即显示与实际运行一致
+            "permission_mode": permission_mode or "default",
+        }
+        for name, val in (
+            ("title", title),
+            ("model_id", model_id),
+            ("fork_parent_id", fork_parent_id),
+            # plan-676: 首页目标随创建一次落准（对齐 set_goal 端点写法；空时维持默认 none）
+            ("goal_text", goal_text.strip()[:2000] if goal_active else None),
+            ("goal_status", "active" if goal_active else None),
+            ("goal_created_at", datetime.now(timezone.utc).isoformat() if goal_active else None),
+        ):
+            if val is not None:
+                values[name] = val
+        if legacy:
+            # 显式插入（含遗留列），绕开 ORM 的 INSERT 列裁剪。
+            # 关键：显式 INSERT 不再经过 ORM 的 Python 侧默认值填充，必须自行补齐
+            # 所有「NOT NULL 且无 server_default」的映射列（status/pinned/
+            # goal_status/last_prompt_tokens/goal_turns_used 等），否则会以 NULL 失败。
+            values.update(legacy)
+            for col in Session.__table__.columns:
+                name = col.name
+                if name in values or col.server_default is not None or col.nullable:
+                    continue
+                # 主键/自增列必须交由数据库生成，不能显式填默认值
+                if col.primary_key or col.autoincrement is True:
+                    continue
+                default = col.default
+                if default is not None:
+                    arg = getattr(default, "arg", None)
+                    values[name] = arg() if callable(arg) else arg
+                else:
+                    values[name] = _legacy_default_for_type(str(col.type))
+            cols = list(values.keys())
+            sql = (
+                f"INSERT INTO sessions ({', '.join(cols)}) "
+                f"VALUES ({', '.join(':' + c for c in cols)})"
+            )
+            bind = s.get_bind()
+            dialect = bind.dialect.name if bind is not None else "sqlite"
+            if dialect.startswith("sqlite"):
+                cur = s.execute(text(sql), values)
+                sid = int(cur.lastrowid)
+            else:
+                sid = int(s.execute(text(sql + " RETURNING id"), values).fetchone()[0])
+            s.commit()
+            return sid
+
         session = Session(
             project_id=project_id, title=title or None,
             model_id=model_id, fork_parent_id=fork_parent_id,
-            # plan-547: 首页所选模式随创建落库，会话输入框立即显示与实际运行一致
             permission_mode=permission_mode or "default",
-            # plan-676: 首页目标随创建一次落准（对齐 set_goal 端点写法；空时维持默认 none）
             **(
                 {
                     "goal_text": goal_text.strip()[:2000],
                     "goal_status": "active",
                     "goal_created_at": datetime.now(timezone.utc).isoformat(),
                 }
-                if goal_text and goal_text.strip() else {}
+                if goal_active else {}
             ),
         )
         s.add(session)

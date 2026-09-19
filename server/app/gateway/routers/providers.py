@@ -71,6 +71,8 @@ async def _to_out(db: AsyncSession, p) -> ProviderOut:
         proxy_url=getattr(p, "proxy_url", None),
         credential_count=len(creds),
         active_credential_count=len(active_creds),
+        # plan-271-1364: 凭据取用策略（sticky | round_robin）
+        credential_strategy=getattr(p, "credential_strategy", None) or "sticky",
     )
 
 
@@ -91,6 +93,7 @@ async def create_provider(body: ProviderCreate, db: AsyncSession = Depends(get_d
         is_active=body.is_active,
         proxy_mode=body.proxy_mode or "inherit",
         proxy_url=body.proxy_url,
+        credential_strategy=body.credential_strategy or "sticky",
     )
     # plan-248-1258 M2.1: 新建供应商时 api_key 作为首条凭据落库（统一凭据模型）
     if body.api_key:
@@ -112,6 +115,7 @@ async def update_provider(provider_id: int, body: ProviderUpdate, db: AsyncSessi
         is_active=body.is_active,
         proxy_mode=body.proxy_mode,
         proxy_url=body.proxy_url,
+        credential_strategy=body.credential_strategy,
     )
     if not ok:
         raise HTTPException(404, "provider not found")

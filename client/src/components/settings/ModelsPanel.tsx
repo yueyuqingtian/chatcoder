@@ -56,6 +56,12 @@ const PROXY_MODES: Array<{ value: string; label: string; desc: string }> = [
   { value: "direct", label: "直连", desc: "不使用任何代理（含忽略环境变量）" },
 ];
 
+/** plan-271-1364 M3.2: 凭据取用策略（多 Key/多账号轮转方式） */
+const STRATEGY_OPTS: Array<{ value: string; label: string; desc: string }> = [
+  { value: "sticky", label: "粘性优先", desc: "上次成功过的凭据优先，失败才切换（默认）" },
+  { value: "round_robin", label: "按优先级轮转", desc: "忽略粘性，严格按优先级顺序依次取用" },
+];
+
 /** 状态徽标颜色类 */
 function statusDotClass(p: ProviderOut) {
   if (!p.is_active) return "models-dot off";
@@ -458,10 +464,10 @@ export function ModelsPanel() {
     if (selected?.api_format === "workbuddy" && !detailLoading) void loadCredits(selected, false);
   }, [selectedId, selected?.api_format, detailLoading, loadCredits]);
 
-  const handleCheckin = async (p: ProviderOut) => {
+  const handleCheckin = async (p: ProviderOut, credentialId?: number) => {
     setBusy(true);
     try {
-      const r = await api.workbuddyCheckin(p.id);
+      const r = await api.workbuddyCheckin(p.id, credentialId);
       const okCount = r.results.filter((x) => x.status === "claimed").length;
       const already = r.results.filter((x) => x.status === "already_claimed").length;
       const failed = r.results.filter((x) => !["claimed", "already_claimed"].includes(x.status));
@@ -481,19 +487,33 @@ export function ModelsPanel() {
   };
 
   // ── OAuth 登录（ta3 / workbuddy / trae）──
+  // plan-271-1364: workbuddy 每次登录视为「登录新账号」——成功后服务端自动建凭据行，
+  // 这里刷新凭据列表即可看到新账号；ta3/trae 保持原有单账号语义。
   const handleLogin = async (p: ProviderOut) => {
     setAuthStatus((s) => ({ ...s, [p.id]: { phase: "pending" } }));
     const fmt = p.api_format;
+    const isWorkbuddy = fmt === "workbuddy";
     try {
-      const start = fmt === "workbuddy" ? await api.workbuddyLoginStart(p.id)
+      const start = isWorkbuddy ? await api.workbuddyLoginStart(p.id)
         : fmt === "ta3" ? await api.ta3LoginStart(p.id)
           : await api.traeLoginStart(p.id);
       const url = (start as { auth_url?: string; authorize_url?: string }).auth_url || (start as { authorize_url?: string }).authorize_url;
-      const statusOf = async () => fmt === "workbuddy" ? api.workbuddyLoginStatus(p.id)
+      const statusOf = async () => isWorkbuddy ? api.workbuddyLoginStatus(p.id)
         : fmt === "ta3" ? api.ta3LoginStatus(p.id) : api.traeLoginStatus(p.id);
+      const onLoggedIn = async (label?: string) => {
+        setAuthStatus((s) => ({ ...s, [p.id]: { phase: "done", label: label || "已登录" } }));
+        if (isWorkbuddy) {
+          // 多账号：刷新凭据列表（新账号已在服务端建行），并同步模型目录
+          await loadDetail(p, true);
+          await handleSync(p, false, false);
+          notify(`账号登录成功${label ? `：${label}` : ""}`);
+        } else {
+          await handleSync(p, false);
+        }
+      };
       if (start.status === "logged_in") {
-        setAuthStatus((s) => ({ ...s, [p.id]: { phase: "done", label: (start.account as Record<string, string>)?.label || "已登录" } }));
-        await handleSync(p, false);
+        const wStart = start as { account_label?: string | null; account?: Record<string, unknown> | null };
+        await onLoggedIn(wStart.account_label || (wStart.account as Record<string, string>)?.label);
         return;
       }
       if (!url) throw new Error(start.status === "failed" ? "登录失败" : "未获取到授权地址");
@@ -505,8 +525,8 @@ export function ModelsPanel() {
         await new Promise((r) => setTimeout(r, 2000));
         const st = await statusOf();
         if (st.status === "logged_in") {
-          setAuthStatus((s) => ({ ...s, [p.id]: { phase: "done", label: (st.account as Record<string, string>)?.label || "已登录" } }));
-          await handleSync(p, false);
+          const wSt = st as { account_label?: string | null; account?: Record<string, unknown> | null };
+          await onLoggedIn(wSt.account_label || (wSt.account as Record<string, string>)?.label);
           return;
         }
         if (st.status === "failed") {
@@ -520,32 +540,37 @@ export function ModelsPanel() {
     }
   };
 
-  const handleSync = async (p: ProviderOut, showMsg = true) => {
+  const handleSync = async (p: ProviderOut, showMsg = true, reloadList = true) => {
     setSyncBusy(p.id);
     try {
       const r = p.api_format === "workbuddy" ? await api.workbuddySync(p.id)
         : p.api_format === "ta3" ? await api.ta3Sync(p.id) : await api.traeSync(p.id);
-      await load();
+      if (reloadList) await load();
       await loadDetail(p, true);
       if (showMsg) notify(`同步完成：${r.synced} 个模型`);
-    } catch (e) { notify(String(e)); }
+    } catch (e) { if (showMsg) notify(String(e)); }
     finally { setSyncBusy(null); }
   };
 
-  const handleLogout = (p: ProviderOut) => {
+  /** 退出账号：workbuddy 传 credentialId 只退该账号；不传/其他类型为退出全部。 */
+  const handleLogout = (p: ProviderOut, cred?: ProviderCredentialOut | null) => {
+    const who = cred?.label || p.account_label || p.name;
     setConfirmDialog({
       open: true,
-      title: "退出账号",
-      message: `退出账号「${p.account_label || p.name}」？其下模型将不可用。`,
+      title: cred ? "退出该账号" : "退出账号",
+      message: cred
+        ? `退出账号「${who}」？该账号将从轮转中移除（其他账号不受影响）。`
+        : `退出账号「${who}」？其下模型将不可用。`,
       danger: true,
       onConfirm: async () => {
         closeConfirm();
         try {
-          if (p.api_format === "workbuddy") await api.workbuddyLogout(p.id);
+          if (p.api_format === "workbuddy") await api.workbuddyLogout(p.id, cred?.id);
           else if (p.api_format === "ta3") await api.ta3Logout(p.id);
           else await api.traeLogout(p.id);
           await load();
           await loadDetail(p, true);
+          if (p.api_format === "workbuddy") await loadCredits(p, true);
         } catch (e) { notify(String(e)); }
       },
     });
@@ -577,7 +602,11 @@ export function ModelsPanel() {
             >
               <span className={statusDotClass(p)} />
               <span className="models-side-name" title={p.name}>{p.name}</span>
-              {(p.credential_count ?? 0) > 1 && <span className="models-side-badge">{p.credential_count} Key</span>}
+              {(p.credential_count ?? 0) > 1 && (
+                <span className="models-side-badge">
+                  {p.credential_count} {OAUTH_FORMATS.has(p.api_format) ? "账号" : "Key"}
+                </span>
+              )}
             </button>
           ))}
           {providers.length === 0 && <div className="models-side-empty">暂无供应商</div>}
@@ -661,17 +690,27 @@ export function ModelsPanel() {
                   <div className="models-section-title">账号</div>
                   <div className="models-inline-row">
                     <span className="settings-resource-tag">{selected.auth_status === "logged_in" ? `已登录${selected.account_label ? `：${selected.account_label}` : ""}` : "未登录"}</span>
+                    {/* plan-271-1364：workbuddy 支持多账号——按钮语义为「登录新账号」，
+                        成功后自动新增一条账号凭据；ta3/trae 保持原单账号文案与行为 */}
                     <button className="btn btn-ghost btn-xs" onClick={() => handleLogin(selected)} disabled={authStatus[selected.id]?.phase === "pending"}>
-                      {authStatus[selected.id]?.phase === "pending" ? "登录中…" : selected.auth_status === "logged_in" ? "重新登录" : "登录账号"}
+                      {authStatus[selected.id]?.phase === "pending" ? "登录中…"
+                        : selected.api_format === "workbuddy" ? "登录新账号"
+                          : selected.auth_status === "logged_in" ? "重新登录" : "登录账号"}
                     </button>
                     {selected.auth_status === "logged_in" && (
                       <>
                         <button className="btn btn-ghost btn-xs" onClick={() => handleSync(selected)} disabled={syncBusy === selected.id}>{syncBusy === selected.id ? "同步中…" : "同步模型"}</button>
-                        <button className="btn btn-ghost btn-xs" onClick={() => handleLogout(selected)}>退出</button>
+                        {/* 多账号：workbuddy 的「退出」逐账号在凭据行内操作，此处保留整体退出 */}
+                        <button className="btn btn-ghost btn-xs" onClick={() => handleLogout(selected)}>{selected.api_format === "workbuddy" ? "退出全部" : "退出"}</button>
                       </>
                     )}
                     {authStatus[selected.id]?.phase === "failed" && <span className="models-err">{authStatus[selected.id]?.error}</span>}
                   </div>
+                  {selected.api_format === "workbuddy" && (
+                    <div className="models-hint" style={{ padding: 0, marginTop: 6 }}>
+                      点「登录新账号」可累积多个账号，旧账号会保留并参与轮转；每个账号单独显示积分与签到。
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -681,19 +720,35 @@ export function ModelsPanel() {
               {/* 凭据管理（多 Key / 多账号） */}
               <div className="models-section">
                 <div className="models-section-title">
-                  凭据（多 Key / 多账号）
-                  <button className="btn btn-ghost btn-xs" onClick={() => { setEditingCred(null); setShowCredForm(true); }}><IconPlus size={12} /> 添加 Key</button>
+                  {credentialsSectionTitle(selected.api_format)}
+                  {selected.api_format !== "workbuddy" && (
+                    <button className="btn btn-ghost btn-xs" onClick={() => { setEditingCred(null); setShowCredForm(true); }}><IconPlus size={12} /> 添加 Key</button>
+                  )}
                 </div>
+                {/* plan-271-1364 M3.2: 取用策略切换（多凭据时才显示） */}
+                {credentials.length > 1 && (
+                  <div className="models-inline-row" style={{ marginBottom: 8 }}>
+                    <span className="models-hint" style={{ padding: 0 }}>取用策略</span>
+                    {STRATEGY_OPTS.map((o) => (
+                      <button
+                        key={o.value}
+                        className={"settings-pill" + (((selected.credential_strategy || "sticky") === o.value) ? " active" : "")}
+                        title={o.desc}
+                        onClick={() => patchProvider(selected.id, { credential_strategy: o.value })}
+                      >{o.label}</button>
+                    ))}
+                  </div>
+                )}
                 <div className="models-cred-list">
                   {credentials.map((c) => (
                     <div key={c.id} className="models-cred-item">
                       <div className="models-cred-main">
                         <div className="models-cred-title">
-                          {c.label || `凭据 #${c.id}`}
-                          <span className={"models-badge sm " + credStatusClass(c.status)}>{credStatusLabel(c.status)}</span>
+                          {c.label || (selected.api_format === "workbuddy" ? `账号 #${c.id}` : `凭据 #${c.id}`)}
+                          <span className={"models-badge sm " + credStatusClass(c.status, c.is_active)}>{credStatusLabel(c.status, c.is_active)}</span>
                         </div>
                         <div className="models-cred-desc">
-                          {c.api_key_preview || (c.token_ref ? "账号登录" : "无 Key")}
+                          {credDesc(c, selected.api_format)}
                           {selected.api_format === "workbuddy" && c.credits != null && (
                             <span className="models-credits">积分 {formatCredits(c.credits)}</span>
                           )}
@@ -702,28 +757,42 @@ export function ModelsPanel() {
                       </div>
                       <div className="models-cred-actions">
                         {selected.api_format === "workbuddy" && (
-                          <button className="btn btn-ghost btn-xs" title="刷新积分余额" onClick={() => loadCredits(selected, true)}>
-                            <IconRefresh size={12} />
-                          </button>
+                          <>
+                            <button className="btn btn-ghost btn-xs" title="刷新积分余额" onClick={() => loadCredits(selected, true)}>
+                              <IconRefresh size={12} />
+                            </button>
+                            <button className="btn btn-ghost btn-xs" onClick={() => handleCheckin(selected, c.id)} disabled={busy} title="为该账号签到">签到</button>
+                          </>
                         )}
                         <Sw checked={c.is_active} onChange={async (v) => { try { await api.updateProviderCredential(c.id, { is_active: v }); await loadDetail(selected, true); } catch (e) { notify(String(e)); } }} />
                         {!OAUTH_FORMATS.has(selected.api_format) && (
                           <button className="btn btn-ghost btn-xs" onClick={() => { setEditingCred(c); setShowCredForm(true); }}>编辑</button>
                         )}
-                        <button className="btn btn-ghost btn-xs" onClick={() => setConfirmDialog({
-                          open: true,
-                          title: "删除凭据",
-                          message: `删除凭据「${c.label || c.id}」？`,
-                          danger: true,
-                          onConfirm: async () => {
-                            closeConfirm();
-                            try { await api.deleteProviderCredential(c.id); await loadDetail(selected, true); } catch (e) { notify(String(e)); }
-                          },
-                        })}><IconX size={12} /></button>
+                        {selected.api_format === "workbuddy" ? (
+                          // 账号行：退出该账号（清其 auth 行并移除该凭据，其他账号不受影响）
+                          <button className="btn btn-ghost btn-xs" onClick={() => handleLogout(selected, c)}>退出该账号</button>
+                        ) : (
+                          <button className="btn btn-ghost btn-xs" onClick={() => setConfirmDialog({
+                            open: true,
+                            title: "删除凭据",
+                            message: `删除凭据「${c.label || c.id}」？`,
+                            danger: true,
+                            onConfirm: async () => {
+                              closeConfirm();
+                              try { await api.deleteProviderCredential(c.id); await loadDetail(selected, true); } catch (e) { notify(String(e)); }
+                            },
+                          })}><IconX size={12} /></button>
+                        )}
                       </div>
                     </div>
                   ))}
-                  {credentials.length === 0 && <div className="navpage-empty">暂无凭据，点击「添加 Key」新增（或使用账号登录）</div>}
+                  {credentials.length === 0 && (
+                    <div className="navpage-empty">
+                      {selected.api_format === "workbuddy"
+                        ? "暂无账号，点上方「登录新账号」添加（支持多账号轮转）"
+                        : "暂无凭据，点击「添加 Key」新增（或使用账号登录）"}
+                    </div>
+                  )}
                 </div>
                 {selected.api_format === "workbuddy" && (
                   <div className="models-inline-row" style={{ marginTop: 8 }}>
@@ -840,22 +909,42 @@ export function ModelsPanel() {
   );
 }
 
+/** 凭据区块标题：OAuth 账号型供应商强调「账号」语义（plan-271-1364 M4.2）。 */
+function credentialsSectionTitle(apiFormat: string): string {
+  if (apiFormat === "workbuddy") return "账号（多账号轮转）";
+  if (OAUTH_FORMATS.has(apiFormat)) return "凭据（多账号）";
+  return "凭据（多 Key 轮转）";
+}
+
+/** 凭据行副标题：区分 API Key 与登录账号（避免账号被显示成「无 Key」）。 */
+function credDesc(c: ProviderCredentialOut, apiFormat: string): string {
+  if (apiFormat === "workbuddy" || OAUTH_FORMATS.has(apiFormat)) {
+    if (c.api_key_preview) return c.api_key_preview;
+    return c.extra ? "账号已登录" : "账号未登录";
+  }
+  return c.api_key_preview || (c.token_ref ? "账号登录" : "无 Key");
+}
+
 /** 名称就地编辑：先改本地状态（避免受控 input 抖动），失焦时提交。 */
-function patchProviderLocal(
-  setProviders: React.Dispatch<React.SetStateAction<ProviderOut[]>>,
+function patchProviderLocal(setProviders: React.Dispatch<React.SetStateAction<ProviderOut[]>>,
   id: number, value: string, key: keyof ProviderOut,
 ) {
   setProviders((prev) => prev.map((p) => (p.id === id ? { ...p, [key]: value } : p)));
 }
 
-function credStatusClass(status: string): string {
+function credStatusClass(status: string, isActive?: boolean): string {
+  // plan-271-1364 修复：停用统一走 muted，避免关掉开关后仍显示绿色「可用」。
+  if (isActive === false) return "muted";
   if (status === "ok") return "ok";
   if (status === "cooldown") return "warn";
   if (status === "error") return "err";
   return "muted";
 }
 
-function credStatusLabel(status: string): string {
+function credStatusLabel(status: string, isActive?: boolean): string {
+  // plan-271-1364 修复：停用的凭据不应再显示「可用」——此前只看 status，
+  // 用户关掉开关后徽标仍显示可用，与实际取用行为不一致。
+  if (isActive === false) return "已停用";
   if (status === "ok") return "可用";
   if (status === "cooldown") return "冷却中";
   if (status === "error") return "异常";

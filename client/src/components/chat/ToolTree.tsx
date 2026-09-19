@@ -315,21 +315,30 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
                   ))}
                 </div>
               )}
-              {/* 对齐图四、图五：ask_user_question 展开为结构化问答详情 */}
+              {/* 对齐图四、图五：ask_user_question 展开为结构化问答详情。
+                  plan-278-1391: 改为扁平文本（不再套独立卡片），与 fs_read/文件编辑展开同构；
+                  底部原始 JSON 输出由下方通用分支对 ask_user_question 跳过。 */}
               {leaf.tool === "ask_user_question" && (
                 (() => {
                   const qs = (leaf.args?.questions as Array<{ question?: string }> | undefined) || [];
-                  let answerMap: Record<string, string> = {};
-                  try {
-                    if (leaf.output) {
-                      const jsonMatch = leaf.output.match(/\{[\s\S]*\}/);
-                      if (jsonMatch) answerMap = JSON.parse(jsonMatch[0]);
+                  /** 解析工具结果中的答案映射（形如 `用户回答:\n{ "0": "..." }`）。 */
+                  const parseAnswers = (): Record<string, string> => {
+                    if (!leaf.output) return {};
+                    const jsonMatch = leaf.output.match(/\{[\s\S]*\}/);
+                    if (!jsonMatch) return {};
+                    try {
+                      const parsed = JSON.parse(jsonMatch[0]);
+                      return parsed && typeof parsed === "object" ? (parsed as Record<string, string>) : {};
+                    } catch {
+                      return {};
                     }
-                  } catch { /* ignore */ }
+                  };
+                  const answerMap = parseAnswers();
                   return (
-                    <div className="tc-question-qa-list">
+                    <div className="tc-question-qa">
                       {qs.map((q, idx) => {
-                        const val = answerMap[String(idx)] ?? answerMap[String(idx + 1)] ?? leaf.output?.slice(0, 100) ?? "已回答";
+                        // plan-278-1391: 解析不到时不再回退 JSON 片段，用可读占位
+                        const val = answerMap[String(idx)] ?? answerMap[String(idx + 1)] ?? "已回答";
                         return (
                           <div key={idx} className="tc-question-qa-item">
                             <div className="tc-question-qa-q">问题 {idx + 1}：{q.question || ""}</div>
@@ -368,7 +377,9 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
                   return null;
                 })()
               )}
-              {leaf.output && (path && /\.(ts|tsx|js|jsx|py|json|md|css|html|go|rs|java|c|cpp|sh)$/i.test(path) ? (
+              {/* plan-278-1391: ask_user_question 的 output 是 `用户回答:\n{json}`，
+                  问答已由上方结构化列表呈现，这里跳过原文，避免重复且可读性差的 JSON。 */}
+              {leaf.output && leaf.tool !== "ask_user_question" && (path && /\.(ts|tsx|js|jsx|py|json|md|css|html|go|rs|java|c|cpp|sh)$/i.test(path) ? (
                 <pre className="tc-code"><code>{leaf.output}</code></pre>
               ) : (
                 <pre className="tc-plain">{leaf.output}</pre>

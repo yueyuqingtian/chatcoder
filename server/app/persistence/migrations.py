@@ -109,6 +109,9 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     # ========== providers（plan-248-1258 M2.3：供应商级代理）==========
     ("providers", "proxy_mode", "VARCHAR(12) DEFAULT 'inherit'"),
     ("providers", "proxy_url", "VARCHAR(255)"),
+    # ========== providers（plan-271-1364：凭据取用策略）==========
+    # sticky=粘性优先（上次成功的先用）| round_robin=严格按 priority 轮转
+    ("providers", "credential_strategy", "VARCHAR(16) DEFAULT 'sticky'"),
     # ========== workbuddy_auth / ta3_auth / trae_auth（plan-248-1258 M2.2：凭据维度）==========
     # 多账号支持：auth 行归属某条 provider_credentials（旧行迁移时挂到首条凭据）。
     ("workbuddy_auth", "credential_id", "BIGINT"),
@@ -148,6 +151,155 @@ async def _table_exists(db: AsyncSession, table: str) -> bool:
         return result.fetchone() is not None
 
 
+# ── plan-278-1391: 遗留 NOT NULL 列清理 ──
+# 背景：旧版本模型中被删除的列（如 sessions.plan_restore_after_turn）在旧库里仍然存在；
+# 若该列 NOT NULL 且无默认值，新代码 INSERT 不带该列 → 直接抛 NOT NULL 约束错误，
+# 表现为「升级后新建会话/发消息必失败」。既有迁移机制只补列、从不清理，故此处补齐。
+# 策略：优先 ALTER TABLE DROP COLUMN 彻底清理；SQLite 不支持时重建表补 DEFAULT 兜底；
+# 两者都失败才登记到 _LEGACY_NOTNULL_DEFAULTS，由写入侧尽量补齐（最后一道保险）。
+_LEGACY_NOTNULL_DEFAULTS: dict[str, dict[str, object]] = {}
+
+
+def legacy_notnull_defaults(table: str) -> dict[str, object]:
+    """返回该表仍需要写入侧补齐默认值的遗留列（DROP / 补 DEFAULT 成功时为空）。"""
+    return dict(_LEGACY_NOTNULL_DEFAULTS.get(table) or {})
+
+
+def _legacy_default_value(col_type: str) -> object:
+    """按列类型推断兜底默认值（避免遗留 NOT NULL 列插入失败）。"""
+    t = (col_type or "").upper()
+    if any(k in t for k in ("INT", "BOOL", "REAL", "NUMERIC", "DECIMAL", "FLOAT", "DOUBLE")):
+        return 0
+    return ""
+
+
+async def _legacy_column_meta(db: AsyncSession, table: str) -> list[tuple[str, str, int, object]]:
+    """读取表列元数据 [(列名, 类型, notnull(0/1), 默认值)]，兼容 SQLite / PostgreSQL。"""
+    if settings.database_url.startswith("sqlite"):
+        rows = (await db.execute(text(f"PRAGMA table_info({table})"))).fetchall()
+        # PRAGMA table_info 列顺序: cid, name, type, notnull, dflt_value, pk
+        return [(str(r[1]), str(r[2] or ""), int(r[3] or 0), r[4]) for r in rows]
+    rows = (await db.execute(text(
+        "SELECT column_name, data_type, is_nullable, column_default "
+        "FROM information_schema.columns WHERE table_name=:t"
+    ), {"t": table})).fetchall()
+    return [(str(r[0]), str(r[1] or ""), 0 if str(r[2]).upper() == "YES" else 1, r[3]) for r in rows]
+
+
+async def _add_legacy_column_default(db: AsyncSession, table: str, column: str,
+                                     col_type: str) -> bool:
+    """给遗留 NOT NULL 列补 DEFAULT（DROP 不可用时的保守兜底）。
+
+    - PostgreSQL：直接 ALTER COLUMN SET DEFAULT；
+    - SQLite：不支持改列默认值，按官方协议重建表（建新表→复制数据→换名→重建索引）。
+    返回是否成功。
+    """
+    value = _legacy_default_value(col_type)
+    ddl_value = "'" + str(value) + "'" if isinstance(value, str) else str(value)
+
+    if not settings.database_url.startswith("sqlite"):
+        await db.execute(text(f"ALTER TABLE {table} ALTER COLUMN {column} SET DEFAULT {ddl_value}"))
+        await db.commit()
+        return True
+
+    import re
+
+    rows = (await db.execute(text(
+        "SELECT name, sql FROM sqlite_master WHERE type='table' AND name=:n"
+    ), {"n": table})).fetchall()
+    if not rows or not rows[0][1]:
+        return False
+    create_sql = str(rows[0][1])
+
+    # 仅在目标列定义末尾（逗号 / 右括号前）插入 DEFAULT，避免破坏其它列定义
+    pattern = re.compile(
+        r'(?is)(["`\[]?' + re.escape(column) + r'["`\]]?\s+[^,]*?)(\s*,\s*|\s*\))'
+    )
+    rewritten, n = pattern.subn(r'\1 DEFAULT ' + ddl_value + r'\2', create_sql, count=1)
+    if n == 0:
+        return False
+
+    tmp = f"{table}__legacy_tmp"
+    tmp_sql = re.sub(
+        r'(?is)^\s*CREATE\s+TABLE\s+["`\[]?' + re.escape(table) + r'["`\]]?',
+        f'CREATE TABLE "{tmp}"', rewritten, count=1,
+    )
+    # 保留原表索引定义（DROP TABLE 会连带删除，重建后需重放）
+    index_rows = (await db.execute(text(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=:n AND sql IS NOT NULL"
+    ), {"n": table})).fetchall()
+
+    await db.execute(text(tmp_sql))
+    await db.execute(text(f'INSERT INTO "{tmp}" SELECT * FROM "{table}"'))
+    await db.execute(text(f'DROP TABLE "{table}"'))
+    await db.execute(text(f'ALTER TABLE "{tmp}" RENAME TO "{table}"'))
+    for (idx_sql,) in index_rows:
+        try:
+            await db.execute(text(str(idx_sql)))
+        except Exception:  # 索引可能已随重建存在或与当前结构等价，忽略
+            pass
+    await db.commit()
+    return True
+
+
+async def _cleanup_legacy_notnull_columns(db: AsyncSession) -> int:
+    """清理「模型已删除、库中仍为 NOT NULL 且无默认值」的遗留列。
+
+    只遍历当前 ORM 已映射的表（`Base.metadata.tables`），已废弃的历史表
+    （team_agents 等）不在此列也不会被误判。返回成功清理的列数。
+    """
+    from app.persistence.database import Base
+
+    cleaned = 0
+    for table, model_table in list(Base.metadata.tables.items()):
+        try:
+            if not await _table_exists(db, table):
+                continue
+            model_cols = set(model_table.columns.keys())
+            for name, col_type, notnull, dflt in await _legacy_column_meta(db, table):
+                if name in model_cols or not notnull or dflt not in (None, ""):
+                    continue
+                dropped = False
+                try:
+                    await db.execute(text(f"ALTER TABLE {table} DROP COLUMN {name}"))
+                    await db.commit()
+                    dropped = True
+                    cleaned += 1
+                    logger.info("迁移: %s.%s 遗留 NOT NULL 列已删除", table, name)
+                except Exception as e:
+                    try:
+                        await db.rollback()
+                    except Exception:
+                        pass
+                    logger.warning(
+                        "迁移: %s.%s 遗留列删除失败(%s)，改用补默认值兜底", table, name, e,
+                    )
+                if dropped:
+                    continue
+                try:
+                    if await _add_legacy_column_default(db, table, name, col_type):
+                        cleaned += 1
+                        logger.info("迁移: %s.%s 遗留列已补默认值", table, name)
+                        continue
+                except Exception as e:
+                    try:
+                        await db.rollback()
+                    except Exception:
+                        pass
+                    logger.warning("迁移: %s.%s 遗留列补值失败: %s", table, name, e)
+                # 最后一道保险：登记给写入侧（ORM 可能忽略未映射列，仅作兜底）
+                value = _legacy_default_value(col_type)
+                _LEGACY_NOTNULL_DEFAULTS.setdefault(table, {})[name] = value
+                logger.warning("迁移: %s.%s 遗留 NOT NULL 列未能自动修复，已登记写入侧兜底", table, name)
+        except Exception as e:
+            logger.warning("迁移: 表 %s 遗留列检查失败(非阻塞): %s", table, e)
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+    return cleaned
+
+
 async def run_migrations(db: AsyncSession) -> dict:
     """启动时执行,幂等。返回 {"migrated": int, "skipped": int, "errors": int}。"""
     migrated = 0
@@ -172,6 +324,18 @@ async def run_migrations(db: AsyncSession) -> dict:
                 await db.rollback()
             except Exception:
                 pass
+    # plan-278-1391: 清理模型已删除、库中仍为 NOT NULL 且无默认值的遗留列。
+    # 根因：旧版 sessions.plan_restore_after_turn 为 NOT NULL 无默认值，新代码不带该列
+    # 插入 → NOT NULL constraint failed（升级后新建会话/发消息必失败）。
+    try:
+        await _cleanup_legacy_notnull_columns(db)
+    except Exception as e:
+        logger.warning("遗留 NOT NULL 列清理失败(非阻塞): %s", e)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
     # v6.0: 数据迁移 -- 升级核心角色模板提示词（幂等，仅旧版才升级）
     try:
         await _upgrade_template_prompts(db)

@@ -68,8 +68,53 @@ def _sort_key(cred: ProviderCredential) -> tuple:
     return (sticky, cred.priority or 0, cred.id or 0)
 
 
-def available_credentials(creds: list[ProviderCredential]) -> list[ProviderCredential]:
-    """过滤出当前可用凭据（启用且不在冷却期内），按尝试序排序。"""
+def _round_robin_key(cred: ProviderCredential) -> tuple:
+    """轮询序：忽略粘性，仅按 priority 小 → id 小（严格优先级顺序）。"""
+    return (cred.priority or 0, cred.id or 0)
+
+
+# plan-271-1364 M3.1: 轮询模式的进程内游标（provider_id → 上次取用的凭据 id）。
+# 只用于"分散用量"的顺序轮转，重启归零属于可接受语义（见方案 §七）。
+_rr_cursor: dict[int, int] = {}
+
+
+def order_credentials(creds: list[ProviderCredential], strategy: str = "sticky",
+                      rotate: bool = False, provider_id: int | None = None,
+                      exclude: set[int] | None = None) -> list[ProviderCredential]:
+    """按取用策略返回尝试序列表。
+
+    - strategy="sticky"（默认）：粘性优先，行为与 available_credentials 一致；
+    - strategy="round_robin"：仅按 (priority, id) 排序；
+    - rotate=True（仅轮询模式生效）：从进程内游标的后一位开始，使多次调用依次落在
+      不同凭据上；rotate 只在真正取用凭据的路径调用，避免展示路径推进游标。
+    """
+    ok = list(creds)
+    if exclude:
+        ok = [c for c in ok if c.id not in exclude]
+    if (strategy or "sticky").lower() != "round_robin":
+        ok.sort(key=_sort_key)
+        return ok
+
+    ok.sort(key=_round_robin_key)
+    if not rotate or not ok or provider_id is None:
+        return ok
+    last_id = _rr_cursor.get(provider_id)
+    if last_id is not None:
+        idx = next((i for i, c in enumerate(ok) if c.id == last_id), None)
+        if idx is not None:
+            ok = ok[idx + 1:] + ok[:idx + 1]
+    _rr_cursor[provider_id] = ok[0].id or 0
+    return ok
+
+
+def available_credentials(creds: list[ProviderCredential], strategy: str = "sticky",
+                          provider_id: int | None = None,
+                          rotate: bool = False) -> list[ProviderCredential]:
+    """过滤出当前可用凭据（启用且不在冷却期内），按尝试序排序。
+
+    plan-271-1364 M3.1: 排序委托 order_credentials（strategy 决定粘性/轮转）；
+    默认 sticky 且不 rotate，展示路径（计数/扫描取 key）行为与改造前完全一致。
+    """
     now = _now()
     ok: list[ProviderCredential] = []
     for c in creds:
@@ -80,8 +125,7 @@ def available_credentials(creds: list[ProviderCredential]) -> list[ProviderCrede
             if until is not None and until > now:
                 continue  # 冷却中，跳过
         ok.append(c)
-    ok.sort(key=_sort_key)
-    return ok
+    return order_credentials(ok, strategy=strategy, rotate=rotate, provider_id=provider_id)
 
 
 async def list_credentials(db: AsyncSession, provider_id: int) -> list[ProviderCredential]:
@@ -124,10 +168,15 @@ async def create_credential(db: AsyncSession, provider_id: int, **fields) -> int
             ).scalars().all()
         )
         default_priority = (max(existing) + 1) if existing else 0
+        # 显式弹出 status：调用方（路由）可能同时传入 status，若一并进 **fields
+        # 会与下面的 status= 重复赋值抛 TypeError（历史缺陷，导致「添加 Key」500）。
+        explicit_status = fields.pop("status", None)
+        explicit_priority = fields.pop("priority", None)
         cred = ProviderCredential(
             provider_id=provider_id,
-            priority=fields.pop("priority", default_priority),
-            status="ok" if fields.get("api_key") else "disabled",
+            # priority 为 None（前端未填/显式传 null）时回落默认排队尾
+            priority=default_priority if explicit_priority is None else explicit_priority,
+            status=explicit_status or ("ok" if fields.get("api_key") else "disabled"),
             **fields,
         )
         s.add(cred)
@@ -137,6 +186,50 @@ async def create_credential(db: AsyncSession, provider_id: int, **fields) -> int
         return cid
 
     return await run_write_locked(patch, label=f"credential.create.{provider_id}")
+
+
+async def create_account_credential(db: AsyncSession, provider_id: int, *,
+                                    label: str | None = None,
+                                    extra: dict | None = None,
+                                    account: dict | None = None) -> int:
+    """plan-271-1364 M2.2: 为 OAuth 登录账号显式建一条「账号凭据」并返回其 id。
+
+    与 create_credential 的差异：账号凭据没有 api_key，若走 create_credential 会被
+    判成 status="disabled"（永远不可用）。此处显式 status="ok"、is_active=True，
+    供登录流程拿到 credential_id 后把 workbuddy_auth 行挂上来，实现多账号。
+    """
+    from app.persistence.database import run_write_locked
+
+    snapshot = dict(account or {})
+    if extra:
+        snapshot.update(extra)
+
+    def patch(s):
+        existing = list(
+            s.execute(
+                select(ProviderCredential.priority).where(
+                    ProviderCredential.provider_id == provider_id
+                )
+            ).scalars().all()
+        )
+        default_priority = (max(existing) + 1) if existing else 0
+        cred = ProviderCredential(
+            provider_id=provider_id,
+            label=label,
+            api_key=None,
+            token_ref=None,
+            priority=default_priority,
+            is_active=True,
+            status="ok",
+            extra=snapshot or None,
+        )
+        s.add(cred)
+        s.flush()
+        cid = cred.id
+        s.commit()
+        return cid
+
+    return await run_write_locked(patch, label=f"credential.create_account.{provider_id}")
 
 
 async def update_credential(db: AsyncSession, credential_id: int, **fields) -> bool:
@@ -154,8 +247,9 @@ async def update_credential(db: AsyncSession, credential_id: int, **fields) -> b
                 setattr(cred, k, None)
             else:
                 setattr(cred, k, v)
-        # 手动启用且有 key → 复位为 ok（清冷却）
-        if fields.get("is_active") is True and (cred.api_key or cred.token_ref):
+        # 手动启用且有 key/账号 → 复位为 ok（清冷却）
+        # plan-271-1364: 账号凭据（无 api_key/token_ref，靠 extra 标记）同样可复位
+        if fields.get("is_active") is True and (cred.api_key or cred.token_ref or cred.extra):
             cred.status = "ok"
             cred.cooldown_until = None
         s.commit()
@@ -171,11 +265,34 @@ async def delete_credential(db: AsyncSession, credential_id: int) -> bool:
         cred = s.get(ProviderCredential, credential_id)
         if cred is None:
             return False
+        # plan-271-1364 M1.2: 级联清理该凭据关联的 OAuth 登录态行——
+        # 否则残留孤儿 token 行，_load_auth_for_credential 的 legacy 回落可能命中旧账号。
+        _purge_auth_rows(s, credential_id)
         s.delete(cred)
         s.commit()
         return True
 
     return await run_write_locked(patch, label=f"credential.delete.{credential_id}")
+
+
+def _purge_auth_rows(session, credential_id: int) -> int:
+    """删除 workbuddy_auth / ta3_auth / trae_auth 中归属该凭据的行（同事务内）。
+
+    用 select 逐个删除而非裸 SQL，保持 ORM 会话状态一致；表名固定，不走用户输入。
+    """
+    from app.persistence.models.ta3_auth import Ta3Auth
+    from app.persistence.models.trae_auth import TraeAuth
+    from app.persistence.models.workbuddy_auth import WorkBuddyAuth
+
+    removed = 0
+    for model in (WorkBuddyAuth, Ta3Auth, TraeAuth):
+        rows = session.execute(
+            select(model).where(model.credential_id == credential_id)
+        ).scalars().all()
+        for row in rows:
+            session.delete(row)
+            removed += 1
+    return removed
 
 
 async def mark_failed(db: AsyncSession, credential_id: int, error: str) -> None:

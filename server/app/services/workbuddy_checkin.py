@@ -35,10 +35,15 @@ _done: dict[tuple[int | None, str], int] = {}
 
 
 async def _checkin_all() -> int:
-    """对所有 workbuddy 供应商的已登录凭据执行签到（当日去重）。返回成功数。"""
+    """对所有 workbuddy 供应商的已登录凭据执行签到（当日去重）。返回成功数。
+
+    plan-271-1364 M2.3（修 D6）：不再用 provider 级 auth_status 整条 gate，
+    改为「该供应商存在任一已登录账号」才进入，否则某个账号退出会导致所有账号停签。
+    """
     from sqlalchemy import select
 
     from app.auth.workbuddy import credits as wb_credits
+    from app.auth.workbuddy import session as wb_session
     from app.persistence.database import async_session_factory
     from app.persistence.models.model_reg import Provider, ProviderCredential
     from app.services import credential_service
@@ -51,11 +56,12 @@ async def _checkin_all() -> int:
         for p in providers:
             if not p.is_active:
                 continue
-            if (p.auth_status or "") != "logged_in":
-                continue
             creds = await credential_service.list_credentials(db, p.id)
             if not creds:
                 # 旧数据无凭据行：以 provider 级账号签到一次
+                legacy = await wb_session.load_auth(db, p.id)
+                if legacy is None or not legacy.access_token:
+                    continue
                 key = (None, today)
                 if _done.get(key, 0) >= _MAX_RETRY_PER_DAY:
                     continue
@@ -70,9 +76,15 @@ async def _checkin_all() -> int:
                     done += 1
                     logger.info("[wb-checkin] provider=%s 签到结果=%s", p.id, r.get("status"))
                 continue
+            # 多账号：逐条凭据判断登录态并签到（不用 provider 级 auth_status 整条 gate）
+            has_any_logged_in = False
             for c in creds:
                 if not c.is_active:
                     continue
+                auth = await wb_session.load_auth(db, p.id, c.id)
+                if auth is None or not auth.access_token:
+                    continue
+                has_any_logged_in = True
                 key = (c.id, today)
                 # 当天已成功过（次数计入过）则跳过
                 if _done.get(key, 0) >= _MAX_RETRY_PER_DAY:
@@ -91,6 +103,8 @@ async def _checkin_all() -> int:
                                 c.id, c.label, status, r.get("credits"))
                 elif status == "login_required":
                     logger.info("[wb-checkin] 凭据 #%s 未登录，跳过", c.id)
+            if not has_any_logged_in:
+                logger.debug("[wb-checkin] provider=%s 无已登录账号，跳过", p.id)
     # 清理非当日记录，避免字典无限增长
     for k in list(_done.keys()):
         if k[1] != today:

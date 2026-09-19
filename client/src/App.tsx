@@ -11,6 +11,7 @@ import { Toast } from "./components/Toast";
 import { Splash } from "./components/Splash";
 import { SettingsContent, type SettingsTab } from "./components/settings";
 import { CommandCenter } from "./components/CommandCenter";
+import { ArchivedProjectPrompt } from "./components/ArchivedProjectPrompt";
 import { PluginSlot } from "./plugins/registry";
 import { useUiStore, initUi } from "./store/ui";
 import { usePanelStore } from "./store/panel";
@@ -147,6 +148,7 @@ export default function App() {
         <ImageGallery />
         <WhatsNewModal />
         <CommandCenter />
+        <ArchivedProjectPrompt />
         {/* v18 布局重构（对齐 zcode）：左侧栏全高（含 logo/导航箭头），
             右侧 = 顶部标题栏 + 内容行（消息流 + 右侧面板）。 */}
         <div ref={leftPanelElRef} className={`app-pane app-pane-left collapsible${sidebarCollapsed ? " collapsed" : ""}`} style={sidebarCollapsed ? { width: "0px", flexBasis: "0px" } : { width: `${leftPanelWidth}px`, flexBasis: `${leftPanelWidth}px` }}>

@@ -1,6 +1,7 @@
 ﻿/** v2 会话状态管理（zustand）：项目 / 会话 / turn 任务驱动。 */
 import { create } from "zustand";
 import { api } from "../api/client";
+import { ApiError } from "../api/client";
 import type { ArtifactOut, AttachmentInfo, FileChangeOut, MessageOut, ModelOut, ProjectOut, ProviderOut, RollbackAffected, RollbackPreviewFile, SessionOut, TaskOut, TurnOut } from "../api/client";
 import { wsClient, globalWsClient } from "../api/ws";
 import type { ServerEventName } from "@chatcoder/shared/events";
@@ -299,11 +300,17 @@ interface ChatState {
   loading: boolean;
   error: string | null;
   wsConnected: boolean;
+  /** plan-278-1391: 添加同路径已归档项目时的提示（前端弹「恢复并打开」确认框）。 */
+  archivedProjectPrompt: { projectId: number; name: string; path: string } | null;
 
   // 动作
   loadBootstrap: () => Promise<void>;
   loadModels: () => Promise<void>;
   createProject: (path: string, name?: string) => Promise<ProjectOut | null>;
+  /** plan-278-1391: 恢复被归档项目并选中（确认「恢复并打开」后调用）。 */
+  restoreArchivedProject: (projectId: number) => Promise<void>;
+  /** plan-278-1391: 关闭归档项目提示（用户取消）。 */
+  dismissArchivedProjectPrompt: () => void;
   selectProject: (projectId: number) => Promise<void>;
   createSession: (projectId: number, title?: string, opts?: { model_id?: number | null; permission_mode?: string; goal_text?: string | null }) => Promise<number | null>;
   switchSession: (sessionId: number, fromHist?: boolean) => Promise<void>;
@@ -658,6 +665,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   loading: false,
   error: null,
   wsConnected: false,
+  /** plan-278-1391: 同路径项目已归档提示（默认无）。 */
+  archivedProjectPrompt: null,
 
   loadModels: async () => {
     // allSettled：单边请求失败时保留旧值；成功的空结果必须生效，
@@ -708,10 +717,42 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set((s) => ({ projects: [project, ...s.projects], currentProjectId: project.id }));
       return project;
     } catch (e) {
+      // plan-278-1391: 同路径项目已归档 → 不做泛红报错，改为弹「恢复并打开」提示。
+      // 后端返回 409 + detail{code:"project_archived", project_id, name}。
+      if (e instanceof ApiError && (e.status === 409 || e.code === "project_archived")) {
+        const d = (e.detail ?? {}) as { project_id?: number; name?: string; path?: string };
+        const pid = Number(d.project_id ?? 0);
+        if (pid > 0) {
+          set({
+            archivedProjectPrompt: {
+              projectId: pid,
+              name: String(d.name ?? ""),
+              path: String(d.path ?? path),
+            },
+            error: null,
+          });
+          return null;
+        }
+      }
       set({ error: String(e) });
       return null;
     }
   },
+
+  /** plan-278-1391: 恢复被归档项目并选中（用户确认「恢复并打开」）。 */
+  restoreArchivedProject: async (projectId) => {
+    try {
+      await api.updateProject(projectId, { archived: false });
+      set({ archivedProjectPrompt: null });
+      await get().loadBootstrap();
+      await get().selectProject(projectId);
+    } catch (e) {
+      set({ error: String(e), archivedProjectPrompt: null });
+    }
+  },
+
+  /** plan-278-1391: 关闭归档项目提示（用户取消）。 */
+  dismissArchivedProjectPrompt: () => set({ archivedProjectPrompt: null }),
 
   selectProject: async (projectId) => {
     // v2.2: 切项目前快照当前会话（与 switchSession 保持一致的分桶语义）

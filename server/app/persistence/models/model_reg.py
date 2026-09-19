@@ -23,6 +23,9 @@ class Provider(Base):
       迁移时旧 api_key 自动拆入首条凭据，两者并存不破坏既有行为。
     - proxy_mode / proxy_url：每供应商独立代理（inherit=跟随全局，custom=独立地址，
       direct=直连绕过代理，global=强制走全局代理）。
+    plan-271-1364: credential_strategy 取用策略 ——
+    - sticky（默认）：上次成功过的凭据优先（粘性），失败进冷却后切下一条；
+    - round_robin：忽略粘性，严格按 priority 顺序轮转起点，分散用量。
     """
     __tablename__ = "providers"
 
@@ -39,6 +42,8 @@ class Provider(Base):
     # plan-248-1258 M2.3: 供应商级代理
     proxy_mode: Mapped[str] = mapped_column(String(12), default="inherit")
     proxy_url: Mapped[str | None] = mapped_column(String(255))
+    # plan-271-1364: 凭据取用策略（sticky=粘性优先 | round_robin=按优先级轮转）
+    credential_strategy: Mapped[str] = mapped_column(String(16), default="sticky")
     created_at: Mapped[str] = mapped_column(server_default=func.now())
 
 

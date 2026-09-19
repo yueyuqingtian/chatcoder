@@ -471,6 +471,8 @@ class ProviderCreate(BaseModel):
     # plan-248-1258 M2.3: 供应商级代理
     proxy_mode: str = "inherit"
     proxy_url: str | None = None
+    # plan-271-1364: 凭据取用策略（sticky | round_robin）
+    credential_strategy: str = "sticky"
 
 
 class ProviderUpdate(BaseModel):
@@ -481,6 +483,8 @@ class ProviderUpdate(BaseModel):
     is_active: bool | None = None
     proxy_mode: str | None = None
     proxy_url: str | None = None
+    # plan-271-1364: 凭据取用策略（sticky | round_robin）
+    credential_strategy: str | None = None
 
 
 class ProviderCredentialOut(BaseModel):
@@ -544,6 +548,8 @@ class ProviderOut(BaseModel):
     # plan-248-1258 M2.2: 凭据数量（多 Key/多账号）
     credential_count: int = 0
     active_credential_count: int = 0
+    # plan-271-1364: 凭据取用策略（sticky=粘性优先 | round_robin=按优先级轮转）
+    credential_strategy: str = "sticky"
 
 
 # ── ta3 登录/同步（v23）──
@@ -572,12 +578,19 @@ class WorkBuddyLoginStartOut(BaseModel):
     auth_url: str | None = None
     state: str | None = None
     expires_in: int | None = None
+    account: dict | None = None
+    # plan-271-1364: 多账号——登录成功后回传新建的账号凭据 id 与显示名
+    credential_id: int | None = None
+    account_label: str | None = None
 
 
 class WorkBuddyLoginStatusOut(BaseModel):
     status: str  # pending | logged_in | failed
     account: dict | None = None
     error: str | None = None
+    # plan-271-1364: 多账号——供前端定位刚登录的账号
+    credential_id: int | None = None
+    account_label: str | None = None
 
 
 class WorkBuddySyncOut(BaseModel):

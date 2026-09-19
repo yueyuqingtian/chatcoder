@@ -36,6 +36,7 @@ import {
   IconFileText,
 } from "../icons";
 import { Modal } from "../Modal";
+import { createPortal } from "react-dom";
 import { ModelPicker } from "./ModelPicker";
 import { useChatStore, persistLastReasoning, type UsageDetail } from "../../store/chat";
 import { useDraftsStore } from "../../store/drafts";
@@ -1836,6 +1837,40 @@ function QuestionWizardBox({
   const answers = draft?.answers ?? {};
   const [customText, setCustomText] = useState("");
   const customInputRef = useRef<HTMLInputElement>(null);
+  // plan-278-1391: 选项浮窗——单行截断的长选项在悬停/键盘聚焦时完整展示。
+  const [optTip, setOptTip] = useState<
+    { text: string; top: number; left: number; maxWidth: number; placement: "top" | "bottom" } | null
+  >(null);
+
+  /** 仅当选项文本确实被单行截断时才弹浮窗（短选项不打扰）。 */
+  const showOptTip = (
+    e: React.MouseEvent<HTMLButtonElement> | React.FocusEvent<HTMLButtonElement>,
+    text: string,
+  ) => {
+    const btn = e.currentTarget;
+    const span = btn.querySelector<HTMLElement>(".question-wizard-opt-text");
+    const el = span ?? btn;
+    if (el.scrollWidth <= el.clientWidth + 1) {
+      setOptTip(null);
+      return;
+    }
+    const r = btn.getBoundingClientRect();
+    const maxWidth = Math.min(560, Math.max(180, window.innerWidth * 0.9));
+    // 粗略估算高度用于决定向上/向下翻转（真实高度由 CSS max-height + 滚动兜底）
+    const estH = Math.min(240, Math.ceil(text.length / 42) * 18 + 18);
+    const spaceBelow = window.innerHeight - r.bottom - 8;
+    const placement: "top" | "bottom" =
+      spaceBelow < estH && r.top - 8 - estH > 0 ? "top" : "bottom";
+    const left = Math.min(Math.max(8, r.left), Math.max(8, window.innerWidth - maxWidth - 8));
+    setOptTip({
+      text,
+      top: placement === "top" ? r.top - 6 : r.bottom + 6,
+      left,
+      maxWidth,
+      placement,
+    });
+  };
+  const hideOptTip = () => setOptTip(null);
 
   const writeDraft = (next: { stepIndex: number; answers: Record<string, string> }) => {
     setQuestionDraft({ approvalId, stepIndex: next.stepIndex, answers: next.answers });
@@ -1933,6 +1968,11 @@ function QuestionWizardBox({
                 type="button"
                 className={`question-wizard-opt-btn${isSelected ? " selected" : ""}`}
                 onClick={() => handlePickOption(opt)}
+                title={opt}
+                onMouseEnter={(e) => showOptTip(e, opt)}
+                onMouseLeave={hideOptTip}
+                onFocus={(e) => showOptTip(e, opt)}
+                onBlur={hideOptTip}
               >
                 <span className="question-wizard-opt-num">{optIdx + 1}.</span>
                 <span className="question-wizard-opt-text">{opt}</span>
@@ -1984,6 +2024,22 @@ function QuestionWizardBox({
           </button>
         </div>
       </div>
+      {/* plan-278-1391: 选项全文浮窗（portal 到 body，避免被输入框容器裁剪） */}
+      {optTip && createPortal(
+        <div
+          className="question-wizard-opt-tooltip"
+          role="tooltip"
+          style={{
+            top: optTip.top,
+            left: optTip.left,
+            maxWidth: optTip.maxWidth,
+            transform: optTip.placement === "top" ? "translateY(-100%)" : undefined,
+          }}
+        >
+          {optTip.text}
+        </div>,
+        document.body,
+      )}
     </div>
   );
 }

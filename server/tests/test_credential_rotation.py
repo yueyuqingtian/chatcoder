@@ -216,3 +216,214 @@ def test_mark_failed_sets_cooldown(tmp_path):
         await engine.dispose()
 
     asyncio.get_event_loop().run_until_complete(_run())
+
+
+# ── plan-271-1364：轮转策略（纯逻辑）──
+
+def test_order_credentials_sticky_vs_round_robin():
+    """轮转策略：sticky 粘性优先；round_robin 严格按 priority，不因粘性提前。"""
+    creds = [
+        _Cred(1, priority=0),
+        _Cred(2, priority=1, last_ok_at="2026-01-01T00:00:00+00:00"),
+        _Cred(3, priority=2),
+    ]
+    sticky = credential_service.order_credentials(creds, strategy="sticky")
+    assert [c.id for c in sticky] == [2, 1, 3]
+
+    rr = credential_service.order_credentials(creds, strategy="round_robin")
+    assert [c.id for c in rr] == [1, 2, 3]
+
+
+def test_order_credentials_rotate_advances_cursor():
+    """rotate=True 连续取用会换起点；不带 rotate 时顺序稳定（展示路径不推进游标）。"""
+    creds = [_Cred(11, priority=0), _Cred(12, priority=1), _Cred(13, priority=2)]
+    first = credential_service.order_credentials(
+        creds, strategy="round_robin", rotate=True, provider_id=999,
+    )
+    second = credential_service.order_credentials(
+        creds, strategy="round_robin", rotate=True, provider_id=999,
+    )
+    assert first[0].id != second[0].id
+    # 起点在 3 条内循环，且集合始终完整
+    assert {c.id for c in first} == {11, 12, 13}
+
+    a = credential_service.order_credentials(creds, strategy="round_robin")
+    b = credential_service.order_credentials(creds, strategy="round_robin")
+    assert [c.id for c in a] == [c.id for c in b] == [11, 12, 13]
+
+
+def test_available_credentials_default_is_non_rotating():
+    """默认调用（展示/计数路径）不轮转 —— 行为与改造前一致。"""
+    creds = [_Cred(21, priority=1), _Cred(22, priority=0)]
+    assert [c.id for c in credential_service.available_credentials(creds)] == [22, 21]
+
+
+# ── plan-271-1364：多账号绑定 / 刷新隔离 / 删除级联（数据库集成）──
+
+def _wb_db_env(tmp_path, name):
+    """建临时库并指向写引擎，返回数据库 URL 供各用例复用。"""
+    import os
+
+    db_file = tmp_path / name
+    url = f"sqlite+aiosqlite:///{db_file.as_posix()}"
+    os.environ["DATABASE_URL"] = url
+    from app.persistence import write_engine
+    write_engine.configure(url)
+    return url
+
+
+def test_workbuddy_multi_account_binding_and_isolation(tmp_path):
+    """多账号：各自 auth 行独立；不传 credential_id 只读旧式 provider 级行。"""
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.auth.workbuddy import session as wb_session
+    from app.persistence.database import Base
+    from app.persistence.models.model_reg import Provider
+    from app.persistence.models.workbuddy_auth import WorkBuddyAuth
+    import app.persistence.models  # noqa: F401 - 触发全部模型注册
+
+    url = _wb_db_env(tmp_path, "wb_multi.db")
+
+    async def _run():
+        engine = create_async_engine(url)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        sm = async_sessionmaker(engine, expire_on_commit=False)
+        async with sm() as db:
+            p = Provider(tenant_id=1, name="wb", base_url="https://copilot.tencent.com",
+                         api_format="workbuddy", is_active=True)
+            db.add(p)
+            await db.commit()
+
+            cid_a = await credential_service.create_account_credential(
+                db, p.id, label="账号A", account={"uid": "ua"})
+            cid_b = await credential_service.create_account_credential(
+                db, p.id, label="账号B", account={"uid": "ub"})
+            assert cid_a != cid_b
+
+            await wb_session.save_auth(db, p.id, access_token="tok-a",
+                                       refresh_token="ref-a", credential_id=cid_a)
+            await wb_session.save_auth(db, p.id, access_token="tok-b",
+                                       refresh_token="ref-b", credential_id=cid_b)
+
+            rows = (await db.execute(select(WorkBuddyAuth))).scalars().all()
+            assert len(rows) == 2
+
+            auth_a = await wb_session.load_auth(db, p.id, cid_a)
+            auth_b = await wb_session.load_auth(db, p.id, cid_b)
+            assert auth_a.access_token == "tok-a"
+            assert auth_b.access_token == "tok-b"
+            # 未指定账号时只命中旧式 provider 级行（本用例中没有）
+            assert await wb_session.load_auth(db, p.id) is None
+
+            # 账号凭据状态应为可用（而非 create_credential 的 disabled）
+            creds = await credential_service.list_credentials(db, p.id)
+            assert {c.status for c in creds} == {"ok"}
+        await engine.dispose()
+
+    asyncio.get_event_loop().run_until_complete(_run())
+
+
+def test_workbuddy_refresh_isolated_per_credential(tmp_path, monkeypatch):
+    """刷新只改目标账号的 auth 行，另一账号不受影响（修 D3 串号）。"""
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.auth.workbuddy import session as wb_session
+    from app.persistence.database import Base
+    from app.persistence.models.model_reg import Provider
+    from app.persistence.models.workbuddy_auth import WorkBuddyAuth
+    import app.persistence.models  # noqa: F401
+
+    async def _fake_refresh(api_base, access_token, refresh_token):
+        return {"accessToken": f"new-{access_token}", "refreshToken": f"new-{refresh_token}"}
+
+    monkeypatch.setattr(wb_session, "refresh_access_token", _fake_refresh)
+
+    url = _wb_db_env(tmp_path, "wb_refresh.db")
+
+    async def _run():
+        engine = create_async_engine(url)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        sm = async_sessionmaker(engine, expire_on_commit=False)
+        async with sm() as db:
+            p = Provider(tenant_id=1, name="wb", base_url="https://copilot.tencent.com",
+                         api_format="workbuddy", is_active=True)
+            db.add(p)
+            await db.commit()
+
+            cid_a = await credential_service.create_account_credential(db, p.id, label="A")
+            cid_b = await credential_service.create_account_credential(db, p.id, label="B")
+            await wb_session.save_auth(db, p.id, access_token="tok-a",
+                                       refresh_token="ref-a", credential_id=cid_a)
+            await wb_session.save_auth(db, p.id, access_token="tok-b",
+                                       refresh_token="ref-b", credential_id=cid_b)
+
+            new_token = await wb_session.refresh_session(
+                db, p.id, "https://copilot.tencent.com", cid_b)
+            assert new_token == "new-tok-b"
+
+            async def _reload(cid):
+                res = await db.execute(
+                    select(WorkBuddyAuth)
+                    .where(WorkBuddyAuth.credential_id == cid)
+                    .execution_options(populate_existing=True)
+                )
+                return res.scalars().first()
+
+            row_a = await _reload(cid_a)
+            row_b = await _reload(cid_b)
+            # A 未被刷新改动，B 已更新
+            assert row_a.access_token == "tok-a"
+            assert row_b.access_token == "new-tok-b"
+            assert row_b.refresh_token == "new-ref-b"
+        await engine.dispose()
+
+    asyncio.get_event_loop().run_until_complete(_run())
+
+
+def test_delete_credential_cascades_auth_rows(tmp_path):
+    """删除凭据级联清理其 auth 行，其他账号的 auth 行保留（修 D5）。"""
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.auth.workbuddy import session as wb_session
+    from app.persistence.database import Base
+    from app.persistence.models.model_reg import Provider
+    from app.persistence.models.workbuddy_auth import WorkBuddyAuth
+    import app.persistence.models  # noqa: F401
+
+    url = _wb_db_env(tmp_path, "wb_del.db")
+
+    async def _run():
+        engine = create_async_engine(url)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        sm = async_sessionmaker(engine, expire_on_commit=False)
+        async with sm() as db:
+            p = Provider(tenant_id=1, name="wb", base_url="https://copilot.tencent.com",
+                         api_format="workbuddy", is_active=True)
+            db.add(p)
+            await db.commit()
+
+            cid_a = await credential_service.create_account_credential(db, p.id, label="A")
+            cid_b = await credential_service.create_account_credential(db, p.id, label="B")
+            await wb_session.save_auth(db, p.id, access_token="tok-a", credential_id=cid_a)
+            await wb_session.save_auth(db, p.id, access_token="tok-b", credential_id=cid_b)
+
+            ok = await credential_service.delete_credential(db, cid_a)
+            assert ok is True
+
+            rows = (await db.execute(
+                select(WorkBuddyAuth).execution_options(populate_existing=True)
+            )).scalars().all()
+            assert [r.credential_id for r in rows] == [cid_b]
+            assert rows[0].access_token == "tok-b"
+
+            remaining = await credential_service.list_credentials(db, p.id)
+            assert [c.id for c in remaining] == [cid_b]
+        await engine.dispose()
+
+    asyncio.get_event_loop().run_until_complete(_run())
