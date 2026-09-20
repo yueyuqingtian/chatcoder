@@ -34,7 +34,9 @@ function BreakpointStatus({ label, status, target, onAct }: {
 }) {
   if (!status?.connected) return null;
   return (
-    <div className="dbg-status">
+    /* plan-17-78（D3）：暂停时才需要高亮块承载调用栈/变量；仅连接的运行态用紧凑行，
+       避免在 360px 面板里铺出一块空荡灰底。 */
+    <div className={`dbg-status${status.paused ? "" : " is-compact"}`}>
       <div className="dbg-status-head">
         <span className={`dbg-dot${status.paused ? " paused" : " live"}`} />
         <span className="dbg-status-title">{label}</span>
@@ -174,18 +176,18 @@ export function DebugPanel() {
     <div className="dbgp">
       <section className="db-section">
         <div className="db-section-head">
-          <span><IconBug size={13} /> Arthas 现场诊断</span>
+          <span className="dbgp-sec-title"><IconBug size={13} /> Arthas 现场诊断</span>
           <button className="btn btn-ghost btn-xs" onClick={() => void refresh(true)} disabled={!!busy}>
             <IconRefresh size={12} /> 刷新
           </button>
         </div>
         <div className="dbg-hint">
-          走 Attach API，**可与 IDEA 的调试并存**（IDEA 占用 JDWP 时 JDWP 调试连不上，Arthas 不受影响）。
+          走 Attach API，<b>可与 IDEA 的调试并存</b>（IDEA 占用 JDWP 时 JDWP 调试连不上，Arthas 不受影响）。
           用 <code>/</code> 引用「开发调试」连接器，让 AI 调 <code>java_list_processes</code> →{" "}
           <code>java_attach_process</code> → <code>arthas_watch</code> 即可观测方法现场。
         </div>
 
-        <div className="dbg-status">
+        <div className={`dbg-status${attached ? "" : " is-idle"}`}>
           <div className="dbg-status-head">
             <span className={`dbg-dot${attached ? " live" : ""}`} />
             <span className="dbg-status-title">会话</span>
@@ -247,7 +249,7 @@ export function DebugPanel() {
 
       <section className="db-section">
         <div className="db-section-head">
-          <span>观测命中（{entries.length}）</span>
+          <span className="dbgp-sec-title">观测命中（{entries.length}）</span>
           {arthasState?.summary && <span className="dbgp-dim">{arthasState.summary}</span>}
         </div>
         {entries.length === 0 ? (
@@ -274,7 +276,7 @@ export function DebugPanel() {
       </section>
 
       <section className="db-section">
-        <div className="db-section-head"><span>断点会话</span></div>
+        <div className="db-section-head"><span className="dbgp-sec-title">断点会话</span></div>
         {!debugState || (!debugState.web?.connected && !debugState.java?.connected) ? (
           <div className="dbgp-empty">
             暂无 Web(CDP) / Java(JDWP) 断点会话。

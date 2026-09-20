@@ -118,7 +118,9 @@ export function DebuggerPanel({ server }: { server?: McpServerOut }) {
   };
 
   const renderStatus = (label: string, st: DebugStatusOut | null, target: "web" | "java") => (
-    <div className="dbg-status">
+    /* plan-17-78（C4/D4）：未连接时用紧凑状态行（去灰底与多余内距），
+       避免只装一行"未连接"却渲染成整条空旷灰带；暂停态仍保留高亮块。 */
+    <div className={`dbg-status${st?.connected ? "" : " is-idle"}`}>
       <div className="dbg-status-head">
         <span className={`dbg-dot${st?.paused ? " paused" : st?.connected ? " live" : ""}`} />
         <span className="dbg-status-title">{label}</span>
@@ -199,10 +201,12 @@ export function DebuggerPanel({ server }: { server?: McpServerOut }) {
           <code>--remote-debugging-port={webPort}</code>，或用内置浏览器面板），
           然后让 AI 通过 <code>/</code> 调用本连接器。
         </div>
-        <div className="db-row">
+        <div className="db-form-row">
           <span className="db-label">调试端口</span>
-          <Input type="number" value={String(webPort)} className="db-num"
-            onChange={(e) => setWebPort(Number(e.target.value) || 9222)} aria-label="Web 调试端口" />
+          <div className="db-controls">
+            <Input type="number" value={String(webPort)} className="db-num"
+              onChange={(e) => setWebPort(Number(e.target.value) || 9222)} aria-label="Web 调试端口" />
+          </div>
         </div>
         {renderStatus("Web（CDP）", webStatus, "web")}
       </section>
@@ -212,18 +216,23 @@ export function DebuggerPanel({ server }: { server?: McpServerOut }) {
         <div className="dbg-hint">
           以调试模式启动 JVM（下方参数），再让 AI 附加并下断点。
         </div>
-        <div className="db-row">
+        {/* JDWP 参数：独立成行（长参数不再与标签挤在同一行导致横向溢出） */}
+        <div className="db-form-row">
           <span className="db-label">JDWP 参数</span>
-          <code className="dbg-jdwp">{JDWP_HINT(javaPort)}</code>
-          <button className="btn btn-ghost btn-xs" onClick={() => void copyJdwp()}>
-            <IconTerminal size={12} /> {copied ? "已复制" : "复制"}
-          </button>
+          <div className="db-controls">
+            <code className="dbg-jdwp">{JDWP_HINT(javaPort)}</code>
+            <button className="btn btn-ghost btn-xs" onClick={() => void copyJdwp()}>
+              <IconTerminal size={12} /> {copied ? "已复制" : "复制"}
+            </button>
+          </div>
         </div>
-        <div className="db-row">
+        <div className="db-form-row">
           <span className="db-label">主机 / 端口</span>
-          <Input value={host} className="db-host" onChange={(e) => setHost(e.target.value)} aria-label="JDWP 主机" />
-          <Input type="number" value={String(javaPort)} className="db-num"
-            onChange={(e) => setJavaPort(Number(e.target.value) || 5005)} aria-label="JDWP 端口" />
+          <div className="db-controls">
+            <Input value={host} className="db-host" onChange={(e) => setHost(e.target.value)} aria-label="JDWP 主机" />
+            <Input type="number" value={String(javaPort)} className="db-num"
+              onChange={(e) => setJavaPort(Number(e.target.value) || 5005)} aria-label="JDWP 端口" />
+          </div>
         </div>
         {renderStatus("Java（JDWP）", javaStatus, "java")}
       </section>

@@ -14,7 +14,7 @@ import { useChatStore } from "../../store/chat";
 import { SkillsPanel } from "./SkillsPanel";
 import { McpPanel } from "./McpPanel";
 import { FormDialog } from "../ui/FormDialog";
-import { Input } from "../ui";
+import { Dialog, Input } from "../ui";
 import { ConfirmDialog } from "../ConfirmDialog";
 import {
   IconBox, IconDownload, IconPlug, IconRefresh, IconSearch, IconTrash, IconZap,
@@ -175,7 +175,9 @@ function PluginsCatalog() {
 
   return (
     <div className="plugins-catalog">
-      {/* 页头：标题 + 搜索 + 已安装/安装入口 */}
+      {/* 页头：两段式——上行「标题 + 主操作」，下行「搜索 + 已安装计数」。
+          此前标题、长说明、搜索框、两个安装按钮与刷新按钮全挤在一行右侧，
+          窄窗口下互相抢宽度并疯狂换行。 */}
       <div className="catalog-head">
         <div className="catalog-head-text">
           <h2 className="catalog-title">
@@ -188,16 +190,6 @@ function PluginsCatalog() {
           </p>
         </div>
         <div className="catalog-head-actions">
-          <div className="catalog-search">
-            <IconSearch size={13} />
-            <input
-              placeholder="搜索名称、说明或标签"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              aria-label="搜索插件"
-            />
-          </div>
-          <span className="catalog-installed">已安装 {installedCount}</span>
           <button className="btn btn-ghost btn-sm" onClick={() => { setInstallMode("dir"); setInstallValue(""); }}>
             <IconDownload size={13} /> 从目录安装
           </button>
@@ -208,6 +200,19 @@ function PluginsCatalog() {
             <IconRefresh size={13} />
           </button>
         </div>
+      </div>
+
+      <div className="catalog-toolbar">
+        <div className="catalog-search">
+          <IconSearch size={13} />
+          <input
+            placeholder="搜索名称、说明或标签"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            aria-label="搜索插件"
+          />
+        </div>
+        <span className="catalog-installed">已安装 {installedCount}</span>
       </div>
 
       {/* 分类条 + 排序 */}
@@ -261,6 +266,7 @@ function PluginsCatalog() {
               {item.descriptionZh || item.description || "无说明"}
             </div>
             <div className="catalog-card-foot">
+              {/* 信息行：分类 · 来源 · 技能数（次级色，独立成行，不再与操作按钮争宽度） */}
               <span className="catalog-card-cat">
                 {item.category}
                 {/* plan-282-1441：展示真实来源（本机哪个工具）+ 技能数 */}
@@ -271,6 +277,7 @@ function PluginsCatalog() {
                   <span className="catalog-card-src">{item.skillCount} 个技能</span>
                 )}
               </span>
+              {/* 操作行：靠右、不换行，主次按钮宽度不再摇摆 */}
               <span className="catalog-card-ops">
                 {item.installed ? (
                   <>
@@ -296,73 +303,85 @@ function PluginsCatalog() {
         ))}
       </div>
 
-      {/* 详情抽屉 */}
-      {detail && (
-        <div className="catalog-detail">
-          <div className="catalog-detail-head">
+      {/* 插件详情：走统一浮层基座（Dialog / Radix）。
+          此前这里是内联在列表 DOM 末尾的 .catalog-detail 块，长列表下落在首屏之外，
+          点击「详情」视口内毫无变化，被判定为"点不进去"。Dialog 是 position:fixed，
+          从机制上保证点击即可见，同时获得焦点陷阱、Esc 与关闭后焦点还原。 */}
+      <Dialog
+        open={detail != null}
+        onClose={() => setDetail(null)}
+        width={560}
+        title={
+          <span className="catalog-dialog-title">
             <span className="catalog-card-icon"><IconBox size={16} /></span>
-            <div>
-              <div className="catalog-detail-title">
-                {detail.displayName || detail.name}
-                {detail.version && <span className="catalog-detail-ver">v{detail.version}</span>}
-              </div>
-              <div className="catalog-detail-meta">
-                {detail.category}
-                {detail.author && ` · ${detail.author}`}
-                {detail.source && detail.source !== "installed" && ` · 来自 ${detail.source}`}
-              </div>
-            </div>
-            <button className="btn btn-ghost btn-xs" onClick={() => setDetail(null)}>关闭</button>
-          </div>
-          <p className="catalog-detail-desc">{detail.descriptionZh || detail.description || "无说明"}</p>
-          {(detail.tags ?? []).length > 0 && (
-            <div className="catalog-detail-tags">
-              {(detail.tags ?? []).map((t) => <span key={t} className="catalog-tag">{t}</span>)}
-            </div>
-          )}
-          {/* 真实插件信息：贡献了哪些技能 / 是否带连接器 / 安装来源目录 */}
-          {((detail.skills ?? []).length > 0 || detail.hasMcp || detail.path) && (
-            <div className="catalog-detail-facts">
-              {(detail.skills ?? []).length > 0 && (
-                <div className="catalog-fact">
-                  <span className="catalog-fact-k">贡献技能</span>
-                  <span className="catalog-fact-v">{(detail.skills ?? []).join("、")}</span>
-                </div>
-              )}
-              {detail.hasMcp && (
-                <div className="catalog-fact">
-                  <span className="catalog-fact-k">连接器</span>
-                  <span className="catalog-fact-v">含 MCP 连接器配置</span>
-                </div>
-              )}
-              {detail.path && (
-                <div className="catalog-fact">
-                  <span className="catalog-fact-k">插件目录</span>
-                  <span className="catalog-fact-v mono" title={detail.path}>{detail.path}</span>
-                </div>
-              )}
-            </div>
-          )}
-          <div className="catalog-detail-foot">
-            {detail.installed ? (
+            <span>{detail?.displayName || detail?.name}</span>
+            {detail?.version && <span className="catalog-detail-ver">v{detail.version}</span>}
+          </span>
+        }
+        subtitle={
+          detail
+            ? [
+                detail.category,
+                detail.author,
+                detail.source && detail.source !== "installed" ? `来自 ${detail.source}` : null,
+              ].filter(Boolean).join(" · ")
+            : undefined
+        }
+        footer={
+          detail ? (
+            detail.installed ? (
               <>
-                <button className="btn btn-ghost btn-xs" disabled={busy === detail.name}
+                <button className="btn btn-ghost btn-sm" disabled={busy === detail.name}
                   onClick={() => void toggle(detail)}>
                   {detail.enabled ? "停用" : "启用"}
                 </button>
-                <button className="btn btn-danger btn-xs" onClick={() => setDropTarget(detail)}>
+                <button className="btn btn-danger btn-sm" onClick={() => setDropTarget(detail)}>
                   <IconTrash size={12} /> 卸载
                 </button>
               </>
             ) : (
-              <button className="btn btn-primary btn-xs" disabled={busy === detail.name || !detail.path}
+              <button className="btn btn-primary btn-sm" disabled={busy === detail.name || !detail.path}
                 onClick={() => void installScanned(detail)}>
                 {busy === detail.name ? "安装中…" : "安装此插件"}
               </button>
+            )
+          ) : null
+        }
+      >
+        {detail && (
+          <div className="catalog-detail">
+            <p className="catalog-detail-desc">{detail.descriptionZh || detail.description || "无说明"}</p>
+            {(detail.tags ?? []).length > 0 && (
+              <div className="catalog-detail-tags">
+                {(detail.tags ?? []).map((t) => <span key={t} className="catalog-tag">{t}</span>)}
+              </div>
+            )}
+            {/* 真实插件信息：贡献了哪些技能 / 是否带连接器 / 安装来源目录 */}
+            {((detail.skills ?? []).length > 0 || detail.hasMcp || detail.path) && (
+              <div className="catalog-detail-facts">
+                {(detail.skills ?? []).length > 0 && (
+                  <div className="catalog-fact">
+                    <span className="catalog-fact-k">贡献技能</span>
+                    <span className="catalog-fact-v">{(detail.skills ?? []).join("、")}</span>
+                  </div>
+                )}
+                {detail.hasMcp && (
+                  <div className="catalog-fact">
+                    <span className="catalog-fact-k">连接器</span>
+                    <span className="catalog-fact-v">含 MCP 连接器配置</span>
+                  </div>
+                )}
+                {detail.path && (
+                  <div className="catalog-fact">
+                    <span className="catalog-fact-k">插件目录</span>
+                    <span className="catalog-fact-v mono" title={detail.path}>{detail.path}</span>
+                  </div>
+                )}
+              </div>
             )}
           </div>
-        </div>
-      )}
+        )}
+      </Dialog>
 
       {/* 安装表单 */}
       <FormDialog
