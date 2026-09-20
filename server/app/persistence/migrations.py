@@ -41,6 +41,14 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("sessions", "shared_context", "JSON"),
     # ========== sessions（v7：置顶时间——"后置顶在上"排序依据）==========
     ("sessions", "pinned_at", "VARCHAR(40)"),
+    # ========== projects（plan-282-1441 #5：工作树复用 Project 表）==========
+    ("projects", "is_worktree", "BOOLEAN DEFAULT 0 NOT NULL"),
+    ("projects", "parent_project_id", "BIGINT"),
+    ("projects", "worktree_branch", "VARCHAR(200)"),
+    # ========== db_connections（plan-282-1441 #7：内置 MCP「数据库连接」）==========
+    ("db_connections", "project_id", "BIGINT"),
+    ("db_connections", "is_active", "BOOLEAN DEFAULT 0 NOT NULL"),
+    ("db_connections", "params", "JSON"),
     # ========== exec_policy_rules（v2.2：工具级规则）==========
     ("exec_policy_rules", "tool_name", "VARCHAR(60)"),
     # ========== messages（v1 缺 turn_id）==========

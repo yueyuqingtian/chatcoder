@@ -15,13 +15,14 @@ import { useUpdaterStore } from "../store/updater";
 import { useI18n } from "../store/i18n";
 import { formatRelativeTime, parseUtc } from "../utils/time";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { MergeDialog } from "./worktree/MergeDialog";
 import { AppLogo } from "./AppLogo";
 import { MarkdownContent } from "./MarkdownContent";
 import {
   IconCalendar, IconChevronDown, IconChevronLeft, IconChevronRight, IconPanelLeft,
   IconFolder, IconFolderDynamic, IconLayers, IconSortDesc,
   IconMoreHorizontal, IconPin, IconPlus, IconRefresh, IconSearch, IconSettings,
-  IconFolderPlus, IconZap, IconDownload, IconArchive,
+  IconFolderPlus, IconDownload, IconArchive, IconGitBranch, IconTrash, IconBox,
 } from "./icons";
 
 export type NavKey = "chat" | "scheduled" | "skills" | "mcp" | "settings";
@@ -42,7 +43,12 @@ const STORAGE_KEY_COLLAPSED_PROJECTS = "chatcoder:collapsed-projects";
  *
  * changelog 弹窗用 Portal + fixed 定位：此前是侧栏内绝对定位，
  * 被 .sidebar 的 overflow:hidden 裁剪、且绘制层级低于右侧面板，
- * 表现为弹窗被中间面板遮挡/只露出一条。 */
+ * 表现为弹窗被中间面板遮挡/只露出一条。
+ *
+ * plan-283-1428：浮窗可接收鼠标（移入后停留并滚动查看完整说明）。
+ * 显隐由 React 态驱动而非 CSS hover，故关闭延迟加长、且浮窗自身的
+ * mouseenter 会取消关闭；浮窗外层 .sb-update-notes-hover 的左侧 padding
+ * 覆盖浮窗与按钮间的空隙，避免鼠标跨越空隙时误关闭。 */
 function UpdateBadge({ collapsed = false }: { collapsed?: boolean }) {
   const { t } = useI18n();
   const status = useUpdaterStore((s) => s.status);
@@ -65,31 +71,49 @@ function UpdateBadge({ collapsed = false }: { collapsed?: boolean }) {
   const percent = status.state === "downloading" ? (status.percent ?? 0) : 0;
   const ring = 2 * Math.PI * 7;
 
+  /** 浮窗宽度：与 .sb-update-notes 的 CSS 宽度保持一致；
+   * HOVER_PAD 与 .sb-update-notes-hover 的 padding-left 一致，用于覆盖
+   * 浮窗与按钮之间的水平空隙（容器左缘贴按钮右缘，避免遮挡按钮热区）。 */
+  const NOTES_W = 420;
+  const HOVER_PAD = 12;
+
+  const cancelClose = () => {
+    if (closeTimer.current) { window.clearTimeout(closeTimer.current); closeTimer.current = null; }
+  };
+
   const openNotes = () => {
     if (!showNotes) return;
-    if (closeTimer.current) { window.clearTimeout(closeTimer.current); closeTimer.current = null; }
+    cancelClose();
     const rect = wrapRef.current?.getBoundingClientRect();
     if (!rect) return;
-    // 从侧栏右缘向右弹出、底部与按钮对齐（向上生长）；右侧空间不足时向左收
-    const width = 340;
-    const left = Math.max(8, Math.min(rect.right + 10, window.innerWidth - width - 12));
+    // 从按钮右缘向右弹出、底部与按钮对齐（向上生长）；右侧空间不足时向左收
+    const total = NOTES_W + HOVER_PAD;
+    const left = Math.max(8, Math.min(rect.right, window.innerWidth - total - 12));
     setAnchor({ left, bottom: Math.max(8, window.innerHeight - rect.bottom) });
   };
   const scheduleClose = () => {
-    if (closeTimer.current) window.clearTimeout(closeTimer.current);
-    closeTimer.current = window.setTimeout(() => { setAnchor(null); closeTimer.current = null; }, 160);
+    cancelClose();
+    // 留出从按钮移到浮窗的缓冲时间（浮窗 mouseenter 会取消该定时器）
+    closeTimer.current = window.setTimeout(() => { setAnchor(null); closeTimer.current = null; }, 320);
   };
 
   const popover = showNotes && anchor ? createPortal(
-    <div className="sb-update-notes" role="tooltip" style={{ left: anchor.left, bottom: anchor.bottom }}>
-      <div className="sb-update-notes-head">
-        <span className="sb-update-notes-badge">NEW</span>
-        <span className="sb-update-notes-ver">{version ? `v${version}` : ""}</span>
-        <span className="sb-update-notes-label">{t("sidebar.update_notes")}</span>
+    <div
+      className="sb-update-notes-hover"
+      style={{ left: anchor.left, bottom: anchor.bottom }}
+      onMouseEnter={cancelClose}
+      onMouseLeave={scheduleClose}
+    >
+      <div className="sb-update-notes" role="tooltip">
+        <div className="sb-update-notes-head">
+          <span className="sb-update-notes-badge">NEW</span>
+          <span className="sb-update-notes-ver">{version ? `v${version}` : ""}</span>
+          <span className="sb-update-notes-label">{t("sidebar.update_notes")}</span>
+        </div>
+        {notes
+          ? <div className="sb-update-notes-body release-notes"><MarkdownContent>{notes}</MarkdownContent></div>
+          : <div className="sb-update-notes-empty">{t("sidebar.update_notes_empty")}</div>}
       </div>
-      {notes
-        ? <div className="sb-update-notes-body release-notes"><MarkdownContent>{notes}</MarkdownContent></div>
-        : <div className="sb-update-notes-empty">{t("sidebar.update_notes_empty")}</div>}
     </div>,
     document.body,
   ) : null;
@@ -207,7 +231,8 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
     { key: "chat", label: t("sidebar.new_task"), icon: <IconPlus size={16} />, shortcut: "Ctrl+N" },
     { key: "search", label: t("sidebar.search"), icon: <IconSearch size={16} />, shortcut: "Ctrl+K" },
     { key: "scheduled", label: t("sidebar.automation"), icon: <IconCalendar size={16} /> },
-    { key: "skills", label: t("sidebar.skills"), icon: <IconZap size={16} /> },
+    // plan-282-1441（#6）：原「技能」入口改为「拓展」（插件/技能/连接器三合一）
+    { key: "skills", label: t("sidebar.extensions"), icon: <IconBox size={16} /> },
   ], [t]);
 
   // Ctrl+N 新建任务
@@ -234,14 +259,36 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
     try { localStorage.setItem("chatcoder:sidebar-sort", sort); } catch { /* ignore */ }
   }, [sort]);
 
+  /** 主项目（排除工作树——工作树作为其父项目下的独立工作区单独渲染） */
   const visibleProjects = useMemo(() => {
-    return projects.filter((p) => !p.archived);
+    return projects.filter((p) => !p.archived && !p.is_worktree);
   }, [projects]);
+
+  /** plan-282-1441（#5）：工作树按父项目分组（parent_project_id → 工作树列表） */
+  const worktreesByParent = useMemo(() => {
+    const m = new Map<number, ProjectOut[]>();
+    for (const p of projects) {
+      if (p.archived || !p.is_worktree) continue;
+      const key = p.parent_project_id ?? 0;
+      const arr = m.get(key) ?? [];
+      arr.push(p);
+      m.set(key, arr);
+    }
+    return m;
+  }, [projects]);
+
+  /** 侧栏「合并到主工作区」目标（弹窗状态） */
+  const [mergeWorktree, setMergeWorktree] = useState<ProjectOut | null>(null);
+  const [dropWorktree, setDropWorktree] = useState<ProjectOut | null>(null);
 
   const filteredSessions = useMemo(() => {
     const list = sessions.filter((s) => s.status !== "archived");
     // v7: 置顶会话恒在顶部（与所选排序无关）；置顶组内按 pinned_at 倒序（后置顶在上）
     const pinnable = (s: SessionOut) => parseUtc(s.pinned_at) || 0;
+    // 运行中任务的排序键：用「开始执行时间」而非 last_activity_at——后者随每条流式消息
+    // 刷新，同一项目内多个并发任务会互相超车导致上下跳动。started_at 运行期间恒定。
+    // 缺字段（如极短的乐观窗口）不倒回活动时间，否则又会跳；统一用 id 兜底保持确定性。
+    const runKey = (s: SessionOut) => parseUtc(s.running_started_at);
     return list.sort((a, b) => {
       if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
       if (a.pinned && b.pinned) {
@@ -250,12 +297,22 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
         const pb = pinnable(b) || parseUtc(b.last_activity_at);
         if (pb !== pa) return pb - pa;
       }
+      // 执行中的任务单独成区：置顶之下、其余会话之上（组内仍按时序）
+      if (!!a.has_running !== !!b.has_running) return a.has_running ? -1 : 1;
+      if (a.has_running && b.has_running) {
+        // 「最新开始执行的在上面」；同刻/缺字段时用 id 兜底，保证顺序确定不抖动
+        const ra = runKey(a);
+        const rb = runKey(b);
+        if (rb !== ra) return rb - ra;
+        return b.id - a.id;
+      }
       if (sort === "name") {
         return (a.title || "").localeCompare(b.title || "");
       }
       const ta = parseUtc(a.last_activity_at);
       const tb = parseUtc(b.last_activity_at);
-      return tb - ta;
+      if (tb !== ta) return tb - ta;
+      return b.id - a.id;
     });
   }, [sessions, sort]);
 
@@ -297,6 +354,30 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
     useDraftsStore.getState().patchDraft("home", { projectId });
     useChatStore.setState({ currentProjectId: projectId });
     onChange("chat");
+  };
+
+  /** plan-282-1441（#5）：一键为项目创建工作树（默认命名），完成后刷新侧栏。 */
+  const handleCreateWorktree = async (p: ProjectOut) => {
+    try {
+      const res = await api.createWorktreeForProject(p.id, {});
+      // 展开父项目，让新工作树立即可见
+      setCollapsedProjects((prev) => ({ ...prev, [p.id]: false }));
+      await loadBootstrap();
+      useChatStore.setState({ error: `已创建工作树「${res.name}」（分支 ${res.branch}）` });
+    } catch (e) {
+      useChatStore.setState({ error: `创建工作树失败：${String(e)}` });
+    }
+  };
+
+  /** 删除工作树（未提交变更时后端会拒绝） */
+  const handleDeleteWorktree = async (wt: ProjectOut, force: boolean) => {
+    try {
+      await api.deleteWorktreeProject(wt.id, force);
+      setDropWorktree(null);
+      await loadBootstrap();
+    } catch (e) {
+      useChatStore.setState({ error: String(e) });
+    }
   };
 
   const renderSession = (s: SessionOut) => {
@@ -427,6 +508,9 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
                         {projectMenuFor === p.id && (
                           <div className="context-menu sb-context-menu" onClick={() => setProjectMenuFor(null)}>
                             <div className="context-menu-item" onClick={() => window.chatcoderAPI?.openPath?.(p.path)}>{t("sidebar.ctx_open_in_folder")}</div>
+                            <div className="context-menu-item" onClick={() => { void handleCreateWorktree(p); }}>
+                              <IconGitBranch size={12} /> 创建工作树
+                            </div>
                             <div className="context-menu-divider" />
                             <div className="context-menu-item danger" onClick={() => { api.updateProject(p.id, { archived: true }).then(() => loadBootstrap()); }}>{t("sidebar.ctx_archive_project")}</div>
                           </div>
@@ -434,6 +518,56 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
                       </div>
                       {open && (
                         <div className="sb-project-children">
+                          {/* plan-282-1441（#5）：工作树作为独立工作区显示在父项目下（分支图标 + 缩进） */}
+                          {(worktreesByParent.get(p.id) ?? []).map((wt) => {
+                            const wtSessions = filteredSessions.filter((s) => s.project_id === wt.id);
+                            const wtOpen = isProjectOpen(wt);
+                            const wtCurrent = wt.id === currentProjectId;
+                            return (
+                              <div key={`wt-${wt.id}`} className="sb-worktree-group">
+                                <div className={`sb-project sb-worktree${wtCurrent ? " current" : ""}`}
+                                  onClick={() => toggleProject(wt.id)}>
+                                  <span className={`sb-project-chevron${wtOpen ? " open" : ""}`} aria-hidden="true"><IconChevronRight size={13} /></span>
+                                  <IconGitBranch size={13} />
+                                  <span className="sb-project-name" title={`工作树 · ${wt.worktree_branch || ""} · ${wt.path}`}>
+                                    {wt.name}
+                                  </span>
+                                  <span className="sb-worktree-tag">工作树</span>
+                                  <span
+                                    className="sb-project-actions sb-project-new"
+                                    title={t("sidebar.new_task_at_project")}
+                                    onClick={(e) => { e.stopPropagation(); handleNewTaskAt(wt.id); }}
+                                  >
+                                    <IconPlus size={12} />
+                                  </span>
+                                  <span className="sb-project-actions"
+                                    onClick={(e) => { e.stopPropagation(); setProjectMenuFor(projectMenuFor === wt.id ? null : wt.id); }}>
+                                    <IconMoreHorizontal size={13} />
+                                  </span>
+                                  {projectMenuFor === wt.id && (
+                                    <div className="context-menu sb-context-menu" onClick={() => setProjectMenuFor(null)}>
+                                      <div className="context-menu-item" onClick={() => window.chatcoderAPI?.openPath?.(wt.path)}>{t("sidebar.ctx_open_in_folder")}</div>
+                                      <div className="context-menu-item" onClick={() => setMergeWorktree(wt)}>
+                                        <IconGitBranch size={12} /> 合并到主工作区
+                                      </div>
+                                      <div className="context-menu-divider" />
+                                      <div className="context-menu-item danger" onClick={() => setDropWorktree(wt)}>
+                                        <IconTrash size={12} /> 删除工作树
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                                {wtOpen && (
+                                  <div className="sb-project-children">
+                                    {wtSessions.slice(0, projectLimits[wt.id] || 5).map(renderSession)}
+                                    {wtSessions.length === 0 && (
+                                      <div className="sb-worktree-empty">还没有会话，点 + 开始</div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
                           {(() => {
                             const limit = projectLimits[p.id] || 5;
                             const shown = projSessions.slice(0, limit);
@@ -505,6 +639,34 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
         danger
         onConfirm={async () => { if (confirmDelete) await deleteSession(confirmDelete.id); setConfirmDelete(null); }}
         onCancel={() => setConfirmDelete(null)}
+      />
+
+      {/* plan-282-1441（#5）：工作树合并 / 删除 */}
+      <MergeDialog
+        open={mergeWorktree != null}
+        worktree={mergeWorktree ? {
+          id: mergeWorktree.id,
+          name: mergeWorktree.name,
+          path: mergeWorktree.path,
+          branch: mergeWorktree.worktree_branch ?? null,
+          parent_project_id: mergeWorktree.parent_project_id ?? null,
+          parent_path: null,
+          dirty: false,
+          ahead: 0,
+          behind: 0,
+        } : null}
+        onClose={() => setMergeWorktree(null)}
+        onMerged={() => { setMergeWorktree(null); void loadBootstrap(); }}
+      />
+      <ConfirmDialog
+        open={dropWorktree !== null}
+        title="删除工作树"
+        message={`将删除工作树「${dropWorktree?.name ?? ""}」的目录与登记，此操作不可恢复。`}
+        confirmLabel="删除"
+        cancelLabel={t("common.cancel")}
+        danger
+        onConfirm={() => { if (dropWorktree) void handleDeleteWorktree(dropWorktree, false); }}
+        onCancel={() => setDropWorktree(null)}
       />
     </nav>
   );

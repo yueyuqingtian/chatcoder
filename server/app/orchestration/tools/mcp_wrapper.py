@@ -27,14 +27,27 @@ def _to_root_uri(root_path: str | None) -> str | None:
     return f"file://{path}"
 
 
-def _resolve_workspace_placeholder(arg: str, workspace_root: str | None) -> str:
-    """解析命令行参数中的工作区占位符（委托 skill_scanner 的公共实现）。
+def _resolve_workspace_placeholder(arg: str, workspace_root: str | None,
+                                   session_id: int | None = None) -> str:
+    """解析命令行参数中的占位符（委托 skill_scanner 的公共实现）。
 
     运行时调用路径与握手路径（skill_scanner.fetch_mcp_tools）共用同一函数，
     避免两套实现漂移——此前握手路径完全没有替换逻辑，是 codegraph 握手失败的次生原因。
+    plan-282-1441（#8）：透传 session_id，支持 `${sessionId}`（内置调试 MCP 需要）。
     """
     from app.orchestration.skill_scanner import resolve_workspace_placeholder
-    return resolve_workspace_placeholder(arg, workspace_root)
+    return resolve_workspace_placeholder(arg, workspace_root, session_id)
+
+
+def _is_builtin_mcp(command: str, args: list | None) -> bool:
+    """是否内置 MCP（数据库连接 / 开发调试）。
+
+    两种入口都必须认，否则打包态会静默丢上下文：
+    - 开发态：sys.executable + ["-m", "app.mcp_servers.<name>"]；
+    - 打包态：exe 自身 + ["--mcp-server", "<name>"]（exe 不支持 -m，见 run_server 的分流）。
+    """
+    joined = " ".join([str(command or ""), *[str(a) for a in (args or [])]])
+    return "app.mcp_servers" in joined or "--mcp-server" in joined
 
 
 def _resolve_tool_call(args: dict, tool_name: str) -> tuple[str, dict]:
@@ -133,10 +146,13 @@ class McpToolWrapper(Tool):
 
         import os
 
-        # 解析 args 中的 ${workspaceFolder} 占位符，替换为实际工作区路径（无则移除该参数）
+        # 解析 args 中的 ${workspaceFolder} / ${sessionId} 占位符（无上下文则移除该参数）。
+        # plan-282-1441（#8）：sessionId 供内置「开发调试」MCP 定位自己的会话状态。
         workspace_root = getattr(ctx, "workspace_root", None)
+        session_id = getattr(ctx, "session_id", None)
         resolved_args = [
-            a for a in (_resolve_workspace_placeholder(a, workspace_root) for a in cmd_args) if a
+            a for a in (_resolve_workspace_placeholder(a, workspace_root, session_id) for a in cmd_args)
+            if a
         ]
 
         # codegraph 默认以 Direct 模式（CODEGRAPH_NO_DAEMON=1）运行：每次调用 spawn
@@ -144,6 +160,18 @@ class McpToolWrapper(Tool):
         # 用户可在 env 中显式设置 CODEGRAPH_NO_DAEMON=0 恢复共享 daemon（索引复用更快）。
         if "codegraph" in command.lower() and "CODEGRAPH_NO_DAEMON" not in env_vars:
             env_vars["CODEGRAPH_NO_DAEMON"] = "1"
+
+        # plan-282-1441（#7/#8）：内置 MCP（数据库连接 / 开发调试）需要的运行上下文。
+        # 它们需回连主服务查询项目连接配置与调试会话状态（这些状态在 MCP 子进程里不存在）。
+        # 判据必须同时认两种入口：打包态 command 是 exe、args 是 --mcp-server <name>，
+        # 只认 app.mcp_servers 会静默丢失 CHATCODER_*，内置调试 MCP 会直接报"缺少会话上下文"。
+        if _is_builtin_mcp(command, cmd_args):
+            from app.core.config import settings as _settings
+            env_vars.setdefault("CHATCODER_SERVER_PORT", str(_settings.server_port))
+            if session_id is not None:
+                env_vars.setdefault("CHATCODER_SESSION_ID", str(session_id))
+            if workspace_root:
+                env_vars.setdefault("CHATCODER_WORKSPACE", str(workspace_root))
 
         # 优化：优先使用系统环境，并在 Windows 下保证 UTF-8 stdio
         full_env = {**os.environ, **env_vars, "PYTHONIOENCODING": "utf-8"}
@@ -371,7 +399,11 @@ def build_mcp_tools_for_agent(
                     server_config=server_config,
                 )
                 # v6.0: 根据工具名/描述自动推断风险等级
-                wrapper.risk_level = _infer_mcp_risk(tool_name, tool_def.get("description", ""))
+                # plan-282-1441（#7/#8）：优先用 MCP 自报的 annotations.riskLevel
+                wrapper.risk_level = _infer_mcp_risk(
+                    tool_name, tool_def.get("description", ""),
+                    tool_def.get("annotations") if isinstance(tool_def.get("annotations"), dict) else None,
+                )
                 tools.append(wrapper)
         else:
             # 没有缓存的 tools 列表，创建一个通用的 MCP 调用工具
@@ -402,12 +434,21 @@ _READONLY_KEYWORDS = {
 }
 
 
-def _infer_mcp_risk(tool_name: str, description: str) -> str:
-    """根据工具名和描述推断风险等级。
+def _infer_mcp_risk(tool_name: str, description: str, annotations: dict | None = None) -> str:
+    """推断 MCP 工具的风险等级。
 
-    只读类工具（explore/search/query/read 等）设为 low（免审批），
-    其他设为 medium（需审批）。
+    plan-282-1441（#7/#8）：**优先采用 MCP 自报的 `annotations.riskLevel`**。
+    内置服务（数据库连接 / 开发调试）会在 tools/list 里明确自带等级——
+    这比"按工具名猜"可靠得多：例如 `db_query` 含 "query" 会被猜成 low，
+    但它到底是只读还是写，只有服务自己知道；而 `db_ddl` 必须始终是 high。
+
+    自报值不合法（缺失/越界）时回退到关键词推断：
+    只读类关键词 → low（免审批），其他 → medium（需审批）。
     """
+    if isinstance(annotations, dict):
+        reported = str(annotations.get("riskLevel") or "").strip().lower()
+        if reported in ("low", "medium", "high"):
+            return reported
     combined = f"{tool_name} {description}".lower()
     for kw in _READONLY_KEYWORDS:
         if kw in combined:

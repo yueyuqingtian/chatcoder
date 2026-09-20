@@ -32,6 +32,11 @@ export function ImageGallery() {
   const [dragging, setDragging] = useState(false);
   const stageRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ x: number; y: number; sl: number; st: number } | null>(null);
+  /** plan-282-1421（图3）：本次指针交互是否已构成"拖拽"——拖拽结束的那次 click 不得触发放大态失焦关闭 */
+  const draggedRef = useRef(false);
+  const closeBtnRef = useRef<HTMLButtonElement>(null);
+  /** 打开前的焦点元素：关闭后归还焦点（键盘用户不会被丢到 body） */
+  const prevFocusRef = useRef<HTMLElement | null>(null);
 
   const current = images[index] ?? null;
   const multi = images.length > 1;
@@ -41,8 +46,24 @@ export function ImageGallery() {
     setZoom(100);
     setNatural(null);
     dragRef.current = null;
+    draggedRef.current = false;
     setDragging(false);
   }, [current?.url]);
+
+  // 打开时把焦点移入弹窗（关闭按钮），关闭时归还给原元素
+  useEffect(() => {
+    if (!current) return;
+    prevFocusRef.current = (document.activeElement as HTMLElement) ?? null;
+    // 下一帧聚焦，确保 Portal 已挂载
+    const raf = requestAnimationFrame(() => closeBtnRef.current?.focus());
+    return () => {
+      cancelAnimationFrame(raf);
+      const prev = prevFocusRef.current;
+      if (prev && document.contains(prev)) {
+        try { prev.focus({ preventScroll: true }); } catch { /* 忽略 */ }
+      }
+    };
+  }, [current != null]);
 
   // 键盘：Esc 关闭 / ←→ 切换 / +/- 缩放
   useEffect(() => {
@@ -91,6 +112,7 @@ export function ImageGallery() {
     if (!zoomed) return;
     const st = stageRef.current;
     if (!st) return;
+    draggedRef.current = false;
     dragRef.current = { x: e.clientX, y: e.clientY, sl: st.scrollLeft, st: st.scrollTop };
     setDragging(true);
     try { st.setPointerCapture(e.pointerId); } catch { /* ignore */ }
@@ -99,8 +121,12 @@ export function ImageGallery() {
     const d = dragRef.current;
     const st = stageRef.current;
     if (!d || !st) return;
-    st.scrollLeft = d.sl - (e.clientX - d.x);
-    st.scrollTop = d.st - (e.clientY - d.y);
+    const dx = e.clientX - d.x;
+    const dy = e.clientY - d.y;
+    // 超过 3px 才算拖拽：避免手抖把"点击"误判成拖拽
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) draggedRef.current = true;
+    st.scrollLeft = d.sl - dx;
+    st.scrollTop = d.st - dy;
   };
   const onPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!dragRef.current) return;
@@ -115,7 +141,7 @@ export function ImageGallery() {
         <button className="gallery-btn" onClick={download} title="下载原图" type="button">
           <IconDownload size={16} />
         </button>
-        <button className="gallery-btn" onClick={close} title="关闭 (Esc)" type="button">
+        <button ref={closeBtnRef} className="gallery-btn" onClick={close} title="关闭 (Esc)" aria-label="关闭预览" type="button">
           <IconX size={16} />
         </button>
       </div>
@@ -124,12 +150,14 @@ export function ImageGallery() {
       <div
         ref={stageRef}
         className={`gallery-stage${zoomed ? " zoomed" : ""}${dragging ? " dragging" : ""}`}
-        onClick={(e) => e.stopPropagation()}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
       >
+        {/* plan-282-1421（图3）：stage 铺满整个遮罩，若它吞掉点击，"点蒙层边缘关闭"就永远失效。
+            改为只让图片本身拦截点击——点击图片外的任何区域都会冒泡到遮罩触发关闭。
+            放大态拖拽位移超过阈值即视为拖拽，松开后的那次 click 不再拦截（也不算关闭）。 */}
         <img
           key={current.url}
           className="gallery-img"
@@ -137,6 +165,11 @@ export function ImageGallery() {
           alt={current.name}
           style={imgStyle}
           draggable={false}
+          onClick={(e) => {
+            // 拖拽结束的 click 直接忽略（既不关闭也无其他副作用）
+            if (draggedRef.current) { draggedRef.current = false; e.stopPropagation(); return; }
+            e.stopPropagation();
+          }}
           onLoad={(e) =>
             setNatural({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })
           }

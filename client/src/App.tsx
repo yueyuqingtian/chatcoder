@@ -13,6 +13,7 @@ import { SettingsContent, type SettingsTab } from "./components/settings";
 import { CommandCenter } from "./components/CommandCenter";
 import { ArchivedProjectPrompt } from "./components/ArchivedProjectPrompt";
 import { PluginSlot } from "./plugins/registry";
+import { PageTransition } from "./components/ui";
 import { useUiStore, initUi } from "./store/ui";
 import { usePanelStore } from "./store/panel";
 import { useChatStore } from "./store/chat";
@@ -165,9 +166,14 @@ export default function App() {
           <PluginSlot slot="titlebar" leftCollapsed={sidebarCollapsed} rightCollapsed={!rightExpanded} settings={nav === "settings"} onToggleLeft={() => setSidebarCollapsed((v) => !v)} onToggleRight={() => usePanelStore.getState().togglePanel()} />
           <div className="app-body">
             <main className={`app-main${!rightExpanded ? " right-panel-collapsed" : ""}`}>
-              {nav === "settings"
-                ? <SettingsContent tab={settingsActiveTab} />
-                : <Workspace nav={nav} onSessionStart={() => setNav(null)} />}
+              {/* plan-282-1421（第3项）：设置 ↔ 工作区切换过渡（id 为页面标识）。
+                  App.tsx 与 settings/Workspace 内层过渡叠加时也不会位移：两者都是
+                  transform/opacity，且内层只在 tab/session 变化时重播。 */}
+              <PageTransition id={nav === "settings" ? "settings" : `ws-${nav ?? "chat"}`}>
+                {nav === "settings"
+                  ? <SettingsContent tab={settingsActiveTab} />
+                  : <Workspace nav={nav} onSessionStart={() => setNav(null)} />}
+              </PageTransition>
             </main>
             {/* plan-95: reservePx=主区 min-width 480 + 手柄宽 10，动态上限防溢出裁剪 */}
             {rightExpanded && !rightFullscreen && <ResizeHandle side="right" baseWidth={rightPanelWidth} minWidth={280} maxWidth={1200} reservePx={490} panelEl={rightPanelElRef} onCommit={setRightPanelWidth} />}

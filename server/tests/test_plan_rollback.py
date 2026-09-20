@@ -51,6 +51,48 @@ def test_plan_document_missing_returns_empty(workspace):
     assert _read_plan_document(str(workspace), session_id=7) == ""
 
 
+# ── 串会话防护：不得读到别的会话的方案文档 ──
+
+
+def test_plan_document_ignores_other_session_document(workspace):
+    """别的会话写出的方案文档不得被本会话命中（串会话修复）。
+
+    这是"当前会话拿到另一个会话的计划"的问题根源：旧实现扫描
+    ai/chatcoder-plan*.md 且按 mtime 取最新，不区分归属。"""
+    (workspace / "ai").mkdir()
+    # 别的会话（id=9）的文档，且 mtime 更新（旧实现会优先命中它）
+    other = workspace / "ai" / "chatcoder-plan-9-20260801_100000.md"
+    other.write_text("other session plan", encoding="utf-8")
+    mine = workspace / "ai" / "chatcoder-plan-7-20260801_100000.md"
+    mine.write_text("my plan", encoding="utf-8")
+    old_ts = other.stat().st_mtime - 200
+    os.utime(other, (old_ts, old_ts))  # 让别的会话文档更新
+    assert _read_plan_document(str(workspace), session_id=7) == "my plan"
+
+
+def test_plan_document_only_other_session_returns_empty(workspace):
+    """工作区里只有别的会话的方案文档时必须返回空，而不是借用它。"""
+    (workspace / "ai").mkdir()
+    (workspace / "ai" / "chatcoder-plan-9.md").write_text("other session", encoding="utf-8")
+    assert _read_plan_document(str(workspace), session_id=7) == ""
+
+
+def test_plan_doc_ownership_classifier():
+    """归属判定单元：本会话 / 别的会话 / 无法归属（纯时间戳）三类。"""
+    from app.orchestration.engine import _plan_doc_belongs_to_other
+
+    # 本会话（含带时间戳、带 turn id 的变体）→ 不属于别人
+    assert _plan_doc_belongs_to_other("chatcoder-plan-7.md", 7) is False
+    assert _plan_doc_belongs_to_other("chatcoder-plan-7-123.md", 7) is False
+    assert _plan_doc_belongs_to_other("chatcoder-plan-7-20260801_100000.md", 7) is False
+    # 别的会话 → 属于别人（丢弃）
+    assert _plan_doc_belongs_to_other("chatcoder-plan-9.md", 7) is True
+    assert _plan_doc_belongs_to_other("chatcoder-plan-9-123.md", 7) is True
+    assert _plan_doc_belongs_to_other("chatcoder-plan-70-1.md", 7) is True
+    # 纯时间戳命名：无法归属 → 保留（不判给别人）
+    assert _plan_doc_belongs_to_other("chatcoder-plan-20260801_100000.md", 7) is False
+
+
 # ── checkpoint 文件名与恢复 ──
 
 

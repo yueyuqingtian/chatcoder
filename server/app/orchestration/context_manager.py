@@ -512,18 +512,11 @@ async def build_main_context(
         system=system_prompt,
         instruction=user_message,
     )
-    # v21: 主路径接入摘要系统 —— 未摘要历史超过窗口阈值(0.35×ctx)时先压缩为
-    # LLM 摘要并落库（session.shared_context），再往下做窗口截断。
-    # 修复：此前 maybe_summarize_main_session 只在旧群聊路径被调用，主 turn 路径
-    # 完全无摘要兜底，超过窗口预算(0.30×ctx)的旧消息被静默丢弃。
-    try:
-        from app.orchestration.context_memory import (
-            _resolve_leader_context_window, maybe_summarize_main_session,
-        )
-        _summary_window = await _resolve_leader_context_window(db, session, model_id=effective_model_id)
-        await maybe_summarize_main_session(db, session, context_window=_summary_window)
-    except Exception:
-        logger.warning("[context] 主会话摘要更新失败(非阻塞)", exc_info=True)
+    # v16（用户要求）：移除重建时的静默渐进摘要 —— 重建不再改写历史。
+    # 此前按 0.85×窗口（且窗口口径可能与实际调用模型不一致）静默摘要并落库
+    # summarized_ids，用户发新任务时看到占用莫名回退（52%→48%）、历史被悄悄改写。
+    # 现在压缩只保留一条通道：占用超过「设置-常规设置」的压缩阈值后，由
+    # agent_loop 走落库式压缩（前端压缩卡片、可恢复）。
     # 1. Current Goal（plan-671：目标激活时为持久目标，本轮消息降级为 Current Task）
     if goal and goal.get("text"):
         bundle.developer_parts.append(

@@ -2,13 +2,38 @@
 
 优先级：project.rules_docs(手动配置) > 自动扫描(根+一级子目录 AGENTS.md/.cursorrules/CLAUDE.md)。
 总量上限 32KiB（对齐 codex project_doc_max_bytes）。
+
+plan-282-1441（#6）：补齐各 CLI 的规则文档名——不同工具用不同约定名，
+此前只认 AGENTS.md / .cursorrules / CLAUDE.md，导致用户已有的
+.codebuddy/AGENTS.md、.trae/rules、.qoder/AGENTS.md、.cursor/rules 等一律读不到。
 """
 import logging
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_RULE_NAMES = ("AGENTS.md", ".cursorrules", "CLAUDE.md", "CLAUDE.md", "AGENTS.md")
+# 根 / 一级子目录下的规则文件名（各 CLI 约定名）
+_RULE_NAMES = (
+    "AGENTS.md",          # codex / 通用（含 codebuddy、qoder 的 AGENTS.md 约定）
+    "CLAUDE.md",          # Claude Code
+    ".cursorrules",       # Cursor（旧式单文件）
+    "CODEBUDDY.md",       # CodeBuddy
+    "QODER.md",           # Qoder
+    "rules.md",           # Trae
+    "GEMINI.md",          # Gemini CLI
+    ".windsurfrules",     # Windsurf
+    "CONTRIBUTING.md",    # 通用工程约定（弱规则，放最后）
+)
+
+# 以「目录」形式存放规则的工具：扫目录下的 *.md
+_RULE_DIRS = (
+    ".cursor/rules",
+    ".trae/rules",
+    ".codebuddy/rules",
+    ".qoder/rules",
+    ".github/instructions",
+)
+
 _MAX_TOTAL_BYTES = 32 * 1024
 _MAX_SINGLE_BYTES = 16 * 1024
 
@@ -26,8 +51,12 @@ _RULE_SOURCE_MAP: list[tuple[str, str]] = [
     ("rules.md", "trae"),
     ("QODER.md", "qoder"),
     (".qoder/AGENTS.md", "qoder"),
+    (".qoder/rules", "qoder"),
     (".cursorrules", "cursor"),
     (".cursor/rules", "cursor"),
+    ("GEMINI.md", "gemini"),
+    (".windsurfrules", "windsurf"),
+    (".github/instructions", "github"),
 ]
 
 
@@ -59,7 +88,11 @@ def _source_of(rel: str) -> str | None:
 
 
 async def scan_rules_docs(root: str) -> list[str]:
-    """扫描目录（根 + 一级子目录）下的规范文档，返回相对路径列表。"""
+    """扫描目录（根 + 一级子目录）下的规范文档，返回相对路径列表。
+
+    plan-282-1441（#6）：除约定文件名外，还支持「以目录存放规则」的工具
+    （.cursor/rules、.trae/rules、.codebuddy/rules 等），取其中 *.md。
+    """
     base = Path(root)
     if not base.is_dir():
         return []
@@ -70,14 +103,32 @@ async def scan_rules_docs(root: str) -> list[str]:
         pass
     found: list[str] = []
     seen: set[str] = set()
+
+    def _add(p: Path) -> None:
+        try:
+            rel = str(p.relative_to(base)).replace("\\", "/")
+        except ValueError:
+            return
+        if rel not in seen:
+            seen.add(rel)
+            found.append(rel)
+
     for d in dirs:
         for name in _RULE_NAMES:
             p = d / name
             if p.is_file():
-                rel = str(p.relative_to(base)).replace("\\", "/")
-                if rel not in seen:
-                    seen.add(rel)
-                    found.append(rel)
+                _add(p)
+        # 目录形态的规则（如 .cursor/rules/*.md）
+        for rel_dir in _RULE_DIRS:
+            rd = d / rel_dir
+            if not rd.is_dir():
+                continue
+            try:
+                for f in sorted(rd.iterdir()):
+                    if f.is_file() and f.suffix.lower() in (".md", ".mdc"):
+                        _add(f)
+            except OSError:
+                continue
     return found
 
 

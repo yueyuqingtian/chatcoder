@@ -70,6 +70,60 @@ async def save_auth(db: AsyncSession, provider_id: int, *, access_token: str,
         s.commit()
 
     await run_write_locked(patch, label=f"ta3.auth.save.{provider_id}")
+    # plan-282-1441 修复：登录成功同时落一条「账号凭据」，否则界面凭据列表永远为空
+    # （用户实测："登录后下面没有显示 key，会话里也无法使用模型"）。
+    await ensure_account_credential(db, provider_id, account)
+
+
+async def ensure_account_credential(db: AsyncSession, provider_id: int,
+                                    account: dict | None) -> int | None:
+    """确保该 ta3 账号在凭据表里有一行（幂等）。
+
+    为什么需要：多凭据/轮询体系（credential_service）是按 ProviderCredential 工作的，
+    但 ta3 登录此前只写 Ta3Auth（token 行），从不建凭据行 —— 于是：
+      · 设置页「凭据」区永远显示"暂无凭据"（用户看不到登录的账号）；
+      · 会话里取 Key 时 available_credentials 为空，模型自然用不了。
+    这里在登录/刷新 token 后补齐凭据行（label 取账号显示名，extra 标记账号身份）。
+    """
+    from sqlalchemy import select
+
+    from app.persistence.models.model_reg import ProviderCredential
+
+    label = None
+    if isinstance(account, dict):
+        label = str(account.get("label") or account.get("name") or account.get("id") or "")[:80] or None
+    label = label or "ta3 账号"
+
+    res = await db.execute(
+        select(ProviderCredential).where(ProviderCredential.provider_id == provider_id)
+    )
+    existing = list(res.scalars().all())
+    for c in existing:
+        extra = c.extra if isinstance(c.extra, dict) else {}
+        # 已有 ta3 账号凭据（同类型）则复用，只补齐启用态与状态
+        if extra.get("kind") == "ta3_account":
+            if not c.is_active:
+                c.is_active = True
+            if (c.status or "ok") != "ok":
+                c.status = "ok"
+                c.cooldown_until = None
+                c.last_error = None
+            if label and c.label != label:
+                c.label = label
+            await db.commit()
+            return c.id
+
+    # 没有则新建（借用既有 create_credential，保持 priority 与状态口径一致）
+    from app.services import credential_service
+
+    cid = await credential_service.create_credential(
+        db, provider_id,
+        label=label,
+        is_active=True,
+        status="ok",
+        extra={"kind": "ta3_account"},
+    )
+    return cid
 
 
 async def clear_auth(db: AsyncSession, provider_id: int) -> None:

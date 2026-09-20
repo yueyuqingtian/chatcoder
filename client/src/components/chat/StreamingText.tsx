@@ -1,8 +1,10 @@
 /** StreamingText（v20→v40）：流式渲染共享组件——主会话与子代理面板共用。
  * - 思考中：与 ThinkingBlock 同款紧凑行（脑图标 +「正在思考」+ 单行 ticker 随产字速度滚动），
  *   不再展示展开式 mono 大块，排版与工具行完全一致；
- * - 正文：块缓存增量 Markdown（StreamingMarkdown）+ 自适应"产字"平滑 + stream-caret 三点光标；
- * - 无思考无文本时状态行「处理中…/等待响应…」（status-pulse）。
+ * - 正文：块缓存增量 Markdown（StreamingMarkdown）+ 自适应"产字"平滑；
+ * - 状态行：统一"进行中"提示（呼吸点 + 文案），四态共用——重试/事务提示（statusLabel）、
+ *   有正文「处理中…」、无内容「等待响应…」。正文与思考流并存时尾部同样保留该行，
+ *   不与上方思考行互相抑制（plan-282-1421 第4项：三点光标已移除，由本行统一承担）。
  */
 import { useEffect, useRef, useState } from "react";
 import { IconBrain, IconChevronRight } from "../icons";
@@ -96,22 +98,37 @@ export function StreamingText({ active, thinking, text, processingLabel = "处�
         <div className="turn-item turn-item-text">
           <div className="turn-agent-text">
             <StreamingMarkdown>{smoothBody}</StreamingMarkdown>
-            <span className="stream-caret"><i /><i /><i /></span>
+            {/* plan-282-1421（第4项）：移除流式尾部三点光标（.stream-caret）。
+                它与状态行的呼吸点在语义上重复、且不同步；现统一由下方状态行
+                （呼吸点 + 文案）承担"进行中"表达，视觉只保留一种语言。 */}
           </div>
         </div>
       )}
-      {statusLabel ? (
-        // v35: 重试/恢复等瞬态状态——无论有无思考/正文都展示在状态行
-        <div className="turn-status-line">
-          <span className="thinking-breath-dot" style={{ marginRight: 6 }} />
-          <span className="thinking-block-status">{statusLabel}</span>
-        </div>
-      ) : (!smoothThinking && (
-        <div className="turn-status-line">
-          <span className="thinking-breath-dot" style={{ marginRight: 6 }} />
-          <span className="thinking-block-status">{smoothBody ? processingLabel : waitingLabel}</span>
-        </div>
-      ))}
+      {/* plan-282-1421（第4项）：进行中状态统一为**唯一一条**状态行。
+          四态（重试中/处理中/等待响应/补充提示）共用同一结构与同一动画，
+          不再与三点光标并存。
+
+          修复：门控此前写作 `statusLabel || !smoothThinking`——只要存在思考流，
+          状态行被整条跳过。而思考行渲染在**正文上方**，当「思考流 + 正文同时产出」
+          （典型：AI 边思考边写方案文档/正文）时，正文尾部既无三点光标、又无状态行，
+          消息流底部完全静默，用户看不到"还在进行"。
+          现改为：只要有正文流式，尾部一律补状态行；仅当「无正文且无瞬态状态」
+          时才交给上方思考行独表"进行中"（避免思考行 + 状态行两行重复）。 */}
+      {(statusLabel || smoothBody || !smoothThinking) && (
+        <StateLine
+          label={statusLabel ?? (smoothBody ? processingLabel : waitingLabel)}
+        />
+      )}
+    </div>
+  );
+}
+
+/** 统一"进行中"状态行：呼吸点 + 文案（四态共用，唯一样式出口）。 */
+function StateLine({ label }: { label: string }) {
+  return (
+    <div className="turn-status-line">
+      <span className="thinking-breath-dot" />
+      <span className="thinking-block-status">{label}</span>
     </div>
   );
 }

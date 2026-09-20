@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { IconRefresh, IconSearch, IconZap } from "../icons";
+import { Input, Select } from "../ui";
 import { isIndexBusy, progressText, resolveSearchTarget } from "./indexProgress";
 
 export interface WorkspaceStat {
@@ -242,18 +243,14 @@ export function IndexLibraryPanel() {
       <div className="idx-search">
         <div className="idx-search-title">符号检索预览</div>
         <div className="idx-search-row">
-          <select
-            className="ui-select"
+          <Select
             value={effectiveTarget ?? ""}
-            onChange={(e) => { setTarget(e.target.value); setHits(null); }}
+            onChange={(v) => { setTarget(v); setHits(null); }}
             disabled={enabledItems.length === 0}
-          >
-            {enabledItems.map((w) => (
-              <option key={w.workspace} value={w.workspace}>{w.name || w.workspace}</option>
-            ))}
-          </select>
-          <input
-            className="ui-input"
+            options={enabledItems.map((w) => ({ value: w.workspace, label: w.name || w.workspace }))}
+            aria-label="检索目标索引库"
+          />
+          <Input
             placeholder="函数名 / 类名（支持部分匹配）"
             value={query}
             onChange={(e) => setQuery(e.target.value)}

@@ -275,38 +275,57 @@ AGENT_LOOP_COMPACT_RATIO = 0.90
 # 超过 0.85×窗口 → 先循环摘要到 ≤ 阈值，再全量注入（无静默丢失）。
 # 预算(=0.85) 必须 ≥ 阈值(=0.85)，否则 80%~85% 区间消息既未注入也未摘要而丢失（v21 已踩坑）。
 MAIN_SUMMARIZE_RATIO = 0.85
-MAIN_WINDOW_RATIO = 0.85          # plan-166-767: 与摘要阈值一致（≥ 阈值），不摘要态全量注入
+# v16: 注入预算 = 窗口 × 压缩触发阈值（设置-常规，默认 0.90），且 ≥ 摘要阈值。
+# 常量仅作默认值/文档；实际取值见 get_main_window_budget()。
+MAIN_WINDOW_RATIO = 0.85
 MAIN_SUMMARIZE_BATCH_RATIO = 0.35  # v6.3: 从 0.06 提升到 0.35，一次摘要更多（循环摘要的每批量）
 THREAD_WINDOW_RATIO = 0.85        # v6.3: 从 0.15 提升到 0.85，线程窗口保留更多历史
 # 至少保留的最近消息条数（保底，不按比例）
 MIN_MESSAGES_KEEP = 5
 
 
-async def get_agent_context_window(db: AsyncSession, agent) -> int:
-    """解析 Agent 的有效上下文窗口大小。
+async def get_agent_context_window(db: AsyncSession, agent, model_id: int | None = None) -> int:
+    """解析**实际调用模型**的有效上下文窗口。
 
-    优先级：
-    1. agent.model_id → Model.context_window（如果已配置）
-    2. settings.default_context_window（全局兜底）
+    优先级（v16，与 engine.effective_model_id 同口径）：
+    1. 显式 model_id —— 会话/请求绑定的模型，即真正发起调用的模型
+    2. agent.model_id → Model.context_window
+    3. settings.default_context_window（全局兜底）
+
+    口径必须全局统一：若占用百分比（前端圆环）、压缩阈值、重建窗口预算
+    各按不同模型计算（如会话模型 512K、主 agent 兜底 1M），会出现
+    「显示 46% 却被静默摘要/裁剪」这类不一致。
 
     这是 v3.3 的核心：不同 Agent 可能绑定不同模型（500K / 1M / 200K），
     所有窗口管理和压缩阈值都应该基于各自模型的真实窗口大小，
     而非全局统一的 500000。
     """
     from app.core.config import settings
+    from app.persistence.models.model_reg import Model
 
-    if agent and getattr(agent, "model_id", None):
-        from app.persistence.models.model_reg import Model
-        model = await db.get(Model, agent.model_id)
-        if model and model.context_window and model.context_window > 0:
-            return model.context_window
+    for mid in (model_id, getattr(agent, "model_id", None) if agent else None):
+        if mid:
+            model = await db.get(Model, mid)
+            if model and model.context_window and model.context_window > 0:
+                return int(model.context_window)
 
     return settings.default_context_window
 
 
 def get_main_window_budget(context_window: int) -> int:
-    """根据 Leader 模型上下文窗口计算主群聊窗口预算。"""
-    return max(4000, int(context_window * MAIN_WINDOW_RATIO))
+    """根据 Leader 模型上下文窗口计算主会话注入预算。
+
+    v16: 预算 = 窗口 × 压缩触发阈值（设置-常规，默认 0.90），且不低于渐进
+    摘要阈值，保证两条不变量：
+    - 预算 ≥ 阈值：未超阈值时历史**全量注入**，重建不改写历史；
+    - 预算与用户设置一致：压缩只发生在用户设置的占用比例被超过之后。
+    """
+    from app.core.config import settings
+
+    ratio = float(getattr(settings, "auto_compact_threshold_ratio", MAIN_WINDOW_RATIO)
+                  or MAIN_WINDOW_RATIO)
+    ratio = max(ratio, MAIN_SUMMARIZE_RATIO)
+    return max(4000, int(context_window * ratio))
 
 
 def get_main_summarize_threshold(context_window: int) -> int:

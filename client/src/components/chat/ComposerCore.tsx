@@ -31,9 +31,12 @@ import {
   IconImage,
   IconCode,
   IconTerminal,
-  IconClipboard,
   IconBox,
+  IconPackage,
+  IconPlug,
   IconFileText,
+  IconRingProgress,
+  IconSpinner,
 } from "../icons";
 import { Modal } from "../Modal";
 import { createPortal } from "react-dom";
@@ -41,7 +44,7 @@ import { ModelPicker } from "./ModelPicker";
 import { useChatStore, persistLastReasoning, type UsageDetail } from "../../store/chat";
 import { useDraftsStore } from "../../store/drafts";
 import { useI18n } from "../../store/i18n";
-import { api, resolveFileUrl, type AttachmentInfo, type PermissionProfileOut, type SkillOut, type TreeNode } from "../../api/client";
+import { api, resolveFileUrl, type AttachmentInfo, type McpServerOut, type PermissionProfileOut, type PluginMarketItem, type SkillOut, type TreeNode } from "../../api/client";
 import { openGallery } from "../../store/gallery";
 import { useClickOutside } from "../../hooks/useClickOutside";
 
@@ -68,10 +71,11 @@ export interface ComposerCoreProps {
 
 /** plan-238-1210 (A2): 引用 chips（@文件 / $技能）——不再内嵌进输入文本。 */
 export interface ComposerRef {
-  kind: "file" | "skill";
-  /** 原始值：文件为工作区相对路径，技能为技能名 */
+  /** plan-282-1441（#9）：新增 "mcp"（连接器）与 "plugin"（插件）引用 */
+  kind: "file" | "skill" | "mcp" | "plugin";
+  /** 原始值：文件为工作区相对路径，技能为技能名，连接器/插件为各自名称 */
   value: string;
-  /** 展示名（文件取文件名、技能取技能名） */
+  /** 展示名 */
   label: string;
 }
 
@@ -80,9 +84,14 @@ export function buildRefsSuffix(refs: ComposerRef[]): string {
   if (refs.length === 0) return "";
   const files = refs.filter((r) => r.kind === "file").map((r) => `@${r.value}`);
   const skills = refs.filter((r) => r.kind === "skill").map((r) => `$${r.value}`);
+  // plan-282-1441（#9）：连接器引用——写明"使用连接器"，引导模型走对应 MCP 工具
+  const connectors = refs.filter((r) => r.kind === "mcp").map((r) => r.value);
+  const pluginRefs = refs.filter((r) => r.kind === "plugin").map((r) => r.value);
   const lines: string[] = [];
   if (files.length > 0) lines.push(`引用文件：${files.join("、")}`);
   if (skills.length > 0) lines.push(`使用技能：${skills.join("、")}`);
+  if (connectors.length > 0) lines.push(`使用连接器：${connectors.join("、")}`);
+  if (pluginRefs.length > 0) lines.push(`使用插件：${pluginRefs.join("、")}`);
   return lines.join("\n");
 }
 
@@ -104,8 +113,6 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   const usage = useChatStore((s) => s.usage);
   const pendingApproval = useChatStore((s) => s.pendingApproval);
   const pendingPlan = useChatStore((s) => s.pendingPlan);
-  const confirmPlanTurn = useChatStore((s) => s.confirmPlanTurn);
-  const dismissPlan = useChatStore((s) => s.dismissPlan);
   const sessions = useChatStore((s) => s.sessions);
 
   const currentSession = sessions.find((s) => s.id === currentSessionId);
@@ -267,6 +274,27 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     return () => { cancelled = true; };
   }, []);
 
+  /** plan-282-1441（#9）：/ 菜单的「连接器」分区——已启用的 MCP（含内置与插件贡献） */
+  useEffect(() => {
+    let cancelled = false;
+    api.listMcpServers()
+      .then((items) => { if (!cancelled) setMcpServers(items.filter((m) => m.is_active)); })
+      .catch(() => { /* ignore */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  /** plan-282-1441（#9）：/ 菜单的「插件」分区——已**启用**的插件（未启用不参与补全） */
+  useEffect(() => {
+    let cancelled = false;
+    api.pluginMarketplace()
+      .then((res) => {
+        if (cancelled) return;
+        setPlugins((res.items ?? []).filter((p) => p.installed && p.enabled));
+      })
+      .catch(() => { /* 未安装插件也不影响菜单其他分区 */ });
+    return () => { cancelled = true; };
+  }, []);
+
   const sendTurn = useChatStore((s) => s.sendTurn);
   const cancelTurn = useChatStore((s) => s.cancelTurn);
   const updateQueuedInput = useChatStore((s) => s.updateQueuedInput);
@@ -295,6 +323,10 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   const [atLoading, setAtLoading] = useState(false);
   // 会话 229: 技能列表（/ 菜单技能区 + $ 补全菜单共用）
   const [skills, setSkills] = useState<SkillOut[]>([]);
+  /** plan-282-1441（#9）：/ 菜单「连接器」分区数据源（已启用的 MCP） */
+  const [mcpServers, setMcpServers] = useState<McpServerOut[]>([]);
+  /** plan-282-1441（#9）：/ 菜单「插件」分区数据源（已安装且已启用的插件） */
+  const [plugins, setPlugins] = useState<PluginMarketItem[]>([]);
   const [showSkills, setShowSkills] = useState(false);
   const [skillIndex, setSkillIndex] = useState(0);
   const [skillQuery, setSkillQuery] = useState("");
@@ -305,6 +337,12 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   useClickOutside(projectMenuRef, showProjectMenu, () => setShowProjectMenu(false));
   useClickOutside(modeMenuRef, showModeMenu, () => setShowModeMenu(false));
   useClickOutside(reasoningMenuRef, showReasoning, () => setShowReasoning(false));
+  /** / @ $ 弹层容器：用于"键盘上下键切换时把选中项滚入可视区"。
+   *  弹层有 max-height + overflow-y:auto，此前只改 index 不滚动内容区，
+   *  选中项一旦超出可视区就看不到（用户看不到自己选到哪一项）。 */
+  const slashMenuRef = useRef<HTMLDivElement>(null);
+  const skillMenuRef = useRef<HTMLDivElement>(null);
+  const atMenuRef = useRef<HTMLDivElement>(null);
 
   const prevApprovalRef = useRef(pendingApproval);
   useEffect(() => {
@@ -419,6 +457,17 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     );
   }, [input, skills]);
 
+  /** plan-282-1441（#9）：/ 菜单「连接器」分区（已启用的 MCP，共用 "/" 过滤词） */
+  const filteredSlashMcp = useMemo(() => {
+    const match = input.match(/(?:^|\s)\/([^\s]*)$/);
+    if (!match) return [];
+    const q = match[1].toLowerCase();
+    if (!q) return mcpServers;
+    return mcpServers.filter(
+      (m) => m.name.toLowerCase().includes(q) || (m.display_name ?? "").toLowerCase().includes(q)
+    );
+  }, [input, mcpServers]);
+
   /** 会话 229: $ 补全菜单技能过滤（仅技能） */
   const filteredSkills = useMemo(() => {
     const q = skillQuery;
@@ -428,13 +477,28 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     );
   }, [skills, skillQuery]);
 
-  /** 会话 229: / 菜单扁平项（命令 + 技能，键盘导航共用同一索引） */
+  /** plan-282-1441（#9）：/ 菜单「插件」分区（已启用的插件，共用 "/" 过滤词） */
+  const filteredSlashPlugins = useMemo(() => {
+    const match = input.match(/(?:^|\s)\/([^\s]*)$/);
+    if (!match) return [];
+    const q = match[1].toLowerCase();
+    if (!q) return plugins;
+    return plugins.filter(
+      (p) => p.name.toLowerCase().includes(q)
+        || (p.displayName ?? "").toLowerCase().includes(q)
+        || (p.descriptionZh ?? "").toLowerCase().includes(q),
+    );
+  }, [input, plugins]);
+
+  /** 会话 229: / 菜单扁平项（命令 + 技能 + 连接器 + 插件，键盘导航共用同一索引） */
   const slashItems = useMemo(
     () => [
       ...filteredSlash.map((s) => ({ kind: "cmd" as const, key: s.cmd })),
       ...filteredSlashSkills.map((s) => ({ kind: "skill" as const, key: s.name })),
+      ...filteredSlashMcp.map((m) => ({ kind: "mcp" as const, key: m.name })),
+      ...filteredSlashPlugins.map((p) => ({ kind: "plugin" as const, key: p.name })),
     ],
-    [filteredSlash, filteredSlashSkills]
+    [filteredSlash, filteredSlashSkills, filteredSlashMcp, filteredSlashPlugins]
   );
 
   const slashVisible = showSlash && slashItems.length > 0;
@@ -478,6 +542,33 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     if (!atQuery) return atFiles.slice(0, 15);
     return atFiles.filter((p) => p.toLowerCase().includes(atQuery)).slice(0, 15);
   }, [atFiles, atQuery]);
+
+  /** 把弹层内当前选中项（.active）滚入可视区。
+   *  不用 scrollIntoView：它会连带滚动祖先容器（消息流会跟着动），
+   *  这里只改弹层自己的 scrollTop，副作用最小。 */
+  const scrollActiveIntoView = (menu: HTMLDivElement | null) => {
+    if (!menu) return;
+    const el = menu.querySelector<HTMLElement>("button.active");
+    if (!el) return;
+    // 弹层自身 position:absolute，是子项的 offsetParent，故 offsetTop 可直接用
+    const top = el.offsetTop;
+    const bottom = top + el.offsetHeight;
+    if (top < menu.scrollTop) menu.scrollTop = top;
+    else if (bottom > menu.scrollTop + menu.clientHeight) {
+      menu.scrollTop = bottom - menu.clientHeight;
+    }
+  };
+
+  // 键盘切换（以及列表内容变化）后，选中项必须在可视区内
+  useEffect(() => { scrollActiveIntoView(slashMenuRef.current); },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [slashIndex, slashItems.length, slashVisible]);
+  useEffect(() => { scrollActiveIntoView(skillMenuRef.current); },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [skillIndex, filteredSkills.length, showSkills]);
+  useEffect(() => { scrollActiveIntoView(atMenuRef.current); },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [atIndex, filteredAtFiles.length, showAt]);
 
   /** plan-238-1210 (A2): 选择文件 → 追加引用 chip（不再把 @路径 写回输入文本）。
    *  同时清掉用户已敲的 `@查询词`，避免残留半截文本。 */
@@ -636,17 +727,47 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   /** 会话 229: 选择技能（/ 菜单或 $ 菜单）→ plan-238-1210 (A2): 追加引用 chip。 */
   const insertSkill = (name: string, fromSlash: boolean) => {
     clearTriggerPrefix(fromSlash ? /(^|\s)\/[^\s]*$/ : /(^|\s)\$[^\s]*$/);
+    // plan-282-1441（#9）：chip 展示可读名，value 仍是技能标识（$name 语义依赖它）
+    const label = skills.find((s) => s.name === name)?.display_name || name;
     setRefs((prev) => (prev.some((r) => r.kind === "skill" && r.value === name)
       ? prev
-      : [...prev, { kind: "skill", value: name, label: name }]));
+      : [...prev, { kind: "skill", value: name, label }]));
     setShowSlash(false);
     setShowSkills(false);
   };
 
-  /** 会话 229: / 菜单项选择（命令走原逻辑，技能走插入） */
-  const pickSlashItem = (item: { kind: "cmd" | "skill"; key: string }) => {
+  /** plan-282-1441（#9）：选择连接器（/ 菜单）→ 追加 MCP 引用 chip。
+   *  发送时会在消息里写明"使用连接器"，让模型明确走该 MCP；是否真正注入工具仍由
+   *  MCP 的启用状态决定（服务端 get_agent_mcp_servers）。 */
+  const insertConnector = (name: string, label: string) => {
+    clearTriggerPrefix(/(^|\s)\/[^\s]*$/);
+    setRefs((prev) => (prev.some((r) => r.kind === "mcp" && r.value === name)
+      ? prev
+      : [...prev, { kind: "mcp", value: name, label }]));
+    setShowSlash(false);
+  };
+
+  /** plan-282-1441（#9）：选择插件（/ 菜单）→ 追加插件引用 chip。
+   *  插件本身不是工具，它通过贡献技能/连接器生效；这里写明"使用插件"，
+   *  让模型知道该按该插件的工作流（其技能）来做事。 */
+  const insertPlugin = (name: string, label: string) => {
+    clearTriggerPrefix(/(^|\s)\/[^\s]*$/);
+    setRefs((prev) => (prev.some((r) => r.kind === "plugin" && r.value === name)
+      ? prev
+      : [...prev, { kind: "plugin", value: name, label }]));
+    setShowSlash(false);
+  };
+
+  /** 会话 229: / 菜单项选择（命令走原逻辑，技能/连接器/插件走插入） */
+  const pickSlashItem = (item: { kind: "cmd" | "skill" | "mcp" | "plugin"; key: string }) => {
     if (item.kind === "cmd") pickSlash(item.key);
-    else insertSkill(item.key, true);
+    else if (item.kind === "mcp") {
+      const m = mcpServers.find((x) => x.name === item.key);
+      insertConnector(item.key, m?.display_name || item.key);
+    } else if (item.kind === "plugin") {
+      const pl = plugins.find((x) => x.name === item.key);
+      insertPlugin(item.key, pl?.displayName || item.key);
+    } else insertSkill(item.key, true);
   };
 
   const pickSlash = (cmd: string) => {
@@ -955,23 +1076,10 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
         </div>
       )}
 
-      {!isHome && pendingPlan && (
-        <div className="composer-plan-bar">
-          <div className="composer-plan-bar-left">
-            <IconClipboard size={13} />
-            <span className="composer-plan-bar-title">{t("composer.plan_ready", { task: pendingPlan.task || "..." })}</span>
-            <span className="composer-plan-bar-hint">{t("composer.plan_ready_hint")}</span>
-          </div>
-          <div className="composer-plan-bar-actions">
-            <button type="button" className="btn-ghost" onClick={() => void dismissPlan()}>
-              {t("common.cancel")}
-            </button>
-            <button type="button" className="plan-inline-confirm" onClick={() => void confirmPlanTurn(true)}>
-              {t("composer.confirm_exec")}
-            </button>
-          </div>
-        </div>
-      )}
+      {/* plan-282-1434（B1）：原「计划已就绪」横幅（.composer-plan-bar）已删除。
+          确认/取消动作移入计划卡内部下方居中（见 PlanCard 的 footer）——
+          此前确认入口在输入框上方、计划内容在消息流里，两者分离，视线要来回跳；
+          且该横幅与卡片"待确认"徽标语义重复。 */}
 
       {/* 核心重构：AI 提问时直接将输入框主体替换为 QuestionWizardBox 卡片（对齐参考图 paste-20260829121505.png） */}
       {isQuestionMode ? (
@@ -982,7 +1090,16 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
           onSubmit={(answers) => respondApproval(pendingApproval.approvalId, true, false, answers)}
         />
       ) : (
-        <div className="composer-main">
+        <div className={`composer-main${dragOver ? " is-drag-over" : ""}`}>
+          {/* plan-282-1421（图4）：拖拽提示内联在输入卡内（不再外挂虚线遮罩）——
+              外挂遮罩挂在 .composer 上（含 32px 横向内距）会与真实输入卡错位一圈，
+              且与卡片圆角/贴条态圆角对不上。现在边框由 .composer-main 自己承载。 */}
+          {dragOver && (
+            <div className="composer-drop-hint">
+              <IconPaperclip size={16} />
+              <span>松开以添加附件</span>
+            </div>
+          )}
           {/* 紧凑内嵌浏览器标注胶囊块：小巧精致不占空间，点击弹出详情预览 Modal（对齐图 2） */}
           {composerBrowserRefs.length > 0 && (
             <div className="composer-browser-refs">
@@ -1111,35 +1228,61 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
               )}
             </div>
           )}
-          {/* plan-547: 排队胶囊——内嵌输入框内（textarea 上方）紧凑展示，不再与任务进度/变更贴条叠压 */}
+          {/* plan-547 → plan-282-1421（第5项）：排队消息展示重做。
+              信息层级：序号 → 模式标签 → 内容摘要 → 附件数 → 立即发送 / 移除。
+              交互：整条可 hover 高亮；发送中显示旋转指示；入队/出队有动效（见 CSS）。 */}
           {!isHome && queuedInputs.length > 0 && (
-            <div className="composer-queue-pills">
-              {queuedInputs.map((q) => (
-                <div key={q.id} className={`composer-queue-pill${q.flushing ? " flushing" : ""}`} title={q.content}>
-                  <span className="cq-pill-label">{q.flushing ? t("composer.queue_sending") : t("composer.queue_label")}</span>
-                  <span className="cq-pill-text">
-                    {q.content || (q.attachments?.length ? `附件 × ${q.attachments.length}` : "")}
-                  </span>
-                  {q.mode === "plan" && <span className="cq-pill-tag">规划</span>}
-                  {q.mode === "readonly" && <span className="cq-pill-tag">只读</span>}
-                  <button
-                    className="cq-pill-send"
-                    onClick={() => void flushQueuedInput(q.id)}
-                    title={t("composer.queue_flush_now")}
-                    type="button"
+            <div className="composer-queue">
+              <div className="composer-queue-head">
+                <span className="cq-head-label">{t("composer.queue_label")}</span>
+                <span className="cq-head-count">{queuedInputs.length}</span>
+              </div>
+              <div className="composer-queue-pills">
+                {queuedInputs.map((q, i) => (
+                  <div
+                    key={q.id}
+                    className={`composer-queue-pill${q.flushing ? " flushing" : ""}`}
+                    title={q.content}
                   >
-                    <IconArrowUp size={10} />
-                  </button>
-                  <button
-                    className="cq-pill-remove"
-                    onClick={() => updateQueuedInput(q.id, null)}
-                    title={t("composer.queue_remove")}
-                    type="button"
-                  >
-                    <IconX size={10} />
-                  </button>
-                </div>
-              ))}
+                    <span className="cq-pill-index">{i + 1}</span>
+                    {q.mode === "plan" && <span className="cq-pill-tag">规划</span>}
+                    {q.mode === "readonly" && <span className="cq-pill-tag">只读</span>}
+                    <span className="cq-pill-text">
+                      {q.content || (q.attachments?.length ? "（仅附件）" : "")}
+                    </span>
+                    {(q.attachments?.length ?? 0) > 0 && (
+                      <span className="cq-pill-attach" title={`${q.attachments?.length ?? 0} 个附件`}>
+                        <IconPaperclip size={10} />
+                        {q.attachments?.length ?? 0}
+                      </span>
+                    )}
+                    {q.flushing ? (
+                      <span className="cq-pill-sending" title={t("composer.queue_sending")}>
+                        <IconSpinner size={11} />
+                      </span>
+                    ) : (
+                      <button
+                        className="cq-pill-btn send"
+                        onClick={() => void flushQueuedInput(q.id)}
+                        title={t("composer.queue_flush_now")}
+                        aria-label={t("composer.queue_flush_now")}
+                        type="button"
+                      >
+                        <IconArrowUp size={11} />
+                      </button>
+                    )}
+                    <button
+                      className="cq-pill-btn remove"
+                      onClick={() => updateQueuedInput(q.id, null)}
+                      title={t("composer.queue_remove")}
+                      aria-label={t("composer.queue_remove")}
+                      type="button"
+                    >
+                      <IconX size={11} />
+                    </button>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
           {/* plan-238-1210 (A2): 引用 chips 行（@文件 / $技能）——不再内嵌进输入文本，
@@ -1153,13 +1296,20 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                   title={r.value}
                 >
                   <span className="composer-ref-icon">
-                    {r.kind === "file" ? <IconFileText size={11} /> : <IconBox size={11} />}
+                    {/* plan-282-1441（#9）：四类引用用不同图标区分（文件/技能/连接器/插件） */}
+                    {r.kind === "file" ? <IconFileText size={11} />
+                      : r.kind === "mcp" ? <IconPlug size={11} />
+                      : r.kind === "plugin" ? <IconPackage size={11} />
+                      : <IconBox size={11} />}
                   </span>
                   <span className="composer-ref-name">{r.label}</span>
                   <button
                     type="button"
                     className="composer-ref-remove"
-                    title={r.kind === "file" ? "移除文件引用" : "移除技能引用"}
+                    title={r.kind === "file" ? "移除文件引用"
+                      : r.kind === "mcp" ? "移除连接器引用"
+                      : r.kind === "plugin" ? "移除插件引用"
+                      : "移除技能引用"}
                     onClick={() => setRefs((prev) => prev.filter((_, idx) => idx !== i))}
                   >
                     <IconX size={10} />
@@ -1460,12 +1610,8 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
         </div>
       )}
 
-      {dragOver && (
-        <div className="composer-drag-overlay">
-          <IconPaperclip size={24} />
-          <span>松开以添加附件</span>
-        </div>
-      )}
+      {/* plan-282-1421（图4）：原 .composer-drag-overlay 外挂虚线遮罩已移除，
+          拖拽提示改由 .composer-main.is-drag-over 的边框 + 卡内 .composer-drop-hint 承载。 */}
 
       {/* plan-671: 设定/修改目标弹层（复用 Modal 与现有输入样式） */}
       <Modal
@@ -1577,7 +1723,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
       </Modal>
 
       {slashVisible && (
-        <div className="composer-menu composer-slash">
+        <div className="composer-menu composer-slash" ref={slashMenuRef}>
           {filteredSlash.length > 0 && <div className="composer-menu-title">快捷命令</div>}
           {filteredSlash.map((s, idx) => (
             <button
@@ -1601,8 +1747,44 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                 onClick={() => insertSkill(s.name, true)}
               >
                 <IconBox size={12} />
-                <strong>${s.name}</strong>
-                <span>{s.display_name || s.description || ""}</span>
+                {/* plan-282-1441（#9）：主标题显示可读名（与设置页一致）。
+                    引用值仍用 s.name——它是稳定标识（$name 语义与工具调用都依赖它）。 */}
+                <strong>{s.display_name || s.name}</strong>
+                <span>{s.display_name ? `$${s.name}` : (s.description || "")}</span>
+              </button>
+            );
+          })}
+          {/* plan-282-1441（#9）：连接器分区（已启用的 MCP，含内置与插件贡献） */}
+          {filteredSlashMcp.length > 0 && <div className="composer-menu-title">连接器</div>}
+          {filteredSlashMcp.map((m, j) => {
+            const idx = filteredSlash.length + filteredSlashSkills.length + j;
+            return (
+              <button
+                key={`mcp-${m.id}`}
+                className={idx === slashIndex ? "active" : ""}
+                onMouseEnter={() => setSlashIndex(idx)}
+                onClick={() => insertConnector(m.name, m.display_name || m.name)}
+              >
+                <IconPlug size={12} />
+                <strong>{m.display_name || m.name}</strong>
+                <span>{m.description || m.name}</span>
+              </button>
+            );
+          })}
+          {/* plan-282-1441（#9）：插件分区（已安装且已启用的插件） */}
+          {filteredSlashPlugins.length > 0 && <div className="composer-menu-title">插件</div>}
+          {filteredSlashPlugins.map((p, j) => {
+            const idx = filteredSlash.length + filteredSlashSkills.length + filteredSlashMcp.length + j;
+            return (
+              <button
+                key={`pl-${p.name}`}
+                className={idx === slashIndex ? "active" : ""}
+                onMouseEnter={() => setSlashIndex(idx)}
+                onClick={() => insertPlugin(p.name, p.displayName || p.name)}
+              >
+                <IconBox size={12} />
+                <strong>{p.displayName || p.name}</strong>
+                <span>{p.descriptionZh || p.description || p.category || ""}</span>
               </button>
             );
           })}
@@ -1610,7 +1792,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
       )}
 
       {showSkills && filteredSkills.length > 0 && (
-        <div className="composer-menu composer-slash">
+        <div className="composer-menu composer-slash" ref={skillMenuRef}>
           <div className="composer-menu-title">技能（$）</div>
           {filteredSkills.map((s, idx) => (
             <button
@@ -1628,7 +1810,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
       )}
 
       {showAt && (
-        <div className="composer-menu composer-at">
+        <div className="composer-menu composer-at" ref={atMenuRef}>
           <div className="composer-menu-title">引用文件上下文（@）</div>
           {atLoading && <div className="composer-menu-empty">加载文件树…</div>}
           {!atLoading && filteredAtFiles.length === 0 && (
@@ -1713,11 +1895,21 @@ function formatApprovalArgs(args: unknown): string {
   }
 }
 
-/** token 占用圆环：无文字，hover 显示百分比 tooltip，点击弹窗详情 */
+/** token 数量格式化（k 单位，去掉多余的 .0）；圆环浮层与旧调用共用的工具函数。 */
 function formatK(value: number): string {
   return (Math.max(0, value) / 1000).toFixed(value >= 10000 ? 0 : 1).replace(/\.0$/, "");
 }
 
+/** plan-282-1421（第10项）：上下文占用圆环 + 浮层重做。
+ *
+ * 相对旧实现的改动（对齐参考图 6）：
+ *  - **hover/focus 即显示**（不再需要点击）；点击可"钉住"以便移入浮层查看细节；
+ *  - **两档信息**：基础态只给「上下文容量 used/window（pct%）」+ 进度条 + 「平均缓存命中率」；
+ *    详细态（拿到供应商真实数据：source=api_last 或带 breakdown）才追加实时缓存率、
+ *    输入/输出/思考输出拆分与分项 breakdown；
+ *  - **压缩中**不再显示文字徽标，圆环自身变旋转加载弧；
+ *  - 圆环 26 → **20px**（与工具栏其他图标同一视觉重量）。
+ */
 function UsageRing({
   pct,
   usage,
@@ -1727,11 +1919,15 @@ function UsageRing({
   usage: UsageDetail | null;
   compacting?: boolean;
 }) {
-  const [showDetail, setShowDetail] = useState(false);
-  const ringRef = useRef<HTMLButtonElement>(null);
-  const radius = 10;
-  const circ = 2 * Math.PI * radius;
-  const offset = circ - (pct / 100) * circ;
+  /** 鼠标在浮层/圆环上时为 true */
+  const [hovering, setHovering] = useState(false);
+  /** 点击钉住（允许鼠标移入浮层内部滚动查看） */
+  const [pinned, setPinned] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const cacheTotals = useChatStore((s) => s.usageCacheTotals);
+
+  const open = (hovering || pinned) && !!usage;
+
   const color = compacting
     ? "var(--warning)"
     : pct > 80
@@ -1740,73 +1936,80 @@ function UsageRing({
     ? "var(--warning)"
     : "var(--success)";
 
+  /** 平均缓存命中率（本任务内累计口径；样本不足时不展示） */
+  const avgCacheRate = cacheTotals.samples > 0 && cacheTotals.inputSum > 0
+    ? Math.round((cacheTotals.cachedSum / cacheTotals.inputSum) * 100)
+    : null;
+
+  // 点击外部关闭"钉住"
   useEffect(() => {
-    if (!showDetail) return;
+    if (!pinned) return;
     const handler = (e: MouseEvent) => {
-      if (ringRef.current && !ringRef.current.contains(e.target as Node)) {
-        setShowDetail(false);
-      }
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setPinned(false);
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
-  }, [showDetail]);
+  }, [pinned]);
+
+  // 切换会话/收起时复位钉住态
+  useEffect(() => {
+    if (!usage) setPinned(false);
+  }, [usage]);
 
   return (
-    <div className="composer-usage-ring-wrap">
+    <div
+      className="composer-usage-ring-wrap"
+      ref={wrapRef}
+      onMouseEnter={() => setHovering(true)}
+      onMouseLeave={() => setHovering(false)}
+    >
       <button
-        ref={ringRef}
-        className={`composer-usage-ring${compacting ? " compacting" : ""}`}
-        title={compacting ? `正在压缩上下文（${pct}%）` : `上下文占用 ${pct}%`}
-        onClick={() => setShowDetail((v) => !v)}
-        style={{
-          position: "relative",
-          width: 26,
-          height: 26,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          borderRadius: "50%",
-          border: "none",
-          background: "transparent",
-          cursor: "pointer",
-        }}
+        className="composer-usage-ring"
+        data-compacting={compacting || undefined}
+        aria-label={compacting ? "正在整理上下文" : `上下文占用 ${pct}%`}
+        aria-expanded={open}
+        onClick={() => setPinned((v) => !v)}
+        onFocus={() => setHovering(true)}
+        onBlur={() => setHovering(false)}
+        type="button"
       >
-        <svg width="26" height="26" viewBox="0 0 26 26">
-          <circle cx="13" cy="13" r={radius} fill="none" stroke="var(--border)" strokeWidth="2.5" />
-          <circle
-            cx="13"
-            cy="13"
-            r={radius}
-            fill="none"
-            stroke={color}
-            strokeWidth="2.5"
-            strokeDasharray={circ}
-            strokeDashoffset={offset}
-            strokeLinecap="round"
-            transform="rotate(-90 13 13)"
-            style={{ transition: "stroke-dashoffset var(--dur-med, 0.3s) ease" }}
-          />
-        </svg>
+        {/* 压缩中：圆环变旋转加载弧（替代原"压缩中"文字徽标） */}
+        <IconRingProgress
+          value={pct / 100}
+          size={20}
+          strokeWidth={2}
+          loading={Boolean(compacting)}
+          trackColor="var(--border)"
+          indicatorColor={color}
+        />
       </button>
-      {showDetail && usage && (
-        <div className="composer-usage-detail" style={{ display: "block" }}>
-          <div className="usage-detail-title">上下文占用 {pct}%</div>
-          <div>输入：{formatK(usage.input)}k</div>
-          <div>缓存：{formatK(usage.cached_input)}k</div>
-          <div>输出：{formatK(usage.output)}k</div>
-          <div>思考输出：{formatK(usage.reasoning_output)}k</div>
-          <div>
-            合计：{formatK(usage.total)}k / 窗口：{formatK(usage.context_window)}k
+
+      {open && usage && (
+        <div
+          className="usage-pop"
+          role="tooltip"
+          onMouseEnter={() => setHovering(true)}
+          onMouseLeave={() => setHovering(false)}
+        >
+          {/* ── 基础态：容量 + 百分比 + 进度条 + 平均缓存命中率 ── */}
+          <div className="usage-pop-head">
+            <span className="usage-pop-title">{compacting ? "正在整理上下文" : "上下文容量"}</span>
+            <span className="usage-pop-pct">{pct}%</span>
           </div>
-          <div>
-            模型：{usage.agent_name || "默认"} · 来源：{usage.source || "未知"}
+          <div className="usage-pop-bar" aria-hidden>
+            <span style={{ width: `${Math.min(100, Math.max(0, pct))}%`, background: color }} />
           </div>
-          {usage.breakdown &&
-            Object.entries(usage.breakdown).map(([key, value]) => (
-              <div key={key}>
-                {key}：{formatK(value)}k
-              </div>
-            ))}
+          <div className="usage-pop-amount">
+            {formatK(usage.total)}k / {formatK(usage.context_window)}k
+          </div>
+          <div className="usage-pop-row">
+            <span className="usage-pop-key">平均缓存命中率</span>
+            <span className="usage-pop-val">{avgCacheRate == null ? "—" : `${avgCacheRate}%`}</span>
+          </div>
+          {/* plan-282-1434（B3）：浮层瘦身——删除实时缓存命中率、缓存命中、输出、思考输出、
+               模型、数据来源与占用构成明细。这些信息要么与"上下文容量"主题无关，
+               要么在任务执行之外并不可得；保留的三项（容量/百分比+进度条/平均缓存命中率）
+               已能回答"窗口还剩多少、缓存省了多少"这两个核心问题。 */}
         </div>
       )}
     </div>

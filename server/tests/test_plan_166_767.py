@@ -14,10 +14,19 @@ def _fake(content):
 
 
 def test_summarize_and_window_ratio():
-    """计划：摘要阈值与注入预算统一为 0.85（预算 ≥ 阈值，避免静默丢失）。"""
+    """v16：注入预算 = 窗口 × 压缩阈值（设置-常规），且 ≥ 摘要阈值，避免静默丢失。"""
+    from app.core.config import settings
+    from app.orchestration.token_counter import (
+        get_main_summarize_threshold, get_main_window_budget,
+    )
+
     assert MAIN_SUMMARIZE_RATIO == 0.85
-    assert MAIN_WINDOW_RATIO == 0.85
-    assert MAIN_WINDOW_RATIO >= MAIN_SUMMARIZE_RATIO
+    ctx = 512000
+    # 预算 ≥ 阈值：未超阈值时历史全量注入（重建不改历史）
+    assert get_main_window_budget(ctx) >= get_main_summarize_threshold(ctx)
+    # 预算与压缩触发阈值（设置-常规）一致
+    ratio = max(float(settings.auto_compact_threshold_ratio), MAIN_SUMMARIZE_RATIO)
+    assert get_main_window_budget(ctx) == max(4000, int(ctx * ratio))
 
 
 def test_is_image_message_true_for_image_attachment():

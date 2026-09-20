@@ -1,10 +1,12 @@
 """Routers 聚合入口（v2）。"""
 from app.gateway.routers import (  # noqa: F401
+    debug,
     diagnostics,
     exec_policy,
     hooks,
     memories,
     permission_profiles,
+    plugins,
     profiles,
     projects,
     scheduled,
@@ -23,4 +25,6 @@ __all__ = [
     "hooks",
     "memories",
     "diagnostics",
+    "plugins",
+    "debug",
 ]

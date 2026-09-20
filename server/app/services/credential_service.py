@@ -313,6 +313,29 @@ async def mark_failed(db: AsyncSession, credential_id: int, error: str) -> None:
     await run_write_locked(patch, label=f"credential.fail.{credential_id}")
 
 
+async def reset_credential(db: AsyncSession, credential_id: int) -> bool:
+    """手动复位凭据：清冷却与错误，恢复为可用（plan-282-1441）。
+
+    与 mark_ok 的区别：mark_ok 是"成功调用后的记账"，会刷新 last_ok_at 影响粘性序；
+    本函数只做"清掉不可用状态"，供用户点一下就把卡住的凭据救回来，不改变调用历史。
+    同时把 is_active 置回 True —— 用户点"恢复可用"的意图就是让它重新参与轮询。
+    """
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        cred = s.get(ProviderCredential, credential_id)
+        if cred is None:
+            return False
+        cred.status = "ok"
+        cred.cooldown_until = None
+        cred.last_error = None
+        cred.is_active = True
+        s.commit()
+        return True
+
+    return await run_write_locked(patch, label=f"credential.reset.{credential_id}")
+
+
 async def mark_ok(db: AsyncSession, credential_id: int) -> None:
     """标记凭据成功（清冷却、刷新粘性时间）。"""
     from app.persistence.database import run_write_locked

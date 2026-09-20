@@ -7,6 +7,7 @@ import { api } from "../../api/client";
 import { useUiStore } from "../../store/ui";
 import { useChatStore } from "../../store/chat";
 import { useI18n } from "../../store/i18n";
+import { Input, Select, Slider } from "../ui";
 import { Row, Sw } from "./shared";
 
 const TERMINAL_SHELLS = [
@@ -93,6 +94,25 @@ export function GeneralPanel() {
     [toolNames, forceTools, toolDraft],
   );
 
+  /** plan-282-1416：下拉选项改为 Select 组件的 options 数组——
+   *  「已选值不在候选列表中时保留显示」的逻辑在此保留（追加为第一项）。 */
+  const shellOptions = useMemo(() => {
+    const base = shells.map((s) => ({ value: s.value, label: s.label }));
+    if (!shells.some((s) => s.value === cfg.terminal_shell)) {
+      base.unshift({ value: cfg.terminal_shell, label: cfg.terminal_shell });
+    }
+    return base;
+  }, [shells, cfg.terminal_shell]);
+
+  const fontOptions = useMemo(() => {
+    const list = fonts.length ? fonts : [{ value: "", label: "继承系统终端字体" }];
+    const base = list.map((f) => ({ value: f.value, label: f.label }));
+    if (!list.some((f) => f.value === cfg.terminal_font)) {
+      base.unshift({ value: cfg.terminal_font, label: cfg.terminal_font || "继承系统终端字体" });
+    }
+    return base;
+  }, [fonts, cfg.terminal_font]);
+
   const load = useCallback(async () => {
     try {
       const g = await api.getGlobalSettings();
@@ -154,33 +174,23 @@ export function GeneralPanel() {
     <div className="settings-card-stack">
       <div className="settings-card">
         <Row title={t("gp.language")} desc={t("gp.language_desc")}>
-          <select className="ui-select" value={ui.language} onChange={(e) => ui.setLanguage(e.target.value as "zh" | "en")}>
-            <option value="zh">中文</option>
-            <option value="en">English</option>
-          </select>
+          <Select
+            value={ui.language}
+            onChange={(v) => ui.setLanguage(v as "zh" | "en")}
+            options={[{ value: "zh", label: "中文" }, { value: "en", label: "English" }]}
+            aria-label={t("gp.language")}
+          />
         </Row>
         <Row title={t("gp.http_proxy")} desc={t("gp.http_proxy_desc")}>
-          <input className="ui-input" placeholder="如 http://127.0.0.1:7890" value={cfg.http_proxy} onChange={(e) => patch({ http_proxy: e.target.value })} />
+          <Input placeholder="如 http://127.0.0.1:7890" value={cfg.http_proxy} onChange={(e) => patch({ http_proxy: e.target.value })} style={{ minWidth: 220 }} />
         </Row>
         <Row title={t("gp.terminal_shell")} desc={t("gp.terminal_shell_desc")}>
-          <select className="ui-select" value={cfg.terminal_shell} onChange={(e) => patch({ terminal_shell: e.target.value })}>
-            {/* 问题7: 仅列出当前设备实际存在的 Shell；已选值不在列表中时保留显示 */}
-            {!shells.some((s) => s.value === cfg.terminal_shell) && (
-              <option value={cfg.terminal_shell}>{cfg.terminal_shell}</option>
-            )}
-            {shells.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
-          </select>
+          {/* 问题7: 仅列出当前设备实际存在的 Shell；已选值不在列表中时保留显示（见 shellOptions） */}
+          <Select value={cfg.terminal_shell} onChange={(v) => patch({ terminal_shell: v })} options={shellOptions} style={{ minWidth: 200 }} aria-label={t("gp.terminal_shell")} />
         </Row>
         <Row title={t("gp.terminal_font")} desc={t("gp.terminal_font_desc")}>
-          <select className="ui-select" value={cfg.terminal_font} onChange={(e) => patch({ terminal_font: e.target.value })}>
-            {/* 问题8: 字体改为下拉候选；已选自定义值不在列表中时保留显示 */}
-            {!fonts.some((f) => f.value === cfg.terminal_font) && (
-              <option value={cfg.terminal_font}>{cfg.terminal_font || "继承系统终端字体"}</option>
-            )}
-            {(fonts.length ? fonts : [{ value: "", label: "继承系统终端字体" }]).map((f) => (
-              <option key={f.value} value={f.value}>{f.label}</option>
-            ))}
-          </select>
+          {/* 问题8: 字体改为下拉候选；已选自定义值不在列表中时保留显示（见 fontOptions） */}
+          <Select value={cfg.terminal_font} onChange={(v) => patch({ terminal_font: v })} options={fontOptions} style={{ minWidth: 200 }} aria-label={t("gp.terminal_font")} />
         </Row>
       </div>
 
@@ -246,80 +256,75 @@ export function GeneralPanel() {
           </div>
         </Row>
         <Row title={t("gp.sandbox")} desc={t("gp.sandbox_desc")}>
-          <select
-            className="ui-select"
+          <Select
             value={cfg.sandbox_mode}
-            onChange={(e) => patch({ sandbox_mode: e.target.value as typeof cfg.sandbox_mode })}
-          >
-            {SANDBOX_MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
-          </select>
+            onChange={(v) => patch({ sandbox_mode: v as typeof cfg.sandbox_mode })}
+            options={SANDBOX_MODES}
+            style={{ minWidth: 200 }}
+            aria-label={t("gp.sandbox")}
+          />
         </Row>
         <Row title={t("gp.max_steps")} desc={t("gp.max_steps_desc")}>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <select
-              className="ui-select"
-              style={{ minWidth: 140 }}
-              value={[200, 500, 1000, 0].includes(cfg.agent_max_steps) ? cfg.agent_max_steps : "custom"}
-              onChange={(e) => {
-                const val = e.target.value;
+          <div style={{ display: "flex", gap: "var(--sp-3)", alignItems: "center" }}>
+            <Select
+              style={{ minWidth: 160 }}
+              value={String([200, 500, 1000, 0].includes(cfg.agent_max_steps) ? cfg.agent_max_steps : "custom")}
+              onChange={(val) => {
                 if (val === "custom") return;
                 patch({ agent_max_steps: Number(val) });
               }}
-            >
-              {MAX_STEPS_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
-              {![200, 500, 1000, 0].includes(cfg.agent_max_steps) && (
-                <option value="custom">自定义 ({cfg.agent_max_steps} 步)</option>
-              )}
-            </select>
+              options={[
+                ...MAX_STEPS_OPTIONS.map((o) => ({ value: String(o.value), label: o.label })),
+                ...(![200, 500, 1000, 0].includes(cfg.agent_max_steps)
+                  ? [{ value: "custom", label: `自定义 (${cfg.agent_max_steps} 步)` }]
+                  : []),
+              ]}
+              aria-label={t("gp.max_steps")}
+            />
             {![200, 500, 1000, 0].includes(cfg.agent_max_steps) && (
-              <input
+              <Input
                 type="number"
-                className="ui-input"
                 style={{ width: 90 }}
                 min={0}
                 value={cfg.agent_max_steps}
                 onChange={(e) => patch({ agent_max_steps: Math.max(0, parseInt(e.target.value) || 0) })}
+                aria-label="自定义最大步数"
               />
             )}
           </div>
         </Row>
         {/* plan-278-1391: 上下文压缩触发阈值——占模型上下文窗口比例，达阈值即自动压缩 */}
         <Row title={t("gp.compact_threshold")} desc={t("gp.compact_threshold_desc")}>
-          <div className="settings-slider-wrap">
-            <input
-              type="range"
-              className="settings-slider"
-              min={50}
-              max={95}
-              step={5}
-              value={Math.round(cfg.auto_compact_threshold_ratio * 100)}
-              onChange={(e) => patch({ auto_compact_threshold_ratio: Number(e.target.value) / 100 })}
-            />
-            <span className="settings-slider-value">{Math.round(cfg.auto_compact_threshold_ratio * 100)}%</span>
-          </div>
+          <Slider
+            min={50}
+            max={95}
+            step={5}
+            value={Math.round(cfg.auto_compact_threshold_ratio * 100)}
+            onChange={(v) => patch({ auto_compact_threshold_ratio: v / 100 })}
+            format={(v) => `${v}%`}
+            aria-label={t("gp.compact_threshold")}
+          />
         </Row>
         {/* v45: 异常自动重试策略——任何报错按间隔依次重试，穷尽后才停止并显示报错 */}
         <Row title={t("gp.retry_count")} desc={t("gp.retry_count_desc")}>
-          <input
+          <Input
             type="number"
-            className="ui-input"
             style={{ width: 90 }}
             min={0}
             max={10}
             value={cfg.agent_retry_count}
             onChange={(e) => patch({ agent_retry_count: Math.max(0, parseInt(e.target.value) || 0) })}
+            aria-label={t("gp.retry_count")}
           />
         </Row>
         <Row title={t("gp.retry_intervals")} desc={t("gp.retry_intervals_desc")}>
-          <input
+          <Input
             type="text"
-            className="ui-input"
             style={{ width: 160 }}
             placeholder="10,20,30"
             value={cfg.agent_retry_intervals}
             onChange={(e) => patch({ agent_retry_intervals: e.target.value })}
+            aria-label={t("gp.retry_intervals")}
           />
         </Row>
         <Row title={t("gp.browser")} desc={t("gp.browser_desc")}>
@@ -339,14 +344,12 @@ export function GeneralPanel() {
           <Sw checked={cfg.plan_mode_allow_outside_access} onChange={(v) => patch({ plan_mode_allow_outside_access: v })} />
         </Row>
         <Row title={t("gp.density")} desc={t("gp.density_desc")}>
-          <select
-            className="ui-select"
+          <Select
             value={ui.msgDensity}
-            onChange={(e) => ui.setPrefs({ msgDensity: e.target.value as "comfortable" | "compact" })}
-          >
-            <option value="comfortable">舒适</option>
-            <option value="compact">紧凑</option>
-          </select>
+            onChange={(v) => ui.setPrefs({ msgDensity: v as "comfortable" | "compact" })}
+            options={[{ value: "comfortable", label: "舒适" }, { value: "compact", label: "紧凑" }]}
+            aria-label={t("gp.density")}
+          />
         </Row>
       </div>
 

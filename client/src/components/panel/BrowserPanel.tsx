@@ -15,6 +15,7 @@ import { useBrowserStore, type ElementInfo } from "../../store/browser";
 import { api, type UploadOut } from "../../api/client";
 import { ElementInspector } from "./ElementInspector";
 import { BrowserStartPage } from "./BrowserStartPage";
+import { useFrameBridge, isGuestFrame, type FrameEl } from "./frameBridge";
 import {
   IconArrowLeft,
   IconArrowRight,
@@ -69,9 +70,16 @@ export function BrowserPanel() {
   const viewportRef = useRef<HTMLDivElement>(null);
   // 多标签 webview / iframe 引用映射表
   const tabFrameRefs = useRef<Map<string, HTMLIFrameElement | any>>(new Map());
+  // guest 安全调用桥：未 attach / 未 dom-ready 时挂起或丢弃调用，绝不让同步异常冒泡
+  const frameBridge = useFrameBridge();
 
   // 记录上一次已同步的 tab 与 URL，避免用户输入中被 re-render 冲掉
   const lastSyncedRef = useRef<{ tabId?: string; current?: string }>({});
+
+  /** 每个标签页的宿主元素句柄（稳定 ref 回调 + 已注册的事件处理器，便于精确解绑） */
+  const tabBindingsRef = useRef<
+    Map<string, { ref: (el: FrameEl | null) => void; el?: FrameEl; handler?: () => void }>
+  >(new Map());
 
   /**
    * 视口内框架尺寸兜底：webview（Electron guest 宿主）与 iframe 仅靠 CSS 百分比
@@ -94,6 +102,83 @@ export function BrowserPanel() {
       el.style.height = `${h}px`;
     }
   }, [activeTabId]);
+
+  // syncFrameSize 在 ref 回调/事件监听里使用，用 ref 持有最新实现，避免为它重建 ref 回调
+  const syncFrameSizeRef = useRef(syncFrameSize);
+  useEffect(() => { syncFrameSizeRef.current = syncFrameSize; }, [syncFrameSize]);
+
+  /**
+   * 取得某标签页宿主元素的稳定 ref 回调。
+   *
+   * 为什么必须稳定：React 每次渲染都会以 null → 元素 的顺序重放内联 ref 回调，
+   * 内联写法会在窗口 resize 等无关重渲染时反复解绑/重绑事件（并触发同步调用）。
+   * 这里按 tabId 缓存回调，只在元素真正挂载/卸载时执行绑定逻辑。
+   */
+  const getTabRefCallback = useCallback(
+    (tabId: string) => {
+      const bindings = tabBindingsRef.current;
+      let binding = bindings.get(tabId);
+      if (!binding) {
+        binding = {
+          ref: (el: FrameEl | null) => {
+            const b = bindings.get(tabId);
+            if (!b) return;
+            if (el) {
+              if (b.el === el) return; // 同一元素重复回调：无需重复绑定
+              b.el = el;
+              tabFrameRefs.current.set(tabId, el);
+
+              // guest 就绪（webview: dom-ready / iframe: load）后再算尺寸并放行挂起调用。
+              // 保留 handler 引用，卸载时才能精确 removeEventListener（markReady 幂等，重复触发无副作用）。
+              const handler = () => {
+                frameBridge.markReady(tabId, el);
+                syncFrameSizeRef.current();
+              };
+              b.handler = handler;
+              if (el.tagName === "WEBVIEW") {
+                el.addEventListener?.("dom-ready", handler);
+                el.addEventListener?.("did-finish-load", handler);
+              } else {
+                el.addEventListener?.("load", handler);
+              }
+              // 元素可能已就绪（面板重挂载时 dom-ready 早于 ref 回调，或 iframe 已 complete）
+              frameBridge.attach(tabId, el);
+              frameBridge.markReadyIfAttached(tabId, el);
+              requestAnimationFrame(syncFrameSizeRef.current);
+            } else {
+              const prev = b.el;
+              b.el = undefined;
+              if (prev && b.handler) {
+                if (prev.tagName === "WEBVIEW") {
+                  prev.removeEventListener?.("dom-ready", b.handler);
+                  prev.removeEventListener?.("did-finish-load", b.handler);
+                } else {
+                  prev.removeEventListener?.("load", b.handler);
+                }
+                b.handler = undefined;
+              }
+              tabFrameRefs.current.delete(tabId);
+              frameBridge.detach(tabId);
+            }
+          },
+        };
+        bindings.set(tabId, binding);
+      }
+      return binding.ref;
+    },
+    [frameBridge],
+  );
+
+  // 面板卸载（折叠右面板 / 切换会话）时清空宿主绑定，防止下次挂载复用失效回调，
+  // 同时作废所有挂起中的 guest 调用（否则它们会在面板已折叠后补执行而抛错）
+  useEffect(() => {
+    const bindings = tabBindingsRef.current;
+    return () => {
+      for (const tabId of Array.from(bindings.keys())) frameBridge.detach(tabId);
+      bindings.clear();
+      tabFrameRefs.current.clear();
+    };
+  }, [frameBridge]);
 
   // 视口尺寸变化（面板宽度拖拽、窗口缩放、面板折叠恢复）时重算框架尺寸
   useEffect(() => {
@@ -249,21 +334,22 @@ export function BrowserPanel() {
   const hoverQueryRef = useRef({ pending: false });
 
   // 开启标注（或页面导航）时注入/激活探针；退出时置 disabled
+  //
+  // 全部走 frameBridge：面板折叠后 BrowserPanel 被卸载、webview 随之脱离 DOM，
+  // 但 cleanup 与重新挂载的 effect 都会立即执行到 executeJavaScript。
+  // 此前直接调用会在未 attach/未 dom-ready 时**同步抛错**，被顶层 ErrorBoundary
+  // 接住导致整页白屏（见 logs: "The WebView must be attached to the DOM..."）。
   useEffect(() => {
     if (!selecting) return;
-    const frame = tabFrameRefs.current.get(activeTabId);
-    if (frame && typeof frame.executeJavaScript === "function") {
-      frame.executeJavaScript(INSPECT_PROBE_SRC).catch(() => {});
-    }
+    // waitReady：面板刚展开、guest 尚未 dom-ready 时先挂起，就绪后自动补注入
+    void frameBridge.invoke(activeTabId, INSPECT_PROBE_SRC, { waitReady: true });
     return () => {
-      const f = tabFrameRefs.current.get(activeTabId);
-      if (f && typeof f.executeJavaScript === "function") {
-        f.executeJavaScript("window.__ccInspect && (window.__ccInspect.enabled = false)").catch(() => {});
-      }
+      // 退出标注时关闭探针；此时 guest 若已不可达就直接丢弃（无副作用价值）
+      void frameBridge.invoke(activeTabId, "window.__ccInspect && (window.__ccInspect.enabled = false)", { waitReady: false });
     };
     // 依赖 tab.current：页面导航会重置 guest 上下文，需要重新注入
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selecting, activeTabId, activeTab?.current]);
+  }, [selecting, activeTabId, activeTab?.current, frameBridge]);
 
   // 鼠标移动：光标追踪（同步）+ 元素命中查询（webview 异步节流 / 同源 iframe 同步直查）
   const handleOverlayMouseMove = (e: React.MouseEvent) => {
@@ -276,12 +362,14 @@ export function BrowserPanel() {
     const frame = tabFrameRefs.current.get(activeTabId);
     if (!frame) { setHoverInfo(null); return; }
 
-    if (typeof frame.executeJavaScript === "function") {
-      // Electron webview：节流异步查询，仅保留最新一次在途请求，返回时丢弃过期结果
+    if (isGuestFrame(frame)) {
+      // Electron webview：节流异步查询，仅保留最新一次在途请求，返回时丢弃过期结果。
+      // waitReady=false：悬停是即时交互，未就绪就跳过本次（重挂载后由就绪唤醒处理）。
       const q = hoverQueryRef.current;
       if (q.pending) return;
       q.pending = true;
-      frame.executeJavaScript(`window.__ccInspect ? __ccInspect.infoAt(${Math.round(x)}, ${Math.round(y)}) : null`)
+      frameBridge
+        .call(activeTabId, `window.__ccInspect ? __ccInspect.infoAt(${Math.round(x)}, ${Math.round(y)}) : null`, { waitReady: false })
         .then((res: any) => {
           q.pending = false;
           if (!selectingRef.current) return;
@@ -330,10 +418,12 @@ export function BrowserPanel() {
     let info: ElementInfo | null = null;
     const currentFrame = tabFrameRefs.current.get(activeTabId);
 
-    if (currentFrame && typeof currentFrame.executeJavaScript === "function") {
+    if (isGuestFrame(currentFrame)) {
       try {
-        const res = await currentFrame.executeJavaScript(
-          `window.__ccInspect ? __ccInspect.pickAt(${Math.round(localX)}, ${Math.round(localY)}) : null`
+        const res = await frameBridge.call<any>(
+          activeTabId,
+          `window.__ccInspect ? __ccInspect.pickAt(${Math.round(localX)}, ${Math.round(localY)}) : null`,
+          { waitReady: true },
         );
         if (res) {
           source = res.source || "";
@@ -360,16 +450,18 @@ export function BrowserPanel() {
 
     if (!source) source = `页面坐标 (${Math.round(localX)}, ${Math.round(localY)})`;
 
-    // 捕获当前页面截图作为标注凭据
+    // 捕获当前页面截图作为标注凭据（桥接层保证未就绪时不抛错，降级到主进程 IPC）
     let screenshotDataUrl = "";
-    try {
-      if (currentFrame && typeof currentFrame.capturePage === "function") {
-        const img = await currentFrame.capturePage();
-        screenshotDataUrl = img?.toDataURL() || "";
-      } else if (window.chatcoderAPI?.captureBrowserPage) {
+    if (isGuestFrame(currentFrame)) {
+      screenshotDataUrl = await frameBridge.capture(activeTabId);
+    }
+    if (!screenshotDataUrl && window.chatcoderAPI?.captureBrowserPage) {
+      try {
         screenshotDataUrl = (await window.chatcoderAPI.captureBrowserPage()) || "";
+      } catch {
+        /* 主进程截图不可用时忽略：标注卡仍可携带元素信息 */
       }
-    } catch {}
+    }
 
     const CARD_W = 320, CARD_H = 340;
     let cardX = localX + 12;
@@ -389,11 +481,10 @@ export function BrowserPanel() {
     setCapturing(true);
 
     try {
+      // 截屏走桥接：webview 未就绪（面板刚展开/dom-ready 未触发）时返回空串而非抛错
       let dataUrl = "";
-      if (currentFrame && typeof currentFrame.capturePage === "function") {
-        const img = await currentFrame.capturePage();
-        dataUrl = img?.toDataURL() || "";
-      } else if (window.chatcoderAPI?.captureBrowserPage) {
+      if (isGuestFrame(currentFrame)) dataUrl = await frameBridge.capture(activeTabId);
+      if (!dataUrl && window.chatcoderAPI?.captureBrowserPage) {
         dataUrl = (await window.chatcoderAPI.captureBrowserPage()) || "";
       }
 
@@ -494,11 +585,8 @@ export function BrowserPanel() {
 
   const openDevTools = async () => {
     try {
-      const currentFrame = tabFrameRefs.current.get(activeTabId);
-      if (currentFrame && typeof currentFrame.openDevTools === "function") {
-        currentFrame.openDevTools();
-        return;
-      }
+      // 桥接层在 guest 未就绪时返回 false，降级到主进程 IPC（避免 executeJavaScript/capturePage 同类抛错）
+      if (frameBridge.openDevTools(activeTabId)) return;
       if (window.chatcoderAPI?.openBrowserDevTools) {
         await window.chatcoderAPI.openBrowserDevTools();
       }
@@ -674,35 +762,13 @@ export function BrowserPanel() {
                 />
               ) : isElectron ? (
                 <webview
-                  ref={(el: any) => {
-                    if (el) {
-                      tabFrameRefs.current.set(tab.id, el);
-                      el.addEventListener?.("dom-ready", syncFrameSize);
-                      el.addEventListener?.("did-finish-load", syncFrameSize);
-                      requestAnimationFrame(syncFrameSize);
-                    } else {
-                      const prev = tabFrameRefs.current.get(tab.id);
-                      prev?.removeEventListener?.("dom-ready", syncFrameSize);
-                      prev?.removeEventListener?.("did-finish-load", syncFrameSize);
-                      tabFrameRefs.current.delete(tab.id);
-                    }
-                  }}
+                  ref={getTabRefCallback(tab.id)}
                   src={tab.current}
                   className="browser-frame-element"
                 />
               ) : (
                 <iframe
-                  ref={(el) => {
-                    if (el) {
-                      tabFrameRefs.current.set(tab.id, el);
-                      el.addEventListener?.("load", syncFrameSize);
-                      requestAnimationFrame(syncFrameSize);
-                    } else {
-                      const prev = tabFrameRefs.current.get(tab.id);
-                      prev?.removeEventListener?.("load", syncFrameSize);
-                      tabFrameRefs.current.delete(tab.id);
-                    }
-                  }}
+                  ref={getTabRefCallback(tab.id)}
                   src={tab.current}
                   className="browser-frame-element"
                   sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
@@ -724,8 +790,8 @@ export function BrowserPanel() {
                   let snapshot = "";
                   const currentFrame = tabFrameRefs.current.get(activeTabId);
                   try {
-                    if (currentFrame && typeof currentFrame.executeJavaScript === "function") {
-                      snapshot = await currentFrame.executeJavaScript("document.documentElement.outerHTML");
+                    if (isGuestFrame(currentFrame)) {
+                      snapshot = (await frameBridge.call<string>(activeTabId, "document.documentElement.outerHTML", { waitReady: true })) || "";
                     } else if (currentFrame?.contentDocument) {
                       snapshot = currentFrame.contentDocument.documentElement.outerHTML;
                     }
@@ -768,12 +834,12 @@ export function BrowserPanel() {
                     if (!code) return;
                     let res = "";
                     const currentFrame = tabFrameRefs.current.get(activeTabId);
-                    try {
-                      if (currentFrame && typeof currentFrame.executeJavaScript === "function") {
-                        res = String(await currentFrame.executeJavaScript(code));
-                      }
-                    } catch (err: any) {
-                      res = `Error: ${err.message || err}`;
+                    if (isGuestFrame(currentFrame)) {
+                      // 用 invoke 而非 call：需要把 guest 内的求值异常回显到结果里
+                      const r = await frameBridge.invoke<string>(activeTabId, code, { waitReady: true });
+                      if (r.ok) res = String(r.value);
+                      else if (r.notReady) res = "Error: 页面尚未就绪，请稍后重试";
+                      else res = `Error: ${r.error}`;
                     }
 
                     addComposerBrowserRef({

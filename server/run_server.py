@@ -222,7 +222,42 @@ def _setup_env() -> None:
     print(f"[chatcoder-server] workspace = {ws_path}")
 
 
+def _maybe_run_mcp_server() -> bool:
+    """`--mcp-server <name>`：把本 exe 当作内置 MCP 服务运行（plan-282-1441 #7/#8）。
+
+    为什么需要：内置 MCP 是独立进程，开发态可用 `python -m app.mcp_servers.database`
+    拉起；但打包后 sys.executable 是本 exe，**不支持 -m**。因此让 exe 自己识别一个
+    子命令，以同一份代码库运行指定的 MCP 服务。返回 True 表示已接管（不再启动 uvicorn）。
+
+    注意：此处**不做** _setup_env（不抢实例锁、不改 chdir）——MCP 子进程只需继承
+    父进程已注入的 DATABASE_URL / CHATCODER_* 环境变量即可，避免与主服务争抢单实例锁。
+    """
+    argv = sys.argv[1:]
+    if not argv or argv[0] != "--mcp-server":
+        return False
+    name = argv[1] if len(argv) > 1 else ""
+    if not name:
+        sys.stderr.write("[chatcoder-server] --mcp-server 需要一个服务名\n")
+        sys.exit(2)
+    try:
+        if name == "database":
+            from app.mcp_servers.database import main as _mcp_main
+        elif name == "debugger":
+            from app.mcp_servers.debugger import main as _mcp_main
+        else:
+            sys.stderr.write(f"[chatcoder-server] 未知的内置 MCP 服务: {name}\n")
+            sys.exit(2)
+        _mcp_main()
+    except Exception:  # noqa: BLE001 —— MCP 崩溃要写日志便于排查
+        traceback.print_exc()
+        sys.exit(1)
+    return True
+
+
 def main() -> None:
+    # 内置 MCP 子进程入口（必须在任何环境/锁初始化之前分流）
+    if _maybe_run_mcp_server():
+        return
     try:
         _setup_env()
         # plan-248-1273 M1: 将实际运行 exe/worker 版本写入 health，避免源码与

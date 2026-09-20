@@ -1,14 +1,21 @@
-/** 设置中心共享组件（v2.2 对齐 zcode 3.18）：开关 / 行 / 通用资源列表。 */
+/** 设置中心共享组件（plan-282-1416：改为组件库薄封装）。
+ *
+ * Row → CardRow（卡片行）、Sw → Switch（Radix 开关），
+ * 消除此前三套开关实现（ui/Switch、.ui-switch、.sp-switch）与内联行样式。
+ */
 import { useCallback, useEffect, useState } from "react";
 import { IconX } from "../icons";
 import { ConfirmDialog } from "../ConfirmDialog";
+import { CardRow, IconButton, List, ListRow, Switch } from "../ui";
 
+/** 开关（兼容旧签名 checked/onChange） */
 export function Sw({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
-  return <label className="ui-switch"><input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} /><span className="ui-switch-track" /></label>;
+  return <Switch checked={checked} onChange={onChange} />;
 }
 
+/** 卡片行：标题 + 描述 + 右侧控件槽 */
 export function Row({ title, desc, children, className }: { title: string; desc: string; children: React.ReactNode; className?: string }) {
-  return <div className={"settings-row" + (className ? " " + className : "")}><div className="settings-row-info"><div className="settings-row-title">{title}</div><div className="settings-row-desc">{desc}</div></div><div className="settings-row-control">{children}</div></div>;
+  return <CardRow title={title} desc={desc} className={className}>{children}</CardRow>;
 }
 
 export function CardTitle({ children }: { children: React.ReactNode }) {
@@ -30,18 +37,21 @@ export function GenericPanel<T extends { id: number }>({ loader, getName, getDes
   useEffect(() => { load(); }, [load]);
   return (
     <div className="settings-resource-list">
-      {items.map((it) => (
-        <div key={it.id} className="settings-resource-item">
-          <div className="settings-resource-info">
-            <div className="settings-resource-name">{getName(it)}</div>
-            <div className="settings-resource-desc">{getDesc(it)}</div>
-          </div>
-          <div className="settings-resource-actions">
-            {onToggle && <Sw checked={getActive(it)} onChange={async (v) => { try { await onToggle(it, v); load(); } catch {} }} />}
-            <button className="btn btn-ghost btn-xs" onClick={() => setConfirmTarget(it)}><IconX size={12} /></button>
-          </div>
-        </div>
-      ))}
+      <List>
+        {items.map((it) => (
+          <ListRow
+            key={it.id}
+            name={getName(it)}
+            desc={getDesc(it)}
+            actions={
+              <>
+                {onToggle && <Sw checked={getActive(it)} onChange={async (v) => { try { await onToggle(it, v); load(); } catch {} }} />}
+                <IconButton size="xs" icon={<IconX size={12} />} title="删除" onClick={() => setConfirmTarget(it)} />
+              </>
+            }
+          />
+        ))}
+      </List>
       {items.length === 0 && <div className="navpage-empty">暂无数据</div>}
       <ConfirmDialog
         open={confirmTarget !== null}

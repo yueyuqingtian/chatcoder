@@ -5,7 +5,7 @@ import { api, type SkillOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { IconRefresh, IconPlus, IconX, IconFolder } from "../icons";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { FormDialog } from "../ui/FormDialog";
+import { FormDialog, Input, Textarea } from "../ui";
 import { Sw } from "./shared";
 
 /** 非阻塞提示：Electron 中 window.alert 是原生模态框，关闭后会破坏窗口焦点，统一改用全局提示条。 */
@@ -137,8 +137,8 @@ export function SkillsPanel() {
         submitLabel="添加"
         submitDisabled={!repoUrl.trim()}
       >
-        <input className="ui-input" placeholder="Git 仓库地址 (https://…/repo.git)" value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} />
-        <input className="ui-input" placeholder="仓库名称（可选）" value={repoName} onChange={(e) => setRepoName(e.target.value)} />
+        <Input placeholder="Git 仓库地址 (https://…/repo.git)" value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} aria-label="Git 仓库地址" />
+        <Input placeholder="仓库名称（可选）" value={repoName} onChange={(e) => setRepoName(e.target.value)} aria-label="仓库名称" />
       </FormDialog>
 
       {repos.length > 0 && (
@@ -197,10 +197,11 @@ export function SkillsPanel() {
                 <div className="skill-detail">
                   <div className="skill-detail-field">
                     <label className="settings-field-label">触发条件（AI 何时该用此技能）</label>
-                    <textarea
-                      className="ui-textarea" rows={2} placeholder="如：当任务涉及浏览器自动化操作时"
+                    <Textarea
+                      rows={2} placeholder="如：当任务涉及浏览器自动化操作时"
                       value={triggerDrafts[s.id] ?? s.trigger ?? ""}
                       onChange={(e) => setTriggerDrafts((p) => ({ ...p, [s.id]: e.target.value }))}
+                      aria-label="触发条件"
                       onBlur={() => void saveTrigger(s)}
                     />
                   </div>

@@ -619,6 +619,86 @@ export function IconCheck({ size = 18, color = "currentColor", strokeWidth = 2, 
   );
 }
 
+/** 圆形警示（plan-282-1416：收编 TurnGroup 内联错误图标；
+ *  相较三角警示，圆形在密集消息流中更安静、与线性图标体系一致） */
+export function IconAlertCircle({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <circle cx="12" cy="12" r="9.5" />
+      <line x1="12" y1="7.5" x2="12" y2="13" />
+      <circle cx="12" cy="16.5" r="0.6" fill={color || "currentColor"} stroke="none" />
+    </svg>
+  );
+}
+
+/** 环形进度（plan-282-1416：收编 ComposerCore 内联上下文占用环）
+ *  value: 0~1；trackColor/indicatorColor 允许调用方按语义着色（默认走中性/品牌）。
+ *  plan-282-1421（第10项）：新增 loading 模式——压缩等"进行中"场景不再依赖文字，
+ *  由圆环自身变成一段固定弧度的旋转加载弧（旋转时长走 --dur-spin，遵循图形约定）。 */
+export function IconRingProgress({
+  value,
+  size = 26,
+  strokeWidth = 2.5,
+  trackColor = "var(--border)",
+  indicatorColor = "currentColor",
+  loading = false,
+  className,
+}: {
+  value: number;
+  size?: number;
+  strokeWidth?: number;
+  trackColor?: string;
+  indicatorColor?: string;
+  /** 加载态：忽略 value，渲染旋转弧（用于压缩/整理上下文等无确定进度的场景） */
+  loading?: boolean;
+  className?: string;
+}) {
+  const r = (size - strokeWidth) / 2;
+  const circ = 2 * Math.PI * r;
+  const clamped = Math.max(0, Math.min(1, value));
+  const offset = circ * (1 - clamped);
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox={`0 0 ${size} ${size}`}
+      className={className ? `icon-ring-progress ${className}` : "icon-ring-progress"}
+      data-loading={loading || undefined}
+      aria-hidden="true"
+    >
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={trackColor} strokeWidth={strokeWidth} />
+      {loading ? (
+        /* 加载弧：仅显示 1/4 周长的一段，靠 SVG 自转表达"进行中" */
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={r}
+          fill="none"
+          stroke={indicatorColor}
+          strokeWidth={strokeWidth}
+          strokeDasharray={`${circ / 4} ${circ}`}
+          strokeLinecap="round"
+          className="icon-ring-spin"
+        />
+      ) : (
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={r}
+          fill="none"
+          stroke={indicatorColor}
+          strokeWidth={strokeWidth}
+          strokeDasharray={circ}
+          strokeDashoffset={offset}
+          strokeLinecap="round"
+          transform={`rotate(-90 ${size / 2} ${size / 2})`}
+          style={{ transition: "stroke-dashoffset var(--dur-3) var(--ease-standard)" }}
+        />
+      )}
+    </svg>
+  );
+}
+
 /** 拖拽(六点) */
 export function IconGripVertical({ size = 14, color = "currentColor", strokeWidth = 2, ...rest }: IconProps) {
   return (
@@ -914,13 +994,41 @@ export function IconPin({ size = 18, color = "currentColor", strokeWidth = 1.6, 
   );
 }
 
-/** 归档（盒子+盖+横线）——左侧会话行一键归档（v7） */
+/** 魔术棒（星星）——AI 智能合并/建议（plan-282-1441 #5） */
+export function IconWand({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <path d="M15 4V2" />
+      <path d="M15 16v-2" />
+      <path d="M8 9h2" />
+      <path d="M20 9h2" />
+      <path d="M17.8 11.8L19 13" />
+      <path d="M15 9h0" />
+      <path d="M17.8 6.2L19 5" />
+      <path d="M12.2 6.2L11 5" />
+      <path d="M3 21l9-9" />
+    </svg>
+  );
+}
 export function IconArchive({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
     <svg {...baseProps(size, color, strokeWidth, rest)}>
       <rect x="3" y="4" width="18" height="4" rx="1" />
       <path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8" />
       <line x1="9" y1="12" x2="15" y2="12" />
+    </svg>
+  );
+}
+
+/** 垃圾桶（盖+桶+两条竖线）——永久删除类操作（plan-282-1441 #4 归档页批量删除） */
+export function IconTrash({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <path d="M3 6h18" />
+      <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
+      <path d="M19 6l-1 14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1L5 6" />
+      <line x1="10" y1="11" x2="10" y2="17" />
+      <line x1="14" y1="11" x2="14" y2="17" />
     </svg>
   );
 }

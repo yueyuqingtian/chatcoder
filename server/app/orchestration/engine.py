@@ -789,6 +789,29 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             _plan_path, _plan_source = _resolve_plan_doc(
                 workspace, session_id, out.kind, turn_id=turn_id, since_ts=turn_started_ts,
             )
+            # plan-282-1421（第7项）：用户手动终止（Stop）不是"计划失败"。
+            # cancel_event 或 cancelled/interrupted 结果必须先于"文档缺失"判定，
+            # 否则 Plan+Stop 会被判成"计划文档未生成"，落一条 ERROR 消息并把 turn 置 failed
+            # ——用户主动终止却看到报错，与直觉相悖。
+            # 收尾口径与 _finalize_cancelled_turn / 下方 _is_cancel 完全一致：
+            # status=interrupted、summary="用户中断"、任务走 cancel_turn_tasks。
+            if cancel_event.is_set() or out.kind in ("cancelled", "interrupted"):
+                await turn_service.update_turn_status(
+                    db, turn_id, "interrupted", summary="用户中断", completed=True,
+                )
+                try:
+                    await task_service.cancel_turn_tasks(db, session_id, turn_id)
+                except Exception:
+                    logger.debug("[engine] plan 中断任务收尾失败(非阻塞)", exc_info=True)
+                await _flush_turn_buffer(session_id, turn_id)
+                await db.commit()
+                await broadcast_turn_updated(session_id, turn_id, "interrupted")
+                await broadcast(session_id, {
+                    "event": "turn.interrupted",
+                    "payload": {"turn_id": turn_id, "status": "interrupted",
+                                "summary": "用户中断", "session_id": session_id},
+                })
+                return {"ok": True, "interrupted": True}
             if _plan_path is None or out.kind != "message":
                 # v3.1 (plan-88): 失败原因落库——超时中断等模型侧失败时 out.error 已
                 # 携带用户可读原因（如"模型响应因网关空闲超时中断"），带出来便于诊断，
@@ -1062,6 +1085,44 @@ def _resolve_workspace(session, project) -> str:
     return project.path if project else ""
 
 
+def _plan_doc_belongs_to_other(name: str, session_id: int) -> bool:
+    """文件名是否**确属另一个会话**的方案文档（串会话防护）。
+
+    约定名：`chatcoder-plan-<sid>.md` / `chatcoder-plan-<sid>-<tid>.md`。
+    另有历史与 AI 自命名的变体，如
+    `chatcoder-plan-7-20260801_100000.md`（本会话，带时间戳）、
+    `chatcoder-plan-20260801_100000.md`（纯时间戳，无法归属）。
+
+    判定（保守——只有能**确定**归属别的会话时才返回 True）：
+      1. 剥掉 `chatcoder-plan` 前缀与 `.md` 后缀；
+      2. **只看紧跟前缀的第一段**（命名约定里会话 id 就在这个位置），
+         后续的 turn id / 时间戳段一律不参与归属判断
+         ——否则 `20260801_100000` 这类时间戳会被误当成会话 id；
+      3. 该段必须是**纯数字且长度 ≤ 6**（日期 8 位、时间 6 位会被下列规则挡掉：
+         日期段长度 8 直接排除；时间段不会出现在首位，因为首位即会话 id）；
+         若首位就是 8 位以上数字（纯时间戳命名）→ 视为**无法归属** → 返回 False；
+      4. 可解析且不等于本会话 id → 属于别的会话（True）。
+
+    例（session_id=7）：
+      chatcoder-plan-7-20260801_100000.md → 首段 7 == 7        → 本会话
+      chatcoder-plan-9-20260801_100000.md → 首段 9 != 7        → 别的会话（丢弃）
+      chatcoder-plan-20260801_100000.md   → 首段 8 位，不认   → 保留（无法归属）
+    """
+    stem = name[len("chatcoder-plan"):]
+    if stem.lower().endswith(".md"):
+        stem = stem[:-3]
+    # 首段：前缀后可能紧跟 `-`/`_`/`.`，取第一个非空片段
+    first = next((s for s in stem.replace("_", "-").replace(".", "-").split("-") if s), "")
+    # 纯时间戳命名（8 位日期打头）不参与归属判断
+    if not first.isdigit() or len(first) > 6:
+        return False
+    try:
+        n = int(first)
+    except ValueError:
+        return False
+    return 1 <= n <= 999_999 and n != session_id
+
+
 def _find_plan_document(workspace: str, session_id: int | None = None,
                         turn_id: int | None = None, since_ts: float | None = None) -> Path | None:
     """定位 /plan 阶段约定的方案文件；只读不执行。返回实际文件路径。
@@ -1104,20 +1165,39 @@ def _find_plan_document(workspace: str, session_id: int | None = None,
         if found is not None and _fresh(found):
             return found
 
-    # 3. 扫描全部变体（chatcoder-plan*.md），过滤陈旧文档后按 mtime 取最新
+    # 3. 扫描变体（chatcoder-plan*.md），过滤陈旧文档后按 mtime 取最新。
+    #
+    # 【串会话修复】这里此前是 `p.name.startswith("chatcoder-plan")` —— **不区分归属**，
+    #   于是同一个工作区里别的会话刚写出的方案文档会被本会话命中（mtime 更新者胜），
+    #   表现为"当前会话拿到了另一个会话的计划"：需求全集、后续执行体全部串台。
+    #
+    #   判定规则（保留既有兼容性，只丢弃"确属别的会话"的文档）：
+    #     - 文件名里带 `<sid>` 段（chatcoder-plan-<sid>[-…].md）→ 必须等于本会话 id；
+    #     - 文件名里带**别的数字段**且该段能解析成本会话之外的 id → 丢弃；
+    #     - 完全无法归属（如 chatcoder-plan-20260801_100000.md，纯时间戳）→ 保留，
+    #       交给 since_ts 新鲜度与调用方判定（既有测试 test_plan_document_timestamped_
+    #       without_session_id 覆盖此兼容路径）。
     ai_dir = root / "ai"
     try:
-        candidates = [
-            p for p in ai_dir.iterdir()
-            if p.is_file() and p.name.startswith("chatcoder-plan") and p.suffix.lower() == ".md"
-            and _fresh(p)
-        ]
+        candidates = []
+        for p in ai_dir.iterdir():
+            if not (p.is_file() and p.suffix.lower() == ".md"):
+                continue
+            if not p.name.startswith("chatcoder-plan"):
+                continue
+            if not _fresh(p):
+                continue
+            if session_id is not None and _plan_doc_belongs_to_other(p.name, int(session_id)):
+                continue
+            candidates.append(p)
         if candidates:
             return max(candidates, key=lambda p: p.stat().st_mtime)
     except OSError:
         pass
 
-    # 4. 兼容旧通用名（同样受新鲜度约束）
+    # 4. 兼容旧通用名（同样受新鲜度约束）。
+    #    【串会话修复】通用名无法归属到具体会话，仅在 session_id 未知时作为最后手段，
+    #    且带 since_ts 新鲜度约束——避免拿历史遗留文档当本轮方案。
     for name in ("chatcoder-plan.md", "plan.md"):
         found = _safe(root / "ai" / name)
         if found is not None and _fresh(found):

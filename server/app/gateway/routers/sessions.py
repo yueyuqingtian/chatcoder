@@ -25,6 +25,7 @@ async def _to_out(db: AsyncSession, s) -> SessionOut:
         has_running=await session_service.has_running_turn(db, s.id),
         has_interrupted_turn=await session_service.has_interrupted_turn(db, s.id),
         last_activity_at=await session_service.last_activity_at(db, s.id),
+        running_started_at=await session_service.running_turn_started_at(db, s.id),
         goal_text=s.goal_text,
         goal_status=s.goal_status or "none",
         goal_turns_used=s.goal_turns_used or 0,
@@ -92,7 +93,19 @@ async def update_session(session_id: int, body: SessionUpdate, db: AsyncSession 
 
 
 @router.delete("/{session_id}", response_model=dict)
-async def delete_session(session_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_session(session_id: int, permanent: bool = False,
+                         db: AsyncSession = Depends(get_db)):
+    """删除会话。默认语义是**归档**（可恢复）；`permanent=true` 为物理删除。
+
+    plan-282-1441（#4）：归档页的「批量删除」需要真正的永久删除——
+    旧接口只有归档语义，"删除"了仍能在归档页看到，用户无法真正清理。
+    永久删除会级联清理该会话的 messages/turns/tasks/agents/audit/rollback/会话记忆。
+    """
+    if permanent:
+        result = await session_service.delete_session_permanent(db, session_id)
+        if result is None:
+            raise HTTPException(404, "会话不存在")
+        return result
     status = await session_service.update_session(db, session_id, status="archived")
     if status is None:
         raise HTTPException(404, "会话不存在")

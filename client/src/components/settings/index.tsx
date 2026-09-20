@@ -6,8 +6,7 @@ import { useEffect, useState } from "react";
 import { AppearancePanel } from "./AppearancePanel";
 import { GeneralPanel } from "./GeneralPanel";
 import { ModelsPanel } from "./ModelsPanel";
-import { SkillsPanel } from "./SkillsPanel";
-import { McpPanel } from "./McpPanel";
+import { ExtensionsPanel } from "./ExtensionsPanel";
 import { SubagentsPanel } from "./SubagentsPanel";
 import { RulesPanel } from "./RulesPanel";
 import { ScheduledPanel } from "./ScheduledPanel";
@@ -17,27 +16,29 @@ import { MemoryPanel } from "./MemoryPanel";
 import { UsagePanel } from "./UsagePanel";
 import { DiagnosticsPanel } from "./DiagnosticsPanel";
 import { IndexLibraryPanel } from "./IndexLibraryPanel";
-import { PluginsPanel } from "./PluginsPanel";
 import { ArchivedPanel } from "./ArchivedPanel";
+import { WorktreesPanel } from "./WorktreesPanel";
 import { IconDownload, IconRefresh } from "../icons";
 import { MarkdownContent } from "../MarkdownContent";
+import { Card, PageShell, PageTransition } from "../ui";
 import { AppLogo } from "../AppLogo";
 import { useUpdaterStore } from "../../store/updater";
 import { useI18n } from "../../store/i18n";
 import {
   IconAnchor, IconBarChart, IconBookOpen, IconBrain, IconCalendar,
   IconChevronDown,
-  IconCpu, IconInfo, IconPalette, IconPlug, IconRotateCcw, IconSettings,
-  IconShield, IconTool, IconUsers, IconZap, IconBox,
+  IconCpu, IconInfo, IconPalette, IconRotateCcw, IconSettings,
+  IconShield, IconTool, IconUsers, IconBox, IconGitBranch,
 } from "../icons";
 
 export type SettingsTab =
   | "general" | "appearance"
-  | "models" | "skills" | "subagents" | "mcp" | "rules"
+  | "models" | "extensions" | "subagents" | "rules"
   | "policy"
-  | "scheduled" | "hooks" | "memory" | "usage" | "diagnostics" | "plugins" | "about"
+  | "scheduled" | "hooks" | "memory" | "usage" | "diagnostics" | "about"
   | "index"
-  | "archive";
+  | "archive"
+  | "worktrees";
 
 export interface SettingsIndexItem {
   key: SettingsTab;
@@ -52,17 +53,17 @@ export const SETTINGS_INDEX: SettingsIndexItem[] = [
   { key: "general", label: "常规", group: "basic", keywords: "语言 代理 终端 Shell 字体 搜索 todos reasoning", icon: <IconSettings size={15} /> },
   { key: "appearance", label: "外观", group: "basic", keywords: "主题 毛玻璃 布局 字号 颜色 面板", icon: <IconPalette size={15} /> },
   { key: "models", label: "模型设置", group: "basic", keywords: "供应商 模型 上下文 多模态 推理", icon: <IconCpu size={15} /> },
-  { key: "plugins", label: "插件", group: "basic", keywords: "插件 组件 替换 slot 外挂", icon: <IconBox size={15} /> },
   { key: "memory", label: "记忆", group: "agent", keywords: "记忆 召回 entries", icon: <IconBrain size={15} /> },
-  { key: "skills", label: "技能", group: "agent", keywords: "skill 技能仓库 git 导入", icon: <IconZap size={15} /> },
+  // plan-282-1441（#6）：插件 / 技能 / MCP 三个独立页收拢为一个「拓展」页（子标签分区）
+  { key: "extensions", label: "拓展", group: "agent", keywords: "插件 市场 skill 技能 技能仓库 git 导入 mcp 连接器 外部工具 slot", icon: <IconBox size={15} /> },
   { key: "subagents", label: "子智能体", group: "agent", keywords: "子代理 profile 工具白名单", icon: <IconUsers size={15} /> },
-  { key: "mcp", label: "MCP 服务器", group: "agent", keywords: "mcp server stdio sse 外部工具", icon: <IconPlug size={15} /> },
   { key: "rules", label: "AI 规则", group: "agent", keywords: "全局规则 项目规则 扫描 命令", icon: <IconBookOpen size={15} /> },
   { key: "hooks", label: "钩子", group: "agent", keywords: "hook 事件 回调", icon: <IconAnchor size={15} /> },
   { key: "policy", label: "执行策略", group: "agent", keywords: "命令 审批 allow deny ask", icon: <IconShield size={15} /> },
   { key: "scheduled", label: "自动化", group: "data", keywords: "cron 定时 自动化 任务", icon: <IconCalendar size={15} /> },
   { key: "usage", label: "使用统计", group: "data", keywords: "token 用量 统计 context", icon: <IconBarChart size={15} /> },
   { key: "index", label: "索引库", group: "data", keywords: "索引 符号 codegraph symbol 代码探索", icon: <IconCpu size={15} /> },
+  { key: "worktrees", label: "工作树", group: "data", keywords: "worktree 工作树 分支 隔离 合并 git", icon: <IconGitBranch size={15} /> },
   { key: "diagnostics", label: "诊断", group: "data", keywords: "健康检查 系统状态 checkpoint", icon: <IconTool size={15} /> },
   { key: "archive", label: "归档恢复", group: "data", keywords: "归档 恢复 已删除 archived restore", icon: <IconRotateCcw size={15} /> },
   { key: "about", label: "关于", group: "basic", keywords: "版本 信息", icon: <IconInfo size={15} /> },
@@ -224,38 +225,64 @@ function RowItem({ title, desc }: { title: string; desc: string }) {
   return <div className="settings-row"><div className="settings-row-info"><div className="settings-row-title">{title}</div><div className="settings-row-desc">{desc}</div></div><div className="settings-row-control" /></div>;
 }
 
+/** plan-282-1416（问题1 根治）：设置页装饰——tab → 内容组件 / 宽度档位。
+ *
+ * 旧实现把「限宽容器 + 标题 + 副标题」在 17 个 case 里各写一遍，导致：
+ *  - 切 tab 时整块 DOM 重建（闪一下、无过渡）；
+ *  - 680 / 960 两套宽度混用，切换时标题与卡片左边界位移；
+ *  - 副标题用 margin-top:-8px 反向补偿 flex gap，长文案换行时行高错位。
+ * 现改为数据驱动：骨架只渲染一次（PageShell），内容组件按 tab 查表。
+ */
+const PANELS: Record<SettingsTab, { Comp: React.ComponentType; width?: "standard" | "wide"; card?: boolean }> = {
+  // general / appearance / memory / about 自带 settings-card(-stack) 结构，不再外包 Card
+  general: { Comp: GeneralPanel },
+  appearance: { Comp: AppearancePanel },
+  models: { Comp: ModelsPanel, card: true },
+  extensions: { Comp: ExtensionsPanel, width: "wide", card: true },
+  subagents: { Comp: SubagentsPanel, card: true },
+  rules: { Comp: RulesPanel, card: true },
+  // policy / usage 含表格与图表，走宽档（唯一允许的宽度差异）
+  policy: { Comp: PolicyPanel, width: "wide", card: true },
+  scheduled: { Comp: ScheduledPanel, card: true },
+  hooks: { Comp: HooksPanel, card: true },
+  memory: { Comp: MemoryPanel },
+  usage: { Comp: UsagePanel, width: "wide", card: true },
+  diagnostics: { Comp: DiagnosticsPanel, card: true },
+  index: { Comp: IndexLibraryPanel, card: true },
+  worktrees: { Comp: WorktreesPanel, width: "wide", card: true },
+  archive: { Comp: ArchivedPanel, card: true },
+  about: { Comp: AboutPanel },
+};
+
 function Panel({ tab }: { tab: SettingsTab }) {
   const { t } = useI18n();
-  const title = t(`settings.pt.${tab}`);
-  const sub = t(`settings.ps.${tab}`);
-  switch (tab) {
-    case "general": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><GeneralPanel /></div>;
-    case "appearance": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><AppearancePanel /></div>;
-    case "models": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><ModelsPanel /></div></div>;
-    case "skills": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><SkillsPanel /></div></div>;
-    case "subagents": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><SubagentsPanel /></div></div>;
-    case "mcp": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><McpPanel /></div></div>;
-    case "rules": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><RulesPanel /></div></div>;
-    case "policy": return <div className="settings-content-inner-wide"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><PolicyPanel /></div></div>;
-    case "scheduled": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><ScheduledPanel /></div></div>;
-    case "hooks": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><HooksPanel /></div></div>;
-    case "memory": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><MemoryPanel /></div></div>;
-    case "usage": return <div className="settings-content-inner-wide"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><UsagePanel /></div></div>;
-    case "diagnostics": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><DiagnosticsPanel /></div></div>;
-    case "index": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><IndexLibraryPanel /></div></div>;
-    case "archive": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><ArchivedPanel /></div></div>;
-    case "plugins": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-page-subtitle">{sub}</div><div className="settings-card"><PluginsPanel /></div></div>;
-    case "about": return <div className="settings-content-inner"><div className="settings-page-title">{title}</div><div className="settings-card"><AboutPanel /></div></div>;
-    default: return null;
-  }
+  const meta = PANELS[tab];
+  if (!meta) return null;
+  const { Comp, width = "standard", card = false } = meta;
+  // 副标题仅在该 tab 确有文案时渲染（缺省不占位，保证卡片区起点恒定）
+  const subtitle = t(`settings.ps.${tab}`);
+  // plan-282-1421（第3项）：tab 切换过渡——只动 transform/opacity；
+  // 外层滚动容器（PageShell 的 .ui-page）不随 tab 重建，滚动位置与宽度均不跳变。
+  return (
+    <PageTransition id={tab} direction="left">
+      <PageShell
+        title={t(`settings.pt.${tab}`)}
+        subtitle={subtitle || undefined}
+        width={width}
+      >
+        {card ? <Card>{<Comp />}</Card> : <Comp />}
+      </PageShell>
+    </PageTransition>
+  );
 }
 
 /** v19: 设置右侧内容区（主布局 main 内渲染，顶部 TitleBar 与左栏宽度共用）。
- * tab 状态由 App 持有（左栏 SettingsSidebar 与内容区共享）。 */
+ * tab 状态由 App 持有（左栏 SettingsSidebar 与内容区共享）。
+ *
+ * plan-282-1416（问题1 根治）：此处不再自带滚动容器与内联 style——
+ * 旧实现这里又写了一份 `height:100%; overflowY:auto`，与 global.css 的
+ * `.settings-content`（flex+padding）语义冲突，造成滚动容器与限宽容器分层、
+ * 滚动条出现/消失时内容盒宽度跳变。现由 PageShell 独占滚动并恒定预留 gutter。 */
 export function SettingsContent({ tab }: { tab: SettingsTab }) {
-  return (
-    <div className="settings-content" style={{ height: "100%", overflowY: "auto" }}>
-      <Panel tab={tab} />
-    </div>
-  );
+  return <Panel tab={tab} />;
 }

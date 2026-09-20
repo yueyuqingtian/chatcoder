@@ -39,6 +39,10 @@ class ProjectOut(BaseModel):
     auto_scan_rules: bool = True
     pinned: bool = False
     archived: bool = False
+    # plan-282-1441（#5 工作树）：工作树在左侧面板作为独立工作区展示所需的标识
+    is_worktree: bool = False
+    parent_project_id: int | None = None
+    worktree_branch: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -90,6 +94,8 @@ class SessionOut(BaseModel):
     has_running: bool = False
     has_interrupted_turn: bool = False
     last_activity_at: str | None = None  # 最近一条消息时间（侧栏相对时间展示）
+    # 运行中 turn 的开始时间——侧栏「执行中任务」的稳定排序键（无运行中 turn 时为 None）
+    running_started_at: str | None = None
     # 目标模式（plan-671）：会话目标状态（前端恢复目标胶囊）
     goal_text: str | None = None
     goal_status: str = "none"  # none / active / completed / cancelled
@@ -750,6 +756,42 @@ class EvError(WsEventPayload):
     message: str | None = None
 
 
+class EvArthasEvent(WsEventPayload):
+    """Arthas 现场诊断事件（arthas.event）——右侧调试面板据此实时可视化观测结果。
+
+    phase：attached / detached / job_started / observed / error
+    entries：watch/trace 命中条目（服务端从命令结果里抽出来的），面板列表即读它。
+    """
+    session_id: int | None = None
+    phase: str | None = None
+    pid: int | None = None
+    http_port: int | None = None
+    version: str | None = None
+    command: str | None = None
+    # Arthas 的 jobId 是整数（实测），前端/模型可能传字符串，两者都收
+    job_id: str | int | None = None
+    summary: str | None = None
+    entries: list[dict] | None = None
+    time_expired: bool | None = None
+    reason: str | None = None
+    at: int | None = None
+
+
+class EvDebugPaused(WsEventPayload):
+    """调试命中事件（debug.paused）——此前未登记，广播时会打告警；此处补齐。"""
+    session_id: int | None = None
+    target: str | None = None
+    phase: str | None = None
+    file: str | None = None
+    line: int | None = None
+    function: str | None = None
+    breakpoints: int | None = None
+    hitCount: int | None = None
+    reason: str | None = None
+    stack: list[dict] | None = None
+    variables: list[dict] | None = None
+
+
 # 事件名 → payload 模型（broadcast 校验用；未登记的兜底 WsEventPayload）
 WS_EVENT_PAYLOAD_MODELS: dict[str, type[WsEventPayload]] = {
     "message.created": WsEventPayload,
@@ -792,4 +834,7 @@ WS_EVENT_PAYLOAD_MODELS: dict[str, type[WsEventPayload]] = {
     "terminal.input": WsEventPayload,
     "browser.command": WsEventPayload,
     "cancel": WsEventPayload,
+    # 调试通道：debug.paused（CDP/JDWP 断点命中）+ arthas.event（Arthas 现场观测）
+    "debug.paused": EvDebugPaused,
+    "arthas.event": EvArthasEvent,
 }

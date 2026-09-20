@@ -29,6 +29,19 @@ import type {
   TaskOut,
   TurnOut,
   TurnSnapshotOut,
+  DbConnectionOut,
+  DbPolicyOut,
+  DebugStatusOut,
+  DebugSettingsOut,
+  ArthasStatusOut,
+  ArthasEntryOut,
+  ArthasProcessOut,
+  ArthasConfigOut,
+  PluginMarketItem,
+  RepoCandidate,
+  WorktreeMergeFile,
+  WorktreeMergePreview,
+  WorktreeOut,
 } from "@chatcoder/shared";
 
 /** 后端 API 基址:桌面版直连 127.0.0.1:12973,网页版用相对路径走代理。
@@ -253,7 +266,12 @@ export interface AuditLogOut {
 
 export interface DiagnosticsOut {
   ok: boolean;
-  checks: { name: string; ok: boolean; detail?: string }[];
+  /** plan-282-1434：后端实际返回**对象**（`{"git": {ok, detail}, ...}`，见
+   *  server/app/gateway/routers/diagnostics.py），此处放宽为两种形态以贴合现实；
+   *  消费侧（DiagnosticsPanel）自行归一化为列表。 */
+  checks:
+    | { name: string; ok: boolean; detail?: string }[]
+    | Record<string, { ok?: boolean; detail?: string } | undefined>;
   /** plan-88: 各项目工作区 .chatcoder/checkpoints 占用统计 */
   checkpoints?: Array<{ workspace: string; file_count: number; size_mb: number; orphan_count: number }>;
 }
@@ -342,6 +360,82 @@ export const api = {
   updateProject: (id: number, data: { name?: string; rules_docs?: string[]; auto_scan_rules?: boolean; pinned?: boolean; archived?: boolean }) =>
     patch<ProjectOut>(`/projects/${id}`, data),
   deleteProject: (id: number) => del<{ ok: boolean }>(`/projects/${id}`),
+  // ── 工作树（plan-282-1441 #5）──
+  /** 可用于创建工作树的仓库（项目根 + 子仓库） */
+  listRepoCandidates: (projectId: number) =>
+    get<RepoCandidate[]>(`/projects/${projectId}/repo-candidates`),
+  listWorktrees: (projectId: number) => get<WorktreeOut[]>(`/projects/${projectId}/worktrees`),
+  createWorktreeForProject: (projectId: number, data: { name?: string; branch?: string; repos?: string[] } = {}) =>
+    post<{ ok: boolean; count: number; worktrees: Array<{ project_id: number; path: string; branch: string; name: string; repo: string }>; project_id: number; path: string; branch: string; name: string }>(
+      `/projects/${projectId}/worktrees`, data),
+  deleteWorktreeProject: (worktreeProjectId: number, force = false) =>
+    del<{ ok: boolean }>(`/projects/worktrees/${worktreeProjectId}${force ? "?force=true" : ""}`),
+  worktreeMergePreview: (worktreeProjectId: number) =>
+    post<WorktreeMergePreview>(`/projects/worktrees/${worktreeProjectId}/merge/preview`, {}),
+  worktreeMergeFile: (worktreeProjectId: number, path: string) =>
+    post<{ ok: boolean; path: string; base: string | null; ours: string | null; theirs: string | null }>(
+      `/projects/worktrees/${worktreeProjectId}/merge/file`, { path }),
+  worktreeMergeApply: (worktreeProjectId: number, files: Array<{ path: string; content?: string; deleted?: boolean }>) =>
+    post<{ ok: boolean; committed: boolean; written: string[] }>(
+      `/projects/worktrees/${worktreeProjectId}/merge/apply`, { files }),
+  worktreeMergeAi: (worktreeProjectId: number, path: string, hunk?: Record<string, unknown>) =>
+    post<{ ok: boolean; suggestion?: string; error?: string }>(
+      `/projects/worktrees/${worktreeProjectId}/merge/ai`, { path, hunk }),
+  // ── 插件市场（plan-282-1441 #6）──
+  pluginMarketplace: () =>
+    get<{ ok: boolean; items: PluginMarketItem[]; installedCount: number }>("/plugins/marketplace"),
+  pluginInstalled: () => get<PluginMarketItem[]>("/plugins/installed"),
+  pluginInstallDir: (path: string) =>
+    post<{ ok: boolean; name: string; path: string; skills: number }>("/plugins/install-dir", { path }),
+  pluginInstallGit: (repoUrl: string, market = "local") =>
+    post<{ ok: boolean; name: string; path: string; skills: number }>("/plugins/install-git", { repo_url: repoUrl, market }),
+  pluginSetEnabled: (name: string, enabled: boolean) =>
+    patch<{ ok: boolean; name: string; enabled: boolean }>(
+      `/plugins/${encodeURIComponent(name)}/enabled`, { enabled }),
+  pluginUninstall: (name: string) =>
+    del<{ ok: boolean; name: string }>(`/plugins/${encodeURIComponent(name)}`),
+  // ── 数据库连接（plan-282-1441 #7，内置 MCP）──
+  listDbConnections: (projectId: number) => get<DbConnectionOut[]>(`/db/connections?project_id=${projectId}`),
+  createDbConnection: (data: {
+    project_id: number; name: string; kind: string; host: string; port?: number;
+    database?: string; username?: string; password?: string;
+    params?: Record<string, unknown>; is_active?: boolean;
+  }) => post<{ ok: boolean; id: number }>("/db/connections", data),
+  updateDbConnection: (id: number, data: {
+    name?: string; kind?: string; host?: string; port?: number; database?: string;
+    username?: string; password?: string; params?: Record<string, unknown>; is_active?: boolean;
+  }) => patch<{ ok: boolean }>(`/db/connections/${id}`, data),
+  deleteDbConnection: (id: number) => del<{ ok: boolean }>(`/db/connections/${id}`),
+  testDbConnection: (id: number) =>
+    post<{ ok: boolean; server?: string; error?: string }>(`/db/connections/${id}/test`, {}),
+  getDbPolicy: (projectId: number) => get<DbPolicyOut>(`/db/policy?project_id=${projectId}`),
+  setDbPolicy: (projectId: number, data: Partial<DbPolicyOut>) =>
+    put<DbPolicyOut>(`/db/policy?project_id=${projectId}`, data),
+  // ── 调试状态（plan-282-1441 #8，供调试面板轮询/收尾）──
+  debugStatus: (sessionId: number, target: "web" | "java") =>
+    post<DebugStatusOut>(`/debug/${target}/status`, { session_id: sessionId }),
+  debugAction: (target: "web" | "java", action: string, sessionId: number, extra: Record<string, unknown> = {}) =>
+    post<Record<string, unknown>>(`/debug/${target}/${action}`, { session_id: sessionId, ...extra }),
+  // 面板配置（落库）：Web 调试端口 / JDWP 目标
+  debugSettings: () => get<DebugSettingsOut>("/debug/settings"),
+  saveDebugSettings: (patch: Partial<DebugSettingsOut>) =>
+    put<DebugSettingsOut>("/debug/settings", patch),
+  // ── Arthas 现场诊断（可与 IDEA 调试并存；见《chatcoder 调试 MCP 集成 Arthas 方案》）──
+  arthasStatus: (sessionId: number) =>
+    post<ArthasStatusOut>("/debug/arthas/status", { session_id: sessionId }),
+  arthasProcesses: (sessionId: number, javaHome?: string) =>
+    post<{ ok: boolean; processes: ArthasProcessOut[]; error?: string;
+           java_home?: string; java_home_source?: string }>(
+      "/debug/arthas/processes", { session_id: sessionId, java_home: javaHome || null }),
+  arthasAttach: (sessionId: number, pid: number) =>
+    post<ArthasStatusOut>("/debug/arthas/attach", { session_id: sessionId, pid }),
+  arthasStop: (sessionId: number) =>
+    post<{ ok: boolean; message?: string; pid?: number }>("/debug/arthas/stop", { session_id: sessionId }),
+  arthasExec: (sessionId: number, command: string) =>
+    post<Record<string, unknown>>("/debug/arthas/exec", { session_id: sessionId, command }),
+  arthasConfig: () => post<ArthasConfigOut>("/debug/arthas/config", {}),
+  setArthasConfig: (patch: Record<string, unknown>) =>
+    put<{ ok: boolean; error?: string }>("/debug/arthas/config", patch),
   scanProjectRules: (id: number) => get<string[]>(`/projects/${id}/scan-rules`),
   getProjectTree: (id: number, depth = 8) => get<ProjectTreeOut>(`/projects/${id}/tree?depth=${depth}`),
   /** 问题2: 轻量文件存在性校验（不读内容），供消息内文件链接判断是否可点击 */
@@ -366,8 +460,9 @@ export const api = {
   getSession: (id: number) => get<SessionOut>(`/sessions/${id}`),
   updateSession: (id: number, data: { title?: string; model_id?: number; pinned?: boolean; status?: string; permission_mode?: string }) =>
     patch<SessionOut>(`/sessions/${id}`, data),
-  /** 删除 = 归档 */
-  deleteSession: (id: number) => del<{ ok: boolean }>(`/sessions/${id}`),
+  /** 删除会话。默认语义 = 归档（可恢复）；permanent=true 走物理删除（plan-282-1441 #4） */
+  deleteSession: (id: number, permanent = false) =>
+    del<{ ok: boolean }>(`/sessions/${id}${permanent ? "?permanent=true" : ""}`),
   // ── 目标模式（plan-671）──
   getSessionGoal: (id: number) => get<GoalOut>(`/sessions/${id}/goal`),
   setSessionGoal: (id: number, text: string) => post<GoalOut>(`/sessions/${id}/goal`, { text }),
@@ -766,6 +861,10 @@ export const api = {
 export type {
   ProjectOut, SessionOut, TurnOut, MessageOut, TaskOut, ArtifactOut, ModelOut,
   ProviderOut, ProviderCredentialOut, ScannedModel,
+  WorktreeOut, WorktreeMergeFile, WorktreeMergePreview, PluginMarketItem,
+  DbConnectionOut, DbPolicyOut, DebugStatusOut, RepoCandidate,
+  DebugSettingsOut,
+  ArthasStatusOut, ArthasEntryOut, ArthasProcessOut, ArthasConfigOut,
   ExecPolicyRuleOut, HookConfigOut, MemoryEntryOut, ScheduledTaskOut,
   RollbackPreviewFile, RollbackAffected, RollbackPreviewOut, FileChangeOut, FileDiffOut,
 };

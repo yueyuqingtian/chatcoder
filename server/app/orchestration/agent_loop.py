@@ -675,7 +675,7 @@ async def run_agent_loop(
     # v6.4: 启动时打印压缩阈值诊断日志
     try:
         from app.orchestration.token_counter import get_agent_context_window
-        _diag_window = await get_agent_context_window(db, agent)
+        _diag_window = await get_agent_context_window(db, agent, model_id=model_id)
         if _diag_window < 100000:
             logger.warning(
                 "[agent] turn=%s agent_window=%d 过小(<100k)，用默认 500000 兜底",
@@ -782,9 +782,11 @@ async def run_agent_loop(
             # 改为仅在 API 响应后用精确 prompt_tokens 判断（见下方 step 后段）。
             agent_window = 0
             try:
-                from app.orchestration.compaction import build_api_copy, ensure_tool_pairing, normalize_tool_sequence, repair_tool_call_ids
+                from app.orchestration.compaction import build_api_copy, ensure_tool_pairing, normalize_tool_sequence, repair_tool_call_ids, take_last_reclaim as _take_reclaim
                 from app.orchestration.token_counter import get_agent_context_window, estimate_messages_tokens as _est_tokens
-                agent_window = await get_agent_context_window(db, agent)
+                # v16: 窗口口径 = 实际调用的模型（effective model_id），与前端占用百分比、
+                # 压缩阈值、重建窗口预算完全一致（此前用 agent 兜底模型，口径分裂）
+                agent_window = await get_agent_context_window(db, agent, model_id=model_id)
                 # v6.4: 最小窗口保护 —— 若 model.context_window 配置过小，用默认值兜底
                 # 避免因模型窗口配置错误导致压缩阈值过低、过早摘要
                 if agent_window < 100000:
@@ -798,9 +800,28 @@ async def run_agent_loop(
                 messages = ensure_tool_pairing(messages)
                 # v8 根治: 强制 assistant(tool_calls) 后紧跟 tool 结果，杜绝 400
                 messages = normalize_tool_sequence(messages)
-                # v15: 预算驱动折叠 —— 上下文占用 < api_copy_fold_ratio 时保留全部工具结果
-                _fold_budget = int(agent_window * settings.api_copy_fold_ratio)
-                api_messages = build_api_copy(messages, fold_budget_tokens=_fold_budget)
+                # v16: build_api_copy 不再按占用占比折叠历史（隐式压缩已移除），
+                # 只保留单条超长工具结果的落盘保护；压缩仅由超设置阈值的
+                # 落库式压缩（可见压缩卡片）完成。
+                api_messages = build_api_copy(messages)
+                # plan-282-1441：把本轮"上下文回收"如实告知用户（此前静默折叠，
+                # 用户只看到占用突然降几十 k，误以为丢历史——即"隐藏压缩"的观感来源）。
+                try:
+                    _reclaim = _take_reclaim()
+                    if _reclaim and (_reclaim.get("folded") or _reclaim.get("est_tokens_saved", 0) > 2000):
+                        await broadcast(session_id, {
+                            "event": "context.folded",
+                            "payload": {
+                                "agent_id": agent_id, "agent_name": agent_name,
+                                "turn_id": turn_id,
+                                "folded_results": _reclaim.get("folded", 0),
+                                "est_tokens_saved": _reclaim.get("est_tokens_saved", 0),
+                                "budget_tokens": _reclaim.get("budget"),
+                                "context_window": agent_window,
+                            },
+                        })
+                except Exception:  # noqa: BLE001 —— 提示失败不影响请求
+                    logger.debug("[agent] 上下文回收提示广播失败", exc_info=True)
 
                 # v6.5: 前置压缩检查 -- 用校准系数调整估算，超阈值则先压缩
                 _est_raw = _est_tokens(api_messages)
@@ -818,7 +839,7 @@ async def run_agent_loop(
                     messages = repair_tool_call_ids(messages)
                     messages = ensure_tool_pairing(messages)
                     messages = normalize_tool_sequence(messages)
-                    api_messages = build_api_copy(messages, fold_budget_tokens=int(agent_window * settings.api_copy_fold_ratio))
+                    api_messages = build_api_copy(messages)
                     _est_after = int(_est_tokens(api_messages) * _calib_factor)
                     logger.info("[agent] turn=%s step=%s 前置压缩后 prompt=%d -> %d (persistent=%s)", turn_id, step, _est_prompt, _est_after, bool(_cc_pre))
                     await broadcast(session_id, {"event": "usage.update", "payload": {"agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id, "prompt_tokens": _est_after, "completion_tokens": 0, "total_tokens": _est_after, "context_window": agent_window, "usage_source": "est_after_compact", "cached_input_tokens": 0, "reasoning_tokens": 0, "agent_kind": agent_kind}})
@@ -1031,8 +1052,8 @@ async def run_agent_loop(
                         messages = _repair_fc(messages)
                         messages = _ensure_pairing(messages)
                         messages = _norm_fc(messages)
-                        # v37: 重试发送前同样构建符合预算的 api_messages 副本
-                        _retry_api_messages = _build_api_fc(messages, fold_budget_tokens=_fold_budget if "_fold_budget" in locals() else None)
+                        # v37: 重试发送前同样构建 api_messages 副本
+                        _retry_api_messages = _build_api_fc(messages)
                         request = ChatRequest(
                             messages=_retry_api_messages, model="", tools=tool_schemas or None,
                             temperature=settings.agent_tool_temperature if tool_schemas else settings.agent_text_temperature,
@@ -1049,7 +1070,8 @@ async def run_agent_loop(
                         # context-overflow 只对 provider 确认的溢出恢复触发）。
                         from app.orchestration.compaction import emergency_compact
                         from app.orchestration.token_counter import get_agent_context_window
-                        agent_window = await get_agent_context_window(db, agent)
+                        # v16: 与主循环同口径——实际调用模型的窗口
+                        agent_window = await get_agent_context_window(db, agent, model_id=model_id)
                         # v30: 溢出恢复优先落库式（保留最近6回合 + LLM 摘要 + 限次重试），
                         # 失败回退旧硬编码 emergency_compact。
                         _cc_ovf, messages = await _compact_persistent_or_fallback(

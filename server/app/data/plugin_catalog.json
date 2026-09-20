@@ -1,0 +1,137 @@
+{
+  "_comment": "内置插件目录（plan-282-1441 #6）。字段与参考项目 plugin.json 同构：name/displayName/description/descriptionZh/category/tags/author/version/source。source 为本地目录或 git 地址；用户也可在市场页用「从目录/Git 安装」添加更多。",
+  "plugins": [
+    {
+      "name": "code-review",
+      "displayName": "代码评审",
+      "description": "Structured code review with severity levels and actionable fixes.",
+      "descriptionZh": "结构化代码评审：按严重级别归类问题并给出可落地的修改建议。",
+      "category": "代码评审",
+      "tags": ["review", "quality", "best-practices"],
+      "author": "chatcoder",
+      "version": "1.0.0",
+      "featured": true
+    },
+    {
+      "name": "ppt",
+      "displayName": "演示文稿",
+      "description": "Create and edit slide decks, outline and layout assistance.",
+      "descriptionZh": "创建与编辑演示文稿，支持内容组织、幻灯片排版与演示文案。",
+      "category": "内容创作",
+      "tags": ["slides", "writing"],
+      "author": "chatcoder",
+      "version": "1.0.0",
+      "featured": true
+    },
+    {
+      "name": "frontend-design",
+      "displayName": "前端设计",
+      "description": "Production-grade frontend design skill: build distinctive UIs.",
+      "descriptionZh": "生产级前端设计技能：构建有主见、有辨识度的界面，避免千篇一律。",
+      "category": "设计",
+      "tags": ["frontend", "ui", "design"],
+      "author": "chatcoder",
+      "version": "1.0.0",
+      "featured": true
+    },
+    {
+      "name": "code-simplifier",
+      "displayName": "代码精简",
+      "description": "Simplify and refactor code while preserving behavior.",
+      "descriptionZh": "在保持行为不变的前提下精简、重构代码，降低复杂度。",
+      "category": "代码开发",
+      "tags": ["refactor", "simplify"],
+      "author": "chatcoder",
+      "version": "1.0.0",
+      "featured": false
+    },
+    {
+      "name": "security-scan",
+      "displayName": "安全扫描",
+      "description": "Scan for common security issues and insecure patterns.",
+      "descriptionZh": "扫描常见安全问题与不安全写法，给出修复方向。",
+      "category": "安全与测试",
+      "tags": ["security", "audit"],
+      "author": "chatcoder",
+      "version": "1.0.0",
+      "featured": false
+    },
+    {
+      "name": "data-analysis",
+      "displayName": "数据分析",
+      "description": "Explore datasets, compute statistics and produce findings.",
+      "descriptionZh": "探索数据集、计算统计指标并产出可读的分析结论。",
+      "category": "数据库与分析",
+      "tags": ["data", "analysis", "sql"],
+      "author": "chatcoder",
+      "version": "1.0.0",
+      "featured": false
+    },
+    {
+      "name": "devops-deploy",
+      "displayName": "运维部署",
+      "description": "Container, CI/CD and deployment assistance.",
+      "descriptionZh": "容器、CI/CD 与部署编排辅助（Dockerfile、流水线、发布脚本）。",
+      "category": "运维部署",
+      "tags": ["docker", "cicd", "deploy"],
+      "author": "chatcoder",
+      "version": "1.0.0",
+      "featured": false
+    },
+    {
+      "name": "api-design",
+      "displayName": "API 设计",
+      "description": "Design REST/RPC interfaces with consistent conventions.",
+      "descriptionZh": "按一致约定设计 REST/RPC 接口，覆盖命名、分页、错误与版本策略。",
+      "category": "开发者工具",
+      "tags": ["api", "rest", "rpc"],
+      "author": "chatcoder",
+      "version": "1.0.0",
+      "featured": false
+    },
+    {
+      "name": "product-manager",
+      "displayName": "产品管理",
+      "description": "PRD writing, user story breakdown and competitive analysis.",
+      "descriptionZh": "产品经理全流程工具箱：PRD 撰写、用户故事拆解、竞品分析。",
+      "category": "产品管理",
+      "tags": ["prd", "user-story"],
+      "author": "chatcoder",
+      "version": "1.0.0",
+      "featured": false
+    },
+    {
+      "name": "knowledge-research",
+      "displayName": "知识研究",
+      "description": "Deep research workflow with source gathering and synthesis.",
+      "descriptionZh": "深度研究工作流：资料收集、交叉验证与结论综述。",
+      "category": "知识研究",
+      "tags": ["research", "synthesis"],
+      "author": "chatcoder",
+      "version": "1.0.0",
+      "featured": false
+    },
+    {
+      "name": "workflow-automation",
+      "displayName": "工作流",
+      "description": "Compose repeatable multi-step workflows.",
+      "descriptionZh": "把重复的多步操作编排为可复用工作流。",
+      "category": "工作流",
+      "tags": ["workflow", "automation"],
+      "author": "chatcoder",
+      "version": "1.0.0",
+      "featured": false
+    },
+    {
+      "name": "office-docs",
+      "displayName": "办公文档",
+      "description": "Generate and edit office documents (docx/xlsx/pdf).",
+      "descriptionZh": "生成与编辑办公文档（docx / xlsx / pdf），含排版与格式规范。",
+      "category": "办公效率",
+      "tags": ["office", "docs"],
+      "author": "chatcoder",
+      "version": "1.0.0",
+      "featured": false
+    }
+  ]
+}

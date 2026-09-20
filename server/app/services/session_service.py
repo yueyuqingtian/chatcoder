@@ -178,6 +178,60 @@ async def update_session(db: AsyncSession, session_id: int, **kwargs) -> str | N
     return await run_write_locked(patch, label=f"session.update.{session_id}")
 
 
+async def delete_session_permanent(db: AsyncSession, session_id: int) -> dict | None:
+    """**永久删除**会话及其全部关联数据（plan-282-1441 #4：归档页批量删除）。
+
+    与 `delete_session`（仅置 status="archived"）语义不同：这是不可恢复的物理删除，
+    供"设置 → 归档"页的批量删除使用。返回删除计数用于提示；会话不存在返回 None。
+
+    关联表按外键依赖顺序自底向上清理（messages / turns / tasks / agents /
+    audit / rollback_writes / rollback_snapshots / tool_calls / memories 的会话级记忆）。
+    项目级与全局记忆（session_id 仅作来源追溯）不动。
+    """
+    from sqlalchemy import delete as _delete
+
+    from app.persistence.database import run_write_locked
+    from app.persistence.models.agent import Agent
+    from app.persistence.models.audit import AuditLog
+    from app.persistence.models.memory import MemoryEntry
+    from app.persistence.models.message import Message
+    from app.persistence.models.rollback import RollbackWrite, TurnSnapshot
+    from app.persistence.models.task import Task
+    from app.persistence.models.tool_call import ToolCall
+    from app.persistence.models.turn import Turn
+
+    def patch(s):
+        session = s.get(Session, session_id)
+        if session is None:
+            return None
+
+        counts: dict[str, int] = {}
+
+        def _purge(model, *criteria) -> None:
+            res = s.execute(_delete(model).where(*criteria))
+            counts[model.__tablename__] = int(res.rowcount or 0)
+
+        # 自底向上：先叶子表，再 turns/tasks，最后 session
+        _purge(Message, Message.session_id == session_id)
+        _purge(ToolCall, ToolCall.session_id == session_id)
+        _purge(RollbackWrite, RollbackWrite.session_id == session_id)
+        _purge(TurnSnapshot, TurnSnapshot.session_id == session_id)
+        _purge(AuditLog, AuditLog.session_id == session_id)
+        _purge(Task, Task.session_id == session_id)
+        _purge(Agent, Agent.session_id == session_id)
+        _purge(Turn, Turn.session_id == session_id)
+        # 仅删"会话级"记忆；项目/全局记忆的 session_id 只是创建来源标记
+        s.execute(_delete(MemoryEntry).where(
+            MemoryEntry.session_id == session_id,
+            MemoryEntry.scope == "session",
+        ))
+        s.delete(session)
+        s.commit()
+        return {"ok": True, "deleted": counts}
+
+    return await run_write_locked(patch, label=f"session.delete_permanent.{session_id}")
+
+
 async def fork_session(db: AsyncSession, session_id: int, title: str | None = None) -> int:
     """复制会话（仅复制元数据与消息，任务/子代理不复制；写引擎单写线程）。"""
     from app.persistence.database import run_write_locked
@@ -303,6 +357,22 @@ async def has_running_turn(db: AsyncSession, session_id: int) -> bool:
         ).limit(1)
     )
     return res.scalars().first() is not None
+
+
+async def running_turn_started_at(db: AsyncSession, session_id: int) -> str | None:
+    """会话正在运行的 turn 的开始时间；无运行中 turn 返回 None。
+
+    侧栏「执行中任务」需要一个运行期间**不变**的排序键：用 last_activity_at 会随
+    每条流式消息刷新，多个并发任务互相超车 → 上下跳动。取 turn.started_at 则整个
+    执行期恒定，实现「最新开始执行的排最上」的稳定时序。
+    """
+    res = await db.execute(
+        select(Turn.started_at).where(
+            Turn.session_id == session_id,
+            Turn.status == "running",
+        ).order_by(Turn.started_at.desc(), Turn.id.desc()).limit(1)
+    )
+    return res.scalar_one_or_none()
 
 
 async def has_interrupted_turn(db: AsyncSession, session_id: int) -> bool:

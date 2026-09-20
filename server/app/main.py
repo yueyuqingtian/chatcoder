@@ -11,12 +11,14 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.gateway.routers import (
+    debug,
     diagnostics,
     exec_policy,
     hooks,
     memories,
     models,
     permission_profiles,
+    plugins,
     profiles,
     projects,
     providers,
@@ -200,6 +202,10 @@ def create_app() -> FastAPI:
     app.include_router(exec_policy.router, prefix="/api", tags=["exec-policy"])
     app.include_router(hooks.router, prefix="/api", tags=["hooks"])
     app.include_router(memories.router, prefix="/api", tags=["memories"])
+    app.include_router(plugins.router, prefix="/api", tags=["plugins"])
+    # plan-282-1441（#7/#8）：内置 MCP 的状态宿主端点（调试会话 + 数据库连接配置）
+    app.include_router(debug.router, prefix="/api", tags=["debug"])
+    app.include_router(debug.db_router, prefix="/api", tags=["db"])
     app.include_router(skills_mcp.router, prefix="/api", tags=["skills-mcp"])
     app.include_router(settings_routes.router, prefix="/api", tags=["settings"])
     app.include_router(usage.router, prefix="/api", tags=["usage"])

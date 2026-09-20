@@ -404,8 +404,18 @@ class ModelRegistry:
                     if provider.base_url and api_key:
                         # ta3 需要远端元数据（系统提示词/协议/目录配置），否则行为退化
                         _meta = (getattr(model, "ta3_meta", None) or {}) if api_format == "ta3" else None
+                        # v0.5.13 修复：ta3 的 LLM 网关在**模型级** dispatch 路径下
+                        # （{base}/ai/dispatch/v2 或 .../anthropic），且只认目录下发的
+                        # per-model `llm-` key（参考项目 buildModelHeaders：LLM 通道只
+                        # 认 llm- 前缀，ide-session- 一律拒）。此前一律用
+                        # provider.base_url（站点根 https://.../newcoder）拼 /chat/completions
+                        # → 404；用账号 ide-session- token → 401。目录同步已把两者落到模型行。
+                        _base_url, _key = provider.base_url, api_key
+                        if api_format == "ta3":
+                            _base_url = getattr(model, "base_url", None) or _base_url
+                            _key = getattr(model, "api_key", None) or _key
                         p = _build_provider(
-                            api_key=api_key, base_url=provider.base_url, model=model.name,
+                            api_key=_key, base_url=_base_url, model=model.name,
                             api_format=api_format, meta=_meta, provider=provider,
                         )
                         _attach_credential_meta(p, provider.id, chosen.id)
@@ -480,8 +490,12 @@ class ModelRegistry:
             ta3_meta = getattr(model, "ta3_meta", None) or {}
             if not (provider.base_url and api_key):
                 return None, "provider_incomplete", None
+            # v0.5.13 修复：同 get_provider_for_model —— ta3 走模型级 dispatch 路径与
+            # per-model llm- key，避免站点根 URL 404 与 ide-session- token 401。
             p, reason = _build_provider(
-                api_key=api_key, base_url=provider.base_url, model=model.name,
+                api_key=getattr(model, "api_key", None) or api_key,
+                base_url=getattr(model, "base_url", None) or provider.base_url,
+                model=model.name,
                 api_format=api_format, meta=ta3_meta, provider=provider,
             ), "provider_credential"
         else:

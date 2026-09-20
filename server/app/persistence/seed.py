@@ -168,22 +168,119 @@ async def _seed_subagent_profiles(db: AsyncSession) -> None:
 
 
 async def _heal_orphan_turns(db: AsyncSession) -> None:
-    """v1.1: 启动自愈——把上次进程异常退出遗留的 running turn 统一置为 failed。
+    """启动自愈：把上次进程异常退出遗留的 running turn / running step 统一收尾。
 
-    后端被杀时 turn 可能停留在 running，导致前端左侧会话永远转圈。
+    后端被杀时 turn 可能停留在 running，导致前端左侧会话永远转圈；
     启动时无任何执行中的 turn，running 状态必然是孤儿。
+
+    plan-282-1441：**同时收尾这些 turn 下仍为 running 的步骤**。
+    此前只改了 turn.status，而任务步骤（todo_write 落库的 step）仍是 running。
+    重启后前端读引擎步骤时看到最后一步"进行中"，于是胶囊显示
+    "最后一步还在执行"——即使该任务在退出前其实已经跑完（只是没来得及写终态）。
+    收尾后这些步骤如实回到 pending（未完成，可继续），不再伪装成执行中。
     """
+    from datetime import datetime, timezone
+
+    from app.persistence.models.task import Task
     from app.persistence.models.turn import Turn
+
     res = await db.execute(select(Turn).where(Turn.status == "running"))
     orphans = list(res.scalars().all())
-    if not orphans:
-        return
-    from datetime import datetime, timezone
-    for t in orphans:
-        t.status = "failed"
-        t.summary = "执行中断(服务重启)"
-        t.completed_at = datetime.now(timezone.utc).isoformat()
+
+    # 步骤收尾不依赖 turn 是否存在：只要步骤还是 running，就说明没有活着的执行者
+    step_res = await db.execute(
+        select(Task).where(Task.status == "running", Task.kind == "step")
+    )
+    orphan_steps = list(step_res.scalars().all())
+    for st in orphan_steps:
+        st.status = "pending"
+
+    if orphans:
+        for t in orphans:
+            t.status = "failed"
+            t.summary = "执行中断(服务重启)"
+            t.completed_at = datetime.now(timezone.utc).isoformat()
+
+    # 同时把"任务清单"分组从 running 收回（其下步骤全做完则应显示已完成）
+    group_res = await db.execute(
+        select(Task).where(Task.status == "running", Task.kind == "group")
+    )
+    for g in list(group_res.scalars().all()):
+        children = list((await db.execute(
+            select(Task).where(Task.parent_task_id == g.id, Task.kind == "step")
+        )).scalars().all())
+        if children and all(c.status == "done" for c in children):
+            g.status = "done"
+        elif children:
+            g.status = "pending"
+
+    if orphans or orphan_steps:
+        await db.flush()
+
+
+async def _seed_builtin_mcp(db: AsyncSession) -> int:
+    """注册应用内置的 MCP 服务（plan-282-1441 #7/#8）。
+
+    幂等：按 name 存在即只修正 command/args（版本升级后路径或参数可能变化），
+    **不动 is_active**——用户手动启用的状态必须保留（默认不启用是产品要求）。
+
+    command/args 的两种形态：
+    - 开发态：sys.executable + ["-m", "app.mcp_servers.<name>"]
+    - 打包态：exe 自身 + ["--mcp-server", "<name>"]（exe 不支持 -m，见 run_server 的分流）
+    需要工作区上下文的内置 MCP 再追加 ["--workspace", "${workspaceFolder}"]：子进程按该参数匹配
+    项目，取不到时回退自身 cwd，而打包态 cwd 是数据目录而非项目根，会匹配不到项目而返回空连接
+    列表。占位符由 mcp_wrapper 在 spawn 前替换，无工作区上下文时整项剔除。
+    """
+    import sys
+
+    from app.persistence.models.skill import McpServer
+
+    frozen = bool(getattr(sys, "frozen", False))
+    specs = [
+        {
+            "name": "database",
+            "display_name": "数据库连接",
+            "description": "让 AI 通过 / 命令连接项目数据库，执行查询与数据变更"
+                           "（读写与 DDL 权限、是否审批均可在设置中严格控制）。",
+            # 必须显式传工作区：打包态子进程 cwd 是数据目录，只靠 cwd 会匹配不到项目
+            "args": (["--mcp-server", "database"] if frozen
+                     else ["-m", "app.mcp_servers.database"]) + ["--workspace", "${workspaceFolder}"],
+        },
+        {
+            "name": "debugger",
+            "display_name": "开发调试",
+            "description": "让 AI 在项目运行期间调用接口、在代码中设断点或做方法级现场观测"
+                           "（Web 前端 CDP、Java JDWP 断点、Arthas 观测——IDEA 调试中也能用）。",
+            "args": ["--mcp-server", "debugger"] if frozen else ["-m", "app.mcp_servers.debugger"],
+        },
+    ]
+    created = 0
+    for spec in specs:
+        existing = (await db.execute(
+            select(McpServer).where(McpServer.name == spec["name"])
+        )).scalars().first()
+        if existing is None:
+            db.add(McpServer(
+                name=spec["name"],
+                display_name=spec["display_name"],
+                description=spec["description"],
+                source="builtin",
+                transport="stdio",
+                command=sys.executable,
+                args=spec["args"],
+                env={},
+                is_active=False,   # 默认不启用，由用户手动开启
+            ))
+            created += 1
+        else:
+            # 修正入口（换机器/改打包方式后路径会变），保留用户的启停选择
+            existing.display_name = spec["display_name"]
+            existing.description = spec["description"]
+            existing.source = "builtin"
+            existing.command = sys.executable
+            existing.args = spec["args"]
     await db.flush()
+    return created
 
 
 async def seed() -> dict:
@@ -196,6 +293,7 @@ async def seed() -> dict:
         await _seed_profiles(db)
         await _seed_exec_policy(db)
         await _seed_subagent_profiles(db)
+        builtin_mcp = await _seed_builtin_mcp(db)
         await _heal_orphan_turns(db)
         await db.commit()
         return {
@@ -203,4 +301,5 @@ async def seed() -> dict:
             "user_id": user.id,
             "model_id": model.id if model else None,
             "main_agent_id": agent.id,
+            "builtin_mcp_created": builtin_mcp,
         }

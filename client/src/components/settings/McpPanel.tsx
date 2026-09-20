@@ -6,8 +6,10 @@ import { useChatStore } from "../../store/chat";
 import { IconRefresh, IconPlus, IconX } from "../icons";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { Modal } from "../Modal";
-import { FormDialog } from "../ui/FormDialog";
+import { FormDialog, Input, Select, Textarea } from "../ui";
 import { Sw } from "./shared";
+import { DatabaseConnectionsPanel } from "./DatabaseConnectionsPanel";
+import { DebuggerPanel } from "./DebuggerPanel";
 
 export function McpPanel() {
   const [items, setItems] = useState<McpServerOut[]>([]);
@@ -20,6 +22,8 @@ export function McpPanel() {
   // plan-230-1144 M1.3: 工具清单展开与手动刷新（健康状态可见）
   const [expandedTools, setExpandedTools] = useState<number | null>(null);
   const [refreshingId, setRefreshingId] = useState<number | null>(null);
+  /** plan-282-1441（#7/#8）：内置 MCP 的专属配置页（数据库连接 / 开发调试） */
+  const [detailServer, setDetailServer] = useState<McpServerOut | null>(null);
   // plan-234-1171 R1: 握手需项目工作区根（codegraph 依赖 rootUri，args 含 ${workspaceFolder}）
   const projects = useChatStore((s) => s.projects);
   const currentProjectId = useChatStore((s) => s.currentProjectId);
@@ -124,6 +128,21 @@ export function McpPanel() {
   };
   return (
     <div>
+      {/* plan-282-1441（#7/#8）：内置 MCP 的详情配置页（列表 ⇄ 详情切换） */}
+      {detailServer ? (
+        <div className="mcp-detail-wrap">
+          <div className="mcp-detail-head">
+            <button className="btn btn-ghost btn-xs" onClick={() => setDetailServer(null)}>← 返回连接器列表</button>
+            <span className="mcp-detail-title">{detailServer.display_name || detailServer.name}</span>
+          </div>
+          {detailServer.name === "database" && <DatabaseConnectionsPanel server={detailServer} />}
+          {detailServer.name === "debugger" && <DebuggerPanel server={detailServer} />}
+          {detailServer.name !== "database" && detailServer.name !== "debugger" && (
+            <div className="navpage-empty">该服务没有专属配置页。</div>
+          )}
+        </div>
+      ) : (
+      <>
       <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginBottom: 12 }}>
         <button className="btn btn-ghost btn-sm" onClick={handleScan} disabled={scanning}><IconRefresh size={13} /> {scanning ? "扫描中…" : "自动扫描本机"}</button>
         <button className="btn btn-ghost btn-sm" onClick={() => setShowJsonModal(true)}>导入 JSON 配置</button>
@@ -136,11 +155,11 @@ export function McpPanel() {
         onSubmit={() => void handleCreate()}
         submitDisabled={!form.name.trim()}
       >
-        <input className="ui-input" placeholder="名称" value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} />
-        <select className="ui-select" value={form.transport} onChange={(e) => setForm((p) => ({ ...p, transport: e.target.value }))}><option value="stdio">stdio</option><option value="sse">sse</option></select>
+        <Input placeholder="名称" value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} aria-label="名称" />
+        <Select value={form.transport} onChange={(v) => setForm((p) => ({ ...p, transport: v }))} options={[{ value: "stdio", label: "stdio" }, { value: "sse", label: "sse" }]} aria-label="传输方式" />
         {form.transport === "stdio"
-          ? <input className="ui-input" placeholder="命令" value={form.command} onChange={(e) => setForm((p) => ({ ...p, command: e.target.value }))} />
-          : <input className="ui-input" placeholder="URL" value={form.url} onChange={(e) => setForm((p) => ({ ...p, url: e.target.value }))} />}
+          ? <Input placeholder="命令" value={form.command} onChange={(e) => setForm((p) => ({ ...p, command: e.target.value }))} aria-label="命令" />
+          : <Input placeholder="URL" value={form.url} onChange={(e) => setForm((p) => ({ ...p, url: e.target.value }))} aria-label="URL" />}
       </FormDialog>
       <div className="settings-resource-list">
         {items.map((m) => {
@@ -181,12 +200,21 @@ export function McpPanel() {
               </div>
               <div className="settings-resource-actions">
                 <Sw checked={m.is_active} onChange={async (v) => { try { await api.updateMcpServer(m.id, { is_active: v }, currentProjectPath); load(); } catch {} }} />
+                {/* plan-282-1441（#7/#8）：内置 MCP 有专属配置页 */}
+                {m.source === "builtin" && (
+                  <button className="btn btn-ghost btn-xs" onClick={() => setDetailServer(m)}
+                    title="打开该内置服务的配置">
+                    配置
+                  </button>
+                )}
                 <button className="btn btn-ghost btn-xs" disabled={refreshingId === m.id}
                   title="重新握手并拉取工具清单"
                   onClick={() => void handleRefreshTools(m)}>
                   <IconRefresh size={12} /> {refreshingId === m.id ? "握手中…" : "刷新工具"}
                 </button>
-                <button className="btn btn-ghost btn-xs" onClick={() => setConfirmTarget(m)}><IconX size={12} /></button>
+                {m.source !== "builtin" && (
+                  <button className="btn btn-ghost btn-xs" onClick={() => setConfirmTarget(m)}><IconX size={12} /></button>
+                )}
               </div>
             </div>
           );
@@ -240,15 +268,17 @@ export function McpPanel() {
               {jsonError}
             </div>
           )}
-          <textarea
-            className="ui-textarea"
+          <Textarea
             style={{ minHeight: 200, fontFamily: "var(--font-mono)", fontSize: 12 }}
             placeholder={`{\n  "mcpServers": {\n    "memory": {\n      "command": "npx",\n      "args": ["-y", "@modelcontextprotocol/server-memory"]\n    }\n  }\n}`}
             value={jsonText}
             onChange={(e) => setJsonText(e.target.value)}
+            aria-label="MCP JSON 配置"
           />
         </div>
       </Modal>
+      </>
+      )}
     </div>
   );
 }

@@ -5,6 +5,8 @@ import { initUi, useUiStore } from "./store/ui";
 import { registerBuiltinPlugins } from "./plugins/builtin";
 import { loadExternalPlugins } from "./plugins/external";
 import "./styles/global.css";
+// plan-282-1416: 组件库样式层（依赖 tokens.css，须在 global.css 之后以便覆盖旧兼容类）
+import "./styles/components.css";
 import "./styles/motion.css";
 import "./styles/focus.css";
 import "./styles/model-picker.css";

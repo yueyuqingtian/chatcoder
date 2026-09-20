@@ -24,6 +24,9 @@ export const PlanCard = memo(function PlanCard({
   const currentProjectId = useChatStore((s) => s.currentProjectId);
   const runningTurnId = useChatStore((s) => s.runningTurnId);
   const streamingBuffers = useChatStore((s) => s.streamingBuffers);
+  // plan-282-1434（B1）：确认/取消动作由卡片自身承载（原先只有输入框上方横幅持有）
+  const confirmPlanTurn = useChatStore((s) => s.confirmPlanTurn);
+  const dismissPlan = useChatStore((s) => s.dismissPlan);
 
   // 时间线消息兜底：content 提供 plan_doc_path/plan_status（历史消息无卡片数据时卡片仍可渲染）
   const msgPlan = msg
@@ -129,6 +132,11 @@ export const PlanCard = memo(function PlanCard({
         <MarkdownContent>{displayMarkdown}</MarkdownContent>
       </div>
 
+      {/* plan-282-1434（B1）：确认动作收进卡片内部下方居中。
+          此前「查看完整计划」在卡片内、「确认执行」却在输入框上方的横幅里，
+          确认入口与计划内容分离，视线要来回跳。
+          现在：两行居中、同宽同高同圆角；确认按钮仅在"待确认"状态渲染
+          ——发新消息后 store 会把该卡置 cancelled（status 变化），按钮自动消失。 */}
       <div className="plan-inline-footer">
         <div className="plan-inline-path-hint">
           <span>已创建计划</span>
@@ -144,8 +152,26 @@ export const PlanCard = memo(function PlanCard({
               usePanelStore.getState().openTab("files");
             }}
           >
-            查看完整计划 →
+            查看完整计划
           </button>
+          {isAwaiting && (
+            <>
+              <button
+                type="button"
+                className="plan-inline-view"
+                onClick={() => void dismissPlan()}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="plan-inline-confirm"
+                onClick={() => void confirmPlanTurn(true)}
+              >
+                确认执行
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>

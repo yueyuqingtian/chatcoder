@@ -7,19 +7,26 @@
  * - 最终回答（Markdown/产物/摘要）与计划卡始终展示
  * - 操作行挂到消息下方
  */
-import { useCallback, memo, useEffect, useState, useMemo } from "react";
-import { CompactCard } from "./CompactCard";
+import { useCallback, memo, useEffect, useState, useMemo, Fragment } from "react";
 import { MessageActions } from "./MessageActions";
-import { PlanCard } from "./PlanCard";
 import type { SubagentMetaLite } from "./SubagentCard";
 import { PluginSlot } from "../../plugins/registry";
 import { MarkdownContent } from "../MarkdownContent";
-import { IconRotateCcw, IconArrowToggle } from "../icons";
+import { IconRotateCcw, IconArrowToggle, IconAlertCircle } from "../icons";
 import type { TimelineEntry, TurnItem } from "./timeline";
 import { msgText } from "./timeline";
 import { useChatStore } from "../../store/chat";
 import { parseUtc } from "../../utils/time";
 import { MessageImageGrid, MessageFileCards, TokenText, attachmentsOf } from "./AttachmentCard";
+
+/** plan-282-1421：turn 的「已结束」状态集合——AI 操作行必须在本轮进入这些状态后才显示。 */
+const TERMINAL_TURN_STATUSES: ReadonlySet<string> = new Set([
+  "completed",
+  "failed",
+  "interrupted",
+  "cancelled",
+  "rolled_back",
+]);
 
 /** 「已工作 X 分 X 秒」计时条与工作过程折叠切换（对齐图 8） */
 function WorkTimer({
@@ -78,6 +85,7 @@ export const TurnGroup = memo(function TurnGroup({
   subagents,
   actions = "full",
   hasPlan = false,
+  flow = "main",
 }: {
   entry: Extract<TimelineEntry, { kind: "turn" }>;
   isRunning: boolean;
@@ -85,16 +93,15 @@ export const TurnGroup = memo(function TurnGroup({
   subagents?: SubagentMetaLite[];
   actions?: "full" | "copy-only" | "none";
   hasPlan?: boolean;
+  /** plan-282-1421：数据来源。subagent 面板的 turn 状态不来自主会话 turns 列表，
+   *  因此不能用主会话的全局运行态推断"是否已结束"。 */
+  flow?: "main" | "subagent";
 }) {
   const requestRollbackPreview = useChatStore((s) => s.requestRollbackPreview);
+  /** 全局运行态：turn 行状态未知时用于判定是否仍在执行（parent 传入的 isRunning 只表示"本 turn"） */
+  const globalRunning = useChatStore((s) => s.isRunning);
   const items = entry.items;
   const turnId = entry.turnId;
-
-  const aiItemsWithIndex = useMemo(() => {
-    return items
-      .map((item, index) => ({ item, index }))
-      .filter(({ item }) => item.kind !== "user");
-  }, [items]);
 
   // v41: 首条用户消息（turn 触发消息）固定渲染在 turn 顶部用户消息区；
   // 其余 user item 为运行中注入，就地渲染在时间序位置（见 flowItems）
@@ -119,6 +126,54 @@ export const TurnGroup = memo(function TurnGroup({
     entry.turnId != null ? s.turns.find((t) => t.id === entry.turnId)?.status : undefined
   );
   const abnormalTurn = turnRowStatus === "interrupted" || turnRowStatus === "failed" || turnRowStatus === "rolled_back";
+
+  /** plan-282-1416（问题2 根治）：操作行门控由「全局 isRunning」改为「本 turn 行状态」。
+   *  仅当**该条目确实属于正在运行的那个 turn**时才隐藏操作行——
+   *  异常中断 / 手动停止 / 回滚 / 失败（interrupted/failed/rolled_back）、
+   *  以及不隶属任何 turn 的独立用户消息（turnId == null）一律可见，
+   *  不再因 runningTurnId 残留在旧值而永久丢失复制/回滚按钮。
+   *
+   *  plan-282-1422（执行期误显按钮根治）：判据从「行状态必须为 running」放宽为
+   *  「行状态不得是终态」。原因是计划确认执行**复用规划 turn**（后端
+   *  execute_confirmed_plan 不换 turn），该 turn 的行状态会停留在
+   *  awaiting_confirmation，而 runningTurnId（=宿主传入的 isRunning）已经指向它；
+   *  旧写法于是把「正在执行」误判为「已结束」，让该 turn 的首条用户消息——
+   *  恰好是全局最近一条用户消息（操作行 is-latest 常显）——在执行期间
+   *  异常常驻复制/回滚按钮。终态优先仍保证陈旧 runningTurnId 不会永久吞掉按钮。
+   *
+   *  subagent 面板例外（与 turnFinished 同口径）：其 turn 行状态来自 subagentMeta 而非
+   *  主会话 turns 列表，用主会话行状态判断会取到无关值——直接用本面板运行态。 */
+  const turnRunning =
+    entry.turnId == null
+      ? false
+      : flow === "subagent"
+        ? isRunning
+        : isRunning && !TERMINAL_TURN_STATUSES.has(turnRowStatus ?? "");
+
+  /** plan-282-1421：AI 操作行**必须等本轮真正结束**才显示。
+   *
+   *  旧门控用 !turnRunning，在以下两个窗口会短暂放行，导致按钮随流式内容
+   *  上下跳动（新增条目不断改变 lastAiItemIdx，操作行跟着块尾移动）：
+   *   ① 乐观发送到 turn.started 之间：runningTurnId 尚未置位、turn 行状态也为空；
+   *   ② 结束事件与 turns 列表刷新之间的空档：状态未落库。
+   *  现在改为「必须确认终态」：turn 行状态已知时只认终态；状态未知时要求全局不在运行中。
+   *  这样执行中（含上述两个窗口）一律不渲染，彻底消除跳动。
+   *
+   *  subagent 面板例外：其 turn 状态不来自主会话 turns 列表（而是 subagentMeta），
+   *  故直接用宿主传入的本面板运行态，与改造前行为一致。
+   *
+   *  plan-282-1422：turnRunning（本 turn 确在运行）优先判「未结束」——计划确认执行
+   *  复用规划 turn 且行状态可能仍是 awaiting_confirmation，若只看行状态会误判已结束。 */
+  const turnFinished =
+    flow === "subagent"
+      ? !isRunning
+      : entry.turnId == null
+        ? true
+        : turnRunning
+          ? false
+          : turnRowStatus != null
+            ? TERMINAL_TURN_STATUSES.has(turnRowStatus)
+            : !globalRunning;
 
   // 执行过程项 = 除首条用户消息外、位于最终汇报之前的所有 AI 项
   const processItems = useMemo(
@@ -159,6 +214,29 @@ export const TurnGroup = memo(function TurnGroup({
   }
   const hasPlanMsg = lastPlanItemIdx >= 0;
 
+  /** plan-282-1416（问题3 根治）：最后一个 AI 内容项的 index（可含 tools 等无 msg 的项）。
+   *  AI 操作行必须紧跟 AI 内容块末尾插入，而不是挂在 .turn-flow 底部——
+   *  否则运行中注入的用户消息（时间序在其后）会被这条操作行「包」进来，
+   *  表现为「AI 和用户被当成一个整体共用一条复制/点赞行」。 */
+  let lastAiItemIdx = -1;
+  for (let k = items.length - 1; k >= 0; k--) {
+    if (items[k].kind !== "user") { lastAiItemIdx = k; break; }
+  }
+
+  /** 安全取项的消息 id（tools / plan 分组项无 msg，回落到 -1 仅供 key 使用） */
+  const itemMsgId = (item: TurnItem): number =>
+    "msg" in item && item.msg ? Number(item.msg.id) : -1;
+
+  /** plan-282-1416（问题2）：全局最近一条用户消息 id——该条操作行常显，
+   *  保证任务异常终止 / 手动停止后无需 hover 就能看到复制与回滚。
+   *  从尾部回溯并提前 break，避免长会话下每次 store 变更全量扫描。 */
+  const latestUserId = useChatStore((s) => {
+    for (let k = s.messages.length - 1; k >= 0; k--) {
+      if (s.messages[k].sender_type === "user") return s.messages[k].id;
+    }
+    return -1;
+  });
+
   const rollbackFn = useCallback(() => {
     if (turnId != null) requestRollbackPreview(turnId);
   }, [turnId, requestRollbackPreview]);
@@ -192,8 +270,29 @@ export const TurnGroup = memo(function TurnGroup({
   const hasAnyAiContent =
     items.some((_, index) => index !== firstUserIdx) || hasPlan || subagentNode != null;
 
-  const renderAiItem = (item: TurnItem, i: number) => {
-    switch (item.kind) {
+  /** plan-282-1416（问题3）：把 AI 操作行渲染在「AI 内容块末尾」。
+   *  plan-282-1421：门控改为 turnFinished——执行中（含乐观发送与状态未落库的空档）
+   *  一律不渲染，避免按钮随流式新增条目上下跳动；必须等本轮进入终态才出现。 */
+  const renderAiItemWithActions = (item: TurnItem, i: number) => {
+    const node = renderAiItem(item, i);
+    if (node == null) return null;
+    return (
+      <Fragment key={`ai-${i}`}>
+        {node}
+        {i === lastAiItemIdx && turnFinished && (
+          <MessageActions
+            entry={entry}
+            onRollback={onRollback}
+            scope="ai"
+            actions={actions}
+            ownerId={itemMsgId(item)}
+          />
+        )}
+      </Fragment>
+    );
+  };
+
+  const renderAiItem = (item: TurnItem, i: number) => {    switch (item.kind) {
       // v41: 注入的用户消息（非首条）就地渲染在时间序位置（运行中由 MessageFlow
       // 剥离到流式段之后，此分支服务 turn 结束后的落库位置渲染）
       case "user":
@@ -207,6 +306,19 @@ export const TurnGroup = memo(function TurnGroup({
                 <div className="turn-user-text"><TokenText text={msgText(item.msg.content)} /></div>
               )}
             </div>
+            {/* plan-282-1416（问题2 根因 A）：turn 内的非首条用户消息（运行中注入 / 立即发送）
+                此前完全没有操作行，导致「最近一条用户消息」永远没有复制/回滚。
+                现补齐：归属该条消息自身，且与 turn 是否运行无关（终态即可见）。 */}
+            {!turnRunning && (
+              <MessageActions
+                entry={entry}
+                onRollback={onRollback}
+                scope="user"
+                actions={actions}
+                alwaysVisible={item.msg.id === latestUserId}
+                ownerId={item.msg.id}
+              />
+            )}
           </div>
         );
       case "thinking":
@@ -250,7 +362,8 @@ export const TurnGroup = memo(function TurnGroup({
         );
       case "summary":
         if ((item.msg.content as Record<string, unknown>).checkpoint === true) {
-          return <CompactCard key={i} msg={item.msg} />;
+          // plan-282-1421：压缩卡走插件 slot（可被外挂组件替换）
+          return <PluginSlot key={i} slot="compact-card" msg={item.msg} />;
         }
         return (
           <div key={i} className="turn-item turn-item-summary">
@@ -260,12 +373,8 @@ export const TurnGroup = memo(function TurnGroup({
       case "error":
         return (
           <div key={i} className="turn-item turn-item-error">
-            <svg className="err-icon" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
-              <path
-                fill="currentColor"
-                d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"
-              />
-            </svg>
+            {/* plan-282-1416：内联 SVG 收编为图标库 IconAlertCircle */}
+            <IconAlertCircle size={15} className="err-icon" />
             <div className="err-body">
               <div className="err-title">执行出错</div>
               <div className="err-msg">{msgText(item.msg.content) || "执行出错"}</div>
@@ -277,7 +386,7 @@ export const TurnGroup = memo(function TurnGroup({
         // 只在最后一条位置渲染卡片（携带最新状态），之前的渲染为细提示行
         const isLastPlan = i === lastPlanItemIdx;
         return isLastPlan ? (
-          <PlanCard key={i} turnId={entry.turnId ?? undefined} embedded msg={item.msg} />
+          <PluginSlot key={i} slot="plan-card" turnId={entry.turnId ?? undefined} embedded msg={item.msg} />
         ) : (
           <div key={i} className="turn-item plan-msg-item">
             <span>{msgText(item.msg.content)}</span>
@@ -333,8 +442,16 @@ export const TurnGroup = memo(function TurnGroup({
                 <div className="turn-user-text"><TokenText text={msgText(firstUser.msg.content)} /></div>
               )}
             </div>
-            {!isRunning && (
-              <MessageActions entry={entry} onRollback={onRollback} scope="user" actions={actions} />
+            {/* plan-282-1416（问题2）：门控改本 turn 行状态；最近一条用户消息常显 */}
+            {!turnRunning && (
+              <MessageActions
+                entry={entry}
+                onRollback={onRollback}
+                scope="user"
+                actions={actions}
+                alwaysVisible={firstUser.msg.id === latestUserId}
+                ownerId={firstUser.msg.id}
+              />
             )}
           </div>
         );
@@ -363,8 +480,8 @@ export const TurnGroup = memo(function TurnGroup({
           {/* 1. 有最终汇报时：过程项进入可折叠容器 */}
           {hasProcess && (
             <div className={`turn-process-container${processCollapsed ? " collapsed" : ""}`}>
-              {processItems.map(({ item, index }) => renderAiItem(item, index))}
-              {hasPlan && !hasPlanMsg && <PlanCard turnId={turnId} embedded />}
+              {processItems.map(({ item, index }) => renderAiItemWithActions(item, index))}
+              {hasPlan && !hasPlanMsg && <PluginSlot slot="plan-card" turnId={turnId} embedded />}
               {subagentNode}
             </div>
           )}
@@ -373,9 +490,9 @@ export const TurnGroup = memo(function TurnGroup({
           {!hasProcess && (
             <div className="turn-process-container">
               {items.map((item, index) =>
-                index !== firstUserIdx ? renderAiItem(item, index) : null
+                index !== firstUserIdx ? renderAiItemWithActions(item, index) : null
               )}
-              {hasPlan && !hasPlanMsg && <PlanCard turnId={turnId} embedded />}
+              {hasPlan && !hasPlanMsg && <PluginSlot slot="plan-card" turnId={turnId} embedded />}
               {subagentNode}
             </div>
           )}
@@ -384,15 +501,13 @@ export const TurnGroup = memo(function TurnGroup({
           {hasProcess &&
             items.map((item, index) =>
               index !== firstUserIdx && index >= finalReportOriginalIdx
-                ? renderAiItem(item, index)
+                ? renderAiItemWithActions(item, index)
                 : null
             )}
 
-          {/* 问题3: AI 操作行（复制/赞踩/重试）以整个 AI 回复块为整体，展示在 turn-flow 底部。
-               历史/已结束消息始终显示；运行中不展示。任务异常中断（无最终 text）也能出现。 */}
-          {!isRunning && aiItemsWithIndex.length > 0 && (
-            <MessageActions entry={entry} onRollback={onRollback} scope="ai" actions={actions} />
-          )}
+          {/* plan-282-1416（问题3 根治）：AI 操作行不再挂在 .turn-flow 底部——
+              它已由 renderAiItemWithActions 紧跟最后一个 AI 内容项输出，
+              因此运行中注入的用户消息（时间序在后）不再被这条操作行包进来。 */}
         </div>
       )}
     </div>

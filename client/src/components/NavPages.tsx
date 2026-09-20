@@ -1,22 +1,18 @@
-/** 左侧导航页（v7 对齐 ZCode；plan-248-1258 M4 统一为「自动化」并复用共享创建弹窗）。 */
+﻿/** 左侧导航页（v7 对齐 ZCode；plan-248-1258 M4 统一为「自动化」并复用共享创建弹窗）。
+ *  plan-282-1441（#6/#9）：原 SkillsPage / McpPage 已移除——技能与连接器并入
+ *  设置与左面板共用的「拓展」面板（settings/ExtensionsPanel）。 */
 import { useCallback, useEffect, useState } from "react";
-import { api, type McpServerOut, type ScheduledTaskOut, type SkillOut } from "../api/client";
+import { api, type ScheduledTaskOut } from "../api/client";
 import {
-  IconBox, IconCheckSquare, IconClipboard, IconFileText, IconInfo,
-  IconPlus, IconRefresh, IconSearch, IconTarget, IconX, IconZap,
-  IconDownload,
+  IconCheckSquare, IconClipboard, IconFileText, IconInfo,
+  IconTarget, IconX, IconZap,
 } from "./icons";
-import { ConfirmDialog } from "./ConfirmDialog";
 import { ScheduledTaskFormModal, cronToForm, type TaskForm } from "./settings/ScheduledTaskFormModal";
-import { useChatStore } from "../store/chat";
+import { Switch, IconButton } from "./ui";
 
+/** plan-282-1416：开关统一走组件库 Switch（此前这里是第三套实现 .sp-switch） */
 function SwitchRow({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <label className="sp-switch">
-      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
-      <span className="sp-slider" />
-    </label>
-  );
+  return <Switch checked={checked} onChange={onChange} />;
 }
 
 /** 任务模板（对齐 zcode 自动化页） */
@@ -94,10 +90,10 @@ export function ScheduledPage() {
                   <div className="automation-item-desc">{cronLabel(t.cron)}</div>
                 </div>
                 <div className="automation-item-actions">
-                  <button className="sb-icon-btn" title="立即试跑" disabled={busyId === t.id} onClick={() => void runNow(t)}><IconZap size={13} /></button>
+                  <IconButton icon={<IconZap size={13} />} title="立即试跑" disabled={busyId === t.id} onClick={() => void runNow(t)} />
                   <button className="btn btn-ghost btn-xs" onClick={() => { setEditing(t); setInitial(null); setShowForm(true); }}>编辑</button>
                   <SwitchRow checked={t.enabled} onChange={async (v) => { try { await api.updateScheduledTask(t.id, { enabled: v }); load(); } catch { /* ignore */ } }} />
-                  <button className="sb-icon-btn" title="删除" onClick={async () => { try { await api.deleteScheduledTask(t.id); load(); } catch { /* ignore */ } }}><IconX size={13} /></button>
+                  <IconButton size="xs" icon={<IconX size={13} />} title="删除" tone="danger" onClick={async () => { try { await api.deleteScheduledTask(t.id); load(); } catch { /* ignore */ } }} />
                 </div>
               </div>
             ))}
@@ -145,193 +141,6 @@ export function ScheduledPage() {
         onClose={() => { setShowForm(false); setEditing(null); setInitial(null); }}
         onSaved={() => void load()}
       />
-    </div>
-  );
-}
-
-export function SkillsPage() {
-  const [items, setItems] = useState<SkillOut[]>([]);
-  const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<string>("all");
-  const load = useCallback(async () => {
-    try { setItems(await api.listSkills()); } catch { /* ignore */ }
-  }, []);
-  useEffect(() => { load(); }, [load]);
-
-  const sources = Array.from(new Set(items.map((s) => s.source || "user")));
-  const filtered = items.filter((s) => {
-    if (filter !== "all" && (s.source || "user") !== filter) return false;
-    if (query.trim()) {
-      const q = query.toLowerCase();
-      return (s.name + (s.display_name || "") + (s.description || "")).toLowerCase().includes(q);
-    }
-    return true;
-  });
-  const grouped = sources.map((src) => ({ src, list: filtered.filter((s) => (s.source || "user") === src) })).filter((g) => g.list.length > 0);
-  const sourceLabel = (src: string) => (src === "plugin" ? "Plugin" : src === "project" ? "项目" : "用户");
-
-  return (
-    <div className="skills-page">
-      <div className="skills-head">
-        <h1 className="automation-title">技能</h1>
-        <div className="skills-head-actions">
-          <button className="sb-icon-btn" title="新建技能" onClick={() => window.dispatchEvent(new CustomEvent("chatcoder:open-settings", { detail: { tab: "skills" } }))}><IconPlus size={15} /></button>
-          <button className="sb-icon-btn" title="导入技能"><IconDownload size={15} /></button>
-          <button className="sb-icon-btn" title="刷新" onClick={load}><IconRefresh size={14} /></button>
-        </div>
-      </div>
-      <p className="automation-sub">管理项目级与用户级技能。启用后可在聊天里通过 $skill-name 使用。</p>
-      <div className="skills-toolbar">
-        <div className="skills-search">
-          <IconSearch size={13} />
-          <input placeholder="搜索技能…" value={query} onChange={(e) => setQuery(e.target.value)} />
-        </div>
-        <select className="skills-filter" value={filter} onChange={(e) => setFilter(e.target.value)}>
-          <option value="all">全部</option>
-          {sources.map((s) => <option key={s} value={s}>{sourceLabel(s)}</option>)}
-        </select>
-      </div>
-      {grouped.map((g) => (
-        <div key={g.src} className="skills-group">
-          <div className="skills-group-head">
-            <span>{sourceLabel(g.src)} 技能 <span className="skills-count">{g.list.length} 项</span></span>
-            {g.src === "plugin" && <span className="skills-group-note">由插件注册，修改请到对应插件中进行。</span>}
-          </div>
-          <div className="skills-list">
-            {g.list.map((s) => (
-              <div key={s.id} className="skills-item">
-                <span className="skills-item-icon"><IconBox size={16} /></span>
-                <div className="skills-item-main">
-                  <div className="skills-item-name">{s.name}</div>
-                  <div className="skills-item-desc">{s.description || "无描述"}</div>
-                </div>
-                <span className="skills-item-source">{s.source || "user"}</span>
-                <span className="skills-item-tag">{sourceLabel(g.src)}</span>
-                <SwitchRow checked={s.is_active} onChange={(v) => { void api.updateSkill(s.id, { is_active: v }).then(load); }} />
-              </div>
-            ))}
-          </div>
-        </div>
-      ))}
-      {filtered.length === 0 && <div className="navpage-empty">暂无技能</div>}
-    </div>
-  );
-}
-
-export function McpPage() {
-  const [items, setItems] = useState<McpServerOut[]>([]);
-  const [candidates, setCandidates] = useState<Array<{ name: string; transport: string; command: string | null; args: string[]; env: Record<string, string> | null; url: string | null; source_path: string }>>([]);
-  const [scanning, setScanning] = useState(false);
-  const [importing, setImporting] = useState<string | null>(null);
-  const [confirmTarget, setConfirmTarget] = useState<McpServerOut | null>(null);
-
-  const load = useCallback(async () => {
-    try { setItems(await api.listMcpServers()); } catch { /* ignore */ }
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
-
-  const handleScan = async () => {
-    setScanning(true);
-    try {
-      // v6.5: 与设置页 MCP 面板一致——拉取最新列表去重，避免删除后状态不同步
-      const [servers, result] = await Promise.all([api.listMcpServers(), api.scanMcpServers()]);
-      setItems(servers);
-      const existing = new Set(servers.map((m) => m.name));
-      const seen = new Set<string>();
-      const next: typeof candidates = [];
-      for (const c of result) {
-        if (existing.has(c.name) || seen.has(c.name)) continue;
-        seen.add(c.name);
-        next.push(c);
-      }
-      setCandidates(next);
-    } catch (e) {
-      useChatStore.setState({ error: "扫描失败: " + String(e) });
-    } finally {
-      setScanning(false);
-    }
-  };
-
-  const handleImport = async (c: { name: string; transport: string; command: string | null; args: string[]; env: Record<string, string> | null; url: string | null; source_path?: string }) => {
-    setImporting(c.name);
-    try {
-      await api.createMcpServer({
-        name: c.name, transport: c.transport, command: c.command ?? undefined,
-        args: c.args, env: c.env ?? undefined, url: c.url ?? undefined, is_active: false,
-        path: c.source_path || undefined,
-      });
-      setCandidates((prev) => prev.filter((x) => x.name !== c.name));
-      load();
-    } catch (e) {
-      useChatStore.setState({ error: `导入 ${c.name} 失败: ${String(e)}` });
-    } finally {
-      setImporting(null);
-    }
-  };
-
-  return (
-    <div className="navpage">
-      <div className="navpage-head">
-        <div>
-          <span className="navpage-title">MCP 服务器</span>
-          <span className="navpage-subtitle">连接外部工具与数据源</span>
-        </div>
-        <div className="navpage-head-actions">
-          <button className="btn-ghost" onClick={handleScan} disabled={scanning}>
-            <IconRefresh size={13} /> {scanning ? "扫描中…" : "自动扫描本机"}
-          </button>
-        </div>
-      </div>
-      <div className="navpage-list">
-        {items.map((m) => (
-          <div key={m.id} className="navpage-item">
-            <div className="navpage-item-main">
-              <div className="navpage-item-title">{m.display_name || m.name}</div>
-              <div className="navpage-item-desc">
-                <span className="np-tag">{m.transport}</span>
-                <span>{m.transport === "stdio" ? m.command || "stdio" : m.url || "sse"}</span>
-              </div>
-            </div>
-            <div className="navpage-item-actions">
-              <SwitchRow checked={m.is_active} onChange={async (v) => { try { await api.updateMcpServer(m.id, { is_active: v }); load(); } catch { /* ignore */ } }} />
-              <button className="icon-btn" onClick={() => setConfirmTarget(m)}><IconX size={12} /></button>
-            </div>
-          </div>
-        ))}
-        {items.length === 0 && <div className="navpage-empty">暂无 MCP 服务器，点击「自动扫描本机」导入</div>}
-      </div>
-      <ConfirmDialog
-        open={confirmTarget !== null}
-        title="删除 MCP 服务器"
-        message={confirmTarget ? `删除「${confirmTarget.display_name || confirmTarget.name}」？` : ""}
-        danger
-        onCancel={() => setConfirmTarget(null)}
-        onConfirm={async () => {
-          const it = confirmTarget;
-          setConfirmTarget(null);
-          if (!it) return;
-          try { await api.deleteMcpServer(it.id); load(); } catch { /* ignore */ }
-        }}
-      />
-      {candidates.length > 0 && (
-        <div className="navpage-candidates">
-          <div className="navpage-candidates-title">扫描候选（勾选导入）</div>
-          {candidates.map((c, i) => (
-            <div key={`${c.name}-${i}`} className="navpage-candidate">
-              <div className="navpage-item-main">
-                <div className="navpage-item-title">{c.name}</div>
-                <div className="navpage-item-desc">
-                  <span className="np-tag">{c.transport}</span>
-                  <span>{c.transport === "stdio" ? c.command : c.url}</span>
-                  <span className="np-source">来自 {c.source_path}</span>
-                </div>
-              </div>
-              <button className="btn-primary btn-sm" disabled={importing !== null} onClick={() => handleImport(c)}>{importing === c.name ? "导入中…" : "导入"}</button>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

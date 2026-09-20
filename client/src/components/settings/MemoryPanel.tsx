@@ -11,6 +11,7 @@ import { api, type MemoryEntryOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { IconX, IconArrowUp, IconRefresh } from "../icons";
 import { ConfirmDialog } from "../ConfirmDialog";
+import { Checkbox } from "../ui";
 import { Row, Sw } from "./shared";
 
 type ScopeFilter = "all" | "global" | "project" | "session";
@@ -143,7 +144,7 @@ export function MemoryPanel() {
           ))}
         </div>
         <label className="mem-cand-toggle">
-          <input type="checkbox" checked={includeCandidate} onChange={(e) => setIncludeCandidate(e.target.checked)} />
+          <Checkbox checked={includeCandidate} onChange={setIncludeCandidate} />
           显示候选区
         </label>
         <button className="btn btn-ghost btn-sm" onClick={() => void load()}><IconRefresh size={13} /> 刷新</button>

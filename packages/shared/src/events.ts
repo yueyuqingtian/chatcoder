@@ -47,7 +47,61 @@ export type ServerWsEvent =
   | { event: "task.planned"; payload: { turn_id: number; steps?: unknown[] } }
   | { event: "task.updated"; payload: { task_id: number; status?: string; note?: string | null } }
   | { event: "usage.update"; payload: Record<string, unknown> }
+  /* plan-282-1441（#8）：调试命中事件——让用户看到"断点停在哪一行"。
+     由 services/debug_service 在 AI 调试命中断点时广播。 */
+  | { event: "debug.paused"; payload: {
+      session_id?: number;
+      target: "web" | "java" | string;
+      phase: "paused" | "resumed" | "stopped" | "timeout" | string;
+      file?: string | null;
+      line?: number | null;
+      function?: string | null;
+      breakpoints?: number;
+      hitCount?: number;
+      reason?: string | null;
+      stack?: Array<{ function?: string; url?: string; line?: number | null; index?: number | null }>;
+      variables?: Array<{ name?: string; value?: unknown; type?: string }>;
+    } }
+  /* plan-282-1441（Arthas 方案）：Java 现场诊断事件。
+     走 Attach API，与 IDEA 的 JDWP 调试并存；服务端 arthas_service 在
+     attach/提交观测/拉取到命中/断开时广播，右侧「调试」面板据此实时可视化。 */
+  | { event: "arthas.event"; payload: {
+      session_id?: number;
+      phase: "attached" | "detached" | "job_started" | "observed" | "error" | string;
+      pid?: number;
+      http_port?: number;
+      version?: string | null;
+      command?: string;
+      job_id?: string | number | null;
+      summary?: string;
+      entries?: Array<{
+        type?: string;
+        ts?: number;
+        cost?: number;
+        class?: string;
+        method?: string;
+        location?: string;
+        params?: unknown;
+        return_obj?: unknown;
+        throwable?: unknown;
+        children?: unknown[];
+      }>;
+      time_expired?: boolean;
+      reason?: string;
+      at?: number;
+    } }
   | { event: "compact.started"; payload: { agent_id?: number; turn_id?: number; used_tokens?: number; context_window?: number; ratio?: number } }
+  /* plan-282-1441：上下文回收提示——工具结果折叠/超长结果落盘后告知用户，
+     避免"占用突然降几十 k"被误认为丢历史（此前的隐藏压缩）。 */
+  | { event: "context.folded"; payload: {
+      agent_id?: number;
+      agent_name?: string;
+      turn_id?: number;
+      folded_results?: number;
+      est_tokens_saved?: number;
+      budget_tokens?: number | null;
+      context_window?: number;
+    } }
   | { event: "compact.summary"; payload: CompactSummaryPayload }
   | { event: "compact.completed"; payload: { agent_id?: number; turn_id?: number } & Partial<CompactSummaryPayload> }
   | { event: "approval.request"; payload: { approval_id: string; detail: Record<string, unknown> } }
@@ -117,7 +171,9 @@ export const ORDERED_EVENTS: ReadonlySet<string> = new Set([
   "agent.updated",
   "agent.completed",
   "usage.update",
+  "debug.paused",
   "compact.started",
+  "context.folded",
   "compact.summary",
   "compact.completed",
   "approval.request",

@@ -12,8 +12,11 @@ import { buildTimeline, msgText } from "./timeline";
 import { TurnGroup } from "./TurnGroup";
 import { JumpDots } from "./JumpDots";
 import { CompactingCard } from "./CompactCard";
+import { DebugCard } from "./DebugCard";
+import { ContextNoticeCard } from "./ContextNoticeCard";
 import { StreamingText } from "./StreamingText";
 import { IconSearch, IconChevronUp, IconChevronDown, IconX, IconArrowDown } from "../icons";
+import { useTextHighlight } from "../../hooks/useTextHighlight";
 import { MarkdownContent } from "../MarkdownContent";
 import { MsgType } from "@chatcoder/shared";
 import { useChatStore } from "../../store/chat";
@@ -105,6 +108,18 @@ interface MessageFlowCoreProps {
   emptyText?: string;
 }
 
+/** plan-282-1421（第11项）：单个虚拟项的高亮包装。
+ *  虚拟列表项随滚动挂载/卸载，用组件封装可让 hook 生命周期与项一致，
+ *  避免在父级维护"下标 → ref"映射带来的清理负担。 */
+const HighlightedItem = memo(function HighlightedItem({ keyword, active, children }: {
+  keyword: string;
+  active: boolean;
+  children: ReactNode;
+}) {
+  const ref = useTextHighlight<HTMLDivElement>(keyword, active);
+  return <div className="mf-list" ref={ref}>{children}</div>;
+});
+
 function MessageFlowCore({
   entries,
   running,
@@ -123,7 +138,10 @@ function MessageFlowCore({
 }: MessageFlowCoreProps) {
   const parentRef = useRef<HTMLDivElement>(null);
   /** plan-547: 虚拟内容容器（RO 监听测高变化保持贴底） */
-  const innerRef = useRef<HTMLDivElement>(null);
+  // plan-282-1444：显式含 null 联合类型，保证 ref 可变（需在回调里同时交给虚拟列表）
+  const innerRef = useRef<HTMLDivElement | null>(null);
+  /** plan-282-1492：悬浮胶囊的底部占位块（高度 0 ↔ 44px 由 CSS 过渡驱动）。 */
+  const capsuleSpaceRef = useRef<HTMLDivElement | null>(null);
   const scrollIdleTimerRef = useRef(0);
   const [autoScroll, setAutoScroll] = useState(true);
   /** autoScroll 的 ref 镜像：ResizeObserver 回调读取，避免每次回调 setState */
@@ -135,6 +153,15 @@ function MessageFlowCore({
   const userScrollOverrideRef = useRef(false);
   /** 程序补滚标记：补滚期间 onScroll 不翻转跟随状态 */
   const programmaticScrollRef = useRef(false);
+
+  /** plan-282-1441（#2）：宽度变化时的"视口锚点"。
+   *  拖拽面板分隔条会改变消息列宽度 → 文本重排 → 每条消息高度变化 → 虚拟列表重新测量
+   *  → 总高度变化 → 同一个 scrollTop 对应的内容整体位移（"拖宽时消息位置漂移"）。
+   *  这里在宽度变化时记录"首条可见项 + 其相对视口偏移"，待重测收敛后按锚点还原：
+   *   - 原本贴底 → 仍然贴底（保持"我在最底部"的语义）；
+   *   - 否则 → 让那条消息停在原来的视口位置（看哪条就停在哪条）。 */
+  const widthAnchorRef = useRef<{ index: number; offset: number; atBottom: boolean } | null>(null);
+  const lastWidthRef = useRef(0);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchKeyword, setSearchKeyword] = useState("");
@@ -148,12 +175,44 @@ function MessageFlowCore({
   const totalCount =
     entries.length + (hasStreaming ? 1 : 0) + (hasInjected ? 1 : 0) + (hasTrailing ? 1 : 0);
 
+  /** plan-282-1434（B6）+ plan-282-1444：首帧定位状态。
+   *  此前：虚拟列表初始 scrollOffset=0 → 先渲染顶部若干项，再由 useLayoutEffect 把
+   *  scrollTop 推到底，多帧叠加后表现为"点击会话后从上往下滚一遍"。
+   *  现在：① initialOffset 按末项估算位置给出初始偏移，首帧即落在底部区域；
+   *        ② 定位**收敛**（总高连续稳定）前用 .is-positioning 隐藏内容。 */
+  const [positioned, setPositioned] = useState(false);
+  const EST_ITEM_H = 140;
+
   const virtualizer = useVirtualizer({
     count: totalCount,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 140,
+    estimateSize: () => EST_ITEM_H,
+    // 仅在 scrollOffset 为 null（首帧）时消费：按"末项估算起点"初始化，避免从顶部渲染
+    initialOffset: () =>
+      totalCount > 0 ? Math.max(0, (totalCount - 1) * EST_ITEM_H) : 0,
     overscan: 6,
+    /* plan-282-1444：位置改由虚拟列表**直接写 DOM**。
+     *
+     *  根因：每一项都是 `position:absolute`，位置来自虚拟列表的尺寸缓存。新挂载
+     *  或长高的一项（典型：流式尾部下方新落库一条正文、工具行展开）要等
+     *  ResizeObserver 回调才把真实高度写回缓存；而回调里走的是普通 React 重渲染
+     *  （`resizeItem → notify(false) → rerender()`，进调度器 → **落在本次绘制之后**）。
+     *  于是这一帧里后续项仍按旧值/`estimateSize`(140) 排版 → 与被撑高的内容**重叠**，
+     *  下一帧测量回写才归位（"新行与原行短暂重叠后又正常"）。
+     *
+     *  开启后：位置在布局阶段（`applyDirectStyles`）同步写入 DOM，修正结果参与
+     *  同一帧绘制，不再有"旧位置帧"。要求项元素不得再在 style 里自带主轴向位置，
+     *  内层容器也不得再写 height（见下方渲染）。 */
+    directDomUpdates: true,
   });
+
+  /** 内层尺寸容器引用：既要给 RO 测高（innerRef），也要交给虚拟列表写高度。
+   *  必须用稳定回调——内联箭头函数每次渲染都会触发 ref 脱挂/重挂，导致
+   *  容器尺寸被反复重置。 */
+  const setInnerRef = useCallback((node: HTMLDivElement | null) => {
+    innerRef.current = node;
+    virtualizer.containerRef(node);
+  }, [virtualizer]);
 
   /** 贴底滚动。
    *  force=false（默认）：仅在"跟随态且用户未接管"时补滚，且不改变跟随状态——
@@ -302,25 +361,161 @@ function MessageFlowCore({
     return () => ro.disconnect();
   }, [hasContent]);
 
+  /** plan-282-1492：胶囊占位块 0 ↔ 44px 的**高度过渡期间逐帧贴底**。
+   *
+   *  胶囊是悬浮元素（absolute，不占布局），出现前不预留、出现时靠占位块的高度过渡
+   *  把消息流顶上去；高度过渡每帧都会触发 ResizeObserver 回调，正好用来逐帧把
+   *  scrollTop 拉到 scrollHeight —— 于是"顶上去"的全过程都停在最底部、保持自动滚动。
+   *  用户已上滑接管时一律不动（沿用全局接管协议）。 */
+  useEffect(() => {
+    const space = capsuleSpaceRef.current;
+    const el = parentRef.current;
+    if (!space || !el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => {
+      if (!autoScrollRef.current || userScrollOverrideRef.current) return;
+      el.scrollTop = el.scrollHeight;
+    });
+    ro.observe(space);
+    return () => ro.disconnect();
+  }, []);
+
+  /** plan-282-1441（#2）：宽度变化 → 锚点补偿。
+   *
+   *  与上面"高度 RO"分工明确：
+   *   - 高度 RO 负责"内容增长时贴底跟随"（跟随态语义）；
+   *   - 本 effect 负责"**容器宽度变化**时保持用户当前看到的位置"（拖拽分隔条语义）。
+   *
+   *  必须在宽度变化**当帧**记录锚点（此时还没重排），否则记录到的偏移已被污染。 */
+  useEffect(() => {
+    const el = parentRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+
+    const capture = () => {
+      const items = virtualizer.getVirtualItems();
+      const first = items[0];
+      if (!first) return;
+      widthAnchorRef.current = {
+        index: first.index,
+        // 首条可见项相对视口顶部的偏移：还原时用它把同一条放回原位
+        offset: first.start - el.scrollTop,
+        atBottom: el.scrollHeight - el.scrollTop - el.clientHeight < 60,
+      };
+    };
+
+    const restore = () => {
+      const anchor = widthAnchorRef.current;
+      const el2 = parentRef.current;
+      if (!anchor || !el2) return;
+      programmaticScrollRef.current = true;
+      if (anchor.atBottom) {
+        el2.scrollTop = el2.scrollHeight;
+      } else {
+        // 按虚拟列表当前尺寸缓存找回同一条消息的起点，还原其视口偏移
+        const offsetTop = virtualizer.getOffsetForIndex(anchor.index)?.[0];
+        if (typeof offsetTop === "number") {
+          el2.scrollTop = Math.max(0, offsetTop - anchor.offset);
+        }
+      }
+      // 下一帧解除"程序滚动"标记，避免吞掉用户真实滚动
+      requestAnimationFrame(() => {
+        programmaticScrollRef.current = false;
+      });
+    };
+
+    lastWidthRef.current = el.clientWidth;
+    const ro = new ResizeObserver(() => {
+      const el2 = parentRef.current;
+      if (!el2) return;
+      const w = el2.clientWidth;
+      if (Math.abs(w - lastWidthRef.current) < 1) return; // 高度抖动不参与
+      lastWidthRef.current = w;
+      capture();
+      // 重排/重新测量在渲染后完成：双帧后再还原（与 scrollToBottom 的补滚节奏一致）
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          restore();
+          widthAnchorRef.current = null;
+        });
+      });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [virtualizer]);
+
   /** 已做过"会话首次填充贴底"的会话标识（切换会话时重新进入首次填充分支） */
   const initSessionKeyRef = useRef<string | number | null>(null);
+  /** plan-282-1444：首次定位的收敛轮询句柄（切会话/卸载时取消） */
+  const settleRafRef = useRef(0);
   useLayoutEffect(() => {
     // v0.3.1: 长会话切换时优先将虚拟列表定位到最后一条（end），再执行贴底双帧补滚，
     // 彻底解决由于消息过多、初始估算高度误差导致切换会话后停在中间的 Bug。
     // 本轮修复: 原实现以 totalCount 为触发条件并无条件贴底 + 恢复跟随——任务执行期间
     // 条目持续增加（工具节点/注入/压缩卡）会把上滑中的用户反复拉回底部（"鬼畜"）。
     // 现在：仅"会话首次填充"强制贴底，后续条目增加只在跟随态（用户未接管）下补滚。
+    //
+    // plan-282-1434（B6）：首次填充是"点击会话"路径 —— 必须**直接呈现底部**，
+    // 不能出现"先顶部、再滚下去"的过程。因此：
+    //  - 定位使用非平滑滚动（scrollToIndex 默认 auto + scrollToBottom(smooth=false)）；
+    //  - 定位收敛前用 .is-positioning 隐藏（见下方揭示逻辑）。
     if (totalCount === 0) return;
     if (initSessionKeyRef.current !== sessionKey) {
       initSessionKeyRef.current = sessionKey;
+      setPositioned(false); // 进入新会话：先隐藏，待定位完成
       virtualizer.scrollToIndex(totalCount - 1, { align: "end" });
       scrollToBottom(false, true);
+
+      /** plan-282-1444：揭示时机由"固定两帧"改为"测量收敛"。
+       *  原来只等 2 帧就取消隐藏，但长会话里可见项的真实高度要经过多轮
+       *  ResizeObserver → resizeItem 才逐步收敛；在仍按 estimateSize(140) 排版的那一帧
+       *  揭示，就会看到"一部分消息重叠"，且随测量快慢时有时无（用户描述的"偶发、
+       *  重进又找不到"）。现在：每帧持续补滚贴底，且只有总高连续 2 帧不变（收敛）
+       *  才显示；10 帧 / 400ms 强制揭示兜底，不允许内容被永久隐藏。 */
+      cancelAnimationFrame(settleRafRef.current);
+      const startedAt = performance.now();
+      let lastTotal = -1;
+      let stableFrames = 0;
+      let frames = 0;
+      const settle = () => {
+        const el = parentRef.current;
+        const total = virtualizer.getTotalSize();
+        stableFrames = total === lastTotal ? stableFrames + 1 : 0;
+        lastTotal = total;
+        frames += 1;
+        // 用户在这段窗口内主动上滑（wheel 捕获即时置接管标记）：立即停止定位并揭示，
+        // 不与他抢滚动（沿用全局"用户接管"协议）。
+        if (userScrollOverrideRef.current) {
+          settleRafRef.current = 0;
+          setPositioned(true);
+          return;
+        }
+        // 收敛过程中持续贴底：测量把高度撑开时不能停在中间
+        if (el && autoScrollRef.current) el.scrollTop = el.scrollHeight;
+        virtualizer.scrollToIndex(totalCount - 1, { align: "end" });
+        const settled = stableFrames >= 2 && frames >= 2;
+        if (settled || frames >= 10 || performance.now() - startedAt > 400) {
+          settleRafRef.current = 0;
+          setPositioned(true);
+          return;
+        }
+        settleRafRef.current = requestAnimationFrame(settle);
+      };
+      settleRafRef.current = requestAnimationFrame(settle);
       return;
     }
     if (!autoScrollRef.current || userScrollOverrideRef.current) return;
     virtualizer.scrollToIndex(totalCount - 1, { align: "end" });
     scrollToBottom(false);
   }, [sessionKey, scrollToBottom, totalCount, virtualizer]);
+
+  // plan-282-1444：切会话/卸载时取消首次定位轮询，避免对已换掉的内容继续补滚
+  useEffect(() => () => { cancelAnimationFrame(settleRafRef.current); settleRafRef.current = 0; }, []);
+
+  // 兜底：极端情况下（如首次填充未触发）不允许内容永久隐藏
+  useEffect(() => {
+    if (positioned) return;
+    const t = window.setTimeout(() => setPositioned(true), 400);
+    return () => window.clearTimeout(t);
+  }, [positioned]);
 
   // v0.3.1: 对话启动（running 由 false -> true）时强制滚到底部并恢复跟随
   const prevRunningRef = useRef(running);
@@ -396,6 +591,9 @@ function MessageFlowCore({
     });
     return result;
   }, [entries, searchKeyword]);
+
+  /** 搜索面板开启且有关键字时才对渲染层做命中标记（否则零开销） */
+  const isSearching = searchOpen && searchKeyword.trim().length > 0;
 
   useEffect(() => {
     setActiveMatchIndex(0);
@@ -473,18 +671,21 @@ function MessageFlowCore({
 
       {jumpDots && <JumpDots entries={entries} activeIndex={activeEntryIndex} onJump={(entry) => virtualizer.scrollToIndex(entries.indexOf(entry), { align: "start", behavior: "smooth" })} />}
 
-      <div ref={parentRef} className="message-flow" onScroll={onScroll}>
+      {/* plan-282-1434（B6）：首次填充贴底完成前隐藏内容，避免看到"从顶部滚下来"的过程 */}
+      <div
+        ref={parentRef}
+        className={"message-flow" + (positioned || totalCount === 0 ? "" : " is-positioning")}
+        onScroll={onScroll}
+      >
         {totalCount === 0 ? (
           <div className="flow-empty">{emptyText}</div>
         ) : (
+          // plan-282-1444：高度改由 `virtualizer.containerRef` 直接写（directDomUpdates），
+          // 故 style 里**不得**再声明 height——否则两处写同一属性会互相抖动。
           <div
-            ref={innerRef}
+            ref={setInnerRef}
             className="message-flow-virtual-inner"
-            style={{
-              height: `${virtualizer.getTotalSize()}px`,
-              position: "relative",
-              width: "100%",
-            }}
+            style={{ position: "relative", width: "100%" }}
           >
             {virtualizer.getVirtualItems().map((item) => {
               // v41 槽位顺序：已落库 entries -> 流式段 -> 注入用户消息 -> 尾部卡片
@@ -511,20 +712,32 @@ function MessageFlowCore({
                   data-index={item.index}
                   ref={virtualizer.measureElement}
                   className="message-flow-virtual-item"
+                  // plan-282-1444：主轴向位置（transform/top）由虚拟列表直接写 DOM，
+                  // 此处只保留 top/left 锚点与宽度——若再声明 transform，
+                  // 会与虚拟列表写入的值打架，重叠回归。
                   style={{
                     position: "absolute",
                     top: 0,
                     left: 0,
                     width: "100%",
-                    transform: `translateY(${item.start}px)`,
                   }}
                 >
-                  <div className="mf-list">{node}</div>
+                  {/* plan-282-1421（第11项）：搜索命中高亮（包裹层做文本节点标记，
+                      不侵入 Markdown 结构；当前命中项用更强的 is-active 配色）。 */}
+                  <HighlightedItem
+                    keyword={searchKeyword}
+                    active={isSearching && item.index === matchedIndices[activeMatchIndex]}
+                  >
+                    {node}
+                  </HighlightedItem>
                 </div>
               );
             })}
           </div>
         )}
+        {/* plan-282-1492：悬浮胶囊的底部安全区（高度过渡见 .message-flow-capsule-space）。
+            未出现时高度 0（不预留空白），出现时过渡到 44px——胶囊"顶上去"消息流且不盖住末行。 */}
+        <div ref={capsuleSpaceRef} className="message-flow-capsule-space" aria-hidden="true" />
       </div>
 
       {showScrollBottom && (
@@ -568,6 +781,18 @@ function MainMessageFlow({
   // v30: 压缩中进度（compact.started 载荷）——消息流尾部渲染"压缩中"卡片
   const isCompacting = useChatStore((s) => s.isCompacting);
   const compactingInfo = useChatStore((s) => s.compactingInfo);
+  // plan-282-1441（#8）：调试现场——AI 调试试过程中在消息流尾部展示“停在哪一行”。
+  // 这是“用户能看到断点进行到哪一行代码”在消息流侧的落点（另一处在调试面板）。
+  const debugState = useChatStore((s) => s.debugState);
+  // plan-282-1441：上下文回收（工具结果折叠）提示——用户可见，避免"隐藏压缩"观感
+  const contextNotice = useChatStore((s) => s.contextNotice);
+  const activeDebug = useMemo(() => {
+    for (const t of ["web", "java"] as const) {
+      const st = debugState?.[t];
+      if (st?.connected) return st;
+    }
+    return null;
+  }, [debugState]);
 
   const subagentsByTurn = useMemo(() => {
     const map = new Map<number, Array<{ agentId: number; name: string; status: string }>>();
@@ -711,7 +936,12 @@ function MainMessageFlow({
           </div>
         ) : null
       }
-      trailingNode={isCompacting ? <CompactingCard info={compactingInfo} /> : null}
+      trailingNode={
+        isCompacting ? <CompactingCard info={compactingInfo} />
+          : activeDebug ? <DebugCard status={activeDebug} />
+          : contextNotice ? <ContextNoticeCard notice={contextNotice} />
+          : null
+      }
       sessionKey={currentSessionId ?? 0}
       streamSignal={streamSignal}
       jumpDots
@@ -748,7 +978,7 @@ function SubagentMessageFlow({
   const renderEntry = useCallback(
     (entry: TimelineEntry) => {
       if (entry.kind !== "turn") return <StandaloneEntry entry={entry} />;
-      return <TurnGroup entry={entry} isRunning={isRunning} actions={actions || "copy-only"} />;
+      return <TurnGroup entry={entry} isRunning={isRunning} actions={actions || "copy-only"} flow="subagent" />;
     },
     [isRunning, actions]
   );

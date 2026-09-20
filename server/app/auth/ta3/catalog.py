@@ -393,10 +393,10 @@ async def sync_ta3_models(db: AsyncSession, provider, api_base: str) -> list[dic
     logger.info("[ta3] provider=%s 组织 %s 解析出 %d 个模型", provider.id, org_name, len(entries))
 
     # upsert
-    existing = (await db.execute(
-        select(Model).where(Model.provider_id == provider.id)
-    )).scalars().all()
-    by_name = {m.name: m for m in existing}
+    # v0.5.13 修复（登录后 key 不保存）：模型必须在**写引擎的同步会话**内查询并按需
+    # 新建。此前先用异步会话查 existing、再把它的 ORM 对象塞进 _persist 赋属性后
+    # `s.commit()`——两个会话互不相识，属性变更不会落库，于是每次登录同步都只更新
+    # 了 auth 行缓存，模型的 api_key（目录下发的 llm- key）永远是 NULL。
     updated = 0
     created = 0
     # 缓存目录原文（脱敏：key 只留前 8 位）
@@ -416,7 +416,12 @@ async def sync_ta3_models(db: AsyncSession, provider, api_base: str) -> list[dic
     from app.persistence.database import run_write_locked
 
     def _persist(s):
-        by_name_local = dict(by_name)
+        # 在同步会话内重新查询（跨会话复用 async ORM 对象不会落库，见上）
+        by_name_local = {
+            m.name: m for m in s.execute(
+                select(Model).where(Model.provider_id == provider.id)
+            ).scalars().all()
+        }
         created_local = 0
         updated_local = 0
         for name, entry in entries.items():
@@ -448,7 +453,11 @@ async def sync_ta3_models(db: AsyncSession, provider, api_base: str) -> list[dic
             })
             m.ta3_meta = meta
             updated_local += 1
-        auth_row = s.get(Ta3Auth, provider.id)
+        # v0.5.13 修复：Ta3Auth 主键是自增 id，不是 provider_id——此前 s.get(Ta3Auth,
+        # provider.id) 永远取不到行，目录缓存从未落库（对齐 workbuddy 的同类修复）。
+        auth_row = s.execute(
+            select(Ta3Auth).where(Ta3Auth.provider_id == provider.id)
+        ).scalars().first()
         if auth_row is not None:
             auth_row.catalog = sanitized
         s.commit()

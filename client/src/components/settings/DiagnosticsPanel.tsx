@@ -17,7 +17,20 @@ export function DiagnosticsPanel() {
     setRunning(true); setResult(null);
     try {
       const d = await api.runDiagnostics();
-      setResult(d.checks);
+      /* plan-282-1434（B5）：后端 `checks` 返回的是**对象**（`{"git": {ok, detail}, ...}`，
+         见 server/app/gateway/routers/diagnostics.py:20/27/35/40-50），
+         此前前端直接按数组 `.map(...)` 渲染 → 运行时 `e.map is not a function`，
+         整页被 ErrorBoundary 接住。这里做归一化：数组直接使用，对象则按 name 转成列表。 */
+      const raw: unknown = d.checks;
+      const list = Array.isArray(raw)
+        ? (raw as Array<{ name: string; ok: boolean; detail?: string }>)
+        : Object.entries((raw ?? {}) as Record<string, { ok?: boolean; detail?: string } | undefined>)
+            .map(([name, v]) => ({
+              name,
+              ok: Boolean(v?.ok),
+              detail: typeof v?.detail === "string" ? v.detail : undefined,
+            }));
+      setResult(list);
       setCheckpoints(Array.isArray(d.checkpoints) ? d.checkpoints : null);
     } catch (e) { useChatStore.setState({ error: String(e) }); }
     finally { setRunning(false); }

@@ -27,7 +27,7 @@ import {
   IconFileRead, IconFileWrite, IconFolder, IconGlobe, IconTerminal,
   IconUsers, IconBox, IconZap, IconFlask, IconGitBranch, IconBrain,
   IconSpinner, IconX, IconImage, IconChevronRight,
-  IconFilePatch, IconFileSearch, IconOperationCluster, IconChecklist,
+  IconFilePatch, IconFileSearch, IconOperationCluster, IconChecklist, IconCopy,
 } from "../icons";
 
 /** 工具 → 中文动作动词（对齐 zcode 行首文案） */
@@ -199,9 +199,95 @@ function InlineDiff({ turnId, path, liveArgContent }: { turnId: number | null; p
   );
 }
 
+/** plan-282-1441（#7）：数据库工具结果的结构化呈现。
+ *
+ * 为什么单独做：MCP 工具输出是纯文本，用户难以从中核对"到底执行了什么"。
+ * 这里把三样东西清楚分开：
+ *   ① 语句（语法高亮的等宽块，可直接复制）
+ *   ② 执行摘要（连接、耗时、影响行数 / 返回行数）
+ *   ③ 结果表格（前 N 行，超出提示）
+ * 语句从调用参数 `args.sql` 取（比从文本里正则抠更可靠）。
+ */
+function SqlResultView({ tool, args, output }: {
+  tool: string;
+  args: Record<string, unknown>;
+  output: string | null | undefined;
+}) {
+  const sql = typeof args.sql === "string" ? args.sql : "";
+  /** 从工具文本输出里解析摘要行与 markdown 结果表（内置 MCP 的输出格式是稳定的） */
+  const parsed = useMemo(() => {
+    const text = output ?? "";
+    const elapsed = /耗时\s*(\d+)\s*ms/.exec(text)?.[1] ?? null;
+    const affected = /影响\s*([\d?]+)\s*行/.exec(text)?.[1] ?? null;
+    const conn = /连接\s+([^（(]+)[（(]([\w]+)[）)]/.exec(text);
+    // markdown 表格 → 行列
+    const lines = text.split("\n");
+    const tableStart = lines.findIndex((l) => l.trim().startsWith("|"));
+    let columns: string[] = [];
+    const rows: string[][] = [];
+    if (tableStart >= 0 && lines[tableStart + 1]?.includes("---")) {
+      columns = lines[tableStart].split("|").slice(1, -1).map((s) => s.trim());
+      for (let i = tableStart + 2; i < lines.length; i++) {
+        const l = lines[i].trim();
+        if (!l.startsWith("|")) break;
+        rows.push(l.split("|").slice(1, -1).map((s) => s.trim()));
+      }
+    }
+    return { elapsed, affected, conn: conn ? { name: conn[1].trim(), kind: conn[2] } : null, columns, rows };
+  }, [output]);
+
+  const denied = /⛔|被拒绝/.test(output ?? "");
+  const opLabel = tool === "db_query" ? "查询"
+    : tool === "db_execute" ? "数据变更"
+    : tool === "db_ddl" ? "结构变更"
+    : tool === "db_schema" ? "读取表结构"
+    : "数据库操作";
+
+  return (
+    <div className={`tc-sql${denied ? " denied" : ""}`}>
+      <div className="tc-sql-head">
+        <span className={`tc-sql-op${tool === "db_ddl" ? " danger" : ""}`}>{opLabel}</span>
+        {parsed.conn && <span className="tc-sql-conn">{parsed.conn.name}（{parsed.conn.kind}）</span>}
+        {parsed.elapsed && <span className="tc-sql-meta">{parsed.elapsed}ms</span>}
+        {parsed.affected != null && <span className="tc-sql-meta">影响 {parsed.affected} 行</span>}
+        {parsed.rows.length > 0 && <span className="tc-sql-meta">{parsed.rows.length} 行结果</span>}
+      </div>
+      {sql && (
+        <pre className="tc-sql-code">
+          <code>{sql}</code>
+          <button
+            className="tc-sql-copy"
+            type="button"
+            title="复制语句"
+            onClick={() => { void navigator.clipboard?.writeText(sql); }}
+          >
+            <IconCopy size={11} />
+          </button>
+        </pre>
+      )}
+      {parsed.columns.length > 0 && (
+        <div className="tc-sql-table-wrap">
+          <table className="tc-sql-table">
+            <thead>
+              <tr>{parsed.columns.map((c, i) => <th key={i}>{c}</th>)}</tr>
+            </thead>
+            <tbody>
+              {parsed.rows.slice(0, 30).map((r, ri) => (
+                <tr key={ri}>{r.map((c, ci) => <td key={ci}>{c}</td>)}</tr>
+              ))}
+            </tbody>
+          </table>
+          {parsed.rows.length === 0 && <div className="tc-sql-empty">（无数据）</div>}
+        </div>
+      )}
+      {/* 被权限拒绝 / 出错时，把原因原样展示（不吞掉） */}
+      {denied && <div className="tc-sql-denied">{output}</div>}
+    </div>
+  );
+}
+
 /** v7(H): 从工具 args 提取写入的新内容（临时 diff 兜底数据源） */
-function leafArgsContent(leaf: ToolLeaf): string | null {
-  const a = (leaf.args ?? {}) as Record<string, unknown>;
+function leafArgsContent(leaf: ToolLeaf): string | null {  const a = (leaf.args ?? {}) as Record<string, unknown>;
   if (leaf.tool === "fs_write") {
     const c = a.content;
     return typeof c === "string" && c ? c : null;
@@ -314,6 +400,12 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
                     </button>
                   ))}
                 </div>
+              )}
+              {/* plan-282-1441（#7）：数据库工具（db_*）的结构化呈现——
+                  用户必须能看清"AI 执行了什么语句、影响了什么、返回了什么"。
+                  语句从 args.sql 取（调用参数），结果从工具结果的结构化数据取。 */}
+              {leaf.tool.startsWith("db_") && (
+                <SqlResultView tool={leaf.tool} args={leaf.args ?? {}} output={leaf.output} />
               )}
               {/* 对齐图四、图五：ask_user_question 展开为结构化问答详情。
                   plan-278-1391: 改为扁平文本（不再套独立卡片），与 fs_read/文件编辑展开同构；

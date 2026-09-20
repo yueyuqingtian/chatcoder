@@ -1,11 +1,12 @@
-"""项目（工作目录）路由。"""
+"""项目（工作目录）路由；plan-282-1441（#5）追加工作树管理端点。"""
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.gateway.schemas import ProjectCreate, ProjectOut, ProjectUpdate
 from app.orchestration.rules_loader import scan_rules_docs
 from app.persistence.database import get_db
-from app.services import project_service
+from app.services import project_service, worktree_service
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -194,3 +195,108 @@ def _build_tree(root: str, max_depth: int) -> dict:
         return out
 
     return {"path": root.replace("\\", "/"), "children": walk(root, 0)}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# plan-282-1441（#5）：工作树（worktree）——按项目管理，合并走三栏冲突解决
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class WorktreeCreateBody(BaseModel):
+    name: str | None = None
+    branch: str | None = None
+    # plan-282-1441：要建工作树的仓库（项目根或子仓库的绝对路径，可多选）；
+    # 为空时后端自动探测（优先有提交的子仓库）
+    repos: list[str] | None = None
+
+
+class MergeFileBody(BaseModel):
+    path: str
+
+
+class MergeApplyBody(BaseModel):
+    # [{path, content, deleted?}]：content 为最终文本；deleted=True 表示删除该文件
+    files: list[dict]
+
+
+class MergeAiBody(BaseModel):
+    path: str
+    # 可选：仅针对某个冲突块（未传则对整文件给建议）
+    hunk: dict | None = None
+
+
+@router.get("/{project_id}/repo-candidates", response_model=list[dict])
+async def project_repo_candidates(project_id: int, db: AsyncSession = Depends(get_db)):
+    """列出该项目可用于创建工作树的仓库（项目根 + 直接的子仓库）。
+
+    plan-282-1441：#5 修复——支持"根目录是空仓库、真实代码在子仓库"的布局，
+    前端据此弹出勾选（如 clinic 后端 + clinicFrontEnd 前端）。
+    """
+    try:
+        return await worktree_service.list_repo_candidates(db, project_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/{project_id}/worktrees", response_model=dict)
+async def create_project_worktree(project_id: int, body: WorktreeCreateBody,
+                                  db: AsyncSession = Depends(get_db)):
+    """为项目（或其选中的子仓库）创建工作树并登记为独立工作区。"""
+    try:
+        return await worktree_service.create_worktree_for_project(
+            db, project_id, name=body.name, branch=body.branch, repos=body.repos)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.get("/{project_id}/worktrees", response_model=list[dict])
+async def list_project_worktrees(project_id: int, db: AsyncSession = Depends(get_db)):
+    """列出该项目下的工作树（含 git 状态摘要）。"""
+    return await worktree_service.list_worktrees(db, project_id=project_id)
+
+
+@router.delete("/worktrees/{worktree_project_id}", response_model=dict)
+async def delete_project_worktree(worktree_project_id: int, force: bool = False,
+                                  db: AsyncSession = Depends(get_db)):
+    """删除工作树（force=true 时忽略未提交变更）。"""
+    try:
+        return await worktree_service.remove_worktree_project(
+            db, worktree_project_id, force=force)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/worktrees/{worktree_project_id}/merge/preview", response_model=dict)
+async def worktree_merge_preview(worktree_project_id: int, db: AsyncSession = Depends(get_db)):
+    """合并预览：差异文件列表（含冲突标记）。不改动任何工作区。"""
+    try:
+        return await worktree_service.merge_preview(db, worktree_project_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/worktrees/{worktree_project_id}/merge/file", response_model=dict)
+async def worktree_merge_file(worktree_project_id: int, body: MergeFileBody,
+                              db: AsyncSession = Depends(get_db)):
+    """三路内容：base（共同祖先）/ ours（主工作区）/ theirs（工作树）。"""
+    try:
+        return await worktree_service.merge_file_blobs(db, worktree_project_id, body.path)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/worktrees/{worktree_project_id}/merge/apply", response_model=dict)
+async def worktree_merge_apply(worktree_project_id: int, body: MergeApplyBody,
+                               db: AsyncSession = Depends(get_db)):
+    """应用合并结果并提交到主工作区。"""
+    try:
+        return await worktree_service.merge_apply(db, worktree_project_id, body.files)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/worktrees/{worktree_project_id}/merge/ai", response_model=dict)
+async def worktree_merge_ai(worktree_project_id: int, body: MergeAiBody,
+                            db: AsyncSession = Depends(get_db)):
+    """某文件 / 某冲突块的 AI 合并建议（失败不阻塞，返回 ok=false + 原因）。"""
+    return await worktree_service.ai_merge_suggest(db, worktree_project_id, body.path, body.hunk)

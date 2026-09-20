@@ -18,6 +18,7 @@ import { useChatStore } from "../../store/chat";
 import { IconRefresh, IconPlus, IconX, IconCpu } from "../icons";
 import { Modal } from "../Modal";
 import { ConfirmDialog } from "../ConfirmDialog";
+import { Checkbox, Input, Select } from "../ui";
 import { Sw } from "./shared";
 import { Ta3QuotaSection } from "./Ta3QuotaSection";
 
@@ -110,10 +111,10 @@ function ProviderFormModal({ open, editing, onClose, onSaved }: { open: boolean;
   return (
     <Modal open={open} onClose={onClose} title={editing ? "编辑供应商" : "添加供应商"} width={520} height="auto">
       <div className="settings-modal-form" style={{ padding: 18 }}>
-        <div className="settings-modal-form-row"><label>供应商名称</label><input className="ui-input" placeholder="如 Ta+3 牛码" value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} /></div>
-        <div className="settings-modal-form-row"><label>API 格式</label><select className="ui-select" value={form.api_format} onChange={(e) => setForm((p) => ({ ...p, api_format: e.target.value, base_url: e.target.value === "commandcode" && !p.base_url ? OAUTH_DEFAULT_BASE.commandcode : p.base_url }))}>{Object.entries(API_FORMAT_LABEL).map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></div>
-        {!isOAuthFormat && <div className="settings-modal-form-row"><label>Base URL</label><input className="ui-input" placeholder={form.api_format === "commandcode" ? "https://api.commandcode.ai" : "https://.../v1"} value={form.base_url} onChange={(e) => setForm((p) => ({ ...p, base_url: e.target.value }))} /></div>}
-        {!isOAuthFormat && <div className="settings-modal-form-row"><label>API Key {editing && "(留空不修改)"}</label><input className="ui-input" placeholder={form.api_format === "commandcode" ? "user_..." : "sk-..."} type="password" value={form.api_key} onChange={(e) => setForm((p) => ({ ...p, api_key: e.target.value }))} /></div>}
+        <div className="settings-modal-form-row"><label>供应商名称</label><Input placeholder="如 Ta+3 牛码" value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} /></div>
+        <div className="settings-modal-form-row"><label>API 格式</label><Select value={form.api_format} onChange={(v) => setForm((p) => ({ ...p, api_format: v, base_url: v === "commandcode" && !p.base_url ? OAUTH_DEFAULT_BASE.commandcode : p.base_url }))} options={Object.entries(API_FORMAT_LABEL).map(([v, l]) => ({ value: v, label: l }))} aria-label="API 格式" /></div>
+        {!isOAuthFormat && <div className="settings-modal-form-row"><label>Base URL</label><Input placeholder={form.api_format === "commandcode" ? "https://api.commandcode.ai" : "https://.../v1"} value={form.base_url} onChange={(e) => setForm((p) => ({ ...p, base_url: e.target.value }))} /></div>}
+        {!isOAuthFormat && <div className="settings-modal-form-row"><label>API Key {editing && "(留空不修改)"}</label><Input placeholder={form.api_format === "commandcode" ? "user_..." : "sk-..."} type="password" value={form.api_key} onChange={(e) => setForm((p) => ({ ...p, api_key: e.target.value }))} /></div>}
         {form.api_format === "commandcode" && <div className="models-hint">CommandCode 直连模式，API Key 为以 user_ 开头的密钥（可从 ~/.commandcode/auth.json 或 commandcode.ai/studio 获取）。</div>}
         {isOAuthFormat && <div className="models-hint">{form.api_format === "ta3"
           ? "ta3 类型使用账号登录获取模型，服务端地址已内置（lc.yinhaiyun.com/newcoder）；保存后在详情面板点击「登录账号」。"
@@ -194,10 +195,10 @@ function ScanModelsModal({ open, provider, onClose, onSaved }: { open: boolean; 
             <div className="scan-list">
               {items.map((it) => (
                 <div key={it.name} className={"scan-item" + (it.enabled ? "" : " off")}>
-                  <input type="checkbox" checked={it.enabled} onChange={(e) => patch(it.name, { enabled: e.target.checked })} />
+                  <Checkbox checked={it.enabled} onChange={(v) => patch(it.name, { enabled: v })} aria-label={`启用 ${it.name}`} />
                   <span className="scan-name" title={it.name}>{it.name}</span>
-                  <label>上下文 <input className="ui-input scan-ctx" value={it.context_window} onChange={(e) => patch(it.name, { context_window: e.target.value })} /></label>
-                  <label><input type="checkbox" checked={it.is_multimodal} onChange={(e) => patch(it.name, { is_multimodal: e.target.checked })} /> 多模态</label>
+                  <label>上下文 <Input className="scan-ctx" value={it.context_window} onChange={(e) => patch(it.name, { context_window: e.target.value })} /></label>
+                  <label><Checkbox checked={it.is_multimodal} onChange={(v) => patch(it.name, { is_multimodal: v })} /> 多模态</label>
                 </div>
               ))}
               {items.length === 0 && <div className="navpage-empty">供应商未返回任何模型</div>}
@@ -256,11 +257,11 @@ function ModelFormModal({ open, editing, targetProvider, onClose, onSaved }: { o
     <Modal open={open} onClose={onClose} title={editing ? "编辑模型" : (targetProvider ? `添加模型（${targetProvider.name}）` : "新建模型")} width={520} height="auto">
       <div className="settings-modal-form" style={{ padding: 18 }}>
         {underProvider && <div className="settings-modal-form-row"><label>所属供应商</label><span style={{ fontSize: 12, color: "var(--text-2)" }}>{currentProviderName}（继承供应商连接与认证）</span></div>}
-        <div className="settings-modal-form-row"><label>模型名称 / ID</label><input className="ui-input" placeholder={targetProvider?.api_format === "commandcode" ? "如 zai-org/GLM-5.1 或 deepseek/deepseek-v4-pro" : "如 glm-5.2"} value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} /></div>
-        {!underProvider && <div className="settings-modal-form-row"><label>协议 / Provider</label><select className="ui-select" value={form.provider} onChange={(e) => setForm((p) => ({ ...p, provider: e.target.value }))}>{PROVIDER_OPTS.map((p) => <option key={p} value={p}>{p}</option>)}</select></div>}
-        {!underProvider && <div className="settings-modal-form-row"><label>Base URL</label><input className="ui-input" placeholder="https://..." value={form.base_url} onChange={(e) => setForm((p) => ({ ...p, base_url: e.target.value }))} /></div>}
-        {!underProvider && <div className="settings-modal-form-row"><label>API Key {editing && "(留空不修改)"}</label><input className="ui-input" placeholder="sk-..." type="password" value={form.api_key} onChange={(e) => setForm((p) => ({ ...p, api_key: e.target.value }))} /></div>}
-        <div className="settings-modal-form-row"><label>上下文窗口 (tokens)</label><input className="ui-input" value={form.context_window} onChange={(e) => setForm((p) => ({ ...p, context_window: e.target.value }))} /></div>
+        <div className="settings-modal-form-row"><label>模型名称 / ID</label><Input placeholder={targetProvider?.api_format === "commandcode" ? "如 zai-org/GLM-5.1 或 deepseek/deepseek-v4-pro" : "如 glm-5.2"} value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} /></div>
+        {!underProvider && <div className="settings-modal-form-row"><label>协议 / Provider</label><Select value={form.provider} onChange={(v) => setForm((p) => ({ ...p, provider: v }))} options={PROVIDER_OPTS.map((p) => ({ value: p, label: p }))} aria-label="协议" /></div>}
+        {!underProvider && <div className="settings-modal-form-row"><label>Base URL</label><Input placeholder="https://..." value={form.base_url} onChange={(e) => setForm((p) => ({ ...p, base_url: e.target.value }))} /></div>}
+        {!underProvider && <div className="settings-modal-form-row"><label>API Key {editing && "(留空不修改)"}</label><Input placeholder="sk-..." type="password" value={form.api_key} onChange={(e) => setForm((p) => ({ ...p, api_key: e.target.value }))} /></div>}
+        <div className="settings-modal-form-row"><label>上下文窗口 (tokens)</label><Input value={form.context_window} onChange={(e) => setForm((p) => ({ ...p, context_window: e.target.value }))} /></div>
         <div className="settings-modal-form-row"><label>多模态（支持图片输入）</label><Sw checked={form.is_multimodal} onChange={(v) => setForm((p) => ({ ...p, is_multimodal: v }))} /></div>
         <div className="settings-modal-form-row"><label>思考深度档位</label><div className="settings-chips">{REASONING_OPTS.map((eff) => { const on = form.reasoning_efforts.includes(eff); return <button key={eff} type="button" className={"settings-chip" + (on ? " on" : "")} onClick={() => setForm((p) => ({ ...p, reasoning_efforts: on ? p.reasoning_efforts.filter((x) => x !== eff) : [...p.reasoning_efforts, eff] }))}>{eff}</button>; })}</div></div>
         <div className="settings-modal-form-row"><label>启用状态</label><Sw checked={form.is_active} onChange={(v) => setForm((p) => ({ ...p, is_active: v }))} /></div>
@@ -309,9 +310,9 @@ function CredentialFormModal({ open, providerId, editing, onClose, onSaved }: {
   return (
     <Modal open={open} onClose={onClose} title={editing ? "编辑凭据" : "添加 API Key"} width={460} height="auto">
       <div className="settings-modal-form" style={{ padding: 18 }}>
-        <div className="settings-modal-form-row"><label>备注名</label><input className="ui-input" placeholder="如 主 Key / 备用 Key" value={label} onChange={(e) => setLabel(e.target.value)} /></div>
-        <div className="settings-modal-form-row"><label>API Key {editing && "(留空不修改)"}</label><input className="ui-input" type="password" placeholder="sk-..." value={apiKey} onChange={(e) => setApiKey(e.target.value)} /></div>
-        <div className="settings-modal-form-row"><label>优先级（小的先用）</label><input className="ui-input" value={priority} onChange={(e) => setPriority(e.target.value)} /></div>
+        <div className="settings-modal-form-row"><label>备注名</label><Input placeholder="如 主 Key / 备用 Key" value={label} onChange={(e) => setLabel(e.target.value)} /></div>
+        <div className="settings-modal-form-row"><label>API Key {editing && "(留空不修改)"}</label><Input type="password" placeholder="sk-..." value={apiKey} onChange={(e) => setApiKey(e.target.value)} /></div>
+        <div className="settings-modal-form-row"><label>优先级（小的先用）</label><Input value={priority} onChange={(e) => setPriority(e.target.value)} /></div>
         <div className="settings-modal-form-row"><label>启用</label><Sw checked={isActive} onChange={setIsActive} /></div>
         <div className="models-hint">同一供应商可配置多个 Key：某个 Key 报错（401/429/5xx）时会自动切换到下一个可用 Key，失败的 Key 进入冷却后自动恢复。</div>
         <div className="settings-create-actions"><button className="btn btn-ghost btn-sm" onClick={onClose}>取消</button><button className="btn btn-primary btn-sm" onClick={handleSave}>{editing ? "保存" : "添加"}</button></div>
@@ -665,23 +666,22 @@ export function ModelsPanel() {
                 <label>Base URL</label>
                 {/* key=provider.id：defaultValue 不随 props 更新，切换供应商时必须重挂载，
                     否则残留上一个供应商的 URL（OAuth 类禁用态下尤其误导） */}
-                <input
+                <Input
                   key={`base-${selected.id}`}
-                  className="ui-input"
                   defaultValue={selected.base_url || ""}
                   disabled={OAUTH_FORMATS.has(selected.api_format)}
                   onBlur={(e) => { if (e.target.value.trim() !== (selected.base_url || "")) patchProvider(selected.id, { base_url: e.target.value.trim() }); }}
+                  aria-label="Base URL"
                 />
               </div>
               <div className="models-field">
                 <label>API 格式</label>
-                <select
-                  className="ui-select"
+                <Select
                   value={selected.api_format}
-                  onChange={(e) => patchProvider(selected.id, { api_format: e.target.value })}
-                >
-                  {Object.entries(API_FORMAT_LABEL).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-                </select>
+                  onChange={(v) => patchProvider(selected.id, { api_format: v })}
+                  options={Object.entries(API_FORMAT_LABEL).map(([v, l]) => ({ value: v, label: l }))}
+                  aria-label="API 格式"
+                />
               </div>
 
               {/* 账号登录型供应商：登录 / 同步 / 退出 */}
@@ -829,12 +829,12 @@ export function ModelsPanel() {
                 {selected.proxy_mode === "custom" && (
                   <div className="models-field" style={{ marginTop: 8 }}>
                     <label>代理地址</label>
-                    <input
+                    <Input
                       key={`proxy-${selected.id}`}
-                      className="ui-input"
                       placeholder="http://127.0.0.1:7897"
                       defaultValue={selected.proxy_url || ""}
                       onBlur={(e) => patchProvider(selected.id, { proxy_url: e.target.value.trim() || null })}
+                      aria-label="代理地址"
                     />
                   </div>
                 )}

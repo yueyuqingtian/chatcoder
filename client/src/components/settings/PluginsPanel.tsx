@@ -7,6 +7,7 @@ import {
   listPlugins, listSlotPlugins, getActivePlugin, replaceSlot, resetSlot,
   unregisterExternal, subscribeRegistry, registryVersion, type SlotId,
 } from "../../plugins/registry";
+import { Select } from "../ui";
 
 const SLOT_LABELS: Record<SlotId, string> = {
   sidebar: "左侧会话栏",
@@ -19,6 +20,8 @@ const SLOT_LABELS: Record<SlotId, string> = {
   "thinking-block": "思考块",
   "tool-tree": "工具调用树",
   "subagent-card": "子代理卡片",
+  "plan-card": "计划卡",
+  "compact-card": "压缩卡",
 };
 
 export function PluginsPanel() {
@@ -40,17 +43,16 @@ export function PluginsPanel() {
             <div className="plugin-slot-row" key={slot}>
               <span className="plugin-slot-name">{SLOT_LABELS[slot]}</span>
               <span className="plugin-slot-desc" title={active?.description}>{active?.description || "—"}</span>
-              <select
-                className="ui-input plugin-slot-select"
+              <Select
                 value={active?.id ?? ""}
-                onChange={(e) => replaceSlot(slot, e.target.value)}
-              >
-                {plugins.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}{p.builtin ? "（内置）" : "（外挂）"}
-                  </option>
-                ))}
-              </select>
+                onChange={(id) => replaceSlot(slot, id)}
+                options={plugins.map((p) => ({
+                  value: p.id,
+                  label: `${p.name}${p.builtin ? "（内置）" : "（外挂）"}`,
+                }))}
+                className="plugin-slot-select"
+                aria-label={`${SLOT_LABELS[slot]} 生效组件`}
+              />
               {active && !active.builtin && (
                 <button className="btn btn-ghost btn-xs" title="禁用外挂插件并恢复内置" onClick={() => unregisterExternal(active.id)}>禁用</button>
               )}

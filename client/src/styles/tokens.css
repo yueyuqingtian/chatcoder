@@ -92,6 +92,10 @@
 
   --color-border: color-mix(in oklab, var(--color-neutral-950) 10%, transparent);
   --color-border-hover: color-mix(in oklab, var(--color-neutral-950) 20%, transparent);
+  /* plan-282-1441（#1）：面板分隔线专用色。
+     --border 仅 10% 透明度，而左右面板背景同为 --bg-panel，1px 细线在非整数像素处
+     会被抗锯齿吃掉 → "有时看不到分界线"。这里给分隔线一档更实的色，仍是中性色不抢视觉。 */
+  --color-divider: color-mix(in oklab, var(--color-neutral-950) 16%, transparent);
   --color-input-border: var(--color-border);
   --color-input-border-hover: var(--color-border-hover);
   /* plan-238-1210: 已删除 --color-input-border-focused（品牌色聚焦边框）——
@@ -181,6 +185,8 @@
 
   --color-border: color-mix(in oklab, var(--color-neutral-50) 10%, transparent);
   --color-border-hover: color-mix(in oklab, var(--color-neutral-50) 30%, transparent);
+  /* plan-282-1441（#1）：深色档分隔线（中性偏亮，保证与 --bg-panel 有稳定对比） */
+  --color-divider: color-mix(in oklab, var(--color-neutral-50) 20%, transparent);
   --color-hover: var(--color-surface-hover);
   --color-selected: color-mix(in oklab, var(--color-white) 10%, transparent);
   --color-surface: color-mix(in oklab, var(--color-white) 5%, transparent);
@@ -286,6 +292,13 @@
   --border: var(--color-border);
   --border-light: color-mix(in oklab, var(--color-neutral-950) 5%, transparent);
   --border-strong: var(--color-border-hover);
+  /* plan-282-1441（#1）：面板分隔线专用（比 --border 更实，稳定可见） */
+  --divider: var(--color-divider);
+  /* plan-282-1434：补齐三处"被引用但从未定义"的别名（全仓扫描发现）。
+     它们此前无 fallback，hover 边框/浅底/错误文字色会整条声明失效。 */
+  --border-hover: var(--color-border-hover);
+  --surface: var(--color-surface);
+  --text-primary: var(--color-foreground);
 
   --success: var(--color-success);
   --success-soft: color-mix(in oklab, var(--color-green-600) 10%, transparent);
@@ -341,13 +354,38 @@
   --rightpanel-max: 1600px;
   /* v1.1: 滚动条 gutter 预留宽度（输入框对齐消息流用） */
   --scrollbar-gutter-w: 12px;
-  /* zcode radius: xs2 sm4 md6 lg8 xl12 2xl16（修复原 --r-md:20px 异常值） */
+  /* plan-282-1416 设计语言 v7：圆角收敛为 4 档 + 胶囊。
+     xs2=微 / sm4=控件 / md8=字段(输入/按钮) / lg12=卡片(含用户气泡) / xl14=弹窗。
+     规则：同层级必须同值——输入 8 == 按钮 8，气泡 12 == 卡片 12。 */
   --r-xs: 2px;
   --r-sm: 4px;
-  --r-md: 6px;
-  --r-lg: 8px;
-  --r-xl: 12px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --r-xl: 14px;
   --r-2xl: 16px;
+
+  /* plan-282-1416 尺寸与间距节奏：控件高度三档 + 7 档间距阶（全站只用这 7 档） */
+  --ctl-h-sm: 28px;
+  --ctl-h-md: 32px;
+  --ctl-h-lg: 36px;
+  --ctl-px: 10px;
+  /* plan-282-1434：滑块轨道宽度。
+     此前 components.css 引用了 --slider-track-w 但**从未定义** → width 声明失效为 auto
+     → 轨道在 flex-shrink:0 的控件槽里塌陷到 0 宽（只剩圆点），且 Radix 按 Root 实测宽度
+     换算指针百分比，宽度为 0 时无法拖动。 */
+  --slider-track-w: 180px;
+  --field-gap-y: 6px;
+  --row-pad-y: 12px;
+  --sp-1: 4px;
+  --sp-2: 6px;
+  --sp-3: 8px;
+  --sp-4: 12px;
+  --sp-5: 16px;
+  --sp-6: 20px;
+  --sp-7: 24px;
+  /* plan-282-1416 页面骨架宽度：单一档位取代旧 680/960 双宽（图表页走 wide） */
+  --page-max-w: 720px;
+  --page-max-w-wide: 880px;
   /* plan-230-1144 M5.1: 时长阶梯重建（此前的 --dur-med/--dur-normal 同值 0.15s
      语义重复、--dur-slow 0.2s 与 --dur-view 0.16s 差距过小，"慢"动画实际不快）。
      新阶梯：1=微反馈 2=hover/色彩 3=展开/折叠 4=页面/模态 5=入场。 */

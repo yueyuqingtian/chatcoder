@@ -116,8 +116,10 @@ class ConnectionManager:
         else:
             try:
                 _model.model_validate(event.get("payload") or {})
-            except Exception:
-                logger.warning("[ws] 事件 %s payload 校验失败: %s", _name, exc_info=True)
+            except Exception as e:
+                # 注意：这里必须把异常本身传给 %s——此前只传了 _name，
+                # 格式化失败会再抛 TypeError（掩盖真正的校验错误）。
+                logger.warning("[ws] 事件 %s payload 校验失败: %s", _name, e, exc_info=True)
         # v2.1: 注入会话级单调 seq 并写入补偿缓冲区（仅对可重放事件计数）
         # v967: 高频流式增量事件（token/thinking delta）不入缓冲、不占 seq——
         #       防止 500 条环形缓冲被增量挤占，保证关键事件可被 sync.request 补发。

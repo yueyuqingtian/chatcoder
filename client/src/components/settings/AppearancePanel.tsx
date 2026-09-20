@@ -2,6 +2,7 @@
  * 主题模式、毛玻璃效果、布局宽度、字号、左侧面板外观。 */
 import { useThemeStore, type Theme } from "../../store/theme";
 import { useUiStore, type MotionLevel } from "../../store/ui";
+import { Slider } from "../ui";
 import { Row, Sw } from "./shared";
 
 const THEMES: Record<Theme, string> = { light: "浅色", dark: "深色" };
@@ -53,106 +54,37 @@ export function AppearancePanel() {
 
       <div className="settings-card">
         <Row title="左侧面板宽度" desc="可在主界面直接拖拽分隔条调整">
-          <div className="settings-slider-wrap">
-            <input
-              type="range"
-              className="settings-slider"
-              min={200}
-              max={480}
-              step={4}
-              value={ui.leftPanelWidth}
-              onChange={(e) => ui.setPrefs({ leftPanelWidth: Number(e.target.value) })}
-            />
-            <span className="settings-slider-value">{ui.leftPanelWidth}px</span>
-          </div>
+          <Slider min={200} max={480} step={4} value={ui.leftPanelWidth}
+            onChange={(v) => ui.setPrefs({ leftPanelWidth: v })} format={(v) => `${v}px`} aria-label="左侧面板宽度" />
         </Row>
         <Row title="右侧面板宽度" desc="可在主界面直接拖拽分隔条调整">
-          <div className="settings-slider-wrap">
-            <input
-              type="range"
-              className="settings-slider"
-              min={200}
-              max={1200}
-              step={10}
-              value={ui.rightPanelWidth}
-              onChange={(e) => ui.setPrefs({ rightPanelWidth: Number(e.target.value) })}
-            />
-            <span className="settings-slider-value">{ui.rightPanelWidth}px</span>
-          </div>
+          <Slider min={200} max={1200} step={10} value={ui.rightPanelWidth}
+            onChange={(v) => ui.setPrefs({ rightPanelWidth: v })} format={(v) => `${v}px`} aria-label="右侧面板宽度" />
         </Row>
         <Row title="对话字号" desc="控制对话消息的文字大小（立即生效）">
-          <div className="settings-slider-wrap">
-            <input
-              type="range"
-              className="settings-slider"
-              min={11}
-              max={18}
-              step={1}
-              value={ui.chatFontSize}
-              onChange={(e) => ui.setPrefs({ chatFontSize: Number(e.target.value) })}
-            />
-            <span className="settings-slider-value">{ui.chatFontSize}px</span>
-          </div>
+          <Slider min={11} max={18} step={1} value={ui.chatFontSize}
+            onChange={(v) => ui.setPrefs({ chatFontSize: v })} format={(v) => `${v}px`} aria-label="对话字号" />
         </Row>
         <Row title="消息行距" desc="控制对话消息的行间间距倍率（立即生效）">
-          <div className="settings-slider-wrap">
-            <input
-              type="range"
-              className="settings-slider"
-              min={1.2}
-              max={2.2}
-              step={0.05}
-              value={ui.chatLineHeight}
-              onChange={(e) => ui.setPrefs({ chatLineHeight: Number(e.target.value) })}
-            />
-            <span className="settings-slider-value">{ui.chatLineHeight.toFixed(2)}</span>
-          </div>
+          <Slider min={1.2} max={2.2} step={0.05} value={ui.chatLineHeight}
+            onChange={(v) => ui.setPrefs({ chatLineHeight: v })} format={(v) => v.toFixed(2)} aria-label="消息行距" />
         </Row>
         <Row title="内容展示宽度" desc="0 表示不限制，填满可视区域">
-          <div className="settings-slider-wrap">
-            <input
-              type="range"
-              className="settings-slider"
-              min={0}
-              max={1200}
-              step={50}
-              value={ui.contentMaxWidth}
-              onChange={(e) => ui.setPrefs({ contentMaxWidth: Number(e.target.value) })}
-            />
-            <span className="settings-slider-value">{ui.contentMaxWidth === 0 ? "不限" : ui.contentMaxWidth + "px"}</span>
-          </div>
+          <Slider min={0} max={1200} step={50} value={ui.contentMaxWidth}
+            onChange={(v) => ui.setPrefs({ contentMaxWidth: v })}
+            format={(v) => (v === 0 ? "不限" : `${v}px`)} aria-label="内容展示宽度" />
         </Row>
       </div>
 
       <div className="settings-card">
         <div className="settings-card-title">左侧面板外观</div>
         <Row title="文字大小" desc="左侧面板会话与导航文字大小">
-          <div className="settings-slider-wrap">
-            <input
-              type="range"
-              className="settings-slider"
-              min={11}
-              max={16}
-              step={1}
-              value={ui.sidebarFontSize}
-              onChange={(e) => ui.setPrefs({ sidebarFontSize: Number(e.target.value) })}
-            />
-            <span className="settings-slider-value">{ui.sidebarFontSize}px</span>
-          </div>
+          <Slider min={11} max={16} step={1} value={ui.sidebarFontSize}
+            onChange={(v) => ui.setPrefs({ sidebarFontSize: v })} format={(v) => `${v}px`} aria-label="侧栏文字大小" />
         </Row>
         <Row title="图标大小" desc="左侧面板图标尺寸">
-          <div className="settings-slider-wrap">
-            <input
-              type="range"
-              className="settings-slider"
-              min={12}
-              max={20}
-              step={1}
-              value={ui.sidebarIconSize}
-              onChange={(e) => ui.setPrefs({ sidebarIconSize: Number(e.target.value) })}
-            />
-            <span className="settings-slider-value">{ui.sidebarIconSize}px</span>
-          </div>
+          <Slider min={12} max={20} step={1} value={ui.sidebarIconSize}
+            onChange={(v) => ui.setPrefs({ sidebarIconSize: v })} format={(v) => `${v}px`} aria-label="侧栏图标大小" />
         </Row>
       </div>
     </div>

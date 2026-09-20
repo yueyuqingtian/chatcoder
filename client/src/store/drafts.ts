@@ -10,9 +10,10 @@ export const BUILTIN_DRAFT_MODES = ["default", "plan", "readonly", "accept_edits
 export type BuiltinDraftMode = (typeof BUILTIN_DRAFT_MODES)[number];
 export type ComposerDraftMode = string;
 
-/** plan-238-1210 (A2): 引用 chip 的可序列化形态（与 ComposerCore.ComposerRef 同构）。 */
+/** plan-238-1210 (A2): 引用 chip 的可序列化形态（与 ComposerCore.ComposerRef 同构）。
+ *  plan-282-1441（#9）：新增 "mcp"（连接器引用）。 */
 export interface ComposerRefDraft {
-  kind: "file" | "skill";
+  kind: "file" | "skill" | "mcp" | "plugin";
   value: string;
   label: string;
 }

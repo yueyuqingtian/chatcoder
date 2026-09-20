@@ -8,7 +8,7 @@ import { api, type ExecPolicyRuleOut, type ExecPolicyToolInfo, type PermissionPr
 import { useChatStore } from "../../store/chat";
 import { IconRefresh, IconPlus, IconX } from "../icons";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { FormDialog } from "../ui/FormDialog";
+import { Checkbox, FormDialog, Input, Select, Textarea } from "../ui";
 
 const DECISION_OPTS = [
   { value: "allow", label: "放行", color: "var(--success)" },
@@ -129,7 +129,7 @@ function RulesSection() {
       </div>
       {rules.length > 0 && (
         <div className="policy-batch-bar">
-          <input type="checkbox" className="policy-checkbox" checked={selected.size === rules.length} onChange={toggleSelectAll} />
+          <Checkbox checked={selected.size === rules.length} onChange={toggleSelectAll} aria-label="全选规则" />
           <span>已选 {selected.size}/{rules.length}</span>
           {selected.size > 0 && (<div className="policy-batch-actions"><button className="btn btn-ghost btn-xs" onClick={() => batchSetDecision("allow")} style={{ color: "var(--success)" }}>批量放行</button><button className="btn btn-ghost btn-xs" onClick={() => batchSetDecision("deny")} style={{ color: "var(--error)" }}>批量拒绝</button><button className="btn btn-ghost btn-xs" onClick={() => batchSetDecision("ask")} style={{ color: "var(--warning)" }}>批量审批</button><button className="btn btn-danger btn-xs" onClick={() => setConfirmDelete({ mode: "batch" })}>批量删除</button></div>)}
         </div>
@@ -152,17 +152,24 @@ function RulesSection() {
         {form.ruleType === "tool" ? (
           <div className="settings-form-field">
             <label className="settings-field-label">选择工具（规则作用于工具本身）</label>
-            <select className="ui-select" value={form.tool_name} onChange={(e) => setForm((p) => ({ ...p, tool_name: e.target.value }))}>
-              <option value="">— 请选择工具 —</option>
-              {tools.map((t) => (
-                <option key={t.name} value={t.name}>{t.name}（{t.risk_level} 风险）{t.description ? ` — ${t.description}` : ""}</option>
-              ))}
-            </select>
+            <Select
+              value={form.tool_name}
+              onChange={(v) => setForm((p) => ({ ...p, tool_name: v }))}
+              placeholder="— 请选择工具 —"
+              options={[
+                { value: "", label: "— 请选择工具 —" },
+                ...tools.map((t) => ({
+                  value: t.name,
+                  label: `${t.name}（${t.risk_level} 风险）${t.description ? ` — ${t.description}` : ""}`,
+                })),
+              ]}
+              aria-label="选择工具"
+            />
           </div>
         ) : (
           <div className="settings-form-field">
             <label className="settings-field-label">命令前缀（支持通配符）</label>
-            <input className="ui-input" placeholder="如 git push、npm install *" value={form.command_pattern} onChange={(e) => setForm((p) => ({ ...p, command_pattern: e.target.value }))} />
+            <Input placeholder="如 git push、npm install *" value={form.command_pattern} onChange={(e) => setForm((p) => ({ ...p, command_pattern: e.target.value }))} aria-label="命令前缀" />
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
               {COMMAND_PRESETS.map((preset) => (
                 <button key={preset} type="button" className="settings-chip" onClick={() => setForm((p) => ({ ...p, command_pattern: preset }))}>{preset}</button>
@@ -171,12 +178,12 @@ function RulesSection() {
           </div>
         )}
         <div className="settings-form-field"><label className="settings-field-label">审批决策</label><div className="settings-chips">{DECISION_OPTS.map((opt) => (<button key={opt.value} type="button" className={"settings-chip" + (form.decision === opt.value ? " on" : "")} onClick={() => setForm((p) => ({ ...p, decision: opt.value }))} style={form.decision === opt.value ? { borderColor: opt.color, color: opt.color } : {}}>{opt.label}</button>))}</div></div>
-        <div className="settings-form-field"><label className="settings-field-label">理由说明（可选）</label><input className="ui-input" value={form.justification} onChange={(e) => setForm((p) => ({ ...p, justification: e.target.value }))} /></div>
+        <div className="settings-form-field"><label className="settings-field-label">理由说明（可选）</label><Input value={form.justification} onChange={(e) => setForm((p) => ({ ...p, justification: e.target.value }))} /></div>
       </FormDialog>
       <div className="settings-resource-list">
         {rules.map((r) => { const dm = decisionMeta(r.decision); const isSel = selected.has(r.id); const isTool = Boolean(r.tool_name); return (
           <div key={r.id} className="settings-resource-item" style={isSel ? { background: "var(--accent-soft)" } : {}}>
-            <input type="checkbox" className="policy-checkbox" checked={isSel} onChange={() => toggleSelect(r.id)} style={{ flexShrink: 0 }} />
+            <Checkbox checked={isSel} onChange={() => toggleSelect(r.id)} aria-label="选择该规则" />
             <div className="settings-resource-info">
               <div className="settings-resource-name" style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}>
                 <span className="settings-resource-tag" style={{ color: "var(--text-secondary)", borderColor: "var(--border)" }}>{isTool ? "工具" : "命令"}</span>
@@ -296,13 +303,15 @@ function ModeProfilesSection() {
           <div className="perm-mode-editor settings-create-form">
             <div className="settings-form-field">
               <label className="settings-field-label">模式名（小写字母/数字/下划线）</label>
-              <input className="ui-input" value={editing.name} disabled={!isNew}
+              <Input value={editing.name} disabled={!isNew}
                 style={{ fontFamily: "var(--font-mono)" }}
+                aria-label="模式名"
                 onChange={(e) => setEditing((p) => p && { ...p, name: e.target.value })} />
             </div>
             <div className="settings-form-field">
               <label className="settings-field-label">显示名</label>
-              <input className="ui-input" value={editing.display_name}
+              <Input value={editing.display_name}
+                aria-label="显示名"
                 onChange={(e) => setEditing((p) => p && { ...p, display_name: e.target.value })} />
             </div>
             <div className="settings-form-field">
@@ -318,7 +327,8 @@ function ModeProfilesSection() {
             </div>
             <div className="settings-form-field">
               <label className="settings-field-label">描述（显示在模式菜单 tooltip）</label>
-              <input className="ui-input" value={editing.description}
+              <Input value={editing.description}
+                aria-label="描述"
                 onChange={(e) => setEditing((p) => p && { ...p, description: e.target.value })} />
             </div>
             <div className="settings-form-field">
@@ -326,7 +336,7 @@ function ModeProfilesSection() {
               <div className="perm-tool-grid">
                 {tools.map((t) => (
                   <label key={t.name} className="perm-tool-check" title={t.description || undefined}>
-                    <input type="checkbox" checked={editing.tools.includes(t.name)} onChange={() => startToolToggle(t.name)} />
+                    <Checkbox checked={editing.tools.includes(t.name)} onChange={() => startToolToggle(t.name)} aria-label={`${t.name} 白名单`} />
                     <code>{t.name}</code>
                     <span className="perm-tool-risk" data-risk={t.risk_level}>{t.risk_level}</span>
                   </label>
@@ -335,8 +345,9 @@ function ModeProfilesSection() {
             </div>
             <div className="settings-form-field">
               <label className="settings-field-label">行为提示词（注入系统指令，可选）</label>
-              <textarea className="ui-textarea" rows={4} value={editing.hint}
+              <Textarea rows={4} value={editing.hint}
                 placeholder="如：当前处于严格审阅模式，任何写操作前必须先输出分析结论等待用户确认。"
+                aria-label="行为提示词"
                 onChange={(e) => setEditing((p) => p && { ...p, hint: e.target.value })} />
             </div>
             <div className="settings-create-actions">

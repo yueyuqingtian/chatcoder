@@ -368,22 +368,21 @@ def normalize_tool_sequence(messages: list[ChatMessage]) -> list[ChatMessage]:
 
 
 # ---------------------------------------------------------------------------
-# v6.0: 工具结果预算 -- 构造本轮 API 副本（不修改原始历史）
-# 对应调研结论："工具结果预算（本轮怎么发）vs auto-compact（以后保留什么）两层分离"
+# v6.0: 构造本轮 API 副本（不修改原始历史）
+# 对应调研结论："本轮怎么发（API 副本）vs 以后保留什么（压缩）两层分离"
 # ---------------------------------------------------------------------------
 
 def build_api_copy(
     messages: list[ChatMessage],
-    keep_recent_groups: int | None = None,
-    fold_budget_tokens: int | None = None,
 ) -> list[ChatMessage]:
-    """v6.0 + v15: 基于原始历史构造发给模型的 API 副本。
+    """v6.0 + v16: 基于原始历史构造发给模型的 API 副本。
 
-    默认（fold_budget_tokens=None）不折叠任何 tool result，完整保留历史内容，
-    避免模型因"看不到自己读过的内容"而反复重读文件。
-    仅在上下文占用达到预算（fold_budget_tokens）时才折叠较早的 tool result：
-    keep_recent_groups 组工具调用回合保留完整（已由 _truncate_output 截断），
-    更早的 tool result 折叠为摘要占位，减少上下文占用。
+    v16（用户要求）：移除"按上下文占比折叠较早 tool result"的隐式压缩——
+    历史内容不再因占用比例被静默改写；压缩只保留一条通道：
+    占用超过「设置-常规设置」的压缩阈值后，由 agent_loop 走可见的
+    落库式压缩（前端压缩卡片、可恢复）。
+    保留：单条超长 tool result 的落盘折叠保护（_micro_compact）——它与占比无关，
+    只防单条巨型结果撑爆单次请求，原文可在 .compact-cache 恢复。
     保证不破坏 tool_call/tool_result 配对（只截断 content 不删消息）。
     """
     import copy as _copy
@@ -393,58 +392,51 @@ def build_api_copy(
 
     api = [_copy.copy(m) for m in messages]
 
-    # v15: 默认不折叠 —— 未显式给预算时完整保留历史，避免模型因内容被折叠而重读
-    if fold_budget_tokens is None:
-        return api
-
-    from app.orchestration.token_counter import estimate_messages_tokens
-    est = estimate_messages_tokens(api)
-    if est <= fold_budget_tokens:
-        logger.debug("[api_copy] 估算 %d <= 折叠预算 %d，保留全部工具结果", est, fold_budget_tokens)
-        return api
-
-    if keep_recent_groups is None:
-        from app.core.config import settings
-        keep_recent_groups = settings.auto_compact_keep_rounds
-
-    # 从后往前找第 keep_recent_groups 个 assistant(tool_calls)，之前的 tool result 折叠
-    keep_from = 0
-    rounds_seen = 0
-    for i in range(len(api) - 1, -1, -1):
-        if api[i].role == "assistant" and api[i].tool_calls:
-            rounds_seen += 1
-            if rounds_seen == keep_recent_groups:
-                keep_from = i
-                break
-
-    folded = 0
-    for i in range(keep_from):
-        m = api[i]
-        if m.role == "tool" and m.content and len(m.content) > 200:
-            orig_len = len(m.content)
-            tool_name = m.name or "unknown"
-            preview = m.content[:200]
-            m.content = f"[已折叠: 工具 {tool_name}，原 {orig_len} 字符，关键信息: {preview}]"
-            folded += 1
-
-    if folded:
-        logger.debug("[api_copy] 折叠了 %d 条较早的 tool result", folded)
-
     # v2.2 (对齐 zcode 3.10 micro-compact): 单条超长 tool result 就地折叠——
     # 原文落盘 .compact-cache，占位符提示可用 fs_read 恢复（防模型失忆重复读取）。
-    api = _micro_compact(api)
+    before_micro = sum(len(m.content or "") for m in api if m.role == "tool")
+    api, micro_folded = _micro_compact(api)
+    after_micro = sum(len(m.content or "") for m in api if m.role == "tool")
+
+    # plan-282-1441：记录"本轮上下文被回收了多少"（超长结果落盘，占比折叠已移除）。
+    # 静默回收会让用户误以为丢历史，这里把统计挂在模块级，agent_loop 紧接着 broadcast 给前端。
+    global _LAST_RECLAIM
+    try:
+        from app.orchestration.token_counter import estimate_messages_tokens
+        _LAST_RECLAIM = {
+            "folded": micro_folded,
+            "chars_saved": max(0, before_micro - after_micro),
+            "est_tokens_saved": max(0, estimate_messages_tokens(messages) - estimate_messages_tokens(api)),
+            "budget": None,
+        }
+    except Exception:  # noqa: BLE001 —— 记账失败不影响发请求
+        _LAST_RECLAIM = None
     return api
 
 
-def _micro_compact(api: list[ChatMessage]) -> list[ChatMessage]:
+# 最近一次 build_api_copy 的回收统计（agent_loop 消费后广播；模块级避免改签名）
+_LAST_RECLAIM: dict | None = None
+
+
+def take_last_reclaim() -> dict | None:
+    """取出并清空"最近一次上下文回收"统计（消费方：agent_loop 广播给前端）。"""
+    global _LAST_RECLAIM
+    stats = _LAST_RECLAIM
+    _LAST_RECLAIM = None
+    return stats
+
+
+def _micro_compact(api: list[ChatMessage]) -> tuple[list[ChatMessage], int]:
     """v2.2 (对齐 zcode 3.10): 单个超大工具结果 → 占位符 + 落盘引用。
 
     与 buildClearedToolResultContent 对齐：sha256 前 8 位标识，原文写
     {workspace}/.compact-cache/{hash8}.txt，占位文本附恢复路径提示。
+    返回 (处理后的列表, 折叠条数)；条数供前端"上下文回收"提示展示（v16）。
     """
     from app.core.config import settings
 
     limit = getattr(settings, "tool_output_chars_read", 16000) or 16000
+    folded = 0
     for m in api:
         if m.role != "tool" or not m.content or len(m.content) <= limit:
             continue
@@ -467,9 +459,10 @@ def _micro_compact(api: list[ChatMessage]) -> list[ChatMessage]:
                 f".compact-cache/{digest}.txt 恢复。"
             )
             logger.info("[micro-compact] 折叠超长工具结果 %s (%d 字符 -> 占位符)", tool_name, orig_len)
+            folded += 1
         except Exception:
             logger.warning("[micro-compact] 落盘失败，保留原文(非阻塞)", exc_info=True)
-    return api
+    return api, folded
 
 
 # ---------------------------------------------------------------------------

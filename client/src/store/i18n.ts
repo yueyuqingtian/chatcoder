@@ -13,6 +13,7 @@ const DICT: Dict = {
   "sidebar.search":               ["搜索", "Search"],
   "sidebar.automation":           ["自动化", "Automations"],
   "sidebar.skills":               ["技能", "Skills"],
+  "sidebar.extensions":           ["拓展", "Extensions"],
   "sidebar.view_group":           ["分组", "Groups"],
   "sidebar.view_project":         ["项目", "Projects"],
   "sidebar.sort_title":           ["排序方式", "Sort by"],
@@ -140,6 +141,7 @@ const DICT: Dict = {
   "rp.tab_files":                 ["文件", "Files"],
   "rp.tab_files_full":            ["文件管理", "Files"],
   "rp.tab_subagent":              ["子代理", "Subagent"],
+  "rp.tab_debug":                 ["调试", "Debug"],
   "rp.tabs_empty":                ["点击 + 打开面板", "Click + to open a panel"],
   "rp.all_tabs":                  ["全部标签", "All Tabs"],
   "rp.new_tab":                   ["新增标签", "New Tab"],
@@ -200,6 +202,9 @@ const DICT: Dict = {
   "settings.tab.index":            ["索引库", "Index Library"],
   "settings.tab.archive":         ["归档恢复", "Archive"],
   "settings.tab.about":           ["关于", "About"],
+  // plan-282-1441：拓展中心（插件/技能/连接器三合一）与工作树
+  "settings.tab.extensions":      ["拓展", "Extensions"],
+  "settings.tab.worktrees":       ["工作树", "Worktrees"],
 
   // ── 设置页：页面标题 ──
   "settings.pt.general":    ["常规", "General"],
@@ -215,6 +220,9 @@ const DICT: Dict = {
   "settings.pt.index":      ["索引库", "Index Library"],
   "settings.pt.archive":    ["归档恢复", "Archive"],
   "settings.pt.plugins":    ["插件", "Plugins"],
+  // plan-282-1441：拓展中心与工作树页面标题
+  "settings.pt.extensions": ["拓展", "Extensions"],
+  "settings.pt.worktrees":  ["工作树", "Worktrees"],
   "settings.pt.scheduled":  ["自动化", "Automations"],
   "settings.pt.hooks":      ["钩子", "Hooks"],
   "settings.pt.memory":     ["记忆", "Memory"],

@@ -1,7 +1,7 @@
 /** 右侧面板状态（v5）：expanded/width/tabs + 全屏模式 + 最大宽度限制。 */
 import { create } from "zustand";
 
-export type PanelTabId = "task-summary" | "browser" | "terminal" | "files" | "subagent";
+export type PanelTabId = "task-summary" | "browser" | "terminal" | "files" | "subagent" | "debug";
 export interface PanelTab {
   id: PanelTabId;
   instance: number;

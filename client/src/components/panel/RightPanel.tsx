@@ -3,16 +3,19 @@
  *      支持滚轮横滚；溢出时头部出现「全部标签」下拉，可直接跳转/关闭。
  */
 import { useEffect, useRef, useState } from "react";
+import { api } from "../../api/client";
 import { usePanelStore } from "../../store/panel";
 import type { PanelTab, PanelTabId } from "../../store/panel";
 import { useI18n } from "../../store/i18n";
-import { IconArrowToggle, IconChevronDown, IconFolder, IconGlobe, IconTerminal, IconX, IconPlus, IconMaximize, IconMinus } from "../icons";
+import { IconArrowToggle, IconBug, IconChevronDown, IconFolder, IconGlobe, IconTerminal, IconX, IconPlus, IconMaximize, IconMinus } from "../icons";
 import { TaskSummaryPanel } from "./TaskSummaryPanel";
 import { BrowserPanel } from "./BrowserPanel";
 import { FileTreePanel } from "./FileTreePanel";
 import { TerminalPanel } from "./TerminalPanel";
 import { SubagentPanel } from "./SubagentPanel";
+import { DebugPanel } from "./DebugPanel";
 import { useClickOutside } from "../../hooks/useClickOutside";
+import { ErrorBoundary } from "../ErrorBoundary";
 
 function PanelContent({ tab }: { tab: PanelTab }) {
   switch (tab.id) {
@@ -21,8 +24,22 @@ function PanelContent({ tab }: { tab: PanelTab }) {
     case "terminal": return <TerminalPanel tab={tab} />;
     case "files": return <FileTreePanel />;
     case "subagent": return <SubagentPanel threadId={tab.meta?.threadId} agentName={tab.meta?.agentName} />;
+    case "debug": return <DebugPanel />;
     default: return null;
   }
+}
+
+/**
+ * 单个面板内容的错误隔离层：某块面板（浏览器 / 终端 / 文件树）抛错时只让该面板
+ * 显示局部兜底，不再冒泡到 App 顶层 ErrorBoundary 把整个应用打成白屏。
+ * resetKey 用 tab key：切 tab 或重开同名 tab 时自动复位并重试渲染。
+ */
+function GuardedPanelContent({ tabKey, tab }: { tabKey: string; tab: PanelTab }) {
+  return (
+    <ErrorBoundary variant="panel" resetKey={tabKey}>
+      <PanelContent tab={tab} />
+    </ErrorBoundary>
+  );
 }
 
 export function RightPanel() {
@@ -40,6 +57,15 @@ export function RightPanel() {
   const toggleFullscreen = usePanelStore((s) => s.toggleFullscreen);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [showTabsMenu, setShowTabsMenu] = useState(false);
+  /** 连接器「开发调试」是否已启用——启用后才提供调试面板入口（需求：如果 mcp 开启了）。
+   *  面板入口是低频操作，在打开「+」菜单时重查即可，无需全局订阅。 */
+  const [debugEnabled, setDebugEnabled] = useState(false);
+  const refreshDebugEnabled = () => {
+    void api.listMcpServers()
+      .then((list) => setDebugEnabled(list.some((m) => m.name === "debugger" && m.is_active)))
+      .catch(() => setDebugEnabled(false));
+  };
+  useEffect(refreshDebugEnabled, []);
   const tabsRef = useRef<HTMLDivElement>(null);
   const headActionsRef = useRef<HTMLDivElement>(null);
   const [tabsOverflow, setTabsOverflow] = useState(false);
@@ -54,6 +80,7 @@ export function RightPanel() {
     terminal: { label: t("rp.tab_terminal"), icon: <IconTerminal size={13} /> },
     files: { label: t("rp.tab_files"), icon: <IconFolder size={13} /> },
     subagent: { label: t("rp.tab_subagent"), icon: <IconTerminal size={13} /> },
+    debug: { label: t("rp.tab_debug"), icon: <IconBug size={13} /> },
   };
 
   // 标签条溢出检测（scrollWidth > clientWidth 时展示「全部标签」入口）
@@ -120,13 +147,16 @@ export function RightPanel() {
               })}
             </div>
           )}
-          <button className="rp-add-btn" onClick={() => { setShowAddMenu(!showAddMenu); setShowTabsMenu(false); }} title={t("rp.new_tab")}><IconPlus size={14} /></button>
+          <button className="rp-add-btn" onClick={() => { const next = !showAddMenu; setShowAddMenu(next); setShowTabsMenu(false); if (next) refreshDebugEnabled(); }} title={t("rp.new_tab")}><IconPlus size={14} /></button>
           {showAddMenu && (
             <div className="rp-add-menu" onClick={() => setShowAddMenu(false)}>
               <button onClick={() => handleAdd("task-summary")}>{t("rp.tab_task_summary")}</button>
               <button onClick={() => handleAdd("browser")}>{t("rp.tab_browser")}</button>
               <button onClick={() => handleAddTerminal()}>{t("rp.tab_terminal")}</button>
               <button onClick={() => handleAdd("files")}>{t("rp.tab_files_full")}</button>
+              {debugEnabled && (
+                <button onClick={() => handleAdd("debug")}>{t("rp.tab_debug")}</button>
+              )}
               {closedStack.length > 0 && (
                 <>
                   <div className="rp-add-menu-divider" />
@@ -156,8 +186,16 @@ export function RightPanel() {
           const key = `${tTab.id}-${tTab.instance}`;
           const isActive = key === activeKey;
           return (
-            <div key={key} className={isActive ? "view-enter" : ""} style={{ display: isActive ? "block" : "none", height: "100%" }}>
-              <PanelContent tab={tTab} />
+            /* plan-282-1421（第3项）：激活 tab 播放统一过渡。
+               这里必须保持"全量挂载 + display 切换"（面板内部状态不能因切 tab 丢失），
+               故不用 PageTransition 的 key 重挂载方案，改用同一套关键帧的动画类：
+               类名从 "" → "ui-tab-enter" 的切换即触发一次动画。 */
+            <div
+              key={key}
+              className={isActive ? "ui-tab-enter" : ""}
+              style={{ display: isActive ? "block" : "none", height: "100%" }}
+            >
+              <GuardedPanelContent tabKey={key} tab={tTab} />
             </div>
           );
         }) : (
@@ -166,6 +204,7 @@ export function RightPanel() {
             <button onClick={() => openTab("browser")}>{t("rp.tab_browser")}</button>
             <button onClick={() => openNewTab("terminal")}>{t("rp.tab_terminal")}</button>
             <button onClick={() => openTab("files")}>{t("rp.tab_files_full")}</button>
+            {debugEnabled && <button onClick={() => openTab("debug")}>{t("rp.tab_debug")}</button>}
           </div>
         )}
       </div>

@@ -6,6 +6,7 @@ import { useChatStore } from "../../store/chat";
 import { IconPlus, IconX } from "../icons";
 import { Modal } from "../Modal";
 import { ConfirmDialog } from "../ConfirmDialog";
+import { Input, Select, Textarea } from "../ui";
 import { Sw } from "./shared";
 
 /** 非阻塞提示：Electron 中 window.alert 是原生模态框，关闭后会破坏窗口焦点，统一改用全局提示条。 */
@@ -63,8 +64,8 @@ function SubagentFormModal({ open, editing, models, tools, onClose, onSaved }: {
   return (
     <Modal open={open} onClose={onClose} title={editing ? "编辑子代理类型" : "新建子代理类型"} width={640} height="auto">
       <div className="settings-modal-form" style={{ padding: 18 }}>
-        <div className="settings-modal-form-row"><label>类型名称</label><input className="ui-input" placeholder="如 explore / code-reviewer" value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} /></div>
-        <div className="settings-modal-form-row"><label>描述</label><input className="ui-input" placeholder="该子代理的职责说明" value={form.description} onChange={(e) => setForm((p) => ({ ...p, description: e.target.value }))} /></div>
+        <div className="settings-modal-form-row"><label>类型名称</label><Input placeholder="如 explore / code-reviewer" value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} /></div>
+        <div className="settings-modal-form-row"><label>描述</label><Input placeholder="该子代理的职责说明" value={form.description} onChange={(e) => setForm((p) => ({ ...p, description: e.target.value }))} /></div>
         <div className="settings-modal-form-row">
           <label>工具权限（勾选 = 允许该工具，留空 = 全量工具）</label>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
@@ -85,8 +86,8 @@ function SubagentFormModal({ open, editing, models, tools, onClose, onSaved }: {
             })}
           </div>
         </div>
-        <div className="settings-modal-form-row"><label>模型覆盖（留空 = 跟随主代理）</label><select className="ui-select" value={form.model_id} onChange={(e) => setForm((p) => ({ ...p, model_id: e.target.value }))}><option value="">跟随主代理</option>{models.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}</select></div>
-        <div className="settings-modal-form-row"><label>系统提示词</label><textarea className="ui-textarea" rows={3} placeholder="可选，覆盖默认子代理系统提示词…" value={form.system_prompt} onChange={(e) => setForm((p) => ({ ...p, system_prompt: e.target.value }))} /></div>
+        <div className="settings-modal-form-row"><label>模型覆盖（留空 = 跟随主代理）</label><Select value={form.model_id} onChange={(v) => setForm((p) => ({ ...p, model_id: v }))} options={[{ value: "", label: "跟随主代理" }, ...models.map((m) => ({ value: String(m.id), label: m.name }))]} aria-label="模型覆盖" /></div>
+        <div className="settings-modal-form-row"><label>系统提示词</label><Textarea rows={3} placeholder="可选，覆盖默认子代理系统提示词…" value={form.system_prompt} onChange={(e) => setForm((p) => ({ ...p, system_prompt: e.target.value }))} aria-label="系统提示词" /></div>
         <div className="settings-modal-form-row"><label>启用状态</label><Sw checked={form.is_active} onChange={(v) => setForm((p) => ({ ...p, is_active: v }))} /></div>
         <div className="settings-create-actions"><button className="btn btn-ghost btn-sm" onClick={onClose}>取消</button><button className="btn btn-primary btn-sm" onClick={handleSave} disabled={!form.name.trim()}>{editing ? "保存" : "创建"}</button></div>
       </div>

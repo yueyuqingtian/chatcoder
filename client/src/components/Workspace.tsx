@@ -6,13 +6,15 @@
 import { useEffect, useState } from "react";
 import type { NavKey } from "./Sidebar";
 import { ChatPanel } from "./ChatPanel";
-import { ScheduledPage, SkillsPage, McpPage } from "./NavPages";
+import { ScheduledPage } from "./NavPages";
+import { ExtensionsPanel } from "./settings/ExtensionsPanel";
 import { useChatStore } from "../store/chat";
 import { useI18n } from "../store/i18n";
 import { api, type SkillOut } from "../api/client";
 import { ComposerCore } from "./chat/ComposerCore";
 import { PluginSlot } from "../plugins/registry";
 import { AppLogo } from "./AppLogo";
+import { PageTransition } from "./ui";
 import { IconAlertTriangle, IconBox, IconBookOpen, IconCheckSquare, IconSearch } from "./icons";
 
 export function Workspace({ nav, onSessionStart }: {
@@ -24,11 +26,20 @@ export function Workspace({ nav, onSessionStart }: {
   if (nav && nav !== "chat") {
     return (
       <main className="workspace">
-        <div key={nav} className="ws-body ws-navpage view-enter">
+        {/* plan-282-1421（第3项）：导航页切换过渡（id=nav 变化即播放一次入场） */}
+        <PageTransition id={nav} className="ws-body ws-navpage">
           {nav === "scheduled" && <ScheduledPage />}
-          {nav === "skills" && <SkillsPage />}
-          {nav === "mcp" && <McpPage />}
-        </div>
+          {/* plan-282-1441（#6）：左面板「拓展」复用设置页同一面板，保证两处内容一致。
+              必须套 .ext-page 容器：该面板原本只在设置页（有 PageShell 提供内距与限宽）里渲染，
+              直接放进导航页会紧贴窗口边缘、排版混乱（用户反馈）。 */}
+          {nav === "skills" && (
+            <div className="ext-page">
+              <h1 className="automation-title">拓展</h1>
+              <p className="automation-sub">管理插件、技能与连接器；启用后可在聊天中通过 / 引用。</p>
+              <ExtensionsPanel />
+            </div>
+          )}
+        </PageTransition>
       </main>
     );
   }
@@ -45,9 +56,10 @@ export function Workspace({ nav, onSessionStart }: {
 
   return (
     <main className="workspace workspace-session">
-      <div key={currentSessionId} className="ws-body view-enter">
+      {/* plan-282-1421（第3项）：会话切换过渡（id=sessionId） */}
+      <PageTransition id={currentSessionId ?? 0} className="ws-body">
         <ChatPanel />
-      </div>
+      </PageTransition>
     </main>
   );
 }

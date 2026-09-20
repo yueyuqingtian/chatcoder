@@ -299,29 +299,39 @@ def scan_all_mcp_servers(workspace_root: str | None = None) -> list[ScannedMcpSe
     return results
 
 
-def resolve_workspace_placeholder(arg: str, workspace_root: str | None) -> str:
-    """解析命令行参数中的工作区占位符（`${workspaceFolder}`）。
+def resolve_workspace_placeholder(arg: str, workspace_root: str | None,
+                                  session_id: int | None = None) -> str:
+    """解析命令行参数中的占位符：`${workspaceFolder}` 与 `${sessionId}`。
 
     VSCode 系 MCP 配置常用 `${workspaceFolder}` 表示项目根；chatcoder 不做变量替换，
     字面量会原样传给子进程，导致 codegraph 等 server 以错误路径初始化索引、
     查询时 projectPath 不匹配而挂起直到超时。这里在 spawn 前替换为实际工作区路径；
     无工作区上下文时返回空串（由调用方过滤，避免传空参数破坏命令行）。
 
+    plan-282-1441（#8）：新增 `${sessionId}`——内置「开发调试」MCP 需要知道自己在为
+    哪个聊天会话服务（调试会话状态由主服务进程按会话隔离持有，见 services/debug_service）。
+
     运行时调用路径（tools/mcp_wrapper.py）与握手路径（fetch_mcp_tools）共用本函数，
     避免两套实现漂移——此前握手路径完全没有替换逻辑，是 codegraph 握手失败的次生原因。
     """
-    if "${workspaceFolder}" not in arg:
-        return arg
-    if not workspace_root:
-        return ""
-    return arg.replace("${workspaceFolder}", str(workspace_root))
+    out = arg
+    if "${workspaceFolder}" in out:
+        if not workspace_root:
+            return ""
+        out = out.replace("${workspaceFolder}", str(workspace_root))
+    if "${sessionId}" in out:
+        if session_id is None:
+            return ""
+        out = out.replace("${sessionId}", str(session_id))
+    return out
 
 
-def resolve_workspace_args(args: list | None, workspace_root: str | None) -> list[str]:
-    """对 args 逐项做 `${workspaceFolder}` 替换，并剔除因无工作区而变空的参数。"""
+def resolve_workspace_args(args: list | None, workspace_root: str | None,
+                           session_id: int | None = None) -> list[str]:
+    """对 args 逐项做占位符替换，并剔除因无上下文而变空的参数。"""
     out: list[str] = []
     for a in args or []:
-        resolved = resolve_workspace_placeholder(str(a), workspace_root)
+        resolved = resolve_workspace_placeholder(str(a), workspace_root, session_id)
         if resolved:
             out.append(resolved)
     return out

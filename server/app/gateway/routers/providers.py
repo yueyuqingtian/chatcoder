@@ -34,6 +34,21 @@ def _mask_key(key: str | None) -> str | None:
 
 
 async def _cred_to_out(c) -> ProviderCredentialOut:
+    """凭据序列化（plan-282-1441 修复：冷却到期即如实呈现为可用）。
+
+    此前 `status` 原样输出——冷却已到期（cooldown_until 已过）的凭据仍然显示
+    "冷却中"，而系统里**没有任何地方会把它复位**，于是用户看到的是一个
+    永远卡在冷却、也无法直接刷新的凭据（他反馈的"凭证进冷却不可刷新、直接不能用了"）。
+    这里做展示层的自愈：冷却已过期 → 按 ok 呈现（并顺手清掉残留截止时间字段）。
+    真正取用时 available_credentials 早已按同样规则放行，两边口径一致。
+    """
+    status = c.status or "ok"
+    cooldown_until = c.cooldown_until
+    if status == "cooldown":
+        until = credential_service._parse_iso(cooldown_until)
+        if until is None or until <= credential_service._now():
+            status = "ok"
+            cooldown_until = None
     return ProviderCredentialOut(
         id=c.id,
         provider_id=c.provider_id,
@@ -43,9 +58,9 @@ async def _cred_to_out(c) -> ProviderCredentialOut:
         token_ref=c.token_ref,
         priority=c.priority or 0,
         is_active=c.is_active,
-        status=c.status or "ok",
+        status=status,
         last_error=c.last_error,
-        cooldown_until=c.cooldown_until,
+        cooldown_until=cooldown_until,
         last_ok_at=c.last_ok_at,
         credits=float(c.credits) if c.credits is not None else None,
         extra=c.extra,
@@ -268,6 +283,21 @@ async def update_credential(credential_id: int, body: ProviderCredentialUpdate,
         label=body.label, api_key=body.api_key, priority=body.priority,
         is_active=body.is_active, extra=body.extra,
     )
+    if not ok:
+        raise HTTPException(404, "credential not found")
+    cred = await credential_service.get_credential(db, credential_id)
+    return await _cred_to_out(cred)
+
+
+@router.post("/credentials/{credential_id}/reset", response_model=ProviderCredentialOut)
+async def reset_credential(credential_id: int, db: AsyncSession = Depends(get_db)):
+    """手动复位凭据（清冷却与错误，恢复为可用）。
+
+    plan-282-1441：此前系统里**没有任何手段**清除冷却——冷却到期也不会自动复位，
+    用户只能等（或删掉重建），实测就是"凭据进了冷却就再也不能用"。
+    现在用户可一键复位；冷却到期时展示层也会自愈（见 _cred_to_out）。
+    """
+    ok = await credential_service.reset_credential(db, credential_id)
     if not ok:
         raise HTTPException(404, "credential not found")
     cred = await credential_service.get_credential(db, credential_id)

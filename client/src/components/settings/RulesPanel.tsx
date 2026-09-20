@@ -9,6 +9,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { IconRefresh, IconFolder } from "../icons";
+import { Textarea, Select } from "../ui";
 import { Sw } from "./shared";
 
 export function RulesPanel() {
@@ -86,19 +87,18 @@ export function RulesPanel() {
       <div className="settings-card-title">项目规则归属</div>
       <div className="rules-project-picker">
         <IconFolder size={13} />
-        <select
-          className="ui-select rules-project-select"
-          value={selectedProject?.id ?? ""}
-          onChange={(e) => {
-            const picked = activeProjects.find((p) => String(p.id) === e.target.value);
+        <Select
+          className="rules-project-select"
+          value={selectedProject?.id != null ? String(selectedProject.id) : ""}
+          onChange={(v) => {
+            const picked = activeProjects.find((p) => String(p.id) === v);
             if (picked) setProjectPath(picked.path);
           }}
-        >
-          {activeProjects.length === 0 && <option value="">暂无项目</option>}
-          {activeProjects.map((p) => (
-            <option key={p.id} value={p.id}>{p.name || p.path}</option>
-          ))}
-        </select>
+          options={activeProjects.length === 0
+            ? [{ value: "", label: "暂无项目" }]
+            : activeProjects.map((p) => ({ value: String(p.id), label: p.name || p.path }))}
+          aria-label="项目规则归属"
+        />
         <span className="rules-project-path" title={projectPath}>{projectPath || "未选择项目"}</span>
       </div>
 
@@ -122,25 +122,25 @@ export function RulesPanel() {
       </div>
 
       <div className="settings-card-title">全局规则</div>
-      <textarea
-        className="ui-textarea"
+      <Textarea
         rows={8}
         style={{ minHeight: 160 }}
         placeholder="全局规则（对所有项目生效）…"
         value={globalRules}
         onChange={(e) => setGlobalRules(e.target.value)}
+        aria-label="全局规则"
       />
 
       <div className="settings-card-title">
         项目规则{selectedProject ? `（${selectedProject.name || selectedProject.path}）` : ""}
       </div>
-      <textarea
-        className="ui-textarea"
+      <Textarea
         rows={8}
         style={{ minHeight: 160 }}
         placeholder="当前项目规则…"
         value={workdirRules}
         onChange={(e) => setWorkdirRules(e.target.value)}
+        aria-label="项目规则"
       />
     </div>
   );

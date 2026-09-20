@@ -46,10 +46,9 @@ class Settings(BaseSettings):
     context_compaction_enabled: bool = True
     # v6.1: 对齐 codex -- auto_compact_token_limit = context_window * 90%
     auto_compact_threshold_ratio: float = 0.90
-    # v15: API 副本折叠阈值 —— 上下文占用低于此比例时 build_api_copy 不折叠任何
-    # tool result（保留全部读取内容，根治"模型失忆反复读文件"）；高于此比例才
-    # 按 keep_recent_groups 折叠旧工具输出，与下层 auto_compact(90%) 形成两级降级。
-    api_copy_fold_ratio: float = 0.70
+    # v16: 已移除 api_copy_fold_ratio（按占用比例折叠工具结果的隐式压缩）——
+    # 历史只在超过上面的压缩阈值后由 agent_loop 的落库式压缩（可见卡片）处理；
+    # build_api_copy 仅保留单条超长工具结果的落盘保护，不再按占比改写历史。
     # v0.3: 计划确认门 — 默认硬门,需用户确认拆解后才执行
     auto_confirm_plan: bool = False
     # v0.3: 审批超时(秒),超时自动拒绝

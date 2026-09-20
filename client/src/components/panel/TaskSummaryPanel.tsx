@@ -2,8 +2,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { useChatStore } from "../../store/chat";
 import { usePanelStore } from "../../store/panel";
-import type { ArtifactOut, TaskOut } from "../../api/client";
+import type { ArtifactOut } from "../../api/client";
 import { IconCheck, IconCheckCircle, IconFileRead, IconExternalLink, IconPause, IconRefresh, IconRotateCcw, IconX } from "../icons";
+
+import { useProgressRows } from "../chat/taskProgress";
 
 function normalizeStatus(status: string): string {
   return status === "in_progress" ? "running" : status || "pending";
@@ -20,7 +22,6 @@ function StepStatus({ status }: { status: string }) {
 
 export function TaskSummaryPanel() {
   const tasks = useChatStore((state) => state.tasks);
-  const todos = useChatStore((state) => state.todos);
   const messages = useChatStore((state) => state.messages);
   // v38 (plan-482): 方案文档确认入口——等待确认时在任务面板提供确认/停止按钮
   const hasPendingPlan = useChatStore((state) => state.pendingPlan != null);
@@ -44,6 +45,16 @@ export function TaskSummaryPanel() {
     setVisitedFiles([...files].slice(-20).reverse());
   }, [messages]);
 
+  /** plan-282-1441（#3）：任务进度统一走共享模块（与输入框上方胶囊**同源**）。
+   *  此前这里自有一套口径：只看 max(turn_id)，无步骤时还会回退到 request 任务
+   *  （而 request 的标题就是用户消息文本），导致与胶囊显示不一致。
+   *  plan-282-1492：展示口径（是否还该显示、要不要标"进行中"）已收进共享模块，
+   *  面板不再自算运行态门控。 */
+  const progress = useProgressRows();
+  const progressRows = progress.rows;
+  const progressDone = progress.done;
+
+  /** 当前任务标题：取最近一个 request 任务（仅用于展示标题，不参与进度） */
   const currentTasks = useMemo(() => {
     const visible = tasks.filter((task) => !task.is_hidden);
     const turnIds = visible.map((task) => task.turn_id).filter((id): id is number => id != null);
@@ -53,23 +64,6 @@ export function TaskSummaryPanel() {
   }, [tasks]);
 
   const requestTask = currentTasks.find((task) => task.kind === "request" || (task.kind == null && task.parent_task_id == null));
-  const isStep = (task: TaskOut) => task.kind === "step" || (task.parent_task_id != null && task.kind !== "group");
-  // v38 (plan-482): 系统不再预拆分（无 proposed group），步骤仅来自 todo_write 清单落库。
-  const steps = useMemo(() => currentTasks.filter((task) => isStep(task) && !task.is_hidden), [currentTasks]);
-
-  const groups = useMemo(() => {
-    // 排除 todo 持久化的「任务清单」区块（后端 _TODO_GROUP_TITLE），避免与任务进度重复展示
-    const realGroups = currentTasks.filter((task) => task.kind === "group" && task.status !== "proposed" && !task.is_hidden && task.title !== "任务清单");
-    if (realGroups.length > 0) {
-      return realGroups.map((group) => ({
-        id: group.id,
-        title: group.title || "任务步骤",
-        steps: steps.filter((step) => isStep(step) && step.parent_task_id === group.id),
-      })).filter((group) => group.steps.length > 0);
-    }
-    if (steps.length > 0) return [{ id: "steps", title: "任务步骤", steps }];
-    return requestTask ? [{ id: "request", title: "任务步骤", steps: [requestTask] }] : [];
-  }, [currentTasks, steps]);
 
   const artifactFiles = useMemo(() => {
     const seen = new Set<string>();
@@ -95,39 +89,8 @@ export function TaskSummaryPanel() {
     openTab("files");
   };
 
-  // 任务进度：todo 清单优先（计划拆分确认后自动初始化、todo_write 驱动），
-  // 缺失时回退引擎任务步骤（与输入框贴条同口径），消除「执行清单/任务清单/建议步骤」重复区块。
-  const todoItems = useMemo(() => (Array.isArray(todos) ? todos.filter((t) => t.content) : []), [todos]);
-  const fallbackSteps = useMemo(() => groups.flatMap((g) => g.steps), [groups]);
-  const progressRows = useMemo(() => {
-    const useTodo = todoItems.length > 0;
-    const hasRunning = todoItems.some((t) => t.status === "in_progress");
-    const fallbackIdx = hasRunning ? -1 : todoItems.findIndex((t) => t.status !== "completed");
-    const rows = useTodo
-      ? todoItems.map((t, i) => ({
-          key: `${t.content}-${i}`,
-          title: t.content,
-          note: t.activeForm || "",
-          status: t.status === "completed" ? "done" : t.status === "in_progress" ? "running" : i === fallbackIdx ? "running" : "pending",
-          isTodo: true,
-          agentId: null,
-        }))
-      : fallbackSteps.map((s) => ({
-          key: String(s.id),
-          title: s.title,
-          note: s.note || "",
-          status: normalizeStatus(s.status),
-          isTodo: false,
-          agentId: s.agent_id ?? null,
-        }));
-    // 兜底：无 running 项时，首个未完成项按 running 展示（保证转圈动画可见）
-    if (rows.length > 0 && !rows.some((r) => r.status === "running")) {
-      const idx = rows.findIndex((r) => r.status !== "done");
-      if (idx >= 0) rows[idx] = { ...rows[idx], status: "running" };
-    }
-    return rows;
-  }, [todoItems, fallbackSteps]);
-  const progressDone = progressRows.filter((r) => r.status === "done").length;
+  // 任务进度：plan-282-1441（#3）已改为共享模块 useProgressRows（与输入框上方胶囊同源），
+  // 此处不再自算（旧实现只看 max(turn_id) 并回退 request 任务，与胶囊口径不一致）。
 
   const ArtifactRows = ({ items }: { items: ArtifactOut[] }) => (
     <div className="ts-artifact-list">
@@ -159,21 +122,18 @@ export function TaskSummaryPanel() {
             {progressRows.map((row, i) => (
               <div className={`ts-step-item ${row.status}`} key={`${row.key}-${i}`}>
                 <StepStatus status={row.status} />
-                {row.isTodo ? (
-                  <span className="ts-step-title" title={row.note || row.title}>{row.title}</span>
-                ) : (
-                  <button
-                    className="ts-step-title ts-step-jump"
-                    type="button"
-                    disabled={row.agentId == null}
-                    title={row.agentId != null ? "点击定位到执行消息" : row.title}
-                    onClick={() => {
-                      if (row.agentId != null) useChatStore.getState().requestScrollTo({ threadId: row.agentId });
-                    }}
-                  >
-                    {row.title}
-                  </button>
-                )}
+                <button
+                  className="ts-step-title ts-step-jump"
+                  type="button"
+                  disabled={row.agentId == null}
+                  title={row.agentId != null ? "点击定位到执行消息" : row.note || row.title}
+                  onClick={() => {
+                    if (row.agentId != null) useChatStore.getState().requestScrollTo({ threadId: row.agentId });
+                  }}
+                >
+                  {row.title}
+                </button>
+                {row.note && <span className="ts-step-note" title={row.note}>{row.note}</span>}
               </div>
             ))}
           </div>

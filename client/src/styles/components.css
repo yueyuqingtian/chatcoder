@@ -1,0 +1,575 @@
+/* ═══════════════════════════════════════════════════════════
+ * 组件库样式层（plan-282-1416 设计语言 v7）
+ *
+ * 职责：承载 client/src/components/ui/* 全部组件的视觉实现。
+ * 规则：
+ *  1. 只用 tokens.css 的令牌，不写魔法数字；
+ *  2. 同一层级圆角/高度/间距必须同值（输入 8 == 按钮 8，气泡 12 == 卡片 12）；
+ *  3. 过渡只用 color/border-color/background/transform/opacity/grid-template-rows，
+ *     禁止 width/height/margin 参与过渡（防跳变，见方案 §3.5）；
+ *  4. 聚焦态统一由 focus.css 输出中性色，本文件不新增品牌色描边。
+ *
+ * 加载顺序（main.tsx）：tokens → global → components → motion → focus
+ * ═══════════════════════════════════════════════════════════ */
+
+/* ── ① Field：label / hint / error 统一排版 ────────────────── */
+.ui-field { display: flex; flex-direction: column; gap: var(--field-gap-y); min-width: 0; }
+.ui-field-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-2);
+  line-height: 1.4;
+  user-select: none;
+}
+.ui-field-label .ui-field-req { color: var(--color-destructive); margin-left: 2px; }
+.ui-field-hint { font-size: 12px; color: var(--text-3); line-height: 1.5; }
+.ui-field-error { font-size: 12px; color: var(--color-destructive); line-height: 1.5; }
+.ui-field-control { min-width: 0; }
+
+/* ── ② Input / Textarea：尺寸三档 + prefix/suffix + 五态 ───── */
+.ui-input-wrap {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 var(--ctl-px);
+  min-height: var(--ctl-h-md);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--color-input);
+  color: var(--text-1);
+  transition: border-color var(--dur-2) var(--ease-standard), background var(--dur-2) var(--ease-standard);
+  min-width: 0;
+}
+.ui-input-wrap:hover:not(.is-disabled) { border-color: var(--border-hover); }
+.ui-input-wrap:focus-within:not(.is-disabled) { border-color: var(--text-2); }
+.ui-input-wrap.is-disabled { border-color: var(--border-light); background: var(--bg-hover); cursor: not-allowed; }
+.ui-input-wrap.is-invalid { border-color: var(--color-destructive); }
+.ui-input-wrap.size-sm { min-height: var(--ctl-h-sm); }
+.ui-input-wrap.size-lg { min-height: var(--ctl-h-lg); }
+
+/* 内嵌 input 去掉自身边框，视觉边界由外层 wrap 承载 */
+.ui-input-wrap > .ui-input,
+.ui-input-wrap > .ui-textarea {
+  border: none;
+  background: transparent;
+  padding: 0;
+  min-height: 0;
+  flex: 1;
+  border-radius: 0;
+}
+.ui-input-affix {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-3);
+  flex-shrink: 0;
+  font-size: 12px;
+}
+/* 独立使用（无 wrap）时的裸样式：兜底与 wrap 同视觉 */
+.ui-input,
+.ui-textarea {
+  width: 100%;
+  padding: 0 var(--ctl-px);
+  min-height: var(--ctl-h-md);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--color-input);
+  color: var(--text-1);
+  font-size: var(--fs-md, 13px);
+  font-family: inherit;
+  line-height: 1.5;
+  outline: none;
+  transition: border-color var(--dur-2) var(--ease-standard);
+}
+.ui-input::placeholder,
+.ui-textarea::placeholder { color: var(--text-3); }
+.ui-input:hover:not(:disabled),
+.ui-textarea:hover:not(:disabled) { border-color: var(--border-hover); }
+.ui-input:disabled,
+.ui-textarea:disabled { border-color: var(--border-light); background: var(--bg-hover); color: var(--text-3); cursor: not-allowed; }
+.ui-input[aria-invalid="true"],
+.ui-textarea[aria-invalid="true"] { border-color: var(--color-destructive); }
+.ui-textarea {
+  padding: 7px var(--ctl-px);
+  min-height: 60px;
+  resize: vertical;
+  line-height: 1.6;
+}
+.ui-textarea.auto-grow { resize: none; overflow-y: auto; }
+
+/* ── ③ Slider：轨道 4px + thumb 14 + 值常显 ─────────────────
+ * plan-282-1421（图1 修复）：行容器必须有**确定宽度**。
+ * .ui-card-row-control / .settings-row-control 都是 flex-shrink:0 且不声明宽度，
+ * 而 Radix 的 Root 是 flex:1 —— 没有确定宽度时轨道会塌陷成"一个圆点"。
+ * 故此处给出确定宽度（--slider-track-w），需要弹性时用 .is-fluid。 */
+.ui-slider-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  /* plan-282-1434：加 fallback 双保险——变量若被误删也不会再退化为"不可见 + 不可拖" */
+  width: var(--slider-track-w, 180px);
+  min-width: 0;
+}
+.ui-slider-row.is-fluid { width: 100%; }
+.ui-slider-root {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  height: 20px;
+  /* 命中区：至少与控件行同高，避免细轨道难以点中 */
+  min-height: var(--ctl-h-md);
+  user-select: none;
+  touch-action: none;
+}
+.ui-slider-track {
+  position: relative;
+  flex-grow: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border-strong);
+}
+.ui-slider-range { position: absolute; height: 100%; border-radius: 2px; background: var(--accent); }
+.ui-slider-thumb {
+  display: block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: none;
+  cursor: pointer;
+  transition: box-shadow var(--dur-2) var(--ease-standard), transform var(--dur-2) var(--ease-standard);
+}
+.ui-slider-thumb:hover { box-shadow: 0 0 0 4px var(--bg-hover); }
+.ui-slider-thumb:active { transform: scale(1.08); }
+.ui-slider-thumb:focus-visible { outline: none; box-shadow: 0 0 0 4px var(--bg-active); }
+.ui-slider-root[data-disabled] { opacity: 0.5; }
+.ui-slider-value {
+  flex-shrink: 0;
+  min-width: 40px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── ④ Select（Radix）+ 原生兜底：与 Input 同高同圆角 ─────── */
+/* 浮层层级约定（重要）：
+   Dialog 遮罩/面板为 1000/1001，浮层组件（Select 下拉 / Menu / Tooltip）必须高于它，
+   否则在弹窗内打开时会被弹窗面板盖住——表现为「点了没反应 / 看不到下拉选项」。
+   Radix popper 的外层 wrapper 会继承 Content 的计算 z-index（见 react-popper contentZIndex），
+   因此只调 .ui-select-content 一处即可整体生效。 */
+.ui-select-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: 0 var(--ctl-px);
+  min-height: var(--ctl-h-md);
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--color-input);
+  color: var(--text-1);
+  font-size: var(--fs-md, 13px);
+  cursor: pointer;
+  outline: none;
+  transition: border-color var(--dur-2) var(--ease-standard);
+}
+.ui-select-trigger:hover { border-color: var(--border-hover); }
+.ui-select-trigger[data-state="open"] { border-color: var(--text-2); }
+.ui-select-trigger:disabled { border-color: var(--border-light); background: var(--bg-hover); color: var(--text-3); cursor: not-allowed; }
+.ui-select-trigger.size-sm { min-height: var(--ctl-h-sm); font-size: 12px; }
+.ui-select-trigger.size-lg { min-height: var(--ctl-h-lg); }
+.ui-select-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ui-select-value[data-placeholder] { color: var(--text-3); }
+.ui-select-icon { color: var(--text-3); flex-shrink: 0; display: inline-flex; }
+
+.ui-select-content {
+  z-index: 1200;
+  overflow: hidden;
+  min-width: var(--radix-select-trigger-width, 120px);
+  max-height: var(--radix-select-content-available-height, 320px);
+  padding: var(--sp-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--color-popover);
+  box-shadow: var(--shadow-md);
+  animation: ui-pop-in var(--dur-3) var(--ease-emphasized-decel);
+}
+.ui-select-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  height: var(--ctl-h-sm);
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-sm);
+  font-size: 12px;
+  color: var(--text-1);
+  cursor: pointer;
+  outline: none;
+  user-select: none;
+}
+/* plan-282-1434：弹窗内下拉的悬停高亮。
+   根因：Radix Select 的 data-highlighted 由 item 的 focus 驱动（onPointerMove 里调 focus()），
+   而 item 经 Portal 挂在 document.body，处在 Dialog 的 FocusScope 之外 → focus() 被判焦点逃逸
+   并立刻拉回 → onBlur 撤销高亮（视觉上"一闪即没"）。
+   :hover 只取决于指针位置、与焦点无关，可稳定生效；data-highlighted 规则保留给键盘导航。 */
+@media (hover: hover) {
+  .ui-select-item:hover { background: var(--bg-hover); }
+}
+.ui-select-item[data-highlighted] { background: var(--bg-hover); }
+.ui-select-item[data-state="checked"] { color: var(--text-1); font-weight: 500; }
+.ui-select-item-indicator { display: inline-flex; color: var(--accent); flex-shrink: 0; }
+.ui-select-group-label { padding: var(--sp-2) var(--sp-3) var(--sp-1); font-size: 11px; color: var(--text-3); user-select: none; }
+
+/* 原生 select 兜底（NativeSelect）：外观与 trigger 对齐 */
+.ui-native-select {
+  padding: 0 var(--sp-3);
+  min-height: var(--ctl-h-md);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--color-input);
+  color: var(--text-1);
+  font-size: var(--fs-md, 13px);
+  font-family: inherit;
+  cursor: pointer;
+  outline: none;
+  transition: border-color var(--dur-2) var(--ease-standard);
+}
+.ui-native-select:hover { border-color: var(--border-hover); }
+.ui-native-select:disabled { border-color: var(--border-light); background: var(--bg-hover); color: var(--text-3); cursor: not-allowed; }
+
+/* ── ⑤ Checkbox / Radio：16px，选中走 accent ──────────────── */
+.ui-check-row,
+.ui-radio-row {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+  cursor: pointer;
+  user-select: none;
+  min-width: 0;
+}
+.ui-check-row.is-disabled,
+.ui-radio-row.is-disabled { opacity: 0.5; cursor: not-allowed; }
+.ui-checkbox {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  background: var(--color-input);
+  color: var(--color-primary-foreground);
+  cursor: pointer;
+  outline: none;
+  transition: border-color var(--dur-2) var(--ease-standard), background var(--dur-2) var(--ease-standard);
+}
+.ui-checkbox:hover:not(:disabled) { border-color: var(--text-3); }
+.ui-checkbox[data-state="checked"],
+.ui-checkbox[data-state="indeterminate"] { background: var(--accent); border-color: var(--accent); }
+.ui-checkbox:disabled { cursor: not-allowed; opacity: 0.6; }
+.ui-radio {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  background: var(--color-input);
+  cursor: pointer;
+  outline: none;
+  transition: border-color var(--dur-2) var(--ease-standard);
+}
+.ui-radio:hover:not(:disabled) { border-color: var(--text-3); }
+.ui-radio[data-state="checked"] { border-color: var(--accent); border-width: 4px; }
+.ui-radio:disabled { cursor: not-allowed; opacity: 0.6; }
+.ui-check-label { font-size: var(--fs-md, 13px); color: var(--text-1); line-height: 1.4; }
+
+/* ── ⑥ Switch（Radix）：32×18，thumb 14 ───────────────────── */
+.ui-switch-root {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 32px;
+  height: 18px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: 9px;
+  background: var(--border-strong);
+  cursor: pointer;
+  outline: none;
+  transition: background var(--dur-2) var(--ease-standard);
+}
+.ui-switch-root:hover:not(:disabled) { background: var(--text-3); }
+.ui-switch-root[data-state="checked"] { background: var(--accent); }
+.ui-switch-root:disabled { opacity: 0.5; cursor: not-allowed; }
+.ui-switch-thumb {
+  display: block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  transform: translateX(2px);
+  transition: transform var(--dur-3) var(--ease-emphasized-decel);
+  will-change: transform;
+}
+.ui-switch-root[data-state="checked"] .ui-switch-thumb { transform: translateX(16px); }
+
+/* ── ⑦ IconButton：收敛 sb-icon-btn / titlebar-btn / icon-btn ─ */
+.ui-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard);
+}
+.ui-icon-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-1); }
+.ui-icon-btn:disabled { opacity: 0.4; cursor: default; }
+.ui-icon-btn.is-active { background: var(--bg-active); color: var(--text-1); }
+.ui-icon-btn.tone-danger:hover:not(:disabled) { color: var(--color-destructive); }
+.ui-icon-btn.size-xs { width: 22px; height: 22px; border-radius: var(--r-sm); }
+.ui-icon-btn.size-lg { width: 32px; height: 32px; }
+
+/* ── ⑧ Card / ListRow：行分隔线走卡片全宽，不用负 margin ────── */
+.ui-card {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+.ui-card-title {
+  padding: var(--sp-4) var(--sp-5) 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  line-height: 1.4;
+}
+.ui-card-body { padding: var(--sp-2) var(--sp-5) var(--sp-4); }
+/* CardRow：左信息块（标题+描述）+ 右控件槽，行高由内容决定且带固定内距 */
+.ui-card-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-5);
+  padding: var(--row-pad-y) var(--sp-5);
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+.ui-card > .ui-card-row:last-child { border-bottom: none; }
+.ui-card-row.is-disabled { opacity: 0.45; pointer-events: none; }
+.ui-card-row-info { flex: 1; min-width: 0; }
+.ui-card-row-title { font-size: 13px; font-weight: 500; color: var(--text-1); line-height: 1.45; }
+.ui-card-row-desc { font-size: 12px; color: var(--text-3); line-height: 1.5; margin-top: 2px; }
+.ui-card-row-control { flex-shrink: 0; display: flex; align-items: center; justify-content: flex-end; gap: var(--sp-3); min-width: 0; }
+
+/* 资源列表项（增删列表） */
+.ui-list { display: flex; flex-direction: column; gap: var(--sp-3); }
+.ui-list-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-main);
+  min-width: 0;
+}
+.ui-list-row-info { flex: 1; min-width: 0; }
+.ui-list-row-name { font-size: 13px; font-weight: 500; color: var(--text-1); }
+.ui-list-row-desc { font-size: 12px; color: var(--text-3); margin-top: 2px; line-height: 1.5; word-break: break-word; }
+.ui-list-row-actions { display: flex; align-items: center; gap: var(--sp-3); flex-shrink: 0; }
+
+/* ── ⑨ PageShell：唯一滚动容器 + 固定标题区（防跳变） ──────── */
+.ui-page {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* 关键：恒定预留滚动条宽度，内容盒宽度在「有/无滚动条」两态相同 */
+  scrollbar-gutter: stable;
+  padding: var(--sp-7) var(--sp-7) 0;
+}
+.ui-page-inner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+  max-width: var(--page-max-w);
+  margin: 0 auto;
+  padding-bottom: var(--sp-7);
+}
+.ui-page-inner.is-wide { max-width: var(--page-max-w-wide); }
+/* 标题区高度固定（标题 28px + 间距），副标题缺省时不占位→卡片区起点恒定 */
+.ui-page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-4); min-height: 28px; }
+.ui-page-title { font-size: 20px; font-weight: 600; color: var(--text-1); line-height: 28px; letter-spacing: -0.2px; }
+.ui-page-subtitle { font-size: 12px; color: var(--text-3); line-height: 18px; margin-top: 2px; }
+.ui-page-head-actions { display: flex; align-items: center; gap: var(--sp-3); flex-shrink: 0; }
+.ui-page-cards { display: flex; flex-direction: column; gap: var(--sp-5); }
+
+/* ── ⑩ Collapse：grid-template-rows 真实高度过渡 ─────────── */
+.ui-collapse { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows var(--dur-4) var(--ease-emphasized-decel), opacity var(--dur-3) var(--ease-emphasized-decel); }
+.ui-collapse[data-open="true"] { grid-template-rows: 1fr; opacity: 1; }
+.ui-collapse > .ui-collapse-inner { overflow: hidden; min-height: 0; }
+
+/* ── ⑪ Menu（Radix DropdownMenu） ─────────────────────────── */
+.ui-menu-content {
+  z-index: 1200; /* 浮层：与 Select 下拉同层，须高于 Dialog(1000/1001) */
+  min-width: 150px;
+  padding: var(--sp-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--color-popover);
+  box-shadow: var(--shadow-md);
+  animation: ui-pop-in var(--dur-3) var(--ease-emphasized-decel);
+}
+.ui-menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  height: var(--ctl-h-sm);
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-sm);
+  font-size: 12px;
+  color: var(--text-1);
+  cursor: pointer;
+  outline: none;
+  user-select: none;
+}
+.ui-menu-item[data-highlighted] { background: var(--bg-hover); }
+.ui-menu-item.is-danger { color: var(--color-destructive); }
+.ui-menu-item.is-danger[data-highlighted] { background: var(--error-soft); }
+.ui-menu-item.is-active { background: var(--bg-active); font-weight: 500; }
+.ui-menu-item[data-disabled] { opacity: 0.45; pointer-events: none; }
+.ui-menu-sep { height: 1px; margin: var(--sp-1) 0; background: var(--border); }
+.ui-menu-label { padding: var(--sp-2) var(--sp-3) var(--sp-1); font-size: 11px; color: var(--text-3); }
+
+/* ── ⑫ Tooltip ────────────────────────────────────────────── */
+.ui-tooltip {
+  z-index: 1300; /* 浮层：最高，避免被同层下拉/菜单遮挡 */
+  max-width: 260px;
+  padding: 5px 9px;
+  border-radius: var(--r-md);
+  background: var(--color-tooltip);
+  color: var(--color-tooltip-foreground);
+  font-size: 12px;
+  line-height: 1.45;
+  box-shadow: var(--shadow-sm);
+  animation: ui-pop-in var(--dur-2) var(--ease-emphasized-decel);
+}
+
+/* ── ⑬ Dialog（Radix）：真实入场 + 退场（Presence 驱动） ───── */
+.ui-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: var(--bg-overlay);
+}
+.ui-dialog-overlay[data-state="open"] { animation: ui-overlay-in var(--dur-3) var(--ease-emphasized-decel); }
+.ui-dialog-overlay[data-state="closed"] { animation: ui-overlay-out var(--dur-2) var(--ease-emphasized-accel); }
+.ui-dialog-content {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 1001;
+  display: flex;
+  flex-direction: column;
+  max-height: 86vh;
+  width: min(var(--ui-dialog-w, 720px), 92vw);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  background: var(--color-popover);
+  box-shadow: var(--shadow-xl);
+  overflow: hidden;
+  outline: none;
+}
+.ui-dialog-content[data-state="open"] { animation: ui-dialog-in var(--dur-3) var(--ease-emphasized-decel); }
+.ui-dialog-content[data-state="closed"] { animation: ui-dialog-out var(--dur-2) var(--ease-emphasized-accel); }
+.ui-dialog-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: var(--sp-5) var(--sp-6);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+  flex-shrink: 0;
+}
+.ui-dialog-title-wrap { min-width: 0; }
+.ui-dialog-title { font-size: 15px; font-weight: 600; color: var(--text-1); line-height: 1.4; }
+.ui-dialog-subtitle { font-size: 12px; color: var(--text-3); margin-top: 3px; line-height: 1.5; }
+.ui-dialog-actions { display: flex; align-items: center; gap: var(--sp-3); flex-shrink: 0; }
+.ui-dialog-body { flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding: var(--sp-6); }
+/* 确认类弹窗正文（ConfirmDialog）——文案行高放宽、颜色次级 */
+.ui-dialog-message { font-size: 13px; line-height: 1.6; color: var(--text-2); word-break: break-word; }
+.ui-dialog-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-6);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+/* ── ⑮ PageTransition：页面/标签切换过渡（plan-282-1421） ─────
+ * 只动 transform + opacity，绝不触碰布局属性；
+ * 位移量走 --motion-dist（动画档位缩放），关闭档为 0 → 瞬时但仍达终态。
+ * 方向由修饰类决定（up / left / none），避免在 CSS 里做表达式判断。 */
+.ui-page-transition {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  animation: ui-page-in-up var(--dur-3) var(--ease-emphasized-decel) both;
+}
+.ui-page-transition.no-fill { height: auto; }
+.ui-page-transition.dir-left { animation-name: ui-page-in-left; }
+.ui-page-transition.dir-none { animation-name: ui-page-in-fade; }
+/* 右面板 tab：面板必须全量挂载（切 tab 不能丢内部状态），因此不用 key 重挂载，
+   而是靠"类名从无到有"触发同一套入场关键帧。 */
+.ui-tab-enter { animation: ui-page-in-up var(--dur-3) var(--ease-emphasized-decel) both; }
+@keyframes ui-page-in-up {
+  from { opacity: 0; transform: translateY(var(--pt-dist, 6px)); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes ui-page-in-left {
+  from { opacity: 0; transform: translateX(var(--pt-dist, 6px)); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes ui-page-in-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* ── ⑭ 关键帧（统一入场/退场，禁止各组件自造） ────────────── */
+@keyframes ui-pop-in {
+  from { opacity: 0; transform: translateY(calc(-4px * var(--motion-dist))) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes ui-overlay-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes ui-overlay-out { from { opacity: 1; } to { opacity: 0; } }
+@keyframes ui-dialog-in {
+  from { opacity: 0; transform: translate(-50%, calc(-50% + 8px * var(--motion-dist))) scale(0.98); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+@keyframes ui-dialog-out {
+  from { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  to { opacity: 0; transform: translate(-50%, calc(-50% + 4px * var(--motion-dist))) scale(0.985); }
+}

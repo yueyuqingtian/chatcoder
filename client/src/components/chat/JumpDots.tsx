@@ -1,7 +1,11 @@
 /** JumpDots：消息区左侧定位横线刻度条（紧凑刻度 + 滚动聚焦自动跟随）。
- * - 紧凑排布：短横线密排（节距 ~9px）左对齐；聚焦线加长加粗，其余刻度不位移（布局零跳变）；
+ * - 紧凑排布：短横线密排（节距 ~9px）左对齐；
  * - 聚焦态由 MessageFlowCore 按消息流滚动位置计算（scrollspy）自动切换，不再固定取最后一条；
- * - 鼠标 hover 触发平滑水波涟漪阻尼位移动效与摘要卡片浮层；点击快速定位到该 turn。
+ * - 鼠标 hover 触发管风琴式**向右阶梯加宽**与摘要卡片浮层；点击快速定位到该 turn。
+ *
+ * plan-282-1434（B4）：修正此前的两个问题——
+ *  1) 横条用 translateX 整体右移（"图4 右移现象"）→ 现在一律左对齐，只让右端变长；
+ *  2) hover 时 scrollspy 的聚焦黑条仍叠加显示 → 现在 hover 进行中只高亮鼠标定位那一条。
  */
 import { useState, useMemo } from "react";
 import type { TimelineEntry } from "./timeline";
@@ -49,25 +53,25 @@ export function JumpDots({ entries, onJump, activeIndex }: {
           const isActive = i === activeDot;
           const diff = hovered !== null ? Math.abs(hovered - i) : null;
 
-          // 水波涟漪位移与长度（聚焦线更长更粗，其余线不动）
-          let tx = 0;
-          let width = isActive ? 13 : 8;
-          let opacity = isActive ? 1 : 0.3;
-          let barHeight = isActive ? "2px" : "1.5px";
+          /** plan-282-1434（B4）：管风琴改为「向右阶梯加宽」。
+           *  - 不再使用 translateX —— 此前 `transform: translateX(tx)` 让整条横线右移（图4 现象）；
+           *    现在横条一律左对齐，只让**右端**变长，视觉上像向右伸展的阶梯。
+           *  - hover 进行中时不套用 scrollspy 的"加粗+最深色"，只高亮鼠标定位的那一条；
+           *    无 hover 时恢复 scrollspy 聚焦表现。 */
+          let width = 8;
+          let opacity = isActive && diff === null ? 1 : 0.3;
+          let barHeight = isActive && diff === null ? "2px" : "1.5px";
 
           if (diff === 0) {
-            tx = 6;
-            width = 15;
+            width = 16;
             opacity = 1;
             barHeight = "2px";
           } else if (diff === 1) {
-            tx = 3.5;
-            width = 11.5;
-            opacity = 0.65;
+            width = 12;
+            opacity = 0.7;
           } else if (diff === 2) {
-            tx = 1.5;
-            width = 9.5;
-            opacity = 0.45;
+            width = 10;
+            opacity = 0.5;
           }
 
           return (
@@ -86,11 +90,10 @@ export function JumpDots({ entries, onJump, activeIndex }: {
                 <span
                   className="jump-tick-bar"
                   style={{
-                    transform: `translateX(${tx}px)`,
                     width: `${width}px`,
                     opacity,
                     height: barHeight,
-                    backgroundColor: isActive || diff === 0 ? "var(--text-1)" : "var(--text-3)",
+                    backgroundColor: diff === 0 || (diff === null && isActive) ? "var(--text-1)" : "var(--text-3)",
                   }}
                 />
               </button>

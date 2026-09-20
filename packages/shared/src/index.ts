@@ -101,8 +101,195 @@ export interface ProjectOut {
   auto_scan_rules: boolean;
   pinned: boolean;
   archived: boolean;
+  /** plan-282-1441（#5 工作树）：工作树作为独立工作区展示所需的标识 */
+  is_worktree?: boolean;
+  parent_project_id?: number | null;
+  worktree_branch?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
+}
+
+/** plan-282-1441（#5）：工作树（含 git 状态摘要）——GET /projects/{id}/worktrees */
+export interface WorktreeOut {
+  id: number;
+  name: string;
+  path: string;
+  branch: string | null;
+  parent_project_id: number | null;
+  parent_path: string | null;
+  /** 有未提交变更 */
+  dirty: boolean;
+  /** 相对主分支的领先/落后提交数 */
+  ahead: number;
+  behind: number;
+}
+
+/** plan-282-1441（#5）：可用于创建工作树的仓库候选（项目根 + 子仓库）。
+ *  典型用途：根目录是空仓库、真实代码在 clinic / clinicFrontEnd 两个子仓库。 */
+export interface RepoCandidate {
+  path: string;
+  name: string;
+  /** 是否为项目根仓库 */
+  is_root: boolean;
+  /** 是否已有提交（空仓库不能作为工作树起点） */
+  has_commits: boolean;
+  branch: string;
+  dirty: boolean;
+}
+
+/** 合并差异文件 */
+export interface WorktreeMergeFile {
+  path: string;
+  status: "added" | "modified" | "deleted" | "renamed" | "copied";
+  conflict: boolean;
+}
+
+export interface WorktreeMergePreview {
+  ok: boolean;
+  base_branch: string;
+  branch: string;
+  files: WorktreeMergeFile[];
+  has_conflict: boolean;
+}
+
+/** plan-282-1441（#7）：数据库连接（密码不回传，只有 has_password） */
+export interface DbConnectionOut {
+  id: number;
+  project_id: number;
+  name: string;
+  kind: "mysql" | "postgresql" | "sqlserver" | string;
+  host: string;
+  port: number;
+  database: string | null;
+  username: string | null;
+  has_password: boolean;
+  params: Record<string, unknown>;
+  is_active: boolean;
+}
+
+/** plan-282-1441（#7）：数据库权限策略（服务端强制门控的真值源） */
+export interface DbPolicyOut {
+  project_id: number;
+  allow_read: boolean;
+  allow_write: boolean;
+  allow_ddl: boolean;
+  require_approval: boolean;
+  row_limit: number;
+  timeout_s: number;
+}
+
+/** plan-282-1441（#8）：调试状态（供调试面板展示"停在哪一行"） */
+export interface DebugStatusOut {
+  connected: boolean;
+  target: "web" | "java" | string;
+  breakpoints: number;
+  paused: boolean;
+  file?: string | null;
+  line?: number | null;
+  function?: string | null;
+  hitCount: number;
+  stack: Array<{ function?: string; url?: string; line?: number | null; index?: number | null }>;
+  variables: Array<{ name?: string; value?: unknown; type?: string }>;
+  reason?: string | null;
+}
+
+/** plan-282-1441（#8）：「开发调试」面板配置（落库，修“改了不保存”）。
+ *  单行全局配置：Web 调试端口 + JDWP 目标主机/端口。 */
+export interface DebugSettingsOut {
+  web_port: number;
+  jdwp_host: string;
+  jdwp_port: number;
+  /** false = 从未保存过，返回的是默认值 */
+  saved?: boolean;
+  updated_at?: string | null;
+}
+
+/** plan-282-1441（Arthas 方案）：Java 现场诊断会话状态（可与 IDEA 调试并存）。
+ *  来自 /api/debug/arthas/status 与 arthas.event 广播。 */
+export interface ArthasStatusOut {
+  ok: boolean;
+  attached: boolean;
+  pid?: number | null;
+  http_port?: number | null;
+  version?: string | null;
+  java?: string;
+  jar?: string;
+  main_class?: string;
+  attached_at?: number;
+  idle_seconds?: number;
+  active_jobs?: number;
+  jobs?: Array<{ job_id: string | number; command?: string; created_at?: number }>;
+}
+
+/** Arthas 观测命中条目（watch / trace / tt）：面板列表展示。
+ *  value 是 Arthas 自己渲染好的观测表达式结果（多行文本），面板直接显示。 */
+export interface ArthasEntryOut {
+  type?: string;
+  ts?: number | string | null;
+  cost?: number | null;
+  class?: string | null;
+  method?: string | null;
+  location?: string | null;
+  access_point?: string | null;
+  value?: string | null;
+  params?: unknown;
+  return_obj?: unknown;
+  throwable?: unknown;
+  children?: unknown[];
+}
+
+/** Arthas 进程条目（java_list_processes 的返回，面板可点选 attach）。 */
+export interface ArthasProcessOut {
+  pid: number;
+  main_class: string;
+  jvm_args?: string;
+  debugging?: boolean;
+  jdwp_address?: string;
+  kind?: string;
+}
+
+/** Arthas 配置与探测结果（面板展示“为什么还不能用”与本地 jar 路径）。 */
+export interface ArthasConfigOut {
+  ok: boolean;
+  java_home?: string;
+  java_home_resolved?: string;
+  java_home_source?: string;
+  boot_jar?: string;
+  boot_jar_resolved?: string;
+  boot_jar_source?: string;
+  cache_dir?: string;
+  repo_mirror?: string;
+  idle_timeout_sec?: number;
+  http_port?: string;
+  disabled_commands?: string;
+}
+
+/** plan-282-1441（#6）：插件市场条目（内置目录 + 已安装标注） */export interface PluginMarketItem {
+  name: string;
+  displayName: string;
+  description: string;
+  descriptionZh: string;
+  category: string;
+  tags: string[];
+  author: string;
+  version: string;
+  /** 安装来源：本地目录 / git 地址（内置目录条目可能有值，供"从该来源安装"） */
+  source?: string;
+  featured?: boolean;
+  installed?: boolean;
+  enabled?: boolean;
+  /** 已安装条目附带的信息 */
+  keywords?: string[];
+  marketplaceName?: string;
+  logo?: string;
+  skillsDir?: string;
+  path?: string;
+  installedAt?: string | null;
+  /** plan-282-1441：真实扫描到的插件——贡献技能数与技能名（市场卡片展示用） */
+  skillCount?: number;
+  skills?: string[];
+  /** 是否提供 MCP 连接器（插件的 .mcp.json） */
+  hasMcp?: boolean;
 }
 
 export interface SessionOut {
@@ -122,6 +309,8 @@ export interface SessionOut {
   has_running?: boolean;
   has_interrupted_turn?: boolean;
   last_activity_at?: string | null;
+  /** 运行中 turn 的开始时间——侧栏「执行中任务」稳定排序键（运行期间不变，避免上下跳动） */
+  running_started_at?: string | null;
   /** plan-671: 目标模式状态（前端恢复目标胶囊） */
   goal_text?: string | null;
   goal_status?: "none" | "active" | "completed" | "cancelled";

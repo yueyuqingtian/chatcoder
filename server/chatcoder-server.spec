@@ -18,6 +18,10 @@ SERVER_DIR = Path(SPECPATH).resolve()
 # 未配置默认模型时用户在应用设置中添加 BYOK 模型即可。
 datas = [
     (str(SERVER_DIR.parent / ".env.example"), ".env.example"),
+    # plan-282-1441（#6）：内置插件目录。plugin_service 按
+    # `Path(__file__).parent.parent / "data" / "plugin_catalog.json"` 读取，
+    # 不打进产物则打包版的市场页会空空如也（源码运行正常、打包后失效）。
+    (str(SERVER_DIR / "app" / "data"), "app/data"),
 ]
 
 hiddenimports = [
@@ -49,6 +53,15 @@ hiddenimports = [
     # driver 数据(node 子进程+JS)由 pyinstaller-hooks-contrib 的 playwright hook 收集
     "playwright",
     "playwright.async_api",
+    # plan-282-1441（#7/#8）：内置 MCP 服务——开发态以 `python -m app.mcp_servers.<name>`
+    # 拉起（动态 import，PyInstaller 静态分析看不到）；打包态由 run_server 的
+    # `--mcp-server <name>` 分流运行。两者都必须显式声明，否则打包版内置 MCP 起不来。
+    "app.mcp_servers",
+    "app.mcp_servers.base",
+    "app.mcp_servers.database",
+    "app.mcp_servers.debugger",
+    "app.mcp_servers.db_drivers",
+    "app.mcp_servers.debug_client",
 ]
 
 a = Analysis(

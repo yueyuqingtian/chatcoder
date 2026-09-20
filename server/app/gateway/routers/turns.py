@@ -640,6 +640,12 @@ async def confirm_plan_turn(turn_id: int, body: TaskConfirmBody,
         return {"ok": True, "mode": "cancelled", "permission_mode": _permission_mode}
 
     await turn_service.update_turn_status(db, turn_id, "running")
+    # plan-282-1422: 确认执行复用规划 turn（execute_confirmed_plan 不新建 turn）——
+    # 必须广播本 turn 已回到 running，否则前端 turns 列表里该行仍是
+    # awaiting_confirmation（终态），计划轮的首条用户消息操作行会被判为"已结束"
+    # 而在执行期间常驻复制/回滚按钮。
+    from app.orchestration.agent_events import broadcast_turn_updated
+    await broadcast_turn_updated(turn.session_id, turn_id, "running")
 
     async def _run_plan():
         from app.persistence.database import async_session_factory

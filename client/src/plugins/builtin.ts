@@ -11,6 +11,8 @@ import { RightPanel } from "../components/panel/RightPanel";
 import { ThinkingBlock } from "../components/chat/ThinkingBlock";
 import { ToolTree } from "../components/chat/ToolTree";
 import { SubagentCard } from "../components/chat/SubagentCard";
+import { PlanCard } from "../components/chat/PlanCard";
+import { CompactCard } from "../components/chat/CompactCard";
 
 let _registered = false;
 
@@ -27,5 +29,8 @@ export function registerBuiltinPlugins(): void {
   registerPlugin({ id: "builtin.thinking-block", name: "思考块", slot: "thinking-block", description: "思考过程折叠块", builtin: true, replaceable: true, component: ThinkingBlock });
   registerPlugin({ id: "builtin.tool-tree", name: "工具调用树", slot: "tool-tree", description: "工具调用行（合并行/写操作行）", builtin: true, replaceable: true, component: ToolTree });
   registerPlugin({ id: "builtin.subagent-card", name: "子代理卡片", slot: "subagent-card", description: "消息流子代理入口卡片", builtin: true, replaceable: true, component: SubagentCard });
+  // plan-282-1421：内容卡片纳入插件体系（可整体替换计划卡/压缩卡实现）
+  registerPlugin({ id: "builtin.plan-card", name: "计划卡", slot: "plan-card", description: "计划预览与确认卡片（方案确认 / 执行中 / 已完成）", builtin: true, replaceable: true, component: PlanCard });
+  registerPlugin({ id: "builtin.compact-card", name: "压缩卡", slot: "compact-card", description: "上下文压缩块卡片（摘要 + 还原入口）", builtin: true, replaceable: true, component: CompactCard });
   applyStoredOverrides();
 }

@@ -10,7 +10,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { CronValidateOut, ScheduledMissedPolicy, ScheduledTaskOut } from "@chatcoder/shared";
 import { api } from "../../api/client";
 import { useChatStore } from "../../store/chat";
-import { FormDialog } from "../ui/FormDialog";
+import { FormDialog, Input, Select, Textarea } from "../ui";
 
 /* ── 可视化频率模型 ── */
 
@@ -298,16 +298,15 @@ export function ScheduledTaskFormModal({
       {err && <div className="sched-error">{err}</div>}
       <div className="settings-form-field">
         <label className="settings-field-label">任务名称</label>
-        <input className="ui-input" placeholder="如 每日构建检查" value={form.name}
-          onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} />
+        <Input placeholder="如 每日构建检查" value={form.name}
+          onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} aria-label="任务名称" />
       </div>
       <div className="settings-form-field">
         <label className="settings-field-label">注入到会话</label>
-        <select className="ui-select" value={form.session_id ?? ""}
-          onChange={(e) => setForm((p) => ({ ...p, session_id: e.target.value ? Number(e.target.value) : null }))}>
-          <option value="">— 请选择会话 —</option>
-          {sessions.map((s) => <option key={s.id} value={s.id}>{s.title || `会话 #${s.id}`}</option>)}
-        </select>
+        <Select value={form.session_id != null ? String(form.session_id) : ""}
+          onChange={(v) => setForm((p) => ({ ...p, session_id: v ? Number(v) : null }))}
+          options={[{ value: "", label: "— 请选择会话 —" }, ...sessions.map((s) => ({ value: String(s.id), label: s.title || `会话 #${s.id}` }))]}
+          aria-label="注入到会话" />
       </div>
 
       <div className="settings-form-field">
@@ -341,12 +340,10 @@ export function ScheduledTaskFormModal({
       {form.freq === "hourly" && (
         <div className="settings-form-field">
           <label className="settings-field-label">在每小时的哪一分钟触发</label>
-          <select className="ui-select" style={{ maxWidth: 160 }} value={form.minute}
-            onChange={(e) => setForm((p) => ({ ...p, minute: Number(e.target.value) }))}>
-            {Array.from({ length: 60 }, (_, i) => (
-              <option key={i} value={i}>第 {pad2(i)} 分</option>
-            ))}
-          </select>
+          <Select style={{ maxWidth: 160 }} value={String(form.minute)}
+            onChange={(v) => setForm((p) => ({ ...p, minute: Number(v) }))}
+            options={Array.from({ length: 60 }, (_, i) => ({ value: String(i), label: `第 ${pad2(i)} 分` }))}
+            aria-label="触发分钟" />
         </div>
       )}
 
@@ -355,8 +352,8 @@ export function ScheduledTaskFormModal({
           <label className="settings-field-label">
             {form.freq === "daily" ? "每天触发时刻" : form.freq === "weekly" ? "触发时刻" : "每月触发时刻"}
           </label>
-          <input type="time" className="ui-input" style={{ maxWidth: 160 }}
-            value={timeValue} onChange={(e) => setTimeValue(e.target.value)} />
+          <Input type="time" style={{ maxWidth: 160 }}
+            value={timeValue} onChange={(e) => setTimeValue(e.target.value)} aria-label="触发时刻" />
         </div>
       )}
 
@@ -378,12 +375,10 @@ export function ScheduledTaskFormModal({
       {form.freq === "monthly" && (
         <div className="settings-form-field">
           <label className="settings-field-label">每月哪一天触发</label>
-          <select className="ui-select" style={{ maxWidth: 160 }} value={form.monthDay}
-            onChange={(e) => setForm((p) => ({ ...p, monthDay: Number(e.target.value) }))}>
-            {Array.from({ length: 31 }, (_, i) => (
-              <option key={i + 1} value={i + 1}>{i + 1} 日</option>
-            ))}
-          </select>
+          <Select style={{ maxWidth: 160 }} value={String(form.monthDay)}
+            onChange={(v) => setForm((p) => ({ ...p, monthDay: Number(v) }))}
+            options={Array.from({ length: 31 }, (_, i) => ({ value: String(i + 1), label: `${i + 1} 日` }))}
+            aria-label="每月触发日" />
           {form.monthDay > 28 && (
             <div className="sched-field-desc">部分月份没有 {form.monthDay} 日，这些月份将自动跳过。</div>
           )}
@@ -393,8 +388,9 @@ export function ScheduledTaskFormModal({
       {form.freq === "custom" && (
         <div className="settings-form-field">
           <label className="settings-field-label">自定义表达式（高级：分 时 日 月 周）</label>
-          <input className={"ui-input sched-cron-input" + (cronState.cls === "err" ? " invalid" : "")}
+          <Input className={"sched-cron-input" + (cronState.cls === "err" ? " invalid" : "")}
             placeholder="0 9 * * 1-5" value={form.customCron} style={{ fontFamily: "var(--font-mono)" }}
+            aria-label="自定义 cron 表达式"
             onChange={(e) => setForm((p) => ({ ...p, customCron: e.target.value }))} />
         </div>
       )}
@@ -405,8 +401,8 @@ export function ScheduledTaskFormModal({
 
       <div className="settings-form-field">
         <label className="settings-field-label">触发时注入的指令</label>
-        <textarea className="ui-textarea" rows={3} placeholder="如：运行测试并总结失败原因"
-          value={form.prompt} onChange={(e) => setForm((p) => ({ ...p, prompt: e.target.value }))} />
+        <Textarea rows={3} placeholder="如：运行测试并总结失败原因"
+          value={form.prompt} onChange={(e) => setForm((p) => ({ ...p, prompt: e.target.value }))} aria-label="触发时注入的指令" />
       </div>
       <div className="settings-form-field">
         <label className="settings-field-label">错过策略</label>

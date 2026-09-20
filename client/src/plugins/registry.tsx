@@ -15,7 +15,10 @@ export type SlotId =
   | "right-panel"
   | "thinking-block"
   | "tool-tree"
-  | "subagent-card";
+  | "subagent-card"
+  /** plan-282-1421：内容卡片也纳入可替换体系（"考虑是否可替换为通用组件"） */
+  | "plan-card"
+  | "compact-card";
 
 export interface PluginDescriptor {
   id: string;
