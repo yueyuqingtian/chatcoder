@@ -81,6 +81,42 @@ async def _ensure_tool_dir_ignored(repo: str) -> None:
         logger.debug("[worktree] 写入 .git/info/exclude 失败(非阻塞)", exc_info=True)
 
 
+def _force_rmtree(path: Path) -> bool:
+    """强制递归删除目录，返回是否已彻底删除。
+
+    背景：`git worktree remove` 在这些情形会失败——
+      - 工作树内存在被**忽略的文件**（git ≥2.31 需要连续两次 `--force` 才肯删）；
+      - Windows 上文件带只读位、或被 IDE / 杀软占用。
+    此前失败后只做 `worktree prune`（仅清理 git 登记），DB 记录被删而目录留在磁盘，
+    用户看到"工作树删了、文件夹还在"。这里兜底：去掉只读位后逐个删除。
+    """
+    import os
+    import shutil
+    import stat as _stat
+
+    if not path.exists():
+        return True
+
+    def _rm_file(f: Path) -> None:
+        try:
+            f.unlink()
+        except OSError:
+            try:
+                f.chmod(_stat.S_IWRITE | _stat.S_IREAD)
+            except OSError:
+                pass
+            try:
+                f.unlink()
+            except OSError:
+                logger.debug("[worktree] 删除文件失败(可能被占用): %s", f, exc_info=True)
+
+    for root, _dirs, files in os.walk(path, topdown=False):
+        for name in files:
+            _rm_file(Path(root) / name)
+    shutil.rmtree(path, ignore_errors=True)
+    return not path.exists()
+
+
 async def create_worktree(db: AsyncSession, session_id: int, *, branch: str | None = None) -> dict:
     """为会话在项目仓库下创建独立工作树。"""
     session = await session_service.get_session(db, session_id)
@@ -136,9 +172,14 @@ async def remove_worktree(db: AsyncSession, session_id: int) -> dict:
     project = await get_project(db, session.project_id) if session.project_id else None
     repo = project.path if project else wt
 
-    ok, out, err = await _git(repo, "worktree", "remove", wt, "--force")
+    ok, out, err = await _git(repo, "worktree", "remove", "--force", wt)
     if not ok:
-        raise ValueError(f"移除工作树失败: {(err or out)[:200]}")
+        # git 拒绝（含被忽略文件 / 文件被占用 / 登记与目录不一致）时兜底：
+        # 先清掉 git 登记，再强删目录——否则会留下"记录删了、目录还在"的残留。
+        await _git(repo, "worktree", "prune")
+        if not _force_rmtree(Path(wt)):
+            raise ValueError(f"移除工作树失败，目录仍被占用: {wt}")
+        logger.warning("worktree remove 失败，已强制清理目录 %s: %s", wt, (err or out)[:200])
     from app.persistence.database import run_write_locked
 
     def _persist_path(s, value: str | None):
@@ -477,13 +518,20 @@ async def remove_worktree_project(db: AsyncSession, worktree_project_id: int, *,
         if ok and _status_lines(out):
             raise ValueError("工作树存在未提交变更，请先提交、或选择强制删除")
 
-    # 先摘除 git 登记（--force 由 force 决定）
-    args = ["worktree", "remove", wt.path] + (["--force"] if force else [])
+    # 先摘除 git 登记。--force 给两次：git ≥2.31 中第一次只覆盖"修改/未跟踪文件"，
+    # 含**被忽略文件**（如 node_modules）的工作树要第二次才肯删。
+    if force:
+        args = ["worktree", "remove", "--force", "--force", wt.path]
+    else:
+        args = ["worktree", "remove", wt.path]
     ok, out, err = await _git(repo, *args)
     if not ok:
-        # 目录已被手工删除时，清理 git 的登记项后继续
+        # git 拒绝（被忽略文件 / 文件被占用 / 登记与目录不一致）→ 兜底清理：
+        # 先 prune 掉 git 登记，再强删目录，避免"DB 记录删了、磁盘目录还在"。
         await _git(repo, "worktree", "prune")
-        logger.warning("worktree remove 失败，已 prune: %s", (err or out)[:200])
+        if not _force_rmtree(Path(wt.path)):
+            raise ValueError(f"删除工作树目录失败（可能被其他程序占用）：{wt.path}")
+        logger.warning("worktree remove 失败，已强制清理目录 %s: %s", wt.path, (err or out)[:200])
 
     def _drop(s):
         from app.persistence.models.project import Project as _P

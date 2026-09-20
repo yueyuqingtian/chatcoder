@@ -8,6 +8,8 @@
  * - pendingWhatsNew：升级后首启"本次更新"弹窗数据（consumeWhatsNew 判定）。 */
 import { create } from "zustand";
 
+import { htmlReleaseNotesToMarkdown } from "../utils/releaseNotes";
+
 export type UpdateStatus =
   | { state: "idle" }
   | { state: "checking" }
@@ -59,9 +61,9 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
     set({ listening: true });
     const api = window.chatcoderAPI;
     if (!api) return;
-    api.onUpdateStatus?.((s) => { if (isUpdateStatus(s)) set({ status: s }); });
+    api.onUpdateStatus?.((s) => { if (isUpdateStatus(s)) set({ status: normalizeStatus(s) }); });
     // 主进程可能在订阅前已推送（如启动检查完成），拉一次当前状态兜底
-    void api.getUpdateState?.().then((s) => { if (isUpdateStatus(s)) set({ status: s }); });
+    void api.getUpdateState?.().then((s) => { if (isUpdateStatus(s)) set({ status: normalizeStatus(s) }); });
     void api.getAppVersion?.().then((v) => set({ appVersion: v || "" }));
     // plan-230-1144 M4.2: 升级后首启判定（异步，不阻塞初始化）
     void get().checkWhatsNew();
@@ -72,7 +74,7 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
     try {
       set({ status: { state: "checking" } });
       const r = await api.checkForUpdates?.();
-      if (isUpdateStatus(r)) set({ status: r });
+      if (isUpdateStatus(r)) set({ status: normalizeStatus(r) });
     } catch { /* 主进程会推送 error 状态 */ }
   },
   downloadUpdate: async () => {
@@ -80,7 +82,7 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
     if (!api) return;
     try {
       const r = await api.downloadUpdate?.();
-      if (isUpdateStatus(r)) set({ status: r });
+      if (isUpdateStatus(r)) set({ status: normalizeStatus(r) });
     } catch { /* ignore */ }
   },
   installUpdate: async () => {
@@ -93,7 +95,7 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
     try {
       const r = await api.getReleaseNotes({ limit: 20 });
       if (r?.ok) {
-        set({ releaseHistory: r.releases || [], releaseSource: r.source });
+        set({ releaseHistory: normalizeReleases(r.releases || []), releaseSource: r.source });
       } else {
         set({ releaseHistory: [], releaseSource: r?.source || "none" });
       }
@@ -106,15 +108,17 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
       const verdict = await api.consumeWhatsNew();
       if (!verdict?.show) return;
       const r = await api.getWhatsNew?.({ from: verdict.from, to: verdict.version });
-      if (r?.ok && r.releases.length > 0) {
-        set({ pendingWhatsNew: r.releases });
+      const releases = normalizeReleases(r?.releases || []);
+      if (r?.ok && releases.length > 0) {
+        set({ pendingWhatsNew: releases });
       } else if (get().status.state === "downloaded" || get().status.state === "available") {
         // 离线回落：至少展示当前版本的状态机携带的 notes
         const st = get().status as { version?: string; notes?: string; releaseDate?: string };
         if (st.notes) {
           set({ pendingWhatsNew: [{
             version: st.version || verdict.version,
-            name: "", date: st.releaseDate || "", notes: st.notes,
+            name: "", date: st.releaseDate || "",
+            notes: htmlReleaseNotesToMarkdown(st.notes),
           }] });
         }
       }
@@ -125,4 +129,17 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
 
 function isUpdateStatus(v: unknown): v is UpdateStatus {
   return !!v && typeof v === "object" && "state" in v;
+}
+
+/** 状态机里的 notes 可能是 HTML（electron-builder 写入 latest.yml 的 releaseNotes），
+ * 统一转成 Markdown 后再入库，保证侧栏浮窗 / 设置页 / 首启弹窗排版一致。 */
+function normalizeStatus(s: UpdateStatus): UpdateStatus {
+  if ((s.state === "available" || s.state === "downloaded") && s.notes) {
+    return { ...s, notes: htmlReleaseNotesToMarkdown(s.notes) };
+  }
+  return s;
+}
+
+function normalizeReleases(list: ReleaseNote[]): ReleaseNote[] {
+  return list.map((r) => ({ ...r, notes: htmlReleaseNotesToMarkdown(r.notes || "") }));
 }

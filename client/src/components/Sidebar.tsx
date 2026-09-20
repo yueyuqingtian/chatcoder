@@ -434,6 +434,92 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
     );
   };
 
+  /** 项目行：普通项目与工作树共用同一套结构与样式（问题3——
+   * 工作树此前被塞在父项目子层级、额外缩进且名称变灰，与普通项目割裂）。
+   * 工作树仅额外带一个「工作树」标识，其余（图标位、+、更多菜单）完全一致。 */
+  const renderProjectRow = (p: ProjectOut, isWorktree: boolean) => {
+    const open = isProjectOpen(p);
+    const isCurrent = p.id === currentProjectId;
+    return (
+      <div className={`sb-project${isCurrent ? " current" : ""}`} onClick={() => toggleProject(p.id)}>
+        <span className={`sb-project-chevron${open ? " open" : ""}`} aria-hidden="true"><IconChevronRight size={13} /></span>
+        {isWorktree ? <IconGitBranch size={14} /> : <IconFolderDynamic open={open} size={14} />}
+        <span className="sb-project-name" title={isWorktree ? `${p.worktree_branch || ""} · ${p.path}` : p.path}>
+          {p.name || shortPath(p.path)}
+        </span>
+        {isWorktree && <span className="sb-worktree-tag">{t("titlebar.worktree")}</span>}
+        <span
+          className="sb-project-actions sb-project-new"
+          title={t("sidebar.new_task_at_project")}
+          onClick={(e) => { e.stopPropagation(); handleNewTaskAt(p.id); }}
+        >
+          <IconPlus size={12} />
+        </span>
+        <span className="sb-project-actions" onClick={(e) => { e.stopPropagation(); setProjectMenuFor(projectMenuFor === p.id ? null : p.id); }}>
+          <IconMoreHorizontal size={13} />
+        </span>
+        {projectMenuFor === p.id && (
+          <div className="context-menu sb-context-menu" onClick={() => setProjectMenuFor(null)}>
+            <div className="context-menu-item" onClick={() => window.chatcoderAPI?.openPath?.(p.path)}>{t("sidebar.ctx_open_in_folder")}</div>
+            {isWorktree ? (
+              <>
+                <div className="context-menu-item" onClick={() => setMergeWorktree(p)}>
+                  <IconGitBranch size={12} /> 合并到主工作区
+                </div>
+                <div className="context-menu-divider" />
+                <div className="context-menu-item danger" onClick={() => setDropWorktree(p)}>
+                  <IconTrash size={12} /> 删除工作树
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="context-menu-item" onClick={() => { void handleCreateWorktree(p); }}>
+                  <IconGitBranch size={12} /> {t("sidebar.ctx_worktree")}
+                </div>
+                <div className="context-menu-divider" />
+                <div className="context-menu-item danger" onClick={() => { api.updateProject(p.id, { archived: true }).then(() => loadBootstrap()); }}>{t("sidebar.ctx_archive_project")}</div>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  /** 项目下的会话列表（普通项目与工作树共用；含「显示更多」分页） */
+  const renderProjectChildren = (p: ProjectOut, emptyHint = false) => {
+    const projSessions = filteredSessions.filter((s) => s.project_id === p.id);
+    const limit = projectLimits[p.id] || 5;
+    const shown = projSessions.slice(0, limit);
+    const remaining = projSessions.length - limit;
+    return (
+      <div className="sb-project-children">
+        {shown.map(renderSession)}
+        {emptyHint && projSessions.length === 0 && (
+          <div className="sb-worktree-empty">还没有会话，点 + 开始</div>
+        )}
+        {remaining > 0 && (
+          <div className="sb-more-wrapper">
+            <button
+              type="button"
+              className="sb-more-btn"
+              onClick={(e) => {
+                e.stopPropagation();
+                setProjectLimits((prev) => ({
+                  ...prev,
+                  [p.id]: (prev[p.id] || 5) + 5,
+                }));
+              }}
+            >
+              <IconChevronDown size={12} />
+              <span>{t("sidebar.show_more", { count: remaining })}</span>
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <nav className={`sidebar sb${collapsed ? " collapsed" : ""}`}>
       {/* 头部：logo + 折叠按钮 + 前进/后退 */}
@@ -484,123 +570,20 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
             {view === "project" ? (
               <>
                 <div className="sb-section-label">{t("sidebar.section_projects")}</div>
-                {visibleProjects.map((p) => {
-                  const open = isProjectOpen(p);
-                  const projSessions = filteredSessions.filter((s) => s.project_id === p.id);
-                  const isCurrent = p.id === currentProjectId;
-                  return (
-                    <div key={p.id} className="sb-project-group">
-                      <div className={`sb-project${isCurrent ? " current" : ""}`}
-                        onClick={() => toggleProject(p.id)}>
-                        <span className={`sb-project-chevron${open ? " open" : ""}`} aria-hidden="true"><IconChevronRight size={13} /></span>
-                        <IconFolderDynamic open={open} size={14} />
-                        <span className="sb-project-name" title={p.path}>{p.name || shortPath(p.path)}</span>
-                        <span
-                          className="sb-project-actions sb-project-new"
-                          title={t("sidebar.new_task_at_project")}
-                          onClick={(e) => { e.stopPropagation(); handleNewTaskAt(p.id); }}
-                        >
-                          <IconPlus size={12} />
-                        </span>
-                        <span className="sb-project-actions" onClick={(e) => { e.stopPropagation(); setProjectMenuFor(projectMenuFor === p.id ? null : p.id); }}>
-                          <IconMoreHorizontal size={13} />
-                        </span>
-                        {projectMenuFor === p.id && (
-                          <div className="context-menu sb-context-menu" onClick={() => setProjectMenuFor(null)}>
-                            <div className="context-menu-item" onClick={() => window.chatcoderAPI?.openPath?.(p.path)}>{t("sidebar.ctx_open_in_folder")}</div>
-                            <div className="context-menu-item" onClick={() => { void handleCreateWorktree(p); }}>
-                              <IconGitBranch size={12} /> 创建工作树
-                            </div>
-                            <div className="context-menu-divider" />
-                            <div className="context-menu-item danger" onClick={() => { api.updateProject(p.id, { archived: true }).then(() => loadBootstrap()); }}>{t("sidebar.ctx_archive_project")}</div>
-                          </div>
-                        )}
+                {visibleProjects.map((p) => (
+                  <div key={p.id} className="sb-project-group">
+                    {renderProjectRow(p, false)}
+                    {isProjectOpen(p) && renderProjectChildren(p)}
+                    {/* 问题3：工作树与父项目**同级**、紧随其后（不再嵌在父项目子层级），
+                        独立折叠不随父项目收起；样式与普通项目完全一致，仅多一个「工作树」标识 */}
+                    {(worktreesByParent.get(p.id) ?? []).map((wt) => (
+                      <div key={`wt-${wt.id}`} className="sb-project-group sb-worktree-entry">
+                        {renderProjectRow(wt, true)}
+                        {isProjectOpen(wt) && renderProjectChildren(wt, true)}
                       </div>
-                      {open && (
-                        <div className="sb-project-children">
-                          {/* plan-282-1441（#5）：工作树作为独立工作区显示在父项目下（分支图标 + 缩进） */}
-                          {(worktreesByParent.get(p.id) ?? []).map((wt) => {
-                            const wtSessions = filteredSessions.filter((s) => s.project_id === wt.id);
-                            const wtOpen = isProjectOpen(wt);
-                            const wtCurrent = wt.id === currentProjectId;
-                            return (
-                              <div key={`wt-${wt.id}`} className="sb-worktree-group">
-                                <div className={`sb-project sb-worktree${wtCurrent ? " current" : ""}`}
-                                  onClick={() => toggleProject(wt.id)}>
-                                  <span className={`sb-project-chevron${wtOpen ? " open" : ""}`} aria-hidden="true"><IconChevronRight size={13} /></span>
-                                  <IconGitBranch size={13} />
-                                  <span className="sb-project-name" title={`工作树 · ${wt.worktree_branch || ""} · ${wt.path}`}>
-                                    {wt.name}
-                                  </span>
-                                  <span className="sb-worktree-tag">工作树</span>
-                                  <span
-                                    className="sb-project-actions sb-project-new"
-                                    title={t("sidebar.new_task_at_project")}
-                                    onClick={(e) => { e.stopPropagation(); handleNewTaskAt(wt.id); }}
-                                  >
-                                    <IconPlus size={12} />
-                                  </span>
-                                  <span className="sb-project-actions"
-                                    onClick={(e) => { e.stopPropagation(); setProjectMenuFor(projectMenuFor === wt.id ? null : wt.id); }}>
-                                    <IconMoreHorizontal size={13} />
-                                  </span>
-                                  {projectMenuFor === wt.id && (
-                                    <div className="context-menu sb-context-menu" onClick={() => setProjectMenuFor(null)}>
-                                      <div className="context-menu-item" onClick={() => window.chatcoderAPI?.openPath?.(wt.path)}>{t("sidebar.ctx_open_in_folder")}</div>
-                                      <div className="context-menu-item" onClick={() => setMergeWorktree(wt)}>
-                                        <IconGitBranch size={12} /> 合并到主工作区
-                                      </div>
-                                      <div className="context-menu-divider" />
-                                      <div className="context-menu-item danger" onClick={() => setDropWorktree(wt)}>
-                                        <IconTrash size={12} /> 删除工作树
-                                      </div>
-                                    </div>
-                                  )}
-                                </div>
-                                {wtOpen && (
-                                  <div className="sb-project-children">
-                                    {wtSessions.slice(0, projectLimits[wt.id] || 5).map(renderSession)}
-                                    {wtSessions.length === 0 && (
-                                      <div className="sb-worktree-empty">还没有会话，点 + 开始</div>
-                                    )}
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })}
-                          {(() => {
-                            const limit = projectLimits[p.id] || 5;
-                            const shown = projSessions.slice(0, limit);
-                            const remaining = projSessions.length - limit;
-                            return (
-                              <>
-                                {shown.map(renderSession)}
-                                {remaining > 0 && (
-                                  <div className="sb-more-wrapper">
-                                    <button
-                                      type="button"
-                                      className="sb-more-btn"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        setProjectLimits((prev) => ({
-                                          ...prev,
-                                          [p.id]: (prev[p.id] || 5) + 5,
-                                        }));
-                                      }}
-                                    >
-                                      <IconChevronDown size={12} />
-                                      <span>{t("sidebar.show_more", { count: remaining })}</span>
-                                    </button>
-                                  </div>
-                                )}
-                              </>
-                            );
-                          })()}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
+                    ))}
+                  </div>
+                ))}
                 {visibleProjects.length === 0 && (
                   <div className="sb-empty">
                     <p>{t("sidebar.empty_projects")}</p>

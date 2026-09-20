@@ -2666,10 +2666,9 @@ a { color: var(--accent); text-decoration: none; }
 .worktree-badge.dirty { background: color-mix(in oklab, var(--warning) 18%, transparent); color: var(--warning); }
 .worktree-force-row { margin-top: calc(var(--sp-2) * -1); display: flex; justify-content: flex-end; }
 
-/* 侧栏工作树（plan-282-1441 #5）：作为父项目下的独立工作区，用分支图标 + 标签区分 */
-.sb-worktree-group { position: relative; }
-.sb-project.sb-worktree { padding-left: 22px; }
-.sb-project.sb-worktree .sb-project-name { color: var(--text-2); }
+/* 侧栏工作树（plan-282-1441 #5；问题3 调整）：与父项目**同级**展示，
+ * 结构与样式完全复用普通项目行（不再额外缩进 / 不再名称变灰），
+ * 仅靠「工作树」标签区分。 */
 .sb-worktree-tag {
   flex-shrink: 0; margin-left: var(--sp-2);
   font-size: 9px; line-height: 1.6;
@@ -2677,7 +2676,7 @@ a { color: var(--accent); text-decoration: none; }
   background: color-mix(in oklab, var(--accent) 16%, transparent);
   color: var(--accent);
 }
-.sb-worktree-empty { font-size: 11px; color: var(--text-3); padding: 4px 0 4px 34px; }
+.sb-worktree-empty { font-size: 11px; color: var(--text-3); padding: 4px 0 4px 6px; }
 
 /* plan-282-1441（#5）：新建工作树时选择仓库（支持根空仓库 + 子仓库布局） */
 .wt-repo-label { font-size: 12px; color: var(--text-2); margin-bottom: var(--sp-1); }

@@ -130,3 +130,26 @@ async def test_remove_worktree_refuses_dirty_then_force(db, repo):
 
     await worktree_service.remove_worktree_project(db, res["project_id"], force=True)
     assert await worktree_service.list_worktrees(db, project_id=pid) == []
+    # 目录必须真的从磁盘消失（此前只 prune 掉 git 登记，文件夹留在原地）
+    assert not Path(res["path"]).exists(), "删除工作树后目录不应残留"
+
+
+@pytest.mark.asyncio
+async def test_remove_worktree_cleans_ignored_files(db, repo):
+    """工作树内有被忽略文件（如 node_modules）时，删除也必须把目录清干净。
+
+    git ≥2.31 对含 ignored 文件的工作树需要 `--force --force`；此前仅一次 --force
+    会失败、代码只做 prune 就删库记录，导致磁盘上留下整个目录。
+    """
+    pid = await _seed_project(db, repo)
+    (repo / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "ignore node_modules")
+
+    res = await worktree_service.create_worktree_for_project(db, pid, name="wt-ignored")
+    wt_path = Path(res["path"])
+    (wt_path / "node_modules").mkdir()
+    (wt_path / "node_modules" / "pkg.js").write_text("x\n", encoding="utf-8")
+
+    await worktree_service.remove_worktree_project(db, res["project_id"], force=False)
+    assert not wt_path.exists(), "含被忽略文件的工作树删除后目录不应残留"
