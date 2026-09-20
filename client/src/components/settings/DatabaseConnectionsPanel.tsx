@@ -204,31 +204,44 @@ export function DatabaseConnectionsPanel({ server }: { server?: McpServerOut }) 
       <section className="db-section">
         <div className="db-row">
           <span className="db-label">项目</span>
-          <Select
-            value={effectiveProjectId != null ? String(effectiveProjectId) : ""}
-            onChange={(v) => setProjectId(Number(v))}
-            options={activeProjects.map((p: ProjectOut) => ({
-              value: String(p.id), label: p.name || p.path,
-            }))}
-            className="db-project-select"
-            aria-label="选择项目"
-          />
-          <button className="btn btn-ghost btn-sm" onClick={() => void load()} disabled={busy}>
-            <IconRefresh size={13} />
-          </button>
+          <div className="db-controls">
+            <Select
+              value={effectiveProjectId != null ? String(effectiveProjectId) : ""}
+              onChange={(v) => setProjectId(Number(v))}
+              options={activeProjects.map((p: ProjectOut) => ({
+                value: String(p.id), label: p.name || p.path,
+              }))}
+              className="db-project-select"
+              aria-label="选择项目"
+            />
+            <button className="btn btn-ghost btn-sm" onClick={() => void load()} disabled={busy} title="重新加载">
+              <IconRefresh size={13} />
+            </button>
+          </div>
         </div>
         <div className="db-hint">连接与权限按项目隔离：AI 在某个项目工作时只能看到该项目的连接。</div>
       </section>
 
-      {/* 连接列表 */}
+      {/* 连接列表：空态改为紧凑可操作空态（含主操作），不再用 40px 内距的 navpage-empty
+          形成大块荒芜，也避免与 section 头部按钮重复表达同一动作。 */}
       <section className="db-section">
         <div className="db-section-head">
           <span>连接（{conns.length}）</span>
-          <button className="btn btn-primary btn-sm" onClick={openCreate} disabled={effectiveProjectId == null}>
-            <IconPlus size={13} /> 添加连接
-          </button>
+          {conns.length > 0 && (
+            <button className="btn btn-primary btn-sm" onClick={openCreate} disabled={effectiveProjectId == null}>
+              <IconPlus size={13} /> 添加连接
+            </button>
+          )}
         </div>
-        {conns.length === 0 && <div className="navpage-empty">该项目还没有数据库连接</div>}
+        {conns.length === 0 && (
+          <div className="db-empty">
+            <IconDatabase size={16} />
+            <span className="db-empty-text">该项目还没有数据库连接，添加后 AI 才能查询或变更该库。</span>
+            <button className="btn btn-primary btn-sm" onClick={openCreate} disabled={effectiveProjectId == null}>
+              <IconPlus size={13} /> 添加连接
+            </button>
+          </div>
+        )}
         {conns.map((c) => (
           <div className="settings-resource-item db-conn-item" key={c.id}>
             <div className="settings-resource-info">
@@ -281,26 +294,32 @@ export function DatabaseConnectionsPanel({ server }: { server?: McpServerOut }) 
             <Switch checked={policyDraft.require_approval}
               onChange={(v) => patchDraft({ require_approval: v })} />
           </div>
-          <div className="db-policy-row">
-            <span>单次查询最多返回行数</span>
-            <Input
-              type="number"
-              value={String(policyDraft.row_limit)}
-              onChange={(e) => patchDraft({ row_limit: Number(e.target.value) || 200 })}
-              className="db-num"
-              aria-label="行数上限"
-            />
+          {/* 数值行：标签 + 控件列（输入框由 .db-num 显式控宽，不再被 100% 拉满整行） */}
+          <div className="db-form-row">
+            <span className="db-label">单次查询最多返回行数</span>
+            <div className="db-controls">
+              <Input
+                type="number"
+                value={String(policyDraft.row_limit)}
+                onChange={(e) => patchDraft({ row_limit: Number(e.target.value) || 200 })}
+                className="db-num"
+                aria-label="行数上限"
+              />
+            </div>
           </div>
-          <div className="db-policy-row">
-            <span>执行超时（秒）</span>
-            <Input
-              type="number"
-              value={String(policyDraft.timeout_s)}
-              onChange={(e) => patchDraft({ timeout_s: Number(e.target.value) || 15 })}
-              className="db-num"
-              aria-label="超时秒数"
-            />
+          <div className="db-form-row">
+            <span className="db-label">执行超时（秒）</span>
+            <div className="db-controls">
+              <Input
+                type="number"
+                value={String(policyDraft.timeout_s)}
+                onChange={(e) => patchDraft({ timeout_s: Number(e.target.value) || 15 })}
+                className="db-num"
+                aria-label="超时秒数"
+              />
+            </div>
           </div>
+          {/* 保存条归位为卡片底栏：与本 section 同宽、带上分隔线，明确"改完在这里保存" */}
           <div className="dbg-savebar">
             <span className={`dbg-savebar-hint${policyDirty ? " dirty" : ""}`}>
               {policySaving ? "保存中…" : policyDirty ? "有未保存的修改" : (policyMsg || "已保存")}

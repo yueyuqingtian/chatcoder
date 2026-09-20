@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type McpServerOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
-import { IconRefresh, IconPlus, IconX } from "../icons";
+import { IconRefresh, IconPlus, IconX, IconChevronLeft, IconLayers } from "../icons";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { Modal } from "../Modal";
 import { FormDialog, Input, Select, Textarea } from "../ui";
@@ -131,14 +131,29 @@ export function McpPanel() {
       {/* plan-282-1441（#7/#8）：内置 MCP 的详情配置页（列表 ⇄ 详情切换） */}
       {detailServer ? (
         <div className="mcp-detail-wrap">
+          {/* 详情头：明确的层级——返回按钮 + 服务名标题 + 说明 + 状态徽标，
+              取代此前"裸按钮 + 裸文本"的无层级拼接。 */}
           <div className="mcp-detail-head">
-            <button className="btn btn-ghost btn-xs" onClick={() => setDetailServer(null)}>← 返回连接器列表</button>
-            <span className="mcp-detail-title">{detailServer.display_name || detailServer.name}</span>
+            <button className="btn btn-ghost btn-xs mcp-detail-back" onClick={() => setDetailServer(null)}>
+              <IconChevronLeft size={13} /> 返回连接器列表
+            </button>
+            <IconLayers size={15} />
+            <h2 className="mcp-detail-title">{detailServer.display_name || detailServer.name}</h2>
+            <span className={`mcp-health${detailServer.is_active ? " ok" : " warn"}`}>
+              {detailServer.is_active ? "已启用" : "已停用"}
+            </span>
           </div>
+          {(detailServer.name === "database" || detailServer.name === "debugger") && (
+            <p className="mcp-detail-desc">
+              {detailServer.name === "database"
+                ? "为当前项目配置数据库连接与 AI 操作权限；权限由服务端强制校验。"
+                : "配置 Web(CDP) / Java(JDWP) 调试端口，并在此观察断点现场。"}
+            </p>
+          )}
           {detailServer.name === "database" && <DatabaseConnectionsPanel server={detailServer} />}
           {detailServer.name === "debugger" && <DebuggerPanel server={detailServer} />}
           {detailServer.name !== "database" && detailServer.name !== "debugger" && (
-            <div className="navpage-empty">该服务没有专属配置页。</div>
+            <div className="db-empty"><span className="db-empty-text">该服务没有专属配置页。</span></div>
           )}
         </div>
       ) : (

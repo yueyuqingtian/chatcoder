@@ -308,7 +308,10 @@ a { color: var(--accent); text-decoration: none; }
 .ws-header-title { font-size: 13px; font-weight: 600; color: var(--text-1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ws-header-meta { font-size: 11px; color: var(--text-3); white-space: nowrap; display: flex; align-items: center; gap: 4px; }
 .ws-body { flex: 1; overflow: hidden; position: relative; display: flex; flex-direction: column; min-height: 0; }
-.ws-navpage { flex: 1; overflow-y: auto; }
+/* plan-17-78（B4）：导航页滚动契约收敛——.ws-navpage 是唯一滚动容器。
+   scrollbar-gutter: stable 恒定预留滚动条宽度，滚动条出现/消失时内容盒宽度不变
+   （避免切换页面时标题与卡片左边界位移）。 */
+.ws-navpage { flex: 1; overflow-y: auto; scrollbar-gutter: stable; }
 .ws-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 40px; }
 /* ── 空态首页 ── */
 /* plan-282-1416（问题4）：空态首页收敛
@@ -1677,7 +1680,10 @@ a { color: var(--accent); text-decoration: none; }
 .terminal-xterm .xterm-screen { padding-bottom: 2px; }
 /* ── 导航页（定时/技能/MCP）── */
 /* ── 自动化页（v7 对齐 ZCode） ── */
-.automation-page { display: flex; flex-direction: column; height: 100%; padding: 28px 32px 32px; overflow-y: auto; max-width: 860px; margin: 0 auto; width: 100%; }
+/* plan-17-78（B4）：去掉自滚动与 height:100%——滚动统一由外层 .ws-navpage 承担，
+   本类只负责内距与限宽（与 .ext-page 保持一致契约，消除嵌套滚动）。
+   同样不设 min-height:0（理由见 .ext-page 注释）。 */
+.automation-page { display: flex; flex-direction: column; padding: 28px 32px 32px; max-width: 860px; margin: 0 auto; width: 100%; box-sizing: border-box; }
 .automation-title { font-size: 24px; font-weight: 700; color: var(--text-1); margin: 0 0 6px; }
 .automation-sub { font-size: 13px; color: var(--text-3); margin: 0 0 20px; }
 .automation-card { border: 1px solid var(--border); border-radius: 14px; background: var(--bg-elevated); padding: 20px; display: flex; flex-direction: column; align-items: center; gap: 14px; }
@@ -1747,8 +1753,16 @@ a { color: var(--accent); text-decoration: none; }
 .navpage-item-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .navpage-empty { padding: 40px 20px; text-align: center; color: var(--text-3); font-size: 13px; }
 /* plan-282-1441（#6）：左面板「拓展」页容器——为设置页专用的 ExtensionsPanel 提供
-   与其它导航页一致的内距与限宽（它原本依赖设置页的 PageShell 提供这些）。 */
-.ext-page { display: flex; flex-direction: column; padding: 28px 32px 32px; max-width: 980px; margin: 0 auto; width: 100%; box-sizing: border-box; }
+   与其它导航页一致的内距与限宽（它原本依赖设置页的 PageShell 提供这些）。
+   plan-17-78（B4）：滚动契约收敛为「一处」——滚动只发生在 .ws-navpage，
+   本容器只负责内距 + 限宽，不再自带 overflow，避免与外层形成嵌套滚动 / 双滚动条。
+   注意：这里**不能**设 min-height:0——本容器是 flex 子项，置 0 会让它被压缩到容器高度，
+   内容转而以可见溢出方式渲染，反而丢失外层滚动条的可靠高度来源。 */
+.ext-page {
+  display: flex; flex-direction: column;
+  padding: 28px 32px 32px; max-width: 980px; margin: 0 auto; width: 100%;
+  box-sizing: border-box;
+}
 /* 窄窗口（分栏被拖窄）时收窄内距，避免卡片与网格被挤压变形 */
 @media (max-width: 900px) {
   .ext-page { padding: 20px 18px 24px; }
@@ -2789,21 +2803,25 @@ a { color: var(--accent); text-decoration: none; }
 .ext-subtab.active { color: var(--text-1); border-bottom-color: var(--accent); font-weight: 600; }
 
 .plugins-catalog { display: flex; flex-direction: column; gap: var(--sp-4); }
+/* 页头：标题/说明在左，主操作在右；说明限宽 + 次级色，避免与操作抢宽度 */
 .catalog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-5); flex-wrap: wrap; }
-.catalog-head-text { min-width: 0; }
+.catalog-head-text { min-width: 0; flex: 1 1 320px; }
 .catalog-title { margin: 0; font-size: 20px; font-weight: 700; color: var(--text-1); }
 .catalog-title-dim { color: var(--text-3); font-weight: 400; }
-.catalog-sub { margin: var(--sp-2) 0 0; font-size: 12px; color: var(--text-3); line-height: 1.6; max-width: 60ch; }
-.catalog-head-actions { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.catalog-sub { margin: var(--sp-2) 0 0; font-size: 12px; color: var(--text-3); line-height: 1.6; max-width: 56ch; }
+.catalog-head-actions { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; flex-shrink: 0; }
+/* 搜索工具条：独立一行，搜索框自适应，计数靠右 */
+.catalog-toolbar { display: flex; align-items: center; gap: var(--sp-3); }
 .catalog-search {
   display: flex; align-items: center; gap: var(--sp-2);
-  height: var(--ctl-h-sm); padding: 0 var(--sp-3); min-width: 200px;
+  flex: 1 1 auto; min-width: 0; max-width: 420px;
+  height: var(--ctl-h-md); padding: 0 var(--sp-3);
   border: 1px solid var(--border); border-radius: var(--r-md);
   background: var(--color-input); color: var(--text-3);
 }
-.catalog-search:focus-within { border-color: var(--border-hover); }
+.catalog-search:focus-within { border-color: var(--text-2); }
 .catalog-search input { flex: 1; min-width: 0; border: none; outline: none; background: transparent; color: var(--text-1); font-size: 13px; }
-.catalog-installed { font-size: 12px; color: var(--text-3); }
+.catalog-installed { margin-left: auto; font-size: 12px; color: var(--text-3); white-space: nowrap; }
 .catalog-filters { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4); flex-wrap: wrap; }
 .catalog-categories { display: flex; align-items: center; gap: var(--sp-1); flex-wrap: wrap; }
 .catalog-cat {
@@ -2813,20 +2831,31 @@ a { color: var(--accent); text-decoration: none; }
 }
 .catalog-cat:hover { background: var(--bg-hover); color: var(--text-1); }
 .catalog-cat.active { background: var(--bg-active); color: var(--text-1); font-weight: 600; }
-.catalog-sort { display: flex; align-items: center; gap: var(--sp-1); }
-.catalog-sort button {
-  padding: 4px 10px; border: 1px solid var(--border); border-radius: var(--r-sm);
-  background: transparent; font-size: 12px; color: var(--text-3); cursor: pointer;
+/* 排序：分段控件（同高、同圆角、共享外框），不再是被孤立的两个裸按钮 */
+.catalog-sort {
+  display: inline-flex; align-items: center; flex-shrink: 0;
+  padding: 2px; border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--bg-hover);
 }
-.catalog-sort button.active { color: var(--text-1); border-color: var(--text-3); }
+.catalog-sort button {
+  padding: 3px 12px; border: none; border-radius: var(--r-sm);
+  background: transparent; font-size: 12px; color: var(--text-3); cursor: pointer;
+  transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard);
+}
+.catalog-sort button:hover { color: var(--text-1); }
+.catalog-sort button.active {
+  background: var(--bg-elevated); color: var(--text-1); font-weight: 600;
+  box-shadow: var(--shadow-xs);
+}
 
-.catalog-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: var(--sp-3); }
+.catalog-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--sp-3); }
 .catalog-card {
   display: flex; flex-direction: column; gap: var(--sp-2);
   padding: var(--sp-4); border: 1px solid var(--border); border-radius: var(--r-lg);
   background: var(--bg-main); transition: box-shadow var(--dur-2) var(--ease-standard), border-color var(--dur-2) var(--ease-standard);
 }
 .catalog-card:hover { box-shadow: var(--shadow-sm); border-color: var(--border-hover); }
+.catalog-card:focus-within { border-color: var(--border-hover); }
 .catalog-card.is-installed { border-color: color-mix(in oklab, var(--accent) 35%, var(--border)); }
 .catalog-card-top { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
 .catalog-card-icon {
@@ -2844,24 +2873,20 @@ a { color: var(--accent); text-decoration: none; }
   font-size: 12px; color: var(--text-3); line-height: 1.55; min-height: 2.9em;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
-.catalog-card-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); margin-top: auto; }
-.catalog-card-cat { font-size: 11px; color: var(--text-3); }
-.catalog-card-ops { display: inline-flex; align-items: center; gap: var(--sp-1); }
+/* 卡片底部：信息行在上、操作行在下（各行独立，避免信息与按钮互相挤压） */
+.catalog-card-foot { display: flex; flex-direction: column; gap: var(--sp-2); margin-top: auto; padding-top: var(--sp-2); border-top: 1px solid var(--border-light); }
+.catalog-card-cat { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; font-size: 11px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.catalog-card-ops { display: flex; align-items: center; justify-content: flex-end; gap: var(--sp-2); flex-wrap: nowrap; }
 
 .catalog-detail {
-  margin-top: var(--sp-3); padding: var(--sp-4);
-  border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--bg-main);
   display: flex; flex-direction: column; gap: var(--sp-3);
-  animation: fadeIn var(--dur-3) var(--ease-out);
 }
-.catalog-detail-head { display: flex; align-items: center; gap: var(--sp-3); }
-.catalog-detail-head > div { flex: 1; min-width: 0; }
-.catalog-detail-title { font-size: 14px; font-weight: 600; color: var(--text-1); }
-.catalog-detail-meta { font-size: 11px; color: var(--text-3); margin-top: 2px; }
-.catalog-detail-desc { margin: 0; font-size: 12px; color: var(--text-2); line-height: 1.65; }
+/* 浮层详情：标题行内联图标 + 名称 + 版本（Dialog 头部承载外框，这里只排内容） */
+.catalog-dialog-title { display: inline-flex; align-items: center; gap: var(--sp-2); min-width: 0; }
+.catalog-dialog-title .catalog-card-icon { width: 22px; height: 22px; }
+.catalog-detail-desc { margin: 0; font-size: 13px; color: var(--text-2); line-height: 1.7; }
 .catalog-detail-tags { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
 .catalog-tag { font-size: 10px; padding: 1px 6px; border-radius: var(--r-xs); background: var(--bg-hover); color: var(--text-3); }
-.catalog-detail-foot { display: flex; justify-content: flex-end; gap: var(--sp-2); }
 
 /* ── plan-282-1441（#6 美化）：拓展页视觉打磨 ── */
 /* 子标签：更清晰的选中态（底色 + 强调线），间距更从容 */
@@ -2877,10 +2902,9 @@ a { color: var(--accent); text-decoration: none; }
 }
 .catalog-sub b { color: var(--text-2); font-weight: 600; }
 .catalog-sub code { font-family: var(--font-mono); font-size: 11px; padding: 1px 4px; border-radius: var(--r-xs); background: var(--bg-hover); }
-/* 卡片底部的来源/技能数小标签 */
-.catalog-card-src { margin-left: var(--sp-2); font-size: 10px; color: var(--text-3); }
-.catalog-card-src::before { content: "· "; }
-/* 详情抽屉：版本与"事实"清单 */
+/* 卡片底部的来源/技能数小标签：靠父级 flex gap 分隔，不再用 ::before 硬拼 "· " */
+.catalog-card-src { font-size: 10px; color: var(--text-3); }
+/* 详情浮层：版本徽标（标题行内联） */
 .catalog-detail-ver { margin-left: var(--sp-2); font-size: 11px; color: var(--text-3); font-weight: 400; }
 .catalog-detail-facts {
   display: flex; flex-direction: column; gap: var(--sp-2);
@@ -2904,25 +2928,63 @@ a { color: var(--accent); text-decoration: none; }
 .catalog-empty-desc { font-size: 12px; line-height: 1.7; max-width: 46ch; }
 
 /* ── plan-282-1441（#7/#8）：内置 MCP 配置页（数据库连接 / 开发调试） ── */
-.mcp-detail-wrap { display: flex; flex-direction: column; gap: var(--sp-3); }
-.mcp-detail-head { display: flex; align-items: center; gap: var(--sp-3); }
-.mcp-detail-title { font-size: 14px; font-weight: 600; color: var(--text-1); }
+.mcp-detail-wrap { display: flex; flex-direction: column; gap: var(--sp-4); }
+/* plan-17-78（C5）：详情头改为有层级的头部行——返回按钮在最上，
+   其下是「图标 + 服务名 + 状态徽标」标题行与说明，视觉重量与设置页标题一致。 */
+.mcp-detail-head { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.mcp-detail-back { order: -1; flex-basis: 100%; justify-content: flex-start; align-self: flex-start; margin-bottom: var(--sp-1); }
+.mcp-detail-head > svg { color: var(--text-3); }
+.mcp-detail-head .mcp-health { margin-left: 0; }
+.mcp-detail-title { margin: 0; font-size: 16px; font-weight: 600; color: var(--text-1); line-height: 1.4; }
+.mcp-detail-desc { margin: 0; font-size: 12px; color: var(--text-3); line-height: 1.6; max-width: 72ch; }
 
 .db-panel, .dbg-panel { display: flex; flex-direction: column; gap: var(--sp-4); }
 .db-section {
-  display: flex; flex-direction: column; gap: var(--sp-2);
-  padding: var(--sp-3) var(--sp-4); border: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: var(--sp-3);
+  padding: var(--sp-4); border: 1px solid var(--border);
   border-radius: var(--r-md); background: var(--bg-main);
+  /* 底栏保存条用负边距贴到卡片边缘，需要裁剪以免溢出圆角 */
+  overflow: hidden;
 }
 .db-master { flex-direction: row; align-items: center; justify-content: space-between; gap: var(--sp-4); }
 .db-master-info { min-width: 0; }
 .db-master-title { display: flex; align-items: center; gap: var(--sp-2); font-size: 13px; font-weight: 600; color: var(--text-1); }
 .db-master-desc { margin-top: 4px; font-size: 12px; color: var(--text-3); line-height: 1.6; }
-.db-section-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); font-size: 13px; font-weight: 600; color: var(--text-1); }
-.db-row { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
-.db-label { flex-shrink: 0; font-size: 12px; color: var(--text-3); min-width: 76px; }
+.db-section-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); min-height: 28px; font-size: 13px; font-weight: 600; color: var(--text-1); }
+/* plan-17-78（C1）：表单行统一为「标签列 + 控件列」栅格。
+   旧写法把标签与控件用 space-between 顶到两端（label 左、开关右），
+   中间空出近 600px 空白 —— 图二最刺眼的一处"排版丑陋"根因。
+   现改为固定标签列 + 自适应控件列，控件紧贴标签列左侧开始；
+   控件宽度交由自身档位类（.db-num / .db-host）决定，不再靠宽泛 max-width 覆盖。
+   注意：.db-row/.db-form-row 的子节点必须是「标签 + .db-controls」两段，
+   这样控件再多也只占控件列，换行时仍与控件列左边界对齐。 */
+.db-row, .db-form-row {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--sp-2) var(--sp-4);
+  min-width: 0;
+}
+/* 权限行：正好两段（说明 + 控件），控件列起始位置与其它行一致 */
+.db-policy-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--sp-2) var(--sp-4);
+  font-size: 12px; color: var(--text-2);
+  min-width: 0;
+}
+/* 控件列：内部单行排布、左对齐，空间不足时才换行 */
+.db-controls { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; min-width: 0; }
+/* 标签列：次级色、不换行（列宽固定，长文案也不会把控件挤走） */
+.db-label { font-size: 12px; color: var(--text-3); min-width: 0; }
 .db-hint, .dbg-hint { font-size: 12px; color: var(--text-3); line-height: 1.65; }
-.db-hint code, .dbg-hint code { font-family: var(--font-mono); font-size: 11px; padding: 1px 4px; border-radius: var(--r-xs); background: var(--bg-hover); }
+/* hint 内的行内 code 芯片：长参数（JDWP / --remote-debugging-port）在窄列必须能断开，
+   否则会横向溢出（图三 Java 调试段的实际问题）。 */
+.db-hint code, .dbg-hint code {
+  font-family: var(--font-mono); font-size: 11px; padding: 1px 4px; border-radius: var(--r-xs);
+  background: var(--bg-hover); overflow-wrap: anywhere; word-break: break-word;
+}
 .db-kind {
   margin-left: var(--sp-2); font-size: 10px; padding: 1px 6px; border-radius: 999px;
   background: var(--bg-hover); color: var(--text-3); font-weight: 400;
@@ -2931,78 +2993,117 @@ a { color: var(--accent); text-decoration: none; }
 .db-conn-actions { display: flex; align-items: center; gap: var(--sp-2); flex-shrink: 0; }
 .db-test { margin-top: 4px; font-size: 11px; color: var(--error); }
 .db-test.ok { color: var(--success); }
-.db-policy-row { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4); font-size: 12px; color: var(--text-2); }
 .db-policy-row .danger { color: var(--warning); }
-.db-project-select { min-width: 200px; }
-/* plan-282-1441（#5）：数值输入必须限定宽度——Input 组件自带 width:100%，
-   此前会把「行数上限 / 超时」拉满整行并挤得标签换行（用户反馈的"输入框用不着这么宽"）。
-   这里提高优先级并给出紧凑宽度，同时让行内标签不换行。 */
-.db-policy-row > span { flex: 1 1 auto; min-width: 0; }
-.db-policy-row .ui-input,
-.db-policy-row .db-num {
-  width: 96px;
-  flex: 0 0 auto;
-  min-height: var(--ctl-h-sm);
-  text-align: left;
+.db-project-select { min-width: 200px; max-width: 320px; }
+/* 数值/主机输入：由档位类显式控宽（取代旧的 .db-section .ui-input{max-width:320px} 宽泛 hack，
+   该 hack 会让同一行里不同输入框"忽宽忽窄"）。 */
+.db-num { width: 96px; min-height: var(--ctl-h-sm); }
+.db-host { width: 150px; min-height: var(--ctl-h-sm); }
+/* 新建/编辑弹窗里的文本字段限宽，避免 100% 拉满整窗 */
+.db-section .ui-input:not(.db-num):not(.db-host) { max-width: 320px; }
+.dbg-jdwp {
+  display: block; max-width: 100%;
+  font-family: var(--font-mono); font-size: 11px; padding: 2px 6px;
+  border-radius: var(--r-xs); background: var(--bg-hover); color: var(--text-2);
+  overflow-wrap: anywhere; word-break: break-all; white-space: normal;
 }
-.db-num { width: 96px; }
-.db-host { width: 150px; }
-/* 连接表单里的字段也保持合理宽度，不被 100% 拉满整窗 */
-.db-section .ui-input { max-width: 320px; }
-.db-section .db-host,
-.db-section .db-num { max-width: none; }
-.dbg-jdwp { font-family: var(--font-mono); font-size: 11px; padding: 2px 6px; border-radius: var(--r-xs); background: var(--bg-hover); color: var(--text-2); overflow-x: auto; }
+/* 紧凑可操作空态（替代 40px 内距的 .navpage-empty 在 section 内形成的大块荒芜） */
+.db-empty {
+  display: flex; align-items: center; gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4); border-radius: var(--r-sm);
+  background: var(--bg-hover); color: var(--text-3); font-size: 12px;
+}
+.db-empty-text { flex: 1; min-width: 0; line-height: 1.6; }
 
+/* 状态块：仅连接/暂停时保留高亮块（含调用栈与变量）。
+   未连接（.is-idle）时退化为一行紧凑状态行——旧写法只装一行"未连接"
+   也渲染成整条灰底大块，是图三两条空旷灰带的根因。 */
 .dbg-status { display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--sp-3); border-radius: var(--r-sm); background: var(--bg-hover); }
-.dbg-status-head { display: flex; align-items: center; gap: var(--sp-2); }
+.dbg-status.is-idle { padding: var(--sp-2) 0; background: transparent; }
+/* 仅连接未暂停：无高亮块的必要，用紧凑内距 */
+.dbg-status.is-compact { padding: var(--sp-2) var(--sp-3); }
+.dbg-status-head { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
 .dbg-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-3); flex-shrink: 0; }
 .dbg-dot.live { background: var(--success); }
 .dbg-dot.paused { background: var(--warning); animation: tc-step-pulse var(--dur-loop) var(--ease-in-out) infinite; }
-.dbg-status-title { font-size: 12px; font-weight: 600; color: var(--text-1); }
-.dbg-status-desc { font-size: 11px; color: var(--text-3); }
+.dbg-status-title { font-size: 12px; font-weight: 600; color: var(--text-1); flex-shrink: 0; }
+.dbg-status-desc { font-size: 11px; color: var(--text-3); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dbg-location { font-size: 12px; color: var(--text-1); }
-.dbg-location code { font-family: var(--font-mono); font-size: 12px; color: var(--accent); }
+.dbg-location code { font-family: var(--font-mono); font-size: 12px; color: var(--accent); overflow-wrap: anywhere; }
 .dbg-fn { color: var(--text-3); }
-.dbg-block { display: flex; flex-direction: column; gap: 2px; }
+.dbg-block { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .dbg-block-title { font-size: 11px; color: var(--text-3); margin-bottom: 2px; }
-.dbg-stack-row { display: flex; align-items: baseline; gap: var(--sp-2); font-size: 11px; }
+.dbg-stack-row { display: flex; align-items: baseline; gap: var(--sp-2); font-size: 11px; min-width: 0; }
 .dbg-stack-idx { color: var(--text-3); flex-shrink: 0; }
-.dbg-stack-fn { color: var(--text-1); font-family: var(--font-mono); }
-.dbg-stack-loc { color: var(--text-3); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dbg-var-row { display: flex; align-items: baseline; gap: var(--sp-2); font-size: 11px; color: var(--text-2); }
-.dbg-var-row code { color: var(--text-1); font-family: var(--font-mono); }
+.dbg-stack-fn { color: var(--text-1); font-family: var(--font-mono); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dbg-stack-loc { color: var(--text-3); font-family: var(--font-mono); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dbg-var-row { display: flex; align-items: baseline; gap: var(--sp-2); font-size: 11px; color: var(--text-2); min-width: 0; }
+.dbg-var-row code { color: var(--text-1); font-family: var(--font-mono); flex-shrink: 0; }
+.dbg-var-row span { min-width: 0; overflow-wrap: anywhere; }
 .dbg-var-type { color: var(--text-3); font-size: 10px; }
 .dbg-actions { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
 .dbg-actions .danger { color: var(--error); }
 
 /* 保存条（开发调试面板 / 数据库权限策略共用）：给"改完点保存"一个明确落点，
-   避免用户不确定改动是否已生效（与逐键写入相比也免了请求乱序覆盖）。 */
-.dbg-savebar { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); padding: var(--sp-3); border-radius: var(--r-sm); background: var(--bg-hover); }
-.dbg-savebar-hint { font-size: 12px; color: var(--text-3); }
+   旧写法在 section 内部再铺一层无边界的灰底，看起来像一条悬浮的独立灰条、归属不明。
+   现在分两种落位：
+   - 直接位于面板根（.dbg-panel，Web/Java 配置共用一条）→ 独立卡片条；
+   - 位于 section 内（数据库权限策略）→ 贴卡片底部的「底栏」（顶部分隔线 + 负边距对齐）。 */
+.dbg-savebar {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--bg-hover);
+}
+.dbg-savebar-hint { font-size: 12px; color: var(--text-3); min-width: 0; }
 .dbg-savebar-hint.dirty { color: var(--warning); }
+/* section 底栏变体：本 section 同宽、贴底，明确保存的是这一段配置 */
+.db-section > .dbg-savebar {
+  margin: var(--sp-1) calc(var(--sp-4) * -1) calc(var(--sp-4) * -1);
+  padding: var(--sp-3) var(--sp-4);
+  border: none; border-top: 1px solid var(--border);
+  border-radius: 0 0 var(--r-md) var(--r-md);
+}
 
-/* ── 右侧「调试」面板（plan-282-1441 后续：Arthas 现场诊断可视化）── */
-.dbgp { display: flex; flex-direction: column; gap: var(--sp-4); padding: var(--sp-3); height: 100%; overflow-y: auto; }
-.dbgp-dim { color: var(--text-3); font-size: 11px; font-weight: 400; }
-.dbgp-empty { font-size: 12px; color: var(--text-3); padding: var(--sp-3); border-radius: var(--r-sm); background: var(--bg-hover); line-height: 1.75; }
+/* ── 右侧「调试」面板（plan-282-1441 后续：Arthas 现场诊断可视化）──
+ * plan-17-78（D4/D6）：面板宽度仅 360px，此前的写法有两重问题：
+ *  1. .dbgp 自带 padding 8px，每个 .db-section 又自带 padding 8/12px → 内容被压成窄条；
+ *  2. 三个 section 全是描边卡片，窄面板里叠三条边框，视觉噪声大。
+ * 这里**作用域化**覆盖（.dbgp 内），改为"分组标题 + 分隔线"；
+ * 设置页里的 .db-section 卡片外观保持不变（避免跨场景误伤）。 */
+.dbgp { display: flex; flex-direction: column; gap: var(--sp-5); padding: var(--sp-4); height: 100%; overflow-y: auto; scrollbar-gutter: stable; }
+.dbgp .db-section {
+  gap: var(--sp-3); padding: 0; border: none; border-radius: 0;
+  background: transparent; overflow: visible;
+}
+.dbgp .db-section + .db-section { padding-top: var(--sp-5); border-top: 1px solid var(--border); }
+.dbgp .db-section-head { min-height: 24px; }
+.dbgp-sec-title { display: inline-flex; align-items: center; gap: var(--sp-2); min-width: 0; }
+.dbgp-sec-title svg { color: var(--text-3); flex-shrink: 0; }
+.dbgp-dim { color: var(--text-3); font-size: 11px; font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 空态：收紧内距，避免两处空态吃掉整屏（此前 padding 8px + 长文案） */
+.dbgp-empty { font-size: 12px; color: var(--text-3); padding: var(--sp-3); border-radius: var(--r-sm); background: var(--bg-hover); line-height: 1.65; }
 .dbgp-empty code { font-family: var(--font-mono); font-size: 11px; padding: 1px 4px; border-radius: var(--r-xs); background: var(--bg-main); }
-.dbgp-notice { font-size: 12px; color: var(--warning); padding: 6px 8px; border-radius: var(--r-sm); background: var(--bg-hover); line-height: 1.6; }
-.dbgp-cfg { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--text-2); line-height: 1.7; }
-.dbgp-cfg code { font-family: var(--font-mono); font-size: 11px; color: var(--text-1); word-break: break-all; }
-.dbgp-procs { display: flex; flex-direction: column; gap: 2px; }
-.dbgp-proc { display: flex; align-items: center; gap: var(--sp-2); padding: 4px 6px; border-radius: var(--r-sm); background: var(--bg-hover); font-size: 11px; }
+.dbgp-notice { font-size: 12px; color: var(--warning); padding: 6px 8px; border-radius: var(--r-sm); background: var(--bg-hover); line-height: 1.6; overflow-wrap: anywhere; }
+.dbgp-cfg { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--text-2); line-height: 1.7; min-width: 0; }
+.dbgp-cfg > div { min-width: 0; }
+/* 长英文路径（JDK / Arthas 启动器）必须能断开——仅 word-break 在 URL 式串上仍会横向溢出 */
+.dbgp-cfg code { font-family: var(--font-mono); font-size: 11px; color: var(--text-1); overflow-wrap: anywhere; word-break: break-all; }
+.dbgp-procs { display: flex; flex-direction: column; gap: var(--sp-1); }
+.dbgp-proc { display: flex; align-items: center; gap: var(--sp-2); padding: 4px 6px; border-radius: var(--r-sm); background: var(--bg-hover); font-size: 11px; min-width: 0; }
 .dbgp-proc-pid { font-family: var(--font-mono); color: var(--text-3); flex-shrink: 0; }
 .dbgp-proc-main { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); color: var(--text-1); }
-.dbgp-badge { font-size: 10px; padding: 0 5px; border-radius: var(--r-xs); background: var(--bg-active); color: var(--text-2); flex-shrink: 0; }
+.dbgp-proc > .btn { flex-shrink: 0; }
+.dbgp-badge { font-size: 10px; padding: 0 5px; border-radius: var(--r-xs); background: var(--bg-active); color: var(--text-2); flex-shrink: 0; white-space: nowrap; }
 .dbgp-badge.warn { color: var(--warning); }
 .dbgp-cost { font-size: 10px; color: var(--text-3); flex-shrink: 0; font-family: var(--font-mono); }
 .dbgp-entries { display: flex; flex-direction: column; gap: var(--sp-2); }
-.dbgp-entry { display: flex; flex-direction: column; gap: 3px; padding: 6px 8px; border-radius: var(--r-sm); background: var(--bg-hover); }
-.dbgp-entry-head { display: flex; align-items: baseline; gap: var(--sp-2); font-size: 11px; }
+.dbgp-entry { display: flex; flex-direction: column; gap: 3px; padding: 6px 8px; border-radius: var(--r-sm); background: var(--bg-hover); min-width: 0; }
+.dbgp-entry-head { display: flex; align-items: baseline; gap: var(--sp-2); font-size: 11px; min-width: 0; }
 .dbgp-entry-time { color: var(--text-3); font-family: var(--font-mono); flex-shrink: 0; }
 .dbgp-entry-target { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); color: var(--text-1); }
-.dbgp-entry-value { margin: 0; font-family: var(--font-mono); font-size: 11px; color: var(--text-2); white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow: auto; }
-.dbgp-entry-throw { margin: 0; font-family: var(--font-mono); font-size: 11px; color: var(--error); white-space: pre-wrap; }
+.dbgp-entry-value { margin: 0; font-family: var(--font-mono); font-size: 11px; color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; max-height: 200px; overflow: auto; }
+.dbgp-entry-throw { margin: 0; font-family: var(--font-mono); font-size: 11px; color: var(--error); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; max-height: 200px; overflow: auto; }
 
 /* plan-282-1441（#7）：数据库语句与结果的结构化呈现（消息流内） */
 .tc-sql { display: flex; flex-direction: column; gap: var(--sp-2); }
