@@ -644,7 +644,10 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
       <ConfirmDialog
         open={dropWorktree !== null}
         title="删除工作树"
-        message={`将删除工作树「${dropWorktree?.name ?? ""}」的目录与登记，此操作不可恢复。`}
+        message={
+          `将删除工作树「${dropWorktree?.name ?? ""}」的目录与登记，` +
+          `并连带删除本地分支 ${dropWorktree?.worktree_branch || "（工作树分支）"}，此操作不可恢复。`
+        }
         confirmLabel="删除"
         cancelLabel={t("common.cancel")}
         danger

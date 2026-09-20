@@ -2702,6 +2702,12 @@ a { color: var(--accent); text-decoration: none; }
   border-radius: var(--r-md); font-size: 12px; line-height: 1.6;
   background: var(--error-soft); color: var(--error);
 }
+/* 合并完成后的收尾确认文案（工作树名称/分支名用等宽强调） */
+.merge-post-note { margin: 8px 0; }
+.merge-post-note code {
+  font-family: var(--font-mono); font-size: 11px;
+  padding: 1px 4px; border-radius: var(--r-xs); background: var(--bg-hover); color: var(--text-1);
+}
 .merge-filelist { display: flex; flex-direction: column; gap: 4px; max-height: 58vh; overflow-y: auto; scrollbar-width: thin; }
 .merge-file-row {
   display: flex; align-items: center; gap: var(--sp-3);

@@ -369,7 +369,8 @@ export const api = {
     post<{ ok: boolean; count: number; worktrees: Array<{ project_id: number; path: string; branch: string; name: string; repo: string }>; project_id: number; path: string; branch: string; name: string }>(
       `/projects/${projectId}/worktrees`, data),
   deleteWorktreeProject: (worktreeProjectId: number, force = false) =>
-    del<{ ok: boolean }>(`/projects/worktrees/${worktreeProjectId}${force ? "?force=true" : ""}`),
+    del<{ ok: boolean; branch?: string | null; branch_deleted?: boolean }>(
+      `/projects/worktrees/${worktreeProjectId}${force ? "?force=true" : ""}`),
   worktreeMergePreview: (worktreeProjectId: number) =>
     post<WorktreeMergePreview>(`/projects/worktrees/${worktreeProjectId}/merge/preview`, {}),
   worktreeMergeFile: (worktreeProjectId: number, path: string) =>
@@ -808,6 +809,11 @@ export const api = {
   // ── 本地技能导入（v1.1：选择本地目录/md 文件导入技能）──
   importLocalSkill: (data: { path: string; mode?: "copy" | "link" }) =>
     post<{ ok: boolean; imported: string[]; skipped: string[]; count: number }>("/skills/import-local", data),
+
+  /** 自动扫描外部工具（Claude/Codex/CodeBuddy/Qoder/Trae）的技能目录并同步入库。
+   *  workspace 缺省时后端回退到最近使用的项目。 */
+  scanSkills: (workspace?: string) =>
+    post<ScanResult>(`/skills/scan${workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""}`, {}),
 
   // ── 文件上传（v14: 附件统一为文件地址，不再传 base64）──
   uploadFile: async (file: File): Promise<UploadOut> => {

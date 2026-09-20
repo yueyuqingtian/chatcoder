@@ -262,6 +262,38 @@ async def scan_mcp_servers():
     return await scan_local_mcp()
 
 
+# ── 技能自动扫描（发现外部工具的 skills 目录并同步入库）──
+
+async def _fallback_workspace(db: AsyncSession) -> str | None:
+    """无显式 workspace 时的兜底：取最近使用的项目路径。
+
+    与 diagnostics._fallback_workspace 同源语义（置顶/最近更新优先），
+    仅用于「用户没传当前项目」时仍能扫到项目级 `.claude/skills` 等目录。
+    """
+    from app.services import project_service
+
+    try:
+        projects = await project_service.list_projects(db)
+        if projects:
+            return getattr(projects[0], "path", None) or None
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+@router.post("/skills/scan", response_model=dict)
+async def scan_skills(
+    workspace: str | None = None, db: AsyncSession = Depends(get_db),
+):
+    """扫描外部工具（Codex/CodeBuddy/Claude/Qoder/Trae）的技能目录并同步入库。
+
+    覆盖两种安装形态：`skills/*.md` 与 `skills/<name>/SKILL.md`（skills CLI、
+    Claude/Codex 原生安装形态）。返回新增/更新/未变计数。
+    """
+    ws = workspace or await _fallback_workspace(db)
+    return await skill_service.sync_scanned_skills(db, ws)
+
+
 # ── 本地技能导入（v1.1：选择本地目录/md 文件导入）──
 
 class SkillImportLocal(BaseModel):

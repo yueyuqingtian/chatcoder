@@ -139,6 +139,12 @@ export function MergeDialog({
   const [resolved, setResolved] = useState<Record<string, string>>({});
   const [confirmApply, setConfirmApply] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  /** 合并完成后的收尾二次确认：是否顺手删除当前工作树（不删则保留） */
+  const [postMerge, setPostMerge] = useState(false);
+  const [wtDeleting, setWtDeleting] = useState(false);
+  const [postError, setPostError] = useState("");
+  /** 工作树有未提交变更时，需用户二次确认才强制删除 */
+  const [needForce, setNeedForce] = useState(false);
 
   const loadPreview = async () => {
     if (!worktree) return;
@@ -158,6 +164,8 @@ export function MergeDialog({
     setBlobs(null);
     setResolved({});
     setError("");
+    setPostMerge(false);
+    setPostError("");
     void loadPreview();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, worktree?.id]);
@@ -284,10 +292,36 @@ export function MergeDialog({
       );
       await api.worktreeMergeApply(worktree.id, files);
       setConfirmApply(false);
-      onMerged();
+      // 合并已写入主工作区：不直接关闭，改为二次确认是否删除当前工作树
+      setPostError("");
+      setPostMerge(true);
     } catch (e) {
       setError(String(e));
     } finally { setSubmitting(false); }
+  };
+
+  /** 合并后收尾：删除工作树（含本地分支）。
+   *  先按普通删除；若因未提交变更被拒，则提示用户确认后再强制删除（不静默丢弃改动）。 */
+  const finishAndDelete = async (force = false) => {
+    if (!worktree) return;
+    setWtDeleting(true);
+    setPostError("");
+    try {
+      await api.deleteWorktreeProject(worktree.id, force);
+      setPostMerge(false);
+      onMerged();
+    } catch (e) {
+      // 未提交变更时后端会拒绝：引导用户确认强制删除
+      setNeedForce(true);
+      setPostError(String(e));
+    } finally { setWtDeleting(false); }
+  };
+
+  /** 合并后收尾：保留工作树，仅关闭对话框 */
+  const finishKeep = () => {
+    setPostMerge(false);
+    setNeedForce(false);
+    onMerged();
   };
 
   const statusLabel: Record<string, string> = {
@@ -297,7 +331,7 @@ export function MergeDialog({
   return (
     <>
       <Dialog
-        open={open}
+        open={open && !postMerge}
         onClose={onClose}
         width={1080}
         title={`合并工作树「${worktree?.name ?? ""}」到主工作区`}
@@ -418,6 +452,58 @@ export function MergeDialog({
         onCancel={() => setConfirmApply(false)}
         onConfirm={() => void applyMerge()}
       />
+
+      {/* 合并完成后的收尾：是否删除当前工作树（不删则保留，可继续在里面开发） */}
+      <Dialog
+        open={postMerge}
+        onClose={finishKeep}
+        width={420}
+        title="合并完成"
+        dismissOnOverlay={false}
+        footer={
+          needForce ? (
+            <>
+              <button className="btn btn-ghost btn-sm" onClick={finishKeep} disabled={wtDeleting}>
+                取消
+              </button>
+              <button className="btn btn-danger btn-sm" onClick={() => void finishAndDelete(true)} disabled={wtDeleting}>
+                {wtDeleting ? "删除中…" : "强制删除（丢弃未提交变更）"}
+              </button>
+            </>
+          ) : (
+            <>
+              <button className="btn btn-ghost btn-sm" onClick={finishKeep} disabled={wtDeleting}>
+                保留工作树
+              </button>
+              <button className="btn btn-danger btn-sm" onClick={() => void finishAndDelete(false)} disabled={wtDeleting}>
+                {wtDeleting ? "删除中…" : "删除工作树"}
+              </button>
+            </>
+          )
+        }
+      >
+        <div className="ui-dialog-message">
+          {needForce ? (
+            <>
+              <p>该工作树存在未提交变更，普通删除已被拒绝。</p>
+              <p className="merge-post-note">
+                继续删除会一并丢弃这些未提交的改动，且连带删除本地分支
+                <code>{worktree?.branch || "（工作树分支）"}</code>。是否确认？
+              </p>
+            </>
+          ) : (
+            <>
+              <p>已将工作树「{worktree?.name ?? ""}」的改动合并到主工作区。</p>
+              <p className="merge-post-note">
+                是否删除该工作树？删除会移除工作树目录与登记，并连带删除本地分支
+                <code>{worktree?.branch || "（工作树分支）"}</code>。
+              </p>
+              <p>选择「保留工作树」则维持现状，可继续在其中开发。</p>
+            </>
+          )}
+        </div>
+        {postError && <div className="merge-error">{postError}</div>}
+      </Dialog>
     </>
   );
 }

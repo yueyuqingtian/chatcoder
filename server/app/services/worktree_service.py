@@ -139,6 +139,10 @@ async def create_worktree(db: AsyncSession, session_id: int, *, branch: str | No
     wt_path = base / f"session_{session_id}"
     branch_name = branch or f"chatcoder/session-{session_id}"
 
+    # 分支已存在时给出可读提示（否则 git 直接抛 "a branch named ... already exists"）
+    if await _branch_exists(repo, branch_name):
+        raise ValueError(f"仓库已存在分支 {branch_name}，请另填分支名或先删除该分支")
+
     ok, out, err = await _git(repo, "worktree", "add", str(wt_path), "-b", branch_name)
     if not ok:
         raise ValueError(f"创建工作树失败: {(err or out)[:200]}")
@@ -168,6 +172,9 @@ async def remove_worktree(db: AsyncSession, session_id: int) -> dict:
     if ok and out.strip():
         raise ValueError("工作树存在未提交变更，请先 commit 或 stash")
 
+    # 分支名必须在摘除工作树之前读取（摘除后工作树目录已不存在）
+    branch = await _branch_of_worktree(wt)
+
     from app.services.project_service import get_project
     project = await get_project(db, session.project_id) if session.project_id else None
     repo = project.path if project else wt
@@ -180,6 +187,10 @@ async def remove_worktree(db: AsyncSession, session_id: int) -> dict:
         if not _force_rmtree(Path(wt)):
             raise ValueError(f"移除工作树失败，目录仍被占用: {wt}")
         logger.warning("worktree remove 失败，已强制清理目录 %s: %s", wt, (err or out)[:200])
+
+    # 连带删除该工作树的本地分支，避免仓库残留 chatcoder/session-xxx
+    branch_deleted = await _delete_local_branch(repo, branch)
+    await _git(repo, "worktree", "prune")
     from app.persistence.database import run_write_locked
 
     def _persist_path(s, value: str | None):
@@ -190,8 +201,8 @@ async def remove_worktree(db: AsyncSession, session_id: int) -> dict:
         s.commit()
 
     await run_write_locked(lambda s: _persist_path(s, None), label=f"worktree.remove.{session_id}")
-    logger.info("会话 %s 移除 worktree: %s", session_id, wt)
-    return {"ok": True}
+    logger.info("会话 %s 移除 worktree: %s (branch=%s, 删除=%s)", session_id, wt, branch, branch_deleted)
+    return {"ok": True, "branch": branch, "branch_deleted": branch_deleted}
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -260,6 +271,44 @@ async def _has_commits(repo: str) -> bool:
     """仓库是否已有提交（空仓库无法作为工作树起点）。"""
     ok, out, _ = await _git(repo, "rev-parse", "--verify", "HEAD")
     return bool(ok and out.strip())
+
+
+async def _branch_exists(repo: str, branch: str) -> bool:
+    """本地是否存在同名分支（refs/heads）。"""
+    if not branch:
+        return False
+    ok, out, _ = await _git(repo, "rev-parse", "--verify", f"refs/heads/{branch}")
+    return bool(ok and out.strip())
+
+
+async def _branch_of_worktree(wt_path: str) -> str | None:
+    """读取工作树当前检出的分支名；游离 HEAD 或失败时返回 None。"""
+    ok, out, _ = await _git(wt_path, "rev-parse", "--abbrev-ref", "HEAD")
+    name = out.strip() if ok else ""
+    if not name or name == "HEAD":
+        return None
+    return name
+
+
+async def _delete_local_branch(repo: str, branch: str | None) -> bool:
+    """删除工作树对应的本地分支（工作树摘除后调用）。
+
+    - 跳过主分支（当前 HEAD 所在分支），避免把用户正在开发的主线删掉；
+    - 分支仍被其他工作树占用时 `git branch -D` 会自行拒绝，这里只记录告警；
+    - 删除分支失败不影响"工作树已删除"这一主结果，返回是否真正删掉。
+    """
+    if not branch:
+        return False
+    default = await _default_branch(repo)
+    if branch == default or branch in ("main", "master"):
+        logger.info("[worktree] 跳过删除主分支: %s", branch)
+        return False
+    ok, out, err = await _git(repo, "branch", "-D", branch)
+    if not ok:
+        logger.warning("[worktree] 删除分支失败 %s: %s", branch, (err or out)[:200])
+        return False
+    logger.info("[worktree] 已删除本地分支: %s", branch)
+    return True
 
 
 # 扫描子仓库时跳过的目录（构建产物/依赖/工具目录，避免误判与耗时）
@@ -401,12 +450,16 @@ async def create_worktree_for_project(
         if not base_branch:
             raise ValueError(f"{repo} 没有可用的起始分支，无法创建工作树")
 
+        # 分支已存在时直接拒绝：此前会退化为"检出该既有分支"，导致删除工作树时
+        # 无法安全地连带删除分支（那可能是用户自己的分支）。宁可让用户换个名字。
+        if await _branch_exists(repo, branch_name):
+            raise ValueError(
+                f"仓库 {_Path_name(repo)} 已存在分支 {branch_name}，请另填一个分支名后再创建工作树"
+            )
+
         ok, out, err = await _git(repo, "worktree", "add", "-b", branch_name, str(wt_path), base_branch)
         if not ok:
-            # 分支已存在时退化为直接检出该分支
-            ok2, out2, err2 = await _git(repo, "worktree", "add", str(wt_path), branch_name)
-            if not ok2:
-                raise ValueError(f"在 {repo} 创建工作树失败: {(err or out or err2 or out2)[:200]}")
+            raise ValueError(f"在 {repo} 创建工作树失败: {(err or out)[:200]}")
 
         display_name = f"{wt_name} · {_Path_name(repo)}" if multi else wt_name
 
@@ -504,7 +557,7 @@ async def list_worktrees(db: AsyncSession, project_id: int | None = None) -> lis
 
 
 async def remove_worktree_project(db: AsyncSession, worktree_project_id: int, *, force: bool = False) -> dict:
-    """删除工作树：先移除 git worktree，再删除登记的 Project 行。"""
+    """删除工作树：移除 git worktree、**删除对应的本地分支**，再删除登记的 Project 行。"""
     from app.persistence.database import run_write_locked
 
     wt = await _project_of(db, worktree_project_id)
@@ -512,6 +565,8 @@ async def remove_worktree_project(db: AsyncSession, worktree_project_id: int, *,
         raise ValueError("工作树不存在")
     parent = await _project_of(db, wt.parent_project_id) if wt.parent_project_id else None
     repo = parent.path if parent else wt.path
+    # 分支名优先取登记值；老数据缺字段时从工作树现场读取（摘除前才读得到）
+    branch = wt.worktree_branch or await _branch_of_worktree(wt.path)
 
     if not force:
         ok, out, _ = await _git(wt.path, "status", "--porcelain")
@@ -533,6 +588,10 @@ async def remove_worktree_project(db: AsyncSession, worktree_project_id: int, *,
             raise ValueError(f"删除工作树目录失败（可能被其他程序占用）：{wt.path}")
         logger.warning("worktree remove 失败，已强制清理目录 %s: %s", wt.path, (err or out)[:200])
 
+    # 工作树摘除后连带删除其本地分支——否则仓库里会残留一堆 chatcoder/xxx 分支
+    branch_deleted = await _delete_local_branch(repo, branch)
+    await _git(repo, "worktree", "prune")
+
     def _drop(s):
         from app.persistence.models.project import Project as _P
         row = s.get(_P, worktree_project_id)
@@ -541,8 +600,9 @@ async def remove_worktree_project(db: AsyncSession, worktree_project_id: int, *,
         s.commit()
 
     await run_write_locked(_drop, label=f"worktree.remove_project.{worktree_project_id}")
-    logger.info("工作树已删除: id=%s path=%s", worktree_project_id, wt.path)
-    return {"ok": True}
+    logger.info("工作树已删除: id=%s path=%s branch=%s(删除=%s)",
+                worktree_project_id, wt.path, branch, branch_deleted)
+    return {"ok": True, "branch": branch, "branch_deleted": branch_deleted}
 
 
 # ── 合并到主工作区（IDEA 式三栏冲突解决）──

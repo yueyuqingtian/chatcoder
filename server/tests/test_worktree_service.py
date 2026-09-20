@@ -135,6 +135,52 @@ async def test_remove_worktree_refuses_dirty_then_force(db, repo):
 
 
 @pytest.mark.asyncio
+async def test_create_refuses_existing_branch(db, repo):
+    """分支已存在时必须报错，而不是退化为检出该既有分支。
+
+    否则删除工作树时无法安全地连带删除分支——那可能是用户自己的分支。
+    """
+    _git(repo, "branch", "chatcoder/wt-dup")
+    pid = await _seed_project(db, repo)
+    with pytest.raises(ValueError) as ei:
+        await worktree_service.create_worktree_for_project(
+            db, pid, name="wt-dup", branch="chatcoder/wt-dup")
+    assert "已存在分支" in str(ei.value)
+
+
+@pytest.mark.asyncio
+async def test_remove_worktree_deletes_local_branch(db, repo):
+    """删除工作树时必须连带删除其本地分支，否则仓库残留 chatcoder/xxx。"""
+    pid = await _seed_project(db, repo)
+    res = await worktree_service.create_worktree_for_project(db, pid, name="wt-br")
+    branch = res["branch"]
+    assert branch in _git(repo, "branch", "--list", branch)
+
+    out = await worktree_service.remove_worktree_project(db, res["project_id"], force=True)
+    assert out["ok"] is True and out["branch"] == branch
+    assert out["branch_deleted"] is True
+    # 分支必须真的从仓库消失
+    assert branch not in _git(repo, "branch", "--list", branch)
+    assert await worktree_service.list_worktrees(db, project_id=pid) == []
+
+
+@pytest.mark.asyncio
+async def test_remove_worktree_keeps_default_branch(db, repo):
+    """工作树检出到主分支时（异常情形）不得把主分支删掉。"""
+    pid = await _seed_project(db, repo)
+    res = await worktree_service.create_worktree_for_project(db, pid, name="wt-main")
+    # 模拟登记分支 == 仓库主分支
+    from app.persistence.models.project import Project as _P
+    row = await db.get(_P, res["project_id"])
+    row.worktree_branch = "main"
+    await db.commit()
+
+    out = await worktree_service.remove_worktree_project(db, res["project_id"], force=True)
+    assert out["branch_deleted"] is False
+    assert "main" in _git(repo, "branch", "--list", "main")
+
+
+@pytest.mark.asyncio
 async def test_remove_worktree_cleans_ignored_files(db, repo):
     """工作树内有被忽略文件（如 node_modules）时，删除也必须把目录清干净。
 

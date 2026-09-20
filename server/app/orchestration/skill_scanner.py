@@ -131,6 +131,20 @@ def _scan_source_skills(source: str, workspace_root: str | None) -> list[Scanned
                 skill = _parse_skill_file_yml(yml_file, source, is_global)
                 if skill:
                     skills.append(skill)
+            # 目录技能：skills/<name>/SKILL.md
+            # 这是 `npx skills add`、Claude/Codex 等工具的安装形态（v3.6 补齐，
+            # 原先只认平铺 *.md，导致 CLI 安装的技能扫不到）。
+            for sub in sorted(d for d in skills_dir.iterdir() if d.is_dir()):
+                # 跳过 .system 等隐藏内部目录（Codex 自带系统技能，非用户技能）
+                if sub.name.startswith("."):
+                    continue
+                for sk_name in ("SKILL.md", "skill.md"):
+                    sk_path = sub / sk_name
+                    if sk_path.is_file():
+                        skill = _parse_skill_file(sk_path, source, is_global)
+                        if skill:
+                            skills.append(skill)
+                        break
         except OSError as e:
             logger.debug("扫描目录 %s 失败: %s", skills_dir, e)
 
@@ -144,7 +158,9 @@ def _parse_skill_file(md_path: Path, source: str, is_global: bool) -> ScannedSki
     except (OSError, UnicodeDecodeError):
         return None
 
-    name = md_path.stem  # 文件名（去后缀）
+    # 目录技能（skills/<name>/SKILL.md）用目录名作技能名，
+    # 否则所有目录技能都会因文件名相同而收敛成一个 "SKILL"。
+    name = md_path.parent.name if md_path.name.lower() == "skill.md" else md_path.stem
     display_name = name.replace("_", " ").replace("-", " ").title()
 
     # 尝试从 Front Matter 提取元数据

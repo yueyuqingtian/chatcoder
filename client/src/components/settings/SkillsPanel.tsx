@@ -24,6 +24,8 @@ export function SkillsPanel() {
   const [confirmDelete, setConfirmDelete] = useState<{ kind: "repo"; id: string; name: string } | { kind: "skill"; id: number; name: string } | null>(null);
   // v1.1: 本地导入
   const [importing, setImporting] = useState(false);
+  // 扫描中标记：扫描会遍历多个技能目录，按钮需给出进行中反馈
+  const [scanning, setScanning] = useState(false);
   // plan-230-1144 M1.2: 技能详情展开 + trigger 草稿（失焦即保存）
   const [expandedSkill, setExpandedSkill] = useState<number | null>(null);
   const [triggerDrafts, setTriggerDrafts] = useState<Record<number, string>>({});
@@ -47,6 +49,20 @@ export function SkillsPanel() {
     try { setRepos(await api.listSkillRepos()); } catch {}
   }, []);
   useEffect(() => { load(); }, [load]);
+
+  /** 「刷新扫描」：先请求后端扫描外部工具技能目录并入库，再刷新列表。
+   *  此前该按钮只调 load()（纯读库），后端也没有扫描路由，导致新装技能永远扫不到。 */
+  const scan = useCallback(async () => {
+    setScanning(true);
+    try {
+      const res = await api.scanSkills();
+      await load();
+      notify(
+        `扫描完成：共发现 ${res.total_scanned} 个技能（新增 ${res.added}、更新 ${res.updated}、未变 ${res.unchanged}）`,
+      );
+    } catch (e) { notify("扫描失败: " + String(e)); }
+    finally { setScanning(false); }
+  }, [load]);
 
   const doImport = useCallback(async (paths: string[]) => {
     if (paths.length === 0) return;
@@ -122,7 +138,9 @@ export function SkillsPanel() {
   return (
     <div>
       <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginBottom: 12 }}>
-        <button className="btn btn-ghost btn-sm" onClick={load}><IconRefresh size={13} /> 刷新扫描</button>
+        <button className="btn btn-ghost btn-sm" onClick={() => void scan()} disabled={scanning}>
+          <IconRefresh size={13} /> {scanning ? "扫描中…" : "刷新扫描"}
+        </button>
         <button className="btn btn-ghost btn-sm" onClick={() => void handleImportLocal()} disabled={importing}>
           <IconFolder size={13} /> {importing ? "导入中…" : "导入本地技能"}
         </button>

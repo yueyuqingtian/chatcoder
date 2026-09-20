@@ -86,6 +86,23 @@ async def lifespan(app: FastAPI):
                 await run_write_locked(_persist, label="startup.repair")
         await seed()
 
+        # 启动时自动扫描一次外部工具技能目录（skills CLI / Claude / Codex 等），
+        # 这样用户无需手动点「刷新扫描」即可在「拓展 → 技能」看到已安装的技能。
+        # 失败不阻塞服务启动。
+        try:
+            import logging
+
+            from app.services import skill_service
+            from app.services import project_service
+
+            _projects = await project_service.list_projects(db)
+            _ws = (getattr(_projects[0], "path", None) or None) if _projects else None
+            _res = await skill_service.sync_scanned_skills(db, _ws)
+            logging.getLogger(__name__).info("启动技能扫描完成: %s", _res)
+        except Exception:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).exception("启动技能扫描失败（不阻塞服务）")
+
         # plan-230-1144 M1.1: 启动定时任务调度循环（此前该表无任何消费者，任务永不执行）
         try:
             from app.services import scheduler_loop

@@ -266,7 +266,8 @@ export function WorktreesPanel() {
         open={dropTarget != null}
         title="删除工作树"
         message={
-          `将删除工作树「${dropTarget?.name ?? ""}」的目录与登记。` +
+          `将删除工作树「${dropTarget?.name ?? ""}」的目录与登记，并连带删除本地分支 ` +
+          `${dropTarget?.branch || "（工作树分支）"}。` +
           `\n\n若该工作树存在未提交变更，删除会被拒绝；此时可选择"强制删除"放弃这些改动。`
         }
         confirmLabel="删除"
