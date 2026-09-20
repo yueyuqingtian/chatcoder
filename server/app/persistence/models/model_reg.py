@@ -77,6 +77,9 @@ class ProviderCredential(Base):
     cooldown_until: Mapped[str | None] = mapped_column(String(40))
     # 最近一次成功时间（粘性优先依据）
     last_ok_at: Mapped[str | None] = mapped_column(String(40))
+    # plan-290: 连续失败次数（成功即清零）。达到 provider_credential_fail_threshold
+    # 才置 cooldown；未达标时只记录 last_error 并留在可用池里，避免瞬时抖动误冷却。
+    fail_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # workbuddy 等账号的积分余额缓存（数字，可为小数）
     credits: Mapped[float | None] = mapped_column(Numeric(12, 2))
     # 供应商自定义扩展（如 workbuddy 账号 uid / enterpriseId 冗余快照）

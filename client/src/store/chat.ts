@@ -138,8 +138,6 @@ export interface SessionSlice {
   thinkingBuffers: Record<number, string>;
   usage: UsageDetail | null;
   isCompacting: boolean;
-  /** plan-282-1441：最近一次上下文回收（工具结果折叠）提示——让"隐藏压缩"可见。 */
-  contextNotice: { savedTokens: number; foldedResults: number; at: number } | null;
   /** plan-282-1441（#8）：调试现场（按 web/java 分桶，随会话 slice 保存/恢复） */
   debugState: Record<string, DebugStatusOut> | null;
   pendingApproval: { approvalId: string; detail: Record<string, unknown> } | null;
@@ -196,8 +194,7 @@ function _snapshotSlice(s: ChatState): SessionSlice {
     thinkingBuffers: s.thinkingBuffers,
     usage: s.usage,
     isCompacting: s.isCompacting,
-  contextNotice: s.contextNotice,
-  debugState: s.debugState,
+    debugState: s.debugState,
     usageCacheTotals: s.usageCacheTotals,
     pendingApproval: s.pendingApproval,
     questionDraft: s.questionDraft,
@@ -264,8 +261,6 @@ interface ChatState {
   usageCacheTotals: UsageCacheTotals;
   /** v6.5: 是否正在压缩上下文（用于页面反馈）。 */
   isCompacting: boolean;
-  /** plan-282-1441：最近一次上下文回收（工具结果折叠）提示——让“隐藏压缩”可见。 */
-  contextNotice: { savedTokens: number; foldedResults: number; at: number } | null;
   /** plan-282-1441（#8）：调试现场状态（按 web / java 分桶，来自 debug.paused 事件）。
    *  调试面板与消息流卡片据此展示"停在哪一行 + 调用栈 + 变量"。 */
   debugState: Record<string, DebugStatusOut> | null;
@@ -644,7 +639,6 @@ function _resetSessionState(): Partial<ChatState> {
     thinkingBuffers: {},
     usage: null,
     isCompacting: false,
-    contextNotice: null,
     debugState: null,
     arthasState: null,
     turnStatus: null,
@@ -702,7 +696,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
   thinkingBuffers: {},
   usage: null,
   isCompacting: false,
-  contextNotice: null,
   debugState: null,
   arthasState: null,
   usageCacheTotals: { inputSum: 0, cachedSum: 0, samples: 0 },
@@ -2437,26 +2430,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         } catch { /* 非浏览器环境忽略 */ }
         break;
       }
-      case "context.folded": {
-        /* plan-282-1441：上下文回收可见化。
-         *
-         * v16：按占用占比折叠较早工具结果的隐式压缩已移除——历史内容只在超过
-         * 「设置-常规」压缩阈值后由"上下文压缩"卡片（可恢复）处理。
-         * 本事件只对应单条超长工具结果的落盘折叠（原文可在 .compact-cache 恢复）。
-         * 这里把回收量记入 store，消息流顶部用一条克制的提示说明"回收了多少、可恢复"。
-         */
-        const savedTokens = Number(payload.est_tokens_saved ?? 0);
-        const foldedResults = Number(payload.folded_results ?? 0);
-        if (savedTokens < 1000 && foldedResults === 0) break;
-        set({
-          contextNotice: {
-            savedTokens,
-            foldedResults,
-            at: Date.now(),
-          },
-        });
+      case "context.folded":
+        // 用户反馈："上下文已回收 x k tokens"提示太丑，直接不展示；
+        // 事件仅落空消费（保留 case 以维持 ServerEventName 穷举检查），不再写入任何状态。
         break;
-      }
       case "compact.started": {
         // v6.5: 压缩开始，前端显示"正在压缩上下文"反馈
         // v30: 记录触发占用信息，消息流顶部渲染"压缩中"卡片

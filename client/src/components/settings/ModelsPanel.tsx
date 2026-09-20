@@ -228,17 +228,22 @@ function ModelFormModal({ open, editing, targetProvider, onClose, onSaved }: { o
       setForm({ name: "", provider: "openai_compatible", base_url: "", api_key: "", context_window: "200000", reasoning_efforts: [], is_active: true, is_multimodal: false });
     }
   }, [editing, targetProvider, open]);
+  const underProvider = !!editing?.provider_id || !!targetProvider;
   const handleSave = async () => {
     if (!form.name.trim()) return;
     try {
       const data: Record<string, unknown> = {
         name: form.name.trim(),
         provider: targetProvider ? (targetProvider.api_format || "openai_compatible") : form.provider,
-        base_url: targetProvider ? targetProvider.base_url : (form.base_url || undefined),
         context_window: Number(form.context_window) || undefined,
         is_active: form.is_active,
         is_multimodal: form.is_multimodal,
       };
+      // 挂靠供应商的模型不提交 base_url：该字段由后端/目录同步维护，表单里也不展示。
+      // 此前一律写入 provider.base_url（站点根）——对 ta3 而言会把目录下发的模型级
+      // 请求基址 …/ai/dispatch/v2 覆盖成 …/newcoder，表现为「编辑一次模型后请求 404」。
+      // 非挂靠（独立模型）才用表单里的值。
+      if (!underProvider) data.base_url = form.base_url || undefined;
       if (targetProvider) {
         data.provider_id = targetProvider.id;
         data.api_format = targetProvider.api_format;
@@ -251,7 +256,6 @@ function ModelFormModal({ open, editing, targetProvider, onClose, onSaved }: { o
       onClose();
     } catch (e) { notify(String(e)); }
   };
-  const underProvider = !!editing?.provider_id || !!targetProvider;
   const currentProviderName = editing?.provider_name || targetProvider?.name || (editing?.provider_id ? `#${editing?.provider_id}` : "");
   return (
     <Modal open={open} onClose={onClose} title={editing ? "编辑模型" : (targetProvider ? `添加模型（${targetProvider.name}）` : "新建模型")} width={520} height="auto">

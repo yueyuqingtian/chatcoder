@@ -1110,11 +1110,19 @@ async def run_agent_loop(
                             try:
                                 from app.services import credential_service as _cred_svc
                                 if _cred_svc.is_retryable_error(_err_msg):
-                                    await _cred_svc.mark_failed(db, _cur_cred, _err_msg)
-                                    logger.warning(
-                                        "[agent] turn=%s 凭据 #%s 标记失败并进入冷却",
-                                        turn_id, _cur_cred,
-                                    )
+                                    # plan-290: 是否真进入冷却由服务层判定——连续失败达阈值
+                                    # 才冷却，单凭据供应商永不冷却（此时仅计数留痕）。
+                                    _cooled = await _cred_svc.mark_failed(db, _cur_cred, _err_msg)
+                                    if _cooled:
+                                        logger.warning(
+                                            "[agent] turn=%s 凭据 #%s 连续失败达阈值，已进入冷却",
+                                            turn_id, _cur_cred,
+                                        )
+                                    else:
+                                        logger.warning(
+                                            "[agent] turn=%s 凭据 #%s 本次失败未冷却（未达阈值或唯一凭据），可继续尝试",
+                                            turn_id, _cur_cred,
+                                        )
                             except Exception:
                                 logger.debug("[agent] 标记凭据失败异常(非阻塞)", exc_info=True)
                         _retry_waits = _retry_plan()

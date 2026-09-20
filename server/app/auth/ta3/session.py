@@ -108,6 +108,7 @@ async def ensure_account_credential(db: AsyncSession, provider_id: int,
                 c.status = "ok"
                 c.cooldown_until = None
                 c.last_error = None
+                c.fail_count = 0  # plan-290: 重新登录即视为健康，清连续失败计数
             if label and c.label != label:
                 c.label = label
             await db.commit()

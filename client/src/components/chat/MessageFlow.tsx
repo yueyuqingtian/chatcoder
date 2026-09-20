@@ -13,7 +13,6 @@ import { TurnGroup } from "./TurnGroup";
 import { JumpDots } from "./JumpDots";
 import { CompactingCard } from "./CompactCard";
 import { DebugCard } from "./DebugCard";
-import { ContextNoticeCard } from "./ContextNoticeCard";
 import { StreamingText } from "./StreamingText";
 import { IconSearch, IconChevronUp, IconChevronDown, IconX, IconArrowDown } from "../icons";
 import { useTextHighlight } from "../../hooks/useTextHighlight";
@@ -784,8 +783,6 @@ function MainMessageFlow({
   // plan-282-1441（#8）：调试现场——AI 调试试过程中在消息流尾部展示“停在哪一行”。
   // 这是“用户能看到断点进行到哪一行代码”在消息流侧的落点（另一处在调试面板）。
   const debugState = useChatStore((s) => s.debugState);
-  // plan-282-1441：上下文回收（工具结果折叠）提示——用户可见，避免"隐藏压缩"观感
-  const contextNotice = useChatStore((s) => s.contextNotice);
   const activeDebug = useMemo(() => {
     for (const t of ["web", "java"] as const) {
       const st = debugState?.[t];
@@ -939,7 +936,6 @@ function MainMessageFlow({
       trailingNode={
         isCompacting ? <CompactingCard info={compactingInfo} />
           : activeDebug ? <DebugCard status={activeDebug} />
-          : contextNotice ? <ContextNoticeCard notice={contextNotice} />
           : null
       }
       sessionKey={currentSessionId ?? 0}

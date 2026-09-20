@@ -3067,32 +3067,6 @@ a { color: var(--accent); text-decoration: none; }
 .debug-card-tip { font-size: 10px; color: var(--text-3); line-height: 1.6; }
 .debug-card-tip code { font-family: var(--font-mono); padding: 0 3px; border-radius: var(--r-xs); background: var(--bg-hover); }
 
-/* plan-282-1441：上下文回收提示（让"隐藏压缩"变得可见、可解释） */
-.ctx-notice {
-  display: flex; align-items: flex-start; gap: var(--sp-3);
-  margin: var(--sp-2) 0; padding: var(--sp-3) var(--sp-4);
-  border: 1px solid var(--border); border-left: 2px solid var(--accent);
-  border-radius: var(--r-md); background: var(--bg-main);
-}
-.ctx-notice-icon {
-  flex-shrink: 0; width: 22px; height: 22px; border-radius: var(--r-sm);
-  display: inline-flex; align-items: center; justify-content: center;
-  background: var(--bg-hover); color: var(--text-3);
-}
-.ctx-notice-body { flex: 1; min-width: 0; }
-.ctx-notice-title { font-size: 12px; font-weight: 600; color: var(--text-1); }
-.ctx-notice-desc { margin-top: 3px; font-size: 11px; line-height: 1.65; color: var(--text-3); }
-.ctx-notice-desc code {
-  font-family: var(--font-mono); font-size: 10px; padding: 0 3px;
-  border-radius: var(--r-xs); background: var(--bg-hover); color: var(--text-2);
-}
-.ctx-notice-desc b { color: var(--text-2); font-weight: 600; }
-.ctx-notice-close {
-  flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
-  width: 22px; height: 22px; padding: 0; border: none; border-radius: var(--r-xs);
-  background: transparent; color: var(--text-3); cursor: pointer;
-}
-.ctx-notice-close:hover { background: var(--bg-hover); color: var(--text-1); }
 .settings-resource-item:hover { box-shadow: var(--shadow-sm); }
 .settings-resource-info { flex: 1; min-width: 0; }
 .settings-resource-name { font-size: 13px; font-weight: 500; color: var(--text-1); }

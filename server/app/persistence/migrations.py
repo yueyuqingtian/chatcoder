@@ -125,6 +125,8 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("workbuddy_auth", "credential_id", "BIGINT"),
     ("ta3_auth", "credential_id", "BIGINT"),
     ("trae_auth", "credential_id", "BIGINT"),
+    # ========== provider_credentials（plan-290：连续失败计数，达到阈值才冷却）==========
+    ("provider_credentials", "fail_count", "INTEGER DEFAULT 0 NOT NULL"),
 ]
 
 

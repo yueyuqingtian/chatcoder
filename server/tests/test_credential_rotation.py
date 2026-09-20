@@ -198,15 +198,24 @@ def test_mark_failed_sets_cooldown(tmp_path):
             cid = await credential_service.create_credential(
                 db, p.id, label="k", api_key="kb", priority=0, is_active=True,
             )
-            await credential_service.mark_failed(db, cid, "HTTP 401 unauthorized")
+            # plan-290: 冷却只在「多凭据 + 连续失败达阈值」时发生——单凭据永不冷却。
+            # 本用例验证原语义（失败→冷却→跳过→成功复位），故再添一条备选凭据，
+            # 并把失败上报累计到阈值。
+            await credential_service.create_credential(
+                db, p.id, label="k2", api_key="kb2", priority=1, is_active=True,
+            )
+            for _ in range(credential_service.fail_threshold()):
+                await credential_service.mark_failed(db, cid, "HTTP 401 unauthorized")
             cred = await credential_service.get_credential(db, cid)
             assert cred.status == "cooldown"
             assert cred.cooldown_until
             assert "401" in (cred.last_error or "")
 
-            # 冷却中的凭据被轮询跳过
+            # 冷却中的凭据被轮询跳过（cooled=[] 只剩那条可用的备选凭据）
             creds = await credential_service.list_credentials(db, p.id)
-            assert credential_service.available_credentials(creds) == []
+            avail_ids = [c.id for c in credential_service.available_credentials(creds)]
+            assert cid not in avail_ids, "冷却中的凭据不应被选中"
+            assert len(avail_ids) == 1
 
             await credential_service.mark_ok(db, cid)
             cred = await credential_service.get_credential(db, cid)

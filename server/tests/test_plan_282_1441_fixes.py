@@ -115,7 +115,11 @@ async def test_reset_credential_clears_cooldown(db):
 
     cid = await credential_service.create_credential(
         db, provider.id, label="k1", api_key="sk-x", is_active=True)
-    await credential_service.mark_failed(db, cid, "429 rate limit")
+    # plan-290: 单凭据供应商永不冷却，故再添一条备选；并把失败累计到阈值才进入冷却
+    await credential_service.create_credential(
+        db, provider.id, label="k2", api_key="sk-y", is_active=True)
+    for _ in range(credential_service.fail_threshold()):
+        await credential_service.mark_failed(db, cid, "429 rate limit")
 
     from app.persistence.models.model_reg import ProviderCredential
     row = await db.get(ProviderCredential, cid)

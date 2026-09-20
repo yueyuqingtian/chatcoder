@@ -101,6 +101,81 @@ async def test_catalog_sync_persists_model_key_and_base_url(db, monkeypatch):
     assert row["base_url"] == DISPATCH_BASE
 
 
+async def test_provider_recovers_stale_site_root_base_url(db):
+    """脏值自愈：模型行 base_url 存成站点根（旧库/手工编辑）时也解析出 dispatch 路径。
+
+    真是现场：安装版复用用户目录旧库，deepseek-flash 行的 base_url 就是站点根，
+    若只"优先取模型行原值"仍会 404。
+    """
+    from app.models.registry import get_model_registry
+
+    provider = Provider(tenant_id=1, name="牛码", api_format="ta3", base_url=SITE_BASE)
+    db.add(provider)
+    await db.flush()
+    db.add(ProviderCredential(provider_id=provider.id, label="胡雷", priority=0,
+                              is_active=True, status="ok", extra={"kind": "ta3_account"}))
+    model = Model(tenant_id=1, name="deepseek-flash", provider_id=provider.id,
+                  source_type="byok", api_format="ta3", is_active=True,
+                  api_key=LLM_KEY, base_url=SITE_BASE, ta3_meta={"anthropic": False})
+    db.add(model)
+    db.add(Ta3Auth(provider_id=provider.id, access_token="ide-session-fake"))
+    await db.commit()
+
+    p, reason = await get_model_registry().get_provider_for_model(db, model)
+    assert p is not None, reason
+    assert p._base_url == DISPATCH_BASE
+
+
+async def test_provider_anthropic_uses_anthropic_dispatch_url(db):
+    """Anthropic 系模型（kimi 等）自愈时带 /anthropic 后缀。"""
+    from app.models.registry import get_model_registry
+
+    provider = Provider(tenant_id=1, name="牛码", api_format="ta3", base_url=SITE_BASE)
+    db.add(provider)
+    await db.flush()
+    db.add(ProviderCredential(provider_id=provider.id, label="胡雷", priority=0,
+                              is_active=True, status="ok", extra={"kind": "ta3_account"}))
+    model = Model(tenant_id=1, name="kimi-k3", provider_id=provider.id,
+                  source_type="byok", api_format="ta3", is_active=True,
+                  api_key=LLM_KEY, base_url=SITE_BASE,
+                  ta3_meta={"anthropic": True, "provider": "kimi"})
+    db.add(model)
+    db.add(Ta3Auth(provider_id=provider.id, access_token="ide-session-fake"))
+    await db.commit()
+
+    p, reason = await get_model_registry().get_provider_for_model(db, model)
+    assert p is not None, reason
+    assert p._base_url == f"{DISPATCH_BASE}/anthropic"
+    assert p._anthropic is True
+
+
+async def test_update_model_without_base_url_keeps_dispatch_path(db):
+    """编辑模型（前端不再提交 base_url）必须保留目录同步写入的 dispatch 路径。
+
+    复现路径：设置页编辑 ta3 模型 → 前端曾把 provider.base_url（站点根）写进模型行
+    → 请求变成 …/newcoder/chat/completions → 404，即"编辑一次就不行了"。
+    后端侧锁住：base_url 未传时 update_model 不修改该列。
+    """
+    from app.services import model_service
+
+    m = Model(tenant_id=1, name="deepseek-flash", provider_id=1, source_type="byok",
+              api_format="ta3", is_active=True, base_url=DISPATCH_BASE)
+    db.add(m)
+    await db.commit()
+    mid = m.id  # expire_all 前取标量，避免之后触发异步懒加载
+
+    await model_service.update_model(
+        db, mid, name="deepseek-flash", context_window=512000,
+        is_active=True, is_multimodal=False, base_url=None,
+    )
+    db.expire_all()
+    ref = (await db.execute(
+        Model.__table__.select().where(Model.id == mid)
+    )).mappings().one()
+    assert ref["base_url"] == DISPATCH_BASE, "编辑模型不得覆盖目录写入的 dispatch 路径"
+    assert ref["context_window"] == 512000
+
+
 async def test_provider_uses_model_level_base_url_and_key(db):
     """缺陷 2：凭据分支构造 ta3 provider 时必须用模型级 base_url 与 llm- key。
 

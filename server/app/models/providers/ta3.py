@@ -878,6 +878,19 @@ class Ta3Provider(ModelProvider):
             url = f"{self._base_url}/chat/completions"
             body = self._build_openai_body(request, disguised)
         headers = self._base_headers(workspace_dir=request.workspace_dir)
+        # 诊断护栏（v0.5.13）：ta3 的 LLM 网关只在「模型级 dispatch 路径」下工作，
+        # 且只认目录下发的 per-model `llm-` key（账号 ide-session- 一律 401）。
+        # 一旦检测到站点根 URL 或非 llm- 前缀，就在发请求前明确告警——否则现场只会
+        # 看到一条 404/401，难以反推是 base_url/api_key 存错了来源。
+        if "/ai/dispatch/" not in url:
+            logger.warning(
+                "[ta3] base_url 疑似站点根而非模型级 dispatch 路径: %s → %s "
+                "（应为 …/ai/dispatch/v2 或 …/ai/dispatch/v2/anthropic，"
+                "请核对模型行的 base_url / 重新同步目录）", self._base_url, url)
+        if self._api_key and not self._api_key.startswith("llm-"):
+            logger.warning(
+                "[ta3] api_key 前缀非 llm-（网关 LLM 通道只认 llm- key，"
+                "ide-session- 会被拒）: %s…", self._api_key[:12])
         logger.info("[ta3] model=%s protocol=%s tools=%d → %s",
                     request.model or self._model_name,
                     "anthropic" if self._anthropic else "openai",

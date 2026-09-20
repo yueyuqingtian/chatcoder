@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 # 凭据失败默认冷却时长（秒）——读全局设置，缺省 5 分钟
 DEFAULT_COOLDOWN_SECONDS = 300
+# plan-290: 默认「连续失败几次才冷却」——瞬时抖动不应立刻踢掉凭据
+DEFAULT_FAIL_THRESHOLD = 3
 # 视为"可切换凭据"的错误类型标记（由 provider 层归一化后的错误文本匹配）
 _RETRYABLE_HINTS = (
     "401", "403", "429", "500", "502", "503", "504",
@@ -54,6 +56,17 @@ def _parse_iso(value: str | None) -> datetime | None:
 
 def cooldown_seconds() -> int:
     return int(getattr(settings, "provider_credential_cooldown_seconds", 0) or DEFAULT_COOLDOWN_SECONDS)
+
+
+def fail_threshold() -> int:
+    """连续失败几次才冷却（默认 3）。<=1 表示首次失败即冷却（旧行为）。"""
+    raw = getattr(settings, "provider_credential_fail_threshold", None)
+    if raw is None:
+        return DEFAULT_FAIL_THRESHOLD
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_FAIL_THRESHOLD
 
 
 def is_retryable_error(err: object) -> bool:
@@ -114,13 +127,18 @@ def available_credentials(creds: list[ProviderCredential], strategy: str = "stic
 
     plan-271-1364 M3.1: 排序委托 order_credentials（strategy 决定粘性/轮转）；
     默认 sticky 且不 rotate，展示路径（计数/扫描取 key）行为与改造前完全一致。
+
+    plan-290 单凭据豁免：该供应商只有这一条凭据时，冷却等于"整个供应商不可用"、
+    没有备选可切——此时忽略其冷却状态照常返回，给"再试一次"的机会。这一层兜底同时
+    修复历史遗留的冷却行（旧版本已把唯一凭据置为 cooldown 的库）。
     """
     now = _now()
+    single = len(creds) <= 1  # 仅此一条：永不因冷却被跳过
     ok: list[ProviderCredential] = []
     for c in creds:
         if not c.is_active:
             continue
-        if (c.status or "ok") == "cooldown":
+        if not single and (c.status or "ok") == "cooldown":
             until = _parse_iso(c.cooldown_until)
             if until is not None and until > now:
                 continue  # 冷却中，跳过
@@ -252,6 +270,7 @@ async def update_credential(db: AsyncSession, credential_id: int, **fields) -> b
         if fields.get("is_active") is True and (cred.api_key or cred.token_ref or cred.extra):
             cred.status = "ok"
             cred.cooldown_until = None
+            cred.fail_count = 0  # plan-290: 重新启用即重置连续失败计数
         s.commit()
         return True
 
@@ -295,22 +314,57 @@ def _purge_auth_rows(session, credential_id: int) -> int:
     return removed
 
 
-async def mark_failed(db: AsyncSession, credential_id: int, error: str) -> None:
-    """标记凭据失败并进入冷却（轮询会跳过，冷却结束后自动恢复可用）。"""
+async def mark_failed(db: AsyncSession, credential_id: int, error: str) -> bool:
+    """上报凭据一次失败。返回是否**因此进入了冷却**。
+
+    plan-290 两条规则：
+    1. **连续失败达阈值才冷却**：单次抖动（网络闪断、网关偶发 5xx、单次超时）只累计
+       fail_count 并记录 last_error，凭据仍留在可用池；连续失败达
+       provider_credential_fail_threshold（默认 3）才置 cooldown。避免一次抖动就让
+       可用 Key/账号被闲置 5 分钟。
+    2. **只有一个凭据时永不冷却**：该供应商仅此一条凭据时，冷却等于"整个供应商不可用"，
+       没有任何备选可切。此时只记录错误、不置 cooldown——保留"再试一次"的机会，
+       否则一次网络抖动就会让用户彻底无法调用模型。
+    """
+    from sqlalchemy import func as _func
+
     from app.persistence.database import run_write_locked
 
     until = _iso(_now() + timedelta(seconds=cooldown_seconds()))
+    threshold = fail_threshold()
 
     def patch(s):
         cred = s.get(ProviderCredential, credential_id)
         if cred is None:
-            return
-        cred.status = "cooldown"
+            return False
         cred.last_error = str(error)[:300]
-        cred.cooldown_until = until
+        cred.fail_count = int(cred.fail_count or 0) + 1
+        # 单凭据供应商：冷却即全局不可用，无备选可切 → 永不冷却
+        total = s.execute(
+            select(_func.count(ProviderCredential.id)).where(
+                ProviderCredential.provider_id == cred.provider_id
+            )
+        ).scalar() or 0
+        if int(total) <= 1:
+            logger.warning(
+                "[credential] #%s 失败(第 %d 次)但该供应商仅此一条凭据——不冷却: %s",
+                credential_id, cred.fail_count, str(error)[:120])
+            cred.status = "ok"
+            cred.cooldown_until = None
+            s.commit()
+            return False
+        if cred.fail_count >= threshold:
+            cred.status = "cooldown"
+            cred.cooldown_until = until
+            s.commit()
+            return True
+        # 未达阈值：保留可用，仅留痕（下一次调用可继续尝试）
+        cred.status = "ok"
+        cred.cooldown_until = None
         s.commit()
+        return False
 
-    await run_write_locked(patch, label=f"credential.fail.{credential_id}")
+    return await run_write_locked(patch, label=f"credential.fail.{credential_id}")
 
 
 async def reset_credential(db: AsyncSession, credential_id: int) -> bool:
@@ -329,6 +383,7 @@ async def reset_credential(db: AsyncSession, credential_id: int) -> bool:
         cred.status = "ok"
         cred.cooldown_until = None
         cred.last_error = None
+        cred.fail_count = 0  # plan-290: 手动复位同时清零连续失败计数
         cred.is_active = True
         s.commit()
         return True
@@ -337,7 +392,7 @@ async def reset_credential(db: AsyncSession, credential_id: int) -> bool:
 
 
 async def mark_ok(db: AsyncSession, credential_id: int) -> None:
-    """标记凭据成功（清冷却、刷新粘性时间）。"""
+    """标记凭据成功（清冷却、刷新粘性时间、清零连续失败计数）。"""
     from app.persistence.database import run_write_locked
 
     now = _iso(_now())
@@ -350,6 +405,7 @@ async def mark_ok(db: AsyncSession, credential_id: int) -> None:
         cred.last_error = None
         cred.cooldown_until = None
         cred.last_ok_at = now
+        cred.fail_count = 0  # plan-290: 一旦成功即重置连续失败计数
         s.commit()
 
     await run_write_locked(patch, label=f"credential.ok.{credential_id}")

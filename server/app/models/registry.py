@@ -22,6 +22,40 @@ if TYPE_CHECKING:
     from app.persistence.models.model_reg import Model
 
 
+_TA3_DISPATCH_SEGMENT = "/ai/dispatch/"
+
+
+def _resolve_ta3_base_url(model, provider, meta: dict | None) -> str:
+    """解析 ta3 的 LLM 网关地址（模型级 dispatch 路径）。
+
+    URL 到底怎么存的（对齐参考项目 modelClient.ts getApiBase/getChatCompletionsEndpoint）：
+
+    - Provider.base_url 存的是**站点根**，如 https://lc.yinhaiyun.com/newcoder——
+      它只用于账号/OAuth/目录接口（/ai/continue/ide/*、/api/oauth/*）；
+    - 模型行的 base_url 存的是**模型级请求基址**，由目录 list-assistants 下发的
+      `apiBase` 写入，形如 https://lc.yinhaiyun.com/newcoder/ai/dispatch/v2
+      （Anthropic 系模型存 apiBaseAnthropic = …/ai/dispatch/v2/anthropic）。
+      请求 URL = 模型 base_url + `/chat/completions` 或 `/v1/messages`。
+
+    用站点根去拼 /chat/completions 会打到…/newcoder/chat/completions → 404。
+
+    这里做一层自愈：模型行缺失或存成站点根（历史脏数据/手工编辑）时，按站点根 +
+    固定 dispatch 段补全，避免"库里的旧值"让修复失效。
+    """
+    root = (getattr(provider, "base_url", None) or "").rstrip("/")
+    candidate = (getattr(model, "base_url", None) or "").rstrip("/")
+    if _TA3_DISPATCH_SEGMENT in candidate:
+        return candidate
+    base = candidate or root
+    if not base:
+        return candidate
+    # 候选值不比站点根多出有效路径时，以站点根为准（如 …/newcoder、…/newcoder/v1）
+    if root and base.startswith(root):
+        base = root
+    suffix = "/anthropic" if (meta or {}).get("anthropic") else ""
+    return f"{base}{_TA3_DISPATCH_SEGMENT}v2{suffix}"
+
+
 def _build_provider(
     api_key: str, base_url: str, model: str, api_format: str = "openai",
     meta: dict | None = None, provider=None,
@@ -412,7 +446,7 @@ class ModelRegistry:
                         # → 404；用账号 ide-session- token → 401。目录同步已把两者落到模型行。
                         _base_url, _key = provider.base_url, api_key
                         if api_format == "ta3":
-                            _base_url = getattr(model, "base_url", None) or _base_url
+                            _base_url = _resolve_ta3_base_url(model, provider, _meta)
                             _key = getattr(model, "api_key", None) or _key
                         p = _build_provider(
                             api_key=_key, base_url=_base_url, model=model.name,
@@ -494,7 +528,7 @@ class ModelRegistry:
             # per-model llm- key，避免站点根 URL 404 与 ide-session- token 401。
             p, reason = _build_provider(
                 api_key=getattr(model, "api_key", None) or api_key,
-                base_url=getattr(model, "base_url", None) or provider.base_url,
+                base_url=_resolve_ta3_base_url(model, provider, ta3_meta),
                 model=model.name,
                 api_format=api_format, meta=ta3_meta, provider=provider,
             ), "provider_credential"
