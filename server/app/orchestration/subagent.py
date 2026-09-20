@@ -77,6 +77,8 @@ class SubagentManager:
                         tool_schemas=tool_schemas, workspace=workspace,
                         cancel_event=cancel_event, token_budget=token_budget,
                         task_id=getattr(task, "id", None), model_id=getattr(agent, "model_id", None),
+                        # plan-19-82: 子代理压缩摘要同样跟随用户语言
+                        reply_language=getattr(context_bundle, "reply_language", "auto"),
                     )
                     handle.status = "done" if out.kind == "message" else "failed"
                     handle.summary = out.text or ""

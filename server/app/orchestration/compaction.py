@@ -509,15 +509,17 @@ async def auto_compact(
     messages: list[ChatMessage],
     context_window: int,
     provider,
+    language: str = "auto",
 ) -> list[ChatMessage]:
     """v6.0: 主动自动压缩 -- 用 LLM 生成 handoff summary 替换较早历史，保留近期完整回合。
 
     参照 codex compact/prompt.md：为接手的 LLM 写交接摘要（进度/决策/约束/下一步/关键数据）。
     切点对齐 turn 边界，不拆散 assistant(tool_calls)+tool results。
     收益不足时跳过（避免无价值 LLM 调用）。LLM 失败时降级为硬编码摘要。
+    plan-19-82: language 控制摘要语言与边界/ReadState 文案（避免英文污染回复语言）。
     """
     from app.core.config import settings
-    from app.orchestration.prompts import COMPACTION_PROMPT
+    from app.orchestration.prompts import build_compaction_prompt
     from app.orchestration.token_counter import estimate_messages_tokens
 
     # v2.2 (对齐 zcode 3.10 压缩边界): 已有边界标记时只压缩边界之后的内容，
@@ -597,14 +599,14 @@ async def auto_compact(
             transcript_parts.append(f"[user] {m.content[:200]}")
     transcript = "\n".join(transcript_parts)
 
-    # LLM 生成 handoff summary（对齐 codex COMPACTION_PROMPT）
+    # LLM 生成 handoff summary（对齐 codex COMPACTION_PROMPT；plan-19-82 按语言生成）
     summary_text = ""
     if provider and transcript:
         try:
             from app.models.schemas import ChatRequest as _CR, ChatMessage as _CM
             req = _CR(
                 messages=[
-                    _CM(role="system", content=COMPACTION_PROMPT),
+                    _CM(role="system", content=build_compaction_prompt(language)),
                     _CM(role="user", content=transcript[:24000]),
                 ],
                 model="",
@@ -619,20 +621,24 @@ async def auto_compact(
         summary_text = _build_fallback_summary(old_rounds)
 
     # v6.1: 注入 SUMMARY_PREFIX（对齐 codex summary_prefix.md），告知接手 LLM 这是前模型摘要，
-    # 避免重复已完成的工作；使用 developer 角色（系统级指令不污染对话流）
-    from app.orchestration.prompts import SUMMARY_PREFIX
+    # 避免重复已完成的工作；使用 developer 角色（系统级指令不污染对话流）。
+    # plan-19-82: prefix 按语言选择，避免中文会话插入英文前缀。
+    from app.orchestration.prompts import get_summary_prefix
     summary_msg = ChatMessage(
         role="developer",
-        content=f"{SUMMARY_PREFIX}\n\n{summary_text}",
+        content=f"{get_summary_prefix(language)}\n\n{summary_text}",
     )
 
     # v2.2 (对齐 zcode 3.10): 压缩边界标记 + ReadState 提醒——
     # 边界标记让后续压缩识别"已压缩区"；ReadState 提醒告知模型哪些文件此前读过，
-    # 防止压缩失忆后反复重读同一文件。
+    # 防止压缩失忆后反复重读同一文件。plan-19-82: 文案按语言选择。
+    _zh = language == "zh"
     import uuid as _uuid
     boundary_msg = ChatMessage(
         role="system",
-        content=f"[compact-boundary id={_uuid.uuid4().hex[:12]}] 以上历史已压缩为摘要。",
+        content=(f"[compact-boundary id={_uuid.uuid4().hex[:12]}] 以上历史已压缩为摘要。"
+                 if _zh else
+                 f"[compact-boundary id={_uuid.uuid4().hex[:12]}] The history above was compacted into a summary."),
     )
     read_paths: list[str] = []
     for m in old_messages_flat:
@@ -650,6 +656,10 @@ async def auto_compact(
                 "以下文件在已压缩的历史中曾被读取：\n"
                 + "\n".join(f"- {p}" for p in read_paths[:20])
                 + "\n如需这些文件的最新内容，请重新调用 fs_read 读取，不要凭记忆猜测。"
+                if _zh else
+                "The following files were read earlier in the compacted history:\n"
+                + "\n".join(f"- {p}" for p in read_paths[:20])
+                + "\nRe-read them via fs_read if you need current content; do not guess from memory."
             ),
         )
 

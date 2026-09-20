@@ -56,6 +56,9 @@ class ContextBundle:
     instruction_blocks: list[dict] | None = None
     # plan-248-1258 M7: 任务边界提示（历史与新指令之间的 system 分隔，防旧任务复述）
     task_boundary: str = ""
+    # plan-19-82: 本轮回复语言（zh/en/auto），由 build_*_context 按用户消息检测后填充；
+    # engine 透传给 run_agent_loop，使压缩摘要 / checkpoint 文案与回复语言一致。
+    reply_language: str = "auto"
 
     def to_messages(self) -> list[ChatMessage]:
         """组装 system + 合并 developer + 历史 + user 指令。"""
@@ -455,11 +458,59 @@ async def _symbol_index_hint(workspace: str) -> str:
     )
 
 
+async def _resolve_session_language(db: AsyncSession, session_id: int | None,
+                                    primary_text: str) -> str:
+    """解析本轮回复语言（plan-19-82 步骤 7 边界处理）。
+
+    规则：以本轮最新用户消息为准；本轮消息为空/纯附件（无文字）时，
+    回退检索会话内**最近一条含文本的 user 消息**判定，避免误判为英文。
+    """
+    from app.orchestration.prompts.language import LANG_AUTO, detect_reply_language
+
+    lang = detect_reply_language(primary_text)
+    if lang != LANG_AUTO or not session_id:
+        return lang
+    try:
+        from sqlalchemy import select
+
+        from app.core.enums import MsgType
+        from app.persistence.models.message import Message
+
+        res = await db.execute(
+            select(Message)
+            .where(
+                Message.session_id == session_id,
+                Message.thread_id.is_(None),
+                Message.sender_type == "user",
+                Message.msg_type == MsgType.TEXT.value,
+                Message.deleted == False,  # noqa: E712 —— 排除已回滚软删
+            )
+            .order_by(Message.created_at.desc(), Message.id.desc())
+            .limit(10)
+        )
+        for m in res.scalars().all():
+            c = m.content if isinstance(m.content, dict) else {}
+            text = str(c.get("text") or "")
+            # 跳过目标续跑轮的系统提醒（其语言不代表用户语言）
+            if c.get("goal_continuation"):
+                continue
+            lang = detect_reply_language(text)
+            if lang != LANG_AUTO:
+                return lang
+    except Exception:
+        logger.debug("[context] 语言回退检索失败(非阻塞)", exc_info=True)
+    return LANG_AUTO
+
+
 async def build_main_context(
     db: AsyncSession, *, agent, session, project, turn, user_message: str,
     attachments: list[dict] | None = None,
     multimodal: bool = False,
     enable_subagents: bool = True,
+    # plan-19-82 步骤7: 语言判定专用文本。默认 None=用 user_message；
+    # 目标续跑轮的系统提醒是写死中文，不能代表用户语言，此时传 "" 触发
+    # 回退检索「最近一条真实用户消息」判定。
+    language_text: str | None = None,
     plan_history: str = "",
     goal: dict | None = None,
     available_tools: set[str] | None = None,
@@ -498,19 +549,26 @@ async def build_main_context(
     # v7: 非 plan 模式下裁剪系统提示词的规划工作流，避免模型自发写计划文档索要确认
     _perm_mode = str(getattr(session, "permission_mode", None) or "default")
     _is_plan_mode = _perm_mode == "plan"
+    # plan-19-82: 回复语言由「本轮最新用户消息」决定（与界面语言设置无关）。
+    # 空消息/纯附件场景回退检索最近一条含文本的 user 消息，避免误判。
+    _lang_src = user_message if language_text is None else language_text
+    _reply_lang = await _resolve_session_language(db, getattr(session, "id", None), _lang_src)
+
     if ta3_meta is not None:
         from app.orchestration.prompts.ta3_fusion import build_ta3_system_prompt
         system_prompt = build_ta3_system_prompt(
             ta3_meta, workspace=workspace, enable_subagents=enable_subagents,
-            sandbox_mode=_sandbox,
+            sandbox_mode=_sandbox, language=_reply_lang,
         )
         logger.info("[context] 会话 %s 使用 ta3 还原式系统提示词", session.id if session else "-")
     else:
         system_prompt = build_main_system_prompt(enable_subagents=enable_subagents,
-                                                 plan_flow_enabled=_is_plan_mode)
+                                                 plan_flow_enabled=_is_plan_mode,
+                                                 language=_reply_lang)
     bundle = ContextBundle(
         system=system_prompt,
         instruction=user_message,
+        reply_language=_reply_lang,
     )
     # v16（用户要求）：移除重建时的静默渐进摘要 —— 重建不再改写历史。
     # 此前按 0.85×窗口（且窗口口径可能与实际调用模型不一致）静默摘要并落库
@@ -526,6 +584,43 @@ async def build_main_context(
         bundle.developer_parts.append(f"## Current Task\n{user_message[:2000]}")
     else:
         bundle.developer_parts.append(f"## Current Goal\n{user_message[:2000]}")
+    # 1.1 Reply Language（plan-19-82）：显式语言锚点，紧随 Current Goal。
+    # 语言纪律已作为系统提示首尾双锚注入，这里再在注意力最高处落一行单锚，降低漂移。
+    from app.orchestration.prompts.language import build_language_pin_line
+    bundle.developer_parts.append(build_language_pin_line(_reply_lang))
+    # 1.2 Rule Documents（plan-19-82 步骤 4）：规则段**前移**到 developer 段最前部并加 MANDATORY 语义。
+    # 现状（本轮改造前）规则在第 4/4.1 位且标题无强制语义，模型容易忽略 → 遵循度不足。
+    # 加载提前到此，顺序：Global Rules（优先级最高）→ Project Rules（工作区文档 + 工作目录规则）。
+    try:
+        from app.orchestration.user_rules_loader import load_global_rules_labeled, load_workdir_rules_labeled
+        _gr = load_global_rules_labeled()
+        if _gr:
+            bundle.developer_parts.append(f"## Global Rules (MANDATORY — highest priority)\n{_gr}")
+    except Exception:
+        logger.debug("[context] 全局规则加载失败(非阻塞)", exc_info=True)
+    _rules_parts: list[str] = []
+    try:
+        _docs = await load_session_rules(workspace, project.rules_docs if project else None)
+        if _docs:
+            _rules_parts.append(_docs)
+    except Exception:
+        logger.debug("[context] 工作区规则文档加载失败(非阻塞)", exc_info=True)
+    try:
+        from app.orchestration.user_rules_loader import load_workdir_rules_labeled
+        _wd = load_workdir_rules_labeled(workspace)
+        if _wd:
+            _rules_parts.append(_wd)
+    except Exception:
+        logger.debug("[context] 工作目录规则加载失败(非阻塞)", exc_info=True)
+    if _rules_parts:
+        bundle.developer_parts.append(
+            "## Project Rules (MANDATORY)\n" + "\n\n".join(_rules_parts)
+        )
+    else:
+        bundle.developer_parts.append(
+            "## Project Rules\n(未检测到 AGENTS.md / CLAUDE.md 等项目规则文档。"
+            "如工作区存在约定，请按既有代码风格与目录结构执行。)"
+        )
     # 2. Working Directory & Tool Rules
     ws_ctx = f"Working directory: {workspace}"
     ws_ctx += (
@@ -548,28 +643,8 @@ async def build_main_context(
     structure = await project_structure_brief(workspace)
     if structure:
         bundle.developer_parts.append(f"## Project Structure\n{structure}")
-    # 4. Project Rules（工作区规则文档 + 用户设置的工作目录规则）
-    rules_parts: list[str] = []
-    _docs = await load_session_rules(workspace, project.rules_docs if project else None)
-    if _docs:
-        rules_parts.append(_docs)
-    try:
-        from app.orchestration.user_rules_loader import load_workdir_rules
-        _wd = load_workdir_rules(workspace)
-        if _wd:
-            rules_parts.append(_wd)
-    except Exception:
-        logger.debug("[context] 工作目录规则加载失败(非阻塞)", exc_info=True)
-    if rules_parts:
-        bundle.developer_parts.append(f"## Project Rules\n{'\n\n'.join(rules_parts)}")
-    # 4.1 Global Rules（用户全局规则，对所有项目生效，优先级最高）
-    try:
-        from app.orchestration.user_rules_loader import load_global_rules
-        _gr = load_global_rules()
-        if _gr:
-            bundle.developer_parts.append(f"## Global Rules\n{_gr}")
-    except Exception:
-        logger.debug("[context] 全局规则加载失败(非阻塞)", exc_info=True)
+    # plan-19-82: 原「4. Project Rules / 4.1 Global Rules」已前移至 developer 段最前部
+    # （见上方 1.2 Rule Documents，标题带 MANDATORY 并统一命名），此处不再重复注入。
     # 5. Session Memory（turn 摘要 + 记忆条目）
     # plan-644: Plan History（会话级计划需求全集）置于 Session Memory 之前--
     # 多轮 /plan 迭代时模型不可能遗忘未完成需求（机制保证，非纯提示词）
@@ -592,23 +667,29 @@ async def build_main_context(
     if isinstance(_ctx, dict):
         _summary = (_ctx.get("summary") or "").strip()
         if _summary:
-            bundle.developer_parts.append(
-                f"## Session Summary (earlier conversation compressed)\n{_summary[:4000]}"
-            )
+            # plan-19-82: 标题按本轮语言生成，避免英文标题污染中文会话的回复语言
+            _sum_title = ("## Session Summary（较早对话已压缩）" if _reply_lang == "zh"
+                          else "## Session Summary (earlier conversation compressed)")
+            bundle.developer_parts.append(f"{_sum_title}\n{_summary[:4000]}")
         # v30: 注入压缩 checkpoint（context_compressor 落库的 SUMMARY 消息摘要）。
         # 与 shared_context.summary（context_memory 后台渐进摘要）不同，checkpoint 是
         # 按 token 预算选定范围的压缩产物，按压缩发生顺序注入，且只注入一次
         # （已注入的 compaction_id 记录在 _injected_compactions，跨轮不重复）。
+        # plan-19-82: ①标题按本轮语言生成（中文会话用中文标题，避免英文标题污染回复语言）；
+        #             ②追加「按需回看」指引（含块 index/compaction_id），让 AI 知道可按需检索；
+        #             ③跳过 merged（已滚动合并）的块——其内容已并入较新 checkpoint，
+        #               原文仍可经 compaction_view 按需回看，不重复注入以防固定开销膨胀。
         try:
             from app.persistence.models.message import Message as _Msg
             _compactions = _ctx.get("compactions") or []
             _injected = set(_ctx.get("injected_compactions") or [])
             _checkpoint_parts: list[str] = []
             _new_injected: list[str] = []
+            _index_lines: list[str] = []
             for _cmp in _compactions:
                 _cid = str(_cmp.get("compaction_id") or "")
                 # v33: 已还原的压缩块不再注入 checkpoint（原文已回到上下文，重复注入冗余）
-                if not _cid or _cid in _injected or _cmp.get("restored"):
+                if not _cid or _cid in _injected or _cmp.get("restored") or _cmp.get("merged"):
                     continue
                 _msg_id = _cmp.get("summary_message_id")
                 if not _msg_id:
@@ -621,11 +702,31 @@ async def build_main_context(
                     continue
                 _checkpoint_parts.append(_text[:3000])
                 _new_injected.append(_cid)
+                _ci = _cmp.get("index") or "-"
+                _index_lines.append(f"#{_ci} (compaction_id={_cid})")
             if _checkpoint_parts:
-                bundle.developer_parts.append(
-                    "## Conversation Checkpoints (compacted spans)\n"
-                    + "\n\n".join(_checkpoint_parts)
-                )
+                if _reply_lang == "zh":
+                    _title = "## Conversation Checkpoints（已压缩的历史片段）"
+                    _howto = (
+                        "以上检查点只是压缩摘要。若需要其中被压缩段落的细节，**按需**回看："
+                        "先调用 `compaction_index` 列出压缩块，再用 `compaction_view` 传入 index 或 "
+                        "compaction_id（可带 keyword / offset / limit，单条全文用 full=true），"
+                        "或用 `memory_search` 检索压缩源。**严禁一次性全量拉取压缩前历史**——"
+                        "那会重新撑爆上下文。可用块：" + "、".join(_index_lines)
+                    )
+                else:
+                    _title = "## Conversation Checkpoints (compacted spans)"
+                    _howto = (
+                        "The checkpoints above are summaries only. For details inside a compacted "
+                        "span, recover **on demand**: call `compaction_index` to list blocks, then "
+                        "`compaction_view` with `index` or `compaction_id` (optionally `keyword` / "
+                        "`offset` / `limit`; single full text via `full=true`), or use `memory_search` "
+                        "against the compaction source. **Never bulk-load the pre-compaction "
+                        "history** — that defeats compaction. Available blocks: "
+                        + ", ".join(_index_lines)
+                    )
+                bundle.developer_parts.append(_title + "\n" + "\n\n".join(_checkpoint_parts)
+                                              + "\n\n" + _howto)
                 if _new_injected:
                     _ctx = dict(_ctx)
                     _ctx["injected_compactions"] = list(_injected) + _new_injected
@@ -908,11 +1009,19 @@ async def build_subagent_context(
 
     v19: 修复上下文继承断裂——子代理此前仅能看到 handoff 摘要，不知道用户
     原始诉求与主会话进展；现注入 original_request 与主会话 shared_context 摘要。
+    plan-19-82: ①语言跟随用户消息（子代理汇报不得被英文任务描述带偏）；
+                ②规则段前移并与主代理统一为 MANDATORY 命名。
     """
     workspace = session.worktree_path or (project.path if project else "")
+    # plan-19-82: 语言以用户原始请求为准（缺则回退任务标题/描述）
+    _lang_text = original_request or f"{task.title or ''}\n{task.description or ''}"
+    _reply_lang = await _resolve_session_language(db, getattr(session, "id", None), _lang_text)
     bundle = ContextBundle(
-        system=build_subagent_system_prompt(task.title or "", task.acceptance_criteria or ""),
-        instruction=f"Start working on: {task.title}",
+        system=build_subagent_system_prompt(task.title or "", task.acceptance_criteria or "",
+                                            language=_reply_lang),
+        # plan-19-82: instruction 由写死英文改为语言中立，避免把子代理汇报语言带向英文
+        instruction=f"Start working on the assigned task: {task.title}",
+        reply_language=_reply_lang,
     )
     if original_request:
         bundle.developer_parts.append(f"## Original User Request\n{original_request[:2000]}")
@@ -921,6 +1030,25 @@ async def build_subagent_context(
         bundle.developer_parts.append(f"Description: {task.description}")
     if handoff_summary:
         bundle.developer_parts.append(f"## Handoff Summary (from main agent)\n{handoff_summary}")
+    # plan-19-82: 规则段前移并统一命名（与主代理同口径：Global → Project）
+    try:
+        from app.orchestration.user_rules_loader import load_global_rules_labeled, load_workdir_rules_labeled
+        _gr = load_global_rules_labeled()
+        if _gr:
+            bundle.developer_parts.append(f"## Global Rules (MANDATORY — highest priority)\n{_gr}")
+        _rules_parts: list[str] = []
+        _docs = await load_session_rules(workspace, project.rules_docs if project else None)
+        if _docs:
+            _rules_parts.append(_docs)
+        _wd = load_workdir_rules_labeled(workspace)
+        if _wd:
+            _rules_parts.append(_wd)
+        if _rules_parts:
+            bundle.developer_parts.append(
+                "## Project Rules (MANDATORY)\n" + "\n\n".join(_rules_parts)
+            )
+    except Exception:
+        logger.debug("[context] 子代理规则加载失败(非阻塞)", exc_info=True)
     # v19: 主会话摘要（历史对话压缩产物），让子代理了解整体进展
     try:
         _ctx = getattr(session, "shared_context", None) or {}
@@ -939,19 +1067,8 @@ async def build_subagent_context(
     # v1.2: 注入 shell 环境说明（与主代理一致，防止用错 shell 语法）
     ws_ctx += "\n\n" + shell_hint()
     bundle.developer_parts.append(ws_ctx)
-    rules = await load_session_rules(workspace, project.rules_docs if project else None)
-    if rules:
-        bundle.developer_parts.append(f"## Project Rules\n{rules}")
-    try:
-        from app.orchestration.user_rules_loader import load_global_rules, load_workdir_rules
-        _wd = load_workdir_rules(workspace)
-        if _wd:
-            bundle.developer_parts.append(f"## Project Rules (workdir)\n{_wd}")
-        _gr = load_global_rules()
-        if _gr:
-            bundle.developer_parts.append(f"## Global Rules\n{_gr}")
-    except Exception:
-        logger.debug("[context] 用户规则加载失败(非阻塞)", exc_info=True)
+    # plan-19-82: 原「子代理规则块尾部重复注入（Project Rules (workdir) / Global Rules）」
+    # 已统一到上方前移的 MANDATORY 规则段，此处不再重复注入。
     # plan-248-1258 M6: 结构化汇报要求——主代理据此精准整合（此前 free-form 汇报信息量不足）
     bundle.developer_parts.append(
         "## Report Back (required)\n"

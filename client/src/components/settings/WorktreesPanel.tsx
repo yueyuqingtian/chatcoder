@@ -40,6 +40,8 @@ export function WorktreesPanel() {
   /** 删除确认 / 合并弹窗 */
   const [dropTarget, setDropTarget] = useState<WorktreeOut | null>(null);
   const [mergeTarget, setMergeTarget] = useState<WorktreeOut | null>(null);
+  /** 合并方向：to_main=工作树→主工作区；from_main=主工作区→工作树 */
+  const [mergeDirection, setMergeDirection] = useState<"to_main" | "from_main">("to_main");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -196,8 +198,14 @@ export function WorktreesPanel() {
                   </div>
                   <div className="settings-resource-actions">
                     <button className="btn btn-ghost btn-xs" disabled={busy}
-                      onClick={() => setMergeTarget(wt)} title="合并该工作树的改动到主工作区">
+                      onClick={() => { setMergeDirection("to_main"); setMergeTarget(wt); }}
+                      title="合并该工作树的改动到主工作区">
                       合并到主工作区
+                    </button>
+                    <button className="btn btn-ghost btn-xs" disabled={busy}
+                      onClick={() => { setMergeDirection("from_main"); setMergeTarget(wt); }}
+                      title="把主工作区的改动更新到该工作树">
+                      从主工作区更新
                     </button>
                     <button className="btn btn-ghost btn-xs" disabled={busy}
                       onClick={() => { usePanelStore.getState().setPreviewPath(wt.path); }}>
@@ -287,6 +295,7 @@ export function WorktreesPanel() {
 
       <MergeDialog
         open={mergeTarget != null}
+        direction={mergeDirection}
         worktree={mergeTarget}
         onClose={() => setMergeTarget(null)}
         onMerged={() => { setMergeTarget(null); void load(); }}

@@ -47,3 +47,20 @@ def load_workdir_rules(workspace: str) -> str:
         rules = stored.get("rules")
         return rules if isinstance(rules, str) else ""
     return stored if isinstance(stored, str) else ""
+
+
+# plan-19-82：规则来源标签——注入时用于标注出处，便于模型与用户核对规则依据。
+RULE_SOURCE_GLOBAL = "用户全局规则（设置中心）"
+RULE_SOURCE_WORKDIR = "工作目录规则（设置中心）"
+
+
+def load_global_rules_labeled() -> str:
+    """带来源标注的全局规则（空则空串）。"""
+    text = load_global_rules()
+    return f"（来源：{RULE_SOURCE_GLOBAL}）\n{text}" if text else ""
+
+
+def load_workdir_rules_labeled(workspace: str) -> str:
+    """带来源标注的工作目录规则（空则空串）。"""
+    text = load_workdir_rules(workspace)
+    return f"（来源：{RULE_SOURCE_WORKDIR}）\n{text}" if text else ""

@@ -279,6 +279,8 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
 
   /** 侧栏「合并到主工作区」目标（弹窗状态） */
   const [mergeWorktree, setMergeWorktree] = useState<ProjectOut | null>(null);
+  /** 合并方向：to_main=工作树→主工作区；from_main=主工作区→工作树 */
+  const [mergeDirection, setMergeDirection] = useState<"to_main" | "from_main">("to_main");
   const [dropWorktree, setDropWorktree] = useState<ProjectOut | null>(null);
 
   const filteredSessions = useMemo(() => {
@@ -463,8 +465,11 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
             <div className="context-menu-item" onClick={() => window.chatcoderAPI?.openPath?.(p.path)}>{t("sidebar.ctx_open_in_folder")}</div>
             {isWorktree ? (
               <>
-                <div className="context-menu-item" onClick={() => setMergeWorktree(p)}>
+                <div className="context-menu-item" onClick={() => { setMergeDirection("to_main"); setMergeWorktree(p); }}>
                   <IconGitBranch size={12} /> 合并到主工作区
+                </div>
+                <div className="context-menu-item" onClick={() => { setMergeDirection("from_main"); setMergeWorktree(p); }}>
+                  <IconGitBranch size={12} /> 从主工作区更新
                 </div>
                 <div className="context-menu-divider" />
                 <div className="context-menu-item danger" onClick={() => setDropWorktree(p)}>
@@ -627,6 +632,7 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
       {/* plan-282-1441（#5）：工作树合并 / 删除 */}
       <MergeDialog
         open={mergeWorktree != null}
+        direction={mergeDirection}
         worktree={mergeWorktree ? {
           id: mergeWorktree.id,
           name: mergeWorktree.name,

@@ -542,6 +542,10 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         user_msg = await message_service.get_message(db, turn.user_message_id) if turn.user_message_id else None
         user_msg_content = (user_msg.content or {}) if user_msg else {}
         user_text = str(user_msg_content.get("text", "")) if user_msg else "(空消息)"
+        # plan-19-82 步骤7: 目标续跑轮的用户消息是系统生成的写死中文提醒，
+        # 不能代表用户真实语言 → 语言判定文本传 "" 以回退检索最近一条真实用户消息。
+        _goal_continuation = bool(user_msg_content.get("goal_continuation"))
+        _lang_text = "" if _goal_continuation else user_text
         if not user_text.strip():
             att_names = [
                 str(a.get("filename") or "") for a in (attachments or [])
@@ -662,6 +666,8 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             multimodal=_is_multimodal,
             enable_subagents=_allow_subagents,
             plan_history=_plan_history,
+            # plan-19-82: 语言判定文本（续跑轮传 "" 回退真实用户消息）
+            language_text=_lang_text,
             # plan-671: 目标激活时 Current Goal 段为持久目标，本轮消息降级为 Current Task
             goal={"text": session.goal_text, "turns_used": session.goal_turns_used or 0}
             if (session.goal_status or "none") == "active" and session.goal_text else None,
@@ -739,6 +745,8 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             task_id=main_task.id,
             model_id=effective_model_id,
             multimodal=_is_multimodal,
+            # plan-19-82: 压缩摘要/checkpoint 文案跟随本轮回复语言
+            reply_language=bundle.reply_language,
             subagent_context={
                 "manager": mgr, "session": session, "project": project,
                 "cancel_event": cancel_event,
@@ -1462,6 +1470,8 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             task_id=request_task.id if request_task else None,
             model_id=effective_model_id,
             multimodal=_is_multimodal,
+            # plan-19-82: 压缩摘要/checkpoint 文案跟随本轮回复语言
+            reply_language=bundle.reply_language,
             subagent_context={
                 "manager": mgr, "session": session, "project": project,
                 "cancel_event": cancel_event,

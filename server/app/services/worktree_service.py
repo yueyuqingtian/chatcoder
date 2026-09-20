@@ -605,147 +605,246 @@ async def remove_worktree_project(db: AsyncSession, worktree_project_id: int, *,
     return {"ok": True, "branch": branch, "branch_deleted": branch_deleted}
 
 
-# ── 合并到主工作区（IDEA 式三栏冲突解决）──
+# ── 合并（双向：工作树 ⇄ 主工作区，基于**工作区当前内容**，含未提交改动）──
+#
+# 关键设计（修复"工作树里有未提交改动却提示无需合并"）：
+#   旧实现用 `git diff base...branch` 比较的是**提交**，工作树里未提交的改动根本不在
+#   比较范围内；且一进 preview 就因主工作区 dirty 直接报错（用户看到的正是这两点）。
+#   现在改为对**工作区文件内容**做三方比较：
+#     base   = merge-base 提交的内容（共同祖先）
+#     ours   = 目标侧工作区当前文件内容（含未提交改动）
+#     theirs = 来源侧工作区当前文件内容（含未提交改动）
+#   两侧都改且不同时，用 `git merge-file` 尝试自动合并；仍冲突才交给用户/AI。
+
+_DIR_TO_MAIN = "to_main"      # 工作树 → 主工作区
+_DIR_FROM_MAIN = "from_main"  # 主工作区 → 工作树
+_DIRECTIONS = (_DIR_TO_MAIN, _DIR_FROM_MAIN)
 
 
-async def merge_preview(db: AsyncSession, worktree_project_id: int) -> dict:
-    """差异文件列表：把工作树分支与主工作区当前分支做三方对比（不改动任何工作区）。
+async def _show_text(repo: str, rev: str, rel: str) -> str | None:
+    """取某提交中某文件的内容（不存在返回 None）。"""
+    ok, out, _ = await _git(repo, "show", f"{rev}:{rel}")
+    return out if ok else None
 
-    实现：在主工作区跑一次 `git merge --no-commit --no-ff <wt-branch>` 探针收集结果，
-    随后 **无论如何都 `git merge --abort`** 回到干净状态——真正的写入留给 apply。
+
+async def _ls_tree_files(repo: str, rev: str) -> set[str]:
+    """某提交下的全部文件路径（相对仓库根）。"""
+    ok, out, _ = await _git(repo, "ls-tree", "-r", "--name-only", rev)
+    if not ok:
+        return set()
+    return {ln.strip().replace("\\", "/") for ln in out.splitlines() if ln.strip()}
+
+
+async def _working_files(work_dir: str) -> set[str]:
+    """工作区中的文件：已跟踪 + 未跟踪（排除本工具目录 .chatcoder）。"""
+    files: set[str] = set()
+    for args in (("ls-files",), ("ls-files", "--others", "--exclude-standard")):
+        ok, out, _ = await _git(work_dir, *args)
+        if not ok:
+            continue
+        for ln in out.splitlines():
+            p = ln.strip().replace("\\", "/")
+            if p and not (p == _TOOL_DIR or p.startswith(_TOOL_DIR + "/")):
+                files.add(p)
+    return files
+
+
+def _read_work_file(work_dir: str, rel: str) -> str | None:
+    """读工作区中的文件内容（不存在 / 读失败返回 None）。
+
+    统一按 LF 归一化（universal newlines），使 base/ours/theirs 三侧口径一致，
+    避免 Windows 上 CRLF 文件被误判为"两侧都改"。
     """
+    p = Path(work_dir) / rel
+    try:
+        if not p.is_file():
+            return None
+        return p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _write_work_file(work_dir: str, rel: str, content: str) -> None:
+    """写工作区文件，**保留原文件的换行风格**（Windows 下多为 CRLF）。
+
+    内部内容一律为 LF；若目标是 CRLF 文件则转换回去，避免一次合并把整份文件的
+    行尾全部改写、产生"整文件重写"的脏 diff。
+    """
+    p = Path(work_dir) / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    nl = "\n"
+    try:
+        if p.is_file() and b"\r\n" in p.read_bytes():
+            nl = "\r\n"
+    except OSError:
+        nl = "\n"
+    data = content if nl == "\n" else content.replace("\n", "\r\n")
+    p.write_bytes(data.encode("utf-8"))
+
+
+async def _merge_file_text(ours: str, base: str, theirs: str) -> tuple[bool, str]:
+    """`git merge-file` 三方合并单文件内容；返回 (是否无冲突, 合并结果)。
+
+    merge-file 不需要仓库，用一个临时目录存放三份文本即可。返回码为冲突数量
+    （0 表示干净合并），冲突时 stdout 已带 `<<<<<<< / ======= / >>>>>>>` 标记。
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="chatcoder-merge-") as td:
+        fo = Path(td) / "ours.txt"
+        fb = Path(td) / "base.txt"
+        ft = Path(td) / "theirs.txt"
+        # newline="\n"：不做换行转换，确保输入/输出都是 LF（Windows 下默认会转成
+        # CRLF，导致合并结果被写回时行尾翻倍或整文件重写）。
+        fo.write_text(ours, encoding="utf-8", newline="\n")
+        fb.write_text(base, encoding="utf-8", newline="\n")
+        ft.write_text(theirs, encoding="utf-8", newline="\n")
+        ok, out, _err = await _git(
+            td, "merge-file", "-p", "--diff3",
+            "-L", "主工作区(ours)", "-L", "base", "-L", "工作树(theirs)",
+            str(fo), str(fb), str(ft),
+        )
+    return ok, (out or "").replace("\r\n", "\n")
+
+
+def _resolve_single(o: str | None, b: str | None, t: str | None,
+                    merged_text: str | None) -> tuple[bool, str | None]:
+    """两侧都改时的冲突判定与合并结果组装。"""
+    if b is None and o is not None and t is not None:
+        return True, t                     # 两侧各自新增，内容不同
+    if o is None or t is None:
+        return True, t                     # 一方删除、另一方修改
+    return merged_text is None, (merged_text or t)
+
+
+async def _merge_sides(db: AsyncSession, worktree_project_id: int, direction: str) -> dict:
+    """解析合并双方目录与共同祖先基点。"""
+    if direction not in _DIRECTIONS:
+        raise ValueError(f"不支持的合并方向: {direction}")
     wt = await _project_of(db, worktree_project_id)
     if wt is None or not getattr(wt, "is_worktree", False):
         raise ValueError("工作树不存在")
     parent = await _project_of(db, wt.parent_project_id) if wt.parent_project_id else None
     if parent is None:
         raise ValueError("找不到主工作区")
+
     repo = parent.path
-    branch = wt.worktree_branch or "HEAD"
-
-    # 主工作区必须干净，否则合并会污染用户未提交的改动（忽略本工具的 .chatcoder/）
-    if await _is_repo_dirty(repo):
-        raise ValueError("主工作区有未提交变更，请先提交后再合并")
-
-    # 先取"相对主分支的提交差异"（用于列表展示与空差异判断）
     base_branch = await _default_branch(repo)
-    ok, name_status, err = await _git(
-        repo, "diff", "--name-status", f"{base_branch}...{branch}"
-    )
-    if not ok:
-        # 分支可能尚未被主仓识别：先 fetch 本地路径（工作树与主仓共享对象库，通常无需 fetch）
-        raise ValueError(f"读取差异失败: {(err or name_status)[:200]}")
+    branch = wt.worktree_branch or "HEAD"
+    ok, mb, _ = await _git(repo, "merge-base", base_branch, branch)
+    base_rev = mb.strip() if ok and mb.strip() else base_branch
+
+    if direction == _DIR_TO_MAIN:
+        ours_dir, theirs_dir, target_dir = parent.path, wt.path, parent.path
+    else:
+        ours_dir, theirs_dir, target_dir = wt.path, parent.path, wt.path
+
+    return {
+        "wt": wt, "parent": parent, "repo": repo,
+        "base_branch": base_branch, "branch": branch, "base_rev": base_rev,
+        "ours_dir": ours_dir, "theirs_dir": theirs_dir, "target_dir": target_dir,
+        "direction": direction,
+    }
+
+
+async def merge_preview(db: AsyncSession, worktree_project_id: int,
+                        *, direction: str = _DIR_TO_MAIN) -> dict:
+    """差异文件列表（含**未提交改动**与自动冲突解决结果）。不改动任何工作区。
+
+    不再因主工作区 dirty 直接报错——主工作区的未提交改动会作为 ours 参与三方比较，
+    能自动合的自动合，合不了的标记为冲突交前端处理。
+    """
+    ctx = await _merge_sides(db, worktree_project_id, direction)
+    base_files = await _ls_tree_files(ctx["repo"], ctx["base_rev"])
+    theirs_files = await _working_files(ctx["theirs_dir"])
+    ours_files = await _working_files(ctx["ours_dir"])
 
     files: list[dict] = []
-    for line in (name_status or "").splitlines():
-        parts = line.split("\t")
-        if len(parts) < 2:
-            continue
-        status_code, path = parts[0], parts[-1]
-        kind = {
-            "A": "added", "M": "modified", "D": "deleted",
-            "R": "renamed", "C": "copied", "T": "modified",
-        }.get(status_code[0], "modified")
-        # 分类：工作树新增/删除是"一方变更"，双方都改则是潜在冲突
-        files.append({"path": path, "status": kind, "conflict": False})
+    for rel in sorted(base_files | theirs_files | ours_files):
+        b = await _show_text(ctx["repo"], ctx["base_rev"], rel) if rel in base_files else None
+        t = _read_work_file(ctx["theirs_dir"], rel) if rel in theirs_files else None
+        if b == t:
+            continue  # 来源侧相对 base 无改动 → 不在本次合并范围
+        o = _read_work_file(ctx["ours_dir"], rel) if rel in ours_files else None
+        if o == t:
+            continue  # 两侧内容已一致 → 无需处理
 
-    # 用 merge-tree 探测真实冲突（不改动工作区，比 merge 探针更安全）
-    ok, tree_out, _ = await _git(repo, "merge-tree", "--write-tree", base_branch, branch)
-    if ok and tree_out:
-        # merge-tree 输出中约定：存在冲突时会包含 "CONFLICT" 行
-        conflict_paths = set()
-        for line in tree_out.splitlines():
-            if "CONFLICT" in line:
-                # 例：CONFLICT (content): Merge conflict in src/a.ts
-                seg = line.split(" in ", 1)
-                if len(seg) == 2:
-                    conflict_paths.add(seg[1].strip())
-        for f in files:
-            if f["path"] in conflict_paths:
-                f["conflict"] = True
-        # merge-tree 报告了冲突但 name-status 未列出（例如仅内容冲突）时补上
-        for p in conflict_paths:
-            if not any(f["path"] == p for f in files):
-                files.append({"path": p, "status": "modified", "conflict": True})
+        status = "deleted" if t is None else ("added" if b is None else "modified")
+        if o == b:
+            conflict, merged = False, t            # 仅来源侧改动：直接采用
+        elif b is None or o is None or t is None:
+            conflict, merged = _resolve_single(o, b, t, None)
+        else:
+            ok_m, merged_out = await _merge_file_text(o, b, t)
+            conflict = not ok_m
+            merged = merged_out or t
+
+        files.append({
+            "path": rel, "status": status, "conflict": conflict,
+            "merged": merged, "has_auto_merge": not conflict,
+        })
 
     return {
         "ok": True,
-        "base_branch": base_branch,
-        "branch": branch,
+        "direction": direction,
+        "base_branch": ctx["base_branch"],
+        "branch": ctx["branch"],
+        "source_dirty": await _is_repo_dirty(ctx["theirs_dir"]),
+        "target_dirty": await _is_repo_dirty(ctx["target_dir"]),
         "files": files,
         "has_conflict": any(f["conflict"] for f in files),
     }
 
 
-async def merge_file_blobs(db: AsyncSession, worktree_project_id: int, path: str) -> dict:
-    """三路内容：base（共同祖先）/ ours（主工作区）/ theirs（工作树）。
+async def merge_file_blobs(db: AsyncSession, worktree_project_id: int, path: str,
+                           *, direction: str = _DIR_TO_MAIN) -> dict:
+    """三路内容：base（共同祖先提交）/ ours（目标侧工作区）/ theirs（来源侧工作区）。
 
-    三方都取 **commit 内容**而非工作区文件——保证"预览的就是将要合并的"，
-    不受本地未提交改动干扰。
+    三方都取**工作区当前内容**（含未提交改动），与 preview/apply 口径一致——
+    否则会出现"预览能看到的改动，打开文件却看不到"的错位。
     """
-    wt = await _project_of(db, worktree_project_id)
-    if wt is None or not getattr(wt, "is_worktree", False):
-        raise ValueError("工作树不存在")
-    parent = await _project_of(db, wt.parent_project_id) if wt.parent_project_id else None
-    if parent is None:
-        raise ValueError("找不到主工作区")
-    repo = parent.path
-    base_branch = await _default_branch(repo)
-    branch = wt.worktree_branch or "HEAD"
+    ctx = await _merge_sides(db, worktree_project_id, direction)
     rel = path.replace("\\", "/")
 
-    async def _show(rev: str) -> str | None:
-        ok, out, _ = await _git(repo, "show", f"{rev}:{rel}")
-        return out if ok else None
-
-    # 共同祖先：merge-base；失败则回退主分支头
-    ok, mb, _ = await _git(repo, "merge-base", base_branch, branch)
-    base_rev = mb.strip() if ok and mb.strip() else base_branch
-
-    base_text = await _show(base_rev)
-    ours_text = await _show(base_branch)
-    theirs_text = await _show(branch)
+    base_text = await _show_text(ctx["repo"], ctx["base_rev"], rel)
+    ours_text = _read_work_file(ctx["ours_dir"], rel)
+    theirs_text = _read_work_file(ctx["theirs_dir"], rel)
     return {
         "ok": True,
         "path": rel,
         "base": base_text,
         "ours": ours_text,
         "theirs": theirs_text,
-        "base_rev": base_rev,
-        "ours_rev": base_branch,
-        "theirs_rev": branch,
+        "base_rev": ctx["base_rev"],
+        "ours_rev": ctx["base_branch"] if direction == _DIR_TO_MAIN else ctx["branch"],
+        "theirs_rev": ctx["branch"] if direction == _DIR_TO_MAIN else ctx["base_branch"],
     }
 
 
-async def merge_apply(db: AsyncSession, worktree_project_id: int, files: list[dict]) -> dict:
-    """应用合并结果：把解决后的内容写入主工作区并提交。
+async def merge_apply(db: AsyncSession, worktree_project_id: int, files: list[dict],
+                      *, direction: str = _DIR_TO_MAIN) -> dict:
+    """应用合并结果：把解决后的内容写入**目标侧**工作区并提交。
 
-    files: [{path, content, deleted?}] —— content 为最终文本（None + deleted 表示删除）。
+    files: [{path, content, deleted?}] —— content 为最终文本（deleted 表示删除）。
+    目标侧原有的其他未提交改动不受影响（只 add 本次写入的文件，不做 `add -A`）。
     """
-    from app.persistence.database import run_write_locked
-
-    wt = await _project_of(db, worktree_project_id)
-    if wt is None or not getattr(wt, "is_worktree", False):
-        raise ValueError("工作树不存在")
-    parent = await _project_of(db, wt.parent_project_id) if wt.parent_project_id else None
-    if parent is None:
-        raise ValueError("找不到主工作区")
-    repo = parent.path
-
-    ok, dirty, _ = await _git(repo, "status", "--porcelain")
-    if ok and _status_lines(dirty):
-        raise ValueError("主工作区有未提交变更，请先提交后再合并")
+    ctx = await _merge_sides(db, worktree_project_id, direction)
+    wt = ctx["wt"]
+    target_dir = ctx["target_dir"]
+    branch = ctx["branch"]
+    label = "合并到主工作区" if direction == _DIR_TO_MAIN else "更新到工作树"
 
     written: list[str] = []
     for f in files:
         rel = str(f.get("path") or "").replace("\\", "/")
         if not rel:
             continue
-        target = Path(repo) / rel
-        # 路径越界防护：必须落在主工作区内
+        target = Path(target_dir) / rel
+        # 路径越界防护：必须落在目标工作区内
         try:
             resolved = target.resolve()
-            if not str(resolved).startswith(str(Path(repo).resolve())):
+            root = Path(target_dir).resolve()
+            if resolved != root and root not in resolved.parents:
                 raise ValueError(f"路径越界: {rel}")
         except OSError:
             raise ValueError(f"路径非法: {rel}")
@@ -757,34 +856,61 @@ async def merge_apply(db: AsyncSession, worktree_project_id: int, files: list[di
         content = f.get("content")
         if content is None:
             continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(str(content), encoding="utf-8")
+        _write_work_file(target_dir, rel, str(content))
         written.append(rel)
 
     if not written:
         return {"ok": True, "committed": False, "written": []}
 
-    await _git(repo, "add", "-A")
-    msg = f"merge(worktree): {wt.name} → {Path(repo).name}（{len(written)} 个文件）"
-    ok, out, err = await _git(repo, "-c", "user.name=chatcoder", "-c", "user.email=chatcoder@local",
+    # 只提交本次写入的文件（不用 add -A），避免把目标侧原有未提交改动一并卷进来
+    await _git(target_dir, "add", "--", *written)
+    dst = "主工作区" if direction == _DIR_TO_MAIN else f"工作树 {wt.name}"
+    src = f"工作树 {wt.name}" if direction == _DIR_TO_MAIN else "主工作区"
+    msg = f"merge(worktree): {src} → {dst}（{len(written)} 个文件）"
+    ok, out, err = await _git(target_dir, "-c", "user.name=chatcoder", "-c", "user.email=chatcoder@local",
                               "commit", "-m", msg)
     if not ok and "nothing to commit" not in (out + err):
         raise ValueError(f"提交合并结果失败: {(err or out)[:200]}")
 
-    # 合并完成后把工作树标记为已合并（分支保留，供用户保留历史）
-    logger.info("工作树 %s 合并到 %s：%d 个文件", wt.id, repo, len(written))
+    logger.info("%s：工作树 %s(%s) 方向=%s，%d 个文件",
+                label, wt.id, branch, direction, len(written))
     return {"ok": True, "committed": True, "written": written}
 
 
+async def commit_worktree(db: AsyncSession, worktree_project_id: int, *,
+                          side: str = "worktree", message: str | None = None) -> dict:
+    """提交某一侧的未提交改动（side=worktree 提交工作树，side=main 提交主工作区）。
+
+    合并前若来源侧有未提交改动，前端会先弹提示；用户确认后调用本接口自动提交，
+    使这些改动成为正式提交后再走合并流程。
+    """
+    ctx = await _merge_sides(db, worktree_project_id, _DIR_TO_MAIN)
+    target_dir = ctx["wt"].path if side == "worktree" else ctx["parent"].path
+    if not await _is_repo_dirty(target_dir):
+        return {"ok": True, "committed": False, "message": "没有需要提交的改动"}
+
+    what = f"工作树 {ctx['wt'].name}" if side == "worktree" else "主工作区"
+    msg = message or f"chore(worktree): 提交{what}的改动（合并前自动提交）"
+    await _git(target_dir, "add", "-A")
+    ok, out, err = await _git(target_dir, "-c", "user.name=chatcoder", "-c", "user.email=chatcoder@local",
+                              "commit", "-m", msg)
+    if not ok and "nothing to commit" not in (out + err):
+        raise ValueError(f"提交失败: {(err or out)[:200]}")
+    logger.info("工作树 %s：已提交 %s 的改动", ctx["wt"].id, what)
+    return {"ok": True, "committed": True, "message": f"已提交{what}的改动"}
+
+
 async def ai_merge_suggest(db: AsyncSession, worktree_project_id: int, path: str,
-                           hunk: dict | None = None) -> dict:
+                           hunk: dict | None = None, *, direction: str = _DIR_TO_MAIN,
+                           model_id: int | None = None) -> dict:
     """针对某文件（或某个冲突块）给出 AI 合并建议。
 
-    复用项目现有的模型调用通道；失败时返回 ok=False 并带可读原因，
-    前端据此提示"AI 建议不可用，请手动解决"，不阻塞合并流程。
+    - `model_id`：用户在合并弹窗中自选的模型（可为任意供应商下的模型）；不传时
+      回退到服务端默认 provider，再回退到库中第一个启用的模型。
+    - 失败时返回 ok=False 并带可读原因，前端据此提示"AI 建议不可用，请手动解决"。
     """
     try:
-        blobs = await merge_file_blobs(db, worktree_project_id, path)
+        blobs = await merge_file_blobs(db, worktree_project_id, path, direction=direction)
     except ValueError as e:
         return {"ok": False, "error": str(e)}
 
@@ -818,19 +944,33 @@ async def ai_merge_suggest(db: AsyncSession, worktree_project_id: int, path: str
 
         from app.persistence.models.model_reg import Model
 
-        # 选一个可用模型：优先服务端默认 provider；否则取库中第一个启用的模型
         registry = get_model_registry()
-        provider = registry.get_default_provider()
+        provider = None
         model_name = ""
+        # 1) 用户显式指定模型：按其供应商/凭据解析（这就是"自己选供应商的模型"）
+        if model_id:
+            row = await db.get(Model, model_id)
+            if row is None:
+                return {"ok": False, "error": f"模型不存在: #{model_id}"}
+            provider, reason = await registry.get_provider_for_model(db, row)
+            if provider is None:
+                return {"ok": False, "error": f"所选模型不可用（{reason}），请在模型设置中检查该供应商"}
+            model_name = getattr(row, "name", "") or ""
+        # 2) 未指定：服务端默认 provider
+        if provider is None:
+            provider = registry.get_default_provider()
+        # 3) 兜底：库中第一个启用且可用的模型
         if provider is None:
             res = await db.execute(
-                _select(Model).where(Model.is_active == True).order_by(Model.id.asc()).limit(1)  # noqa: E712
+                _select(Model).where(Model.is_active == True).order_by(Model.id.asc())  # noqa: E712
             )
-            row = res.scalars().first()
-            provider, _reason = await registry.get_provider_for_model(db, row)
-            model_name = getattr(row, "name", "") or ""
+            for row in res.scalars().all():
+                p, _reason = await registry.get_provider_for_model(db, row)
+                if p is not None:
+                    provider, model_name = p, (getattr(row, "name", "") or "")
+                    break
         if provider is None:
-            return {"ok": False, "error": "未配置可用模型，无法生成 AI 建议"}
+            return {"ok": False, "error": "未配置可用模型，无法生成 AI 建议。请在「设置 → 模型」中添加模型后重试"}
 
         request = ChatRequest(
             messages=[ChatMessage(role="user", content=prompt)],
@@ -846,7 +986,7 @@ async def ai_merge_suggest(db: AsyncSession, worktree_project_id: int, path: str
             lines = merged.splitlines()
             if len(lines) >= 2 and lines[-1].strip().startswith("```"):
                 merged = "\n".join(lines[1:-1])
-        return {"ok": True, "suggestion": merged}
+        return {"ok": True, "suggestion": merged, "model": model_name}
     except Exception as e:  # noqa: BLE001 —— 建议失败不应影响合并主流程
         logger.warning("[worktree] AI 合并建议失败 path=%s", path, exc_info=True)
         return {"ok": False, "error": f"AI 建议失败: {e}"}

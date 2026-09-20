@@ -199,3 +199,138 @@ async def test_remove_worktree_cleans_ignored_files(db, repo):
 
     await worktree_service.remove_worktree_project(db, res["project_id"], force=False)
     assert not wt_path.exists(), "含被忽略文件的工作树删除后目录不应残留"
+
+
+# ── 合并（含**未提交改动**，修复"工作树改了却提示无需合并"）──
+
+
+@pytest.mark.asyncio
+async def test_merge_preview_sees_uncommitted_worktree_change(db, repo):
+    """工作树里**未提交**的改动也必须被合并预览看到。
+
+    旧实现比较的是提交（git diff base...branch），未提交改动不在范围内，
+    因此用户改了文件却被告知"工作树与主工作区没有差异，无需合并"。
+    """
+    pid = await _seed_project(db, repo)
+    res = await worktree_service.create_worktree_for_project(db, pid, name="wt-uncommitted")
+    # 只改文件、**不提交**
+    (Path(res["path"]) / "app.txt").write_text("line1\nDIRTY-WT\nline3\n", encoding="utf-8")
+
+    preview = await worktree_service.merge_preview(db, res["project_id"])
+    paths = [f["path"] for f in preview["files"]]
+    assert "app.txt" in paths, f"未提交的改动也应出现在差异列表，实际 {paths}"
+    row = next(f for f in preview["files"] if f["path"] == "app.txt")
+    assert row["conflict"] is False, "仅来源侧改动应可自动合并"
+    assert "DIRTY-WT" in (row["merged"] or "")
+
+
+@pytest.mark.asyncio
+async def test_merge_apply_writes_uncommitted_change(db, repo):
+    """应用后未提交的改动必须真的落到主工作区。"""
+    pid = await _seed_project(db, repo)
+    res = await worktree_service.create_worktree_for_project(db, pid, name="wt-apply-dirty")
+    (Path(res["path"]) / "app.txt").write_text("line1\nAPPLIED\nline3\n", encoding="utf-8")
+
+    preview = await worktree_service.merge_preview(db, res["project_id"])
+    files = [{"path": f["path"], "content": f["merged"]} for f in preview["files"]]
+    apply_res = await worktree_service.merge_apply(db, res["project_id"], files)
+    assert apply_res["ok"] is True and apply_res["committed"] is True
+    assert (repo / "app.txt").read_text(encoding="utf-8") == "line1\nAPPLIED\nline3\n"
+
+
+@pytest.mark.asyncio
+async def test_merge_preview_allows_dirty_main_repo(db, repo):
+    """主工作区有未提交改动时**不再直接报错**：其改动作为 ours 参与三方比较。"""
+    pid = await _seed_project(db, repo)
+    res = await worktree_service.create_worktree_for_project(db, pid, name="wt-dirty-main")
+    await _commit_in(res["path"], "line1\nWT\nline3\n", "wt change")
+    # 主工作区改另一个文件（未提交），不应阻塞合并
+    (repo / "other.txt").write_text("main dirty\n", encoding="utf-8")
+
+    preview = await worktree_service.merge_preview(db, res["project_id"])
+    assert preview["ok"] is True
+    assert "app.txt" in [f["path"] for f in preview["files"]]
+
+
+@pytest.mark.asyncio
+async def test_merge_from_main_updates_worktree(db, repo):
+    """反向：把主工作区的改动更新到工作树（direction=from_main）。"""
+    pid = await _seed_project(db, repo)
+    res = await worktree_service.create_worktree_for_project(db, pid, name="wt-from-main")
+    # 主工作区提交一个改动
+    (repo / "main_only.txt").write_text("from main\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "main change")
+
+    preview = await worktree_service.merge_preview(db, res["project_id"], direction="from_main")
+    paths = [f["path"] for f in preview["files"]]
+    assert "main_only.txt" in paths, f"主工作区的新文件应出现在反向差异中，实际 {paths}"
+
+    files = [{"path": f["path"], "content": f["merged"]} for f in preview["files"]]
+    await worktree_service.merge_apply(db, res["project_id"], files, direction="from_main")
+    assert (Path(res["path"]) / "main_only.txt").exists(), "反向合并后工作树应拿到主工作区的文件"
+
+
+@pytest.mark.asyncio
+async def test_merge_apply_keeps_unrelated_dirty_files(db, repo):
+    """合并只提交本次涉及的文件，不把目标侧无关的未提交改动一并卷进提交。"""
+    pid = await _seed_project(db, repo)
+    res = await worktree_service.create_worktree_for_project(db, pid, name="wt-keep-dirty")
+    await _commit_in(res["path"], "line1\nMERGED\nline3\n", "wt change")
+    # 主工作区有一个无关文件的未提交改动
+    (repo / "unrelated.txt").write_text("keep me dirty\n", encoding="utf-8")
+
+    preview = await worktree_service.merge_preview(db, res["project_id"])
+    files = [{"path": f["path"], "content": f["merged"]} for f in preview["files"]]
+    await worktree_service.merge_apply(db, res["project_id"], files)
+
+    # 无关文件仍是未提交状态（未被卷入合并提交）
+    st = _git(repo, "status", "--porcelain")
+    assert "unrelated.txt" in st, f"无关未提交改动不应被提交，实际状态: {st}"
+
+
+@pytest.mark.asyncio
+async def test_commit_worktree_side(db, repo):
+    """合并前自动提交：commit_worktree(side=worktree) 应把工作树改动提交掉。"""
+    pid = await _seed_project(db, repo)
+    res = await worktree_service.create_worktree_for_project(db, pid, name="wt-commit")
+    (Path(res["path"]) / "app.txt").write_text("line1\nCOMMITTED\nline3\n", encoding="utf-8")
+
+    out = await worktree_service.commit_worktree(db, res["project_id"], side="worktree")
+    assert out["ok"] is True and out["committed"] is True
+    assert _git(Path(res["path"]), "status", "--porcelain").strip() == ""
+
+
+@pytest.mark.asyncio
+async def test_merge_preserves_crlf_line_endings(db, repo):
+    """合并写回时应保留目标文件的 CRLF 行尾，避免"整文件重写"的脏 diff。"""
+    pid = await _seed_project(db, repo)
+    (repo / "win.txt").write_bytes(b"a\r\nb\r\nc\r\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "add win file")
+    res = await worktree_service.create_worktree_for_project(db, pid, name="wt-crlf")
+    (Path(res["path"]) / "win.txt").write_bytes(b"a\r\nB-WT\r\nc\r\n")
+
+    preview = await worktree_service.merge_preview(db, res["project_id"])
+    files = [{"path": f["path"], "content": f["merged"]} for f in preview["files"]]
+    await worktree_service.merge_apply(db, res["project_id"], files)
+    # 内容已更新，且行尾仍是 CRLF（不是 LF）
+    assert (repo / "win.txt").read_bytes() == b"a\r\nB-WT\r\nc\r\n"
+
+
+@pytest.mark.asyncio
+async def test_merge_file_detects_conflict(db, repo):
+    """两侧改同一行 → 自动合并失败并标记冲突（交给用户/AI 处理）。"""
+    pid = await _seed_project(db, repo)
+    res = await worktree_service.create_worktree_for_project(db, pid, name="wt-conflict")
+    # 主工作区与工作树各自改 app.txt 的同一行
+    (repo / "app.txt").write_text("line1\nMAIN-SIDE\nline3\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "main side")
+    (Path(res["path"]) / "app.txt").write_text("line1\nWT-SIDE\nline3\n", encoding="utf-8")
+
+    preview = await worktree_service.merge_preview(db, res["project_id"])
+    row = next(f for f in preview["files"] if f["path"] == "app.txt")
+    assert row["conflict"] is True, "两侧改同一行应被判为冲突"
+    assert preview["has_conflict"] is True
+    assert "<<<<<<<" in (row["merged"] or ""), "冲突内容应含冲突标记"

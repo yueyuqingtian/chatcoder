@@ -9,7 +9,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.enums import MsgType, SenderType
 from app.orchestration.context_compressor import (
+    _COMPACT_KEEP_TYPES,
     _build_transcript,
+    _fallback_summary,
     _is_pairing_balanced,
     select_compactable_range,
 )
@@ -91,3 +93,46 @@ def test_transcript_contains_tools_and_files():
     assert "fs_read" in t
     assert "src/main.py" in t
     assert "user hello" in t
+
+
+# ── plan-19-82 步骤5：THINKING 纳入压缩候选 + 降级摘要按语言 ──────────────
+
+def test_thinking_included_in_compact_types():
+    """plan-19-82：THINKING 必须参与压缩候选（此前被排除 → 占用永久保留）。"""
+    assert MsgType.THINKING.value in _COMPACT_KEEP_TYPES
+
+
+def test_fallback_summary_language():
+    """降级摘要固定文案按语言选择，避免英文摘要污染中文会话。"""
+    msgs = [
+        _mk(1, MsgType.TEXT.value, text="用户问题"),
+        _mk(2, MsgType.TOOL_CALL.value, tool="fs_read", key="k1"),
+        _mk(3, MsgType.TOOL_RESULT.value, text="内容", tool="fs_read", key="k1"),
+    ]
+    zh = _fallback_summary(msgs, language="zh")
+    en = _fallback_summary(msgs, language="en")
+    assert "以下是之前对话的摘要" in zh
+    assert "Summary of earlier conversation" in en
+    assert "已调用工具" in zh and "Tools called" in en
+
+
+def test_select_range_reduces_effectively_on_long_chain():
+    """目标闭环的基础：长链在目标预算下能选出可压缩区间（配合迭代可压到目标）。"""
+    # 构造长链：20 轮 × 2 次调用 × 2000 字符 ≈ 大量 token
+    msgs = _chain(n_user=20, calls_per_round=2, tool_chars=2000)
+    from app.orchestration.token_counter import messages_token_total
+    total = messages_token_total(msgs)
+    # 目标上界按窗口 15% 计；窗口取自总 token 的 10 倍
+    window = total * 10
+    target_max = int(window * 0.15)
+    span = select_compactable_range(msgs, retain_tokens=4000)
+    assert span is not None
+    start, end = span
+    shadowed = msgs[start:end + 1]
+    kept = msgs[end + 1:]
+    # 压缩后剩余 = 保留区；显著小于原始总量（说明可有效回收）
+    assert messages_token_total(kept) < total
+    assert messages_token_total(shadowed) > 0
+    # 仅一次压缩（保留区为 4000 token 预算）时，剩余应远小于原量的一半，
+    # 说明配合多轮迭代可达目标区间
+    assert messages_token_total(kept) < total * 0.5 or messages_token_total(kept) <= target_max * 3

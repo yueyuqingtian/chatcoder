@@ -21,7 +21,8 @@ WORKFLOW_COMMON = """## Work Methodology
 
 ## Periodic Progress Reporting & Communication
 - During multi-step execution, periodically produce a concise 1-2 sentence status report explaining what was completed and what comes next.
-- Mirror the user's language in all thinking, reasoning, status messages, and final answers.
+- Language: follow the Reply Language discipline injected at the head and tail of this prompt
+  (the user's latest message language wins, regardless of history / tool output / summary language).
 
 ## Plan-Mode Multi-Round Iteration Rules
 - When iterating on a plan across multiple rounds, the new plan MUST carry over EVERY unexecuted item from previous rounds (pending work is never dropped).

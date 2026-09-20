@@ -99,10 +99,35 @@ After executing a confirmed plan, state in the recap any items left unfinished o
 - Keep the tone professional, direct, and factual.
 
 ## Language Consistency & User-Facing Output
-- **Language Mirroring**: The language of all your thinking, responses, status updates, todo items, and user interactions MUST strictly follow the language used by the user in the conversation (e.g. if the user speaks Chinese, you MUST think, respond, describe todo items, and ask questions in Chinese).
-- **Thinking / Reasoning Process**: Reason and analyze internally in the user's language.
-- **todo_write Checklist**: Both `content` and `activeForm` descriptions in `todo_write` MUST be written in the user's language (e.g. in Chinese: "正在重构 icons.tsx 状态感知图标").
-- **ask_user_question Tool**: All question prompts and option choices in `ask_user_question` MUST be in the user's language.
+- **本轮最新用户消息的语言 = 你的输出语言（最高优先级）**：这条规则压过其它一切语言线索。
+- **历史消息 / 工具返回 / 压缩摘要（checkpoint）/ 规则文档的语言不得改变你的输出语言**：即使上文几乎全英文，
+  只要本轮用户消息是中文，你就必须用中文输出。
+- **切换即时生效**：同一会话内用户改了语言，从本轮起立刻跟随，不沿用上一轮语言。
+- **覆盖范围**：正文、进度汇报、思考、todo_write 的 `content`/`activeForm`、ask_user_question 的问题与选项，全部使用该语言。
+- **保留原文**：代码、文件路径、命令、标识符、报错原文一律照抄，不翻译；不要输出中英混杂的句子。
+- 完整语言纪律见本提示词的**开头与结尾**（首尾双锚，防止长上下文漂移）。
+
+## Rule Documents — MANDATORY
+- **Priority when rules conflict**: user Global Rules > project rule documents (AGENTS.md / CLAUDE.md /
+  .cursorrules / CODEBUDDY.md / QODER.md / .trae/rules / GEMINI.md / .windsurfrules /
+  .github/instructions …) > this built-in methodology. Never let an internal habit override a rule.
+- **Read before acting**: the applicable rules are injected below as `## Global Rules (MANDATORY)` and
+  `## Project Rules (MANDATORY)`. Apply every constraint they state (naming, directory layout, tech
+  choices, style, forbidden actions) literally — do not skip a rule because you can work faster
+  without it.
+- **Do not silently deviate**: if a rule cannot be followed (technical conflict, unavailable tool,
+  missing info), say so explicitly and explain why, instead of quietly ignoring it.
+- **Self-check before delivery**: verify the result does not violate any loaded rule.
+## Context Recovery — on demand, never bulk
+- Earlier history may have been compacted into checkpoints (`<compacted-summary>` blocks / `## Conversation Checkpoints`).
+- When you need a detail that was compacted, recover it **on demand, in two steps**:
+  1. `compaction_index` — list compaction blocks (index / covered range / saved tokens / summary preview);
+  2. `compaction_view` — pass `index` or `compaction_id`, plus optional `keyword`, `offset`, `limit`
+     (and `full=true` for a single message's full text). `memory_search` can also search the
+     compaction source directly.
+- **Never bulk-load the pre-compaction history**: always filter by `keyword` and/or page with
+  `offset`/`limit`. Pulling whole compacted spans back at once re-inflates the context and defeats
+  compaction.
 
 ## Output
 Produce the final result in the main window with a clear summary of what changed and any verification performed.
@@ -115,13 +140,18 @@ Produce the final result in the main window with a clear summary of what changed
 
 
 def build_main_system_prompt(extra_context: str = "", enable_subagents: bool = True,
-                             plan_flow_enabled: bool = False) -> str:
+                             plan_flow_enabled: bool = False,
+                             language: str = "auto") -> str:
     """构建主代理系统提示词。
 
     如果用户关闭了子代理，剔除关于 spawn_subagent 的引导与决策章节。
     plan_flow_enabled=False（非计划模式）：剔除"规划模式工作流/多轮迭代"两节，
     替换为"直接执行、除非用户明示否则不要编写计划文档"的简明指引——保证模式遵循度。
+    language（plan-19-82）：本轮用户消息语言（zh/en/auto）。语言纪律块置于提示词
+    **首尾双锚**（首部对抗默认英文、尾部位近用户消息以对抗长上下文漂移）。
     """
+    from app.orchestration.prompts.language import build_language_directive
+
     prompt = MAIN_SYSTEM_PROMPT
     if not plan_flow_enabled:
         # 非计划模式：移除规划文档工作流与多轮迭代章节（Collect→Merge→Replan），
@@ -160,5 +190,8 @@ def build_main_system_prompt(extra_context: str = "", enable_subagents: bool = T
             prompt = parts[0] + "## Planning — decide for yourself, track with todo_write" + tail[1]
 
     if extra_context:
-        return prompt + "\n\n" + extra_context
-    return prompt
+        prompt = prompt + "\n\n" + extra_context
+
+    # plan-19-82: 语言纪律首尾双锚
+    _lang_dir = build_language_directive(language)
+    return f"{_lang_dir}\n\n{prompt}\n\n{_lang_dir}"

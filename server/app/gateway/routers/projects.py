@@ -212,17 +212,33 @@ class WorktreeCreateBody(BaseModel):
 
 class MergeFileBody(BaseModel):
     path: str
+    # 合并方向：to_main=工作树→主工作区（默认）；from_main=主工作区→工作树
+    direction: str = "to_main"
 
 
 class MergeApplyBody(BaseModel):
     # [{path, content, deleted?}]：content 为最终文本；deleted=True 表示删除该文件
     files: list[dict]
+    direction: str = "to_main"
 
 
 class MergeAiBody(BaseModel):
     path: str
     # 可选：仅针对某个冲突块（未传则对整文件给建议）
     hunk: dict | None = None
+    direction: str = "to_main"
+    # 用户自选的模型 id（任意供应商下的模型）；不传则由服务端默认解析
+    model_id: int | None = None
+
+
+class MergePreviewBody(BaseModel):
+    direction: str = "to_main"
+
+
+class WorktreeCommitBody(BaseModel):
+    """提交某一侧的未提交改动（合并前的自动提交）。side: worktree | main"""
+    side: str = "worktree"
+    message: str | None = None
 
 
 @router.get("/{project_id}/repo-candidates", response_model=list[dict])
@@ -267,10 +283,12 @@ async def delete_project_worktree(worktree_project_id: int, force: bool = False,
 
 
 @router.post("/worktrees/{worktree_project_id}/merge/preview", response_model=dict)
-async def worktree_merge_preview(worktree_project_id: int, db: AsyncSession = Depends(get_db)):
-    """合并预览：差异文件列表（含冲突标记）。不改动任何工作区。"""
+async def worktree_merge_preview(worktree_project_id: int, body: MergePreviewBody | None = None,
+                                 db: AsyncSession = Depends(get_db)):
+    """合并预览：差异文件列表（含未提交改动、自动冲突解决结果）。不改动任何工作区。"""
     try:
-        return await worktree_service.merge_preview(db, worktree_project_id)
+        return await worktree_service.merge_preview(
+            db, worktree_project_id, direction=(body.direction if body else "to_main"))
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -278,9 +296,10 @@ async def worktree_merge_preview(worktree_project_id: int, db: AsyncSession = De
 @router.post("/worktrees/{worktree_project_id}/merge/file", response_model=dict)
 async def worktree_merge_file(worktree_project_id: int, body: MergeFileBody,
                               db: AsyncSession = Depends(get_db)):
-    """三路内容：base（共同祖先）/ ours（主工作区）/ theirs（工作树）。"""
+    """三路内容：base（共同祖先）/ ours（目标侧）/ theirs（来源侧），均取工作区当前内容。"""
     try:
-        return await worktree_service.merge_file_blobs(db, worktree_project_id, body.path)
+        return await worktree_service.merge_file_blobs(
+            db, worktree_project_id, body.path, direction=body.direction)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -288,9 +307,10 @@ async def worktree_merge_file(worktree_project_id: int, body: MergeFileBody,
 @router.post("/worktrees/{worktree_project_id}/merge/apply", response_model=dict)
 async def worktree_merge_apply(worktree_project_id: int, body: MergeApplyBody,
                                db: AsyncSession = Depends(get_db)):
-    """应用合并结果并提交到主工作区。"""
+    """应用合并结果并提交到目标侧工作区。"""
     try:
-        return await worktree_service.merge_apply(db, worktree_project_id, body.files)
+        return await worktree_service.merge_apply(
+            db, worktree_project_id, body.files, direction=body.direction)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -298,5 +318,18 @@ async def worktree_merge_apply(worktree_project_id: int, body: MergeApplyBody,
 @router.post("/worktrees/{worktree_project_id}/merge/ai", response_model=dict)
 async def worktree_merge_ai(worktree_project_id: int, body: MergeAiBody,
                             db: AsyncSession = Depends(get_db)):
-    """某文件 / 某冲突块的 AI 合并建议（失败不阻塞，返回 ok=false + 原因）。"""
-    return await worktree_service.ai_merge_suggest(db, worktree_project_id, body.path, body.hunk)
+    """某文件 / 某冲突块的 AI 合并建议（可指定模型；失败不阻塞，返回 ok=false + 原因）。"""
+    return await worktree_service.ai_merge_suggest(
+        db, worktree_project_id, body.path, body.hunk,
+        direction=body.direction, model_id=body.model_id)
+
+
+@router.post("/worktrees/{worktree_project_id}/commit", response_model=dict)
+async def worktree_commit(worktree_project_id: int, body: WorktreeCommitBody,
+                          db: AsyncSession = Depends(get_db)):
+    """提交某一侧的未提交改动（side=worktree 提交工作树，side=main 提交主工作区）。"""
+    try:
+        return await worktree_service.commit_worktree(
+            db, worktree_project_id, side=body.side, message=body.message)
+    except ValueError as e:
+        raise HTTPException(400, str(e))

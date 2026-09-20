@@ -50,7 +50,9 @@ async def list_compaction_index(db: AsyncSession, session_id: int) -> list[dict]
     """返回会话内全部压缩块索引（按压缩发生顺序）。
 
     每条含 index / compaction_id / summary_message_id / shadowed_ids /
-    shadowed_tokens / saved_tokens / trigger / created_at / summary_preview。
+    shadowed_tokens / saved_tokens / trigger / created_at / summary_preview，
+    以及 plan-19-82 新增的 merged / restored 状态位（已滚动合并 / 已还原）。
+    注意：merged 只影响 checkpoint 注入，**原文仍可经 compaction_view 回看**。
     """
     from app.persistence.models.message import Message, Session
 
@@ -73,6 +75,10 @@ async def list_compaction_index(db: AsyncSession, session_id: int) -> list[dict]
             "trigger": c.get("trigger", "pressure"),
             "created_at": c.get("created_at"),
             "summary_preview": "",
+            # plan-19-82: 状态位（merged=已并入较新 checkpoint，不再重复注入；
+            # restored=已还原回上下文）。两者原文都仍可回看。
+            "merged": bool(c.get("merged")),
+            "restored": bool(c.get("restored")),
         }
         msg_id = c.get("summary_message_id")
         if msg_id:

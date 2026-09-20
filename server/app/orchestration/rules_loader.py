@@ -164,7 +164,14 @@ async def load_session_rules(workspace: str, rules_docs: list[str] | None = None
                 text = p.read_text(encoding="utf-8", errors="replace").strip()
                 if not text:
                     continue
-                chunk = f"({p.name})\n{text[:_MAX_SINGLE_BYTES]}"
+                # plan-19-82：规则来源标注——让模型与用户能核对规则出自哪个文件/工具。
+                try:
+                    rel = str(p.relative_to(base)).replace("\\", "/")
+                except ValueError:
+                    rel = p.name
+                src = _source_of(rel)
+                label = f"{rel}" + (f" · {src}" if src else "")
+                chunk = f"({label})\n{text[:_MAX_SINGLE_BYTES]}"
                 if total + len(chunk) > _MAX_TOTAL_BYTES:
                     break
                 parts.append(chunk)

@@ -41,6 +41,7 @@ import type {
   RepoCandidate,
   WorktreeMergeFile,
   WorktreeMergePreview,
+  WorktreeMergeDirection,
   WorktreeOut,
 } from "@chatcoder/shared";
 
@@ -371,17 +372,31 @@ export const api = {
   deleteWorktreeProject: (worktreeProjectId: number, force = false) =>
     del<{ ok: boolean; branch?: string | null; branch_deleted?: boolean }>(
       `/projects/worktrees/${worktreeProjectId}${force ? "?force=true" : ""}`),
-  worktreeMergePreview: (worktreeProjectId: number) =>
-    post<WorktreeMergePreview>(`/projects/worktrees/${worktreeProjectId}/merge/preview`, {}),
-  worktreeMergeFile: (worktreeProjectId: number, path: string) =>
+  worktreeMergePreview: (worktreeProjectId: number, direction: WorktreeMergeDirection = "to_main") =>
+    post<WorktreeMergePreview>(`/projects/worktrees/${worktreeProjectId}/merge/preview`, { direction }),
+  worktreeMergeFile: (worktreeProjectId: number, path: string, direction: WorktreeMergeDirection = "to_main") =>
     post<{ ok: boolean; path: string; base: string | null; ours: string | null; theirs: string | null }>(
-      `/projects/worktrees/${worktreeProjectId}/merge/file`, { path }),
-  worktreeMergeApply: (worktreeProjectId: number, files: Array<{ path: string; content?: string; deleted?: boolean }>) =>
+      `/projects/worktrees/${worktreeProjectId}/merge/file`, { path, direction }),
+  worktreeMergeApply: (
+    worktreeProjectId: number,
+    files: Array<{ path: string; content?: string; deleted?: boolean }>,
+    direction: WorktreeMergeDirection = "to_main",
+  ) =>
     post<{ ok: boolean; committed: boolean; written: string[] }>(
-      `/projects/worktrees/${worktreeProjectId}/merge/apply`, { files }),
-  worktreeMergeAi: (worktreeProjectId: number, path: string, hunk?: Record<string, unknown>) =>
-    post<{ ok: boolean; suggestion?: string; error?: string }>(
-      `/projects/worktrees/${worktreeProjectId}/merge/ai`, { path, hunk }),
+      `/projects/worktrees/${worktreeProjectId}/merge/apply`, { files, direction }),
+  worktreeMergeAi: (
+    worktreeProjectId: number,
+    path: string,
+    hunk?: Record<string, unknown>,
+    opts?: { direction?: WorktreeMergeDirection; modelId?: number | null },
+  ) =>
+    post<{ ok: boolean; suggestion?: string; error?: string; model?: string }>(
+      `/projects/worktrees/${worktreeProjectId}/merge/ai`,
+      { path, hunk, direction: opts?.direction ?? "to_main", model_id: opts?.modelId ?? null }),
+  /** 合并前自动提交某一侧的未提交改动（side: worktree | main） */
+  worktreeCommit: (worktreeProjectId: number, side: "worktree" | "main", message?: string) =>
+    post<{ ok: boolean; committed: boolean; message: string }>(
+      `/projects/worktrees/${worktreeProjectId}/commit`, { side, message }),
   // ── 插件市场（plan-282-1441 #6）──
   pluginMarketplace: () =>
     get<{ ok: boolean; items: PluginMarketItem[]; installedCount: number }>("/plugins/marketplace"),
@@ -867,7 +882,7 @@ export const api = {
 export type {
   ProjectOut, SessionOut, TurnOut, MessageOut, TaskOut, ArtifactOut, ModelOut,
   ProviderOut, ProviderCredentialOut, ScannedModel,
-  WorktreeOut, WorktreeMergeFile, WorktreeMergePreview, PluginMarketItem,
+  WorktreeOut, WorktreeMergeFile, WorktreeMergePreview, WorktreeMergeDirection, PluginMarketItem,
   DbConnectionOut, DbPolicyOut, DebugStatusOut, RepoCandidate,
   DebugSettingsOut,
   ArthasStatusOut, ArthasEntryOut, ArthasProcessOut, ArthasConfigOut,

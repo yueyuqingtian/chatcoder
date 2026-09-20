@@ -142,14 +142,26 @@ export interface WorktreeMergeFile {
   path: string;
   status: "added" | "modified" | "deleted" | "renamed" | "copied";
   conflict: boolean;
+  /** 自动三方合并后的内容（冲突时含 <<<<<<< 标记） */
+  merged?: string | null;
+  /** 是否可自动合并（无需人工/AI 介入） */
+  has_auto_merge?: boolean;
 }
+
+/** 合并方向：to_main=工作树→主工作区；from_main=主工作区→工作树 */
+export type WorktreeMergeDirection = "to_main" | "from_main";
 
 export interface WorktreeMergePreview {
   ok: boolean;
+  direction?: WorktreeMergeDirection;
   base_branch: string;
   branch: string;
   files: WorktreeMergeFile[];
   has_conflict: boolean;
+  /** 来源侧是否存在未提交改动 */
+  source_dirty?: boolean;
+  /** 目标侧是否存在未提交改动 */
+  target_dirty?: boolean;
 }
 
 /** plan-282-1441（#7）：数据库连接（密码不回传，只有 has_password） */

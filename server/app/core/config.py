@@ -230,6 +230,12 @@ class Settings(BaseSettings):
     # v6.0: 自动压缩配置（对齐 codex/claude code 主动 auto-compact）
     auto_compact_keep_rounds: int = 6  # 压缩时保留最近 N 个完整工具回合
     auto_compact_min_reclaim_tokens: int = 2000  # 可回收 token 低于此值则跳过（避免无价值 LLM 调用）
+    # plan-19-82 步骤5: 压缩目标闭环——压缩后总占用应落入目标区间（默认 10%-15%）。
+    # 旧实现只切一刀（保留 16%），压缩后仍可能占 40%（512K 窗口），用户反馈效率过低。
+    compact_target_ratio: float = 0.12      # 压缩后目标占用（窗口比例），默认 12%
+    compact_target_min_ratio: float = 0.10  # 目标区间下界（10%）
+    compact_target_max_ratio: float = 0.15  # 目标区间上界（15%，超此值继续迭代压缩）
+    compact_max_rounds: int = 5             # 单次压缩最多迭代轮数（防死循环）
     # v6.0: 主会话超级摘要配置（context_memory）
     super_summary_trigger: int = 5  # 摘要条数超过此值触发超级摘要
     super_summary_keep_latest: int = 3  # 超级摘要保留最新 N 条不压缩

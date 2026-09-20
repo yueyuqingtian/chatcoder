@@ -40,7 +40,9 @@ TA3_TOOL_DISCIPLINE_SECTION = """## 工具使用纪律
 历史上下文中的 assistant 消息若带 tool_calls 及其 tool 返回结果，说明这些操作真实发生过，其返回内容是可查验的事实依据；不要重复声称已做过上下文中不存在的操作，也不要把上下文中的叙述性描述当成已发生的事实。
 历史消息中出现 "tool call aborted before dispatch" 或 "TOOL_OUTCOME_UNKNOWN" 错误结果时，说明对应操作未完成或结果未知；在重新核实外部状态前，不得假定该操作已经成功。"""
 
-# ⑤ 当前项目流程规范追加段（不依赖工具名的通用约束，与 ta3 提示词语言风格一致）
+# ⑤ 当前项目流程规范追加段（不依赖工具名的通用约束）
+# plan-19-82: 回复语言不再写死「简体中文」——由 language 参数动态生成，
+# 与远端 systemMessage 及主提示词口径统一（用户发什么语言就用什么语言回复）。
 CHATCODER_ADDENDUM = """## 流程规范（本环境附加）
 1. 本环境由 chatcoder 工作台托管：任务拆解、上下文压缩、工具审批由平台自动完成，你只需专注执行。
 2. 工具调用按平台定义执行：Write/Edit/Bash 等写操作默认需用户审批，审批通过后才会真正生效；被拒绝时如实说明并调整方案。
@@ -48,7 +50,7 @@ CHATCODER_ADDENDUM = """## 流程规范（本环境附加）
 4. 重要决策与关键改动添加简短注释；交付前自查可运行性（编译/测试）。
 5. 长驻进程（dev server、watch、后端服务）必须以后台模式启动（Bash 的 waitForCompletion=false）。
 6. 执行类任务按步骤推进：探索 → 小步修改 → 验证 → 汇报；失败时先读完整错误定位根因，不要盲目重试。
-7. 最终结论在主窗口以清晰摘要汇报：改了什么、如何验证。回复用简体中文、简洁直接，不使用表情符号或装饰符号。"""
+7. 最终结论在主窗口以清晰摘要汇报：改了什么、如何验证。回复用{lang_label}、简洁直接，不使用表情符号或装饰符号。"""
 
 # 完全访问模式（danger-full-access）：免审批直接执行——流程规范去掉"默认需审批"条款，
 # 与用户选择的完全访问语义一致（此前恒注入审批说明导致"完全访问仍像要审批"的观感）。
@@ -59,7 +61,7 @@ CHATCODER_ADDENDUM_FULL_ACCESS = """## 流程规范（本环境附加）
 4. 重要决策与关键改动添加简短注释；交付前自查可运行性（编译/测试）。
 5. 长驻进程（dev server、watch、后端服务）必须以后台模式启动（Bash 的 waitForCompletion=false）。
 6. 执行类任务按步骤推进：探索 → 小步修改 → 验证 → 汇报；失败时先读完整错误定位根因，不要盲目重试。
-7. 最终结论在主窗口以清晰摘要汇报：改了什么、如何验证。回复用简体中文、简洁直接，不使用表情符号或装饰符号。"""
+7. 最终结论在主窗口以清晰摘要汇报：改了什么、如何验证。回复用{lang_label}、简洁直接，不使用表情符号或装饰符号。"""
 
 # 只读模式（read-only）：仅允许查看/搜索/分析
 CHATCODER_ADDENDUM_READONLY = """## 流程规范（本环境附加）
@@ -69,16 +71,29 @@ CHATCODER_ADDENDUM_READONLY = """## 流程规范（本环境附加）
 4. 重要决策与关键改动添加简短注释；交付前自查可运行性（编译/测试）。
 5. 长驻进程（dev server、watch、后端服务）必须以后台模式启动（Bash 的 waitForCompletion=false）。
 6. 执行类任务按步骤推进：探索 → 小步修改 → 验证 → 汇报；失败时先读完整错误定位根因，不要盲目重试。
-7. 最终结论在主窗口以清晰摘要汇报：改了什么、如何验证。回复用简体中文、简洁直接，不使用表情符号或装饰符号。"""
+7. 最终结论在主窗口以清晰摘要汇报：改了什么、如何验证。回复用{lang_label}、简洁直接，不使用表情符号或装饰符号。"""
 
 
-def _build_addendum(sandbox_mode: str) -> str:
-    """按沙箱模式选择流程规范段：完全访问/只读使用对应文案，其余保持默认。"""
+def _normalize_lang(language: str | None) -> str:
+    """语言码归一（非 zh/en 一律按 auto 处理，沿用“跟随用户消息”表述）。"""
+    return language if language in ("zh", "en") else "auto"
+
+
+def _build_addendum(sandbox_mode: str, language: str = "auto") -> str:
+    """按沙箱模式选择流程规范段：完全访问/只读使用对应文案，其余保持默认。
+
+    language（plan-19-82）：回复语言句按本轮语言动态生成（中文→简体中文；英文→English；
+    auto→跟随用户消息），不再写死中文。
+    """
+    from app.orchestration.prompts.language import language_label
+
     if sandbox_mode == "danger-full-access":
-        return CHATCODER_ADDENDUM_FULL_ACCESS
-    if sandbox_mode == "read-only":
-        return CHATCODER_ADDENDUM_READONLY
-    return CHATCODER_ADDENDUM
+        tpl = CHATCODER_ADDENDUM_FULL_ACCESS
+    elif sandbox_mode == "read-only":
+        tpl = CHATCODER_ADDENDUM_READONLY
+    else:
+        tpl = CHATCODER_ADDENDUM
+    return tpl.format(lang_label=language_label(_normalize_lang(language)))
 
 # 子代理引导（启用子代理时追加）
 SUBAGENT_GUIDE_SECTION = """## 子代理使用
@@ -104,12 +119,17 @@ def build_runtime_snapshot(workspace: str = "") -> str:
 
 def build_ta3_system_prompt(model_meta: dict | None, workspace: str = "",
                             enable_subagents: bool = True,
-                            sandbox_mode: str = "workspace-write") -> str:
+                            sandbox_mode: str = "workspace-write",
+                            language: str = "auto") -> str:
     """组装 ta3 模式系统提示词（见模块 docstring 结构）。
 
     sandbox_mode：完全访问(danger-full-access)/只读(read-only)时流程规范段
     按对应语义生成（免审批/仅读），避免注入与所选模式矛盾的审批条款。
+    language（plan-19-82）：远端 systemMessage 可能是英文，与本地流程规范口径不一；
+    这里把统一的语言纪律块置于**首尾双锚**，并按本轮语言生成「回复用 X」文案。
     """
+    from app.orchestration.prompts.language import build_language_directive
+
     model_meta = model_meta or {}
     sections = [
         (model_meta.get("systemMessage") or "").strip(),
@@ -119,5 +139,7 @@ def build_ta3_system_prompt(model_meta: dict | None, workspace: str = "",
     ]
     if enable_subagents:
         sections.append(SUBAGENT_GUIDE_SECTION)
-    sections.append(_build_addendum(sandbox_mode))
-    return "\n\n".join(s for s in sections if s)
+    sections.append(_build_addendum(sandbox_mode, language=language))
+    body = "\n\n".join(s for s in sections if s)
+    _lang_dir = build_language_directive(language)
+    return f"{_lang_dir}\n\n{body}\n\n{_lang_dir}"

@@ -57,9 +57,9 @@ class CompactionIndexTool(Tool):
     name = "compaction_index"
     risk_level = "low"
     description = (
-        "列出当前会话内全部上下文压缩块的索引（序号/覆盖消息范围/节省 token/"
+        "【按需回看第 1 步】列出当前会话内全部上下文压缩块的索引（序号/覆盖消息范围/节省 token/"
         "摘要预览）。上下文被压缩后，需要回忆早期会话细节时先调用本工具定位索引，"
-        "再调用 compaction_view 按索引查看压缩前的原始消息。"
+        "再调用 compaction_view 按索引查看压缩前的原始消息（只取需要的部分，**不要全量拉取**）。"
     )
 
     def function_schema(self) -> dict:
@@ -102,10 +102,12 @@ class CompactionViewTool(Tool):
     name = "compaction_view"
     risk_level = "low"
     description = (
-        "按索引查看某个上下文压缩块遮蔽的压缩前会话消息。参数二选一："
+        "【按需回看第 2 步】按索引查看某个上下文压缩块遮蔽的压缩前会话消息。参数二选一："
         "index=压缩块序号（compaction_index 返回的 #序号，从 1 起）；"
         "或 compaction_id=压缩块 id。支持 offset/limit 分页与 keyword 过滤；"
         "单条消息默认截断 400 字符，需要某条全文时用 full=true。"
+        "**按需取用**：先用 compaction_index 定位块，再用 keyword / offset / limit 只取需要的几条；"
+        "**严禁一次性全量拉取**压缩前历史（会重新撑爆上下文、抵消压缩效果）。"
         "当需要回忆被压缩早期会话的具体内容时使用。"
     )
 

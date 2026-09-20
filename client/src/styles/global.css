@@ -2702,12 +2702,25 @@ a { color: var(--accent); text-decoration: none; }
   border-radius: var(--r-md); font-size: 12px; line-height: 1.6;
   background: var(--error-soft); color: var(--error);
 }
+/* 多行错误（如多个文件 AI 无建议）保留换行 */
+.merge-error-block { white-space: pre-wrap; }
 /* 合并完成后的收尾确认文案（工作树名称/分支名用等宽强调） */
 .merge-post-note { margin: 8px 0; }
 .merge-post-note code {
   font-family: var(--font-mono); font-size: 11px;
   padding: 1px 4px; border-radius: var(--r-xs); background: var(--bg-hover); color: var(--text-1);
 }
+/* 合并弹窗顶部的 AI 模型选择（自选供应商模型） */
+.merge-model-select {
+  height: 26px; max-width: 240px; font-size: 12px;
+  padding: 0 6px; border-radius: var(--r-sm);
+  border: 1px solid var(--border); background: var(--bg-elevated); color: var(--text-1);
+}
+.merge-filelist-hint {
+  padding: 6px 10px; margin-bottom: 6px; font-size: 12px; line-height: 1.5;
+  border-radius: var(--r-sm); background: var(--bg-hover); color: var(--text-2);
+}
+.merge-file-auto { flex-shrink: 0; font-size: 10px; padding: 1px 6px; border-radius: var(--r-xs); background: var(--bg-hover); color: var(--text-3); }
 .merge-filelist { display: flex; flex-direction: column; gap: 4px; max-height: 58vh; overflow-y: auto; scrollbar-width: thin; }
 .merge-file-row {
   display: flex; align-items: center; gap: var(--sp-3);

@@ -11,7 +11,7 @@
  * 这里用轻量实现（LCS 行 diff），不引入额外依赖。
  */
 import { useEffect, useMemo, useState } from "react";
-import { api, type WorktreeOut } from "../../api/client";
+import { api, type ModelOut, type WorktreeMergeDirection, type WorktreeOut } from "../../api/client";
 import { Dialog } from "../ui/Dialog";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { IconCheck, IconChevronDown, IconChevronUp, IconFileText, IconRefresh, IconWand } from "../icons";
@@ -117,14 +117,18 @@ function sliceByBaseRange(base: string[], side: string[], start: number, end: nu
 export function MergeDialog({
   open,
   worktree,
+  direction = "to_main",
   onClose,
   onMerged,
 }: {
   open: boolean;
   worktree: WorktreeOut | null;
+  /** 合并方向：to_main=工作树→主工作区（默认）；from_main=主工作区→工作树 */
+  direction?: WorktreeMergeDirection;
   onClose: () => void;
   onMerged: () => void;
 }) {
+  const toMain = direction === "to_main";
   const [loading, setLoading] = useState(false);
   const [preview, setPreview] = useState<import("../../api/client").WorktreeMergePreview | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
@@ -145,13 +149,28 @@ export function MergeDialog({
   const [postError, setPostError] = useState("");
   /** 工作树有未提交变更时，需用户二次确认才强制删除 */
   const [needForce, setNeedForce] = useState(false);
+  /** 来源侧有未提交改动时的"先提交"确认 */
+  const [confirmCommit, setConfirmCommit] = useState(false);
+  const [committing, setCommitting] = useState(false);
+  /** AI 合并使用的模型（可自选供应商的模型）；null=服务端默认 */
+  const [modelId, setModelId] = useState<number | null>(null);
+  const [models, setModels] = useState<ModelOut[]>([]);
 
   const loadPreview = async () => {
     if (!worktree) return;
     setLoading(true);
     setError("");
     try {
-      setPreview(await api.worktreeMergePreview(worktree.id));
+      const pv = await api.worktreeMergePreview(worktree.id, direction);
+      setPreview(pv);
+      // 可自动合并的文件直接预置为合并结果，用户只需处理冲突文件
+      const auto: Record<string, string> = {};
+      for (const f of pv.files) {
+        if (f.status !== "deleted" && f.has_auto_merge && f.merged != null) auto[f.path] = f.merged;
+      }
+      setResolved(auto);
+      // 来源侧有未提交改动：提示用户先提交（确认后自动提交再继续）
+      setConfirmCommit(Boolean(pv.source_dirty));
     } catch (e) {
       setError(String(e));
       setPreview(null);
@@ -166,19 +185,37 @@ export function MergeDialog({
     setError("");
     setPostMerge(false);
     setPostError("");
+    setConfirmCommit(false);
     void loadPreview();
+    // 模型列表：供 AI 合并自选供应商模型
+    api.listModels().then(setModels).catch(() => setModels([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, worktree?.id]);
+  }, [open, worktree?.id, direction]);
+
+  /** 用户确认后自动提交来源侧的未提交改动，再继续合并 */
+  const doCommitSource = async () => {
+    if (!worktree) return;
+    setCommitting(true);
+    setError("");
+    try {
+      await api.worktreeCommit(worktree.id, toMain ? "worktree" : "main");
+      setConfirmCommit(false);
+      await loadPreview();
+    } catch (e) {
+      setError(String(e));
+    } finally { setCommitting(false); }
+  };
 
   const openFile = async (path: string) => {
     if (!worktree) return;
     setLoading(true);
     setError("");
     try {
-      const data = await api.worktreeMergeFile(worktree.id, path);
+      const data = await api.worktreeMergeFile(worktree.id, path, direction);
       setBlobs({ base: data.base, ours: data.ours, theirs: data.theirs });
-      // 默认合并结果：优先用工作树版本（工作树的改动通常是要合入的）
-      setMerged(data.theirs ?? data.ours ?? "");
+      // 默认合并结果：优先用后端自动三方合并的内容（含冲突标记），否则用来源侧版本
+      const auto = preview?.files.find((f) => f.path === path)?.merged;
+      setMerged(auto ?? data.theirs ?? data.ours ?? "");
       setActivePath(path);
       setHunkIndex(0);
     } catch (e) {
@@ -234,9 +271,9 @@ export function MergeDialog({
     setError("");
     try {
       const hunk = conflicts[hunkIndex];
-      const res = await api.worktreeMergeAi(worktree.id, activePath, hunk
-        ? { ours: hunk.oursLines.join("\n"), theirs: hunk.theirsLines.join("\n") }
-        : undefined);
+      const res = await api.worktreeMergeAi(worktree.id, activePath,
+        hunk ? { ours: hunk.oursLines.join("\n"), theirs: hunk.theirsLines.join("\n") } : undefined,
+        { direction, modelId });
       if (res.ok && res.suggestion != null) {
         if (hunk) {
           // 把建议替换到该冲突块位置
@@ -257,19 +294,24 @@ export function MergeDialog({
     } finally { setAiBusy(false); }
   };
 
-  /** 一键 AI 智能合并：对所有文件依次求整文件建议 */
+  /** 一键 AI 智能合并：对所有文件依次求整文件建议（失败时逐个提示，不静默） */
   const aiMergeAll = async () => {
     if (!worktree || !preview) return;
     setAiBusy(true);
     setError("");
     try {
       const next: Record<string, string> = { ...resolved };
+      const failures: string[] = [];
       for (const f of preview.files) {
         if (f.status === "deleted") continue;
-        const res = await api.worktreeMergeAi(worktree.id, f.path);
+        const res = await api.worktreeMergeAi(worktree.id, f.path, undefined, { direction, modelId });
         if (res.ok && res.suggestion != null) next[f.path] = res.suggestion;
+        else failures.push(`${f.path}（${res.error || "无建议"}）`);
       }
       setResolved(next);
+      if (failures.length > 0) {
+        setError(`以下文件 AI 未给出建议，请手动处理：\n${failures.join("\n")}`);
+      }
     } catch (e) {
       setError(String(e));
     } finally { setAiBusy(false); }
@@ -288,13 +330,18 @@ export function MergeDialog({
       const files = preview.files.map((f) =>
         f.status === "deleted"
           ? { path: f.path, deleted: true }
-          : { path: f.path, content: resolved[f.path] ?? "" },
+          : { path: f.path, content: resolved[f.path] ?? f.merged ?? "" },
       );
-      await api.worktreeMergeApply(worktree.id, files);
+      await api.worktreeMergeApply(worktree.id, files, direction);
       setConfirmApply(false);
-      // 合并已写入主工作区：不直接关闭，改为二次确认是否删除当前工作树
-      setPostError("");
-      setPostMerge(true);
+      if (toMain) {
+        // 合并已写入主工作区：不直接关闭，改为二次确认是否删除当前工作树
+        setPostError("");
+        setPostMerge(true);
+      } else {
+        // 反向（主工作区 → 工作树）：无需删除工作树，直接收尾
+        onMerged();
+      }
     } catch (e) {
       setError(String(e));
     } finally { setSubmitting(false); }
@@ -327,15 +374,34 @@ export function MergeDialog({
   const statusLabel: Record<string, string> = {
     added: "新增", modified: "修改", deleted: "删除", renamed: "重命名", copied: "复制",
   };
+  const srcName = toMain ? `工作树「${worktree?.name ?? ""}」` : `主工作区`;
+  const dstName = toMain ? `主工作区` : `工作树「${worktree?.name ?? ""}」`;
 
   return (
     <>
       <Dialog
-        open={open && !postMerge}
+        open={open && !postMerge && !confirmCommit}
         onClose={onClose}
         width={1080}
-        title={`合并工作树「${worktree?.name ?? ""}」到主工作区`}
-        subtitle={preview ? `分支 ${preview.branch} → ${preview.base_branch}` : undefined}
+        title={`合并${srcName}的改动到${dstName}`}
+        subtitle={preview
+          ? `分支 ${toMain ? preview.branch : preview.base_branch} → ${toMain ? preview.base_branch : preview.branch}`
+          : undefined}
+        actions={models.length > 0 ? (
+          <select
+            className="merge-model-select"
+            title="AI 智能合并使用的模型（可自选供应商）"
+            value={modelId ?? ""}
+            onChange={(e) => setModelId(e.target.value ? Number(e.target.value) : null)}
+          >
+            <option value="">AI 模型：服务端默认</option>
+            {models.filter((m) => m.is_active).map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.provider_name ? `${m.provider_name}/${m.name}` : m.name}
+              </option>
+            ))}
+          </select>
+        ) : undefined}
         footer={
           <>
             <button className="btn btn-ghost btn-sm" onClick={onClose}>取消</button>
@@ -353,7 +419,7 @@ export function MergeDialog({
           </>
         }
       >
-        {error && <div className="merge-error">{error}</div>}
+        {error && <div className="merge-error merge-error-block">{error}</div>}
 
         {/* 第二层：三栏冲突解决 */}
         {activePath && blobs ? (
@@ -384,15 +450,15 @@ export function MergeDialog({
             {conflicts.length > 0 && (
               <div className="merge-hunk-actions">
                 <span>当前冲突块：</span>
-                <button className="btn btn-ghost btn-xs" onClick={() => acceptSide("theirs")}>接受左侧（工作树）</button>
-                <button className="btn btn-ghost btn-xs" onClick={() => acceptSide("ours")}>接受右侧（主工作区）</button>
+                <button className="btn btn-ghost btn-xs" onClick={() => acceptSide("theirs")}>接受左侧（{toMain ? "工作树" : "主工作区"}）</button>
+                <button className="btn btn-ghost btn-xs" onClick={() => acceptSide("ours")}>接受右侧（{toMain ? "主工作区" : "工作树"}）</button>
                 <button className="btn btn-ghost btn-xs" onClick={() => acceptSide("both")}>两者都保留</button>
               </div>
             )}
 
             <div className="merge-columns">
               <div className="merge-col">
-                <div className="merge-col-head">工作树（theirs）</div>
+                <div className="merge-col-head">{toMain ? "工作树（来源）" : "主工作区（来源）"}</div>
                 <pre className="merge-pre">{blobs.theirs ?? "（无此文件）"}</pre>
               </div>
               <div className="merge-col merge-col-center">
@@ -405,7 +471,7 @@ export function MergeDialog({
                 />
               </div>
               <div className="merge-col">
-                <div className="merge-col-head">主工作区（ours）</div>
+                <div className="merge-col-head">{toMain ? "主工作区（目标）" : "工作树（目标）"}</div>
                 <pre className="merge-pre">{blobs.ours ?? "（无此文件）"}</pre>
               </div>
             </div>
@@ -421,14 +487,26 @@ export function MergeDialog({
           <div className="merge-filelist">
             {loading && <div className="navpage-empty">正在检测差异…</div>}
             {!loading && preview && preview.files.length === 0 && (
-              <div className="navpage-empty">工作树与主工作区没有差异，无需合并。</div>
+              <div className="navpage-empty">
+                {srcName}与{dstName}没有差异，无需合并。
+              </div>
+            )}
+            {!loading && preview && preview.files.length > 0 && (
+              <div className="merge-filelist-hint">
+                共 {preview.files.length} 个文件，
+                {preview.has_conflict
+                  ? `其中 ${preview.files.filter((f) => f.conflict).length} 个存在冲突（需处理或 AI 合并）`
+                  : "全部可自动合并"}
+                。已自动合并的文件可直接提交，冲突文件请逐个处理。
+              </div>
             )}
             {!loading && preview?.files.map((f) => (
               <div className="merge-file-row" key={f.path}>
                 <span className={`merge-file-status ${f.status}`}>{statusLabel[f.status] ?? f.status}</span>
                 <IconFileText size={13} />
                 <span className="merge-file-path" title={f.path}>{f.path}</span>
-                {f.conflict && <span className="merge-file-conflict">冲突</span>}
+                {f.conflict ? <span className="merge-file-conflict">冲突</span>
+                  : <span className="merge-file-auto">可自动合并</span>}
                 {resolved[f.path] != null && <span className="merge-file-done">已解决</span>}
                 {f.status !== "deleted" && (
                   <button className="btn btn-ghost btn-xs" onClick={() => void openFile(f.path)}>
@@ -445,12 +523,27 @@ export function MergeDialog({
         open={confirmApply}
         title="提交合并"
         message={
-          `将把解决后的内容写入主工作区并创建一次提交。\n\n` +
-          `未在列表中处理过的文件将按工作树版本写入。是否继续？`
+          `将把解决后的内容写入${dstName}并创建一次提交。\n\n` +
+          `未在列表中处理过的文件将按${toMain ? "工作树" : "主工作区"}当前内容写入。是否继续？`
         }
         confirmLabel="提交"
         onCancel={() => setConfirmApply(false)}
         onConfirm={() => void applyMerge()}
+      />
+
+      {/* 来源侧有未提交改动：提示用户先提交（确认后自动提交再继续合并） */}
+      <ConfirmDialog
+        open={confirmCommit}
+        title="先提交未提交的改动"
+        message={
+          `${toMain ? "工作树" : "主工作区"}存在未提交的改动。\n\n` +
+          `若先提交这些改动，合并会以最新提交为准，历史更清晰。\n` +
+          `点击「提交并继续」将自动提交它们；点击「跳过」则直接合并当前工作区内容。`
+        }
+        confirmLabel={committing ? "提交中…" : "提交并继续"}
+        cancelLabel="跳过"
+        onCancel={() => setConfirmCommit(false)}
+        onConfirm={() => void doCommitSource()}
       />
 
       {/* 合并完成后的收尾：是否删除当前工作树（不删则保留，可继续在里面开发） */}

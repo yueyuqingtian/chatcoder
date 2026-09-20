@@ -474,6 +474,7 @@ async def _compact_persistent_or_fallback(
     db: AsyncSession, *, session_id: int, provider, agent_window: int,
     used_tokens: int | None, agent_id: int, agent_name: str,
     turn_id: int, messages: list, trigger: str = "pressure",
+    reply_language: str = "auto",
 ) -> tuple[dict | None, list]:
     """优先落库式压缩（v30，参照 deepseek-harness compaction）。
 
@@ -485,9 +486,14 @@ async def _compact_persistent_or_fallback(
     Returns:
         (result, messages)：result 非 None 表示落库式压缩成功。
     """
-    from app.orchestration.prompts import CHECKPOINT_PREAMBLE
+    # plan-19-82: checkpoint 前言按本轮语言选择（中文会话用中文前言，避免英文污染回复语言）
+    from app.orchestration.prompts import get_checkpoint_preamble
 
     _result: dict | None = None
+    # plan-19-82 步骤5: 固定开销（system/developer + 工具规则）实测值——压缩不会动它们，
+    # 必须先扣除再判定目标可达性，否则会「压不动却反复压」。
+    from app.orchestration.token_counter import estimate_fixed_overhead_tokens as _fixed_of
+    _fixed_overhead = _fixed_of(messages)
     try:
         from app.persistence.models.message import Session as _SessRow
         from app.orchestration.context_compressor import compact_session, emergency_compact_session
@@ -497,13 +503,14 @@ async def _compact_persistent_or_fallback(
                 _result = await emergency_compact_session(
                     db, session=_sess, provider=provider, context_window=agent_window,
                     used_tokens=used_tokens, agent_id=agent_id, agent_name=agent_name,
-                    turn_id=turn_id,
+                    turn_id=turn_id, language=reply_language,
                 )
             else:
                 _result = await compact_session(
                     db, session=_sess, provider=provider, context_window=agent_window,
                     used_tokens=used_tokens, agent_id=agent_id, agent_name=agent_name,
-                    turn_id=turn_id, trigger=trigger,
+                    turn_id=turn_id, trigger=trigger, language=reply_language,
+                    fixed_overhead_tokens=_fixed_overhead,
                 )
     except Exception:
         logger.warning("[agent] turn=%s %s 落库式压缩失败，回退内存式", turn_id, trigger, exc_info=True)
@@ -514,18 +521,22 @@ async def _compact_persistent_or_fallback(
         # 不裁剪的话，被压缩内容仍留在本轮 prompt 里 → 占用不降 → 每步反复触发压缩。
         from app.orchestration.token_counter import estimate_messages_tokens
         _before_tokens = estimate_messages_tokens(messages)
+        # plan-19-82 步骤5: 内存裁剪预算改用「压缩后目标预算」而非固定 16% 保留，
+        # 否则落库压缩达标了、内存 prompt 仍占高位（下一 step 又判超阈值 → 反复压缩）。
+        from app.orchestration.token_counter import get_compact_target_tokens
         _retain = _result.get("retained_tokens")
         if not isinstance(_retain, int) or _retain <= 0:
-            _retain = max(4000, int(agent_window * 0.16))  # 与 compact_session 缺省一致
+            _retain = get_compact_target_tokens(agent_window)
         _pruned = _prune_messages_for_compaction(messages, _retain)
         _after_tokens = estimate_messages_tokens(_pruned)
+        _post_ratio = round(_after_tokens / agent_window * 100, 1) if agent_window else None
         logger.info(
-            "[agent] turn=%s 压缩后内存上下文 %d -> %d tokens（保留预算 %d，消息 %d -> %d 条）",
-            turn_id, _before_tokens, _after_tokens, _retain, len(messages), len(_pruned),
+            "[agent] turn=%s 压缩后内存上下文 %d -> %d tokens（保留预算 %d，消息 %d -> %d 条，压缩后占用 %s%%）",
+            turn_id, _before_tokens, _after_tokens, _retain, len(messages), len(_pruned), _post_ratio,
         )
         messages = [*_pruned, ChatMessage(
             role="developer",
-            content=f"{CHECKPOINT_PREAMBLE}\n\n{_result['summary']}",
+            content=f"{get_checkpoint_preamble(reply_language)}\n\n{_result['summary']}",
         )]
         await broadcast(session_id, {
             "event": "compact.summary",
@@ -544,6 +555,9 @@ async def _compact_persistent_or_fallback(
                 "used_tokens": used_tokens,
                 "context_window": agent_window,
                 "ratio": round((used_tokens or 0) / agent_window * 100, 1) if agent_window else None,
+                # plan-19-82: 压缩后占用率（验收口径：应落入 10%-15% 目标区间）
+                "post_compact_ratio": _post_ratio,
+                "rounds": _result.get("rounds"),
             },
         })
     else:
@@ -552,7 +566,8 @@ async def _compact_persistent_or_fallback(
             messages = emergency_compact(messages, agent_window)
         else:
             from app.orchestration.compaction import auto_compact
-            messages = await auto_compact(messages, agent_window, provider)
+            messages = await auto_compact(messages, agent_window, provider,
+                                          language=reply_language)
     return _result, messages
 
 
@@ -575,6 +590,8 @@ async def run_agent_loop(
     task_id: int | None = None,
     model_id: int | None = None,
     multimodal: bool = False,
+    # plan-19-82: 本轮回复语言（zh/en/auto），用于压缩摘要与 checkpoint 文案对齐
+    reply_language: str = "auto",
 ) -> AgentOutput:
     """运行单个 agent 推理循环。
 
@@ -582,6 +599,7 @@ async def run_agent_loop(
     subagent_context: 主代理专用，含子代理管理能力（spawn_subagent/collect_results 工具）。
     multimodal: 当前模型支持图片输入时，read_attachment/view_image 的图片结果
     会以 image_url 内容块追加一条 user 消息，让模型真正"看到"图片（v15）。
+    reply_language: 本轮语言，压缩路径据此生成同语言摘要，避免英文 checkpoint 污染回复语言。
     """
     agent_id = agent.id
     agent_name = agent.name
@@ -835,6 +853,7 @@ async def run_agent_loop(
                         db, session_id=session_id, provider=provider, agent_window=agent_window,
                         used_tokens=_est_prompt, agent_id=agent_id, agent_name=agent_name,
                         turn_id=turn_id, messages=messages, trigger="pressure",
+                        reply_language=reply_language,
                     )
                     messages = repair_tool_call_ids(messages)
                     messages = ensure_tool_pairing(messages)
@@ -1078,6 +1097,7 @@ async def run_agent_loop(
                             db, session_id=session_id, provider=provider, agent_window=agent_window,
                             used_tokens=None, agent_id=agent_id, agent_name=agent_name,
                             turn_id=turn_id, messages=messages, trigger="context-overflow",
+                            reply_language=reply_language,
                         )
                         if _cc_ovf is None:
                             messages = emergency_compact(messages, agent_window)
@@ -1352,6 +1372,7 @@ async def run_agent_loop(
                         db, session_id=session_id, provider=provider, agent_window=agent_window,
                         used_tokens=_final_prompt, agent_id=agent_id, agent_name=agent_name,
                         turn_id=turn_id, messages=messages, trigger="pressure",
+                        reply_language=reply_language,
                     )
                     # v6.5: 压缩后广播，前端关闭反馈提示（携带阴影定价供渲染压缩卡片）
                     await broadcast(session_id, {

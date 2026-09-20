@@ -64,8 +64,49 @@ def precise_token_count(text: str) -> int:
 # codex: effective_context_window_percent = 95 (95% 可用于输入)
 _AUTO_COMPACT_THRESHOLD = 0.90
 _EFFECTIVE_CONTEXT_WINDOW_RATIO = 0.95
-# 压缩后目标 token：窗口的此比例（codex compact 后约保留 45%）
-_POST_COMPACT_TARGET = 0.45
+# 压缩后目标 token：窗口的此比例。
+# plan-19-82 步骤5: 旧固定 0.45 与用户诉求（10%-15%）严重不符且不可配置，
+# 改为从 settings.compact_target_ratio 读取（默认 0.12）；保留常量作兜底默认值。
+_POST_COMPACT_TARGET = 0.12
+
+
+def get_compact_target_ratio() -> float:
+    """压缩后目标占用比例（窗口比例），来自 settings，缺省 0.12。"""
+    from app.core.config import settings
+    try:
+        return float(getattr(settings, "compact_target_ratio", _POST_COMPACT_TARGET)
+                     or _POST_COMPACT_TARGET)
+    except (TypeError, ValueError):
+        return _POST_COMPACT_TARGET
+
+
+def get_compact_target_max_ratio() -> float:
+    """压缩后目标区间上界（超过则继续迭代压缩），缺省 0.15。"""
+    from app.core.config import settings
+    try:
+        return float(getattr(settings, "compact_target_max_ratio", 0.15) or 0.15)
+    except (TypeError, ValueError):
+        return 0.15
+
+
+def get_compact_target_tokens(context_window: int) -> int:
+    """压缩后目标 token 预算 = 窗口 × compact_target_ratio。"""
+    return max(2000, int(context_window * get_compact_target_ratio()))
+
+
+def get_compact_target_max_tokens(context_window: int) -> int:
+    """压缩后目标区间上界 token（达标线） = 窗口 × compact_target_max_ratio。"""
+    return max(2000, int(context_window * get_compact_target_max_ratio()))
+
+
+def estimate_fixed_overhead_tokens(messages: list[ChatMessage]) -> int:
+    """不可压缩的固定开销估算（system + developer；plan-19-82 步骤5）。
+
+    这些消息在任何压缩策略下都被强制保留（系统提示、分层上下文、工具规则…），
+    必须先扣除再判断「压到目标区间是否可能」，否则会出现「压不动却反复压缩」。
+    """
+    return sum(estimate_message_tokens(m) for m in messages
+               if m.role in ("system", "developer"))
 
 
 def estimate_message_tokens(msg: ChatMessage) -> int:
@@ -142,7 +183,8 @@ def get_context_budget(context_window: int) -> dict[str, int]:
     return {
         "input_limit": input_limit,
         "auto_compact_threshold": int(context_window * _AUTO_COMPACT_THRESHOLD),
-        "post_compact_target": int(context_window * _POST_COMPACT_TARGET),
+        # plan-19-82: 目标 token 按配置比例（默认 12%）而非旧固定 45%
+        "post_compact_target": get_compact_target_tokens(context_window),
         "output_reserve": context_window - input_limit,
     }
 
