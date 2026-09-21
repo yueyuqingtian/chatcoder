@@ -107,6 +107,22 @@ export type ServerWsEvent =
   | { event: "approval.request"; payload: { approval_id: string; detail: Record<string, unknown> } }
   | { event: "approval.response"; payload: { approval_id: string; approved: boolean } }
   | { event: "api.retry"; payload: { attempt: number; wait_ms: number; reason?: string } }
+  /* plan-308-1542 需求3-A：AI 自动合并的实时进度（用户要求"像消息流那样展示 AI 进度、
+     工具调用、消息，并汇报结果"）。后端边执行边广播，前端在合并弹窗内实时追加行。 */
+  | { event: "merge.progress"; payload: {
+      merge_id: string;
+      session_id?: number;
+      direction?: "to_main" | "from_main" | string;
+      phase: "prepare" | "detect" | "file_start" | "tool" | "file_done" | "apply" | "done" | "error" | string;
+      path?: string | null;
+      index?: number;
+      total?: number;
+      tool?: string | null;
+      detail?: string | null;
+      ok?: boolean | null;
+      elapsed_ms?: number | null;
+      summary?: MergeReport | null;
+    } }
   | { event: "config.changed"; payload: { profile_id: number; changed_keys: string[] } }
   | { event: "scheduled.triggered"; payload: { task_id: number; turn_id: number } }
   | { event: "session.updated"; payload: { session_id: number; title?: string; permission_mode?: string; last_activity_at?: string | null } }
@@ -151,6 +167,30 @@ export interface CompactSummaryPayload {
   ratio?: number;
 }
 
+/**
+ * plan-308-1542 需求3-A：AI 自动合并的**汇总报告**（merge.progress 的 done 载荷）。
+ * 前端据此渲染"自动合并 N / git 合并 N / AI 解决 N / 失败 N / 跳过 N + 总耗时"报告卡。
+ */
+export interface MergeReport {
+  total: number;
+  /** 由 git 干净合入（含单侧改动） */
+  git: number;
+  /** AI 介入并解决 */
+  ai: number;
+  /** AI 未能解决 / 真冲突待人工 */
+  conflicted: number;
+  failed: number;
+  skipped: number;
+  elapsed_ms: number;
+  engine?: string;
+  files: Array<{
+    path: string;
+    result: "git" | "ai" | "manual" | "failed" | "skipped";
+    reason?: string;
+    ms?: number;
+  }>;
+}
+
 /** 需要端到端有序的事件（seq 断点重放时前端按序处理） */
 export const ORDERED_EVENTS: ReadonlySet<string> = new Set([
   "message.created",
@@ -172,6 +212,8 @@ export const ORDERED_EVENTS: ReadonlySet<string> = new Set([
   "agent.completed",
   "usage.update",
   "debug.paused",
+  // plan-308-1542：AI 合并进度（有序，保证前端进度行不跳序）
+  "merge.progress",
   "compact.started",
   "context.folded",
   "compact.summary",

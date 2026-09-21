@@ -370,6 +370,9 @@ async def _register_contributed_skills(db: AsyncSession, plugin_name: str, dir_p
         # 用本模块自己的技能发现（已覆盖 skills/<name>/SKILL.md 与 skills/*.md，
         # 且兼容 manifest.skills 指向单目录的情况）
         found = _skills_in(dir_path, manifest)
+        # plan-308-1542 需求2：插件技能的目录必须随技能一起登记，
+        # 否则 AI 拿到技能正文也不知道 scripts/ 等配套资源在哪（"找不到技能目录"）。
+        skills_root = str((dir_path / "skills").resolve())
         n = 0
         for item in found:
             skill_name = str(item.get("name") or "")
@@ -377,19 +380,30 @@ async def _register_contributed_skills(db: AsyncSession, plugin_name: str, dir_p
                 continue
             # 加插件前缀，避免与用户技能重名互相覆盖
             full_name = f"{plugin_name}:{skill_name}"
+            src = str(item.get("path") or "")
+            meta = {
+                "plugin": plugin_name,
+                "plugin_dir": str(dir_path),
+                "skills_root": skills_root,
+                "source_file": src,
+            }
             existing = await skill_service.get_skill_by_name(db, full_name)
             if existing is not None:
+                # plan-308-1542 需求2：已存在也要补写 meta（旧版本注册的行 meta 为空），
+                # 否则重新安装/升级插件后仍然定位不到技能目录。
+                if not (existing.meta or {}).get("plugin_dir"):
+                    await skill_service.update_skill(db, existing.id, meta=meta)
                 continue
             content = ""
             try:
-                content = Path(str(item.get("path") or "")).read_text(
+                content = Path(src).read_text(
                     encoding="utf-8", errors="replace")[:20000]
             except OSError:
                 content = ""
             await skill_service.create_skill(
                 db, name=full_name, display_name=skill_name,
                 description="", content=content, source="plugin",
-                path=str(item.get("path") or ""), is_active=True,
+                path=src, is_active=True, auto_load=True, meta=meta,
             )
             n += 1
         await db.commit()

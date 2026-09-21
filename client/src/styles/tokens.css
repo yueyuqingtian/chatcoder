@@ -278,6 +278,27 @@
   --glass-strength: 1;
   /* plan-548: 玻璃开启时侧栏底色不透明度（叠在 DWM acrylic 之上），由 ui.ts 按玻璃强度覆写 */
   --glass-sidebar-alpha: 0.68;
+  /* ── plan-308-1542 需求4：液态玻璃（Liquid Glass）层次 token ──
+     用户诉求："要做到微微透出桌面应该要软件框架支持；消息流可以正常不变，
+     左侧面板可添加微微透出到桌面的液态玻璃效果，样式更精美"。
+     系统级模糊由 electron 主进程提供（Win11 acrylic / Win10 ACCENT / mac vibrancy），
+     这里只负责**液态质感**：高光斜面 + 内描边 + 柔和外阴影，覆盖各面板与弹层。 */
+  --lg-blur: 14px;
+  --lg-saturate: 1.5;
+  /* 各区域底色不透明度（越低越透） */
+  --lg-alpha-sidebar: var(--glass-sidebar-alpha);
+  --lg-alpha-panel: 0.72;
+  --lg-alpha-overlay: 0.86;
+  /* 对角高光（模拟玻璃斜面的折射亮带） */
+  --lg-sheen: linear-gradient(
+    150deg,
+    color-mix(in srgb, #ffffff 14%, transparent) 0%,
+    color-mix(in srgb, #ffffff 3%, transparent) 34%,
+    transparent 62%
+  );
+  /* 1px 内描边（玻璃边缘的高光轮廓） */
+  --lg-edge: color-mix(in srgb, #ffffff 16%, var(--color-border));
+  --lg-shadow: 0 10px 30px rgba(0, 0, 0, 0.18), 0 2px 6px rgba(0, 0, 0, 0.10);
   --ambient-c1: var(--color-background);
   --ambient-c2: var(--color-background);
   --bg-ambient: none;

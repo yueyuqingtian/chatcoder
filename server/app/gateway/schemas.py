@@ -126,6 +126,9 @@ class TurnCreate(BaseModel):
     # plan-166-767: 请求携带的权威模型 id（切换模型后立即发送时优先），
     # 消除 PATCH/POST 竞态导致后端仍按旧模型处理。
     model_id: int | None = None
+    # plan-308-1542 需求2: 输入框引用芯片的**结构化**副本（文件/技能/连接器/插件）。
+    # 纯文本引用行仍保留（模型上下文不变），本字段供消息流渲染带图标芯片。
+    refs: list[dict[str, Any]] | None = None
 
 
 class TurnInjectBody(BaseModel):
@@ -135,6 +138,8 @@ class TurnInjectBody(BaseModel):
     attachments: list[dict[str, Any]] | None = None
     # plan-166-767: 透传当前会话模型（供注入项记录，不改变运行中 turn 的模型）
     model_id: int | None = None
+    # plan-308-1542 需求2: 同 TurnCreate.refs
+    refs: list[dict[str, Any]] | None = None
 
 
 class TurnOut(BaseModel):
@@ -792,6 +797,27 @@ class EvDebugPaused(WsEventPayload):
     variables: list[dict] | None = None
 
 
+class EvMergeProgress(WsEventPayload):
+    """plan-308-1542 需求3-A：AI 自动合并的实时进度事件。
+
+    用户要求"像消息流那样展示 AI 进度、工具调用、消息，并汇报结果"：
+    后端边执行边广播 prepare/detect/file_start/tool/file_done/done，
+    done 时携带完整 summary（MergeReport）供前端渲染汇总报告卡。
+    """
+    merge_id: str | None = None
+    session_id: int | None = None
+    direction: str | None = None
+    phase: str | None = None
+    path: str | None = None
+    index: int | None = None
+    total: int | None = None
+    tool: str | None = None
+    detail: str | None = None
+    ok: bool | None = None
+    elapsed_ms: int | None = None
+    summary: dict | None = None
+
+
 # 事件名 → payload 模型（broadcast 校验用；未登记的兜底 WsEventPayload）
 WS_EVENT_PAYLOAD_MODELS: dict[str, type[WsEventPayload]] = {
     "message.created": WsEventPayload,
@@ -836,5 +862,6 @@ WS_EVENT_PAYLOAD_MODELS: dict[str, type[WsEventPayload]] = {
     "cancel": WsEventPayload,
     # 调试通道：debug.paused（CDP/JDWP 断点命中）+ arthas.event（Arthas 现场观测）
     "debug.paused": EvDebugPaused,
+    "merge.progress": EvMergeProgress,
     "arthas.event": EvArthasEvent,
 }

@@ -544,6 +544,10 @@ a { color: var(--accent); text-decoration: none; }
 .turn-item-error .err-title { font-weight: 600; color: var(--error); margin-bottom: 2px; }
 .turn-item-error .err-msg { color: var(--text-secondary); word-break: break-word; font-family: var(--font-mono, ui-monospace, Consolas, monospace); font-size: 11.5px; }
 .turn-item-error:only-child .err-msg { color: var(--error); }
+/* plan-308-1542 需求1：任务执行类错误卡（消息流末尾唯一棂位，不再重复弹右上角 Toast） */
+.flow-error-card { margin: 4px 0 2px; }
+.flow-error-actions { display: flex; gap: 6px; margin-top: 6px; }
+.flow-error-actions .btn-xs { font-size: 11px; }
 /* v10 → plan-282-1416：消息操作行（归属与显隐协议重写）
    - 归属：用户消息 → 该条消息项内部；AI 回复 → 紧随 AI 内容块末尾（不再挂 turn 整体）；
    - 行高固定 24px，仅 opacity 切换 → 显隐零布局位移；
@@ -2031,6 +2035,8 @@ a { color: var(--accent); text-decoration: none; }
 .usage-range-custom { display: inline-flex; align-items: center; gap: 6px; margin-left: 6px; }
 .usage-range-sep { font-size: 12px; color: var(--text-3); }
 .usage-date-input { width: 132px; font-size: 12px; }
+/* plan-308-1542 需求6：供应商筛选下拉 */
+.usage-provider-select { max-width: 220px; font-size: 12px; }
 
 .usage-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; }
 .usage-card { position: relative; display: flex; flex-direction: column; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 12px; padding: 14px; transition: transform var(--dur-fast), border-color var(--dur-fast), box-shadow var(--dur-fast); }
@@ -2663,6 +2669,69 @@ a { color: var(--accent); text-decoration: none; }
 .worktrees-panel { display: flex; flex-direction: column; gap: var(--sp-4); }
 .settings-toolbar { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4); }
 .worktrees-hint { font-size: 12px; color: var(--text-3); line-height: 1.6; max-width: 70ch; }
+/* plan-308-1542 需求3-C：删除工作树的面板内联提示（含"已级联删除 N 个会话"） */
+/* plan-308-1542 需求7-A：断点列表（右侧调试面板可视化） */
+.dbg-bps { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.dbg-idea-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 4px 0; }
+.dbg-bps-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.dbg-bp-row {
+  display: flex; align-items: center; gap: 6px; padding: 4px 6px;
+  border: 1px solid var(--border); border-radius: var(--r-xs);
+  background: var(--bg-elevated);
+}
+.dbg-bp-src {
+  flex-shrink: 0; font-size: 10px; padding: 1px 5px; border-radius: 3px;
+  color: var(--text-3); border: 1px solid var(--border);
+}
+.dbg-bp-src.is-idea {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.dbg-bp-loc {
+  flex: 1; min-width: 0; font-size: 11px; color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dbg-bp-del {
+  flex-shrink: 0; font-size: 11px; padding: 1px 6px; border-radius: var(--r-xs);
+  color: var(--text-3); border: 1px solid transparent; background: transparent; cursor: pointer;
+}
+.dbg-bp-del:hover { color: var(--error); border-color: color-mix(in srgb, var(--error) 30%, transparent); }
+
+.worktrees-notice {
+  font-size: 12px; color: var(--text-2); padding: 8px 10px;
+  border-radius: var(--r-sm); background: var(--bg-elevated);
+  border: 1px solid var(--border); line-height: 1.6; word-break: break-word;
+}
+/* plan-308-1542 需求4：设置页毛玻璃能力徽标 */
+.settings-badge-ok,
+.settings-badge-warn {
+  font-size: 11px; padding: 2px 8px; border-radius: var(--r-xs); white-space: nowrap;
+}
+.settings-badge-ok {
+  color: var(--success);
+  border: 1px solid color-mix(in srgb, var(--success) 34%, transparent);
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+}
+.settings-badge-warn {
+  color: var(--warning);
+  border: 1px solid color-mix(in srgb, var(--warning) 34%, transparent);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+}
+/* plan-308-1555 M9：玻璃诊断结果区（回读值 + 判定结论，正面解决"改了看不出"） */
+.glass-diag {
+  margin: 6px 0 2px; padding: 10px 12px; border-radius: var(--r-sm);
+  background: var(--bg-elevated); border: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 6px;
+}
+.glass-diag-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.glass-diag-line {
+  font-family: var(--font-mono); font-size: 11px; color: var(--text-3);
+  word-break: break-all;
+}
+.glass-diag-reason { font-size: 12px; color: var(--text-2); line-height: 1.6; }
+/* 液态玻璃折射叠加层：铺满宿主容器，不拦截交互 */
+.lg-overlay { border-radius: inherit; }
 .worktree-group { display: flex; flex-direction: column; gap: var(--sp-2); }
 .worktree-group-head {
   display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);
@@ -2787,6 +2856,83 @@ a { color: var(--accent); text-decoration: none; }
   scrollbar-width: thin;
 }
 .merge-workbench-foot { display: flex; justify-content: flex-end; }
+
+/* ── plan-308-1542 需求3-B：带行号的三栏 + 冲突行高亮 ── */
+.merge-columns-numbered { min-height: 340px; }
+.merge-pre-numbered {
+  flex: 1; overflow: auto; max-height: 52vh;
+  font-family: var(--font-mono); font-size: 11px; line-height: 1.55;
+  background: var(--bg-main); scrollbar-width: thin;
+}
+.merge-codeline { display: flex; white-space: pre-wrap; word-break: break-word; }
+.merge-codeline.is-conflict { background: color-mix(in srgb, var(--warning) 18%, transparent); }
+.merge-lineno {
+  flex-shrink: 0; width: 38px; padding-right: 6px; text-align: right;
+  color: var(--text-3); user-select: none;
+  background: color-mix(in srgb, var(--bg-main) 80%, var(--bg-elevated));
+}
+.merge-codetext { flex: 1; min-width: 0; color: var(--text-2); padding-left: 6px; }
+.merge-hunk-sep { flex: 1; }
+.merge-file-resolved-tag {
+  margin-left: auto; font-size: 11px; color: var(--success);
+  border: 1px solid color-mix(in srgb, var(--success) 34%, transparent);
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+  border-radius: var(--r-xs); padding: 1px 6px;
+}
+.merge-all-resolved {
+  display: flex; align-items: center; gap: 6px; margin: 4px 0;
+  padding: 8px 10px; border-radius: var(--r-sm); font-size: 12px;
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--success) 32%, transparent);
+}
+.merge-file-binary, .merge-file-manual {
+  font-size: 11px; color: var(--warning);
+  border: 1px solid color-mix(in srgb, var(--warning) 32%, transparent);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  border-radius: var(--r-xs); padding: 1px 6px;
+}
+.merge-engine-warn { color: var(--warning); margin-right: 6px; }
+/* plan-308-1542 修复：AI 建议成功后的可见提示条（此前成功时界面毫无反馈） */
+.merge-ai-notice {
+  margin: 4px 0; padding: 8px 10px; border-radius: var(--r-sm); font-size: 12px;
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--success) 32%, transparent);
+}
+
+/* ── plan-308-1542 需求3-A：AI 合并进度面板（消息流样式）+ 汇总报告卡 ── */
+.merge-progress {
+  margin-top: 10px; border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--bg-main); overflow: hidden;
+}
+.merge-progress-head {
+  display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+  font-size: 12px; font-weight: 600; color: var(--text-2);
+  border-bottom: 1px solid var(--border); background: var(--bg-elevated);
+}
+.merge-progress-running { font-size: 11px; color: var(--accent); font-weight: 400; }
+.merge-progress-lines {
+  max-height: 200px; overflow: auto; padding: 6px 10px;
+  font-family: var(--font-mono); font-size: 11px; line-height: 1.6;
+  scrollbar-width: thin;
+}
+.merge-progress-line { display: flex; gap: 8px; }
+.merge-progress-line.is-ok .merge-progress-text { color: var(--success); }
+.merge-progress-line.is-bad .merge-progress-text { color: var(--error); }
+.merge-progress-time { flex-shrink: 0; color: var(--text-3); }
+.merge-progress-text { min-width: 0; word-break: break-word; color: var(--text-2); }
+.merge-report {
+  border-top: 1px solid var(--border); padding: 8px 10px;
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+.merge-report-title { font-size: 12px; font-weight: 600; color: var(--text-1); margin-bottom: 4px; }
+.merge-report-stats { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11.5px; color: var(--text-2); }
+.merge-report-stats .is-ok { color: var(--success); }
+.merge-report-stats .is-warn { color: var(--warning); }
+.merge-report-stats .is-bad { color: var(--error); }
+.merge-report-detail { margin-top: 6px; font-size: 11px; color: var(--text-3); }
+.merge-report-detail-row { word-break: break-all; }
 
 /* ── plan-282-1441（#6）：拓展中心（插件市场 / 技能 / 连接器） ── */
 .extensions-panel { display: flex; flex-direction: column; gap: var(--sp-4); }
@@ -3267,9 +3413,8 @@ a { color: var(--accent); text-decoration: none; }
 body.panel-dragging { cursor: col-resize !important; }
 /* 拖拽期间禁用面板宽度过渡，保证宽度即时跟随鼠标 */
 body.panel-dragging .app-pane { transition: none; }
-.splash-overlay { position: fixed; inset: 0; z-index: 9999; display: flex; align-items: center; justify-content: center; background: var(--bg-main); animation: splash-fade var(--dur-5) var(--curve) forwards; }
-@keyframes splash-fade { from { opacity: 1; } to { opacity: 0; visibility: hidden; } }
-.splash-logo { font-size: 28px; font-weight: 700; color: var(--text-1); }
+/* plan-308-1555 M7：已删除客户端启动蒙层（.splash / .splash-overlay）。
+   开屏统一由主进程 loading.html 承担（带加载指示 + 玻璃质感），避免两个开屏叠放。 */
 .toast-container { position: fixed; bottom: 20px; right: 20px; z-index: 2000; display: flex; flex-direction: column; gap: 8px; }
 .toast { padding: 10px 14px; border-radius: var(--r-sm); background: var(--bg-elevated); border: 1px solid var(--border); box-shadow: var(--shadow-md); font-size: 12px; color: var(--text-1); animation: toast-in var(--dur-4) var(--ease-emphasized-decel); }
 @keyframes toast-in { from { transform: translateY(calc(10px * var(--motion-dist))); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
@@ -3986,6 +4131,10 @@ body.panel-dragging .app-pane { transition: none; }
 .task-summary-redesign .ts-step-item { display: flex; align-items: center; min-height: 34px; gap: 8px; padding: 6px 6px; border-radius: 7px; }
 .task-summary-redesign .ts-step-item:hover { background: var(--bg-hover); }
 .task-summary-redesign .ts-step-title { min-width: 0; color: var(--text-1); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 步骤备注（todo 的 activeForm / 引擎步骤 note）：此前**没有**任何样式约束，作为可换行的
+   flex 子项其 min-content 只有「一个汉字」宽，面板一窄就被压成单字一行的竖排（排版异常）。
+   这里与胶囊浮层 .tc-step-note 同构：限宽 + 单行省略，剩余宽度全部让给标题。 */
+.task-summary-redesign .ts-step-note { flex: 0 0 auto; min-width: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font-size: 10px; }
 .task-summary-redesign .ts-step-status { width: 14px; height: 14px; flex: 0 0 14px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; }
 .task-summary-redesign .ts-step-status.pending { border: 1.5px solid var(--border-strong); }
 .task-summary-redesign .ts-step-status.running { border: 0; }
@@ -4129,11 +4278,31 @@ body.panel-dragging .app-pane { transition: none; }
 .sb-project-new { margin-right: -4px; }
 .sb-project-new:hover { color: var(--accent, var(--text-1)); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 
-/* 毛玻璃：plan-548 Win11 走 DWM acrylic 真磨砂（主进程非透明窗口 + 系统材质，
- * 桌面经系统模糊后透出）；侧栏以 ~68% 不透明度叠加底色（--glass-sidebar-alpha 随玻璃强度变化），
- * 主内容区 app-main 保持不透明。Win10 无 acrylic，降级为透明窗口 + CSS 半透明。 */
-[data-glass="on"] .app-shell { background: transparent; }
-[data-glass="on"] .app-pane-left { background: transparent; }
+/* ══════════════════════════════════════════════════════════════════
+   plan-308-1555 M4：修正透明度链路（**这是"透不出桌面"的真正原因**）
+   --------------------------------------------------------------
+   实测证据（镜像实验 + DWM 回读）：
+     * 系统层材质一直是生效的（回读 DWMWA_SYSTEMBACKDROP_TYPE = acrylic(3)）；
+     * 左侧栏 / 标题栏改 alpha 后像素确实变化 ⇒ 透明度链路本身有效；
+     * **但 .app-pane-right 一直是 var(--bg-panel) 完全不透明**——
+       上一轮只给 .app-pane-left 写了 transparent，右侧面板整列把材质挡住了。
+   因此这里逐层补齐"玻璃开启时应透明"的容器，并明确"哪些必须保持不透明"。
+   ══════════════════════════════════════════════════════════════════ */
+
+/* ① 窗口底与外框：全部透明，让系统材质从最底层透上来 */
+[data-glass="on"] html,
+[data-glass="on"] body,
+[data-glass="on"] #root { background: transparent; }
+[data-glass="on"] .app-shell { background: transparent; border-color: transparent; }
+
+/* ② 左右面板容器 + 右侧面板内层（**修复点**：此前 .app-pane-right / .rp-body 缺失） */
+[data-glass="on"] .app-pane-left,
+[data-glass="on"] .app-pane-right,
+[data-glass="on"] .app-right,
+[data-glass="on"] .app-body { background: transparent; }
+[data-glass="on"] .rp-body { background: transparent; }
+
+/* ③ 侧栏与标题栏：玻璃面板（高光 + 内描边 + 半透明底色） */
 [data-glass="on"] .sidebar.sb {
   background: var(--bg-sidebar);
   background:
@@ -4152,6 +4321,141 @@ body.panel-dragging .app-pane { transition: none; }
     color-mix(in srgb, var(--bg-sidebar) 72%, transparent);
   backdrop-filter: blur(calc(12px * var(--glass-strength, 1)));
   -webkit-backdrop-filter: blur(calc(12px * var(--glass-strength, 1)));
+}
+
+/* ④ 明确保持不透明：消息流与主内容区（决策 B 硬约束，可读性优先）
+      这里把"必须不透明"写进代码，防止后续再被误改成透明 */
+[data-glass="on"] .app-main,
+[data-glass="on"] .message-flow,
+[data-glass="on"] .message-flow-wrap,
+[data-glass="on"] .message-flow-outer {
+  background: var(--bg-panel);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   plan-308-1555 M6c：窗口圆角（修"缩小后变直角边框"）
+   --------------------------------------------------------------
+   无边框窗口（frame:false）Windows **不会**自动加圆角，必须：
+     * 主进程用 DWMWA_WINDOW_CORNER_PREFERENCE 让 DWM 画圆角（见 main.cjs）；
+     * 并在最大化/全屏时置 DONOTROUND（否则四角会露出桌面）；
+     * 渲染层据 data-maximized 决定 CSS 圆角，避免"系统直角 + CSS 圆角"打架产生黑边。
+   ══════════════════════════════════════════════════════════════════ */
+
+/* 有原生圆角时：内容铺满，圆角由系统绘制（CSS 不再画，避免双层圆角错位） */
+:root[data-native-corners="1"] .app-shell { border-radius: 0; border: none; }
+:root[data-native-corners="1"][data-maximized="0"] body { background: transparent; }
+
+/* 无原生圆角时（老系统/其他平台）：退回 CSS 圆角 + 透明外框，四角透桌面 */
+:root[data-native-corners="0"] .app-shell {
+  border-radius: 10px;
+  overflow: hidden;
+}
+:root[data-native-corners="0"] body { background: transparent; }
+
+/* 最大化/全屏：一定是直角（与系统 DONOTROUND 对齐），且不留缝隙 */
+:root[data-maximized="1"] .app-shell { border-radius: 0 !important; border: none; }
+
+/* ══════════════════════════════════════════════════════════════════
+   plan-308-1542 需求4：液态玻璃（Liquid Glass）
+   --------------------------------------------------------------
+   用户诉求：左侧面板等要"微微透出桌面"，样式更精美；消息流保持正常不变。
+   分成两层：
+     1) **系统层**（electron 主进程）：Win11 DWM acrylic / Win10 ACCENT 系统模糊 /
+        mac vibrancy——负责"真的把桌面模糊后透出来"；
+     2) **App 层**（以下样式）：只负责液态质感（对角高光 + 1px 内描边 + 柔和外阴影），
+        并把各区域底色调到半透明，让系统模糊层显现。
+   明确排除：.app-main / 消息流 / 消息气泡保持不透明（用户要求消息流正常不变）。
+   ══════════════════════════════════════════════════════════════════ */
+[data-glass="on"][data-glass-style="liquid"] .sidebar.sb {
+  background:
+    var(--lg-sheen),
+    color-mix(in srgb, var(--bg-sidebar) calc(var(--lg-alpha-sidebar, 0.68) * 100%), transparent);
+  box-shadow: inset 1px 0 0 var(--lg-edge), var(--lg-shadow);
+}
+/* 左侧面板整列：透出系统模糊层 + 右缘高光 */
+[data-glass="on"][data-glass-style="liquid"] .app-pane-left {
+  background: transparent;
+  box-shadow: inset -1px 0 0 var(--lg-edge);
+}
+/* plan-308-1555 M4 修复：右侧面板整列此前**完全没有玻璃规则**（一直不透明），
+   导致"开了毛玻璃右面板依然挡住桌面"。此处与左面板对称补齐。 */
+[data-glass="on"][data-glass-style="liquid"] .app-pane-right {
+  background: transparent;
+  box-shadow: inset 1px 0 0 var(--lg-edge);
+}
+[data-glass="on"][data-glass-style="liquid"] .rp-body { background: transparent; }
+/* 标题栏 / 右侧面板：应用内磨砂 + 液态高光与内描边 */
+[data-glass="on"][data-glass-style="liquid"] .titlebar,
+[data-glass="on"][data-glass-style="liquid"] .right-panel {
+  background:
+    var(--lg-sheen),
+    color-mix(in srgb, var(--bg-sidebar) calc(var(--lg-alpha-panel, 0.72) * 100%), transparent);
+  backdrop-filter: blur(calc(var(--lg-blur) * var(--glass-strength, 1))) saturate(var(--lg-saturate));
+  -webkit-backdrop-filter: blur(calc(var(--lg-blur) * var(--glass-strength, 1))) saturate(var(--lg-saturate));
+  box-shadow: inset 0 1px 0 var(--lg-edge);
+}
+/* 设置侧栏（与左面板同源材质） */
+[data-glass="on"][data-glass-style="liquid"] .settings-sidebar,
+[data-glass="on"][data-glass-style="liquid"] .settings-page-overlay {
+  background: color-mix(in srgb, var(--bg-main) calc(var(--lg-alpha-panel, 0.72) * 100%), transparent);
+  backdrop-filter: blur(calc(var(--lg-blur) * var(--glass-strength, 1)));
+  -webkit-backdrop-filter: blur(calc(var(--lg-blur) * var(--glass-strength, 1)));
+}
+/* 弹层/菜单/输入区：轻量玻璃（高不透明度保证可读性） */
+[data-glass="on"][data-glass-style="liquid"] .context-menu,
+[data-glass="on"][data-glass-style="liquid"] .ui-dialog,
+[data-glass="on"][data-glass-style="liquid"] .composer-box,
+[data-glass="on"][data-glass-style="liquid"] .message-search-bar {
+  background:
+    var(--lg-sheen),
+    color-mix(in srgb, var(--bg-elevated) calc(var(--lg-alpha-overlay, 0.86) * 100%), transparent);
+  border: 1px solid var(--lg-edge);
+  backdrop-filter: blur(calc(10px * var(--glass-strength, 1))) saturate(var(--lg-saturate));
+  -webkit-backdrop-filter: blur(calc(10px * var(--glass-strength, 1))) saturate(var(--lg-saturate));
+  box-shadow: var(--lg-shadow);
+}
+/* 消息流与主内容区**保持不透明**（用户明确要求消息流正常不变） */
+[data-glass="on"] .app-main,
+[data-glass="on"] .message-flow-wrap,
+[data-glass="on"] .turn-user-bubble {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+/* 系统不支持模糊时：退化为纯色（不谎报"透出桌面"），设置页会给出提示 */
+[data-glass="on"][data-glass-degraded="1"] .sidebar.sb,
+[data-glass="on"][data-glass-degraded="1"] .titlebar,
+[data-glass="on"][data-glass-degraded="1"] .right-panel {
+  background: var(--bg-sidebar);
+}
+/* 不支持 backdrop-filter 的环境（老 Chromium）降级为半透明底色 */
+@supports not (backdrop-filter: blur(1px)) {
+  [data-glass="on"][data-glass-style="liquid"] .titlebar,
+  [data-glass="on"][data-glass-style="liquid"] .right-panel {
+    background: color-mix(in srgb, var(--bg-sidebar) 88%, transparent);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   plan-308-1555 M5：玻璃自检模式
+   --------------------------------------------------------------
+   用途（针对"反复改却看不出"的历史困局）：把面板 alpha 临时压到极低并加高饱和描边，
+   让"桌面到底有没有混进来"一眼可判——
+     * 若自检下明显变亮/透出壁纸色 ⇒ 材质与链路都正常，此前只是对比度不足；
+     * 若自检下毫无变化 ⇒ 材质确实没生效或被遮挡，需查主进程回读值与遮挡层。
+   由设置页「玻璃诊断 → 运行自检」触发，不写进用户偏好、刷新即恢复。
+   ══════════════════════════════════════════════════════════════════ */
+:root[data-glass-selfcheck="1"][data-glass="on"] .sidebar.sb,
+:root[data-glass-selfcheck="1"][data-glass="on"] .titlebar,
+:root[data-glass-selfcheck="1"][data-glass="on"] .right-panel {
+  background: rgba(255, 64, 129, 0.06) !important;
+  outline: 2px solid rgba(255, 64, 129, 0.9) !important;
+  outline-offset: -2px !important;
+}
+:root[data-glass-selfcheck="1"][data-glass="on"] .app-shell {
+  outline: 2px solid rgba(0, 200, 255, 0.9) !important;
+  outline-offset: -2px !important;
 }
 
 
@@ -4378,6 +4682,20 @@ body.panel-dragging .app-pane { transition: none; }
   color: var(--text-3); cursor: pointer; border-radius: 3px;
 }
 .composer-ref-remove:hover { color: var(--error); background: var(--bg-hover); }
+/* plan-308-1542 需求2：消息流内的引用芯片（与输入框 .composer-ref-chip 同视觉，
+   使"输入框里精美的图标"在发送后不退化成长串文字）。 */
+.msg-ref-chips { display: flex; flex-wrap: wrap; gap: 5px; margin: 2px 0 5px; }
+.msg-ref-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  max-width: min(240px, 100%); padding: 2px 7px;
+  border-radius: var(--r-sm); font-size: 11px; line-height: 1.4;
+  background: var(--bg-elevated); border: 1px solid var(--border); color: var(--text-2);
+}
+.msg-ref-icon { display: inline-flex; flex-shrink: 0; align-items: center; }
+.msg-ref-file { color: var(--color-browser-blue); border-color: color-mix(in srgb, var(--color-browser-blue) 30%, var(--border)); }
+.msg-ref-skill { color: #8b5cf6; border-color: color-mix(in srgb, #8b5cf6 30%, var(--border)); }
+.msg-ref-mcp { color: var(--success); border-color: color-mix(in srgb, var(--success) 32%, var(--border)); }
+.msg-ref-plugin { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 32%, var(--border)); }
 /* 首页变体的 chips 节奏对齐（输入框字号更大） */
 .empty-state-card > .composer-home .composer-refs { padding: 6px 4px 8px; }
 

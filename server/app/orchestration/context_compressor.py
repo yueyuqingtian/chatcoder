@@ -60,6 +60,46 @@ def _call_key(m) -> str:
     return str(content.get("call_key") or "")
 
 
+def _reasoning_cutoff(messages: list) -> int:
+    """返回「旧 reasoning 分界线」索引：< cutoff 的 thinking 出站时会被剥离。
+
+    从尾部向前数第 _REASONING_KEEP_TOOL_ROUNDS 个 tool_call 的位置；
+    工具回合不足时返回 0（即全部 thinking 都在保留窗口内，不剥离）。
+    """
+    from app.orchestration.compaction import _REASONING_KEEP_TOOL_ROUNDS
+
+    seen = 0
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].msg_type == MsgType.TOOL_CALL.value:
+            seen += 1
+            if seen >= _REASONING_KEEP_TOOL_ROUNDS:
+                return i
+    return 0
+
+
+def estimate_effective_tokens(messages: list) -> int:
+    """估算「剥离旧 reasoning 后」实际发往模型的 token 数（plan-282-0）。
+
+    压缩器的核算必须与真实出站内容一致，否则会出现「自报达标、真实超限」：
+    build_api_copy 每次请求都会剥离较旧工具回合的 reasoning_content，
+    但压缩器此前按「全量 thinking」核算候选与保留区，两边口径不同。
+
+    此处镜像同一策略（仅保留最近 _REASONING_KEEP_TOOL_ROUNDS 个工具回合的
+    thinking），使 post_compact_ratio 与保留区预算都反映真实占用。
+
+    注意：保留窗口内的 thinking 仍全额计入（原样回传），只有更早的被排除。
+    """
+    cutoff = _reasoning_cutoff(messages)
+    total = 0
+    for i, m in enumerate(messages):
+        if i < cutoff and m.msg_type == MsgType.THINKING.value:
+            # 旧 reasoning：出站时被剥离，仅剩消息结构开销
+            total += 4
+            continue
+        total += estimate_message_tokens_from_model(m)
+    return total
+
+
 def select_compactable_range(messages: list, retain_tokens: int) -> tuple[int, int] | None:
     """按 token 预算 + tool 配对边界选择压缩范围（参照 deepseek-harness region.ts）。
 
@@ -78,10 +118,18 @@ def select_compactable_range(messages: list, retain_tokens: int) -> tuple[int, i
         return None
 
     # 1. 从尾部向前累计 token，定初始切点
+    # plan-282-0: 用「有效口径」累计——旧工具回合的 thinking 出站时会被剥离
+    # （见 compaction.strip_stale_reasoning），若仍按全量 thinking 计预算，保留区
+    # 会被这些「不占真实体积」的 thinking 白吃满，把真正的对话内容挤进压缩区，
+    # 出现「百分比好看、AI 却丢了上下文」的伪优化。
+    cutoff = _reasoning_cutoff(messages)
     keep_from = len(messages)
     acc = 0
     for i in range(len(messages) - 1, -1, -1):
-        acc += estimate_message_tokens_from_model(messages[i])
+        if i < cutoff and messages[i].msg_type == MsgType.THINKING.value:
+            acc += 4  # 剥离后仅剩结构开销
+        else:
+            acc += estimate_message_tokens_from_model(messages[i])
         keep_from = i
         if acc >= retain_tokens:
             break
@@ -398,7 +446,8 @@ async def compact_session(
     rounds = 0
     while rounds < max_rounds:
         # 剩余候选总量已 <= 可压缩预算 → 达标，停止
-        if compressible_budget > 0 and messages_token_total(remaining) <= compressible_budget:
+        # plan-282-0: 用「有效口径」（剥离旧 reasoning 后）判定，与真实出站一致。
+        if compressible_budget > 0 and estimate_effective_tokens(remaining) <= compressible_budget:
             break
         span = select_compactable_range(remaining, retain_tokens)
         if span is None:
@@ -528,7 +577,9 @@ async def compact_session(
     await run_write_locked(_persist_ctx, label="compact.shared_ctx")
 
     # 压缩后总占用估算：未压缩候选 + 固定开销 + 新 checkpoint 摘要
-    remaining_tokens = messages_token_total(remaining)
+    # plan-282-0: 用「有效口径」——旧 reasoning 出站时会被剥离，不计入真实占用，
+    # 否则自报占用虚高、与实际不符（反向也会因漏算而虚低）。
+    remaining_tokens = estimate_effective_tokens(remaining)
     summary_tokens = max(1, len(summary_text.encode("utf-8")) // 4)
     post_tokens = remaining_tokens + fixed_overhead + summary_tokens
     result = {

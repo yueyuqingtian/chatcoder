@@ -1,6 +1,7 @@
 """Git 工作树服务（§4.16）。"""
 import asyncio
 import logging
+import re
 from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -557,7 +558,15 @@ async def list_worktrees(db: AsyncSession, project_id: int | None = None) -> lis
 
 
 async def remove_worktree_project(db: AsyncSession, worktree_project_id: int, *, force: bool = False) -> dict:
-    """删除工作树：移除 git worktree、**删除对应的本地分支**，再删除登记的 Project 行。"""
+    """删除工作树：移除 git worktree、删除本地分支、**级联删除其下会话**，再删登记的 Project 行。
+
+    plan-308-1542 需求3-C（用户决策 C：级联删除该工作树下所有会话及其消息）：
+    此前直接 `s.delete(Project 行)`，而 `sessions.project_id` 有外键且 `PRAGMA foreign_keys=ON`，
+    于是 `DELETE FROM projects` 触发 IntegrityError——用户看到"delete from ... 报错、
+    git 分支与目录都已清空，但左侧面板这个工作树还在"。现在按顺序级联清理，保证 DB 干净。
+    """
+    from sqlalchemy import select as _select
+
     from app.persistence.database import run_write_locked
 
     wt = await _project_of(db, worktree_project_id)
@@ -573,36 +582,179 @@ async def remove_worktree_project(db: AsyncSession, worktree_project_id: int, *,
         if ok and _status_lines(out):
             raise ValueError("工作树存在未提交变更，请先提交、或选择强制删除")
 
-    # 先摘除 git 登记。--force 给两次：git ≥2.31 中第一次只覆盖"修改/未跟踪文件"，
-    # 含**被忽略文件**（如 node_modules）的工作树要第二次才肯删。
-    if force:
-        args = ["worktree", "remove", "--force", "--force", wt.path]
-    else:
-        args = ["worktree", "remove", wt.path]
-    ok, out, err = await _git(repo, *args)
-    if not ok:
-        # git 拒绝（被忽略文件 / 文件被占用 / 登记与目录不一致）→ 兜底清理：
-        # 先 prune 掉 git 登记，再强删目录，避免"DB 记录删了、磁盘目录还在"。
+    # plan-308-1542 修复：目录与 git 登记**都已不存在**（用户反馈"实际分支和目录已经删除，
+    # 但左面板还是删不掉"）→ 不再做无意义的 git 调用，直接进入级联清理，
+    # 保证这类僵尸项一定能被删掉。
+    already_gone = False
+    if not (wt.path and Path(wt.path).exists()):
+        listed = ""
+        ok_ls, ls_out, _ = await _git(repo, "worktree", "list", "--porcelain")
+        if ok_ls:
+            listed = (ls_out or "").replace("\\", "/")
+        norm_path = (wt.path or "").replace("\\", "/")
+        if not norm_path or norm_path not in listed:
+            already_gone = True
+            logger.info("[worktree] 目录与 git 登记均不存在，直接清理数据库登记: %s", wt.path)
+
+    if not already_gone:
+        # 先摘除 git 登记。--force 给两次：git ≥2.31 中第一次只覆盖"修改/未跟踪文件"，
+        # 含**被忽略文件**（如 node_modules）的工作树要第二次才肯删。
+        if force:
+            args = ["worktree", "remove", "--force", "--force", wt.path]
+        else:
+            args = ["worktree", "remove", wt.path]
+        ok, out, err = await _git(repo, *args)
+        if not ok:
+            # git 拒绝（被忽略文件 / 文件被占用 / 登记与目录不一致）→ 兜底清理：
+            # 先 prune 掉 git 登记，再强删目录，避免"DB 记录删了、磁盘目录还在"。
+            await _git(repo, "worktree", "prune")
+            if not _force_rmtree(Path(wt.path)):
+                raise ValueError(f"删除工作树目录失败（可能被其他程序占用）：{wt.path}")
+            logger.warning("worktree remove 失败，已强制清理目录 %s: %s", wt.path, (err or out)[:200])
+        else:
+            # 目录可能因被忽略文件仍未删净 → 再兜底一次（git 已摘除登记，此处只清磁盘）
+            if Path(wt.path).exists():
+                _force_rmtree(Path(wt.path))
+
+        # 工作树摘除后连带删除其本地分支——否则仓库里会残留一堆 chatcoder/xxx 分支
+        branch_deleted = await _delete_local_branch(repo, branch)
         await _git(repo, "worktree", "prune")
-        if not _force_rmtree(Path(wt.path)):
-            raise ValueError(f"删除工作树目录失败（可能被其他程序占用）：{wt.path}")
-        logger.warning("worktree remove 失败，已强制清理目录 %s: %s", wt.path, (err or out)[:200])
+    else:
+        branch_deleted = False
+        await _git(repo, "worktree", "prune")
 
-    # 工作树摘除后连带删除其本地分支——否则仓库里会残留一堆 chatcoder/xxx 分支
-    branch_deleted = await _delete_local_branch(repo, branch)
-    await _git(repo, "worktree", "prune")
+    # plan-308-1542 需求3-C：级联删除该工作树下的所有会话（及其消息/任务/回滚等关联数据）。
+    # 必须发生在删 Project 行**之前**，否则外键约束会让 Project 删除失败（正是原报错根因）。
+    session_ids: list[int] = []
+    try:
+        from app.persistence.models.message import Session as _S
+        res = await db.execute(_select(_S.id).where(_S.project_id == worktree_project_id))
+        session_ids = [int(x) for x in res.scalars().all()]
+    except Exception:  # noqa: BLE001
+        logger.warning("[worktree] 查询工作树下会话失败(非阻塞)", exc_info=True)
 
+    deleted_sessions = 0
+    if session_ids:
+        # 逐个走 session_service.delete_session_permanent：它已按外键依赖自底向上清理
+        # messages / tool_calls / rollback_writes / turn_snapshots / audit_logs / tasks / agents / turns
+        for sid in session_ids:
+            try:
+                r = await session_service.delete_session_permanent(db, sid)
+                if r is not None:
+                    deleted_sessions += 1
+            except Exception:  # noqa: BLE001
+                logger.warning("[worktree] 删除工作树会话失败 sid=%s(继续清理其余)", sid, exc_info=True)
+
+    # 兜底清理（plan-308-1542 修复）：复用 session_service.purge_session_children，
+    # 它按外键安全顺序清理**全部**子表（含 artifacts→tasks，正是原报错 DELETE FROM tasks 的根因）。
+    # 同时清掉 projects 的两个直接引用者：sessions（上面已处理）与 config_profiles。
     def _drop(s):
+        from app.persistence.models.config import ConfigProfile as _Cfg
+        from app.persistence.models.message import Session as _S
         from app.persistence.models.project import Project as _P
+
+        leftover = [int(x) for x in s.execute(
+            _select(_S.id).where(_S.project_id == worktree_project_id)).scalars().all()]
+        counts = session_service.purge_session_children(s, leftover)
+        for sid in leftover:
+            row = s.get(_S, sid)
+            if row is not None:
+                s.delete(row)
+        # config_profiles.project_id 有外键，不清则 projects 行删不掉
+        for cfg in s.execute(_select(_Cfg).where(_Cfg.project_id == worktree_project_id)).scalars().all():
+            s.delete(cfg)
         row = s.get(_P, worktree_project_id)
         if row is not None:
             s.delete(row)
         s.commit()
+        return {"dropped_sessions": len(leftover), "purged": counts}
 
-    await run_write_locked(_drop, label=f"worktree.remove_project.{worktree_project_id}")
-    logger.info("工作树已删除: id=%s path=%s branch=%s(删除=%s)",
-                worktree_project_id, wt.path, branch, branch_deleted)
-    return {"ok": True, "branch": branch, "branch_deleted": branch_deleted}
+    dropped = await run_write_locked(_drop, label=f"worktree.remove_project.{worktree_project_id}")
+    deleted_sessions += int((dropped or {}).get("dropped_sessions", 0))
+
+    logger.info("工作树已删除: id=%s path=%s branch=%s(删除=%s) 级联会话=%d",
+                worktree_project_id, wt.path, branch, branch_deleted, deleted_sessions)
+    return {
+        "ok": True,
+        "branch": branch,
+        "branch_deleted": branch_deleted,
+        "deleted_sessions": deleted_sessions,
+        # detached=True 表示被删工作树正是前端当前选中项目，前端需清理选中态
+        "detached": True,
+    }
+
+
+async def cleanup_stale_worktrees(db: AsyncSession) -> dict:
+    """自愈：清理"git 侧已不存在、但数据库仍登记"的失效工作树。
+
+    plan-308-1542 修复（用户反馈："实际分支和目录已经删除了，但左侧面板还是没有删除，
+    现在左面板这个工作树删除不掉"）：
+    当目录与 git 登记都已被外部清掉时，删除接口再去摘 worktree 会走一堆无意义的
+    git 调用；更早的版本还会在级联删除时因外键报错中断，留下**删不掉的僵尸工作树**。
+    这里统一处理：对每个登记的工作树判定其是否仍真实存在——
+      * 目录存在，或
+      * 仓库里 `git worktree list` 仍列出该路径
+    两者皆否即视为失效 → 直接走同一套级联清理（会话 / 子表 / Project 行）。
+
+    在服务启动时调用一次，也暴露为接口供用户在设置页手动触发。
+    """
+    from sqlalchemy import select as _select
+
+    from app.persistence.database import run_write_locked
+    from app.persistence.models.config import ConfigProfile as _Cfg
+    from app.persistence.models.message import Session as _S
+    from app.persistence.models.project import Project as _P
+
+    try:
+        rows = (await db.execute(
+            _select(_P).where(_P.is_worktree == True)  # noqa: E712
+        )).scalars().all()
+    except Exception:  # noqa: BLE001
+        logger.warning("[worktree] 查询工作树失败(自愈跳过)", exc_info=True)
+        return {"ok": False, "cleaned": 0, "error": "查询工作树失败"}
+
+    stale: list[tuple[int, str, str]] = []  # (id, name, path)
+    for wt in rows:
+        path = wt.path or ""
+        if path and Path(path).exists():
+            continue
+        parent = await _project_of(db, wt.parent_project_id) if wt.parent_project_id else None
+        repo = parent.path if parent else None
+        if repo:
+            ok, out, _ = await _git(repo, "worktree", "list", "--porcelain")
+            if ok and path and path.replace("\\", "/") in (out or "").replace("\\", "/"):
+                continue  # git 仍登记 → 不算失效（目录可能是被临时移动）
+        stale.append((int(wt.id), wt.name or "", path))
+
+    if not stale:
+        return {"ok": True, "cleaned": 0, "stale": []}
+
+    ids = [w[0] for w in stale]
+
+    def _purge(s):
+        # 会话及其全部子表（含 artifacts→tasks）走公共清理，避免再次踩外键坑
+        sids = [int(x) for x in s.execute(
+            _select(_S.id).where(_S.project_id.in_(ids))).scalars().all()]
+        counts = session_service.purge_session_children(s, sids)
+        for sid in sids:
+            row = s.get(_S, sid)
+            if row is not None:
+                s.delete(row)
+        for cfg in s.execute(_select(_Cfg).where(_Cfg.project_id.in_(ids))).scalars().all():
+            s.delete(cfg)
+        for pid in ids:
+            row = s.get(_P, pid)
+            if row is not None:
+                s.delete(row)
+        s.commit()
+        return {"sessions": len(sids), "purged": counts}
+
+    res = await run_write_locked(_purge, label="worktree.cleanup_stale")
+    logger.info("[worktree] 已自愈失效工作树 %d 个: %s", len(stale),
+                [(w[1], w[2]) for w in stale])
+    return {"ok": True, "cleaned": len(stale),
+            "stale": [{"id": w[0], "name": w[1], "path": w[2]} for w in stale],
+            "detail": res}
 
 
 # ── 合并（双向：工作树 ⇄ 主工作区，基于**工作区当前内容**，含未提交改动）──
@@ -625,6 +777,33 @@ async def _show_text(repo: str, rev: str, rel: str) -> str | None:
     """取某提交中某文件的内容（不存在返回 None）。"""
     ok, out, _ = await _git(repo, "show", f"{rev}:{rel}")
     return out if ok else None
+
+
+async def _show_bytes_text(repo: str, rev: str, rel: str) -> str | None:
+    """取某提交中某文件的内容，**按字节口径**解码（供降级路径与 base 统一口径）。
+
+    plan-308-1542 需求3-A：`_show_text` 的 stdout 经 `decode(errors="replace")`，
+    与工作区 `read_text()` 的 universal-newline 归一化不一致，是"假冲突"的根因之一。
+    这里统一用 surrogateescape，保证 base 与工作区两侧口径一致。
+    """
+    from app.services import git_merge_engine as ge
+    return await ge.show_file(repo, rev, rel)
+
+
+def is_binary_text(text: str | None) -> bool:
+    """文本是否来自二进制内容（surrogateescape 解码残留的代理字符）。"""
+    if text is None:
+        return False
+    return "\udc00" <= text[:8000]
+
+
+# plan-308-1542 需求3-A：git diff3 冲突标记（含 ||||||| 分隔符）
+_CONFLICT_MARKER_RE = re.compile(r"^(<{7}|\|{7}|={7}|>{7})", re.MULTILINE)
+
+
+def _has_conflict_markers(text: str) -> bool:
+    """内容是否仍含 git 冲突标记（提交前拦截，避免把坏文件写进仓库）。"""
+    return bool(_CONFLICT_MARKER_RE.search(text or ""))
 
 
 async def _ls_tree_files(repo: str, rev: str) -> set[str]:
@@ -652,14 +831,16 @@ async def _working_files(work_dir: str) -> set[str]:
 def _read_work_file(work_dir: str, rel: str) -> str | None:
     """读工作区中的文件内容（不存在 / 读失败返回 None）。
 
-    统一按 LF 归一化（universal newlines），使 base/ours/theirs 三侧口径一致，
-    避免 Windows 上 CRLF 文件被误判为"两侧都改"。
+    plan-308-1542 需求3-A：改为**字节级读取 + surrogateescape 解码**。
+    此前用 `read_text()`（universal newlines 会把 CRLF 归一化成 LF），
+    而 base 走 `git show`（保留 CRLF）——两侧口径不一致，导致只剩一侧改动时
+    也被当成"两侧都改"，产生假冲突。现在统一字节口径，二进制内容也不会被破坏。
     """
     p = Path(work_dir) / rel
     try:
         if not p.is_file():
             return None
-        return p.read_text(encoding="utf-8", errors="replace")
+        return p.read_bytes().decode("utf-8", errors="surrogateescape")
     except OSError:
         return None
 
@@ -751,46 +932,178 @@ async def merge_preview(db: AsyncSession, worktree_project_id: int,
                         *, direction: str = _DIR_TO_MAIN) -> dict:
     """差异文件列表（含**未提交改动**与自动冲突解决结果）。不改动任何工作区。
 
-    不再因主工作区 dirty 直接报错——主工作区的未提交改动会作为 ours 参与三方比较，
-    能自动合的自动合，合不了的标记为冲突交前端处理。
+    plan-308-1542 需求3-A：判定与合并结果**全部交给 git**（此前是手写三态比较，
+    base 走 `git show`（保留 CRLF）而 ours/theirs 走 Python read_text（归一化 LF），
+    口径不一致导致"只有一侧改动也报冲突"的假冲突）。
+
+    现在的数据来源：
+      * `git merge-tree` 判 clean/conflict（内存，不碰工作区）
+      * `git merge-file --diff3` 取冲突文件的 git 原生标记内容
+      * 双方工作区的未提交改动经**临时索引快照**参与合并
     """
     ctx = await _merge_sides(db, worktree_project_id, direction)
+    from app.services import git_merge_engine as ge
+
+    # 双方 revision：先按方向给出基线，再优先用"含未提交改动"的快照覆盖。
+    # 方向映射必须与 _merge_sides 的目录映射一致：
+    #   to_main   → ours=主工作区(base_branch)  theirs=工作树(branch)
+    #   from_main → ours=工作树(branch)         theirs=主工作区(base_branch)
+    if direction == _DIR_TO_MAIN:
+        ours_rev, theirs_rev = ctx["base_branch"], ctx["branch"]
+    else:
+        ours_rev, theirs_rev = ctx["branch"], ctx["base_branch"]
+    ours_dirty = False
+    theirs_dirty = False
+    try:
+        snap = await ge.snapshot_dirty(ctx["ours_dir"])
+        if snap:
+            ours_rev, ours_dirty = snap, True
+        snap_t = await ge.snapshot_dirty(ctx["theirs_dir"])
+        if snap_t:
+            theirs_rev, theirs_dirty = snap_t, True
+    except ge.GitMergeUnavailable:
+        pass
+
+    engine = "git"
+    try:
+        det = await ge.detect(ctx["repo"], ours_rev, theirs_rev)
+        # plan-308-1542 需求3-A：候选范围 = **来源侧相对共同祖先的改动**（与原语义一致）。
+        # 不能取 `ours..theirs` 的对称差异——那会把"只有目标侧改了"的文件也卷进来，
+        # 导致合并把主工作区里无关的未提交改动一并提交（既有用例 test_merge_apply_keeps_unrelated_dirty_files 正是守这一点）。
+        diff = await ge.diff_files(ctx["repo"], ctx["base_rev"], theirs_rev)
+    except ge.GitMergeUnavailable:
+        # 旧版 git / 异常 → 降级到原手写路径（仍返回 engine 供 UI 提示）
+        return await _merge_preview_fallback(
+            ctx, direction, ours_dirty=ours_dirty, theirs_dirty=theirs_dirty)
+
+    conflicted = set(det["conflicted"])
+    files: list[dict] = []
+    for f in diff:
+        rel, status = f["path"], _status_of_letter(f["status"])
+        if rel == _TOOL_DIR or rel.startswith(_TOOL_DIR + "/"):
+            continue  # 本工具自身目录不参与合并
+        b = await ge.show_file(ctx["repo"], ctx["base_rev"], rel)
+        o = await ge.show_file(ctx["repo"], ours_rev, rel)
+        t = await ge.show_file(ctx["repo"], theirs_rev, rel)
+        # 二进制判定（git 口径：含 NUL 字节）
+        binary = any(ge.is_binary_bytes((x or "").encode("utf-8", errors="surrogateescape"))
+                     for x in (b, o, t) if x is not None)
+
+        if rel not in conflicted:
+            # git 判干净：直接采用 git 的合并结果（tree 里已含自动合并结果）
+            merged = await ge.show_file(ctx["repo"], det["tree"], rel) if det.get("tree") else None
+            if merged is None:
+                merged = t if o == b else (o if t == b else t)
+            files.append({
+                "path": rel, "status": status, "conflict": False,
+                "merged": merged, "has_auto_merge": True,
+                "change_side": _change_side(o, b, t),
+                "reason": "", "binary": binary, "needs_manual": False,
+            })
+            continue
+
+        if binary:
+            # 二进制真冲突：git 也无法自动合并，交给用户选一侧
+            files.append({
+                "path": rel, "status": status, "conflict": True,
+                "merged": None, "has_auto_merge": False,
+                "change_side": "both",
+                "reason": "二进制文件，git 无法自动合并，请选择保留哪一侧",
+                "binary": True, "needs_manual": True,
+            })
+            continue
+
+        res = await ge.merge_file(o, b, t)
+        files.append({
+            "path": rel, "status": status, "conflict": not res["clean"],
+            "merged": res["content"], "has_auto_merge": res["clean"],
+            "change_side": "both",
+            "reason": res.get("reason") or "",
+            "binary": False,
+            # 文本冲突可由 AI 或用户在三栏界面解决，不属"必须人工选一侧"
+            "needs_manual": False,
+        })
+
+    return {
+        "ok": True,
+        "engine": engine,
+        "direction": direction,
+        "base_branch": ctx["base_branch"],
+        "branch": ctx["branch"],
+        "source_dirty": theirs_dirty or await _is_repo_dirty(ctx["theirs_dir"]),
+        "target_dirty": ours_dirty or await _is_repo_dirty(ctx["target_dir"]),
+        "files": files,
+        "has_conflict": any(f["conflict"] for f in files),
+    }
+
+
+def _status_of_letter(letter: str) -> str:
+    return {"A": "added", "D": "deleted", "M": "modified",
+            "R": "renamed", "C": "copied"}.get((letter or "M")[:1], "modified")
+
+
+def _change_side(o: str | None, b: str | None, t: str | None) -> str:
+    """相对 base 的改动侧（用于 UI 精确提示"仅一侧改动，已自动采用"）。"""
+    ours_changed = o != b
+    theirs_changed = t != b
+    if ours_changed and theirs_changed:
+        return "both"
+    if theirs_changed:
+        return "theirs"
+    if ours_changed:
+        return "ours"
+    return "none"
+
+
+async def _merge_preview_fallback(ctx: dict, direction: str, *,
+                                  ours_dirty: bool = False, theirs_dirty: bool = False) -> dict:
+    """降级路径（git 版本过旧/内存合并不可用）：字节级读取 + merge-file 返回码分级。
+
+    plan-308-1542 需求3-A：即使降级也必须修掉两处根因——
+      1) base 与工作区读取统一按**字节**（此前一边 CRLF 一边 LF，制造假冲突）；
+      2) `git merge-file` 返回码分级（>1 不再当冲突）。
+    """
     base_files = await _ls_tree_files(ctx["repo"], ctx["base_rev"])
     theirs_files = await _working_files(ctx["theirs_dir"])
     ours_files = await _working_files(ctx["ours_dir"])
 
     files: list[dict] = []
     for rel in sorted(base_files | theirs_files | ours_files):
-        b = await _show_text(ctx["repo"], ctx["base_rev"], rel) if rel in base_files else None
+        b = await _show_bytes_text(ctx["repo"], ctx["base_rev"], rel) if rel in base_files else None
         t = _read_work_file(ctx["theirs_dir"], rel) if rel in theirs_files else None
         if b == t:
-            continue  # 来源侧相对 base 无改动 → 不在本次合并范围
+            continue
         o = _read_work_file(ctx["ours_dir"], rel) if rel in ours_files else None
         if o == t:
-            continue  # 两侧内容已一致 → 无需处理
+            continue
 
         status = "deleted" if t is None else ("added" if b is None else "modified")
-        if o == b:
-            conflict, merged = False, t            # 仅来源侧改动：直接采用
-        elif b is None or o is None or t is None:
-            conflict, merged = _resolve_single(o, b, t, None)
+        binary = any(is_binary_text(x) for x in (b, o, t) if x is not None)
+        if binary:
+            conflict, merged, reason = (o != t), None, "二进制文件，请选择保留哪一侧"
+        elif o == b:
+            conflict, merged, reason = False, t, ""
         else:
-            ok_m, merged_out = await _merge_file_text(o, b, t)
-            conflict = not ok_m
-            merged = merged_out or t
-
+            from app.services import git_merge_engine as ge
+            res = await ge.merge_file(o, b, t)
+            conflict, merged = not res["clean"], res["content"]
+            reason = res.get("reason") or ""
         files.append({
             "path": rel, "status": status, "conflict": conflict,
             "merged": merged, "has_auto_merge": not conflict,
+            "change_side": _change_side(o, b, t), "reason": reason,
+            # 二进制/无三方基底才需人工选一侧；文本冲突仍可交给 AI
+            "binary": binary, "needs_manual": bool(binary),
         })
 
     return {
         "ok": True,
+        "engine": "fallback",
         "direction": direction,
         "base_branch": ctx["base_branch"],
         "branch": ctx["branch"],
-        "source_dirty": await _is_repo_dirty(ctx["theirs_dir"]),
-        "target_dirty": await _is_repo_dirty(ctx["target_dir"]),
+        "source_dirty": theirs_dirty or await _is_repo_dirty(ctx["theirs_dir"]),
+        "target_dirty": ours_dirty or await _is_repo_dirty(ctx["target_dir"]),
         "files": files,
         "has_conflict": any(f["conflict"] for f in files),
     }
@@ -798,17 +1111,38 @@ async def merge_preview(db: AsyncSession, worktree_project_id: int,
 
 async def merge_file_blobs(db: AsyncSession, worktree_project_id: int, path: str,
                            *, direction: str = _DIR_TO_MAIN) -> dict:
-    """三路内容：base（共同祖先提交）/ ours（目标侧工作区）/ theirs（来源侧工作区）。
+    """三路内容：base（共同祖先）/ ours（目标侧）/ theirs（来源侧）。
 
-    三方都取**工作区当前内容**（含未提交改动），与 preview/apply 口径一致——
-    否则会出现"预览能看到的改动，打开文件却看不到"的错位。
+    plan-308-1542 需求3-A：口径与 merge_preview 统一——**优先取 git 侧内容**
+    （含未提交改动的快照 revision），保证"预览看到的 = 打开文件看到的"。
     """
     ctx = await _merge_sides(db, worktree_project_id, direction)
     rel = path.replace("\\", "/")
+    from app.services import git_merge_engine as ge
 
-    base_text = await _show_text(ctx["repo"], ctx["base_rev"], rel)
-    ours_text = _read_work_file(ctx["ours_dir"], rel)
-    theirs_text = _read_work_file(ctx["theirs_dir"], rel)
+    # 方向映射与 merge_preview / _merge_sides 保持一致
+    if direction == _DIR_TO_MAIN:
+        ours_rev, theirs_rev = ctx["base_branch"], ctx["branch"]
+    else:
+        ours_rev, theirs_rev = ctx["branch"], ctx["base_branch"]
+    try:
+        snap = await ge.snapshot_dirty(ctx["ours_dir"])
+        if snap:
+            ours_rev = snap
+        snap_t = await ge.snapshot_dirty(ctx["theirs_dir"])
+        if snap_t:
+            theirs_rev = snap_t
+    except ge.GitMergeUnavailable:
+        pass
+
+    base_text = await ge.show_file(ctx["repo"], ctx["base_rev"], rel)
+    ours_text = await ge.show_file(ctx["repo"], ours_rev, rel)
+    theirs_text = await ge.show_file(ctx["repo"], theirs_rev, rel)
+    # git 取不到（未跟踪文件等）时回退工作区字节读取，仍保持字节口径
+    if ours_text is None:
+        ours_text = _read_work_file(ctx["ours_dir"], rel)
+    if theirs_text is None:
+        theirs_text = _read_work_file(ctx["theirs_dir"], rel)
     return {
         "ok": True,
         "path": rel,
@@ -816,8 +1150,9 @@ async def merge_file_blobs(db: AsyncSession, worktree_project_id: int, path: str
         "ours": ours_text,
         "theirs": theirs_text,
         "base_rev": ctx["base_rev"],
-        "ours_rev": ctx["base_branch"] if direction == _DIR_TO_MAIN else ctx["branch"],
-        "theirs_rev": ctx["branch"] if direction == _DIR_TO_MAIN else ctx["base_branch"],
+        "ours_rev": ours_rev,
+        "theirs_rev": theirs_rev,
+        "binary": any(is_binary_text(x) for x in (base_text, ours_text, theirs_text) if x is not None),
     }
 
 
@@ -856,7 +1191,13 @@ async def merge_apply(db: AsyncSession, worktree_project_id: int, files: list[di
         content = f.get("content")
         if content is None:
             continue
-        _write_work_file(target_dir, rel, str(content))
+        text = str(content)
+        # plan-308-1542 需求3-A：提交前拦下**残留冲突标记**的文件——
+        # 冲突内容现由 git 产出（diff3 标记），若用户/AI 没处理完就提交，
+        # 会把 `<<<<<<<` 写进仓库。这里显式报错，避免"静默提交坏文件"。
+        if _has_conflict_markers(text):
+            raise ValueError(f"文件 {rel} 仍含未解决的冲突标记，请先解决后再提交合并")
+        _write_work_file(target_dir, rel, text)
         written.append(rel)
 
     if not written:
@@ -898,6 +1239,161 @@ async def commit_worktree(db: AsyncSession, worktree_project_id: int, *,
         raise ValueError(f"提交失败: {(err or out)[:200]}")
     logger.info("工作树 %s：已提交 %s 的改动", ctx["wt"].id, what)
     return {"ok": True, "committed": True, "message": f"已提交{what}的改动"}
+
+
+# ── plan-308-1542 需求3-A：AI 自动合并的进度事件流 ──
+
+async def _emit_merge_progress(session_id: int | None, payload: dict) -> None:
+    """把合并进度广播给前端（失败静默，绝不影响合并主流程）。
+
+    走会话级通道（debug.paused 同款）：payload 带 session_id，前端按会话归属校验。
+    """
+    if not session_id:
+        return
+    try:
+        from app.orchestration.agent_events import broadcast as _b
+        await _b(int(session_id), {"event": "merge.progress", "payload": payload})
+    except Exception:  # noqa: BLE001
+        logger.debug("[worktree] 合并进度广播失败(非阻塞)", exc_info=True)
+
+
+def _tool_label(model_name: str | None = None) -> str:
+    return f"model:{model_name}" if model_name else "model:默认"
+
+
+async def ai_merge_all(db: AsyncSession, worktree_project_id: int, *,
+                       direction: str = _DIR_TO_MAIN, model_id: int | None = None,
+                       session_id: int | None = None, merge_id: str | None = None) -> dict:
+    """一键 AI 智能合并：git 判定 → 冲突文件逐个求模型建议，全程广播进度。
+
+    plan-308-1542 需求3-A：用户要求"AI 自动合并要有进度展示（像消息流那样展示 AI 进度、
+    工具调用、消息），并且 AI 会汇报结果"。因此本函数：
+      1) 先跑 git 判定（预览），把"哪些由 git 自动合入、哪些真冲突"实时报出；
+      2) 非冲突文件**不调模型**（git 已合好），只报结果——省 token 也更快；
+      3) 冲突文件逐个调模型，每个文件的开始/工具/结果都广播；
+      4) 最后广播 done，携带汇总报告（MergeReport）。
+    """
+    import time as _time
+    import uuid as _uuid
+
+    mid = merge_id or f"m-{_uuid.uuid4().hex[:12]}"
+    t0 = _time.time()
+    await _emit_merge_progress(session_id, {
+        "merge_id": mid, "session_id": session_id, "direction": direction,
+        "phase": "prepare", "detail": "开始合并：准备 git 判定…",
+    })
+
+    try:
+        preview = await merge_preview(db, worktree_project_id, direction=direction)
+    except ValueError as e:
+        await _emit_merge_progress(session_id, {
+            "merge_id": mid, "session_id": session_id, "direction": direction,
+            "phase": "error", "ok": False, "detail": str(e),
+        })
+        return {"ok": False, "merge_id": mid, "error": str(e)}
+
+    files = preview.get("files") or []
+    engine = preview.get("engine") or "git"
+    pending = [f for f in files if f.get("status") != "deleted"]
+    conflicts = [f for f in pending if f.get("conflict")]
+
+    await _emit_merge_progress(session_id, {
+        "merge_id": mid, "session_id": session_id, "direction": direction,
+        "phase": "detect", "total": len(pending), "index": 0,
+        "detail": f"git 合并分析完成（引擎 {engine}）：共 {len(pending)} 个文件，"
+                  f"其中 {len(conflicts)} 个真冲突需要处理",
+    })
+
+    report: dict = {
+        "total": len(pending), "git": 0, "ai": 0, "conflicted": 0, "failed": 0,
+        "skipped": 0, "elapsed_ms": 0, "engine": engine, "files": [],
+    }
+    resolved: dict[str, str] = {}
+
+    for i, f in enumerate(pending, start=1):
+        rel = f["path"]
+        tf = _time.time()
+        await _emit_merge_progress(session_id, {
+            "merge_id": mid, "session_id": session_id, "direction": direction,
+            "phase": "file_start", "path": rel, "index": i, "total": len(pending),
+            "detail": ("冲突文件，交由 AI 合并" if f.get("conflict") else "git 已自动合入"),
+        })
+
+        if not f.get("conflict"):
+            # git 干净合入（含单侧改动）——不调模型
+            merged = f.get("merged")
+            if merged is not None:
+                resolved[rel] = merged
+            report["git"] += 1
+            report["files"].append({"path": rel, "result": "git",
+                                    "ms": int((_time.time() - tf) * 1000)})
+            await _emit_merge_progress(session_id, {
+                "merge_id": mid, "session_id": session_id, "direction": direction,
+                "phase": "file_done", "path": rel, "index": i, "total": len(pending),
+                "ok": True, "elapsed_ms": int((_time.time() - tf) * 1000),
+                "detail": "git 自动合入完成",
+            })
+            continue
+
+        if f.get("binary") or f.get("needs_manual"):
+            # 二进制/必须人工选一侧：不调模型
+            report["conflicted"] += 1
+            report["files"].append({"path": rel, "result": "manual",
+                                    "reason": f.get("reason") or "需人工选择一侧",
+                                    "ms": int((_time.time() - tf) * 1000)})
+            await _emit_merge_progress(session_id, {
+                "merge_id": mid, "session_id": session_id, "direction": direction,
+                "phase": "file_done", "path": rel, "index": i, "total": len(pending),
+                "ok": False, "elapsed_ms": int((_time.time() - tf) * 1000),
+                "detail": f.get("reason") or "需人工处理",
+            })
+            continue
+
+        await _emit_merge_progress(session_id, {
+            "merge_id": mid, "session_id": session_id, "direction": direction,
+            "phase": "tool", "path": rel, "index": i, "total": len(pending),
+            "tool": "git merge-file --diff3", "detail": "已由 git 生成冲突标记，正在请求 AI 合并建议",
+        })
+        res = await ai_merge_suggest(db, worktree_project_id, rel, None,
+                                     direction=direction, model_id=model_id)
+        if res.get("ok") and res.get("suggestion"):
+            resolved[rel] = res["suggestion"]
+            report["ai"] += 1
+            report["files"].append({"path": rel, "result": "ai",
+                                    "ms": int((_time.time() - tf) * 1000)})
+            await _emit_merge_progress(session_id, {
+                "merge_id": mid, "session_id": session_id, "direction": direction,
+                "phase": "file_done", "path": rel, "index": i, "total": len(pending),
+                "ok": True, "tool": _tool_label(res.get("model")),
+                "elapsed_ms": int((_time.time() - tf) * 1000),
+                "detail": f"AI 已给出合并结果（{_tool_label(res.get('model'))}）",
+            })
+        else:
+            report["failed"] += 1
+            reason = res.get("error") or "AI 未给出建议"
+            report["files"].append({"path": rel, "result": "failed", "reason": reason,
+                                    "ms": int((_time.time() - tf) * 1000)})
+            await _emit_merge_progress(session_id, {
+                "merge_id": mid, "session_id": session_id, "direction": direction,
+                "phase": "file_done", "path": rel, "index": i, "total": len(pending),
+                "ok": False, "elapsed_ms": int((_time.time() - tf) * 1000),
+                "detail": reason,
+            })
+
+    report["elapsed_ms"] = int((_time.time() - t0) * 1000)
+    await _emit_merge_progress(session_id, {
+        "merge_id": mid, "session_id": session_id, "direction": direction,
+        "phase": "done", "ok": report["failed"] == 0,
+        "total": len(pending), "elapsed_ms": report["elapsed_ms"],
+        "detail": (f"合并完成：git 自动合入 {report['git']} 个，AI 解决 {report['ai']} 个，"
+                   f"待人工 {report['conflicted']} 个，失败 {report['failed']} 个，"
+                   f"耗时 {report['elapsed_ms'] / 1000:.1f}s"),
+        "summary": report,
+    })
+    logger.info("[worktree] AI 合并完成 worktree=%s merge_id=%s: %s",
+                worktree_project_id, mid, {k: v for k, v in report.items() if k != "files"})
+    return {"ok": True, "merge_id": mid, "resolved": resolved, "report": report,
+            "engine": engine, "preview": preview}
 
 
 async def ai_merge_suggest(db: AsyncSession, worktree_project_id: int, path: str,

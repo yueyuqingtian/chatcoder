@@ -334,3 +334,263 @@ async def test_merge_file_detects_conflict(db, repo):
     assert row["conflict"] is True, "两侧改同一行应被判为冲突"
     assert preview["has_conflict"] is True
     assert "<<<<<<<" in (row["merged"] or ""), "冲突内容应含冲突标记"
+
+
+# ── plan-308-1542 需求3-C：删除工作树级联清理会话 ──
+
+@pytest.mark.asyncio
+async def test_remove_worktree_project_cascades_sessions(tmp_path):
+    """删除工作树必须级联删除其下会话（原报错：DELETE FROM projects 因外键失败、侧栏残留）。
+
+    本用例专开 foreign_keys=ON 的库（与生产 app/persistence/database.py 的 PRAGMA 一致），
+    否则复现不出原始 IntegrityError。
+    """
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.persistence.models import Session as _Session
+
+    r = tmp_path / "repo-cascade"
+    r.mkdir()
+    _git(r, "init", "-b", "main")
+    _git(r, "config", "user.email", "t@t.local")
+    _git(r, "config", "user.name", "t")
+    (r / "f.txt").write_text("x\n", encoding="utf-8")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-m", "init")
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/cascade.db"
+    engine = create_async_engine(db_url)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    from app.persistence import write_engine as _we
+    _we.configure(db_url, foreign_keys=True)  # 生产口径
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as db:
+            p = Project(name="main", path=str(r))
+            db.add(p)
+            await db.commit()
+            res = await worktree_service.create_worktree_for_project(db, p.id, name="wt-cascade")
+            wt_pid = res["project_id"]
+
+            # 工作树下建 2 个会话（模拟"在该工作区开过会话"）
+            db.add(_Session(project_id=wt_pid, title="s1"))
+            db.add(_Session(project_id=wt_pid, title="s2"))
+            await db.commit()
+
+            out = await worktree_service.remove_worktree_project(db, wt_pid)
+            assert out["ok"] is True
+            assert out["deleted_sessions"] == 2, f"应级联删除 2 个会话，实际 {out['deleted_sessions']}"
+            assert out["detached"] is True
+
+            # DB 无残留（原 bug：projects 行残留 → 左侧面板仍显示该工作树）
+            left_p = (await db.execute(select(Project).where(Project.id == wt_pid))).scalars().all()
+            left_s = (await db.execute(select(_Session).where(_Session.project_id == wt_pid))).scalars().all()
+            assert left_p == [], "projects 不应残留该工作树"
+            assert left_s == [], "该工作树下的会话应被级联删除"
+            # git 侧也已清理
+            assert not Path(res["path"]).exists()
+    finally:
+        await engine.dispose()
+        _we.configure(None)
+
+
+@pytest.mark.asyncio
+async def test_remove_worktree_project_missing_raises(db, repo):
+    """重复删除：工作树不存在时应给出可读错误（不再静默成功）。"""
+    pid = await _seed_project(db, repo)
+    res = await worktree_service.create_worktree_for_project(db, pid, name="wt-dup")
+    await worktree_service.remove_worktree_project(db, res["project_id"])
+    with pytest.raises(ValueError, match="工作树不存在"):
+        await worktree_service.remove_worktree_project(db, res["project_id"])
+
+
+# ── 回归：用户实测报错 "DELETE FROM tasks ... FOREIGN KEY constraint failed" ──
+
+@pytest.mark.asyncio
+async def test_remove_worktree_project_with_artifacts_and_children(tmp_path):
+    """工作树会话带**产物（artifacts→tasks 外键）/ 记忆 / 审核 / 调度**时也必须删干净。
+
+    用户实测：合并后点删除，弹窗报
+      `IntegrityError: FOREIGN KEY constraint failed [SQL: DELETE FROM tasks WHERE tasks.session_id = ?]`
+    根因是 artifacts.task_id 引用 tasks.id，而删除顺序里漏了 artifacts（以及
+    memory_entries 非 session 作用域行同样带 session_id 外键）。本用例覆盖全链路。
+    """
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.persistence.models import Session as _Session
+    from app.persistence.models.memory import MemoryEntry
+    from app.persistence.models.review import FileReview
+    from app.persistence.models.task import Artifact, Task
+    from app.persistence.models.turn import Turn
+
+    r = tmp_path / "repo-fk"
+    r.mkdir()
+    _git(r, "init", "-b", "main")
+    _git(r, "config", "user.email", "t@t.local")
+    _git(r, "config", "user.name", "t")
+    (r / "f.txt").write_text("x\n", encoding="utf-8")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-m", "init")
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/fk.db"
+    engine = create_async_engine(db_url)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    from app.persistence import write_engine as _we
+    _we.configure(db_url, foreign_keys=True)  # 生产口径（PRAGMA foreign_keys=ON）
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as db:
+            p = Project(name="main", path=str(r))
+            db.add(p)
+            await db.commit()
+            res = await worktree_service.create_worktree_for_project(db, p.id, name="wt-fk")
+            wt_pid = res["project_id"]
+
+            s = _Session(project_id=wt_pid, title="s-fk")
+            db.add(s)
+            await db.commit()
+            t = Turn(session_id=s.id, status="completed")
+            db.add(t)
+            await db.commit()
+            task = Task(session_id=s.id, turn_id=t.id, title="产出任务")
+            db.add(task)
+            await db.commit()
+            # 关键：产物引用 task（正是报错的直接原因）
+            db.add(Artifact(task_id=task.id, type="file", title="note.txt"))
+            # 会话级记忆 + 项目级记忆（后者也曾阻断删除）
+            db.add(MemoryEntry(session_id=s.id, text="会话记忆", scope="session"))
+            db.add(MemoryEntry(session_id=s.id, text="项目记忆", scope="project"))
+            # turn 级审核记录
+            db.add(FileReview(turn_id=t.id, path="note.txt", reviewed=True))
+            await db.commit()
+
+            out = await worktree_service.remove_worktree_project(db, wt_pid)
+            assert out["ok"] is True, "带产物的会话删除不应报外键错误"
+            assert out["deleted_sessions"] == 1
+
+            # 全链路无残留
+            assert (await db.execute(select(Project).where(Project.id == wt_pid))).scalars().all() == []
+            assert (await db.execute(select(_Session).where(_Session.project_id == wt_pid))).scalars().all() == []
+            assert (await db.execute(select(Task).where(Task.id == task.id))).scalars().all() == []
+            assert (await db.execute(select(Artifact).where(Artifact.task_id == task.id))).scalars().all() == []
+            assert (await db.execute(select(Turn).where(Turn.session_id == s.id))).scalars().all() == []
+            assert (await db.execute(select(MemoryEntry).where(MemoryEntry.session_id == s.id))).scalars().all() == []
+            assert (await db.execute(select(FileReview).where(FileReview.turn_id == t.id))).scalars().all() == []
+    finally:
+        await engine.dispose()
+        _we.configure(None)
+
+
+@pytest.mark.asyncio
+async def test_remove_worktree_when_dir_already_gone(tmp_path):
+    """目录与 git 登记都已被外部删除时，删除接口仍须成功清掉数据库登记。
+
+    用户实测："最后点击删除实际分支和目录已经删除了，但是左面板还是没有删除"——
+    这类僵尸项必须能删掉（快速路径：不再做无意义 git 调用，直接级联清理）。
+    """
+    import shutil as _shutil
+
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.persistence.models import Session as _Session
+
+    r = tmp_path / "repo-gone"
+    r.mkdir()
+    _git(r, "init", "-b", "main")
+    _git(r, "config", "user.email", "t@t.local")
+    _git(r, "config", "user.name", "t")
+    (r / "f.txt").write_text("x\n", encoding="utf-8")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-m", "init")
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/gone.db"
+    engine = create_async_engine(db_url)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    from app.persistence import write_engine as _we
+    _we.configure(db_url, foreign_keys=True)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as db:
+            p = Project(name="main", path=str(r))
+            db.add(p)
+            await db.commit()
+            res = await worktree_service.create_worktree_for_project(db, p.id, name="wt-gone")
+            wt_pid = res["project_id"]
+            db.add(_Session(project_id=wt_pid, title="s-gone"))
+            await db.commit()
+
+            # 模拟"用户已手工删掉目录 + git 登记"
+            _git(r, "worktree", "remove", "--force", "--force", res["path"])
+            _git(r, "worktree", "prune")
+            if Path(res["path"]).exists():
+                _shutil.rmtree(res["path"], ignore_errors=True)
+
+            out = await worktree_service.remove_worktree_project(db, wt_pid)
+            assert out["ok"] is True
+            assert (await db.execute(select(Project).where(Project.id == wt_pid))).scalars().all() == [], \
+                "目录已消失的僵尸工作树也必须能删掉（否则左面板永远残留）"
+    finally:
+        await engine.dispose()
+        _we.configure(None)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_stale_worktrees_selfheal(tmp_path):
+    """自愈：目录已不存在的登记工作树应被 cleanup_stale_worktrees 清掉（含其会话）。"""
+    import shutil as _shutil
+
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.persistence.models import Session as _Session
+
+    r = tmp_path / "repo-stale"
+    r.mkdir()
+    _git(r, "init", "-b", "main")
+    _git(r, "config", "user.email", "t@t.local")
+    _git(r, "config", "user.name", "t")
+    (r / "f.txt").write_text("x\n", encoding="utf-8")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-m", "init")
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/stale.db"
+    engine = create_async_engine(db_url)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    from app.persistence import write_engine as _we
+    _we.configure(db_url, foreign_keys=True)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as db:
+            p = Project(name="main", path=str(r))
+            db.add(p)
+            await db.commit()
+            res = await worktree_service.create_worktree_for_project(db, p.id, name="wt-stale")
+            wt_pid = res["project_id"]
+            db.add(_Session(project_id=wt_pid, title="s-stale"))
+            await db.commit()
+
+            # 目录消失 + git 登记 prune（模拟外部删除）
+            _shutil.rmtree(res["path"], ignore_errors=True)
+            _git(r, "worktree", "prune")
+
+            out = await worktree_service.cleanup_stale_worktrees(db)
+            assert out["ok"] is True and out["cleaned"] >= 1
+            assert any(s["id"] == wt_pid for s in out["stale"])
+            left = (await db.execute(select(Project).where(Project.id == wt_pid))).scalars().all()
+            assert left == [], "失效工作树应被自愈清理"
+            assert (await db.execute(
+                select(_Session).where(_Session.project_id == wt_pid))).scalars().all() == []
+
+            # 幂等：再次调用不应报错
+            again = await worktree_service.cleanup_stale_worktrees(db)
+            assert again["ok"] is True and again["cleaned"] == 0
+    finally:
+        await engine.dispose()
+        _we.configure(None)

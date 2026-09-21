@@ -31,6 +31,9 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
     user_content: dict = {"text": body.content}
     if body.attachments:
         user_content["attachments"] = body.attachments
+    # plan-308-1542 需求2: 引用 chips 结构化落库（消息流据此渲染带图标芯片）
+    if getattr(body, "refs", None):
+        user_content["refs"] = body.refs
     user_msg = await message_service.create_message(
         db, session_id=body.session_id,
         sender_type=SenderType.USER.value,
@@ -184,6 +187,9 @@ async def inject_turn_input(turn_id: int, body: TurnInjectBody, db: AsyncSession
     user_content: dict = {"text": body.content}
     if body.attachments:
         user_content["attachments"] = body.attachments
+    # plan-308-1542 需求2: 注入消息同样保留引用芯片
+    if getattr(body, "refs", None):
+        user_content["refs"] = body.refs
     user_msg = await message_service.create_message(
         db, session_id=turn.session_id,
         sender_type=SenderType.USER.value,

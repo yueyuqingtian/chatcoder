@@ -5,15 +5,55 @@
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { width: 100%; height: 100%; overflow: hidden; }
-  /* 深浅色双主题：默认深色，body.light 切换浅色（主题由主进程按用户偏好/系统注入） */
+
+  /* ── plan-308-1555 M7：开屏改为"半透明玻璃"风格 ──
+     用户要求：把 zcode 的半透明做法用到本软件的开屏动画上，
+     只在用户开启毛玻璃效果时生效（glass off 时保持原来的纯色不透明）。
+     实现分层：
+       * 系统层：主进程窗口 transparent + ACCENT/acrylic（由 main.cjs 施加，本页无需处理）
+       * 样式层：本页背景透明 + 玻璃高光/内描边（模拟液态质感）
+       * 动画层：整页淡入（opacity 0→1），避免"啪"地跳出 */
+  html { background: transparent; }
   body {
-    background: #16181d; color: #e4e6eb;
+    background: transparent; color: #e4e6eb;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     display: flex; flex-direction: column;
     align-items: center; justify-content: center;
-    transition: background 0.2s;
+    opacity: 0;
+    transition: opacity 0.42s cubic-bezier(0.22, 1, 0.36, 1);
   }
-  body.light { background: #f2f3f7; color: #23262e; }
+  body.ready { opacity: 1; }
+
+  /* glass off：纯色不透明开屏（保持原有观感，不做透明渗色） */
+  body.solid {
+    background: #16181d;
+    opacity: 1;
+    transition: none;
+  }
+  body.solid.light { background: #f2f3f7; color: #23262e; }
+
+  /* glass on：玻璃面板（自己铺一层玻璃底，露出下层系统材质） */
+  body.glass {
+    background:
+      linear-gradient(150deg,
+        rgba(255, 255, 255, 0.10) 0%,
+        rgba(255, 255, 255, 0.03) 34%,
+        transparent 62%),
+      rgba(20, 22, 28, 0.55);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
+    backdrop-filter: blur(14px) saturate(1.5);
+    -webkit-backdrop-filter: blur(14px) saturate(1.5);
+  }
+  body.glass.light {
+    background:
+      linear-gradient(150deg,
+        rgba(255, 255, 255, 0.55) 0%,
+        rgba(255, 255, 255, 0.22) 34%,
+        transparent 62%),
+      rgba(244, 245, 249, 0.62);
+    color: #23262e;
+  }
+
   .logo { display: flex; flex-direction: column; align-items: center; gap: 14px; margin-bottom: 26px; }
   .logo svg { display: block; filter: drop-shadow(0 6px 18px rgba(90, 60, 220, 0.35)); }
   .logo-name {
@@ -60,13 +100,23 @@
   <div class="spinner"></div>
   <div class="text" id="msg">正在启动服务…</div>
   <script>
-    // 主进程通过 query 注入主题偏好（light/dark），未传时跟随系统
+    // 主进程通过 query 注入：theme=light|dark（主题）、glass=1|0（是否开启毛玻璃）
     (function () {
       try {
-        var q = new URLSearchParams(location.search).get("theme");
-        var dark = q ? q !== "light" : !window.matchMedia("(prefers-color-scheme: light)").matches;
+        var q = new URLSearchParams(location.search);
+        var theme = q.get("theme");
+        var dark = theme ? theme !== "light" : !window.matchMedia("(prefers-color-scheme: light)").matches;
         if (!dark) document.body.classList.add("light");
-      } catch (e) { /* 保持默认深色 */ }
+        // 毛玻璃开启时用玻璃样式（半透明 + 露出下层系统材质），否则纯色不透明
+        var glass = q.get("glass") === "1";
+        document.body.classList.add(glass ? "glass" : "solid");
+        // 下一帧再置 ready，触发淡入过渡（避免与首帧绘制同帧导致动画被跳过）
+        requestAnimationFrame(function () {
+          requestAnimationFrame(function () { document.body.classList.add("ready"); });
+        });
+      } catch (e) {
+        document.body.classList.add("solid");
+      }
     })();
     window.__chatcoderLoading = { update: function(text) { document.getElementById('msg').textContent = text; } };
   </script>

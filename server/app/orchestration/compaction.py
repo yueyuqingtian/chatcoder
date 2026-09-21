@@ -392,6 +392,11 @@ def build_api_copy(
 
     api = [_copy.copy(m) for m in messages]
 
+    # plan-282-0: 先剥离较旧工具回合的 reasoning_content——thinking 在真实 prompt
+    # 中占比极高（实测全库 69%），且按 token 预算保留时会霸占保留区，是「压缩后
+    # 占用不降」的首要原因。剥离后再做体积折叠，两者叠加收益最大。
+    api, reasoning_stripped = strip_stale_reasoning(api)
+
     # v2.2 (对齐 zcode 3.10 micro-compact): 单条超长 tool result 就地折叠——
     # 原文落盘 .compact-cache，占位符提示可用 fs_read 恢复（防模型失忆重复读取）。
     before_micro = sum(len(m.content or "") for m in api if m.role == "tool")
@@ -405,6 +410,7 @@ def build_api_copy(
         from app.orchestration.token_counter import estimate_messages_tokens
         _LAST_RECLAIM = {
             "folded": micro_folded,
+            "reasoning_stripped": reasoning_stripped,
             "chars_saved": max(0, before_micro - after_micro),
             "est_tokens_saved": max(0, estimate_messages_tokens(messages) - estimate_messages_tokens(api)),
             "budget": None,
@@ -463,6 +469,93 @@ def _micro_compact(api: list[ChatMessage]) -> tuple[list[ChatMessage], int]:
         except Exception:
             logger.warning("[micro-compact] 落盘失败，保留原文(非阻塞)", exc_info=True)
     return api, folded
+
+
+# ---------------------------------------------------------------------------
+# plan-282-0: 历史 reasoning（thinking）剥离 —— 压缩效率根治的关键一环
+# ---------------------------------------------------------------------------
+# 根因（512K 窗口实测）：thinking 消息在重建时写入 assistant.reasoning_content
+# 并真实发给模型，全库占比可达 69%。它按 token 预算从尾部保留时会霸占保留区
+# （retain=61440 时保留区 thinking 占 64493），把有价值的对话挤进压缩区——
+# 结果「压了半天，占用不降」：第一轮 28%、第二轮 69%，压缩器却自报 14.4%。
+#
+# zcode 策略（对齐）：reasoning 只对**最近的工具回合**有意义——thinking 模式网关
+# 要求把「紧跟最新 tool_calls 的推理」回传以维持思维链连续性；更早的推理对后续
+# 决策无贡献，属于纯历史包袱。zcode 的 microcompact（LocalToolResultClear）同样
+# 只保留 keepRecentToolResults（默认 5）个最近工具回合，更早的原地清空。
+#
+# 与zcode 的差异说明：zcode 清空的是「旧工具结果」，本项目额外清空「旧 reasoning」，
+# 因为本项目把 thinking 作为独立消息持久化并回传，占用权重远高于工具结果。
+# 保留窗口内的 reasoning 一律原样保留（不截断），保证思维链连续性与缓存命中。
+_REASONING_KEEP_TOOL_ROUNDS = 3
+
+
+def strip_stale_reasoning(
+    messages: list[ChatMessage],
+    keep_rounds: int | None = None,
+) -> tuple[list[ChatMessage], int]:
+    """剥离「较旧工具回合」的 reasoning_content，压缩历史 reasoning 体积。
+
+    plan-282-0（对齐 zcode microcompact 的 keepRecentToolResults 语义）：
+
+    - 从尾部向前数，保留最近 `keep_rounds` 个「含 tool_calls 的 assistant 消息」
+      及其之后的全部 reasoning；
+    - 更早的 assistant 消息清空 reasoning_content（消息本身保留，工具配对不破坏）；
+    - 不截断保留区内的 reasoning——思维链完整性优先。
+
+    为什么只清 reasoning 而不清 content：
+    - thinking 模式网关要求「最新工具回合」的 reasoning_content 回传，清掉会 400；
+    - 更早的 reasoning 不参与后续决策，剥离后语义无损，但体积收益极大
+      （实测单条常达 10k~80k 字符）。
+
+    Args:
+        messages: 待处理的 API 副本消息（就地修改，调用方应先 copy）。
+        keep_rounds: 保留的最近工具回合数，缺省取 _REASONING_KEEP_TOOL_ROUNDS。
+
+    Returns:
+        (处理后的列表, 剥离的 reasoning 条数)
+    """
+    keep = _REASONING_KEEP_TOOL_ROUNDS if keep_rounds is None else max(0, int(keep_rounds))
+    if not messages:
+        return messages, 0
+
+    # keep=0：全部历史 reasoning 都超出保留窗口 → 清空所有 assistant 的 reasoning。
+    if keep == 0:
+        stripped = 0
+        for m in messages:
+            if m.role == "assistant" and m.reasoning_content:
+                m.reasoning_content = None
+                stripped += 1
+        if stripped:
+            logger.info("[reasoning-strip] 剥离 %d 条历史 reasoning（keep=0，全部剥离）", stripped)
+        return messages, stripped
+
+    # 1. 定位从尾部数第 keep 个「含 tool_calls 的 assistant」的位置
+    seen_rounds = 0
+    cutoff = 0
+    for i in range(len(messages) - 1, -1, -1):
+        m = messages[i]
+        if m.role == "assistant" and m.tool_calls:
+            seen_rounds += 1
+            if seen_rounds >= keep:
+                cutoff = i
+                break
+    else:
+        # 工具回合不足 keep 个 → 全部 reasoning 都在保留窗口内，不剥离
+        return messages, 0
+
+    stripped = 0
+    for m in messages[:cutoff]:
+        if m.role == "assistant" and m.reasoning_content:
+            m.reasoning_content = None
+            stripped += 1
+    if stripped:
+        logger.info(
+            "[reasoning-strip] 剥离 %d 条旧工具回合的历史 reasoning（保留最近 %d 个工具回合）",
+            stripped, keep,
+        )
+    return messages, stripped
+
 
 
 # ---------------------------------------------------------------------------

@@ -79,6 +79,63 @@ class ScannedMcpServer:
     tools: list = field(default_factory=list)  # v4.8: MCP tools/list 结果缓存
 
 
+def _scan_plugin_skills() -> list[ScannedSkill]:
+    """扫描本工具自己的插件目录下的技能：`~/.chatcoder/plugins/<market>/<plugin>/skills/**`。
+
+    plan-308-1542 需求2：拓展-插件里安装的技能此前不在「刷新扫描」的覆盖范围内
+    （扫描器只认 .claude/.codex/.codebuddy/.qoder/.trae），用户重新扫描也扫不到，
+    只能靠安装那一刻的注册——重装/手动放置的插件技能因此长期不可见。
+    """
+    skills: list[ScannedSkill] = []
+    root = Path.home() / ".chatcoder" / "plugins"
+    try:
+        if not root.is_dir():
+            return skills
+        for plugin_dir in sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")):
+            for skills_root in (plugin_dir / "skills", plugin_dir):
+                if not skills_root.is_dir():
+                    continue
+                found_any = False
+                for entry in sorted(skills_root.iterdir()):
+                    if entry.is_dir():
+                        for md_name in ("SKILL.md", "skill.md"):
+                            md = entry / md_name
+                            if md.is_file():
+                                sk = _parse_skill_file(md, "plugin", True)
+                                if sk:
+                                    skills.append(_prefix_plugin(sk, plugin_dir.name))
+                                    found_any = True
+                                break
+                    elif entry.suffix.lower() in (".md", ".yaml", ".yml"):
+                        if entry.name.lower() == "skill.md":
+                            continue
+                        sk = (_parse_skill_file(entry, "plugin", True)
+                              if entry.suffix.lower() == ".md"
+                              else _parse_skill_file_yml(entry, "plugin", True))
+                        if sk:
+                            skills.append(_prefix_plugin(sk, plugin_dir.name))
+                            found_any = True
+                if found_any:
+                    break  # plugin_dir/skills 命中后不再把插件根当技能目录
+    except OSError as e:
+        logger.debug("扫描插件技能目录失败(非阻塞): %s", e)
+    return skills
+
+
+def _prefix_plugin(sk: ScannedSkill, plugin_name: str) -> ScannedSkill:
+    """给插件技能名加 `{plugin}:` 前缀，与安装时注册的命名保持一致。
+
+    plan-308-1542 需求2：安装路径（plugin_service._register_contributed_skills）
+    用的是 `{plugin}:{skill}`；扫描路径若用裸技能名，会在技能表里产生
+    "同一技能两行"（一行带前缀、一行不带），用户看到重复且部分不可用。
+    """
+    sk.name = f"{plugin_name}:{sk.name}"
+    sk.meta = {**(sk.meta or {}), "plugin": plugin_name, "plugin_dir": str(
+        Path(sk.path).parent.parent if Path(sk.path).name.lower() == "skill.md" else Path(sk.path).parent
+    )}
+    return sk
+
+
 def scan_all_skills(workspace_root: str | None = None) -> list[ScannedSkill]:
     """扫描所有外部工具的技能文件。
 
@@ -100,6 +157,15 @@ def scan_all_skills(workspace_root: str | None = None) -> list[ScannedSkill]:
                     results.append(skill)
         except Exception as e:
             logger.debug("扫描 %s 技能失败(非阻塞): %s", source, e)
+
+    # plan-308-1542 需求2：本工具自己的插件目录（~/.chatcoder/plugins）也要能被扫描覆盖
+    try:
+        for skill in _scan_plugin_skills():
+            if skill.name not in seen_names:
+                seen_names.add(skill.name)
+                results.append(skill)
+    except Exception as e:
+        logger.debug("扫描插件技能失败(非阻塞): %s", e)
 
     return results
 

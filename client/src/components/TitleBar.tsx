@@ -72,24 +72,55 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
     ? project.path.replace(/\\/g, "/").replace(/\/$/, "").split("/").pop() || project.path
     : "";
 
-  const handleOpenInApp = (target: string) => {
+  const handleOpenInApp = async (target: string) => {
     if (!project?.path) return;
-    setOpenTarget(target);
-    try { localStorage.setItem("chatcoder.preferred_open_target", target); } catch {}
     setFolderMenuOpen(false);
 
+    // plan-308-1542 需求5：主进程现返回 { ok, launcher?, error? }——
+    // 失败必须可见（此前 spawn 失败静默，用户只看到"点了没反应"）。
     if (winApi?.openInApp) {
-      void winApi.openInApp(target, project.path);
+      try {
+        const res = await winApi.openInApp(target, project.path);
+        if (res && res.ok === false) {
+          useChatStore.setState({
+            error: `${t("titlebar.open_failed")}${res.error ? `：${res.error}` : ""}`
+              + `（可在菜单中「${t("titlebar.choose_app")}」指定可执行文件）`,
+          });
+          return;
+        }
+        // 仅在成功时记忆目标，避免记住一个不可用的目标却无反馈
+        setOpenTarget(target);
+        try { localStorage.setItem("chatcoder.preferred_open_target", target); } catch {}
+      } catch (e) {
+        useChatStore.setState({ error: `${t("titlebar.open_failed")}：${String(e)}` });
+      }
       return;
     }
 
     // Web 模式兜底
+    setOpenTarget(target);
+    try { localStorage.setItem("chatcoder.preferred_open_target", target); } catch {}
     if (target === "vscode") {
       window.open(`vscode://file/${project.path.replace(/\\/g, "/")}`);
     } else if (target === "idea") {
       window.open(`idea://open?file=${project.path.replace(/\\/g, "/")}`);
     } else if (winApi?.openPath) {
       void winApi.openPath(project.path);
+    }
+  };
+
+  /** plan-308-1542 需求5：手动指定外部应用可执行文件，成功后立即重试打开。 */
+  const handleChooseApp = async (target: string) => {
+    if (!winApi?.selectApp) return;
+    try {
+      const res = await winApi.selectApp(target);
+      if (res?.ok) {
+        await handleOpenInApp(target);
+      } else if (res && res.canceled !== true) {
+        useChatStore.setState({ error: t("titlebar.choose_app_failed") });
+      }
+    } catch (e) {
+      useChatStore.setState({ error: String(e) });
     }
   };
 
@@ -224,13 +255,21 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
                 </div>
                 {openTarget === "explorer" && <IconCheck size={13} className="titlebar-folder-menu-check" />}
               </div>
-              <div className={`context-menu-item titlebar-folder-menu-item${openTarget === "idea" ? " active" : ""}`} onClick={() => handleOpenInApp("idea")}>
+              <div className={`context-menu-item titlebar-folder-menu-item${openTarget === "idea" ? " active" : ""}`} onClick={() => void handleOpenInApp("idea")}>
                 <div className="titlebar-folder-menu-item-left">
                   <IconBrandIdea size={15} />
                   <span>{t("titlebar.open_idea")}</span>
                 </div>
                 {openTarget === "idea" && <IconCheck size={13} className="titlebar-folder-menu-check" />}
               </div>
+              {winApi?.selectApp && (
+                <div className="context-menu-item titlebar-folder-menu-item" onClick={() => void handleChooseApp("idea")}>
+                  <div className="titlebar-folder-menu-item-left">
+                    <IconFolder size={15} />
+                    <span>{t("titlebar.choose_idea")}</span>
+                  </div>
+                </div>
+              )}
               <div className={`context-menu-item titlebar-folder-menu-item${openTarget === "terminal" ? " active" : ""}`} onClick={() => handleOpenInApp("terminal")}>
                 <div className="titlebar-folder-menu-item-left">
                   <IconBrandWindowsTerminal size={15} />
@@ -238,13 +277,21 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
                 </div>
                 {openTarget === "terminal" && <IconCheck size={13} className="titlebar-folder-menu-check" />}
               </div>
-              <div className={`context-menu-item titlebar-folder-menu-item${openTarget === "vscode" ? " active" : ""}`} onClick={() => handleOpenInApp("vscode")}>
+              <div className={`context-menu-item titlebar-folder-menu-item${openTarget === "vscode" ? " active" : ""}`} onClick={() => void handleOpenInApp("vscode")}>
                 <div className="titlebar-folder-menu-item-left">
                   <IconBrandVSCode size={15} />
                   <span>{t("titlebar.open_vscode")}</span>
                 </div>
                 {openTarget === "vscode" && <IconCheck size={13} className="titlebar-folder-menu-check" />}
               </div>
+              {winApi?.selectApp && (
+                <div className="context-menu-item titlebar-folder-menu-item" onClick={() => void handleChooseApp("vscode")}>
+                  <div className="titlebar-folder-menu-item-left">
+                    <IconFolder size={15} />
+                    <span>{t("titlebar.choose_vscode")}</span>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>

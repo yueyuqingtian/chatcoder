@@ -53,6 +53,9 @@ def status(session_id: int, target: str = "web") -> dict:
         "connected": sess is not None,
         "target": target,
         "breakpoints": len(getattr(sess, "breakpoints", {}) or {}),
+        # plan-308-1542 需求7-A：断点明细（用户要求"可见断点的情况"）——
+        # 此前只回数量，面板无法列出具体断点，更无法逐条删除。
+        "breakpointList": _breakpoint_list(sess, m, target),
         "paused": bool(m.get("paused")),
         "file": m.get("file"),
         "line": m.get("line"),
@@ -62,6 +65,37 @@ def status(session_id: int, target: str = "web") -> dict:
         "variables": m.get("variables") or [],
         "reason": m.get("reason"),
     }
+
+
+def _breakpoint_list(sess: Any, m: dict, target: str) -> list[dict]:
+    """把会话内的断点整理成可展示的明细列表（web / java 两种来源）。"""
+    out: list[dict] = []
+    if target == "web" and sess is not None:
+        # CdpSession.breakpoints: "url_regex:line" -> breakpointId
+        for key, bp_id in (getattr(sess, "breakpoints", {}) or {}).items():
+            url_regex, _, line = str(key).rpartition(":")
+            out.append({
+                "id": str(bp_id),
+                "target": "web",
+                "file": url_regex or None,
+                "line": int(line) if line.isdigit() else None,
+                "source": "app",
+                "enabled": True,
+            })
+        return out
+    # Java：_meta["breakpoints"] = {"Class:line": requestId}
+    for key2, req_id in (m.get("breakpoints") or {}).items():
+        cls, _, line = str(key2).rpartition(":")
+        out.append({
+            "id": str(req_id),
+            "target": "java",
+            "class": cls or None,
+            "file": m.get("bp_files", {}).get(str(key2)) if isinstance(m.get("bp_files"), dict) else None,
+            "line": int(line) if line.isdigit() else None,
+            "source": "app",
+            "enabled": True,
+        })
+    return out
 
 
 # ── Web（CDP）──
@@ -393,6 +427,92 @@ async def java_stop(session_id: int) -> dict:
     await _close(session_id, "java")
     await _broadcast(session_id, {"target": "java", "phase": "stopped"})
     return {"ok": True, "message": "Java 调试会话已关闭"}
+
+
+# ── plan-308-1542 需求7-A：断点的枚举 / 删除 / 清空（面板可视化与操作）──
+
+def list_breakpoints(session_id: int, target: str) -> dict:
+    """列出会话内断点明细（面板渲染数据源）。"""
+    k = _key(session_id, target)
+    sess = _sessions.get(k)
+    m = _meta.get(k) or {}
+    if sess is None:
+        return {"ok": True, "breakpoints": [], "connected": False}
+    return {"ok": True, "breakpoints": _breakpoint_list(sess, m, target), "connected": True}
+
+
+async def remove_breakpoint(session_id: int, target: str, bp_id: str) -> dict:
+    """按 id（web=breakpointId / java=requestId）删除单个断点。"""
+    k = _key(session_id, target)
+    sess = _sessions.get(k)
+    m = _meta.get(k) or {}
+    if sess is None:
+        return {"ok": False, "error": "调试会话未连接"}
+
+    if target == "web":
+        bps = getattr(sess, "breakpoints", {}) or {}
+        hit_key = next((key for key, val in bps.items() if str(val) == str(bp_id)), None)
+        if hit_key is None:
+            return {"ok": False, "error": f"断点不存在: {bp_id}"}
+        url_regex, _, line = str(hit_key).rpartition(":")
+        ok = await sess.remove_breakpoint(url_regex, int(line) if line.isdigit() else 0)
+        if ok:
+            await _broadcast(session_id, {"target": "web", "phase": "breakpoints_changed",
+                                          "breakpoints": len(bps)})
+        return {"ok": bool(ok), "error": None if ok else "删除断点失败"}
+
+    # Java：_meta["breakpoints"] = {"Class:line": requestId}
+    bps = m.get("breakpoints") or {}
+    hit_key = next((key for key, val in bps.items() if str(val) == str(bp_id)), None)
+    if hit_key is None:
+        return {"ok": False, "error": f"断点不存在: {bp_id}"}
+
+    def _do() -> bool:
+        try:
+            sess.clear_breakpoint(int(bp_id))
+            return True
+        except Exception:  # noqa: BLE001
+            logger.debug("[debug] 清除 Java 断点失败", exc_info=True)
+            return False
+
+    ok = await asyncio.to_thread(_do)
+    if ok:
+        bps.pop(hit_key, None)
+        bpf = m.get("bp_files")
+        if isinstance(bpf, dict):
+            bpf.pop(hit_key, None)
+        await _broadcast(session_id, {"target": "java", "phase": "breakpoints_changed",
+                                      "breakpoints": len(bps)})
+    return {"ok": ok, "error": None if ok else "删除断点失败"}
+
+
+async def clear_breakpoints(session_id: int, target: str) -> dict:
+    """清空会话内全部断点。"""
+    k = _key(session_id, target)
+    sess = _sessions.get(k)
+    m = _meta.get(k) or {}
+    if sess is None:
+        return {"ok": False, "error": "调试会话未连接"}
+    removed = 0
+    if target == "web":
+        for key in list((getattr(sess, "breakpoints", {}) or {}).keys()):
+            url_regex, _, line = str(key).rpartition(":")
+            try:
+                if await sess.remove_breakpoint(url_regex, int(line) if line.isdigit() else 0):
+                    removed += 1
+            except Exception:  # noqa: BLE001
+                logger.debug("[debug] 清空 web 断点单条失败", exc_info=True)
+    else:
+        for req_id in list((m.get("breakpoints") or {}).values()):
+            try:
+                await asyncio.to_thread(sess.clear_breakpoint, int(req_id))
+                removed += 1
+            except Exception:  # noqa: BLE001
+                logger.debug("[debug] 清空 java 断点单条失败", exc_info=True)
+        m["breakpoints"] = {}
+        m["bp_files"] = {}
+    await _broadcast(session_id, {"target": target, "phase": "breakpoints_changed", "breakpoints": 0})
+    return {"ok": True, "removed": removed}
 
 
 def cleanup_session(session_id: int) -> None:

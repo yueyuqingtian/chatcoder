@@ -43,6 +43,7 @@ import type {
   WorktreeMergePreview,
   WorktreeMergeDirection,
   WorktreeOut,
+  MergeReportOut,
 } from "@chatcoder/shared";
 
 /** 后端 API 基址:桌面版直连 127.0.0.1:12973,网页版用相对路径走代理。
@@ -240,6 +241,16 @@ export interface ProjectTreeOut {
   children: TreeNode[];
 }
 
+/** plan-308-1542 需求2：输入框引用 chips 的**结构化**副本。
+ *  从前只把引用拼成文本行（"使用技能：$x"）落库，消息流只能靠正则解析，
+ *  且正则无终止符会把整行吞成一个纯文本 token（发送后图标变文字）。
+ *  落库结构化副本后，消息流可直接渲染出与输入框一致的带图标芯片。 */
+export interface ComposerRefOut {
+  kind: "file" | "skill" | "mcp" | "plugin";
+  value: string;
+  label: string;
+}
+
 export interface TurnCreateBody {
   session_id: number;
   content: string;
@@ -250,6 +261,8 @@ export interface TurnCreateBody {
   mode?: string | null;
   // plan-166-767: 发送请求携带当前会话选中模型，后端据此优先解析（切换后立即发送用新模型）
   model_id?: number;
+  // plan-308-1542 需求2: 引用芯片结构化落库（消息流据此渲染图标芯片）
+  refs?: ComposerRefOut[];
 }
 
 export interface RollbackParams {
@@ -338,6 +351,10 @@ export interface UsageStatsOut {
     prompt: number; completion: number; reasoning: number; cached: number;
     total: number; calls: number;
   };
+  /** plan-308-1542 需求6：区间内出现过的供应商（下拉框选项） */
+  providers?: string[];
+  /** 当前筛选的供应商（null = 全部） */
+  provider?: string | null;
   by_model: Array<{
     key: string; model: string; provider_name: string; display_name: string;
     prompt: number; completion: number; reasoning: number; cached: number;
@@ -370,12 +387,16 @@ export const api = {
     post<{ ok: boolean; count: number; worktrees: Array<{ project_id: number; path: string; branch: string; name: string; repo: string }>; project_id: number; path: string; branch: string; name: string }>(
       `/projects/${projectId}/worktrees`, data),
   deleteWorktreeProject: (worktreeProjectId: number, force = false) =>
-    del<{ ok: boolean; branch?: string | null; branch_deleted?: boolean }>(
+    del<{ ok: boolean; branch?: string | null; branch_deleted?: boolean; deleted_sessions?: number; detached?: boolean }>(
       `/projects/worktrees/${worktreeProjectId}${force ? "?force=true" : ""}`),
+  /** plan-308-1542 修复：清理"git 侧已不存在、数据库仍登记"的失效工作树（左面板僵尸项） */
+  cleanupStaleWorktrees: () =>
+    post<{ ok: boolean; cleaned: number; stale: Array<{ id: number; name: string; path: string }> }>(
+      "/projects/worktrees/cleanup-stale", {}),
   worktreeMergePreview: (worktreeProjectId: number, direction: WorktreeMergeDirection = "to_main") =>
     post<WorktreeMergePreview>(`/projects/worktrees/${worktreeProjectId}/merge/preview`, { direction }),
   worktreeMergeFile: (worktreeProjectId: number, path: string, direction: WorktreeMergeDirection = "to_main") =>
-    post<{ ok: boolean; path: string; base: string | null; ours: string | null; theirs: string | null }>(
+    post<{ ok: boolean; path: string; base: string | null; ours: string | null; theirs: string | null; binary?: boolean }>(
       `/projects/worktrees/${worktreeProjectId}/merge/file`, { path, direction }),
   worktreeMergeApply: (
     worktreeProjectId: number,
@@ -393,6 +414,14 @@ export const api = {
     post<{ ok: boolean; suggestion?: string; error?: string; model?: string }>(
       `/projects/worktrees/${worktreeProjectId}/merge/ai`,
       { path, hunk, direction: opts?.direction ?? "to_main", model_id: opts?.modelId ?? null }),
+  /** plan-308-1542 需求3-A：一键 AI 智能合并（进度经 WS merge.progress 广播）。 */
+  worktreeMergeAiAll: (
+    worktreeProjectId: number,
+    opts?: { direction?: WorktreeMergeDirection; modelId?: number | null; sessionId?: number | null },
+  ) =>
+    post<{ ok: boolean; merge_id: string; resolved?: Record<string, string>; report?: MergeReportOut; engine?: string; preview?: WorktreeMergePreview }>(
+      `/projects/worktrees/${worktreeProjectId}/merge/ai-all`,
+      { direction: opts?.direction ?? "to_main", model_id: opts?.modelId ?? null, session_id: opts?.sessionId ?? null }),
   /** 合并前自动提交某一侧的未提交改动（side: worktree | main） */
   worktreeCommit: (worktreeProjectId: number, side: "worktree" | "main", message?: string) =>
     post<{ ok: boolean; committed: boolean; message: string }>(
@@ -432,6 +461,31 @@ export const api = {
     post<DebugStatusOut>(`/debug/${target}/status`, { session_id: sessionId }),
   debugAction: (target: "web" | "java", action: string, sessionId: number, extra: Record<string, unknown> = {}) =>
     post<Record<string, unknown>>(`/debug/${target}/${action}`, { session_id: sessionId, ...extra }),
+  // ── plan-308-1542 需求7-A：断点明细 / 删除 / 清空 ──
+  debugBreakpoints: (sessionId: number, target: "web" | "java") =>
+    post<{ ok: boolean; connected: boolean; breakpoints: Array<{ id: string; file?: string | null; line?: number | null; class?: string | null; source?: string; enabled?: boolean }> }>(
+      "/debug/breakpoints", { session_id: sessionId, target }),
+  debugRemoveBreakpoint: (sessionId: number, target: "web" | "java", breakpointId: string) =>
+    post<{ ok: boolean; error?: string }>("/debug/breakpoints/remove",
+      { session_id: sessionId, target, breakpoint_id: breakpointId }),
+  debugClearBreakpoints: (sessionId: number, target: "web" | "java") =>
+    post<{ ok: boolean; removed?: number }>("/debug/breakpoints/clear", { session_id: sessionId, target }),
+  // ── plan-308-1542 需求7-B：与 IntelliJ IDEA 的双向断点通道 ──
+  ideaBreakpoints: (projectPath: string) =>
+    post<{ ok: boolean; available?: boolean; reason?: string; count?: number; path?: string; breakpoints: Array<{ id: string; file: string; line: number | null; enabled?: boolean; source?: string }> }>(
+      "/debug/idea/breakpoints", { project_path: projectPath }),
+  ideaAddBreakpoint: (projectPath: string, file: string, line: number) =>
+    post<{ ok: boolean; added?: boolean; duplicated?: boolean; backup?: string; warning?: string; error?: string }>(
+      "/debug/idea/breakpoints/add", { project_path: projectPath, file, line }),
+  ideaRemoveBreakpoint: (projectPath: string, file: string, line: number) =>
+    post<{ ok: boolean; removed?: number; warning?: string; error?: string }>(
+      "/debug/idea/breakpoints/remove", { project_path: projectPath, file, line }),
+  ideaDebugSession: (projectPath: string) =>
+    post<{ ok: boolean; idea_running: boolean; sessions: Array<{ pid: number; main_class: string; jdwp_port: number }>; note?: string }>(
+      "/debug/idea/session", { project_path: projectPath }),
+  ideaMethodAtLine: (projectPath: string, file: string, line: number) =>
+    post<{ ok: boolean; class?: string; method?: string | null; target?: string | null; error?: string }>(
+      "/debug/idea/method-at-line", { project_path: projectPath, file, line }),
   // 面板配置（落库）：Web 调试端口 / JDWP 目标
   debugSettings: () => get<DebugSettingsOut>("/debug/settings"),
   saveDebugSettings: (patch: Partial<DebugSettingsOut>) =>
@@ -543,11 +597,13 @@ export const api = {
     agent_name: string;
     source?: string;  // v1.1: api_last=最后一次 API 真实占用 / est=本地估算
   }>(`/turns/sessions/${sessionId}/usage`),
-  getUsageStats: (params?: { start?: string; end?: string; days?: number }) => {
+  getUsageStats: (params?: { start?: string; end?: string; days?: number; provider?: string }) => {
     const q = new URLSearchParams();
     if (params?.start) q.set("start", params.start);
     if (params?.end) q.set("end", params.end);
     if (params?.days) q.set("days", String(params.days));
+    // plan-308-1542 需求6：按供应商筛选
+    if (params?.provider) q.set("provider", params.provider);
     const qs = q.toString();
     return get<UsageStatsOut>(`/usage/stats${qs ? `?${qs}` : ""}`);
   },
@@ -882,7 +938,7 @@ export const api = {
 export type {
   ProjectOut, SessionOut, TurnOut, MessageOut, TaskOut, ArtifactOut, ModelOut,
   ProviderOut, ProviderCredentialOut, ScannedModel,
-  WorktreeOut, WorktreeMergeFile, WorktreeMergePreview, WorktreeMergeDirection, PluginMarketItem,
+  WorktreeOut, WorktreeMergeFile, WorktreeMergePreview, WorktreeMergeDirection, MergeReportOut, PluginMarketItem,
   DbConnectionOut, DbPolicyOut, DebugStatusOut, RepoCandidate,
   DebugSettingsOut,
   ArthasStatusOut, ArthasEntryOut, ArthasProcessOut, ArthasConfigOut,

@@ -27,7 +27,7 @@
     "productName": "chatcoder",
     "copyright": "Copyright © 2026 chatcoder",
     "directories": {
-      "output": "v6",
+      "output": "v7",
       "buildResources": "electron/build"
     },
     "files": [
@@ -35,11 +35,13 @@
       "electron/preload.cjs",
       "electron/pty.cjs",
       "electron/loading.html",
+      "electron/glass-diagnostics.cjs",
       "package.json",
       "node_modules/node-pty/**"
     ],
     "asarUnpack": [
-      "node_modules/node-pty/**"
+      "node_modules/node-pty/**",
+      "node_modules/koffi/**"
     ],
     "extraResources": [
       {
@@ -98,6 +100,7 @@
     ]
   },
   "dependencies": {
-    "electron-updater": "^6.8.9"
+    "electron-updater": "^6.8.9",
+    "koffi": "^2.16.3"
   }
 }

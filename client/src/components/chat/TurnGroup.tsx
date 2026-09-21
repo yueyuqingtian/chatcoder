@@ -17,7 +17,7 @@ import type { TimelineEntry, TurnItem } from "./timeline";
 import { msgText } from "./timeline";
 import { useChatStore } from "../../store/chat";
 import { parseUtc } from "../../utils/time";
-import { MessageImageGrid, MessageFileCards, TokenText, attachmentsOf } from "./AttachmentCard";
+import { MessageImageGrid, MessageFileCards, TokenText, RefChips, refsOf, stripRefLines, attachmentsOf } from "./AttachmentCard";
 
 /** plan-282-1421：turn 的「已结束」状态集合——AI 操作行必须在本轮进入这些状态后才显示。 */
 const TERMINAL_TURN_STATUSES: ReadonlySet<string> = new Set([
@@ -302,8 +302,12 @@ export const TurnGroup = memo(function TurnGroup({
             <MessageImageGrid atts={attachmentsOf(item.msg.content)} />
             <div className="turn-user-bubble">
               <MessageFileCards atts={attachmentsOf(item.msg.content)} />
-              {msgText(item.msg.content) && (
-                <div className="turn-user-text"><TokenText text={msgText(item.msg.content)} /></div>
+              {/* plan-308-1542 需求2：引用芯片 */}
+              <RefChips refs={refsOf(item.msg.content)} />
+              {stripRefLines(msgText(item.msg.content), refsOf(item.msg.content).length > 0) && (
+                <div className="turn-user-text">
+                  <TokenText text={stripRefLines(msgText(item.msg.content), refsOf(item.msg.content).length > 0)} />
+                </div>
               )}
             </div>
             {/* plan-282-1416（问题2 根因 A）：turn 内的非首条用户消息（运行中注入 / 立即发送）
@@ -438,8 +442,12 @@ export const TurnGroup = memo(function TurnGroup({
             <MessageImageGrid atts={attachmentsOf(firstUser.msg.content)} />
             <div className="turn-user-bubble">
               <MessageFileCards atts={attachmentsOf(firstUser.msg.content)} />
-              {msgText(firstUser.msg.content) && (
-                <div className="turn-user-text"><TokenText text={msgText(firstUser.msg.content)} /></div>
+              {/* plan-308-1542 需求2：引用芯片 */}
+              <RefChips refs={refsOf(firstUser.msg.content)} />
+              {stripRefLines(msgText(firstUser.msg.content), refsOf(firstUser.msg.content).length > 0) && (
+                <div className="turn-user-text">
+                  <TokenText text={stripRefLines(msgText(firstUser.msg.content), refsOf(firstUser.msg.content).length > 0)} />
+                </div>
               )}
             </div>
             {/* plan-282-1416（问题2）：门控改本 turn 行状态；最近一条用户消息常显 */}

@@ -2,7 +2,7 @@
 import { create } from "zustand";
 import { api } from "../api/client";
 import { ApiError } from "../api/client";
-import type { ArtifactOut, ArthasEntryOut, AttachmentInfo, DebugStatusOut, FileChangeOut, MessageOut, ModelOut, ProjectOut, ProviderOut, RollbackAffected, RollbackPreviewFile, SessionOut, TaskOut, TurnOut } from "../api/client";
+import type { ArtifactOut, ArthasEntryOut, AttachmentInfo, ComposerRefOut, DebugStatusOut, FileChangeOut, MergeReportOut, MessageOut, ModelOut, ProjectOut, ProviderOut, RollbackAffected, RollbackPreviewFile, SessionOut, TaskOut, TurnOut } from "../api/client";
 import { wsClient, globalWsClient } from "../api/ws";
 import type { ServerEventName } from "@chatcoder/shared/events";
 import type { CompactSummaryPayload } from "@chatcoder/shared/events";
@@ -339,7 +339,20 @@ interface ChatState {
   /** v42: 注入分割标记（见 InjectMark） */
   injectMarks: InjectMark[];
   loading: boolean;
+  /** 系统级错误（后端连接失败 / 启动加载失败 / 配置读写失败）→ 右上角 Toast。
+   *  任务执行/会话运行类错误不得写这里（plan-308-1542 需求1）：它们只进 flowError。 */
   error: string | null;
+  /** 任务执行/会话运行类错误 → **只**在消息流末尾渲染错误卡（不弹右上角 Toast）。
+   *  来源：sendTurn 失败、turn.failed、计划确认失败、重试/回滚/审查失败等。 */
+  flowError: { text: string; turnId: number | null; at: number } | null;
+  /** plan-308-1542 需求3-A：AI 自动合并的实时进度（merge.progress 广播累积）。
+   *  仅在合并弹窗内渲染（像消息流一样实时追加行），done 时带汇总报告。 */
+  mergeProgress: {
+    mergeId: string | null;
+    running: boolean;
+    lines: Array<{ phase: string; text: string; at: number; ok?: boolean | null; path?: string | null; tool?: string | null }>;
+    report: MergeReportOut | null;
+  } | null;
   wsConnected: boolean;
   /** plan-278-1391: 添加同路径已归档项目时的提示（前端弹「恢复并打开」确认框）。 */
   archivedProjectPrompt: { projectId: number; name: string; path: string } | null;
@@ -363,7 +376,7 @@ interface ChatState {
   renameSession: (sessionId: number, title: string) => Promise<void>;
   forkSession: (sessionId: number) => Promise<void>;
 /** plan-547: 返回新 turn id（null=未创建，如运行中入队/发送失败），供队列续发失败回队判断。 */
-sendTurn: (content: string, attachments?: Record<string, unknown>[], reasoningEffort?: string, mode?: string | null, modelId?: number | null) => Promise<number | null>;
+sendTurn: (content: string, attachments?: Record<string, unknown>[], reasoningEffort?: string, mode?: string | null, modelId?: number | null, refs?: ComposerRefOut[]) => Promise<number | null>;
 cancelTurn: () => Promise<void>;
   forceStop: () => Promise<void>;
 resumeTurn: () => Promise<void>;
@@ -402,6 +415,14 @@ resumeTurn: () => Promise<void>;
   /** 清空所有浏览器标注引用。 */
   clearComposerBrowserRefs: () => void;
   clearError: () => void;
+  /** plan-308-1542 需求1：把任务执行类错误投递到消息流（附带归属 turnId，可为 null）。 */
+  setFlowError: (text: string, turnId?: number | null) => void;
+  /** plan-308-1542 需求1：清除消息流错误卡（新一轮开始 / 用户关闭）。 */
+  clearFlowError: () => void;
+  /** plan-308-1542 需求3-A：写入/追加 AI 合并进度（merge.progress 事件消费点）。 */
+  applyMergeProgress: (payload: Record<string, unknown>) => void;
+  /** 重置合并进度（打开合并弹窗时）。 */
+  resetMergeProgress: () => void;
   addMessage: (msg: MessageOut) => void;
   /** v2.2: 请求消息流滚动到某子代理线程首条消息（任务卡步骤穿透）。 */
   requestScrollTo: (target: { threadId?: number; turnId?: number }) => void;
@@ -641,6 +662,10 @@ function _resetSessionState(): Partial<ChatState> {
     isCompacting: false,
     debugState: null,
     arthasState: null,
+    // plan-308-1542 需求1：切换会话时清空消息流错误卡（避免串到别的会话）
+    flowError: null,
+    // 合并进度属弹窗级瞬态，切会话一并清空
+    mergeProgress: null,
     turnStatus: null,
     compactingInfo: null,
     lastCompact: null,
@@ -729,6 +754,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   lastModelId: null,
   loading: false,
   error: null,
+  flowError: null,
+  mergeProgress: null,
   wsConnected: false,
   /** plan-278-1391: 同路径项目已归档提示（默认无）。 */
   archivedProjectPrompt: null,
@@ -1122,7 +1149,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  sendTurn: async (content, attachments, reasoningEffort, mode, modelId) => {
+  sendTurn: async (content, attachments, reasoningEffort, mode, modelId, refs) => {
     const { currentSessionId, isRunning } = get();
     if (!currentSessionId) return null;
     // 空态新会话可能在 WS 建连前就收到首条消息，先本地投影标题，避免等待事件丢失。
@@ -1197,7 +1224,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
     _startHeartbeat();
     try {
-      const turn = await api.createTurn({ session_id: currentSessionId, content, attachments, reasoning_effort: reasoningEffort, mode, model_id: modelId ?? undefined });
+      const turn = await api.createTurn({ session_id: currentSessionId, content, attachments, reasoning_effort: reasoningEffort, mode, model_id: modelId ?? undefined, refs });
       _clearPendingDeltas(); // v6.5: 新 turn 清掉上一轮残留的完成标记，保证思考/正文从头实时流式
       set((s) => ({
         turns: [...s.turns, turn],
@@ -1216,9 +1243,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // v23: 发送失败回退乐观运行态（左侧转圈同步摘除）
       _clearHeartbeat();
       set((s) => ({
-        error: String(e), isRunning: false, runningTurnId: null, pendingPlan: null, pendingPlanTurn: null,
+        isRunning: false, runningTurnId: null, pendingPlan: null, pendingPlanTurn: null,
         sessions: s.sessions.map((x) => (x.id === currentSessionId ? setSessionRunning(x, false) : x)),
       }));
+      // plan-308-1542 需求1：发送失败属任务执行类错误——只进消息流错误卡，不弹右上角 Toast。
+      get().setFlowError(String(e), null);
       return null;
     } finally {
       _sendingGuard = false;
@@ -1346,7 +1375,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           _clearHeartbeat();
           set({ isRunning: false, runningTurnId: null });
         }
-        set({ error: msg });
+        // plan-308-1542 需求1：计划确认/执行失败属任务执行类——只进消息流
+        get().setFlowError(msg, pending.turnId ?? null);
       }
     }
   },
@@ -1358,7 +1388,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       await api.retryTask(task.turn_id, taskId);
       await get().refreshTasks();
     } catch (e) {
-      set({ error: String(e) });
+      // plan-308-1542 需求1：重试失败属任务执行类——只进消息流
+      get().setFlowError(`重试失败：${String(e)}`, task.turn_id);
     }
   },
 
@@ -1395,7 +1426,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch { /* 非关键路径，忽略 */ }
   },
 
-  // v11: 批量审核——乐观更新本地状态后 PUT 持久化；失败回滚并 toast 提示。
+  // v11: 批量审核——乐观更新本地状态后 PUT 持久化；失败回滚并提示（消息流错误卡）。
   reviewFiles: async (turnId, paths, reviewed) => {
     const prev = get().turnChanges[turnId] ?? [];
     set((s) => ({
@@ -1410,7 +1441,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       await api.reviewFiles(turnId, paths, reviewed);
     } catch (e) {
       set((s) => ({ turnChanges: { ...s.turnChanges, [turnId]: prev } }));
-      set({ error: String(e) });
+      // plan-308-1542 需求1：审核写入失败属任务执行类——只进消息流
+      get().setFlowError(`保存审核状态失败：${String(e)}`, turnId);
     }
   },
 
@@ -1644,6 +1676,43 @@ export const useChatStore = create<ChatState>((set, get) => ({
   removeComposerBrowserRef: (id) => set((s) => ({ composerBrowserRefs: s.composerBrowserRefs.filter((r) => r.id !== id) })),
   clearComposerBrowserRefs: () => set({ composerBrowserRefs: [] }),
   clearError: () => set({ error: null }),
+  setFlowError: (text, turnId = null) => set({ flowError: { text: String(text), turnId, at: Date.now() } }),
+  clearFlowError: () => set({ flowError: null }),
+  resetMergeProgress: () => set({ mergeProgress: null }),
+  applyMergeProgress: (payload) => set((s) => {
+    // plan-308-1542 需求3-A：把 merge.progress 累积成"像消息流一样"的进度行。
+    const mergeId = String(payload.merge_id ?? "");
+    const phase = String(payload.phase ?? "");
+    const detail = String(payload.detail ?? payload.reason ?? "");
+    const path = payload.path != null ? String(payload.path) : null;
+    const tool = payload.tool != null ? String(payload.tool) : null;
+    const prev = s.mergeProgress;
+    // 新的 merge_id 到来即开启一轮新进度
+    const base = prev && prev.mergeId === mergeId
+      ? prev
+      : { mergeId, running: true, lines: [], report: null };
+    const okVal = typeof payload.ok === "boolean" ? payload.ok : null;
+    // 进度行文本：阶段 + 文件 + 工具 + 说明（紧凑可读）
+    const labelMap: Record<string, string> = {
+      prepare: "准备", detect: "git 分析", file_start: "开始", tool: "工具",
+      file_done: "完成", apply: "提交", done: "结束", error: "出错",
+    };
+    let text = `[${labelMap[phase] ?? phase}]`;
+    if (payload.index != null && payload.total != null) text += ` ${payload.index}/${payload.total}`;
+    if (path) text += ` ${path}`;
+    if (tool) text += ` · ${tool}`;
+    if (detail) text += ` — ${detail}`;
+    if (payload.elapsed_ms != null) text += ` (${payload.elapsed_ms}ms)`;
+    const lines = [...base.lines, { phase, text, at: Date.now(), ok: okVal, path, tool }];
+    return {
+      mergeProgress: {
+        mergeId,
+        running: phase !== "done" && phase !== "error",
+        lines: lines.slice(-500),  // 上限防内存膨胀
+        report: (payload.summary as MergeReportOut | null) ?? base.report,
+      },
+    };
+  }),
 
   requestScrollTo: (target) => set({ scrollTarget: { ...target } }),
   clearScrollTarget: () => set({ scrollTarget: null }),
@@ -1883,6 +1952,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
             usageCacheTotals: { inputSum: 0, cachedSum: 0, samples: 0 },
             // v35: 新 turn 开始时清掉上一轮残留的重试状态提示
             turnStatus: null,
+            // plan-308-1542 需求1：新一轮开始即清掉上一轮的消息流错误卡
+            flowError: null,
             // v42: 新 turn 清空上一 turn 的注入分割标记（渲染回归纯 id 序）
             injectMarks: [],
             // v26: 新 turn 开始 = 旧方案提案失效，隐藏旧方案卡片（task.proposed 后再展示新卡片）
@@ -2002,8 +2073,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break;
       }
       case "turn.failed": {
-        // v45: 执行失败——必须可视化：写入全局错误横幅 + 复位运行态 + 刷新消息
+        // v45: 执行失败——必须可视化：写入消息流错误卡 + 复位运行态 + 刷新消息
         // （后端已补错误消息；此前 failed 与中断共用事件导致静默终止）。
+        // plan-308-1542 需求1：任务执行失败属"任务执行类错误"——只进消息流，不弹右上角 Toast。
         const turnId = Number(payload.turn_id);
         const failReason = String(
           (payload as { error?: unknown; summary?: unknown }).error
@@ -2013,7 +2085,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // v2.2: 仅当失败的就是当前运行 turn 才复位运行态（迟到事件同样不串扰）
         const clearsRunningFail = get().runningTurnId == null || get().runningTurnId === turnId;
         set((s) => ({
-          error: failReason,
           turnStatus: null,
           turns: s.turns.map((t) => (t.id === turnId
             ? { ...t, status: "failed", summary: t.summary ?? failReason, completed_at: t.completed_at ?? new Date().toISOString() }
@@ -2022,6 +2093,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             ? { runningTurnId: null, isRunning: false, streamingBuffers: {}, thinkingBuffers: {} }
             : {}),
         }));
+        get().setFlowError(failReason, turnId);
         get().refreshMessages();
         get().refreshTurns();
         get().refreshTasks();
@@ -2343,6 +2415,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           context_window: Number(payload.context_window ?? 0),
           agent_name: String(payload.agent_name ?? "main"),
           breakdown: (payload.breakdown as Record<string, number> | undefined) ?? undefined,
+          /* plan-282-0: 透传占用口径来源——此前该字段定义了却从未赋值，
+           * 圆环无法区分「API 真实占用」与「压缩后本地估算」，用户在压缩后看到的
+           * 估算值（est_after_compact）与真实占用可能相差数倍（实测估算 14.4% /
+           * 真实 69%），造成"压缩后占用很低"的错觉。 */
+          source: String(payload.usage_source ?? "") || undefined,
         };
         // plan-282-1421（第10项）：累加会话缓存统计，供"平均缓存命中率"使用。
         // 仅统计真实 API 样本（cached_input>0 或 prompt>0 才有意义），避免估算样本污染均值。
@@ -2358,6 +2435,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
               }
             : prevTotals,
         });
+        break;
+      }
+      case "merge.progress": {
+        /* plan-308-1542 需求3-A：AI 自动合并的实时进度。
+         *
+         * 后端 ai_merge_all 边执行边广播（prepare / detect / file_start / tool /
+         * file_done / done），这里累积成进度行供合并弹窗渲染；
+         * done 携带的 summary 作为汇总报告。
+         * 会话归属校验：事件带 session_id 时只接受当前会话的（避免其它会话的合并串入）。
+         */
+        const mpSid = Number(payload.session_id ?? 0);
+        if (mpSid && mpSid !== get().currentSessionId) break;
+        get().applyMergeProgress(payload);
         break;
       }
       case "debug.paused": {

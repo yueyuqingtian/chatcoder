@@ -142,10 +142,39 @@ export interface WorktreeMergeFile {
   path: string;
   status: "added" | "modified" | "deleted" | "renamed" | "copied";
   conflict: boolean;
-  /** 自动三方合并后的内容（冲突时含 <<<<<<< 标记） */
+  /** 自动三方合并后的内容（Git 真冲突时为 git diff3 标记内容） */
   merged?: string | null;
   /** 是否可自动合并（无需人工/AI 介入） */
   has_auto_merge?: boolean;
+  /** plan-308-1542：相对 base 的改动侧，供 UI 精确提示"仅一侧改动，已自动采用" */
+  change_side?: "ours" | "theirs" | "both" | "none";
+  /** 判定/降级原因（如"git 无法处理，已采用来源侧"） */
+  reason?: string;
+  /** 是否为二进制文件（git 无法自动合并，需人工选侧） */
+  binary?: boolean;
+  /** 是否必须人工处理（二进制冲突等） */
+  needs_manual?: boolean;
+}
+
+/** plan-308-1542 需求3-A：AI 自动合并的汇总报告（merge.progress 的 done 载荷） */
+export interface MergeReportOut {
+  total: number;
+  /** 由 git 干净合入（含单侧改动） */
+  git: number;
+  /** AI 介入并解决 */
+  ai: number;
+  /** 待人工处理 */
+  conflicted: number;
+  failed: number;
+  skipped: number;
+  elapsed_ms: number;
+  engine?: string;
+  files: Array<{
+    path: string;
+    result: "git" | "ai" | "manual" | "failed" | "skipped";
+    reason?: string;
+    ms?: number;
+  }>;
 }
 
 /** 合并方向：to_main=工作树→主工作区；from_main=主工作区→工作树 */
@@ -162,6 +191,8 @@ export interface WorktreeMergePreview {
   source_dirty?: boolean;
   /** 目标侧是否存在未提交改动 */
   target_dirty?: boolean;
+  /** plan-308-1542：实际使用的合并引擎（git=git 原生；fallback=旧版 git 降级） */
+  engine?: "git" | "fallback" | string;
 }
 
 /** plan-282-1441（#7）：数据库连接（密码不回传，只有 has_password） */

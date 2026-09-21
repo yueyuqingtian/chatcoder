@@ -29,6 +29,8 @@ export function WorktreesPanel() {
   const [worktrees, setWorktrees] = useState<WorktreeOut[]>([]);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
+  /** plan-308-1542 需求3-C：删除/内联操作的面板内提示（不再弹全局 Toast）。 */
+  const [notice, setNotice] = useState<string | null>(null);
   /** 新建工作树：目标项目 + 表单 */
   const [createFor, setCreateFor] = useState<ProjectOut | null>(null);
   const [name, setName] = useState("");
@@ -129,14 +131,26 @@ export function WorktreesPanel() {
   const handleDelete = async (force: boolean) => {
     if (!dropTarget) return;
     setBusy(true);
+    setNotice(null);
     try {
-      await api.deleteWorktreeProject(dropTarget.id, force);
+      const res = await api.deleteWorktreeProject(dropTarget.id, force);
+      const n = res.deleted_sessions ?? 0;
       setDropTarget(null);
+      setNotice(`已删除工作树${n > 0 ? `，并级联删除 ${n} 个会话及其消息` : ""}`);
       await load();
+      // plan-308-1542 需求3-C：被删工作树可能正是当前选中项目/会话所在处——
+      // detached 时清理选中态，避免左侧面板指向已不存在的项目。
+      if (res.detached) {
+        const store = useChatStore.getState();
+        if (store.currentProjectId === dropTarget.id) {
+          useChatStore.setState({ currentProjectId: null, currentSessionId: null });
+        }
+      }
       await useChatStore.getState().loadBootstrap();
     } catch (e) {
-      // 未提交变更时后端会拒绝，提示用户可强制删除
-      useChatStore.setState({ error: String(e) });
+      // 未提交变更时后端会拒绝，提示用户可强制删除。
+      // 走面板内联提示（不弹全局 Toast）——删除属面板内操作，就地反馈更清晰。
+      setNotice(`删除失败：${String(e)}`);
     } finally { setBusy(false); }
   };
 
@@ -150,7 +164,32 @@ export function WorktreesPanel() {
         <button className="btn btn-ghost btn-sm" onClick={() => void load()} disabled={loading}>
           <IconRefresh size={13} /> 刷新
         </button>
+        {/* plan-308-1542 修复：一键清理失效工作树（目录/分支已被外部删除，但左面板仍残留的僵尸项） */}
+        <button
+          className="btn btn-ghost btn-sm"
+          disabled={busy}
+          title="清理目录已不存在、但仍登记在库里的工作树（左面板删不掉的残留项）"
+          onClick={async () => {
+            setBusy(true);
+            setNotice(null);
+            try {
+              const res = await api.cleanupStaleWorktrees();
+              setNotice(res.cleaned > 0
+                ? `已清理 ${res.cleaned} 个失效工作树：${res.stale.map((s) => s.name).join("、")}`
+                : "没有发现失效的工作树");
+              await load();
+              // 左面板同步刷新（否则被清理的项仍显示在项目列表里）
+              await useChatStore.getState().loadBootstrap();
+            } catch (e) {
+              setNotice(`清理失败：${String(e)}`);
+            } finally { setBusy(false); }
+          }}
+        >
+          清理失效工作树
+        </button>
       </div>
+
+      {notice && <div className="worktrees-notice">{notice}</div>}
 
       {projects.length === 0 && !loading && (
         <div className="navpage-empty">暂无项目。请先在左侧添加一个 git 项目。</div>

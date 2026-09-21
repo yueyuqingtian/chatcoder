@@ -59,6 +59,10 @@ let BACKEND_PORT = Number(process.env.CHATCODER_PORT || DEFAULT_PORT);
 let backendProcess = null;
 let mainWindow = null;
 let backendReady = false;
+// plan-308-1555 M0：记录主进程侧实际下发的材质参数（诊断与窗口报告用）
+let _glassRecorded = { material: null, backgroundColor: null, transparent: null, at: null };
+// plan-308-1555 M5：玻璃自检模式（临时调淡面板，肉眼判定桌面是否混入）
+let _glassSelfCheck = false;
 
 // ── 安全写日志(打包后无 stdout 也不崩溃) + 写入文件 ──
 const LOG_DIR = app.isPackaged
@@ -261,13 +265,258 @@ function waitForBackend(maxAttempts = 120, intervalMs = 500) {
   });
 }
 
-// ── 毛玻璃（plan-548）──
-// Win11 才支持 DWM backgroundMaterial(acrylic)，且与 transparent: true 互斥——
-// Win11 必须建非透明窗口走系统材质；Win10/mac 保持透明窗口 + CSS 半透明降级。
+// ── 防御式模块加载（plan-308-1555 修复）──
+// 教训：上一轮新增 electron/glass-diagnostics.cjs 后**忘记加入 package.json 的 build.files 白名单**，
+// 打包产物里缺该文件 → 主进程 require 抛 MODULE_NOT_FOUND → ready-to-show 里的
+// 圆角/淡入等后续步骤全部中断，窗口停在"已显示但 opacity=0"的状态：
+// 任务栏有图标、DWM 预览能渲染出内容，但肉眼看不见、也点不开。
+// 现在统一用 defensiveRequire：任何可选模块缺失都只降级，**绝不影响窗口显示**。
+let _gdCache;
+function glassDiag() {
+  if (_gdCache !== undefined) return _gdCache;
+  try {
+    _gdCache = require("./glass-diagnostics.cjs");
+  } catch (err) {
+    logErr("[chatcoder] glass-diagnostics 加载失败（将降级，不影响启动）:", err && err.message);
+    _gdCache = null;
+  }
+  return _gdCache;
+}
+
+// ── 毛玻璃（plan-548，plan-308-1542 需求4 强化为"框架级"）──
+// 用户反馈："要做到微微透出桌面应该要软件框架支持吧，仅仅靠样式应该做不到透出软件"。
+// 事实：Electron 31 只在 **Win11 22000+** 提供 backgroundMaterial('acrylic')；Win10
+// 没有任何内建模糊 API，纯 CSS 半透明只能看到"未模糊的桌面"，观感不成立。
+// 因此这里引入**系统级模糊后端**三通道：
+//   win11      → DWM acrylic（非透明窗口，系统材质）
+//   win32 旧版 → SetWindowCompositionAttribute + ACCENT_ENABLE_BLURBEHIND（透明窗口 + 系统模糊）
+//   darwin     → setVibrancy('sidebar')
+// 失败/不支持 → 明确降级（返回 backend="none" + reason），设置页据此提示用户。
 function isWin11Plus() {
   if (process.platform !== "win32") return false;
   const m = /^10\.0\.(\d+)/.exec(os.release());
   return !!m && Number(m[1]) >= 22000;
+}
+
+/** 探测可用的模糊后端（结果缓存：系统能力在运行期不变）。 */
+let _blurBackend = null;
+function blurBackend() {
+  if (_blurBackend) return _blurBackend;
+  if (process.platform === "darwin") {
+    _blurBackend = { backend: "vibrancy", reason: "" };
+  } else if (process.platform === "win32") {
+    if (isWin11Plus()) {
+      _blurBackend = { backend: "dwm-acrylic", reason: "" };
+    } else {
+      // Win10：需要 FFI 调 user32.SetWindowCompositionAttribute
+      const ffi = loadAccentFfi();
+      _blurBackend = ffi
+        ? { backend: "win32-accent", reason: "", _ffi: ffi }
+        : { backend: "none", reason: "当前系统无可用模糊后端（Win10 需 koffi 模块，Win11 才支持 DWM acrylic）" };
+    }
+  } else {
+    _blurBackend = { backend: "none", reason: `平台 ${process.platform} 不支持系统级模糊` };
+  }
+  return _blurBackend;
+}
+
+/** 尝试加载 FFI（koffi）用于 Win10 ACCENT 模糊；不可用返回 null（不抛错）。 */
+function loadAccentFfi() {
+  let koffi;
+  try {
+    koffi = require("koffi");
+  } catch (err) {
+    logErr("[chatcoder] glass: koffi 不可用，Win10 系统模糊禁用:", err && err.message);
+    return null;
+  }
+  try {
+    const user32 = koffi.load("user32.dll");
+    // 结构体定义交给 koffi（与实测验证的写法一致；手工 Buffer 容易错位）
+    const ACCENT_POLICY = koffi.struct("ACCENT_POLICY", {
+      AccentState: "int",
+      AccentFlags: "int",
+      GradientColor: "uint",
+      AnimationId: "int",
+    });
+    const WCAD = koffi.struct("WINDOWCOMPOSITIONATTRIBDATA", {
+      Attribute: "int",
+      Data: "void*",
+      SizeOfData: "size_t",
+    });
+    const SetWindowCompositionAttribute = user32.func(
+      "bool __stdcall SetWindowCompositionAttribute(intptr hwnd, _Inout_ WINDOWCOMPOSITIONATTRIBDATA* data)");
+    return { koffi, SetWindowCompositionAttribute, ACCENT_POLICY, WCAD };
+  } catch (err) {
+    logErr("[chatcoder] glass: koffi 绑定 user32 失败:", err && err.message);
+    return null;
+  }
+}
+
+/**
+ * 应用/关闭毛玻璃（统一入口）。
+ *
+ * plan-308-1555 关键改动：每次应用后**回读校验** DWM 实际值，
+ * 并把（下发的材质 + 回读结果）写入 `_glassRecorded` 与日志——
+ * 这是本轮与历史做法的根本差别：不再以"API 返回 ok"自证成功。
+ *
+ * @returns {{ok: boolean, backend: string, reason?: string, verified?: number|null}}
+ */
+function applyGlass(win, on) {
+  if (!win || win.isDestroyed()) return { ok: false, backend: "none", reason: "窗口不可用" };
+  const cap = blurBackend();
+  let res;
+  try {
+    if (cap.backend === "dwm-acrylic") {
+      if (typeof win.setBackgroundMaterial === "function") {
+        win.setBackgroundMaterial(on ? "acrylic" : "none");
+        res = { ok: true, backend: cap.backend };
+      } else {
+        res = { ok: false, backend: "none", reason: "Electron 不支持 setBackgroundMaterial" };
+      }
+    } else if (cap.backend === "vibrancy") {
+      if (typeof win.setVibrancy === "function") {
+        win.setVibrancy(on ? "sidebar" : null);
+        res = { ok: true, backend: cap.backend };
+      } else {
+        res = { ok: false, backend: "none", reason: "Electron 不支持 setVibrancy" };
+      }
+    } else if (cap.backend === "win32-accent") {
+      res = _applyWin32Accent(win, cap._ffi, on);
+    } else {
+      res = { ok: false, backend: "none", reason: cap.reason || "无可用模糊后端" };
+    }
+  } catch (err) {
+    logErr("[chatcoder] glass: 应用失败:", err && err.message);
+    res = { ok: false, backend: cap.backend, reason: err && err.message };
+  }
+
+  // 回读校验：DWM 实际生效值（0=auto / 1=none / 2=mica / 3=acrylic / 4=tabbed）
+  let verified = null;
+  try {
+    const gd = glassDiag();
+    const rb = gd ? gd.dwmReadBack(win) : { ok: false, value: null };
+    verified = rb.ok ? rb.value : null;
+    if (on && rb.ok && rb.value < 2) {
+      // API 被接受但 DWM 未启用 → 明确标记为未生效（历史上正是这种"假成功"误导了排查）
+      logErr(`[chatcoder] glass: 回读校验未生效！下发=acrylic 但系统实际=${rb.name}(${rb.value})`);
+      res = { ...res, ok: false, reason: `系统未启用材质（回读 ${rb.name}）` };
+    }
+  } catch (err) {
+    logErr("[chatcoder] glass: 回读校验异常:", err && err.message);
+  }
+
+  _glassRecorded = {
+    material: on ? "acrylic" : "none",
+    backgroundColor: on ? "#00000000" : null,
+    transparent: false,
+    verifiedBackdrop: verified,
+    at: new Date().toISOString(),
+  };
+  log("[chatcoder] glass: applied =", JSON.stringify({ ...res, verified }));
+  return { ...res, verified };
+}
+
+/** Win10：SetWindowCompositionAttribute(ACCENT_ENABLE_BLURBEHIND)。 */
+function _applyWin32Accent(win, ffi, on) {
+  try {
+    const hwnd = win.getNativeWindowHandle();
+    // 取 HWND 数值（Windows 上传回的是 little-endian 指针）
+    let hwndVal = 0;
+    if (Buffer.isBuffer(hwnd)) {
+      hwndVal = hwnd.length >= 8 ? Number(hwnd.readBigUInt64LE(0)) : hwnd.readUInt32LE(0);
+    } else if (typeof hwnd === "number") {
+      hwndVal = hwnd;
+    }
+    // AccentState: 4 = ACCENT_ENABLE_BLURBEHIND（系统模糊）；0 = 关闭
+    const policy = {
+      AccentState: on ? 4 : 0,
+      AccentFlags: 0,
+      // GradientColor 用 0xAABBGGRR（深色半透明，与深色主题协调）
+      GradientColor: on ? 0x9916181d : 0,
+      AnimationId: 0,
+    };
+    // koffi.encode 到 Buffer，再取指针交给 WCAD.Data（与实测验证写法一致）
+    const policyBuf = Buffer.alloc(ffi.koffi.sizeof(ffi.ACCENT_POLICY));
+    ffi.koffi.encode(policyBuf, ffi.ACCENT_POLICY, policy);
+    const data = {
+      Attribute: 19, // WCA_ACCENT_POLICY
+      Data: ffi.koffi.as(policyBuf, "void*"),
+      SizeOfData: ffi.koffi.sizeof(ffi.ACCENT_POLICY),
+    };
+    const ok = ffi.SetWindowCompositionAttribute(Number(hwndVal), data);
+    if (!ok) {
+      return { ok: false, backend: "win32-accent", reason: "SetWindowCompositionAttribute 返回 false" };
+    }
+    return { ok: true, backend: "win32-accent" };
+  } catch (err) {
+    return { ok: false, backend: "win32-accent", reason: err && err.message };
+  }
+}
+
+// ── plan-308-1555 M6：DWM 原生窗口圆角 ──
+// "窗口缩小后变成直角边框"的根因：本应用是 frame:false 的无边框窗口，
+// Windows **不会**自动给无边框窗口加圆角；CSS 的 border-radius 只在窗口背景透明处才看得出。
+// zcode 的做法（已实测其实现）：build ≥ 22000 使用系统原生圆角，并把"是否最大化"
+// 同步给渲染层（最大化时为直角，避免四角露出桌面）。
+const DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+const DWMW_CORNER = { DEFAULT: 0, DONOTROUND: 1, ROUND: 2, ROUNDSMALL: 3 };
+
+/** 是否支持系统原生圆角（与 zcode 的 supportsNativeWindowsRoundedCorners 同口径） */
+function supportsNativeRoundedCorners() {
+  const gd = glassDiag();
+  if (!gd) return false;
+  try {
+    const w = gd.parseWindowsBuild(os.release());
+    return Boolean(w && w.isWindows && w.build >= 22000);
+  } catch {
+    return false;
+  }
+}
+
+/** 设置圆角偏好：最大化/全屏时必须 DONOTROUND（否则四角会露出桌面）。 */
+function applyWindowCorners(win) {
+  if (!win || win.isDestroyed()) return { ok: false, reason: "窗口不可用" };
+  if (!supportsNativeRoundedCorners()) {
+    return { ok: false, reason: "系统 build < 22000，不支持 DWMWA_WINDOW_CORNER_PREFERENCE" };
+  }
+  const gd = glassDiag();
+  if (!gd) return { ok: false, reason: "glass-diagnostics 不可用" };
+  const ffi = gd.loadDwmFfi();
+  const hwnd = gd.hwndOf(win);
+  if (!ffi || hwnd === null) return { ok: false, reason: "FFI 或 HWND 不可用" };
+  try {
+    const maximized = win.isMaximized() || win.isFullScreen();
+    const buf = Buffer.alloc(4);
+    buf.writeInt32LE(maximized ? DWMW_CORNER.DONOTROUND : DWMW_CORNER.ROUND, 0);
+    const hr = ffi.DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, buf, 4);
+    if (hr !== 0) return { ok: false, reason: `DwmSetWindowAttribute 失败(hr=0x${(hr >>> 0).toString(16)})` };
+    return { ok: true, preference: maximized ? "DONOTROUND" : "ROUND" };
+  } catch (err) {
+    return { ok: false, reason: err && err.message };
+  }
+}
+
+/** 把"是否最大化/是否有原生圆角"同步给渲染层（CSS 据此决定画不画圆角）。 */
+function syncWindowChromeState(win) {
+  if (!win || win.isDestroyed()) return;
+  const maximized = win.isMaximized() || win.isFullScreen();
+  const native = supportsNativeRoundedCorners();
+  try {
+    void win.webContents.executeJavaScript(
+      `(() => { const r = document.documentElement;`
+      + ` r.setAttribute('data-maximized', ${maximized ? "'1'" : "'0'"});`
+      + ` r.setAttribute('data-native-corners', ${native ? "'1'" : "'0'"});`
+      + ` return true; })()`, true);
+  } catch { /* 渲染层未就绪时忽略 */ }
+  applyWindowCorners(win);
+}
+
+/** 在窗口状态变化后重放材质（最大化/还原/显示后 DWM/ACCENT 状态可能丢失）。 */
+function reapplyGlass(win) {
+  if (!win || win.isDestroyed()) return;
+  syncWindowChromeState(win); // 圆角与最大化态：无论玻璃是否开启都要同步
+  if (!readGlassPref()) return;
+  applyGlass(win, true);
 }
 
 // 玻璃偏好落盘：渲染进程偏好存 localStorage 主进程读不到，而 acrylic 材质必须
@@ -299,6 +548,7 @@ function writeThemePref(theme) {
 function createWindow() {
   const win11 = isWin11Plus();
   const glassOn = win11 && readGlassPref();
+  const cap = blurBackend();
   // 启动期主题：优先用户上次偏好，否则跟随系统（loading 页与窗口底色保持一致，避免闪色）
   const themePref = readThemePref();
   const lightStart = themePref ? themePref === "light" : !nativeTheme.shouldUseDarkColors;
@@ -308,8 +558,9 @@ function createWindow() {
     minWidth: 960,
     minHeight: 640,
     frame: false,
-    // plan-548: Win11 非透明窗口 + DWM acrylic（与 transparent 互斥）；glass off 时
-    // 显式 "none"（默认 auto 可能被 DWM 施加 Mica）；Win10/mac 维持透明窗口原状。
+    // plan-548 + plan-308-1542：Win11 非透明窗口 + DWM acrylic（与 transparent 互斥）；
+    // Win10 仍走透明窗口（系统模糊在 ready-to-show 后由 ACCENT 通道施加）；
+    // glass off 时显式 "none"（默认 auto 可能被 DWM 施加 Mica）。
     transparent: !win11,
     backgroundMaterial: win11 ? (glassOn ? "acrylic" : "none") : undefined,
     backgroundColor: win11 ? (glassOn ? "#00000000" : (lightStart ? "#f2f3f7" : "#16181d")) : undefined,
@@ -327,15 +578,120 @@ function createWindow() {
       webviewTag: true,
     },
   });
+  // plan-308-1555 M7：开屏 loading.html 需要知道"毛玻璃是否开启"以决定玻璃/纯色样式
+  const loadingGlassQuery = readGlassPref() ? "1" : "0";
+  // 说明（事故复盘）：这里曾经做过"窗口级 setOpacity(0) + 渐进到 1"的整窗淡入，
+  // 一旦后续任一步骤抛异常（上一轮为打包漏文件），窗口会永久停在 opacity=0——
+  // 表现为"任务栏有图标、预览有内容，但看不见也点不开"。
+  // 现已移除窗口级淡入：开屏的淡入由 loading.html 页面内完成（观感一致），
+  // 主进程不再碰窗口不透明度，从根上消除"窗口不可见"的可能。
+  log("[chatcoder] glass: backend =", cap.backend, cap.reason ? `(reason: ${cap.reason})` : "");
+
   mainWindow.once("ready-to-show", () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
-    mainWindow.show();
+    // ① 显示窗口——这一步之后窗口必须是可见可交互的
+    try {
+      mainWindow.show();
+    } catch (err) {
+      logErr("[chatcoder] 显示窗口失败:", err && err.message);
+    }
+    // ② 保险：显式把不透明度钉到 1。
+    //    plan-308-1555 事故复盘：此前这里做了"窗口级 setOpacity(0) 淡入"，
+    //    而紧邻的 require("./glass-diagnostics.cjs") 因打包漏文件抛异常，
+    //    导致后续"升回 1"的代码没执行 → 窗口永远停在 opacity=0：
+    //    任务栏有图标、DWM 预览能渲染内容，但肉眼看不见也点不开。
+    //    现在**彻底移除窗口级淡入**（页面内 loading.html 已有淡入，观感无损），
+    //    并把这一行作为"窗口一定能被看见"的硬保证。
+    try {
+      if (typeof mainWindow.setOpacity === "function") mainWindow.setOpacity(1);
+    } catch (err) {
+      logErr("[chatcoder] 设置窗口不透明度失败:", err && err.message);
+    }
+    // ③ 装饰性步骤逐个独立 try：任一失败都不得影响窗口可用性
+    try {
+      // plan-308-1555 M6：首次同步圆角与最大化态（无边框窗口不会自动获得系统圆角）
+      syncWindowChromeState(mainWindow);
+    } catch (err) {
+      logErr("[chatcoder] 窗口圆角同步失败（不影响使用）:", err && err.message);
+    }
+    try {
+      // plan-308-1542 需求4：非 Win11 的系统模糊必须在窗口可见后施加
+      // （ACCENT/vibrancy 依赖已创建的 HWND；acrylic 已在构造参数中生效）。
+      if (glassOn && cap.backend !== "dwm-acrylic") {
+        const r = applyGlass(mainWindow, true);
+        log("[chatcoder] glass: apply →", JSON.stringify(r));
+      }
+    } catch (err) {
+      logErr("[chatcoder] 玻璃材质应用失败（不影响使用）:", err && err.message);
+    }
   });
 
-  // 先加载本地 loading.html(不用 data: URL)；query 注入主题供启动页深浅色适配
+  // 兜底（plan-308-1555 修复）：即使 ready-to-show 从未触发（页面加载失败等），
+  // 也不能让窗口停留在不可见状态——超时后强制显示并把不透明度钉到 1。
+  setTimeout(() => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    try {
+      if (!mainWindow.isVisible()) {
+        logErr("[chatcoder] ready-to-show 超时，强制显示窗口（兜底）");
+        mainWindow.show();
+      }
+      if (typeof mainWindow.setOpacity === "function") mainWindow.setOpacity(1);
+    } catch { /* ignore */ }
+  }, 8000);
+  // 窗口状态变化后重放材质（最大化/还原会让 DWM/ACCENT 状态丢失）
+  for (const ev of ["show", "restore", "unmaximize", "focus"]) {
+    mainWindow.on(ev, () => reapplyGlass(mainWindow));
+  }
+  // plan-308-1555 M6：圆角与最大化态必须在这些事件上同步——
+  // 最大化时圆角要变直角（否则四角露出桌面）；还原/进入全屏同理。
+  for (const ev of ["maximize", "unmaximize", "enter-full-screen", "leave-full-screen"]) {
+    mainWindow.on(ev, () => {
+      syncWindowChromeState(mainWindow);
+      if (readGlassPref()) reapplyGlass(mainWindow);
+    });
+  }
+  // plan-308-1555 M2：resize 也会丢材质（每帧重放代价高，节流 250ms）；
+  // 显示器 DPI/分辨率变化后同样需要重放（多屏场景常见）
+  let _resizeTimer = null;
+  mainWindow.on("resize", () => {
+    if (_resizeTimer) clearTimeout(_resizeTimer);
+    _resizeTimer = setTimeout(() => { _resizeTimer = null; reapplyGlass(mainWindow); }, 250);
+  });
+  try {
+    const { screen } = require("electron");
+    screen.on("display-metrics-changed", () => reapplyGlass(mainWindow));
+  } catch { /* 非致命：拿不到 screen 模块时跳过 */ }
+
+  // plan-308-1555 M0：启动即打印一次诊断结论（历史教训：只记"ok"不够，
+  // 必须记录**系统回读值**才能在事后判定材质到底有没有生效）
+  mainWindow.webContents.once("did-finish-load", async () => {
+    try {
+      const gd = glassDiag();
+      if (!gd) return;
+      const env = gd.envReport(app);
+      const rb = gd.dwmReadBack(mainWindow);
+      const winInfo = gd.windowReport(mainWindow, _glassRecorded);
+      log("[chatcoder] glass: env =", JSON.stringify({
+        release: env.release,
+        windows: env.windows,
+        electron: env.electron,
+        chrome: env.chrome,
+        isPackaged: env.isPackaged,
+      }));
+      log("[chatcoder] glass: window =", JSON.stringify(winInfo));
+      log("[chatcoder] glass: dwm-readback =", JSON.stringify(rb));
+    } catch (err) {
+      logErr("[chatcoder] glass: 启动诊断失败:", err && err.message);
+    }
+  });
+
+  // 先加载本地 loading.html(不用 data: URL)；query 注入主题与毛玻璃开关，
+  // 供启动页做深浅色与"玻璃/纯色"两种样式适配（plan-308-1555 M7）
   const loadingPath = path.join(__dirname, "loading.html");
   if (fs.existsSync(loadingPath)) {
-    mainWindow.loadFile(loadingPath, { query: { theme: lightStart ? "light" : "dark" } });
+    mainWindow.loadFile(loadingPath, {
+      query: { theme: lightStart ? "light" : "dark", glass: loadingGlassQuery },
+    });
   }
 
   // 诊断
@@ -418,6 +774,56 @@ ipcMain.handle("dialog:selectFiles", async (_e, filters, opts) => {
 // ── IPC:后端端口透传（v2.1: 前端 BASE 去硬编码）──
 ipcMain.handle("backend:getPort", () => BACKEND_PORT);
 
+// ── plan-308-1555 M0：毛玻璃诊断（把"改了看不到"变成"改完能读到确切结论"）──
+// 历史十几轮失败的根因是缺少可验证反馈环：只能拿到"API 返回 ok"，
+// 拿不到"像素层有没有把桌面混进来"。此处提供**回读**式自证。
+ipcMain.handle("window:glassDiagnostics", async () => {
+  const gd = glassDiag();
+  const win = mainWindow;
+  if (!gd) {
+    return {
+      ok: false,
+      backend: blurBackend().backend,
+      conclusion: { verdict: "unknown", reason: "glass-diagnostics 模块不可用", line: "diagnostics-unavailable" },
+      line: "diagnostics-unavailable",
+    };
+  }
+  const env = gd.envReport(app);
+  const wrep = gd.windowReport(win, _glassRecorded);
+  // FFI 回读：DWM 实际生效的 backdrop 类型（唯一权威判据）
+  const dwm = gd.dwmReadBack(win);
+  // 渲染层逐层 alpha 链路采样（探针为自包含脚本，与前端构建产物解耦）
+  let probe = null;
+  try {
+    if (win && !win.isDestroyed()) {
+      // 关键：注入自包含脚本，即使前端是旧构建也能得到结论
+      const script = gd.probeScript();
+      probe = await win.webContents.executeJavaScript(script, true);
+    }
+  } catch (err) {
+    logErr("[chatcoder] glass: 渲染层探针执行失败:", err && err.message);
+  }
+  const cap = blurBackend();
+  const conclusion = gd.buildConclusion({
+    backdropRaw: dwm.ok ? dwm.value : null,
+    backend: cap.backend,
+    alphaPath: (probe && probe.alphaPath) || null,
+    degraded: !dwm.ok || dwm.value < 2,
+  });
+  return {
+    ok: true,
+    env,
+    window: wrep,
+    dwm,
+    probe,
+    backend: cap.backend,
+    backendReason: cap.reason || "",
+    conclusion,
+    // 便于用户/开发者直接复制的一行摘要
+    line: conclusion.line,
+  };
+});
+
 // ── IPC:v19 外挂插件扫描（~/.chatcoder/plugins/<dir>/plugin.json + entry 源码）──
 ipcMain.handle("plugins:list", () => {
   const fs = require("fs");
@@ -455,24 +861,178 @@ ipcMain.handle("shell:openPath", (_event, p) => {
 ipcMain.handle("shell:showItemInFolder", (_event, p) => {
   if (p) shell.showItemInFolder(p);
 });
+// ── plan-308-1542 需求5：外部应用启动器解析（"从 IDEA 打开"点击无反应）──
+// 原实现 `spawn("idea", [p], { shell: true })` 后**立即 return true**，不监听 error：
+// PATH 里没有 idea / .bat 经 shell 启动失败时静默无事发生，用户完全无感知。
+// 现在：①解析启动器（用户配置 → PATH → 常见安装路径 → 注册表 App Paths → 协议回退）；
+//       ②按扩展名选正确的启动方式（.bat/.cmd 走 cmd start；.exe 直接 spawn）；
+//       ③监听 error/exit，失败时返回可读原因给前端提示，并支持用户手动指定可执行文件。
+const EXTERNAL_APPS_FILE = path.join(app.getPath("userData"), "external-apps.json");
+
+function readExternalApps() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(EXTERNAL_APPS_FILE, "utf8"));
+    return raw && typeof raw === "object" ? raw : {};
+  } catch { return {}; }
+}
+
+function writeExternalApps(data) {
+  try { fs.writeFileSync(EXTERNAL_APPS_FILE, JSON.stringify(data, null, 2)); } catch (e) {
+    logErr("[chatcoder] 写入 external-apps.json 失败:", e && e.message);
+  }
+}
+
+const _APP_CANDIDATES = {
+  idea: ["idea.bat", "idea64.exe", "idea.exe", "idea"],
+  vscode: ["code.cmd", "code.bat", "code.exe", "code"],
+};
+const _APP_DISPLAY = { idea: "IntelliJ IDEA", vscode: "VS Code" };
+
+/** 在 PATH 中解析可执行文件（不依赖 `where`，避免额外进程）。 */
+function whichInPath(name) {
+  const dirs = (process.env.PATH || "").split(path.delimiter).filter(Boolean);
+  for (const d of dirs) {
+    const full = path.join(d, name);
+    try { if (fs.existsSync(full)) return full; } catch { /* ignore */ }
+  }
+  return null;
+}
+
+/** 扫描常见安装目录（含本机实测命中：D:\javaEnvironment\*\bin）。 */
+function scanCommonInstallPaths(appName) {
+  const found = [];
+  const names = _APP_CANDIDATES[appName] || [];
+  const roots = [];
+  if (process.platform === "win32") {
+    const local = process.env.LOCALAPPDATA || "";
+    const pf = process.env.ProgramFiles || "C:\\Program Files";
+    const pf86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
+    roots.push(
+      path.join(local, "JetBrains", "Toolbox", "apps"),
+      path.join(local, "Programs"),
+      path.join(pf, "JetBrains"),
+      path.join(pf86, "JetBrains"),
+      "D:\\javaEnvironment",
+      "C:\\javaEnvironment",
+    );
+  }
+  for (const root of roots) {
+    try {
+      if (!root || !fs.existsSync(root)) continue;
+      // 最多两层深度（Toolbox: apps/<product>/<channel>/bin/idea64.exe 会超出，
+      // 故对 Toolbox 根额外深一层；这里统一用递归限深搜索，够用且可控）
+      const hits = _searchLauncher(root, names, 4);
+      found.push(...hits);
+    } catch { /* ignore */ }
+  }
+  return found;
+}
+
+/** 限深目录搜索：找 names 中的可执行文件。 */
+function _searchLauncher(dir, names, depth) {
+  const out = [];
+  if (depth < 0) return out;
+  let entries = [];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+  for (const ent of entries) {
+    const full = path.join(dir, ent.name);
+    if (ent.isFile() && names.includes(ent.name)) {
+      out.push(full);
+    } else if (ent.isDirectory()) {
+      out.push(..._searchLauncher(full, names, depth - 1));
+    }
+    if (out.length >= 4) break;
+  }
+  return out;
+}
+
+/** 查注册表 App Paths（Windows）：`HK..\...\App Paths\<exe>` 默认值即可执行文件路径。 */
+function lookupAppPaths(appName) {
+  if (process.platform !== "win32") return null;
+  const names = (_APP_CANDIDATES[appName] || []).filter((n) => n.endsWith(".exe"));
+  for (const exe of names) {
+    try {
+      const { execFileSync } = require("child_process");
+      const out = execFileSync("reg", [
+        "query",
+        `HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\${exe}`,
+        "/ve",
+      ], { encoding: "utf8", timeout: 3000, windowsHide: true });
+      const m = /REG_SZ\s+(.+)/.exec(out || "");
+      if (m && m[1].trim() && fs.existsSync(m[1].trim())) return m[1].trim();
+    } catch { /* 未注册或权限不足 → 继续尝试其它 */ }
+  }
+  return null;
+}
+
+/** 解析某外部应用的启动器路径（带缓存）。 */
+const _launcherCache = {};
+function resolveLauncher(appName) {
+  if (_launcherCache[appName]) return _launcherCache[appName];
+  // ① 用户显式配置优先
+  const cfg = readExternalApps();
+  if (cfg[appName] && fs.existsSync(cfg[appName])) {
+    _launcherCache[appName] = cfg[appName];
+    return cfg[appName];
+  }
+  // ② PATH
+  for (const n of _APP_CANDIDATES[appName] || []) {
+    const hit = whichInPath(n);
+    if (hit) { _launcherCache[appName] = hit; return hit; }
+  }
+  // ③ 常见安装路径
+  const scanned = scanCommonInstallPaths(appName);
+  if (scanned.length > 0) {
+    _launcherCache[appName] = scanned[0];
+    return scanned[0];
+  }
+  // ④ 注册表
+  const reg = lookupAppPaths(appName);
+  if (reg) { _launcherCache[appName] = reg; return reg; }
+  return null;
+}
+
+/** 启动外部应用；返回 { ok, launcher?, error? }。 */
+function launchExternalApp(appName, projectPath) {
+  const { spawn, execFile } = require("child_process");
+  const launcher = resolveLauncher(appName);
+  const display = _APP_DISPLAY[appName] || appName;
+  if (!launcher) {
+    return { ok: false, error: `未找到 ${display} 启动器（已尝试：用户配置 / PATH / 常见安装目录 / 注册表）` };
+  }
+  const lower = launcher.toLowerCase();
+  try {
+    if (lower.endsWith(".bat") || lower.endsWith(".cmd")) {
+      // .bat/.cmd 必须经 cmd 执行；先 cd 到目标目录再打开（IDEA 支持传目录）
+      execFile("cmd.exe", ["/c", "start", "", launcher, projectPath],
+        { windowsHide: true }, (err) => {
+          if (err) logErr(`[chatcoder] 启动 ${display} 失败:`, err.message);
+        });
+    } else {
+      const child = spawn(launcher, [projectPath], { detached: true, stdio: "ignore", windowsHide: true });
+      child.on("error", (err) => logErr(`[chatcoder] 启动 ${display} 失败:`, err && err.message));
+      child.unref();
+    }
+    log(`[chatcoder] 已启动 ${display}: ${launcher} → ${projectPath}`);
+    return { ok: true, launcher };
+  } catch (e) {
+    logErr(`[chatcoder] 启动 ${display} 异常:`, e && e.message);
+    return { ok: false, launcher, error: `启动 ${display} 失败：${e && e.message}` };
+  }
+}
+
 // 在特定外部应用中打开目录（explorer / vscode / idea / terminal）
+// plan-308-1542 需求5：返回 { ok, launcher?, error? }，失败原因回传前端提示。
 ipcMain.handle("shell:openInApp", (_event, target, projectPath) => {
-  if (!projectPath) return false;
+  if (!projectPath) return { ok: false, error: "项目路径为空" };
   try {
     const p = path.normalize(projectPath);
     if (target === "explorer") {
       shell.openPath(p);
-      return true;
+      return { ok: true };
     }
-    if (target === "vscode") {
-      const { spawn } = require("child_process");
-      spawn("code", [p], { shell: true, detached: true });
-      return true;
-    }
-    if (target === "idea") {
-      const { spawn } = require("child_process");
-      spawn("idea", [p], { shell: true, detached: true, windowsHide: true });
-      return true;
+    if (target === "vscode" || target === "idea") {
+      return launchExternalApp(target, p);
     }
     if (target === "terminal") {
       const { spawn } = require("child_process");
@@ -483,14 +1043,42 @@ ipcMain.handle("shell:openInApp", (_event, target, projectPath) => {
       } else {
         shell.openPath(p);
       }
-      return true;
+      return { ok: true };
     }
     shell.openPath(p);
-    return true;
+    return { ok: true };
   } catch (e) {
     logErr("[shell:openInApp] 失败: " + e.message);
-    return false;
+    return { ok: false, error: e.message };
   }
+});
+
+// plan-308-1542 需求5：用户手动指定外部应用可执行文件（自动探测失败时的兜底）。
+ipcMain.handle("app:selectApp", async (_event, appName, currentPath) => {
+  const display = _APP_DISPLAY[appName] || appName;
+  const res = await dialog.showOpenDialog(mainWindow, {
+    title: `选择 ${display} 可执行文件`,
+    properties: ["openFile"],
+    defaultPath: currentPath || undefined,
+    filters: [{ name: "可执行文件", extensions: ["exe", "bat", "cmd", "sh"] }],
+  });
+  if (res.canceled || !res.filePaths.length) return { ok: false, canceled: true };
+  const chosen = res.filePaths[0];
+  const cfg = readExternalApps();
+  cfg[appName] = chosen;
+  writeExternalApps(cfg);
+  delete _launcherCache[appName];
+  return { ok: true, path: chosen };
+});
+
+// 查询已解析/已配置的启动器（前端可展示"当前将用哪个"）。
+ipcMain.handle("app:getExternalApps", () => {
+  const cfg = readExternalApps();
+  const out = {};
+  for (const name of Object.keys(_APP_CANDIDATES)) {
+    out[name] = { configured: cfg[name] || null, resolved: resolveLauncher(name) };
+  }
+  return out;
 });
 // v23: 打开外部 URL（ta3 登录授权跳转，走系统默认浏览器）
 ipcMain.handle("shell:openExternal", (_event, url) => {
@@ -519,21 +1107,40 @@ ipcMain.handle("window:fixTextInput", () => {
   return true;
 });
 
-// ── IPC:毛玻璃模式（plan-546 / plan-548）──
-// Win11：切换 DWM acrylic 真磨砂（非透明窗口，运行时双向切换有效）；
-// Win10/老版：setBackgroundMaterial 不可用或无效，静默降级为 CSS 半透明（透明窗口已开）。
+// ── IPC:毛玻璃模式（plan-546 / plan-548 / plan-308-1542）──
+// 统一走 applyGlass：Win11=DWM acrylic；Win10=ACCENT 系统模糊；mac=vibrancy；
+// 无可用后端时返回 { ok:false, backend:"none", reason } 供前端明确提示用户。
 ipcMain.handle("window:setGlass", (_e, on) => {
   writeGlassPref(!!on); // plan-548: 落盘，下次启动直接以正确材质建窗（见 createWindow）
-  if (!mainWindow || mainWindow.isDestroyed()) return false;
-  try {
-    if (typeof mainWindow.setBackgroundMaterial === "function") {
-      mainWindow.setBackgroundMaterial(on ? "acrylic" : "none");
-      log("[chatcoder] glass: material =", on ? "acrylic" : "none");
-    }
-  } catch (err) {
-    log("[chatcoder] glass: setBackgroundMaterial unavailable, fallback to CSS alpha:", err && err.message);
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return { ok: false, backend: "none", reason: "窗口尚未就绪" };
   }
-  return true;
+  const res = applyGlass(mainWindow, !!on);
+  log("[chatcoder] glass: setGlass =", on, JSON.stringify(res));
+  return res;
+});
+
+// plan-308-1542 需求4：能力探测——设置页据此展示"当前系统支持哪种玻璃"。
+ipcMain.handle("window:glassCapability", () => {
+  const cap = blurBackend();
+  return { backend: cap.backend, supported: cap.backend !== "none", reason: cap.reason || "" };
+});
+
+// plan-308-1555 M5：玻璃自检模式——临时把面板 alpha 降到很低 + 加亮描边，
+// 让用户/开发者一眼判定"桌面到底有没有混进来"（区分"材质无效"与"材质太淡"）。
+ipcMain.handle("window:glassSelfCheck", (_e, on) => {
+  _glassSelfCheck = !!on;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      // 渲染层读这个标记来切换自检样式（CSS 侧 [data-glass-selfcheck]）
+      void mainWindow.webContents.executeJavaScript(
+        `document.documentElement.setAttribute('data-glass-selfcheck', ${on ? "'1'" : "'0'"}); true`, true);
+    } catch (err) {
+      logErr("[chatcoder] glass: 自检模式切换失败:", err && err.message);
+    }
+  }
+  log("[chatcoder] glass: self-check =", _glassSelfCheck);
+  return { ok: true, on: _glassSelfCheck };
 });
 
 // ── IPC:保持唤醒（对齐 zcode「运行会话时保持电脑唤醒」）──

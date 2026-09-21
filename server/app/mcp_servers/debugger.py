@@ -210,7 +210,22 @@ def tool_java_breakpoint(args: dict) -> tuple[str, dict]:
     data = _run(_call("java/breakpoint", {"class_name": cls, "line": line}))
     if not data.get("ok"):
         return (f"下断点失败：{data.get('error')}", data)
-    return (f"已在 {cls}:{line} 下断点。触发后调用 java_debug_wait 读取命中信息。", data)
+    msg = f"已在 {cls}:{line} 下断点。触发后调用 java_debug_wait 读取命中信息。"
+    # plan-308-1542 需求7-B（用户决策 D：双向写入）：可选同步到 IDEA 配置，
+    # 使"本软件/AI 打的断点 IDEA 里也能看到"。必须明确告知生效条件。
+    if args.get("sync_idea"):
+        file = str(args.get("file") or "").strip()
+        pp = _project_path(args)
+        if file and pp:
+            idea_res = _run(_call("idea/breakpoints/add",
+                                  {"project_path": pp, "file": file, "line": line}))
+            if idea_res.get("ok"):
+                msg += f"\n已同步到 IDEA 配置（{file}:{line}）。注意：{idea_res.get('warning') or ''}"
+            else:
+                msg += f"\n⚠ IDEA 同步失败：{idea_res.get('error')}"
+        else:
+            msg += "\n（sync_idea 已开启，但缺少 file / 工作区路径，未同步到 IDEA）"
+    return (msg, data)
 
 
 def tool_java_wait(args: dict) -> tuple[str, dict]:
@@ -238,6 +253,133 @@ def tool_java_stop(args: dict) -> tuple[str, dict]:
     data = _run(_call("java/stop", {}))
     return ((data.get("message") or "已关闭") if data.get("ok")
             else f"关闭失败：{data.get('error')}", data)
+
+
+# ── plan-308-1542 需求7-A：断点枚举 / 删除（AI 与面板共用的可观测能力）──
+
+def _fmt_breakpoints(rows: list[dict]) -> str:
+    if not rows:
+        return "当前没有断点。"
+    lines = [f"当前共 {len(rows)} 个断点："]
+    for b in rows:
+        loc = b.get("file") or b.get("class") or "?"
+        line = b.get("line")
+        lines.append(f"- [{b.get('target')}] {loc}:{line if line is not None else '?'} "
+                     f"(id={b.get('id')}, source={b.get('source', 'app')})")
+    return "\n".join(lines)
+
+
+def tool_debug_breakpoints(args: dict) -> tuple[str, dict]:
+    """列出当前调试会话的断点（web / java）。"""
+    target = str(args.get("target") or "web")
+    data = _run(_call("breakpoints", {"target": target}))
+    if not data.get("ok", True):
+        return (f"读取断点失败：{data.get('error')}", data)
+    return (_fmt_breakpoints(data.get("breakpoints") or []), data)
+
+
+def tool_web_debug_remove_breakpoint(args: dict) -> tuple[str, dict]:
+    bp_id = str(args.get("breakpoint_id") or "").strip()
+    if not bp_id:
+        return ("需要 breakpoint_id（可用 debug_breakpoints 查询）。", {"error": "missing breakpoint_id"})
+    data = _run(_call("breakpoints/remove", {"target": "web", "breakpoint_id": bp_id}))
+    return ((f"已删除 Web 断点 {bp_id}") if data.get("ok")
+            else f"删除失败：{data.get('error')}", data)
+
+
+def tool_java_debug_remove_breakpoint(args: dict) -> tuple[str, dict]:
+    bp_id = str(args.get("breakpoint_id") or "").strip()
+    if not bp_id:
+        return ("需要 breakpoint_id（可用 debug_breakpoints 查询）。", {"error": "missing breakpoint_id"})
+    data = _run(_call("breakpoints/remove", {"target": "java", "breakpoint_id": bp_id}))
+    return ((f"已删除 Java 断点 {bp_id}") if data.get("ok")
+            else f"删除失败：{data.get('error')}", data)
+
+
+# ── plan-308-1542 需求7-B：与 IntelliJ IDEA 的双向断点通道 ──
+
+def _project_path(args: dict) -> str:
+    """工程路径：优先显式参数，其次 CHATCODER_WORKSPACE（内置 MCP 已注入）。"""
+    return str(args.get("project_path") or os.environ.get("CHATCODER_WORKSPACE") or "").strip()
+
+
+def _fmt_idea_breakpoints(rows: list[dict]) -> str:
+    if not rows:
+        return "IDEA 工程中当前没有断点。"
+    lines = [f"IDEA 工程中已配置 {len(rows)} 个断点："]
+    for b in rows:
+        lines.append(f"- {b.get('file')}:{b.get('line')}"
+                     f"{'（已禁用）' if b.get('enabled') is False else ''}")
+    return "\n".join(lines)
+
+
+def tool_idea_list_breakpoints(args: dict) -> tuple[str, dict]:
+    """读取 IDEA 工程内的断点（.idea/workspace.xml）。"""
+    pp = _project_path(args)
+    if not pp:
+        return ("缺少工程路径（可通过 project_path 指定）", {"error": "missing project_path"})
+    data = _run(_call("idea/breakpoints", {"project_path": pp}))
+    if not data.get("ok"):
+        return (f"读取失败：{data.get('error')}", data)
+    if not data.get("available", True):
+        return (f"未启用 IDEA 联动：{data.get('reason')}", data)
+    return (_fmt_idea_breakpoints(data.get("breakpoints") or []), data)
+
+
+def tool_idea_add_breakpoint(args: dict) -> tuple[str, dict]:
+    """把断点写入 IDEA 配置（需重启 IDEA 生效；写前自动备份）。"""
+    pp = _project_path(args)
+    file = str(args.get("file") or "").strip()
+    line = int(args.get("line") or 0)
+    if not pp or not file or not line:
+        return ("需要 project_path（或工作区上下文）、file 与 line。", {"error": "missing args"})
+    data = _run(_call("idea/breakpoints/add", {"project_path": pp, "file": file, "line": line}))
+    if not data.get("ok"):
+        return (f"写入失败：{data.get('error')}", data)
+    warn = data.get("warning") or ""
+    dup = "（该断点已存在，未重复写入）" if data.get("duplicated") else ""
+    return (f"已写入 IDEA 断点 {file}:{line}{dup}。\n注意事项：{warn}", data)
+
+
+def tool_idea_remove_breakpoint(args: dict) -> tuple[str, dict]:
+    pp = _project_path(args)
+    file = str(args.get("file") or "").strip()
+    line = int(args.get("line") or 0)
+    if not pp or not file or not line:
+        return ("需要 project_path、file 与 line。", {"error": "missing args"})
+    data = _run(_call("idea/breakpoints/remove", {"project_path": pp, "file": file, "line": line}))
+    if not data.get("ok"):
+        return (f"移除失败：{data.get('error')}", data)
+    return (f"已从 IDEA 配置移除 {file}:{line}。{data.get('warning') or ''}", data)
+
+
+def tool_idea_debug_session(args: dict) -> tuple[str, dict]:
+    """探测 IDEA 调试会话（JDWP 占用）：其通道被占用时改用 Arthas 观测。"""
+    pp = _project_path(args)
+    data = _run(_call("idea/session", {"project_path": pp or ""}))
+    if not data.get("ok"):
+        return (f"探测失败：{data.get('error')}", data)
+    lines = [f"IDEA 运行中：{'是' if data.get('idea_running') else '否'}"]
+    sess = data.get("sessions") or []
+    if sess:
+        lines.append(f"检测到 {len(sess)} 个 JDWP 调试会话：")
+        for s in sess:
+            lines.append(f"- pid={s.get('pid')} {s.get('main_class')} (JDWP {s.get('jdwp_port')})")
+    lines.append(str(data.get("note") or ""))
+    return ("\n".join([x for x in lines if x]), data)
+
+
+def tool_idea_method_at_line(args: dict) -> tuple[str, dict]:
+    """由「文件:行」推导 class#method（供为 IDEA 断点建立 Arthas 观测）。"""
+    pp = _project_path(args)
+    file = str(args.get("file") or "").strip()
+    line = int(args.get("line") or 0)
+    if not pp or not file or not line:
+        return ("需要 project_path、file 与 line。", {"error": "missing args"})
+    data = _run(_call("idea/method-at-line", {"project_path": pp, "file": file, "line": line}))
+    if not data.get("ok"):
+        return (f"未识别方法：{data.get('error')}", data)
+    return (f"该行所在方法：{data.get('target')}（可用 arthas_watch 建立观测）", data)
 
 
 # ── Arthas（现场诊断：IDEA 调试中也能用）──
@@ -575,10 +717,13 @@ def _build_tools() -> list[ToolSpec]:
         ),
         ToolSpec(
             "java_debug_breakpoint",
-            "在 Java 类的指定行下断点。",
+            "在 Java 类的指定行下断点。可选 sync_idea=true 同时写入 IDEA 配置"
+            "（需重启 IDEA 生效，且运行期可能被 IDEA 覆盖）——实现「AI 打的断点 IDEA 也能看到」。",
             {"type": "object", "properties": {
                 "class_name": {"type": "string", "description": "全限定类名，如 com.example.OrderService"},
                 "line": {"type": "integer"},
+                "sync_idea": {"type": "boolean", "description": "是否同步写入 IDEA 配置（默认 false）"},
+                "file": {"type": "string", "description": "sync_idea 时的工程相对源码路径，如 src/main/java/A.java"},
             }, "required": ["class_name", "line"]},
             tool_java_breakpoint, risk_level="medium",
         ),
@@ -608,6 +753,82 @@ def _build_tools() -> list[ToolSpec]:
             "断开 Java 调试会话。",
             {"type": "object", "properties": {}},
             tool_java_stop, risk_level="low",
+        ),
+        # ── plan-308-1542 需求7-A：断点可观测能力 ──
+        ToolSpec(
+            "debug_breakpoints",
+            "列出当前调试会话的断点明细（target=web|java）；配合 web_debug_remove_breakpoint / "
+            "java_debug_remove_breakpoint 可逐条删除。",
+            {"type": "object", "properties": {
+                "target": {"type": "string", "enum": ["web", "java"], "description": "默认 web"},
+            }},
+            tool_debug_breakpoints, risk_level="low",
+        ),
+        ToolSpec(
+            "web_debug_remove_breakpoint",
+            "删除一个 Web 断点（breakpoint_id 由 debug_breakpoints 获取）。",
+            {"type": "object", "properties": {
+                "breakpoint_id": {"type": "string"},
+            }, "required": ["breakpoint_id"]},
+            tool_web_debug_remove_breakpoint, risk_level="medium",
+        ),
+        ToolSpec(
+            "java_debug_remove_breakpoint",
+            "删除一个 Java 断点（breakpoint_id 由 debug_breakpoints 获取）。",
+            {"type": "object", "properties": {
+                "breakpoint_id": {"type": "string"},
+            }, "required": ["breakpoint_id"]},
+            tool_java_debug_remove_breakpoint, risk_level="medium",
+        ),
+        # ── plan-308-1542 需求7-B：与 IntelliJ IDEA 的双向断点通道 ──
+        ToolSpec(
+            "idea_list_breakpoints",
+            "读取 IntelliJ IDEA 工程内已配置的断点（.idea/workspace.xml）。"
+            "用于「IDEA 里打了断点，本软件也能看到」。",
+            {"type": "object", "properties": {
+                "project_path": {"type": "string", "description": "工程根目录（可选，默认当前工作区）"},
+            }},
+            tool_idea_list_breakpoints, risk_level="low",
+        ),
+        ToolSpec(
+            "idea_add_breakpoint",
+            "把断点写入 IDEA 配置，使「本软件/AI 打的断点 IDEA 里也能看到」。"
+            "写前自动备份 workspace.xml；注意需重启 IDEA 生效，且运行期可能被 IDEA 覆盖。",
+            {"type": "object", "properties": {
+                "project_path": {"type": "string"},
+                "file": {"type": "string", "description": "工程相对路径，如 src/main/java/A.java"},
+                "line": {"type": "integer"},
+            }, "required": ["file", "line"]},
+            tool_idea_add_breakpoint, risk_level="medium",
+        ),
+        ToolSpec(
+            "idea_remove_breakpoint",
+            "从 IDEA 配置移除断点（写前备份；需重启 IDEA 生效）。",
+            {"type": "object", "properties": {
+                "project_path": {"type": "string"},
+                "file": {"type": "string"},
+                "line": {"type": "integer"},
+            }, "required": ["file", "line"]},
+            tool_idea_remove_breakpoint, risk_level="medium",
+        ),
+        ToolSpec(
+            "idea_debug_session",
+            "探测 IDEA 是否在调试运行（JDWP 占用）：其通道被占用时真断点连不上，"
+            "应改用 Arthas 观测（可与 IDEA 调试并存）。",
+            {"type": "object", "properties": {
+                "project_path": {"type": "string"},
+            }},
+            tool_idea_debug_session, risk_level="low",
+        ),
+        ToolSpec(
+            "idea_method_at_line",
+            "由「文件:行」推导 class#method，用于为 IDEA 断点建立 Arthas 方法级观测。",
+            {"type": "object", "properties": {
+                "project_path": {"type": "string"},
+                "file": {"type": "string"},
+                "line": {"type": "integer"},
+            }, "required": ["file", "line"]},
+            tool_idea_method_at_line, risk_level="low",
         ),
         # ── Arthas 现场诊断（走 Attach API，可与 IDEA 调试并存）──
         # 使用顺序（写进描述，避免模型乱试）：

@@ -12,9 +12,62 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { api, type ModelOut, type WorktreeMergeDirection, type WorktreeOut } from "../../api/client";
+import { useChatStore } from "../../store/chat";
 import { Dialog } from "../ui/Dialog";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { IconCheck, IconChevronDown, IconChevronUp, IconFileText, IconRefresh, IconWand } from "../icons";
+
+/* ── plan-308-1542 需求3-A：git diff3 冲突标记解析 ──
+ *
+ * 冲突内容现由 git 产出（`git merge-file --diff3` / 临时工作树 `git merge`），
+ * 格式为：
+ *   <<<<<<< 主工作区(ours)
+ *   ...ours...
+ *   ||||||| base
+ *   ...base...
+ *   =======
+ *   ...theirs...
+ *   >>>>>>> 工作树(theirs)
+ * 解析真实标记比自研 LCS 猜冲突更准（与 git/IDEA 判定一致）。 */
+
+const MARK_OURS = /^<{7}/;
+const MARK_BASE = /^\|{7}/;
+const MARK_SEP = /^={7}$/;
+const MARK_THEIRS = /^>{7}/;
+
+/** 解析 diff3 冲突块；无标记返回空数组（调用方回退到 LCS 启发式）。 */
+export function parseConflictMarkers(text: string): Array<{
+  startLine: number; endLine: number; oursLines: string[]; baseLines: string[]; theirsLines: string[];
+}> {
+  const lines = (text ?? "").split("\n");
+  const out: Array<{ startLine: number; endLine: number; oursLines: string[]; baseLines: string[]; theirsLines: string[] }> = [];
+  let i = 0;
+  while (i < lines.length) {
+    if (MARK_OURS.test(lines[i])) {
+      const start = i;
+      const ours: string[] = [];
+      const base: string[] = [];
+      const theirs: string[] = [];
+      let stage: "ours" | "base" | "theirs" = "ours";
+      i++;
+      for (; i < lines.length; i++) {
+        const ln = lines[i];
+        if (MARK_BASE.test(ln) && stage === "ours") { stage = "base"; continue; }
+        if (MARK_SEP.test(ln) && stage !== "theirs") { stage = "theirs"; continue; }
+        if (MARK_THEIRS.test(ln)) { break; }
+        (stage === "ours" ? ours : stage === "base" ? base : theirs).push(ln);
+      }
+      out.push({ startLine: start, endLine: i, oursLines: ours, baseLines: base, theirsLines: theirs });
+    }
+    i++;
+  }
+  return out;
+}
+
+/** 内容是否还含未解决冲突标记（提交前校验，与后端 merge_apply 双重防护）。 */
+export function hasConflictMarkers(text: string): boolean {
+  return /^(<{7}|\|{7}|={7}|>{7})/m.test(text ?? "");
+}
 
 /* ── 轻量行级 diff ── */
 
@@ -223,10 +276,28 @@ export function MergeDialog({
     } finally { setLoading(false); }
   };
 
-  const conflicts = useMemo(
-    () => (blobs ? computeConflicts(blobs.base, blobs.ours, blobs.theirs) : []),
-    [blobs],
-  );
+  const currentSessionId = useChatStore((s) => s.currentSessionId);
+  const mergeProgress = useChatStore((s) => s.mergeProgress);
+  const resetMergeProgress = useChatStore((s) => s.resetMergeProgress);
+
+  const conflicts = useMemo(() => {
+    if (!blobs) return [];
+    // plan-308-1542 需求3-A：优先解析 **git 产出的 diff3 标记**（与 git/IDEA 判定一致），
+    // 仅当内容里没有标记时才回退到 LCS 启发式（兼容手动编辑过的结果）。
+    const hunks = parseConflictMarkers(merged);
+    if (hunks.length > 0) {
+      const all = merged.split("\n");
+      return hunks.map((h) => ({
+        baseStart: h.startLine,
+        baseEnd: h.endLine,
+        oursLines: h.oursLines,
+        theirsLines: h.theirsLines,
+        _markerRange: [h.startLine, h.endLine] as [number, number],
+        _allLines: all,
+      }));
+    }
+    return computeConflicts(blobs.base, blobs.ours, blobs.theirs);
+  }, [blobs, merged]);
 
   /** 把当前合并结果保存为该文件的最终内容 */
   const saveFile = () => {
@@ -236,39 +307,82 @@ export function MergeDialog({
     setBlobs(null);
   };
 
-  /** 接受某侧：把当前冲突块替换为指定侧内容 */
-  const acceptSide = (side: "ours" | "theirs" | "both") => {
-    const hunk = conflicts[hunkIndex];
+  /** 接受某侧：把当前冲突块替换为指定侧内容。
+   *
+   * plan-308-1542 需求3-B：内容为 git diff3 标记时，直接按**标记行区间**定位替换
+   * （比按 base 行号猜测猫确——merged 行号与 base 本就不同）。
+   */
+  const acceptSide = (side: "ours" | "theirs" | "both", at = hunkIndex) => {
+    const hunk: any = conflicts[at];
     if (!hunk) return;
-    const lines = merged.split("\n");
     const replacement =
       side === "ours" ? hunk.oursLines
       : side === "theirs" ? hunk.theirsLines
       : [...hunk.oursLines, ...hunk.theirsLines];
-    // 用 base 行号定位到 merged 中的对应位置：这里采用"按 base 区间逐行替换"的稳健做法
-    // （merged 默认取自某一侧，行数与 base 可能有偏移，故用内容匹配兜底）
-    const baseLines = splitLines(blobs?.base);
-    const target = baseLines.slice(hunk.baseStart, hunk.baseEnd + 1);
-    let replaced = false;
-    if (target.length > 0) {
-      const startIdx = findSublist(lines, target, hunk.baseStart);
-      if (startIdx >= 0) {
-        lines.splice(startIdx, target.length, ...replacement);
-        replaced = true;
+
+    let next = merged;
+    if (hunk._markerRange && hunk._allLines) {
+      // git 标记路径：按标记所在行区间整体替换
+      const [s, e] = hunk._markerRange as [number, number];
+      const lines = [...hunk._allLines] as string[];
+      lines.splice(s, e - s + 1, ...replacement);
+      next = lines.join("\n");
+    } else {
+      const lines = merged.split("\n");
+      const baseLines = splitLines(blobs?.base);
+      const target = baseLines.slice(hunk.baseStart, hunk.baseEnd + 1);
+      let replaced = false;
+      if (target.length > 0) {
+        const startIdx = findSublist(lines, target, hunk.baseStart);
+        if (startIdx >= 0) {
+          lines.splice(startIdx, target.length, ...replacement);
+          replaced = true;
+        }
       }
+      if (!replaced) lines.push(...replacement);
+      next = lines.join("\n");
     }
-    if (!replaced) {
-      // 兜底：在文件末尾追加（保证用户能看到内容并手动调整）
-      lines.push(...replacement);
-    }
-    setMerged(lines.join("\n"));
+    setMerged(next);
+    // 解决完当前块自动跳下一处（没有下一处则停在最后）
+    setHunkIndex((i) => Math.min(i + 1, Math.max(0, conflicts.length - 1)));
   };
 
-  /** 请求 AI 建议（针对当前冲突块） */
+  /** 全部采用某一侧（当前文件全部冲突块）。 */
+  const acceptAllSide = (side: "ours" | "theirs") => {
+    if (!blobs) return;
+    // 从最后一个冲突块往前替换，避免行号偏移
+    let next = merged;
+    const hunks = [...conflicts];
+    for (let k = hunks.length - 1; k >= 0; k--) {
+      const h: any = hunks[k];
+      const replacement = side === "ours" ? h.oursLines : h.theirsLines;
+      if (h._markerRange && h._allLines) {
+        const [s, e] = h._markerRange as [number, number];
+        const lines = next.split("\n");
+        lines.splice(s, e - s + 1, ...replacement);
+        next = lines.join("\n");
+      }
+    }
+    setMerged(next);
+  };
+
+  const [aiNotice, setAiNotice] = useState("");
+
+  /** 请求 AI 建议（针对当前冲突块）。
+   *
+   * plan-308-1542 修复（用户反馈"ai 建议点击了看不到"）：
+   * 之前有两种"看不到"：① 未打开文件时直接 return，界面无任何反应；
+   * ② 成功把建议写进中间栏后也无任何提示，用户不知道发生了什么。
+   * 现在：未打开文件→提示如何操作；成功→绿色提示条（含模型名）。 */
   const askAi = async () => {
-    if (!worktree || !activePath) return;
+    if (!worktree) return;
+    if (!activePath) {
+      setError("请先在下方文件列表中点击「合并」打开一个文件，再请求 AI 建议");
+      return;
+    }
     setAiBusy(true);
     setError("");
+    setAiNotice("");
     try {
       const hunk = conflicts[hunkIndex];
       const res = await api.worktreeMergeAi(worktree.id, activePath,
@@ -286,6 +400,9 @@ export function MergeDialog({
         } else {
           setMerged(res.suggestion);
         }
+        // 可见反馈：告诉用户建议已插入到哪里（否则"点了没反应"）
+        setAiNotice(`AI 建议已插入${hunk ? `第 ${hunkIndex + 1} 处冲突块` : "整个文件"}`
+          + `${res.model ? `（模型 ${res.model}）` : ""}，确认无误后点「保存并标记已解决」`);
       } else {
         setError(res.error || "AI 未给出建议");
       }
@@ -294,23 +411,27 @@ export function MergeDialog({
     } finally { setAiBusy(false); }
   };
 
-  /** 一键 AI 智能合并：对所有文件依次求整文件建议（失败时逐个提示，不静默） */
+  /** plan-308-1542 需求3-A：一键 AI 智能合并（后端边执行边广播 merge.progress）。
+   *
+   * 取代原来"前端 for 循环逐个调 AI"——那样用户看不到任何过程。
+   * 现在后端一次调用完成：git 判定 → 冲突文件走模型 → 广播进度 → 返回汇总报告。
+   */
   const aiMergeAll = async () => {
     if (!worktree || !preview) return;
     setAiBusy(true);
     setError("");
+    resetMergeProgress();
     try {
-      const next: Record<string, string> = { ...resolved };
-      const failures: string[] = [];
-      for (const f of preview.files) {
-        if (f.status === "deleted") continue;
-        const res = await api.worktreeMergeAi(worktree.id, f.path, undefined, { direction, modelId });
-        if (res.ok && res.suggestion != null) next[f.path] = res.suggestion;
-        else failures.push(`${f.path}（${res.error || "无建议"}）`);
-      }
-      setResolved(next);
-      if (failures.length > 0) {
-        setError(`以下文件 AI 未给出建议，请手动处理：\n${failures.join("\n")}`);
+      const res = await api.worktreeMergeAiAll(worktree.id, {
+        direction, modelId, sessionId: currentSessionId,
+      });
+      // 后端返回的 resolved 是权威结果（含 git 自动合入 + AI 解决）
+      if (res.resolved) setResolved({ ...resolved, ...res.resolved });
+      if (res.preview) setPreview(res.preview);
+      const rep = res.report;
+      if (rep && rep.failed > 0) {
+        const failedPaths = rep.files.filter((f) => f.result === "failed").map((f) => f.path);
+        setError(`以下文件 AI 未给出建议，请手动处理：\n${failedPaths.join("\n")}`);
       }
     } catch (e) {
       setError(String(e));
@@ -321,6 +442,42 @@ export function MergeDialog({
     () => (preview?.files ?? []).filter((f) => f.status !== "deleted"),
     [preview],
   );
+
+  /** plan-308-1542 需求3-B：当前冲突块在"合并结果"里的行区间（用于三栏高亮）。 */
+  const currentHunkRange = useMemo<[number, number] | null>(() => {
+    const h: any = conflicts[hunkIndex];
+    if (!h) return null;
+    if (h._markerRange) return h._markerRange as [number, number];
+    return [h.baseStart, h.baseEnd];
+  }, [conflicts, hunkIndex]);
+
+  /** 全部非删除文件是否都已有最终结果且不含未解决冲突标记。 */
+  const allResolved = useMemo(() => {
+    if (!preview) return false;
+    const files = preview.files.filter((f) => f.status !== "deleted");
+    if (files.length === 0) return false;
+    return files.every((f) => {
+      const content = resolved[f.path] ?? f.merged ?? "";
+      return !hasConflictMarkers(content);
+    });
+  }, [preview, resolved]);
+
+  /** plan-308-1542 需求3-B：键盘快捷键跳转冲突点。
+   *  F7 / Alt+↓ 下一处；Shift+F7 / Alt+↑ 上一处（与 IDEA 习惯对齐）。 */
+  useEffect(() => {
+    if (!open || !activePath) return;
+    const onKey = (e: KeyboardEvent) => {
+      const next = (e.key === "F7" && !e.shiftKey) || (e.altKey && e.key === "ArrowDown");
+      const prev = (e.key === "F7" && e.shiftKey) || (e.altKey && e.key === "ArrowUp");
+      if (!next && !prev) return;
+      e.preventDefault();
+      setHunkIndex((i) => (next
+        ? Math.min(i + 1, Math.max(0, conflicts.length - 1))
+        : Math.max(0, i - 1)));
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, activePath, conflicts.length]);
 
   const applyMerge = async () => {
     if (!worktree || !preview) return;
@@ -420,6 +577,8 @@ export function MergeDialog({
         }
       >
         {error && <div className="merge-error merge-error-block">{error}</div>}
+        {/* plan-308-1542 修复：AI 建议成功后的可见反馈（此前点了没有任何提示） */}
+        {aiNotice && <div className="merge-ai-notice">{aiNotice}</div>}
 
         {/* 第二层：三栏冲突解决 */}
         {activePath && blobs ? (
@@ -453,13 +612,21 @@ export function MergeDialog({
                 <button className="btn btn-ghost btn-xs" onClick={() => acceptSide("theirs")}>接受左侧（{toMain ? "工作树" : "主工作区"}）</button>
                 <button className="btn btn-ghost btn-xs" onClick={() => acceptSide("ours")}>接受右侧（{toMain ? "主工作区" : "工作树"}）</button>
                 <button className="btn btn-ghost btn-xs" onClick={() => acceptSide("both")}>两者都保留</button>
+                <span className="merge-hunk-sep" />
+                {/* plan-308-1542 需求3-B：全部采用（当前文件全部冲突块） */}
+                <button className="btn btn-ghost btn-xs" onClick={() => acceptAllSide("theirs")}>全部采用左侧</button>
+                <button className="btn btn-ghost btn-xs" onClick={() => acceptAllSide("ours")}>全部采用右侧</button>
+                {!hasConflictMarkers(merged) && (
+                  <span className="merge-file-resolved-tag">本文件冲突已全部解决</span>
+                )}
               </div>
             )}
 
-            <div className="merge-columns">
+            {/* plan-308-1542 需求3-B：三栏带行号 + 冲突行高亮（与 git 标记行区间对齐） */}
+            <div className="merge-columns merge-columns-numbered">
               <div className="merge-col">
                 <div className="merge-col-head">{toMain ? "工作树（来源）" : "主工作区（来源）"}</div>
-                <pre className="merge-pre">{blobs.theirs ?? "（无此文件）"}</pre>
+                <NumberedPre text={blobs.theirs} highlight={currentHunkRange} />
               </div>
               <div className="merge-col merge-col-center">
                 <div className="merge-col-head">合并结果（可编辑）</div>
@@ -472,7 +639,7 @@ export function MergeDialog({
               </div>
               <div className="merge-col">
                 <div className="merge-col-head">{toMain ? "主工作区（目标）" : "工作树（目标）"}</div>
-                <pre className="merge-pre">{blobs.ours ?? "（无此文件）"}</pre>
+                <NumberedPre text={blobs.ours} highlight={currentHunkRange} />
               </div>
             </div>
 
@@ -493,6 +660,9 @@ export function MergeDialog({
             )}
             {!loading && preview && preview.files.length > 0 && (
               <div className="merge-filelist-hint">
+                {preview.engine === "fallback" && (
+                  <span className="merge-engine-warn">（当前 git 版本不支持内存合并，已降级为兼容模式）</span>
+                )}
                 共 {preview.files.length} 个文件，
                 {preview.has_conflict
                   ? `其中 ${preview.files.filter((f) => f.conflict).length} 个存在冲突（需处理或 AI 合并）`
@@ -500,14 +670,24 @@ export function MergeDialog({
                 。已自动合并的文件可直接提交，冲突文件请逐个处理。
               </div>
             )}
+            {/* plan-308-1542 需求3-A/3-B：全部冲突已解决提示 */}
+            {!loading && allResolved && pendingFiles.length > 0 && (
+              <div className="merge-all-resolved">
+                <IconCheck size={13} /> 全部冲突已解决，可提交合并
+              </div>
+            )}
             {!loading && preview?.files.map((f) => (
               <div className="merge-file-row" key={f.path}>
                 <span className={`merge-file-status ${f.status}`}>{statusLabel[f.status] ?? f.status}</span>
                 <IconFileText size={13} />
                 <span className="merge-file-path" title={f.path}>{f.path}</span>
-                {f.conflict ? <span className="merge-file-conflict">冲突</span>
-                  : <span className="merge-file-auto">可自动合并</span>}
+                {f.binary ? <span className="merge-file-binary" title={f.reason || "二进制文件"}>二进制</span>
+                  : f.conflict ? <span className="merge-file-conflict">冲突</span>
+                    : <span className="merge-file-auto" title={f.change_side === "theirs" ? "仅来源侧改动，已由 git 自动采用" : ""}>可自动合并</span>}
                 {resolved[f.path] != null && <span className="merge-file-done">已解决</span>}
+                {f.status !== "deleted" && f.needs_manual && (
+                  <span className="merge-file-manual">需人工选侧</span>
+                )}
                 {f.status !== "deleted" && (
                   <button className="btn btn-ghost btn-xs" onClick={() => void openFile(f.path)}>
                     合并
@@ -515,6 +695,49 @@ export function MergeDialog({
                 )}
               </div>
             ))}
+          </div>
+        )}
+
+        {/* plan-308-1542 需求3-A：AI 自动合并进度面板（像消息流一样实时追加）
+            + 完成后的汇总报告卡。仅在有一轮进度时显示。 */}
+        {mergeProgress && (mergeProgress.lines.length > 0 || mergeProgress.report) && (
+          <div className="merge-progress">
+            <div className="merge-progress-head">
+              <span>AI 合并进度</span>
+              {mergeProgress.running && <span className="merge-progress-running">进行中…</span>}
+            </div>
+            <div className="merge-progress-lines">
+              {mergeProgress.lines.map((ln, i) => (
+                <div className={`merge-progress-line${ln.ok === false ? " is-bad" : ln.ok ? " is-ok" : ""}`} key={i}>
+                  <span className="merge-progress-time">
+                    {new Date(ln.at).toLocaleTimeString()}
+                  </span>
+                  <span className="merge-progress-text">{ln.text}</span>
+                </div>
+              ))}
+            </div>
+            {mergeProgress.report && (
+              <div className="merge-report">
+                <div className="merge-report-title">合并结果报告</div>
+                <div className="merge-report-stats">
+                  <span>共 {mergeProgress.report.total} 个文件</span>
+                  <span className="is-ok">git 自动合入 {mergeProgress.report.git}</span>
+                  <span className="is-ok">AI 解决 {mergeProgress.report.ai}</span>
+                  <span className={mergeProgress.report.conflicted ? "is-warn" : ""}>待人工 {mergeProgress.report.conflicted}</span>
+                  <span className={mergeProgress.report.failed ? "is-bad" : ""}>失败 {mergeProgress.report.failed}</span>
+                  <span>耗时 {(mergeProgress.report.elapsed_ms / 1000).toFixed(1)}s</span>
+                </div>
+                {mergeProgress.report.files.filter((r) => r.reason).length > 0 && (
+                  <div className="merge-report-detail">
+                    {mergeProgress.report.files.filter((r) => r.reason).map((r) => (
+                      <div className="merge-report-detail-row" key={r.path}>
+                        <code>{r.path}</code> — {r.result}：{r.reason}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
       </Dialog>
@@ -598,6 +821,27 @@ export function MergeDialog({
         {postError && <div className="merge-error">{postError}</div>}
       </Dialog>
     </>
+  );
+}
+
+/** 带行号 + 冲突区间高亮的只读代码栏（plan-308-1542 需求3-B）。
+ *  行号让"冲突在哪一行"与 git/IDEA 的口径一致；高亮当前冲突块，便于逐点解决。 */
+function NumberedPre({ text, highlight }: { text: string | null; highlight: [number, number] | null }) {
+  const lines = (text ?? "").split("\n");
+  if (text == null) return <pre className="merge-pre">{`（无此文件）`}</pre>;
+  const [hs, he] = highlight ?? [-1, -1];
+  return (
+    <div className="merge-pre-numbered">
+      {lines.map((ln, i) => (
+        <div
+          className={`merge-codeline${i >= hs && i <= he ? " is-conflict" : ""}`}
+          key={i}
+        >
+          <span className="merge-lineno">{i + 1}</span>
+          <span className="merge-codetext">{ln}</span>
+        </div>
+      ))}
+    </div>
   );
 }
 

@@ -29,6 +29,9 @@ async def usage_stats(
     start: str | None = Query(default=None, description="自定义起始日期 YYYY-MM-DD"),
     end: str | None = Query(default=None, description="自定义截止日期 YYYY-MM-DD"),
     days: int = Query(default=30, description="预设区间天数（无自定义日期时生效）"),
+    # plan-308-1542 需求6：按供应商筛选。用普通默认值（而非 Query(default=None)）——
+    # 这样单测直接调用本函数时不会拿到 Query 对象，FastAPI 侧行为不变。
+    provider: str | None = None,
     db: AsyncSession = Depends(get_db),
 ):
     """全软件 token 用量统计。
@@ -79,13 +82,20 @@ async def usage_stats(
         if r.model_id is not None:
             key = str(r.model_id)
             name = r.model_name or (model_map.get(r.model_id, ("", ""))[0] if r.model_id in model_map else "")
-            provider = r.provider_name or (model_map.get(r.model_id, ("", ""))[1] if r.model_id in model_map else "")
+            provider_name = r.provider_name or (model_map.get(r.model_id, ("", ""))[1] if r.model_id in model_map else "")
         else:
             key = f"name::{r.model_name or '未知模型'}"
             name = r.model_name or "未知模型"
-            provider = r.provider_name or ""
-        display = f"{provider}/{name}" if provider else (name or "未知模型")
-        return key, name, provider, display
+            provider_name = r.provider_name or ""
+        display = f"{provider_name}/{name}" if provider_name else (name or "未知模型")
+        return key, name, provider_name, display
+
+    # plan-308-1542 需求6：先算出"本次区间内出现过的全部供应商"（不受 provider 筛选影响），
+    # 供前端下拉框展示可选项；再进行实际筛选。
+    all_providers = sorted({resolve(r)[2] for r in rows if resolve(r)[2]})
+    want = (provider or "").strip()
+    if want:
+        rows = [r for r in rows if resolve(r)[2] == want]
 
     # ── 汇总 ──
     total = {"prompt": 0, "completion": 0, "reasoning": 0, "cached": 0}
@@ -124,13 +134,31 @@ async def usage_stats(
     ]
 
     # ── 全历史逐日聚合（热力图 + 峰值 + 连续天数）──
+    # plan-308-1542 需求6：与区间口径保持一致——选定供应商时，热力图/峰值/连续天数
+    # 也只统计该供应商，否则"筛了供应商但热力图没变"会让用户以为筛选没生效。
     all_rows = (
         await db.execute(
-            select(UsageRecord.created_at, UsageRecord.prompt_tokens, UsageRecord.completion_tokens)
+            select(UsageRecord.created_at, UsageRecord.prompt_tokens, UsageRecord.completion_tokens,
+                   UsageRecord.model_id, UsageRecord.model_name, UsageRecord.provider_name)
         )
     ).all()
+    all_prov_ids = {r[3] for r in all_rows if r[3] is not None}
+    all_model_map: dict[int, str] = {}
+    if all_prov_ids:
+        _mrows = (await db.execute(select(Model).where(Model.id.in_(all_prov_ids)))).scalars().all()
+        _pids = {m.provider_id for m in _mrows if m.provider_id is not None}
+        _prov = {}
+        if _pids:
+            _prows = (await db.execute(select(Provider).where(Provider.id.in_(_pids)))).scalars().all()
+            _prov = {p.id: p.name for p in _prows}
+        all_model_map = {m.id: _prov.get(m.provider_id, "") for m in _mrows}
+
     all_map: dict[str, int] = defaultdict(int)
-    for dt, p, c in all_rows:
+    for dt, p, c, mid, mname, pname in all_rows:
+        if want:
+            prov_name = pname or (all_model_map.get(mid, "") if mid is not None else "")
+            if prov_name != want:
+                continue
         all_map[_local_date_str(dt)] += (p or 0) + (c or 0)
     daily_all = [{"date": d, "tokens": t} for d, t in sorted(all_map.items())]
     peak_tokens = max((v["tokens"] for v in daily_all), default=0)
@@ -158,4 +186,7 @@ async def usage_stats(
         "peak_tokens": peak_tokens,
         "streak_current": streak_current,
         "streak_longest": longest,
+        # plan-308-1542 需求6：供应商筛选 + 可选列表
+        "providers": all_providers,
+        "provider": want or None,
     }

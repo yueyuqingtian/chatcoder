@@ -1,0 +1,344 @@
+// chatcoder 毛玻璃诊断模块（plan-308-1555 M0）
+//
+// 为什么需要它（正面解决历史失败根因）：
+//   过去十几轮"改毛玻璃"反复失败，不是因为没调 API，而是**缺少可验证的反馈环**——
+//   代码只能拿到"API 调用返回 ok"，拿不到"像素层究竟有没有把桌面混进来"。
+//   于是每轮都停在「改了 → 看不到 → 再改别的」的循环里。
+//
+// 本模块提供三件事：
+//   1) envReport()      —— 系统/Electron 版本事实（判断 acrylic 是否可用）
+//   2) dwmReadBack()    —— **回读** DWM 实际生效的 backdrop 类型（不靠 API 返回值自证）
+//   3) buildConclusion() —— 把「窗口层回读值 + 渲染层 alpha 链路采样」合成一行确定结论
+//
+// 设计约定：纯函数（版本解析 / 结论合成）与系统调用（FFI）分离，
+// 前者可被单测覆盖，后者失败一律降级为"未知"，绝不抛异常打断主流程。
+
+const os = require("os");
+
+// ───────────────────────────────────────────────────────────────
+// DWMWA / ACCENT 常量（与 Windows SDK 同名，便于对照文档）
+// ───────────────────────────────────────────────────────────────
+const DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+const DWMWA_SYSTEMBACKDROP_TYPE = 38;
+
+/** DWMSBT_* 值 → 可读名（回读值即用它解释） */
+const BACKDROP_NAMES = {
+  0: "auto",
+  1: "none",
+  2: "mica",
+  3: "acrylic",       // DWMSBT_TRANSIENTWINDOW：桌面 Acrylic，真实透出桌面
+  4: "tabbed",        // DWMSBT_TABBEDWINDOW：Mica Alt
+};
+
+// ───────────────────────────────────────────────────────────────
+// 纯函数区（可单测）
+// ───────────────────────────────────────────────────────────────
+
+/**
+ * 从 `os.release()` 字符串解析 Windows 构建号。
+ * Windows 11 报 "10.0.26200"；Windows 10 报 "10.0.19045"。
+ * 返回 { major, minor, build, isWindows, isWin11, supportsBackdrop } 或 null。
+ */
+function parseWindowsBuild(release) {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(String(release || ""));
+  if (!m) return null;
+  const major = Number(m[1]);
+  const minor = Number(m[2]);
+  const build = Number(m[3]);
+  return {
+    major,
+    minor,
+    build,
+    isWindows: true,
+    // 22000+ 即 Windows 11（21H2 首发）。注意：22000 本身不支持
+    // DWMWA_SYSTEMBACKDROP_TYPE（需 22621+），故另给 supportsBackdrop 区分。
+    isWin11: build >= 22000,
+    supportsBackdrop: build >= 22621,
+  };
+}
+
+/** 回读值（数字或字符串）→ 可读名；未知返回 `unknown(<raw>)`。 */
+function backdropName(value) {
+  if (value === null || value === undefined) return "unknown";
+  const n = Number(value);
+  if (Number.isNaN(n)) return `unknown(${value})`;
+  return BACKDROP_NAMES[n] || `unknown(${n})`;
+}
+
+/**
+ * 合成一行确定结论（本模块的核心产出）。
+ *
+ * @param {object} p
+ * @param {number|string|null} p.backdropRaw   DWM 回读的 DWMWA_SYSTEMBACKDROP_TYPE 原值
+ * @param {string} p.backend                   blurBackend() 探测到的后端名
+ * @param {string|null} p.alphaPath            'ready' 或 'blocked@<selector>'
+ * @param {boolean} p.degraded                 是否已降级
+ * @returns {{ verdict: string, reason: string, line: string }}
+ *
+ * verdict 取值（供 UI 与日志直接判断）：
+ *   material-live   材质已生效 → 若仍看不见属视觉对比问题（H3）
+ *   material-dead   材质未生效 → 属合成路径问题（H1/H4/H5）
+ *   blocked         材质可能生效但被不透明层遮挡（H2）
+ *   unknown         无法判定（缺回读能力，如无 FFI）
+ */
+function buildConclusion({ backdropRaw, backend, alphaPath, degraded } = {}) {
+  const name = backdropName(backdropRaw);
+  const isLive = Number(backdropRaw) >= 2;
+  const blocked = String(alphaPath || "").startsWith("blocked@");
+
+  let verdict;
+  let reason;
+  if (backdropRaw === null || backdropRaw === undefined) {
+    verdict = "unknown";
+    reason = "无法回读 DWM 材质（FFI 不可用）——请检查 koffi 是否随包分发";
+  } else if (isLive && blocked) {
+    verdict = "blocked";
+    reason = `材质已生效（${name}）但被不透明层遮挡：${String(alphaPath).replace("blocked@", "")}`;
+  } else if (isLive) {
+    verdict = "material-live";
+    reason = `材质已生效（${name}）且透明度链路通畅；若肉眼仍看不出，属对比度不足（换彩色壁纸/提高强度）`;
+  } else {
+    verdict = "material-dead";
+    reason = `材质未生效（回读 backdrop=${name}）——API 可能被接受但 DWM 未启用，需走 FFI 兼容路径`;
+  }
+
+  const line = [
+    `backdrop=${name}(${backdropRaw ?? "-"})`,
+    `alphaPath=${alphaPath || "unknown"}`,
+    `backend=${backend || "unknown"}`,
+    `degraded=${degraded ? "true" : "false"}`,
+    `verdict=${verdict}`,
+  ].join(" | ");
+
+  return { verdict, reason, line };
+}
+
+// ───────────────────────────────────────────────────────────────
+// FFI（koffi）：DWM 回读。失败一律降级，不抛异常
+// ───────────────────────────────────────────────────────────────
+
+let _ffiCache; // undefined=未尝试；null=不可用；对象=可用
+
+/** 加载 user32/dwmapi 绑定（仅 Windows）。失败返回 null（不抛）。 */
+function loadDwmFfi() {
+  if (_ffiCache !== undefined) return _ffiCache;
+  if (process.platform !== "win32") {
+    _ffiCache = null;
+    return null;
+  }
+  try {
+    const koffi = require("koffi");
+    const dwmapi = koffi.load("dwmapi.dll");
+    const user32 = koffi.load("user32.dll");
+    _ffiCache = {
+      koffi,
+      DwmGetWindowAttribute: dwmapi.func(
+        "long __stdcall DwmGetWindowAttribute(intptr hwnd, uint attr, _Out_ void* pvAttribute, uint cbAttribute)"),
+      DwmSetWindowAttribute: dwmapi.func(
+        "long __stdcall DwmSetWindowAttribute(intptr hwnd, uint attr, _In_ void* pvAttribute, uint cbAttribute)"),
+      DwmExtendFrameIntoClientArea: dwmapi.func(
+        "long __stdcall DwmExtendFrameIntoClientArea(intptr hwnd, _In_ void* margins)"),
+      SetWindowCompositionAttribute: user32.func(
+        "bool __stdcall SetWindowCompositionAttribute(intptr hwnd, _Inout_ void* data)"),
+    };
+    return _ffiCache;
+  } catch (err) {
+    _ffiCache = null;
+    return null;
+  }
+}
+
+/** 从 Electron BrowserWindow 取 HWND 数值（Buffer 为 little-endian 指针）。 */
+function hwndOf(win) {
+  if (!win || win.isDestroyed()) return null;
+  try {
+    const h = win.getNativeWindowHandle();
+    if (Buffer.isBuffer(h)) {
+      return h.length >= 8 ? Number(h.readBigUInt64LE(0)) : h.readUInt32LE(0);
+    }
+    if (typeof h === "number") return h;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 回读 DWM 实际生效的 backdrop 类型（**这是"是否真生效"的唯一权威判据**）。
+ * 返回 { ok, value, name, hresult } 或 { ok:false, reason }。
+ */
+function dwmReadBack(win) {
+  const ffi = loadDwmFfi();
+  const hwnd = hwndOf(win);
+  if (!ffi) return { ok: false, value: null, name: "unknown", reason: "FFI 不可用（koffi 缺失或非 Windows）" };
+  if (hwnd === null) return { ok: false, value: null, name: "unknown", reason: "无法获取 HWND" };
+  try {
+    const buf = Buffer.alloc(4);
+    const hr = ffi.DwmGetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, buf, 4);
+    if (hr !== 0) {
+      return { ok: false, value: null, name: "unknown", hresult: hr,
+               reason: `DwmGetWindowAttribute 失败(hr=0x${(hr >>> 0).toString(16)})；该系统可能不支持 DWMWA_SYSTEMBACKDROP_TYPE` };
+    }
+    const value = buf.readInt32LE(0);
+    return { ok: true, value, name: backdropName(value) };
+  } catch (err) {
+    return { ok: false, value: null, name: "unknown", reason: err && err.message };
+  }
+}
+
+// ───────────────────────────────────────────────────────────────
+// 渲染层 alpha 链路探针（自包含脚本，由主进程注入执行）
+// ───────────────────────────────────────────────────────────────
+
+/** 采样顺序：自窗口底向上（越外层越先采，先命中者即遮挡源候选） */
+const PROBE_SELECTORS = [
+  "html",
+  "body",
+  "#root",
+  ".app-shell",
+  ".app-right",
+  ".app-body",
+  ".app-pane-left",
+  ".sidebar.sb",
+  ".titlebar",
+  ".app-pane-right",
+  ".right-panel",
+  ".settings-page-overlay",
+  ".settings-nav",
+  // 决策 B：以下按设计保持不透明，仅记录、不参与 blocked 判定
+  ".app-main",
+];
+
+/** 决策 B「消息流与主内容区保持不透明」的**预期**不透明白名单。 */
+const EXPECTED_OPAQUE_SELECTORS = [
+  ".app-main",
+  ".message-flow",
+  ".message-flow-wrap",
+  ".composer",
+  ".composer-main",
+];
+
+/**
+ * 解析 CSS 颜色的 alpha（0..1）。
+ * 支持 transparent / rgba() / rgb() / #RRGGBBAA / 现代空格语法 `rgb(r g b / a)`。
+ * 无背景（none）按 0；纯 hex/rgb（无 alpha）按 1。
+ */
+function parseColorAlpha(color) {
+  if (!color) return 0;
+  const c = String(color).trim().toLowerCase();
+  if (["transparent", "none", "initial", "unset", "rgba(0, 0, 0, 0)"].includes(c)) return 0;
+  const rgba = /^rgba?\(([^)]+)\)$/.exec(c);
+  if (rgba) {
+    const parts = rgba[1].split(/[,/\s]+/).filter(Boolean);
+    if (parts.length >= 4) {
+      const a = Number(parts[3]);
+      return Number.isNaN(a) ? 0 : Math.max(0, Math.min(1, a));
+    }
+    return 1;
+  }
+  const hex8 = /^#([0-9a-f]{8})$/.exec(c);
+  if (hex8) return parseInt(hex8[1].slice(6, 8), 16) / 255;
+  if (/^#[0-9a-f]{3,6}$/.test(c)) return 1;
+  return 0;
+}
+
+/**
+ * 由采样结果判定透明度链路是否通畅。
+ * 规则：某层「背景完全不透明」且「没有使用 backdrop-filter」⇒ 材质被它挡住 ⇒ blocked@该层。
+ * 白名单层（决策 B 预期不透明）跳过判定。
+ */
+function analyzeAlphaChain(samples) {
+  const opaqueUnexpected = [];
+  for (const s of samples || []) {
+    if (s.isExpectedOpaque) continue;
+    const alpha = parseColorAlpha(s.backgroundColor);
+    const hasBackdrop = Boolean(s.backdropFilter && s.backdropFilter !== "none");
+    if (alpha >= 1 && !hasBackdrop) opaqueUnexpected.push(s.selector);
+  }
+  return {
+    alphaPath: opaqueUnexpected.length ? `blocked@${opaqueUnexpected[0]}` : "ready",
+    blockedSelector: opaqueUnexpected[0] || null,
+    opaqueUnexpected,
+  };
+}
+
+/**
+ * 生成注入渲染进程执行的**自包含**探针脚本字符串。
+ *
+ * 设计取舍：为什么把 JS 写成字符串而不是 import 前端模块？
+ *   探针必须在「前端可能未加载完 / 前端构建产物未更新」时也能跑出结论——
+ *   这正是本计划要打破的历史困局（改了代码但运行的仍是旧包）。
+ *   自包含脚本由主进程注入，与前端构建产物解耦，永远可用。
+ */
+function probeScript() {
+  return `(() => {
+    const SELECTORS = ${JSON.stringify(PROBE_SELECTORS)};
+    const EXPECTED = ${JSON.stringify(EXPECTED_OPAQUE_SELECTORS)};
+    const parseAlpha = ${parseColorAlpha.toString()};
+    const analyze = ${analyzeAlphaChain.toString()};
+    const samples = [];
+    for (const sel of SELECTORS) {
+      const el = document.querySelector(sel);
+      if (!el) continue;
+      const cs = window.getComputedStyle(el);
+      samples.push({
+        selector: sel,
+        backgroundColor: cs.backgroundColor,
+        backdropFilter: cs.backdropFilter || cs.webkitBackdropFilter || "none",
+        backgroundImage: (cs.backgroundImage && cs.backgroundImage !== "none") ? "has-image" : "none",
+        isExpectedOpaque: EXPECTED.includes(sel),
+      });
+    }
+    const a = analyze(samples);
+    return { ok: true, ...a, samples };
+  })()`;
+}
+
+/** 环境事实（版本/平台/是否打包），供诊断与日志使用。 */
+function envReport(app, explicitRelease) {
+  const release = explicitRelease || os.release();
+  const win = parseWindowsBuild(release);
+  return {
+    platform: process.platform,
+    release,
+    windows: win,
+    electron: process.versions.electron,
+    chrome: process.versions.chrome,
+    node: process.versions.node,
+    modules: process.versions.modules,
+    isPackaged: Boolean(app && app.isPackaged),
+  };
+}
+
+/** 窗口事实（含主进程侧记录的材质参数）。 */
+function windowReport(win, recorded) {
+  if (!win || win.isDestroyed()) return { ok: false, reason: "窗口不可用" };
+  const base = {
+    ok: true,
+    visible: win.isVisible(),
+    maximized: win.isMaximized(),
+    minimized: win.isMinimized(),
+    fullScreen: win.isFullScreen(),
+  };
+  try { base.transparent = win.isTransparent(); } catch { base.transparent = null; }
+  return { ...base, recorded: recorded || null };
+}
+
+module.exports = {
+  DWMWA_USE_IMMERSIVE_DARK_MODE,
+  DWMWA_SYSTEMBACKDROP_TYPE,
+  BACKDROP_NAMES,
+  PROBE_SELECTORS,
+  EXPECTED_OPAQUE_SELECTORS,
+  parseWindowsBuild,
+  backdropName,
+  parseColorAlpha,
+  analyzeAlphaChain,
+  probeScript,
+  buildConclusion,
+  loadDwmFfi,
+  hwndOf,
+  dwmReadBack,
+  envReport,
+  windowReport,
+};

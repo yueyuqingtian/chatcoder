@@ -11,19 +11,22 @@ import { UsageTrendChart, type TrendSeries } from "./usage/UsageTrendChart";
 import { UsageDonutChart, type DonutSeg } from "./usage/UsageDonutChart";
 import { fmtTokens, modelColor } from "./usage/chartUtils";
 
-type RangeMode = "7" | "30" | "custom";
+type RangeMode = "today" | "7" | "30" | "custom";
 
 const RANGE_OPTS: Array<{ mode: RangeMode; label: string }> = [
+  { mode: "today", label: "今天" },
   { mode: "7", label: "近 7 日" },
   { mode: "30", label: "近 30 日" },
   { mode: "custom", label: "自定义" },
 ];
 
-function buildRangeParams(mode: RangeMode, start: string, end: string): { start?: string; end?: string; days?: number } {
-  if (mode === "7") return { days: 7 };
-  if (mode === "30") return { days: 30 };
-  if (start && end) return { start, end };
-  return { days: 30 };
+function buildRangeParams(mode: RangeMode, start: string, end: string, provider?: string): { start?: string; end?: string; days?: number; provider?: string } {
+  // plan-308-1542 需求6：「今天」= 本地当日闭区间（days=1）
+  if (mode === "today") return { days: 1, provider };
+  if (mode === "7") return { days: 7, provider };
+  if (mode === "30") return { days: 30, provider };
+  if (start && end) return { start, end, provider };
+  return { days: 30, provider };
 }
 
 export function UsagePanel() {
@@ -31,21 +34,25 @@ export function UsagePanel() {
   const [rangeMode, setRangeMode] = useState<RangeMode>("30");
   const [customStart, setCustomStart] = useState("");
   const [customEnd, setCustomEnd] = useState("");
+  // plan-308-1542 需求6：按供应商筛选（空 = 全部供应商）
+  const [provider, setProvider] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async (mode: RangeMode, start: string, end: string) => {
+  const load = useCallback(async (mode: RangeMode, start: string, end: string, prov?: string) => {
     setLoading(true);
     setError(null);
     try {
-      const s = await api.getUsageStats(buildRangeParams(mode, start, end));
+      const s = await api.getUsageStats(buildRangeParams(mode, start, end, prov ?? provider));
       setStats(s);
     } catch (e) {
       setError(String(e));
     } finally {
       setLoading(false);
     }
-  }, []);
+    // provider 依赖：切换供应商后重新拉取（闭包读取最新值）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider]);
 
   useEffect(() => { void load("30", "", ""); }, [load]);
 
@@ -56,6 +63,12 @@ export function UsagePanel() {
       return;
     }
     void load(mode, start, end);
+  };
+
+  /** plan-308-1542 需求6：切换供应商（空字符串 = 全部供应商）。 */
+  const applyProvider = (p: string) => {
+    setProvider(p);
+    void load(rangeMode, customStart, customEnd, p);
   };
 
   // ── 由 stats 派生的展示数据 ──
@@ -159,6 +172,19 @@ export function UsagePanel() {
             </span>
           )}
         </div>
+        {/* plan-308-1542 需求6：按供应商筛选（可切换查看对应供应商的使用情况） */}
+        <select
+          className="sp-input usage-provider-select"
+          value={provider}
+          disabled={loading}
+          onChange={(e) => applyProvider(e.target.value)}
+          title="按供应商筛选用量"
+        >
+          <option value="">全部供应商</option>
+          {(stats?.providers ?? []).map((p) => (
+            <option key={p} value={p}>{p}</option>
+          ))}
+        </select>
         <button
           className="btn btn-ghost btn-sm"
           onClick={() => applyRange(rangeMode)}
@@ -168,6 +194,9 @@ export function UsagePanel() {
           <IconRefresh size={13} /> {loading ? "加载中…" : "刷新"}
         </button>
       </div>
+      {provider && stats && stats.total.total === 0 && (
+        <div className="navpage-empty">「{provider}」在所选区间无用量。</div>
+      )}
 
       {error && (
         <div className="usage-error">

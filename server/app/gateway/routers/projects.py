@@ -235,6 +235,14 @@ class MergePreviewBody(BaseModel):
     direction: str = "to_main"
 
 
+class MergeAiAllBody(BaseModel):
+    """plan-308-1542 需求3-A：一键 AI 智能合并（进度经 WS merge.progress 广播）。"""
+    direction: str = "to_main"
+    model_id: int | None = None
+    # 会话 id：进度事件按会话归属推送（与 debug.paused 同口径）
+    session_id: int | None = None
+
+
 class WorktreeCommitBody(BaseModel):
     """提交某一侧的未提交改动（合并前的自动提交）。side: worktree | main"""
     side: str = "worktree"
@@ -269,6 +277,16 @@ async def create_project_worktree(project_id: int, body: WorktreeCreateBody,
 async def list_project_worktrees(project_id: int, db: AsyncSession = Depends(get_db)):
     """列出该项目下的工作树（含 git 状态摘要）。"""
     return await worktree_service.list_worktrees(db, project_id=project_id)
+
+
+@router.post("/worktrees/cleanup-stale", response_model=dict)
+async def cleanup_stale_worktrees(db: AsyncSession = Depends(get_db)):
+    """清理"git 侧已不存在、数据库仍登记"的失效工作树（左面板删不掉的僵尸项）。
+
+    plan-308-1542 修复：目录/分支被外部删除（或早前版本删除时因外键报错中断）后，
+    左面板会一直显示这个工作树且删不掉。设置页与启动自愈都走本接口。
+    """
+    return await worktree_service.cleanup_stale_worktrees(db)
 
 
 @router.delete("/worktrees/{worktree_project_id}", response_model=dict)
@@ -322,6 +340,22 @@ async def worktree_merge_ai(worktree_project_id: int, body: MergeAiBody,
     return await worktree_service.ai_merge_suggest(
         db, worktree_project_id, body.path, body.hunk,
         direction=body.direction, model_id=body.model_id)
+
+
+@router.post("/worktrees/{worktree_project_id}/merge/ai-all", response_model=dict)
+async def worktree_merge_ai_all(worktree_project_id: int, body: MergeAiAllBody,
+                                db: AsyncSession = Depends(get_db)):
+    """一键 AI 智能合并（plan-308-1542 需求3-A）。
+
+    执行期间经 WS 广播 `merge.progress`（当前文件/阶段/工具调用/耗时），
+    前端在合并弹窗内像消息流一样实时追加行；完成后返回汇总报告。
+    """
+    try:
+        return await worktree_service.ai_merge_all(
+            db, worktree_project_id, direction=body.direction,
+            model_id=body.model_id, session_id=body.session_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @router.post("/worktrees/{worktree_project_id}/commit", response_model=dict)

@@ -20,6 +20,10 @@ from app.persistence.database import async_session_factory
 _CONTENT_LIMIT = 12000
 # 索引模式最多列出的技能数
 _INDEX_LIMIT = 30
+# plan-308-1542 需求2：未命中时的相近技能候选上限
+_SUGGEST_LIMIT = 10
+# plan-308-1542 需求2：技能同目录资源清单上限
+_SIBLING_LIMIT = 50
 
 
 class SkillViewTool(Tool):
@@ -86,7 +90,25 @@ class SkillViewTool(Tool):
                     select(Skill).where(Skill.display_name == name)
                 )
                 skill = res.scalars().first()
+            if skill is None and ":" not in name:
+                # plan-308-1542 需求2：插件技能注册名形如 "{plugin}:{skill}"，
+                # AI 常直接用技能短名调用——按后缀 ":{name}" 反查，避免"找不到技能"。
+                res = await db.execute(
+                    select(Skill).where(Skill.name.like(f"%:{name}"))
+                )
+                skill = res.scalars().first()
             if skill is None:
+                # plan-308-1542 需求2：未命中时给出候选（包含匹配），而不是让 AI 直接放弃。
+                res = await db.execute(
+                    select(Skill).where(Skill.name.like(f"%{name}%"))
+                    .order_by(Skill.source, Skill.name).limit(_SUGGEST_LIMIT)
+                )
+                near = [s for s in res.scalars().all()]
+                if near:
+                    lines = [f"技能 '{name}' 不存在；相近的技能（用 skill_view(name=...) 加载）："]
+                    for s in near:
+                        lines.append(f"- {s.name}: {(s.description or '')[:120]}")
+                    return ToolResult(ok=True, output="\n".join(lines), data={"count": len(near)})
                 return ToolResult(ok=False, output="", error=f"技能 '{name}' 不存在（用不带参数的 skill_view 查看全部技能）")
             if not skill.is_active:
                 return ToolResult(ok=False, output="", error=f"技能 '{name}' 已停用，请在设置 → 技能中启用")
@@ -111,6 +133,21 @@ class SkillViewTool(Tool):
             if truncated:
                 content = content[:_CONTENT_LIMIT]
 
+            # plan-308-1542 需求2：返回**路径与同目录资源清单**——
+            # 技能常带 scripts/、references/ 等配套文件，AI 拿到目录才能读它们
+            # （用户反馈"AI 说找不到技能目录"）。
+            skill_path = (skill.path or "").strip()
+            skill_dir = ""
+            siblings: list[str] = []
+            if skill_path:
+                try:
+                    from pathlib import Path as _P
+                    p = _P(skill_path)
+                    skill_dir = str(p.parent)
+                    siblings = _list_siblings(p)
+                except Exception:  # noqa: BLE001
+                    skill_dir, siblings = "", []
+
             lines = [f"# 技能: {skill.display_name or skill.name}"]
             if skill.description:
                 lines.append(f"描述: {skill.description.strip()}")
@@ -118,11 +155,42 @@ class SkillViewTool(Tool):
                 lines.append(f"触发条件: {skill.trigger.strip()}")
             if skill.tools:
                 lines.append(f"依赖工具: {', '.join(str(t) for t in skill.tools)}")
+            if skill_path:
+                lines.append(f"技能文件: {skill_path}")
+            if skill_dir:
+                lines.append(f"技能目录: {skill_dir}")
+            if siblings:
+                lines.append(f"同目录资源（可直接用 fs_read/terminal 读取）: {', '.join(siblings)}")
             lines.append("")
             lines.append(content)
             if truncated:
                 lines.append(f"\n[正文超长已截断至 {_CONTENT_LIMIT} 字符]")
             return ToolResult(
                 ok=True, output="\n".join(lines),
-                data={"name": skill.name, "truncated": truncated},
+                data={"name": skill.name, "truncated": truncated,
+                      "path": skill_path or None, "dir": skill_dir or None,
+                      "siblings": siblings},
             )
+
+
+def _list_siblings(skill_file) -> list[str]:
+    """列出技能目录下的同级资源文件（含 scripts/references/assets 子目录，限 _SIBLING_LIMIT 条）。
+
+    plan-308-1542 需求2：技能自带的脚本/参考文件必须可被 AI 发现，
+    否则"技能能用"只停留在提示词层面，配套资源形同不存在。
+    """
+    out: list[str] = []
+    try:
+        base = skill_file.parent
+        for sub in ("", "scripts", "references", "assets", "resources"):
+            d = base / sub if sub else base
+            if not d.is_dir():
+                continue
+            for f in sorted(d.iterdir()):
+                if f.is_file() and f.name.lower() != "skill.md":
+                    out.append(f.name if not sub else f"{sub}/{f.name}")
+                if len(out) >= _SIBLING_LIMIT:
+                    return out
+    except OSError:
+        return out
+    return out

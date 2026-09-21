@@ -371,12 +371,22 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
     }
   };
 
-  /** 删除工作树（未提交变更时后端会拒绝） */
+  /** 删除工作树（未提交变更时后端会拒绝）。
+   *  plan-308-1542 需求3-C：后端会级联删除该工作树下所有会话；若被删的正是当前选中
+   *  项目/会话，需要清理选中态，否则界面会指向已不存在的项目。 */
   const handleDeleteWorktree = async (wt: ProjectOut, force: boolean) => {
     try {
-      await api.deleteWorktreeProject(wt.id, force);
+      const res = await api.deleteWorktreeProject(wt.id, force);
       setDropWorktree(null);
+      const store = useChatStore.getState();
+      if (res?.detached && store.currentProjectId === wt.id) {
+        useChatStore.setState({ currentProjectId: null, currentSessionId: null });
+      }
       await loadBootstrap();
+      const n = res?.deleted_sessions ?? 0;
+      useChatStore.setState({
+        error: `已删除工作树「${wt.name}」${n > 0 ? `（并级联删除 ${n} 个会话）` : ""}`,
+      });
     } catch (e) {
       useChatStore.setState({ error: String(e) });
     }

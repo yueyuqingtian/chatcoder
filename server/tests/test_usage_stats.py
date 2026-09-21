@@ -126,3 +126,59 @@ async def test_no_data_returns_empty_shapes(db):
     assert result["peak_tokens"] == 0
     assert result["streak_current"] == 0
     assert result["streak_longest"] == 0
+
+
+# ── plan-308-1542 需求6：「今天」与按供应商筛选 ──
+
+async def test_today_range_only_counts_today(db):
+    """days=1（前端「今天」）只统计本地当日流水。"""
+    today = datetime.now().astimezone().date()
+    now_local = datetime(today.year, today.month, today.day, 10, 0)
+    yesterday = datetime(today.year, today.month, today.day, 10, 0) - timedelta(days=1)
+    _add(db, model_id=None, model_name="m", prompt=50, completion=0, created_at=now_local)
+    _add(db, model_id=None, model_name="m", prompt=999, completion=0, created_at=yesterday)
+    await db.commit()
+
+    result = await usage_stats(start=None, end=None, days=1, db=db)
+    assert result["total"]["prompt"] == 50, "「今天」不应包含昨日用量"
+    assert [d["date"] for d in result["daily"]] == [today.isoformat()]
+
+
+async def test_provider_filter_scopes_all_aggregates(db):
+    """按供应商筛选后，总量/分布/逐日/热力图/峰值口径一致。"""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    _add(db, model_id=None, model_name="m1", provider_name="alpha", prompt=100, completion=0, created_at=now)
+    _add(db, model_id=None, model_name="m2", provider_name="beta", prompt=300, completion=0, created_at=now)
+    await db.commit()
+
+    all_res = await usage_stats(start=None, end=None, days=30, db=db)
+    assert all_res["total"]["prompt"] == 400
+    assert sorted(all_res["providers"]) == ["alpha", "beta"]
+    assert all_res["provider"] is None
+
+    alpha = await usage_stats(start=None, end=None, days=30, provider="alpha", db=db)
+    assert alpha["total"]["prompt"] == 100
+    assert alpha["provider"] == "alpha"
+    assert len(alpha["by_model"]) == 1
+    assert alpha["by_model"][0]["provider_name"] == "alpha"
+    # 热力图/峰值也只反映该供应商（口径一致）
+    assert alpha["peak_tokens"] == 100
+    assert sum(d["tokens"] for d in alpha["daily_all"]) == 100
+    # providers 列表仍是全量（供下拉框展示可选项）
+    assert sorted(alpha["providers"]) == ["alpha", "beta"]
+
+
+async def test_provider_filter_unknown_returns_empty_but_ok(db):
+    """不存在的供应商：返回空集合但结构完整、不报错。"""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    _add(db, model_id=None, model_name="m", provider_name="alpha", prompt=10, completion=0, created_at=now)
+    await db.commit()
+
+    res = await usage_stats(start=None, end=None, days=30, provider="nope", db=db)
+    assert res["total"]["calls"] == 0
+    assert res["by_model"] == []
+    assert res["provider"] == "nope"
+
+    # 无 provider 过滤的旧调用签名仍然兼容（回归保护）
+    res2 = await usage_stats(start=None, end=None, days=30, db=db)
+    assert res2["total"]["calls"] == 1

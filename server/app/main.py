@@ -103,6 +103,21 @@ async def lifespan(app: FastAPI):
             import logging
             logging.getLogger(__name__).exception("启动技能扫描失败（不阻塞服务）")
 
+        # plan-308-1542 修复：启动时自愈"git 侧已不存在、数据库仍登记"的失效工作树。
+        # 用户反馈：分支与目录已被删除后，左面板仍显示该工作树且删不掉（僵尸项）。
+        # 失败不阻塞服务启动。
+        try:
+            import logging
+
+            from app.services import worktree_service
+
+            _res = await worktree_service.cleanup_stale_worktrees(db)
+            if _res.get("cleaned"):
+                logging.getLogger(__name__).info("启动工作树自愈完成: %s", _res)
+        except Exception:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).exception("启动工作树自愈失败（不阻塞服务）")
+
         # plan-230-1144 M1.1: 启动定时任务调度循环（此前该表无任何消费者，任务永不执行）
         try:
             from app.services import scheduler_loop

@@ -110,9 +110,25 @@ def estimate_fixed_overhead_tokens(messages: list[ChatMessage]) -> int:
 
 
 def estimate_message_tokens(msg: ChatMessage) -> int:
-    """估算单条 ChatMessage 的 token 数。"""
+    """估算单条 ChatMessage 的 token 数。
+
+    plan-282-0（压缩效率根治）：**必须计入 reasoning_content**。
+
+    此前漏算该字段，导致估算与真实 prompt 出现 2~5 倍偏差（512K 窗口下，
+    压缩器自报 14.4% 而 API 真实占用 69%）。根因链条：
+    - thinking 消息在 context_manager 重建时被写入 assistant.reasoning_content
+      并**真实发给模型**（thinking 模式网关要求回传）；
+    - 但估算只看 content/tool_calls，reasoning_content 完全不计；
+    - thinking 单条常达 10k~80k 字符（全库可占 69%），漏算量级极大。
+
+    zcode 的 uf()/u9o() 明确把 type=="reasoning" 的块计入估算（yB 为每 token
+    字符数），本函数与之对齐。
+    """
     total = _MESSAGE_OVERHEAD
     total += rough_token_estimate(msg.content or "")
+    # reasoning_content：思考模式的历史推理内容，出站时原样回传，必须计入。
+    if msg.reasoning_content:
+        total += rough_token_estimate(str(msg.reasoning_content))
     if msg.tool_calls:
         for tc in msg.tool_calls:
             args = tc.get("arguments", {})
@@ -130,6 +146,30 @@ def estimate_message_tokens(msg: ChatMessage) -> int:
 def estimate_messages_tokens(messages: list[ChatMessage]) -> int:
     """估算消息列表的总 token 数。"""
     return sum(estimate_message_tokens(m) for m in messages)
+
+
+def estimate_tools_tokens(tool_schemas: list[dict] | None) -> int:
+    """估算工具定义（tool schemas）占用的 prompt token（plan-282-0）。
+
+    tools 随每次请求独立传给 provider，**不属于 messages**，此前所有占用核算
+    （前置压缩判定、压缩后占用汇报、前端圆环）全部漏算它——真实窗口被这批
+    schema 白占一部分，压缩后仍显占用偏高。
+
+    对齐 zcode：其 jyo() 把 tools 序列化进请求体参与计费；本函数按 json 序列化
+    后的字节数 / 4 估算（与 _approx_token_count 同口径）。
+    """
+    if not tool_schemas:
+        return 0
+    import json
+
+    total = 0
+    for schema in tool_schemas:
+        try:
+            total += rough_token_estimate(json.dumps(schema, ensure_ascii=False))
+        except (TypeError, ValueError):
+            total += rough_token_estimate(str(schema))
+    # 每个工具的 JSON 结构自身还有键名/括号开销，按 json 结果已足够近似。
+    return total
 
 
 def estimate_breakdown(messages: list[ChatMessage]) -> dict[str, int]:

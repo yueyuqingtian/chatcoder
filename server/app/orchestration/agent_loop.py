@@ -440,9 +440,16 @@ def _prune_messages_for_compaction(messages: list, retain_tokens: int) -> list:
     3. 切点向前回退到 tool 配对平衡位置；
     4. 按原顺序重组（保持消息相对次序），返回裁剪后的列表。
 
+    plan-282-0: 累计用「有效口径」——reasoning_content 计入估算后，旧工具回合的
+    thinking（出站会被 build_api_copy 剥离）不应再白吃保留预算，否则内存裁剪会把
+    真正的对话挤出去、却留下不占真实体积的旧 thinking。
+
     注意：仅作用于内存，落库消息与 compacted_ids 不变，前端压缩卡片/还原不受影响。
     """
-    from app.orchestration.token_counter import estimate_message_tokens
+    from app.orchestration.token_counter import (
+        estimate_message_tokens, rough_token_estimate,
+    )
+    from app.orchestration.compaction import _REASONING_KEEP_TOOL_ROUNDS
 
     if len(messages) <= 1:
         return messages
@@ -450,10 +457,29 @@ def _prune_messages_for_compaction(messages: list, retain_tokens: int) -> list:
     if not body:
         return messages
 
+    # 旧 reasoning 分界线：索引 < cutoff 的 assistant reasoning 出站时会被剥离，
+    # 核算时只计消息结构开销（与 compaction.strip_stale_reasoning 同一语义）。
+    cutoff = 0
+    seen_rounds = 0
+    for i in range(len(body) - 1, -1, -1):
+        m = body[i]
+        if m.role == "assistant" and m.tool_calls:
+            seen_rounds += 1
+            if seen_rounds >= _REASONING_KEEP_TOOL_ROUNDS:
+                cutoff = i
+                break
+
+    def _eff_tokens(idx: int) -> int:
+        """单条消息的有效 token（旧工具回合的 reasoning 只计结构开销）。"""
+        m = body[idx]
+        if idx < cutoff and m.role == "assistant" and m.reasoning_content:
+            return estimate_message_tokens(m) - rough_token_estimate(str(m.reasoning_content))
+        return estimate_message_tokens(m)
+
     keep_from = len(body)
     acc = 0
     for i in range(len(body) - 1, -1, -1):
-        acc += estimate_message_tokens(body[i])
+        acc += _eff_tokens(i)
         keep_from = i
         if acc >= retain_tokens:
             break
@@ -826,13 +852,16 @@ async def run_agent_loop(
                 # 用户只看到占用突然降几十 k，误以为丢历史——即"隐藏压缩"的观感来源）。
                 try:
                     _reclaim = _take_reclaim()
-                    if _reclaim and (_reclaim.get("folded") or _reclaim.get("est_tokens_saved", 0) > 2000):
+                    if _reclaim and (_reclaim.get("folded") or _reclaim.get("reasoning_stripped")
+                                     or _reclaim.get("est_tokens_saved", 0) > 2000):
                         await broadcast(session_id, {
                             "event": "context.folded",
                             "payload": {
                                 "agent_id": agent_id, "agent_name": agent_name,
                                 "turn_id": turn_id,
                                 "folded_results": _reclaim.get("folded", 0),
+                                # plan-282-0: 旧工具回合的 reasoning 被出站剥离的条数
+                                "reasoning_stripped": _reclaim.get("reasoning_stripped", 0),
                                 "est_tokens_saved": _reclaim.get("est_tokens_saved", 0),
                                 "budget_tokens": _reclaim.get("budget"),
                                 "context_window": agent_window,
@@ -842,7 +871,12 @@ async def run_agent_loop(
                     logger.debug("[agent] 上下文回收提示广播失败", exc_info=True)
 
                 # v6.5: 前置压缩检查 -- 用校准系数调整估算，超阈值则先压缩
-                _est_raw = _est_tokens(api_messages)
+                # plan-282-0: **必须把 tools schema 计入**——它随每次请求独立发送，
+                # 不属于 messages，此前完全漏算（实测 57 个工具占掉近半 prompt），
+                # 是「压缩器自报 14.4% 而真实占用 69%」口径缺口的重要来源。
+                from app.orchestration.token_counter import estimate_tools_tokens as _est_tools
+                _tools_tokens = _est_tools(tool_schemas)
+                _est_raw = _est_tokens(api_messages) + _tools_tokens
                 _est_prompt = int(_est_raw * _calib_factor)
                 _pre_threshold = int(agent_window * settings.auto_compact_threshold_ratio)
                 if _est_prompt >= _pre_threshold:
@@ -859,7 +893,7 @@ async def run_agent_loop(
                     messages = ensure_tool_pairing(messages)
                     messages = normalize_tool_sequence(messages)
                     api_messages = build_api_copy(messages)
-                    _est_after = int(_est_tokens(api_messages) * _calib_factor)
+                    _est_after = int((_est_tokens(api_messages) + _tools_tokens) * _calib_factor)
                     logger.info("[agent] turn=%s step=%s 前置压缩后 prompt=%d -> %d (persistent=%s)", turn_id, step, _est_prompt, _est_after, bool(_cc_pre))
                     await broadcast(session_id, {"event": "usage.update", "payload": {"agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id, "prompt_tokens": _est_after, "completion_tokens": 0, "total_tokens": _est_after, "context_window": agent_window, "usage_source": "est_after_compact", "cached_input_tokens": 0, "reasoning_tokens": 0, "agent_kind": agent_kind}})
                     await broadcast(session_id, {"event": "compact.completed", "payload": {"agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id, **(_cc_pre or {})}})
@@ -1234,7 +1268,9 @@ async def run_agent_loop(
             # 1) usage.update 总被广播（前端占用显示实时更新）
             # 2) auto_compact 压缩逻辑能基于真实占用触发（避免永不压缩）
             from app.orchestration.token_counter import estimate_messages_tokens as _est_tokens
-            _est_prompt = _est_tokens(api_messages) if api_messages else 0
+            # plan-282-0: 兜底估算同样计入 tools schema（与前置判定口径一致）
+            from app.orchestration.token_counter import estimate_tools_tokens as _est_tools
+            _est_prompt = (_est_tokens(api_messages) + _est_tools(tool_schemas)) if api_messages else 0
             _api_prompt = 0
             _api_completion = 0
             _api_total = 0

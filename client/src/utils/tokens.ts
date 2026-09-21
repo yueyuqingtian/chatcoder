@@ -14,8 +14,12 @@ export interface Token {
 }
 
 /** $技能：$ 后跟非空白字符（技能引用格式 `$name`，与 EmptyState 预填一致）；
- * @文件：@ 后跟非空白字符（与 pickAtFile 插入的 `@path ` 一致）。 */
-const TOKEN_RE = /(\$[^\s]+|@[^\s]+)/g;
+ * @文件：@ 后跟非空白字符（与 pickAtFile 插入的 `@path ` 一致）。
+ *
+ * plan-308-1542 需求2：补上**终止符**（顿号/逗号/分号）——此前 `[^\s]+` 会一路吃到
+ * 行尾，把 "引用文件：@a.ts、使用技能：$b" 整行吞成一个 token，
+ * 于是用户看到的带图标芯片在发送后就退化为一段纯文字。 */
+const TOKEN_RE = /(\$[^\s、,，;；]+|@[^\s、,，;；]+)/g;
 
 /** 把输入文本切分为 [{type, text}]；无 token 时返回单个 text 片段（空串返回空数组）。 */
 export function tokenize(text: string): Token[] {

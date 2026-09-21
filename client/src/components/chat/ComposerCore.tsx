@@ -931,6 +931,9 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
       refTextParts.push(lines.join("\n"));
     }
     const refsSuffix = buildRefsSuffix(refs);
+    // plan-308-1542 需求2：引用芯片的**结构化**副本——随消息落库，消息流据此渲染
+    // 与输入框一致的带图标芯片（纯文本后缀继续保留，模型上下文不变）。
+    const refPayload = refs.map((r) => ({ kind: r.kind, value: r.value, label: r.label }));
     const hasPriorText = Boolean(input.trim()) || refTextParts.length > 0;
     const content = (input.trim() ? input.trim() : "") +
       (refTextParts.length ? `${input.trim() ? "\n\n" : ""}${refTextParts.join("\n\n")}` : "") +
@@ -963,7 +966,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     // 自定义模式名也要传给引擎，否则后端按 "default" 解析出全量工具集，
     // 出现"选了受限模式但模型仍看到全量工具"的错位。
     const sendMode = (mode === "default" || mode === "accept_edits") ? null : mode;
-        await sendTurn(content, attachmentPayload, sendEffort, sendMode, usedModelId);
+        await sendTurn(content, attachmentPayload, sendEffort, sendMode, usedModelId, refPayload);
         skipDraftSyncRef.current = true;
         setInput("");
         setAttachments([]);
@@ -987,7 +990,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     // 自定义模式名也要传给引擎，否则后端按 "default" 解析出全量工具集，
     // 出现"选了受限模式但模型仍看到全量工具"的错位。
     const sendMode = (mode === "default" || mode === "accept_edits") ? null : mode;
-        await sendTurn(content, attachmentPayload, sendEffort, sendMode, sessionModelId);
+        await sendTurn(content, attachmentPayload, sendEffort, sendMode, sessionModelId, refPayload);
     skipDraftSyncRef.current = true;
     setInput("");
     setAttachments([]);
@@ -2002,6 +2005,21 @@ function UsageRing({
           <div className="usage-pop-amount">
             {formatK(usage.total)}k / {formatK(usage.context_window)}k
           </div>
+          {/* plan-282-0: 标注占用口径——压缩后本地估算覆盖显示时，明确告知用户
+              该数字为估算（真实占用以下一次 API 响应为准），避免"压缩后占用很低"
+              的误判（实测估算 14.4% 而真实 69%）。 */}
+          {usage.source === "est_after_compact" && (
+            <div className="usage-pop-row">
+              <span className="usage-pop-key">数据来源</span>
+              <span className="usage-pop-val">压缩后估算（下次请求校准）</span>
+            </div>
+          )}
+          {usage.source === "est" && (
+            <div className="usage-pop-row">
+              <span className="usage-pop-key">数据来源</span>
+              <span className="usage-pop-val">本地估算</span>
+            </div>
+          )}
           <div className="usage-pop-row">
             <span className="usage-pop-key">平均缓存命中率</span>
             <span className="usage-pop-val">{avgCacheRate == null ? "—" : `${avgCacheRate}%`}</span>

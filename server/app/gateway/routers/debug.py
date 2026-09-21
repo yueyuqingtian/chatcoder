@@ -146,6 +146,38 @@ async def java_status(body: Sid):
     return debug_service.status(body.session_id, "java")
 
 
+# ── plan-308-1542 需求7-A：断点明细 / 删除 / 清空（右侧面板可视化与操作）──
+
+
+class BreakpointListBody(BaseModel):
+    session_id: int
+    target: str = "web"
+
+
+class BreakpointRemoveBody(BaseModel):
+    session_id: int
+    target: str = "web"
+    breakpoint_id: str
+
+
+@router.post("/breakpoints", response_model=dict)
+async def breakpoints(body: BreakpointListBody):
+    """列出会话内断点明细（Web=URL 正则+行号；Java=类+行号）。"""
+    return debug_service.list_breakpoints(body.session_id, body.target)
+
+
+@router.post("/breakpoints/remove", response_model=dict)
+async def breakpoints_remove(body: BreakpointRemoveBody):
+    """删除单个断点（按 breakpointId / requestId）。"""
+    return _guard(await debug_service.remove_breakpoint(body.session_id, body.target, body.breakpoint_id))
+
+
+@router.post("/breakpoints/clear", response_model=dict)
+async def breakpoints_clear(body: BreakpointListBody):
+    """清空会话内全部断点。"""
+    return _guard(await debug_service.clear_breakpoints(body.session_id, body.target))
+
+
 # ── 面板配置（落库，修「改了不保存」）──
 #
 # Web 调试端口 / JDWP 主机·端口此前只在前端组件 state 里，重新进入面板即丢。
@@ -167,6 +199,63 @@ async def get_debug_settings(db: AsyncSession = Depends(get_db)):
 async def save_debug_settings(body: DebugSettingsBody, db: AsyncSession = Depends(get_db)):
     """保存「开发调试」面板配置到数据库。"""
     return await debug_service.save_settings(db, **body.model_dump(exclude_unset=True))
+
+
+# ── plan-308-1542 需求7-B：与 IntelliJ IDEA 的双向断点通道 ──
+#
+# 用户要求：IDEA 里打的断点本软件可见；AI 打的断点 IDEA 里也能看到。
+# 通道 = 工程内的 .idea/workspace.xml（IDEA 的断点存储），写前备份、
+# 且必须在 UI/工具返回中提示"需重启 IDEA 生效、可能被 IDEA 覆盖"。
+
+
+class IdeaProjectBody(BaseModel):
+    project_path: str
+
+
+class IdeaBreakpointBody(BaseModel):
+    project_path: str
+    file: str
+    line: int
+    # 可选：同步写入 IDEA 配置（AI 下断点想"IDEA 也可见"时传 true）
+    sync_idea: bool = False
+
+
+@router.post("/idea/breakpoints", response_model=dict)
+async def idea_breakpoints(body: IdeaProjectBody):
+    """读取 IDEA 工程内已配置的断点（纯文件解析，不改动任何东西）。"""
+    from app.services import idea_service
+    return idea_service.list_breakpoints(body.project_path)
+
+
+@router.post("/idea/breakpoints/add", response_model=dict)
+async def idea_breakpoints_add(body: IdeaBreakpointBody):
+    """向 IDEA 工程写入断点（写前备份 workspace.xml）。
+
+    返回的 `warning` 必须让用户看到：需重启 IDEA 生效，且运行期可能被 IDEA 覆盖。
+    """
+    from app.services import idea_service
+    return idea_service.add_breakpoint(body.project_path, body.file, body.line)
+
+
+@router.post("/idea/breakpoints/remove", response_model=dict)
+async def idea_breakpoints_remove(body: IdeaBreakpointBody):
+    """从 IDEA 工程移除断点。"""
+    from app.services import idea_service
+    return idea_service.remove_breakpoint(body.project_path, body.file, body.line)
+
+
+@router.post("/idea/session", response_model=dict)
+async def idea_session(body: IdeaProjectBody):
+    """探测 IDEA 调试会话（JDWP 占用）与本机可 attach 的 JVM。"""
+    from app.services import idea_service
+    return idea_service.detect_debug_session(body.project_path)
+
+
+@router.post("/idea/method-at-line", response_model=dict)
+async def idea_method_at_line(body: IdeaBreakpointBody):
+    """由「文件:行」推导 class#method（用于为 IDEA 断点建立 Arthas 观测）。"""
+    from app.services import idea_service
+    return idea_service.method_at_line(body.project_path, body.file, body.line)
 
 
 # ── Arthas（现场诊断，可与 IDEA 调试并存）──

@@ -26,6 +26,10 @@ node_modules/
 dist/
 build/
 build_pkg/
+# electron-builder 图标资源目录（package.json build.directories.buildResources 指向此处），
+# 必须随仓库分发：否则其他机器拉取后缺少 icon.png，打包出的 exe 没有应用图标
+!electron/build/
+!electron/build/**
 .next/
 *.tsbuildinfo
 .vite/

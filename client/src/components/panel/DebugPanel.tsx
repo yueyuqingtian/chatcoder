@@ -25,6 +25,46 @@ function fmtTs(ts?: number | string | null): string {
   }
 }
 
+/** plan-308-1542 需求7-A：断点明细区块（用户要求"可见断点的情况"）。
+ *  数据来源：store.debugState[target].breakpointList（debug.paused / breakpoints_changed 广播与主动刷新共同维护）。 */
+function BreakpointList({ label, target, rows, onRemove, onClear }: {
+  label: string;
+  target: "web" | "java";
+  rows: Array<{ id: string; file?: string | null; line?: number | null; class?: string | null; source?: string }>;
+  onRemove: (id: string) => void;
+  onClear: () => void;
+}) {
+  return (
+    <div className="dbg-bps">
+      <div className="dbg-bps-head">
+        <span className="dbgp-sec-title">{label}（{rows.length}）</span>
+        {rows.length > 0 && (
+          <button className="btn btn-ghost btn-xs" onClick={onClear} title="清空该会话全部断点">
+            全部清除
+          </button>
+        )}
+      </div>
+      {rows.length === 0 ? (
+        <div className="dbgp-empty">当前无{label}断点。</div>
+      ) : (
+        rows.map((b) => (
+          <div className="dbg-bp-row" key={`${target}-${b.id}`}>
+            <span className={`dbg-bp-src${b.source === "idea" ? " is-idea" : ""}`}>
+              {b.source === "idea" ? "IDEA" : "本软件"}
+            </span>
+            <code className="dbg-bp-loc" title={b.file || b.class || ""}>
+              {(b.file || b.class || "?")}{b.line != null ? `:${b.line}` : ""}
+            </code>
+            <button className="dbg-bp-del" onClick={() => onRemove(b.id)} title="删除该断点">
+              删除
+            </button>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
 /** Web/Java 断点会话状态块（含继续/步进控制） */
 function BreakpointStatus({ label, status, target, onAct }: {
   label: string;
@@ -96,6 +136,9 @@ export function DebugPanel() {
   const currentSessionId = useChatStore((s) => s.currentSessionId);
   const debugState = useChatStore((s) => s.debugState);
   const arthasState = useChatStore((s) => s.arthasState);
+  // plan-308-1542 需求7-B：IDEA 联动（工程路径取当前项目 path）
+  const currentProjectId = useChatStore((s) => s.currentProjectId);
+  const projects = useChatStore((s) => s.projects);
   const [status, setStatus] = useState<ArthasStatusOut | null>(null);
   const [procs, setProcs] = useState<ArthasProcessOut[] | null>(null);
   const [cfg, setCfg] = useState<ArthasConfigOut | null>(null);
@@ -170,6 +213,113 @@ export function DebugPanel() {
       if (currentSessionId == null) return;
       await api.debugAction(target, action, currentSessionId, extra);
     });
+  };
+
+  // plan-308-1542 需求7-A：断点明细列表（本地态 + store 广播双源）。
+  const [bps, setBps] = useState<{ web: Array<{ id: string; file?: string | null; line?: number | null; source?: string }>; java: Array<{ id: string; class?: string | null; line?: number | null; source?: string }> }>({ web: [], java: [] });
+  const bpsWeb = bps.web;
+  const bpsJava = bps.java;
+
+  const refreshBreakpoints = useCallback(async () => {
+    if (currentSessionId == null) return;
+    try {
+      const [w, j] = await Promise.all([
+        api.debugBreakpoints(currentSessionId, "web").catch(() => ({ breakpoints: [] as never[] })),
+        api.debugBreakpoints(currentSessionId, "java").catch(() => ({ breakpoints: [] as never[] })),
+      ]);
+      setBps({
+        web: (w.breakpoints || []) as never,
+        java: (j.breakpoints || []) as never,
+      });
+    } catch { /* 未连接时静默 */ }
+  }, [currentSessionId]);
+
+  // 进入面板与调试事件到达时刷新断点列表
+  useEffect(() => { void refreshBreakpoints(); }, [refreshBreakpoints]);
+  useEffect(() => {
+    const onEvt = () => { void refreshBreakpoints(); };
+    window.addEventListener("chatcoder:debug-paused", onEvt);
+    return () => window.removeEventListener("chatcoder:debug-paused", onEvt);
+  }, [refreshBreakpoints]);
+
+  /** 删除单个断点（失败在面板内联提示）。 */
+  const removeBp = async (target: "web" | "java", id: string) => {
+    if (currentSessionId == null) return;
+    try {
+      const res = await api.debugRemoveBreakpoint(currentSessionId, target, id);
+      if (!res.ok) setNotice(res.error || "删除断点失败");
+      await refreshBreakpoints();
+    } catch (e) {
+      setNotice(String(e));
+    }
+  };
+
+  /** 清空某会话全部断点。 */
+  const clearBps = async (target: "web" | "java") => {
+    if (currentSessionId == null) return;
+    try {
+      await api.debugClearBreakpoints(currentSessionId, target);
+      await refreshBreakpoints();
+    } catch (e) {
+      setNotice(String(e));
+    }
+  };
+
+  // ── plan-308-1542 需求7-B：IntelliJ IDEA 双向断点通道 ──
+  // 读 IDEA 断点（workspace.xml）→ 面板可见；一键把 IDEA 断点转为 Arthas 观测
+  // （IDEA 调试独占 JDWP，但 Arthas 走 Attach API 可并存，命中即本软件可见）。
+  const projectPath = useMemo(() => {
+    const p = projects.find((x) => x.id === currentProjectId);
+    return p?.path ?? "";
+  }, [projects, currentProjectId]);
+  const [ideaBps, setIdeaBps] = useState<Array<{ id: string; file: string; line: number | null; enabled?: boolean }>>([]);
+  const [ideaNote, setIdeaNote] = useState<string>("");
+  const [ideaSessions, setIdeaSessions] = useState<Array<{ pid: number; main_class: string; jdwp_port: number }>>([]);
+  const [ideaRunning, setIdeaRunning] = useState(false);
+
+  const loadIdea = useCallback(async () => {
+    if (!projectPath) return;
+    try {
+      const res = await api.ideaBreakpoints(projectPath);
+      setIdeaBps(res.breakpoints || []);
+      if (res.available === false) {
+        setIdeaNote(res.reason || "未找到 IDEA 工程配置（.idea/workspace.xml）");
+      } else {
+        setIdeaNote("");
+      }
+      const sess = await api.ideaDebugSession(projectPath).catch(() => null);
+      if (sess) {
+        setIdeaRunning(sess.idea_running);
+        setIdeaSessions(sess.sessions || []);
+      }
+    } catch { /* 非阻塞：无 IDEA 工程时静默 */ }
+  }, [projectPath]);
+
+  useEffect(() => { void loadIdea(); }, [loadIdea]);
+
+  /** 为某个 IDEA 断点建立 Arthas 方法级观测（命中即本软件可见）。 */
+  const watchIdeaBp = async (bp: { file: string; line: number | null }) => {
+    if (!projectPath || bp.line == null) return;
+    setNotice(null);
+    try {
+      const m = await api.ideaMethodAtLine(projectPath, bp.file, bp.line);
+      if (!m.ok || !m.target) {
+        setNotice(m.error || "未能识别该方法，请手动指定 class#method");
+        return;
+      }
+      const [cls, method] = m.target.split("#");
+      // 未 attach 时先提示用户 attach（Arthas 会话按 PID 建立）
+      if (!attached) {
+        setNotice(`已识别 ${m.target}；请先「扫描本机 Java 进程」并 Attach，再建立观测`);
+        return;
+      }
+      // Arthas 观测命令：watch（命中即上报，可与 IDEA 调试并存）
+      await api.arthasExec(currentSessionId as number,
+        `watch ${cls} ${method} '{params, returnObj, throwable}' -x 2`);
+      setNotice(`已为 ${m.target} 建立 Arthas 观测：IDEA 命中断点时会显示在「观测命中」`);
+    } catch (e) {
+      setNotice(String(e));
+    }
   };
 
   return (
@@ -288,6 +438,71 @@ export function DebugPanel() {
               onAct={(a, extra) => bpAct("web", a, extra)} />
             <BreakpointStatus label="Java（JDWP）" status={debugState.java} target="java"
               onAct={(a, extra) => bpAct("java", a, extra)} />
+          </>
+        )}
+      </section>
+
+      {/* plan-308-1542 需求7-A：断点明细（用户要求"让用户可见断点的情况"）。
+          此前面板只显示断点数量，看不到具体断在哪个文件哪一行，也无法逐条删除。 */}
+      <section className="db-section">
+        <div className="db-section-head">
+          <span className="dbgp-sec-title">断点列表</span>
+          <button className="btn btn-ghost btn-xs" onClick={() => void refreshBreakpoints()} disabled={!!busy}>
+            <IconRefresh size={12} /> 刷新
+          </button>
+        </div>
+        <BreakpointList label="Web（CDP）" target="web"
+          rows={bpsWeb}
+          onRemove={(id) => void removeBp("web", id)}
+          onClear={() => void clearBps("web")} />
+        <BreakpointList label="Java（JDWP）" target="java"
+          rows={bpsJava}
+          onRemove={(id) => void removeBp("java", id)}
+          onClear={() => void clearBps("java")} />
+      </section>
+
+      {/* plan-308-1542 需求7-B：与 IntelliJ IDEA 的双向断点通道。
+          - 读：展示 IDEA 工程内已配置的断点（workspace.xml）
+          - 联动：一键由「文件:行」推导 class#method 并建立 Arthas 观测
+            （IDEA 调试独占 JDWP，但 Arthas 走 Attach API 可并存 → 命中即本软件可见） */}
+      <section className="db-section">
+        <div className="db-section-head">
+          <span className="dbgp-sec-title">IDEA 联动</span>
+          <button className="btn btn-ghost btn-xs" onClick={() => void loadIdea()} disabled={!projectPath}>
+            <IconRefresh size={12} /> 刷新
+          </button>
+        </div>
+        {!projectPath ? (
+          <div className="dbgp-empty">未选择项目，无法读取 IDEA 配置。</div>
+        ) : (
+          <>
+            <div className="dbg-idea-head">
+              <span className={`dbg-bp-src${ideaRunning ? " is-idea" : ""}`}>
+                {ideaRunning ? "IDEA 运行中" : "IDEA 未运行"}
+              </span>
+              {ideaSessions.length > 0 && (
+                <span className="dbgp-dim">
+                  JDWP 调试会话 {ideaSessions.length} 个（通道被占用 → 观测走 Arthas）
+                </span>
+              )}
+            </div>
+            {ideaNote && <div className="dbgp-notice">{ideaNote}</div>}
+            {ideaBps.length === 0 ? (
+              <div className="dbgp-empty">
+                IDEA 工程内暂无断点（或未在 IDEA 中打开过该工程）。
+              </div>
+            ) : (
+              ideaBps.map((b) => (
+                <div className="dbg-bp-row" key={b.id}>
+                  <span className="dbg-bp-src is-idea">IDEA</span>
+                  <code className="dbg-bp-loc" title={b.file}>{b.file}:{b.line}</code>
+                  <button className="dbg-bp-del" onClick={() => void watchIdeaBp(b)}
+                    title="由该断点推导方法并建立 Arthas 观测（IDEA 命中即可在本软件看到）">
+                    建立观测
+                  </button>
+                </div>
+              ))
+            )}
           </>
         )}
       </section>

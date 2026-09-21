@@ -8,7 +8,9 @@ import { WhatsNewModal } from "./components/WhatsNewModal";
 import { ResizeHandle } from "./components/ResizeHandle";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Toast } from "./components/Toast";
-import { Splash } from "./components/Splash";
+// plan-308-1555 M8：液态玻璃折射层（仅在开启毛玻璃 + 液态风格时渲染）
+import { LiquidGlassOverlay } from "./components/LiquidGlassSurface";
+import "@tomagranate/liquid-glass/styles.css";
 import { SettingsContent, type SettingsTab } from "./components/settings";
 import { CommandCenter } from "./components/CommandCenter";
 import { ArchivedProjectPrompt } from "./components/ArchivedProjectPrompt";
@@ -22,7 +24,9 @@ import { initTheme } from "./store/theme";
 import { installFocusGuard } from "./utils/focusGuard";
 
 export default function App() {
-  const [showSplash, setShowSplash] = useState(true);
+  // plan-308-1555 M7：删除了原先的第二个开屏界面（纯 logo 蒙层）。
+  // 用户要求只保留主进程 loading.html 那一个带加载指示的启动界面——
+  // 两个开屏叠在一起会先看到「加载中」再闪一个「无加载图标的 logo」，观感割裂。
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [nav, setNav] = useState<NavKey | null>(null);
   // 进入设置前的位置：首页用 null + 空会话 ID 与消息页区分。
@@ -142,7 +146,6 @@ export default function App() {
 
   return (
     <ErrorBoundary>
-      {showSplash && <Splash onDone={() => setShowSplash(false)} />}
       <div className="app-shell">
         <Toast />
         <RollbackConfirmModal />
@@ -153,6 +156,8 @@ export default function App() {
         {/* v18 布局重构（对齐 zcode）：左侧栏全高（含 logo/导航箭头），
             右侧 = 顶部标题栏 + 内容行（消息流 + 右侧面板）。 */}
         <div ref={leftPanelElRef} className={`app-pane app-pane-left collapsible${sidebarCollapsed ? " collapsed" : ""}`} style={sidebarCollapsed ? { width: "0px", flexBasis: "0px" } : { width: `${leftPanelWidth}px`, flexBasis: `${leftPanelWidth}px` }}>
+          {/* plan-308-1555 M8：液态玻璃折射覆盖层（纯装饰，pointer-events:none，不影响布局） */}
+          <LiquidGlassOverlay radius={0} depth={16} />
           {nav === "settings" ? (
             /* v19: 设置侧栏经插件 slot 渲染（与外部侧栏共用壳与宽度）。 */
             <PluginSlot slot="settings-sidebar" tab={settingsActiveTab} onTab={setSettingsActiveTab} onBack={leaveSettings} collapsed={sidebarCollapsed} />
@@ -178,6 +183,8 @@ export default function App() {
             {/* plan-95: reservePx=主区 min-width 480 + 手柄宽 10，动态上限防溢出裁剪 */}
             {rightExpanded && !rightFullscreen && <ResizeHandle side="right" baseWidth={rightPanelWidth} minWidth={280} maxWidth={1200} reservePx={490} panelEl={rightPanelElRef} onCommit={setRightPanelWidth} />}
             <div ref={rightPanelElRef} className={`app-pane app-pane-right${rightExpanded ? "" : " collapsed"}${rightFullscreen ? " fullscreen" : ""}`} style={{ width: rightExpanded ? (rightFullscreen ? "100%" : `${rightPanelWidth}px`) : "0px", flexBasis: rightExpanded ? (rightFullscreen ? "100%" : `${rightPanelWidth}px`) : "0px" }}>
+              {/* plan-308-1555 M8：右面板同样叠加液态玻璃折射层（与左面板对称） */}
+              {rightExpanded && <LiquidGlassOverlay radius={0} depth={16} />}
               {rightExpanded && <PluginSlot slot="right-panel" />}
             </div>
           </div>

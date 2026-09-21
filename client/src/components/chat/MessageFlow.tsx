@@ -14,13 +14,36 @@ import { JumpDots } from "./JumpDots";
 import { CompactingCard } from "./CompactCard";
 import { DebugCard } from "./DebugCard";
 import { StreamingText } from "./StreamingText";
-import { IconSearch, IconChevronUp, IconChevronDown, IconX, IconArrowDown } from "../icons";
+import { IconSearch, IconChevronUp, IconChevronDown, IconX, IconArrowDown, IconAlertCircle } from "../icons";
 import { useTextHighlight } from "../../hooks/useTextHighlight";
 import { MarkdownContent } from "../MarkdownContent";
 import { MsgType } from "@chatcoder/shared";
 import { useChatStore } from "../../store/chat";
 import type { MessageOut } from "../../api/client";
-import { MessageImageGrid, MessageFileCards, TokenText, attachmentsOf } from "./AttachmentCard";
+import { MessageImageGrid, MessageFileCards, TokenText, RefChips, refsOf, stripRefLines, attachmentsOf } from "./AttachmentCard";
+
+/** plan-308-1542 需求1：任务执行类错误的**唯一**棂位——消息流末尾错误卡。
+ *  此前这类错误会同时写入 store.error（右上角 Toast）与消息流，造成重复报错；
+ *  现在 sendTurn 失败 / turn.failed / 重试 / 回滚 / 审核失败等只走本卡。 */
+const FlowErrorCard = memo(function FlowErrorCard({
+  text, onRetry, onClose,
+}: { text: string; onRetry?: () => void; onClose: () => void }) {
+  return (
+    <div className="turn-item turn-item-error flow-error-card">
+      <IconAlertCircle size={15} className="err-icon" />
+      <div className="err-body">
+        <div className="err-title">任务执行出错</div>
+        <div className="err-msg">{text}</div>
+        <div className="flow-error-actions">
+          {onRetry && (
+            <button className="btn btn-ghost btn-xs" onClick={onRetry} type="button">重试</button>
+          )}
+          <button className="btn btn-ghost btn-xs" onClick={onClose} type="button">关闭</button>
+        </div>
+      </div>
+    </div>
+  );
+});
 
 /** 工具节点可搜索文本（group 取聚合工具名；其余取各 leaf 工具名） */
 function nodeToolText(n: ToolNode): string {
@@ -900,6 +923,9 @@ function MainMessageFlow({
   const thinkingText = Object.values(thinkingBuffers).join("").trim();
   const text = Object.values(streamingBuffers).join("");
   const turnStatus = useChatStore((s) => s.turnStatus);
+  // plan-308-1542 需求1：任务执行类错误卡（只进消息流，不弹右上角 Toast）
+  const flowError = useChatStore((s) => s.flowError);
+  const clearFlowError = useChatStore((s) => s.clearFlowError);
 
   return (
     <MessageFlowCore
@@ -924,8 +950,12 @@ function MainMessageFlow({
                 <MessageImageGrid atts={attachmentsOf(m.content)} />
                 <div className="turn-user-bubble">
                   <MessageFileCards atts={attachmentsOf(m.content)} />
-                  {msgText(m.content) && (
-                    <div className="turn-user-text"><TokenText text={msgText(m.content)} /></div>
+                  {/* plan-308-1542 需求2：引用芯片（文件/技能/连接器/插件），与输入框同视觉 */}
+                  <RefChips refs={refsOf(m.content)} />
+                  {stripRefLines(msgText(m.content), refsOf(m.content).length > 0) && (
+                    <div className="turn-user-text">
+                      <TokenText text={stripRefLines(msgText(m.content), refsOf(m.content).length > 0)} />
+                    </div>
                   )}
                 </div>
               </div>
@@ -936,6 +966,18 @@ function MainMessageFlow({
       trailingNode={
         isCompacting ? <CompactingCard info={compactingInfo} />
           : activeDebug ? <DebugCard status={activeDebug} />
+          // plan-308-1542 需求1：任务执行类错误统一在消息流末尾报（不弹右上角）
+          : flowError ? (
+            <FlowErrorCard
+              text={flowError.text}
+              onRetry={() => {
+                // 重试 = 重发最近一条用户消息（若可定位），否则仅清除提示
+                const lastUser = [...timelineMessages].reverse().find((m) => m.sender_type === "user");
+                if (lastUser) void useChatStore.getState().sendTurn(msgText(lastUser.content));
+              }}
+              onClose={() => clearFlowError()}
+            />
+          )
           : null
       }
       sessionKey={currentSessionId ?? 0}

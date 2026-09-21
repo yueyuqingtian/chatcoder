@@ -178,53 +178,87 @@ async def update_session(db: AsyncSession, session_id: int, **kwargs) -> str | N
     return await run_write_locked(patch, label=f"session.update.{session_id}")
 
 
+def purge_session_children(s, session_ids: list[int]) -> dict:
+    """在给定写事务内**按外键安全顺序**清理这些会话的全部关联数据。
+
+    plan-308-1542 修复（用户反馈"删除报 IntegrityError，实际分支目录都删了但左面板还在"）：
+    原实现漏了两类引用，导致 `DELETE FROM tasks ... FOREIGN KEY constraint failed`：
+      1. **artifacts.task_id → tasks.id**：产物表引用任务表，必须先删产物再删任务；
+      2. memory_entries：非 session 作用域（project/global）的行同样带 session_id 外键，
+         "只删会话级记忆"的过滤让它们变成孤儿并阻断 sessions 删除。
+    另外补齐 exec_policy_rules / scheduled_tasks / file_reviews（按 turn_id 关联）。
+
+    返回各表删除行数（供提示与测试断言）。调用方负责 commit。
+    """
+    from sqlalchemy import delete as _delete
+    from sqlalchemy import select as _select
+
+    from app.persistence.models.agent import Agent
+    from app.persistence.models.audit import AuditLog
+    from app.persistence.models.exec_policy import ExecPolicyRule
+    from app.persistence.models.memory import MemoryEntry
+    from app.persistence.models.message import Message
+    from app.persistence.models.review import FileReview
+    from app.persistence.models.rollback import RollbackWrite, TurnSnapshot
+    from app.persistence.models.scheduled import ScheduledTask
+    from app.persistence.models.task import Artifact, Task
+    from app.persistence.models.tool_call import ToolCall
+    from app.persistence.models.turn import Turn
+
+    counts: dict[str, int] = {}
+    if not session_ids:
+        return counts
+
+    def _purge(model, *criteria) -> None:
+        res = s.execute(_delete(model).where(*criteria))
+        counts[model.__tablename__] = counts.get(model.__tablename__, 0) + int(res.rowcount or 0)
+
+    # 先取 turn / task id：artifacts 与 file_reviews 没有 session_id 列，只能按 id 关联清理
+    turn_ids = [int(x) for x in s.execute(
+        _select(Turn.id).where(Turn.session_id.in_(session_ids))
+    ).scalars().all()]
+    task_ids = [int(x) for x in s.execute(
+        _select(Task.id).where(Task.session_id.in_(session_ids))
+    ).scalars().all()]
+
+    # 1) 最底层叶子：**先删 artifacts**（引用 tasks.id；顺序错即报外键错，正是本 bug 根因）
+    if task_ids:
+        _purge(Artifact, Artifact.task_id.in_(task_ids))
+    _purge(Message, Message.session_id.in_(session_ids))
+    _purge(ToolCall, ToolCall.session_id.in_(session_ids))
+    _purge(RollbackWrite, RollbackWrite.session_id.in_(session_ids))
+    _purge(TurnSnapshot, TurnSnapshot.session_id.in_(session_ids))
+    _purge(AuditLog, AuditLog.session_id.in_(session_ids))
+    _purge(ExecPolicyRule, ExecPolicyRule.session_id.in_(session_ids))
+    _purge(ScheduledTask, ScheduledTask.session_id.in_(session_ids))
+    if turn_ids:
+        _purge(FileReview, FileReview.turn_id.in_(turn_ids))
+    # 2) 记忆：session_id 是 NOT NULL 外键——**所有**引用这些会话的行都必须删，
+    #    否则孤儿行会阻断 sessions 删除（project/global 记忆只在删除这些会话时受影响）。
+    _purge(MemoryEntry, MemoryEntry.session_id.in_(session_ids))
+    # 3) 任务与代理，最后 turns
+    _purge(Task, Task.session_id.in_(session_ids))
+    _purge(Agent, Agent.session_id.in_(session_ids))
+    _purge(Turn, Turn.session_id.in_(session_ids))
+    return counts
+
+
 async def delete_session_permanent(db: AsyncSession, session_id: int) -> dict | None:
     """**永久删除**会话及其全部关联数据（plan-282-1441 #4：归档页批量删除）。
 
     与 `delete_session`（仅置 status="archived"）语义不同：这是不可恢复的物理删除，
-    供"设置 → 归档"页的批量删除使用。返回删除计数用于提示；会话不存在返回 None。
+    供"设置 → 归档"页的批量删除与工作树级联删除（plan-308-1542）使用。
+    会话不存在返回 None。
 
-    关联表按外键依赖顺序自底向上清理（messages / turns / tasks / agents /
-    audit / rollback_writes / rollback_snapshots / tool_calls / memories 的会话级记忆）。
-    项目级与全局记忆（session_id 仅作来源追溯）不动。
+    关联数据清理统一走 `purge_session_children`（外键安全顺序，含 artifacts）。
     """
-    from sqlalchemy import delete as _delete
-
     from app.persistence.database import run_write_locked
-    from app.persistence.models.agent import Agent
-    from app.persistence.models.audit import AuditLog
-    from app.persistence.models.memory import MemoryEntry
-    from app.persistence.models.message import Message
-    from app.persistence.models.rollback import RollbackWrite, TurnSnapshot
-    from app.persistence.models.task import Task
-    from app.persistence.models.tool_call import ToolCall
-    from app.persistence.models.turn import Turn
 
     def patch(s):
         session = s.get(Session, session_id)
         if session is None:
             return None
-
-        counts: dict[str, int] = {}
-
-        def _purge(model, *criteria) -> None:
-            res = s.execute(_delete(model).where(*criteria))
-            counts[model.__tablename__] = int(res.rowcount or 0)
-
-        # 自底向上：先叶子表，再 turns/tasks，最后 session
-        _purge(Message, Message.session_id == session_id)
-        _purge(ToolCall, ToolCall.session_id == session_id)
-        _purge(RollbackWrite, RollbackWrite.session_id == session_id)
-        _purge(TurnSnapshot, TurnSnapshot.session_id == session_id)
-        _purge(AuditLog, AuditLog.session_id == session_id)
-        _purge(Task, Task.session_id == session_id)
-        _purge(Agent, Agent.session_id == session_id)
-        _purge(Turn, Turn.session_id == session_id)
-        # 仅删"会话级"记忆；项目/全局记忆的 session_id 只是创建来源标记
-        s.execute(_delete(MemoryEntry).where(
-            MemoryEntry.session_id == session_id,
-            MemoryEntry.scope == "session",
-        ))
+        counts = purge_session_children(s, [session_id])
         s.delete(session)
         s.commit()
         return {"ok": True, "deleted": counts}

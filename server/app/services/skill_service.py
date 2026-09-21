@@ -292,6 +292,10 @@ async def sync_scanned_skills(
                     tools=item.tools,
                     tags=item.tags,
                     meta=item.meta,
+                    # plan-308-1542 需求2：显式置 True——否则历史 schema 下可能写入 NULL，
+                    # 进而被清单查询漏掉（见 get_global_skills 的注释）。
+                    is_active=True,
+                    auto_load=True,
                 ))
                 added += 1
             elif existing.source != "custom":
@@ -304,6 +308,11 @@ async def sync_scanned_skills(
                     changed = True
                 if existing.display_name != item.display_name:
                     existing.display_name = item.display_name
+                    changed = True
+                # plan-308-1542 需求2：历史行的 auto_load 为 NULL 时补齐为 True，
+                # 否则该技能永远进不了「Available Skills」。
+                if existing.auto_load is None:
+                    existing.auto_load = True
                     changed = True
                 if changed:
                     updated += 1
@@ -477,9 +486,17 @@ async def get_agent_mcp_servers(db: AsyncSession, agent: Agent) -> list[McpServe
 
 # v2: 全局技能/MCP（context_manager 注入用）
 async def get_global_skills(db: AsyncSession) -> list[Skill]:
-    """全局激活技能（auto_load 或 is_active）。"""
+    """全局激活技能。
+
+    plan-308-1542 需求2：条件从 `auto_load == True` 放宽为 `auto_load IS NOT False`。
+    旧行为下 auto_load 为 NULL（历史数据 / 部分安装路径未写该列）的技能会被静默排除出
+    「Available Skills」，AI 看不到也调不到——这正是"插件里装的技能 AI 用不了"的一环。
+    """
     res = await db.execute(
-        select(Skill).where(Skill.is_active == True, Skill.auto_load == True)  # noqa: E712
+        select(Skill).where(
+            Skill.is_active == True,  # noqa: E712
+            Skill.auto_load.is_not(False),
+        )
     )
     return list(res.scalars().all())
 

@@ -3,8 +3,8 @@
  * 会话 229: 统一改用全局 ImageGallery（左右切换/缩放/下载）；
  * 并新增 MessageAttachmentList——消息内图片改为约 150px 缩略图并排展示，非图片附件保持卡片。
  */
-import { IconPaperclip } from "../icons";
-import { type AttachmentInfo, resolveFileUrl } from "../../api/client";
+import { IconPaperclip, IconFileText, IconBox, IconPlug, IconPackage } from "../icons";
+import { type AttachmentInfo, type ComposerRefOut, resolveFileUrl } from "../../api/client";
 import { openGallery } from "../../store/gallery";
 import { tokenize, tokenDisplayName } from "../../utils/tokens";
 
@@ -97,6 +97,60 @@ export function TokenText({ text }: { text: string }) {
       )}
     </>
   );
+}
+
+/** plan-308-1542 需求2：消息内引用芯片（与输入框 .composer-ref-chip 同视觉）。
+ *
+ * 数据源：用户消息 content.refs（结构化落库）。历史消息无该字段时，
+ * 调用方回退用 TokenText 解析文本（见 stripRefLines + TokenText）。
+ */
+const REF_KIND_LABEL: Record<string, string> = {
+  file: "文件", skill: "技能", mcp: "连接器", plugin: "插件",
+};
+
+export function RefChips({ refs }: { refs: ComposerRefOut[] }) {
+  if (!refs || refs.length === 0) return null;
+  return (
+    <div className="msg-ref-chips">
+      {refs.map((r, i) => (
+        <span
+          key={`${r.kind}-${r.value}-${i}`}
+          className={`msg-ref-chip msg-ref-${r.kind}`}
+          title={`${REF_KIND_LABEL[r.kind] ?? r.kind}：${r.value}`}
+        >
+          <span className="msg-ref-icon">
+            {r.kind === "file" ? <IconFileText size={11} />
+              : r.kind === "mcp" ? <IconPlug size={11} />
+              : r.kind === "plugin" ? <IconPackage size={11} />
+              : <IconBox size={11} />}
+          </span>
+          {r.label || r.value}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** 读取用户消息里的结构化引用（v14 content.refs；非法项过滤）。 */
+export function refsOf(content: Record<string, unknown> | undefined): ComposerRefOut[] {
+  const raw = content?.refs;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((r): r is ComposerRefOut => {
+    const it = r as { kind?: unknown; value?: unknown };
+    return Boolean(it && typeof it === "object" && typeof it.kind === "string" && typeof it.value === "string");
+  });
+}
+
+/** plan-308-1542 需求2：拼在消息文本里的引用行（buildRefsSuffix 产物）在有了芯片后
+ *  应从气泡文本中剔除，避免「芯片 + 同一段文字」重复展示。
+ *  只在消息确实带结构化 refs 时才剔除（历史消息保留原文，不丢信息）。 */
+export function stripRefLines(text: string, hasRefs: boolean): string {
+  if (!hasRefs || !text) return text;
+  return text
+    .split("\n")
+    .filter((ln) => !/^(引用文件|使用技能|使用连接器|使用插件)：/.test(ln.trim()))
+    .join("\n")
+    .trim();
 }
 
 /** 从消息 content 中解析附件数组（v14: content.attachments）。 */

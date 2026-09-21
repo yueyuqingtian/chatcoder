@@ -105,6 +105,18 @@ async def _load_skills_and_mcp(db: AsyncSession) -> tuple[str, str]:
                 line = f"- {s.name}: {(s.description or '')[:200]}"
                 if s.trigger:
                     line += f" [触发条件: {str(s.trigger)[:120]}]"
+                # plan-308-1542 需求2：注入**绝对路径与父目录**——此前只有「名称: 描述」，
+                # AI 即便想看技能正文/附带脚本，也无从知道技能装在哪（用户反馈"找不到技能目录"）。
+                _path = (getattr(s, "path", None) or "").strip()
+                if _path:
+                    try:
+                        from pathlib import Path as _P
+                        _dir = str(_P(_path).parent)
+                    except Exception:  # noqa: BLE001
+                        _dir = ""
+                    line += f" [路径: {_path}]"
+                    if _dir:
+                        line += f" [目录: {_dir}]"
                 parts.append(line)
             if len(skills) > _SKILLS_LIST_MAX:
                 parts.append(f"（另有 {len(skills) - _SKILLS_LIST_MAX} 个技能，用 skill_view 浏览）")
