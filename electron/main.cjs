@@ -61,8 +61,26 @@ let mainWindow = null;
 let backendReady = false;
 // plan-308-1555 M0：记录主进程侧实际下发的材质参数（诊断与窗口报告用）
 let _glassRecorded = { material: null, backgroundColor: null, transparent: null, at: null };
-// plan-308-1555 M5：玻璃自检模式（临时调淡面板，肉眼判定桌面是否混入）
-let _glassSelfCheck = false;
+// plan-26-116：毛玻璃意图的内存态（窗口构造时初始化，IPC 切换时更新）。
+// 事件后重放只认这个内存态，不再每次读 glass-pref.json——窗口切换动画期间读文件有时序风险，
+// 且 DWM 在最大化/全屏过渡中会重置 backdrop，需要多次重放兜底（见 syncWindowGlass）。
+let _glassWanted = false;
+
+// ── plan-26-126 M4：伪最大化状态（保住玻璃 + 不惊动任务栏）──
+// 为何要伪最大化：系统原生最大化会改写 HWND 样式并触发 DWM 图层重建，透明/acrylic 标记
+//   在其中丢失（用户实测"点最大化后透不出桌面、退出也回不来"）。改为自行 setBounds(workArea)
+//   就不触发该行为，玻璃全程保留。
+// 状态：
+//   _pseudoMax           —— 是否处于伪最大化（**唯一判据源**：圆角/直角与 data-maximized 都看它）
+//   _pseudoPrevBounds    —— 还原用矩形快照（含位置）
+//   _pseudoSuppressUntil —— 程序化 setBounds 的抑制窗，避免被误判成"用户拖动"
+//   _convertingNativeMax —— 原生最大化 → 伪最大化的转换防重入
+let _pseudoMax = false;
+let _pseudoPrevBounds = null;
+let _pseudoSuppressUntil = 0;
+let _convertingNativeMax = false;
+// 明确禁止（防回归，与 N14 对齐）：setSkipTaskbar(true) / display.bounds / alwaysOnTop /
+//   setFullScreen(true)。前两者会让窗口覆盖或从任务栏消失，最后一个会关闭 DWM 合成导致玻璃直接失效。
 
 // ── 安全写日志(打包后无 stdout 也不崩溃) + 写入文件 ──
 const LOG_DIR = app.isPackaged
@@ -416,6 +434,11 @@ function applyGlass(win, on) {
   return { ...res, verified };
 }
 
+// plan-26-126 P1：原 applyWindowBackground（运行期改写窗口底色）已**删除**。
+// 删除原因（用户实测）：运行期翻转 Win11 窗口底色会让 DWM 合成状态与渲染层缓存失步，
+//   表现为左侧面板异常色块、设置页返回后残留浅残影，**只有重启才恢复**。
+// 现在玻璃开关一律重启生效，窗口底色只在 createWindow 的构造参数里按落盘偏好决定一次。
+
 /** Win10：SetWindowCompositionAttribute(ACCENT_ENABLE_BLURBEHIND)。 */
 function _applyWin32Accent(win, ffi, on) {
   try {
@@ -473,34 +496,58 @@ function supportsNativeRoundedCorners() {
   }
 }
 
-/** 设置圆角偏好：最大化/全屏时必须 DONOTROUND（否则四角会露出桌面）。 */
+/** 设置圆角偏好：最大化/全屏时必须 DONOTROUND（否则四角会露出桌面）。
+ *  plan-26-126 P6：**同时消除 DWM 系统边框**（DWMWA_BORDER_COLOR=NONE）——
+ *    实测取证：无边框窗口在 Win11 上仍有一圈 DWM 绘制的系统边框（物理 2px @1.5x），
+ *    玻璃态下窗口内部透明，这圈边框就是用户看到的"一圈透出桌面"。两者必须一起设：
+ *    只设圆角不设边框，四角圆了但四边仍留一圈系统色。 */
 function applyWindowCorners(win) {
   if (!win || win.isDestroyed()) return { ok: false, reason: "窗口不可用" };
-  if (!supportsNativeRoundedCorners()) {
-    return { ok: false, reason: "系统 build < 22000，不支持 DWMWA_WINDOW_CORNER_PREFERENCE" };
-  }
   const gd = glassDiag();
   if (!gd) return { ok: false, reason: "glass-diagnostics 不可用" };
   const ffi = gd.loadDwmFfi();
   const hwnd = gd.hwndOf(win);
   if (!ffi || hwnd === null) return { ok: false, reason: "FFI 或 HWND 不可用" };
+  const out = { ok: true };
+  // ① 系统边框一律不绘制（P6）。**不依赖圆角能力**：老系统上该属性会返回 hr!=0，
+  //    此处只记录并继续，绝不影响窗口可用性。
   try {
-    const maximized = win.isMaximized() || win.isFullScreen();
+    const b = (typeof gd.setWindowBorder === "function") ? gd.setWindowBorder(win, true) : { ok: false, reason: "no-api" };
+    out.border = b.ok ? "none" : `skip(${b.reason || "unsupported"})`;
+  } catch (err) {
+    out.border = `skip(${err && err.message})`;
+  }
+  // ② 圆角：仅 Win11 build ≥ 22000 支持 DWMWA_WINDOW_CORNER_PREFERENCE
+  if (!supportsNativeRoundedCorners()) {
+    out.preference = "skip(build<22000)";
+    return out;
+  }
+  try {
+    const maximized = isMaximizedLike(win);
     const buf = Buffer.alloc(4);
     buf.writeInt32LE(maximized ? DWMW_CORNER.DONOTROUND : DWMW_CORNER.ROUND, 0);
     const hr = ffi.DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, buf, 4);
-    if (hr !== 0) return { ok: false, reason: `DwmSetWindowAttribute 失败(hr=0x${(hr >>> 0).toString(16)})` };
-    return { ok: true, preference: maximized ? "DONOTROUND" : "ROUND" };
+    out.preference = hr === 0 ? (maximized ? "DONOTROUND" : "ROUND") : `fail(hr=0x${(hr >>> 0).toString(16)})`;
   } catch (err) {
-    return { ok: false, reason: err && err.message };
+    out.preference = `fail(${err && err.message})`;
   }
+  return out;
 }
 
-/** 把"是否最大化/是否有原生圆角"同步给渲染层（CSS 据此决定画不画圆角）。 */
+/** 把"是否最大化/是否有原生圆角"同步给渲染层（CSS 据此决定画不画圆角）。
+ *  plan-26-126 P4（卡顿治理）：本函数只在窗口状态**真正变化**时才注入——
+ *   历史上它被 resize/move/材质重放反复调用，每次都跑 FFI + 两次 executeJavaScript，
+ *   是"拖窗口/拖面板卡顿甚至无响应"的直接原因。现在：
+ *     * 用 _lastChromeState 记住上次下发值，未变化则直接返回（零成本）；
+ *     * 单次注入（去掉原来的 120ms 重试——重试会与下次调用叠加，形成注入风暴）。 */
+let _lastChromeState = null;
 function syncWindowChromeState(win) {
   if (!win || win.isDestroyed()) return;
-  const maximized = win.isMaximized() || win.isFullScreen();
+  const maximized = isMaximizedLike(win);
   const native = supportsNativeRoundedCorners();
+  const key = `${maximized ? 1 : 0}|${native ? 1 : 0}`;
+  if (key === _lastChromeState) return; // 状态未变：不注入、不跑 FFI
+  _lastChromeState = key;
   try {
     void win.webContents.executeJavaScript(
       `(() => { const r = document.documentElement;`
@@ -511,12 +558,243 @@ function syncWindowChromeState(win) {
   applyWindowCorners(win);
 }
 
-/** 在窗口状态变化后重放材质（最大化/还原/显示后 DWM/ACCENT 状态可能丢失）。 */
-function reapplyGlass(win) {
+/**
+ * plan-26-116 M2：窗口状态变化后**多次重放**材质（取代原先的单次 reapplyGlass）。
+ *
+ * 为什么必须多次：DWM 在最大化 / 全屏 / 还原的**过渡动画期间**会重置窗口 backdrop，
+ * 事件触发当下立刻调一次常落空——这正是「点最大化就透不出桌面、退出全屏也回不来」
+ * 的直接原因。因此在 0 / 120 / 400ms 各重放一次，最后一次覆盖过渡窗口期。
+ *
+ * 为什么用内存态而非读文件：重放属高频路径（resize 节流后仍会走），每次读
+ * glass-pref.json 既有 IO 成本也存在「读到旧值」的时序风险；_glassWanted 在启动
+ * 与 IPC 切换时同步维护。
+ */
+function syncWindowGlass(win) {
   if (!win || win.isDestroyed()) return;
-  syncWindowChromeState(win); // 圆角与最大化态：无论玻璃是否开启都要同步
-  if (!readGlassPref()) return;
-  applyGlass(win, true);
+  syncWindowChromeState(win); // 圆角与最大化态：仅在真正变化时才有开销（P4）
+  if (!_glassWanted) return;
+  // plan-26-126 P4：次数由 3 次收为 2 次（去掉 400ms 那次）。
+  //   保留多次的原因：DWM 在最大化/还原过渡期间确实会重置 backdrop；
+  //   去掉 400ms 那次是因为它落在用户已跟交互之后，收益低而干扰感高。
+  for (const delay of [0, 160]) {
+    setTimeout(() => {
+      if (!win || win.isDestroyed() || !_glassWanted) return;
+      try {
+        const r = applyGlass(win, true);
+        if (delay === 160 && r && r.ok === false) {
+          logErr("[chatcoder] glass: 重放后仍未生效 →", JSON.stringify(r));
+        }
+      } catch (err) {
+        logErr("[chatcoder] glass: 材质重放异常:", err && err.message);
+      }
+    }, delay);
+  }
+}
+
+// ── plan-26-126 M4：伪最大化（保住玻璃 + 任务栏保持现状） ──
+// 效果保真目标（N13）：铺满**工作区**、四角直角、还原矩形一致、按钮行为一致。
+// 任务栏保真（N14）：只用 workArea（不覆盖任务栏）、不调用 setSkipTaskbar（不从任务栏消失）、
+//   不置顶（不盖住任务栏）。
+
+/** 本地取 screen 模块（延迟到调用时，避免 app ready 之前访问）。 */
+function screenModule() {
+  try { return require("electron").screen; } catch { return null; }
+}
+
+/** 单一真源判据：伪最大化 / 系统最大化 / 全屏 三者任一为真。
+ *  圆角（DONOTROUND）与 data-maximized 注入全都改用它，避免两套判据打架。 */
+function isMaximizedLike(win) {
+  if (!win || win.isDestroyed()) return false;
+  if (_pseudoMax) return true;
+  try { return win.isMaximized() || win.isFullScreen(); } catch { return false; }
+}
+
+/** 伪最大化矩形 = 窗口所在显示器的 **workArea**（DIP，不含任务栏）。
+ *  多屏场景用 getDisplayMatching 取窗口所在屏，不固定主屏。 */
+function workAreaOf(win) {
+  const fallback = win.getBounds();
+  const sc = screenModule();
+  if (!sc) return fallback;
+  try {
+    const d = sc.getDisplayMatching(fallback);
+    return (d && d.workArea) || fallback;
+  } catch { return fallback; }
+}
+
+/** 近似原生 drag-restore：把窗口还原到**光标附近**（尺寸取快照，位置为光标居中偏上）。 */
+function restoredBoundsNearCursor(win) {
+  const prev = _pseudoPrevBounds || win.getContentBounds();
+  const wa = workAreaOf(win);
+  let px = wa.x + Math.round(wa.width / 2);
+  let py = wa.y + 40;
+  try {
+    const sc = screenModule();
+    if (sc) { const p = sc.getCursorScreenPoint(); px = p.x; py = p.y; }
+  } catch { /* 拿不到光标就用工作区顶部居中 */ }
+  const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), Math.max(lo, hi));
+  return {
+    x: clamp(px - Math.round(prev.width / 2), wa.x, wa.x + wa.width - prev.width),
+    y: clamp(py - 24, wa.y, wa.y + wa.height - prev.height),
+    width: prev.width,
+    height: prev.height,
+  };
+}
+
+/** ── plan-26-126 P6：窗口几何"运动中"标记 ──
+ *
+ * 为什么需要它（用户反馈"毛玻璃下拖尺寸卡顿 / 缩放动画不自然"的直接原因）：
+ *   窗口几何每变一帧，渲染进程都要整体重排。本应用里最贵的一段是消息流的
+ *   "宽度锚点补偿"——它在每次宽度变化时 capture + 双帧 rAF + 重新测量后写 scrollTop
+ *   （见 MessageFlow 的宽度 RO）。窗口缩放/拖拽期间它每帧都跑，把本已紧张的 16ms 帧
+ *   预算直接吃穿，于是动画掉帧、拖尺寸发涩。
+ *   这里把"窗口正在运动"下发给渲染层，让它**跳过**这类"位置补偿"类重活——
+ *   因为整窗缩放的中间帧里，保持内容锚点本来就没有意义（结束后再收敛一次即可）。
+ *
+ * 为什么用 executeJavaScript 而不是 IPC：注入一次即完成（无事件订阅/无监听泄漏），
+ *   渲染层同步读取 `window.__chatcoderWindowMotion`，零 React 重渲染。
+ */
+let _windowMotion = false;
+function setWindowMotion(win, active) {
+  if (!win || win.isDestroyed()) return;
+  if (_windowMotion === active) return;
+  _windowMotion = active;
+  try {
+    void win.webContents.executeJavaScript(
+      `(() => { window.__chatcoderWindowMotion = ${active ? "true" : "false"};`
+      + ` try { document.documentElement.setAttribute('data-window-motion', ${active ? "'1'" : "'0'"}); } catch (e) {}`
+      + ` return true; })()`, true);
+  } catch { /* 渲染层未就绪时忽略 */ }
+}
+
+/** 与 Windows 原生全屏过渡同量级（系统默认约 200~240ms，取 220ms 最接近原生观感）。
+ *  实测对照：180ms 偏"急"，260ms 偏"拖"。 */
+const FULLSCREEN_ANIM_MS = 220;
+
+/** 用**客户区**矩形贴合目标区域（而不是窗口外框）。
+ *
+ * 为何用 setContentBounds：无边框窗口在 Windows 上仍带一圈不可见的 resize 边框，
+ *   setBounds 设的是**外框**，可见内容会内缩约 1px；setContentBounds 直接指定可见客户区。
+ *   注（P6 实测更正）：本机实测 `getBounds() === getContentBounds()`（无边框窗口两者等值），
+ *   因此内缩并非主因；用户看到的"四周一圈透出桌面"真凶是 **DWM 画的系统边框**
+ *   （见 applyWindowCorners 里的 DWMWA_BORDER_COLOR=NONE）。两种口径并存不冲突，保留。
+ *
+ * 为何要自研补间（plan-26-126 P3/P6）：Electron 的 animate 参数**仅 macOS 生效**，
+ *   Windows 上直接 setContentBounds 是"瞬移"。本函数复刻系统缩放缓动：
+ *     * 缓动：easeOutCubic（先快后慢，与 Windows 全屏过渡一致）；
+ *     * 时长：220ms；
+ *     * 驱动：8ms 定时 + **按真实时间插值**（定时抖动不影响曲线形状），
+ *       并**合并相同整数矩形**——避免把无意义的重复 setBounds 推给系统；
+ *     * 运动中置 motion 标记：让渲染层关门停掉位置补偿类重活（这是流畅度的关键）。
+ *
+ * @param {BrowserWindow} win
+ * @param {{x,y,width,height}} rect 目标矩形
+ * @param {boolean} animate 是否带动画
+ * @param {() => void} [onDone] 动画结束回调（用于解除 motion 标记）
+ */
+let _fitAnimTimer = null;
+function fitContentBounds(win, rect, animate, onDone) {
+  if (!win || win.isDestroyed()) return;
+  if (_fitAnimTimer) { clearTimeout(_fitAnimTimer); _fitAnimTimer = null; }
+  const hasContent = typeof win.setContentBounds === "function";
+  const apply = (r) => (hasContent ? win.setContentBounds(r, false) : win.setBounds(r, false));
+  try {
+    if (!animate) { apply(rect); if (onDone) onDone(); return; }
+    const from = (typeof win.getBounds === "function" ? win.getBounds() : rect);
+    const t0 = Date.now();
+    const ease = (t) => 1 - Math.pow(1 - t, 3); // easeOutCubic：先快后慢
+    let lastKey = "";
+    const step = () => {
+      if (!win || win.isDestroyed()) { _fitAnimTimer = null; return; }
+      const p = Math.min(1, (Date.now() - t0) / FULLSCREEN_ANIM_MS);
+      const k = ease(p);
+      if (p < 1) {
+        const r = {
+          x: Math.round(from.x + (rect.x - from.x) * k),
+          y: Math.round(from.y + (rect.y - from.y) * k),
+          width: Math.round(from.width + (rect.width - from.width) * k),
+          height: Math.round(from.height + (rect.height - from.height) * k),
+        };
+        const key = `${r.x},${r.y},${r.width},${r.height}`;
+        if (key !== lastKey) { lastKey = key; win.setBounds(r, false); }
+        _fitAnimTimer = setTimeout(step, 8);
+      } else {
+        _fitAnimTimer = null;
+        apply(rect); // 终帧：客户区口径，精确铺满
+        if (onDone) onDone();
+      }
+    };
+    step();
+  } catch (err) {
+    _fitAnimTimer = null;
+    logErr("[chatcoder] 贴合客户区矩形失败:", err && err.message);
+    if (onDone) onDone();
+  }
+}
+
+/** 进入伪最大化（不调用 win.maximize()，从根上避开 DWM 图层重建）。 */
+function enterPseudoMax(win, restoreBounds) {
+  if (!win || win.isDestroyed() || _pseudoMax) return;
+  // 快照用**客户区**：与实际可见尺寸同口径，还原后才不会尺寸漂移
+  _pseudoPrevBounds = restoreBounds || win.getContentBounds();
+  _pseudoMax = true;
+  _pseudoSuppressUntil = Date.now() + 700;              // 抑制贴合/动画引发的 move/resize 误判（覆盖 220ms 动画 + 余量）
+  syncWindowChromeState(win);                           // data-maximized=1 + DWM DONOTROUND
+  syncWindowGlass(win);                                 // 圆角/材质即时同步
+  // 动画开始前先置 motion（渲染层停掉位置补偿类重活），动画结束再解除。
+  // 顺序很重要：若先跑动画再置标记，最前面的几帧仍会被渲染层的重活拖慢。
+  setWindowMotion(win, true);
+  fitContentBounds(win, workAreaOf(win), true, () => {
+    setWindowMotion(win, false);
+    syncWindowGlass(win); // 动画结束补一次材质（DWM 过渡期可能重置 backdrop）
+  });
+  log("[chatcoder] glass: pseudo-max on", JSON.stringify(win.getBounds()));
+}
+
+/** 退出伪最大化。overrideBounds 用于"拖动还原到光标附近"与"用户改尺寸后保留新尺寸"。
+ *  快照/传入矩形均为**客户区**口径，与进入时一致。 */
+function exitPseudoMax(win, overrideBounds) {
+  if (!win || win.isDestroyed() || !_pseudoMax) return;
+  _pseudoMax = false;
+  const b = overrideBounds || _pseudoPrevBounds;
+  _pseudoPrevBounds = null;
+  _pseudoSuppressUntil = Date.now() + 700;
+  syncWindowChromeState(win);                           // data-maximized=0 + DWM ROUND（先于动画：圆角应立即回来）
+  syncWindowGlass(win);
+  setWindowMotion(win, true);
+  if (b) {
+    fitContentBounds(win, b, true, () => {
+      setWindowMotion(win, false);
+      syncWindowGlass(win);
+    });
+  } else {
+    setWindowMotion(win, false);
+  }
+  log("[chatcoder] glass: pseudo-max off", JSON.stringify(win.getBounds()));
+}
+
+/** 最大化/还原按钮入口（与原生最大化同语义：未最大化→最大化，已最大化→还原）。 */
+function togglePseudoMaximize(win) {
+  if (!win || win.isDestroyed()) return;
+  if (_pseudoMax) { exitPseudoMax(win); return; }
+  // 兜底：若此刻已是系统原生最大化态（如系统快捷键先触发了），本次点击按"还原"处理
+  if (win.isMaximized()) {
+    try { win.unmaximize(); } catch { /* ignore */ }
+    syncWindowGlass(win);
+    return;
+  }
+  enterPseudoMax(win);
+}
+
+/** 显示器变化后按新 workArea 重新贴合（仅伪最大化状态下生效）。 */
+function refitPseudoMax(win) {
+  if (!_pseudoMax || !win || win.isDestroyed()) return;
+  try {
+    _pseudoSuppressUntil = Date.now() + 450;
+    _lastChromeState = null; // 圆角需按新显示器重算
+    fitContentBounds(win, workAreaOf(win), false); // 贴合不需动画（属于被动重排）
+  } catch (err) {
+    logErr("[chatcoder] 伪最大化重贴合失败:", err && err.message);
+  }
 }
 
 // 玻璃偏好落盘：渲染进程偏好存 localStorage 主进程读不到，而 acrylic 材质必须
@@ -529,6 +807,16 @@ function readGlassPref() {
 }
 function writeGlassPref(on) {
   try { fs.writeFileSync(GLASS_PREF_FILE, JSON.stringify({ on: !!on })); } catch {}
+}
+
+// ── plan-26-116：清理历史遗留的「折射液态玻璃」偏好文件 ──
+// 该模式已整体移除；旧版本可能留下 liquid-glass-pref.json（on:true），
+// 启动时覆写为关闭，避免旧偏好与「只保留毛玻璃」的新语义冲突。
+// 注：electron/liquid-glass.cjs 仍保留在 electron 目录与打包清单中（不再被引用），
+//     目的是避免「打包缺文件」类历史事故复现。
+const LIQUID_PREF_FILE = path.join(app.getPath("userData"), "liquid-glass-pref.json");
+function clearLegacyLiquidPref() {
+  try { fs.writeFileSync(LIQUID_PREF_FILE, JSON.stringify({ on: false })); } catch { /* ignore */ }
 }
 
 // 主题偏好落盘（同 glass-pref 机制）：启动动画 loading.html 在前端加载前显示，
@@ -544,11 +832,22 @@ function writeThemePref(theme) {
   try { fs.writeFileSync(THEME_PREF_FILE, JSON.stringify({ theme: theme === "light" ? "light" : "dark" })); } catch {}
 }
 
+// ── plan-26-116：原生折射面板已整体移除 ──
+// 历史实现（plan-24-106 M6）通过 electron/liquid-glass.cjs 在窗口 z 序下方钉一层原生
+// 折射面板，依赖 `transparent: true` 且与系统 acrylic 互斥（切换需重启窗口），是「折射版
+// 会闪 / 普通版有条纹 / 行为不一致」的来源；本轮只保留毛玻璃，故连同管理器一起删除。
+
 // ── 创建主窗口 ──
 function createWindow() {
   const win11 = isWin11Plus();
-  const glassOn = win11 && readGlassPref();
   const cap = blurBackend();
+  // plan-26-116：只保留毛玻璃一种模式。Win11 = 非透明窗口 + DWM acrylic（与 transparent
+  //   互斥）；Win10 = 透明窗口 + ACCENT 系统模糊（窗口可见后施加）。
+  const glassOn = win11 && readGlassPref();
+  // 材质意图的内存态：启动时由落盘偏好初始化，IPC 切换时更新（见 window:setGlass）。
+  _glassWanted = glassOn;
+  // 启动时清理历史遗留的折射偏好文件（该模式已移除）
+  clearLegacyLiquidPref();
   // 启动期主题：优先用户上次偏好，否则跟随系统（loading 页与窗口底色保持一致，避免闪色）
   const themePref = readThemePref();
   const lightStart = themePref ? themePref === "light" : !nativeTheme.shouldUseDarkColors;
@@ -558,11 +857,28 @@ function createWindow() {
     minWidth: 960,
     minHeight: 640,
     frame: false,
+    // plan-26-126 P2：**禁用系统原生最大化**——它是"双击标题栏后玻璃永久丢失"的根因。
+    // 原生最大化会改写 HWND 样式并重建 DWM 图层，透明/acrylic 标记在其中丢失且不保证恢复；
+    // 关闭后双击 / Snap / Win+↑ 不再触发原生最大化，最大化一律走伪最大化（保玻璃）。
+    // 注：主窗口需要最小化与关闭能力，故只关 maximizable。
+    maximizable: false,
     // plan-548 + plan-308-1542：Win11 非透明窗口 + DWM acrylic（与 transparent 互斥）；
     // Win10 仍走透明窗口（系统模糊在 ready-to-show 后由 ACCENT 通道施加）；
     // glass off 时显式 "none"（默认 auto 可能被 DWM 施加 Mica）。
     transparent: !win11,
     backgroundMaterial: win11 ? (glassOn ? "acrylic" : "none") : undefined,
+    // plan-24-106 M2 实测结论（更正 plan-24-105 R3 的推测，实测优先）：
+    //   本机 Win11 22621 用「非透明窗口 + acrylic」逐个变体抓屏比对，窗口内部中心 RGB：
+    //     A 省略 backgroundColor            → rgb(183,202,229)  透出桌面（蓝调保留）
+    //     B backgroundColor:"#00000000"     → rgb(183,202,229)  透出桌面（蓝调保留）
+    //     C backgroundColor:"#16181d"(不透明) → rgb(21,23,28)    ✗ 把 acrylic 整个盖住
+    //   即：**带 alpha 的透明底色不会屏蔽 acrylic，反而是不透明底色会**。
+    //   （官方文档只说"alpha 仅在 transparent:true 时受支持"，并未说透明底色会抑制材质；
+    //     原推测"alpha 被忽略后落成不透明黑"与实测不符。）
+    //   追加稳定性验证：resize / 放大 / 最小化-还原 后均为 rgb(183,202,230)，未复现 #48440 的变黑。
+    //   ⇒ 这里保留 "#00000000"（玻璃开启时必须保持透明，才能看到材质），
+    //     仅在玻璃关闭时下发不透明主题底色。
+    //     plan-26-116：删去折射分支——玻璃开启必须保持透明底色才能看到材质。
     backgroundColor: win11 ? (glassOn ? "#00000000" : (lightStart ? "#f2f3f7" : "#16181d")) : undefined,
     // plan-548: 延迟到首帧就绪再显示——acrylic 需在窗口可见前应用，
     // 创建即显示会导致 backgroundMaterial 初始化失败（electron#38466）。
@@ -580,6 +896,21 @@ function createWindow() {
   });
   // plan-308-1555 M7：开屏 loading.html 需要知道"毛玻璃是否开启"以决定玻璃/纯色样式
   const loadingGlassQuery = readGlassPref() ? "1" : "0";
+  // plan-26-126 P6：**窗口显示前**就把系统边框设为不绘制。
+  //   此时 HWND 已存在（构造完成），DWM 属性对隐藏窗口同样生效；
+  //   提前设可避免"先看到一圈系统边框、稍后才消失"的闪烁。
+  //   失败不影响任何功能（仅日志），ready-to-show 里还会再同步一次兜底。
+  try {
+    const gd0 = glassDiag();
+    if (gd0 && typeof gd0.setWindowBorder === "function") {
+      const rb0 = gd0.setWindowBorder(mainWindow, true);
+      log("[chatcoder] glass: border =", JSON.stringify(rb0));
+    }
+  } catch (err) {
+    logErr("[chatcoder] 窗口边框消除失败（不影响使用）:", err && err.message);
+  }
+  // plan-26-126 M6：开屏页还需知道"系统是否真有模糊材质"——没有时才用页面内轻量兜底模糊
+  const loadingMatQuery = cap.backend !== "none" ? "1" : "0";
   // 说明（事故复盘）：这里曾经做过"窗口级 setOpacity(0) + 渐进到 1"的整窗淡入，
   // 一旦后续任一步骤抛异常（上一轮为打包漏文件），窗口会永久停在 opacity=0——
   // 表现为"任务栏有图标、预览有内容，但看不见也点不开"。
@@ -610,6 +941,7 @@ function createWindow() {
     // ③ 装饰性步骤逐个独立 try：任一失败都不得影响窗口可用性
     try {
       // plan-308-1555 M6：首次同步圆角与最大化态（无边框窗口不会自动获得系统圆角）
+      // plan-26-126 P6：同时消除 DWM 系统边框（修"四周一圈透出桌面"）
       syncWindowChromeState(mainWindow);
     } catch (err) {
       logErr("[chatcoder] 窗口圆角同步失败（不影响使用）:", err && err.message);
@@ -638,29 +970,78 @@ function createWindow() {
       if (typeof mainWindow.setOpacity === "function") mainWindow.setOpacity(1);
     } catch { /* ignore */ }
   }, 8000);
-  // 窗口状态变化后重放材质（最大化/还原会让 DWM/ACCENT 状态丢失）
-  for (const ev of ["show", "restore", "unmaximize", "focus"]) {
-    mainWindow.on(ev, () => reapplyGlass(mainWindow));
+  // 窗口状态变化后重放材质（最大化/还原会让 DWM/ACCENT 状态丢失）。
+  // plan-24-106 M2：**移除 focus**——材质是窗口级 DWM 属性，不随焦点丢失；
+  //   实测（ai/_m2_stability.cjs）最小化→还原、resize 后材质均完好（RGB 恒定 183,202,230）。
+  // plan-26-116 M2：材质重放覆盖窗口状态事件。syncWindowGlass 内部会先同步圆角与最大化态。
+  // 注（plan-26-126 M4）："maximize" 不绑 syncWindowGlass —— 它是兜底转换入口（见下）。
+  for (const ev of ["show", "restore", "unmaximize", "enter-full-screen", "leave-full-screen"]) {
+    mainWindow.on(ev, () => syncWindowGlass(mainWindow));
   }
-  // plan-308-1555 M6：圆角与最大化态必须在这些事件上同步——
-  // 最大化时圆角要变直角（否则四角露出桌面）；还原/进入全屏同理。
-  for (const ev of ["maximize", "unmaximize", "enter-full-screen", "leave-full-screen"]) {
-    mainWindow.on(ev, () => {
-      syncWindowChromeState(mainWindow);
-      if (readGlassPref()) reapplyGlass(mainWindow);
-    });
-  }
-  // plan-308-1555 M2：resize 也会丢材质（每帧重放代价高，节流 250ms）；
-  // 显示器 DPI/分辨率变化后同样需要重放（多屏场景常见）
+  // plan-26-126 M4/P2：**防御性兑底**——万一仍然发生了系统原生最大化，立刻回收转伪最大化。
+  //   P2 已把窗口设为 maximizable:false，并把标题栏/侧栏头部改为自研拖拽 + 双击伪全屏，
+  //   正常情况下本回调**不会触发**；保留它是因为：
+  //     * Win+↑ / 任务栏右键"最大化" 等系统入口不受 maximizable 完全屏蔽；
+  //     * 代价极低（只在真的发生时跑一次），而漏掉一次的代价是玻璃永久丢失。
+  mainWindow.on("maximize", () => {
+    if (_convertingNativeMax) return;
+    _convertingNativeMax = true;
+    try {
+      const normal = mainWindow.getNormalBounds(); // 原生最大化前的还原矩形
+      mainWindow.unmaximize();                     // 立刻退回，避免停留在原生最大化态
+      // 等还原动画起步后再贴合 workArea（同一 tick 内 setBounds 会被动画覆盖）
+      setTimeout(() => {
+        try {
+          if (!mainWindow || mainWindow.isDestroyed()) return;
+          if (!_pseudoMax) enterPseudoMax(mainWindow, normal);
+        } catch (err) {
+          logErr("[chatcoder] 伪最大化转换失败:", err && err.message);
+        } finally {
+          _convertingNativeMax = false;
+        }
+      }, 20);
+    } catch (err) {
+      _convertingNativeMax = false;
+      logErr("[chatcoder] 原生最大化回收失败:", err && err.message);
+    }
+  });
+  // plan-308-1555 M2：resize 也会丢材质；
+  // plan-26-126 P4（卡顿治理）：**resize 不再重放材质**——拖动窗口时每帧重放（FFI + 回读）
+  //   正是"拖尺寸卡顿甚至无响应"的主因。材质是窗口级 DWM 属性，实测 resize 不会丢；
+  //   拖动结束后补一次即可。
+  // plan-26-126 P6：再加一道"运动中不重放"——自研全屏动画 / 窗口拖拽期间由 motion 标记
+  //   抑制，避免在高频几何变更中叠加 FFI + 回读（那是"毛玻璃下拖尺寸卡顿"的直接来源）。
   let _resizeTimer = null;
   mainWindow.on("resize", () => {
+    // 伪最大化下用户拖动边缘改尺寸 ⇒ 视为"取消最大化"，保留新尺寸退出（快照用客户区口径）
+    if (_pseudoMax && Date.now() > _pseudoSuppressUntil) {
+      exitPseudoMax(mainWindow, mainWindow.getContentBounds());
+    }
     if (_resizeTimer) clearTimeout(_resizeTimer);
-    _resizeTimer = setTimeout(() => { _resizeTimer = null; reapplyGlass(mainWindow); }, 250);
+    _resizeTimer = setTimeout(() => {
+      _resizeTimer = null;
+      if (_windowMotion) return; // 运动中：材质重放留给结束后的补偿
+      syncWindowGlass(mainWindow);
+    }, 300);
+  });
+  // plan-26-126 M4：伪最大化下用户拖动窗口 ⇒ 近似原生 drag-restore（还原到光标附近）
+  mainWindow.on("move", () => {
+    if (!_pseudoMax || Date.now() <= _pseudoSuppressUntil) return;
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    exitPseudoMax(mainWindow, restoredBoundsNearCursor(mainWindow));
   });
   try {
     const { screen } = require("electron");
-    screen.on("display-metrics-changed", () => reapplyGlass(mainWindow));
+    const onDisplayChange = () => {
+      _lastChromeState = null; // 圆角/最大化态需重算（P4：清缓存以强制重新注入）
+      refitPseudoMax(mainWindow); // plan-26-126 M4：按新工作区重新贴合（不跑回主屏）
+      syncWindowGlass(mainWindow);
+    };
+    screen.on("display-metrics-changed", onDisplayChange);
+    screen.on("display-removed", onDisplayChange);
   } catch { /* 非致命：拿不到 screen 模块时跳过 */ }
+
+  // plan-26-116：折射面板几何同步（syncLiquid）已随折射模式一并移除。
 
   // plan-308-1555 M0：启动即打印一次诊断结论（历史教训：只记"ok"不够，
   // 必须记录**系统回读值**才能在事后判定材质到底有没有生效）
@@ -690,7 +1071,7 @@ function createWindow() {
   const loadingPath = path.join(__dirname, "loading.html");
   if (fs.existsSync(loadingPath)) {
     mainWindow.loadFile(loadingPath, {
-      query: { theme: lightStart ? "light" : "dark", glass: loadingGlassQuery },
+      query: { theme: lightStart ? "light" : "dark", glass: loadingGlassQuery, mat: loadingMatQuery },
     });
   }
 
@@ -720,7 +1101,14 @@ function createWindow() {
     try { /* 保留空回调，仅消费事件 */ } catch { /* 窗口销毁竞态 */ }
   });
 
-  mainWindow.on("closed", () => { mainWindow = null; });
+  mainWindow.on("closed", () => {
+    // plan-26-126 M4：重置伪最大化状态，避免下次建窗沿用旧快照/标志
+    _pseudoMax = false;
+    _pseudoPrevBounds = null;
+    _pseudoSuppressUntil = 0;
+    _convertingNativeMax = false;
+    mainWindow = null;
+  });
 }
 
 // ── 图标路径解析 ──
@@ -774,55 +1162,9 @@ ipcMain.handle("dialog:selectFiles", async (_e, filters, opts) => {
 // ── IPC:后端端口透传（v2.1: 前端 BASE 去硬编码）──
 ipcMain.handle("backend:getPort", () => BACKEND_PORT);
 
-// ── plan-308-1555 M0：毛玻璃诊断（把"改了看不到"变成"改完能读到确切结论"）──
-// 历史十几轮失败的根因是缺少可验证反馈环：只能拿到"API 返回 ok"，
-// 拿不到"像素层有没有把桌面混进来"。此处提供**回读**式自证。
-ipcMain.handle("window:glassDiagnostics", async () => {
-  const gd = glassDiag();
-  const win = mainWindow;
-  if (!gd) {
-    return {
-      ok: false,
-      backend: blurBackend().backend,
-      conclusion: { verdict: "unknown", reason: "glass-diagnostics 模块不可用", line: "diagnostics-unavailable" },
-      line: "diagnostics-unavailable",
-    };
-  }
-  const env = gd.envReport(app);
-  const wrep = gd.windowReport(win, _glassRecorded);
-  // FFI 回读：DWM 实际生效的 backdrop 类型（唯一权威判据）
-  const dwm = gd.dwmReadBack(win);
-  // 渲染层逐层 alpha 链路采样（探针为自包含脚本，与前端构建产物解耦）
-  let probe = null;
-  try {
-    if (win && !win.isDestroyed()) {
-      // 关键：注入自包含脚本，即使前端是旧构建也能得到结论
-      const script = gd.probeScript();
-      probe = await win.webContents.executeJavaScript(script, true);
-    }
-  } catch (err) {
-    logErr("[chatcoder] glass: 渲染层探针执行失败:", err && err.message);
-  }
-  const cap = blurBackend();
-  const conclusion = gd.buildConclusion({
-    backdropRaw: dwm.ok ? dwm.value : null,
-    backend: cap.backend,
-    alphaPath: (probe && probe.alphaPath) || null,
-    degraded: !dwm.ok || dwm.value < 2,
-  });
-  return {
-    ok: true,
-    env,
-    window: wrep,
-    dwm,
-    probe,
-    backend: cap.backend,
-    backendReason: cap.reason || "",
-    conclusion,
-    // 便于用户/开发者直接复制的一行摘要
-    line: conclusion.line,
-  };
-});
+// ── plan-26-116：毛玻璃诊断 IPC（window:glassDiagnostics）已移除 ──
+// 诊断/回读/自检属「提示性信息」体系，本轮从用户可见面（设置页 + IPC）整体撤下；
+// electron/glass-diagnostics.cjs 仍保留（它提供 DWM FFI 与启动日志，属主进程内部依赖）。
 
 // ── IPC:v19 外挂插件扫描（~/.chatcoder/plugins/<dir>/plugin.json + entry 源码）──
 ipcMain.handle("plugins:list", () => {
@@ -1088,11 +1430,79 @@ ipcMain.handle("shell:openExternal", (_event, url) => {
 // ── IPC:窗口控制 ──
 ipcMain.on("window:minimize", () => { if (mainWindow) mainWindow.minimize(); });
 ipcMain.on("window:maximizeToggle", () => {
+  // plan-26-126 M4：改走**伪最大化**（不再调用 win.maximize()/unmaximize()）。
+  // 原因：系统原生最大化会触发 DWM 图层重建，透明/acrylic 标记丢失（玻璃"点一下就没了"）。
   if (!mainWindow) return;
-  if (mainWindow.isMaximized()) mainWindow.unmaximize();
-  else mainWindow.maximize();
+  togglePseudoMaximize(mainWindow);
 });
 ipcMain.on("window:close", () => { if (mainWindow) mainWindow.close(); });
+
+// ── plan-26-126 P6：自研标题栏拖拽（让双击可被渲染层接管）──
+// 为何要自研：`-webkit-app-region: drag` 区域由**系统**处理拖拽与双击，DOM 收不到 dblclick；
+//   双击会直接触发系统原生最大化（破坏玻璃且无法还原）。
+//   改为渲染层发起拖拽后，双击就可由渲染层自行处理（转伪最大化）。
+//
+// 历史实现的两个致命错（本轮修正）：
+//   ① 用了 `mainWindow.startDrag(...)` —— **BrowserWindow 上不存在这个方法**
+//      （`startDrag` 只在 WebContents 上，且语义是"拖文件"，不是拖窗口）。
+//      于是每次拖拽都抛 TypeError 后被 catch 静默吞掉 ⇒ 用户反馈"非全屏模式下
+//      顶部完全拖不动窗口"。日志里连一行都没有，因为 catch 只写了 logErr 且
+//      该分支从未被触发过（说明它连 throw 都发生在更外层）。
+//   ② 即便存在，那份实现也只在"按下后立刻调用"时可用；本应用要求 180ms 延迟以
+//      区分双击，系统那套拖动循环早已错过时机。
+//
+// 现在改为**自研拖动循环**：渲染层持续上报屏幕坐标（pointermove），主进程按
+//   光标与"按下点相对窗口的偏移"反算新位置并 setPosition。这样：
+//     * 与双击判定天然共存（拖拽由渲染层决定何时开始）；
+//     * 拖动中不触发 DWM 图层重建，玻璃全程保留；
+//     * 到位精确（按屏幕坐标算，不依赖系统拖动循环的时机）。
+// 拖拽中置 motion 标记：渲染层停掉位置补偿类重活，拖窗口不发涩。
+let _dragSession = null; // { offsetX, offsetY } —— 光标相对窗口左上角的偏移（DIP）
+
+function endWindowDrag() {
+  if (!_dragSession) return;
+  _dragSession = null;
+  setWindowMotion(mainWindow, false);
+}
+
+ipcMain.on("window:dragStart", () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try {
+    const { screen } = require("electron");
+    const p = screen.getCursorScreenPoint();
+    const b = mainWindow.getBounds();
+    _dragSession = { offsetX: p.x - b.x, offsetY: p.y - b.y };
+    setWindowMotion(mainWindow, true);
+  } catch (err) {
+    _dragSession = null;
+    logErr("[chatcoder] 窗口拖拽起点失败:", err && err.message);
+  }
+});
+
+ipcMain.on("window:dragMove", () => {
+  if (!_dragSession || !mainWindow || mainWindow.isDestroyed()) return;
+  try {
+    const { screen } = require("electron");
+    // 按键状态兜底：渲染层若因指针离开窗口而漏发 pointerup，这里能自行结束，
+    // 避免"鼠标已松开但窗口仍跟着光标跑"的粘滞感。
+    const gd = glassDiag();
+    if (gd && typeof gd.isLeftButtonDown === "function") {
+      const down = gd.isLeftButtonDown();
+      if (down === false) { endWindowDrag(); return; }
+    }
+    const p = screen.getCursorScreenPoint();
+    mainWindow.setPosition(p.x - _dragSession.offsetX, p.y - _dragSession.offsetY, false);
+  } catch (err) {
+    logErr("[chatcoder] 窗口拖拽失败:", err && err.message);
+  }
+});
+
+ipcMain.on("window:dragEnd", () => {
+  endWindowDrag();
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  // 拖动结束后补一次材质（DWM 在窗口移动后偶发重置 backdrop）与状态同步
+  syncWindowGlass(mainWindow);
+});
 
 // ── IPC:修复文本输入状态（输入框"能删不能输"卡死的兜底）──
 // 保留 API 兼容与节流，但不再触碰任何焦点：调用 webContents.focus() 会与
@@ -1107,41 +1517,51 @@ ipcMain.handle("window:fixTextInput", () => {
   return true;
 });
 
-// ── IPC:毛玻璃模式（plan-546 / plan-548 / plan-308-1542）──
-// 统一走 applyGlass：Win11=DWM acrylic；Win10=ACCENT 系统模糊；mac=vibrancy；
-// 无可用后端时返回 { ok:false, backend:"none", reason } 供前端明确提示用户。
+// ── IPC：毛玻璃模式（plan-546 / plan-548 / plan-308-1542 / plan-26-126 P1）──
+// plan-26-126 P1（用户明确要求）：**开启毛玻璃不再直接生效，改为下次重启后生效**。
+//
+// 为何改成重启生效（三个已确定的根因，均有实测依据）：
+//   ① 运行期翻转 Win11 窗口底色（setBackgroundColor）会让 DWM 合成状态与渲染层缓存失步
+//      → 左侧面板出现异常色块、从设置页返回后残留上一页浅残影，**重启后即正常**（用户实测）；
+//   ② applyUiVars 在**每次偏好变更**时都会调这个 IPC（拖滑杆 / 提交面板宽度 / 切语言…），
+//      于是"即时生效"在高频偏好写入下变成持续重创合成管线 → 界面无响应数秒；
+//   ③ 窗口底色只能在构造期可靠生效（transparent 也是构造参数）。
+// 因此这里只做**落盘**：材质与窗口底色都交由下次 createWindow 一次性决定，
+// 返回 needRestart=true，由设置页提示用户重启（不再做任何运行期材质/底色变更）。
 ipcMain.handle("window:setGlass", (_e, on) => {
-  writeGlassPref(!!on); // plan-548: 落盘，下次启动直接以正确材质建窗（见 createWindow）
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    return { ok: false, backend: "none", reason: "窗口尚未就绪" };
-  }
-  const res = applyGlass(mainWindow, !!on);
-  log("[chatcoder] glass: setGlass =", on, JSON.stringify(res));
-  return res;
+  const want = !!on;
+  const applied = readGlassPref(); // 当前窗口**实际**采用的材质状态
+  writeGlassPref(want);           // 仅落盘：供下次启动建窗时读取
+  _glassWanted = want;            // 同步内存态（供伪最大化/还原时的材质补偿使用）
+  const needRestart = want !== applied;
+  log("[chatcoder] glass: setGlass =", want, JSON.stringify({ needRestart, appliedBefore: applied }));
+  return {
+    ok: true,
+    backend: blurBackend().backend,
+    // 与本次窗口实际生效状态不一致 ⇒ 需重启才能看到变化
+    needRestart,
+    applied,
+    wanted: want,
+  };
 });
 
-// plan-308-1542 需求4：能力探测——设置页据此展示"当前系统支持哪种玻璃"。
-ipcMain.handle("window:glassCapability", () => {
-  const cap = blurBackend();
-  return { backend: cap.backend, supported: cap.backend !== "none", reason: cap.reason || "" };
+/** plan-26-126 P1：一键重启（设置页提示条上的按钮）。
+ *  用 app.relaunch + app.exit：比让渲染层刷新页面更彻底（窗口会按新偏好重建）。 */
+ipcMain.handle("app:relaunch", () => {
+  try {
+    app.relaunch();
+    app.exit(0);
+    return { ok: true };
+  } catch (err) {
+    logErr("[chatcoder] 重启失败:", err && err.message);
+    return { ok: false, reason: err && err.message };
+  }
 });
 
-// plan-308-1555 M5：玻璃自检模式——临时把面板 alpha 降到很低 + 加亮描边，
-// 让用户/开发者一眼判定"桌面到底有没有混进来"（区分"材质无效"与"材质太淡"）。
-ipcMain.handle("window:glassSelfCheck", (_e, on) => {
-  _glassSelfCheck = !!on;
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    try {
-      // 渲染层读这个标记来切换自检样式（CSS 侧 [data-glass-selfcheck]）
-      void mainWindow.webContents.executeJavaScript(
-        `document.documentElement.setAttribute('data-glass-selfcheck', ${on ? "'1'" : "'0'"}); true`, true);
-    } catch (err) {
-      logErr("[chatcoder] glass: 自检模式切换失败:", err && err.message);
-    }
-  }
-  log("[chatcoder] glass: self-check =", _glassSelfCheck);
-  return { ok: true, on: _glassSelfCheck };
-});
+// ── plan-26-116：能力探测 / 折射 / 自检 IPC 已移除 ──
+// window:glassCapability、window:liquidGlassCapability、window:setLiquidGlass、
+// window:glassSelfCheck 整体删去：设置页不再展示「系统模糊后端」「折射面板」「需重启」
+// 「玻璃诊断/自检」等提示性信息，只留一个「毛玻璃效果」开关 + 「玻璃强度」三档。
 
 // ── IPC:保持唤醒（对齐 zcode「运行会话时保持电脑唤醒」）──
 let _psbId = null;
@@ -1571,7 +1991,9 @@ app.on("window-all-closed", () => {
   killBackend();
   app.quit();
 });
-app.on("before-quit", () => { killBackend(); });
+app.on("before-quit", () => {
+  killBackend();
+});
 app.on("will-quit", () => { killBackend(); });
 process.on("exit", () => { killBackend(); });
 

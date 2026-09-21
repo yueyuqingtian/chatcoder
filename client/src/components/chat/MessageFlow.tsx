@@ -445,23 +445,43 @@ function MessageFlowCore({
     };
 
     lastWidthRef.current = el.clientWidth;
+    // plan-26-126 P6（卡顿治理）：「宽度补偿」是几何变更期间最贵的一段——
+    //   每次宽度变化都要 capture + 双帧 rAF + 重测后写 scrollTop，写入又触发重排。
+    //   而窗口平滑缩放动画与面板分隔条拖拽**每帧**都在改宽度 ⇒ 它把 16ms 帧预算吃穿，
+    //   表现为"毛玻璃下拖尺寸卡顿""缩放动画不自然"。
+    //   这里在两类"运动中"跳过它（中间帧保持内容锚点本就无意义）：
+    //     * window.__chatcoderWindowMotion —— 主进程在窗口动画/拖窗口期间置位；
+    //     * body.panel-dragging          —— 面板分隔条拖拽中。
+    //   拖拽结束时 handleMouseUp 会先移除 body 类、再 commit 宽度 ⇒ 那次 RO 会正常
+    //   做一次收尾还原，功能语义（拖完仍停在同一位置）完整保留。
+    let pendingRestore = 0;
+    const inMotion = () =>
+      document.body.classList.contains("panel-dragging")
+      || Boolean((window as unknown as { __chatcoderWindowMotion?: boolean }).__chatcoderWindowMotion);
     const ro = new ResizeObserver(() => {
       const el2 = parentRef.current;
       if (!el2) return;
       const w = el2.clientWidth;
       if (Math.abs(w - lastWidthRef.current) < 1) return; // 高度抖动不参与
       lastWidthRef.current = w;
+      if (inMotion()) { widthAnchorRef.current = null; return; } // 运动中：跳过重活
       capture();
-      // 重排/重新测量在渲染后完成：双帧后再还原（与 scrollToBottom 的补滚节奏一致）
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
+      // 重排/重新测量在渲染后完成：双帧后再还原（与 scrollToBottom 的补滚节奏一致）。
+      // 额外做 rAF 合并：连续宽度变化只保留最后一次还原，避免回调排队堆积。
+      if (pendingRestore) cancelAnimationFrame(pendingRestore);
+      pendingRestore = requestAnimationFrame(() => {
+        pendingRestore = requestAnimationFrame(() => {
+          pendingRestore = 0;
           restore();
           widthAnchorRef.current = null;
         });
       });
     });
     ro.observe(el);
-    return () => ro.disconnect();
+    return () => {
+      if (pendingRestore) cancelAnimationFrame(pendingRestore);
+      ro.disconnect();
+    };
   }, [virtualizer]);
 
   /** 已做过"会话首次填充贴底"的会话标识（切换会话时重新进入首次填充分支） */

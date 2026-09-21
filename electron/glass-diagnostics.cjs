@@ -20,6 +20,15 @@ const os = require("os");
 // ───────────────────────────────────────────────────────────────
 const DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
 const DWMWA_SYSTEMBACKDROP_TYPE = 38;
+// plan-26-126 P6：DWM 窗口边框色。无边框窗口（frame:false）在 Win11 上仍会被 DWM 画一圈
+// **约 1 DIP 的系统边框**（实测：物理 2px @1.5x，颜色由系统/壁纸决定，与内容无关）。
+// 玻璃态下这圈边框在深色主题上最显眼——用户看到的"边框透出桌面"就是它。
+// DWMWA_COLOR_NONE 显式取消绘制（实测：设为 NONE 后四边像素立即变为内容色，且开启
+// acrylic 材质后依然干净）。
+const DWMWA_BORDER_COLOR = 34;
+const DWMWA_COLOR_NONE = 0xfffffffe; // DWMWA_COLOR_NONE：不画边框（系统未定义常量，按文档字面值）
+// 鼠标左键虚拟键码（GetAsyncKeyState 用）：自研窗口拖拽期间据此判断"用户是否已松开"。
+const VK_LBUTTON = 0x01;
 
 /** DWMSBT_* 值 → 可读名（回读值即用它解释） */
 const BACKDROP_NAMES = {
@@ -140,10 +149,55 @@ function loadDwmFfi() {
         "long __stdcall DwmExtendFrameIntoClientArea(intptr hwnd, _In_ void* margins)"),
       SetWindowCompositionAttribute: user32.func(
         "bool __stdcall SetWindowCompositionAttribute(intptr hwnd, _Inout_ void* data)"),
+      // plan-26-126 P6：自研窗口拖拽的按键状态查询（GetAsyncKeyState 返回高位=当前按下）
+      GetAsyncKeyState: user32.func("short __stdcall GetAsyncKeyState(int vKey)"),
     };
     return _ffiCache;
   } catch (err) {
     _ffiCache = null;
+    return null;
+  }
+}
+
+/**
+ * plan-26-126 P6：把窗口的系统边框设为"不绘制"。
+ *
+ * 为什么必须做（实测取证）：`frame:false` 的窗口在 Win11 上仍有一圈 DWM 绘制的系统边框
+ * （物理 2px @1.5x）。玻璃开启时窗口内部透明，这圈边框就是用户看到的"一圈透出桌面的边"。
+ * 实测结论：设 DWMWA_BORDER_COLOR = DWMWA_COLOR_NONE 后，四边外侧像素立刻并入内容色；
+ * 并且叠加 acrylic 材质后依然干净（材质与边框色互不影响）。
+ *
+ * @param {BrowserWindow} win
+ * @param {boolean} none true=不画边框（默认）；false=恢复系统默认
+ * @returns {{ok: boolean, reason?: string, value?: number}}
+ */
+function setWindowBorder(win, none = true) {
+  if (process.platform !== "win32") return { ok: false, reason: "非 Windows 平台" };
+  const ffi = loadDwmFfi();
+  const hwnd = hwndOf(win);
+  if (!ffi) return { ok: false, reason: "FFI 不可用（koffi 缺失）" };
+  if (hwnd === null) return { ok: false, reason: "无法获取 HWND" };
+  try {
+    const buf = Buffer.alloc(4);
+    // DWMWA_COLOR_DEFAULT = 0xFFFFFFFF（恢复默认）；NONE = 0xFFFFFFFE
+    buf.writeUInt32LE((none ? DWMWA_COLOR_NONE : 0xffffffff) >>> 0, 0);
+    const hr = ffi.DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, buf, 4);
+    if (hr !== 0) {
+      return { ok: false, reason: `DwmSetWindowAttribute(BORDER_COLOR) 失败(hr=0x${(hr >>> 0).toString(16)})` };
+    }
+    return { ok: true, value: none ? DWMWA_COLOR_NONE : -1 };
+  } catch (err) {
+    return { ok: false, reason: err && err.message };
+  }
+}
+
+/** 左键当前是否按下（自研拖拽的松开检测；FFI 不可用时返回 null） */
+function isLeftButtonDown() {
+  const ffi = loadDwmFfi();
+  if (!ffi || typeof ffi.GetAsyncKeyState !== "function") return null;
+  try {
+    return (ffi.GetAsyncKeyState(VK_LBUTTON) & 0x8000) !== 0;
+  } catch {
     return null;
   }
 }
@@ -191,6 +245,9 @@ function dwmReadBack(win) {
 // ───────────────────────────────────────────────────────────────
 
 /** 采样顺序：自窗口底向上（越外层越先采，先命中者即遮挡源候选） */
+// plan-24-106 M7：复核选择器与真实 DOM 一致 —— 设置侧栏现由 SidebarShell 渲染
+// （`sidebar sb settings-sidebar`），旧名 `.settings-nav` 已不是实际容器，补上真名，
+// 否则"设置页被不透明层遮挡"这类问题会漏判。
 const PROBE_SELECTORS = [
   "html",
   "body",
@@ -204,6 +261,8 @@ const PROBE_SELECTORS = [
   ".app-pane-right",
   ".right-panel",
   ".settings-page-overlay",
+  ".settings-sidebar",
+  // 兼容旧命名（若仍存在则采样，不存在时 querySelector 返回 null 自动跳过）
   ".settings-nav",
   // 决策 B：以下按设计保持不透明，仅记录、不参与 blocked 判定
   ".app-main",
@@ -271,26 +330,47 @@ function analyzeAlphaChain(samples) {
  *   自包含脚本由主进程注入，与前端构建产物解耦，永远可用。
  */
 function probeScript() {
+  // plan-24-106 M0 关键修复（历史十几轮"改了看不到"的直接原因）：
+  //   analyzeAlphaChain 序列化后的函数体内部引用的是 **parseColorAlpha**，
+  //   而旧代码注入时只把它赋给了 `parseAlpha` —— 注入后该标识符不存在，
+  //   整段脚本一进入 analyze() 就抛 ReferenceError，又被主进程 catch 静默吞掉，
+  //   于是 alphaPath 永远是 unknown（截图实测：backdrop=acrylic(3) | alphaPath=unknown）。
+  //   修复：注入时使用**与源码一致的函数名** parseColorAlpha（并保留 parseAlpha 别名），
+  //   同时整段脚本自带 try/catch，把异常作为 `error` 字段回传，后续不再静默失败。
   return `(() => {
     const SELECTORS = ${JSON.stringify(PROBE_SELECTORS)};
     const EXPECTED = ${JSON.stringify(EXPECTED_OPAQUE_SELECTORS)};
-    const parseAlpha = ${parseColorAlpha.toString()};
-    const analyze = ${analyzeAlphaChain.toString()};
-    const samples = [];
-    for (const sel of SELECTORS) {
-      const el = document.querySelector(sel);
-      if (!el) continue;
-      const cs = window.getComputedStyle(el);
-      samples.push({
-        selector: sel,
-        backgroundColor: cs.backgroundColor,
-        backdropFilter: cs.backdropFilter || cs.webkitBackdropFilter || "none",
-        backgroundImage: (cs.backgroundImage && cs.backgroundImage !== "none") ? "has-image" : "none",
-        isExpectedOpaque: EXPECTED.includes(sel),
-      });
+    const parseColorAlpha = ${parseColorAlpha.toString()};
+    const parseAlpha = parseColorAlpha;
+    const analyzeAlphaChain = ${analyzeAlphaChain.toString()};
+    const analyze = analyzeAlphaChain;
+    try {
+      const samples = [];
+      for (const sel of SELECTORS) {
+        const el = document.querySelector(sel);
+        if (!el) continue;
+        const cs = window.getComputedStyle(el);
+        samples.push({
+          selector: sel,
+          backgroundColor: cs.backgroundColor,
+          backdropFilter: cs.backdropFilter || cs.webkitBackdropFilter || "none",
+          backgroundImage: (cs.backgroundImage && cs.backgroundImage !== "none") ? "has-image" : "none",
+          isExpectedOpaque: EXPECTED.includes(sel),
+        });
+      }
+      const a = analyze(samples);
+      return { ok: true, ...a, samples, error: null };
+    } catch (err) {
+      // 探针自身异常必须可见：否则又会退回"只能看到 unknown、查不出为什么"的困局
+      return {
+        ok: false,
+        error: (err && err.message) ? err.message : String(err),
+        alphaPath: null,
+        blockedSelector: null,
+        opaqueUnexpected: [],
+        samples: [],
+      };
     }
-    const a = analyze(samples);
-    return { ok: true, ...a, samples };
   })()`;
 }
 
@@ -327,6 +407,9 @@ function windowReport(win, recorded) {
 module.exports = {
   DWMWA_USE_IMMERSIVE_DARK_MODE,
   DWMWA_SYSTEMBACKDROP_TYPE,
+  DWMWA_BORDER_COLOR,
+  DWMWA_COLOR_NONE,
+  VK_LBUTTON,
   BACKDROP_NAMES,
   PROBE_SELECTORS,
   EXPECTED_OPAQUE_SELECTORS,
@@ -339,6 +422,8 @@ module.exports = {
   loadDwmFfi,
   hwndOf,
   dwmReadBack,
+  setWindowBorder,
+  isLeftButtonDown,
   envReport,
   windowReport,
 };

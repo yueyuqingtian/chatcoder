@@ -13,10 +13,7 @@ export interface UiPrefs {
   rightPanelWidth: number;
   /** 毛玻璃效果开关 */
   glassmorphism: boolean;
-  /** plan-308-1542 需求4：玻璃风格——solid=不透明纯色（仅开应用内层次）
-   *  liquid=液态玻璃（高光/内描边/柔和阴影 + 系统模糊透出桌面） */
-  glassStyle: "solid" | "liquid";
-  /** 毛玻璃玻璃强度:0=轻柔 1=标准 2=深邃 */
+  /** 毛玻璃强度:0=轻柔 1=标准 2=深邃（决定各层不透明度） */
   glassStrength: number;
   /** 玻璃渐变主色1 */
   glassGradientC1: string;
@@ -58,7 +55,6 @@ const DEFAULTS: UiPrefs = {
   leftPanelWidth: 264,
   rightPanelWidth: 420,
   glassmorphism: false,
-  glassStyle: "liquid",
   glassStrength: 1,
   glassGradientC1: "",
   glassGradientC2: "",
@@ -123,55 +119,46 @@ export function applyUiVars(p: UiPrefs) {
   else root.style.removeProperty("--sidebar-focus");
   root.style.fontSize = `${p.uiBaseFontSize}px`;
   root.setAttribute("data-glass", p.glassmorphism ? "on" : "off");
-  // plan-308-1542 需求4：玻璃风格（liquid=液态玻璃高光层；solid=纯色）
-  root.setAttribute("data-glass-style", p.glassStyle || "liquid");
-  // plan-546: 通知主进程切换系统级模糊（Win11 acrylic / Win10 ACCENT / mac vibrancy）；
-  // 浏览器/开发模式无 chatcoderAPI 时仅走 CSS 效果。
-  // plan-308-1542：并探测后端能力，落 data-glass-backend 供设置页与 CSS 降级分支使用。
-  // plan-308-1555 M5：降级判定改为以 **DWM 回读值**为准——
-  //   历史上只看"后端名"就报成功（setBackgroundMaterial 返回无异常即算成功），
-  //   但实测存在"API 被接受、系统实际未启用材质"的情况，会误导排查。
-  //   主进程 applyGlass 现返回 verified（DWMWA_SYSTEMBACKDROP_TYPE 回读值），
-  //   只有 verified >= 2（mica/acrylic/tabbed）才算真的生效。
+  // 清理旧版本遗留的 DOM 属性（外部穿透 / 液态玻璃 / 玻璃风格 / 诊断）。
+  root.removeAttribute("data-external");
+  root.removeAttribute("data-glass-style");
+  root.removeAttribute("data-liquid-glass");
+  root.removeAttribute("data-liquid-glass-degraded");
+  root.removeAttribute("data-liquid-glass-restart");
+  root.removeAttribute("data-liquid-glass-reason");
+  root.removeAttribute("data-glass-backend");
+  root.removeAttribute("data-glass-verified");
+  root.removeAttribute("data-glass-selfcheck");
+  // 玻璃强度:0=0.5x 1=1x 2=1.6x（模糊半径缩放；标准档 = 1）
+  const strength = p.glassStrength === 2 ? 1.6 : p.glassStrength === 0 ? 0.5 : 1;
+  root.style.setProperty("--glass-strength", String(strength));
+  root.setAttribute("data-glass-strength", String(p.glassStrength ?? 1));
+  // plan-26-126 M2：左列不透明度**不再由 JS 写内联变量**，改由 tokens.css 按
+  //   data-glass / data-glass-strength / data-theme / data-glass-degraded 声明式驱动。
+  //   原因：内联自定义属性优先级高于样式表，若在此写入浅色档数值，用户切换深浅主题时
+  //   那些数值不会重算（applyUiVars 并不随主题变化调用），深色档因此会失效。
+  //   这里只负责落下 data-glass-strength（三档），具体 alpha 交给 CSS。
+  // plan-26-126 P1：毛玻璃改为**重启后生效**（用户明确要求）。
+  // 为何不再即时生效：运行期切换需要翻转窗口底色 + 重建材质，会让 DWM 合成与
+  //   渲染层缓存失步（左侧面板异常色块 / 设置页残留浅残影，**只有重启才恢复**）；
+  //   且 applyUiVars 在每次偏好变更时都会走到这里（拖滑杆 / 提交面板宽度 / 切语言），
+  //   于是就变成持续重创合成管线 → 界面无响应数秒。
+  // 因此这里只把偏好告知主进程（**仅落盘**），实际效果由下次启动建窗时一次性应用；
+  // 需重启时落 data-glass-restart 属性并写 store，供设置页提示（带一键重启）。
   try {
     const api = window.chatcoderAPI;
     if (api?.setGlassMode) {
       void api.setGlassMode(p.glassmorphism).then((res) => {
-        const r = (res || {}) as { backend?: string; ok?: boolean; verified?: number | null; reason?: string };
-        const backend = r.backend || "none";
-        root.setAttribute("data-glass-backend", backend);
-        if (typeof r.verified === "number") {
-          root.setAttribute("data-glass-verified", String(r.verified));
-        } else {
-          root.removeAttribute("data-glass-verified");
-        }
-        // 关闭玻璃时不判降级；开启时要求"有后端 + 回读值 >= 2"
-        const live = !p.glassmorphism
-          || (r.ok !== false && (r.verified == null || r.verified >= 2));
-        if (!live) root.setAttribute("data-glass-degraded", "1");
+        const r = (res || {}) as { ok?: boolean; needRestart?: boolean };
+        if (p.glassmorphism && r.ok === false) root.setAttribute("data-glass-degraded", "1");
         else root.removeAttribute("data-glass-degraded");
+        const needRestart = r.needRestart === true;
+        if (needRestart) root.setAttribute("data-glass-restart", "1");
+        else root.removeAttribute("data-glass-restart");
+        useUiStore.setState({ glassNeedRestart: needRestart });
       }).catch(() => { /* 忽略：能力探测失败不阻断 */ });
-    } else if (api?.glassCapability) {
-      void api.glassCapability().then((cap) => {
-        if (cap?.backend) root.setAttribute("data-glass-backend", cap.backend);
-        if (!cap?.supported) root.setAttribute("data-glass-degraded", "1");
-      }).catch(() => { /* ignore */ });
     }
   } catch { /* ignore */ }
-  // v15: 外部穿透已移除；清理旧版本可能遗留的 DOM 属性。
-  root.removeAttribute("data-external");
-  // 玻璃强度:0=0.5x 1=1x 2=1.6x 模糊
-  const strength = p.glassStrength === 2 ? 1.6 : p.glassStrength === 0 ? 0.5 : 1;
-  root.style.setProperty("--glass-strength", String(strength));
-  // plan-548 + plan-308-1555 M4：侧栏/面板透出桌面的比例。
-  // 旧值 0.78/0.68/0.58 在深色主题 + 深色桌面的组合下对比度趋近于 0，
-  // 用户"看不出透出"多半就是这个原因（实测：改 alpha 像素确实变化，说明链路是通的）。
-  // 新值整体下调，保证"微微透出"肉眼可辨，同时保留可读性底线。
-  const sidebarAlpha = p.glassStrength === 2 ? 0.42 : p.glassStrength === 0 ? 0.62 : 0.52;
-  root.style.setProperty("--glass-sidebar-alpha", String(sidebarAlpha));
-  // 面板（标题栏/右面板）不透明度：比侧栏略高，平衡可读性与透出感
-  const panelAlpha = p.glassStrength === 2 ? 0.52 : p.glassStrength === 0 ? 0.72 : 0.62;
-  root.style.setProperty("--lg-alpha-panel", String(panelAlpha));
   // 玻璃渐变主色（空则使用主题默认）
   if (p.glassGradientC1) root.style.setProperty("--ambient-c1", p.glassGradientC1);
   else root.style.removeProperty("--ambient-c1");
@@ -208,6 +195,9 @@ interface UiState extends UiPrefs {
   showTodos: boolean;
   showReasoning: boolean;
   refreshGlobalFlags: () => Promise<void>;
+  /** plan-26-126 M5：本次开启玻璃**未即时生效**（极少数环境需重启）——
+   *  仅用于设置页一次性提示，不持久化、不常驻。 */
+  glassNeedRestart: boolean;
 }
 
 export const useUiStore = create<UiState>((set, get) => ({
@@ -216,6 +206,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   // v1.1: 消息流显示开关默认开，启动后由后端全局设置刷新
   showTodos: true,
   showReasoning: true,
+  glassNeedRestart: false, // plan-26-126 M5：瞬时状态，由 setGlassMode 回包驱动
   refreshGlobalFlags: async () => {
     try {
       // 动态 import 避免循环依赖（ui.ts 与 api/client 相互独立但被各组件引用）

@@ -46,6 +46,14 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
   minimizeWindow: () => ipcRenderer.send("window:minimize"),
   toggleMaximize: () => ipcRenderer.send("window:maximizeToggle"),
   closeWindow: () => ipcRenderer.send("window:close"),
+  // plan-26-126 P6：自研窗口拖拽（原生 drag 区会吞掉双击事件，改由渲染层接管）。
+  // 分三步上报：start（记录光标相对窗口偏移）→ move（逐帧 setPosition）→ end。
+  // 为何不用 mainWindow.startDrag：BrowserWindow 上**没有**这个方法（只有 WebContents
+  // 的 startDrag，语义是拖文件），历史实现因此每次都抛错被吞 ⇒ 窗口拖不动。
+  startWindowDrag: () => ipcRenderer.send("window:dragStart"),
+  moveWindowDrag: () => ipcRenderer.send("window:dragMove"),
+  endWindowDrag: () => ipcRenderer.send("window:dragEnd"),
+  relaunchApp: () => ipcRenderer.invoke("app:relaunch"),
   // 修复文本输入状态（输入框"能删不能输"卡死的兜底：主进程重新同步焦点）
   fixTextInput: () => ipcRenderer.invoke("window:fixTextInput"),
   // 主进程完成 WebContents 焦点同步后通知渲染层重试 DOM 输入框聚焦。
@@ -58,12 +66,7 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
   setExternalBackdrop: (on) => ipcRenderer.send("window:setExternalBackdrop", !!on),
   // plan-546/plan-308-1542: 毛玻璃模式（Win11 acrylic / Win10 ACCENT 系统模糊 / mac vibrancy）
   setGlassMode: (on) => ipcRenderer.invoke("window:setGlass", !!on),
-  // plan-308-1542：模糊能力探测（设置页据此告知用户当前系统支持哪种玻璃）
-  glassCapability: () => ipcRenderer.invoke("window:glassCapability"),
-  // plan-308-1555 M0：毛玻璃诊断（DWM 回读 + 渲染层 alpha 链路），把"看不到"变成可判定结论
-  glassDiagnostics: () => ipcRenderer.invoke("window:glassDiagnostics"),
-  // plan-308-1555 M5：玻璃自检模式（临时调淡面板 alpha，肉眼一眼判定桌面是否混入）
-  setGlassSelfCheck: (on) => ipcRenderer.invoke("window:glassSelfCheck", !!on),
+  // plan-26-116：液态玻璃（折射版）/玻璃诊断/自检的渲染层入口已全部移除（只保留毛玻璃）。
   // 当前系统用户名（侧栏底部用户条展示，对齐 zcode）
   getUsername: () => {
     try { return Promise.resolve(require("os").userInfo().username || ""); }
