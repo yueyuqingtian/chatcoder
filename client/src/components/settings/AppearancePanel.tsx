@@ -3,6 +3,7 @@
  *
  * plan-26-116：只保留**毛玻璃**一种玻璃模式——液态玻璃、液态玻璃（折射版）、
  * 系统模糊后端提示、玻璃诊断/自检等全部移除，设置页不再出现任何后端/诊断文案。 */
+import { useEffect } from "react";
 import { useThemeStore, type Theme } from "../../store/theme";
 import { useUiStore, type MotionLevel } from "../../store/ui";
 import { Slider } from "../ui";
@@ -27,6 +28,11 @@ const GLASS_STRENGTHS: Array<{ value: number; label: string; desc: string }> = [
 export function AppearancePanel() {
   const { theme, setTheme } = useThemeStore();
   const ui = useUiStore();
+  const consumeGlassRestartNotice = useUiStore((s) => s.consumeGlassRestartNotice);
+  // 离开外观页（切 tab / 退出设置）即消费提醒：再回来不再提示
+  useEffect(() => consumeGlassRestartNotice, [consumeGlassRestartNotice]);
+  // 仅在「本次开启毛玻璃确实需要重启」时展示，且需毛玻璃处于开启态
+  const showRestartBadge = ui.glassmorphism && ui.glassRestartNotice;
 
   return (
     <div className="settings-card-stack">
@@ -45,7 +51,16 @@ export function AppearancePanel() {
           </div>
         </Row>
         <Row
-          title="毛玻璃效果"
+          title={(
+            <span className="settings-title-with-badge">
+              毛玻璃效果
+              {showRestartBadge && (
+                <span className="settings-badge-warn" title="毛玻璃需要重启应用才能完全生效（设置已保存）">
+                  需重启生效
+                </span>
+              )}
+            </span>
+          )}
           desc={ui.glassmorphism ? "左侧面板半透明磨砂，轻微透出桌面壁纸" : "启用左侧面板与启动页的半透明磨砂背景"}
         >
           <Sw checked={ui.glassmorphism} onChange={(v) => ui.setPrefs({ glassmorphism: v })} />
@@ -65,19 +80,6 @@ export function AppearancePanel() {
                 </button>
               ))}
             </div>
-          </Row>
-        )}
-        {/* plan-26-126 P1：毛玻璃**重启后生效**——开启/切换后提示用户重启（带一键重启）。
-            为何改为重启生效：运行期切换会让 DWM 合成与渲染层缓存失步
-            （左侧面板色块 / 设置页残影，只有重启才恢复），且在高频偏好写入下卡顿。 */}
-        {ui.glassmorphism && ui.glassNeedRestart && (
-          <Row title="重启后生效" desc="毛玻璃需要重启应用才能完全生效（设置已保存）">
-            <button
-              className="btn btn-primary btn-sm"
-              onClick={() => { void window.chatcoderAPI?.relaunchApp?.(); }}
-            >
-              立即重启
-            </button>
           </Row>
         )}
         <Row title="动画效果" desc="低配置设备可选择「减弱」或「关闭」以提升流畅度">

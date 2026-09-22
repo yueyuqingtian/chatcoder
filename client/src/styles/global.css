@@ -2707,6 +2707,10 @@ a { color: var(--accent); text-decoration: none; }
   border: 1px solid var(--border); line-height: 1.6; word-break: break-word;
 }
 /* plan-308-1542 需求4：设置页毛玻璃能力徽标 */
+/* 标题右侧附属麉标（不单独起一行，也不改变描述位置） */
+.settings-title-with-badge {
+  display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
 .settings-badge-ok,
 .settings-badge-warn {
   font-size: 11px; padding: 2px 8px; border-radius: var(--r-xs); white-space: nowrap;
@@ -3407,6 +3411,46 @@ body.panel-dragging .app-pane { transition: none; }
    过渡会让内容"追着窗口跑"）。渲染层另据 body 上的这个类跳过位置补偿类重活。 */
 body.window-dragging { cursor: move !important; user-select: none; }
 body.window-dragging .app-pane { transition: none; }
+
+/* ══ 窗口"运动中"统一降级（本轮优化：全屏⇄小窗动画 / 拖尺寸的流畅度）══
+ *
+ * 背景（用户反馈"缩放动画不流畅、界面与内容抖动严重""拖尺寸时内容重渲染延迟很高"）：
+ *   自研全屏补间每帧都在改窗口几何；此刻若还并发这些开销，帧预算直接被吃穿：
+ *     ① 面板宽度 transition —— 宽度是被动跟随窗口，过渡会让内容"追着窗口跑"，
+ *        且在动画期间持续制造新的重排，与补间相位错开 ⇒ 抖动；
+ *     ② 左列玻璃面的 backdrop 材质合成 —— 窗口尺寸每变一帧，系统就要重新采样
+ *        模糊区域（DWM acrylic），是最贵的一段；
+ *     ③ 各面板内部的过渡/动画（终端、文件树、消息流卡片等）。
+ *   因此：运动期间一律"降级为静态"——关过渡、把玻璃面临的时降为不透明实底，
+ *   运动结束（主进程派发 chatcoder:window-motion{active:false}）当帧即恢复原样。
+ *   二者都是纯 CSS 切换，零 React 重渲染。
+ *
+ * 为什么用 html[data-window-motion] 而不是 body 类：该属性由主进程 executeJavaScript
+ *   一次注入（见 main.cjs setWindowMotion），与 __chatcoderWindowMotion 同源，
+ *   避免渲染层为了加类再走一次 React 生命周期。 */
+html[data-window-motion="1"] .app-pane { transition: none !important; }
+/* 运动期间暂停持续型循环动画（spinner/pulse/breath 等）。
+   为什么用**精确类名列表**而不是 `*`：通配选择器在属性切换那一刻要对整棵样式树
+   重新匹配，本身就是一次可观的开销；而这些类名数量固定、维护成本可控。 */
+html[data-window-motion="1"] .spinning,
+html[data-window-motion="1"] .sb-session-pulse,
+html[data-window-motion="1"] .anim-breath,
+html[data-window-motion="1"] .anim-pulse,
+html[data-window-motion="1"] .text-shine,
+html[data-window-motion="1"] .usage-skeleton-card,
+html[data-window-motion="1"] .usage-skeleton-block,
+html[data-window-motion="1"] .todo-float-item .status-icon.running,
+html[data-window-motion="1"] .tc-step-dot.running,
+html[data-window-motion="1"] .debug-card-dot.paused,
+html[data-window-motion="1"] .dbg-dot.paused {
+  animation-play-state: paused !important;
+}
+/* 玻璃面临时降为不透明实底：省掉每帧重新采样模糊（用户已确认优先流畅，动画结束立即恢复）。
+   注：--frost-* 与 data-glass 同挂在 <html> 上，两者必须写在**同一个**选择器主体里，
+   不能用后代选择器（`html[...] [data-glass="on"]` 永远不匹配——历史上的同类坑见上文）。 */
+html[data-window-motion="1"][data-glass="on"] .app-pane-left {
+  background: var(--bg-sidebar) !important;
+}
 /* plan-308-1555 M7：已删除客户端启动蒙层（.splash / .splash-overlay）。
    开屏统一由主进程 loading.html 承担（带加载指示 + 玻璃质感），避免两个开屏叠放。 */
 .toast-container { position: fixed; bottom: 20px; right: 20px; z-index: 2000; display: flex; flex-direction: column; gap: 8px; }
@@ -4312,17 +4356,28 @@ body.window-dragging .app-pane { transition: none; }
    于是该 1px 像素列**直接显示窗口底**（DWM 材质 + 桌面壁纸），颜色不可控：
      * 浅色壁纸下与相邻面板亮度接近 ⇒ 用户看到"分割线完全看不见"；
      * 深色壁纸下是一条由壁纸决定的偏亮细线 ⇒ 用户看到"彩色线"。
-   现在线画在 .app-pane-left **自身底之上**，颜色可预期：浅色可见、深色中性，绝不发彩。 */
-[data-glass="on"] .app-pane-left { border-right-color: var(--frost-divider); }
+   现在线画在 .app-pane-left **自身底之上**，颜色可预期：浅色可见、深色中性，绝不发彩。
+   补充（用户反馈"竖线有时候能看见有时候看不见"）：12% 这档在**非整数缩放屏**
+   （本机 1.5×，1 DIP = 1.5 物理px）上，线宽落在半物理像素会被抗锯齿稀释，
+   有效对比度只剩声明的六成上下，于是同一档颜色在浅色壁纸上时浓时淡。
+   故线条**粗细不变**（仍是 1px，布局零位移），只把颜色换成更实的 --frost-seam。 */
+[data-glass="on"] .app-pane-left { border-right-color: var(--frost-seam); }
 
-/* ③-b 中/右接缝（修"中间和右侧面板间一条透明线"）——
-   根因：.app-pane-right 基础样式带 `background-clip: padding-box`，
-     意味着**背景不画在 border 区域**；而它的父容器 .app-body 是透明的，
-     于是那条 1px `border-left` 的半透明色直接叠在"无底"之上 → 透出窗口底/桌面，
-     看起来就是一条"透明的线"（深色模式下与面板对比大，最容易发现）。
-   修法：玻璃态下让背景回到 border-box（覆盖 padding-box），
-     使这 1px 变成"面板底色 + 边框色"，不再透桌面。**只改 clip，不改宽度、不改布局**。 */
-[data-glass="on"] .app-pane-right { background-clip: border-box; }
+/* ③-b 中/右接缝（修"中间和右侧面板间一条透明线"，以及用户反馈的"竖线有时看得见有时看不见"）——
+   两个叠加的根因：
+     ① `background-clip: padding-box`：背景不画在 border 区域，那条 1px `border-left`
+        直接叠在透明父容器上 → 透出窗口底/桌面，颜色由壁纸决定（浅壁纸下几乎看不见）；
+     ② 非整数缩放屏（本机 1.5×）：1px 边框落在半物理像素上，DIP→物理换算后仅覆盖约
+        1.5 个物理设备像素，边缘被抗锯齿**按比例稀释**（实测有效对比度只有声明值的
+        六成上下）——于是同一档颜色在不同宽度/位置下时浓时淡，"有时看不见"。
+   修法（不新增元素、不改宽度、布局零位移）：
+     * 背景回到 border-box，让这 1px 变成"面板底色 + 边框色"，不再受壁纸影响；
+     * 颜色换成更实的接缝专用档 --frost-seam —— 与左接缝同口径：非整数缩放屏上
+       1px 会被抗锯齿按比例稀释，用同一档颜色保证两条接缝**视觉一致**。 */
+[data-glass="on"] .app-pane-right {
+  background-clip: border-box;
+  border-left-color: var(--frost-seam);
+}
 
 /* 以下为上一轮"四层玻璃材质"（L1 侧栏 / L2 顶栏+右面板 / L3 主内容 / L4 浮层）的移除说明：
    该四层结构已于 plan-26-126 M1 **整体撤除**——范围收敛为"仅左面板"（N1）。
@@ -4350,8 +4405,56 @@ body.window-dragging .app-pane { transition: none; }
 }
 /* hover 淡于 selected（按选中色的 60% 混合），保证层级单调 */
 :root[data-glass="on"] .sb-session:hover,
-:root[data-glass="on"] .sb-nav-item:hover {
+:root[data-glass="on"] .sb-nav-item:hover,
+:root[data-glass="on"] .sb-project:hover,
+:root[data-glass="on"] .sb-user-settings:hover,
+:root[data-glass="on"] .sb-view-switch button:hover,
+:root[data-glass="on"] .sb-icon-btn:hover {
   background: color-mix(in srgb, var(--frost-selected) 60%, transparent);
+}
+
+/* ══ ④-b 左列"选中/当前"态全量覆盖（用户反馈：三处聚焦时没适配玻璃）══
+   问题：④ 只覆盖了 .sb-session 与 .sb-nav-item，左列里还有三处"选中/当前"语义的
+   元素仍走各自的不透明底（--bg-hover / --bg-elevated / --bg-active），
+   在半透明的玻璃面上就是三块突兀的实心方块，与材质割裂：
+     1. 底部设置入口  .sb-user-settings.active   —— 图标菜单里"设置"页处于当前页；
+     2. 分组|项目切换 .sb-view-switch button.active（及其容器 .sb-view-switch 的 --bg-hover 底槽）；
+     3. 项目行"聚焦"  .sb-project.current       —— 当前项目（本轮选中项目）。
+   统一到与 ④ 同一套语言：选中走 --frost-selected + 5% 内描边，文字色不突变；
+   分段控件的**底槽**（未选中区）改用比选中更淡的 40%，保证"槽 < 选中项"层级单调。
+   关闭玻璃时这些规则不命中，基础样式完全不受影响。 */
+:root[data-glass="on"] .sb-user-settings.active,
+:root[data-glass="on"] .sb-project.current {
+  background: var(--frost-selected);
+  box-shadow: inset 0 0 0 1px var(--frost-selected-line);
+  color: var(--text-1);
+}
+/* 分段切换：底槽淡、选中项实（选中项基础样式带 1px 阴影，这里换成内描边统一语言） */
+:root[data-glass="on"] .sb-view-switch {
+  background: color-mix(in srgb, var(--frost-selected) 40%, transparent);
+}
+:root[data-glass="on"] .sb-view-switch button.active {
+  background: var(--frost-selected);
+  box-shadow: inset 0 0 0 1px var(--frost-selected-line);
+  color: var(--text-1);
+}
+/* 排序按钮的 active（菜单展开中）与上面同族 */
+:root[data-glass="on"] .sb-icon-btn.active {
+  background: var(--frost-selected);
+  color: var(--text-1);
+}
+/* 其余左列"悬停即高亮"的小控件统一到同一套 hover 语言（此前各自走 --bg-hover 实心灰）：
+   顶部前进/后退、项目行内的「+」「更多」「归档」、「显示更多」、行内操作按钮。 */
+:root[data-glass="on"] .sidebar.sb .sb-nav-arrow:hover:not(:disabled),
+:root[data-glass="on"] .sidebar.sb .sb-more-btn:hover,
+:root[data-glass="on"] .sidebar.sb .sb-project-actions:hover,
+:root[data-glass="on"] .sidebar.sb .sb-session-actions:hover {
+  background: color-mix(in srgb, var(--frost-selected) 60%, transparent);
+  color: var(--text-1);
+}
+/* 「显示更多」是虚线描边按钮：描边同样换成中性分隔线色，避免实心灰底割裂 */
+:root[data-glass="on"] .sidebar.sb .sb-more-btn {
+  border-color: var(--frost-divider);
 }
 
 /* 系统无可用模糊后端时：由 ui.ts 直接把 --frost-left-alpha 提到 0.97 近实

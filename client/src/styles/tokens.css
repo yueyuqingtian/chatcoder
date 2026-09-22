@@ -287,6 +287,11 @@
   --frost-left-tint: var(--bg-sidebar);
   --frost-left-alpha: 0.90;
   --frost-divider: color-mix(in srgb, var(--color-neutral-950) 12%, transparent);
+  /* 中/右接缝专用色（用户反馈"竖线有时看得见有时看不见"）：
+     比 --frost-divider 更实——1px 线在非整数缩放屏（1.5×）上会落在半物理像素，
+     边缘被抗锯齿按比例稀释，12% 的对比度会被吃到接近不可见。
+     这里给一档稳定可辨的对比度：浅色档 22%、深色档 26%（深色档另见下方 dark 覆盖）。 */
+  --frost-seam: color-mix(in srgb, var(--color-neutral-950) 22%, transparent);
   --frost-selected: color-mix(in srgb, var(--color-neutral-950) 6%, transparent);
   --frost-selected-line: color-mix(in srgb, var(--color-neutral-950) 5%, transparent);
   --ambient-c1: var(--color-background);
@@ -358,6 +363,8 @@
      分割线 / 选中态改用显式白色低透明度（深色下中性深色不可用）。 */
   --frost-left-tint: #14161B;
   --frost-divider: rgb(255 255 255 / 0.10);
+  /* 深色档接缝：显式白色低透明度，比 --frost-divider 更实以抵消 1.5× 屏的抗锯齿稀释 */
+  --frost-seam: rgb(255 255 255 / 0.20);
   --frost-selected: rgb(255 255 255 / 0.07);
   --frost-selected-line: rgb(255 255 255 / 0.05);
 }

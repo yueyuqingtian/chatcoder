@@ -569,13 +569,28 @@ function syncWindowChromeState(win) {
  * glass-pref.json 既有 IO 成本也存在「读到旧值」的时序风险；_glassWanted 在启动
  * 与 IPC 切换时同步维护。
  */
-function syncWindowGlass(win) {
+// ── 动画期免抖：材质重放延后到几何动画结束 ──
+//
+// 为什么（用户反馈"全屏⇄小窗动画不流畅、界面和内容抖动严重"）：
+//   自研补间每帧都在改窗口几何，而 applyGlass 走的是 DWM 材质重设 + **同步回读**
+//   （dwmReadBack 也是 FFI 调用）。把它放在动画进行中，等于每帧额外插一段
+//   系统调用 + 一次同步等待，与"改几何"抢同一个 UI 线程 ⇒ 掉帧、窗口与内容相位错开。
+//   而材质在过渡期本来就会被 DWM 重置，动画中间帧重放也留不住。
+//   因此：动画进行中只登记意图，等几何落定（终帧回调）再重放。
+let _glassReapplyTimer = null;
+function scheduleGlassReapply(win, delay = 0) {
+  if (_glassReapplyTimer) clearTimeout(_glassReapplyTimer);
+  _glassReapplyTimer = setTimeout(() => {
+    _glassReapplyTimer = null;
+    syncWindowGlassNow(win);
+  }, delay);
+}
+
+/** 立即重放材质（原 syncWindowGlass 主体的同步版）。 */
+function syncWindowGlassNow(win) {
   if (!win || win.isDestroyed()) return;
   syncWindowChromeState(win); // 圆角与最大化态：仅在真正变化时才有开销（P4）
   if (!_glassWanted) return;
-  // plan-26-126 P4：次数由 3 次收为 2 次（去掉 400ms 那次）。
-  //   保留多次的原因：DWM 在最大化/还原过渡期间确实会重置 backdrop；
-  //   去掉 400ms 那次是因为它落在用户已跟交互之后，收益低而干扰感高。
   for (const delay of [0, 160]) {
     setTimeout(() => {
       if (!win || win.isDestroyed() || !_glassWanted) return;
@@ -589,6 +604,24 @@ function syncWindowGlass(win) {
       }
     }, delay);
   }
+}
+
+/** 材质重放统一入口：**运动中自动延后**，静止时立即执行。
+ *
+ *  plan-26-116 M2 原本要求"事件后立刻多次重放"（DWM 在过渡期会重置 backdrop）；
+ *  但本轮用户反馈"动画抖动严重"，实测根因是 applyGlass 内部的 FFI + 同步回读
+ *  与自研补间抢同一个 UI 线程。因此保留"多次重放"语义，只把**执行时机**挪到
+ *  几何落定之后（终帧回调 / 拖拽结束），动画中间帧一律不再插系统调用。
+ *
+ *  @param {boolean} [force] true = 忽略运动状态立即重放（拖拽结束、窗口事件等明确收尾点）
+ */
+function syncWindowGlass(win, force) {
+  if (!win || win.isDestroyed()) return;
+  if (!force && (_fitAnimTimer || _dragSession)) {
+    scheduleGlassReapply(win, 0); // 动画/拖拽进行中：登记意图，落定后补一次
+    return;
+  }
+  syncWindowGlassNow(win);
 }
 
 // ── plan-26-126 M4：伪最大化（保住玻璃 + 任务栏保持现状） ──
@@ -621,9 +654,55 @@ function workAreaOf(win) {
   } catch { return fallback; }
 }
 
+/** 窗口是否**真的**离开了伪最大化矩形（用于把"用户拖动"与"同值 move 通知"区分开）。
+ *
+ *  为什么需要：Windows 在最小化瞬间也会发 move 事件，且此时的 bounds 与最小化前
+ *  完全一致（实测取证）。旧代码只看 `_pseudoMax`，于是这类"假移动"会被误判成用户
+ *  拖窗口，提前把还原快照消费掉 —— 这正是"全屏→最小化→恢复后点缩放还原不了"的根因。
+ *  阈值取 2 DIP：吸收 DIP↔物理像素换算的 1px 抖动，又远小于"人手动拖一下"的位移。 */
+function _movedAwayFromPseudoRect(win) {
+  try {
+    const b = win.getBounds();
+    const wa = workAreaOf(win);
+    return Math.abs(b.x - wa.x) > 2 || Math.abs(b.y - wa.y) > 2
+      || Math.abs(b.width - wa.width) > 2 || Math.abs(b.height - wa.height) > 2;
+  } catch {
+    return false;
+  }
+}
+
+/** 还原矩形是否**可用**：非空、尺寸合理、且不等于铺满工作区（避免"还原"其实没还原）。
+ *
+ *  为什么需要这道校验（日志实测暴露）：还原目标读到 `1708x1020`，那正是 workArea 铺满尺寸。
+ *  说明 `_pseudoPrevBounds` 在某些路径下被写成了"最大化时的矩形"（例如抑制窗内发生的
+ *  resize 先把快照换成了铺满值）。此时执行还原等于原地不动，用户看到的就是"点缩放没反应"。
+ *  校验失败时退回"默认小窗尺寸"，宁可还原到一个合理小窗，也不要停在铺满态。
+ *
+ *  注意：只用于校验**快照**。调用方显式传入的目标矩形属于用户意图（例如用户拖边缘
+ *  把窗口拉成与工作区一样大），不可套用本规则，否则会被莫名换成默认小窗。 */
+function _resolveRestoreBounds(win, candidate) {
+  const wa = workAreaOf(win);
+  const okSize = (r) => r && r.width > 0 && r.height > 0
+    && !(r.width >= wa.width - 2 && r.height >= wa.height - 2); // 等于铺满 ⇒ 不是有效小窗
+  if (okSize(candidate)) return candidate;
+  // 兜底：默认小窗尺寸（与建窗一致），位置取工作区居中偏上，避免还原后跑出屏幕
+  const w = Math.min(1280, Math.max(960, wa.width - 200));
+  const h = Math.min(820, Math.max(640, wa.height - 160));
+  const r = {
+    x: wa.x + Math.max(0, Math.round((wa.width - w) / 2)),
+    y: wa.y + Math.max(0, Math.round((wa.height - h) / 3)),
+    width: w,
+    height: h,
+  };
+  log("[chatcoder] glass: 还原快照不可用，退回默认小窗", JSON.stringify(r),
+      "| candidate =", JSON.stringify(candidate || null));
+  return r;
+}
+
 /** 近似原生 drag-restore：把窗口还原到**光标附近**（尺寸取快照，位置为光标居中偏上）。 */
 function restoredBoundsNearCursor(win) {
-  const prev = _pseudoPrevBounds || win.getContentBounds();
+  // 快照可能缺失或被污染（见 _resolveRestoreBounds 说明），先过一道可用性校验
+  const prev = _resolveRestoreBounds(win, _pseudoPrevBounds);
   const wa = workAreaOf(win);
   let px = wa.x + Math.round(wa.width / 2);
   let py = wa.y + 40;
@@ -631,6 +710,7 @@ function restoredBoundsNearCursor(win) {
     const sc = screenModule();
     if (sc) { const p = sc.getCursorScreenPoint(); px = p.x; py = p.y; }
   } catch { /* 拿不到光标就用工作区顶部居中 */ }
+  // 夹紧范围用 max(lo, hi)：窗口比工作区还大时（多屏/分辨率变化）仍能落回可见区
   const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), Math.max(lo, hi));
   return {
     x: clamp(px - Math.round(prev.width / 2), wa.x, wa.x + wa.width - prev.width),
@@ -652,6 +732,9 @@ function restoredBoundsNearCursor(win) {
  *
  * 为什么用 executeJavaScript 而不是 IPC：注入一次即完成（无事件订阅/无监听泄漏），
  *   渲染层同步读取 `window.__chatcoderWindowMotion`，零 React 重渲染。
+ *   本轮追加：置位/解除时**派发一个 DOM 事件**（chatcoder:window-motion），
+ *   渲染层据此在运动结束的那一刻做收尾（宽度锚点还原、终端 fit），
+ *   不再依赖"120ms 轮询"——那正是用户反馈"拖完尺寸后内容收敛慢"的来源。
  */
 let _windowMotion = false;
 function setWindowMotion(win, active) {
@@ -662,6 +745,7 @@ function setWindowMotion(win, active) {
     void win.webContents.executeJavaScript(
       `(() => { window.__chatcoderWindowMotion = ${active ? "true" : "false"};`
       + ` try { document.documentElement.setAttribute('data-window-motion', ${active ? "'1'" : "'0'"}); } catch (e) {}`
+      + ` try { window.dispatchEvent(new CustomEvent('chatcoder:window-motion', { detail: { active: ${active ? "true" : "false"} } })); } catch (e) {}`
       + ` return true; })()`, true);
   } catch { /* 渲染层未就绪时忽略 */ }
 }
@@ -692,14 +776,84 @@ const FULLSCREEN_ANIM_MS = 220;
  * @param {() => void} [onDone] 动画结束回调（用于解除 motion 标记）
  */
 let _fitAnimTimer = null;
+
+/** 取消进行中的贴合/还原动画（纯清理，不动 motion 标记）。
+ *
+ *  拖拽起点必须调用：动画每帧都会写 宽/高，与逐帧移动窗口抢同一组几何属性，
+ *  表现即用户反馈的"拖拽时窗口大小也在变"。
+ *
+ *  刻意**不**在这里解除 motion 标记：本函数也被 fitContentBounds 在每次新动画开始时
+ *  调用，若顺手置 false，就会把调用方刚置好的 true 覆盖掉，导致开头几帧渲染层误以为
+ *  "已静止"而跑起位置补偿类重活。motion 的解除一律交给拖拽结束（endWindowDrag）
+ *  或动画终帧回调，两处都是明确的收尾点。 */
+function cancelFitAnimation() {
+  if (!_fitAnimTimer) return;
+  clearTimeout(_fitAnimTimer);
+  _fitAnimTimer = null;
+}
+
+/** 把"客户区矩形"换算成"窗口外框矩形"（无边框窗口两者可能差 1~2 DIP）。
+ *
+ *  为什么需要（用户反馈"全屏⇄小窗动画抖动严重"的直接成因之一）：
+ *  补间中间帧写的是 setBounds（**外框**），终帧写的是 setContentBounds（**客户区**），
+ *  两个口径混用时最后一帧会与倒数第二帧差出边框量 —— 表现为动画收尾时"顿一下/跳一下"。
+ *  这里按"当前客户区相对外框的偏移"补偿，让整段动画全部走外框口径，
+ *  终帧再切回客户区精确贴合。
+ *
+ *  偏移取法：客户区左上角在外框内的位移（left = c.x - b.x，top = c.y - b.y），
+ *  尺寸取外框与客户区的差 —— 不能假设上下边框等宽（无边框窗口的隐形边框上下并不对称）。 */
+function contentToFrameRect(win, rect) {
+  try {
+    if (typeof win.getContentBounds !== "function") return rect;
+    const c = win.getContentBounds();
+    const b = win.getBounds();
+    return {
+      x: Math.round(rect.x - (c.x - b.x)),
+      y: Math.round(rect.y - (c.y - b.y)),
+      width: Math.round(rect.width + (b.width - c.width)),
+      height: Math.round(rect.height + (b.height - c.height)),
+    };
+  } catch { return rect; }
+}
+
+/** 补间步进间隔（毫秒）——按显示器刷新率对齐，**每帧只写一次几何**。
+ *
+ *  为什么（用户反馈"全屏⇄小窗动画不流畅、界面与内容抖动严重"）：
+ *  原实现固定 `setTimeout(step, 8)`，在 60Hz 屏上约合**每帧写两次** setBounds。
+ *  每次写几何都会让渲染进程重排一次；一帧排两次就等于把该帧的布局预算翻倍，
+ *  且两次排版的内容会落在同一帧的两个不同位置上 —— 视觉上正是"抖动/相位错开"。
+ *  现在按刷新率取 1 帧（120Hz ⇒ 8.3ms，60Hz ⇒ 16.7ms），并下限 8ms 兜底。 */
+function fitStepIntervalMs(win) {
+  try {
+    const sc = screenModule();
+    if (sc && typeof win.getBounds === "function") {
+      const d = sc.getDisplayMatching(win.getBounds());
+      const hz = Number(d && d.displayFrequency);
+      if (Number.isFinite(hz) && hz >= 30) return Math.max(8, Math.round(1000 / hz));
+    }
+  } catch { /* 取不到刷新率就用 60Hz 口径 */ }
+  return 16;
+}
+
 function fitContentBounds(win, rect, animate, onDone) {
   if (!win || win.isDestroyed()) return;
-  if (_fitAnimTimer) { clearTimeout(_fitAnimTimer); _fitAnimTimer = null; }
+  cancelFitAnimation();
   const hasContent = typeof win.setContentBounds === "function";
   const apply = (r) => (hasContent ? win.setContentBounds(r, false) : win.setBounds(r, false));
   try {
-    if (!animate) { apply(rect); if (onDone) onDone(); return; }
+    if (!animate) {
+      apply(rect);
+      // 瞬时贴合没有"运动过程"，因此必须在这里解除 motion：若本次调用取消了上一段
+      // 动画，那段动画的 onDone（唯一会解除标记的地方）已不会再执行，标记就会永久
+      // 卡在 true，渲染层此后一直跳过位置补偿。拖拽中除外——此时标记由拖拽会话接管。
+      if (!_dragSession) setWindowMotion(win, false);
+      if (onDone) onDone();
+      return;
+    }
     const from = (typeof win.getBounds === "function" ? win.getBounds() : rect);
+    // 补间区间**全走外框口径**：终帧才切回客户区精确贴合。
+    const toFrame = contentToFrameRect(win, rect);
+    const stepMs = fitStepIntervalMs(win);
     const t0 = Date.now();
     const ease = (t) => 1 - Math.pow(1 - t, 3); // easeOutCubic：先快后慢
     let lastKey = "";
@@ -709,14 +863,14 @@ function fitContentBounds(win, rect, animate, onDone) {
       const k = ease(p);
       if (p < 1) {
         const r = {
-          x: Math.round(from.x + (rect.x - from.x) * k),
-          y: Math.round(from.y + (rect.y - from.y) * k),
-          width: Math.round(from.width + (rect.width - from.width) * k),
-          height: Math.round(from.height + (rect.height - from.height) * k),
+          x: Math.round(from.x + (toFrame.x - from.x) * k),
+          y: Math.round(from.y + (toFrame.y - from.y) * k),
+          width: Math.round(from.width + (toFrame.width - from.width) * k),
+          height: Math.round(from.height + (toFrame.height - from.height) * k),
         };
         const key = `${r.x},${r.y},${r.width},${r.height}`;
         if (key !== lastKey) { lastKey = key; win.setBounds(r, false); }
-        _fitAnimTimer = setTimeout(step, 8);
+        _fitAnimTimer = setTimeout(step, stepMs); // 按刷新率对齐：每帧只写一次几何
       } else {
         _fitAnimTimer = null;
         apply(rect); // 终帧：客户区口径，精确铺满
@@ -738,38 +892,54 @@ function enterPseudoMax(win, restoreBounds) {
   _pseudoPrevBounds = restoreBounds || win.getContentBounds();
   _pseudoMax = true;
   _pseudoSuppressUntil = Date.now() + 700;              // 抑制贴合/动画引发的 move/resize 误判（覆盖 220ms 动画 + 余量）
-  syncWindowChromeState(win);                           // data-maximized=1 + DWM DONOTROUND
-  syncWindowGlass(win);                                 // 圆角/材质即时同步
+  syncWindowChromeState(win);                           // data-maximized=1 + DWM DONOTROUND（纯属性，无 FFI 回读）
+  // 材质重放**延后到动画结束**（见 fitContentBounds 终帧回调）：
+  //   动画中途 applyGlass 的 FFI + 回读与改几何抢 UI 线程，正是动画抖动的直接来源；
+  //   而 DWM 在过渡期本就会重置 backdrop，中间帧重放也留不住。
   // 动画开始前先置 motion（渲染层停掉位置补偿类重活），动画结束再解除。
   // 顺序很重要：若先跑动画再置标记，最前面的几帧仍会被渲染层的重活拖慢。
   setWindowMotion(win, true);
   fitContentBounds(win, workAreaOf(win), true, () => {
     setWindowMotion(win, false);
-    syncWindowGlass(win); // 动画结束补一次材质（DWM 过渡期可能重置 backdrop）
+    // 几何已落定：延迟一点再重放材质，让终帧先完成合成（避免与收尾同帧竞争）
+    scheduleGlassReapply(win, 60);
   });
   log("[chatcoder] glass: pseudo-max on", JSON.stringify(win.getBounds()));
 }
 
 /** 退出伪最大化。overrideBounds 用于"拖动还原到光标附近"与"用户改尺寸后保留新尺寸"。
- *  快照/传入矩形均为**客户区**口径，与进入时一致。 */
-function exitPseudoMax(win, overrideBounds) {
-  if (!win || win.isDestroyed() || !_pseudoMax) return;
+ *  快照/传入矩形均为**客户区**口径，与进入时一致。
+ *  opts.animate 显式指定是否补间：默认按"是否正在拖窗口"决定（拖动中不能补间）。
+ *  @returns {{x,y,width,height}|null} 本次实际应用的目标矩形。
+ *    返回值供"拖拽起点"直接采用——避免再 getBounds() 二次读回：在非整数缩放屏上
+ *    读回值可能因 DIP↔物理像素换算带 1~2 DIP 偏差，拖拽全程冻结它就会把这点偏差固定下来。 */
+function exitPseudoMax(win, overrideBounds, opts) {
+  if (!win || win.isDestroyed() || !_pseudoMax) return null;
   _pseudoMax = false;
-  const b = overrideBounds || _pseudoPrevBounds;
+  // 只有**快照**需要过可用性校验（它可能被污染成铺满矩形 → "点缩放没反应"）。
+  // 调用方显式传入的 overrideBounds 是用户意图（拖边缘改尺寸后保留新尺寸、拖动还原到
+  // 光标附近），必须原样采用，不能套用"等于铺满即视为污染"的规则。
+  const b = overrideBounds || _resolveRestoreBounds(win, _pseudoPrevBounds);
   _pseudoPrevBounds = null;
   _pseudoSuppressUntil = Date.now() + 700;
   syncWindowChromeState(win);                           // data-maximized=0 + DWM ROUND（先于动画：圆角应立即回来）
-  syncWindowGlass(win);
   setWindowMotion(win, true);
+  // 拖拽已经开始时不做补间：动画每帧写 width/height 会与逐帧 setBounds 打架，
+  // 表现为"拖拽时窗口尺寸也在变"（用户实测）。此时直接落到目标矩形。
+  const _animate = opts && opts.animate !== undefined ? opts.animate : !_dragSession;
   if (b) {
-    fitContentBounds(win, b, true, () => {
+    fitContentBounds(win, b, _animate, () => {
       setWindowMotion(win, false);
-      syncWindowGlass(win);
+      // 同 enterPseudoMax：带动画时材质延后到几何落定之后；瞬时贴合则立即同步
+      if (_animate) scheduleGlassReapply(win, 60);
+      else syncWindowGlassNow(win);
     });
   } else {
     setWindowMotion(win, false);
+    syncWindowGlass(win, true);
   }
   log("[chatcoder] glass: pseudo-max off", JSON.stringify(win.getBounds()));
+  return b || null;
 }
 
 /** 最大化/还原按钮入口（与原生最大化同语义：未最大化→最大化，已最大化→还原）。 */
@@ -1012,22 +1182,74 @@ function createWindow() {
   // plan-26-126 P6：再加一道"运动中不重放"——自研全屏动画 / 窗口拖拽期间由 motion 标记
   //   抑制，避免在高频几何变更中叠加 FFI + 回读（那是"毛玻璃下拖尺寸卡顿"的直接来源）。
   let _resizeTimer = null;
+  // 窗口 resize 的"运动"解除定时器（见下方说明：resize 没有确定终点，只能延时解除）
+  let _motionTimer = null;
   mainWindow.on("resize", () => {
-    // 伪最大化下用户拖动边缘改尺寸 ⇒ 视为"取消最大化"，保留新尺寸退出（快照用客户区口径）
-    if (_pseudoMax && Date.now() > _pseudoSuppressUntil) {
+    // 伪最大化下用户拖动边缘改尺寸 ⇒ 视为"取消最大化"，保留新尺寸退出（快照用客户区口径）。
+    // 最小化/不可见期间不判定：那是系统收窗引起的尺寸变化，不是用户拖边缘。
+    if (_pseudoMax && !mainWindow.isMinimized() && mainWindow.isVisible()
+        && Date.now() > _pseudoSuppressUntil) {
       exitPseudoMax(mainWindow, mainWindow.getContentBounds());
     }
+    // 卡顿治理（用户反馈"尺寸变化时非常卡顿，尤其会话正在运行时"）：
+    //   窗口连续 resize 期间，渲染层每帧都要整体重排；其中最贵的是消息流的
+    //   "宽度锚点补偿"（capture + 双帧 rAF + 重测后写 scrollTop，写入又触发重排）。
+    //   而该补偿此前只在"自研全屏动画 / 拖标题栏"两种情形被抑制，**用户拖窗口边缘改尺寸
+    //   这条最高频的路径反而没有**——于是每帧一次全量补偿，与终端/canvas 重排叠加就卡。
+    //   这里在 resize 期间统一置 motion 标记，让渲染层跳过这类"位置补偿"重活。
+    //   解除策略：停止 resize 一段时间后延时解除（不能用 onDone，因为无确定终点）；
+    //   拖拽会话/全屏动画自己会置/清该标记，故二者进行中不解除，避免互相覆盖。
+    if (!_dragSession && !_fitAnimTimer) setWindowMotion(mainWindow, true);
+    if (_motionTimer) clearTimeout(_motionTimer);
+    // 兜底：若 resized 事件未到达（部分程序化 resize 路径），延时解除。
+    // 从 180ms 收到 120ms —— 用户反馈"拖完尺寸后内容收敛慢"，这里每多等 60ms
+    // 渲染层就多等 60ms 才做宽度锚点还原与终端 fit。
+    _motionTimer = setTimeout(() => {
+      _motionTimer = null;
+      if (_dragSession || _fitAnimTimer) return; // 由它们负责解除
+      // 只解除标记：材质重放交给下面的 _resizeTimer 统一做一次，
+      // 避免这里和它各跑一次 FFI + 回读（那正是要削减的开销）。
+      setWindowMotion(mainWindow, false);
+    }, 120);
     if (_resizeTimer) clearTimeout(_resizeTimer);
     _resizeTimer = setTimeout(() => {
       _resizeTimer = null;
       if (_windowMotion) return; // 运动中：材质重放留给结束后的补偿
-      syncWindowGlass(mainWindow);
-    }, 300);
+      syncWindowGlass(mainWindow, true);
+    }, 240);
   });
-  // plan-26-126 M4：伪最大化下用户拖动窗口 ⇒ 近似原生 drag-restore（还原到光标附近）
-  mainWindow.on("move", () => {
-    if (!_pseudoMax || Date.now() <= _pseudoSuppressUntil) return;
+  /** resized：窗口尺寸**落定**后触发一次（Windows/macOS 支持）。
+   *  比固定延时准确：用户一松手就解除运动标记并补材质，渲染层当场收尾
+   *  （宽度锚点还原 / 终端 fit），不再白等一个固定时长。
+   *  渲染层的收尾由 setWindowMotion(false) 派发的 chatcoder:window-motion 事件驱动。 */
+  mainWindow.on("resized", () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (_dragSession || _fitAnimTimer) return; // 拖拽会话/补间动画自有收尾点
+    if (_motionTimer) { clearTimeout(_motionTimer); _motionTimer = null; }
+    setWindowMotion(mainWindow, false);
+    if (_resizeTimer) { clearTimeout(_resizeTimer); _resizeTimer = null; }
+    syncWindowGlass(mainWindow, true);
+  });
+  // plan-26-126 M4：伪最大化下用户拖动窗口 ⇒ 近似原生 drag-restore（还原到光标附近）。
+  //
+  // 用户实测问题（本轮修正）：伪全屏 → 最小化（点任务栏图标）→ 再点图标恢复后，
+  //   **点「缩放」无法还原**。根因就在这个监听里：Windows 在**最小化瞬间也会发 move 事件**
+  //   （实测：bounds 与最小化前完全相同，纯粹是状态切换通知）。旧代码只判 `_pseudoMax`
+  //   与抑制窗，于是这次"假移动"被当成用户拖动 → 提前执行 exitPseudoMax，把还原快照
+  //   `_pseudoPrevBounds` 消费掉；而此时窗口已被最小化，补间落空，窗口尺寸仍停在
+  //   最大化时的铺满值。恢复后 `_pseudoMax=false`，点「缩放」只会再次进入伪最大化
+  //   → 看起来"点了没反应/还原不了"。
+  // 修正：要求"确实被用户拖动了"，即 ①窗口可见且未最小化；②不在我们自己的拖拽会话中；
+  //   ③bounds 相对贴合后的矩形**真的变了**（最小化那种同值 move 直接忽略）；
+  //   ④按住左键（真实拖动才有；系统重排/最小化/程序化移动都没有按键）。
+  mainWindow.on("move", () => {
+    if (!_pseudoMax || !mainWindow || mainWindow.isDestroyed()) return;
+    if (Date.now() <= _pseudoSuppressUntil) return;      // 我们自己的程序化移动
+    if (_dragSession) return;                            // 自研拖拽会话已在别处处理
+    if (mainWindow.isMinimized() || !mainWindow.isVisible()) return;
+    if (!_movedAwayFromPseudoRect(mainWindow)) return;   // 同值 move（最小化瞬间等）
+    const gd = glassDiag();
+    if (gd && typeof gd.isLeftButtonDown === "function" && gd.isLeftButtonDown() === false) return;
     exitPseudoMax(mainWindow, restoredBoundsNearCursor(mainWindow));
   });
   try {
@@ -1452,12 +1674,33 @@ ipcMain.on("window:close", () => { if (mainWindow) mainWindow.close(); });
 //      区分双击，系统那套拖动循环早已错过时机。
 //
 // 现在改为**自研拖动循环**：渲染层持续上报屏幕坐标（pointermove），主进程按
-//   光标与"按下点相对窗口的偏移"反算新位置并 setPosition。这样：
+//   光标与"按下点相对窗口的偏移"反算新位置，并**显式回写冻结的宽高**。这样：
 //     * 与双击判定天然共存（拖拽由渲染层决定何时开始）；
 //     * 拖动中不触发 DWM 图层重建，玻璃全程保留；
-//     * 到位精确（按屏幕坐标算，不依赖系统拖动循环的时机）。
+//     * 到位精确（按屏幕坐标算，不依赖系统拖动循环的时机）；
+//     * 尺寸全程冻结（见下方"用户实测问题"的根因说明）。
 // 拖拽中置 motion 标记：渲染层停掉位置补偿类重活，拖窗口不发涩。
-let _dragSession = null; // { offsetX, offsetY } —— 光标相对窗口左上角的偏移（DIP）
+//
+// ── 用户实测问题（本轮修正）：拖拽标题栏时"窗口尺寸会变大，拖得越慢变化越大" ──
+//
+// 根因（本机 probe 实测，非推断）：**非整数缩放屏上的 setPosition 会把尺寸慢慢撑大**。
+//   本机 scaleFactor = 1.5（1 DIP = 1.5 物理像素）。逐帧调用 win.setPosition(x, y) 时
+//   Chromium 要把位置换算成物理像素再回写，非整数倍换算带小数，每次调用都会让尺寸
+//   向上取整 1 DIP。实测（1204×760 窗口、1.5× 屏、每帧只移动 1 DIP）：
+//     · setPosition 200 帧                        ⇒ 宽 +200（**每调用一次涨 1**）
+//     · setPosition 每帧 +2 DIP（对齐整数物理像素）⇒ 0（物理像素对齐即免疫）
+//     · setPosition 原地不动 200 帧                ⇒ 0（位置不变不触发换算）
+//     · setBounds 显式带冻结宽高 200~300 帧        ⇒ 恒为 0
+//   这正好解释用户的核心观察"拖得越慢变化越大"：慢拖意味着同样的手部位移产生了更多次
+//   pointermove，调用次数越多累加越多；快拖调用少，漂移小到看不出来。
+//   也与"顶部中间拖拽时光标没变成缩放箭头"吻合——尺寸不是系统 NC 缩放区改的，
+//   而是在我们的拖动循环里自己累加出来的。
+//
+// 修法：
+//   ① 拖拽起点**一次性冻结宽高**（_dragSession.width/height），全程不读窗口实时矩形；
+//   ② 移动改用 setBounds({x,y,width,height}) 显式带上冻结宽高——实测漂移恒为 0；
+//   ③ 渲染层 pointermove 按 rAF 合并，减少单位时间的几何写入次数（见 useWindowDrag.ts）。
+let _dragSession = null; // { offsetX, offsetY, width, height } —— 光标偏移 + **冻结宽高**（DIP）
 
 function endWindowDrag() {
   if (!_dragSession) return;
@@ -1465,22 +1708,47 @@ function endWindowDrag() {
   setWindowMotion(mainWindow, false);
 }
 
-ipcMain.on("window:dragStart", () => {
+// 用户实测问题（上一轮修正）：拖拽顶部标题栏时"位置在变、尺寸也在变（乱变）"。
+// 当时的根因是**两套几何写入者同时跑**：伪最大化下 move 事件触发 exitPseudoMax，
+//   其 220ms 补间每帧写 x/y/width/height；同时逐帧上报按"最大化时的偏移"不断移动。
+// 修正（对齐原生 drag-restore 语义）：起点先取消动画，伪最大化时**即时**还原小窗，
+//   再按还原后几何重算偏移；配合下方"冻结宽高"彻底消除尺寸变化。
+function startWindowDrag() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   try {
     const { screen } = require("electron");
+    cancelFitAnimation();       // 停掉贴合动画：它每帧也写 width/height
+    let applied = null;
+    if (_pseudoMax) {           // 伪最大化 → 原生式还原（不做补间，拖动必须即时跟手）
+      // 复用 exitPseudoMax：圆角/材质/抑制窗/motion 标记都在那里统一处置，
+      // 避免这里手写一份状态变更与它分叉；并接收它**实际应用**的目标矩形。
+      applied = exitPseudoMax(mainWindow, restoredBoundsNearCursor(mainWindow), { animate: false });
+    }
+    // 基准几何：优先用 exitPseudoMax 返回的目标矩形（精确整数，不经换算），
+    // 否则再读当前 bounds。非整数缩放屏上二次读回可能带 1~2 DIP 偏差，
+    // 而拖拽全程会冻结这份几何，偏差会被固定下来。
     const p = screen.getCursorScreenPoint();
-    const b = mainWindow.getBounds();
-    _dragSession = { offsetX: p.x - b.x, offsetY: p.y - b.y };
+    const b = applied || mainWindow.getBounds();
+    _dragSession = {
+      offsetX: p.x - b.x,
+      offsetY: p.y - b.y,
+      // 【关键】冻结宽高：本次拖拽的每一帧都显式回写这两个值，
+      // 既不让位置换算的舍入漂移累积，也不受其它组件改尺寸的影响。
+      width: b.width,
+      height: b.height,
+    };
     setWindowMotion(mainWindow, true);
   } catch (err) {
     _dragSession = null;
     logErr("[chatcoder] 窗口拖拽起点失败:", err && err.message);
   }
-});
+}
+
+ipcMain.on("window:dragStart", startWindowDrag);
 
 ipcMain.on("window:dragMove", () => {
-  if (!_dragSession || !mainWindow || mainWindow.isDestroyed()) return;
+  const s = _dragSession;
+  if (!s || !mainWindow || mainWindow.isDestroyed()) return;
   try {
     const { screen } = require("electron");
     // 按键状态兜底：渲染层若因指针离开窗口而漏发 pointerup，这里能自行结束，
@@ -1491,7 +1759,13 @@ ipcMain.on("window:dragMove", () => {
       if (down === false) { endWindowDrag(); return; }
     }
     const p = screen.getCursorScreenPoint();
-    mainWindow.setPosition(p.x - _dragSession.offsetX, p.y - _dragSession.offsetY, false);
+    // 只改位置：宽高始终用起点冻结值显式回写（见上方根因说明）。
+    mainWindow.setBounds({
+      x: p.x - s.offsetX,
+      y: p.y - s.offsetY,
+      width: s.width,
+      height: s.height,
+    }, false);
   } catch (err) {
     logErr("[chatcoder] 窗口拖拽失败:", err && err.message);
   }

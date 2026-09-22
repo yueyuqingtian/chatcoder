@@ -225,3 +225,53 @@ def build_rules_reminder(lang: str) -> str:
         "不要静默忽略。上下文变长或压缩后，规则依然有效——它们不会因为"
         "「较早出现在上下文里」而失效。"
     )
+
+
+def build_rules_anchor(lang: str, project_docs: list[str] | None = None) -> str:
+    """本轮规则锚点（跟随每条用户消息一起下发）。
+
+    与 `build_rules_reminder` 的分工：
+      * `build_rules_reminder` 由 agent_loop 按**步数间隔**注入（默认 20 步一次），
+        用于长 turn 中途把规则拉回注意力范围；
+      * 本函数在每个**用户消息**上注入一次（位置就在本轮指令之前），保证"用户一开口，
+        规则就在眼前"——用户反馈"规则遵循度不够"的直接对症项。
+        两者叠加覆盖"轮次边界"与"长 turn 中段"两个注意力洼地。
+
+    project_docs：本轮**实际加载**的项目规则文档相对路径清单（由 rules_loader
+    同源产出）。列出真实文件名有两个作用：模型知道去哪个文件核对规则；文件缺失时
+    也能看出"没扫到规则"而不是误以为已遵守。
+
+    正文语言跟随锚定语言（en → 英文，其余 → 中文）。
+    """
+    docs = [d for d in (project_docs or []) if d]
+    if lang == LANG_EN:
+        head = (
+            "[Rules anchor] Before acting on the user message below, re-read the injected rules "
+            "and follow them as written this turn, in this priority: user Global Rules > project "
+            "rule documents > the built-in methodology. They OVERRIDE default behavior; if you "
+            "must deviate, say why and get the user's agreement instead of silently ignoring them."
+        )
+        if docs:
+            return head + (
+                "\nProject rule documents loaded from the workspace this turn: "
+                + ", ".join(docs)
+                + ". Read the relevant ones and keep working inside their conventions."
+            )
+        return head + (
+            "\nNo project rule document was detected in this workspace — follow the existing "
+            "code style and directory structure instead of inventing new conventions."
+        )
+    head = (
+        "[规则锚点] 处理下方用户消息前，请重新对照已注入的规则并原样遵循，优先级："
+        "用户全局规则 > 项目规则文档 > 内置方法论。"
+        "这些规则覆盖默认行为；需要偏离时先说明原因并征得用户同意，不要静默忽略。"
+    )
+    if docs:
+        return head + (
+            "\n本轮已从工作区加载的项目规则文档：" + "、".join(docs)
+            + "。请先阅读相关文档，并在其约定内推进工作。"
+        )
+    return head + (
+        "\n本轮未在工作区检测到项目规则文档——请沿用既有代码风格与目录结构，"
+        "不要自创新的约定。"
+    )

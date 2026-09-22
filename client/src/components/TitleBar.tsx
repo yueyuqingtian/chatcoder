@@ -138,8 +138,10 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
 
   /* ── plan-26-126 P2：自研拖拽 + 双击伪全屏（详见 hooks/useWindowDrag.ts）──
      不再用 `-webkit-app-region: drag`：该区域由系统处理拖拽/双击，DOM 拿不到 dblclick，
-     双击会直接触发系统原生最大化（重建 DWM 图层 ⇒ 玻璃丢失且不保证恢复）。 */
-  const { onPointerDown, onPointerMove, onPointerUp, onDoubleClick: onTitleDoubleClick } = useWindowDrag();
+     双击会直接触发系统原生最大化（重建 DWM 图层 ⇒ 玻璃丢失且不保证恢复）。
+     本轮修复：双击判定改由 hook 内部按 pointerup 自研——原生 dblclick 的 target 会被
+     提升到两次点击的共同祖先，导致「点折叠按钮 + 点旁边空白」误触发伪最大化（小窗变全屏）。 */
+  const { onPointerDown, onPointerMove, onPointerUp } = useWindowDrag();
 
   return (
     <div
@@ -147,7 +149,6 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
-      onDoubleClick={onTitleDoubleClick}
     >
       <div className="titlebar-left">
         {/* 侧栏折叠时：logo 与前进/后退 + 展开按钮移到标题栏左侧（展开态折叠入口在侧栏头部） */}
@@ -222,7 +223,18 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
                 onClick={() => setMenuOpen(false)}
               >
                 <div className="context-menu-item" onClick={() => setRenaming(session.title || "")}>{t("sidebar.ctx_rename")}</div>
-                <div className="context-menu-item" onClick={() => { void api.updateSession(session.id, { status: "archived" }).then(() => loadBootstrap()); }}>{t("sidebar.ctx_archive")}</div>
+                {/* 归档限制：正在执行任务的会话不允许归档（与侧栏一致）——
+                    执行中归档会让运行中的 turn 与它所属的会话被拆散。
+                    会话未执行过任务（has_running 为假）时照常可用。 */}
+                <div
+                  className={"context-menu-item" + (session.has_running ? " disabled" : "")}
+                  title={session.has_running ? t("sidebar.archive_disabled") : ""}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    if (session.has_running) return;
+                    void api.updateSession(session.id, { status: "archived" }).then(() => loadBootstrap());
+                  }}
+                >{t("sidebar.ctx_archive")}</div>
                 <div className="context-menu-divider" />
                 <div className="context-menu-item danger" onClick={() => setConfirmDelete(true)}>{t("sidebar.ctx_delete")}</div>
               </div>

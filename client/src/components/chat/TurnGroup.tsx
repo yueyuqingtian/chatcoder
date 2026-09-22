@@ -293,8 +293,9 @@ export const TurnGroup = memo(function TurnGroup({
   };
 
   const renderAiItem = (item: TurnItem, i: number) => {    switch (item.kind) {
-      // v41: 注入的用户消息（非首条）就地渲染在时间序位置（运行中由 MessageFlow
-      // 剥离到流式段之后，此分支服务 turn 结束后的落库位置渲染）
+      // v41 → 本轮：注入的用户消息（非首条）**就地渲染在时间序位置**。
+      // 旧实现在运行中由 MessageFlow 把它剥离到流式段下方的独立槽位，导致
+      // "发送的消息没有固定位置、会被刷到下方"；现在它始终按 id 序留在时间线内。
       case "user":
         return (
           <div key={i} className="turn-item turn-item-user">

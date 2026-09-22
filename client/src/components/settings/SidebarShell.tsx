@@ -30,10 +30,10 @@ export function SettingsSidebar({ tab, onTab, onBack, collapsed }: {
 }) {
   const { t } = useI18n();
   // plan-26-126 P2：设置侧栏头部同样是拖拽/双击伪全屏区
-  const { onPointerDown, onPointerMove, onPointerUp, onDoubleClick: onTitleDoubleClick } = useWindowDrag();
+  const { onPointerDown, onPointerMove, onPointerUp } = useWindowDrag();
   return (
     <SidebarShell collapsed={collapsed}>
-      <div className="sb-head" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onDoubleClick={onTitleDoubleClick}>
+      <div className="sb-head" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}>
         <AppLogo size={20} className="sb-logo-img" />
         {collapsed && (
           <button className="sb-nav-arrow" onClick={onBack} title={t("titlebar.back")} type="button">

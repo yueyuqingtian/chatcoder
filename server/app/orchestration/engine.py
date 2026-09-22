@@ -1441,7 +1441,8 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             build_plan_exit_reminder(bundle.reply_language)
         )
         bundle.instruction = (
-            "用户已确认以下方案文档，现在按它执行：\n\n"
+            (bundle.rules_anchor + "\n\n" if bundle.rules_anchor else "")
+            + "用户已确认以下方案文档，现在按它执行：\n\n"
             f"【方案文档】\n{plan_doc or '（文档读取失败，请依据用户原始请求执行）'}\n\n"
             "【执行要求】\n"
             "1. 先用 todo_write 按文档重建执行清单——分几步、每步粒度由你决定，"

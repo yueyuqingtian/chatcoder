@@ -20,7 +20,6 @@ import { MarkdownContent } from "../MarkdownContent";
 import { MsgType } from "@chatcoder/shared";
 import { useChatStore } from "../../store/chat";
 import type { MessageOut } from "../../api/client";
-import { MessageImageGrid, MessageFileCards, TokenText, RefChips, refsOf, stripRefLines, attachmentsOf } from "./AttachmentCard";
 
 /** plan-308-1542 需求1：任务执行类错误的**唯一**棂位——消息流末尾错误卡。
  *  此前这类错误会同时写入 store.error（右上角 Toast）与消息流，造成重复报错；
@@ -112,10 +111,17 @@ interface MessageFlowCoreProps {
   renderEntry: (entry: TimelineEntry, index: number) => ReactNode;
   /** 运行中尾部（StreamingText），占虚拟列表最后一项 */
   streamingNode: ReactNode | null;
-  /** v41: 运行中注入的用户消息（"立即发送"），占流式段之后的槽位--时间直觉上位于实时内容下方 */
-  injectedNode?: ReactNode | null;
   /** 额外尾部（如压缩中卡片），占最后一项 */
   trailingNode?: ReactNode | null;
+  /** 强制贴底信号（单调递增）。
+   *
+   *  本轮修复（用户反馈"运行中发送的消息没有固定位置，会被刷到下方"）：
+   *  「立即发送」的注入消息**不再从时间线抽离**（旧实现把它渲染到流式段下方的独立槽位，
+   *  于是它的位置随流式内容增长不断下移，turn 结束后又回归时间线 ⇒ 位置反复跳）。
+   *  现在它按 id 序固定留在时间线内；但它落进的是**已存在的** turn entry，
+   *  entries.length 不变 ⇒ 既有的"末尾新增以用户消息开头的新 turn → 滚底"判定不会触发。
+   *  故由宿主显式下发该信号，保证"点了发送就滚到最新"的意图仍然成立。 */
+  forceBottomKey?: number;
   /** 会话标识：变化时强制跳底（主界面传 currentSessionId，子代理传 threadId） */
   sessionKey: string | number;
   /** 流式信号：内容变化时贴底跟随（避免整对象依赖；v40 允许数字——缓冲长度即可） */
@@ -147,8 +153,8 @@ function MessageFlowCore({
   running,
   renderEntry,
   streamingNode,
-  injectedNode,
   trailingNode,
+  forceBottomKey = 0,
   sessionKey,
   streamSignal,
   jumpDots = true,
@@ -192,10 +198,8 @@ function MessageFlowCore({
   const [activeEntryIndex, setActiveEntryIndex] = useState(0);
 
   const hasStreaming = Boolean(running && streamingNode);
-  const hasInjected = Boolean(injectedNode);
   const hasTrailing = Boolean(trailingNode);
-  const totalCount =
-    entries.length + (hasStreaming ? 1 : 0) + (hasInjected ? 1 : 0) + (hasTrailing ? 1 : 0);
+  const totalCount = entries.length + (hasStreaming ? 1 : 0) + (hasTrailing ? 1 : 0);
 
   /** plan-282-1434（B6）+ plan-282-1444：首帧定位状态。
    *  此前：虚拟列表初始 scrollOffset=0 → 先渲染顶部若干项，再由 useLayoutEffect 把
@@ -364,23 +368,53 @@ function MessageFlowCore({
     };
   }, []);
 
-  /** plan-547: 内容总高度变化（虚拟测量/图片加载/展开）时若处于跟随态则保持贴底 */
+  /** plan-547: 内容总高度变化（虚拟测量/图片加载/展开）时若处于跟随态则保持贴底。
+   *
+   *  本轮优化（用户反馈"拖拉尺寸时内容重渲染的延迟很高"）：
+   *  窗口/面板几何变化的每一帧，浏览器都要重排一次；而 `el.scrollHeight` 是**布局属性读取**，
+   *  读取它会强制把此前的脏布局全部算完（forced synchronous layout）。把它放在逐帧的
+   *  RO 回调里，等于每帧额外付一次全量重排，与"重排后每条消息高度变化 → 虚拟列表测量
+   *  → 再次重排"叠加成两倍开销。
+   *  现在运动期间只**记账**，几何落定后统一补一次贴底——中间帧本来就看不到底部变化。 */
   const hasContent = totalCount > 0;
   useEffect(() => {
     if (!hasContent) return;
     const inner = innerRef.current;
     const el = parentRef.current;
     if (!inner || !el || typeof ResizeObserver === "undefined") return;
+    let missedStick = false;
+    const inMotion = () =>
+      document.body.classList.contains("panel-dragging")
+      || Boolean((window as unknown as { __chatcoderWindowMotion?: boolean }).__chatcoderWindowMotion);
+    const stick = () => {
+      if (!autoScrollRef.current || userScrollOverrideRef.current) return;
+      el.scrollTop = el.scrollHeight;
+    };
+    const stickAfterMotion = () => {
+      if (!missedStick) return;
+      missedStick = false;
+      stick();
+    };
+    const onMotionEnd = (e: Event) => {
+      if ((e as CustomEvent<{ active?: boolean }>).detail?.active === false) stickAfterMotion();
+    };
+    const onPointerUp = () => stickAfterMotion();
+    window.addEventListener("chatcoder:window-motion", onMotionEnd);
+    window.addEventListener("pointerup", onPointerUp, true);
     const ro = new ResizeObserver(() => {
       // 问题4 回退：内容高度变化时若处于跟随态直接贴底；用户上滑已由 onScroll
       // 关闭 autoScroll（补滚窗口内则靠 scrollToBottom 的「用户已滚动则放弃」兜底），
       // 无需在 RO 内重复判定（内容增长后 scrollHeight 先变大，dist 判定会误关 autoScroll）。
       // 本轮补充：用户接管期间（已上滑）RO 也不得贴底，否则内容增长会把视图拉回底部。
-      if (!autoScrollRef.current || userScrollOverrideRef.current) return;
-      el.scrollTop = el.scrollHeight;
+      if (inMotion()) { missedStick = true; return; } // 运动中不读布局属性（见上方说明）
+      stick();
     });
     ro.observe(inner);
-    return () => ro.disconnect();
+    return () => {
+      window.removeEventListener("chatcoder:window-motion", onMotionEnd);
+      window.removeEventListener("pointerup", onPointerUp, true);
+      ro.disconnect();
+    };
   }, [hasContent]);
 
   /** plan-282-1492：胶囊占位块 0 ↔ 44px 的**高度过渡期间逐帧贴底**。
@@ -394,6 +428,10 @@ function MessageFlowCore({
     const el = parentRef.current;
     if (!space || !el || typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver(() => {
+      // 本轮优化：几何运动中不读布局属性（scrollHeight 会强制同步布局），
+      // 与高度 RO 同一口径——运动结束后由事件收尾统一补一次。
+      if (document.body.classList.contains("panel-dragging")
+        || Boolean((window as unknown as { __chatcoderWindowMotion?: boolean }).__chatcoderWindowMotion)) return;
       if (!autoScrollRef.current || userScrollOverrideRef.current) return;
       el.scrollTop = el.scrollHeight;
     });
@@ -455,17 +493,15 @@ function MessageFlowCore({
     //   拖拽结束时 handleMouseUp 会先移除 body 类、再 commit 宽度 ⇒ 那次 RO 会正常
     //   做一次收尾还原，功能语义（拖完仍停在同一位置）完整保留。
     let pendingRestore = 0;
+    // 运动中是否记录过待还原锚点：运动结束后需要补一次还原。
+    // 旧实现运动中只把 widthAnchorRef 置空、直接丢弃这次补偿，而它依赖"拖拽结束后
+    // 还会有一次宽度变化"来触发收尾还原——若刚好停在同一像素宽度上就不会发生，
+    // 表现为"拖完位置没跟回来"。现在运动第一帧记下锚点，结束后主动补做一次。
+    let missedDuringMotion = false;
     const inMotion = () =>
       document.body.classList.contains("panel-dragging")
       || Boolean((window as unknown as { __chatcoderWindowMotion?: boolean }).__chatcoderWindowMotion);
-    const ro = new ResizeObserver(() => {
-      const el2 = parentRef.current;
-      if (!el2) return;
-      const w = el2.clientWidth;
-      if (Math.abs(w - lastWidthRef.current) < 1) return; // 高度抖动不参与
-      lastWidthRef.current = w;
-      if (inMotion()) { widthAnchorRef.current = null; return; } // 运动中：跳过重活
-      capture();
+    const scheduleRestore = () => {
       // 重排/重新测量在渲染后完成：双帧后再还原（与 scrollToBottom 的补滚节奏一致）。
       // 额外做 rAF 合并：连续宽度变化只保留最后一次还原，避免回调排队堆积。
       if (pendingRestore) cancelAnimationFrame(pendingRestore);
@@ -476,10 +512,53 @@ function MessageFlowCore({
           widthAnchorRef.current = null;
         });
       });
+    };
+    /** 运动结束后收尾：补一次锚点还原。
+     *
+     *  本轮优化（用户反馈"拖拉尺寸时内容重渲染延迟很高"）：
+     *  旧实现用 120ms 的 setInterval 轮询"运动是否结束"，最坏情况下拖完还要再等
+     *  120ms + 双帧 rAF 才收敛。现在改为**事件驱动**——主进程在解除运动标记时
+     *  同步派发 chatcoder:window-motion（detail.active=false），当场收尾；
+     *  仅保留一个低频兜底轮询，防止事件丢失（例如渲染层重载）时收尾永不发生。 */
+    const settleAfterMotion = () => {
+      if (!missedDuringMotion) return;
+      missedDuringMotion = false;
+      scheduleRestore();
+    };
+    const onMotionEnd = (e: Event) => {
+      const active = (e as CustomEvent<{ active?: boolean }>).detail?.active;
+      if (active === false) settleAfterMotion();
+    };
+    const onPanelDragEnd = () => settleAfterMotion();
+    window.addEventListener("chatcoder:window-motion", onMotionEnd);
+    // 面板分隔条拖拽没有主进程事件：借用 pointerup 捕获阶段收尾（与 RO 的最后一次回调互补）
+    window.addEventListener("pointerup", onPanelDragEnd, true);
+    const ro = new ResizeObserver(() => {
+      const el2 = parentRef.current;
+      if (!el2) return;
+      const w = el2.clientWidth;
+      if (Math.abs(w - lastWidthRef.current) < 1) return; // 高度抖动不参与
+      lastWidthRef.current = w;
+      if (inMotion()) {
+        // 运动中：跳过重活（中间帧保持锚点本无意义），但**只在运动第一帧记录一次**锚点，
+        // 并在运动结束后补一次还原。
+        // 为何只记一次：运动期间宽度只变不还原，视口顶部会随重排漂移；若每帧都覆盖锚点，
+        // 留下的是"漂移后"的位置，收尾还原就还原到了漂移结果上（等于没还原）。
+        // 第一帧的锚点最接近用户拖动前的视口，正是收尾要还原的目标。
+        if (!missedDuringMotion) capture();
+        missedDuringMotion = true;
+        return;
+      }
+      // 非运动态：若运动期间欠过一次还原，先补做（避免与新锚点交错）
+      if (missedDuringMotion) { missedDuringMotion = false; }
+      capture();
+      scheduleRestore();
     });
     ro.observe(el);
     return () => {
       if (pendingRestore) cancelAnimationFrame(pendingRestore);
+      window.removeEventListener("chatcoder:window-motion", onMotionEnd);
+      window.removeEventListener("pointerup", onPanelDragEnd, true);
       ro.disconnect();
     };
   }, [virtualizer]);
@@ -597,18 +676,14 @@ function MessageFlowCore({
     if (autoScroll) scrollToBottom(false);
   }, [entries, autoScroll, scrollToBottom]);
 
-  // v0.3.1: 注入消息（"立即发送"）从 entries 抽离到 injectedNode 时 entries 长度不变，
-  // 任何现有触发都不生效，用户发送后停在原位。injectedNode 出现（0→1）→ 无条件滚底，
-  // 与发送意图一致（turn 结束注入消息回归时间线时仅复位标记，不滚底）。
-  const hadInjectedRef = useRef(false);
+  // 本轮修复：强制贴底信号（"立即发送"后用户消息固定在时间线内，entries.length 不变，
+  // 故由宿主下发信号保证"发送即滚到最新"）。
+  const prevForceBottomRef = useRef(forceBottomKey);
   useEffect(() => {
-    if (injectedNode && !hadInjectedRef.current) {
-      hadInjectedRef.current = true;
-      scrollToBottom(false, true);
-    } else if (!injectedNode) {
-      hadInjectedRef.current = false;
-    }
-  }, [injectedNode, scrollToBottom]);
+    if (forceBottomKey === prevForceBottomRef.current) return;
+    prevForceBottomRef.current = forceBottomKey;
+    scrollToBottom(false, true);
+  }, [forceBottomKey, scrollToBottom]);
 
   /** 问题12: 内容/滚动变化后刷新 scrollspy 焦点，保证 JumpDots 自动跟随 */
   useEffect(() => {
@@ -730,18 +805,15 @@ function MessageFlowCore({
             style={{ position: "relative", width: "100%" }}
           >
             {virtualizer.getVirtualItems().map((item) => {
-              // v41 槽位顺序：已落库 entries -> 流式段 -> 注入用户消息 -> 尾部卡片
+              // 槽位顺序：已落库 entries -> 流式段 -> 尾部卡片
+              // （注入的用户消息已回归时间线，不再占用独立槽位——见 MessageFlowCoreProps.forceBottomKey）
               const streamStart = entries.length;
-              const injectedStart = streamStart + (hasStreaming ? 1 : 0);
-              const trailingStart = injectedStart + (hasInjected ? 1 : 0);
+              const trailingStart = streamStart + (hasStreaming ? 1 : 0);
               const isStreamSlot = hasStreaming && item.index === streamStart;
-              const isInjectedSlot = hasInjected && item.index === injectedStart;
               const isTrailingSlot = hasTrailing && item.index === trailingStart;
               let node: ReactNode;
               if (isStreamSlot) {
                 node = streamingNode;
-              } else if (isInjectedSlot) {
-                node = injectedNode;
               } else if (isTrailingSlot) {
                 node = trailingNode;
               } else {
@@ -845,29 +917,20 @@ function MainMessageFlow({
     return map;
   }, [subagentMeta]);
 
-  // v42: 注入分割渲染（"立即发送"的消息是时间分割点）：
-  // - pending 注入（注入时刻正在流式的段尚未落库）：注入消息剥离出时间线，
-  //   渲染到流式段之后--消息流是两段式（已落库 entries + 未落库流式段），
-  //   流式段固定在 entries 之后，留在 entries 内会显示在实时内容上方；
-  // - 跨界段（注入时刻流式中、之后落库的消息，mark.crossoverId）：前移到
-  //   对应注入消息之前--其 id 大于注入消息，按 id 序会错误地掉到注入下方。
-  // 其余消息按 id 序：注入前内容天然在注入上方，注入后新刷新的工具调用
-  // 与消息天然在注入下方。turn 结束后标记保留（顺序不跳变），新 turn 开始清空。
+  // v42 → 本轮修复：注入消息（"立即发送"）**固定留在时间线内**渲染。
+  //
+  // 旧实现（v42/v41）把它从 entries 剥离、渲染到流式段**下方的独立槽位**，
+  // 导致用户反馈"发送的消息没有固定位置，任务刷新消息时被刷到下方"：
+  // 流式内容每长高一截，槽位就往下走一截；turn 结束槽位消失，它又回归时间线，
+  // 位置再跳一次。
+  //
+  // 现在只保留"跨界段前移"这一必要修正：
+  //  - 注入时刻正在流式的段（尚未落库）落库后 id 会大于注入消息，按 id 序会错误地
+  //    掉到注入消息下方；将其前移到对应注入消息之前 —— 注入消息成为时间分割点
+  //    （上方 = 注入前内容，下方 = 注入后新输出）。
+  //  - 注入消息本身按 id 序自然落位：它在注入前内容之后、注入后新输出之前，固定不动。
+  // 结合 TurnGroup 对非首条 user item 的"就地渲染在时间序位置"，视觉与旧槽位一致。
   const injectMarks = useChatStore((s) => s.injectMarks);
-
-  // pending 注入仅运行中生效：turn 结束后流式槽消失，注入消息回归时间线
-  // id 序位置（跨界段已有 crossoverId 绑定的仍前移，顺序不跳变）
-  const pendingInjectIds = useMemo(
-    () =>
-      new Set(
-        isRunning
-          ? injectMarks
-              .filter((mk) => mk.crossoverId == null && mk.pendingAgents.length > 0)
-              .map((mk) => mk.injectId)
-          : [],
-      ),
-    [injectMarks, isRunning],
-  );
 
   const timelineMessages = useMemo(() => {
     // 跨界段 -> 前移目标注入消息（同一跨界段绑定多条注入时取最小 injectId）
@@ -877,9 +940,9 @@ function MainMessageFlow({
       const prev = crossoverTarget.get(mk.crossoverId);
       if (prev == null || mk.injectId < prev) crossoverTarget.set(mk.crossoverId, mk.injectId);
     }
-    if (pendingInjectIds.size === 0 && crossoverTarget.size === 0) return messages;
+    if (crossoverTarget.size === 0) return messages;
     const msgById = new Map(messages.map((m) => [m.id, m]));
-    // 目注入消息 -> 前移插入的跨界段列表（按 id 升序）
+    // 注入消息 -> 前移插入的跨界段列表（按 id 升序）
     const crossoversByTarget = new Map<number, MessageOut[]>();
     for (const crossoverId of crossoverTarget.keys()) {
       const msg = msgById.get(crossoverId);
@@ -892,23 +955,28 @@ function MainMessageFlow({
     for (const list of crossoversByTarget.values()) list.sort((a, b) => a.id - b.id);
     const out: MessageOut[] = [];
     for (const m of messages) {
-      if (pendingInjectIds.has(m.id) || crossoverTarget.has(m.id)) continue;
+      if (crossoverTarget.has(m.id)) continue;
       const cs = crossoversByTarget.get(m.id);
       if (cs) out.push(...cs);
       out.push(m);
     }
     return out;
-  }, [messages, injectMarks, pendingInjectIds]);
-
-  // pending 注入消息（跨界段还在流式）：渲染在流式段之后的独立槽位；
-  // turn 结束（isRunning=false）后回归时间线（流式槽已消失，无需让位）
-  const injectedMsgs = useMemo(
-    () => (isRunning ? messages.filter((m) => pendingInjectIds.has(m.id)) : []),
-    [messages, pendingInjectIds, isRunning],
-  );
+  }, [messages, injectMarks]);
 
   // v30: 被压缩的消息保留在时间线上（不隐藏）；压缩块卡由 SUMMARY 消息渲染
   const entries = useMemo(() => buildTimeline(timelineMessages), [timelineMessages]);
+
+  /** 强制贴底信号：用户消息条数。
+   *
+   *  为什么需要：注入消息现在固定留在时间线内，它落进的是**已存在的** turn entry，
+   *  entries.length 与末尾 entry 形态都不变 ⇒ MessageFlowCore 里"末尾新增以用户消息
+   *  开头的新 turn → 滚底"的判定不会触发，点了「立即发送」或发新消息后视图不会跟到底。
+   *  这里用"用户消息条数"作信号：每新增一条用户消息（含注入与乐观占位）即 +1，
+   *  核心层据此无条件贴底——语义精确且不会因流式内容变化而误触发。 */
+  const userMsgSeq = useMemo(
+    () => timelineMessages.reduce((n, m) => (m.sender_type === "user" ? n + 1 : n), 0),
+    [timelineMessages],
+  );
 
   const plansByTurn = useChatStore((s) => s.plansByTurn);
 
@@ -961,28 +1029,6 @@ function MainMessageFlow({
           statusLabel={turnStatus ?? undefined}
         />
       }
-      injectedNode={
-        injectedMsgs.length > 0 ? (
-          <div className="turn-group">
-            {injectedMsgs.map((m) => (
-              <div key={m.id} className="turn-item turn-item-user">
-                {/* 会话 228-1142: 图片网格在气泡外部、靠右；文件卡与文本留在气泡内 */}
-                <MessageImageGrid atts={attachmentsOf(m.content)} />
-                <div className="turn-user-bubble">
-                  <MessageFileCards atts={attachmentsOf(m.content)} />
-                  {/* plan-308-1542 需求2：引用芯片（文件/技能/连接器/插件），与输入框同视觉 */}
-                  <RefChips refs={refsOf(m.content)} />
-                  {stripRefLines(msgText(m.content), refsOf(m.content).length > 0) && (
-                    <div className="turn-user-text">
-                      <TokenText text={stripRefLines(msgText(m.content), refsOf(m.content).length > 0)} />
-                    </div>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : null
-      }
       trailingNode={
         isCompacting ? <CompactingCard info={compactingInfo} />
           : activeDebug ? <DebugCard status={activeDebug} />
@@ -1000,6 +1046,7 @@ function MainMessageFlow({
           )
           : null
       }
+      forceBottomKey={userMsgSeq}
       sessionKey={currentSessionId ?? 0}
       streamSignal={streamSignal}
       jumpDots

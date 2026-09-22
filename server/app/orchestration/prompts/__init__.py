@@ -13,6 +13,7 @@ from app.orchestration.prompts.language import (
     build_language_pin_line,
     build_language_reminder,
     build_plan_exit_reminder,
+    build_rules_anchor,
     build_rules_reminder,
     detect_reply_language,
     language_label,
@@ -66,4 +67,6 @@ __all__ = [
     "build_language_reminder",
     "build_plan_exit_reminder",
     "build_rules_reminder",
+    # 每轮用户消息随行下发的规则锚点（含本轮实际加载的项目规则文档清单）
+    "build_rules_anchor",
 ]

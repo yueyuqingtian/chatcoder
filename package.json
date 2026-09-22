@@ -27,7 +27,7 @@
     "productName": "chatcoder",
     "copyright": "Copyright © 2026 chatcoder",
     "directories": {
-      "output": "v6",
+      "output": "v7",
       "buildResources": "electron/build"
     },
     "files": [

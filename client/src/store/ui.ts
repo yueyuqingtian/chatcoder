@@ -102,8 +102,15 @@ function savePrefs(p: UiPrefs) {
   }
 }
 
-/** 把偏好应用到全局 CSS 变量 */
-export function applyUiVars(p: UiPrefs) {
+/** 把偏好应用到全局 CSS 变量。
+ *
+ *  opts.glassToggle：本次调用是否由"用户主动拨动毛玻璃开关"触发。
+ *  只有这种调用才允许点亮「需重启生效」徽标——applyUiVars 在**每次**偏好变更
+ *  （拖滑杆 / 改面板宽度 / 切语言）时都会跑，若不加区分，用户离开外观页后随便改点
+ *  别的设置就会把徽标顶回来，违背"离开过该页面就不再提示"。
+ *  用显式入参而非模块级标志：标志法在快速连点 / 并发 IPC 回包时会被后一次调用抢先
+ *  消费，导致该亮的徽标不亮。 */
+export function applyUiVars(p: UiPrefs, opts?: { glassToggle?: boolean }) {
   if (typeof document === "undefined") return;
   const root = document.documentElement;
   root.style.setProperty("--sidebar-w", `${p.leftPanelWidth}px`);
@@ -155,7 +162,17 @@ export function applyUiVars(p: UiPrefs) {
         const needRestart = r.needRestart === true;
         if (needRestart) root.setAttribute("data-glass-restart", "1");
         else root.removeAttribute("data-glass-restart");
-        useUiStore.setState({ glassNeedRestart: needRestart });
+        // glassNeedRestart = "当前确实需要重启"的事实态；glassRestartNotice = "这次切换
+        // 还没被用户看到"的一次性展示态。后者只在用户**主动拨开关**那一次置位：
+        // applyUiVars 在每次偏好变更（拖滑杆 / 改面板宽度 / 切语言）时都会走到这里，
+        // 若无条件置位，用户离开外观页后改别的设置又会把徽标顶回来，就不再是"只提示一次"。
+        const patch: { glassNeedRestart: boolean; glassRestartNotice?: boolean } = {
+          glassNeedRestart: needRestart,
+        };
+        if (opts?.glassToggle) {
+          patch.glassRestartNotice = needRestart;
+        }
+        useUiStore.setState(patch);
       }).catch(() => { /* 忽略：能力探测失败不阻断 */ });
     }
   } catch { /* ignore */ }
@@ -178,8 +195,7 @@ export function applyUiVars(p: UiPrefs) {
   root.setAttribute("data-motion", p.motionLevel || "full");
 }
 
-export const FONT_LABELS: Record<string, { zh: string; en: string }> = {
-  system: { zh: "系统默认", en: "System Default" },
+export const FONT_LABELS: Record<string, { zh: string; en: string }> = {  system: { zh: "系统默认", en: "System Default" },
   serif: { zh: "衬线体", en: "Serif" },
   mono: { zh: "等宽体", en: "Monospace" },
   rounded: { zh: "圆角体", en: "Rounded" },
@@ -198,6 +214,11 @@ interface UiState extends UiPrefs {
   /** plan-26-126 M5：本次开启玻璃**未即时生效**（极少数环境需重启）——
    *  仅用于设置页一次性提示，不持久化、不常驻。 */
   glassNeedRestart: boolean;
+  /** 「需重启生效」徽标的一次性展示开关：仅在用户主动切换毛玻璃开关时置位，
+   *  离开外观页（组件卸载）即消费——离开过该页面就不再提示。 */
+  glassRestartNotice: boolean;
+  /** 消费本次提醒（外观页卸载时调用） */
+  consumeGlassRestartNotice: () => void;
 }
 
 export const useUiStore = create<UiState>((set, get) => ({
@@ -207,6 +228,8 @@ export const useUiStore = create<UiState>((set, get) => ({
   showTodos: true,
   showReasoning: true,
   glassNeedRestart: false, // plan-26-126 M5：瞬时状态，由 setGlassMode 回包驱动
+  glassRestartNotice: false, // 毛玻璃「重启生效」徽标的一次性展示开关
+  consumeGlassRestartNotice: () => set({ glassRestartNotice: false }),
   refreshGlobalFlags: async () => {
     try {
       // 动态 import 避免循环依赖（ui.ts 与 api/client 相互独立但被各组件引用）
@@ -237,14 +260,15 @@ export const useUiStore = create<UiState>((set, get) => ({
     const next = { ...get(), ...partial };
     set(partial);
     savePrefs(next);
-    applyUiVars(next);
+    // 只有显式改毛玻璃开关才算"用户主动切换"——徽标仅在此时点亮
+    applyUiVars(next, { glassToggle: partial.glassmorphism !== undefined });
   },
 
   toggleGlass: () => {
     const next = { ...get(), glassmorphism: !get().glassmorphism };
     set({ glassmorphism: next.glassmorphism });
     savePrefs(next);
-    applyUiVars(next);
+    applyUiVars(next, { glassToggle: true });
   },
 
   setLanguage: (lang) => {

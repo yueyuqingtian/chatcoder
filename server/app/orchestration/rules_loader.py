@@ -132,8 +132,12 @@ async def scan_rules_docs(root: str) -> list[str]:
     return found
 
 
-async def load_session_rules(workspace: str, rules_docs: list[str] | None = None) -> str:
-    """加载规范文档内容（拼接，各带文件名头）。"""
+async def collect_rule_docs(workspace: str, rules_docs: list[str] | None = None) -> list[Path]:
+    """收集本轮将要加载的规则文档路径（顺序与 load_session_rules 完全一致）。
+
+    plan-19-82 后续：拆出独立函数，供「本轮实际加载了哪些规则文档」清单复用——
+    每轮随用户消息注入的规则锚点需要点名这些文档，模型才知道该去读/遵循哪几个文件。
+    """
     base = Path(workspace)
     candidates: list[Path] = []
     for rel in (rules_docs or []):
@@ -150,6 +154,33 @@ async def load_session_rules(workspace: str, rules_docs: list[str] | None = None
         p = base / rel
         if p not in candidates:
             candidates.append(p)
+    return candidates
+
+
+async def list_rules_doc_names(workspace: str, rules_docs: list[str] | None = None) -> list[str]:
+    """已加载规则文档的相对路径清单（空则返回空列表）。
+
+    与 load_session_rules 同源：只列**确实存在且有内容**的文档，避免提示词点名一个
+    空文件让模型白读。
+    """
+    base = Path(workspace)
+    names: list[str] = []
+    for p in await collect_rule_docs(workspace, rules_docs):
+        try:
+            if not p.is_file():
+                continue
+            rel = str(p.relative_to(base)).replace("\\", "/")
+        except (OSError, ValueError):
+            rel = p.name
+        if rel not in names:
+            names.append(rel)
+    return names
+
+
+async def load_session_rules(workspace: str, rules_docs: list[str] | None = None) -> str:
+    """加载规范文档内容（拼接，各带文件名头）。"""
+    base = Path(workspace)
+    candidates = await collect_rule_docs(workspace, rules_docs)
 
     parts: list[str] = []
     seen: set[str] = set()

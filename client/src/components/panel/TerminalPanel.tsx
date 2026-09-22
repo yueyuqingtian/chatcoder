@@ -124,20 +124,63 @@ export function TerminalPanel({ tab }: TerminalPanelProps) {
     });
 
     // 面板尺寸变化 → fit + 同步后端
-    const ro = new ResizeObserver(() => {
+    //
+    // 卡顿治理（用户反馈"拖动/尺寸变化时非常卡顿，尤其会话正在运行时"）：
+    //   xterm 的 fit() 会重新计算行列并重排整个终端缓冲（含已回滚的历史行），
+    //   单次成本随会话输出量增长——它正是"会话正在运行时拖拽特别卡"的主要贡献者之一。
+    //   窗口/面板拖拽期间宽度每帧都在变，逐帧 fit 等于把这段重活乘以帧数。
+    //   这里改为：运动中只**记账**，等运动停止后补一次 fit（终态一次即可，
+    //   中间帧的行列数本来也不会被用户看到）。判定口径与消息流一致：
+    //   body.panel-dragging（拖分隔条）/ __chatcoderWindowMotion（窗口动画·拖窗·resize）。
+    let fitTimer = 0;
+    let ptyResizeTimer = 0;
+    const inMotion = () =>
+      document.body.classList.contains("panel-dragging")
+      || Boolean((window as unknown as { __chatcoderWindowMotion?: boolean }).__chatcoderWindowMotion);
+    const doFit = () => {
       if (!containerRef.current) return;
       try {
         fit.fit();
         if (ptyIdRef.current != null) {
           api?.ptyResize?.(ptyIdRef.current, term.cols, term.rows);
         }
-      } catch {}
+      } catch { /* 尺寸为 0 等瞬时状态忽略 */ }
+    };
+    /** 运动结束后的收尾 fit：双帧 rAF 后执行，确保容器 clientWidth 已是终值。
+     *  事件驱动（主进程 chatcoder:window-motion / 分隔条 pointerup）替代旧的 120ms 轮询，
+     *  拖完立刻收敛，不再多等一个固定延时。 */
+    const settleFit = () => {
+      if (fitTimer) { window.clearTimeout(fitTimer); fitTimer = 0; }
+      if (ptyResizeTimer) { window.clearTimeout(ptyResizeTimer); ptyResizeTimer = 0; }
+      ptyResizeTimer = window.setTimeout(() => {
+        ptyResizeTimer = 0;
+        if (disposed || inMotion()) return;
+        doFit();
+      }, 16);
+    };
+    const onMotionEnd = (e: Event) => {
+      if ((e as CustomEvent<{ active?: boolean }>).detail?.active === false) settleFit();
+    };
+    const onPointerUp = () => { if (!inMotion()) settleFit(); };
+    window.addEventListener("chatcoder:window-motion", onMotionEnd);
+    window.addEventListener("pointerup", onPointerUp, true);
+    const ro = new ResizeObserver(() => {
+      if (!containerRef.current) return;
+      if (inMotion()) return; // 运动中不 fit：结束事件会补一次（终态一次即可）
+      // 非运动态：RO 本身已按帧合并，直接 fit（保持原有即时语义）
+      if (fitTimer) { window.clearTimeout(fitTimer); fitTimer = 0; }
+      if (ptyResizeTimer) { window.clearTimeout(ptyResizeTimer); ptyResizeTimer = 0; }
+      doFit();
     });
     ro.observe(container);
 
     return () => {
       disposed = true;
       cancelAnimationFrame(raf);
+      if (fitTimer) window.clearTimeout(fitTimer);
+      if (ptyResizeTimer) window.clearTimeout(ptyResizeTimer);
+      window.removeEventListener("chatcoder:window-motion", onMotionEnd);
+      window.removeEventListener("pointerup", onPointerUp, true);
       ro.disconnect();
       offData?.();
       offExit?.();

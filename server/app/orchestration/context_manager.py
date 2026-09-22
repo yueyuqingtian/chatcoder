@@ -64,6 +64,9 @@ class ContextBundle:
     # ZCode 把 userInstructions（AGENTS.md 等）放进独立的 meta_user 通道并加 OVERRIDE 裁决。
     # 这里把 Global/Project Rules 单独承载，避免与其它上下文挤在同一段落里。
     rules_parts: list[str] = field(default_factory=list)
+    # 本轮规则锚点（紧贴用户消息）。单独保留一份：engine 的「确认执行」路径会整体
+    # 重写 instruction（换成方案文档指令），需要把锚点原样拼回去而不是重新构造。
+    rules_anchor: str = ""
 
     def to_messages(self) -> list[ChatMessage]:
         """组装 system + developer 段 + 历史 + user 指令。
@@ -662,6 +665,20 @@ async def build_main_context(
             "如工作区存在约定，请按既有代码风格与目录结构执行。)"
         )
     bundle.rules_parts.extend(_rule_fragments)
+    # 1.3 本轮规则锚点：让规则**紧贴本轮用户消息**出现。
+    # 用户反馈"规则遵循度不够"——规则段虽在 developer 段最前部，但与本轮指令之间隔着
+    # 工具说明/结构摘要/记忆/历史消息，长会话下模型读到用户消息时规则已被稀释。
+    # 这里把一条轻量锚点放进 instruction 前置，点名本轮**实际加载**的规则文档，
+    # 使"读指令"与"遵循规则"在同一注意力窗口内完成。
+    try:
+        from app.orchestration.prompts import build_rules_anchor
+        from app.orchestration.rules_loader import list_rules_doc_names
+        _doc_names = await list_rules_doc_names(workspace, project.rules_docs if project else None)
+        bundle.rules_anchor = build_rules_anchor(_reply_lang, _doc_names)
+        if bundle.instruction:
+            bundle.instruction = bundle.rules_anchor + "\n\n" + bundle.instruction
+    except Exception:
+        logger.debug("[context] 规则锚点注入失败(非阻塞)", exc_info=True)
     # 2. Working Directory & Tool Rules
     ws_ctx = f"Working directory: {workspace}"
     ws_ctx += (
