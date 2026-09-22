@@ -317,7 +317,9 @@
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
   transform: translateX(2px);
   transition: transform var(--dur-3) var(--ease-emphasized-decel);
-  will-change: transform;
+  /* plan-24-106 M4：移除 will-change —— 开关在设置页/侧栏常驻渲染，
+     固定 will-change 会让每个 thumb 长期占用独立合成层显存（R5-6），
+     而它的动画只是一次 8px 位移，transition 本身已足够流畅。 */
 }
 .ui-switch-root[data-state="checked"] .ui-switch-thumb { transform: translateX(16px); }
 

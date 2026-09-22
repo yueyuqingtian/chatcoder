@@ -773,6 +773,15 @@ async def run_agent_loop(
     _steps_since_last_text = 0
     # plan-547 C3: 最近一次 todo_write 的清单全集（plan 模式每步注入状态标记）
     _last_todos: list[dict] = []
+    # plan-19-82 增强（对齐 ZCode runtime-reminders）：周期性重申的步数游标。
+    # 语言纪律/规则此前只在上下文构建时静态注入一次，长 turn 内会被工具结果稀释；
+    # 这里按步重新注入，频率由 settings.language_reminder_interval /
+    # rules_reminder_interval 控制（0 = 禁用）。
+    _lang_reminded_at_step = 0
+    _rules_reminded_at_step = 0
+    # 语言漂移检测：记录已因"输出语言与锚定语言不符"注入过提醒的次数，
+    # 避免模型持续英文时每步都注入（徒增上下文，且重复提醒无增量信息）。
+    _lang_drift_reminders = 0
 
     try:
         for step in range(1, loop_step_limit + 1):
@@ -902,6 +911,30 @@ async def run_agent_loop(
             except Exception:
                 logger.warning("[agent] turn=%s step=%s 前置压缩检查失败，降级为原始消息继续", turn_id, step, exc_info=True)
                 api_messages = messages
+
+            # plan-19-82 增强（对齐 ZCode runtime-reminders）：周期性重申语言纪律与规则优先级。
+            # 只在本步骤首次进入该区间时注入，注入后更新游标（避免同一提醒连续多步重复）。
+            # 注意：api_messages 在上方可能已被压缩重建，这里追加到末尾——位置贴近当次
+            # 模型调用，正是 ZCode 强调的"贴近动作点"约束。
+            if (reply_language != "auto"
+                    and settings.language_reminder_interval > 0
+                    and step - _lang_reminded_at_step >= settings.language_reminder_interval):
+                from app.orchestration.prompts import build_language_reminder
+                api_messages = [*api_messages, ChatMessage(
+                    role="system", content=build_language_reminder(reply_language),
+                )]
+                _lang_reminded_at_step = step
+                logger.info("[agent] turn=%s step=%s 注入语言重申（间隔 %d 步，lang=%s）",
+                            turn_id, step, settings.language_reminder_interval, reply_language)
+            if (settings.rules_reminder_interval > 0
+                    and step - _rules_reminded_at_step >= settings.rules_reminder_interval):
+                from app.orchestration.prompts import build_rules_reminder
+                api_messages = [*api_messages, ChatMessage(
+                    role="system", content=build_rules_reminder(reply_language),
+                )]
+                _rules_reminded_at_step = step
+                logger.info("[agent] turn=%s step=%s 注入规则重申（间隔 %d 步）",
+                            turn_id, step, settings.rules_reminder_interval)
 
             # v2.2: todo 提醒——存在清单且连续 N 步未更新 → 注入 system 提醒
             # （对齐 ZCode buildTodoReminderBody：防模型"开清单后跑偏"）
@@ -1439,6 +1472,25 @@ async def run_agent_loop(
                         _steps_since_last_text = 0
                         logger.info("[agent] turn=%s step=%s 注入进度提醒（连续 %d 步无文字输出）",
                                     turn_id, step, settings.agent_progress_reminder_interval)
+
+            # plan-19-82 增强（对齐 ZCode "贴近输出点的分散约束"）：语言漂移即时纠正。
+            # 周期性重申是"定时"，这里是"按需"——模型已实际输出与锚定语言不符的文字时，
+            # 立即在下一步追问前拉回，而不是等到下一个间隔步。最多纠正 2 次：持续漂移
+            # 通常意味着用户消息本身语言歧义（auto/混合），反复注入只会挤占上下文。
+            if reply_language != "auto" and _lang_drift_reminders < 2:
+                _out_text = str(response.content or "").strip()
+                if _out_text:
+                    from app.orchestration.prompts.language import detect_reply_language as _detect
+                    _out_lang = _detect(_out_text)
+                    if _out_lang != "auto" and _out_lang != reply_language:
+                        _lang_drift_reminders += 1
+                        from app.orchestration.prompts import build_language_reminder
+                        _pending_reminders.append(build_language_reminder(reply_language))
+                        logger.info(
+                            "[agent] turn=%s step=%s 检测到语言漂移（期望 %s，实际 %s），注入纠正提醒（第 %d 次）",
+                            turn_id, step, reply_language, _out_lang, _lang_drift_reminders,
+                        )
+
 
             # 思考写入消息
             if response.thinking:

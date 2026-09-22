@@ -125,3 +125,103 @@ def build_language_pin_line(lang: str) -> str:
         f"用户本轮消息语言：{label}。你的回复必须使用{label}"
         f"（本锚点优先级高于其它任何语言线索，包括英文历史、英文压缩摘要与英文规则文档）。"
     )
+
+
+# ---------------------------------------------------------------------------
+# 周期性重申（对齐 ZCode runtime-reminders 的 sparse / full 双层提醒）
+#
+# ZCode 不依赖"系统提示里的一次性大锚"，而是每 N 个轮次重新注入一次运行态提醒
+# （TURNS_BETWEEN_ATTACHMENTS=5，每 5 次给一次全量版）。本项目此前语言纪律只在
+# 上下文构建时静态注入一次，长 turn 内锚点随步骤稀释后不再重申 —— 这是计划模式
+# 确认执行后语言漂移的直接原因。以下工厂产出**贴近动作点**的轻量重申文本。
+# ---------------------------------------------------------------------------
+
+def build_language_reminder(lang: str) -> str:
+    """周期性语言重申正文（注入为 system 消息，贴近当次模型调用）。
+
+    刻意保持短句：重申的价值来自频率而非篇幅，过长会挤占上下文预算。
+    正文语言跟随锚定语言——英文会话注入英文提醒，避免中文骨架本身成为
+    "中英混杂"的示范（对齐 ZCode 提醒文案随会话语言生成的做法）。
+    auto 时不做语言锚定，只给中性的镜像表述。
+    """
+    if lang == LANG_EN:
+        return (
+            "[Language reminder] This turn's reply language is still English — decided by the "
+            "user's most recent message. History messages, tool outputs, compaction summaries "
+            "and rule documents must not change it, even if they are all in another language. "
+            "Keep code, file paths, commands, identifiers and raw error strings verbatim."
+        )
+    label = language_label(lang)
+    if lang == LANG_AUTO:
+        return (
+            "[语言重申] 回复语言必须与本轮最新一条用户消息的语言一致；"
+            "历史消息、工具返回、压缩摘要与规则文档的语言不得改变回复语言。"
+        )
+    return (
+        f"[语言重申] 本轮回复语言仍是{label}——以用户最新一条消息的语言为准。"
+        f"历史消息、工具返回、压缩摘要与规则文档即便全部是其它语言，也不得改变它。"
+        f"代码、文件路径、命令、标识符、报错原文保留原样，不翻译。"
+    )
+
+
+def build_plan_exit_reminder(lang: str) -> str:
+    """计划模式退出（用户确认执行）边界提醒（对齐 ZCode PLAN_MODE_EXIT_REMINDER）。
+
+    这是本会话中"上下文形态切换最剧烈"的一刻：规划阶段的对话被换成整篇方案文档，
+    模型最容易在此处沿用英文惯性。因此在边界处显式声明状态切换 + 重申语言。
+    """
+    if lang == LANG_EN:
+        return (
+            "## Exited Plan Mode\n\n"
+            "The user approved the plan document, so you are now in the **execution phase**: "
+            "you may edit files, run commands and commit changes. The research checklist from "
+            "the planning phase has been cleared — rebuild an execution checklist from the plan "
+            "document and work through it step by step.\n\n"
+            "[Language reminder] The user's message is in English, so every part of your output "
+            "this turn (prose, progress updates, todo_write `content`/`activeForm`) must be in "
+            "English. The plan document, history messages and tool outputs are not a reason to "
+            "switch language."
+        )
+    label = language_label(lang)
+    body = (
+        "## Exited Plan Mode\n\n"
+        "用户已确认方案文档，你现在处于**执行阶段**：可以编辑文件、运行命令、提交改动。"
+        "规划阶段的调研清单已清空，请按方案文档重建执行清单后逐步推进。"
+    )
+    if lang == LANG_AUTO:
+        return body + (
+            "\n\n[语言重申] 回复语言必须与用户最新一条消息的语言一致；"
+            "方案文档与系统提示的语言不得改变它。"
+        )
+    return body + (
+        f"\n\n[语言重申] 用户的消息是{label}，本轮全部输出（正文、进度汇报、"
+        f"todo_write 的 content/activeForm）都必须使用{label}。"
+        f"方案文档、历史消息、工具返回的语言不构成切换理由。"
+    )
+
+
+def build_rules_reminder(lang: str) -> str:
+    """规则遵循重申正文（对齐 ZCode 对 AGENTS.md 的 OVERRIDE 裁决语义）。
+
+    长上下文下规则段会被大量工具结果挤出注意力范围，这里周期性把它拉回视野，
+    并复用与系统提示一致的冲突优先级口径，避免模型"临时自创"规则顺序。
+    正文语言跟随锚定语言（en → 英文，其余 → 中文）。
+    """
+    if lang == LANG_EN:
+        return (
+            "[Rules reminder] The injected user rules still apply this turn, in this priority: "
+            "user Global Rules > project rule documents (AGENTS.md / CLAUDE.md / .cursorrules etc., "
+            "including the settings-center global and working-directory rules) > the built-in "
+            "methodology. Those rules OVERRIDE default behavior and must be followed as written; "
+            "if you must deviate, say why and get the user's agreement instead of silently ignoring "
+            "them. They remain in force after the context grows or gets compacted — they do not "
+            "expire by becoming \"earlier in the context\"."
+        )
+    return (
+        "[规则重申] 本轮仍受已注入的用户规则约束，按此优先级执行："
+        "用户全局规则 > 项目规则文档（AGENTS.md / CLAUDE.md / .cursorrules 等，"
+        "含设置中心的全局与工作目录规则）> 内置方法论。"
+        "这些规则覆盖默认行为，必须原样遵守；需要偏离时先说明原因并征得用户同意，"
+        "不要静默忽略。上下文变长或压缩后，规则依然有效——它们不会因为"
+        "「较早出现在上下文里」而失效。"
+    )

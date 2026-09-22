@@ -1,24 +1,14 @@
 /** 设置中心：外观（v2.2 对齐 zcode 3.18）。
- * 主题模式、毛玻璃效果、布局宽度、字号、左侧面板外观。 */
-import { useEffect, useState } from "react";
+ * 主题模式、毛玻璃效果、布局宽度、字号、左侧面板外观。
+ *
+ * plan-26-116：只保留**毛玻璃**一种玻璃模式——液态玻璃、液态玻璃（折射版）、
+ * 系统模糊后端提示、玻璃诊断/自检等全部移除，设置页不再出现任何后端/诊断文案。 */
 import { useThemeStore, type Theme } from "../../store/theme";
 import { useUiStore, type MotionLevel } from "../../store/ui";
-import {
-  fetchGlassDiagnostics, setGlassSelfCheck,
-  GLASS_VERDICT_LABEL, GLASS_VERDICT_TONE, type GlassDiagnostics,
-} from "../../utils/glassProbe";
 import { Slider } from "../ui";
 import { Row, Sw } from "./shared";
 
 const THEMES: Record<Theme, string> = { light: "浅色", dark: "深色" };
-
-/** plan-308-1542 需求4：系统级模糊后端的中文说明（设置页据此告知用户） */
-const GLASS_BACKEND_LABEL: Record<string, string> = {
-  "dwm-acrylic": "Win11 DWM Acrylic",
-  "win32-accent": "Win32 ACCENT 系统模糊",
-  vibrancy: "macOS Vibrancy",
-  none: "无（不支持系统级模糊）",
-};
 
 /** plan-248-1258 M5: 动画效果三档（低配机可减弱以提升流畅度） */
 const MOTION_LEVELS: Record<MotionLevel, { label: string; desc: string }> = {
@@ -27,9 +17,9 @@ const MOTION_LEVELS: Record<MotionLevel, { label: string; desc: string }> = {
   off: { label: "关闭", desc: "瞬时呈现" },
 };
 
-/** plan-308-1555 M9：玻璃强度三档（0 轻柔 / 1 标准 / 2 深邃）——不透明度由 ui.ts 计算 */
+/** plan-26-116 M4：玻璃强度三档（0 轻柔 / 1 标准 / 2 深邃）——各层不透明度由 ui.ts 计算 */
 const GLASS_STRENGTHS: Array<{ value: number; label: string; desc: string }> = [
-  { value: 0, label: "轻柔", desc: "面板更不透明，文字最清晰" },
+  { value: 0, label: "轻柔", desc: "面板更接近实色，文字最清晰" },
   { value: 1, label: "标准", desc: "默认：可读性与透出感平衡" },
   { value: 2, label: "深邃", desc: "透出桌面最明显（深色壁纸下更通透）" },
 ];
@@ -37,41 +27,7 @@ const GLASS_STRENGTHS: Array<{ value: number; label: string; desc: string }> = [
 export function AppearancePanel() {
   const { theme, setTheme } = useThemeStore();
   const ui = useUiStore();
-  // plan-308-1542 需求4：查询系统级模糊后端能力（窗口初始化时探测，运行期不变）
-  const [glassBackend, setGlassBackend] = useState<string>("");
-  const [glassCapability, setGlassCapability] = useState<{ backend: string; supported: boolean; reason?: string } | null>(null);
-  // plan-308-1555 M9：诊断结果（来自主进程：DWM 回读值 + 渲染层 alpha 链路）
-  const [diag, setDiag] = useState<GlassDiagnostics | null>(null);
-  const [diagBusy, setDiagBusy] = useState(false);
-  const [selfCheck, setSelfCheck] = useState(false);
-  useEffect(() => {
-    const api = window.chatcoderAPI;
-    if (!api?.glassCapability) return;
-    let alive = true;
-    void api.glassCapability().then((cap) => {
-      if (!alive || !cap) return;
-      setGlassCapability(cap);
-      setGlassBackend(cap.backend || "none");
-    }).catch(() => { /* 探测失败：不阻断设置页 */ });
-    return () => { alive = false; };
-  }, []);
 
-  /** 运行一次玻璃诊断（主进程回读 DWM + 注入探针采样渲染层 alpha 链路）。 */
-  const runDiagnostics = async () => {
-    setDiagBusy(true);
-    try {
-      const res = await fetchGlassDiagnostics();
-      setDiag(res);
-    } finally {
-      setDiagBusy(false);
-    }
-  };
-
-  /** 切换自检模式：临时把面板 alpha 压到极低 + 高饱和描边，一眼判定桌面是否混入。 */
-  const toggleSelfCheck = async (on: boolean) => {
-    const ok = await setGlassSelfCheck(on);
-    if (ok) setSelfCheck(on);
-  };
   return (
     <div className="settings-card-stack">
       <div className="settings-card">
@@ -90,28 +46,13 @@ export function AppearancePanel() {
         </Row>
         <Row
           title="毛玻璃效果"
-          desc={
-            ui.glassmorphism
-              ? `液态玻璃：面板微透出桌面（系统级模糊：${GLASS_BACKEND_LABEL[glassBackend] ?? glassBackend}）`
-              : "启用窗口与侧边栏半透明磨砂背景"
-          }
+          desc={ui.glassmorphism ? "左侧面板半透明磨砂，轻微透出桌面壁纸" : "启用左侧面板与启动页的半透明磨砂背景"}
         >
           <Sw checked={ui.glassmorphism} onChange={(v) => ui.setPrefs({ glassmorphism: v })} />
         </Row>
-        {/* plan-308-1542 需求4：液态玻璃风格 + 系统能力提示。
-            用户反馈"仅靠样式做不到透出软件"——这里明确告知是否具备系统级模糊后端，
-            不具备时不谎报效果（样式侧同时置 data-glass-degraded 降级为纯色）。 */}
+        {/* plan-26-126 M4：强度三档统一控制左侧面板的不透明度（低透明：0.94/0.90/0.86） */}
         {ui.glassmorphism && (
-          <Row title="液态玻璃" desc="面板边缘折射 + 高光斜面 + 内描边（关闭则仅系统模糊，无液态质感）">
-            <Sw
-              checked={(ui.glassStyle || "liquid") === "liquid"}
-              onChange={(v) => ui.setPrefs({ glassStyle: v ? "liquid" : "solid" })}
-            />
-          </Row>
-        )}
-        {/* plan-308-1555 M9：强度三档——控制面板不透明度（越深邃越透出桌面） */}
-        {ui.glassmorphism && (
-          <Row title="玻璃强度" desc="右面板/侧栏的不透明度。深色壁纸下若看不出来，请选「深邃」">
+          <Row title="玻璃强度" desc="左侧面板的不透明度。深色壁纸下若看不出透出，请选「深邃」">
             <div style={{ display: "flex", gap: 6 }}>
               {GLASS_STRENGTHS.map((s) => (
                 <button
@@ -126,57 +67,18 @@ export function AppearancePanel() {
             </div>
           </Row>
         )}
-        {ui.glassmorphism && glassBackend && glassBackend !== "none" && (
-          <Row title="系统模糊后端" desc={`当前由 ${GLASS_BACKEND_LABEL[glassBackend] ?? glassBackend} 提供真实透出桌面`}>
-            <span className="settings-badge-ok">已启用</span>
+        {/* plan-26-126 P1：毛玻璃**重启后生效**——开启/切换后提示用户重启（带一键重启）。
+            为何改为重启生效：运行期切换会让 DWM 合成与渲染层缓存失步
+            （左侧面板色块 / 设置页残影，只有重启才恢复），且在高频偏好写入下卡顿。 */}
+        {ui.glassmorphism && ui.glassNeedRestart && (
+          <Row title="重启后生效" desc="毛玻璃需要重启应用才能完全生效（设置已保存）">
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={() => { void window.chatcoderAPI?.relaunchApp?.(); }}
+            >
+              立即重启
+            </button>
           </Row>
-        )}
-        {ui.glassmorphism && glassBackend === "none" && (
-          <Row
-            title="系统模糊不可用"
-            desc={`当前系统无法提供系统级模糊（${glassCapability?.reason || "需要 Win11，或 Win10 安装 koffi 模块"}）；已降级为半透明纯色（不会透出桌面）`}
-          >
-            <span className="settings-badge-warn">已降级</span>
-          </Row>
-        )}
-
-        {/* plan-308-1555 M9：玻璃诊断——正面解决"改了看不出、到底哪儿不对"的历史困局。
-            这里展示**系统侧回读值**（而非 API 返回值），并给出可执行的判定结论。 */}
-        {ui.glassmorphism && (
-          <Row
-            title="玻璃诊断"
-            desc="回读系统实际生效的材质 + 检查透明度链路，给出「该修哪里」的结论"
-          >
-            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-              <button className="btn btn-ghost btn-sm" onClick={() => void runDiagnostics()} disabled={diagBusy}>
-                {diagBusy ? "检测中…" : "运行诊断"}
-              </button>
-              <button
-                className="btn btn-ghost btn-sm"
-                onClick={() => void toggleSelfCheck(!selfCheck)}
-                title="把面板调成半透明+高亮描边，一眼看出桌面有没有混进来"
-              >
-                {selfCheck ? "退出自检" : "自检模式"}
-              </button>
-            </div>
-          </Row>
-        )}
-        {ui.glassmorphism && diag && (
-          <div className="glass-diag">
-            <div className="glass-diag-head">
-              <span className={`settings-badge-${GLASS_VERDICT_TONE[diag.conclusion.verdict] === "ok" ? "ok" : "warn"}`}>
-                {GLASS_VERDICT_LABEL[diag.conclusion.verdict]}
-              </span>
-              <span className="glass-diag-line">{diag.line}</span>
-            </div>
-            <div className="glass-diag-reason">{diag.conclusion.reason}</div>
-            {selfCheck && (
-              <div className="glass-diag-reason">
-                自检模式已开启：面板已调至极低不透明度。若能明显看到壁纸颜色 ⇒ 材质与链路正常（此前只是对比度不足）；
-                若毫无变化 ⇒ 材质未生效或被遮挡。
-              </div>
-            )}
-          </div>
         )}
         <Row title="动画效果" desc="低配置设备可选择「减弱」或「关闭」以提升流畅度">
           <div style={{ display: "flex", gap: 6 }}>

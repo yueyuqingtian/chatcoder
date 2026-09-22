@@ -1344,6 +1344,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         from app.persistence.models.agent import Agent
         from app.persistence.models.task import Task
         from app.orchestration.context_manager import build_main_context
+        from app.orchestration.prompts import build_plan_exit_reminder
         from app.orchestration.subagent import get_subagent_manager
         from app.orchestration.subagent_tools import append_subagent_tools, load_subagent_type_states
         from app.orchestration.tools.registry import tool_registry
@@ -1431,6 +1432,13 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             user_message=original_request,
             multimodal=_is_multimodal,
             effective_model_id=effective_model_id,
+        )
+        # plan-19-82 增强（对齐 ZCode PLAN_MODE_EXIT_REMINDER）：确认执行是本会话中
+        # 上下文形态切换最剧烈的一刻——规划阶段的对话被整篇方案文档替换，叠加 16000
+        # 字符方案文档与全英文系统提示，模型最容易在此处沿用英文惯性。因此在边界处
+        # 显式声明"已退出规划、进入执行"并重申语言，而非仅依赖构建时的一次性锚。
+        bundle.developer_parts.append(
+            build_plan_exit_reminder(bundle.reply_language)
         )
         bundle.instruction = (
             "用户已确认以下方案文档，现在按它执行：\n\n"

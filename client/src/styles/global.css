@@ -77,7 +77,10 @@ a { color: var(--accent); text-decoration: none; }
 .app-main { flex: 1 1 auto; display: flex; flex-direction: column; overflow: hidden; background: var(--bg-panel); min-width: 420px; }
 .app-main.right-panel-collapsed { min-width: 0; }
 /* ── 标题栏 ── */
-.titlebar { height: var(--titlebar-h); display: flex; align-items: center; justify-content: space-between; padding: 0 8px 0 12px; background: var(--bg-panel); border-bottom: 1px solid var(--border); flex-shrink: 0; -webkit-app-region: drag; }
+/* plan-26-126 P2：标题栏**不再是** -webkit-app-region: drag —— 该区域由系统处理拖拽/双击，
+   DOM 拿不到 dblclick，双击会直接触发系统原生最大化（破坏玻璃）。现改自研拖拽
+   （mousedown 延迟发起原生拖动）+ 渲染层 dblclick（转伪最大化），见 TitleBar.tsx。 */
+.titlebar { height: var(--titlebar-h); display: flex; align-items: center; justify-content: space-between; padding: 0 8px 0 12px; background: var(--bg-panel); border-bottom: 1px solid var(--border); flex-shrink: 0; cursor: default; }
 .titlebar-left, .titlebar-right { display: flex; align-items: center; gap: 8px; -webkit-app-region: no-drag; }
 .titlebar-left .titlebar-btn,
 .titlebar-right .titlebar-btn { margin: 0 2px; }
@@ -2718,20 +2721,7 @@ a { color: var(--accent); text-decoration: none; }
   border: 1px solid color-mix(in srgb, var(--warning) 34%, transparent);
   background: color-mix(in srgb, var(--warning) 10%, transparent);
 }
-/* plan-308-1555 M9：玻璃诊断结果区（回读值 + 判定结论，正面解决"改了看不出"） */
-.glass-diag {
-  margin: 6px 0 2px; padding: 10px 12px; border-radius: var(--r-sm);
-  background: var(--bg-elevated); border: 1px solid var(--border);
-  display: flex; flex-direction: column; gap: 6px;
-}
-.glass-diag-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.glass-diag-line {
-  font-family: var(--font-mono); font-size: 11px; color: var(--text-3);
-  word-break: break-all;
-}
-.glass-diag-reason { font-size: 12px; color: var(--text-2); line-height: 1.6; }
-/* 液态玻璃折射叠加层：铺满宿主容器，不拦截交互 */
-.lg-overlay { border-radius: inherit; }
+/* plan-26-116：玻璃诊断结果区样式（.glass-diag*）与折射叠加层残留注释已移除。 */
 .worktree-group { display: flex; flex-direction: column; gap: var(--sp-2); }
 .worktree-group-head {
   display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);
@@ -3377,7 +3367,7 @@ a { color: var(--accent); text-decoration: none; }
 .confirm-msg { font-size: var(--fs-sm); color: var(--text-2); line-height: 1.65; margin-bottom: 20px; }
 .confirm-actions { display: flex; gap: 8px; justify-content: flex-end; }
 /* 通用工具 ── */
-/* 分隔条只负责提供拖拽命中区；视觉边框由左右面板自身绘制，避免中心变换落在半像素上。 */
+/* 分隔条只负责提供拖拽命中区；视觉分隔由左右面板自身绘制（避免中心变换落在半像素上）。 */
 .resize-handle {
   flex-shrink: 0;
   width: 10px;
@@ -3413,6 +3403,10 @@ a { color: var(--accent); text-decoration: none; }
 body.panel-dragging { cursor: col-resize !important; }
 /* 拖拽期间禁用面板宽度过渡，保证宽度即时跟随鼠标 */
 body.panel-dragging .app-pane { transition: none; }
+/* plan-26-126 P6：窗口拖动中——统一光标，并关掉面板宽度过渡（此时宽度是被动跟随，
+   过渡会让内容"追着窗口跑"）。渲染层另据 body 上的这个类跳过位置补偿类重活。 */
+body.window-dragging { cursor: move !important; user-select: none; }
+body.window-dragging .app-pane { transition: none; }
 /* plan-308-1555 M7：已删除客户端启动蒙层（.splash / .splash-overlay）。
    开屏统一由主进程 loading.html 承担（带加载指示 + 玻璃质感），避免两个开屏叠放。 */
 .toast-container { position: fixed; bottom: 20px; right: 20px; z-index: 2000; display: flex; flex-direction: column; gap: 8px; }
@@ -3429,8 +3423,9 @@ body.panel-dragging .app-pane { transition: none; }
 .app-shell { border: 1px solid var(--border); border-radius: 10px; }
 /* 侧栏全高后，标题栏不再与侧栏对齐分列，左区宽度自适应 */
 .titlebar-left { flex: 0 0 auto; min-width: 0; }
-/* 侧栏头部（logo + 前进/后退）：与标题栏同高，作为窗口拖拽区 */
-.sb-head { height: var(--titlebar-h); display: flex; align-items: center; gap: 4px; padding: 0 10px; flex-shrink: 0; -webkit-app-region: drag; }
+/* 侧栏头部（logo + 前进/后退）：与标题栏同高。
+   plan-26-126 P2：同样取消系统 drag 区（原因见 .titlebar），保留布局与内边距不变。 */
+.sb-head { height: var(--titlebar-h); display: flex; align-items: center; gap: 4px; padding: 0 10px; flex-shrink: 0; }
 .sb-head button, .sb-head .sb-logo { -webkit-app-region: no-drag; }
 .titlebar-workspace { display: flex; align-items: center; gap: 10px; min-width: 0; max-width: min(720px, 42vw); height: 100%; }
 .titlebar-workspace-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-1); font-size: 13px; font-weight: 600; }
@@ -4279,60 +4274,89 @@ body.panel-dragging .app-pane { transition: none; }
 .sb-project-new:hover { color: var(--accent, var(--text-1)); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 
 /* ══════════════════════════════════════════════════════════════════
-   plan-308-1555 M4：修正透明度链路（**这是"透不出桌面"的真正原因**）
+   plan-26-126：毛玻璃（唯一玻璃模式）——**仅左侧面板**（+ 启动加载页，见 electron/loading.html）
    --------------------------------------------------------------
-   实测证据（镜像实验 + DWM 回读）：
-     * 系统层材质一直是生效的（回读 DWMWA_SYSTEMBACKDROP_TYPE = acrylic(3)）；
-     * 左侧栏 / 标题栏改 alpha 后像素确实变化 ⇒ 透明度链路本身有效；
-     * **但 .app-pane-right 一直是 var(--bg-panel) 完全不透明**——
-       上一轮只给 .app-pane-left 写了 transparent，右侧面板整列把材质挡住了。
-   因此这里逐层补齐"玻璃开启时应透明"的容器，并明确"哪些必须保持不透明"。
+   范围（N1）：只做左列。顶部标题栏 / 中间面板 / 右侧面板 / 设置页 / 菜单 / 弹窗 / composer
+               一律回到基础不透明样式（撤销上一轮的四层玻璃覆盖）。
+   前提：玻璃开启时窗口底保持透明，让 DWM 材质从最底层透上来。由于只有左列是玻璃面，
+        其余面板自身不透明，视觉上也就只有左列轻微透出桌面。
    ══════════════════════════════════════════════════════════════════ */
 
-/* ① 窗口底与外框：全部透明，让系统材质从最底层透上来 */
-[data-glass="on"] html,
-[data-glass="on"] body,
-[data-glass="on"] #root { background: transparent; }
-[data-glass="on"] .app-shell { background: transparent; border-color: transparent; }
+/* ① 窗口底与外框：玻璃开启时必须透明（DWM 材质 / 桌面从这里透上来）。
+   两个历史坑，务必保持现状：
+     * `[data-glass="on"] html` 这类写法**永远不匹配**——data-glass 挂在 <html> 自身，
+       html 不可能是自身属性的后代，必须写成 :root[data-glass="on"]；
+     * 透明**不得与 data-maximized 耦合**，否则最大化/全屏后 body 落回不透明底色，
+       会把 DWM 材质整个盖住（这正是"点最大化就透不出桌面"的根因之一）。
+   注：这里**不能**给 .app-shell / .app-body 铺不透明底——那会把桌面挡住、左面板玻璃失效。
+     接缝问题改由面板自身解决（见下方 .app-pane-right 的 background-clip 修正）。 */
+:root[data-glass="on"],
+:root[data-glass="on"] body,
+:root[data-glass="on"] #root { background: transparent; }
+:root[data-glass="on"] .app-shell { background: transparent; border-color: transparent; }
 
-/* ② 左右面板容器 + 右侧面板内层（**修复点**：此前 .app-pane-right / .rp-body 缺失） */
-[data-glass="on"] .app-pane-left,
-[data-glass="on"] .app-pane-right,
-[data-glass="on"] .app-right,
-[data-glass="on"] .app-body { background: transparent; }
-[data-glass="on"] .rp-body { background: transparent; }
+/* ② 左列：唯一的玻璃面。
+   承载层 = .app-pane-left（左列容器）；.sidebar.sb 必须透明，避免"容器 + 侧栏"双层底色叠色。
+   同时**撤销**上一轮擅自加的横线与材质覆盖（N7/N8）：
+     * 曾给 .sb-head 加过 `inset 0 -1px 0` 发丝线 → 用户看到"左侧面板顶部多了一条横线"；
+     * 曾把 .sb-head 并入顶栏材质组 → 顶部条与侧栏**底色不同**，形成材质断层。
+   现在 .sb-head / .sb-list / .sb-userbar 均无自己的底色与横线，左列自顶到底一种材质。 */
+[data-glass="on"] .app-pane-left {
+  background: color-mix(in srgb, var(--frost-left-tint) calc(var(--frost-left-alpha, 0.9) * 100%), transparent);
+}
+[data-glass="on"] .sidebar.sb { background: transparent; box-shadow: none; }
 
-/* ③ 侧栏与标题栏：玻璃面板（高光 + 内描边 + 半透明底色） */
-[data-glass="on"] .sidebar.sb {
-  background: var(--bg-sidebar);
-  background:
-    linear-gradient(150deg,
-      color-mix(in srgb, var(--ambient-c1, var(--bg-sidebar)) 30%, transparent),
-      color-mix(in srgb, var(--ambient-c2, var(--bg-sidebar)) 30%, transparent)),
-    color-mix(in srgb, var(--bg-sidebar) calc(var(--glass-sidebar-alpha, 0.68) * 100%), transparent);
+/* ③ 左/中分割线：保留基础样式的 1px `border-right`（宽度与占位不动 ⇒ 布局零位移），
+   玻璃态下只替换**颜色**为中性的 --frost-divider。
+   为何必须如此（N9/N10，上一轮的教训）：曾把 border 置 transparent 并由"发丝线"接替，
+   于是该 1px 像素列**直接显示窗口底**（DWM 材质 + 桌面壁纸），颜色不可控：
+     * 浅色壁纸下与相邻面板亮度接近 ⇒ 用户看到"分割线完全看不见"；
+     * 深色壁纸下是一条由壁纸决定的偏亮细线 ⇒ 用户看到"彩色线"。
+   现在线画在 .app-pane-left **自身底之上**，颜色可预期：浅色可见、深色中性，绝不发彩。 */
+[data-glass="on"] .app-pane-left { border-right-color: var(--frost-divider); }
+
+/* ③-b 中/右接缝（修"中间和右侧面板间一条透明线"）——
+   根因：.app-pane-right 基础样式带 `background-clip: padding-box`，
+     意味着**背景不画在 border 区域**；而它的父容器 .app-body 是透明的，
+     于是那条 1px `border-left` 的半透明色直接叠在"无底"之上 → 透出窗口底/桌面，
+     看起来就是一条"透明的线"（深色模式下与面板对比大，最容易发现）。
+   修法：玻璃态下让背景回到 border-box（覆盖 padding-box），
+     使这 1px 变成"面板底色 + 边框色"，不再透桌面。**只改 clip，不改宽度、不改布局**。 */
+[data-glass="on"] .app-pane-right { background-clip: border-box; }
+
+/* 以下为上一轮"四层玻璃材质"（L1 侧栏 / L2 顶栏+右面板 / L3 主内容 / L4 浮层）的移除说明：
+   该四层结构已于 plan-26-126 M1 **整体撤除**——范围收敛为"仅左面板"（N1）。
+   现状：.titlebar / .right-panel / .app-main / .message-flow* / .settings-page-overlay /
+        .settings-sidebar / .context-menu / .ui-dialog / .composer-box / .message-search-bar
+        全部走基础不透明样式（不再有玻璃覆盖）。
+   材质 token 相应收敛为左面板专用（--frost-left-tint / --frost-left-alpha，见 tokens.css）。
+   此处不再保留任何非左面板的玻璃规则，避免后续误加回来造成范围回涨。 */
+/* ══ ④ 交互态（H5，范围收敛到左列）：柔和 frosted 高亮，不再是突兀白块 ══
+   问题：玻璃态下侧栏选中项走 --bg-active（深色档 = 白 10%），在轻微半透明的侧栏上
+   就是一块突兀的"白块"，与材质割裂；且同一侧栏曾同时存在两套高亮语言
+   （--bg-active 与 --sidebar-focus 14% 混色）。
+   统一为：选中态走 --frost-selected（柔和混色 + 5% 内描边），文字色**不突变**
+   （保持 --text-1，不再切成纯白），hover 取选中色的 60% 以保证 hover < selected。
+   覆盖：侧栏会话、侧栏导航（含设置侧栏复用项）。关闭玻璃时完全不受影响。 */
+:root[data-glass="on"] .sb-session.active,
+:root[data-glass="on"] .sb-nav-item.active {
+  background: var(--frost-selected);
+  box-shadow: inset 0 0 0 1px var(--frost-selected-line);
+  color: var(--text-1);
 }
-/* 标题栏/右面板保持应用内磨砂（背后是应用内容，backdrop-filter 有效） */
-[data-glass="on"] .titlebar,
-[data-glass="on"] .right-panel {
-  background:
-    linear-gradient(150deg,
-      color-mix(in srgb, var(--ambient-c1, var(--bg-sidebar)) 55%, transparent),
-      color-mix(in srgb, var(--ambient-c2, var(--bg-sidebar)) 55%, transparent)),
-    color-mix(in srgb, var(--bg-sidebar) 72%, transparent);
-  backdrop-filter: blur(calc(12px * var(--glass-strength, 1)));
-  -webkit-backdrop-filter: blur(calc(12px * var(--glass-strength, 1)));
+/* 侧栏会话标题：不再因选中切成 --sidebar-focus（白/品牌色），避免与材质割裂 */
+:root[data-glass="on"] .sidebar.sb .sb-session.active .sb-session-title {
+  color: var(--text-1);
+}
+/* hover 淡于 selected（按选中色的 60% 混合），保证层级单调 */
+:root[data-glass="on"] .sb-session:hover,
+:root[data-glass="on"] .sb-nav-item:hover {
+  background: color-mix(in srgb, var(--frost-selected) 60%, transparent);
 }
 
-/* ④ 明确保持不透明：消息流与主内容区（决策 B 硬约束，可读性优先）
-      这里把"必须不透明"写进代码，防止后续再被误改成透明 */
-[data-glass="on"] .app-main,
-[data-glass="on"] .message-flow,
-[data-glass="on"] .message-flow-wrap,
-[data-glass="on"] .message-flow-outer {
-  background: var(--bg-panel);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-}
+/* 系统无可用模糊后端时：由 ui.ts 直接把 --frost-left-alpha 提到 0.97 近实
+   （内联自定义属性优先级高于样式表，因此降级只能在 JS 侧落地），
+   data-glass-degraded 仅作为状态标记，不向用户展示任何后端/诊断文案。 */
 
 /* ══════════════════════════════════════════════════════════════════
    plan-308-1555 M6c：窗口圆角（修"缩小后变直角边框"）
@@ -4343,7 +4367,10 @@ body.panel-dragging .app-pane { transition: none; }
      * 渲染层据 data-maximized 决定 CSS 圆角，避免"系统直角 + CSS 圆角"打架产生黑边。
    ══════════════════════════════════════════════════════════════════ */
 
-/* 有原生圆角时：内容铺满，圆角由系统绘制（CSS 不再画，避免双层圆角错位） */
+/* 有原生圆角时：内容铺满，圆角由系统绘制（CSS 不再画，避免双层圆角错位）。
+   注（plan-26-116 M2）：这里**保留**原来的「仅非最大化时透明」条件，以保证关闭玻璃时的
+   观感与改动前完全一致；最大化/全屏下的透明由上方 `:root[data-glass="on"] body`
+   无条件提供（那条规则在文件中靠后，优先级足够覆盖 platform 规则）。 */
 :root[data-native-corners="1"] .app-shell { border-radius: 0; border: none; }
 :root[data-native-corners="1"][data-maximized="0"] body { background: transparent; }
 
@@ -4354,109 +4381,46 @@ body.panel-dragging .app-pane { transition: none; }
 }
 :root[data-native-corners="0"] body { background: transparent; }
 
-/* 最大化/全屏：一定是直角（与系统 DONOTROUND 对齐），且不留缝隙 */
-:root[data-maximized="1"] .app-shell { border-radius: 0 !important; border: none; }
+/* 最大化/全屏：一定是直角（与系统 DONOTROUND 对齐），且不留缝隙。
+   plan-26-126 P5（修"全屏四周看到桌面边缘色"）：
+     根因是贴合口径——setBounds 设的是**窗口外框**，而 frame:false 窗口在 Windows 上
+     仍带一圈不可见 resize 边框，可见内容因此内缩约 1px；玻璃态窗口透明，这圈就露桌面。
+     主进程已改用 setContentBounds（客户区精确贴合 workArea），此处配合把圆角/边框清零。
+   注：**不能**在这里给 .app-shell 铺不透明底——最大化时左面板仍需玻璃。 */
+:root[data-maximized="1"] .app-shell {
+  border-radius: 0 !important;
+  border: none !important;
+  outline: none !important;
+}
 
-/* ══════════════════════════════════════════════════════════════════
-   plan-308-1542 需求4：液态玻璃（Liquid Glass）
-   --------------------------------------------------------------
-   用户诉求：左侧面板等要"微微透出桌面"，样式更精美；消息流保持正常不变。
-   分成两层：
-     1) **系统层**（electron 主进程）：Win11 DWM acrylic / Win10 ACCENT 系统模糊 /
-        mac vibrancy——负责"真的把桌面模糊后透出来"；
-     2) **App 层**（以下样式）：只负责液态质感（对角高光 + 1px 内描边 + 柔和外阴影），
-        并把各区域底色调到半透明，让系统模糊层显现。
-   明确排除：.app-main / 消息流 / 消息气泡保持不透明（用户要求消息流正常不变）。
-   ══════════════════════════════════════════════════════════════════ */
-[data-glass="on"][data-glass-style="liquid"] .sidebar.sb {
-  background:
-    var(--lg-sheen),
-    color-mix(in srgb, var(--bg-sidebar) calc(var(--lg-alpha-sidebar, 0.68) * 100%), transparent);
-  box-shadow: inset 1px 0 0 var(--lg-edge), var(--lg-shadow);
-}
-/* 左侧面板整列：透出系统模糊层 + 右缘高光 */
-[data-glass="on"][data-glass-style="liquid"] .app-pane-left {
-  background: transparent;
-  box-shadow: inset -1px 0 0 var(--lg-edge);
-}
-/* plan-308-1555 M4 修复：右侧面板整列此前**完全没有玻璃规则**（一直不透明），
-   导致"开了毛玻璃右面板依然挡住桌面"。此处与左面板对称补齐。 */
-[data-glass="on"][data-glass-style="liquid"] .app-pane-right {
-  background: transparent;
-  box-shadow: inset 1px 0 0 var(--lg-edge);
-}
-[data-glass="on"][data-glass-style="liquid"] .rp-body { background: transparent; }
-/* 标题栏 / 右侧面板：应用内磨砂 + 液态高光与内描边 */
-[data-glass="on"][data-glass-style="liquid"] .titlebar,
-[data-glass="on"][data-glass-style="liquid"] .right-panel {
-  background:
-    var(--lg-sheen),
-    color-mix(in srgb, var(--bg-sidebar) calc(var(--lg-alpha-panel, 0.72) * 100%), transparent);
-  backdrop-filter: blur(calc(var(--lg-blur) * var(--glass-strength, 1))) saturate(var(--lg-saturate));
-  -webkit-backdrop-filter: blur(calc(var(--lg-blur) * var(--glass-strength, 1))) saturate(var(--lg-saturate));
-  box-shadow: inset 0 1px 0 var(--lg-edge);
-}
-/* 设置侧栏（与左面板同源材质） */
-[data-glass="on"][data-glass-style="liquid"] .settings-sidebar,
-[data-glass="on"][data-glass-style="liquid"] .settings-page-overlay {
-  background: color-mix(in srgb, var(--bg-main) calc(var(--lg-alpha-panel, 0.72) * 100%), transparent);
-  backdrop-filter: blur(calc(var(--lg-blur) * var(--glass-strength, 1)));
-  -webkit-backdrop-filter: blur(calc(var(--lg-blur) * var(--glass-strength, 1)));
-}
-/* 弹层/菜单/输入区：轻量玻璃（高不透明度保证可读性） */
-[data-glass="on"][data-glass-style="liquid"] .context-menu,
-[data-glass="on"][data-glass-style="liquid"] .ui-dialog,
-[data-glass="on"][data-glass-style="liquid"] .composer-box,
-[data-glass="on"][data-glass-style="liquid"] .message-search-bar {
-  background:
-    var(--lg-sheen),
-    color-mix(in srgb, var(--bg-elevated) calc(var(--lg-alpha-overlay, 0.86) * 100%), transparent);
-  border: 1px solid var(--lg-edge);
-  backdrop-filter: blur(calc(10px * var(--glass-strength, 1))) saturate(var(--lg-saturate));
-  -webkit-backdrop-filter: blur(calc(10px * var(--glass-strength, 1))) saturate(var(--lg-saturate));
-  box-shadow: var(--lg-shadow);
-}
-/* 消息流与主内容区**保持不透明**（用户明确要求消息流正常不变） */
-[data-glass="on"] .app-main,
+/* plan-26-116：液态玻璃/折射版已移除，面板材质统一由上方「毛玻璃材质规范」区块承担。 */
+
+/* 消息流气泡不叠加 backdrop-filter（桌面模糊由系统材质承担，重复模糊是卡顿源） */
 [data-glass="on"] .message-flow-wrap,
 [data-glass="on"] .turn-user-bubble {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }
-/* 系统不支持模糊时：退化为纯色（不谎报"透出桌面"），设置页会给出提示 */
-[data-glass="on"][data-glass-degraded="1"] .sidebar.sb,
-[data-glass="on"][data-glass-degraded="1"] .titlebar,
-[data-glass="on"][data-glass-degraded="1"] .right-panel {
-  background: var(--bg-sidebar);
-}
-/* 不支持 backdrop-filter 的环境（老 Chromium）降级为半透明底色 */
-@supports not (backdrop-filter: blur(1px)) {
-  [data-glass="on"][data-glass-style="liquid"] .titlebar,
-  [data-glass="on"][data-glass-style="liquid"] .right-panel {
-    background: color-mix(in srgb, var(--bg-sidebar) 88%, transparent);
-  }
-}
 
 /* ══════════════════════════════════════════════════════════════════
-   plan-308-1555 M5：玻璃自检模式
+   plan-24-106 M4：玻璃开启时的持续动画降级
    --------------------------------------------------------------
-   用途（针对"反复改却看不出"的历史困局）：把面板 alpha 临时压到极低并加高饱和描边，
-   让"桌面到底有没有混进来"一眼可判——
-     * 若自检下明显变亮/透出壁纸色 ⇒ 材质与链路都正常，此前只是对比度不足；
-     * 若自检下毫无变化 ⇒ 材质确实没生效或被遮挡，需查主进程回读值与遮挡层。
-   由设置页「玻璃诊断 → 运行自检」触发，不写进用户偏好、刷新即恢复。
+   依据（R5-5）：玻璃态下窗口底层有系统材质（DWM acrylic / ACCENT / vibrancy）
+   在持续合成，此时**装饰性的无限循环动画**会不断触发重绘，是"开了玻璃就很卡"
+   的可感来源。这里只降级**纯装饰**的呼吸/脉冲类（skeleton 占位、goal pill、浏览器
+   镜像横幅），刻意保留：
+     * spinner / session-spin —— 用户据此判断"正在进行中"，是功能反馈而非装饰；
+     * 思考 ticker —— 由 rAF 驱动，属内容区真实活动指示。
+   与既有 --motion / prefers-reduced-motion 机制一致，只是把触发条件扩展到"玻璃开启"。
    ══════════════════════════════════════════════════════════════════ */
-:root[data-glass-selfcheck="1"][data-glass="on"] .sidebar.sb,
-:root[data-glass-selfcheck="1"][data-glass="on"] .titlebar,
-:root[data-glass-selfcheck="1"][data-glass="on"] .right-panel {
-  background: rgba(255, 64, 129, 0.06) !important;
-  outline: 2px solid rgba(255, 64, 129, 0.9) !important;
-  outline-offset: -2px !important;
+:root[data-glass="on"] .usage-skeleton-card,
+:root[data-glass="on"] .usage-skeleton-block,
+:root[data-glass="on"] .goal-pill-label,
+:root[data-glass="on"] .browser-mirror-banner {
+  animation: none !important;
 }
-:root[data-glass-selfcheck="1"][data-glass="on"] .app-shell {
-  outline: 2px solid rgba(0, 200, 255, 0.9) !important;
-  outline-offset: -2px !important;
-}
+
+
 
 
 /* v1.1: 使用统计页总览卡 */
@@ -4557,8 +4521,20 @@ body.panel-dragging .app-pane { transition: none; }
 .terminal-error-msg { color: var(--danger, #f85149); font-size: 12px; }
 
 /* v19: 设置侧栏（并入主布局后复用侧栏壳样式） */
-.settings-sidebar .sb-back-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px; margin: 2px 6px; border-radius: var(--r-sm); font-size: 12px; color: var(--text-2); cursor: pointer; }
-.settings-sidebar .sb-back-item:hover { background: var(--bg-hover); color: var(--text-1); }
+.settings-sidebar .sb-back-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px; margin: 2px 6px; border-radius: var(--r-sm); font-size: 12px; color: var(--text-2); cursor: pointer; transition: background var(--dur-fast), color var(--dur-fast); }
+/* plan-26-126 P7：按钮底色与既有导航项**同一套语言**（不再用 --bg-hover）。
+ *  问题（用户实测）：鼠标点过该按钮后，按钮上残留一块**明显的灰底**。
+ *  根因有两条，缺一不可：
+ *    ① --bg-hover 在浅色主题是**纯中性灰**（neutral-200 ≈ #e5e5e5），而侧栏底色是偏蓝的
+ *       --bg-sidebar ⇒ 色相不一致，看起来就是"贴了一块灰"；
+ *    ② 该按钮**未被**玻璃态的 frost 规则覆盖（只有 .sb-session / .sb-nav-item 被覆盖），
+ *       玻璃开启时它仍走不透明灰 ⇒ 与材质割裂，更显突兀。
+ *  修法：hover 与 .sb-nav-item:hover 对齐（bg-hover → 侧栏族高亮），
+ *       玻璃态再统一走 --frost-selected 的 60%（与导航项完全同一条规则）。
+ *  注：按钮**不加** :focus 背景——focus.css 已全局约定"按钮聚焦零描边"，
+ *       背景残留属于 hover 退出后的绘制残留，改用它同族颜色即同步消失。 */
+.settings-sidebar .sb-back-item:hover { background: var(--color-surface-hover); color: var(--text-1); }
+:root[data-glass="on"] .settings-sidebar .sb-back-item:hover { background: color-mix(in srgb, var(--frost-selected) 60%, transparent); color: var(--text-1); }
 .settings-sidebar .sb-nav-item { cursor: pointer; }
 
 /* v19: 插件页 */

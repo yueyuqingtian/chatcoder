@@ -157,3 +157,71 @@ def test_summary_prefix_and_preamble_by_language():
     assert "另一个语言模型" in get_summary_prefix("zh")
     assert "另一" in get_checkpoint_preamble("zh") or "检查点" in get_checkpoint_preamble("zh")
     assert "checkpoint" in get_checkpoint_preamble("en").lower()
+
+
+# ── 5. 周期性重申与边界提醒（对齐 ZCode runtime-reminders）─────────────────
+
+def test_language_reminder_semantics():
+    """重申文本须含纪律要点，且短小（重申的价值在频率而非篇幅）。"""
+    from app.orchestration.prompts import build_language_reminder
+
+    r_zh = build_language_reminder("zh")
+    assert "语言重申" in r_zh
+    assert "简体中文" in r_zh
+    # 仍须声明"不得被历史/工具/摘要/规则文档改变"
+    assert "压缩摘要" in r_zh and "规则文档" in r_zh
+    assert "保留原样" in r_zh
+    # 英文锚定时正文须整体切到英文，不得留中文骨架（否则自身即中英混杂示范）
+    r_en = build_language_reminder("en")
+    assert "Language reminder" in r_en
+    assert "本轮" not in r_en and "语言重申" not in r_en
+    # auto 不做语言锚定，但仍有通用镜像表述
+    r_auto = build_language_reminder("auto")
+    assert "语言重申" in r_auto
+    # 短句：重申过长会挤占上下文预算
+    assert len(r_zh) < 400 and len(r_en) < 700
+
+
+def test_plan_exit_reminder_semantics():
+    """确认执行边界提醒：声明状态切换 + 重申语言。"""
+    from app.orchestration.prompts import build_plan_exit_reminder
+
+    r_zh = build_plan_exit_reminder("zh")
+    assert "Exited Plan Mode" in r_zh
+    # 边界提醒必须同时说明"语言未变"与"方案文档不构成切换理由"
+    assert "语言重申" in r_zh
+    assert "简体中文" in r_zh
+    assert "方案文档" in r_zh
+    # 执行阶段语义
+    assert "执行" in r_zh
+
+    r_en = build_plan_exit_reminder("en")
+    assert "Exited Plan Mode" in r_en
+    assert "Language reminder" in r_en
+    # 英文锚定时不留中文骨架
+    assert "本轮" not in r_en and "语言重申" not in r_en
+
+
+def test_rules_reminder_semantics():
+    """规则重申：复用与系统提示一致的冲突优先级口径。"""
+    from app.orchestration.prompts import build_rules_reminder
+
+    r_zh = build_rules_reminder("zh")
+    assert "规则重申" in r_zh
+    assert "用户全局规则 > 项目规则文档" in r_zh
+    assert "AGENTS.md" in r_zh and "CLAUDE.md" in r_zh
+    # 必须声明"压缩后依然有效"，否则长上下文下重申无意义
+    assert "压缩" in r_zh
+
+    r_en = build_rules_reminder("en")
+    assert "Rules reminder" in r_en
+    assert "OVERRIDE" in r_en
+    assert "AGENTS.md" in r_en
+
+
+def test_reminder_interval_settings_exist():
+    """重申间隔配置存在且为正数默认值（0 会静默禁用整个机制）。"""
+    from app.core.config import settings
+
+    assert settings.language_reminder_interval > 0
+    assert settings.rules_reminder_interval > 0

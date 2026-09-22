@@ -70,3 +70,82 @@ def test_user_rules_loader_labeled(tmp_path, monkeypatch):
 
     w = user_rules_loader.load_workdir_rules_labeled(str(tmp_path))
     assert "工作目录规则" in w and "禁止 print 调试" in w
+
+
+# ── plan-19-82 增强：规则独立通道（对齐 ZCode 的 meta_user 通道隔离）────────
+
+def test_rules_go_into_dedicated_channel():
+    """规则段必须落在独立通道，不与工具说明/结构摘要平铺在同一条 developer 消息里。"""
+    from app.models.schemas import ChatMessage
+    from app.orchestration.context_manager import ContextBundle
+
+    bundle = ContextBundle(system="SYS")
+    bundle.rules_parts.append("## Global Rules (MANDATORY — highest priority)\n全局规则内容")
+    bundle.developer_parts.append("## Tool Usage Rules\n工具说明")
+    bundle.developer_parts.append("## Project Structure\n目录结构")
+
+    msgs = bundle.to_messages()
+    assert isinstance(msgs[0], ChatMessage) and msgs[0].role == "system"
+    # 规则独立成第二条消息，且紧随 system（注意力锚点）
+    assert msgs[1].role == "developer"
+    assert "Global Rules" in msgs[1].content
+    assert "工具说明" not in msgs[1].content
+    assert "目录结构" not in msgs[1].content
+    # 其余上下文在第三条 developer 消息中
+    assert msgs[2].role == "developer"
+    assert "工具说明" in msgs[2].content
+    assert "Global Rules" not in msgs[2].content
+
+
+def test_bundle_without_rules_keeps_single_developer():
+    """无规则时不应多插空消息（保持既有消息序列形态）。"""
+    from app.orchestration.context_manager import ContextBundle
+
+    bundle = ContextBundle(system="SYS")
+    bundle.developer_parts.append("## Tool Usage Rules\n工具说明")
+    msgs = bundle.to_messages()
+    assert [m.role for m in msgs] == ["system", "developer"]
+    assert "工具说明" in msgs[1].content
+
+
+def test_rule_documents_priority_declared():
+    """规则通道须携带冲突优先级裁决（对齐 ZCode OVERRIDE 语义）。"""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.orchestration.context_manager import build_main_context
+
+    session = MagicMock()
+    session.id = 1
+    session.worktree_path = "D:/nonexistent-ws"
+    session.model_id = None
+    session.permission_mode = "default"
+    session.shared_context = {}
+    project = MagicMock()
+    project.id = 1
+    project.path = "D:/nonexistent-ws"
+    project.rules_docs = None
+
+    with patch("app.orchestration.context_manager._resolve_ta3_model_meta",
+               new=AsyncMock(return_value=None)), \
+         patch("app.orchestration.context_manager._symbol_index_hint",
+               new=AsyncMock(return_value="")), \
+         patch("app.orchestration.context_manager.project_structure_brief",
+               new=AsyncMock(return_value="")), \
+         patch("app.orchestration.context_manager._session_memory_summary",
+               new=AsyncMock(return_value="")), \
+         patch("app.orchestration.context_manager._load_memories",
+               new=AsyncMock(return_value="")), \
+         patch("app.orchestration.context_manager._load_skills_and_mcp",
+               new=AsyncMock(return_value=("", ""))):
+        bundle = asyncio.run(build_main_context(
+            MagicMock(), agent=MagicMock(name="main"), session=session,
+            project=project, turn=None, user_message="帮我改代码",
+        ))
+
+    rules_text = "\n\n".join(bundle.rules_parts)
+    assert "Rule Documents — MANDATORY" in rules_text
+    assert "OVERRIDE" in rules_text
+    assert "user Global Rules > project rule documents" in rules_text
+    # 语言锚点仍紧随 Current Goal 之前/之后的 developer 段中
+    assert bundle.reply_language == "zh"

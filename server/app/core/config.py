@@ -253,6 +253,15 @@ class Settings(BaseSettings):
     # plan-547 C1: 进度提醒间隔——连续 N 步没有面向用户的文字输出时注入 system 提醒
     # （防"长时间静默执行"，用户看不到进展）；0 = 禁用。
     agent_progress_reminder_interval: int = 8
+    # plan-19-82 增强（对齐 ZCode runtime-reminders）：语言重申间隔——每 N 个 agent 步
+    # 重新注入一次语言锚（ZCode 的 TURNS_BETWEEN_ATTACHMENTS=5 为轮次口径，本项目按
+    # 步计，取更保守的 10）。语言纪律此前只在上下文构建时静态注入一次，长 turn 内
+    # 锚点随步骤稀释后不再重申，是确认执行后语言漂移的直接原因；0 = 禁用。
+    language_reminder_interval: int = 10
+    # plan-19-82 增强：规则遵循重申间隔——每 N 步重申用户规则优先级，对抗长上下文
+    # 下规则段被工具结果挤出注意力范围（对齐 ZCode 对 AGENTS.md 的 OVERRIDE 语义）；
+    # 0 = 禁用。默认比语言重申更稀疏（规则比语言更稳定，无需过密）。
+    rules_reminder_interval: int = 20
     complexity_direct_max_chars: int = 15
     complexity_llm_timeout: float = 15.0
     task_fail_policy: str = "continue"  # continue | abort

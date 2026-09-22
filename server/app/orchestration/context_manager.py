@@ -59,10 +59,26 @@ class ContextBundle:
     # plan-19-82: 本轮回复语言（zh/en/auto），由 build_*_context 按用户消息检测后填充；
     # engine 透传给 run_agent_loop，使压缩摘要 / checkpoint 文案与回复语言一致。
     reply_language: str = "auto"
+    # plan-19-82 增强（对齐 ZCode ContextBuilder 的通道化注入）：规则段独立成通道。
+    # 此前规则与工具说明/结构摘要/记忆全部拼进同一条 developer 消息，规则被噪声稀释；
+    # ZCode 把 userInstructions（AGENTS.md 等）放进独立的 meta_user 通道并加 OVERRIDE 裁决。
+    # 这里把 Global/Project Rules 单独承载，避免与其它上下文挤在同一段落里。
+    rules_parts: list[str] = field(default_factory=list)
 
     def to_messages(self) -> list[ChatMessage]:
-        """组装 system + 合并 developer + 历史 + user 指令。"""
+        """组装 system + developer 段 + 历史 + user 指令。
+
+        plan-19-82 增强：规则段独立为一条 developer 消息（紧随首条 developer 之后），
+        避免与工具说明/结构/记忆平铺在同一条消息里被稀释——对齐 ZCode 把
+        userInstructions 放进独立 meta_user 通道的做法。
+        """
         messages = [ChatMessage(role="system", content=self.system)]
+        # 规则通道优先落位：模型对"紧邻 system 的独立段落"注意力高于长段落中段。
+        if self.rules_parts:
+            messages.append(ChatMessage(
+                role="developer",
+                content="\n\n".join(self.rules_parts),
+            ))
         if self.developer_parts:
             messages.append(ChatMessage(role="developer", content="\n\n".join(self.developer_parts)))
         messages.extend(self.history)
@@ -603,11 +619,23 @@ async def build_main_context(
     # 1.2 Rule Documents（plan-19-82 步骤 4）：规则段**前移**到 developer 段最前部并加 MANDATORY 语义。
     # 现状（本轮改造前）规则在第 4/4.1 位且标题无强制语义，模型容易忽略 → 遵循度不足。
     # 加载提前到此，顺序：Global Rules（优先级最高）→ Project Rules（工作区文档 + 工作目录规则）。
+    # plan-19-82 增强：规则改走独立通道（bundle.rules_parts → 单独一条 developer 消息），
+    # 避免与工具说明/结构摘要/记忆平铺在同一条消息里被稀释；并附上冲突优先级裁决
+    # （对齐 ZCode `# agentsMd` 的 "OVERRIDE any default behavior" 语义）。
+    _rule_fragments: list[str] = []
+    # 冲突优先级裁决：用户全局规则 > 项目规则文档 > 内置方法论（与系统提示口径一致）
+    _rule_fragments.append(
+        "## Rule Documents — MANDATORY\n"
+        "The rules below OVERRIDE default behavior and MUST be followed exactly as written. "
+        "Priority when they conflict: user Global Rules > project rule documents "
+        "(AGENTS.md / CLAUDE.md / .cursorrules / CODEBUDDY.md / QODER.md / .trae/rules / "
+        "GEMINI.md / .windsurfrules / .github/instructions …) > the built-in methodology."
+    )
     try:
-        from app.orchestration.user_rules_loader import load_global_rules_labeled, load_workdir_rules_labeled
+        from app.orchestration.user_rules_loader import load_global_rules_labeled
         _gr = load_global_rules_labeled()
         if _gr:
-            bundle.developer_parts.append(f"## Global Rules (MANDATORY — highest priority)\n{_gr}")
+            _rule_fragments.append(f"## Global Rules (MANDATORY — highest priority)\n{_gr}")
     except Exception:
         logger.debug("[context] 全局规则加载失败(非阻塞)", exc_info=True)
     _rules_parts: list[str] = []
@@ -625,14 +653,15 @@ async def build_main_context(
     except Exception:
         logger.debug("[context] 工作目录规则加载失败(非阻塞)", exc_info=True)
     if _rules_parts:
-        bundle.developer_parts.append(
+        _rule_fragments.append(
             "## Project Rules (MANDATORY)\n" + "\n\n".join(_rules_parts)
         )
     else:
-        bundle.developer_parts.append(
+        _rule_fragments.append(
             "## Project Rules\n(未检测到 AGENTS.md / CLAUDE.md 等项目规则文档。"
             "如工作区存在约定，请按既有代码风格与目录结构执行。)"
         )
+    bundle.rules_parts.extend(_rule_fragments)
     # 2. Working Directory & Tool Rules
     ws_ctx = f"Working directory: {workspace}"
     ws_ctx += (
@@ -1043,11 +1072,19 @@ async def build_subagent_context(
     if handoff_summary:
         bundle.developer_parts.append(f"## Handoff Summary (from main agent)\n{handoff_summary}")
     # plan-19-82: 规则段前移并统一命名（与主代理同口径：Global → Project）
+    # plan-19-82 增强：改走独立规则通道（与主代理一致），避免与工具说明平铺稀释。
+    _rule_fragments: list[str] = [
+        "## Rule Documents — MANDATORY\n"
+        "The rules below OVERRIDE default behavior and MUST be followed exactly as written. "
+        "Priority when they conflict: user Global Rules > project rule documents "
+        "(AGENTS.md / CLAUDE.md / .cursorrules / CODEBUDDY.md / QODER.md / .trae/rules / "
+        "GEMINI.md / .windsurfrules / .github/instructions …) > the built-in methodology."
+    ]
     try:
         from app.orchestration.user_rules_loader import load_global_rules_labeled, load_workdir_rules_labeled
         _gr = load_global_rules_labeled()
         if _gr:
-            bundle.developer_parts.append(f"## Global Rules (MANDATORY — highest priority)\n{_gr}")
+            _rule_fragments.append(f"## Global Rules (MANDATORY — highest priority)\n{_gr}")
         _rules_parts: list[str] = []
         _docs = await load_session_rules(workspace, project.rules_docs if project else None)
         if _docs:
@@ -1056,11 +1093,12 @@ async def build_subagent_context(
         if _wd:
             _rules_parts.append(_wd)
         if _rules_parts:
-            bundle.developer_parts.append(
+            _rule_fragments.append(
                 "## Project Rules (MANDATORY)\n" + "\n\n".join(_rules_parts)
             )
     except Exception:
         logger.debug("[context] 子代理规则加载失败(非阻塞)", exc_info=True)
+    bundle.rules_parts.extend(_rule_fragments)
     # v19: 主会话摘要（历史对话压缩产物），让子代理了解整体进展
     try:
         _ctx = getattr(session, "shared_context", None) or {}

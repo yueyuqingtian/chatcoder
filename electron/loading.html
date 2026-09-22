@@ -32,26 +32,24 @@
   }
   body.solid.light { background: #f2f3f7; color: #23262e; }
 
-  /* glass on：玻璃面板（自己铺一层玻璃底，露出下层系统材质） */
+  /* glass on：**平坦**的低透明底（与左面板同色系、同 alpha 区间）。
+     plan-26-126 M6（去波浪感）——删除三样造成"波浪 / 斜纹"的东西：
+       * 150° 对角渐变高光：大面积亮带随桌面明暗起伏，是波浪感的主因；
+       * 顶部 `inset 0 1px 0` 白色高光：在纯色底上多出一条横线；
+       * `saturate(1.5)` 重饱和：让渗入的壁纸色更脏。
+     模糊只保留极轻一档，且**仅在系统材质不可用时**启用（mat=0）；有系统材质时
+     交给 DWM（acrylic / ACCENT / vibrancy）做高斯模糊，页面不再叠加。 */
   body.glass {
-    background:
-      linear-gradient(150deg,
-        rgba(255, 255, 255, 0.10) 0%,
-        rgba(255, 255, 255, 0.03) 34%,
-        transparent 62%),
-      rgba(20, 22, 28, 0.55);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
-    backdrop-filter: blur(14px) saturate(1.5);
-    -webkit-backdrop-filter: blur(14px) saturate(1.5);
+    background: rgba(20, 22, 27, 0.90);
   }
   body.glass.light {
-    background:
-      linear-gradient(150deg,
-        rgba(255, 255, 255, 0.55) 0%,
-        rgba(255, 255, 255, 0.22) 34%,
-        transparent 62%),
-      rgba(244, 245, 249, 0.62);
+    background: rgba(242, 243, 247, 0.92);
     color: #23262e;
+  }
+  /* mat=0（无系统模糊材质）：用轻量 backdrop-filter 兜底，保持"轻微模糊"而非重度磨砂 */
+  body.glass.mat-fallback {
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
   }
 
   .logo { display: flex; flex-direction: column; align-items: center; gap: 14px; margin-bottom: 26px; }
@@ -107,9 +105,11 @@
         var theme = q.get("theme");
         var dark = theme ? theme !== "light" : !window.matchMedia("(prefers-color-scheme: light)").matches;
         if (!dark) document.body.classList.add("light");
-        // 毛玻璃开启时用玻璃样式（半透明 + 露出下层系统材质），否则纯色不透明
+        // 毛玻璃开启时用玻璃样式（轻微半透明 + 露出下层系统材质），否则纯色不透明
         var glass = q.get("glass") === "1";
         document.body.classList.add(glass ? "glass" : "solid");
+        // plan-26-126 M6：只有系统没有可用模糊材质（mat=0）时才叠轻量 backdrop-filter 兜底
+        if (glass && q.get("mat") === "0") document.body.classList.add("mat-fallback");
         // 下一帧再置 ready，触发淡入过渡（避免与首帧绘制同帧导致动画被跳过）
         requestAnimationFrame(function () {
           requestAnimationFrame(function () { document.body.classList.add("ready"); });

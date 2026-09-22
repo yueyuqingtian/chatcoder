@@ -27,7 +27,7 @@
     "productName": "chatcoder",
     "copyright": "Copyright © 2026 chatcoder",
     "directories": {
-      "output": "v7",
+      "output": "v6",
       "buildResources": "electron/build"
     },
     "files": [
@@ -36,12 +36,16 @@
       "electron/pty.cjs",
       "electron/loading.html",
       "electron/glass-diagnostics.cjs",
+      "electron/liquid-glass.cjs",
       "package.json",
-      "node_modules/node-pty/**"
+      "node_modules/node-pty/**",
+      "node_modules/koffi/**",
+      "node_modules/@hicccc77/electron-liquid-glass/**/*"
     ],
     "asarUnpack": [
       "node_modules/node-pty/**",
-      "node_modules/koffi/**"
+      "node_modules/koffi/**",
+      "node_modules/@hicccc77/electron-liquid-glass/**/*"
     ],
     "extraResources": [
       {
@@ -63,6 +67,10 @@
       {
         "from": "CHANGELOG.md",
         "to": "CHANGELOG.md"
+      },
+      {
+        "from": "electron/build/icon.png",
+        "to": "icon.png"
       }
     ],
     "win": {
@@ -100,6 +108,7 @@
     ]
   },
   "dependencies": {
+    "@hicccc77/electron-liquid-glass": "^0.4.0",
     "electron-updater": "^6.8.9",
     "koffi": "^2.16.3"
   }

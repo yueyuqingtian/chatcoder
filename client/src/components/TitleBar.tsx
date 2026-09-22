@@ -4,6 +4,7 @@
  * 右：打开工作区(黄文件夹) + 任务卡开关 + 右面板开关 + 窗口控制
  */
 import { useEffect, useRef, useState } from "react";
+import { useWindowDrag } from "../hooks/useWindowDrag";
 import { api } from "../api/client";
 import { useChatStore } from "../store/chat";
 import { usePanelStore } from "../store/panel";
@@ -135,9 +136,20 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
     }
   };
 
+  /* ── plan-26-126 P2：自研拖拽 + 双击伪全屏（详见 hooks/useWindowDrag.ts）──
+     不再用 `-webkit-app-region: drag`：该区域由系统处理拖拽/双击，DOM 拿不到 dblclick，
+     双击会直接触发系统原生最大化（重建 DWM 图层 ⇒ 玻璃丢失且不保证恢复）。 */
+  const { onPointerDown, onPointerMove, onPointerUp, onDoubleClick: onTitleDoubleClick } = useWindowDrag();
+
   return (
-    <div className={`titlebar title-drag-region${leftCollapsed ? " left-collapsed" : ""}`}>
-      <div className="titlebar-left title-no-drag">
+    <div
+      className={`titlebar${leftCollapsed ? " left-collapsed" : ""}`}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onDoubleClick={onTitleDoubleClick}
+    >
+      <div className="titlebar-left">
         {/* 侧栏折叠时：logo 与前进/后退 + 展开按钮移到标题栏左侧（展开态折叠入口在侧栏头部） */}
         {leftCollapsed && (
           <>
@@ -153,7 +165,7 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
         )}
       </div>
 
-      <div className="titlebar-workspace title-no-drag">
+      <div className="titlebar-workspace">
         {settings ? (
           null
         ) : (
@@ -223,7 +235,7 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
 
       <div className="titlebar-mid" />
 
-      <div className="titlebar-right title-no-drag">
+      <div className="titlebar-right">
         {/* 打开工作区下拉菜单 */}
         {!settings && (
         <>

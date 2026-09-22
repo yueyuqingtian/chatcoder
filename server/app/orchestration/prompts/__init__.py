@@ -11,6 +11,9 @@ from app.orchestration.prompts.language import (
     LANG_ZH,
     build_language_directive,
     build_language_pin_line,
+    build_language_reminder,
+    build_plan_exit_reminder,
+    build_rules_reminder,
     detect_reply_language,
     language_label,
 )
@@ -59,4 +62,8 @@ __all__ = [
     "language_label",
     "build_language_directive",
     "build_language_pin_line",
+    # plan-19-82 增强（对齐 ZCode runtime-reminders）：周期性重申 + 边界提醒
+    "build_language_reminder",
+    "build_plan_exit_reminder",
+    "build_rules_reminder",
 ]
