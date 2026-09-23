@@ -41,19 +41,43 @@ interface Props {
   freezeRefs?: Array<React.RefObject<HTMLElement | null>>;
 }
 
-export function freezePaneContents(refs: Array<React.RefObject<HTMLElement | null>>) {
-  const list: Array<{ el: HTMLElement; prev: string }> = [];
+/** 内容根跟随记录：el=内容根，prev=拖拽前的 inline width，offset=面板宽 − 内容根宽。 */
+export interface PaneFollowEntry {
+  el: HTMLElement;
+  prev: string;
+  offset: number;
+}
+
+/** 钉住内容根宽度（拖拽起点调用），并记录 offset 供拖拽期跟随换算。
+ *
+ *  本轮修复「拖拉右侧面板宽度时内容不实时自适应，停下才刷新」：
+ *  旧实现只钉住宽度、拖拽期完全不更新，内容要等松手解冻才重排。
+ *  现在配合 followPaneContents：拖动过程中按帧闸门节拍把内容根宽度同步到当前面板宽，
+ *  即「跟随」——默认 realtime 档每帧跟随（所见即所得），降档后按节拍跟随（不会停住）。 */
+export function freezePaneContents(refs: Array<React.RefObject<HTMLElement | null>>): PaneFollowEntry[] {
+  const list: PaneFollowEntry[] = [];
   for (const ref of refs) {
-    const el = ref.current?.firstElementChild as HTMLElement | null;
-    if (!el) continue;
+    const pane = ref.current;
+    const el = pane?.firstElementChild as HTMLElement | null;
+    if (!pane || !el) continue;
     const w = Math.round(el.getBoundingClientRect().width);
-    list.push({ el, prev: el.style.width });
+    const paneW = Math.round(pane.getBoundingClientRect().width);
+    list.push({ el, prev: el.style.width, offset: Math.max(0, paneW - w) });
     el.style.width = w + "px";
   }
   return list;
 }
 
-export function unfreezePaneContents(list: Array<{ el: HTMLElement; prev: string }>) {
+/** 拖拽期把内容根宽度同步到当前面板宽（按 offset 反推）。
+ *  必须与 applyWidth 同拍调用：面板宽与内容宽同帧一致，不会出现内容留白 / 裁切。 */
+export function followPaneContents(list: PaneFollowEntry[], panelWidth: number) {
+  for (const it of list) {
+    const next = Math.max(0, Math.round(panelWidth - it.offset)) + "px";
+    if (it.el.style.width !== next) it.el.style.width = next;
+  }
+}
+
+export function unfreezePaneContents(list: PaneFollowEntry[]) {
   for (const it of list) it.el.style.width = it.prev;
 }
 
@@ -82,21 +106,26 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
   // 高刷鼠标下一帧多个事件就多次 recalc；与宽度写入合并到每帧一次。
   const pendingYRef = useRef<number | null>(null);
 
-  // ── RFL-5 帧闸门（plan-329-1647 S6）──
+  // ── RFL-5 帧闸门（plan-329-1647 S6，本轮重写判据）──
   // 中列不再冻结（RFL-1）后，实时排版的主要成本变成“浏览器文本折行”，它随可见内容量增长。
   // 为同时守住「实时排版」与「绝不卡死」，按实测帧间隔做三档自适应：
-  //   realtime —— 每帧写宽度 + 测量跟随（默认；用户要的实时折行）
+  //   realtime —— 每帧写宽度 + 跟随（默认；用户要的实时折行）
   //   balanced —— 宽度隔帧写一次（把重排预算摊到两帧上）
-  //   frozen   —— 安全阀：暂停宽度写入（面板停在当前宽度，拖拽期间不再有任何重排），
-  //               松手时按最终目标宽度一次性提交并收敛。代价是这段窗口内面板不跟手，
-  //               但保证界面绝不卡死（比旧方案更安全：旧方案钉住内容宽度，flex 行仍逐帧重排）。
+  //   frozen   —— 最低保证频率：约 15fps（66ms 一拍）继续写宽度与跟随。
+  //               （旧行为是“暂停写入”，面板会停住不动 → 用户感知成卡死；
+  //                本轮改为降频而不停止：交互断裂感远大于掉帧感。）
+  // 判据改用滑动窗口长帧比例 + 可升档（见 gateAllowWrite）；
   // 档位写入 documentElement.dataset.panelDragMode，便于观测与自动化验证。
   const dragModeRef = useRef<PanelDragLayout>("realtime");
   const autoDegradeRef = useRef(true);
   const prevFrameTsRef = useRef(0);
   const minDeltaRef = useRef(Number.POSITIVE_INFINITY);
-  const overStreakRef = useRef(0);
   const skipFrameRef = useRef(false);
+  // 最近 12 帧的帧间隔滑动窗口（升降档判据）+ 降档冷却 + 升档连好计数 + frozen 档节拍计时
+  const frameSamplesRef = useRef<number[]>([]);
+  const degradeCooldownRef = useRef(0);
+  const goodStreakRef = useRef(0);
+  const lastFrozenWriteRef = useRef(0);
 
   /** 读取设置里的拖拽排版档位（含 reduced-motion 降档）。 */
   const readDragLayoutPref = useCallback((): { layout: PanelDragLayout; autoDegrade: boolean } => {
@@ -113,43 +142,79 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
     return { layout, autoDegrade };
   }, []);
 
-  /** 本帧是否允许写宽度；同时按实测帧间隔推进档位（见上方三档说明）。 */
+  /** 本帧是否允许写宽度；同时按实测帧间隔推进档位（见上方三档说明）。
+   *
+   *  本轮两处修复：
+   *   ① frozen 档不再是「停止写宽度」（旧行为会让面板停在原地，用户感知成"卡死"），
+   *      改为**最低保证频率**：约 15fps（66ms 一拍）——宁可降频也不能停止反馈；
+   *   ② 判据由「连续超预算帧数」改为「最近 12 帧的长帧比例」，并补上**升档**：
+   *      旧实现只降不升，一次瞬时尖峰（GC / markdown 解析）会让整段拖拽保持降级。 */
   const gateAllowWrite = useCallback((): boolean => {
     const now = performance.now();
     const prev = prevFrameTsRef.current;
     prevFrameTsRef.current = now;
-    if (!prev) return dragModeRef.current !== "frozen";
+    if (!prev) {
+      // 本次拖拽首帧：必须放行（否则"按下不动"）；同时重置 frozen 节拍计时
+      lastFrozenWriteRef.current = now;
+      return true;
+    }
     const delta = now - prev;
     // 自适应刷新间隔：取本次拖拽观察到的最小帧间隔（≈显示器刷新间隔）
     if (delta < minDeltaRef.current) minDeltaRef.current = delta;
     const budget = Math.max(24, minDeltaRef.current * 1.6);
-    overStreakRef.current = delta > budget ? overStreakRef.current + 1 : 0;
-    if (autoDegradeRef.current) {
-      if (dragModeRef.current === "realtime" && overStreakRef.current >= 3) {
-        dragModeRef.current = "balanced";
-        overStreakRef.current = 0;
-        document.documentElement.dataset.panelDragMode = "balanced";
-      } else if (dragModeRef.current === "balanced" && overStreakRef.current >= 5) {
-        dragModeRef.current = "frozen";
-        overStreakRef.current = 0;
-        document.documentElement.dataset.panelDragMode = "frozen";
+    const samples = frameSamplesRef.current;
+    samples.push(delta);
+    if (samples.length > 12) samples.shift();
+
+    if (autoDegradeRef.current && samples.length >= 8) {
+      const longRatio = samples.filter((d) => d > budget).length / samples.length;
+      if (degradeCooldownRef.current > 0) {
+        degradeCooldownRef.current -= 1;
+      } else if (longRatio > 0.5 && dragModeRef.current !== "frozen") {
+        dragModeRef.current = dragModeRef.current === "realtime" ? "balanced" : "frozen";
+        degradeCooldownRef.current = 24; // 降档冷却：避免连续跳档
+        goodStreakRef.current = 0;
+        samples.length = 0;
+        document.documentElement.dataset.panelDragMode = dragModeRef.current;
+      } else if (longRatio < 0.25 && dragModeRef.current !== "realtime") {
+        goodStreakRef.current += 1;
+        if (goodStreakRef.current >= 24) {
+          dragModeRef.current = dragModeRef.current === "frozen" ? "balanced" : "realtime";
+          goodStreakRef.current = 0;
+          samples.length = 0;
+          document.documentElement.dataset.panelDragMode = dragModeRef.current;
+        }
+      } else {
+        goodStreakRef.current = 0;
       }
     }
-    if (dragModeRef.current === "frozen") return false;
+
+    if (dragModeRef.current === "frozen") {
+      if (now - lastFrozenWriteRef.current < 66) return false;
+      lastFrozenWriteRef.current = now;
+      return true;
+    }
     if (dragModeRef.current === "balanced") {
       skipFrameRef.current = !skipFrameRef.current;
       return !skipFrameRef.current;
     }
     return true;
   }, []);
-  // 冻结内容的原 inline width（解冻时原样恢复；正常情况下内容根无 inline width）
-  const frozenRef = useRef<Array<{ el: HTMLElement; prev: string }>>([]);
+  // 内容根跟随记录（拖拽起点建立；松手恢复原 inline width。正常情况下内容根无 inline width）
+  const frozenRef = useRef<PaneFollowEntry[]>([]);
 
-  /** 面板展开/折叠与拖分隔条共用：把容器内容根钉成当前像素宽。 */
+  /** 面板展开/折叠与拖分隔条共用：把容器内容根钉成当前像素宽（并记录 offset，供拖拽期跟随）。 */
   const freezeContents = useCallback(() => {
     if (!freezeRefs || freezeRefs.length === 0) return;
     frozenRef.current = freezePaneContents(freezeRefs);
   }, [freezeRefs]);
+
+  /** 内容根跟随（本轮修复"拖拽时内容不实时自适应，停下才刷新"）：
+   *  与 applyWidth 同拍调用，保证「面板宽 → 内容根宽」同帧一致（不出现留白/裁切）。
+   *  跟随频率由帧闸门决定：realtime 每帧、balanced 隔帧、frozen 约 15fps 一拍。 */
+  const followContents = useCallback((panelWidth: number) => {
+    followPaneContents(frozenRef.current, panelWidth);
+  }, []);
 
   /** 拖结束：恢复原 inline width。必须在 applyWidth（面板已到终宽）**之后**调用，
    *  解冻即按面板终宽一次性重排，与随后的 onCommit 合并到同一帧。 */
@@ -199,11 +264,13 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
       rafRef.current = 0;
       if (!draggingRef.current) return; // 帧间已结束拖拽：不再写
       if (pendingYRef.current != null) { setHandleY(pendingYRef.current); pendingYRef.current = null; }
-      // RFL-5 帧闸门：balanced 档隔帧写、frozen 档暂停写（见 gateAllowWrite）
+      // RFL-5 帧闸门：balanced 档隔帧写、frozen 档按约 15fps 节拍写（见 gateAllowWrite）
       if (!gateAllowWrite()) return;
       applyWidth(pendingWRef.current);
+      // 内容根与面板宽同拍跟随（本轮修复：此前拖拽期内容被完全钉住，松手才刷新）
+      followContents(pendingWRef.current);
     });
-  }, [side, minWidth, applyWidth, setHandleY, gateAllowWrite]);
+  }, [side, minWidth, applyWidth, setHandleY, gateAllowWrite, followContents]);
 
   const handleMouseUp = useCallback(() => {
     if (!draggingRef.current) return;
@@ -215,6 +282,7 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
     if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = 0; }
     pendingYRef.current = null;
     applyWidth(pendingWRef.current);
+    followContents(pendingWRef.current); // 松手当帧内容先跟到终宽，再解冻（避免解冻瞬间回退到旧宽）
     unfreezeContents(); // 面板已到终宽 → 解冻后内容按新宽一次性重排（见 unfreezeContents 注释）
     rectRef.current = null;
 
@@ -239,7 +307,7 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
       el ? parseInt(el.style.width, 10) || baseWRef.current : baseWRef.current,
     );
     onCommit(finalWidth);
-  }, [handleMouseMove, panelEl, onCommit, applyWidth, unfreezeContents]);
+  }, [handleMouseMove, panelEl, onCommit, applyWidth, unfreezeContents, followContents]);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -256,8 +324,11 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
     autoDegradeRef.current = pref.autoDegrade;
     prevFrameTsRef.current = 0;
     minDeltaRef.current = Number.POSITIVE_INFINITY;
-    overStreakRef.current = 0;
     skipFrameRef.current = false;
+    frameSamplesRef.current = [];
+    degradeCooldownRef.current = 0;
+    goodStreakRef.current = 0;
+    lastFrozenWriteRef.current = 0;
     document.documentElement.dataset.panelDragMode = pref.layout;
     freezeContents(); // 钉住内容根宽度（现仅右面板内容根，见 Props.freezeRefs 注释）
     // 拖拽开始取一次手柄矩形（此时无脏布局，成本最低），全程复用
@@ -269,6 +340,9 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
     document.body.style.userSelect = "none";
     document.body.classList.add("panel-dragging");
     acquire("panel-drag"); // PerfBus：分隔条拖拽期（S3 统一门控口径）
+    // plan-31-151 S4：拖拽开始前派发事件——MessageFlow 在此时捕获滚动锚点
+    //   （布局尚未被拖拽改写，锚点不被污染）。
+    window.dispatchEvent(new CustomEvent("chatcoder:panel-drag-start"));
 
     document.addEventListener("mousemove", handleMouseMove);
     document.addEventListener("mouseup", handleMouseUp);

@@ -42,13 +42,15 @@ def test_disguise_tools_drops_unmapped():
         {"type": "function", "function": {"name": "fs_write", "parameters": {}}},
         # v7: 有映射的通用提问工具 → 伪装保留
         {"type": "function", "function": {"name": "ask_user_question", "parameters": {}}},
-        # 无映射工具 → 剔除
+        # v43: 此前 web_fetch / collect_results 因缺映射被剔除，现全量补齐 → 保留
         {"type": "function", "function": {"name": "web_fetch", "parameters": {}}},
         {"type": "function", "function": {"name": "collect_results", "parameters": {}}},
+        # 真正无映射的工具（非 MCP 前缀）→ 仍剔除
+        {"type": "function", "function": {"name": "mystery_tool", "parameters": {}}},
     ]
     out = disguise_tools(schemas)
     names = [s["function"]["name"] for s in out]
-    assert names == ["Read", "Write", "AskUser"]
+    assert names == ["Read", "Write", "AskUser", "WebFetch", "TaskQuery"]
     # 原生 schema 中文 description 完整还原
     assert out[0]["function"]["description"].startswith("读取工作区内指定文件内容")
     assert out[2]["function"]["description"].startswith("向用户发起结构化提问")
@@ -217,13 +219,17 @@ def test_common_tools_args_roundtrip():
 
 
 def test_unmapped_history_call_becomes_text():
-    """历史中未映射的 tool_call（collect_results）→ 转普通文本，防协议断裂。"""
+    """历史中未映射的 tool_call → 转普通文本，防协议断裂。
+
+    v43: 原用例用 collect_results 作样本，该工具已补映射（→TaskQuery）；
+    改用真正无映射的名字，保持对该降级分支的覆盖。
+    """
     from app.models.providers.ta3 import Ta3Provider
     from app.models.schemas import ChatMessage
 
     provider = Ta3Provider(api_key="llm-x", base_url="https://x", model="m")
     m = ChatMessage(role="assistant", content=None,
-                    tool_calls=[{"id": "c1", "name": "collect_results", "arguments": {}}])
+                    tool_calls=[{"id": "c1", "name": "unknown_tool", "arguments": {}}])
     out = provider._disguise_message(m)
     assert "tool_calls" not in out
     assert "不可用" in out["content"]
@@ -433,3 +439,94 @@ def test_symbol_tools_disguise_message_roundtrip():
     assert calls[0]["arguments"] == {"query": "outline", "limit": 5}
     assert calls[1]["name"] == "outline"
     assert calls[1]["arguments"] == {"path": "main.cjs"}
+
+
+# ───────────────── v43: ta3 全量工具映射补齐 ─────────────────
+
+
+def test_all_registry_tools_are_mapped():
+    """v43 全量守护：registry 内全部工具 + 子代理工具都必须有 ta3 映射与原生 schema。
+
+    此前 web_fetch/ci_run/git/codebase_search/compaction_*/skill_view/memory_write/
+    browser_* 等缺映射，被伪装层整体剔除——ta3 会话下模型完全看不到、也调不动。
+    """
+    from app.orchestration.subagent_tools import SUBAGENT_TOOL_NAMES
+    from app.orchestration.tools.registry import tool_registry
+
+    names = {t.name for t in tool_registry.all()} | SUBAGENT_TOOL_NAMES
+    for n in sorted(names):
+        assert n in TO_TA3, f"缺 ta3 映射: {n}"
+        assert TO_TA3[n] in TA3_NATIVE_SCHEMAS, f"缺原生 schema: {TO_TA3[n]}"
+
+
+def test_subagent_management_tools_mapped():
+    """v43: 子代理管理/上报工具的出/入站映射与参数适配。"""
+    assert TO_TA3["collect_results"] == "TaskQuery"
+    assert TO_TA3["cancel_subagent"] == "TaskCancel"
+    assert TO_TA3["subagent_inspect"] == "SubAgentInspect"
+    assert TO_TA3["send_to_subagent"] == "SendToSubagent"
+    assert TO_TA3["report_to_leader"] == "ReportToLeader"
+    # 出站：agent_id → taskId；wait 在 ta3 侧无对应键被丢弃
+    assert disguise_args("collect_results", {"agent_id": 3, "wait": True}) == {"taskId": 3}
+    assert disguise_args("cancel_subagent", {"agent_id": 4}) == {"taskId": 4}
+    # 入站：taskId → agent_id（v36 适配保持）
+    assert restore_args("TaskQuery", {"taskId": 3}) == {"agent_id": 3}
+    # 检视/指令参数名一致，往返不变形
+    ins = {"agent_id": 1, "section": "result"}
+    assert disguise_args("subagent_inspect", ins) == ins
+    assert restore_args("SubAgentInspect", ins) == ins
+    send = {"agent_id": 1, "message": "x"}
+    assert disguise_args("send_to_subagent", send) == send
+    assert restore_args("SendToSubagent", send) == send
+
+
+def test_toolkit_and_browser_tools_mapped():
+    """v43: 新增工具（fetch/ci/git/检索/压缩/技能/记忆/浏览器）映射与参数透传。"""
+    cases = {
+        "web_fetch": "WebFetch",
+        "ci_run": "CiRun",
+        "git": "Git",
+        "codebase_search": "CodebaseSearch",
+        "compaction_index": "CompactionIndex",
+        "compaction_view": "CompactionView",
+        "skill_view": "SkillView",
+        "memory_write": "MemoryWrite",
+        "browser_navigate": "BrowserNavigate",
+        "browser_screenshot": "BrowserScreenshot",
+        "browser_click": "BrowserClick",
+        "browser_type": "BrowserType",
+        "browser_snapshot": "BrowserSnapshot",
+        "browser_evaluate": "BrowserEvaluate",
+    }
+    for real, alias in cases.items():
+        assert TO_TA3[real] == alias
+        assert FROM_TA3[alias] == real
+        # 参数键名两侧一致 → 原样透传（无 ARGS 适配）
+        args = {"probe": 1}
+        assert disguise_args(real, args) == args
+        assert restore_args(alias, args) == args
+    # Git 参数多但键名一致
+    git_args = {"command": "status", "cwd": "sub"}
+    assert disguise_args("git", git_args) == git_args
+    assert restore_args("Git", git_args) == git_args
+
+
+def test_history_call_of_newly_mapped_tool_not_degraded():
+    """v43: 补齐映射后，历史调用不再被降级成「不可用」文本。"""
+    import json as _json
+
+    from app.models.providers.ta3 import Ta3Provider
+    from app.models.schemas import ChatMessage
+
+    provider = Ta3Provider(api_key="llm-x", base_url="https://x", model="m")
+    m = ChatMessage(role="assistant", content=None, tool_calls=[
+        {"id": "c1", "name": "collect_results", "arguments": {"agent_id": 7}},
+        {"id": "c2", "name": "skill_view", "arguments": {"name": "brandkit"}},
+        {"id": "c3", "name": "browser_snapshot", "arguments": {"max_depth": 3}},
+    ])
+    out = provider._disguise_message(m)
+    assert "不可用" not in (out.get("content") or "")
+    assert [tc["function"]["name"] for tc in out["tool_calls"]] == [
+        "TaskQuery", "SkillView", "BrowserSnapshot",
+    ]
+    assert _json.loads(out["tool_calls"][0]["function"]["arguments"]) == {"taskId": 7}

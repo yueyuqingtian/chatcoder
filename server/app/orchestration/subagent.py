@@ -68,6 +68,8 @@ class SubagentManager:
         self._reply_waiters: dict[int, asyncio.Event] = {}
         # 子代理 → 主代理的上报回调（engine 启动 turn 时注册：写入主代理注入队列）
         self._leader_notify = None
+        # 后台子代理终态回调（engine 启动 turn 时注册：turn 已结束时据此自动唤醒主代理）
+        self._finish_notify = None
 
     def spawn(self, db, *, agent, turn_id: int, task, handoff_summary: str,
               context_bundle, tool_schemas: list[dict], workspace: str,
@@ -166,6 +168,10 @@ class SubagentManager:
             # v36 (plan-321-1600 M3): 终态入队“完成通知”——主代理下次 LLM 调用前自动收到，
             # 无需轮询 collect_results（已读集合命中则跳过）。
             self._enqueue_completion(handle)
+            # 修复：主代理 turn 已结束时仅入队通知没有任何动作送达（要等用户下一条消息）
+            # ——表现为“子代理跑完但主代理没被唤醒”。终态回调让 engine 在会话空闲时
+            # 自动创建续跑 turn，完成报告随新 turn 的注入通道送达主代理。
+            self.notify_finished(handle)
             logger.info("[subagent] %s 完成 status=%s", agent.id, handle.status)
 
         handle.task = asyncio.create_task(_run())
@@ -225,6 +231,25 @@ class SubagentManager:
     def set_leader_notify(self, callback) -> None:
         """注册子代理 → 主代理的上报回调（engine 在启动 turn 时注册）。"""
         self._leader_notify = callback
+
+    def set_finish_notify(self, callback) -> None:
+        """注册后台子代理终态回调（engine 在启动 turn 时注册）。
+
+        后台子代理完成时主代理 turn 可能已结束——engine 据此决定是否自动创建
+        续跑 turn 把完成通知送达主代理（对齐 zcode background-task-notifications，
+        不再依赖用户下一条消息触发送达）。
+        """
+        self._finish_notify = callback
+
+    def notify_finished(self, handle: SubagentHandle) -> None:
+        """子代理进入终态 → 通知 engine 判断是否需要唤醒主代理（失败仅记日志）。"""
+        cb = self._finish_notify
+        if cb is None:
+            return
+        try:
+            cb(handle)
+        except Exception:
+            logger.debug("[subagent] 终态回调失败 agent=%s", handle.agent_id, exc_info=True)
 
     def notify_leader(self, agent_id: int, message: str, kind: str) -> None:
         """子代理上报/提问 → 主代理注入队列（失败仅记日志，不影响子代理）。"""

@@ -74,6 +74,10 @@ def test_directive_zh_semantics():
     assert "压缩摘要" in d and "规则文档" in d
     # 保留原文不翻译
     assert "保留原样" in d
+    # 首条输出即锚定语言（子代理/工具步骤的首句也必须对）
+    assert "从第一条输出起" in d
+    # 禁止把语言要求复述进正文（用户反馈的「（简体中文）」标注）
+    assert "不得在正文里提及" in d
 
 
 def test_directive_en_semantics():
@@ -269,3 +273,53 @@ def test_opening_language_mismatch_does_not_release_wrong_text():
     assert _opening_language_mismatch("我按中文回复。", "zh") is False
     assert _opening_language_mismatch("ok", "zh") is True
     assert _opening_language_mismatch("x", "zh") is False
+
+
+# ── 6. 禁止复述语言标注 + 首条输出语言 ─────────────────────────────────────
+
+def test_language_blocks_forbid_restating_the_language():
+    """语言块必须禁止复述语言要求——否则模型会把锚点原文抄进正文。
+
+    用户反馈：回复里会冒出「（简体中文）」「（保持简体中文）」这类语言标注。
+    """
+    from app.orchestration.prompts import build_language_reminder, build_plan_exit_reminder
+
+    assert "never mention, restate or tag it" in build_language_directive("en")
+    assert "never mention, restate or tag it" in build_language_directive("auto")
+
+    assert "不要在回复正文里提及" in build_language_pin_line("zh")
+    assert "不要在回复正文里提及" in build_language_pin_line("zh", source="global")
+    assert "不要在回复正文里提及" in build_language_pin_line("zh", source="project")
+    assert "不要在回复正文里提及" in build_language_pin_line("auto")
+    assert "Do not mention or restate" in build_language_pin_line("en")
+
+    assert "不要在正文里提及" in build_language_reminder("zh")
+    assert "不要在正文里提及" in build_language_reminder("auto")
+    assert "never mention or tag" in build_language_reminder("en")
+
+    assert "不要在正文里提及" in build_plan_exit_reminder("zh")
+    assert "Never mention or restate" in build_plan_exit_reminder("en")
+
+
+def test_first_output_uses_anchored_language():
+    """首条输出（含工具调用前的说明文字）即必须是锚定语言。
+
+    修复点：子代理上下文里的英文 instruction 会把首句带向英文，用户看到
+    「第一句话不是我说的语言，后续才切回来」。
+    """
+    assert "very first output" in build_language_directive("en")
+    assert "first output on" in build_language_directive("auto")
+    p = build_subagent_system_prompt("task", "ac", language="zh")
+    assert "FIRST output" in p
+    assert "简体中文" in p
+
+
+def test_subagent_instruction_follows_anchored_language():
+    """子代理 instruction 不得写死英文（首句语言漂移的直接来源）。"""
+    import inspect
+
+    from app.orchestration import context_manager
+
+    src = inspect.getsource(context_manager.build_subagent_context)
+    assert "开始执行分配给你的子任务" in src
+    assert "_reply_lang == LANG_ZH" in src

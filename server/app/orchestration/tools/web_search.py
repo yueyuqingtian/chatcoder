@@ -11,6 +11,10 @@ v31.2: 多引擎 + 代理——
   - 所有引擎统一走 app.core.http_client.build_http_client()，
     设置面板配置 HTTP 代理后自动走代理（google/duckduckgo 直连通常不可达）；
   - google/duckduckgo 无结果时给出「配置代理」提示。
+v31.3: 复刻参考项目的搜索方法——
+  - 默认引擎改为 **workbuddy**（WorkBuddy/CodeBuddy 云端搜索网关，契约见 workbuddy_search.py）：
+    结果由服务端清洗，不依赖 HTML 结构 / 出口 IP / 代理，字段与参考项目对齐；
+  - 未登录 WorkBuddy 账号或云端不可用时，自动回退本地抓取（bing），保证搜索始终可用。
 """
 import base64
 import html
@@ -22,18 +26,20 @@ from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 from app.orchestration.tools.duckduckgo import DuckDuckGoSearchAdapter
 from app.orchestration.tools.google import GoogleSearchAdapter
 from app.orchestration.tools.search_base import filter_relevant
+from app.orchestration.tools.workbuddy_search import search_via_workbuddy
 
 _MAX_RESULTS = 8
 _MAX_OUTPUT = 6000
 
-_ENGINES = ("bing", "google", "duckduckgo")
+_ENGINES = ("workbuddy", "bing", "google", "duckduckgo")
 
 
 class WebSearchTool(Tool):
     name = "web_search"
     description = (
         "Search the web for real-time information. Returns titles, URLs, and snippets. "
-        "engine: bing (default, no proxy needed) / google / duckduckgo "
+        "engine: workbuddy (default, uses the logged-in WorkBuddy account; falls back to bing "
+        "automatically when unavailable) / bing (no proxy needed) / google / duckduckgo "
         "(google & duckduckgo may require an HTTP proxy configured in settings)."
     )
     risk_level = "low"
@@ -54,7 +60,7 @@ class WebSearchTool(Tool):
                         "engine": {
                             "type": "string",
                             "enum": list(_ENGINES),
-                            "description": "Search engine. bing=默认(直连可用); google/duckduckgo 需在设置中配置 HTTP 代理",
+                            "description": "Search engine. workbuddy=默认(用已登录的 WorkBuddy 账号，云端清洗结果，不可用时自动回退 bing); bing=直连可用; google/duckduckgo 需在设置中配置 HTTP 代理",
                         },
                         "max_results": {
                             "type": "integer",
@@ -72,20 +78,33 @@ class WebSearchTool(Tool):
             return ToolResult(ok=False, output="", error="query is empty")
 
         # v31.2: 兼容 ta3 伪装 schema 的参数名（WebSearch: searchEngine/maxResults/timeRange）
+        # v31.3: 默认引擎改为 workbuddy（云端，复刻参考项目）；search_std 等别名同口径。
         engine_arg = args.get("engine") or args.get("searchEngine")
         if engine_arg in ("search_pro",):
             engine_arg = "google"
         elif engine_arg in ("search_pro_sogou", "search_pro_quark"):
             engine_arg = "duckduckgo"
         elif engine_arg in ("search_std", "noLimit") or engine_arg is None:
-            engine_arg = "bing"
+            engine_arg = "workbuddy"
 
         max_results = min(
             15, max(1, args.get("max_results") or args.get("maxResults") or _MAX_RESULTS)
         )
-        engine = engine_arg if engine_arg in _ENGINES else "bing"
+        engine = engine_arg if engine_arg in _ENGINES else "workbuddy"
 
-        if engine == "google":
+        if engine == "workbuddy":
+            # v31.3: 复刻参考项目的云端搜索（见 workbuddy_search.py）。
+            # 未登录 / 云端不可用 → 回退本地抓取，保证搜索始终可用（engine 标注实际来源）。
+            results = await search_via_workbuddy(ctx.db, query, max_results)
+            if results is None:
+                results = await _bing_search(query, max_results)
+                engine = "bing(fallback: workbuddy unavailable)"
+            if not results:
+                return ToolResult(
+                    ok=True, output=f'No results for "{query}"',
+                    data={"results": [], "engine": engine},
+                )
+        elif engine == "google":
             results = await GoogleSearchAdapter().search(query, max_results)
             if not results:
                 return ToolResult(
@@ -114,7 +133,10 @@ class WebSearchTool(Tool):
                     ok=True, output=f'No results for "{query}"', data={"results": []}
                 )
 
-        results = filter_relevant(results, query)
+        # 本地抓取结果做轻量相关性过滤（导航站降权/词元命中）；
+        # 云端结果已由服务端清洗，不再二次过滤（避免误杀无字面命中的高质量结果）。
+        if not engine.startswith("workbuddy"):
+            results = filter_relevant(results, query)
         if not results:
             return ToolResult(
                 ok=True, output=f'No results for "{query}"', data={"results": [], "engine": engine}

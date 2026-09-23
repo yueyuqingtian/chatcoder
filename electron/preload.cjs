@@ -46,13 +46,14 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
   minimizeWindow: () => ipcRenderer.send("window:minimize"),
   toggleMaximize: () => ipcRenderer.send("window:maximizeToggle"),
   closeWindow: () => ipcRenderer.send("window:close"),
-  // plan-26-126 P6：自研窗口拖拽（原生 drag 区会吞掉双击事件，改由渲染层接管）。
-  // 分三步上报：start（记录光标相对窗口偏移）→ move（逐帧 setPosition）→ end。
-  // 为何不用 mainWindow.startDrag：BrowserWindow 上**没有**这个方法（只有 WebContents
-  // 的 startDrag，语义是拖文件），历史实现因此每次都抛错被吞 ⇒ 窗口拖不动。
-  startWindowDrag: () => ipcRenderer.send("window:dragStart"),
-  moveWindowDrag: () => ipcRenderer.send("window:dragMove"),
-  endWindowDrag: () => ipcRenderer.send("window:dragEnd"),
+  // plan-31-151 S2：主进程在 maximize/unmaximize 时通知渲染层——修复 frame:true +
+  //   titleBarStyle:"hidden" 最大化时客户区外扩 8px 非客户区导致的边缘内容裁切。
+  onMaximizeChange: (cb) => {
+    const handler = (_e, isMax) => cb(isMax === true);
+    ipcRenderer.on("window:maximize-change", handler);
+    return () => ipcRenderer.removeListener("window:maximize-change", handler);
+  },
+  // plan-31-151 S3：自研拖拽通道已移除（标题栏改回系统 -webkit-app-region:drag）。
   relaunchApp: () => ipcRenderer.invoke("app:relaunch"),
   // 修复文本输入状态（输入框"能删不能输"卡死的兜底：主进程重新同步焦点）
   fixTextInput: () => ipcRenderer.invoke("window:fixTextInput"),

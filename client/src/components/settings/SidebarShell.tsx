@@ -6,7 +6,6 @@ import { IconArrowLeft } from "../icons";
 import { AppLogo } from "../AppLogo";
 import { NAV_GROUPS, SETTINGS_INDEX, type SettingsTab } from "./index";
 import { useI18n } from "../../store/i18n";
-import { useWindowDrag } from "../../hooks/useWindowDrag";
 
 export function SidebarShell({ collapsed, children, footer }: {
   collapsed: boolean;
@@ -29,11 +28,10 @@ export function SettingsSidebar({ tab, onTab, onBack, collapsed }: {
   collapsed: boolean;
 }) {
   const { t } = useI18n();
-  // plan-26-126 P2：设置侧栏头部同样是拖拽/双击伪全屏区
-  const { onPointerDown, onPointerMove, onPointerUp } = useWindowDrag();
+  // plan-31-151 S3：设置侧栏头部拖拽/双击改由系统 -webkit-app-region:drag 处理（见 global.css）。
   return (
     <SidebarShell collapsed={collapsed}>
-      <div className="sb-head" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}>
+      <div className="sb-head">
         <AppLogo size={20} className="sb-logo-img" />
         {collapsed && (
           <button className="sb-nav-arrow" onClick={onBack} title={t("titlebar.back")} type="button">

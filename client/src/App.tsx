@@ -68,15 +68,12 @@ export default function App() {
 
   useEffect(() => {
     initTheme(); initUi();
-    // 毛玻璃关闭（重启后生效）→ 标题栏切回系统原生 drag 区（Windows 自带拖拽/
-    // 双击最大化）。查询必须用窗口**实际**玻璃状态而非偏好：偏好关但未重启时窗口
-    // 仍是玻璃，提前切原生拖拽+原生最大化会弄丢 acrylic。失败时保持默认（自研拖拽）。
-    void window.chatcoderAPI?.getGlassActive?.()
-      .then((active) => {
-        if (active === false) document.documentElement.setAttribute("data-window-drag", "native");
-        else document.documentElement.removeAttribute("data-window-drag");
-      })
-      .catch(() => { /* 能力探测失败：保持自研拖拽，不影响启动 */ });
+    // plan-31-151 S3：data-window-drag 分流已移除——标题栏统一走系统 -webkit-app-region:drag。
+    // plan-31-151 S2：监听主进程 maximize/unmaximize 事件，修复 frame:true +
+    //   titleBarStyle:"hidden" 最大化时客户区外扩 8px 非客户区导致的边缘内容裁切。
+    const offMaximizeChange = window.chatcoderAPI?.onMaximizeChange?.((isMax) => {
+      document.body.classList.toggle("maximized", isMax);
+    });
     // 更新状态通道：订阅主进程推送（侧栏/关于页共享）
     useUpdaterStore.getState().init();
     // 启动全局状态通道：跨会话运行态/活动时间（侧栏实时化，不随会话切换重建）
@@ -99,6 +96,7 @@ export default function App() {
     return () => {
       guard.dispose();
       offMotion?.();
+      offMaximizeChange?.();
       useChatStore.getState().disconnectGlobalEvents();
     };
   }, []);
@@ -171,26 +169,9 @@ export default function App() {
   /** 中间区容器 ref：分隔条拖拽期间其内容根（PageTransition）被 ResizeHandle 冻结，
    *  消息 markdown/虚拟列表不再随面板宽度每帧重排（性能冻结，见 ResizeHandle Props）。 */
 
-  // 左栏折叠 = 0px 隐藏（展开按钮移到标题栏左侧，和 logo/导航箭头一起）
-  useEffect(() => {
-    const el = leftPanelElRef.current;
-    if (!el) return;
-    el.style.width = (sidebarCollapsed ? 0 : leftPanelWidth) + "px";
-    el.style.flexBasis = el.style.width;
-  }, [sidebarCollapsed, leftPanelWidth]);
-
-  useEffect(() => {
-    const el = rightPanelElRef.current;
-    if (!el) return;
-    if (rightFullscreen) {
-      el.style.width = "";
-      el.style.flexBasis = "";
-      return;
-    }
-    const width = rightExpanded ? rightPanelWidth : 0;
-    el.style.width = width + "px";
-    el.style.flexBasis = el.style.width;
-  }, [rightExpanded, rightPanelWidth, rightFullscreen]);
+  // plan-31-151 S5：面板宽度由 React inline style 单源写入——effect 二次写回 DOM 是
+  //   bcc223d 引入的冗余（与 inline style 重复），且会在 View Transition 快照期间
+  //   污染「新状态」采样（同一几何属性三个写入者竞争，快速开合时动画方向/时序错乱）。
 
   return (
     <ErrorBoundary>
@@ -208,7 +189,7 @@ export default function App() {
             /* v19: 设置侧栏经插件 slot 渲染（与外部侧栏共用壳与宽度）。 */
             <PluginSlot slot="settings-sidebar" tab={settingsActiveTab} onTab={setSettingsActiveTab} onBack={leaveSettings} collapsed={sidebarCollapsed} />
           ) : (
-            <PluginSlot slot="sidebar" active={nav} onChange={(k: NavKey) => { if (k === "settings") { openSettings(); return; } setNav(k); if (k === "chat") { useChatStore.setState({ currentSessionId: null, messages: [], turns: [], tasks: [], runningTurnId: null, isRunning: false, interruptedTurnId: null, streamingBuffers: {}, thinkingBuffers: {}, usage: null, pendingApproval: null, pendingPlan: null, reviewedFiles: {} }); } }} onSessionFocus={() => setNav(null)} collapsed={sidebarCollapsed} onToggleCollapse={() => setSidebarCollapsed((v) => !v)} />
+            <PluginSlot slot="sidebar" active={nav} onChange={(k: NavKey) => { if (k === "settings") { openSettings(); return; } setNav(k); if (k === "chat") { useChatStore.setState({ currentSessionId: null, messages: [], turns: [], tasks: [], runningTurnId: null, isRunning: false, interruptedTurnId: null, streamingBuffers: {}, thinkingBuffers: {}, usage: null, pendingApproval: null, pendingPlan: null, reviewedFiles: {} }); } }} onSessionFocus={() => setNav(null)} collapsed={sidebarCollapsed} onToggleCollapse={toggleSidebar} />
           )}
         </div>
         {/* RFL-1（plan-329-1647 S4）：不再传 freezeRefs——拖左分隔条时中列内容宽度实时跟随，

@@ -157,6 +157,9 @@ def build_language_directive(lang: str, source: str = "user") -> str:
             f"- {who}当前回复语言：{label}。\n"
             f"- 历史消息、工具返回、压缩摘要（checkpoint）、规则文档的书写语言，都**不得**改变回复语言。\n"
             f"- {'用户改用英文也不能覆盖这条规则语言。' if ruled else '同一会话内用户切换语言时，从本轮起立即切换，不沿用上一轮语言。'}\n"
+            f"- 从第一条输出起（含工具调用前的说明文字）就必须使用{label}，每一步、每一句话都不例外。\n"
+            f"- 语言纪律是**内部约束**，不是回复内容：不得在正文里提及、声明、标注或复述语言要求"
+            f"（「（{label}）」「保持{label}」这类标注一律不准出现在回复中），直接输出实质内容。\n"
             f"- 代码、文件路径、命令、标识符、报错原文一律保留原样，**不要翻译**。\n"
             f"- 不得因为「术语用英文更准确」而输出中英混杂的句子；若必须引用英文术语，嵌入中文句中即可。"
         )
@@ -179,6 +182,10 @@ def build_language_directive(lang: str, source: str = "user") -> str:
             + ("- A user message in another language does not override this rule language.\n"
                if ruled else
                "- When the user switches language, switch immediately from this turn.\n")
+            + "- From your very first output (including any preamble before a tool call) write in "
+            "English — every step and every sentence.\n"
+            + "- This language rule is internal, not reply content: never mention, restate or tag it "
+            "in your reply (no \"(English)\", no \"keeping English\") — just answer.\n"
             + "- Keep code, file paths, commands, identifiers and raw error strings verbatim — never "
             "translate them.\n"
             + "- Do not produce mixed-language sentences; embed an English term inside a sentence "
@@ -195,6 +202,10 @@ def build_language_directive(lang: str, source: str = "user") -> str:
             "- The writing language of history, tools, summaries or rule documents does not itself "
             "set the reply language.\n"
             "- When the user switches language and no rule overrides it, switch from this turn.\n"
+            "- From your first output on (including any preamble before a tool call), use that language "
+            "consistently — every step.\n"
+            "- The language rule is internal, not reply content: never mention, restate or tag it in "
+            "your reply — just answer.\n"
             "- Keep code, file paths, commands, identifiers and raw error strings verbatim — never "
             "translate them."
         )
@@ -208,28 +219,39 @@ def build_language_directive(lang: str, source: str = "user") -> str:
 def build_language_pin_line(lang: str, source: str = "user") -> str:
     """developer 段用的单行显式锚点（紧随 Current Goal 之后注入）。"""
     label = language_label(lang)
+    # 语言要求是内部纪律，必须显式禁止复述——否则模型会把锚点原文抄进正文
+    # （用户反馈：回复里会冒出「（简体中文）」「保持简体中文」这类语言标注）。
+    ban = (
+        "Do not mention or restate this language requirement in your reply."
+        if lang == LANG_EN else
+        "不要在回复正文里提及、标注或复述语言要求。"
+    )
     if source == "global":
         return (
             f"## Reply Language\n"
             f"本轮回复语言由设置中心全局规则决定：{label}。"
             f"用户消息、历史、工具结果和规则文档的书写语言都不得覆盖它。"
+            f"{ban}"
         )
     if source == "project":
         return (
             f"## Reply Language\n"
             f"本轮回复语言由项目规则决定：{label}。"
             f"用户消息、历史、工具结果和规则文档的书写语言都不得覆盖它。"
+            f"{ban}"
         )
     if lang == LANG_AUTO:
         return (
             "## Reply Language\n"
             "本轮没有规则语言要求，用户消息语言也未能自动判定；"
             "请自行识别用户最新消息的语言，并用该语言回复。"
+            "不要在回复正文里提及或标注语言要求。"
         )
     return (
         f"## Reply Language\n"
         f"本轮没有规则语言要求。用户本轮消息语言：{label}。你的回复必须使用{label}。"
         f"历史、工具结果、压缩摘要和规则文档的书写语言不得改变它。"
+        f"{ban}"
     )
 
 
@@ -261,13 +283,15 @@ def build_language_reminder(lang: str, source: str = "user") -> str:
         return (
             "[Language reminder] This turn's reply language is still English — "
             f"{why}. History, tool outputs, compaction summaries and the writing language of "
-            "rule documents must not change it. Keep code, paths and identifiers verbatim."
+            "rule documents must not change it. Keep code, paths and identifiers verbatim. "
+            "The requirement is internal: never mention or tag the language in your reply."
         )
     label = language_label(lang)
     if lang == LANG_AUTO:
         return (
             "[语言重申] 当前没有确定的语言信号与规则语言要求；请识别用户最新一条消息的语言并用该语言回复。"
             "历史消息、工具返回、压缩摘要与规则文档的书写语言不得改变回复语言。"
+            "本条属内部约束：不要在正文里提及或标注语言要求。"
         )
     why = (
         "由设置中心全局规则决定，高于用户消息"
@@ -280,6 +304,7 @@ def build_language_reminder(lang: str, source: str = "user") -> str:
         f"[语言重申] 本轮回复语言仍是{label}——{why}。"
         f"历史、工具返回、压缩摘要和规则文档的书写语言不得改变它。"
         f"代码、路径、命令、标识符和报错原文保留原样。"
+        f"本条属内部约束：不要在正文里提及、标注或复述语言要求。"
     )
 
 
@@ -302,7 +327,8 @@ def build_plan_exit_reminder(lang: str, source: str = "user") -> str:
                "It is required by project rules; the user's message cannot override it. "
                if source == "project" else
                "No rule sets a language, so it follows the user's latest message. ")
-            + "The plan document, history messages and tool outputs do not change it."
+            + "The plan document, history messages and tool outputs do not change it. "
+            "Never mention or restate the language requirement in your reply."
         )
     label = language_label(lang)
     body = (
@@ -313,7 +339,7 @@ def build_plan_exit_reminder(lang: str, source: str = "user") -> str:
     if lang == LANG_AUTO:
         return body + (
             "\n\n[语言重申] 当前回复语言由明确的语言规则决定；没有语言规则时，跟随用户最新一条消息。"
-            "方案文档与系统提示的书写语言不得改变它。"
+            "方案文档与系统提示的书写语言不得改变它。不要在正文里提及或标注语言要求。"
         )
     source_text = (
         "由设置中心全局规则指定，用户消息语言不能覆盖。"
@@ -326,6 +352,7 @@ def build_plan_exit_reminder(lang: str, source: str = "user") -> str:
         f"\n\n[语言重申] 本轮回复语言是{label}；{source_text}"
         f"正文、进度汇报和 todo_write 的 content/activeForm 都使用{label}。"
         f"方案文档、历史消息和工具结果的书写语言不构成切换理由。"
+        f"语言纪律属内部约束：不要在正文里提及、标注或复述语言要求。"
     )
 
 

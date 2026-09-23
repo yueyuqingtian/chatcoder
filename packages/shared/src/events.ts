@@ -135,8 +135,13 @@ export type ServerWsEvent =
   | { event: "goal.completed"; payload: { turn_id?: number | null; summary?: string } }
   | { event: "goal.continued"; payload: { turn_id: number; prev_turn_id?: number; turns_used: number } }
   | { event: "goal.stopped"; payload: { turn_id?: number | null; reason?: string; max_turns?: number } }
-  /** v37: turn 结束即摘除会话运行标记；last_activity_at 供侧栏按最近活动重排 */
-  | { event: "session.completed"; payload: { session_id: number; last_activity_at?: string | null } }
+  /** v37: turn 结束即摘除会话运行标记；last_activity_at 供侧栏按最近活动重排。
+   *  v39: subagent_pending——后台子代理仍在跑时前端保持运行标记并显示等待子代理态。 */
+  | { event: "session.completed"; payload: { session_id: number; last_activity_at?: string | null; subagent_pending?: number } }
+  /** v39: 后台子代理运行数变化（>0 保持运行态并显示「等待子代理结束…」；=0 摘除） */
+  | { event: "subagent.pending"; payload: { session_id: number; pending: number } }
+  /** v39: 子代理完成唤醒——服务端自动创建新 turn 送达完成报告（前端渲染分隔线） */
+  | { event: "subagent.wakeup"; payload: { session_id: number; turn_id: number } }
   | { event: "error"; payload: { code?: string; message?: string } }
   /** 服务端对客户端请求的确认（approval/cancel/sync 等） */
   | { event: "ack"; payload: { ref: string; ok?: boolean; resolved?: boolean } }
@@ -213,6 +218,8 @@ export const ORDERED_EVENTS: ReadonlySet<string> = new Set([
   "agent.updated",
   "agent.completed",
   "subagent.failed",
+  "subagent.pending",
+  "subagent.wakeup",
   "usage.update",
   "debug.paused",
   // plan-308-1542：AI 合并进度（有序，保证前端进度行不跳序）

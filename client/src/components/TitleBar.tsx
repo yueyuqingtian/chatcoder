@@ -3,8 +3,7 @@
  * 中：会话标题 + 项目 chip + 「...」会话操作菜单
  * 右：打开工作区(黄文件夹) + 任务卡开关 + 右面板开关 + 窗口控制
  */
-import { useEffect, useRef, useState } from "react";
-import { useWindowDrag } from "../hooks/useWindowDrag";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { api } from "../api/client";
 import { useChatStore } from "../store/chat";
 import { usePanelStore } from "../store/panel";
@@ -18,6 +17,12 @@ import {
   IconChevronLeft, IconChevronRight, IconChevronDown, IconCheck,
   IconBrandExplorer, IconBrandVSCode, IconBrandIdea, IconBrandWindowsTerminal,
 } from "./icons";
+
+/** plan-31-152 S5-2：窗口按钮级 no-drag 加固。
+ *  用户反馈"只有缩放按钮点击无反应，最小化/关闭正常"——同容器按钮行为不一致，
+ *  说明点击在该按钮位置被系统 caption 命中区吞掉（而非 CSS 继承链问题）。
+ *  这里给三个按钮各自挂 inline app-region，不依赖任何选择器/继承。 */
+const NO_DRAG = { WebkitAppRegion: "no-drag" } as CSSProperties;
 
 interface TitleBarProps {
   leftCollapsed: boolean;
@@ -136,19 +141,12 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
     }
   };
 
-  /* ── plan-26-126 P2：自研拖拽 + 双击伪全屏（详见 hooks/useWindowDrag.ts）──
-     不再用 `-webkit-app-region: drag`：该区域由系统处理拖拽/双击，DOM 拿不到 dblclick，
-     双击会直接触发系统原生最大化（重建 DWM 图层 ⇒ 玻璃丢失且不保证恢复）。
-     本轮修复：双击判定改由 hook 内部按 pointerup 自研——原生 dblclick 的 target 会被
-     提升到两次点击的共同祖先，导致「点折叠按钮 + 点旁边空白」误触发伪最大化（小窗变全屏）。 */
-  const { onPointerDown, onPointerMove, onPointerUp } = useWindowDrag();
-
+  /* ── plan-31-151 S3：标题栏改回 -webkit-app-region:drag（系统原生拖拽/双击/右键菜单）──
+     自研拖拽（useWindowDrag）已随 frame:false 伪最大化架构一并移除；
+     frame:true + titleBarStyle:"hidden" 下系统接管拖拽与双击最大化，玻璃由 DWM 全程合成不丢。 */
   return (
     <div
       className={`titlebar${leftCollapsed ? " left-collapsed" : ""}`}
-      onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
     >
       <div className="titlebar-left">
         {/* 侧栏折叠时：logo 与前进/后退 + 展开按钮移到标题栏左侧（展开态折叠入口在侧栏头部） */}
@@ -336,13 +334,36 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
         </button>
         )}
         <span className="titlebar-sep" />
-        <button className="titlebar-btn" onClick={() => winApi?.minimizeWindow?.()} title={t("titlebar.min")} disabled={!winApi}>
+        {/* plan-31-152 S5-2（用户反馈"只有缩放按钮点击无反应，最小化/关闭正常"）：
+            三个按钮结构相同，唯独缩放失效 ⇒ 排除 drag 区吞点击（同容器会全吞），
+            问题在该按钮自身：要么被系统 caption 命中区吞掉，要么 maximize() 未生效。
+            双重加固：① 按钮级 inline no-drag（不依赖 CSS 继承链）；
+            ② 点击日志便于核对 IPC 是否到达（主进程 console-message 会写进 main.log）。 */}
+        <button
+          className="titlebar-btn"
+          style={NO_DRAG}
+          onClick={() => { console.log("[chatcoder] titlebar: minimize clicked"); winApi?.minimizeWindow?.(); }}
+          title={t("titlebar.min")}
+          disabled={!winApi}
+        >
           <IconMinus size={14} />
         </button>
-        <button className="titlebar-btn" onClick={() => winApi?.toggleMaximize?.()} title={t("titlebar.max")} disabled={!winApi}>
-          <IconSquare size={12} />
+        <button
+          className="titlebar-btn"
+          style={NO_DRAG}
+          onClick={() => { console.log("[chatcoder] titlebar: maximize toggle clicked"); winApi?.toggleMaximize?.(); }}
+          title={t("titlebar.max")}
+          disabled={!winApi}
+        >
+          <IconSquare size={14} />
         </button>
-        <button className="titlebar-btn titlebar-close" onClick={() => winApi?.closeWindow?.()} title={t("titlebar.close")} disabled={!winApi}>
+        <button
+          className="titlebar-btn titlebar-close"
+          style={NO_DRAG}
+          onClick={() => { console.log("[chatcoder] titlebar: close clicked"); winApi?.closeWindow?.(); }}
+          title={t("titlebar.close")}
+          disabled={!winApi}
+        >
           <IconX size={14} />
         </button>
       </div>

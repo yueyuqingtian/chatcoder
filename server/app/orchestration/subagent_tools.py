@@ -59,15 +59,22 @@ SPAWN_SUBAGENT_SCHEMA = {
             "properties": {
                 "task_title": {
                     "type": "string",
-                    "description": "Short verb-object title of the subtask (under 40 characters).",
+                    "description": (
+                        "Short verb-object title of the subtask (under 40 characters), "
+                        "written in the current reply language (the language the user speaks)."
+                    ),
                 },
                 "task_description": {
                     "type": "string",
-                    "description": "Detailed instructions: what to investigate or do, which files to read, what to look for, what to report back.",
+                    "description": (
+                        "Detailed instructions: what to investigate or do, which files to read, what to look "
+                        "for, what to report back. Write it in the current reply language — the subagent "
+                        "mirrors the language of this handoff, so an English text makes it open in English."
+                    ),
                 },
                 "acceptance_criteria": {
                     "type": "string",
-                    "description": "How to verify the subtask is done.",
+                    "description": "How to verify the subtask is done. Written in the current reply language.",
                 },
                 "explore": {
                     "type": "boolean",

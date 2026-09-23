@@ -1115,11 +1115,19 @@ async def build_subagent_context(
     _lang_text = original_request or f"{task.title or ''}\n{task.description or ''}"
     _user_lang = await _resolve_session_language(db, getattr(session, "id", None), _lang_text)
     _reply_lang, _lang_source = await _resolve_rule_language(workspace, project, _user_lang)
+    # plan-19-82 修复（子代理首句语言）：instruction 是子代理上下文里最后一条、最贴近输出点的
+    # 指令，写死英文会让它成为英文语言示范——子代理首条输出（尤其工具调用前的说明文字）被
+    # 带向英文，用户看到“第一句话不是我说的语言，后续才切回来”。这里按锚定语言生成指令句。
+    from app.orchestration.prompts.language import LANG_ZH, build_language_pin_line
+    _instruction = (
+        f"开始执行分配给你的子任务：{task.title}"
+        if _reply_lang == LANG_ZH else
+        f"Start working on the assigned task: {task.title}"
+    )
     bundle = ContextBundle(
         system=build_subagent_system_prompt(task.title or "", task.acceptance_criteria or "",
                                             language=_reply_lang, language_source=_lang_source),
-        # plan-19-82: instruction 由写死英文改为语言中立，避免把子代理汇报语言带向英文
-        instruction=f"Start working on the assigned task: {task.title}",
+        instruction=_instruction,
         reply_language=_reply_lang,
         reply_language_source=_lang_source,
     )
@@ -1137,7 +1145,6 @@ async def build_subagent_context(
     except Exception:
         logger.debug("[context] 子代理规则锚点注入失败(非阻塞)", exc_info=True)
     # plan-330-1648 M3: 语言锚点行（与主代理同一行文与位置语义——紧贴任务指令之前）
-    from app.orchestration.prompts.language import build_language_pin_line
     bundle.developer_parts.append(build_language_pin_line(_reply_lang, source=_lang_source))
     if original_request:
         bundle.developer_parts.append(f"## Original User Request\n{original_request[:2000]}")

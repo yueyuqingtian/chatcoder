@@ -8,8 +8,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, memo, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { TimelineEntry, ToolNode, TurnItem } from "./timeline";
-import { createTimelineBuilder, msgText } from "./timeline";
-import { isBusy } from "../../perf/bus";
+import { createTimelineBuilder, msgText, lastPersistedText } from "./timeline";
+import { isBusy, subscribe } from "../../perf/bus";
 import { registerReconcileTask, RECONCILE_ORDER } from "../../perf/reconcile";
 import { TurnGroup } from "./TurnGroup";
 import { JumpDots } from "./JumpDots";
@@ -21,6 +21,13 @@ import { MarkdownContent } from "../MarkdownContent";
 import { MsgType } from "@chatcoder/shared";
 import { useChatStore } from "../../store/chat";
 import { api, type MessageOut } from "../../api/client";
+
+/** plan-31-152 S5-4：运动期（拖分隔条/窗口缩放）视口 rect 的提交节流间隔（毫秒）。
+ *  逐帧提交会让虚拟器每帧 setState → 整棵可见消息树 React 重渲染（含 markdown/工具树），
+ *  这是"拖动左右侧面板卡顿"的主因（空态首页无消息所以不卡）。取 ~120ms（约 8 帧一次）：
+ *  既让虚拟器的可见范围跟上宽度变化，又把整树重渲染频率压到拖拽可接受的水平；
+ *  运动结束由收敛序列（order 20）立即提交最终 rect 保证精确。 */
+const MOTION_RECT_THROTTLE_MS = 120;
 
 /** plan-308-1542 需求1：任务执行类错误的**唯一**棂位——消息流末尾错误卡。
  *  此前这类错误会同时写入 store.error（右上角 Toast）与消息流，造成重复报错；
@@ -40,6 +47,22 @@ const FlowErrorCard = memo(function FlowErrorCard({
           )}
           <button className="btn btn-ghost btn-xs" onClick={onClose} type="button">关闭</button>
         </div>
+      </div>
+    </div>
+  );
+});
+
+/** v39: 后台子代理运行期间的等待行（主会话保持“运行中”的视觉表达）。
+ *  与 StreamingText 的状态行同款样式（呼吸点 + 文案），语义为「等子代理结束」；
+ *  子代理结束会自动创建唤醒轮，届时转为常规流式尾部。 */
+const SubagentWaitingLine = memo(function SubagentWaitingLine({ count }: { count: number }) {
+  return (
+    <div className="turn-group turn-flow streaming-tail">
+      <div className="turn-status-line">
+        <span className="thinking-breath-dot" />
+        <span className="thinking-block-status">
+          {count > 1 ? `等待子代理结束…（${count} 个运行中）` : "等待子代理结束…"}
+        </span>
       </div>
     </div>
   );
@@ -235,6 +258,13 @@ function MessageFlowCore({
    *  现在统一由唯一收敛序列（reconcile）按 order 20 调用一次。 */
   const settleRectRef = useRef<(() => void) | null>(null);
 
+  /** 运动期降低 overscan（拖拽卡顿治理 P2-2）：拖拽 / 窗口运动期间每条离屏项也会随宽度变化
+   *  逐帧折行，它们不可见却同样占满帧预算；降到 2 仍能覆盖滚动余量，静止后立即恢复 6。
+   *  注意：**不做**「离屏项 content-visibility 跳过」——那会让虚拟器测到估算高度、
+   *  总高反复跳变，引发重叠/错位（详见 docs/panel-drag-jank-optimization.md P2-2）。 */
+  const [overscan, setOverscan] = useState(6);
+  useEffect(() => subscribe((busy) => setOverscan(busy ? 2 : 6)), []);
+
   const virtualizer = useVirtualizer({
     count: totalCount,
     getScrollElement: () => parentRef.current,
@@ -242,7 +272,7 @@ function MessageFlowCore({
     // 仅在 scrollOffset 为 null（首帧）时消费：按"末项估算起点"初始化，避免从顶部渲染
     initialOffset: () =>
       totalCount > 0 ? Math.max(0, (totalCount - 1) * heightEstRef.current[estBucketOf(totalCount - 1)]) : 0,
-    overscan: 6,
+    overscan,
     /* plan-282-1444：位置改由虚拟列表**直接写 DOM**。
      *
      *  根因：每一项都是 `position:absolute`，位置来自虚拟列表的尺寸缓存。新挂载
@@ -259,53 +289,64 @@ function MessageFlowCore({
     // 消息数较多时默认 transform 会让每个可视虚拟项进入合成层；切为 top 定位，
     // 避免窗口动画/滚动时维护大量图层。绝对定位项已满足 position 模式契约。
     directDomUpdatesMode: "position",
-    // 默认 observer 在窗口每帧 resize 时通知虚拟器更新可视范围并触发 React 重渲染。
-    // 几何运动期冻结该尺寸通知，结束后只提交一次最终 rect；scroll offset 观察仍保留，
-    // 所以用户滚动不受影响。
+    // plan-31-152 S5-4（用户反馈"拖左右侧面板卡顿，空态首页不卡"）：
+    //   拖拽期间容器宽度每帧在变，若每帧都 cb 提交 rect → 虚拟器 setState →
+    //   **整棵可见消息树 React 重渲染**（含 markdown/工具树），这正是卡顿主因；
+    //   空态首页没有消息，所以感觉不卡。
+    //   现在按状态分流：
+    //     · 运动期（拖分隔条/窗口缩放）→ **低频节流提交**（MOTION_RECT_THROTTLE_MS）：
+    //       虚拟器仍能跟上宽度变化（可见范围计算），但不再逐帧触发整树重渲染；
+    //     · 静止期 → rAF 合并提交（跟手，无额外开销）。
+    //   运动结束后的最终 rect 由收敛序列（order 20）立即提交，保证精确。
     observeElementRect: (instance, cb) => {
       const el = instance.scrollElement;
       if (!el) return;
       const readFinalRect = () => ({ width: Math.round(el.clientWidth), height: Math.round(el.clientHeight) });
-      const notify = () => cb(readFinalRect());
-      notify();
+      cb(readFinalRect()); // 首帧立即提交
       let lastWidth = el.clientWidth;
       let lastHeight = el.clientHeight;
-      let missedDuringMotion = false;
-      // 判定统一走 PerfBus（S3）：窗口运动 / 拖分隔条 / 面板过渡三源合并
-      const isMotion = () => isBusy();
-      const ro = new ResizeObserver(() => {
-        if (isMotion()) { missedDuringMotion = true; return; }
+      let raf = 0;
+      let throttleTimer = 0;
+      const commit = () => {
         const width = el.clientWidth;
         const height = el.clientHeight;
-        if (width === lastWidth && height === lastHeight && !missedDuringMotion) return;
+        if (width === lastWidth && height === lastHeight) return;
         lastWidth = width;
         lastHeight = height;
-        missedDuringMotion = false;
         cb({ width: Math.round(width), height: Math.round(height) });
-      });
+      };
+      const scheduleNotify = () => {
+        if (isBusy()) {
+          // 运动期：节流为一拍一次（上一拍未到则合并进这一拍）
+          if (throttleTimer) return;
+          throttleTimer = window.setTimeout(() => {
+            throttleTimer = 0;
+            commit();
+          }, MOTION_RECT_THROTTLE_MS);
+          return;
+        }
+        if (raf) return; // 静止期：本帧已排队，合并为一次
+        raf = requestAnimationFrame(() => {
+          raf = 0;
+          commit();
+        });
+      };
+      const ro = new ResizeObserver(scheduleNotify);
       ro.observe(el);
       const settle = () => {
-        if (!missedDuringMotion || isMotion()) return;
-        missedDuringMotion = false;
+        // 收敛序列（order 20）调用：取消所有 pending，立即提交最终 rect
+        if (raf) { cancelAnimationFrame(raf); raf = 0; }
+        if (throttleTimer) { clearTimeout(throttleTimer); throttleTimer = 0; }
         lastWidth = el.clientWidth;
         lastHeight = el.clientHeight;
         cb({ width: Math.round(lastWidth), height: Math.round(lastHeight) });
       };
-      const onMotion = (event: Event) => {
-        if ((event as CustomEvent<{ active?: boolean }>).detail?.active === false) settle();
-      };
-      const onPointerUp = () => settle();
-      const onPanelDragEnd = () => settle();
       settleRectRef.current = settle; // 供收敛序列（order 20）调用
-      window.addEventListener("chatcoder:window-motion", onMotion);
-      window.addEventListener("pointerup", onPointerUp, true);
-      window.addEventListener("chatcoder:panel-drag-end", onPanelDragEnd);
       return () => {
         if (settleRectRef.current === settle) settleRectRef.current = null;
+        if (raf) cancelAnimationFrame(raf);
+        if (throttleTimer) clearTimeout(throttleTimer);
         ro.disconnect();
-        window.removeEventListener("chatcoder:window-motion", onMotion);
-        window.removeEventListener("pointerup", onPointerUp, true);
-        window.removeEventListener("chatcoder:panel-drag-end", onPanelDragEnd);
       };
     },
   });
@@ -404,6 +445,10 @@ function MessageFlowCore({
    *  节流到每帧一次，既保跟手又去掉同一帧内的重复计算。 */
   const spyRafRef = useRef(0);
   const scheduleSpy = useCallback(() => {
+    // P1-4（拖拽卡顿治理）：运动期不读布局——updateActiveEntry 每次都要取虚拟项集合与
+    // scrollTop/clientHeight；拖拽期这些读会升级为强制同步布局，与折行重排叠加。
+    // 运动结束后由面板拖拽结束 / 窗口运动结束路径触发一次 scroll，届时自然补算。
+    if (isBusy()) return;
     if (spyRafRef.current) return;
     spyRafRef.current = requestAnimationFrame(() => {
       spyRafRef.current = 0;
@@ -477,16 +522,35 @@ function MessageFlowCore({
     const el = parentRef.current;
     if (!el) return;
     const SCROLLBAR_BAND = 12; // 6px 滚动条 + 6px 容差，便于命中
-    const onMove = (e: PointerEvent) => {
+    // P0-3（拖拽卡顿治理）：getBoundingClientRect 是强制同步布局读，此前每次 pointermove
+    // 都执行一次——与拖拽期逐帧写入的宽度叠加，等于每帧多付一次全量重排。
+    // 现在：① 运动期（拖拽 / 窗口缩放）直接跳过——此时指针被拖拽占用，热区无意义；
+    // ② 静止期用 rAF 合并，一帧至多读一次。
+    let raf = 0;
+    let lastX = 0;
+    let lastY = 0;
+    const apply = () => {
+      raf = 0;
       const rect = el.getBoundingClientRect();
-      if (e.clientY < rect.top || e.clientY > rect.bottom) return;
-      const nearRight = e.clientX >= rect.right - SCROLLBAR_BAND && e.clientX <= rect.right + 2;
+      if (lastY < rect.top || lastY > rect.bottom) { el.classList.remove("is-scrollbar-hover"); return; }
+      const nearRight = lastX >= rect.right - SCROLLBAR_BAND && lastX <= rect.right + 2;
       el.classList.toggle("is-scrollbar-hover", nearRight);
     };
-    const onLeave = () => el.classList.remove("is-scrollbar-hover");
+    const onMove = (e: PointerEvent) => {
+      if (isBusy()) return;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      if (raf) return;
+      raf = requestAnimationFrame(apply);
+    };
+    const onLeave = () => {
+      if (raf) { cancelAnimationFrame(raf); raf = 0; }
+      el.classList.remove("is-scrollbar-hover");
+    };
     el.addEventListener("pointermove", onMove);
     el.addEventListener("pointerleave", onLeave);
     return () => {
+      if (raf) cancelAnimationFrame(raf);
       el.removeEventListener("pointermove", onMove);
       el.removeEventListener("pointerleave", onLeave);
       el.classList.remove("is-scrollbar-hover");
@@ -605,20 +669,11 @@ function MessageFlowCore({
     };
 
     lastWidthRef.current = el.clientWidth;
-    // plan-26-126 P6（卡顿治理）：「宽度补偿」是几何变更期间最贵的一段——
-    //   每次宽度变化都要 capture + 双帧 rAF + 重测后写 scrollTop，写入又触发重排。
-    //   而窗口平滑缩放动画与面板分隔条拖拽**每帧**都在改宽度 ⇒ 它把 16ms 帧预算吃穿，
-    //   表现为"毛玻璃下拖尺寸卡顿""缩放动画不自然"。
-    //   这里在两类"运动中"跳过它（中间帧保持内容锚点本就无意义）：
-    //     * window.__chatcoderWindowMotion —— 主进程在窗口动画/拖窗口期间置位；
-    //     * body.panel-dragging          —— 面板分隔条拖拽中。
-    //   拖拽结束时 handleMouseUp 会先移除 body 类、再 commit 宽度 ⇒ 那次 RO 会正常
-    //   做一次收尾还原，功能语义（拖完仍停在同一位置）完整保留。
+    // plan-31-151 S4：锚点 capture 时机修正——拖拽期间 RO 回调里 capture 时布局已被改写，
+    //   捕获到的是污染锚点。改为在 ResizeHandle 的 mousedown（拖拽开始前）派发的
+    //   chatcoder:panel-drag-start 事件里捕获（此时布局尚未变）；窗口 resize 路径
+    //   仍在 RO 回调第一帧捕获（此时是窗口几何驱动，布局同样尚未变）。
     let pendingRestore = 0;
-    // 运动中是否记录过待还原锚点：运动结束后需要补一次还原。
-    // 旧实现运动中只把 widthAnchorRef 置空、直接丢弃这次补偿，而它依赖"拖拽结束后
-    // 还会有一次宽度变化"来触发收尾还原——若刚好停在同一像素宽度上就不会发生，
-    // 表现为"拖完位置没跟回来"。现在运动第一帧记下锚点，结束后主动补做一次。
     let missedDuringMotion = false;
     const inMotion = () => isBusy(); // PerfBus（S3）
     const scheduleRestore = () => {
@@ -634,52 +689,36 @@ function MessageFlowCore({
         });
       });
     };
-    /** 运动结束后收尾：补一次锚点还原。
-     *
-     *  本轮优化（用户反馈"拖拉尺寸时内容重渲染延迟很高"）：
-     *  旧实现用 120ms 的 setInterval 轮询"运动是否结束"，最坏情况下拖完还要再等
-     *  120ms + 双帧 rAF 才收敛。现在改为**事件驱动**——主进程在解除运动标记时
-     *  同步派发 chatcoder:window-motion（detail.active=false），当场收尾；
-     *  仅保留一个低频兜底轮询，防止事件丢失（例如渲染层重载）时收尾永不发生。 */
+    /** 运动结束后收尾：补一次锚点还原。 */
     const settleAfterMotion = () => {
       if (!missedDuringMotion) return;
-      // 保留原锚点直到 restore 真正执行；motion=false 与最终 ResizeObserver
-      // 回调可能同帧到达，不能在 RO 中用已重排后的新位置覆盖运动前锚点。
       scheduleRestore();
     };
-    // ── RFL-6：把本效果负责的收尾注册进「唯一收敛序列」──
-    //  · order 20：提交虚拟器视口尺寸（observeElementRect 运动期只记账，这里叫它提交）
-    //  · order 30：锚点还原（仍保留双帧等待——测量收敛确实需要跨帧，见 scheduleRestore 注释）
-    //  · order 40：虚拟列表重新测量
-    // 注册后由 ResizeHandle 在松手时统一触发；原有事件监听依然保留（窗口缩放/补间路径仍走它们）。
+    // plan-31-151 S4：锚点收尾路径去重——删除 pointerup 捕获监听与 panel-drag-end 事件，
+    //   只保留 reconcile order 30 一条路径；窗口 resize 路径仍走 chatcoder:window-motion。
     const offRect = registerReconcileTask("mf-virtualizer-rect", RECONCILE_ORDER.virtualizerRect,
       "提交虚拟器视口尺寸", () => settleRectRef.current?.());
     const offAnchor = registerReconcileTask("mf-scroll-anchor", RECONCILE_ORDER.scrollAnchor,
       "还原滚动锚点", () => settleAfterMotion());
-    const offMeasure = registerReconcileTask("mf-virtualizer-measure", RECONCILE_ORDER.virtualizerMeasure,
-      "虚拟列表重测", () => virtualizer.measure());
     const onMotionEnd = (e: Event) => {
       const active = (e as CustomEvent<{ active?: boolean }>).detail?.active;
       if (active === false) settleAfterMotion();
     };
-    const onPanelDragEnd = () => settleAfterMotion();
     window.addEventListener("chatcoder:window-motion", onMotionEnd);
-    // 面板分隔条拖拽没有主进程事件：借用 pointerup 捕获阶段收尾（与 RO 的最后一次回调互补）
-    window.addEventListener("pointerup", onPanelDragEnd, true);
+    // plan-31-151 S4：拖拽开始前捕获锚点（ResizeHandle mousedown 派发，此时布局尚未变）。
+    const onDragStart = () => {
+      if (!inMotion()) return; // 非拖拽路径不捕获（窗口 resize 走 RO 第一帧）
+      lastWidthRef.current = el.clientWidth;
+      capture();
+      missedDuringMotion = true;
+    };
+    window.addEventListener("chatcoder:panel-drag-start", onDragStart);
     const ro = new ResizeObserver(() => {
       const el2 = parentRef.current;
       if (!el2) return;
-      // 运动期（拖窗口边缘/最大化补间；拖面板时本组件内容根已被 ResizeHandle
-      // 冻结，RO 基本不触发——这里主要兜窗口几何变化路径）：只在第一帧记账一次
-      // 锚点，之后不再读任何布局属性。clientWidth 在 dirty 布局下会强制同步
-      // 重排整棵消息树，逐帧读正是拖拽期长任务来源之一。
-      // 收尾由 missedDuringMotion + onMotionEnd/pointerup 事件驱动（见下），
-      // 不依赖运动期间的逐帧回调。
+      // 运动期：锚点已在 drag-start 事件里捕获（拖拽路径），或在 RO 第一帧捕获（窗口 resize）。
+      //   这里只记账，不再重复 capture（避免在已改写的布局上捕获污染锚点）。
       if (inMotion()) {
-        if (!missedDuringMotion) {
-          lastWidthRef.current = el2.clientWidth;
-          capture();
-        }
         missedDuringMotion = true;
         return;
       }
@@ -687,21 +726,21 @@ function MessageFlowCore({
       if (Math.abs(w - lastWidthRef.current) < 1) return; // 高度抖动不参与
       lastWidthRef.current = w;
       // 运动期钉住了内容宽度，松手解冻后这次 RO 仍应使用运动前的锚点，
-      // 不能在内容折行后的新布局上重新 capture（否则就是把漂移后的偏移当作目标）。
+      //   不能在内容折行后的新布局上重新 capture（否则就是把漂移后的偏移当作目标）。
       if (missedDuringMotion) {
-        missedDuringMotion = false;
         scheduleRestore();
         return;
       }
+      // 非运动路径（窗口 resize 的第一帧 RO）：此时布局尚未变，可安全捕获。
       capture();
       scheduleRestore();
     });
     ro.observe(el);
     return () => {
-      offRect(); offAnchor(); offMeasure();
+      offRect(); offAnchor();
       if (pendingRestore) cancelAnimationFrame(pendingRestore);
       window.removeEventListener("chatcoder:window-motion", onMotionEnd);
-      window.removeEventListener("pointerup", onPanelDragEnd, true);
+      window.removeEventListener("chatcoder:panel-drag-start", onDragStart);
       ro.disconnect();
     };
   }, [virtualizer]);
@@ -1050,6 +1089,8 @@ function MainMessageFlow({
   const turns = useChatStore((s) => s.turns);
   const isRunning = useChatStore((s) => s.isRunning);
   const runningTurnId = useChatStore((s) => s.runningTurnId);
+  // v39: 后台子代理运行数——主会话等待子代理时显示「等待子代理结束…」
+  const pendingSubagents = useChatStore((s) => s.pendingSubagents);
   const currentSessionId = useChatStore((s) => s.currentSessionId);
   const subagentMeta = useChatStore((s) => s.subagentMeta);
   // S8（FlowEngine）：**不再**订阅 streamingBuffers / thinkingBuffers。
@@ -1189,10 +1230,14 @@ function MainMessageFlow({
         <StreamingTail
           active={Boolean(isRunning && runningTurnId)}
           statusLabel={turnStatus ?? (isCompacting ? "压缩中…" : undefined)}
+          persistedText={lastPersistedText(entries)}
         />
       }
       trailingNode={
-        activeDebug ? <DebugCard status={activeDebug} />
+        // v39: 后台子代理运行期间主会话保持“运行中”——主 turn 未跑但有子代理在跑时，
+        // 用与流式状态行同款样式显示「等待子代理结束…」（完成后服务端自动唤醒新一轮）。
+        !isRunning && pendingSubagents > 0 ? <SubagentWaitingLine count={pendingSubagents} />
+          : activeDebug ? <DebugCard status={activeDebug} />
           // plan-308-1542 需求1：任务执行类错误统一在消息流末尾报（不弹右上角）
           : flowError ? (
             <FlowErrorCard
@@ -1234,7 +1279,9 @@ function SubagentMessageFlow({
   // S8：子代理流式文本同样下沉到 <StreamingTail>（见其注释），此处不再订阅缓冲。
   const subagentMeta = useChatStore((s) => (threadId != null ? s.subagentMeta[threadId] : undefined));
 
-  const isRunning = subagentMeta?.status === "running";
+  // v36 修复：与 SubagentPanel / SubagentCard 口径统一——后端存在 in_progress 状态，
+  // 只判 running 会把运行中的面板当成终态（计时条消失、汇报卡片提前生效、运行态标记误判）。
+  const isRunning = subagentMeta?.status === "running" || subagentMeta?.status === "in_progress";
 
   // plan-330-1648 M6: REST 历史回填——事件桶只覆盖“本次连接期间”收到的消息，
   // 重开面板/断线/切会话后会有缺口（用户反馈：面板内容不完整）。这里按 threadId 拉一次历史，
@@ -1286,11 +1333,12 @@ function SubagentMessageFlow({
           isRunning={isRunning}
           actions={actions || "copy-only"}
           flow="subagent"
+          agentId={threadId ?? undefined}
           reportMessageId={reportMessageId}
         />
       );
     },
-    [isRunning, actions, reportMessageId]
+    [isRunning, actions, reportMessageId, threadId]
   );
 
 
@@ -1305,6 +1353,7 @@ function SubagentMessageFlow({
           source={threadId ?? -1}
           active={isRunning}
           statusLabel={isRunning ? "子代理执行中…" : undefined}
+          persistedText={lastPersistedText(entries)}
         />
       }
       sessionKey={`${currentSessionId ?? 0}:${threadId ?? 0}`}

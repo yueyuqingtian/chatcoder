@@ -30,44 +30,67 @@ const TERMINAL_TURN_STATUSES: ReadonlySet<string> = new Set([
   "rolled_back",
 ]);
 
-/** 「已工作 X 分 X 秒」计时条与工作过程折叠切换（对齐图 8） */
+/** 「已工作 X 分 X 秒」计时条与工作过程折叠切换（对齐图 8）。
+ *
+ * v36 修复（用户反馈）：flow="subagent"（右面板）时起止时间改取 subagentMeta
+ * （与面板头部「用时」同源）。此前固定查主会话 `turns`，而右面板的 turnId 是子代理
+ * 消息的 turn_id：切会话/刷新/主会话列表未覆盖该 id 时 `turn` 为空 → 整条 return null，
+ * 计时条消失且过程区再无折叠入口。现在无时间数据也不再整条消失（退化为「工作过程」
+ * 文案），保证折叠入口始终可点。 */
 function WorkTimer({
   turnId,
+  agentId,
+  flow = "main",
   isRunning,
-  hasProcess,
+  canCollapse,
   collapsed,
   onToggleCollapsed,
 }: {
   turnId: number | null;
+  agentId?: number;
+  flow?: "main" | "subagent";
   isRunning: boolean;
-  hasProcess?: boolean;
+  canCollapse?: boolean;
   collapsed?: boolean;
   onToggleCollapsed?: () => void;
 }) {
-  const turn = useChatStore((s) => s.turns.find((t) => t.id === turnId));
+  const subagentFlow = flow === "subagent";
+  const subMeta = useChatStore((s) =>
+    subagentFlow && agentId != null ? s.subagentMeta[agentId] : undefined
+  );
+  const turn = useChatStore((s) => (subagentFlow ? undefined : s.turns.find((t) => t.id === turnId)));
   // S8c：改用共享秒级 ticker（原先每处各自 setInterval，运行期多处独立唤醒 + 各自重渲染）。
   useRunningTicker(isRunning);
-  if (!turn?.started_at) return null;
-  const start = parseUtc(turn.started_at);
-  if (!start) return null;
 
-  let end = Date.now();
-  if (!isRunning && turn.completed_at) {
-    const completed = parseUtc(turn.completed_at);
-    if (completed > 0) end = completed;
+  // 起止时间：子代理面板取 meta（事件 + REST 回填），主会话取 turn 行
+  const startRaw = subagentFlow ? subMeta?.startedAt ?? null : turn?.started_at ?? null;
+  const endRaw = subagentFlow ? subMeta?.endedAt ?? null : turn?.completed_at ?? null;
+  const start = startRaw ? parseUtc(startRaw) : 0;
+
+  let label = "";
+  if (start > 0) {
+    let end = Date.now();
+    if (!isRunning && endRaw) {
+      const completed = parseUtc(endRaw);
+      if (completed > 0) end = completed;
+    }
+    const sec = Math.max(0, Math.round((end - start) / 1000));
+    const min = Math.floor(sec / 60);
+    label = min > 0 ? `${min} 分 ${sec % 60} 秒` : `${sec} 秒`;
   }
-  const sec = Math.max(0, Math.round((end - start) / 1000));
-  const min = Math.floor(sec / 60);
-  const label = min > 0 ? `${min} 分 ${sec % 60} 秒` : `${sec} 秒`;
+
+  // 既无时间数据又不可折叠时：主消息流维持旧行为（不渲染，避免乐观发送期闪现徒条）；
+  // 子代理面板的条是唯一折叠入口——只要可折叠就继续渲染（无秒数时展示「工作过程」）。
+  if (!label && !canCollapse) return null;
 
   return (
     <div
-      className={`turn-worktime${hasProcess ? " clickable" : ""}`}
-      onClick={hasProcess ? onToggleCollapsed : undefined}
-      title={hasProcess ? (collapsed ? "展开工作过程" : "折叠工作过程") : undefined}
+      className={`turn-worktime${canCollapse ? " clickable" : ""}`}
+      onClick={canCollapse ? onToggleCollapsed : undefined}
+      title={canCollapse ? (collapsed ? "展开工作过程" : "折叠工作过程") : undefined}
     >
-      <span>已工作 {label}</span>
-      {hasProcess && (
+      <span>{label ? `已工作 ${label}` : "工作过程"}</span>
+      {canCollapse && (
         <span className="turn-worktime-arrow">
           <IconArrowToggle open={!collapsed} size={11} />
         </span>
@@ -84,6 +107,7 @@ export const TurnGroup = memo(function TurnGroup({
   actions = "full",
   hasPlan = false,
   flow = "main",
+  agentId,
   reportMessageId,
 }: {
   entry: Extract<TimelineEntry, { kind: "turn" }>;
@@ -95,6 +119,9 @@ export const TurnGroup = memo(function TurnGroup({
   /** plan-282-1421：数据来源。subagent 面板的 turn 状态不来自主会话 turns 列表，
    *  因此不能用主会话的全局运行态推断"是否已结束"。 */
   flow?: "main" | "subagent";
+  /** v36 修复：子代理线程 id（=agentId）。右面板计时条改取 subagentMeta 的起止时间，
+   *  不再依赖主会话 turns（主会话列表缺该 turn 时计时条会整条消失、无法折叠）。 */
+  agentId?: number;
   /** v36 (plan-321-1600 M2)：子代理面板的最终汇报消息 id——命中时改由结构化汇报卡片渲染；
    *  主消息流（flow="main"）不传该参数，渲染完全不变。 */
   reportMessageId?: number;
@@ -193,7 +220,8 @@ export const TurnGroup = memo(function TurnGroup({
   // 任务完成且有最终汇报时，工作过程自动折叠；运行中默认展开。
   // v0.3.1 (plan-190-898): 方案等待用户确认阶段（awaiting_confirmation）必须保持展开，
   // 确保计划卡预览在规划阶段完成后始终展现在最底部；用户手动点击计时条折叠时才尊重手动状态。
-  const isAwaitingConfirmation = turnRowStatus === "awaiting_confirmation";
+  // 子代理面板的 turn 行状态取自主会话 turns——计划等待语义不适用，否则面板会被一直保持展开
+  const isAwaitingConfirmation = flow !== "subagent" && turnRowStatus === "awaiting_confirmation";
   const [userToggledCollapsed, setUserToggledCollapsed] = useState<boolean | null>(null);
   const processCollapsed =
     userToggledCollapsed !== null
@@ -278,6 +306,11 @@ export const TurnGroup = memo(function TurnGroup({
   // v0.3.1: 外层容器渲染守卫——只要存在任何非首条用户消息的项、计划卡或子代理，必须完整渲染 AI 回复区
   const hasAnyAiContent =
     items.some((_, index) => index !== firstUserIdx) || hasPlan || subagentNode != null;
+
+  /** v36 修复：折叠入口可用性。主消息流维持原口径（有最终汇报才折叠）；
+   *  子代理面板放宽为「存在 AI 内容即可折叠」——终态但无结构化汇报（失败/取消/纯工具）
+   *  时 hasProcess=false，此前既无计时条也无折叠入口（用户反馈「点击后条消失、无法折叠」）。 */
+  const canCollapse = hasProcess || (flow === "subagent" && hasAnyAiContent);
 
   /** plan-282-1416（问题3）：把 AI 操作行渲染在「AI 内容块末尾」。
    *  plan-282-1421：门控改为 turnFinished——执行中（含乐观发送与状态未落库的空档）
@@ -447,6 +480,16 @@ export const TurnGroup = memo(function TurnGroup({
           </div>
         );
       }
+      // v39: 子代理完成唤醒消息——细分隔线（系统生成，对应上方「等待子代理结束…」）
+      case "subagent-wakeup": {
+        return (
+          <div key={i} className="turn-item turn-item-divider subagent-wakeup-divider">
+            <span className="turn-divider-line" />
+            <span className="turn-divider-text">⟳ 子代理已完成，继续执行</span>
+            <span className="turn-divider-line" />
+          </div>
+        );
+      }
       default:
         return null;
     }
@@ -504,11 +547,13 @@ export const TurnGroup = memo(function TurnGroup({
         <div className="turn-flow">
           {/* plan-1094: 运行中即使尚无最终汇报文本（hasProcess=false）也必须渲染
               WorkTimer，否则发送初期/纯思考阶段「已工作 N 秒」计时条缺失 */}
-          {(hasProcess || isRunning) && (
+          {(canCollapse || isRunning) && (
             <WorkTimer
               turnId={turnId}
+              agentId={agentId}
+              flow={flow}
               isRunning={isRunning}
-              hasProcess={hasProcess}
+              canCollapse={canCollapse}
               collapsed={processCollapsed}
               onToggleCollapsed={() => setUserToggledCollapsed(!processCollapsed)}
             />
@@ -523,9 +568,10 @@ export const TurnGroup = memo(function TurnGroup({
             </div>
           )}
 
-          {/* 2. 无最终汇报时（运行中/异常/纯工具调用无 text 总结）：所有项直显展开，杜绝隐形 */}
+          {/* 2. 无最终汇报时（运行中/异常/纯工具调用无 text 总结）：所有项直显展开，杜绝隐形；
+              子代理面板例外——允许折叠（v36 修复：此前没有折叠入口，长过程无法收起） */}
           {!hasProcess && (
-            <div className="turn-process-container">
+            <div className={`turn-process-container${flow === "subagent" && processCollapsed ? " collapsed" : ""}`}>
               {items.map((item, index) =>
                 index !== firstUserIdx ? renderAiItemWithActions(item, index) : null
               )}

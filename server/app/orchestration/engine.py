@@ -170,6 +170,36 @@ _cancel_finalizers: dict[int, asyncio.Task] = {}
 # 注入项在 agent_loop 每次 LLM 调用前被 drain 进上下文（下次调用前传达给 AI）。
 _pending_inputs: dict[int, list[dict]] = {}
 
+# v39 子代理完成唤醒：会话级运行 turn 计数（session_id -> 数量）。
+# 后台子代理终态时据此判断会话是否空闲——空闲才自动唤醒主代理
+# （对齐 zcode background-task-notifications：不再等用户下一条消息触发送达）。
+_running_session_turns: dict[int, int] = {}
+# 唤醒任务防重（session_id -> task）：同会话同时只调度一个唤醒 turn。
+_subagent_wakeups: dict[int, asyncio.Task] = {}
+
+
+def _session_turn_busy(session_id: int) -> bool:
+    """该会话当前是否有主 turn 在运行（含确认执行/唤醒/目标续跑各路径）。"""
+    return _running_session_turns.get(session_id, 0) > 0
+
+
+def _session_turn_enter(session_id: int | None) -> None:
+    """会话运行 turn 计数 +1（start_turn / execute_confirmed_plan 进入时调用）。"""
+    if session_id is None:
+        return
+    _running_session_turns[session_id] = _running_session_turns.get(session_id, 0) + 1
+
+
+def _session_turn_leave(session_id: int | None) -> None:
+    """会话运行 turn 计数 -1（各处 finally 调用；归零即移除，避免注册表累积）。"""
+    if session_id is None:
+        return
+    n = _running_session_turns.get(session_id, 0) - 1
+    if n > 0:
+        _running_session_turns[session_id] = n
+    else:
+        _running_session_turns.pop(session_id, None)
+
 
 def inject_input(turn_id: int, item: dict) -> bool:
     """向运行中的 turn 注入一条用户消息。turn 未在运行时返回 False（调用方走常规发送）。"""
@@ -206,6 +236,49 @@ def _on_agent_report(manager, session_id: int, turn_id: int,
         manager.queue_leader_note(text)
     except Exception:
         logger.debug("[engine] 子代理上报转完成队列失败(非阻塞)", exc_info=True)
+
+
+def _on_subagent_finished(manager, session_id: int, handle) -> None:
+    """v39 子代理完成唤醒：后台子代理进入终态时的调度入口（manager 回调）。
+
+    修复背景：此前完成通知只入队，等主代理“下一次” LLM 调用或用户下一条消息
+    才送达——主 turn 已结束时表现为“子代理跑完了但主代理没被唤醒”。
+    现在两件事：
+      ① 广播 subagent.pending：前端在子代理运行期间保持“运行中”并显示等待提示；
+      ② 会话空闲且仍有未送达通知时，调度唤醒 turn 把完成报告送达主代理。
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return  # 无事件循环（测试/关停路径）：不调度
+    try:
+        pending = int(manager.pending_count())
+    except Exception:
+        pending = 0
+    # 前端状态同步：>0 保持会话运行标记；=0 由前端摘除等待态（无主 turn 时）
+    try:
+        loop.create_task(broadcast(session_id, {
+            "event": "subagent.pending",
+            "payload": {"session_id": session_id, "pending": pending},
+        }))
+    except Exception:
+        logger.debug("[engine] subagent.pending 广播调度失败(非阻塞)", exc_info=True)
+    if pending > 0 or not settings.subagent_wakeup_enabled:
+        return
+    if _session_turn_busy(session_id):
+        return  # 会话仍在运行 → 完成通知随该轮注入通道送达，无需唤醒
+    try:
+        if not manager.has_unclaimed_notes():
+            return  # 无待送达通知（已被读取/清理）
+    except Exception:
+        return
+    existing = _subagent_wakeups.get(session_id)
+    if existing is not None and not existing.done():
+        return  # 已有唤醒在途（期间新完成的通知随该次唤醒一并送达）
+    try:
+        _subagent_wakeups[session_id] = loop.create_task(_wakeup_turn_for_subagents(session_id))
+    except Exception:
+        logger.debug("[engine] 唤醒 turn 调度失败(非阻塞)", exc_info=True)
 
 
 def _cleanup_manager_if_idle(session_id: int, manager) -> None:
@@ -482,6 +555,84 @@ async def _continue_goal_turn(session_id: int, prev_turn_id: int) -> None:
             logger.warning("[goal] 续跑 turn 创建失败 session=%s", session_id, exc_info=True)
 
 
+async def _wakeup_turn_for_subagents(session_id: int) -> None:
+    """v39 子代理完成唤醒：会话空闲时由服务端创建新 turn，把完成报告送达主代理。
+
+    对齐 zcode background-task-notifications——不再依赖用户下一条消息触发。
+    - 间隔窗口（subagent_wakeup_delay_sec）内用户自行发消息 → 通知随该轮送达，
+      has_unclaimed_notes() 判定为空后直接退出；
+    - 会话已被新一轮占用（用户发送 / 目标续跑 / 确认执行）→ 放弃唤醒。
+    唤醒消息带 subagent_wakeup 标记：前端渲染为细分隔线（非用户气泡），
+    语言判定回退真实用户消息（与目标续跑同口径）。
+    """
+    from app.persistence.database import async_session_factory
+
+    try:
+        await asyncio.sleep(settings.subagent_wakeup_delay_sec)
+    except asyncio.CancelledError:
+        return
+
+    try:
+        async with async_session_factory() as db:
+            try:
+                from app.orchestration.subagent import peek_subagent_manager
+                manager = peek_subagent_manager(session_id)
+                if manager is None or not manager.has_unclaimed_notes():
+                    return
+                if _session_turn_busy(session_id):
+                    return
+                session = await session_service.get_session(db, session_id)
+                if session is None:
+                    return
+                prompt = (
+                    "[系统提醒] 你派发的后台子代理已结束运行，完成报告已作为通知放入本轮上下文。"
+                    "请先读取这些通知，再决定下一步：整合结论、推进未完成的工作，并向用户给出阶段性总结。"
+                )
+                # v43 说明：正常路径不会走到本唤醒轮——主代理收工时会阻塞等待子代理
+                # （见 agent_loop._await_background_subagents），turn 保持运行、报告随同轮送达。
+                # 本兜底仅覆盖等待超时/取消/异常退出等路径；消息带 subagent_wakeup 标记，
+                # 前端渲染为细分隔线（timeline.ts 的 subagent-wakeup 条目），不显示为用户气泡。
+                user_msg = await message_service.create_message(
+                    db, session_id=session_id,
+                    sender_type=SenderType.USER.value,
+                    msg_type=MsgType.TEXT.value,
+                    content={"text": prompt, "subagent_wakeup": True},
+                    broadcast=True,
+                )
+                turn_id_new = await turn_service.create_turn(
+                    db, session_id=session_id, user_message_id=user_msg.id,
+                )
+                await _patch_message(user_msg.id, turn_id=turn_id_new)
+                logger.info("[subagent] 完成唤醒 turn=%s 创建 session=%s", turn_id_new, session_id)
+                await broadcast(session_id, {
+                    "event": "subagent.wakeup",
+                    "payload": {"session_id": session_id, "turn_id": turn_id_new},
+                })
+
+                async def _run():
+                    async with async_session_factory() as s:
+                        try:
+                            await start_turn(s, turn_id=turn_id_new)
+                            await s.commit()
+                        except Exception:
+                            await s.rollback()
+                            logger.warning("[subagent] 唤醒 turn=%s 执行异常", turn_id_new, exc_info=True)
+                            try:
+                                await turn_service.update_turn_status(
+                                    s, turn_id_new, "failed", summary="唤醒轮执行异常", completed=True)
+                                await s.commit()
+                                await broadcast_turn_updated(session_id, turn_id_new, "failed")
+                            except Exception:
+                                pass
+
+                _turn_tasks[turn_id_new] = asyncio.get_event_loop().create_task(_run())
+            except Exception:
+                await db.rollback()
+                logger.warning("[subagent] 完成唤醒 turn 创建失败 session=%s", session_id, exc_info=True)
+    finally:
+        _subagent_wakeups.pop(session_id, None)
+
+
 async def _emit_goal_exhausted(db: AsyncSession, session_id: int, turn_id: int) -> None:
     """续跑轮次耗尽：落一条系统提示消息并广播 goal.stopped（幂等由调用方保证单次触发）。"""
     max_turns = settings.goal_max_continuation_turns
@@ -522,6 +673,8 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         return {"ok": False, "error": "turn already running"}
     _running_turns.add(turn_id)
     cancel_event = _cancel_events.setdefault(turn_id, asyncio.Event())
+    # v39: 会话运行计数——后台子代理终态据此判断会话是否空闲（空闲才唤醒）
+    _session_turn_enter(session_id)
     # v7: 主 turn 对应的任务记录（任务摘要步骤），创建后跟踪状态与产物
     main_task = None
 
@@ -598,8 +751,10 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         user_text = str(user_msg_content.get("text", "")) if user_msg else "(空消息)"
         # plan-19-82 步骤7: 目标续跑轮的用户消息是系统生成的写死中文提醒，
         # 不能代表用户真实语言 → 语言判定文本传 "" 以回退检索最近一条真实用户消息。
-        _goal_continuation = bool(user_msg_content.get("goal_continuation"))
-        _lang_text = "" if _goal_continuation else user_text
+        # v39: 子代理完成唤醒轮同理（同为系统生成文本，非用户语言信号）。
+        _system_generated = bool(user_msg_content.get("goal_continuation")
+                                 or user_msg_content.get("subagent_wakeup"))
+        _lang_text = "" if _system_generated else user_text
         if not user_text.strip():
             att_names = [
                 str(a.get("filename") or "") for a in (attachments or [])
@@ -815,6 +970,10 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         mgr.set_leader_notify(
             lambda aid, msg, kind, _m=mgr, _sid=session_id, _tid=turn_id:
                 _on_agent_report(_m, _sid, _tid, aid, msg, kind)
+        )
+        # v39: 后台子代理终态通道——turn 已结束时据此自动唤醒主代理（子代理完成唤醒）
+        mgr.set_finish_notify(
+            lambda _h, _m=mgr, _sid=session_id: _on_subagent_finished(_m, _sid, _h)
         )
         _turn_managers[turn_id] = mgr
         out = await run_agent_loop(
@@ -1078,13 +1237,23 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         _cancel_events.pop(turn_id, None)
         _turn_managers.pop(turn_id, None)
         discard_injected_inputs(turn_id)  # plan-547: 丢弃残留注入项
+        _session_turn_leave(session_id)
         # plan-330-1648 M7: 有后台子代理/未送达通知时保活 manager（结果跨 turn 送达）
         from app.orchestration.subagent import peek_subagent_manager
-        _cleanup_manager_if_idle(session_id, peek_subagent_manager(session_id))
+        _mgr_final = peek_subagent_manager(session_id)
+        _cleanup_manager_if_idle(session_id, _mgr_final)
         # v1.1: 无条件广播 session.completed，驱动前端摘除左侧转圈（无论成败）
         # v37: 携带最新活动时间，侧栏排序同步上移（此前仅整表刷新才更新）
+        # v39: 携带 subagent_pending——后台子代理仍在跑时前端保持会话运行标记并
+        #      在消息流底部显示「等待子代理结束…」（不再显示为已完成）
+        _pending_sub = 0
+        if _mgr_final is not None:
+            try:
+                _pending_sub = int(_mgr_final.pending_count())
+            except Exception:
+                _pending_sub = 0
         try:
-            await broadcast_session_completed(session_id, db)
+            await broadcast_session_completed(session_id, db, subagent_pending=_pending_sub)
         except Exception:
             pass
         # v2.2 (plan-88): 低频 checkpoint GC
@@ -1444,6 +1613,9 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             return {"ok": False, "error": "turn not found"}
         session = await session_service.get_session(db, turn.session_id)
         _session_id = session.id if session else turn.session_id
+        # v39: 会话运行计数（同 start_turn）——后台子代理终态据此判断是否空闲唤醒。
+        # 紧跟 _session_id 赋值，保证 finally 的 leave 严格配对。
+        _session_turn_enter(_session_id)
         _session_model_id = getattr(session, "model_id", None) if session else None
         project = await project_service.get_project(db, session.project_id) if session and session.project_id else None
         if session is None or project is None:
@@ -1460,6 +1632,10 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         manager.set_leader_notify(
             lambda aid, msg, kind, _m=manager, _sid=_session_id, _tid=turn_id:
                 _on_agent_report(_m, _sid, _tid, aid, msg, kind)
+        )
+        # v39: 后台子代理终态通道（同 start_turn）——turn 已结束时自动唤醒主代理
+        manager.set_finish_notify(
+            lambda _h, _m=manager, _sid=_session_id: _on_subagent_finished(_m, _sid, _h)
         )
         _turn_managers[turn_id] = manager
         # plan-166-767: confirm 执行路径与 start_turn 对齐——按有效模型解析多模态/窗口。
@@ -1681,12 +1857,21 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         _cancel_events.pop(turn_id, None)
         _turn_managers.pop(turn_id, None)
         discard_injected_inputs(turn_id)  # plan-547: 丢弃残留注入项
+        _session_turn_leave(_session_id)
         # plan-330-1648 M7: 同上——有后台子代理时保活 manager
         from app.orchestration.subagent import peek_subagent_manager
-        _cleanup_manager_if_idle(_session_id or 0, peek_subagent_manager(_session_id or 0))
+        _mgr_final = peek_subagent_manager(_session_id or 0)
+        _cleanup_manager_if_idle(_session_id or 0, _mgr_final)
         if _session_id:
+            # v39: 同 start_turn——携带 subagent_pending 供前端保持等待子代理态
+            _pending_sub = 0
+            if _mgr_final is not None:
+                try:
+                    _pending_sub = int(_mgr_final.pending_count())
+                except Exception:
+                    _pending_sub = 0
             try:
-                await broadcast_session_completed(_session_id, db)
+                await broadcast_session_completed(_session_id, db, subagent_pending=_pending_sub)
             except Exception:
                 pass
         try:

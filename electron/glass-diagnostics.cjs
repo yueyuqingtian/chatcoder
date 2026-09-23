@@ -29,6 +29,11 @@ const DWMWA_BORDER_COLOR = 34;
 const DWMWA_COLOR_NONE = 0xfffffffe; // DWMWA_COLOR_NONE：不画边框（系统未定义常量，按文档字面值）
 // 鼠标左键虚拟键码（GetAsyncKeyState 用）：自研窗口拖拽期间据此判断"用户是否已松开"。
 const VK_LBUTTON = 0x01;
+// plan-31-152 S5-2：窗口系统命令消息（自定义窗口按钮的兜底路径，与系统标题栏同源）。
+const WM_SYSCOMMAND = 0x0112;
+const SC_MINIMIZE = 0xf020;
+const SC_MAXIMIZE = 0xf030;
+const SC_RESTORE = 0xf120;
 
 /** DWMSBT_* 值 → 可读名（回读值即用它解释） */
 const BACKDROP_NAMES = {
@@ -151,6 +156,9 @@ function loadDwmFfi() {
         "bool __stdcall SetWindowCompositionAttribute(intptr hwnd, _Inout_ void* data)"),
       // plan-26-126 P6：自研窗口拖拽的按键状态查询（GetAsyncKeyState 返回高位=当前按下）
       GetAsyncKeyState: user32.func("short __stdcall GetAsyncKeyState(int vKey)"),
+      // plan-31-152 S5-2：窗口命令兜底（自定义窗口按钮在系统 caption 命中区被吞时的补救路径）
+      SendMessageW: user32.func(
+        "intptr __stdcall SendMessageW(intptr hwnd, uint msg, intptr wParam, intptr lParam)"),
     };
     return _ffiCache;
   } catch (err) {
@@ -199,6 +207,32 @@ function isLeftButtonDown() {
     return (ffi.GetAsyncKeyState(VK_LBUTTON) & 0x8000) !== 0;
   } catch {
     return null;
+  }
+}
+
+/** plan-31-152 S5-2：向窗口发送 WM_SYSCOMMAND 系统命令。
+ *
+ *  为什么需要（用户反馈"右上角只有缩放按钮点击无反应，最小化/关闭正常"）：
+ *  该按钮位置可能落在 Windows 系统 caption 命中区，点击被系统吞掉且无任何行为；
+ *  另一种可能是 Electron 的 `win.maximize()` 被系统忽略（CanMaximize 判定）。
+ *  这里提供与「系统双击标题栏 / 标题栏右键菜单」**完全同一条路径**的兜底命令：
+ *  WM_SYSCOMMAND + SC_MAXIMIZE / SC_RESTORE，命中率高于 Electron API。
+ *
+ * @param {BrowserWindow} win
+ * @param {number} command SC_MAXIMIZE(0xF030) / SC_RESTORE(0xF120) / SC_MINIMIZE(0xF020)
+ * @returns {{ok: boolean, reason?: string}}
+ */
+function sendSysCommand(win, command) {
+  if (process.platform !== "win32") return { ok: false, reason: "非 Windows 平台" };
+  const ffi = loadDwmFfi();
+  if (!ffi || typeof ffi.SendMessageW !== "function") return { ok: false, reason: "FFI 不可用（koffi 缺失）" };
+  const hwnd = hwndOf(win);
+  if (hwnd === null) return { ok: false, reason: "无法获取 HWND" };
+  try {
+    ffi.SendMessageW(hwnd, WM_SYSCOMMAND, command, 0);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: err && err.message };
   }
 }
 
@@ -400,7 +434,8 @@ function windowReport(win, recorded) {
     minimized: win.isMinimized(),
     fullScreen: win.isFullScreen(),
   };
-  try { base.transparent = win.isTransparent(); } catch { base.transparent = null; }
+  // Electron 44 起 BrowserWindow.isTransparent() 已被移除 → 改按能力探测（诊断字段，缺失即 null）
+  base.transparent = typeof win.isTransparent === "function" ? win.isTransparent() : null;
   return { ...base, recorded: recorded || null };
 }
 
@@ -424,6 +459,11 @@ module.exports = {
   dwmReadBack,
   setWindowBorder,
   isLeftButtonDown,
+  sendSysCommand,
+  WM_SYSCOMMAND,
+  SC_MINIMIZE,
+  SC_MAXIMIZE,
+  SC_RESTORE,
   envReport,
   windowReport,
 };

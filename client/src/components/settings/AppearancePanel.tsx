@@ -6,6 +6,7 @@
 import { useEffect } from "react";
 import { useThemeStore, type Theme } from "../../store/theme";
 import { useUiStore, type MotionLevel, type PanelDragLayout } from "../../store/ui";
+import { usePanelStore } from "../../store/panel";
 import { Slider } from "../ui";
 import { Row, Sw } from "./shared";
 
@@ -31,13 +32,17 @@ const GLASS_STRENGTHS: Array<{ value: number; label: string; desc: string }> = [
 const PANEL_DRAG_LAYOUTS: Array<{ value: PanelDragLayout; label: string; desc: string }> = [
   { value: "realtime", label: "实时", desc: "默认：拖拽时消息文本按新宽度逐帧折行（所见即所得）" },
   { value: "balanced", label: "均衡", desc: "宽度隔帧写入，折行开销约减半（观感略滞后）" },
-  { value: "frozen", label: "冻结", desc: "最低开销：拖拽期暂停宽度写入，松手一次性到位" },
+  { value: "frozen", label: "降频", desc: "最低开销：拖拽期约 15fps 跟随（不停止反馈），松手一次性到位" },
 ];
 
 export function AppearancePanel() {
   const { theme, setTheme } = useThemeStore();
   const ui = useUiStore();
   const consumeGlassRestartNotice = useUiStore((s) => s.consumeGlassRestartNotice);
+  // 右面板宽度与主界面拖拽共用**唯一数据源**（panel store）：此前本页读写 ui store 里的
+  // 独立副本，滑杆调整与拖拽结果互不同步，是「分割线 / 内容布局更新不同步」的竞态源之一。
+  const rightPanelWidth = usePanelStore((s) => s.width);
+  const setRightPanelWidth = usePanelStore((s) => s.setWidth);
   // 离开外观页（切 tab / 退出设置）即消费提醒：再回来不再提示
   useEffect(() => consumeGlassRestartNotice, [consumeGlassRestartNotice]);
   // 仅在「本次开启毛玻璃确实需要重启」时展示，且需毛玻璃处于开启态
@@ -139,8 +144,8 @@ export function AppearancePanel() {
             onChange={(v) => ui.setPrefs({ leftPanelWidth: v })} format={(v) => `${v}px`} aria-label="左侧面板宽度" />
         </Row>
         <Row title="右侧面板宽度" desc="可在主界面直接拖拽分隔条调整">
-          <Slider min={200} max={1200} step={10} value={ui.rightPanelWidth}
-            onChange={(v) => ui.setPrefs({ rightPanelWidth: v })} format={(v) => `${v}px`} aria-label="右侧面板宽度" />
+          <Slider min={200} max={1200} step={10} value={rightPanelWidth}
+            onChange={(v) => setRightPanelWidth(v)} format={(v) => `${v}px`} aria-label="右侧面板宽度" />
         </Row>
         <Row title="对话字号" desc="控制对话消息的文字大小（立即生效）">
           <Slider min={11} max={18} step={1} value={ui.chatFontSize}

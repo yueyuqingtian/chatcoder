@@ -32,12 +32,15 @@ async def broadcast_turn_updated(session_id: int, turn_id: int, status: str) -> 
     })
 
 
-async def broadcast_session_completed(session_id: int, db=None) -> None:
+async def broadcast_session_completed(session_id: int, db=None, subagent_pending: int = 0) -> None:
     """v37: 广播会话完成——摘除侧栏运行标记并同步最新活动时间。
 
     last_activity_at 由调用方传入的 db 现算（无 db 时为 None）：
     侧栏「按最近活动」排序依赖该值，此前只在整表刷新时才更新，
     表现为「后台会话结束也不上移」。
+
+    v39: subagent_pending——后台子代理仍在运行数。>0 时前端保持会话运行标记
+    并在消息流底部显示「等待子代理结束…」（对齐 zcode background 任务等待态）。
     """
     last_activity: str | None = None
     if db is not None:
@@ -48,5 +51,6 @@ async def broadcast_session_completed(session_id: int, db=None) -> None:
             logger.debug("[events] last_activity_at 读取失败(非阻塞)", exc_info=True)
     await broadcast(session_id, {
         "event": "session.completed",
-        "payload": {"session_id": session_id, "last_activity_at": last_activity},
+        "payload": {"session_id": session_id, "last_activity_at": last_activity,
+                    "subagent_pending": int(subagent_pending or 0)},
     })

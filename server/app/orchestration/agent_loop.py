@@ -1980,6 +1980,33 @@ async def run_agent_loop(
                             ))
                 continue
 
+            # ── v43: 主代理收工等待后台子代理（会话保持运行，直到子代理结束）──
+            # 语义：后台子代理运行时主代理可继续并行工作；主代理做完自己的事（本步无工具
+            # 调用、准备结束 turn）而子代理仍在跑时，turn **不结束**——保持会话 running
+            # 并阻塞等待（前端状态行显示「等待子代理结束…」，左侧转圈、输入框停止按钮可中断），
+            # 子代理结束后把完成报告注入同一 turn 继续（不伪造用户消息、不新开唤醒轮）。
+            # pending=0 时同样取一次未送达报告：子代理在模型生成期间完成的通知不丢。
+            _sub_mgr = (subagent_context or {}).get("manager")
+            if _sub_mgr is not None:
+                _wait_notes = await _await_background_subagents(
+                    _sub_mgr, session_id=session_id, turn_id=turn_id,
+                    thread_id=thread_id, cancel_event=cancel_event,
+                )
+                if _wait_notes is None:
+                    return AgentOutput(kind="cancelled", error="任务被用户中断")
+                if _wait_notes:
+                    logger.info("[agent] turn=%s 注入 %d 条子代理完成报告，继续本 turn",
+                                turn_id, len(_wait_notes))
+                    messages.append(ChatMessage(
+                        role="user",
+                        content=(
+                            "[系统] 后台子代理已结束，以下是它们的完成报告。"
+                            "请整合结论并继续推进任务；不要复述本条提示。\n\n"
+                            + "\n\n".join(_wait_notes)
+                        ),
+                    ))
+                    continue
+
             # 最终文本
             final_text = response.content or ""
             # plan-330-1648 M1: 计划文档纠偏**只对主代理生效**——子代理不参与规划流程，
@@ -2505,6 +2532,76 @@ def _subagent_context_snapshot(subagent_context: dict, original_request: str = "
     return snap
 
 
+async def _await_background_subagents(manager, *, session_id: int, turn_id: int,
+                                      thread_id: int | None,
+                                      cancel_event: asyncio.Event | None) -> list[str] | None:
+    """v43: 主代理收工后等待后台子代理结束（turn 保持运行，前端显示「等待子代理结束…」）。
+
+    语义（对齐用户需求）：后台子代理运行时主代理可继续并行工作；主代理做完自己的事
+    （本步无工具调用、准备结束 turn）而子代理仍在跑时，turn **不结束**——阻塞等待，
+    期间会话保持 running（左侧转圈、输入框显示停止按钮），子代理结束后由调用方把
+    完成报告注入同一 turn 继续，不伪造用户消息、不新开唤醒轮。
+
+    返回：
+        - list[str]：等待结束后待注入的完成报告（可能为空，表示无报告可取）；
+        - None：等待期间收到用户中断信号（调用方应结束 turn；子代理已由 cancel_turn 统一取消）。
+
+    每个采样周期（0.5s）检查一次中断信号，保证停止按钮响应及时；
+    超过 settings.subagent_wait_timeout_s 仍未结束则停止等待（剩余结果走完成唤醒兜底）。
+    """
+    def _pending() -> int:
+        try:
+            return int(manager.pending_count())
+        except Exception:
+            return 0
+
+    async def _show(pending: int) -> None:
+        label = (f"等待子代理结束…（{pending} 个运行中）" if pending > 1 else "等待子代理结束…")
+        try:
+            await _broadcast_turn_status(session_id, turn_id, thread_id, label)
+        except Exception:
+            logger.debug("[agent] 等待子代理状态广播失败(非阻塞)", exc_info=True)
+
+    async def _clear() -> None:
+        try:
+            await _broadcast_turn_status(session_id, turn_id, thread_id, "")
+        except Exception:
+            logger.debug("[agent] 等待子代理状态清除失败(非阻塞)", exc_info=True)
+
+    timeout_s = float(getattr(settings, "subagent_wait_timeout_s", 1800.0) or 0.0)
+    started = time.monotonic()
+    pending = _pending()
+    if pending > 0:
+        logger.info("[agent] turn=%s 主代理已收工，等待 %d 个后台子代理结束（上限 %.0fs）",
+                    turn_id, pending, timeout_s)
+        await _show(pending)
+        while pending > 0:
+            if cancel_event is not None and cancel_event.is_set():
+                logger.warning("[agent] turn=%s 等待子代理期间收到中断信号", turn_id)
+                await _clear()
+                return None
+            if timeout_s > 0 and (time.monotonic() - started) >= timeout_s:
+                logger.warning("[agent] turn=%s 等待子代理超时(%.0fs)，剩余 %d 个转由完成唤醒兜底",
+                               turn_id, timeout_s, pending)
+                break
+            try:
+                # 单次最多等 0.5s：既避免忙轮询，又保证停止按钮响应时延可接受
+                await manager.wait_one(timeout=0.5)
+            except Exception:
+                await asyncio.sleep(0.5)
+            _now_pending = _pending()
+            if _now_pending != pending:
+                pending = _now_pending
+                if pending > 0:
+                    await _show(pending)
+        await _clear()
+    try:
+        return list(manager.drain_completions())
+    except Exception:
+        logger.debug("[agent] 子代理完成报告取出失败(非阻塞)", exc_info=True)
+        return []
+
+
 async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent, workspace,
                              subagent_context, agent_model_id: int | None = None,
                              parent_agent_id: int | None = None) -> str:
@@ -2933,6 +3030,15 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
             "payload": {"agent_id": sub_agent_id, "kind": "sub",
                         "name": sub_agent.name, "turn_id": turn_id},
         })
+        # v43: 派发即同步前端子代理计数——此前 subagent.pending 只在完成时广播，
+        # 运行期前端计数为 0（会话卡不转圈、兜底等待行不出现）。
+        try:
+            await broadcast(session.id, {
+                "event": "subagent.pending",
+                "payload": {"session_id": session.id, "pending": int(mgr.pending_count())},
+            })
+        except Exception:
+            logger.debug("[agent] 子代理 pending 广播失败(非阻塞)", exc_info=True)
         return (
             f"Subagent #{sub_agent_id} dispatched in the background for task: {task_title}. "
             f"[运行参数] mode={_sub_mode} model=#{_spawn_model_id} "

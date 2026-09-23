@@ -13,7 +13,6 @@ import { useChatStore } from "../store/chat";
 import { useDraftsStore } from "../store/drafts";
 import { useUpdaterStore } from "../store/updater";
 import { useI18n } from "../store/i18n";
-import { useWindowDrag } from "../hooks/useWindowDrag";
 import { formatRelativeTime, parseUtc } from "../utils/time";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { MergeDialog } from "./worktree/MergeDialog";
@@ -213,8 +212,8 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
   const histGo = useChatStore((s) => s.histGo);
   const canBack = sessionHistIdx > 0;
   const canForward = sessionHistIdx >= 0 && sessionHistIdx < sessionHist.length - 1;
-  // plan-26-126 P2：侧栏头部也是窗口拖拽/双击伪全屏区（与标题栏一致）
-  const { onPointerDown, onPointerMove, onPointerUp } = useWindowDrag();
+  // plan-31-151 S3：侧栏头部拖拽/双击改由系统 -webkit-app-region:drag 处理（见 global.css），
+  //   自研 useWindowDrag 已随 frame:false 伪最大化架构一并移除。
 
   const [view, setView] = useState<"group" | "project">(() => {
     return (localStorage.getItem("chatcoder:sidebar-view") as "group" | "project") || "project";
@@ -541,8 +540,8 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
   return (
     <nav className={`sidebar sb${collapsed ? " collapsed" : ""}`}>
       {/* 头部：logo + 折叠按钮 + 前进/后退。
-          plan-26-126 P2：头部同时是窗口拖拽区与双击伪全屏区（与标题栏一致）。 */}
-      <div className="sb-head" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}>
+          plan-31-151 S3：头部拖拽/双击改由系统 -webkit-app-region:drag 处理（见 global.css）。 */}
+      <div className="sb-head">
         <AppLogo size={20} className="sb-logo-img" />
         <button className="sb-nav-arrow" onClick={onToggleCollapse} title={collapsed ? t("sidebar.expand_tip") : t("sidebar.collapse_tip")}><IconPanelLeft size={15} open={!collapsed} /></button>
         <button className="sb-nav-arrow" disabled={!canBack} onClick={() => histGo(-1)} title={t("sidebar.history_back")}><IconChevronLeft size={15} /></button>

@@ -35,9 +35,13 @@ export interface StreamingTailProps {
   active: boolean;
   /** turn 级瞬态状态提示（如"调用异常，正在重试 1/2…"） */
   statusLabel?: string;
+  /** plan-31-152 S5-5：时间线中最后一条已落库正文（见 timeline.lastPersistedText）。
+   *  与流式正文完全一致时不再渲染流式正文——后端已落库、缓冲尚未清空，
+   *  否则同一条消息会显示两份（用户反馈"偶尔重复显示一条消息，过几秒又变回一条"）。 */
+  persistedText?: string;
 }
 
-export const StreamingTail = memo(function StreamingTail({ source = "main", active, statusLabel }: StreamingTailProps) {
+export const StreamingTail = memo(function StreamingTail({ source = "main", active, statusLabel, persistedText }: StreamingTailProps) {
   const isSub = typeof source === "number";
   const thinking = useChatStore((s) => (isSub
     ? (s.subagentThinking[source as number] || "")
@@ -47,5 +51,8 @@ export const StreamingTail = memo(function StreamingTail({ source = "main", acti
     : joinBuffers(s.streamingBuffers)));
 
   if (!active) return null;
+  // plan-31-152 S5-5：流式正文与已落库正文完全一致 ⇒ 隐藏流式尾部，避免重复显示。
+  //   仅比较正文（thinking 不参与：它落库为独立的 thinking 消息，不构成"重复的正文"）。
+  if (text && persistedText && text.trim() === persistedText.trim()) return null;
   return <StreamingText active={active} thinking={thinking} text={text} statusLabel={statusLabel} />;
 });

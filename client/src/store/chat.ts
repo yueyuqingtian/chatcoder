@@ -193,6 +193,8 @@ export interface SessionSlice {
   subagentStreams: Record<number, string>;
   subagentThinking: Record<number, string>;
   subagentMeta: Record<number, SubagentMeta>;
+  /** v39: 后台子代理运行数——主会话保持“运行中”与「等待子代理结束…」提示的数据源。 */
+  pendingSubagents: number;
 }
 
 /** plan-282-1421：会话累计缓存统计。
@@ -246,6 +248,7 @@ function _snapshotSlice(s: ChatState): SessionSlice {
     subagentStreams: s.subagentStreams,
     subagentThinking: s.subagentThinking,
     subagentMeta: s.subagentMeta,
+    pendingSubagents: s.pendingSubagents,
   };
 }
 
@@ -355,6 +358,8 @@ interface ChatState {
   runningToolResults: Record<string, RunningToolResult>;
   /** v19: 子代理元信息（agentId -> 名称/turn/任务/状态）——消息流子代理卡片数据源。 */
   subagentMeta: Record<number, SubagentMeta>;
+  /** v39: 后台子代理运行数（>0 且主 turn 未运行时显示「等待子代理结束…」并保持会话转圈）。 */
+  pendingSubagents: number;
   /** v19: 子代理线程消息桶（threadId=agentId -> 落库消息），右面板完整会话数据源。 */
   subagentMessages: Record<number, MessageOut[]>;
   /** v19: 子代理流式缓冲（threadId -> 文本/思考），主消息流不再混入子代理内容。 */
@@ -790,6 +795,7 @@ function _resetSessionState(): Partial<ChatState> {
     subagentMessages: {},
     subagentStreams: {},
     subagentThinking: {},
+    pendingSubagents: 0,
     scrollTarget: null,
     queuedInputs: [],
     injectMarks: [],
@@ -848,6 +854,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   subagentMessages: {},
   subagentStreams: {},
   subagentThinking: {},
+  pendingSubagents: 0,
   scrollTarget: null,
   queuedInputs: [],
   injectMarks: [],
@@ -1565,6 +1572,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       thinkingBuffers: {},
       subagentStreams: {},
       subagentThinking: {},
+      // v43: 一并清空子代理等待态——停止会连带取消所有子代理（后端 cancel_turn），
+      // 否则残留的 pendingSubagents>0 会在消息流尾部留一条「等待子代理结束…」兜底行。
+      pendingSubagents: 0,
       pendingApproval: null,
       questionDraft: null,
       sessions: s.sessions.map((x) => (x.id === s.currentSessionId ? setSessionRunning(x, false) : x)),
@@ -1700,7 +1710,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
               : (prev?.status === "running" && it.status === "pending" ? "running" : (it.status || prev?.status || "running")),
           };
         }
-        return { subagentMeta: meta };
+        // v39: 依据合并后的状态统计运行中子代理数——切回会话/断线重连后
+        // 「等待子代理结束…」状态可恢复（终态不回退，口径与卡片一致）。
+        const pending = Object.values(meta).filter((m) =>
+          m.status === "running" || m.status === "in_progress" || m.status === "pending").length;
+        return { subagentMeta: meta, pendingSubagents: pending };
       });
     } catch { /* 非阻塞 */ }
   },
@@ -2292,6 +2306,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
         get().refreshTasks();
         break;
       }
+      case "subagent.pending": {
+        // v39: 后台子代理运行数变化——>0 时主会话保持“运行中”并显示「等待子代理结束…」；
+        // =0 且主 turn 未运行时摘除（子代理全部结束的兜底复位；待后续唤醒轮
+        // 由 subagent.wakeup/turn.started 接管运行态）。
+        const pSid = Number((payload as { session_id?: unknown }).session_id ?? 0);
+        const pCount = Math.max(0, Number((payload as { pending?: unknown }).pending ?? 0));
+        set((s) => {
+          const isCurrent = pSid === s.currentSessionId;
+          return {
+            ...(isCurrent ? { pendingSubagents: pCount } : {}),
+            sessions: s.sessions.map((x) => (x.id === pSid
+              ? (pCount > 0 ? setSessionRunning(x, true)
+                : (isCurrent && s.isRunning ? x : setSessionRunning(x, false)))
+              : x)),
+          };
+        });
+        break;
+      }
+      case "subagent.wakeup": {
+        // v39: 子代理完成唤醒——服务端已创建新一轮（完成报告随该轮送达主代理），
+        // 运行态由随后的 turn.started 接管，此处无需额外处理。
+        break;
+      }
       case "agent.started": {
         // v19: 子代理启动 → 消息流卡片实时出现（engine 直启与 spawn_subagent 路径均广播）
         const aid = Number(payload.agent_id ?? 0);
@@ -2731,14 +2768,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       case "session.completed": {
         const sid = Number((payload as { session_id?: unknown }).session_id ?? 0);
+        // v39: 后台子代理仍在跑时保持“运行中”（转圈 + 等待子代理结束…）——
+        // 此前无条件摘除运行标记，子代理续跑期间界面误显为空闲；
+        // 待 subagent.pending=0 事件到达再摘除。
+        const subPending = Math.max(0, Number((payload as { subagent_pending?: unknown }).subagent_pending ?? 0));
         // v1.1: 本地立即摘除转圈标记，避免等待 REST
         set((s) => {
           // v2.2: 仅当完成的就是当前会话才复位视图运行态——
           // 后台会话的 session.completed 只更新其列表标记，不串扰当前会话。
           const isCurrent = sid === s.currentSessionId;
           return {
-            ...(isCurrent ? { isRunning: false, runningTurnId: null } : {}),
-            sessions: s.sessions.map((x) => (x.id === sid ? setSessionRunning(x, false) : x)),
+            ...(isCurrent ? { isRunning: false, runningTurnId: null, pendingSubagents: subPending } : {}),
+            sessions: s.sessions.map((x) => (x.id === sid
+              ? setSessionRunning(x, subPending > 0)
+              : x)),
           };
         });
         // 仅当前会话需要立即刷新 turn/task（后台会话切回时由 switchSession 的 refresh 补齐）

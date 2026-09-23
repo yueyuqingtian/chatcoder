@@ -270,6 +270,13 @@ class Settings(BaseSettings):
     # spawn 时下发为 run_agent_loop 的 token_budget，超限即熔断并按结构化汇报“预算耗尽”，
     # 避免子代理无人看管地无限消耗（此前 spawn 路径从不传预算）。
     subagent_token_budget: int = 0
+    # v43: 主代理收工等待后台子代理的上限（秒）。
+    # 语义：后台子代理运行时主代理可继续并行工作；主代理做完自己的事（本步无工具调用）
+    # 而子代理仍在跑时，turn 不结束——保持会话运行并阻塞等待（前端显「等待子代理结束…」、
+    # 左侧转圈、输入框停止按钮），子代理结束后把完成报告注入同一 turn 继续。
+    # 超过该上限仍未结束则不再等待，把已有报告注入并结束 turn（剩余结果走完成唤醒兜底）。
+    # 0/负数 = 不限制（一直等到用户停止或子代理全部结束）。
+    subagent_wait_timeout_s: float = 1800.0
     # v13: 任务规划与拆分
     task_split_confirm: bool = True
     # v2.2 (对齐 zcode 3.9): todo 提醒间隔——模型维护的执行清单连续 N 步未更新时
@@ -308,6 +315,12 @@ class Settings(BaseSettings):
     goal_mode_enabled: bool = True
     goal_max_continuation_turns: int = 10
     goal_continuation_interval_sec: float = 2.0
+
+    # 后台子代理完成唤醒（对齐 zcode background-task-notifications）：
+    # - subagent_wakeup_enabled: 总开关，关闭后后台子代理完成只随下一轮送达
+    # - subagent_wakeup_delay_sec: 唤醒前间隔（合并同批完成通知 + 用户可打断窗口）
+    subagent_wakeup_enabled: bool = True
+    subagent_wakeup_delay_sec: float = 1.5
 
     # v23: ta3（Ta+3 牛码）供应商 —— Electron 同族 UA（风控伪装，可覆盖）
     ta3_user_agent: str = (

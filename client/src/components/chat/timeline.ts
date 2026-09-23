@@ -67,6 +67,8 @@ export type TurnItem =
   | { kind: "divider"; msg: MessageOut }
   /** plan-671: 目标续跑消息（zcode model-only 语义）——渲染为细分隔线而非用户气泡 */
   | { kind: "goal-continuation"; msg: MessageOut }
+  /** v39: 子代理完成唤醒消息（系统生成）——同样渲染为细分隔线 */
+  | { kind: "subagent-wakeup"; msg: MessageOut }
   /** plan-865: 计划预览/确认消息——按数据库时间线位置渲染计划卡 */
   | { kind: "plan"; msg: MessageOut };
 
@@ -77,6 +79,26 @@ export type TimelineEntry =
 export function msgText(c: Record<string, unknown>): string {
   const t = c.text;
   return typeof t === "string" ? t : "";
+}
+
+/** plan-31-152 S5-5：取时间线中**最后一条已落库的正文文本**（assistant text item）。
+ *
+ *  用途：会话运行期间后端会把已完整的内容落库，而前端流式缓冲（streamingBuffers）
+ *  要到 turn 结束/下一拍才清空——两者并存时同一条消息会在消息流里显示两份
+ *  （用户反馈"偶尔重复显示一条消息，过几秒又变回一条"）。
+ *  由 StreamingTail 用本函数结果与流式文本比对，完全一致时不再重复渲染流式正文。
+ *
+ *  扫描顺序：从最后一个 entry 往前；turn 内从最后一个 item 往前找 text。 */
+export function lastPersistedText(entries: TimelineEntry[]): string {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e.kind !== "turn") return msgText(e.msg.content);
+    for (let j = e.items.length - 1; j >= 0; j--) {
+      const it = e.items[j];
+      if (it.kind === "text") return msgText(it.msg.content);
+    }
+  }
+  return "";
 }
 
 /** 从 tool_call / tool_result 消息提取统一 leaf。 */
@@ -186,7 +208,14 @@ export function buildTimeline(messages: MessageOut[]): TimelineEntry[] {
       continue;
     }
     if (m.sender_type === SenderType.User) {
-      entries.push({ kind: "turn", turnId: null, items: [{ kind: "user", msg: m }] });
+      // v39: 子代理完成唤醒消息（turn_id 回填前/独立到达）按分隔线渲染，不显示为用户气泡
+      const ucU = m.content as Record<string, unknown>;
+      entries.push({
+        kind: "turn", turnId: null,
+        items: ucU?.subagent_wakeup === true
+          ? [{ kind: "subagent-wakeup", msg: m }]
+          : [{ kind: "user", msg: m }],
+      });
       continue;
     }
     if (lastTurnId != null) turnMap.get(lastTurnId)!.push(m);
@@ -323,9 +352,12 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
       flushTools();
       // plan-671: 目标续跑消息不渲染为用户气泡（对齐 zcode providerContextOnly）
       const uc = m.content as Record<string, unknown>;
-      items.push(uc.goal_continuation === true
-        ? { kind: "goal-continuation", msg: m }
-        : { kind: "user", msg: m });
+      // v39: 子代理完成唤醒消息同样不渲染为用户气泡（系统生成，对应「等待子代理结束…」的续跑轮）
+      items.push(uc.subagent_wakeup === true
+        ? { kind: "subagent-wakeup", msg: m }
+        : uc.goal_continuation === true
+          ? { kind: "goal-continuation", msg: m }
+          : { kind: "user", msg: m });
       continue;
     }
     const c = m.content as Record<string, unknown>;

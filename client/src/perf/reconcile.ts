@@ -90,9 +90,10 @@ export const RECONCILE_ORDER = {
   unfreezePane: 10,
   /** ② 虚拟列表视口尺寸提交 */
   virtualizerRect: 20,
-  /** ③ 滚动锚点还原 / 贴底 */
+  /** ③ 滚动锚点还原 / 贴底（plan-31-151 S4：改为双帧后执行，等虚拟器按新 rect 重算完成） */
   scrollAnchor: 30,
-  /** ④ 虚拟列表重新测量 */
+  /** ④ 虚拟列表重新测量（plan-31-151 S4：已移除——directDomUpdates 模式下 RO 自动触发重测，
+   *   手动调 virtualizer.measure() 会与 RO 竞争导致重叠） */
   virtualizerMeasure: 40,
   /** ⑤ 终端 fit */
   terminalFit: 50,

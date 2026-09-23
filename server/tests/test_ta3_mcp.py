@@ -77,7 +77,8 @@ def test_disguise_tools_keeps_mcp_tools():
             "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
         }},
         # 无映射且非 MCP → 仍剔除
-        {"type": "function", "function": {"name": "web_fetch", "parameters": {}}},
+        # v43: 原样本 web_fetch 已补映射（→WebFetch），改用真正未映射的名字保持覆盖
+        {"type": "function", "function": {"name": "mystery_tool", "parameters": {}}},
     ]
     out = disguise_tools(schemas)
     names = [s["function"]["name"] for s in out]

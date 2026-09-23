@@ -60,6 +60,33 @@ TO_TA3: dict[str, str] = {
     # 键名与真实工具一致，无需 ARGS 适配。
     "symbol_search": "SymbolSearch",       # query/kind/file_glob/limit ✓
     "outline": "get_file_outline",         # path→filepath（见 ARGS_* 表）
+    # ── v43: 全量补齐（此前缺映射的工具被伪装层整体剔除）──
+    # 背景：disguise_tools 对无映射工具直接丢弃——这些工具在 ta3 会话里模型既看不到、
+    # 也调不动，历史调用还会被降级成"当前模型下不可用"文本。现按真实注册表补全。
+    "web_fetch": "WebFetch",                 # url ✓
+    "ci_run": "CiRun",                       # check ✓
+    "git": "Git",                            # command/cwd/message/files/... ✓
+    "codebase_search": "CodebaseSearch",     # query/top_k/file_glob ✓
+    "compaction_index": "CompactionIndex",   # 无参 ✓
+    "compaction_view": "CompactionView",     # index/compaction_id/keyword/offset/limit/full ✓
+    "skill_view": "SkillView",               # name ✓
+    "memory_write": "MemoryWrite",           # text/kind/scope ✓
+    "browser_navigate": "BrowserNavigate",       # url/wait_until ✓
+    "browser_screenshot": "BrowserScreenshot",   # url/full_page ✓
+    "browser_click": "BrowserClick",             # selector/x/y ✓
+    "browser_type": "BrowserType",               # selector/text/press_enter/clear_before ✓
+    "browser_snapshot": "BrowserSnapshot",       # max_depth ✓
+    "browser_evaluate": "BrowserEvaluate",       # script ✓
+    # v43: 子代理管理工具——v36 只补了入站三条（SubAgentAsync/TaskQuery/TaskCancel），
+    # 出站 TO_TA3 缺失 → ta3 会话里 collect_results 等历史调用被降级、模型侧拿不到
+    # 查询/取消/检视/指令能力（只能单向派发）。现补齐，键名适配见 ARGS_TO_TA3。
+    "collect_results": "TaskQuery",          # agent_id→taskId
+    "cancel_subagent": "TaskCancel",         # agent_id→taskId
+    "subagent_inspect": "SubAgentInspect",   # agent_id/section ✓
+    "send_to_subagent": "SendToSubagent",    # agent_id/message ✓
+    # v43: 子代理侧上报工具（只在子代理线程暴露）——子代理同样可能运行在 ta3 模型上，
+    # 缺映射会让子代理失去向主代理上报/求助的通道。
+    "report_to_leader": "ReportToLeader",    # message/kind/wait/timeout_s ✓
 }
 
 # 伪装名 → 真实执行名（反查）
@@ -101,6 +128,10 @@ ARGS_TO_TA3: dict[str, dict[str, str | None]] = {
     "terminal_bg_kill": {"shell_id": "shellId"},
     # plan-248-1258 M3.3: 文件骨架键名适配（参考项目原生用 filepath）
     "outline": {"path": "filepath"},
+    # v43: 子代理管理工具出站键名适配（ta3 侧查询/取消按 taskId 定位）
+    # wait 无对应键（ta3 TaskQuery 为即时查询语义），出站丢弃该键
+    "collect_results": {"agent_id": "taskId", "wait": None},
+    "cancel_subagent": {"agent_id": "taskId"},
 }
 
 # 入站参数键名适配：ta3 键 → 真实键（None = 丢弃该键）

@@ -185,12 +185,12 @@ _TASK: list[dict] = [
 
 # ── webSearch ──
 _WEB_SEARCH: list[dict] = [
-    _f("WebSearch", "联网搜索获取实时信息，返回标题、链接与摘要。不支持按发布时间过滤。searchEngine 取值映射到实际搜索源：search_std=bing（直连可用）、search_pro=google、search_pro_sogou/search_pro_quark=duckduckgo（后两者可能需要配置 HTTP 代理）。", {
+    _f("WebSearch", "联网搜索获取实时信息，返回标题、链接与摘要。不支持按发布时间过滤。searchEngine 取值映射到实际搜索源：search_std=默认引擎（WorkBuddy 云端搜索，用已登录账号；未登录时自动回退 bing 抓取）、search_pro=google、search_pro_sogou/search_pro_quark=duckduckgo（后两者可能需要配置 HTTP 代理）。", {
         "type": "object", "required": ["query"],
         "properties": {
             "query": {"type": "string", "description": "要搜索的问题或关键词。建议不超过 70 个字符。"},
             "searchEngine": {"type": "string", "enum": ["search_std", "search_pro", "search_pro_sogou", "search_pro_quark"],
-                             "description": "搜索源编码：search_std=bing（默认，直连可用）；search_pro=google；search_pro_sogou/search_pro_quark=duckduckgo（后两者需配置 HTTP 代理）。"},
+                             "description": "搜索源编码：search_std=默认引擎（WorkBuddy 云端，未登录时自动回退 bing）；search_pro=google；search_pro_sogou/search_pro_quark=duckduckgo（后两者需配置 HTTP 代理）。"},
             "maxResults": {"type": "integer", "minimum": 1, "maximum": 50, "description": "最多返回多少条结果，范围 1-50。"},
         },
     }),
@@ -316,10 +316,187 @@ _SYMBOL: list[dict] = [
     }),
 ]
 
+# ── v43: 全量补齐（fetch/ci/git/检索/压缩/技能/记忆）──
+# 背景：ta3 伪装层对无映射工具整体剔除——此前这些工具在 ta3 会话下模型完全不可见。
+# 现按真实注册表补全；描述沿用真实工具语义（可精简，但不得超出真实能力，plan-609 口径）。
+_TOOLKIT: list[dict] = [
+    _f("WebFetch", "HTTP GET 抓取 URL 的文本响应(超时 15s,截断 8KB)。需用户审批。", {
+        "type": "object", "required": ["url"],
+        "properties": {"url": {"type": "string", "description": "完整 URL"}},
+    }),
+    _f("CiRun", "运行预设的 CI 检查项(lint/test/build 之一),返回通过/失败与输出。"
+        "用于审查产物质量。检查项在工作区内执行。", {
+        "type": "object", "required": ["check"],
+        "properties": {
+            "check": {"type": "string", "enum": ["lint", "test", "build"],
+                      "description": "检查项:lint=代码检查, test=测试, build=构建"},
+        },
+    }),
+    _f("Git", "Git 版本控制操作。支持子命令:\n- diff: 查看变更 (stat_only=true 仅统计)\n"
+        "- commit: 提交变更 (message 必填, files 可选)\n- branch: 创建/列出分支 (name 可选)\n"
+        "- checkout: 切换分支/恢复文件 (ref 必填)\n- stash: 暂存操作 (action: push/pop/list)\n"
+        "- log: 查看提交历史 (n 条数, 默认 10)\n- blame: 查看文件逐行归属 (file 必填)\n"
+        "- status: 查看工作区状态", {
+        "type": "object", "required": ["command"],
+        "properties": {
+            "command": {"type": "string",
+                        "enum": ["diff", "commit", "branch", "checkout", "stash", "log", "blame", "status"],
+                        "description": "Git 子命令"},
+            "cwd": {"type": "string", "description": "工作目录(相对工作根)"},
+            "message": {"type": "string", "description": "commit 消息"},
+            "files": {"type": "array", "items": {"type": "string"}, "description": "commit 指定文件"},
+            "name": {"type": "string", "description": "branch 名称"},
+            "ref": {"type": "string", "description": "checkout 目标"},
+            "action": {"type": "string", "enum": ["push", "pop", "list"], "description": "stash 操作"},
+            "n": {"type": "integer", "description": "log 条数"},
+            "file": {"type": "string", "description": "blame 文件路径"},
+            "stat_only": {"type": "boolean", "description": "diff 仅统计"},
+        },
+    }),
+    _f("CodebaseSearch", "关键词检索代码库（非语义向量检索）。按关键词在已索引的代码块中打分，"
+        "切块优先对齐函数/类符号边界，返回完整代码片段及文件位置与符号名。\n"
+        "适合「记不清确切符号名、但记得关键词/注释/字符串」的场景；"
+        "若已知符号名（函数名/类名）请优先用 SymbolSearch，更快更准。", {
+        "type": "object", "required": ["query"],
+        "properties": {
+            "query": {"type": "string", "description": "搜索关键词（自然语言或代码片段）"},
+            "top_k": {"type": "integer", "description": "返回结果数量(默认 5)"},
+            "file_glob": {"type": "string", "description": "文件过滤(如 *.py, *.ts)"},
+        },
+    }),
+    _f("CompactionIndex", "【按需回看第 1 步】列出当前会话内全部上下文压缩块的索引"
+        "（序号/覆盖消息范围/节省 token/摘要预览）。上下文被压缩后，需要回忆早期会话细节时"
+        "先调用本工具定位索引，再调用 CompactionView 按索引查看压缩前的原始消息"
+        "（只取需要的部分，**不要全量拉取**）。", {
+        "type": "object", "properties": {},
+    }),
+    _f("CompactionView", "【按需回看第 2 步】按索引查看某个上下文压缩块遮蔽的压缩前会话消息。"
+        "参数二选一：index=压缩块序号（CompactionIndex 返回的 #序号，从 1 起）；"
+        "或 compaction_id=压缩块 id。支持 offset/limit 分页与 keyword 过滤；"
+        "单条消息默认截断 400 字符，需要某条全文时用 full=true。"
+        "**按需取用**：先用 CompactionIndex 定位块，再按需只取需要的几条；"
+        "**严禁一次性全量拉取**压缩前历史。", {
+        "type": "object",
+        "properties": {
+            "index": {"type": "integer", "description": "压缩块序号（CompactionIndex 的 #序号，从 1 起）"},
+            "compaction_id": {"type": "string", "description": "压缩块 id（CompactionIndex 返回的 compaction_id）"},
+            "keyword": {"type": "string", "description": "只返回包含该关键词的消息（不区分大小写）"},
+            "offset": {"type": "integer", "description": "分页起始偏移（默认 0）"},
+            "limit": {"type": "integer", "description": "返回条数（默认 30，最大 200）"},
+            "full": {"type": "boolean", "description": "true=单条消息不截断返回全文（默认 false，单条截 400 字符）"},
+        },
+    }),
+    _f("SkillView", "查看技能内容。技能是可复用的领域知识包/工作流指令，"
+        "系统提示词的 Available Skills 段列出了可用技能。当任务与某技能的描述或触发条件匹配时，"
+        "调用本工具（name=技能名）加载该技能的完整指令并遵照执行。"
+        "不传 name 时返回全部已启用技能的索引（名称/描述/触发条件）。", {
+        "type": "object",
+        "properties": {"name": {"type": "string",
+                                "description": "技能名（Available Skills 中列出的名称）。留空返回全部技能索引。"}},
+    }),
+    _f("MemoryWrite", "主动记录一条长期有价值的记忆（事实/约定/坑点/决策），跨 turn 生效。"
+        "适用：用户明确要求记住某事；发现了重要项目约定、易踩的坑、关键决策。"
+        "scope 选择：session=本会话（默认）；project=本项目长期有效；global=跨项目全局规范。"
+        "不要记录临时性内容（如单次命令输出、当前任务进度）。", {
+        "type": "object", "required": ["text"],
+        "properties": {
+            "text": {"type": "string", "description": "记忆内容（一句话，8 字符以上）"},
+            "kind": {"type": "string", "description": "分类：fact 事实 / convention 约定 / pitfall 坑点 / decision 决策"},
+            "scope": {"type": "string", "description": "作用域：session（默认）/ project / global"},
+        },
+    }),
+]
+
+# ── v43: 浏览器工具套件（Playwright；需在设置中启用浏览器）──
+_BROWSER: list[dict] = [
+    _f("BrowserNavigate", "在内置浏览器中导航到指定 URL，支持加载页面并返回精简标题和摘要。"
+        "需审批，需在设置中启用浏览器。", {
+        "type": "object", "required": ["url"],
+        "properties": {
+            "url": {"type": "string", "description": "目标 URL"},
+            "wait_until": {"type": "string", "enum": ["load", "domcontentloaded", "networkidle"],
+                           "description": "页面等待条件，默认 domcontentloaded"},
+        },
+    }),
+    _f("BrowserScreenshot", "对当前页面或指定 URL 进行截图，返回 base64 图片及多模态元数据。"
+        "需审批，需在设置中启用浏览器。", {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "目标 URL（可选，若不传则对当前已打开的页面截图）"},
+            "full_page": {"type": "boolean", "description": "是否截取完整长图，默认 false"},
+        },
+    }),
+    _f("BrowserClick", "在当前浏览器页面中点击元素。支持 CSS 选择器或页面坐标 (x, y)。需审批。", {
+        "type": "object",
+        "properties": {
+            "selector": {"type": "string",
+                         "description": "CSS 选择器或元素文本选择器（如 'button:has-text(\"登录\")' 或 '#submit-btn'）"},
+            "x": {"type": "number", "description": "点击的横坐标（可选）"},
+            "y": {"type": "number", "description": "点击的纵坐标（可选）"},
+        },
+    }),
+    _f("BrowserType", "在当前页面的输入框中填写或输入文本，可选择是否按回车提交。需审批。", {
+        "type": "object", "required": ["selector", "text"],
+        "properties": {
+            "selector": {"type": "string", "description": "目标输入框的 CSS 选择器"},
+            "text": {"type": "string", "description": "要输入的文本内容"},
+            "press_enter": {"type": "boolean", "description": "输入完成后是否按下 Enter 键，默认 false"},
+            "clear_before": {"type": "boolean", "description": "输入前是否先清空输入框，默认 true"},
+        },
+    }),
+    _f("BrowserSnapshot", "获取当前页面的精简可交互 DOM 树快照（包括按钮、输入框、链接及选择器），"
+        "供模型精确感知与决策。需在设置中启用浏览器。", {
+        "type": "object",
+        "properties": {"max_depth": {"type": "integer", "description": "DOM 树遍历深度，默认 4"}},
+    }),
+    _f("BrowserEvaluate", "在当前浏览器页面上下文中执行一段 JavaScript 代码并获取返回值。需审批。", {
+        "type": "object", "required": ["script"],
+        "properties": {"script": {"type": "string", "description": "要执行的 JavaScript 表达式或函数字符串"}},
+    }),
+]
+
+# ── v43: 子代理管理（主代理侧）/ 上报（子代理侧）──
+# TaskQuery / TaskCancel 已在 _TASK 段（v36）；此处补检视、指令与子代理上报。
+_SUBAGENT_ADMIN: list[dict] = [
+    _f("SubAgentInspect", "查看本轮某个子代理的交接上下文（任务、继承上下文）、执行轨迹"
+        "（工具调用序列与简要输出）与当前状态/结果。需要子代理的详细上下文或推理过程而非"
+        "仅摘要时使用。", {
+        "type": "object", "required": ["agent_id"],
+        "properties": {
+            "agent_id": {"type": "integer", "description": "spawn_subagent/SubAgent 返回的子代理 id。"},
+            "section": {"type": "string",
+                        "description": "查看部分：context（交接与继承上下文）、transcript（轨迹）、"
+                                       "result（最终摘要）。默认全部。"},
+        },
+    }),
+    _f("SendToSubagent", "向本轮仍在运行的子代理发送补充指令（spawn 返回的 id）。"
+        "指令会在其下一次模型调用前注入其上下文，用于纠偏/收窄任务而不取消它。"
+        "已结束的子代理无法接收。要彻底停止用 TaskCancel。", {
+        "type": "object", "required": ["agent_id", "message"],
+        "properties": {
+            "agent_id": {"type": "integer", "description": "子代理 id。"},
+            "message": {"type": "string", "description": "要传达的指令（须自包含、具体）。"},
+        },
+    }),
+    _f("ReportToLeader", "向主代理汇报进度或提问（仅子代理可用）。消息会在主代理下一次模型调用前"
+        "进入其上下文，同时也显示在你自己的线程里。"
+        "kind=\"progress\"（默认）：发后即忘的状态更新，随后继续工作。"
+        "kind=\"question\" 且 wait=true：阻塞等待主代理答复（仅后台异步子代理可用；"
+        "同步/只读子代理请把问题写进最终汇报）。", {
+        "type": "object", "required": ["message"],
+        "properties": {
+            "message": {"type": "string", "description": "要汇报或询问的内容。"},
+            "kind": {"type": "string", "description": "progress（默认）=状态更新；question=需要决策。"},
+            "wait": {"type": "boolean", "description": "仅 kind=question：true=阻塞等待主代理答复。"},
+            "timeout_s": {"type": "integer", "description": "wait=true 时等待答复的最长秒数（默认 300）。"},
+        },
+    }),
+]
+
 TA3_NATIVE_SCHEMAS: dict[str, dict] = {
     s["function"]["name"]: s for s in [
         *_CORE, *_EDIT, *_TASK, *_WEB_SEARCH, *_ATTACHMENT, *_BACKGROUND, *_GOAL, *_ASK, *_MULTI_EDIT,
-        *_SYMBOL,
+        *_SYMBOL, *_TOOLKIT, *_BROWSER, *_SUBAGENT_ADMIN,
     ]
 }
 

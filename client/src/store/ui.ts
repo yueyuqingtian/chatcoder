@@ -46,7 +46,7 @@ export interface UiPrefs {
   /** plan-248-1258 M5: 动画效果档位——full=标准 reduced=减弱(低配机省性能) off=关闭 */
   motionLevel: MotionLevel;
   /** plan-329-1647 S6（RFL-7）：分隔条拖拽期的排版档位
-   *  realtime=实时折行（默认）/ balanced=隔帧写宽度 / frozen=临时钉住内容宽度（退回旧行为） */
+   *  realtime=实时跟随（默认）/ balanced=隔帧写宽度 / frozen=约 15fps 降频跟随（不停止反馈） */
   panelDragLayout: PanelDragLayout;
   /** plan-329-1647 S6（RFL-7）：是否允许按帧预算自动降级（关闭则固定 panelDragLayout） */
   panelDragAutoDegrade: boolean;
@@ -259,11 +259,18 @@ export const useUiStore = create<UiState>((set, get) => ({
     applyUiVars({ ...get(), leftPanelWidth: clamped });
   },
 
- setRightPanelWidth: (w) => {
-    const clamped = Math.max(320, Math.min(1200, Math.round(w))); // v1.1: 上限 640 → 1200，与外观滑杆 max 一致
+  /** 右面板宽度的**唯一数据源**是 panel store（`usePanelStore.width`）。
+   *  本字段为遗留投影：历史上此处与拖拽写入的 panel store 各维护一份，形成两处独立读写，
+   *  是「拖拽结束后分割线 / 内容布局更新不同步」的竞态来源之一。
+   *  现在统一转发到 panel store，保证任何写入方最终都落在同一个状态上。 */
+  setRightPanelWidth: (w) => {
+    const clamped = Math.max(200, Math.min(1200, Math.round(w)));
     set({ rightPanelWidth: clamped });
     savePrefs({ ...get(), rightPanelWidth: clamped });
-    applyUiVars({ ...get(), rightPanelWidth: clamped });
+    // 动态 import 避免模块循环（ui.ts ↔ panel.ts）
+    void import("./panel")
+      .then(({ usePanelStore }) => usePanelStore.getState().setWidth(clamped))
+      .catch(() => { /* 转发失败不阻塞：下次拖拽/设置仍会写入 */ });
   },
 
   setPrefs: (partial) => {
