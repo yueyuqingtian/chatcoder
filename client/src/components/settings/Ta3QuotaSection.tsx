@@ -12,6 +12,7 @@ import {
   type ProviderOut,
   type Ta3ModelStatusModelOut,
   type Ta3ModelStatusOut,
+  type Ta3QuotaActionResult,
   type Ta3QuotaOut,
   type Ta3QuotaTrendOut,
   type Ta3QuotaWindowOut,
@@ -133,6 +134,16 @@ function gradeClass(grade: string): string {
   }
 }
 
+/** 额度动作结果文案（APPLIED=立即生效 / PENDING=转人工审批）。 */
+function describeQuotaAction(r: Ta3QuotaActionResult | null | undefined): string {
+  const status = String(r?.status || "").toUpperCase();
+  if (status === "APPLIED") return "已生效";
+  if (status === "PENDING") return "已提交，等待管理员审批";
+  const msg = String(r?.message || "").trim();
+  if (msg) return msg;
+  return status ? `结果：${status}` : "已提交";
+}
+
 export function Ta3QuotaSection({ provider }: { provider: ProviderOut }) {
   const loggedIn = provider.auth_status === "logged_in";
   const [quota, setQuota] = useState<Ta3QuotaOut | null>(null);
@@ -210,6 +221,39 @@ export function Ta3QuotaSection({ provider }: { provider: ProviderOut }) {
         resetMomentText: resetEpochSeconds ? formatClockText(resetEpochSeconds * 1000, nowMs + serverOffsetMs) : "",
         countdownText: formatDurationText(remainMs),
         selfResetText: describeSelfReset(raw),
+        // v36 (plan-321-1600 R3): 额度用尽后的可执行动作（以服务端能力标记为准）
+        canOverdraft: raw.canOverdraft !== false,
+        // v46: 额度动作（重置）可用性。必须先用尽（>=100%），再看服务端能力标记：
+        // 周/月窗以 canReset 为准（实测未用尽时返回 false），字段缺失再回退用尽判断；
+        // 日窗在上游没有独立重置能力，「透支本周额度」才是它的恢复手段，故看 canOverdraft。
+        resetActionKind: String(raw.window || "").toUpperCase() === "DAILY"
+          ? ("overdraft" as const)
+          : ("reset" as const),
+        resetActionLabel: (() => {
+          switch (String(raw.window || "").toUpperCase()) {
+            case "DAILY": return "重置（透支本周额度）";
+            case "MONTHLY": return "重置（刷新本月额度）";
+            default: return "重置（刷新本周额度）";
+          }
+        })(),
+        canResetNow: (() => {
+          if (percentUsed === null || percentUsed < QUOTA_EXHAUSTED_PERCENT) return false;
+          if (String(raw.window || "").toUpperCase() === "DAILY") return raw.canOverdraft !== false;
+          if (raw.canReset === undefined || raw.canReset === null) return true;
+          return raw.canReset === true;
+        })(),
+        // 可点击时的悬停说明
+        resetActionTitle: String(raw.window || "").toUpperCase() === "DAILY"
+          ? "透支本周额度以恢复今日可用量"
+          : "提交额度重置（立即生效或转人工审批）",
+        // 不可点击的原因：区分「未用尽」与「已达 100% 但服务端不允许」，避免误导
+        blockedReason: (() => {
+          if (percentUsed === null) return "";
+          if (percentUsed < QUOTA_EXHAUSTED_PERCENT) {
+            return `额度未用尽（当前 ${formatPercentText(percentUsed)}），达到 100% 后才可重置`;
+          }
+          return "当前窗口暂不支持重置（服务端未开放该操作）";
+        })(),
       };
     });
     // tick 用于驱动倒计时按时重算（依赖并非直接参与计算）
@@ -258,6 +302,73 @@ export function Ta3QuotaSection({ provider }: { provider: ProviderOut }) {
     await Promise.allSettled([loadCore(true), loadTrend(trendPeriod)]);
   }, [loadCore, loadTrend, trendPeriod]);
 
+  // ── v36 (plan-321-1600 R3) / v46: 额度动作（透支/重置）与自动重置配置 ──
+  const [actionBusy, setActionBusy] = useState<null | "overdraft" | "reset">(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [autoReset, setAutoReset] = useState(false);
+  const [settingsReady, setSettingsReady] = useState(false);
+
+  // 自动重置开关（全局设置，与设置中心共用同一配置项）
+  useEffect(() => {
+    let alive = true;
+    void api.getGlobalSettings()
+      .then((g) => {
+        if (!alive) return;
+        // v46: 兼容旧键——老的「自动透支」开关此前也写在同一个意图上，任一为真即视为开启
+        setAutoReset(
+          g.auto_reset_on_quota_exceeded === true || g.auto_overdraft_on_quota_exceeded === true,
+        );
+        setSettingsReady(true);
+      })
+      .catch(() => { if (alive) setSettingsReady(false); });
+    return () => { alive = false; };
+  }, []);
+
+  const toggleAutoReset = useCallback(async (next: boolean) => {
+    setAutoReset(next); // 乐观更新，失败回滚
+    try {
+      // v46: 两个键一起写，避免旧键残留导致"关不掉"；读取侧同样按"任一为真"处理
+      await api.setGlobalSettings({
+        auto_reset_on_quota_exceeded: next,
+        auto_overdraft_on_quota_exceeded: next,
+      });
+      setNotice(next
+        ? "已开启自动重置：模型请求报错且某窗口额度已用尽时，自动提交一次重置（日窗走透支本周额度）"
+        : "已关闭自动重置");
+    } catch (e) {
+      setAutoReset(!next);
+      setNotice(`保存自动重置配置失败：${String(e)}`);
+    }
+  }, []);
+
+  const runOverdraft = useCallback(async () => {
+    setActionBusy("overdraft");
+    setNotice(null);
+    try {
+      const r = await api.ta3QuotaOverdraft(provider.id);
+      setNotice(`日额度透支：${describeQuotaAction(r)}`);
+      await refresh();
+    } catch (e) {
+      setNotice(`日额度透支失败：${String(e)}`);
+    } finally {
+      setActionBusy(null);
+    }
+  }, [provider.id, refresh]);
+
+  const runReset = useCallback(async (windowType: "WEEKLY" | "MONTHLY") => {
+    setActionBusy("reset");
+    setNotice(null);
+    try {
+      const r = await api.ta3QuotaReset(provider.id, windowType);
+      setNotice(`${windowType === "WEEKLY" ? "本周" : "本月"}额度重置：${describeQuotaAction(r)}`);
+      await refresh();
+    } catch (e) {
+      setNotice(`额度重置失败：${String(e)}`);
+    } finally {
+      setActionBusy(null);
+    }
+  }, [provider.id, refresh]);
+
   const openAdminWeb = useCallback(async () => {
     setWebBusy(true);
     setError(null);
@@ -294,11 +405,29 @@ export function Ta3QuotaSection({ provider }: { provider: ProviderOut }) {
         </div>
       </div>
 
+      {/* v36 (plan-321-1600 R3) / v46: 自动重置配置——报错时查额度，窗口用尽则自动恢复一次 */}
+      <div className="ta3-quota-setting">
+        <label className="ta3-quota-setting-label">
+          <input
+            type="checkbox"
+            checked={autoReset}
+            disabled={!settingsReady}
+            onChange={(e) => void toggleAutoReset(e.target.checked)}
+          />
+          超出额度时自动尝试一次重置
+        </label>
+        <span className="ta3-quota-muted">
+          开启后：模型请求报错时查询一次额度，任一窗口已用尽（≥100%）则自动提交一次重置；
+          日窗无独立重置能力，走「透支本周额度」恢复今日用量（同一供应商 5 分钟内只尝试一次）
+        </span>
+      </div>
+
       {!loggedIn ? (
         <div className="navpage-empty">登录账号后可查看剩余额度、用量趋势与模型状态。</div>
       ) : (
         <>
           {error && <div className="models-err">{error}</div>}
+          {notice && <div className="ta3-quota-hint">{notice}</div>}
           {!error && loading && !quota && <div className="ta3-quota-loading">正在加载额度信息…</div>}
 
           {quota && (
@@ -329,7 +458,30 @@ export function Ta3QuotaSection({ provider }: { provider: ProviderOut }) {
                     {w.selfResetText && <div className="ta3-quota-hint">{w.selfResetText}</div>}
                     {w.window === "DAILY" && w.exhausted && !w.unlimited && (
                       <div className="ta3-quota-hint warn">
-                        {`今日额度已用尽，请等待明日自动重置或使用自助重置。`}
+                        {`今日额度已用尽，请等待明日自动重置，或点击下方重置（透支本周额度）。`}
+                      </div>
+                    )}
+                    {/* v46: 每日/每周/每月统一提供重置入口——按钮常显，仅在窗口
+                        达到 100% 且服务端允许时才可点击（未达 100% 时置灰并说明原因）。 */}
+                    {!w.unlimited && w.window !== "" && (
+                      <div className="ta3-quota-window-actions">
+                        <button
+                          className="btn btn-ghost btn-xs"
+                          disabled={actionBusy !== null || !w.canResetNow}
+                          onClick={() => void (w.resetActionKind === "overdraft"
+                            ? runOverdraft()
+                            : runReset(w.window === "MONTHLY" ? "MONTHLY" : "WEEKLY"))}
+                          title={w.canResetNow
+                            ? w.resetActionTitle
+                            : w.blockedReason}
+                        >
+                          {actionBusy !== null
+                            ? "正在提交…"
+                            : w.resetActionLabel}
+                        </button>
+                        {!w.canResetNow && (
+                          <span className="ta3-quota-muted">{w.blockedReason}</span>
+                        )}
                       </div>
                     )}
                   </div>

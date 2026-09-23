@@ -144,29 +144,40 @@ _TASK: list[dict] = [
                                 }}},
         },
     }),
-    _f("SubAgent", "启动一个只读探索子代理来调研独立子任务，调用会阻塞直到子代理返回调研结论。subagent_type 参数被忽略（统一按只读探索执行）。", {
-        "type": "object", "required": ["prompt"],
-        "properties": {
-            "subagent_type": {"type": "string", "enum": ["Explore", "Plan", "GeneralPurpose", "Verification"],
-                              "description": "子代理类型（当前被忽略，统一按只读探索执行）。"},
-            "prompt": {"type": "string", "description": "传递给子代理的任务描述。"},
-            "description": {"type": "string", "description": "5 个词以内的任务摘要。"},
-        },
-    }),
-    _f("SubAgentAsync", "异步启动一个子代理任务，立即返回 taskId。适合耗时较长、可并行推进的独立分析任务。任务完成后结果会自动推送回当前会话，不要主动调用 TaskQuery 轮询。", {
-        "type": "object", "required": ["prompt"],
-        "properties": {
-            "subagent_type": {"type": "string", "enum": ["Explore", "Plan", "GeneralPurpose", "Verification"],
-                              "description": "子代理类型。"},
-            "prompt": {"type": "string", "description": "传递给子代理的任务描述。"},
-            "description": {"type": "string", "description": "5 个词以内的任务摘要。"},
-        },
-    }),
-    _f("TaskQuery", "查询异步子代理任务状态和结果。", {
+    _f("SubAgent",
+       "启动子代理处理独立子任务。subagent_type=Explore 时按只读探索同步执行，直接返回调研结论；"
+       "其他类型（含缺省）转为后台异步执行，完成后结果自动推送回来（无需轮询）。"
+       "适用：可拆分为互不依赖的子任务；需要跨多个文件调研（超过约 3 次搜索/读取才能回答）；"
+       "只需结论、不需要把原始输出灌进自己的上下文。"
+       "不适用：已知文件/符号/取值的单点查询（直接搜索更快）；简单或强串行的工作（自己直接用工具做）。"
+       "派发多个独立子任务时，请在一条消息里同时发起多个调用——它们会并行执行；"
+       "同一子任务不要重复派发，若不确定是否已有等价子任务在跑，先用 collect_results 查看。", {
+           "type": "object", "required": ["prompt"],
+           "properties": {
+               "subagent_type": {"type": "string",
+                                 "enum": ["Explore", "Plan", "GeneralPurpose", "Verification"],
+                                 "description": "子代理类型：Explore=只读探索（同步返回结论）；其他类型=后台异步执行。"},
+               "prompt": {"type": "string", "description": "传递给子代理的任务描述（必须自包含：子代理看不到你的上下文）。"},
+               "description": {"type": "string", "description": "5 个词以内的任务摘要。"},
+           },
+       }),
+    _f("SubAgentAsync",
+       "异步启动子代理任务，立即返回 taskId、不阻塞当前工作；任务完成时结果会自动推送回当前会话，"
+       "不要主动用 TaskQuery 轮询。适合耗时较长、可与当前工作并行的独立分析/实现任务。"
+       "多个独立任务请在一条消息里同时发起多个调用，它们会并行执行。", {
+           "type": "object", "required": ["prompt"],
+           "properties": {
+               "subagent_type": {"type": "string", "enum": ["Explore", "Plan", "GeneralPurpose", "Verification"],
+                                 "description": "子代理类型。"},
+               "prompt": {"type": "string", "description": "传递给子代理的任务描述（必须自包含）。"},
+               "description": {"type": "string", "description": "5 个词以内的任务摘要。"},
+           },
+       }),
+    _f("TaskQuery", "按 taskId 查询异步子代理任务的状态与结果（仅在需要立即获取时使用；任务完成时会自动推送，无需轮询）。", {
         "type": "object", "required": ["taskId"],
         "properties": {"taskId": {"type": "string", "description": "SubAgentAsync 返回的 taskId。"}},
     }),
-    _f("TaskCancel", "取消仍在运行的异步子代理任务。", {
+    _f("TaskCancel", "取消仍在运行的异步子代理任务（任务不再需要时及时取消，避免继续消耗额度）。", {
         "type": "object", "required": ["taskId"],
         "properties": {"taskId": {"type": "string", "description": "要取消的 taskId。"}},
     }),
@@ -276,7 +287,7 @@ _ASK: list[dict] = [
                           "items": {"type": "object", "required": ["question"],
                                     "properties": {
                                         "question": {"type": "string"},
-                                        "options": {"type": "array", "items": {"type": "string"}},
+                                        "options": {"type": "array", "description": "选项文本数组（必须为字符串，不要用 {label, description} 对象）", "items": {"type": "string"}},
                                         "allow_custom": {"type": "boolean"},
                                     }}},
         },

@@ -581,7 +581,13 @@ export const api = {
     post<{ ok: boolean; restored_messages: number }>(`/sessions/${sessionId}/compactions/${encodeURIComponent(compactionId)}/restore`),
   // v19: 会话子代理列表（消息流卡片重建）
   listSessionSubagents: (sessionId: number) =>
-    get<Array<{ agent_id: number; name: string; turn_id: number | null; task_id: number | null; task_title: string | null; status: string }>>(`/turns/sessions/${sessionId}/subagents`),
+    get<Array<{
+      agent_id: number; name: string; turn_id: number | null; task_id: number | null;
+      task_title: string | null; status: string;
+      /** v36 (plan-321-1600 M2): 面板头部“用时 / 文件数 / 用量”展示字段 */
+      created_at?: string | null; updated_at?: string | null;
+      token_usage?: number; files_count?: number;
+    }>>(`/turns/sessions/${sessionId}/subagents`),
   listSessionTasks: (sessionId: number) => get<TaskOut[]>(`/turns/sessions/${sessionId}/tasks`),
   /** v38 (plan-482): 确认/取消方案文档（不再涉及 group/steps）。 */
   confirmPlanTurn: (turnId: number, data: { accepted: boolean }) =>
@@ -927,10 +933,13 @@ export const api = {
   createSubagent: (data: {
     name: string; description?: string; tools_whitelist?: string[];
     model_id?: number; system_prompt?: string; is_active?: boolean;
+    /** plan-330-1648 M2: 思考深度档位（null = 跟随会话本轮档位） */
+    reasoning_effort?: string | null;
   }) => post<SubagentProfileOut>("/subagents", data),
   updateSubagent: (id: number, data: {
     name?: string; description?: string; tools_whitelist?: string[];
     model_id?: number; system_prompt?: string; is_active?: boolean;
+    reasoning_effort?: string | null;
   }) => patch<SubagentProfileOut>(`/subagents/${id}`, data),
   deleteSubagent: (id: number) => del<{ ok: boolean }>(`/subagents/${id}`),
 };
@@ -968,6 +977,12 @@ export interface GlobalSettingsOut {
   plan_mode_allow_outside_access: boolean;
   /** v32 (plan-89): 沙箱模式（workspace-write / read-only / danger-full-access） */
   sandbox_mode: string;
+  /** v36 (plan-321-1600 R2): 工作目录外读取自动审批（开启后不再弹审批卡） */
+  auto_approve_outside_read?: boolean;
+  /** v36 (plan-321-1600 R3): ta3 额度自动透支（报错时查额度，日额度>=100% 自动透支一次） */
+  auto_overdraft_on_quota_exceeded?: boolean;
+  /** v46: ta3 额度自动重置（报错时查额度，周/月额度用尽则自动提交重置） */
+  auto_reset_on_quota_exceeded?: boolean;
   agent_max_steps?: number;
   /** v45: 异常自动重试次数（0 = 不重试） */
   agent_retry_count?: number;
@@ -975,6 +990,10 @@ export interface GlobalSettingsOut {
   agent_retry_intervals?: string;
   browser_enabled?: boolean;
   browser_headless?: boolean;
+  /** v36: 子代理同时运行上限（超出后新派发排队等待，1~16） */
+  max_concurrent_subagents?: number;
+  /** v36: 每轮子代理派发总量上限（含已完成，1~32） */
+  max_subagents_per_turn?: number;
 }
 
 export type GlobalSettingsIn = Partial<Omit<GlobalSettingsOut, never>>;
@@ -1001,6 +1020,8 @@ export interface SubagentProfileOut {
   tools_whitelist: string[] | null;
   model_id: number | null;
   system_prompt: string | null;
+  /** plan-330-1648 M2: 思考深度档位覆盖（null = 跟随会话） */
+  reasoning_effort: string | null;
   is_active: boolean;
 }
 
@@ -1016,6 +1037,8 @@ export interface Ta3QuotaWindowOut {
   windowStartEpochSeconds?: number;
   resetEpochSeconds?: number;
   canOverdraft?: boolean;
+  /** v46: 服务端权威判定「当前窗口是否可重置」（实测周窗未用尽时返回 false） */
+  canReset?: boolean;
   selfResetEnabled?: boolean;
   selfResetUsed?: number;
   selfResetMax?: number | null;

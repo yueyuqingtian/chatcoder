@@ -36,7 +36,11 @@ declare global {
       /** plan-546/plan-308-1542: 毛玻璃模式（Win11 acrylic；Win10 ACCENT 系统模糊；mac vibrancy）
        *  返回 { ok, backend, reason? }；ok=false 时渲染层自动提高不透明度降级。 */
       setGlassMode?: (on: boolean) => Promise<{ ok: boolean; backend: string; reason?: string; verified?: number | null; needRestart?: boolean }>;
+      /** 查询当前窗口实际玻璃状态（false =毛玻璃已关，标题栏/最大化走 Windows 原生行为） */
+      getGlassActive?: () => Promise<boolean>;
       onRendererFocus?: (cb: () => void) => () => void;
+      /** 主进程在窗口几何变化前同步通知，避免开头几帧仍按静止态重测。 */
+      onWindowMotion?: (cb: (payload: { active?: boolean }) => void) => () => void;
       getUsername?: () => Promise<string>;
       setKeepAwake?: (on: boolean) => Promise<boolean>;
       /** 主题偏好同步（主进程落盘，下次启动 loading 页按此适配深浅色） */

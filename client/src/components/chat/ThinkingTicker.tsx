@@ -8,6 +8,7 @@
  *   快刷时"一行快速渲染→快速滚到下一行"。
  */
 import { memo, useEffect, useRef, useState } from "react";
+import { isBusy } from "../../perf/bus";
 
 const SWAP_MS_SLOW = 160;
 const SWAP_MS_FAST = 90;
@@ -86,6 +87,16 @@ export const ThinkingTicker = memo(function ThinkingTicker({ text, placeholder =
     const a = anim.current;
     const easeOut = (p: number) => 1 - Math.pow(1 - p, 3);
     const step = (now: number) => {
+      // 运动期空转（用户反馈"拖窗口/拖面板时鼠标失灵几秒"）：本循环每帧做
+      // 3 个布局读（scrollWidth / clientWidth / offsetHeight）+ 2 个 transform 写。
+      // 运动期间布局常处于 dirty 状态，这些读会升级为**强制同步布局**（每帧一次
+      // 整树重排），是拖拽期主线程长任务的组成之一。运动期只继续排队、不做任何
+      // 读写；结束后的下一帧自然追上——上滚动画按 start/dur 推进（超时即完成），
+      // 横滚按 dt 补偿，暂停不会造成视觉残留。
+      if (isBusy()) {
+        a.raf = requestAnimationFrame(step);
+        return;
+      }
       const view = viewRef.current;
       const line = lineRef.current;
       const strip = stripRef.current;

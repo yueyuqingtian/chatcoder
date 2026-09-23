@@ -13,8 +13,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/exec-policy", tags=["exec-policy"])
 
-# 内部/交互工具不参与策略配置（子代理编排工具也无 registry 实例）
-_INTERNAL_TOOLS = {"ask_user_question", "todo_write", "spawn_subagent", "collect_results"}
+# 交互类工具不参与策略配置（提问/待办由 UI 直接接管，不是可授权的能力）
+_INTERNAL_TOOLS = {"ask_user_question", "todo_write"}
 
 
 class ExecPolicyToolInfo(BaseModel):
@@ -36,6 +36,30 @@ async def list_tools(db: AsyncSession = Depends(get_db)):
         first_line = t.description.strip().splitlines()[0][:80] if t.description else ""
         out.append(ExecPolicyToolInfo(name=t.name, risk_level=t.risk_level, description=first_line))
         seen.add(t.name)
+
+    # v36 (plan-321-1600 R1): 子代理编排工具（agent_loop 特判执行，无 registry 实例）——
+    # 此前被 _INTERNAL_TOOLS 整体排除，设置页「工具权限」里既看不到也无法勾选
+    # （用户反馈“看不到子代理相关工具”）。现补齐为可配置项，白名单勾选对其生效。
+    try:
+        from app.orchestration.subagent_tools import (
+            SUBAGENT_TOOL_NAMES, SUBAGENT_TOOL_RISK, SUBAGENT_TOOL_SCHEMAS,
+        )
+
+        _sub_desc = {
+            s["function"]["name"]: str(s["function"].get("description") or "")
+            for s in SUBAGENT_TOOL_SCHEMAS
+        }
+        for _n in sorted(SUBAGENT_TOOL_NAMES):
+            if _n in seen:
+                continue
+            _d = _sub_desc.get(_n, "").strip().splitlines()
+            out.append(ExecPolicyToolInfo(
+                name=_n, risk_level=SUBAGENT_TOOL_RISK.get(_n, "medium"),
+                description=_d[0][:80] if _d else "",
+            ))
+            seen.add(_n)
+    except Exception:
+        logger.debug("[exec-policy] 子代理工具候选清单构建失败(非阻塞)", exc_info=True)
 
     # MCP 工具（mcp_<server>_<tool>）：名字随用户配置动态变化，registry 里只有"某次
     # turn 注入过"才存在——设置页首屏因此看不到、也就无从勾选（plan-230-1144 M1.3

@@ -112,6 +112,32 @@ def test_edit_args_roundtrip():
     assert restored == real_args
 
 
+def test_async_subagent_aliases_map_to_background():
+    """v36 (plan-321-1600 M3): ta3 异步子代理三件套入站映射，且不再强制同步探索。"""
+    from app.models.providers.ta3_tool_aliases import FROM_TA3, restore_args
+
+    assert FROM_TA3["SubAgentAsync"] == "spawn_subagent"
+    assert FROM_TA3["TaskQuery"] == "collect_results"
+    assert FROM_TA3["TaskCancel"] == "cancel_subagent"
+
+    # 异步派发 → background=True（立即返回，完成时自动推送）
+    a = restore_args("SubAgentAsync", {"description": "T", "prompt": "P"})
+    assert a["background"] is True
+    assert a["task_title"] == "T" and a["task_description"] == "P"
+
+    # SubAgent：仅 Explore 保持同步只读探索，其余走后台异步
+    explore = restore_args("SubAgent", {"description": "T", "prompt": "P", "subagent_type": "Explore"})
+    assert explore.get("explore") is True and "background" not in explore
+    general = restore_args(
+        "SubAgent", {"description": "T", "prompt": "P", "subagent_type": "GeneralPurpose"}
+    )
+    assert general.get("background") is True and "explore" not in general
+
+    # 查询/取消的键名适配（taskId → agent_id）
+    assert restore_args("TaskQuery", {"taskId": 7})["agent_id"] == 7
+    assert restore_args("TaskCancel", {"taskId": 8})["agent_id"] == 8
+
+
 def test_subagent_args_roundtrip():
     # 出站：真实 spawn_subagent → ta3 SubAgent（explore 丢弃，由入站强制补回）
     real_args = {"task_title": "调研", "task_description": "读 A 文件", "acceptance_criteria": "ok", "explore": False}

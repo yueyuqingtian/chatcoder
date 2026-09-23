@@ -272,6 +272,8 @@ const DICT: Dict = {
   "gp.force_approve_desc":        ["即使开启自动批准或危险全访问沙箱也不可跳过的工具", "Tools that cannot bypass approval even with auto-approve"],
   "gp.sandbox":                   ["沙箱模式", "Sandbox Mode"],
   "gp.sandbox_desc":              ["工作区写访问/只读沙箱/危险全访问；项目 .chatcoder/config.toml 优先", "Write access / read-only / full access; project config takes priority"],
+  "gp.outside_read_auto":         ["工作目录外读取自动审批", "Auto-Approve Outside Reads"],
+  "gp.outside_read_auto_desc":    ["开启后，读取/搜索工作目录以外的路径不再弹审批卡；危险全访问沙箱本身免审", "Skip the approval card when reading/searching outside the workspace; full-access sandbox always skips it"],
   "gp.max_steps":                 ["AI 最大执行步数", "Max Steps"],
   "gp.max_steps_desc":            ["单轮对话中模型可调用的最大工具步数", "Max tool steps per turn"],
   // plan-278-1391: 上下文压缩触发阈值

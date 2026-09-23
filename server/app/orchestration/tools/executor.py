@@ -278,7 +278,12 @@ class ServerToolExecutor(ToolExecutor):
         try:
             from app.services import permission_profile_service as _pps
             _profile = _pps.get_profile(pm)
-            if _profile and _profile.get("tools") and tool_name not in _profile["tools"]:
+            # v36 (plan-321-1600 R1): MCP 工具名（mcp_<server>_<tool>）随用户配置动态生成，
+            # 无法预先写进模式白名单；其注入已由 engine 的 _inject_mcp_tools（只读类 + 显式
+            # 勾选）把关，此处不再按静态白名单二次拒绝（否则用户在面板勾选了仍不可用）。
+            _is_mcp = tool_name.startswith("mcp_")
+            if (not _is_mcp and _profile and _profile.get("tools")
+                    and tool_name not in _profile["tools"]):
                 return False, (
                     f"模式「{_profile.get('display_name') or pm}」不允许工具 {tool_name}"
                 )

@@ -64,10 +64,60 @@ class FsListTool(Tool):
 
         # v4.8.2: 同步 I/O 移出事件循环，防止 Windows 网络盘/特殊目录挂起
         import asyncio
+
+        # v36 (plan-321-1600 R2): 工作区外目录——审批通过后放行（全访问沙箱免审）
+        if path:
+            from app.orchestration.tools.safe_path import safe_resolve
+            if safe_resolve(ctx.workspace_root, path) is None:
+                from app.orchestration.tools import outside_access
+
+                _outside, _err = await outside_access.authorize_outside_read(
+                    ctx, path, tool_name="fs_list",
+                )
+                if _outside is None:
+                    return ToolResult(ok=False, output="", error=_err)
+                return await asyncio.to_thread(
+                    self._list_resolved, _outside, recursive, max_depth, ctx.workspace_root, path,
+                )
+
         try:
             return await asyncio.to_thread(self._list_sync, path, recursive, max_depth, ctx.workspace_root)
         except Exception as e:
             return ToolResult(ok=False, output="", error=f"列目录失败: {e}")
+
+    def _list_resolved(self, target: Path, recursive: bool, max_depth: int,
+                       workspace_root: str, display_path: str) -> ToolResult:
+        """列目录（target 已解析完毕，可为工作区外路径）。"""
+        if not target.exists():
+            return ToolResult(ok=False, output="", error=f"目录不存在: {display_path}")
+        if not target.is_dir():
+            return ToolResult(ok=False, output="", error=f"非目录: {display_path}")
+
+        try:
+            ws_root = Path(workspace_root)
+            entries: list[str] = []
+            if recursive:
+                self._walk_recursive(target, ws_root, entries, depth=0, max_depth=max_depth)
+            else:
+                for e in sorted(target.iterdir()):
+                    if e.name in _IGNORE_DIRS:
+                        continue
+                    kind = "dir" if e.is_dir() else "file"
+                    entries.append(f"[{kind}] {e.name}")
+            result = "\n".join(entries[:_MAX_ENTRIES]) or "(空目录)"
+            if len(entries) > _MAX_ENTRIES:
+                result += f"\n...(仅显示前 {_MAX_ENTRIES} 条,共 {len(entries)} 条)"
+        except OSError as e:
+            return ToolResult(ok=False, output="", error=f"列目录失败: {e}")
+
+        header = f"目录: {display_path} ({len(entries[:_MAX_ENTRIES])} 条) [工作区外]"
+        if recursive:
+            header += f" [递归, 深度={max_depth}]"
+        return ToolResult(
+            ok=True,
+            output=f"{header}\n{result}",
+            data={"path": display_path, "count": len(entries), "outside_workspace": True},
+        )
 
     def _list_sync(self, path: str, recursive: bool, max_depth: int, workspace_root: str) -> ToolResult:
         target = safe_resolve(workspace_root, path) if path else Path(workspace_root).resolve()

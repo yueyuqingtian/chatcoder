@@ -911,6 +911,18 @@ class Ta3Provider(ModelProvider):
             async with client.stream("POST", url, json=body, headers=headers) as resp:
                 if resp.status_code != 200:
                     text = (await resp.aread()).decode("utf-8", errors="replace")[:400]
+                    # v36/v46: 请求报错时，若开启「额度自动重置 / 自动透支」配置，
+                    # 查一次额度；有窗口 >=100% 则自动提交一次恢复（日窗→透支，周/月→重置；
+                    # 带冷却，失败不影响上报）。
+                    try:
+                        from app.auth.ta3.auto_recover import maybe_auto_recover
+
+                        await maybe_auto_recover(
+                            getattr(self, "provider_row_id", None),
+                            reason=f"模型请求失败 {resp.status_code}",
+                        )
+                    except Exception:
+                        logger.debug("[ta3] 自动透支钩子异常(忽略)", exc_info=True)
                     raise RuntimeError(f"模型请求失败 {resp.status_code}：{text}")
                 _lines = resp.aiter_lines()
                 while True:

@@ -141,6 +141,15 @@ def load_persisted_workspace() -> None:
         _sm = str(data["sandbox_mode"])
         if _sm in ("workspace-write", "read-only", "danger-full-access"):
             settings.sandbox_mode = _sm
+    # v36 (plan-321-1600 R2): 启动时恢复「工作目录外读取自动审批」开关
+    if "auto_approve_outside_read" in data:
+        settings.auto_approve_outside_read = bool(data["auto_approve_outside_read"])
+    # v36 (plan-321-1600 R3): 启动时恢复「额度自动透支」开关
+    if "auto_overdraft_on_quota_exceeded" in data:
+        settings.auto_overdraft_on_quota_exceeded = bool(data["auto_overdraft_on_quota_exceeded"])
+    # v46: 启动时恢复「额度自动重置」开关
+    if "auto_reset_on_quota_exceeded" in data:
+        settings.auto_reset_on_quota_exceeded = bool(data["auto_reset_on_quota_exceeded"])
     # plan-278-1391: 启动时恢复压缩触发阈值（默认 0.90，范围 0.50~0.95）
     if "auto_compact_threshold_ratio" in data:
         try:
@@ -149,6 +158,17 @@ def load_persisted_workspace() -> None:
             _ratio = None
         if _ratio is not None and 0.50 <= _ratio <= 0.95:
             settings.auto_compact_threshold_ratio = round(_ratio, 2)
+    # v36: 启动时恢复子代理并发治理（同时运行上限 / 每轮总量上限）
+    if "max_concurrent_subagents" in data:
+        try:
+            settings.max_concurrent_subagents = max(1, min(16, int(data["max_concurrent_subagents"])))
+        except (TypeError, ValueError):
+            pass
+    if "max_subagents_per_turn" in data:
+        try:
+            settings.max_subagents_per_turn = max(1, min(32, int(data["max_subagents_per_turn"])))
+        except (TypeError, ValueError):
+            pass
 
 
 @router.get("/settings/workspace", response_model=WorkspaceOut)
@@ -190,6 +210,12 @@ class GlobalSettingsOut(BaseModel):
     plan_mode_allow_outside_access: bool = False
     # v32 (plan-89): 沙箱模式（三态：workspace-write / read-only / danger-full-access）
     sandbox_mode: str = "workspace-write"
+    # v36 (plan-321-1600 R2): 工作目录外读取自动审批（开启后不再弹审批卡）
+    auto_approve_outside_read: bool = False
+    # v36 (plan-321-1600 R3): ta3 额度自动透支（报错时查额度，日额度>=100% 自动透支一次）
+    auto_overdraft_on_quota_exceeded: bool = False
+    # v46: ta3 额度自动重置（报错时查额度，窗口用尽则自动提交重置；日窗走透支）
+    auto_reset_on_quota_exceeded: bool = False
     # Agent 最大步数（200 / 500 / 1000 / 0=不限制）
     agent_max_steps: int = 1000
     # v45: 异常自动重试策略（任何报错都按此重试，穷尽后才停止并显示报错）
@@ -200,6 +226,9 @@ class GlobalSettingsOut(BaseModel):
     # 浏览器自动化开关与无头模式
     browser_enabled: bool = False
     browser_headless: bool = True
+    # v36: 子代理并发治理（设置中心「子代理」面板可配，运行时立即生效）
+    max_concurrent_subagents: int = 6   # 同时运行上限（超出排队等待，1~16）
+    max_subagents_per_turn: int = 10    # 每轮派发总量上限（含已完成，1~32）
 
 
 class GlobalSettingsIn(BaseModel):
@@ -222,18 +251,32 @@ class GlobalSettingsIn(BaseModel):
     show_reasoning: bool | None = None
     plan_mode_allow_outside_access: bool | None = None
     sandbox_mode: str | None = None
+    # v36 (plan-321-1600 R2): 工作目录外读取自动审批
+    auto_approve_outside_read: bool | None = None
+    # v36 (plan-321-1600 R3): ta3 额度自动透支
+    auto_overdraft_on_quota_exceeded: bool | None = None
+    # v46: ta3 额度自动重置
+    auto_reset_on_quota_exceeded: bool | None = None
     agent_max_steps: int | None = None
     # v45: 异常自动重试策略
     agent_retry_count: int | None = None
     agent_retry_intervals: str | None = None
     browser_enabled: bool | None = None
     browser_headless: bool | None = None
+    # v36: 子代理并发治理
+    max_concurrent_subagents: int | None = None
+    max_subagents_per_turn: int | None = None
 
 
-@router.get("/settings/global", response_model=GlobalSettingsOut)
-async def get_global_settings() -> GlobalSettingsOut:
-    """读取全局设置(记忆开关、全局规则、Agent/安全配置、终端/显示选项等)。"""
-    data = _load_config()
+def _global_settings_out(data: dict) -> GlobalSettingsOut:
+    """按持久化数据组装全局设置响应。
+
+    v46 修复：此前 GET / PUT 各自手写一遍字段列表，v36 新增的
+    auto_approve_outside_read 与 auto_overdraft_on_quota_exceeded 只加进了
+    请求模型与持久化分支，却漏在这两处回填 —— 用户勾选后值确实已落盘，
+    但重新进入面板读到的是类默认值，表现为"没保存成功"。
+    现两条路径统一走本函数，新增字段只需改一处，不会再漏。
+    """
     return GlobalSettingsOut(
         memory_enabled=data.get("memory_enabled", True),
         global_rules=data.get("global_rules", ""),
@@ -255,12 +298,32 @@ async def get_global_settings() -> GlobalSettingsOut:
         show_reasoning=data.get("show_reasoning", True),
         plan_mode_allow_outside_access=data.get("plan_mode_allow_outside_access", False),
         sandbox_mode=data.get("sandbox_mode", settings.sandbox_mode),
+        # v36 (plan-321-1600 R2/R3): 两项自动审批/自动额度开关（回填持久化值）
+        auto_approve_outside_read=bool(
+            data.get("auto_approve_outside_read", settings.auto_approve_outside_read)
+        ),
+        auto_overdraft_on_quota_exceeded=bool(
+            data.get("auto_overdraft_on_quota_exceeded", settings.auto_overdraft_on_quota_exceeded)
+        ),
+        # v46: 额度自动重置（与自动透支同为额度恢复开关）
+        auto_reset_on_quota_exceeded=bool(
+            data.get("auto_reset_on_quota_exceeded", settings.auto_reset_on_quota_exceeded)
+        ),
         agent_max_steps=data.get("agent_max_steps", settings.agent_max_steps),
         agent_retry_count=data.get("agent_retry_count", settings.agent_retry_count),
         agent_retry_intervals=data.get("agent_retry_intervals", settings.agent_retry_intervals),
         browser_enabled=data.get("browser_enabled", settings.browser_enabled),
         browser_headless=data.get("browser_headless", settings.browser_headless),
+        # v36: 子代理并发治理
+        max_concurrent_subagents=data.get("max_concurrent_subagents", settings.max_concurrent_subagents),
+        max_subagents_per_turn=data.get("max_subagents_per_turn", settings.max_subagents_per_turn),
     )
+
+
+@router.get("/settings/global", response_model=GlobalSettingsOut)
+async def get_global_settings() -> GlobalSettingsOut:
+    """读取全局设置(记忆开关、全局规则、Agent/安全配置、终端/显示选项等)。"""
+    return _global_settings_out(_load_config())
 
 
 class TerminalShellOption(BaseModel):
@@ -391,6 +454,16 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         if body.sandbox_mode in ("workspace-write", "read-only", "danger-full-access"):
             data["sandbox_mode"] = body.sandbox_mode
             settings.sandbox_mode = body.sandbox_mode
+    if body.auto_approve_outside_read is not None:
+        data["auto_approve_outside_read"] = body.auto_approve_outside_read
+        settings.auto_approve_outside_read = body.auto_approve_outside_read
+    if body.auto_overdraft_on_quota_exceeded is not None:
+        data["auto_overdraft_on_quota_exceeded"] = body.auto_overdraft_on_quota_exceeded
+        settings.auto_overdraft_on_quota_exceeded = body.auto_overdraft_on_quota_exceeded
+    # v46: 额度自动重置开关（与自动透支并列的额度恢复手段）
+    if body.auto_reset_on_quota_exceeded is not None:
+        data["auto_reset_on_quota_exceeded"] = body.auto_reset_on_quota_exceeded
+        settings.auto_reset_on_quota_exceeded = body.auto_reset_on_quota_exceeded
     if body.memory_enabled is not None:
         data["memory_enabled"] = body.memory_enabled
         settings.auto_memory_enabled = body.memory_enabled
@@ -412,37 +485,20 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
     if body.browser_headless is not None:
         data["browser_headless"] = bool(body.browser_headless)
         settings.browser_headless = bool(body.browser_headless)
+    # v36: 子代理并发治理（夹紧上限，运行时立即生效——agent_loop 每次派发前读取）
+    if body.max_concurrent_subagents is not None:
+        _mc = max(1, min(16, int(body.max_concurrent_subagents)))
+        data["max_concurrent_subagents"] = _mc
+        settings.max_concurrent_subagents = _mc
+    if body.max_subagents_per_turn is not None:
+        _mt = max(1, min(32, int(body.max_subagents_per_turn)))
+        data["max_subagents_per_turn"] = _mt
+        settings.max_subagents_per_turn = _mt
     _save_config(data)
     # 运行时更新 context compaction 设置
     if body.auto_compact_enabled is not None:
         settings.context_compaction_enabled = body.auto_compact_enabled
-    return GlobalSettingsOut(
-        memory_enabled=data.get("memory_enabled", True),
-        global_rules=data.get("global_rules", ""),
-        auto_compact_enabled=data.get("auto_compact_enabled", True),
-        # plan-278-1391: 压缩触发阈值（默认取运行时 settings，即 0.90）
-        auto_compact_threshold_ratio=float(
-            data.get("auto_compact_threshold_ratio", settings.auto_compact_threshold_ratio)
-        ),
-        language=data.get("language", "zh"),
-        auto_approve_tools=data.get("auto_approve_tools", settings.auto_approve_tools),
-        force_approval_tools=data.get("force_approval_tools", settings.force_approval_tools),
-        session_token_budget=data.get("session_token_budget", 200_000),
-        # v2.2: 常规面板补项
-        terminal_shell=data.get("terminal_shell", "auto"),
-        terminal_font=data.get("terminal_font", ""),
-        http_proxy=data.get("http_proxy", ""),
-        enhanced_search=data.get("enhanced_search", True),
-        show_todos=data.get("show_todos", True),
-        show_reasoning=data.get("show_reasoning", True),
-        plan_mode_allow_outside_access=data.get("plan_mode_allow_outside_access", False),
-        sandbox_mode=data.get("sandbox_mode", settings.sandbox_mode),
-        agent_max_steps=data.get("agent_max_steps", settings.agent_max_steps),
-        agent_retry_count=data.get("agent_retry_count", settings.agent_retry_count),
-        agent_retry_intervals=data.get("agent_retry_intervals", settings.agent_retry_intervals),
-        browser_enabled=data.get("browser_enabled", settings.browser_enabled),
-        browser_headless=data.get("browser_headless", settings.browser_headless),
-    )
+    return _global_settings_out(data)
 
 
 # ── 作用域规则(工作目录 / 群聊) ──

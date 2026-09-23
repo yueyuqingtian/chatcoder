@@ -8,9 +8,14 @@
 
 参数适配说明：
 - editor_apply_diff(path/old_text/new_text) → Edit(filepath/oldString/newString)
-- spawn_subagent(task_title/task_description/acceptance_criteria/explore)
-    → SubAgent(description/prompt/subagent_type)，explore 强制 True（同步拿结果，
-    因为当前项目后台子代理需要 collect_results 轮询，而 ta3 侧无对应工具）
+- spawn_subagent(task_title/task_description/acceptance_criteria/explore/background)
+    → SubAgent(description/prompt/subagent_type)
+- v36 (plan-321-1600 M3): 接入 ta3 侧异步子代理三件套——
+    SubAgentAsync → spawn_subagent(background=True)（后台派发，完成时自动推送）
+    TaskQuery     → collect_results(taskId→agent_id)
+    TaskCancel    → cancel_subagent(taskId→agent_id)
+  并**取消**此前 SubAgent 的 explore 强制同步：改按 subagent_type 决定
+  （Explore → 只读同步探索；其余/缺省 → 后台异步），使 ta3 模型真正能用上并行子代理。
 """
 from __future__ import annotations
 
@@ -59,6 +64,12 @@ TO_TA3: dict[str, str] = {
 
 # 伪装名 → 真实执行名（反查）
 FROM_TA3: dict[str, str] = {v: k for k, v in TO_TA3.items()}
+# v36 (plan-321-1600 M3): ta3 异步子代理工具 → 本项目工具（多对一，TO_TA3 反查得不到）
+FROM_TA3.update({
+    "SubAgentAsync": "spawn_subagent",
+    "TaskQuery": "collect_results",
+    "TaskCancel": "cancel_subagent",
+})
 
 # 出站参数键名适配：真实键 → ta3 键（None = 丢弃该键）
 ARGS_TO_TA3: dict[str, dict[str, str | None]] = {
@@ -82,7 +93,8 @@ ARGS_TO_TA3: dict[str, dict[str, str | None]] = {
         "task_title": "description",
         "task_description": "prompt",
         "acceptance_criteria": None,   # ta3 无对应
-        "explore": None,               # 强制 True（见模块 docstring）
+        "explore": None,               # 出站丢弃：ta3 侧由 subagent_type 表达
+        "background": None,            # v36: 同上（ta3 侧由 SubAgentAsync 表达）
     },
     # plan-153-705: 后台进程工具键名适配（offset 键名一致免映射）
     "terminal_bg_status": {"shell_id": "shellId"},
@@ -111,8 +123,16 @@ ARGS_FROM_TA3: dict[str, dict[str, str | None]] = {
     "SubAgent": {
         "prompt": "task_description",
         "description": "task_title",
-        "subagent_type": None,         # 强制同步探索（explore=True）
+        "subagent_type": None,         # v36: 丢弃前先用于判定 explore/background（见 restore_args）
     },
+    # v36 (plan-321-1600 M3): ta3 异步子代理三件套
+    "SubAgentAsync": {
+        "prompt": "task_description",
+        "description": "task_title",
+        "subagent_type": None,
+    },
+    "TaskQuery": {"taskId": "agent_id"},
+    "TaskCancel": {"taskId": "agent_id"},
     # plan-153-705: 后台进程工具入站适配（BashStatus/BashKill）
     "BashStatus": {"shellId": "shell_id"},
     "BashKill": {"shellId": "shell_id"},
@@ -120,8 +140,8 @@ ARGS_FROM_TA3: dict[str, dict[str, str | None]] = {
     "get_file_outline": {"filepath": "path"},
 }
 
-# SubAgent 伪装后的固定附加参数（模型调用 SubAgent 时强制同步只读探索）
-SPAWN_FORCED_ARGS: dict[str, object] = {"explore": True}
+# v36 (plan-321-1600 M3): 原 SPAWN_FORCED_ARGS（强制 explore=True）已删除——
+# 它让 ta3 侧调用永远同步阻塞，模型无法并行派发子代理。现按 subagent_type 判定。
 
 
 def disguise_args(real_name: str, args: dict) -> dict:
@@ -147,6 +167,15 @@ def restore_args(ta3_name: str, args: dict) -> dict:
         if target is None:
             continue
         out[target] = v
-    if ta3_name == "SubAgent":
-        out.update(SPAWN_FORCED_ARGS)
+    if ta3_name == "SubAgentAsync":
+        # ta3 异步派发 → 本项目后台子代理（立即返回，完成时自动推送）
+        out["background"] = True
+    elif ta3_name == "SubAgent":
+        # v36: 按 ta3 给出的 subagent_type 决定同步/异步——
+        # Explore → 只读同步探索（主代理直接拿结论）；其余/缺省 → 后台异步并行。
+        _st = str(args.get("subagent_type") or "").strip().lower()
+        if _st == "explore":
+            out["explore"] = True
+        else:
+            out["background"] = True
     return out

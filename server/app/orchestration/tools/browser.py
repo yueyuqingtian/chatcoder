@@ -15,6 +15,7 @@ import base64
 import logging
 from typing import Any
 
+from app.core.browser_env import ensure_bundled_browsers_path
 from app.core.config import settings
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 
@@ -36,24 +37,35 @@ class _BrowserSessionManager:
     _context = None
     _page = None
     _lock = asyncio.Lock()
+    # 内置浏览器目录路径；非 None 表示使用随安装包分发的完整版 Chromium
+    _bundled_browsers_path: str | None = None
 
     @classmethod
     async def get_page(cls, headless: bool = True):
         async with cls._lock:
             if cls._pw is None:
+                # 必须在 start() 前注入内置浏览器目录：driver 是 node 子进程，
+                # 只在启动时继承 PLAYWRIGHT_BROWSERS_PATH，之后再改无效
+                cls._bundled_browsers_path = ensure_bundled_browsers_path()
                 from playwright.async_api import async_playwright
                 cls._pw = await async_playwright().start()
             if cls._browser is None or not cls._browser.is_connected():
+                launch_kwargs: dict[str, Any] = {
+                    "headless": headless,
+                    "args": ["--disable-web-security", "--no-sandbox", "--disable-setuid-sandbox"],
+                }
+                if cls._bundled_browsers_path:
+                    # 内置的只有完整版 Chromium（未内置 chromium-headless-shell 以省体积），
+                    # 指定 channel 让无头模式也走完整版，否则 Playwright 会去找 headless-shell 报未安装
+                    launch_kwargs["channel"] = "chromium"
                 try:
-                    cls._browser = await cls._pw.chromium.launch(
-                        headless=headless,
-                        args=["--disable-web-security", "--no-sandbox", "--disable-setuid-sandbox"],
-                    )
+                    cls._browser = await cls._pw.chromium.launch(**launch_kwargs)
                 except Exception as launch_err:
                     # plan-219: 区分「chromium 浏览器未安装」与「playwright 模块缺失」，避免误导用户重装 pip 包
                     if "Executable doesn't exist" in str(launch_err) or "looks like Playwright was just installed" in str(launch_err):
                         raise RuntimeError(
-                            "Chromium 浏览器未安装。请在服务端运行: playwright install chromium"
+                            "Chromium 浏览器不可用（内置浏览器缺失或损坏）。请重装应用，"
+                            "或在服务端运行: playwright install chromium"
                         ) from launch_err
                     raise
                 cls._context = await cls._browser.new_context(

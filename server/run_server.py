@@ -214,6 +214,16 @@ def _setup_env() -> None:
     os.environ.setdefault("SERVER_HOST", "127.0.0.1")
     os.environ.setdefault("SERVER_PORT", "12973")
 
+    # ── 内置浏览器: 把 PLAYWRIGHT_BROWSERS_PATH 指向随包分发的 Chromium ──
+    # 必须在 playwright 启动前完成注入（driver 子进程只在启动时继承环境变量）
+    try:
+        from app.core.browser_env import ensure_bundled_browsers_path
+
+        bundled_browsers = ensure_bundled_browsers_path()
+        print(f"[chatcoder-server] bundled chromium = {bundled_browsers or '(未内置，回退默认浏览器目录)'}")
+    except Exception as exc:  # noqa: BLE001 —— 注入失败不阻塞启动，浏览器工具会给出自己的提示
+        print(f"[chatcoder-server] 内置浏览器注入失败: {exc}")
+
     # 切换到数据目录(确保相对路径写操作都落到可写位置)
     os.chdir(data_dir)
 

@@ -41,6 +41,7 @@ export function GeneralPanel() {
     memory_enabled: true,
     plan_mode_allow_outside_access: false,
     sandbox_mode: "workspace-write",
+    auto_approve_outside_read: false,
     agent_max_steps: 1000,
     agent_retry_count: 3,
     agent_retry_intervals: "10,20,30",
@@ -127,6 +128,7 @@ export function GeneralPanel() {
         memory_enabled: g.memory_enabled !== false,
         plan_mode_allow_outside_access: g.plan_mode_allow_outside_access === true,
         sandbox_mode: g.sandbox_mode || "workspace-write",
+        auto_approve_outside_read: g.auto_approve_outside_read === true,
         agent_max_steps: typeof g.agent_max_steps === "number" ? g.agent_max_steps : 1000,
         agent_retry_count: typeof g.agent_retry_count === "number" ? g.agent_retry_count : 3,
         agent_retry_intervals: typeof g.agent_retry_intervals === "string" ? g.agent_retry_intervals : "10,20,30",
@@ -156,6 +158,7 @@ export function GeneralPanel() {
         memory_enabled: cfg.memory_enabled,
         plan_mode_allow_outside_access: cfg.plan_mode_allow_outside_access,
         sandbox_mode: cfg.sandbox_mode,
+        auto_approve_outside_read: cfg.auto_approve_outside_read,
         agent_max_steps: cfg.agent_max_steps,
         agent_retry_count: cfg.agent_retry_count,
         agent_retry_intervals: cfg.agent_retry_intervals,
@@ -262,6 +265,13 @@ export function GeneralPanel() {
             options={SANDBOX_MODES}
             style={{ minWidth: 200 }}
             aria-label={t("gp.sandbox")}
+          />
+        </Row>
+        {/* v36 (plan-321-1600 R2): 工作目录外读取自动审批——关闭时读工作区外路径弹审批卡 */}
+        <Row title={t("gp.outside_read_auto")} desc={t("gp.outside_read_auto_desc")}>
+          <Sw
+            checked={cfg.auto_approve_outside_read}
+            onChange={(v) => patch({ auto_approve_outside_read: v })}
           />
         </Row>
         <Row title={t("gp.max_steps")} desc={t("gp.max_steps_desc")}>

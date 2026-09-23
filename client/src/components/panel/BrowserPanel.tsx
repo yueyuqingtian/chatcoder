@@ -16,6 +16,8 @@ import { api, type UploadOut } from "../../api/client";
 import { ElementInspector } from "./ElementInspector";
 import { BrowserStartPage } from "./BrowserStartPage";
 import { useFrameBridge, isGuestFrame, type FrameEl } from "./frameBridge";
+import { isBusy, subscribe } from "../../perf/bus";
+import { registerReconcileTask, RECONCILE_ORDER } from "../../perf/reconcile";
 import {
   IconArrowLeft,
   IconArrowRight,
@@ -81,17 +83,32 @@ export function BrowserPanel() {
     Map<string, { ref: (el: FrameEl | null) => void; el?: FrameEl; handler?: () => void }>
   >(new Map());
 
-  /**
-   * 视口内框架尺寸兜底：webview（Electron guest 宿主）与 iframe 仅靠 CSS 百分比
-   * 在面板折叠恢复、全屏切换、标签切换、窗口 resize 等时机不会自动重算，
-   * 会停留在初始尺寸导致网页只显示约 1/5 高度。此处按视口实测尺寸显式赋值 px。
+  /** 视口尺寸统一入口（plan-329-1647 S5）。
+   *
+   *  原有职责：webview（Electron guest 宿主）与 iframe 仅靠 CSS 百分比，在面板折叠恢复、
+   *  全屏切换、标签切换、窗口 resize 等时机不会自动重算，会停留在初始尺寸导致网页只显示
+   *  约 1/5 高度；故按视口实测尺寸显式赋值 px。
+   *
+   *  S5 追加两件事：
+   *   ① 顺带把视口尺寸交给 ElementInspector（此前它在 render 期直接读 clientWidth，
+   *      布局 dirty 时会升级为强制同步布局）——同一次读取两处共用；
+   *   ② 整个函数在运动期（PerfBus.isBusy）**不执行**：这些布局读在拖面板/拖窗口时
+   *      每帧都会经 RO 触发，是“面板一拖就卡”的组成之一。运动中只记账，结束后补一次。
    */
+  const viewportSizeRef = useRef<{ width: number; height: number } | null>(null);
+  const [viewportSize, setViewportSize] = useState<{ width: number; height: number } | null>(null);
   const syncFrameSize = useCallback(() => {
     const vp = viewportRef.current;
     if (!vp) return;
     const w = vp.clientWidth;
     const h = vp.clientHeight;
     if (w <= 0 || h <= 0) return;
+    // 视口尺寸缓存（供 ElementInspector 用；尺寸未变不触发重渲染）
+    const prev = viewportSizeRef.current;
+    if (!prev || prev.width !== w || prev.height !== h) {
+      viewportSizeRef.current = { width: w, height: h };
+      setViewportSize({ width: w, height: h });
+    }
     // 获取当前视口内全部 webview 与 iframe 元素统一设置尺寸
     const elements: HTMLElement[] = Array.from(vp.querySelectorAll("webview, iframe"));
     const fromRef = tabFrameRefs.current.get(activeTabId);
@@ -180,26 +197,39 @@ export function BrowserPanel() {
     };
   }, [frameBridge]);
 
-  // 视口尺寸变化（面板宽度拖拽、窗口缩放、面板折叠恢复）时重算框架尺寸
+  // 视口尺寸变化（面板宽度拖拽、窗口缩放、面板折叠恢复）时重算框架尺寸。
+  // plan-329-1647 S5：运动期只记账不执行（见 syncFrameSize 注释），
+  // 运动结束由 PerfBus 订阅补一次——终态一次即可，中间帧的框架尺寸没人看得到。
   useEffect(() => {
     const vp = viewportRef.current;
     if (!vp) return;
     let raf = 0;
+    let missed = false;
     const schedule = () => {
+      if (isBusy()) { missed = true; return; } // 运动期：不做布局读
       cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(syncFrameSize);
+      raf = requestAnimationFrame(() => { missed = false; syncFrameSize(); });
     };
     schedule();
+    // RFL-6（S6）：注册进唯一收敛序列——order 60 浏览器框架尺寸。
+    // 与此前新增的 PerfBus 订阅互补：订阅负责「运动结束时补一次」，
+    // 收敛序列则把它排进统一的同帧序列（在终端 fit 之后、输入框 remeasure 之前）。
+    const offReconcile = registerReconcileTask("browser-frame-size", RECONCILE_ORDER.browserFrameSize,
+      "浏览器框架尺寸", () => syncFrameSize());
     let ro: ResizeObserver | null = null;
     if (typeof ResizeObserver !== "undefined") {
       ro = new ResizeObserver(schedule);
       ro.observe(vp);
     }
     window.addEventListener("resize", schedule);
+    // 运动结束补一次：PerfBus 只在 busy 翻转时回调，不会引入逐帧开销。
+    const off = subscribe((busy) => { if (!busy && missed) schedule(); });
     return () => {
+      offReconcile();
       cancelAnimationFrame(raf);
       ro?.disconnect();
       window.removeEventListener("resize", schedule);
+      off();
     };
   }, [syncFrameSize]);
 
@@ -871,13 +901,12 @@ export function BrowserPanel() {
               移动鼠标聚焦元素，点击添加标注 · 按 Esc 退出
             </div>
 
+            {/* 用缓存的视口尺寸（S5）：不在 render 期读 clientWidth，避免强制同步布局。
+                缓存由 syncFrameSize 在同一处更新，且运动期不更新（运动中不刷新悬停卡）。 */}
             <ElementInspector
               hoverInfo={hoverInfo}
               cursorPos={cursorPos}
-              containerRect={viewportRef.current ? {
-                width: viewportRef.current.clientWidth,
-                height: viewportRef.current.clientHeight,
-              } : undefined}
+              containerRect={viewportSize ?? undefined}
             />
           </div>
         )}

@@ -61,6 +61,9 @@ BUILTIN_PROFILES: list[dict] = [
             "skill_view", "compaction_index", "compaction_view",
             # plan-230-1144 M3: 符号检索/文件骨架属纯读探索能力，只读模式可用
             "symbol_search", "outline",
+            # v36 (plan-321-1600 R1): 四模式全支持子代理——只读模式仅暴露只读探索
+            # 子代理（运行时强制 explore；可写 general 类型不暴露）。
+            "spawn_subagent", "collect_results", "subagent_inspect", "cancel_subagent",
         ],
         "hint": (
             "【审阅模式】当前处于只读审阅模式，你只能查看、检索、分析代码，"
@@ -82,6 +85,8 @@ BUILTIN_PROFILES: list[dict] = [
             "skill_view", "compaction_index", "compaction_view",
             "symbol_search", "outline",
             "fs_write", "terminal_exec",
+            # v36 (plan-321-1600 R1): 计划模式同样支持子代理（仅只读探索，运行时强制 explore）
+            "spawn_subagent", "collect_results", "subagent_inspect", "cancel_subagent",
         ],
         # plan 的完整提示词较长且含 {session_id}/{turn_id} 占位符，
         # 仍由 engine._MODE_HINTS 维护（格式化处理在那边）；这里留空表示沿用。
@@ -210,6 +215,19 @@ def is_readonly_like(mode: str) -> bool:
         return False
     kind = profile.get("kind") or "full"
     return kind in ("readonly", "plan")
+
+
+def mcp_explicit_tools(mode: str) -> set[str]:
+    """用户在权限面板显式勾选的 MCP 工具名（v36 plan-321-1600 R1）。
+
+    只读/计划类模式默认只注入只读类（low 风险）MCP 工具；但用户在模式白名单里
+    显式勾选的 MCP 工具应额外放行（用户明确授权）——否则「勾选了仍不可用」。
+    返回勾选集合（可能为空集）。
+    """
+    profile = get_profile(mode)
+    if not profile:
+        return set()
+    return {str(t) for t in (profile.get("tools") or []) if str(t).startswith("mcp_")}
 
 
 def upsert_profile(profile: dict) -> dict:

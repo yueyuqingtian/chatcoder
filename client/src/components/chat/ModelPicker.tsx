@@ -46,12 +46,21 @@ export function ModelPicker({
   onChange,
   open,
   onToggle,
+  inheritLabel,
+  onInherit,
+  side = "top",
 }: {
   models: ModelOut[];
   value: number | null;
   onChange: (id: number) => void;
   open: boolean;
   onToggle: () => void;
+  /** v36: 提供时菜单顶部增加「继承项」（如子代理的「跟随主代理」），
+   *  选中回调 onInherit；同时触发器在 value 为空时展示该文案。 */
+  inheritLabel?: string;
+  onInherit?: () => void;
+  /** 菜单弹出方向：输入框贴底用 top（默认）；设置弹窗内用 bottom。 */
+  side?: "top" | "bottom";
 }) {
   const groups = useMemo<ModelGroup[]>(() => {
     const map = new Map<string, ModelGroup>();
@@ -123,11 +132,13 @@ export function ModelPicker({
   };
 
   const activeModel = models.find((m) => m.id === value);
+  // v36: 未选模型时优先展示继承项文案（子代理场景为「跟随主代理」），
+  // 无继承项（聊天输入框场景）时保持原「模型」占位。
   const label = activeModel
     ? activeModel.provider_name
       ? `${activeModel.provider_name}/${activeModel.name}`
       : activeModel.name
-    : "模型";
+    : inheritLabel || "模型";
 
   return (
     <div className="composer-model-wrap">
@@ -143,12 +154,25 @@ export function ModelPicker({
               保证菜单文本整体左对齐（plan-238-1210）；越界翻转/平移由 avoidCollisions 处理 */}
           <DropdownMenu.Content
             className="mp-menu"
-            side="top"
+            side={side}
             align="start"
             sideOffset={6}
             collisionPadding={8}
           >
             <div className="mp-menu-head">选择模型</div>
+            {/* v36: 继承项（子代理「跟随主代理」）——置顶展示，当前为空值时打勾 */}
+            {inheritLabel ? (
+              <>
+                <DropdownMenu.Item
+                  className={"mp-item" + (value == null ? " active" : "")}
+                  onSelect={() => onInherit?.()}
+                >
+                  <span className="mp-item-check">{value == null && <IconCheck size={12} />}</span>
+                  <span className="mp-item-name">{inheritLabel}</span>
+                </DropdownMenu.Item>
+                <DropdownMenu.Separator className="mp-sep" />
+              </>
+            ) : null}
             {groups.length === 0 ? (
               <>
                 <div className="mp-models-empty">暂无可用模型，请先在设置中添加</div>

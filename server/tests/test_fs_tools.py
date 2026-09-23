@@ -40,11 +40,41 @@ async def test_fs_read_missing_file(workspace):
 
 
 @pytest.mark.asyncio
-async def test_fs_read_traversal_rejected(workspace):
+async def test_fs_read_traversal_requires_approval(workspace, monkeypatch):
+    """v36 (plan-321-1600 R2): 工作区外读取改走审批——未获批准时拒绝。
+
+    旧语义是直接报「越界」；新语义允许目录外读取，但必须经用户审批
+    （全访问沙箱/自动审批配置除外）。
+    """
+    from app.orchestration.approval import approval_manager
+
+    async def _deny(detail=None, approval_id=None, is_forced=False):  # noqa: ANN001
+        return False
+
+    monkeypatch.setattr(approval_manager, "request", _deny, raising=False)
+
     tool = FsReadTool()
     r = await tool.run({"path": "../../../etc/passwd"}, _ctx(workspace))
     assert r.ok is False
-    assert "越界" in r.error
+    assert "未获批准" in r.error
+
+
+@pytest.mark.asyncio
+async def test_fs_read_outside_allowed_when_auto_approved(workspace, tmp_path, monkeypatch):
+    """v36 (plan-321-1600 R2): 开启「工作目录外读取自动审批」后可直接读取区外文件。"""
+    from app.core.config import settings
+
+    outside_dir = tmp_path / "outside_root"
+    outside_dir.mkdir()
+    outside_file = outside_dir / "note.txt"
+    outside_file.write_text("outside content", encoding="utf-8")
+
+    monkeypatch.setattr(settings, "auto_approve_outside_read", True, raising=False)
+
+    tool = FsReadTool()
+    r = await tool.run({"path": str(outside_file)}, _ctx(workspace))
+    assert r.ok is True
+    assert "outside content" in r.output
 
 
 @pytest.mark.asyncio

@@ -702,6 +702,7 @@ export type ServerWsEvent =
   | { event: "agent.started"; payload: { agent_id: number; kind: string; name: string; turn_id: number | null } }
   | { event: "agent.updated"; payload: { agent_id: number; status: string; tool?: string; step?: number } }
   | { event: "agent.completed"; payload: { agent_id: number; summary: string | null; artifact_ids: number[] } }
+  | { event: "subagent.failed"; payload: { agent_id: number; status: string; error: string | null } }
   | { event: "thinking.delta"; payload: { agent_id: number; turn_id: number | null; delta: string } }
   | { event: "thinking.done"; payload: { agent_id: number; turn_id: number | null; full_text: string } }
   | { event: "token.delta"; payload: { agent_id: number; turn_id: number | null; delta: string } }

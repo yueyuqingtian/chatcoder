@@ -45,9 +45,17 @@ export interface UiPrefs {
   language: Language;
   /** plan-248-1258 M5: 动画效果档位——full=标准 reduced=减弱(低配机省性能) off=关闭 */
   motionLevel: MotionLevel;
+  /** plan-329-1647 S6（RFL-7）：分隔条拖拽期的排版档位
+   *  realtime=实时折行（默认）/ balanced=隔帧写宽度 / frozen=临时钉住内容宽度（退回旧行为） */
+  panelDragLayout: PanelDragLayout;
+  /** plan-329-1647 S6（RFL-7）：是否允许按帧预算自动降级（关闭则固定 panelDragLayout） */
+  panelDragAutoDegrade: boolean;
 }
 
 export type MotionLevel = "full" | "reduced" | "off";
+
+/** 面板拖拽期排版档位（RFL-5 帧闸门的目标档上限）。 */
+export type PanelDragLayout = "realtime" | "balanced" | "frozen";
 
 const STORAGE_KEY = "chatcoder.ui-prefs";
 
@@ -71,6 +79,8 @@ const DEFAULTS: UiPrefs = {
   msgDensity: "comfortable",
   language: "zh",
   motionLevel: "full",
+  panelDragLayout: "realtime",
+  panelDragAutoDegrade: true,
 };
 
 const FONT_OPTIONS: Record<string, string> = {

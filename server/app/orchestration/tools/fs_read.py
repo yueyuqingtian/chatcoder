@@ -80,10 +80,19 @@ class FsReadTool(Tool):
         # 附件目录兜底：用户消息附件在工作区外的 uploads 目录，允许只读
         target = safe_resolve_read(ctx.workspace_root, path)
         if target is None:
-            return ToolResult(
-                ok=False, output="",
-                error=f"路径越界或非法: {path}\n工作根目录: {ctx.workspace_root}",
+            # v36 (plan-321-1600 R2): 工作区外路径——审批通过（或全访问沙箱/自动审批）后放行
+            from app.orchestration.tools import outside_access
+
+            _outside, _err = await outside_access.authorize_outside_read(
+                ctx, path, tool_name="fs_read",
             )
+            if _outside is None:
+                return ToolResult(ok=False, output="", error=_err)
+            target = _outside
+        elif not target.exists():
+            # 工作区内解析成功但文件不存在：可能是附件的「{file_id}/{name}」相对路径，
+            # 交由下方统一报「文件不存在」（不再触发审批，工作区内无需授权）。
+            pass
         if not target.exists():
             return ToolResult(ok=False, output="", error=f"文件不存在: {path}")
         if not target.is_file():

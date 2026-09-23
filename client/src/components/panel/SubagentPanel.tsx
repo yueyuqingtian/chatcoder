@@ -3,8 +3,11 @@
  * 与主界面共用同一注册插件（参考 deepseek-harness「同一渲染引擎 + 数据注入」模式）。
  * 头部显示状态文案（执行中/已完成/失败），对齐消息流子代理卡片图标体系。
  */
+import { useEffect, useState } from "react";
+import { subscribeTick } from "../chat/useRunningTicker";
 import { useChatStore } from "../../store/chat";
 import { PluginSlot } from "../../plugins/registry";
+import { parseUtc } from "../../utils/time";
 import { IconCpu, IconSpinner, IconCheck, IconX } from "../icons";
 
 export function SubagentPanel({ threadId, agentName }: { threadId?: number; agentName?: string }) {
@@ -13,6 +16,24 @@ export function SubagentPanel({ threadId, agentName }: { threadId?: number; agen
   const running = meta?.status === "running" || meta?.status === "in_progress";
   const failed = meta?.status === "failed" || meta?.status === "cancelled";
   const done = meta?.status === "done";
+
+  // v36 (plan-321-1600 M2): 头部“用时”在运行中需每秒刷新（否则计时不动）。
+  // S8c：订阅共享秒级 ticker（与 ToolTree / WorkTimer 共用同一个 setInterval）。
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!running) return;
+    return subscribeTick((now) => setNowMs(now));
+  }, [running]);
+
+  // v36: 用时 = 起止时间差（运行中取当前时间；无起始时间时不展示）
+  const startedMs = meta?.startedAt ? parseUtc(meta.startedAt) : null;
+  const endedMs = meta?.endedAt ? parseUtc(meta.endedAt) : null;
+  let elapsedLabel = "";
+  if (startedMs != null) {
+    const sec = Math.max(0, Math.round(((endedMs ?? nowMs) - startedMs) / 1000));
+    const min = Math.floor(sec / 60);
+    elapsedLabel = min > 0 ? `${min} 分 ${sec % 60} 秒` : `${sec} 秒`;
+  }
 
   if (threadId == null) return <div className="subagent-panel-empty">未指定子代理</div>;
 
@@ -24,9 +45,18 @@ export function SubagentPanel({ threadId, agentName }: { threadId?: number; agen
         {running && <span className="tc-status wait"><IconSpinner size={11} /></span>}
         {done && <span className="tc-status ok"><IconCheck size={11} /></span>}
         {failed && <span className="tc-status fail"><IconX size={11} /></span>}
-        <span className="subagent-panel-status">
-          {running ? "执行中…" : done ? "已完成" : failed ? "失败" : meta?.status ?? ""}
+        <span className="subagent-panel-status"
+              title={failed && meta?.error ? String(meta.error) : undefined}>
+          {running ? "执行中…" : done ? "已完成"
+            : failed ? (meta?.error ? `失败：${meta.error}` : "失败")
+            : meta?.status ?? ""}
         </span>
+        {/* v36 (plan-321-1600 M2): 用时 / 变更文件数 / token 用量 */}
+        {elapsedLabel && (
+          <span className="subagent-panel-meta">{running ? "已用 " : "用时 "}{elapsedLabel}</span>
+        )}
+        {meta?.filesCount ? <span className="subagent-panel-meta">{meta.filesCount} 个文件</span> : null}
+        {meta?.tokens ? <span className="subagent-panel-meta">{meta.tokens} tokens</span> : null}
         <span className="subagent-panel-count">{liveCount} 条消息</span>
       </div>
       <div className="subagent-panel-body">

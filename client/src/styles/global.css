@@ -68,18 +68,49 @@ a { color: var(--accent); text-decoration: none; }
 .app-pane-right.fullscreen {
   position: fixed;
   inset: var(--titlebar-h) 0 0 0;
+  /* 根因修复（用户反馈"全屏看文档滚动到中途就划不动、看不到末尾"）：
+     .app-pane-right 基础规则带 height:100%。全屏切 fixed 后，该 100% 改按**视口**
+     计算（=100vh），与 inset 的 top(--titlebar-h) + bottom:0 构成过约束——Chromium
+     忽略 bottom，面板实际变成 top:40 → bottom:940（视口只有 900），底部 40px 被
+     html/body 的 overflow:hidden 裁掉：滚动条已到头，文档最后约两行却永远不可见。
+     这里显式 height:auto（带 !important 压过基础规则的 height:100%），让高度完全
+     由 inset(top+bottom) 推导 = 视口高 - 标题栏高，底边精确落在视口内。 */
+  height: auto !important;
   z-index: 100;
   width: 100% !important;
   flex-basis: 100% !important;
   max-width: none !important;
   border-left: none;
 }
+/* ══ S7（plan-329-1647）：面板几何过渡的 View Transition 底座 ══
+   折叠/展开与全屏切换现在**一次性**改布局，由浏览器对下面三个同名元素做尺寸/位置插值
+   （合成器动画，主线程逐帧零布局）。过渡期间 html.vt-pane 关掉 .app-pane 自身的 CSS
+   过渡——否则“新状态”会停在过渡中间值，快照前后对比失准。
+   注：.app-pane-right.fullscreen 是 position:fixed，仍参与快照（名字照常生效），
+   但此处**不给任何面板加 contain**，避免改写 fixed 的包含块。 */
+.app-pane-left { view-transition-name: app-pane-left; }
+.app-main { view-transition-name: app-main; }
+.app-pane-right { view-transition-name: app-pane-right; }
+html.vt-pane .app-pane { transition: none !important; }
+::view-transition-group(root),
+::view-transition-group(app-pane-left),
+::view-transition-group(app-main),
+::view-transition-group(app-pane-right) {
+  animation-duration: var(--dur-pane, 180ms);
+}
 .app-main { flex: 1 1 auto; display: flex; flex-direction: column; overflow: hidden; background: var(--bg-panel); min-width: 420px; }
 .app-main.right-panel-collapsed { min-width: 0; }
 /* ── 标题栏 ── */
 /* plan-26-126 P2：标题栏**不再是** -webkit-app-region: drag —— 该区域由系统处理拖拽/双击，
    DOM 拿不到 dblclick，双击会直接触发系统原生最大化（破坏玻璃）。现改自研拖拽
-   （mousedown 延迟发起原生拖动）+ 渲染层 dblclick（转伪最大化），见 TitleBar.tsx。 */
+   （mousedown 延迟发起原生拖动）+ 渲染层 dblclick（转伪最大化），见 TitleBar.tsx。
+   本轮（用户要求）：**毛玻璃关闭（重启生效）时切回系统原生 drag 区** —— Windows
+   自带拖拽/双击最大化/Snap 行为，由 App.tsx 启动时按窗口实际玻璃状态落
+   data-window-drag="native" 驱动；玻璃开启时无此属性，仍走自研拖拽。 */
+html[data-window-drag="native"] .titlebar { -webkit-app-region: drag; }
+/* drag 区内的交互控件必须显式 no-drag，否则会被系统拖拽吞掉点击（重命名输入框等） */
+html[data-window-drag="native"] .titlebar input,
+html[data-window-drag="native"] .titlebar textarea { -webkit-app-region: no-drag; }
 .titlebar { height: var(--titlebar-h); display: flex; align-items: center; justify-content: space-between; padding: 0 8px 0 12px; background: var(--bg-panel); border-bottom: 1px solid var(--border); flex-shrink: 0; cursor: default; }
 .titlebar-left, .titlebar-right { display: flex; align-items: center; gap: 8px; -webkit-app-region: no-drag; }
 .titlebar-left .titlebar-btn,
@@ -2590,6 +2621,12 @@ a { color: var(--accent); text-decoration: none; }
 .approval-risk.risk-low { color: var(--ok); border-color: var(--ok); }
 .approval-agent { font-size: 11px; color: var(--text-3); margin-bottom: 8px; }
 .approval-args { margin: 0 0 10px; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-sm); font-family: var(--font-mono); font-size: 12px; line-height: 1.5; color: var(--text-1); white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow: auto; }
+/* v36 (plan-321-1600 R2): 审批卡参数结构化展示（替代 JSON 原文，按字段分行展示） */
+.approval-fields { margin: 0 0 10px; display: flex; flex-direction: column; gap: 6px; max-height: 280px; overflow: auto; }
+.approval-field { display: flex; gap: 10px; align-items: flex-start; background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 7px 10px; }
+.approval-field-label { flex: 0 0 auto; min-width: 52px; font-size: 11px; color: var(--text-3); padding-top: 2px; }
+.approval-field-value { flex: 1 1 auto; font-size: 12px; line-height: 1.6; color: var(--text-1); white-space: pre-wrap; word-break: break-word; }
+.approval-field-value.mono { font-family: var(--font-mono); }
 .approval-summary { font-size: 12px; color: var(--text-2); line-height: 1.6; margin-bottom: 12px; }
 .approval-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .approval-actions .btn-primary { padding: 7px 16px; border: none; border-radius: var(--r-sm); background: var(--accent); color: #fff; font-size: 13px; cursor: pointer; }
@@ -3347,6 +3384,14 @@ a { color: var(--accent); text-decoration: none; }
 .subagent-tool-cell.on { background: var(--bg-active); border-color: var(--text-1); color: var(--text-1); }
 .subagent-tool-name { font-family: var(--font-mono); font-size: 11px; }
 .subagent-tool-risk { margin-left: auto; font-size: 10px; color: var(--text-3); }
+/* v36: 设置中心「子代理」——并发与上限配置卡 */
+.subagent-limits { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg-elevated); }
+.subagent-limits-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.subagent-limits-title { font-size: 13px; font-weight: 600; color: var(--text-1); }
+.subagent-limits-row { display: flex; align-items: center; gap: 10px; }
+.subagent-limits-row label { font-size: 12px; color: var(--text-2); flex-shrink: 0; min-width: 140px; }
+.subagent-limits-input { width: 84px; flex-shrink: 0; }
+.subagent-limits-hint { font-size: 11px; color: var(--text-3); }
 /* ═══════════════════════════════════════════════════════════
  * 弹窗组件（Modal / ConfirmDialog / 回滚确认等）
  * 统一迁移：移除内联 <style>，样式集中管理，毛玻璃/阴影令牌生效
@@ -3431,26 +3476,37 @@ body.window-dragging .app-pane { transition: none; }
 html[data-window-motion="1"] .app-pane { transition: none !important; }
 /* 运动期间暂停持续型循环动画（spinner/pulse/breath 等）。
    为什么用**精确类名列表**而不是 `*`：通配选择器在属性切换那一刻要对整棵样式树
-   重新匹配，本身就是一次可观的开销；而这些类名数量固定、维护成本可控。 */
-html[data-window-motion="1"] .spinning,
-html[data-window-motion="1"] .sb-session-pulse,
-html[data-window-motion="1"] .anim-breath,
-html[data-window-motion="1"] .anim-pulse,
-html[data-window-motion="1"] .text-shine,
-html[data-window-motion="1"] .usage-skeleton-card,
-html[data-window-motion="1"] .usage-skeleton-block,
-html[data-window-motion="1"] .todo-float-item .status-icon.running,
-html[data-window-motion="1"] .tc-step-dot.running,
-html[data-window-motion="1"] .debug-card-dot.paused,
-html[data-window-motion="1"] .dbg-dot.paused {
+   重新匹配，本身就是一次可观的开销；而这些类名数量固定、维护成本可控。
+   本轮（问题2卡顿治理）：面板分隔条拖拽（body.panel-dragging）与窗口运动同为
+   "几何每帧变化"场景，同样暂停这些循环动画，避免动画与重排抢帧预算。 */
+:is(html[data-window-motion="1"], body.panel-dragging) .spinning,
+:is(html[data-window-motion="1"], body.panel-dragging) .sb-session-pulse,
+:is(html[data-window-motion="1"], body.panel-dragging) .anim-breath,
+:is(html[data-window-motion="1"], body.panel-dragging) .anim-pulse,
+:is(html[data-window-motion="1"], body.panel-dragging) .text-shine,
+:is(html[data-window-motion="1"], body.panel-dragging) .usage-skeleton-card,
+:is(html[data-window-motion="1"], body.panel-dragging) .usage-skeleton-block,
+:is(html[data-window-motion="1"], body.panel-dragging) .todo-float-item .status-icon.running,
+:is(html[data-window-motion="1"], body.panel-dragging) .tc-step-dot.running,
+:is(html[data-window-motion="1"], body.panel-dragging) .debug-card-dot.paused,
+:is(html[data-window-motion="1"], body.panel-dragging) .dbg-dot.paused,
+/* 本轮补全（拖拽期卡顿治理）：此前漏掉的运动期常驻循环动画——
+   呼吸点/状态行闪烁/目标运行态/环形进度/浏览器镜像横幅/索引脉冲点，
+   任务执行期间它们逐帧参与合成，与几何变化抢同一份帧预算。 */
+:is(html[data-window-motion="1"], body.panel-dragging) .thinking-breath-dot,
+:is(html[data-window-motion="1"], body.panel-dragging) .turn-status-line > span:last-child,
+:is(html[data-window-motion="1"], body.panel-dragging) .goal-pill.running .goal-pill-label,
+:is(html[data-window-motion="1"], body.panel-dragging) .icon-ring-spin,
+:is(html[data-window-motion="1"], body.panel-dragging) .browser-mirror-banner,
+:is(html[data-window-motion="1"], body.panel-dragging) .idx-dot {
   animation-play-state: paused !important;
 }
-/* 玻璃面临时降为不透明实底：省掉每帧重新采样模糊（用户已确认优先流畅，动画结束立即恢复）。
-   注：--frost-* 与 data-glass 同挂在 <html> 上，两者必须写在**同一个**选择器主体里，
-   不能用后代选择器（`html[...] [data-glass="on"]` 永远不匹配——历史上的同类坑见上文）。 */
-html[data-window-motion="1"][data-glass="on"] .app-pane-left {
-  background: var(--bg-sidebar) !important;
-}
+/* plan-329-1647：运动期「左列实底」降级已整体撤除。
+   历史规则曾在此把 .app-pane-left 的 background 强制为 var(--bg-sidebar)（配合主进程的
+   acrylic→none 与 data-glass-drag 标记），覆盖拖窗 / 拖分隔条 / 伪全屏补间三种场景。
+   现在玻璃全程保留：上述三种场景下左列与静止态同材质，观感连续。
+   历史教训（保留备查）：--frost-* 与 data-glass 同挂在 <html> 上，若要写玻璃相关覆盖，
+   必须写在**同一个**选择器主体里——`html[...] [data-glass="on"]` 这类后代写法永不匹配。 */
 /* plan-308-1555 M7：已删除客户端启动蒙层（.splash / .splash-overlay）。
    开屏统一由主进程 loading.html 承担（带加载指示 + 玻璃质感），避免两个开屏叠放。 */
 .toast-container { position: fixed; bottom: 20px; right: 20px; z-index: 2000; display: flex; flex-direction: column; gap: 8px; }
@@ -3549,6 +3605,12 @@ html[data-window-motion="1"][data-glass="on"] .app-pane-left {
 .message-flow {
   scrollbar-width: thin;
   scrollbar-color: transparent transparent;
+  /* plan-329-1647 S6（RFL-4）：显式声明浏览器原生滚动锚定。
+     RFL-1 取消内容宽度冻结后，拖拽期文本逐帧折行、项高度随之变化；视口稳定交给浏览器的
+     滚动锚定（Chromium 默认 auto：锚点元素上方内容尺寸变化时自动补偿 scrollTop），
+     于是无需 JS 逐帧改 scrollTop。此处显式声明是防御性的——避免祖先规则把它关掉后，
+     静默退回「拖宽时消息位置漂移」。 */
+  overflow-anchor: auto;
   /* v45 对齐修复：恒定预留滚动条 gutter，使内容盒宽度在「有/无滚动条」两种状态下相同。
      否则无滚动条时内容盒回宽 --scrollbar-gutter-w，消息列会比输入框（恒定预留同宽 padding-right）
      反向偏移半个 gutter。 */
@@ -3594,6 +3656,7 @@ html[data-window-motion="1"][data-glass="on"] .app-pane-left {
    配合 initialOffset（首帧即落在底部区域）与双帧补滚，使"点击会话"直接呈现底部，
    不再出现"先渲染顶部、再滚下去"的过程。用 visibility 而非 display，保留滚动几何。 */
 .message-flow.is-positioning { visibility: hidden; }
+
 .message-flow::-webkit-scrollbar-thumb {
   background: transparent;
   border-radius: 3px;
@@ -4596,6 +4659,8 @@ html[data-window-motion="1"][data-glass="on"] .app-pane-left {
 .subagent-panel-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
 .subagent-panel-name { font-size: 12px; font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .subagent-panel-status { font-size: 11px; color: var(--text-3); flex-shrink: 0; }
+/* v36 (plan-321-1600 M2): 头部元信息（用时 / 文件数 / 用量），以分隔线区分 */
+.subagent-panel-meta { font-size: 11px; color: var(--text-3); flex-shrink: 0; padding-left: 8px; border-left: 1px solid var(--border); }
 .subagent-panel-count { font-size: 11px; color: var(--text-3); margin-left: auto; flex-shrink: 0; }
 /* v20: 消息体交给共享 message-flow 插件（自身不滚动，滚动由插件容器承担） */
 .subagent-panel-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0; }
@@ -4610,12 +4675,36 @@ html[data-window-motion="1"][data-glass="on"] .app-pane-left {
 .turn-item-user > .turn-subagents .tc-row { width: 100%; }
 
 /* v20: 子代理面板窄版消息流适配（共享插件容器） */
-.subagent-panel-body .mf-list { max-width: none; padding: 0 12px 4px; }
+/* v36 (plan-321-1600 M2): 内容列与主消息流同口径（max-width + 居中 + 同左右留白）。
+   此前 max-width: none + 12px 内边距 → 文本全宽贴边、行长过长，观感与主流明显不一致。 */
+.subagent-panel-body .mf-list { max-width: var(--content-max-w); margin: 0 auto; padding: 0 32px 4px; }
 .subagent-panel-body .turn-user-bubble { max-width: 85%; }
 .subagent-panel-body { --msg-gap: 8px; }
 .subagent-panel-body .mf-jump-bottom { right: 16px; bottom: 16px; }
 .subagent-panel-body .flow-scroll-bottom-btn { right: 16px; bottom: 16px; }
 .subagent-panel-body .jump-dots { display: none; }
+
+/* ── v36 (plan-321-1600 M2): 子代理结构化汇报卡片（仅右面板渲染） ──
+   六节汇报渲染为分区视图：文件芯片 / 验证 / 验收 / 风险；
+   解析失败时走 .subagent-report-raw 原样 markdown，保证不吞内容。 */
+.subagent-report { display: flex; flex-direction: column; gap: 10px; margin: 2px 0; }
+.subagent-report-raw { gap: 0; }
+.sr-sec { display: flex; flex-direction: column; gap: 6px; }
+.sr-sec-head { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; color: var(--text-2); }
+.sr-sec-head .sr-count { font-size: 10px; font-weight: 400; color: var(--text-3); background: var(--bg-hover); border-radius: 999px; padding: 1px 6px; }
+.sr-files { display: flex; flex-wrap: wrap; gap: 6px; }
+.sr-file { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 3px 8px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg-elevated); color: var(--text-1); font-size: 12px; cursor: pointer; }
+.sr-file:hover { border-color: var(--border-hover); background: var(--bg-hover); }
+.sr-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sr-list { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.sr-list li { display: flex; align-items: flex-start; gap: 6px; font-size: 12.5px; line-height: 1.6; color: var(--text-2); }
+.sr-list .sr-mark { flex-shrink: 0; display: inline-flex; margin-top: 3px; }
+.sr-list .sr-mark.ok { color: var(--success); }
+.sr-list .sr-mark.no { color: var(--error); }
+.sr-list .sr-mark.warn { color: var(--warning, #d29922); }
+.sr-list .sr-mark.plain { color: var(--text-3); }
+.sr-risks { border: 1px solid color-mix(in srgb, var(--warning, #d29922) 28%, transparent); background: color-mix(in srgb, var(--warning, #d29922) 8%, transparent); border-radius: var(--r-sm); padding: 8px 10px; }
+.sr-risks .sr-list li { color: var(--text-1); }
 
 /* v19: 终端失败覆盖层 + 容器防 0 高 */
 .terminal-wrap { position: relative; height: 100%; min-height: 120px; }

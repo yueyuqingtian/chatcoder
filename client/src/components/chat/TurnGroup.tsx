@@ -5,13 +5,15 @@
  * - 工作过程（思考/工具/子代理）支持折叠，任务完成后自动默认折叠（对齐图 8）；
  *   计划 turn 的规划段与执行段共享同一折叠状态（plan-655），无"上面展开、中间折叠"割裂
  * - 最终回答（Markdown/产物/摘要）与计划卡始终展示
- * - 操作行挂到消息下方
+
  */
-import { useCallback, memo, useEffect, useState, useMemo, Fragment } from "react";
+import { useCallback, memo, useState, useMemo, Fragment } from "react";
+import { useRunningTicker } from "./useRunningTicker";
 import { MessageActions } from "./MessageActions";
 import type { SubagentMetaLite } from "./SubagentCard";
 import { PluginSlot } from "../../plugins/registry";
 import { MarkdownContent } from "../MarkdownContent";
+import { SubagentReportCard } from "./SubagentReportCard";
 import { IconRotateCcw, IconArrowToggle, IconAlertCircle } from "../icons";
 import type { TimelineEntry, TurnItem } from "./timeline";
 import { msgText } from "./timeline";
@@ -43,12 +45,8 @@ function WorkTimer({
   onToggleCollapsed?: () => void;
 }) {
   const turn = useChatStore((s) => s.turns.find((t) => t.id === turnId));
-  const [, tick] = useState(0);
-  useEffect(() => {
-    if (!isRunning) return;
-    const t = setInterval(() => tick((v) => v + 1), 1000);
-    return () => clearInterval(t);
-  }, [isRunning]);
+  // S8c：改用共享秒级 ticker（原先每处各自 setInterval，运行期多处独立唤醒 + 各自重渲染）。
+  useRunningTicker(isRunning);
   if (!turn?.started_at) return null;
   const start = parseUtc(turn.started_at);
   if (!start) return null;
@@ -86,6 +84,7 @@ export const TurnGroup = memo(function TurnGroup({
   actions = "full",
   hasPlan = false,
   flow = "main",
+  reportMessageId,
 }: {
   entry: Extract<TimelineEntry, { kind: "turn" }>;
   isRunning: boolean;
@@ -96,6 +95,9 @@ export const TurnGroup = memo(function TurnGroup({
   /** plan-282-1421：数据来源。subagent 面板的 turn 状态不来自主会话 turns 列表，
    *  因此不能用主会话的全局运行态推断"是否已结束"。 */
   flow?: "main" | "subagent";
+  /** v36 (plan-321-1600 M2)：子代理面板的最终汇报消息 id——命中时改由结构化汇报卡片渲染；
+   *  主消息流（flow="main"）不传该参数，渲染完全不变。 */
+  reportMessageId?: number;
 }) {
   const requestRollbackPreview = useChatStore((s) => s.requestRollbackPreview);
   /** 全局运行态：turn 行状态未知时用于判定是否仍在执行（parent 传入的 isRunning 只表示"本 turn"） */
@@ -251,11 +253,14 @@ export const TurnGroup = memo(function TurnGroup({
     }
   }
 
-  const unplacedSubagents = (subagents || []).filter(
-    (sa) =>
-      !renderedSubagentNames.has(sa.name) &&
-      !renderedSubagentNames.has(sa.name.replace(/^探索[·:：\s]*/, ""))
-  );
+  const unplacedSubagents = (subagents || [])
+    .filter(
+      (sa) =>
+        !renderedSubagentNames.has(sa.name) &&
+        !renderedSubagentNames.has(sa.name.replace(/^探索[·:：\s]*/, ""))
+    )
+    // plan-330-1648 M5-b: 按 agentId 升序（= 派发创建序）稳定排序，刷新前后顺序一致
+    .sort((a, b) => a.agentId - b.agentId);
 
   const subagentNode =
     unplacedSubagents.length > 0 ? (
@@ -265,6 +270,10 @@ export const TurnGroup = memo(function TurnGroup({
         ))}
       </div>
     ) : null;
+
+  /** plan-330-1648 M5-b: 未落位卡片优先挂在**最后一个 AI 内容项之后**（与工具行同序）；
+   *  仅当该 turn 没有任何 AI 内容项（纯用户消息等）时，才回落到过程容器位置，保证卡片不丢。 */
+  const subagentFallbackInContainer = items.every((it) => it.kind === "user");
 
   // v0.3.1: 外层容器渲染守卫——只要存在任何非首条用户消息的项、计划卡或子代理，必须完整渲染 AI 回复区
   const hasAnyAiContent =
@@ -279,6 +288,9 @@ export const TurnGroup = memo(function TurnGroup({
     return (
       <Fragment key={`ai-${i}`}>
         {node}
+        {/* plan-330-1648 M5-b: 未落位的子代理卡片渲染在**最后一个 AI 内容项之后**，
+            而不是过程容器末尾——否则卡片会出现在 AI 文本上方（用户反馈问题1）。 */}
+        {i === lastAiItemIdx && subagentNode}
         {i === lastAiItemIdx && turnFinished && (
           <MessageActions
             entry={entry}
@@ -351,13 +363,24 @@ export const TurnGroup = memo(function TurnGroup({
           name: taskTitle,
           status: "running",
         };
+        // v36 修复：去掉内联 28px 左缩进——子代理行此前比工具调用行右移 28px，
+        // 与「子代理卡片与工具调用行共用同一左侧边界」的规范不一致（用户反馈未对齐）。
         return (
-          <div key={i} className="turn-item turn-item-subagent" style={{ margin: "0 0 0 28px" }}>
+          <div key={i} className="turn-item turn-item-subagent">
             <PluginSlot slot="subagent-card" meta={meta} />
           </div>
         );
       }
       case "text":
+        // v36 (plan-321-1600 M2): 子代理面板的最终汇报交结构化卡片（文件芯片/验证/验收/风险）；
+        // 主流不传 reportMessageId，渲染路径不变。
+        if (flow === "subagent" && reportMessageId != null && item.msg.id === reportMessageId) {
+          return (
+            <div key={i} className="turn-item turn-item-text">
+              <SubagentReportCard text={msgText(item.msg.content)} />
+            </div>
+          );
+        }
         return (
           <div key={i} className="turn-item turn-item-text">
             <div className="turn-agent-text">
@@ -372,7 +395,12 @@ export const TurnGroup = memo(function TurnGroup({
         }
         return (
           <div key={i} className="turn-item turn-item-summary">
-            <MarkdownContent>{msgText(item.msg.content)}</MarkdownContent>
+            {/* v36 (plan-321-1600 M2): 补上 .turn-agent-text 包裹——与 case "text" 同结构。
+                否则 summary 消息拿不到 .turn-agent-text .md-body 下的完整 markdown 排版
+                （标题/列表/代码块样式全丢，退化为浏览器默认样式）。 */}
+            <div className="turn-agent-text">
+              <MarkdownContent>{msgText(item.msg.content)}</MarkdownContent>
+            </div>
           </div>
         );
       case "error":
@@ -491,7 +519,7 @@ export const TurnGroup = memo(function TurnGroup({
             <div className={`turn-process-container${processCollapsed ? " collapsed" : ""}`}>
               {processItems.map(({ item, index }) => renderAiItemWithActions(item, index))}
               {hasPlan && !hasPlanMsg && <PluginSlot slot="plan-card" turnId={turnId} embedded />}
-              {subagentNode}
+              {subagentFallbackInContainer ? subagentNode : null}
             </div>
           )}
 
@@ -502,7 +530,7 @@ export const TurnGroup = memo(function TurnGroup({
                 index !== firstUserIdx ? renderAiItemWithActions(item, index) : null
               )}
               {hasPlan && !hasPlanMsg && <PluginSlot slot="plan-card" turnId={turnId} embedded />}
-              {subagentNode}
+              {subagentFallbackInContainer ? subagentNode : null}
             </div>
           )}
 

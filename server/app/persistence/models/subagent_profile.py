@@ -20,4 +20,6 @@ class SubagentProfile(Base):
     # 模型覆盖（None = 跟随会话/主代理模型）
     model_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("models.id"))
     system_prompt: Mapped[str | None] = mapped_column(String(4000))
+    # plan-330-1648 M2: 思考深度档位覆盖（None = 跟随会话本轮档位，再回落全局默认）
+    reasoning_effort: Mapped[str | None] = mapped_column(String(20))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)

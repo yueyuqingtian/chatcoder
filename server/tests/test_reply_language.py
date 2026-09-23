@@ -48,6 +48,16 @@ def test_detect_auto_for_no_signal():
     assert detect_reply_language("a") == "auto"
 
 
+def test_detect_chinese_ignores_paths_and_code():
+    text = "请看 `D:/myProject/chatcoder/server/app/orchestration/prompts/language.py` 里的 detect_reply_language"
+    assert detect_reply_language(text) == "zh"
+    assert detect_reply_language("```ts\nconst replyLanguage = 'en'\n```\n这段要改成中文") == "zh"
+
+
+def test_detect_plain_english_still_english():
+    assert detect_reply_language("please fix this parser and keep the tests") == "en"
+
+
 def test_language_label():
     assert language_label("zh") == "简体中文"
     assert language_label("en") == "English"
@@ -59,7 +69,7 @@ def test_language_label():
 def test_directive_zh_semantics():
     d = build_language_directive("zh")
     assert "MANDATORY" in d and "highest priority" in d
-    assert "本轮最新一条用户消息" in d
+    assert "本轮没有规则语言要求" in d
     # 明确「不得被历史/工具/压缩摘要改变」
     assert "压缩摘要" in d and "规则文档" in d
     # 保留原文不翻译
@@ -70,7 +80,7 @@ def test_directive_en_semantics():
     d = build_language_directive("en")
     assert "MANDATORY" in d
     assert "English" in d
-    assert "history messages" in d
+    assert "History, tool outputs" in d
     # 英文锚定时不该混入中文细则
     assert "本轮锚定语言" not in d
 
@@ -82,8 +92,11 @@ def test_directive_auto_semantics():
 
 def test_pin_line():
     assert "简体中文" in build_language_pin_line("zh")
+    assert "没有规则语言要求" in build_language_pin_line("zh")
     assert "English" in build_language_pin_line("en")
     assert "自行识别" in build_language_pin_line("auto")
+    assert "全局规则" in build_language_pin_line("zh", source="global")
+    assert "项目规则" in build_language_pin_line("en", source="project")
 
 
 # ── 3. 各链路系统提示词首尾双锚 ──────────────────────────────────────────
@@ -198,6 +211,8 @@ def test_plan_exit_reminder_semantics():
     r_en = build_plan_exit_reminder("en")
     assert "Exited Plan Mode" in r_en
     assert "Language reminder" in r_en
+    assert "settings-center global rules" in build_plan_exit_reminder("en", source="global")
+    assert "project rules" in build_plan_exit_reminder("en", source="project")
     # 英文锚定时不留中文骨架
     assert "本轮" not in r_en and "语言重申" not in r_en
 
@@ -208,8 +223,8 @@ def test_rules_reminder_semantics():
 
     r_zh = build_rules_reminder("zh")
     assert "规则重申" in r_zh
-    assert "用户全局规则 > 项目规则文档" in r_zh
-    assert "AGENTS.md" in r_zh and "CLAUDE.md" in r_zh
+    assert "设置中心全局规则 > 项目规则文档" in r_zh
+    assert "与设置中心项目规则 > 用户本轮消息语言" in r_zh
     # 必须声明"压缩后依然有效"，否则长上下文下重申无意义
     assert "压缩" in r_zh
 
@@ -223,5 +238,34 @@ def test_reminder_interval_settings_exist():
     """重申间隔配置存在且为正数默认值（0 会静默禁用整个机制）。"""
     from app.core.config import settings
 
-    assert settings.language_reminder_interval > 0
+    assert settings.language_reminder_interval == 1
     assert settings.rules_reminder_interval > 0
+
+
+def test_rule_language_priority():
+    from app.orchestration.prompts.language import resolve_reply_language
+
+    lang, source = resolve_reply_language(
+        "en",
+        global_rules="全局使用中文",
+        project_rules="always reply in English",
+    )
+    assert (lang, source) == ("zh", "global")
+
+    lang, source = resolve_reply_language(
+        "en",
+        project_rules="必须使用简体中文",
+    )
+    assert (lang, source) == ("zh", "project")
+
+    lang, source = resolve_reply_language("en", global_rules="follow the repository style")
+    assert (lang, source) == ("en", "user")
+
+
+def test_opening_language_mismatch_does_not_release_wrong_text():
+    from app.orchestration.agent_loop import _opening_language_mismatch
+
+    assert _opening_language_mismatch("I will answer in English from here.", "zh") is True
+    assert _opening_language_mismatch("我按中文回复。", "zh") is False
+    assert _opening_language_mismatch("ok", "zh") is True
+    assert _opening_language_mismatch("x", "zh") is False

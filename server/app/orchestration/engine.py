@@ -21,7 +21,9 @@ from app.orchestration.context_manager import (
     _collect_plan_history, build_main_context, build_subagent_context,
 )
 from app.orchestration.subagent import cleanup, get_subagent_manager
-from app.orchestration.subagent_tools import append_subagent_tools, load_subagent_type_states
+from app.orchestration.subagent_tools import (
+    SUBAGENT_TOOL_NAMES, append_subagent_tools, load_subagent_type_states,
+)
 from app.orchestration.tools.registry import tool_registry
 from app.persistence.write_behind import write_behind
 from app.services import audit_service, message_service, project_service, rollback_service, session_service, task_service, turn_service
@@ -186,6 +188,50 @@ def discard_injected_inputs(turn_id: int) -> None:
     """turn 结束时丢弃残留注入项（防内存泄漏；正常路径已被 drain 清空）。"""
     _pending_inputs.pop(turn_id, None)
 
+
+def _on_agent_report(manager, session_id: int, turn_id: int,
+                     agent_id: int, message: str, kind: str) -> None:
+    """plan-330-1648 M4: 子代理上报/提问 → 主代理可见（engine 注册为 manager 回调）。
+
+    ① turn 仍在运行：写入该 turn 的注入队列，agent_loop 下一次 LLM 调用前注入；
+    ② turn 已结束（后台子代理续跑）：挂到 manager 的完成通知队列，随下一轮 turn 启动的
+       drain_completions() 一并送达（与子代理完成报告同一通道，不丢信息）。
+    """
+    label = "子代理提问" if kind == "question" else "子代理进度上报"
+    text = f"【{label} subagent#{agent_id}】{message}"
+    if turn_id in _running_turns:
+        _pending_inputs.setdefault(turn_id, []).append({"content": text})
+        return
+    try:
+        manager.queue_leader_note(text)
+    except Exception:
+        logger.debug("[engine] 子代理上报转完成队列失败(非阻塞)", exc_info=True)
+
+
+def _cleanup_manager_if_idle(session_id: int, manager) -> None:
+    """plan-330-1648 M7: turn 收尾时**按需**销毁子代理管理器。
+
+    旧实现无条件 cleanup(session_id)：后台子代理仍在运行时，其 handle/完成通知/上报
+    全随 manager 消失，表现为“子代理做到一半断了、结果没了”（用户反馈问题4）。
+    现在：仍有运行中的子代理、或仍有未送达的完成通知/上报 → 保留 manager，
+    下一轮 turn 启动时 drain_completions() 自动把它们送达主代理；
+    会话删除/应用关停路径仍会强制清理。
+    """
+    if manager is None:
+        return
+    try:
+        _pending = manager.pending_count()
+        if _pending > 0:
+            logger.info("[engine] 会话 %s 仍有 %d 个子代理在后台运行，保留子代理管理器",
+                        session_id, _pending)
+            return
+        if manager.has_unclaimed_notes():
+            logger.info("[engine] 会话 %s 有未送达的子代理通知，保留子代理管理器", session_id)
+            return
+    except Exception:
+        logger.debug("[engine] 子代理管理器空闲判定失败(按清理处理)", exc_info=True)
+    cleanup(session_id)
+
 # 命令模式：只读审阅（/chat）工具白名单
 # v7: 追加 ask_user_question/todo_write 为通用工具——四种模式（只读/计划/完全访问/计划执行）
 # 全部可用：结构化提问（需求澄清）与执行清单是通用能力，不因模式受限。
@@ -244,7 +290,7 @@ _MODE_HINTS = {
 
 async def _inject_mcp_tools(
     db, agent, tool_schemas: list, turn_id: int, *, readonly_only: bool = False,
-    allowed: set[str] | None = None,
+    allowed: set[str] | None = None, extra_allowed: set[str] | None = None,
 ) -> int:
     """主 turn 路径 MCP 工具注入（plan-230-1144 M1.3）。
 
@@ -257,7 +303,9 @@ async def _inject_mcp_tools(
     - readonly_only=True（只读/计划模式）时仅注入 low 风险（只读类）MCP 工具，
       让 codegraph 这类检索工具在规划/审阅时同样可用；写类 MCP 仍不暴露；
     - allowed 非 None 时只注入其中列出的 MCP 工具（设置页白名单勾选对 MCP 生效，
-      由 permission_profile_service.mcp_allowed_tools 计算；None = 不限制）。
+      由 permission_profile_service.mcp_allowed_tools 计算；None = 不限制）；
+    - v36 (plan-321-1600 R1): readonly_only 下除只读类（low 风险）外，extra_allowed
+      中显式勾选的 MCP 工具也放行（用户明确授权，但未勾选仍不可用）。
 
     失败不阻塞（返回 0）。返回实际注入数量。
     """
@@ -271,7 +319,13 @@ async def _inject_mcp_tools(
         if allowed is not None:
             _mcp_tools = [t for t in _mcp_tools if t.name in allowed]
         if readonly_only:
-            _mcp_tools = [t for t in _mcp_tools if getattr(t, "risk_level", "medium") == "low"]
+            # v36 (plan-321-1600 R1): 只读/计划模式默认仅注入只读类（low 风险）MCP 工具；
+            # 用户在权限面板显式勾选的 MCP 工具（extra_allowed）额外放行。
+            _extra = extra_allowed or set()
+            _mcp_tools = [
+                t for t in _mcp_tools
+                if getattr(t, "risk_level", "medium") == "low" or t.name in _extra
+            ]
         existing = {str(s.get("function", {}).get("name") or "") for s in tool_schemas}
         injected = 0
         for mt in _mcp_tools:
@@ -622,13 +676,21 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         # 用户自定义模式），支持模式自定义与自由权限分配；旧硬编码仅作兜底
         try:
             from app.services import permission_profile_service as _pps
+            # v36 (plan-321-1600 R1): 子代理工具不在 registry，候选名集合需并入，
+            # 否则权限模式白名单里的子代理工具会被 resolve_tools 过滤（配置不生效）。
             _mode_whitelist = _pps.resolve_tools(
-                mode or "default", {t.name for t in tool_registry.all()},
+                mode or "default",
+                {t.name for t in tool_registry.all()} | SUBAGENT_TOOL_NAMES,
             )
         except Exception:
             logger.debug("[engine] turn=%s 权限配置解析失败，回退硬编码白名单", turn_id, exc_info=True)
             _mode_whitelist = _READONLY_TOOLS if mode == "readonly" else (_PLAN_TOOLS if mode == "plan" else None)
         _available_tools = {t.name for t in tool_registry.for_agent(_mode_whitelist)}
+        # v36: 子代理工具计入「模型可见工具」（提示词引导降级口径一致）
+        _available_tools |= {
+            n for n in SUBAGENT_TOOL_NAMES
+            if _mode_whitelist is None or n in _mode_whitelist
+        }
         if selected_model is not None and getattr(selected_model, "api_format", "") == "ta3":
             from app.models.providers.ta3_mcp import is_mcp_tool
             from app.models.providers.ta3_tool_aliases import TO_TA3
@@ -702,11 +764,14 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         try:
             from app.services import permission_profile_service as _pps
             _schema_whitelist = _pps.resolve_tools(
-                mode or "default", {t.name for t in tool_registry.all()},
+                mode or "default",
+                {t.name for t in tool_registry.all()} | SUBAGENT_TOOL_NAMES,
             )
             _mode_readonly = _pps.is_readonly_like(mode or "default") and not _full_access
             # 设置页白名单勾选对 MCP 工具同样生效（None = 不限制，见服务层口径说明）
             _mcp_allowed = _pps.mcp_allowed_tools(mode or "default")
+            # v36: 只读/计划模式下「显式勾选的 MCP 工具」也放行（默认仅只读类）
+            _mcp_extra = _pps.mcp_explicit_tools(mode or "default")
         except Exception:
             logger.debug("[engine] turn=%s 权限配置解析失败，回退硬编码", turn_id, exc_info=True)
             _schema_whitelist = (
@@ -715,6 +780,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             )
             _mode_readonly = mode in ("readonly", "plan")
             _mcp_allowed = None
+            _mcp_extra = set()
         if _full_access:
             tool_schemas = tool_registry.all_schemas()
         else:
@@ -723,18 +789,33 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             db, main_agent, tool_schemas, turn_id,
             readonly_only=_mode_readonly,
             allowed=_mcp_allowed,
+            extra_allowed=_mcp_extra,
         )
         # v38 (plan-482): 系统不再预拆分子任务，是否分步由主代理 todo_write 自主决定。
         # v20: 把 spawn_subagent/collect_results 暴露给主代理——
         # 需要并行调研时主代理自行 spawn 探索任务并拿回结论，再串行实现。
         # v22: 子代理类型开关前移——类型停用时不再暴露对应工具，避免模型反复尝试。
         # 子代理工具仅追加 schema（executor 不注册），agent_loop 特判执行。
-        if mode not in ("readonly", "plan"):
-            tool_schemas = append_subagent_tools(tool_schemas, _type_states)
+        # v36 (plan-321-1600 R1): 四种权限模式都支持子代理（此前 readonly/plan 完全禁用）。
+        # 只读/计划模式仅暴露只读探索子代理（explore_only，运行时强制 explore）；
+        # 白名单模式尊重用户在权限面板勾选的子代理工具子集（未勾选不暴露）。
+        _subagent_allowed: set[str] | None = None
+        if not _full_access and _schema_whitelist is not None:
+            _subagent_allowed = SUBAGENT_TOOL_NAMES & set(_schema_whitelist)
+        tool_schemas = append_subagent_tools(
+            tool_schemas, _type_states,
+            explore_only=_mode_readonly,
+            allowed=_subagent_allowed,
+        )
         # 3. 运行主代理
         # v10/v13: 会话级模型覆盖；同一模型也用于规划评估与拆分。
         from app.orchestration.subagent import get_subagent_manager
         mgr = get_subagent_manager(session_id)
+        # plan-330-1648 M4: 注册子代理 → 主代理的上报通道（report_to_leader）
+        mgr.set_leader_notify(
+            lambda aid, msg, kind, _m=mgr, _sid=session_id, _tid=turn_id:
+                _on_agent_report(_m, _sid, _tid, aid, msg, kind)
+        )
         _turn_managers[turn_id] = mgr
         out = await run_agent_loop(
             db, session_id=session_id, turn_id=turn_id,
@@ -747,6 +828,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             multimodal=_is_multimodal,
             # plan-19-82: 压缩摘要/checkpoint 文案跟随本轮回复语言
             reply_language=bundle.reply_language,
+            reply_language_source=bundle.reply_language_source,
             subagent_context={
                 "manager": mgr, "session": session, "project": project,
                 "cancel_event": cancel_event,
@@ -755,10 +837,17 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                 # plan-248-1258 M6: 子代理继承的关键上下文（沙箱/权限模式）
                 "sandbox_mode": _eff_sandbox,
                 "permission_mode": mode,
+                # plan-330-1648 M2: 子代理思考深度 = 设置优先 → 本 turn 档位 → 全局默认
+                "reasoning_effort": reasoning_effort,
                 "context_summary": _plan_history or "",
             },
-            # plan-547: 每次 LLM 调用前 drain 运行中注入的用户消息
-            injected_inputs_provider=lambda: drain_injected_inputs(turn_id),
+            # plan-547: 每次 LLM 调用前 drain 运行中注入的用户消息；
+            # v36 (plan-321-1600 M3): 同通道附带子代理完成通知——后台子代理结束时
+            # 主代理无需轮询 collect_results 即可得知（已读过的结果不会重复推送）。
+            injected_inputs_provider=lambda: (
+                drain_injected_inputs(turn_id)
+                + [{"content": _note} for _note in mgr.drain_completions()]
+            ),
         )
 
         # /plan：方案文档完成后自动生成拆分提案，确认前不执行方案中的业务修改。
@@ -989,7 +1078,9 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         _cancel_events.pop(turn_id, None)
         _turn_managers.pop(turn_id, None)
         discard_injected_inputs(turn_id)  # plan-547: 丢弃残留注入项
-        cleanup(session_id)
+        # plan-330-1648 M7: 有后台子代理/未送达通知时保活 manager（结果跨 turn 送达）
+        from app.orchestration.subagent import peek_subagent_manager
+        _cleanup_manager_if_idle(session_id, peek_subagent_manager(session_id))
         # v1.1: 无条件广播 session.completed，驱动前端摘除左侧转圈（无论成败）
         # v37: 携带最新活动时间，侧栏排序同步上移（此前仅整表刷新才更新）
         try:
@@ -1365,6 +1456,11 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             return {"ok": False, "error": "主代理未初始化"}
         workspace = _resolve_workspace(session, project)
         manager = get_subagent_manager(_session_id)
+        # plan-330-1648 M4: 注册子代理 → 主代理的上报通道（report_to_leader）
+        manager.set_leader_notify(
+            lambda aid, msg, kind, _m=manager, _sid=_session_id, _tid=turn_id:
+                _on_agent_report(_m, _sid, _tid, aid, msg, kind)
+        )
         _turn_managers[turn_id] = manager
         # plan-166-767: confirm 执行路径与 start_turn 对齐——按有效模型解析多模态/窗口。
         effective_model_id = _session_model_id or main_agent.model_id
@@ -1438,7 +1534,10 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         # 字符方案文档与全英文系统提示，模型最容易在此处沿用英文惯性。因此在边界处
         # 显式声明"已退出规划、进入执行"并重申语言，而非仅依赖构建时的一次性锚。
         bundle.developer_parts.append(
-            build_plan_exit_reminder(bundle.reply_language)
+            build_plan_exit_reminder(
+                bundle.reply_language,
+                source=bundle.reply_language_source,
+            )
         )
         bundle.instruction = (
             (bundle.rules_anchor + "\n\n" if bundle.rules_anchor else "")
@@ -1481,11 +1580,16 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             multimodal=_is_multimodal,
             # plan-19-82: 压缩摘要/checkpoint 文案跟随本轮回复语言
             reply_language=bundle.reply_language,
+            reply_language_source=bundle.reply_language_source,
             subagent_context={
                 "manager": mgr, "session": session, "project": project,
                 "cancel_event": cancel_event,
                 "main_task_id": request_task.id if request_task else None,
                 "model_id": effective_model_id,
+                # plan-330-1648: 确认执行阶段主代理已是执行语义（非 plan/readonly），
+                # 子代理按类型锁定模式；无 turn 级思考档位 → 回落全局默认。
+                "permission_mode": "default",
+                "reasoning_effort": None,
             },
         )
 
@@ -1577,7 +1681,9 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         _cancel_events.pop(turn_id, None)
         _turn_managers.pop(turn_id, None)
         discard_injected_inputs(turn_id)  # plan-547: 丢弃残留注入项
-        cleanup(_session_id or 0)
+        # plan-330-1648 M7: 同上——有后台子代理时保活 manager
+        from app.orchestration.subagent import peek_subagent_manager
+        _cleanup_manager_if_idle(_session_id or 0, peek_subagent_manager(_session_id or 0))
         if _session_id:
             try:
                 await broadcast_session_completed(_session_id, db)
@@ -1670,6 +1776,8 @@ async def retry_failed_step(db: AsyncSession, *, turn_id: int, task_id: int) -> 
         handoff_summary=handoff,
         context_bundle=context, tool_schemas=tool_schemas,
         workspace=workspace, cancel_event=cancel_event,
+        # plan-330-1648 M1: 计划步骤子代理 = 可写执行（按自身语义锁定，不继承主代理当时的模式）
+        subagent_mode="default",
     )
     # v19: 重试也广播子代理启动事件
     await broadcast(session.id, {

@@ -51,8 +51,13 @@ async def list_tasks(db: AsyncSession, session_id: int, turn_id: int | None = No
 
 
 async def update_task_status(db: AsyncSession, task_id: int, status: str,
-                             note: str | None = None) -> str | None:
-    """更新任务状态（写线程内读-改-写，权威）。返回 status（None=未找到）。"""
+                             note: str | None = None,
+                             token_usage: int | None = None) -> str | None:
+    """更新任务状态（写线程内读-改-写，权威）。返回 status（None=未找到）。
+
+    v36 (plan-321-1600 M1): token_usage 传入时**累加**到任务用量上——
+    此前子代理任务的 token_usage 恒为 0，用户看不到子代理消耗（成本不可见）。
+    """
     from app.persistence.database import run_write_locked
 
     def patch(s):
@@ -62,6 +67,8 @@ async def update_task_status(db: AsyncSession, task_id: int, status: str,
         task.status = status
         if note is not None:
             task.note = note
+        if token_usage:
+            task.token_usage = (task.token_usage or 0) + int(token_usage)
         s.commit()
         return task.status
 

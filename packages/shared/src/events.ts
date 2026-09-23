@@ -29,6 +29,8 @@ export type ServerWsEvent =
   | { event: "agent.started"; payload: { agent_id: number; kind?: string; name?: string; turn_id?: number | null } }
   | { event: "agent.updated"; payload: { agent_id: number; status?: string; tool?: string; step?: number } }
   | { event: "agent.completed"; payload: { agent_id: number; summary?: string | null; artifact_ids?: number[] } }
+  /** plan-330-1648 M7: 子代理失败/取消（主消息流卡片与右面板展示原因） */
+  | { event: "subagent.failed"; payload: { agent_id: number; status?: string; error?: string | null } }
   | { event: "thinking.delta"; payload: { agent_id: number; turn_id?: number | null; delta: string } }
   | { event: "thinking.done"; payload: { agent_id: number; turn_id?: number | null; full_text?: string } }
   | { event: "token.delta"; payload: { agent_id: number; turn_id?: number | null; delta: string } }
@@ -210,6 +212,7 @@ export const ORDERED_EVENTS: ReadonlySet<string> = new Set([
   "agent.started",
   "agent.updated",
   "agent.completed",
+  "subagent.failed",
   "usage.update",
   "debug.paused",
   // plan-308-1542：AI 合并进度（有序，保证前端进度行不跳序）

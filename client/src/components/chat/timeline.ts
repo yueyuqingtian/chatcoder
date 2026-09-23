@@ -201,6 +201,105 @@ export function buildTimeline(messages: MessageOut[]): TimelineEntry[] {
   return entries;
 }
 
+/** 引用级比较：两个数组等长且逐项同一引用。 */
+function sameRefs<T>(a: readonly T[], b: readonly T[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/**
+ * 增量版时间线构建器（plan-329-1647 S8b / FlowEngine）。
+ *
+ * ── 问题 ──
+ * 任一条消息落库 ⇒ store 里 messages 换新引用 ⇒ 原实现 buildTimeline 全量重建**所有**
+ * entry / item 对象 ⇒ 下游 memo 的 TurnGroup / StandaloneEntry 引用全变 ⇒ 所有可见消息
+ * 重渲染（含 markdown / rehype 插件重跑）。会话运行期间每步工具调用都会触发一次。
+ *
+ * ── 现在 ──
+ * 按 turn_id 缓存「上次的消息数组 + 构建结果」。只有当某个 turn 的消息数组**逐项引用**
+ * 发生变化（典型：只有最后一个 turn 在追加消息）时才重建它，其余 turn 直接复用上次的
+ * entry 对象 ⇒ memo 继续命中，只有真正变化的那一条 turn 重渲染。
+ *
+ * 用法：一个会话/面板持有一个 builder（`useMemo(() => createTimelineBuilder(), [])`），
+ * 每次渲染调用它即可。缓存按 turn_id 键控，已消失的 turn 会被清理，不会无界增长。
+ */
+export function createTimelineBuilder(): (messages: MessageOut[]) => TimelineEntry[] {
+  interface TurnCache { msgs: MessageOut[]; entry: Extract<TimelineEntry, { kind: "turn" }>; }
+  const turnCache = new Map<number, TurnCache>();
+  // 无 turn_id 的消息（用户消息独立成组 / 前置 standalone）：按消息对象身份缓存
+  const msgEntryCache = new WeakMap<MessageOut, TimelineEntry>();
+
+  return function buildCached(messages: MessageOut[]): TimelineEntry[] {
+    // ① 单遍扫描：与 buildTimeline 同一套聚合规则，但只记录「顺序槽位」，
+    //    不在这里创建 turn entry 对象（推迟到第 ② 步按缓存决定复用还是新建）。
+    type Slot = { kind: "turn"; tid: number } | { kind: "entry"; entry: TimelineEntry };
+    const slots: Slot[] = [];
+    const turnMsgs = new Map<number, MessageOut[]>();
+    const turnOrder: number[] = [];
+    let lastTurnId: number | null = null;
+
+    for (const m of messages) {
+      const tid = m.turn_id ?? null;
+      if (tid != null) {
+        let arr = turnMsgs.get(tid);
+        if (!arr) {
+          arr = [];
+          turnMsgs.set(tid, arr);
+          turnOrder.push(tid);
+          slots.push({ kind: "turn", tid });
+        }
+        arr.push(m);
+        lastTurnId = tid;
+        continue;
+      }
+      if (m.sender_type === SenderType.User) {
+        let e = msgEntryCache.get(m);
+        if (!e) {
+          e = { kind: "turn", turnId: null, items: [{ kind: "user", msg: m }] };
+          msgEntryCache.set(m, e);
+        }
+        slots.push({ kind: "entry", entry: e });
+        continue;
+      }
+      if (lastTurnId != null) {
+        const arr = turnMsgs.get(lastTurnId);
+        if (arr) arr.push(m);
+        continue;
+      }
+      let e = msgEntryCache.get(m);
+      if (!e) {
+        e = { kind: "standalone", msg: m };
+        msgEntryCache.set(m, e);
+      }
+      slots.push({ kind: "entry", entry: e });
+    }
+
+    // ② 逐 turn：逐项引用未变则复用上次 entry（memo 命中），否则只重建该 turn
+    const resolved = new Map<number, TimelineEntry>();
+    for (const tid of turnOrder) {
+      const msgs = turnMsgs.get(tid)!;
+      const cached = turnCache.get(tid);
+      if (cached && sameRefs(cached.msgs, msgs)) {
+        cached.msgs = msgs; // 数组对象换了但元素引用一致：更新句柄，保留 entry
+        resolved.set(tid, cached.entry);
+        continue;
+      }
+      const entry = { kind: "turn", turnId: tid, items: buildTurnItems(msgs) } as Extract<TimelineEntry, { kind: "turn" }>;
+      turnCache.set(tid, { msgs, entry });
+      resolved.set(tid, entry);
+    }
+    // 清理已消失的 turn（例如回滚/切换会话后），避免缓存无界增长
+    if (turnCache.size > turnOrder.length) {
+      const live = new Set(turnOrder);
+      for (const tid of Array.from(turnCache.keys())) if (!live.has(tid)) turnCache.delete(tid);
+    }
+
+    return slots.map((s) => (s.kind === "entry" ? s.entry : resolved.get(s.tid)!));
+  };
+}
+
 /** turn 内消息归类：严格按消息时间序；相邻 tool_call 合并 cluster；系统消息 → divider。 */
 function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
   // §3.3: 相邻 tool_call 合并为 tool-cluster，AI 文字切段时新开 cluster

@@ -461,8 +461,13 @@ async def list_session_subagents(session_id: int, turn_id: int | None = None,
         stmt = stmt.where(Agent.turn_id == turn_id)
     stmt = stmt.order_by(Agent.id.asc())
     res = await db.execute(stmt)
+    # v36 (plan-321-1600 M2): 右面板头部需要“用时 + 文件数”——文件清单只存于运行期
+    # handle（内存），任务行无此列，故从会话管理器只读取用（不创建）。
+    from app.orchestration.subagent import peek_subagent_manager
+    _mgr = peek_subagent_manager(session_id)
     out: list[dict] = []
     for agent, task in res.all():
+        _h = _mgr.get(agent.id) if _mgr is not None else None
         out.append({
             "agent_id": agent.id,
             "name": agent.name or f"子代理 #{agent.id}",
@@ -470,6 +475,11 @@ async def list_session_subagents(session_id: int, turn_id: int | None = None,
             "task_id": task.id if task else None,
             "task_title": task.title if task else None,
             "status": (task.status if task else None) or ({"running": "running", "done": "done", "failed": "failed", "terminated": "terminated"}.get(agent.status, agent.status or "terminated")),
+            # v36: 头部展示字段（created_at→updated_at 即任务起止，前端据此算用时）
+            "created_at": str(task.created_at) if task and task.created_at else None,
+            "updated_at": str(task.updated_at) if task and task.updated_at else None,
+            "token_usage": (task.token_usage or 0) if task else 0,
+            "files_count": len(_h.files_touched) if _h is not None else 0,
         })
     return out
 

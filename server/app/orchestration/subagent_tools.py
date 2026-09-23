@@ -27,18 +27,32 @@ SPAWN_SUBAGENT_SCHEMA = {
         "name": "spawn_subagent",
         "description": (
             "Launch an isolated subagent to work on a subtask in its own context. "
-            "DECIDE AUTONOMOUSLY: spawn one or more subagents whenever the work is naturally decomposable "
-            "into independent subtasks, or when parallel research/implementation would materially improve "
-            "speed or quality (e.g. multi-area investigation, independent module changes, broad search). "
-            "For simple or tightly sequential work, just do it yourself with direct tool calls — do NOT spawn "
-            "for trivial tasks. You may spawn several subagents in one turn; they run in parallel. "
-            "Subagents never share context with each other or with you; hand off everything they need. "
-            "Set explore=true for a READ-ONLY research/investigation subtask: the tool call blocks until "
-            "it finishes and returns the subagent's findings directly to you. "
-            "Without explore, the subagent runs in the background; poll with collect_results (or wait=true). "
-            "Subagents report back a structured summary (result, files touched, findings, risks); "
-            "use subagent_inspect to read any subagent's full context and trajectory when you need details. "
-            "You remain responsible for integrating their work."
+            "Its final message is returned to you as the tool result (the user does not see it), "
+            "and its context starts fresh — the prompt must be self-contained.\n"
+            "\nDECIDE AUTONOMOUSLY: judging by the criteria below, you may spawn one or more "
+            "subagents on your own initiative — no user request is required.\n"
+            "\n## When to use\n"
+            "- Work that splits into independent subtasks you can run in parallel.\n"
+            "- Broad exploration or research that would take more than ~3 search/read calls to answer — "
+            "delegate it and keep the conclusion, not the raw file dumps.\n"
+            "- Anything where you only need the conclusion instead of raw outputs in your own context.\n"
+            "\n## When NOT to use\n"
+            "- A single-fact lookup where you already know the file, symbol or value — search directly.\n"
+            "- Simple or tightly sequential work: do it yourself with a few direct tool calls.\n"
+            "\n## How to dispatch\n"
+            "- Independent subtasks: send SEVERAL spawn_subagent calls in ONE message so they run concurrently.\n"
+            "- explore=true → read-only research subtask; the call blocks and returns the findings directly.\n"
+            "- background=true → dispatch and return immediately; the completion report is pushed back to you "
+            "automatically, so do NOT poll for it.\n"
+            "- NEVER dispatch the same subtask twice, and give each subtask a distinct task_title; "
+            "check collect_results first if unsure whether an equivalent one already exists.\n"
+            "- Subagents never share context with each other or with you: hand off everything they need.\n"
+            "\n## After the dispatch\n"
+            "- Once you delegate a piece of work, do NOT also do it yourself — work on non-overlapping things "
+            "or wait for the result, then integrate it.\n"
+            "- Subagents report back a structured summary (result, files touched, key findings, "
+            "verification, acceptance, risks); use subagent_inspect for their full context and trajectory.\n"
+            "- You remain responsible for integrating their work."
         ),
         "parameters": {
             "type": "object",
@@ -58,6 +72,14 @@ SPAWN_SUBAGENT_SCHEMA = {
                 "explore": {
                     "type": "boolean",
                     "description": "True = read-only research subtask whose findings are returned directly. Default false.",
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": (
+                        "True = dispatch and return immediately (run in the background); no blocking wait. "
+                        "The completion report is pushed back to you automatically when the subagent finishes, "
+                        "so do NOT poll. Use it to parallelize long-running independent subtasks. Default false."
+                    ),
                 },
             },
             "required": ["task_title", "task_description"],
@@ -81,6 +103,13 @@ COLLECT_RESULTS_SCHEMA = {
                 "wait": {
                     "type": "boolean",
                     "description": "True = block until all spawned subagents finish before returning. Default false.",
+                },
+                "agent_id": {
+                    "type": "integer",
+                    "description": (
+                        "Only report this specific subagent (id returned by spawn_subagent). "
+                        "Omit to report every subagent spawned this turn."
+                    ),
                 },
             },
             "required": [],
@@ -111,7 +140,149 @@ SUBAGENT_INSPECT_SCHEMA = {
     },
 }
 
-SUBAGENT_TOOL_SCHEMAS = [SPAWN_SUBAGENT_SCHEMA, COLLECT_RESULTS_SCHEMA, SUBAGENT_INSPECT_SCHEMA]
+CANCEL_SUBAGENT_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "cancel_subagent",
+        "description": (
+            "Cancel one still-running subagent spawned this turn (id returned by spawn_subagent). "
+            "Use it when the subtask is no longer needed (e.g. you already found the answer, "
+            "or the plan changed) to stop wasting tokens. Finished subagents cannot be cancelled."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "integer", "description": "Subagent agent id returned by spawn_subagent."},
+            },
+            "required": ["agent_id"],
+        },
+    },
+}
+
+SEND_TO_SUBAGENT_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "send_to_subagent",
+        "description": (
+            "Send a follow-up instruction to a STILL-RUNNING subagent spawned this turn "
+            "(id returned by spawn_subagent). The instruction is injected into its context before "
+            "its next model call, so you can steer, correct or narrow its work without cancelling it. "
+            "Use cancel_subagent to stop it entirely. Finished subagents cannot receive instructions."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "integer", "description": "Subagent id returned by spawn_subagent."},
+                "message": {
+                    "type": "string",
+                    "description": "The instruction to deliver (be specific and self-contained).",
+                },
+            },
+            "required": ["agent_id", "message"],
+        },
+    },
+}
+
+REPORT_TO_LEADER_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "report_to_leader",
+        "description": (
+            "Report progress to the main agent, or ask it a question (subagents only). "
+            "The message reaches the main agent's context before its next model call, and is also "
+            "visible in your own thread. "
+            "kind=\"progress\" (default): fire-and-forget status update — keep working afterwards. "
+            "kind=\"question\" with wait=true: block until the main agent replies. Only background "
+            "subagents may wait; synchronous/read-only subagents cannot (include the open question "
+            "in your final report instead)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "What to report or ask."},
+                "kind": {
+                    "type": "string",
+                    "description": "progress (default) = status update; question = need a decision.",
+                },
+                "wait": {
+                    "type": "boolean",
+                    "description": "Only for kind=question: true = block until the main agent replies.",
+                },
+                "timeout_s": {
+                    "type": "integer",
+                    "description": "Max seconds to wait for a reply when wait=true (default 300).",
+                },
+            },
+            "required": ["message"],
+        },
+    },
+}
+
+SUBAGENT_TOOL_SCHEMAS = [
+    SPAWN_SUBAGENT_SCHEMA, COLLECT_RESULTS_SCHEMA, SUBAGENT_INSPECT_SCHEMA, CANCEL_SUBAGENT_SCHEMA,
+    SEND_TO_SUBAGENT_SCHEMA,
+]
+
+# plan-330-1648 M4: 子代理自身可用的通信工具（只在**子代理**侧暴露，主代理不可见）。
+SUBAGENT_OWN_TOOLS: list[dict] = [REPORT_TO_LEADER_SCHEMA]
+
+# v36 (plan-321-1600 R1)：子代理工具名集合与展示用风险级。
+# 这些工具由 agent_loop 特判执行（不经 executor/registry），但权限模式白名单、
+# 权限面板工具清单都需要认识它们——否则「配置了不生效」。
+SUBAGENT_TOOL_NAMES: set[str] = (
+    {s["function"]["name"] for s in SUBAGENT_TOOL_SCHEMAS}
+    | {s["function"]["name"] for s in SUBAGENT_OWN_TOOLS}
+)
+SUBAGENT_TOOL_RISK: dict[str, str] = {
+    "spawn_subagent": "medium",
+    "collect_results": "low",
+    "subagent_inspect": "low",
+    "cancel_subagent": "low",
+    "send_to_subagent": "low",
+    "report_to_leader": "low",
+}
+
+
+def _spawn_schema(explore_only: bool) -> dict:
+    """spawn_subagent schema；只读/计划模式下替换为「只读探索」版本（v36）。
+
+    explore_only=True 时：描述改为仅支持只读探索子任务，并移除 background/explore 参数
+    （background 会派发可写子代理，与本模式语义冲突；explore 由运行时强制）。
+    """
+    if not explore_only:
+        return SPAWN_SUBAGENT_SCHEMA
+    import copy
+
+    schema = copy.deepcopy(SPAWN_SUBAGENT_SCHEMA)
+    fn = schema["function"]
+    fn["description"] = (
+        "Launch a READ-ONLY exploration subagent to research a self-contained subtask in its "
+        "own context. Its final message is returned to you as the tool result (the user does "
+        "not see it), and its context starts fresh — the prompt must be self-contained.\n"
+        "\nDECIDE AUTONOMOUSLY: you may dispatch exploration subagents on your own initiative "
+        "when the criteria below are met — no user request is required.\n"
+        "\n## When to use\n"
+        "- Broad exploration or research that would take more than ~3 search/read calls to answer — "
+        "delegate it and keep the conclusion, not the raw file dumps.\n"
+        "- Several independent research areas you can investigate in parallel.\n"
+        "\n## When NOT to use\n"
+        "- A single-fact lookup where you already know the file, symbol or value — search directly.\n"
+        "\n## Mode note\n"
+        "- The current permission mode is READ-ONLY / PLAN: only read-only exploration is "
+        "available. The call blocks until it finishes and returns the findings directly to you. "
+        "NEVER ask the subagent to modify, write or create files — it will be rejected.\n"
+        "\n## How to dispatch\n"
+        "- Send SEVERAL spawn_subagent calls in ONE message to run them concurrently.\n"
+        "- Give each subtask a distinct task_title; never dispatch the same subtask twice.\n"
+        "\n## After the dispatch\n"
+        "- Once you delegate a piece of work, do NOT also do it yourself — work on non-overlapping "
+        "things, then integrate the conclusion.\n"
+        "- Use collect_results / subagent_inspect when you need more detail."
+    )
+    props = fn["parameters"]["properties"]
+    props.pop("background", None)
+    props.pop("explore", None)  # 强制只读探索，无需模型传参
+    return schema
 
 
 def filter_tool_schemas(schemas: list[dict], whitelist: list[str] | None) -> list[dict]:
@@ -144,7 +315,10 @@ async def load_subagent_type_states(db) -> dict[str, bool]:
 
 
 def append_subagent_tools(tool_schemas: list[dict],
-                          subagent_types: dict[str, bool] | None = None) -> list[dict]:
+                          subagent_types: dict[str, bool] | None = None,
+                          *,
+                          explore_only: bool = False,
+                          allowed: set[str] | None = None) -> list[dict]:
     """为主代理工具列表追加子代理工具 schema（按名去重，不重复追加）。
 
     v22: 子代理类型开关（SubagentProfile.is_active）前移到工具暴露前——
@@ -152,8 +326,16 @@ def append_subagent_tools(tool_schemas: list[dict],
     类型停用时不再把 spawn_subagent/collect_results 暴露给模型，
     避免模型反复尝试被拒的调用（此前仅 spawn 执行时返回错误）。
 
+    v36 (plan-321-1600 R1): 四种权限模式都支持子代理——
+    - explore_only=True（只读/计划模式）：仅暴露只读探索子代理（spawn 描述换成
+      只读探索版、不含 background），general 类型不参与本模式；
+    - allowed：白名单模式下的子代理工具子集（None = 全量）——设置页未勾选的
+      子代理工具不暴露，勾选真正生效。
+
     参数：
         subagent_types: 类型名 → is_active 映射；None/缺省 = 全部放行（旧行为兼容）。
+        explore_only: 只读/计划模式（仅只读探索）。
+        allowed: 允许暴露的子代理工具名集合；None = 不限制。
     """
     allow_spawn = True
     allow_collect = True
@@ -161,28 +343,40 @@ def append_subagent_tools(tool_schemas: list[dict],
     if subagent_types is not None:
         explore_active = subagent_types.get("explore", True)
         general_active = subagent_types.get("general", True)
-        # 如果 explore 停用且 general 停用（或无任何活跃子代理），完全禁用子代理工具
-        if not explore_active and not general_active:
+        if explore_only:
+            # v36: 只读/计划模式只放行只读探索类型（general 不暴露）
+            allow_spawn = bool(explore_active)
+            allow_collect = bool(explore_active)
+        elif not explore_active and not general_active:
+            # 两个类型都停用 → 完全禁用子代理工具
             allow_spawn = False
             allow_collect = False
         elif not explore_active:
-            # explore 停用，但 general 仍开启：如果用户关闭了 explore，只允许普通子任务
-            # 但 spawn_subagent 默认带 explore 参数，此处若需完全关闭则遵循开关
+            # explore 停用、general 开启 → 仅普通子任务
             allow_spawn = bool(general_active)
             allow_collect = bool(general_active)
 
+    _permitted = (lambda name: True) if allowed is None else (lambda name: name in allowed)
+
+    # 先剔除传入列表中已有的子代理工具（幂等），再按本次口径重新追加
     out = [
         s for s in tool_schemas
-        if (allow_spawn or s.get("function", {}).get("name") != "spawn_subagent")
-        and (allow_collect or s.get("function", {}).get("name") not in ("collect_results", "subagent_inspect"))
+        if s.get("function", {}).get("name") not in SUBAGENT_TOOL_NAMES
     ]
     names = {s.get("function", {}).get("name") for s in out}
 
-    if allow_spawn and SPAWN_SUBAGENT_SCHEMA["function"]["name"] not in names:
-        out.append(SPAWN_SUBAGENT_SCHEMA)
-    if allow_collect and COLLECT_RESULTS_SCHEMA["function"]["name"] not in names:
-        out.append(COLLECT_RESULTS_SCHEMA)
-    if allow_collect and SUBAGENT_INSPECT_SCHEMA["function"]["name"] not in names:
-        out.append(SUBAGENT_INSPECT_SCHEMA)
+    if allow_spawn and _permitted("spawn_subagent") and "spawn_subagent" not in names:
+        out.append(_spawn_schema(explore_only))
+        names.add("spawn_subagent")
+    for _schema in (COLLECT_RESULTS_SCHEMA, SUBAGENT_INSPECT_SCHEMA, CANCEL_SUBAGENT_SCHEMA):
+        _name = _schema["function"]["name"]
+        if allow_collect and _permitted(_name) and _name not in names:
+            out.append(_schema)
+            names.add(_name)
+    # plan-330-1648 M4: 主代理 → 子代理的运行中指令通道（与 collect 同门控：子代理能力可用即可用）
+    if allow_collect and _permitted("send_to_subagent") and "send_to_subagent" not in names:
+        out.append(SEND_TO_SUBAGENT_SCHEMA)
+        names.add("send_to_subagent")
+    return out
 
     return out

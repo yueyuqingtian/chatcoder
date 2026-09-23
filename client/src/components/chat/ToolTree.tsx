@@ -16,6 +16,7 @@ function parseGrepLines(output: string): Array<{ path: string; line: number; res
   return out;
 }
 import { memo, useEffect, useMemo, useState } from "react";
+import { useRunningTicker } from "./useRunningTicker";
 import type { ToolLeaf, ToolNode } from "./timeline";
 import { SEARCH_TOOLS, RUN_TOOLS, isWriteLeaf } from "./timeline";
 import { api } from "../../api/client";
@@ -497,12 +498,8 @@ const ActionClusterRow = memo(function ActionClusterRow({ leaves }: { leaves: To
   const runningLeaves = leaves.filter((l) => l.ok === null);
   const rollingPool = runningLeaves.length > 0 ? runningLeaves : leaves;
   // 轮播索引：运行中循环展示最近若干条
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    if (!running) return;
-    const t = setInterval(() => setTick((v) => v + 1), 1200);
-    return () => clearInterval(t);
-  }, [running]);
+  // S8c：轮播节拍改用共享秒级 ticker（原为各自 1200ms setInterval）。
+  const tick = useRunningTicker(running);
 
   const summary = useMemo(() => {
     const search = leaves.filter((l) => SEARCH_TOOLS.has(l.tool)).length;

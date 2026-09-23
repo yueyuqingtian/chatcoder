@@ -13,6 +13,8 @@ import {
   type DragEvent,
   type WheelEvent,
 } from "react";
+import { isBusy } from "../../perf/bus";
+import { registerReconcileTask, RECONCILE_ORDER } from "../../perf/reconcile";
 import {
   IconArrowUp,
   IconStop,
@@ -618,16 +620,37 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   // 窗口/面板宽度变化会改变换行高度，同步重测
   useEffect(() => {
     let raf = 0;
+    // 运动中跳过重测（判定统一走 PerfBus：窗口运动 / 拖分隔条 / 面板过渡）
+    const inMotion = () => isBusy();
+    const remeasure = () => {
+      // 运动期跳过：resizeTextarea = height:"auto" 写入 + scrollHeight 读取，
+      // 是强制同步布局；拖窗口/拖面板每帧跑一次会直接拖垮帧预算（鼠标失灵来源之一）。
+      if (inMotion()) return;
+      if (taRef.current) resizeTextarea(taRef.current);
+    };
     const onResize = () => {
       cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(() => {
-        if (taRef.current) resizeTextarea(taRef.current);
-      });
+      raf = requestAnimationFrame(remeasure);
     };
     window.addEventListener("resize", onResize);
+    // 运动结束补测一次（窗口 motion 解除 / 分隔条松手）：换行宽度在拖拽中已变，
+    // 输入框高度须按终宽重测。顺带修掉旧缺陷：拖面板不产生 window resize，
+    // 输入框高度此前从不重测，折行变化后停留旧值。
+    const onMotionEnd = (e: Event) => {
+      if ((e as CustomEvent<{ active?: boolean }>).detail?.active === false) remeasure();
+    };
+    // RFL-6（S6）：注册进唯一收敛序列——order 70 输入框 remeasure。
+    const offReconcile = registerReconcileTask("composer-remeasure", RECONCILE_ORDER.composerRemeasure,
+      "输入框重测", remeasure);
+    const onPointerUp = () => { if (!inMotion()) remeasure(); };
+    window.addEventListener("chatcoder:window-motion", onMotionEnd);
+    window.addEventListener("pointerup", onPointerUp, true);
     return () => {
+      offReconcile();
       cancelAnimationFrame(raf);
       window.removeEventListener("resize", onResize);
+      window.removeEventListener("chatcoder:window-motion", onMotionEnd);
+      window.removeEventListener("pointerup", onPointerUp, true);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1848,7 +1871,10 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
               <div className="approval-agent">{String(pendingApproval.detail.agent_name)} 申请执行此工具</div>
             )}
             {pendingApproval.detail.args != null && (
-              <pre className="approval-args">{formatApprovalArgs(pendingApproval.detail.args)}</pre>
+              <ApprovalArgsView
+                tool={String(pendingApproval.detail.tool ?? "")}
+                args={pendingApproval.detail.args}
+              />
             )}
             {typeof pendingApproval.detail.summary === "string" && (
               <div className="approval-summary">{pendingApproval.detail.summary}</div>
@@ -1888,14 +1914,87 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   );
 }
 
-function formatApprovalArgs(args: unknown): string {
-  if (typeof args === "string") return args;
+/** v36 (plan-321-1600 R2): 审批参数文案对照（工具参数名 → 中文标签）。
+ * 用户反馈「审批弹窗不要展示 json」——此处按工具渲染关键字段，未知字段回落原名。 */
+const APPROVAL_FIELD_LABELS: Record<string, string> = {
+  command: "命令", cwd: "工作目录", timeout: "超时", is_background: "后台运行",
+  path: "路径", paths: "路径", file: "文件", files: "文件列表",
+  pattern: "搜索内容", query: "关键词", include: "文件过滤",
+  offset: "起始行", limit: "行数上限", recursive: "递归", max_depth: "递归深度",
+  content: "写入内容", old_text: "原文本", new_text: "新文本", replace_all: "替换全部",
+  edits: "批量编辑", url: "地址", method: "请求方法", body: "请求体", headers: "请求头",
+  sql: "SQL", goal: "目标", question: "问题", task_title: "子任务",
+};
+
+/** 长文本截断（避免审批卡被超长内容撑爆）。 */
+function clipApprovalText(text: string, max = 600): string {
+  return text.length > max ? `${text.slice(0, max)}\n…（已省略 ${text.length - max} 字）` : text;
+}
+
+function safeJsonText(value: unknown): string {
   try {
-    const str = JSON.stringify(args, null, 2);
-    return str.length > 800 ? str.slice(0, 800) + "\n…" : str;
+    return JSON.stringify(value);
   } catch {
-    return String(args);
+    return String(value);
   }
+}
+
+/** 单个参数值 → 可读文本（布尔转是/否，批量编辑列出文件，其余结构化值紧凑化）。 */
+function formatApprovalValue(key: string, value: unknown): string {
+  if (typeof value === "boolean") return value ? "是" : "否";
+  if (typeof value === "number") return String(value);
+  if (typeof value === "string") return clipApprovalText(value);
+  if (Array.isArray(value)) {
+    if (key === "edits") {
+      const paths = value
+        .map((e) => (e && typeof e === "object" ? String((e as Record<string, unknown>).path ?? "") : ""))
+        .filter(Boolean);
+      const head = `${value.length} 处修改`;
+      return paths.length ? `${head}\n${paths.join("\n")}` : head;
+    }
+    return clipApprovalText(value.map((x) => (typeof x === "string" ? x : safeJsonText(x))).join("\n"));
+  }
+  return clipApprovalText(safeJsonText(value));
+}
+
+/** 参数 → 标签/值行（常用字段优先，其余按原顺序追加；空值跳过）。 */
+function approvalArgRows(args: unknown): Array<{ label: string; value: string }> {
+  if (args == null) return [];
+  if (typeof args === "string") return [{ label: "参数", value: clipApprovalText(args) }];
+  if (typeof args !== "object" || Array.isArray(args)) {
+    return [{ label: "参数", value: clipApprovalText(safeJsonText(args)) }];
+  }
+  const obj = args as Record<string, unknown>;
+  const keys = Object.keys(obj);
+  const ordered = [
+    ...Object.keys(APPROVAL_FIELD_LABELS).filter((k) => k in obj),
+    ...keys.filter((k) => !(k in APPROVAL_FIELD_LABELS)),
+  ];
+  const rows: Array<{ label: string; value: string }> = [];
+  for (const k of ordered) {
+    const v = obj[k];
+    if (v === null || v === undefined || v === "") continue;
+    rows.push({ label: APPROVAL_FIELD_LABELS[k] || k, value: formatApprovalValue(k, v) });
+  }
+  return rows;
+}
+
+/** 审批参数结构化视图（替代旧 JSON 原文展示）。 */
+function ApprovalArgsView({ tool, args }: { tool: string; args: unknown }) {
+  const rows = approvalArgRows(args);
+  if (rows.length === 0) return null;
+  return (
+    <div className="approval-fields">
+      {rows.map((r, i) => (
+        <div key={`${i}-${r.label}`} className="approval-field">
+          <span className="approval-field-label">{r.label}</span>
+          <span className={`approval-field-value${tool === "terminal_exec" ? " mono" : ""}`}>
+            {r.value}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 /** token 数量格式化（k 单位，去掉多余的 .0）；圆环浮层与旧调用共用的工具函数。 */
@@ -2035,6 +2134,33 @@ function UsageRing({
 }
 
 /** 直接替换输入框的向导式提问卡片组件（对齐参考图 paste-20260829121505.png） */
+/** v36 紧急修复：模型可能把选择题选项写成 [{label, description}] 对象数组（工具 schema 要求 string[]）。
+ *  对象被当作 React 子元素渲染会直接抛 React #31「Objects are not valid as a React child」整页崩溃。
+ *  这里统一压成展示文本：label — description（缺 label 用 description，其余 JSON 化兜底）。 */
+function normalizeQuestionOption(raw: unknown): string {
+  if (typeof raw === "string") return raw;
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const rec = raw as Record<string, unknown>;
+    const pick = (keys: string[]): string => {
+      for (const k of keys) {
+        const v = rec[k];
+        if (typeof v === "string" && v.trim()) return v.trim();
+      }
+      return "";
+    };
+    const label = pick(["label", "text", "title", "value", "name"]);
+    const desc = pick(["description", "desc", "detail", "hint"]);
+    if (label && desc) return `${label} — ${desc}`;
+    if (label || desc) return label || desc;
+    try {
+      return JSON.stringify(raw);
+    } catch {
+      return String(raw);
+    }
+  }
+  return String(raw ?? "");
+}
+
 function QuestionWizardBox({
   approvalId,
   detail,
@@ -2104,7 +2230,11 @@ function QuestionWizardBox({
   }>;
   const total = questions.length;
   const currentQ = questions[stepIndex] ?? {};
-  const currentOptions = Array.isArray(currentQ.options) ? (currentQ.options as string[]) : [];
+  // v36 紧急修复：选项统一归一化为文本——模型曾把 options 写成 [{label, description}] 对象，
+  // 直接渲染对象会抛 React #31 把整个应用打成错误页。
+  const currentOptions = Array.isArray(currentQ.options)
+    ? (currentQ.options as unknown[]).map(normalizeQuestionOption)
+    : [];
   const allowCustom = currentQ.allow_custom !== false;
   const currentAnswer = answers[String(stepIndex)] ?? "";
 

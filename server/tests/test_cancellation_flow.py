@@ -35,6 +35,44 @@ async def test_subagent_manager_cancel_all_waits_for_tasks():
 
 
 @pytest.mark.asyncio
+async def test_wait_one_returns_when_any_subagent_finishes():
+    """v36 (plan-321-1600 M3): 并发排队——wait_one 在任一子代理结束时返回。"""
+    manager = SubagentManager(session_id=2)
+
+    async def worker():
+        await asyncio.sleep(0.05)
+
+    handle = SubagentHandle(agent_id=21, task=asyncio.create_task(worker()))
+    manager._handles[21] = handle
+    assert await manager.wait_one(timeout=2.0) is True
+    # 无运行中子代理时立即就绪
+    assert await manager.wait_one(timeout=0.1) is True
+
+
+@pytest.mark.asyncio
+async def test_cancel_subagent_single():
+    """v36 (plan-321-1600 M3): cancel_subagent 单任务取消（对齐 ta3 TaskCancel）。"""
+    manager = SubagentManager(session_id=2)
+    stopped = asyncio.Event()
+
+    async def worker():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            stopped.set()
+            raise
+
+    handle = SubagentHandle(agent_id=22, task=asyncio.create_task(worker()))
+    manager._handles[22] = handle
+    await asyncio.sleep(0)
+    assert await manager.cancel(22) == "cancelled"
+    assert stopped.is_set() and handle.status == "cancelled"
+    # 已结束再取消 → not_running；不存在 → not_found
+    assert await manager.cancel(22) == "not_running"
+    assert await manager.cancel(999) == "not_found"
+
+
+@pytest.mark.asyncio
 async def test_repeated_cancel_all_is_idempotent():
     manager = SubagentManager(session_id=1)
     manager._handles[1] = SubagentHandle(agent_id=1)

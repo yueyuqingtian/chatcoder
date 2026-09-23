@@ -4,6 +4,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { api } from "../../api/client";
+import { isBusy, subscribe } from "../../perf/bus";
 import { usePanelStore } from "../../store/panel";
 import type { PanelTab, PanelTabId } from "../../store/panel";
 import { useI18n } from "../../store/i18n";
@@ -83,15 +84,24 @@ export function RightPanel() {
     debug: { label: t("rp.tab_debug"), icon: <IconBug size={13} /> },
   };
 
-  // 标签条溢出检测（scrollWidth > clientWidth 时展示「全部标签」入口）
+  // 标签条溢出检测（scrollWidth > clientWidth 时展示「全部标签」入口）。
+  // plan-329-1647 S5：两个布局读（scrollWidth / clientWidth）在运动期跳过——
+  // 拖分隔条/折叠面板时标签条宽度每帧都变，逐帧读会升级为强制同步布局。
+  // 运动中只记账，运动结束由 PerfBus 订阅补一次。
   useEffect(() => {
     const el = tabsRef.current;
     if (!el) return;
-    const check = () => setTabsOverflow(el.scrollWidth > el.clientWidth + 2);
+    let missed = false;
+    const check = () => {
+      if (isBusy()) { missed = true; return; }
+      missed = false;
+      setTabsOverflow(el.scrollWidth > el.clientWidth + 2);
+    };
     check();
     const ro = new ResizeObserver(check);
     ro.observe(el);
-    return () => ro.disconnect();
+    const off = subscribe((busy) => { if (!busy && missed) check(); });
+    return () => { ro.disconnect(); off(); };
   }, [tabs.length]);
 
   // 滚轮纵转横：标签过多时直接滚轮浏览

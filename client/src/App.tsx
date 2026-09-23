@@ -22,8 +22,21 @@ import { useChatStore } from "./store/chat";
 import { useUpdaterStore } from "./store/updater";
 import { initTheme } from "./store/theme";
 import { installFocusGuard } from "./utils/focusGuard";
+import { setWindowMotion } from "./perf/bus";
+import { applyPaneUpdate } from "./perf/paneTransition";
+
+/** S7（plan-329-1647）：面板折叠/展开的过渡已整体改为 View Transition。
+ *
+ *  原实现在这里（beginPaneAnimation）：给面板 180ms 的 CSS width 过渡，同时把内容根宽度
+ *  钉死以省掉逐帧折行——代价是过渡期内容被裁切、结束瞬间一次集中重排。
+ *  现在缩放交给合成器快照动画（见 client/src/perf/paneTransition.ts），布局一次性到位；
+ *  过渡期与收尾的“运动中”状态由 PerfBus 的 panel-anim 统一表达。
+ *  下方 applyPaneUpdate 的调用点：本文件的左栏折叠、以及 store/panel.ts 的右栏展开/折叠/全屏。 */
 
 export default function App() {
+  const leftPanelElRef = useRef<HTMLDivElement>(null);
+  const rightPanelElRef = useRef<HTMLDivElement>(null);
+  const mainElRef = useRef<HTMLDivElement>(null);
   // plan-308-1555 M7：删除了原先的第二个开屏界面（纯 logo 蒙层）。
   // 用户要求只保留主进程 loading.html 那一个带加载指示的启动界面——
   // 两个开屏叠在一起会先看到「加载中」再闪一个「无加载图标的 logo」，观感割裂。
@@ -43,8 +56,27 @@ export default function App() {
   const rightFullscreen = usePanelStore((s) => s.fullscreen);
   const setRightPanelWidth = usePanelStore((s) => s.setWidth);
 
+  /** 左栏折叠/展开（S7）：与右栏同走 applyPaneUpdate——View Transition 快照动画，
+   *  布局一次性到位、主线程逐帧零布局；能力缺失或用户要求减少动效时自动退化。 */
+  const toggleSidebar = useCallback(() => {
+    applyPaneUpdate(() => setSidebarCollapsed((v) => !v));
+  }, []);
+  const toggleRightPanel = useCallback(() => {
+    if (usePanelStore.getState().fullscreen) return;
+    usePanelStore.getState().togglePanel();
+  }, []);
+
   useEffect(() => {
     initTheme(); initUi();
+    // 毛玻璃关闭（重启后生效）→ 标题栏切回系统原生 drag 区（Windows 自带拖拽/
+    // 双击最大化）。查询必须用窗口**实际**玻璃状态而非偏好：偏好关但未重启时窗口
+    // 仍是玻璃，提前切原生拖拽+原生最大化会弄丢 acrylic。失败时保持默认（自研拖拽）。
+    void window.chatcoderAPI?.getGlassActive?.()
+      .then((active) => {
+        if (active === false) document.documentElement.setAttribute("data-window-drag", "native");
+        else document.documentElement.removeAttribute("data-window-drag");
+      })
+      .catch(() => { /* 能力探测失败：保持自研拖拽，不影响启动 */ });
     // 更新状态通道：订阅主进程推送（侧栏/关于页共享）
     useUpdaterStore.getState().init();
     // 启动全局状态通道：跨会话运行态/活动时间（侧栏实时化，不随会话切换重建）
@@ -54,8 +86,19 @@ export default function App() {
 
     // 全局焦点保护：覆盖"切换页面后输入框无法聚焦/IME 卡死"的兜底逻辑
     const guard = installFocusGuard();
+    // 主进程在改窗口几何前同步发来运动态（IPC window:motion）。
+    // S7 起面板折叠/展开的过渡由 applyPaneUpdate 接管（View Transition），
+    // 不再需要 chatcoder:panel-before-* 事件。
+    const offMotion = window.chatcoderAPI?.onWindowMotion?.((payload) => {
+      const active = payload?.active === true;
+      (window as unknown as { __chatcoderWindowMotion?: boolean }).__chatcoderWindowMotion = active;
+      document.documentElement.setAttribute("data-window-motion", active ? "1" : "0");
+      setWindowMotion(active); // PerfBus：窗口几何运动状态（S3）
+      window.dispatchEvent(new CustomEvent("chatcoder:window-motion", { detail: { active } }));
+    });
     return () => {
       guard.dispose();
+      offMotion?.();
       useChatStore.getState().disconnectGlobalEvents();
     };
   }, []);
@@ -65,7 +108,7 @@ export default function App() {
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "b") {
         e.preventDefault();
-        setSidebarCollapsed((v) => !v);
+        toggleSidebar();
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "j") {
         e.preventDefault();
@@ -74,7 +117,7 @@ export default function App() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, []);
+  }, [toggleSidebar]);
 
   const openSettings = useCallback((tab?: string) => {
     const { currentSessionId } = useChatStore.getState();
@@ -82,16 +125,16 @@ export default function App() {
     if (tab) setSettingsActiveTab(tab as SettingsTab);
     setSettingsTab(tab);
     setNav("settings");
-    setSidebarCollapsed(false);
+    if (sidebarCollapsed) toggleSidebar();
     // 问题1: 进入设置页自动折叠右面板（记录展开态，离开时恢复）
     settingsPanelExpandedRef.current = usePanelStore.getState().expanded;
-    usePanelStore.getState().closePanel();
-  }, [nav]);
+    if (settingsPanelExpandedRef.current) toggleRightPanel();
+  }, [nav, sidebarCollapsed, toggleSidebar, toggleRightPanel]);
 
   const leaveSettings = useCallback(() => {
     const target = returnLocation;
     // 问题1: 离开设置页恢复右面板展开态
-    if (settingsPanelExpandedRef.current) usePanelStore.getState().openPanel();
+    if (settingsPanelExpandedRef.current) toggleRightPanel();
     setNav(target.nav);
     if (target.sessionId === null) {
       useChatStore.setState({ currentSessionId: null, ...{
@@ -108,7 +151,7 @@ export default function App() {
     window.setTimeout(() => {
       window.dispatchEvent(new CustomEvent("chatcoder:focus-composer"));
     }, 50);
-  }, [returnLocation]);
+  }, [returnLocation, toggleRightPanel]);
 
   // v16: 模型选择器「管理模型」入口 —— 打开设置页并定位到模型 tab
   useEffect(() => {
@@ -125,23 +168,28 @@ export default function App() {
   }, [settingsTab, nav]);
   // 设置入口由 openSettings 捕获，避免 nav 变化后覆盖首页的会话 ID。
 
-  const leftPanelElRef = useRef<HTMLDivElement>(null);
-  const rightPanelElRef = useRef<HTMLDivElement>(null);
+  /** 中间区容器 ref：分隔条拖拽期间其内容根（PageTransition）被 ResizeHandle 冻结，
+   *  消息 markdown/虚拟列表不再随面板宽度每帧重排（性能冻结，见 ResizeHandle Props）。 */
 
   // 左栏折叠 = 0px 隐藏（展开按钮移到标题栏左侧，和 logo/导航箭头一起）
   useEffect(() => {
     const el = leftPanelElRef.current;
     if (!el) return;
-    if (sidebarCollapsed) { el.style.width = "0px"; el.style.flexBasis = "0px"; }
-    else { el.style.width = leftPanelWidth + "px"; el.style.flexBasis = leftPanelWidth + "px"; }
+    el.style.width = (sidebarCollapsed ? 0 : leftPanelWidth) + "px";
+    el.style.flexBasis = el.style.width;
   }, [sidebarCollapsed, leftPanelWidth]);
 
   useEffect(() => {
     const el = rightPanelElRef.current;
     if (!el) return;
-    if (rightExpanded && !rightFullscreen) { el.style.width = rightPanelWidth + "px"; el.style.flexBasis = rightPanelWidth + "px"; }
-    else if (rightFullscreen) { el.style.width = ""; el.style.flexBasis = ""; }
-    else { el.style.width = "0px"; el.style.flexBasis = "0px"; }
+    if (rightFullscreen) {
+      el.style.width = "";
+      el.style.flexBasis = "";
+      return;
+    }
+    const width = rightExpanded ? rightPanelWidth : 0;
+    el.style.width = width + "px";
+    el.style.flexBasis = el.style.width;
   }, [rightExpanded, rightPanelWidth, rightFullscreen]);
 
   return (
@@ -163,12 +211,14 @@ export default function App() {
             <PluginSlot slot="sidebar" active={nav} onChange={(k: NavKey) => { if (k === "settings") { openSettings(); return; } setNav(k); if (k === "chat") { useChatStore.setState({ currentSessionId: null, messages: [], turns: [], tasks: [], runningTurnId: null, isRunning: false, interruptedTurnId: null, streamingBuffers: {}, thinkingBuffers: {}, usage: null, pendingApproval: null, pendingPlan: null, reviewedFiles: {} }); } }} onSessionFocus={() => setNav(null)} collapsed={sidebarCollapsed} onToggleCollapse={() => setSidebarCollapsed((v) => !v)} />
           )}
         </div>
+        {/* RFL-1（plan-329-1647 S4）：不再传 freezeRefs——拖左分隔条时中列内容宽度实时跟随，
+            消息流文本逐帧折行（用户反馈「拖拽时排版不实时」）。性能改由 PerfBus 零读预算兜。 */}
         {!sidebarCollapsed && <ResizeHandle side="left" baseWidth={leftPanelWidth} minWidth={200} maxWidth={480} reservePx={370} panelEl={leftPanelElRef} onCommit={setLeftPanelWidth} />}
         <div className="app-right">
           {/* v19: 标题栏与右面板经插件 slot 渲染 */}
-          <PluginSlot slot="titlebar" leftCollapsed={sidebarCollapsed} rightCollapsed={!rightExpanded} settings={nav === "settings"} onToggleLeft={() => setSidebarCollapsed((v) => !v)} onToggleRight={() => usePanelStore.getState().togglePanel()} />
+          <PluginSlot slot="titlebar" leftCollapsed={sidebarCollapsed} rightCollapsed={!rightExpanded} settings={nav === "settings"} onToggleLeft={toggleSidebar} onToggleRight={toggleRightPanel} />
           <div className="app-body">
-            <main className={`app-main${!rightExpanded ? " right-panel-collapsed" : ""}`}>
+            <main ref={mainElRef} className={`app-main${!rightExpanded ? " right-panel-collapsed" : ""}`}>
               {/* plan-282-1421（第3项）：设置 ↔ 工作区切换过渡（id 为页面标识）。
                   App.tsx 与 settings/Workspace 内层过渡叠加时也不会位移：两者都是
                   transform/opacity，且内层只在 tab/session 变化时重播。 */}
@@ -178,8 +228,10 @@ export default function App() {
                   : <Workspace nav={nav} onSessionStart={() => setNav(null)} />}
               </PageTransition>
             </main>
-            {/* plan-95: reservePx=主区 min-width 480 + 手柄宽 10，动态上限防溢出裁剪 */}
-            {rightExpanded && !rightFullscreen && <ResizeHandle side="right" baseWidth={rightPanelWidth} minWidth={280} maxWidth={1200} reservePx={490} panelEl={rightPanelElRef} onCommit={setRightPanelWidth} />}
+            {/* plan-95: reservePx=主区 min-width 480 + 手柄宽 10，动态上限防溢出裁剪。
+                RFL-1（S4）：freezeRefs 收窄为仅右面板内容根——中列实时跟随（消息流逐帧折行），
+                右面板内的 Monaco/xterm 不逐帧重排，松手后由收敛序列一次解冻。 */}
+            {rightExpanded && !rightFullscreen && <ResizeHandle side="right" baseWidth={rightPanelWidth} minWidth={280} maxWidth={1200} reservePx={490} panelEl={rightPanelElRef} onCommit={setRightPanelWidth} freezeRefs={[rightPanelElRef]} />}
             <div ref={rightPanelElRef} className={`app-pane app-pane-right${rightExpanded ? "" : " collapsed"}${rightFullscreen ? " fullscreen" : ""}`} style={{ width: rightExpanded ? (rightFullscreen ? "100%" : `${rightPanelWidth}px`) : "0px", flexBasis: rightExpanded ? (rightFullscreen ? "100%" : `${rightPanelWidth}px`) : "0px" }}>
               {rightExpanded && <PluginSlot slot="right-panel" />}
             </div>

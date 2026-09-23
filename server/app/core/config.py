@@ -124,6 +124,20 @@ class Settings(BaseSettings):
     # 生效优先级：项目 .chatcoder/config.toml 或 profile 显式配置 > 此处全局设置。
     sandbox_mode: str = "workspace-write"
 
+    # v36 (plan-321-1600 R2): 工作目录外读取的自动审批开关。
+    # 关闭（默认）：fs_read/fs_list/fs_grep 读工作区外路径时弹审批卡；
+    # 开启：直接放行（不再弹卡）；完全访问沙箱（danger-full-access）无论开关如何都免审。
+    auto_approve_outside_read: bool = False
+
+    # v36 (plan-321-1600 R3): ta3 额度自动透支——模型请求报错时查一次额度，
+    # 日额度 >=100% 时自动尝试透支一次（带冷却；日额度后透支本周额度）。
+    auto_overdraft_on_quota_exceeded: bool = False
+
+    # v46: ta3 额度自动重置——模型请求报错时查一次额度，某窗口 >=100% 时自动提交一次
+    # 重置（周/月窗走 /quota/reset，日窗无重置能力则退化为透支）。与上面的自动透支
+    # 并列，两者各自独立开关，共用同一套冷却与"尽力而为"语义。
+    auto_reset_on_quota_exceeded: bool = False
+
     # plan-230-1144 M1.1: 定时任务调度循环开关。
     # 此前 scheduled_tasks 表只有 CRUD、无任何消费者，用户建的任务永不执行；
     # 现由 services/scheduler_loop.py 的 tick 循环驱动。默认开启，
@@ -242,9 +256,20 @@ class Settings(BaseSettings):
 
     # v4.6: 单会话 token 预算--超过此值任务自动终止
     session_token_budget: int = 2_000_000
-    # v10: 单个 turn 的子代理数量上限——主代理 spawn_subagent 的硬性限制。
+    # v10: 单个 turn 的子代理派发总量上限（含已完成/失败的）——主代理 spawn_subagent 的硬性限制。
     # 超过上限时拒绝新子代理并提示主代理合并/串行处理，防止无限拆分导致资源失控。
-    max_subagents_per_turn: int = 6
+    # v36: 默认由 6 上调至 10（配合并发排队，给并行拆分留足空间）；设置中心「子代理」可改（1~32）。
+    max_subagents_per_turn: int = 10
+    # v36 (plan-321-1600 M3): 子代理并发治理——同时“运行中”的子代理达该值时，
+    # 新派发先排队等任意一个结束（不再像旧行为那样直接拒绝）。
+    # v36 优化：默认由 4 上调至 6；设置中心「子代理」可改（1~16）。
+    max_concurrent_subagents: int = 6
+    # v36: 排队等待上限（秒）——等不到空位时不再干等，直接放行，避免阻塞主代理。
+    subagent_queue_wait_s: float = 60.0
+    # plan-330-1648 M7: 单个子代理的 token 预算上限（0 = 不限）。
+    # spawn 时下发为 run_agent_loop 的 token_budget，超限即熔断并按结构化汇报“预算耗尽”，
+    # 避免子代理无人看管地无限消耗（此前 spawn 路径从不传预算）。
+    subagent_token_budget: int = 0
     # v13: 任务规划与拆分
     task_split_confirm: bool = True
     # v2.2 (对齐 zcode 3.9): todo 提醒间隔——模型维护的执行清单连续 N 步未更新时
@@ -257,7 +282,7 @@ class Settings(BaseSettings):
     # 重新注入一次语言锚（ZCode 的 TURNS_BETWEEN_ATTACHMENTS=5 为轮次口径，本项目按
     # 步计，取更保守的 10）。语言纪律此前只在上下文构建时静态注入一次，长 turn 内
     # 锚点随步骤稀释后不再重申，是确认执行后语言漂移的直接原因；0 = 禁用。
-    language_reminder_interval: int = 10
+    language_reminder_interval: int = 1
     # plan-19-82 增强：规则遵循重申间隔——每 N 步重申用户规则优先级，对抗长上下文
     # 下规则段被工具结果挤出注意力范围（对齐 ZCode 对 AGENTS.md 的 OVERRIDE 语义）；
     # 0 = 禁用。默认比语言重申更稀疏（规则比语言更稳定，无需过密）。

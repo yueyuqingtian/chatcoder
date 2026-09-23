@@ -17,6 +17,47 @@ logger = logging.getLogger(__name__)
 _MAX_QUESTIONS = 4
 
 
+def _normalize_option(opt: Any) -> str:
+    """模型可能把选项写成 {label, description} 对象（schema 要求字符串）——
+    统一压成展示文本，避免前端把对象当 React 子元素渲染导致整页崩溃。"""
+    if isinstance(opt, str):
+        return opt
+    if isinstance(opt, dict):
+        def pick(keys: tuple[str, ...]) -> str:
+            for k in keys:
+                v = opt.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            return ""
+
+        label = pick(("label", "text", "title", "value", "name"))
+        desc = pick(("description", "desc", "detail", "hint"))
+        if label and desc:
+            return f"{label} — {desc}"
+        if label or desc:
+            return label or desc
+        try:
+            return json.dumps(opt, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(opt)
+    return str(opt)
+
+
+def _normalize_questions(questions: list[Any]) -> list[Any]:
+    """每个问题的 options 规范化为字符串数组（其余字段原样保留）。"""
+    out: list[Any] = []
+    for q in questions:
+        if isinstance(q, dict):
+            item = dict(q)
+            opts = item.get("options")
+            if isinstance(opts, list):
+                item["options"] = [_normalize_option(o) for o in opts]
+            out.append(item)
+        else:
+            out.append(q)
+    return out
+
+
 class AskUserQuestionTool(Tool):
     name = "ask_user_question"
     risk_level = "low"
@@ -52,6 +93,7 @@ class AskUserQuestionTool(Tool):
                                     "question": {"type": "string"},
                                     "options": {
                                         "type": "array",
+                                        "description": "选项文本数组（必须为字符串，不要用 {label, description} 对象）",
                                         "items": {"type": "string"},
                                     },
                                     "allow_custom": {"type": "boolean"},
@@ -70,6 +112,9 @@ class AskUserQuestionTool(Tool):
         if not isinstance(questions, list) or not questions:
             return ToolResult(ok=False, output="", error="questions 不能为空")
         questions = questions[:_MAX_QUESTIONS]
+        # v36 紧急修复：规范化选项——模型常把 options 写成 [{label, description}] 对象数组，
+        # 旧前端把对象当 React 子元素渲染会抛 React #31 并整页崩溃（用户实测）。
+        questions = _normalize_questions(questions)
 
         approval_id = approval_manager.new_id()
         detail = {

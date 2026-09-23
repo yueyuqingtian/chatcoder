@@ -231,14 +231,73 @@ async def ta3_model_status(provider_id: int, model: str | None = None,
         _raise_quota_http(e, provider_id, "模型状态查询")
 
 
+async def _silent_relogin(db: AsyncSession, provider_id: int, api_base: str) -> bool:
+    """静默重登录（v36 plan-321-1600 R3）：先无感刷新 token；无 refresh_token 或刷新
+    失败时再走一次登录流程（IM 静默登录可用时立即成功）。失败不抛错。
+
+    返回是否拿到新的登录态（供调用方判断是否值得重试）。
+    """
+    refreshed = False
+    try:
+        row = await ta3_session.load_auth(db, provider_id)
+        if row is not None and row.refresh_token:
+            await ta3_session.ensure_token(db, provider_id, api_base)
+            refreshed = True
+    except Exception as e:  # noqa: BLE001
+        logger.info("[ta3] provider=%s token 刷新失败(%s)，降级尝试静默登录", provider_id, e)
+
+    if refreshed:
+        ta3_quota.clear_cache(provider_id)
+        return True
+
+    try:
+        result = await ta3_oauth.start_login(db, provider_id, api_base)
+    except Exception:  # noqa: BLE001
+        logger.warning("[ta3] provider=%s 静默重登录失败(非阻塞)", provider_id, exc_info=True)
+        return False
+
+    ta3_quota.clear_cache(provider_id)
+    if result.get("status") != "logged_in":
+        # 需要浏览器 PKCE 的场合不在静默重试里拉起浏览器，交给用户手动登录
+        logger.info("[ta3] provider=%s 静默重登录未完成(status=%s)", provider_id, result.get("status"))
+        return False
+
+    # 登录态回写供应商（与 login/start 同口径）
+    account = result.get("account") or {}
+    _label = str(account.get("label") or account.get("id") or "")[:80] or None
+    from app.persistence.database import run_write_locked
+
+    def _p(s):
+        from app.persistence.models.model_reg import Provider
+        row = s.get(Provider, provider_id)
+        if row is not None:
+            row.auth_status = "logged_in"
+            row.account_label = _label
+        s.commit()
+
+    await run_write_locked(_p, label=f"ta3.relogin_state.{provider_id}")
+    return True
+
+
 @router.post("/providers/{provider_id}/ta3/admin-web")
 async def ta3_admin_web(provider_id: int, db: AsyncSession = Depends(get_db)):
-    """生成「后台网页」SSO 免登链接（进入网页查看剩余额度）；前端用系统浏览器打开。"""
+    """生成「后台网页」SSO 免登链接（进入网页查看剩余额度）；前端用系统浏览器打开。
+
+    v36 (plan-321-1600 R3): 偶发失败（登录态过期/服务端抖动）时**先不报错**——
+    静默重登录一次并重试一次；仍失败才把错误抛给前端（用户要求的重试口径）。
+    """
     provider = await _get_ta3_provider(db, provider_id)
     api_base = _resolve_api_base(provider)
     try:
         url = await ta3_quota.build_admin_web_url(db, provider_id, api_base)
-    except Exception as e:  # noqa: BLE001
-        _raise_quota_http(e, provider_id, "后台网页链接生成")
+    except Exception as first_err:  # noqa: BLE001
+        logger.info(
+            "[ta3] provider=%s 后台网页链接生成失败，静默重登录后重试: %s", provider_id, first_err,
+        )
+        await _silent_relogin(db, provider_id, api_base)
+        try:
+            url = await ta3_quota.build_admin_web_url(db, provider_id, api_base)
+        except Exception as e:  # noqa: BLE001
+            _raise_quota_http(e, provider_id, "后台网页链接生成")
     return {"ok": True, "url": url}
 

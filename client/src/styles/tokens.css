@@ -446,6 +446,9 @@
   --dur-normal: var(--dur-3);
   --dur-slow: var(--dur-4);
   --dur-view: var(--dur-4);
+  /* plan-329-1647 S7：面板折叠 / 全屏切换的 View Transition 快照时长。
+     取 180ms（≈旧 CSS width 过渡的观感），已含 --motion-scale 系数。 */
+  --dur-pane: var(--dur-3);
   /* zcode 默认过渡曲线；emphasize 收编原散落的 cubic-bezier(0.2,0,0,1) */
   --curve: cubic-bezier(0.4, 0, 0.2, 1);
   --curve-emphasize: cubic-bezier(0.2, 0, 0, 1);

@@ -62,10 +62,18 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
     ipcRenderer.on("window:renderer-focus", handler);
     return () => ipcRenderer.removeListener("window:renderer-focus", handler);
   },
+  // 窗口几何运动：主进程在改尺寸前同步通知，渲染层据此暂停消息流重测。
+  onWindowMotion: (cb) => {
+    const handler = (_e, payload) => cb(payload || { active: false });
+    ipcRenderer.on("window:motion", handler);
+    return () => ipcRenderer.removeListener("window:motion", handler);
+  },
   // 外部穿透开关（透桌面/其他软件颜色）
   setExternalBackdrop: (on) => ipcRenderer.send("window:setExternalBackdrop", !!on),
   // plan-546/plan-308-1542: 毛玻璃模式（Win11 acrylic / Win10 ACCENT 系统模糊 / mac vibrancy）
   setGlassMode: (on) => ipcRenderer.invoke("window:setGlass", !!on),
+  // 查询当前窗口实际玻璃状态（false = 毛玻璃已关，标题栏/最大化走 Windows 原生行为）
+  getGlassActive: () => ipcRenderer.invoke("window:getGlassActive"),
   // plan-26-116：液态玻璃（折射版）/玻璃诊断/自检的渲染层入口已全部移除（只保留毛玻璃）。
   // 当前系统用户名（侧栏底部用户条展示，对齐 zcode）
   getUsername: () => {

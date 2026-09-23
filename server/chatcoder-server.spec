@@ -24,6 +24,21 @@ datas = [
     (str(SERVER_DIR / "app" / "data"), "app/data"),
 ]
 
+# 内置 Chromium 浏览器二进制（约 430MB）：让浏览器工具开箱可用，用户无需手动执行
+# playwright install chromium。由 server/prepare-playwright-browsers.ps1 生成到
+# server/vendor/ms-playwright，运行时 app/core/browser_env.py 把
+# PLAYWRIGHT_BROWSERS_PATH 指向产物内的 _internal/ms-playwright。
+# 目录缺失时不阻塞构建（产物退回"用户需自行安装浏览器"的旧行为），
+# 但正式发布走 build-release.ps1，那里有硬性守门。
+_BROWSERS_STAGING = SERVER_DIR / "vendor" / "ms-playwright"
+if _BROWSERS_STAGING.is_dir():
+    datas.append((str(_BROWSERS_STAGING), "ms-playwright"))
+else:
+    print(
+        "[chatcoder-server.spec] 警告: 未找到 %s，产物将不含内置浏览器；"
+        "请先运行 server/prepare-playwright-browsers.ps1" % _BROWSERS_STAGING
+    )
+
 hiddenimports = [
     "sqlite3",
     "uvicorn.logging",

@@ -183,6 +183,11 @@
 .ta3-quota-window-foot { margin-top: 6px; font-size: 11px; color: var(--text-3); line-height: 1.5; }
 .ta3-quota-hint { margin-top: 6px; font-size: 11px; color: var(--text-3); line-height: 1.5; }
 .ta3-quota-hint.warn { color: var(--warning); }
+/* v36 (plan-321-1600 R3): 额度动作按钮（日额透支 / 周额重置）与自动透支配置行 */
+.ta3-quota-window-actions { display: flex; gap: 6px; margin-top: 8px; }
+.ta3-quota-setting { display: flex; flex-direction: column; gap: 4px; margin: 10px 0 12px; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-sm); }
+.ta3-quota-setting-label { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-1); cursor: pointer; }
+.ta3-quota-setting-label input { accent-color: var(--accent); }
 .ta3-quota-trend { display: flex; flex-direction: column; gap: 8px; }
 .ta3-quota-trend-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; font-weight: 600; color: var(--text-2); }
 .ta3-quota-seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--r-sm); overflow: hidden; }

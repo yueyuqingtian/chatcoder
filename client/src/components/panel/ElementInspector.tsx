@@ -50,8 +50,12 @@ export const ElementInspector = memo(function ElementInspector({
         className="devtools-inspector-highlight"
         style={{
           position: "absolute",
-          left: rect.x,
-          top: rect.y,
+          // plan-329-1647 S5：位置改由 transform 驱动（合成器属性，不触发布局）。
+          // 原来用 left/top 定位，且 `transition: all 0.05s ease-out` 会把 width/height
+          // 一并纳入过渡——悬停移动时四个布局属性每帧都在过渡，等于逐帧强制重排 + 重绘。
+          left: 0,
+          top: 0,
+          transform: `translate3d(${rect.x}px, ${rect.y}px, 0)`,
           width: rect.width,
           height: rect.height,
           pointerEvents: "none",
@@ -60,7 +64,7 @@ export const ElementInspector = memo(function ElementInspector({
           border: "1.5px solid #2563EB",
           boxShadow: "0 0 0 1px rgba(255, 255, 255, 0.3)",
           boxSizing: "border-box",
-          transition: "all 0.05s ease-out",
+          transition: "transform 0.05s ease-out",
         }}
       />
 
@@ -69,8 +73,11 @@ export const ElementInspector = memo(function ElementInspector({
         className="devtools-inspector-tip"
         style={{
           position: "absolute",
-          left: tipX,
-          top: tipY,
+          // plan-329-1647 S5：同上，位置走 transform（只过渡 transform，不碰布局属性）。
+          left: 0,
+          top: 0,
+          transform: `translate3d(${tipX}px, ${tipY}px, 0)`,
+          transition: "transform 0.05s ease-out",
           width: TIP_W,
           pointerEvents: "none",
           zIndex: 50,

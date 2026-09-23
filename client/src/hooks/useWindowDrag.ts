@@ -133,15 +133,8 @@ export function useWindowDrag() {
         try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* ignore */ }
         window.chatcoderAPI?.startWindowDrag?.();
       }
-      // 按帧合并：pointermove 可能一帧内触发多次（高刷屏 / 慢速拖动更密集），
-      // 每次都发 IPC 会让主进程反复写窗口几何。合并到每帧一次即可——
-      // 主进程本就按"当前光标位置"反算，重复的中间值没有任何额外信息。
-      if (rafRef.current !== null) return;
-      rafRef.current = requestAnimationFrame(() => {
-        rafRef.current = null;
-        if (!draggingRef.current) return; // 帧间已结束拖拽
-        window.chatcoderAPI?.moveWindowDrag?.();
-      });
+      // 移动由主进程按显示器刷新率读取光标推进。渲染层不再逐帧发 IPC，
+      // 否则帧率会被进程往返卡住，而不是被刷新率卡住。
     },
     [],
   );

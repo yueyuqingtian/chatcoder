@@ -127,6 +127,8 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("trae_auth", "credential_id", "BIGINT"),
     # ========== provider_credentials（plan-290：连续失败计数，达到阈值才冷却）==========
     ("provider_credentials", "fail_count", "INTEGER DEFAULT 0 NOT NULL"),
+    # ========== subagent_profiles（plan-330-1648 M2：子代理思考深度档位覆盖）==========
+    ("subagent_profiles", "reasoning_effort", "VARCHAR(20)"),
 ]
 
 

@@ -59,6 +59,8 @@ class ContextBundle:
     # plan-19-82: 本轮回复语言（zh/en/auto），由 build_*_context 按用户消息检测后填充；
     # engine 透传给 run_agent_loop，使压缩摘要 / checkpoint 文案与回复语言一致。
     reply_language: str = "auto"
+    # 语言来源：global / project / user。提醒与系统提示必须用同一份裁决。
+    reply_language_source: str = "user"
     # plan-19-82 增强（对齐 ZCode ContextBuilder 的通道化注入）：规则段独立成通道。
     # 此前规则与工具说明/结构摘要/记忆全部拼进同一条 developer 消息，规则被噪声稀释；
     # ZCode 把 userInstructions（AGENTS.md 等）放进独立的 meta_user 通道并加 OVERRIDE 裁决。
@@ -489,6 +491,31 @@ async def _symbol_index_hint(workspace: str) -> str:
     )
 
 
+async def _resolve_rule_language(workspace: str, project, user_lang: str) -> tuple[str, str]:
+    """全局规则 > 项目规则 > 用户消息。规则读取失败时退回用户消息语言。"""
+    from app.orchestration.prompts.language import resolve_reply_language
+    from app.orchestration.user_rules_loader import load_global_rules, load_workdir_rules
+
+    global_rules = ""
+    workdir_rules = ""
+    project_rules = ""
+    try:
+        global_rules = load_global_rules()
+        workdir_rules = load_workdir_rules(workspace)
+    except Exception:
+        logger.debug("[context] 设置规则读取失败，语言退回用户消息", exc_info=True)
+    try:
+        project_rules = await load_session_rules(workspace, project.rules_docs if project else None)
+    except Exception:
+        logger.debug("[context] 项目规则文档读取失败，语言不采用该层", exc_info=True)
+    return resolve_reply_language(
+        user_lang,
+        global_rules=global_rules,
+        project_rules=project_rules,
+        workdir_rules=workdir_rules,
+    )
+
+
 async def _resolve_session_language(db: AsyncSession, session_id: int | None,
                                     primary_text: str) -> str:
     """解析本轮回复语言（plan-19-82 步骤 7 边界处理）。
@@ -583,23 +610,27 @@ async def build_main_context(
     # plan-19-82: 回复语言由「本轮最新用户消息」决定（与界面语言设置无关）。
     # 空消息/纯附件场景回退检索最近一条含文本的 user 消息，避免误判。
     _lang_src = user_message if language_text is None else language_text
-    _reply_lang = await _resolve_session_language(db, getattr(session, "id", None), _lang_src)
+    _user_lang = await _resolve_session_language(db, getattr(session, "id", None), _lang_src)
+    _reply_lang, _lang_source = await _resolve_rule_language(workspace, project, _user_lang)
 
     if ta3_meta is not None:
         from app.orchestration.prompts.ta3_fusion import build_ta3_system_prompt
         system_prompt = build_ta3_system_prompt(
             ta3_meta, workspace=workspace, enable_subagents=enable_subagents,
             sandbox_mode=_sandbox, language=_reply_lang,
+            language_source=_lang_source,
         )
         logger.info("[context] 会话 %s 使用 ta3 还原式系统提示词", session.id if session else "-")
     else:
         system_prompt = build_main_system_prompt(enable_subagents=enable_subagents,
                                                  plan_flow_enabled=_is_plan_mode,
-                                                 language=_reply_lang)
+                                                 language=_reply_lang,
+                                                 language_source=_lang_source)
     bundle = ContextBundle(
         system=system_prompt,
         instruction=user_message,
         reply_language=_reply_lang,
+        reply_language_source=_lang_source,
     )
     # v16（用户要求）：移除重建时的静默渐进摘要 —— 重建不再改写历史。
     # 此前按 0.85×窗口（且窗口口径可能与实际调用模型不一致）静默摘要并落库
@@ -618,7 +649,7 @@ async def build_main_context(
     # 1.1 Reply Language（plan-19-82）：显式语言锚点，紧随 Current Goal。
     # 语言纪律已作为系统提示首尾双锚注入，这里再在注意力最高处落一行单锚，降低漂移。
     from app.orchestration.prompts.language import build_language_pin_line
-    bundle.developer_parts.append(build_language_pin_line(_reply_lang))
+    bundle.developer_parts.append(build_language_pin_line(_reply_lang, source=_lang_source))
     # 1.2 Rule Documents（plan-19-82 步骤 4）：规则段**前移**到 developer 段最前部并加 MANDATORY 语义。
     # 现状（本轮改造前）规则在第 4/4.1 位且标题无强制语义，模型容易忽略 → 遵循度不足。
     # 加载提前到此，顺序：Global Rules（优先级最高）→ Project Rules（工作区文档 + 工作目录规则）。
@@ -674,7 +705,9 @@ async def build_main_context(
         from app.orchestration.prompts import build_rules_anchor
         from app.orchestration.rules_loader import list_rules_doc_names
         _doc_names = await list_rules_doc_names(workspace, project.rules_docs if project else None)
-        bundle.rules_anchor = build_rules_anchor(_reply_lang, _doc_names)
+        bundle.rules_anchor = build_rules_anchor(
+            _reply_lang, _doc_names, language_source=_lang_source,
+        )
         if bundle.instruction:
             bundle.instruction = bundle.rules_anchor + "\n\n" + bundle.instruction
     except Exception:
@@ -1063,7 +1096,14 @@ async def build_subagent_context(
     handoff_summary: str,
     original_request: str = "",
 ) -> ContextBundle:
-    """构建子代理上下文（交接摘要 + 用户原始请求 + 主会话摘要 + 项目规则）。
+    """构建子代理上下文（plan-330-1648 M3：子代理 = 受限的新会话）。
+
+    与主会话上下文（build_main_context）**逐项对齐**：同一规则通道（Global / Project
+    MANDATORY）、同一语言锚点与语言纪律、同一工作目录/工具规则/shell 提示/符号索引提示、
+    同一项目结构摘要。隔离边界仅体现在替代项：
+      - 「原始用户请求」替代主代理的 Current Goal；
+      - 「交接摘要」说明子任务来源与范围；
+      - 「主会话摘要」替代历史消息窗口（子代理不加载完整对话历史）。
 
     v19: 修复上下文继承断裂——子代理此前仅能看到 handoff 摘要，不知道用户
     原始诉求与主会话进展；现注入 original_request 与主会话 shared_context 摘要。
@@ -1073,14 +1113,32 @@ async def build_subagent_context(
     workspace = session.worktree_path or (project.path if project else "")
     # plan-19-82: 语言以用户原始请求为准（缺则回退任务标题/描述）
     _lang_text = original_request or f"{task.title or ''}\n{task.description or ''}"
-    _reply_lang = await _resolve_session_language(db, getattr(session, "id", None), _lang_text)
+    _user_lang = await _resolve_session_language(db, getattr(session, "id", None), _lang_text)
+    _reply_lang, _lang_source = await _resolve_rule_language(workspace, project, _user_lang)
     bundle = ContextBundle(
         system=build_subagent_system_prompt(task.title or "", task.acceptance_criteria or "",
-                                            language=_reply_lang),
+                                            language=_reply_lang, language_source=_lang_source),
         # plan-19-82: instruction 由写死英文改为语言中立，避免把子代理汇报语言带向英文
         instruction=f"Start working on the assigned task: {task.title}",
         reply_language=_reply_lang,
+        reply_language_source=_lang_source,
     )
+    # plan-330-1648 M3: 与主代理同口径——本轮规则锚点前置到 instruction，让“读指令”
+    # 与“遵循规则”落在同一注意力窗口（锚点会点名本轮实际加载的规则文档）。
+    try:
+        from app.orchestration.prompts import build_rules_anchor
+        from app.orchestration.rules_loader import list_rules_doc_names
+        _doc_names = await list_rules_doc_names(workspace, project.rules_docs if project else None)
+        bundle.rules_anchor = build_rules_anchor(
+            _reply_lang, _doc_names, language_source=_lang_source,
+        )
+        if bundle.instruction:
+            bundle.instruction = bundle.rules_anchor + "\n\n" + bundle.instruction
+    except Exception:
+        logger.debug("[context] 子代理规则锚点注入失败(非阻塞)", exc_info=True)
+    # plan-330-1648 M3: 语言锚点行（与主代理同一行文与位置语义——紧贴任务指令之前）
+    from app.orchestration.prompts.language import build_language_pin_line
+    bundle.developer_parts.append(build_language_pin_line(_reply_lang, source=_lang_source))
     if original_request:
         bundle.developer_parts.append(f"## Original User Request\n{original_request[:2000]}")
     bundle.developer_parts.append(f"## Current Task\nTitle: {task.title}")
@@ -1113,6 +1171,12 @@ async def build_subagent_context(
             _rule_fragments.append(
                 "## Project Rules (MANDATORY)\n" + "\n\n".join(_rules_parts)
             )
+        else:
+            # plan-330-1648 M3: 与主代理同口径的兑底文案（无规则文档时明确告知）
+            _rule_fragments.append(
+                "## Project Rules\n(未检测到 AGENTS.md / CLAUDE.md 等项目规则文档。"
+                "如工作区存在约定，请按既有代码风格与目录结构执行。)"
+            )
     except Exception:
         logger.debug("[context] 子代理规则加载失败(非阻塞)", exc_info=True)
     bundle.rules_parts.extend(_rule_fragments)
@@ -1133,18 +1197,41 @@ async def build_subagent_context(
     )
     # v1.2: 注入 shell 环境说明（与主代理一致，防止用错 shell 语法）
     ws_ctx += "\n\n" + shell_hint()
+    # plan-330-1648 M3: 符号索引状态提示（与主代理一致，鼓励用 symbol_search / outline 探索）
+    try:
+        _idx_hint = await _symbol_index_hint(workspace)
+        if _idx_hint:
+            ws_ctx += "\n\n" + _idx_hint
+    except Exception:
+        logger.debug("[context] 子代理符号索引提示注入失败(非阻塞)", exc_info=True)
     bundle.developer_parts.append(ws_ctx)
+    # plan-330-1648 M3: 项目结构摘要（与主代理一致，子代理不必自行摸索目录布局）
+    try:
+        structure = await project_structure_brief(workspace)
+        if structure:
+            bundle.developer_parts.append(f"## Project Structure\n{structure}")
+    except Exception:
+        logger.debug("[context] 子代理项目结构注入失败(非阻塞)", exc_info=True)
     # plan-19-82: 原「子代理规则块尾部重复注入（Project Rules (workdir) / Global Rules）」
     # 已统一到上方前移的 MANDATORY 规则段，此处不再重复注入。
-    # plan-248-1258 M6: 结构化汇报要求——主代理据此精准整合（此前 free-form 汇报信息量不足）
+    # plan-248-1258 M6: 结构化汇报要求——主代理据此精准整合（此前 free-form 汇报信息量不足）。
+    # v36 (plan-321-1600 M1): 契约统一为六节——新增 Verification（验证动作与结果）与
+    # Acceptance（逐条对照验收标准），补上此前“缺验收闭环/缺验证证据”的缺口；
+    # 原文案不得再出现不存在的 report_to_leader 工具（子代理工具集里没有它）。
     bundle.developer_parts.append(
         "## Report Back (required)\n"
         "When you finish, reply with a STRUCTURED report so the main agent can integrate precisely. "
-        "Use exactly these section headings:\n"
+        "Use exactly these section headings, in this order:\n"
         "### Result\nOne-paragraph outcome of the subtask.\n"
-        "### Files Touched\nBullet list of every file you created or modified (full relative paths).\n"
-        "### Key Findings\nBullet list of the concrete facts the main agent must know (with file:line evidence where relevant).\n"
-        "### Risks / Open Questions\nBullet list of blockers, uncertainties, or follow-ups (write 'None' if clean).\n"
-        "Be specific and concise — no filler."
+        "### Files Touched\nBullet list of every file you created or modified (full relative paths). "
+        "Write 'None' if you changed nothing.\n"
+        "### Key Findings\nBullet list of the concrete facts the main agent must know "
+        "(with file:line evidence where relevant).\n"
+        "### Verification\nWhat you actually ran or checked to validate the work "
+        "(commands, tests, diff review) and its outcome. Write 'None' if nothing was verifiable.\n"
+        "### Acceptance\nGo through the acceptance criteria one by one and state met / not met, with evidence.\n"
+        "### Risks / Open Questions\nBullet list of blockers, uncertainties, or follow-ups "
+        "(write 'None' if clean).\n"
+        "Be specific and concise — no filler. Never invent results you did not verify."
     )
     return bundle

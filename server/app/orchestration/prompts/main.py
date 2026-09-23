@@ -147,7 +147,8 @@ Produce the final result in the main window with a clear summary of what changed
 
 def build_main_system_prompt(extra_context: str = "", enable_subagents: bool = True,
                              plan_flow_enabled: bool = False,
-                             language: str = "auto") -> str:
+                             language: str = "auto",
+                             language_source: str = "user") -> str:
     """构建主代理系统提示词。
 
     如果用户关闭了子代理，剔除关于 spawn_subagent 的引导与决策章节。
@@ -199,5 +200,5 @@ def build_main_system_prompt(extra_context: str = "", enable_subagents: bool = T
         prompt = prompt + "\n\n" + extra_context
 
     # plan-19-82: 语言纪律首尾双锚
-    _lang_dir = build_language_directive(language)
+    _lang_dir = build_language_directive(language, source=language_source)
     return f"{_lang_dir}\n\n{prompt}\n\n{_lang_dir}"

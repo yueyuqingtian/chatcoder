@@ -4,6 +4,8 @@ import { api } from "../api/client";
 import { ApiError } from "../api/client";
 import type { ArtifactOut, ArthasEntryOut, AttachmentInfo, ComposerRefOut, DebugStatusOut, FileChangeOut, MergeReportOut, MessageOut, ModelOut, ProjectOut, ProviderOut, RollbackAffected, RollbackPreviewFile, SessionOut, TaskOut, TurnOut } from "../api/client";
 import { wsClient, globalWsClient } from "../api/ws";
+import { isBusy } from "../perf/bus";
+import { registerReconcileTask, RECONCILE_ORDER } from "../perf/reconcile";
 import type { ServerEventName } from "@chatcoder/shared/events";
 import type { CompactSummaryPayload } from "@chatcoder/shared/events";
 
@@ -131,6 +133,21 @@ export interface PlanCardInfo {
  * 单会话的全部可变状态收敛为一个 slice，切换会话时视图零重载、状态不串。
  * 视图字段（messages/turns/...）仍是当前会话的投影，组件选择器无需改动。
  */
+/** plan-330-1648 M7: 子代理元信息（agentId → 名称/归属 turn/状态/错误），卡片与面板共用。 */
+export interface SubagentMeta {
+  name: string;
+  turnId: number | null;
+  taskId: number | null;
+  status: string;
+  /** v36 (plan-321-1600 M2): 面板头部展示——起止时间（算用时）、变更文件数、token 用量 */
+  startedAt?: string | null;
+  endedAt?: string | null;
+  filesCount?: number;
+  tokens?: number;
+  /** plan-330-1648 M7: 失败/取消原因——主消息流卡片与子代理面板据此展示（不再只有一个红叉） */
+  error?: string | null;
+}
+
 export interface SessionSlice {
   messages: MessageOut[];
   turns: TurnOut[];
@@ -171,6 +188,11 @@ export interface SessionSlice {
   pendingThreads: Record<number, number>;
   /** plan-282-1421（第10项）：会话累计缓存统计（用于"平均缓存命中率"） */
   usageCacheTotals?: UsageCacheTotals;
+  /** plan-330-1648 M6: 子代理面板数据随会话切片保存/恢复（切走再切回不丢面板内容）。 */
+  subagentMessages: Record<number, MessageOut[]>;
+  subagentStreams: Record<number, string>;
+  subagentThinking: Record<number, string>;
+  subagentMeta: Record<number, SubagentMeta>;
 }
 
 /** plan-282-1421：会话累计缓存统计。
@@ -218,6 +240,12 @@ function _snapshotSlice(s: ChatState): SessionSlice {
     pendingStreamDeltas: { ..._pendingToken },
     pendingThinkingDeltas: { ..._pendingThinking },
     pendingThreads: { ..._pendingThread },
+    // plan-330-1648 M6: 子代理面板数据（消息桶/流式缓冲/元信息）随切片保存——
+    // 此前未纳入，切走再切回会发现子代理面板内容丢失。
+    subagentMessages: s.subagentMessages,
+    subagentStreams: s.subagentStreams,
+    subagentThinking: s.subagentThinking,
+    subagentMeta: s.subagentMeta,
   };
 }
 
@@ -283,7 +311,8 @@ interface ChatState {
   } | null;
   /** v35: turn 级瞬态状态提示（重试/恢复），来自 turn.status 广播，不落库；null=无。 */
   turnStatus: string | null;
-  /** v30: 压缩进度信息（compact.started 载荷，渲染"压缩中"卡片用）。 */
+  /** v30: 压缩进度信息（compact.started 载荷）。v42: 消息流不再渲染统计卡片，
+   *  仅保留事件状态（保留字段以便后续面板复用/回归，不再抛给消息流尾部）。 */
   compactingInfo: { usedTokens?: number; contextWindow?: number; ratio?: number } | null;
   /** v30: 最近一次压缩结果（compact.summary 载荷，压缩完成后消息流渲染摘要卡）。 */
   lastCompact: CompactSummaryPayload | null;
@@ -325,7 +354,7 @@ interface ChatState {
   /** v7(H): 运行中工具结果实时视图（call_key -> 摘要，来自 tool.result 事件，含 change_stat） */
   runningToolResults: Record<string, RunningToolResult>;
   /** v19: 子代理元信息（agentId -> 名称/turn/任务/状态）——消息流子代理卡片数据源。 */
-  subagentMeta: Record<number, { name: string; turnId: number | null; taskId: number | null; status: string }>;
+  subagentMeta: Record<number, SubagentMeta>;
   /** v19: 子代理线程消息桶（threadId=agentId -> 落库消息），右面板完整会话数据源。 */
   subagentMessages: Record<number, MessageOut[]>;
   /** v19: 子代理流式缓冲（threadId -> 文本/思考），主消息流不再混入子代理内容。 */
@@ -529,10 +558,69 @@ function _clearStreamDoneFor(agentOrThread: number) {
   delete _streamDoneText[`token:${agentOrThread}`];
 }
 
+/** 几何运动期判据：统一走 PerfBus（plan-329-1647 S3）。
+ *  三个来源——主进程窗口运动（拖窗口 / 最大化补间 / 边缘 resize）、分隔条拖拽、
+ *  面板折叠过渡——在 bus 里合并为单一 `isBusy()`，口径与 MessageFlow / TerminalPanel /
+ *  ComposerCore / StreamingText 完全一致（此前这几处各读各的 DOM，且多数不认
+ *  `panel-animating`）。
+ *
+ *  为何要门控 flush（问题2「深度前端性能优化」的核心矛盾）：几何变化的每一帧都要
+ *  整树重排+绘制，而流式 flush 每帧一次 setState 会触发 markdown 重解析与虚拟列表
+ *  重测——两者抢同一份帧预算，叠加时直接吃穿 16ms，表现为"任务执行期间切全屏/
+ *  拖面板宽度时鼠标卡顿抖动"。运动期（通常 1~2 秒）暂停 flush，pending 在模块级
+ *  继续累积，静止后的下一帧一次性追平：文字最多晚到几十毫秒，换来操作全程跟手。 */
+function _geometryBusy(): boolean {
+  try { return isBusy(); } catch { return false; }
+}
+
+/** S10b（plan-329-1647）：flush 高负载分级。
+ *  流式高峰时每帧一次 setState 会与几何动画 / 消息流渲染抢帧预算；当上一次 flush 的
+ *  同步耗时超过预算（FLUSH_COST_BUDGET_MS）时，把后续 flush 间隔放宽到约 30fps
+ *  （HIGH_LOAD_GAP_MS），保持 HIGH_LOAD_HOLD_MS 后自动恢复逐帧；期间若 pending 已清空
+ *  则立即停表，不做 rAF 空转。几何运动期的"完全暂停 + 结束追平"语义不变（见 _geometryBusy）。 */
+let _lastFlushAt = 0;
+let _highLoadUntil = 0;
+const FLUSH_COST_BUDGET_MS = 6;
+const HIGH_LOAD_GAP_MS = 33;
+const HIGH_LOAD_HOLD_MS = 600;
+let _flushWaitListening = false;
 function _scheduleDeltaFlush() {
   if (_flushScheduled) return;
   _flushScheduled = true;
-  requestAnimationFrame(() => {
+  const tick = () => {
+    if (_geometryBusy()) {
+      // 运动期间不做每帧 rAF 空转：pending 留在模块缓冲，只注册一次结束监听。
+      if (!_flushWaitListening) {
+        _flushWaitListening = true;
+        const settle = () => {
+          if (_geometryBusy()) return;
+          window.removeEventListener("chatcoder:window-motion", onMotion);
+          window.removeEventListener("pointerup", onPointerUp, true);
+          window.removeEventListener("chatcoder:panel-drag-end", onPanelDragEnd);
+          _flushWaitListening = false;
+          requestAnimationFrame(tick);
+        };
+        const onMotion = (e: Event) => {
+          if ((e as CustomEvent<{ active?: boolean }>).detail?.active === false) settle();
+        };
+        const onPointerUp = () => settle();
+        const onPanelDragEnd = () => settle();
+        window.addEventListener("chatcoder:window-motion", onMotion);
+        window.addEventListener("pointerup", onPointerUp, true);
+        window.addEventListener("chatcoder:panel-drag-end", onPanelDragEnd);
+      }
+      return;
+    }
+    // S10b：高负载降级期降低 flush 频率（逐帧 → 约 30fps）；无待 flush 内容时停表。
+    const nowTs = performance.now();
+    if (nowTs < _highLoadUntil && nowTs - _lastFlushAt < HIGH_LOAD_GAP_MS) {
+      if (Object.keys(_pendingToken).length > 0 || Object.keys(_pendingThinking).length > 0) {
+        requestAnimationFrame(tick);
+      } else {
+        _flushScheduled = false;
+      }
+      return;
+    }
     _flushScheduled = false;
     const tok = _pendingToken;
     const thk = _pendingThinking;
@@ -543,6 +631,7 @@ function _scheduleDeltaFlush() {
     const tokKeys = Object.keys(tok);
     const thkKeys = Object.keys(thk);
     if (tokKeys.length === 0 && thkKeys.length === 0) return;
+    const t0 = performance.now();
     useChatStore.setState((s) => {
       const next: Partial<ChatState> = {};
       // v19: 子代理（thread_id != null）流式内容进独立桶，主消息流不混入
@@ -572,8 +661,17 @@ function _scheduleDeltaFlush() {
       }
       return next;
     });
-  });
+    _lastFlushAt = performance.now();
+    if (_lastFlushAt - t0 > FLUSH_COST_BUDGET_MS) _highLoadUntil = _lastFlushAt + HIGH_LOAD_HOLD_MS;
+  };
+  requestAnimationFrame(tick);
 }
+
+// RFL-6（S6）：注册进唯一收敛序列——order 80 流式追平。
+// 收敛序列在 rAF 内按序执行，此处只需“叫一次调度”：_scheduleDeltaFlush 自身会合并并
+// 在一帧内落库（见其注释），因此不会与其它收尾任务抢帧。
+registerReconcileTask("chat-stream-flush", RECONCILE_ORDER.streamFlush,
+  "流式缓冲追平", () => _scheduleDeltaFlush());
 
 /** 有序追加：后端按 id 升序投递，常规追加 O(1)；仅乱序兜底时排序插入。 */
 function _appendOrdered(messages: MessageOut[], msg: MessageOut): MessageOut[] {
@@ -1591,6 +1689,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
             name: it.name || prev?.name || `子代理 #${it.agent_id}`,
             turnId: it.turn_id ?? prev?.turnId ?? null,
             taskId: it.task_id ?? prev?.taskId ?? null,
+            // v36 (plan-321-1600 M2): 头部展示字段（用时 / 文件数 / 用量）
+            startedAt: it.created_at ?? prev?.startedAt ?? null,
+            endedAt: it.updated_at ?? prev?.endedAt ?? null,
+            filesCount: it.files_count ?? prev?.filesCount ?? 0,
+            tokens: it.token_usage ?? prev?.tokens ?? 0,
             // 终态单向不可逆：本地已 done/failed 不被 REST 滞后的 running/pending 回退
             status: (prev?.status === "done" || prev?.status === "failed") && (it.status === "running" || it.status === "pending")
               ? prev.status
@@ -1846,7 +1949,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
             if (bucket.some((m) => m.id === rawMsg.id)) return {};
             const subStreams = { ...state.subagentStreams };
             const subThinking = { ...state.subagentThinking };
-            delete subStreams[rawThread];
+            // plan-330-1648 M6: 落库清理流式缓冲时**保留未落库的尾部增量**——
+            // 消息落库与 delta 到达存在竞态，旧实现直接 delete 会让已渲染的尾字丢失、
+            // 或让后续 delta 重复追加（表现为面板文本闪烁/重复）。
+            const _landedText = typeof (rawMsg.content as Record<string, unknown>)?.text === "string"
+              ? String((rawMsg.content as Record<string, unknown>).text) : "";
+            const _bufText = subStreams[rawThread] || "";
+            if (_landedText && _bufText.startsWith(_landedText)) {
+              const _tail = _bufText.slice(_landedText.length);
+              if (_tail) subStreams[rawThread] = _tail;
+              else delete subStreams[rawThread];
+            } else {
+              delete subStreams[rawThread];
+            }
+            // 思考缓冲仍按落库即清（思考块落库后不会再有同段增量）
             delete subThinking[rawThread];
             _clearStreamDoneFor(rawThread);
             return {
@@ -2150,6 +2266,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const doneAid = Number(payload.agent_id ?? 0);
         if (doneAid && get().subagentMeta[doneAid]) {
           set((s) => ({ subagentMeta: { ...s.subagentMeta, [doneAid]: { ...s.subagentMeta[doneAid], status: "done" } } }));
+        }
+        get().refreshTasks();
+        break;
+      }
+      case "subagent.failed": {
+        // plan-330-1648 M7: 子代理失败/取消 → 卡片与面板展示原因（不再只有一个红叉）
+        const fAid = Number(payload.agent_id ?? 0);
+        const fErr = typeof payload.error === "string" ? payload.error : "";
+        const fStatus = String(payload.status ?? "failed");
+        if (fAid) {
+          set((s) => ({
+            subagentMeta: {
+              ...s.subagentMeta,
+              [fAid]: {
+                ...(s.subagentMeta[fAid] ?? {
+                  name: `子代理 #${fAid}`, turnId: null, taskId: null, status: fStatus,
+                }),
+                status: fStatus,
+                error: fErr || "未知原因",
+              },
+            },
+          }));
         }
         get().refreshTasks();
         break;

@@ -5,7 +5,7 @@
  * 系统模糊后端提示、玻璃诊断/自检等全部移除，设置页不再出现任何后端/诊断文案。 */
 import { useEffect } from "react";
 import { useThemeStore, type Theme } from "../../store/theme";
-import { useUiStore, type MotionLevel } from "../../store/ui";
+import { useUiStore, type MotionLevel, type PanelDragLayout } from "../../store/ui";
 import { Slider } from "../ui";
 import { Row, Sw } from "./shared";
 
@@ -23,6 +23,15 @@ const GLASS_STRENGTHS: Array<{ value: number; label: string; desc: string }> = [
   { value: 0, label: "轻柔", desc: "面板更接近实色，文字最清晰" },
   { value: 1, label: "标准", desc: "默认：可读性与透出感平衡" },
   { value: 2, label: "深邃", desc: "透出桌面最明显（深色壁纸下更通透）" },
+];
+
+/** plan-329-1647 S6b（RFL-7）：分隔条拖拽期的排版档位。
+ *  拖动分隔条时中列宽度每帧变化，消息文本要逐帧折行（实时排版）；
+ *  内容量很大时折行会成为帧预算的主要消耗，故提供三档可调。 */
+const PANEL_DRAG_LAYOUTS: Array<{ value: PanelDragLayout; label: string; desc: string }> = [
+  { value: "realtime", label: "实时", desc: "默认：拖拽时消息文本按新宽度逐帧折行（所见即所得）" },
+  { value: "balanced", label: "均衡", desc: "宽度隔帧写入，折行开销约减半（观感略滞后）" },
+  { value: "frozen", label: "冻结", desc: "最低开销：拖拽期暂停宽度写入，松手一次性到位" },
 ];
 
 export function AppearancePanel() {
@@ -95,6 +104,32 @@ export function AppearancePanel() {
               </button>
             ))}
           </div>
+        </Row>
+        {/* plan-329-1647 S6b（RFL-7）：面板拖拽排版档位 + 自动降级开关。
+            档位决定拖拽期的重排预算上限；自动降级开启时，实测帧间隔连续超预算会自动
+            下调一档（realtime → balanced → frozen），保证界面绝不卡死。 */}
+        <Row
+          title="面板拖拽排版"
+          desc="拖分隔条时消息流的重排档位：实时 = 逐帧折行；均衡/冻结 = 换取更高帧率"
+        >
+          <div style={{ display: "flex", gap: 6 }}>
+            {PANEL_DRAG_LAYOUTS.map((s) => (
+              <button
+                key={s.value}
+                className={"settings-pill" + ((ui.panelDragLayout ?? "realtime") === s.value ? " active" : "")}
+                title={s.desc}
+                onClick={() => ui.setPrefs({ panelDragLayout: s.value })}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
+        </Row>
+        <Row title="拖拽自动降级" desc="实测帧率不足时自动下调一档，松手后自动恢复所选档位">
+          <Sw
+            checked={ui.panelDragAutoDegrade !== false}
+            onChange={(v) => ui.setPrefs({ panelDragAutoDegrade: v })}
+          />
         </Row>
       </div>
 

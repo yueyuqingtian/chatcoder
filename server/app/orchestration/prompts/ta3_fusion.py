@@ -120,7 +120,8 @@ def build_runtime_snapshot(workspace: str = "") -> str:
 def build_ta3_system_prompt(model_meta: dict | None, workspace: str = "",
                             enable_subagents: bool = True,
                             sandbox_mode: str = "workspace-write",
-                            language: str = "auto") -> str:
+                            language: str = "auto",
+                            language_source: str = "user") -> str:
     """组装 ta3 模式系统提示词（见模块 docstring 结构）。
 
     sandbox_mode：完全访问(danger-full-access)/只读(read-only)时流程规范段
@@ -141,5 +142,5 @@ def build_ta3_system_prompt(model_meta: dict | None, workspace: str = "",
         sections.append(SUBAGENT_GUIDE_SECTION)
     sections.append(_build_addendum(sandbox_mode, language=language))
     body = "\n\n".join(s for s in sections if s)
-    _lang_dir = build_language_directive(language)
+    _lang_dir = build_language_directive(language, source=language_source)
     return f"{_lang_dir}\n\n{body}\n\n{_lang_dir}"

@@ -96,6 +96,31 @@ def safe_resolve_read(workspace_root: str, rel_path: str) -> Path | None:
     return target
 
 
+def resolve_loose(rel_path: str, workspace_root: str | None = None) -> str | None:
+    """宽松解析路径（不限制在工作区内）——仅供「工作区外读取」审批路径使用（v36 R2）。
+
+    与 safe_resolve 的区别：safe_resolve 遇到越界一律返回 None（拒绝）；本函数
+    只做纯路径解析（绝对路径原样 realpath，相对路径基于工作目录拼接），越界与否
+    由调用方（outside_access）先审批、后放行。返回 realpath 字符串或 None。
+    """
+    if not rel_path:
+        return None
+    try:
+        p = Path(rel_path)
+    except (OSError, ValueError):
+        return None
+    if p.is_absolute():
+        try:
+            return os.path.realpath(str(p))
+        except (OSError, ValueError):
+            return None
+    base = workspace_root or os.getcwd()
+    try:
+        return os.path.realpath(str(Path(base) / rel_path))
+    except (OSError, ValueError):
+        return None
+
+
 def safe_resolve_parent(workspace_root: str, rel_path: str) -> Path | None:
     """v2.5: 对 fs.write 这类需要创建新文件的场景,
     检查父目录是否在 workspace 内(文件本身可能尚不存在)。

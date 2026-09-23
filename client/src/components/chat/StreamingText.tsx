@@ -9,6 +9,7 @@
 import { useEffect, useRef, useState } from "react";
 import { IconBrain, IconChevronRight } from "../icons";
 import { StreamingMarkdown } from "./StreamingMarkdown";
+import { isBusy } from "../../perf/bus";
 import { ThinkingTicker } from "./ThinkingTicker";
 import { ThinkingExpanded } from "./ThinkingExpanded";
 import { ChatCollapse } from "./ChatCollapse";
@@ -37,24 +38,63 @@ function useSmoothText(target: string): string {
   targetRef.current = target;
   useEffect(() => {
     let raf = 0;
+    let waitingForMotion = false;
+    // 判定统一走 PerfBus（S3）：窗口运动 / 拖分隔条 / 面板过渡三源合并
+    const isMotion = () => isBusy();
+    const schedule = () => {
+      if (!raf) raf = requestAnimationFrame(tick);
+    };
+    const onMotion = (e: Event) => {
+      if ((e as CustomEvent<{ active?: boolean }>).detail?.active === false) resume();
+    };
+    const onPointerUp = () => { if (!isMotion()) resume(); };
+    const onPanelDragEnd = () => { if (!isMotion()) resume(); };
+    const resume = () => {
+      if (!waitingForMotion) return;
+      waitingForMotion = false;
+      window.removeEventListener("chatcoder:window-motion", onMotion);
+      window.removeEventListener("pointerup", onPointerUp, true);
+      window.removeEventListener("chatcoder:panel-drag-end", onPanelDragEnd);
+      schedule();
+    };
     const tick = () => {
+      raf = 0;
+      if (isMotion()) {
+        // 不在每一帧 setState / 重解析 markdown；只保留最新 target，结束事件再追平。
+        if (!waitingForMotion) {
+          waitingForMotion = true;
+          window.addEventListener("chatcoder:window-motion", onMotion);
+          window.addEventListener("pointerup", onPointerUp, true);
+          window.addEventListener("chatcoder:panel-drag-end", onPanelDragEnd);
+        }
+        return;
+      }
       const t = targetRef.current;
       let cur = shownRef.current;
       if (!t.startsWith(cur) || t.length < cur.length) {
         cur = t; // 内容重置（新 turn / 落库清缓冲）：直接对齐
-      } else if (cur.length < t.length) {
+      } else {
         const backlog = t.length - cur.length;
-        const step = Math.min(backlog, Math.max(3, Math.ceil(backlog * 0.18)));
+        // 窗口几何运动期间流式更新会暂停，结束后可能积累了较大 backlog；
+        // 超过 240 字直接一次追平，避免动画结束后又占据多个帧造成二次掉帧。
+        const step = backlog > 240 ? backlog : Math.min(backlog, Math.max(3, Math.ceil(backlog * 0.18)));
         cur = t.slice(0, cur.length + step);
       }
       if (cur !== shownRef.current) {
         shownRef.current = cur;
         setShown(cur);
       }
-      if (shownRef.current.length < targetRef.current.length) raf = requestAnimationFrame(tick);
+      if (shownRef.current.length < targetRef.current.length) schedule();
     };
-    if (shownRef.current.length < target.length || !target.startsWith(shownRef.current)) tick();
-    return () => cancelAnimationFrame(raf);
+    if (shownRef.current.length < target.length || !target.startsWith(shownRef.current)) schedule();
+    return () => {
+      cancelAnimationFrame(raf);
+      if (waitingForMotion) {
+        window.removeEventListener("chatcoder:window-motion", onMotion);
+        window.removeEventListener("pointerup", onPointerUp, true);
+        window.removeEventListener("chatcoder:panel-drag-end", onPanelDragEnd);
+      }
+    };
   }, [target]);
   return shown;
 }

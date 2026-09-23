@@ -1,5 +1,6 @@
 /** 右侧面板状态（v5）：expanded/width/tabs + 全屏模式 + 最大宽度限制。 */
 import { create } from "zustand";
+import { applyPaneUpdate } from "../perf/paneTransition";
 
 export type PanelTabId = "task-summary" | "browser" | "terminal" | "files" | "subagent" | "debug";
 export interface PanelTab {
@@ -79,10 +80,17 @@ export const usePanelStore = create<PanelState>((set, get) => ({
   previewPath: null,
   previewLine: null,
   diffPreview: null,
-  openPanel: () => set({ expanded: true }),
-  closePanel: () => set({ expanded: false, fullscreen: false, diffPreview: null }),
-  togglePanel: () => set((s) => ({ expanded: !s.expanded })),
-  toggleFullscreen: () => set((s) => ({ fullscreen: !s.fullscreen })),
+  openPanel: () => {
+    if (get().expanded) return;
+    // S7：展开是一次几何变更——交 applyPaneUpdate 统一走 View Transition + 收尾
+    applyPaneUpdate(() => set({ expanded: true }));
+  },
+  closePanel: () => {
+    if (!get().expanded) return;
+    applyPaneUpdate(() => set({ expanded: false, fullscreen: false, diffPreview: null }));
+  },
+  togglePanel: () => applyPaneUpdate(() => set((s) => ({ expanded: !s.expanded }))),
+  toggleFullscreen: () => applyPaneUpdate(() => set((s) => ({ fullscreen: !s.fullscreen }))),
   toggleTaskCard: () => set((s) => ({ taskCardVisible: !s.taskCardVisible })),
   setWidth: (w) => {
     const clamped = Math.max(200, Math.min(MAX_WIDTH, Math.round(w)));
@@ -97,21 +105,30 @@ export const usePanelStore = create<PanelState>((set, get) => ({
     set({ tabs: [...tabs, tab], activeKey: tabKey(tab) });
   },
   openNewTab: (id) => {
-    const { tabs } = get();
+    const { tabs, expanded } = get();
     const tab: PanelTab = { id, instance: tabs.filter((t) => t.id === id).length + 1 };
-    set({ expanded: true, tabs: [...tabs, tab], activeKey: tabKey(tab) });
+    const next = { tabs: [...tabs, tab], activeKey: tabKey(tab) };
+    if (!expanded) { applyPaneUpdate(() => set({ expanded: true, ...next })); return; }
+    set(next);
   },
   openSubagent: (threadId, agentName) => {
     const { tabs } = get();
     // 同线程已开则激活，否则新开实例
     const existing = tabs.find((t) => t.id === "subagent" && t.meta?.threadId === threadId);
-    if (existing) { set({ expanded: true, activeKey: tabKey(existing) }); return; }
+    if (existing) {
+      const next = { expanded: true, activeKey: tabKey(existing) };
+      if (!get().expanded) { applyPaneUpdate(() => set(next)); return; }
+      set(next);
+      return;
+    }
     const tab: PanelTab = {
       id: "subagent",
       instance: tabs.filter((t) => t.id === "subagent").length + 1,
       meta: { threadId, agentName },
     };
-    set({ expanded: true, tabs: [...tabs, tab], activeKey: tabKey(tab) });
+    const next = { expanded: true, tabs: [...tabs, tab], activeKey: tabKey(tab) };
+    if (!get().expanded) { applyPaneUpdate(() => set(next)); return; }
+    set(next);
   },
   closeTab: (key) => {
     const { tabs, activeKey, closedStack } = get();
@@ -139,7 +156,7 @@ export const usePanelStore = create<PanelState>((set, get) => ({
       set({ closedStack: stack, activeKey: tabKey(closed) });
       return;
     }
-    set({ expanded: true, tabs: [...tabs, closed], activeKey: tabKey(closed), closedStack: stack });
+
   },
   setActiveTab: (key) => set({ activeKey: key }),
   // v11: 切换预览文件时清空 diff（diff 视图仅由变更审核卡片进入时提供）

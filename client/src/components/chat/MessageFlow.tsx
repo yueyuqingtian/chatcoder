@@ -8,18 +8,19 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, memo, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { TimelineEntry, ToolNode, TurnItem } from "./timeline";
-import { buildTimeline, msgText } from "./timeline";
+import { createTimelineBuilder, msgText } from "./timeline";
+import { isBusy } from "../../perf/bus";
+import { registerReconcileTask, RECONCILE_ORDER } from "../../perf/reconcile";
 import { TurnGroup } from "./TurnGroup";
 import { JumpDots } from "./JumpDots";
-import { CompactingCard } from "./CompactCard";
 import { DebugCard } from "./DebugCard";
-import { StreamingText } from "./StreamingText";
+import { StreamingTail } from "./StreamingTail";
 import { IconSearch, IconChevronUp, IconChevronDown, IconX, IconArrowDown, IconAlertCircle } from "../icons";
 import { useTextHighlight } from "../../hooks/useTextHighlight";
 import { MarkdownContent } from "../MarkdownContent";
 import { MsgType } from "@chatcoder/shared";
 import { useChatStore } from "../../store/chat";
-import type { MessageOut } from "../../api/client";
+import { api, type MessageOut } from "../../api/client";
 
 /** plan-308-1542 需求1：任务执行类错误的**唯一**棂位——消息流末尾错误卡。
  *  此前这类错误会同时写入 store.error（右上角 Toast）与消息流，造成重复报错；
@@ -85,7 +86,11 @@ const StandaloneEntry = memo(function StandaloneEntry({ entry }: { entry: Timeli
     return (
       <div className="turn-group">
         <div className="turn-item turn-item-summary">
-          <MarkdownContent>{msgText(entry.msg.content)}</MarkdownContent>
+          {/* v36 (plan-321-1600 M2): 同 case "summary" —— 补 .turn-agent-text 包裹，
+              使其获得与主消息流一致的 markdown 排版。 */}
+          <div className="turn-agent-text">
+            <MarkdownContent>{msgText(entry.msg.content)}</MarkdownContent>
+          </div>
         </div>
       </div>
     );
@@ -124,8 +129,8 @@ interface MessageFlowCoreProps {
   forceBottomKey?: number;
   /** 会话标识：变化时强制跳底（主界面传 currentSessionId，子代理传 threadId） */
   sessionKey: string | number;
-  /** 流式信号：内容变化时贴底跟随（避免整对象依赖；v40 允许数字——缓冲长度即可） */
-  streamSignal: string | number;
+  /** 贴底跟随的流式信号 prop 已移除（S8）：MessageFlowCore 内部直接订阅 store 缓冲，
+   *  避免“缓冲每帧换引用 → 整棵消息树每帧重渲染”。 */
   /** 功能开关（默认按模式由外层传入） */
   jumpDots?: boolean;
   search?: boolean;
@@ -156,7 +161,6 @@ function MessageFlowCore({
   trailingNode,
   forceBottomKey = 0,
   sessionKey,
-  streamSignal,
   jumpDots = true,
   search = true,
   scrollTarget,
@@ -206,16 +210,38 @@ function MessageFlowCore({
    *  scrollTop 推到底，多帧叠加后表现为"点击会话后从上往下滚一遍"。
    *  现在：① initialOffset 按末项估算位置给出初始偏移，首帧即落在底部区域；
    *        ② 定位**收敛**（总高连续稳定）前用 .is-positioning 隐藏内容。 */
+
+
   const [positioned, setPositioned] = useState(false);
   const EST_ITEM_H = 140;
+
+  /** S9a（plan-329-1647）：按条目类型的**实测高度**分桶估算，替代固定 140。
+   *
+   *  为何分桶：条目真实高度差异极大——单行用户消息 ~60px，含长文 + 工具树的 turn 可达上千 px。
+   *  统一按 140 估算会让「估算 → 实测」跳变很大，表现为长会话首屏收敛慢、滚动中总高反复变化。
+   *  采样来源**零额外 DOM 读取**：直接取虚拟器当前可见项的 size（可见项在视口内必已挂载，
+   *  挂载即被 measureElement 测过），取中位数抗异常项。 */
+  const heightEstRef = useRef({ turn: EST_ITEM_H, standalone: EST_ITEM_H, stream: EST_ITEM_H, trailing: EST_ITEM_H });
+  /** 条目 index → 估算桶（槽位顺序与渲染顺序一致：已落库 entries → 流式段 → 尾部卡片）。 */
+  const estBucketOf = useCallback((index: number): "turn" | "standalone" | "stream" | "trailing" => {
+    if (hasStreaming && index === entries.length) return "stream";
+    if (hasTrailing && index === entries.length + (hasStreaming ? 1 : 0)) return "trailing";
+    return entries[index]?.kind === "turn" ? "turn" : "standalone";
+  }, [entries, hasStreaming, hasTrailing]);
+
+  /** 虚拟器视口尺寸的「运动后提交」函数（S6 / RFL-6）。
+   *  由 observeElementRect 在内部赋值：运动期它只记账（missedDuringMotion），
+   *  需要有人叫一次才提交。原本靠 window-motion / pointerup / panel-drag-end 三个事件，
+   *  现在统一由唯一收敛序列（reconcile）按 order 20 调用一次。 */
+  const settleRectRef = useRef<(() => void) | null>(null);
 
   const virtualizer = useVirtualizer({
     count: totalCount,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => EST_ITEM_H,
+    estimateSize: (index) => heightEstRef.current[estBucketOf(index)],
     // 仅在 scrollOffset 为 null（首帧）时消费：按"末项估算起点"初始化，避免从顶部渲染
     initialOffset: () =>
-      totalCount > 0 ? Math.max(0, (totalCount - 1) * EST_ITEM_H) : 0,
+      totalCount > 0 ? Math.max(0, (totalCount - 1) * heightEstRef.current[estBucketOf(totalCount - 1)]) : 0,
     overscan: 6,
     /* plan-282-1444：位置改由虚拟列表**直接写 DOM**。
      *
@@ -230,15 +256,100 @@ function MessageFlowCore({
      *  同一帧绘制，不再有"旧位置帧"。要求项元素不得再在 style 里自带主轴向位置，
      *  内层容器也不得再写 height（见下方渲染）。 */
     directDomUpdates: true,
+    // 消息数较多时默认 transform 会让每个可视虚拟项进入合成层；切为 top 定位，
+    // 避免窗口动画/滚动时维护大量图层。绝对定位项已满足 position 模式契约。
+    directDomUpdatesMode: "position",
+    // 默认 observer 在窗口每帧 resize 时通知虚拟器更新可视范围并触发 React 重渲染。
+    // 几何运动期冻结该尺寸通知，结束后只提交一次最终 rect；scroll offset 观察仍保留，
+    // 所以用户滚动不受影响。
+    observeElementRect: (instance, cb) => {
+      const el = instance.scrollElement;
+      if (!el) return;
+      const readFinalRect = () => ({ width: Math.round(el.clientWidth), height: Math.round(el.clientHeight) });
+      const notify = () => cb(readFinalRect());
+      notify();
+      let lastWidth = el.clientWidth;
+      let lastHeight = el.clientHeight;
+      let missedDuringMotion = false;
+      // 判定统一走 PerfBus（S3）：窗口运动 / 拖分隔条 / 面板过渡三源合并
+      const isMotion = () => isBusy();
+      const ro = new ResizeObserver(() => {
+        if (isMotion()) { missedDuringMotion = true; return; }
+        const width = el.clientWidth;
+        const height = el.clientHeight;
+        if (width === lastWidth && height === lastHeight && !missedDuringMotion) return;
+        lastWidth = width;
+        lastHeight = height;
+        missedDuringMotion = false;
+        cb({ width: Math.round(width), height: Math.round(height) });
+      });
+      ro.observe(el);
+      const settle = () => {
+        if (!missedDuringMotion || isMotion()) return;
+        missedDuringMotion = false;
+        lastWidth = el.clientWidth;
+        lastHeight = el.clientHeight;
+        cb({ width: Math.round(lastWidth), height: Math.round(lastHeight) });
+      };
+      const onMotion = (event: Event) => {
+        if ((event as CustomEvent<{ active?: boolean }>).detail?.active === false) settle();
+      };
+      const onPointerUp = () => settle();
+      const onPanelDragEnd = () => settle();
+      settleRectRef.current = settle; // 供收敛序列（order 20）调用
+      window.addEventListener("chatcoder:window-motion", onMotion);
+      window.addEventListener("pointerup", onPointerUp, true);
+      window.addEventListener("chatcoder:panel-drag-end", onPanelDragEnd);
+      return () => {
+        if (settleRectRef.current === settle) settleRectRef.current = null;
+        ro.disconnect();
+        window.removeEventListener("chatcoder:window-motion", onMotion);
+        window.removeEventListener("pointerup", onPointerUp, true);
+        window.removeEventListener("chatcoder:panel-drag-end", onPanelDragEnd);
+      };
+    },
   });
 
   /** 内层尺寸容器引用：既要给 RO 测高（innerRef），也要交给虚拟列表写高度。
    *  必须用稳定回调——内联箭头函数每次渲染都会触发 ref 脱挂/重挂，导致
    *  容器尺寸被反复重置。 */
+  /** S9a：从虚拟器当前可见项采样高度，更新分桶估算（中位数，抗异常项）。
+   *  调用点：条目数变化后、首屏定位收敛后——均为低频时机，不进逐帧路径。
+   *  阈值 4px 内不改写，避免估算值抖动引发不必要的重排。 */
+  const sampleHeights = useCallback(() => {
+    const items = virtualizer.getVirtualItems();
+    if (items.length === 0) return;
+    const buckets: Record<"turn" | "standalone" | "stream" | "trailing", number[]> = {
+      turn: [], standalone: [], stream: [], trailing: [],
+    };
+    for (const it of items) {
+      const size = it.size;
+      if (!Number.isFinite(size) || size <= 0) continue;
+      buckets[estBucketOf(it.index)].push(size);
+    }
+    const est = heightEstRef.current;
+    for (const k of Object.keys(buckets) as Array<keyof typeof est>) {
+      const arr = buckets[k];
+      if (arr.length < 2) continue; // 样本太少：保留原值，避免被单个异常项带偏
+      arr.sort((a, b) => a - b);
+      const mid = Math.round(arr[Math.floor(arr.length / 2)]);
+      if (Math.abs(mid - est[k]) >= 4) est[k] = mid;
+    }
+  }, [virtualizer, estBucketOf]);
+
   const setInnerRef = useCallback((node: HTMLDivElement | null) => {
     innerRef.current = node;
     virtualizer.containerRef(node);
   }, [virtualizer]);
+
+  /* RFL-1（plan-329-1647 S4）：原本这里还有一个「冻结消息列内容宽度」的 effect
+     （拖拽/窗口运动期间把 innerRef 的宽度钉成当前像素值，松手再解冻）。
+     它确实降低了拖拽期的重排量，但代价是**排版不实时**：面板变宽后内容右侧留白、
+     变窄则被裁切，直到松手才重新折行（用户反馈的问题）。现已删除：
+       · 宽度实时跟随 → 文本逐帧折行（所见即所得）；
+       · 拖拽期的重排成本改由「零布局读预算 + 帧闸门（RFL-2 / RFL-5）」控制；
+       · 位置稳定交给浏览器原生滚动锚定 + 结束时的收敛序列（RFL-4 / RFL-6）。
+     注：右面板内容根仍由 ResizeHandle.freezeRefs 冻结（见 App.tsx）。 */
 
   /** 贴底滚动。
    *  force=false（默认）：仅在"跟随态且用户未接管"时补滚，且不改变跟随状态——
@@ -288,6 +399,20 @@ function MessageFlowCore({
     setActiveEntryIndex((prev) => (prev === idx ? prev : idx));
   }, [virtualizer]);
 
+  /** S9b（plan-329-1647）：scrollspy 用 rAF 节流。scroll 事件可在一帧内多次触发，
+   *  而 updateActiveEntry 每次都要取虚拟项集合与滚动位置做映射（JumpDots 焦点跟随）；
+   *  节流到每帧一次，既保跟手又去掉同一帧内的重复计算。 */
+  const spyRafRef = useRef(0);
+  const scheduleSpy = useCallback(() => {
+    if (spyRafRef.current) return;
+    spyRafRef.current = requestAnimationFrame(() => {
+      spyRafRef.current = 0;
+      const cur = parentRef.current;
+      if (cur) updateActiveEntry(cur);
+    });
+  }, [updateActiveEntry]);
+
+
   const onScroll = useCallback(() => {
     const el = parentRef.current;
     if (el) {
@@ -316,8 +441,8 @@ function MessageFlowCore({
       autoScrollRef.current = isNearBottom;
     }
     setShowScrollBottom(distance > 120);
-    updateActiveEntry(el);
-  }, [updateActiveEntry]);
+    scheduleSpy();
+  }, [scheduleSpy]);
 
   /** plan-238-1188 + 本轮优化: 用户上滚意图必须"当帧生效"。
    *  思考内容快速刷新时，ResizeObserver / 双帧补滚都可能在 scroll 事件派发前
@@ -383,9 +508,7 @@ function MessageFlowCore({
     const el = parentRef.current;
     if (!inner || !el || typeof ResizeObserver === "undefined") return;
     let missedStick = false;
-    const inMotion = () =>
-      document.body.classList.contains("panel-dragging")
-      || Boolean((window as unknown as { __chatcoderWindowMotion?: boolean }).__chatcoderWindowMotion);
+    const inMotion = () => isBusy(); // PerfBus（S3）
     const stick = () => {
       if (!autoScrollRef.current || userScrollOverrideRef.current) return;
       el.scrollTop = el.scrollHeight;
@@ -430,8 +553,7 @@ function MessageFlowCore({
     const ro = new ResizeObserver(() => {
       // 本轮优化：几何运动中不读布局属性（scrollHeight 会强制同步布局），
       // 与高度 RO 同一口径——运动结束后由事件收尾统一补一次。
-      if (document.body.classList.contains("panel-dragging")
-        || Boolean((window as unknown as { __chatcoderWindowMotion?: boolean }).__chatcoderWindowMotion)) return;
+      if (isBusy()) return;
       if (!autoScrollRef.current || userScrollOverrideRef.current) return;
       el.scrollTop = el.scrollHeight;
     });
@@ -498,9 +620,7 @@ function MessageFlowCore({
     // 还会有一次宽度变化"来触发收尾还原——若刚好停在同一像素宽度上就不会发生，
     // 表现为"拖完位置没跟回来"。现在运动第一帧记下锚点，结束后主动补做一次。
     let missedDuringMotion = false;
-    const inMotion = () =>
-      document.body.classList.contains("panel-dragging")
-      || Boolean((window as unknown as { __chatcoderWindowMotion?: boolean }).__chatcoderWindowMotion);
+    const inMotion = () => isBusy(); // PerfBus（S3）
     const scheduleRestore = () => {
       // 重排/重新测量在渲染后完成：双帧后再还原（与 scrollToBottom 的补滚节奏一致）。
       // 额外做 rAF 合并：连续宽度变化只保留最后一次还原，避免回调排队堆积。
@@ -510,6 +630,7 @@ function MessageFlowCore({
           pendingRestore = 0;
           restore();
           widthAnchorRef.current = null;
+          missedDuringMotion = false;
         });
       });
     };
@@ -522,9 +643,21 @@ function MessageFlowCore({
      *  仅保留一个低频兜底轮询，防止事件丢失（例如渲染层重载）时收尾永不发生。 */
     const settleAfterMotion = () => {
       if (!missedDuringMotion) return;
-      missedDuringMotion = false;
+      // 保留原锚点直到 restore 真正执行；motion=false 与最终 ResizeObserver
+      // 回调可能同帧到达，不能在 RO 中用已重排后的新位置覆盖运动前锚点。
       scheduleRestore();
     };
+    // ── RFL-6：把本效果负责的收尾注册进「唯一收敛序列」──
+    //  · order 20：提交虚拟器视口尺寸（observeElementRect 运动期只记账，这里叫它提交）
+    //  · order 30：锚点还原（仍保留双帧等待——测量收敛确实需要跨帧，见 scheduleRestore 注释）
+    //  · order 40：虚拟列表重新测量
+    // 注册后由 ResizeHandle 在松手时统一触发；原有事件监听依然保留（窗口缩放/补间路径仍走它们）。
+    const offRect = registerReconcileTask("mf-virtualizer-rect", RECONCILE_ORDER.virtualizerRect,
+      "提交虚拟器视口尺寸", () => settleRectRef.current?.());
+    const offAnchor = registerReconcileTask("mf-scroll-anchor", RECONCILE_ORDER.scrollAnchor,
+      "还原滚动锚点", () => settleAfterMotion());
+    const offMeasure = registerReconcileTask("mf-virtualizer-measure", RECONCILE_ORDER.virtualizerMeasure,
+      "虚拟列表重测", () => virtualizer.measure());
     const onMotionEnd = (e: Event) => {
       const active = (e as CustomEvent<{ active?: boolean }>).detail?.active;
       if (active === false) settleAfterMotion();
@@ -536,26 +669,36 @@ function MessageFlowCore({
     const ro = new ResizeObserver(() => {
       const el2 = parentRef.current;
       if (!el2) return;
-      const w = el2.clientWidth;
-      if (Math.abs(w - lastWidthRef.current) < 1) return; // 高度抖动不参与
-      lastWidthRef.current = w;
+      // 运动期（拖窗口边缘/最大化补间；拖面板时本组件内容根已被 ResizeHandle
+      // 冻结，RO 基本不触发——这里主要兜窗口几何变化路径）：只在第一帧记账一次
+      // 锚点，之后不再读任何布局属性。clientWidth 在 dirty 布局下会强制同步
+      // 重排整棵消息树，逐帧读正是拖拽期长任务来源之一。
+      // 收尾由 missedDuringMotion + onMotionEnd/pointerup 事件驱动（见下），
+      // 不依赖运动期间的逐帧回调。
       if (inMotion()) {
-        // 运动中：跳过重活（中间帧保持锚点本无意义），但**只在运动第一帧记录一次**锚点，
-        // 并在运动结束后补一次还原。
-        // 为何只记一次：运动期间宽度只变不还原，视口顶部会随重排漂移；若每帧都覆盖锚点，
-        // 留下的是"漂移后"的位置，收尾还原就还原到了漂移结果上（等于没还原）。
-        // 第一帧的锚点最接近用户拖动前的视口，正是收尾要还原的目标。
-        if (!missedDuringMotion) capture();
+        if (!missedDuringMotion) {
+          lastWidthRef.current = el2.clientWidth;
+          capture();
+        }
         missedDuringMotion = true;
         return;
       }
-      // 非运动态：若运动期间欠过一次还原，先补做（避免与新锚点交错）
-      if (missedDuringMotion) { missedDuringMotion = false; }
+      const w = el2.clientWidth;
+      if (Math.abs(w - lastWidthRef.current) < 1) return; // 高度抖动不参与
+      lastWidthRef.current = w;
+      // 运动期钉住了内容宽度，松手解冻后这次 RO 仍应使用运动前的锚点，
+      // 不能在内容折行后的新布局上重新 capture（否则就是把漂移后的偏移当作目标）。
+      if (missedDuringMotion) {
+        missedDuringMotion = false;
+        scheduleRestore();
+        return;
+      }
       capture();
       scheduleRestore();
     });
     ro.observe(el);
     return () => {
+      offRect(); offAnchor(); offMeasure();
       if (pendingRestore) cancelAnimationFrame(pendingRestore);
       window.removeEventListener("chatcoder:window-motion", onMotionEnd);
       window.removeEventListener("pointerup", onPanelDragEnd, true);
@@ -660,13 +803,30 @@ function MessageFlowCore({
     if (lastStartsUser) scrollToBottom(false, true);
   }, [entries, scrollToBottom]);
 
+  // S8：流式增长 → 跟随态下贴底。改为**直接订阅 store**（不再经 props）：
+  // 缓冲每帧换新引用，若作为 prop 传入会让整棵消息流每帧重渲染。
+  // 这里只做一次轻量长度比较（数字），命中变化才 scrollToBottom，全程不触发 React 重渲染。
   useEffect(() => {
     // 问题4 回退：流式内容变化时在跟随态（autoScroll）下直接贴底。
     // autoScroll 由 onScroll（用户滚动）与补滚的「用户已滚动则放弃」判定维护——
     // 此处不另设距底判定，否则内容增长后 scrollHeight 先变大、scrollTop 未贴底的
     // 时序会误判 dist>60 而误关 autoScroll，导致"已在底部却不自动滚动"。
-    if (autoScroll) scrollToBottom(false);
-  }, [streamSignal, autoScroll, scrollToBottom]);
+    const total = (map: Record<number, string> | undefined) => {
+      let n = 0;
+      if (map) for (const k in map) n += map[k].length;
+      return n;
+    };
+    const measure = (s: ReturnType<typeof useChatStore.getState>) =>
+      total(s.streamingBuffers) + total(s.thinkingBuffers)
+      + total(s.subagentStreams) + total(s.subagentThinking);
+    let last = measure(useChatStore.getState());
+    return useChatStore.subscribe((s) => {
+      const len = measure(s);
+      if (len === last) return;
+      last = len;
+      if (autoScrollRef.current) scrollToBottom(false);
+    });
+  }, [scrollToBottom]);
 
   // v0.3.1: 内容整表替换（refreshMessages 等 REST 刷新/回滚/压缩）后同样贴底——
   // 依赖 entries 引用而非 length：REST 刷新常使 entries 重建但长度不变，
@@ -689,7 +849,12 @@ function MessageFlowCore({
   useEffect(() => {
     const el = parentRef.current;
     if (el) updateActiveEntry(el);
-  }, [entries.length, updateActiveEntry]);
+    sampleHeights();
+  }, [entries.length, updateActiveEntry, sampleHeights]);
+
+  useEffect(() => {
+    if (positioned) sampleHeights();
+  }, [positioned, sampleHeights]);
 
   const matchedIndices = useMemo(() => {
     const kw = searchKeyword.trim().toLowerCase();
@@ -887,14 +1052,15 @@ function MainMessageFlow({
   const runningTurnId = useChatStore((s) => s.runningTurnId);
   const currentSessionId = useChatStore((s) => s.currentSessionId);
   const subagentMeta = useChatStore((s) => s.subagentMeta);
-  const streamingBuffers = useChatStore((s) => s.streamingBuffers);
-  const thinkingBuffers = useChatStore((s) => s.thinkingBuffers);
+  // S8（FlowEngine）：**不再**订阅 streamingBuffers / thinkingBuffers。
+  // 缓冲每帧换新引用，此前会让整棵消息流每帧重渲染（运行期“更卡”的头号来源）。
+  // 现在订阅下沉到 <StreamingTail>（只重渲染那一个组件），主树与 delta 解耦。
   // plan-95: 计划卡归属 turn——卡片内嵌到该 turn 行尾随时间线滚动，
   // 不再固定在消息流最底部（与后续新消息脱节）
   const planTurnId = useChatStore((s) => s.pendingPlan?.turnId ?? null);
-  // v30: 压缩中进度（compact.started 载荷）——消息流尾部渲染"压缩中"卡片
+  // v30: 压缩中状态（compact.started 载荷）——v42: 不再在消息流尾部渲染「正在压缩上下文」
+  // 统计卡片（用户反馈与状态行重复、样式突兀），改为把流式状态行文案从「处理中…」切换为「压缩中…」。
   const isCompacting = useChatStore((s) => s.isCompacting);
-  const compactingInfo = useChatStore((s) => s.compactingInfo);
   // plan-282-1441（#8）：调试现场——AI 调试试过程中在消息流尾部展示“停在哪一行”。
   // 这是“用户能看到断点进行到哪一行代码”在消息流侧的落点（另一处在调试面板）。
   const debugState = useChatStore((s) => s.debugState);
@@ -907,11 +1073,12 @@ function MainMessageFlow({
   }, [debugState]);
 
   const subagentsByTurn = useMemo(() => {
-    const map = new Map<number, Array<{ agentId: number; name: string; status: string }>>();
+    // plan-330-1648 M7: 透传 error——卡片/面板据此展示失败原因（不再只有一个红叉）
+    const map = new Map<number, Array<{ agentId: number; name: string; status: string; error?: string | null }>>();
     for (const [aid, m] of Object.entries(subagentMeta)) {
       if (m.turnId == null) continue;
       const list = map.get(m.turnId) ?? [];
-      list.push({ agentId: Number(aid), name: m.name, status: m.status });
+      list.push({ agentId: Number(aid), name: m.name, status: m.status, error: m.error ?? null });
       map.set(m.turnId, list);
     }
     return map;
@@ -963,8 +1130,11 @@ function MainMessageFlow({
     return out;
   }, [messages, injectMarks]);
 
-  // v30: 被压缩的消息保留在时间线上（不隐藏）；压缩块卡由 SUMMARY 消息渲染
-  const entries = useMemo(() => buildTimeline(timelineMessages), [timelineMessages]);
+  // v30: 被压缩的消息保留在时间线上（不隐藏）；压缩块卡由 SUMMARY 消息渲染。
+  // S8b：改用增量构建器——单条消息落库只重建它所在的那个 turn，其余 turn 的 entry
+  // 对象逐项复用（引用不变）⇒ 下游 memo 的 TurnGroup 继续命中，不再全量重渲染。
+  const buildEntries = useMemo(() => createTimelineBuilder(), []);
+  const entries = useMemo(() => buildEntries(timelineMessages), [buildEntries, timelineMessages]);
 
   /** 强制贴底信号：用户消息条数。
    *
@@ -1001,15 +1171,7 @@ function MainMessageFlow({
     [turns, runningTurnId, subagentsByTurn, planTurnId, plansByTurn, actions]
   );
 
-  // v40: 流式信号只取缓冲长度（数字），避免每次渲染把全量流式文本 join 成大字符串造成 GC 抖动
-  const streamSignal = useMemo(
-    () =>
-      Object.values(streamingBuffers).reduce((n, s) => n + s.length, 0) +
-      Object.values(thinkingBuffers).reduce((n, s) => n + s.length, 0),
-    [streamingBuffers, thinkingBuffers]
-  );
-  const thinkingText = Object.values(thinkingBuffers).join("").trim();
-  const text = Object.values(streamingBuffers).join("");
+  // S8：流式文本/信号不再在此计算（已下沉到 <StreamingTail> 的精确 selector）。
   const turnStatus = useChatStore((s) => s.turnStatus);
   // plan-308-1542 需求1：任务执行类错误卡（只进消息流，不弹右上角 Toast）
   const flowError = useChatStore((s) => s.flowError);
@@ -1022,16 +1184,15 @@ function MainMessageFlow({
       running={isRunning}
       renderEntry={renderEntry}
       streamingNode={
-        <StreamingText
+        // v42: 压缩期间状态行改显「压缩中…」（优先于「处理中…／等待响应…」；
+        // 若同时存在 turn 级瞬态提示（如重试），瞬态提示仍优先）。
+        <StreamingTail
           active={Boolean(isRunning && runningTurnId)}
-          thinking={thinkingText}
-          text={text}
-          statusLabel={turnStatus ?? undefined}
+          statusLabel={turnStatus ?? (isCompacting ? "压缩中…" : undefined)}
         />
       }
       trailingNode={
-        isCompacting ? <CompactingCard info={compactingInfo} />
-          : activeDebug ? <DebugCard status={activeDebug} />
+        activeDebug ? <DebugCard status={activeDebug} />
           // plan-308-1542 需求1：任务执行类错误统一在消息流末尾报（不弹右上角）
           : flowError ? (
             <FlowErrorCard
@@ -1048,7 +1209,6 @@ function MainMessageFlow({
       }
       forceBottomKey={userMsgSeq}
       sessionKey={currentSessionId ?? 0}
-      streamSignal={streamSignal}
       jumpDots
       search
       scrollTarget={scrollTarget}
@@ -1071,24 +1231,68 @@ function SubagentMessageFlow({
 }) {
   const currentSessionId = useChatStore((s) => s.currentSessionId);
   const storeMessages = useChatStore((s) => (threadId != null ? s.subagentMessages[threadId] || [] : []));
-  const thinkingBuffer = useChatStore((s) => (threadId != null ? s.subagentThinking[threadId] || "" : ""));
-  const streamingBuffer = useChatStore((s) => (threadId != null ? s.subagentStreams[threadId] || "" : ""));
+  // S8：子代理流式文本同样下沉到 <StreamingTail>（见其注释），此处不再订阅缓冲。
   const subagentMeta = useChatStore((s) => (threadId != null ? s.subagentMeta[threadId] : undefined));
 
   const isRunning = subagentMeta?.status === "running";
 
+  // plan-330-1648 M6: REST 历史回填——事件桶只覆盖“本次连接期间”收到的消息，
+  // 重开面板/断线/切会话后会有缺口（用户反馈：面板内容不完整）。这里按 threadId 拉一次历史，
+  // 与事件桶按 id 去重后并入（升序），不覆盖已有流式状态。
+  useEffect(() => {
+    if (threadId == null || currentSessionId == null) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const fetched = await api.listSessionMessages(currentSessionId, threadId);
+        if (cancelled || fetched.length === 0) return;
+        useChatStore.setState((s) => {
+          const bucket = s.subagentMessages[threadId] ?? [];
+          const known = new Set(bucket.map((m) => m.id));
+          const merged = [...bucket, ...fetched.filter((m) => !known.has(m.id))];
+          if (merged.length === bucket.length) return {};
+          merged.sort((a, b) => a.id - b.id);
+          return { subagentMessages: { ...s.subagentMessages, [threadId]: merged } };
+        });
+      } catch { /* 非阻塞：拉取失败就只用事件桶 */ }
+    })();
+    return () => { cancelled = true; };
+  }, [threadId, currentSessionId]);
+
   // 将子代理消息按 timeline 构建（子代理消息通常是平铺的 tool/text/thinking）
-  const entries = useMemo(() => buildTimeline(storeMessages), [storeMessages]);
+  // S8b：同样走增量构建器（与主会话同一套引用复用语义）。
+  const buildEntries = useMemo(() => createTimelineBuilder(), []);
+  const entries = useMemo(() => buildEntries(storeMessages), [buildEntries, storeMessages]);
+
+  // v36 (plan-321-1600 M2): 末条非空 text 消息 = 子代理的结构化汇报，交结构化卡片渲染。
+  // plan-330-1648 M6: **仅在子代理终态启用**——运行中每落一段新文本都会改写“最后一条
+  // text”的判定，使面板在“结构化卡片 ↔ 普通 markdown”之间反复切换（用户反馈问题3：
+  // 先正常排版、随后内容消失又重新输出）。
+  const reportMessageId = useMemo(() => {
+    if (isRunning || !subagentMeta) return undefined;
+    for (let i = storeMessages.length - 1; i >= 0; i--) {
+      const m = storeMessages[i];
+      if (m.msg_type === "text" && msgText(m.content).trim()) return m.id;
+    }
+    return undefined;
+  }, [storeMessages, isRunning, subagentMeta]);
 
   const renderEntry = useCallback(
     (entry: TimelineEntry) => {
       if (entry.kind !== "turn") return <StandaloneEntry entry={entry} />;
-      return <TurnGroup entry={entry} isRunning={isRunning} actions={actions || "copy-only"} flow="subagent" />;
+      return (
+        <TurnGroup
+          entry={entry}
+          isRunning={isRunning}
+          actions={actions || "copy-only"}
+          flow="subagent"
+          reportMessageId={reportMessageId}
+        />
+      );
     },
-    [isRunning, actions]
+    [isRunning, actions, reportMessageId]
   );
 
-  const streamSignal = (thinkingBuffer?.length || 0) + (streamingBuffer?.length || 0);
 
   return (
     <MessageFlowCore
@@ -1097,15 +1301,13 @@ function SubagentMessageFlow({
       running={isRunning}
       renderEntry={renderEntry}
       streamingNode={
-        <StreamingText
+        <StreamingTail
+          source={threadId ?? -1}
           active={isRunning}
-          thinking={thinkingBuffer}
-          text={streamingBuffer}
           statusLabel={isRunning ? "子代理执行中…" : undefined}
         />
       }
       sessionKey={`${currentSessionId ?? 0}:${threadId ?? 0}`}
-      streamSignal={streamSignal}
       jumpDots={false}
       search={false}
       className={className}

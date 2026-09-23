@@ -9,6 +9,8 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { api as backendApi } from "../../api/client";
+import { isBusy } from "../../perf/bus";
+import { registerReconcileTask, RECONCILE_ORDER } from "../../perf/reconcile";
 import { useChatStore } from "../../store/chat";
 import type { PanelTab } from "../../store/panel";
 
@@ -130,13 +132,11 @@ export function TerminalPanel({ tab }: TerminalPanelProps) {
     //   单次成本随会话输出量增长——它正是"会话正在运行时拖拽特别卡"的主要贡献者之一。
     //   窗口/面板拖拽期间宽度每帧都在变，逐帧 fit 等于把这段重活乘以帧数。
     //   这里改为：运动中只**记账**，等运动停止后补一次 fit（终态一次即可，
-    //   中间帧的行列数本来也不会被用户看到）。判定口径与消息流一致：
-    //   body.panel-dragging（拖分隔条）/ __chatcoderWindowMotion（窗口动画·拖窗·resize）。
+    //   中间帧的行列数本来也不会被用户看到）。判定统一走 PerfBus（S3）——
+    //   此前这里只认「拖分隔条 / 窗口运动」，漏了「面板折叠过渡」，现已合并。
     let fitTimer = 0;
     let ptyResizeTimer = 0;
-    const inMotion = () =>
-      document.body.classList.contains("panel-dragging")
-      || Boolean((window as unknown as { __chatcoderWindowMotion?: boolean }).__chatcoderWindowMotion);
+    const inMotion = () => isBusy();
     const doFit = () => {
       if (!containerRef.current) return;
       try {
@@ -158,6 +158,12 @@ export function TerminalPanel({ tab }: TerminalPanelProps) {
         doFit();
       }, 16);
     };
+    // RFL-6（S6）：注册进唯一收敛序列——order 50 终端 fit。
+    // 直接 doFit（不再走 settleFit 的 16ms 延时）：收敛序列本身在 rAF 内，
+    // 且 order 20/30 已先提交虚拟器尺寸，此时容器宽度已是终值。
+    // 原有事件监听保留：窗口缩放/补间路径仍走它们。
+    const offReconcile = registerReconcileTask("terminal-fit", RECONCILE_ORDER.terminalFit,
+      "终端 fit", () => { if (!disposed) doFit(); });
     const onMotionEnd = (e: Event) => {
       if ((e as CustomEvent<{ active?: boolean }>).detail?.active === false) settleFit();
     };
@@ -176,6 +182,7 @@ export function TerminalPanel({ tab }: TerminalPanelProps) {
 
     return () => {
       disposed = true;
+      offReconcile();
       cancelAnimationFrame(raf);
       if (fitTimer) window.clearTimeout(fitTimer);
       if (ptyResizeTimer) window.clearTimeout(ptyResizeTimer);
