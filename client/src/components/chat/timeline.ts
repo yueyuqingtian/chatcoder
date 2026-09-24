@@ -12,6 +12,7 @@
  */
 import type { MessageOut } from "../../api/client";
 import { MsgType, SenderType } from "@chatcoder/shared";
+import type { TurnOut } from "@chatcoder/shared";
 
 export interface ToolLeaf {
   callKey: string;
@@ -429,4 +430,32 @@ export function turnPreview(turn: TimelineEntry & { kind: "turn" }): string {
     return joined.length > 40 ? `${joined.slice(0, 40)}…` : joined;
   }
   return "";
+}
+
+/** plan-334-1661 S3：按 id 取 turn 行（O(1) 索引，替代热路径上的 `turns.find`）。
+ *
+ * ── 为什么 ──
+ * TurnGroup 的两个 selector（WorkTimer 起止时间、本 turn 行状态）在**每个可见 turn** 上
+ * 每帧各执行一次，内部 `s.turns.find(...)` 是 O(turns)；长会话（数百~上千 turn）时
+ * 叠加为「每帧 × 可见 turn 数 × turns 长度」的纯 CPU 开销，直接与流式帧预算竞争。
+ *
+ * ── 实现 ──
+ * 以 turns 数组**引用**为键缓存 id→turn 的 Map：store 走不可变更新，只有确实改过 turn 行
+ * （新 turn / 状态流转等低频事件）才换数组引用 → 重建索引；流式 flush 不改 turns ⇒ 缓存命中。
+ * 返回语义与 `find` 一致：取**首个**匹配（正常不存在重复 id）。
+ */
+const turnIndexCache = new WeakMap<readonly TurnOut[], Map<number, TurnOut>>();
+
+export function getTurnById(
+  turns: readonly TurnOut[] | undefined,
+  turnId: number | null | undefined,
+): TurnOut | undefined {
+  if (!turns || turnId == null) return undefined;
+  let map = turnIndexCache.get(turns);
+  if (!map || map.size !== turns.length) {
+    map = new Map<number, TurnOut>();
+    for (const t of turns) if (!map.has(t.id)) map.set(t.id, t);
+    turnIndexCache.set(turns, map);
+  }
+  return map.get(turnId);
 }

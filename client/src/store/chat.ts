@@ -537,6 +537,9 @@ function _clearHeartbeat() {
  */
 let _pendingToken: Record<number, string> = {};
 let _pendingThinking: Record<number, string> = {};
+/** plan-334-1661 S2：运行中工具的实时输出增量（call_key -> 文本）。
+ *  原先每个 chunk 直接 set()，高频输出时每 chunk 一次 React 提交；现并入同一帧合流。 */
+let _pendingToolOutput: Record<string, string> = {};
 // v19: agentId -> threadId（子代理流式内容分桶到 subagentStreams/subagentThinking）
 let _pendingThread: Record<number, number> = {};
 let _streamDoneText: Record<string, string> = {};
@@ -548,7 +551,15 @@ function _clearPendingDeltas() {
   _pendingToken = {};
   _pendingThinking = {};
   _pendingThread = {};
+  _pendingToolOutput = {};
   _streamDoneText = {};
+}
+
+/** plan-334-1661 S2：是否还有待 flush 的增量——高负载降级期据此决定是否继续排 rAF，避免空转。 */
+function _hasPendingDelta(): boolean {
+  return Object.keys(_pendingToken).length > 0
+    || Object.keys(_pendingThinking).length > 0
+    || Object.keys(_pendingToolOutput).length > 0;
 }
 
 function _clearPendingFor(agentId: number) {
@@ -619,7 +630,7 @@ function _scheduleDeltaFlush() {
     // S10b：高负载降级期降低 flush 频率（逐帧 → 约 30fps）；无待 flush 内容时停表。
     const nowTs = performance.now();
     if (nowTs < _highLoadUntil && nowTs - _lastFlushAt < HIGH_LOAD_GAP_MS) {
-      if (Object.keys(_pendingToken).length > 0 || Object.keys(_pendingThinking).length > 0) {
+      if (_hasPendingDelta()) {
         requestAnimationFrame(tick);
       } else {
         _flushScheduled = false;
@@ -630,15 +641,24 @@ function _scheduleDeltaFlush() {
     const tok = _pendingToken;
     const thk = _pendingThinking;
     const thr = _pendingThread;
+    const tpo = _pendingToolOutput;
     _pendingToken = {};
     _pendingThinking = {};
     _pendingThread = {};
+    _pendingToolOutput = {};
     const tokKeys = Object.keys(tok);
     const thkKeys = Object.keys(thk);
-    if (tokKeys.length === 0 && thkKeys.length === 0) return;
+    const tpoKeys = Object.keys(tpo);
+    if (tokKeys.length === 0 && thkKeys.length === 0 && tpoKeys.length === 0) return;
     const t0 = performance.now();
     useChatStore.setState((s) => {
       const next: Partial<ChatState> = {};
+      // plan-334-1661 S2：运行中工具的实时输出与 token/thinking 共用同一次提交
+      if (tpoKeys.length > 0) {
+        const runningOutput = { ...s.runningToolOutput };
+        for (const k of tpoKeys) runningOutput[k] = (runningOutput[k] || "") + tpo[k];
+        next.runningToolOutput = runningOutput;
+      }
       // v19: 子代理（thread_id != null）流式内容进独立桶，主消息流不混入
       if (tokKeys.length > 0) {
         const streaming = { ...s.streamingBuffers };
@@ -2431,16 +2451,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break;
       }
       case "tool.output": {
-        // v7(B): 运行中命令/工具的实时输出增量——按 call_key 累积，ToolTree 展开时实时渲染
+        // v7(B): 运行中命令/工具的实时输出增量——按 call_key 累积，ToolTree 展开时实时渲染。
+        // plan-334-1661 S2：改为与 token/thinking 同一条帧合流（原先每 chunk 一次 set，
+        // 高频输出时每 chunk 触发一次 React 提交）；顺带获得几何运动期暂停与高负载降级。
         const ok = String(payload.call_key ?? "");
         const chunk = String(payload.chunk ?? "");
         if (ok && chunk) {
-          set((s) => ({
-            runningToolOutput: {
-              ...s.runningToolOutput,
-              [ok]: (s.runningToolOutput[ok] || "") + chunk,
-            },
-          }));
+          _pendingToolOutput[ok] = (_pendingToolOutput[ok] || "") + chunk;
+          _scheduleDeltaFlush();
         }
         break;
       }

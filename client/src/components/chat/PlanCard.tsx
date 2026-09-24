@@ -6,6 +6,10 @@ import { useChatStore } from "../../store/chat";
 import { usePanelStore } from "../../store/panel";
 import { api, type MessageOut } from "../../api/client";
 
+/** plan-334-1661 S1：规划流式文本的节流读取窗口（ms）。
+ *  store 的流式缓冲每次 flush（约每帧）换新引用，不节流会让卡片每帧 join 全文并重渲染。 */
+const STREAM_TEXT_THROTTLE_MS = 120;
+
 export const PlanCard = memo(function PlanCard({
   turnId,
   fallbackPlan,
@@ -23,7 +27,15 @@ export const PlanCard = memo(function PlanCard({
   const pendingPlan = useChatStore((s) => s.pendingPlan);
   const currentProjectId = useChatStore((s) => s.currentProjectId);
   const runningTurnId = useChatStore((s) => s.runningTurnId);
-  const streamingBuffers = useChatStore((s) => s.streamingBuffers);
+  /** plan-334-1661 S1：只订阅「流式正文总长度」（数字）。
+   *  此前订阅整个 streamingBuffers map——该 map 每次 flush（约每帧）换新引用，
+   *  卡片于是每帧重渲染；改为数字比较后，长度不变即不触发重渲染。 */
+  const streamLen = useChatStore((s) => {
+    let n = 0;
+    const m = s.streamingBuffers;
+    for (const k in m) n += m[k].length;
+    return n;
+  });
   // plan-282-1434（B1）：确认/取消动作由卡片自身承载（原先只有输入框上方横幅持有）
   const confirmPlanTurn = useChatStore((s) => s.confirmPlanTurn);
   const dismissPlan = useChatStore((s) => s.dismissPlan);
@@ -66,7 +78,24 @@ export const PlanCard = memo(function PlanCard({
   /** plan-644: 已被更新方案取代（后端 turn.plan_status=superseded） */
   const isSuperseded = plan?.status === "superseded";
   const isPlanningStream = isRunningThisTurn && !isConfirmed && !isCancelled && !isSuperseded;
-  const streamText = isPlanningStream ? Object.values(streamingBuffers).join("") : "";
+
+  /** plan-334-1661 S1：规划流式文本按 STREAM_TEXT_THROTTLE_MS 节流读入本地 state，
+   *  替代原先「渲染期 Object.values(...).join("") + 每帧随 map 变化重渲染」。
+   *  依赖 streamLen（数字）：节流窗口内的多次 flush 只读取一次。 */
+  const [streamText, setStreamText] = useState("");
+  const lastStreamSyncRef = useRef(0);
+  useEffect(() => {
+    if (!isPlanningStream) {
+      setStreamText("");
+      return;
+    }
+    const wait = Math.max(0, STREAM_TEXT_THROTTLE_MS - (performance.now() - lastStreamSyncRef.current));
+    const timer = window.setTimeout(() => {
+      lastStreamSyncRef.current = performance.now();
+      setStreamText(Object.values(useChatStore.getState().streamingBuffers).join(""));
+    }, wait);
+    return () => window.clearTimeout(timer);
+  }, [streamLen, isPlanningStream]);
 
   const [fileContent, setFileContent] = useState<string>("");
   const contentRef = useRef<HTMLDivElement>(null);
@@ -74,7 +103,10 @@ export const PlanCard = memo(function PlanCard({
 
   useEffect(() => {
     let active = true;
-    if (currentProjectId && planDocPath) {
+    // plan-334-1661 S1：规划流式期间卡片展示的就是实时流式文本，无需读取文档；
+    // 此前依赖 streamText（每帧变化）⇒ 规划期间**每帧一次** readProjectFile 请求。
+    // 现在只在「非规划流式」阶段读一次（进入待确认 / 执行中 / 执行结束各一次）。
+    if (!isPlanningStream && currentProjectId && planDocPath) {
       api
         .readProjectFile(currentProjectId, planDocPath)
         .then((res) => {
@@ -87,7 +119,8 @@ export const PlanCard = memo(function PlanCard({
     };
     // plan-633: 依赖含 isRunningThisTurn--执行结束（runningTurnId 离开本 turn）时重读计划 md，
     // 卡片展示 AI 执行期间更新过的最新文档内容（执行中保持挂载时快照）。
-  }, [currentProjectId, planDocPath, streamText, isRunningThisTurn]);
+    // plan-334-1661 S1: 依赖由 streamText 改为 isPlanningStream（布尔），去掉每帧抖动源。
+  }, [currentProjectId, planDocPath, isPlanningStream, isRunningThisTurn]);
 
   // displayMarkdown 需在条件 return 之前计算：溢出检测 useEffect 依赖它（hooks 顺序约束）
   const displayMarkdown =
@@ -129,7 +162,9 @@ export const PlanCard = memo(function PlanCard({
         ref={contentRef}
         className={isOverflowing ? "plan-compact-markdown is-faded" : "plan-compact-markdown"}
       >
-        <MarkdownContent>{displayMarkdown}</MarkdownContent>
+        {/* plan-334-1661 修复：规划流式中间态（每 120ms 一段新文本、永远不会命中）关闭
+            Markdown LRU 缓存，避免写满缓存挤掉可复用的历史条目；稳定文本（读盘/落库）正常缓存。 */}
+        <MarkdownContent cache={!(isPlanningStream && streamText)}>{displayMarkdown}</MarkdownContent>
       </div>
 
       {/* plan-282-1434（B1）：确认动作收进卡片内部下方居中。

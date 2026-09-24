@@ -16,7 +16,7 @@ import { MarkdownContent } from "../MarkdownContent";
 import { SubagentReportCard } from "./SubagentReportCard";
 import { IconRotateCcw, IconArrowToggle, IconAlertCircle } from "../icons";
 import type { TimelineEntry, TurnItem } from "./timeline";
-import { msgText } from "./timeline";
+import { msgText, getTurnById } from "./timeline";
 import { useChatStore } from "../../store/chat";
 import { parseUtc } from "../../utils/time";
 import { MessageImageGrid, MessageFileCards, TokenText, RefChips, refsOf, stripRefLines, attachmentsOf } from "./AttachmentCard";
@@ -58,7 +58,7 @@ function WorkTimer({
   const subMeta = useChatStore((s) =>
     subagentFlow && agentId != null ? s.subagentMeta[agentId] : undefined
   );
-  const turn = useChatStore((s) => (subagentFlow ? undefined : s.turns.find((t) => t.id === turnId)));
+  const turn = useChatStore((s) => (subagentFlow ? undefined : getTurnById(s.turns, turnId)));
   // S8c：改用共享秒级 ticker（原先每处各自 setInterval，运行期多处独立唤醒 + 各自重渲染）。
   useRunningTicker(isRunning);
 
@@ -152,7 +152,7 @@ export const TurnGroup = memo(function TurnGroup({
   // （思考/工具/中间说明/计划预览消息及计划卡）；最终汇报与操作行始终展示。
   // 异常中断（interrupted/failed/rolled_back）不折叠（错误与过程必须可见）。
   const turnRowStatus = useChatStore((s) =>
-    entry.turnId != null ? s.turns.find((t) => t.id === entry.turnId)?.status : undefined
+    entry.turnId != null ? getTurnById(s.turns, entry.turnId)?.status : undefined
   );
   const abnormalTurn = turnRowStatus === "interrupted" || turnRowStatus === "failed" || turnRowStatus === "rolled_back";
 

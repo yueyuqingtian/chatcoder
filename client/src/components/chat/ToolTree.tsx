@@ -24,6 +24,7 @@ import { usePanelStore } from "../../store/panel";
 import { useChatStore } from "../../store/chat";
 import { FileBadge, splitFilePath } from "./FileBadge";
 import { ChatCollapse } from "./ChatCollapse";
+import { tailClamp } from "../../utils/tailClamp";
 import {
   IconFileRead, IconFileWrite, IconFolder, IconGlobe, IconTerminal,
   IconUsers, IconBox, IconZap, IconFlask, IconGitBranch, IconBrain,
@@ -305,6 +306,26 @@ function leafArgsContent(leaf: ToolLeaf): string | null {  const a = (leaf.args 
   return null;
 }
 
+/** plan-334-1661 S2：超长输出的**尾部**截断渲染。
+ *  只截渲染文本（DOM 文本量有界），数据源与复制仍是全量；
+ *  截断时显式提示省略量，避免用户误以为输出被吞。 */
+const ClampedPre = memo(function ClampedPre({ text, className, code = false }: {
+  text: string;
+  className: string;
+  /** true = 保留 <code> 包装（代码块分支） */
+  code?: boolean;
+}) {
+  const { text: shown, omitted } = useMemo(() => tailClamp(text), [text]);
+  return (
+    <>
+      {omitted > 0 && (
+        <div className="tc-clamp-hint">已省略前 {omitted.toLocaleString()} 字符（复制内容仍为完整输出）</div>
+      )}
+      <pre className={className}>{code ? <code>{shown}</code> : shown}</pre>
+    </>
+  );
+});
+
 const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
   const setPreviewPath = usePanelStore((s) => s.setPreviewPath);
   const setDiffPreview = usePanelStore((s) => s.setDiffPreview);
@@ -389,7 +410,7 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
               )}
               {/* v7(B): 运行中命令行的实时输出 */}
               {leaf.ok === null && liveOutput != null && liveOutput.length > 0 && (
-                <pre className="tc-plain tc-live">{liveOutput}</pre>
+                <ClampedPre className="tc-plain tc-live" text={liveOutput} />
               )}
               {grepHits.length > 0 && (
                 <div className="tc-grep-hits">
@@ -473,9 +494,9 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
               {/* plan-278-1391: ask_user_question 的 output 是 `用户回答:\n{json}`，
                   问答已由上方结构化列表呈现，这里跳过原文，避免重复且可读性差的 JSON。 */}
               {leaf.output && leaf.tool !== "ask_user_question" && (path && /\.(ts|tsx|js|jsx|py|json|md|css|html|go|rs|java|c|cpp|sh)$/i.test(path) ? (
-                <pre className="tc-code"><code>{leaf.output}</code></pre>
+                <ClampedPre className="tc-code" text={leaf.output} code />
               ) : (
-                <pre className="tc-plain">{leaf.output}</pre>
+                <ClampedPre className="tc-plain" text={leaf.output} />
               ))}
               {leaf.error && <pre className="tc-error-output">{leaf.error}</pre>}
             </>

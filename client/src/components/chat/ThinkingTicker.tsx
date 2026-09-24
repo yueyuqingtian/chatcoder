@@ -6,6 +6,15 @@
  *   不重启动画（视觉为连续上滚流）；
  * - v41 速度自适应：产字越快横滚追逐越快（上限 2000px/s）、上滚时长越短（160ms→90ms），
  *   快刷时"一行快速渲染→快速滚到下一行"。
+ * - plan-334-1661 修复：**测量与动画分离**。
+ *   原实现每帧在 rAF 里读 3 个布局属性（line.scrollWidth / view.clientWidth / line.offsetHeight）：
+ *   流式期间这些读会把"浏览器尚未结算的整棵消息树脏布局"强制同步结算一次，是流式掉帧与
+ *   拖面板卡顿的固定成本。现在几何值全部由 ResizeObserver 在**布局之后**测量并缓存
+ *   （该时机不会触发强制同步布局），rAF 只做 transform 写入；文本增长与容器尺寸变化
+ *   都会经 RO 更新目标值并唤醒停帧中的循环。
+ * - 静止停帧：横滚到位且一段时间无新文本时停止排队（布局读/写入全免），文本或尺寸变化唤醒。
+ * - `will-change: transform` 由 CSS 常驻（`.thinking-ticker-strip/.thinking-ticker-line`）：
+ *   本组件最多同时存在 1~2 个实例，常驻合成层成本远低于滚动开始时的重新光栅化。
  */
 import { memo, useEffect, useRef, useState } from "react";
 import { isBusy } from "../../perf/bus";
@@ -13,6 +22,10 @@ import { isBusy } from "../../perf/bus";
 const SWAP_MS_SLOW = 160;
 const SWAP_MS_FAST = 90;
 const FAST_RATE = 80; // chars/s，超过视为快刷
+/** 静止停帧：横滚到位且该时长内无新文本 ⇒ 停止排队，等唤醒。 */
+const IDLE_STOP_MS = 400;
+/** 行高兜底值（与 .thinking-ticker-line 的 line-height 一致；正常由 RO 实测覆盖）。 */
+const ROW_H = 18;
 
 export const ThinkingTicker = memo(function ThinkingTicker({ text, placeholder = "正在深入思考…" }: {
   text: string;
@@ -27,12 +40,26 @@ export const ThinkingTicker = memo(function ThinkingTicker({ text, placeholder =
   const prevRef = useRef<string | null>(null);
   const swapRef = useRef<{ start: number; dur: number } | null>(null);
   const lineCountRef = useRef(0);
-  const anim = useRef({ offset: 0, rate: 0, lastLen: 0, lastTs: 0, frameTs: 0, raf: 0 });
+  const anim = useRef({
+    offset: 0,
+    rate: 0,
+    lastLen: 0,
+    lastTs: 0,
+    frameTs: 0,
+    raf: 0,
+    /** 最近一次文本增长时间（静止停帧判据） */
+    lastGrowTs: 0,
+  });
+  /** 几何测量缓存：仅由 RO 回调（布局后）写入；rAF 循环只读，不触发强制同步布局。 */
+  const metrics = useRef({ scrollW: 0, viewW: 0, lineH: ROW_H });
+  /** rAF 循环启动器：由 rAF effect 赋值，文本/尺寸变化时唤醒（停帧态）。 */
+  const startRef = useRef<() => void>(() => {});
 
   // 文本变化：EMA 测产字速率（chars/s）+ 当前行提取 + 换行检测（互斥状态机）
   useEffect(() => {
     const a = anim.current;
     const now = performance.now();
+    a.lastGrowTs = now; // 文本有变化即视为"活着"，唤醒可能已停帧的循环
     if (a.lastTs) {
       const dt = (now - a.lastTs) / 1000;
       if (dt > 0.008) {
@@ -80,19 +107,39 @@ export const ThinkingTicker = memo(function ThinkingTicker({ text, placeholder =
       curRef.current = line;
       setCur(line);
     }
+    startRef.current(); // 有新文本 → 唤醒循环（测量由 RO 更新）
   }, [text]);
 
-  // rAF 循环：上滚期间不做横滚（互斥）；上滚结束后横滚以自适应速度追逐行尾
+  // 测量：RO 在**布局之后**回调（不会强制同步布局），文本增长 / 容器宽度变化都会命中；
+  // 命中即更新目标值并唤醒停帧循环。
+  useEffect(() => {
+    const view = viewRef.current;
+    const line = lineRef.current;
+    if (!view || !line || typeof ResizeObserver === "undefined") return;
+    const measure = () => {
+      metrics.current.viewW = view.clientWidth;
+      metrics.current.scrollW = line.scrollWidth;
+      metrics.current.lineH = line.offsetHeight || ROW_H;
+    };
+    measure(); // 初次：commit 后布局已就绪，仅此一次同步读
+    const ro = new ResizeObserver(() => {
+      measure();
+      startRef.current();
+    });
+    ro.observe(view);
+    ro.observe(line);
+    return () => ro.disconnect();
+  }, []);
+
+  // rAF 循环：只写 transform、只读缓存测量值；上滚期间不做横滚（互斥）；
+  // 横滚到位且长时间无新文本 ⇒ 停帧，等 startRef 唤醒。
   useEffect(() => {
     const a = anim.current;
     const easeOut = (p: number) => 1 - Math.pow(1 - p, 3);
     const step = (now: number) => {
-      // 运动期空转（用户反馈"拖窗口/拖面板时鼠标失灵几秒"）：本循环每帧做
-      // 3 个布局读（scrollWidth / clientWidth / offsetHeight）+ 2 个 transform 写。
-      // 运动期间布局常处于 dirty 状态，这些读会升级为**强制同步布局**（每帧一次
-      // 整树重排），是拖拽期主线程长任务的组成之一。运动期只继续排队、不做任何
-      // 读写；结束后的下一帧自然追上——上滚动画按 start/dur 推进（超时即完成），
-      // 横滚按 dt 补偿，暂停不会造成视觉残留。
+      a.raf = 0;
+      // 几何运动期（拖窗口/拖面板/面板过渡）只排队、不做任何读写：
+      // 结束后的下一帧自然追上——上滚按 start/dur 推进（超时即完成），横滚按 dt 补偿。
       if (isBusy()) {
         a.raf = requestAnimationFrame(step);
         return;
@@ -114,22 +161,34 @@ export const ThinkingTicker = memo(function ThinkingTicker({ text, placeholder =
               setPrev(null);
             }
           } else {
-            swapY = -(line.offsetHeight || 18) * easeOut(Math.max(0, p));
+            swapY = -metrics.current.lineH * easeOut(Math.max(0, p));
           }
         } else {
-          // 「横滚」模式：追逐行尾，速度随产字速率自适应
-          const target = Math.max(0, line.scrollWidth - view.clientWidth);
+          // 「横滚」模式：追逐行尾，速度随产字速率自适应（目标值来自 RO 测量缓存）
+          const target = Math.max(0, metrics.current.scrollW - metrics.current.viewW);
           const speed = Math.min(2000, Math.max(60, a.rate * 10));
           if (a.offset < target) a.offset = Math.min(target, a.offset + speed * dt);
           else if (a.offset > target + 1) a.offset = Math.max(target, a.offset - speed * 2 * dt);
+          // 静止停帧：横滚已到位且一段时间无新文本 ⇒ 不再排队（无读写）；
+          // 文本变化与尺寸变化都会重新唤醒循环。
+          if (a.offset === target && now - a.lastGrowTs > IDLE_STOP_MS) return;
         }
         line.style.transform = `translate3d(${-a.offset}px,0,0)`;
         strip.style.transform = `translate3d(0,${swapY}px,0)`;
       }
       a.raf = requestAnimationFrame(step);
     };
-    a.raf = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(a.raf);
+    startRef.current = () => {
+      if (a.raf) return;
+      a.frameTs = 0; // 唤醒后首帧用默认 dt（避免用停帧前的旧时间戳算出大跨步）
+      a.raf = requestAnimationFrame(step);
+    };
+    startRef.current();
+    return () => {
+      if (a.raf) cancelAnimationFrame(a.raf);
+      a.raf = 0;
+      startRef.current = () => {};
+    };
   }, []);
 
   return (

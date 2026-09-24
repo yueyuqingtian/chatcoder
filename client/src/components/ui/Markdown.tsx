@@ -167,16 +167,69 @@ export const markdownComponents: Components = {
   td({ children }) { return <td className="md-td">{children}</td>; },
 };
 
-export const Markdown = memo(function Markdown({ children }: { children: string }) {
-  return (
-    <div className="md-body">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath]}
-        rehypePlugins={[rehypeHighlight, rehypeKatex]}
-        components={markdownComponents}
-      >
-        {children}
-      </ReactMarkdown>
-    </div>
+/** plan-334-1661 S4（本轮修复）：落库 Markdown 的跨挂载渲染缓存。
+ *
+ * ── 为什么 ──
+ * 消息流是虚拟列表，历史条目在滚动中反复挂载/卸载；而 `Markdown` 的 memo 只按 children
+ * 值比较，卸载即丢缓存 ⇒ 每次回翻都要重跑一遍 unified 解析 + rehype-highlight/rehype-katex。
+ *
+ * ── 做法与上一版的两处修正 ──
+ * ① 缓存的是 **ReactMarkdown 的内层渲染结果**，外层 `<div className="md-body">` 每次新建——
+ *    上一版把含 `.md-body` 的整棵树塞进缓存，命中后外层再包一层，出现 `.md-body > .md-body`
+ *    双层结构（该轮"进入会话卡顿"的嫌疑点之一：后代选择器双重命中 + DOM 结构随命中与否变化）。
+ * ② 新增 `cache` 开关：流式中间态（PlanCard 的节流预览文本）每次都产生新内容、永远不会命中，
+ *    不应写入 LRU 挤掉真正可复用的历史条目（上一版未区分，属缓存污染）。
+ *
+ * ── 边界 ──
+ * · 只缓存元素树（React 元素是不可变数据，可被重复渲染）；交互子组件（FileLink /
+ *   CodeBlockWrapper）在挂载时各自跑自己的 hook（订阅 / 存在性校验），行为与未命中一致。
+ * · 单条超长文本（> MD_CACHE_MAX_ONE）不入缓存，避免大对象长期滞留。
+ * · 写入发生在渲染阶段：内容只由 children 决定，幂等（并发渲染被丢弃也不影响正确性）。
+ */
+const MD_CACHE_MAX_ENTRIES = 64;
+/** 缓存文本总量上限（近似内存上限，按 key 字符数计） */
+const MD_CACHE_MAX_CHARS = 2 * 1024 * 1024;
+/** 单条文本上限：超过则不缓存 */
+const MD_CACHE_MAX_ONE = 128 * 1024;
+
+const mdCache = new Map<string, ReactNode>();
+let mdCacheChars = 0;
+
+function mdCacheGet(key: string): ReactNode | undefined {
+  if (!mdCache.has(key)) return undefined;
+  const hit = mdCache.get(key)!;
+  // 命中后移到队尾：Map 保持插入顺序，即天然 LRU
+  mdCache.delete(key);
+  mdCache.set(key, hit);
+  return hit;
+}
+
+function mdCacheSet(key: string, node: ReactNode): void {
+  if (key.length > MD_CACHE_MAX_ONE) return;
+  if (mdCache.has(key)) return; // 已存在（并发双渲染）：保留先入的元素树
+  mdCache.set(key, node);
+  mdCacheChars += key.length;
+  while (mdCache.size > MD_CACHE_MAX_ENTRIES || mdCacheChars > MD_CACHE_MAX_CHARS) {
+    const oldest = mdCache.keys().next();
+    if (oldest.done) break;
+    mdCache.delete(oldest.value);
+    mdCacheChars -= oldest.value.length;
+  }
+}
+
+export const Markdown = memo(function Markdown({ children, cache = true }: { children: string; cache?: boolean }) {
+  // 命中缓存则直接复用内层元素树（跳过解析与 highlight/katex）；外层 .md-body 每次新建，
+  // 保证无论是否命中缓存，DOM 结构恒为单层 .md-body。
+  const cached = cache ? mdCacheGet(children) : undefined;
+  const inner = cached !== undefined ? cached : (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm, remarkMath]}
+      rehypePlugins={[rehypeHighlight, rehypeKatex]}
+      components={markdownComponents}
+    >
+      {children}
+    </ReactMarkdown>
   );
+  if (cache && cached === undefined) mdCacheSet(children, inner);
+  return <div className="md-body">{inner}</div>;
 });

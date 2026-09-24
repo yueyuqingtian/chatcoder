@@ -8,7 +8,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, memo, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { TimelineEntry, ToolNode, TurnItem } from "./timeline";
-import { createTimelineBuilder, msgText, lastPersistedText } from "./timeline";
+import { createTimelineBuilder, msgText, lastPersistedText, getTurnById } from "./timeline";
 import { isBusy, subscribe } from "../../perf/bus";
 import { registerReconcileTask, RECONCILE_ORDER } from "../../perf/reconcile";
 import { TurnGroup } from "./TurnGroup";
@@ -1195,7 +1195,8 @@ function MainMessageFlow({
     (entry: TimelineEntry) => {
       if (entry.kind !== "turn") return <StandaloneEntry entry={entry} />;
       // v12: 已回滚 turn 显示专用横幅（回滚后消息被软删，以此占位区分「回滚了」与「没执行」）
-      const rolledBack = turns.find((t) => t.id === entry.turnId)?.status === "rolled_back";
+      // plan-334-1661 S3: 改用 O(1) 索引（原先每次渲染每个可见条目都做一次 O(turns) 的 find）
+      const rolledBack = getTurnById(turns, entry.turnId)?.status === "rolled_back";
       // 计划卡内嵌到其归属 turn 内部规划说明之后、执行操作之前（彻底根治时序倒挂沉底 Bug）
       const hasTurnPlan = entry.turnId != null && (plansByTurn[entry.turnId] != null || entry.turnId === planTurnId);
       return (

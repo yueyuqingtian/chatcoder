@@ -802,6 +802,13 @@ body.maximized .titlebar { padding-top: 8px; padding-left: 16px; padding-right: 
   -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 14px);
   mask-image: linear-gradient(90deg, transparent 0, #000 14px);
 }
+/* plan-334-1661 修复：以下两条规则曾被误删，缺失会造成三处症状——
+   ① `.thinking-ticker-line` 退回 `display: inline` ⇒ 行高继承 `.tc-row` 的 1.7（约 22px），
+      被 18px 容器 `overflow:hidden` 裁掉底部（"思考预览偏下 + 文字下半部分被遮挡"）；
+   ② inline 元素上的 transform 不生效（规范行为）⇒ 横滚/换行上滚动画完全失效；
+   ③ 丢失 `white-space:pre` / `width:max-content` ⇒ 长文本在容器内折行，每来一个 token
+      都要对整段做折行重排（流式掉帧、拖面板更卡）。
+   恢复后行盒高度与容器高度严格一致（18px），滚动元素为 block（transform 生效）。 */
 .thinking-ticker-strip {
   display: block;
   will-change: transform;
@@ -815,6 +822,7 @@ body.maximized .titlebar { padding-top: 8px; padding-left: 16px; padding-right: 
   color: var(--text-3);
   will-change: transform;
 }
+
 .thinking-done-label {
   color: var(--text-3);
   font-size: 12px;
@@ -983,6 +991,8 @@ body.maximized .titlebar { padding-top: 8px; padding-left: 16px; padding-right: 
 .tc-plain { margin: 0; font-family: var(--font-mono); font-size: 11px; color: var(--text-2); white-space: pre-wrap; word-break: break-word; line-height: 1.4; }
 /* v7: 运行中命令行/工具输出的实时区——略浅前景 + 首帧上边距，避免与图标行贴死 */
 .tc-live { color: var(--text-3); padding-top: 2px; }
+/* plan-334-1661 S2: 超长输出被尾部截断时的提示行（说明省略量，复制仍为完整内容） */
+.tc-clamp-hint { margin: 0 0 2px; font-size: 10px; color: var(--text-3); font-family: var(--font-mono); }
 /* v2.2 (对齐 zcode 3.14.2): grep 命中行可点击跳转 */
 .tc-grep-hits { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px dashed var(--border); }
 .tc-grep-hit { display: flex; align-items: center; gap: 6px; padding: 3px 6px; border-radius: var(--r-sm); background: transparent; border: none; cursor: pointer; text-align: left; font-size: 11px; font-family: var(--font-mono); transition: background var(--dur-fast); }
@@ -3696,10 +3706,13 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
      反向偏移半个 gutter。 */
   scrollbar-gutter: stable;
 }
+/* plan-334-1661 修复：本规则曾被误删——缺它时滚动中 / 悬停滚动条条带也不显示滑块
+   （`.message-flow` 上的 scrollbar-color 恒为 transparent）。 */
 .message-flow.is-scrolling,
 .message-flow.is-scrollbar-hover {
   scrollbar-color: color-mix(in srgb, var(--text-3) 70%, transparent) transparent;
 }
+
 .message-flow::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -4150,10 +4163,8 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 .view-enter-slow { animation: view-enter var(--dur-slow) var(--ease-emphasized-decel) both; }
 @keyframes view-enter { from { opacity: 0; transform: translateY(calc(6px * var(--motion-dist))); } to { opacity: 1; transform: none; } }
 /* ── 消息流动效 ── */
-/* 新消息入场（仅对真正新增的条目挂 .mf-entry-new，虚拟列表滚动重挂载不重播）
-   v13: 收敛到 4px 位移 + 140-180ms，避免大位移跳动 */
-.mf-entry-new { animation: msg-in var(--dur-3) var(--ease-emphasized-decel) both; }
-@keyframes msg-in { from { opacity: 0; transform: translateY(calc(4px * var(--motion-dist))); } to { opacity: 1; transform: none; } }
+/* plan-334-1661 S7：`.mf-entry-new` 与 `@keyframes msg-in` 已删除——全仓无挂载点
+   （原注释写“仅对真正新增的条目挂”，但组件侧始终未实现），属死样式。 */
 /* v13: 日常状态不再使用紫粉流光循环——`.text-flow`/`.text-shine` 降级为静态中性文字。
    保留类名与结构（组件仍引用），仅移除 background-clip 渐变与循环动画。 */
 .text-flow {
