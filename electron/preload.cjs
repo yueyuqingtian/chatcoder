@@ -85,6 +85,12 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
   setKeepAwake: (on) => ipcRenderer.invoke("power:setKeepAwake", !!on),
   // 主题偏好同步（主进程落盘，下次启动 loading 页按此适配深浅色）
   setThemePref: (theme) => ipcRenderer.send("theme:setPref", theme === "light" ? "light" : "dark"),
+  // UI 偏好备份（plan-73-344）：localStorage 之外的第二落盘通道；读取为同步调用
+  // （启动时须与 localStorage 比对取较新者，异步会让首帧闪默认值）
+  setUiPrefs: (payload) => ipcRenderer.send("ui-prefs:save", payload),
+  getUiPrefs: () => {
+    try { return ipcRenderer.sendSync("ui-prefs:load"); } catch { return null; }
+  },
   // v19: 外挂插件列表（manifest + 源码文本）
   listUserPlugins: () => ipcRenderer.invoke("plugins:list"),
   // 自动更新（electron-updater + GitHub Releases）
@@ -102,6 +108,31 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
   getReleaseNotes: (opts) => ipcRenderer.invoke("app:getReleaseNotes", opts || {}),
   getWhatsNew: (opts) => ipcRenderer.invoke("app:getWhatsNew", opts || {}),
   consumeWhatsNew: () => ipcRenderer.invoke("app:consumeWhatsNew"),
+  // plan-73-323：宠物系统（设置页入口；偏好真相在主进程 userData/pet-pref.json）
+  petGetPref: () => ipcRenderer.invoke("pet:getPref"),
+  petSetPref: (patch) => ipcRenderer.invoke("pet:setPref", patch),
+  petListInstalled: () => ipcRenderer.invoke("pet:listInstalled"),
+  petListManifest: (opts) => ipcRenderer.invoke("pet:listManifest", opts || {}),
+  petInstall: (slug) => ipcRenderer.invoke("pet:install", slug),
+  petRemove: (slug) => ipcRenderer.invoke("pet:remove", slug),
+  petImportLocal: () => ipcRenderer.invoke("pet:importLocal"),
+  petOpenPetPage: (slug) => ipcRenderer.invoke("pet:openPetPage", slug),
+  petRevealPet: (slug) => ipcRenderer.invoke("pet:revealPet", slug),
+  onPetPrefChanged: (cb) => {
+    const handler = (_e, pref) => cb(pref);
+    ipcRenderer.on("pet:prefChanged", handler);
+    return () => ipcRenderer.removeListener("pet:prefChanged", handler);
+  },
+  onPetFocusSession: (cb) => {
+    const handler = (_e, sessionId) => cb(sessionId);
+    ipcRenderer.on("app:focusSession", handler);
+    return () => ipcRenderer.removeListener("app:focusSession", handler);
+  },
+  onPetOpenSettings: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on("app:openPetSettings", handler);
+    return () => ipcRenderer.removeListener("app:openPetSettings", handler);
+  },
 });
 
 // 注入平台到 <html data-platform>，供 CSS 平台感知样式（如 Win11 微圆角+四角透桌面）使用

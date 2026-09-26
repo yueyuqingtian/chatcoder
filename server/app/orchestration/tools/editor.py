@@ -3,10 +3,11 @@
 简化版:仅支持对单个文件应用 unified diff(基于 Python 标准库 difflib 不易反向,
 故采用 "整文件替换 + 旧片段定位" 策略;若失败提示 agent 改用 fs.write)。
 """
+from pathlib import Path
 from typing import Any
 
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
-from app.orchestration.tools.safe_path import safe_resolve
+from app.orchestration.tools.safe_path import resolve_loose
 
 # plan-1085: data 带回新内容上限（对齐 agent_loop.MAX_TOOL_OUTPUT_CHARS）；超限不带，走磁盘读取兜底路径
 _NEW_CONTENT_MAX_CHARS = 16000
@@ -41,9 +42,11 @@ class EditorApplyDiffTool(Tool):
         old_text = args.get("old_text", "")
         new_text = args.get("new_text", "")
         replace_all = bool(args.get("replace_all", False))
-        target = safe_resolve(ctx.workspace_root, path)
-        if target is None:
-            return ToolResult(ok=False, output="", error=f"路径越界或非法: {path}")
+        # plan-75-332: 不再限制写入落在工作区内（越界写入交给 approval_policy 裁决）
+        resolved = resolve_loose(path, ctx.workspace_root)
+        if not resolved:
+            return ToolResult(ok=False, output="", error=f"路径非法: {path}")
+        target = Path(resolved)
         if not target.exists():
             return ToolResult(ok=False, output="", error=f"文件不存在: {path}")
         try:

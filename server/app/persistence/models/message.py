@@ -16,8 +16,14 @@ class Session(Base):
     pinned: Mapped[bool] = mapped_column(Boolean, default=False)
     # v7: 置顶时间（VARCHAR 与 created_at 口径一致）——“后置顶在上”的稳定排序依据
     pinned_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    # v2.2 (对齐 zcode 3.12): 权限模式 default/accept_edits/plan
-    permission_mode: Mapped[str] = mapped_column(String(20), default="default")
+    # 执行模式（plan-75-332）：readonly / plan / agent。
+    # 旧值 default / accept_edits 读取时归一化为 agent（见 approval_policy.normalize_execution_mode）。
+    permission_mode: Mapped[str] = mapped_column(String(20), default="agent")
+    # 权限模式（plan-75-332）：ask 询问审批 / auto 自动审批 / full 完全访问。
+    # 与执行模式正交：执行模式管"能做什么"，权限模式管"要不要问"。
+    approval_mode: Mapped[str] = mapped_column(
+        String(20), default="ask", server_default="ask", nullable=False
+    )
     fork_parent_id: Mapped[int | None] = mapped_column(BigInteger)  # 分支来源会话 id
     worktree_path: Mapped[str | None] = mapped_column(String(512))  # git 工作树路径（有则优先作为工作目录）
     plan_confirmed: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")  # 计划确认门

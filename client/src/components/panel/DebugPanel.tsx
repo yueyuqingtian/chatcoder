@@ -132,8 +132,13 @@ function BreakpointStatus({ label, status, target, onAct }: {
   );
 }
 
-export function DebugPanel() {
-  const currentSessionId = useChatStore((s) => s.currentSessionId);
+export function DebugPanel({ sessionId }: {
+  /** plan-41-233：标签所属会话（undefined=跟随当前会话）——保活渲染下 Arthas 操作
+   *  必须落到标签所属会话，不再读全局 currentSessionId。 */
+  sessionId?: number | null;
+} = {}) {
+  const followedSessionId = useChatStore((s) => s.currentSessionId);
+  const currentSessionId = sessionId !== undefined ? sessionId : followedSessionId;
   const debugState = useChatStore((s) => s.debugState);
   const arthasState = useChatStore((s) => s.arthasState);
   // plan-308-1542 需求7-B：IDEA 联动（工程路径取当前项目 path）

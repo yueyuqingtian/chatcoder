@@ -11,6 +11,7 @@ import type { TimelineEntry, ToolNode, TurnItem } from "./timeline";
 import { createTimelineBuilder, msgText, lastPersistedText, getTurnById } from "./timeline";
 import { isBusy, subscribe } from "../../perf/bus";
 import { registerReconcileTask, RECONCILE_ORDER } from "../../perf/reconcile";
+import { recordComponentRender } from "../../perf/metrics";
 import { TurnGroup } from "./TurnGroup";
 import { JumpDots } from "./JumpDots";
 import { DebugCard } from "./DebugCard";
@@ -20,7 +21,7 @@ import { useTextHighlight } from "../../hooks/useTextHighlight";
 import { MarkdownContent } from "../MarkdownContent";
 import { MsgType } from "@chatcoder/shared";
 import { useChatStore } from "../../store/chat";
-import { api, type MessageOut } from "../../api/client";
+import { api } from "../../api/client";
 
 /** plan-31-152 S5-4：运动期（拖分隔条/窗口缩放）视口 rect 的提交节流间隔（毫秒）。
  *  逐帧提交会让虚拟器每帧 setState → 整棵可见消息树 React 重渲染（含 markdown/工具树），
@@ -28,6 +29,10 @@ import { api, type MessageOut } from "../../api/client";
  *  既让虚拟器的可见范围跟上宽度变化，又把整树重渲染频率压到拖拽可接受的水平；
  *  运动结束由收敛序列（order 20）立即提交最终 rect 保证精确。 */
 const MOTION_RECT_THROTTLE_MS = 120;
+
+/** plan-75-334 阶段1：子代理面板不消费「turn 错误抑制列表」——固定传空数组，
+ *  避免每次渲染新建 [] 破坏 TurnGroup 的 memo 命中。 */
+const EMPTY_TURN_ERRORS: number[] = [];
 
 /** plan-308-1542 需求1：任务执行类错误的**唯一**棂位——消息流末尾错误卡。
  *  此前这类错误会同时写入 store.error（右上角 Toast）与消息流，造成重复报错；
@@ -43,9 +48,9 @@ const FlowErrorCard = memo(function FlowErrorCard({
         <div className="err-msg">{text}</div>
         <div className="flow-error-actions">
           {onRetry && (
-            <button className="btn btn-ghost btn-xs" onClick={onRetry} type="button">重试</button>
+            <button className="btn btn-outline btn-sm" onClick={onRetry} type="button">重试</button>
           )}
-          <button className="btn btn-ghost btn-xs" onClick={onClose} type="button">关闭</button>
+          <button className="btn btn-ghost btn-sm" onClick={onClose} type="button">关闭</button>
         </div>
       </div>
     </div>
@@ -98,6 +103,9 @@ export interface MessageStreamProps {
   /** 滚动目标：当外部点击任务卡时传 { turnId } 或 { threadId }，滚动到对应节点 */
   scrollTarget?: { threadId?: number; turnId?: number } | null;
   clearScrollTarget?: () => void;
+  /** plan-75-334 阶段3：宿主可见性。false 时子代理尾部不推进流式视觉更新
+   *  （恢复可见时以当前缓冲一次性对齐）。主会话不传（默认可见）。 */
+  visible?: boolean;
   className?: string;
 }
 
@@ -114,6 +122,21 @@ const StandaloneEntry = memo(function StandaloneEntry({ entry }: { entry: Timeli
           <div className="turn-agent-text">
             <MarkdownContent>{msgText(entry.msg.content)}</MarkdownContent>
           </div>
+        </div>
+      </div>
+    );
+  }
+  // plan-41-229: 系统消息（模型切换 divider 等）落在**首个 turn 之前**时会是 standalone 条目，
+  // 旧实现直接落到下方普通正文分支 ⇒ 既无分割线结构也无 .turn-divider-* 类名，
+  // 表现为「无样式纯文本」（用户反馈截图）。此处与 TurnGroup 的 divider 分支保持同一套
+  // DOM 结构与类名，样式天然一致，不新增 CSS。
+  if (entry.msg.msg_type === MsgType.System) {
+    return (
+      <div className="turn-group">
+        <div className="turn-item turn-item-divider">
+          <span className="turn-divider-line" />
+          <span className="turn-divider-text">{msgText(entry.msg.content)}</span>
+          <span className="turn-divider-line" />
         </div>
       </div>
     );
@@ -191,6 +214,9 @@ function MessageFlowCore({
   className,
   emptyText = "暂无消息",
 }: MessageFlowCoreProps) {
+  // plan-75-334 阶段0：记录组件渲染（仅采集期间统计，零开销）
+  recordComponentRender("messageFlowCore");
+  
   const parentRef = useRef<HTMLDivElement>(null);
   /** plan-547: 虚拟内容容器（RO 监听测高变化保持贴底） */
   // plan-282-1444：显式含 null 联合类型，保证 ref 可变（需在回调里同时交给虚拟列表）
@@ -1125,80 +1151,58 @@ function MainMessageFlow({
     return map;
   }, [subagentMeta]);
 
-  // v42 → 本轮修复：注入消息（"立即发送"）**固定留在时间线内**渲染。
+  // plan-41-227: 时间线直接用落库消息本体（按 id 序），位置只由 id 决定。
   //
-  // 旧实现（v42/v41）把它从 entries 剥离、渲染到流式段**下方的独立槽位**，
-  // 导致用户反馈"发送的消息没有固定位置，任务刷新消息时被刷到下方"：
-  // 流式内容每长高一截，槽位就往下走一截；turn 结束槽位消失，它又回归时间线，
-  // 位置再跳一次。
-  //
-  // 现在只保留"跨界段前移"这一必要修正：
-  //  - 注入时刻正在流式的段（尚未落库）落库后 id 会大于注入消息，按 id 序会错误地
-  //    掉到注入消息下方；将其前移到对应注入消息之前 —— 注入消息成为时间分割点
-  //    （上方 = 注入前内容，下方 = 注入后新输出）。
-  //  - 注入消息本身按 id 序自然落位：它在注入前内容之后、注入后新输出之前，固定不动。
-  // 结合 TurnGroup 对非首条 user item 的"就地渲染在时间序位置"，视觉与旧槽位一致。
-  const injectMarks = useChatStore((s) => s.injectMarks);
-
-  const timelineMessages = useMemo(() => {
-    // 跨界段 -> 前移目标注入消息（同一跨界段绑定多条注入时取最小 injectId）
-    const crossoverTarget = new Map<number, number>();
-    for (const mk of injectMarks) {
-      if (mk.crossoverId == null) continue;
-      const prev = crossoverTarget.get(mk.crossoverId);
-      if (prev == null || mk.injectId < prev) crossoverTarget.set(mk.crossoverId, mk.injectId);
-    }
-    if (crossoverTarget.size === 0) return messages;
-    const msgById = new Map(messages.map((m) => [m.id, m]));
-    // 注入消息 -> 前移插入的跨界段列表（按 id 升序）
-    const crossoversByTarget = new Map<number, MessageOut[]>();
-    for (const crossoverId of crossoverTarget.keys()) {
-      const msg = msgById.get(crossoverId);
-      if (!msg) continue;
-      const target = crossoverTarget.get(crossoverId)!;
-      const list = crossoversByTarget.get(target) ?? [];
-      list.push(msg);
-      crossoversByTarget.set(target, list);
-    }
-    for (const list of crossoversByTarget.values()) list.sort((a, b) => a.id - b.id);
-    const out: MessageOut[] = [];
-    for (const m of messages) {
-      if (crossoverTarget.has(m.id)) continue;
-      const cs = crossoversByTarget.get(m.id);
-      if (cs) out.push(...cs);
-      out.push(m);
-    }
-    return out;
-  }, [messages, injectMarks]);
+  // 历史实现（v41/v42）在注入消息（"立即发送"）落库时快照"当时正在流式的 agent"，
+  // 等该段落库后把它前移到注入消息上方，充当"注入前 / 注入后"的时间分割点。
+  // 实测该前移会让位置来回跳：段落库瞬间从流式槽位（注入消息下方）跳到注入消息上方，
+  // turn 结束后标记清空又落回 id 序（用户反馈"位置不按时间线，任务完成后才回到该在的位置"）。
+  // 现在注入消息落库即按 id 序固定——后端广播已带 turn_id，直接归入所属 turn，不再二次搬移。
 
   // v30: 被压缩的消息保留在时间线上（不隐藏）；压缩块卡由 SUMMARY 消息渲染。
   // S8b：改用增量构建器——单条消息落库只重建它所在的那个 turn，其余 turn 的 entry
   // 对象逐项复用（引用不变）⇒ 下游 memo 的 TurnGroup 继续命中，不再全量重渲染。
   const buildEntries = useMemo(() => createTimelineBuilder(), []);
-  const entries = useMemo(() => buildEntries(timelineMessages), [buildEntries, timelineMessages]);
+  const entries = useMemo(() => buildEntries(messages), [buildEntries, messages]);
 
   /** 强制贴底信号：用户消息条数。
    *
-   *  为什么需要：注入消息现在固定留在时间线内，它落进的是**已存在的** turn entry，
-   *  entries.length 与末尾 entry 形态都不变 ⇒ MessageFlowCore 里"末尾新增以用户消息
-   *  开头的新 turn → 滚底"的判定不会触发，点了「立即发送」或发新消息后视图不会跟到底。
+   *  为什么需要：注入消息落在**已存在的** turn entry 内部，entries.length 与末尾 entry
+   *  形态都不变 ⇒ MessageFlowCore 里"末尾新增以用户消息开头的新 turn → 滚底"的判定不会
+   *  触发，点了「立即发送」或发新消息后视图不会跟到底。
    *  这里用"用户消息条数"作信号：每新增一条用户消息（含注入与乐观占位）即 +1，
    *  核心层据此无条件贴底——语义精确且不会因流式内容变化而误触发。 */
   const userMsgSeq = useMemo(
-    () => timelineMessages.reduce((n, m) => (m.sender_type === "user" ? n + 1 : n), 0),
-    [timelineMessages],
+    () => messages.reduce((n, m) => (m.sender_type === "user" ? n + 1 : n), 0),
+    [messages],
   );
 
   const plansByTurn = useChatStore((s) => s.plansByTurn);
+
+  // plan-75-334 阶段1：在父层一次性计算全局派生值，避免每个 TurnGroup 重复 selector
+  // 1. 最近用户消息 ID（从尾部扫描，每个 TurnGroup 都需要判断是否为最新）
+  const latestUserId = useMemo(() => {
+    for (let k = messages.length - 1; k >= 0; k--) {
+      if (messages[k].sender_type === "user") return messages[k].id;
+    }
+    return -1;
+  }, [messages]);
+
+  // 2. 流错误相关状态（每个 TurnGroup 都需要判断是否需要隐藏错误消息）
+  const flowErrorTurnId = useChatStore((s) => s.flowError?.turnId ?? null);
+  const hiddenTurnErrors = useChatStore((s) => s.hiddenTurnErrors);
 
   const renderEntry = useCallback(
     (entry: TimelineEntry) => {
       if (entry.kind !== "turn") return <StandaloneEntry entry={entry} />;
       // v12: 已回滚 turn 显示专用横幅（回滚后消息被软删，以此占位区分「回滚了」与「没执行」）
       // plan-334-1661 S3: 改用 O(1) 索引（原先每次渲染每个可见条目都做一次 O(turns) 的 find）
-      const rolledBack = getTurnById(turns, entry.turnId)?.status === "rolled_back";
+      // plan-75-334 阶段1：一次查询同时供「回滚横幅」与「turn 行状态 props」使用
+      const turnRow = getTurnById(turns, entry.turnId);
+      const rolledBack = turnRow?.status === "rolled_back";
       // 计划卡内嵌到其归属 turn 内部规划说明之后、执行操作之前（彻底根治时序倒挂沉底 Bug）
       const hasTurnPlan = entry.turnId != null && (plansByTurn[entry.turnId] != null || entry.turnId === planTurnId);
+      const turnRowStatus = turnRow?.status;
       return (
         <TurnGroup
           entry={entry}
@@ -1207,10 +1211,15 @@ function MainMessageFlow({
           subagents={entry.turnId != null ? subagentsByTurn.get(entry.turnId) : undefined}
           actions={actions}
           hasPlan={hasTurnPlan}
+          globalRunning={isRunning}
+          latestUserId={latestUserId}
+          flowErrorTurnId={flowErrorTurnId}
+          hiddenTurnErrors={hiddenTurnErrors}
+          turnStatus={turnRowStatus}
         />
       );
     },
-    [turns, runningTurnId, subagentsByTurn, planTurnId, plansByTurn, actions]
+    [turns, runningTurnId, subagentsByTurn, planTurnId, plansByTurn, actions, isRunning, latestUserId, flowErrorTurnId, hiddenTurnErrors]
   );
 
   // S8：流式文本/信号不再在此计算（已下沉到 <StreamingTail> 的精确 selector）。
@@ -1218,6 +1227,7 @@ function MainMessageFlow({
   // plan-308-1542 需求1：任务执行类错误卡（只进消息流，不弹右上角 Toast）
   const flowError = useChatStore((s) => s.flowError);
   const clearFlowError = useChatStore((s) => s.clearFlowError);
+  const dismissTurnError = useChatStore((s) => s.dismissTurnError);
 
   return (
     <MessageFlowCore
@@ -1245,10 +1255,11 @@ function MainMessageFlow({
               text={flowError.text}
               onRetry={() => {
                 // 重试 = 重发最近一条用户消息（若可定位），否则仅清除提示
-                const lastUser = [...timelineMessages].reverse().find((m) => m.sender_type === "user");
+                const lastUser = [...messages].reverse().find((m) => m.sender_type === "user");
                 if (lastUser) void useChatStore.getState().sendTurn(msgText(lastUser.content));
               }}
-              onClose={() => clearFlowError()}
+              // plan-41-228：关闭 = 清除末尾卡 + 隐藏该 turn 内同源 ERROR 消息（否则同一条错误换个样式又冒出来）
+              onClose={() => { dismissTurnError(flowError.turnId); clearFlowError(); }}
             />
           )
           : null
@@ -1269,16 +1280,21 @@ function MainMessageFlow({
 function SubagentMessageFlow({
   threadId,
   actions,
+  visible = true,
   className,
 }: {
   threadId?: number;
   actions?: "full" | "copy-only" | "none";
+  /** plan-75-334 阶段3：宿主可见性（右面板隐藏标签为 false）。 */
+  visible?: boolean;
   className?: string;
 }) {
   const currentSessionId = useChatStore((s) => s.currentSessionId);
   const storeMessages = useChatStore((s) => (threadId != null ? s.subagentMessages[threadId] || [] : []));
   // S8：子代理流式文本同样下沉到 <StreamingTail>（见其注释），此处不再订阅缓冲。
   const subagentMeta = useChatStore((s) => (threadId != null ? s.subagentMeta[threadId] : undefined));
+  // plan-75-334 阶段1：turn 行状态改由本层统一查询（与改造前每个 TurnGroup 各自查询语义一致）
+  const turns = useChatStore((s) => s.turns);
 
   // v36 修复：与 SubagentPanel / SubagentCard 口径统一——后端存在 in_progress 状态，
   // 只判 running 会把运行中的面板当成终态（计时条消失、汇报卡片提前生效、运行态标记误判）。
@@ -1328,6 +1344,11 @@ function SubagentMessageFlow({
   const renderEntry = useCallback(
     (entry: TimelineEntry) => {
       if (entry.kind !== "turn") return <StandaloneEntry entry={entry} />;
+      // plan-75-334 阶段1：父层统一计算的全局派生值经 props 传入。
+      //  · turnStatus 保留改造前语义（子代理消息的 turn_id 也可能命中主会话 turns 行）；
+      //  · latestUserId / flowErrorTurnId / hiddenTurnErrors 仅主消息流消费
+      //    （suppressTurnError 有 flow === "main" 前提，错误抑制在子代理面板不适用）。
+      const turnRowStatus = entry.turnId != null ? getTurnById(turns, entry.turnId)?.status : undefined;
       return (
         <TurnGroup
           entry={entry}
@@ -1336,10 +1357,15 @@ function SubagentMessageFlow({
           flow="subagent"
           agentId={threadId ?? undefined}
           reportMessageId={reportMessageId}
+          globalRunning={isRunning}
+          latestUserId={-1}
+          flowErrorTurnId={null}
+          hiddenTurnErrors={EMPTY_TURN_ERRORS}
+          turnStatus={turnRowStatus}
         />
       );
     },
-    [isRunning, actions, reportMessageId, threadId]
+    [isRunning, actions, reportMessageId, threadId, turns]
   );
 
 
@@ -1350,9 +1376,11 @@ function SubagentMessageFlow({
       running={isRunning}
       renderEntry={renderEntry}
       streamingNode={
+        // plan-75-334 阶段3：面板隐藏时不推进流式视觉更新（active=false ⇒ TailBody 返回 null，
+        // 流式 Markdown 不重算）；恢复可见时 active 恢复，以当前缓冲一次性对齐。
         <StreamingTail
           source={threadId ?? -1}
-          active={isRunning}
+          active={isRunning && visible}
           statusLabel={isRunning ? "子代理执行中…" : undefined}
           persistedText={lastPersistedText(entries)}
         />
@@ -1373,6 +1401,7 @@ export function MessageFlow(props: MessageStreamProps) {
       <SubagentMessageFlow
         threadId={props.threadId}
         actions={props.features?.actions ?? "copy-only"}
+        visible={props.visible !== false}
         className={props.className}
       />
     );

@@ -3,12 +3,14 @@
  * 工具规则：下拉选择工具 + 三态决策 chips（作用于工具本身，executor 按 tool_name 匹配）。
  * plan-230-1144 M2: 新增「权限模式」页签——内置 4 模式白名单/提示词可覆盖，
  * 支持新建自定义模式（从全量工具勾选白名单），模式列表供输入框模式菜单动态消费。 */
-import { useCallback, useEffect, useState } from "react";
-import { api, type ExecPolicyRuleOut, type ExecPolicyToolInfo, type PermissionProfileOut } from "../../api/client";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api, type ExecPolicyRuleOut, type ExecPolicyToolInfo, type ModelOut, type PermissionProfileOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
+import { sortModelsByProvider } from "../../utils/modelOrder";
 import { IconRefresh, IconPlus, IconX } from "../icons";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { Checkbox, FormDialog, Input, Select, Textarea } from "../ui";
+import { Row } from "./shared";
 
 const DECISION_OPTS = [
   { value: "allow", label: "放行", color: "var(--success)" },
@@ -212,6 +214,38 @@ function RulesSection() {
  * 名称/显示名/类型/描述/行为提示词 + 工具白名单勾选矩阵（全量工具来自
  * /exec-policy/tools）。保存即写 config.json 的 permission_profiles，
  * 输入框模式菜单与 engine 白名单即时消费，无需重启。 */
+/** S13（plan-41-197）：新建模式的组合模板——一键预填类型 / 工具白名单 / 行为提示词，
+ *  降低“从零配一个 Agent 模式”的门槛（用户要求提供组合工具模版与说明）。 */
+const MODE_TEMPLATES: Array<{
+  key: string; label: string; desc: string;
+  kind: "full" | "readonly" | "plan"; tools: string[]; hint: string;
+}> = [
+  {
+    key: "readonly-analysis",
+    label: "只读分析",
+    desc: "只读探索与结论输出，不写盘、不执行修改类命令",
+    kind: "readonly",
+    tools: ["fs_read", "fs_list", "fs_grep", "codebase_search", "memory_search", "git_diff"],
+    hint: "当前处于只读分析模式：只做阅读、检索与结论输出；禁止写入文件或执行修改类命令。",
+  },
+  {
+    key: "frontend-polish",
+    label: "前端改造",
+    desc: "读写前端代码并跑构建 / 类型检查验证",
+    kind: "full",
+    tools: ["fs_read", "fs_list", "fs_grep", "fs_write", "editor_apply_diff", "multi_file_edit", "terminal_exec", "git_diff", "codebase_search", "todo_write"],
+    hint: "当前处于前端改造模式：改动遵循项目既有设计语言与目录结构；改完必须跑类型检查与构建验证。",
+  },
+  {
+    key: "release-ops",
+    label: "发布运维",
+    desc: "发布链路命令与脚本操作为主，少改代码",
+    kind: "full",
+    tools: ["fs_read", "fs_list", "fs_grep", "terminal_exec", "git_diff"],
+    hint: "当前处于发布运维模式：优先排查与执行发布链路命令；任何破坏性操作前先确认当前状态与回滚方案。",
+  },
+];
+
 function ModeProfilesSection() {
   const [profiles, setProfiles] = useState<PermissionProfileOut[]>([]);
   const [tools, setTools] = useState<ExecPolicyToolInfo[]>([]);
@@ -232,9 +266,18 @@ function ModeProfilesSection() {
   }, []);
   useEffect(() => { void load(); }, [load]);
 
-  const openCreate = () => {
+  /** S13：支持从模板创建（预填类型 / 工具白名单 / 行为提示词） */
+  const openCreate = (tpl?: (typeof MODE_TEMPLATES)[number]) => {
     setIsNew(true);
-    setEditing({ name: "", display_name: "", kind: "full", builtin: false, description: "", tools: [], hint: "" });
+    setEditing({
+      name: tpl ? tpl.key : "",
+      display_name: tpl ? tpl.label : "",
+      kind: tpl ? tpl.kind : "full",
+      builtin: false,
+      description: tpl ? tpl.desc : "",
+      tools: tpl ? [...tpl.tools] : [],
+      hint: tpl ? tpl.hint : "",
+    });
   };
   const startToolToggle = (name: string) => {
     if (!editing) return;
@@ -273,7 +316,21 @@ function ModeProfilesSection() {
       {err && <div className="sched-error">{err}</div>}
       <div className="settings-toolbar">
         <button className="btn btn-ghost btn-sm" onClick={() => void load()}><IconRefresh size={13} /> 刷新</button>
-        <button className="btn btn-primary btn-sm" onClick={openCreate}><IconPlus size={13} /> 新建模式</button>
+        <button className="btn btn-primary btn-sm" onClick={() => openCreate()}><IconPlus size={13} /> 新建模式</button>
+      </div>
+      {/* S13（plan-41-197）：快速模板——一键预填工具组合与行为提示词 */}
+      <div className="mode-tpl-row">
+        <span className="mode-tpl-label">快速模板</span>
+        {MODE_TEMPLATES.map((tpl) => (
+          <button key={tpl.key} type="button" className="settings-chip"
+            title={`${tpl.desc}｜预填 ${tpl.tools.length} 个工具与行为提示词`}
+            onClick={() => openCreate(tpl)}>
+            {tpl.label}
+          </button>
+        ))}
+      </div>
+      <div className="ui-field-hint mode-intro-hint">
+        模式 = 工具白名单 + 行为提示词；白名单留空表示不限工具。内置模式（智能体 / 只读 / 计划）不可删除，但可覆盖其白名单与提示词。
       </div>
       <div className="perm-modes-layout">
         <div className="perm-modes-list settings-resource-list">
@@ -366,15 +423,105 @@ function ModeProfilesSection() {
   );
 }
 
+/** plan-75-332: 审批「解释」——点击审批卡左下角「解释」时，用哪个模型与思考深度
+ *  分析该命令的用途与风险。两项默认都跟随当前会话（会话模型 / 会话思考深度）；
+ *  也可在此固定为专用组合（例如用轻量模型快速解释、或用强模型深度审风险）。
+ *  遵循设置页「修改即保存」：改动后 300ms 防抖落盘，无保存按钮。 */
+function ApprovalExplainSection() {
+  const [modelId, setModelId] = useState<number | null>(null);
+  const [effort, setEffort] = useState<string | null>(null);
+  const [models, setModels] = useState<ModelOut[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const timerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    api.getGlobalSettings()
+      .then((g) => {
+        setModelId(typeof g.approval_explain_model_id === "number" ? g.approval_explain_model_id : null);
+        setEffort(g.approval_explain_reasoning_effort || null);
+      })
+      .catch(() => { /* 读取失败保持“跟随会话”默认 */ });
+    // 可用性口径与输入框模型选择器一致：模型启用 + 供应商启用
+    api.listModels()
+      .then((list) => setModels(list.filter((m) => m.is_active && m.provider_active !== false)))
+      .catch(() => { /* 失败则只能选“跟随会话模型” */ });
+  }, []);
+
+  const patch = useCallback((nextModelId: number | null, nextEffort: string | null) => {
+    if (timerRef.current) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => {
+      void api.setGlobalSettings({
+        approval_explain_model_id: nextModelId,
+        approval_explain_reasoning_effort: nextEffort,
+      }).catch((e) => setErr(String(e)));
+    }, 300);
+  }, []);
+  useEffect(() => () => { if (timerRef.current) window.clearTimeout(timerRef.current); }, []);
+
+  const selectedModel = models.find((m) => m.id === modelId) ?? null;
+  const modelOptions = [
+    { value: "", label: "跟随会话模型（默认）" },
+    // plan-89-386: 与全局模型选择器同序（设置页供应商顺序）
+    ...sortModelsByProvider(models).map((m) => ({ value: String(m.id), label: m.name })),
+  ];
+  // 专用深度必须先选定专用模型且该模型声明了思考档位（否则无法确定可选值）
+  const supportsEffort = (selectedModel?.reasoning_efforts?.length ?? 0) > 0;
+  const effortOptions = [
+    { value: "", label: "跟随会话思考深度（默认）" },
+    ...(selectedModel?.reasoning_efforts ?? []).map((e) => ({ value: e, label: e })),
+  ];
+
+  return (
+    <div className="settings-card">
+      <div className="ui-field-hint">
+        审批卡左下角「解释」会把当前命令交给 AI 分析用途与风险。默认沿用当前会话的模型与思考深度；
+        如需固定为更轻快或更强的组合，可在此单独指定。
+      </div>
+      <Row title="解释专用模型" desc="留空则跟随当前会话所用模型">
+        <Select
+          value={modelId == null ? "" : String(modelId)}
+          onChange={(v) => {
+            const next = v ? Number(v) : null;
+            // 换模型后旧深度可能不被支持 → 一并重置为「跟随会话深度」
+            setModelId(next);
+            setEffort(null);
+            patch(next, null);
+          }}
+          options={modelOptions}
+          style={{ minWidth: 220 }}
+          aria-label="解释专用模型"
+        />
+      </Row>
+      <Row
+        title="解释专用思考深度"
+        desc={supportsEffort ? "留空则跟随当前会话所用思考深度" : "选定支持思考档位的专用模型后可选"}
+      >
+        <Select
+          value={effort ?? ""}
+          onChange={(v) => { const next = v || null; setEffort(next); patch(modelId, next); }}
+          options={effortOptions}
+          disabled={!supportsEffort}
+          style={{ minWidth: 220 }}
+          aria-label="解释专用思考深度"
+        />
+      </Row>
+      {err && <div className="sched-error">{err}</div>}
+    </div>
+  );
+}
+
 export function PolicyPanel() {
-  const [tab, setTab] = useState<"rules" | "modes">("rules");
+  const [tab, setTab] = useState<"rules" | "modes" | "explain">("rules");
   return (
     <div>
       <div className="perm-tabs">
         <button type="button" className={"perm-tab" + (tab === "rules" ? " on" : "")} onClick={() => setTab("rules")}>执行规则</button>
         <button type="button" className={"perm-tab" + (tab === "modes" ? " on" : "")} onClick={() => setTab("modes")}>权限模式</button>
+        <button type="button" className={"perm-tab" + (tab === "explain" ? " on" : "")} onClick={() => setTab("explain")}>审批解释</button>
       </div>
-      {tab === "rules" ? <RulesSection /> : <ModeProfilesSection />}
+      {tab === "rules" && <RulesSection />}
+      {tab === "modes" && <ModeProfilesSection />}
+      {tab === "explain" && <ApprovalExplainSection />}
     </div>
   );
 }

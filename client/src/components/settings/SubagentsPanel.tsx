@@ -6,7 +6,7 @@ import { useChatStore } from "../../store/chat";
 import { IconPlus, IconX } from "../icons";
 import { Modal } from "../Modal";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { Input, Textarea } from "../ui";
+import { Input, Textarea, Tooltip } from "../ui";
 import { Sw } from "./shared";
 import { ModelPicker } from "../chat/ModelPicker";
 
@@ -86,7 +86,19 @@ function SubagentFormModal({ open, editing, models, tools, onClose, onSaved }: {
     } catch (e) { notify(String(e)); }
   };
   return (
-    <Modal open={open} onClose={onClose} title={editing ? "编辑子代理类型" : "新建子代理类型"} width={640} height="auto">
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={editing ? "编辑子代理类型" : "新建子代理类型"}
+      width={640}
+      height="auto"
+      footer={
+        <>
+          <button className="btn btn-ghost btn-sm" onClick={onClose}>取消</button>
+          <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={!form.name.trim()}>{editing ? "保存" : "创建"}</button>
+        </>
+      }
+    >
       <div className="settings-modal-form" style={{ padding: 18 }}>
         <div className="settings-modal-form-row"><label>类型名称</label><Input placeholder="如 explore / code-reviewer" value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} /></div>
         <div className="settings-modal-form-row"><label>描述</label><Input placeholder="该子代理的职责说明" value={form.description} onChange={(e) => setForm((p) => ({ ...p, description: e.target.value }))} /></div>
@@ -103,7 +115,10 @@ function SubagentFormModal({ open, editing, models, tools, onClose, onSaved }: {
               return (
                 <label key={t.name} className={"subagent-tool-cell" + (checked ? " on" : "")}>
                   <input type="checkbox" checked={checked} onChange={() => toggleTool(t.name)} />
-                  <span className="subagent-tool-name">{t.name}</span>
+                  {/* plan-41-227: 长工具名单行省略，悬停经统一 Tooltip 查看完整名称 */}
+                  <Tooltip content={t.name}>
+                    <span className="subagent-tool-name">{t.name}</span>
+                  </Tooltip>
                   <span className="subagent-tool-risk">{t.risk_level}</span>
                 </label>
               );
@@ -141,7 +156,6 @@ function SubagentFormModal({ open, editing, models, tools, onClose, onSaved }: {
         </div>
         <div className="settings-modal-form-row"><label>系统提示词</label><Textarea rows={3} placeholder="可选，覆盖默认子代理系统提示词…" value={form.system_prompt} onChange={(e) => setForm((p) => ({ ...p, system_prompt: e.target.value }))} aria-label="系统提示词" /></div>
         <div className="settings-modal-form-row"><label>启用状态</label><Sw checked={form.is_active} onChange={(v) => setForm((p) => ({ ...p, is_active: v }))} /></div>
-        <div className="settings-create-actions"><button className="btn btn-ghost btn-sm" onClick={onClose}>取消</button><button className="btn btn-primary btn-sm" onClick={handleSave} disabled={!form.name.trim()}>{editing ? "保存" : "创建"}</button></div>
       </div>
     </Modal>
   );
@@ -157,6 +171,8 @@ export function SubagentsPanel() {
   // v36: 并发治理配置（全局设置）——同时运行上限 + 每轮派发总量上限
   const [limits, setLimits] = useState({ concurrent: 6, perTurn: 10 });
   const [limitsSaving, setLimitsSaving] = useState(false);
+  // S10（plan-41-197）：并发配置收进弹窗（按钮触发），不再常驻表单
+  const [limitsOpen, setLimitsOpen] = useState(false);
   const load = useCallback(async () => {
     try { setItems(await api.listSubagents()); } catch {}
     try { setModels(await api.listModels()); } catch {}
@@ -186,25 +202,19 @@ export function SubagentsPanel() {
 
   return (
     <div>
-      {/* v36: 并发与上限——超出同时运行上限时新派发排队等待；每轮总量超限直接拒绝 */}
-      <div className="subagent-limits">
-        <div className="subagent-limits-head">
-          <span className="subagent-limits-title">并发与上限</span>
-          <button className="btn btn-primary btn-xs" onClick={saveLimits} disabled={limitsSaving}>保存</button>
-        </div>
-        <div className="subagent-limits-row">
-          <label>同时运行的子代理上限</label>
-          <Input type="number" min={1} max={16} value={String(limits.concurrent)}
-                 onChange={(e) => setLimits((p) => ({ ...p, concurrent: Number(e.target.value) || 1 }))}
-                 className="subagent-limits-input" aria-label="同时运行的子代理上限" />
-          <span className="subagent-limits-hint">达到上限后新派发排队等待（1~16）</span>
-        </div>
-        <div className="subagent-limits-row">
-          <label>每轮派发总量上限</label>
-          <Input type="number" min={1} max={32} value={String(limits.perTurn)}
-                 onChange={(e) => setLimits((p) => ({ ...p, perTurn: Number(e.target.value) || 1 }))}
-                 className="subagent-limits-input" aria-label="每轮派发总量上限" />
-          <span className="subagent-limits-hint">单个回合内最多派发数量，含已完成（1~32）</span>
+      {/* S10（plan-41-197）：并发与上限改为「摘要行 + 配置弹窗」——此前常驻两行数字输入观感笨重，
+          且保存按钮与全局“修改即保存”协议不一致。 */}
+      <div className="settings-card subagent-limits-summary">
+        <div className="settings-row">
+          <div className="settings-row-info">
+            <div className="settings-row-title">并发与上限</div>
+            <div className="settings-row-desc">
+              同时运行上限 {limits.concurrent} · 每轮派发上限 {limits.perTurn}
+            </div>
+          </div>
+          <div className="settings-row-control">
+            <button className="btn btn-ghost btn-sm" onClick={() => setLimitsOpen(true)}>配置</button>
+          </div>
         </div>
       </div>
       <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginBottom: 12 }}>
@@ -226,7 +236,11 @@ export function SubagentsPanel() {
               </div>
             </div>
             <div className="settings-resource-actions">
-              <Sw checked={s.is_active} onChange={async (v) => { try { await api.updateSubagent(s.id, { is_active: v }); load(); } catch {} }} />
+              {/* S10：列表开关直接生效（后端已支持部分更新）；失败给出明确提示，不再静默吞错 */}
+              <Sw checked={s.is_active} onChange={async (v) => {
+                try { await api.updateSubagent(s.id, { is_active: v }); await load(); }
+                catch (e) { notify("更新启用状态失败：" + String(e)); }
+              }} />
               <button className="btn btn-ghost btn-xs" onClick={() => { setEditing(s); setShowForm(true); }}>编辑</button>
               <button className="btn btn-ghost btn-xs" onClick={() => setConfirmTarget(s)}><IconX size={12} /></button>
             </div>
@@ -247,6 +261,39 @@ export function SubagentsPanel() {
           try { await api.deleteSubagent(it.id); load(); } catch { /* ignore */ }
         }}
       />
+      {/* S10（plan-41-197）：并发与上限配置弹窗（保存后即时生效） */}
+      <Modal
+        open={limitsOpen}
+        onClose={() => setLimitsOpen(false)}
+        title="并发与上限"
+        subtitle="超出同时运行上限时新派发排队等待；每轮总量超限直接拒绝"
+        width={520}
+        footer={
+          <>
+            <button className="btn btn-ghost btn-sm" onClick={() => setLimitsOpen(false)}>取消</button>
+            <button className="btn btn-primary btn-sm" disabled={limitsSaving} aria-busy={limitsSaving}
+              onClick={async () => { await saveLimits(); setLimitsOpen(false); }}>
+              {limitsSaving ? "保存中…" : "保存"}
+            </button>
+          </>
+        }
+      >
+        <div className="settings-modal-form" style={{ padding: 18 }}>
+          <div className="settings-modal-form-row">
+            <label>同时运行的子代理上限</label>
+            <Input type="number" min={1} max={16} value={String(limits.concurrent)}
+              onChange={(e) => setLimits((p) => ({ ...p, concurrent: Number(e.target.value) || 1 }))} />
+            <div className="ui-field-hint">达到上限后新派发排队等待（1~16）</div>
+          </div>
+          <div className="settings-modal-form-row">
+            <label>每轮派发总量上限</label>
+            <Input type="number" min={1} max={32} value={String(limits.perTurn)}
+              onChange={(e) => setLimits((p) => ({ ...p, perTurn: Number(e.target.value) || 1 }))} />
+            <div className="ui-field-hint">单个回合内最多派发数量，含已完成（1~32）</div>
+          </div>
+        </div>
+      </Modal>
+
       <SubagentFormModal open={showForm} editing={editing} models={models} tools={tools} onClose={() => setShowForm(false)} onSaved={load} />
     </div>
   );

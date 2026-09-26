@@ -171,7 +171,9 @@ export const PlanCard = memo(function PlanCard({
           此前「查看完整计划」在卡片内、「确认执行」却在输入框上方的横幅里，
           确认入口与计划内容分离，视线要来回跳。
           现在：两行居中、同宽同高同圆角；确认按钮仅在"待确认"状态渲染
-          ——发新消息后 store 会把该卡置 cancelled（status 变化），按钮自动消失。 */}
+          ——发新消息后 store 会把该卡置 cancelled（status 变化），按钮自动消失。
+          计划卡动作显式传 turnId：重启/历史恢复的卡片没有 pendingPlan，
+          只依赖 store 的 pendingPlan 会让按钮点了没反应。 */}
       <div className="plan-inline-footer">
         <div className="plan-inline-path-hint">
           <span>已创建计划</span>
@@ -194,14 +196,14 @@ export const PlanCard = memo(function PlanCard({
               <button
                 type="button"
                 className="plan-inline-view"
-                onClick={() => void dismissPlan()}
+                onClick={() => void dismissPlan(turnId ?? undefined)}
               >
                 取消
               </button>
               <button
                 type="button"
                 className="plan-inline-confirm"
-                onClick={() => void confirmPlanTurn(true)}
+                onClick={() => void confirmPlanTurn(true, turnId ?? undefined)}
               >
                 确认执行
               </button>

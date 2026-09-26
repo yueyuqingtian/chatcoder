@@ -2,7 +2,6 @@
  * 界面语言、HTTP 代理、终端 Shell/字体、增强搜索、消息流显示开关。
  * 所有设置项走 /settings/global 持久化（config.json），重启不丢。 */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useClickOutside } from "../../hooks/useClickOutside";
 import { api } from "../../api/client";
 import { useUiStore } from "../../store/ui";
 import { useChatStore } from "../../store/chat";
@@ -18,12 +17,6 @@ const TERMINAL_SHELLS = [
   { value: "git-bash", label: "Git Bash" },
 ];
 
-const SANDBOX_MODES = [
-  { value: "workspace-write", label: "工作区写访问（默认）" },
-  { value: "read-only", label: "只读沙箱（仅读操作）" },
-  { value: "danger-full-access", label: "危险全访问（免审批）" },
-];
-
 const MAX_STEPS_OPTIONS = [
   { value: 200, label: "200 步" },
   { value: 500, label: "500 步" },
@@ -37,11 +30,10 @@ export function GeneralPanel() {
   const [cfg, setCfg] = useState({
     terminal_shell: "auto", terminal_font: "", http_proxy: "",
     enhanced_search: true, show_reasoning: true,
-    auto_approve_tools: false, force_approval_tools: "",
+    // plan-75-332：原「自动批准工具调用 / 始终需要审批的工具 / 沙箱模式 /
+    // 工作目录外读取自动审批 / 计划模式外部访问」五项已移除——是否需审批统一由
+    // 权限模式（询问审批 / 自动审批 / 完全访问）裁决，入口在输入框右侧。
     memory_enabled: true,
-    plan_mode_allow_outside_access: false,
-    sandbox_mode: "workspace-write",
-    auto_approve_outside_read: false,
     agent_max_steps: 1000,
     agent_retry_count: 3,
     agent_retry_intervals: "10,20,30",
@@ -50,16 +42,29 @@ export function GeneralPanel() {
     // plan-278-1391: 上下文压缩触发阈值（占模型窗口比例，默认 0.90）
     auto_compact_threshold_ratio: 0.90,
   });
-  const [saving, setSaving] = useState(false);
+  // S4（plan-41-197）：改为「修改即保存」——移除底部保存按钮，所有项在改动后
+  // 300ms 内自动落盘（config.json），与外观/模型等页操作逻辑统一（用户反馈
+  // “常规下面有个保存按钮，和其余标签页的操作逻辑不一致”）。
+  const saveTimerRef = useRef<number | null>(null);
+  const flushSave = useCallback(async (payload: typeof cfg) => {
+    try {
+      await api.setGlobalSettings({
+        ...payload,
+        // plan-278-1391: 压缩触发阈值（保留两位小数，避免浮点噪声）
+        auto_compact_threshold_ratio: Math.round(payload.auto_compact_threshold_ratio * 100) / 100,
+      });
+      // v1.1: 保存即生效——刷新 todos/reasoning 显示开关
+      await useUiStore.getState().refreshGlobalFlags();
+    } catch (e) { useChatStore.setState({ error: "保存失败: " + String(e) }); }
+  }, []);
+  const scheduleSave = useCallback((next: typeof cfg) => {
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = window.setTimeout(() => { void flushSave(next); }, 300);
+  }, [flushSave]);
+  useEffect(() => () => { if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current); }, []);
   // 问题7/8: 终端 Shell/字体选项（后端按当前设备存在性探测）
   const [shells, setShells] = useState(TERMINAL_SHELLS);
   const [fonts, setFonts] = useState<{ value: string; label: string }[]>([]);
-  // 问题9: 始终需要审批的工具——可用工具列表 + 已选标签
-  const [toolNames, setToolNames] = useState<string[]>([]);
-  const [toolDraft, setToolDraft] = useState("");
-  const [toolOpen, setToolOpen] = useState(false);
-  const toolSelectorRef = useRef<HTMLDivElement>(null);
-  useClickOutside(toolSelectorRef, toolOpen, () => setToolOpen(false));
 
   useEffect(() => {
     api.getTerminalOptions()
@@ -71,29 +76,7 @@ export function GeneralPanel() {
         if (avail.length > 0) setShells(avail);
       })
       .catch(() => { /* 拉取失败沿用硬编码候选 */ });
-    api.listExecPolicyTools()
-      .then((list) => setToolNames(list.map((t) => t.name)))
-      .catch(() => { /* 失败则工具下拉为空，仅支持手动输入 */ });
   }, []);
-
-  /** 问题9: 已选审批工具列表（以逗号字符串与 cfg.force_approval_tools 同步） */
-  const forceTools = useMemo(
-    () => cfg.force_approval_tools.split(",").map((s) => s.trim()).filter(Boolean),
-    [cfg.force_approval_tools],
-  );
-  const setForceTools = (next: string[]) => patch({ force_approval_tools: next.join(",") });
-  const addForceTool = (name: string) => {
-    const t = name.trim();
-    if (!t) return;
-    if (forceTools.includes(t)) { setToolDraft(""); return; }
-    setForceTools([...forceTools, t]);
-    setToolDraft("");
-  };
-  const removeForceTool = (name: string) => setForceTools(forceTools.filter((t) => t !== name));
-  const filteredTools = useMemo(
-    () => toolNames.filter((n) => !forceTools.includes(n) && n.toLowerCase().includes(toolDraft.trim().toLowerCase())),
-    [toolNames, forceTools, toolDraft],
-  );
 
   /** plan-282-1416：下拉选项改为 Select 组件的 options 数组——
    *  「已选值不在候选列表中时保留显示」的逻辑在此保留（追加为第一项）。 */
@@ -123,12 +106,7 @@ export function GeneralPanel() {
         http_proxy: g.http_proxy || "",
         enhanced_search: g.enhanced_search,
         show_reasoning: g.show_reasoning,
-        auto_approve_tools: g.auto_approve_tools,
-        force_approval_tools: g.force_approval_tools || "",
         memory_enabled: g.memory_enabled !== false,
-        plan_mode_allow_outside_access: g.plan_mode_allow_outside_access === true,
-        sandbox_mode: g.sandbox_mode || "workspace-write",
-        auto_approve_outside_read: g.auto_approve_outside_read === true,
         agent_max_steps: typeof g.agent_max_steps === "number" ? g.agent_max_steps : 1000,
         agent_retry_count: typeof g.agent_retry_count === "number" ? g.agent_retry_count : 3,
         agent_retry_intervals: typeof g.agent_retry_intervals === "string" ? g.agent_retry_intervals : "10,20,30",
@@ -142,36 +120,12 @@ export function GeneralPanel() {
   }, []);
   useEffect(() => { load(); }, [load]);
 
-  const patch = (p: Partial<typeof cfg>) => setCfg((prev) => ({ ...prev, ...p }));
-
-  const handleSave = async () => {
-    setSaving(true);
-    try {
-      await api.setGlobalSettings({
-        terminal_shell: cfg.terminal_shell,
-        terminal_font: cfg.terminal_font,
-        http_proxy: cfg.http_proxy,
-        enhanced_search: cfg.enhanced_search,
-        show_reasoning: cfg.show_reasoning,
-        auto_approve_tools: cfg.auto_approve_tools,
-        force_approval_tools: cfg.force_approval_tools,
-        memory_enabled: cfg.memory_enabled,
-        plan_mode_allow_outside_access: cfg.plan_mode_allow_outside_access,
-        sandbox_mode: cfg.sandbox_mode,
-        auto_approve_outside_read: cfg.auto_approve_outside_read,
-        agent_max_steps: cfg.agent_max_steps,
-        agent_retry_count: cfg.agent_retry_count,
-        agent_retry_intervals: cfg.agent_retry_intervals,
-        browser_enabled: cfg.browser_enabled,
-        browser_headless: cfg.browser_headless,
-        // plan-278-1391: 压缩触发阈值（保留两位小数，避免浮点噪声）
-        auto_compact_threshold_ratio: Math.round(cfg.auto_compact_threshold_ratio * 100) / 100,
-      });
-      // v1.1: 保存即生效——刷新 todos/reasoning 显示开关
-      await useUiStore.getState().refreshGlobalFlags();
-    } catch (e) { useChatStore.setState({ error: "保存失败: " + String(e) }); }
-    finally { setSaving(false); }
-  };
+  /** S4：改动即保存——本地 state 立即更新，300ms 防抖后写后端（连续拖动只落一次） */
+  const patch = (p: Partial<typeof cfg>) => setCfg((prev) => {
+    const next = { ...prev, ...p };
+    scheduleSave(next);
+    return next;
+  });
 
   return (
     <div className="settings-card-stack">
@@ -206,73 +160,6 @@ export function GeneralPanel() {
         </Row>
         <Row title={t("gp.reasoning")} desc={t("gp.reasoning_desc")}>
           <Sw checked={cfg.show_reasoning} onChange={(v) => patch({ show_reasoning: v })} />
-        </Row>
-        <Row title={t("gp.auto_approve")} desc={t("gp.auto_approve_desc")}>
-          <Sw checked={cfg.auto_approve_tools} onChange={(v) => patch({ auto_approve_tools: v })} />
-        </Row>
-        <Row title={t("gp.force_approve")} desc={t("gp.force_approve_desc")}>
-          <div className="approval-tool-selector" ref={toolSelectorRef}>
-            {forceTools.map((t) => (
-              <span key={t} className="approval-tool-chip">
-                {t}
-                <button type="button" className="approval-tool-chip-remove" onClick={() => removeForceTool(t)} title="移除">×</button>
-              </span>
-            ))}
-            <input
-              className="approval-tool-input"
-              value={toolDraft}
-              placeholder={forceTools.length ? "" : "选择或输入工具名…"}
-              onChange={(e) => { setToolDraft(e.target.value); setToolOpen(true); }}
-              onFocus={() => setToolOpen(true)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === ",") {
-                  e.preventDefault();
-                  if (toolDraft.trim()) addForceTool(toolDraft);
-                } else if (e.key === "Escape") {
-                  setToolOpen(false);
-                }
-              }}
-            />
-            {toolOpen && (filteredTools.length > 0 || toolDraft.trim()) && (
-              <div className="approval-tool-dropdown">
-                {filteredTools.map((n) => (
-                  <button
-                    key={n}
-                    type="button"
-                    className="approval-tool-option"
-                    onMouseDown={() => addForceTool(n)}
-                  >
-                    {n}
-                  </button>
-                ))}
-                {toolDraft.trim() && !toolNames.includes(toolDraft.trim()) && (
-                  <button
-                    type="button"
-                    className="approval-tool-option custom"
-                    onMouseDown={() => addForceTool(toolDraft)}
-                  >
-                    添加「{toolDraft.trim()}」
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
-        </Row>
-        <Row title={t("gp.sandbox")} desc={t("gp.sandbox_desc")}>
-          <Select
-            value={cfg.sandbox_mode}
-            onChange={(v) => patch({ sandbox_mode: v as typeof cfg.sandbox_mode })}
-            options={SANDBOX_MODES}
-            style={{ minWidth: 200 }}
-            aria-label={t("gp.sandbox")}
-          />
-        </Row>
-        {/* v36 (plan-321-1600 R2): 工作目录外读取自动审批——关闭时读工作区外路径弹审批卡 */}
-        <Row title={t("gp.outside_read_auto")} desc={t("gp.outside_read_auto_desc")}>
-          <Sw
-            checked={cfg.auto_approve_outside_read}
-            onChange={(v) => patch({ auto_approve_outside_read: v })}
-          />
         </Row>
         <Row title={t("gp.max_steps")} desc={t("gp.max_steps_desc")}>
           <div style={{ display: "flex", gap: "var(--sp-3)", alignItems: "center" }}>
@@ -350,9 +237,6 @@ export function GeneralPanel() {
             onChange={(v) => { if (cfg.browser_enabled) patch({ browser_headless: v }); }}
           />
         </Row>
-        <Row title={t("gp.plan_outside")} desc={t("gp.plan_outside_desc")}>
-          <Sw checked={cfg.plan_mode_allow_outside_access} onChange={(v) => patch({ plan_mode_allow_outside_access: v })} />
-        </Row>
         <Row title={t("gp.density")} desc={t("gp.density_desc")}>
           <Select
             value={ui.msgDensity}
@@ -363,11 +247,6 @@ export function GeneralPanel() {
         </Row>
       </div>
 
-      <div className="settings-create-actions" style={{ marginTop: 0 }}>
-        <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={saving} aria-busy={saving}>
-          {t("gp.save")}
-        </button>
-      </div>
     </div>
   );
 }

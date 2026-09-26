@@ -10,7 +10,13 @@ import { PluginSlot } from "../../plugins/registry";
 import { parseUtc } from "../../utils/time";
 import { IconCpu, IconSpinner, IconCheck, IconX } from "../icons";
 
-export function SubagentPanel({ threadId, agentName }: { threadId?: number; agentName?: string }) {
+export function SubagentPanel({ threadId, agentName, visible = true }: {
+  threadId?: number;
+  agentName?: string;
+  /** plan-75-334 阶段3：面板是否可见。隐藏时仅暂停秒级计时与流式视觉更新，
+   *  线程数据、消息与滚动位置全部保留（恢复可见时补算一次）。 */
+  visible?: boolean;
+}) {
   const meta = useChatStore((s) => (threadId != null ? s.subagentMeta[threadId] : undefined));
   const liveCount = useChatStore((s) => (threadId != null ? s.subagentMessages[threadId]?.length ?? 0 : 0));
   const running = meta?.status === "running" || meta?.status === "in_progress";
@@ -19,11 +25,13 @@ export function SubagentPanel({ threadId, agentName }: { threadId?: number; agen
 
   // v36 (plan-321-1600 M2): 头部“用时”在运行中需每秒刷新（否则计时不动）。
   // S8c：订阅共享秒级 ticker（与 ToolTree / WorkTimer 共用同一个 setInterval）。
+  // plan-75-334 阶段3：面板不可见时不订阅——隐藏标签不再每秒 setState。
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
-    if (!running) return;
+    if (!running || !visible) return;
+    setNowMs(Date.now()); // 恢复可见时先对齐一次，再开始秒级刷新
     return subscribeTick((now) => setNowMs(now));
-  }, [running]);
+  }, [running, visible]);
 
   // v36: 用时 = 起止时间差（运行中取当前时间；无起始时间时不展示）
   const startedMs = meta?.startedAt ? parseUtc(meta.startedAt) : null;
@@ -60,8 +68,10 @@ export function SubagentPanel({ threadId, agentName }: { threadId?: number; agen
         <span className="subagent-panel-count">{liveCount} 条消息</span>
       </div>
       <div className="subagent-panel-body">
-        {/* v20: 消息体共享 message-flow 插件（source=subagent，操作仅复制） */}
-        <PluginSlot slot="message-flow" source="subagent" threadId={threadId} className="subagent-flow" />
+        {/* v20: 消息体共享 message-flow 插件（source=subagent，操作仅复制）
+            plan-75-334 阶段3：透传 visible——隐藏时不推进流式视觉更新，
+            恢复可见时以当前缓冲一次性对齐（历史消息与线程数据不丢）。 */}
+        <PluginSlot slot="message-flow" source="subagent" threadId={threadId} visible={visible} className="subagent-flow" />
       </div>
     </div>
   );

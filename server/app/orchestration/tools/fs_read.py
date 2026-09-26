@@ -80,12 +80,11 @@ class FsReadTool(Tool):
         # 附件目录兜底：用户消息附件在工作区外的 uploads 目录，允许只读
         target = safe_resolve_read(ctx.workspace_root, path)
         if target is None:
-            # v36 (plan-321-1600 R2): 工作区外路径——审批通过（或全访问沙箱/自动审批）后放行
+            # plan-75-332: 工作区外读取不再由工具自身弹审批卡——直接解析放行，
+            # 是否询问用户由 approval_policy 按权限模式统一裁决。
             from app.orchestration.tools import outside_access
 
-            _outside, _err = await outside_access.authorize_outside_read(
-                ctx, path, tool_name="fs_read",
-            )
+            _outside, _err = outside_access.resolve_outside_target(ctx, path)
             if _outside is None:
                 return ToolResult(ok=False, output="", error=_err)
             target = _outside

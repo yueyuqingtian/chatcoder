@@ -106,15 +106,13 @@ class GrepTool(Tool):
         if search_path:
             root = safe_resolve(ctx.workspace_root, search_path)
             if root is None:
-                # v36 (plan-321-1600 R2): 工作区外路径——审批通过后放行（全访问沙箱免审）
+                # plan-75-332: 工作区外搜索根直接放行（是否询问由 approval_policy 裁决）
                 from app.orchestration.tools import outside_access
 
-                _outside, _err = await outside_access.authorize_outside_read(
-                    ctx, search_path, tool_name="fs_grep",
-                )
+                _outside, _err = outside_access.resolve_outside_target(ctx, search_path)
                 if _outside is None:
                     return ToolResult(ok=False, output="", error=_err)
-                root = Path(_outside)
+                root = _outside
             if not root.exists():
                 return ToolResult(ok=False, output="", error=f"路径不存在: {search_path}")
         else:

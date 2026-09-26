@@ -69,11 +69,10 @@ class FsListTool(Tool):
         if path:
             from app.orchestration.tools.safe_path import safe_resolve
             if safe_resolve(ctx.workspace_root, path) is None:
+                # plan-75-332: 工作区外目录直接放行（是否询问由 approval_policy 裁决）
                 from app.orchestration.tools import outside_access
 
-                _outside, _err = await outside_access.authorize_outside_read(
-                    ctx, path, tool_name="fs_list",
-                )
+                _outside, _err = outside_access.resolve_outside_target(ctx, path)
                 if _outside is None:
                     return ToolResult(ok=False, output="", error=_err)
                 return await asyncio.to_thread(

@@ -205,6 +205,11 @@ async def update_mcp_server(db: AsyncSession, server_id: int, **kwargs: Any) -> 
     而定义为 `(command, args, env, root_path=None)`，TypeError 被下方 except 吞进
     logger.debug，表现为「打开启用开关后工具清单永远为空」的静默失败。
     `workspace` 为项目工作区根（非 ORM 字段，仅用于握手 rootUri/占位符替换）。
+
+    plan-59-286：「停用 → 启用」这一步此前不会拉工具清单——判断条件读的是**更新前**的
+    `is_active`，于是用户刚打开开关时，模型侧一个工具都看不到（要再手动刷新一次）。
+    现在改为按**本次请求的目标状态**判定，并把握手结果写成可见状态（`meta.tools_status`），
+    失败不再静默：前端据此提示「工具清单获取失败，点击重试」。
     """
     from app.persistence.database import run_write_locked
 
@@ -213,19 +218,37 @@ async def update_mcp_server(db: AsyncSession, server_id: int, **kwargs: Any) -> 
     _existing = await get_mcp_server(db, server_id)
     if _existing is None:
         return False
-    if _existing.is_active and not _existing.tools and _existing.transport == "stdio" and _existing.command:
+
+    # 目标状态：本次显式给了 is_active 就按它算，否则沿用旧值（保留"补拉"语义）
+    target_active = kwargs.get("is_active")
+    target_active = _existing.is_active if target_active is None else bool(target_active)
+    transport = str(kwargs.get("transport") or _existing.transport or "stdio")
+    command = str(kwargs.get("command") or _existing.command or "")
+    args = kwargs.get("args") if isinstance(kwargs.get("args"), list) else (_existing.args or [])
+    env = kwargs.get("env") if isinstance(kwargs.get("env"), dict) else (_existing.env or {})
+
+    tools_status: dict | None = None
+    if target_active and transport == "stdio" and command and not _existing.tools:
         try:
             from app.core.config import settings
             from app.orchestration.skill_scanner import fetch_mcp_tools
             fetched = await fetch_mcp_tools(
-                _existing.command, _existing.args or [], _existing.env or {},
+                command, args or [], env or {},
                 root_path=workspace or settings.workspace_root,
             )
             if fetched:
                 kwargs["tools"] = fetched
-        except Exception:
+                tools_status = {"ok": True, "count": len(fetched)}
+            else:
+                # 握手无返回：保留启用状态，但明确记录失败，供 UI 提示重试
+                tools_status = {"ok": False, "error": "握手未返回工具清单（命令不存在或未响应）"}
+        except Exception as exc:  # noqa: BLE001
             # 非阻塞语义保留，但提升到 warning：此前 debug 级别让签名类错误长期不可见
-            logger.warning("[mcp] update 时拉取工具列表失败 %s", _existing.name, exc_info=True)
+            logger.warning("[mcp] 更新时拉取工具列表失败 %s", _existing.name, exc_info=True)
+            tools_status = {"ok": False, "error": str(exc)[:200]}
+
+    if tools_status is not None:
+        kwargs["meta"] = {**(_existing.meta or {}), "tools_status": tools_status}
 
     def patch(s):
         srv = s.get(McpServer, server_id)

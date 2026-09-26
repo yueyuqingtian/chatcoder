@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import resolve_workspace_root
 from app.core.enums import MsgType, SenderType
+from app.models.base import resolve_reasoning
 from app.models.schemas import ChatMessage, ChatRequest
 from app.orchestration.prompts import (
     SUMMARY_CLOSE_TAG,
@@ -315,6 +316,8 @@ async def _summarize_with_llm(db: AsyncSession, provider, messages: list, max_ch
         if not replay:
             return ""
 
+        # plan-53-258 R4: 辅助摘要请求同样携带用户配置的思考深度（此前完全不带）
+        _effort, _thinking = resolve_reasoning(provider)
         req = ChatRequest(
             messages=[
                 ChatMessage(role="system", content=build_compaction_prompt(language)),
@@ -329,6 +332,8 @@ async def _summarize_with_llm(db: AsyncSession, provider, messages: list, max_ch
             ],
             model="",
             temperature=0.3,
+            reasoning_effort=_effort,
+            thinking=_thinking or None,
             # plan-270-1358: ta3 x-ws-id 需要工作目录指纹（其它 Provider 忽略）
             workspace_dir=workspace_dir,
         )

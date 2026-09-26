@@ -14,6 +14,7 @@ from app.gateway.schemas import (
     ProviderModelsBulkIn,
     ProviderOut,
     ProviderProxyTestOut,
+    ProviderReorder,
     ProviderScanOut,
     ProviderUpdate,
 )
@@ -88,6 +89,8 @@ async def _to_out(db: AsyncSession, p) -> ProviderOut:
         active_credential_count=len(active_creds),
         # plan-271-1364: 凭据取用策略（sticky | round_robin）
         credential_strategy=getattr(p, "credential_strategy", None) or "sticky",
+        # plan-41-225: 排序位（前端拖拽排序的当前值）
+        sort_order=getattr(p, "sort_order", 0) or 0,
     )
 
 
@@ -117,6 +120,16 @@ async def create_provider(body: ProviderCreate, db: AsyncSession = Depends(get_d
         )
     provider = await provider_service.get_provider(db, pid)  # async 只读
     return await _to_out(db, provider)
+
+
+@router.post("/providers/reorder", response_model=dict)
+async def reorder_providers(body: ProviderReorder, db: AsyncSession = Depends(get_db)):
+    """plan-41-225: 保存供应商顺序（模型页左列拖拽排序）。
+
+    路由注册在 `/providers/{provider_id}` 之前，避免被路径参数误匹配。
+    """
+    updated = await provider_service.reorder_providers(db, body.ids)
+    return {"ok": True, "updated": updated}
 
 
 @router.patch("/providers/{provider_id}", response_model=ProviderOut)
@@ -188,7 +201,7 @@ async def scan_provider_models(provider_id: int, db: AsyncSession = Depends(get_
     return ProviderScanOut(models=models)
 
 
-def _model_to_out(m) -> ModelOut:
+def _model_to_out(m, provider_sort_order: int = 0) -> ModelOut:
     tmeta = getattr(m, "trae_meta", None) or {}
     if not isinstance(tmeta, dict):
         tmeta = {}
@@ -210,6 +223,8 @@ def _model_to_out(m) -> ModelOut:
         trae_consumption_rate=tmeta.get("consumption_rate"),
         trae_available=bool(tmeta.get("is_available")),
         trae_thinking=bool(tmeta.get("thinking")),
+        # plan-89-386: 供应商排序位（全局模型选择器按设置页顺序展示）
+        provider_sort_order=provider_sort_order,
     )
 
 
@@ -222,7 +237,8 @@ async def list_provider_models(provider_id: int, db: AsyncSession = Depends(get_
 
     from app.persistence.models.model_reg import Model
     res = await db.execute(select(Model).where(Model.provider_id == provider_id).order_by(Model.name.asc()))
-    return [_model_to_out(m) for m in res.scalars().all()]
+    order = int(getattr(provider, "sort_order", 0) or 0)
+    return [_model_to_out(m, order) for m in res.scalars().all()]
 
 
 @router.post("/providers/{provider_id}/models", response_model=list[ModelOut])
@@ -236,8 +252,10 @@ async def bulk_save_provider_models(provider_id: int, body: ProviderModelsBulkIn
         raise HTTPException(404, str(e))
     from sqlalchemy import select
     from app.persistence.models.model_reg import Model
+    provider = await provider_service.get_provider(db, provider_id)
+    order = int(getattr(provider, "sort_order", 0) or 0) if provider else 0
     res = await db.execute(select(Model).where(Model.provider_id == provider_id).order_by(Model.name.asc()))
-    return [_model_to_out(m) for m in res.scalars().all()]
+    return [_model_to_out(m, order) for m in res.scalars().all()]
 
 
 # ── plan-248-1258 M2.2: 供应商凭据（多 API Key / 多登录账号）──

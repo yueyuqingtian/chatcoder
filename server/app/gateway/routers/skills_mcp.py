@@ -49,6 +49,8 @@ def skill_to_dict(s) -> dict:
         "description": s.description, "source": s.source, "path": s.path,
         "content": s.content, "trigger": s.trigger, "tools": s.tools,
         "tags": s.tags, "is_active": s.is_active, "auto_load": s.auto_load,
+        # plan-284-1450：已安装列表复用市场图标（安装时写入 meta）
+        "meta": s.meta,
     }
 
 
@@ -58,6 +60,7 @@ def mcp_to_dict(m) -> dict:
         "description": m.description, "source": m.source, "transport": m.transport,
         "command": m.command, "args": m.args, "env": m.env, "url": m.url,
         "tools": m.tools, "is_active": m.is_active,
+        "meta": m.meta,
     }
 
 
@@ -249,6 +252,9 @@ async def refresh_mcp_tools(
         if row is None:
             return
         row.tools = tools
+        # plan-59-286：刷新成功即清掉此前的失败状态，
+        # 否则「启用时握手失败」的提示会一直挂在界面上。
+        row.meta = {**(row.meta or {}), "tools_status": {"ok": True, "count": len(tools)}}
         s.commit()
 
     await run_write_locked(patch, label=f"mcp.refresh_tools.{server_id}")

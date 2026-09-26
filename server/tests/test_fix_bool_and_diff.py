@@ -9,17 +9,20 @@ from app.services import rollback_service, task_service
 
 
 @pytest.mark.asyncio
-async def test_approval_manager_with_bool_auto_approve():
-    """验证 settings.auto_approve_tools 为 True 时，不会抛出 'bool' object is not iterable。"""
-    settings.auto_approve_tools = True
-    approved = await approval_manager.request(
-        # 高风险工具即使 auto_approve=True 也必须审批；本测试只验证 bool 配置不触发迭代 TypeError。
-        detail={"tool": "fs_write", "kind": "tool_call", "risk_level": "medium"}
-    )
-    assert approved is True
+async def test_approval_manager_ignores_bool_auto_approve():
+    """回归：旧配置 auto_approve_tools 为布尔值时不再触发 'bool' object is not iterable。
 
-    # 设为 False
-    settings.auto_approve_tools = False
+    plan-75-332: approval.py 不再读该配置自行放行——是否放行由 approval_policy 在
+    executor 侧判定。走 request() 即意味着需要询问用户，无人作答时超时返回 False。
+    """
+    settings.auto_approve_tools = True
+    try:
+        approved = await approval_manager.request(
+            detail={"tool": "fs_write", "kind": "tool_call", "risk_level": "medium"}
+        )
+        assert approved is False  # 不再自行放行，等用户决定
+    finally:
+        settings.auto_approve_tools = False
 
 
 @pytest.mark.asyncio
@@ -27,7 +30,7 @@ async def test_task_service_create_artifact():
     """验证 task_service.create_artifact 可正常创建产物（写引擎单写线程）。"""
     from app.persistence.models.task import Artifact
     async with async_session_factory() as db:
-        session = Session(project_id=None, permission_mode="default")
+        session = Session(project_id=None, permission_mode="agent")
         db.add(session)
         await db.commit()  # 提交数据（create_task 经写引擎独立连接写入，需先提交）
 
@@ -53,7 +56,7 @@ async def test_task_service_create_artifact():
 async def test_get_file_diff_path_normalization():
     """验证 get_file_diff 对正反斜杠的容错匹配。"""
     async with async_session_factory() as db:
-        session = Session(project_id=None, permission_mode="default")
+        session = Session(project_id=None, permission_mode="agent")
         db.add(session)
         await db.flush()
         rw = RollbackWrite(

@@ -1,8 +1,9 @@
 ﻿/** 左侧导航页（v7 对齐 ZCode；plan-248-1258 M4 统一为「自动化」并复用共享创建弹窗）。
- *  plan-282-1441（#6/#9）：原 SkillsPage / McpPage 已移除——技能与连接器并入
- *  设置与左面板共用的「拓展」面板（settings/ExtensionsPanel）。 */
+ *  plan-282-1441（#6/#9）：原 SkillsPage / McpPage 已移除——技能与连接器并入「拓展」；
+ *  plan-41-198：左面板「拓展」= 市场视图（MarketPanel），设置页「拓展」= 已安装管理（InstalledPanel）。 */
 import { useCallback, useEffect, useState } from "react";
 import { api, type ScheduledTaskOut } from "../api/client";
+import { useChatStore } from "../store/chat";
 import {
   IconCheckSquare, IconClipboard, IconFileText, IconInfo,
   IconTarget, IconX, IconZap,
@@ -55,10 +56,14 @@ export function ScheduledPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  // S3（plan-41-197）：开关语义 = “运行会话时保持电脑唤醒”——偏好只在运行期生效：
+  //   有任何会话在跑（含后台/自动化任务）时才向主进程申请防休眠，全部跑完自动释放；
+  //   主进程侧已改用 prevent-display-sleep（阻止显示器休眠，见 electron/main.cjs）。
+  const anyRunning = useChatStore((s) => s.isRunning || s.sessions.some((x) => x.has_running));
   useEffect(() => {
-    void window.chatcoderAPI?.setKeepAwake?.(keepAwake);
+    void window.chatcoderAPI?.setKeepAwake?.(keepAwake && anyRunning);
     localStorage.setItem("chatcoder.keepAwake", keepAwake ? "1" : "0");
-  }, [keepAwake]);
+  }, [keepAwake, anyRunning]);
 
   /** 模板 → 打开共享弹窗并预填（plan-248-1258 M4：与设置页同一表单） */
   const applyTemplate = (tpl: { name: string; cron: string; prompt: string }) => {

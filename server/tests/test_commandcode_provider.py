@@ -112,8 +112,11 @@ def test_convert_image_block_to_native_image_part():
     assert content[0] == {"type": "text", "text": "这张图是什么？"}
     img = content[1]
     assert img["type"] == "image"
-    assert img["source"]["type"] == "url"
-    assert img["source"]["url"] == data_uri
+    # plan-53-258 R1: data URI 必须走 base64 分支——上游 url 分支只认 http(s)，
+    # 传 data: 会被整轮拒绝（"URL scheme must be http or https, got data:"）。
+    assert img["source"]["type"] == "base64"
+    assert img["source"]["media_type"] == "image/png"
+    assert img["source"]["data"] == "iVBORw0KGgoAAAANSUhEUg=="
     # 关键回归：不得再出现占位文本
     assert "[image]" not in str(content)
 
@@ -202,3 +205,50 @@ async def test_response_failure_reason_catches_empty_tool_calls():
     msg_trunc, fatal_trunc = res_trunc
     assert fatal_trunc is True
     assert "截断" in msg_trunc
+
+
+def test_build_payload_reasoning_effort_values():
+    """plan-53-258 R2: 用户配置的思考深度必须下发到 params。
+
+    实测：不带 reasoning_effort 时上游完全不产出 reasoning 事件（思考块为空）；
+    值域仅 low|medium|high|xhigh|max，minimal/none 会被 400 拒绝。
+    """
+    provider = CommandCodeProvider(api_key="user_test123", model="deepseek/deepseek-v4.1-flash")
+
+    def _effort_param(effort):
+        req = ChatRequest(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="deepseek/deepseek-v4.1-flash",
+            reasoning_effort=effort,
+        )
+        return provider._build_payload(req)["params"].get("reasoning_effort")
+
+    assert _effort_param("low") == "low"
+    assert _effort_param("high") == "high"
+    assert _effort_param("xhigh") == "xhigh"
+    assert _effort_param("max") == "max"
+    # minimal 语义最接近 low；none/空/未知档位不下发（避免上游 400）
+    assert _effort_param("minimal") == "low"
+    for off in ("none", "", None, "ultra"):
+        assert _effort_param(off) is None
+
+
+def test_convert_image_block_native_base64_passthrough():
+    """已是原生 base64 形态的块（历史消息落库后回传）保持合法字段。"""
+    provider = CommandCodeProvider(api_key="user_test123", model="deepseek/deepseek-v4.1-flash")
+    messages = [
+        ChatMessage(
+            role="user",
+            content=None,
+            content_blocks=[{
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"},
+            }],
+        ),
+    ]
+
+    _, converted = provider._convert_messages(messages)
+    assert converted[0]["content"][0] == {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"},
+    }

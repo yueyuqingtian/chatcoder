@@ -1,12 +1,12 @@
 """v29 (plan-78): 空响应重试 + 思考降档的配置与判定单测。
 
-v31 (plan-89): 对齐 zcode/AI SDK 语义——本 turn 已有工具产出（has_progress）时，
-finish=stop 空响应视为"任务完成、主动结束对话"，不再 fatal/重试。
+v968: 撤销 v31 (plan-89) 的 has_progress 豁免——完全空响应一律 fatal 走统一
+重试计划（实测网关截断输出流曾被静默当"任务完成"，用户看到"无故中断"）。
 
 agent_loop 的重试逻辑内联在 run_agent_loop（依赖 db/engine/广播），
 此处覆盖可独立验证的部分：
 - 降档序列配置解析（agent_empty_retry_effort_list）
-- 空响应/thinking_timeout fatal 判定（重试触发前提，含 has_progress 豁免）
+- 空响应/thinking_timeout fatal 判定（重试触发前提）
 - 非 fatal（截断/部分内容）不进入重试路径的前提判定
 """
 from app.core.config import Settings
@@ -46,13 +46,17 @@ def test_thinking_timeout_is_fatal_and_triggers_retry_premise():
     assert "思考超时" in reason
 
 
-# ── v31 (plan-89): 已有工具产出时 stop 空响应豁免 ──
+# ── v968: 已有工具产出时 stop 空响应同样 fatal（原 v31 豁免撤销）──
 
-def test_stop_empty_response_with_progress_is_healthy():
-    """本 turn 已有工具产出时，stop 空响应 = 任务完成，正常结束不重试不报错。"""
-    assert _response_failure_reason(
+def test_stop_empty_response_with_progress_is_fatal():
+    """本 turn 已有工具产出时，完全空响应不再判"任务完成"——疑似网关截断
+    输出流，走统一重试计划，穷尽后报错。"""
+    reason, fatal = _response_failure_reason(
         ChatResponse(content=None, finish_reason="stop"), has_progress=True,
-    ) is None
+    )
+    assert fatal is True
+    assert "空响应" in reason
+    assert "截断" in reason
 
 
 def test_stop_empty_response_without_progress_is_fatal():
@@ -109,12 +113,14 @@ def test_zero_frame_timeout_empty_is_fatal():
     assert fatal is True
 
 
-def test_frames_received_stop_empty_with_progress_is_healthy():
-    """模型已应答（收到帧）但主动无输出 + 已有产出 → 保留 v31 豁免语义。"""
-    assert _response_failure_reason(
+def test_frames_received_stop_empty_with_progress_is_fatal():
+    """v968: 已收到帧但零输出的 stop 空响应同样 fatal（原 v31 豁免已撤销）。"""
+    reason, fatal = _response_failure_reason(
         ChatResponse(content=None, finish_reason="stop", frames_received=2),
         has_progress=True,
-    ) is None
+    )
+    assert fatal is True
+    assert "空响应" in reason
 
 
 def test_frames_received_stop_empty_without_progress_is_fatal():
@@ -126,12 +132,15 @@ def test_frames_received_stop_empty_without_progress_is_fatal():
     assert "空响应" in reason
 
 
-def test_frames_received_none_keeps_legacy_logic():
-    """provider 未提供 frames 信号（None）时保持旧判定：有产出+stop 空响应豁免。"""
-    assert _response_failure_reason(
+def test_frames_received_none_stop_empty_with_progress_is_fatal():
+    """v968: provider 未提供 frames 信号（None）时，完全空响应同样 fatal——
+    不再回退"有产出即健康"的旧判定。"""
+    reason, fatal = _response_failure_reason(
         ChatResponse(content=None, finish_reason="stop", frames_received=None),
         has_progress=True,
-    ) is None
+    )
+    assert fatal is True
+    assert "空响应" in reason
 
 
 # ── 非 fatal 不进入重试路径 ──

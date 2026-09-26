@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
-from app.orchestration.tools.safe_path import safe_resolve, safe_resolve_parent
+from app.orchestration.tools.safe_path import resolve_loose
 
 logger = logging.getLogger(__name__)
 
@@ -78,14 +78,12 @@ class MultiFileEditTool(Tool):
                 errors.append(f"edit[{i}]: old_text 为空")
                 continue
 
-            # 路径安全校验
-            resolved = safe_resolve(ctx.workspace_root, path_str)
-            if resolved is None:
-                # 可能是新文件，用 safe_resolve_parent
-                resolved = safe_resolve_parent(ctx.workspace_root, path_str)
-            if resolved is None:
-                errors.append(f"edit[{i}]: 路径越界或非法: {path_str}")
+            # plan-75-332: 不再限制写入落在工作区内（越界写入交给 approval_policy 裁决）
+            _resolved = resolve_loose(path_str, ctx.workspace_root)
+            if not _resolved:
+                errors.append(f"edit[{i}]: 路径非法: {path_str}")
                 continue
+            resolved = Path(_resolved)
 
             # 读取文件验证 old_text 存在
             if not resolved.exists():
@@ -129,7 +127,11 @@ class MultiFileEditTool(Tool):
                 # 执行替换
                 new_content = original.replace(old_text, new_text, 1)
                 resolved.write_text(new_content, encoding="utf-8")
-                _rel = str(resolved.relative_to(ctx.workspace_root))
+                # plan-75-332: 越界写入时相对路径算不出来，回退绝对路径（仅影响展示）
+                try:
+                    _rel = str(resolved.relative_to(ctx.workspace_root))
+                except ValueError:
+                    _rel = str(resolved)
                 applied.append(_rel)
                 if len(new_content) <= _NEW_CONTENT_MAX_CHARS:
                     new_contents[_rel] = new_content

@@ -18,6 +18,7 @@ import { BrowserStartPage } from "./BrowserStartPage";
 import { useFrameBridge, isGuestFrame, type FrameEl } from "./frameBridge";
 import { isBusy, subscribe } from "../../perf/bus";
 import { registerReconcileTask, RECONCILE_ORDER } from "../../perf/reconcile";
+import { recordDerivation } from "../../perf/metrics";
 import {
   IconArrowLeft,
   IconArrowRight,
@@ -33,8 +34,16 @@ import {
   IconImage,
 } from "../icons";
 
-export function BrowserPanel() {
-  const activeSessionId = useChatStore((s) => s.currentSessionId);
+export function BrowserPanel({ sessionId, visible = true }: {
+  /** plan-41-233：标签所属会话（undefined=跟随当前会话；null=无会话的 home 桶）。
+   *  跨会话保活渲染下必须按所属会话读取分桶状态，否则会读到当前会话的浏览器实例。 */
+  sessionId?: number | null;
+  /** plan-75-334 阶段3：面板是否可见。隐藏时不执行框架尺寸同步与布局读取，
+   *  但 webview / 页面 / 标签状态全部保留（恢复可见时补一次最终尺寸）。 */
+  visible?: boolean;
+} = {}) {
+  const followedSessionId = useChatStore((s) => s.currentSessionId);
+  const activeSessionId = sessionId !== undefined ? sessionId : followedSessionId;
   const browserState = useBrowserStore((s) => s.getSessionState(activeSessionId));
   const updateSessionState = useBrowserStore((s) => s.updateSessionState);
   const newTab = useBrowserStore((s) => s.newTab);
@@ -97,9 +106,14 @@ export function BrowserPanel() {
    */
   const viewportSizeRef = useRef<{ width: number; height: number } | null>(null);
   const [viewportSize, setViewportSize] = useState<{ width: number; height: number } | null>(null);
+  /** plan-75-334 阶段3：可见性镜像——供事件回调/收敛任务读取，不进 useCallback 依赖。 */
+  const visibleRef = useRef(visible);
   const syncFrameSize = useCallback(() => {
     const vp = viewportRef.current;
     if (!vp) return;
+    // plan-75-334 阶段3：隐藏期跳过——容器 display:none 时尺寸为 0，读取与写入都是白做；
+    // 恢复可见时由可见性 effect 补一次最终尺寸。
+    if (!visibleRef.current) return;
     const w = vp.clientWidth;
     const h = vp.clientHeight;
     if (w <= 0 || h <= 0) return;
@@ -110,6 +124,7 @@ export function BrowserPanel() {
       setViewportSize({ width: w, height: h });
     }
     // 获取当前视口内全部 webview 与 iframe 元素统一设置尺寸
+    recordDerivation("browserResize");
     const elements: HTMLElement[] = Array.from(vp.querySelectorAll("webview, iframe"));
     const fromRef = tabFrameRefs.current.get(activeTabId);
     if (fromRef && !elements.includes(fromRef)) elements.push(fromRef);
@@ -123,6 +138,15 @@ export function BrowserPanel() {
   // syncFrameSize 在 ref 回调/事件监听里使用，用 ref 持有最新实现，避免为它重建 ref 回调
   const syncFrameSizeRef = useRef(syncFrameSize);
   useEffect(() => { syncFrameSizeRef.current = syncFrameSize; }, [syncFrameSize]);
+
+  // plan-75-334 阶段3：同步可见性镜像，并在恢复可见时补一次最终尺寸。
+  // 延迟一帧：display:none → block 后容器需要一帧才能量到真实尺寸。
+  useEffect(() => {
+    visibleRef.current = visible;
+    if (!visible) return;
+    const raf = requestAnimationFrame(() => { syncFrameSizeRef.current(); });
+    return () => cancelAnimationFrame(raf);
+  }, [visible]);
 
   /**
    * 取得某标签页宿主元素的稳定 ref 回调。

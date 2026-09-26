@@ -39,4 +39,7 @@ class RollbackWrite(Base):
     new_content: Mapped[str | None] = mapped_column(String)  # 写盘后内容
     # v2.2 (plan-88): 二进制/超限文件——不存文本前后内容，回滚走 checkpoint 备份恢复
     binary: Mapped[bool] = mapped_column(Boolean, default=False)
+    # plan-89-387: 工具调用键——同一 turn 内同文件多次编辑时，前端按 call_key
+    # 精确取「这一次编辑」的前后内容，而不是整轮累积 diff（老记录为 NULL，回退累积口径）
+    call_key: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[str] = mapped_column(server_default=func.now())

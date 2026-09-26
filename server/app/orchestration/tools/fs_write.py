@@ -2,10 +2,11 @@
 
 v2.5: 使用 safe_resolve_parent 检查路径合法性(新文件可能尚不存在)。
 """
+from pathlib import Path
 from typing import Any
 
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
-from app.orchestration.tools.safe_path import safe_resolve_parent
+from app.orchestration.tools.safe_path import resolve_loose
 
 # plan-1085: data 带回写入内容上限（对齐 agent_loop.MAX_TOOL_OUTPUT_CHARS）；超限不带，走磁盘读取兜底路径
 _NEW_CONTENT_MAX_CHARS = 16000
@@ -56,15 +57,12 @@ class FsWriteTool(Tool):
         if not path:
             return ToolResult(ok=False, output="", error="path 不能为空")
 
-        target = safe_resolve_parent(ctx.workspace_root, path)
-        if target is None:
-            return ToolResult(
-                ok=False, output="",
-                error=(
-                    f"路径越界或非法: {path}\n"
-                    f"请确认路径在工作目录内: {ctx.workspace_root}"
-                ),
-            )
+        # plan-75-332: 不再限制写入必须落在工作区内——越界写入由 approval_policy
+        # 归类为 write_outside，在审批卡上呈现（完全访问下直接执行）。
+        resolved = resolve_loose(path, ctx.workspace_root)
+        if not resolved:
+            return ToolResult(ok=False, output="", error=f"路径非法: {path}")
+        target = Path(resolved)
 
         try:
             target.parent.mkdir(parents=True, exist_ok=True)

@@ -13,9 +13,22 @@ SCAN_TIMEOUT = 20.0
 
 
 async def create_provider(db: AsyncSession, **kwargs) -> int:
+    from sqlalchemy import func
+
     from app.persistence.database import run_write_locked
+    from app.services import credential_service
 
     def patch(s):
+        # plan-81-345: 先清理历史孤儿凭据（旧版本删除供应商时漏删的行）——
+        # SQLite 复用被删供应商的 id，孤儿凭据会被误挂到本次新建的供应商名下
+        # （表现为「新增后凭空多出一个旧 Key」）。
+        credential_service.purge_orphan_credentials(s)
+        # plan-41-225: 新供应商排到列表末尾——"新增的加在最后"是所有列表的通用心智，
+        # 若插入首位会打断用户已调整好的顺序。
+        if kwargs.get("sort_order") is None:
+            kwargs["sort_order"] = int(
+                s.execute(select(func.max(Provider.sort_order))).scalar() or 0
+            ) + 1
         provider = Provider(tenant_id=1, **kwargs)
         s.add(provider)
         s.flush()
@@ -31,7 +44,11 @@ async def get_provider(db: AsyncSession, provider_id: int) -> Provider | None:
 
 
 async def list_providers(db: AsyncSession) -> list[Provider]:
-    res = await db.execute(select(Provider).order_by(Provider.id.asc()))
+    # plan-41-225: 按用户自定义顺序（sort_order）排序，id 兜底保证顺序稳定不抖动
+    # （老库迁移后 sort_order 全为 0 → 等价于原 id 升序，升级零感知）。
+    res = await db.execute(
+        select(Provider).order_by(Provider.sort_order.asc(), Provider.id.asc())
+    )
     return list(res.scalars().all())
 
 
@@ -56,11 +73,39 @@ async def update_provider(db: AsyncSession, provider_id: int, **kwargs) -> bool:
     return await run_write_locked(patch, label=f"provider.update.{provider_id}")
 
 
+async def reorder_providers(db: AsyncSession, ids: list[int]) -> int:
+    """plan-41-225: 按给定顺序重写供应商排序位（数组下标即 sort_order）。
+
+    为什么用批量而非逐条 PATCH：一次拖拽 = 一次请求，避免逐条写入的中间态闪烁
+    （列表可能被中间态渲染两次）；且"顺序"天然是全量有序列表语义。
+    未知 id 忽略（防御脏数据）；未出现在 ids 中的供应商保留在末尾，不丢数据。
+    """
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        rows = list(s.execute(select(Provider)).scalars().all())
+        known = {p.id: p for p in rows}
+        order = [pid for pid in ids if pid in known]
+        ordered = set(order)
+        rest = [p.id for p in rows if p.id not in ordered]
+        updated = 0
+        for index, pid in enumerate(order + rest):
+            p = known[pid]
+            if p.sort_order != index:
+                p.sort_order = index
+                updated += 1
+        s.commit()
+        return updated
+
+    return await run_write_locked(patch, label="provider.reorder")
+
+
 async def delete_provider(db: AsyncSession, provider_id: int) -> bool:
     """删除供应商，并级联删除其下模型（写引擎单写线程）。
     删除前置空会话/代理/子代理配置对这些模型的引用（FK 约束），
     引用方 model_id 变 NULL 后前端选择器自动忽略。"""
     from app.persistence.database import run_write_locked
+    from app.services import credential_service
     from app.services.model_service import detach_model_refs
 
     def patch(s):
@@ -71,6 +116,10 @@ async def delete_provider(db: AsyncSession, provider_id: int) -> bool:
         detach_model_refs(s, [m.id for m in models])
         for m in models:
             s.delete(m)
+        # plan-81-345: 凭据必须一并删除——provider_credentials.provider_id 无外键约束，
+        # 漏删会残留孤儿行；SQLite 复用被删供应商的 id，孤儿凭据会被误挂到新供应商上
+        # （表现为「删除再新增后多出一个旧 Key」）。
+        credential_service.purge_provider_credentials(s, provider_id)
         s.delete(provider)
         s.commit()
         return True

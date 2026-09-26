@@ -6,6 +6,7 @@
 import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,6 +46,9 @@ class SubagentHandle:
     acceptance: list[str] = field(default_factory=list)
     # 主代理可见的上下文快照（关键事实/约束，spawn 时传入）
     context_snapshot: dict = field(default_factory=dict)
+    # plan-64-291: 派发时刻（单调时钟）——供运行期提醒展示「已运行多久」，
+    # 让主代理知道子代理仍在正常推进、而不是卡住（避免因此自己动手重复劳动）。
+    started_at: float | None = None
     # plan-330-1648 M2: 实际生效的模型/思考深度（供汇报与诊断——核对“设置是否生效”）
     model_id: int | None = None
     reasoning_effort: str | None = None
@@ -91,6 +95,7 @@ class SubagentManager:
             task_description=task_description,
             handoff_summary=handoff_summary,
             context_snapshot=context_snapshot or {},
+            started_at=time.monotonic(),
             # plan-330-1648 M2: 记录生效的模型/深度（设置覆盖 → 会话 → 主代理已在上游解析完）
             model_id=getattr(agent, "model_id", None),
             reasoning_effort=reasoning_effort,
@@ -367,6 +372,25 @@ class SubagentManager:
 
     def pending_count(self) -> int:
         return sum(1 for h in self._handles.values() if h.status == "running")
+
+    def running_snapshot(self) -> list[dict]:
+        """plan-64-291: 运行中子代理清单（agent_id / 标题 / 已运行秒数）。
+
+        运行期提醒的唯一数据源——主循环据此告诉主代理「还有谁在跑、跑了多久」，
+        避免它在等待期重复劳动、或因误判卡死而自己动手。已完成的子代理不在内。
+        """
+        now = time.monotonic()
+        snap: list[dict] = []
+        for h in self._handles.values():
+            if h.status != "running":
+                continue
+            elapsed = max(0.0, now - h.started_at) if h.started_at is not None else None
+            snap.append({
+                "agent_id": h.agent_id,
+                "title": h.task_title or "",
+                "elapsed_s": elapsed,
+            })
+        return snap
 
     async def wait_all(self) -> None:
         """等待所有仍在运行的子代理结束（collect_results(wait=true) 用）。"""

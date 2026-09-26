@@ -83,7 +83,8 @@ export function JumpDots({ entries, onJump, activeIndex }: {
               <button
                 className="jump-tick-btn"
                 onClick={() => onJump(t.entry)}
-                title={preview || `第 ${i + 1} 条`}
+                /* plan-64-294：不再挂原生 title——同一 hover 已经弹出 .jump-dot-card
+                   摘要卡，再接管一个浮层就是「两个浮窗叠着弹」（用户反馈图）。 */
                 aria-label={`跳转到第 ${i + 1} 条`}
                 type="button"
               >

@@ -15,12 +15,13 @@ import {
   api, type ModelOut, type ProviderCredentialOut, type ProviderOut,
 } from "../../api/client";
 import { useChatStore } from "../../store/chat";
-import { IconRefresh, IconPlus, IconX, IconCpu } from "../icons";
+import { IconRefresh, IconPlus, IconX, IconTrash, IconCpu, IconCheck, IconPencil, IconEye, IconEyeOff } from "../icons";
 import { Modal } from "../Modal";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { Checkbox, Input, Select } from "../ui";
 import { Sw } from "./shared";
 import { Ta3QuotaSection } from "./Ta3QuotaSection";
+import { ProviderSideList } from "./ProviderSideList";
 
 /** 非阻塞提示：Electron 中 window.alert 是原生模态框，关闭后会破坏窗口焦点
  * （返回会话后输入框无法聚焦），统一改用全局 Toast。 */
@@ -109,7 +110,19 @@ function ProviderFormModal({ open, editing, onClose, onSaved }: { open: boolean;
     } catch (e) { notify(String(e)); }
   };
   return (
-    <Modal open={open} onClose={onClose} title={editing ? "编辑供应商" : "添加供应商"} width={520} height="auto">
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={editing ? "编辑供应商" : "添加供应商"}
+      width={520}
+      height="auto"
+      footer={
+        <>
+          <button className="btn btn-ghost btn-sm" onClick={onClose}>取消</button>
+          <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={!form.name.trim() || (!isOAuthFormat && !form.base_url.trim())}>{editing ? "保存" : "创建"}</button>
+        </>
+      }
+    >
       <div className="settings-modal-form" style={{ padding: 18 }}>
         <div className="settings-modal-form-row"><label>供应商名称</label><Input placeholder="如 Ta+3 牛码" value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} /></div>
         <div className="settings-modal-form-row"><label>API 格式</label><Select value={form.api_format} onChange={(v) => setForm((p) => ({ ...p, api_format: v, base_url: v === "commandcode" && !p.base_url ? OAUTH_DEFAULT_BASE.commandcode : p.base_url }))} options={Object.entries(API_FORMAT_LABEL).map(([v, l]) => ({ value: v, label: l }))} aria-label="API 格式" /></div>
@@ -122,7 +135,6 @@ function ProviderFormModal({ open, editing, onClose, onSaved }: { open: boolean;
             ? "workbuddy 类型使用账号登录获取模型，服务端地址已内置（copilot.tencent.com）；保存后在详情面板点击「登录账号」，支持登录多个账号。"
             : "trae 类型使用账号登录获取模型，服务端地址已内置（trae-api-cn.mchost.guru）；保存后在详情面板点击「登录账号」。"}</div>}
         <div className="settings-modal-form-row"><label>启用状态</label><Sw checked={form.is_active} onChange={(v) => setForm((p) => ({ ...p, is_active: v }))} /></div>
-        <div className="settings-create-actions"><button className="btn btn-ghost btn-sm" onClick={onClose}>取消</button><button className="btn btn-primary btn-sm" onClick={handleSave} disabled={!form.name.trim() || (!isOAuthFormat && !form.base_url.trim())}>{editing ? "保存" : "创建"}</button></div>
       </div>
     </Modal>
   );
@@ -185,7 +197,19 @@ function ScanModelsModal({ open, provider, onClose, onSaved }: { open: boolean; 
 
   const enabledCount = items.filter((i) => i.enabled).length;
   return (
-    <Modal open={open} onClose={onClose} title={`扫描模型 — ${provider?.name ?? ""}`} width={640} height="auto">
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={`扫描模型 — ${provider?.name ?? ""}`}
+      width={640}
+      height="auto"
+      footer={
+        <>
+          <button className="btn btn-ghost btn-sm" onClick={onClose}>取消</button>
+          <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={loading || saving || items.length === 0}>{saving ? "保存中…" : `保存（启用 ${enabledCount} 个）`}</button>
+        </>
+      }
+    >
       <div style={{ padding: 18 }}>
         {loading && <div className="navpage-empty">正在向供应商请求模型列表…</div>}
         {error && <div className="navpage-empty" style={{ color: "var(--error)" }}>扫描失败：{error}</div>}
@@ -205,10 +229,6 @@ function ScanModelsModal({ open, provider, onClose, onSaved }: { open: boolean; 
             </div>
           </>
         )}
-        <div className="settings-create-actions" style={{ marginTop: 12 }}>
-          <button className="btn btn-ghost btn-sm" onClick={onClose}>取消</button>
-          <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={loading || saving || items.length === 0}>{saving ? "保存中…" : `保存（启用 ${enabledCount} 个）`}</button>
-        </div>
       </div>
     </Modal>
   );
@@ -258,7 +278,19 @@ function ModelFormModal({ open, editing, targetProvider, onClose, onSaved }: { o
   };
   const currentProviderName = editing?.provider_name || targetProvider?.name || (editing?.provider_id ? `#${editing?.provider_id}` : "");
   return (
-    <Modal open={open} onClose={onClose} title={editing ? "编辑模型" : (targetProvider ? `添加模型（${targetProvider.name}）` : "新建模型")} width={520} height="auto">
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={editing ? "编辑模型" : (targetProvider ? `添加模型（${targetProvider.name}）` : "新建模型")}
+      width={520}
+      height="auto"
+      footer={
+        <>
+          <button className="btn btn-ghost btn-sm" onClick={onClose}>取消</button>
+          <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={!form.name.trim()}>{editing ? "保存" : "创建"}</button>
+        </>
+      }
+    >
       <div className="settings-modal-form" style={{ padding: 18 }}>
         {underProvider && <div className="settings-modal-form-row"><label>所属供应商</label><span style={{ fontSize: 12, color: "var(--text-2)" }}>{currentProviderName}（继承供应商连接与认证）</span></div>}
         <div className="settings-modal-form-row"><label>模型名称 / ID</label><Input placeholder={targetProvider?.api_format === "commandcode" ? "如 zai-org/GLM-5.1 或 deepseek/deepseek-v4-pro" : "如 glm-5.2"} value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} /></div>
@@ -269,7 +301,6 @@ function ModelFormModal({ open, editing, targetProvider, onClose, onSaved }: { o
         <div className="settings-modal-form-row"><label>多模态（支持图片输入）</label><Sw checked={form.is_multimodal} onChange={(v) => setForm((p) => ({ ...p, is_multimodal: v }))} /></div>
         <div className="settings-modal-form-row"><label>思考深度档位</label><div className="settings-chips">{REASONING_OPTS.map((eff) => { const on = form.reasoning_efforts.includes(eff); return <button key={eff} type="button" className={"settings-chip" + (on ? " on" : "")} onClick={() => setForm((p) => ({ ...p, reasoning_efforts: on ? p.reasoning_efforts.filter((x) => x !== eff) : [...p.reasoning_efforts, eff] }))}>{eff}</button>; })}</div></div>
         <div className="settings-modal-form-row"><label>启用状态</label><Sw checked={form.is_active} onChange={(v) => setForm((p) => ({ ...p, is_active: v }))} /></div>
-        <div className="settings-create-actions"><button className="btn btn-ghost btn-sm" onClick={onClose}>取消</button><button className="btn btn-primary btn-sm" onClick={handleSave} disabled={!form.name.trim()}>{editing ? "保存" : "创建"}</button></div>
       </div>
     </Modal>
   );
@@ -312,14 +343,25 @@ function CredentialFormModal({ open, providerId, editing, onClose, onSaved }: {
     } catch (e) { notify(String(e)); }
   };
   return (
-    <Modal open={open} onClose={onClose} title={editing ? "编辑凭据" : "添加 API Key"} width={460} height="auto">
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={editing ? "编辑凭据" : "添加 API Key"}
+      width={460}
+      height="auto"
+      footer={
+        <>
+          <button className="btn btn-ghost btn-sm" onClick={onClose}>取消</button>
+          <button className="btn btn-primary btn-sm" onClick={handleSave}>{editing ? "保存" : "添加"}</button>
+        </>
+      }
+    >
       <div className="settings-modal-form" style={{ padding: 18 }}>
         <div className="settings-modal-form-row"><label>备注名</label><Input placeholder="如 主 Key / 备用 Key" value={label} onChange={(e) => setLabel(e.target.value)} /></div>
         <div className="settings-modal-form-row"><label>API Key {editing && "(留空不修改)"}</label><Input type="password" placeholder="sk-..." value={apiKey} onChange={(e) => setApiKey(e.target.value)} /></div>
         <div className="settings-modal-form-row"><label>优先级（小的先用）</label><Input value={priority} onChange={(e) => setPriority(e.target.value)} /></div>
         <div className="settings-modal-form-row"><label>启用</label><Sw checked={isActive} onChange={setIsActive} /></div>
         <div className="models-hint">同一供应商可配置多个 Key：某个 Key 报错（401/429/5xx）时会自动切换到下一个可用 Key，失败的 Key 进入冷却后自动恢复。</div>
-        <div className="settings-create-actions"><button className="btn btn-ghost btn-sm" onClick={onClose}>取消</button><button className="btn btn-primary btn-sm" onClick={handleSave}>{editing ? "保存" : "添加"}</button></div>
       </div>
     </Modal>
   );
@@ -358,6 +400,12 @@ export function ModelsPanel() {
     open: boolean; title: string; message: string; danger?: boolean; onConfirm: () => Promise<void> | void;
   }>({ open: false, title: "", message: "", onConfirm: () => {} });
 
+  // plan-41-225（右列照图）：名称常态为「标题 + 铅笔」（点击才编辑）、
+  // Key 为密码框（可显隐）、多凭据收进附属入口（主区只留一个 Key 框）。
+  const [renamingName, setRenamingName] = useState(false);
+  const [showKey, setShowKey] = useState(false);
+  const [showAllCreds, setShowAllCreds] = useState(false);
+
   const closeConfirm = () => setConfirmDialog((d) => ({ ...d, open: false }));
 
   const load = useCallback(async () => {
@@ -365,6 +413,19 @@ export function ModelsPanel() {
       const list = await api.listProviders();
       setProviders(list);
       setSelectedId((cur) => (cur != null && list.some((p) => p.id === cur) ? cur : (list[0]?.id ?? null)));
+      // plan-81-345: 清掉已删除供应商的详情缓存与登录态残留——SQLite 会复用被删供应商的 id，
+      // 残留缓存会让之后新建的供应商原样显示旧 Key / 旧模型（“新增后凭空多出一个 Key”）。
+      const alive = new Set(list.map((p) => p.id));
+      for (const id of [...detailCache.current.keys()]) {
+        if (!alive.has(id)) detailCache.current.delete(id);
+      }
+      setAuthStatus((prev) => {
+        const stale = Object.keys(prev).filter((k) => !alive.has(Number(k)));
+        if (stale.length === 0) return prev;
+        const next = { ...prev };
+        for (const k of stale) delete next[Number(k)];
+        return next;
+      });
     } catch { /* ignore */ }
     try { setIndependentModels((await api.listModels()).filter((m) => !m.provider_id)); } catch { /* ignore */ }
   }, []);
@@ -376,6 +437,8 @@ export function ModelsPanel() {
   // workbuddy 供应商级积分合计（多账号时汇总展示在详情头部；全部未知时显示 --）
   const creditValues = credentials.map((c) => c.credits).filter((v): v is number => v != null);
   const totalCredits = creditValues.length > 0 ? creditValues.reduce((a, b) => a + Number(b), 0) : null;
+  /** plan-41-225（右列照图）：主区密码框绑定的凭据（优先级最高的那条；无凭据时为 null） */
+  const primaryCred = credentials.length > 0 ? credentials[0] : null;
 
   // 选中供应商 → 拉取其模型与凭据。切换时保留旧详情直到新详情准备好，
   // 避免双栏右侧空白/高度跳变；requestId 防止慢响应回写到错误供应商。
@@ -413,6 +476,13 @@ export function ModelsPanel() {
     }
   }, []);
   useEffect(() => { void loadDetail(selected); }, [selectedId, loadDetail]);
+
+  // 切换供应商时重置「编辑名称 / 显示密钥 / 展开多凭据」三个临时态，避免串到下一家
+  useEffect(() => {
+    setRenamingName(false);
+    setShowKey(false);
+    setShowAllCreds(false);
+  }, [selectedId]);
 
   const patchProvider = async (id: number, data: Record<string, unknown>) => {
     try {
@@ -586,54 +656,34 @@ export function ModelsPanel() {
       <div className="models-head">
         <div>
           <div className="models-head-title">模型设置</div>
-          <div className="models-head-sub">管理自定义模型供应商，配置后可随时切换使用。</div>
+          <div className="models-head-sub">管理自定义模型供应商，配置后可随时在聊天时切换使用。</div>
         </div>
+        {/* S18（plan-41-197b）：右上只保留刷新——移除「+ 独立模型」入口，
+            模型统一从供应商详情内添加（先加供应商，再加模型）。 */}
         <div className="models-head-actions">
           <button className="btn btn-ghost btn-sm" title="刷新" onClick={load}><IconRefresh size={13} /></button>
-          <button className="btn btn-ghost btn-sm" onClick={() => { setEditingModel(null); setTargetProviderForModel(null); setShowModelForm(true); }}><IconPlus size={13} /> 独立模型</button>
-          <button className="btn btn-primary btn-sm" onClick={() => { setEditingProvider(null); setShowProviderForm(true); }}><IconPlus size={13} /> 添加供应商</button>
         </div>
       </div>
 
       <div className="models-body">
-        {/* 左：供应商列表 */}
-        <aside className="models-side">
-          <div className="models-side-group">供应商</div>
-          {providers.map((p) => (
-            <button
-              key={p.id}
-              className={"models-side-item" + (p.id === selectedId ? " active" : "")}
-              onClick={() => setSelectedId(p.id)}
-            >
-              <span className={statusDotClass(p)} />
-              <span className="models-side-name" title={p.name}>{p.name}</span>
-              {(p.credential_count ?? 0) > 1 && (
-                <span className="models-side-badge">
-                  {p.credential_count} {OAUTH_FORMATS.has(p.api_format) ? "账号" : "Key"}
-                </span>
-              )}
-            </button>
-          ))}
-          {providers.length === 0 && <div className="models-side-empty">暂无供应商</div>}
-          {independentModels.length > 0 && (
-            <>
-              <div className="models-side-group">独立模型</div>
-              {independentModels.map((m) => (
-                <div key={m.id} className="models-side-item static">
-                  <span className={"models-dot " + (m.is_active ? "on" : "off")} />
-                  <span className="models-side-name" title={m.name}>{m.name}</span>
-                </div>
-              ))}
-            </>
-          )}
-        </aside>
+        {/* 左：供应商列表（plan-41-225：无分组标题 + 拖拽排序 + 末尾添加入口） */}
+        <ProviderSideList
+          providers={providers}
+          independentModels={independentModels}
+          selectedId={selectedId}
+          statusDotClass={statusDotClass}
+          oauthFormats={OAUTH_FORMATS}
+          onSelect={setSelectedId}
+          onLocalReorder={setProviders}
+          onAdd={() => { setEditingProvider(null); setShowProviderForm(true); }}
+        />
 
         {/* 右：详情 */}
         <section className="models-detail">
           {!selected ? (
             <div className="models-detail-empty">
               <IconCpu size={28} />
-              <div>选择左侧供应商以查看配置，或点击右上「添加供应商」。</div>
+              <div>选择左侧供应商以查看配置；还没有供应商时，点击左下「添加供应商」开始。</div>
             </div>
           ) : (
             <>
@@ -641,18 +691,43 @@ export function ModelsPanel() {
                 <div className="models-detail-loading" aria-live="polite">正在加载供应商配置…</div>
               )}
               <div className="models-detail-head">
-                <input
-                  className="models-name-input"
-                  value={selected.name}
-                  onChange={(e) => patchProviderLocal(setProviders, selected.id, e.target.value, "name")}
-                  onBlur={(e) => patchProvider(selected.id, { name: e.target.value.trim() || selected.name })}
-                />
-                <span className={"models-badge " + (selected.is_active ? "ok" : "muted")}>{selected.is_active ? "已启用" : "已禁用"}</span>
+                {/* plan-41-225（右列照图）：名称常态是「标题 + 铅笔」，点铅笔才进入编辑——
+                    常驻输入框会让人误以为必须立刻改；「像标题、点铅笔才编辑」是通用心智。 */}
+                {renamingName ? (
+                  <input
+                    className="models-name-input"
+                    autoFocus
+                    value={selected.name}
+                    onChange={(e) => patchProviderLocal(setProviders, selected.id, e.target.value, "name")}
+                    onBlur={(e) => {
+                      setRenamingName(false);
+                      patchProvider(selected.id, { name: e.target.value.trim() || selected.name });
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") { e.preventDefault(); (e.target as HTMLInputElement).blur(); }
+                      if (e.key === "Escape") { e.preventDefault(); setRenamingName(false); }
+                    }}
+                    aria-label="供应商名称"
+                  />
+                ) : (
+                  <>
+                    <span className="models-detail-name" title={selected.name}>{selected.name}</span>
+                    <button className="ui-icon-btn size-xs" aria-label="重命名供应商" onClick={() => setRenamingName(true)}>
+                      <IconPencil size={13} />
+                    </button>
+                  </>
+                )}
+                {/* 状态双通道：胶囊 = 当前状态（带勾），文字 = 可执行动作——
+                    此前两个元素都在描述状态，用户不知道点哪个。 */}
+                <span className={"models-status-pill" + (selected.is_active ? " on" : "")}>
+                  {selected.is_active && <IconCheck size={11} />}
+                  {selected.is_active ? "启用" : "已禁用"}
+                </span>
                 <button className="models-link" onClick={() => patchProvider(selected.id, { is_active: !selected.is_active })}>
                   {selected.is_active ? "禁用" : "启用"}
                 </button>
                 <div style={{ marginLeft: "auto" }}>
-                  <button className="btn btn-ghost btn-xs" onClick={() => setConfirmDialog({
+                  <button className="btn btn-ghost btn-xs" aria-label="删除供应商" title="删除供应商" onClick={() => setConfirmDialog({
                     open: true,
                     title: "删除供应商",
                     message: `删除供应商「${selected.name}」及其下所有模型与凭据？`,
@@ -661,7 +736,7 @@ export function ModelsPanel() {
                       closeConfirm();
                       try { await api.deleteProvider(selected.id); await load(); } catch (e) { notify(String(e)); }
                     },
-                  })}><IconX size={13} /></button>
+                  })}><IconTrash size={13} /></button>
                 </div>
               </div>
 
@@ -721,7 +796,48 @@ export function ModelsPanel() {
               {/* ta3 额度与用量（plan-270-1358：对齐 Ta+3 v0.4.6 额度查看） */}
               {selected.api_format === "ta3" && <Ta3QuotaSection provider={selected} />}
 
-              {/* 凭据管理（多 Key / 多账号） */}
+              {/* Key（plan-41-225 右列照图）：主区一个密码框 —— 填 Key 是绝大多数用户的唯一动作；
+                  多 Key/账号轮转是既有能力，收进下方「管理多个…」入口，保持界面专注。 */}
+              {!isOAuth && (
+                <div className="models-field">
+                  <label>{selected.name} key</label>
+                  <div className="models-key-row">
+                    <Input
+                      key={`key-${selected.id}-${primaryCred?.id ?? "new"}`}
+                      type={showKey ? "text" : "password"}
+                      defaultValue={primaryCred?.api_key_preview || ""}
+                      placeholder="sk-..."
+                      onBlur={async (e) => {
+                        const v = e.target.value.trim();
+                        // 未改动（含仍是后端返回的掩码）→ 不写库，避免把掩码当成真 key 保存
+                        if (!v || v === (primaryCred?.api_key_preview || "")) return;
+                        try {
+                          if (primaryCred) await api.updateProviderCredential(primaryCred.id, { api_key: v });
+                          else await api.createProviderCredential(selected.id, { label: "默认凭据", api_key: v, priority: 0, is_active: true } as never);
+                          await loadDetail(selected, true);
+                          await load();
+                        } catch (err) { notify(String(err)); }
+                      }}
+                      aria-label={`${selected.name} key`}
+                    />
+                    <button
+                      className="ui-icon-btn size-xs"
+                      aria-label={showKey ? "隐藏密钥" : "显示密钥"}
+                      onClick={() => setShowKey((v) => !v)}
+                    >
+                      {showKey ? <IconEyeOff size={13} /> : <IconEye size={13} />}
+                    </button>
+                  </div>
+                  {credentials.length > 1 && (
+                    <button className="models-cred-toggle" onClick={() => setShowAllCreds((v) => !v)}>
+                      {showAllCreds ? "收起多 Key 管理" : `管理多个 Key / 账号（${credentials.length}）`}
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* 凭据管理（多 Key / 多账号）：账号登录类常驻；其余类型由上方入口展开 */}
+              {(isOAuth || showAllCreds) && (
               <div className="models-section">
                 <div className="models-section-title">
                   {credentialsSectionTitle(selected.api_format)}
@@ -814,6 +930,7 @@ export function ModelsPanel() {
                   </div>
                 )}
               </div>
+              )}
 
               {/* 代理配置 */}
               <div className="models-section">
@@ -851,11 +968,8 @@ export function ModelsPanel() {
               {/* 模型列表 */}
               <div className="models-section">
                 <div className="models-section-title">
-                  模型（{providerModels.length}）
-                  <div style={{ display: "flex", gap: 6 }}>
-                    {!isOAuth && <button className="btn btn-ghost btn-xs" onClick={() => setScanningProvider(selected)}>扫描模型</button>}
-                    <button className="btn btn-ghost btn-xs" onClick={() => { setTargetProviderForModel(selected); setEditingModel(null); setShowModelForm(true); }}><IconPlus size={12} /> 添加模型</button>
-                  </div>
+                  模型列表（{providerModels.length}）
+                  {!isOAuth && <button className="btn btn-ghost btn-xs" onClick={() => setScanningProvider(selected)}>扫描模型</button>}
                 </div>
                 <div className="models-model-list">
                   {providerModels.map((m) => (
@@ -872,9 +986,12 @@ export function ModelsPanel() {
                         </div>
                       </div>
                       <div className="models-model-actions">
+                        {/* 启停开关保留（既有能力，且属高频操作）；行尾改图标按钮形态贴齐参考图 */}
                         <Sw checked={m.is_active} onChange={async (v) => { try { await api.updateModel(m.id, { is_active: v }); await loadDetail(selected, true); } catch (e) { notify(String(e)); } }} />
-                        <button className="btn btn-ghost btn-xs" onClick={() => { setEditingModel(m); setTargetProviderForModel(selected); setShowModelForm(true); }}>编辑</button>
-                        <button className="btn btn-ghost btn-xs" onClick={() => setConfirmDialog({
+                        <button className="ui-icon-btn size-xs" aria-label="编辑模型" onClick={() => { setEditingModel(m); setTargetProviderForModel(selected); setShowModelForm(true); }}>
+                          <IconPencil size={13} />
+                        </button>
+                        <button className="ui-icon-btn size-xs tone-danger" aria-label="删除模型" onClick={() => setConfirmDialog({
                           open: true,
                           title: "删除模型",
                           message: `删除模型「${m.name}」？`,
@@ -883,13 +1000,20 @@ export function ModelsPanel() {
                             closeConfirm();
                             try { await api.deleteModel(m.id); await loadDetail(selected, true); } catch (e) { notify(String(e)); }
                           },
-                        })}><IconX size={12} /></button>
+                        })}><IconTrash size={13} /></button>
                       </div>
                     </div>
                   ))}
                   {providerModels.length === 0 && (
-                    <div className="navpage-empty">{isOAuth ? "暂无模型，请先登录账号并点击「同步模型」" : "暂无模型，点击「扫描模型」或「添加模型」获取"}</div>
+                    <div className="navpage-empty">{isOAuth ? "暂无模型，请先登录账号并点击「同步模型」" : "暂无模型，点击下方「添加模型」或标题右侧「扫描模型」获取"}</div>
                   )}
+                  <button
+                    type="button"
+                    className="models-add-model"
+                    onClick={() => { setTargetProviderForModel(selected); setEditingModel(null); setShowModelForm(true); }}
+                  >
+                    <IconPlus size={13} /> 添加模型
+                  </button>
                 </div>
               </div>
             </>

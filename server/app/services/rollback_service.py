@@ -546,19 +546,29 @@ async def count_rollback_affected(db: AsyncSession, session_id: int, turn_id: in
 # ── 写盘记录（v9 精确回滚依据）──
 
 def resolve_write_paths(tool: str, args: dict) -> list[str]:
-    """从工具参数解析目标文件路径（agent_loop 与回滚共用）。"""
+    """从工具参数解析目标文件路径（agent_loop 与回滚共用）。
+
+    plan-89-387: 补齐路径键名别名（file_path/filepath）——此前只认 args.path，
+    模型用别名传参时不落写盘记录、不生成 change_stat，表现为「工具卡没有 +N -M、
+    展开看不到变更」（executor / approval_policy 早已识别这些别名）。
+    """
     args = args or {}
     if tool == "multi_file_edit":
         paths: list[str] = []
         edits = args.get("edits")
         if isinstance(edits, list):
             for e in edits:
-                p = e.get("path") if isinstance(e, dict) else None
+                if not isinstance(e, dict):
+                    continue
+                p = e.get("path") or e.get("file_path") or e.get("filepath")
                 if isinstance(p, str) and p.strip():
                     paths.append(p.strip())
         return paths
-    p = args.get("path")
-    return [p.strip()] if isinstance(p, str) and p.strip() else []
+    for key in ("path", "file_path", "filepath"):
+        p = args.get(key)
+        if isinstance(p, str) and p.strip():
+            return [p.strip()]
+    return []
 
 
 # ── 工具伪装兜底（v25）：从 shell 命令解析候选写盘路径 ──
@@ -700,10 +710,12 @@ def resolve_command_write_paths(tool_name: str, args: dict, workspace: str) -> l
 
 async def record_turn_write(db: AsyncSession, *, session_id: int, turn_id: int,
                             tool: str, path: str, before: str | None, after: str | None,
-                            binary: bool = False) -> None:
+                            binary: bool = False, call_key: str | None = None) -> None:
     """记录一次写盘操作的前后内容（精确回滚依据）。失败不阻塞（非关键路径）。
 
     binary=True 表示二进制/超限文件：不存文本前后内容，回滚走 checkpoint 备份恢复。
+    plan-89-387: call_key 关联发起该次写盘的工具调用——同一 turn 内同文件多次编辑时，
+    前端据此精确取「这一次编辑」的前后内容（见 get_file_diff）。
     v975：经 WriteEngine 单写线程（写事务不阻塞事件循环、无锁单写者）。
     """
     try:
@@ -712,7 +724,8 @@ async def record_turn_write(db: AsyncSession, *, session_id: int, turn_id: int,
         def _persist(s):
             from app.persistence.models.rollback import RollbackWrite
             s.add(RollbackWrite(session_id=session_id, turn_id=turn_id, tool=tool,
-                                path=path, old_content=before, new_content=after, binary=binary))
+                                path=path, old_content=before, new_content=after,
+                                binary=binary, call_key=call_key))
             s.commit()
 
         await run_write_locked(_persist, label=f"rollback.write.{turn_id}")
@@ -839,7 +852,9 @@ async def list_turn_changes(db: AsyncSession, *, session_id: int, turn_id: int,
     """聚合该 turn 的全部写盘记录为变更清单（不含文件全文）。
 
     主/子代理写盘同 turn_id，一并聚合；按 path 分组：
-    - before = 首条写盘的 old_content，after = 当前磁盘内容
+    - before = 首条写盘的 old_content，after = 本轮**末条**写盘记录的 new_content
+      （plan-89-387：原先直接读当前磁盘，会把该轮之后的编辑并入本轮统计，
+      表现为审核清单行数偏大；记录缺失时回退磁盘内容）
     - action：全部 old_content 为 None → added；文件当前不存在 → deleted；否则 modified
     - difflib.unified_diff 统计增删行数
     - reviewed 来自 FileReview（turn_id+path 唯一键），与实际磁盘内容无关
@@ -863,7 +878,9 @@ async def list_turn_changes(db: AsyncSession, *, session_id: int, turn_id: int,
     for path, recs in by_path.items():
         binary = all(getattr(r, "binary", False) for r in recs)
         before = recs[0].old_content
-        after = _read_file_text(workspace, path)
+        after = recs[-1].new_content
+        if after is None:
+            after = _read_file_text(workspace, path)
         if binary:
             action = "modified"  # 二进制/大文件：按写盘前备份恢复，不展示文本 diff
         elif all(r.old_content is None for r in recs):
@@ -885,8 +902,14 @@ async def list_turn_changes(db: AsyncSession, *, session_id: int, turn_id: int,
 
 
 async def get_file_diff(db: AsyncSession, *, session_id: int, turn_id: int,
-                        workspace: str, path: str) -> dict | None:
-    """单文件 diff：before=首条写盘前内容，after=当前磁盘内容（大文件截断）。
+                        workspace: str, path: str, call_key: str | None = None) -> dict | None:
+    """单文件 diff。
+
+    plan-89-387: 传 call_key 时按「这一次写盘」返回——before/after 取该条记录自身的
+    old_content / new_content（写盘后内容缺失时回退当前磁盘），同一轮内同一文件
+    被多次编辑时，每次展开只展示本次变更，行数与工具卡 +N -M 同源一致。
+    未传 call_key 或未命中（老记录无该列）时回退累积口径：
+    before=首条写盘前内容，after=当前磁盘内容（大文件截断）。
 
     返回 None 表示该 turn 无此文件写盘记录。
     兼容正反斜杠与工作区相对/绝对路径归一化匹配。
@@ -912,6 +935,12 @@ async def get_file_diff(db: AsyncSession, *, session_id: int, turn_id: int,
     if not writes:
         return None
 
+    # plan-89-387: 单次编辑口径（命中该 call_key 的写盘记录）
+    if call_key:
+        hit = next((w for w in writes if (getattr(w, "call_key", None) or "") == call_key), None)
+        if hit is not None:
+            return _single_write_diff(workspace, path, hit)
+
     if writes[0].binary:
         # plan-1085: 历史污染轮降级——同 turn 同文件存在带内容的 bin=0 记录时，
         # 用其 old_content 作 before、当前磁盘作 after 返回文本 diff，避免瞬时
@@ -928,6 +957,9 @@ async def get_file_diff(db: AsyncSession, *, session_id: int, turn_id: int,
                 "truncated": (_add_f + _del_f) > _MAX_DIFF_CHANGE_LINES,
                 "reason": "该轮部分编辑文件读取失败，已降级展示最近可用版本 diff",
                 "lines": _diff_lines(_fb.old_content, _after_now),
+                "additions": _add_f,
+                "deletions": _del_f,
+                "single_edit": False,
             }
         # 二进制/大文件：不展示文本 diff，提示按写盘前备份恢复
         return {
@@ -937,6 +969,9 @@ async def get_file_diff(db: AsyncSession, *, session_id: int, turn_id: int,
             "truncated": False,
             "reason": "二进制/大文件，不展示文本 diff，回滚按写盘前备份恢复",
             "lines": None,
+            "additions": 0,
+            "deletions": 0,
+            "single_edit": False,
         }
 
     before = writes[0].old_content
@@ -950,6 +985,45 @@ async def get_file_diff(db: AsyncSession, *, session_id: int, turn_id: int,
         "after": a_disp,
         "truncated": truncated,
         "lines": _diff_lines(before, after),
+        "additions": add,
+        "deletions": dele,
+        "single_edit": False,
+    }
+
+
+def _single_write_diff(workspace: str, path: str, rec: RollbackWrite) -> dict:
+    """plan-89-387: 单条写盘记录的「本次变更」diff（不与其他编辑合并）。
+
+    before/after 取记录自身的 old_content / new_content；写盘后内容缺失
+    （二进制降级、磁盘读取失败且无工具兜底）时回退当前磁盘内容。
+    additions/deletions 与 lines 同源（_diff_stats / _diff_lines 均为
+    SequenceMatcher 口径），保证卡片 +N -M 与展开内容一致。
+    """
+    if rec.binary:
+        return {
+            "path": path,
+            "before": None,
+            "after": None,
+            "truncated": False,
+            "reason": "二进制/大文件，不展示文本 diff，回滚按写盘前备份恢复",
+            "lines": None,
+            "additions": 0,
+            "deletions": 0,
+            "single_edit": True,
+        }
+    before = rec.old_content
+    after = rec.new_content if rec.new_content is not None else _read_file_text(workspace, path)
+    add, dele = _diff_stats(before, after)
+    b_disp, a_disp = _truncate_window(before, after)
+    return {
+        "path": path,
+        "before": b_disp,
+        "after": a_disp,
+        "truncated": (add + dele) > _MAX_DIFF_CHANGE_LINES,
+        "lines": _diff_lines(before, after),
+        "additions": add,
+        "deletions": dele,
+        "single_edit": True,
     }
 
 

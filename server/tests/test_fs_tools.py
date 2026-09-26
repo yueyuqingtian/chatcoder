@@ -40,36 +40,30 @@ async def test_fs_read_missing_file(workspace):
 
 
 @pytest.mark.asyncio
-async def test_fs_read_traversal_requires_approval(workspace, monkeypatch):
-    """v36 (plan-321-1600 R2): 工作区外读取改走审批——未获批准时拒绝。
+async def test_fs_read_outside_does_not_self_gate(workspace, tmp_path):
+    """plan-75-332: 工具自身不再拦截工作区外读取——放行交由统一策略裁决。
 
-    旧语义是直接报「越界」；新语义允许目录外读取，但必须经用户审批
-    （全访问沙箱/自动审批配置除外）。
+    旧语义是 fs_read 内部弹审批卡（未批准则报「未获批准」）；现在工具只是解析路径并
+    如实读取，是否需要用户批准由 approval_policy 按「执行模式 × 权限模式」判定。
     """
-    from app.orchestration.approval import approval_manager
-
-    async def _deny(detail=None, approval_id=None, is_forced=False):  # noqa: ANN001
-        return False
-
-    monkeypatch.setattr(approval_manager, "request", _deny, raising=False)
+    outside_dir = tmp_path / "outside_root"
+    outside_dir.mkdir(exist_ok=True)
+    outside_file = outside_dir / "passwd"
+    outside_file.write_text("root:x:0:0", encoding="utf-8")
 
     tool = FsReadTool()
-    r = await tool.run({"path": "../../../etc/passwd"}, _ctx(workspace))
-    assert r.ok is False
-    assert "未获批准" in r.error
+    r = await tool.run({"path": str(outside_file)}, _ctx(workspace))
+    assert r.ok is True
+    assert "root:x:0:0" in r.output
 
 
 @pytest.mark.asyncio
-async def test_fs_read_outside_allowed_when_auto_approved(workspace, tmp_path, monkeypatch):
-    """v36 (plan-321-1600 R2): 开启「工作目录外读取自动审批」后可直接读取区外文件。"""
-    from app.core.config import settings
-
+async def test_fs_read_outside_resolved_without_config(workspace, tmp_path):
+    """工作区外读取不再依赖已废弃的 auto_approve_outside_read 开关。"""
     outside_dir = tmp_path / "outside_root"
-    outside_dir.mkdir()
+    outside_dir.mkdir(exist_ok=True)
     outside_file = outside_dir / "note.txt"
     outside_file.write_text("outside content", encoding="utf-8")
-
-    monkeypatch.setattr(settings, "auto_approve_outside_read", True, raising=False)
 
     tool = FsReadTool()
     r = await tool.run({"path": str(outside_file)}, _ctx(workspace))
@@ -174,11 +168,19 @@ async def test_fs_write_creates_file(workspace):
 
 
 @pytest.mark.asyncio
-async def test_fs_write_traversal_rejected(workspace):
+async def test_fs_write_outside_no_self_gate(workspace):
+    """plan-75-332: 越界写入不再由 fs_write 自身拒绝——工具只负责写入。
+
+    旧语义是直接报「越界」；现在越界写入由 approval_policy 归类为 write_outside，
+    是否需要询问用户由「执行模式 × 权限模式」裁决（完全访问下直接执行）。
+    """
     tool = FsWriteTool()
     r = await tool.run({"path": "../../escape.txt", "content": "x"}, _ctx(workspace))
-    assert r.ok is False
-    assert "越界" in r.error
+    assert r.ok is True
+    # 相对路径越过工作区一层：workspace/../../escape.txt = workspace.parent.parent/escape.txt
+    outside = (workspace.parent.parent / "escape.txt").resolve()
+    assert outside.read_text(encoding="utf-8") == "x"
+    outside.unlink()
 
 
 @pytest.mark.asyncio

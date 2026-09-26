@@ -743,9 +743,14 @@ class Ta3Provider(ModelProvider):
                 # v29 (plan-78): effort 归一化到 low/high/max，未知档位取保守默认
                 body["output_config"] = {"effort": self._kimi_effort(request)}
             else:
+                # plan-75-332 R6 修复：此处原先引用未定义的 max_tokens（本函数内只有
+                # _catalog_max 与 body["max_tokens"]）——非 kimi 模型开启思考时必抛
+                # NameError，整轮请求失败。预算按**本次实际下发值**的 80% 计算，
+                # 未下发时回落 2048（与原实现 max(2048, ...) 的兜底语义一致）。
+                _eff_max_tokens = int(body.get("max_tokens") or 0)
                 body["thinking"] = {
                     "type": "enabled",
-                    "budget_tokens": max(2048, int(max_tokens * 0.8)),
+                    "budget_tokens": max(2048, int(_eff_max_tokens * 0.8)),
                 }
                 body["output_config"] = {"effort": effort if effort in ("low", "medium", "high") else "low"}
         return {k: v for k, v in body.items() if v not in (None, "", {})}

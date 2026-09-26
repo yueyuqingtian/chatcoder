@@ -145,30 +145,33 @@ _TASK: list[dict] = [
         },
     }),
     _f("SubAgent",
-       "启动子代理处理独立子任务。subagent_type=Explore 时按只读探索同步执行，直接返回调研结论；"
+       "启动子代理处理独立子任务。subagent_type=Explore 时按只读探索同步执行，直接返回调研结论，"
+       "但会阻塞当前工作——仅当下一步强依赖结论且子任务很小时使用；结论不急需的只读调研请改用 "
+       "SubAgentAsync（配 subagent_type=Explore 保持只读、后台执行）。"
        "其他类型（含缺省）转为后台异步执行，完成后结果自动推送回来（无需轮询）。"
        "适用：可拆分为互不依赖的子任务；需要跨多个文件调研（超过约 3 次搜索/读取才能回答）；"
        "只需结论、不需要把原始输出灌进自己的上下文。"
        "不适用：已知文件/符号/取值的单点查询（直接搜索更快）；简单或强串行的工作（自己直接用工具做）。"
        "派发多个独立子任务时，请在一条消息里同时发起多个调用——它们会并行执行；"
-       "同一子任务不要重复派发，若不确定是否已有等价子任务在跑，先用 collect_results 查看。", {
+       "同一子任务不要重复派发，若不确定是否已有等价子任务在跑，先用 TaskQuery 查看。", {
            "type": "object", "required": ["prompt"],
            "properties": {
                "subagent_type": {"type": "string",
                                  "enum": ["Explore", "Plan", "GeneralPurpose", "Verification"],
-                                 "description": "子代理类型：Explore=只读探索（同步返回结论）；其他类型=后台异步执行。"},
+                                 "description": "子代理类型：Explore=只读探索（同步返回结论、会阻塞主流程）；其他类型=后台异步执行。"},
                "prompt": {"type": "string", "description": "传递给子代理的任务描述（必须自包含：子代理看不到你的上下文）。"},
                "description": {"type": "string", "description": "5 个词以内的任务摘要。"},
            },
        }),
     _f("SubAgentAsync",
        "异步启动子代理任务，立即返回 taskId、不阻塞当前工作；任务完成时结果会自动推送回当前会话，"
-       "不要主动用 TaskQuery 轮询。适合耗时较长、可与当前工作并行的独立分析/实现任务。"
+       "不要主动用 TaskQuery 轮询。只读调研的首选入口：subagent_type=Explore 时按只读探索后台执行，"
+       "适合「结论不急需、但需要跨文件调研」的课题；也适合耗时较长、可与当前工作并行的独立分析/实现任务。"
        "多个独立任务请在一条消息里同时发起多个调用，它们会并行执行。", {
            "type": "object", "required": ["prompt"],
            "properties": {
                "subagent_type": {"type": "string", "enum": ["Explore", "Plan", "GeneralPurpose", "Verification"],
-                                 "description": "子代理类型。"},
+                                 "description": "子代理类型：Explore=只读探索（后台执行、不阻塞）；其他/缺省=可写子代理。"},
                "prompt": {"type": "string", "description": "传递给子代理的任务描述（必须自包含）。"},
                "description": {"type": "string", "description": "5 个词以内的任务摘要。"},
            },
@@ -463,13 +466,13 @@ _SUBAGENT_ADMIN: list[dict] = [
         "仅摘要时使用。", {
         "type": "object", "required": ["agent_id"],
         "properties": {
-            "agent_id": {"type": "integer", "description": "spawn_subagent/SubAgent 返回的子代理 id。"},
+            "agent_id": {"type": "integer", "description": "SubAgent/SubAgentAsync 返回的子代理 id。"},
             "section": {"type": "string",
                         "description": "查看部分：context（交接与继承上下文）、transcript（轨迹）、"
                                        "result（最终摘要）。默认全部。"},
         },
     }),
-    _f("SendToSubagent", "向本轮仍在运行的子代理发送补充指令（spawn 返回的 id）。"
+    _f("SendToSubagent", "向本轮仍在运行的子代理发送补充指令（SubAgent/SubAgentAsync 返回的 id）。"
         "指令会在其下一次模型调用前注入其上下文，用于纠偏/收窄任务而不取消它。"
         "已结束的子代理无法接收。要彻底停止用 TaskCancel。", {
         "type": "object", "required": ["agent_id", "message"],
@@ -524,4 +527,13 @@ def disguise_tools(tool_schemas: list[dict]) -> list[dict]:
         if native is None:
             continue
         out.append(native)
+        # plan-73-322: 一对多下发——spawn_subagent 在 ta3 侧对应两个原生工具
+        # （SubAgent=按类型同步/异步、SubAgentAsync=恒后台异步）。此前只出 SubAgent，
+        # 模型没有显式异步入口，「只读调研 + 不阻塞」在模型侧无法表达。
+        if alias == "SubAgent" and "SubAgentAsync" not in {
+            s.get("function", {}).get("name") for s in out
+        }:
+            _async_native = TA3_NATIVE_SCHEMAS.get("SubAgentAsync")
+            if _async_native is not None:
+                out.append(_async_native)
     return out

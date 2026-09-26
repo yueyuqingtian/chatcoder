@@ -2,10 +2,10 @@
  * v19: 标签溢出治理——tab 不再被 flex 压缩（flex-shrink:0 + 文字省略），
  *      支持滚轮横滚；溢出时头部出现「全部标签」下拉，可直接跳转/关闭。
  */
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { api } from "../../api/client";
 import { isBusy, subscribe } from "../../perf/bus";
-import { usePanelStore } from "../../store/panel";
+import { usePanelStore, bucketSessionId } from "../../store/panel";
 import type { PanelTab, PanelTabId } from "../../store/panel";
 import { useI18n } from "../../store/i18n";
 import { IconArrowToggle, IconBug, IconChevronDown, IconFolder, IconGlobe, IconTerminal, IconX, IconPlus, IconMaximize, IconMinus } from "../icons";
@@ -18,35 +18,46 @@ import { DebugPanel } from "./DebugPanel";
 import { useClickOutside } from "../../hooks/useClickOutside";
 import { ErrorBoundary } from "../ErrorBoundary";
 
-function PanelContent({ tab }: { tab: PanelTab }) {
+/** plan-75-334 阶段3：面板内容按 tab/sessionId/visible 记忆化。
+ *  此前标签列表无关变化（新增/关闭其它标签、全屏切换等）会重建**全部**面板内容，
+ *  包括已保活的终端与浏览器；memo 后只有本标签自身的可见性与 tab 变化才重渲染。 */
+const PanelContent = memo(function PanelContent({ tab, sessionId, visible }: { tab: PanelTab; sessionId: number | null; visible: boolean }) {
   switch (tab.id) {
-    case "task-summary": return <TaskSummaryPanel />;
-    case "browser": return <BrowserPanel />;
-    case "terminal": return <TerminalPanel tab={tab} />;
-    case "files": return <FileTreePanel />;
-    case "subagent": return <SubagentPanel threadId={tab.meta?.threadId} agentName={tab.meta?.agentName} />;
-    case "debug": return <DebugPanel />;
+    case "task-summary": return <TaskSummaryPanel visible={visible} />;
+    case "browser": return <BrowserPanel sessionId={sessionId} visible={visible} />;
+    case "terminal": return <TerminalPanel tab={tab} sessionId={sessionId} visible={visible} />;
+    case "files": return <FileTreePanel visible={visible} />;
+    case "subagent": return <SubagentPanel threadId={tab.meta?.threadId} agentName={tab.meta?.agentName} visible={visible} />;
+    case "debug": return <DebugPanel sessionId={sessionId} />;
     default: return null;
   }
-}
+});
 
 /**
  * 单个面板内容的错误隔离层：某块面板（浏览器 / 终端 / 文件树）抛错时只让该面板
  * 显示局部兜底，不再冒泡到 App 顶层 ErrorBoundary 把整个应用打成白屏。
- * resetKey 用 tab key：切 tab 或重开同名 tab 时自动复位并重试渲染。
+ * resetKey 用「桶 + tab key」：切 tab 或重开同名 tab 时自动复位并重试渲染。
  */
-function GuardedPanelContent({ tabKey, tab }: { tabKey: string; tab: PanelTab }) {
+const GuardedPanelContent = memo(function GuardedPanelContent({ tabKey, tab, sessionId, visible }: {
+  tabKey: string;
+  tab: PanelTab;
+  sessionId: number | null;
+  visible: boolean;
+}) {
   return (
     <ErrorBoundary variant="panel" resetKey={tabKey}>
-      <PanelContent tab={tab} />
+      <PanelContent tab={tab} sessionId={sessionId} visible={visible} />
     </ErrorBoundary>
   );
-}
+});
 
 export function RightPanel() {
   const { t } = useI18n();
+  // tabs/activeKey 为「当前会话桶」的投影（见 store/panel.ts）；buckets 用于跨会话保活渲染
   const tabs = usePanelStore((s) => s.tabs);
   const activeKey = usePanelStore((s) => s.activeKey);
+  const buckets = usePanelStore((s) => s.buckets);
+  const activeBucket = usePanelStore((s) => s.activeBucket);
   const closePanel = usePanelStore((s) => s.closePanel);
   const openTab = usePanelStore((s) => s.openTab);
   const openNewTab = usePanelStore((s) => s.openNewTab);
@@ -192,23 +203,26 @@ export function RightPanel() {
         </div>
       </div>
       <div className="rp-content">
-        {tabs.length > 0 ? tabs.map((tTab) => {
-          const key = `${tTab.id}-${tTab.instance}`;
-          const isActive = key === activeKey;
-          return (
-            /* plan-282-1421（第3项）：激活 tab 播放统一过渡。
-               这里必须保持"全量挂载 + display 切换"（面板内部状态不能因切 tab 丢失），
-               故不用 PageTransition 的 key 重挂载方案，改用同一套关键帧的动画类：
-               类名从 "" → "ui-tab-enter" 的切换即触发一次动画。 */
-            <div
-              key={key}
-              className={isActive ? "ui-tab-enter" : ""}
-              style={{ display: isActive ? "block" : "none", height: "100%" }}
-            >
-              <GuardedPanelContent tabKey={key} tab={tTab} />
-            </div>
-          );
-        }) : (
+        {/* plan-41-233：跨会话保活渲染——所有会话桶内的标签实例都保持挂载（display 切换可见性），
+            切换会话 / 折叠面板都不会卸载终端与浏览器（PTY 不关闭、网页不刷新）。
+            可见性 = 「属于当前会话桶」且「是该桶的激活标签」。
+            plan-282-1421（第3项）：激活 tab 播放统一过渡（类名 "" → "ui-tab-enter" 触发动画）。 */}
+        {Object.entries(buckets).flatMap(([bKey, bucket]) =>
+          bucket.tabs.map((tTab) => {
+            const key = `${tTab.id}-${tTab.instance}`;
+            const isActive = bKey === activeBucket && key === activeKey;
+            return (
+              <div
+                key={`${bKey}:${key}`}
+                className={isActive ? "ui-tab-enter" : ""}
+                style={{ display: isActive ? "block" : "none", height: "100%" }}
+              >
+                <GuardedPanelContent tabKey={`${bKey}:${key}`} tab={tTab} sessionId={bucketSessionId(bKey)} visible={isActive} />
+              </div>
+            );
+          })
+        )}
+        {tabs.length === 0 && (
           <div className="rp-quick">
             <button onClick={() => openTab("task-summary")}>{t("rp.tab_task_summary")}</button>
             <button onClick={() => openTab("browser")}>{t("rp.tab_browser")}</button>

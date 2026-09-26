@@ -138,13 +138,17 @@ async def _seed_subagent_profiles(db: AsyncSession) -> None:
     """v2.2 (对齐 zcode 3.13): 内置子代理类型 Explore / general（幂等）。"""
     from app.persistence.models.subagent_profile import SubagentProfile
 
+    # S10（plan-41-197）：两个系统子代理的默认工具集重规划——
+    #   · explore：只读探索（读/搜/网/图），不含任何写盘与执行类工具；
+    #   · general：常用工作集（读+写+执行+搜索），不再是“全量”（含高风险与冷门工具）。
     presets = [
         {
             "name": "explore",
             "description": "只读探索代理：搜索/阅读代码，不可写盘",
             "tools_whitelist": [
                 "fs_read", "fs_list", "fs_grep", "git_diff",
-                "web_fetch", "web_search", "codebase_search", "memory_search",
+                "codebase_search", "memory_search",
+                "web_fetch", "web_search", "view_image", "read_attachment",
             ],
             "system_prompt": (
                 "你是代码探索代理，只能读取与搜索。请全面定位相关代码并给出结论，"
@@ -153,17 +157,37 @@ async def _seed_subagent_profiles(db: AsyncSession) -> None:
         },
         {
             "name": "general",
-            "description": "通用代理：全量工具",
-            "tools_whitelist": None,
+            "description": "通用代理：常用读/写/执行工具集",
+            "tools_whitelist": [
+                "fs_read", "fs_list", "fs_grep", "fs_write",
+                "editor_apply_diff", "multi_file_edit", "terminal_exec",
+                "git_diff", "codebase_search", "memory_search",
+                "web_fetch", "web_search",
+                "todo_write", "ask_user_question",
+                "view_image", "read_attachment",
+            ],
             "system_prompt": None,
         },
+    ]
+    _OLD_EXPLORE_TOOLS = [
+        "fs_read", "fs_list", "fs_grep", "git_diff",
+        "web_fetch", "web_search", "codebase_search", "memory_search",
     ]
     for preset in presets:
         res = await db.execute(
             select(SubagentProfile).where(SubagentProfile.name == preset["name"])
         )
-        if res.scalars().first() is None:
+        existing = res.scalars().first()
+        if existing is None:
             db.add(SubagentProfile(**preset))
+            continue
+        # S10：旧默认值迁移——仅在用户未自定义过时替换为新默认（幂等）：
+        #   explore 旧默认 = 8 工具白名单；general 旧默认 = None（全量）。
+        if preset["name"] == "explore" and list(existing.tools_whitelist or []) == _OLD_EXPLORE_TOOLS:
+            existing.tools_whitelist = preset["tools_whitelist"]
+        elif preset["name"] == "general" and existing.tools_whitelist is None:
+            existing.tools_whitelist = preset["tools_whitelist"]
+            existing.description = preset["description"]
     await db.flush()
 
 

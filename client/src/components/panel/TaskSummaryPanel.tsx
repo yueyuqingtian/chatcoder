@@ -1,11 +1,14 @@
 /** 任务摘要：与 TodoFloat 同构，只显示真实任务区块、步骤状态和真实产物数据。 */
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useChatStore } from "../../store/chat";
 import { usePanelStore } from "../../store/panel";
 import type { ArtifactOut } from "../../api/client";
 import { IconCheck, IconCheckCircle, IconFileRead, IconExternalLink, IconPause, IconRefresh, IconRotateCcw, IconX } from "../icons";
-
+import { recordComponentRender } from "../../perf/metrics";
 import { useProgressRows } from "../chat/taskProgress";
+
+/** plan-75-334 阶段3：隐藏期的消息占位——稳定空引用，selector 结果不变 ⇒ 不触发重渲染。 */
+const EMPTY_MESSAGES: never[] = [];
 
 function normalizeStatus(status: string): string {
   return status === "in_progress" ? "running" : status || "pending";
@@ -20,9 +23,14 @@ function StepStatus({ status }: { status: string }) {
   return <span className="ts-step-status pending" />;
 }
 
-export function TaskSummaryPanel() {
+export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
+  // plan-75-334 阶段0：记录组件渲染（仅采集期间统计，零开销）
+  recordComponentRender("taskSummary");
+  
   const tasks = useChatStore((state) => state.tasks);
-  const messages = useChatStore((state) => state.messages);
+  // plan-75-334 阶段3：不可见时不订阅真实 messages（读稳定空数组），
+  // 隐藏标签不再随每个落库 delta 重算派生；恢复可见时 selector 立即切回并补算一次。
+  const messages = useChatStore((state) => (visible ? state.messages : EMPTY_MESSAGES));
   // v38 (plan-482): 方案文档确认入口——等待确认时在任务面板提供确认/停止按钮
   const hasPendingPlan = useChatStore((state) => state.pendingPlan != null);
   const confirmPlanTurn = useChatStore((state) => state.confirmPlanTurn);
@@ -32,9 +40,12 @@ export function TaskSummaryPanel() {
   const artifacts = useChatStore((state) => state.artifacts);
   const setPreviewPath = usePanelStore((state) => state.setPreviewPath);
   const openTab = usePanelStore((state) => state.openTab);
-  const [visitedFiles, setVisitedFiles] = useState<string[]>([]);
 
-  useEffect(() => {
+  /** plan-75-334 阶段2：浏览过的文件改为稳定派生。
+   *  原实现是 effect 扫描 messages 后 setVisitedFiles：消息每落库一次就先扫描、
+   *  再触发一次额外组件更新；现在与本次渲染同拍算出，不再多一轮渲染。
+   *  阶段3：visible=false 时 messages 为空引用，本派生自然退化为空数组（无重复扫描）。 */
+  const visitedFiles = useMemo(() => {
     const files = new Set<string>();
     for (const message of messages) {
       const content = message.content as Record<string, unknown>;
@@ -42,7 +53,7 @@ export function TaskSummaryPanel() {
       const args = content.args as Record<string, unknown> | undefined;
       if (typeof args?.path === "string" && args.path) files.add(args.path);
     }
-    setVisitedFiles([...files].slice(-20).reverse());
+    return [...files].slice(-20).reverse();
   }, [messages]);
 
   /** plan-282-1441（#3）：任务进度统一走共享模块（与输入框上方胶囊**同源**）。
@@ -50,7 +61,7 @@ export function TaskSummaryPanel() {
    *  （而 request 的标题就是用户消息文本），导致与胶囊显示不一致。
    *  plan-282-1492：展示口径（是否还该显示、要不要标"进行中"）已收进共享模块，
    *  面板不再自算运行态门控。 */
-  const progress = useProgressRows();
+  const progress = useProgressRows(visible);
   const progressRows = progress.rows;
   const progressDone = progress.done;
 

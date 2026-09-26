@@ -314,6 +314,44 @@ def _purge_auth_rows(session, credential_id: int) -> int:
     return removed
 
 
+def purge_provider_credentials(session, provider_id: int) -> int:
+    """删除某供应商的全部凭据行（连同其 OAuth 登录态行），返回删除条数。
+
+    plan-81-345: 删除供应商时必须调用——provider_credentials.provider_id 无外键约束，
+    漏删会残留孤儿行；SQLite 会复用被删供应商的 id（rowid 复用），
+    孤儿行会被误挂到之后新建的供应商上（用户看到「新供应商凭空多出一个旧 Key」）。
+    仅在写锁（run_write_locked 的 patch）内调用，不单独提交。
+    """
+    rows = list(
+        session.execute(
+            select(ProviderCredential).where(ProviderCredential.provider_id == provider_id)
+        ).scalars().all()
+    )
+    for cred in rows:
+        _purge_auth_rows(session, cred.id)
+        session.delete(cred)
+    return len(rows)
+
+
+def purge_orphan_credentials(session) -> int:
+    """清理 provider_id 已不存在于 providers 表的孤儿凭据（连同其 OAuth 登录态行）。
+
+    plan-81-345: 历史版本删除供应商时漏删凭据；SQLite 复用被删供应商的 id 时，
+    孤儿行会被误挂到新建的供应商上。新建供应商前调用一次即可自愈（幂等）。
+    仅在写锁内调用，不单独提交。
+    """
+    known = set(session.execute(select(Provider.id)).scalars().all())
+    rows = list(session.execute(select(ProviderCredential)).scalars().all())
+    removed = 0
+    for cred in rows:
+        if cred.provider_id in known:
+            continue
+        _purge_auth_rows(session, cred.id)
+        session.delete(cred)
+        removed += 1
+    return removed
+
+
 async def mark_failed(db: AsyncSession, credential_id: int, error: str) -> bool:
     """上报凭据一次失败。返回是否**因此进入了冷却**。
 

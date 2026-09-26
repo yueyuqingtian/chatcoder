@@ -299,7 +299,7 @@
   flex-shrink: 0;
   padding: 0;
   border: none;
-  border-radius: 9px;
+  border-radius: 999px;
   background: var(--border-strong);
   cursor: pointer;
   outline: none;
@@ -423,6 +423,14 @@
 .ui-page-subtitle { font-size: 12px; color: var(--text-3); line-height: 18px; margin-top: 2px; }
 .ui-page-head-actions { display: flex; align-items: center; gap: var(--sp-3); flex-shrink: 0; }
 .ui-page-cards { display: flex; flex-direction: column; gap: var(--sp-5); }
+/* S19（plan-41-197c）：填充式页面——页面自身不滚动（overflow hidden），
+   限宽层撑满剩余高度，卡片区成为可伸缩容器，由内容组件内部的滚动区
+   （如记忆页 .mem-scroll）承担上下滑动。用于「头部控制区固定 + 列表独立滑动」的页面。
+   注：overflow:hidden 仍属 scroll container，scrollbar-gutter:stable 会继续预留槽位
+   导致内容右侧多出空白且居中偏移 → 此处显式回到 auto（本层不滚动，无需预留）。 */
+.ui-page.is-fill { overflow: hidden; padding-bottom: 0; scrollbar-gutter: auto; }
+.ui-page-inner.is-fill { flex: 1; min-height: 0; height: 100%; padding-bottom: 0; }
+.ui-page-inner.is-fill > .ui-page-cards { flex: 1; min-height: 0; }
 
 /* ── ⑩ Collapse：grid-template-rows 真实高度过渡 ─────────── */
 .ui-collapse { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows var(--dur-4) var(--ease-emphasized-decel), opacity var(--dur-3) var(--ease-emphasized-decel); }
@@ -462,17 +470,56 @@
 .ui-menu-label { padding: var(--sp-2) var(--sp-3) var(--sp-1); font-size: 11px; color: var(--text-3); }
 
 /* ── ⑫ Tooltip ────────────────────────────────────────────── */
+/* S1（plan-41-197）：用户反馈"原生 title 是方形丑陋块、聚焦还有延迟"。
+   此处统一为圆角卡片浮层：--r-pop 圆角 + 描边 + shadow-lg + 箭头，
+   入场/退场双向动画（Radix Presence 驱动），延迟由 --tooltip-delay 单源控制。 */
 .ui-tooltip {
   z-index: 1300; /* 浮层：最高，避免被同层下拉/菜单遮挡 */
-  max-width: 260px;
-  padding: 5px 9px;
-  border-radius: var(--r-md);
+  /* plan-64-292：宽度上限随视口收缩——窄窗口下不再有「卡片本身宽于视口」的溢出 */
+  max-width: min(320px, calc(100vw - 16px));
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-pop);
+  border: 1px solid var(--border);
   background: var(--color-tooltip);
   color: var(--color-tooltip-foreground);
   font-size: 12px;
-  line-height: 1.45;
-  box-shadow: var(--shadow-sm);
-  animation: ui-pop-in var(--dur-2) var(--ease-emphasized-decel);
+  line-height: 1.5;
+  letter-spacing: 0.01em;
+  box-shadow: var(--shadow-lg);
+  user-select: none;
+  /* plan-64-292：长命令/长路径（无空格长串）不再横向撑破卡片——
+     pre-wrap 保留原文换行（多行命令按原样展示），anywhere 允许任意字符处断行 */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  transform-origin: var(--radix-tooltip-content-transform-origin);
+  animation: ui-tooltip-in var(--dur-2) var(--ease-emphasized-decel);
+}
+.ui-tooltip[data-state="closed"] { animation: ui-tooltip-out var(--dur-1) var(--ease-emphasized-accel); }
+.ui-tooltip-arrow { fill: var(--color-tooltip); }
+/* 存量原生 title 接管浮层的定位层（plan-41-197 S1；plan-64-292 修订；plan-64-293 修复）：
+   内层复用 .ui-tooltip 的圆角卡片视觉与动效；pointer-events:none 不遮挡指针。
+   落点仍由 TS 先测实测尺寸、再决策上下翻转与四向夹取，但位移**只能走 transform**
+   （top/left 固定为 0）——固定定位元素不设 width 时宽度是 shrink-to-fit，
+   可用空间 = 视口宽 − left：一旦用 left/top 定位，改写落点就会改变换行宽度，
+   实测尺寸随之变化、再反过来改落点，形成「测量 ↔ 定位」反馈环，
+   layout effect 内的 setState 会一路嵌套到 React 上限（错误 #185）。
+   transform 不参与布局，配合显式 width: max-content 后，
+   浮层宽度只由文本与 max-width 决定，与落点无关。 */
+.ui-tooltip-anchor {
+  position: fixed;
+  top: 0;
+  left: 0;
+  /* 关键：宽度声明式给定，不受落点影响（否则 shrink-to-fit 会随 left 变化） */
+  width: max-content;
+  max-width: min(320px, calc(100vw - 16px));
+  z-index: 1300;
+  pointer-events: none;
+}
+/* plan-64-292：极端长文本兜底——整卡不高于视口（接管浮层无箭头，裁剪安全；
+   Radix 浮层带箭头，不套用此规则） */
+.ui-tooltip-anchor .ui-tooltip {
+  max-height: calc(100vh - 16px);
+  overflow: hidden;
 }
 
 /* ── ⑬ Dialog（Radix）：真实入场 + 退场（Presence 驱动） ───── */
@@ -485,13 +532,19 @@
 .ui-dialog-overlay[data-state="open"] { animation: ui-overlay-in var(--dur-3) var(--ease-emphasized-decel); }
 .ui-dialog-overlay[data-state="closed"] { animation: ui-overlay-out var(--dur-2) var(--ease-emphasized-accel); }
 .ui-dialog-content {
+  /* plan-41-227: 居中改用 inset + margin auto——原 transform: translate(-50%,-50%) 会让本节点
+     成为内部 fixed 浮层的包含块，弹窗内下拉菜单超出弹窗范围的部分会被 overflow: hidden 裁掉
+     （实测：二级菜单落到弹窗之外时，点击命中的是遮罩）。无 transform 时浮层包含块仍是视口。 */
   position: fixed;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
+  inset: 0;
+  margin: auto;
   z-index: 1001;
   display: flex;
   flex-direction: column;
+  /* plan-41-230：inset:0 会把绝对定位元素的高度解算为「填充剩余空间」，
+     于是弹窗被拉伸到 max-height，内容不足时下方出现大片空白。
+     必须显式 height: fit-content 让高度回到内容高度（超出仍由 max-height 截断滚动）。 */
+  height: fit-content;
   max-height: 86vh;
   width: min(var(--ui-dialog-w, 720px), 92vw);
   border: 1px solid var(--border);
@@ -565,13 +618,152 @@
   from { opacity: 0; transform: translateY(calc(-4px * var(--motion-dist))) scale(0.98); }
   to { opacity: 1; transform: none; }
 }
+/* S1（plan-41-197）：Tooltip 专用入场/退场——从触发元素方向轻微位移 + 缩放，
+   比通用 ui-pop-in 更贴合"从按钮旁弹出"的观感；退场更快（--dur-1）避免拖影。 */
+@keyframes ui-tooltip-in {
+  from { opacity: 0; transform: translateY(calc(3px * var(--motion-dist))) scale(0.96); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes ui-tooltip-out {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: scale(0.98); }
+}
+/* 注：reduced-motion 降级由 motion.css 全局规则统一处理，此处不重复声明。 */
 @keyframes ui-overlay-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes ui-overlay-out { from { opacity: 1; } to { opacity: 0; } }
+/* plan-41-227: 动画与居中方式解耦——只做轻微下浮 + 缩放，不再携带 translate(-50%,-50%) */
 @keyframes ui-dialog-in {
-  from { opacity: 0; transform: translate(-50%, calc(-50% + 8px * var(--motion-dist))) scale(0.98); }
-  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  from { opacity: 0; transform: translateY(calc(8px * var(--motion-dist))) scale(0.98); }
+  to { opacity: 1; transform: none; }
 }
+/* ── plan-73-326：设置 · 宠物（图库缩略图网格 / 已安装列表缩略图） ── */
+.pets-gallery {
+  display: grid;
+  /* 固定一行 4 个（用户要求）：比 auto-fill 更整齐，卡片也更大方。
+     用 minmax(0, 1fr) 防止内容把列撞宽而溢出。 */
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--sp-5);
+  padding: 0 var(--sp-5) var(--sp-5);
+}
+
+.pets-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  /* 四边等距、收紧内边距：配合正方形缩略图，卡片整体更接近正方形（此前偏瘦长） */
+  padding: var(--sp-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--r-lg);
+  background: var(--color-card);
+  transition: border-color var(--dur-fast) ease;
+}
+
+.pets-card:hover {
+  border-color: var(--color-border-hover);
+}
+
+.pets-card.is-installed {
+  opacity: 0.7;
+}
+
+.pets-card-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.pets-card-meta {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--color-foreground-subtle);
+}
+
+/* 宠物缩略图：**取帧图集左上角第一帧，等比缩放居中显示**。
+ *
+ * 实测取数（plan-73-344）：petdex 的 preview.webp 是 **8 列 × 1 行**（1152×208，单帧 144×208），
+ * 精灵图是 8 列 × 9 行（1536×1872，单帧 192×208）——两者都只是"帧图集"，不是单只宠物照。
+ *
+ * 为什么不再用「放大 8 倍贴左上角」：那条路径要求**容器宽高比恰好等于单帧比例**，
+ * 一旦容器被布局压扁就会切掉宠物上下部分（用户反馈"展示不全被遮挡"）。
+ * 现在把裁帧交给 `object-view-box`（按图像自身坐标精确切列），把缩放交给
+ * `object-fit: contain`（浏览器保证等比、完整、居中），与容器尺寸彻底解耦。
+ *
+ * 正方形框用 padding-bottom 撑高（不依赖 aspect-ratio，避免在 grid 项里被压扁）。 */
+.pets-thumb {
+  position: relative;
+  display: block;
+  flex: none;
+  width: 100%;
+  height: 0;
+  /* 正方形：高度 = 宽度 */
+  padding-bottom: 100%;
+  border-radius: var(--r-md);
+  background: var(--color-surface);
+  overflow: hidden;
+}
+
+.pets-thumb img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  /* 只保留第 1 列：右侧裁掉 7/8 = 87.5%（preview.webp 恰好 8 列 × 1 行）。
+     写成字面量而非 CSS 变量：变量在 inset() 内若解析失败会让**整条声明失效**，
+     退化成"显示 8 帧"，风险不值得。 */
+  object-view-box: inset(0 87.5% 0 0);
+  /* 等比缩放 + 完整显示 + 居中，永不拉伸裁剪 */
+  object-fit: contain;
+}
+
+/* 回退到精灵图时（8 列 × 9 行）：除裁列外还要裁掉下方 8 行 = 88.889% */
+.pets-thumb img.is-sheet {
+  object-view-box: inset(0 87.5% 88.889% 0);
+}
+
+/* 加载失败：低调的占位（不用「破图」图标，避免整页看起来像坏了） */
+.pets-thumb-empty {
+  position: absolute;
+  inset: 0;
+  background: var(--color-surface-hover, rgba(127, 127, 127, 0.08));
+}
+
+/* 加载中：轻微脉冲提示「正在取图」（不做 0 动画切换） */
+.pets-thumb[data-state="loading"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--color-surface-hover, rgba(127, 127, 127, 0.08));
+  animation: pets-thumb-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pets-thumb-pulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.8; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pets-thumb[data-state="loading"]::after { animation: none; opacity: 0.5; }
+}
+
+.pets-gallery-more {
+  padding: 0 var(--sp-5) var(--sp-5);
+}
+
+.pets-installed-name {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
 @keyframes ui-dialog-out {
-  from { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-  to { opacity: 0; transform: translate(-50%, calc(-50% + 4px * var(--motion-dist))) scale(0.985); }
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: translateY(calc(4px * var(--motion-dist))) scale(0.985); }
 }

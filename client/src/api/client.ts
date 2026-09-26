@@ -309,6 +309,8 @@ export interface SkillOut {
   tags: string[] | null;
   is_active: boolean;
   auto_load: boolean;
+  /** plan-284-1450：安装来源元数据（含市场图标），已安装列表据此复用市场图标 */
+  meta?: Record<string, unknown> | null;
 }
 
 /** plan-230-1144 M2: 权限模式（白名单+提示词） */
@@ -336,6 +338,8 @@ export interface McpServerOut {
   url: string | null;
   tools: Record<string, unknown>[] | null;
   is_active: boolean;
+  /** plan-284-1450：安装来源元数据（含市场图标） */
+  meta?: Record<string, unknown> | null;
 }
 
 export interface ScanResult {
@@ -431,14 +435,49 @@ export const api = {
     get<{ ok: boolean; items: PluginMarketItem[]; installedCount: number }>("/plugins/marketplace"),
   pluginInstalled: () => get<PluginMarketItem[]>("/plugins/installed"),
   pluginInstallDir: (path: string) =>
-    post<{ ok: boolean; name: string; path: string; skills: number }>("/plugins/install-dir", { path }),
+    post<{ ok: boolean; name: string; path: string; skills: number; connectorCount?: number }>("/plugins/install-dir", { path }),
   pluginInstallGit: (repoUrl: string, market = "local") =>
-    post<{ ok: boolean; name: string; path: string; skills: number }>("/plugins/install-git", { repo_url: repoUrl, market }),
+    post<{ ok: boolean; name: string; path: string; skills: number; connectorCount?: number }>("/plugins/install-git", { repo_url: repoUrl, market }),
   pluginSetEnabled: (name: string, enabled: boolean) =>
     patch<{ ok: boolean; name: string; enabled: boolean }>(
       `/plugins/${encodeURIComponent(name)}/enabled`, { enabled }),
   pluginUninstall: (name: string) =>
     del<{ ok: boolean; name: string }>(`/plugins/${encodeURIComponent(name)}`),
+  // ── 市场目录（plan-41-198）：左面板「拓展」市场视图的统一数据源 ──
+  /** 市场目录：内置精选 + 本机真实项叠加（已安装 / 可直接安装 / 需前往市场）。 */
+  marketCatalog: (kind: MarketKind) =>
+    get<MarketCatalogOut>(`/market/catalog?kind=${kind}`),
+  /** 已安装聚合计数（插件 / 技能 / 连接器 / 智能体）。 */
+  marketInstalled: () =>
+    get<{ ok: boolean; counts: Record<MarketKind | "agent", number> }>("/market/installed"),
+  /** plan-41-225：市场浏览（远端分页 + 已装状态 + 缓存降级）。
+   *  全量可见的实现：远端分页 + 无限滚动（本地只渲染可视区）；搜索/分类透传远端参数
+   *  以覆盖全库（43,710 条技能量级），而不是本地过滤已加载的那几页。 */
+  marketBrowse: (opts: {
+    kind: MarketKind; page?: number; pageSize?: number;
+    keyword?: string; category?: string; sort?: "hot" | "new";
+  }) => {
+    const q = new URLSearchParams({ kind: opts.kind });
+    q.set("page", String(opts.page ?? 1));
+    q.set("page_size", String(opts.pageSize ?? 40));
+    if (opts.keyword) q.set("keyword", opts.keyword);
+    if (opts.category) q.set("category", opts.category);
+    if (opts.sort) q.set("sort", opts.sort);
+    return get<MarketBrowseOut>(`/market/browse?${q.toString()}`);
+  },
+  /** plan-41-225：把市场条目安装到本机（三类均可，全程不跳浏览器）。
+   *  ident 为**远端条目 id**（从 `MarketItem.id` 形如 `skill:xxx` 拆出）；
+   *  技能→下载包并落盘入库；插件→下载包并复用插件安装流程；连接器→写 MCP 配置（默认不启用）。 */
+  marketInstall: (data: {
+    kind: MarketKind; ident: string; displayName?: string; description?: string;
+  }) => post<{
+    ok: boolean; kind: string; name: string; path?: string;
+    skills?: number; bytes?: number; connectors?: string[];
+    /** plan-59-286：插件贡献的连接器数量（与连接器安装返回的 connectors 清单区分开） */
+    connectorCount?: number;
+    updated?: boolean; enabled?: boolean;
+  }>("/market/install", data),
+
   // ── 数据库连接（plan-282-1441 #7，内置 MCP）──
   listDbConnections: (projectId: number) => get<DbConnectionOut[]>(`/db/connections?project_id=${projectId}`),
   createDbConnection: (data: {
@@ -525,10 +564,10 @@ export const api = {
       .filter(Boolean).join("&");
     return get<SessionOut[]>(`/sessions${q ? `?${q}` : ""}`);
   },
-  createSession: (data: { project_id: number; title?: string; model_id?: number; permission_mode?: string; goal_text?: string }) =>
+  createSession: (data: { project_id: number; title?: string; model_id?: number; permission_mode?: string; approval_mode?: string; goal_text?: string }) =>
     post<SessionOut>("/sessions", data),
   getSession: (id: number) => get<SessionOut>(`/sessions/${id}`),
-  updateSession: (id: number, data: { title?: string; model_id?: number; pinned?: boolean; status?: string; permission_mode?: string }) =>
+  updateSession: (id: number, data: { title?: string; model_id?: number; pinned?: boolean; status?: string; permission_mode?: string; approval_mode?: string }) =>
     patch<SessionOut>(`/sessions/${id}`, data),
   /** 删除会话。默认语义 = 归档（可恢复）；permanent=true 走物理删除（plan-282-1441 #4） */
   deleteSession: (id: number, permanent = false) =>
@@ -564,8 +603,9 @@ export const api = {
 
   // ── 变更审核（v11）──
   getTurnChanges: (turnId: number) => get<FileChangeOut[]>(`/turns/${turnId}/changes`),
-  getFileDiff: (turnId: number, path: string) =>
-    get<FileDiffOut>(`/turns/${turnId}/changes/diff?path=${encodeURIComponent(path)}`),
+  /** plan-89-387: 传 callKey 取「这一次编辑」的变更（同轮多次编辑各自独立）；不传为整轮累积 */
+  getFileDiff: (turnId: number, path: string, callKey?: string) =>
+    get<FileDiffOut>(`/turns/${turnId}/changes/diff?path=${encodeURIComponent(path)}${callKey ? `&call_key=${encodeURIComponent(callKey)}` : ""}`),
   reviewFiles: (turnId: number, paths: string[], reviewed: boolean) =>
     put<{ ok: boolean; updated: number }>(`/turns/${turnId}/reviews`, { paths, reviewed }),
 
@@ -658,10 +698,15 @@ export const api = {
 
   // ── 钩子 ──
   listHooks: () => get<HookConfigOut[]>("/hooks"),
-  createHook: (data: { event: string; command: string; matcher?: string; enabled?: boolean }) =>
-    post<HookConfigOut>("/hooks", data),
-  updateHook: (id: number, data: { command?: string; matcher?: string; enabled?: boolean }) =>
-    patch<HookConfigOut>(`/hooks/${id}`, data),
+  /** S12（plan-41-197）：command=执行脚本；prompt=向 AI 注入提示词（二选一） */
+  createHook: (data: {
+    event: string; command?: string; matcher?: string; enabled?: boolean;
+    hook_type?: "command" | "prompt"; prompt?: string;
+  }) => post<HookConfigOut>("/hooks", data),
+  updateHook: (id: number, data: {
+    command?: string; matcher?: string; enabled?: boolean;
+    hook_type?: "command" | "prompt"; prompt?: string;
+  }) => patch<HookConfigOut>(`/hooks/${id}`, data),
   deleteHook: (id: number) => del<{ ok: boolean }>(`/hooks/${id}`),
 
   // ── 记忆 ──
@@ -676,6 +721,9 @@ export const api = {
     return get<MemoryEntryOut[]>(`/memories${qs ? `?${qs}` : ""}`);
   },
   deleteMemory: (id: number) => del<{ ok: boolean }>(`/memories/${id}`),
+  /** S8（plan-41-197）：编辑记忆文本/类型（编辑即人工确认，候选标记清除） */
+  updateMemory: (id: number, data: { text?: string; kind?: string }) =>
+    patch<{ ok: boolean }>(`/memories/${id}`, data),
   /** 提升/降级记忆作用域（session ↔ project ↔ global） */
   promoteMemory: (id: number, targetScope: "session" | "project" | "global", projectId?: number) =>
     post<{ ok: boolean }>(`/memories/${id}/promote`, { target_scope: targetScope, project_id: projectId }),
@@ -698,6 +746,9 @@ export const api = {
     post<ProviderOut>("/providers", data),
   updateProvider: (id: number, data: Record<string, unknown>) => patch<ProviderOut>(`/providers/${id}`, data),
   deleteProvider: (id: number) => del<{ ok: boolean }>(`/providers/${id}`),
+  /** plan-41-225: 保存供应商顺序（模型页左列拖拽排序，数组下标即目标顺序） */
+  reorderProviders: (ids: number[]) =>
+    post<{ ok: boolean; updated: number }>("/providers/reorder", { ids }),
   scanProviderModels: (id: number) => post<{ models: ScannedModel[] }>(`/providers/${id}/scan`, {}),
   listProviderModels: (id: number) => get<ModelOut[]>(`/providers/${id}/models`),
   bulkSaveProviderModels: (id: number, models: Array<{
@@ -955,6 +1006,82 @@ export type {
   RollbackPreviewFile, RollbackAffected, RollbackPreviewOut, FileChangeOut, FileDiffOut,
 };
 
+/** plan-41-198：市场条目类型与三种来源：
+ *  - scan     本机扫描到、尚未安装 → 可直接一键安装（本地目录安装）；
+ *  - market   仅在内置精选目录中 → 前往市场获取后走导入/安装通道；
+ *  - installed 已安装 → 进入管理（启停/卸载）。 */
+export type MarketKind = "plugin" | "skill" | "connector";
+
+export interface MarketItem {
+  id: string;
+  kind: MarketKind;
+  name: string;
+  displayName: string;
+  /** 中文说明（优先展示） */
+  descriptionZh?: string;
+  /** 原始说明（多为英文，作为补充） */
+  description?: string;
+  category: string;
+  tags?: string[];
+  author?: string;
+  downloads?: number | null;
+  version?: string | null;
+  featured?: boolean;
+  installKind: "remote" | "scan" | "market" | "installed";
+  installed: boolean;
+  enabled: boolean;
+  source?: string;
+  path?: string;
+  skills?: string[];
+  hasMcp?: boolean;
+  /** plan-284-1450：远端原始分类 code（界面显示中文，筛选仍用 code） */
+  categoryCode?: string;
+  /** plan-284-1450：远端条目主键（已装比对用） */
+  marketId?: string;
+  /** plan-284-1451：本机记录 id（技能/连接器才有）——行内启停与卸载用它定位记录 */
+  localId?: number;
+  /** plan-284-1452：分组标记——builtin 应用内置 / local 本机已安装；缺省为市场条目 */
+  group?: "builtin" | "local";
+  /** plan-41-225：远端图标地址（仅 https；缺失或加载失败时回退首字母色块） */
+  iconUrl?: string;
+  /** plan-41-225：安装/获取次数（远面条目） */
+  installCount?: number;
+  /** plan-41-225：条目归属（official 等） */
+  location?: string;
+  /** plan-41-225：内容更新时间（远端毫秒时间戳字符串） */
+  updatedAt?: string;
+}
+
+/** plan-41-225：远端市场分类维度（facets.categories） */
+export interface MarketCategoryFacet { code: string; label: string; count: number }
+
+/** plan-41-225：市场浏览响应（远端分页 + 已装状态 + 缓存降级） */
+export interface MarketBrowseOut {
+  ok: boolean;
+  kind: MarketKind;
+  items: MarketItem[];
+  page: number;
+  pageSize: number;
+  lastPage: number;
+  total: number;
+  categories: MarketCategoryFacet[];
+  installedCount: number;
+  marketUrl: string;
+  /** cached=true 命中缓存；degraded=true 表示远端不可达（用了过期缓存或本机兜底） */
+  cached?: boolean;
+  degraded?: boolean;
+}
+
+export interface MarketCatalogOut {
+  ok: boolean;
+  kind: MarketKind;
+  marketUrl: string;
+  items: MarketItem[];
+  categories: string[];
+  installedCount: number;
+  localCount?: number;
+}
+
 /** v2.2 (对齐 zcode 3.18): 全局设置（设置中心持久化统一，落 config.json） */
 export interface GlobalSettingsOut {
   memory_enabled: boolean;
@@ -963,6 +1090,8 @@ export interface GlobalSettingsOut {
   /** plan-278-1391: 上下文压缩触发阈值（0.50~0.95，默认 0.90） */
   auto_compact_threshold_ratio?: number;
   language: string;
+  /** plan-75-332: 以下五项旧风控已废弃（后端仅保留字段兼容旧 config.json，
+   *  不再参与任何判定）——是否需审批统一由会话权限模式裁决。 */
   auto_approve_tools: boolean;
   force_approval_tools: string;
   session_token_budget: number;
@@ -973,12 +1102,16 @@ export interface GlobalSettingsOut {
   enhanced_search: boolean;
   show_todos: boolean;
   show_reasoning: boolean;
-  /** v3.0 (plan-88): 计划模式允许访问工作区外路径 */
+  /** v3.0 (plan-88): 计划模式允许访问工作区外路径（plan-75-332 废弃） */
   plan_mode_allow_outside_access: boolean;
-  /** v32 (plan-89): 沙箱模式（workspace-write / read-only / danger-full-access） */
+  /** v32 (plan-89): 沙箱模式（plan-75-332 废弃） */
   sandbox_mode: string;
-  /** v36 (plan-321-1600 R2): 工作目录外读取自动审批（开启后不再弹审批卡） */
+  /** v36 (plan-321-1600 R2): 工作目录外读取自动审批（plan-75-332 废弃） */
   auto_approve_outside_read?: boolean;
+  /** plan-75-332: 审批「解释」专用模型 id；null/缺省 = 跟随会话模型 */
+  approval_explain_model_id?: number | null;
+  /** plan-75-332: 审批「解释」专用思考深度；null/缺省 = 跟随会话思考深度 */
+  approval_explain_reasoning_effort?: string | null;
   /** v36 (plan-321-1600 R3): ta3 额度自动透支（报错时查额度，日额度>=100% 自动透支一次） */
   auto_overdraft_on_quota_exceeded?: boolean;
   /** v46: ta3 额度自动重置（报错时查额度，周/月额度用尽则自动提交重置） */

@@ -68,6 +68,18 @@ export function IconSettings({ size = 18, color = "currentColor", strokeWidth = 
   );
 }
 
+/** 宠物（爪印）—— plan-73-323：设置页「宠物」分区与面板入口 */
+export function IconPet({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <ellipse cx="12" cy="15.5" rx="5" ry="4" />
+      <circle cx="7.6" cy="9.6" r="2" />
+      <circle cx="12" cy="7.8" r="2" />
+      <circle cx="16.4" cy="9.6" r="2" />
+    </svg>
+  );
+}
+
 /** 工作目录(文件夹，闭合态，对齐图 2) */
 export function IconFolder({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
@@ -1029,6 +1041,38 @@ export function IconTrash({ size = 18, color = "currentColor", strokeWidth = 1.7
       <path d="M19 6l-1 14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1L5 6" />
       <line x1="10" y1="11" x2="10" y2="17" />
       <line x1="14" y1="11" x2="14" y2="17" />
+    </svg>
+  );
+}
+
+/** 铅笔（编辑） */
+export function IconPencil({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" />
+    </svg>
+  );
+}
+
+/** 眼睛（显示密钥） */
+export function IconEye({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+/** 眼睛（隐藏密钥，带斜线） */
+export function IconEyeOff({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <path d="M10.7 5.1A9.9 9.9 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-3 3.9" />
+      <path d="M6.6 6.6A17 17 0 0 0 2 12s3.5 7 10 7a9.9 9.9 0 0 0 4.4-1" />
+      <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+      <path d="M2 2l20 20" />
     </svg>
   );
 }

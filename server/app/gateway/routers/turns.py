@@ -46,6 +46,9 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
     # 且（消息按 id 升序）用户消息排在 AI 回复之前（修复消息顺序颠倒）
     # ——经写引擎单写线程补丁（无锁单写者）
     await message_service.patch_message(user_msg.id, turn_id=turn_id)
+    # plan-41-227: patch 只改库、不回填本对象——广播 payload 必须自带 turn_id，
+    # 否则前端按 turn 分组时会把该消息当成独立条目排到消息流末尾。
+    user_msg.turn_id = turn_id
     generated_title = await session_service.auto_title_session(db, session, body.content)
     # v37: 用户消息落库时间即会话最新活动时间（侧栏排序依据）
     _last_activity = str(user_msg.created_at) if user_msg.created_at is not None else None
@@ -190,14 +193,18 @@ async def inject_turn_input(turn_id: int, body: TurnInjectBody, db: AsyncSession
     # plan-308-1542 需求2: 注入消息同样保留引用芯片
     if getattr(body, "refs", None):
         user_content["refs"] = body.refs
+    # plan-41-227: turn_id 必须在**广播前**确定——此前先入库（turn_id 空）再 patch 回填，
+    # 而 patch 不回填本对象，广播出去的 turn_id 是空值；前端据此把注入消息当成独立条目
+    # 丢到消息流末尾「显示在底部」，直到 turn 结束整表刷新才归位（用户反馈的位置跳动）。
+    # turn 已存在，直接随消息一起写入即可。
     user_msg = await message_service.create_message(
         db, session_id=turn.session_id,
         sender_type=SenderType.USER.value,
         msg_type=MsgType.TEXT.value,
         content=user_content,
+        turn_id=turn_id,
         broadcast=False,
     )
-    await message_service.patch_message(user_msg.id, turn_id=turn_id)
     try:
         from app.gateway.ws import manager as ws_manager
         from app.services.message_service import _to_out
@@ -355,14 +362,20 @@ async def list_turn_changes(turn_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{turn_id}/changes/diff", response_model=FileDiffOut)
-async def get_change_diff(turn_id: int, path: str, db: AsyncSession = Depends(get_db)):
-    """单文件变更 diff：按需拉取 before/after（大文件截断），供右侧面板 DiffEditor。"""
+async def get_change_diff(turn_id: int, path: str, call_key: str | None = None,
+                          db: AsyncSession = Depends(get_db)):
+    """单文件变更 diff：按需拉取 before/after（大文件截断），供右侧面板 DiffEditor。
+
+    plan-89-387: 传 call_key 时只返回「这一次写盘」的变更（同轮同文件多次编辑各自独立），
+    不传则回退整轮累积口径（兼容老数据）。
+    """
     try:
         session_id, workspace = await rollback_service.resolve_turn_workspace(db, turn_id)
         if session_id is None or not workspace:
             raise HTTPException(404, "该 turn 无快照")
         diff = await rollback_service.get_file_diff(
             db, session_id=session_id, turn_id=turn_id, workspace=workspace, path=path,
+            call_key=call_key,
         )
         if diff is None:
             # v36: 区分三种成因——该 turn 完全无写盘记录 / 有记录但路径不匹配。
@@ -606,15 +619,16 @@ async def confirm_plan_turn(turn_id: int, body: TaskConfirmBody,
     if turn.status != "awaiting_confirmation":
         raise HTTPException(409, "该方案已处理或不在待确认状态")
 
-    # 确认执行 = 用户授权完全访问：计划模式会话切换为 accept_edits，
+    # 确认执行 = 用户授权执行：计划模式会话切换为 agent（智能体模式，
+    # plan-75-332：原 accept_edits 已取消，它的能力与 agent 完全相同），
     # 使后续执行 turn 不再被 plan 写盘拦截。
     # v26: 仅「接受」时切换权限；「取消」= 停止任务，会话保持 plan 模式。
-    # plan_restore_after_turn 粘性机制已移除：确认后的 accept_edits 保持到手动切换。
+    # plan_restore_after_turn 粘性机制已移除：确认后的 agent 保持到手动切换。
     _session = await session_service.get_session(db, turn.session_id)
     _permission_mode = None
     if body.accepted and _session is not None and _session.permission_mode == "plan":
-        await session_service.patch_session(_session.id, permission_mode="accept_edits")
-        _permission_mode = "accept_edits"
+        await session_service.patch_session(_session.id, permission_mode="agent")
+        _permission_mode = "agent"
 
     # plan-644: 计划生命周期流转（数据库为真值源，文档头元数据行冗余标注）
     _workspace = ""

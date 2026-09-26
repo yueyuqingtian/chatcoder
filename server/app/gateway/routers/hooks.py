@@ -20,6 +20,7 @@ async def create_hook(body: HookConfigCreate, db: AsyncSession = Depends(get_db)
         hid = await hook_service.create_hook(
             db, event=body.event, command=body.command,
             matcher=body.matcher, enabled=body.enabled,
+            hook_type=body.hook_type, prompt=body.prompt,
         )
         from sqlalchemy import select
         from app.persistence.models.hook import HookConfig

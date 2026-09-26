@@ -1,5 +1,5 @@
 /**
- * 性能度量护栏（plan-329-1647 S12）。
+ * 性能度量护栏（plan-329-1647 S12 + plan-75-334 阶段0扩展）。
  *
  * 目标：把「四项操作（拖分隔条 / 折叠展开 / 窗口边缘 resize / 拖标题栏）是否达标」
  * 从人工观感变成可读数字，并为「玻璃不是主要开销」这一判断留可核对的依据。
@@ -8,6 +8,8 @@
  *   · 帧间隔分布（rAF 采样，输出 p50 / p95 / max）；
  *   · longtask 数量与总时长（PerformanceObserver('longtask')）；
  *   · 收敛序列耗时（reconcile 每次执行 start → end）。
+ *   · 关键组件渲染计数（plan-75-334）：MessageFlowCore、TurnGroup、StreamingTail、
+ *     时间线构建次数、文件预览请求次数等（仅开发环境、仅采集期间）。
  *
  * 开销控制：**默认不采集**。帧采样需显式 start()（常驻 rAF 有成本）；longtask 观察仅在
  * start() 后注册、stop() 时断开；recordReconcile 在未采集时只是一次函数调用 + 判断。
@@ -35,6 +37,20 @@ export interface PerfSnapshot {
   frames: FrameStats;
   longtasks: { count: number; totalMs: number; maxMs: number };
   reconcile: { count: number; lastMs: number; p95Ms: number; maxMs: number };
+  /** plan-75-334 阶段0：关键组件渲染与派生计数（仅采集期间统计） */
+  components: {
+    messageFlowCore: number;
+    turnGroup: number;
+    streamingTail: number;
+    taskSummary: number;
+    filePanel: number;
+  };
+  derivations: {
+    timelineBuild: number;
+    filePreviewRequest: number;
+    terminalFit: number;
+    browserResize: number;
+  };
 }
 
 const frames: number[] = [];
@@ -49,6 +65,23 @@ let rafId = 0;
 let lastFrameTs = 0;
 let startedAt = 0;
 let longtaskObserver: PerformanceObserver | null = null;
+
+/** plan-75-334 阶段0：关键组件渲染计数（仅采集期间统计） */
+let componentCounts = {
+  messageFlowCore: 0,
+  turnGroup: 0,
+  streamingTail: 0,
+  taskSummary: 0,
+  filePanel: 0,
+};
+
+/** plan-75-334 阶段0：派生计算计数（仅采集期间统计） */
+let derivationCounts = {
+  timelineBuild: 0,
+  filePreviewRequest: 0,
+  terminalFit: 0,
+  browserResize: 0,
+};
 
 /** 四舍五入到 0.1ms（报告里不必给更高精度）。 */
 function r1(v: number): number {
@@ -109,12 +142,26 @@ export function reset(): void {
   longtaskMax = 0;
   startedAt = performance.now();
   lastFrameTs = 0;
+  componentCounts = { messageFlowCore: 0, turnGroup: 0, streamingTail: 0, taskSummary: 0, filePanel: 0 };
+  derivationCounts = { timelineBuild: 0, filePreviewRequest: 0, terminalFit: 0, browserResize: 0 };
 }
 
 /** 由收敛序列调用：记录一次收敛耗时（未采集时近似零开销）。 */
 export function recordReconcile(ms: number): void {
   if (!sampling) return;
   reconcileMs.push(ms);
+}
+
+/** plan-75-334 阶段0：记录组件渲染（未采集时零开销）。 */
+export function recordComponentRender(component: keyof typeof componentCounts): void {
+  if (!sampling) return;
+  componentCounts[component]++;
+}
+
+/** plan-75-334 阶段0：记录派生计算（未采集时零开销）。 */
+export function recordDerivation(derivation: keyof typeof derivationCounts): void {
+  if (!sampling) return;
+  derivationCounts[derivation]++;
 }
 
 /** 读取当前报告（不停止采集）。 */
@@ -140,6 +187,8 @@ export function snapshot(): PerfSnapshot {
       p95Ms: r1(percentile(r, 95)),
       maxMs: r1(r.length ? r[r.length - 1] : 0),
     },
+    components: { ...componentCounts },
+    derivations: { ...derivationCounts },
   };
 }
 
@@ -170,6 +219,10 @@ export function install(): void {
         "收敛 max(ms)": [s.reconcile.maxMs],
         "采集时长(s)": [Math.round(s.elapsed / 1000)],
       });
+      // eslint-disable-next-line no-console
+      console.log("组件渲染次数:", s.components);
+      // eslint-disable-next-line no-console
+      console.log("派生计算次数:", s.derivations);
       return s;
     },
   };

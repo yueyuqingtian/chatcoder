@@ -79,27 +79,38 @@ def _normalize_lang(language: str | None) -> str:
     return language if language in ("zh", "en") else "auto"
 
 
-def _build_addendum(sandbox_mode: str, language: str = "auto") -> str:
-    """按沙箱模式选择流程规范段：完全访问/只读使用对应文案，其余保持默认。
+def _build_addendum(execution_mode: str = "agent", approval_mode: str = "ask",
+                    language: str = "auto") -> str:
+    """按「执行模式 × 权限模式」选择流程规范段。
+
+    plan-75-332: 参数由 sandbox_mode 改为两条正交轴——
+    - approval_mode == "full"（完全访问）→ 免询问版规范；
+    - execution_mode == "readonly"（只读模式）→ 仅读版规范；
+    - 其余保持默认（写操作按权限模式裁决）。
 
     language（plan-19-82）：回复语言句按本轮语言动态生成（中文→简体中文；英文→English；
     auto→跟随用户消息），不再写死中文。
     """
     from app.orchestration.prompts.language import language_label
 
-    if sandbox_mode == "danger-full-access":
+    if approval_mode == "full":
         tpl = CHATCODER_ADDENDUM_FULL_ACCESS
-    elif sandbox_mode == "read-only":
+    elif execution_mode == "readonly":
         tpl = CHATCODER_ADDENDUM_READONLY
     else:
         tpl = CHATCODER_ADDENDUM
     return tpl.format(lang_label=language_label(_normalize_lang(language)))
 
 # 子代理引导（启用子代理时追加）
+# plan-73-322: 补派发方式纪律——与内部通道主提示词的派发口径一致（优先异步、完成自动推送
+# 无需轮询、同步仅在强依赖时使用），修复 ta3 会话「调研一律同步阻塞」的引导偏差。
 SUBAGENT_GUIDE_SECTION = """## 子代理使用
 SubAgent 用于并行调研多个相互独立的课题（如前端 + 后端 + 协议同时排查）。同一轮最多 2-3 个，
 单文件读取、单关键词搜索等琐碎调研必须自己用直接工具调用完成，不得派发。子代理返回结论后
-由你串行整合并亲自验证关键事实。"""
+由你串行整合并亲自验证关键事实。
+派发方式优先异步：结论不急需时用 SubAgentAsync（subagent_type=Explore 为只读调研）后台派发，
+立即返回、完成后结果自动推送，不要轮询；仅当下一步强依赖结论且子任务很小时，才用 SubAgent
+同步等待（该组合会阻塞主流程）。已派发给子代理的工作不要自己重复做。"""
 
 
 def build_runtime_snapshot(workspace: str = "") -> str:
@@ -119,13 +130,15 @@ def build_runtime_snapshot(workspace: str = "") -> str:
 
 def build_ta3_system_prompt(model_meta: dict | None, workspace: str = "",
                             enable_subagents: bool = True,
-                            sandbox_mode: str = "workspace-write",
+                            execution_mode: str = "agent",
+                            approval_mode: str = "ask",
                             language: str = "auto",
                             language_source: str = "user") -> str:
     """组装 ta3 模式系统提示词（见模块 docstring 结构）。
 
-    sandbox_mode：完全访问(danger-full-access)/只读(read-only)时流程规范段
-    按对应语义生成（免审批/仅读），避免注入与所选模式矛盾的审批条款。
+    plan-75-332：参数由 sandbox_mode 改为两条正交轴——execution_mode
+    （readonly / plan / agent）决定能力边界，approval_mode（ask / auto / full）
+    决定是否免询问；流程规范段按二者生成，避免注入与所选模式矛盾的审批条款。
     language（plan-19-82）：远端 systemMessage 可能是英文，与本地流程规范口径不一；
     这里把统一的语言纪律块置于**首尾双锚**，并按本轮语言生成「回复用 X」文案。
     """
@@ -140,7 +153,7 @@ def build_ta3_system_prompt(model_meta: dict | None, workspace: str = "",
     ]
     if enable_subagents:
         sections.append(SUBAGENT_GUIDE_SECTION)
-    sections.append(_build_addendum(sandbox_mode, language=language))
+    sections.append(_build_addendum(execution_mode, approval_mode, language=language))
     body = "\n\n".join(s for s in sections if s)
     _lang_dir = build_language_directive(language, source=language_source)
     return f"{_lang_dir}\n\n{body}\n\n{_lang_dir}"

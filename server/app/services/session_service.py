@@ -21,9 +21,13 @@ def _legacy_default_for_type(type_name: str) -> object:
 async def create_session(db: AsyncSession, *, project_id: int, title: str | None = None,
                          model_id: int | None = None, fork_parent_id: int | None = None,
                          permission_mode: str | None = None,
+                         approval_mode: str | None = None,
                          goal_text: str | None = None) -> int:
     from datetime import datetime, timezone
 
+    from app.orchestration.approval_policy import (
+        normalize_approval_mode, normalize_execution_mode,
+    )
     from app.persistence.database import run_write_locked
 
     def patch(s):
@@ -39,7 +43,10 @@ async def create_session(db: AsyncSession, *, project_id: int, title: str | None
         values: dict[str, object] = {
             "project_id": project_id,
             # plan-547: 首页所选模式随创建落库，会话输入框立即显示与实际运行一致
-            "permission_mode": permission_mode or "default",
+            # plan-75-332: 存的是执行模式（readonly / plan / agent）。
+            "permission_mode": normalize_execution_mode(permission_mode),
+            # plan-75-332: 权限模式（ask / auto / full）随创建一次落准
+            "approval_mode": normalize_approval_mode(approval_mode),
         }
         for name, val in (
             ("title", title),
@@ -89,7 +96,11 @@ async def create_session(db: AsyncSession, *, project_id: int, title: str | None
         session = Session(
             project_id=project_id, title=title or None,
             model_id=model_id, fork_parent_id=fork_parent_id,
-            permission_mode=permission_mode or "default",
+            # plan-75-332 R3 修复：此处必须显式写入两种模式——此前漏传 approval_mode，
+            # 新建会话一律落到 ORM 默认值 "ask"，表现为「首页选完全访问，发出后变询问审批」；
+            # permission_mode 一并改用归一化值（原本写的 "default" 是已废弃的旧名）。
+            permission_mode=normalize_execution_mode(permission_mode),
+            approval_mode=normalize_approval_mode(approval_mode),
             **(
                 {
                     "goal_text": goal_text.strip()[:2000],
@@ -268,6 +279,9 @@ async def delete_session_permanent(db: AsyncSession, session_id: int) -> dict | 
 
 async def fork_session(db: AsyncSession, session_id: int, title: str | None = None) -> int:
     """复制会话（仅复制元数据与消息，任务/子代理不复制；写引擎单写线程）。"""
+    from app.orchestration.approval_policy import (
+        normalize_approval_mode, normalize_execution_mode,
+    )
     from app.persistence.database import run_write_locked
 
     def patch(s):
@@ -280,6 +294,12 @@ async def fork_session(db: AsyncSession, session_id: int, title: str | None = No
             model_id=src.model_id,
             fork_parent_id=session_id,
             status="active",
+            # plan-75-332 R3 修复：分支会话必须继承源会话的两种模式——
+            # 此前未复制，fork 出来一律回到 ORM 默认（agent + 询问审批），
+            # 用「完全访问」的分支会突然开始弹审批。
+            # R7：继承时经归一化，避免旧值（default / accept_edits）随分支继续扩散。
+            permission_mode=normalize_execution_mode(src.permission_mode),
+            approval_mode=normalize_approval_mode(src.approval_mode),
         )
         s.add(new_session)
         s.flush()
@@ -305,25 +325,22 @@ async def fork_session(db: AsyncSession, session_id: int, title: str | None = No
 
 
 async def create_system_message(db: AsyncSession, *, session_id: int, content: dict) -> int:
-    """v2.2 (对齐 zcode 3.11): 写一条系统消息（模型切换 divider 等，写引擎单写线程）。"""
+    """v2.2 (对齐 zcode 3.11): 写一条系统消息（模型切换 divider 等，写引擎单写线程）。
+
+    plan-41-229: 旧实现只落库不广播，前端要等到下一次消息刷新（发送消息时触发）
+    才把它拉进消息列表——用户反馈「切换模型后必须再发一条消息才提示切换了模型」。
+    改走 message_service.create_message：同一条写引擎路径，落库后广播 message.created，
+    切换模型当场即出提示；广播失败仍只影响实时性，不影响落库。
+    """
     from app.core.enums import MsgType, SenderType
+    from app.services.message_service import create_message
 
-    from app.persistence.database import run_write_locked
-
-    def patch(s):
-        from app.persistence.models.message import Message as _Msg
-        m = _Msg(
-            session_id=session_id, turn_id=None, thread_id=None,
-            sender_type=SenderType.SYSTEM.value, sender_id=None,
-            msg_type=MsgType.SYSTEM.value, content=content,
-        )
-        s.add(m)
-        s.flush()
-        mid = m.id
-        s.commit()
-        return mid
-
-    return await run_write_locked(patch, label="session.sysmsg")
+    msg = await create_message(
+        db, session_id=session_id,
+        sender_type=SenderType.SYSTEM.value, sender_id=None,
+        msg_type=MsgType.SYSTEM.value, content=content,
+    )
+    return int(msg.id or 0)
 
 
 async def list_main_messages(db: AsyncSession, session_id: int, limit: int | None = None) -> list[Message]:

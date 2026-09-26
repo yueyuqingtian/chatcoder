@@ -209,7 +209,9 @@ export function TaskProgressCapsule({ onVisibilityChange }: {
             >
               <IconCheckSquare size={12} />
               <span className="tc-seg-num">{done}/{displayRows.length}</span>
-              {currentTitle && <span className="tc-seg-title" title={currentTitle}>{currentTitle}</span>}
+              {/* plan-64-294：不再挂原生 title——hover 本段已经弹出 .tc-pop（内含完整步骤清单与全文），
+                  再接管一个浮层就成两个提示框。 */}
+              {currentTitle && <span className="tc-seg-title">{currentTitle}</span>}
               <IconChevronUp size={12} className="tc-seg-caret" />
             </button>
           </div>

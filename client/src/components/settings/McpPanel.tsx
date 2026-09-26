@@ -270,7 +270,7 @@ export function McpPanel() {
         title="导入 MCP JSON 配置"
         subtitle="支持粘贴标准 Claude / Cursor 的 mcpServers JSON 格式"
         width={640}
-        actions={
+        footer={
           <>
             <button className="btn btn-ghost" onClick={() => setShowJsonModal(false)}>取消</button>
             <button className="btn btn-primary" onClick={handleJsonImport} disabled={!jsonText.trim()}>确认导入</button>

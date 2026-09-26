@@ -1,5 +1,7 @@
 """v21: 对齐 deepseek-harness/zcode 的 thinking 模式 wire 参数测试。"""
 
+from types import SimpleNamespace
+
 import pytest
 
 from app.models.providers.openai_compatible import OpenAICompatibleProvider
@@ -81,3 +83,101 @@ class TestConvertMessages:
         p = _provider()
         out = p._convert_messages([ChatMessage(role="developer", content="ctx")])
         assert out[0]["role"] == "system"
+
+
+# ───────────── plan-53-265: 思考块字段名兼容（OpenRouter 风格 reasoning） ─────────────
+
+def _delta(**kwargs):
+    """最小 delta 替身：显式给出 SDK 直读字段，其余仅设传入项（未设=属性不存在）。"""
+    d = SimpleNamespace(content=None, tool_calls=None)
+    for k, v in kwargs.items():
+        setattr(d, k, v)
+    return d
+
+
+def _chunk(delta, finish_reason=None, usage=None):
+    choice = SimpleNamespace(delta=delta, finish_reason=finish_reason)
+    return SimpleNamespace(usage=usage, choices=[choice])
+
+
+class _FakeStream:
+    """模拟 openai SDK 的异步流（逐 chunk yield）。"""
+
+    def __init__(self, chunks):
+        self._chunks = chunks
+
+    def __aiter__(self):
+        async def _gen():
+            for c in self._chunks:
+                yield c
+
+        return _gen()
+
+
+def _install_stream(provider, chunks):
+    """替换 _create_compat，使解析路径吃到构造好的 chunk 序列。"""
+
+    async def _fake_create(kwargs):
+        return _FakeStream(chunks)
+
+    provider._create_compat = _fake_create
+    return provider
+
+
+def _request():
+    return ChatRequest(messages=[ChatMessage(role="user", content="hi")], model="m")
+
+
+class TestReasoningFieldCompat:
+    """plan-53-265: 部分中转网关把思考放在 delta.reasoning。
+
+    实测（service.guyueyu.asia + deepseek/deepseek-v4.1-flash）：思考 chunk 只带
+    reasoning/reasoning_details，旧实现只读 reasoning_content/thinking，思考块整段丢失。
+    """
+
+    async def test_stream_structured_reads_reasoning_field(self):
+        """流式实时广播路径：只带 reasoning 也要产出 thinking 事件。"""
+        p = _install_stream(_provider(), [
+            _chunk(_delta(reasoning="先算")),
+            _chunk(_delta(reasoning="再答")),
+            _chunk(_delta(), finish_reason="stop"),
+        ])
+        events = []
+        async for ev in p.stream_structured(_request()):
+            events.append(ev)
+        assert "".join(e["delta"] for e in events if e["type"] == "thinking") == "先算再答"
+        assert events[-1]["type"] == "done"
+        assert events[-1]["thinking"] == "先算再答"
+
+    async def test_chat_reads_reasoning_field(self):
+        """非流式聚合路径：只带 reasoning 也要回填 thinking。"""
+        p = _install_stream(_provider(), [
+            _chunk(_delta(reasoning="思考")),
+            _chunk(_delta(content="答案")),
+            _chunk(_delta(), finish_reason="stop"),
+        ])
+        resp = await p.chat(_request())
+        assert resp.thinking == "思考"
+        assert resp.content == "答案"
+
+    async def test_reasoning_content_priority_kept(self):
+        """三字段同现时保持既有优先级 reasoning_content > reasoning > thinking。"""
+        p = _install_stream(_provider(), [
+            _chunk(_delta(reasoning_content="A", reasoning="B", thinking="C")),
+            _chunk(_delta(), finish_reason="stop"),
+        ])
+        events = []
+        async for ev in p.stream_structured(_request()):
+            events.append(ev)
+        assert "".join(e["delta"] for e in events if e["type"] == "thinking") == "A"
+
+    async def test_no_reasoning_field_no_thinking_event(self):
+        """三字段均缺时不得产出思考事件（空值安全回归）。"""
+        p = _install_stream(_provider(), [
+            _chunk(_delta(content="ok")),
+            _chunk(_delta(), finish_reason="stop"),
+        ])
+        events = []
+        async for ev in p.stream_structured(_request()):
+            events.append(ev)
+        assert not [e for e in events if e["type"] == "thinking"]

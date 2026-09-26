@@ -10,6 +10,7 @@ import { usePanelStore } from "../store/panel";
 import { useI18n } from "../store/i18n";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { AppLogo } from "./AppLogo";
+import { Input } from "./ui";
 import {
   IconMinus, IconSquare, IconX, IconFolder,
   IconGitBranch, IconTerminal,
@@ -29,12 +30,21 @@ interface TitleBarProps {
   rightCollapsed: boolean;
   /** 设置页态——不展示项目/会话/外部打开/命令行/侧边栏等信息 */
   settings?: boolean;
+  /** plan-41-233：页面态（拓展/定时任务/设置等 nav 页）——不展示会话标题与右侧图标组；
+   *  左侧 logo/折叠/前进后退属导航控件，**始终保留**（用户反馈：这组不能被页面态隐藏）。 */
+  page?: boolean;
   onToggleLeft: () => void;
   onToggleRight: () => void;
+  /** plan-41-233：点击前进/后退时通知外部「进入会话视图」（退出 nav 页）。
+   *  否则在页面态点箭头会切会话但内容区仍停在 nav 页，按钮看起来没反应。 */
+  onSessionFocus?: () => void;
 }
 
-export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onToggleLeft, onToggleRight }: TitleBarProps) {
+export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page = false, onToggleLeft, onToggleRight, onSessionFocus }: TitleBarProps) {
   const { t } = useI18n();
+  // plan-41-233：裸态 = 设置页 ∪ 页面态——仅约束「会话标题 / 项目 chip / 右侧图标组」；
+  // 左侧 logo/折叠/前进后退不在其内（用户要求保留）。
+  const bare = settings || page;
   const currentSessionId = useChatStore((s) => s.currentSessionId);
   const sessions = useChatStore((s) => s.sessions);
   const projects = useChatStore((s) => s.projects);
@@ -149,7 +159,8 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
       className={`titlebar${leftCollapsed ? " left-collapsed" : ""}`}
     >
       <div className="titlebar-left">
-        {/* 侧栏折叠时：logo 与前进/后退 + 展开按钮移到标题栏左侧（展开态折叠入口在侧栏头部） */}
+        {/* 侧栏折叠时：logo 与前进/后退 + 展开按钮移到标题栏左侧（展开态折叠入口在侧栏头部）。
+            plan-41-233：这组导航控件不随页面态/设置页隐藏——用户明确要求保留。 */}
         {leftCollapsed && (
           <>
             <AppLogo size={20} className="sb-logo-img" />
@@ -158,20 +169,20 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
             <button className="titlebar-btn collapsed" onClick={onToggleLeft} title={t("sidebar.expand_tip")}>
               <IconPanelLeft size={15} open={false} />
             </button>
-            <button className="sb-nav-arrow" disabled={!canBack} onClick={() => histGo(-1)} title={t("sidebar.history_back")}><IconChevronLeft size={15} /></button>
-            <button className="sb-nav-arrow" disabled={!canForward} onClick={() => histGo(1)} title={t("sidebar.history_forward")}><IconChevronRight size={15} /></button>
+            <button className="sb-nav-arrow" disabled={!canBack} onClick={() => { histGo(-1); onSessionFocus?.(); }} title={t("sidebar.history_back")}><IconChevronLeft size={15} /></button>
+            <button className="sb-nav-arrow" disabled={!canForward} onClick={() => { histGo(1); onSessionFocus?.(); }} title={t("sidebar.history_forward")}><IconChevronRight size={15} /></button>
           </>
         )}
       </div>
 
       <div className="titlebar-workspace">
-        {settings ? (
+        {bare ? (
           null
         ) : (
           <>
         {renaming !== null && session ? (
-          <input
-            className="input titlebar-rename"
+          <Input
+            className="titlebar-rename"
             autoFocus
             value={renaming}
             onFocus={(e) => e.target.select()}
@@ -247,7 +258,7 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
 
       <div className="titlebar-right">
         {/* 打开工作区下拉菜单 */}
-        {!settings && (
+        {!bare && (
         <>
         <div className="titlebar-folder-dropdown-wrap" ref={folderMenuRef}>
           <button
@@ -323,7 +334,7 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, onTo
         </button>
         </>
         )}
-        {!settings && (
+        {!bare && (
         <button
           className={`app-pane-toggle titlebar-btn${rightCollapsed ? " collapsed" : ""}`}
           onClick={onToggleRight}

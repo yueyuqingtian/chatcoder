@@ -20,6 +20,7 @@ import { msgText, getTurnById } from "./timeline";
 import { useChatStore } from "../../store/chat";
 import { parseUtc } from "../../utils/time";
 import { MessageImageGrid, MessageFileCards, TokenText, RefChips, refsOf, stripRefLines, attachmentsOf } from "./AttachmentCard";
+import { recordComponentRender } from "../../perf/metrics";
 
 /** plan-282-1421：turn 的「已结束」状态集合——AI 操作行必须在本轮进入这些状态后才显示。 */
 const TERMINAL_TURN_STATUSES: ReadonlySet<string> = new Set([
@@ -55,16 +56,27 @@ function WorkTimer({
   onToggleCollapsed?: () => void;
 }) {
   const subagentFlow = flow === "subagent";
-  const subMeta = useChatStore((s) =>
-    subagentFlow && agentId != null ? s.subagentMeta[agentId] : undefined
+  // plan-75-334 阶段1：只订阅**起止时间 primitive**。此前返回整个 turn / subagentMeta 对象，
+  // turns 列表或 meta 上任何字段变化都会让每个可见计时条重渲染；primitive 只在起止时间
+  // 真正变化时才触发更新，共享秒级 ticker 的行为不变。
+  const subStart = useChatStore((s) =>
+    subagentFlow && agentId != null ? s.subagentMeta[agentId]?.startedAt ?? null : null
   );
-  const turn = useChatStore((s) => (subagentFlow ? undefined : getTurnById(s.turns, turnId)));
+  const subEnd = useChatStore((s) =>
+    subagentFlow && agentId != null ? s.subagentMeta[agentId]?.endedAt ?? null : null
+  );
+  const turnStart = useChatStore((s) =>
+    subagentFlow ? null : getTurnById(s.turns, turnId)?.started_at ?? null
+  );
+  const turnEnd = useChatStore((s) =>
+    subagentFlow ? null : getTurnById(s.turns, turnId)?.completed_at ?? null
+  );
   // S8c：改用共享秒级 ticker（原先每处各自 setInterval，运行期多处独立唤醒 + 各自重渲染）。
   useRunningTicker(isRunning);
 
   // 起止时间：子代理面板取 meta（事件 + REST 回填），主会话取 turn 行
-  const startRaw = subagentFlow ? subMeta?.startedAt ?? null : turn?.started_at ?? null;
-  const endRaw = subagentFlow ? subMeta?.endedAt ?? null : turn?.completed_at ?? null;
+  const startRaw = subagentFlow ? subStart : turnStart;
+  const endRaw = subagentFlow ? subEnd : turnEnd;
   const start = startRaw ? parseUtc(startRaw) : 0;
 
   let label = "";
@@ -109,6 +121,11 @@ export const TurnGroup = memo(function TurnGroup({
   flow = "main",
   agentId,
   reportMessageId,
+  globalRunning,
+  latestUserId,
+  flowErrorTurnId,
+  hiddenTurnErrors,
+  turnStatus,
 }: {
   entry: Extract<TimelineEntry, { kind: "turn" }>;
   isRunning: boolean;
@@ -125,12 +142,29 @@ export const TurnGroup = memo(function TurnGroup({
   /** v36 (plan-321-1600 M2)：子代理面板的最终汇报消息 id——命中时改由结构化汇报卡片渲染；
    *  主消息流（flow="main"）不传该参数，渲染完全不变。 */
   reportMessageId?: number;
+  /** plan-75-334 阶段1：父层统一计算的全局派生值（必需）。
+   *  此前每个 TurnGroup 各自订阅 isRunning / flowError / hiddenTurnErrors / turns / messages，
+   *  运行期任何相关 store 更新都会让所有可见 turn 重复执行 selector；
+   *  现在由 MainMessageFlow / SubagentMessageFlow 各算一次、经 props 传下来。 */
+  globalRunning: boolean;
+  latestUserId: number;
+  flowErrorTurnId: number | null;
+  hiddenTurnErrors: number[];
+  turnStatus: string | undefined;
 }) {
+  // plan-75-334 阶段0：记录组件渲染（仅采集期间统计，零开销）
+  recordComponentRender("turnGroup");
+  
   const requestRollbackPreview = useChatStore((s) => s.requestRollbackPreview);
-  /** 全局运行态：turn 行状态未知时用于判定是否仍在执行（parent 传入的 isRunning 只表示"本 turn"） */
-  const globalRunning = useChatStore((s) => s.isRunning);
   const items = entry.items;
   const turnId = entry.turnId;
+
+  /** plan-41-228：turn 内 ERROR 消息与末尾错误卡（FlowErrorCard）是同一错误的两个渲染位。
+   *  flowError 命中本 turn（或该 turn 已被「关闭」）时由末尾卡独家呈现（带重试/关闭），
+   *  这里不再重复渲染同一条错误。 */
+  const suppressTurnError =
+    flow === "main" && turnId != null
+    && (flowErrorTurnId === turnId || hiddenTurnErrors.includes(turnId));
 
   // v41: 首条用户消息（turn 触发消息）固定渲染在 turn 顶部用户消息区；
   // 其余 user item 为运行中注入，就地渲染在时间序位置（见 flowItems）
@@ -151,9 +185,8 @@ export const TurnGroup = memo(function TurnGroup({
   // plan-865 折叠口径：只折叠「最终汇报（最后一条 text）之前」的 AI 执行过程
   // （思考/工具/中间说明/计划预览消息及计划卡）；最终汇报与操作行始终展示。
   // 异常中断（interrupted/failed/rolled_back）不折叠（错误与过程必须可见）。
-  const turnRowStatus = useChatStore((s) =>
-    entry.turnId != null ? getTurnById(s.turns, entry.turnId)?.status : undefined
-  );
+  // plan-75-334 阶段1：本 turn 行状态由父层统一查询后传入（原先每个 TurnGroup 各自查 turns）
+  const turnRowStatus = turnStatus;
   const abnormalTurn = turnRowStatus === "interrupted" || turnRowStatus === "failed" || turnRowStatus === "rolled_back";
 
   /** plan-282-1416（问题2 根治）：操作行门控由「全局 isRunning」改为「本 turn 行状态」。
@@ -223,10 +256,17 @@ export const TurnGroup = memo(function TurnGroup({
   // 子代理面板的 turn 行状态取自主会话 turns——计划等待语义不适用，否则面板会被一直保持展开
   const isAwaitingConfirmation = flow !== "subagent" && turnRowStatus === "awaiting_confirmation";
   const [userToggledCollapsed, setUserToggledCollapsed] = useState<boolean | null>(null);
+  /** plan-41-198: turn 内是否存在运行期注入的用户消息（非首条）。
+   *  它属于用户输入而非 AI 执行过程，被默认折叠（max-height:0 + opacity:0）后
+   *  用户会以为消息没发出去；故含注入消息的 turn 完成后默认展开，仍可由计时条手动收起。 */
+  const hasInjectedUser = useMemo(
+    () => items.some((it, index) => it.kind === "user" && index !== firstUserIdx),
+    [items, firstUserIdx]
+  );
   const processCollapsed =
     userToggledCollapsed !== null
       ? userToggledCollapsed
-      : (!isRunning && hasProcess && !isAwaitingConfirmation);
+      : (!isRunning && hasProcess && !isAwaitingConfirmation && !hasInjectedUser);
 
   let lastThinkingIdx = -1;
   for (let k = items.length - 1; k >= 0; k--) {
@@ -259,13 +299,7 @@ export const TurnGroup = memo(function TurnGroup({
 
   /** plan-282-1416（问题2）：全局最近一条用户消息 id——该条操作行常显，
    *  保证任务异常终止 / 手动停止后无需 hover 就能看到复制与回滚。
-   *  从尾部回溯并提前 break，避免长会话下每次 store 变更全量扫描。 */
-  const latestUserId = useChatStore((s) => {
-    for (let k = s.messages.length - 1; k >= 0; k--) {
-      if (s.messages[k].sender_type === "user") return s.messages[k].id;
-    }
-    return -1;
-  });
+   *  plan-75-334 阶段1：改由父层一次性扫描消息尾部后经 props 传入（不再每实例重复扫描）。 */
 
   const rollbackFn = useCallback(() => {
     if (turnId != null) requestRollbackPreview(turnId);
@@ -437,6 +471,8 @@ export const TurnGroup = memo(function TurnGroup({
           </div>
         );
       case "error":
+        // plan-41-228：与末尾错误卡重复的那条不再渲染（见 suppressTurnError）
+        if (suppressTurnError) return null;
         return (
           <div key={i} className="turn-item turn-item-error">
             {/* plan-282-1416：内联 SVG 收编为图标库 IconAlertCircle */}

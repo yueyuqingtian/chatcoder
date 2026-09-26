@@ -7,7 +7,7 @@ import { useEffect, useState } from "react";
 import type { NavKey } from "./Sidebar";
 import { ChatPanel } from "./ChatPanel";
 import { ScheduledPage } from "./NavPages";
-import { ExtensionsPanel } from "./settings/ExtensionsPanel";
+import { MarketPanel } from "./settings/MarketPanel";
 import { useChatStore } from "../store/chat";
 import { useI18n } from "../store/i18n";
 import { api, type SkillOut } from "../api/client";
@@ -15,7 +15,7 @@ import { ComposerCore } from "./chat/ComposerCore";
 import { PluginSlot } from "../plugins/registry";
 import { AppLogo } from "./AppLogo";
 import { PageTransition } from "./ui";
-import { IconAlertTriangle, IconBox, IconBookOpen, IconCheckSquare, IconSearch } from "./icons";
+import { IconAlertTriangle, IconBox, IconBookOpen, IconCheckSquare, IconClipboard, IconSearch, IconZap } from "./icons";
 
 export function Workspace({ nav, onSessionStart }: {
   nav: NavKey | null;
@@ -27,18 +27,12 @@ export function Workspace({ nav, onSessionStart }: {
     return (
       <main className="workspace">
         {/* plan-282-1421（第3项）：导航页切换过渡（id=nav 变化即播放一次入场） */}
-        <PageTransition id={nav} className="ws-body ws-navpage">
+        <PageTransition id={nav} className={"ws-body ws-navpage" + (nav === "skills" ? " is-fill" : "")}>
           {nav === "scheduled" && <ScheduledPage />}
-          {/* plan-282-1441（#6）：左面板「拓展」复用设置页同一面板，保证两处内容一致。
-              必须套 .ext-page 容器：该面板原本只在设置页（有 PageShell 提供内距与限宽）里渲染，
-              直接放进导航页会紧贴窗口边缘、排版混乱（用户反馈）。 */}
-          {nav === "skills" && (
-            <div className="ext-page">
-              <h1 className="automation-title">拓展</h1>
-              <p className="automation-sub">管理插件、技能与连接器；启用后可在聊天中通过 / 引用。</p>
-              <ExtensionsPanel />
-            </div>
-          )}
+          {/* plan-41-198：左面板「拓展」= 市场视图（浏览与安装）；设置页「扩展管理」只展示
+              已安装内容。MarketPanel 自带头部与内容滚动区，容器加 is-fill 让外层不再滚动
+              （滚动发生在其内部 .market-scroll），实现「头部固定 + 内容滑动」。 */}
+          {nav === "skills" && <MarketPanel />}
         </PageTransition>
       </main>
     );
@@ -75,12 +69,16 @@ function getGreetingKey(): string {
   return "workspace.greet_evening";
 }
 
-/** plan-219: 快捷动作 chips（编码场景，点击预填输入框） */
+/** plan-219: 快捷动作 chips（编码场景，点击预填输入框）
+ *  S16（plan-41-197）：扩充为 6 个有特色的细化模板（新增排查报错 / 安全重构），
+ *  提示词写明角色、步骤与输出要求，替换此前“一句话占位”式文案。 */
 const QUICK_ACTIONS = [
   { icon: IconAlertTriangle, labelKey: "workspace.quick_fix", promptKey: "workspace.quick_fix_prompt" },
+  { icon: IconZap, labelKey: "workspace.quick_triage", promptKey: "workspace.quick_triage_prompt" },
   { icon: IconCheckSquare, labelKey: "workspace.quick_test", promptKey: "workspace.quick_test_prompt" },
   { icon: IconSearch, labelKey: "workspace.quick_review", promptKey: "workspace.quick_review_prompt" },
   { icon: IconBookOpen, labelKey: "workspace.quick_explain", promptKey: "workspace.quick_explain_prompt" },
+  { icon: IconClipboard, labelKey: "workspace.quick_refactor", promptKey: "workspace.quick_refactor_prompt" },
 ];
 
 /** 空态首页（plan-219：水印 + 问候语 + 副标题 + 输入卡片 + 快捷 chips + 技能 chips） */

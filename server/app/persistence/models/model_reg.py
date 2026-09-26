@@ -44,6 +44,9 @@ class Provider(Base):
     proxy_url: Mapped[str | None] = mapped_column(String(255))
     # plan-271-1364: 凭据取用策略（sticky=粘性优先 | round_robin=按优先级轮转）
     credential_strategy: Mapped[str] = mapped_column(String(16), default="sticky")
+    # plan-41-225: 供应商手动排序位（用户在模型页左列拖拽调整顺序）。
+    # 0 = 未排序，列表由 id 兜底——保证老库升级后顺序与升级前完全一致（零感知）。
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[str] = mapped_column(server_default=func.now())
 
 

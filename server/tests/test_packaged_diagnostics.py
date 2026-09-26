@@ -128,7 +128,9 @@ def test_terminal_tool_importable_after_patch():
     from app.orchestration.tools.terminal import TerminalExecTool
     tool = TerminalExecTool()
     assert tool.name == "terminal_exec"
-    assert tool.approval_precheck({}, None) == (False, "命令为空")
+    # plan-75-332: 工具不再自行决定免审——钩子恒返回"不豁免"，
+    # 是否放行统一由 approval_policy.decide() 判定。
+    assert tool.approval_precheck({}, None) == (False, "")
 
 
 def test_terminal_timeout_path_emits_diagnostics(caplog):

@@ -15,7 +15,7 @@ import { SettingsContent, type SettingsTab } from "./components/settings";
 import { CommandCenter } from "./components/CommandCenter";
 import { ArchivedProjectPrompt } from "./components/ArchivedProjectPrompt";
 import { PluginSlot } from "./plugins/registry";
-import { PageTransition } from "./components/ui";
+import { NativeTitleTooltip, PageTransition, TooltipProvider } from "./components/ui";
 import { useUiStore, initUi } from "./store/ui";
 import { usePanelStore } from "./store/panel";
 import { useChatStore } from "./store/chat";
@@ -42,6 +42,8 @@ export default function App() {
   // 两个开屏叠在一起会先看到「加载中」再闪一个「无加载图标的 logo」，观感割裂。
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [nav, setNav] = useState<NavKey | null>(null);
+  // plan-41-233：右面板状态按会话分桶，这里跟随会话切换同步「当前桶」。
+  const currentSessionId = useChatStore((s) => s.currentSessionId);
   // 进入设置前的位置：首页用 null + 空会话 ID 与消息页区分。
   const [returnLocation, setReturnLocation] = useState<{ nav: NavKey | null; sessionId: number | null }>({ nav: null, sessionId: null });
   const [settingsTab, setSettingsTab] = useState<string | undefined>(undefined);
@@ -138,7 +140,7 @@ export default function App() {
       useChatStore.setState({ currentSessionId: null, ...{
         messages: [], turns: [], tasks: [], runningTurnId: null, isRunning: false,
         interruptedTurnId: null, streamingBuffers: {}, thinkingBuffers: {}, usage: null,
-        pendingApproval: null, pendingPlan: null, reviewedFiles: {}, injectMarks: [],
+        pendingApproval: null, pendingPlan: null, reviewedFiles: {},
       } });
     }
     // 退出设置页后自动刷新模型列表
@@ -151,6 +153,12 @@ export default function App() {
     }, 50);
   }, [returnLocation, toggleRightPanel]);
 
+  // plan-41-233：会话切换时把右面板投影切到该会话的桶（旧会话的终端/浏览器实例继续保活，
+  // 切回时原样恢复；不再出现「A 会话的子代理标签残留在 B 会话面板」）。
+  useEffect(() => {
+    usePanelStore.getState().setActiveSession(currentSessionId);
+  }, [currentSessionId]);
+
   // v16: 模型选择器「管理模型」入口 —— 打开设置页并定位到模型 tab
   useEffect(() => {
     const handler = (e: Event) => {
@@ -159,6 +167,43 @@ export default function App() {
     };
     window.addEventListener("chatcoder:open-settings", handler);
     return () => window.removeEventListener("chatcoder:open-settings", handler);
+  }, [openSettings]);
+  // S14（plan-41-197）：反向通道——设置页内容区需要“离开设置页进入刚打开的会话”时
+  // （如归档恢复并打开），由内容区派发该事件：退出设置并回到工作区。
+  // 与 leaveSettings 的差异：**不按入场快照重置 currentSessionId**——调用方刚刚
+  // switchSession 切到目标会话，若在这里重置会话会被清掉（“点了恢复并打开却没进会话”）。
+  useEffect(() => {
+    const handler = (e: Event) => {
+      // plan-41-198：detail.nav 指定离开设置后的落点——设置页「扩展管理 → 前往市场」
+      // 需要直接落到左面板「拓展」（nav=skills），而不是回入场快照的会话。
+      const targetNav = (e as CustomEvent<{ nav?: string }>).detail?.nav;
+      if (settingsPanelExpandedRef.current) toggleRightPanel();
+      setNav((targetNav as NavKey | undefined) ?? null);
+      void useChatStore.getState().loadModels();
+      window.setTimeout(() => {
+        window.dispatchEvent(new CustomEvent("chatcoder:focus-composer"));
+      }, 50);
+    };
+    window.addEventListener("chatcoder:leave-settings", handler);
+    return () => window.removeEventListener("chatcoder:leave-settings", handler);
+  }, [toggleRightPanel]);
+
+  // plan-73-323：宠物面板 → 主窗的两个入口
+  //  ①「查看会话」：切到目标会话并退出设置页（复用 switchSession 与既有 leave-settings 通道，
+  //    该通道不重置 currentSessionId，所以刚切的会话不会被盖掉）；
+  //  ② 面板底部齿轮：打开「设置 → 宠物」。
+  useEffect(() => {
+    const offFocus = window.chatcoderAPI?.onPetFocusSession?.((sessionId) => {
+      void useChatStore.getState().switchSession(sessionId);
+      window.dispatchEvent(new CustomEvent("chatcoder:leave-settings"));
+    });
+    const offSettings = window.chatcoderAPI?.onPetOpenSettings?.(() => {
+      openSettings("pets");
+    });
+    return () => {
+      offFocus?.();
+      offSettings?.();
+    };
   }, [openSettings]);
   // v19: 命令中心跳转设置 tab 同步
   useEffect(() => {
@@ -175,6 +220,12 @@ export default function App() {
 
   return (
     <ErrorBoundary>
+      {/* S0（plan-41-197）：全局 Tooltip Provider —— 所有 ui/Tooltip 消费点
+          （侧栏/顶栏/右面板/设置页图标按钮）共享统一展示延迟（200ms）。 */}
+      <TooltipProvider>
+      {/* S1（plan-41-197）：接管存量原生 title——全站悬停提示统一为圆角卡片浮层，
+          与 ui/Tooltip 共享展示延迟（不再出现浏览器自带的方形浮块）。 */}
+      <NativeTitleTooltip />
       <div className="app-shell">
         <Toast />
         <RollbackConfirmModal />
@@ -196,8 +247,10 @@ export default function App() {
             消息流文本逐帧折行（用户反馈「拖拽时排版不实时」）。性能改由 PerfBus 零读预算兜。 */}
         {!sidebarCollapsed && <ResizeHandle side="left" baseWidth={leftPanelWidth} minWidth={200} maxWidth={480} reservePx={370} panelEl={leftPanelElRef} onCommit={setLeftPanelWidth} />}
         <div className="app-right">
-          {/* v19: 标题栏与右面板经插件 slot 渲染 */}
-          <PluginSlot slot="titlebar" leftCollapsed={sidebarCollapsed} rightCollapsed={!rightExpanded} settings={nav === "settings"} onToggleLeft={toggleSidebar} onToggleRight={toggleRightPanel} />
+          {/* v19: 标题栏与右面板经插件 slot 渲染。
+              plan-41-233：页面态（拓展/定时任务/设置等 nav 页）传 page——隐藏会话标题、项目
+              与右侧图标组；左侧 logo/折叠/前进后退保留，页面态的会话聚焦由 Sidebar 抑制。 */}
+          <PluginSlot slot="titlebar" leftCollapsed={sidebarCollapsed} rightCollapsed={!rightExpanded} page={nav !== null && nav !== "chat"} onToggleLeft={toggleSidebar} onToggleRight={toggleRightPanel} onSessionFocus={() => setNav(null)} />
           <div className="app-body">
             <main ref={mainElRef} className={`app-main${!rightExpanded ? " right-panel-collapsed" : ""}`}>
               {/* plan-282-1421（第3项）：设置 ↔ 工作区切换过渡（id 为页面标识）。
@@ -214,11 +267,14 @@ export default function App() {
                 右面板内的 Monaco/xterm 不逐帧重排，松手后由收敛序列一次解冻。 */}
             {rightExpanded && !rightFullscreen && <ResizeHandle side="right" baseWidth={rightPanelWidth} minWidth={280} maxWidth={1200} reservePx={490} panelEl={rightPanelElRef} onCommit={setRightPanelWidth} freezeRefs={[rightPanelElRef]} />}
             <div ref={rightPanelElRef} className={`app-pane app-pane-right${rightExpanded ? "" : " collapsed"}${rightFullscreen ? " fullscreen" : ""}`} style={{ width: rightExpanded ? (rightFullscreen ? "100%" : `${rightPanelWidth}px`) : "0px", flexBasis: rightExpanded ? (rightFullscreen ? "100%" : `${rightPanelWidth}px`) : "0px" }}>
-              {rightExpanded && <PluginSlot slot="right-panel" />}
+              {/* plan-41-233：内容常驻挂载——折叠只变几何（width:0 + visibility:hidden），
+                  终端 PTY 与浏览器页面不再因折叠被卸载重建（用户诉求：折叠再展开保留状态）。 */}
+              <PluginSlot slot="right-panel" />
             </div>
           </div>
         </div>
       </div>
+      </TooltipProvider>
     </ErrorBoundary>
   );
 }

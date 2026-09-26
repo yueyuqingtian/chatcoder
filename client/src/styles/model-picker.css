@@ -6,7 +6,7 @@
   z-index: 1200;
   min-width: 236px;
   padding: 5px;
-  border-radius: 10px;
+  border-radius: var(--r-lg);
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   box-shadow: var(--shadow-md);
@@ -14,24 +14,24 @@
   flex-direction: column;
   gap: 1px;
 }
-.mp-sub-menu { min-width: 236px; }
+.mp-sub-menu { min-width: 236px; max-height: min(60vh, 420px); overflow-y: auto; }
 .mp-menu-head { padding: 5px 8px 6px; font-size: 11px; color: var(--text-3); text-align: left; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mp-label { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mp-models-empty { padding: 10px 8px; font-size: 11px; color: var(--text-3); text-align: center; }
 /* 一级：供应商行——单行省略 + 右侧 ›（当前模型所在项显示 ✓） */
-.mp-group { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border-radius: 7px; font-size: 12.5px; color: var(--text-2); cursor: pointer; border: none; background: transparent; text-align: left; outline: none; transition: background var(--dur-fast), color var(--dur-fast); }
+.mp-group { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border-radius: var(--r-md); font-size: 12.5px; color: var(--text-2); cursor: pointer; border: none; background: transparent; text-align: left; outline: none; transition: background var(--dur-fast), color var(--dur-fast); }
 .mp-group[data-highlighted], .mp-group[data-state="open"] { background: var(--bg-hover); color: var(--text-1); }
 .mp-group-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 .mp-group-arrow { flex-shrink: 0; display: inline-flex; color: var(--text-3); opacity: .5; }
 .mp-group-current { flex-shrink: 0; display: inline-flex; color: var(--accent); }
 /* workbuddy 积分徽标（一级供应商行 / 二级菜单头） */
-.mp-credits { display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; font-size: 10px; font-weight: 400; color: var(--success); white-space: nowrap; }
+.mp-credits { display: inline-flex; align-items: center; justify-content: flex-end; gap: 3px; flex-shrink: 0; min-width: 62px; font-size: 10px; font-weight: 400; color: var(--success); white-space: nowrap; }
 .mp-credits-refresh { display: inline-flex; align-items: center; justify-content: center; padding: 2px; border-radius: 4px; color: var(--text-3); cursor: pointer; }
 .mp-credits-refresh:hover { color: var(--text-1); background: var(--bg-active); }
 .mp-credits-refresh.busy { opacity: .4; pointer-events: none; }
 .mp-menu-head .mp-credits { margin-left: 8px; }
 /* 二级：模型行——选中项以左侧 ✓ + 底色区分 */
-.mp-item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border-radius: 7px; font-size: 12.5px; color: var(--text-1); cursor: pointer; border: none; background: transparent; text-align: left; outline: none; transition: background var(--dur-fast); }
+.mp-item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border-radius: var(--r-md); font-size: 12.5px; color: var(--text-1); cursor: pointer; border: none; background: transparent; text-align: left; outline: none; transition: background var(--dur-fast); }
 .mp-item[data-highlighted] { background: var(--bg-hover); }
 .mp-item.active { background: var(--bg-active); }
 .mp-item-check { flex-shrink: 0; width: 14px; display: inline-flex; align-items: center; justify-content: center; color: var(--accent); }
@@ -60,41 +60,96 @@
  * plan-248-1258 M2.5: 模型设置页双栏布局（参照 zcode 模型设置）
  * 左：供应商列表；右：详情（名称/URL/格式/凭据/代理/模型）
  * ═══════════════════════════════════════════════════════════ */
-.models-page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-.models-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 4px 2px 14px; }
-.models-head-title { font-size: 20px; font-weight: 700; color: var(--text-1); }
-.models-head-sub { font-size: 12px; color: var(--text-3); margin-top: 4px; }
+/* S6（plan-41-197）：高度固定为内容面板的 80%——上下限兜底，避免小窗塌陷/大屏过长；
+   整页承载单卡片（见 .models-body），不再依赖外层 Card 包一层。 */
+.models-page { display: flex; flex-direction: column; height: 80vh; min-height: 460px; max-height: 880px; }
+.models-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 0 2px 12px; }
+/* S18（plan-41-197b）：字号/行高与设置页其它 tab 的 .ui-page-title 完全一致
+   （20px / 行高 28px / 600 字重），自带标题区与外层标题区切换时视觉连续、无跳动。 */
+.models-head-title { font-size: 20px; font-weight: 600; line-height: 28px; letter-spacing: -0.2px; color: var(--text-1); }
+.models-head-sub { font-size: 12px; line-height: 18px; color: var(--text-3); margin-top: 2px; }
 .models-head-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 
 .models-body {
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
-  gap: 14px;
+  grid-template-columns: 256px minmax(0, 1fr);
   min-height: 0;
   flex: 1;
+  /* S6：单卡片左右衔接——左右两栏共享同一外框与圆角，中间以 1px 分隔线分隔
+     （左列 border-right），不再“卡片套卡片”。 */
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  /* S18（plan-41-197b）：卡片内部用 --color-card（浅色纯白 / 深色中性灰），
+     与页面画布底色形成内外区分；左右列背景透明以继承此色。 */
+  background: var(--color-card);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
 }
 @media (max-width: 900px) {
   .models-body { grid-template-columns: 1fr; }
 }
 
-/* ── 左列 ── */
-.models-side {
-  display: flex; flex-direction: column; gap: 2px;
-  border: 1px solid var(--border); border-radius: var(--r-lg);
-  background: var(--bg-main); padding: 8px; overflow-y: auto;
+/* ── 左列（plan-41-225 重构）：无分组标题 + 拖拽排序 + 末尾添加入口 ──
+   行高 36px / 行距 2px = 拖拽步距 38px（与 ProviderSideList.tsx 的 STEP 常量一致，
+   两处必须同步修改，否则会出现“错位半行”）。 */
+.models-side { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--border); background: transparent; }
+.models-side-scroll {
+  flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable;
+  padding: 10px; display: flex; flex-direction: column; gap: 2px;
+  /* 防止浏览器原生文本拖拽抢走指针事件（与手柄拖拽冲突） */
+  user-select: none;
 }
-.models-side-group { font-size: 11px; color: var(--text-3); padding: 8px 8px 4px; }
+/* 行容器：手柄绝对定位在其中（不占文档流 → 出现/消失不引起列表位移） */
+.models-side-row { position: relative; }
+.models-drag-handle {
+  position: absolute; left: 4px; top: 50%; transform: translateY(-50%);
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px; border-radius: var(--r-sm);
+  color: var(--text-3); opacity: 0; cursor: grab;
+  transition: opacity var(--dur-2) var(--ease-standard);
+}
+/* 常态隐藏保证列表干净；hover / 键盘聚焦时淡入（保证键盘可达） */
+.models-side-row:hover .models-drag-handle { opacity: 0.55; }
+.models-drag-handle:hover { opacity: 1; }
+.models-drag-handle:focus-visible { opacity: 1; outline: none; box-shadow: 0 0 0 2px var(--bg-active); }
+.models-drag-handle:active { cursor: grabbing; }
 .models-side-item {
   display: flex; align-items: center; gap: 8px;
-  padding: 6px 8px; border: none; border-radius: var(--r-sm);
+  /* 左内距 22 = 4(手柄 left) + 14(手柄宽) + 4(间距)，与绝对定位的手柄错开 */
+  height: 36px; padding: 0 8px 0 22px;
+  border: none; border-radius: var(--r-md);
   background: transparent; color: var(--text-1); font-size: 13px;
   cursor: pointer; text-align: left; width: 100%;
-  transition: background var(--dur-2) var(--ease-standard);
+  transition: background var(--dur-2) var(--ease-standard),
+    transform var(--dur-2) var(--ease-standard),
+    box-shadow var(--dur-2) var(--ease-standard),
+    opacity var(--dur-2) var(--ease-standard);
 }
 .models-side-item:hover { background: var(--bg-hover); }
-.models-side-item.active { background: var(--bg-selected, var(--bg-hover)); font-weight: 500; }
+.models-side-item.active { background: var(--bg-active); font-weight: 500; }
 .models-side-item.static { cursor: default; }
+/* 拖拽中：浮起（阴影 + 微透明）并置上层；transition:none 保证跟手无延迟 */
+.models-side-item.dragging { box-shadow: var(--shadow-md); opacity: 0.92; z-index: 1; cursor: grabbing; transition: none; }
+/* 拖拽期间整列禁用文本选择，避免选区高亮闪烁 */
+.models-side-scroll.is-dragging { user-select: none; }
+/* 添加入口：列表流末尾（“加在最后”的列表心智），行式、无底色、hover 变浅底 */
+.models-side-add {
+  display: flex; align-items: center; gap: 6px;
+  height: 36px; padding: 0 8px 0 22px; margin-top: 2px;
+  border: none; border-radius: var(--r-md); background: transparent;
+  color: var(--text-2); font-size: 13px; text-align: left; width: 100%; cursor: pointer;
+  transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard);
+}
+.models-side-add:hover { background: var(--bg-hover); color: var(--text-1); }
+/* 独立模型区：末端小标题 + 上方细分隔线（弱分隔，不与供应商抢层级） */
+.models-side-group {
+  display: flex; align-items: center;
+  font-size: 11px; color: var(--text-3);
+  padding: 10px 8px 4px; margin-top: 8px; border-top: 1px solid var(--border);
+}
 .models-side-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* S6：供应商图标——首字母色块（与状态圆点分工：图标回答“是谁”，圆点回答“状态”） */
+.models-side-icon { width: 20px; height: 20px; border-radius: var(--r-sm); display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; color: var(--text-2); background: var(--bg-hover); flex-shrink: 0; }
 .models-side-badge { font-size: 10px; color: var(--text-3); background: var(--bg-hover); border-radius: var(--r-xs); padding: 1px 5px; }
 .models-side-empty { padding: 8px; font-size: 12px; color: var(--text-3); }
 .models-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: var(--text-3); }
@@ -102,15 +157,25 @@
 .models-dot.off { background: var(--text-3); opacity: 0.4; }
 .models-dot.warn { background: var(--warning); }
 
-/* ── 右列 ── */
+/* ── 右列：详情（与左列同一卡片内，独立滚动）── */
 .models-detail {
   display: flex; flex-direction: column; gap: 14px;
-  border: 1px solid var(--border); border-radius: var(--r-lg);
-  background: var(--bg-main); padding: 16px; overflow-y: auto; min-height: 0;
+  background: transparent; padding: 16px; overflow-y: auto; min-height: 0;
 }
 .models-detail-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; height: 100%; color: var(--text-3); font-size: 13px; }
-.models-detail-loading { position: sticky; top: -16px; z-index: 2; margin: -16px -16px -6px; padding: 7px 12px; background: color-mix(in oklab, var(--bg-main) 94%, transparent); border-bottom: 1px solid var(--border); color: var(--text-3); font-size: 11px; text-align: center; backdrop-filter: blur(6px); }
+.models-detail-loading { position: sticky; top: -16px; z-index: 2; margin: -16px -16px -6px; padding: 7px 12px; background: color-mix(in oklab, var(--color-card) 94%, transparent); border-bottom: 1px solid var(--border); color: var(--text-3); font-size: 11px; text-align: center; backdrop-filter: blur(6px); }
 .models-detail-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* plan-41-225（右列照图）：名称常态为标题（点铅笔才进入编辑） */
+.models-detail-name { max-width: 320px; font-size: 16px; font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 状态胶囊：当前态（绿底带勾）/ 非当前态（中性）—— 与「禁用/启用」文字按钮构成“状态 + 动作”双通道 */
+.models-status-pill { display: inline-flex; align-items: center; gap: 3px; padding: 2px 8px; border-radius: 999px; background: var(--bg-hover); color: var(--text-3); font-size: 11px; white-space: nowrap; flex-shrink: 0; }
+.models-status-pill.on { background: color-mix(in oklab, var(--success) 16%, transparent); color: var(--success); }
+/* Key 行：密码框 + 显隐按钮 */
+.models-key-row { display: flex; align-items: center; gap: var(--sp-2); }
+.models-key-row > .ui-input { flex: 1; min-width: 0; }
+/* 多凭据附属入口：轻量文字按钮（主区只留一个 Key 框） */
+.models-cred-toggle { align-self: flex-start; margin-top: 6px; padding: 0; border: none; background: transparent; color: var(--text-3); font-size: 12px; cursor: pointer; }
+.models-cred-toggle:hover { color: var(--text-1); }
 .models-name-input {
   font-size: 16px; font-weight: 600; color: var(--text-1);
   background: transparent; border: 1px solid transparent; border-radius: var(--r-sm);
@@ -159,6 +224,18 @@
 
 /* 模型行 */
 .models-model-list { display: flex; flex-direction: column; gap: 4px; }
+/* S18（plan-41-197b）：模型列表底部的「+ 添加模型」——虚线框、内容宽度左对齐（复刻参考图） */
+.models-add-model {
+  align-self: flex-start;
+  display: inline-flex; align-items: center; gap: 6px;
+  height: var(--btn-h-sm); padding: 0 var(--btn-px-sm);
+  margin-top: 2px;
+  border: 1px dashed var(--border-strong); border-radius: var(--r-md);
+  background: transparent; color: var(--text-2);
+  font-size: 12px; cursor: pointer;
+  transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard), border-color var(--dur-2) var(--ease-standard);
+}
+.models-add-model:hover { background: var(--bg-hover); color: var(--text-1); border-color: var(--border-hover); }
 .models-model-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--r-sm); }
 .models-model-main { flex: 1; min-width: 0; }
 .models-model-name { font-size: 12.5px; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

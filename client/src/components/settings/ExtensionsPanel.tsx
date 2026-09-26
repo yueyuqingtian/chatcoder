@@ -28,6 +28,30 @@ const SUBTABS: Array<{ key: SubTab; label: string; icon: React.ReactNode }> = [
   { key: "connectors", label: "连接器", icon: <IconPlug size={13} /> },
 ];
 
+/** S9（plan-41-197）：英文说明的中文化兜底——多数本机插件 manifest 只有英文 description，
+ *  直接铺给用户看不懂。此处按常见能力词条给出中文能力标签；
+ *  未命中时提示“详见详情”，不强行机翻产生歧义。 */
+const EN_ZH_TAGS: Array<[RegExp, string]> = [
+  [/code review|review/i, "代码评审"],
+  [/\btest(s|ing)?\b|unit test/i, "测试"],
+  [/lint|format/i, "代码检查"],
+  [/database|sql|query/i, "数据库"],
+  [/deploy|ci\/cd|devops|release/i, "部署运维"],
+  [/doc(s|umentation)?\b|readme/i, "文档"],
+  [/security|audit|scan/i, "安全"],
+  [/design|frontend|\bui\b/i, "前端设计"],
+  [/git/i, "版本控制"],
+  [/workflow|automat/i, "工作流自动化"],
+];
+const hasZh = (s: string) => /[\u4e00-\u9fff]/.test(s);
+function zhTagsFor(text: string): string[] {
+  const out: string[] = [];
+  for (const [re, label] of EN_ZH_TAGS) {
+    if (re.test(text) && !out.includes(label)) out.push(label);
+  }
+  return out.slice(0, 4);
+}
+
 /** 市场分类（"全部"由代码补入；其余从条目聚合，保证分类条始终反映真实数据） */
 const DEFAULT_CATEGORIES = [
   "全部", "精选", "办公效率", "内容创作", "代码开发", "代码评审",
@@ -202,6 +226,8 @@ function PluginsCatalog() {
         </div>
       </div>
 
+      {/* S9（plan-41-197）：搜索 + 分类条整体吸顶（子标签下方 40px），仅卡片区滚动 */}
+      <div className="catalog-sticky">
       <div className="catalog-toolbar">
         <div className="catalog-search">
           <IconSearch size={13} />
@@ -232,6 +258,7 @@ function PluginsCatalog() {
           <button className={sort === "hot" ? "active" : ""} onClick={() => setSort("hot")}>热门</button>
           <button className={sort === "new" ? "active" : ""} onClick={() => setSort("new")}>最新</button>
         </div>
+      </div>
       </div>
 
       {/* 卡片网格 */}
@@ -265,6 +292,13 @@ function PluginsCatalog() {
             <div className="catalog-card-desc" title={item.descriptionZh || item.description}>
               {item.descriptionZh || item.description || "无说明"}
             </div>
+            {/* S9：英文说明的插件补一行中文能力标签（本机 manifest 多数只有英文） */}
+            {!item.descriptionZh && !hasZh(item.description || "") && (
+              <div className="catalog-card-zhtags">
+                <b>能力</b>{" "}
+                {zhTagsFor(`${item.name} ${item.displayName} ${item.description || ""} ${(item.tags || []).join(" ")}`).join(" · ") || "详见详情"}
+              </div>
+            )}
             <div className="catalog-card-foot">
               {/* 信息行：分类 · 来源 · 技能数（次级色，独立成行，不再与操作按钮争宽度） */}
               <span className="catalog-card-cat">
@@ -310,7 +344,7 @@ function PluginsCatalog() {
       <Dialog
         open={detail != null}
         onClose={() => setDetail(null)}
-        width={560}
+        width={720}
         title={
           <span className="catalog-dialog-title">
             <span className="catalog-card-icon"><IconBox size={16} /></span>
@@ -351,6 +385,13 @@ function PluginsCatalog() {
         {detail && (
           <div className="catalog-detail">
             <p className="catalog-detail-desc">{detail.descriptionZh || detail.description || "无说明"}</p>
+            {/* S9：英文说明的插件补中文能力标签（本机 manifest 多数只有英文） */}
+            {!detail.descriptionZh && !hasZh(detail.description || "") && (
+              <div className="catalog-card-zhtags">
+                <b>能力</b>{" "}
+                {zhTagsFor(`${detail.name} ${detail.displayName} ${detail.description || ""} ${(detail.tags || []).join(" ")}`).join(" · ") || "详见下方信息"}
+              </div>
+            )}
             {(detail.tags ?? []).length > 0 && (
               <div className="catalog-detail-tags">
                 {(detail.tags ?? []).map((t) => <span key={t} className="catalog-tag">{t}</span>)}

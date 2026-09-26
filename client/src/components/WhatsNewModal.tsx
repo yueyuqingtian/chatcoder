@@ -31,7 +31,7 @@ export function WhatsNewModal() {
       title="本次更新内容"
       subtitle={appVersion ? `当前版本 v${appVersion}` : undefined}
       width={640}
-      actions={
+      footer={
         <button className="btn btn-primary btn-sm" onClick={dismiss}>知道了</button>
       }
     >

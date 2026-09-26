@@ -10,7 +10,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { api, type ModelOut } from "../../api/client";
+import { providerRank } from "../../utils/modelOrder";
 import { IconCpu, IconCheck, IconChevronRight, IconMultimodal, IconRefresh } from "../icons";
+import { useDialogContentHost } from "../ui/Dialog";
 
 interface ModelGroup {
   name: string;
@@ -19,6 +21,8 @@ interface ModelGroup {
   providerId: number | null;
   /** workbuddy 供应商：展示积分余额 + 刷新按钮 */
   workbuddy: boolean;
+  /** plan-89-386: 组排序位（本组供应商在设置页的顺序位；独立模型排最后） */
+  sortOrder: number;
 }
 
 export function openModelSettings() {
@@ -62,6 +66,11 @@ export function ModelPicker({
   /** 菜单弹出方向：输入框贴底用 top（默认）；设置弹窗内用 bottom。 */
   side?: "top" | "bottom";
 }) {
+  // plan-41-227: 弹窗（ui/Dialog）内使用时，菜单 Portal 挂到弹窗内容节点——浮层若挂在 body 下，
+  // 焦点一进入菜单就会被 Dialog 的 FocusScope 判为「弹窗外部」而抢回，级联子菜单刚展开即关闭
+  //（用户反馈：右移鼠标选模型时模型窗消失）。非弹窗场景保持默认 body，行为不变。
+  const overlayHost = useDialogContentHost();
+
   const groups = useMemo<ModelGroup[]>(() => {
     const map = new Map<string, ModelGroup>();
     for (const m of models) {
@@ -73,16 +82,24 @@ export function ModelPicker({
       if (m.api_format === "trae" && !m.trae_available) continue;
       const g = m.provider_name || "独立模型";
       if (!map.has(g)) {
-        map.set(g, { name: g, models: [], providerId: m.provider_id ?? null, workbuddy: m.api_format === "workbuddy" });
+        map.set(g, {
+          name: g, models: [], providerId: m.provider_id ?? null,
+          workbuddy: m.api_format === "workbuddy", sortOrder: providerRank(m),
+        });
       }
       map.get(g)!.models.push(m);
     }
-    // 组内按名称排序，组按名称排序（"独立模型" 排最后）
+    // 组内按名称排序；组按「设置-模型管理」的供应商顺序排序（plan-89-386），
+    // 排序位相同（或老库全为 0）时按供应商 id 兜底（与后端 list_providers 同口径）；
+    // 独立模型的排序位为哨兵值，恒排最后。
     const arr = [...map.values()].map((g) => ({
       ...g,
       models: g.models.sort((a, b) => a.name.localeCompare(b.name)),
     }));
-    arr.sort((a, b) => (a.name === "独立模型" ? 1 : b.name === "独立模型" ? -1 : a.name.localeCompare(b.name)));
+    arr.sort((a, b) =>
+      a.sortOrder - b.sortOrder
+      || (a.providerId ?? 0) - (b.providerId ?? 0)
+      || a.name.localeCompare(b.name));
     return arr;
   }, [models, value]);
 
@@ -149,7 +166,7 @@ export function ModelPicker({
             <span className="mp-label">{label}</span>
           </button>
         </DropdownMenu.Trigger>
-        <DropdownMenu.Portal>
+        <DropdownMenu.Portal container={overlayHost ?? undefined}>
           {/* side=top：输入框贴近窗口底部，向上展开；align=start 与触发按钮左缘对齐，
               保证菜单文本整体左对齐（plan-238-1210）；越界翻转/平移由 avoidCollisions 处理 */}
           <DropdownMenu.Content
@@ -195,11 +212,14 @@ export function ModelPicker({
                           ? <span className="mp-group-current"><IconCheck size={12} /></span>
                           : <span className="mp-group-arrow"><IconChevronRight size={13} /></span>}
                       </DropdownMenu.SubTrigger>
-                      <DropdownMenu.Portal>
+                      <DropdownMenu.Portal container={overlayHost ?? undefined}>
+                        {/* S10（plan-41-197）：子菜单零间隙 + 无对齐偏移——此前 6px 间隙 +
+                            负对齐偏移会让鼠标在“右移选模型”途中掉出 Radix 的指针宽限区，
+                            二级菜单被关闭（用户反馈“右移鼠标后模型窗消失，无法选择模型”）。 */}
                         <DropdownMenu.SubContent
                           className="mp-menu mp-sub-menu"
-                          sideOffset={6}
-                          alignOffset={-5}
+                          sideOffset={0}
+                          alignOffset={0}
                           collisionPadding={8}
                         >
                           <div className="mp-menu-head">{g.name}{renderCredits(g)}</div>

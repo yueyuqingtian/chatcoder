@@ -344,9 +344,12 @@ export interface SessionOut {
   pinned: boolean;
   /** v7: 置顶时间——前端"后置顶在上"排序依据 */
   pinned_at?: string | null;
-  // plan-230-1144 M2: 模式外置为可配置数据，自定义模式名是任意字符串——
-  // 内置 4 值（default/accept_edits/plan/readonly）仅是其中的内置项。
+  // plan-230-1144 M2: 模式外置为可配置数据，自定义模式名是任意字符串。
+  // plan-75-332: 语义改为**执行模式**——内置 3 值（agent/plan/readonly）；
+  // 旧值 default / accept_edits 由后端归一化为 agent。
   permission_mode?: string;
+  // plan-75-332: 权限模式（与执行模式正交）——ask 询问审批 / auto 自动审批 / full 完全访问
+  approval_mode?: string;
   fork_parent_id: number | null;
   worktree_path: string | null;
   has_running?: boolean;
@@ -510,6 +513,10 @@ export interface HookConfigOut {
   command: string;
   matcher: string | null;
   enabled: boolean;
+  /** S12（plan-41-197）：动作类型——command=执行脚本 / prompt=向 AI 注入提示词 */
+  hook_type?: "command" | "prompt";
+  /** 提示词型钩子的注入文本 */
+  prompt?: string | null;
 }
 
 export interface MemoryEntryOut {
@@ -546,6 +553,8 @@ export interface ModelOut {
   reasoning_efforts: string[];
   /** plan-248-1258 M2.4: 所属供应商启用状态（false 时输入框选择器过滤该模型） */
   provider_active?: boolean;
+  /** plan-89-386: 所属供应商排序位（全局模型选择器按设置页供应商顺序展示） */
+  provider_sort_order?: number;
   // trae 供应商扩展（源自 trae_meta）
   trae_max_context?: number | null;        // max 档上下文（如 1000000 = 1M）
   trae_consumption_rate?: number | null;   // 积分消耗倍率（max 档更快）
@@ -573,6 +582,8 @@ export interface ProviderOut {
   active_credential_count?: number;
   /** plan-271-1364: 凭据取用策略（sticky=粘性优先 | round_robin=按优先级轮转） */
   credential_strategy?: string;
+  /** plan-41-225: 供应商排序位（模型页左列拖拽排序依据） */
+  sort_order?: number;
 }
 
 /** plan-248-1258 M2.2: 供应商凭据（多 API Key / 多登录账号） */
@@ -678,7 +689,7 @@ export interface FileDiffOut {
   path: string;
   /** 写盘前内容（新建文件为 null） */
   before: string | null;
-  /** 当前磁盘内容（已删除文件为 null） */
+  /** 写盘后内容（本次编辑口径）/ 当前磁盘内容（整轮累积口径） */
   after: string | null;
   /** 变更行数超限已截断 */
   truncated: boolean;
@@ -686,6 +697,12 @@ export interface FileDiffOut {
   reason?: string | null;
   /** 行级 diff（服务端预计算，优先于 before/after 本地 LCS） */
   lines?: DiffLine[] | null;
+  /** 新增行数（与 lines 同源，卡片 +N -M 与展开内容据此对齐） */
+  additions?: number;
+  /** 删除行数 */
+  deletions?: number;
+  /** true=按 call_key 命中的本次编辑；false=整轮累积（老数据回退） */
+  single_edit?: boolean;
 }
 
 // ── WebSocket 事件 ──

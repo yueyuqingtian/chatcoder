@@ -25,7 +25,7 @@
  *
  * 这一条同时覆盖胶囊与右面板（两处同源），因此"重启后残留进度"不会只在某处复发。
  */
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
 import { useChatStore } from "../../store/chat";
 import type { TaskOut } from "../../api/client";
 
@@ -95,15 +95,22 @@ function withRunningFallback(rows: ProgressRow[], activelyRunning: boolean): Pro
  *  - 该轮已完成 → 不展示（不再命中上一轮陈旧步骤，也不展示本轮的漏标项）；
  *  - 该轮被停止 → 保留未完成项（警示色），便于用户知道还剩什么、继续干。
  */
-export function useProgressRows(): ProgressResult {
+export function useProgressRows(enabled = true): ProgressResult {
   const tasks = useChatStore((s) => s.tasks);
   const todos = useChatStore((s) => s.todos);
   const todosTurnId = useChatStore((s) => s.todosTurnId);
   const turns = useChatStore((s) => s.turns);
   const runningTurnId = useChatStore((s) => s.runningTurnId);
   const isRunning = useChatStore((s) => s.isRunning);
+  /** plan-75-334 阶段3：不可见（面板隐藏）期间的冻结结果。 */
+  const frozenRef = useRef<ProgressResult | null>(null);
 
   return useMemo<ProgressResult>(() => {
+    // plan-75-334 阶段3：enabled=false 时直接复用上次结果，跳过任务扫描与 turn 查找——
+    // 右侧面板隐藏标签不再随主会话每个 delta 重算进度；恢复可见时补算一次。
+    if (!enabled && frozenRef.current) return frozenRef.current;
+    /** 记录本次派生结果作为隐藏期冻结值（所有出口共用）。 */
+    const freeze = (r: ProgressResult): ProgressResult => { frozenRef.current = r; return r; };
     const sessionRunning = isRunning || runningTurnId != null;
 
     /** 判定某轮任务的活跃态。
@@ -133,7 +140,7 @@ export function useProgressRows(): ProgressResult {
       }
       const display = withRunningFallback(list, phase === "running");
       const done = display.filter((r) => r.status === "done").length;
-      return { rows: display, useTodo, done, unfinished: display.length - done, phase };
+      return freeze({ rows: display, useTodo, done, unfinished: display.length - done, phase });
     };
 
     // ① AI 清单优先（todo.updated 事件，运行中实时）
@@ -167,6 +174,6 @@ export function useProgressRows(): ProgressResult {
       return settle(rows, false, phaseOf(turnId));
     }
 
-    return { rows: [], useTodo: false, done: 0, unfinished: 0, phase: "concluded" };
-  }, [tasks, todos, todosTurnId, turns, runningTurnId, isRunning]);
+    return freeze({ rows: [], useTodo: false, done: 0, unfinished: 0, phase: "concluded" });
+  }, [tasks, todos, todosTurnId, turns, runningTurnId, isRunning, enabled]);
 }

@@ -22,11 +22,15 @@ from app.gateway.ws import manager as ws_manager
 from app.models.registry import get_model_registry
 from app.models.schemas import ChatMessage, ChatRequest
 from app.orchestration.agent_events import broadcast
+from app.orchestration.approval_policy import (
+    normalize_approval_mode,
+    normalize_execution_mode,
+)
 from app._diag import log_tool_error, summarize_args  # v36: 工具错误诊断日志
 from app.persistence.database import async_session_factory
 from app.orchestration.tools import ToolContext, tool_executor
 from app.orchestration.tools.registry import tool_registry
-from app.services import message_service, rollback_service, task_service
+from app.services import hook_service, message_service, rollback_service, task_service
 
 logger = logging.getLogger(__name__)
 
@@ -650,25 +654,36 @@ async def run_agent_loop(
     # plan-330-1648 M1: 子代理按类型锁定运行模式（subagent_mode），**不继承会话模式**——
     # 否则主代理处于 plan 模式时，子代理会被 executor 的 plan 规则拒绝写业务文件，
     # 并被“未写计划文档”的纠偏逻辑反复催写 ai/chatcoder-plan-*.md（用户反馈 Bug）。
-    permission_mode = "default"
+    permission_mode = "agent"
     if subagent_mode:
-        permission_mode = str(subagent_mode)
+        permission_mode = normalize_execution_mode(str(subagent_mode))
         logger.info(
-            "[agent] 子代理 turn=%s 运行模式=%s（按类型锁定，不继承会话模式）",
+            "[agent] 子代理 turn=%s 执行模式=%s（按类型锁定，不继承会话模式）",
             turn_id, permission_mode,
         )
     else:
         try:
             from app.persistence.models.message import Session as _Session
             _sess = await db.get(_Session, session_id)
-            permission_mode = getattr(_sess, "permission_mode", None) or "default"
+            permission_mode = normalize_execution_mode(getattr(_sess, "permission_mode", None))
         except Exception:
-            logger.warning("[agent] turn=%s 读取会话权限模式失败，用 default", turn_id, exc_info=True)
+            logger.warning("[agent] turn=%s 读取会话执行模式失败，用 agent", turn_id, exc_info=True)
 
-    # v3.0 (plan-88): 沙箱模式——effective_config 合并默认值（workspace-write）。
-    # 每 turn 计算一次，注入本 turn 所有 ToolContext（主代理/子代理共用此入口）。
-    # v32 (plan-89): 设置中心「常规」新增沙箱模式——项目未显式配置（值为默认）时
-    # 回退到全局设置 settings.sandbox_mode（优先级：项目配置 > 全局设置 > 默认）。
+    # plan-75-332: 权限模式（ask / auto / full）——与执行模式正交，注入本 turn 所有
+    # ToolContext（主代理/子代理共用此入口）。子代理同样继承会话权限模式：子代理的
+    # 写操作也应按用户所选口径裁决，不因是子代理就绕开询问。
+    approval_mode = "ask"
+    try:
+        from app.persistence.models.message import Session as _SessionPM
+        _sess_pm = await db.get(_SessionPM, session_id)
+        approval_mode = normalize_approval_mode(getattr(_sess_pm, "approval_mode", None))
+    except Exception:
+        logger.warning("[agent] turn=%s 读取权限模式失败，用 ask", turn_id, exc_info=True)
+
+    # v3.0 (plan-88): 沙箱模式。
+    # plan-75-332：**已废弃、不再参与任何判定**（read-only / danger-full-access 的
+    # 硬边界已由「执行模式 × 权限模式」取代）。保留计算仅为兼容子代理快照与
+    # ta3 提示词段的旧参数位，避免改动面外溢。
     sandbox_mode = "workspace-write"
     try:
         from app.services import config_service
@@ -787,6 +802,24 @@ async def run_agent_loop(
     _call_sigs: dict[str, int] = {}
     # 待注入提醒（下一步循环构建 api_messages 后追加，避免被重建丢弃）
     _pending_reminders: list[str] = []
+    # plan-64-291: 运行中子代理提醒的节流状态——等待期纪律需「持续在场」。
+    # 主代理一旦在等待期开始自己干，就没有机制把它拉回来（用户实测：子代理仍在跑，
+    # 主代理却把它的活干了，最终重复劳动、token 与时间双倍消耗）。
+    _sub_mgr_for_reminder = (subagent_context or {}).get("manager") if subagent_context else None
+    _subagent_reminded_sig: tuple[int, ...] = ()
+    _subagent_reminded_at_step = 0
+    # S12（plan-41-197）：user_prompt_submit 钩子——每轮任务开始时触发，
+    # 提示词型钩子的文本并入本轮首批提醒（fail-open，不影响主流程）。
+    try:
+        for _hr in await hook_service.run_hooks(
+            db, "user_prompt_submit",
+            {"session_id": session_id, "turn_id": turn_id, "agent_kind": agent_kind},
+        ):
+            _inj = (_hr or {}).get("inject")
+            if _inj:
+                _pending_reminders.append(f"[钩子提示词]\n{_inj}")
+    except Exception:
+        logger.debug("[agent] user_prompt_submit 钩子执行失败(不阻断)", exc_info=True)
     # v31 (plan-89): 本 turn 是否已执行过工具（有产出）——空响应判定依据：
     # 已有产出时 finish=stop 空响应 = 任务完成正常结束（对齐 zcode/AI SDK），
     # 不重试不报错；零产出时保留重试兜底瞬时故障。
@@ -976,12 +1009,35 @@ async def run_agent_loop(
                     "[agent] turn=%s step=%s 注入 todo 提醒（清单 %d 步未更新）",
                     turn_id, step, settings.todo_reminder_interval,
                 )
+            # plan-64-291: 运行中子代理提醒——等待期纪律「持续在场」。
+            # 节流：运行集合变化（新派发/完工）立即注入一次；集合不变时每
+            # _SUBAGENT_REMINDER_STEP_GAP 步才重复一次，避免每步都占上下文。
+            if _sub_mgr_for_reminder is not None:
+                try:
+                    _running_now = _sub_mgr_for_reminder.running_snapshot()
+                except Exception:
+                    _running_now = []
+                _running_sig = tuple(sorted(int(_r.get("agent_id", 0)) for _r in _running_now))
+                if _should_emit_running_reminder(
+                    has_running=bool(_running_now), sig=_running_sig,
+                    last_sig=_subagent_reminded_sig, step=step,
+                    last_step=_subagent_reminded_at_step,
+                ):
+                    _pending_reminders.append(_build_subagent_running_reminder(_running_now))
+                    _subagent_reminded_sig = _running_sig
+                    _subagent_reminded_at_step = step
+                elif not _running_now:
+                    # 全部结束：复位签名，下一批新派发的子代理能立即触发一次提醒
+                    _subagent_reminded_sig = ()
+
             # v2.2: 注入待发的重复调用提醒（上一步工具执行中检测到）
             if _pending_reminders:
                 api_messages = [*api_messages, *[
                     ChatMessage(role="system", content=r) for r in _pending_reminders
                 ]]
-                _pending_reminders = []
+                # S12（plan-41-197）：就地清空（而非重新绑定）——审批回调等闭包共享
+                # 同一列表引用，重新绑定会让闭包持有的引用失效（钩子注入丢失）。
+                _pending_reminders.clear()
 
             # plan-547 C3: plan 模式每次调用注入计划全集与状态标记——
             # 模型在任意一步都看得到完整清单与进度，防止长规划跑偏或遗漏步骤
@@ -1147,14 +1203,19 @@ async def run_agent_loop(
                             logger.warning("[agent] turn=%s step=%s 响应异常重试仍失败: %s",
                                            turn_id, step, _rf[0])
                     if _failure is not None:
+                        # v968: 按配置次数重试穷尽后报错——文案注明已重试次数，
+                        # 用户能明确知道系统已尽力（而非再次误以为"无故中断"）。
+                        _err_text = _reason
+                        if _fatal and _retry_waits:
+                            _err_text = f"{_reason}（已自动重试 {len(_retry_waits)} 次仍失败）"
                         await _emit_agent_msg(
                             db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
                             agent_id=agent_id, agent_name=agent_name,
                             msg_type=MsgType.ERROR,
-                            content={"text": _reason, "agent_name": agent_name},
+                            content={"text": _err_text, "agent_name": agent_name},
                         )
                         if _fatal:
-                            return AgentOutput(kind="error", error=_reason)
+                            return AgentOutput(kind="error", error=_err_text)
             except Exception as api_err:
                 logger.warning("[agent] turn=%s 模型调用失败，尝试修复/压缩: %s", turn_id, str(api_err)[:200])
                 try:
@@ -1183,6 +1244,9 @@ async def run_agent_loop(
                         request = ChatRequest(
                             messages=_retry_api_messages, model="", tools=tool_schemas or None,
                             temperature=settings.agent_tool_temperature if tool_schemas else settings.agent_text_temperature,
+                            # plan-53-258 R3: 重试同样携带思考深度——此前只带 thinking，
+                            # 用户配置的档位在重试时静默失效（首次与重试行为不一致）。
+                            reasoning_effort=reasoning_effort or (settings.agent_reasoning_effort if tool_schemas else None),
                             max_tokens=settings.agent_max_output_tokens or None,
                             session_id=str(session_id),
                             message_id=f"{session_id}-{turn_id}-{step}-fc-retry",
@@ -1214,6 +1278,8 @@ async def run_agent_loop(
                         request = ChatRequest(
                             messages=messages, model="", tools=tool_schemas or None,
                             temperature=settings.agent_tool_temperature if tool_schemas else settings.agent_text_temperature,
+                            # plan-53-258 R3: 紧急压缩重试同样保持思考深度
+                            reasoning_effort=reasoning_effort or (settings.agent_reasoning_effort if tool_schemas else None),
                             max_tokens=settings.agent_max_output_tokens or None,
                             session_id=str(session_id),
                             message_id=f"{session_id}-{turn_id}-{step}-retry",
@@ -1287,6 +1353,8 @@ async def run_agent_loop(
                             request = ChatRequest(
                                 messages=messages, model="", tools=tool_schemas or None,
                                 temperature=settings.agent_tool_temperature if tool_schemas else settings.agent_text_temperature,
+                                # plan-53-258 R3: 瞬时故障重试同样保持思考深度
+                                reasoning_effort=reasoning_effort or (settings.agent_reasoning_effort if tool_schemas else None),
                                 max_tokens=settings.agent_max_output_tokens or None,
                                 session_id=str(session_id),
                                 message_id=f"{session_id}-{turn_id}-{step}-transient-retry-{_ri}",
@@ -1715,9 +1783,25 @@ async def run_agent_loop(
                             cancel_event=cancel_event,
                             db=tdb,
                             permission_mode=permission_mode,
+                            approval_mode=approval_mode,
                             sandbox_mode=sandbox_mode,
+                            reasoning_effort=reasoning_effort,
                             on_tool_output=_emit_tool_output,
                         )
+                        # S12（plan-41-197）：pre_tool_use 钩子——工具调用前触发（可按工具名匹配）；
+                        # 提示词型钩子文本注入下一步上下文，命令型钩子在此执行（fail-open）。
+                        try:
+                            for _hr in await hook_service.run_hooks(
+                                db, "pre_tool_use",
+                                {"tool": tool_name, "args": args,
+                                 "session_id": session_id, "turn_id": turn_id},
+                                matcher_key=tool_name,
+                            ):
+                                _inj = (_hr or {}).get("inject")
+                                if _inj:
+                                    _pending_reminders.append(f"[钩子提示词]\n{_inj}")
+                        except Exception:
+                            logger.debug("[agent] pre_tool_use 钩子执行失败(不阻断)", exc_info=True)
                         _ts0 = time.monotonic()
                         # v9: 写盘工具执行前读取原文件内容（精确回滚依据：只撤销 AI 改动部分）
                         _pre_paths = rollback_service.resolve_write_paths(tool_name, args) if tool_name in _WRITE_TOOLS else []
@@ -1740,7 +1824,7 @@ async def run_agent_loop(
                         _exec_task = asyncio.ensure_future(tool_executor.execute(
                             tool_name=tool_name, args=args, call_key=call_key,
                             agent=agent, ctx=ctx,
-                            on_approval_request=_make_approval_emitter(session_id),
+                            on_approval_request=_make_approval_emitter(session_id, _pending_reminders),
                         ))
                         try:
                             if tool_name == "ask_user_question":
@@ -1785,6 +1869,21 @@ async def run_agent_loop(
                     # v31 (plan-89): 工具已执行（无论成败）即视为有产出——后续空响应
                     # 判定据此豁免 stop 空响应的 fatal，避免"任务完成后误报异常"。
                     _tool_executed = True
+                    # S12（plan-41-197）：post_tool_use 钩子——工具执行完成后触发；
+                    # 提示词型钩子文本注入下一步上下文（fail-open，不阻断）。
+                    try:
+                        for _hr in await hook_service.run_hooks(
+                            db, "post_tool_use",
+                            {"tool": tool_name, "ok": bool(result.ok),
+                             "error": (result.error or "")[:500],
+                             "session_id": session_id, "turn_id": turn_id},
+                            matcher_key=tool_name,
+                        ):
+                            _inj = (_hr or {}).get("inject")
+                            if _inj:
+                                _pending_reminders.append(f"[钩子提示词]\n{_inj}")
+                    except Exception:
+                        logger.debug("[agent] post_tool_use 钩子执行失败(不阻断)", exc_info=True)
 
                     # 写盘工具：登记路径 + 记录 before/after（v9 精确回滚依据）
                     _change_stat = None
@@ -1833,6 +1932,8 @@ async def run_agent_loop(
                                 before=None if _is_bin else _pre_before.get(target),
                                 after=None if _is_bin else _after_text,
                                 binary=_is_bin,
+                                # plan-89-387: 关联工具调用——同轮同文件多次编辑各自独立取 diff
+                                call_key=call_key,
                             )
                             # v2.2 (对齐 zcode 3.7): 行级变更统计（+N -M），工具卡摘要展示
                             if not _is_bin:
@@ -1891,6 +1992,8 @@ async def run_agent_loop(
                                 db, session_id=session_id, turn_id=turn_id, tool=tool_name,
                                 path=target, before=None if _is_bin else _guess_before.get(target),
                                 after=None if _is_bin else _after, binary=_is_bin,
+                                # plan-89-387: 伪装写盘同样关联工具调用（terminal_exec 等）
+                                call_key=call_key,
                             )
                             if _is_bin:
                                 _add = _del = 0
@@ -1922,7 +2025,10 @@ async def run_agent_loop(
                     # v32: 当 AI 调用 browser_* 工具成功时，向前端广播 browser.mirror 事件，驱动右侧面板自动打开与可视化
                     if tool_name.startswith("browser_") and result.ok:
                         _b_action = tool_name.replace("browser_", "")
-                        _b_args = tool_args if isinstance(tool_args, dict) else {}
+                        # plan-75-332 R6 修复：变量名写错（tool_args 从未定义，本处应为
+                        # 同循环内 1631 行的 args）——每次浏览器工具调用成功都会抛 NameError，
+                        # 表现为「浏览器操作已执行、前端却报任务执行出错」。
+                        _b_args = args if isinstance(args, dict) else {}
                         await broadcast(session_id, {
                             "event": "browser.mirror",
                             "payload": {
@@ -1995,6 +2101,18 @@ async def run_agent_loop(
                 if _wait_notes is None:
                     return AgentOutput(kind="cancelled", error="任务被用户中断")
                 if _wait_notes:
+                    # plan-64-289: 本步正文先固化落库再续跑——收工步（无工具调用）的正文
+                    # 原本只在 turn 真正结束时落库（见下方「最终文本」），而此处 turn 要延续，
+                    # 这段「等待汇报」便永不落库：它只留在前端流式缓冲里，随后被下一轮的
+                    # token.done 覆盖 → 表现为「等待汇报消失、新内容刷到上方思考块」。
+                    # 直写（非 buffered）保证 message.created 先于下一轮流式到达。
+                    if response.content:
+                        await message_service.create_message(
+                            db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
+                            sender_type=SenderType.AGENT.value, sender_id=agent_id,
+                            msg_type=MsgType.TEXT.value,
+                            content={"text": response.content, "agent_name": agent_name},
+                        )
                     logger.info("[agent] turn=%s 注入 %d 条子代理完成报告，继续本 turn",
                                 turn_id, len(_wait_notes))
                     messages.append(ChatMessage(
@@ -2044,6 +2162,16 @@ async def run_agent_loop(
                         role="user",
                         content=_reminder,
                     ))
+                    # plan-64-289: 与子代理续跑同理——纠偏续跑时本步正文也需先固化落库，
+                    # 否则它只留在前端流式缓冲里、被下一轮的 token.done 覆盖（内容丢失 + 错位）。
+                    # 直写（非 buffered）保证 message.created 先于下一轮流式到达。
+                    if final_text:
+                        await message_service.create_message(
+                            db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
+                            sender_type=SenderType.AGENT.value, sender_id=agent_id,
+                            msg_type=MsgType.TEXT.value,
+                            content={"text": final_text, "agent_name": agent_name},
+                        )
                     continue
 
             if final_text:
@@ -2188,6 +2316,12 @@ def _response_failure_reason(response, has_progress: bool = False) -> tuple[str,
     纳入 fatal → 按统一重试计划重试（重试带 effort 降档，通常可恢复），穷尽后由
     调用方显式提示异常，不做"把思考提升为正文"的兜底。>10 字符的门槛用于与上方
     "残缺思考片段"判据互斥。
+    v968: 撤销 v31 的 has_progress 豁免——实测网关截断输出流时（HTTP 200 但无
+    content/thinking/tool_calls、无 usage），只要本 turn 执行过工具就会被判
+    "任务完成、主动结束"，turn 静默收尾：用户视角是"回了几句话后无故中断"，
+    既无报错也无重试。真正"任务完成主动结束"必然产出最终正文，完全空响应几乎
+    只来自流截断；一律纳入 fatal 走统一重试计划（次数取 agent_retry_count 配置），
+    重试穷尽后由调用方显式报错。
     """
     finish = response.finish_reason or "stop"
 
@@ -2216,11 +2350,16 @@ def _response_failure_reason(response, has_progress: bool = False) -> tuple[str,
         if finish in ("timeout", "thinking_timeout"):
             return ("模型思考超时，未生成任何内容" if finish == "thinking_timeout"
                     else "模型响应因网关空闲超时中断，未生成任何内容"), True
-        # v31 (plan-89): 对齐 zcode/AI SDK 语义——本 turn 已有工具产出（has_progress）
-        # 时，finish_reason=stop 的空响应是模型"任务已完成、主动结束对话"的正常信号，
-        # 视为健康直接结束，不触发重试/报错（任务完成后误报"模型返回空响应"的根因）。
+        # v968: 撤销 v31 的 has_progress 豁免（原语义：本 turn 已有工具产出时，
+        # stop 空响应 = 模型"任务完成、主动结束"→ 健康）。实测该响应无
+        # content/thinking/tool_calls 且无 usage，是网关截断输出流的特征——被
+        # 静默当"任务完成"后，用户看到"回了几句话后无故中断"（无报错、无重试）。
         if finish == "stop" and has_progress:
-            return None
+            return (
+                "模型返回空响应 (finish_reason=stop)，未生成内容或工具调用；"
+                "本 turn 已有执行产出，疑似网关截断输出流，任务未完成",
+                True,
+            )
         return f"模型返回空响应 (finish_reason={finish})，未生成内容或工具调用", True
     if finish == "timeout":
         return "响应因网关空闲超时中断，以上为已生成的部分内容", False
@@ -2490,10 +2629,30 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
     )
 
 
-def _make_approval_emitter(session_id: int):
-    """审批请求回调：仅广播 WS 事件。"""
+def _make_approval_emitter(session_id: int, pending_reminders: list[str] | None = None):
+    """审批请求回调：广播 WS 事件，并触发 permission_request 钩子。
+
+    S12（plan-41-197）：提示词型钩子的文本追加到 pending_reminders，
+    在下一步构建 api_messages 时注入；命令型钩子在此执行。全部 fail-open，
+    钩子失败不影响审批广播（用户仍能看到审批卡）。
+    """
 
     async def _emit(approval_id: str, detail: dict) -> None:
+        try:
+            # 独立短会话：审批回调不在主循环 db 上下文里，避免干扰主连接
+            from app.persistence.database import async_session_factory
+            async with async_session_factory() as _hdb:
+                _matcher = str(detail.get("tool") or "") or None
+                for _hr in await hook_service.run_hooks(
+                    _hdb, "permission_request",
+                    {"approval_id": approval_id, "detail": detail, "session_id": session_id},
+                    matcher_key=_matcher,
+                ):
+                    _inj = (_hr or {}).get("inject")
+                    if _inj and pending_reminders is not None:
+                        pending_reminders.append(f"[钩子提示词]\n{_inj}")
+        except Exception:
+            logger.debug("[agent] permission_request 钩子执行失败(不阻断)", exc_info=True)
         await ws_manager.broadcast(
             session_id,
             {"event": "approval.request", "payload": {"approval_id": approval_id, "detail": detail}},
@@ -2503,6 +2662,56 @@ def _make_approval_emitter(session_id: int):
 
 
 # ── 子代理工具处理 ──
+
+# plan-64-291: 运行中子代理提醒的节流间隔（步）——集合不变时至少间隔这么多步才重复注入
+_SUBAGENT_REMINDER_STEP_GAP = 3
+
+
+def _should_emit_running_reminder(*, has_running: bool, sig: tuple, last_sig: tuple,
+                                  step: int, last_step: int) -> bool:
+    """plan-64-291: 运行中提醒的节流判定。
+
+    集合变化（新派发/完工）立即发；集合不变时每 _SUBAGENT_REMINDER_STEP_GAP 步才发一次
+    ——避免每步都注入挤占上下文（对齐 Anthropic 的多智能体成本警示）；无运行中子代理不发。
+    """
+    if not has_running:
+        return False
+    if sig != last_sig:
+        return True
+    return step - last_step >= _SUBAGENT_REMINDER_STEP_GAP
+
+
+def _format_elapsed_zh(seconds: float) -> str:
+    """把已运行秒数格式化为中文时长（运行中提醒展示用）。"""
+    if seconds < 60:
+        return f"{int(seconds)} 秒"
+    minutes = seconds / 60
+    if minutes < 60:
+        return f"{int(minutes)} 分钟"
+    return f"{minutes / 60:.1f} 小时"
+
+
+def _build_subagent_running_reminder(snapshot: list[dict]) -> str:
+    """plan-64-291: 构造「子代理运行中」提醒（等待期纪律的持续在场）。
+
+    只陈述事实（谁在跑、跑了多久）+ 纪律三条，不替主代理决定具体做什么；
+    子代理全部结束后自然消失（下一步 running_snapshot 为空即复位）。
+    """
+    parts: list[str] = []
+    for _r in snapshot:
+        _title = str(_r.get("title") or "未命名任务")
+        _elapsed = _r.get("elapsed_s")
+        _suffix = ""
+        if isinstance(_elapsed, (int, float)):
+            _suffix = f"（已运行 {_format_elapsed_zh(float(_elapsed))}）"
+        parts.append(f"#{_r.get('agent_id')}「{_title}」{_suffix}")
+    return (
+        "[子代理运行中] 仍在运行：" + "、".join(parts) + "。"
+        "子代理看起来慢通常只是还在跑，不代表卡死。\n"
+        "等待期纪律：① 不要自己执行它们的任务——重复劳动会双倍消耗 token 与时间；"
+        "② 只做与它们不重叠的工作；"
+        "③ 没有非重叠工作可做时，调用 collect_results(wait=true) 阻塞等待，完成后统一整合其报告。"
+    )
 
 def _subagent_context_snapshot(subagent_context: dict, original_request: str = "") -> dict:
     """plan-248-1258 M6: 汇总主代理的当前上下文快照，传给子代理并留档供 inspect。
@@ -2514,7 +2723,7 @@ def _subagent_context_snapshot(subagent_context: dict, original_request: str = "
     try:
         if original_request:
             snap["original_request"] = original_request[:2000]
-        for key in ("main_task_id", "model_id", "sandbox_mode", "permission_mode"):
+        for key in ("main_task_id", "model_id", "permission_mode", "approval_mode"):
             v = subagent_context.get(key)
             if v not in (None, ""):
                 snap[key] = v
@@ -2687,7 +2896,16 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         if data is None:
             known = ", ".join(f"#{i}" for i in manager.agent_ids()) or "(none)"
             return f"No subagent with id {aid}. Known subagents: {known}."
-        return "Subagent inspection:\n" + _json.dumps(data, ensure_ascii=False, indent=2)[:8000]
+        _payload = _json.dumps(data, ensure_ascii=False, indent=2)[:8000]
+        # plan-64-291: running 状态追加等待期纪律尾注——上一轮实测正是在此触点失守
+        # （inspect 看到 running 后转而自己动手做子代理的任务，最终重复劳动、双倍消耗）。
+        if str(data.get("status")) == "running":
+            _payload += (
+                "\n\n[等待期纪律] 该子代理仍在运行——不要自己动手做它的任务（重复劳动会双倍"
+                "消耗 token 与时间）；需要它的结论请调用 collect_results(wait=true) 阻塞等待；"
+                "subagent_inspect 只用于查看上下文/轨迹，不要用它反复轮询。"
+            )
+        return "Subagent inspection:\n" + _payload
 
     if tool_name == "cancel_subagent":
         # v36 (plan-321-1600 M3): 取消单个仍在运行的子代理（对齐 ZCode TaskCancel）。
@@ -2753,22 +2971,22 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         task_title = str(args.get("task_title", ""))[:200]
         task_desc = str(args.get("task_description", ""))[:4000]
         acceptance = str(args.get("acceptance_criteria", ""))[:500]
-        # v20: explore=true → 只读探索子代理，结果直接返回给主代理（见下方同步等待）。
+        # plan-64-289: explore 只决定读写范围（只读探索），background 只决定调度方式，
+        # 两者解耦、可自由组合——此前 background 会强制 explore=false，导致「只读 + 异步」
+        # 在参数层面无法表达：模型派只读调研子代理时只能选同步阻塞，主 turn 被长时间挂住。
         explore = bool(args.get("explore", False))
-        # v36 (plan-321-1600 M3): background=true → 强制后台派发（立即返回，完成时自动推送）；
-        # 与 explore 的“同步取结论”语义互斥，background 优先（对齐 ZCode SubAgentAsync）。
-        if bool(args.get("background", False)):
-            explore = False
+        background = bool(args.get("background", False))
         # v36 (plan-321-1600 R1) + plan-330-1648 M1: 主代理处于只读/计划模式时，只允许派发
-        # 只读探索子代理（忽略模型传入的 explore/background）——这是主代理侧的**模式语义护栏**
+        # 只读探索子代理（忽略模型传入的 explore）——主代理侧的**模式语义护栏**
         # （该模式下不产生业务写入），与“子代理不继承会话模式”不冲突：explore 子代理本就只读。
-        _pm = str(subagent_context.get("permission_mode") or "default")
+        # plan-64-289: 该护栏只锁「只读」、不再连带锁「同步」——异步只读探索同样不产生写入。
+        _pm = normalize_execution_mode(subagent_context.get("permission_mode"))
         if _pm in ("readonly", "plan"):
             explore = True
-        # plan-330-1648 M1: 子代理运行模式**按类型锁定**（explore=只读 / general=可写工作区），
-        # 显式下发给 run_agent_loop——子代理不再读取会话 permission_mode，因此主代理的
+        # plan-330-1648 M1: 子代理执行模式**按类型锁定**（explore=只读 / general=可写工作区），
+        # 显式下发给 run_agent_loop——子代理不继承会话的执行模式，因此主代理的
         # 计划/只读模式不会把子代理拖进“只能写计划文档 + 被纠偏催写”的状态。
-        _sub_mode = "readonly" if explore else "default"
+        _sub_mode = "readonly" if explore else "agent"
         if not task_title:
             return "Error: task_title is required"
 
@@ -2974,9 +3192,10 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
 
         from app.orchestration.subagent import get_subagent_manager
         mgr = manager or get_subagent_manager(session_id)
-        # v20: explore 子代理同步等待——主代理拿结论后继续串行整合，
-        # 避免主代理把"等待"变成反复轮询 collect_results 的空转。
-        if explore:
+        # v20: explore 子代理同步等待——主代理拿结论后继续串行整合。
+        # plan-64-289: 仅当未显式要求 background 时才同步——只读调研同样可异步派发
+        # （主代理继续做别的事、完成报告自动推送），不再「只读必然阻塞」。
+        if explore and not background:
             await broadcast(session.id, {
                 "event": "agent.started",
                 "payload": {"agent_id": sub_agent.id, "kind": "sub",
@@ -3043,10 +3262,10 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
             f"Subagent #{sub_agent_id} dispatched in the background for task: {task_title}. "
             f"[运行参数] mode={_sub_mode} model=#{_spawn_model_id} "
             f"effort={_spawn_effort or 'default'}. "
-            "It runs in an isolated context and you can keep working — its completion report is "
-            "pushed back to you automatically, so do NOT poll. Call collect_results only when you "
-            "need the structured report right now (agent_id=<id> to target this one, wait=true to "
-            "block until it finishes), or subagent_inspect for its full context/trajectory."
+            "It runs in an isolated context; its completion report is pushed back to you automatically. "
+            "## Waiting discipline — while it runs: do NOT do its task yourself (duplicating a running "
+            "subagent's work costs tokens and time twice over); take only NON-overlapping work; if none "
+            "is left, call collect_results(wait=true) to block until it finishes, or end your turn."
         )
 
     return "Error: unknown subagent tool"

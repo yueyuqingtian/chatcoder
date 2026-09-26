@@ -1,10 +1,11 @@
 """ToolExecutor 集成单测。
 
 验证:
-- low risk 工具直接执行不经审批
-- high risk 工具需 ApprovalManager 同意才执行
-- high risk 工具被拒绝则失败
+- 裁决为 allow 的工具直接执行不经审批
+- 裁决为 ask 的工具需 ApprovalManager 同意才执行
+- 被拒绝则失败
 - 未知工具返回错误
+- plan-75-332：执行模式边界（只读/计划）与权限模式矩阵（询问/自动/完全访问）
 """
 import asyncio
 from typing import Any
@@ -129,60 +130,163 @@ async def test_unknown_tool_returns_error(tmp_path, isolated_executor):
     assert "未知工具" in r.error
 
 
-# ───────────────── v3.0 (plan-88): 沙箱模式审批门决策 ─────────────────
+# ───────────── plan-75-332: 统一裁决内核（执行模式 × 权限模式） ─────────────
 
 
-@pytest.mark.asyncio
-async def test_readonly_sandbox_denies_write_tool(tmp_path, isolated_executor):
-    executor, _ = isolated_executor
+def _decide(tool, tool_name, args, ctx):
+    """轻量调用唯一裁决点（同步，无需跑完整 executor）。"""
+    from app.orchestration.approval_policy import decide
+    return decide(tool_name, args, ctx, risk_level=tool.risk_level)
+
+
+def test_readonly_mode_denies_write_tool(tmp_path, isolated_executor):
+    """只读模式：写文件属能力边界，直接拒绝（不进入审批）。"""
+    from app.orchestration.approval_policy import VERDICT_DENY
+    from app.orchestration.tools.fs_write import FsWriteTool
+
     ctx = _ctx(tmp_path)
-    ctx.sandbox_mode = "read-only"
-    skip, reason = await executor._precheck_approval(
-        _FakeHighTool(), "fs_write", {"path": "x.py"}, ctx, {})
-    assert skip is False
-    assert "只读沙箱" in reason
+    ctx.permission_mode = "readonly"
+    d = _decide(FsWriteTool(), "fs_write", {"path": "x.py", "content": "a"}, ctx)
+    assert d.verdict == VERDICT_DENY
+    assert "只读模式" in d.reason
 
 
-@pytest.mark.asyncio
-async def test_readonly_sandbox_denies_risky_command(tmp_path, isolated_executor):
-    executor, _ = isolated_executor
+def test_readonly_mode_denies_risky_command(tmp_path, isolated_executor):
+    """只读模式：修改类命令一律拒绝。"""
+    from app.orchestration.approval_policy import VERDICT_DENY
     from app.orchestration.tools.terminal import TerminalExecTool
+
     ctx = _ctx(tmp_path)
-    ctx.sandbox_mode = "read-only"
-    skip, reason = await executor._precheck_approval(
-        TerminalExecTool(), "terminal_exec", {"command": "del /f C:\\x"}, ctx, {})
-    assert skip is False
-    assert "只读沙箱" in reason
+    ctx.permission_mode = "readonly"
+    d = _decide(TerminalExecTool(), "terminal_exec", {"command": "del /f C:\\x"}, ctx)
+    assert d.verdict == VERDICT_DENY
+    assert "只读模式" in d.reason
 
 
-@pytest.mark.asyncio
-async def test_readonly_sandbox_allows_safe_command(tmp_path, isolated_executor):
-    executor, _ = isolated_executor
+def test_readonly_mode_asks_readonly_command(tmp_path, isolated_executor):
+    """只读模式不拦只读命令；是否询问由权限模式决定（默认 ask）。"""
+    from app.orchestration.approval_policy import VERDICT_ASK
     from app.orchestration.tools.terminal import TerminalExecTool
+
     ctx = _ctx(tmp_path)
-    ctx.sandbox_mode = "read-only"
-    skip, _ = await executor._precheck_approval(
-        TerminalExecTool(), "terminal_exec", {"command": "git status"}, ctx, {})
-    assert skip is True
+    ctx.permission_mode = "readonly"
+    ctx.approval_mode = "ask"
+    d = _decide(TerminalExecTool(), "terminal_exec", {"command": "git status"}, ctx)
+    assert d.verdict == VERDICT_ASK
+
+
+def test_readonly_mode_allows_read_tool(tmp_path, isolated_executor):
+    """只读模式：纯读工具三档权限模式都放行（读取不构成风险）。"""
+    from app.orchestration.approval_policy import VERDICT_ALLOW
+    from app.orchestration.tools.fs_read import FsReadTool
+
+    ctx = _ctx(tmp_path)
+    ctx.permission_mode = "readonly"
+    ctx.approval_mode = "ask"
+    d = _decide(FsReadTool(), "fs_read", {"path": "a.txt"}, ctx)
+    assert d.verdict == VERDICT_ALLOW
+
+
+def test_plan_mode_only_allows_plan_doc(tmp_path, isolated_executor):
+    """计划模式：仅 ai/*.md 计划文档可写，其余写操作一律拒绝。"""
+    from app.orchestration.approval_policy import VERDICT_ALLOW, VERDICT_DENY
+    from app.orchestration.tools.fs_write import FsWriteTool
+
+    ctx = _ctx(tmp_path)
+    ctx.permission_mode = "plan"
+    ctx.approval_mode = "auto"
+    ok = _decide(FsWriteTool(), "fs_write", {"path": "ai/plan-x.md", "content": "# 计划"}, ctx)
+    assert ok.verdict == VERDICT_ALLOW
+    bad = _decide(FsWriteTool(), "fs_write", {"path": "src/a.py", "content": "x"}, ctx)
+    assert bad.verdict == VERDICT_DENY
+    assert "计划模式" in bad.reason
+
+
+def test_full_access_mode_allows_everything(tmp_path, isolated_executor):
+    """完全访问：无视风险等级，全部自动执行。"""
+    from app.orchestration.approval_policy import VERDICT_ALLOW
+    from app.orchestration.tools.terminal import TerminalExecTool
+
+    ctx = _ctx(tmp_path)
+    ctx.permission_mode = "agent"
+    ctx.approval_mode = "full"
+    d = _decide(TerminalExecTool(), "terminal_exec", {"command": "del /f C:\\x"}, ctx)
+    assert d.verdict == VERDICT_ALLOW
+
+
+def test_auto_mode_allows_write_inside_workspace(tmp_path, isolated_executor):
+    """自动审批：工作区内新增/编辑文件属常规操作，直接放行。"""
+    from app.orchestration.approval_policy import VERDICT_ALLOW
+    from app.orchestration.tools.fs_write import FsWriteTool
+
+    ctx = _ctx(tmp_path)
+    ctx.permission_mode = "agent"
+    ctx.approval_mode = "auto"
+    d = _decide(FsWriteTool(), "fs_write", {"path": "src/a.py", "content": "x"}, ctx)
+    assert d.verdict == VERDICT_ALLOW
+
+
+def test_auto_mode_asks_outside_write(tmp_path, isolated_executor):
+    """自动审批：写工作区外仍要问（越出项目范围）。"""
+    from app.orchestration.approval_policy import VERDICT_ASK
+    from app.orchestration.tools.fs_write import FsWriteTool
+
+    ctx = _ctx(tmp_path)
+    ctx.permission_mode = "agent"
+    ctx.approval_mode = "auto"
+    d = _decide(FsWriteTool(), "fs_write", {"path": "../outside.py", "content": "x"}, ctx)
+    assert d.verdict == VERDICT_ASK
+
+
+def test_auto_mode_asks_risky_command(tmp_path, isolated_executor):
+    """自动审批：风险命令仍要问。"""
+    from app.orchestration.approval_policy import VERDICT_ASK
+    from app.orchestration.tools.terminal import TerminalExecTool
+
+    ctx = _ctx(tmp_path)
+    ctx.permission_mode = "agent"
+    ctx.approval_mode = "auto"
+    d = _decide(TerminalExecTool(), "terminal_exec", {"command": "del /f C:\\x"}, ctx)
+    assert d.verdict == VERDICT_ASK
+    assert d.risk_note  # 给出风险说明供审批卡渲染
+
+
+def test_ask_mode_asks_every_write_and_command(tmp_path, isolated_executor):
+    """询问审批：写文件与执行命令每次都问（只有纯读不带问题通过）。"""
+    from app.orchestration.approval_policy import VERDICT_ASK
+    from app.orchestration.tools.fs_write import FsWriteTool
+    from app.orchestration.tools.terminal import TerminalExecTool
+
+    ctx = _ctx(tmp_path)
+    ctx.permission_mode = "agent"
+    ctx.approval_mode = "ask"
+    assert _decide(FsWriteTool(), "fs_write", {"path": "src/a.py", "content": "x"}, ctx).verdict == VERDICT_ASK
+    assert _decide(TerminalExecTool(), "terminal_exec", {"command": "git status"}, ctx).verdict == VERDICT_ASK
 
 
 @pytest.mark.asyncio
-async def test_full_access_sandbox_skips_approval(tmp_path, isolated_executor):
-    executor, _ = isolated_executor
-    ctx = _ctx(tmp_path)
-    ctx.sandbox_mode = "danger-full-access"
-    skip, reason = await executor._precheck_approval(_FakeHighTool(), "fake.high", {}, ctx, {})
-    assert skip is True
-    assert reason == ""
-
-
-@pytest.mark.asyncio
-async def test_full_access_runs_without_approval_card(tmp_path, isolated_executor):
+async def test_executor_denies_in_readonly_mode(tmp_path, isolated_executor):
+    """只读模式经 executor 全链路：直接拒绝，不产生审批卡。"""
     executor, mgr = isolated_executor
     ctx = _ctx(tmp_path)
-    ctx.sandbox_mode = "danger-full-access"
+    ctx.permission_mode = "readonly"
     r = await executor.execute(
         tool_name="fake.high", args={}, call_key="k5",
+        agent=_FakeAgent(), ctx=ctx,
+    )
+    assert r.ok is False
+    assert "权限策略" in r.error
+    assert not mgr._pending
+
+
+@pytest.mark.asyncio
+async def test_full_access_mode_runs_without_approval_card(tmp_path, isolated_executor):
+    """完全访问经 executor 全链路：直接执行，未产生审批卡。"""
+    executor, mgr = isolated_executor
+    ctx = _ctx(tmp_path)
+    ctx.approval_mode = "full"
+    r = await executor.execute(
+        tool_name="fake.high", args={}, call_key="k6",
         agent=_FakeAgent(), ctx=ctx,
     )
     assert r.ok is True
@@ -191,24 +295,11 @@ async def test_full_access_runs_without_approval_card(tmp_path, isolated_executo
 
 
 @pytest.mark.asyncio
-async def test_full_access_respects_force_approval_list(tmp_path, isolated_executor, monkeypatch):
-    """v32 (plan-89): danger-full-access 与"始终需要审批的工具"冲突修复——
-    显式 force_approval_tools 列表内的工具即使全访问沙箱仍保留审批卡。"""
+async def test_ask_mode_keeps_approval_card(tmp_path, isolated_executor):
+    """询问审批（默认）经 executor 全链路：走审批卡，批准后执行。"""
     executor, mgr = isolated_executor
     ctx = _ctx(tmp_path)
-    ctx.sandbox_mode = "danger-full-access"
-    from app.core.config import settings
-    monkeypatch.setattr(settings, "force_approval_tools", "fake.high")
-    skip, reason = await executor._precheck_approval(_FakeHighTool(), "fake.high", {}, ctx, {})
-    assert skip is False
-    assert reason == ""  # 保留审批（不 deny 不 skip），走 approval_manager.request
-
-
-@pytest.mark.asyncio
-async def test_workspace_write_keeps_approval(tmp_path, isolated_executor):
-    executor, mgr = isolated_executor
-    ctx = _ctx(tmp_path)
-    ctx.sandbox_mode = "workspace-write"  # 默认：高危工具仍走审批
+    ctx.approval_mode = "ask"  # 默认：风险动作仍走审批
 
     async def approver():
         await asyncio.sleep(0.02)
@@ -217,12 +308,27 @@ async def test_workspace_write_keeps_approval(tmp_path, isolated_executor):
 
     asyncio.create_task(approver())
     r = await executor.execute(
-        tool_name="fake.high", args={}, call_key="k6",
+        tool_name="fake.high", args={}, call_key="k7",
         agent=_FakeAgent(), ctx=ctx,
         on_approval_request=lambda aid, detail: None,
     )
     assert r.ok is True
     assert r.output == "high-ok"
+
+
+@pytest.mark.asyncio
+async def test_auto_mode_allows_conventional_tool(tmp_path, isolated_executor):
+    """自动审批经 executor 全链路：常规动作（low 风险读类）直接执行。"""
+    executor, mgr = isolated_executor
+    ctx = _ctx(tmp_path)
+    ctx.approval_mode = "auto"
+    r = await executor.execute(
+        tool_name="fake.low", args={}, call_key="k8",
+        agent=_FakeAgent(), ctx=ctx,
+    )
+    assert r.ok is True
+    assert r.output == "low-ok"
+    assert not mgr._pending
 
 
 # ───────────────── plan-153-705: executor 超时读配置 ─────────────────

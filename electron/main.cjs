@@ -1,5 +1,7 @@
 // chatcoder 桌面主进程 (v3 — 健壮启动版)
 // 修复: data: URL → loadFile / stdout 安全 / 全局错误捕获 / 图标
+// plan-75-335：libuv 线程池须在首次异步 IO 前配置（默认 4，提高到 8 增加主进程 IO 并行度）。
+process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || "8";
 const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
@@ -7,6 +9,23 @@ const os = require("os");
 const http = require("http");
 const net = require("net");
 const fs = require("fs");
+// plan-73-323：宠物窗口与宠物资源管理（只管窗口/资源/偏好，任务状态由渲染层直连后端）
+const pet = require("./pet.cjs");
+
+// ── GPU 加速开关（plan-75-335）──
+// 调研结论：Electron 在 Windows 上默认启用 GPU 加速（本机实测 ANGLE/NVIDIA D3D11 已生效）；
+// 以下为「保持硬件路径 + 防止静默降级为软件渲染」的显式声明，须在 app ready 之前调用：
+app.commandLine.appendSwitch("enable-gpu-rasterization");        // GPU 光栅化：光栅负载从 CPU 移到 GPU
+app.commandLine.appendSwitch("enable-zero-copy");                // 零拷贝纹理上传，降低显存带宽占用
+app.commandLine.appendSwitch("force_high_performance_gpu");      // 多显示适配器（含虚拟显示器）时优先独显
+app.commandLine.appendSwitch("disable-gpu-process-crash-limit"); // GPU 进程崩溃后不永久降级为软件渲染
+// 实验结论（plan-75-335）：num-raster-threads 在渲染进程的有效上限为 4（实测设 2 生效为 2、
+// 设 8 被收敛为 4），本机默认已在上限，故不设置该开关，避免无效配置。
+
+// GPU 特性状态诊断（plan-75-335）：每次 GPU 信息更新记录一行，排查「是否被降级为软件渲染」。
+app.on("gpu-info-update", () => {
+  try { log("[chatcoder] GPU 特性状态:", JSON.stringify(app.getGPUFeatureStatus())); } catch { /* 诊断信息，失败不影响运行 */ }
+});
 
 // ── 后端端口选择（默认不常用端口 12973，避免冲突）──
 const DEFAULT_PORT = 12973;
@@ -796,6 +815,45 @@ function writeThemePref(theme) {
   try { fs.writeFileSync(THEME_PREF_FILE, JSON.stringify({ theme: theme === "light" ? "light" : "dark" })); } catch {}
 }
 
+// ── UI 偏好备份落盘（plan-73-344）──
+// 渲染层的外观/排版偏好（消息行距、字号、面板宽度等）存 localStorage，但 Chromium 的
+// DOMStorage 是「内存缓存 + 异步批量提交」：app.exit 强退（一键重启）、多实例共享
+// userData 的 LevelDB 锁竞争等场景下，最后一次写入在重启后可能不可见（用户实测：
+// 行距改 2.2，重启回默认 1.7）。这里在主进程侧另存一份 JSON（fs.writeFileSync 同步
+// 落盘，不依赖 Chromium 提交流水线），渲染层启动时与 localStorage 按 savedAt 取较新者。
+const UI_PREFS_FILE = path.join(app.getPath("userData"), "ui-prefs.json");
+let _uiPrefsPending = null; // 250ms 合并窗口内的最新偏好
+let _uiPrefsTimer = null;
+
+function writeUiPrefsBackup(payload) {
+  try {
+    if (!payload || typeof payload !== "object") return;
+    fs.writeFileSync(UI_PREFS_FILE, JSON.stringify(payload));
+  } catch { /* 磁盘异常不阻断偏好变更 */ }
+}
+
+/** 把挂起的偏好立即写盘（退出/重启/关窗前调用——合并窗口内的最后一次变更不丢） */
+function flushUiPrefsBackup() {
+  if (_uiPrefsTimer) { clearTimeout(_uiPrefsTimer); _uiPrefsTimer = null; }
+  if (_uiPrefsPending) {
+    writeUiPrefsBackup(_uiPrefsPending);
+    _uiPrefsPending = null;
+  }
+}
+
+function readUiPrefsBackup() {
+  try { return JSON.parse(fs.readFileSync(UI_PREFS_FILE, "utf8")); } catch { return null; }
+}
+
+/** 把渲染进程未提交的 DOMStorage（localStorage）数据刷到磁盘。
+ *  flushStorageData 触发写入但完成是异步的——调用后需留一小段时间再退出（见 app:relaunch）。 */
+function flushDomStorage() {
+  try {
+    const { session } = require("electron");
+    session.defaultSession.flushStorageData();
+  } catch { /* ignore */ }
+}
+
 // ── plan-26-116：原生折射面板已整体移除 ──
 // 历史实现（plan-24-106 M6）通过 electron/liquid-glass.cjs 在窗口 z 序下方钉一层原生
 // 折射面板，依赖 `transparent: true` 且与系统 acrylic 互斥（切换需重启窗口），是「折射版
@@ -951,6 +1009,12 @@ function createWindow() {
   // plan-26-116 M2：材质重放覆盖窗口状态事件。syncWindowGlass 内部会先同步圆角与最大化态。
   // plan-31-151 S2：maximize/unmaximize 统一走系统原生——同步圆角/data-maximized（DONOTROUND）
   //   并通知渲染层修复 8px 非客户区溢出；同时重放材质兜底（若原生最大化下 acrylic 被 DWM 重置）。
+  // plan-73-344：关窗退出前把偏好落盘（关窗是最常见退出路径，同样要 flush——
+  // 否则「改完设置立刻关窗」可能丢最后一次写入）。
+  mainWindow.on("close", () => {
+    flushUiPrefsBackup();
+    flushDomStorage();
+  });
   mainWindow.on("maximize", () => {
     syncWindowGlass(mainWindow);
     try { mainWindow.webContents.send("window:maximize-change", true); } catch { /* 渲染层未就绪时忽略 */ }
@@ -1498,8 +1562,13 @@ ipcMain.handle("window:setGlass", (_e, on) => {
  *  用 app.relaunch + app.exit：比让渲染层刷新页面更彻底（窗口会按新偏好重建）。 */
 ipcMain.handle("app:relaunch", () => {
   try {
+    // plan-73-344：重启前先落盘再退出——flush 挂起的偏好备份 + 刷 DOMStorage 未提交数据，
+    // 延时 150ms 让异步提交完成。此前直接 app.exit(0)（强退），「改完设置立刻重启」会丢
+    // 最后一次写入（用户实测：消息行距改 2.2，重启回到默认 1.7）。
+    flushUiPrefsBackup();
+    flushDomStorage();
     app.relaunch();
-    app.exit(0);
+    setTimeout(() => app.exit(0), 150);
     return { ok: true };
   } catch (err) {
     logErr("[chatcoder] 重启失败:", err && err.message);
@@ -1513,11 +1582,15 @@ ipcMain.handle("app:relaunch", () => {
 // 「玻璃诊断/自检」等提示性信息，只留一个「毛玻璃效果」开关 + 「玻璃强度」三档。
 
 // ── IPC:保持唤醒（对齐 zcode「运行会话时保持电脑唤醒」）──
+// S3（plan-41-197）：语义修正——原实现用 prevent-app-suspension，它只阻止系统
+// 挂起应用（App Nap 类），**不阻止显示器/系统睡眠**，与界面上“保持电脑唤醒”的
+// 描述不符（用户反馈“配置确认一下是否真的有效，假开关的话请完善”）。
+// 改为 prevent-display-sleep：阻止显示器休眠，这才是用户对“保持唤醒”的真实预期。
 let _psbId = null;
 ipcMain.handle("power:setKeepAwake", (_e, on) => {
   const { powerSaveBlocker } = require("electron");
   if (on) {
-    if (_psbId === null) _psbId = powerSaveBlocker.start("prevent-app-suspension");
+    if (_psbId === null) _psbId = powerSaveBlocker.start("prevent-display-sleep");
   } else if (_psbId !== null) {
     try { powerSaveBlocker.stop(_psbId); } catch { /* ignore */ }
     _psbId = null;
@@ -1527,6 +1600,22 @@ ipcMain.handle("power:setKeepAwake", (_e, on) => {
 
 // ── IPC:主题偏好落盘（渲染进程切主题时同步，下次启动 loading 页按此适配深浅色）──
 ipcMain.on("theme:setPref", (_e, theme) => { writeThemePref(theme); });
+
+// ── IPC:UI 偏好备份（plan-73-344）──
+// 写入做 250ms 合并（拖滑杆高频变更不逐次写盘；退出前由 flushUiPrefsBackup 强制写完），
+// 读取走同步通道（启动时要与 localStorage 比对、决定用哪份，异步会让首帧闪默认值）。
+ipcMain.on("ui-prefs:save", (_e, payload) => {
+  if (!payload || typeof payload !== "object") return;
+  _uiPrefsPending = payload;
+  if (_uiPrefsTimer) return;
+  _uiPrefsTimer = setTimeout(() => {
+    _uiPrefsTimer = null;
+    const p = _uiPrefsPending;
+    _uiPrefsPending = null;
+    if (p) writeUiPrefsBackup(p);
+  }, 250);
+});
+ipcMain.on("ui-prefs:load", (e) => { e.returnValue = readUiPrefsBackup(); });
 
 // ── IPC:终端 PTY（v2.2: node-pty 真 PTY，支持 resize/全屏程序；加载失败回退 spawn）──
 const { createPty, usingNodePty } = require("./pty.cjs");
@@ -1890,6 +1979,18 @@ app.whenReady().then(async () => {
     logErr("[chatcoder] createWindow 失败:", err);
   }
 
+  // 1.5 注册宠物 IPC + 挂主窗钩子（必须在渲染层加载前完成，否则设置页/宠物页早期调用会失败）
+  try {
+    pet.registerPetIpc({
+      log, logErr,
+      getMainWindow: () => mainWindow,
+      getBackendPort: () => BACKEND_PORT,
+    });
+    pet.hookMainWindow();
+  } catch (err) {
+    logErr("[chatcoder] 宠物模块初始化失败:", err);
+  }
+
   // 2. 彻底清理所有历史残留的旧后端进程并释放端口，杜绝复用旧版本进程
   try {
     await killExistingBackendProcesses(DEFAULT_PORT);
@@ -1932,6 +2033,15 @@ app.whenReady().then(async () => {
     logErr("[chatcoder] loadFrontend 失败:", err);
   }
 
+  // 5.5 宠物窗口：按偏好创建（默认关闭；用户安装并启用后出现）
+  //     放在后端就绪之后，避免宠物页首帧连不上 WebSocket 空转。
+  try {
+    pet.createPetWindow();
+    pet.syncVisibility();
+  } catch (err) {
+    logErr("[chatcoder] 宠物窗口创建失败:", err);
+  }
+
   // 6. 初始化自动更新（含定时检查,仅打包版）
   initAutoUpdater();
 });
@@ -1941,6 +2051,9 @@ app.on("window-all-closed", () => {
   app.quit();
 });
 app.on("before-quit", () => {
+  // plan-73-344：退出前兜底落盘（关窗路径已在 close 事件 flush，此处覆盖系统注销等其余退出路径）
+  flushUiPrefsBackup();
+  flushDomStorage();
   killBackend();
 });
 app.on("will-quit", () => { killBackend(); });

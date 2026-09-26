@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { AppearancePanel } from "./AppearancePanel";
 import { GeneralPanel } from "./GeneralPanel";
 import { ModelsPanel } from "./ModelsPanel";
-import { ExtensionsPanel } from "./ExtensionsPanel";
+import { InstalledPanel } from "./InstalledPanel";
 import { SubagentsPanel } from "./SubagentsPanel";
 import { RulesPanel } from "./RulesPanel";
 import { ScheduledPanel } from "./ScheduledPanel";
@@ -18,6 +18,7 @@ import { DiagnosticsPanel } from "./DiagnosticsPanel";
 import { IndexLibraryPanel } from "./IndexLibraryPanel";
 import { ArchivedPanel } from "./ArchivedPanel";
 import { WorktreesPanel } from "./WorktreesPanel";
+import { PetsPanel } from "./PetsPanel";
 import { IconDownload, IconRefresh } from "../icons";
 import { MarkdownContent } from "../MarkdownContent";
 import { Card, PageShell, PageTransition } from "../ui";
@@ -28,7 +29,7 @@ import {
   IconAnchor, IconBarChart, IconBookOpen, IconBrain, IconCalendar,
   IconChevronDown,
   IconCpu, IconInfo, IconPalette, IconRotateCcw, IconSettings,
-  IconShield, IconTool, IconUsers, IconBox, IconGitBranch,
+  IconShield, IconTool, IconUsers, IconBox, IconGitBranch, IconPet,
 } from "../icons";
 
 export type SettingsTab =
@@ -38,7 +39,8 @@ export type SettingsTab =
   | "scheduled" | "hooks" | "memory" | "usage" | "diagnostics" | "about"
   | "index"
   | "archive"
-  | "worktrees";
+  | "worktrees"
+  | "pets";
 
 export interface SettingsIndexItem {
   key: SettingsTab;
@@ -52,6 +54,7 @@ export interface SettingsIndexItem {
 export const SETTINGS_INDEX: SettingsIndexItem[] = [
   { key: "general", label: "常规", group: "basic", keywords: "语言 代理 终端 Shell 字体 搜索 todos reasoning", icon: <IconSettings size={15} /> },
   { key: "appearance", label: "外观", group: "basic", keywords: "主题 毛玻璃 布局 字号 颜色 面板", icon: <IconPalette size={15} /> },
+  { key: "pets", label: "宠物", group: "basic", keywords: "宠物 pet petdex 桌面 浮窗 任务 状态 徽标 胶囊", icon: <IconPet size={15} /> },
   { key: "models", label: "模型设置", group: "basic", keywords: "供应商 模型 上下文 多模态 推理", icon: <IconCpu size={15} /> },
   { key: "memory", label: "记忆", group: "agent", keywords: "记忆 召回 entries", icon: <IconBrain size={15} /> },
   // plan-282-1441（#6）：插件 / 技能 / MCP 三个独立页收拢为一个「拓展」页（子标签分区）
@@ -87,8 +90,26 @@ function AboutPanel() {
   // plan-230-1144 M4.2: 更新说明展开态与历史区展开态
   const [notesOpen, setNotesOpen] = useState<boolean>(true);
   const [historyOpen, setHistoryOpen] = useState<boolean>(false);
+  // S7（plan-41-197）：更新历史展示重构——版本行可逐条展开/收起（默认展开最新版本），
+  // 长历史分段加载；头部给出条目数摘要，便于快速定位“这次更新了什么”。
+  const [expandedVersions, setExpandedVersions] = useState<Set<string>>(new Set());
+  const [historyLimit, setHistoryLimit] = useState(5);
 
   useEffect(() => { void loadReleaseHistory(); }, [loadReleaseHistory]);
+
+  // S7：首次拉到历史时自动展开最新版本（用户最关心“这次更新了什么”）
+  useEffect(() => {
+    if (releaseHistory.length === 0) return;
+    setExpandedVersions((prev) => {
+      if (prev.size > 0) return prev;
+      const first = releaseHistory[0];
+      return new Set([`${first.version}-0`]);
+    });
+  }, [releaseHistory]);
+
+  /** S7：更新条目计数（只数 "- 条目"，分组标题不计） */
+  const countItems = (notes?: string) =>
+    (notes || "").split("\n").filter((l) => /^\s*-\s+/.test(l)).length;
 
   // dev 模式无 preload 更新 API，显示纯静态信息
   const supported = status.state !== "unsupported";
@@ -201,19 +222,46 @@ function AboutPanel() {
           {historyOpen && (
             <div className="upd-history">
               {releaseHistory.length === 0 && <div className="navpage-empty">暂无更新历史</div>}
-              {releaseHistory.map((r, i) => {
+              {releaseHistory.slice(0, historyLimit).map((r, i) => {
                 const isCurrent = r.version === appVersion;
+                const key = `${r.version}-${i}`;
+                const expanded = expandedVersions.has(key);
+                const count = countItems(r.notes);
                 return (
-                  <div key={`${r.version}-${i}`} className={"upd-history-item" + (isCurrent ? " current" : "")}>
-                    <div className="upd-history-version">
-                      {r.version ? `v${r.version}` : (r.name || "更新日志")}
-                      {isCurrent && <span className="upd-history-cur">当前版本</span>}
-                      {r.date && <span className="upd-history-date">{new Date(r.date).toLocaleDateString()}</span>}
-                    </div>
-                    <div className="upd-history-notes release-notes"><MarkdownContent>{r.notes || "(无说明)"}</MarkdownContent></div>
+                  <div key={key} className={"upd-history-item" + (isCurrent ? " current" : "")}>
+                    {/* S7：版本行可点击——默认只看到“版本 + 日期 + 条目数”，
+                        点击展开该版本完整内容，避免多个版本的长文一次性铺开。 */}
+                    <button
+                      type="button"
+                      className={"upd-history-head" + (expanded ? " open" : "")}
+                      aria-expanded={expanded}
+                      onClick={() => setExpandedVersions((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(key)) next.delete(key); else next.add(key);
+                        return next;
+                      })}
+                    >
+                      <span className="upd-history-version">
+                        {r.version ? `v${r.version}` : (r.name || "更新日志")}
+                        {isCurrent && <span className="upd-history-cur">当前版本</span>}
+                        {r.date && <span className="upd-history-date">{new Date(r.date).toLocaleDateString()}</span>}
+                      </span>
+                      <span className="upd-history-meta">
+                        {count > 0 && <span>{count} 条更新</span>}
+                        <IconChevronDown size={12} className={"upd-notes-caret" + (expanded ? " open" : "")} />
+                      </span>
+                    </button>
+                    {expanded && (
+                      <div className="upd-history-notes release-notes"><MarkdownContent>{r.notes || "(无说明)"}</MarkdownContent></div>
+                    )}
                   </div>
                 );
               })}
+              {releaseHistory.length > historyLimit && (
+                <button className="btn btn-ghost btn-sm upd-history-more" onClick={() => setHistoryLimit((n) => n + 10)}>
+                  显示更早的版本（还有 {releaseHistory.length - historyLimit} 个）
+                </button>
+              )}
             </div>
           )}
         </>
@@ -233,42 +281,52 @@ function RowItem({ title, desc }: { title: string; desc: string }) {
  *  - 副标题用 margin-top:-8px 反向补偿 flex gap，长文案换行时行高错位。
  * 现改为数据驱动：骨架只渲染一次（PageShell），内容组件按 tab 查表。
  */
-const PANELS: Record<SettingsTab, { Comp: React.ComponentType; width?: "standard" | "wide"; card?: boolean }> = {
+const PANELS: Record<SettingsTab, { Comp: React.ComponentType; width?: "standard" | "wide"; card?: boolean; selfHeader?: boolean; fill?: boolean }> = {
   // general / appearance / memory / about 自带 settings-card(-stack) 结构，不再外包 Card
   general: { Comp: GeneralPanel },
   appearance: { Comp: AppearancePanel },
-  models: { Comp: ModelsPanel, card: true },
-  extensions: { Comp: ExtensionsPanel, width: "wide", card: true },
+  // S6（plan-41-197）：模型页自带单卡片左右衔接布局，不外包 Card（避免“卡片套卡片”）
+  // S18（plan-41-197b）：自带标题区（模型设置 + 副标题 + 刷新），外层不再渲染标题
+  models: { Comp: ModelsPanel, selfHeader: true },
+  // plan-41-198：拓展页 = 已安装管理（市场在左面板「拓展」）；自带标题区 +
+  // 头部固定、列表独立滚动（fill）
+  extensions: { Comp: InstalledPanel, selfHeader: true, fill: true },
   subagents: { Comp: SubagentsPanel, card: true },
   rules: { Comp: RulesPanel, card: true },
   // policy / usage 含表格与图表，走宽档（唯一允许的宽度差异）
   policy: { Comp: PolicyPanel, width: "wide", card: true },
   scheduled: { Comp: ScheduledPanel, card: true },
   hooks: { Comp: HooksPanel, card: true },
-  memory: { Comp: MemoryPanel },
+  // S19（plan-41-197c）：记忆页头部固定、列表独立滑动——走填充式布局（fill）
+  memory: { Comp: MemoryPanel, fill: true },
   usage: { Comp: UsagePanel, width: "wide", card: true },
   diagnostics: { Comp: DiagnosticsPanel, card: true },
   index: { Comp: IndexLibraryPanel, card: true },
   worktrees: { Comp: WorktreesPanel, width: "wide", card: true },
   archive: { Comp: ArchivedPanel, card: true },
   about: { Comp: AboutPanel },
+  // plan-73-323 / plan-73-326：宠物分区（面板自带 settings-card 结构，不再外包 Card——
+  // 此前 card:true 会形成“卡片套卡片”，与「设置 → 常规」的排版不一致）
+  pets: { Comp: PetsPanel },
 };
 
 function Panel({ tab }: { tab: SettingsTab }) {
   const { t } = useI18n();
   const meta = PANELS[tab];
   if (!meta) return null;
-  const { Comp, width = "standard", card = false } = meta;
+  const { Comp, width = "standard", card = false, selfHeader = false, fill = false } = meta;
   // 副标题仅在该 tab 确有文案时渲染（缺省不占位，保证卡片区起点恒定）
-  const subtitle = t(`settings.ps.${tab}`);
+  // S18：selfHeader 的 tab（模型页）由内容组件自渲染标题区，外层整体不渲染标题。
+  const subtitle = selfHeader ? "" : t(`settings.ps.${tab}`);
   // plan-282-1421（第3项）：tab 切换过渡——只动 transform/opacity；
   // 外层滚动容器（PageShell 的 .ui-page）不随 tab 重建，滚动位置与宽度均不跳变。
   return (
     <PageTransition id={tab} direction="left">
       <PageShell
-        title={t(`settings.pt.${tab}`)}
+        title={selfHeader ? undefined : t(`settings.pt.${tab}`)}
         subtitle={subtitle || undefined}
         width={width}
+        fill={fill}
       >
         {card ? <Card>{<Comp />}</Card> : <Comp />}
       </PageShell>

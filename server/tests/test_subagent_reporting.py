@@ -187,14 +187,17 @@ def test_inspect_sections():
 
 def test_subagent_context_snapshot():
     ctx = {
-        "main_task_id": 5, "model_id": 3, "sandbox_mode": "workspace-write",
-        "permission_mode": "default",
+        "main_task_id": 5, "model_id": 3,
+        "permission_mode": "agent", "approval_mode": "ask",
         "todos": [{"content": "step 1", "status": "pending"}, "bad-item"],
         "context_summary": "summary text",
     }
     snap = _subagent_context_snapshot(ctx, original_request="please fix the bug")
     assert snap["main_task_id"] == 5
-    assert snap["sandbox_mode"] == "workspace-write"
+    # plan-75-332: 已废弃的 sandbox_mode 不再入快照，改为执行模式 × 权限模式
+    assert "sandbox_mode" not in snap
+    assert snap["permission_mode"] == "agent"
+    assert snap["approval_mode"] == "ask"
     assert snap["original_request"] == "please fix the bug"
     assert snap["todos"] == [{"content": "step 1", "status": "pending"}]
     assert snap["context_summary"] == "summary text"

@@ -31,7 +31,8 @@ function buildRangeParams(mode: RangeMode, start: string, end: string, provider?
 
 export function UsagePanel() {
   const [stats, setStats] = useState<UsageStatsOut | null>(null);
-  const [rangeMode, setRangeMode] = useState<RangeMode>("30");
+  // S14（plan-41-197）：默认「今天」——此前默认近 30 日，用户要求打开即看当日用量
+  const [rangeMode, setRangeMode] = useState<RangeMode>("today");
   const [customStart, setCustomStart] = useState("");
   const [customEnd, setCustomEnd] = useState("");
   // plan-308-1542 需求6：按供应商筛选（空 = 全部供应商）
@@ -54,7 +55,9 @@ export function UsagePanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider]);
 
-  useEffect(() => { void load("30", "", ""); }, [load]);
+  // plan-41-197：默认「今天」是既定需求，此前只在按钮高亮上生效，首屏却拉了近 30 日，
+  // 这里让首次加载与默认选中项对齐（否则用户看到的数字口径与「今天」不符）。
+  useEffect(() => { void load("today", "", ""); }, [load]);
 
   const applyRange = (mode: RangeMode, start = customStart, end = customEnd) => {
     setRangeMode(mode); // 先切换模式（自定义时立即渲染起止输入框）

@@ -7,8 +7,12 @@ v1.0 (对齐 Claude Code):
 
 v2.2 (对齐 zcode 3.12/3.14):
 - 支持结构化提问(kind == "question")：answer 回填至 detail["answer"]
-- 自动批准配置(auto_approve_tools)：只读/低风险工具免确认，降低中断率
 - 执行策略规则匹配(ExecutionPolicyManager)：会话级/全局规则自动放行/阻断
+
+plan-75-332：本模块**不再自行决定是否放行**（原来的 auto_approve_tools 自动放行
+与 force_approval_tools / risk_level=="high" 强制审批已移除）——那些判定与 executor
+侧的策略重复、又靠例外逻辑互相兜底。是否放行统一由 approval_policy.decide() 判定；
+走到这里的请求一律意味着"需要询问用户"。
 """
 
 import asyncio
@@ -57,48 +61,24 @@ class ApprovalManager:
         self,
         detail: dict,
         approval_id: str | None = None,
-        is_forced: bool = False,
+        is_forced: bool = False,  # noqa: ARG002 —— plan-75-332：形参保留兼容，语义已由策略层承担
     ) -> bool:
         """发起一个审批请求并挂起等待结果。
 
-        - 若已配置 auto_approve_tools 且匹配当前工具，直接放行不挂起；
-        - 若 detail.kind == "question" 或 is_forced=True，绝不跳过；
-        - plan-230-1144: 结构化提问（question）**不设超时**——AI 保持暂停直到
+        plan-75-332：本方法**不再自行决定是否放行**。改造前它会读全局配置
+        `auto_approve_tools` 直接放行、并按 `force_approval_tools` / `risk_level=="high"`
+        强制审批——与 executor 的策略判定重复且互相冲突（「自动批准」开关一开，
+        「始终需要审批」就得靠另一套例外逻辑兜底）。
+
+        现在：是否放行由 `approval_policy.decide()` 在 executor 侧判定，走到这里
+        就意味着"需要询问用户"，本方法只负责挂起等待与超时。
+
+        - detail.kind == "question"（结构化提问）**不设超时**——AI 保持暂停直到
           用户回答（取消 turn 可结束等待）；工具审批仍按
           settings.approval_timeout_sec 超时自动拒绝。
+        - is_forced 形参保留以兼容既有调用方（语义已由策略层承担）。
         """
-        tool_name = detail.get("tool", "")
         kind = detail.get("kind", "tool_call")
-        risk_level = detail.get("risk_level", "low")
-
-        # v32 (plan-89)/问题9 修复: auto_approve 不可绕过"始终需要审批的工具"与高风险工具。
-        # 调用方 is_forced 之外，再结合配置列表与风险等级判定强制审批（executor/ask_user 均不传 is_forced）。
-        if not is_forced and kind != "question":
-            try:
-                forced = list(settings.force_approval_tools_list or [])
-            except Exception:
-                forced = [t.strip() for t in str(getattr(settings, "force_approval_tools", "")).split(",") if t.strip()]
-            if tool_name and (tool_name in forced or risk_level == "high"):
-                is_forced = True
-
-        # 提问(kind == "question")与强制列表(is_forced=True)必须等待用户交互
-        if kind != "question" and not is_forced:
-            if settings.auto_approve_tools is True:
-                logger.info("auto_approve_tools 为 True，自动放行工具: %s", tool_name)
-                return True
-            elif settings.auto_approve_tools:
-                if isinstance(settings.auto_approve_tools, str):
-                    auto_tools = {t.strip() for t in settings.auto_approve_tools.split(",") if t.strip()}
-                elif isinstance(settings.auto_approve_tools, (list, set, tuple)):
-                    auto_tools = set(settings.auto_approve_tools)
-                else:
-                    auto_tools = set()
-                if tool_name and (tool_name in auto_tools or "*" in auto_tools):
-                    logger.info("自动放行免审批工具: %s", tool_name)
-                    return True
-
-        if is_forced:
-            logger.info("强制审批/提问(高风险/强制列表/问卷): %s (risk=%s)", tool_name, risk_level)
         approval_id = approval_id or self.new_id()
         pa = _PendingApproval(approval_id=approval_id, detail=detail)
         pa.ensure_future()  # v1.0: 在运行中的事件循环内创建 future

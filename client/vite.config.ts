@@ -11,6 +11,16 @@ export default defineConfig({
   plugins: [react()],
   // 桌面版用 file:// 加载,必须用相对路径,否则资源找不到导致黑屏
   base: "./",
+  // plan-73-323：宠物窗口作为第二个 HTML 入口（独立置顶浮窗）——
+  // 与主窗共享构建流程、产出独立 chunk，不增加主窗包体积。
+  build: {
+    rollupOptions: {
+      input: {
+        main: "index.html",
+        pet: "pet.html",
+      },
+    },
+  },
   server: {
     port: 5173,
     proxy: {

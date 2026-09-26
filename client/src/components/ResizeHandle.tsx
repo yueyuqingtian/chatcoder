@@ -7,10 +7,10 @@
  *
  * 这样每帧只有一次 style 写入, 没有 React reconciliation, 没有 localStorage I/O。
  */
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { acquire, release } from "../perf/bus";
 import { runReconcile } from "../perf/reconcile";
-import { useUiStore, type PanelDragLayout } from "../store/ui";
+import type { PanelDragLayout } from "../store/ui";
 
 interface Props {
   side: "left" | "right";
@@ -41,6 +41,13 @@ interface Props {
   freezeRefs?: Array<React.RefObject<HTMLElement | null>>;
 }
 
+/** 内容根钉住标记（plan-75-333）。
+ *
+ *  为什么必须显式标记而不是只看「有没有 inline width」：正常态的内容根也可能带 inline width
+ *  （外部插件覆写），无法据此判定它是不是被本模块钉住的。
+ *  标记语义严格等价于「该元素当前处于钉住态」——写入即钉住，解冻即摘除。 */
+const PIN_ATTR = "data-pane-pinned";
+
 /** 内容根跟随记录：el=内容根，prev=拖拽前的 inline width，offset=面板宽 − 内容根宽。 */
 export interface PaneFollowEntry {
   el: HTMLElement;
@@ -50,20 +57,29 @@ export interface PaneFollowEntry {
 
 /** 钉住内容根宽度（拖拽起点调用），并记录 offset 供拖拽期跟随换算。
  *
- *  本轮修复「拖拉右侧面板宽度时内容不实时自适应，停下才刷新」：
- *  旧实现只钉住宽度、拖拽期完全不更新，内容要等松手解冻才重排。
- *  现在配合 followPaneContents：拖动过程中按帧闸门节拍把内容根宽度同步到当前面板宽，
- *  即「跟随」——默认 realtime 档每帧跟随（所见即所得），降档后按节拍跟随（不会停住）。 */
+ *  本轮修复（plan-75-333）「拖拽过右侧面板后，内容被永久限制在旧宽度、右侧大片空白」：
+ *  根因是上一轮拖拽未正常收尾（mouseup 丢失——指针在窗口外/guest 上松开、系统弹窗抢焦点）
+ *  时，元素上带着钉住值；下次 freeze 又把这个残留值当成「原始值」存进 prev，
+ *  松手时 unfreeze 写回 ⇒ 内容根被钉死在窄宽，且此后每次拖拽都在复制这份污染。
+ *
+ *  自愈做法：检测到钉住标记仍在 ⇒ 判定为残留态，先**清空 inline width 并重新测量自然宽**，
+ *  再以新宽度重算 offset——污染的 prev 与 offset 一并排除，用户一拖即恢复，无需重启应用。 */
 export function freezePaneContents(refs: Array<React.RefObject<HTMLElement | null>>): PaneFollowEntry[] {
   const list: PaneFollowEntry[] = [];
   for (const ref of refs) {
     const pane = ref.current;
     const el = pane?.firstElementChild as HTMLElement | null;
     if (!pane || !el) continue;
+    if (el.hasAttribute(PIN_ATTR)) {
+      // 残留态：丢弃上一次未收尾留下的钉住值，回到自然宽度再测量
+      el.style.width = "";
+      el.removeAttribute(PIN_ATTR);
+    }
     const w = Math.round(el.getBoundingClientRect().width);
     const paneW = Math.round(pane.getBoundingClientRect().width);
     list.push({ el, prev: el.style.width, offset: Math.max(0, paneW - w) });
     el.style.width = w + "px";
+    el.setAttribute(PIN_ATTR, "1");
   }
   return list;
 }
@@ -77,8 +93,13 @@ export function followPaneContents(list: PaneFollowEntry[], panelWidth: number) 
   }
 }
 
+/** 解冻内容根：还原钉住前的 inline width，并摘除钉住标记（标记语义严格等价于「当前被钉住」）。 */
 export function unfreezePaneContents(list: PaneFollowEntry[]) {
-  for (const it of list) it.el.style.width = it.prev;
+  for (const it of list) {
+    if (it.prev) it.el.style.width = it.prev;
+    else it.el.style.width = "";
+    it.el.removeAttribute(PIN_ATTR);
+  }
 }
 
 export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 0, panelEl, onCommit, freezeRefs }: Props) {
@@ -105,6 +126,17 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
   // 手柄 Y 也并入同一帧：直接在 mousemove 里写 --handle-y 会触发 style recalc，
   // 高刷鼠标下一帧多个事件就多次 recalc；与宽度写入合并到每帧一次。
   const pendingYRef = useRef<number | null>(null);
+  /** 拖拽期 document/window 监听器的实际函数引用（plan-75-333 卸载兜底用）。
+   *  handleMouseMove/Up 是 useCallback，卸载时的 cleanup 里读到的是当次渲染的闭包，
+   *  必须用 ref 记住"当初挂上去的那一个"，否则 removeEventListener 摘不掉。 */
+  const moveListenerRef = useRef<((e: MouseEvent) => void) | null>(null);
+  const upListenerRef = useRef<(() => void) | null>(null);
+  /** freezeRefs 的最新值（plan-75-333 性能收口）。
+   *  调用方传的是内联数组（App.tsx 为 `[rightPanelElRef]`），每次渲染都是新引用——
+   *  直接放进安全网 effect 的依赖里会让它每次渲染都重跑；用 ref 持有后，
+   *  安全网只在 baseWidth（面板宽度）真正变化时才执行。 */
+  const freezeRefsRef = useRef(freezeRefs);
+  freezeRefsRef.current = freezeRefs;
 
   // ── RFL-5 帧闸门（plan-329-1647 S6，本轮重写判据）──
   // 中列不再冻结（RFL-1）后，实时排版的主要成本变成“浏览器文本折行”，它随可见内容量增长。
@@ -127,17 +159,16 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
   const goodStreakRef = useRef(0);
   const lastFrozenWriteRef = useRef(0);
 
-  /** 读取设置里的拖拽排版档位（含 reduced-motion 降档）。 */
+  /** S5（plan-41-197）：拖拽排版固定「实时、不降级」——外观页已取消该配置项
+   *  （用户要求“拖拽自动降级，直接实时不降级即可”）。
+   *  仅保留系统级“减少动态效果”偏好的降档（无障碍优先，不属用户可配项）。 */
   const readDragLayoutPref = useCallback((): { layout: PanelDragLayout; autoDegrade: boolean } => {
     let layout: PanelDragLayout = "realtime";
-    let autoDegrade = true;
+    const autoDegrade = false;
     try {
-      const p = useUiStore.getState();
-      layout = p.panelDragLayout ?? "realtime";
-      autoDegrade = p.panelDragAutoDegrade !== false;
-      const reduceMotion = p.motionLevel === "reduced" || p.motionLevel === "off"
-        || (typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
-      if (reduceMotion && layout === "realtime") layout = "balanced";
+      const reduceMotion = typeof window.matchMedia === "function"
+        && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      if (reduceMotion) layout = "balanced";
     } catch { /* 读不到偏好时用默认档 */ }
     return { layout, autoDegrade };
   }, []);
@@ -246,6 +277,48 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
     el.style.flexBasis = w + "px";
   }, [panelEl]);
 
+  /** 卸载兜底（plan-75-333）：拖拽过程中组件被卸载（面板折叠、全屏切换把分隔条卸掉）时，
+   *  document 上的 mousemove/mouseup 不会随组件消失——旧实例会继续写同一个面板元素，
+   *  与重挂载出的新实例交替 applyWidth，宽度表现不可预测；内容根的钉住值也无人解冻。
+   *  这里做与 handleMouseUp 同口径的收尾，但**不提交宽度**：卸载多由折叠/全屏引起，
+   *  提交拖拽中间值会污染用户保存的面板宽度。 */
+  useEffect(() => () => {
+    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = 0; }
+    if (!draggingRef.current) return;
+    draggingRef.current = false;
+    const move = moveListenerRef.current;
+    const up = upListenerRef.current;
+    if (move) document.removeEventListener("mousemove", move);
+    if (up) {
+      document.removeEventListener("mouseup", up);
+      window.removeEventListener("blur", up);
+      window.removeEventListener("resize", up);
+    }
+    moveListenerRef.current = null;
+    upListenerRef.current = null;
+    unfreezeContents();
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+    document.body.classList.remove("panel-dragging");
+    release("panel-drag");
+  }, [unfreezeContents]);
+
+  /** 残留态安全网（plan-75-333）：非拖拽状态下内容根仍带钉住标记，说明上一次拖拽未正常收尾
+   *  （mouseup 丢失）。此时面板宽度由 React 单源写入，可能已经变宽，而内容根还钉在旧值上——
+   *  一旦面板宽度被外部改写（store 提交 / 切换会话恢复宽度 / 展开面板），立刻清掉残留，
+   *  用户不必"先拖一次"才恢复自适应。
+   *  依赖只用 baseWidth：freezeRefs 经 ref 读取（见 freezeRefsRef 声明处），
+   *  避免调用方的内联数组让本检查每次渲染都白跑一遍。 */
+  useEffect(() => {
+    if (draggingRef.current) return;
+    for (const ref of freezeRefsRef.current ?? []) {
+      const el = ref.current?.firstElementChild as HTMLElement | null;
+      if (!el?.hasAttribute(PIN_ATTR)) continue;
+      el.removeAttribute(PIN_ATTR);
+      el.style.width = "";
+    }
+  }, [baseWidth]);
+
   const handleMouseMove = useCallback((e: MouseEvent) => {
     if (!draggingRef.current) return;
     e.preventDefault();
@@ -290,6 +363,8 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
     document.removeEventListener("mouseup", handleMouseUp);
     window.removeEventListener("blur", handleMouseUp);
     window.removeEventListener("resize", handleMouseUp);
+    moveListenerRef.current = null;
+    upListenerRef.current = null;
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
     document.body.classList.remove("panel-dragging");
@@ -346,6 +421,9 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
 
     document.addEventListener("mousemove", handleMouseMove);
     document.addEventListener("mouseup", handleMouseUp);
+    // 记录本实例实际挂上的引用，供卸载时精确摘除（见 moveListenerRef 声明处）
+    moveListenerRef.current = handleMouseMove;
+    upListenerRef.current = handleMouseUp;
     // 冻结兜底：拖拽中窗口失焦（Alt+Tab）或被系统 resize（屏变/DPI/分屏）时
     // document mouseup 可能永不到达——若不收尾，内容根的 inline width 会被
     // 永久钉死，此后窗口怎么变内容都不跟随。两类事件都按"拖拽中断"处理：

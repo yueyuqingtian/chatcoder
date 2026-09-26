@@ -279,7 +279,11 @@ class OpenAICompatibleProvider(ModelProvider):
 
                 if delta:
                     # v4.3: 收集推理/思考内容（DeepSeek reasoning_content / Claude thinking）
-                    _reasoning = getattr(delta, 'reasoning_content', None) or getattr(delta, 'thinking', None)
+                    # plan-53-265: 补 OpenRouter 风格 reasoning 字段——部分中转网关
+                    # （service.guyueyu.asia 等）把思考放在 delta.reasoning，漏读会整段丢弃思考块。
+                    _reasoning = (getattr(delta, 'reasoning_content', None)
+                                  or getattr(delta, 'reasoning', None)
+                                  or getattr(delta, 'thinking', None))
                     if _reasoning:
                         thinking_parts.append(_reasoning)
                     if delta.content:
@@ -469,7 +473,10 @@ class OpenAICompatibleProvider(ModelProvider):
 
             if delta:
                 # v4.4: 思考内容实时广播
-                _reasoning = getattr(delta, 'reasoning_content', None) or getattr(delta, 'thinking', None)
+                # plan-53-265: 同上补 reasoning 字段（两处必须同口径，否则流式与非流式行为不一致）
+                _reasoning = (getattr(delta, 'reasoning_content', None)
+                              or getattr(delta, 'reasoning', None)
+                              or getattr(delta, 'thinking', None))
                 if _reasoning:
                     thinking_parts.append(_reasoning)
                     yield {"type": "thinking", "delta": _reasoning}

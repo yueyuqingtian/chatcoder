@@ -160,44 +160,116 @@ function simpleLineDiff(before: string, after: string): Array<{ type: "add" | "d
   return out;
 }
 
-/** v19: 内联 diff 块（写操作行展开内容）。v7(H): 运行中 diff 尚未落库（404）时，
- *  用 liveArgContent（fs_write args.content 等临时内容）兜底展示，落库后权威 diff 覆盖。 */
-function InlineDiff({ turnId, path, liveArgContent }: { turnId: number | null; path: string; liveArgContent?: string | null }) {
-  const [state, setState] = useState<{ kind: "loading" } | { kind: "error"; msg: string } | { kind: "ok"; lines: Array<{ type: "add" | "del" | "ctx"; text: string }>; truncated: boolean }>({ kind: "loading" });
+/** v19: 内联 diff 块（写操作行展开内容）。
+ *
+ *  plan-89-387: 传 call_key 拉取「本次编辑」的 diff——同一轮内同文件多次编辑时，
+ *  每次展开只展示本次变更（此前服务端按 turn+path 聚合，多次展开见同一份累积 diff）；
+ *  老记录无 call_key 时服务端回退整轮累积口径，头部会标注「该轮累计」。
+ *  v7(H): 运行中记录尚未落库（404）或无 turn 信息时，用调用参数兜底展示本次编辑内容。 */
+function InlineDiff({ turnId, path, callKey, fallbackLines, onStat }: {
+  turnId: number | null;
+  path: string;
+  callKey?: string;
+  fallbackLines?: Array<{ type: "add" | "del" | "ctx"; text: string }> | null;
+  /** plan-89-387: 加载完成后回报本次变更行数（行上缺 changeStat 时回填展示） */
+  onStat?: (stat: { additions: number; deletions: number }) => void;
+}) {
+  const [state, setState] = useState<
+    | { kind: "loading" }
+    | { kind: "error"; msg: string }
+    | {
+        kind: "ok";
+        lines: Array<{ type: "add" | "del" | "ctx"; text: string }>;
+        truncated: boolean;
+        additions: number;
+        deletions: number;
+        /** true=本次编辑口径；false=整轮累积（老记录无 call_key） */
+        singleEdit: boolean;
+        /** 口径说明（二进制降级、参数兜底等） */
+        note: string | null;
+      }
+  >({ kind: "loading" });
   useEffect(() => {
     let cancelled = false;
-    if (turnId == null) { setState({ kind: "error", msg: "无 turn 信息，无法拉取变更" }); return; }
-    api.getFileDiff(turnId, path)
+    const fb = fallbackLines && fallbackLines.length > 0 ? fallbackLines : null;
+    /** 记录缺失时用调用参数兜底渲染，避免「展开空白」；返回是否已兜底 */
+    const showFallback = (note: string): boolean => {
+      if (!fb) return false;
+      const c = countDiffLines(fb);
+      setState({
+        kind: "ok", lines: fb, truncated: false,
+        additions: c.additions, deletions: c.deletions, singleEdit: true, note,
+      });
+      onStat?.({ additions: c.additions, deletions: c.deletions });
+      return true;
+    };
+    if (turnId == null) {
+      if (!showFallback("无写盘记录，展示调用参数中的本次编辑内容")) {
+        setState({ kind: "error", msg: "无 turn 信息，无法拉取变更" });
+      }
+      return;
+    }
+    setState({ kind: "loading" });
+    api.getFileDiff(turnId, path, callKey)
       .then((d) => {
         if (cancelled) return;
         // 行级 diff 优先（服务端 SequenceMatcher 预计算，与徽标 +N -M 同源一致，
-        // 避免大文件本地 LCS 命中 1600 行阈值退化为全量 -/+）；无 lines 时回退本地 LCS
+        // 避免大文件本地 LCS 命中 1600 行阈值退化为全量 -/+）；
+        // 无 lines（二进制 / 无前后内容）时优先兜底、再回退本地 LCS
         const rendered = d.lines && d.lines.length > 0
           ? d.lines.map((l) => ({ type: l.type, text: l.text }))
-          : simpleLineDiff(d.before ?? "", d.after ?? "");
-        setState({ kind: "ok", lines: rendered, truncated: d.truncated });
+          : (d.before == null && d.after == null && fb ? fb : simpleLineDiff(d.before ?? "", d.after ?? ""));
+        const c = countDiffLines(rendered);
+        const adds = typeof d.additions === "number" ? d.additions : c.additions;
+        const dels = typeof d.deletions === "number" ? d.deletions : c.deletions;
+        setState({
+          kind: "ok",
+          lines: rendered,
+          truncated: d.truncated,
+          additions: adds,
+          deletions: dels,
+          singleEdit: d.single_edit === true,
+          note: d.reason ?? null,
+        });
+        onStat?.({ additions: adds, deletions: dels });
       })
       .catch((e) => {
         if (cancelled) return;
-        // v7(H): diff 记录尚未落库（运行中）时用临时内容兜底，避免"展开空白"
-        if (liveArgContent != null && liveArgContent.length > 0) {
-          setState({ kind: "ok", lines: simpleLineDiff("", liveArgContent), truncated: false });
-        } else {
+        if (!showFallback("写盘记录尚未落库，展示调用参数中的本次编辑内容")) {
           setState({ kind: "error", msg: String(e) });
         }
       });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [turnId, path, liveArgContent]);
+  }, [turnId, path, callKey, fallbackLines]);
   if (state.kind === "loading") return <pre className="tc-plain">加载变更…</pre>;
   if (state.kind === "error") return <pre className="tc-plain">变更加载失败：{state.msg}</pre>;
+  const hasStat = state.additions > 0 || state.deletions > 0;
   return (
-    <pre className="tc-diff">
-      {state.lines.map((l, i) => (
-        <div key={i} className={`tc-diff-line ${l.type}`}>{l.type === "add" ? "+ " : l.type === "del" ? "- " : "  "}{l.text}</div>
-      ))}
+    <div className="tc-diff-wrap">
+      {(hasStat || state.note) && (
+        <div className="tc-diff-head">
+          {hasStat && (
+            <span className="tc-diff-stat">
+              {state.singleEdit ? "本次变更" : "该轮累计"}
+              <span className="tc-add">+{state.additions}</span>
+              <span className="tc-del">-{state.deletions}</span>
+            </span>
+          )}
+          {state.note && <span className="tc-diff-note">{state.note}</span>}
+        </div>
+      )}
+      {state.lines.length > 0 ? (
+        <pre className="tc-diff">
+          {state.lines.map((l, i) => (
+            <div key={i} className={`tc-diff-line ${l.type}`}>{l.type === "add" ? "+ " : l.type === "del" ? "- " : "  "}{l.text}</div>
+          ))}
+        </pre>
+      ) : (
+        <div className="tc-diff-empty">本次无文本变更</div>
+      )}
       {state.truncated && <div className="tc-diff-trunc">变更过大，已截断显示</div>}
-    </pre>
+    </div>
   );
 }
 
@@ -288,19 +360,45 @@ function SqlResultView({ tool, args, output }: {
   );
 }
 
-/** v7(H): 从工具 args 提取写入的新内容（临时 diff 兜底数据源） */
-function leafArgsContent(leaf: ToolLeaf): string | null {  const a = (leaf.args ?? {}) as Record<string, unknown>;
+/** plan-89-387: 行级 diff 的行数统计（服务端未给 additions/deletions 时兜底） */
+function countDiffLines(lines: Array<{ type: "add" | "del" | "ctx" }>): { additions: number; deletions: number } {
+  let additions = 0;
+  let deletions = 0;
+  for (const l of lines) {
+    if (l.type === "add") additions++;
+    else if (l.type === "del") deletions++;
+  }
+  return { additions, deletions };
+}
+
+/** v7(H) / plan-89-387: 从工具 args 提取「本次编辑」的兜底行级 diff。
+ *
+ *  用途：写盘记录尚未落库（运行中）或该 turn 无记录（老数据）时，让展开区仍能看到
+ *  本次变更内容；覆盖 fs_write / editor_apply_diff / multi_file_edit 三种写工具。
+ *  只使用调用参数（无法拿到写前内容时退化为全量新增行），落库后由权威 diff 覆盖。 */
+function leafFallbackDiff(leaf: ToolLeaf, path: string | null): Array<{ type: "add" | "del" | "ctx"; text: string }> | null {
+  const a = (leaf.args ?? {}) as Record<string, unknown>;
   if (leaf.tool === "fs_write") {
     const c = a.content;
-    return typeof c === "string" && c ? c : null;
+    return typeof c === "string" && c ? simpleLineDiff("", c) : null;
+  }
+  if (leaf.tool === "editor_apply_diff") {
+    const oldT = typeof a.old_text === "string" ? a.old_text : "";
+    const newT = typeof a.new_text === "string" ? a.new_text : "";
+    if (!oldT && !newT) return null;
+    return simpleLineDiff(oldT, newT);
   }
   if (leaf.tool === "multi_file_edit") {
-    const edits = a.edits as Array<{ path?: unknown; new_text?: unknown; content?: unknown }> | undefined;
+    const edits = a.edits as Array<{ path?: unknown; old_text?: unknown; new_text?: unknown; content?: unknown }> | undefined;
     if (Array.isArray(edits)) {
-      const rel = (leafPath(leaf) || "").replace(/\\/g, "/");
+      const rel = (path || "").replace(/\\/g, "/");
       const hit = edits.find((e) => (typeof e.path === "string" ? e.path.replace(/\\/g, "/") : "").endsWith(rel));
-      const body = hit?.new_text ?? hit?.content;
-      return typeof body === "string" && body ? body : null;
+      if (hit) {
+        const oldT = typeof hit.old_text === "string" ? hit.old_text : "";
+        const newT = typeof hit.new_text === "string" ? hit.new_text : (typeof hit.content === "string" ? hit.content : "");
+        if (!oldT && !newT) return null;
+        return simpleLineDiff(oldT, newT);
+      }
     }
   }
   return null;
@@ -339,6 +437,14 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
   const ok = leaf.ok;
   // v25: 工具伪装写盘（terminal_exec 等带 change_stat）按写操作渲染——可展开行内 diff
   const isWrite = isWriteLeaf(leaf);
+  // plan-89-387: 展开后从服务端拿到的「本次变更」统计（行上无 changeStat 时回填展示，
+  // 覆盖历史消息缺统计的情况）；同一调用的 args 落库后不再变化，依赖 call_key 即可
+  const [loadedStat, setLoadedStat] = useState<{ additions: number; deletions: number } | null>(null);
+  const fallbackLines = useMemo(
+    () => (isWrite ? leafFallbackDiff(leaf, path) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [isWrite, leaf.callKey, path],
+  );
   const hasOutput = (leaf.output && leaf.output.length > 0) || !!leaf.error;
   // v7(B): 运行中（ok===null）恒可展开——即使 output 尚未落库，也能看实时输出
   const expandable = hasOutput || isWrite || leaf.ok === null;
@@ -352,7 +458,7 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
     openTab("files");
   };
 
-  // 点击文件名/徽标：写入工具 = 右面板 Monaco DiffEditor 查看变更；其余查看文件
+  // 点击文件名/徽标：写入工具 = 右面板 Monaco DiffEditor 查看变更（plan-89-387: 带 call_key 取本次编辑）；其余查看文件
   const openFilePreview = async (e: React.MouseEvent, p: string) => {
     e.stopPropagation();
     setPreviewPath(p);
@@ -360,7 +466,7 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
     openTab("files");
     if (isWrite && leaf.turnId != null) {
       try {
-        const d = await api.getFileDiff(leaf.turnId, p);
+        const d = await api.getFileDiff(leaf.turnId, p, leaf.callKey);
         setDiffPreview({ path: d.path, before: d.before, after: d.after, truncated: d.truncated });
       } catch { /* 回退普通预览 */ }
     }
@@ -384,13 +490,14 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
         {path && dir && <span className="tc-dir" title={path}>{dir}</span>}
         {!path && !TOOL_VERBS[leaf.tool] && <span className="tc-tool-name" title={leaf.tool}>{leaf.tool}</span>}
         {!path && summary && <span className="tc-query" title={summary}>{summary}</span>}
-        {/* v7(H): 写操作运行中 changeStat 未落库时回退到实时结果 */}
-        {leaf.changeStat || liveResult?.change_stat
-          ? <ChangeStat
-              additions={leaf.changeStat?.additions ?? liveResult?.change_stat?.additions ?? 0}
-              deletions={leaf.changeStat?.deletions ?? liveResult?.change_stat?.deletions ?? 0}
-            />
-          : null}
+        {/* v7(H): 写操作运行中 changeStat 未落库时回退到实时结果；
+            plan-89-387: 历史消息缺统计时，展开后按「本次变更」回填行数 */}
+        {(() => {
+          const stat = leaf.changeStat ?? liveResult?.change_stat ?? loadedStat;
+          return stat
+            ? <ChangeStat additions={stat.additions} deletions={stat.deletions} />
+            : null;
+        })()}
         {ok === null && <span className="tc-status wait"><IconSpinner size={11} /></span>}
         {ok === false && <span className="tc-status fail"><IconX size={11} /></span>}
         {expandable ? (
@@ -401,7 +508,13 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
         <ChatCollapse open={expanded}>
           <div className="tc-output">
             {isWrite && path ? (
-            <InlineDiff turnId={leaf.turnId} path={path} liveArgContent={leafArgsContent(leaf)} />
+            <InlineDiff
+              turnId={leaf.turnId}
+              path={path}
+              callKey={leaf.callKey}
+              fallbackLines={fallbackLines}
+              onStat={leaf.changeStat || liveResult?.change_stat ? undefined : setLoadedStat}
+            />
           ) : (
             <>
               {/* v7(H): 写操作但无 path（如 change_stat 路径缺失）时显示实时结果概要 */}

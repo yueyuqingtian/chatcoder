@@ -27,6 +27,16 @@ const DWMWA_SYSTEMBACKDROP_TYPE = 38;
 // acrylic 材质后依然干净）。
 const DWMWA_BORDER_COLOR = 34;
 const DWMWA_COLOR_NONE = 0xfffffffe; // DWMWA_COLOR_NONE：不画边框（系统未定义常量，按文档字面值）
+
+// ── plan-73-341：透明无边框窗口的合成痕迹清理（宠物浮窗周围那圈半透明色块的根因） ──
+// 背景：即使设了 transparent + frame:false + hasShadow:false + backgroundMaterial:"none"，
+// Win11 的 DWM 仍会为非客户区（NC）做合成：一层系统边框 + 窗口圆角 + 可能的背景材质，
+// 在透明窗口上表现为"浮窗周围一圈半透明色块"。逐项关掉才干净：
+const DWMWA_NCRENDERING_POLICY = 2;     // DWMNCRENDERINGPOLICY
+const DWMNCRP_DISABLED = 1;             // 完全关闭 DWM 的非客户区渲染
+const DWMWA_WINDOW_CORNER_PREFERENCE = 33; // DWM_WINDOW_CORNER_PREFERENCE（Win11 22000+）
+const DWMWCP_DONOTROUND = 1;            // 不要圆角（透明窗口自己画外观，圆角由 DWM 加会留残影）
+const DWMSBT_NONE = 1;                  // DWMWA_SYSTEMBACKDROP_TYPE = none（无背景材质）
 // 鼠标左键虚拟键码（GetAsyncKeyState 用）：自研窗口拖拽期间据此判断"用户是否已松开"。
 const VK_LBUTTON = 0x01;
 // plan-31-152 S5-2：窗口系统命令消息（自定义窗口按钮的兜底路径，与系统标题栏同源）。
@@ -197,6 +207,64 @@ function setWindowBorder(win, none = true) {
   } catch (err) {
     return { ok: false, reason: err && err.message };
   }
+}
+
+/**
+ * plan-73-341：清理透明无边框窗口的 DWM 合成痕迹（宠物浮窗周围那圈半透明色块）。
+ *
+ * 为什么单独做一件事：`transparent + frame:false` 只是让**客户区**可以透明，
+ * 非客户区（NC）仍由 DWM 合成——包括系统边框、窗口圆角、可选背景材质。
+ * 在透明窗口上，这三者叠加起来就是用户看到的"浮窗周围一圈半透明块"。
+ * 之前只设了 `backgroundMaterial:"none"` 与会话级透明参数，覆盖不全，故没根治。
+ *
+ * 逐项清理（任一失败不影响其余项，全部结果返回给调用方记日志）：
+ *   ① DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED  关掉 NC 渲染（关键项）
+ *   ② DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_DONOTROUND  不要让 DWM 加圆角
+ *   ③ DWMWA_SYSTEMBACKDROP_TYPE = DWMSBT_NONE  明确无背景材质
+ *   ④ DWMWA_BORDER_COLOR = DWMWA_COLOR_NONE  不画系统边框
+ *   ⑤ DwmExtendFrameIntoClientArea(全 0 边距)  确保帧不向客户区外扩
+ *
+ * @param {BrowserWindow} win
+ * @returns {{ok: boolean, reason?: string, steps?: Record<string, string>}}
+ */
+function applyFramelessCleanup(win) {
+  if (process.platform !== "win32") return { ok: false, reason: "非 Windows 平台" };
+  const ffi = loadDwmFfi();
+  if (!ffi) return { ok: false, reason: "FFI 不可用（koffi 缺失）" };
+  const hwnd = hwndOf(win);
+  if (hwnd === null) return { ok: false, reason: "无法获取 HWND" };
+
+  const steps = {};
+  const setUint = (label, attr, value) => {
+    try {
+      const buf = Buffer.alloc(4);
+      buf.writeUInt32LE(value >>> 0, 0);
+      const hr = ffi.DwmSetWindowAttribute(hwnd, attr, buf, 4);
+      steps[label] = hr === 0 ? "ok" : `hr=0x${(hr >>> 0).toString(16)}`;
+    } catch (err) {
+      steps[label] = `err:${err && err.message}`;
+    }
+  };
+
+  setUint("ncRendering", DWMWA_NCRENDERING_POLICY, DWMNCRP_DISABLED);
+  setUint("corner", DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND);
+  setUint("backdrop", DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_NONE);
+  setUint("border", DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE);
+
+  // 帧外扩清零：4 个 int32（左/右/上/下），全 0 = 不向客户区外扩
+  try {
+    if (typeof ffi.DwmExtendFrameIntoClientArea === "function") {
+      const margins = Buffer.alloc(16); // 默认全 0
+      const hr = ffi.DwmExtendFrameIntoClientArea(hwnd, margins);
+      steps.frame = hr === 0 ? "ok" : `hr=0x${(hr >>> 0).toString(16)}`;
+    } else {
+      steps.frame = "unavailable";
+    }
+  } catch (err) {
+    steps.frame = `err:${err && err.message}`;
+  }
+
+  return { ok: true, steps };
 }
 
 /** 左键当前是否按下（自研拖拽的松开检测；FFI 不可用时返回 null） */
@@ -444,6 +512,11 @@ module.exports = {
   DWMWA_SYSTEMBACKDROP_TYPE,
   DWMWA_BORDER_COLOR,
   DWMWA_COLOR_NONE,
+  DWMWA_NCRENDERING_POLICY,
+  DWMNCRP_DISABLED,
+  DWMWA_WINDOW_CORNER_PREFERENCE,
+  DWMWCP_DONOTROUND,
+  DWMSBT_NONE,
   VK_LBUTTON,
   BACKDROP_NAMES,
   PROBE_SELECTORS,
@@ -458,6 +531,7 @@ module.exports = {
   hwndOf,
   dwmReadBack,
   setWindowBorder,
+  applyFramelessCleanup,
   isLeftButtonDown,
   sendSysCommand,
   WM_SYSCOMMAND,

@@ -114,8 +114,14 @@ export function ArchivedPanel() {
     try {
       await api.updateSession(s.id, { status: "active" });
       await loadBootstrap();
-      if (open) await switchSession(s.id);
-      else await load();
+      if (open) {
+        await switchSession(s.id);
+        // S14（plan-41-197）：此前只切换了会话但停留在设置页（且离开设置页会按入场快照
+        // 重置会话），用户感知为“点击后没有进入对应恢复的会话”。现显式请求离开设置页。
+        window.dispatchEvent(new CustomEvent("chatcoder:leave-settings"));
+      } else {
+        await load();
+      }
     } catch { /* 非阻塞 */ }
     finally { setBusy(false); }
   };

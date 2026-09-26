@@ -187,16 +187,20 @@ def test_bg_tools_risk_level_low():
 # ───────────────── v3.0 (plan-88): 外部访问开关的 cwd 解析 ─────────────────
 
 
-def test_resolve_path_outside_blocked_by_default(tmp_path):
-    """开关关闭(默认)：越界 cwd 回退 workspace_root。"""
+def test_resolve_path_outside_not_blocked(tmp_path):
+    """plan-75-332: cwd 越界不再回退 workspace_root——工具只负责解析并执行。
+
+    旧语义要读已废弃的 plan_mode_allow_outside_access 开关；现在越界是否需询问用户
+    由 approval_policy 裁决，工具侧默认直接解析。
+    """
     ws = str(tmp_path)
     tool = TerminalExecTool()
-    assert tool._resolve_path(ws, "..") == ws
-    assert tool._resolve_path(ws, str(tmp_path.parent)) == ws
+    assert tool._resolve_path(ws, "..") == str(tmp_path.parent)
+    assert tool._resolve_path(ws, str(tmp_path.parent)) == str(tmp_path.parent)
 
 
-def test_resolve_path_outside_allowed_when_enabled(tmp_path):
-    """开关开启：绝对越界路径与 ../ 相对越界均放行。"""
+def test_resolve_path_explicit_allow_outside(tmp_path):
+    """显式 allow_outside=True 时放行越界路径（形参保留以兼容旧调用）。"""
     ws = str(tmp_path)
     tool = TerminalExecTool()
     parent = str(tmp_path.parent)
@@ -213,21 +217,19 @@ def test_resolve_path_inside_unchanged(tmp_path):
     assert tool._resolve_path(ws, "clinic", allow_outside=True) == str(tmp_path / "clinic")
 
 
-def test_plan_mode_outside_flag_in_result(tmp_path):
-    """plan 模式 + 开关开启：执行数据带 outside_access 审计标记。"""
+def test_outside_cwd_flag_in_result(tmp_path):
+    """plan-75-332: cwd 越界不再由工具拦截——执行数据仅带 outside_access 审计标记。
+
+    旧语义要读 settings.plan_mode_allow_outside_access 才允许越界 cwd；现在工具
+    只负责解析并执行，越界与否仅作为审计信息回传，是否询问用户由 approval_policy 裁决。
+    """
     tool = TerminalExecTool()
     ctx = ToolContext(
         workspace_root=str(tmp_path),
         session_id=1, task_id=1, agent_id=1, agent_name="tester",
         permission_mode="plan",
     )
-    from app.core.config import settings as _s
-    prev = _s.plan_mode_allow_outside_access
-    _s.plan_mode_allow_outside_access = True
-    try:
-        r = asyncio.run(tool.run({"command": "echo x", "cwd": ".."}, ctx))
-    finally:
-        _s.plan_mode_allow_outside_access = prev
+    r = asyncio.run(tool.run({"command": "echo x", "cwd": ".."}, ctx))
     assert r.ok is True
     assert r.data.get("outside_access") is True
     assert r.data["cwd"] == str(tmp_path.parent)

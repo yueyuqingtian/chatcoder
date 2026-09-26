@@ -19,7 +19,7 @@ export { Dialog } from "./Dialog";
 export { Markdown, markdownComponents } from "./Markdown";
 export { Menu, type MenuEntry } from "./Menu";
 export { PageTransition } from "./PageTransition";
-export { Tooltip, TooltipProvider } from "./Tooltip";
+export { Tooltip, TooltipProvider, NativeTitleTooltip } from "./Tooltip";
 export { FormDialog } from "./FormDialog";
 export { ContextMenu } from "./ContextMenu";
 export type { MenuItem } from "./ContextMenu";

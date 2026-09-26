@@ -13,6 +13,7 @@
 import type { MessageOut } from "../../api/client";
 import { MsgType, SenderType } from "@chatcoder/shared";
 import type { TurnOut } from "@chatcoder/shared";
+import { recordDerivation } from "../../perf/metrics";
 
 export interface ToolLeaf {
   callKey: string;
@@ -261,14 +262,25 @@ export function createTimelineBuilder(): (messages: MessageOut[]) => TimelineEnt
   // 无 turn_id 的消息（用户消息独立成组 / 前置 standalone）：按消息对象身份缓存
   const msgEntryCache = new WeakMap<MessageOut, TimelineEntry>();
 
-  return function buildCached(messages: MessageOut[]): TimelineEntry[] {
+  type Slot = { kind: "turn"; tid: number } | { kind: "entry"; entry: TimelineEntry };
+
+  /** plan-75-334 阶段2：上一次调用的输入快照与结果，作为「追加快路径」的前缀基准。
+   *  快路径只在「旧前缀逐项引用一致、长度只增、只动尾部 turn」时启用；
+   *  任何前缀变化（REST 刷新、回滚、乐观消息替换、乱序插入）都回退到全量安全路径。 */
+  let lastMessages: MessageOut[] | null = null;
+  let lastSlots: Slot[] | null = null;
+  let lastResult: TimelineEntry[] | null = null;
+  /** 上次扫描结束时「最后一条带 turn_id 的消息」所属 tid（null-turn 消息的归属判定沿用此值）。 */
+  let lastTurnId: number | null = null;
+
+  /** 全量安全路径：与改造前语义完全一致（逐 turn 按引用复用缓存 entry），也是所有异常情况的落点。 */
+  function buildFull(messages: MessageOut[]): TimelineEntry[] {
     // ① 单遍扫描：与 buildTimeline 同一套聚合规则，但只记录「顺序槽位」，
     //    不在这里创建 turn entry 对象（推迟到第 ② 步按缓存决定复用还是新建）。
-    type Slot = { kind: "turn"; tid: number } | { kind: "entry"; entry: TimelineEntry };
     const slots: Slot[] = [];
     const turnMsgs = new Map<number, MessageOut[]>();
     const turnOrder: number[] = [];
-    let lastTurnId: number | null = null;
+    let scanLastTid: number | null = null;
 
     for (const m of messages) {
       const tid = m.turn_id ?? null;
@@ -281,7 +293,7 @@ export function createTimelineBuilder(): (messages: MessageOut[]) => TimelineEnt
           slots.push({ kind: "turn", tid });
         }
         arr.push(m);
-        lastTurnId = tid;
+        scanLastTid = tid;
         continue;
       }
       if (m.sender_type === SenderType.User) {
@@ -293,8 +305,8 @@ export function createTimelineBuilder(): (messages: MessageOut[]) => TimelineEnt
         slots.push({ kind: "entry", entry: e });
         continue;
       }
-      if (lastTurnId != null) {
-        const arr = turnMsgs.get(lastTurnId);
+      if (scanLastTid != null) {
+        const arr = turnMsgs.get(scanLastTid);
         if (arr) arr.push(m);
         continue;
       }
@@ -326,7 +338,109 @@ export function createTimelineBuilder(): (messages: MessageOut[]) => TimelineEnt
       for (const tid of Array.from(turnCache.keys())) if (!live.has(tid)) turnCache.delete(tid);
     }
 
-    return slots.map((s) => (s.kind === "entry" ? s.entry : resolved.get(s.tid)!));
+    const result = slots.map((s) => (s.kind === "entry" ? s.entry : resolved.get(s.tid)!));
+    // 记录本次快照，供下一次调用做「追加快路径」的前缀比对
+    lastMessages = messages;
+    lastSlots = slots;
+    lastResult = result;
+    lastTurnId = scanLastTid;
+    return result;
+  }
+
+  /** 追加快路径（plan-75-334 阶段2）：只重建「被追加的尾部 turn」与新增 turn，
+   *  其余 slot 与 entry 引用原样复用——长会话追加一条消息不再是 O(N) 全量重建。
+   *
+   *  成立条件（由 buildCached 保证前缀一致后进入）：新增消息要么延续尾部 turn，
+   *  要么开启全新 turn；一旦发现「已存在的旧 turn 被追加」立即返回 null 回退安全路径，
+   *  因此刷新、回滚、乱序与乐观消息替换永远不会走这条路。 */
+  function tryAppendTail(messages: MessageOut[], oldLen: number): TimelineEntry[] | null {
+    const slots = lastSlots!.slice();
+    const appendedByTid = new Map<number, MessageOut[]>();
+    const append = (tid: number, m: MessageOut) => {
+      const list = appendedByTid.get(tid);
+      if (list) list.push(m);
+      else appendedByTid.set(tid, [m]);
+    };
+    let fastLastTid = lastTurnId;
+
+    for (let i = oldLen; i < messages.length; i++) {
+      const m = messages[i];
+      const tid = m.turn_id ?? null;
+      if (tid != null) {
+        if (tid === fastLastTid) {
+          append(tid, m);
+        } else if (!turnCache.has(tid)) {
+          // 全新 turn：时间线继续向后延伸
+          append(tid, m);
+          slots.push({ kind: "turn", tid });
+          fastLastTid = tid;
+        } else {
+          // 已存在的旧 turn 在尾部被追加：乱序插入或 REST 合并混入 → 回退安全路径
+          return null;
+        }
+        continue;
+      }
+      if (m.sender_type === SenderType.User) {
+        // 与安全路径一致：null-turn 用户消息独立成组，且不改变「当前 turn」归属
+        let e = msgEntryCache.get(m);
+        if (!e) {
+          e = { kind: "turn", turnId: null, items: [{ kind: "user", msg: m }] };
+          msgEntryCache.set(m, e);
+        }
+        slots.push({ kind: "entry", entry: e });
+        continue;
+      }
+      if (fastLastTid != null) {
+        append(fastLastTid, m);
+        continue;
+      }
+      let e = msgEntryCache.get(m);
+      if (!e) {
+        e = { kind: "standalone", msg: m };
+        msgEntryCache.set(m, e);
+      }
+      slots.push({ kind: "entry", entry: e });
+    }
+
+    // 应用阶段（所有判定已通过）：只重建受影响的 turn，其 msg 数组由旧数组拼接新增项而来，
+    // 保证下次即使回退到安全路径，sameRefs 仍能逐项命中并继续复用 entry。
+    for (const [tid, extra] of appendedByTid) {
+      const cached = turnCache.get(tid);
+      const msgs = cached ? [...cached.msgs, ...extra] : extra;
+      const entry = { kind: "turn", turnId: tid, items: buildTurnItems(msgs) } as Extract<TimelineEntry, { kind: "turn" }>;
+      turnCache.set(tid, { msgs, entry });
+    }
+
+    const result = slots.map((s) => (s.kind === "entry" ? s.entry : turnCache.get(s.tid)!.entry));
+    lastMessages = messages;
+    lastSlots = slots;
+    lastResult = result;
+    lastTurnId = fastLastTid;
+    return result;
+  }
+
+  return function buildCached(messages: MessageOut[]): TimelineEntry[] {
+    // plan-75-334 阶段0：记录时间线构建次数（仅采集期间统计，零开销）
+    recordDerivation("timelineBuild");
+
+    // 同一数组引用（store 未变）⇒ 直接复用上次结果
+    if (lastMessages === messages && lastResult) return lastResult;
+
+    // 追加快路径：有上次快照、长度只增、且旧前缀逐项为同一引用
+    if (lastMessages && lastSlots && lastResult && messages.length >= lastMessages.length) {
+      const oldLen = lastMessages.length;
+      let prefixSame = true;
+      for (let i = 0; i < oldLen; i++) {
+        if (messages[i] !== lastMessages[i]) { prefixSame = false; break; }
+      }
+      if (prefixSame) {
+        const appended = tryAppendTail(messages, oldLen);
+        if (appended) return appended;
+      }
+    }
+
+    // 安全路径：首次调用、REST 刷新、回滚、乱序插入、乐观消息替换、会话切换等
+    return buildFull(messages);
   };
 }
 

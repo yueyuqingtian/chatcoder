@@ -1,15 +1,19 @@
-"""v2.2 (对齐 zcode 3.12): shell 命令静态安全分级。
+"""v2.2 (对齐 zcode 3.12): shell 命令静态分级。
 
-ZCode 的 analyzeBashCommand/classifySafeCommandIdentity 思路简化版：
-不解析 AST（Python 侧无 shell parser），用管道分段 + 首 token 匹配两级判定：
+plan-75-332 语义调整（重要）：本模块**不再做任何拦截**。
+改造前 `analyze()` 命中黑名单会直接 deny（连审批机会都没有），命中白名单则免审批——
+两者都是"工具自身在替用户做决定"。现在它只回答两个分类问题：
 
-- allow：只读白名单命令（ls/cat/git status…）→ 免审批直接执行；
-- deny ：危险黑名单（rm -rf / format / 磁盘清理…）→ 直接拒绝，不执行、不审批；
-- ask  ：其余命令 → 走原有审批门（risk=high）+ exec_policy 前缀规则。
+- `risk_note(cmd)`     → 风险命令特征（原黑名单），命中即归 `exec_risky`；
+- `delete_note(cmd)`   → 删除操作特征，命中即归 `delete`；
+- `is_readonly_command(cmd)` → 只读命令判定（原白名单），命中即归 `exec_readonly`。
 
-每段管道单独判定，任一段 deny 即整体 deny；全部 allow 才整体 allow。
+是否放行、是否弹审批一律交给 `approval_policy.decide()` 按权限模式裁决：
+完全访问下 `rm -rf` 可执行（用户明确要求），自动审批下它进审批卡而不是被硬拒。
+
+`analyze()` 保留原签名与三态语义，作为向后兼容的薄封装（deny 仅在描述风险时返回，
+调用方不应再据此拒绝执行）。
 """
-
 from __future__ import annotations
 
 import re
@@ -81,59 +85,93 @@ _READONLY_WHITELIST: dict[str, set[str] | None] = {
     "measure-object": None,
 }
 
-# 危险黑名单：命中即整体拒绝（regex 匹配原始命令行）。
-# v1.2: 每项带可操作的中文原因，agent 看到后知道该怎么改；
-#       去掉 `> nul` 拦截——Windows 上 nul 是合法的空设备（findstr ... > nul 属于正常用法），
-#       仅拦截 `/dev/null`（Windows 无此设备，重定向会产生垃圾文件 dev/null）。
-_DANGEROUS_PATTERNS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"\brm\s+(-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r|--recursive)", re.I), "危险命令已拦截: rm 递归强制删除"),
-    (re.compile(r"\brm\s+(-[a-z]*f|--force)\b", re.I), "危险命令已拦截: rm 强制删除"),
-    (re.compile(r"\bRemove-Item\b.*\b-Recurse\b", re.I), "危险命令已拦截: Remove-Item 递归删除"),
-    (re.compile(r"\bdel\s+/[sfq]", re.I), "危险命令已拦截: del 静默/递归删除"),
-    (re.compile(r"\brmdir\s+/s", re.I), "危险命令已拦截: rmdir 递归删除"),
-    (re.compile(r"\bformat\b", re.I), "危险命令已拦截: format"),
-    (re.compile(r"\bdiskpart\b", re.I), "危险命令已拦截: diskpart"),
-    (re.compile(r"\bmkfs\b", re.I), "危险命令已拦截: mkfs"),
-    (re.compile(r"\bdd\s+if=", re.I), "危险命令已拦截: dd 写入"),
-    (re.compile(r"\bshutdown\b", re.I), "危险命令已拦截: shutdown"),
-    (re.compile(r"\breboot\b", re.I), "危险命令已拦截: reboot"),
-    (re.compile(r"\bStop-Computer\b", re.I), "危险命令已拦截: Stop-Computer"),
-    (re.compile(r"\bRestart-Computer\b", re.I), "危险命令已拦截: Restart-Computer"),
-    (re.compile(r"\bgit\s+(reset\s+--hard|clean\s+-[a-z]*f|checkout\s+--\s+\.)", re.I), "危险命令已拦截: git 破坏性操作"),
-    (re.compile(r">\s*/dev/", re.I), "危险命令已拦截: Windows 没有 /dev/null，请去掉重定向或改用 > nul"),
-    (re.compile(r"\bchmod\s+-R\s+777\b", re.I), "危险命令已拦截: chmod -R 777"),
-    (re.compile(r"\bicacls\b", re.I), "危险命令已拦截: icacls"),
-    (re.compile(r"\brmdir\b.*\b/s\b", re.I), "危险命令已拦截: rmdir /s"),
+# ── 风险特征（原"危险黑名单"）：不可逆、影响系统范围或破坏版本历史 ──
+# 命中 → exec_risky（自动审批下仍需人工确认；完全访问下放行）。
+_RISK_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\brm\s+(-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r|--recursive)", re.I), "递归强制删除（rm -rf）"),
+    (re.compile(r"\bRemove-Item\b.*\b-Recurse\b", re.I), "递归删除（Remove-Item -Recurse）"),
+    (re.compile(r"\bdel\s+/[sfq]", re.I), "静默/递归删除（del /s /f /q）"),
+    (re.compile(r"\brmdir\s+/s", re.I), "递归删除目录（rmdir /s）"),
+    (re.compile(r"\bformat\b", re.I), "格式化磁盘（format）"),
+    (re.compile(r"\bdiskpart\b", re.I), "磁盘分区操作（diskpart）"),
+    (re.compile(r"\bmkfs\b", re.I), "创建文件系统（mkfs）"),
+    (re.compile(r"\bdd\s+if=", re.I), "裸设备写入（dd if=）"),
+    (re.compile(r"\bshutdown\b", re.I), "关机（shutdown）"),
+    (re.compile(r"\breboot\b", re.I), "重启（reboot）"),
+    (re.compile(r"\bStop-Computer\b", re.I), "关机（Stop-Computer）"),
+    (re.compile(r"\bRestart-Computer\b", re.I), "重启（Restart-Computer）"),
+    (re.compile(r"\bgit\s+(reset\s+--hard|clean\s+-[a-z]*f|checkout\s+--\s+\.)", re.I), "Git 破坏性操作（丢失未提交改动）"),
+    (re.compile(r">\s*/dev/", re.I), "重定向到 /dev/（Windows 无此设备，会产生垃圾文件）"),
+    (re.compile(r"\bchmod\s+-R\s+777\b", re.I), "开放全部权限（chmod -R 777）"),
+    (re.compile(r"\bicacls\b", re.I), "修改文件访问控制（icacls）"),
+]
+
+# ── 删除特征（非递归、破坏面局限在目标路径）──
+_DELETE_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\brm\s+(-[a-z]+\s+)*[^\s-]", re.I), "删除文件（rm）"),
+    (re.compile(r"\bRemove-Item\b", re.I), "删除文件/目录（Remove-Item）"),
+    (re.compile(r"\b(?:del|erase)\s+", re.I), "删除文件（del）"),
+    (re.compile(r"\b(?:rmdir|rd)\s+", re.I), "删除目录（rmdir）"),
+    (re.compile(r"\bunlink\s+", re.I), "删除文件（unlink）"),
 ]
 
 # 管道分隔（考虑引号内管道符误判：简单处理——按常见引号保护）
 _PIPE_SPLIT_RE = re.compile(r'[|](?=(?:[^"\']|"[^"]*"|\'[^\']*\')*$)')
 
 
-def analyze(command: str) -> tuple[str, str]:
-    """静态分析命令。返回 (verdict, reason)：allow / deny / ask。"""
+def risk_note(command: str) -> str:
+    """风险特征说明；未命中返回空串（调用方据此归为 exec_risky）。"""
     cmd = (command or "").strip()
     if not cmd:
-        return "deny", "命令为空"
-
-    # 1. 危险黑名单（原始命令匹配，任一段命中即 deny）
-    for pat, reason in _DANGEROUS_PATTERNS:
+        return ""
+    for pat, note in _RISK_PATTERNS:
         if pat.search(cmd):
-            return "deny", reason
+            return note
+    return ""
 
-    # 2. 逐段管道判定只读白名单
+
+def delete_note(command: str) -> str:
+    """删除操作说明；未命中返回空串。
+
+    风险特征优先：`rm -rf` 既是删除也是风险，由 `risk_note` 先命中归为 exec_risky，
+    审批卡会按"风险命令"而非"删除"呈现（破坏性更强，文案更醒目）。
+    """
+    cmd = (command or "").strip()
+    if not cmd or risk_note(cmd):
+        return ""
+    for pat, note in _DELETE_PATTERNS:
+        if pat.search(cmd):
+            return note
+    return ""
+
+
+def is_readonly_command(command: str) -> bool:
+    """只读命令判定（原白名单逻辑）。
+
+    逐段管道判定：含串联操作符（&& / ;）或输出重定向一律不算只读
+    （白名单命令夹带写操作是典型的绕过手法）；每段首 token 及其子命令都需在
+    只读集内，全部段落满足才算只读。
+
+    含删除/风险特征时直接判否，避免 `cat x; rm y` 这类混淆被误判。
+    """
+    cmd = (command or "").strip()
+    if not cmd:
+        return False
+    if risk_note(cmd) or delete_note(cmd):
+        return False
+
     segments = [s.strip() for s in _PIPE_SPLIT_RE.split(cmd) if s.strip()]
     if not segments:
-        return "deny", "命令为空"
+        return False
 
     for seg in segments:
-        # 去掉 && / ; 串联（串联命令一律按 ask 处理，防止白名单命令夹带写操作）
+        # 串联命令一律不视为只读（防白名单命令夹带写操作）
         if "&&" in seg or ";" in seg:
-            return "ask", "命令含串联操作符"
-        # 拦截输出重定向（> 或 >> 写入文件，除 > $null / > nul / 2>&1 等安全静默输出外）
+            return False
+        # 输出重定向（> / >>）不算只读；`> $null` / `> nul` / `2>&1` 等安全静默输出除外
         clean_seg = re.sub(r">\s*(?:\$null|nul|&\d+)", "", seg, flags=re.I)
         if ">" in clean_seg:
-            return "ask", "命令包含写入重定向 (> 或 >>)"
+            return False
         tokens = seg.split()
         if not tokens:
             continue
@@ -145,15 +183,37 @@ def analyze(command: str) -> tuple[str, str]:
             first = first.lower()
         allowed_subs = _READONLY_WHITELIST.get(first)
         if allowed_subs is None and first not in _READONLY_WHITELIST:
-            return "ask", f"命令不在只读白名单: {first}"
+            return False
         if allowed_subs is not None:
             sub = tokens[1] if len(tokens) > 1 else None
             if sub is not None:
-                # 只读子命令集合匹配：git diff / npm list 等；
                 # 先原样匹配，再尝试去前导 - 匹配（--version ↔ version 两种写法）
                 sub_lower = sub.lower()
                 if sub_lower not in allowed_subs and sub_lower.lstrip("-") not in allowed_subs:
-                    # 子命令不在只读集 → ask（如 git push / git reset）
-                    return "ask", f"{first} 子命令不在只读白名单: {sub}"
+                    return False
+    return True
 
-    return "allow", "只读安全命令"
+
+def analyze(command: str) -> tuple[str, str]:
+    """兼容包装：返回 (verdict, reason)，verdict ∈ allow / deny / ask。
+
+    语义已变更（plan-75-332）：`deny` 仅表示"命中风险特征"，**不再**代表拒绝执行。
+    新的裁决方 `approval_policy.decide()` 会把它当作 exec_risky 分类；保留三态返回值
+    只为不破坏既有调用点与测试的签名约定。
+    """
+    cmd = (command or "").strip()
+    if not cmd:
+        return "deny", "命令为空"
+
+    note = risk_note(cmd)
+    if note:
+        return "deny", f"风险命令: {note}"
+
+    if is_readonly_command(cmd):
+        return "allow", "只读安全命令"
+
+    del_note = delete_note(cmd)
+    if del_note:
+        return "ask", del_note
+
+    return "ask", "命令不在只读白名单"

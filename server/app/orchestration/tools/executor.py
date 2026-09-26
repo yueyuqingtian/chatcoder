@@ -3,6 +3,16 @@
 - 抽象 ToolExecutor:execute(tool_call, agent, ctx) -> ToolResult
 - 本期实现 ServerToolExecutor:服务端进程内执行 + 审批门。
 - v0.5 可加 ClientToolExecutor:WS 下发 tool_call.request 等客户端回结果。
+
+plan-75-332：审批门改造为**单一裁决点**。改造前本文件内嵌五段硬编码判定
+（沙箱 read-only → 工具钩子 approval_precheck → 权限模式 plan/readonly →
+模式白名单 → exec_policy 规则 → danger-full-access 免审），并只对
+`risk_level != "low"` 的工具走审批——导致"读工作区外文件"这类 low 风险操作
+必须在工具内部（outside_access）另开一个审批入口。
+
+现在：每个工具调用都交给 `approval_policy.decide()` 裁决一次，
+返回 allow（直接执行）/ ask（弹审批卡）/ deny（拒绝，仅执行模式边界与用户规则）。
+工具自身不再做任何拦截，也不再自行决定免审。
 """
 import logging
 from abc import ABC, abstractmethod
@@ -10,6 +20,13 @@ from typing import TYPE_CHECKING, Any
 
 from app._diag import log_tool_error  # v36: 审批/执行异常诊断日志
 from app.orchestration.approval import approval_manager
+from app.orchestration.approval_policy import (
+    VERDICT_ASK,
+    VERDICT_DENY,
+    decide,
+    normalize_approval_mode,
+    normalize_execution_mode,
+)
 from app.orchestration.tools.base import ToolContext, ToolResult
 from app.orchestration.tools.registry import tool_registry
 
@@ -17,35 +34,6 @@ if TYPE_CHECKING:
     from app.persistence.models.agent import Agent
 
 logger = logging.getLogger(__name__)
-
-
-def _is_plan_doc_path(ctx: ToolContext, args: dict) -> bool:
-    """规划模式放行判定：写入目标为 workspace/ai/ 下的 .md 计划文档。"""
-    raw = args.get("path") or args.get("file_path") or args.get("filepath") or ""
-    if not isinstance(raw, str) or not raw.strip():
-        return False
-    try:
-        from pathlib import Path
-        from app.orchestration.tools.safe_path import safe_resolve, safe_resolve_parent
-        root_dir = ctx.workspace_root if (ctx.workspace_root and str(ctx.workspace_root).strip()) else "."
-        root = Path(root_dir).resolve()
-        target = safe_resolve(str(root), raw) or safe_resolve_parent(str(root), raw)
-        if target is None:
-            # 尝试直接使用 Path 解析
-            p = Path(raw)
-            if p.is_absolute():
-                target = p.resolve()
-            else:
-                target = (root / p).resolve()
-        else:
-            target = target.resolve()
-        rel = target.relative_to(root) if target.is_relative_to(root) else None
-        if rel is None:
-            return False
-        parts = rel.parts
-        return len(parts) == 2 and parts[0].lower() == "ai" and parts[1].lower().endswith(".md")
-    except Exception:
-        return False
 
 
 # plan-248-1258 M3.1: 写盘类工具名 → 变更文件路径参数名（多个时按 args.edits[].path）
@@ -110,10 +98,22 @@ class ServerToolExecutor(ToolExecutor):
     """服务端进程内执行。
 
     流程:
-    1. 工具存在性 + agent 白名单校验
-    2. risk != low -> 发起审批(阻塞)
+    1. 工具存在性校验
+    2. approval_policy.decide() 裁决（allow / ask / deny）
     3. 执行工具
     """
+
+    async def _load_rules(self, ctx: ToolContext) -> list | None:
+        """取本次会话可见的 exec_policy 规则（失败按无规则处理，不阻断执行）。"""
+        if getattr(ctx, "db", None) is None:
+            return None
+        try:
+            from app.services import exec_policy_service
+
+            return await exec_policy_service.list_rules(ctx.db, session_id=ctx.session_id)
+        except Exception:
+            logger.warning("exec_policy 规则查询异常(按无规则处理)", exc_info=True)
+            return None
 
     async def execute(
         self,
@@ -129,18 +129,28 @@ class ServerToolExecutor(ToolExecutor):
         if tool is None:
             return ToolResult(ok=False, output="", error=f"未知工具: {tool_name}")
 
-        # agent 白名单校验已由调用方（agent_loop）控制，此处只做风险审批门
+        # agent 白名单校验已由调用方（agent_loop）控制，此处只做统一权限裁决
 
-        whitelist: list[str] | None = None
-        if getattr(agent, "template_id", None):
-            # 注意:调用方在事务中读取 tpl;此处 agent 已是 ORM 对象
-            # 白名单字段可能需调用方预注入到 ctx.data;这里宽松处理:
-            pass
-        # ctx.data 不存在;为简化,白名单校验放调用方(agent_runtime)做
-        # 这里只做风险审批门
+        # ── 统一裁决（plan-75-332）：所有工具调用都过一次策略，不再按 risk_level 分流 ──
+        rules = await self._load_rules(ctx)
+        decision = decide(
+            tool_name, args or {}, ctx,
+            risk_level=tool.risk_level, rules=rules,
+        )
 
-        # 风险审批门
-        if tool.risk_level != "low":
+        if decision.verdict == VERDICT_DENY:
+            logger.info(
+                "[tool.gate] 拒绝 tool=%s action=%s pm=%s reason=%s",
+                tool_name, decision.action,
+                getattr(ctx, "permission_mode", "-"), decision.reason,
+            )
+            return ToolResult(
+                ok=False, output="",
+                error=f"[权限策略] {decision.reason}",
+                data={"denied": True, "reason": decision.reason, "action": decision.action},
+            )
+
+        if decision.verdict == VERDICT_ASK:
             approval_id = approval_manager.new_id()
             detail = {
                 "call_key": call_key,
@@ -151,34 +161,35 @@ class ServerToolExecutor(ToolExecutor):
                 "agent_name": ctx.agent_name,
                 "task_id": ctx.task_id,
                 "session_id": ctx.session_id,
-                "summary": f"{ctx.agent_name} 申请执行 {tool_name}({tool.risk_level} 风险)",
+                # plan-75-332: 审批卡展示用的动作短语与风险说明（前端直接渲染，不再拼工具名）
+                "kind": "tool_call",
+                "action": decision.action,
+                "action_label": decision.label,
+                "risk_note": decision.risk_note,
+                "execution_mode": normalize_execution_mode(getattr(ctx, "permission_mode", None)),
+                "approval_mode": normalize_approval_mode(getattr(ctx, "approval_mode", None)),
+                # plan-75-332: 本 turn 的思考深度——审批卡「解释」默认沿用（未在设置中指定专用档位时）
+                "reasoning_effort": getattr(ctx, "reasoning_effort", None),
+                "summary": f"{ctx.agent_name} 申请{decision.label}",
             }
-            # v2.2 (对齐 zcode 3.12): 权限模式三态 + 命令安全分级 + 工具级规则
-            skip, deny_reason = await self._precheck_approval(tool, tool_name, args, ctx, detail)
-            if deny_reason:
+            # plan-230-1144: 不再注册全局单例回调——多会话并发时后注册者会覆盖前者，
+            # 导致 A 会话的审批广播进 B 会话。approval_manager.request 现按
+            # detail.session_id 精确路由到发起会话的 WS 通道。
+            # （on_approval_request 保留形参以兼容既有调用方，其内部 emitter 已无用）
+            _ = on_approval_request  # noqa: F841 兼容保留
+            approved = await approval_manager.request(approval_id=approval_id, detail=detail)
+            if not approved:
                 return ToolResult(
                     ok=False, output="",
-                    error=f"[权限策略] {deny_reason}",
-                    data={"denied": True, "reason": deny_reason},
+                    error=f"审批未通过/已超时（{decision.label}）",
+                    data={"approved": False, "approval_id": approval_id},
                 )
-            if skip:
-                logger.info(
-                    "跳过审批(权限模式/安全分级/工具规则): %s pm=%s",
-                    tool_name, getattr(ctx, "permission_mode", "default"),
-                )
-            else:
-                # plan-230-1144: 不再注册全局单例回调——多会话并发时后注册者会覆盖前者，
-                # 导致 A 会话的审批广播进 B 会话。approval_manager.request 现按
-                # detail.session_id 精确路由到发起会话的 WS 通道。
-                # （on_approval_request 保留形参以兼容既有调用方，其内部 emitter 已无用）
-                _ = on_approval_request  # noqa: F841 兼容保留
-                approved = await approval_manager.request(approval_id=approval_id, detail=detail)
-                if not approved:
-                    return ToolResult(
-                        ok=False, output="",
-                        error=f"审批未通过/已超时({tool.risk_level} 风险:{tool_name})",
-                        data={"approved": False, "approval_id": approval_id},
-                    )
+        else:
+            logger.info(
+                "[tool.gate] 放行 tool=%s action=%s pm=%s am=%s",
+                tool_name, decision.action,
+                getattr(ctx, "permission_mode", "-"), getattr(ctx, "approval_mode", "-"),
+            )
 
         # 执行
         try:
@@ -190,6 +201,7 @@ class ServerToolExecutor(ToolExecutor):
             # 仍被本层 wait_for(审批超时+30s) 杀掉，表现为"提问还是会超时"。
             # 现改为无限等待（用户取消 turn 会连带取消本协程，不存在悬挂）。
             import asyncio
+
             from app.core.config import settings as _settings
             if tool_name == "ask_user_question":
                 result = await tool.run(args, ctx)
@@ -213,121 +225,6 @@ class ServerToolExecutor(ToolExecutor):
                 args=args, phase="run",
             )
             return ToolResult(ok=False, output="", error=f"工具异常: {type(e).__name__}: {e}")
-
-    async def _precheck_approval(self, tool, tool_name: str, args: dict, ctx: ToolContext,
-                                 detail: dict) -> tuple[bool, str]:
-        """v2.2 (对齐 zcode 3.12): 审批门前决策。
-
-        返回 (skip_approval, deny_reason)：deny_reason 非空 = 直接拒绝；
-        否则 skip_approval=True 时免审批执行。
-        决策顺序：命令安全分级(工具钩子) → 权限模式 → exec_policy 工具/命令规则。
-        """
-        # 写盘工具集合（accept_edits 免审 / plan 拒绝）
-        _WRITE_TOOLS = ("fs_write", "editor_apply_diff", "multi_file_edit")
-
-        # 0. v3.0 (plan-88): 沙箱模式硬边界——read-only 拒绝一切写盘与高危命令
-        # （优先级最高，exec_policy allow 也不可绕过；见 docs/sandbox-design.md）
-        sandbox = getattr(ctx, "sandbox_mode", "workspace-write") or "workspace-write"
-        if sandbox == "read-only":
-            if tool_name in _WRITE_TOOLS:
-                return False, "只读沙箱不允许写盘工具"
-            if tool_name == "terminal_exec":
-                from app.orchestration.tools.shell_policy import analyze as _analyze_shell
-                _v, _r = _analyze_shell(str(args.get("command", "") or ""))
-                if _v != "allow":
-                    return False, "只读沙箱仅允许只读命令"
-
-        # 1. 工具自身的安全分级钩子（terminal_exec 只读命令免审）
-        try:
-            skip, reason = tool.approval_precheck(args, ctx)
-            if skip:
-                return True, ""
-        except Exception as exc:
-            # v36: approval_precheck 必须返回 (skip_approval, reason) 二元组；
-            # 返回值契约被破坏时（如返回单个 bool）会在解包处抛
-            # TypeError: 'bool' object is not iterable。记录完整堆栈与返回值，
-            # 便于区分「工具钩子内部报错」与「返回值契约不符」。
-            log_tool_error(
-                turn_id=getattr(ctx, "task_id", None), step=None,
-                tool_name=tool_name, call_key=detail.get("call_key", ""),
-                exc=exc, args=args, phase="approval_precheck",
-            )
-
-        # 2. 权限模式三态与规划模式命令防篡改拦截
-        pm = getattr(ctx, "permission_mode", "default") or "default"
-        if pm in ("plan", "readonly") and tool_name in _WRITE_TOOLS:
-            # 规划模式放行计划文档写入（ai/*.md），其余写盘仍拒绝
-            if pm == "plan" and tool_name == "fs_write" and _is_plan_doc_path(ctx, args):
-                return True, ""
-            return False, f"{'规划' if pm == 'plan' else '只读'}模式不允许写盘工具"
-        if pm in ("plan", "readonly") and tool_name == "terminal_exec":
-            # 规划模式/只读模式下严禁使用命令行修改或创建任何文件
-            from app.orchestration.tools.shell_policy import analyze as _analyze_shell
-            cmd_str = str(args.get("command", "") or "")
-            verdict, reason = _analyze_shell(cmd_str)
-            if verdict != "allow":
-                return False, f"{'规划' if pm == 'plan' else '只读'}模式仅允许只读命令，禁止通过终端修改/写入文件: {reason or cmd_str}"
-            # 即使命令本身在只读白名单中，也严格放行且无需人工审批
-            return True, ""
-        if pm == "accept_edits" and tool_name in _WRITE_TOOLS:
-            return True, ""
-
-        # 2b. plan-230-1144 M2: 模式白名单强制——模式定义了白名单且工具不在其中时直接拒绝。
-        # schema 层已按白名单过滤，模型理论上看不到白名单外的工具；这里是第二道闸门
-        # （新旧双跑取更严方：防模型幻觉调用未暴露工具时 executor 仍放行）。
-        try:
-            from app.services import permission_profile_service as _pps
-            _profile = _pps.get_profile(pm)
-            # v36 (plan-321-1600 R1): MCP 工具名（mcp_<server>_<tool>）随用户配置动态生成，
-            # 无法预先写进模式白名单；其注入已由 engine 的 _inject_mcp_tools（只读类 + 显式
-            # 勾选）把关，此处不再按静态白名单二次拒绝（否则用户在面板勾选了仍不可用）。
-            _is_mcp = tool_name.startswith("mcp_")
-            if (not _is_mcp and _profile and _profile.get("tools")
-                    and tool_name not in _profile["tools"]):
-                return False, (
-                    f"模式「{_profile.get('display_name') or pm}」不允许工具 {tool_name}"
-                )
-        except Exception:
-            logger.debug("permission_profile 白名单强制检查失败(忽略)", exc_info=True)
-
-        # 3. exec_policy 规则（工具级 + terminal 命令级；需要 ctx.db）
-        if ctx.db is not None:
-            try:
-                from app.services import exec_policy_service
-                rules = await exec_policy_service.list_rules(ctx.db, session_id=ctx.session_id)
-                decision, just = exec_policy_service.match_tool_rule(rules, tool_name)
-                if decision is None and tool_name == "terminal_exec":
-                    decision, just = exec_policy_service.match_rule(
-                        rules, str(args.get("command", "") or ""),
-                    )
-                if decision == "allow":
-                    return True, ""
-                if decision == "deny":
-                    return False, just or f"执行策略已禁止 {tool_name}"
-            except Exception:
-                logger.warning("exec_policy 规则匹配异常(忽略)", exc_info=True)
-
-        # 4. v3.0 (plan-88): danger-full-access 沙箱——跳过审批门直接执行
-        # v32 (plan-89): 修复与"始终需要审批的工具"的冲突——danger-full-access 是
-        # 显式全访问模式，仅尊重用户显式配置的 force_approval_tools 列表（最高例外，
-        # 仍弹审批）；high 风险通用拦截不适用于本模式（否则与"全访问"自相矛盾）。
-        if sandbox == "danger-full-access":
-            from app.core.config import settings as _settings
-            if tool_name in _settings.force_approval_tools_list:
-                logger.info("danger-full-access 命中强制审批列表，保留审批: %s", tool_name)
-            else:
-                logger.info("danger-full-access 沙箱免审批: %s pm=%s", tool_name,
-                            getattr(ctx, "permission_mode", "default"))
-                return True, ""
-
-        # v36: 需人工审批时留痕（此前无任何日志，无法判断工具是卡在审批还是执行）。
-        # 注意本方法签名无 call_key，审批标识取 detail["approval_id"]。
-        logger.info(
-            "[tool.gate] tool=%s approval_id=%s 需人工审批(sandbox=%s pm=%s)",
-            tool_name, detail.get("approval_id", "-"), sandbox,
-            getattr(ctx, "permission_mode", "default"),
-        )
-        return False, ""
 
 
 # 全局单例(本期服务端执行)

@@ -27,6 +27,8 @@ import {
   IconX,
   IconFolder,
   IconShield,
+  IconPlay,
+  IconAlertTriangle,
   IconBrain,
   IconTarget,
   IconCheck,
@@ -43,17 +45,25 @@ import {
 import { Modal } from "../Modal";
 import { createPortal } from "react-dom";
 import { ModelPicker } from "./ModelPicker";
+// plan-75-332: 审批卡——与 QuestionWizardBox 同构，需要审批时替换输入框主体
+import { ApprovalCard } from "./ApprovalCard";
 import { useChatStore, persistLastReasoning, type UsageDetail } from "../../store/chat";
-import { useDraftsStore } from "../../store/drafts";
+import { useDraftsStore, normalizeDraftMode, normalizeApprovalMode, type ApprovalMode } from "../../store/drafts";
 import { useI18n } from "../../store/i18n";
 import { api, resolveFileUrl, type AttachmentInfo, type McpServerOut, type PermissionProfileOut, type PluginMarketItem, type SkillOut, type TreeNode } from "../../api/client";
 import { openGallery } from "../../store/gallery";
 import { useClickOutside } from "../../hooks/useClickOutside";
+// plan-75-332: 权限模式菜单说明文案走统一 Tooltip（遵循“禁止新增原生 title”）
+import { Tooltip } from "../ui";
 
 /** v7: 思考深度档位高低序——与 ModelsPanel REASONING_OPTS 对齐，用于取模型最高档兜底 */
 const EFFORT_RANK: Record<string, number> = {
   none: 0, minimal: 1, low: 2, medium: 3, high: 4, xhigh: 5, max: 6,
 };
+
+/** plan-75-332 R2（用户指定）：执行模式菜单固定档位顺序——只读 → 计划 → 智能体；
+ *  自定义模式排在其后（保持后端返回的相对顺序）。 */
+const BUILTIN_MODE_ORDER = ["readonly", "plan", "agent"];
 
 /** v7: 取模型支持的最高思考档位（无支持返回 null）——新建任务冷启动默认 */
 function maxEffortOf(reasoningEfforts?: string[] | null): string | null {
@@ -234,22 +244,39 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     return () => { cancelled = true; };
   }, []);
 
+  // plan-75-332: 执行模式——内置 3 档（agent / plan / readonly）。
+  // 存量草稿/会话里的旧值（default / accept_edits）经 normalizeDraftMode 归一化为 agent，
+  // 否则模式菜单会因为选项里没有旧值而"一个都不高亮"。
   const [composerMode, setComposerMode] = useState<string>(
     isHome
-      ? initialDraft?.mode ?? "default"
-      : (currentSession?.permission_mode as string) || "default"
+      ? normalizeDraftMode(initialDraft?.mode)
+      : normalizeDraftMode(currentSession?.permission_mode)
+  );
+
+  // plan-75-332: 权限模式（与执行模式正交）——询问审批 / 自动审批 / 完全访问。
+  // 会话级持久化到 session.approval_mode；首页先入草稿，随创建一次落准。
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>(
+    isHome
+      ? normalizeApprovalMode(initialDraft?.approvalMode)
+      : normalizeApprovalMode(currentSession?.approval_mode as string)
   );
 
   useEffect(() => {
     if (currentSession?.permission_mode) {
-      setComposerMode(currentSession.permission_mode as string);
+      setComposerMode(normalizeDraftMode(currentSession.permission_mode));
     }
   }, [currentSession?.permission_mode, currentSessionId]);
 
   useEffect(() => {
+    if (currentSession?.approval_mode) {
+      setApprovalMode(normalizeApprovalMode(currentSession.approval_mode as string));
+    }
+  }, [currentSession?.approval_mode, currentSessionId]);
+
+  useEffect(() => {
     const onComposerModeEvt = (e: Event) => {
-      const mode = (e as CustomEvent<{ mode: "default" | "plan" | "readonly" }>).detail?.mode;
-      if (mode) setComposerMode(mode);
+      const mode = (e as CustomEvent<{ mode: string }>).detail?.mode;
+      if (mode) setComposerMode(normalizeDraftMode(mode));
     };
     window.addEventListener("chatcoder:composer-mode", onComposerModeEvt);
     return () => window.removeEventListener("chatcoder:composer-mode", onComposerModeEvt);
@@ -276,11 +303,16 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     return () => { cancelled = true; };
   }, []);
 
-  /** plan-282-1441（#9）：/ 菜单的「连接器」分区——已启用的 MCP（含内置与插件贡献） */
+  /** plan-282-1441（#9）：/ 菜单的「连接器」分区——已启用的 MCP（含内置与插件贡献）
+   *  plan-59-286：未启用的不入菜单（避免误选），但记下数量在分区底部给"去启用"的出口。 */
   useEffect(() => {
     let cancelled = false;
     api.listMcpServers()
-      .then((items) => { if (!cancelled) setMcpServers(items.filter((m) => m.is_active)); })
+      .then((items) => {
+        if (cancelled) return;
+        setMcpServers(items.filter((m) => m.is_active));
+        setDisabledMcpCount(items.filter((m) => !m.is_active).length);
+      })
       .catch(() => { /* ignore */ });
     return () => { cancelled = true; };
   }, []);
@@ -316,6 +348,8 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   const [slashIndex, setSlashIndex] = useState(0);
   const [showProjectMenu, setShowProjectMenu] = useState(false);
   const [showModeMenu, setShowModeMenu] = useState(false);
+  // plan-75-332: 权限模式菜单（输入框右侧）——与执行模式菜单互斥展开
+  const [showApprovalMenu, setShowApprovalMenu] = useState(false);
   const [addingDir, setAddingDir] = useState(false);
   const [listening, setListening] = useState(false);
   const [showAt, setShowAt] = useState(false);
@@ -327,6 +361,9 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   const [skills, setSkills] = useState<SkillOut[]>([]);
   /** plan-282-1441（#9）：/ 菜单「连接器」分区数据源（已启用的 MCP） */
   const [mcpServers, setMcpServers] = useState<McpServerOut[]>([]);
+  /** plan-59-286：未启用连接器数量——在分区里给一行"去启用"的出口，
+   *  否则用户装了连接器却在引用菜单里看不到，也不知道原因。 */
+  const [disabledMcpCount, setDisabledMcpCount] = useState(0);
   /** plan-282-1441（#9）：/ 菜单「插件」分区数据源（已安装且已启用的插件） */
   const [plugins, setPlugins] = useState<PluginMarketItem[]>([]);
   const [showSkills, setShowSkills] = useState(false);
@@ -335,9 +372,12 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   const recognitionRef = useRef<any>(null);
   const projectMenuRef = useRef<HTMLDivElement>(null);
   const modeMenuRef = useRef<HTMLDivElement>(null);
+  // plan-75-332: 权限模式选择器容器（点击外部关闭）
+  const approvalMenuRef = useRef<HTMLDivElement>(null);
   const reasoningMenuRef = useRef<HTMLDivElement>(null);
   useClickOutside(projectMenuRef, showProjectMenu, () => setShowProjectMenu(false));
   useClickOutside(modeMenuRef, showModeMenu, () => setShowModeMenu(false));
+  useClickOutside(approvalMenuRef, showApprovalMenu, () => setShowApprovalMenu(false));
   useClickOutside(reasoningMenuRef, showReasoning, () => setShowReasoning(false));
   /** / @ $ 弹层容器：用于"键盘上下键切换时把选中项滚入可视区"。
    *  弹层有 max-height + overflow-y:auto，此前只改 index 不滚动内容区，
@@ -364,6 +404,15 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     useChatStore.setState({ composerBackfill: null });
     setInput(bf.text);
     if (bf.attachments.length > 0) setAttachments((prev) => [...prev, ...bf.attachments]);
+    // S16（plan-41-197）：撤回回填恢复引用 chips（此前只恢复正文与附件，
+    // 发送过的 $技能 / @文件 样式在撤回后丢失）
+    if (bf.refs && bf.refs.length > 0) {
+      setRefs(bf.refs.map((r) => ({
+        kind: r.kind as ComposerRef["kind"],
+        value: r.value,
+        label: r.label,
+      })));
+    }
   }, [draftKey, composerBackfill]);
 
   /** plan-546: 草稿防抖同步——输入/附件/配置变化 300ms 后写入草稿 store；
@@ -381,11 +430,13 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
         attachments,
         refs,
         reasoningEffort: effort,
-        ...(isHome ? { modelId: homeModelId, mode: composerMode, projectId: currentProjectId } : {}),
+        ...(isHome
+          ? { modelId: homeModelId, mode: composerMode, approvalMode, projectId: currentProjectId }
+          : {}),
       });
     }, 300);
     return () => clearTimeout(t);
-  }, [draftKey, input, attachments, refs, effort, isHome, homeModelId, composerMode, currentProjectId]);
+  }, [draftKey, input, attachments, refs, effort, isHome, homeModelId, composerMode, approvalMode, currentProjectId]);
 
   /** plan-546: 首页挂载时若草稿记录了工作目录，恢复全局 currentProjectId（侧栏高亮同步） */
   useEffect(() => {
@@ -799,7 +850,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
       useChatStore.setState({
         messages: [], turns: [], tasks: [], runningTurnId: null, isRunning: false,
         interruptedTurnId: null, streamingBuffers: {}, thinkingBuffers: {}, usage: null,
-        pendingApproval: null, pendingPlan: null, reviewedFiles: {}, injectMarks: [],
+        pendingApproval: null, pendingPlan: null, reviewedFiles: {},
       });
       setInput("");
       setShowSlash(false);
@@ -885,6 +936,9 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
             sessions: s.sessions.map((x) => (x.id === currentSessionId ? { ...x, model_id: modelId } : x)),
             lastModelId: modelId,
           }));
+          // plan-41-229: 后端已把「模型已切换」divider 落库并广播；此处再拉一次做兜底——
+          // 覆盖广播丢失、断线重连中或消息列表尚未回流的情况，保证提示不滞后到下次发送。
+          void useChatStore.getState().refreshMessages();
         })
         .catch(() => {
           useChatStore.setState({ error: "切换模型失败，请重试" });
@@ -905,13 +959,46 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     setShowReasoning(false);
   };
 
+  /** plan-75-332: 切换执行模式（只读 / 计划 / 智能体）。旧值先归一化再落库，避免写入脏值。 */
   const setMode = (mode: string) => {
-    setComposerMode(mode);
+    const next = normalizeDraftMode(mode);
+    const prev = composerMode;
+    setComposerMode(next);
     setShowModeMenu(false);
     if (currentSessionId != null) {
-      void api.updateSession(currentSessionId, { permission_mode: mode });
+      // plan-75-332 R2: 保存失败必须回滚并提示——否则界面显示与实际落库不一致，
+      // 用户以为已切换、重进会话又变回去（权限模式同样处理）。
+      void api.updateSession(currentSessionId, { permission_mode: next }).catch((e) => {
+        setComposerMode(prev);
+        useChatStore.setState((s) => ({
+          sessions: s.sessions.map((x) => (x.id === currentSessionId ? { ...x, permission_mode: prev } : x)),
+          error: `执行模式保存失败：${String(e)}`,
+        }));
+      });
       useChatStore.setState((s) => ({
-        sessions: s.sessions.map((x) => (x.id === currentSessionId ? { ...x, permission_mode: mode } : x)),
+        sessions: s.sessions.map((x) => (x.id === currentSessionId ? { ...x, permission_mode: next } : x)),
+      }));
+    }
+  };
+
+  /** plan-75-332: 切换权限模式（询问审批 / 自动审批 / 完全访问）。
+   *  会话内立即 PATCH 持久化；首页只改本地状态，随创建会话一次落准。 */
+  const changeApprovalMode = (mode: ApprovalMode) => {
+    const prev = approvalMode;
+    setApprovalMode(mode);
+    setShowApprovalMenu(false);
+    if (currentSessionId != null) {
+      // plan-75-332 R2: 保存失败回滚（见 setMode 注释）——权限模式决定后续操作是否弹审批，
+      // 显示与落库不一致会让用户误判拦截行为。
+      void api.updateSession(currentSessionId, { approval_mode: mode }).catch((e) => {
+        setApprovalMode(prev);
+        useChatStore.setState((s) => ({
+          sessions: s.sessions.map((x) => (x.id === currentSessionId ? { ...x, approval_mode: prev } : x)),
+          error: `权限模式保存失败：${String(e)}`,
+        }));
+      });
+      useChatStore.setState((s) => ({
+        sessions: s.sessions.map((x) => (x.id === currentSessionId ? { ...x, approval_mode: mode } : x)),
       }));
     }
   };
@@ -977,18 +1064,20 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
         if (pId == null) return;
         // plan-546/547: 模型与模式随创建一次落准；深度写入新会话草稿；全局最近值同步
         // plan-676: 首页目标同样随创建一次落准（goal_status=active）
+        // plan-75-332: 权限模式（approval_mode）同样随创建一次落准
         const sessionId = await useChatStore.getState().createSession(pId, input.trim().slice(0, 30) || "新对话", {
           model_id: usedModelId,
           permission_mode: mode,
+          approval_mode: approvalMode,
           goal_text: homeGoalText,
         });
         if (sessionId == null) return;
         useDraftsStore.getState().patchDraft(`s${sessionId}`, { reasoningEffort: sendEffort ?? null });
         if (usedModelId != null) useChatStore.setState({ lastModelId: usedModelId });
-        // plan-230-1144 M2: 除 default/accept_edits（无命令模式语义）外一律透传——
-    // 自定义模式名也要传给引擎，否则后端按 "default" 解析出全量工具集，
-    // 出现"选了受限模式但模型仍看到全量工具"的错位。
-    const sendMode = (mode === "default" || mode === "accept_edits") ? null : mode;
+        // plan-75-332: agent（智能体模式）即原来的 default，透传 null 让引擎走默认全量工具；
+        // 其余模式（含自定义模式名）必须透传，否则后端按默认解析出全量工具集，
+        // 出现"选了受限模式但模型仍看到全量工具"的错位。
+    const sendMode = mode === "agent" ? null : mode;
         await sendTurn(content, attachmentPayload, sendEffort, sendMode, usedModelId, refPayload);
         skipDraftSyncRef.current = true;
         setInput("");
@@ -1009,10 +1098,8 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
       return;
     }
     // 运行中发送 → sendTurn 内部入队，turn 完成后自动续发
-    // plan-230-1144 M2: 除 default/accept_edits（无命令模式语义）外一律透传——
-    // 自定义模式名也要传给引擎，否则后端按 "default" 解析出全量工具集，
-    // 出现"选了受限模式但模型仍看到全量工具"的错位。
-    const sendMode = (mode === "default" || mode === "accept_edits") ? null : mode;
+    // plan-75-332: 同首页口径——agent 透传 null（引擎默认全量工具），其余模式名一律透传。
+    const sendMode = mode === "agent" ? null : mode;
         await sendTurn(content, attachmentPayload, sendEffort, sendMode, sessionModelId, refPayload);
     skipDraftSyncRef.current = true;
     setInput("");
@@ -1026,11 +1113,11 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   };
 
   // plan-230-1144 M2: 模式标签——内置模式走 i18n，自定义模式用配置里的 display_name
+  // plan-75-332: 内置档位改为 3 个（agent / plan / readonly）；accept_edits 已取消。
   const BUILTIN_MODE_KEYS: Record<string, string> = {
-    default: "composer.mode_full",
+    agent: "composer.mode_agent",
     plan: "composer.mode_plan",
     readonly: "composer.mode_readonly",
-    accept_edits: "composer.mode_plan_exec",
   };
   const modeLabel = (() => {
     const key = BUILTIN_MODE_KEYS[composerMode];
@@ -1039,8 +1126,44 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     return p ? p.display_name : composerMode;
   })();
 
+  /** plan-75-332 R2: 菜单项数据源——按固定档位顺序排列（只读 → 计划 → 智能体），
+   *  API 未就绪时用静态三项兜底（此前的兜底项是早已废弃的 default / mode_full，
+   *  文案查不到、选中态也匹配不上）。 */
+  const modeMenuProfiles = useMemo(() => {
+    const base: PermissionProfileOut[] = permProfiles.length > 0
+      ? permProfiles
+      : ([{ name: "readonly" }, { name: "plan" }, { name: "agent" }] as PermissionProfileOut[]);
+    const rank = (n: string) => {
+      const i = BUILTIN_MODE_ORDER.indexOf(n);
+      return i < 0 ? BUILTIN_MODE_ORDER.length : i;
+    };
+    return [...base].sort((a, b) => rank(a.name) - rank(b.name));
+  }, [permProfiles]);
+
+  // plan-75-332: 权限模式选项（对齐设计图：图标 + 标题 + 两行描述 + 选中勾）
+  const APPROVAL_OPTIONS: Array<{
+    mode: ApprovalMode; labelKey: string; descKey: string; danger?: boolean;
+  }> = [
+    { mode: "ask", labelKey: "composer.approval_ask", descKey: "composer.approval_ask_desc" },
+    { mode: "auto", labelKey: "composer.approval_auto", descKey: "composer.approval_auto_desc" },
+    { mode: "full", labelKey: "composer.approval_full", descKey: "composer.approval_full_desc", danger: true },
+  ];
+  const approvalLabel = t(
+    APPROVAL_OPTIONS.find((o) => o.mode === approvalMode)?.labelKey ?? "composer.approval_ask"
+  );
+  /** 权限模式按钮的三种图标：盾牌（询问）/ 播放（自动）/ 警示三角（完全访问） */
+  const approvalIcon = (mode: ApprovalMode) => {
+    if (mode === "auto") return <IconPlay size={13} />;
+    if (mode === "full") return <IconAlertTriangle size={13} />;
+    return <IconShield size={13} />;
+  };
+
   // 是否处于 AI 结构化提问阶段（直接替换输入框主体）
   const isQuestionMode = !isHome && pendingApproval?.detail?.kind === "question";
+
+  // plan-75-332: 是否处于工具审批阶段——与提问同构：审批卡直接替换输入框主体，
+  // 不再用全屏遮罩弹窗（遮罩会把用户的视线与操作位置从输入区移开）。
+  const isApprovalMode = !isHome && pendingApproval != null && !isQuestionMode;
 
   /** 会话 229: 输入框 placeholder（textarea 文字透明后由标签层渲染，保持视觉一致） */
   const placeholderText = isHome
@@ -1107,13 +1230,23 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
           此前确认入口在输入框上方、计划内容在消息流里，两者分离，视线要来回跳；
           且该横幅与卡片"待确认"徽标语义重复。 */}
 
-      {/* 核心重构：AI 提问时直接将输入框主体替换为 QuestionWizardBox 卡片（对齐参考图 paste-20260829121505.png） */}
+      {/* plan-75-332: 需要审批时把输入框主体替换为 ApprovalCard（与提问卡同构）——
+          旧的全屏遮罩弹窗（.approval-overlay）已删除。 */}
       {isQuestionMode ? (
         <QuestionWizardBox
           approvalId={pendingApproval.approvalId}
           detail={pendingApproval.detail}
           onCancel={() => respondApproval(pendingApproval.approvalId, false)}
           onSubmit={(answers) => respondApproval(pendingApproval.approvalId, true, false, answers)}
+        />
+      ) : isApprovalMode ? (
+        <ApprovalCard
+          approvalId={pendingApproval.approvalId}
+          detail={pendingApproval.detail}
+          onDeny={() => respondApproval(pendingApproval.approvalId, false)}
+          onAllowOnce={() => respondApproval(pendingApproval.approvalId, true)}
+          onAlwaysAllow={(scope) =>
+            respondApproval(pendingApproval.approvalId, true, true, undefined, scope)}
         />
       ) : (
         <div className={`composer-main${dragOver ? " is-drag-over" : ""}`}>
@@ -1494,23 +1627,16 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                   <div className="composer-menu composer-mode-menu">
                     <div className="composer-menu-title">{t("composer.mode_title")}</div>
                     {/* plan-230-1144 M2: 菜单项由 /permission-profiles 下发（内置+自定义）；
-                        API 失败时回退静态三项。accept_edits 现在也可手动选择/切回。 */}
-                    {(permProfiles.length > 0
-                      ? permProfiles
-                      : [
-                          { name: "default", display_name: t("composer.mode_full") } as PermissionProfileOut,
-                          { name: "plan", display_name: t("composer.mode_plan") } as PermissionProfileOut,
-                          { name: "readonly", display_name: t("composer.mode_readonly") } as PermissionProfileOut,
-                        ]
-                    ).map((p) => (
-                      <button
-                        key={p.name}
-                        className={composerMode === p.name ? "active" : ""}
-                        title={p.description || undefined}
-                        onClick={() => setMode(p.name)}
-                      >
-                        {BUILTIN_MODE_KEYS[p.name] ? t(BUILTIN_MODE_KEYS[p.name]) : p.display_name}
-                      </button>
+                        plan-75-332 R2: 固定为「只读 → 计划 → 智能体」，自定义模式排后。 */}
+                    {modeMenuProfiles.map((p) => (
+                      <Tooltip key={p.name} content={p.description} side="right">
+                        <button
+                          className={composerMode === p.name ? "active" : ""}
+                          onClick={() => setMode(p.name)}
+                        >
+                          {BUILTIN_MODE_KEYS[p.name] ? t(BUILTIN_MODE_KEYS[p.name]) : p.display_name}
+                        </button>
+                      </Tooltip>
                     ))}
                     {/* plan-671/676: 目标模式入口（会话内与空态首页均可用） */}
                     {(currentSessionId != null || isHome) && (
@@ -1534,6 +1660,44 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                         )}
                       </>
                     )}
+                  </div>
+                )}
+              </div>
+              {/* plan-75-332: 权限模式选择器（询问审批 / 自动审批 / 完全访问）——紧跟在执行模式
+                  右侧：前者管"能做什么"，后者管"要不要问"。菜单项只留图标 + 名称（单行不换行），
+                  各档位说明改用鼠标悬停 tooltip，保持简洁。 */}
+              <div className="composer-approval-wrap" ref={approvalMenuRef}>
+                <Tooltip content={t("composer.approval_title")}>
+                  <button
+                    className={`composer-approval-btn mode-${approvalMode}`}
+                    onClick={() => {
+                      setShowApprovalMenu((v) => !v);
+                      setShowModels(false);
+                      setShowReasoning(false);
+                      setShowModeMenu(false);
+                    }}
+                  >
+                    {approvalIcon(approvalMode)}
+                    {approvalLabel}
+                    <IconChevronDown size={11} />
+                  </button>
+                </Tooltip>
+                {showApprovalMenu && (
+                  <div className="composer-menu composer-approval-menu">
+                    {APPROVAL_OPTIONS.map((opt) => (
+                      <Tooltip key={opt.mode} content={t(opt.descKey)} side="right">
+                        <button
+                          className={`composer-approval-opt${opt.danger ? " danger" : ""}`}
+                          onClick={() => changeApprovalMode(opt.mode)}
+                        >
+                          <span className="composer-approval-opt-icon">{approvalIcon(opt.mode)}</span>
+                          <span className="composer-approval-opt-title">{t(opt.labelKey)}</span>
+                          {approvalMode === opt.mode && (
+                            <span className="composer-approval-opt-check"><IconCheck size={13} /></span>
+                          )}
+                        </button>
+                      </Tooltip>
+                    ))}
                   </div>
                 )}
               </div>
@@ -1646,7 +1810,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
         title={goalStatus === "active" ? "修改目标" : "设定目标"}
         subtitle="目标激活后，每轮结束若未标记完成将自动续跑推进，直至达成或达轮次上限"
         width={520}
-        actions={
+        footer={
           <>
             <button className="btn" onClick={() => setShowGoalModal(false)}>取消</button>
             <button className="btn primary" onClick={submitGoal} disabled={!goalInput.trim()}>
@@ -1797,6 +1961,24 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
               </button>
             );
           })}
+          {/* plan-59-286：有未启用连接器时给一行出口——
+              否则用户装了连接器却在引用菜单里看不到，也无从知道原因。 */}
+          {disabledMcpCount > 0 && (
+            <button
+              className="composer-menu-hint"
+              onMouseEnter={() => setSlashIndex(-1)}
+              onClick={() => {
+                setShowSlash(false);
+                window.dispatchEvent(new CustomEvent("chatcoder:open-settings", {
+                  detail: { tab: "extensions" },
+                }));
+              }}
+            >
+              <IconPlug size={12} />
+              <strong>另有 {disabledMcpCount} 个连接器未启用</strong>
+              <span>前往扩展管理启用</span>
+            </button>
+          )}
           {/* plan-282-1441（#9）：插件分区（已安装且已启用的插件） */}
           {filteredSlashPlugins.length > 0 && <div className="composer-menu-title">插件</div>}
           {filteredSlashPlugins.map((p, j) => {
@@ -1856,146 +2038,16 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
         </div>
       )}
 
-      {/* 普通工具审批弹窗（终端命令/危险写入等工具调用审批） */}
-      {!isHome && pendingApproval && pendingApproval.detail.kind !== "question" && (
-        <div className="approval-overlay">
-          <div className="approval-card">
-            <div className="approval-title">工具审批请求</div>
-            <div className="approval-tool">
-              <span className="approval-tool-name">{String(pendingApproval.detail.tool ?? "unknown")}</span>
-              <span className={`approval-risk risk-${String(pendingApproval.detail.risk_level ?? "low")}`}>
-                {String(pendingApproval.detail.risk_level ?? "low")} 风险
-              </span>
-            </div>
-            {pendingApproval.detail.agent_name != null && (
-              <div className="approval-agent">{String(pendingApproval.detail.agent_name)} 申请执行此工具</div>
-            )}
-            {pendingApproval.detail.args != null && (
-              <ApprovalArgsView
-                tool={String(pendingApproval.detail.tool ?? "")}
-                args={pendingApproval.detail.args}
-              />
-            )}
-            {typeof pendingApproval.detail.summary === "string" && (
-              <div className="approval-summary">{pendingApproval.detail.summary}</div>
-            )}
-            <div className="approval-actions">
-              <button
-                className="btn-ghost"
-                onClick={() => respondApproval(pendingApproval.approvalId, false)}
-              >
-                取消
-              </button>
-              <button
-                className="btn-ghost"
-                onClick={() => respondApproval(pendingApproval.approvalId, true)}
-              >
-                仅本次执行
-              </button>
-              <button
-                className="btn-ghost"
-                onClick={() => respondApproval(pendingApproval.approvalId, true, true, undefined, "session")}
-                title="自动生成会话级执行策略规则，本会话内同类操作不再询问"
-              >
-                当前会话允许
-              </button>
-              <button
-                className="btn-ghost"
-                onClick={() => respondApproval(pendingApproval.approvalId, true, true, undefined, "global")}
-                title="自动生成全局执行策略规则，所有会话同类操作不再询问"
-              >
-                始终允许
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* plan-75-332: 原「普通工具审批弹窗」（.approval-overlay 遮罩 + 四按钮卡片）已删除——
+          审批改为 ApprovalCard 直接替换输入框主体（见上方渲染分支），
+          四个动作（拒绝 / 允许一次 / 本会话始终允许 / 全局始终允许）全部保留。 */}
     </div>
   );
 }
 
-/** v36 (plan-321-1600 R2): 审批参数文案对照（工具参数名 → 中文标签）。
- * 用户反馈「审批弹窗不要展示 json」——此处按工具渲染关键字段，未知字段回落原名。 */
-const APPROVAL_FIELD_LABELS: Record<string, string> = {
-  command: "命令", cwd: "工作目录", timeout: "超时", is_background: "后台运行",
-  path: "路径", paths: "路径", file: "文件", files: "文件列表",
-  pattern: "搜索内容", query: "关键词", include: "文件过滤",
-  offset: "起始行", limit: "行数上限", recursive: "递归", max_depth: "递归深度",
-  content: "写入内容", old_text: "原文本", new_text: "新文本", replace_all: "替换全部",
-  edits: "批量编辑", url: "地址", method: "请求方法", body: "请求体", headers: "请求头",
-  sql: "SQL", goal: "目标", question: "问题", task_title: "子任务",
-};
-
-/** 长文本截断（避免审批卡被超长内容撑爆）。 */
-function clipApprovalText(text: string, max = 600): string {
-  return text.length > max ? `${text.slice(0, max)}\n…（已省略 ${text.length - max} 字）` : text;
-}
-
-function safeJsonText(value: unknown): string {
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
-
-/** 单个参数值 → 可读文本（布尔转是/否，批量编辑列出文件，其余结构化值紧凑化）。 */
-function formatApprovalValue(key: string, value: unknown): string {
-  if (typeof value === "boolean") return value ? "是" : "否";
-  if (typeof value === "number") return String(value);
-  if (typeof value === "string") return clipApprovalText(value);
-  if (Array.isArray(value)) {
-    if (key === "edits") {
-      const paths = value
-        .map((e) => (e && typeof e === "object" ? String((e as Record<string, unknown>).path ?? "") : ""))
-        .filter(Boolean);
-      const head = `${value.length} 处修改`;
-      return paths.length ? `${head}\n${paths.join("\n")}` : head;
-    }
-    return clipApprovalText(value.map((x) => (typeof x === "string" ? x : safeJsonText(x))).join("\n"));
-  }
-  return clipApprovalText(safeJsonText(value));
-}
-
-/** 参数 → 标签/值行（常用字段优先，其余按原顺序追加；空值跳过）。 */
-function approvalArgRows(args: unknown): Array<{ label: string; value: string }> {
-  if (args == null) return [];
-  if (typeof args === "string") return [{ label: "参数", value: clipApprovalText(args) }];
-  if (typeof args !== "object" || Array.isArray(args)) {
-    return [{ label: "参数", value: clipApprovalText(safeJsonText(args)) }];
-  }
-  const obj = args as Record<string, unknown>;
-  const keys = Object.keys(obj);
-  const ordered = [
-    ...Object.keys(APPROVAL_FIELD_LABELS).filter((k) => k in obj),
-    ...keys.filter((k) => !(k in APPROVAL_FIELD_LABELS)),
-  ];
-  const rows: Array<{ label: string; value: string }> = [];
-  for (const k of ordered) {
-    const v = obj[k];
-    if (v === null || v === undefined || v === "") continue;
-    rows.push({ label: APPROVAL_FIELD_LABELS[k] || k, value: formatApprovalValue(k, v) });
-  }
-  return rows;
-}
-
-/** 审批参数结构化视图（替代旧 JSON 原文展示）。 */
-function ApprovalArgsView({ tool, args }: { tool: string; args: unknown }) {
-  const rows = approvalArgRows(args);
-  if (rows.length === 0) return null;
-  return (
-    <div className="approval-fields">
-      {rows.map((r, i) => (
-        <div key={`${i}-${r.label}`} className="approval-field">
-          <span className="approval-field-label">{r.label}</span>
-          <span className={`approval-field-value${tool === "terminal_exec" ? " mono" : ""}`}>
-            {r.value}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
+/* plan-75-332: 原审批参数视图（APPROVAL_FIELD_LABELS / clipApprovalText / safeJsonText /
+ * formatApprovalValue / approvalArgRows / ApprovalArgsView）已随旧遮罩弹窗一并移除——
+ * 参数渲染逻辑迁至 ApprovalCard.tsx（与卡片本身放在一起，避免跨文件找同一件事）。 */
 
 /** token 数量格式化（k 单位，去掉多余的 .0）；圆环浮层与旧调用共用的工具函数。 */
 function formatK(value: number): string {
@@ -2314,12 +2366,13 @@ function QuestionWizardBox({
           {currentOptions.map((opt, optIdx) => {
             const isSelected = currentAnswer === opt;
             return (
+              // S16（plan-41-197）：移除原生 title——它与自定义浮窗（showOptTip）同时出现，
+              // 聚焦/悬停时会叠两个提示框（用户反馈“两处展示浮窗”）。
               <button
                 key={opt}
                 type="button"
                 className={`question-wizard-opt-btn${isSelected ? " selected" : ""}`}
                 onClick={() => handlePickOption(opt)}
-                title={opt}
                 onMouseEnter={(e) => showOptTip(e, opt)}
                 onMouseLeave={hideOptTip}
                 onFocus={(e) => showOptTip(e, opt)}

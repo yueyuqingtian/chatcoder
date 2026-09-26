@@ -17,6 +17,7 @@
 import { memo, useState } from "react";
 import { useChatStore } from "../../store/chat";
 import { IconCopy, IconRotateCcw, IconThumbsUp, IconThumbsDown, IconRefresh, IconCheck } from "../icons";
+import { Tooltip } from "../ui";
 import type { TimelineEntry } from "./timeline";
 import { turnPartToPlainText, turnToPlainText } from "./markdown";
 
@@ -70,33 +71,43 @@ export const MessageActions = memo(function MessageActions({ entry, onRollback, 
 
   return (
     <div className={cls} data-owner={ownerId}>
-      <button className={`msg-action${copied ? " active" : ""}`} title="复制" aria-label="复制" onClick={copy}>
-        {copied ? <IconCheck size={13} /> : <IconCopy size={13} />}
-      </button>
-      {!copyOnly && scope === "user" && onRollback && (
-        <button className="msg-action danger" title="回滚此消息及其后的更改" onClick={onRollback}>
-          <IconRotateCcw size={13} />
+      <Tooltip title="复制" side="top">
+        <button className={`msg-action${copied ? " active" : ""}`} aria-label="复制" onClick={copy}>
+          {copied ? <IconCheck size={13} /> : <IconCopy size={13} />}
         </button>
+      </Tooltip>
+      {!copyOnly && scope === "user" && onRollback && (
+        <Tooltip title="回滚此消息及其后的更改" side="top">
+          <button className="msg-action danger" aria-label="回滚此消息及其后的更改" onClick={onRollback}>
+            <IconRotateCcw size={13} />
+          </button>
+        </Tooltip>
       )}
       {!copyOnly && scope === "ai" && (
         <>
-          <button
-            className={`msg-action msg-action-hover${feedback === "up" ? " active" : ""}`}
-            title="赞"
-            onClick={() => setFeedback(feedback === "up" ? null : "up")}
-          >
-            <IconThumbsUp size={13} />
-          </button>
-          <button
-            className={`msg-action msg-action-hover${feedback === "down" ? " active" : ""}`}
-            title="踩"
-            onClick={() => setFeedback(feedback === "down" ? null : "down")}
-          >
-            <IconThumbsDown size={13} />
-          </button>
-          <button className="msg-action msg-action-hover" title="重新生成此回复" onClick={handleRetry}>
-            <IconRefresh size={13} />
-          </button>
+          <Tooltip title="赞" side="top">
+            <button
+              className={`msg-action msg-action-hover${feedback === "up" ? " active" : ""}`}
+              aria-label="赞"
+              onClick={() => setFeedback(feedback === "up" ? null : "up")}
+            >
+              <IconThumbsUp size={13} />
+            </button>
+          </Tooltip>
+          <Tooltip title="踩" side="top">
+            <button
+              className={`msg-action msg-action-hover${feedback === "down" ? " active" : ""}`}
+              aria-label="踩"
+              onClick={() => setFeedback(feedback === "down" ? null : "down")}
+            >
+              <IconThumbsDown size={13} />
+            </button>
+          </Tooltip>
+          <Tooltip title="重新生成此回复" side="top">
+            <button className="msg-action msg-action-hover" aria-label="重新生成此回复" onClick={handleRetry}>
+              <IconRefresh size={13} />
+            </button>
+          </Tooltip>
         </>
       )}
     </div>

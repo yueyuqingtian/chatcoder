@@ -52,12 +52,33 @@ def test_append_subagent_tools_idempotent():
     assert _names(out).count("send_to_subagent") == 1
 
 
-def test_explore_only_schema_has_no_background():
-    """只读/计划模式：spawn schema 去掉 background/explore（子代理强制只读探索）。"""
+def test_explore_only_schema_keeps_background_only():
+    """只读/计划模式（plan-64-289）：explore 仍隐藏（运行时强制只读），但保留 background——
+    否则该模式下唯一路径必然同步阻塞（用户反馈：AI 倾向同步子代理，主 turn 被长时间挂住）。"""
     out = append_subagent_tools([], None, explore_only=True)
     spawn = next(s for s in out if s["function"]["name"] == "spawn_subagent")
     props = spawn["function"]["parameters"]["properties"]
-    assert "background" not in props and "explore" not in props
+    assert "explore" not in props
+    assert "background" in props
+
+
+# ── plan-64-289: 派发异步化与续跑正文固化 ────────────────────
+
+def test_explore_and_background_are_composable():
+    """plan-64-289：explore 只锁读写范围、background 只锁调度方式，两者可自由组合——
+    旧「background 强制 explore=false」互斥已移除，同步分支只在 explore 且非 background 时走。"""
+    text = (_ORCH / "agent_loop.py").read_text(encoding="utf-8")
+    assert "background = bool(args.get(\"background\", False))" in text
+    assert "if explore and not background:" in text
+    assert "\n        if bool(args.get(\"background\", False)):\n            explore = False\n" not in text
+
+
+def test_continuation_paths_persist_step_text():
+    """plan-64-289：两条「无工具调用 + 续跑」路径必须先把本步正文固化落库再 continue——
+    否则该段正文只留在前端流式缓冲、被下一轮 token.done 覆盖（等待汇报消失/错位）。"""
+    text = (_ORCH / "agent_loop.py").read_text(encoding="utf-8")
+    assert "plan-64-289: 本步正文先固化落库再续跑" in text
+    assert "plan-64-289: 与子代理续跑同理" in text
 
 
 # ── M1: 运行模式按类型锁定 ────────────────────────────────────

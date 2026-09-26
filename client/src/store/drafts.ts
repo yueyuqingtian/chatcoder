@@ -5,10 +5,41 @@ import { create } from "zustand";
 import type { AttachmentInfo } from "../api/client";
 
 /** plan-230-1144 M2: 模式名外置为可配置数据，自定义模式是任意字符串。
- *  内置 4 值保留为常量便于类型提示与默认值，实际取值域 = 内置 ∪ 用户自定义。 */
-export const BUILTIN_DRAFT_MODES = ["default", "plan", "readonly", "accept_edits"] as const;
+ *  plan-75-332: 内置模式改为 3 档（agent 智能体 / plan 计划 / readonly 只读）——“计划执行”
+ *  （accept_edits）已取消（它与 agent 能力相同），旧值 default 更名为 agent。
+ *  旧 localStorage 里的旧值由 normalizeDraftMode 归一化，避免模式菜单选不中任何一项。 */
+export const BUILTIN_DRAFT_MODES = ["agent", "plan", "readonly"] as const;
 export type BuiltinDraftMode = (typeof BUILTIN_DRAFT_MODES)[number];
 export type ComposerDraftMode = string;
+
+/** plan-75-332: 权限模式（与执行模式正交）——询问审批 / 自动审批 / 完全访问。 */
+export const APPROVAL_MODES = ["ask", "auto", "full"] as const;
+export type ApprovalMode = (typeof APPROVAL_MODES)[number];
+
+const _MODE_ALIASES: Record<string, ComposerDraftMode> = {
+  default: "agent",
+  accept_edits: "agent",
+};
+
+/** 执行模式归一化（存量草稿兼容）。
+ *
+ *  plan-75-332 R6 修复：空值必须回落 **agent（智能体模式）**——这是空态首页的默认档。
+ *  此前写法 `_MODE_ALIASES[m] ?? m ?? "agent"` 在 m 为空串时返回 ""：`??` 只跳过
+ *  null/undefined，空串会原样返回，于是「首次打开首页」与「发送后草稿被清空再回首页」
+ *  两种场景下模式标签都会变成空（用户反馈首页默认档显示异常）。
+ */
+export function normalizeDraftMode(mode: string | null | undefined): ComposerDraftMode {
+  const m = (mode || "").trim();
+  if (!m) return "agent";
+  if ((BUILTIN_DRAFT_MODES as readonly string[]).includes(m)) return m;
+  return _MODE_ALIASES[m] ?? m; // 旧值别名映射；自定义模式名原样保留
+}
+
+/** 权限模式归一化（存量草稿兼容）。空值/未识别值均按最保守的 ask（询问审批）处理。 */
+export function normalizeApprovalMode(mode: string | null | undefined): ApprovalMode {
+  const m = (mode || "").trim();
+  return ((APPROVAL_MODES as readonly string[]).includes(m) ? m : "ask") as ApprovalMode;
+}
 
 /** plan-238-1210 (A2): 引用 chip 的可序列化形态（与 ComposerCore.ComposerRef 同构）。
  *  plan-282-1441（#9）：新增 "mcp"（连接器引用）。 */
@@ -30,8 +61,10 @@ export interface ComposerDraft {
   reasoningEffort: string | null;
   /** 仅 home 草稿使用：首页选中的模型（会话模型走服务端 session.model_id） */
   modelId: number | null;
-  /** 仅 home 草稿使用：首页权限模式（会话模式走服务端 session.permission_mode） */
+  /** 仅 home 草稿使用：首页执行模式（会话模式走服务端 session.permission_mode） */
   mode: ComposerDraftMode;
+  /** plan-75-332: 仅 home 草稿使用：首页权限模式（会话模式走服务端 session.approval_mode） */
+  approvalMode: ApprovalMode;
   /** 仅 home 草稿使用：空态首页工作目录项目 */
   projectId: number | null;
   /** 仅 home 草稿使用：空态首页设定的目标（会话目标走服务端 session.goal_text；plan-676） */
@@ -99,7 +132,8 @@ export const useDraftsStore = create<DraftsState>((set, get) => ({
       refs: [],
       reasoningEffort: null,
       modelId: null,
-      mode: "default",
+      mode: "agent",
+      approvalMode: "ask",
       projectId: null,
       goalText: null,
       updatedAt: Date.now(),

@@ -13,6 +13,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, type ModelOut, type WorktreeMergeDirection, type WorktreeOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
+import { sortModelsByProvider } from "../../utils/modelOrder";
 import { Dialog } from "../ui/Dialog";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { IconCheck, IconChevronDown, IconChevronUp, IconFileText, IconRefresh, IconWand } from "../icons";
@@ -552,7 +553,8 @@ export function MergeDialog({
             onChange={(e) => setModelId(e.target.value ? Number(e.target.value) : null)}
           >
             <option value="">AI 模型：服务端默认</option>
-            {models.filter((m) => m.is_active).map((m) => (
+            {/* plan-89-386: 与全局模型选择器同序（设置页供应商顺序） */}
+            {sortModelsByProvider(models.filter((m) => m.is_active)).map((m) => (
               <option key={m.id} value={m.id}>
                 {m.provider_name ? `${m.provider_name}/${m.name}` : m.name}
               </option>

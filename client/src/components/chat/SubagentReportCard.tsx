@@ -9,8 +9,10 @@
  * 解析不到任何分节时**原样渲染 markdown**（兜底，绝不吞内容）。
  */
 import { memo, useMemo } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { usePanelStore } from "../../store/panel";
-import { MarkdownContent } from "../MarkdownContent";
+import { MarkdownContent, markdownComponents } from "../MarkdownContent";
 import { FileBadge, splitFilePath } from "./FileBadge";
 import { IconAlertCircle, IconCheck, IconChecklist, IconFlask, IconFileRead, IconX } from "../icons";
 
@@ -20,6 +22,26 @@ const FILE_RE =
 
 /** 空值占位（子代理被要求写 None） */
 const isEmptyItem = (s: string) => !s || /^(none|n\/a|null|-)$/i.test(s.trim());
+
+/** 行内 Markdown（v42）：「图标 + 文本」的行结构专用——
+ *  复用主消息流的 markdown 组件映射，只把块级容器（p / ul / ol / li）内联化。
+ *  目的：条目里的 `代码`、**加粗**、链接按主消息流样式渲染；
+ *  此前这些条目是纯文本，反引号原样裸露（终态汇报"丑陋"的来源之一）。 */
+const inlineComponents: Components = {
+  ...markdownComponents,
+  p: ({ children }) => <>{children}</>,
+  ul: ({ children }) => <>{children}</>,
+  ol: ({ children }) => <>{children}</>,
+  li: ({ children }) => <>{children}</>,
+};
+
+const InlineMd = memo(function InlineMd({ text }: { text: string }) {
+  return (
+    <div className="md-body">
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={inlineComponents}>{text}</ReactMarkdown>
+    </div>
+  );
+});
 
 interface Report {
   result: string;
@@ -97,17 +119,17 @@ export const SubagentReportCard = memo(function SubagentReportCard({ text }: { t
   // 兜底：解析不出分节（非结构化汇报）时保持原样 markdown，绝不吞内容
   if (!report) {
     return (
-      <div className="subagent-report subagent-report-raw">
+      <div className="subagent-report subagent-report-raw turn-agent-text">
         <MarkdownContent>{text}</MarkdownContent>
       </div>
     );
   }
 
   return (
-    <div className="subagent-report">
+    <div className="subagent-report turn-agent-text">
       {report.result && (
         <section className="sr-sec">
-          <div className="sr-sec-head"><IconChecklist size={12} /><span>执行结果</span></div>
+          <div className="sr-sec-head"><IconChecklist size={13} /><span>执行结果</span></div>
           <MarkdownContent>{report.result}</MarkdownContent>
         </section>
       )}
@@ -115,7 +137,7 @@ export const SubagentReportCard = memo(function SubagentReportCard({ text }: { t
       {report.files.length > 0 && (
         <section className="sr-sec">
           <div className="sr-sec-head">
-            <IconFileRead size={12} /><span>变更文件</span>
+            <IconFileRead size={13} /><span>变更文件</span>
             <span className="sr-count">{report.files.length}</span>
           </div>
           <div className="sr-files">
@@ -137,21 +159,21 @@ export const SubagentReportCard = memo(function SubagentReportCard({ text }: { t
 
       {report.findings && (
         <section className="sr-sec">
-          <div className="sr-sec-head"><IconAlertCircle size={12} /><span>关键发现</span></div>
+          <div className="sr-sec-head"><IconAlertCircle size={13} /><span>关键发现</span></div>
           <MarkdownContent>{report.findings}</MarkdownContent>
         </section>
       )}
 
       {report.verification.length > 0 && (
         <section className="sr-sec">
-          <div className="sr-sec-head"><IconFlask size={12} /><span>验证</span></div>
+          <div className="sr-sec-head"><IconFlask size={13} /><span>验证</span></div>
           <ul className="sr-list">
             {report.verification.map((v, i) => (
               <li key={i}>
                 <span className={"sr-mark " + (isNotMet(v) ? "no" : "plain")}>
-                  <IconFlask size={11} />
+                  <IconFlask size={12} />
                 </span>
-                <span>{v}</span>
+                <InlineMd text={v} />
               </li>
             ))}
           </ul>
@@ -160,16 +182,16 @@ export const SubagentReportCard = memo(function SubagentReportCard({ text }: { t
 
       {report.acceptance.length > 0 && (
         <section className="sr-sec">
-          <div className="sr-sec-head"><IconCheck size={12} /><span>验收</span></div>
+          <div className="sr-sec-head"><IconCheck size={13} /><span>验收</span></div>
           <ul className="sr-list">
             {report.acceptance.map((a, i) => {
               const ok = !isNotMet(a);
               return (
                 <li key={i}>
                   <span className={"sr-mark " + (ok ? "ok" : "no")}>
-                    {ok ? <IconCheck size={11} /> : <IconX size={11} />}
+                    {ok ? <IconCheck size={12} /> : <IconX size={12} />}
                   </span>
-                  <span>{a}</span>
+                  <InlineMd text={a} />
                 </li>
               );
             })}
@@ -179,10 +201,10 @@ export const SubagentReportCard = memo(function SubagentReportCard({ text }: { t
 
       {report.risks.length > 0 && (
         <section className="sr-sec sr-risks">
-          <div className="sr-sec-head"><IconAlertCircle size={12} /><span>风险 / 待确认</span></div>
+          <div className="sr-sec-head"><IconAlertCircle size={13} /><span>风险 / 待确认</span></div>
           <ul className="sr-list">
             {report.risks.map((r, i) => (
-              <li key={i}><span className="sr-mark warn"><IconAlertCircle size={11} /></span><span>{r}</span></li>
+              <li key={i}><span className="sr-mark warn"><IconAlertCircle size={12} /></span><InlineMd text={r} /></li>
             ))}
           </ul>
         </section>

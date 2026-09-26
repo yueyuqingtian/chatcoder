@@ -1,3 +1,5 @@
+import type { InstalledPet, PetPref } from "../pet/petApi";
+
 export {};
 
 declare global {
@@ -43,6 +45,9 @@ declare global {
       setKeepAwake?: (on: boolean) => Promise<boolean>;
       /** 主题偏好同步（主进程落盘，下次启动 loading 页按此适配深浅色） */
       setThemePref?: (theme: "light" | "dark") => void;
+      /** UI 偏好备份（plan-73-344）：localStorage 之外的第二落盘通道（启动时取较新者） */
+      setUiPrefs?: (payload: { savedAt: number; prefs: object }) => void;
+      getUiPrefs?: () => { savedAt?: number; prefs?: object } | null;
       /** 自动更新：检查 / 状态 / 下载 / 安装 / 版本（electron-updater） */
       checkForUpdates?: () => Promise<unknown>;
       getUpdateState?: () => Promise<unknown>;
@@ -64,6 +69,31 @@ declare global {
         releases: Array<{ version: string; name: string; date: string; notes: string }>;
       }>;
       consumeWhatsNew?: () => Promise<{ show: boolean; version: string; from?: string }>;
+      /** plan-73-323：宠物系统（设置页——偏好 / 图库 / 本地导入 / 来源链接） */
+      petGetPref?: () => Promise<PetPref>;
+      petSetPref?: (patch: Partial<PetPref>) => Promise<PetPref>;
+      petListInstalled?: () => Promise<InstalledPet[]>;
+      petListManifest?: (opts?: { force?: boolean; query?: string }) => Promise<{
+        total: number;
+        shown: number;
+        pets: Array<{ slug: string; displayName: string; kind: string; author: string; previewUrl: string; spritesheetUrl: string; installed: boolean }>;
+        fromCache: boolean;
+        stale: boolean;
+        error: string | null;
+      }>;
+      petInstall?: (slug: string) => Promise<InstalledPet>;
+      petRemove?: (slug: string) => Promise<{ slug: string }>;
+      petImportLocal?: () => Promise<{ ok: boolean; canceled?: boolean } & Partial<InstalledPet>>;
+      petOpenPetPage?: (slug: string) => Promise<boolean>;
+      petRevealPet?: (slug: string) => Promise<boolean>;
+      /** 恢复显示（隐藏角标置 visible=false 后，从设置页恢复） */
+      petShowPet?: () => Promise<boolean>;
+      /** 主进程偏好变更广播（宠物窗口与设置页共用同一份偏好真相） */
+      onPetPrefChanged?: (cb: (pref: PetPref) => void) => () => void;
+      /** 宠物面板「查看会话」：切到主窗对应会话 */
+      onPetFocusSession?: (cb: (sessionId: number) => void) => () => void;
+      /** 宠物面板齿轮：打开「设置 → 宠物」 */
+      onPetOpenSettings?: (cb: () => void) => () => void;
     };
   }
 }

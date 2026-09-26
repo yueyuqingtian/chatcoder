@@ -18,6 +18,7 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { MergeDialog } from "./worktree/MergeDialog";
 import { AppLogo } from "./AppLogo";
 import { MarkdownContent } from "./MarkdownContent";
+import { Input } from "./ui";
 import {
   IconCalendar, IconChevronDown, IconChevronLeft, IconChevronRight, IconPanelLeft,
   IconFolder, IconFolderDynamic, IconLayers, IconSortDesc,
@@ -97,6 +98,14 @@ function UpdateBadge({ collapsed = false }: { collapsed?: boolean }) {
     closeTimer.current = window.setTimeout(() => { setAnchor(null); closeTimer.current = null; }, 320);
   };
 
+  /** 操作提示（plan-64-294）：原先是按钮上的原生 title，hover 时与更新日志浮窗
+   *  同时出现会「两个提示叠着弹」；现在并入浮窗内部展示，信息不丢且只有一处提示。 */
+  const actionHint = status.state === "downloaded"
+    ? t("sidebar.restart_update_tip", { version: version ?? "" })
+    : status.state === "available"
+      ? t("sidebar.download_update_tip", { version: version ?? "" })
+      : "";
+
   const popover = showNotes && anchor ? createPortal(
     <div
       className="sb-update-notes-hover"
@@ -110,6 +119,7 @@ function UpdateBadge({ collapsed = false }: { collapsed?: boolean }) {
           <span className="sb-update-notes-ver">{version ? `v${version}` : ""}</span>
           <span className="sb-update-notes-label">{t("sidebar.update_notes")}</span>
         </div>
+        {actionHint && <div className="sb-update-notes-hint">{actionHint}</div>}
         {notes
           ? <div className="sb-update-notes-body release-notes"><MarkdownContent>{notes}</MarkdownContent></div>
           : <div className="sb-update-notes-empty">{t("sidebar.update_notes_empty")}</div>}
@@ -148,7 +158,7 @@ function UpdateBadge({ collapsed = false }: { collapsed?: boolean }) {
       <div className="sb-update-wrap" {...notesHoverProps}>
         <button
           className="sb-update-restart"
-          title={t("sidebar.restart_update_tip", { version: version ?? "" })}
+          aria-label={t("sidebar.restart_update_tip", { version: version ?? "" })}
           onClick={() => { void installUpdate(); }}
         >
           {!collapsed && <span>{t("sidebar.restart")}</span>}
@@ -162,7 +172,7 @@ function UpdateBadge({ collapsed = false }: { collapsed?: boolean }) {
     <div className="sb-update-wrap" {...notesHoverProps}>
       <button
         className="sb-update-btn"
-        title={t("sidebar.download_update_tip", { version: version ?? "" })}
+        aria-label={t("sidebar.download_update_tip", { version: version ?? "" })}
         onClick={() => { void downloadUpdate(); }}
       >
         <IconDownload size={16} />
@@ -228,6 +238,63 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
   const [menuFor, setMenuFor] = useState<number | null>(null);
   const [projectMenuFor, setProjectMenuFor] = useState<number | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<SessionOut | null>(null);
+  // plan-41-233：页面态 = nav 落在「拓展/定时任务/设置」等页面（会话页 chat 不算）。
+  // 页面态下抑制会话行的聚焦高亮——避免 nav 项与会话行同时「双聚焦」。
+  const pageMode = active != null && active !== "chat";
+
+  // ── S1（plan-41-197）：重命名稳定性 ────────────────────────────────
+  // 用户反馈“会话运行时点重命名会很快失去焦点，导致重命名失败”。三层根因：
+  //   ① onBlur 无条件提交退出——运行期列表高频重写，任何一次被动失焦都会终止编辑；
+  //   ② Enter 未判中文输入法合成态（选词回车直接结束）；
+  //   ③ 无焦点保活。
+  // 对策：失焦后 120ms 自检——焦点已离开且用户没有主动点击别处 → 恢复焦点继续编辑；
+  //   用户主动点击别处时才提交。输入值走 ref 读取，规避 onBlur 闭包过期。
+  const renameInputRef = useRef<HTMLInputElement>(null);
+  const renameValueRef = useRef<{ id: number; value: string } | null>(null);
+  const allowRenameBlurRef = useRef(false);
+  useEffect(() => { renameValueRef.current = renaming; }, [renaming]);
+
+  /** S1：提交重命名（读 ref 拿最新值；标题未变化则不请求） */
+  const commitRename = (id: number, originalTitle: string) => {
+    const cur = renameValueRef.current;
+    setRenaming(null);
+    renameValueRef.current = null;
+    const title = (cur && cur.id === id ? cur.value : "").trim();
+    if (title && title !== originalTitle) void renameSession(id, title);
+  };
+
+  // ── S1：浮窗外点关闭 + Esc 关闭（会话/项目/排序三处菜单共用） ──
+  // 此前三处菜单只能再次点击触发按钮关闭，点击空白处无反应
+  // （用户要求“所有浮窗，点击空白处应该自动关闭”）。触发按钮自身除外，避免“先关后开”抖动。
+  const anyMenuOpen = menuFor !== null || projectMenuFor !== null || sortMenuOpen;
+  useEffect(() => {
+    if (!anyMenuOpen) return;
+    const closeAll = () => { setMenuFor(null); setProjectMenuFor(null); setSortMenuOpen(false); };
+    const onDown = (e: PointerEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (el?.closest(".sb-context-menu, .sb-session-actions, .sb-project-actions, .sb-icon-btn")) return;
+      closeAll();
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") closeAll(); };
+    document.addEventListener("pointerdown", onDown, true);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown, true);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [anyMenuOpen]);
+
+  // ── S1：重命名编辑期间，仅“用户主动点击别处”才允许 blur 提交 ──
+  useEffect(() => {
+    if (!renaming) { allowRenameBlurRef.current = false; return; }
+    const onDown = (e: PointerEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (el?.closest(".sb-rename-input")) return;
+      allowRenameBlurRef.current = true;
+    };
+    document.addEventListener("pointerdown", onDown, true);
+    return () => document.removeEventListener("pointerdown", onDown, true);
+  }, [renaming]);
 
   const navItems = useMemo(() => [
     { key: "chat", label: t("sidebar.new_task"), icon: <IconPlus size={16} />, shortcut: "Ctrl+N" },
@@ -395,20 +462,57 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
   };
 
   const renderSession = (s: SessionOut) => {
-    const isCurrent = s.id === currentSessionId;
+    const isCurrent = s.id === currentSessionId && !pageMode;
+    const editing = renaming?.id === s.id;
     return (
-      <div key={s.id} className={`sb-session${isCurrent ? " active" : ""}`} onClick={() => { switchSession(s.id); onSessionFocus(); }}>
+      <div key={s.id} className={`sb-session${isCurrent ? " active" : ""}`} onClick={() => { if (editing) return; switchSession(s.id); onSessionFocus(); }}>
+        {/* S1（plan-41-197）：运行指示移到标题左侧，且**始终占位**（非运行态透明）。
+            此前只给运行项渲染 → 运行/非运行切换时整行标题列宽与右侧列位跳动。 */}
+        <span className={"sb-session-pulse" + (s.has_running ? " on" : "")} aria-hidden="true" />
         {s.pinned && <span title={t("sidebar.ctx_pin")} className="sb-pin"><IconPin size={11} /></span>}
-        {renaming?.id === s.id ? (
-          <input className="input sb-rename-input" autoFocus value={renaming.value} onFocus={(e) => e.target.select()}
+        {editing ? (
+          <Input className="sb-rename-input" ref={renameInputRef} autoFocus value={renaming.value} onFocus={(e) => e.target.select()}
             onChange={(e) => setRenaming({ id: s.id, value: e.target.value })}
             onClick={(e) => e.stopPropagation()}
-            onBlur={async () => { const title = renaming.value.trim(); setRenaming(null); if (title && title !== s.title) await renameSession(s.id, title); }}
-            onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setRenaming(null); }} />
+            onPointerDown={(e) => e.stopPropagation()}
+            onBlur={() => {
+              const el = renameInputRef.current;
+              window.setTimeout(() => {
+                if (!el || !document.contains(el)) return;      // 已提交/卸载
+                if (document.activeElement === el) return;       // 焦点还在（未真失焦）
+                if (allowRenameBlurRef.current) { allowRenameBlurRef.current = false; commitRename(s.id, s.title || ""); return; }
+                // 被动失焦（列表刷新/重排）→ 恢复焦点继续编辑，不再让重命名"半途而废"
+                el.focus();
+                el.select();
+              }, 120);
+            }}
+            onKeyDown={(e) => {
+              const native = e.nativeEvent as KeyboardEvent & { isComposing?: boolean };
+              // S1：中文输入法选词回车不算提交（isComposing / keyCode 229）
+              if (e.key === "Enter" && !native.isComposing && e.keyCode !== 229) {
+                e.preventDefault();
+                allowRenameBlurRef.current = true;
+                commitRename(s.id, s.title || "");
+                return;
+              }
+              if (e.key === "Escape") { e.preventDefault(); setRenaming(null); }
+            }} />
         ) : (
-          <span className="sb-session-title" title={s.title || `会话 ${s.id}`}>{s.title || t("sidebar.new_task")}</span>
+          <span className="sb-session-title" title={s.title || `会话 ${s.id}`}
+            onMouseEnter={(e) => {
+              // S1：标题溢出时 hover 跑马灯浏览全文（测量后写 CSS 变量，不改 state 避免重渲染）
+              const el = e.currentTarget;
+              const dx = el.scrollWidth - el.clientWidth;
+              if (dx <= 2) return;
+              el.style.setProperty("--marquee-x", `-${dx}px`);
+              el.style.setProperty("--marquee-dur", `${Math.min(6, Math.max(1, dx / 36)).toFixed(2)}s`);
+              el.classList.add("is-marquee");
+            }}
+            onMouseLeave={(e) => e.currentTarget.classList.remove("is-marquee")}
+          >
+            <span className="sb-title-inner">{s.title || t("sidebar.new_task")}</span>
+          </span>
         )}
-        {s.has_running && <span className="sb-session-pulse" />}
         <span className="sb-session-time">{formatRelativeTime(s.last_activity_at, language)}</span>
         {/* v7: 一键归档（三点菜单图标左侧）。运行中的会话禁止归档 */}
         <span
@@ -453,7 +557,9 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
    * 工作树仅额外带一个「工作树」标识，其余（图标位、+、更多菜单）完全一致。 */
   const renderProjectRow = (p: ProjectOut, isWorktree: boolean) => {
     const open = isProjectOpen(p);
-    const isCurrent = p.id === currentProjectId;
+    // S1（plan-41-197）：唯一聚焦——选中会话后其所属项目行不再同时高亮，
+    // 只有“未选中任何会话”（首页新建态）时项目才显示 current。
+    const isCurrent = p.id === currentProjectId && currentSessionId == null;
     return (
       <div className={`sb-project${isCurrent ? " current" : ""}`} onClick={() => toggleProject(p.id)}>
         <span className={`sb-project-chevron${open ? " open" : ""}`} aria-hidden="true"><IconChevronRight size={13} /></span>
@@ -544,8 +650,8 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
       <div className="sb-head">
         <AppLogo size={20} className="sb-logo-img" />
         <button className="sb-nav-arrow" onClick={onToggleCollapse} title={collapsed ? t("sidebar.expand_tip") : t("sidebar.collapse_tip")}><IconPanelLeft size={15} open={!collapsed} /></button>
-        <button className="sb-nav-arrow" disabled={!canBack} onClick={() => histGo(-1)} title={t("sidebar.history_back")}><IconChevronLeft size={15} /></button>
-        <button className="sb-nav-arrow" disabled={!canForward} onClick={() => histGo(1)} title={t("sidebar.history_forward")}><IconChevronRight size={15} /></button>
+        <button className="sb-nav-arrow" disabled={!canBack} onClick={() => { histGo(-1); onSessionFocus(); }} title={t("sidebar.history_back")}><IconChevronLeft size={15} /></button>
+        <button className="sb-nav-arrow" disabled={!canForward} onClick={() => { histGo(1); onSessionFocus(); }} title={t("sidebar.history_forward")}><IconChevronRight size={15} /></button>
       </div>
 
       {/* 主导航 */}

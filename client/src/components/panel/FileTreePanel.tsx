@@ -2,13 +2,14 @@
  * v11: 变更审核 diff 视图——diffPreview.path 匹配当前预览文件时，
  * 用 Monaco DiffEditor 展示 before/after，可切换「变更对比 / 当前内容」。
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Editor, { DiffEditor } from "@monaco-editor/react";
 import { api, type TreeNode } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { usePanelStore } from "../../store/panel";
 import { IconArrowToggle, IconFileText, IconFolder, IconFolderOpen, IconRefresh } from "../icons";
 import { MarkdownContent } from "../MarkdownContent";
+import { recordComponentRender, recordDerivation } from "../../perf/metrics";
 
 /** 文件扩展名 -> Monaco 语言 ID 映射（后端只返回扩展名，这里兜底转换）。 */
 const EXT_LANG_MAP: Record<string, string> = {
@@ -50,6 +51,29 @@ function ancestorDirs(filePath: string): string[] {
   }
   return dirs;
 }
+
+/** S14（plan-41-197）：文件类型徽标映射——按扩展名给出缩写与配色。
+ *  此前所有文件都用同一个 IconFileText，无法区分类型（用户反馈“各类文件图标无区分度”）。 */
+const FILE_KIND: Record<string, { label: string; tone: string }> = {
+  ts: { label: "TS", tone: "blue" }, tsx: { label: "TSX", tone: "blue" },
+  js: { label: "JS", tone: "yellow" }, jsx: { label: "JSX", tone: "yellow" },
+  mjs: { label: "JS", tone: "yellow" }, cjs: { label: "JS", tone: "yellow" },
+  py: { label: "PY", tone: "green" }, pyi: { label: "PYI", tone: "green" },
+  json: { label: "JSON", tone: "orange" }, jsonc: { label: "JSON", tone: "orange" },
+  md: { label: "MD", tone: "gray" }, mdx: { label: "MDX", tone: "gray" }, txt: { label: "TXT", tone: "gray" },
+  css: { label: "CSS", tone: "purple" }, scss: { label: "SCSS", tone: "purple" }, less: { label: "LESS", tone: "purple" },
+  html: { label: "HTML", tone: "orange" }, vue: { label: "VUE", tone: "green" }, svelte: { label: "SVE", tone: "red" },
+  yml: { label: "YML", tone: "red" }, yaml: { label: "YML", tone: "red" },
+  toml: { label: "TOML", tone: "red" }, env: { label: "ENV", tone: "red" },
+  sh: { label: "SH", tone: "green" }, ps1: { label: "PS1", tone: "blue" }, bat: { label: "BAT", tone: "gray" },
+  sql: { label: "SQL", tone: "blue" }, rs: { label: "RS", tone: "orange" }, go: { label: "GO", tone: "blue" },
+  java: { label: "JAVA", tone: "red" }, kt: { label: "KT", tone: "purple" },
+  c: { label: "C", tone: "blue" }, cpp: { label: "C++", tone: "blue" }, h: { label: "H", tone: "blue" },
+  png: { label: "IMG", tone: "green" }, jpg: { label: "IMG", tone: "green" },
+  jpeg: { label: "IMG", tone: "green" }, gif: { label: "IMG", tone: "green" },
+  svg: { label: "SVG", tone: "green" }, webp: { label: "IMG", tone: "green" }, ico: { label: "ICO", tone: "green" },
+  lock: { label: "LOCK", tone: "gray" },
+};
 
 function FileRow({ node, depth, onSelect, openPaths, setOpenPaths, selectedPath, registerRow }: {
   node: TreeNode;
@@ -96,6 +120,9 @@ function FileRow({ node, depth, onSelect, openPaths, setOpenPaths, selectedPath,
     );
   }
 
+  // S14（plan-41-197）：文件类型徽标——按扩展名区分（未知类型回落通用文件图标）
+  const _ext = node.name.includes(".") ? node.name.split(".").pop()!.toLowerCase() : "";
+  const _kind = FILE_KIND[_ext];
   return (
     <div
       className={`ft-row ft-file${node.path === selectedPath ? " active" : ""}`}
@@ -105,13 +132,18 @@ function FileRow({ node, depth, onSelect, openPaths, setOpenPaths, selectedPath,
       title={node.path}
     >
       <span className="ft-chev" />
-      <IconFileText size={13} />
+      {_kind
+        ? <span className="ft-kind" data-tone={_kind.tone} aria-hidden>{_kind.label}</span>
+        : <IconFileText size={13} />}
       <span className="ft-name">{node.name}</span>
     </div>
   );
 }
 
-export function FileTreePanel() {
+export function FileTreePanel({ visible = true }: { visible?: boolean }) {
+  // plan-75-334 阶段0：记录组件渲染（仅采集期间统计，零开销）
+  recordComponentRender("filePanel");
+  
   const currentProjectId = useChatStore((s) => s.currentProjectId);
   const projects = useChatStore((s) => s.projects);
   const previewPath = usePanelStore((s) => s.previewPath);
@@ -132,8 +164,32 @@ export function FileTreePanel() {
   const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // v2.2 (对齐 zcode 3.14.2): Monaco 编辑器实例引用（grep 行号定位）
   const editorRef = useRef<{ revealLineInCenter: (line: number) => void; setPosition: (p: { lineNumber: number; column: number }) => void; focus: () => void } | null>(null);
+  /** plan-75-334 阶段2：请求序号——快速切换文件时只允许最新一次响应落地。 */
+  const loadSeqRef = useRef(0);
+  /** plan-75-334 阶段3：已完成的「路径#变更签名」加载键（隐藏期不请求、恢复可见时补算）。 */
+  const loadedKeyRef = useRef<string>("");
 
   const project = projects.find((p) => p.id === currentProjectId);
+
+  /** plan-75-334 阶段2：文件加载依赖从**整个 turnChanges** 收窄为「当前预览路径的变更签名」。
+   *  此前任意 turn 的任意文件变化都会重读当前预览文件并刷新编辑器内容；
+   *  现在只有「当前预览路径确实发生变更」时才触发加载。
+   *
+   *  签名取命中文件的**变更元数据**（action/additions/deletions）而非仅位置：
+   *  同一文件在同一个 turn 中被二次修改（行数变化）也会换签名 → 重新读盘，
+   *  保持「文件落盘后重新读取真实磁盘内容」的语义；其它文件变化则签名不变、不读盘。 */
+  const previewChangeSignature = useMemo(() => {
+    if (!previewPath) return "";
+    const norm = previewPath.replace(/\\/g, "/");
+    const parts: string[] = [];
+    for (const key of Object.keys(turnChanges)) {
+      for (const c of turnChanges[Number(key)] ?? []) {
+        if (String(c?.path ?? "").replace(/\\/g, "/") !== norm) continue;
+        parts.push(`${key}:${c.action}:${c.additions}:${c.deletions}`);
+      }
+    }
+    return parts.join("|");
+  }, [turnChanges, previewPath]);
 
   // v11: 当前是否处于 diff 视图（diffPreview 与预览文件匹配）
   const showDiff = viewMode === "diff" && diffPreview != null && diffPreview.path === previewPath;
@@ -156,23 +212,36 @@ export function FileTreePanel() {
   useEffect(() => { loadTree(); }, [currentProjectId]);
 
   // 预览文件
-  const loadFile = async (path: string) => {
+  const loadFile = async (path: string, seq: number) => {
     if (!currentProjectId) return;
     setContentError(null);
+    // plan-75-334 阶段0：文件预览请求计数（仅采集期间统计）——
+    // 用来核对「只修改其它文件时当前预览请求次数为 0」这一验收项。
+    recordDerivation("filePreviewRequest");
     try {
       const data = await api.readProjectFile(currentProjectId, path);
+      // plan-75-334 阶段2：过期响应保护——快速切换文件时旧响应不得覆盖新预览
+      if (loadSeqRef.current !== seq) return;
       setContent(data.content);
       setContentLang(toMonacoLang(data.language, path));
       if (data.truncated) setContentError("文件过大，已截断预览");
     } catch (e) {
+      if (loadSeqRef.current !== seq) return;
       setContentError(String(e));
       setContent("");
     }
   };
 
   useEffect(() => {
-    if (previewPath) loadFile(previewPath);
-  }, [previewPath, turnChanges]);
+    if (!previewPath) { loadedKeyRef.current = ""; return; }
+    // plan-75-334 阶段3：隐藏期不请求磁盘（面板不可见时读盘+编辑器刷新都是白做）；
+    // 恢复可见时本 effect 因 visible 变化重跑，键未记录 ⇒ 补算一次。
+    if (!visible) return;
+    const key = `${previewPath}#${previewChangeSignature}`;
+    if (loadedKeyRef.current === key) return;
+    loadedKeyRef.current = key;
+    void loadFile(previewPath, ++loadSeqRef.current);
+  }, [previewPath, previewChangeSignature, visible, currentProjectId]);
 
   // v19.2 (plan-917): 彻底隔离右侧文件面板与主会话流式输出。
   // 文件面板永远展示磁盘真实文件内容，绝不被 streamingBuffers 覆盖。

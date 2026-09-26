@@ -11,11 +11,19 @@ import "@xterm/xterm/css/xterm.css";
 import { api as backendApi } from "../../api/client";
 import { isBusy } from "../../perf/bus";
 import { registerReconcileTask, RECONCILE_ORDER } from "../../perf/reconcile";
+import { recordDerivation } from "../../perf/metrics";
 import { useChatStore } from "../../store/chat";
 import type { PanelTab } from "../../store/panel";
 
 interface TerminalPanelProps {
   tab: PanelTab;
+  /** plan-41-233：标签所属会话（跨会话保活渲染时不能跟随当前会话漂移——
+   *  否则切换会话会改动 cwd、命中 effect 依赖并重建 PTY，终端被重置）。 */
+  sessionId?: number | null;
+  /** plan-75-334 阶段3：面板是否可见。隐藏时仅暂停 fit / 尺寸同步等**布局工作**，
+   *  PTY 进程、数据订阅与滚动缓冲全部保留（恢复可见时补一次 fit）。
+   *  注意：不得进入 PTY 建连 effect 的依赖，否则隐藏/显示会重建终端。 */
+  visible?: boolean;
 }
 
 function readCssVar(name: string, fallback: string): string {
@@ -26,10 +34,14 @@ function readCssVar(name: string, fallback: string): string {
   } catch { return fallback; }
 }
 
-export function TerminalPanel({ tab }: TerminalPanelProps) {
+export function TerminalPanel({ tab, sessionId, visible = true }: TerminalPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const ptyIdRef = useRef<number | null>(null);
+  /** plan-75-334 阶段3：可见性镜像（供 PTY effect 内的回调读取，不进依赖）。 */
+  const visibleRef = useRef(visible);
+  /** plan-75-334 阶段3：PTY effect 内定义的 fit 函数句柄——恢复可见时由外层补一次。 */
+  const doFitRef = useRef<(() => void) | null>(null);
   const api = typeof window !== "undefined" ? window.chatcoderAPI : undefined;
   // v19: spawn 失败可见反馈（此前静默吞错导致白屏无提示）
   const [spawnError, setSpawnError] = useState<string | null>(null);
@@ -37,12 +49,11 @@ export function TerminalPanel({ tab }: TerminalPanelProps) {
 
   const projects = useChatStore((s) => s.projects);
   const currentProjectId = useChatStore((s) => s.currentProjectId);
-  const currentSessionId = useChatStore((s) => s.currentSessionId);
   const sessions = useChatStore((s) => s.sessions);
 
-  // 终端工作目录 = 当前会话所属项目目录
-  const session = sessions.find((s) => s.id === currentSessionId);
-  const project = projects.find((p) => p.id === (session?.project_id ?? currentProjectId));
+  // 终端工作目录 = 标签所属会话的项目目录（无所属会话时退回当前项目）
+  const ownerSession = sessionId != null ? sessions.find((s) => s.id === sessionId) : undefined;
+  const project = projects.find((p) => p.id === (ownerSession?.project_id ?? currentProjectId));
   const cwd = project?.path;
 
   useEffect(() => {
@@ -139,13 +150,17 @@ export function TerminalPanel({ tab }: TerminalPanelProps) {
     const inMotion = () => isBusy();
     const doFit = () => {
       if (!containerRef.current) return;
+      // plan-75-334 阶段3：隐藏期不做布局工作（容器尺寸为 0，fit 无意义且会触发重排）
+      if (!visibleRef.current) return;
       try {
+        recordDerivation("terminalFit");
         fit.fit();
         if (ptyIdRef.current != null) {
           api?.ptyResize?.(ptyIdRef.current, term.cols, term.rows);
         }
       } catch { /* 尺寸为 0 等瞬时状态忽略 */ }
     };
+    doFitRef.current = doFit;
     /** 运动结束后的收尾 fit：双帧 rAF 后执行，确保容器 clientWidth 已是终值。
      *  事件驱动（主进程 chatcoder:window-motion / 分隔条 pointerup）替代旧的 120ms 轮询，
      *  拖完立刻收敛，不再多等一个固定延时。 */
@@ -182,6 +197,7 @@ export function TerminalPanel({ tab }: TerminalPanelProps) {
 
     return () => {
       disposed = true;
+      doFitRef.current = null;
       offReconcile();
       cancelAnimationFrame(raf);
       if (fitTimer) window.clearTimeout(fitTimer);
@@ -199,6 +215,15 @@ export function TerminalPanel({ tab }: TerminalPanelProps) {
     };
     // tab.instance 变化（多开）时重建独立 PTY；retryTick 触发重试重建
   }, [api, cwd, tab.instance, retryTick]);
+
+  // plan-75-334 阶段3：同步可见性镜像，并在恢复可见时补一次 fit。
+  // 延迟到下一帧执行：display:none → block 的尺寸需要一帧才能量到。
+  useEffect(() => {
+    visibleRef.current = visible;
+    if (!visible) return;
+    const raf = requestAnimationFrame(() => { doFitRef.current?.(); });
+    return () => cancelAnimationFrame(raf);
+  }, [visible]);
 
   if (!api?.ptySpawn) {
     return <div className="rp-body"><div className="rp-empty">终端需要桌面版环境</div></div>;

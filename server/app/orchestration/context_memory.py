@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import resolve_workspace_root
 from app.core.enums import MsgType, SenderType
+from app.models.base import resolve_reasoning
 from app.models.schemas import ChatMessage, ChatRequest
 from app.models.registry import get_model_registry
 from app.orchestration.token_counter import (
@@ -145,6 +146,8 @@ async def _summarize_messages(messages: "list[Message]",
     transcript = "\n".join(lines)
 
     try:
+        # plan-53-258 R4: 辅助摘要请求同样携带用户配置的思考深度
+        _effort, _thinking = resolve_reasoning(provider)
         request = ChatRequest(
             messages=[
                 ChatMessage(
@@ -163,6 +166,8 @@ async def _summarize_messages(messages: "list[Message]",
                 ChatMessage(role="user", content=transcript),
             ],
             model="",
+            reasoning_effort=_effort,
+            thinking=_thinking or None,
             # plan-270-1358: ta3 x-ws-id 需要工作目录指纹（其它 Provider 忽略）
             workspace_dir=workspace_dir,
         )
@@ -197,6 +202,8 @@ async def _compress_super_summary(summaries: list[dict],
     provider = get_model_registry().get_default_provider()
     if provider:
         try:
+            # plan-53-258 R4: 辅助摘要请求同样携带用户配置的思考深度
+            _effort, _thinking = resolve_reasoning(provider)
             request = ChatRequest(
                 messages=[
                     ChatMessage(
@@ -210,6 +217,8 @@ async def _compress_super_summary(summaries: list[dict],
                     ChatMessage(role="user", content=merged_text[:6000]),
                 ],
                 model="",
+                reasoning_effort=_effort,
+                thinking=_thinking or None,
                 workspace_dir=workspace_dir,  # plan-270-1358: ta3 x-ws-id
             )
             resp = await provider.chat(request)

@@ -13,7 +13,13 @@ from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import resolve_workspace_root, settings
+from app.orchestration.approval_policy import (
+    APPROVAL_FULL,
+    normalize_approval_mode,
+    normalize_execution_mode,
+)
 from app.core.enums import MsgType, SenderType
+from app.models.base import resolve_reasoning
 from app.orchestration.agent_events import (broadcast, broadcast_session_completed,
                                             broadcast_turn_updated)
 from app.orchestration.agent_loop import run_agent_loop
@@ -243,9 +249,12 @@ def _on_subagent_finished(manager, session_id: int, handle) -> None:
 
     修复背景：此前完成通知只入队，等主代理“下一次” LLM 调用或用户下一条消息
     才送达——主 turn 已结束时表现为“子代理跑完了但主代理没被唤醒”。
-    现在两件事：
+    现在三件事：
       ① 广播 subagent.pending：前端在子代理运行期间保持“运行中”并显示等待提示；
-      ② 会话空闲且仍有未送达通知时，调度唤醒 turn 把完成报告送达主代理。
+      ② 会话空闲且仍有未送达通知时，调度唤醒 turn 把完成报告送达主代理；
+      ③ v44：会话空闲且没有任何后续轮次接管时，补发权威收尾事件
+         session.completed(subagent_pending=0)，摘除侧栏「运行中」标记——
+         否则子代理全部结束、无唤醒的会话会永久停留在“转圈”假象。
     """
     try:
         loop = asyncio.get_running_loop()
@@ -255,7 +264,8 @@ def _on_subagent_finished(manager, session_id: int, handle) -> None:
         pending = int(manager.pending_count())
     except Exception:
         pending = 0
-    # 前端状态同步：>0 保持会话运行标记；=0 由前端摘除等待态（无主 turn 时）
+    # 前端状态同步：>0 保持会话运行标记；=0 时前端不再本地摘除（v44），
+    # 统一等权威事件（本函数末尾的收尾补发 / 唤醒轮 / 主 turn 收尾的 session.completed）
     try:
         loop.create_task(broadcast(session_id, {
             "event": "subagent.pending",
@@ -263,22 +273,34 @@ def _on_subagent_finished(manager, session_id: int, handle) -> None:
         }))
     except Exception:
         logger.debug("[engine] subagent.pending 广播调度失败(非阻塞)", exc_info=True)
-    if pending > 0 or not settings.subagent_wakeup_enabled:
+    if pending > 0:
         return
     if _session_turn_busy(session_id):
         return  # 会话仍在运行 → 完成通知随该轮注入通道送达，无需唤醒
-    try:
-        if not manager.has_unclaimed_notes():
-            return  # 无待送达通知（已被读取/清理）
-    except Exception:
-        return
-    existing = _subagent_wakeups.get(session_id)
-    if existing is not None and not existing.done():
-        return  # 已有唤醒在途（期间新完成的通知随该次唤醒一并送达）
-    try:
-        _subagent_wakeups[session_id] = loop.create_task(_wakeup_turn_for_subagents(session_id))
-    except Exception:
-        logger.debug("[engine] 唤醒 turn 调度失败(非阻塞)", exc_info=True)
+    # v44: 无主 turn 且子代理全部结束——判断是否有唤醒轮接管运行态：
+    #   ① 唤醒在途（existing 未完成）→ 由该唤醒轮接管，不补发；
+    #   ② 唤醒可用且有未送达报告 → 调度唤醒（subagent.wakeup/turn.started 会置运行标记）；
+    #   ③ 其余情况（唤醒禁用 / 无报告可取 / 调度失败）→ 会话就此空闲，补发收尾事件。
+    wakeup_scheduled = False
+    if settings.subagent_wakeup_enabled:
+        try:
+            has_notes = bool(manager.has_unclaimed_notes())
+        except Exception:
+            has_notes = False
+        if has_notes:
+            existing = _subagent_wakeups.get(session_id)
+            if existing is not None and not existing.done():
+                return  # 已有唤醒在途（期间新完成的通知随该次唤醒一并送达）
+            try:
+                _subagent_wakeups[session_id] = loop.create_task(_wakeup_turn_for_subagents(session_id))
+                wakeup_scheduled = True
+            except Exception:
+                logger.debug("[engine] 唤醒 turn 调度失败(非阻塞)", exc_info=True)
+    if not wakeup_scheduled:
+        try:
+            loop.create_task(broadcast_session_completed(session_id, subagent_pending=0))
+        except Exception:
+            logger.debug("[engine] 空闲收尾广播调度失败(非阻塞)", exc_info=True)
 
 
 def _cleanup_manager_if_idle(session_id: int, manager) -> None:
@@ -541,7 +563,10 @@ async def _continue_goal_turn(session_id: int, prev_turn_id: int) -> None:
                         await s.commit()
                     except Exception:
                         await s.rollback()
-                        logger.warning("[goal] 续跑 turn=%s 执行异常", turn.id, exc_info=True)
+                        # plan-75-332 R6 修复：此处引用了未定义的 turn（本函数内变量是
+                        # turn_id_new）——续跑 turn 执行异常时，这条日志本身会再抛
+                        # NameError，把「可诊断的失败」变成「无法诊断的失败」。
+                        logger.warning("[goal] 续跑 turn=%s 执行异常", turn_id_new, exc_info=True)
                         try:
                             await turn_service.update_turn_status(s, turn_id_new, "failed", summary="续跑执行异常", completed=True)
                             await s.commit()
@@ -727,7 +752,28 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             if stale_turns:
                 await _patch_turn_cancel(stale_turns, [t.id for t in stale_turns])
                 stale_turn_ids.update(t.id for t in stale_turns)
-            if stale_groups or stale_turns:
+
+            # 计划卡作废状态持久化：发新消息 = 放弃旧计划，上面只改了 turn.status，
+            # plan_status 仍停在 proposed；前端（含重启后）以 plan_status 为真值源
+            # 恢复计划卡，旧卡的「取消 / 确认执行」按钮会重新长出（本次修复的 bug）。
+            # 与 _supersede_stale_proposed 同语义：此处补标 superseded 并广播，
+            # 不依赖"下一轮方案解析成功"这一时机（普通消息轮同样生效）。
+            stale_plan_res = await db.execute(_select(_Turn).where(
+                _Turn.session_id == session_id,
+                _Turn.id < turn_id,
+                _Turn.plan_status == "proposed",
+            ))
+            stale_plan_turns = list(stale_plan_res.scalars().all())
+            if stale_plan_turns:
+                _plan_ws = _resolve_workspace(session, project)
+                for _st in stale_plan_turns:
+                    _stamp_plan_doc(_plan_ws, _st.plan_doc_path, "superseded", f" by turn {turn_id}")
+                await _patch_turn_bulk([t.id for t in stale_plan_turns], plan_status="superseded")
+                stale_turn_ids.update(t.id for t in stale_plan_turns)
+                logger.info("[engine] turn=%s 发新消息作废旧待确认方案 turns=%s",
+                            turn_id, [t.id for t in stale_plan_turns])
+
+            if stale_groups or stale_turns or stale_plan_turns:
                 for stale_tid in sorted(stale_turn_ids):
                     try:
                         await broadcast_turn_updated(session_id, stale_tid, "cancelled")
@@ -839,7 +885,10 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             )
         except Exception:
             logger.debug("[engine] turn=%s 权限配置解析失败，回退硬编码白名单", turn_id, exc_info=True)
-            _mode_whitelist = _READONLY_TOOLS if mode == "readonly" else (_PLAN_TOOLS if mode == "plan" else None)
+            # R7 审查修复：回退分支必须**就地**归一化——`_mode` 的定义在本块之后，
+            # 权限解析抛异常时引用它会再抛 UnboundLocalError，把可诊断的失败变成无法诊断。
+            _fallback_mode = normalize_execution_mode(mode)
+            _mode_whitelist = _READONLY_TOOLS if _fallback_mode == "readonly" else (_PLAN_TOOLS if _fallback_mode == "plan" else None)
         _available_tools = {t.name for t in tool_registry.for_agent(_mode_whitelist)}
         # v36: 子代理工具计入「模型可见工具」（提示词引导降级口径一致）
         _available_tools |= {
@@ -859,21 +908,18 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         # plan-644: plan 模式收集本会话此前各轮计划需求全集并注入（多轮迭代
         # 零丢失的机制保证）；非 plan 模式不注入、零开销
         _plan_history = ""
-        # 沙箱模式解析（与 run_agent_loop 同口径：项目配置 > 全局设置 > 默认）
-        _eff_sandbox = "workspace-write"
-        try:
-            from app.services import config_service
-            _eff = await config_service.effective_config(db, project_path=workspace)
-            _eff_sandbox = str(_eff.get("sandbox_mode") or "workspace-write")
-            if _eff_sandbox == "workspace-write" and settings.sandbox_mode != "workspace-write":
-                _eff_sandbox = settings.sandbox_mode
-        except Exception:
-            logger.debug("[engine] turn=%s 读取沙箱模式失败，用 workspace-write", turn_id, exc_info=True)
-        # 完全访问模式（danger-full-access）：免审批、直接执行——
-        # 不注入规划/审阅模式说明，工具全量放行（用户要求"完全访问"不再被规划流程限制）
-        _full_access = _eff_sandbox == "danger-full-access"
+        # plan-75-332: 两条正交控制轴在本轮生效——
+        # 执行模式（readonly / plan / agent）决定"能做什么"，权限模式（ask / auto / full）
+        # 决定"要不要问"。旧值（default / accept_edits）在此归一化，存量会话与前端
+        # 旧版请求都不会让模式解析落空。
+        _mode = normalize_execution_mode(mode)
+        _approval_mode = normalize_approval_mode(getattr(session, "approval_mode", None))
+        # 完全访问（approval_mode=full）：免询问、工具全量放行——
+        # 不注入规划/审阅模式说明（用户要求"完全访问"不再被规划流程限制）。
+        # 注意这是**权限模式**而非执行模式：能力边界仍由 _mode 决定。
+        _full_access = _approval_mode == APPROVAL_FULL
 
-        if mode == "plan" and not _full_access and settings.plan_history_inject_chars > 0:
+        if _mode == "plan" and not _full_access and settings.plan_history_inject_chars > 0:
             _plan_history = await _collect_plan_history(db, session, workspace)
             if _plan_history:
                 logger.info("[engine] turn=%s 注入 Plan History %d 字符", turn_id, len(_plan_history))
@@ -897,8 +943,8 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         # 内置模式沿用 _MODE_HINTS。
         _mode_hint = ""
         if not _full_access:
-            if mode in _MODE_HINTS:
-                _mode_hint = _MODE_HINTS[mode]
+            if _mode in _MODE_HINTS:
+                _mode_hint = _MODE_HINTS[_mode]
             else:
                 try:
                     from app.services import permission_profile_service as _pps
@@ -906,7 +952,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                 except Exception:
                     logger.debug("[engine] turn=%s 自定义提示词读取失败", turn_id, exc_info=True)
         if _mode_hint:
-            if mode == "plan":
+            if _mode == "plan":
                 # plan-95: 提示词含 {session_id}/{turn_id} 占位符——文档按 turn 唯一命名，
                 # 同一会话多次规划不再互相覆盖（此前固定会话名导致解析到上一任务旧文档）
                 _mode_hint = _mode_hint.format(session_id=session_id, turn_id=turn_id)
@@ -930,10 +976,10 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         except Exception:
             logger.debug("[engine] turn=%s 权限配置解析失败，回退硬编码", turn_id, exc_info=True)
             _schema_whitelist = (
-                _READONLY_TOOLS if mode == "readonly"
-                else (_PLAN_TOOLS if mode == "plan" else None)
+                _READONLY_TOOLS if _mode == "readonly"
+                else (_PLAN_TOOLS if _mode == "plan" else None)
             )
-            _mode_readonly = mode in ("readonly", "plan")
+            _mode_readonly = _mode in ("readonly", "plan")
             _mcp_allowed = None
             _mcp_extra = set()
         if _full_access:
@@ -993,9 +1039,9 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                 "cancel_event": cancel_event,
                 "main_task_id": main_task.id,
                 "model_id": effective_model_id,
-                # plan-248-1258 M6: 子代理继承的关键上下文（沙箱/权限模式）
-                "sandbox_mode": _eff_sandbox,
-                "permission_mode": mode,
+                # plan-248-1258 M6: 子代理继承的关键上下文（执行模式 / 权限模式）
+                "permission_mode": _mode,
+                "approval_mode": _approval_mode,
                 # plan-330-1648 M2: 子代理思考深度 = 设置优先 → 本 turn 档位 → 全局默认
                 "reasoning_effort": reasoning_effort,
                 "context_summary": _plan_history or "",
@@ -1013,7 +1059,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         # v2.2 (plan-88): 仅当方案文档真实存在且 AI 正常返回（kind=message）时才生成
         # 提案；未生成文档 / AI 异常结束时 turn 置 failed 并提示，不再广播 task.proposed
         # ——前端计划卡（pendingSplit）由 task.proposed 驱动，因此不会出现"无文档也弹卡"。
-        if mode == "plan" and settings.plan_mode_auto_split:
+        if _mode == "plan" and settings.plan_mode_auto_split:
             async def _fail_plan_turn(reason: str, user_hint: str) -> dict:
                 """plan 阶段失败收尾：turn 置 failed + 任务失败 + 落一条用户可读错误。"""
                 await turn_service.update_turn_status(
@@ -1042,8 +1088,13 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                 await broadcast_turn_updated(session_id, turn_id, "failed")
                 return {"ok": True, "failed": True, "reason": reason}
 
+            # plan-85-379: 先取本 turn 实际写盘记录中的方案文档候选——归属以写盘事实
+            # 为准，模型沿用历史编号命名（如把 session-83 的文档写成 plan-75-334）时，
+            # 不再被串会话防护误判丢弃，避免"文档明明写了却报未生成"。
+            _plan_written = await _turn_written_plan_docs(db, session_id, turn_id, workspace)
             _plan_path, _plan_source = _resolve_plan_doc(
                 workspace, session_id, out.kind, turn_id=turn_id, since_ts=turn_started_ts,
+                turn_written=_plan_written,
             )
             # plan-282-1421（第7项）：用户手动终止（Stop）不是"计划失败"。
             # cancel_event 或 cancelled/interrupted 结果必须先于"文档缺失"判定，
@@ -1392,13 +1443,17 @@ def _plan_doc_belongs_to_other(name: str, session_id: int) -> bool:
 
 
 def _find_plan_document(workspace: str, session_id: int | None = None,
-                        turn_id: int | None = None, since_ts: float | None = None) -> Path | None:
+                        turn_id: int | None = None, since_ts: float | None = None,
+                        turn_written: list[Path] | None = None) -> Path | None:
     """定位 /plan 阶段约定的方案文件；只读不执行。返回实际文件路径。
 
     plan-95: 文档按 turn 唯一命名 ai/chatcoder-plan-<sid>-<tid>.md；传入 since_ts
     （本 turn 开始时间）后仅接受该时刻之后有更新的候选——同会话再次规划时，
     即使 AI 自行改名写新文档，也不会解析到上一任务的旧文档。
     since_ts 为 None 时保持旧行为（取最新已知方案，供执行阶段回读）。
+    plan-85-379: turn_written 传入「本 turn 实际写盘记录」中的 ai/chatcoder-plan*.md
+    候选——归属事实优先于文件名编号推断，模型命名偏差（如沿用历史文档编号）时
+    仍能命中本会话刚写出的文档（此前会被串会话防护误判为别的会话而丢弃）。
     """
     if not workspace:
         return None
@@ -1426,6 +1481,15 @@ def _find_plan_document(workspace: str, session_id: int | None = None,
         found = _safe(root / "ai" / f"chatcoder-plan-{session_id}-{turn_id}.md")
         if found is not None and _fresh(found):
             return found
+
+    # 1.5 本 turn 实际写盘记录（plan-85-379）：归属的权威依据，先于文件名编号推断。
+    #   串会话防护按「文件名首段数字」判定归属，模型命名偏差（沿用历史编号，如把
+    #   session-83 的文档写成 chatcoder-plan-75-334.md）时会把本会话刚写出的文档
+    #   误判为别的会话而丢弃，表现为"文档明明写了却报未生成"。
+    if turn_written:
+        fresh_written = [p for p in turn_written if _safe(p) is not None and _fresh(p)]
+        if fresh_written:
+            return max(fresh_written, key=lambda p: p.stat().st_mtime)
 
     # 2. 本会话绑定名：仅当本轮确有更新时才可直接命中（防复用上一任务旧文档）
     if session_id is not None:
@@ -1561,16 +1625,58 @@ async def _supersede_stale_proposed(db: AsyncSession, session_id: int,
                     new_turn_id, [t.id for t in stale])
 
 
+async def _turn_written_plan_docs(db: AsyncSession, session_id: int, turn_id: int,
+                                  workspace: str) -> list[Path]:
+    """本 turn（session + turn 双键）实际写入的方案文档候选（plan-85-379）。
+
+    rollback_writes 记录 fs_write 等写盘操作的目标路径，是「谁在哪个 turn 写出」
+    的权威依据——不受模型文件名编号偏差影响。串会话防护按文件名首段数字推断归属，
+    模型沿用历史编号命名时会把本会话文档误判为别的会话而丢弃（表现为"文档明明写了
+    却报未生成"）；此处返回的候选交给 _find_plan_document 优先采用。
+    查询失败/无记录返回空列表——调用方回退既有文件名推断逻辑，旧行为不变。
+    """
+    if not workspace:
+        return []
+    try:
+        writes = await rollback_service.list_turn_writes(db, session_id, turn_id)
+    except Exception:
+        logger.debug("[engine] 计划文档写盘记录查询失败(非阻塞)", exc_info=True)
+        return []
+    root = Path(workspace).resolve()
+    out: list[Path] = []
+    for w in writes:
+        # list_turn_writes 语义为 turn_id >= 查询值（回滚用）：此处只认本 turn 的记录
+        _w_turn = getattr(w, "turn_id", None)
+        if _w_turn is not None and int(_w_turn) != int(turn_id):
+            continue
+        rel = str(getattr(w, "path", "") or "").replace("\\", "/").lstrip("/")
+        name = rel.rsplit("/", 1)[-1]
+        if not name.startswith("chatcoder-plan") or not name.lower().endswith(".md"):
+            continue
+        try:
+            target = (root / rel).resolve()
+            if (target.is_file() and target not in out
+                    and (target == root or root in target.parents)):
+                out.append(target)
+        except OSError:
+            continue
+    return out
+
+
 def _resolve_plan_doc(workspace: str, session_id: int, out_kind: str,
                       turn_id: int | None = None,
-                      since_ts: float | None = None) -> tuple[Path | None, str]:
+                      since_ts: float | None = None,
+                      turn_written: list[Path] | None = None) -> tuple[Path | None, str]:
     """v2.2 (plan-88): 解析 /plan 方案文档——命中且内容非空才视为有效。
 
     plan-95: 按 turn 解析（turn_id + since_ts），只认本轮写出的文档。
+    plan-85-379: turn_written 为本 turn 实际写盘记录中的文档候选（见
+    _turn_written_plan_docs），优先于文件名编号推断，模型命名偏差时仍能命中。
     返回 (path, source)；文档缺失或内容为空返回 (None, "")，
     由调用方判定 turn 失败（不生成提案，避免"无文档也弹计划卡"）。
     """
-    path = _find_plan_document(workspace, session_id, turn_id=turn_id, since_ts=since_ts)
+    path = _find_plan_document(workspace, session_id, turn_id=turn_id, since_ts=since_ts,
+                               turn_written=turn_written)
     if path is None:
         return None, ""
     try:
@@ -1620,6 +1726,11 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         project = await project_service.get_project(db, session.project_id) if session and session.project_id else None
         if session is None or project is None:
             return {"ok": False, "error": "session/project not found"}
+        # plan-75-332 R5 修复：确认执行路径的权限模式必须**就地**计算——此前这里直接
+        # 引用了 start_turn 的局部变量 `_approval_mode`，点击计划卡「确认执行」必抛
+        # NameError: name '_approval_mode' is not defined（用户实测）。
+        # 子代理按同一会话权限模式裁决，与 start_turn 口径保持一致。
+        _approval_mode = normalize_approval_mode(getattr(session, "approval_mode", None))
         request_task = (await db.execute(
             select(Task).where(Task.turn_id == turn_id, Task.kind == "request").order_by(Task.id.asc()).limit(1)
         )).scalars().first()
@@ -1764,7 +1875,9 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
                 "model_id": effective_model_id,
                 # plan-330-1648: 确认执行阶段主代理已是执行语义（非 plan/readonly），
                 # 子代理按类型锁定模式；无 turn 级思考档位 → 回落全局默认。
-                "permission_mode": "default",
+                # plan-75-332: 旧值 default 改名 agent（确认执行阶段就是智能体模式）。
+                "permission_mode": "agent",
+                "approval_mode": _approval_mode,
                 "reasoning_effort": None,
             },
         )
@@ -2070,6 +2183,8 @@ async def _spawn_memory_extract(
                 logger.debug("[memory] 无可用 ModelProvider，跳过记忆提取")
                 return
 
+            # plan-53-258 R4: 记忆提取同样携带用户配置的思考深度
+            _effort, _thinking = resolve_reasoning(provider)
             req = ChatRequest(
                 messages=[
                     ChatMessage(
@@ -2085,6 +2200,8 @@ async def _spawn_memory_extract(
                     ChatMessage(role="user", content=text[:4500]),
                 ],
                 model=model_name or getattr(provider, "model", "") or "default",
+                reasoning_effort=_effort,
+                thinking=_thinking or None,
                 workspace_dir=_ws_dir,  # plan-270-1358: ta3 x-ws-id
             )
             resp = await provider.chat(req)

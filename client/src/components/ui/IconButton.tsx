@@ -3,8 +3,12 @@
  * 收敛此前三套并行实现：`.sb-icon-btn`（侧栏/导航页）、`.titlebar-btn`（标题栏）、
  * `.icon-btn`（右面板/列表）。默认 28px 方（--ctl-h-sm）与图标按钮行高对齐，
  * 尺寸档与控件高度三档一致，hover 走底色而非描边。
+ *
+ * S1（plan-41-197）：`title` 不再落到原生属性，改由 ui/Tooltip 渲染统一圆角卡片浮层
+ * （原生 title 是浏览器方形浮块且聚焦延迟明显）；`aria-label` 缺省时以 title 兜底。
  */
 import type { ButtonHTMLAttributes, ReactNode } from "react";
+import { Tooltip } from "./Tooltip";
 
 type Size = "xs" | "sm" | "lg";
 
@@ -17,7 +21,7 @@ interface IconButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, 
   tone?: "default" | "danger";
 }
 
-export function IconButton({ icon, size = "sm", active = false, tone = "default", className = "", ...props }: IconButtonProps) {
+export function IconButton({ icon, size = "sm", active = false, tone = "default", className = "", title, ...props }: IconButtonProps) {
   const cls = [
     "ui-icon-btn",
     size !== "sm" ? `size-${size}` : "",
@@ -25,9 +29,11 @@ export function IconButton({ icon, size = "sm", active = false, tone = "default"
     tone === "danger" ? "tone-danger" : "",
     className,
   ].filter(Boolean).join(" ");
-  return (
-    <button type="button" className={cls} {...props}>
+  const label = props["aria-label"] ?? (typeof title === "string" ? title : undefined);
+  const btn = (
+    <button type="button" className={cls} aria-label={label} {...props}>
       {icon}
     </button>
   );
+  return typeof title === "string" && title ? <Tooltip title={title} side="top">{btn}</Tooltip> : btn;
 }

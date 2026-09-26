@@ -1,16 +1,25 @@
-/** 命令中心（v7 完全对齐 ZCode）：Cmd/Ctrl+K。
+/** 命令中心（v7 完全对齐 ZCode / S2 升级 plan-41-197）：Cmd/Ctrl+K。
  * 结构：搜索框 + Tab（全部/操作/任务/文件）+ 分组列表
  * 分组：最近任务（相对时间）/ 建议（新任务、打开工作区、设置）/ 面板（侧边栏、终端）
  * 查询时追加斜杠命令与设置项（归入"操作"）。
+ *
+ * S2 改动（plan-41-197）：
+ *  - 弹窗放大（640 → 720px，行高/内距同步放大），观感不再局促；
+ *  - 「文件」tab 落地真实文件搜索（复用 GET /projects/:id/files/search），
+ *    点击结果直接打开右侧文件面板并定位到该文件；
+ *  - 僵尸功能修复：斜杠命令原派发 `chatcoder:insert-slash` 事件但全仓无监听方
+ *    （点了没反应），现改为复用已实现的 `chatcoder:composer-prefill` 通道，
+ *    把命令写入输入框并聚焦，用户可继续补参数后发送。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
+import { api } from "../api/client";
 import { useChatStore } from "../store/chat";
 import { usePanelStore } from "../store/panel";
 import { useI18n } from "../store/i18n";
 import { formatRelativeTime } from "../utils/time";
 import { SETTINGS_INDEX, type SettingsTab } from "./settings";
 import {
-  IconFileText, IconFolderOpen, IconSortDesc, IconMessageSquare, IconPanelLeft,
+  IconFileText, IconFolderOpen, IconLayers, IconMessageSquare, IconPanelLeft,
   IconPlus, IconSearch, IconSettings, IconTerminal, IconZap,
 } from "./icons";
 
@@ -43,6 +52,14 @@ async function openWorkspace() {
   if (dir) await useChatStore.getState().createProject(dir);
 }
 
+/** S2：把文件打开到右侧文件面板（折叠时自动展开）并定位 */
+function openFileAt(path: string) {
+  const panel = usePanelStore.getState();
+  panel.openPanel();
+  panel.openTab("files");
+  panel.setPreviewPath(path);
+}
+
 export function CommandCenter() {
   const { t, language } = useI18n();
   const [open, setOpen] = useState(false);
@@ -54,6 +71,11 @@ export function CommandCenter() {
   const sessions = useChatStore((s) => s.sessions);
   const switchSession = useChatStore((s) => s.switchSession);
   const currentSessionId = useChatStore((s) => s.currentSessionId);
+  const currentProjectId = useChatStore((s) => s.currentProjectId);
+
+  // S2：文件搜索结果（「文件」tab）——debounce 200ms，避免逐键打后端
+  const [fileResults, setFileResults] = useState<string[]>([]);
+  const [fileLoading, setFileLoading] = useState(false);
 
   const slashCommands = useMemo(() => [
     { cmd: "/plan", desc: t("cmd.slash_plan") },
@@ -88,6 +110,22 @@ export function CommandCenter() {
       setTimeout(() => inputRef.current?.focus(), 10);
     } else setQuery("");
   }, [open]);
+
+  // S2：文件搜索（仅「文件」tab 且有查询时请求；项目切换/关闭弹窗自动清理）
+  useEffect(() => {
+    if (!open || tab !== "file") return;
+    const q = query.trim();
+    if (!q || currentProjectId == null) { setFileResults([]); setFileLoading(false); return; }
+    let cancelled = false;
+    setFileLoading(true);
+    const timer = window.setTimeout(() => {
+      api.projectFileSearch(currentProjectId, q, 60)
+        .then((list) => { if (!cancelled) setFileResults(list ?? []); })
+        .catch(() => { if (!cancelled) setFileResults([]); })
+        .finally(() => { if (!cancelled) setFileLoading(false); });
+    }, 200);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [open, tab, query, currentProjectId]);
 
   const closeAndRestoreFocus = () => {
     setOpen(false);
@@ -125,7 +163,7 @@ export function CommandCenter() {
         {
           icon: <IconPlus size={14} />, label: t("cmd.new_task"), hint: "Ctrl+N",
           run: () => {
-            useChatStore.setState({ currentSessionId: null, messages: [], turns: [], tasks: [], runningTurnId: null, isRunning: false, interruptedTurnId: null, streamingBuffers: {}, thinkingBuffers: {}, usage: null, pendingApproval: null, pendingPlan: null, reviewedFiles: {}, injectMarks: [] });
+            useChatStore.setState({ currentSessionId: null, messages: [], turns: [], tasks: [], runningTurnId: null, isRunning: false, interruptedTurnId: null, streamingBuffers: {}, thinkingBuffers: {}, usage: null, pendingApproval: null, pendingPlan: null, reviewedFiles: {} });
           },
         },
         { icon: <IconFolderOpen size={14} />, label: t("cmd.open_workspace"), hint: "Ctrl+O", run: () => { void openWorkspace(); } },
@@ -154,7 +192,9 @@ export function CommandCenter() {
       const slash = slashCommands.filter((c) => c.cmd.includes(q) || c.desc.toLowerCase().includes(q))
         .map((c): Entry => ({
           icon: <IconZap size={14} />, label: c.cmd, hint: c.desc,
-          run: () => window.dispatchEvent(new CustomEvent("chatcoder:insert-slash", { detail: { cmd: c.cmd } })),
+          // S2 修复：原派发 `chatcoder:insert-slash` 无监听方（僵尸功能），
+          // 改用已实现的 composer-prefill 通道写入输入框并聚焦。
+          run: () => window.dispatchEvent(new CustomEvent("chatcoder:composer-prefill", { detail: { text: `${c.cmd} ` } })),
         }));
       const settingEntries = SETTINGS_INDEX.filter((it) => it.label.toLowerCase().includes(q) || it.keywords.toLowerCase().includes(q))
         .map((it): Entry => ({
@@ -177,7 +217,7 @@ export function CommandCenter() {
     <div className="cmd-center-overlay" onMouseDown={closeAndRestoreFocus}>
       <div className="cmd-center" onMouseDown={(e) => e.stopPropagation()}>
         <div className="cmd-center-input-wrap">
-          <IconSearch size={14} />
+          <IconSearch size={15} />
           <input
             ref={inputRef}
             className="cmd-center-input"
@@ -186,6 +226,20 @@ export function CommandCenter() {
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Escape") { e.preventDefault(); closeAndRestoreFocus(); return; }
+              if (tab === "file") {
+                // S2：文件 tab 的键盘导航（↑↓ 移动、Enter 打开）
+                if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                  e.preventDefault();
+                  return;
+                }
+                if (e.key === "Enter" && fileResults.length > 0) {
+                  e.preventDefault();
+                  closeAndRestoreFocus();
+                  openFileAt(fileResults[0]);
+                  return;
+                }
+                return;
+              }
               if (e.key === "ArrowDown") { e.preventDefault(); setActive((i) => Math.min(flat.length - 1, i + 1)); return; }
               if (e.key === "ArrowUp") { e.preventDefault(); setActive((i) => Math.max(0, i - 1)); return; }
               if (e.key === "Enter" && flat[active]) { e.preventDefault(); closeAndRestoreFocus(); flat[active].run(); return; }
@@ -195,7 +249,7 @@ export function CommandCenter() {
         <div className="cmd-center-tabs">
           {([["all", t("cmd.tab_all")], ["action", t("cmd.tab_action")], ["task", t("cmd.tab_task")], ["file", t("cmd.tab_file")]] as [TabKey, string][]).map(([k, label]) => (
             <button key={k} className={tab === k ? "active" : ""} onClick={() => setTab(k)}>
-              {k === "all" && <IconSortDesc size={12} />}
+              {k === "all" && <IconLayers size={12} />}
               {k === "action" && <IconZap size={12} />}
               {k === "task" && <IconMessageSquare size={12} />}
               {k === "file" && <IconFileText size={12} />}
@@ -204,34 +258,65 @@ export function CommandCenter() {
           ))}
         </div>
         <div className="cmd-center-list">
-          {tab === "file" && (
-            <div className="cmd-center-empty">{t("cmd.file_search_unimpl")}</div>
-          )}
-          {tab !== "file" && (
-            groups.map((g) => (
-              <div className="cmd-center-group" key={g.title}>
-                <div className="cmd-center-group-title">{g.title}</div>
-                {g.items.map((item) => {
-                  rowIdx++;
-                  const idx = rowIdx;
+          {tab === "file" ? (
+            currentProjectId == null ? (
+              <div className="cmd-center-empty">请先在左侧选择一个项目，再搜索项目内文件</div>
+            ) : !query.trim() ? (
+              <div className="cmd-center-empty">输入文件名或路径片段开始搜索</div>
+            ) : fileLoading ? (
+              <div className="cmd-center-empty">搜索中…</div>
+            ) : fileResults.length === 0 ? (
+              <div className="cmd-center-empty">{t("cmd.no_match")}</div>
+            ) : (
+              <div className="cmd-center-group">
+                <div className="cmd-center-group-title">文件（{fileResults.length}）</div>
+                {fileResults.map((p) => {
+                  const idx = p.lastIndexOf("/");
+                  const dir = idx >= 0 ? p.slice(0, idx) : "";
+                  const name = idx >= 0 ? p.slice(idx + 1) : p;
                   return (
                     <div
-                      key={idx}
-                      className={`cmd-center-item${idx === active ? " active" : ""}`}
-                      onMouseEnter={() => setActive(idx)}
-                      onClick={() => { setOpen(false); item.run(); }}
+                      key={p}
+                      className="cmd-center-item"
+                      onClick={() => { closeAndRestoreFocus(); openFileAt(p); }}
                     >
-                      <span className="cmd-center-item-icon">{item.icon}</span>
-                      <span className="cmd-center-item-label">{highlight(item.label, query.trim())}</span>
-                      {item.hint && <span className="cmd-center-item-hint">{item.hint}</span>}
+                      <span className="cmd-center-item-icon"><IconFileText size={14} /></span>
+                      <span className="cmd-center-item-label">
+                        <span className="cmd-center-file-name">{highlight(name, query.trim())}</span>
+                        {dir && <span className="cmd-center-file-dir">{dir}</span>}
+                      </span>
                     </div>
                   );
                 })}
               </div>
-            ))
-          )}
-          {tab !== "file" && flat.length === 0 && (
-            <div className="cmd-center-empty">{t("cmd.no_match")}</div>
+            )
+          ) : (
+            <>
+              {groups.map((g) => (
+                <div className="cmd-center-group" key={g.title}>
+                  <div className="cmd-center-group-title">{g.title}</div>
+                  {g.items.map((item) => {
+                    rowIdx++;
+                    const idx = rowIdx;
+                    return (
+                      <div
+                        key={idx}
+                        className={`cmd-center-item${idx === active ? " active" : ""}`}
+                        onMouseEnter={() => setActive(idx)}
+                        onClick={() => { setOpen(false); item.run(); }}
+                      >
+                        <span className="cmd-center-item-icon">{item.icon}</span>
+                        <span className="cmd-center-item-label">{highlight(item.label, query.trim())}</span>
+                        {item.hint && <span className="cmd-center-item-hint">{item.hint}</span>}
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+              {flat.length === 0 && (
+                <div className="cmd-center-empty">{t("cmd.no_match")}</div>
+              )}
+            </>
           )}
         </div>
       </div>

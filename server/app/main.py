@@ -15,6 +15,7 @@ from app.gateway.routers import (
     diagnostics,
     exec_policy,
     hooks,
+    market,
     memories,
     models,
     permission_profiles,
@@ -235,6 +236,8 @@ def create_app() -> FastAPI:
     app.include_router(hooks.router, prefix="/api", tags=["hooks"])
     app.include_router(memories.router, prefix="/api", tags=["memories"])
     app.include_router(plugins.router, prefix="/api", tags=["plugins"])
+    # plan-41-198：拓展页市场目录（内置精选 + 本机真实项）/ 已安装聚合计数
+    app.include_router(market.router, prefix="/api", tags=["market"])
     # plan-282-1441（#7/#8）：内置 MCP 的状态宿主端点（调试会话 + 数据库连接配置）
     app.include_router(debug.router, prefix="/api", tags=["debug"])
     app.include_router(debug.db_router, prefix="/api", tags=["db"])

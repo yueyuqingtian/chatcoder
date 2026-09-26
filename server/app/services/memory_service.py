@@ -197,6 +197,33 @@ async def delete_memory(db: AsyncSession, memory_id: int) -> bool:
     return await run_write_locked(patch, label=f"memory.delete.{memory_id}")
 
 
+async def update_memory(db: AsyncSession, memory_id: int, *, text: str | None = None,
+                       kind: str | None = None) -> bool:
+    """编辑记忆文本/类型（S8 / plan-41-197）。
+
+    用户可在设置-记忆的详情弹窗里修正记忆文本；编辑即视为人工确认，
+    候选标记随之清除（与 promote 同一语义）。
+    """
+    if text is not None and not text.strip():
+        raise ValueError("记忆内容不能为空")
+
+    from app.persistence.database import run_write_locked
+
+    def patch(s):
+        entry = s.get(MemoryEntry, memory_id)
+        if entry is None:
+            return False
+        if text is not None:
+            entry.text = text.strip()
+            entry.candidate = False
+        if kind is not None:
+            entry.kind = kind
+        s.commit()
+        return True
+
+    return await run_write_locked(patch, label=f"memory.update.{memory_id}")
+
+
 async def promote_memory(db: AsyncSession, memory_id: int, target_scope: str,
                          project_id: int | None = None) -> bool:
     """把记忆提升/降级到目标作用域（session → project → global）。

@@ -1,6 +1,6 @@
 """权限模式（Permission Profile）路由（plan-230-1144 M2）。
 
-模式 = 工具白名单 + 提示词。内置 4 模式（default/readonly/plan/accept_edits）
+模式 = 工具白名单 + 提示词。内置 3 模式（agent/readonly/plan，plan-75-332）
 只读不可删，但白名单与提示词可覆盖；用户可新建自定义模式。
 存储于 ~/.chatcoder/config.json（permission_profiles 键），不需要数据库迁移。
 """

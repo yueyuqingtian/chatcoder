@@ -37,6 +37,21 @@ DEFAULT_VERSION = "0.25.7"
 # 取 32768（主流模型单次输出上限的常见值），既不再被网关小默认值截断，也不会超模型上限被拒。
 DEFAULT_MAX_OUTPUT_TOKENS = 32768
 
+# plan-53-258 R2: CommandCode 只接受这五档思考深度（实测 400 提示
+# "Invalid option: expected one of \"low\"|\"medium\"|\"high\"|\"xhigh\"|\"max\""）。
+_REASONING_LEVELS = ("low", "medium", "high", "xhigh", "max")
+# 内部档位别名：minimal 语义最接近 low；none/空 表示关闭思考，不下发该字段。
+_REASONING_ALIASES = {"minimal": "low"}
+
+
+def _normalize_reasoning_effort(effort: str | None) -> str | None:
+    """把内部思考档位收敛到 CommandCode 接受的值域；返回 None 表示不下发。"""
+    value = (effort or "").strip().lower()
+    if not value or value == "none":
+        return None
+    value = _REASONING_ALIASES.get(value, value)
+    return value if value in _REASONING_LEVELS else None
+
 _DEFAULT_TIMEOUT = max(
     300.0,
     float(getattr(settings, "provider_stream_idle_timeout", 180) or 180),
@@ -136,8 +151,11 @@ class CommandCodeProvider(ModelProvider):
                         if converted:
                             user_content.append(converted)
                     elif b_type == "image":
-                        # 已是 CommandCode 原生 image 块，原样透传
-                        user_content.append(block)
+                        # 原生 image 块同样过一遍归一化：历史消息/系统注入的块可能仍是
+                        # data URI + source.type=url 形态（上游会拒），统一收敛字段。
+                        converted = self._convert_image_block(block)
+                        if converted:
+                            user_content.append(converted)
             if not user_content:
                 user_content = [{"type": "text", "text": ""}]
             out_messages.append({
@@ -150,18 +168,21 @@ class CommandCodeProvider(ModelProvider):
 
     @staticmethod
     def _convert_image_block(block: dict) -> dict | None:
-        """OpenAI image_url 块 → CommandCode 原生 image 块。
+        """OpenAI image_url / 原生 image 块 → CommandCode 合法 image 块。
 
         plan-234-1171 R3: 此前这里把图片硬编码替换为占位文本 `[image]`，base64
         从未进入请求体，模型永远看不到图（本文件是唯一直接丢弃图片的 provider）。
 
-        真实协议由 api.commandcode.ai 实测确定（400 校验提示 + 逐候选验证命中）：
-        - content 数组元素的 `type` 只接受 text|image|document|search_result|thinking；
-        - image 块必须带 `source` 对象，`source.type` 为 "url"（另有 "base64" 分支，
-          其字段名为 snake_case `media_type`）；
-        - 实测命中形态（模型正确读出测试图中已知字符串）：
-            {"type": "image", "source": {"type": "url", "url": "data:image/png;base64,..."}}
-          data URI 与远程 http(s) URL 共用该形态，故统一走这里。
+        plan-53-258 R1（本次修复）：此前把 data URI 也塞进 `source.type="url"`，
+        而上游的 url 分支只接受 http(s)——整轮请求直接失败：
+            {'type': 'server_error', 'message': 'URL scheme must be http or https, got data:'}
+        实测（api.commandcode.ai 真实请求，muse-spark / deepseek-v4.1-flash / glm-5.3-flash 交叉验证）：
+        - data URI 必须走 `source.type="base64"`，字段名是 snake_case `media_type`
+          （驼峰 mediaType 或省略该字段均返回 400 Validation error）；
+        - `source.type="url"` 仅接受 http(s)，上游按地址自行下载（下载失败报 404）；
+        - content 数组元素的 `type` 只接受 text|image|document|search_result|thinking。
+        命中形态（模型正确读出图中颜色）：
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "..."}}
         """
         url = ""
         image_url = block.get("image_url")
@@ -171,9 +192,34 @@ class CommandCodeProvider(ModelProvider):
             url = image_url
         if not url:
             url = str(block.get("url") or "")
+        # 已是原生 base64 形态（历史消息落库后回传）——字段齐全则归一化透传
+        if not url:
+            source = block.get("source")
+            if isinstance(source, dict):
+                if str(source.get("type") or "") == "base64":
+                    data = str(source.get("data") or "")
+                    media_type = str(source.get("media_type") or "")
+                    if data and media_type:
+                        return {
+                            "type": "image",
+                            "source": {"type": "base64", "media_type": media_type, "data": data},
+                        }
+                url = str(source.get("url") or "")
         if not url:
             return None
-        # 远程 http(s) URL 与 data URI 走同一 source.type=url 形态（实测一致）
+        # data URI → base64 分支（上游 url 分支只认 http(s)，传 data: 会被整轮拒绝）
+        if url.startswith("data:"):
+            header, _, data = url.partition(",")
+            if not data:
+                return None
+            media_type = "image/png"
+            if header.startswith("data:") and ";" in header:
+                media_type = header[len("data:"):].split(";", 1)[0] or media_type
+            return {
+                "type": "image",
+                "source": {"type": "base64", "media_type": media_type, "data": data},
+            }
+        # 远程 http(s) URL：上游按其地址下载
         return {"type": "image", "source": {"type": "url", "url": url}}
 
     def _convert_tools(self, tools: list[dict] | None) -> list[dict] | None:
@@ -208,6 +254,13 @@ class CommandCodeProvider(ModelProvider):
             "stream": True,
             "temperature": request.temperature if request.temperature is not None else 0.3,
         }
+        # plan-53-258 R2: 下发用户配置的思考深度。
+        # 根因：此前从不发 reasoning_effort，上游因此**完全不产出 reasoning 事件**
+        # （实测同一 prompt：不带该字段事件流只有 text-*；带 high 时出现
+        #   reasoning-start / reasoning-delta / reasoning-end，思考块随之为空）。
+        _effort = _normalize_reasoning_effort(request.reasoning_effort)
+        if _effort:
+            params["reasoning_effort"] = _effort
         # v45: 显式下发充裕的输出上限。
         # 根因：不带 max_tokens 时网关套用自身较小的默认值（实测 finish_reason=length、
         # 正文为空）——推理模型的 thinking 会先耗尽该预算，用户看到"输出达到 token 上限，可能不完整"。

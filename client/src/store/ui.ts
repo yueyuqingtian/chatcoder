@@ -1,6 +1,6 @@
 /**
  * UI 偏好管理:面板宽度、字体、字号、毛玻璃、语言等。
- * 全部持久化到 localStorage,启动时自动应用 CSS 变量。
+ * 持久化到 localStorage + 主进程 ui-prefs.json 双通道（plan-73-344），启动时自动应用 CSS 变量。
  */
 import { create } from "zustand";
 
@@ -58,6 +58,8 @@ export type MotionLevel = "full" | "reduced" | "off";
 export type PanelDragLayout = "realtime" | "balanced" | "frozen";
 
 const STORAGE_KEY = "chatcoder.ui-prefs";
+/** 偏好写入时间戳（plan-73-344）：与主进程备份比对，以最后写入的通道为准 */
+const SAVED_AT_KEY = "chatcoder.ui-prefs.saved-at";
 
 const DEFAULTS: UiPrefs = {
   leftPanelWidth: 264,
@@ -70,11 +72,11 @@ const DEFAULTS: UiPrefs = {
   chatFontFamily: "system",
   chatFontSize: 13,
   chatBubbleWidth: 70,
-  chatLineHeight: 1.7,
+  chatLineHeight: 2.2,
   uiBaseFontSize: 13,
   contentMaxWidth: 1120,
-  sidebarFontSize: 12,
-  sidebarIconSize: 14,
+  sidebarFontSize: 14,
+  sidebarIconSize: 16,
   sidebarFocusColor: "",
   msgDensity: "comfortable",
   language: "zh",
@@ -90,25 +92,94 @@ const FONT_OPTIONS: Record<string, string> = {
   rounded: '"SF Pro Rounded", "Hiragino Maru Gothic Pro", "Microsoft YaHei", sans-serif',
 };
 
+/** 主进程备份的进程内缓存：启动期只读一次（loadPrefs 会被 main / App / store 创建三处调用），
+ *  避免重复同步 IPC；运行期变更由 savePrefs 负责回写缓存与磁盘（plan-73-344）。 */
+let _backupCache: { prefs: Partial<UiPrefs> | null; at: number } | undefined;
+
+function readBackupPrefs(): { prefs: Partial<UiPrefs> | null; at: number } {
+  if (_backupCache !== undefined) return _backupCache;
+  let prefs: Partial<UiPrefs> | null = null;
+  let at = 0;
+  try {
+    const b = window.chatcoderAPI?.getUiPrefs?.();
+    if (b && b.prefs && typeof b.prefs === "object") {
+      prefs = b.prefs as Partial<UiPrefs>;
+      at = Number(b.savedAt) || 0;
+    }
+  } catch {
+    prefs = null;
+    at = 0;
+  }
+  _backupCache = { prefs, at };
+  return _backupCache;
+}
+
 function loadPrefs(): UiPrefs {
   if (typeof window === "undefined") return DEFAULTS;
+  // plan-73-344：偏好有两个落盘通道——localStorage 与主进程 ui-prefs.json，取 savedAt 较新者。
+  // 原因：Chromium 的 DOMStorage 是异步提交，app.exit 强退 / 多实例锁竞争下最后一次写入
+  // 可能未落盘；备份通道为 fs.writeFileSync 同步写，故备份更新时以其为准并回写本地。
+  let stored: Partial<UiPrefs> | null = null;
+  let localAt = 0;
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return DEFAULTS;
-    const stored = JSON.parse(raw) as Partial<UiPrefs>;
-    // v14: 840px 是旧版默认值；仅迁移未主动调整过的旧默认，不覆盖用户自定义宽度。
-    if (stored.contentMaxWidth === 840) stored.contentMaxWidth = DEFAULTS.contentMaxWidth;
-    return { ...DEFAULTS, ...stored };
+    if (raw) {
+      stored = JSON.parse(raw) as Partial<UiPrefs>;
+      localAt = Number(localStorage.getItem(SAVED_AT_KEY)) || 0;
+    }
   } catch {
-    return DEFAULTS;
+    stored = null;
+    localAt = 0;
   }
+  const backup = readBackupPrefs();
+  if (backup.prefs && (!stored || backup.at > localAt)) {
+    stored = backup.prefs;
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
+      localStorage.setItem(SAVED_AT_KEY, String(backup.at));
+    } catch {
+      /* 本地回写失败不阻断：本次仍以备份值启动 */
+    }
+  }
+  if (!stored) return DEFAULTS;
+  // v14: 840px 是旧版默认值；仅迁移未主动调整过的旧默认，不覆盖用户自定义宽度。
+  if (stored.contentMaxWidth === 840) stored.contentMaxWidth = DEFAULTS.contentMaxWidth;
+  // S1（plan-41-197）：左栏字号/图标默认值上修（12→14 / 14→16）。
+  // 旧默认值（12/14）视作“用户未自定义”，迁移到新默认；手动调过的值保持不变。
+  if (stored.sidebarFontSize === 12) stored.sidebarFontSize = 14;
+  if (stored.sidebarIconSize === 14) stored.sidebarIconSize = 16;
+  // plan-73-344：消息行距默认值 1.7 → 2.2；旧默认值视作“未自定义”，迁移到新默认。
+  if (stored.chatLineHeight === 1.7) stored.chatLineHeight = DEFAULTS.chatLineHeight;
+  // S5（plan-41-197）：外观页已移除「动画效果 / 面板拖拽排版 / 拖拽自动降级」配置，
+  // 对应行为固定：标准动画、拖拽实时排版、不降级（旧存储值一并纠正，避免行为与界面不一致）。
+  stored.motionLevel = "full";
+  stored.panelDragLayout = "realtime";
+  stored.panelDragAutoDegrade = false;
+  return { ...DEFAULTS, ...stored };
 }
 
 function savePrefs(p: UiPrefs) {
+  // 净化成纯数据：调用方传入的可能是含方法的 store 快照（get() 展开），
+  // IPC 的结构化克隆不接受函数（plan-73-344）。
+  let data: UiPrefs;
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(p));
+    data = JSON.parse(JSON.stringify(p)) as UiPrefs;
+  } catch {
+    return;
+  }
+  const savedAt = Date.now();
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    localStorage.setItem(SAVED_AT_KEY, String(savedAt));
   } catch {
     /* ignore */
+  }
+  // 第二通道：主进程 ui-prefs.json（250ms 合并落盘；退出/关窗前由主进程 flush）。
+  try {
+    window.chatcoderAPI?.setUiPrefs?.({ savedAt, prefs: data });
+    _backupCache = { prefs: data, at: savedAt };
+  } catch {
+    /* 非桌面环境忽略 */
   }
 }
 

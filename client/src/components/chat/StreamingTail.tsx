@@ -20,6 +20,7 @@ import { memo } from "react";
 import { useChatStore } from "../../store/chat";
 import { useMergedStreamText, useMergedThinkingText } from "../../store/streamMerged";
 import { StreamingText } from "./StreamingText";
+import { recordComponentRender } from "../../perf/metrics";
 
 export interface StreamingTailProps {
   /** true = 主会话桶；数字 = 该 threadId 的子代理桶 */
@@ -87,6 +88,9 @@ const SubagentTail = memo(function SubagentTail({ threadId, active, statusLabel,
 });
 
 export const StreamingTail = memo(function StreamingTail({ source = "main", active, statusLabel, persistedText }: StreamingTailProps) {
+  // plan-75-334 阶段0：记录组件渲染（仅采集期间统计，零开销）
+  recordComponentRender("streamingTail");
+  
   // plan-334-1661 S3：按数据源分流订阅——主会话不订阅子代理桶、子代理不订阅主会话合并文本，
   // 两边互不牵动重渲染（子代理面板在未就绪时传 -1，按单桶读取自然得到空串）。
   return typeof source === "number"

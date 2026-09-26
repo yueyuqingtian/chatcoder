@@ -16,9 +16,17 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 
 async def _to_out(db: AsyncSession, s) -> SessionOut:
+    # plan-75-332: 模式值统一走内核归一化——存量会话可能是旧值
+    # （permission_mode=default/accept_edits），直接丢给前端会让模式菜单选不中任何一项。
+    from app.orchestration.approval_policy import (
+        normalize_approval_mode, normalize_execution_mode,
+    )
+
     return SessionOut(
         id=s.id, project_id=s.project_id, title=s.title, model_id=s.model_id,
-        status=s.status, pinned=s.pinned, permission_mode=s.permission_mode,
+        status=s.status, pinned=s.pinned,
+        permission_mode=normalize_execution_mode(s.permission_mode),
+        approval_mode=normalize_approval_mode(getattr(s, "approval_mode", None)),
         pinned_at=getattr(s, "pinned_at", None),
         fork_parent_id=s.fork_parent_id,
         worktree_path=s.worktree_path,
@@ -37,6 +45,7 @@ async def create_session(body: SessionCreate, db: AsyncSession = Depends(get_db)
     sid = await session_service.create_session(
         db, project_id=body.project_id, title=body.title, model_id=body.model_id,
         permission_mode=body.permission_mode,
+        approval_mode=body.approval_mode,
         goal_text=body.goal_text,
     )
     session = await session_service.get_session(db, sid)  # async 只读
@@ -61,6 +70,11 @@ async def get_session(session_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.patch("/{session_id}", response_model=SessionOut)
 async def update_session(session_id: int, body: SessionUpdate, db: AsyncSession = Depends(get_db)):
+    # plan-75-332: 模式值走内核归一化，旧值（default/accept_edits）写入也统一成新取值
+    from app.orchestration.approval_policy import (
+        normalize_approval_mode, normalize_execution_mode,
+    )
+
     # 先取旧值：模型切换 divider 仅在模型真正发生变化时写入，
     # 否则重复 PATCH（同一模型/自动绑定）会在消息流顶部刷出多条「模型已切换」。
     old_model_id: int | None = None
@@ -70,7 +84,8 @@ async def update_session(session_id: int, body: SessionUpdate, db: AsyncSession 
     result_status = await session_service.update_session(
         db, session_id,
         title=body.title, model_id=body.model_id, pinned=body.pinned, status=body.status,
-        permission_mode=body.permission_mode,
+        permission_mode=normalize_execution_mode(body.permission_mode) if body.permission_mode else None,
+        approval_mode=normalize_approval_mode(body.approval_mode) if body.approval_mode else None,
     )
     if result_status is None:
         raise HTTPException(404, "会话不存在")

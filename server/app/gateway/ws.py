@@ -25,15 +25,39 @@ _EVENT_BUFFER_SIZE = 500
 # v967: 高频流式增量事件不入补偿缓冲、不占 seq——避免挤占 500 条环形缓冲，
 # 使 sync.request 断线补偿对关键事件（message.created/turn.*/task.updated/done 类）有效。
 # 这些增量由 done 事件（带 full_text）与前端切回刷新消息兜底，不影响最终一致性。
-_STREAM_NO_BUFFER_EVENTS = frozenset({"token.delta", "thinking.delta"})
+# plan-75-332: approval.explain.delta 同样属高频流式增量（逐字推送的解释文本），
+# 不入缓冲不占 seq；其终态由 approval.explain.done 承担。
+_STREAM_NO_BUFFER_EVENTS = frozenset({
+    "token.delta", "thinking.delta", "approval.explain.delta",
+})
+
+# 转发到全局通道的清单条目上限（与服务端 todo_write 的 12 项限制一致，防御异常数据）
+_TODO_FORWARD_MAX = 12
 
 # v37: 全局通道转发的事件白名单——仅转发「跨会话可见」的状态类事件。
 # 高频流式事件（token/thinking/tool）绝不转发，避免全局连接被长任务淹没。
+# v44: 增补 turn.started / subagent.pending / subagent.wakeup——侧栏需要感知
+# 「后台会话子代理跑完后唤醒轮接管」这类运行态恢复信号；此前只有 session.completed
+# 单向摘除没有恢复源，子代理流程后非聚焦会话的转圈会永久缺失。
+# v45 (plan-73-323)：为桌面宠物的多任务卡片增补 5 个**低频、非流式**事件——
+#   每张任务卡需要「步骤进度 / 当前动作 / 最近结果 / 等待审批 / 失败」：
+#   todo.updated（清单）、tool.call 与 tool.result（每次工具调用各一条）、
+#   approval.request、turn.failed（每次各一条）。它们量级很小
+#   （单任务 10 分钟约几十条、payload 均为小对象），不改变全局通道的低频性质；
+#   高频增量（token.delta / thinking.delta / tool.output）仍不转发。
 _GLOBAL_FORWARD_EVENTS = frozenset({
     "session.completed",
     "session.updated",
+    "turn.started",
     "turn.completed",
     "turn.updated",
+    "turn.failed",
+    "todo.updated",
+    "tool.call",
+    "tool.result",
+    "approval.request",
+    "subagent.pending",
+    "subagent.wakeup",
     "message.created",
 })
 
@@ -88,18 +112,25 @@ class ConnectionManager:
             self._global_conns.discard(ws)
 
     async def _forward_global(self, session_id: int, event: dict) -> None:
-        """v37: 白名单事件转发到全局通道，payload 注入 session_id 供前端定位会话。"""
-        if event.get("event") not in _GLOBAL_FORWARD_EVENTS:
+        """v37: 白名单事件转发到全局通道，payload 注入 session_id 供前端定位会话。
+
+        v45 (plan-73-323)：增补 5 个低频事件（见 _GLOBAL_FORWARD_EVENTS 注释），
+        并对清单做**防御性裁剪**——服务端 todo_write 已限制 12 项，此处再截一刀，
+        保证异常数据不会撑爆全局通道（全局通道只服务展示，不得影响主流程）。
+        """
+        name = event.get("event")
+        if name not in _GLOBAL_FORWARD_EVENTS:
             return
         payload = event.get("payload")
-        forwarded = {
-            "event": event["event"],
-            "payload": {**(payload if isinstance(payload, dict) else {}), "session_id": session_id},
-        }
+        merged = {**(payload if isinstance(payload, dict) else {}), "session_id": session_id}
+        if name == "todo.updated":
+            todos = merged.get("todos")
+            if isinstance(todos, list) and len(todos) > _TODO_FORWARD_MAX:
+                merged["todos"] = todos[:_TODO_FORWARD_MAX]
         try:
-            await self.broadcast_global(forwarded)
+            await self.broadcast_global({"event": name, "payload": merged})
         except Exception:
-            logger.debug("[ws] 全局通道转发失败(非阻塞): %s", event.get("event"), exc_info=True)
+            logger.debug("[ws] 全局通道转发失败(非阻塞): %s", name, exc_info=True)
 
     def next_seq(self, session_id: int) -> int:
         self._seqs[session_id] += 1
@@ -205,6 +236,13 @@ async def ws_endpoint(ws: WebSocket, session_id: int) -> None:
                 }))
                 await manager.broadcast(session_id, {"event": "approval.response", "payload": payload})
 
+            elif event == "approval.explain":
+                # plan-75-332: 审批卡「解释」——异步生成说明并流式推送，不阻塞 ws 读取循环
+                # （解释是辅助能力，耗时不可控，绝不能卡住审批回执的接收）。
+                approval_id = payload.get("approval_id")
+                if approval_id:
+                    asyncio.create_task(_run_explain(str(approval_id)))
+
             elif event == "cancel":
                 turn_id = payload.get("turn_id")
                 if turn_id:
@@ -231,6 +269,23 @@ async def ws_endpoint(ws: WebSocket, session_id: int) -> None:
 
     except WebSocketDisconnect:
         manager.disconnect(session_id, ws)
+
+
+async def _run_explain(approval_id: str) -> None:
+    """执行一次审批解释（plan-75-332）。
+
+    自行开数据库会话：ws_endpoint 不持有 db 依赖，而解释服务需要读会话行
+    （取 model_id）。异常已在服务内部转成 approval.explain.error，这里只做
+    会话生命周期的收尾，保证不会有未处理的异常泄漏到事件循环。
+    """
+    from app.persistence.database import async_session_factory
+    from app.services import approval_explain_service
+
+    try:
+        async with async_session_factory() as db:
+            await approval_explain_service.explain_approval(db, approval_id)
+    except Exception:
+        logger.warning("[ws] 审批解释执行异常 %s", approval_id, exc_info=True)
 
 
 async def _remember_approval(approval_id: str, session_id: int,

@@ -196,6 +196,10 @@ class GlobalSettingsOut(BaseModel):
     auto_compact_threshold_ratio: float = 0.90
     language: str = "zh"
     # v1.0: Agent/安全配置
+    # plan-75-332：auto_approve_tools / force_approval_tools / sandbox_mode /
+    # plan_mode_allow_outside_access / auto_approve_outside_read 均已**废弃**——
+    # 是否放行统一由「执行模式 × 权限模式」裁决（见 orchestration/approval_policy.py）。
+    # 字段保留仅为兼容旧配置文件回读（不做物理删除），前端不再展示。
     auto_approve_tools: bool = False
     force_approval_tools: str = "terminal_exec,ci_run,browser_navigate,browser_click,browser_type"
     session_token_budget: int = 200_000
@@ -229,6 +233,9 @@ class GlobalSettingsOut(BaseModel):
     # v36: 子代理并发治理（设置中心「子代理」面板可配，运行时立即生效）
     max_concurrent_subagents: int = 6   # 同时运行上限（超出排队等待，1~16）
     max_subagents_per_turn: int = 10    # 每轮派发总量上限（含已完成，1~32）
+    # plan-75-332: 审批卡「解释」专用模型 / 思考深度（0/空 = 跟随会话）
+    approval_explain_model_id: int = 0
+    approval_explain_reasoning_effort: str = ""
 
 
 class GlobalSettingsIn(BaseModel):
@@ -266,6 +273,9 @@ class GlobalSettingsIn(BaseModel):
     # v36: 子代理并发治理
     max_concurrent_subagents: int | None = None
     max_subagents_per_turn: int | None = None
+    # plan-75-332: 审批卡「解释」专用模型 / 思考深度（0/空 = 跟随会话）
+    approval_explain_model_id: int | None = None
+    approval_explain_reasoning_effort: str | None = None
 
 
 def _global_settings_out(data: dict) -> GlobalSettingsOut:
@@ -314,6 +324,13 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
         agent_retry_intervals=data.get("agent_retry_intervals", settings.agent_retry_intervals),
         browser_enabled=data.get("browser_enabled", settings.browser_enabled),
         browser_headless=data.get("browser_headless", settings.browser_headless),
+        # plan-75-332: 审批卡「解释」专用模型 / 思考深度（0/空 = 跟随会话）
+        approval_explain_model_id=int(data.get("approval_explain_model_id", 0) or 0),
+        approval_explain_reasoning_effort=str(
+            data.get("approval_explain_reasoning_effort", "")
+            or getattr(settings, "approval_explain_reasoning_effort", "")
+            or ""
+        ),
         # v36: 子代理并发治理
         max_concurrent_subagents=data.get("max_concurrent_subagents", settings.max_concurrent_subagents),
         max_subagents_per_turn=data.get("max_subagents_per_turn", settings.max_subagents_per_turn),
@@ -470,6 +487,15 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
     if body.agent_max_steps is not None:
         data["agent_max_steps"] = int(body.agent_max_steps)
         settings.agent_max_steps = int(body.agent_max_steps)
+    # plan-75-332: 审批卡「解释」专用模型 / 思考深度（0/空 = 跟随会话）
+    if body.approval_explain_model_id is not None:
+        _emid = int(body.approval_explain_model_id)
+        data["approval_explain_model_id"] = _emid
+        settings.approval_explain_model_id = _emid or None
+    if body.approval_explain_reasoning_effort is not None:
+        _meff = str(body.approval_explain_reasoning_effort).strip()
+        data["approval_explain_reasoning_effort"] = _meff
+        settings.approval_explain_reasoning_effort = _meff
     # v45: 异常自动重试策略（次数 + 间隔序列），运行时立即生效
     if body.agent_retry_count is not None:
         _rc = max(0, int(body.agent_retry_count))
@@ -645,7 +671,10 @@ async def get_ai_rules(project_path: str = "") -> AiRulesOut:
     ws_key = _resolve_project_scope_key(project_path)
     workdir_data = data.get(_get_scope_rules_key("workdir", ws_key), {})
     workdir_rules = workdir_data.get("rules", "") if isinstance(workdir_data, dict) else str(workdir_data)
-    enabled = set(data.get("ai_rules_enabled") or list(AI_RULE_SOURCES.keys()))
+    # S11（plan-41-197）：用“键是否存在”判定，不再用 `or` 回落——
+    # 用户把来源全部停用时保存的是空数组 []，`[] or 默认全集` 会复活成“全部启用”，
+    # 导致重进页面看到“停用未保存成功”（读写两侧同源问题，一起修正）。
+    enabled = set(data["ai_rules_enabled"]) if "ai_rules_enabled" in data else set(AI_RULE_SOURCES.keys())
     sources = [
         {"source": s, "label": cfg["label"], "enabled": s in enabled}
         for s, cfg in AI_RULE_SOURCES.items()
@@ -676,7 +705,8 @@ async def set_ai_rules(body: AiRulesIn) -> AiRulesOut:
             "rules": body.workdir_rules, "scope": "workdir", "key": ws_key,
         }
     _save_config(data)
-    enabled = set(data.get("ai_rules_enabled") or list(AI_RULE_SOURCES.keys()))
+    # S11（plan-41-197）：同 get_ai_rules——空数组是合法值（全部停用），不得 `or` 回落。
+    enabled = set(data["ai_rules_enabled"]) if "ai_rules_enabled" in data else set(AI_RULE_SOURCES.keys())
     sources = [
         {"source": s, "label": cfg["label"], "enabled": s in enabled}
         for s, cfg in AI_RULE_SOURCES.items()

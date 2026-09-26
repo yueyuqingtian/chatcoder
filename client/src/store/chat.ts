@@ -4,6 +4,7 @@ import { api } from "../api/client";
 import { ApiError } from "../api/client";
 import type { ArtifactOut, ArthasEntryOut, AttachmentInfo, ComposerRefOut, DebugStatusOut, FileChangeOut, MergeReportOut, MessageOut, ModelOut, ProjectOut, ProviderOut, RollbackAffected, RollbackPreviewFile, SessionOut, TaskOut, TurnOut } from "../api/client";
 import { wsClient, globalWsClient } from "../api/ws";
+import { normalizeApprovalMode, normalizeDraftMode } from "./drafts";
 import { isBusy } from "../perf/bus";
 import { registerReconcileTask, RECONCILE_ORDER } from "../perf/reconcile";
 import type { ServerEventName } from "@chatcoder/shared/events";
@@ -79,26 +80,11 @@ export interface QueuedInput {
   flushing?: boolean;
 }
 
-/** v42（本轮修订语义）："立即发送"注入分割标记。
+/** plan-41-227: 原 v42「注入分割标记」（InjectMark）已整体移除。
  *
- *  注入时刻 AI 恰在流式输出时，该流式段（跨界段）尚未落库、落库后 id 会大于
- *  注入消息 —— 按 id 序渲染会掉到注入消息下方。注入时快照流式中的 agent，
- *  其当前段落库后绑定 crossoverId，渲染时该段固定前移到注入消息上方：
- *  注入消息成为时间分割点（上方 = 注入前内容含跨界段，下方 = 注入后新输出）。
- *
- *  本轮变更（用户反馈"发送的消息没有固定位置，会被刷到下方"）：
- *  渲染层**不再**把注入消息从时间线剥离到独立槽位——它按 id 序固定留在时间线里。
- *  因此 pendingAgents 只作为"谁是跨界段"的判据保留，不再影响消息是否剥离。 */
-export interface InjectMark {
-  /** 注入消息所属 turn */
-  turnId: number;
-  /** 注入的用户消息 id（渲染分割点） */
-  injectId: number;
-  /** 注入时刻正在流式输出的 agent（跨界段落库绑定后清空） */
-  pendingAgents: number[];
-  /** 注入时刻流式中的段完成落库后的消息 id（前移到注入消息上方）；null=尚未落库 */
-  crossoverId: number | null;
-}
+ *  它在注入消息（"立即发送"）落库时快照当时流式中的 agent，等该段落库后由渲染层
+ *  前移到注入消息上方做时间分割；实测造成位置两跳（落库瞬间上跳、turn 结束回落到 id 序）。
+ *  现在注入消息的时间线位置**只由落库 id 序决定**（后端广播已带 turn_id）。 */
 
 /** 浏览器引用贴条（元素标注 / 网页截图 / DOM 快照 / 控制台求值）。 */
 export interface BrowserRef {
@@ -148,6 +134,19 @@ export interface SubagentMeta {
   error?: string | null;
 }
 
+/** plan-75-332: 审批卡「解释」状态。
+ *  按 approvalId 键控（与 questionDraft 同法）——切换页面/会话后返回仍可恢复；
+ *  approval.request 到达时重置，审批结束/取消时清空。 */
+export interface ApprovalExplainState {
+  approvalId: string;
+  status: "idle" | "loading" | "streaming" | "done" | "error";
+  text: string;
+  error: string | null;
+  /** 实际使用的模型与思考深度（后端在 done 事件回传，供用户核对配置是否生效） */
+  model?: string;
+  reasoningEffort?: string;
+}
+
 export interface SessionSlice {
   messages: MessageOut[];
   turns: TurnOut[];
@@ -165,6 +164,8 @@ export interface SessionSlice {
   pendingApproval: { approvalId: string; detail: Record<string, unknown> } | null;
   /** plan-238-1188: 提问作答草稿随会话 slice 一起保存/恢复，切走再回来不丢。 */
   questionDraft: { approvalId: string; stepIndex: number; answers: Record<string, string> } | null;
+  /** plan-75-332: 审批卡解释内容（同样随切片保存/恢复）。 */
+  approvalExplain: ApprovalExplainState | null;
   /** plan-95/v38: turnId 标记计划卡归属 turn；planDocPath 为后端广播的实际文档路径。
    *  task.proposed 与旧 /plan 流程统一由本状态渲染确认卡（不再有独立 pendingSplit）。 */
   pendingPlan: { task: string; turnId?: number; planDocPath?: string } | null;
@@ -180,8 +181,6 @@ export interface SessionSlice {
   todoPersisted: boolean;
   agentActivity: Record<number, string>;
   queuedInputs: QueuedInput[];
-  /** v42: 注入分割标记（会话级，跨 turn 在 turn.started 清空） */
-  injectMarks: InjectMark[];
   /** v967: 切换瞬间尚未 flush 到 streaming/thinking 缓冲的增量尾巴（不随切走丢失） */
   pendingStreamDeltas: Record<number, string>;
   pendingThinkingDeltas: Record<number, string>;
@@ -227,6 +226,7 @@ function _snapshotSlice(s: ChatState): SessionSlice {
     usageCacheTotals: s.usageCacheTotals,
     pendingApproval: s.pendingApproval,
     questionDraft: s.questionDraft,
+    approvalExplain: s.approvalExplain,
     pendingPlan: s.pendingPlan,
     pendingPlanTurn: s.pendingPlanTurn,
     plansByTurn: s.plansByTurn || {},
@@ -238,7 +238,6 @@ function _snapshotSlice(s: ChatState): SessionSlice {
     todoPersisted: s.todoPersisted,
     agentActivity: s.agentActivity,
     queuedInputs: s.queuedInputs,
-    injectMarks: s.injectMarks,
     pendingStreamDeltas: { ..._pendingToken },
     pendingThinkingDeltas: { ..._pendingThinking },
     pendingThreads: { ..._pendingThread },
@@ -327,9 +326,18 @@ interface ChatState {
    *  生命周期：approval.request 置 null（新提问）→ 作答过程中持续写回 →
    *  approval.response / respondApproval / cancelTurn 清空。 */
   questionDraft: { approvalId: string; stepIndex: number; answers: Record<string, string> } | null;
+  /** plan-75-332: 审批卡「解释」状态（骨架 → 流式填充），按 approvalId 键控。
+   *  生命周期：explainApproval 置 loading → delta 累加 → done/error 终态 →
+   *  approval.request / approval.response / respondApproval / cancelTurn 清空。 */
+  approvalExplain: ApprovalExplainState | null;
   /** 回滚/撤销后回填输入框的草稿（v40 按 key 隔离：key="home"|"new"|sessionId，
    * 仅 draftKey 匹配的 Composer 实例消费一次，避免跨会话/首页串扰）。 */
-  composerBackfill: { key: string; text: string; attachments: AttachmentInfo[] } | null;
+  composerBackfill: {
+    key: string; text: string; attachments: AttachmentInfo[];
+    /** S16（plan-41-197）：撤回回填的引用 chips（@文件 / $技能 / 连接器 / 插件）。
+     *  此前只回填正文与附件，撤回后引用样式丢失（用户反馈）。 */
+    refs?: Array<{ kind: string; value: string; label: string }>;
+  } | null;
   /** 浏览器标注/截图贴条列表。 */
   composerBrowserRefs: BrowserRef[];
   /** v6/v38: 计划确认状态（方案文档生成后等待确认，含任务标题、归属 turnId 与文档路径）。 */
@@ -375,8 +383,6 @@ interface ChatState {
   lastModelId: number | null;
   /** v2.2 (对齐 zcode 3.8): 输入队列——运行中发送的消息排队，turn 完成后自动续发。 */
   queuedInputs: QueuedInput[];
-  /** v42: 注入分割标记（见 InjectMark） */
-  injectMarks: InjectMark[];
   loading: boolean;
   /** 系统级错误（后端连接失败 / 启动加载失败 / 配置读写失败）→ 右上角 Toast。
    *  任务执行/会话运行类错误不得写这里（plan-308-1542 需求1）：它们只进 flowError。 */
@@ -384,6 +390,9 @@ interface ChatState {
   /** 任务执行/会话运行类错误 → **只**在消息流末尾渲染错误卡（不弹右上角 Toast）。
    *  来源：sendTurn 失败、turn.failed、计划确认失败、重试/回滚/审查失败等。 */
   flowError: { text: string; turnId: number | null; at: number } | null;
+  /** plan-41-228：已被末尾错误卡「关闭」的 turn——该 turn 内落的 ERROR 消息不再渲染，
+   *  避免同一条错误关闭后又以另一种样式冒出来。内存态：切换会话 / 刷新即清空。 */
+  hiddenTurnErrors: number[];
   /** plan-308-1542 需求3-A：AI 自动合并的实时进度（merge.progress 广播累积）。
    *  仅在合并弹窗内渲染（像消息流一样实时追加行），done 时带汇总报告。 */
   mergeProgress: {
@@ -405,7 +414,7 @@ interface ChatState {
   /** plan-278-1391: 关闭归档项目提示（用户取消）。 */
   dismissArchivedProjectPrompt: () => void;
   selectProject: (projectId: number) => Promise<void>;
-  createSession: (projectId: number, title?: string, opts?: { model_id?: number | null; permission_mode?: string; goal_text?: string | null }) => Promise<number | null>;
+  createSession: (projectId: number, title?: string, opts?: { model_id?: number | null; permission_mode?: string; approval_mode?: string; goal_text?: string | null }) => Promise<number | null>;
   switchSession: (sessionId: number, fromHist?: boolean) => Promise<void>;
   /** 会话前进/后退历史（侧栏 logo 区与折叠态标题栏共用，zcode 顶部导航箭头） */
   sessionHist: number[];
@@ -427,14 +436,21 @@ resumeTurn: () => Promise<void>;
   /** v9: 取消回滚（关闭弹窗）。 */
   cancelRollback: () => void;
   confirmPlan: (task: string) => Promise<void>;
-  /** v38 (plan-482): 确认/取消方案文档（不再涉及 group/steps 编辑）。 */
-  confirmPlanTurn: (accepted: boolean) => Promise<void>;
+  /** v38 (plan-482): 确认/取消方案文档（不再涉及 group/steps 编辑）。
+   *  turnId 可选：重启/历史恢复的计划卡没有 pendingPlan，需显式传入
+   *  才能操作（否则按钮点击被静默短路，点了没反应）。 */
+  confirmPlanTurn: (accepted: boolean, turnId?: number) => Promise<void>;
   /** v15: 重试失败/已取消的步骤。 */
   retryTask: (taskId: number) => Promise<void>;
-  dismissPlan: () => void;
+  /** 取消方案（落库版）：= confirmPlanTurn(false)，重启后卡片按钮不复活。 */
+  dismissPlan: (turnId?: number) => void;
   respondApproval: (approvalId: string, approved: boolean, remember?: boolean, answer?: Record<string, unknown>, rememberScope?: "session" | "global") => void;
   /** plan-238-1188: 提问向导作答草稿写回（null 清空）。 */
   setQuestionDraft: (draft: { approvalId: string; stepIndex: number; answers: Record<string, string> } | null) => void;
+  /** plan-75-332: 请求 AI 解释当前审批项（骨架先显示，内容流式填充）。 */
+  explainApproval: (approvalId: string) => void;
+  /** plan-75-332: 清空解释状态（审批结束/取消/卡片卸载时调用）。 */
+  resetApprovalExplain: () => void;
   markFileReviewed: (path: string, reviewed: boolean) => void;
   /** v11: 拉取指定 turn 的变更审核清单。 */
   loadTurnChanges: (turnId: number) => Promise<void>;
@@ -458,6 +474,8 @@ resumeTurn: () => Promise<void>;
   setFlowError: (text: string, turnId?: number | null) => void;
   /** plan-308-1542 需求1：清除消息流错误卡（新一轮开始 / 用户关闭）。 */
   clearFlowError: () => void;
+  /** plan-41-228：关闭末尾错误卡时联动隐藏对应 turn 内的 ERROR 消息（同一条错误只呈现一次）。 */
+  dismissTurnError: (turnId: number | null) => void;
   /** plan-308-1542 需求3-A：写入/追加 AI 合并进度（merge.progress 事件消费点）。 */
   applyMergeProgress: (payload: Record<string, unknown>) => void;
   /** 重置合并进度（打开合并弹窗时）。 */
@@ -751,6 +769,37 @@ function _mergeMessages(existing: MessageOut[], fetched: MessageOut[]): MessageO
   return [...out.values()].sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
 }
 
+/** plan-41-198: 快照刷新的安全合并——DB 结果为准，但保留「请求发起后才在本地出现」的消息。
+ *
+ *  背景（用户反馈「排队消息自动发送后不显示，重新进会话又出现」）：
+ *  turn.completed 先发 refreshMessages（DB 快照），紧接着 _drainQueue 续发排队消息
+ *  （乐观插入本地 + WS 落库回填）。快照若在续发落库前取到，响应一到整体覆盖
+ *  就把刚插入的消息抹掉——只有切走再回（走只增合并）才重新出现。
+ *
+ *  baseIds = 请求发起时本地已确认消息（id ≤ 1e12）的 id 集合，用于区分两种情况：
+ *  · 不在 baseIds 且 DB 结果里没有 ⇒ 请求期间新增（乐观消息或刚落库），保留；
+ *  · 在 baseIds 但 DB 结果里没有 ⇒ 确已删除（回滚等），丢弃——不可退化为只增不减。
+ */
+function _mergeRefreshed(existing: MessageOut[], fetched: MessageOut[], baseIds: Set<number>): MessageOut[] {
+  const out = new Map<number, MessageOut>();
+  for (const m of fetched) {
+    const id = Number(m.id) || 0;
+    if (id > 0 && id <= 1e12) out.set(id, m);
+  }
+  for (const m of existing) {
+    const id = Number(m.id) || 0;
+    if (id > 1e12) {
+      // 乐观占位：DB 已落库则替换为真实消息，否则保留等待落库
+      const replaced = fetched.find((fm) => fm.sender_type === "user" && _sameUserContent(fm.content, m.content));
+      if (replaced && Number(replaced.id) > 0) out.set(Number(replaced.id), replaced);
+      else out.set(id, m);
+    } else if (!out.has(id) && !baseIds.has(id)) {
+      out.set(id, m); // 请求期间新增（快照尚未包含）：保留，避免被覆盖丢失
+    }
+  }
+  return [...out.values()].sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
+}
+
 /** v967: cached 切回时刷新 messages（DB 最新），与快照去重合并——补齐切走期间已落库但未收到广播的消息。 */
 async function refreshAndMergeMessages(sessionId: number): Promise<void> {
   const cur = useChatStore.getState();
@@ -792,6 +841,7 @@ function _resetSessionState(): Partial<ChatState> {
     arthasState: null,
     // plan-308-1542 需求1：切换会话时清空消息流错误卡（避免串到别的会话）
     flowError: null,
+    hiddenTurnErrors: [],
     // 合并进度属弹窗级瞬态，切会话一并清空
     mergeProgress: null,
     turnStatus: null,
@@ -799,6 +849,7 @@ function _resetSessionState(): Partial<ChatState> {
     lastCompact: null,
     pendingApproval: null,
     questionDraft: null,
+    approvalExplain: null,
     pendingPlan: null,
     pendingPlanTurn: null,
     plansByTurn: {},
@@ -818,7 +869,6 @@ function _resetSessionState(): Partial<ChatState> {
     pendingSubagents: 0,
     scrollTarget: null,
     queuedInputs: [],
-    injectMarks: [],
   };
 }
 
@@ -858,6 +908,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   lastCompact: null,
   pendingApproval: null,
   questionDraft: null,
+  approvalExplain: null,
   pendingPlan: null,
   pendingPlanTurn: null,
   plansByTurn: {},
@@ -877,7 +928,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pendingSubagents: 0,
   scrollTarget: null,
   queuedInputs: [],
-  injectMarks: [],
   composerBackfill: null,
   composerBrowserRefs: [],
   lastReasoningEffort: loadLastReasoning(),
@@ -885,6 +935,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   loading: false,
   error: null,
   flowError: null,
+  hiddenTurnErrors: [],
   mergeProgress: null,
   wsConnected: false,
   /** plan-278-1391: 同路径项目已归档提示（默认无）。 */
@@ -998,11 +1049,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       // plan-547: 模型与权限模式在创建时一次落准（避免事后 updateSession 竞态与 UI 不同步）
       // plan-676: 首页目标同样随创建一次落准
+      // plan-75-332: 权限模式 approval_mode 一并落准
       const session = await api.createSession({
         project_id: projectId,
         title,
         model_id: opts?.model_id ?? undefined,
         permission_mode: opts?.permission_mode ?? undefined,
+        approval_mode: opts?.approval_mode ?? undefined,
         goal_text: opts?.goal_text ?? undefined,
       });
       set((s) => ({ sessions: [session, ...s.sessions] }));
@@ -1255,6 +1308,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (active) await get().switchSession(active.id);
         else set({ currentSessionId: null, currentProjectId: null });
       }
+      // plan-41-233：右面板按会话分桶——会话删除后清掉它的桶（终端/浏览器实例随卸载回收）。
+      // 动态 import 避免 chat ↔ panel 静态循环依赖（与 store/ui.ts 的转发写法一致）。
+      void import("./panel")
+        .then(({ usePanelStore }) => usePanelStore.getState().dropBucket(sessionId))
+        .catch(() => { /* 清理失败不阻塞删除流程 */ });
     } catch (e) {
       set({ error: String(e) });
     }
@@ -1387,10 +1445,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   confirmPlan: async (task) => {
     const { currentSessionId } = get();
     if (!currentSessionId || !task.trim()) return;
-    // 确认执行 = 授权完全访问：先切换会话权限再发送执行 turn，避免 plan 权限拦截写盘
+    // 确认执行 = 授权执行：先把会话切到 agent（智能体模式，plan-75-332：
+    // 原 accept_edits 已取消），避免 plan 权限拦截写盘
     try {
-      await api.updateSession(currentSessionId, { permission_mode: "accept_edits" });
-      set((s) => ({ sessions: s.sessions.map((x) => (x.id === currentSessionId ? { ...x, permission_mode: "accept_edits" } : x)) }));
+      await api.updateSession(currentSessionId, { permission_mode: "agent" });
+      set((s) => ({ sessions: s.sessions.map((x) => (x.id === currentSessionId ? { ...x, permission_mode: "agent" } : x)) }));
     } catch { /* 权限切换失败不阻断发送 */ }
     const pending = get().pendingPlan;
     if (pending?.turnId != null) {
@@ -1416,36 +1475,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
     await get().sendTurn(task);
   },
 
-  dismissPlan: () => {
-    const pending = get().pendingPlan;
-    if (pending?.turnId != null) {
-      const tid = pending.turnId;
-      set((s) => ({
-        plansByTurn: {
-          ...s.plansByTurn,
-          [tid]: {
-            ...s.plansByTurn[tid],
-            turnId: tid,
-            task: pending.task,
-            planDocPath: pending.planDocPath || s.plansByTurn[tid]?.planDocPath || "",
-            status: "cancelled",
-          },
-        },
-      }));
-    }
-    set({ pendingPlan: null, pendingPlanTurn: null });
-    const { currentSessionId } = get();
-    if (currentSessionId != null) {
-      const slice = _snapshotSlice(get());
-      set((s) => ({ sessionState: { ...s.sessionState, [currentSessionId]: slice } }));
-    }
+  dismissPlan: (turnId?: number) => {
+    // 计划卡取消必须落库（复用确认接口 accepted=false 的"停止任务"语义）：
+    // 此前只改本地 plansByTurn，数据库 plan_status 仍停在 proposed，
+    // 重启/切回会话后卡片按真值恢复，"取消 / 确认执行"按钮复活。
+    void get().confirmPlanTurn(false, turnId);
   },
 
   /** v38 (plan-482): 确认/取消方案文档（不再涉及 group/steps）。 */
-  confirmPlanTurn: async (accepted) => {
+  confirmPlanTurn: async (accepted, turnId) => {
     const pending = get().pendingPlan;
-    if (!pending || pending.turnId == null) return;
-    const tid = pending.turnId;
+    // 计划卡动作不依赖 pendingPlan：显式 turnId 优先（重启/历史恢复的卡片
+    // pendingPlan 为 null，只依赖它会让按钮点击静默短路、点了没反应）。
+    const tid = turnId ?? pending?.turnId ?? null;
+    if (tid == null) return;
+    const card = get().plansByTurn[tid];
+    const taskTitle = pending?.task ?? card?.task ?? "任务执行计划";
+    const docPath = pending?.planDocPath || card?.planDocPath || "";
     // 更新 plansByTurn 对应卡片的状态为 confirmed 或 cancelled，保留卡片在时间线上
     set((s) => ({
       plansByTurn: {
@@ -1453,8 +1499,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         [tid]: {
           ...s.plansByTurn[tid],
           turnId: tid,
-          task: pending.task,
-          planDocPath: pending.planDocPath || s.plansByTurn[tid]?.planDocPath || "",
+          task: taskTitle,
+          planDocPath: docPath || s.plansByTurn[tid]?.planDocPath || "",
           status: accepted ? "confirmed" : "cancelled",
         },
       },
@@ -1481,11 +1527,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set((s) => ({ sessionState: { ...s.sessionState, [currentSessionId]: slice } }));
     }
     try {
-      const res = await api.confirmPlanTurn(pending.turnId, { accepted });
+      const res = await api.confirmPlanTurn(tid, { accepted });
       const pm = res?.permission_mode;
-      if (pm === "accept_edits" || pm === "plan" || pm === "readonly" || pm === "default") {
+      // plan-75-332: 后端返回的已是新语义（agent / plan / readonly），
+      // 统一走 normalizeDraftMode 归一化（兼容旧版后端返回的 accept_edits）。
+      if (pm === "agent" || pm === "plan" || pm === "readonly" || pm === "default" || pm === "accept_edits") {
         if (currentSessionId != null) {
-          set((s) => ({ sessions: s.sessions.map((x) => (x.id === currentSessionId ? { ...x, permission_mode: pm } : x)) }));
+          const nextMode = normalizeDraftMode(pm);
+          set((s) => ({ sessions: s.sessions.map((x) => (x.id === currentSessionId ? { ...x, permission_mode: nextMode } : x)) }));
         }
       }
       // v42: 计划「确认执行」→ 输入框显式切回完全访问（唯一允许的自动切换，其余情况不再自动改模式）
@@ -1506,7 +1555,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           set({ isRunning: false, runningTurnId: null });
         }
         // plan-308-1542 需求1：计划确认/执行失败属任务执行类——只进消息流
-        get().setFlowError(msg, pending.turnId ?? null);
+        get().setFlowError(msg, tid);
       }
     }
   },
@@ -1533,11 +1582,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ...(answer ? { answer } : {}),
     });
     // 本地立即关闭横幅，避免等待广播返回造成的 UI 延迟
-    set({ pendingApproval: null, questionDraft: null });
+    // plan-75-332: 一并清掉解释内容（本次审批已结束，保留下来只会串到下个审批卡）
+    set({ pendingApproval: null, questionDraft: null, approvalExplain: null });
   },
 
   /** plan-238-1188: 提问向导作答草稿写回（切设置页/换会话后仍可恢复）。 */
   setQuestionDraft: (draft) => set({ questionDraft: draft }),
+
+  /** plan-75-332: 请求 AI 解释审批项。立即置 loading（UI 立刻出骨架），
+   *  内容由 approval.explain.delta/done/error 事件补充。 */
+  explainApproval: (approvalId) => {
+    set({ approvalExplain: { approvalId, status: "loading", text: "", error: null } });
+    wsClient.send("approval.explain", { approval_id: approvalId });
+  },
+
+  /** plan-75-332: 清空解释状态（含增量缓冲，避免下个审批卡复用残留文本）。 */
+  resetApprovalExplain: () => { if (get().approvalExplain) set({ approvalExplain: null }); },
 
   markFileReviewed: (path, reviewed) => {
     set((s) => {
@@ -1597,6 +1657,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       pendingSubagents: 0,
       pendingApproval: null,
       questionDraft: null,
+      approvalExplain: null,
       sessions: s.sessions.map((x) => (x.id === s.currentSessionId ? setSessionRunning(x, false) : x)),
     }));
     // 取消接口有专用短超时；失败不覆盖已经完成的本地停止。
@@ -1648,17 +1709,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
       for (const k of Object.keys(nextChanges)) {
         if (Number(k) >= turnId) delete nextChanges[Number(k)];
       }
+      // S16（plan-41-197）：撤回回填恢复引用 chips——发送时 refs 被拼装成
+      // 「引用文件：/ 使用技能：/ 使用连接器：/ 使用插件：」可读行追加在正文后；
+      // 撤回时解析回结构化 refs，输入框恢复 chips 样式（不再只剩纯文本）。
+      const rawText = result.user_message ?? "";
+      const restoredRefs: Array<{ kind: string; value: string; label: string }> = [];
+      const bodyLines: string[] = [];
+      const _kindMap: Record<string, string> = {
+        "引用文件": "file", "使用技能": "skill", "使用连接器": "mcp", "使用插件": "plugin",
+      };
+      for (const line of rawText.split("\n")) {
+        const m = line.match(/^(引用文件|使用技能|使用连接器|使用插件)：(.*)$/);
+        if (!m) { bodyLines.push(line); continue; }
+        const kind = _kindMap[m[1]];
+        for (const part of m[2].split("、")) {
+          const v = part.trim();
+          if (!v) continue;
+          const value = kind === "file" ? v.replace(/^@/, "") : kind === "skill" ? v.replace(/^\$/, "") : v;
+          restoredRefs.push({ kind, value, label: value });
+        }
+      }
+      const restoredText = bodyLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
       set({
         messages, turns, tasks,
         turnChanges: nextChanges,
         isRunning: false, runningTurnId: null,
         // 回填原文与附件到「本会话」输入框，供用户修改后重发（v40: 按 key 隔离，不串扰首页/其它会话）
-        ...(restoreToComposer && (result.user_message || restoredAttachments.length > 0)
+        ...(restoreToComposer && (restoredText || restoredAttachments.length > 0 || restoredRefs.length > 0)
           ? {
               composerBackfill: {
                 key: String(currentSessionId),
-                text: result.user_message ?? "",
+                text: restoredText,
                 attachments: restoredAttachments,
+                refs: restoredRefs,
               },
             }
           : {}),
@@ -1742,10 +1825,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
   refreshMessages: async () => {
     const { currentSessionId } = get();
     if (!currentSessionId) return;
+    // plan-41-198: 请求发起前记录本地已确认消息 id——区分「请求期间新增」与「已被删除」
+    const baseIds = new Set(
+      get().messages.filter((m) => (Number(m.id) || 0) <= 1e12).map((m) => Number(m.id)),
+    );
     try {
       const messages = await api.listSessionMessages(currentSessionId);
       if (get().currentSessionId !== currentSessionId) return;
-       set({ messages });
+      set((s) => ({ messages: _mergeRefreshed(s.messages, messages, baseIds) }));
     } catch (e) {
       set({ error: String(e) });
     }
@@ -1820,6 +1907,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   clearError: () => set({ error: null }),
   setFlowError: (text, turnId = null) => set({ flowError: { text: String(text), turnId, at: Date.now() } }),
   clearFlowError: () => set({ flowError: null }),
+  // plan-41-228：末尾错误卡关闭 → 同步隐藏该 turn 内的 ERROR 消息（同一条错误只呈现一次）
+  dismissTurnError: (turnId) => {
+    if (turnId == null || get().hiddenTurnErrors.includes(turnId)) return;
+    set((s) => ({ hiddenTurnErrors: [...s.hiddenTurnErrors, turnId] }));
+  },
   resetMergeProgress: () => set({ mergeProgress: null }),
   applyMergeProgress: (payload) => set((s) => {
     // plan-308-1542 需求3-A：把 merge.progress 累积成"像消息流一样"的进度行。
@@ -2039,44 +2131,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
               delete newStreaming[sid];
             }
           }
-          // v42: 注入分割标记（见 InjectMark）——注入的用户消息快照流式中的 agent；
-          // 该流式段（思考/正文）落库时绑定 crossoverId，渲染层据此做时间分割
-          let newMarks = state.injectMarks;
-          if (isUserMsg && state.isRunning && rawMsg.turn_id != null && rawMsg.turn_id === state.runningTurnId) {
-            // 注入判定：本条之前该 turn 已有用户消息（首条为触发消息，后续为注入）
-            const hadUser = state.messages.some(
-              (m) => m.sender_type === "user" && m.turn_id === state.runningTurnId,
-            );
-            const pendingAgents = [
-              ...Object.entries(state.streamingBuffers).filter(([, v]) => v).map(([k]) => Number(k)),
-              ...Object.entries(state.thinkingBuffers).filter(([, v]) => v).map(([k]) => Number(k)),
-            ];
-            if (hadUser && pendingAgents.length > 0) {
-              newMarks = [...state.injectMarks, {
-                turnId: state.runningTurnId,
-                injectId: rawMsg.id,
-                pendingAgents,
-                crossoverId: null,
-              }];
-            }
-          } else if (!isUserMsg && sid) {
-            // AI 思考/正文落库 -> 若存在注入时刻流式中的 pending 标记，本条即跨界段
-            const mt = String(rawMsg.msg_type ?? "");
-            const isStreamMsg = mt === "text" || mt === "thinking" || isThinking;
-            if (state.isRunning && rawMsg.turn_id === state.runningTurnId && isStreamMsg
-              && state.injectMarks.some((mk) => mk.crossoverId == null && mk.pendingAgents.includes(sid))) {
-              newMarks = state.injectMarks.map((mk) =>
-                mk.crossoverId == null && mk.pendingAgents.includes(sid)
-                  ? { ...mk, crossoverId: rawMsg.id, pendingAgents: [] }
-                  : mk,
-              );
-            }
-          }
           return {
             messages: newMessages,
             streamingBuffers: newStreaming,
             thinkingBuffers: newThinking,
-            injectMarks: newMarks,
           };
         });
         break;
@@ -2109,8 +2167,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
             turnStatus: null,
             // plan-308-1542 需求1：新一轮开始即清掉上一轮的消息流错误卡
             flowError: null,
-            // v42: 新 turn 清空上一 turn 的注入分割标记（渲染回归纯 id 序）
-            injectMarks: [],
             // v26: 新 turn 开始 = 旧方案提案失效，隐藏旧方案卡片（task.proposed 后再展示新卡片）
             pendingPlan: null,
             pendingPlanTurn: null,
@@ -2327,9 +2383,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break;
       }
       case "subagent.pending": {
-        // v39: 后台子代理运行数变化——>0 时主会话保持“运行中”并显示「等待子代理结束…」；
-        // =0 且主 turn 未运行时摘除（子代理全部结束的兜底复位；待后续唤醒轮
-        // 由 subagent.wakeup/turn.started 接管运行态）。
+        // v39: 后台子代理运行数变化——>0 时主会话保持“运行中”并显示「等待子代理结束…」。
+        // v44 修复（左侧转圈在子代理流程后消失）：=0 时**不再直接摘除运行标记**——
+        // 主代理收工等待子代理、以及「子代理全部结束 → 唤醒轮启动」之间的窗口内，
+        // isRunning 可能已是 false（如等待态），此时摘除会让转圈提前消失，
+        // 且此后没有事件把它恢复（表现为“AI 还在跑但左侧不转圈”）。
+        // 摘除统一交给权威事件：session.completed（含服务端空闲兜底补发）/
+        // subagent.wakeup（唤醒轮接管）/ turn.started。
         const pSid = Number((payload as { session_id?: unknown }).session_id ?? 0);
         const pCount = Math.max(0, Number((payload as { pending?: unknown }).pending ?? 0));
         set((s) => {
@@ -2337,16 +2397,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return {
             ...(isCurrent ? { pendingSubagents: pCount } : {}),
             sessions: s.sessions.map((x) => (x.id === pSid
-              ? (pCount > 0 ? setSessionRunning(x, true)
-                : (isCurrent && s.isRunning ? x : setSessionRunning(x, false)))
+              ? (pCount > 0 ? setSessionRunning(x, true) : x)
               : x)),
           };
         });
         break;
       }
       case "subagent.wakeup": {
-        // v39: 子代理完成唤醒——服务端已创建新一轮（完成报告随该轮送达主代理），
-        // 运行态由随后的 turn.started 接管，此处无需额外处理。
+        // v39: 子代理完成唤醒——服务端已创建新一轮（完成报告随该轮送达主代理）。
+        // v44 修复：这里立即接管运行态，而不是只等随后的 turn.started——
+        // 唤醒轮创建与 start_turn 之间存在延迟窗口，期间若无运行标记，
+        // 左侧转圈会短暂/永久消失（turn.started 一旦丢失便再无恢复事件）。
+        const wakeSid = Number((payload as { session_id?: unknown }).session_id ?? 0);
+        const wakeTurnId = Number((payload as { turn_id?: unknown }).turn_id ?? 0) || null;
+        if (wakeSid) {
+          set((s) => ({
+            ...(wakeSid === s.currentSessionId
+              ? { isRunning: true, runningTurnId: s.runningTurnId ?? wakeTurnId }
+              : {}),
+            sessions: s.sessions.map((x) => (x.id === wakeSid ? setSessionRunning(x, true) : x)),
+          }));
+        }
         break;
       }
       case "agent.started": {
@@ -2765,20 +2836,75 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       case "approval.response":
         // 审批结果广播回前端（含其他窗口），关闭本地审批横幅
-        set({ pendingApproval: null, questionDraft: null });
+        // plan-75-332: 一并清掉解释内容（本次审批已结束，保留只会串到下个审批卡）
+        set({ pendingApproval: null, questionDraft: null, approvalExplain: null });
         break;
+      case "approval.explain.delta": {
+        // plan-75-332: 解释流式增量。按 approvalId 严格过滤——审批已被处理时
+        // 后端仍可能推送尾部事件，不过滤会把内容写到已消失的卡片（下次审批复活）。
+        const cur = get().approvalExplain;
+        const aid = String(payload.approval_id ?? "");
+        if (cur && aid && cur.approvalId === aid) {
+          set({
+            approvalExplain: {
+              ...cur,
+              status: "streaming",
+              text: cur.text + String(payload.delta ?? ""),
+            },
+          });
+        }
+        break;
+      }
+      case "approval.explain.done": {
+        const cur = get().approvalExplain;
+        const aid = String(payload.approval_id ?? "");
+        if (cur && aid && cur.approvalId === aid) {
+          set({
+            approvalExplain: {
+              ...cur,
+              status: "done",
+              text: String(payload.text ?? cur.text),
+              model: typeof payload.model === "string" ? payload.model : undefined,
+              reasoningEffort:
+                typeof payload.reasoning_effort === "string" ? payload.reasoning_effort : undefined,
+            },
+          });
+        }
+        break;
+      }
+      case "approval.explain.error": {
+        const cur = get().approvalExplain;
+        const aid = String(payload.approval_id ?? "");
+        if (cur && aid && cur.approvalId === aid) {
+          set({
+            approvalExplain: {
+              ...cur,
+              status: "error",
+              error: String(payload.message ?? "解释失败，请重试"),
+            },
+          });
+        }
+        break;
+      }
       case "session.updated": {
         const sid = Number(payload.session_id ?? 0);
         const title = typeof payload.title === "string" ? payload.title : null;
         // v2.2 (plan-88): 执行结束后后端恢复 plan 模式 → 同步 permission_mode，
         // ComposerCore 据此把输入框切回「计划模式」。
         const pm = payload.permission_mode;
-        const permissionMode: "plan" | "default" | "accept_edits" | "readonly" | null =
-          pm === "plan" || pm === "default" || pm === "accept_edits" || pm === "readonly" ? pm : null;
-        if (sid > 0 && (title || permissionMode)) {
+        // plan-75-332: 执行模式新三档（agent/plan/readonly）；旧值 default/accept_edits
+        // 经 normalizeDraftMode 归一化，避免会话里留下菜单选不中的脏值。
+        const permissionMode = typeof pm === "string" && pm ? normalizeDraftMode(pm) : null;
+        // plan-75-332: 权限模式同步（多窗口/多端场景下其他端改动要跟随）
+        const am = payload.approval_mode;
+        const approvalMode = typeof am === "string" && am ? normalizeApprovalMode(am) : null;
+        if (sid > 0 && (title || permissionMode || approvalMode)) {
           set((s) => ({
             sessions: s.sessions.map((x) => (x.id === sid
-              ? { ...x, ...(title ? { title } : {}), ...(permissionMode ? { permission_mode: permissionMode } : {}) }
+              ? { ...x,
+                  ...(title ? { title } : {}),
+                  ...(permissionMode ? { permission_mode: permissionMode } : {}),
+                  ...(approvalMode ? { approval_mode: approvalMode } : {}) }
               : x)),
           }));
         }
@@ -2879,13 +3005,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const event = ev.event as ServerEventName;
       if (event === "session.completed") {
         const ts = typeof p.last_activity_at === "string" ? p.last_activity_at : null;
+        // v44 修复（左侧转圈在子代理流程后消失）：与会话级通道同口径——后台子代理
+        // 仍在跑（subagent_pending>0）时必须保持运行标记。此前这里无条件摘除，
+        // 与会话级通道（按 pending 保持）对同一事件的处理互相打架：两条 WS 到达
+        // 顺序不定，全局后到就会把转圈摘掉，且此后全局通道没有任何恢复事件
+        // （turn.started / subagent.* 均不转发），侧栏长时间停在“空闲”假象。
+        const subPending = Math.max(0, Number(p.subagent_pending ?? 0));
         set((s) => {
           if (!s.sessions.some((x) => x.id === sid)) return {};
           return {
             sessions: s.sessions.map((x) => (x.id === sid
-              ? { ...setSessionRunning(x, false), ...(ts ? { last_activity_at: ts } : {}) }
+              ? { ...setSessionRunning(x, subPending > 0), ...(ts ? { last_activity_at: ts } : {}) }
               : x)),
             ...(s.currentSessionId === sid ? { isRunning: false, runningTurnId: null } : {}),
+          };
+        });
+        return;
+      }
+      // v44 修复：运行态**恢复**分支——后台会话的新轮启动（turn.started）/ 子代理唤醒
+      // （subagent.wakeup）/ 子代理开始运行（subagent.pending>0）/ turn 回到 running
+      // 时同步置位运行标记。只置位、不清除：摘除统一由 session.completed 权威事件
+      // 负责（含服务端空闲兜底补发），避免多条通道对同一会话互相覆盖。
+      if (event === "turn.started" || event === "subagent.wakeup"
+          || (event === "turn.updated" && p.status === "running")
+          || (event === "subagent.pending" && Number(p.pending ?? 0) > 0)) {
+        set((s) => {
+          if (!s.sessions.some((x) => x.id === sid)) return {};
+          return {
+            sessions: s.sessions.map((x) => (x.id === sid ? setSessionRunning(x, true) : x)),
           };
         });
         return;
@@ -2894,14 +3041,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const title = typeof p.title === "string" ? p.title : null;
         const ts = typeof p.last_activity_at === "string" ? p.last_activity_at : null;
         const pm = p.permission_mode;
-        const permissionMode = pm === "plan" || pm === "default" || pm === "accept_edits" || pm === "readonly" ? pm : null;
-        if (!title && !ts && !permissionMode) return;
+        // plan-75-332: 执行模式新三档（agent/plan/readonly）——旧值经归一化，
+        // 避免侧栏会话留下模式菜单选不中的脏值。
+        const permissionMode = typeof pm === "string" && pm ? normalizeDraftMode(pm) : null;
+        // plan-75-332: 权限模式同步（后台会话改权限后侧栏/输入框要跟随）
+        const am = p.approval_mode;
+        const approvalMode = typeof am === "string" && am ? normalizeApprovalMode(am) : null;
+        if (!title && !ts && !permissionMode && !approvalMode) return;
         set((s) => {
           if (!s.sessions.some((x) => x.id === sid)) return {};
           return {
             sessions: s.sessions.map((x) => (x.id === sid
               ? { ...x, ...(title ? { title } : {}), ...(ts ? { last_activity_at: ts } : {}),
-                  ...(permissionMode ? { permission_mode: permissionMode } : {}) }
+                  ...(permissionMode ? { permission_mode: permissionMode } : {}),
+                  ...(approvalMode ? { approval_mode: approvalMode } : {}) }
               : x)),
           };
         });

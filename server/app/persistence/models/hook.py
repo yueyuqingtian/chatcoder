@@ -1,4 +1,4 @@
-"""钩子配置（D5，Claude Code 风格）。"""
+"""钩子配置（D5，Claude Code 风格；S12 / plan-41-197 支持提示词注入型）。"""
 from sqlalchemy import BigInteger, Boolean, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -10,6 +10,10 @@ class HookConfig(Base):
 
     id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
     event: Mapped[str] = mapped_column(String(40), nullable=False)  # pre_tool_use / post_tool_use / ...
-    command: Mapped[str] = mapped_column(String(500), nullable=False)  # 要执行的 shell 命令（JSON stdin）
+    command: Mapped[str] = mapped_column(String(500), nullable=False, default="")  # 命令型：要执行的 shell 命令（JSON stdin）
     matcher: Mapped[str | None] = mapped_column(String(120))  # 可选匹配器（如 tool 名过滤）
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # ── S12（plan-41-197）：动作类型与注入提示词 ──
+    #   command = 执行外部脚本（原行为）；prompt = 不执行脚本，直接把文本注入给 AI。
+    hook_type: Mapped[str] = mapped_column(String(20), default="command", nullable=False)
+    prompt: Mapped[str | None] = mapped_column(String(2000))

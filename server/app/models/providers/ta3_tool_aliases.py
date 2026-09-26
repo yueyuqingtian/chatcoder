@@ -16,6 +16,9 @@
     TaskCancel    → cancel_subagent(taskId→agent_id)
   并**取消**此前 SubAgent 的 explore 强制同步：改按 subagent_type 决定
   （Explore → 只读同步探索；其余/缺省 → 后台异步），使 ta3 模型真正能用上并行子代理。
+- plan-73-322: SubAgentAsync 入站补透传只读语义（subagent_type=Explore → explore=True
+  + background=True，即「只读 + 异步」）；配套在 disguise_tools 侧把 SubAgentAsync 真正
+  下发给模型——此前一对一出站映射使它从未暴露，「只读调研不阻塞」在模型侧无法表达。
 """
 from __future__ import annotations
 
@@ -30,7 +33,7 @@ TO_TA3: dict[str, str] = {
     "terminal_exec": "Bash",           # command/waitForCompletion ✓
     "web_search": "WebSearch",         # query ✓
     "todo_write": "TodoWrite",         # todos ✓
-    "spawn_subagent": "SubAgent",      # 参数适配 + 强制同步探索
+    "spawn_subagent": "SubAgent",      # 参数适配（explore/background 按 subagent_type 还原）
     "memory_search": "get_project_memory",  # query ✓
     # plan-147-674: 附件/图片读取工具——ta3 参考项目无对应工具，但缺失会导致
     # 多模态图片只能用 Read 读二进制、docx/pdf 附件完全无法解析，故补充伪装名
@@ -201,6 +204,10 @@ def restore_args(ta3_name: str, args: dict) -> dict:
     if ta3_name == "SubAgentAsync":
         # ta3 异步派发 → 本项目后台子代理（立即返回，完成时自动推送）
         out["background"] = True
+        # plan-73-322: 补透传只读语义——subagent_type=Explore 表示只读调研，须同时置 explore，
+        # 否则会被派发成可写子代理（全工具），与「Explore=只读」约定不符。
+        if str(args.get("subagent_type") or "").strip().lower() == "explore":
+            out["explore"] = True
     elif ta3_name == "SubAgent":
         # v36: 按 ta3 给出的 subagent_type 决定同步/异步——
         # Explore → 只读同步探索（主代理直接拿结论）；其余/缺省 → 后台异步并行。

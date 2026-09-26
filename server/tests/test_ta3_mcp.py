@@ -156,11 +156,16 @@ def _write_profiles(tmp_path, monkeypatch, profiles):
 
 
 def test_mcp_allowed_tools_default_unrestricted(tmp_path, monkeypatch):
-    """default / accept_edits（空列表 = 全量）→ None（不限制，全量注入）。"""
+    """agent（空列表 = 全量）→ None（不限制，全量注入）。
+
+    plan-75-332: 内置模式改为 agent / readonly / plan；旧值 default、accept_edits
+    由 _canonical 归一化到 agent，仍返回 None（存量会话不因改名而收紧工具）。
+    """
     _write_profiles(tmp_path, monkeypatch, [])
+    assert pps.mcp_allowed_tools("agent") is None
     assert pps.mcp_allowed_tools("default") is None
     assert pps.mcp_allowed_tools("accept_edits") is None
-    # 未识别的模式名按 None 处理（engine 侧按 default 语义）
+    # 未识别的模式名按 None 处理（engine 侧按默认语义）
     assert pps.mcp_allowed_tools("no_such_mode") is None
 
 

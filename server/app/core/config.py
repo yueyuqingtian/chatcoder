@@ -112,26 +112,31 @@ class Settings(BaseSettings):
     symbol_index_auto_update: bool = True
 
     # v3.0 (plan-88): 计划模式是否允许访问工作区外路径。
-    # 默认关闭：plan 模式下 terminal_exec 的 cwd 被限制在工作区内，越界静默回退。
-    # 开启后 plan 会话中的命令可以访问工作区外目录（执行记录标记 outside_access 供审计）。
+    # plan-75-332：**已废弃**——cwd 越界限制已取消（工具自身不再限制），
+    # 越界访问是否需询问由权限模式统一裁决。字段保留仅为兼容旧配置文件，
+    # 不参与任何判定。
     plan_mode_allow_outside_access: bool = False
 
-    # v32 (plan-89): 沙箱模式（设置中心「常规」可配置，config.json 持久化）——
-    # 三态：workspace-write 默认走审批门；read-only 拒绝写盘与高危命令（最高优先级，
-    # 即使自动批准也不可绕过）；danger-full-access 免审批卡。
-    # 与现有设置的关系：danger-full-access / auto_approve_tools 均尊重
-    # force_approval_tools（"始终需要审批的工具"是最高例外，仍弹审批卡）。
-    # 生效优先级：项目 .chatcoder/config.toml 或 profile 显式配置 > 此处全局设置。
+    # v32 (plan-89): 沙箱模式。
+    # plan-75-332：**已废弃**——三态沙箱的硬边界已被「执行模式×权限模式」取代
+    # （read-only 归执行模式，danger-full-access 归权限模式的「完全访问」）。
+    # 字段保留仅为兼容旧配置文件与既有赋值位，不参与任何判定。
     sandbox_mode: str = "workspace-write"
 
     # v36 (plan-321-1600 R2): 工作目录外读取的自动审批开关。
-    # 关闭（默认）：fs_read/fs_list/fs_grep 读工作区外路径时弹审批卡；
-    # 开启：直接放行（不再弹卡）；完全访问沙箱（danger-full-access）无论开关如何都免审。
+    # plan-75-332：**已废弃**——越界读取不再由工具弹卡，改由权限模式裁决。
+    # 字段保留仅为兼容旧配置文件，不参与任何判定。
     auto_approve_outside_read: bool = False
 
     # v36 (plan-321-1600 R3): ta3 额度自动透支——模型请求报错时查一次额度，
     # 日额度 >=100% 时自动尝试透支一次（带冷却；日额度后透支本周额度）。
     auto_overdraft_on_quota_exceeded: bool = False
+
+    # plan-75-332: 审批解释专用模型 / 专用思考深度（设置中心「执行策略 → 审批解释」）。
+    # 空值 = 跟随会话（会话模型 + 会话思考深度）；非空则覆盖，用于把解释这类
+    # 轻量分析交给更快/更便宜的模型。
+    approval_explain_model_id: int | None = None
+    approval_explain_reasoning_effort: str = ""
 
     # v46: ta3 额度自动重置——模型请求报错时查一次额度，某窗口 >=100% 时自动提交一次
     # 重置（周/月窗走 /quota/reset，日窗无重置能力则退化为透支）。与上面的自动透支

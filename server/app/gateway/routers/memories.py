@@ -53,6 +53,23 @@ async def delete_memory(memory_id: int, db: AsyncSession = Depends(get_db)):
     return {"ok": True}
 
 
+class MemoryUpdate(BaseModel):
+    text: str | None = None
+    kind: str | None = None
+
+
+@router.patch("/{memory_id}", response_model=dict)
+async def update_memory(memory_id: int, body: MemoryUpdate, db: AsyncSession = Depends(get_db)):
+    """编辑记忆文本/类型（S8 / plan-41-197）。编辑即人工确认，候选标记随之清除。"""
+    try:
+        ok = await memory_service.update_memory(db, memory_id, text=body.text, kind=body.kind)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not ok:
+        raise HTTPException(404, "记忆不存在")
+    return {"ok": True}
+
+
 @router.post("/consolidate", response_model=dict)
 async def consolidate(session_id: int, project_id: int, db: AsyncSession = Depends(get_db)):
     """整合记忆 → 写 MEMORY.md。"""

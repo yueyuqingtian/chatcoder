@@ -19,15 +19,24 @@ async def list_hooks(db: AsyncSession) -> list[HookConfig]:
     return list(res.scalars().all())
 
 
-async def create_hook(db: AsyncSession, *, event: str, command: str,
-                      matcher: str | None = None, enabled: bool = True) -> int:
+async def create_hook(db: AsyncSession, *, event: str, command: str = "",
+                      matcher: str | None = None, enabled: bool = True,
+                      hook_type: str = "command", prompt: str | None = None) -> int:
+    """S12（plan-41-197）：hook_type 支持 command（执行脚本）与 prompt（向 AI 注入提示词）。"""
     from app.persistence.database import run_write_locked
 
     if event not in [e.value for e in HookEvent]:
         raise ValueError(f"未知钩子事件: {event}")
+    if hook_type not in ("command", "prompt"):
+        raise ValueError("hook_type 必须为 command 或 prompt")
+    if hook_type == "command" and not (command or "").strip():
+        raise ValueError("命令型钩子必须提供 command")
+    if hook_type == "prompt" and not (prompt or "").strip():
+        raise ValueError("提示词型钩子必须提供 prompt")
 
     def patch(s):
-        hook = HookConfig(event=event, command=command, matcher=matcher, enabled=enabled)
+        hook = HookConfig(event=event, command=command or "", matcher=matcher, enabled=enabled,
+                          hook_type=hook_type, prompt=prompt)
         s.add(hook)
         s.flush()
         hid = hook.id
@@ -81,6 +90,13 @@ async def run_hooks(db: AsyncSession, event: str, payload: dict,
     results: list[dict] = []
     for hook in matched:
         try:
+            # S12（plan-41-197）：提示词型钩子不执行脚本，直接产出注入文本（{"inject": ...}）；
+            # 命令型钩子保持原语义（stdin 传 payload、stdout 解析 JSON）。
+            if getattr(hook, "hook_type", "command") == "prompt":
+                text = (hook.prompt or "").strip()
+                if text:
+                    results.append({"inject": text, "hook_id": hook.id})
+                continue
             outcome = await _exec_hook(hook.command, payload)
             results.append(outcome)
             logger.info("[hook] event=%s cmd=%s decision=%s", event, hook.command, outcome.get("decision"))

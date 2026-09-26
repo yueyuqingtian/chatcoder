@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import subprocess
 import time
@@ -33,6 +34,13 @@ logger = logging.getLogger(__name__)
 _PLUGINS_ROOT = Path.home() / ".chatcoder" / "plugins"
 _REGISTRY_FILE = _PLUGINS_ROOT / "installed_plugins.json"
 _GIT_TIMEOUT = 120
+# plan-59-286：插件根目录下可能存在的 MCP 配置文件（与 plugin.json#mcpServers 二选一或并存）
+_MCP_FILES = (".mcp.json", "mcp.json")
+# 远端 MCP 的 type/protocol → 本机 transport（与 market_install 同口径）
+_MCP_TRANSPORT = {
+    "streamable_http": "http", "http": "http", "sse": "sse",
+    "websocket": "websocket", "stdio": "stdio",
+}
 
 
 def _root() -> Path:
@@ -93,7 +101,10 @@ def _manifest_to_out(manifest: dict, entry: dict | None, dir_path: Path) -> dict
         "tags": [str(t) for t in (manifest.get("tags") or [])],
         "keywords": [str(t) for t in (manifest.get("keywords") or [])],
         "marketplaceName": str(manifest.get("marketplaceName") or "local"),
-        "logo": str(manifest.get("logo") or ""),
+        # plan-284-1450：磁盘 manifest 不含市场图标与远端 id（只在安装时才知道），
+        # 故优先取注册表记录，再回退 manifest —— 否则扩展管理画不出真实图标。
+        "logo": str(manifest.get("logo") or (entry or {}).get("logo") or ""),
+        "marketId": str(manifest.get("marketId") or (entry or {}).get("marketId") or ""),
         "skillsDir": str(manifest.get("skills") or ""),
         "path": str(dir_path),
         "installed": entry is not None,
@@ -357,6 +368,164 @@ def list_marketplace() -> dict:
     return {"ok": True, "items": items, "installedCount": len(installed)}
 
 
+def _skill_md_meta(path: Path) -> dict:
+    """从 SKILL.md 读 front matter 的 description/trigger/tags，缺失时取首个正文段落。
+
+    plan-59-286：此前插件贡献技能的 description 一律写成空串，模型侧的技能清单里
+    就只剩技能名，完全无法判断"这个技能什么时候该用"。这里补上有效描述，
+    front matter 缺失时退到正文首个非标题段落（截 200 字）。
+    """
+    out: dict = {}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    lines = text.splitlines()
+    body_start = 0
+    if lines and lines[0].strip() == "---":
+        for i in range(1, min(len(lines), 80)):
+            line = lines[i]
+            if line.strip() == "---":
+                body_start = i + 1
+                break
+            m = re.match(r"\s*(description|trigger|tags)\s*:\s*(.*)$", line)
+            if m and m.group(2).strip():
+                out[m.group(1)] = m.group(2).strip().strip("\"'")
+    if not out.get("description"):
+        for line in lines[body_start:]:
+            s = line.strip()
+            if not s or s.startswith("#") or s.startswith("---"):
+                continue
+            out["description"] = s[:200]
+            break
+    return out
+
+
+def _mcp_specs(dir_path: Path, manifest: dict) -> list[tuple[str, dict, str]]:
+    """收集插件声明的 MCP 服务器，返回 [(name, spec, 来源), ...]。
+
+    兼容三种声明方式（真实插件三种都存在）：
+      1. plugin.json 内联对象：`"mcpServers": { "<name>": {command|url, args, env} }`
+      2. plugin.json 指向插件目录内的 json：`"mcpServers": "./.mcp.json"`
+      3. 插件根目录直接放 `.mcp.json` / `mcp.json`
+    """
+    out: list[tuple[str, dict, str]] = []
+    seen: set[str] = set()
+
+    def add(specs, source: str) -> None:
+        if not isinstance(specs, dict):
+            return
+        for raw_name, spec in specs.items():
+            name = str(raw_name or "").strip()
+            if not name or name in seen or not isinstance(spec, dict):
+                continue
+            seen.add(name)
+            out.append((name, spec, source))
+
+    def load(rel: str) -> dict | None:
+        try:
+            data = json.loads((dir_path / rel).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        inner = data.get("mcpServers")
+        return inner if isinstance(inner, dict) else data
+
+    decl = manifest.get("mcpServers")
+    if isinstance(decl, dict):
+        add(decl, "plugin.json#mcpServers")
+    elif isinstance(decl, str) and decl.strip():
+        data = load(decl.strip())
+        if data is not None:
+            add(data, decl.strip())
+    for cand in _MCP_FILES:
+        if (dir_path / cand).is_file():
+            data = load(cand)
+            if data is not None:
+                add(data, cand)
+    return out
+
+
+async def _register_contributed_mcp(db: AsyncSession, plugin_name: str, dir_path: Path,
+                                    manifest: dict) -> int:
+    """把插件声明的 MCP 服务器登记为连接器（source="plugin"）。
+
+    plan-59-286：文件头注释一直承诺"mcp.json → 其 MCP 出现在拓展-连接器"，
+    但此前**没有任何登记实现**（`plugin.json#mcpServers` 全仓无读取点），
+    于是装完插件后连接器页看不到任何东西。这里补齐这条链路。
+
+    安全前提：插件来自第三方，其 MCP 会执行指定命令或访问指定地址，
+    因此一律以 `is_active=False` 落库，由用户在「拓展 → 连接器」显式开启。
+    名称加 `<插件>:` 前缀，避免与用户自建或其它来源的连接器撞名。
+    """
+    specs = _mcp_specs(dir_path, manifest)
+    if not specs:
+        return 0
+
+    from sqlalchemy import select
+
+    from app.persistence.database import run_write_locked
+    from app.persistence.models.skill import McpServer
+
+    market = str(manifest.get("marketplaceName") or "local")
+
+    def patch(s) -> int:
+        created = 0
+        for name, spec, source_file in specs:
+            row_name = f"{plugin_name}:{name}"
+            url = str(spec.get("url") or "").strip()
+            command = str(spec.get("command") or "").strip()
+            if not url and not command:
+                continue  # 既无命令也无地址的声明无法落地
+            raw_type = str(spec.get("type") or spec.get("transport") or "").strip().lower()
+            transport = _MCP_TRANSPORT.get(raw_type) or ("http" if url else "stdio")
+            args = spec.get("args") if isinstance(spec.get("args"), list) else None
+            env = spec.get("env") if isinstance(spec.get("env"), dict) else None
+            meta = {
+                "plugin": plugin_name, "plugin_dir": str(dir_path),
+                "market": market, "source_file": source_file,
+            }
+            existing = s.execute(
+                select(McpServer).where(McpServer.name == row_name)
+            ).scalars().first()
+            if existing is not None:
+                # 幂等：刷新配置但**不动** is_active（尊重用户已做的开启/关闭选择）
+                existing.transport = transport
+                if url:
+                    existing.url = url
+                if command:
+                    existing.command = command
+                if args is not None:
+                    existing.args = args
+                if env is not None:
+                    existing.env = env
+                existing.meta = {**(existing.meta or {}), **meta}
+                continue
+            s.add(McpServer(
+                name=row_name,
+                display_name=name,
+                description=f"由插件「{plugin_name}」提供，安装后默认未启用",
+                source="plugin",
+                transport=transport,
+                command=command or None,
+                args=args,
+                env=env,
+                url=url or None,
+                is_active=False,
+                meta=meta,
+            ))
+            created += 1
+        s.commit()
+        return created
+
+    try:
+        return await run_write_locked(patch, label=f"plugin.mcp.{plugin_name}")
+    except Exception:  # noqa: BLE001
+        logger.warning("[plugin] 登记插件连接器失败 plugin=%s", plugin_name, exc_info=True)
+        return 0
+
+
 async def _register_contributed_skills(db: AsyncSession, plugin_name: str, dir_path: Path,
                                        manifest: dict) -> int:
     """把插件 skills/ 下的技能注册进技能表（source="plugin"）。
@@ -387,12 +556,21 @@ async def _register_contributed_skills(db: AsyncSession, plugin_name: str, dir_p
                 "skills_root": skills_root,
                 "source_file": src,
             }
+            md_meta = _skill_md_meta(Path(src)) if src else {}
             existing = await skill_service.get_skill_by_name(db, full_name)
             if existing is not None:
                 # plan-308-1542 需求2：已存在也要补写 meta（旧版本注册的行 meta 为空），
                 # 否则重新安装/升级插件后仍然定位不到技能目录。
+                patch: dict = {}
                 if not (existing.meta or {}).get("plugin_dir"):
-                    await skill_service.update_skill(db, existing.id, meta=meta)
+                    patch["meta"] = meta
+                # plan-59-286：旧版本注册的行 description 为空，这里补一次——
+                # 空描述会让模型侧技能清单只剩技能名，无法判断何时该用。
+                desc = str(md_meta.get("description") or "")
+                if desc and not (existing.description or "").strip():
+                    patch["description"] = desc[:200]
+                if patch:
+                    await skill_service.update_skill(db, existing.id, **patch)
                 continue
             content = ""
             try:
@@ -402,8 +580,11 @@ async def _register_contributed_skills(db: AsyncSession, plugin_name: str, dir_p
                 content = ""
             await skill_service.create_skill(
                 db, name=full_name, display_name=skill_name,
-                description="", content=content, source="plugin",
-                path=src, is_active=True, auto_load=True, meta=meta,
+                description=str(md_meta.get("description") or "")[:200],
+                content=content, source="plugin",
+                path=src, is_active=True, auto_load=True,
+                trigger=str(md_meta.get("trigger") or "") or None,
+                meta=meta,
             )
             n += 1
         await db.commit()
@@ -446,6 +627,9 @@ def _record_install(name: str, market: str, dest: Path, manifest: dict, source: 
         "source": source,
         "installedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "displayName": str(manifest.get("displayName") or name),
+        # plan-284-1450：市场安装时记下图标与远端 id，扩展管理据此复用市场图标
+        "logo": str(manifest.get("logo") or ""),
+        "marketId": str(manifest.get("marketId") or ""),
     }]
     _write_registry(reg)
 
@@ -456,11 +640,15 @@ async def install_from_dir(db: AsyncSession, src: str) -> dict:
     if not p.is_dir():
         raise ValueError("路径不存在或不是目录")
     dest, manifest = _install_files(p, "local")
+    name = str(manifest["name"])
     market = str(manifest.get("marketplaceName") or "local")
-    _record_install(str(manifest["name"]), market, dest, manifest, source=str(p))
-    n = await _register_contributed_skills(db, str(manifest["name"]), dest, manifest)
-    logger.info("[plugin] 安装 %s（技能 %d）", manifest["name"], n)
-    return {"ok": True, "name": str(manifest["name"]), "path": str(dest), "skills": n}
+    _record_install(name, market, dest, manifest, source=str(p))
+    n = await _register_contributed_skills(db, name, dest, manifest)
+    # plan-59-286：插件声明的 MCP 一并登记为连接器（默认未启用），
+    # 否则"插件自带连接器"在拓展页完全不可见。
+    m = await _register_contributed_mcp(db, name, dest, manifest)
+    logger.info("[plugin] 安装 %s（技能 %d / 连接器 %d）", name, n, m)
+    return {"ok": True, "name": name, "path": str(dest), "skills": n, "connectorCount": m}
 
 
 async def install_from_git(db: AsyncSession, repo_url: str, *, market: str = "local") -> dict:
@@ -497,19 +685,25 @@ async def set_enabled(db: AsyncSession, name: str, enabled: bool) -> dict:
         raise ValueError("插件未安装")
     _write_registry(reg)
 
-    # 贡献技能跟随插件启停（技能名带 "<plugin>:" 前缀，可精确匹配）
+    # 贡献技能与连接器跟随插件启停（名称都带 "<plugin>:" 前缀，可精确匹配）
     try:
         from sqlalchemy import select
 
-        from app.persistence.models.skill import Skill
+        from app.persistence.models.skill import McpServer, Skill
 
         res = await db.execute(select(Skill).where(Skill.source == "plugin"))
         for sk in res.scalars().all():
             if str(sk.name).startswith(f"{name}:"):
                 sk.is_active = enabled
+        # plan-59-286：插件自带的连接器同样跟随启停——
+        # 插件停用后其连接器仍在启用状态是不可预期的（第三方 MCP 不该继续被调用）。
+        rows = await db.execute(select(McpServer).where(McpServer.source == "plugin"))
+        for srv in rows.scalars().all():
+            if str(srv.name).startswith(f"{name}:"):
+                srv.is_active = enabled
         await db.commit()
     except Exception:  # noqa: BLE001
-        logger.warning("[plugin] 同步技能启停失败 name=%s", name, exc_info=True)
+        logger.warning("[plugin] 同步技能/连接器启停失败 name=%s", name, exc_info=True)
 
     return {"ok": True, "name": name, "enabled": enabled}
 
@@ -533,18 +727,22 @@ async def uninstall(db: AsyncSession, name: str) -> dict:
             shutil.rmtree(ip, ignore_errors=True)
     _write_registry(reg)
 
-    # 注销其贡献的技能
+    # 注销其贡献的技能与连接器（避免卸载后残留第三方 MCP 配置）
     try:
         from sqlalchemy import delete as _delete
 
-        from app.persistence.models.skill import Skill
+        from app.persistence.models.skill import McpServer, Skill
 
         await db.execute(_delete(Skill).where(
             Skill.source == "plugin", Skill.name.like(f"{name}:%"),
         ))
+        # plan-59-286：插件贡献的连接器同源清理（meta.plugin 与名称前缀双重对应）
+        await db.execute(_delete(McpServer).where(
+            McpServer.source == "plugin", McpServer.name.like(f"{name}:%"),
+        ))
         await db.commit()
     except Exception:  # noqa: BLE001
-        logger.warning("[plugin] 注销插件技能失败 name=%s", name, exc_info=True)
+        logger.warning("[plugin] 注销插件技能/连接器失败 name=%s", name, exc_info=True)
 
     logger.info("[plugin] 已卸载 %s", name)
     return {"ok": True, "name": name}

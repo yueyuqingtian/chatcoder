@@ -108,6 +108,11 @@ export type ServerWsEvent =
   | { event: "compact.completed"; payload: { agent_id?: number; turn_id?: number } & Partial<CompactSummaryPayload> }
   | { event: "approval.request"; payload: { approval_id: string; detail: Record<string, unknown> } }
   | { event: "approval.response"; payload: { approval_id: string; approved: boolean } }
+  /* plan-75-332: 审批卡「解释」——delta 为流式增量（不入 seq 缓冲），
+     done 为终态（带实际使用的模型与思考深度），error 为失败（卡片内提示，不影响审批按钮） */
+  | { event: "approval.explain.delta"; payload: { approval_id: string; delta?: string } }
+  | { event: "approval.explain.done"; payload: { approval_id: string; text?: string; model?: string; reasoning_effort?: string; truncated?: boolean } }
+  | { event: "approval.explain.error"; payload: { approval_id: string; message?: string } }
   | { event: "api.retry"; payload: { attempt: number; wait_ms: number; reason?: string } }
   /* plan-308-1542 需求3-A：AI 自动合并的实时进度（用户要求"像消息流那样展示 AI 进度、
      工具调用、消息，并汇报结果"）。后端边执行边广播，前端在合并弹窗内实时追加行。 */
@@ -127,7 +132,7 @@ export type ServerWsEvent =
     } }
   | { event: "config.changed"; payload: { profile_id: number; changed_keys: string[] } }
   | { event: "scheduled.triggered"; payload: { task_id: number; turn_id: number } }
-  | { event: "session.updated"; payload: { session_id: number; title?: string; permission_mode?: string; last_activity_at?: string | null } }
+  | { event: "session.updated"; payload: { session_id: number; title?: string; permission_mode?: string; approval_mode?: string; last_activity_at?: string | null } }
   /** plan-547: 运行中 turn 的用户消息注入确认（前端按 request_id 移除排队项） */
   | { event: "user_input.injected"; payload: { turn_id: number; request_id?: string | null } }
   /** plan-671: 目标模式（对齐 zcode goal-continuation）——目标设定/取消/完成/续跑/停止 */
@@ -237,6 +242,8 @@ export const ORDERED_EVENTS: ReadonlySet<string> = new Set([
 
 export type ClientWsEvent =
   | { event: "approval.response"; payload: { approval_id: string; approved: boolean } }
+  /* plan-75-332: 审批卡「解释」请求——服务端异步生成并流式回推 */
+  | { event: "approval.explain"; payload: { approval_id: string } }
   | { event: "terminal.input"; payload: { id: string; data: string } }
   | { event: "browser.command"; payload: { id: string; cmd: string; payload: Record<string, unknown> } }
   | { event: "cancel"; payload: { turn_id: number } }

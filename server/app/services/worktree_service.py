@@ -1434,6 +1434,7 @@ async def ai_merge_suggest(db: AsyncSession, worktree_project_id: int, path: str
     )
 
     try:
+        from app.models.base import resolve_reasoning
         from app.models.registry import get_model_registry
         from app.models.schemas import ChatMessage, ChatRequest
         from sqlalchemy import select as _select
@@ -1468,10 +1469,14 @@ async def ai_merge_suggest(db: AsyncSession, worktree_project_id: int, path: str
         if provider is None:
             return {"ok": False, "error": "未配置可用模型，无法生成 AI 建议。请在「设置 → 模型」中添加模型后重试"}
 
+        # plan-53-258 R4: AI 合并建议同样携带用户配置的思考深度
+        _effort, _thinking = resolve_reasoning(provider)
         request = ChatRequest(
             messages=[ChatMessage(role="user", content=prompt)],
             model=model_name,
             temperature=0.0,
+            reasoning_effort=_effort,
+            thinking=_thinking or None,
         )
         resp = await provider.chat(request)
         merged = (resp.content or "").strip()

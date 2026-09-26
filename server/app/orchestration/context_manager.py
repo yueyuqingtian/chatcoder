@@ -16,6 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.schemas import ChatMessage
+from app.orchestration.approval_policy import (
+    normalize_approval_mode,
+    normalize_execution_mode,
+)
 from app.orchestration.prompts import build_main_system_prompt, build_subagent_system_prompt
 from app.orchestration.rules_loader import load_session_rules, project_structure_brief
 from app.orchestration.tools.shell_env import shell_hint
@@ -123,9 +127,15 @@ async def _load_skills_and_mcp(db: AsyncSession) -> tuple[str, str]:
         if skills:
             parts = []
             for s in skills[:_SKILLS_LIST_MAX]:
-                line = f"- {s.name}: {(s.description or '')[:200]}"
-                if s.trigger:
-                    line += f" [触发条件: {str(s.trigger)[:120]}]"
+                desc = (s.description or "").strip()
+                line = f"- {s.name}: {desc[:200]}" if desc else f"- {s.name}"
+                trig = str(s.trigger or "").strip()
+                if trig:
+                    line += f" [触发条件: {trig[:120]}]"
+                elif not desc:
+                    # plan-59-286：名与描述双空时给出读取指引——
+                    # 此前插件贡献技能 description 为空串，这行对模型等于噪声。
+                    line += " [无描述，可用 skill_view 查看正文]"
                 # plan-308-1542 需求2：注入**绝对路径与父目录**——此前只有「名称: 描述」，
                 # AI 即便想看技能正文/附带脚本，也无从知道技能装在哪（用户反馈"找不到技能目录"）。
                 _path = (getattr(s, "path", None) or "").strip()
@@ -140,7 +150,12 @@ async def _load_skills_and_mcp(db: AsyncSession) -> tuple[str, str]:
                         line += f" [目录: {_dir}]"
                 parts.append(line)
             if len(skills) > _SKILLS_LIST_MAX:
-                parts.append(f"（另有 {len(skills) - _SKILLS_LIST_MAX} 个技能，用 skill_view 浏览）")
+                # plan-59-286：把"这是非全量清单"说清楚，避免模型以为只有这些技能
+                parts.append(
+                    f"（以上为前 {_SKILLS_LIST_MAX} 个技能，另有 "
+                    f"{len(skills) - _SKILLS_LIST_MAX} 个未列出；"
+                    "本清单非全量，需要时可不带参数调用 skill_view 浏览全部）"
+                )
             skills_text = _SKILLS_GUIDANCE + "\n\n" + "\n".join(parts)
     except Exception:
         logger.warning("[context] 全局技能加载失败", exc_info=True)
@@ -148,10 +163,236 @@ async def _load_skills_and_mcp(db: AsyncSession) -> tuple[str, str]:
         from app.services.skill_service import get_global_mcp_servers
         servers = await get_global_mcp_servers(db)
         if servers:
-            mcp_text = "\n".join(f"- {s.display_name or s.name}" for s in servers[:10])
+            lines = []
+            for s in servers[:10]:
+                entry = f"- {s.display_name or s.name}"
+                tools = s.tools if isinstance(s.tools, list) else []
+                names = [str(t.get("name")) for t in tools
+                         if isinstance(t, dict) and t.get("name")]
+                # plan-59-286：此前只给显示名，模型不知道这个连接器能做什么、该不该选它。
+                # 现在附上工具数与前几个工具名；未就绪/远端服务也如实标注。
+                if names:
+                    shown = "、".join(names[:3])
+                    entry += (f"：{shown}（共 {len(names)} 个工具）"
+                              if len(names) > 3 else f"：{shown}")
+                elif str(getattr(s, "transport", "") or "") != "stdio":
+                    entry += "：远端服务，工具清单在调用时获取"
+                else:
+                    entry += "：工具清单未就绪（可在扩展管理中刷新）"
+                lines.append(entry)
+            mcp_text = "\n".join(lines)
     except Exception:
         logger.warning("[context] MCP 服务器加载失败", exc_info=True)
     return skills_text, mcp_text
+
+
+async def _load_plugins(db: AsyncSession) -> str:
+    """已启用插件的能力摘要（plan-59-286）。
+
+    此前插件在模型侧**完全不可见**——没有 `## Available Plugins` 之类的注入，
+    模型不知道"某个插件带来了哪些技能/连接器"，也就无法按插件族去选能力。
+    这里按插件聚合它贡献的技能与连接器（名称都带 `<插件>:` 前缀），
+    并给出一句引导：需要某类能力时先看该插件贡献的技能。
+    """
+    try:
+        from sqlalchemy import select
+
+        from app.persistence.models.skill import McpServer, Skill
+        from app.services import plugin_service
+
+        installed = [p for p in plugin_service.list_installed() if p.get("enabled")]
+        if not installed:
+            return ""
+        skill_names = [str(n) for n in (await db.execute(select(Skill.name))).scalars().all()]
+        mcp_names = [str(n) for n in (await db.execute(select(McpServer.name))).scalars().all()]
+
+        lines: list[str] = []
+        for p in installed[:10]:
+            name = str(p.get("name") or "")
+            if not name:
+                continue
+            prefix = f"{name}:"
+            skills = sorted(n[len(prefix):] for n in skill_names if n.startswith(prefix))
+            conns = sorted(n[len(prefix):] for n in mcp_names if n.startswith(prefix))
+            desc = str(p.get("descriptionZh") or p.get("description") or "").strip()[:160]
+            line = f"- {p.get('displayName') or name}"
+            if desc:
+                line += f": {desc}"
+            if skills:
+                shown = "、".join(skills[:6])
+                line += f" [贡献技能: {shown}{'…' if len(skills) > 6 else ''}]"
+            if conns:
+                shown = "、".join(conns[:4])
+                line += f" [贡献连接器: {shown}{'…' if len(conns) > 4 else ''}]"
+            lines.append(line)
+        if not lines:
+            return ""
+        head = (
+            "以下插件已启用。插件通过它贡献的技能与连接器生效："
+            "需要某类能力时，优先查看该插件贡献的技能（用 skill_view 加载正文）；"
+            "其连接器需在扩展管理中启用后才可用。"
+        )
+        return head + "\n" + "\n".join(lines)
+    except Exception:
+        logger.warning("[context] 插件摘要加载失败", exc_info=True)
+        return ""
+
+
+# 引用技能正文的注入上限（用户已点名，正文越长越值钱；但仍要有上限防止爆预算）
+_REFS_SKILL_BODY_MAX = 8000
+
+
+async def _load_turn_refs(db: AsyncSession, turn) -> list[dict]:
+    """取本轮用户消息里的结构化引用（refs）。
+
+    plan-59-286：refs 此前只落库给前端渲染芯片，后端**没有任何消费**——
+    用户在输入框里用 / 引用了技能或连接器，模型侧只是多了一行中文文本，
+    显式意图没有被兑现。这里把它读出来，供生成"本轮引用"段。
+    """
+    mid = getattr(turn, "user_message_id", None)
+    if not mid:
+        return []
+    try:
+        from app.services import message_service
+
+        msg = await message_service.get_message(db, int(mid))
+        content = getattr(msg, "content", None) if msg is not None else None
+        refs = (content or {}).get("refs") if isinstance(content, dict) else None
+        return [r for r in refs if isinstance(r, dict)] if isinstance(refs, list) else []
+    except Exception:  # noqa: BLE001
+        logger.debug("[context] 读取本轮引用失败", exc_info=True)
+        return []
+
+
+def _split_refs(refs: list[dict]) -> tuple[list[str], list[str], list[str]]:
+    """按类别拆出技能 / 连接器 / 插件的引用值（文件引用由附件链路承担，这里忽略）。"""
+    skills: list[str] = []
+    connectors: list[str] = []
+    plugins: list[str] = []
+    for r in refs:
+        kind = str(r.get("kind") or "")
+        val = str(r.get("value") or "").strip()
+        if not val:
+            continue
+        if kind == "skill":
+            skills.append(val)
+        elif kind == "mcp":
+            connectors.append(val)
+        elif kind == "plugin":
+            plugins.append(val)
+    return skills, connectors, plugins
+
+
+async def _load_refs_context(db: AsyncSession, turn) -> str:
+    """把本轮引用兑现为上下文：技能正文、连接器启用校验、插件说明。
+
+    plan-59-286 的三条兑现规则：
+      · 技能引用 → 直接注入正文，省掉模型"猜要不要 skill_view"的一步；
+      · 连接器引用 → 先校验是否启用（未启用就明确告知，而不是静默当没看见），
+        已启用则在提示里点名"本轮优先"；
+      · 插件引用 → 注入插件说明与其贡献清单。
+    边界：引用只影响**上下文提示**，工具调用仍受权限白名单与审批约束（引用不越权）。
+    """
+    refs = await _load_turn_refs(db, turn)
+    if not refs:
+        return ""
+    skills, connectors, plugins = _split_refs(refs)
+    parts: list[str] = []
+
+    if skills:
+        from app.services import skill_service
+
+        blocks: list[str] = []
+        for name in skills[:3]:
+            row = await skill_service.get_skill_by_name(db, name)
+            if row is None:
+                blocks.append(f"- 技能「{name}」：不在本机技能库中（可能已删除或未安装）")
+                continue
+            if not row.is_active:
+                blocks.append(f"- 技能「{name}」：当前已停用（可在「设置 → 扩展管理」中启用）")
+                continue
+            body = str(row.content or "").strip()
+            if not body:
+                # link 模式的行只存路径，正文按需从磁盘读
+                try:
+                    from pathlib import Path as _P
+
+                    p = str(row.path or "").strip()
+                    body = _P(p).read_text(encoding="utf-8", errors="replace").strip() if p else ""
+                except OSError:
+                    body = ""
+            if len(body) > _REFS_SKILL_BODY_MAX:
+                body = body[:_REFS_SKILL_BODY_MAX] + "\n…（正文过长，已截断）"
+            blocks.append(f"### 技能：{row.display_name or row.name}\n{body or '（技能正文为空）'}")
+        parts.append(
+            "用户在输入框中显式引用了以下技能，请直接按该技能的工作流执行，"
+            "无需再判断是否要用它：\n\n" + "\n\n".join(blocks)
+        )
+
+    if connectors:
+        from sqlalchemy import select
+
+        from app.persistence.models.skill import McpServer
+
+        lines: list[str] = []
+        for name in connectors[:4]:
+            rows = (await db.execute(
+                select(McpServer).where(McpServer.name == name))).scalars().all()
+            if not rows:
+                # 前端 chip 里存的是展示名，回退按 display_name 匹配
+                rows = (await db.execute(
+                    select(McpServer).where(McpServer.display_name == name))).scalars().all()
+            row = rows[0] if rows else None
+            if row is None:
+                lines.append(f"- 连接器「{name}」：未在本机登记")
+                continue
+            label = row.display_name or row.name
+            tools = row.tools if isinstance(row.tools, list) else []
+            tool_names = [str(t.get("name")) for t in tools
+                          if isinstance(t, dict) and t.get("name")]
+            if not row.is_active:
+                lines.append(
+                    f"- 连接器「{label}」：**当前未启用**，其工具本轮不可用；"
+                    "如确需使用，请先提示用户在「设置 → 扩展管理」中开启。"
+                )
+            elif tool_names:
+                lines.append(
+                    f"- 连接器「{label}」：已启用，本轮优先使用其工具"
+                    f"（{'、'.join(tool_names[:5])}）。"
+                )
+            else:
+                lines.append(
+                    f"- 连接器「{label}」：已启用但工具清单未就绪，"
+                    "可提示用户在扩展管理中刷新工具清单。"
+                )
+        parts.append("用户在输入框中引用了以下连接器：\n" + "\n".join(lines))
+
+    if plugins:
+        try:
+            from app.services import plugin_service
+
+            installed = {str(p.get("name")): p for p in plugin_service.list_installed()}
+            lines = []
+            for name in plugins[:3]:
+                p = installed.get(name)
+                if p is None:
+                    lines.append(f"- 插件「{name}」：本机未安装")
+                    continue
+                desc = str(p.get("descriptionZh") or p.get("description") or "").strip()[:200]
+                line = f"- 插件「{p.get('displayName') or name}」"
+                if desc:
+                    line += f"：{desc}"
+                if not p.get("enabled"):
+                    line += "（当前已停用，其技能与连接器不生效）"
+                lines.append(line)
+            parts.append(
+                "用户引用了以下插件（插件通过其贡献的技能与连接器生效，"
+                "需要能力时先看它贡献的技能）：\n" + "\n".join(lines)
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("[context] 插件引用渲染失败", exc_info=True)
+
+    return "\n\n".join(parts)
 
 
 async def _load_memories(db: AsyncSession, session_id: int, project_id: int | None = None) -> str:
@@ -591,22 +832,14 @@ async def build_main_context(
     引导模型调用不存在的工具。
     """
     workspace = session.worktree_path or (project.path if project else "")
-    # 沙箱模式解析（与 engine/run_agent_loop 同口径：项目配置 > 全局设置 > 默认）
-    _sandbox = "workspace-write"
-    try:
-        from app.services import config_service
-        _eff = await config_service.effective_config(db, project_path=workspace)
-        _sandbox = str(_eff.get("sandbox_mode") or "workspace-write")
-        from app.core.config import settings as _st
-        if _sandbox == "workspace-write" and _st.sandbox_mode != "workspace-write":
-            _sandbox = _st.sandbox_mode
-    except Exception:
-        logger.debug("[context] 沙箱模式读取失败，用 workspace-write", exc_info=True)
+    # plan-75-332: 两条正交控制轴——执行模式（能做什么）与权限模式（要不要问）。
+    # 旧值（default / accept_edits）在此归一化，存量会话不会让模式解析落空。
+    _execution_mode = normalize_execution_mode(getattr(session, "permission_mode", None))
+    _approval_mode = normalize_approval_mode(getattr(session, "approval_mode", None))
     # v23: ta3 供应商模型 → 还原式系统提示词（远端主体 + ta3 纪律 + 当前项目规范）
     ta3_meta = await _resolve_ta3_model_meta(db, agent, session)
     # v7: 非 plan 模式下裁剪系统提示词的规划工作流，避免模型自发写计划文档索要确认
-    _perm_mode = str(getattr(session, "permission_mode", None) or "default")
-    _is_plan_mode = _perm_mode == "plan"
+    _is_plan_mode = _execution_mode == "plan"
     # plan-19-82: 回复语言由「本轮最新用户消息」决定（与界面语言设置无关）。
     # 空消息/纯附件场景回退检索最近一条含文本的 user 消息，避免误判。
     _lang_src = user_message if language_text is None else language_text
@@ -617,7 +850,8 @@ async def build_main_context(
         from app.orchestration.prompts.ta3_fusion import build_ta3_system_prompt
         system_prompt = build_ta3_system_prompt(
             ta3_meta, workspace=workspace, enable_subagents=enable_subagents,
-            sandbox_mode=_sandbox, language=_reply_lang,
+            execution_mode=_execution_mode, approval_mode=_approval_mode,
+            language=_reply_lang,
             language_source=_lang_source,
         )
         logger.info("[context] 会话 %s 使用 ta3 还原式系统提示词", session.id if session else "-")
@@ -1028,12 +1262,23 @@ async def build_main_context(
     except Exception:
         logger.warning("[context] 注入历史消息失败(非阻塞)", exc_info=True)
 
-    # 6. Skills / MCP
+    # 6. Skills / MCP / Plugins
     skills, mcp = await _load_skills_and_mcp(db)
     if skills:
         bundle.developer_parts.append(f"## Available Skills\n{skills}")
     if mcp:
         bundle.developer_parts.append(f"## Available MCP Servers\n{mcp}")
+    # plan-59-286：插件此前在模型侧完全不可见（无任何插件段），
+    # 模型不知道"这个插件带来了哪些能力"，这里补一段已启用插件的贡献摘要。
+    plugins_text = await _load_plugins(db)
+    if plugins_text:
+        bundle.developer_parts.append(f"## Available Plugins\n{plugins_text}")
+    # plan-59-286：本轮显式引用（技能正文 / 连接器校验 / 插件说明）。
+    # 用户点了 chip 就是最高优先级的意图表达，必须真的改变本轮上下文，
+    # 否则"引用了却没生效"就是装完拓展后最大的认知落差来源。
+    refs_text = await _load_refs_context(db, turn)
+    if refs_text:
+        bundle.developer_parts.append(f"## 本轮引用（用户显式点名，优先满足）\n{refs_text}")
     # 附件注入（v14: 附件已统一为文件地址，注入路径清单 + 读取工具说明，
     # AI 通过 read_attachment 工具按 path 读取图片/文档内容）
     # v33: 注入绝对路径（_attachment_abs_path）——AI 直接拿到磁盘真实路径，

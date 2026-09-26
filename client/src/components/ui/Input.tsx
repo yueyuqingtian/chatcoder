@@ -8,8 +8,11 @@
  *  - 纯 className 追加仍可用作页面级微调（不破坏既有调用习惯）。
  *
  * 兼容：未迁移页面里的 `className="ui-input"` 仍由 components.css 的裸样式兜底。
+ *
+ * plan-41-199：补 forwardRef —— 侧栏重命名依赖 DOM 引用做「被动失焦保活 / 恢复焦点全选」，
+ * React 18 下普通函数组件接不了 ref；ref 透传到内层原生 input，既有调用行为不变。
  */
-import { useState, type InputHTMLAttributes, type ReactNode, type TextareaHTMLAttributes } from "react";
+import { forwardRef, useState, type InputHTMLAttributes, type ReactNode, type TextareaHTMLAttributes } from "react";
 import { IconX } from "../icons";
 
 export type ControlSize = "sm" | "md" | "lg";
@@ -29,7 +32,7 @@ interface InputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, "size" 
   wrapClassName?: string;
 }
 
-export function Input({
+export const Input = forwardRef<HTMLInputElement, InputProps>(function Input({
   size = "md",
   invalid = false,
   prefix,
@@ -40,13 +43,14 @@ export function Input({
   value,
   disabled,
   ...props
-}: InputProps) {
+}, ref) {
   const [hoverClear, setHoverClear] = useState(false);
   const hasValue = value !== undefined && value !== null && String(value).length > 0;
   const showClear = clearable && hasValue && !disabled && typeof props.onChange === "function";
 
   const input = (
     <input
+      ref={ref}
       className={`ui-input ${className}`.trim()}
       value={value}
       disabled={disabled}
@@ -90,7 +94,7 @@ export function Input({
       {suffix && <span className="ui-input-affix">{suffix}</span>}
     </div>
   );
-}
+});
 
 interface TextareaProps extends TextareaHTMLAttributes<HTMLTextAreaElement> {
   invalid?: boolean;

@@ -52,8 +52,11 @@ class SessionCreate(BaseModel):
     project_id: int
     title: str | None = None
     model_id: int | None = None
-    # plan-547: 首页计划模式发送时随创建一次落准（default / accept_edits / plan / readonly）
+    # plan-547: 首页计划模式发送时随创建一次落准。
+    # plan-75-332: 语义已改为执行模式（readonly / plan / agent）。
     permission_mode: str | None = None
+    # plan-75-332: 首页所选权限模式随创建一次落准（ask / auto / full）
+    approval_mode: str | None = None
     # plan-676: 首页目标模式发送时随创建一次落准（非空即 goal_status=active）
     goal_text: str | None = None
 
@@ -76,7 +79,8 @@ class SessionUpdate(BaseModel):
     model_id: int | None = None
     pinned: bool | None = None
     status: str | None = None  # active / archived
-    permission_mode: str | None = None  # v2.2: default / accept_edits / plan
+    permission_mode: str | None = None  # plan-75-332: 执行模式 readonly / plan / agent
+    approval_mode: str | None = None  # plan-75-332: 权限模式 ask / auto / full
 
 
 class SessionOut(BaseModel):
@@ -88,7 +92,8 @@ class SessionOut(BaseModel):
     pinned: bool = False
     # v7: 置顶时间——前端"后置顶在上"排序依据
     pinned_at: str | None = None
-    permission_mode: str = "default"  # v2.2: default / accept_edits / plan
+    permission_mode: str = "agent"  # plan-75-332: 执行模式 readonly / plan / agent
+    approval_mode: str = "ask"  # plan-75-332: 权限模式 ask / auto / full
     fork_parent_id: int | None = None
     worktree_path: str | None = None
     has_running: bool = False
@@ -302,12 +307,18 @@ class HookConfigOut(BaseModel):
     command: str
     matcher: str | None = None
     enabled: bool = True
+    # S12（plan-41-197）：动作类型（command / prompt）与注入提示词
+    hook_type: str = "command"
+    prompt: str | None = None
 
 
 class HookConfigCreate(BaseModel):
     event: str
-    command: str
+    command: str = ""
     matcher: str | None = None
+    hook_type: str = "command"
+    prompt: str | None = None
+    enabled: bool = True
     enabled: bool = True
 
 
@@ -396,10 +407,15 @@ class FileDiffOut(BaseModel):
     """单文件变更 diff（按需拉取，大文件截断）。"""
     path: str
     before: str | None = None  # 写盘前内容（新建文件为 None）
-    after: str | None = None   # 当前磁盘内容（已删除文件为 None）
+    after: str | None = None   # 写盘后内容（single_edit）/ 当前磁盘内容（累积口径）
     truncated: bool = False    # 变更行数超限已截断
     reason: str | None = None  # 二进制/大文件说明（不展示文本 diff）
     lines: list[DiffLineOut] | None = None  # 行级 diff（优先于 before/after 本地 LCS）
+    # plan-89-387: 行数统计与 lines 同源——卡片 +N -M 与展开内容据此对齐
+    additions: int = 0
+    deletions: int = 0
+    # True = 按 call_key 命中的本次编辑口径；False = 整轮累积（老数据回退）
+    single_edit: bool = False
 
 
 class ReviewBatchBody(BaseModel):
@@ -465,6 +481,8 @@ class ModelOut(BaseModel):
     # plan-248-1258 M2.4: 所属供应商启用状态（false 时前端选择器需过滤；
     # 供应商被禁用但模型仍 active 时，输入框选择器不应再显示其模型）
     provider_active: bool = True
+    # plan-89-386: 所属供应商的排序位（全局模型选择器按「设置-模型管理」的顺序展示供应商）
+    provider_sort_order: int = 0
     # ── trae 供应商扩展（源自 trae_meta）──
     trae_max_context: int | None = None        # max 档上下文（如 1000000 = 1M）
     trae_consumption_rate: float | None = None  # 积分消耗倍率（max 档更快）
@@ -496,6 +514,11 @@ class ProviderUpdate(BaseModel):
     proxy_url: str | None = None
     # plan-271-1364: 凭据取用策略（sticky | round_robin）
     credential_strategy: str | None = None
+
+
+class ProviderReorder(BaseModel):
+    """plan-41-225: 供应商拖拽排序提交（数组下标即目标顺序）。"""
+    ids: list[int]
 
 
 class ProviderCredentialOut(BaseModel):
@@ -561,6 +584,8 @@ class ProviderOut(BaseModel):
     active_credential_count: int = 0
     # plan-271-1364: 凭据取用策略（sticky=粘性优先 | round_robin=按优先级轮转）
     credential_strategy: str = "sticky"
+    # plan-41-225: 供应商排序位（前端拖拽排序依据）
+    sort_order: int = 0
 
 
 # ── ta3 登录/同步（v23）──
@@ -675,6 +700,20 @@ class EvTurnCompleted(WsEventPayload):
     artifact_ids: list[int] | None = None
 
 
+class EvTurnFailed(WsEventPayload):
+    """v45 (plan-73-323)：失败单独事件。
+
+    此前 turn.failed 未登记在事件表中，每次广播都会打「未登记的事件名」告警；
+    桌面宠物的任务卡还要取其中的 error 作为失败原因展示。
+    """
+
+    turn_id: int | None = None
+    status: str | None = None
+    summary: str | None = None
+    error: str | None = None
+    artifact_ids: list[int] | None = None
+
+
 class EvTokenDelta(WsEventPayload):
     agent_id: int | None = None
     turn_id: int | None = None
@@ -746,6 +785,21 @@ class EvCompactEvent(WsEventPayload):
 class EvApprovalRequest(WsEventPayload):
     approval_id: str = ""
     detail: dict | None = None
+
+
+class EvApprovalExplain(WsEventPayload):
+    """审批卡「解释」的流式增量与终态事件（plan-75-332）。
+
+    三类事件共用一份 payload 模型：delta 只填 delta，done 填 text/model/reasoning_effort，
+    error 填 message；字段均给默认值，缺失不报校验错。
+    """
+    approval_id: str = ""
+    delta: str | None = None
+    text: str | None = None
+    model: str | None = None
+    reasoning_effort: str | None = None
+    truncated: bool | None = None
+    message: str | None = None
 
 
 class EvAgentEvent(WsEventPayload):
@@ -824,6 +878,7 @@ WS_EVENT_PAYLOAD_MODELS: dict[str, type[WsEventPayload]] = {
     "turn.started": EvTurnStarted,
     "turn.updated": EvTurnStarted,
     "turn.completed": EvTurnCompleted,
+    "turn.failed": EvTurnFailed,
     "turn.interrupted": EvTurnStarted,
     "turn.rolled_back": WsEventPayload,
     "agent.started": EvAgentEvent,
@@ -848,11 +903,19 @@ WS_EVENT_PAYLOAD_MODELS: dict[str, type[WsEventPayload]] = {
     "compact.completed": EvCompactEvent,
     "approval.request": EvApprovalRequest,
     "approval.response": WsEventPayload,
+    # plan-75-332: 审批卡「解释」（请求方向 approval.explain 不经广播，无需登记）
+    "approval.explain.delta": EvApprovalExplain,
+    "approval.explain.done": EvApprovalExplain,
+    "approval.explain.error": EvApprovalExplain,
     "api.retry": WsEventPayload,
     "config.changed": WsEventPayload,
     "scheduled.triggered": WsEventPayload,
     "session.updated": WsEventPayload,
     "session.completed": WsEventPayload,
+    # v44: 子代理运行态事件（运行数变化 / 完成唤醒）——侧栏运行标记与等待行的数据源
+    "subagent.pending": WsEventPayload,
+    "subagent.wakeup": WsEventPayload,
+    "subagent.failed": WsEventPayload,
     "error": EvError,
     "ack": WsEventPayload,
     "sync.response": WsEventPayload,

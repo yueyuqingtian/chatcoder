@@ -6,18 +6,21 @@
 
 本模块把"模式 → 工具白名单 + 提示词"外置为可配置数据：
 
-- **内置 4 模式**（default / readonly / plan / accept_edits）：白名单沿用
-  engine 原定义（含 M1.2 追加的 skill_view / compaction_*），作为默认集，
-  用户可覆盖其白名单与提示词；
+- **内置 3 模式**（agent / readonly / plan，plan-75-332）：白名单沿用 engine 原定义，
+  作为默认集，用户可覆盖其白名单与提示词；
 - **自定义模式**：用户新建，`builtin=False`，白名单从全量工具中勾选，
   持久化到用户 config.json 的 `permission_profiles` 键；
 - **安全兜底（新旧双跑取更严方）**：`resolve_tools` 返回的白名单只允许是
-  全量注册工具的子集；未识别的自定义模式名在 engine 侧按 `default` 处理。
+  全量注册工具的子集；未识别的自定义模式名在 engine 侧按 `agent` 处理。
 
 模式语义（`kind` 字段，供 engine/executor 复用既有判定分支）：
-- `full`：全量工具（default / accept_edits 属此类，审批策略不同）；
+- `full`：全量工具（agent 属此类）；
 - `readonly`：仅只读工具；
-- `plan`：只读 + 计划文档写 + 命令行（受审批门约束）。
+- `plan`：只读 + 计划文档写。
+
+plan-75-332 变更：原 `default`（完全访问）更名为 `agent`（智能体模式），原
+`accept_edits`（计划执行）删除——两者能力完全相同（全量工具），保留两个等价
+选项只会让用户在选择时困惑。存量旧名由 `_LEGACY_NAMES` 映射到 `agent`。
 
 存储位置与 `skills_mcp.py` 的技能仓库配置同址（~/.chatcoder/config.json，
 可经 CHATCODER_USER_CONFIG 覆盖），不新增表、不需要迁移。
@@ -36,17 +39,11 @@ _CFG_PATH = Path(
 )
 
 # ── 内置模式定义（白名单与 engine 原硬编码保持一致，外置后仍是唯一事实源）──
+# plan-75-332 R2（用户指定）：菜单顺序固定为「只读 → 计划 → 智能体」——
+# 按能力由窄到宽递进，故内置列表按此顺序声明；list_profiles 按本列表顺序
+# 返回，前端菜单直接消费（agent 定义已移至列表末尾）。
 
 BUILTIN_PROFILES: list[dict] = [
-    {
-        "name": "default",
-        "display_name": "完全访问",
-        "kind": "full",
-        "builtin": True,
-        "description": "全量工具，按审批策略执行写操作",
-        "tools": [],  # 空列表 = 全量工具（不限制）
-        "hint": "",
-    },
     {
         "name": "readonly",
         "display_name": "只读模式",
@@ -93,17 +90,31 @@ BUILTIN_PROFILES: list[dict] = [
         "hint": "",
     },
     {
-        "name": "accept_edits",
-        "display_name": "计划执行",
+        "name": "agent",
+        "display_name": "智能体模式",
         "kind": "full",
         "builtin": True,
-        "description": "确认计划后的执行模式：写盘免审批",
-        "tools": [],  # 全量工具，写盘免审批由 executor 按 permission_mode 判定
+        # S13（plan-41-197）：系统模式说明补全——“全量工具”不是缺陷而是语义定位，
+        # 把能力边界写清楚。plan-75-332：改名 agent，避免与权限模式的
+        # 「完全访问」重名（前者说能力范围，后者说是否免询问）。
+        "description": "全量工具；是否需审批由权限模式决定（日常开发默认）",
+        "tools": [],  # 空列表 = 全量工具（不限制）
         "hint": "",
     },
 ]
 
 _BY_NAME = {p["name"]: p for p in BUILTIN_PROFILES}
+
+# plan-75-332: 旧模式名 → 新模式名。default（原「完全访问」）与 accept_edits（原「计划执行」）
+# 的能力完全相同（全量工具、无白名单限制），统一并入 agent。存量会话与用户配置里
+# 可能还留着旧名，在此映射；否则解析不到模式会让白名单校验静默失效。
+_LEGACY_NAMES = {"default": "agent", "accept_edits": "agent"}
+
+
+def _canonical(name: str) -> str:
+    """模式名归一化：旧名映射到新名，其余原样返回。"""
+    n = (name or "").strip()
+    return _LEGACY_NAMES.get(n, n)
 
 
 def _read_cfg() -> dict:
@@ -128,8 +139,13 @@ def _load_custom() -> list[dict]:
     out = []
     for p in raw:
         if isinstance(p, dict) and p.get("name"):
+            raw_name = str(p["name"])
+            # plan-75-332: 旧模式名的用户覆盖条目直接忽略（default / accept_edits
+            # 已并入 agent）；若照原样返回，输入框模式菜单会多出语义重复的选项。
+            if raw_name in _LEGACY_NAMES:
+                continue
             out.append({
-                "name": str(p["name"]),
+                "name": raw_name,
                 "display_name": str(p.get("display_name") or p["name"]),
                 "kind": str(p.get("kind") or "full"),
                 "builtin": False,
@@ -151,8 +167,9 @@ def list_profiles() -> list[dict]:
 
 
 def get_profile(name: str) -> dict | None:
+    target = _canonical(name)
     for p in list_profiles():
-        if p["name"] == name:
+        if p["name"] == target:
             return p
     return None
 
@@ -160,7 +177,7 @@ def get_profile(name: str) -> dict | None:
 def resolve_tools(mode: str, all_tool_names: set[str]) -> list[str] | None:
     """把模式解析为工具白名单。
 
-    - `default` / `accept_edits` / 未识别模式 → None（全量，不限制）；
+    - `agent` / 未识别模式 → None（全量，不限制）；
     - 内置只读/计划/自定义模式 → 白名单列表（过滤掉未注册的幽灵工具名）。
 
     安全口径：白名单只能从 `all_tool_names` 中取（deny-by-default），
@@ -238,7 +255,7 @@ def upsert_profile(profile: dict) -> dict:
     resolve_tools 时会被过滤，不产生越权）。
     """
     import re
-    name = str(profile.get("name") or "").strip()
+    name = _canonical(str(profile.get("name") or "").strip())
     if not re.fullmatch(r"[a-z0-9_]{1,40}", name):
         raise ValueError("模式名仅允许小写字母、数字、下划线（1-40 字符）")
     if profile.get("kind") not in (None, "full", "readonly", "plan"):

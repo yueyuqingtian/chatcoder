@@ -40,19 +40,24 @@ SPAWN_SUBAGENT_SCHEMA = {
             "- A single-fact lookup where you already know the file, symbol or value — search directly.\n"
             "- Simple or tightly sequential work: do it yourself with a few direct tool calls.\n"
             "\n## How to dispatch\n"
+            "- background=true is the DEFAULT and recommended way: dispatch and return immediately, keep "
+            "working on other things, and the completion report is pushed back to you automatically "
+            "(do NOT poll for it). Combine it with explore=true when the subtask is read-only research.\n"
+            "- explore=true only marks the subtask READ-ONLY — pair it with background=true for read-only "
+            "research you do not need to block on.\n"
+            "- explore=true WITHOUT background=true BLOCKS your turn until the subagent finishes and returns "
+            "its findings inline. Use that combination only when your very next step depends on the "
+            "conclusion and the subtask is small.\n"
             "- Independent subtasks: send SEVERAL spawn_subagent calls in ONE message so they run concurrently.\n"
-            "- explore=true → read-only research subtask; the call blocks and returns the findings directly.\n"
-            "- background=true → dispatch and return immediately; the completion report is pushed back to you "
-            "automatically, so do NOT poll for it.\n"
             "- NEVER dispatch the same subtask twice, and give each subtask a distinct task_title; "
             "check collect_results first if unsure whether an equivalent one already exists.\n"
             "- Subagents never share context with each other or with you: hand off everything they need.\n"
-            "\n## After the dispatch\n"
-            "- Once you delegate a piece of work, do NOT also do it yourself — work on non-overlapping things "
-            "or wait for the result, then integrate it.\n"
-            "- Subagents report back a structured summary (result, files touched, key findings, "
-            "verification, acceptance, risks); use subagent_inspect for their full context and trajectory.\n"
-            "- You remain responsible for integrating their work."
+            "\n## After the dispatch — waiting discipline\n"
+            "- NEVER do the delegated task yourself — duplicated work costs tokens and time twice over; a "
+            "subagent that looks slow is usually just still working. Take only NON-overlapping work; if none "
+            "is left, call collect_results(wait=true) to block until they finish, or end your turn.\n"
+            "- Subagents report back a structured summary (result, files, findings, verification, acceptance, "
+            "risks); use subagent_inspect only to read context/trajectory. You integrate their work."
         ),
         "parameters": {
             "type": "object",
@@ -78,14 +83,19 @@ SPAWN_SUBAGENT_SCHEMA = {
                 },
                 "explore": {
                     "type": "boolean",
-                    "description": "True = read-only research subtask whose findings are returned directly. Default false.",
+                    "description": (
+                        "True = the subtask is READ-ONLY research (no writes, no commands). Default false. "
+                        "Combine with background=true for non-blocking read-only research; setting explore "
+                        "alone BLOCKS your turn until the subagent finishes."
+                    ),
                 },
                 "background": {
                     "type": "boolean",
                     "description": (
-                        "True = dispatch and return immediately (run in the background); no blocking wait. "
-                        "The completion report is pushed back to you automatically when the subagent finishes, "
-                        "so do NOT poll. Use it to parallelize long-running independent subtasks. Default false."
+                        "PREFER setting this to true: dispatch and return immediately (run in the background), "
+                        "no blocking wait — you keep doing other work in parallel. The completion report is "
+                        "pushed back to you automatically when the subagent finishes, so do NOT poll. Leave it "
+                        "false only when you need the conclusion inline before your next step. Default false."
                     ),
                 },
             },
@@ -153,8 +163,8 @@ CANCEL_SUBAGENT_SCHEMA = {
         "name": "cancel_subagent",
         "description": (
             "Cancel one still-running subagent spawned this turn (id returned by spawn_subagent). "
-            "Use it when the subtask is no longer needed (e.g. you already found the answer, "
-            "or the plan changed) to stop wasting tokens. Finished subagents cannot be cancelled."
+            "Use it only when the subtask is genuinely no longer needed — the plan changed or the "
+            "scope was dropped. Finished subagents cannot be cancelled; never cancel after duplicating work."
         ),
         "parameters": {
             "type": "object",
@@ -253,8 +263,10 @@ SUBAGENT_TOOL_RISK: dict[str, str] = {
 def _spawn_schema(explore_only: bool) -> dict:
     """spawn_subagent schema；只读/计划模式下替换为「只读探索」版本（v36）。
 
-    explore_only=True 时：描述改为仅支持只读探索子任务，并移除 background/explore 参数
-    （background 会派发可写子代理，与本模式语义冲突；explore 由运行时强制）。
+    explore_only=True 时：描述改为仅支持只读探索子任务，并移除 explore 参数（只读由
+    运行时强制、无需模型传参）；background 参数**保留**——plan-64-289 起 background 只
+    决定调度方式、不再影响读写范围，「只读 + 异步」合法且推荐（v36 早期注释称连带移除
+    background，系解耦前口径，已作废）。
     """
     if not explore_only:
         return SPAWN_SUBAGENT_SCHEMA
@@ -264,8 +276,8 @@ def _spawn_schema(explore_only: bool) -> dict:
     fn = schema["function"]
     fn["description"] = (
         "Launch a READ-ONLY exploration subagent to research a self-contained subtask in its "
-        "own context. Its final message is returned to you as the tool result (the user does "
-        "not see it), and its context starts fresh — the prompt must be self-contained.\n"
+        "own context. Its findings are reported back to you (the user does not see them), and "
+        "its context starts fresh — the prompt must be self-contained.\n"
         "\nDECIDE AUTONOMOUSLY: you may dispatch exploration subagents on your own initiative "
         "when the criteria below are met — no user request is required.\n"
         "\n## When to use\n"
@@ -276,9 +288,12 @@ def _spawn_schema(explore_only: bool) -> dict:
         "- A single-fact lookup where you already know the file, symbol or value — search directly.\n"
         "\n## Mode note\n"
         "- The current permission mode is READ-ONLY / PLAN: only read-only exploration is "
-        "available. The call blocks until it finishes and returns the findings directly to you. "
-        "NEVER ask the subagent to modify, write or create files — it will be rejected.\n"
+        "available. NEVER ask the subagent to modify, write or create files — it will be rejected.\n"
         "\n## How to dispatch\n"
+        "- PREFER background=true: dispatch and return immediately, keep working on other things, "
+        "and the completion report is pushed back to you automatically (do NOT poll).\n"
+        "- Without background=true the call BLOCKS your turn until the subagent finishes and "
+        "returns the findings inline — use it only when you need the conclusion right now.\n"
         "- Send SEVERAL spawn_subagent calls in ONE message to run them concurrently.\n"
         "- Give each subtask a distinct task_title; never dispatch the same subtask twice.\n"
         "\n## After the dispatch\n"
@@ -287,8 +302,7 @@ def _spawn_schema(explore_only: bool) -> dict:
         "- Use collect_results / subagent_inspect when you need more detail."
     )
     props = fn["parameters"]["properties"]
-    props.pop("background", None)
-    props.pop("explore", None)  # 强制只读探索，无需模型传参
+    props.pop("explore", None)  # 仍由运行时强制只读，无需模型传参
     return schema
 
 
@@ -335,7 +349,7 @@ def append_subagent_tools(tool_schemas: list[dict],
 
     v36 (plan-321-1600 R1): 四种权限模式都支持子代理——
     - explore_only=True（只读/计划模式）：仅暴露只读探索子代理（spawn 描述换成
-      只读探索版、不含 background），general 类型不参与本模式；
+      只读探索版；隐藏 explore、保留 background，支持只读+异步），general 不参与本模式；
     - allowed：白名单模式下的子代理工具子集（None = 全量）——设置页未勾选的
       子代理工具不暴露，勾选真正生效。
 

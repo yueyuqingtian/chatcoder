@@ -374,12 +374,15 @@
    用户切换深浅主题时不会重算（applyUiVars 不随主题变化调用），深色档会失效。
    驱动属性：data-glass(on/off) / data-glass-strength(0|1|2) / data-theme(light|dark) /
             data-glass-degraded(1)；具体值对应方案 3.2 的"低透明"区间（0.84~0.94）。 */
-:root[data-glass="on"] { --frost-left-alpha: 0.90; }                          /* 标准 · 浅色 */
-:root[data-glass="on"][data-glass-strength="0"] { --frost-left-alpha: 0.94; } /* 轻柔 · 浅色 */
-:root[data-glass="on"][data-glass-strength="2"] { --frost-left-alpha: 0.86; } /* 深邃 · 浅色 */
-:root[data-theme="dark"][data-glass="on"] { --frost-left-alpha: 0.88; }       /* 标准 · 深色 */
-:root[data-theme="dark"][data-glass="on"][data-glass-strength="0"] { --frost-left-alpha: 0.92; }
-:root[data-theme="dark"][data-glass="on"][data-glass-strength="2"] { --frost-left-alpha: 0.84; }
+/* ── plan-26-126 / S5（plan-41-197）：左列不透明度（三档 × 浅/深 + 降级） ──
+    S5 重标定（用户反馈“三档透明度再细化一下：深邃再加深、标准次之、轻柔最浅，但轻柔现在太浅了”）：
+    三档整体上移通透度并拉开档差——深邃透出最多、标准居中、轻柔仍保留玻璃感（不再接近实色）。 */
+:root[data-glass="on"] { --frost-left-alpha: 0.87; }                          /* 标准 · 浅色 */
+:root[data-glass="on"][data-glass-strength="0"] { --frost-left-alpha: 0.92; } /* 轻柔 · 浅色 */
+:root[data-glass="on"][data-glass-strength="2"] { --frost-left-alpha: 0.82; } /* 深邃 · 浅色 */
+:root[data-theme="dark"][data-glass="on"] { --frost-left-alpha: 0.85; }       /* 标准 · 深色 */
+:root[data-theme="dark"][data-glass="on"][data-glass-strength="0"] { --frost-left-alpha: 0.90; }
+:root[data-theme="dark"][data-glass="on"][data-glass-strength="2"] { --frost-left-alpha: 0.80; }
 /* 无系统模糊材质：退到近实 0.97（宁可"不透"，也不给"透但没模糊"的脏状态）。
    必须用 !important —— 它需要**无条件覆盖**上面的主题/档位组合（那些选择器最高到 0-4-0）。 */
 :root[data-glass="on"][data-glass-degraded="1"] { --frost-left-alpha: 0.97 !important; }
@@ -415,6 +418,24 @@
      → 轨道在 flex-shrink:0 的控件槽里塌陷到 0 宽（只剩圆点），且 Radix 按 Root 实测宽度
      换算指针百分比，宽度为 0 时无法拖动。 */
   --slider-track-w: 180px;
+  /* S0（plan-41-197）：按钮尺寸档。
+     用户反馈“全局按钮看起来非常小气，内边距和文字离得太近”——此前按钮内边距
+     最小到 `3px 7px`、字号 11px、圆角 4px。现将四档高度 + 横向内边距集中于此，
+     .btn 系列与 Button 组件只引用这里的令牌，禁止再写行内/私有数值。 */
+  --btn-h-xs: 24px;
+  --btn-h-sm: 28px;
+  --btn-h-md: 32px;
+  --btn-h-lg: 36px;
+  --btn-px-xs: 10px;
+  --btn-px-sm: 12px;
+  --btn-px-md: 16px;
+  --btn-px-lg: 18px;
+  /* S0：浮层统一圆角档（菜单/提示/弹窗）与提示展示延迟（聚焦快速响应） */
+  --r-pop: var(--r-xl);
+  /* S1（plan-41-197）：用户反馈"聚焦后提示有明显延迟"——首次展示 200ms → 120ms，
+     同排图标间切换 100ms → 60ms（Radix skipDelayDuration）。 */
+  --tooltip-delay: 120ms;
+  --tooltip-skip-delay: 60ms;
   --field-gap-y: 6px;
   --row-pad-y: 12px;
   --sp-1: 4px;
@@ -482,9 +503,9 @@
      项间距随字号缩放；运行时 applyUiVars 会用外观设置覆盖 --fs-md/--chat-line-height，
      行与文本始终等高、间距始终一致（节距 = 行高 + --flow-gap = 段落节奏）。
      注意 --chat-line-height 是无单位倍率（与外观设置语义一致）。 */
-  --chat-line-height: 1.7;
+  --chat-line-height: 2.2;
   --flow-gap: calc(var(--fs-md, 13px) * 0.62);
-  --sidebar-fs: 13px;
+  --sidebar-fs: 14px;
   --sidebar-icon: 16px;
   --sidebar-focus: var(--text-1);
   --sidebar-active-bg: var(--color-selected);

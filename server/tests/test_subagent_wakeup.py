@@ -206,3 +206,85 @@ def test_frontend_contract_registered():
     assert '"subagent.pending"' in events and '"subagent.wakeup"' in events
     store = (_ROOT / "client" / "src" / "store" / "chat.ts").read_text(encoding="utf-8")
     assert "pendingSubagents" in store
+
+
+# ── v44: 空闲兜底收尾（子代理结束后摘除侧栏运行标记） ──────
+
+async def test_on_subagent_finished_broadcasts_idle_completion_without_wakeup(monkeypatch):
+    """v44: 空闲且无唤醒接管（报告已被读走）→ 补发 session.completed(pending=0)。
+
+    否则侧栏「运行中」标记在子代理全部结束后无人摘除（转圈残留）。
+    """
+    sid = 987661
+    mgr = SubagentManager(session_id=sid)
+    h = SubagentHandle(agent_id=61, status="done", task_title="T6")
+    mgr._handles[61] = h  # 不入队完成通知：模拟报告已被 collect_results 读走
+    monkeypatch.setattr(engine_mod.settings, "subagent_wakeup_enabled", True)
+    calls: list[tuple[int, int]] = []
+
+    async def _fake_completed(session_id: int, db=None, subagent_pending: int = 0) -> None:
+        calls.append((session_id, subagent_pending))
+
+    monkeypatch.setattr(engine_mod, "broadcast_session_completed", _fake_completed)
+    engine_mod._subagent_wakeups.pop(sid, None)
+    engine_mod._on_subagent_finished(mgr, sid, h)
+    await asyncio.sleep(0)
+    assert calls == [(sid, 0)]
+    assert sid not in engine_mod._subagent_wakeups  # 无唤醒轮接管
+
+
+async def test_on_subagent_finished_disabled_settings_still_broadcasts_idle(monkeypatch):
+    """v44: 唤醒开关关闭 → 不调度唤醒，但同样补发空闲收尾（否则转圈残留）。
+
+    此前 pending>0 或开关关闭都直接 return，开关关闭时空闲会话的
+    「运行中」标记永远摘不掉。
+    """
+    sid = 987662
+    mgr = SubagentManager(session_id=sid)
+    h = SubagentHandle(agent_id=71, status="done", task_title="T7")
+    mgr._handles[71] = h
+    mgr._enqueue_completion(h)
+    monkeypatch.setattr(engine_mod.settings, "subagent_wakeup_enabled", False)
+    calls: list[int] = []
+
+    async def _fake_completed(session_id: int, db=None, subagent_pending: int = 0) -> None:
+        calls.append(subagent_pending)
+
+    monkeypatch.setattr(engine_mod, "broadcast_session_completed", _fake_completed)
+    engine_mod._subagent_wakeups.pop(sid, None)
+    engine_mod._on_subagent_finished(mgr, sid, h)
+    await asyncio.sleep(0)
+    assert calls == [0]
+    assert sid not in engine_mod._subagent_wakeups
+
+
+async def test_on_subagent_finished_wakeup_takes_over_no_idle_broadcast(monkeypatch):
+    """v44: 有未送达报告且唤醒可用 → 唤醒轮接管，不补发空闲收尾（避免双事件互相干扰）。"""
+    sid = 987663
+    mgr = SubagentManager(session_id=sid)
+    h = SubagentHandle(agent_id=81, status="done", task_title="T8")
+    mgr._handles[81] = h
+    mgr._enqueue_completion(h)
+    monkeypatch.setattr(engine_mod.settings, "subagent_wakeup_enabled", True)
+    started: list[int] = []
+    idle_calls: list[int] = []
+
+    async def _fake(session_id: int) -> None:
+        started.append(session_id)
+
+    async def _record_completed(session_id: int, db=None, subagent_pending: int = 0) -> None:
+        idle_calls.append(subagent_pending)
+
+    monkeypatch.setattr(engine_mod, "_wakeup_turn_for_subagents", _fake)
+    monkeypatch.setattr(engine_mod, "broadcast_session_completed", _record_completed)
+    engine_mod._subagent_wakeups.pop(sid, None)
+    try:
+        engine_mod._on_subagent_finished(mgr, sid, h)
+        task = engine_mod._subagent_wakeups.get(sid)
+        assert task is not None
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.sleep(0)
+        assert started == [sid]
+        assert idle_calls == []  # 唤醒轮已接管 → 不补发空闲收尾
+    finally:
+        engine_mod._subagent_wakeups.pop(sid, None)

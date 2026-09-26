@@ -12,27 +12,36 @@
 import type { ReactNode } from "react";
 
 interface PageShellProps {
-  title: ReactNode;
+  /** 页面标题；与 subtitle/actions 同时缺省时不渲染标题区（供自带标题区的内容组件使用） */
+  title?: ReactNode;
   /** 仅在承载真实信息时传入——无实义时不渲染，避免"无意义文案" */
   subtitle?: ReactNode;
   /** standard=常规表单页(720)；wide=图表/表格类(880) */
   width?: "standard" | "wide";
   /** 标题行右侧操作区（如刷新/新建） */
   actions?: ReactNode;
+  /** S19（plan-41-197c）：填充式页面——页面自身不滚动，由内容组件内部滚动区承担
+   *  （记忆页：标题与控制区固定、列表独立上下滑动）。 */
+  fill?: boolean;
   children: ReactNode;
 }
 
-export function PageShell({ title, subtitle, width = "standard", actions, children }: PageShellProps) {
+export function PageShell({ title, subtitle, width = "standard", actions, fill = false, children }: PageShellProps) {
+  // S18（plan-41-197b）：标题区按需渲染——模型页自带标题区（模型设置 + 副标题 + 刷新），
+  // 外层若再渲染一次标题会出现「模型管理 / 模型设置」双标题叠加（用户反馈）。
+  const hasHead = Boolean(title || subtitle || actions);
   return (
-    <div className="ui-page">
-      <div className={`ui-page-inner${width === "wide" ? " is-wide" : ""}`}>
-        <div className="ui-page-head">
-          <div style={{ minWidth: 0 }}>
-            <h1 className="ui-page-title">{title}</h1>
-            {subtitle ? <div className="ui-page-subtitle">{subtitle}</div> : null}
+    <div className={`ui-page${fill ? " is-fill" : ""}`}>
+      <div className={`ui-page-inner${width === "wide" ? " is-wide" : ""}${fill ? " is-fill" : ""}`}>
+        {hasHead && (
+          <div className="ui-page-head">
+            <div style={{ minWidth: 0 }}>
+              {title ? <h1 className="ui-page-title">{title}</h1> : null}
+              {subtitle ? <div className="ui-page-subtitle">{subtitle}</div> : null}
+            </div>
+            {actions ? <div className="ui-page-head-actions">{actions}</div> : null}
           </div>
-          {actions ? <div className="ui-page-head-actions">{actions}</div> : null}
-        </div>
+        )}
         <div className="ui-page-cards">{children}</div>
       </div>
     </div>

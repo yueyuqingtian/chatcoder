@@ -11,7 +11,8 @@ from app.services import model_service
 router = APIRouter()
 
 
-def _to_out(m, provider_name: str | None = None, provider_active: bool = True) -> ModelOut:
+def _to_out(m, provider_name: str | None = None, provider_active: bool = True,
+            provider_sort_order: int = 0) -> ModelOut:
     tmeta = getattr(m, "trae_meta", None) or {}
     if not isinstance(tmeta, dict):
         tmeta = {}
@@ -38,6 +39,8 @@ def _to_out(m, provider_name: str | None = None, provider_active: bool = True) -
         trae_thinking=bool(tmeta.get("thinking")),
         # plan-248-1258 M2.4: 供应商启用状态（禁用供应商时前端选择器过滤其模型）
         provider_active=provider_active,
+        # plan-89-386: 供应商排序位（全局模型选择器按设置页顺序展示）
+        provider_sort_order=provider_sort_order,
     )
 
 
@@ -77,17 +80,21 @@ async def list_models(db: AsyncSession = Depends(get_db)):
     provider_ids = {m.provider_id for m in models if getattr(m, "provider_id", None)}
     provider_names: dict[int, str] = {}
     provider_active: dict[int, bool] = {}
+    # plan-89-386: 供应商排序位（全局模型选择器按「设置-模型管理」的顺序展示供应商）
+    provider_sort: dict[int, int] = {}
     if provider_ids:
         res = await db.execute(select(Provider).where(Provider.id.in_(provider_ids)))
         for p in res.scalars().all():
             provider_names[p.id] = p.name
             provider_active[p.id] = bool(p.is_active)
+            provider_sort[p.id] = int(getattr(p, "sort_order", 0) or 0)
     return [
         _to_out(
             m,
             provider_names.get(getattr(m, "provider_id", None)),
             # 独立模型（无供应商）默认视为可用
             provider_active.get(getattr(m, "provider_id", None), True),
+            provider_sort.get(getattr(m, "provider_id", None), 0),
         )
         for m in models
     ]

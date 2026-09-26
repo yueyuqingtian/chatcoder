@@ -141,12 +141,8 @@ class TerminalExecTool(Tool):
         if not command:
             return ToolResult(ok=False, output="", error="command 为空")
 
-        # v2.2 (对齐 zcode 3.12): 静态安全分级——危险命令直接拒绝（不审批不执行）
-        from app.orchestration.tools.shell_policy import analyze as _analyze_shell
-        verdict, reason = _analyze_shell(command)
-        if verdict == "deny":
-            logger.warning("terminal_exec 危险命令拦截: %r (%s)", command[:120], reason)
-            return ToolResult(ok=False, output="", error=f"[安全策略] {reason}")
+        # plan-75-332: 工具不再拦截危险命令——分类与风险标注由 shell_policy 给出，
+        # 最终是否询问/放行由 approval_policy 按权限模式裁决（完全访问下可直接执行）。
 
         # 1. 检测裸 cd 命令 → 给提示但不执行(避免无效调用)
         bare_cd = re.match(r"^(?:cd|chdir)\s+(.+)$", command, re.IGNORECASE)
@@ -167,18 +163,15 @@ class TerminalExecTool(Tool):
             command, re.IGNORECASE,
         )
         explicit_cwd = args.get("cwd", None)
-        # v3.0 (plan-88): 计划模式外部访问开关——开启后放行工作区外 cwd（仅 plan 模式生效）
-        allow_outside = (
-            getattr(ctx, "permission_mode", "default") == "plan"
-            and settings.plan_mode_allow_outside_access
-        )
+        # plan-75-332: 取消了 cwd 越界限制——工具不再阻止在工作区外目录执行命令
+        # （是否询问用户由 approval_policy 按权限模式裁决）。
         resolved_cwd: str | None = None
 
         if explicit_cwd:
-            resolved_cwd = self._resolve_path(ctx.workspace_root, explicit_cwd, allow_outside)
+            resolved_cwd = self._resolve_path(ctx.workspace_root, explicit_cwd)
         elif cd_chain_match:
             cd_dir = cd_chain_match.group(1).strip().strip('"').strip("'")
-            resolved_cwd = self._resolve_path(ctx.workspace_root, cd_dir, allow_outside)
+            resolved_cwd = self._resolve_path(ctx.workspace_root, cd_dir)
             # 从命令中移除 'cd xxx && ' 部分
             command = re.sub(
                 r"(?:cd|chdir)\s+[^\s&;|]+\s*(?:&&|;|&)\s*",
@@ -359,14 +352,13 @@ class TerminalExecTool(Tool):
             resolved_cwd, len(out), len(err), err[:200],
         )
         data: dict[str, Any] = {"returncode": rc, "cwd": resolved_cwd, "cmd": command}
-        if allow_outside:
-            # 审计标记：放行后实际 cwd 落在工作区外时记录，供回放/审计识别越界访问
-            try:
-                _inside = Path(resolved_cwd).resolve().is_relative_to(Path(ctx.workspace_root).resolve())
-            except (OSError, ValueError):
-                _inside = False
-            if not _inside:
-                data["outside_access"] = True
+        # plan-75-332: 越界 cwd 仅作审计标记（不再有"放行开关"）
+        try:
+            _inside = Path(resolved_cwd).resolve().is_relative_to(Path(ctx.workspace_root).resolve())
+        except (OSError, ValueError):
+            _inside = False
+        if not _inside:
+            data["outside_access"] = True
         return ToolResult(
             ok=rc == 0,
             output=combined or "(无输出)",
@@ -375,38 +367,34 @@ class TerminalExecTool(Tool):
         )
 
     def approval_precheck(self, args: dict[str, Any], ctx: ToolContext) -> tuple[bool, str]:
-        """v2.2 (对齐 zcode 3.12): 只读安全命令免审批；其余维持 high 风险审批。"""
-        from app.orchestration.tools.shell_policy import analyze as _analyze_shell
-        command = str(args.get("command", "") or "")
-        verdict, reason = _analyze_shell(command)
-        if verdict == "allow":
-            return True, reason
-        return False, reason
+        """plan-75-332: 工具不再自行决定免审。
+
+        改造前本钩子会把只读命令判为"免审批"，等于工具自身做了审批决策；
+        现在是否放行统一由 `approval_policy.decide()` 判定（只读命令归
+        exec_readonly：自动审批下放行，询问审批下仍需确认）。
+        保留空实现仅为兼容基类契约。
+        """
+        return False, ""
 
     @staticmethod
-    def _resolve_path(workspace_root: str, rel: str, allow_outside: bool = False) -> str:
-        """把相对路径解析为绝对路径。
+    def _resolve_path(workspace_root: str, rel: str, allow_outside: bool = True) -> str:
+        """把相对/绝对路径解析为绝对路径。
 
-        allow_outside=True（plan 模式外部访问开关开启）时放行工作区外路径：
-        绝对路径直接用，相对路径以 workspace_root 为基准解析（允许 ../ 越界）。
-        否则维持 v1.0 穿越防护：越界路径回退 workspace_root。
+        plan-75-332: 默认不再限制在工作区内（参数 `allow_outside` 保留以兼容旧调用）。
+        工具的职责是"解析并执行"；越界访问是否需询问用户，交由 approval_policy 裁决。
         """
+        from app.orchestration.tools.safe_path import resolve_loose
+
         if allow_outside:
-            try:
-                p = Path(rel)
-                return str(p if p.is_absolute() else (Path(workspace_root) / p).resolve())
-            except (OSError, ValueError):
-                return workspace_root
+            resolved = resolve_loose(rel, workspace_root)
+            return resolved or workspace_root
         from app.orchestration.tools.safe_path import safe_resolve
-        # 优先用 safe_resolve 校验路径安全性
+        # 保守路径：仅限工作区内，越界回退 workspace_root（外部调用方显式要求时使用）
         resolved = safe_resolve(workspace_root, rel)
         if resolved is not None:
             return str(resolved)
-        # safe_resolve 返回 None 表示越界，回退到 workspace_root
         p = Path(rel)
         if p.is_absolute():
-            # 绝对路径但不在 workspace 内 → 拒绝，回退 workspace
             logger.warning("terminal cwd 绝对路径越界: %s，回退 workspace", rel)
             return workspace_root
-        # 相对路径但解析失败（不存在等）→ 回退 workspace
         return workspace_root

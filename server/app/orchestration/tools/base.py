@@ -23,11 +23,17 @@ class ToolContext:
     cancel_event: asyncio.Event | None = None
     # P0 修复: agent 主循环同连接 db 会话,供工具直接落库（避免跨连接 SQLite 写锁）
     db: "AsyncSession | None" = None
-    # v2.2 (对齐 zcode 3.12): 会话权限模式 default / accept_edits / plan
-    permission_mode: str = "default"
-    # v3.0 (plan-88): 沙箱模式 read-only / workspace-write / danger-full-access
-    # （P0：executor 审批门消费；P1/P2：进程与文件系统隔离，见 docs/sandbox-design.md）
+    # plan-75-332: 执行模式（readonly / plan / agent）——"能做什么"，越界即拒绝
+    permission_mode: str = "agent"
+    # plan-75-332: 权限模式（ask / auto / full）——"要不要问"，与执行模式正交
+    approval_mode: str = "ask"
+    # plan-88 引入的沙箱模式字段。plan-75-332 起不再有任何判定消费它
+    # （read-only / danger-full-access 的硬边界已由执行模式×权限模式取代）；
+    # 保留仅为兼容 agent_loop / subagent_context 的既有赋值，避免改动面外溢。
     sandbox_mode: str = "workspace-write"
+    # plan-75-332: 审批卡「解释」专用思考深度默认取本 turn 的档位
+    # （未指定时回落全局 agent_reasoning_effort，见 approval_explain_service）。
+    reasoning_effort: str | None = None
     # v7(B): 运行时输出回调——长命令（terminal_exec 同步模式）执行期间逐帧上报增量输出，
     # 由 agent_loop 注入闭包并广播 tool.output WS 事件（前端运行中实时展示）。
     on_tool_output: Callable[[str], Awaitable[None]] | None = None
@@ -64,8 +70,9 @@ class Tool(ABC):
     def approval_precheck(self, args: dict[str, Any], ctx: ToolContext) -> tuple[bool, str]:
         """v2.2 (对齐 zcode 3.12 命令安全分级): 审批门前置检查。
 
-        返回 (skip_approval, reason)：
-        - skip_approval=True 时 executor 跳过审批直接执行（安全命令免审）；
-        - 默认 (False, "")，维持原有 risk_level 审批流程。
+        plan-75-332 **已废弃**：工具不再自行决定是否免审——那等于工具在替用户
+        做审批决策，与统一策略重复。是否需询问用户一律由
+        `approval_policy.decide()` 按「执行模式 × 权限模式」判定。
+        保留默认实现仅为兼容既有子类与测试的签名约定。
         """
         return False, ""

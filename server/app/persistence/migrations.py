@@ -33,7 +33,12 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("sessions", "plan_confirmed", "BOOLEAN DEFAULT 1 NOT NULL"),
     ("sessions", "updated_at", "VARCHAR"),
     # ========== sessions（v2.2 对齐 zcode 3.12：权限模式）==========
+    # plan-75-332：语义改为"执行模式"（readonly / plan / agent）。旧值 default /
+    # accept_edits 在读取侧归一化为 agent，此处不强制回填，避免改动用户既有数据。
     ("sessions", "permission_mode", "VARCHAR(20) DEFAULT 'default' NOT NULL"),
+    # ========== sessions（plan-75-332：权限模式，与执行模式正交）==========
+    # ask 询问审批 / auto 自动审批 / full 完全访问
+    ("sessions", "approval_mode", "VARCHAR(20) DEFAULT 'ask' NOT NULL"),
     # ========== sessions（v1.1：最后一次 API 真实上下文占用）==========
     ("sessions", "last_prompt_tokens", "INTEGER DEFAULT 0 NOT NULL"),
     ("sessions", "last_usage_at", "VARCHAR(40)"),
@@ -91,6 +96,8 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("team_agents", "mcp_server_ids", "JSON"),
     # ========== rollback_writes（plan-88：二进制/超限文件只走 checkpoint 恢复）==========
     ("rollback_writes", "binary", "BOOLEAN DEFAULT 0 NOT NULL"),
+    # plan-89-387: 写盘记录关联工具调用键——同轮同文件多次编辑按 call_key 取本次变更
+    ("rollback_writes", "call_key", "VARCHAR(64)"),
     # ========== turns（plan-644：计划模式字段持久化，多轮迭代需求全集与卡片恢复的数据源）==========
     ("turns", "plan_doc_path", "VARCHAR(512)"),
     ("turns", "plan_status", "VARCHAR(20)"),
@@ -108,6 +115,9 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("scheduled_tasks", "last_status", "VARCHAR(16)"),
     ("scheduled_tasks", "last_error", "VARCHAR(300)"),
     ("scheduled_tasks", "missed_policy", "VARCHAR(12) DEFAULT 'skip'"),
+    # ========== hook_configs（S12 / plan-41-197：提示词注入型钩子）==========
+    ("hook_configs", "hook_type", "VARCHAR(20) DEFAULT 'command' NOT NULL"),
+    ("hook_configs", "prompt", "VARCHAR(2000)"),
     # ========== memory_entries（plan-230-1144 M4.1：记忆三层化）==========
     ("memory_entries", "scope", "VARCHAR(12) DEFAULT 'session'"),
     ("memory_entries", "project_id", "BIGINT"),
@@ -120,6 +130,9 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     # ========== providers（plan-271-1364：凭据取用策略）==========
     # sticky=粘性优先（上次成功的先用）| round_robin=严格按 priority 轮转
     ("providers", "credential_strategy", "VARCHAR(16) DEFAULT 'sticky'"),
+    # ========== providers（plan-41-225：供应商手动排序位）==========
+    # 用户在模型页左列拖拽调整顺序；0 = 未排序，由 id 兜底保证顺序稳定。
+    ("providers", "sort_order", "INTEGER DEFAULT 0"),
     # ========== workbuddy_auth / ta3_auth / trae_auth（plan-248-1258 M2.2：凭据维度）==========
     # 多账号支持：auth 行归属某条 provider_credentials（旧行迁移时挂到首条凭据）。
     ("workbuddy_auth", "credential_id", "BIGINT"),
