@@ -333,6 +333,19 @@ async def fetch_catalog_raw(api_base: str, token: str) -> dict:
         return {"organizations": organizations, "assistants_by_org": assistants_by_org}
 
 
+async def warm_ide_session(api_base: str, token: str) -> None:
+    """会话预热（plan-90-392）：登录后调一次组织列表接口，完成 IDE 会话初始化。
+
+    背景：/api/ai-sso/generate-token 只接受走过 IDE 目录初始化的会话——IM 静默
+    重登录得到的新会话若未先调用目录接口，生成 SSO 链接仍被 418「未提供有效的
+    认证信息」拒绝（用户实测：重登录成功但重试仍失败）。这里模拟 IDE 端登录后
+    的目录加载（只取组织列表，不拉各组织配置），失败向上抛出由调用方决定忽略。
+    """
+    async with httpx.AsyncClient(timeout=_CATALOG_TIMEOUT,
+                                 headers={"Accept-Encoding": "gzip, deflate"}) as client:
+        await _list_organizations(client, api_base, token)
+
+
 async def sync_ta3_models(db: AsyncSession, provider, api_base: str) -> list[dict]:
     """同步目录 → upsert Model 表，返回新增/更新条目（含 orgId/profileId 元数据）。
 

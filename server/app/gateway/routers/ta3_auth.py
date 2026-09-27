@@ -231,11 +231,34 @@ async def ta3_model_status(provider_id: int, model: str | None = None,
         _raise_quota_http(e, provider_id, "模型状态查询")
 
 
+async def _warm_ide_session(db: AsyncSession, provider_id: int, api_base: str) -> None:
+    """会话预热（plan-90-392，尽力而为）：用当前登录态调一次 IDE 目录接口。
+
+    背景：/api/ai-sso/generate-token 只接受走过 IDE 目录初始化的会话。用户手动
+    「重新登录」后前端会自动「同步模型」（触发目录接口），而自动静默重登录没有
+    这一步——不补预热，重试会被 418「未提供有效的认证信息」拒绝（用户实测：
+    「点击打开网页查看额度报错、重登录后重试仍失败」）。任何失败静默忽略，
+    由后续重试自证。
+    """
+    try:
+        token = await ta3_session.get_access_token(db, provider_id)
+        if not token:
+            return
+        from app.auth.ta3.catalog import warm_ide_session
+
+        await warm_ide_session(api_base, token)
+        logger.info("[ta3] provider=%s 会话预热完成", provider_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[ta3] provider=%s 会话预热失败（忽略）: %s", provider_id, e)
+
+
 async def _silent_relogin(db: AsyncSession, provider_id: int, api_base: str) -> bool:
     """静默重登录（v36 plan-321-1600 R3）：先无感刷新 token；无 refresh_token 或刷新
     失败时再走一次登录流程（IM 静默登录可用时立即成功）。失败不抛错。
 
     返回是否拿到新的登录态（供调用方判断是否值得重试）。
+    plan-90-392：拿到新登录态后补一次会话预热（`_warm_ide_session`），否则 SSO
+    生成接口会以 418 拒绝新会话，重试仍然失败。
     """
     refreshed = False
     try:
@@ -248,6 +271,7 @@ async def _silent_relogin(db: AsyncSession, provider_id: int, api_base: str) -> 
 
     if refreshed:
         ta3_quota.clear_cache(provider_id)
+        await _warm_ide_session(db, provider_id, api_base)
         return True
 
     try:
@@ -276,6 +300,7 @@ async def _silent_relogin(db: AsyncSession, provider_id: int, api_base: str) -> 
         s.commit()
 
     await run_write_locked(_p, label=f"ta3.relogin_state.{provider_id}")
+    await _warm_ide_session(db, provider_id, api_base)
     return True
 
 

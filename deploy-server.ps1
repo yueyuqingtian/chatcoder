@@ -3,7 +3,7 @@
 #   powershell -ExecutionPolicy Bypass -File deploy-server.ps1            # 仅部署+验证
 #   powershell -ExecutionPolicy Bypass -File deploy-server.ps1 -Restart   # 部署+重启 12973 端口服务
 param(
-    [string]$TargetDir = "v7\win-unpacked\resources\server\chatcoder-server",
+    [string]$TargetDir = "0.7.1\win-unpacked\resources\server\chatcoder-server",
     [switch]$Restart
 )
 $ErrorActionPreference = 'Stop'
@@ -17,14 +17,22 @@ $workerExe = "$workerSrc\chatcoder-index-worker.exe"
 if (-not (Test-Path $srcExe)) { throw "未找到打包产物 $srcExe，请先执行打包（build:backend 或 build-release.ps1）" }
 if (-not (Test-Path $workerExe)) { throw "未找到索引 worker $workerExe，请先执行打包" }
 
-# 1. 运行中的服务会锁住部署目录文件且继续跑旧代码，必须先停才能部署
+# 1. 目标目录中的后端若正在运行，会锁住部署文件且继续跑旧代码，必须先停才能部署；
+#    12973 被其他目录的实例占用（例如并存运行的另一个版本）不影响本次部署，跳过停止步骤。
 $conn = Get-NetTCPConnection -LocalPort 12973 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($conn) {
-    if (-not $Restart) { throw "12973 端口服务运行中（PID $($conn.OwningProcess)），会锁住部署文件。请加 -Restart 参数：先停止、部署后自动重启" }
-    $p = Get-Process -Id $conn.OwningProcess
-    Write-Host "停止旧进程 PID $($p.Id)（$($p.Path)）" -ForegroundColor Yellow
-    Stop-Process -Id $p.Id -Force
-    Start-Sleep -Seconds 2
+    $p = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
+    $targetFull = if ([IO.Path]::IsPathRooted($TargetDir)) { [IO.Path]::GetFullPath($TargetDir) } else { [IO.Path]::GetFullPath((Join-Path $root $TargetDir)) }
+    $targetPrefix = $targetFull.TrimEnd('\') + '\'
+    $occupierPath = if ($p -and $p.Path) { [IO.Path]::GetFullPath($p.Path) } else { "" }
+    if ($occupierPath -and $occupierPath.StartsWith($targetPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        if (-not $Restart) { throw "12973 端口服务运行中（PID $($conn.OwningProcess)），会锁住部署文件。请加 -Restart 参数：先停止、部署后自动重启" }
+        Write-Host "停止旧进程 PID $($p.Id)（$($p.Path)）" -ForegroundColor Yellow
+        Stop-Process -Id $p.Id -Force
+        Start-Sleep -Seconds 2
+    } else {
+        Write-Host "12973 端口被其他目录的服务占用（PID $($conn.OwningProcess)），与本次部署目标无关，跳过停止步骤" -ForegroundColor DarkGray
+    }
 } else {
     Write-Host "12973 端口无运行中的服务" -ForegroundColor DarkGray
 }

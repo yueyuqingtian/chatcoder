@@ -28,7 +28,19 @@ def _now() -> str:
 
 
 async def load_auth(db: AsyncSession, provider_id: int) -> Ta3Auth | None:
-    res = await db.execute(select(Ta3Auth).where(Ta3Auth.provider_id == provider_id))
+    """读取登录态行（始终以数据库最新值为准）。
+
+    plan-90-392：登录态写入全部经写引擎独立 session（run_write_locked），与请求读
+    会话不是同一个 identity map——不强制刷新时，同一请求内「静默重登录写入新 token
+    → 重试」会命中缓存里的旧对象，重试仍带旧 token 而必然失败（用户实测：点击
+    「打开网页查看额度」报「生成后台登录 token 失败：服务未返回 token」，IM 重登录
+    成功但重试不生效）。populate_existing 保证每次读取都覆盖为库内最新值。
+    """
+    res = await db.execute(
+        select(Ta3Auth)
+        .where(Ta3Auth.provider_id == provider_id)
+        .execution_options(populate_existing=True)
+    )
     return res.scalars().first()
 
 

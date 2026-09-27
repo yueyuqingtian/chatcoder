@@ -32,9 +32,9 @@ interface UpdaterStore {
   status: UpdateStatus;
   appVersion: string;
   listening: boolean;
-  /** 更新历史（GitHub Releases；离线时回落本地 changelog） */
+  /** 更新历史（自建源 → GitHub Releases；离线时回落本地 changelog） */
   releaseHistory: ReleaseNote[];
-  releaseSource: "github" | "local" | "none" | "";
+  releaseSource: "mirror" | "github" | "local" | "none" | "";
   /** 升级后首启"本次更新"数据；null=无需展示 */
   pendingWhatsNew: ReleaseNote[] | null;
   /** 订阅主进程状态推送（幂等，App 挂载时调用一次） */

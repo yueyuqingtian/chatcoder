@@ -1776,8 +1776,16 @@ function localChangelogPath() {
   return "";
 }
 
-/** GitHub Releases API（owner/repo 来自 package.json build.publish） */
+/** GitHub Releases（owner/repo 来自 package.json build.publish）：发布通道 + 自动更新备源 */
 const UPDATER_REPO = { owner: "yueyuqingtian", repo: "chatcoder" };
+
+/** 自建更新源（主源，plan-90-390）：nginx 静态文件，国内实测 8MB/s+；
+ *  useMultipleRangeRequest=false —— 差分下载各段用单区间请求，兼容性最稳。 */
+const UPDATES_BASE_URL = "https://service.guyueyu.asia/updates/";
+const MIRROR_FEED = { provider: "generic", url: UPDATES_BASE_URL, useMultipleRangeRequest: false };
+const GITHUB_FEED = { provider: "github", owner: UPDATER_REPO.owner, repo: UPDATER_REPO.repo };
+/** 当前生效源：mirror=自建主源 / github=备源；手动检查与启动首查从主源重新开始 */
+let activeFeed = "mirror";
 
 async function fetchReleases(limit = 20) {
   const url = `https://api.github.com/repos/${UPDATER_REPO.owner}/${UPDATER_REPO.repo}/releases?per_page=${limit}`;
@@ -1786,6 +1794,36 @@ async function fetchReleases(limit = 20) {
   });
   if (!resp.ok) throw new Error(`GitHub API HTTP ${resp.status}`);
   return await resp.json();
+}
+
+/** 自建源更新历史：发布时生成的静态 releases.json（结构与下方 GitHub 映射一致：
+ *  {version,name,date,notes,prerelease}），毫秒级返回；失败由调用方回落 GitHub。 */
+async function fetchReleasesMirror(limit = 30) {
+  const resp = await fetch(`${UPDATES_BASE_URL}releases.json`, {
+    headers: { "Accept": "application/json", "User-Agent": "chatcoder-updater" },
+  });
+  if (!resp.ok) throw new Error(`mirror HTTP ${resp.status}`);
+  const data = await resp.json();
+  if (!Array.isArray(data) || data.length === 0) throw new Error("mirror payload invalid");
+  return data.slice(0, limit);
+}
+
+/** 检查更新：主源优先、失败自动切 GitHub 备源（plan-90-390）。
+ *  manual=true（用户手动检查）时重置回主源，给“重试主源”的机会。 */
+async function checkForUpdatesSmart(manual = false) {
+  if (!autoUpdater) return null;
+  if (manual) activeFeed = "mirror";
+  if (activeFeed === "mirror") {
+    try {
+      autoUpdater.setFeedURL(MIRROR_FEED);
+      return await autoUpdater.checkForUpdates();
+    } catch (e) {
+      logErr("[updater] 自建源检查失败，切换 GitHub 备源:", e && e.message);
+      activeFeed = "github";
+    }
+  }
+  autoUpdater.setFeedURL(GITHUB_FEED);
+  return await autoUpdater.checkForUpdates();
 }
 
 function initAutoUpdater() {
@@ -1854,14 +1892,14 @@ function initAutoUpdater() {
   });
 
   // 打开软件 3s 内立即检查一次，之后每 20 分钟自动检测一次
-  // （GitHub 匿名 API 限流 60 次/小时，20 分钟间隔量级安全）
+  // （主源为自建服务器；GitHub 备源匿名 API 限流 60 次/小时，20 分钟间隔量级安全）
   setTimeout(() => {
-    autoUpdater.checkForUpdates().catch((e) => logErr("[updater] 自动检查失败(启动后首查):", e && e.message));
+    checkForUpdatesSmart().catch((e) => logErr("[updater] 自动检查失败(启动后首查):", e && e.message));
   }, 3 * 1000);
   setInterval(() => {
     // 下载中/已下载完成时跳过自动检查：避免 update-available 事件把 downloaded 状态冲回 available
     if (updateState.state === "downloading" || updateState.state === "downloaded") return;
-    autoUpdater.checkForUpdates().catch((e) => logErr("[updater] 自动检查失败(定时):", e && e.message));
+    checkForUpdatesSmart().catch((e) => logErr("[updater] 自动检查失败(定时):", e && e.message));
   }, 20 * 60 * 1000);
 }
 
@@ -1869,7 +1907,7 @@ function initAutoUpdater() {
 ipcMain.handle("app:checkForUpdates", async () => {
   if (!autoUpdater) return { state: "unsupported" };
   try {
-    return await autoUpdater.checkForUpdates();
+    return await checkForUpdatesSmart(true);
   } catch (e) {
     updateState = { state: "error", message: String((e && e.message) || e) };
     pushUpdateState();
@@ -1882,6 +1920,21 @@ ipcMain.handle("app:downloadUpdate", async () => {
   try {
     await autoUpdater.downloadUpdate();
   } catch (e) {
+    // 主源下载失败：切 GitHub 备源重试一次（plan-90-390）
+    if (activeFeed === "mirror") {
+      logErr("[updater] 自建源下载失败，切换备源重试:", e && e.message);
+      activeFeed = "github";
+      try {
+        autoUpdater.setFeedURL(GITHUB_FEED);
+        await autoUpdater.checkForUpdates();
+        if (updateState.state === "available") {
+          await autoUpdater.downloadUpdate();
+          return updateState;
+        }
+      } catch (e2) {
+        logErr("[updater] 备源重试失败:", e2 && e2.message);
+      }
+    }
     updateState = { state: "error", message: String((e && e.message) || e) };
     pushUpdateState();
   }
@@ -1895,9 +1948,27 @@ ipcMain.handle("app:installUpdate", () => {
 });
 ipcMain.handle("app:getVersion", () => app.getVersion());
 
-// plan-230-1144 M4.2: 更新历史 —— 优先 GitHub Releases API（联网），失败回落本地 CHANGELOG.md
+// plan-230-1144 M4.2 / plan-90-390: 更新历史 —— 自建源静态数据 → GitHub API → 本地 CHANGELOG.md 三级回落
 ipcMain.handle("app:getReleaseNotes", async (_e, opts) => {
   const limit = (opts && opts.limit) || 20;
+  // 1) 自建源 releases.json（国内毫秒级）
+  try {
+    const releases = await fetchReleasesMirror(limit);
+    return {
+      ok: true,
+      source: "mirror",
+      releases: releases.map((r) => ({
+        version: String(r.version || "").replace(/^v/, ""),
+        name: r.name || "",
+        date: r.date || "",
+        notes: normalizeReleaseNotes(r.notes),
+        prerelease: !!r.prerelease,
+      })),
+    };
+  } catch (e) {
+    log("[updater] releases.json 不可用，回落 GitHub:", e && e.message);
+  }
+  // 2) GitHub Releases API（联网）
   try {
     const releases = await fetchReleases(limit);
     return {
@@ -1912,7 +1983,7 @@ ipcMain.handle("app:getReleaseNotes", async (_e, opts) => {
       })),
     };
   } catch (e) {
-    // 网络不可用：回落本地打包 changelog（保证离线可看）
+    // 3) 网络不可用：回落本地打包 changelog（保证离线可看）
     try {
       const p = localChangelogPath();
       if (p) {
@@ -1933,26 +2004,40 @@ ipcMain.handle("app:consumeWhatsNew", () => {
   return { show: true, version: cur, from: lastSeen };
 });
 
-// plan-230-1144 M4.2: 拉取"从 fromVersion 到当前"之间各版本的更新说明（汇总展示）
+// plan-230-1144 M4.2 / plan-90-390: 拉取"从 fromVersion 到当前"之间各版本的更新说明（汇总展示）
 ipcMain.handle("app:getWhatsNew", async (_e, opts) => {
   const from = (opts && opts.from) || "";
   const to = (opts && opts.to) || app.getVersion();
+  // 数据源：自建 releases.json 优先，失败回落 GitHub API
+  let releases = null;
+  let source = "mirror";
   try {
-    const releases = await fetchReleases(30);
-    const cmp = (a, b) => {
-      const pa = String(a).split(".").map((x) => parseInt(x, 10) || 0);
-      const pb = String(b).split(".").map((x) => parseInt(x, 10) || 0);
-      for (let i = 0; i < 3; i++) { if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0); }
-      return 0;
-    };
-    const picked = releases
-      .map((r) => ({ version: String(r.tag_name || "").replace(/^v/, ""), name: r.name || "", date: r.published_at || "", notes: normalizeReleaseNotes(r.body) }))
-      .filter((r) => r.version && (!from || cmp(r.version, from) > 0) && cmp(r.version, to) <= 0)
-      .sort((a, b) => cmp(b.version, a.version));
-    return { ok: true, source: "github", releases: picked };
+    releases = await fetchReleasesMirror(30);
   } catch (e) {
-    return { ok: false, source: "none", error: String((e && e.message) || e), releases: [] };
+    log("[updater] releases.json 不可用，回落 GitHub:", e && e.message);
+    source = "github";
+    try {
+      releases = await fetchReleases(30);
+    } catch (e2) {
+      return { ok: false, source: "none", error: String((e2 && e2.message) || e2), releases: [] };
+    }
   }
+  const cmp = (a, b) => {
+    const pa = String(a).split(".").map((x) => parseInt(x, 10) || 0);
+    const pb = String(b).split(".").map((x) => parseInt(x, 10) || 0);
+    for (let i = 0; i < 3; i++) { if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0); }
+    return 0;
+  };
+  const picked = releases
+    .map((r) => ({
+      version: String(r.version || r.tag_name || "").replace(/^v/, ""),
+      name: r.name || "",
+      date: r.date || r.published_at || "",
+      notes: normalizeReleaseNotes(r.notes || r.body),
+    }))
+    .filter((r) => r.version && (!from || cmp(r.version, from) > 0) && cmp(r.version, to) <= 0)
+    .sort((a, b) => cmp(b.version, a.version));
+  return { ok: true, source, releases: picked };
 });
 
 // ── 确保单实例 ──
