@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.core.logging import setup_logging
 from app.gateway.routers import (
     debug,
+    desktop,
     diagnostics,
     exec_policy,
     hooks,
@@ -171,6 +172,14 @@ async def lifespan(app: FastAPI):
         await write_behind.shutdown()
     except Exception:
         logging.getLogger(__name__).debug("shutdown drain write-behind failed", exc_info=True)
+    # plan-334-1661: 停止桌面操控内核子进程。
+    # 必须显式关停：内核是长驻子进程，若只让父进程退出，在部分场景下它会残留
+    # （Windows 无进程组级联退出），既占着命名管道也让下次启动连到旧实例。
+    try:
+        from app.core.desktop_env import shutdown_desktop_core
+        await shutdown_desktop_core()
+    except Exception:
+        logging.getLogger(__name__).debug("shutdown desktop core failed", exc_info=True)
 
 
 def create_app() -> FastAPI:
@@ -241,6 +250,8 @@ def create_app() -> FastAPI:
     # plan-282-1441（#7/#8）：内置 MCP 的状态宿主端点（调试会话 + 数据库连接配置）
     app.include_router(debug.router, prefix="/api", tags=["debug"])
     app.include_router(debug.db_router, prefix="/api", tags=["db"])
+    # plan-334-1661：电脑操控（操作路线管理 + 内核状态）
+    app.include_router(desktop.router, prefix="/api", tags=["desktop"])
     app.include_router(skills_mcp.router, prefix="/api", tags=["skills-mcp"])
     app.include_router(settings_routes.router, prefix="/api", tags=["settings"])
     app.include_router(usage.router, prefix="/api", tags=["usage"])

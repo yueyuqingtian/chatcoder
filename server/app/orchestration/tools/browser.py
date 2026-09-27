@@ -25,9 +25,24 @@ _TIMEOUT = 30000  # ms
 
 
 def _check_browser_enabled() -> str | None:
-    if not getattr(settings, "browser_enabled", False):
-        return "浏览器工具当前未启用。请在「设置 -> 通用设置 -> 内置浏览器自动化工具」中开启该功能。"
-    return None
+    """浏览器工具门禁。
+
+    plan-334-1661：浏览器能力有两个入口，任一开启即可用——
+      1.「设置 → 常规 → 内置浏览器工具」（browser_enabled，历史入口）；
+      2.「设置 → 电脑操控 → 浏览器操作」（desktop_enabled + desktop_browser_ops_enabled）。
+    这样用户在专用页里把「电脑操控」打开后，不必再回到常规页二次开启同一件事；
+    两个开关是「并集」而非「主从」，任一为真都放行。
+    """
+    if getattr(settings, "browser_enabled", False):
+        return None
+    if getattr(settings, "desktop_enabled", False) and getattr(
+        settings, "desktop_browser_ops_enabled", True
+    ):
+        return None
+    return (
+        "浏览器工具当前未启用。可在「设置 → 电脑操控 → 浏览器操作」开启，"
+        "或在「设置 → 常规 → 内置浏览器工具」中开启。"
+    )
 
 
 class _BrowserSessionManager:

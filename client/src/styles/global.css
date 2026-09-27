@@ -3329,6 +3329,38 @@ body.maximized .titlebar { padding-top: 8px; padding-left: 16px; padding-right: 
   padding: var(--sp-2) var(--sp-4); border-radius: var(--r-sm) var(--r-sm) 0 0;
 }
 .ext-subtab.active { background: var(--bg-hover); border-bottom-color: var(--accent); }
+
+/* ── plan-334-1661：电脑操控设置页 ──
+   子标签刻意用「纯文字 + 字重/颜色」表达选中态：不铺底色、不加下划强调线——
+   只有两个标签时，任何容器装饰都是多余的噪声。
+   工具条（搜索 / 批量操作）统一占满卡片宽度并按组分列，
+   避免按钮挤在行尾控件槽里零散换行。 */
+.dp-panel { display: flex; flex-direction: column; gap: var(--sp-4); }
+.dp-subtabs { display: flex; align-items: center; gap: var(--sp-5); }
+.dp-subtab {
+  padding: 0; border: none; background: transparent; cursor: pointer;
+  font-size: 14px; color: var(--text-3);
+  transition: color var(--dur-2) var(--ease-standard);
+}
+.dp-subtab:hover { color: var(--text-1); }
+.dp-subtab.active { color: var(--text-1); font-weight: 600; }
+.dp-toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--sp-3); flex-wrap: wrap;
+}
+.dp-toolbar-group { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; flex-wrap: wrap; }
+.dp-toolbar-hint { font-size: 12px; color: var(--text-3); white-space: nowrap; }
+/* 搜索行：输入框与按钮固定同行。不要复用 .dp-toolbar（那是 space-between + 允许换行的
+   批量操作条容器），否则输入框倾向占满宽度时按钮会被挤到下一行。
+   输入框可收缩（min-width: 0）、按钮不收缩。 */
+.dp-search-row { display: flex; align-items: center; gap: var(--sp-2); }
+.dp-search-row .ui-input { flex: 1 1 auto; min-width: 0; max-width: 320px; }
+.dp-search-row .btn { flex-shrink: 0; }
+/* 路线卡片：标题行 + 原则预览。卡片只给预览，完整内容进弹窗查看/编辑 */
+.dp-recipe-title { display: flex; align-items: center; gap: var(--sp-2); }
+.dp-recipe-title-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dp-recipe-usage { margin-left: auto; flex-shrink: 0; font-size: 11px; color: var(--text-3); }
+.dp-recipe-desc { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 /* 标题计数徽标 */
 .catalog-count {
   margin-left: var(--sp-2); font-size: 12px; font-weight: 500; vertical-align: middle;

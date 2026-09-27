@@ -15,6 +15,20 @@ from app.orchestration.tools.browser import (
 from app.orchestration.tools.ci import CiRunTool
 from app.orchestration.tools.codebase_search import CodebaseSearchTool
 from app.orchestration.tools.compaction_view import CompactionIndexTool, CompactionViewTool
+from app.orchestration.tools.desktop import (
+    DesktopAppsTool,
+    DesktopClickTool,
+    DesktopFindTextTool,
+    DesktopFocusTool,
+    DesktopHitTool,
+    DesktopKeysTool,
+    DesktopRecipeTool,
+    DesktopScreenshotTool,
+    DesktopScrollTool,
+    DesktopSnapshotTool,
+    DesktopTypeTool,
+    DesktopWindowsTool,
+)
 from app.orchestration.tools.editor import EditorApplyDiffTool
 from app.orchestration.tools.fs_list import FsListTool
 from app.orchestration.tools.fs_read import FsReadTool
@@ -101,6 +115,11 @@ def _build_default_registry() -> ToolRegistry:
         GoalCompleteTool,
         # v1.0 (plan-153-705): 后台进程查询/终止（配合 terminal_exec waitForCompletion=false）
         TerminalBgStatusTool, TerminalBgKillTool,
+        # plan-334-1661: 电脑操控（内置原生工具，非 MCP——内核常驻，详见 tools/desktop.py）
+        DesktopWindowsTool, DesktopSnapshotTool, DesktopHitTool,
+        DesktopScreenshotTool, DesktopFindTextTool,
+        DesktopClickTool, DesktopTypeTool, DesktopKeysTool, DesktopScrollTool,
+        DesktopFocusTool, DesktopAppsTool, DesktopRecipeTool,
     ):
         reg.register(tool_cls())
     return reg

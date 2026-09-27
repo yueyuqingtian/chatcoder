@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import resolve_workspace_root, settings
 from app.orchestration.approval_policy import (
-    APPROVAL_FULL,
     normalize_approval_mode,
     normalize_execution_mode,
 )
@@ -374,6 +373,10 @@ _MODE_HINTS = {
         "ai/chatcoder-plan-{session_id}-{turn_id}.md，"
         "必须严格使用这个文件名，不要自行改名或加序号/时间戳。"
         "文档包含目标、步骤拆解、涉及文件与验收标准。\n"
+        "2a. 调整/修订方案时同样只写新文档：不要用编辑工具（editor_apply_diff / "
+        "multi_file_edit 等）修改历史方案文档（计划模式下编辑类工具一律被拒绝）；"
+        "请基于历史方案与用户最新意见，用 fs_write 重新写出完整的新方案文档，"
+        "历史文档保持原样留档。\n"
         "3. 文档写出后本轮即结束，交付用户确认；此时不要执行方案中的业务修改动作。\n"
         "4. 执行期间保持清单状态实时更新：每完成一项立即用 todo_write 标记 completed，系统会在每次调用时向你提供计划状态全集。\n"
         "【重要】方案文档必须通过调用 fs_write 工具写入文件才算完成——"
@@ -914,12 +917,12 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         # 旧版请求都不会让模式解析落空。
         _mode = normalize_execution_mode(mode)
         _approval_mode = normalize_approval_mode(getattr(session, "approval_mode", None))
-        # 完全访问（approval_mode=full）：免询问、工具全量放行——
-        # 不注入规划/审阅模式说明（用户要求"完全访问"不再被规划流程限制）。
-        # 注意这是**权限模式**而非执行模式：能力边界仍由 _mode 决定。
-        _full_access = _approval_mode == APPROVAL_FULL
-
-        if _mode == "plan" and not _full_access and settings.plan_history_inject_chars > 0:
+        # 用户反馈修复：移除旧「完全访问豁免规划流程」特殊化——权限模式（ask/auto/full）
+        # 只决定"要不要问"，能力边界与流程说明一律由执行模式（_mode）决定。此前完全访问
+        # 会跳过模式说明/Plan History 注入，并按全量下发工具，「计划模式 + 完全访问」下
+        # 模型既不知道 plan 规则、又看得到 plan 下必被拒的编辑类工具，反复尝试编辑
+        # 历史方案文档、全部失败（用户反馈）。
+        if _mode == "plan" and settings.plan_history_inject_chars > 0:
             _plan_history = await _collect_plan_history(db, session, workspace)
             if _plan_history:
                 logger.info("[engine] turn=%s 注入 Plan History %d 字符", turn_id, len(_plan_history))
@@ -938,19 +941,19 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             effective_model_id=effective_model_id,
         )
 
-        # 命令模式：注入模式指令（/chat 只读、/plan 先规划后执行）；完全访问下跳过。
+        # 命令模式：注入模式指令（/chat 只读、/plan 先规划后执行）。用户显式选择的
+        # 执行模式，规则说明必须送达——不再因"完全访问"跳过（用户反馈修复）。
         # plan-230-1144 M2: 自定义模式的提示词从配置读取（resolve_hint），
         # 内置模式沿用 _MODE_HINTS。
         _mode_hint = ""
-        if not _full_access:
-            if _mode in _MODE_HINTS:
-                _mode_hint = _MODE_HINTS[_mode]
-            else:
-                try:
-                    from app.services import permission_profile_service as _pps
-                    _mode_hint = _pps.resolve_hint(mode or "default")
-                except Exception:
-                    logger.debug("[engine] turn=%s 自定义提示词读取失败", turn_id, exc_info=True)
+        if _mode in _MODE_HINTS:
+            _mode_hint = _MODE_HINTS[_mode]
+        else:
+            try:
+                from app.services import permission_profile_service as _pps
+                _mode_hint = _pps.resolve_hint(mode or "default")
+            except Exception:
+                logger.debug("[engine] turn=%s 自定义提示词读取失败", turn_id, exc_info=True)
         if _mode_hint:
             if _mode == "plan":
                 # plan-95: 提示词含 {session_id}/{turn_id} 占位符——文档按 turn 唯一命名，
@@ -958,7 +961,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                 _mode_hint = _mode_hint.format(session_id=session_id, turn_id=turn_id)
             bundle.instruction = (_mode_hint + "\n\n" + bundle.instruction).strip() if bundle.instruction else _mode_hint
 
-        # 2. 工具 schemas（按模式过滤 + 子代理工具；完全访问 = 全量工具）
+        # 2. 工具 schemas（按执行模式过滤 + 子代理工具；工具清单与权限模式无关）
         # plan-230-1144 M1.3: 先按模式取内置工具集，再统一走一次 MCP 注入。
         # plan-230-1144 M2: 白名单统一经 resolve_tools（内置 4 模式 + 自定义模式）；
         # 只读类判定经 is_readonly_like（MCP 只放行只读工具的依据）。
@@ -968,7 +971,9 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                 mode or "default",
                 {t.name for t in tool_registry.all()} | SUBAGENT_TOOL_NAMES,
             )
-            _mode_readonly = _pps.is_readonly_like(mode or "default") and not _full_access
+            # 用户反馈修复：只读类判定不再看权限模式——「完全访问」下 MCP 只读过滤
+            # 与子代理工具面必须与执行模式（只读/计划）一致。
+            _mode_readonly = _pps.is_readonly_like(mode or "default")
             # 设置页白名单勾选对 MCP 工具同样生效（None = 不限制，见服务层口径说明）
             _mcp_allowed = _pps.mcp_allowed_tools(mode or "default")
             # v36: 只读/计划模式下「显式勾选的 MCP 工具」也放行（默认仅只读类）
@@ -982,10 +987,10 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             _mode_readonly = _mode in ("readonly", "plan")
             _mcp_allowed = None
             _mcp_extra = set()
-        if _full_access:
-            tool_schemas = tool_registry.all_schemas()
-        else:
-            tool_schemas = tool_registry.all_schemas(_schema_whitelist)
+        # 用户反馈修复：工具清单只由执行模式（能力边界）决定，与权限模式无关——
+        # 此前「完全访问」走全量下发，把 plan 下必然被拒的编辑类工具也发给模型，
+        # 模型见得到、试了必被拒：多轮调整计划时反复尝试编辑历史方案文档（用户反馈）。
+        tool_schemas = tool_registry.all_schemas(_schema_whitelist)
         await _inject_mcp_tools(
             db, main_agent, tool_schemas, turn_id,
             readonly_only=_mode_readonly,
@@ -1001,7 +1006,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         # 只读/计划模式仅暴露只读探索子代理（explore_only，运行时强制 explore）；
         # 白名单模式尊重用户在权限面板勾选的子代理工具子集（未勾选不暴露）。
         _subagent_allowed: set[str] | None = None
-        if not _full_access and _schema_whitelist is not None:
+        if _schema_whitelist is not None:
             _subagent_allowed = SUBAGENT_TOOL_NAMES & set(_schema_whitelist)
         tool_schemas = append_subagent_tools(
             tool_schemas, _type_states,

@@ -458,6 +458,143 @@ _BROWSER: list[dict] = [
     }),
 ]
 
+# ── 电脑操控（plan-334-1661：当前项目补充，非参考项目原生）──
+# 本能力是内置原生工具集（内核常驻子进程），伪装名自造（ReadAttachment/MultiFileEdit 先例）。
+# 参数键名与真实工具完全一致，无需 ARGS 适配。
+# 描述里保留「需在设置中启用」的引导，让模型在未开启时能向用户解释原因。
+_DESKTOP: list[dict] = [
+    _f("DesktopWindows", "列出当前可见窗口及其句柄、进程名与中心坐标。"
+        "操作电脑前的第一步：先看有哪些窗口，拿到 handle 或标题再给其它工具用。"
+        "需在「设置 → 电脑操控」中启用。", {
+        "type": "object",
+        "properties": {
+            "filter": {"type": "string", "description": "按标题或进程名过滤（可选）"},
+            "limit": {"type": "integer", "description": "最多返回多少个窗口，默认 30"},
+        },
+    }),
+    _f("DesktopSnapshot", "读取指定窗口的控件树（UI Automation），返回可交互元素及其中心坐标。"
+        "这是感知窗口内容的首选方式：一次调用即可拿到按钮/输入框/菜单项等元素，"
+        "元素带 x,y 中心点，可直接用于 DesktopClick。若返回元素数为 0，说明该应用是自绘界面，"
+        "请改用 DesktopScreenshot 截图后用 DesktopFindText 定位。需在「设置 → 电脑操控」中启用。", {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string", "description": "窗口标题（包含匹配，可选）"},
+            "handle": {"type": "integer", "description": "窗口句柄（来自 DesktopWindows）"},
+            "interactive_only": {"type": "boolean", "description": "只返回可交互元素，默认 true"},
+            "budget": {"type": "integer", "description": "最多返回多少个元素，默认 200"},
+            "depth": {"type": "integer", "description": "最大遍历深度，默认 12"},
+            "time_budget_ms": {"type": "integer", "description": "遍历时间预算（毫秒），默认 800"},
+        },
+    }),
+    _f("DesktopHit", "查询屏幕某个坐标上是什么 UI 元素（含上级层级链）。"
+        "这是最便宜的感知原语：先定位再决定动作，比先抓全控件树再在客户端搜索快得多。", {
+        "type": "object", "required": ["x", "y"],
+        "properties": {
+            "x": {"type": "integer", "description": "屏幕横坐标（物理像素）"},
+            "y": {"type": "integer", "description": "屏幕纵坐标（物理像素）"},
+            "chain": {"type": "boolean", "description": "是否返回上级层级链，默认 true"},
+        },
+    }),
+    _f("DesktopScreenshot", "截取屏幕（或指定区域），保存为图片并返回路径与尺寸。"
+        "仅在 UI Automation 无法读取控件时使用（自绘界面）。"
+        "返回的 scale 可把图片坐标换算回屏幕坐标，点击时请用屏幕坐标。", {
+        "type": "object",
+        "properties": {
+            "max_dim": {"type": "integer", "description": "缩放后长边像素，默认 1600；0 表示不缩放"},
+            "region": {"type": "string", "description": "截图区域 \"x,y,w,h\"（屏幕物理像素），不填则截全屏"},
+            "format": {"type": "string", "description": "jpg 或 png，默认 jpg"},
+        },
+    }),
+    _f("DesktopFindText", "在屏幕上查找指定文字，直接返回可点击的屏幕坐标。"
+        "这是自绘界面（UI Automation 读不到控件）的主力手段：与其「截图→自己估坐标→点击→再截图确认」，"
+        "直接问文字在哪里更准也更快。返回的 x,y 已是屏幕物理坐标，可直接传给 DesktopClick。"
+        "若未找到，会返回屏幕上实际可见的文字片段，便于修正目标文字而无需重新截图。"
+        "需在「设置 → 电脑操控」中启用。", {
+        "type": "object", "required": ["text"],
+        "properties": {
+            "text": {"type": "string", "description": "要查找的文字"},
+            "exact": {"type": "boolean", "description": "是否区分大小写精确匹配，默认 false"},
+            "region": {"type": "string", "description": "限定区域 \"x,y,w,h\"，可显著提速（可选）"},
+            "max_dim": {"type": "integer", "description": "识别前缩放长边像素，默认 1600"},
+        },
+    }),
+    _f("DesktopClick", "在屏幕指定坐标点击鼠标。这是真正的写操作，会移动真实鼠标。"
+        "提供 title 或 handle 时会校验目标窗口，防止点错窗口。需审批。", {
+        "type": "object", "required": ["x", "y"],
+        "properties": {
+            "x": {"type": "integer", "description": "屏幕横向物理像素坐标"},
+            "y": {"type": "integer", "description": "屏幕纵向物理像素坐标"},
+            "title": {"type": "string", "description": "目标窗口标题（包含匹配），用于安全校验"},
+            "handle": {"type": "integer", "description": "目标窗口句柄"},
+            "button": {"type": "string", "description": "left / right / middle，默认 left"},
+            "count": {"type": "integer", "description": "点击次数，2 表示双击，默认 1"},
+            "focus_first": {"type": "boolean", "description": "点击前先激活目标窗口，默认 false"},
+            "text": {"type": "string", "description": "点击后紧接着输入的文本（可选）"},
+            "keys": {"type": "string", "description": "输入后紧接着按下的键，如 ENTER（可选）"},
+            "clear_first": {"type": "boolean", "description": "输入前先全选清空，默认 false"},
+        },
+    }),
+    _f("DesktopType", "向当前焦点位置输入文本（支持中文）。这是真正的写操作。"
+        "提供 title 或 handle 时会校验目标窗口，防止输入打到错误窗口。需审批。", {
+        "type": "object", "required": ["text"],
+        "properties": {
+            "text": {"type": "string", "description": "要输入的文本"},
+            "title": {"type": "string", "description": "目标窗口标题（用于安全校验）"},
+            "handle": {"type": "integer", "description": "目标窗口句柄"},
+            "clear_first": {"type": "boolean", "description": "输入前先全选清空，默认 false"},
+        },
+    }),
+    _f("DesktopKeys", "按下组合键或功能键，如 ENTER / CTRL+S / ALT+F4。这是真正的写操作。需审批。", {
+        "type": "object", "required": ["keys"],
+        "properties": {
+            "keys": {"type": "string", "description": "按键或组合键，如 ENTER、CTRL+S、WIN+D"},
+            "title": {"type": "string", "description": "目标窗口标题（用于安全校验）"},
+            "handle": {"type": "integer", "description": "目标窗口句柄"},
+        },
+    }),
+    _f("DesktopScroll", "在指定位置滚动鼠标滚轮。需审批。", {
+        "type": "object",
+        "properties": {
+            "x": {"type": "integer", "description": "横向坐标（可选）"},
+            "y": {"type": "integer", "description": "纵向坐标（可选）"},
+            "clicks": {"type": "integer", "description": "滚动格数，正数向上、负数向下，默认 3"},
+            "horizontal": {"type": "boolean", "description": "是否横向滚动，默认 false"},
+        },
+    }),
+    _f("DesktopFocus", "把指定窗口激活到前台（最小化时先还原）。"
+        "写操作前若目标窗口不在前台，先用本工具把它激活。", {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string", "description": "窗口标题（包含匹配，可选）"},
+            "handle": {"type": "integer", "description": "窗口句柄（来自 DesktopWindows）"},
+        },
+    }),
+    _f("DesktopApps", "查找或启动应用程序。action=find 按关键词列出已安装应用与匹配路径；"
+        "action=start 启动指定程序（exe 路径或关键词）。启动程序需审批。", {
+        "type": "object", "required": ["action"],
+        "properties": {
+            "action": {"type": "string", "description": "find（查找）或 start（启动）"},
+            "keyword": {"type": "string", "description": "应用名关键词，如 QQMusic、记事本"},
+            "exe": {"type": "string", "description": "action=start 时可直接给出可执行文件完整路径"},
+        },
+    }),
+    _f("DesktopRecipe", "记录或查询「操作路线」——某应用某操作意图的通用原则，用于减少重复推演。\n"
+        "action=recall：在操控某个应用之前先查一次；命中就按 principle 执行，不必重新摸索界面。\n"
+        "action=save：一次操控成功后，把「怎么做才有效、踩了什么坑」沉淀下来。\n"
+        "**存的是通用原则，不是坐标回放**——界面会变，原则不会。\n"
+        "同一应用同一意图只保留一条：重复保存会累加使用次数并更新原则。", {
+        "type": "object", "required": ["action"],
+        "properties": {
+            "action": {"type": "string", "description": "recall（查询）或 save（保存）"},
+            "app_name": {"type": "string", "description": "应用名，建议用进程名（如 QQMusic）"},
+            "intent": {"type": "string", "description": "操作意图，一句话（如「搜索并播放指定歌曲」）"},
+            "principle": {"type": "string", "description": "action=save 时必填：通用原则"},
+            "pitfalls": {"type": "string", "description": "action=save 时可选：踩过的坑"},
+            "steps": {"type": "array", "description": "action=save 时可选：实际的操作序列，供人工核对", "items": {"type": "object"}},
+        },
+    }),
+]
+
 # ── v43: 子代理管理（主代理侧）/ 上报（子代理侧）──
 # TaskQuery / TaskCancel 已在 _TASK 段（v36）；此处补检视、指令与子代理上报。
 _SUBAGENT_ADMIN: list[dict] = [
@@ -499,7 +636,7 @@ _SUBAGENT_ADMIN: list[dict] = [
 TA3_NATIVE_SCHEMAS: dict[str, dict] = {
     s["function"]["name"]: s for s in [
         *_CORE, *_EDIT, *_TASK, *_WEB_SEARCH, *_ATTACHMENT, *_BACKGROUND, *_GOAL, *_ASK, *_MULTI_EDIT,
-        *_SYMBOL, *_TOOLKIT, *_BROWSER, *_SUBAGENT_ADMIN,
+        *_SYMBOL, *_TOOLKIT, *_BROWSER, *_DESKTOP, *_SUBAGENT_ADMIN,
     ]
 }
 

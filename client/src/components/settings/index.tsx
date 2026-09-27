@@ -19,6 +19,8 @@ import { IndexLibraryPanel } from "./IndexLibraryPanel";
 import { ArchivedPanel } from "./ArchivedPanel";
 import { WorktreesPanel } from "./WorktreesPanel";
 import { PetsPanel } from "./PetsPanel";
+// plan-334-1661：电脑操控专用设置页（内核常驻，不作为 MCP 注册，故不进连接器页）
+import { DesktopPanel } from "./DesktopPanel";
 import { IconDownload, IconRefresh } from "../icons";
 import { MarkdownContent } from "../MarkdownContent";
 import { Card, PageShell, PageTransition } from "../ui";
@@ -29,7 +31,7 @@ import {
   IconAnchor, IconBarChart, IconBookOpen, IconBrain, IconCalendar,
   IconChevronDown,
   IconCpu, IconInfo, IconPalette, IconRotateCcw, IconSettings,
-  IconShield, IconTool, IconUsers, IconBox, IconGitBranch, IconPet,
+  IconShield, IconTool, IconUsers, IconBox, IconGitBranch, IconPet, IconMonitor,
 } from "../icons";
 
 export type SettingsTab =
@@ -40,7 +42,8 @@ export type SettingsTab =
   | "index"
   | "archive"
   | "worktrees"
-  | "pets";
+  | "pets"
+  | "desktop";
 
 export interface SettingsIndexItem {
   key: SettingsTab;
@@ -55,6 +58,8 @@ export const SETTINGS_INDEX: SettingsIndexItem[] = [
   { key: "general", label: "常规", group: "basic", keywords: "语言 代理 终端 Shell 字体 搜索 todos reasoning", icon: <IconSettings size={15} /> },
   { key: "appearance", label: "外观", group: "basic", keywords: "主题 毛玻璃 布局 字号 颜色 面板", icon: <IconPalette size={15} /> },
   { key: "pets", label: "宠物", group: "basic", keywords: "宠物 pet petdex 桌面 浮窗 任务 状态 徽标 胶囊", icon: <IconPet size={15} /> },
+  // plan-334-1661：电脑操控（内核常驻的内置工具，不注册为 MCP，因此不在连接器页）
+  { key: "desktop", label: "电脑操控", group: "agent", keywords: "电脑操控 computer use 桌面 鼠标 键盘 截图 uia 无障碍 操作路线 recipe", icon: <IconMonitor size={15} /> },
   { key: "models", label: "模型设置", group: "basic", keywords: "供应商 模型 上下文 多模态 推理", icon: <IconCpu size={15} /> },
   { key: "memory", label: "记忆", group: "agent", keywords: "记忆 召回 entries", icon: <IconBrain size={15} /> },
   // plan-282-1441（#6）：插件 / 技能 / MCP 三个独立页收拢为一个「拓展」页（子标签分区）
@@ -308,6 +313,8 @@ const PANELS: Record<SettingsTab, { Comp: React.ComponentType; width?: "standard
   // plan-73-323 / plan-73-326：宠物分区（面板自带 settings-card 结构，不再外包 Card——
   // 此前 card:true 会形成“卡片套卡片”，与「设置 → 常规」的排版不一致）
   pets: { Comp: PetsPanel },
+  // plan-334-1661：自带 settings-card-stack / 子标签结构，不外包 Card
+  desktop: { Comp: DesktopPanel },
 };
 
 function Panel({ tab }: { tab: SettingsTab }) {

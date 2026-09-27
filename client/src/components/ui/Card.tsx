@@ -47,11 +47,16 @@ interface ListRowProps {
   desc?: ReactNode;
   actions?: ReactNode;
   className?: string;
+  /** 整行点击（如打开详情/编辑弹窗）——传入后整行呈现可点击态 */
+  onClick?: () => void;
 }
 
-export function ListRow({ name, desc, actions, className = "" }: ListRowProps) {
+export function ListRow({ name, desc, actions, className = "", onClick }: ListRowProps) {
   return (
-    <div className={`ui-list-row ${className}`.trim()}>
+    <div
+      className={`ui-list-row${onClick ? " is-clickable" : ""} ${className}`.trim()}
+      onClick={onClick}
+    >
       <div className="ui-list-row-info">
         <div className="ui-list-row-name">{name}</div>
         {desc ? <div className="ui-list-row-desc">{desc}</div> : null}

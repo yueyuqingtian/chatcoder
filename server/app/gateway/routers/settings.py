@@ -128,6 +128,24 @@ def load_persisted_workspace() -> None:
         settings.browser_enabled = bool(data["browser_enabled"])
     if "browser_headless" in data:
         settings.browser_headless = bool(data["browser_headless"])
+    # plan-334-1661: 电脑操控相关开关
+    _DESKTOP_BOOL_KEYS = (
+        "desktop_enabled", "desktop_plain_ops_enabled", "desktop_browser_ops_enabled",
+        "desktop_require_foreground", "desktop_recipe_enabled",
+    )
+    for _k in _DESKTOP_BOOL_KEYS:
+        if _k in data:
+            setattr(settings, _k, bool(data[_k]))
+    if "desktop_screenshot_quality" in data:
+        try:
+            settings.desktop_screenshot_quality = max(10, min(100, int(data["desktop_screenshot_quality"])))
+        except (TypeError, ValueError):
+            pass
+    if "desktop_screenshot_max_dim" in data:
+        try:
+            settings.desktop_screenshot_max_dim = max(0, int(data["desktop_screenshot_max_dim"]))
+        except (TypeError, ValueError):
+            pass
     # v31.2: 启动时恢复代理设置（运行时字段 + 环境变量，供 web 工具走代理）
     if "http_proxy" in data:
         _proxy = str(data["http_proxy"] or "")
@@ -230,6 +248,16 @@ class GlobalSettingsOut(BaseModel):
     # 浏览器自动化开关与无头模式
     browser_enabled: bool = False
     browser_headless: bool = True
+    # plan-334-1661: 电脑操控（内核常驻的内置工具集，不作为 MCP 注册）
+    # 注意：这些字段必须同时出现在 Out 与 In 两个模型里——只加 In 会导致
+    # _global_settings_out 传入的 kwarg 被 pydantic 静默丢弃，前端表现为"改了不保存"。
+    desktop_enabled: bool = False
+    desktop_plain_ops_enabled: bool = True
+    desktop_browser_ops_enabled: bool = True
+    desktop_require_foreground: bool = True
+    desktop_screenshot_quality: int = 75
+    desktop_screenshot_max_dim: int = 1600
+    desktop_recipe_enabled: bool = True
     # v36: 子代理并发治理（设置中心「子代理」面板可配，运行时立即生效）
     max_concurrent_subagents: int = 6   # 同时运行上限（超出排队等待，1~16）
     max_subagents_per_turn: int = 10    # 每轮派发总量上限（含已完成，1~32）
@@ -270,6 +298,14 @@ class GlobalSettingsIn(BaseModel):
     agent_retry_intervals: str | None = None
     browser_enabled: bool | None = None
     browser_headless: bool | None = None
+    # plan-334-1661: 电脑操控（集中一处，_global_settings_out 与 PUT 都读这里）
+    desktop_enabled: bool | None = None
+    desktop_plain_ops_enabled: bool | None = None
+    desktop_browser_ops_enabled: bool | None = None
+    desktop_require_foreground: bool | None = None
+    desktop_screenshot_quality: int | None = None
+    desktop_screenshot_max_dim: int | None = None
+    desktop_recipe_enabled: bool | None = None
     # v36: 子代理并发治理
     max_concurrent_subagents: int | None = None
     max_subagents_per_turn: int | None = None
@@ -324,6 +360,20 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
         agent_retry_intervals=data.get("agent_retry_intervals", settings.agent_retry_intervals),
         browser_enabled=data.get("browser_enabled", settings.browser_enabled),
         browser_headless=data.get("browser_headless", settings.browser_headless),
+        # plan-334-1661: 电脑操控（新增字段只需改这里，不会再漏——见本函数 docstring）
+        desktop_enabled=data.get("desktop_enabled", getattr(settings, "desktop_enabled", False)),
+        desktop_plain_ops_enabled=data.get(
+            "desktop_plain_ops_enabled", getattr(settings, "desktop_plain_ops_enabled", True)),
+        desktop_browser_ops_enabled=data.get(
+            "desktop_browser_ops_enabled", getattr(settings, "desktop_browser_ops_enabled", True)),
+        desktop_require_foreground=data.get(
+            "desktop_require_foreground", getattr(settings, "desktop_require_foreground", True)),
+        desktop_screenshot_quality=int(data.get(
+            "desktop_screenshot_quality", getattr(settings, "desktop_screenshot_quality", 75))),
+        desktop_screenshot_max_dim=int(data.get(
+            "desktop_screenshot_max_dim", getattr(settings, "desktop_screenshot_max_dim", 1600))),
+        desktop_recipe_enabled=data.get(
+            "desktop_recipe_enabled", getattr(settings, "desktop_recipe_enabled", True)),
         # plan-75-332: 审批卡「解释」专用模型 / 思考深度（0/空 = 跟随会话）
         approval_explain_model_id=int(data.get("approval_explain_model_id", 0) or 0),
         approval_explain_reasoning_effort=str(
@@ -511,6 +561,23 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
     if body.browser_headless is not None:
         data["browser_headless"] = bool(body.browser_headless)
         settings.browser_headless = bool(body.browser_headless)
+    # plan-334-1661: 电脑操控开关（落盘 + 运行时立即生效，工具门禁每次调用都读 settings）
+    for _field in (
+        "desktop_enabled", "desktop_plain_ops_enabled", "desktop_browser_ops_enabled",
+        "desktop_require_foreground", "desktop_recipe_enabled",
+    ):
+        _val = getattr(body, _field, None)
+        if _val is not None:
+            data[_field] = bool(_val)
+            setattr(settings, _field, bool(_val))
+    if body.desktop_screenshot_quality is not None:
+        _q = max(10, min(100, int(body.desktop_screenshot_quality)))
+        data["desktop_screenshot_quality"] = _q
+        settings.desktop_screenshot_quality = _q
+    if body.desktop_screenshot_max_dim is not None:
+        _d = max(0, int(body.desktop_screenshot_max_dim))
+        data["desktop_screenshot_max_dim"] = _d
+        settings.desktop_screenshot_max_dim = _d
     # v36: 子代理并发治理（夹紧上限，运行时立即生效——agent_loop 每次派发前读取）
     if body.max_concurrent_subagents is not None:
         _mc = max(1, min(16, int(body.max_concurrent_subagents)))

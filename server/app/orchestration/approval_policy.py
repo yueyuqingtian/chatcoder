@@ -42,6 +42,9 @@ ACTION_EXEC_NORMAL = "exec_normal"
 ACTION_EXEC_RISKY = "exec_risky"
 ACTION_NETWORK = "network"
 ACTION_MANAGE = "manage"
+# plan-334-1661：电脑操控写操作（点击/输入/按键）——直接作用于用户的真实桌面，
+# 语义上既不是文件写也不是命令执行，单独成类才能在审批卡上给出准确措辞。
+ACTION_DESKTOP = "desktop"
 
 # 审批卡标题用的动作短语（前端可直接展示，不必再拼工具名）
 ACTION_LABELS: dict[str, str] = {
@@ -55,6 +58,7 @@ ACTION_LABELS: dict[str, str] = {
     ACTION_EXEC_RISKY: "执行风险命令",
     ACTION_NETWORK: "访问网络",
     ACTION_MANAGE: "管理系统进程",
+    ACTION_DESKTOP: "操作电脑（鼠标/键盘）",
 }
 
 # ══════════════════════════════════════════════════════════
@@ -156,6 +160,9 @@ _MATRIX: dict[str, dict[str, str]] = {
     ACTION_NETWORK: {APPROVAL_ASK: VERDICT_ASK, APPROVAL_AUTO: VERDICT_ALLOW, APPROVAL_FULL: VERDICT_ALLOW},
     # 进程/服务管理
     ACTION_MANAGE: {APPROVAL_ASK: VERDICT_ASK, APPROVAL_AUTO: VERDICT_ASK, APPROVAL_FULL: VERDICT_ALLOW},
+    # 电脑操控写操作（plan-334-1661）：直接操作真实鼠标键盘，
+    # 与「风险命令」同档——自动审批下仍要问（点错窗口成本很高），完全访问才自动放行。
+    ACTION_DESKTOP: {APPROVAL_ASK: VERDICT_ASK, APPROVAL_AUTO: VERDICT_ASK, APPROVAL_FULL: VERDICT_ALLOW},
 }
 
 # ══════════════════════════════════════════════════════════
@@ -179,6 +186,12 @@ _PATH_READ_TOOLS = frozenset({"fs_read", "fs_list", "fs_grep", "view_image"})
 # 写盘工具（路径参数名见下）
 _WRITE_TOOLS = frozenset({"fs_write", "editor_apply_diff", "multi_file_edit", "apply_patch"})
 
+# 编辑类写工具（原地改写已有文件，含历史计划文档）：计划模式下没有任何例外。
+# 单独成表用于在拒绝文案中给出「改用 fs_write 重写新文档」的明确指引——用户反馈：
+# 调整计划时模型反复尝试编辑历史方案文档，原文案（"只能写入计划文档"）会被误读为
+# "目标在 ai/ 下即应放行"，模型于是换工具反复重试。
+_EDIT_TOOLS = frozenset({"editor_apply_diff", "multi_file_edit", "apply_patch"})
+
 # 读磁盘时可能带上"列目录/读文件"语义的路径参数名
 _PATH_KEYS = ("path", "file_path", "filepath", "file")
 
@@ -191,6 +204,16 @@ _NETWORK_TOOLS = frozenset({
 
 # 进程 / 服务管理
 _MANAGE_TOOLS = frozenset({"terminal_bg_kill"})
+
+# 电脑操控：写操作（真的动鼠标键盘）
+_DESKTOP_WRITE_TOOLS = frozenset({
+    "desktop_click", "desktop_type", "desktop_keys", "desktop_scroll",
+})
+# 电脑操控：只读感知（读屏幕/无障碍树），与文件读取同为纯读
+_DESKTOP_READ_TOOLS = frozenset({
+    "desktop_windows", "desktop_snapshot", "desktop_hit", "desktop_focus",
+    "desktop_find_text", "desktop_screenshot",
+})
 
 # 执行任意命令
 _COMMAND_TOOLS = frozenset({"terminal_exec"})
@@ -379,6 +402,12 @@ def classify(tool_name: str, args: dict, ctx, *, risk_level: str = "low") -> Act
     if tool_name in _MANAGE_TOOLS:
         return ActionInfo(ACTION_MANAGE)
 
+    if tool_name in _DESKTOP_WRITE_TOOLS:
+        return ActionInfo(ACTION_DESKTOP, risk_note="将真实操作鼠标键盘")
+
+    if tool_name in _DESKTOP_READ_TOOLS:
+        return ActionInfo(ACTION_READ, label="读取屏幕内容")
+
     if tool_name in _READ_TOOLS:
         if tool_name in _PATH_READ_TOOLS:
             paths = target_paths(tool_name, args)
@@ -420,6 +449,8 @@ def _mode_boundary(
             return "只读模式仅允许只读命令，禁止通过终端修改或创建文件"
         if info.action == ACTION_MANAGE:
             return "只读模式不允许管理系统进程"
+        if info.action == ACTION_DESKTOP:
+            return "只读模式不允许操作电脑（鼠标/键盘）"
         return None
 
     if execution_mode == MODE_PLAN:
@@ -429,6 +460,15 @@ def _mode_boundary(
                 paths = target_paths(tool_name, args)
                 if paths and is_plan_doc_path(getattr(ctx, "workspace_root", None), paths[0]):
                     return None
+            # 编辑类工具（原地改写已有文件）：即使目标是 ai/*.md 计划文档也无例外——
+            # 文案明确指向「用 fs_write 重写新文档」，避免模型误读为"目标在 ai/ 下
+            # 就该放行"而换工具反复重试（用户反馈：多轮调整计划时 AI 反复尝试编辑
+            # 历史方案文档，全部被拒）。
+            if tool_name in _EDIT_TOOLS:
+                return (
+                    "计划模式不支持编辑已有文件（包括历史方案文档）；"
+                    "调整方案请用 fs_write 重新写出完整的新方案文档，不要编辑旧文档"
+                )
             return "计划模式只能写入计划文档（ai/*.md），其余写操作一律不放开"
         if info.action == ACTION_DELETE:
             return "计划模式不允许删除文件或执行删除命令"
@@ -436,6 +476,8 @@ def _mode_boundary(
             return "计划模式仅允许只读命令，禁止通过终端修改或创建文件"
         if info.action == ACTION_MANAGE:
             return "计划模式不允许管理系统进程"
+        if info.action == ACTION_DESKTOP:
+            return "计划模式不允许操作电脑（鼠标/键盘）"
         return None
 
     return None

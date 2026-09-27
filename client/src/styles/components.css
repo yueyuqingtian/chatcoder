@@ -397,6 +397,9 @@
 .ui-list-row-name { font-size: 13px; font-weight: 500; color: var(--text-1); }
 .ui-list-row-desc { font-size: 12px; color: var(--text-3); margin-top: 2px; line-height: 1.5; word-break: break-word; }
 .ui-list-row-actions { display: flex; align-items: center; gap: var(--sp-3); flex-shrink: 0; }
+/* 整行可点击（如打开详情弹窗）：悬停给出反馈，与设置页其它可点元素同用动效令牌 */
+.ui-list-row.is-clickable { cursor: pointer; transition: border-color var(--dur-2) var(--ease-standard), background var(--dur-2) var(--ease-standard); }
+.ui-list-row.is-clickable:hover { border-color: var(--border-hover); background: var(--bg-hover); }
 
 /* ── ⑨ PageShell：唯一滚动容器 + 固定标题区（防跳变） ──────── */
 .ui-page {

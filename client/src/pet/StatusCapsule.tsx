@@ -306,7 +306,8 @@ export function StatusCapsule({
     endReorder(false);
   }, [endReorder]);
 
-  // 无运行任务：一块「空闲」提示（保持浮窗位置稳定，不突然消失）
+  // 空列表兜底（plan-344-1706）：PetApp 在没有执行中任务时已不再渲染浮窗
+  // （会话全部停止后与「空闲」占位块一起退场）；此分支仅防御组件被复用到空列表场景。
   if (ordered.length === 0) {
     const r = recent[0];
     return (

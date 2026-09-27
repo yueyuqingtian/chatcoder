@@ -39,6 +39,21 @@ else:
         "请先运行 server/prepare-playwright-browsers.ps1" % _BROWSERS_STAGING
     )
 
+# 内置桌面操控内核（C# 单文件 exe，约 60KB）：让「电脑操控」工具开箱可用。
+# 由 tools/desktop-core/build.ps1 编译（用系统自带 csc.exe，无需 .NET SDK），
+# 产物统一落到 server/vendor/desktop-core/，运行时 app/core/desktop_env.py 从
+# _internal/desktop-core/desktop-core.exe 定位。
+# 与 ms-playwright 同样采取「缺失不阻塞构建」，但正式发布走 build-release.ps1，那里有硬性守门。
+_DESKTOP_STAGING = SERVER_DIR / "vendor" / "desktop-core"
+if _DESKTOP_STAGING.is_dir():
+    datas.append((str(_DESKTOP_STAGING), "desktop-core"))
+else:
+    print(
+        "[chatcoder-server.spec] 警告: 未找到 %s，产物将不含桌面操控内核；"
+        "请先运行 tools/desktop-core/build.ps1 -OutDir ..\\..\\server\\vendor\\desktop-core"
+        % _DESKTOP_STAGING
+    )
+
 hiddenimports = [
     "sqlite3",
     "uvicorn.logging",

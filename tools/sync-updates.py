@@ -10,10 +10,12 @@
 用法:
     python tools/sync-updates.py [--version X.Y.Z] [--dry-run]
 
-依赖: paramiko；SSH 私钥默认 ~/.ssh/chatcoder_deploy（可用 --key 指定）。
+依赖: paramiko；SSH 私钥默认 ~/.ssh/chatcoder_deploy（可用 --key 指定）；
+也可用密码认证（--password 或环境变量 CHATCODER_DEPLOY_PASSWORD，二者优先密码）。
 """
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -37,19 +39,31 @@ def fetch(url: str, timeout: int = 20) -> bytes:
         return resp.read()
 
 
-def ssh_connect(key_path: str, attempts: int = 3) -> paramiko.SSHClient:
+def ssh_connect(key_path: str, attempts: int = 3, password: str = "") -> paramiko.SSHClient:
+    """建立 SSH 连接。传入 password 时走密码认证，否则走密钥（Ed25519）。"""
     last_err = None
     for i in range(1, attempts + 1):
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
-            client.connect(
-                HOST,
-                username=USER,
-                pkey=paramiko.Ed25519Key.from_private_key_file(key_path),
-                timeout=20,
-                banner_timeout=30,
-            )
+            if password:
+                client.connect(
+                    HOST,
+                    username=USER,
+                    password=password,
+                    timeout=20,
+                    banner_timeout=30,
+                    allow_agent=False,
+                    look_for_keys=False,
+                )
+            else:
+                client.connect(
+                    HOST,
+                    username=USER,
+                    pkey=paramiko.Ed25519Key.from_private_key_file(key_path),
+                    timeout=20,
+                    banner_timeout=30,
+                )
             client.get_transport().set_keepalive(30)
             return client
         except Exception as e:  # noqa: BLE001
@@ -67,7 +81,7 @@ def run(client: paramiko.SSHClient, cmd: str, timeout: int = 60) -> str:
     return (out + ("\n[stderr] " + err if err.strip() else "")).strip()
 
 
-def upload_script(client: paramiko.SSHClient, script_bytes: bytes, key_path: str):
+def upload_script(client: paramiko.SSHClient, script_bytes: bytes, key_path: str, password: str = ""):
     """上传服务器端脚本（统一 LF），失败自动重连重试。"""
     last_err = None
     for i in range(1, 4):
@@ -84,11 +98,11 @@ def upload_script(client: paramiko.SSHClient, script_bytes: bytes, key_path: str
                 client.close()
             except Exception:  # noqa: BLE001
                 pass
-            client = ssh_connect(key_path)
+            client = ssh_connect(key_path, password=password)
     raise last_err  # type: ignore[misc]
 
 
-def wait_remote_sync(client: paramiko.SSHClient, key_path: str) -> tuple[int, str]:
+def wait_remote_sync(client: paramiko.SSHClient, key_path: str, password: str = "") -> tuple[int, str]:
     """等待后台同步完成（轮询 exit 文件），断线自动重连后续看。"""
     deadline = time.time() + WAIT_TIMEOUT_S
     status = "RUNNING"
@@ -105,7 +119,7 @@ def wait_remote_sync(client: paramiko.SSHClient, key_path: str) -> tuple[int, st
                 client.close()
             except Exception:  # noqa: BLE001
                 pass
-            client = ssh_connect(key_path)
+            client = ssh_connect(key_path, password=password)
             continue
         if status != "RUNNING":
             break
@@ -122,6 +136,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="同步自建更新源（服务器从 GitHub 拉取）")
     parser.add_argument("--version", default="", help="期望版本号（默认读 package.json）")
     parser.add_argument("--key", default=str(DEFAULT_KEY), help="SSH 私钥路径")
+    parser.add_argument(
+        "--password",
+        default=os.environ.get("CHATCODER_DEPLOY_PASSWORD", ""),
+        help="SSH 密码（也可用环境变量 CHATCODER_DEPLOY_PASSWORD）；给定时走密码认证",
+    )
     parser.add_argument("--dry-run", action="store_true", help="只上传脚本，不执行同步")
     args = parser.parse_args()
 
@@ -136,11 +155,11 @@ def main() -> int:
         print(f"[sync] 缺少服务器端脚本: {server_script}", file=sys.stderr)
         return 1
 
-    client = ssh_connect(args.key)
+    client = ssh_connect(args.key, password=args.password)
     try:
         # 统一换行，避免 CRLF 在 Linux 上执行报错
         script_bytes = server_script.read_bytes().replace(b"\r\n", b"\n")
-        client = upload_script(client, script_bytes, args.key)
+        client = upload_script(client, script_bytes, args.key, args.password)
         print(f"[sync] 已上传服务器脚本 -> {REMOTE_SCRIPT}")
 
         if args.dry_run:
@@ -152,7 +171,7 @@ def main() -> int:
         inner = f"bash {REMOTE_SCRIPT} {version} > {REMOTE_LOG} 2>&1; echo $? > {REMOTE_EXIT}"
         run(client, f"rm -f {REMOTE_LOG} {REMOTE_EXIT}; nohup bash -c '{inner}' >/dev/null 2>&1 & echo STARTED")
 
-        rc, log = wait_remote_sync(client, args.key)
+        rc, log = wait_remote_sync(client, args.key, args.password)
         if log:
             print(log)
         if rc != 0:

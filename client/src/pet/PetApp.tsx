@@ -12,6 +12,11 @@
  *     此前依赖 pointerenter/leave，而穿透窗口在切换穿透时会丢事件，浮窗就永远卡在展开态。
  *  ③ **缩放手柄在宠物区域内**：手柄移入宠物容器右下角，避免"点在手柄上却触发拖拽"。
  *  ④ 拖拽帧率：主进程侧已改为跨屏才重算工作区、位置未变不发 setBounds。
+ *
+ * 本轮调整（plan-344-1706）：
+ *  · **没有执行中的任务时不渲染浮窗**（会话全部停止后，连同「空闲」占位块一起退场）；
+ *  · **折叠语义升级**：折叠后默认隐藏，聚焦宠物显示最新一条、移到浮窗上展开、失去焦点隐藏；
+ *  · 修正隐藏态「幽灵命中带」：浮窗高度为 0 时不再参与命中，鼠标路过不会误触发。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DetailPanel } from "./DetailPanel";
@@ -103,8 +108,12 @@ export function PetApp() {
   );
   const now = useNow(cards.length > 0 || expanded, 1000);
 
-  /** 主任务 = 列表第一张 */
-  const primaryId = cards.length > 0 ? cards[0].sessionId : null;
+  /** 执行中的任务（plan-344-1706）：以「会话未停止」为准（对齐主界面的转圈 + 停止按钮），
+   *  失败即停止 —— 失败卡不再参与浮窗展示（用户确认口径）。 */
+  const activeCards = useMemo(() => cards.filter((c) => c.status !== "failed"), [cards]);
+
+  /** 主任务 = 执行中列表的第一张 */
+  const primaryId = activeCards.length > 0 ? activeCards[0].sessionId : null;
 
   /** 实时消息行：**连接常驻**（只要宠物窗口可见且有主任务），不随 hover 断连 ——
    *  流式增量不入服务端缓冲，断连即永久丢失（历史问题：浮窗消息卡住不动）。 */
@@ -152,12 +161,19 @@ export function PetApp() {
   const floatCollapsed = pref.floatCollapsed === true;
   const blockCountRaw = useMemo(() => {
     if (dragging) return 0; // 拖拽时收起浮窗：避免遮挡，也让命中区稳定
-    if (floatCollapsed) return 0; // 折叠手柄主动隐藏浮窗（宠物本体保持显示）
     if (expanded) return 0; // 面板态由面板承载列表
     if (pref.showCapsule === false) return 0;
-    if (blocksHover) return Math.min(cards.length || 1, maxBlocks);
-    return 1; // 默认：只显示最新一条（空闲时也显示 1 块，保持布局稳定）
-  }, [dragging, floatCollapsed, expanded, pref.showCapsule, blocksHover, cards.length, maxBlocks]);
+    // 没有执行中的任务 → 不展示浮窗（plan-344-1706：空闲时连同「空闲」占位块一起退场）
+    if (activeCards.length === 0) return 0;
+    // 折叠态（plan-344-1706）：默认隐藏；聚焦宠物显示最新一条，鼠标移到浮窗上展开，
+    // 失去焦点（离开宠物与浮窗）即隐藏 —— 折叠不再是「彻底隐藏」
+    if (floatCollapsed) {
+      if (blocksHover) return Math.min(activeCards.length, maxBlocks);
+      return petHover ? 1 : 0;
+    }
+    if (blocksHover) return Math.min(activeCards.length, maxBlocks);
+    return 1; // 默认：只显示最新一条
+  }, [dragging, expanded, pref.showCapsule, activeCards.length, floatCollapsed, blocksHover, petHover, maxBlocks]);
 
   // 调序期间冻结块数：拖动时鼠标可能短暂离开浮窗区，块区收缩会打乱落点
   useEffect(() => {
@@ -183,6 +199,15 @@ export function PetApp() {
     return false;
   }, [inRectOf]);
 
+  /** 鼠标是否落在浮窗块区（plan-344-1706）。
+   *  要求 wrap 有实际高度：浮窗隐藏时它高度为 0，仅凭 pad 外扩会在宠物上方留下
+   *  一条「幽灵命中带」——鼠标路过即误判为聚焦浮窗，折叠态浮窗会无端闪现。 */
+  const inBlocksArea = useCallback((x: number, y: number, pad = 4) => {
+    const el = blocksRef.current;
+    if (!el || el.offsetHeight <= 0) return false;
+    return inRectOf(el, x, y, pad);
+  }, [inRectOf]);
+
   // ── 命中检测 + 悬停推导（同一份 mousemove，状态永远同步）──
   useEffect(() => {
     const api = petApi();
@@ -201,7 +226,7 @@ export function PetApp() {
       // ① 命中：宠物区（矩形 + 容差）/ 浮窗区 / 徽标 / 折叠手柄 / 缩放 / 菜单
       const hit =
         overPetArea(x, y) ||
-        inRectOf(blocksRef.current, x, y) ||
+        inBlocksArea(x, y, 0) ||
         inRectOf(badgeRef.current, x, y, 2) ||
         inRectOf(handleRef.current, x, y, 6) ||
         inRectOf(menuRef.current, x, y);
@@ -212,7 +237,7 @@ export function PetApp() {
 
       // ② 悬停：按坐标推导，不依赖 enter/leave —— 穿透窗口切换时会丢事件，
       //    会导致浮窗永远卡在展开态（用户反馈"失去焦点后浮窗没有折叠"）。
-      const overBlocks = inRectOf(blocksRef.current, x, y, 4);
+      const overBlocks = inBlocksArea(x, y);
       if (overBlocks !== blocksHoverRef.current) {
         blocksHoverRef.current = overBlocks;
         setBlocksHover(overBlocks);
@@ -249,7 +274,7 @@ export function PetApp() {
             clearHover();
             return;
           }
-          const overBlocks = inRectOf(blocksRef.current, p.x, p.y, 4);
+          const overBlocks = inBlocksArea(p.x, p.y);
           if (overBlocks !== blocksHoverRef.current) {
             blocksHoverRef.current = overBlocks;
             setBlocksHover(overBlocks);
@@ -277,7 +302,7 @@ export function PetApp() {
       document.removeEventListener("mouseleave", clearHover);
       window.removeEventListener("blur", clearHover);
     };
-  }, [expanded, dragging, reordering, inRectOf, overPetArea]);
+  }, [expanded, dragging, reordering, inRectOf, overPetArea, inBlocksArea]);
 
   // 面板/菜单在鼠标移出后收起（面板是整块区域，用坐标判定同样更可靠）
   useEffect(() => {
@@ -448,6 +473,8 @@ export function PetApp() {
     void petApi()?.hideTemporarily();
   }, []);
 
+  /** 折叠/展开浮窗（plan-344-1706）：折叠后不再彻底隐藏——聚焦宠物或浮窗时仍会临时
+   *  展示（见 blockCountRaw），失去焦点即隐藏；展开则恢复常显。 */
   const toggleFloat = useCallback(() => {
     const next = !floatCollapsed;
     if (next) {
@@ -509,7 +536,7 @@ export function PetApp() {
       <div className={`pet-blocks-wrap${blockCount > 0 ? " is-open" : ""}`} ref={blocksRef}>
         {blockCount > 0 && (
           <StatusCapsule
-            cards={cards}
+            cards={activeCards}
             live={live}
             primaryId={primaryId}
             recent={recent}

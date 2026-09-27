@@ -14,8 +14,8 @@ export function Sw({ checked, onChange }: { checked: boolean; onChange: (v: bool
 }
 
 /** 卡片行：标题 + 描述 + 右侧控件槽（title 支持 ReactNode，便于在标题右侧挂徽标） */
-export function Row({ title, desc, children, className }: { title: React.ReactNode; desc: string; children: React.ReactNode; className?: string }) {
-  return <CardRow title={title} desc={desc} className={className}>{children}</CardRow>;
+export function Row({ title, desc, children, className, disabled }: { title: React.ReactNode; desc: string; children: React.ReactNode; className?: string; disabled?: boolean }) {
+  return <CardRow title={title} desc={desc} className={className} disabled={disabled}>{children}</CardRow>;
 }
 
 export function CardTitle({ children }: { children: React.ReactNode }) {

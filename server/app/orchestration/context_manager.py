@@ -859,7 +859,8 @@ async def build_main_context(
         system_prompt = build_main_system_prompt(enable_subagents=enable_subagents,
                                                  plan_flow_enabled=_is_plan_mode,
                                                  language=_reply_lang,
-                                                 language_source=_lang_source)
+                                                 language_source=_lang_source,
+                                                 desktop_enabled=bool(getattr(settings, "desktop_enabled", False)))
     bundle = ContextBundle(
         system=system_prompt,
         instruction=user_message,

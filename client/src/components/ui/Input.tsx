@@ -104,7 +104,8 @@ interface TextareaProps extends TextareaHTMLAttributes<HTMLTextAreaElement> {
   maxRows?: number;
 }
 
-export function Textarea({
+// plan-340：补 forwardRef（与 Input 对齐）——弹窗需在打开时把长内容的滚动位置复位到开头
+export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(function Textarea({
   invalid = false,
   autoGrow = false,
   maxRows = 10,
@@ -113,7 +114,7 @@ export function Textarea({
   value,
   onChange,
   ...props
-}: TextareaProps) {
+}, ref) {
   /** autoGrow 用 scrollHeight 测量：先把高度复位再取，避免只增不减 */
   const handleInput = (e: React.FormEvent<HTMLTextAreaElement>) => {
     const el = e.currentTarget;
@@ -126,6 +127,7 @@ export function Textarea({
 
   return (
     <textarea
+      ref={ref}
       className={`ui-textarea${autoGrow ? " auto-grow" : ""} ${className}`.trim()}
       rows={autoGrow ? 1 : rows}
       value={value}
@@ -135,4 +137,4 @@ export function Textarea({
       {...props}
     />
   );
-}
+});

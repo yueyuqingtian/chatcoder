@@ -149,11 +149,35 @@ Produce the final result in the main window with a clear summary of what changed
 - State conclusions and facts directly; avoid exclamation marks and promotional tone.
 """
 
+# plan-334-1661：电脑操控任务规范。仅在「设置 → 电脑操控」启用时注入，未启用零 token 成本。
+# 核心两件事：任务前先查已沉淀的路线（recall），任务成功后必须沉淀路线（save）——
+# 后者是模型最容易漏掉的一步，却是把「每次重新摸索」变成「一次摸索反复复用」的关键。
+DESKTOP_TASK_PROMPT = """## Computer-Control Tasks — recall first, settle after
+When a task actually operates the desktop (`desktop_*` tools) or the built-in browser on the user's machine:
+- **Recall before probing**: check the saved routes first — `desktop_recipe` (action=recall) with the app
+  name and intent. A saved route is the fastest path available and removes UI re-exploration entirely.
+- **Settle the route before you end the turn**: after a successful operation on a given app, call
+  `desktop_recipe` (action=save) with the app name, a one-line intent, the general principle that worked,
+  and the pitfalls you hit. Record the *approach* — how you located the element, what to avoid — never
+  raw coordinates, because the UI changes and coordinates do not survive it. One call now saves a whole
+  session of re-discovery later; do not end the turn without it.
+- **Do not re-verify what you already know**: one snapshot is enough for one screen state. If the window
+  has not changed since your last snapshot, act on what you have — re-taking it only re-confirms the same
+  information and costs a whole extra round trip. When you only need to know what sits at one point,
+  `desktop_hit` answers it far more cheaply than a full snapshot.
+- **Read the error, then apply the fix**: desktop_* failures state what went wrong *and* what to do about
+  it (for example "window is not in the foreground" → pass `focus_first=true`). Apply that fix instead of
+  repeating the same call unchanged.
+- **Combine action with observation**: when a click or keystroke is expected to change the screen, pass
+  `then_snapshot=true` so the new state comes back in the same call instead of costing another round trip.
+"""
+
 
 def build_main_system_prompt(extra_context: str = "", enable_subagents: bool = True,
                              plan_flow_enabled: bool = False,
                              language: str = "auto",
-                             language_source: str = "user") -> str:
+                             language_source: str = "user",
+                             desktop_enabled: bool = False) -> str:
     """构建主代理系统提示词。
 
     如果用户关闭了子代理，剔除关于 spawn_subagent 的引导与决策章节。
@@ -161,6 +185,8 @@ def build_main_system_prompt(extra_context: str = "", enable_subagents: bool = T
     替换为"直接执行、除非用户明示否则不要编写计划文档"的简明指引——保证模式遵循度。
     language（plan-19-82）：本轮用户消息语言（zh/en/auto）。语言纪律块置于提示词
     **首尾双锚**（首部对抗默认英文、尾部位近用户消息以对抗长上下文漂移）。
+    desktop_enabled（plan-334-1661）：开启电脑操控时追加该能力的任务规范
+    （先查路线、完成后沉淀路线），未开启时不注入。
     """
     from app.orchestration.prompts.language import build_language_directive
 
@@ -200,6 +226,9 @@ def build_main_system_prompt(extra_context: str = "", enable_subagents: bool = T
             parts = prompt.split("## Decision Guide — when to spawn subagents")
             tail = parts[1].split("## Planning — decide for yourself, track with todo_write")
             prompt = parts[0] + "## Planning — decide for yourself, track with todo_write" + tail[1]
+
+    if desktop_enabled:
+        prompt = prompt + "\n\n" + DESKTOP_TASK_PROMPT
 
     if extra_context:
         prompt = prompt + "\n\n" + extra_context

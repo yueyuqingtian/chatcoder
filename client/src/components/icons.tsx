@@ -68,6 +68,16 @@ export function IconSettings({ size = 18, color = "currentColor", strokeWidth = 
   );
 }
 
+/** 显示器 —— plan-334-1661：设置页「电脑操控」入口（表达"屏幕 + 操作"） */
+export function IconMonitor({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest)}>
+      <rect x="3" y="4.5" width="18" height="12.5" rx="2" />
+      <path d="M9 20.5h6M12 17v3.5" />
+    </svg>
+  );
+}
+
 /** 宠物（爪印）—— plan-73-323：设置页「宠物」分区与面板入口 */
 export function IconPet({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (

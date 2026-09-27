@@ -60,6 +60,25 @@ class Settings(BaseSettings):
     # 浏览器自动化开关（可通过设置中心持久化配置，0.5 默认关闭，开启后注册浏览器工具集）
     browser_enabled: bool = False
     browser_headless: bool = True
+
+    # ── 电脑操控（plan-334-1661）──
+    # 总开关：控制 desktop_* 工具集是否可用。默认关闭——这类能力会真实操作鼠标键盘，
+    # 必须由用户显式开启。
+    desktop_enabled: bool = False
+    # 普通电脑操作子开关（点击/输入/截图/UIA 感知等）
+    desktop_plain_ops_enabled: bool = True
+    # 浏览器操作子开关（本能力统一入口；与 browser_enabled 的区别见设置页说明）
+    desktop_browser_ops_enabled: bool = True
+    # 安全：写操作是否要求目标窗口处于前台。默认开启——这是防止「输入打到错误窗口」
+    # 的关键护栏，关闭后风险自负。
+    desktop_require_foreground: bool = True
+    # 截图默认画质（JPEG）与缩放长边。实测 maxDim 是体积的主要杠杆，
+    # JPEG q75 在速度上显著优于 PNG（本机 30ms vs 72ms）。
+    desktop_screenshot_quality: int = 75
+    desktop_screenshot_max_dim: int = 1600
+    # 操作路线沉淀：命中已有路线时复用「通用原则」，降低模型思考与推理开销
+    desktop_recipe_enabled: bool = True
+
     # 验证模式:自动批准副作用工具(fs.write/terminal.exec 等),跳过人工审批门
     # v1.0: 默认关闭，高风险工具始终需要审批
     auto_approve_tools: bool = False

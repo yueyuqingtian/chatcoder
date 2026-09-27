@@ -202,6 +202,66 @@ def test_plan_mode_only_allows_plan_doc(tmp_path, isolated_executor):
     assert "计划模式" in bad.reason
 
 
+def test_plan_mode_edit_tools_denied_with_fs_write_hint(tmp_path, isolated_executor):
+    """计划模式：编辑类工具（原地改文件）一律拒绝，理由须给出改用 fs_write 的指引。
+
+    用户反馈：多轮调整计划时 AI 反复尝试用编辑工具修改历史方案文档——原拒绝文案
+    「计划模式只能写入计划文档（ai/*.md）」没有点破"编辑类工具不可用"，模型看到
+    目标在 ai/ 下会误判为应放行、换工具重试。修复后文案必须明确指向 fs_write 重写。
+    """
+    from app.orchestration.approval_policy import VERDICT_ALLOW, VERDICT_DENY
+    from app.orchestration.tools.editor import EditorApplyDiffTool
+    from app.orchestration.tools.fs_write import FsWriteTool
+    from app.orchestration.tools.multi_edit import MultiFileEditTool
+
+    ctx = _ctx(tmp_path)
+    ctx.permission_mode = "plan"
+    ctx.approval_mode = "full"  # 复现用户截图组合：计划模式 + 完全访问
+
+    d = _decide(
+        MultiFileEditTool(), "multi_file_edit",
+        {"edits": [{"path": "ai/chatcoder-plan-1-2.md", "old_text": "a", "new_text": "b"}]},
+        ctx,
+    )
+    assert d.verdict == VERDICT_DENY
+    assert "fs_write" in d.reason
+
+    d2 = _decide(
+        EditorApplyDiffTool(), "editor_apply_diff",
+        {"path": "ai/chatcoder-plan-1-2.md", "old_text": "a", "new_text": "b"},
+        ctx,
+    )
+    assert d2.verdict == VERDICT_DENY
+    assert "fs_write" in d2.reason
+
+    # 对照：同一组合下 fs_write 写计划文档仍正常放行（修复不得误伤主路径）
+    ok = _decide(
+        FsWriteTool(), "fs_write",
+        {"path": "ai/chatcoder-plan-1-2.md", "content": "# 方案"}, ctx,
+    )
+    assert ok.verdict == VERDICT_ALLOW
+
+
+def test_plan_tool_schemas_exclude_editor_tools(monkeypatch):
+    """规划模式的工具下发清单不含编辑类工具（守护 engine 的按执行模式过滤）。
+
+    修复前「完全访问」走 all_schemas() 全量下发：编辑类工具见得到、但 plan 下
+    必被拒，模型于是反复尝试编辑历史方案文档；修复后一律按执行模式白名单下发。
+    """
+    from app.orchestration.tools.registry import tool_registry
+    from app.services import permission_profile_service as pps
+
+    # 隔离本机用户配置——自定义模式覆盖不应影响内置 plan 的定义断言
+    monkeypatch.setattr(pps, "_load_custom", lambda: [])
+    wl = pps.resolve_tools("plan", {t.name for t in tool_registry.all()})
+    assert wl is not None  # None = 全量（会把编辑工具也发给模型）
+    names = {s["function"]["name"] for s in tool_registry.all_schemas(wl)}
+    assert "fs_write" in names  # 计划文档写入能力保留
+    assert "multi_file_edit" not in names
+    assert "editor_apply_diff" not in names
+    assert "apply_patch" not in names
+
+
 def test_full_access_mode_allows_everything(tmp_path, isolated_executor):
     """完全访问：无视风险等级，全部自动执行。"""
     from app.orchestration.approval_policy import VERDICT_ALLOW

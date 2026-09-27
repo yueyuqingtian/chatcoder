@@ -979,6 +979,30 @@ export const api = {
   /** 问题7/8: 终端 Shell 存在性探测 + 候选等宽字体 */
   getTerminalOptions: () => get<TerminalOptionsOut>("/settings/terminal/options"),
 
+  // ── 电脑操控（plan-334-1661）──
+  getDesktopStatus: () => get<DesktopStatus>("/desktop/status"),
+  /** 主动拉起内核并取回环境信息（设置页「立即检测」） */
+  probeDesktop: () => post<{ ok: boolean; info: Record<string, unknown> }>("/desktop/probe", {}),
+  listDesktopRecipes: (keyword = "") =>
+    get<{ count: number; items: DesktopRecipe[] }>(
+      `/desktop/recipes${keyword ? `?keyword=${encodeURIComponent(keyword)}` : ""}`,
+    ),
+  createDesktopRecipe: (data: {
+    app_name: string; intent: string; principle: string; pitfalls?: string;
+  }) => post<{ created: boolean; item: DesktopRecipe }>("/desktop/recipes", data),
+  updateDesktopRecipe: (
+    id: number,
+    data: { app_name?: string; intent?: string; principle?: string; pitfalls?: string },
+  ) => put<{ item: DesktopRecipe }>(`/desktop/recipes/${id}`, data),
+  deleteDesktopRecipes: (ids: number[]) =>
+    post<{ deleted: number }>("/desktop/recipes/delete", { ids }),
+  deleteAllDesktopRecipes: () => del<{ deleted: number }>("/desktop/recipes"),
+  exportDesktopRecipes: () => get<{ version: number; count: number; items: DesktopRecipe[] }>(
+    "/desktop/recipes/export",
+  ),
+  importDesktopRecipes: (payload: { items: unknown[] }) =>
+    post<{ created: number; updated: number; skipped: number }>("/desktop/recipes/import", payload),
+
   // ── 子代理类型（v2.2: 对齐 zcode 3.13）──
   listSubagents: () => get<SubagentProfileOut[]>("/subagents"),
   createSubagent: (data: {
@@ -1123,6 +1147,20 @@ export interface GlobalSettingsOut {
   agent_retry_intervals?: string;
   browser_enabled?: boolean;
   browser_headless?: boolean;
+  /** plan-334-1661: 电脑操控总开关（开启后 desktop_* 工具集可用） */
+  desktop_enabled?: boolean;
+  /** plan-334-1661: 普通电脑操作子开关 */
+  desktop_plain_ops_enabled?: boolean;
+  /** plan-334-1661: 浏览器操作子开关 */
+  desktop_browser_ops_enabled?: boolean;
+  /** plan-334-1661: 写操作是否要求目标窗口在前台（安全护栏） */
+  desktop_require_foreground?: boolean;
+  /** plan-334-1661: 截图 JPEG 画质（10~100） */
+  desktop_screenshot_quality?: number;
+  /** plan-334-1661: 截图缩放长边像素（0 = 不缩放） */
+  desktop_screenshot_max_dim?: number;
+  /** plan-334-1661: 操作路线沉淀开关 */
+  desktop_recipe_enabled?: boolean;
   /** v36: 子代理同时运行上限（超出后新派发排队等待，1~16） */
   max_concurrent_subagents?: number;
   /** v36: 每轮子代理派发总量上限（含已完成，1~32） */
@@ -1143,6 +1181,31 @@ export interface ExecPolicyToolInfo {
   name: string;
   risk_level: string;
   description: string;
+}
+
+/** plan-334-1661: 电脑操控操作路线（应用 + 意图 → 通用原则） */
+export interface DesktopRecipe {
+  id: number;
+  app_name: string;
+  intent: string;
+  /** 通用原则：跨界面版本仍成立的操作知识，是复用时的核心依据 */
+  principle: string;
+  pitfalls: string;
+  steps: Array<Record<string, unknown>>;
+  usage_count: number;
+  last_used_at: string | null;
+  /** agent = AI 沉淀；user = 用户手写或编辑过 */
+  source: string;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+/** plan-334-1661: 电脑操控内核状态 */
+export interface DesktopStatus {
+  core_found: boolean;
+  core_path: string;
+  running: boolean;
+  info: Record<string, unknown>;
 }
 
 /** v2.2 (对齐 zcode 3.13): 子代理类型 */

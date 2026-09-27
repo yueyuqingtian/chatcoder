@@ -4,6 +4,8 @@ from app.persistence.models.audit import AuditLog
 from app.persistence.models.config import ConfigProfile
 from app.persistence.models.db_connection import DbConnection, DbPolicy
 from app.persistence.models.debug_setting import DebugSetting
+# plan-334-1661：电脑操控操作路线（新表，靠 create_all 建立）
+from app.persistence.models.desktop_recipe import DesktopRecipe
 from app.persistence.models.exec_policy import ExecPolicyRule
 from app.persistence.models.hook import HookConfig
 from app.persistence.models.knowledge import KnowledgeBase, KnowledgeDoc
@@ -45,6 +47,7 @@ __all__ = [
     "DbConnection",
     "DbPolicy",
     "DebugSetting",
+    "DesktopRecipe",
     "ExecPolicyRule",
     "HookConfig",
     "AuditLog",

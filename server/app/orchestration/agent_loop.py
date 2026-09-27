@@ -604,6 +604,19 @@ async def _compact_persistent_or_fallback(
     return _result, messages
 
 
+def _desktop_obs_scene(tools: list, write_tools: frozenset) -> str:
+    """推断电脑操控的观测场景（plan-340-1705 L3.1）。
+
+    仅用于「场景标签 × 思考量」的观测埋点，不参与任何行为判定——
+    本版刻意不做自动降档（依据不足时降档会伤准确率，需先拿到分布数据）。
+    场景取自「紧邻的上一步对电脑做了什么」：刚看完界面只需挑动作，操作失败才需要诊断。
+    """
+    name, ok = tools[-1]
+    if not ok:
+        return "after_error"
+    return "after_action" if name in write_tools else "after_perceive"
+
+
 async def run_agent_loop(
     db: AsyncSession,
     *,
@@ -837,6 +850,15 @@ async def run_agent_loop(
     # 语言漂移检测：记录已因"输出语言与锚定语言不符"注入过提醒的次数，
     # 避免模型持续英文时每步都注入（徒增上下文，且重复提醒无增量信息）。
     _lang_drift_reminders = 0
+
+    # L3.1（plan-340-1705）：电脑操控的「场景标签 × 思考量」观测缓冲。
+    # 只有本步真正调过 desktop_* 工具才非空——普通任务全程为空，零开销、零日志噪音。
+    # 写操作集合用于区分「看了界面再动作」与「只是读取」两种场景。
+    _desktop_write_tools = frozenset({
+        "desktop_click", "desktop_type", "desktop_keys", "desktop_scroll",
+        "desktop_focus", "desktop_apps",
+    })
+    _obs_tools: list[tuple[str, bool]] = []
 
     try:
         for step in range(1, loop_step_limit + 1):
@@ -1484,6 +1506,25 @@ async def run_agent_loop(
                 (_final_prompt / agent_window * 100) if agent_window > 0 else 0,
             )
 
+            # L3.1（plan-340-1705）：电脑操控的「场景标签 × 思考量」观测埋点。
+            # 只记录、不改变任何行为——本版明确不据此自动调整思考档位（依据不足时降档会伤准确率）。
+            # 场景取自「紧邻的上一步对电脑做了什么」：刚看完界面只需挑动作，操作失败才需要诊断。
+            if _obs_tools:
+                try:
+                    _obs_name = _obs_tools[-1][0]
+                    _obs_scene = _desktop_obs_scene(_obs_tools, _desktop_write_tools)
+                    logger.info(
+                        "[desktop-obs] turn=%s step=%s scene=%s last_tool=%s "
+                        "reasoning_tokens=%d prompt=%d completion=%d",
+                        turn_id, step, _obs_scene, _obs_name,
+                        (getattr(response.usage, "reasoning_tokens", 0) or 0)
+                        if response.usage else 0,
+                        _final_prompt, _final_completion,
+                    )
+                except Exception:
+                    logger.debug("[desktop-obs] 埋点失败(非阻塞)", exc_info=True)
+                _obs_tools = []
+
             # v1.1: 用量流水落库（全软件统计的数据源），失败不阻断主流程
             # v0.3.1: 改用独立会话——此前在主 db 上 commit 失败 → rollback 主 db，
             # 主 db 会话上已加载对象全部过期，后续属性访问触发同步 reload 抛
@@ -2056,6 +2097,9 @@ async def run_agent_loop(
                         role="tool", content=_truncate_output(result.output or result.error),
                         name=tool_name, tool_call_id=tc.get("id", ""),
                     ))
+                    # L3.1（plan-340-1705）：登记本步的电脑操控调用，供下一步的观测埋点使用
+                    if tool_name.startswith("desktop_"):
+                        _obs_tools.append((tool_name, bool(result.ok)))
                     # 步级提交：结束主 db 零星写（checkpoint/任务态）形成短事务边界，
                     # 避免消息缓冲化后主 db 长事务悬挂（违背短事务原则）。
                     try:
@@ -2073,7 +2117,13 @@ async def run_agent_loop(
                     # v15: 图片类工具结果 → 多模态模型追加 image_url 消息，让模型真正看到图片。
                     # （此前 base64 只放在 ToolResult.data，从未进入对话，模型只能看到
                     #   "Base64 length: N" 文本，被迫转向 OCR/命令行猜图）
-                    if multimodal and result.ok and tool_name in ("read_attachment", "view_image"):
+                    if multimodal and result.ok and tool_name in (
+                        "read_attachment",
+                        "view_image",
+                        # plan-334-1661：截图同样内联——自绘界面必须看图才能决策，
+                        # 此前要「复制文件 → view_image」两轮往返才看得到。
+                        "desktop_screenshot",
+                    ):
                         _b64 = (result.data or {}).get("base64")
                         if _b64:
                             import mimetypes as _mt
