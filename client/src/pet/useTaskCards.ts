@@ -38,6 +38,9 @@ export interface TaskCard {
   /** 等待确认时的待处理动作（工具名 + 入参预览）——浮窗用它说明「在等什么」，
    *  比只显示裸工具名可读（plan-73-340） */
   pendingAction: { tool: string; argsPreview: string } | null;
+  /** 当前挂起的审批/提问 id（approval.request 时记录，approval.response 按 id 匹配清除）。
+   *  plan-354-1739：只清「自己这一次等待」，旧审批的迟到响应不会误清新一轮等待 */
+  pendingApprovalId: string | null;
   errorText: string;
   goalText: string;
   goalTurnsUsed: number;
@@ -130,6 +133,7 @@ function newCard(sessionId: number, now: number, patch?: Partial<TaskCard>): Tas
     subagentCount: 0,
     waitingReason: "",
     pendingAction: null,
+    pendingApprovalId: null,
     errorText: "",
     goalText: "",
     goalTurnsUsed: 0,
@@ -361,6 +365,7 @@ export function useTaskCards(
             card.currentAction = "";
             card.waitingReason = "";
             card.pendingAction = null;
+            card.pendingApprovalId = null;
             card.errorText = "";
             card.subagentCount = 0;
             card.startedAt = card.startedAt ?? now;
@@ -415,12 +420,29 @@ export function useTaskCards(
           if (!card) break;
           const detail = (p.detail || {}) as Record<string, unknown>;
           card.status = "waiting";
+          card.pendingApprovalId = str(p.approval_id) || null;
           card.waitingReason = str(detail.tool) || str(detail.title) || "等待确认";
           // 优先用审批详情里的工具/参数；缺失则沿用最近一次 tool.call 的上下文，
           // 这样浮窗能显示「等待确认 · 执行命令 · npm run build」而不是裸工具名
           const tool = str(detail.tool) || card.pendingAction?.tool || "";
           const argsPreview = str(detail.args_preview) || card.pendingAction?.argsPreview || "";
           if (tool) card.pendingAction = { tool, argsPreview };
+          break;
+        }
+        case "approval.response": {
+          // plan-354-1739：用户在主窗回答提问/处理审批后，服务端把该事件转发到全局
+          // 通道（ws.py 白名单 v46）；这里据此把卡片从「等待」恢复为「执行中」——
+          // 此前只有 approval.request 单向到达，答完题浮窗会一直卡在「等待回答」。
+          const card = map.get(sid);
+          if (!card) break;
+          const aid = str(p.approval_id);
+          // 只认自己挂起的那一次：与记录不符（迟到/串台的旧响应）时忽略，
+          // 避免旧审批的响应误清新一轮等待
+          if (card.pendingApprovalId && aid && aid !== card.pendingApprovalId) break;
+          card.pendingApprovalId = null;
+          card.waitingReason = "";
+          card.pendingAction = null;
+          if (card.status === "waiting") card.status = "running";
           break;
         }
         case "turn.failed": {

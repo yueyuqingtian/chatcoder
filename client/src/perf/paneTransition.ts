@@ -29,19 +29,24 @@ import { useUiStore } from "../store/ui";
 /** 面板过渡时长（毫秒）：读 `--dur-pane` 的计算值；解析失败回退 200ms。
  *
  *  注意：未注册的自定义属性经 getComputedStyle 返回的是**原始 token 串**
- *  （例如 `calc(180ms * var(--motion-scale))`），因此这里用正则抓其中的 ms 数值。
+ *  （例如 `calc(260ms * var(--motion-scale))`），因此这里用正则抓其中的 ms 数值，
+ *  再乘一次 `--motion-scale`（plan-353-1738 M2 修正：此前只取数值、未折算档位系数，
+ *  与 CSS 侧 `calc(... * var(--motion-scale))` 的实际时长不一致）。
  *  取不到时再退到 `--dur-med` / 200ms，保证收尾一定发生。 */
 function paneTransitionMs(): number {
   if (typeof window === "undefined") return 0;
   try {
     const cs = getComputedStyle(document.documentElement);
+    // 动画档位系数（full=1 / reduced=0.6 / off=0）；读不到时按 1 处理。
+    const scaleRaw = cs.getPropertyValue("--motion-scale").trim();
+    const scale = scaleRaw ? (Number.parseFloat(scaleRaw) || 0) : 1;
     for (const name of ["--dur-pane", "--dur-med", "--dur-3"]) {
       const raw = cs.getPropertyValue(name).trim();
       if (!raw) continue;
       const ms = /([\d.]+)ms/.exec(raw);
-      if (ms) return Math.max(0, Math.round(parseFloat(ms[1])));
+      if (ms) return Math.max(0, Math.round(parseFloat(ms[1]) * scale));
       const s = /([\d.]+)s/.exec(raw);
-      if (s) return Math.max(0, Math.round(parseFloat(s[1]) * 1000));
+      if (s) return Math.max(0, Math.round(parseFloat(s[1]) * 1000 * scale));
     }
   } catch { /* 读不到样式时用回退值 */ }
   return 200;

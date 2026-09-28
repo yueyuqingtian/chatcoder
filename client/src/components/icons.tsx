@@ -978,7 +978,9 @@ export function IconArrowToggle({ open, size = 14, color = "currentColor", strok
       {...baseProps(size, color, strokeWidth, rest)}
       style={{
         transform: open ? "rotate(90deg)" : "rotate(0deg)",
-        transition: "transform var(--dur-fast, 0.15s) ease",
+        // plan-353-1738 M4b（S5）：统一为折叠展开档时长 + 弹性曲线（原为 --dur-fast + 字面量 ease，
+        // 与 .tc-chevron / .debug-card-caret 手感不一致）
+        transition: "transform var(--dur-3) var(--ease-spring)",
         ...((rest as Record<string, unknown>).style as Record<string, unknown> | undefined),
       }}
     >

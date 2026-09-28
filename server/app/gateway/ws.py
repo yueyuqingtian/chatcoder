@@ -45,6 +45,9 @@ _TODO_FORWARD_MAX = 12
 #   approval.request、turn.failed（每次各一条）。它们量级很小
 #   （单任务 10 分钟约几十条、payload 均为小对象），不改变全局通道的低频性质；
 #   高频增量（token.delta / thinking.delta / tool.output）仍不转发。
+# v46 (plan-354-1739)：增补 approval.response——用户回答提问/处理审批后，宠物卡片
+#   需要据此从「等待确认」恢复为「执行中」。此前只有 approval.request 单向到达全局
+#   通道，答完题后没有任何恢复信号，浮窗会一直卡在「等待回答」（用户实测）。
 _GLOBAL_FORWARD_EVENTS = frozenset({
     "session.completed",
     "session.updated",
@@ -56,6 +59,7 @@ _GLOBAL_FORWARD_EVENTS = frozenset({
     "tool.call",
     "tool.result",
     "approval.request",
+    "approval.response",
     "subagent.pending",
     "subagent.wakeup",
     "message.created",

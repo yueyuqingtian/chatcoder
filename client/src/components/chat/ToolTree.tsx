@@ -672,7 +672,7 @@ const ActionClusterRow = memo(function ActionClusterRow({ leaves }: { leaves: To
         {!running && failed && <span className="tc-status fail"><IconX size={11} /></span>}
         <span className={"tc-chevron" + (expanded ? " open" : "")}><IconChevronRight size={11} /></span>
       </div>
-      <ChatCollapse open={expanded} className="tc-collapse-explore">
+      <ChatCollapse open={expanded}>
         <div className="tc-explore-detail">
           {leaves.map((leaf, j) => <LeafRow key={j} leaf={leaf} />)}
         </div>
@@ -708,7 +708,7 @@ const WriteMergedRow = memo(function WriteMergedRow({ leaves }: { leaves: ToolLe
         {!running && failed && <span className="tc-status fail"><IconX size={11} /></span>}
         <span className={"tc-chevron" + (expanded ? " open" : "")}><IconChevronRight size={11} /></span>
       </div>
-      <ChatCollapse open={expanded} className="tc-collapse-explore">
+      <ChatCollapse open={expanded}>
         <div className="tc-explore-detail">
           {leaves.map((leaf, j) => <LeafRow key={j} leaf={leaf} />)}
         </div>

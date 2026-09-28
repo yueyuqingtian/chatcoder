@@ -70,7 +70,7 @@ npm run dev                     # http://localhost:5173
 ```powershell
 # 一键脚本：构建前端 -> PyInstaller 打包后端 -> electron-builder 出 NSIS 安装包
 powershell -ExecutionPolicy Bypass -File build-release.ps1
-# 产物: 0.7.2/chatcoder-Setup-<version>.exe + latest.yml + .blockmap
+# 产物: 0.7.3/chatcoder-Setup-<version>.exe + latest.yml + .blockmap
 ```
 
 或分步执行：
@@ -81,7 +81,7 @@ npm install
 npm run build:frontend
 # 打包后端（需 server/.venv 已安装 pyinstaller）
 npm run build:backend
-# 打包桌面应用（0.7.2/ 目录）
+# 打包桌面应用（0.7.3/ 目录）
 npm run dist
 ```
 
@@ -105,7 +105,7 @@ powershell -ExecutionPolicy Bypass -File build-release.ps1 -Publish
 # 方式二：先手动打包，再单独发布
 powershell -ExecutionPolicy Bypass -File build-release.ps1
 gh release create v<version> `
-  0.7.2/chatcoder-Setup-<version>.exe 0.7.2/latest.yml 0.7.2/chatcoder-Setup-<version>.exe.blockmap `
+  0.7.3/chatcoder-Setup-<version>.exe 0.7.3/latest.yml 0.7.3/chatcoder-Setup-<version>.exe.blockmap `
   --title "v<version>" --notes "ChatCoder v<version>"
 # 再同步自建更新源（服务器从 GitHub 拉取）
 python tools\sync-updates.py --version <version>

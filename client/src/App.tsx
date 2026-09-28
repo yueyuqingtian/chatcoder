@@ -254,9 +254,12 @@ export default function App() {
           <div className="app-body">
             <main ref={mainElRef} className={`app-main${!rightExpanded ? " right-panel-collapsed" : ""}`}>
               {/* plan-282-1421（第3项）：设置 ↔ 工作区切换过渡（id 为页面标识）。
-                  App.tsx 与 settings/Workspace 内层过渡叠加时也不会位移：两者都是
-                  transform/opacity，且内层只在 tab/session 变化时重播。 */}
-              <PageTransition id={nav === "settings" ? "settings" : `ws-${nav ?? "chat"}`}>
+                  plan-353-1738 M3（S1）：id 收敛为二值语义——此前用 `ws-${nav}`，
+                  工作区内每次导航（chat ↔ scheduled ↔ skills）都会**同时**改变外层与本层 id，
+                  两层同一套位移 + 淡入同帧播放（位移视觉叠加、opacity 相乘），
+                  正是「快得不自然」的来源之一。现外层只负责 settings ↔ 工作区这一次切换，
+                  工作区内部导航完全交给 Workspace 内层过渡，任何时刻只播一层。 */}
+              <PageTransition id={nav === "settings" ? "settings" : "workspace"}>
                 {nav === "settings"
                   ? <SettingsContent tab={settingsActiveTab} />
                   : <Workspace nav={nav} onSessionStart={() => setNav(null)} />}

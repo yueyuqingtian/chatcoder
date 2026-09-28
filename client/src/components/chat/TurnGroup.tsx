@@ -598,9 +598,13 @@ export const TurnGroup = memo(function TurnGroup({
           {/* 1. 有最终汇报时：过程项进入可折叠容器 */}
           {hasProcess && (
             <div className={`turn-process-container${processCollapsed ? " collapsed" : ""}`}>
-              {processItems.map(({ item, index }) => renderAiItemWithActions(item, index))}
-              {hasPlan && !hasPlanMsg && <PluginSlot slot="plan-card" turnId={turnId} embedded />}
-              {subagentFallbackInContainer ? subagentNode : null}
+              {/* plan-353-1738 M4a：内层承载原来的 flex + gap 布局，
+                  外层（grid）只负责 0fr↔1fr 的真实高度过渡 */}
+              <div className="turn-process-inner">
+                {processItems.map(({ item, index }) => renderAiItemWithActions(item, index))}
+                {hasPlan && !hasPlanMsg && <PluginSlot slot="plan-card" turnId={turnId} embedded />}
+                {subagentFallbackInContainer ? subagentNode : null}
+              </div>
             </div>
           )}
 
@@ -608,11 +612,15 @@ export const TurnGroup = memo(function TurnGroup({
               子代理面板例外——允许折叠（v36 修复：此前没有折叠入口，长过程无法收起） */}
           {!hasProcess && (
             <div className={`turn-process-container${flow === "subagent" && processCollapsed ? " collapsed" : ""}`}>
-              {items.map((item, index) =>
-                index !== firstUserIdx ? renderAiItemWithActions(item, index) : null
-              )}
-              {hasPlan && !hasPlanMsg && <PluginSlot slot="plan-card" turnId={turnId} embedded />}
-              {subagentFallbackInContainer ? subagentNode : null}
+              {/* plan-353-1738 M4a：同 hasProcess 分支——内层承担 flex + gap，
+                  外层 grid 承担真实高度过渡 */}
+              <div className="turn-process-inner">
+                {items.map((item, index) =>
+                  index !== firstUserIdx ? renderAiItemWithActions(item, index) : null
+                )}
+                {hasPlan && !hasPlanMsg && <PluginSlot slot="plan-card" turnId={turnId} embedded />}
+                {subagentFallbackInContainer ? subagentNode : null}
+              </div>
             </div>
           )}
 

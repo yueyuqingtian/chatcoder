@@ -1,5 +1,5 @@
 ﻿# chatcoder 一键打包脚本(Windows)
-# 产物:0.7.2/chatcoder-Setup-<version>.exe（electron-builder 输出目录见 package.json build.directories.output）
+# 产物:0.7.3/chatcoder-Setup-<version>.exe（electron-builder 输出目录见 package.json build.directories.output）
 # 用法:powershell -ExecutionPolicy Bypass -File build-release.ps1 [-Publish]
 #   -Publish: 打包后自动创建 GitHub Release 并上传产物（需 gh CLI 已登录，见 README 发布章节）
 param(
@@ -62,14 +62,14 @@ Write-Host ("桌面操控内核: {0} ({1:N0} KB)" -f (Split-Path $coreExe -Leaf)
 
 Write-Host "=== [4/6] 部署后端到运行目录 ===" -ForegroundColor Cyan
 # 同步产物到目标目录，不重启任何正在运行的进程
-& "$root\deploy-server.ps1" -TargetDir "0.7.2\win-unpacked\resources\server\chatcoder-server"
+& "$root\deploy-server.ps1" -TargetDir "0.7.3\win-unpacked\resources\server\chatcoder-server"
 
 Write-Host "=== [5/6] 打包桌面应用(electron-builder) ===" -ForegroundColor Cyan
 & npx electron-builder --win
 if ($LASTEXITCODE -ne 0) { throw "electron-builder 打包失败" }
 
 Write-Host "=== [6/6] 完成 ===" -ForegroundColor Green
-Get-ChildItem "$root\0.7.2\*.exe" | ForEach-Object {
+Get-ChildItem "$root\0.7.3\*.exe" | ForEach-Object {
     Write-Host ("产物: " + $_.Name + " (" + [math]::Round($_.Length/1MB,1) + " MB)") -ForegroundColor Yellow
 }
 
@@ -82,7 +82,7 @@ if ($Publish) {
     # 资产名必须与 latest.yml 中 url 一致（package.json nsis.artifactName 已保证无空格）。
     # 更新说明与 CHANGELOG 同源：提取当前版本区块作为 release notes。
     # 服务器同步脚本会把 notes 注入自建源 latest.yml，客户端「更新说明」展示它。
-    $notesFile = "$root\0.7.2\release-notes.md"
+    $notesFile = "$root\0.7.3\release-notes.md"
     $notesArgs = @("--notes", "ChatCoder $tag")
     $changelog = Get-Content "$root\CHANGELOG.md" -Raw -Encoding UTF8
     if ($changelog -match "(?ms)^## v$([regex]::Escape($version))\s*\r?\n(.*?)(?=^## |\z)") {
@@ -92,7 +92,7 @@ if ($Publish) {
             $notesArgs = @("--notes-file", $notesFile)
         }
     }
-    gh release create $tag "$root\0.7.2\chatcoder-Setup-$version.exe" "$root\0.7.2\latest.yml" "$root\0.7.2\chatcoder-Setup-$version.exe.blockmap" --title $tag @notesArgs
+    gh release create $tag "$root\0.7.3\chatcoder-Setup-$version.exe" "$root\0.7.3\latest.yml" "$root\0.7.3\chatcoder-Setup-$version.exe.blockmap" --title $tag @notesArgs
     if ($LASTEXITCODE -ne 0) { throw "gh release create 失败" }
     Write-Host "发布完成: https://github.com/yueyuqingtian/chatcoder/releases/tag/$tag" -ForegroundColor Green
 

@@ -3,7 +3,7 @@
 #   powershell -ExecutionPolicy Bypass -File deploy-server.ps1            # 仅部署+验证
 #   powershell -ExecutionPolicy Bypass -File deploy-server.ps1 -Restart   # 部署+重启 12973 端口服务
 param(
-    [string]$TargetDir = "0.7.2\win-unpacked\resources\server\chatcoder-server",
+    [string]$TargetDir = "0.7.3\win-unpacked\resources\server\chatcoder-server",
     [switch]$Restart
 )
 $ErrorActionPreference = 'Stop'

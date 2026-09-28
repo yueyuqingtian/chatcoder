@@ -35,8 +35,9 @@ export function PageTransition({ id, direction = "up", fill = true, className = 
       key={id}
       className={`ui-page-transition ${dirCls}${fill ? "" : " no-fill"} ${className}`.trim()}
       style={{
-        // 位移量随 --motion-dist 缩放（动画"关闭"档为 0，等价瞬时但仍达终态）
-        ["--pt-dist" as string]: "calc(6px * var(--motion-dist, 1))",
+        // plan-353-1738 M3：位移量 6px → 10px（240ms 下 6px 几乎看不出方向语义）；
+        // 仍随 --motion-dist 缩放（动画"关闭"档为 0，等价瞬时但仍达终态）
+        ["--pt-dist" as string]: "calc(10px * var(--motion-dist, 1))",
         ...style,
       }}
     >

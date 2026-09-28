@@ -39,7 +39,7 @@ a { color: var(--accent); text-decoration: none; }
 .app-shell { display: flex; flex-direction: row; height: 100vh; overflow: hidden; background: var(--bg-sidebar); border-radius: var(--r-lg); }
 .app-right { display: flex; flex-direction: column; flex: 1; min-width: 0; overflow: hidden; }
 .app-body { display: flex; flex: 1; overflow: hidden; min-height: 0; }
-.app-pane { flex-shrink: 0; overflow: hidden; transition: width var(--dur-med) var(--curve), flex-basis var(--dur-med) var(--curve); }
+.app-pane { flex-shrink: 0; overflow: hidden; transition: width var(--dur-pane) var(--ease-drawer), flex-basis var(--dur-pane) var(--ease-drawer); }
 /* 左面板：自身不画接缝线，只保留 1px 透明 border 占位（布局零位移 + 背景延伸进 border 区，
    不会露出窗口底/壁纸）。线的绘制**统一由分隔条 .resize-handle::after 承担**（见该规则处说明）。
    为什么不在面板上画（两轮踩坑，务必保持本形态）：
@@ -66,6 +66,15 @@ a { color: var(--accent); text-decoration: none; }
   display: flex;
   flex-direction: column;
   height: 100%;
+  /* plan-353-1738 M2：收起方向「内容瞬隐」修复。
+     折叠态带 visibility:hidden，而 visibility 不在 .app-pane 的过渡列表里 ⇒ 一加
+     .collapsed 内容立即消失，只剩空壳在收缩。这里把 visibility 纳入过渡：
+     展开方向延迟 0s（立即可见），收起方向延迟 --dur-pane（等宽度动画走完再隐藏），
+     收起过程因此能看到内容随面板被裁切。 */
+  transition:
+    width var(--dur-pane) var(--ease-drawer),
+    flex-basis var(--dur-pane) var(--ease-drawer),
+    visibility 0s linear 0s;
 }
 .app-pane-right.collapsed {
   width: 0 !important;
@@ -75,6 +84,12 @@ a { color: var(--accent); text-decoration: none; }
   border-left: none !important;
   overflow: hidden !important;
   visibility: hidden !important;
+  /* 收起方向才延迟隐藏（见 .app-pane-right 基础规则）；transition 取「目标状态」的声明，
+     因此获得 .collapsed 时用本条的 --dur-pane 延迟，移除时用基础条的 0s 立即显示。 */
+  transition:
+    width var(--dur-pane) var(--ease-drawer),
+    flex-basis var(--dur-pane) var(--ease-drawer),
+    visibility 0s linear var(--dur-pane);
 }
 .app-pane-right.fullscreen {
   position: fixed;
@@ -891,23 +906,39 @@ body.maximized .titlebar { padding-top: 8px; padding-left: 16px; padding-right: 
   align-items: center;
   justify-content: center;
   color: var(--text-3);
-  transition: transform var(--dur-fast), color var(--dur-fast);
+  /* plan-353-1738 M4b（S5）：旋转统一 --dur-3 + --ease-spring（原 --dur-fast 且无曲线） */
+  transition: transform var(--dur-3) var(--ease-spring), color var(--dur-fast);
 }
 .turn-worktime.clickable:hover .turn-worktime-arrow {
   color: var(--text-1);
 }
-/* 工作过程容器（思考/工具/子代理），支持折叠与平滑过渡；间距交给 .turn-flow gap */
+/* 工作过程容器（思考/工具/子代理），支持折叠与平滑过渡；间距交给 .turn-flow gap
+   plan-353-1738 M4a（S2）：由「max-height: none ↔ 0」改为 grid-template-rows 0fr↔1fr。
+   原实现基础规则未声明 max-height（=none），折叠态 max-height:0 —— none 与长度值
+   不可插值 ⇒ 高度是瞬跳（只有 opacity 在动），turn 完成自动折叠时就是「啪一下消失」。
+   改用 grid 真实高度过渡后收起/展开全程可见；margin 也纳入过渡，消除折叠瞬间的
+   间距跳变（.turn-flow > .turn-process-container.collapsed 的负 margin）。 */
 .turn-process-container {
+  display: grid;
+  grid-template-rows: 1fr;
+  margin: 0;
+  opacity: 1;
+  transition:
+    grid-template-rows var(--dur-3) var(--ease-emphasized-decel),
+    opacity var(--dur-2) var(--ease-emphasized-decel),
+    margin var(--dur-3) var(--ease-emphasized-decel);
+  overflow: hidden;
+}
+/* 内层承载原来的 flex + gap（grid 0fr↔1fr 机制要求外层只有一层子元素） */
+.turn-process-container > .turn-process-inner {
   display: flex;
   flex-direction: column;
   gap: var(--flow-gap, 8px);
-  margin: 0;
-  /* v40.1 节距说明略；plan-230-1144 M5.1: 过渡时长改用 token */
-  transition: max-height var(--dur-4) var(--ease-out), opacity var(--dur-3) var(--ease-out);
   overflow: hidden;
+  min-height: 0;
 }
 .turn-process-container.collapsed {
-  max-height: 0 !important;
+  grid-template-rows: 0fr;
   opacity: 0;
   pointer-events: none;
   margin: 0;
@@ -2308,8 +2339,10 @@ body.maximized .titlebar { padding-top: 8px; padding-left: 16px; padding-right: 
 /* v2.2 (对齐 zcode 3.8.3): 命令中心（Cmd+K）
    S2（plan-41-197）：用户反馈“点击后的弹窗做小了”——弹窗 640→720px，
    输入区/标签条/列表行高与内距同步放大，观感不再局促。 */
-.cmd-center-overlay { position: fixed; inset: 0; z-index: 300; background: rgba(0, 0, 0, 0.45); display: flex; align-items: flex-start; justify-content: center; padding-top: 11vh; }
-.cmd-center { width: 720px; max-width: 92vw; background: var(--color-popover); border: 1px solid var(--border); border-radius: var(--r-pop); box-shadow: 0 16px 48px rgba(0,0,0,0.18); overflow: hidden; }
+/* plan-353-1738 M5（S7）：命令中心此前完全无动画（打开即闪现）。
+   遮罩淡入 + 面板轻微下拉淡入，与其它浮层（菜单/弹窗）手感一致。 */
+.cmd-center-overlay { position: fixed; inset: 0; z-index: 300; background: rgba(0, 0, 0, 0.45); display: flex; align-items: flex-start; justify-content: center; padding-top: 11vh; animation: anim-fade-in var(--dur-3) var(--ease-emphasized-decel) both; }
+.cmd-center { width: 720px; max-width: 92vw; background: var(--color-popover); border: 1px solid var(--border); border-radius: var(--r-pop); box-shadow: 0 16px 48px rgba(0,0,0,0.18); overflow: hidden; animation: ui-pop-in var(--dur-4) var(--ease-emphasized-decel) both; }
 .cmd-center-input-wrap { display: flex; align-items: center; gap: 12px; padding: 16px 18px 12px; color: var(--text-3); }
 .cmd-center-input { flex: 1; border: none; outline: none; background: transparent; color: var(--text-1); font-size: 15px; }
 .cmd-center-input::placeholder { color: var(--text-3); }
@@ -2849,7 +2882,8 @@ body.maximized .titlebar { padding-top: 8px; padding-left: 16px; padding-right: 
   background: var(--bg);
   padding: 6px;
   display: flex; flex-direction: column; gap: 2px;
-  animation: plan-pop var(--dur-fast);
+  /* plan-353-1738 M4b（S8）：移除 plan-pop 入场动画——展开/收起改由外层 ChatCollapse
+     （.tc-collapse 真实高度过渡）承担；两套动画叠加会显得生硬，且原先收起无动画。 */
 }
 .approval-more-opt {
   display: flex; align-items: flex-start; gap: 9px;
@@ -3661,7 +3695,7 @@ body.maximized .titlebar { padding-top: 8px; padding-left: 16px; padding-right: 
 }
 .debug-card-fn { font-size: 11px; color: var(--text-3); flex-shrink: 0; }
 .debug-card-meta { margin-left: auto; font-size: 10px; color: var(--text-3); flex-shrink: 0; }
-.debug-card-caret { display: inline-flex; color: var(--text-3); transition: transform var(--dur-2) var(--ease-standard); flex-shrink: 0; }
+.debug-card-caret { display: inline-flex; color: var(--text-3); transition: transform var(--dur-3) var(--ease-spring); flex-shrink: 0; }
 .debug-card-caret.open { transform: rotate(90deg); }
 .debug-card-body { display: flex; flex-direction: column; gap: var(--sp-3); padding: var(--sp-2) var(--sp-3) var(--sp-3); }
 .debug-card-block { display: flex; flex-direction: column; gap: 2px; }
@@ -4451,10 +4485,9 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 @keyframes anim-slide-up { from { opacity: 0; transform: translateY(calc(8px * var(--motion-dist))); } to { opacity: 1; transform: none; } }
 @keyframes anim-slide-in-left { from { opacity: 0; transform: translateX(calc(-10px * var(--motion-dist))); } to { opacity: 1; transform: none; } }
 @keyframes anim-scale-in { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: none; } }
-/* 视图切换入场（Workspace / 右面板标签内容 key 重挂载时使用） */
-.view-enter { animation: view-enter var(--dur-view) var(--ease-emphasized-decel) both; }
-.view-enter-slow { animation: view-enter var(--dur-slow) var(--ease-emphasized-decel) both; }
-@keyframes view-enter { from { opacity: 0; transform: translateY(calc(6px * var(--motion-dist))); } to { opacity: 1; transform: none; } }
+/* plan-353-1738 M5（S10）：`.view-enter` / `.view-enter-slow` / `@keyframes view-enter`
+   已删除——全仓无挂载点（页面切换早已统一走 ui/PageTransition 的 ui-page-in-* 关键帧），
+   属死样式。 */
 /* ── 消息流动效 ── */
 /* plan-334-1661 S7：`.mf-entry-new` 与 `@keyframes msg-in` 已删除——全仓无挂载点
    （原注释写“仅对真正新增的条目挂”，但组件侧始终未实现），属死样式。 */

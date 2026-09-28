@@ -436,7 +436,10 @@
 .ui-page-inner.is-fill > .ui-page-cards { flex: 1; min-height: 0; }
 
 /* ── ⑩ Collapse：grid-template-rows 真实高度过渡 ─────────── */
-.ui-collapse { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows var(--dur-4) var(--ease-emphasized-decel), opacity var(--dur-3) var(--ease-emphasized-decel); }
+/* plan-353-1738 M4a（S4）：与 .tc-collapse / .collapse-grid 统一为 3 档时长（展开/折叠）。
+    此前三套折叠类各用一套参数（--dur-4 / --dur-3，emphasized-decel / ease-out），
+    同一「展开」语义在同一屏内手感不一致。现在统一为 --dur-3 + emphasized-decel。 */
+.ui-collapse { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows var(--dur-3) var(--ease-emphasized-decel), opacity var(--dur-2) var(--ease-emphasized-decel); }
 .ui-collapse[data-open="true"] { grid-template-rows: 1fr; opacity: 1; }
 .ui-collapse > .ui-collapse-inner { overflow: hidden; min-height: 0; }
 
@@ -590,25 +593,30 @@
  * 只动 transform + opacity，绝不触碰布局属性；
  * 位移量走 --motion-dist（动画档位缩放），关闭档为 0 → 瞬时但仍达终态。
  * 方向由修饰类决定（up / left / none），避免在 CSS 里做表达式判断。 */
+/* plan-353-1738 M3：时长 3 档 → 4 档（页面/模态专用），位移 6px → 10px。
+   此前页面级误用展开/折叠档的 180ms，叠加 6px 位移量，观感只剩「闪现」；
+   改 240ms + 10px 后位移与淡入都能被看见。 */
 .ui-page-transition {
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  animation: ui-page-in-up var(--dur-3) var(--ease-emphasized-decel) both;
+  animation: ui-page-in-up var(--dur-4) var(--ease-emphasized-decel) both;
 }
 .ui-page-transition.no-fill { height: auto; }
 .ui-page-transition.dir-left { animation-name: ui-page-in-left; }
 .ui-page-transition.dir-none { animation-name: ui-page-in-fade; }
 /* 右面板 tab：面板必须全量挂载（切 tab 不能丢内部状态），因此不用 key 重挂载，
-   而是靠"类名从无到有"触发同一套入场关键帧。 */
-.ui-tab-enter { animation: ui-page-in-up var(--dur-3) var(--ease-emphasized-decel) both; }
+   而是靠"类名从无到有"触发同一套入场关键帧。
+   plan-353-1738 M3（S6）：本类不经过 PageTransition，取不到 --pt-dist，
+   此前回退值 6px 恒定、不随 --motion-dist 缩放；现回退值与 PageTransition 内联值同源。 */
+.ui-tab-enter { animation: ui-page-in-up var(--dur-4) var(--ease-emphasized-decel) both; }
 @keyframes ui-page-in-up {
-  from { opacity: 0; transform: translateY(var(--pt-dist, 6px)); }
+  from { opacity: 0; transform: translateY(var(--pt-dist, calc(10px * var(--motion-dist, 1)))); }
   to { opacity: 1; transform: none; }
 }
 @keyframes ui-page-in-left {
-  from { opacity: 0; transform: translateX(var(--pt-dist, 6px)); }
+  from { opacity: 0; transform: translateX(var(--pt-dist, calc(10px * var(--motion-dist, 1)))); }
   to { opacity: 1; transform: none; }
 }
 @keyframes ui-page-in-fade {

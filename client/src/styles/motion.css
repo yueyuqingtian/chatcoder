@@ -28,11 +28,13 @@
 
 /* ── 折叠规范类：内容高度自适应过渡（替代 max-height 估算）──
  * 用法：<div class="collapse-grid" data-open="true"><div>…内容…</div></div>
- * 子元素只有一层，grid-template-rows 0fr ↔ 1fr 即得到真实高度过渡。 */
+ * 子元素只有一层，grid-template-rows 0fr ↔ 1fr 即得到真实高度过渡。
+ * plan-353-1738 M4a（S4）：与 .tc-collapse / .ui-collapse 统一为 --dur-3 +
+ *   emphasized-decel（此前用 --dur-4 + --ease-out，同语义三套参数）。 */
 .collapse-grid {
   display: grid;
   grid-template-rows: 0fr;
-  transition: grid-template-rows var(--dur-4) var(--ease-out), opacity var(--dur-3) var(--ease-out);
+  transition: grid-template-rows var(--dur-3) var(--ease-emphasized-decel), opacity var(--dur-2) var(--ease-emphasized-decel);
   opacity: 0;
 }
 .collapse-grid[data-open="true"] {

@@ -27,6 +27,7 @@ import {
   IconWand,
 } from "../icons";
 import { Button, Tooltip } from "../ui";
+import { ChatCollapse } from "./ChatCollapse";
 
 /** 审批卡字段文案对照（工具参数名 → 中文标签）。未知字段回落原名。 */
 const FIELD_LABELS: Record<string, string> = {
@@ -247,7 +248,9 @@ export function ApprovalCard({
 
       <ExplainSection approvalId={approvalId} />
 
-      {showMore && (
+      {/* plan-353-1738 M4b（S8）：展开/收起改由 ChatCollapse 承担真实高度过渡，
+          不再用「120ms plan-pop 入场 + 收起瞬删」——现在两个方向都有平滑动画。 */}
+      <ChatCollapse open={showMore}>
         <div className="approval-more-panel">
           {/* plan-75-332 R2（用户反馈）：始终允许改为列表式选项——图标 + 标题 + 作用范围说明，
               用户一眼能分辨「本会话 / 所有会话」的区别，不再靠两个并排长文字按钮去猜。 */}
@@ -283,7 +286,7 @@ export function ApprovalCard({
             始终允许仅对「自动审批」与「完全访问」生效；询问审批模式下每次仍会询问。
           </div>
         </div>
-      )}
+      </ChatCollapse>
 
       <div className="approval-footer">
         <Tooltip content="由 AI 分析这条操作的用途与风险">

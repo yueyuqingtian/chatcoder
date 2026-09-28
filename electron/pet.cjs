@@ -741,6 +741,10 @@ function createPetWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      // plan-354-1739：宠物窗口从不获得焦点，Windows 下被遮挡/长时间未交互时
+      // Chromium 会把渲染进程定时器节流到最低 1s，浮窗消息与状态刷新随之变慢；
+      // 这里是常驻实时窗口，必须禁用后台节流。
+      backgroundThrottling: false,
     },
   });
   try { petWindow.setAlwaysOnTop(true, "screen-saver"); } catch { /* 平台差异，忽略 */ }

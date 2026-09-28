@@ -41,9 +41,12 @@ export function Workspace({ nav, onSessionStart }: {
   if (!currentSessionId) {
     return (
       <main className="workspace workspace-empty">
-        <div className="ws-body ws-empty">
+        {/* plan-353-1738 M3（S9）：空态 ⇄ 会话态此前是裸 div 瞬切（外层 id 也不变）。
+            这里包一层 PageTransition，让「新建会话 / 退出会话」也有与其它切换一致的入场。
+            fill=false：保持原 .ws-body 的盒模型（flex:1 撑满，不引入 height:100%）。 */}
+        <PageTransition id="workspace-empty" fill={false} className="ws-body ws-empty">
           <PluginSlot slot="empty-state" onStarted={() => onSessionStart?.()} />
-        </div>
+        </PageTransition>
       </main>
     );
   }

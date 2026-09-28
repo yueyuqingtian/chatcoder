@@ -66,6 +66,7 @@ v*/
 
 0.7.2/
 0.7.2copy/
+0.7.3/
 releasev1/
 
 # 第三方参考仓库（deepseek-harness 等）
@@ -235,3 +236,11 @@ server/*_out.txt
 # Ta+3 参考应用解包（plan-270-1358 移植对照用，可用 tmp_extract_ta3.cjs 重新生成）
 /tmp_ta3_extract/
 /tmp_extract_ta3.cjs
+
+# 本地调试临时产物（截图/探针/基准/补丁等，不入库）
+/tmp_*/
+/tmp_*.txt
+/tmp_*.diff
+/tmp_*.py
+/tmp_*.patch
+/tmp_*.cjs

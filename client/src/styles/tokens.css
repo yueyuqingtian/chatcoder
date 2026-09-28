@@ -450,10 +450,12 @@
   --page-max-w-wide: 880px;
   /* plan-230-1144 M5.1: 时长阶梯重建（此前的 --dur-med/--dur-normal 同值 0.15s
      语义重复、--dur-slow 0.2s 与 --dur-view 0.16s 差距过小，"慢"动画实际不快）。
-     新阶梯：1=微反馈 2=hover/色彩 3=展开/折叠 4=页面/模态 5=入场。 */
+     新阶梯：1=微反馈 2=hover/色彩 3=展开/折叠 4=页面/模态 5=入场。
+     plan-353-1738 M1：3 档 180→200ms——展开/折叠是「内容高度变化 + 位移」的复合动画，
+     180ms 下前段几乎看不见，200ms 才让「展开」过程可被感知（标准优雅节奏）。 */
   --dur-1: calc(80ms * var(--motion-scale));
   --dur-2: calc(120ms * var(--motion-scale));
-  --dur-3: calc(180ms * var(--motion-scale));
+  --dur-3: calc(200ms * var(--motion-scale));
   --dur-4: calc(240ms * var(--motion-scale));
   --dur-5: calc(360ms * var(--motion-scale));
   /* 循环动画时长（spinner/pulse/breath 等持续型动效，与交互时长阶梯分列） */
@@ -467,16 +469,23 @@
   --dur-normal: var(--dur-3);
   --dur-slow: var(--dur-4);
   --dur-view: var(--dur-4);
-  /* plan-329-1647 S7：面板折叠 / 全屏切换的 View Transition 快照时长。
-     取 180ms（≈旧 CSS width 过渡的观感），已含 --motion-scale 系数。 */
-  --dur-pane: var(--dur-3);
+  /* plan-329-1647 S7：面板折叠 / 全屏切换时长；plan-353-1738 M2 改为独立取值。
+     面板开合是 300px 级的横向大位移，沿用展开/折叠档的 200ms 会显得「瞬移」；
+     独立取 260ms，让起步有加速感、中段可见滑行、末端缓停。已含 --motion-scale 系数。 */
+  --dur-pane: calc(260ms * var(--motion-scale));
   /* zcode 默认过渡曲线；emphasize 收编原散落的 cubic-bezier(0.2,0,0,1) */
   --curve: cubic-bezier(0.4, 0, 0.2, 1);
   --curve-emphasize: cubic-bezier(0.2, 0, 0, 1);
   --ease-out: cubic-bezier(0, 0, 0.2, 1);
+  /* plan-353-1738 M2：面板/抽屉类「从静止展开」的大位移专用曲线（iOS 抽屉同族）。
+     起步柔和、中段滑行明显、长尾缓停——比对称的 ease-in-out 更有「推出感」，
+     比强 decel 曲线更不像「弹射」。仅用于 .app-pane 的水平开合。 */
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
   --ease-out-expo: cubic-bezier(0.19, 1, 0.22, 1);
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
-  --ease-spring: cubic-bezier(0.34, 1.3, 0.44, 1);
+  /* plan-353-1738 M1：过冲幅度 1.3 → 1.16——原值用在图标旋转（90°/180°）这类
+     小角度变化上会「甩过头再弹回」，降幅后保留弹性手感、去掉可见回弹。 */
+  --ease-spring: cubic-bezier(0.34, 1.16, 0.42, 1);
   /* 旋转动效专用（收编原散落的 cubic-bezier(0.45,0.15,0.55,0.85)） */
   --ease-spin: cubic-bezier(0.45, 0.15, 0.55, 0.85);
   /* plan-248-1258 M5: 全局统一缓动组（丝滑基线）。
@@ -485,7 +494,13 @@
        Material 3 "emphasized decelerate" 同款手感；
      - emphasized-accel：退场专用（关闭/收起）——起步缓、末端加速离场。 */
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
-  --ease-emphasized-decel: cubic-bezier(0.05, 0.7, 0.1, 1);
+  /* plan-353-1738 M1（核心）：入场曲线重标定。
+     原值 cubic-bezier(0.05, 0.7, 0.1, 1) 是 Material 3 为**长时长（≥300ms）**
+     强调动画设计的曲线，起点速度 ≈ 0.7/0.05 = 14×——用在 120~180ms 的短时长上，
+     头 1~2 帧即走完约 1/3 路程，观感正是「傻快」。
+     新值取 M3 通用「强调」曲线 cubic-bezier(0.2, 0, 0, 1)：起点与终点速度均为 0，
+     进度分布为 8.5%时间→10%位移 / 20%→50% / 53%→90% / 86%→99%，两端柔化、中段可见。 */
+  --ease-emphasized-decel: cubic-bezier(0.2, 0, 0, 1);
   --ease-emphasized-accel: cubic-bezier(0.3, 0, 0.8, 0.15);
   /* plan-248-1258 M5: 动画强度系数——由外观设置「动画效果」写入
      （full=1 / reduced=0.6 / off=0）。所有时长 token 乘该系数即可整体降速，
