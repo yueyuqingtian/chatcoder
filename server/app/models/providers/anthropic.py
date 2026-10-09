@@ -123,9 +123,13 @@ class AnthropicProvider(ModelProvider):
         if request.temperature is not None:
             payload["temperature"] = request.temperature
         # v6.0: extended thinking（对齐 claude code），reasoning_effort 非 none 时启用
-        if request.reasoning_effort and request.reasoning_effort != "none":
+        # v29: 用户显式选择档位 none（thinking=False）时下发 disabled —— Anthropic
+        # extended thinking 协议原生支持该关闭形态；此前只做"不传"，网关/模型默认
+        # 仍可能开思考导致"关不掉"。
+        _effort = (request.reasoning_effort or "").strip().lower()
+        if _effort and _effort != "none":
             budget = {"low": 2048, "medium": 8192, "high": 16384, "xhigh": 32768, "max": 32768}.get(
-                request.reasoning_effort, 8192
+                _effort, 8192
             )
             # v23.1: 中转网关（如 9router）对 Anthropic 请求体做严格白名单校验，
             # thinking.budget_tokens 不在其中会直接 400 UNKNOWN_FIELD；
@@ -138,6 +142,8 @@ class AnthropicProvider(ModelProvider):
             payload["temperature"] = 1
             if _official and payload.get("max_tokens", 0) <= budget:
                 payload["max_tokens"] = budget + 4096
+        elif request.thinking is False or _effort == "none":
+            payload["thinking"] = {"type": "disabled"}
         if request.tools:
             payload["tools"] = [
                 {

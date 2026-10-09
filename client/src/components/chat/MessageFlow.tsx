@@ -16,7 +16,8 @@ import { TurnGroup } from "./TurnGroup";
 import { JumpDots } from "./JumpDots";
 import { DebugCard } from "./DebugCard";
 import { StreamingTail } from "./StreamingTail";
-import { IconSearch, IconChevronUp, IconChevronDown, IconX, IconArrowDown, IconAlertCircle } from "../icons";
+import { IconSearch, IconChevronUp, IconChevronDown, IconX, IconArrowDown } from "../icons";
+import { ErrorCard } from "./ErrorCard";
 import { useTextHighlight } from "../../hooks/useTextHighlight";
 import { MarkdownContent } from "../MarkdownContent";
 import { MsgType } from "@chatcoder/shared";
@@ -30,6 +31,15 @@ import { api } from "../../api/client";
  *  运动结束由收敛序列（order 20）立即提交最终 rect 保证精确。 */
 const MOTION_RECT_THROTTLE_MS = 120;
 
+/** plan-387-1825 D1：程序滚动标记的**自动失效窗口**（毫秒）。
+ *  标记用于让 onScroll 忽略「由我们自己写 scrollTop 触发的 scroll 事件」；
+ *  但它一旦因某条代码路径漏复位而永久为真，onScroll 就永久早退 —— 用户的真实滚动
+ *  不再被记录（自动贴底、上滑接管解除、「回到底部」按钮显隐、scrollspy 全部失灵），
+ *  表现为「折叠/展开面板后再也不自动贴底，只能点回到底部才恢复」。
+ *  正常路径（双帧补滚 / 锚点还原最多 5 帧校正）均在该窗口内完成，
+ *  超时即视为标记泄漏，自动恢复真实滚动判定。 */
+const PROGRAMMATIC_SCROLL_GRACE_MS = 320;
+
 /** plan-75-334 阶段1：子代理面板不消费「turn 错误抑制列表」——固定传空数组，
  *  避免每次渲染新建 [] 破坏 TurnGroup 的 memo 命中。 */
 const EMPTY_TURN_ERRORS: number[] = [];
@@ -40,20 +50,15 @@ const EMPTY_TURN_ERRORS: number[] = [];
 const FlowErrorCard = memo(function FlowErrorCard({
   text, onRetry, onClose,
 }: { text: string; onRetry?: () => void; onClose: () => void }) {
+  // plan-387-1825 C1：与 turn 内 ERROR 消息共用同一组件，避免两份 markup 各改各的
   return (
-    <div className="turn-item turn-item-error flow-error-card">
-      <IconAlertCircle size={15} className="err-icon" />
-      <div className="err-body">
-        <div className="err-title">任务执行出错</div>
-        <div className="err-msg">{text}</div>
-        <div className="flow-error-actions">
-          {onRetry && (
-            <button className="btn btn-outline btn-sm" onClick={onRetry} type="button">重试</button>
-          )}
-          <button className="btn btn-ghost btn-sm" onClick={onClose} type="button">关闭</button>
-        </div>
-      </div>
-    </div>
+    <ErrorCard
+      text={text}
+      title="任务执行出错"
+      variant="trailing"
+      onRetry={onRetry}
+      onClose={onClose}
+    />
   );
 });
 
@@ -232,8 +237,20 @@ function MessageFlowCore({
    *  只有用户自己滚回贴底（距底 < 8px）才解除接管并恢复自动跟随。
    *  修复"上滑一点点 → 被 60px 贴底阈值立刻判回跟随 → 内容增长又拉回底部"的鬼畜循环。 */
   const userScrollOverrideRef = useRef(false);
-  /** 程序补滚标记：补滚期间 onScroll 不翻转跟随状态 */
+  /** 程序补滚标记：补滚/锚点还原期间 onScroll 不翻转跟随状态。
+   *  plan-387-1825 D1：必须与截止时间配套使用 —— 单纯布尔标记一旦某条路径漏复位，
+   *  onScroll 会永久早退（真实滚动不再被记录），表现见 PROGRAMMATIC_SCROLL_GRACE_MS 注释。 */
   const programmaticScrollRef = useRef(false);
+  const programmaticScrollUntilRef = useRef(0);
+  /** 标记「接下来写入 scrollTop 的是程序自己」；超过窗口未清除则自动失效。 */
+  const markProgrammaticScroll = useCallback(() => {
+    programmaticScrollRef.current = true;
+    programmaticScrollUntilRef.current = performance.now() + PROGRAMMATIC_SCROLL_GRACE_MS;
+  }, []);
+  const clearProgrammaticScroll = useCallback(() => {
+    programmaticScrollRef.current = false;
+    programmaticScrollUntilRef.current = 0;
+  }, []);
 
   /** plan-282-1441（#2）：宽度变化时的"视口锚点"。
    *  拖拽面板分隔条会改变消息列宽度 → 文本重排 → 每条消息高度变化 → 虚拟列表重新测量
@@ -241,7 +258,9 @@ function MessageFlowCore({
    *  这里在宽度变化时记录"首条可见项 + 其相对视口偏移"，待重测收敛后按锚点还原：
    *   - 原本贴底 → 仍然贴底（保持"我在最底部"的语义）；
    *   - 否则 → 让那条消息停在原来的视口位置（看哪条就停在哪条）。 */
-  const widthAnchorRef = useRef<{ index: number; offset: number; atBottom: boolean } | null>(null);
+  const widthAnchorRef = useRef<
+    { index: number; offset: number; atBottom: boolean; ratio: number; untrusted: boolean } | null
+  >(null);
   const lastWidthRef = useRef(0);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -428,9 +447,12 @@ function MessageFlowCore({
     if (!el) return;
     if (!force && (!autoScrollRef.current || userScrollOverrideRef.current)) return;
     if (smooth) {
+      // plan-387-1825 D1：平滑补滚同样标记为程序滚动——动画途中距底距离由大变小，
+      // 不标记的话中途的 scroll 事件会把跟随态误判成「用户已离开底部」。
+      markProgrammaticScroll();
       el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
     } else {
-      programmaticScrollRef.current = true;
+      markProgrammaticScroll();
       el.scrollTop = el.scrollHeight;
       // plan-547/v0.3.1 (对齐 v0.2.0)：双帧补滚——虚拟列表动态测量在渲染后才把总高度撑大，
       // 首帧撑开排版，次帧补齐 TanStack Virtual 测量差额坚决贴底（彻底删除 anchor 误杀拦截）
@@ -440,7 +462,7 @@ function MessageFlowCore({
           // plan-238-1188: 补滚窗口内用户若已上滚（wheel 捕获即时置 autoScrollRef=false），
           // 放弃这次补滚——否则快速流式刷新时用户的上滚会被逐帧拉回底部（"划不动"）
           if (el2 && autoScrollRef.current && !userScrollOverrideRef.current) el2.scrollTop = el2.scrollHeight;
-          programmaticScrollRef.current = false;
+          clearProgrammaticScroll();
         });
       });
     }
@@ -450,7 +472,7 @@ function MessageFlowCore({
       autoScrollRef.current = true;
       setShowScrollBottom(false);
     }
-  }, []);
+  }, [markProgrammaticScroll, clearProgrammaticScroll]);
 
   /** 问题12: scrollspy——取视口上 1/3 焦点线所在虚拟项，映射为 entry 下标传给 JumpDots */
   const updateActiveEntry = useCallback((el: HTMLDivElement) => {
@@ -493,8 +515,13 @@ function MessageFlowCore({
         parentRef.current?.classList.remove("is-scrolling");
       }, 700);
     }
-    // plan-547: 程序补滚产生的 scroll 事件不参与跟随判定
-    if (programmaticScrollRef.current) return;
+    // plan-547: 程序补滚产生的 scroll 事件不参与跟随判定。
+    // plan-387-1825 D1：带截止时间兜底——标记超时未复位即视为泄漏，恢复真实判定，
+    // 否则一次漏复位会让自动贴底 / 接管解除 / 回到底部按钮永久失效。
+    if (programmaticScrollRef.current) {
+      if (performance.now() < programmaticScrollUntilRef.current) return;
+      clearProgrammaticScroll();
+    }
     if (!el) return;
     const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
     // 恢复 v0.2.0 贴底阈值 60px（抵抗高 DPI 缩放浮点舍入与末尾元素 margin/padding 波动）
@@ -513,7 +540,7 @@ function MessageFlowCore({
     }
     setShowScrollBottom(distance > 120);
     scheduleSpy();
-  }, [scheduleSpy]);
+  }, [scheduleSpy, clearProgrammaticScroll]);
 
   /** plan-238-1188 + 本轮优化: 用户上滚意图必须"当帧生效"。
    *  思考内容快速刷新时，ResizeObserver / 双帧补滚都可能在 scroll 事件派发前
@@ -663,14 +690,40 @@ function MessageFlowCore({
     if (!el || typeof ResizeObserver === "undefined") return;
 
     const capture = () => {
-      const items = virtualizer.getVirtualItems();
-      const first = items[0];
-      if (!first) return;
+      const nodes = Array.from(el.querySelectorAll<HTMLElement>("[data-index]"));
+      const viewportTop = el.getBoundingClientRect().top + el.clientTop;
+      const firstNode = nodes.find((node) => node.getBoundingClientRect().bottom > viewportTop);
+      const firstIndex = firstNode ? Number(firstNode.dataset.index) : -1;
+      const first = Number.isFinite(firstIndex) && firstIndex >= 0
+        ? { index: firstIndex, start: el.scrollTop + firstNode!.getBoundingClientRect().top - viewportTop }
+        : null;
+      // plan-387-1825 A7：宽度为 0（折叠态）或拿不到虚拟项时，scrollHeight/clientHeight
+      // 都处于**塌缩状态**，据此算出的 atBottom 不可信 —— 会被误判成「原本在底部」，
+      // restore() 于是执行 scrollTop = scrollHeight，把用户从中间一把拽到最下方
+      // （用户反馈「展开/折叠后消息流聚焦到最下方」）。
+      // 此时只记比例、且标记 untrusted=true，restore 不再据此判定贴底。
+      const max = el.scrollHeight - el.clientHeight;
+      if (el.clientWidth === 0 || !first) {
+        widthAnchorRef.current = {
+          index: -1, offset: 0,
+          atBottom: false,
+          untrusted: true,
+          ratio: max > 0 ? el.scrollTop / max : 0,
+        };
+        return;
+      }
       widthAnchorRef.current = {
         index: first.index,
         // 首条可见项相对视口顶部的偏移：还原时用它把同一条放回原位
-        offset: first.start - el.scrollTop,
-        atBottom: el.scrollHeight - el.scrollTop - el.clientHeight < 60,
+        offset: (() => {
+          const node = el.querySelector(`[data-index="${first.index}"]`);
+          return node instanceof HTMLElement
+            ? node.getBoundingClientRect().top - el.getBoundingClientRect().top - el.clientTop
+            : first.start - el.scrollTop;
+        })(),
+        atBottom: max - el.scrollTop < 60,
+        untrusted: false,
+        ratio: max > 0 ? el.scrollTop / max : 0,
       };
     };
 
@@ -678,20 +731,51 @@ function MessageFlowCore({
       const anchor = widthAnchorRef.current;
       const el2 = parentRef.current;
       if (!anchor || !el2) return;
-      programmaticScrollRef.current = true;
-      if (anchor.atBottom) {
+      markProgrammaticScroll();
+      const max = el2.scrollHeight - el2.clientHeight;
+      // plan-387-1825 A13：锚点不可信（容器宽为 0、几何塌缩）时**禁止**走「贴底」分支——
+      // 那会把用户从中间一把拽到最下方。此时只按比例保持。
+      if (anchor.atBottom && !anchor.untrusted) {
         el2.scrollTop = el2.scrollHeight;
-      } else {
-        // 按虚拟列表当前尺寸缓存找回同一条消息的起点，还原其视口偏移
+        // plan-387-1825 D1：本分支此前**漏了解除程序滚动标记**（复位被写在两个 else 分支里），
+        // 标记因而永久为真 → onScroll 永久早退 → 「展开/拖拉/折叠面板之后就再也不自动贴底」，
+        // 且上滑接管态再也无法通过「滚回贴底」自行解除（只能点回到底部按钮强制复位）。
+        // 这里显式复位，并再跨一帧兜住「scroll 事件异步派发」的时序。
+        requestAnimationFrame(() => clearProgrammaticScroll());
+      } else if (anchor.index >= 0) {
+        // ① 粗还原：按虚拟器几何把锚点项放回它原来的视口偏移。
         const offsetTop = virtualizer.getOffsetForIndex(anchor.index)?.[0];
         if (typeof offsetTop === "number") {
           el2.scrollTop = Math.max(0, offsetTop - anchor.offset);
+        } else if (max > 0) {
+          el2.scrollTop = anchor.ratio * max;
         }
+        // ② 精确校正（本轮新增，针对性修「位置偏差非常大」）：
+        //    getOffsetForIndex 对**尚未测量**的项用的是 estimateSize（按类型分桶取中位数），
+        //    长会话中锚点项之前有大量离屏项时，估算累计误差可达数百像素 —— 粗还原因此偏得很远，
+        //    且偏移量随会话长度增长（这正是用户说的"偏差非常大"，而不是几像素的抖动）。
+        //    锚点项此刻必然已挂载（上一步刚把它定位进视口），直接量它的真实位置做像素级校正，
+        //    等价于用实测值覆盖估算值。虚拟项自带 data-index（见渲染处 data-index={item.index}）。
+        const correctAnchor = (remaining: number) => {
+          let node = el2.querySelector(`[data-index="${anchor.index}"]`);
+          if (!(node instanceof HTMLElement) && remaining > 0) {
+            virtualizer.scrollToIndex(anchor.index, { align: "start", behavior: "auto" });
+            requestAnimationFrame(() => correctAnchor(remaining - 1));
+            return;
+          }
+          if (node instanceof HTMLElement) {
+            const actual = node.getBoundingClientRect().top - el2.getBoundingClientRect().top - el2.clientTop;
+            const delta = actual - anchor.offset;
+            if (Math.abs(delta) > 1) el2.scrollTop += delta;
+          }
+          if (remaining > 0) requestAnimationFrame(() => correctAnchor(remaining - 1));
+          else clearProgrammaticScroll();
+        };
+        requestAnimationFrame(() => correctAnchor(5));
+      } else {
+        if (max > 0) el2.scrollTop = anchor.ratio * max;
+        requestAnimationFrame(() => { clearProgrammaticScroll(); });
       }
-      // 下一帧解除"程序滚动"标记，避免吞掉用户真实滚动
-      requestAnimationFrame(() => {
-        programmaticScrollRef.current = false;
-      });
     };
 
     lastWidthRef.current = el.clientWidth;
@@ -702,13 +786,44 @@ function MessageFlowCore({
     let pendingRestore = 0;
     let missedDuringMotion = false;
     const inMotion = () => isBusy(); // PerfBus（S3）
+    // plan-387-1825 A13：还原时机 = 「容器宽度已落定」，并以 400ms 硬兜底。
+    //
+    // 演进记录（前两版都不对，这里写明为什么最终这样写）：
+    //   · 最初「固定重试 3 次」≈96ms —— 短于折叠/展开的 `--dur-pane`（260ms）CSS 过渡，
+    //     restore 读到**半程布局**并随即清空锚点，过渡结束后再无补偿 → 位置错位。
+    //   · 上一版「宽度与总高连续 3 帧都不变」—— 虚拟器重排期间总高会持续微调，
+    //     判据过严导致长期不满足，被 800ms 兜底强制还原时位置已经漂了。
+    //   现在只用一个判据：**宽度连续两帧一致且非 0**。
+    //     拖拽 → 宽度瞬时到位，4 帧内即还原；
+    //     折叠/展开 → 宽度在 260ms 过渡中持续变化，自然等到过渡走完才还原。
+    //   测量缓存的新旧不再影响准确性 —— restore 末尾会用 DOM 实测做像素级校正。
+    const RESTORE_MAX_WAIT_MS = 400;
+    let lastProbeW = -1;
+    let restoreStartedAt = 0;
     const scheduleRestore = () => {
-      // 重排/重新测量在渲染后完成：双帧后再还原（与 scrollToBottom 的补滚节奏一致）。
-      // 额外做 rAF 合并：连续宽度变化只保留最后一次还原，避免回调排队堆积。
+      if (!restoreStartedAt) restoreStartedAt = performance.now();
       if (pendingRestore) cancelAnimationFrame(pendingRestore);
       pendingRestore = requestAnimationFrame(() => {
         pendingRestore = requestAnimationFrame(() => {
           pendingRestore = 0;
+          const el2 = parentRef.current;
+          if (!el2) {
+            widthAnchorRef.current = null;
+            missedDuringMotion = false;
+            restoreStartedAt = 0;
+            lastProbeW = -1;
+            return;
+          }
+          const w = el2.clientWidth;
+          const widthSettled = w > 0 && Math.abs(w - lastProbeW) < 1;
+          lastProbeW = w;
+          const timedOut = performance.now() - restoreStartedAt > RESTORE_MAX_WAIT_MS;
+          if (!widthSettled && !timedOut) {
+            scheduleRestore(); // 继续等，不消耗锚点
+            return;
+          }
+          restoreStartedAt = 0;
+          lastProbeW = -1;
           restore();
           widthAnchorRef.current = null;
           missedDuringMotion = false;
@@ -739,6 +854,16 @@ function MessageFlowCore({
       missedDuringMotion = true;
     };
     window.addEventListener("chatcoder:panel-drag-start", onDragStart);
+    // plan-387-1825 B1：折叠/展开按钮的几何变更。applyPaneUpdate 在 acquire("panel-anim")
+    // 之后、提交布局之前派发本事件 —— 与分隔条 mousedown 同一时机语义（布局尚未改写），
+    // 捕获到的锚点是干净的。此处**不能**沿用 onDragStart 的 inMotion 守卫的早退逻辑：
+    // 折叠时 isBusy() 恰为真（panel-anim 已登记），但事件本身正是我们要的触发点。
+    const onPaneChangeStart = () => {
+      lastWidthRef.current = el.clientWidth;
+      capture();
+      missedDuringMotion = true;
+    };
+    window.addEventListener("chatcoder:pane-change-start", onPaneChangeStart);
     const ro = new ResizeObserver(() => {
       const el2 = parentRef.current;
       if (!el2) return;
@@ -767,9 +892,10 @@ function MessageFlowCore({
       if (pendingRestore) cancelAnimationFrame(pendingRestore);
       window.removeEventListener("chatcoder:window-motion", onMotionEnd);
       window.removeEventListener("chatcoder:panel-drag-start", onDragStart);
+      window.removeEventListener("chatcoder:pane-change-start", onPaneChangeStart);
       ro.disconnect();
     };
-  }, [virtualizer]);
+  }, [virtualizer, markProgrammaticScroll, clearProgrammaticScroll]);
 
   /** 已做过"会话首次填充贴底"的会话标识（切换会话时重新进入首次填充分支） */
   const initSessionKeyRef = useRef<string | number | null>(null);

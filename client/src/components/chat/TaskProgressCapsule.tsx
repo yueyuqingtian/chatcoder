@@ -70,7 +70,9 @@ function usePopoverControl() {
   useEffect(() => {
     if (!pinned) return;
     const onDown = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+      // plan-282-1493：wrapRef.current 为 null（触发段已从 DOM 卸载，如内容清空后胶囊整体隐藏）
+      // 时也视为“点击外部”，否则钉住状态会残留，段重新出现时浮层自动弹出。
+      if (!wrapRef.current || !wrapRef.current.contains(e.target as Node)) {
         setPinned(false);
         setOpen(false);
       }
@@ -160,6 +162,22 @@ export function TaskProgressCapsule({ onVisibilityChange }: {
    *  `left: 50%` + `translate: -50% 0`），不再随触发分段偏移。 */
   const progressPop = usePopoverControl();
   const filesPop = usePopoverControl();
+
+  // plan-282-1493：触发段消失（如审核完最后一个文件 / 任务收尾）时，同步清空对应浮层的
+  // open/pinned 状态——两者是组件级 state，不随段一起消失；若残留，AI 再次写盘让段回归时
+  // 浮层会带着旧状态“自动弹出”（用户未聚焦即展开）。
+  useEffect(() => {
+    if (!hasFiles) {
+      filesPop.setOpen(false);
+      filesPop.setPinned(false);
+    }
+  }, [hasFiles, filesPop.setOpen, filesPop.setPinned]);
+  useEffect(() => {
+    if (!hasProgress) {
+      progressPop.setOpen(false);
+      progressPop.setPinned(false);
+    }
+  }, [hasProgress, progressPop.setOpen, progressPop.setPinned]);
 
   const openDiff = async (turnId: number, f: FileChangeOut) => {
     setPreviewPath(f.path);
@@ -257,7 +275,7 @@ export function TaskProgressCapsule({ onVisibilityChange }: {
 
       {/* 浮层放在**胶囊内部**渲染：胶囊即其包含块，`--tc-pop-x`（触发段中心相对胶囊的百分比）
           才能正确换算成"胶囊正上方居中"（#3）。绝对定位不参与 flex 布局，不影响胶囊尺寸。 */}
-      {progressPop.open && (
+      {hasProgress && progressPop.open && (
         <div className="tc-pop" role="dialog" aria-label="任务进度" onMouseEnter={progressPop.cancelClose}>
           <div className="tc-pop-head">
             <span>{useTodo ? "执行清单" : "任务步骤"}</span>
@@ -275,7 +293,7 @@ export function TaskProgressCapsule({ onVisibilityChange }: {
         </div>
       )}
 
-      {filesPop.open && (
+      {hasFiles && filesPop.open && (
         <div className="tc-pop" role="dialog" aria-label="未审核变更" onMouseEnter={filesPop.cancelClose}>
           <div className="tc-pop-head">
             <span>未审核变更</span>

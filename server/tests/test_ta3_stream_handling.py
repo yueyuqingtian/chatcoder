@@ -251,6 +251,48 @@ def test_kimi_effort_unknown_falls_back_to_conservative():
         settings.ta3_kimi_thinking_effort = _orig
 
 
+# ── v29: 显式关闭思考（档位 none 不再只做“不传”） ──
+
+def test_openai_explicit_off_sends_disabled():
+    """ta3（OpenAI 协议）用户选 none 时下发 thinking disabled。"""
+    p = _provider(anthropic=False, provider="glm", _model="glm-4.6",
+                  completionOptions={"thinkingEnabled": True})
+    body = p._build_openai_body(
+        ChatRequest(messages=[], model="glm-4.6", thinking=False), [],
+    )
+    assert body.get("thinking") == {"type": "disabled"}
+
+
+def test_anthropic_explicit_off_sends_disabled():
+    """ta3（Anthropic 协议）非 kimi 模型选 none 时下发 thinking disabled。"""
+    p = _provider(anthropic=True, provider="glm", _model="glm-4.6",
+                  completionOptions={"thinkingEnabled": True})
+    body = p._build_anthropic_body(
+        ChatRequest(messages=[], model="glm-4.6", thinking=False), [],
+    )
+    assert body.get("thinking") == {"type": "disabled"}
+
+
+def test_kimi_anthropic_explicit_off_leaves_no_thinking():
+    """kimi 系（Anthropic 协议）档位只有 low/high/max、无关闭表达，保持不传。"""
+    p = _provider(anthropic=True, provider="kimi", completionOptions={"thinkingEnabled": True})
+    body = p._build_anthropic_body(
+        ChatRequest(messages=[], model="kimi-k3", thinking=False), [],
+    )
+    assert "thinking" not in body
+    assert "output_config" not in body
+
+
+def test_unspecified_thinking_leaves_body_untouched():
+    """未指定档位时不注入任何思考字段（保持网关默认）。"""
+    p = _provider(anthropic=False, provider="glm", _model="glm-4.6",
+                  completionOptions={"thinkingEnabled": True})
+    body = p._build_openai_body(ChatRequest(messages=[], model="glm-4.6"), [])
+    assert "thinking" not in body
+    assert "enable_thinking" not in body
+    assert "reasoning_effort" not in body
+
+
 # ── v29 (plan-78): Anthropic thinking 帧变体解析 ──
 
 def test_anthropic_thinking_delta_variant_fields():

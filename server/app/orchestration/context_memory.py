@@ -167,7 +167,7 @@ async def _summarize_messages(messages: "list[Message]",
             ],
             model="",
             reasoning_effort=_effort,
-            thinking=_thinking or None,
+            thinking=_thinking,
             # plan-270-1358: ta3 x-ws-id 需要工作目录指纹（其它 Provider 忽略）
             workspace_dir=workspace_dir,
         )
@@ -218,7 +218,7 @@ async def _compress_super_summary(summaries: list[dict],
                 ],
                 model="",
                 reasoning_effort=_effort,
-                thinking=_thinking or None,
+                thinking=_thinking,
                 workspace_dir=workspace_dir,  # plan-270-1358: ta3 x-ws-id
             )
             resp = await provider.chat(request)

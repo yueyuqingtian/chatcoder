@@ -38,7 +38,7 @@ class ModelProvider(ABC):
 
 
 def resolve_reasoning(provider: "ModelProvider",
-                      effort: str | None = None) -> tuple[str | None, bool]:
+                      effort: str | None = None) -> tuple[str | None, bool | None]:
     """解析「用户配置的思考深度」→ (reasoning_effort, thinking)。
 
     plan-53-258 R4: 压缩/摘要/记忆提取/提交信息等辅助 AI 请求此前不带思考深度，
@@ -46,14 +46,18 @@ def resolve_reasoning(provider: "ModelProvider",
     的 _thinking_enabled 判定同源），供各辅助请求复用：
 
     - effort 为空时回落全局设置 agent_reasoning_effort（用户配置的档位）；
-      none/空 → 返回 None，表示不下发该字段（不干扰不支持思考的模型）；
-    - thinking 仅在总开关开启且 provider 声明支持时为 True——未声明支持的
-      provider（如 anthropic/commandcode 自有分支）保持不传。
+    - v29: thinking 为三态——档位 none → False（**显式关闭**思考，provider 按各自
+      协议下发关闭形态）；档位为空 → None（不触碰该字段，不干扰不支持思考的模型）；
+      档位非空 → 仅在总开关开启且 provider 声明支持时为 True。
     """
     from app.core.config import settings
 
-    value = (effort or getattr(settings, "agent_reasoning_effort", "") or "").strip()
-    if not value or value.lower() == "none":
+    value = (effort if effort is not None
+             else getattr(settings, "agent_reasoning_effort", "") or "").strip()
+    if not value:
+        return None, None
+    if value.lower() == "none":
+        # 用户显式选择关闭思考：下发明确关闭信号（无法表达关闭的协议由 provider 兜底）
         return None, False
     thinking = False
     try:

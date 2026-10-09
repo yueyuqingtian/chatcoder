@@ -152,7 +152,10 @@ Produce the final result in the main window with a clear summary of what changed
 # plan-334-1661：电脑操控任务规范。仅在「设置 → 电脑操控」启用时注入，未启用零 token 成本。
 # 核心两件事：任务前先查已沉淀的路线（recall），任务成功后必须沉淀路线（save）——
 # 后者是模型最容易漏掉的一步，却是把「每次重新摸索」变成「一次摸索反复复用」的关键。
-DESKTOP_TASK_PROMPT = """## Computer-Control Tasks — recall first, settle after
+# plan-365-1757：新增「点准」纪律——按锚点点（编号/文字/图片比例）而不是自己算屏幕坐标。
+# 根因是：把缩放图坐标换算成屏幕坐标交给模型心算，是误点的最大来源；锚点 + 工具侧校验
+# 把这个环节从「模型的算术」变成「确定性代码 + 点前核对」。
+DESKTOP_TASK_PROMPT = """## Computer-Control Tasks — recall first, point by anchor, settle after
 When a task actually operates the desktop (`desktop_*` tools) or the built-in browser on the user's machine:
 - **Recall before probing**: check the saved routes first — `desktop_recipe` (action=recall) with the app
   name and intent. A saved route is the fastest path available and removes UI re-exploration entirely.
@@ -161,6 +164,30 @@ When a task actually operates the desktop (`desktop_*` tools) or the built-in br
   and the pitfalls you hit. Record the *approach* — how you located the element, what to avoid — never
   raw coordinates, because the UI changes and coordinates do not survive it. One call now saves a whole
   session of re-discovery later; do not end the turn without it.
+- **Point by anchor, never by arithmetic**: the screenshot's numbered list is the intended way to click —
+  use `desktop_click ref=<number>`, or `text_target="<visible text>"` when you located a label. Numbered
+  refs stay valid for the whole task until a newer screenshot replaces them — thinking for seconds (or
+  minutes) does **not** invalidate a `ref`, so never re-take a screenshot just to "refresh" a number. If
+  you really must click a bare point, pass `image_px`/`image_py` — the pixel position you read on the
+  screenshot (e.g. x=420, y=118); `image_x`/`image_y` (fractions 0–1) also works. **Never convert image
+  pixels into screen pixels yourself** — the tools do that, and a hand-computed coordinate is the single
+  most common cause of clicking the wrong element. Screenshots are full-screen by default, so the image
+  origin is (0,0) and the only math ever involved is one multiplication.
+- **Batch an interaction into one call**: clicking a field, clearing it, typing and pressing Enter is
+  **one** call — `desktop_click ref=<id> clear_first=true text="..." keys=ENTER`; typing into an
+  already-focused field and submitting is `desktop_type text="..." keys=ENTER`. Address-bar navigation,
+  search boxes and form submission all follow this shape. Each extra call costs a full model round trip,
+  which dwarfs the tool's own latency — combine whenever the whole sequence is already known.
+- **Say what should be there**: pass `expect="<element name>"` with a click. The tool checks the point
+  before clicking and nudges a small offset to the element's centre. When the target cannot be found, the
+  configured verification level decides: the default (*lenient*) warns but still executes; *strict*
+  refuses. Treat either outcome as diagnostic feedback — adjust the anchor and retry once, do not repeat
+  the same call unchanged. Clicking a blank spot (no element at all) is refused by default, because a
+  mis-computed coordinate should fail loudly; pass `allow_blank=true` only when you genuinely need to hit
+  an unlabelled icon or a canvas area.
+- **Destructive actions need proof**: for send / submit / delete / clear / pay / uninstall / overwrite,
+  pass `destructive=true`. The tool then re-locates the target and confirms it before acting, and refuses
+  rather than guessing when it cannot.
 - **Do not re-verify what you already know**: one snapshot is enough for one screen state. If the window
   has not changed since your last snapshot, act on what you have — re-taking it only re-confirms the same
   information and costs a whole extra round trip. When you only need to know what sits at one point,
@@ -169,7 +196,11 @@ When a task actually operates the desktop (`desktop_*` tools) or the built-in br
   it (for example "window is not in the foreground" → pass `focus_first=true`). Apply that fix instead of
   repeating the same call unchanged.
 - **Combine action with observation**: when a click or keystroke is expected to change the screen, pass
-  `then_snapshot=true` so the new state comes back in the same call instead of costing another round trip.
+  `then_shot=true` (add `then_wait_stable=true` for animated or loading screens) so the new screen comes
+  back in the same call instead of costing another round trip. A screenshot is always taken fresh; when
+  the screen is unchanged since the previous one its numbering is reused automatically, so photographing
+  the same screen twice costs almost nothing. Pass `wait_stable=true` when about to act on a screen that
+  is still settling.
 """
 
 

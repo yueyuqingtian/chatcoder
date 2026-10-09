@@ -592,7 +592,7 @@ export const api = {
   injectTurnInput: (turnId: number, body: { request_id?: string; content: string; attachments?: Record<string, unknown>[] }) =>
     post<{ ok: boolean; queued: boolean; error?: string }>(`/turns/${turnId}/inputs`, body),
   listTurns: (sessionId: number) => get<TurnOut[]>(`/turns/sessions/${sessionId}`),
-  cancelTurn: (turnId: number) => postCancel<{ ok: boolean }>(`/turns/${turnId}/cancel`),
+  cancelTurn: (turnId: number) => postCancel<{ ok: boolean }>(`/turns/${turnId}/cancel?source=main`),
   resumeTurn: (turnId: number) => post<TurnOut>(`/turns/${turnId}/resume`),
   rollbackTurn: (turnId: number, params: RollbackParams = {}) => {
     const q = params.restore_to_composer === false ? "?restore_to_composer=false" : "";
@@ -1161,6 +1161,12 @@ export interface GlobalSettingsOut {
   desktop_screenshot_max_dim?: number;
   /** plan-334-1661: 操作路线沉淀开关 */
   desktop_recipe_enabled?: boolean;
+  /** plan-365-1757: 截图元素编号（按编号点击，而非自行换算坐标） */
+  desktop_mark_shot?: boolean;
+  /** plan-365-1757/1769: 点击前校验档位（off / lenient / strict）；旧值为布尔，读取时自动迁移 */
+  desktop_verify_click?: boolean | string;
+  /** plan-365-1757: 破坏性操作词表（逗号分隔） */
+  desktop_destructive_words?: string;
   /** v36: 子代理同时运行上限（超出后新派发排队等待，1~16） */
   max_concurrent_subagents?: number;
   /** v36: 每轮子代理派发总量上限（含已完成，1~32） */

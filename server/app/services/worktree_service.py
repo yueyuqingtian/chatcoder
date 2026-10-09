@@ -1476,7 +1476,7 @@ async def ai_merge_suggest(db: AsyncSession, worktree_project_id: int, path: str
             model=model_name,
             temperature=0.0,
             reasoning_effort=_effort,
-            thinking=_thinking or None,
+            thinking=_thinking,
         )
         resp = await provider.chat(request)
         merged = (resp.content or "").strip()

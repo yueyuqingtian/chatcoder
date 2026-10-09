@@ -174,8 +174,16 @@ namespace DesktopCore
                         return Hit(line);
                     case "shot":
                         return Shot(line);
+                    case "zoom":
+                        return ZoomOp(line);
+                    case "waitstable":
+                        return WaitStableOp(line);
+                    case "frame":
+                        return FrameOp(line);
                     case "findtext":
                         return FindText(line);
+                    case "ocrboxes":
+                        return OcrBoxes(line);
                     case "proccmd":
                         return ProcCmd(line);
                     case "listenports":
@@ -487,8 +495,75 @@ namespace DesktopCore
         }
 
         /// <summary>
+        /// 围绕给定屏幕坐标放大截取一小块（plan-365-1757 A5）。
+        ///
+        /// 用途：列表里的小目标（复选框、缩略图、16px 级图标）在全屏缩放图上看不清，
+        /// 业界（Anthropic 官方建议、通义 InnerZoom）验证「先粗定位、再放大复核」能显著提准。
+        /// 裁剪范围自动夹在虚拟桌面内，避免越界取到黑边。
+        /// </summary>
+        private static string ZoomOp(string line)
+        {
+            int x = Js.GetInt(line, "x", 0), y = Js.GetInt(line, "y", 0);
+            int radius = Js.GetInt(line, "radius", 160);
+            if (radius < 20) radius = 20;
+            if (radius > 1200) radius = 1200;
+
+            int vx = Native.GetSystemMetrics(Native.SM_XVIRTUALSCREEN);
+            int vy = Native.GetSystemMetrics(Native.SM_YVIRTUALSCREEN);
+            int vw = Native.GetSystemMetrics(Native.SM_CXVIRTUALSCREEN);
+            int vh = Native.GetSystemMetrics(Native.SM_CYVIRTUALSCREEN);
+            if (vw <= 0) vw = Native.GetSystemMetrics(Native.SM_CXSCREEN);
+            if (vh <= 0) vh = Native.GetSystemMetrics(Native.SM_CYSCREEN);
+
+            int left = Math.Max(vx, x - radius);
+            int top = Math.Max(vy, y - radius);
+            int right = Math.Min(vx + vw, x + radius);
+            int bottom = Math.Min(vy + vh, y + radius);
+            int w = Math.Max(1, right - left);
+            int h = Math.Max(1, bottom - top);
+
+            return Sensing.Capture(
+                Js.GetStr(line, "path", ""), left, top, w, h,
+                Js.GetInt(line, "maxDim", 1200),
+                Js.GetStr(line, "format", "jpg"),
+                Js.GetInt(line, "quality", 75));
+        }
+
+        /// <summary>等待界面稳定（plan-365-1757 A7）：连续两次画面哈希一致即返回。</summary>
+        private static string WaitStableOp(string line)
+        {
+            return Sensing.WaitStable(
+                Js.GetInt(line, "x", 0), Js.GetInt(line, "y", 0),
+                Js.GetInt(line, "w", 0), Js.GetInt(line, "h", 0),
+                Js.GetInt(line, "timeout", 3000),
+                Js.GetInt(line, "settle", 60));
+        }
+
+        /// <summary>
+        /// 窗口可见边界（plan-365-1757 A6）：同时给出 DWM 扩展帧与 GetWindowRect 两种矩形，
+        /// 调用方据此把 CDP 的视口坐标换算到屏幕，消除不可见边框带来的系统偏差。
+        /// </summary>
+        private static string FrameOp(string line)
+        {
+            IntPtr h = Sensing.Resolve(Js.GetLong(line, "handle", 0),
+                                       Js.GetStr(line, "title", ""), Js.GetStr(line, "proc", ""));
+            if (h == IntPtr.Zero) return "{\"error\":\"未找到目标窗口\"}";
+
+            Native.RECT fr = Sensing.VisibleFrame(h);
+            Native.RECT wr;
+            Native.GetWindowRect(h, out wr);
+            return "{\"handle\":" + h.ToInt64()
+                 + ",\"frame\":[" + fr.Left + "," + fr.Top + ","
+                 + (fr.Right - fr.Left) + "," + (fr.Bottom - fr.Top) + "]"
+                 + ",\"window\":[" + wr.Left + "," + wr.Top + ","
+                 + (wr.Right - wr.Left) + "," + (wr.Bottom - wr.Top) + "]}";
+        }
+
+        /// <summary>
         /// Locate on-screen text and return clickable absolute screen coordinates.
         /// The escape hatch for self-drawn UIs where the UIA tree is empty.
+        ///
+        /// image/scale/srcX/srcY（plan-365-1757 B3）：传入则复用该图做 OCR，不再重新截屏。
         /// </summary>
         private static string FindText(string line)
         {
@@ -496,9 +571,29 @@ namespace DesktopCore
                 Js.GetStr(line, "text", ""),
                 Js.GetBool(line, "exact", false),
                 Js.GetStr(line, "region", ""),
+                Js.GetStr(line, "image", ""),
+                Js.GetDouble(line, "scale", 0),
+                Js.GetInt(line, "srcX", 0),
+                Js.GetInt(line, "srcY", 0),
                 Js.GetInt(line, "maxDim", 1600),
-                Js.GetInt(line, "maxCandidates", 5),
-                0, 0);
+                Js.GetInt(line, "maxCandidates", 5));
+        }
+
+        /// <summary>
+        /// 返回屏幕上全部文字行框（plan-365-1757 A2）。
+        /// 自绘界面拿不到控件树，只能靠文字行框给模型编号；image/scale/srcX/srcY
+        /// 可复用已有截图，避免为 OCR 再截一次屏。
+        /// </summary>
+        private static string OcrBoxes(string line)
+        {
+            return Ocr.Boxes(
+                Js.GetStr(line, "region", ""),
+                Js.GetStr(line, "image", ""),
+                Js.GetDouble(line, "scale", 0),
+                Js.GetInt(line, "srcX", 0),
+                Js.GetInt(line, "srcY", 0),
+                Js.GetInt(line, "maxDim", 1600),
+                Js.GetInt(line, "maxBoxes", 200));
         }
 
         // ── applications ─────────────────────────────────────────────────────
@@ -577,6 +672,12 @@ namespace DesktopCore
             if (thenText.Length > 0)
             {
                 System.Threading.Thread.Sleep(120);
+                if (Js.GetBool(line, "clearFirst", false))
+                {
+                    // 先全选再输入：一步完成「清空 + 覆盖」（plan-365-1774）。
+                    Input.Keys("ctrl+a");
+                    System.Threading.Thread.Sleep(60);
+                }
                 int n = Input.TypeText(thenText, Js.GetInt(line, "charDelay", 0));
                 extra.Append(",\"typed\":").Append(n);
             }
@@ -617,8 +718,20 @@ namespace DesktopCore
                 System.Threading.Thread.Sleep(60);
             }
             int n = Input.TypeText(text, Js.GetInt(line, "charDelay", 0));
+
+            // 输入完顺手按键（如 ENTER 提交）：一步完成「输入 + 回车」（plan-365-1774）。
+            string afterKeys = Js.GetStr(line, "keys", "");
+            string keysErr = "";
+            if (afterKeys.Length > 0)
+            {
+                System.Threading.Thread.Sleep(80);
+                keysErr = Input.Keys(afterKeys);
+            }
+
             return "{\"typed\":" + n + ",\"target\":\"" + Js.Esc(t.Title) + "\""
-                 + ",\"focusedNow\":" + (focusedNow ? "true" : "false") + "}";
+                 + ",\"focusedNow\":" + (focusedNow ? "true" : "false")
+                 + (keysErr.Length > 0 ? ",\"keysError\":\"" + Js.Esc(keysErr) + "\"" : "")
+                 + "}";
         }
 
         private static string KeysOp(string line)

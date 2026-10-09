@@ -40,6 +40,19 @@ const PET_HIT_PAD = 10;
 /** 悬停态兜底校正间隔（ms）：透明穿透窗口被快速移出时会丢 mouseleave 与后续 mousemove，
  *  旧坐标仍停在浮窗矩形内 → 浮窗卡在展开态；定时向主进程查真实光标位置来校正。 */
 const HOVER_RECONCILE_MS = 400;
+/** 存活心跳间隔（ms）：常驻运行，主进程连续 3s 收不到才判定渲染层冻结（约 3 个周期的余量）。 */
+const HEARTBEAT_MS = 1000;
+
+/** 光标（窗口客户区坐标）是否仍在宠物窗口内；2px 容差吸收 DIP 取整误差 */
+function insideWindow(p: { x: number; y: number }): boolean {
+  return p.x >= -2 && p.y >= -2 && p.x <= window.innerWidth + 2 && p.y <= window.innerHeight + 2;
+}
+
+/* plan-387-1825 A14：菜单根节点的原生捕获 stopPropagation 兜底已删除（它确实会截断
+ * React 18 挂在 #pet-root 上的事件委托，删除是对的）。
+ * 「重新显示后右键菜单高亮正常、点击无反应、拖不动」的真因不在渲染层：隐藏 → 显示后 Chromium 不再恢复
+ * 输入子窗口，左键按下被不可激活的顶层窗口丢弃（主进程补显，见 pet.cjs ensureInputChild，plan-20261009 P2）。
+ * 另一条独立成因：菜单停留超过 3s 被看门狗误判冻结、重放成穿透（见下方「存活心跳」，plan-20261009 P1）。 */
 
 function defaultPref(): PetBoot["pref"] {
   return {
@@ -88,6 +101,9 @@ export function PetApp() {
   const resizeRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const interactiveRef = useRef(false);
+  /** 交互保持期（面板展开 / 拖拽 / 调序 / 右键菜单）：整窗必须可交互，
+   *  任何命中回调都不得把交互态改回穿透（plan-20261009 P1） */
+  const holdRef = useRef(false);
   /** 悬停态的镜像（供事件回调比对，避免闭包读到过期值） */
   const petHoverRef = useRef(false);
   const blocksHoverRef = useRef(false);
@@ -208,101 +224,141 @@ export function PetApp() {
     return inRectOf(el, x, y, pad);
   }, [inRectOf]);
 
+  /** 命中结果统一落位：交互态（穿透开关）+ 悬停视觉态。
+   *  plan-365-1770：鼠标事件与兜底轮询必须走同一份逻辑 —— 唤醒后事件转发可能中断，
+   *  只有这条不依赖事件的兜底路径能把窗口从穿透态里拉回来。 */
+  const syncAt = useCallback((x: number, y: number) => {
+    const api = petApi();
+    // ① 命中：宠物区（矩形 + 容差）/ 浮窗区 / 徽标 / 折叠手柄 / 缩放 / 菜单。
+    //    保持期恒为命中：唤醒重放会在保持期内调用本函数，而面板区不在下列矩形里，
+    //    不加这条会把「面板打开中」的窗口误切回穿透（plan-20261009 P1）。
+    const hit =
+      holdRef.current ||
+      overPetArea(x, y) ||
+      inBlocksArea(x, y, 0) ||
+      inRectOf(badgeRef.current, x, y, 2) ||
+      inRectOf(handleRef.current, x, y, 6) ||
+      inRectOf(menuRef.current, x, y);
+    if (hit !== interactiveRef.current) {
+      interactiveRef.current = hit;
+      void api?.setInteractive(hit);
+    }
+
+    // ② 悬停：按坐标推导，不依赖 enter/leave —— 穿透窗口切换时会丢事件，
+    //    会导致浮窗永远卡在展开态（用户反馈"失去焦点后浮窗没有折叠"）。
+    const overBlocks = inBlocksArea(x, y);
+    if (overBlocks !== blocksHoverRef.current) {
+      blocksHoverRef.current = overBlocks;
+      setBlocksHover(overBlocks);
+    }
+    const overPet = overPetArea(x, y);
+    if (overPet !== petHoverRef.current) {
+      petHoverRef.current = overPet;
+      setPetHover(overPet);
+    }
+  }, [inRectOf, overPetArea, inBlocksArea]);
+
+  // 鼠标离开窗口 / 窗口失焦：mousemove 不再派发 → 主动清一遍悬停态与交互态，
+  // 保证"失去焦点后浮窗折叠、缩放手柄隐藏、透明区域恢复穿透"。
+  const clearHover = useCallback(() => {
+    if (blocksHoverRef.current) { blocksHoverRef.current = false; setBlocksHover(false); }
+    if (petHoverRef.current) { petHoverRef.current = false; setPetHover(false); }
+    if (interactiveRef.current && !holdRef.current) {
+      interactiveRef.current = false;
+      void petApi()?.setInteractive(false);
+    }
+  }, []);
+
+  // ── 命中/悬停定时兜底（plan-73-344 起源；plan-365-1770 扩展为「交互态同步」）──
+  // 为什么必须加：透明穿透窗口在用户**快速把鼠标移远**时会一次性丢掉 mouseleave
+  // 与后续 mousemove（窗口来不及切换交互态），最后收到的坐标仍停在浮窗矩形内 →
+  // 浮窗卡在展开态；系统唤醒后事件转发甚至可能整体中断（用户反馈"唤醒后无法
+  // 拖动/折叠/右键无反应"）。这里不依赖任何鼠标事件，直接问主进程要真实光标
+  // 位置，命中态与交互态一并校正 —— 400ms 内自动恢复。
+  const reconcileNow = useCallback(() => {
+    const api = petApi();
+    if (!api?.cursorClient) return;
+    void api
+      .cursorClient()
+      .then((p) => {
+        if (!p || document.hidden) return;
+        if (!insideWindow(p)) {
+          clearHover();
+          return;
+        }
+        syncAt(p.x, p.y);
+      })
+      .catch(() => {
+        /* 查询失败不影响正常交互 */
+      });
+  }, [clearHover, syncAt]);
+
+  // ── 存活心跳（plan-387-1825 A3 起源；plan-20261009 P1 改为常驻）──
+  // 必须独立常驻：此前心跳挂在上面的兜底轮询里，而该轮询在「菜单 / 面板 / 拖拽 / 调序」
+  // 保持期整体停摆 —— 主进程看门狗把这种刻意暂停误判为「渲染层冻结」，每 3s 按宠物矩形
+  // 重放一次穿透。右键菜单不在宠物矩形内 → 窗口转为穿透：菜单项悬停高亮照常
+  // （穿透窗口仍转发 mousemove），点击却落到下层窗口 —— 即「右键菜单高亮正常、点击无反应」
+  // （main.log 中菜单打开期间每 3s 一条「渲染层心跳停滞」即此误判）。
+  // 心跳同时上报期望交互态：主进程侧任何路径（显示 / 唤醒重放 / 看门狗）改写后，一个周期内被纠正。
+  useEffect(() => {
+    const api = petApi();
+    if (!api?.heartbeat) return;
+    const beat = () => void api.heartbeat?.(interactiveRef.current);
+    beat();
+    const timer = window.setInterval(beat, HEARTBEAT_MS);
+    return () => window.clearInterval(timer);
+  }, []);
+
   // ── 命中检测 + 悬停推导（同一份 mousemove，状态永远同步）──
   useEffect(() => {
     const api = petApi();
-    // 面板展开 / 拖拽 / 调序中：整窗可交互（交互期间不能被穿透打断）
-    if (expanded || dragging || reordering) {
-      if (!interactiveRef.current) {
-        interactiveRef.current = true;
-        void api?.setInteractive(true);
-      }
-      return;
+    // 面板展开 / 拖拽 / 调序 / **右键菜单打开** 时：整窗可交互（交互期间不能被穿透打断）
+    //
+    // plan-387-1825 A5：此前漏了 `menuAt` —— 菜单弹出后只要鼠标移出菜单矩形，
+    // syncAt 立刻把交互态置 false → 主进程 setIgnoreMouseEvents(true) 让窗口转为穿透。
+    // 穿透窗口收不到 pointerdown / contextmenu，于是「点击外部关闭」永远不触发、
+    // 菜单里两个按钮也点不动、宠物也拖不动（用户反馈：菜单关不掉、重新右键也还在）。
+    const held = expanded || dragging || reordering || !!menuAt;
+    holdRef.current = held;
+    if (held) {
+      // plan-20261009 P1：无条件重申。本地镜像为 true 不代表窗口真的可交互 ——
+      // 主进程的显示重放 / 唤醒重放会绕过本层改写穿透态，按镜像跳过就会一直错下去。
+      interactiveRef.current = true;
+      void api?.setInteractive(true);
+      if (!menuAt && !expanded) return;
+      // 菜单 / 面板：光标离开宠物窗口即收起。保持期整窗可交互，不收起的话
+      // 整块透明区域会变成看不见的「挡点击」区域（窗口不可聚焦，Esc 也到不了这里）。
+      // 用光标轮询而非 mouseleave：窗口被主窗最小化连带隐藏时根本没有离开事件。
+      const timer = window.setInterval(() => {
+        void api
+          ?.cursorClient?.()
+          .then((p) => {
+            if (!p || insideWindow(p)) return;
+            setMenuAt(null);
+            setExpanded(false);
+            setSelected(null);
+          })
+          .catch(() => {
+            /* 查询失败不影响正常交互 */
+          });
+      }, HOVER_RECONCILE_MS);
+      return () => window.clearInterval(timer);
     }
-    const onMove = (e: MouseEvent) => {
-      const x = e.clientX;
-      const y = e.clientY;
-
-      // ① 命中：宠物区（矩形 + 容差）/ 浮窗区 / 徽标 / 折叠手柄 / 缩放 / 菜单
-      const hit =
-        overPetArea(x, y) ||
-        inBlocksArea(x, y, 0) ||
-        inRectOf(badgeRef.current, x, y, 2) ||
-        inRectOf(handleRef.current, x, y, 6) ||
-        inRectOf(menuRef.current, x, y);
-      if (hit !== interactiveRef.current) {
-        interactiveRef.current = hit;
-        void api?.setInteractive(hit);
-      }
-
-      // ② 悬停：按坐标推导，不依赖 enter/leave —— 穿透窗口切换时会丢事件，
-      //    会导致浮窗永远卡在展开态（用户反馈"失去焦点后浮窗没有折叠"）。
-      const overBlocks = inBlocksArea(x, y);
-      if (overBlocks !== blocksHoverRef.current) {
-        blocksHoverRef.current = overBlocks;
-        setBlocksHover(overBlocks);
-      }
-      const overPet = overPetArea(x, y);
-      if (overPet !== petHoverRef.current) {
-        petHoverRef.current = overPet;
-        setPetHover(overPet);
-      }
-    };
-
-    // 鼠标离开窗口 / 窗口失焦：mousemove 不再派发 → 主动清一遍悬停态，
-    // 保证"失去焦点后浮窗折叠、缩放手柄隐藏"。
-    const clearHover = () => {
-      if (blocksHoverRef.current) { blocksHoverRef.current = false; setBlocksHover(false); }
-      if (petHoverRef.current) { petHoverRef.current = false; setPetHover(false); }
-    };
-
-    // ── 悬停态定时兜底（plan-73-344）──
-    // 为什么必须加：透明穿透窗口在用户**快速把鼠标移远**时会一次性丢掉 mouseleave
-    // 与后续 mousemove（窗口来不及切换交互态），最后收到的坐标仍停在浮窗矩形内 →
-    // 浮窗卡在展开态。用户实测路径正是"聚焦最上面那块后迅速移开鼠标"。
-    // 这里不依赖任何鼠标事件，直接问主进程要真实光标位置。
-    const reconcile = () => {
-      const api = petApi();
-      if (!api?.cursorClient) return;
-      void api
-        .cursorClient()
-        .then((p) => {
-          if (!p || document.hidden) return;
-          const inside =
-            p.x >= -2 && p.y >= -2 && p.x <= window.innerWidth + 2 && p.y <= window.innerHeight + 2;
-          if (!inside) {
-            clearHover();
-            return;
-          }
-          const overBlocks = inBlocksArea(p.x, p.y);
-          if (overBlocks !== blocksHoverRef.current) {
-            blocksHoverRef.current = overBlocks;
-            setBlocksHover(overBlocks);
-          }
-          const overPet = overPetArea(p.x, p.y);
-          if (overPet !== petHoverRef.current) {
-            petHoverRef.current = overPet;
-            setPetHover(overPet);
-          }
-        })
-        .catch(() => {
-          /* 查询失败不影响正常交互 */
-        });
-    };
-    const reconcileTimer = window.setInterval(reconcile, HOVER_RECONCILE_MS);
-    window.addEventListener("focus", reconcile);
+    const onMove = (e: MouseEvent) => syncAt(e.clientX, e.clientY);
+    const reconcileTimer = window.setInterval(reconcileNow, HOVER_RECONCILE_MS);
+    window.addEventListener("focus", reconcileNow);
 
     window.addEventListener("mousemove", onMove, true);
     document.addEventListener("mouseleave", clearHover);
     window.addEventListener("blur", clearHover);
     return () => {
       window.clearInterval(reconcileTimer);
-      window.removeEventListener("focus", reconcile);
+      window.removeEventListener("focus", reconcileNow);
       window.removeEventListener("mousemove", onMove, true);
       document.removeEventListener("mouseleave", clearHover);
       window.removeEventListener("blur", clearHover);
     };
-  }, [expanded, dragging, reordering, inRectOf, overPetArea, inBlocksArea]);
+  }, [expanded, dragging, reordering, menuAt, syncAt, clearHover, reconcileNow]);
 
   // 面板/菜单在鼠标移出后收起（面板是整块区域，用坐标判定同样更可靠）
   useEffect(() => {
@@ -331,16 +387,26 @@ export function PetApp() {
   }, []);
 
   // ── 右键菜单：点击外部 / 再次右键 / Esc 关闭 ──
+  // plan-387-1825 A1：此前是无差别 `pointerdown → close`（捕获阶段），
+  // 菜单内按下时它先于按钮 onClick 执行 → 菜单被自己卸载，两个按钮全是「假按钮」。
+  // 修法只有一条：判定事件目标是否落在菜单 DOM 内，是则不关（contains 判定与时序无关）。
+  //
+  // A14：上一版在菜单根节点加的原生捕获阶段 stopPropagation 会截断 React 委托链，已删除。
+  // （「高亮正常、点击无反应」的成因在窗口层而非事件链：输入子窗口缺席 P2 / 看门狗误判穿透 P1。）
   useEffect(() => {
     if (!menuAt) return;
     const close = () => setMenuAt(null);
+    const onOutside = (e: Event) => {
+      if (menuRef.current?.contains(e.target as Node)) return;
+      close();
+    };
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
-    window.addEventListener("pointerdown", close, true);
-    window.addEventListener("contextmenu", close, true);
+    window.addEventListener("pointerdown", onOutside, true);
+    window.addEventListener("contextmenu", onOutside, true);
     window.addEventListener("keydown", onKey);
     return () => {
-      window.removeEventListener("pointerdown", close, true);
-      window.removeEventListener("contextmenu", close, true);
+      window.removeEventListener("pointerdown", onOutside, true);
+      window.removeEventListener("contextmenu", onOutside, true);
       window.removeEventListener("keydown", onKey);
     };
   }, [menuAt]);
@@ -444,6 +510,21 @@ export function PetApp() {
     };
   }, []);
 
+  // ── 系统唤醒/解锁：主进程已重放窗口状态（穿透/置顶），这里复位本地交互残留并立即校准 ──
+  useEffect(() => {
+    const api = petApi();
+    if (!api?.onSystemResume) return;
+    const off = api.onSystemResume(() => {
+      // 唤醒时不可能还按着鼠标：清掉可能卡住的拖拽会话与视觉态
+      dragRef.current.active = false;
+      dragRef.current.moved = false;
+      setDragging(false);
+      setDragDir(null);
+      reconcileNow();
+    });
+    return off;
+  }, [reconcileNow]);
+
   // ── 缩放：只发开始信号（主进程按光标纵向位移 1:1 调整宠物尺寸）──
   const onResizeDown = useCallback((e: React.PointerEvent) => {
     if (e.button !== 0) return;
@@ -463,7 +544,9 @@ export function PetApp() {
   }, []);
 
   const stopRun = useCallback((card: TaskCard) => {
-    if (card.turnId) void petApi()?.cancelTurn(card.turnId);
+    // plan-365-1770：turnId 可能缺失（快照补建卡错过 turn.started）——
+    // 携带 sessionId，由主进程补查运行中的 turn 再取消，点击不再被静默吞掉
+    void petApi()?.cancelTurn(card.turnId, card.sessionId);
   }, []);
 
   const hideTemporarily = useCallback(() => {

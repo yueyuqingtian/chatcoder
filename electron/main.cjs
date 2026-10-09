@@ -604,7 +604,10 @@ function syncWindowChromeState(win) {
   if (!win || win.isDestroyed()) return;
   const maximized = isMaximizedLike(win);
   const native = supportsNativeRoundedCorners();
-  const key = `${maximized ? 1 : 0}|${native ? 1 : 0}`;
+  // plan-387-1825 A10：把「应用是否深色」并入状态键——主题切换会改变窗口非客户区配色，
+  // 必须触发一次重放，否则小窗四周会一直停留在切换前的颜色。
+  const dark = isAppDarkTheme();
+  const key = `${maximized ? 1 : 0}|${native ? 1 : 0}|${dark ? 1 : 0}`;
   if (key === _lastChromeState) return; // 状态未变：不注入、不跑 FFI
   _lastChromeState = key;
   try {
@@ -615,6 +618,19 @@ function syncWindowChromeState(win) {
       + ` return true; })()`, true);
   } catch { /* 渲染层未就绪时忽略 */ }
   applyWindowCorners(win);
+  // plan-387-1825 A10：同步窗口**非客户区**的深/浅渲染。
+  // frame:true 保留了 WS_CAPTION/WS_THICKFRAME，四周存在约 10 逻辑 px 的非客户区；
+  // 它由 DWM 按系统主题绘制——系统浅色而应用深色时，小窗就会露出一圈白边。
+  // 这里让非客户区跟随应用主题（对 frame:false 窗口为无害 no-op）。
+  try {
+    const gd = glassDiag();
+    if (gd && typeof gd.setImmersiveDarkMode === "function") {
+      const r = gd.setImmersiveDarkMode(win, dark);
+      log("[chatcoder] 非客户区深色模式:", JSON.stringify(r));
+    }
+  } catch (err) {
+    logErr("[chatcoder] 非客户区深色模式设置失败（不影响使用）:", err && err.message);
+  }
 }
 
 /**
@@ -815,6 +831,18 @@ function writeThemePref(theme) {
   try { fs.writeFileSync(THEME_PREF_FILE, JSON.stringify({ theme: theme === "light" ? "light" : "dark" })); } catch {}
 }
 
+/** plan-387-1825 A10：应用主题是否为深色——窗口底色与非客户区渲染的**唯一判据**。
+ *
+ * 此前「窗口底色」与「窗口非客户区配色」是两个独立的东西：
+ * 底色按 lightStart 决定，而非客户区（frame:true 保留的 WS_CAPTION/WS_THICKFRAME 边框）
+ * 一直跟随**系统主题**，没人同步过。实测本机系统浅色 + 应用深色时，
+ * 小窗四周因此留一圈白边（详见 glass-diagnostics.setImmersiveDarkMode 注释）。
+ * 抽成单一函数，保证底色与边框配色同源、不会各按各的口径漂移。 */
+function isAppDarkTheme() {
+  const t = readThemePref();
+  return t ? t === "dark" : nativeTheme.shouldUseDarkColors;
+}
+
 // ── UI 偏好备份落盘（plan-73-344）──
 // 渲染层的外观/排版偏好（消息行距、字号、面板宽度等）存 localStorage，但 Chromium 的
 // DOMStorage 是「内存缓存 + 异步批量提交」：app.exit 强退（一键重启）、多实例共享
@@ -873,8 +901,8 @@ function createWindow() {
   // 启动时清理历史遗留的折射偏好文件（该模式已移除）
   clearLegacyLiquidPref();
   // 启动期主题：优先用户上次偏好，否则跟随系统（loading 页与窗口底色保持一致，避免闪色）
-  const themePref = readThemePref();
-  const lightStart = themePref ? themePref === "light" : !nativeTheme.shouldUseDarkColors;
+  // plan-387-1825 A10：改走 isAppDarkTheme()，与窗口非客户区的深/浅渲染同一判据。
+  const lightStart = !isAppDarkTheme();
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -1599,7 +1627,17 @@ ipcMain.handle("power:setKeepAwake", (_e, on) => {
 });
 
 // ── IPC:主题偏好落盘（渲染进程切主题时同步，下次启动 loading 页按此适配深浅色）──
-ipcMain.on("theme:setPref", (_e, theme) => { writeThemePref(theme); });
+ipcMain.on("theme:setPref", (_e, theme) => {
+  writeThemePref(theme);
+  // plan-387-1825 A10：切换主题后立即同步窗口**非客户区**（WS_CAPTION 边框 / 系统标题栏 /
+  // 系统菜单）的深浅渲染。不同步的话，「深色应用 + 浅色系统」在小窗下会一直留一圈白边，
+  // 而底色其实已经跟着主题变了——这正是用户看到的"覆盖不全的白底"。
+  // 注：这里只改 DWM 的非客户区配色，不动窗口底色（运行期改底色会与 DWM 合成失步，
+  // 见下方 glass IPC 的历史结论），因此不会引发色块/残影问题。
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) syncWindowChromeState(mainWindow);
+  } catch { /* 窗口未就绪时忽略 */ }
+});
 
 // ── IPC:UI 偏好备份（plan-73-344）──
 // 写入做 250ms 合并（拖滑杆高频变更不逐次写盘；退出前由 flushUiPrefsBackup 强制写完），

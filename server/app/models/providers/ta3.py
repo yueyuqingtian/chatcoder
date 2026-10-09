@@ -339,18 +339,26 @@ class Ta3Provider(ModelProvider):
         return str(getattr(settings, "ta3_kimi_thinking_effort", "low") or "low")
 
     def _apply_thinking_openai(self, body: dict, request: ChatRequest) -> None:
-        if not self._thinking_enabled(request):
-            return
+        """按 request.thinking 三态拼装思考字段（v29：显式关闭下发 disabled 形态）。"""
         identity = _identity(self._model_name, self._meta)
         effort = self._thinking_intensity(request)
+        on = self._thinking_enabled(request)
+        # v29: 用户显式选择档位 none（thinking=False）时要求关闭思考；仅对声明
+        # 支持思考的模型下发关闭形态，避免给不支持的模型发未知字段被网关拒绝。
+        # 注意：“是否显式关闭”必须看档位原始值——_thinking_intensity 会把“未指定”
+        # 也归一化成 "none"，拿它判断会把“没选档位”误当成“要求关闭”。
+        off = request.thinking is False or (
+            (request.reasoning_effort or "").strip().lower() == "none")
+        if not on and not (off and self.supports_thinking()):
+            return
         if any(kw in identity for kw in _QWEN_IDENT):
             # qwen 系：enable_thinking 布尔 + reasoning_effort
-            body["enable_thinking"] = effort != "none"
-            if effort != "none":
+            body["enable_thinking"] = bool(on)
+            if on:
                 body["reasoning_effort"] = effort
         else:
-            body["thinking"] = {"type": "enabled" if effort != "none" else "disabled"}
-            if effort != "none":
+            body["thinking"] = {"type": "enabled" if on else "disabled"}
+            if on:
                 body["reasoning_effort"] = effort
 
     # ─────────────────────────── 消息转换 ───────────────────────────
@@ -733,12 +741,13 @@ class Ta3Provider(ModelProvider):
             body["system"] = system
         if disguised:
             body["tools"] = self._convert_anthropic_tools(disguised)
-        if self._thinking_enabled(request):
-            effort = self._thinking_intensity(request)
-            if effort == "none":
-                if not is_kimi:
-                    body["thinking"] = {"type": "disabled"}
-            elif is_kimi:
+        effort = self._thinking_intensity(request)
+        _on = self._thinking_enabled(request)
+        # 同 _apply_thinking_openai：“显式关闭”看档位原始值，不能拿归一化后的 "none" 判断
+        _off = request.thinking is False or (
+            (request.reasoning_effort or "").strip().lower() == "none")
+        if _on:
+            if is_kimi:
                 # kimi 官方：output_config.effort 控制思考档位，不发 thinking 块
                 # v29 (plan-78): effort 归一化到 low/high/max，未知档位取保守默认
                 body["output_config"] = {"effort": self._kimi_effort(request)}
@@ -753,6 +762,10 @@ class Ta3Provider(ModelProvider):
                     "budget_tokens": max(2048, int(_eff_max_tokens * 0.8)),
                 }
                 body["output_config"] = {"effort": effort if effort in ("low", "medium", "high") else "low"}
+        elif _off and not is_kimi and self.supports_thinking():
+            # v29: 用户显式选择档位 none 时下发关闭形态；kimi 系档位只有
+            # low/high/max、协议无关闭表达，保持不传。
+            body["thinking"] = {"type": "disabled"}
         return {k: v for k, v in body.items() if v not in (None, "", {})}
 
     def _parse_anthropic_frame(self, line: str, monitor) -> bool:

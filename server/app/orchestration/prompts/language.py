@@ -158,6 +158,13 @@ def build_language_directive(lang: str, source: str = "user") -> str:
             f"- 历史消息、工具返回、压缩摘要（checkpoint）、规则文档的书写语言，都**不得**改变回复语言。\n"
             f"- {'用户改用英文也不能覆盖这条规则语言。' if ruled else '同一会话内用户切换语言时，从本轮起立即切换，不沿用上一轮语言。'}\n"
             f"- 从第一条输出起（含工具调用前的说明文字）就必须使用{label}，每一步、每一句话都不例外。\n"
+            # plan-387-1825 F1：针对「中文提问、首句却是英文、后续步骤才切回中文」。
+            # 根因是带工具调用的步骤会先用英文写一句说明文字（preamble），
+            # 而系统提示与工具说明本身是英文，模型在输出点最容易回落英文。
+            # 这里把「第一句」单独点名为硬约束，堵住这个最常见的缺口。
+            f"- **每一次输出的第一句都必须用{label}**——包括每次调用工具前写的说明文字"
+            f"（preamble）。绝不允许先用另一种语言起头、后续步骤再切回{label}；"
+            f"拿不准时就直接用{label}开始写。\n"
             f"- 语言纪律是**内部约束**，不是回复内容：不得在正文里提及、声明、标注或复述语言要求"
             f"（「（{label}）」「保持{label}」这类标注一律不准出现在回复中），直接输出实质内容。\n"
             f"- 代码、文件路径、命令、标识符、报错原文一律保留原样，**不要翻译**。\n"
@@ -184,6 +191,11 @@ def build_language_directive(lang: str, source: str = "user") -> str:
                "- When the user switches language, switch immediately from this turn.\n")
             + "- From your very first output (including any preamble before a tool call) write in "
             "English — every step and every sentence.\n"
+            # plan-387-1825 F1：与中文段同一约束（每次输出的第一句必须是锚定语言），
+            # 堵住「英文提问首句回落中文、后续步骤才切回英文」这个对称缺口。
+            + "- The **first sentence of every output** must be in that language — including the "
+            "preamble written before each tool call. Never open in another language and switch "
+            "back later; if unsure, just start writing in that language.\n"
             + "- This language rule is internal, not reply content: never mention, restate or tag it "
             "in your reply (no \"(English)\", no \"keeping English\") — just answer.\n"
             + "- Keep code, file paths, commands, identifiers and raw error strings verbatim — never "
@@ -204,6 +216,9 @@ def build_language_directive(lang: str, source: str = "user") -> str:
             "- When the user switches language and no rule overrides it, switch from this turn.\n"
             "- From your first output on (including any preamble before a tool call), use that language "
             "consistently — every step.\n"
+            # plan-387-1825 F1：auto 分支同样点明「第一句」，与 zh/en 两条保持同一口径
+            "- The **first sentence of every output** must be in that language, including the "
+            "preamble before each tool call; never open in another language and switch back later.\n"
             "- The language rule is internal, not reply content: never mention, restate or tag it in "
             "your reply — just answer.\n"
             "- Keep code, file paths, commands, identifiers and raw error strings verbatim — never "

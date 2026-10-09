@@ -78,6 +78,20 @@ class Settings(BaseSettings):
     desktop_screenshot_max_dim: int = 1600
     # 操作路线沉淀：命中已有路线时复用「通用原则」，降低模型思考与推理开销
     desktop_recipe_enabled: bool = True
+    # plan-365-1757：「点准」相关开关。
+    # 截图元素编号：在截图上叠加编号矩形，模型按编号点击而不是自己换算像素坐标
+    # （微软 OmniParser 实测把图标正确标记率从 70.5% 提到 93.8%）。默认开启。
+    desktop_mark_shot: bool = True
+    # 点击前校验档位（plan-365-1769 F5）：off / lenient / strict，默认 lenient。
+    # 旧值布尔由 normalize_verify_mode 兼容迁移：true→lenient、false→off。
+    # 为什么默认宽松：plan-365-1757 的「找不到目标即拒绝」在真实任务中造成操作反复失败；
+    # 宽松档只在「点位空白」或「与目标明显冲突且无唯一候选」时拒绝。
+    desktop_verify_click: str = "lenient"
+    # 破坏性操作词表：命中即走「重新定位确证后再执行」，不做自动纠偏。
+    # 逗号分隔，用户可编辑；误报的代价只是一次毫秒级的重新定位。
+    desktop_destructive_words: str = (
+        "发送,提交,删除,清空,卸载,格式化,支付,付款,转账,购买,确认下单,退出登录,覆盖保存"
+    )
 
     # 验证模式:自动批准副作用工具(fs.write/terminal.exec 等),跳过人工审批门
     # v1.0: 默认关闭，高风险工具始终需要审批

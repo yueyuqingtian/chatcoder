@@ -16,6 +16,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Automation;
 
@@ -153,6 +154,30 @@ namespace DesktopCore
             }, IntPtr.Zero);
 
             return found;
+        }
+
+        /// <summary>
+        /// 窗口的**可见**边界矩形（plan-365-1757 A6）。
+        ///
+        /// 为什么不能直接用 GetWindowRect：它包含 DWM 的不可见调整边框（Win10/11 上约 7–8 px），
+        /// 而 CDP 给的是视口 CSS 坐标、截图给的是真实像素——用含边框的矩形做换算基准会带来
+        /// 与边框宽度成正比的系统性偏移，表现就是「网页元素点击总是差几个像素」。
+        /// DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS) 返回用户实际看到的矩形；
+        /// 在极老系统或 DWM 关闭时它会失败，此时回退 GetWindowRect（不劣于改动前）。
+        /// </summary>
+        public static Native.RECT VisibleFrame(IntPtr h)
+        {
+            Native.RECT r = new Native.RECT();
+            try
+            {
+                int size = Marshal.SizeOf(typeof(Native.RECT));
+                if (Native.DwmGetWindowAttribute(h, Native.DWMWA_EXTENDED_FRAME_BOUNDS, out r, size) == 0
+                    && r.Right > r.Left && r.Bottom > r.Top)
+                    return r;
+            }
+            catch { /* DWM 不可用：走下面的回退 */ }
+            Native.GetWindowRect(h, out r);
+            return r;
         }
 
         /// <summary>Bring a window to the foreground and verify it actually became foreground.</summary>
@@ -397,6 +422,69 @@ namespace DesktopCore
         {
             sb.Append(',');
             AppendElementBody(sb, e);
+        }
+
+        /// <summary>
+        /// 等待一块区域画面稳定（plan-365-1757 A7）。
+        ///
+        /// 为什么需要它：动效/加载中的界面里，「截图时是 A、点击时已经是 B」是稳定的误点来源。
+        /// 固定 sleep 既慢又不可靠——快的时候白等，慢的时候仍然点早。
+        /// 这里改用画面哈希：连续两次抓取的哈希一致即视为稳定，最多等到 timeout。
+        ///
+        /// 抓取时做下采样（长边 480）并落 PNG 再读回哈希：稳定与否只取决于像素是否变化，
+        /// 不需要清晰度，小图能把单次抓取压到几毫秒。
+        /// </summary>
+        public static string WaitStable(int x, int y, int w, int h, int timeoutMs, int settleMs)
+        {
+            if (timeoutMs <= 0) timeoutMs = 3000;
+            if (settleMs <= 0) settleMs = 60;
+
+            System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+            string tmp = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(), "desktop_core_stable.png");
+            long prev = 0;
+            int checks = 0;
+            bool stable = false;
+            try
+            {
+                while (true)
+                {
+                    long hash = 0;
+                    try
+                    {
+                        Capture(tmp, x, y, w, h, 480, "png", 100);
+                        hash = FileHash(tmp);
+                    }
+                    catch { /* 抓取失败：按未稳定处理，等下一轮或超时 */ }
+
+                    checks++;
+                    if (hash != 0 && hash == prev) { stable = true; break; }
+                    prev = hash;
+                    if (sw.ElapsedMilliseconds >= timeoutMs) break;
+                    System.Threading.Thread.Sleep(settleMs);
+                }
+            }
+            finally
+            {
+                try { System.IO.File.Delete(tmp); } catch { }
+            }
+
+            return "{\"stable\":" + (stable ? "true" : "false")
+                 + ",\"elapsedMs\":" + sw.ElapsedMilliseconds
+                 + ",\"checks\":" + checks + "}";
+        }
+
+        /// <summary>FNV-1a 64 位文件哈希：只用于「两张抓图是否同一画面」的比较。</summary>
+        private static long FileHash(string path)
+        {
+            byte[] b = System.IO.File.ReadAllBytes(path);
+            long h = -3750763034362895579L;   // FNV offset basis (14695981039346656037 的有符号表示)
+            for (int i = 0; i < b.Length; i++)
+            {
+                h ^= b[i];
+                h *= 1099511628211L;
+            }
+            return h;
         }
 
         /// <summary>

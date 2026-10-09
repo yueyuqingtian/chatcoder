@@ -384,6 +384,12 @@ interface ChatState {
   /** v2.2 (对齐 zcode 3.8): 输入队列——运行中发送的消息排队，turn 完成后自动续发。 */
   queuedInputs: QueuedInput[];
   loading: boolean;
+  /** plan-387-1825 C3：正在加载一个**尚未缓存**的会话（switchSession 的首次加载路径）。
+   *  与 `loading` 分开：`loading` 是 loadBootstrap（首屏拉项目/会话列表）语义，
+   *  且全客户端无消费点；切会话时消息流已清空成空态、界面会闪一次
+   *  「选择或创建会话」文案。本字段专供消息流骨架屏消费。
+   *  缓存命中路径**不置位**，保证零闪烁直接显示旧内容。 */
+  sessionLoading: boolean;
   /** 系统级错误（后端连接失败 / 启动加载失败 / 配置读写失败）→ 右上角 Toast。
    *  任务执行/会话运行类错误不得写这里（plan-308-1542 需求1）：它们只进 flowError。 */
   error: string | null;
@@ -933,6 +939,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   lastReasoningEffort: loadLastReasoning(),
   lastModelId: null,
   loading: false,
+  sessionLoading: false,
   error: null,
   flowError: null,
   hiddenTurnErrors: [],
@@ -1143,7 +1150,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
 
-    set({ loading: true, error: null });
+    // plan-387-1825 C3：置位 sessionLoading → 消息流显示骨架屏，
+    // 避免消息流被 _resetSessionState 清空后闪一次「选择或创建会话」空态文案。
+    // 缓存命中路径在上面已 return，不会走到这里，故缓存切换零闪烁。
+    set({ loading: true, error: null, sessionLoading: true });
     try {
       const [messages, turns, tasks] = await Promise.all([
         api.listSessionMessages(sessionId),
@@ -1153,7 +1163,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const running = turns.find((t) => t.status === "running");
       const interrupted = turns.find((t) => t.status === "interrupted");
       set({
-        messages, turns, tasks, loading: false,
+        messages, turns, tasks, loading: false, sessionLoading: false,
         runningTurnId: running?.id ?? null,
         isRunning: Boolean(running),
         interruptedTurnId: interrupted?.id ?? null,
@@ -1288,7 +1298,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // plan-547: 切回会话若已空闲且存在排队输入，立即续发
       if (!get().isRunning) void get()._drainQueue();
     } catch (e) {
-      set({ loading: false, error: String(e) });
+      // plan-387-1825 C3：失败也要清 sessionLoading，否则骨架屏永久停留
+      set({ loading: false, sessionLoading: false, error: String(e) });
     }
   },
 
@@ -1610,14 +1621,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   // v11: 拉取该 turn 的变更审核清单（含后端持久化审核状态）。失败静默，下次完成/切会话时重试。
   loadTurnChanges: async (turnId) => {
+    /* 【串会话修复】会话归属校验：请求由旧会话的事件/写盘广播发起后，响应可能
+     * 等到用户已切走才返回——旧实现无条件 set，会把旧会话的变更写进新会话的
+     * turnChanges（胶囊里凭空冒出「变更 #N」，按不到当轮用户消息时还回退成兜底标签）。
+     * 切走时的结果归位到该会话的缓存切片：切回随视图恢复，既不串也不丢。 */
+    const sid = get().currentSessionId;
     try {
       const changes = await api.getTurnChanges(turnId);
-      set((s) => ({ turnChanges: { ...s.turnChanges, [turnId]: changes } }));
+      if (get().currentSessionId === sid) {
+        set((s) => ({ turnChanges: { ...s.turnChanges, [turnId]: changes } }));
+      } else if (sid != null) {
+        set((s) => {
+          const slice = s.sessionState[sid];
+          if (!slice) return {};
+          return {
+            sessionState: {
+              ...s.sessionState,
+              [sid]: { ...slice, turnChanges: { ...slice.turnChanges, [turnId]: changes } },
+            },
+          };
+        });
+      }
     } catch { /* 非关键路径，忽略 */ }
   },
 
   // v11: 批量审核——乐观更新本地状态后 PUT 持久化；失败回滚并提示（消息流错误卡）。
   reviewFiles: async (turnId, paths, reviewed) => {
+    // 【串会话修复】失败回滚同样按会话归属——切走后的回滚不得写进新会话。
+    const sid = get().currentSessionId;
     const prev = get().turnChanges[turnId] ?? [];
     set((s) => ({
       turnChanges: {
@@ -1630,16 +1661,61 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       await api.reviewFiles(turnId, paths, reviewed);
     } catch (e) {
-      set((s) => ({ turnChanges: { ...s.turnChanges, [turnId]: prev } }));
-      // plan-308-1542 需求1：审核写入失败属任务执行类——只进消息流
-      get().setFlowError(`保存审核状态失败：${String(e)}`, turnId);
+      if (get().currentSessionId === sid) {
+        set((s) => ({ turnChanges: { ...s.turnChanges, [turnId]: prev } }));
+        // plan-308-1542 需求1：审核写入失败属任务执行类——只进消息流
+        get().setFlowError(`保存审核状态失败：${String(e)}`, turnId);
+      } else if (sid != null) {
+        set((s) => {
+          const slice = s.sessionState[sid];
+          if (!slice) return {};
+          return {
+            sessionState: {
+              ...s.sessionState,
+              [sid]: { ...slice, turnChanges: { ...slice.turnChanges, [turnId]: prev } },
+            },
+          };
+        });
+      }
     }
   },
 
   cancelTurn: async () => {
-    const { runningTurnId } = get();
-    if (!runningTurnId || _stoppingTurnIds.has(runningTurnId)) return;
-    const turnId = runningTurnId;
+    const st = get();
+    const runningTurnId = st.runningTurnId;
+    if (runningTurnId && _stoppingTurnIds.has(runningTurnId)) return;
+
+    let turnId: number;
+    if (runningTurnId) {
+      turnId = runningTurnId;
+    } else {
+      // plan-365-1770：本地没有 runningTurnId 但界面仍在运行态（发送在途/状态脱节）时，
+      // 直接 return 会让「停止」按钮点了没反应；按会话向后端补查当前运行的 turn。
+      if (!st.isRunning || !st.currentSessionId) return;
+      const sid = st.currentSessionId;
+      let found: number | null = null;
+      try {
+        const turns = await api.listTurns(sid);
+        const running = turns
+          .filter((t) => t.status === "running")
+          .sort((a, b) => b.id - a.id)[0];
+        found = running ? running.id : null;
+      } catch {
+        found = null;
+      }
+      if (get().currentSessionId !== sid) return; // 等待期间切了会话：不再作用于新会话
+      if (found == null) {
+        // 后端也没有运行中的 turn：无目标可取消，本地复位运行态即可。
+        _clearHeartbeat();
+        set((s) => ({
+          runningTurnId: null,
+          isRunning: false,
+          sessions: s.sessions.map((x) => (x.id === sid ? setSessionRunning(x, false) : x)),
+        }));
+        return;
+      }
+      turnId = found;
+    }
     _stoppingTurnIds.add(turnId);
     _clearHeartbeat();
     // 停止是用户明确的本地控制操作：先清理 UI，再等待后端信号/落库。
@@ -1661,7 +1737,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sessions: s.sessions.map((x) => (x.id === s.currentSessionId ? setSessionRunning(x, false) : x)),
     }));
     // 取消接口有专用短超时；失败不覆盖已经完成的本地停止。
-    void api.cancelTurn(turnId).catch(() => { /* 后端可能正在异步收尾 */ });
+    void api.cancelTurn(turnId).catch(() => {
+      // plan-371-1788：请求失败必须解除防重标记并校准状态——否则该 turnId 会永久
+      // 抑制 running 回跳（turn.updated / refreshTurns 都跳过它），停止按钮不再
+      // 出现、再点也无效，用户视角就是「点停止没有反应」。失败不等于未取消失败，
+      // 真实状态以刷新结果为准（若已停，拉到的就是 interrupted/completed）。
+      _stoppingTurnIds.delete(turnId);
+      void get().refreshTurns();
+    });
   },
   forceStop: async () => {
     // 保留兼容入口，统一走同一套乐观停止逻辑，避免两套状态清理漂移。
@@ -2232,8 +2315,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (endedNow) void get()._drainQueue();
         // v26: plan 模式 turn 完成（awaiting_confirmation，方案文档已写盘）也刷新变更清单，
         // 否则输入框上方"文件变更"贴条缺失方案文档（非 git 仓库同样适用）。
+        // 【串会话修复】迟到/串通道的旧会话事件不得拉取本会话变更（无 session_id 兼容放行）。
         if (endedNow || status === "awaiting_confirmation") {
-          void get().loadTurnChanges(turnId);
+          const evSid = Number(payload.session_id ?? 0);
+          if (!evSid || evSid === get().currentSessionId) void get().loadTurnChanges(turnId);
         }
         break;
       }
@@ -2278,7 +2363,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         get().refreshMessages();
         get().refreshTasks();
         // v11: turn 完成后拉取变更审核清单（写盘变更 + 持久化审核状态）
-        get().loadTurnChanges(turnId);
+        // 【串会话修复】与 turn.updated 同口径：别的会话的迟到事件不得拉取。
+        const evSidDone = Number(payload.session_id ?? 0);
+        if (!evSidDone || evSidDone === get().currentSessionId) get().loadTurnChanges(turnId);
         // 正常完成才自动续发队列；用户主动 Stop 后队列保留，避免误发。
         if (!_stoppingTurnIds.has(turnId)) void get()._drainQueue();
         break;
@@ -2333,6 +2420,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // v11: 已回滚 turn 的变更已撤销，清掉其审核卡片
         // plan-1094: 回滚语义为撤销该 turn 及其之后的写盘（后端删除 turn_id >= turn_id
         // 的 RollbackWrite），缓存清理同口径 >=；该事件由后端 rollback_service 补广播
+        // 【串会话修复】仅本会话的回滚事件才清缓存——别的会话的迟到事件会误删
+        // 当前会话更大编号的待审分组（该事件 payload 已带 session_id）。
+        const rolledSid = Number((payload as { session_id?: unknown }).session_id ?? 0);
+        if (rolledSid && rolledSid !== get().currentSessionId) break;
         const rollbackTurnId = Number((payload as { turn_id?: unknown }).turn_id ?? 0);
         set((s) => {
           if (!rollbackTurnId) return {};
@@ -2556,8 +2647,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       case "file.change": {
         // v24: 写盘实时广播——立即拉取该 turn 最新变更清单（含持久化审核状态），
         // 使输入框贴条"文件变更"在任务执行期间实时刷新。
+        // 【串会话修复】仅本会话事件才拉取（后端已携带 session_id；无则兼容放行）。
         const changeTurnId = Number(payload.turn_id ?? 0);
-        if (changeTurnId) void get().loadTurnChanges(changeTurnId);
+        const evSidFile = Number(payload.session_id ?? 0);
+        if (changeTurnId && (!evSidFile || evSidFile === get().currentSessionId)) {
+          void get().loadTurnChanges(changeTurnId);
+        }
         break;
       }
       case "todo.updated": {
@@ -2580,6 +2675,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break;
       }
       case "task.proposed": {
+        // 【串会话修复】事件带会话归属时必须与当前会话一致——迟到/串通道的旧会话
+        // 事件会污染当前会话的计划卡与待审清单（无 session_id 时兼容放行）。
+        const evSidProp = Number(payload.session_id ?? 0);
+        if (evSidProp && evSidProp !== get().currentSessionId) break;
         // v38 (plan-482): 事件仅表示"方案文档已生成、等待用户确认"，
         // 统一走 pendingPlan（含文档路径），由 PlanCard 渲染确认卡。
         const turnId = Number(payload.turn_id ?? 0);

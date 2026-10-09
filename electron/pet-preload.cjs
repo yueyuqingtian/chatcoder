@@ -29,11 +29,19 @@ contextBridge.exposeInMainWorld("petAPI", {
   /** 光标在窗口客户区内的坐标（DIP）；窗口已销毁返回 null。
    *  用于悬停态兜底：透明穿透窗口会丢 mouseleave，需按真实光标位置校正。 */
   cursorClient: () => ipcRenderer.invoke("pet:cursorClient"),
+  /** plan-387-1825 A3：渲染层存活心跳。
+   *  休眠唤醒后渲染进程可能被系统冻结（400ms 轮询停摆 → 命中态与交互态永远停在旧值，
+   *  窗口卡在穿透态收不到任何鼠标事件）。主进程据此判定「渲染层已冻结」并主动重放窗口状态。
+   *  plan-20261009 P1：附带渲染层期望的交互态（true=可交互），主进程以它为准纠正分歧。 */
+  heartbeat: (wantInteractive) =>
+    ipcRenderer.invoke("pet:heartbeat", typeof wantInteractive === "boolean" ? wantInteractive : null),
 
   /** 跳回主窗对应会话（主窗聚焦并切到该会话） */
   focusSession: (sessionId) => ipcRenderer.invoke("pet:focusSession", sessionId),
-  /** 停止会话运行（浮窗块右侧「停止」角标；走 REST 取消接口） */
-  cancelTurn: (turnId) => ipcRenderer.invoke("pet:cancelTurn", turnId),
+  /** 停止会话运行（浮窗块右侧「停止」角标；走 REST 取消接口）。
+   *  plan-365-1770：turnId 可能缺失（快照补建卡错过了 turn.started）——
+   *  改为携带 sessionId，由主进程兜底补查运行中的 turn 再取消。 */
+  cancelTurn: (turnId, sessionId) => ipcRenderer.invoke("pet:cancelTurn", { turnId, sessionId }),
   /** 隐藏宠物（写偏好，任务运行中同样有效；可从设置页或右键菜单恢复） */
   hideTemporarily: () => ipcRenderer.invoke("pet:hideTemporarily"),
   /** 恢复显示（设置页或右键菜单调用） */
@@ -73,6 +81,13 @@ contextBridge.exposeInMainWorld("petAPI", {
     const handler = (_e, dir) => cb(dir === "left" || dir === "right" ? dir : null);
     ipcRenderer.on("pet:dragDir", handler);
     return () => ipcRenderer.removeListener("pet:dragDir", handler);
+  },
+  /** 系统唤醒/解锁后的状态重放通知（plan-365-1770）：
+   *  渲染层据此复位拖拽残留并立即校准命中态（解决「唤醒后无法拖动/折叠/右键」）。 */
+  onSystemResume: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on("pet:systemResume", handler);
+    return () => ipcRenderer.removeListener("pet:systemResume", handler);
   },
 
   /** 会话快照（主进程 net.fetch 代取）。

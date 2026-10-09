@@ -74,6 +74,10 @@ const PET_BADGE_W = 28;
 const EDGE_MARGIN = 24;
 const SNAP_THRESHOLD = 28;
 
+/** 宠物命中容差（px）：与渲染层 PET_HIT_PAD 同口径。
+ *  plan-365-1770：唤醒重放时主进程也要按它判断「光标是否在宠物上」，用于决定穿透初值。 */
+const PET_HIT_PAD = 10;
+
 /** manifest 缓存有效期、单文件体积上限、已安装宠物上限 */
 const MANIFEST_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_SPRITE_BYTES = 8 * 1024 * 1024;
@@ -116,6 +120,9 @@ const DEFAULT_PREF = {
 let pref = null;
 let petWindow = null;
 let interactive = false;
+/** plan-387-1825 A3：最近一次渲染层心跳时间戳（渲染层常驻心跳每 1s 上报一次）。
+ *  休眠唤醒后渲染进程可能被系统冻结、轮询停摆，超过阈值未收到心跳即由主进程主动重放窗口状态。 */
+let lastHeartbeatAt = 0;
 let registered = false;
 let mainHooked = false;
 let ctx = { log: () => {}, logErr: () => {}, getMainWindow: () => null, getBackendPort: () => 12973 };
@@ -471,6 +478,9 @@ function rememberPosition() {
 
 // ─────────────────────────── 窗口生命周期 ───────────────────────────
 
+/** 交互态（穿透开关）唯一落位点。
+ *  决策者是渲染层（只有它知道菜单 / 面板 / 浮窗块的位置）；主进程侧的重放（显示 / 唤醒 / 看门狗）
+ *  只能按宠物矩形猜，猜错由下一次心跳纠正（plan-20261009 P1，见 pet:heartbeat）。 */
 function setInteractive(on) {
   interactive = !!on;
   if (!petWindow || petWindow.isDestroyed()) return;
@@ -481,6 +491,154 @@ function setInteractive(on) {
   } catch (e) {
     logErr("穿透切换失败:", e && e.message);
   }
+}
+
+/* ─────────────── 输入子窗口补显（plan-20261009 P2）───────────────
+ *
+ * 「隐藏宠物 → 设置页重新显示」后左键点击 / 拖动 / 缩放全部失效、右键菜单却能弹出的**真因**：
+ * backgroundThrottling:false 让 Chromium 在 show 时跳过恢复输入子窗口（Chrome_RenderWidgetHostHWND），
+ * 按下消息改由不可激活的顶层窗口处理并被丢弃（机理与取证见 glass-diagnostics.ensureInputChildVisible）。
+ * 不能为此去掉 backgroundThrottling:false（plan-354-1739：去掉后浮窗刷新会被节流到 1s），
+ * 也不能改 focusable:true（会抢走用户正在输入的焦点）—— 只能在窗口可见时把子窗口补显回来。
+ * 调用点：每次显示后、唤醒重放后、以及每次渲染层心跳（1s）自愈 ——
+ * 锁屏 / 息屏等「遮挡」路径走 Chromium 同一段隐藏逻辑（按源码推断，未实测），只靠显示时补一次不够。 */
+let inputChildRepairLogAt = 0;
+let inputChildFailLogged = false;
+function ensureInputChild(reason) {
+  if (!petWindow || petWindow.isDestroyed() || !petWindow.isVisible()) return;
+  const r = glassDiag.ensureInputChildVisible(petWindow);
+  if (r.repaired) {
+    // 限频：若系统反复隐藏子窗口，日志最多 10s 一条
+    if (Date.now() - inputChildRepairLogAt > 10000) {
+      inputChildRepairLogAt = Date.now();
+      log("已补显宠物输入子窗口", JSON.stringify({ reason }));
+    }
+  } else if (!r.ok && !inputChildFailLogged) {
+    inputChildFailLogged = true; // 失败原因只记一次（如 koffi 缺失），避免每秒刷屏
+    logErr("宠物输入子窗口检查失败:", JSON.stringify({ reason, why: r.reason }));
+  }
+}
+
+/* ─────────────── 系统唤醒恢复（plan-365-1770）───────────────
+ *
+ * 为什么需要：电脑睡眠唤醒后，鼠标事件转发可能中断、Windows 侧穿透
+ * （WS_EX_TRANSPARENT）与实际期望脱节 —— 渲染层收不到任何鼠标事件，
+ * 命中态永远停在旧值，窗口卡在穿透或不可交互状态，表现为「无法拖动、
+ * 无法折叠、右键无反应」。
+ *
+ * 修复分两层（缺一不可）：
+ *  ① 主进程：唤醒时**不依赖渲染层**直接重放窗口状态（本段代码）——
+ *    可见性/置顶/穿透（先写穿透再写目标值，强制刷新脱节的状态）；
+ *  ② 渲染层：兜底轮询（reconcile）扩展为同时同步命中与交互态，
+ *    即使事件转发彻底失效，400ms 内也能自动恢复。
+ */
+
+/** 光标是否落在宠物可交互区（宠物矩形 + 容差）。
+ *  唤醒重放用它决定穿透初值：光标就在宠物上时直接关闭穿透，
+ *  用户无需先移动鼠标即可继续拖动/右键。 */
+function cursorOverPet() {
+  if (!petWindow || petWindow.isDestroyed()) return false;
+  try {
+    const p = screen.getCursorScreenPoint();
+    const b = petWindow.getBounds();
+    const r = petRectInWindow();
+    const cx = p.x - b.x;
+    const cy = p.y - b.y;
+    return cx >= r.x - PET_HIT_PAD && cx <= r.x + r.w + PET_HIT_PAD
+      && cy >= r.y - PET_HIT_PAD && cy <= r.y + r.h + PET_HIT_PAD;
+  } catch {
+    return false;
+  }
+}
+
+/** 唤醒 / 解锁后的窗口状态重放（不依赖渲染层） */
+function handleSystemResume() {
+  if (!petWindow || petWindow.isDestroyed()) return;
+  endInteraction(false); // 唤醒时不可能还按着鼠标：清掉可能残留的拖拽循环
+  // ① 可见性兜底：偏好要求显示但窗口不可见时恢复（不抢焦点）
+  try {
+    if (pref.enabled && pref.visible !== false && !petWindow.isVisible()) petWindow.showInactive();
+  } catch (e) {
+    logErr("唤醒恢复可见性失败:", e && e.message);
+  }
+  // ② 置顶重设（唤醒后 z 序可能被系统重置）
+  try { petWindow.setAlwaysOnTop(true, "screen-saver"); } catch { /* 平台差异，忽略 */ }
+  // ③ 穿透态强制重放：先明确写一次穿透再写目标值——状态脱节时单次写入不可靠。
+  //    目标值取「光标是否在宠物上」的真实位置判定，而不是残留的 interactive 变量。
+  try { petWindow.setIgnoreMouseEvents(true, { forward: true }); } catch { /* ignore */ }
+  interactive = cursorOverPet();
+  setInteractive(interactive);
+  // plan-20261009 P2：锁屏 / 睡眠期间窗口可能被判为遮挡、输入子窗口随之隐藏（推断），这里顺带补显
+  ensureInputChild("resume");
+  // ④ 位置纠正：唤醒后工作区可能变化（副屏休眠移除 / 分辨率切换），保证宠物不被留在盲区
+  try {
+    const b = petWindow.getBounds();
+    const pos = clampWindowPos(b.x, b.y, screen.getDisplayMatching(b).workArea);
+    if (pos.x !== b.x || pos.y !== b.y) {
+      petWindow.setBounds({ x: pos.x, y: pos.y, width: WIN_W, height: WIN_H });
+    }
+  } catch (e) {
+    logErr("唤醒位置纠正失败:", e && e.message);
+  }
+  // ⑤ 通知渲染层：复位拖拽残留并立即校准命中态
+  try { petWindow.webContents.send("pet:systemResume"); } catch { /* 窗口销毁竞态，忽略 */ }
+  log("系统唤醒：宠物窗口状态已重放", JSON.stringify({ interactive }));
+}
+
+/** plan-387-1825 A3：渲染层心跳被视为「已冻结」的阈值（ms）。
+ *  渲染层健康时每 1s 报一次（PetApp 的常驻心跳，plan-20261009 P1 起不随菜单 / 面板停摆），3s 仍无心跳即视为冻结。 */
+const HEARTBEAT_STALE_MS = 3000;
+/** 心跳看门狗间隔：检查渲染层是否被冻结并主动重放窗口状态 */
+const HEARTBEAT_WATCHDOG_MS = 1000;
+
+/** 注册唤醒恢复（resume / unlock-screen 合并防抖，仅注册一次）
+ *
+ * plan-387-1825 A3：此前只听 resume / unlock-screen 两条事件，实际「显示器休眠 / 快速用户切换 /
+ * 部分休眠唤醒路径」都不触发它们 → 重放从未执行，宠物停在穿透态。
+ * 现在补两条更宽的触发源，并加一条**不依赖任何系统事件**的心跳看门狗。
+ */
+function registerSystemRecovery() {
+  let powerMonitor = null;
+  try { powerMonitor = require("electron").powerMonitor; } catch { powerMonitor = null; }
+  let timer = null;
+  const schedule = () => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => { timer = null; handleSystemResume(); }, 500);
+  };
+  if (powerMonitor && typeof powerMonitor.on === "function") {
+    powerMonitor.on("resume", schedule);
+    powerMonitor.on("unlock-screen", schedule);
+    // 锁屏 / 显示器休眠（非睡眠路径）、快速用户切换都会走这两条
+    powerMonitor.on("lock-screen", schedule);
+    powerMonitor.on("user-did-become-active", schedule);
+  }
+  // 心跳看门狗：窗口可见但渲染层长时间冻死时，直接重放穿透/置顶状态。
+  // 「用户把光标移回宠物上但点击无反应」正是此时发生（穿透态收不到任何鼠标事件）。
+  //
+  // plan-20261009 P1：前提是心跳**只在渲染层真冻结时**才会断。此前渲染层把心跳挂在命中轮询里，
+  // 菜单 / 面板 / 拖拽期间轮询刻意暂停 → 本看门狗每 3s 误判一次，按宠物矩形把窗口重放成穿透，
+  // 光标正停在菜单上（菜单不在宠物矩形内）→ 菜单项高亮正常、点击落到下层窗口。
+  // 现在渲染层心跳常驻；万一真冻结，按宠物矩形猜也只影响冻结期间（渲染层恢复后心跳立即纠正）。
+  const watchdog = setInterval(() => {
+    if (!petWindow || petWindow.isDestroyed()) return;
+    if (!petWindow.isVisible()) return;
+    if (!lastHeartbeatAt) return; // 渲染层尚未上报过（刚启动），不误判
+    if (!pref.clickThrough) return; // 未开穿透时不存在「卡在穿透态」问题
+    const staleMs = Date.now() - lastHeartbeatAt;
+    if (staleMs < HEARTBEAT_STALE_MS) return;
+    lastHeartbeatAt = Date.now(); // 防重复重放
+    try {
+      // 先强制写一次穿透，再写目标值——状态脱节时单次写入不可靠
+      petWindow.setIgnoreMouseEvents(true, { forward: true });
+      const on = cursorOverPet();
+      setInteractive(on);
+      log("渲染层心跳停滞，已强制重放交互态", JSON.stringify({ interactive: on, staleMs }));
+    } catch (e) {
+      logErr("心跳兜底重放失败:", e && e.message);
+    }
+  }, HEARTBEAT_WATCHDOG_MS);
+  if (typeof watchdog.unref === "function") watchdog.unref();
+  log("系统唤醒恢复已注册");
 }
 
 /* ─────────────── 拖拽与缩放：主进程自循环（plan-73-341）───────────────
@@ -682,7 +840,27 @@ function syncVisibility() {
     try { validatePetPackage(petDir(slug)); usable = true; } catch { usable = false; }
   }
   if (usable) {
-    if (!petWindow.isVisible()) petWindow.showInactive();
+    if (!petWindow.isVisible()) {
+      petWindow.showInactive();
+      // plan-387-1825 A5：窗口重新可见后重放一次穿透态 —— 先写穿透再写目标值
+      // （脱节状态下单次写入不可靠），目标值按光标真实位置判定；
+      // 随后由渲染层心跳上报的期望态接管（≤1 个心跳周期）。
+      //
+      // plan-20261009 P1：撤销 A11 的「显示后 1.5s 无条件可交互 + 屏蔽渲染层穿透回报 + 到期定时器改写」。
+      // 它的归因是错的（「重新显示后点不动」的真因是输入子窗口未恢复，见 ensureInputChild / P2），
+      // 反而让主进程成为第二个写入者：宽限期内整窗挡住下层点击，到期定时器又绕过渲染层、
+      // 按宠物矩形改写交互态 —— 菜单 / 面板此刻若已打开就会被切成穿透。
+      // 穿透窗口仍转发 mousemove，光标移到宠物上时渲染层命中检测会立即切回可交互。
+      try {
+        petWindow.setIgnoreMouseEvents(true, { forward: true });
+        setInteractive(cursorOverPet());
+        if (debugOn) log("[debug] show 重放交互态", JSON.stringify({ interactive }));
+      } catch (e) {
+        logErr("显示时重放交互态失败:", e && e.message);
+      }
+      // plan-20261009 P2：隐藏 → 显示后 Chromium 不再恢复输入子窗口，不补显则左键按下全部被丢弃
+      ensureInputChild("show");
+    }
   } else if (petWindow.isVisible()) {
     petWindow.hide();
   }
@@ -826,6 +1004,8 @@ function registerPetIpc(options) {
     getBackendPort: (options && options.getBackendPort) || (() => 12973),
   };
   pref = readPref();
+  // plan-365-1770：睡眠唤醒后重放宠物窗口状态（穿透/置顶/可见性），解决「唤醒后交互全失效」
+  registerSystemRecovery();
 
   // 宠物窗口启动时一次性取全：偏好 + 当前宠物资源 + 已安装列表 + 后端端口 + 标题缓存
   ipcMain.handle("pet:getBoot", () => {
@@ -900,7 +1080,8 @@ function registerPetIpc(options) {
     const sid = Number(sessionId);
     if (!Number.isFinite(sid) || sid <= 0) return [];
     const port = ctx.getBackendPort();
-    const res = await net.fetch(`http://127.0.0.1:${port}/turns/sessions/${sid}/tasks`, { signal: AbortSignal.timeout(8000) });
+    // plan-371-1788：URL 必须带 /api 前缀（后端路由统一挂载在 /api 下），缺前缀会 404
+    const res = await net.fetch(`http://127.0.0.1:${port}/api/turns/sessions/${sid}/tasks`, { signal: AbortSignal.timeout(8000) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
   });
@@ -969,6 +1150,24 @@ function registerPetIpc(options) {
     }
   });
 
+  /** 渲染层存活心跳（plan-387-1825 A3）。
+   *  休眠唤醒后渲染进程可能被系统冻结：400ms 轮询停摆 → 命中态永远停在旧值 →
+   *  窗口卡在穿透态收不到任何鼠标事件（表现为「无法拖动/右键无反应」）。
+   *  主进程按「多久没收到心跳」判定渲染层已冻结，并主动重放窗口状态，不依赖渲染层自愈。 */
+  ipcMain.handle("pet:heartbeat", (_e, want) => {
+    lastHeartbeatAt = Date.now();
+    // plan-20261009 P1：心跳携带渲染层期望的交互态。渲染层只在状态**变化**时才发 setInteractive，
+    // 主进程侧的重放（显示 / 唤醒 / 看门狗）一旦改写，两端就会长期分歧（典型：菜单打开中渲染层
+    // 认为「已可交互」不再上报，窗口却已被切成穿透）。以渲染层为准对齐，分歧最多存活一个心跳周期。
+    if (typeof want === "boolean" && want !== interactive) {
+      setInteractive(want);
+      if (debugOn) log("[debug] 心跳纠正交互态", JSON.stringify({ interactive: want }));
+    }
+    // plan-20261009 P2：输入子窗口自愈（遮挡 / 息屏后被隐藏时 1s 内补显；两次系统调用，开销可忽略）
+    ensureInputChild("heartbeat");
+    return lastHeartbeatAt;
+  });
+
   /** 拖拽开始：传入「鼠标在窗口客户区内的偏移」（抓取点语义）与启动帧的初判方向。
    *  之后主进程自己轮询光标定位窗口并持续判定行走方向，渲染层不再上报任何坐标 ——
    *  从根上避免"跨进程坐标换算误差"、"合成事件反馈环"与"拖拽期间事件停发导致方向冻结"。 */
@@ -985,13 +1184,32 @@ function registerPetIpc(options) {
 
   /** 停止会话运行（浮窗块右侧「停止」角标）：转发后端取消接口。
    * 与会话级 WS 的 cancel 事件同一条链路（engine.cancel_turn），
-   * 走 REST 是因为浮窗只对主任务开了会话连接，而块可能属于任意会话。 */
-  ipcMain.handle("pet:cancelTurn", async (_e, turnId) => {
-    const tid = Number(turnId);
-    if (!Number.isFinite(tid) || tid <= 0) return { ok: false, error: "invalid_turn" };
+   * 走 REST 是因为浮窗只对主任务开了会话连接，而块可能属于任意会话。
+   * plan-365-1770：入参扩展为 { turnId, sessionId }（兼容旧数字）——
+   * 卡片 turnId 可能缺失（快照补建卡错过了 turn.started），此前会因 if (turnId)
+   * 被静默吞掉；现在按 sessionId 向后端补查运行中的 turn 再取消。
+   * plan-371-1788：两处 URL 补上 /api 前缀——此前请求打到未挂载的裸路径，
+   * 后端恒返回 404（日志：[pet] 停止会话失败: HTTP 404），停止按钮从未生效。 */
+  ipcMain.handle("pet:cancelTurn", async (_e, payload) => {
+    const p = payload && typeof payload === "object" ? payload : { turnId: payload };
+    let tid = Number(p.turnId);
+    const sid = Number(p.sessionId);
+    const port = ctx.getBackendPort();
     try {
-      const port = ctx.getBackendPort();
-      const res = await net.fetch(`http://127.0.0.1:${port}/turns/${tid}/cancel`, {
+      if (!Number.isFinite(tid) || tid <= 0) {
+        if (!Number.isFinite(sid) || sid <= 0) return { ok: false, error: "invalid_target" };
+        const listRes = await net.fetch(`http://127.0.0.1:${port}/api/turns/sessions/${sid}`, {
+          signal: AbortSignal.timeout(8000),
+        });
+        if (!listRes.ok) throw new Error(`HTTP ${listRes.status}`);
+        const list = await listRes.json();
+        const running = (Array.isArray(list) ? list : [])
+          .filter((t) => t && t.status === "running")
+          .sort((a, b) => Number(b.id) - Number(a.id))[0];
+        tid = running ? Number(running.id) : NaN;
+        if (!Number.isFinite(tid) || tid <= 0) return { ok: false, error: "no_running_turn" };
+      }
+      const res = await net.fetch(`http://127.0.0.1:${port}/api/turns/${tid}/cancel?source=pet`, {
         method: "POST",
         signal: AbortSignal.timeout(8000),
       });

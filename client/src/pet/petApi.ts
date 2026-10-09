@@ -112,9 +112,14 @@ export interface PetAPI {
   /** 光标在窗口客户区内的坐标（DIP）；窗口已销毁返回 null。
    *  用于悬停态兜底：透明穿透窗口快速移出时会丢 mouseleave，需按真实光标位置校正。 */
   cursorClient(): Promise<{ x: number; y: number } | null>;
+  /** 渲染层存活心跳（plan-387-1825 A3）：主进程据此判定渲染进程是否被系统冻结，
+   *  冻结时主动重放窗口穿透/置顶状态（解决「唤醒后宠物无法拖动、点击无反应」）。
+   *  plan-20261009 P1：携带渲染层期望的交互态，主进程侧状态被其它路径改写时据此纠正。 */
+  heartbeat?(wantInteractive?: boolean): Promise<number>;
   focusSession(sessionId: number): Promise<boolean>;
-  /** 停止会话运行（块右侧角标） */
-  cancelTurn(turnId: number): Promise<{ ok: boolean; error?: string }>;
+  /** 停止会话运行（块右侧角标）；turnId 可能缺失（快照补建卡），
+   *  携带 sessionId 由主进程补查运行中的 turn 再取消 */
+  cancelTurn(turnId: number | null, sessionId?: number): Promise<{ ok: boolean; error?: string }>;
   hideTemporarily(): Promise<boolean>;
   showPet(): Promise<boolean>;
   openPetPage(slug: string): Promise<boolean>;
@@ -127,6 +132,8 @@ export interface PetAPI {
   onInteractionEnded(cb: (payload: { kind?: string }) => void): () => void;
   /** 拖拽行走方向（主进程按光标水平位移判定，仅方向变化时推送） */
   onDragDir(cb: (dir: "left" | "right" | null) => void): () => void;
+  /** 系统唤醒/解锁后的状态重放：复位交互残留并立即校准命中态 */
+  onSystemResume(cb: () => void): () => void;
   /** 会话快照（主进程代取，规避 file:// 跨源限制） */
   snapshot(): Promise<SessionSnapshot[]>;
   /** 引擎步骤（仅选中无清单的任务时按需拉取一次） */

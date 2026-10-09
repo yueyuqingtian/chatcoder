@@ -116,6 +116,43 @@ FROM_TA3.update({
     "TaskCancel": "cancel_subagent",
 })
 
+# ── plan-365-1769 F1：动态派生 schema 的自造伪装名 ──
+#
+# **为什么需要这份清单**：`ta3_tool_schemas.py` 里的原生 schema 是**硬编码快照**，而
+# `disguise_tools` 命中映射时是用快照**整体替换**真实 schema 的（`out.append(native)`）。
+# 于是真实工具新增任何参数都不会到达模型——plan-365-1757 给 `desktop_click` 加了
+# ref/image_x/text_target/expect 等参数，ta3 会话里模型仍然只看到 x/y，
+# 只能「看图心算屏幕坐标」，直接造成点击准确率大幅下降（plan-365-1769 故）。
+#
+# **判定规则**：「自造伪装名」（非 ta3 参考项目原生）**且无参数适配器**
+# （即不在 ARGS_TO_TA3 / ARGS_FROM_TA3 中，参数键名与真实工具逐一对应）的工具，
+# 其伪装 schema 一律**从真实 schema 派生**——只改 function.name，描述与参数原样沿用。
+# 这样真实工具演进后，ta3 侧自动跟随，不再需要人工同步。
+#
+# **维持硬编码的**：① ta3 原生工具（Read/Write/Edit/Bash/List/Search/Diff/WebSearch/
+# TodoWrite/SubAgent 等，描述需贴合 ta3 语义）；② 有参数适配器的（键名需转换）；
+# ③ 一对多下发特例（spawn_subagent → SubAgent + SubAgentAsync）。
+#
+# 新增自造工具时，只需在 TO_TA3 与本清单各加一行；漏加会被
+# `tests/test_ta3_schema_parity.py` 守护测试直接拦下（不会静默漂移）。
+DYNAMIC_SCHEMA_ALIASES: frozenset[str] = frozenset({
+    # 电脑操控（plan-334-1661 起；plan-365-1769 起改为动态派生）
+    "DesktopWindows", "DesktopSnapshot", "DesktopHit", "DesktopScreenshot",
+    "DesktopFindText", "DesktopClick", "DesktopType", "DesktopKeys",
+    "DesktopScroll", "DesktopFocus", "DesktopApps", "DesktopRecipe",
+    # 浏览器套件（v43 补映射）
+    "BrowserNavigate", "BrowserScreenshot", "BrowserClick",
+    "BrowserType", "BrowserSnapshot", "BrowserEvaluate",
+    # 附件与图片读取（plan-147-674）
+    "ReadAttachment", "ViewImage",
+    # 其余自造工具（v43 全量补齐）
+    "CompleteGoal", "AskUser", "MultiFileEdit", "SymbolSearch",
+    "WebFetch", "CiRun", "Git", "CodebaseSearch",
+    "CompactionIndex", "CompactionView", "SkillView", "MemoryWrite",
+    # 子代理管理/上报（v43 补齐）
+    "SubAgentInspect", "SendToSubagent", "ReportToLeader",
+})
+
 # 出站参数键名适配：真实键 → ta3 键（None = 丢弃该键）
 ARGS_TO_TA3: dict[str, dict[str, str | None]] = {
     # 键名不一致的工具做出站转换；其余参数名一致的键保留原名

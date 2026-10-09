@@ -750,13 +750,20 @@ async def run_agent_loop(
     # 且本轮 effort 非 none 时开启（对齐 deepseek-harness：thinking:{type:"enabled"} + effort）。
     # 修复：此前只发 reasoning_effort、从不发 thinking，DeepSeek 官方网关不识别
     # reasoning_effort，思考模式从未生效 → 同一模型显得"笨"。
-    _thinking_enabled = False
+    # v29: 三态语义——True 显式开启；False 用户选择档位 none，要求**显式关闭**思考
+    # （各 provider 按自身协议翻译成 disabled / enable_thinking=false；协议无关闭
+    # 字段的供应商保持不下发）；None 不触碰该字段（未指定档位 / provider 不支持思考）。
+    _thinking_flag: bool | None = None
+    _eff = reasoning_effort or (settings.agent_reasoning_effort if tool_schemas else None)
+    _eff_norm = (_eff or "").strip().lower()
     try:
-        if settings.agent_thinking_enabled and hasattr(provider, "supports_thinking"):
-            _eff = reasoning_effort or (settings.agent_reasoning_effort if tool_schemas else None)
-            _thinking_enabled = bool(provider.supports_thinking()) and _eff not in (None, "", "none")
-            if _thinking_enabled:
-                logger.info("[agent] turn=%s 启用 thinking 模式 (effort=%s)", turn_id, _eff)
+        if _eff_norm == "none":
+            _thinking_flag = False
+            logger.info("[agent] turn=%s 思考档位为 none，显式关闭思考", turn_id)
+        elif (_eff_norm and settings.agent_thinking_enabled
+              and hasattr(provider, "supports_thinking") and bool(provider.supports_thinking())):
+            _thinking_flag = True
+            logger.info("[agent] turn=%s 启用 thinking 模式 (effort=%s)", turn_id, _eff)
     except Exception:
         logger.debug("[agent] turn=%s thinking 能力判断失败(非阻塞)", turn_id, exc_info=True)
 
@@ -1088,7 +1095,7 @@ async def run_agent_loop(
                 session_id=str(session_id),
                 message_id=f"{session_id}-{turn_id}-{step}",
                 # v21: thinking 模式（provider 会据此发 thinking 参数并移除 temperature）
-                thinking=_thinking_enabled or None,
+                thinking=_thinking_flag,
                 # plan-270-1358: ta3 x-ws-id 需要工作目录指纹（其它 Provider 忽略）
                 workspace_dir=workspace or None,
             )
@@ -1181,8 +1188,18 @@ async def run_agent_loop(
                                 f"{_reason}，{_wait_s:.0f} 秒后重试 {_ri}/{len(_retry_waits)}…",
                             )
                             if not await _wait_retry_interval(cancel_event, _wait_s):
-                                logger.warning("[agent] turn=%s 重试等待期间收到中断信号，停止重试", turn_id)
+                                # plan-365-1790: 带出原始失败原因——此前的日志只有“收到中断信号”，
+                                # 导致“本来是一次报错、被取消信号收尾成用户中断”的链路不可追溯。
+                                logger.warning(
+                                    "[agent] turn=%s 响应异常重试等待期间收到中断信号，停止重试（原始原因：%s）",
+                                    turn_id, _reason,
+                                )
                                 return AgentOutput(kind="cancelled", error="任务被用户中断")
+                            # v29: 重试档位同样三态传递——降档到 none 时显式关闭思考
+                            _eff_l = (_eff or "").strip().lower()
+                            _retry_thinking = (
+                                False if _eff_l == "none" else (True if _eff_l else None)
+                            )
                             _retry_req = ChatRequest(
                                 messages=api_messages, model="",
                                 tools=tool_schemas or None,
@@ -1191,7 +1208,7 @@ async def run_agent_loop(
                                 max_tokens=settings.agent_max_output_tokens or None,
                                 session_id=str(session_id),
                                 message_id=f"{session_id}-{turn_id}-{step}-empty-retry-{_ri}",
-                                thinking=_eff not in (None, "", "none"),
+                                thinking=_retry_thinking,
                                 workspace_dir=workspace or None,  # plan-270-1358: ta3 x-ws-id
                             )
                             try:
@@ -1230,6 +1247,16 @@ async def run_agent_loop(
                         _err_text = _reason
                         if _fatal and _retry_waits:
                             _err_text = f"{_reason}（已自动重试 {len(_retry_waits)} 次仍失败）"
+                        # plan-365-1790: 致命响应终止前记录诊断字段——
+                        # 以 finish/frames/usage 三者组合区分「网关截断」与「模型真无输出」。
+                        logger.warning(
+                            "[agent] turn=%s step=%s 响应异常终止 fatal=%s finish=%s frames=%s "
+                            "usage=%s tool_calls=%d content_len=%d thinking_len=%d reason=%s",
+                            turn_id, step, _fatal, response.finish_reason,
+                            response.frames_received, response.usage is not None,
+                            len(response.tool_calls or []), len(response.content or ""),
+                            len(response.thinking or ""), _reason,
+                        )
                         await _emit_agent_msg(
                             db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
                             agent_id=agent_id, agent_name=agent_name,
@@ -1272,7 +1299,7 @@ async def run_agent_loop(
                             max_tokens=settings.agent_max_output_tokens or None,
                             session_id=str(session_id),
                             message_id=f"{session_id}-{turn_id}-{step}-fc-retry",
-                            thinking=_thinking_enabled or None,
+                            thinking=_thinking_flag,
                             workspace_dir=workspace or None,  # plan-270-1358: ta3 x-ws-id
                         )
                         response = await provider.chat(request)
@@ -1305,7 +1332,7 @@ async def run_agent_loop(
                             max_tokens=settings.agent_max_output_tokens or None,
                             session_id=str(session_id),
                             message_id=f"{session_id}-{turn_id}-{step}-retry",
-                            thinking=_thinking_enabled or None,  # v21: 紧急压缩重试同样保持 thinking
+                            thinking=_thinking_flag,  # v21: 紧急压缩重试同样保持 thinking
                             workspace_dir=workspace or None,  # plan-270-1358: ta3 x-ws-id
                         )
                         response = await provider.chat(request)
@@ -1370,7 +1397,11 @@ async def run_agent_loop(
                                     f"调用异常，{_wait_s:.0f} 秒后重试 {_ri}/{len(_retry_waits)}…",
                                 )
                                 if not await _wait_retry_interval(cancel_event, _wait_s):
-                                    logger.warning("[agent] turn=%s 重试等待期间收到中断信号，停止重试", turn_id)
+                                    # plan-365-1790: 同上——重试等待期被中断会掩盖原始调用错误。
+                                    logger.warning(
+                                        "[agent] turn=%s 调用异常重试等待期间收到中断信号，停止重试（原始错误：%s）",
+                                        turn_id, str(api_err)[:200],
+                                    )
                                     return AgentOutput(kind="cancelled", error="任务被用户中断")
                             request = ChatRequest(
                                 messages=messages, model="", tools=tool_schemas or None,
@@ -1380,7 +1411,7 @@ async def run_agent_loop(
                                 max_tokens=settings.agent_max_output_tokens or None,
                                 session_id=str(session_id),
                                 message_id=f"{session_id}-{turn_id}-{step}-transient-retry-{_ri}",
-                                thinking=_thinking_enabled or None,
+                                thinking=_thinking_flag,
                                 workspace_dir=workspace or None,  # plan-270-1358: ta3 x-ws-id
                             )
                             try:
@@ -1994,7 +2025,9 @@ async def run_agent_loop(
                         if _pre_paths:
                             await broadcast(session_id, {
                                 "event": "file.change",
-                                "payload": {"turn_id": turn_id, "path": str(_pre_paths[0])},
+                                # 携带 session_id（串会话修复）：前端据此丢弃迟到/串通道的旧会话事件
+                                "payload": {"turn_id": turn_id, "path": str(_pre_paths[0]),
+                                            "session_id": session_id},
                             })
                     elif result.ok and _guess_paths:
                         # v25: 工具伪装写盘检测——命令解析出的候选路径，前后内容有变化才登记
@@ -2051,7 +2084,9 @@ async def run_agent_loop(
                         if _detected:
                             await broadcast(session_id, {
                                 "event": "file.change",
-                                "payload": {"turn_id": turn_id, "path": str(_detected[0])},
+                                # 携带 session_id（串会话修复）：与精确写盘分支同口径
+                                "payload": {"turn_id": turn_id, "path": str(_detected[0]),
+                                            "session_id": session_id},
                             })
 
                     await broadcast(session_id, {
@@ -2117,13 +2152,10 @@ async def run_agent_loop(
                     # v15: 图片类工具结果 → 多模态模型追加 image_url 消息，让模型真正看到图片。
                     # （此前 base64 只放在 ToolResult.data，从未进入对话，模型只能看到
                     #   "Base64 length: N" 文本，被迫转向 OCR/命令行猜图）
-                    if multimodal and result.ok and tool_name in (
-                        "read_attachment",
-                        "view_image",
-                        # plan-334-1661：截图同样内联——自绘界面必须看图才能决策，
-                        # 此前要「复制文件 → view_image」两轮往返才看得到。
-                        "desktop_screenshot",
-                    ):
+                    # plan-365-1757：判据由「工具名白名单」改为「结果里是否带图片」——
+                    # 电脑操控的「动作后附带截图」（then_shot）也会带 base64，白名单写法会让
+                    # 点击后返回的新画面根本看不到，等于白截一张。
+                    if multimodal and result.ok:
                         _b64 = (result.data or {}).get("base64")
                         if _b64:
                             import mimetypes as _mt

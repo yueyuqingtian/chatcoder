@@ -314,6 +314,29 @@ def test_first_output_uses_anchored_language():
     assert "简体中文" in p
 
 
+def test_every_output_first_sentence_must_be_anchored_language():
+    """plan-387-1825 F1：每次输出的**第一句**必须用锚定语言。
+
+    用户反馈：中文提问后，AI 第一句是英文（"I'll investigate the codebase..."），
+    后续步骤说明才切回中文。根因是带工具调用的步骤先用英文写了 preamble，
+    而系统提示与工具说明本身是英文，模型在输出点最容易回落英文。
+    提示词层需把「第一句」单独点名为硬约束（含 auto 分支，保持同一口径）。
+    """
+    zh = build_language_directive("zh", "global")
+    assert "每一次输出的第一句" in zh
+    assert "preamble" in zh
+    # 明确禁止「先用另一种语言起头、后续再切回」
+    assert "绝不允许先用另一种语言起头" in zh
+
+    en = build_language_directive("en", "user")
+    assert "first sentence of every output" in en
+    assert "preamble" in en
+    assert "Never open in another language" in en
+
+    auto = build_language_directive("auto")
+    assert "first sentence of every output" in auto
+
+
 def test_subagent_instruction_follows_anchored_language():
     """子代理 instruction 不得写死英文（首句语言漂移的直接来源）。"""
     import inspect

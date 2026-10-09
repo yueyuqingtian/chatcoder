@@ -7,6 +7,7 @@ import asyncio
 import logging
 import re
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1108,6 +1109,12 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             # 收尾口径与 _finalize_cancelled_turn / 下方 _is_cancel 完全一致：
             # status=interrupted、summary="用户中断"、任务走 cancel_turn_tasks。
             if cancel_event.is_set() or out.kind in ("cancelled", "interrupted"):
+                # plan-365-1790: 中断判定的依据必须留痕——对外都是"用户中断"，
+                # 但 cancel_event 与 out.kind 各自为真代表完全不同的成因。
+                logger.warning(
+                    "[turn.finalize] turn=%s 判为中断(plan 分支) cancel_event=%s out.kind=%s out.error=%s",
+                    turn_id, cancel_event.is_set(), out.kind, (out.error or "")[:200],
+                )
                 await turn_service.update_turn_status(
                     db, turn_id, "interrupted", summary="用户中断", completed=True,
                 )
@@ -1176,6 +1183,8 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                     "reasons": [],
                     "plan_doc_path": _plan_rel,
                     "steps": [],
+                    # 携带 session_id（串会话修复）：前端据此丢弃迟到/串通道的旧会话事件
+                    "session_id": session_id,
                 },
             })
             await broadcast_turn_updated(session_id, turn_id, "awaiting_confirmation")
@@ -1184,6 +1193,12 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         # 4. turn 完成：取消是用户中断，不应伪装成失败；先落库再广播。
         summary = out.text or ""
         _is_cancel = cancel_event.is_set() or out.kind in ("cancelled", "interrupted")
+        if _is_cancel:
+            # plan-365-1790: 记录中断判定依据（信号 vs 返回类型）与原始错误内容。
+            logger.warning(
+                "[turn.finalize] turn=%s 判为中断 cancel_event=%s out.kind=%s out.error=%s",
+                turn_id, cancel_event.is_set(), out.kind, (out.error or "")[:200],
+            )
         final_status = (
             "interrupted" if _is_cancel
             else "completed" if out.kind == "message" else "failed"
@@ -1319,32 +1334,58 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             pass
 
 
-async def cancel_turn(turn_id: int) -> bool:
-    """立即发出取消信号，数据库终态由唯一后台 finalizer 完成。"""
+async def cancel_turn(turn_id: int, source: str = "unknown") -> bool:
+    """立即发出取消信号，数据库终态由唯一后台 finalizer 完成。
+
+    source: 调用来源（main / pet / ws / rollback / unknown），**仅用于日志与审计**，
+    不参与任何判定。plan-365-1790：取消此前全程无留痕，日志轮转后无法回答"任务为何
+    突然停止"；这里先补可区分的观测点。
+    """
     ev = _cancel_events.get(turn_id)
     manager = _turn_managers.get(turn_id)
     main_task = _turn_tasks.get(turn_id)
+    # plan-365-1790: 连同调用栈摘要（最后 4 帧）一起记录——同一次"无人操作却中断"的
+    # 复现里，只有栈能回答取消到底由谁发起（前端误发 / 浮窗 / 回滚 / 后台任务）。
+    _stack = " <- ".join(
+        f"{_fr.name}:{_fr.lineno}" for _fr in traceback.extract_stack()[-5:-1]
+    )
+    logger.warning(
+        "[cancel] 收到停止信号 turn=%s source=%s 运行态(cancel_event=%s manager=%s main_task=%s) stack=%s",
+        turn_id, source, ev is not None, manager is not None, main_task is not None, _stack,
+    )
     if ev is None and manager is None and main_task is None:
         # 非运行态也返回真实存在性，避免前端把不存在的 turn 当成已取消。
         from app.persistence.database import async_session_factory
         async with async_session_factory() as db:
-            return await turn_service.get_turn(db, turn_id) is not None
+            _exists = await turn_service.get_turn(db, turn_id) is not None
+        logger.warning(
+            "[cancel] turn=%s 不在运行态（信号/manager/主任务均为空）source=%s exists=%s",
+            turn_id, source, _exists,
+        )
+        return _exists
 
     if ev is not None:
         ev.set()
+        logger.warning("[cancel] 已置位取消信号 turn=%s source=%s", turn_id, source)
     if manager is not None:
         # cancel_all 会取消子任务，但不在 HTTP 请求中等待其数据库收尾。
         pending = [h.task for h in manager._handles.values()
                    if h.task is not None and not h.task.done()]
         for task in pending:
             task.cancel()
+        if pending:
+            logger.warning("[cancel] 已取消 %d 个子代理任务 turn=%s", len(pending), turn_id)
     if main_task is not None and main_task is not asyncio.current_task() and not main_task.done():
         main_task.cancel()
+        logger.warning("[cancel] 已取消主任务协程 turn=%s", turn_id)
 
     existing = _cancel_finalizers.get(turn_id)
     if existing is None or existing.done():
         finalizer = asyncio.create_task(_finalize_cancelled_turn(turn_id))
         _cancel_finalizers[turn_id] = finalizer
+        logger.warning("[cancel] 已启动取消收尾任务 turn=%s source=%s", turn_id, source)
+    else:
+        logger.warning("[cancel] 取消收尾任务已在运行，复用 turn=%s source=%s", turn_id, source)
     return True
 
 
@@ -1366,6 +1407,11 @@ async def _finalize_cancelled_turn(turn_id: int) -> None:
             session_id = int(t.session_id)
             terminal = ("completed", "failed", "cancelled", "interrupted", "rolled_back")
             if t.status in terminal:
+                # plan-365-1790: 取消信号到达时 turn 已自行进入终态——留痕以区分
+                # "取消生效"与"任务本就已结束"（前端误报停止的常见成因）。
+                logger.warning(
+                    "[cancel] 收尾跳过 turn=%s 已是终态 status=%s", turn_id, t.status,
+                )
                 return {"session_id": session_id, "active": False, "summary": t.summary or ""}
             t.status = "interrupted"
             t.summary = t.summary or "用户中断"
@@ -1378,6 +1424,11 @@ async def _finalize_cancelled_turn(turn_id: int) -> None:
             return {"session_id": session_id, "active": True, "summary": t.summary}
 
         result = await run_write_locked(patch, label=f"turn.cancel.{turn_id}")
+        logger.warning(
+            "[cancel] 收尾落库 turn=%s active=%s summary=%s",
+            turn_id, bool(result and result.get("active")),
+            ((result or {}).get("summary") or "")[:120],
+        )
         if result and result.get("active"):
             await task_service.cancel_turn_tasks(db, int(result["session_id"]), turn_id)
         return result
@@ -1890,6 +1941,12 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         # —— 收尾：状态与产物 ——
         summary = out.text or ""
         _is_cancel2 = cancel_event.is_set() or out.kind in ("cancelled", "interrupted")
+        if _is_cancel2:
+            # plan-365-1790: 与主路径同口径留痕（方案确认后的执行分支）。
+            logger.warning(
+                "[turn.finalize] turn=%s 判为中断(confirm 分支) cancel_event=%s out.kind=%s out.error=%s",
+                turn_id, cancel_event.is_set(), out.kind, (out.error or "")[:200],
+            )
         final_status = (
             "interrupted" if _is_cancel2
             else "completed" if out.kind == "message" else "failed"
@@ -2206,7 +2263,7 @@ async def _spawn_memory_extract(
                 ],
                 model=model_name or getattr(provider, "model", "") or "default",
                 reasoning_effort=_effort,
-                thinking=_thinking or None,
+                thinking=_thinking,
                 workspace_dir=_ws_dir,  # plan-270-1358: ta3 x-ws-id
             )
             resp = await provider.chat(req)

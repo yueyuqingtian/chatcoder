@@ -118,6 +118,10 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
   petImportLocal: () => ipcRenderer.invoke("pet:importLocal"),
   petOpenPetPage: (slug) => ipcRenderer.invoke("pet:openPetPage", slug),
   petRevealPet: (slug) => ipcRenderer.invoke("pet:revealPet", slug),
+  // plan-387-1825 A2：右键菜单「隐藏宠物」后唯一的恢复入口。此前只声明未暴露，
+  // 设置页「重新显示」按钮（store/pets.ts 的 showPet）恒拿到 undefined 静默早退，
+  // 隐藏后彻底无法恢复。
+  petShowPet: () => ipcRenderer.invoke("pet:showPet"),
   onPetPrefChanged: (cb) => {
     const handler = (_e, pref) => cb(pref);
     ipcRenderer.on("pet:prefChanged", handler);

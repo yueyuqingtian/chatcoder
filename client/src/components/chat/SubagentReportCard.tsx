@@ -26,13 +26,22 @@ const isEmptyItem = (s: string) => !s || /^(none|n\/a|null|-)$/i.test(s.trim());
 /** 行内 Markdown（v42）：「图标 + 文本」的行结构专用——
  *  复用主消息流的 markdown 组件映射，只把块级容器（p / ul / ol / li）内联化。
  *  目的：条目里的 `代码`、**加粗**、链接按主消息流样式渲染；
- *  此前这些条目是纯文本，反引号原样裸露（终态汇报"丑陋"的来源之一）。 */
+ *  此前这些条目是纯文本，反引号原样裸露（终态汇报"丑陋"的来源之一）。
+ *
+ *  plan-387-1825 D1-2：**必须同时接管 `pre`**。此前只内联化 p/ul/ol/li，
+ *  `pre` 仍是块级元素（CodeBlockWrapper 内含 div 头部 + pre），被塞进 <li> 的
+ *  内联流后布局裂开——语言标签框与代码框分离、代码行落在两框之间（用户截图实况）。 */
 const inlineComponents: Components = {
   ...markdownComponents,
   p: ({ children }) => <>{children}</>,
   ul: ({ children }) => <>{children}</>,
   ol: ({ children }) => <>{children}</>,
   li: ({ children }) => <>{children}</>,
+  // plan-387-1825 D1-2：**刻意不覆盖 `pre`**。
+  // 覆盖成 Fragment 会剥掉 CodeBlockWrapper（div.md-code-block > 头部 + pre），
+  // 只剩一个裸 <pre> —— 那正是「语言标签框与代码框分离、内容散落」的成因。
+  // 正确做法是让 pre 沿用 markdownComponents 的 CodeBlockWrapper（块级完整渲染），
+  // 由 items() 的围栏感知拆分保证围栏成对、不会散架（见下方 items 实现）。
 };
 
 const InlineMd = memo(function InlineMd({ text }: { text: string }) {
@@ -93,10 +102,30 @@ function parseReport(text: string): Report | null {
   if (matched === 0) return null;
 
   const text_ = (k: keyof Report) => (buffers[k] || []).join("\n").trim();
-  const items = (k: keyof Report): string[] =>
-    (buffers[k] || [])
-      .map((l) => l.replace(/^[-*·•]\s*/, "").replace(/^\d+[.)]\s*/, "").trim())
-      .filter((l) => l && !isEmptyItem(l));
+  /**
+   * plan-387-1825 D1-1：**围栏感知**的条目拆分。
+   * 此前按行拆分，多行代码围栏被切成散行、``` 标记丢失，
+   * 每行各自走一次 InlineMd → 围栏结构彻底破坏（用户截图：TS 空框 + 代码行散落 + CODE 空框）。
+   * 现在按 ``` 成对扫描：围栏内的所有行（含首尾标记）合并为**一个条目**，原样保留。
+   */
+  const items = (k: keyof Report): string[] => {
+    const out: string[] = [];
+    let fence: string[] | null = null; // 非 null 表示正处于围栏内
+    for (const raw of buffers[k] || []) {
+      const t = raw.trim();
+      if (/^```/.test(t)) {
+        if (fence) { fence.push(raw); out.push(fence.join("\n")); fence = null; }
+        else fence = [raw];
+        continue;
+      }
+      if (fence) { fence.push(raw); continue; }
+      const line = t.replace(/^[-*·•]\s*/, "").replace(/^\d+[.)]\s*/, "").trim();
+      if (line && !isEmptyItem(line)) out.push(line);
+    }
+    // 围栏未闭合（子代理输出被截断）：整段并入最后一个条目，绝不丢内容
+    if (fence) out.push(fence.join("\n"));
+    return out.filter((l) => l && !isEmptyItem(l));
+  };
 
   out.result = text_("result");
   out.findings = text_("findings");

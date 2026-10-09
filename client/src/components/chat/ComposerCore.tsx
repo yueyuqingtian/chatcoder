@@ -1763,11 +1763,9 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                   <UsageRing pct={usagePct} usage={usage} compacting={isCompacting} />
                 </div>
               )}
-              {!isHome && isCompacting && (
-                <span className="composer-compacting-badge" title="上下文接近窗口上限，正在压缩历史对话">
-                  正在压缩上下文…
-                </span>
-              )}
+              {/* plan-282-1495：压缩时不再渲染文字徽标——它带 white-space: nowrap，
+                  展开右侧面板把消息列压窄时会把输入卡工具条顶出边界（宽度溢出）。
+                  压缩反馈统一由左侧上下文圆环自转（UsageRing → IconRingProgress loading）承担。 */}
               <button
                 className={`composer-ctx${listening ? " listening" : ""}`}
                 onClick={toggleVoice}
@@ -2062,7 +2060,8 @@ function formatK(value: number): string {
  *    详细态（拿到供应商真实数据：source=api_last 或带 breakdown）才追加实时缓存率、
  *    输入/输出/思考输出拆分与分项 breakdown；
  *  - **压缩中**不再显示文字徽标，圆环自身变旋转加载弧；
- *  - 圆环 26 → **20px**（与工具栏其他图标同一视觉重量）。
+ *  - 尺寸迭代：26 → 20px（与其他图标同视觉重量）→ 10px（用户嫌大，缩半）
+ *    → **16px（10px 看不清，回调；描边同步 1.5px）**。
  */
 function UsageRing({
   pct,
@@ -2130,8 +2129,8 @@ function UsageRing({
         {/* 压缩中：圆环变旋转加载弧（替代原"压缩中"文字徽标） */}
         <IconRingProgress
           value={pct / 100}
-          size={20}
-          strokeWidth={2}
+          size={16}
+          strokeWidth={1.5}
           loading={Boolean(compacting)}
           trackColor="var(--border)"
           indicatorColor={color}

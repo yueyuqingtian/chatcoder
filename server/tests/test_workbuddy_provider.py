@@ -94,6 +94,26 @@ class TestThinking:
         assert "reasoning_effort" not in body
         assert body["temperature"] == 1
 
+    def test_zai_explicit_off_sends_false(self):
+        """v29: 用户选 none 时 GLM（zai）系显式下发 enable_thinking=false。"""
+        p = _provider(model="glm-5.3")
+        body = p._build_body(ChatRequest(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="glm-5.3", thinking=False,
+        ))
+        assert body.get("enable_thinking") is False
+        assert "reasoning_effort" not in body
+
+    def test_kimi_explicit_off_sends_disabled(self):
+        """v29: kimi 系关闭时下发 thinking disabled（此前完全不传，关不掉）。"""
+        p = _provider(model="kimi-k2-thinking")
+        body = p._build_body(ChatRequest(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="kimi-k2-thinking", thinking=False,
+        ))
+        assert body["thinking"] == {"type": "disabled"}
+        assert "reasoning_effort" not in body
+
 
 class TestConvertMessages:
     def test_tool_call_turn_content_empty_string(self):

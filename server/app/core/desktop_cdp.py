@@ -289,22 +289,29 @@ async def _evaluate(ws_url: str, expression: str, timeout_s: float) -> Any:
             pass
 
 
-def to_screen_coords(el: dict, win: dict, rect: list[int]) -> tuple[int, int]:
+def to_screen_coords(
+    el: dict, win: dict, rect: list[int], frame: list[int] | None = None,
+) -> tuple[int, int]:
     """把元素的视口内 CSS 坐标换算成屏幕物理像素。
 
-    推导：`rect` 是内核给的窗口**物理**矩形；`win.outerWidth/Height` 是 CDP 给的窗口
+    推导：`base` 是窗口的**物理**矩形；`win.outerWidth/Height` 是 CDP 给的窗口
     **逻辑（DIP）**尺寸。两者之比即当前缩放比。元素先加"窗口边框 + 浏览器 UI（顶部
     高度）"偏移得到相对窗口左上角的 DIP 位置，再乘缩放比、加到窗口物理原点上。
 
-    注意这是估算：Windows 的 GetWindowRect 含 DWM 不可见边框（约 7–8 px），可能带来
-    个位数像素偏差。因此调用方必须用 desktop_hit 校验换算结果（见工具层），
-    校验不通过时不执行点击，避免误点。
+    plan-365-1757 A6：base 优先取 **DWM 可见边界**（内核 frame op）。GetWindowRect 含
+    一圈不可见的调整边框（Win10/11 上左右各约 7–8 px），按它当原点会让网页元素整体
+    偏掉几个像素；可见边界才是用户真正看到的矩形。frame 不可用时回退 rect，
+    行为与改动前一致。
     """
+    base = rect
+    if frame and len(frame) >= 4 and float(frame[2] or 0) > 0 and float(frame[3] or 0) > 0:
+        base = frame
+
     ow = float(win.get("outerWidth") or 0) or 1.0
     oh = float(win.get("outerHeight") or 0) or 1.0
     iw = float(win.get("innerWidth") or 0)
     ih = float(win.get("innerHeight") or 0)
-    win_w, win_h = float(rect[2] or 0) or 1.0, float(rect[3] or 0) or 1.0
+    win_w, win_h = float(base[2] or 0) or 1.0, float(base[3] or 0) or 1.0
 
     scale_x = win_w / ow
     scale_y = win_h / oh
@@ -316,12 +323,14 @@ def to_screen_coords(el: dict, win: dict, rect: list[int]) -> tuple[int, int]:
     dip_y = chrome_h + float(el.get("cy") or 0)
 
     return (
-        int(round(float(rect[0]) + dip_x * scale_x)),
-        int(round(float(rect[1]) + dip_y * scale_y)),
+        int(round(float(base[0]) + dip_x * scale_x)),
+        int(round(float(base[1]) + dip_y * scale_y)),
     )
 
 
-def normalize_elements(raw: dict, rect: list[int]) -> list[dict]:
+def normalize_elements(
+    raw: dict, rect: list[int], frame: list[int] | None = None,
+) -> list[dict]:
     """把 CDP 元素转成与内核 snapshot 一致的字段结构（n/id/ct/en/ix/x/y/r）。
 
     统一结构让工具层的渲染与点击坐标逻辑无需区分感知通道。
@@ -329,14 +338,14 @@ def normalize_elements(raw: dict, rect: list[int]) -> list[dict]:
     win = raw.get("win") or {}
     items: list[dict] = []
     for el in raw.get("elements") or []:
-        x, y = to_screen_coords(el, win, rect)
+        x, y = to_screen_coords(el, win, rect, frame)
         left, top = to_screen_coords(
-            {"cx": el.get("left", 0), "cy": el.get("top", 0)}, win, rect
+            {"cx": el.get("left", 0), "cy": el.get("top", 0)}, win, rect, frame
         )
         right, bottom = to_screen_coords(
             {"cx": float(el.get("left", 0)) + float(el.get("width", 0)),
              "cy": float(el.get("top", 0)) + float(el.get("height", 0))},
-            win, rect,
+            win, rect, frame,
         )
         items.append({
             "n": el.get("name") or "",
@@ -400,15 +409,18 @@ async def probe_window(
     cmdline: str = "",
     ports_provider: Callable[[int], Awaitable[list[int]]] | None = None,
     extra_ports: tuple[int, ...] = DEFAULT_EXTRA_PORTS,
+    frame: list[int] | None = None,
 ) -> dict | None:
     """对 Chromium 系窗口做一次 CDP 感知。
 
     成功返回 {"port", "target", "items", "url", "page_title"}；任何环节不可用都返回 None，
     由调用方回退 UIA（保证"最差情况不劣于现状"）。
+
+    frame（plan-365-1757 A6）：窗口的 DWM 可见边界，用于坐标换算；缺省时回退 rect。
     """
     try:
         return await asyncio.wait_for(
-            _probe(pid, window_title, rect, cmdline, ports_provider, extra_ports),
+            _probe(pid, window_title, rect, cmdline, ports_provider, extra_ports, frame),
             timeout=_PROBE_BUDGET_S,
         )
     except asyncio.TimeoutError:
@@ -426,6 +438,7 @@ async def _probe(
     cmdline: str,
     ports_provider: Callable[[int], Awaitable[list[int]]] | None,
     extra_ports: tuple[int, ...],
+    frame: list[int] | None = None,
 ) -> dict | None:
     found = await find_debug_port(pid, window_title, cmdline, ports_provider, extra_ports)
     if not found:
@@ -439,7 +452,7 @@ async def _probe(
     if not isinstance(raw, dict):
         return None
 
-    items = normalize_elements(raw, rect)
+    items = normalize_elements(raw, rect, frame)
     return {
         "port": port,
         "target": target.get("title") or "",

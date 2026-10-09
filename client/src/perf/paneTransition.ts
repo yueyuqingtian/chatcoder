@@ -73,6 +73,11 @@ export function supportsPaneViewTransition(): boolean {
  */
 export function applyPaneUpdate(apply: () => void): void {
   acquire("panel-anim");
+  // plan-387-1825 B1：几何即将变化、布局**尚未**被改写的瞬间先广播一次。
+  // 折叠/展开期间消息流容器宽度是逐帧渐变的，MessageFlow 的 ResizeObserver 在
+  // 运动期只记账（isBusy 为真）不捕获；若等布局改写完再捕获，锚点已被污染。
+  // 时机与 ResizeHandle 的分隔条 mousedown（panel-drag-start）完全一致。
+  window.dispatchEvent(new CustomEvent("chatcoder:pane-change-start"));
   let done = false;
   const finish = () => {
     if (done) return;

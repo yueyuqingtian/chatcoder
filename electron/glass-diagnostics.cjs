@@ -169,6 +169,11 @@ function loadDwmFfi() {
       // plan-31-152 S5-2：窗口命令兜底（自定义窗口按钮在系统 caption 命中区被吞时的补救路径）
       SendMessageW: user32.func(
         "intptr __stdcall SendMessageW(intptr hwnd, uint msg, intptr wParam, intptr lParam)"),
+      // plan-20261009 P2：输入子窗口补显（见 ensureInputChildVisible）
+      FindWindowExW: user32.func(
+        "intptr __stdcall FindWindowExW(intptr parent, intptr after, str16 cls, str16 title)"),
+      IsWindowVisible: user32.func("bool __stdcall IsWindowVisible(intptr hwnd)"),
+      ShowWindow: user32.func("bool __stdcall ShowWindow(intptr hwnd, int cmd)"),
     };
     return _ffiCache;
   } catch (err) {
@@ -204,6 +209,45 @@ function setWindowBorder(win, none = true) {
       return { ok: false, reason: `DwmSetWindowAttribute(BORDER_COLOR) 失败(hr=0x${(hr >>> 0).toString(16)})` };
     }
     return { ok: true, value: none ? DWMWA_COLOR_NONE : -1 };
+  } catch (err) {
+    return { ok: false, reason: err && err.message };
+  }
+}
+
+/**
+ * plan-387-1825 A10：启用/关闭窗口的「沉浸式深色模式」（DWMWA_USE_IMMERSIVE_DARK_MODE）。
+ *
+ * 为什么必须做（本轮只读探针实测取证，非推测）：
+ *   · 主窗口是 `frame:true + titleBarStyle:"hidden"`，保留了 WS_CAPTION/WS_THICKFRAME 样式位，
+ *     因此四周存在**非客户区**：实测窗口 1721x1033 / 客户区 1706x1018
+ *     → 15 物理 px（DPI 1.5，约 10 逻辑 px）的边框区；
+ *     对照组宠物窗口（frame:false）为 386x522 / 386x522，非客户区为 0。
+ *   · 这圈非客户区由 DWM 绘制，其配色取**系统主题**而非应用主题：
+ *     实测本机「系统=浅色（AppsUseLightTheme=1）、应用=深色（theme-pref.json=dark）」，
+ *     且本属性回读为 0 → 非客户区按浅色绘制 = **白色边框**。
+ *   · 最大化时窗口向外扩约 7px 把这圈推出屏幕外（所以最大化看不到），
+ *     **小窗时全部落在屏幕内** —— 正是用户反馈的「小窗四周覆盖不全的白底」。
+ *
+ * 打开后 DWM 会用深色渲染窗口非客户区（边框 / 系统标题栏 / 系统菜单），与应用主题一致。
+ * 对 `frame:false` 窗口（如宠物窗口）为无害 no-op。
+ *
+ * @param {BrowserWindow} win
+ * @param {boolean} on true=深色非客户区
+ * @returns {{ok: boolean, value?: number, reason?: string}}
+ */
+function setImmersiveDarkMode(win, on) {
+  if (process.platform !== "win32") return { ok: false, reason: "非 Windows 平台" };
+  const ffi = loadDwmFfi();
+  if (!ffi) return { ok: false, reason: "FFI 不可用（koffi 缺失）" };
+  const hwnd = hwndOf(win);
+  if (hwnd === null) return { ok: false, reason: "无法获取 HWND" };
+  try {
+    const buf = Buffer.alloc(4);
+    buf.writeInt32LE(on ? 1 : 0, 0);
+    const hr = ffi.DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, buf, 4);
+    return hr === 0
+      ? { ok: true, value: on ? 1 : 0 }
+      : { ok: false, reason: `hr=0x${(hr >>> 0).toString(16)}` };
   } catch (err) {
     return { ok: false, reason: err && err.message };
   }
@@ -265,6 +309,48 @@ function applyFramelessCleanup(win) {
   }
 
   return { ok: true, steps };
+}
+
+/** Chromium 输入子窗口类名（窗口标题为 "Chrome Legacy Window"）与 ShowWindow 的「显示但不激活」 */
+const INPUT_CHILD_CLASS = "Chrome_RenderWidgetHostHWND";
+const SW_SHOWNA = 8;
+
+/**
+ * plan-20261009 P2：确保窗口的 Chromium 输入子窗口可见。
+ *
+ * 为什么必须做（独立 Electron 复现 + 用户运行中进程只读取证，非推测）：
+ *   · Chromium 在客户区铺一个同尺寸的子窗口 Chrome_RenderWidgetHostHWND，鼠标按下先命中它；
+ *     它对 WM_MOUSEACTIVATE 回 MA_NOACTIVATE（不激活、照常投递按下消息）。
+ *   · 宠物窗口 `backgroundThrottling:false` → Electron 让 RenderWidgetHost 永不进入 hidden 态，
+ *     于是 hide() 时 Chromium 照常把该子窗口隐藏，show 时却因「宿主从未 hidden」跳过恢复 ——
+ *     子窗口一直隐藏（对照组 backgroundThrottling:true 会正常恢复）。
+ *   · 子窗口缺席后按下直接命中顶层窗口；顶层窗口不可激活（focusable:false），
+ *     对 WM_MOUSEACTIVATE 回 MA_NOACTIVATEANDEAT ——「不激活并丢弃这次按下」：
+ *     左键点击 / 拖动 / 缩放全部失效；右键菜单仍能弹出（Windows 下 contextmenu 在右键「抬起」时派发，
+ *     不依赖被丢弃的按下）；悬停正常（mousemove 不受影响）。这正是「隐藏后重新显示，菜单有高亮点不动」。
+ *   · ShowWindow(子窗口, SW_SHOWNA) 后命中与投递恢复如初（复现脚本逐项验证）。
+ *
+ * @param {BrowserWindow} win
+ * @returns {{ok: boolean, repaired?: boolean, reason?: string}}
+ */
+function ensureInputChildVisible(win) {
+  if (process.platform !== "win32") return { ok: false, reason: "非 Windows 平台" };
+  const ffi = loadDwmFfi();
+  if (!ffi || typeof ffi.FindWindowExW !== "function") return { ok: false, reason: "FFI 不可用（koffi 缺失）" };
+  const hwnd = hwndOf(win);
+  if (hwnd === null) return { ok: false, reason: "无法获取 HWND" };
+  try {
+    if (!ffi.IsWindowVisible(hwnd)) return { ok: true, repaired: false };
+    const child = Number(ffi.FindWindowExW(hwnd, 0, INPUT_CHILD_CLASS, null));
+    if (!child) return { ok: false, reason: "未找到输入子窗口" };
+    if (ffi.IsWindowVisible(child)) return { ok: true, repaired: false };
+    ffi.ShowWindow(child, SW_SHOWNA);
+    return ffi.IsWindowVisible(child)
+      ? { ok: true, repaired: true }
+      : { ok: false, reason: "补显后仍不可见" };
+  } catch (err) {
+    return { ok: false, reason: err && err.message };
+  }
 }
 
 /** 左键当前是否按下（自研拖拽的松开检测；FFI 不可用时返回 null） */
@@ -531,7 +617,9 @@ module.exports = {
   hwndOf,
   dwmReadBack,
   setWindowBorder,
+  setImmersiveDarkMode,
   applyFramelessCleanup,
+  ensureInputChildVisible,
   isLeftButtonDown,
   sendSysCommand,
   WM_SYSCOMMAND,

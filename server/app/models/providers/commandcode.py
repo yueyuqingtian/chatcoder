@@ -40,7 +40,9 @@ DEFAULT_MAX_OUTPUT_TOKENS = 32768
 # plan-53-258 R2: CommandCode 只接受这五档思考深度（实测 400 提示
 # "Invalid option: expected one of \"low\"|\"medium\"|\"high\"|\"xhigh\"|\"max\""）。
 _REASONING_LEVELS = ("low", "medium", "high", "xhigh", "max")
-# 内部档位别名：minimal 语义最接近 low；none/空 表示关闭思考，不下发该字段。
+# 内部档位别名：minimal 语义最接近 low；none/空 表示关闭思考。
+# v29: 该网关值域既无 none 也无 disabled（实测发 none 直接 400），用户选择关闭思考时
+# 只能不下发该字段——由模型自身默认行为决定。
 _REASONING_ALIASES = {"minimal": "low"}
 
 

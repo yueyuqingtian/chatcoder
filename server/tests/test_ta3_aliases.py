@@ -2,7 +2,8 @@
 import json
 
 from app.models.providers.ta3_tool_aliases import (
-    ARGS_FROM_TA3, ARGS_TO_TA3, FROM_TA3, TO_TA3, disguise_args, restore_args,
+    ARGS_FROM_TA3, ARGS_TO_TA3, DYNAMIC_SCHEMA_ALIASES, FROM_TA3, TO_TA3,
+    disguise_args, restore_args,
 )
 from app.models.providers.ta3_tool_schemas import TA3_NATIVE_SCHEMAS, disguise_tools
 
@@ -41,9 +42,12 @@ def test_disguise_tools_drops_unmapped():
         {"type": "function", "function": {"name": "fs_read", "parameters": {}}},
         {"type": "function", "function": {"name": "fs_write", "parameters": {}}},
         # v7: 有映射的通用提问工具 → 伪装保留
-        {"type": "function", "function": {"name": "ask_user_question", "parameters": {}}},
+        # plan-365-1769: 自造工具改动态派生，描述与参数原样沿用真实 schema
+        {"type": "function", "function": {"name": "ask_user_question",
+                                          "description": "向用户发起结构化提问（用于需求澄清）。",
+                                          "parameters": {}}},
         # v43: 此前 web_fetch / collect_results 因缺映射被剔除，现全量补齐 → 保留
-        {"type": "function", "function": {"name": "web_fetch", "parameters": {}}},
+        {"type": "function", "function": {"name": "web_fetch", "description": "抓取 URL。", "parameters": {}}},
         {"type": "function", "function": {"name": "collect_results", "parameters": {}}},
         # 真正无映射的工具（非 MCP 前缀）→ 仍剔除
         {"type": "function", "function": {"name": "mystery_tool", "parameters": {}}},
@@ -51,8 +55,9 @@ def test_disguise_tools_drops_unmapped():
     out = disguise_tools(schemas)
     names = [s["function"]["name"] for s in out]
     assert names == ["Read", "Write", "AskUser", "WebFetch", "TaskQuery"]
-    # 原生 schema 中文 description 完整还原
+    # 原生 schema 中文 description 完整还原（Read/Write 走硬编码表）
     assert out[0]["function"]["description"].startswith("读取工作区内指定文件内容")
+    # 自造工具走动态派生：描述原样沿用（不再有硬编码副本可漂移）
     assert out[2]["function"]["description"].startswith("向用户发起结构化提问")
 
 
@@ -77,15 +82,23 @@ def test_disguise_tools_keeps_mcp_tools():
 
 
 def test_disguise_tools_keeps_attachment_tools():
-    """plan-147-674: read_attachment/view_image 有映射，伪装后保留（不再剔除）。"""
+    """plan-147-674: read_attachment/view_image 有映射，伪装后保留（不再剔除）。
+
+    plan-365-1769: 改为动态派生——描述与参数原样沿用真实 schema。
+    """
     schemas = [
-        {"type": "function", "function": {"name": "read_attachment", "parameters": {}}},
-        {"type": "function", "function": {"name": "view_image", "parameters": {}}},
+        {"type": "function", "function": {
+            "name": "read_attachment", "description": "读取用户上传的附件文件内容。",
+            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}},
+        {"type": "function", "function": {
+            "name": "view_image", "description": "查看图片文件。",
+            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}},
     ]
     out = disguise_tools(schemas)
     names = [s["function"]["name"] for s in out]
     assert names == ["ReadAttachment", "ViewImage"]
     assert out[0]["function"]["description"].startswith("读取用户上传的附件文件内容")
+    assert "path" in out[0]["function"]["parameters"]["properties"]
 
 
 def test_attachment_args_roundtrip():
@@ -98,8 +111,16 @@ def test_attachment_args_roundtrip():
 
 
 def test_native_schemas_cover_aliases():
-    """所有伪装目标名都应有原生 schema（除 generate_project_memory 等未映射目标）。"""
+    """非动态别名都应有原生 schema；动态别名由真实 schema 派生（plan-365-1769）。
+
+    动态清单里的伪装名**不得**再出现在 TA3_NATIVE_SCHEMAS——两份副本就是漂移的温床。
+    """
+    from app.models.providers.ta3_tool_aliases import DYNAMIC_SCHEMA_ALIASES
+
     for alias in set(TO_TA3.values()):
+        if alias in DYNAMIC_SCHEMA_ALIASES:
+            assert alias not in TA3_NATIVE_SCHEMAS, f"动态派生的别名不应再有硬编码副本: {alias}"
+            continue
         assert alias in TA3_NATIVE_SCHEMAS, f"缺原生 schema: {alias}"
         assert TA3_NATIVE_SCHEMAS[alias]["function"]["name"] == alias
 
@@ -262,14 +283,16 @@ def test_multi_file_edit_disguise_roundtrip():
 
 
 def test_disguise_tools_keeps_multi_file_edit():
-    """multi_file_edit 有映射与原生 schema → 伪装后保留（不再被剔除）。"""
+    """multi_file_edit 有映射 → 伪装后保留；schema 走动态派生（plan-365-1769）。"""
     schemas = [
-        {"type": "function", "function": {"name": "multi_file_edit", "parameters": {}}},
+        {"type": "function", "function": {
+            "name": "multi_file_edit", "description": "多文件结构化编辑。",
+            "parameters": {"type": "object", "properties": {"edits": {"type": "array"}}}}},
     ]
     out = disguise_tools(schemas)
     names = [s["function"]["name"] for s in out]
     assert names == ["MultiFileEdit"]
-    props = TA3_NATIVE_SCHEMAS["MultiFileEdit"]["function"]["parameters"]["properties"]
+    props = out[0]["function"]["parameters"]["properties"]
     assert "edits" in props
 
 
@@ -397,19 +420,25 @@ def test_symbol_tools_args_roundtrip():
 
 
 def test_disguise_tools_keeps_symbol_tools():
-    """两个符号索引工具伪装后保留（不再被伪装层剔除）。"""
-    schemas = [
-        {"type": "function", "function": {"name": "symbol_search", "parameters": {}}},
-        {"type": "function", "function": {"name": "outline", "parameters": {}}},
-    ]
-    out = disguise_tools(schemas)
+    """两个符号索引工具伪装后保留（不再被伪装层剔除）。
+
+    plan-365-1769: symbol_search 改动态派生（参数/描述直接来自真实工具），
+    断言改为对真实注册表校验；outline 有键名适配，仍走硬编码表。
+    """
+    from app.orchestration.tools.registry import tool_registry
+
+    real = {s["function"]["name"]: s for s in tool_registry.all_schemas()}
+    out = disguise_tools([real["symbol_search"], real["outline"]])
     assert [s["function"]["name"] for s in out] == ["SymbolSearch", "get_file_outline"]
-    props = TA3_NATIVE_SCHEMAS["SymbolSearch"]["function"]["parameters"]["properties"]
-    assert {"query", "kind", "file_glob", "limit"} <= set(props)
+
+    # 动态派生：参数原样沿用真实 schema
+    sym_props = out[0]["function"]["parameters"]["properties"]
+    assert {"query", "kind", "file_glob", "limit"} <= set(sym_props)
+    # plan-609 同口径：描述不得超出真实能力——索引未开启时返开启指引，不自动建库
+    assert "自动建索引" not in out[0]["function"]["description"]
+
     outline_props = TA3_NATIVE_SCHEMAS["get_file_outline"]["function"]["parameters"]["properties"]
     assert "filepath" in outline_props
-    # plan-609 同口径：描述不得超出真实能力——索引未开启时返开启指引，不自动建库
-    assert "自动建索引" not in TA3_NATIVE_SCHEMAS["SymbolSearch"]["function"]["description"]
     # 骨架工具不产出 import，描述不得声明
     assert "import" not in TA3_NATIVE_SCHEMAS["get_file_outline"]["function"]["description"]
 
@@ -445,10 +474,13 @@ def test_symbol_tools_disguise_message_roundtrip():
 
 
 def test_all_registry_tools_are_mapped():
-    """v43 全量守护：registry 内全部工具 + 子代理工具都必须有 ta3 映射与原生 schema。
+    """v43 全量守护：registry 内全部工具 + 子代理工具都必须有 ta3 映射与 schema 来源。
 
     此前 web_fetch/ci_run/git/codebase_search/compaction_*/skill_view/memory_write/
     browser_* 等缺映射，被伪装层整体剔除——ta3 会话下模型完全看不到、也调不动。
+
+    plan-365-1769: 自造工具改动态派生后，schema 来源有两个（动态清单 / 硬编码表），
+    但「必须有一个」的门槛不变——两者皆漏 = 工具静默消失。
     """
     from app.orchestration.subagent_tools import SUBAGENT_TOOL_NAMES
     from app.orchestration.tools.registry import tool_registry
@@ -456,7 +488,10 @@ def test_all_registry_tools_are_mapped():
     names = {t.name for t in tool_registry.all()} | SUBAGENT_TOOL_NAMES
     for n in sorted(names):
         assert n in TO_TA3, f"缺 ta3 映射: {n}"
-        assert TO_TA3[n] in TA3_NATIVE_SCHEMAS, f"缺原生 schema: {TO_TA3[n]}"
+        alias = TO_TA3[n]
+        assert alias in DYNAMIC_SCHEMA_ALIASES or alias in TA3_NATIVE_SCHEMAS, (
+            f"缺 schema 来源（既不在动态清单也不在原生表）: {alias}"
+        )
 
 
 def test_subagent_management_tools_mapped():

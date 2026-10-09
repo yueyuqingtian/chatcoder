@@ -149,37 +149,37 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
   // 判据改用滑动窗口长帧比例 + 可升档（见 gateAllowWrite）；
   // 档位写入 documentElement.dataset.panelDragMode，便于观测与自动化验证。
   const dragModeRef = useRef<PanelDragLayout>("realtime");
-  const autoDegradeRef = useRef(true);
   const prevFrameTsRef = useRef(0);
   const minDeltaRef = useRef(Number.POSITIVE_INFINITY);
   const skipFrameRef = useRef(false);
-  // 最近 12 帧的帧间隔滑动窗口（升降档判据）+ 降档冷却 + 升档连好计数 + frozen 档节拍计时
-  const frameSamplesRef = useRef<number[]>([]);
-  const degradeCooldownRef = useRef(0);
-  const goodStreakRef = useRef(0);
+  // frozen 档的节拍计时（最低保证频率约 15fps 一拍）
   const lastFrozenWriteRef = useRef(0);
 
   /** S5（plan-41-197）：拖拽排版固定「实时、不降级」——外观页已取消该配置项
    *  （用户要求“拖拽自动降级，直接实时不降级即可”）。
    *  仅保留系统级“减少动态效果”偏好的降档（无障碍优先，不属用户可配项）。 */
-  const readDragLayoutPref = useCallback((): { layout: PanelDragLayout; autoDegrade: boolean } => {
+  const readDragLayoutPref = useCallback((): { layout: PanelDragLayout } => {
     let layout: PanelDragLayout = "realtime";
-    const autoDegrade = false;
     try {
       const reduceMotion = typeof window.matchMedia === "function"
         && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
       if (reduceMotion) layout = "balanced";
     } catch { /* 读不到偏好时用默认档 */ }
-    return { layout, autoDegrade };
+    return { layout };
   }, []);
 
-  /** 本帧是否允许写宽度；同时按实测帧间隔推进档位（见上方三档说明）。
+  /** 本帧是否允许写宽度；同时探测实测最小帧间隔（供上层稳定性判据使用）。
    *
-   *  本轮两处修复：
+   *  plan-387-1825 B3-2：按用户决策「拖分隔条保持实时折行」，此前那套
+   *  realtime/balanced/frozen 三档自适应降级判据（长帧比例 → 升降档）在
+   *  S5 之后已成为**永不执行的死代码**——`readDragLayoutPref` 恒返回
+   *  `autoDegrade = false`，整段 `if (autoDegradeRef.current && …)` 永不进入。
+   *  留着会误导后续维护以为「拖拽卡顿时会自动降档」，故删除该分支，
+   *  只保留最小帧间隔探测（reduced-motion 的 balanced 档仍然生效）。
+   *
+   *  另两处修复（保留）：
    *   ① frozen 档不再是「停止写宽度」（旧行为会让面板停在原地，用户感知成"卡死"），
-   *      改为**最低保证频率**：约 15fps（66ms 一拍）——宁可降频也不能停止反馈；
-   *   ② 判据由「连续超预算帧数」改为「最近 12 帧的长帧比例」，并补上**升档**：
-   *      旧实现只降不升，一次瞬时尖峰（GC / markdown 解析）会让整段拖拽保持降级。 */
+   *      改为**最低保证频率**：约 15fps（66ms 一拍）——宁可降频也不能停止反馈。 */
   const gateAllowWrite = useCallback((): boolean => {
     const now = performance.now();
     const prev = prevFrameTsRef.current;
@@ -192,33 +192,6 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
     const delta = now - prev;
     // 自适应刷新间隔：取本次拖拽观察到的最小帧间隔（≈显示器刷新间隔）
     if (delta < minDeltaRef.current) minDeltaRef.current = delta;
-    const budget = Math.max(24, minDeltaRef.current * 1.6);
-    const samples = frameSamplesRef.current;
-    samples.push(delta);
-    if (samples.length > 12) samples.shift();
-
-    if (autoDegradeRef.current && samples.length >= 8) {
-      const longRatio = samples.filter((d) => d > budget).length / samples.length;
-      if (degradeCooldownRef.current > 0) {
-        degradeCooldownRef.current -= 1;
-      } else if (longRatio > 0.5 && dragModeRef.current !== "frozen") {
-        dragModeRef.current = dragModeRef.current === "realtime" ? "balanced" : "frozen";
-        degradeCooldownRef.current = 24; // 降档冷却：避免连续跳档
-        goodStreakRef.current = 0;
-        samples.length = 0;
-        document.documentElement.dataset.panelDragMode = dragModeRef.current;
-      } else if (longRatio < 0.25 && dragModeRef.current !== "realtime") {
-        goodStreakRef.current += 1;
-        if (goodStreakRef.current >= 24) {
-          dragModeRef.current = dragModeRef.current === "frozen" ? "balanced" : "realtime";
-          goodStreakRef.current = 0;
-          samples.length = 0;
-          document.documentElement.dataset.panelDragMode = dragModeRef.current;
-        }
-      } else {
-        goodStreakRef.current = 0;
-      }
-    }
 
     if (dragModeRef.current === "frozen") {
       if (now - lastFrozenWriteRef.current < 66) return false;
@@ -376,6 +349,10 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
     runReconcile();
 
     // 读取最终宽度,一次性提交（plan-95: 提交前按动态上限钳制，不持久化越界值）
+    // 注（plan-387-1825 A13）：收敛与 onCommit 的先后**无因果关系**——拖拽期间
+    // applyWidth 已把终宽**直接写入 DOM**，收敛序列读到的 clientWidth 一直是新值；
+    // onCommit 只负责回写 React 单源与持久化。上一轮把 onCommit 前移的理由
+    // （"虚拟器按旧布局提交视口尺寸"）不成立，此处回退为长期验证过的原序。
     const el = panelEl.current;
     const finalWidth = Math.min(
       effectiveMaxRef.current,
@@ -396,13 +373,9 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
     // RFL-5：本次拖拽从设置档位起步（reduced-motion 自动降一档），并重置闸门统计
     const pref = readDragLayoutPref();
     dragModeRef.current = pref.layout;
-    autoDegradeRef.current = pref.autoDegrade;
     prevFrameTsRef.current = 0;
     minDeltaRef.current = Number.POSITIVE_INFINITY;
     skipFrameRef.current = false;
-    frameSamplesRef.current = [];
-    degradeCooldownRef.current = 0;
-    goodStreakRef.current = 0;
     lastFrozenWriteRef.current = 0;
     document.documentElement.dataset.panelDragMode = pref.layout;
     freezeContents(); // 钉住内容根宽度（现仅右面板内容根，见 Props.freezeRefs 注释）

@@ -14,7 +14,8 @@ import type { SubagentMetaLite } from "./SubagentCard";
 import { PluginSlot } from "../../plugins/registry";
 import { MarkdownContent } from "../MarkdownContent";
 import { SubagentReportCard } from "./SubagentReportCard";
-import { IconRotateCcw, IconArrowToggle, IconAlertCircle } from "../icons";
+import { ErrorCard } from "./ErrorCard";
+import { IconRotateCcw, IconArrowToggle } from "../icons";
 import type { TimelineEntry, TurnItem } from "./timeline";
 import { msgText, getTurnById } from "./timeline";
 import { useChatStore } from "../../store/chat";
@@ -474,13 +475,8 @@ export const TurnGroup = memo(function TurnGroup({
         // plan-41-228：与末尾错误卡重复的那条不再渲染（见 suppressTurnError）
         if (suppressTurnError) return null;
         return (
-          <div key={i} className="turn-item turn-item-error">
-            {/* plan-282-1416：内联 SVG 收编为图标库 IconAlertCircle */}
-            <IconAlertCircle size={15} className="err-icon" />
-            <div className="err-body">
-              <div className="err-title">执行出错</div>
-              <div className="err-msg">{msgText(item.msg.content) || "执行出错"}</div>
-            </div>
+          <div key={i} className="turn-item-wrap">
+            <ErrorCard text={msgText(item.msg.content) || "执行出错"} />
           </div>
         );
       case "plan": {

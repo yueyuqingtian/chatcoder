@@ -31,7 +31,8 @@ async def extract_and_persist_artifacts(
         lang = m.group(1) or "text"
         code = m.group(2)
         first_line = code.strip().split("\n", 1)[0][:80]
-        art = await task_service.create_artifact(
+        # create_artifact 返回 int id（非 ORM 对象），直接收集，勿再取 .id
+        art_id = await task_service.create_artifact(
             db,
             task_id=task_id,
             type="code",
@@ -39,11 +40,11 @@ async def extract_and_persist_artifacts(
             storage_ref=f"inline://{task_id}/{i}",
             summary=f"{lang} 代码块,{len(code)} 字符",
         )
-        ids.append(art.id)
+        ids.append(art_id)
 
     # 文件写入产物
     for p in write_paths or []:
-        art = await task_service.create_artifact(
+        art_id = await task_service.create_artifact(
             db,
             task_id=task_id,
             type="file",
@@ -52,7 +53,7 @@ async def extract_and_persist_artifacts(
             summary=f"由 fs.write 产出 {p}",
             files=[p],
         )
-        ids.append(art.id)
+        ids.append(art_id)
 
     if ids:
         await task_service.attach_artifacts(db, task_id, ids)

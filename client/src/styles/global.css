@@ -620,18 +620,32 @@ body.maximized .titlebar { padding-top: 8px; padding-left: 16px; padding-right: 
 .turn-item-text { margin-bottom: var(--msg-gap, 10px); }
 .turn-agent-text { color: var(--text-1); font-size: var(--fs-md, 13px); line-height: var(--chat-line-height, 2.2); white-space: pre-wrap; word-break: break-word; }
 .turn-item-summary { padding: 5px 10px; border-radius: var(--r-sm); background: var(--bg-elevated); color: var(--text-2); font-size: 12px; margin: 2px 0; }
-.turn-item-error { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-radius: var(--r-md); background: color-mix(in srgb, var(--error) 5%, var(--bg-elevated, transparent)); border: 1px solid color-mix(in srgb, var(--error) 22%, transparent); color: var(--text-primary); font-size: 12px; line-height: 1.55; margin: 2px 0; }
-.turn-item-error .err-icon { flex-shrink: 0; margin-top: 2px; color: var(--error); }
+/* 报错卡片（plan-387-1825 C2 → plan-20261009 E1 重做为紧凑单行）。
+ *  用户反馈：一条报错占位太高（标题 / 摘要 / 开关 / 按钮四段纵向堆叠，单行报错约 97px）、
+ *  展开后出现异色色块、「查看详情」悬停色怪。现在：
+ *   · 一行头部：图标 +「标题 摘要」同行流式排版 + 右侧操作按钮，单行报错整卡约 40px；
+ *   · 中性表面（与消息流其它卡片同底同边框），只有图标与标题用错误色 —— 卡内按钮直接用标准 .btn
+ *     配色，悬停是全局统一的中性底色，不再出现「粉底上一块灰」；
+ *   · 详情与卡片同底，不再套独立色块：等宽小字 + 与标题文字左对齐表达层次，超长时卡内滚动。
+ *  层次只用留白 / 字号字重 / 颜色表达，不引入左侧彩色竖线（项目设计规则）。 */
+.turn-item-error { display: flex; flex-direction: column; padding: 7px 8px 7px 12px; border-radius: var(--r-lg); background: var(--bg-elevated); border: 1px solid var(--border); color: var(--text-1); margin: 2px 0; }
+/* plan-387-1825 C4：内边距必须用**双类**再声明一次 ——「消息流统一节奏」区块的 .turn-item（单类）
+   有一条 `padding: 0`，与上一条同特异性但声明更靠后，单类写法会被整体清零。 */
+.turn-item.turn-item-error { padding: 7px 8px 7px 12px; }
+/* 头部按 24px（= xs 按钮高）对齐：单行时图标 / 文字 / 按钮同一中线；摘要换行时图标与按钮贴首行 */
+.turn-item-error .err-head { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+.turn-item-error .err-icon { flex-shrink: 0; margin-top: 5px; color: var(--error); }
+.turn-item-error .err-text { flex: 1; min-width: 0; padding: 2px 0; font-size: var(--fs-md, 13px); line-height: 20px; word-break: break-word; }
+.turn-item-error .err-title { margin-right: 8px; font-weight: 600; color: var(--error); }
+.turn-item-error .err-summary { color: var(--text-2); }
+.turn-item-error .err-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+/* 详情：完整报错原文，与标题文字左对齐（图标 14 + 间距 8），可整体选中复制；超长时卡内滚动，不撑高消息流 */
+.turn-item-error .err-detail { margin-top: 4px; padding: 0 4px 2px 22px; max-height: 240px; overflow-y: auto; color: var(--text-2); font-family: var(--font-mono, ui-monospace, Consolas, monospace); font-size: 11.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; user-select: text; }
 /* plan-865: 计划消息提示行（同 turn 多条 PLAN 消息时，非最后一条渲染为细提示） */
 .plan-msg-item { font-size: 12px; color: var(--text-3); padding: 0; }
-.turn-item-error .err-body { min-width: 0; flex: 1; }
-.turn-item-error .err-title { font-weight: 600; color: var(--error); font-size: 12.5px; margin-bottom: 3px; }
-.turn-item-error .err-msg { color: var(--text-secondary); word-break: break-word; font-family: var(--font-mono, ui-monospace, Consolas, monospace); font-size: 11.5px; line-height: 1.6; }
-/* plan-41-228：删除 `:only-child .err-msg{color:error}` 特例——末尾错误卡恰好是父容器唯一子元素，
-   正文会整体变红，与 turn 内同款卡不一致；标题红色已足够表明语义，正文统一次级文本色。 */
+/* plan-41-228：错误卡不做 `:only-child` 红色特例——标题红色已足够表明语义，正文统一用次级文本色。 */
 /* plan-308-1542 需求1：任务执行类错误卡（消息流末尾唯一棂位，不再重复弹右上角 Toast） */
 .flow-error-card { margin: 6px 0 4px; }
-.flow-error-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
 /* v10 → plan-282-1416：消息操作行（归属与显隐协议重写）
    - 归属：用户消息 → 该条消息项内部；AI 回复 → 紧随 AI 内容块末尾（不再挂 turn 整体）；
    - 行高固定 24px，仅 opacity 切换 → 显隐零布局位移；
@@ -1311,11 +1325,13 @@ body.maximized .titlebar { padding-top: 8px; padding-left: 16px; padding-right: 
 /* plan-282-1421（第10项）：上下文圆环 + 浮层（对齐参考图 6）。
    旧实现：必须点击才展开、11px 纯文本堆叠、圆环 26px、压缩中加文字徽标。
    新实现：hover/focus 即显、基础态一行容量 + 进度条 + 平均缓存命中率、
-   详细态按需展开、压缩中圆环自身旋转、圆环缩到 20px。 */
+   详细态按需展开、压缩中圆环自身旋转、圆环缩到 20px。
+   尺寸迭代：圆环 20 → 10px（用户嫌大）→ 16px（10px 看不清回调）；
+   按钮容器始终比圆环大 4px：24 → 16 → 20px，保持 hover 背景圆与环的协调。 */
 .composer-usage-ring-wrap { position: relative; display: inline-flex; align-items: center; flex-shrink: 0; }
 .composer-usage-ring {
   display: inline-flex; align-items: center; justify-content: center;
-  width: 24px; height: 24px; padding: 0;
+  width: 20px; height: 20px; padding: 0;
   border: none; border-radius: 50%; background: transparent;
   cursor: pointer;
   transition: background var(--dur-2) var(--ease-standard);
@@ -1356,9 +1372,9 @@ body.maximized .titlebar { padding-top: 8px; padding-left: 16px; padding-right: 
 .composer-usage-row.total { border-top: 1px solid var(--border); margin-top: 3px; padding-top: 3px; font-weight: 600; }
 .composer-usage-agent { margin-top: 4px; color: var(--text-3); font-size: 10px; }
 /* plan-282-1421（第10项）：压缩反馈不再用文字徽标与整环脉冲——
-   圆环自身变旋转加载弧（IconRingProgress loading + .icon-ring-spin）。 */
-@keyframes compacting-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
-.composer-compacting-badge { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; color: var(--warning); white-space: nowrap; }
+   圆环自身变旋转加载弧（IconRingProgress loading + .icon-ring-spin）。
+   plan-282-1495：遗留的 .composer-compacting-badge 文字徽标与 compacting-pulse 关键帧一并删除——
+   该徽标 nowrap 会把输入卡工具条顶出边界（窄面板下宽度溢出），压缩反馈只保留圆环自转。 */
 .composer-reasoning { position: relative; }
 .composer-reasoning-btn { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; padding: 5px 8px; border-radius: var(--r-sm); background: transparent; color: var(--text-2); cursor: pointer; white-space: nowrap; border: none; transition: all var(--dur-fast); }
 .composer-reasoning-btn:hover { background: var(--bg-hover); color: var(--text-1); }
@@ -4098,6 +4114,10 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 .mf-list { display: flex; flex-direction: column; max-width: var(--content-max-w); margin: 0 auto; padding: 0 32px; }
 .mf-entry { width: 100%; }
 .turn-group { margin-bottom: 4px; padding: 0; width: 100%; }
+/* 注（plan-387-1825 C4）：此处 `padding: 0` 是刻意保留的「消息流内各项内边距统一归零」——
+   同一批次下方还有 .turn-item-text / .turn-agent-text，.turn-item-summary 等子类的
+   内边距也依赖它被压平。**不要**为了让报错卡片有内边距而删掉此行（会连带恢复这些子类）。
+   报错卡片的内边距改用双类选择器单独声明（见上方 .turn-item.turn-item-error）。 */
 .turn-item { margin-bottom: var(--msg-gap, 10px); padding: 0; position: relative; }
 .turn-item-text { padding: 0; margin-bottom: var(--msg-gap, 10px); }
 .turn-agent-text { color: var(--text-1); font-size: var(--fs-md, 13px); line-height: var(--chat-line-height, 2.2); white-space: normal; padding: 0; }
@@ -4955,12 +4975,29 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
      * 渲染层据 data-maximized 决定 CSS 圆角，避免"系统直角 + CSS 圆角"打架产生黑边。
    ══════════════════════════════════════════════════════════════════ */
 
-/* 有原生圆角时：内容铺满，圆角由系统绘制（CSS 不再画，避免双层圆角错位）。
-   注（plan-26-116 M2）：这里**保留**原来的「仅非最大化时透明」条件，以保证关闭玻璃时的
-   观感与改动前完全一致；最大化/全屏下的透明由上方 `:root[data-glass="on"] body`
-   无条件提供（那条规则在文件中靠后，优先级足够覆盖 platform 规则）。 */
+/* 有原生圆角时：圆角由 DWM 绘制，但**内容不得越出圆角**。
+ *
+ * plan-387-1825 A9：修复「小窗下四周有覆盖不全的白底」。
+ * 根因是 plan-31-151 S1 改回 `frame:true + titleBarStyle:"hidden"` 后，
+ * 留下一条 frame:false 时代的遗留规则：
+ *   `:root[data-native-corners="1"][data-maximized="0"] body { background: transparent }`
+ *   —— 它当时是为「四角透桌面」而设。但现在：
+ *   · 玻璃**开启**时：DWM 的 acrylic 铺满整个窗口矩形（只在圆角处被裁掉），
+ *     body 透明是正确的，透出来的是桌面材质，不会发白；
+ *   · 玻璃**关闭**时：窗口没有任何材质，而构造期的 backgroundColor 是
+ *     不透明主题浅色（见 main.cjs 的 `#f2f3f7`），body 透明就等于把
+ *     这层近白色直接露在圆角矩形之外 —— 正是用户看到的「四周白底」。
+ *
+ * 因此只在**玻璃关闭**时给 body 回填主题实色（跟随 data-theme，自动适配深/浅）；
+ * 玻璃开启时保持透明，毛玻璃照旧。`:not()` 让本规则特异性高于上方
+ * `:root[data-platform="win32"][data-glass="on"] body`，无需依赖书写顺序。
+ *
+ * 注：`.app-shell` 在原生圆角下**仍保持铺满、不画 CSS 圆角**——圆角由 DWM 裁剪，
+ * CSS 再画一层会出现双层圆角错位（这是 plan-26-116 既有结论，不要改回去）。
+ * 白底的根因只在 body 透明、圆角矩形外无任何内容填充这一处。
+ */
 :root[data-native-corners="1"] .app-shell { border-radius: 0; border: none; }
-:root[data-native-corners="1"][data-maximized="0"] body { background: transparent; }
+:root[data-native-corners="1"][data-maximized="0"]:not([data-glass="on"]) body { background: var(--bg-sidebar); }
 
 /* 无原生圆角时（老系统/其他平台）：退回 CSS 圆角 + 透明外框，四角透桌面 */
 :root[data-native-corners="0"] .app-shell {
@@ -5142,6 +5179,13 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 .sr-list .sr-mark.plain { color: var(--text-3); }
 .sr-risks { border: 1px solid color-mix(in srgb, var(--warning, #d29922) 28%, transparent); background: color-mix(in srgb, var(--warning, #d29922) 8%, transparent); border-radius: var(--r-sm); padding: 8px 10px; }
 .sr-risks .sr-list li { color: var(--text-1); }
+/* plan-387-1825 D1-3：条目内的围栏代码块。
+ * .md-body 是块级容器，代码块本就占满整行；此处只需统一上下留白，
+ * 让代码框与同条目的其他行之间有呼吸感。层次只用留白与圆角表达，
+ * 不引入左侧竖线（项目设计规则）。 */
+.sr-list .md-code-block { margin: 6px 0; }
+.sr-list .md-body > .md-code-block:first-child { margin-top: 0; }
+.sr-list .md-body > .md-code-block:last-child { margin-bottom: 0; }
 
 /* ── v42 修复：卡片内 markdown 排版归还主消息流 ──
  * 此前本卡片自定义了一套 12.5px / 1.65 / --text-2 的独立排版：比正文（.turn-agent-text

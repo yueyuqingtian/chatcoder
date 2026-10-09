@@ -2,7 +2,7 @@
 import asyncio
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,7 +12,7 @@ from app.gateway.schemas import (ArtifactOut, FileChangeOut, FileDiffOut, Messag
                                  RollbackResult, TaskConfirmBody, TaskOut, TurnCreate, TurnInjectBody, TurnOut, TurnSnapshotOut)
 from app.orchestration import engine
 from app.persistence.database import commit_with_retry, get_db
-from app.services import message_service, project_service, rollback_service, session_service, task_service, turn_service
+from app.services import audit_service, message_service, project_service, rollback_service, session_service, task_service, turn_service
 
 router = APIRouter(prefix="/turns", tags=["turns"])
 
@@ -138,7 +138,9 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
                     from app.gateway.ws import manager as ws_manager
                     await ws_manager.broadcast(session_id, {
                         "event": "turn.updated",
-                        "payload": {"turn_id": turn_id, "status": "failed"},
+                        # 携带 session_id（串会话修复）：前端据此丢弃迟到/串通道的旧会话事件
+                        "payload": {"turn_id": turn_id, "status": "failed",
+                                    "session_id": session_id},
                     })
                 except Exception:
                     logger.debug("turn 异常态落库失败", exc_info=True)
@@ -226,12 +228,28 @@ async def inject_turn_input(turn_id: int, body: TurnInjectBody, db: AsyncSession
 
 
 @router.post("/{turn_id}/cancel", response_model=dict)
-async def cancel_turn(turn_id: int, db: AsyncSession = Depends(get_db)):
-    ok = await engine.cancel_turn(turn_id)
-    if not ok:
-        turn = await turn_service.get_turn(db, turn_id)
-        if turn is None:
-            raise HTTPException(404, "turn 不存在")
+async def cancel_turn(turn_id: int, source: str = Query("unknown"),
+                      db: AsyncSession = Depends(get_db)):
+    """停止运行中的 turn。
+
+    source 由调用方标注来源（main / pet / unknown）——仅用于审计定位，不参与判定。
+    plan-365-1790：停止入口此前无任何留痕，日志轮转后无法回答“谁在何时停止了任务”，
+    故在此记录来源并落 audit_logs（库内持久，不受日志轮转影响）。
+    """
+    turn = await turn_service.get_turn(db, turn_id)
+    _session_id = int(turn.session_id) if turn is not None else None
+    logger.warning(
+        "[cancel] REST 收到停止请求 turn=%s session=%s source=%s",
+        turn_id, _session_id, source,
+    )
+    try:
+        await audit_service.log(db, action="turn.cancel", session_id=_session_id,
+                                turn_id=turn_id, detail={"source": source})
+    except Exception:
+        logger.warning("[cancel] 审计落库失败 turn=%s", turn_id, exc_info=True)
+    ok = await engine.cancel_turn(turn_id, source=source)
+    if not ok and turn is None:
+        raise HTTPException(404, "turn 不存在")
     return {"ok": ok}
 
 
@@ -271,7 +289,9 @@ async def resume_turn(turn_id: int, db: AsyncSession = Depends(get_db)):
                     from app.gateway.ws import manager as ws_manager
                     await ws_manager.broadcast(session_id, {
                         "event": "turn.updated",
-                        "payload": {"turn_id": turn_id, "status": "failed"},
+                        # 携带 session_id（串会话修复）：与首轮启动的异常兜底同口径
+                        "payload": {"turn_id": turn_id, "status": "failed",
+                                    "session_id": session_id},
                     })
                 except Exception:
                     logger.debug("turn 异常态落库失败", exc_info=True)

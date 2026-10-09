@@ -333,7 +333,7 @@ async def _summarize_with_llm(db: AsyncSession, provider, messages: list, max_ch
             model="",
             temperature=0.3,
             reasoning_effort=_effort,
-            thinking=_thinking or None,
+            thinking=_thinking,
             # plan-270-1358: ta3 x-ws-id 需要工作目录指纹（其它 Provider 忽略）
             workspace_dir=workspace_dir,
         )

@@ -321,7 +321,8 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
     #    并等待其退出（最长 3s），避免回滚期间 agent 仍在写文件导致并发冲突。
     #    （延迟 import 避免与 engine 模块循环依赖）
     from app.orchestration import engine
-    await engine.cancel_turn(turn_id)
+    logger.warning("[cancel] 回滚流程先停止运行中任务 turn=%s", turn_id)
+    await engine.cancel_turn(turn_id, source="rollback")
     if turn_id in engine._running_turns:
         for _ in range(30):
             if turn_id not in engine._running_turns:

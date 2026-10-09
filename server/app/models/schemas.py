@@ -38,6 +38,9 @@ class ChatRequest(BaseModel):
     # 仅对支持 thinking 参数的网关生效（DeepSeek/GLM/Kimi 系），
     # agent_loop 根据 provider 能力 + effort 计算后传入；provider 据此发送
     # thinking:{type:"enabled", budget_tokens} 并移除 temperature（thinking 模式不支持）。
+    # v29: 三态语义——True=显式开启；False=用户选择 none，要求**显式关闭**思考
+    # （provider 按各自协议翻译成 disabled / enable_thinking=false 等关闭形态；
+    # 协议本身无关闭字段的供应商保持不下发）；None=不触碰该字段（保持网关默认）。
     thinking: bool | None = None
     # TRAE Work 模式需要稳定的云端会话/消息标识；其它供应商忽略这些字段。
     session_id: str | None = None

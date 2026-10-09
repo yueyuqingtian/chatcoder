@@ -199,27 +199,6 @@ _WEB_SEARCH: list[dict] = [
     }),
 ]
 
-# ── attachment（plan-147-674：当前项目补充，非参考项目原生——附件/图片读取）──
-_ATTACHMENT: list[dict] = [
-    _f("ReadAttachment", "读取用户上传的附件文件内容。path 参数可直接使用用户消息附件中的"
-        "服务器磁盘绝对路径（如 'C:/Users/xx/AppData/Local/chatcoder/uploads/1a2b3c/报告.docx'），"
-        "也兼容相对路径（如 '1a2b3c/报告.docx'）。\n"
-        "支持 docx / pdf / xlsx / csv / txt / md 等文本类（返回解析文本）"
-        "以及 png/jpg/jpeg/gif/webp 图片（返回 base64 与元信息，多模态模型可直接理解）。\n"
-        "path 取自用户消息中附件的 path 字段，或对话上下文「用户上传的附件」列表中的路径。", {
-        "type": "object", "required": ["path"],
-        "properties": {
-            "path": {"type": "string", "description": "附件路径——优先使用消息中给出的服务器绝对路径（如 'C:/Users/xx/AppData/Local/chatcoder/uploads/1a2b3c/报告.docx'），相对路径（'1a2b3c/报告.docx'）亦可"},
-        },
-    }),
-    _f("ViewImage", "查看图片文件，返回图片元信息（大小、格式、尺寸）与 base64（多模态模型可直接理解）。", {
-        "type": "object", "required": ["path"],
-        "properties": {
-            "path": {"type": "string", "description": "图片文件路径（相对工作区根目录、绝对路径或用户附件路径均可）"},
-        },
-    }),
-]
-
 # ── background（plan-153-705：当前项目补充，非参考项目原生——后台进程管理）──
 _BACKGROUND: list[dict] = [
     _f("BashStatus", "查询后台命令的运行状态与增量日志。shellId 来自 Bash 以 waitForCompletion=false "
@@ -239,417 +218,44 @@ _BACKGROUND: list[dict] = [
     }),
 ]
 
-# ── goal（会话目标管理）──
-_GOAL: list[dict] = [
-    _f("CompleteGoal", "标记当前会话目标已达成。仅当目标描述的工作已全部完成时调用。", {
-        "type": "object", "required": ["summary"],
-        "properties": {
-            "summary": {"type": "string", "description": "完成总结：目标达成的关键结果与验证方式"},
-        },
-    }),
-]
+# ── 自造伪装工具的 schema 已改为动态派生（plan-365-1769 F1）──
+# 浏览器套件（BrowserXxx）、电脑操控（DesktopXxx）、子代理管理（SubAgentInspect 等）
+# 这些**自造伪装名**的 schema 一律从**真实工具 schema** 派生——只把 function.name
+# 改成伪装名，描述与参数原样沿用（见 ta3_tool_aliases.DYNAMIC_SCHEMA_ALIASES 与
+# disguise_tools 的实现）。
+#
+# 为什么删除这里的硬编码副本：硬编码快照是**漂移源头**——desktop_click 在
+# plan-365-1757 新增了 ref/image_x/image_y/text_target/expect 等参数，但伪装层仍在用
+# 旧快照整体替换真实 schema，导致 ta3 会话里模型只看到 x/y，只能「看图心算屏幕坐标」，
+# 直接造成点击准确率大幅下降（plan-365-1769）。改为派生后，真实工具演进 ta3 侧自动跟随。
 
-# ── multiEdit（plan-238-1191：当前项目补充——多文件批量编辑）──
-# 参考项目无对应工具；此前缺映射被伪装层整体剔除，ta3 会话下模型失去批量编辑
-# 能力、历史调用被降级为"结果已略"文本。伪装名自造（ReadAttachment/BashStatus 先例）。
-_MULTI_EDIT: list[dict] = [
-    _f("MultiFileEdit", "多文件结构化编辑。在一次调用中对多个文件执行 search-replace。\n"
-        "原子性：全部成功或全部回滚。\n"
-        "每个 edit 包含: path(文件路径), old_text(要替换的原文), new_text(替换后的文本)。\n"
-        "old_text 必须在文件中唯一匹配。new_text 为空字符串表示删除。", {
-        "type": "object", "required": ["edits"],
-        "properties": {
-            "edits": {
-                "type": "array",
-                "description": "编辑操作列表",
-                "items": {
-                    "type": "object",
-                    "required": ["path", "old_text", "new_text"],
-                    "properties": {
-                        "path": {"type": "string", "description": "文件路径(相对工作根)"},
-                        "old_text": {"type": "string", "description": "要替换的原始文本"},
-                        "new_text": {"type": "string", "description": "替换后的文本(空=删除)"},
-                    },
-                },
-            },
-        },
-    }),
-]
-
-# ── ask（通用提问，当前项目补充——需求澄清，四种模式均可用）──
-_ASK: list[dict] = [
-    _f("AskUser", "向用户发起结构化提问（用于需求澄清）。"
-        "当任务的意图、范围或验收标准不明确、存在多种可行设计、或选择取决于用户偏好时，"
-        "在动手实现之前使用此工具——避免猜测用户意图导致方向性返工。"
-        "能从代码库/文档/会话历史中查到的事实不要问（先自行探索）；只问真正的决策点。"
-        "问题必须简洁、选项互斥且覆盖主要可能，相关的问题合并到一次调用中（最多 4 个），"
-        "不要反复打断用户；allow_custom 为 true 时用户可自由输入选项之外的答案。", {
-        "type": "object", "required": ["questions"],
-        "properties": {
-            "questions": {"type": "array", "description": "问题列表（1-4 个）。每个问题包含 question 文本与 options 选项数组；allow_custom 为 true 时用户可自由输入答案。",
-                          "items": {"type": "object", "required": ["question"],
-                                    "properties": {
-                                        "question": {"type": "string"},
-                                        "options": {"type": "array", "description": "选项文本数组（必须为字符串，不要用 {label, description} 对象）", "items": {"type": "string"}},
-                                        "allow_custom": {"type": "boolean"},
-                                    }}},
-        },
-    }),
-]
-
-# ── symbol（plan-248-1258 M3.3：当前项目补充——符号索引检索）──
-# 参考项目无对应工具（其 core.ts 只有 get_file_outline 文件骨架），故新增
-# SymbolSearch；伪装名自造（ReadAttachment/MultiFileEdit 先例）。参数键名与真实
-# 工具 symbol_search 一致（query/kind/file_glob/limit），无需 ARGS 适配。
-# 描述与真实语义对齐：query 是符号名字符串检索（非语义向量），索引未开启时
-# 返回开启指引而非自动建库。
-_SYMBOL: list[dict] = [
-    _f("SymbolSearch", "在代码库的项目符号索引中检索符号（函数/方法/类/接口等），返回"
-        "「文件路径:符号名:起止行号 + 签名」，可直接用 Read 按行精读。"
-        "需要定位某个函数/类定义、查找某功能的实现位置时优先使用本工具，"
-        "比 Search 全库文本扫描更快更准。索引未开启时按返回提示引导用户开启。", {
-        "type": "object", "required": ["query"],
-        "properties": {
-            "query": {"type": "string", "description": "符号名（支持部分匹配，如 build_main / Session）"},
-            "kind": {"type": "string",
-                     "description": "可选过滤：function / method / class / interface / type / enum / struct"},
-            "file_glob": {"type": "string", "description": "可选文件过滤，如 *.py、src/**/*.ts"},
-            "limit": {"type": "integer", "description": "返回条数(默认 20，最大 100)"},
-        },
-    }),
-]
-
-# ── v43: 全量补齐（fetch/ci/git/检索/压缩/技能/记忆）──
-# 背景：ta3 伪装层对无映射工具整体剔除——此前这些工具在 ta3 会话下模型完全不可见。
-# 现按真实注册表补全；描述沿用真实工具语义（可精简，但不得超出真实能力，plan-609 口径）。
-_TOOLKIT: list[dict] = [
-    _f("WebFetch", "HTTP GET 抓取 URL 的文本响应(超时 15s,截断 8KB)。需用户审批。", {
-        "type": "object", "required": ["url"],
-        "properties": {"url": {"type": "string", "description": "完整 URL"}},
-    }),
-    _f("CiRun", "运行预设的 CI 检查项(lint/test/build 之一),返回通过/失败与输出。"
-        "用于审查产物质量。检查项在工作区内执行。", {
-        "type": "object", "required": ["check"],
-        "properties": {
-            "check": {"type": "string", "enum": ["lint", "test", "build"],
-                      "description": "检查项:lint=代码检查, test=测试, build=构建"},
-        },
-    }),
-    _f("Git", "Git 版本控制操作。支持子命令:\n- diff: 查看变更 (stat_only=true 仅统计)\n"
-        "- commit: 提交变更 (message 必填, files 可选)\n- branch: 创建/列出分支 (name 可选)\n"
-        "- checkout: 切换分支/恢复文件 (ref 必填)\n- stash: 暂存操作 (action: push/pop/list)\n"
-        "- log: 查看提交历史 (n 条数, 默认 10)\n- blame: 查看文件逐行归属 (file 必填)\n"
-        "- status: 查看工作区状态", {
-        "type": "object", "required": ["command"],
-        "properties": {
-            "command": {"type": "string",
-                        "enum": ["diff", "commit", "branch", "checkout", "stash", "log", "blame", "status"],
-                        "description": "Git 子命令"},
-            "cwd": {"type": "string", "description": "工作目录(相对工作根)"},
-            "message": {"type": "string", "description": "commit 消息"},
-            "files": {"type": "array", "items": {"type": "string"}, "description": "commit 指定文件"},
-            "name": {"type": "string", "description": "branch 名称"},
-            "ref": {"type": "string", "description": "checkout 目标"},
-            "action": {"type": "string", "enum": ["push", "pop", "list"], "description": "stash 操作"},
-            "n": {"type": "integer", "description": "log 条数"},
-            "file": {"type": "string", "description": "blame 文件路径"},
-            "stat_only": {"type": "boolean", "description": "diff 仅统计"},
-        },
-    }),
-    _f("CodebaseSearch", "关键词检索代码库（非语义向量检索）。按关键词在已索引的代码块中打分，"
-        "切块优先对齐函数/类符号边界，返回完整代码片段及文件位置与符号名。\n"
-        "适合「记不清确切符号名、但记得关键词/注释/字符串」的场景；"
-        "若已知符号名（函数名/类名）请优先用 SymbolSearch，更快更准。", {
-        "type": "object", "required": ["query"],
-        "properties": {
-            "query": {"type": "string", "description": "搜索关键词（自然语言或代码片段）"},
-            "top_k": {"type": "integer", "description": "返回结果数量(默认 5)"},
-            "file_glob": {"type": "string", "description": "文件过滤(如 *.py, *.ts)"},
-        },
-    }),
-    _f("CompactionIndex", "【按需回看第 1 步】列出当前会话内全部上下文压缩块的索引"
-        "（序号/覆盖消息范围/节省 token/摘要预览）。上下文被压缩后，需要回忆早期会话细节时"
-        "先调用本工具定位索引，再调用 CompactionView 按索引查看压缩前的原始消息"
-        "（只取需要的部分，**不要全量拉取**）。", {
-        "type": "object", "properties": {},
-    }),
-    _f("CompactionView", "【按需回看第 2 步】按索引查看某个上下文压缩块遮蔽的压缩前会话消息。"
-        "参数二选一：index=压缩块序号（CompactionIndex 返回的 #序号，从 1 起）；"
-        "或 compaction_id=压缩块 id。支持 offset/limit 分页与 keyword 过滤；"
-        "单条消息默认截断 400 字符，需要某条全文时用 full=true。"
-        "**按需取用**：先用 CompactionIndex 定位块，再按需只取需要的几条；"
-        "**严禁一次性全量拉取**压缩前历史。", {
-        "type": "object",
-        "properties": {
-            "index": {"type": "integer", "description": "压缩块序号（CompactionIndex 的 #序号，从 1 起）"},
-            "compaction_id": {"type": "string", "description": "压缩块 id（CompactionIndex 返回的 compaction_id）"},
-            "keyword": {"type": "string", "description": "只返回包含该关键词的消息（不区分大小写）"},
-            "offset": {"type": "integer", "description": "分页起始偏移（默认 0）"},
-            "limit": {"type": "integer", "description": "返回条数（默认 30，最大 200）"},
-            "full": {"type": "boolean", "description": "true=单条消息不截断返回全文（默认 false，单条截 400 字符）"},
-        },
-    }),
-    _f("SkillView", "查看技能内容。技能是可复用的领域知识包/工作流指令，"
-        "系统提示词的 Available Skills 段列出了可用技能。当任务与某技能的描述或触发条件匹配时，"
-        "调用本工具（name=技能名）加载该技能的完整指令并遵照执行。"
-        "不传 name 时返回全部已启用技能的索引（名称/描述/触发条件）。", {
-        "type": "object",
-        "properties": {"name": {"type": "string",
-                                "description": "技能名（Available Skills 中列出的名称）。留空返回全部技能索引。"}},
-    }),
-    _f("MemoryWrite", "主动记录一条长期有价值的记忆（事实/约定/坑点/决策），跨 turn 生效。"
-        "适用：用户明确要求记住某事；发现了重要项目约定、易踩的坑、关键决策。"
-        "scope 选择：session=本会话（默认）；project=本项目长期有效；global=跨项目全局规范。"
-        "不要记录临时性内容（如单次命令输出、当前任务进度）。", {
-        "type": "object", "required": ["text"],
-        "properties": {
-            "text": {"type": "string", "description": "记忆内容（一句话，8 字符以上）"},
-            "kind": {"type": "string", "description": "分类：fact 事实 / convention 约定 / pitfall 坑点 / decision 决策"},
-            "scope": {"type": "string", "description": "作用域：session（默认）/ project / global"},
-        },
-    }),
-]
-
-# ── v43: 浏览器工具套件（Playwright；需在设置中启用浏览器）──
-_BROWSER: list[dict] = [
-    _f("BrowserNavigate", "在内置浏览器中导航到指定 URL，支持加载页面并返回精简标题和摘要。"
-        "需审批，需在设置中启用浏览器。", {
-        "type": "object", "required": ["url"],
-        "properties": {
-            "url": {"type": "string", "description": "目标 URL"},
-            "wait_until": {"type": "string", "enum": ["load", "domcontentloaded", "networkidle"],
-                           "description": "页面等待条件，默认 domcontentloaded"},
-        },
-    }),
-    _f("BrowserScreenshot", "对当前页面或指定 URL 进行截图，返回 base64 图片及多模态元数据。"
-        "需审批，需在设置中启用浏览器。", {
-        "type": "object",
-        "properties": {
-            "url": {"type": "string", "description": "目标 URL（可选，若不传则对当前已打开的页面截图）"},
-            "full_page": {"type": "boolean", "description": "是否截取完整长图，默认 false"},
-        },
-    }),
-    _f("BrowserClick", "在当前浏览器页面中点击元素。支持 CSS 选择器或页面坐标 (x, y)。需审批。", {
-        "type": "object",
-        "properties": {
-            "selector": {"type": "string",
-                         "description": "CSS 选择器或元素文本选择器（如 'button:has-text(\"登录\")' 或 '#submit-btn'）"},
-            "x": {"type": "number", "description": "点击的横坐标（可选）"},
-            "y": {"type": "number", "description": "点击的纵坐标（可选）"},
-        },
-    }),
-    _f("BrowserType", "在当前页面的输入框中填写或输入文本，可选择是否按回车提交。需审批。", {
-        "type": "object", "required": ["selector", "text"],
-        "properties": {
-            "selector": {"type": "string", "description": "目标输入框的 CSS 选择器"},
-            "text": {"type": "string", "description": "要输入的文本内容"},
-            "press_enter": {"type": "boolean", "description": "输入完成后是否按下 Enter 键，默认 false"},
-            "clear_before": {"type": "boolean", "description": "输入前是否先清空输入框，默认 true"},
-        },
-    }),
-    _f("BrowserSnapshot", "获取当前页面的精简可交互 DOM 树快照（包括按钮、输入框、链接及选择器），"
-        "供模型精确感知与决策。需在设置中启用浏览器。", {
-        "type": "object",
-        "properties": {"max_depth": {"type": "integer", "description": "DOM 树遍历深度，默认 4"}},
-    }),
-    _f("BrowserEvaluate", "在当前浏览器页面上下文中执行一段 JavaScript 代码并获取返回值。需审批。", {
-        "type": "object", "required": ["script"],
-        "properties": {"script": {"type": "string", "description": "要执行的 JavaScript 表达式或函数字符串"}},
-    }),
-]
-
-# ── 电脑操控（plan-334-1661：当前项目补充，非参考项目原生）──
-# 本能力是内置原生工具集（内核常驻子进程），伪装名自造（ReadAttachment/MultiFileEdit 先例）。
-# 参数键名与真实工具完全一致，无需 ARGS 适配。
-# 描述里保留「需在设置中启用」的引导，让模型在未开启时能向用户解释原因。
-_DESKTOP: list[dict] = [
-    _f("DesktopWindows", "列出当前可见窗口及其句柄、进程名与中心坐标。"
-        "操作电脑前的第一步：先看有哪些窗口，拿到 handle 或标题再给其它工具用。"
-        "需在「设置 → 电脑操控」中启用。", {
-        "type": "object",
-        "properties": {
-            "filter": {"type": "string", "description": "按标题或进程名过滤（可选）"},
-            "limit": {"type": "integer", "description": "最多返回多少个窗口，默认 30"},
-        },
-    }),
-    _f("DesktopSnapshot", "读取指定窗口的控件树（UI Automation），返回可交互元素及其中心坐标。"
-        "这是感知窗口内容的首选方式：一次调用即可拿到按钮/输入框/菜单项等元素，"
-        "元素带 x,y 中心点，可直接用于 DesktopClick。若返回元素数为 0，说明该应用是自绘界面，"
-        "请改用 DesktopScreenshot 截图后用 DesktopFindText 定位。需在「设置 → 电脑操控」中启用。", {
-        "type": "object",
-        "properties": {
-            "title": {"type": "string", "description": "窗口标题（包含匹配，可选）"},
-            "handle": {"type": "integer", "description": "窗口句柄（来自 DesktopWindows）"},
-            "interactive_only": {"type": "boolean", "description": "只返回可交互元素，默认 true"},
-            "budget": {"type": "integer", "description": "最多返回多少个元素，默认 200"},
-            "depth": {"type": "integer", "description": "最大遍历深度，默认 12"},
-            "time_budget_ms": {"type": "integer", "description": "遍历时间预算（毫秒），默认 800"},
-        },
-    }),
-    _f("DesktopHit", "查询屏幕某个坐标上是什么 UI 元素（含上级层级链）。"
-        "这是最便宜的感知原语：先定位再决定动作，比先抓全控件树再在客户端搜索快得多。", {
-        "type": "object", "required": ["x", "y"],
-        "properties": {
-            "x": {"type": "integer", "description": "屏幕横坐标（物理像素）"},
-            "y": {"type": "integer", "description": "屏幕纵坐标（物理像素）"},
-            "chain": {"type": "boolean", "description": "是否返回上级层级链，默认 true"},
-        },
-    }),
-    _f("DesktopScreenshot", "截取屏幕（或指定区域），保存为图片并返回路径与尺寸。"
-        "仅在 UI Automation 无法读取控件时使用（自绘界面）。"
-        "返回的 scale 可把图片坐标换算回屏幕坐标，点击时请用屏幕坐标。", {
-        "type": "object",
-        "properties": {
-            "max_dim": {"type": "integer", "description": "缩放后长边像素，默认 1600；0 表示不缩放"},
-            "region": {"type": "string", "description": "截图区域 \"x,y,w,h\"（屏幕物理像素），不填则截全屏"},
-            "format": {"type": "string", "description": "jpg 或 png，默认 jpg"},
-        },
-    }),
-    _f("DesktopFindText", "在屏幕上查找指定文字，直接返回可点击的屏幕坐标。"
-        "这是自绘界面（UI Automation 读不到控件）的主力手段：与其「截图→自己估坐标→点击→再截图确认」，"
-        "直接问文字在哪里更准也更快。返回的 x,y 已是屏幕物理坐标，可直接传给 DesktopClick。"
-        "若未找到，会返回屏幕上实际可见的文字片段，便于修正目标文字而无需重新截图。"
-        "需在「设置 → 电脑操控」中启用。", {
-        "type": "object", "required": ["text"],
-        "properties": {
-            "text": {"type": "string", "description": "要查找的文字"},
-            "exact": {"type": "boolean", "description": "是否区分大小写精确匹配，默认 false"},
-            "region": {"type": "string", "description": "限定区域 \"x,y,w,h\"，可显著提速（可选）"},
-            "max_dim": {"type": "integer", "description": "识别前缩放长边像素，默认 1600"},
-        },
-    }),
-    _f("DesktopClick", "在屏幕指定坐标点击鼠标。这是真正的写操作，会移动真实鼠标。"
-        "提供 title 或 handle 时会校验目标窗口，防止点错窗口。需审批。", {
-        "type": "object", "required": ["x", "y"],
-        "properties": {
-            "x": {"type": "integer", "description": "屏幕横向物理像素坐标"},
-            "y": {"type": "integer", "description": "屏幕纵向物理像素坐标"},
-            "title": {"type": "string", "description": "目标窗口标题（包含匹配），用于安全校验"},
-            "handle": {"type": "integer", "description": "目标窗口句柄"},
-            "button": {"type": "string", "description": "left / right / middle，默认 left"},
-            "count": {"type": "integer", "description": "点击次数，2 表示双击，默认 1"},
-            "focus_first": {"type": "boolean", "description": "点击前先激活目标窗口，默认 false"},
-            "text": {"type": "string", "description": "点击后紧接着输入的文本（可选）"},
-            "keys": {"type": "string", "description": "输入后紧接着按下的键，如 ENTER（可选）"},
-            "clear_first": {"type": "boolean", "description": "输入前先全选清空，默认 false"},
-        },
-    }),
-    _f("DesktopType", "向当前焦点位置输入文本（支持中文）。这是真正的写操作。"
-        "提供 title 或 handle 时会校验目标窗口，防止输入打到错误窗口。需审批。", {
-        "type": "object", "required": ["text"],
-        "properties": {
-            "text": {"type": "string", "description": "要输入的文本"},
-            "title": {"type": "string", "description": "目标窗口标题（用于安全校验）"},
-            "handle": {"type": "integer", "description": "目标窗口句柄"},
-            "clear_first": {"type": "boolean", "description": "输入前先全选清空，默认 false"},
-        },
-    }),
-    _f("DesktopKeys", "按下组合键或功能键，如 ENTER / CTRL+S / ALT+F4。这是真正的写操作。需审批。", {
-        "type": "object", "required": ["keys"],
-        "properties": {
-            "keys": {"type": "string", "description": "按键或组合键，如 ENTER、CTRL+S、WIN+D"},
-            "title": {"type": "string", "description": "目标窗口标题（用于安全校验）"},
-            "handle": {"type": "integer", "description": "目标窗口句柄"},
-        },
-    }),
-    _f("DesktopScroll", "在指定位置滚动鼠标滚轮。需审批。", {
-        "type": "object",
-        "properties": {
-            "x": {"type": "integer", "description": "横向坐标（可选）"},
-            "y": {"type": "integer", "description": "纵向坐标（可选）"},
-            "clicks": {"type": "integer", "description": "滚动格数，正数向上、负数向下，默认 3"},
-            "horizontal": {"type": "boolean", "description": "是否横向滚动，默认 false"},
-        },
-    }),
-    _f("DesktopFocus", "把指定窗口激活到前台（最小化时先还原）。"
-        "写操作前若目标窗口不在前台，先用本工具把它激活。", {
-        "type": "object",
-        "properties": {
-            "title": {"type": "string", "description": "窗口标题（包含匹配，可选）"},
-            "handle": {"type": "integer", "description": "窗口句柄（来自 DesktopWindows）"},
-        },
-    }),
-    _f("DesktopApps", "查找或启动应用程序。action=find 按关键词列出已安装应用与匹配路径；"
-        "action=start 启动指定程序（exe 路径或关键词）。启动程序需审批。", {
-        "type": "object", "required": ["action"],
-        "properties": {
-            "action": {"type": "string", "description": "find（查找）或 start（启动）"},
-            "keyword": {"type": "string", "description": "应用名关键词，如 QQMusic、记事本"},
-            "exe": {"type": "string", "description": "action=start 时可直接给出可执行文件完整路径"},
-        },
-    }),
-    _f("DesktopRecipe", "记录或查询「操作路线」——某应用某操作意图的通用原则，用于减少重复推演。\n"
-        "action=recall：在操控某个应用之前先查一次；命中就按 principle 执行，不必重新摸索界面。\n"
-        "action=save：一次操控成功后，把「怎么做才有效、踩了什么坑」沉淀下来。\n"
-        "**存的是通用原则，不是坐标回放**——界面会变，原则不会。\n"
-        "同一应用同一意图只保留一条：重复保存会累加使用次数并更新原则。", {
-        "type": "object", "required": ["action"],
-        "properties": {
-            "action": {"type": "string", "description": "recall（查询）或 save（保存）"},
-            "app_name": {"type": "string", "description": "应用名，建议用进程名（如 QQMusic）"},
-            "intent": {"type": "string", "description": "操作意图，一句话（如「搜索并播放指定歌曲」）"},
-            "principle": {"type": "string", "description": "action=save 时必填：通用原则"},
-            "pitfalls": {"type": "string", "description": "action=save 时可选：踩过的坑"},
-            "steps": {"type": "array", "description": "action=save 时可选：实际的操作序列，供人工核对", "items": {"type": "object"}},
-        },
-    }),
-]
-
-# ── v43: 子代理管理（主代理侧）/ 上报（子代理侧）──
-# TaskQuery / TaskCancel 已在 _TASK 段（v36）；此处补检视、指令与子代理上报。
-_SUBAGENT_ADMIN: list[dict] = [
-    _f("SubAgentInspect", "查看本轮某个子代理的交接上下文（任务、继承上下文）、执行轨迹"
-        "（工具调用序列与简要输出）与当前状态/结果。需要子代理的详细上下文或推理过程而非"
-        "仅摘要时使用。", {
-        "type": "object", "required": ["agent_id"],
-        "properties": {
-            "agent_id": {"type": "integer", "description": "SubAgent/SubAgentAsync 返回的子代理 id。"},
-            "section": {"type": "string",
-                        "description": "查看部分：context（交接与继承上下文）、transcript（轨迹）、"
-                                       "result（最终摘要）。默认全部。"},
-        },
-    }),
-    _f("SendToSubagent", "向本轮仍在运行的子代理发送补充指令（SubAgent/SubAgentAsync 返回的 id）。"
-        "指令会在其下一次模型调用前注入其上下文，用于纠偏/收窄任务而不取消它。"
-        "已结束的子代理无法接收。要彻底停止用 TaskCancel。", {
-        "type": "object", "required": ["agent_id", "message"],
-        "properties": {
-            "agent_id": {"type": "integer", "description": "子代理 id。"},
-            "message": {"type": "string", "description": "要传达的指令（须自包含、具体）。"},
-        },
-    }),
-    _f("ReportToLeader", "向主代理汇报进度或提问（仅子代理可用）。消息会在主代理下一次模型调用前"
-        "进入其上下文，同时也显示在你自己的线程里。"
-        "kind=\"progress\"（默认）：发后即忘的状态更新，随后继续工作。"
-        "kind=\"question\" 且 wait=true：阻塞等待主代理答复（仅后台异步子代理可用；"
-        "同步/只读子代理请把问题写进最终汇报）。", {
-        "type": "object", "required": ["message"],
-        "properties": {
-            "message": {"type": "string", "description": "要汇报或询问的内容。"},
-            "kind": {"type": "string", "description": "progress（默认）=状态更新；question=需要决策。"},
-            "wait": {"type": "boolean", "description": "仅 kind=question：true=阻塞等待主代理答复。"},
-            "timeout_s": {"type": "integer", "description": "wait=true 时等待答复的最长秒数（默认 300）。"},
-        },
-    }),
-]
 
 TA3_NATIVE_SCHEMAS: dict[str, dict] = {
     s["function"]["name"]: s for s in [
-        *_CORE, *_EDIT, *_TASK, *_WEB_SEARCH, *_ATTACHMENT, *_BACKGROUND, *_GOAL, *_ASK, *_MULTI_EDIT,
-        *_SYMBOL, *_TOOLKIT, *_BROWSER, *_DESKTOP, *_SUBAGENT_ADMIN,
+        # 仅保留 ta3 原生工具与「有参数适配器」的工具；
+        # 自造伪装工具（Desktop*/Browser*/附件读取等）已改走动态派生，不在此表。
+        *_CORE, *_EDIT, *_TASK, *_WEB_SEARCH, *_BACKGROUND,
     ]
 }
 
 
 def disguise_tools(tool_schemas: list[dict]) -> list[dict]:
-    """当前项目工具 schema → ta3 原生 schema（无映射的工具剔除）。
+    """当前项目工具 schema → ta3 伪装 schema（无映射的工具剔除）。
 
-    例外：MCP 工具（`mcp_<server>_<tool>`）不在静态映射表里，但名字动态、
-    无法预先枚举——统一改名为 ta3 风格伪装名并中文化描述（见 ta3_mcp），
-    不再整体剔除（此前它们被本函数丢弃，ta3 会话完全用不了 MCP）。
+    plan-365-1769 F1：**自造伪装工具**（Desktop*、Browser*、附件读取、子代理管理等，
+    见 `DYNAMIC_SCHEMA_ALIASES`）的 schema **从真实工具 schema 派生**——只把
+    `function.name` 换成伪装名，描述与参数原样沿用。这样真实工具新增/调整参数时
+    ta3 侧自动跟随，不会再出现「真实工具有、ta3 侧看不到」的漂移（这正是
+    desktop_click 的 ref/image_x 在 ta3 会话不可见、只能手算坐标导致点错的原因）。
+
+    其余工具走两条既有路径：
+    - ta3 原生工具与有参数适配器的工具 → `TA3_NATIVE_SCHEMAS` 的硬编码快照；
+    - MCP 工具名字动态、无法预先枚举 → 改名为 ta3 风格伪装名（见 `ta3_mcp`），不剔除。
     """
+    import copy
+
     from app.models.providers.ta3_mcp import disguise_schema, is_mcp_tool
-    from app.models.providers.ta3_tool_aliases import TO_TA3
+    from app.models.providers.ta3_tool_aliases import DYNAMIC_SCHEMA_ALIASES, TO_TA3
 
     out: list[dict] = []
     for schema in tool_schemas:
@@ -660,6 +266,14 @@ def disguise_tools(tool_schemas: list[dict]) -> list[dict]:
             if is_mcp_tool(real_name):
                 out.append(disguise_schema(schema))
             continue
+
+        # 自造工具：动态派生（单一事实来源，杜绝硬编码漂移）
+        if alias in DYNAMIC_SCHEMA_ALIASES:
+            derived = copy.deepcopy(schema)
+            derived.setdefault("function", {})["name"] = alias
+            out.append(derived)
+            continue
+
         native = TA3_NATIVE_SCHEMAS.get(alias)
         if native is None:
             continue

@@ -60,8 +60,35 @@ class TestApplyThinking:
         # 未指定 effort → 默认 1024（对齐 zcode）
         assert p._thinking_budget(None) == 1024
 
-    def test_disabled_leaves_kwargs_untouched(self):
+    def test_explicit_off_sends_disabled_on_supporting_gateway(self):
+        """v29: 用户选择档位 none（thinking=False）时显式下发关闭形态。
+
+        此前只做“不传”，网关/模型默认仍开思考——选了 none 也关不掉。
+        """
         p = _provider()
+        kwargs = {"model": "m", "temperature": 0.3, "messages": []}
+        p._apply_thinking(kwargs, ChatRequest(messages=[], model="m", thinking=False))
+        assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+        # 关闭不移除 temperature：只有开启时 thinking 模式才不支持采样参数
+        assert kwargs["temperature"] == 0.3
+
+    def test_effort_none_also_sends_disabled(self):
+        """v29: 只带档位 none（thinking=None，如辅助请求）同样下发关闭形态。"""
+        p = _provider()
+        kwargs = {"temperature": 0.3}
+        p._apply_thinking(kwargs, ChatRequest(messages=[], model="m", reasoning_effort="none"))
+        assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+
+    def test_unspecified_thinking_leaves_kwargs_untouched(self):
+        """v29: 未指定档位（thinking=None 且无 effort）时不触碰任何字段。"""
+        p = _provider()
+        kwargs = {"temperature": 0.3}
+        p._apply_thinking(kwargs, ChatRequest(messages=[], model="m"))
+        assert kwargs == {"temperature": 0.3}
+
+    def test_explicit_off_on_unsupported_gateway_untouched(self):
+        """v29: 不声明支持 thinking 的网关（OpenAI 官方等）不发关闭字段，避免 400。"""
+        p = _provider(base_url="https://api.openai.com/v1", model="gpt-5")
         kwargs = {"temperature": 0.3}
         p._apply_thinking(kwargs, ChatRequest(messages=[], model="m", thinking=False))
         assert kwargs == {"temperature": 0.3}
@@ -181,3 +208,30 @@ class TestReasoningFieldCompat:
         async for ev in p.stream_structured(_request()):
             events.append(ev)
         assert not [e for e in events if e["type"] == "thinking"]
+
+
+# ───────────── v29: 显式关闭思考（档位 none 不再只做“不传”） ─────────────
+
+class TestAnthropicExplicitOff:
+    """anthropic provider：用户选 none 时下发 thinking:{type:"disabled"}。"""
+
+    def _p(self, base_url: str = "https://api.anthropic.com"):
+        from app.models.providers.anthropic import AnthropicProvider
+
+        return AnthropicProvider(api_key="k", base_url=base_url, model="claude-sonnet-4-5")
+
+    def test_explicit_off_sends_disabled(self):
+        payload = self._p()._build_payload(
+            ChatRequest(messages=[], model="m", thinking=False), stream=True,
+        )
+        assert payload["thinking"] == {"type": "disabled"}
+
+    def test_effort_none_sends_disabled(self):
+        payload = self._p()._build_payload(
+            ChatRequest(messages=[], model="m", reasoning_effort="none"), stream=True,
+        )
+        assert payload["thinking"] == {"type": "disabled"}
+
+    def test_unspecified_leaves_no_thinking(self):
+        payload = self._p()._build_payload(ChatRequest(messages=[], model="m"), stream=True)
+        assert "thinking" not in payload

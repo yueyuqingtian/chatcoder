@@ -90,6 +90,13 @@ namespace DesktopCore
         [DllImport("iphlpapi.dll", SetLastError = true)]
         public static extern uint GetExtendedTcpTable(IntPtr table, ref int size, bool order, int af, int tableClass, int reserved);
 
+        // 窗口可见边界（plan-365-1757 A6）：GetWindowRect 含 DWM 不可见调整边框
+        // （Windows 10/11 上左右各约 7–8 px），按它把 CDP 的视口坐标换算回屏幕会系统性偏移。
+        // DWMWA_EXTENDED_FRAME_BOUNDS 返回的是用户实际看到的矩形。
+        [DllImport("dwmapi.dll")]
+        public static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out RECT rect, int size);
+        public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+
         [StructLayout(LayoutKind.Sequential)]
         public struct RECT { public int Left, Top, Right, Bottom; }
 
@@ -233,6 +240,24 @@ namespace DesktopCore
         }
 
         public static int GetInt(string s, string key, int dflt) { return (int)GetLong(s, key, dflt); }
+
+        /// <summary>读取浮点数（plan-365-1757：复用截图时需要调用方传入的缩放比）。</summary>
+        public static double GetDouble(string s, string key, double dflt)
+        {
+            if (string.IsNullOrEmpty(s)) return dflt;
+            string pat = "\"" + key + "\":";
+            int i = s.IndexOf(pat, StringComparison.Ordinal);
+            if (i < 0) return dflt;
+            i += pat.Length;
+            while (i < s.Length && s[i] == ' ') i++;
+            int j = i;
+            while (j < s.Length && (char.IsDigit(s[j]) || s[j] == '-' || s[j] == '.')) j++;
+            double d;
+            if (double.TryParse(s.Substring(i, j - i), NumberStyles.Float,
+                                CultureInfo.InvariantCulture, out d))
+                return d;
+            return dflt;
+        }
 
         public static bool GetBool(string s, string key, bool dflt)
         {

@@ -252,7 +252,12 @@ async def ws_endpoint(ws: WebSocket, session_id: int) -> None:
                 if turn_id:
                     # 延迟导入，避免 ws <-> engine <-> agent_loop 顶层循环导入
                     from app.orchestration import engine
-                    ok = await engine.cancel_turn(int(turn_id))
+                    # plan-365-1790: WS 停止入口此前无留痕——与 REST 同口径记录来源，
+                    # 便于在“任务突然停止”时区分是前端发送的 WS 指令还是 HTTP 请求。
+                    logger.warning(
+                        "[cancel] WS 收到停止请求 turn=%s session=%s", turn_id, session_id,
+                    )
+                    ok = await engine.cancel_turn(int(turn_id), source="ws")
                     await ws.send_text(json.dumps({"event": "ack", "payload": {"ref": f"cancel:{turn_id}", "ok": ok}}))
 
             elif event == "sync.request":

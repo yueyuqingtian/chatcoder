@@ -127,7 +127,10 @@ class WorkBuddyProvider(ModelProvider):
     def _apply_thinking(self, body: dict, request: ChatRequest) -> None:
         caps = get_model_caps(self._model_name)
         effort = (request.reasoning_effort or "").strip() or None
-        thinking_on = bool(request.thinking) or effort not in (None, "none")
+        # v29: 三态——thinking=False 或档位 none 表示用户显式关闭思考；None 且无档位
+        # 表示不开启、也不注入任何思考字段（保持网关/模型默认）。
+        off = request.thinking is False or (effort or "").lower() == "none"
+        thinking_on = (not off) and (bool(request.thinking) or effort is not None)
         thinking_format = caps.get("thinking_format")
 
         if thinking_format == "deepseek":
@@ -141,17 +144,21 @@ class WorkBuddyProvider(ModelProvider):
                 body.pop("reasoning_effort", None)
         elif thinking_format == "zai":
             # GLM（zai）系：enable_thinking 布尔，不传 reasoning_effort
-            if thinking_on:
-                body["enable_thinking"] = True
+            # v29: 关闭时显式下发 false——此前只在开启时下发 true，选 none 时字段缺失，
+            # 网关按模型默认仍可能开思考（关不掉）。
+            body["enable_thinking"] = thinking_on
             body.pop("reasoning_effort", None)
         elif caps.get("supports_reasoning_effort") is False:
-            # kimi 系：不传 reasoning_effort（模型不支持），thinking 透传由网关决定
-            if effort and effort != "none":
+            # kimi 系：不传 reasoning_effort（模型不支持）
+            # v29: 关闭时下发 thinking disabled（与 deepseek 系同款关闭形态）
+            if thinking_on:
                 body["thinking"] = {"type": "enabled"}
+            elif off:
+                body["thinking"] = {"type": "disabled"}
             body.pop("reasoning_effort", None)
         else:
             # 未知模型：标准 reasoning_effort 透传（xhigh 降级 high）
-            if effort and effort != "none":
+            if thinking_on and effort:
                 body["reasoning_effort"] = map_reasoning_effort(effort, caps)
 
         if thinking_on and (body.get("reasoning_effort") or body.get("enable_thinking")

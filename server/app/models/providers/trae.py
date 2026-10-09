@@ -133,6 +133,9 @@ class TraeProvider(ModelProvider):
         query = start_chat 同款消息块 JSON 数组（text 块）。user_info /
         client_info / streamlined_common_params 由 meta 提供（registry 注入
         trae_auth 的账号与设备指纹）。
+
+        v29: 该请求体没有思考开关字段（档位由云端 model_name 配置决定），
+        用户选择关闭思考同样只能不下发。
         """
         messages = [self._convert_message(m) for m in request.messages]
         query_blocks = [

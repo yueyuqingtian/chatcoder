@@ -152,14 +152,23 @@ class OpenAICompatibleProvider(ModelProvider):
         )
 
     def _apply_thinking(self, kwargs: dict, request: "ChatRequest") -> None:
-        """request.thinking=True 时写入 thinking 参数并移除 temperature。
+        """按 request.thinking 三态写入 thinking 参数并处理 temperature。
 
         对齐 deepseek-harness serialize.ts（thinking:{type:"enabled"}）与 zcode
         （thinking 开启时 temperature 不支持，置空由网关内部固定采样）。
         v23.1: 轻量网关（智谱 bigmodel 中转、LiteLLM 等）只认 thinking.type、
         不认识 budget_tokens，会直接 400 UNKNOWN_FIELD——budget_tokens 仅发给
         官方 Anthropic 网关（Anthropic extended thinking 协议原生要求该字段）。
+        v29: 用户显式选择档位 none（thinking=False）时下发 thinking:{type:"disabled"}，
+        避免网关/模型默认仍开思考导致"关不掉"（此前只做"不传"）。关闭形态仅对
+        声明支持 thinking 的网关下发——其它网关（OpenAI 官方等）收到未知字段会
+        400，保持不传。
         """
+        effort = (request.reasoning_effort or "").strip().lower()
+        if request.thinking is False or effort == "none":
+            if self.supports_thinking():
+                kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+            return
         if not request.thinking:
             return
         thinking: dict = {"type": "enabled"}

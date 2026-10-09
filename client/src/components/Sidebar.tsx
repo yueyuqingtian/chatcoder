@@ -38,6 +38,12 @@ interface SidebarProps {
 
 const STORAGE_KEY_COLLAPSED_PROJECTS = "chatcoder:collapsed-projects";
 
+/** plan-387-1825 E1：项目下会话列表的分批展开步长与「一次全开」阈值。
+ *  语义：首次显示 5 条，每次点「显示更多」+5；已显示达到 10 条后，
+ *  按钮文案变为「展开全部（剩余 N 项）」，点击一次全部展开。 */
+const SESSION_PAGE_STEP = 5;
+const SESSION_EXPAND_ALL_THRESHOLD = 10;
+
 /** 更新徽标：主进程发现新版本时在设置按钮右侧出现。
  * available 点击开始下载 → downloading 显示环形进度 → downloaded 显示「更新」按钮；
  * hover 弹出该版本 changelog（plan-246-1236 S4）。
@@ -612,9 +618,11 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
   /** 项目下的会话列表（普通项目与工作树共用；含「显示更多」分页） */
   const renderProjectChildren = (p: ProjectOut, emptyHint = false) => {
     const projSessions = filteredSessions.filter((s) => s.project_id === p.id);
-    const limit = projectLimits[p.id] || 5;
+    const limit = projectLimits[p.id] || SESSION_PAGE_STEP;
     const shown = projSessions.slice(0, limit);
     const remaining = projSessions.length - limit;
+    // 达到阈值后按钮语义从「再显示一批」切换为「一次全开」
+    const canExpandAll = limit >= SESSION_EXPAND_ALL_THRESHOLD && remaining > 0;
     return (
       <div className="sb-project-children">
         {shown.map(renderSession)}
@@ -628,14 +636,21 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
               className="sb-more-btn"
               onClick={(e) => {
                 e.stopPropagation();
-                setProjectLimits((prev) => ({
-                  ...prev,
-                  [p.id]: (prev[p.id] || 5) + 5,
-                }));
+                const total = projSessions.length;
+                setProjectLimits((prev) => {
+                  const cur = prev[p.id] ?? SESSION_PAGE_STEP;
+                  // 已达阈值：一次展开全部（slice 会自然收敛到总数，按钮随之消失）
+                  const next = cur >= SESSION_EXPAND_ALL_THRESHOLD ? total : cur + SESSION_PAGE_STEP;
+                  return { ...prev, [p.id]: next };
+                });
               }}
             >
               <IconChevronDown size={12} />
-              <span>{t("sidebar.show_more", { count: remaining })}</span>
+              <span>
+                {canExpandAll
+                  ? t("sidebar.expand_all", { count: remaining })
+                  : t("sidebar.show_more", { count: remaining })}
+              </span>
             </button>
           </div>
         )}
