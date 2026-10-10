@@ -105,6 +105,9 @@ export interface ProjectOut {
   is_worktree?: boolean;
   parent_project_id?: number | null;
   worktree_branch?: string | null;
+  /** plan-20261009-ui U1：项目图标 key / 色板名称（空值 = 默认外观） */
+  icon?: string | null;
+  color?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -344,6 +347,8 @@ export interface SessionOut {
   pinned: boolean;
   /** v7: 置顶时间——前端"后置顶在上"排序依据 */
   pinned_at?: string | null;
+  /** plan-20261009-ui U2：创建时间（首页用量热力图按创建日统计会话数） */
+  created_at?: string | null;
   // plan-230-1144 M2: 模式外置为可配置数据，自定义模式名是任意字符串。
   // plan-75-332: 语义改为**执行模式**——内置 3 值（agent/plan/readonly）；
   // 旧值 default / accept_edits 由后端归一化为 agent。

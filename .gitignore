@@ -245,3 +245,6 @@ server/*_out.txt
 /tmp_*.py
 /tmp_*.patch
 /tmp_*.cjs
+
+# 本地预览/开发工具配置（不入库）
+/.claude/

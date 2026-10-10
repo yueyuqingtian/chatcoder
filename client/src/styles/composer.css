@@ -1,0 +1,447 @@
+/* ═══════════════════════════════════════════════════════════
+ * 输入框 v3（plan-20261009-ui U2）
+ *  · 输入卡：圆角 12、白底、极淡双层阴影；聚焦只加深边框与阴影（无品牌色描边）；
+ *  · 工具条：左「+ · 附件 · 执行模式 · 权限」，右「模型 · 思考深度 · 上下文 · 发送」，控件统一 28~32px；
+ *  · 浮层：全部走 ui/Popover（圆角 14 / 内边距 6 / 菜单项 8）；
+ *  · 排队托盘：输入卡上方独立托盘；工作区胶囊：输入卡左下。
+ * 新类名统一 cc- 前缀，不与 global.css 旧规则互相覆盖。
+ * ═══════════════════════════════════════════════════════════ */
+
+/* ── 输入卡 ─────────────────────────────────────────────── */
+.composer-main {
+  border-radius: var(--r-card);
+  border: 1px solid var(--border);
+  background: var(--color-input);
+  padding: 10px 10px 8px 12px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, calc(0.03 * var(--shadow-strength, 1))), 0 6px 20px -8px rgba(0, 0, 0, calc(0.08 * var(--shadow-strength, 1)));
+  transition: border-color var(--dur-2) var(--ease-standard), box-shadow var(--dur-3) var(--ease-standard);
+}
+/* 聚焦零视觉变化（plan-234-1171 R2 约定，focus.css §4）：不加深边框、不加重阴影，光标即焦点提示；
+   用户明确反馈「聚焦时输入框不要出现黑色边框」。拖入文件的高亮由 .is-drag-over 单独承担。 */
+:root[data-theme="dark"] .composer-main { background: color-mix(in oklab, var(--color-neutral-800) 70%, var(--color-background)); }
+.composer-input { font-size: 13.5px; line-height: 1.55; padding: 2px 2px 6px; }
+
+/* ── 工具条 ─────────────────────────────────────────────── */
+.cc-toolbar { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); padding-top: 4px; }
+.cc-tools-left { display: flex; align-items: center; gap: 4px; flex-shrink: 0; min-width: 0; }
+.cc-tools-right { display: flex; align-items: center; gap: 4px; min-width: 0; flex-shrink: 1; justify-content: flex-end; }
+.cc-anchor { position: relative; display: inline-flex; min-width: 0; }
+
+/* + 按钮：描边圆，打开时图标弹性旋转成 ×、底色加深 */
+.cc-plus {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard), border-color var(--dur-2) var(--ease-standard), transform var(--dur-spring) var(--spring-bouncy);
+}
+.cc-plus:hover { background: var(--bg-hover); color: var(--text-1); border-color: color-mix(in oklab, var(--text-1) 28%, transparent); }
+.cc-plus:active { transform: scale(0.92); }
+.cc-plus.is-open { background: var(--bg-active); color: var(--text-1); border-color: transparent; }
+
+.cc-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard);
+}
+.cc-icon-btn:hover { background: var(--bg-hover); color: var(--text-1); }
+
+/* 胶囊按钮（执行模式 / 权限 / 思考深度）：28px 高、8px 圆角，无底色，悬停浅底 */
+.cc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  min-width: 0;
+  padding: 0 9px;
+  border: none;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard);
+}
+.cc-chip:hover, .cc-chip.is-open { background: var(--bg-hover); color: var(--text-1); }
+.cc-chip.is-open { background: var(--bg-active); }
+.cc-chip-label { overflow: hidden; text-overflow: ellipsis; }
+.cc-chip-caret { opacity: 0.6; transition: transform var(--dur-spring) var(--spring-snappy); }
+.cc-chip.is-open .cc-chip-caret { transform: rotate(180deg); }
+.cc-chip.is-danger { color: var(--error); }
+.cc-chip.is-danger:hover, .cc-chip.is-danger.is-open { background: var(--error-soft); color: var(--error); }
+/* 执行模式胶囊语义色：智能体中性 / 计划强调（信息蓝浅底）/ 只读弱化 */
+.cc-mode-chip.tone-accent { color: var(--info); background: color-mix(in oklab, var(--info) 10%, transparent); }
+.cc-mode-chip.tone-accent:hover, .cc-mode-chip.tone-accent.is-open { background: color-mix(in oklab, var(--info) 16%, transparent); color: var(--info); }
+.cc-mode-chip.tone-muted { color: var(--text-3); }
+
+/* 模型选择触发器与胶囊同规格 */
+.cc-tools-right .composer-model-badge { height: 28px; padding: 0 9px; border-radius: var(--r-ctl); font-size: 12.5px; }
+
+/* 上下文圆环：命中区与其它图标按钮同高 */
+.cc-tools-right .composer-usage-ring { width: 28px; height: 28px; border-radius: var(--r-ctl); }
+
+/* 发送 / 停止 / 排队：同一枚 32px 圆，三态只换底色与图形（图形带弹簧形变，按钮位置与大小不变）
+ *  · 发送：实心主色 + 箭头；输入为空时降为浅灰（禁用）；
+ *  · 停止：实心主色 + 圆角方块——与发送同一视觉重量，不加外圈、不加循环动画
+ *    （运行态已由消息流里的「处理中」与侧栏会话状态图标表达，按钮自己不必再动）；
+ *  · 排队：浅灰底 + 深色箭头（次要：稍后发送），悬停才变实心；不描边。 */
+.cc-send {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  margin-left: 2px;
+  border: none;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  color: var(--accent-contrast);
+  cursor: pointer;
+  transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard), transform var(--dur-spring) var(--spring-bouncy);
+}
+.cc-send:hover:not(:disabled) { background: var(--accent-hover); transform: scale(1.06); }
+.cc-send:active:not(:disabled) { transform: scale(0.92); }
+.cc-send:disabled { background: var(--bg-active); color: var(--text-3); cursor: not-allowed; }
+.cc-send.is-queue { background: var(--bg-active); color: var(--text-1); }
+.cc-send.is-queue:hover:not(:disabled) { background: var(--accent); color: var(--accent-contrast); }
+
+/* ── 输入卡下方：工作区胶囊 ─────────────────────────────── */
+.cc-under { display: flex; align-items: center; gap: var(--sp-3); min-height: 26px; margin-top: 6px; padding: 0 2px; }
+.cc-ws {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  max-width: 320px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard);
+}
+.cc-ws:hover, .cc-ws.is-open { background: var(--bg-hover); color: var(--text-1); }
+.cc-ws.is-open .cc-chip-caret { transform: rotate(180deg); }
+.cc-ws.is-empty { color: var(--text-3); }
+.cc-ws-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.cc-ws.is-locked { cursor: default; color: var(--text-3); }
+.cc-ws.is-locked:hover { background: transparent; color: var(--text-2); }
+.cc-ws-lock { opacity: 0; transition: opacity var(--dur-2) var(--ease-standard); }
+.cc-ws.is-locked:hover .cc-ws-lock, .cc-ws.is-locked:focus-visible .cc-ws-lock { opacity: 0.7; }
+.cc-ws-branch {
+  display: inline-flex; align-items: center; gap: 3px;
+  height: 18px; padding: 0 6px; border-radius: var(--r-pill);
+  background: var(--bg-hover); color: var(--text-3); font-size: 11px;
+}
+
+/* ── 浮层规格 ───────────────────────────────────────────── */
+.cc-plus-pop { width: 312px; }
+.cc-plus-pop .cc-mode-item { min-height: 44px; }
+.cc-goal-row { display: flex; align-items: center; gap: 2px; }
+.cc-goal-row > .pop-item { flex: 1; min-width: 0; }
+.cc-goal-cancel { width: var(--ic-btn-sm); height: var(--ic-btn-sm); color: var(--text-3); }
+.cc-ext-row { position: relative; }
+.cc-ext-count { font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.cc-ext-pop { width: 360px; }
+.cc-ext-list { max-height: min(300px, 42vh); }
+.cc-ext-item { min-height: 34px; }
+.cc-ext-name { flex-shrink: 0; max-width: 48%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.cc-ext-img { width: 16px; height: 16px; border-radius: var(--r-sm); object-fit: cover; }
+.cc-ext-glyph { display: inline-flex; color: var(--text-2); }
+.cc-approval-pop { width: 300px; }
+.cc-ws-pop { width: 340px; }
+
+/* 思考深度：分档滑块（参考图6） */
+.cc-effort-pop { width: 312px; }
+.cc-effort-head { display: flex; align-items: center; gap: var(--sp-3); padding: 8px 10px 0; }
+.cc-effort-title { font-size: 13px; color: var(--text-2); }
+.cc-effort-value { font-size: 14px; font-weight: 600; color: var(--text-1); }
+.cc-effort-help { margin-left: auto; display: inline-flex; color: var(--text-3); cursor: help; border-radius: var(--r-pill); }
+.cc-effort-ends { display: flex; justify-content: space-between; padding: 10px 12px 8px; font-size: 11.5px; color: var(--text-3); }
+/* 分档滑块本体见 overlay.css 的 .ui-step*；这里只定它在浮窗里的边距 */
+.cc-effort-pop .ui-step { margin: 0 12px 2px; }
+/* 档位名切换：新值从下方轻轻升起（key 随档位变化重挂载，动画自动重放） */
+.cc-effort-value { display: inline-block; animation: cc-effort-swap var(--dur-spring) var(--spring-soft) both; }
+@keyframes cc-effort-swap { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.cc-effort-manage .pop-item-desc { white-space: normal; }
+
+/* ── 引用 / 附件 chips：胶囊 + 按类型着色 ──────────────── */
+.composer-refs { gap: 6px; padding: 0 0 8px; }
+.composer-ref-chip {
+  --ref-c: var(--text-2);
+  height: 24px;
+  padding: 0 4px 0 8px;
+  gap: 5px;
+  border: none;
+  border-radius: var(--r-pill);
+  background: color-mix(in oklab, var(--ref-c) 11%, transparent);
+  color: var(--ref-c);
+  font-size: 12px;
+  animation: mo-bounce-in var(--dur-spring) var(--spring-bouncy) both;
+}
+.composer-ref-file { --ref-c: var(--pc-blue); }
+.composer-ref-skill { --ref-c: var(--pc-violet); }
+.composer-ref-mcp { --ref-c: var(--pc-teal); }
+.composer-ref-plugin { --ref-c: var(--pc-orange); }
+.composer-ref-remove { width: 18px; height: 18px; border-radius: var(--r-pill); color: inherit; opacity: 0.6; }
+.composer-ref-remove:hover { opacity: 1; background: color-mix(in oklab, var(--ref-c) 16%, transparent); color: inherit; }
+.composer-attachments { gap: 6px; padding: 0 0 8px; }
+.composer-attach-chip { height: 30px; padding: 0 6px 0 4px; border-radius: var(--r-ctl); background: var(--bg-hover); border: none; font-size: 12px; animation: mo-bounce-in var(--dur-spring) var(--spring-bouncy) both; }
+.composer-attach-chip .attach-chip-thumb { width: 22px; height: 22px; border-radius: 6px; }
+.composer-attach-chip .remove { display: inline-flex; width: 18px; height: 18px; align-items: center; justify-content: center; border-radius: var(--r-pill); }
+.composer-attach-chip .remove:hover { background: var(--bg-active); }
+
+/* ── 排队托盘 ───────────────────────────────────────────── */
+.cc-queue {
+  margin: 0 0 8px;
+  padding: 6px 6px 2px;
+  border: 1px solid var(--surface-inset-border);
+  border-radius: var(--r-card);
+  background: var(--surface-tray);
+  animation: mo-rise-in var(--dur-4) var(--spring-soft) both;
+}
+.cc-queue-head { display: flex; align-items: center; gap: 6px; padding: 2px 6px 6px; min-width: 0; }
+.cc-queue-title { font-size: 12px; font-weight: 600; color: var(--text-1); }
+.cc-queue-hint { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--text-3); }
+.cc-queue-clear {
+  flex-shrink: 0; height: 22px; padding: 0 8px; border: none; border-radius: var(--r-ctl);
+  background: transparent; color: var(--text-3); font-size: 11.5px; cursor: pointer;
+}
+.cc-queue-clear:hover { background: var(--bg-hover); color: var(--text-1); }
+.cc-queue-slot { margin-bottom: 4px; }
+.cc-queue-slot > * { animation: mo-slide-in var(--dur-4) var(--spring-soft) both; }
+.cc-queue-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-height: 34px;
+  padding: 3px 4px 3px 8px;
+  border: 1px solid var(--surface-inset-border);
+  border-radius: var(--r-ctl);
+  background: var(--surface-inset);
+  transition: border-color var(--dur-2) var(--ease-standard);
+}
+.cc-queue-item:hover { border-color: var(--border-hover); }
+.cc-queue-idx {
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  width: 20px; height: 20px; border-radius: var(--r-pill);
+  background: var(--bg-hover); color: var(--text-2);
+  font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums;
+}
+.cc-queue-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--text-1); }
+.cc-queue-attach { display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.cc-queue-ops { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; opacity: 0.35; transition: opacity var(--dur-2) var(--ease-standard); }
+.cc-queue-item:hover .cc-queue-ops, .cc-queue-item:focus-within .cc-queue-ops { opacity: 1; }
+.cc-queue-sending { font-size: 11.5px; color: var(--info); padding: 0 6px; }
+.cc-queue-item.is-flushing {
+  border-color: color-mix(in oklab, var(--info) 35%, transparent);
+  background: linear-gradient(100deg, var(--surface-inset) 30%, color-mix(in oklab, var(--info) 10%, var(--surface-inset)) 50%, var(--surface-inset) 70%) 0 0 / 200% 100%;
+  animation: mo-shimmer 1.4s linear infinite;
+}
+.cc-queue-item.is-flushing .cc-queue-ops { opacity: 1; }
+
+/* 目标胶囊（输入卡内顶部）：与引用 chips 同一胶囊语言 */
+.goal-pill { height: 28px; padding: 0 4px 0 6px; margin: 0 0 8px; border: none; background: color-mix(in oklab, var(--success) 9%, transparent); }
+.goal-pill-label { padding: 2px 8px; background: color-mix(in oklab, var(--success) 16%, transparent); color: var(--success); font-weight: 600; }
+.goal-pill-btn { width: 22px; height: 22px; }
+
+/* 窄面板收档：useToolbarFit 按工具条宽度写入 data-fit（空格分隔的已收起项），
+ * 依次收起 模型名 → 思考深度文字 → 执行模式文字 → 权限文字 → 紧凑内边距，只剩图标，名称由悬停提示承接。
+ * 右侧只有模型名可以被挤（带省略号、保底 56px），其余按钮不收缩，发送键不会被挤出或压到左侧文字上。 */
+.cc-tools-right > .cc-anchor { flex-shrink: 0; }
+.cc-tools-right .mp-label { min-width: 56px; }
+.cc-toolbar[data-fit~="model"] .mp-label { display: none; }
+.cc-toolbar[data-fit~="effort"] .cc-effort-chip .cc-chip-label { display: none; }
+.cc-toolbar[data-fit~="mode"] .cc-mode-chip .cc-chip-label { display: none; }
+.cc-toolbar[data-fit~="approval"] .cc-approval-chip :is(.cc-chip-label, .cc-chip-caret) { display: none; }
+.cc-toolbar[data-fit~="tight"] { gap: 4px; }
+.cc-toolbar[data-fit~="tight"] :is(.cc-chip, .composer-model-badge) { padding: 0 7px; }
+
+/* ═══════════════════════════════════════════════════════════
+ * 悬浮胶囊（任务进度 / 文件变更，plan-20261009-ui U6）
+ * 约束沿用 plan-282-1441 #3：聚焦 / 展开 **零颜色与边框变化**（点击必然伴随 hover，
+ * 所以 hover 也只允许投影变化）；浮层在胶囊正上方居中（独立 translate 属性居中）。
+ * 胶囊高度保持约 30px——消息流底部让位块（.message-flow-capsule-space，44px）按它换算。
+ * ═══════════════════════════════════════════════════════════ */
+.tcap-wrap {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  margin-bottom: 8px;
+  display: flex;
+  justify-content: center;
+  /* 容器横跨整宽，只作居中锚点；事件穿透，避免挡住消息流底部的点击 / 选择 */
+  pointer-events: none;
+  z-index: 6;
+  animation: mo-rise-in var(--dur-4) var(--spring-soft) both;
+}
+.tcap-wrap > * { pointer-events: auto; }
+/* 间隙桥接：胶囊与浮层间 8px 是指针死区，桥接让指针穿隙时仍处于容器内 */
+.tcap-wrap::before { content: ""; position: absolute; left: 0; right: 0; bottom: 100%; height: 10px; pointer-events: auto; }
+.tcap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: min(560px, 80vw);
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--color-popover);
+  box-shadow: var(--shadow-xs);
+  color: var(--text-2);
+  font-size: 12.5px;
+  transition: box-shadow var(--dur-2) var(--ease-standard);
+}
+.tcap:hover { box-shadow: var(--shadow-sm); }
+.tcap::before { content: ""; position: absolute; left: 0; right: 0; bottom: 100%; height: 10px; }
+.tcap-seg-wrap { position: relative; display: inline-flex; min-width: 0; }
+.tcap-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  height: 22px;
+  padding: 0 9px 0 7px;
+  border: none;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: background var(--dur-2) var(--ease-standard);
+}
+.tcap-seg:hover { background: var(--bg-hover); }
+/* 聚焦 / 展开不改底色（#3） */
+.tcap-seg:focus, .tcap-seg:focus-visible, .tcap-seg.is-open { outline: none; }
+.tcap-seg:focus-visible, .tcap-seg.is-open:not(:hover) { background: transparent; }
+.tcap-seg > svg { flex-shrink: 0; color: var(--text-3); }
+.tcap-num { flex-shrink: 0; color: var(--text-1); font-weight: 600; font-variant-numeric: tabular-nums; }
+.tcap-title { min-width: 0; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); }
+.tcap-caret { transition: transform var(--dur-spring) var(--spring-snappy); }
+.tcap-seg.is-open .tcap-caret { transform: rotate(180deg); }
+.tcap-diff { display: inline-flex; gap: 4px; flex-shrink: 0; font-variant-numeric: tabular-nums; font-size: 12px; }
+.tcap-diff .add { color: var(--success); }
+.tcap-diff .del { color: var(--error); }
+.tcap-divider { width: 1px; height: 14px; margin: 0 2px; flex-shrink: 0; background: var(--border); }
+
+/* 浮层：标准浮层规格（圆角 14 / 内边距 6），在胶囊正上方居中 */
+.tcap-pop {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  translate: -50% 0;
+  z-index: 7;
+  display: flex;
+  flex-direction: column;
+  width: max-content;
+  min-width: 280px;
+  max-width: min(420px, 86vw);
+  max-height: 340px;
+  padding: var(--pop-pad);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pop);
+  background: var(--color-popover);
+  box-shadow: var(--shadow-pop);
+  transform-origin: 50% 100%;
+  cursor: default;
+  --pop-dy: 6px;
+}
+.tcap-pop-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: 8px 10px 6px;
+}
+.tcap-pop-title { font-size: 13px; font-weight: 600; color: var(--text-1); }
+.tcap-pop-count { font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.tcap-bar { height: 3px; margin: 0 10px 6px; border-radius: var(--r-pill); background: var(--bg-active); overflow: hidden; }
+.tcap-bar > span { display: block; height: 100%; border-radius: inherit; background: var(--success); transition: width var(--dur-4) var(--ease-standard); }
+.tcap-pop-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+/* 步骤行：状态图标 + 标题 + 备注 */
+.tcap-step { display: flex; align-items: center; gap: 9px; min-height: 30px; padding: 4px 10px; border-radius: var(--r-ctl); font-size: 12.5px; color: var(--text-2); }
+.tcap-step:hover { background: var(--bg-hover); }
+.tcap-step-title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tcap-step.is-running .tcap-step-title { color: var(--text-1); font-weight: 500; }
+.tcap-step.is-done .tcap-step-title { color: var(--text-3); }
+.tcap-step-note { flex-shrink: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--text-3); }
+/* 变更分组 */
+.tcap-group { display: flex; flex-direction: column; }
+.tcap-group + .tcap-group { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); }
+.tcap-group-head { display: flex; align-items: center; gap: var(--sp-3); min-height: 28px; padding: 0 6px 0 10px; font-size: 11.5px; color: var(--text-3); }
+.tcap-group-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--text-2); }
+.tcap-group-count { flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.tcap-ops { margin-left: auto; display: inline-flex; gap: 2px; flex-shrink: 0; }
+.tcap-op {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--ic-btn-xs);
+  height: var(--ic-btn-xs);
+  padding: 0;
+  border: none;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard);
+}
+.tcap-op:hover { background: var(--bg-active); color: var(--text-1); }
+.tcap-op.is-danger:hover { background: var(--error-soft); color: var(--error); }
+.tcap-file { display: flex; align-items: center; gap: 9px; min-height: 32px; padding: 0 6px 0 10px; border-radius: var(--r-ctl); font-size: 12.5px; color: var(--text-2); }
+.tcap-file:hover { background: var(--bg-hover); }
+.tcap-file-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.tcap-file-base { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-1); }
+.tcap-file-dir { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--text-3); }
+.tcap-file-ops { opacity: 0; transition: opacity var(--dur-2) var(--ease-standard); }
+.tcap-file:hover .tcap-file-ops, .tcap-file:focus-within .tcap-file-ops { opacity: 1; }
+
+/* 图标按钮最小可点区 24px（plan-20261009-ui U7：原 xs 档 22px 偏小） */
+.ui-icon-btn.size-xs { width: var(--ic-btn-xs); height: var(--ic-btn-xs); }

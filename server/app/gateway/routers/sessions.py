@@ -28,6 +28,8 @@ async def _to_out(db: AsyncSession, s) -> SessionOut:
         permission_mode=normalize_execution_mode(s.permission_mode),
         approval_mode=normalize_approval_mode(getattr(s, "approval_mode", None)),
         pinned_at=getattr(s, "pinned_at", None),
+        # plan-20261009-ui U2：首页用量热力图按「创建日」统计会话数
+        created_at=str(s.created_at) if getattr(s, "created_at", None) else None,
         fork_parent_id=s.fork_parent_id,
         worktree_path=s.worktree_path,
         has_running=await session_service.has_running_turn(db, s.id),

@@ -106,6 +106,9 @@ const DICT: Dict = {
   // plan-219: 空态首页副标题与快捷动作 chips
   // S16（plan-41-197）：细化模板提示词——写明角色、步骤与输出要求；新增「排查线上报错」「安全重构」。
   "workspace.subtitle":           ["今天想让我帮你做点什么？", "What can I help you with today?"],
+  // plan-20261009-ui U2：空态首页主副标语（主题：在对话中即可完成编码）
+  "workspace.tagline":            ["聊着聊着，代码就写好了", "Just chat — the code writes itself"],
+  "workspace.tagline_sub":        ["说出需求，读代码、改文件、跑测试，全都在对话里完成", "Say what you need — reading, editing and testing all happen right in the conversation"],
   "workspace.quick_fix":          ["修复报错", "Fix a bug"],
   "workspace.quick_fix_prompt":   ["帮我修复以下报错。要求：① 先定位根因（给出证据链，如日志 / 代码位置）；② 给出最小修复方案；③ 用测试或运行验证修复有效，并说明如何回归验证：\n", "Help me fix the following error. Requirements: (1) locate the root cause with an evidence chain (logs / code); (2) give the minimal fix; (3) verify with tests or a run, and describe regression steps:\n"],
   "workspace.quick_triage":       ["排查线上报错", "Triage a live error"],
@@ -131,6 +134,13 @@ const DICT: Dict = {
   "composer.mode_agent":          ["智能体模式", "Agent Mode"],
   "composer.mode_plan":           ["计划模式", "Plan Mode"],
   "composer.mode_readonly":       ["只读模式", "Read Only"],
+  // plan-20261009-ui U2：+ 浮窗与模式胶囊的短名 / 一行说明
+  "composer.mode_agent_short":    ["智能体", "Agent"],
+  "composer.mode_plan_short":     ["计划", "Plan"],
+  "composer.mode_readonly_short": ["只读", "Read only"],
+  "composer.mode_agent_desc":     ["自主读写文件、运行命令，端到端完成任务", "Reads, edits and runs commands to finish the task end to end"],
+  "composer.mode_plan_desc":      ["先给出方案，确认后再动手执行", "Proposes a plan first and executes after you confirm"],
+  "composer.mode_readonly_desc":  ["只阅读与分析代码，不做任何修改", "Reads and analyzes only, never changes anything"],
   "composer.approval_title":      ["权限模式", "Permission Mode"],
   "composer.approval_ask":        ["询问审批", "Ask Approval"],
   "composer.approval_ask_desc":   ["执行命令、修改工作区外文件或访问网络前，始终询问", "Always ask before running commands, writing outside the workspace, or accessing the network"],
@@ -167,6 +177,15 @@ const DICT: Dict = {
   "rp.fullscreen":                ["全屏", "Fullscreen"],
   "rp.scale":                     ["缩放", "Restore"],
   "rp.collapse":                  ["折叠", "Collapse"],
+  "rp.close_tab":                 ["关闭标签", "Close tab"],
+  "rp.recent_closed":             ["最近关闭", "Recently closed"],
+  "rp.launch_title":              ["打开一个工具", "Open a tool"],
+  "rp.launch_sub":                ["任务、网页、终端与文件，并排查看", "Tasks, web, terminal and files side by side"],
+  "rp.desc_task":                 ["进度、产物与文件审核", "Progress, artifacts and review"],
+  "rp.desc_browser":              ["浏览网页，标注页面元素", "Browse and annotate pages"],
+  "rp.desc_terminal":             ["在项目目录里运行命令", "Run commands in the project"],
+  "rp.desc_files":                ["浏览并预览项目文件", "Browse and preview files"],
+  "rp.desc_debug":                ["断点、变量与调用栈", "Breakpoints, variables, call stack"],
 
   // ── 命令中心 CommandCenter ──
   "cmd.placeholder":              ["搜索操作、任务或文件", "Search actions, tasks, or files"],

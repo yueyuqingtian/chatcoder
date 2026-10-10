@@ -50,6 +50,9 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("projects", "is_worktree", "BOOLEAN DEFAULT 0 NOT NULL"),
     ("projects", "parent_project_id", "BIGINT"),
     ("projects", "worktree_branch", "VARCHAR(200)"),
+    # ========== projects（plan-20261009-ui U1：项目图标 / 颜色）==========
+    ("projects", "icon", "VARCHAR(40)"),
+    ("projects", "color", "VARCHAR(20)"),
     # ========== db_connections（plan-282-1441 #7：内置 MCP「数据库连接」）==========
     ("db_connections", "project_id", "BIGINT"),
     ("db_connections", "is_active", "BOOLEAN DEFAULT 0 NOT NULL"),

@@ -16,32 +16,33 @@ import {
 import { isBusy } from "../../perf/bus";
 import { registerReconcileTask, RECONCILE_ORDER } from "../../perf/reconcile";
 import {
-  IconArrowUp,
-  IconStop,
   IconPaperclip,
-  IconPlus,
-  IconMic,
-  IconChevronDown,
   IconChevronLeft,
   IconChevronRight,
   IconX,
-  IconFolder,
-  IconShield,
-  IconPlay,
-  IconAlertTriangle,
-  IconBrain,
   IconTarget,
   IconCheck,
   IconImage,
   IconCode,
   IconTerminal,
   IconBox,
-  IconPackage,
   IconPlug,
   IconFileText,
   IconRingProgress,
-  IconSpinner,
+  IconPuzzle,
+  IconSparkles,
 } from "../icons";
+// plan-20261009-ui U2：输入框重做——+ 浮窗 / 思考深度滑块 / 权限 / 工作区 / 排队托盘拆为独立组件
+import { IconPlusX, IconSendStop } from "../iconkit/MorphIcons";
+import { PlusMenu, type ModeOption } from "../composer/PlusMenu";
+import type { ExtItem } from "../composer/ExtensionPicker";
+import { EffortPicker } from "../composer/EffortPicker";
+import { ApprovalPicker } from "../composer/ApprovalPicker";
+import { WorkspaceChip } from "../composer/WorkspaceChip";
+import { QueueTray } from "../composer/QueueTray";
+import { useToolbarFit } from "../composer/useToolbarFit";
+import { BUILTIN_MODES, MODE_META, customModeIcon, EFFORT_RANK } from "../composer/modeMeta";
+import type { ExtKind } from "../../store/navIntent";
 import { Modal } from "../Modal";
 import { createPortal } from "react-dom";
 import { ModelPicker } from "./ModelPicker";
@@ -52,18 +53,12 @@ import { useDraftsStore, normalizeDraftMode, normalizeApprovalMode, type Approva
 import { useI18n } from "../../store/i18n";
 import { api, resolveFileUrl, type AttachmentInfo, type McpServerOut, type PermissionProfileOut, type PluginMarketItem, type SkillOut, type TreeNode } from "../../api/client";
 import { openGallery } from "../../store/gallery";
-import { useClickOutside } from "../../hooks/useClickOutside";
 // plan-75-332: 权限模式菜单说明文案走统一 Tooltip（遵循“禁止新增原生 title”）
 import { Tooltip } from "../ui";
 
-/** v7: 思考深度档位高低序——与 ModelsPanel REASONING_OPTS 对齐，用于取模型最高档兜底 */
-const EFFORT_RANK: Record<string, number> = {
-  none: 0, minimal: 1, low: 2, medium: 3, high: 4, xhigh: 5, max: 6,
-};
-
-/** plan-75-332 R2（用户指定）：执行模式菜单固定档位顺序——只读 → 计划 → 智能体；
- *  自定义模式排在其后（保持后端返回的相对顺序）。 */
-const BUILTIN_MODE_ORDER = ["readonly", "plan", "agent"];
+/** plan-20261009-ui U2：+ 浮窗中执行模式的顺序改为「智能体 → 计划 → 只读」——
+ *  最常用的默认模式排在最上，自定义模式排在其后（保持后端返回的相对顺序）。 */
+const BUILTIN_MODE_ORDER: readonly string[] = BUILTIN_MODES;
 
 /** v7: 取模型支持的最高思考档位（无支持返回 null）——新建任务冷启动默认 */
 function maxEffortOf(reasoningEfforts?: string[] | null): string | null {
@@ -144,6 +139,9 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   const goalStatus = isHome ? (homeGoalText ? "active" : "none") : (currentSession?.goal_status ?? "none");
   const goalTurnsUsed = currentSession?.goal_turns_used ?? 0;
   const [showGoalModal, setShowGoalModal] = useState(false);
+  // 工具条收窄：用 state 持有节点（问答 / 审批态下工具条不渲染，之后再出现时需要重新观察）
+  const [toolbarEl, setToolbarEl] = useState<HTMLDivElement | null>(null);
+  useToolbarFit(toolbarEl);
   const [goalInput, setGoalInput] = useState("");
   /** goal.completed 后的 3 秒过渡展示（label「已完成」→ 淡出） */
   const [goalCompletedVisible, setGoalCompletedVisible] = useState(false);
@@ -285,9 +283,11 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   // plan-219: 空态首页快捷 chips 预填输入框（detail.text 非空时写入并聚焦）
   useEffect(() => {
     const onPrefillEvt = (e: Event) => {
-      const text = (e as CustomEvent<{ text?: string }>).detail?.text;
+      const detail = (e as CustomEvent<{ text?: string; ifEmpty?: boolean }>).detail;
+      const text = detail?.text;
       if (!text) return;
-      setInput(text);
+      // plan-20261009-ui U2：首页示例对话点击填入——输入框已有内容时保持不动，不覆盖用户正在写的文字
+      setInput((prev) => (detail?.ifEmpty && prev.trim() ? prev : text));
       taRef.current?.focus();
     };
     window.addEventListener("chatcoder:composer-prefill", onPrefillEvt);
@@ -346,12 +346,12 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   const [showReasoning, setShowReasoning] = useState(false);
   const [showSlash, setShowSlash] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
-  const [showProjectMenu, setShowProjectMenu] = useState(false);
-  const [showModeMenu, setShowModeMenu] = useState(false);
-  // plan-75-332: 权限模式菜单（输入框右侧）——与执行模式菜单互斥展开
+  // plan-20261009-ui U2：+ 浮窗（执行模式 / 目标 / 插件·技能·连接器），与其它浮窗互斥
+  const [showPlus, setShowPlus] = useState(false);
+  const plusBtnRef = useRef<HTMLButtonElement>(null);
+  const modeChipRef = useRef<HTMLButtonElement>(null);
+  // plan-75-332: 权限模式菜单（输入框左侧）——与其它浮窗互斥展开
   const [showApprovalMenu, setShowApprovalMenu] = useState(false);
-  const [addingDir, setAddingDir] = useState(false);
-  const [listening, setListening] = useState(false);
   const [showAt, setShowAt] = useState(false);
   const [atIndex, setAtIndex] = useState(0);
   const [atQuery, setAtQuery] = useState("");
@@ -369,16 +369,13 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   const [showSkills, setShowSkills] = useState(false);
   const [skillIndex, setSkillIndex] = useState(0);
   const [skillQuery, setSkillQuery] = useState("");
-  const recognitionRef = useRef<any>(null);
-  const projectMenuRef = useRef<HTMLDivElement>(null);
-  const modeMenuRef = useRef<HTMLDivElement>(null);
-  // plan-75-332: 权限模式选择器容器（点击外部关闭）
-  const approvalMenuRef = useRef<HTMLDivElement>(null);
-  const reasoningMenuRef = useRef<HTMLDivElement>(null);
-  useClickOutside(projectMenuRef, showProjectMenu, () => setShowProjectMenu(false));
-  useClickOutside(modeMenuRef, showModeMenu, () => setShowModeMenu(false));
-  useClickOutside(approvalMenuRef, showApprovalMenu, () => setShowApprovalMenu(false));
-  useClickOutside(reasoningMenuRef, showReasoning, () => setShowReasoning(false));
+  /** 同一时刻只开一个输入框浮窗（+ / 权限 / 模型 / 思考深度） */
+  const closeFloats = () => {
+    setShowPlus(false);
+    setShowApprovalMenu(false);
+    setShowModels(false);
+    setShowReasoning(false);
+  };
   /** / @ $ 弹层容器：用于"键盘上下键切换时把选中项滚入可视区"。
    *  弹层有 max-height + overflow-y:auto，此前只改 index 不滚动内容区，
    *  选中项一旦超出可视区就看不到（用户看不到自己选到哪一项）。 */
@@ -480,7 +477,6 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
 
   const activeProjects = useMemo(() => projects.filter((p) => !p.archived), [projects]);
   const activeProjectId = currentProjectId;
-  const activeProject = activeProjects.find((p) => p.id === activeProjectId);
 
   const slashCommands = useMemo(
     () => [
@@ -596,32 +592,52 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     return atFiles.filter((p) => p.toLowerCase().includes(atQuery)).slice(0, 15);
   }, [atFiles, atQuery]);
 
+  /** plan-404-1892（图2）：标记「选中项变化来自键盘导航」，仅此时才把选中项滚入可视区。
+   *  鼠标悬停（onMouseEnter → setXxxIndex）不得触发滚动——此前悬停到部分可见项会把列表拽动。
+   *  值为对应菜单 key，滚动后立即复位。 */
+  const kbScrollRef = useRef<"slash" | "skill" | "at" | null>(null);
+
   /** 把弹层内当前选中项（.active）滚入可视区。
    *  不用 scrollIntoView：它会连带滚动祖先容器（消息流会跟着动），
-   *  这里只改弹层自己的 scrollTop，副作用最小。 */
+   *  这里只改弹层自己的 scrollTop，副作用最小。
+   *  plan-404-1892：改用 rect 相对位移计算，不再依赖「弹层是子项 offsetParent」的假设。 */
   const scrollActiveIntoView = (menu: HTMLDivElement | null) => {
     if (!menu) return;
     const el = menu.querySelector<HTMLElement>("button.active");
     if (!el) return;
-    // 弹层自身 position:absolute，是子项的 offsetParent，故 offsetTop 可直接用
-    const top = el.offsetTop;
-    const bottom = top + el.offsetHeight;
-    if (top < menu.scrollTop) menu.scrollTop = top;
-    else if (bottom > menu.scrollTop + menu.clientHeight) {
-      menu.scrollTop = bottom - menu.clientHeight;
-    }
+    const mr = menu.getBoundingClientRect();
+    const er = el.getBoundingClientRect();
+    if (er.top < mr.top) menu.scrollTop -= mr.top - er.top;
+    else if (er.bottom > mr.bottom) menu.scrollTop += er.bottom - mr.bottom;
   };
 
-  // 键盘切换（以及列表内容变化）后，选中项必须在可视区内
-  useEffect(() => { scrollActiveIntoView(slashMenuRef.current); },
+  // 键盘 ↑/↓ 切换后选中项必须滚入可视区（仅键盘导航触发，见 kbScrollRef）
+  useEffect(() => {
+    if (kbScrollRef.current !== "slash") return;
+    kbScrollRef.current = null;
+    scrollActiveIntoView(slashMenuRef.current);
+  }, [slashIndex]);
+  useEffect(() => {
+    if (kbScrollRef.current !== "skill") return;
+    kbScrollRef.current = null;
+    scrollActiveIntoView(skillMenuRef.current);
+  }, [skillIndex]);
+  useEffect(() => {
+    if (kbScrollRef.current !== "at") return;
+    kbScrollRef.current = null;
+    scrollActiveIntoView(atMenuRef.current);
+  }, [atIndex]);
+
+  // 列表内容变化（输入过滤 / 菜单开关）时回到顶部：旧滚动位置已不对应同一批项
+  useEffect(() => { if (slashMenuRef.current) slashMenuRef.current.scrollTop = 0; },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [slashIndex, slashItems.length, slashVisible]);
-  useEffect(() => { scrollActiveIntoView(skillMenuRef.current); },
+    [showSlash, input]);
+  useEffect(() => { if (skillMenuRef.current) skillMenuRef.current.scrollTop = 0; },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [skillIndex, filteredSkills.length, showSkills]);
-  useEffect(() => { scrollActiveIntoView(atMenuRef.current); },
+    [showSkills, skillQuery]);
+  useEffect(() => { if (atMenuRef.current) atMenuRef.current.scrollTop = 0; },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [atIndex, filteredAtFiles.length, showAt]);
+    [showAt, atQuery]);
 
   /** plan-238-1210 (A2): 选择文件 → 追加引用 chip（不再把 @路径 写回输入文本）。
    *  同时清掉用户已敲的 `@查询词`，避免残留半截文本。 */
@@ -879,51 +895,8 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     taRef.current?.focus();
   };
 
-  const toggleVoice = () => {
-    const SpeechRecognition =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      alert("当前环境不支持语音识别 API");
-      return;
-    }
-    if (listening) {
-      recognitionRef.current?.stop();
-      setListening(false);
-      return;
-    }
-    const rec = new SpeechRecognition();
-    rec.lang = "zh-CN";
-    rec.continuous = true;
-    rec.interimResults = true;
-    rec.onresult = (e: any) => {
-      let text = "";
-      for (let i = 0; i < e.results.length; i++) {
-        text += e.results[i][0].transcript;
-      }
-      setInput(text);
-    };
-    rec.onerror = () => setListening(false);
-    rec.onend = () => setListening(false);
-    rec.start();
-    recognitionRef.current = rec;
-    setListening(true);
-  };
-
-  const handleAddDirectory = async () => {
-    setAddingDir(true);
-    try {
-      const dir = await window.chatcoderAPI?.selectDirectory?.();
-      if (dir) {
-        const created = await useChatStore.getState().createProject(dir);
-        if (created?.id) {
-          useChatStore.setState({ currentProjectId: created.id });
-        }
-      }
-    } finally {
-      setAddingDir(false);
-      setShowProjectMenu(false);
-    }
-  };
+  /** plan-20261009-ui U2：已移除语音输入（功能未实现，按钮误导）与「选择本地目录」直建项目——
+   *  新建项目统一走项目弹窗（工作区胶囊 → 新建项目）。 */
 
   const changeModel = (modelId: number) => {
     if (!isHome && currentSessionId != null) {
@@ -953,10 +926,11 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   const changeReasoning = (e: string | null) => {
     // plan-546: 深度双写——本 key 草稿隔离 + 全局最近值（新会话/新首页默认承接）
     // v7: 全局最近值同时落 localStorage，重启后可恢复上次选择（新建任务默认跟随全局）
+    // plan-20261009-ui：滑块可以连续拖动，每越过一档就调用一次——这里不关浮窗，
+    // 用户拖完点外部 / 按 Esc 自然收起（此前选一档就关，无法连续调整）
     setEffort(e);
     useChatStore.setState({ lastReasoningEffort: e });
     persistLastReasoning(e);
-    setShowReasoning(false);
   };
 
   /** plan-75-332: 切换执行模式（只读 / 计划 / 智能体）。旧值先归一化再落库，避免写入脏值。 */
@@ -964,7 +938,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     const next = normalizeDraftMode(mode);
     const prev = composerMode;
     setComposerMode(next);
-    setShowModeMenu(false);
+    setShowPlus(false);
     if (currentSessionId != null) {
       // plan-75-332 R2: 保存失败必须回滚并提示——否则界面显示与实际落库不一致，
       // 用户以为已切换、重进会话又变回去（权限模式同样处理）。
@@ -1003,10 +977,6 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     }
   };
 
-  const shortPathName = (fullPath: string) => {
-    const segs = fullPath.replace(/\\/g, "/").split("/").filter(Boolean);
-    return segs[segs.length - 1] || fullPath;
-  };
 
   const canSend = Boolean(input.trim() || attachments.length > 0 || composerBrowserRefs.length > 0);
 
@@ -1112,27 +1082,12 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     setSending(false);
   };
 
-  // plan-230-1144 M2: 模式标签——内置模式走 i18n，自定义模式用配置里的 display_name
-  // plan-75-332: 内置档位改为 3 个（agent / plan / readonly）；accept_edits 已取消。
-  const BUILTIN_MODE_KEYS: Record<string, string> = {
-    agent: "composer.mode_agent",
-    plan: "composer.mode_plan",
-    readonly: "composer.mode_readonly",
-  };
-  const modeLabel = (() => {
-    const key = BUILTIN_MODE_KEYS[composerMode];
-    if (key) return t(key);
-    const p = permProfiles.find((x) => x.name === composerMode);
-    return p ? p.display_name : composerMode;
-  })();
-
-  /** plan-75-332 R2: 菜单项数据源——按固定档位顺序排列（只读 → 计划 → 智能体），
-   *  API 未就绪时用静态三项兜底（此前的兜底项是早已废弃的 default / mode_full，
-   *  文案查不到、选中态也匹配不上）。 */
+  /** plan-75-332 R2 / plan-20261009-ui U2：执行模式数据源——内置模式按「智能体 → 计划 → 只读」排序，
+   *  自定义模式排后；API 未就绪时用静态三项兜底。 */
   const modeMenuProfiles = useMemo(() => {
     const base: PermissionProfileOut[] = permProfiles.length > 0
       ? permProfiles
-      : ([{ name: "readonly" }, { name: "plan" }, { name: "agent" }] as PermissionProfileOut[]);
+      : ([{ name: "agent" }, { name: "plan" }, { name: "readonly" }] as PermissionProfileOut[]);
     const rank = (n: string) => {
       const i = BUILTIN_MODE_ORDER.indexOf(n);
       return i < 0 ? BUILTIN_MODE_ORDER.length : i;
@@ -1140,23 +1095,58 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     return [...base].sort((a, b) => rank(a.name) - rank(b.name));
   }, [permProfiles]);
 
-  // plan-75-332: 权限模式选项（对齐设计图：图标 + 标题 + 两行描述 + 选中勾）
-  const APPROVAL_OPTIONS: Array<{
-    mode: ApprovalMode; labelKey: string; descKey: string; danger?: boolean;
-  }> = [
-    { mode: "ask", labelKey: "composer.approval_ask", descKey: "composer.approval_ask_desc" },
-    { mode: "auto", labelKey: "composer.approval_auto", descKey: "composer.approval_auto_desc" },
-    { mode: "full", labelKey: "composer.approval_full", descKey: "composer.approval_full_desc", danger: true },
-  ];
-  const approvalLabel = t(
-    APPROVAL_OPTIONS.find((o) => o.mode === approvalMode)?.labelKey ?? "composer.approval_ask"
-  );
-  /** 权限模式按钮的三种图标：盾牌（询问）/ 播放（自动）/ 警示三角（完全访问） */
-  const approvalIcon = (mode: ApprovalMode) => {
-    if (mode === "auto") return <IconPlay size={13} />;
-    if (mode === "full") return <IconAlertTriangle size={13} />;
-    return <IconShield size={13} />;
+  /** + 浮窗的模式项：内置模式取 modeMeta（图标 + 短名 + 一行说明），自定义模式取配置的名称与描述 */
+  const modeOptions: ModeOption[] = useMemo(() => modeMenuProfiles.map((p) => {
+    const meta = MODE_META[p.name];
+    return meta
+      ? { name: p.name, label: t(meta.shortKey), desc: t(meta.descKey), icon: meta.icon(16), kbd: p.name === "plan" ? "⇧ Tab" : undefined }
+      : { name: p.name, label: p.display_name || p.name, desc: p.description || "自定义执行模式", icon: customModeIcon(16) };
+  }), [modeMenuProfiles, t]);
+  const modeMeta = MODE_META[composerMode];
+  const modeShort = modeMeta
+    ? t(modeMeta.shortKey)
+    : (permProfiles.find((x) => x.name === composerMode)?.display_name ?? composerMode);
+  const modeTone = modeMeta?.tone ?? "neutral";
+
+  /** Shift+Tab：在内置三种执行模式间循环（输入框聚焦时，与参考图4的快捷键提示一致） */
+  const cycleMode = () => {
+    const order = BUILTIN_MODE_ORDER;
+    const i = order.indexOf(composerMode);
+    setMode(order[(i + 1) % order.length]);
   };
+
+  /** + 浮窗「插件 / 技能 / 连接器」树的数据（只含已启用项，与 / 菜单同源） */
+  const extItems = useMemo<Record<ExtKind, ExtItem[]>>(() => {
+    const httpsOnly = (u: unknown) => (typeof u === "string" && u.startsWith("https://") ? u : undefined);
+    const marketIcon = (meta?: Record<string, unknown> | null) => httpsOnly((meta || {}).market_icon_url);
+    return {
+      plugin: plugins.map((p) => ({ key: p.name, name: p.displayName || p.name, desc: p.descriptionZh || p.description || p.category || "", iconUrl: httpsOnly(p.logo) })),
+      skill: skills.map((sk) => ({ key: sk.name, name: sk.display_name || sk.name, desc: sk.description || "", iconUrl: marketIcon(sk.meta) })),
+      connector: mcpServers.map((m) => ({ key: m.name, name: m.display_name || m.name, desc: m.description || "", iconUrl: marketIcon(m.meta) })),
+    };
+  }, [plugins, skills, mcpServers]);
+
+  /** 从拓展树插入引用 chip（与 / 菜单插入同一语义：发送时追加「使用插件/技能/连接器」引用行） */
+  const pickExt = (kind: ExtKind, item: ExtItem) => {
+    const refKind: ComposerRef["kind"] = kind === "connector" ? "mcp" : kind;
+    setRefs((prev) => (prev.some((r) => r.kind === refKind && r.value === item.key)
+      ? prev
+      : [...prev, { kind: refKind, value: item.key, label: item.name }]));
+    window.setTimeout(() => taRef.current?.focus(), 0);
+  };
+
+  /** 排队项「编辑」：移出队列并回填输入框（已有正文时追加在后面，不覆盖用户正在写的内容） */
+  const editQueued = (q: { id: string; content: string; attachments?: Record<string, unknown>[] }) => {
+    updateQueuedInput(q.id, null);
+    setInput((cur) => (cur.trim() ? `${cur}
+${q.content}` : q.content));
+    const atts = (q.attachments ?? []) as unknown as AttachmentInfo[];
+    if (atts.length > 0) setAttachments((prev) => [...prev, ...atts]);
+    window.setTimeout(() => taRef.current?.focus(), 0);
+  };
+
+  /** 当前会话所在项目（会话态工作区胶囊只读展示） */
+  const sessionProject = projects.find((p) => p.id === (currentSession?.project_id ?? currentProjectId)) ?? null;
 
   // 是否处于 AI 结构化提问阶段（直接替换输入框主体）
   const isQuestionMode = !isHome && pendingApproval?.detail?.kind === "question";
@@ -1185,44 +1175,15 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
       }}
       onDrop={handleDrop}
     >
-      {isHome && (
-        <div className="es-card-project" ref={projectMenuRef}>
-          <button
-            className="es-project-trigger"
-            onClick={() => setShowProjectMenu(!showProjectMenu)}
-            title={activeProject?.path ?? t("composer.select_project")}
-          >
-            <IconFolder size={13} />
-            <span className="es-project-name">{activeProject ? shortPathName(activeProject.path) : t("composer.select_project")}</span>
-            <IconChevronDown size={11} />
-          </button>
-          {showProjectMenu && (
-            <div className="context-menu es-project-menu" onClick={() => setShowProjectMenu(false)}>
-              <div
-                className="context-menu-item"
-                onClick={() => {
-                  void handleAddDirectory();
-                }}
-              >
-                <IconFolder size={12} /> <span>{addingDir ? t("composer.adding_dir") : t("composer.choose_local_dir")}</span>
-              </div>
-              {activeProjects.length > 0 && <div className="context-menu-divider" />}
-              {activeProjects.map((p) => (
-                <div
-                  key={p.id}
-                  className={`context-menu-item${p.id === activeProjectId ? " active" : ""}`}
-                  onClick={() => {
-                    useChatStore.setState({ currentProjectId: p.id });
-                    setShowProjectMenu(false);
-                  }}
-                  title={p.path}
-                >
-                  <span>{shortPathName(p.path)}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+      {/* plan-20261009-ui U2：运行中继续发送的消息排在输入卡上方的独立托盘（原先挤在卡内顶部） */}
+      {!isHome && !isQuestionMode && !isApprovalMode && (
+        <QueueTray
+          items={queuedInputs}
+          onFlush={(id) => void flushQueuedInput(id)}
+          onRemove={(id) => updateQueuedInput(id, null)}
+          onEdit={editQueued}
+          onClear={() => queuedInputs.forEach((q) => { if (!q.flushing) updateQueuedInput(q.id, null); })}
+        />
       )}
 
       {/* plan-282-1434（B1）：原「计划已就绪」横幅（.composer-plan-bar）已删除。
@@ -1387,63 +1348,6 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
               )}
             </div>
           )}
-          {/* plan-547 → plan-282-1421（第5项）：排队消息展示重做。
-              信息层级：序号 → 模式标签 → 内容摘要 → 附件数 → 立即发送 / 移除。
-              交互：整条可 hover 高亮；发送中显示旋转指示；入队/出队有动效（见 CSS）。 */}
-          {!isHome && queuedInputs.length > 0 && (
-            <div className="composer-queue">
-              <div className="composer-queue-head">
-                <span className="cq-head-label">{t("composer.queue_label")}</span>
-                <span className="cq-head-count">{queuedInputs.length}</span>
-              </div>
-              <div className="composer-queue-pills">
-                {queuedInputs.map((q, i) => (
-                  <div
-                    key={q.id}
-                    className={`composer-queue-pill${q.flushing ? " flushing" : ""}`}
-                    title={q.content}
-                  >
-                    <span className="cq-pill-index">{i + 1}</span>
-                    {q.mode === "plan" && <span className="cq-pill-tag">规划</span>}
-                    {q.mode === "readonly" && <span className="cq-pill-tag">只读</span>}
-                    <span className="cq-pill-text">
-                      {q.content || (q.attachments?.length ? "（仅附件）" : "")}
-                    </span>
-                    {(q.attachments?.length ?? 0) > 0 && (
-                      <span className="cq-pill-attach" title={`${q.attachments?.length ?? 0} 个附件`}>
-                        <IconPaperclip size={10} />
-                        {q.attachments?.length ?? 0}
-                      </span>
-                    )}
-                    {q.flushing ? (
-                      <span className="cq-pill-sending" title={t("composer.queue_sending")}>
-                        <IconSpinner size={11} />
-                      </span>
-                    ) : (
-                      <button
-                        className="cq-pill-btn send"
-                        onClick={() => void flushQueuedInput(q.id)}
-                        title={t("composer.queue_flush_now")}
-                        aria-label={t("composer.queue_flush_now")}
-                        type="button"
-                      >
-                        <IconArrowUp size={11} />
-                      </button>
-                    )}
-                    <button
-                      className="cq-pill-btn remove"
-                      onClick={() => updateQueuedInput(q.id, null)}
-                      title={t("composer.queue_remove")}
-                      aria-label={t("composer.queue_remove")}
-                      type="button"
-                    >
-                      <IconX size={11} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
           {/* plan-238-1210 (A2): 引用 chips 行（@文件 / $技能）——不再内嵌进输入文本，
               从结构上消除"透明 textarea + 标签高亮层"的排版错位问题。 */}
           {refs.length > 0 && (
@@ -1456,10 +1360,10 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                 >
                   <span className="composer-ref-icon">
                     {/* plan-282-1441（#9）：四类引用用不同图标区分（文件/技能/连接器/插件） */}
-                    {r.kind === "file" ? <IconFileText size={11} />
-                      : r.kind === "mcp" ? <IconPlug size={11} />
-                      : r.kind === "plugin" ? <IconPackage size={11} />
-                      : <IconBox size={11} />}
+                    {r.kind === "file" ? <IconFileText size={12} />
+                      : r.kind === "mcp" ? <IconPlug size={12} />
+                      : r.kind === "plugin" ? <IconPuzzle size={12} />
+                      : <IconSparkles size={12} />}
                   </span>
                   <span className="composer-ref-name">{r.label}</span>
                   <button
@@ -1522,17 +1426,25 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
               }
             }}
             onKeyDown={(e) => {
+              // plan-20261009-ui U2：Shift+Tab 在「智能体 → 计划 → 只读」间循环（+ 浮窗内有提示）
+              if (e.key === "Tab" && e.shiftKey && !slashVisible && !showSkills && !showAt) {
+                e.preventDefault();
+                cycleMode();
+                return;
+              }
               // plan-238-1210 (A2): 文本中不再有 @/$ 引用片段（已改为 chips），
               // 原"整词删除拦截"随之移除——Backspace/Delete 回归原生行为。
               if (slashVisible) {
                 if (e.key === "ArrowDown") {
                   e.preventDefault();
                   setSlashIndex((i) => (i + 1) % slashItems.length);
+                  kbScrollRef.current = "slash";
                   return;
                 }
                 if (e.key === "ArrowUp") {
                   e.preventDefault();
                   setSlashIndex((i) => (i - 1 + slashItems.length) % slashItems.length);
+                  kbScrollRef.current = "slash";
                   return;
                 }
                 if (e.key === "Enter" && !e.shiftKey) {
@@ -1552,11 +1464,13 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                 if (e.key === "ArrowDown") {
                   e.preventDefault();
                   setSkillIndex((i) => (i + 1) % Math.max(1, n));
+                  kbScrollRef.current = "skill";
                   return;
                 }
                 if (e.key === "ArrowUp") {
                   e.preventDefault();
                   setSkillIndex((i) => (i - 1 + Math.max(1, n)) % Math.max(1, n));
+                  kbScrollRef.current = "skill";
                   return;
                 }
                 if (e.key === "Enter" && !e.shiftKey && n > 0) {
@@ -1574,11 +1488,13 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                 if (e.key === "ArrowDown") {
                   e.preventDefault();
                   setAtIndex((i) => (i + 1) % filteredAtFiles.length);
+                  kbScrollRef.current = "at";
                   return;
                 }
                 if (e.key === "ArrowUp") {
                   e.preventDefault();
                   setAtIndex((i) => (i - 1 + filteredAtFiles.length) % filteredAtFiles.length);
+                  kbScrollRef.current = "at";
                   return;
                 }
                 if (e.key === "Enter" && !e.shiftKey) {
@@ -1604,103 +1520,68 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
             }}
             />
           </div>
-          <div className="composer-toolbar">
-            <div className="composer-tools-left">
-              <button className="composer-attach" title={t("composer.attach_tip")} onClick={() => fileRef.current?.click()}>
-                <IconPlus size={16} />
-              </button>
-              <div className="composer-mode-wrap" ref={modeMenuRef}>
-                <button
-                  className={`composer-mode-btn mode-${composerMode}`}
-                  onClick={() => {
-                    setShowModeMenu((v) => !v);
-                    setShowModels(false);
-                    setShowReasoning(false);
-                  }}
-                  title={t("composer.mode_title")}
-                >
-                  <IconShield size={13} />
-                  {modeLabel}
-                  <IconChevronDown size={11} />
-                </button>
-                {showModeMenu && (
-                  <div className="composer-menu composer-mode-menu">
-                    <div className="composer-menu-title">{t("composer.mode_title")}</div>
-                    {/* plan-230-1144 M2: 菜单项由 /permission-profiles 下发（内置+自定义）；
-                        plan-75-332 R2: 固定为「只读 → 计划 → 智能体」，自定义模式排后。 */}
-                    {modeMenuProfiles.map((p) => (
-                      <Tooltip key={p.name} content={p.description} side="right">
-                        <button
-                          className={composerMode === p.name ? "active" : ""}
-                          onClick={() => setMode(p.name)}
-                        >
-                          {BUILTIN_MODE_KEYS[p.name] ? t(BUILTIN_MODE_KEYS[p.name]) : p.display_name}
-                        </button>
-                      </Tooltip>
-                    ))}
-                    {/* plan-671/676: 目标模式入口（会话内与空态首页均可用） */}
-                    {(currentSessionId != null || isHome) && (
-                      <>
-                        <div className="composer-menu-divider" />
-                        <button
-                          onClick={() => {
-                            setGoalInput(goalStatus === "active" ? (goalText ?? "") : "");
-                            setShowGoalModal(true);
-                            setShowModeMenu(false);
-                          }}
-                        >
-                          <IconTarget size={12} />
-                          {goalStatus === "active" ? t("composer.edit_goal") : t("composer.set_goal")}
-                        </button>
-                        {goalStatus === "active" && (
-                          <button onClick={cancelGoal}>
-                            <IconX size={12} />
-                            {isHome ? t("composer.remove_goal") : t("composer.cancel_goal")}
-                          </button>
-                        )}
-                      </>
-                    )}
-                  </div>
-                )}
-              </div>
-              {/* plan-75-332: 权限模式选择器（询问审批 / 自动审批 / 完全访问）——紧跟在执行模式
-                  右侧：前者管"能做什么"，后者管"要不要问"。菜单项只留图标 + 名称（单行不换行），
-                  各档位说明改用鼠标悬停 tooltip，保持简洁。 */}
-              <div className="composer-approval-wrap" ref={approvalMenuRef}>
-                <Tooltip content={t("composer.approval_title")}>
+          {/* plan-20261009-ui U2：工具条重做——
+              左：+（模式 / 目标 / 插件·技能·连接器）· 附件 · 执行模式胶囊 · 权限模式胶囊；
+              右：模型 · 思考深度 · 上下文圆环（会话）· 发送/停止/排队（同一按钮形变）。
+              已移除语音按钮（功能未实现）。 */}
+          <div className="composer-toolbar cc-toolbar" ref={setToolbarEl}>
+            <div className="composer-tools-left cc-tools-left">
+              <div className="cc-anchor">
+                <Tooltip content="模式、目标与拓展" side="top" disabled={showPlus}>
                   <button
-                    className={`composer-approval-btn mode-${approvalMode}`}
-                    onClick={() => {
-                      setShowApprovalMenu((v) => !v);
-                      setShowModels(false);
-                      setShowReasoning(false);
-                      setShowModeMenu(false);
-                    }}
+                    ref={plusBtnRef}
+                    type="button"
+                    className={"cc-plus" + (showPlus ? " is-open" : "")}
+                    aria-haspopup="menu"
+                    aria-expanded={showPlus}
+                    aria-label="模式、目标与拓展"
+                    onClick={() => { const next = !showPlus; closeFloats(); setShowPlus(next); }}
                   >
-                    {approvalIcon(approvalMode)}
-                    {approvalLabel}
-                    <IconChevronDown size={11} />
+                    <IconPlusX open={showPlus} size={16} />
                   </button>
                 </Tooltip>
-                {showApprovalMenu && (
-                  <div className="composer-menu composer-approval-menu">
-                    {APPROVAL_OPTIONS.map((opt) => (
-                      <Tooltip key={opt.mode} content={t(opt.descKey)} side="right">
-                        <button
-                          className={`composer-approval-opt${opt.danger ? " danger" : ""}`}
-                          onClick={() => changeApprovalMode(opt.mode)}
-                        >
-                          <span className="composer-approval-opt-icon">{approvalIcon(opt.mode)}</span>
-                          <span className="composer-approval-opt-title">{t(opt.labelKey)}</span>
-                          {approvalMode === opt.mode && (
-                            <span className="composer-approval-opt-check"><IconCheck size={13} /></span>
-                          )}
-                        </button>
-                      </Tooltip>
-                    ))}
-                  </div>
-                )}
+                <PlusMenu
+                  open={showPlus}
+                  onClose={() => setShowPlus(false)}
+                  anchorRefs={[plusBtnRef, modeChipRef]}
+                  modes={modeOptions}
+                  mode={composerMode}
+                  onModeChange={setMode}
+                  goal={{
+                    visible: currentSessionId != null || isHome,
+                    active: goalStatus === "active",
+                    text: goalText,
+                  }}
+                  onGoal={() => { setGoalInput(goalStatus === "active" ? (goalText ?? "") : ""); setShowGoalModal(true); }}
+                  onCancelGoal={cancelGoal}
+                  exts={extItems}
+                  onPickExt={pickExt}
+                />
               </div>
+              <Tooltip content={t("composer.attach_tip")} side="top">
+                <button type="button" className="cc-icon-btn" aria-label={t("composer.attach_tip")} onClick={() => fileRef.current?.click()}>
+                  <IconPaperclip size={16} />
+                </button>
+              </Tooltip>
+              <Tooltip content={t("composer.mode_title") + "：" + modeShort + " · Shift+Tab 切换"} side="top" disabled={showPlus}>
+                <button
+                  ref={modeChipRef}
+                  type="button"
+                  className={"cc-chip cc-mode-chip tone-" + modeTone + (showPlus ? " is-open" : "")}
+                  aria-label={t("composer.mode_title") + "：" + modeShort}
+                  onClick={() => { const next = !showPlus; closeFloats(); setShowPlus(next); }}
+                >
+                  {modeMeta ? modeMeta.icon(14) : customModeIcon(14)}
+                  <span className="cc-chip-label">{modeShort}</span>
+                </button>
+              </Tooltip>
+              <ApprovalPicker
+                open={showApprovalMenu}
+                onToggle={() => { const next = !showApprovalMenu; closeFloats(); setShowApprovalMenu(next); }}
+                onClose={() => setShowApprovalMenu(false)}
+                value={approvalMode}
+                onChange={changeApprovalMode}
+              />
               <input
                 ref={fileRef}
                 type="file"
@@ -1712,89 +1593,63 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                 }}
               />
             </div>
-            <div className="composer-right">
+            <div className="composer-right cc-tools-right">
               <ModelPicker
                 models={models}
                 value={sessionModelId}
                 onChange={changeModel}
                 open={showModels}
-                onToggle={() => {
-                  setShowModels((v) => !v);
-                  setShowReasoning(false);
-                }}
+                onToggle={() => { const next = !showModels; closeFloats(); setShowModels(next); }}
               />
               {supportsReasoning && (
-                <div className="composer-reasoning" ref={reasoningMenuRef}>
-                  <button
-                    className="composer-reasoning-btn"
-                    onClick={() => {
-                      setShowReasoning((v) => !v);
-                      setShowModels(false);
-                    }}
-                    title={t("composer.reasoning_depth")}
-                  >
-                    <IconBrain size={11} />
-                    {activeEffort || t("composer.reasoning_default")}
-                  </button>
-                  {showReasoning && (
-                    <div className="composer-menu composer-reasoning-menu">
-                      <div className="composer-menu-title">{t("composer.reasoning_depth")}</div>
-                      {activeModel!.reasoning_efforts.map((effort) => (
-                        <button
-                          key={effort}
-                          className={effort === activeEffort ? "active" : ""}
-                          onClick={() => changeReasoning(effort)}
-                        >
-                          {effort}
-                        </button>
-                      ))}
-                      <button
-                        className={activeEffort == null ? "active" : ""}
-                        onClick={() => changeReasoning(null)}
-                      >
-                        {t("composer.reasoning_default")}
-                      </button>
-                    </div>
-                  )}
-                </div>
+                <EffortPicker
+                  open={showReasoning}
+                  onToggle={() => { const next = !showReasoning; closeFloats(); setShowReasoning(next); }}
+                  onClose={() => setShowReasoning(false)}
+                  efforts={activeModel?.reasoning_efforts ?? []}
+                  value={activeEffort}
+                  onChange={changeReasoning}
+                />
               )}
               {!isHome && (
                 <div className="composer-usage">
                   <UsageRing pct={usagePct} usage={usage} compacting={isCompacting} />
                 </div>
               )}
-              {/* plan-282-1495：压缩时不再渲染文字徽标——它带 white-space: nowrap，
-                  展开右侧面板把消息列压窄时会把输入卡工具条顶出边界（宽度溢出）。
-                  压缩反馈统一由左侧上下文圆环自转（UsageRing → IconRingProgress loading）承担。 */}
-              <button
-                className={`composer-ctx${listening ? " listening" : ""}`}
-                onClick={toggleVoice}
-                title={listening ? "停止录音" : "语音输入"}
-              >
-                <IconMic size={15} />
-              </button>
-              {/* plan-547: 运行中按钮互斥——空输入只显示 Stop；输入内容后切换为排队发送（点击入队，入队后变回 Stop） */}
-              {!isHome && isRunning && !canSend && (
-                <button
-                  className="composer-send stop"
-                  onClick={handleCancel}
-                  title="停止当前任务"
-                >
-                  <IconStop size={14} />
-                </button>
-              )}
-              {(!isRunning || (!isHome && canSend)) && (
-                <button
-                  className={`composer-send${isRunning ? " queue" : ""}`}
-                  disabled={!canSend}
-                  onClick={() => void handleSend()}
-                  title={isRunning ? "发送（排队，任务完成后自动发送）" : "发送"}
-                >
-                  <IconArrowUp size={16} />
-                </button>
-              )}
+              {/* plan-547 → plan-20261009-ui U2：发送 / 停止 / 排队为同一个按钮的三种形态（图标弹性形变，位置不跳）——
+                  空闲：发送；运行中且输入为空：停止；运行中有输入：加入排队（任务结束后自动发送）。 */}
+              {(() => {
+                const sendState: "send" | "stop" | "queue" = !isHome && isRunning ? (canSend ? "queue" : "stop") : "send";
+                const tip = sendState === "stop" ? "停止当前任务" : sendState === "queue" ? "加入排队（当前任务结束后发送）" : "发送 (Enter)";
+                return (
+                  <Tooltip content={tip} side="top">
+                    <button
+                      type="button"
+                      className={"cc-send is-" + sendState}
+                      disabled={sendState === "send" && !canSend}
+                      aria-label={tip}
+                      onClick={() => (sendState === "stop" ? handleCancel() : void handleSend())}
+                    >
+                      <IconSendStop mode={sendState} size={16} />
+                    </button>
+                  </Tooltip>
+                );
+              })()}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* plan-20261009-ui U2：输入卡左下——当前工作区（首页可选；会话开始后只读展示） */}
+      {!isQuestionMode && !isApprovalMode && (
+        <div className="cc-under">
+          <WorkspaceChip
+            projects={activeProjects}
+            currentId={isHome ? activeProjectId ?? null : sessionProject?.id ?? null}
+            locked={!isHome}
+            branch={!isHome && sessionProject?.is_worktree ? sessionProject.worktree_branch ?? null : null}
+            onSelect={(id) => useChatStore.setState({ currentProjectId: id })}
+          />
         </div>
       )}
 
@@ -1917,7 +1772,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
             <button
               key={s.cmd}
               className={idx === slashIndex ? "active" : ""}
-              onMouseEnter={() => setSlashIndex(idx)}
+              onMouseEnter={() => { kbScrollRef.current = null; setSlashIndex(idx); }}
               onClick={() => pickSlash(s.cmd)}
             >
               <strong>{s.cmd}</strong>
@@ -1931,7 +1786,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
               <button
                 key={`sk-${s.id}`}
                 className={idx === slashIndex ? "active" : ""}
-                onMouseEnter={() => setSlashIndex(idx)}
+                onMouseEnter={() => { kbScrollRef.current = null; setSlashIndex(idx); }}
                 onClick={() => insertSkill(s.name, true)}
               >
                 <IconBox size={12} />
@@ -1950,7 +1805,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
               <button
                 key={`mcp-${m.id}`}
                 className={idx === slashIndex ? "active" : ""}
-                onMouseEnter={() => setSlashIndex(idx)}
+                onMouseEnter={() => { kbScrollRef.current = null; setSlashIndex(idx); }}
                 onClick={() => insertConnector(m.name, m.display_name || m.name)}
               >
                 <IconPlug size={12} />
@@ -1964,7 +1819,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
           {disabledMcpCount > 0 && (
             <button
               className="composer-menu-hint"
-              onMouseEnter={() => setSlashIndex(-1)}
+              onMouseEnter={() => { kbScrollRef.current = null; setSlashIndex(-1); }}
               onClick={() => {
                 setShowSlash(false);
                 window.dispatchEvent(new CustomEvent("chatcoder:open-settings", {
@@ -1985,7 +1840,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
               <button
                 key={`pl-${p.name}`}
                 className={idx === slashIndex ? "active" : ""}
-                onMouseEnter={() => setSlashIndex(idx)}
+                onMouseEnter={() => { kbScrollRef.current = null; setSlashIndex(idx); }}
                 onClick={() => insertPlugin(p.name, p.displayName || p.name)}
               >
                 <IconBox size={12} />
@@ -2004,7 +1859,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
             <button
               key={`s-${s.id}`}
               className={idx === skillIndex ? "active" : ""}
-              onMouseEnter={() => setSkillIndex(idx)}
+              onMouseEnter={() => { kbScrollRef.current = null; setSkillIndex(idx); }}
               onClick={() => insertSkill(s.name, false)}
             >
               <IconBox size={12} />
@@ -2027,7 +1882,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
               <button
                 key={f}
                 className={idx === atIndex ? "active" : ""}
-                onMouseEnter={() => setAtIndex(idx)}
+                onMouseEnter={() => { kbScrollRef.current = null; setAtIndex(idx); }}
                 onClick={() => pickAtFile(f)}
               >
                 <span>{f}</span>

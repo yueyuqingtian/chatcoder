@@ -51,6 +51,9 @@ import type {
  * v2.1: 打包版端口由主进程探活后透传（getBackendPort），端口冲突自动换空闲端口。 */
 const IS_ELECTRON = typeof window !== "undefined" && Boolean((window as Window).chatcoderAPI);
 const IS_DEV = import.meta.env.DEV;
+/** plan-20261009-ui D0：开发态可用 VITE_API_PORT 指向独立的开发后端（隔离测试库），
+ *  避免浏览器调试时读写已安装版本的真实数据；未设置时保持 12973。 */
+export const DEV_API_PORT = Number(import.meta.env.VITE_API_PORT) || 12973;
 
 /** 桌面版后端端口（主进程透传，Promise 缓存） */
 let _backendPortPromise: Promise<number> | null = null;
@@ -66,12 +69,12 @@ function backendPort(): Promise<number> {
 
 /** 桌面版/开发模式的 API 基址（异步解析端口） */
 async function directBase(): Promise<string> {
-  const port = IS_ELECTRON ? await backendPort() : 12973;
+  const port = IS_ELECTRON ? await backendPort() : DEV_API_PORT;
   return `http://127.0.0.1:${port}/api`;
 }
 
 /** 默认基址：同步兜底（12973），实际请求前会用 directBase 修正 */
-const BASE = (IS_ELECTRON || IS_DEV) ? "http://127.0.0.1:12973/api" : "/api";
+const BASE = IS_ELECTRON ? "http://127.0.0.1:12973/api" : IS_DEV ? `http://127.0.0.1:${DEV_API_PORT}/api` : "/api";
 
 /** 已解析的直接基址缓存 */
 let _directBase: string | null = null;
@@ -376,10 +379,10 @@ export const api = {
   // ── 项目 ──
   listProjects: (params?: { include_archived?: boolean }) =>
     get<ProjectOut[]>(`/projects${params?.include_archived ? "?include_archived=true" : ""}`),
-  createProject: (data: { path: string; name?: string; rules_docs?: string[]; auto_scan_rules?: boolean }) =>
+  createProject: (data: { path: string; name?: string; rules_docs?: string[]; auto_scan_rules?: boolean; icon?: string | null; color?: string | null }) =>
     post<ProjectOut>("/projects", data),
   getProject: (id: number) => get<ProjectOut>(`/projects/${id}`),
-  updateProject: (id: number, data: { name?: string; rules_docs?: string[]; auto_scan_rules?: boolean; pinned?: boolean; archived?: boolean }) =>
+  updateProject: (id: number, data: { name?: string; rules_docs?: string[]; auto_scan_rules?: boolean; pinned?: boolean; archived?: boolean; icon?: string | null; color?: string | null }) =>
     patch<ProjectOut>(`/projects/${id}`, data),
   deleteProject: (id: number) => del<{ ok: boolean }>(`/projects/${id}`),
   // ── 工作树（plan-282-1441 #5）──
@@ -884,6 +887,31 @@ export const api = {
       file_path: string; kind: string; name: string; qualified_name?: string | null;
       line_start: number; line_end: number; signature?: string | null;
     }> }>(`/symbol-index/search?workspace=${encodeURIComponent(workspace)}&query=${encodeURIComponent(query)}${kind ? `&kind=${encodeURIComponent(kind)}` : ""}`),
+
+  // ── plan-20261009-ui U1: 选择本机文件夹（桌面版走 Electron 选择器；浏览器环境由本机后端代为弹出系统选择窗口） ──
+  /** 让本机后端弹出系统自带的「选择文件夹」窗口（阻塞到用户选完 / 取消）；
+   *  unsupported=true 表示当前环境弹不出（后端不在本机 / 无桌面会话），调用方回落到 browseDirs 的自绘浏览器 */
+  pickDirectory: (initial?: string) =>
+    post<{ path: string | null; canceled: boolean; unsupported: boolean; reason: string }>(
+      "/utils/pick-directory",
+      { title: "选择文件夹", initial: initial || undefined },
+    ),
+  /** 自绘目录浏览器的数据源（仅 pickDirectory 不可用时使用） */
+  browseDirs: (path = "", showHidden = false) =>
+    get<{
+      path: string;
+      /** 上一级；"" = 回到根（盘符 / 此电脑）；null = 当前就是根 */
+      parent: string | null;
+      crumbs: Array<{ name: string; path: string }>;
+      entries: Array<{ name: string; path: string }>;
+      places: Array<{ name: string; path: string }>;
+      truncated: boolean;
+    }>(`/utils/browse-dirs?path=${encodeURIComponent(path)}${showHidden ? "&show_hidden=true" : ""}`),
+  /** 浏览器拖入文件夹时读不到绝对路径：按名称 + 子项在本机常见位置定位 */
+  resolveDir: (name: string, children: string[]) =>
+    get<{ candidates: Array<{ name: string; path: string; score: number }> }>(
+      `/utils/resolve-dir?name=${encodeURIComponent(name)}&children=${encodeURIComponent(children.slice(0, 80).join(","))}`,
+    ),
 
   // ── 技能 ──
   listSkills: (source?: string) =>

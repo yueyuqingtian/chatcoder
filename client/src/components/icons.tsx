@@ -38,11 +38,14 @@ interface IconProps extends Omit<SVGProps<SVGSVGElement>, "size" | "color"> {
   className?: string;
 }
 
+/** plan-20261009-ui U3：每枚图标带 `ic ic-<名称>` 类名——图标三态（闲置/聚焦/状态变更）
+ *  与部件微动效由 styles/icons.css 依据宿主状态驱动，调用方无需传任何状态参数。 */
 const baseProps = (
   size: IconSize,
   color: IconColor,
   strokeWidth: number,
   rest: SVGProps<SVGSVGElement>,
+  name?: string,
 ) => ({
   width: resolveSize(size),
   height: resolveSize(size),
@@ -54,6 +57,7 @@ const baseProps = (
   strokeLinejoin: "round" as const,
   "aria-hidden": true,
   ...rest, // 允许调用方覆盖 aria-hidden 等属性
+  className: ["ic", name ? `ic-${name}` : "", rest.className ?? ""].filter(Boolean).join(" "),
 });
 
 /* ── 主图标 ──────────────────────────────────────────────── */
@@ -61,7 +65,8 @@ const baseProps = (
 /** 设置 (齿轮) */
 export function IconSettings({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "settings")}>
+      <path className="ic-fill" d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.36.15.65.41.86.73.21.32.31.7.31 1.08V11a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
       <circle cx="12" cy="12" r="3" />
       <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.36.15.65.41.86.73.21.32.31.7.31 1.08V11a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
     </svg>
@@ -71,7 +76,8 @@ export function IconSettings({ size = 18, color = "currentColor", strokeWidth = 
 /** 显示器 —— plan-334-1661：设置页「电脑操控」入口（表达"屏幕 + 操作"） */
 export function IconMonitor({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "monitor")}>
+      <rect className="ic-fill" x="3" y="4.5" width="18" height="12.5" rx="2" />
       <rect x="3" y="4.5" width="18" height="12.5" rx="2" />
       <path d="M9 20.5h6M12 17v3.5" />
     </svg>
@@ -81,11 +87,12 @@ export function IconMonitor({ size = 18, color = "currentColor", strokeWidth = 1
 /** 宠物（爪印）—— plan-73-323：设置页「宠物」分区与面板入口 */
 export function IconPet({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "pet")}>
+      <ellipse className="ic-fill" cx="12" cy="15.5" rx="5" ry="4" />
       <ellipse cx="12" cy="15.5" rx="5" ry="4" />
-      <circle cx="7.6" cy="9.6" r="2" />
-      <circle cx="12" cy="7.8" r="2" />
-      <circle cx="16.4" cy="9.6" r="2" />
+      <circle className="ic-dot" style={{ ["--d" as string]: 0 }} cx="7.6" cy="9.6" r="2" />
+      <circle className="ic-dot" style={{ ["--d" as string]: 1 }} cx="12" cy="7.8" r="2" />
+      <circle className="ic-dot" style={{ ["--d" as string]: 2 }} cx="16.4" cy="9.6" r="2" />
     </svg>
   );
 }
@@ -93,7 +100,8 @@ export function IconPet({ size = 18, color = "currentColor", strokeWidth = 1.75,
 /** 工作目录(文件夹，闭合态，对齐图 2) */
 export function IconFolder({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "folder")}>
+      <path className="ic-fill" d="M3 6.5C3 5.39543 3.89543 4.5 5 4.5H9.17157C9.70201 4.5 10.2107 4.71071 10.5858 5.08579L12.4142 6.91421C12.7893 7.28929 13.298 7.5 13.8284 7.5H19C20.1046 7.5 21 8.39543 21 9.5V17.5C21 18.6046 20.1046 19.5 19 19.5H5C3.89543 19.5 3 18.6046 3 17.5V6.5Z" />
       <path d="M3 6.5C3 5.39543 3.89543 4.5 5 4.5H9.17157C9.70201 4.5 10.2107 4.71071 10.5858 5.08579L12.4142 6.91421C12.7893 7.28929 13.298 7.5 13.8284 7.5H19C20.1046 7.5 21 8.39543 21 9.5V17.5C21 18.6046 20.1046 19.5 19 19.5H5C3.89543 19.5 3 18.6046 3 17.5V6.5Z" />
     </svg>
   );
@@ -102,7 +110,8 @@ export function IconFolder({ size = 18, color = "currentColor", strokeWidth = 1.
 /** 打开的工作目录(文件夹，透视开口态，对齐图 3) */
 export function IconFolderOpen({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "folder-open")}>
+      <path className="ic-fill" d="M2.5 11.5L4.7 18.2C4.9 18.9 5.5 19.5 6.3 19.5H19.5C20.5 19.5 21.3 18.6 21.1 17.6L19.8 11.5H2.5Z" />
       <path d="M3 6.5C3 5.39543 3.89543 4.5 5 4.5H9.17C9.7 4.5 10.21 4.71 10.59 5.09L12.41 6.91C12.79 7.29 13.3 7.5 13.83 7.5H19C20.1 7.5 21 8.4 21 9.5V11H4.5" />
       <path d="M2.5 11.5L4.7 18.2C4.9 18.9 5.5 19.5 6.3 19.5H19.5C20.5 19.5 21.3 18.6 21.1 17.6L19.8 11.5H2.5Z" />
     </svg>
@@ -119,9 +128,11 @@ export function IconFolderDynamic({ open, size = 18, color = "currentColor", str
 /** 新建 + */
 export function IconPlus({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <line x1="12" y1="5" x2="12" y2="19" />
-      <line x1="5" y1="12" x2="19" y2="12" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "plus")}>
+      <g className="ic-spin">
+        <line x1="12" y1="5" x2="12" y2="19" />
+        <line x1="5" y1="12" x2="19" y2="12" />
+      </g>
     </svg>
   );
 }
@@ -129,9 +140,11 @@ export function IconPlus({ size = 18, color = "currentColor", strokeWidth = 1.75
 /** 上箭头 (发送) */
 export function IconArrowUp({ size = 18, color = "currentColor", strokeWidth = 2, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <line x1="12" y1="19" x2="12" y2="5" />
-      <polyline points="5 12 12 5 19 12" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "arrow-up")}>
+      <g className="ic-up">
+        <line x1="12" y1="19" x2="12" y2="5" />
+        <polyline points="5 12 12 5 19 12" />
+      </g>
     </svg>
   );
 }
@@ -139,8 +152,8 @@ export function IconArrowUp({ size = 18, color = "currentColor", strokeWidth = 2
 /** 右箭头 */
 export function IconChevronRight({ size = 14, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <polyline points="9 18 15 12 9 6" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "chevron-right")}>
+      <polyline className="ic-right" points="9 18 15 12 9 6" />
     </svg>
   );
 }
@@ -148,8 +161,8 @@ export function IconChevronRight({ size = 14, color = "currentColor", strokeWidt
 /** 下箭头 */
 export function IconChevronDown({ size = 14, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <polyline points="6 9 12 15 18 9" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "chevron-down")}>
+      <polyline className="ic-down" points="6 9 12 15 18 9" />
     </svg>
   );
 }
@@ -157,8 +170,8 @@ export function IconChevronDown({ size = 14, color = "currentColor", strokeWidth
 /** 左箭头 */
 export function IconChevronLeft({ size = 14, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <polyline points="15 18 9 12 15 6" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "chevron-left")}>
+      <polyline className="ic-left" points="15 18 9 12 15 6" />
     </svg>
   );
 }
@@ -185,10 +198,10 @@ export function IconChevron({
   const baseAngle = direction === "right" ? 0 : direction === "down" ? 90 : 180;
   const openDelta = direction === "down" ? 180 : 90; // right: 0→90(down)；down: 90→270(up)
   const angle = open ? baseAngle + openDelta : baseAngle;
-  const cls = "icon-chevron" + (className ? " " + className : "");
+  const cls = "ic ic-chevron icon-chevron" + (className ? " " + className : "");
   return (
     <svg
-      {...baseProps(size, color, strokeWidth, rest)}
+      {...baseProps(size, color, strokeWidth, rest, "chevron")}
       className={cls}
       style={{
         transition: "transform var(--dur-3) var(--ease-out)",
@@ -204,7 +217,7 @@ export function IconChevron({
 /** 左面板切换（支持 open 状态微形变：展开为图 4 实心指示块，折叠为图 5 细线框） */
 export function IconPanelLeft({ size = 18, color = "currentColor", strokeWidth = 1.75, open = false, ...rest }: IconProps & { open?: boolean }) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "panel-left")}>
       <rect x="3" y="4" width="18" height="16" rx="3" ry="3" />
       <line x1="9" y1="4" x2="9" y2="20" />
       {open ? (
@@ -221,7 +234,7 @@ export function IconPanelLeft({ size = 18, color = "currentColor", strokeWidth =
 /** 右面板切换（支持 open 状态微形变） */
 export function IconPanelRight({ size = 18, color = "currentColor", strokeWidth = 1.75, open = false, ...rest }: IconProps & { open?: boolean }) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "panel-right")}>
       <rect x="3" y="4" width="18" height="16" rx="3" ry="3" />
       <line x1="15" y1="4" x2="15" y2="20" />
       {open ? (
@@ -236,7 +249,8 @@ export function IconPanelRight({ size = 18, color = "currentColor", strokeWidth 
 /** 群聊 / 对话气泡 */
 export function IconMessageSquare({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "message-square")}>
+      <path className="ic-fill" d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
       <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
     </svg>
   );
@@ -245,8 +259,9 @@ export function IconMessageSquare({ size = 18, color = "currentColor", strokeWid
 /** 任务 / 检查框 */
 export function IconCheckSquare({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <polyline points="9 11 12 14 22 4" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "check-square")}>
+      <rect className="ic-fill" x="3" y="3" width="18" height="18" rx="2" />
+      <polyline className="ic-pop" points="9 11 12 14 22 4" />
       <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
     </svg>
   );
@@ -255,7 +270,8 @@ export function IconCheckSquare({ size = 18, color = "currentColor", strokeWidth
 /** 用户 */
 export function IconUser({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "user")}>
+      <circle className="ic-fill" cx="12" cy="7" r="4" />
       <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
       <circle cx="12" cy="7" r="4" />
     </svg>
@@ -265,11 +281,12 @@ export function IconUser({ size = 18, color = "currentColor", strokeWidth = 1.75
 /** 用户组 */
 export function IconUsers({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "users")}>
+      <circle className="ic-fill" cx="9" cy="7" r="4" />
       <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
       <circle cx="9" cy="7" r="4" />
-      <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
-      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+      <path className="ic-right" d="M23 21v-2a4 4 0 0 0-3-3.87" />
+      <path className="ic-right" d="M16 3.13a4 4 0 0 1 0 7.75" />
     </svg>
   );
 }
@@ -277,7 +294,8 @@ export function IconUsers({ size = 18, color = "currentColor", strokeWidth = 1.7
 /** 数据库 / 知识库 */
 export function IconDatabase({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "database")}>
+      <ellipse className="ic-fill" cx="12" cy="5" rx="9" ry="3" />
       <ellipse cx="12" cy="5" rx="9" ry="3" />
       <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
       <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
@@ -288,9 +306,10 @@ export function IconDatabase({ size = 18, color = "currentColor", strokeWidth = 
 /** 模型 / cpu */
 export function IconCpu({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "cpu")}>
+      <rect className="ic-fill" x="9" y="9" width="6" height="6" />
       <rect x="4" y="4" width="16" height="16" rx="2" ry="2" />
-      <rect x="9" y="9" width="6" height="6" />
+      <rect className="ic-pop" x="9" y="9" width="6" height="6" />
       <line x1="9" y1="2" x2="9" y2="4" />
       <line x1="15" y1="2" x2="15" y2="4" />
       <line x1="9" y1="20" x2="9" y2="22" />
@@ -306,11 +325,13 @@ export function IconCpu({ size = 18, color = "currentColor", strokeWidth = 1.75,
 /** 列表 / 任务板 */
 export function IconLayoutGrid({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "layout-grid")}>
+      <rect className="ic-fill" x="3" y="3" width="7" height="7" />
+      <rect className="ic-fill" x="14" y="14" width="7" height="7" />
       <rect x="3" y="3" width="7" height="7" />
-      <rect x="14" y="3" width="7" height="7" />
+      <rect className="ic-pop" x="14" y="3" width="7" height="7" />
       <rect x="14" y="14" width="7" height="7" />
-      <rect x="3" y="14" width="7" height="7" />
+      <rect className="ic-pop" x="3" y="14" width="7" height="7" />
     </svg>
   );
 }
@@ -318,7 +339,8 @@ export function IconLayoutGrid({ size = 18, color = "currentColor", strokeWidth 
 /** 产物 / 文件 */
 export function IconFileText({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "file-text")}>
+      <path className="ic-fill" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
       <polyline points="14 2 14 8 20 8" />
       <line x1="16" y1="13" x2="8" y2="13" />
@@ -331,8 +353,9 @@ export function IconFileText({ size = 18, color = "currentColor", strokeWidth = 
 /** 播放 / 试跑 */
 export function IconPlay({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <polygon points="5 3 19 12 5 21 5 3" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "play")}>
+      <polygon className="ic-fill" points="5 3 19 12 5 21 5 3" />
+      <polygon className="ic-right" points="5 3 19 12 5 21 5 3" />
     </svg>
   );
 }
@@ -340,8 +363,9 @@ export function IconPlay({ size = 18, color = "currentColor", strokeWidth = 1.75
 /** 闪电 / 技能 */
 export function IconZap({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "zap")}>
+      <polygon className="ic-fill" points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+      <polygon className="ic-pop" points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
     </svg>
   );
 }
@@ -349,7 +373,8 @@ export function IconZap({ size = 18, color = "currentColor", strokeWidth = 1.75,
 /** 魔方 / MCP */
 export function IconBox({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "box")}>
+      <path className="ic-fill" d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
       <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
       <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
       <line x1="12" y1="22.08" x2="12" y2="12" />
@@ -360,9 +385,11 @@ export function IconBox({ size = 18, color = "currentColor", strokeWidth = 1.75,
 /** 头脑 / 规则 */
 export function IconBookOpen({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
-      <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "book-open")}>
+      <path className="ic-fill" d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
+      <path className="ic-fill" d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
+      <path className="ic-left" d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
+      <path className="ic-right" d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
     </svg>
   );
 }
@@ -370,13 +397,12 @@ export function IconBookOpen({ size = 18, color = "currentColor", strokeWidth = 
 /** 记忆 / 大脑（精修现代高光双半球智力回路，简化内部曲折碎线，在 13px 行高下通透无粘连） */
 export function IconBrain({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      {/* 左半球 */}
+    <svg {...baseProps(size, color, strokeWidth, rest, "brain")}>
+      <path className="ic-fill" d="M9.5 4a3.5 3.5 0 0 0-3.5 3.5c0 .46.09.9.25 1.3A3.5 3.5 0 0 0 4 12a3.5 3.5 0 0 0 2.25 3.25A3.5 3.5 0 0 0 9.5 20H11V4H9.5z" />
+      <path className="ic-fill" d="M14.5 4a3.5 3.5 0 0 1 3.5 3.5c0 .46-.09.9-.25 1.3A3.5 3.5 0 0 1 20 12a3.5 3.5 0 0 1-2.25 3.25A3.5 3.5 0 0 1 14.5 20H13V4h1.5z" />
       <path d="M9.5 4a3.5 3.5 0 0 0-3.5 3.5c0 .46.09.9.25 1.3A3.5 3.5 0 0 0 4 12a3.5 3.5 0 0 0 2.25 3.25A3.5 3.5 0 0 0 9.5 20H11V4H9.5z" />
-      {/* 右半球 */}
       <path d="M14.5 4a3.5 3.5 0 0 1 3.5 3.5c0 .46-.09.9-.25 1.3A3.5 3.5 0 0 1 20 12a3.5 3.5 0 0 1-2.25 3.25A3.5 3.5 0 0 1 14.5 20H13V4h1.5z" />
-      {/* 内部神经智力传导微刻线 */}
-      <path d="M7 12h4M13 12h4" strokeWidth={1.3} />
+      <path className="ic-pop" d="M7 12h4M13 12h4" strokeWidth={1.3} />
     </svg>
   );
 }
@@ -384,7 +410,7 @@ export function IconBrain({ size = 18, color = "currentColor", strokeWidth = 1.7
 /** 压缩 / 上下文折叠 */
 export function IconCompress({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "compress")}>
       <path d="M4 9V4h5" />
       <path d="M9 4l-5 5" />
       <path d="M20 9V4h-5" />
@@ -400,8 +426,8 @@ export function IconCompress({ size = 18, color = "currentColor", strokeWidth = 
 /** 终端 / 命令 */
 export function IconTerminal({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <polyline points="4 17 10 11 4 5" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "terminal")}>
+      <polyline className="ic-right" points="4 17 10 11 4 5" />
       <line x1="12" y1="19" x2="20" y2="19" />
     </svg>
   );
@@ -410,9 +436,11 @@ export function IconTerminal({ size = 18, color = "currentColor", strokeWidth = 
 /** 关闭 × */
 export function IconX({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <line x1="18" y1="6" x2="6" y2="18" />
-      <line x1="6" y1="6" x2="18" y2="18" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "x")}>
+      <g className="ic-spin">
+        <line x1="18" y1="6" x2="6" y2="18" />
+        <line x1="6" y1="6" x2="18" y2="18" />
+      </g>
     </svg>
   );
 }
@@ -420,7 +448,7 @@ export function IconX({ size = 18, color = "currentColor", strokeWidth = 1.75, .
 /** 停止(方块) */
 export function IconStop({ size = 14, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)} fill={color}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "stop")} fill={color}>
       <rect x="6" y="6" width="12" height="12" rx="1" />
     </svg>
   );
@@ -429,7 +457,7 @@ export function IconStop({ size = 14, color = "currentColor", strokeWidth = 1.75
 /** 减号(最小化) */
 export function IconMinus({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "minus")}>
       <line x1="5" y1="12" x2="19" y2="12" />
     </svg>
   );
@@ -438,7 +466,7 @@ export function IconMinus({ size = 18, color = "currentColor", strokeWidth = 1.7
 /** 方框(最大化) */
 export function IconSquare({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "square")}>
       <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
     </svg>
   );
@@ -447,8 +475,9 @@ export function IconSquare({ size = 18, color = "currentColor", strokeWidth = 1.
 /** 复制 / 拷 */
 export function IconCopy({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "copy")}>
+      <rect className="ic-fill" x="9" y="9" width="13" height="13" rx="2" ry="2" />
+      <rect className="ic-up" x="9" y="9" width="13" height="13" rx="2" ry="2" />
       <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
     </svg>
   );
@@ -457,7 +486,7 @@ export function IconCopy({ size = 18, color = "currentColor", strokeWidth = 1.75
 /** 刷新 */
 export function IconRefresh({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "refresh")}>
       <polyline points="23 4 23 10 17 10" />
       <polyline points="1 20 1 14 7 14" />
       <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10" />
@@ -469,10 +498,10 @@ export function IconRefresh({ size = 18, color = "currentColor", strokeWidth = 1
 /** 更多 ⋯ */
 export function IconMoreHorizontal({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <circle cx="12" cy="12" r="1" />
-      <circle cx="19" cy="12" r="1" />
-      <circle cx="5" cy="12" r="1" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "more-horizontal")}>
+      <circle className="ic-dot" style={{ ["--d" as string]: 0 }} cx="5" cy="12" r="1" />
+      <circle className="ic-dot" style={{ ["--d" as string]: 1 }} cx="12" cy="12" r="1" />
+      <circle className="ic-dot" style={{ ["--d" as string]: 2 }} cx="19" cy="12" r="1" />
     </svg>
   );
 }
@@ -480,7 +509,7 @@ export function IconMoreHorizontal({ size = 18, color = "currentColor", strokeWi
 /** 麦克风 */
 export function IconMic({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "mic")}>
       <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
       <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
       <line x1="12" y1="19" x2="12" y2="23" />
@@ -492,7 +521,7 @@ export function IconMic({ size = 18, color = "currentColor", strokeWidth = 1.75,
 /** 太阳 (浅色) */
 export function IconSun({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "sun")}>
       <circle cx="12" cy="12" r="4" />
       <line x1="12" y1="2" x2="12" y2="4" />
       <line x1="12" y1="20" x2="12" y2="22" />
@@ -509,8 +538,9 @@ export function IconSun({ size = 18, color = "currentColor", strokeWidth = 1.75,
 /** 月亮 (深色) */
 export function IconMoon({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "moon")}>
+      <path className="ic-fill" d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+      <path className="ic-tilt" d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
     </svg>
   );
 }
@@ -518,8 +548,9 @@ export function IconMoon({ size = 18, color = "currentColor", strokeWidth = 1.75
 /** 搜索 */
 export function IconSearch({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <circle cx="11" cy="11" r="8" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "search")}>
+      <circle className="ic-fill" cx="11" cy="11" r="8" />
+      <circle className="ic-pop" cx="11" cy="11" r="8" />
       <line x1="21" y1="21" x2="16.65" y2="16.65" />
     </svg>
   );
@@ -528,7 +559,7 @@ export function IconSearch({ size = 18, color = "currentColor", strokeWidth = 1.
 /** 全屏 / 最大化窗口 */
 export function IconMaximize({ size = 14, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "maximize")}>
       <polyline points="15 3 21 3 21 9" />
       <polyline points="9 21 3 21 3 15" />
       <line x1="21" y1="3" x2="14" y2="10" />
@@ -540,14 +571,16 @@ export function IconMaximize({ size = 14, color = "currentColor", strokeWidth = 
 /** 自动化调度（日历外框 + 底部调度循环齿轮/脉冲回路） */
 export function IconCalendar({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "calendar")}>
+      <rect className="ic-fill" x="3" y="4" width="18" height="17" rx="3" ry="3" />
       <rect x="3" y="4" width="18" height="17" rx="3" ry="3" />
-      <line x1="16" y1="2" x2="16" y2="5.5" />
-      <line x1="8" y1="2" x2="8" y2="5.5" />
+      <line className="ic-up" x1="16" y1="2" x2="16" y2="5.5" />
+      <line className="ic-up" x1="8" y1="2" x2="8" y2="5.5" />
       <line x1="3" y1="9.5" x2="21" y2="9.5" />
-      {/* 底部自动化循环箭头轨迹 */}
-      <path d="M14.5 14.5a3 3 0 1 0-1.8 2.75" />
-      <polyline points="14.5 12.5 14.5 14.5 16.5 14.5" />
+      <g className="ic-spin">
+        <path d="M14.5 14.5a3 3 0 1 0-1.8 2.75" />
+        <polyline points="14.5 12.5 14.5 14.5 16.5 14.5" />
+      </g>
     </svg>
   );
 }
@@ -555,10 +588,11 @@ export function IconCalendar({ size = 18, color = "currentColor", strokeWidth = 
 /** 信息 */
 export function IconInfo({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "info")}>
+      <circle className="ic-fill" cx="12" cy="12" r="10" />
       <circle cx="12" cy="12" r="10" />
       <line x1="12" y1="16" x2="12" y2="12" />
-      <line x1="12" y1="8" x2="12.01" y2="8" />
+      <line className="ic-up" x1="12" y1="8" x2="12.01" y2="8" />
     </svg>
   );
 }
@@ -566,10 +600,13 @@ export function IconInfo({ size = 18, color = "currentColor", strokeWidth = 1.75
 /** 警告 */
 export function IconAlertTriangle({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "alert-triangle")}>
+      <path className="ic-fill" d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
       <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-      <line x1="12" y1="9" x2="12" y2="13" />
-      <line x1="12" y1="17" x2="12.01" y2="17" />
+      <g className="ic-swing">
+        <line x1="12" y1="9" x2="12" y2="13" />
+        <line x1="12" y1="17" x2="12.01" y2="17" />
+      </g>
     </svg>
   );
 }
@@ -577,7 +614,7 @@ export function IconAlertTriangle({ size = 18, color = "currentColor", strokeWid
 /** 加载 spinner */
 export function IconSpinner({ size = 18, color = "currentColor", strokeWidth = 2, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)} className={`spinning ${rest.className || ""}`}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "spinner")} className={`ic ic-spinner spinning ${rest.className || ""}`}>
       <path d="M21 12a9 9 0 1 1-6.219-8.56" />
     </svg>
   );
@@ -586,8 +623,8 @@ export function IconSpinner({ size = 18, color = "currentColor", strokeWidth = 2
 /** 附件(回形针) */
 export function IconPaperclip({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "paperclip")}>
+      <path className="ic-tilt" d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
     </svg>
   );
 }
@@ -595,7 +632,7 @@ export function IconPaperclip({ size = 18, color = "currentColor", strokeWidth =
 /** @提及 */
 export function IconAt({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "at")}>
       <circle cx="12" cy="12" r="4" />
       <path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8" />
     </svg>
@@ -605,8 +642,8 @@ export function IconAt({ size = 18, color = "currentColor", strokeWidth = 1.75, 
 /** 工具 */
 export function IconTool({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "tool")}>
+      <path className="ic-tilt" d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
     </svg>
   );
 }
@@ -614,7 +651,8 @@ export function IconTool({ size = 18, color = "currentColor", strokeWidth = 1.75
 /** 全局(地球) */
 export function IconGlobe({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "globe")}>
+      <circle className="ic-fill" cx="12" cy="12" r="10" />
       <circle cx="12" cy="12" r="10" />
       <line x1="2" y1="12" x2="22" y2="12" />
       <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
@@ -625,9 +663,10 @@ export function IconGlobe({ size = 18, color = "currentColor", strokeWidth = 1.7
 /** 工作 / 团队 */
 export function IconBriefcase({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "briefcase")}>
+      <rect className="ic-fill" x="2" y="7" width="20" height="14" rx="2" ry="2" />
       <rect x="2" y="7" width="20" height="14" rx="2" ry="2" />
-      <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16" />
+      <path className="ic-up" d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16" />
     </svg>
   );
 }
@@ -635,7 +674,7 @@ export function IconBriefcase({ size = 18, color = "currentColor", strokeWidth =
 /** 对勾 */
 export function IconCheck({ size = 18, color = "currentColor", strokeWidth = 2, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "check")}>
       <polyline points="20 6 9 17 4 12" />
     </svg>
   );
@@ -645,10 +684,13 @@ export function IconCheck({ size = 18, color = "currentColor", strokeWidth = 2, 
  *  相较三角警示，圆形在密集消息流中更安静、与线性图标体系一致） */
 export function IconAlertCircle({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "alert-circle")}>
+      <circle className="ic-fill" cx="12" cy="12" r="9.5" />
       <circle cx="12" cy="12" r="9.5" />
-      <line x1="12" y1="7.5" x2="12" y2="13" />
-      <circle cx="12" cy="16.5" r="0.6" fill={color || "currentColor"} stroke="none" />
+      <g className="ic-pop">
+        <line x1="12" y1="7.5" x2="12" y2="13" />
+        <circle cx="12" cy="16.5" r="0.6" fill={color || "currentColor"} stroke="none" />
+      </g>
     </svg>
   );
 }
@@ -724,7 +766,7 @@ export function IconRingProgress({
 /** 拖拽(六点) */
 export function IconGripVertical({ size = 14, color = "currentColor", strokeWidth = 2, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "grip-vertical")}>
       <circle cx="9" cy="6" r="1" />
       <circle cx="9" cy="12" r="1" />
       <circle cx="9" cy="18" r="1" />
@@ -738,12 +780,12 @@ export function IconGripVertical({ size = 14, color = "currentColor", strokeWidt
 /** 文件读取（精修：文件外框 + 居中透视眼睛/水平扫描视线，彻底消除对勾造成的任务完成误判） */
 export function IconFileRead({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "file-read")}>
+      <path className="ic-fill" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
       <polyline points="14 2 14 8 20 8" />
-      {/* 居中检视透视眼 */}
       <path d="M7.5 15s1.8-2.5 4.5-2.5 4.5 2.5 4.5 2.5-1.8 2.5-4.5 2.5-4.5-2.5-4.5-2.5z" strokeWidth={1.4} />
-      <circle cx="12" cy="15" r="1.1" fill={color || "currentColor"} stroke="none" />
+      <circle className="ic-pop" cx="12" cy="15" r="1.1" fill={color || "currentColor"} stroke="none" />
     </svg>
   );
 }
@@ -751,11 +793,11 @@ export function IconFileRead({ size = 18, color = "currentColor", strokeWidth = 
 /** 文件写入（精修：圆角折角纸张 + 底部精准 45° 笔尖写入接触线，比例舒展和谐） */
 export function IconFileWrite({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "file-write")}>
+      <path className="ic-fill" d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9" />
       <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9" />
       <polyline points="13 2 13 8 19 8" />
-      {/* 底部雕刻笔身与笔尖 */}
-      <path d="M10 18l5-5 2.5 2.5-5 5L9 21l1-3z" strokeWidth={1.4} />
+      <path className="ic-tilt" d="M10 18l5-5 2.5 2.5-5 5L9 21l1-3z" strokeWidth={1.4} />
     </svg>
   );
 }
@@ -763,7 +805,7 @@ export function IconFileWrite({ size = 18, color = "currentColor", strokeWidth =
 /** 文件补丁 / 差异修补（代码文件折角框 + 内部横向增删差分指示微条 +/-） */
 export function IconFilePatch({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "file-patch")}>
       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
       <polyline points="14 2 14 8 20 8" />
       {/* 加号 + 刻线 */}
@@ -778,7 +820,7 @@ export function IconFilePatch({ size = 18, color = "currentColor", strokeWidth =
 /** 复合操作聚合流（专为 ActionClusterRow 设计：多层卡片流水线与执行光芒，替代突兀的放大镜） */
 export function IconOperationCluster({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "operation-cluster")}>
       <rect x="3" y="4" width="13" height="13" rx="2" />
       <path d="M7 20h11a2 2 0 0 0 2-2V7" />
       {/* 内部操作流水线指示齿/执行符 */}
@@ -790,15 +832,13 @@ export function IconOperationCluster({ size = 18, color = "currentColor", stroke
 /** 任务分步执行清单（todo_write 专属：任务纸板 + 对齐步骤条目与勾选标） */
 export function IconChecklist({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "checklist")}>
+      <rect className="ic-fill" x="3" y="3" width="18" height="18" rx="3" />
       <rect x="3" y="3" width="18" height="18" rx="3" />
-      {/* 步骤 1：对勾 + 横线 */}
-      <path d="M7 8l1.5 1.5 3-3" strokeWidth={1.5} />
+      <path className="ic-pop" d="M7 8l1.5 1.5 3-3" strokeWidth={1.5} />
       <line x1="14" y1="8" x2="17" y2="8" strokeWidth={1.5} />
-      {/* 步骤 2：点 + 横线 */}
       <circle cx="8" cy="13" r="1" fill={color || "currentColor"} stroke="none" />
       <line x1="11" y1="13" x2="17" y2="13" strokeWidth={1.5} />
-      {/* 步骤 3：点 + 横线 */}
       <circle cx="8" cy="17" r="1" fill={color || "currentColor"} stroke="none" />
       <line x1="11" y1="17" x2="17" y2="17" strokeWidth={1.5} />
     </svg>
@@ -808,7 +848,7 @@ export function IconChecklist({ size = 18, color = "currentColor", strokeWidth =
 /** 代码行级/全库搜索特化放大镜（放大镜内嵌代码尖括号刻度点，强化代码检索属性） */
 export function IconFileSearch({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "file-search")}>
       <circle cx="10.5" cy="10.5" r="7.5" />
       <line x1="21" y1="21" x2="15.8" y2="15.8" />
       {/* 镜面内嵌代码刻度点/尖角 */}
@@ -821,7 +861,8 @@ export function IconFileSearch({ size = 18, color = "currentColor", strokeWidth 
 /** 包/包装 */
 export function IconPackage({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "package")}>
+      <path className="ic-fill" d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
       <line x1="16.5" y1="9.4" x2="7.5" y2="4.21" />
       <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
       <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
@@ -833,9 +874,10 @@ export function IconPackage({ size = 18, color = "currentColor", strokeWidth = 1
 /** 剪贴板(规则) */
 export function IconClipboard({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "clipboard")}>
+      <path className="ic-fill" d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
       <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
-      <rect x="8" y="2" width="8" height="4" rx="1" ry="1" />
+      <rect className="ic-up" x="8" y="2" width="8" height="4" rx="1" ry="1" />
     </svg>
   );
 }
@@ -843,7 +885,7 @@ export function IconClipboard({ size = 18, color = "currentColor", strokeWidth =
 /** 文件差异 */
 export function IconDiff({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "diff")}>
       <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
     </svg>
   );
@@ -852,10 +894,13 @@ export function IconDiff({ size = 18, color = "currentColor", strokeWidth = 1.75
 /** 烧瓶 / 测试 */
 export function IconFlask({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <path d="M9 2h6" />
-      <path d="M10 2v6L4 18a2 2 0 0 0 1.7 3h12.6A2 2 0 0 0 20 18L14 8V2" />
-      <line x1="8" y1="14" x2="16" y2="14" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "flask")}>
+      <path className="ic-fill" d="M10 2v6L4 18a2 2 0 0 0 1.7 3h12.6A2 2 0 0 0 20 18L14 8V2" />
+      <g className="ic-swing">
+        <path d="M9 2h6" />
+        <path d="M10 2v6L4 18a2 2 0 0 0 1.7 3h12.6A2 2 0 0 0 20 18L14 8V2" />
+        <line x1="8" y1="14" x2="16" y2="14" />
+      </g>
     </svg>
   );
 }
@@ -863,9 +908,11 @@ export function IconFlask({ size = 18, color = "currentColor", strokeWidth = 1.7
 /** Git 分支 */
 export function IconGitBranch({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "git-branch")}>
+      <circle className="ic-fill" cx="18" cy="6" r="3" />
+      <circle className="ic-fill" cx="6" cy="18" r="3" />
       <line x1="6" y1="3" x2="6" y2="15" />
-      <circle cx="18" cy="6" r="3" />
+      <circle className="ic-pop" cx="18" cy="6" r="3" />
       <circle cx="6" cy="18" r="3" />
       <path d="M18 9a9 9 0 0 1-9 9" />
     </svg>
@@ -875,9 +922,11 @@ export function IconGitBranch({ size = 18, color = "currentColor", strokeWidth =
 /** 左箭头(返回) */
 export function IconArrowLeft({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <line x1="19" y1="12" x2="5" y2="12" />
-      <polyline points="12 19 5 12 12 5" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "arrow-left")}>
+      <g className="ic-left">
+        <line x1="19" y1="12" x2="5" y2="12" />
+        <polyline points="12 19 5 12 12 5" />
+      </g>
     </svg>
   );
 }
@@ -931,9 +980,12 @@ export const IconWorkdir = IconFolder;
 /** 插头（MCP 连接） */
 export function IconPlug({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <path d="M9 2v6" />
-      <path d="M15 2v6" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "plug")}>
+      <path className="ic-fill" d="M6 8h12v3a6 6 0 0 1-12 0V8z" />
+      <g className="ic-up">
+        <path d="M9 2v6" />
+        <path d="M15 2v6" />
+      </g>
       <path d="M6 8h12v3a6 6 0 0 1-12 0V8z" />
       <path d="M12 17v5" />
     </svg>
@@ -943,7 +995,7 @@ export function IconPlug({ size = 18, color = "currentColor", strokeWidth = 1.75
 /** Markdown 标识（M 字母徽章） */
 export function IconMarkdown({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "markdown")}>
       <path d="M4 7.5h16v9H4z" />
       <path d="M7.5 14V10l2 2 2-2v4" />
       <path d="M15.5 14v-4" />
@@ -955,7 +1007,7 @@ export function IconMarkdown({ size = 18, color = "currentColor", strokeWidth = 
 /** 回滚（逆时针箭头） */
 export function IconRotateCcw({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "rotate-ccw")}>
       <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
       <path d="M3 3v5h5" />
     </svg>
@@ -965,8 +1017,8 @@ export function IconRotateCcw({ size = 18, color = "currentColor", strokeWidth =
 /** 上箭头（chevron up） */
 export function IconChevronUp({ size = 14, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <path d="M18 15l-6-6-6 6" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "chevron-up")}>
+      <path className="ic-up" d="M18 15l-6-6-6 6" />
     </svg>
   );
 }
@@ -975,7 +1027,7 @@ export function IconChevronUp({ size = 14, color = "currentColor", strokeWidth =
 export function IconArrowToggle({ open, size = 14, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps & { open: boolean }) {
   return (
     <svg
-      {...baseProps(size, color, strokeWidth, rest)}
+      {...baseProps(size, color, strokeWidth, rest, "arrow-toggle")}
       style={{
         transform: open ? "rotate(90deg)" : "rotate(0deg)",
         // plan-353-1738 M4b（S5）：统一为折叠展开档时长 + 弹性曲线（原为 --dur-fast + 字面量 ease，
@@ -992,8 +1044,8 @@ export function IconArrowToggle({ open, size = 14, color = "currentColor", strok
 /** 右箭头 */
 export function IconArrowRight({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <path d="M4 12h16M14 6l6 6-6 6" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "arrow-right")}>
+      <path className="ic-right" d="M4 12h16M14 6l6 6-6 6" />
     </svg>
   );
 }
@@ -1001,9 +1053,10 @@ export function IconArrowRight({ size = 18, color = "currentColor", strokeWidth 
 /** 时钟 */
 export function IconClock({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "clock")}>
+      <circle className="ic-fill" cx="12" cy="12" r="9" />
       <circle cx="12" cy="12" r="9" />
-      <path d="M12 7v5l3 2" />
+      <path className="ic-hand" d="M12 7v5l3 2" />
     </svg>
   );
 }
@@ -1011,9 +1064,12 @@ export function IconClock({ size = 18, color = "currentColor", strokeWidth = 1.7
 /** 图钉（置顶排序）：45° 现代纤细倾斜图钉，精修针尖与重心比例 */
 export function IconPin({ size = 18, color = "currentColor", strokeWidth = 1.6, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <line x1="12" y1="17" x2="12" y2="22" />
-      <path d="M5 17h14v-2l-2-2V7a5 5 0 0 0-10 0v6l-2 2v2z" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "pin")}>
+      <path className="ic-fill" d="M5 17h14v-2l-2-2V7a5 5 0 0 0-10 0v6l-2 2v2z" />
+      <g className="ic-tilt">
+        <line x1="12" y1="17" x2="12" y2="22" />
+        <path d="M5 17h14v-2l-2-2V7a5 5 0 0 0-10 0v6l-2 2v2z" />
+      </g>
     </svg>
   );
 }
@@ -1021,23 +1077,26 @@ export function IconPin({ size = 18, color = "currentColor", strokeWidth = 1.6, 
 /** 魔术棒（星星）——AI 智能合并/建议（plan-282-1441 #5） */
 export function IconWand({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <path d="M15 4V2" />
-      <path d="M15 16v-2" />
-      <path d="M8 9h2" />
-      <path d="M20 9h2" />
-      <path d="M17.8 11.8L19 13" />
-      <path d="M15 9h0" />
-      <path d="M17.8 6.2L19 5" />
-      <path d="M12.2 6.2L11 5" />
-      <path d="M3 21l9-9" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "wand")}>
+      <g className="ic-pop">
+        <path d="M15 4V2" />
+        <path d="M15 16v-2" />
+        <path d="M8 9h2" />
+        <path d="M20 9h2" />
+        <path d="M17.8 11.8L19 13" />
+        <path d="M15 9h0" />
+        <path d="M17.8 6.2L19 5" />
+        <path d="M12.2 6.2L11 5" />
+      </g>
+      <path className="ic-tilt" d="M3 21l9-9" />
     </svg>
   );
 }
 export function IconArchive({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <rect x="3" y="4" width="18" height="4" rx="1" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "archive")}>
+      <path className="ic-fill" d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8" />
+      <rect className="ic-lid" x="3" y="4" width="18" height="4" rx="1" />
       <path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8" />
       <line x1="9" y1="12" x2="15" y2="12" />
     </svg>
@@ -1047,9 +1106,12 @@ export function IconArchive({ size = 18, color = "currentColor", strokeWidth = 1
 /** 垃圾桶（盖+桶+两条竖线）——永久删除类操作（plan-282-1441 #4 归档页批量删除） */
 export function IconTrash({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <path d="M3 6h18" />
-      <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "trash")}>
+      <path className="ic-fill" d="M19 6l-1 14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1L5 6" />
+      <g className="ic-lid">
+        <path d="M3 6h18" />
+        <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
+      </g>
       <path d="M19 6l-1 14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1L5 6" />
       <line x1="10" y1="11" x2="10" y2="17" />
       <line x1="14" y1="11" x2="14" y2="17" />
@@ -1060,9 +1122,10 @@ export function IconTrash({ size = 18, color = "currentColor", strokeWidth = 1.7
 /** 铅笔（编辑） */
 export function IconPencil({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "pencil")}>
+      <path className="ic-fill" d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" />
       <path d="M12 20h9" />
-      <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" />
+      <path className="ic-tilt" d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" />
     </svg>
   );
 }
@@ -1070,9 +1133,10 @@ export function IconPencil({ size = 18, color = "currentColor", strokeWidth = 1.
 /** 眼睛（显示密钥） */
 export function IconEye({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "eye")}>
+      <path className="ic-fill" d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
       <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
-      <circle cx="12" cy="12" r="3" />
+      <circle className="ic-pop" cx="12" cy="12" r="3" />
     </svg>
   );
 }
@@ -1080,7 +1144,7 @@ export function IconEye({ size = 18, color = "currentColor", strokeWidth = 1.75,
 /** 眼睛（隐藏密钥，带斜线） */
 export function IconEyeOff({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "eye-off")}>
       <path d="M10.7 5.1A9.9 9.9 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-3 3.9" />
       <path d="M6.6 6.6A17 17 0 0 0 2 12s3.5 7 10 7a9.9 9.9 0 0 0 4.4-1" />
       <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
@@ -1092,7 +1156,7 @@ export function IconEyeOff({ size = 18, color = "currentColor", strokeWidth = 1.
 /** 字母排序（AZ） */
 export function IconSortAlpha({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "sort-alpha")}>
       <path d="M3 6h4l2 5-2 5H3" />
       <path d="M17 6v12" />
       <path d="M13 18h8" />
@@ -1104,9 +1168,10 @@ export function IconSortAlpha({ size = 18, color = "currentColor", strokeWidth =
 /** 准星（选择元素） */
 export function IconTarget({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "target")}>
+      <circle className="ic-fill" cx="12" cy="12" r="8" />
       <circle cx="12" cy="12" r="8" />
-      <circle cx="12" cy="12" r="2" />
+      <circle className="ic-pop" cx="12" cy="12" r="2" />
       <path d="M12 2v4M12 18v4M2 12h4M18 12h4" />
     </svg>
   );
@@ -1115,8 +1180,9 @@ export function IconTarget({ size = 18, color = "currentColor", strokeWidth = 1.
 /** 点赞（大拇指向上） */
 export function IconThumbsUp({ size = 16, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "thumbs-up")}>
+      <path className="ic-fill" d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3" />
+      <path className="ic-tilt" d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3" />
     </svg>
   );
 }
@@ -1124,8 +1190,9 @@ export function IconThumbsUp({ size = 16, color = "currentColor", strokeWidth = 
 /** 踩（大拇指向下） */
 export function IconThumbsDown({ size = 16, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zM17 2h3a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "thumbs-down")}>
+      <path className="ic-fill" d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zM17 2h3a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3" />
+      <path className="ic-tilt" d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zM17 2h3a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3" />
     </svg>
   );
 }
@@ -1133,10 +1200,12 @@ export function IconThumbsDown({ size = 16, color = "currentColor", strokeWidth 
 /** 外部链接（右上箭头） */
 export function IconExternalLink({ size = 16, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "external-link")}>
       <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-      <polyline points="15 3 21 3 21 9" />
-      <line x1="10" y1="14" x2="21" y2="3" />
+      <g className="ic-ne">
+        <polyline points="15 3 21 3 21 9" />
+        <line x1="10" y1="14" x2="21" y2="3" />
+      </g>
     </svg>
   );
 }
@@ -1144,7 +1213,7 @@ export function IconExternalLink({ size = 16, color = "currentColor", strokeWidt
 /** 暂停（竖线） */
 export function IconPause({ size = 16, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "pause")}>
       <rect x="6" y="4" width="4" height="16" rx="1" />
       <rect x="14" y="4" width="4" height="16" rx="1" />
     </svg>
@@ -1154,9 +1223,10 @@ export function IconPause({ size = 16, color = "currentColor", strokeWidth = 1.7
 /** 图片（风景） */
 export function IconImage({ size = 16, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "image")}>
+      <rect className="ic-fill" x="3" y="3" width="18" height="18" rx="2" />
       <rect x="3" y="3" width="18" height="18" rx="2" />
-      <circle cx="8.5" cy="8.5" r="1.5" />
+      <circle className="ic-pop" cx="8.5" cy="8.5" r="1.5" />
       <polyline points="21 15 16 10 5 21" />
     </svg>
   );
@@ -1167,7 +1237,7 @@ export function IconImage({ size = 16, color = "currentColor", strokeWidth = 1.7
  *  12px 下仍保持清晰：只保留 3 条粗笔画，避免小尺寸糊成一团。 */
 export function IconMultimodal({ size = 14, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "multimodal")}>
       {/* 左：图像卡（内嵌小太阳点） */}
       <rect x="2.5" y="4" width="10" height="10" rx="2" />
       <circle cx="6" cy="7.5" r="1" />
@@ -1183,8 +1253,8 @@ export function IconMultimodal({ size = 14, color = "currentColor", strokeWidth 
 /** 扳手（技能/工具） */
 export function IconWrench({ size = 16, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "wrench")}>
+      <path className="ic-tilt" d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
     </svg>
   );
 }
@@ -1192,9 +1262,11 @@ export function IconWrench({ size = 16, color = "currentColor", strokeWidth = 1.
 /** 下箭头（跳转底部） */
 export function IconArrowDown({ size = 18, color = "currentColor", strokeWidth = 2, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <line x1="12" y1="5" x2="12" y2="19" />
-      <polyline points="19 12 12 19 5 12" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "arrow-down")}>
+      <g className="ic-down">
+        <line x1="12" y1="5" x2="12" y2="19" />
+        <polyline points="19 12 12 19 5 12" />
+      </g>
     </svg>
   );
 }
@@ -1202,9 +1274,10 @@ export function IconArrowDown({ size = 18, color = "currentColor", strokeWidth =
 /** 对勾圆圈（完成/成功状态） */
 export function IconCheckCircle({ size = 16, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "check-circle")}>
+      <path className="ic-fill" d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
       <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
-      <polyline points="22 4 12 14.01 9 11.01" />
+      <polyline className="ic-pop" points="22 4 12 14.01 9 11.01" />
     </svg>
   );
 }
@@ -1212,10 +1285,13 @@ export function IconCheckCircle({ size = 16, color = "currentColor", strokeWidth
 /** 盾牌（权限/完全访问标识，精修外轮廓 + 内部安全核刻线） */
 export function IconShield({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "shield")}>
+      <path className="ic-fill" d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
       <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-      <path d="M12 8v5" />
-      <circle cx="12" cy="16" r="1" fill={color || "currentColor"} stroke="none" />
+      <g className="ic-pop">
+        <path d="M12 8v5" />
+        <circle cx="12" cy="16" r="1" fill={color || "currentColor"} stroke="none" />
+      </g>
     </svg>
   );
 }
@@ -1223,10 +1299,12 @@ export function IconShield({ size = 18, color = "currentColor", strokeWidth = 1.
 /** 下载（导入入口，对齐 zcode 技能页头部） */
 export function IconDownload({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "download")}>
       <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-      <polyline points="7 10 12 15 17 10" />
-      <line x1="12" y1="15" x2="12" y2="3" />
+      <g className="ic-down">
+        <polyline points="7 10 12 15 17 10" />
+        <line x1="12" y1="15" x2="12" y2="3" />
+      </g>
     </svg>
   );
 }
@@ -1234,12 +1312,15 @@ export function IconDownload({ size = 18, color = "currentColor", strokeWidth = 
 /** 调色板（外观设置，对齐 zcode 设置导航） */
 export function IconPalette({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <circle cx="13.5" cy="6.5" r=".5" />
-      <circle cx="17.5" cy="10.5" r=".5" />
-      <circle cx="8.5" cy="7.5" r=".5" />
-      <circle cx="6.5" cy="12.5" r=".5" />
-      <path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "palette")}>
+      <path className="ic-fill" d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z" />
+      <g className="ic-tilt">
+        <circle cx="13.5" cy="6.5" r=".5" />
+        <circle cx="17.5" cy="10.5" r=".5" />
+        <circle cx="8.5" cy="7.5" r=".5" />
+        <circle cx="6.5" cy="12.5" r=".5" />
+        <path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z" />
+      </g>
     </svg>
   );
 }
@@ -1247,10 +1328,12 @@ export function IconPalette({ size = 18, color = "currentColor", strokeWidth = 1
 /** 锚（钩子设置，对齐 zcode 设置导航） */
 export function IconAnchor({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <circle cx="12" cy="5" r="3" />
-      <line x1="12" y1="22" x2="12" y2="8" />
-      <path d="M5 12H2a10 10 0 0 0 20 0h-3" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "anchor")}>
+      <g className="ic-swing">
+        <circle cx="12" cy="5" r="3" />
+        <line x1="12" y1="22" x2="12" y2="8" />
+        <path d="M5 12H2a10 10 0 0 0 20 0h-3" />
+      </g>
     </svg>
   );
 }
@@ -1258,10 +1341,10 @@ export function IconAnchor({ size = 18, color = "currentColor", strokeWidth = 1.
 /** 柱状图（使用统计，对齐 zcode 设置导航） */
 export function IconBarChart({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <line x1="12" y1="20" x2="12" y2="10" />
-      <line x1="18" y1="20" x2="18" y2="4" />
-      <line x1="6" y1="20" x2="6" y2="16" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "bar-chart")}>
+      <line className="ic-dot" style={{ ["--d" as string]: 0 }} x1="6" y1="20" x2="6" y2="16" />
+      <line className="ic-dot" style={{ ["--d" as string]: 1 }} x1="12" y1="20" x2="12" y2="10" />
+      <line className="ic-dot" style={{ ["--d" as string]: 2 }} x1="18" y1="20" x2="18" y2="4" />
     </svg>
   );
 }
@@ -1269,10 +1352,11 @@ export function IconBarChart({ size = 18, color = "currentColor", strokeWidth = 
 /** 图层/分组（替代旧版井号，直观传达分组归纳与层级收拢） */
 export function IconLayers({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <polygon points="12 2 2 7 12 12 22 7 12 2" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "layers")}>
+      <polygon className="ic-fill" points="12 2 2 7 12 12 22 7 12 2" />
+      <polygon className="ic-up" points="12 2 2 7 12 12 22 7 12 2" />
       <polyline points="2 12 12 17 22 12" />
-      <polyline points="2 17 12 22 22 17" />
+      <polyline className="ic-down" points="2 17 12 22 22 17" />
     </svg>
   );
 }
@@ -1283,12 +1367,11 @@ export const IconHash = IconLayers;
 /** 排序切换（阶梯降序横线 + 垂直升降上下微双向箭头，消除筛选歧义） */
 export function IconSortDesc({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "sort-desc")}>
       <line x1="3" y1="6" x2="13" y2="6" />
       <line x1="3" y1="12" x2="10" y2="12" />
       <line x1="3" y1="18" x2="7" y2="18" />
-      {/* 右侧垂直排序指示箭头 */}
-      <path d="M17 7v11M14 15l3 3 3-3" />
+      <path className="ic-down" d="M17 7v11M14 15l3 3 3-3" />
     </svg>
   );
 }
@@ -1296,7 +1379,7 @@ export function IconSortDesc({ size = 18, color = "currentColor", strokeWidth = 
 /** 列表筛选（保留兼容，但优先推荐 IconSortDesc） */
 export function IconListFilter({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "list-filter")}>
       <line x1="3" y1="6" x2="13" y2="6" />
       <circle cx="17" cy="6" r="2" />
       <line x1="3" y1="12" x2="7" y2="12" />
@@ -1311,7 +1394,7 @@ export function IconListFilter({ size = 18, color = "currentColor", strokeWidth 
 /** 对角展开（侧栏宽度展开，对齐 zcode） */
 export function IconExpandDiagonal({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "expand-diagonal")}>
       <polyline points="15 3 21 3 21 9" />
       <polyline points="9 21 3 21 3 15" />
       <line x1="21" y1="3" x2="14" y2="10" />
@@ -1323,9 +1406,9 @@ export function IconExpandDiagonal({ size = 18, color = "currentColor", strokeWi
 /** 开发者工具/代码 */
 export function IconCode({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <polyline points="16 18 22 12 16 6" />
-      <polyline points="8 6 2 12 8 18" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "code")}>
+      <polyline className="ic-right" points="16 18 22 12 16 6" />
+      <polyline className="ic-left" points="8 6 2 12 8 18" />
     </svg>
   );
 }
@@ -1333,16 +1416,19 @@ export function IconCode({ size = 18, color = "currentColor", strokeWidth = 1.75
 /** Bug / 调试图标 */
 export function IconBug({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
-      <rect width="8" height="14" x="8" y="6" rx="4" />
-      <path d="m19 7-3 2" />
-      <path d="m5 7 3 2" />
-      <path d="m19 19-3-2" />
-      <path d="m5 19 3-2" />
-      <path d="M20 13h-4" />
-      <path d="M4 13h4" />
-      <path d="m10 4 1 2" />
-      <path d="m14 4-1 2" />
+    <svg {...baseProps(size, color, strokeWidth, rest, "bug")}>
+      <rect className="ic-fill" width="8" height="14" x="8" y="6" rx="4" />
+      <g className="ic-swing">
+        <rect width="8" height="14" x="8" y="6" rx="4" />
+        <path d="m19 7-3 2" />
+        <path d="m5 7 3 2" />
+        <path d="m19 19-3-2" />
+        <path d="m5 19 3-2" />
+        <path d="M20 13h-4" />
+        <path d="M4 13h4" />
+        <path d="m10 4 1 2" />
+        <path d="m14 4-1 2" />
+      </g>
     </svg>
   );
 }
@@ -1350,9 +1436,10 @@ export function IconBug({ size = 18, color = "currentColor", strokeWidth = 1.75,
 /** 拍照/截图 */
 export function IconCamera({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "camera")}>
+      <path className="ic-fill" d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
       <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
-      <circle cx="12" cy="13" r="4" />
+      <circle className="ic-pop" cx="12" cy="13" r="4" />
     </svg>
   );
 }
@@ -1360,10 +1447,13 @@ export function IconCamera({ size = 18, color = "currentColor", strokeWidth = 1.
 /** 新建项目文件夹（圆润文件夹轮廓 + 右下角悬浮精巧加号微章，消除方框加号歧义） */
 export function IconFolderPlus({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest)}>
+    <svg {...baseProps(size, color, strokeWidth, rest, "folder-plus")}>
+      <path className="ic-fill" d="M12 19H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h4.5l2 2.5H19a2 2 0 0 1 2 2v2.5" />
       <path d="M12 19H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h4.5l2 2.5H19a2 2 0 0 1 2 2v2.5" />
-      <line x1="18" y1="14" x2="18" y2="20" />
-      <line x1="15" y1="17" x2="21" y2="17" />
+      <g className="ic-spin">
+        <line x1="18" y1="14" x2="18" y2="20" />
+        <line x1="15" y1="17" x2="21" y2="17" />
+      </g>
     </svg>
   );
 }
@@ -1421,6 +1511,251 @@ export function IconBrandWindowsTerminal({ size = 16, className }: { size?: numb
       <rect x="2" y="3" width="20" height="18" rx="3" stroke="#4F4F4F" strokeWidth="1" />
       <path d="M6 8L10 12L6 16" stroke="#4CC2FF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
       <line x1="12" y1="16" x2="17" y2="16" stroke="#FFFFFF" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/* ── plan-20261009-ui U3：新增线性图标（几何取自 Lucide，ISC License），带双色调与部件微动效 ── */
+
+/** 拼图（插件） */
+export function IconPuzzle({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  const d = "M15.39 4.39a1 1 0 0 0 1.68-.474 2.5 2.5 0 1 1 3.014 3.015 1 1 0 0 0-.474 1.68l1.683 1.682a2.414 2.414 0 0 1 0 3.414L19.61 15.39a1 1 0 0 1-1.68-.474 2.5 2.5 0 1 0-3.014 3.015 1 1 0 0 1 .474 1.68l-1.683 1.682a2.414 2.414 0 0 1-3.414 0L8.61 19.61a1 1 0 0 0-1.68.474 2.5 2.5 0 1 1-3.014-3.015 1 1 0 0 0 .474-1.68l-1.683-1.682a2.414 2.414 0 0 1 0-3.414L4.39 8.61a1 1 0 0 1 1.68.474 2.5 2.5 0 1 0 3.014-3.015 1 1 0 0 1-.474-1.68l1.683-1.682a2.414 2.414 0 0 1 3.414 0z";
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "puzzle")}>
+      <path className="ic-fill" d={d} />
+      <path className="ic-tilt" d={d} />
+    </svg>
+  );
+}
+
+/** 星芒（技能 / 智能体模式） */
+export function IconSparkles({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  const d = "M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z";
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "sparkles")}>
+      <path className="ic-fill" d={d} />
+      <path className="ic-pop" d={d} />
+      <g className="ic-dot" style={{ ["--d" as string]: 1 }}>
+        <path d="M20 2v4" />
+        <path d="M22 4h-4" />
+      </g>
+      <circle className="ic-dot" style={{ ["--d" as string]: 2 }} cx="4" cy="20" r="2" />
+    </svg>
+  );
+}
+
+/** 待办清单（计划模式） */
+export function IconListTodo({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "list-todo")}>
+      <rect className="ic-fill" x="3" y="4" width="6" height="6" rx="1" />
+      <path d="M13 5h8" />
+      <path d="M13 12h8" />
+      <path d="M13 19h8" />
+      <path className="ic-pop" d="m3 17 2 2 4-4" />
+      <rect x="3" y="4" width="6" height="6" rx="1" />
+    </svg>
+  );
+}
+
+/** 勾选清单（任务标签） */
+export function IconListChecks({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "list-checks")}>
+      <path d="M13 5h8" />
+      <path d="M13 12h8" />
+      <path d="M13 19h8" />
+      <path className="ic-pop" d="m3 17 2 2 4-4" />
+      <path className="ic-pop" d="m3 7 2 2 4-4" />
+    </svg>
+  );
+}
+
+/** 右上箭头（前往 / 探索更多） */
+export function IconArrowUpRight({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "arrow-up-right")}>
+      <g className="ic-ne">
+        <path d="M7 7h10v10" />
+        <path d="M7 17 17 7" />
+      </g>
+    </svg>
+  );
+}
+
+/** 锁（会话工作区已锁定） */
+export function IconLock({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "lock")}>
+      <rect className="ic-fill" x="3" y="10" width="18" height="12" rx="2" />
+      <path className="ic-up" d="M7 10V7a5 5 0 0 1 10 0v3" />
+      <rect x="3" y="10" width="18" height="12" rx="2" />
+      <circle cx="12" cy="16" r="1" />
+    </svg>
+  );
+}
+
+/** 仪表（思考深度） */
+export function IconGauge({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "gauge")}>
+      <path d="M3.34 19a10 10 0 1 1 17.32 0" />
+      <path className="ic-needle" d="m12 14 4-4" />
+    </svg>
+  );
+}
+
+/** 应用窗口（浏览器标签） */
+export function IconAppWindow({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "app-window")}>
+      <rect className="ic-fill" x="2" y="4" width="20" height="16" rx="2" />
+      <rect x="2" y="4" width="20" height="16" rx="2" />
+      <path d="M10 4v4" />
+      <path d="M2 8h20" />
+      <path d="M6 4v4" />
+    </svg>
+  );
+}
+
+/** 方框终端（终端标签） */
+export function IconSquareTerminal({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "square-terminal")}>
+      <rect className="ic-fill" width="18" height="18" x="3" y="3" rx="2" ry="2" />
+      <path className="ic-right" d="m7 11 2-2-2-2" />
+      <path d="M11 13h4" />
+      <rect width="18" height="18" x="3" y="3" rx="2" ry="2" />
+    </svg>
+  );
+}
+
+/** 文件树（文件标签） */
+export function IconFolderTree({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  const a = "M20 10a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1h-2.5a1 1 0 0 1-.8-.4l-.9-1.2A1 1 0 0 0 15 3h-2a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1Z";
+  const b = "M20 21a1 1 0 0 0 1-1v-3a1 1 0 0 0-1-1h-2.9a1 1 0 0 1-.88-.55l-.42-.85a1 1 0 0 0-.92-.6H13a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1Z";
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "folder-tree")}>
+      <path className="ic-fill" d={a} />
+      <path className="ic-fill" d={b} />
+      <path className="ic-right" d={a} />
+      <path className="ic-right" d={b} />
+      <path d="M3 5a2 2 0 0 0 2 2h3" />
+      <path d="M3 3v13a2 2 0 0 0 2 2h3" />
+    </svg>
+  );
+}
+
+/** 机器人（子代理） */
+export function IconBot({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "bot")}>
+      <rect className="ic-fill" width="16" height="12" x="4" y="8" rx="2" />
+      <path className="ic-swing" d="M12 8V4H8" />
+      <rect width="16" height="12" x="4" y="8" rx="2" />
+      <path d="M2 14h2" />
+      <path d="M20 14h2" />
+      <path className="ic-dot" style={{ ["--d" as string]: 0 }} d="M15 13v2" />
+      <path className="ic-dot" style={{ ["--d" as string]: 1 }} d="M9 13v2" />
+    </svg>
+  );
+}
+
+/** 火焰（热门） */
+export function IconFlame({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  const d = "M12 3q1 4 4 6.5t3 5.5a1 1 0 0 1-14 0 5 5 0 0 1 1-3 1 1 0 0 0 5 0c0-2-1.5-3-1.5-5q0-2 2.5-4";
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "flame")}>
+      <path className="ic-fill" d={d} />
+      <path className="ic-swing" d={d} />
+    </svg>
+  );
+}
+
+/** 历史（最近 / 最新） */
+export function IconHistory({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "history")}>
+      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+      <path d="M3 3v5h5" />
+      <path className="ic-hand" d="M12 7v5l4 2" />
+    </svg>
+  );
+}
+
+/** 回车（发送提示） */
+export function IconCornerDownLeft({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "corner-down-left")}>
+      <path d="M20 4v7a4 4 0 0 1-4 4H4" />
+      <path className="ic-left" d="m9 10-5 5 5 5" />
+    </svg>
+  );
+}
+
+/** 调节（管理入口） */
+export function IconSliders({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "sliders")}>
+      <path d="M14 17H5" />
+      <path d="M19 7h-9" />
+      <circle className="ic-left" cx="17" cy="17" r="3" />
+      <circle className="ic-right" cx="7" cy="7" r="3" />
+    </svg>
+  );
+}
+
+/** 文件叠（变更文件） */
+export function IconFileStack({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  const top = "M21 6a2 2 0 0 0-.586-1.414l-2-2A2 2 0 0 0 17 2h-3a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1z";
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "file-stack")}>
+      <path className="ic-fill" d={top} />
+      <path d="M11 21a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1" />
+      <path d="M16 16a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1" />
+      <path className="ic-up" d={top} />
+    </svg>
+  );
+}
+
+/** 积木（拓展 / 模块化） */
+export function IconBlocks({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "blocks")}>
+      <rect className="ic-fill" x="14" y="2" width="8" height="8" rx="1" />
+      <path d="M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2" />
+      <rect className="ic-ne" x="14" y="2" width="8" height="8" rx="1" />
+    </svg>
+  );
+}
+
+/** 望远镜（空态：没找到） */
+export function IconTelescope({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "telescope")}>
+      <g className="ic-tilt">
+        <path d="m10.065 12.493-6.18 1.318a.934.934 0 0 1-1.108-.702l-.537-2.15a1.07 1.07 0 0 1 .691-1.265l13.504-4.44" />
+        <path d="m13.56 11.747 4.332-.924" />
+        <path d="M16.485 5.94a2 2 0 0 1 1.455-2.425l1.09-.272a1 1 0 0 1 1.212.727l1.515 6.06a1 1 0 0 1-.727 1.213l-1.09.272a2 2 0 0 1-2.425-1.455z" />
+        <path d="m6.158 8.633 1.114 4.456" />
+      </g>
+      <path d="m16 21-3.105-6.21" />
+      <path d="m8 21 3.105-6.21" />
+      <circle cx="12" cy="13" r="2" />
+    </svg>
+  );
+}
+
+/** 有序列表（排队） */
+export function IconListOrdered({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "list-ordered")}>
+      <path className="ic-right" d="M11 5h10" />
+      <path d="M11 12h10" />
+      <path d="M11 19h10" />
+      <path d="M4 4h1v5" />
+      <path d="M4 9h2" />
+      <path d="M6.5 20H3.4c0-1 2.6-1.925 2.6-3.5a1.5 1.5 0 0 0-2.6-1.02" />
     </svg>
   );
 }

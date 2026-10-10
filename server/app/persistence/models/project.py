@@ -23,5 +23,9 @@ class Project(Base):
     parent_project_id: Mapped[int | None] = mapped_column(BigInteger)
     # git 分支名（工作树才有），便于列表直接展示。
     worktree_branch: Mapped[str | None] = mapped_column(String(200))
+    # plan-20261009-ui U1：项目外观（新建/编辑项目弹窗）。icon 为前端图标集 key、color 为色板名称，
+    # 只存名称不存色值——同一名称在明暗主题下由前端令牌取不同色值；空值 = 旧项目默认外观。
+    icon: Mapped[str | None] = mapped_column(String(40))
+    color: Mapped[str | None] = mapped_column(String(20))
     created_at: Mapped[str] = mapped_column(server_default=func.now())
     updated_at: Mapped[str] = mapped_column(server_default=func.now(), onupdate=func.now())

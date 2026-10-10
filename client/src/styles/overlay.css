@@ -1,0 +1,643 @@
+/* ═══════════════════════════════════════════════════════════
+ * 统一浮层体系（plan-20261009-ui U4/U7）
+ *
+ *  · 弹窗：浅灰底（--surface-dialog）+ 白色分组卡（InsetCard），无头尾分隔线，参考图1/图2；
+ *  · 浮层：Popover / Radix 菜单 / 下拉 / 旧自绘菜单统一为 圆角 14 + 内边距 6 + 菜单项圆角 8（同心圆）；
+ *  · 徽标、分段控件的统一外观。
+ * 本文件在 components.css 之后加载，同特异度规则覆盖旧实现。
+ * ═══════════════════════════════════════════════════════════ */
+
+/* ── ① 弹窗 ───────────────────────────────────────────────── */
+.ui-dialog-overlay { background: color-mix(in srgb, #000 28%, transparent); }
+:root[data-theme="dark"] .ui-dialog-overlay { background: color-mix(in srgb, #000 55%, transparent); }
+.ui-dialog-content {
+  background: var(--surface-dialog);
+  border: 1px solid var(--surface-inset-border);
+  border-radius: var(--r-pop);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, calc(0.18 * var(--shadow-strength, 1))), 0 4px 14px rgba(0, 0, 0, calc(0.08 * var(--shadow-strength, 1)));
+}
+.ui-dialog-content[data-state="open"] { animation: mo-pop-in var(--dur-spring-long) var(--spring-soft) both; --pop-dy: 10px; }
+.ui-dialog-content[data-state="closed"] { animation: mo-pop-out var(--dur-2) var(--ease-emphasized-accel) both; --pop-dy: 6px; }
+.ui-dialog-head {
+  align-items: center;
+  padding: 18px 18px 6px 24px;
+  border-bottom: none;
+  background: transparent;
+}
+.ui-dialog-title { font-size: 17px; font-weight: 650; letter-spacing: -0.01em; color: var(--text-1); line-height: 1.35; }
+.ui-dialog-subtitle { font-size: 12.5px; color: var(--text-3); margin-top: 4px; }
+.ui-dialog-close { width: var(--ic-btn-md); height: var(--ic-btn-md); border-radius: var(--r-ctl); color: var(--text-2); }
+.ui-dialog-body { padding: 10px 24px 18px; }
+.ui-dialog-footer {
+  gap: var(--sp-3);
+  padding: 6px 24px 20px;
+  border-top: none;
+}
+/* 弹窗底部：取消类为无边框文字按钮，主按钮实心（参考图1） */
+.ui-dialog-footer .btn { height: var(--btn-h-md); padding: 0 var(--btn-px-md); font-size: 13px; }
+.ui-dialog-footer .btn-ghost { border-color: transparent; color: var(--text-2); }
+.ui-dialog-footer .btn-ghost:hover:not(:disabled) { background: color-mix(in oklab, var(--text-1) 7%, transparent); color: var(--text-1); }
+.ui-dialog-footer .btn-primary { min-width: 88px; }
+/* 旧表单弹窗正文自带内距：与新弹窗正文内距合并，避免双倍留白 */
+.ui-dialog-body .form-dialog-body { padding: 0; max-height: none; overflow: visible; }
+.ui-dialog-message { font-size: 13.5px; color: var(--text-2); }
+
+/* 分组区块 + 白色分组卡 */
+.ui-dsec { display: flex; flex-direction: column; gap: var(--sp-3); }
+.ui-dsec + .ui-dsec { margin-top: 18px; }
+.ui-dsec-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4); min-height: 20px; }
+.ui-dsec-title { font-size: 13px; font-weight: 600; color: var(--text-1); }
+.ui-dsec-aside { display: inline-flex; align-items: center; gap: var(--sp-2); font-size: 12px; color: var(--text-3); }
+.ui-inset {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--surface-inset-border);
+  border-radius: var(--r-card);
+  background: var(--surface-inset);
+  overflow: hidden;
+}
+.ui-inset-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  width: 100%;
+  min-height: 52px;
+  padding: 10px var(--sp-5);
+  border: none;
+  background: transparent;
+  color: var(--text-1);
+  text-align: left;
+  font: inherit;
+}
+.ui-inset-row + .ui-inset-row { border-top: 1px solid var(--surface-inset-border); }
+.ui-inset-row.is-clickable { cursor: pointer; transition: background var(--dur-2) var(--ease-standard); }
+.ui-inset-row.is-clickable:hover { background: var(--bg-hover); }
+.ui-inset-row-icon { display: inline-flex; color: var(--text-2); flex-shrink: 0; }
+.ui-inset-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ui-inset-row-title { font-size: 13.5px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ui-inset-row-desc { font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ui-inset-row-actions { display: inline-flex; align-items: center; gap: var(--sp-1); flex-shrink: 0; }
+
+/* ── ② Popover 基座 ───────────────────────────────────────── */
+.ui-pop {
+  position: absolute;
+  z-index: 1100;
+  min-width: 200px;
+  padding: var(--pop-pad);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pop);
+  background: var(--color-popover);
+  color: var(--text-1);
+  box-shadow: var(--shadow-pop);
+  translate: var(--pop-shift-x, 0px) 0;
+  outline: none;
+}
+.ui-pop.pl-top-start { bottom: calc(100% + var(--pop-gap)); left: 0; transform-origin: 0% 100%; --pop-dy: 6px; }
+.ui-pop.pl-top-end { bottom: calc(100% + var(--pop-gap)); right: 0; transform-origin: 100% 100%; --pop-dy: 6px; }
+.ui-pop.pl-top-center { bottom: calc(100% + var(--pop-gap)); left: 50%; translate: calc(-50% + var(--pop-shift-x, 0px)) 0; transform-origin: 50% 100%; --pop-dy: 6px; }
+.ui-pop.pl-bottom-start { top: calc(100% + var(--pop-gap)); left: 0; transform-origin: 0% 0%; --pop-dy: -6px; }
+.ui-pop.pl-bottom-end { top: calc(100% + var(--pop-gap)); right: 0; transform-origin: 100% 0%; --pop-dy: -6px; }
+.ui-pop.pl-bottom-center { top: calc(100% + var(--pop-gap)); left: 50%; translate: calc(-50% + var(--pop-shift-x, 0px)) 0; transform-origin: 50% 0%; --pop-dy: -6px; }
+/* 侧向（二级浮层）：贴父浮层外侧，垂直位置由调用方 style.top/bottom 指定 */
+.ui-pop.pl-right-start { left: calc(100% + var(--pop-gap)); top: calc(-1 * var(--pop-pad) - 1px); transform-origin: 0% 0%; --pop-dy: 0px; }
+.ui-pop.pl-right-end { left: calc(100% + var(--pop-gap)); bottom: calc(-1 * var(--pop-pad) - 1px); transform-origin: 0% 100%; --pop-dy: 0px; }
+.ui-pop.pl-left-start { right: calc(100% + var(--pop-gap)); top: calc(-1 * var(--pop-pad) - 1px); transform-origin: 100% 0%; --pop-dy: 0px; }
+.ui-pop.pl-left-end { right: calc(100% + var(--pop-gap)); bottom: calc(-1 * var(--pop-pad) - 1px); transform-origin: 100% 100%; --pop-dy: 0px; }
+
+/* 浮层内通用结构：分组标题 / 菜单项 / 分隔 / 搜索 / 空态 / 底部入口 */
+.pop-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: 8px 10px 4px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-3);
+  user-select: none;
+}
+.pop-sep { height: 1px; margin: var(--pop-pad) calc(-1 * var(--pop-pad)); background: var(--border); }
+.pop-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--text-1);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--dur-1) var(--ease-standard), color var(--dur-1) var(--ease-standard);
+}
+.pop-item:hover,
+.pop-item.is-hl,
+.pop-item:focus-visible { background: var(--bg-hover); outline: none; }
+.pop-item.is-selected { background: var(--bg-active); }
+.pop-item:disabled,
+.pop-item.is-disabled { opacity: 0.45; cursor: not-allowed; }
+.pop-item.is-danger { color: var(--error); }
+.pop-item.is-danger:hover { background: var(--error-soft); }
+.pop-item-icon { display: inline-flex; align-items: center; justify-content: center; width: 18px; flex-shrink: 0; color: var(--text-2); }
+.pop-item.is-danger .pop-item-icon { color: var(--error); }
+.pop-item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.pop-item-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.pop-item-desc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--text-3); }
+.pop-item-inline-desc { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--text-3); }
+.pop-item-end { display: inline-flex; align-items: center; gap: var(--sp-2); flex-shrink: 0; margin-left: auto; color: var(--text-3); font-size: 12px; }
+.pop-item-check { display: inline-flex; color: var(--text-1); }
+.pop-kbd {
+  display: inline-flex; align-items: center; height: 18px; padding: 0 5px;
+  border-radius: var(--r-sm); background: var(--bg-hover); color: var(--text-3);
+  font-family: var(--font-sans); font-size: 10.5px; letter-spacing: 0.02em;
+}
+.pop-search {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: 34px;
+  margin-bottom: var(--pop-pad);
+  padding: 0 10px;
+  border-radius: var(--r-ctl);
+  background: var(--bg-hover);
+  color: var(--text-3);
+}
+.pop-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-1);
+  font-size: 13px;
+}
+.pop-search input::placeholder { color: var(--text-3); }
+.pop-scroll { max-height: min(320px, 46vh); overflow-y: auto; overscroll-behavior: contain; margin: 0 calc(-1 * var(--pop-pad)); padding: 0 var(--pop-pad); }
+.pop-scroll::-webkit-scrollbar { width: 4px; }
+.pop-empty { padding: 18px 10px; text-align: center; font-size: 12.5px; color: var(--text-3); }
+
+/* ── ③ Radix 菜单 / 下拉：同一套浮层规格 ─────────────────── */
+.ui-menu-content,
+.ui-select-content {
+  padding: var(--pop-pad);
+  border-radius: var(--r-pop);
+  box-shadow: var(--shadow-pop);
+  animation: mo-pop-in var(--dur-spring) var(--spring-soft) both;
+  --pop-dy: -4px;
+}
+.ui-menu-item,
+.ui-select-item {
+  min-height: 32px;
+  height: auto;
+  padding: 0 10px;
+  border-radius: var(--r-ctl);
+  font-size: 13px;
+  gap: 10px;
+}
+.ui-menu-sep { margin: var(--pop-pad) calc(-1 * var(--pop-pad)); }
+.ui-menu-label,
+.ui-select-group-label { padding: 8px 10px 4px; font-size: 11.5px; }
+.ui-select-trigger { border-radius: var(--r-ctl); }
+
+/* ── ④ 旧自绘菜单（逐步迁移到 Popover）：统一圆角与行高 ─────── */
+.context-menu,
+.ctx-menu {
+  padding: var(--pop-pad);
+  border-radius: var(--r-pop);
+  background: var(--color-popover);
+  box-shadow: var(--shadow-pop);
+  animation: mo-pop-in var(--dur-spring) var(--spring-soft) both;
+  --pop-dy: -4px;
+}
+.context-menu-item,
+.ctx-menu-item {
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: var(--r-ctl);
+  font-size: 13px;
+}
+.context-menu-divider { margin: var(--pop-pad) calc(-1 * var(--pop-pad)); }
+.composer-menu {
+  padding: var(--pop-pad);
+  border-radius: var(--r-pop);
+  background: var(--color-popover);
+  box-shadow: var(--shadow-pop);
+  animation: mo-pop-in var(--dur-spring) var(--spring-soft) both;
+}
+.composer-menu button { min-height: 32px; padding: 6px 10px; border-radius: var(--r-ctl); font-size: 12.5px; }
+.composer-menu-title { padding: 8px 10px 4px; font-size: 11.5px; }
+
+/* ── ⑤ 徽标 ───────────────────────────────────────────────── */
+.ui-badge {
+  --bd-c: var(--text-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  flex-shrink: 0;
+  max-width: 100%;
+  border-radius: var(--r-pill);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.ui-badge.bd-xs { height: var(--badge-h-xs); padding: 0 6px; font-size: 10.5px; }
+.ui-badge.bd-sm { height: var(--badge-h-sm); padding: 0 8px; font-size: 11.5px; }
+.ui-badge.bd-md { height: var(--badge-h-md); padding: 0 10px; font-size: 12px; }
+.ui-badge.bd-count.bd-xs { min-width: var(--badge-h-xs); padding: 0 4px; }
+.ui-badge.bd-count.bd-sm { min-width: var(--badge-h-sm); padding: 0 6px; }
+.ui-badge.bd-neutral { --bd-c: var(--text-2); }
+.ui-badge.bd-accent { --bd-c: var(--text-1); }
+.ui-badge.bd-success { --bd-c: var(--success); }
+.ui-badge.bd-warning { --bd-c: var(--warning); }
+.ui-badge.bd-danger { --bd-c: var(--error); }
+.ui-badge.bd-info { --bd-c: var(--info); }
+.ui-badge.bd-soft { background: color-mix(in oklab, var(--bd-c) 11%, transparent); color: var(--bd-c); }
+.ui-badge.bd-soft.bd-neutral { background: var(--bg-hover); color: var(--text-2); }
+.ui-badge.bd-outline { background: transparent; color: var(--bd-c); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--bd-c) 32%, transparent); }
+.ui-badge.bd-solid { background: var(--bd-c); color: var(--color-background); }
+.ui-badge svg { flex-shrink: 0; }
+
+/* ── ⑥ 分段控件（胶囊） ───────────────────────────────────── */
+.ui-seg {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--r-pill);
+  background: color-mix(in oklab, var(--text-1) 6%, transparent);
+  isolation: isolate;
+}
+.ui-seg.seg-block { display: flex; }
+.ui-seg.seg-block .ui-seg-item { flex: 1; justify-content: center; }
+.ui-seg-thumb {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 0;
+  z-index: 0;
+  border-radius: var(--r-pill);
+  background: var(--color-card);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08), 0 0 0 1px color-mix(in oklab, var(--text-1) 6%, transparent);
+  transition: transform var(--dur-spring) var(--spring-snappy), width var(--dur-spring) var(--spring-snappy);
+}
+:root[data-theme="dark"] .ui-seg-thumb { background: color-mix(in oklab, var(--color-neutral-50) 14%, transparent); }
+.ui-seg-item {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--dur-2) var(--ease-standard);
+}
+.ui-seg.seg-sm .ui-seg-item { height: 24px; padding: 0 10px; font-size: 12px; }
+.ui-seg.seg-md .ui-seg-item { height: 28px; padding: 0 14px; font-size: 13px; }
+.ui-seg-item:hover:not(:disabled) { color: var(--text-1); }
+.ui-seg-item.is-active { color: var(--text-1); }
+.ui-seg-item:disabled { opacity: 0.45; cursor: not-allowed; }
+.ui-seg-count { font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+
+/* ── ⑦ 新建 / 编辑项目弹窗（plan-20261009-ui U1）─────────────── */
+.pd-root { display: flex; flex-direction: column; }
+.pd-name { display: flex; align-items: center; gap: var(--sp-4); padding: 8px 14px 8px 8px; }
+.pd-name-preview { display: inline-flex; flex-shrink: 0; }
+.pd-name-preview .proj-ic.is-tile { transition: background var(--dur-3) var(--ease-standard); }
+.pd-name-preview .proj-ic svg { transition: transform var(--dur-spring) var(--spring-bouncy); }
+.pd-name-input {
+  flex: 1;
+  min-width: 0;
+  height: 40px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-1);
+  font-size: 15px;
+  font-weight: 500;
+}
+.pd-name-input::placeholder { color: var(--text-3); font-weight: 400; }
+.pd-sec + .pd-sec { margin-top: 20px; }
+
+/* 源文件夹投放区（参考图1）：白色分组卡里套一块虚线投放区；拖入时整块变蓝、图标跳一下 */
+.pd-drop-frame {
+  padding: 8px;
+  border: 1px solid var(--surface-inset-border);
+  border-radius: var(--r-card);
+  background: var(--surface-inset);
+  transition: background var(--dur-3) var(--ease-standard), border-color var(--dur-3) var(--ease-standard), box-shadow var(--dur-3) var(--ease-standard);
+}
+.pd-drop-frame.is-over {
+  border-color: color-mix(in oklab, var(--info) 55%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--info) 14%, transparent);
+}
+.pd-drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 124px;
+  padding: 18px 20px;
+  border: 1.5px dashed color-mix(in oklab, var(--text-1) 20%, transparent);
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color var(--dur-2) var(--ease-standard), background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard);
+}
+.pd-drop:hover:not(:disabled) { border-color: color-mix(in oklab, var(--text-1) 38%, transparent); color: var(--text-1); background: color-mix(in oklab, var(--text-1) 3%, transparent); }
+.pd-drop:focus-visible { outline: 2px solid color-mix(in oklab, var(--info) 60%, transparent); outline-offset: 2px; }
+.pd-drop:disabled { cursor: progress; opacity: 0.85; }
+.pd-drop.is-over,
+.pd-drop.is-over:hover:not(:disabled) {
+  border-color: var(--info);
+  background: var(--info-soft);
+  color: var(--info);
+}
+.pd-drop-ic { display: inline-flex; color: var(--text-1); transition: transform var(--dur-spring) var(--spring-bouncy), color var(--dur-2) var(--ease-standard); }
+.pd-drop.is-over .pd-drop-ic { color: var(--info); }
+.pd-drop:hover:not(:disabled) .pd-drop-ic { transform: translateY(-2px); }
+.pd-drop.is-over .pd-drop-ic { transform: translateY(-4px) scale(1.14); }
+.pd-drop.is-over svg.ic .ic-spin { transform: rotate(90deg); }
+.pd-drop-title { font-size: 14px; font-weight: 600; }
+.pd-drop-sub { font-size: 12px; color: var(--text-3); }
+.pd-drop.is-over .pd-drop-sub { color: color-mix(in oklab, var(--info) 70%, var(--text-3)); }
+.pd-drop.is-invalid { border-color: var(--error); animation: mo-shake var(--dur-4) var(--ease-standard) 1; }
+
+.pd-folder { display: flex; align-items: center; gap: var(--sp-4); padding: 12px 10px 12px 16px; }
+.pd-folder-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.pd-folder-name { font-size: 13.5px; font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pd-folder-path { font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: ltr; }
+.pd-folder-ops { display: inline-flex; align-items: center; gap: var(--sp-1); flex-shrink: 0; }
+.pd-folder-note { padding: 0 16px 12px 52px; margin-top: -4px; font-size: 11.5px; color: var(--text-3); }
+.pd-folder-over { padding: 8px 16px; border-top: 1px dashed color-mix(in oklab, var(--info) 55%, transparent); background: var(--info-soft); color: var(--info); font-size: 12px; text-align: center; }
+.pd-error { margin-top: 2px; font-size: 12px; color: var(--error); }
+.pd-notice { margin-top: 2px; font-size: 12px; color: var(--text-3); }
+
+/* 浏览器调试环境的本机文件夹浏览器（桌面版走系统选择器，不会出现） */
+.pd-fb { border: 1px solid var(--surface-inset-border); border-radius: var(--r-card); background: var(--surface-inset); overflow: hidden; }
+.pd-fb-crumbs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 38px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--surface-inset-border);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.pd-fb-crumbs::-webkit-scrollbar { display: none; }
+.pd-fb-crumb-wrap { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; }
+.pd-fb-sep { color: var(--text-3); flex-shrink: 0; }
+.pd-fb-crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12.5px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-standard), color var(--dur-1) var(--ease-standard);
+}
+.pd-fb-crumb:hover { background: var(--bg-hover); color: var(--text-1); }
+.pd-fb-crumb.is-current { color: var(--text-1); font-weight: 600; }
+.pd-fb-list { height: 176px; padding: 6px; overflow-y: auto; overscroll-behavior: contain; transition: opacity var(--dur-2) var(--ease-standard); }
+.pd-fb-list.is-loading { opacity: 0.55; }
+.pd-fb-places { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 2px 8px; }
+.pd-fb-place {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 11px 0 9px;
+  border: none;
+  border-radius: var(--r-pill);
+  background: var(--bg-hover);
+  color: var(--text-1);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-standard);
+}
+.pd-fb-place:hover { background: var(--bg-active); }
+.pd-fb-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 34px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--text-1);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-standard);
+}
+.pd-fb-row:hover,
+.pd-fb-row:focus-visible { background: var(--bg-hover); outline: none; }
+.pd-fb-row.is-up { color: var(--text-2); }
+.pd-fb-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pd-fb-go { color: var(--text-3); opacity: 0; transform: translateX(-3px); transition: opacity var(--dur-2) var(--ease-standard), transform var(--dur-2) var(--ease-standard); }
+.pd-fb-row:hover .pd-fb-go,
+.pd-fb-row:focus-visible .pd-fb-go { opacity: 1; transform: none; }
+.pd-fb-empty { padding: 28px 12px; text-align: center; font-size: 12.5px; color: var(--text-3); }
+.pd-fb-empty.is-error { color: var(--error); }
+.pd-fb-foot { display: flex; align-items: center; gap: var(--sp-2); padding: 8px 8px 8px 14px; border-top: 1px solid var(--surface-inset-border); }
+.pd-fb-cur { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--text-3); }
+
+/* 浏览器拖入后找到多个同名文件夹：列出完整路径让用户认领 */
+.pd-cands { margin-top: 8px; border: 1px solid var(--surface-inset-border); border-radius: var(--r-card); background: var(--surface-inset); padding: 6px; }
+.pd-cands-head { padding: 6px 10px 4px; font-size: 12px; color: var(--text-3); }
+.pd-cand { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 34px; padding: 0 10px; border: none; border-radius: var(--r-ctl); background: transparent; color: var(--text-1); font: inherit; font-size: 12.5px; text-align: left; cursor: pointer; }
+.pd-cand:hover { background: var(--bg-hover); }
+.pd-cand-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.pd-icons {
+  display: grid;
+  /* 固定 15 列 × 2 行（30 个图标恰好排满，参考图2的一行一组） */
+  grid-template-columns: repeat(15, minmax(0, 1fr));
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--surface-inset-border);
+  border-radius: var(--r-card);
+  background: var(--surface-inset);
+}
+.pd-icon-cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 1;
+  min-height: 30px;
+  border: none;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  cursor: pointer;
+  transition: background var(--dur-2) var(--ease-standard), box-shadow var(--dur-2) var(--ease-standard);
+}
+.pd-icon-cell .proj-ic svg { transition: transform var(--dur-spring) var(--spring-bouncy); }
+.pd-icon-cell:hover { background: var(--bg-hover); }
+.pd-icon-cell:hover .proj-ic svg { transform: scale(1.14) rotate(-6deg); }
+.pd-icon-cell.is-active {
+  background: color-mix(in oklab, var(--pick-c) 13%, transparent);
+  box-shadow: inset 0 0 0 1.5px color-mix(in oklab, var(--pick-c) 70%, transparent);
+}
+.pd-icon-cell.is-active .proj-ic .ph-duo { opacity: 0.32; }
+
+.pd-colors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--surface-inset-border);
+  border-radius: var(--r-card);
+  background: var(--surface-inset);
+}
+.pd-color {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-pill);
+  background: var(--swatch);
+  cursor: pointer;
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, #000 10%, transparent);
+  transition: transform var(--dur-spring) var(--spring-bouncy), box-shadow var(--dur-2) var(--ease-standard);
+}
+.pd-color:hover { transform: scale(1.12); }
+.pd-color.is-active { box-shadow: 0 0 0 2px var(--surface-inset), 0 0 0 4px var(--swatch); transform: scale(1.04); }
+
+.pd-divider { height: 1px; margin: 22px 0 16px; background: var(--surface-inset-border); }
+.pd-index { display: flex; align-items: center; gap: var(--sp-6); }
+.pd-index-text { flex: 1; min-width: 0; }
+.pd-index-title { font-size: 13.5px; font-weight: 600; color: var(--text-1); }
+.pd-index-desc { margin-top: 4px; font-size: 12px; line-height: 1.6; color: var(--text-3); }
+
+/* ── ⑧ 分档滑块（ui/StepSlider；思考深度等「几档选一档」的场景）──────────
+ * 拇指拖动期间 1:1 跟手（不加 left 过渡）；松手 / 点击 / 键盘切换时走弹簧过渡。
+ * 位置全部由 --pos（当前位置，0..n-1 的小数）与 --n1（n-1）算出，档位点 / 档位名按 --p（0..1）与拇指中心对齐。 */
+.ui-step { --st-x: calc(var(--th) + (100% - 2 * var(--th)) * var(--pos) / var(--n1)); }
+.ui-step-slider {
+  position: relative;
+  height: 26px;
+  touch-action: none;
+  user-select: none;
+  cursor: pointer;
+}
+.ui-step.is-disabled .ui-step-slider { cursor: default; opacity: 0.55; }
+.ui-step-track {
+  position: absolute;
+  inset: 2px 0;
+  border-radius: var(--r-pill);
+  background: color-mix(in oklab, var(--text-1) 8%, transparent);
+  overflow: hidden;
+}
+.ui-step-range {
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 100%;
+  width: var(--st-x);
+  border-radius: var(--r-pill);
+  background: color-mix(in oklab, var(--text-1) 17%, transparent);
+  transition: width var(--dur-spring) var(--spring-snappy);
+}
+.ui-step-stop {
+  position: absolute;
+  top: 50%;
+  left: calc(var(--th) + (100% - 2 * var(--th)) * var(--p, 0));
+  width: 4px;
+  height: 4px;
+  margin: -2px 0 0 -2px;
+  border-radius: var(--r-pill);
+  background: color-mix(in oklab, var(--text-1) 28%, transparent);
+  transition: background var(--dur-2) var(--ease-standard);
+}
+.ui-step-stop.is-on { background: color-mix(in oklab, var(--text-1) 55%, transparent); }
+/* 拇指越过 / 停在某档时，该档的点弹一下 */
+.ui-step-stop.is-near { animation: ui-step-stop-pop var(--dur-spring) var(--spring-bouncy) both; }
+@keyframes ui-step-stop-pop { from { transform: scale(2.4); } to { transform: none; } }
+.ui-step-thumb {
+  position: absolute;
+  top: 50%;
+  left: var(--st-x);
+  width: 22px;
+  height: 22px;
+  translate: -50% -50%;
+  border-radius: var(--r-pill);
+  outline: none;
+  cursor: grab;
+  transition: left var(--dur-spring) var(--spring-snappy);
+}
+.ui-step-core {
+  --base: 1;
+  position: absolute;
+  inset: 0;
+  border-radius: var(--r-pill);
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28), 0 0 0 0.5px rgba(0, 0, 0, 0.08);
+  scale: var(--base);
+  transition: scale var(--dur-spring) var(--spring-bouncy), box-shadow var(--dur-2) var(--ease-standard);
+}
+.ui-step-core[data-hit="1"] { animation: ui-step-tick var(--dur-spring) var(--spring-bouncy) both; }
+@keyframes ui-step-tick { 0%, 100% { scale: var(--base); } 35% { scale: calc(var(--base) + 0.2); } }
+.ui-step-slider:hover .ui-step-core { --base: 1.06; }
+/* 拖动：拇指不加位置过渡（1:1 跟手），放大并抬起；刚按下的 160ms 带一小段过渡滑向按下点 */
+.ui-step.is-dragging .ui-step-thumb { cursor: grabbing; transition: none; }
+.ui-step.is-dragging.is-jump .ui-step-thumb { transition: left 160ms var(--ease-out); }
+.ui-step.is-dragging .ui-step-range { transition: none; }
+.ui-step.is-dragging.is-jump .ui-step-range { transition: width 160ms var(--ease-out); }
+.ui-step.is-dragging .ui-step-core { --base: 1.14; box-shadow: 0 3px 10px rgba(0, 0, 0, 0.3), 0 0 0 0.5px rgba(0, 0, 0, 0.1); }
+.ui-step-thumb:focus-visible .ui-step-core { box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28), 0 0 0 4px color-mix(in oklab, var(--text-1) 16%, transparent); }
+.ui-step-labels { position: relative; height: 34px; margin-top: 4px; }
+.ui-step-tick {
+  position: absolute;
+  top: 0;
+  left: calc(var(--th) + (100% - 2 * var(--th)) * var(--p, 0));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 2px 4px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-3);
+  font: inherit;
+  font-size: 11.5px;
+  white-space: nowrap;
+  translate: -50% 0;
+  cursor: pointer;
+  transition: color var(--dur-2) var(--ease-standard), transform var(--dur-spring) var(--spring-bouncy);
+}
+.ui-step-tick:hover:not(:disabled) { color: var(--text-1); }
+.ui-step-tick.is-active { color: var(--text-1); font-weight: 600; transform: translateY(-1px) scale(1.06); }
+.ui-step-tick:disabled { cursor: default; }
+.ui-step-badge { font-size: 10.5px; font-weight: 500; color: var(--success); }

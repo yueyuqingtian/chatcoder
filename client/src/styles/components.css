@@ -203,7 +203,7 @@
   gap: var(--sp-3);
   height: var(--ctl-h-sm);
   padding: 0 var(--sp-3);
-  border-radius: var(--r-sm);
+  border-radius: var(--r-ctl);
   font-size: 12px;
   color: var(--text-1);
   cursor: pointer;
@@ -269,6 +269,9 @@
   transition: border-color var(--dur-2) var(--ease-standard), background var(--dur-2) var(--ease-standard);
 }
 .ui-checkbox:hover:not(:disabled) { border-color: var(--text-3); }
+/* plan-20261009-ui U7：视觉 16px 不变，命中区扩到 24px */
+.ui-checkbox { position: relative; }
+.ui-checkbox::after { content: ""; position: absolute; inset: -4px; }
 .ui-checkbox[data-state="checked"],
 .ui-checkbox[data-state="indeterminate"] { background: var(--accent); border-color: var(--accent); }
 .ui-checkbox:disabled { cursor: not-allowed; opacity: 0.6; }
@@ -306,6 +309,8 @@
   transition: background var(--dur-2) var(--ease-standard);
 }
 .ui-switch-root:hover:not(:disabled) { background: var(--text-3); }
+/* 视觉 18px 高不变，命中区上下各扩 3px → 24px */
+.ui-switch-root::after { content: ""; position: absolute; inset: -3px 0; }
 .ui-switch-root[data-state="checked"] { background: var(--accent); }
 .ui-switch-root:disabled { opacity: 0.5; cursor: not-allowed; }
 .ui-switch-thumb {
@@ -343,7 +348,7 @@
 .ui-icon-btn:disabled { opacity: 0.4; cursor: default; }
 .ui-icon-btn.is-active { background: var(--bg-active); color: var(--text-1); }
 .ui-icon-btn.tone-danger:hover:not(:disabled) { color: var(--color-destructive); }
-.ui-icon-btn.size-xs { width: 22px; height: 22px; border-radius: var(--r-sm); }
+.ui-icon-btn.size-xs { width: 24px; height: 24px; border-radius: var(--r-ctl); }
 .ui-icon-btn.size-lg { width: 32px; height: 32px; }
 
 /* ── ⑧ Card / ListRow：行分隔线走卡片全宽，不用负 margin ────── */
@@ -407,8 +412,10 @@
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  /* 关键：恒定预留滚动条宽度，内容盒宽度在「有/无滚动条」两态相同 */
-  scrollbar-gutter: stable;
+  /* 关键：恒定预留滚动条宽度，内容盒宽度在「有/无滚动条」两态相同。
+     plan-20261009-ui U4：改为两侧对称预留（both-edges）——只在右侧预留时，内容中心比整页中心偏左半个槽位（3px），
+     与「填充式页面」（无槽位）互相切换时内容横向跳 3px；对称预留后两类页面的内容中心重合。 */
+  scrollbar-gutter: stable both-edges;
   padding: var(--sp-7) var(--sp-7) 0;
 }
 .ui-page-inner {
@@ -420,8 +427,8 @@
   padding-bottom: var(--sp-7);
 }
 .ui-page-inner.is-wide { max-width: var(--page-max-w-wide); }
-/* 标题区高度固定（标题 28px + 间距），副标题缺省时不占位→卡片区起点恒定 */
-.ui-page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-4); min-height: 28px; }
+/* 标题区高度固定为「标题 28 + 间距 2 + 副标题 18」= 48px：副标题缺省时按一行空位占位，各页卡片区起点恒定（plan-20261009-ui U4） */
+.ui-page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-4); min-height: 48px; }
 .ui-page-title { font-size: 20px; font-weight: 600; color: var(--text-1); line-height: 28px; letter-spacing: -0.2px; }
 .ui-page-subtitle { font-size: 12px; color: var(--text-3); line-height: 18px; margin-top: 2px; }
 .ui-page-head-actions { display: flex; align-items: center; gap: var(--sp-3); flex-shrink: 0; }
@@ -460,7 +467,7 @@
   gap: var(--sp-3);
   height: var(--ctl-h-sm);
   padding: 0 var(--sp-3);
-  border-radius: var(--r-sm);
+  border-radius: var(--r-ctl);
   font-size: 12px;
   color: var(--text-1);
   cursor: pointer;

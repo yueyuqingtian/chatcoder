@@ -13,6 +13,7 @@ import {
   api, type McpServerOut, type PluginMarketItem, type SkillOut,
 } from "../../api/client";
 import { useChatStore } from "../../store/chat";
+import { useNavIntentStore } from "../../store/navIntent";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { Modal } from "../Modal";
 import { Input, Menu, Select, Switch } from "../ui";
@@ -107,7 +108,8 @@ export function InstalledPanel() {
   const [counts, setCounts] = useState<Record<InstKind, number>>({ plugin: 0, skill: 0, connector: 0 });
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("");
-  const [kindFilter, setKindFilter] = useState<"all" | InstKind>("all");
+  // plan-20261009-ui A：输入框「+」浮窗的「管理插件 / 技能 / 连接器」落到这里时预选对应分类（消费一次）
+  const [kindFilter, setKindFilter] = useState<"all" | InstKind>(() => useNavIntentStore.getState().takeInstalledKind() ?? "all");
   /** plan-41-226：来源筛选（用户反馈缺筛选）——按分组来源过滤，插件/技能/连接器通用 */
   const [sourceFilter, setSourceFilter] = useState<string>("");
   const [busy, setBusy] = useState<string | null>(null);

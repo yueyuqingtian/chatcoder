@@ -77,6 +77,113 @@
   animation: none !important;
 }
 
+/* ═══════════════════════════════════════════════════════════
+ * plan-20261009-ui U5：动效体系 v2（关键帧库 + 进出场 + 错峰）
+ *
+ * 原则：
+ *  1. 只动 transform / opacity / filter / grid-template-rows（不触发逐帧布局）；
+ *  2. 入场用弹簧（--spring-soft / --spring-snappy），退场用加速曲线且更短（--dur-2），
+ *     「来得从容、走得干脆」；
+ *  3. 位移量乘 --motion-dist，时长取 --dur-*（已乘 --motion-scale），档位为 off 时自然退化为瞬时。
+ * ═══════════════════════════════════════════════════════════ */
+
+/* 浮层进出场：以 transform-origin 为锚缩放（由组件按弹出方向写入 --pop-origin） */
+@keyframes mo-pop-in {
+  from { opacity: 0; transform: translateY(calc(var(--pop-dy, 4px) * var(--motion-dist))) scale(0.96); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes mo-pop-out {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: translateY(calc(var(--pop-dy, 4px) * 0.5 * var(--motion-dist))) scale(0.98); }
+}
+/* 卡片/区块上浮入场 */
+@keyframes mo-rise-in {
+  from { opacity: 0; transform: translateY(calc(10px * var(--motion-dist))); }
+  to { opacity: 1; transform: none; }
+}
+/* 横向滑入（列表条目、标签） */
+@keyframes mo-slide-in {
+  from { opacity: 0; transform: translateX(calc(-8px * var(--motion-dist))); }
+  to { opacity: 1; transform: none; }
+}
+/* 淡入淡出 */
+@keyframes mo-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes mo-fade-out { from { opacity: 1; } to { opacity: 0; } }
+/* 弹性出现（徽章 / 计数变化 / 勾选） */
+@keyframes mo-bounce-in {
+  from { opacity: 0; transform: scale(0.6); }
+  to { opacity: 1; transform: none; }
+}
+/* 盖章：从放大、透明压到纸面，略带回弹（首页邮票邮戳） */
+@keyframes mo-stamp-press {
+  0% { opacity: 0; transform: scale(1.45) rotate(-14deg); }
+  60% { opacity: 0.9; transform: scale(0.94) rotate(-9deg); }
+  100% { opacity: 0.82; transform: scale(1) rotate(-10deg); }
+}
+/* 轻摇（铃铛 / 贴纸趣味动效） */
+@keyframes mo-wiggle {
+  0%, 100% { transform: rotate(0); }
+  20% { transform: rotate(-9deg); }
+  45% { transform: rotate(7deg); }
+  70% { transform: rotate(-4deg); }
+  85% { transform: rotate(2deg); }
+}
+/* 错误抖动（校验失败的输入框 / 按钮） */
+@keyframes mo-shake {
+  0%, 100% { transform: none; }
+  20% { transform: translateX(calc(-4px * var(--motion-dist))); }
+  40% { transform: translateX(calc(4px * var(--motion-dist))); }
+  60% { transform: translateX(calc(-2px * var(--motion-dist))); }
+  80% { transform: translateX(calc(2px * var(--motion-dist))); }
+}
+/* 描边绘入（对勾 / 状态图标），需要元素设置 stroke-dasharray = 路径长度（pathLength=1 时为 1） */
+@keyframes mo-draw-in {
+  from { stroke-dashoffset: 1; }
+  to { stroke-dashoffset: 0; }
+}
+/* 微光扫过（发送中 / 加载中的文本或条目） */
+@keyframes mo-shimmer {
+  from { background-position: 150% 0; }
+  to { background-position: -50% 0; }
+}
+/* 骨架屏呼吸 */
+@keyframes mo-skeleton {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+/* 旋转（加载弧） */
+@keyframes mo-spin { to { transform: rotate(360deg); } }
+
+/* 通用进出场类：配合 ui/usePresence 的 data-state */
+.mo-pop[data-state="open"] { animation: mo-pop-in var(--dur-spring) var(--spring-soft) both; }
+.mo-pop[data-state="closed"] { animation: mo-pop-out var(--dur-2) var(--ease-emphasized-accel) both; pointer-events: none; }
+.mo-rise { animation: mo-rise-in var(--dur-5) var(--spring-soft) both; }
+.mo-fade[data-state="open"] { animation: mo-fade-in var(--dur-3) var(--ease-standard) both; }
+.mo-fade[data-state="closed"] { animation: mo-fade-out var(--dur-2) var(--ease-emphasized-accel) both; pointer-events: none; }
+
+/* 错峰入场：子元素以 --i（由组件写入，或下方 nth-child 兜底）计算延迟，最多前 8 项错峰 */
+.mo-stagger > * {
+  animation: mo-rise-in var(--dur-5) var(--spring-soft) both;
+  animation-delay: calc(min(var(--i, 0), 8) * 36ms * var(--motion-scale));
+}
+.mo-stagger > :nth-child(1) { --i: 0; }
+.mo-stagger > :nth-child(2) { --i: 1; }
+.mo-stagger > :nth-child(3) { --i: 2; }
+.mo-stagger > :nth-child(4) { --i: 3; }
+.mo-stagger > :nth-child(5) { --i: 4; }
+.mo-stagger > :nth-child(6) { --i: 5; }
+.mo-stagger > :nth-child(7) { --i: 6; }
+.mo-stagger > :nth-child(n + 8) { --i: 7; }
+
+/* 高度收拢（列表条目移除）：grid 行 1fr → 0fr，配合 usePresence 的 closed 态 */
+.mo-collapse {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows var(--dur-3) var(--ease-emphasized-decel), opacity var(--dur-2) var(--ease-standard);
+}
+.mo-collapse > * { min-height: 0; overflow: hidden; }
+.mo-collapse[data-state="closed"] { grid-template-rows: 0fr; opacity: 0; }
+
 /* ── 全局 reduced-motion 降级 ──
  * 系统"减少动态效果"开启时：终止一切 animation/transition 的时长与位移，
  * 循环动画（spinner/pulse/breath）直接停帧，避免视觉噪声。 */
@@ -111,6 +218,7 @@
   --motion-dist: 0;
 }
 /* 减弱档：停止呼吸/脉冲/旋转类持续动画（spinner 保留，否则用户无法感知"进行中"） */
+:root[data-motion="reduced"] .mo-loop,
 :root[data-motion="reduced"] .anim-breath,
 :root[data-motion="reduced"] .anim-pulse,
 :root[data-motion="reduced"] .text-shine {
@@ -124,4 +232,18 @@
   animation-iteration-count: 1 !important;
   transition-duration: 0.01ms !important;
   scroll-behavior: auto !important;
+}
+
+/* ── plan-20261009-ui：旧胶囊块删除时一并带走的共享关键帧（调试面板圆点仍在引用）── */
+@keyframes tc-step-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.8); }
+}
+
+/* 窗口几何运动 / 拖分隔条期间：新增的常驻循环动画一并停播（与 global.css 同一治理口径） */
+:is(html[data-window-motion="1"], body.panel-dragging) .st-icon .st-arc,
+:is(html[data-window-motion="1"], body.panel-dragging) .st-icon .st-pulse,
+:is(html[data-window-motion="1"], body.panel-dragging) .cc-queue-item.is-flushing,
+:is(html[data-window-motion="1"], body.panel-dragging) .es-chat-caret {
+  animation: none !important;
 }

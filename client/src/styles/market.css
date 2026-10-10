@@ -1,0 +1,235 @@
+/* ═══════════════════════════════════════════════════════════
+ * 拓展页（市场）（plan-20261009-ui U9）
+ *   固定顶栏 · 分类胶囊 · 卡片网格 · 安装按钮形变 · 骨架卡 · 错峰入场
+ * 取代 global.css 里的旧 .market-row / .market-tab / .market-cat / .market-sort / .market-search 规则。
+ * ═══════════════════════════════════════════════════════════ */
+
+/* ── ① 顶栏 ─────────────────────────────────────────────── */
+.mkt-topbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+  row-gap: 8px;
+  padding: 14px var(--sp-5) 8px;
+  background: var(--bg-main);
+}
+.mkt-topbar-right { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; flex: 1 1 auto; }
+.mkt-refresh.is-spinning svg { animation: mkt-spin var(--dur-spin) linear infinite; }
+.mkt-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 160px;
+  min-width: 120px;
+  max-width: 248px;
+  height: var(--btn-h-md);
+  padding: 0 8px 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-ctl);
+  background: var(--color-input);
+  color: var(--text-3);
+  cursor: text;
+  transition: border-color var(--dur-2) var(--ease-standard), box-shadow var(--dur-2) var(--ease-standard);
+}
+.mkt-search:focus-within { border-color: var(--text-2); box-shadow: 0 0 0 3px color-mix(in oklab, var(--text-1) 8%, transparent); }
+.mkt-search input { flex: 1; min-width: 0; border: none; outline: none; background: transparent; color: var(--text-1); font: inherit; font-size: 13px; }
+.mkt-search input::placeholder { color: var(--text-3); }
+.mkt-search-clear { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; padding: 0; border: none; border-radius: var(--r-pill); background: transparent; color: var(--text-3); cursor: pointer; }
+.mkt-search-clear:hover { background: var(--bg-hover); color: var(--text-1); }
+
+/* ── ② 分类：一行胶囊横向滚动 + 排序分段 ───────────────── */
+.mkt-filters { display: flex; align-items: center; gap: var(--sp-4); margin-bottom: var(--sp-5); }
+.mkt-cats {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 2px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.mkt-cats::-webkit-scrollbar { display: none; }
+/* 溢出时右缘渐隐，提示还可以横向滑动 */
+.mkt-cats.is-overflow { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent); }
+.mkt-cat {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12.5px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard), border-color var(--dur-2) var(--ease-standard);
+}
+.mkt-cat:hover { background: var(--bg-hover); color: var(--text-1); }
+.mkt-cat.is-on { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); font-weight: 500; }
+.mkt-cat-count { margin-left: 6px; font-size: 11px; font-variant-numeric: tabular-nums; opacity: 0.6; }
+
+/* ── ③ 卡片网格 ──────────────────────────────────────────── */
+.mkt-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(268px, 1fr));
+  gap: 14px;
+  transition: opacity var(--dur-3) var(--ease-standard);
+}
+.mkt-grid.is-loading { opacity: 0.55; }
+.mkt-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 150px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  background: var(--color-card);
+  cursor: pointer;
+  outline: none;
+  /* 错峰入场（前 12 张）；抬升用独立的 translate，避免与入场动画持有的 transform 冲突 */
+  animation: mo-rise-in var(--dur-5) var(--spring-soft) both;
+  animation-delay: calc(var(--i, 0) * 34ms * var(--motion-scale));
+  transition: border-color var(--dur-2) var(--ease-standard), box-shadow var(--dur-3) var(--ease-standard), translate var(--dur-spring) var(--spring-bouncy);
+}
+.mkt-card:hover { border-color: var(--border-strong); box-shadow: 0 10px 24px rgba(0, 0, 0, calc(0.08 * var(--shadow-strength, 1))); translate: 0 -2px; }
+.mkt-card:focus-visible { border-color: color-mix(in oklab, var(--info) 60%, transparent); box-shadow: 0 0 0 3px color-mix(in oklab, var(--info) 18%, transparent); }
+.mkt-card-head { display: flex; align-items: center; gap: 12px; }
+.mkt-card-title { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.mkt-card-name { font-size: 14px; font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mkt-card-author { font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mkt-card-desc {
+  flex: 1;
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-2);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.mkt-card-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 30px; }
+.mkt-card-tags { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
+.mkt-card-ops { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+
+/* 安装按钮：安装 → 安装中（转圈）→ 已安装（对勾）。三枚图标叠在同一格里交叉缩放，只动 transform / opacity */
+.mkt-install {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px 0 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--text-1);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard), border-color var(--dur-2) var(--ease-standard);
+}
+.mkt-install:hover:not(:disabled) { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
+.mkt-install:disabled { cursor: default; }
+.mkt-install-ic { display: inline-grid; width: 14px; height: 14px; }
+.mkt-install-ic > svg { grid-area: 1 / 1; transition: opacity var(--dur-2) var(--ease-standard), transform var(--dur-spring) var(--spring-bouncy); }
+.mkt-install .mkt-i-busy, .mkt-install .mkt-i-done { opacity: 0; transform: scale(0.4); }
+.mkt-install[data-stage="busy"] .mkt-i-idle { opacity: 0; transform: rotate(90deg) scale(0.4); }
+.mkt-install[data-stage="busy"] .mkt-i-busy { opacity: 1; transform: none; animation: mo-spin var(--dur-spin) linear infinite; }
+.mkt-install[data-stage="done"] { background: var(--success-soft); border-color: color-mix(in oklab, var(--success) 45%, transparent); color: var(--success); }
+.mkt-install[data-stage="done"] .mkt-i-idle { opacity: 0; transform: scale(0.4); }
+.mkt-install[data-stage="done"] .mkt-i-done { opacity: 1; transform: none; }
+.mkt-install-label { animation: mkt-label-in var(--dur-spring) var(--spring-soft) both; }
+@keyframes mkt-label-in { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+
+/* 骨架卡：形状与真实卡片一致 */
+.mkt-card.is-skeleton { cursor: default; pointer-events: none; }
+.mkt-sk { display: block; border-radius: 6px; background: color-mix(in oklab, var(--text-1) 9%, transparent); animation: mo-skeleton 1.4s ease-in-out infinite; }
+.mkt-sk-ic { width: 40px; height: 40px; border-radius: var(--r-md); flex-shrink: 0; }
+.mkt-sk-line { height: 11px; }
+.mkt-sk-line.is-sm { height: 9px; margin-top: 3px; }
+.mkt-sk-pill { width: 56px; height: 18px; border-radius: var(--r-pill); }
+.mkt-sk-btn { width: 66px; height: 28px; border-radius: var(--r-pill); }
+
+/* ── ④ 窄窗口：标题不竖排折行，装饰图让出位置 ───────────── */
+.market-hero-title { flex-wrap: wrap; white-space: nowrap; }
+@media (max-width: 1100px) { .market-hero-art { display: none; } }
+
+/* ── ⑤ 个性化图标：标题小标 + 英雄区插画（组件见 MarketArt.tsx）──────────
+ * 入场用 backwards 填充：动画结束后不再持有 transform / rotate，悬停等交互属性才能生效。
+ * 悬停反馈全部走独立的 translate / rotate / scale 属性（与入场关键帧用的 transform 互不覆盖）。 */
+.mkt-mark {
+  --m-top: #ffd66b;
+  --m-base: #ffb627;
+  --m-deep: #ee9308;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: var(--r-lg);
+  background: linear-gradient(150deg, var(--m-top), var(--m-deep));
+  color: #fff;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.42), inset 0 -2px 0 rgba(0, 0, 0, 0.12), 0 6px 14px color-mix(in oklab, var(--m-deep) 36%, transparent);
+}
+.mkt-mark::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: linear-gradient(180deg, rgba(255, 255, 255, 0.3), rgba(255, 255, 255, 0) 55%); pointer-events: none; }
+.mkt-mark-glyph { position: relative; z-index: 1; filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.24)); transition: rotate var(--dur-spring) var(--spring-bouncy), scale var(--dur-spring) var(--spring-bouncy); }
+.market-hero-title:hover .mkt-mark-glyph { rotate: -10deg; scale: 1.1; }
+
+.market-hero-art { position: relative; width: 272px; height: 144px; flex-shrink: 0; }
+.mkt-art { position: absolute; inset: 0; }
+.mkt-art-svg { display: block; width: 100%; height: 100%; overflow: visible; }
+/* 中性部件（技能卡面 / 插座面板）取主题变量，深浅主题都立得住 */
+.mkt-card-face { fill: var(--color-card); stroke: var(--border); stroke-width: 1; filter: drop-shadow(0 6px 10px rgba(0, 0, 0, calc(0.1 * var(--shadow-strength, 1)))); }
+.mkt-card-line { fill: color-mix(in oklab, var(--text-1) 17%, transparent); }
+.mkt-card-line.is-soft { fill: color-mix(in oklab, var(--text-1) 9%, transparent); }
+.mkt-socket-face { fill: var(--color-card); stroke: var(--border); stroke-width: 1; }
+.mkt-socket-inset { fill: color-mix(in oklab, var(--text-1) 5%, transparent); }
+.mkt-screw { fill: color-mix(in oklab, var(--text-1) 24%, transparent); }
+.mkt-led { fill: #3cc96e; filter: drop-shadow(0 0 4px #3cc96e); transition: opacity var(--dur-3) var(--ease-standard); animation: mkt-led-on calc(520ms * var(--motion-scale)) var(--ease-standard) calc(620ms * var(--motion-scale)) backwards; }
+@keyframes mkt-led-on { from { fill: #94a0ae; filter: none; } }
+
+/* 星芒闪烁 / 小圆点漂浮：慢速循环，只做装饰 */
+.mkt-twinkle { transform-box: fill-box; transform-origin: center; animation: mkt-twinkle 3.4s ease-in-out infinite; }
+.mkt-tw-b { animation-duration: 4.1s; animation-delay: -1.2s; }
+.mkt-tw-c { animation-duration: 3.8s; animation-delay: -2.2s; }
+@keyframes mkt-twinkle { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.35; transform: scale(0.62); } }
+.mkt-dot { animation: mkt-bob 4.6s ease-in-out infinite; }
+.mkt-dot-b { animation-duration: 5.4s; animation-delay: -2s; }
+@keyframes mkt-bob { 50% { transform: translateY(-4px); } }
+:root[data-motion="reduced"] .mkt-art .mkt-twinkle,
+:root[data-motion="reduced"] .mkt-art .mkt-dot,
+:root[data-motion="off"] .mkt-art .mkt-twinkle,
+:root[data-motion="off"] .mkt-art .mkt-dot { animation: none; }
+
+/* 插件：最后一块拼图从斜上方落下、咔地嵌进缺口；悬停时它跳起来再落回 */
+.mkt-snap { transform-box: fill-box; transform-origin: 50% 50%; transition: translate var(--dur-spring) var(--spring-bouncy), rotate var(--dur-spring) var(--spring-bouncy); animation: mkt-snap-in calc(900ms * var(--motion-scale)) var(--spring-bouncy) calc(160ms * var(--motion-scale)) backwards, mo-fade-in calc(220ms * var(--motion-scale)) ease-out calc(160ms * var(--motion-scale)) backwards; }
+@keyframes mkt-snap-in { from { transform: translate(20px, -40px) rotate(18deg); } }
+.mkt-art:hover .mkt-snap { translate: 5px -11px; rotate: 6deg; }
+
+/* 技能：三张卡从叠放状态扇形展开；悬停时张得更开，居中那张微微抬起 */
+.mkt-fan { --k: 1; rotate: calc(var(--a) * var(--k)); transition: rotate var(--dur-spring) var(--spring-bouncy); animation: mkt-fan-open calc(820ms * var(--motion-scale)) var(--spring-bouncy) calc(140ms * var(--motion-scale)) backwards; }
+@keyframes mkt-fan-open { from { rotate: 0deg; } }
+.mkt-art:hover .mkt-fan { --k: 1.45; }
+.mkt-fan-front { transition: translate var(--dur-spring) var(--spring-bouncy); animation: mkt-front-rise calc(700ms * var(--motion-scale)) var(--spring-bouncy) calc(80ms * var(--motion-scale)) backwards; }
+@keyframes mkt-front-rise { from { transform: translateY(6px); } }
+.mkt-art:hover .mkt-fan-front { translate: 0 -5px; }
+
+/* 连接器：插头顺着线缆滑进插座，指示灯随后点亮，接通处迸出一点电火花；悬停时插头拔出一截，移开又弹回去 */
+.mkt-plug { transition: translate var(--dur-spring) var(--spring-bouncy); animation: mkt-plug-in calc(900ms * var(--motion-scale)) var(--spring-snappy) calc(120ms * var(--motion-scale)) backwards; }
+@keyframes mkt-plug-in { from { transform: translateX(-36px); } }
+.mkt-art:hover .mkt-plug { translate: -10px 0; }
+.mkt-art:hover .mkt-led { opacity: 0.25; }
+.mkt-zap { transform-box: fill-box; transform-origin: 50% 100%; transition: opacity var(--dur-2) var(--ease-standard), scale var(--dur-spring) var(--spring-bouncy); animation: mkt-zap-pop calc(700ms * var(--motion-scale)) var(--spring-bouncy) calc(560ms * var(--motion-scale)) backwards; }
+@keyframes mkt-zap-pop { from { transform: scale(0.1); opacity: 0; } 40% { opacity: 1; } }
+.mkt-art:hover .mkt-zap { opacity: 0; scale: 0.5; }

@@ -16,11 +16,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type MarketCategoryFacet, type MarketItem, type MarketKind } from "../../api/client";
 import { useChatStore } from "../../store/chat";
+import { useNavIntentStore } from "../../store/navIntent";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { Modal } from "../Modal";
-import { Input, Menu, Switch, Textarea } from "../ui";
+import { Badge, Input, Menu, Segmented, Switch, Textarea, Tooltip } from "../ui";
 import {
-  IconSearch, IconRefresh, IconPlus, IconDownload, IconTrash, IconFolder, IconMoreHorizontal,
+  IconSearch, IconRefresh, IconPlus, IconDownload, IconTrash, IconFolder, IconMoreHorizontal, IconCheck, IconSpinner, IconArrowUpRight, IconX,
 } from "../icons";
 import { MarketDecor, KindMark, KIND_ACCENT, WaveUnderline } from "./MarketDecor";
 
@@ -158,11 +159,17 @@ function fuzzyHit(text: string, query: string): boolean {
 }
 
 export function MarketPanel() {
-  const [kind, setKind] = useState<MarketKind>("plugin");
+  // plan-20261009-ui A：输入框「+」浮窗的「探索更多…」带着分类意图而来，挂载时消费一次并预选对应标签
+  const [kind, setKind] = useState<MarketKind>(() => useNavIntentStore.getState().takeMarketKind() ?? "plugin");
   const [items, setItems] = useState<MarketItem[]>([]);
   const [categories, setCategories] = useState<MarketCategoryFacet[]>([]);
   const [marketUrl, setMarketUrl] = useState("");
   const [loading, setLoading] = useState(false);
+  /** plan-20261009-ui U9：每个类型最近一次（无筛选）的总数，分段标签上展示计数 */
+  const [totals, setTotals] = useState<Partial<Record<MarketKind, number>>>({});
+  /** 刚装好的条目 id：安装按钮先「形变」成已安装的对勾停留片刻，再换成启停 / 更多操作 */
+  const [recent, setRecent] = useState<string | null>(null);
+  const recentTimer = useRef(0);
   /** plan-41-225：远端分页状态——全量可见靠它（本地只持有已加载的页） */
   const [page, setPage] = useState(1);
   const [lastPage, setLastPage] = useState(1);
@@ -172,6 +179,9 @@ export function MarketPanel() {
   /** 图标加载失败的条目 id（回退首字母色块，避免破图） */
   const [iconFailed, setIconFailed] = useState<Set<string>>(new Set());
   const scrollRef = useRef<HTMLDivElement>(null);
+  /** 分类胶囊行：右侧还有内容时渐隐提示可横向滑动 */
+  const catsRef = useRef<HTMLDivElement>(null);
+  const [catsOverflow, setCatsOverflow] = useState(false);
   const [query, setQuery] = useState("");
   /** 已选分类 code（"" = 全部；"__featured__" = 精选，本地过滤） */
   const [category, setCategory] = useState("");
@@ -188,6 +198,17 @@ export function MarketPanel() {
   /** 已加载条目镜像：加载更多时需基于「最新列表」追加，并用于分类兑底聚合 */
   const itemsRef = useRef<MarketItem[]>([]);
   useEffect(() => { itemsRef.current = items; }, [items]);
+  useEffect(() => () => window.clearTimeout(recentTimer.current), []);
+  useEffect(() => {
+    const el = catsRef.current;
+    if (!el) return;
+    const check = () => setCatsOverflow(el.scrollWidth > el.clientWidth + 2 && el.scrollLeft + el.clientWidth < el.scrollWidth - 2);
+    check();
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    el.addEventListener("scroll", check, { passive: true });
+    return () => { ro.disconnect(); el.removeEventListener("scroll", check); };
+  }, [categories]);
 
   /** plan-41-225：拉取市场数据（远端分页 + 归一化 + 已装状态；失败自动降级到缓存/本机）。
    *  append=false 用于切类型/搜索/分类/排序（重置到第 1 页）；
@@ -216,6 +237,7 @@ export function MarketPanel() {
       setPage(res.page ?? pageNum);
       setLastPage(res.lastPage ?? 1);
       setTotal(res.total ?? 0);
+      if (!snap.query && !snap.category) setTotals((prev) => ({ ...prev, [snap.kind]: res.total ?? 0 }));
       // 分类：优先用远端 facets；为空时从已加载条目聚合，保证筛选条不空着。
       // 均无数据时保留上一次的分类，避免排序/翻页瞬间分类条闪成空白（伴生页面抖动）。
       const nextCats = (res.categories ?? []).length > 0
@@ -351,6 +373,9 @@ export function MarketPanel() {
           : it;
       setItems((prev) => prev.map(patch));
       setDetail((prev) => (prev && prev.id === item.id ? patch(prev) : prev));
+      setRecent(item.id);
+      window.clearTimeout(recentTimer.current);
+      recentTimer.current = window.setTimeout(() => setRecent(null), 1600);
       await fetchPage(kind, 1, false);
       await useChatStore.getState().loadBootstrap();
     } catch (e) {
@@ -418,99 +443,117 @@ export function MarketPanel() {
 
   const current = KINDS.find((k) => k.key === kind)!;
 
-  /** 单行渲染（分组列表复用）：图标 + 名称/描述 + 操作区。 */
-  const renderRow = (item: MarketItem) => (
-    <div
-      key={item.id}
-      className={"market-row" + (item.installed ? " is-installed" : "")}
-      role="button"
-      tabIndex={0}
-      onClick={() => setDetail(item)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setDetail(item); }
-      }}
-    >
-      <MarketIcon item={item} failed={iconFailed} onFail={onIconFail} size={30} />
-      <span className="market-row-text">
-        <span className="market-row-name">{item.displayName || item.name}</span>
-        <span className="market-row-desc">{item.description || "暂无说明"}</span>
-      </span>
-      {/* 操作区对齐参考图——
-          未安装：一个「+」图标按钮（点一下即装，不再用文字按钮占宽）；
-          已安装：「…」菜单（详情 / 卸载）+ 启停滑块。 */}
-      <span className="market-row-ops" onClick={(e) => e.stopPropagation()}>
-        {item.installed ? (
-          <>
-            <Menu
-              align="end"
-              trigger={
-                <button type="button" className="ui-icon-btn size-xs" aria-label="更多操作">
-                  <IconMoreHorizontal size={15} />
-                </button>
-              }
-              entries={[
-                { label: "查看详情", onSelect: () => setDetail(item) },
-                {
-                  label: item.kind === "plugin" ? "卸载" : "删除",
-                  icon: <IconTrash size={12} />,
-                  danger: true,
-                  onSelect: () => setDropTarget(item),
-                },
-              ]}
-            />
-            {(item.kind === "plugin" || item.localId != null) && (
-              <Switch
-                checked={!!item.enabled}
-                disabled={busy === item.id}
-                onChange={() => void toggleEnabled(item)}
-                aria-label={`${item.displayName} 启用状态`}
-              />
+  /** 卡片渲染（plan-20261009-ui U9；分组列表复用）：
+   *  图标块 + 名称 + 两行说明；底部左为分类 / 精选徽标，右为操作区。
+   *  未安装：「安装」按钮——点击后依次形变为「安装中（转圈）→ 已安装（对勾）」，对勾停留片刻再换成启停 + 更多；
+   *  已安装：「…」菜单（详情 / 卸载）+ 启停滑块。 */
+  const renderCard = (item: MarketItem, index: number) => {
+    const installing = busy === item.id && !item.installed;
+    const justDone = recent === item.id;
+    const showInstall = !item.installed || justDone;
+    const stage = justDone ? "done" : installing ? "busy" : "idle";
+    return (
+      <div
+        key={item.id}
+        className={"mkt-card" + (item.installed ? " is-installed" : "")}
+        style={{ ["--i" as string]: Math.min(index, 11) }}
+        role="button"
+        tabIndex={0}
+        onClick={() => setDetail(item)}
+        onKeyDown={(e) => {
+          if (e.target !== e.currentTarget) return;
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setDetail(item); }
+        }}
+      >
+        <div className="mkt-card-head">
+          <MarketIcon item={item} failed={iconFailed} onFail={onIconFail} size={40} />
+          <span className="mkt-card-title">
+            <span className="mkt-card-name">{item.displayName || item.name}</span>
+            {item.author && <span className="mkt-card-author">{item.author}</span>}
+          </span>
+        </div>
+        <p className="mkt-card-desc">{item.descriptionZh || item.description || "暂无说明"}</p>
+        <div className="mkt-card-foot">
+          <span className="mkt-card-tags">
+            {item.category && <Badge size="xs" tone="neutral">{item.category}</Badge>}
+            {item.featured && <Badge size="xs" tone="warning">精选</Badge>}
+          </span>
+          <span className="mkt-card-ops" onClick={(e) => e.stopPropagation()}>
+            {showInstall ? (
+              <button
+                type="button"
+                className="mkt-install"
+                data-stage={stage}
+                aria-label={stage === "done" ? `${item.displayName} 已安装` : `安装 ${item.displayName}`}
+                disabled={installing || justDone}
+                onClick={() => void installItem(item)}
+              >
+                <span className="mkt-install-ic" aria-hidden>
+                  <IconPlus size={14} className="mkt-i-idle" />
+                  <IconSpinner size={14} className="mkt-i-busy" />
+                  <IconCheck size={14} className="mkt-i-done" />
+                </span>
+                <span className="mkt-install-label" key={stage}>{stage === "done" ? "已安装" : stage === "busy" ? "安装中" : "安装"}</span>
+              </button>
+            ) : (
+              <>
+                <Menu
+                  align="end"
+                  trigger={
+                    <button type="button" className="ui-icon-btn size-xs" aria-label="更多操作">
+                      <IconMoreHorizontal size={15} />
+                    </button>
+                  }
+                  entries={[
+                    { label: "查看详情", onSelect: () => setDetail(item) },
+                    {
+                      label: item.kind === "plugin" ? "卸载" : "删除",
+                      icon: <IconTrash size={12} />,
+                      danger: true,
+                      onSelect: () => setDropTarget(item),
+                    },
+                  ]}
+                />
+                {(item.kind === "plugin" || item.localId != null) && (
+                  <Switch
+                    checked={!!item.enabled}
+                    disabled={busy === item.id}
+                    onChange={() => void toggleEnabled(item)}
+                    aria-label={`${item.displayName} 启用状态`}
+                  />
+                )}
+              </>
             )}
-          </>
-        ) : (
-          <button
-            type="button"
-            className="ui-icon-btn size-xs market-op-add"
-            aria-label={`安装 ${item.displayName}`}
-            disabled={busy === item.id}
-            onClick={() => void installItem(item)}
-          >
-            <IconPlus size={15} />
-          </button>
-        )}
-      </span>
-    </div>
-  );
+          </span>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div className="market-panel">
-      {/* 顶部固定：标签 + 搜索 + 已安装筛选 + 主动作 */}
-      <div className="market-topbar">
-        <div className="market-tabs" role="tablist">
-          {KINDS.map((k) => (
-            <button
-              key={k.key}
-              role="tab"
-              aria-selected={kind === k.key}
-              className={"market-tab" + (kind === k.key ? " active" : "")}
-              onClick={() => switchKind(k.key)}
-            >
-              {k.label}
-            </button>
-          ))}
-        </div>
-        <div className="market-topbar-right">
+      {/* 顶部固定：类型分段（带计数）+ 搜索 + 已安装 + 主动作 */}
+      <div className="mkt-topbar">
+        <Segmented
+          value={kind}
+          onChange={switchKind}
+          aria-label="拓展类型"
+          options={KINDS.map((k) => ({ value: k.key, label: k.label, count: totals[k.key] }))}
+        />
+        <div className="mkt-topbar-right">
           {/* plan-284-1451：刷新入口（点击图标转动并重拉当前查询） */}
-          <button
-            type="button"
-            className={"market-refresh" + (refreshing ? " is-spinning" : "")}
-            aria-label="刷新市场内容"
-            disabled={refreshing}
-            onClick={() => void refresh()}
-          >
-            <IconRefresh size={15} />
-          </button>
-          <div className="market-search">
+          <Tooltip content="刷新市场内容" side="bottom">
+            <button
+              type="button"
+              className={"ui-icon-btn mkt-refresh" + (refreshing ? " is-spinning" : "")}
+              aria-label="刷新市场内容"
+              disabled={refreshing}
+              onClick={() => void refresh()}
+            >
+              <IconRefresh size={15} />
+            </button>
+          </Tooltip>
+          <label className="mkt-search">
             <IconSearch size={14} />
             <input
               placeholder="搜索名称、说明或标签"
@@ -518,10 +561,13 @@ export function MarketPanel() {
               onChange={(e) => setQuery(e.target.value)}
               aria-label="搜索市场"
             />
-          </div>
+            {query && (
+              <button type="button" className="mkt-search-clear" aria-label="清除搜索" onClick={() => setQuery("")}><IconX size={11} /></button>
+            )}
+          </label>
           <button
             type="button"
-            className="btn btn-ghost btn-sm"
+            className="btn btn-ghost btn-md"
             onClick={() => {
               // plan-41-226：按用户要求——「已安装」跳转到设置页的扩展管理界面。
               // 市场页只负责发现与获取，管理集中在设置页（避免两处都能管理造成职责重叠）。
@@ -530,9 +576,10 @@ export function MarketPanel() {
             }}
           >
             已安装
+            <IconArrowUpRight size={13} />
           </button>
-          <button type="button" className="btn btn-primary btn-sm" onClick={() => setDialog(kind)}>
-            <IconPlus size={13} />
+          <button type="button" className="btn btn-primary btn-md" onClick={() => setDialog(kind)}>
+            <IconPlus size={14} />
             {kind === "plugin" ? "安装插件" : kind === "skill" ? "导入技能" : "添加连接器"}
           </button>
         </div>
@@ -576,52 +623,64 @@ export function MarketPanel() {
           </div>
         </div>
 
-        <div className="market-filters">
-          <div className="market-cats">
+        {/* 分类：一行胶囊横向滚动（分类很多时不再折成三行挤占首屏）+ 排序分段 */}
+        <div className="mkt-filters">
+          <div className={"mkt-cats" + (catsOverflow ? " is-overflow" : "")} ref={catsRef} role="group" aria-label="分类" onWheel={(e) => {
+            const el = e.currentTarget;
+            if (el.scrollWidth <= el.clientWidth || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+            el.scrollLeft += e.deltaY;
+          }}>
             {/* 分类来自远端 facets（code 透传远端，覆盖全库筛选）；精选为本地开关 */}
-            <button
-              type="button"
-              className={"market-cat" + (category === "" ? " on" : "")}
-              onClick={() => setCategory("")}
-            >全部</button>
-            <button
-              type="button"
-              className={"market-cat" + (category === "__featured__" ? " on" : "")}
-              onClick={() => setCategory("__featured__")}
-            >精选</button>
+            <button type="button" className={"mkt-cat" + (category === "" ? " is-on" : "")} onClick={() => setCategory("")}>全部</button>
+            <button type="button" className={"mkt-cat" + (category === "__featured__" ? " is-on" : "")} onClick={() => setCategory("__featured__")}>精选</button>
             {categories.map((c) => (
               <button
                 key={c.code || c.label}
                 type="button"
-                className={"market-cat" + (category === c.code ? " on" : "")}
+                className={"mkt-cat" + (category === c.code ? " is-on" : "")}
                 onClick={() => setCategory(c.code)}
               >
                 {c.label}
-                {c.count > 0 && <span className="market-cat-count">{c.count > 999 ? `${Math.round(c.count / 1000)}k` : c.count}</span>}
+                {c.count > 0 && <span className="mkt-cat-count">{c.count > 999 ? `${Math.round(c.count / 1000)}k` : c.count}</span>}
               </button>
             ))}
           </div>
           {/* 筛选行只放筛选与排序——结果数不在这里（它属于"规模"，见标题行徽标） */}
-          <div className="market-sort">
-            <button type="button" className={sort === "hot" ? "on" : ""} onClick={() => setSort("hot")}>热门</button>
-            <button type="button" className={sort === "new" ? "on" : ""} onClick={() => setSort("new")}>最新</button>
-          </div>
+          <Segmented
+            size="sm"
+            value={sort}
+            onChange={setSort}
+            aria-label="排序"
+            options={[{ value: "hot", label: "热门" }, { value: "new", label: "最新" }]}
+          />
         </div>
 
-        {loading && <div className="market-empty">正在加载市场条目…</div>}
+        {/* 首屏 / 切类型时的骨架卡：形状与真实卡片一致，避免加载完成时整页跳动 */}
+        {loading && items.length === 0 && (
+          <div className="mkt-grid" aria-busy="true" aria-label="正在加载">
+            {Array.from({ length: 9 }, (_, i) => (
+              <div className="mkt-card is-skeleton" key={i} style={{ ["--i" as string]: i }}>
+                <div className="mkt-card-head"><span className="mkt-sk mkt-sk-ic" /><span className="mkt-card-title"><span className="mkt-sk mkt-sk-line" style={{ width: "58%" }} /><span className="mkt-sk mkt-sk-line is-sm" style={{ width: "32%" }} /></span></div>
+                <span className="mkt-sk mkt-sk-line" style={{ width: "96%" }} />
+                <span className="mkt-sk mkt-sk-line" style={{ width: "72%" }} />
+                <div className="mkt-card-foot"><span className="mkt-sk mkt-sk-pill" /><span className="mkt-sk mkt-sk-btn" /></div>
+              </div>
+            ))}
+          </div>
+        )}
         {!loading && visible.length === 0 && (
           <div className="market-empty">
             {`没有匹配「${query || "当前筛选"}」的${current.label}`}
           </div>
         )}
-        {/* 行式列表：连接器页按「内置 / 本机已安装 / 市场精选」分组渲染；
+        {/* 卡片网格：连接器页按「内置 / 本机已安装 / 市场精选」分组渲染；
             技能与插件页不分段（用户要求），已安装条目靠置顶表达。 */}
-        {sections.map((sec) => (
+        {visible.length > 0 && sections.map((sec) => (
           <section className="market-section" key={sec.key}>
             {showGroupTitles && sec.label && (
               <div className="market-group-title">{sec.label}</div>
             )}
-            <div className="market-rows">{sec.items.map(renderRow)}</div>
+            <div className={"mkt-grid" + (loading ? " is-loading" : "")}>{sec.items.map((it, i) => renderCard(it, i))}</div>
           </section>
         ))}
         {loadingMore && <div className="market-more">正在加载更多…</div>}

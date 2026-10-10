@@ -43,9 +43,10 @@ export class WsClient {
     const isElectron = typeof window !== "undefined" && Boolean((window as Window).chatcoderAPI);
     // v2.2: 防御性访问 import.meta.env（非 Vite 环境如 Node 测试/打包变体下 env 不存在）
     const isDev = Boolean((import.meta as { env?: { DEV?: boolean } }).env?.DEV);
+    const devPort = Number((import.meta as { env?: { VITE_API_PORT?: string } }).env?.VITE_API_PORT) || 12973;
     const portPromise = isElectron
       ? (window as Window).chatcoderAPI?.getBackendPort?.() ?? Promise.resolve(12973)
-      : Promise.resolve(12973);
+      : Promise.resolve(devPort);
     void portPromise
       .then((port) => {
         // v2.2: 端口解析期间若已切换会话，丢弃旧会话的连接（避免打开旧通道）
@@ -172,9 +173,10 @@ export class GlobalWsClient {
   private _doConnect() {
     const isElectron = typeof window !== "undefined" && Boolean((window as Window).chatcoderAPI);
     const isDev = Boolean((import.meta as { env?: { DEV?: boolean } }).env?.DEV);
+    const devPort = Number((import.meta as { env?: { VITE_API_PORT?: string } }).env?.VITE_API_PORT) || 12973;
     const portPromise = isElectron
       ? (window as Window).chatcoderAPI?.getBackendPort?.() ?? Promise.resolve(12973)
-      : Promise.resolve(12973);
+      : Promise.resolve(devPort);
     void portPromise
       .then((port) => {
         if (this.ws) return;

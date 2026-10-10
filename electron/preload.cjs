@@ -1,9 +1,14 @@
 // preload:通过 contextBridge 暴露受限 API 给前端
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 contextBridge.exposeInMainWorld("chatcoderAPI", {
   // 选择工作目录(返回绝对路径或 null)
   selectDirectory: () => ipcRenderer.invoke("dialog:selectDirectory"),
+  // plan-20261009-ui U1：拖入文件夹取绝对路径（Electron 32+ 移除了 File.path，只能经 webUtils；
+  // 非磁盘文件（JS 构造的 File）返回空串，调用方据此提示「请拖入文件夹」）
+  getPathForFile: (file) => {
+    try { return webUtils.getPathForFile(file) || ""; } catch { return ""; }
+  },
   // 多选 md 文件（v1.1: 本地技能导入；v19: opts.allowDirectories 支持目录+文件混合选择）
   selectFiles: (filters, opts) => ipcRenderer.invoke("dialog:selectFiles", filters, opts),
   // 后端端口（主进程探活后选定的实际端口，前端去硬编码）

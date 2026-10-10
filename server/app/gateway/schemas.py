@@ -21,6 +21,9 @@ class ProjectCreate(BaseModel):
     path: str
     rules_docs: list[str] | None = None
     auto_scan_rules: bool = True
+    # plan-20261009-ui U1：项目图标 key / 色板名称（前端定义取值范围）
+    icon: str | None = Field(default=None, max_length=40)
+    color: str | None = Field(default=None, max_length=20)
 
 
 class ProjectUpdate(BaseModel):
@@ -29,6 +32,8 @@ class ProjectUpdate(BaseModel):
     auto_scan_rules: bool | None = None
     pinned: bool | None = None
     archived: bool | None = None
+    icon: str | None = Field(default=None, max_length=40)
+    color: str | None = Field(default=None, max_length=20)
 
 
 class ProjectOut(BaseModel):
@@ -43,6 +48,8 @@ class ProjectOut(BaseModel):
     is_worktree: bool = False
     parent_project_id: int | None = None
     worktree_branch: str | None = None
+    icon: str | None = None
+    color: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -92,6 +99,7 @@ class SessionOut(BaseModel):
     pinned: bool = False
     # v7: 置顶时间——前端"后置顶在上"排序依据
     pinned_at: str | None = None
+    created_at: str | None = None  # plan-20261009-ui U2：首页用量热力图按创建日统计会话数
     permission_mode: str = "agent"  # plan-75-332: 执行模式 readonly / plan / agent
     approval_mode: str = "ask"  # plan-75-332: 权限模式 ask / auto / full
     fork_parent_id: int | None = None

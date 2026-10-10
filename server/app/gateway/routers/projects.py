@@ -17,6 +17,7 @@ async def create_project(body: ProjectCreate, db: AsyncSession = Depends(get_db)
         pid = await project_service.create_project(
             db, path=body.path, name=body.name,
             rules_docs=body.rules_docs, auto_scan_rules=body.auto_scan_rules,
+            icon=body.icon, color=body.color,
         )
         project = await project_service.get_project(db, pid)  # async 只读
         return project
@@ -53,7 +54,7 @@ async def update_project(project_id: int, body: ProjectUpdate, db: AsyncSession 
     ok = await project_service.update_project(
         db, project_id,
         name=body.name, rules_docs=body.rules_docs, auto_scan_rules=body.auto_scan_rules,
-        pinned=body.pinned, archived=body.archived,
+        pinned=body.pinned, archived=body.archived, icon=body.icon, color=body.color,
     )
     if ok is None:
         raise HTTPException(404, "项目不存在")

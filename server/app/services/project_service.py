@@ -32,7 +32,8 @@ async def find_by_path(db: AsyncSession, path: str) -> Project | None:
 
 
 async def create_project(db: AsyncSession, *, path: str, name: str | None = None,
-                         rules_docs: list[str] | None = None, auto_scan_rules: bool = True) -> int:
+                         rules_docs: list[str] | None = None, auto_scan_rules: bool = True,
+                         icon: str | None = None, color: str | None = None) -> int:
     """创建项目（写引擎单写线程）。path 必须是存在的目录；name 默认取路径末段。
     返回项目 id。
 
@@ -55,6 +56,10 @@ async def create_project(db: AsyncSession, *, path: str, name: str | None = None
     if existing is not None:
         if getattr(existing, "archived", False):
             raise ProjectArchivedError(int(existing.id), str(existing.name or name), norm_path)
+        # plan-20261009-ui U1：同路径幂等返回既有项目；若本次弹窗带了外观，顺带更新外观
+        # （用户在弹窗里选了图标/颜色却「什么都没变」会被认为是 bug）。名称与路径保持不变。
+        if icon is not None or color is not None:
+            await update_project(db, int(existing.id), icon=icon, color=color)
         return int(existing.id)
 
     def patch(s):
@@ -64,7 +69,8 @@ async def create_project(db: AsyncSession, *, path: str, name: str | None = None
             if getattr(row, "archived", False):
                 raise ProjectArchivedError(int(row.id), str(row.name or name), norm_path)
             return int(row.id)
-        project = Project(name=name, path=norm_path, rules_docs=rules_docs, auto_scan_rules=auto_scan_rules)
+        project = Project(name=name, path=norm_path, rules_docs=rules_docs, auto_scan_rules=auto_scan_rules,
+                          icon=icon, color=color)
         s.add(project)
         s.flush()
         pid = project.id

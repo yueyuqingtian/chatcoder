@@ -1,0 +1,214 @@
+/* ═══════════════════════════════════════════════════════════
+ * 空态首页（plan-20261009-ui U2）
+ * 主题：在对话中即可完成编码。
+ *   对话邮票（灰度静置 → 聚焦彩色 + 跟手摆动的浮签）→ 主副标语 → 用量热力图（与输入框同宽）→ 输入框固定底部。
+ * ═══════════════════════════════════════════════════════════ */
+
+/* ── 骨架：上半 hero 居中，输入框固定在底部（与会话态同位置，发送后不跳位）── */
+.ws-empty { padding: 0; gap: 0; align-items: stretch; justify-content: flex-start; }
+.es-home { display: flex; flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 0; width: 100%; height: 100%; }
+/* 覆盖 global.css 的「.empty-state 子元素整体上滑入场」：首页改由 hero 内部逐项错峰 */
+.es-home > * { animation: none; }
+/* hero 与输入框区使用**同一套水平盒模型**：右侧各让出滚动条槽位，内层再各让出 32px，
+   因此用量卡与输入卡的左右边缘严格对齐（用户要求「热力图与输入框同宽」）。 */
+.es-hero {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  padding: 16px var(--scrollbar-gutter-w, 12px) 8px 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+/* margin:auto 的「安全居中」：内容矮时垂直居中，高于容器时从顶部起排并可滚动（不会被上沿裁掉） */
+.es-hero-inner {
+  width: 100%;
+  max-width: var(--content-max-w);
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 22px;
+  /* 浮签从邮票上方弹出（约 140px 高）：为它固定预留净空，永远不会压到标语或被容器裁掉 */
+  padding: 168px 32px 0;
+}
+.es-headline { display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; }
+.es-title { margin: 0; font-size: 28px; font-weight: 650; letter-spacing: -0.02em; line-height: 1.25; color: var(--text-1); }
+.es-sub { margin: 0; font-size: 13.5px; line-height: 1.6; color: var(--text-3); max-width: 520px; }
+
+/* 输入框区：与 .chat-panel-composer 同一套内边距，首页 / 会话态位置一致 */
+.es-composer { flex: 0 0 auto; padding: 0 var(--scrollbar-gutter-w, 12px) 7px 0; } /* 7 = 会话态的 6px + 其 1px 下边框，首页发送后输入卡零位移 */
+.es-composer .composer { max-width: var(--content-max-w); }
+.es-composer .composer-home .composer-input { min-height: 52px; font-size: 14px; }
+
+/* 低矮窗口：先让出用量卡，保证邮票、标语与输入框不被挤压 */
+@media (max-height: 800px) { .es-usage { display: none; } }
+@media (max-height: 640px) { .es-hero-inner { padding-top: 0; } }
+
+/* ── 对话邮票（小而清爽：纸张 + 像素插画 + 大字 + 淡淡的邮戳）──────────────
+ * 聚焦：灰度 → 彩色、轻轻抬起、鼠标指针换成故事里的小物件（内联 style.cursor，见 stampCursors.ts）。 */
+.es-stamp-wrap {
+  position: relative;
+  width: fit-content;
+  --nx: 0;
+  --ny: 0;
+  --ax: 0;
+  --stamp-paper: #ffffff;
+  --stamp-ink: #2a2724;
+  --stamp-mark: #4b6fa8;
+}
+/* 深色主题：邮票仍是一张纸，只把纸色压暗一档，避免在深色底上刺眼 */
+:root[data-theme="dark"] .es-stamp-wrap { --stamp-paper: #e9e7e2; }
+.es-stamp {
+  display: block;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer; /* 有指针素材时由内联 style 覆盖 */
+  filter: drop-shadow(0 0 0.6px rgba(0, 0, 0, 0.3)) drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.1)) drop-shadow(0 6px 14px rgba(0, 0, 0, 0.07));
+  transition: transform var(--dur-spring-long) var(--spring-bouncy), filter var(--dur-3) var(--ease-standard);
+}
+:root[data-theme="dark"] .es-stamp { filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.4)) drop-shadow(0 8px 18px rgba(0, 0, 0, 0.35)); }
+.es-stamp-wrap:hover .es-stamp,
+.es-stamp-wrap:has(.es-stamp:focus-visible) .es-stamp {
+  transform: translateY(-3px);
+  filter: drop-shadow(0 0 0.6px rgba(0, 0, 0, 0.3)) drop-shadow(0 2px 3px rgba(0, 0, 0, 0.1)) drop-shadow(0 12px 22px rgba(0, 0, 0, 0.1));
+}
+:root[data-theme="dark"] .es-stamp-wrap:hover .es-stamp,
+:root[data-theme="dark"] .es-stamp-wrap:has(.es-stamp:focus-visible) .es-stamp { filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.45)) drop-shadow(0 14px 26px rgba(0, 0, 0, 0.45)); }
+.es-stamp:active { transform: translateY(-1px) scale(0.988); }
+.es-stamp:focus-visible { outline: 2px solid color-mix(in oklab, var(--info) 60%, transparent); outline-offset: 5px; }
+/* 跟手 3D 倾斜：变量由弹簧模拟逐帧写入，故这里不加 transition（否则会与弹簧叠成双重缓动） */
+.es-stamp-tilt {
+  display: block;
+  transform: perspective(720px) rotateY(calc(var(--nx) * 9deg)) rotateX(calc(var(--ny) * -7deg));
+}
+.es-stamp-flip { position: relative; display: block; }
+.es-stamp-svg {
+  display: block;
+  width: 224px;
+  height: auto;
+  filter: grayscale(1) contrast(1.04);
+  transition: filter var(--dur-5) var(--ease-standard);
+}
+.es-stamp-wrap:hover .es-stamp-svg,
+.es-stamp-wrap:has(.es-stamp:focus-visible) .es-stamp-svg { filter: none; }
+/* 邮戳：闲置淡淡一枚；聚焦时重新「盖」一次 */
+.es-postmark { opacity: 0.55; transition: opacity var(--dur-4) var(--ease-standard); }
+.es-stamp-wrap:hover .es-postmark,
+.es-stamp-wrap:has(.es-stamp:focus-visible) .es-postmark { opacity: 0.9; animation: es-press var(--dur-spring-long) var(--spring-bouncy) both; }
+@keyframes es-press {
+  0% { opacity: 0; transform: scale(1.4) rotate(-14deg); }
+  55% { opacity: 0.95; }
+  100% { transform: none; }
+}
+
+/* 换一枚：绕竖轴翻转，90° 处换内容 */
+.es-stamp-wrap[data-phase="out"] .es-stamp-flip { animation: es-flip-out 150ms var(--ease-emphasized-accel) forwards; }
+.es-stamp-wrap[data-phase="in"] .es-stamp-flip { animation: es-flip-in 480ms var(--spring-bouncy) both; }
+@keyframes es-flip-out { to { transform: perspective(700px) rotateY(86deg); opacity: 0.35; } }
+@keyframes es-flip-in { from { transform: perspective(700px) rotateY(-86deg); opacity: 0.35; } to { transform: none; opacity: 1; } }
+
+/* 圆点：8 枚邮票的位置。聚焦邮票时才浮现；固定占位，浮现与否都不改变版面 */
+.es-dots {
+  display: flex;
+  justify-content: center;
+  height: 24px;
+  margin-top: 4px;
+  opacity: 0;
+  transition: opacity var(--dur-3) var(--ease-standard);
+}
+.es-stamp-wrap:hover .es-dots,
+.es-stamp-wrap:focus-within .es-dots { opacity: 1; }
+.es-dot { position: relative; width: 20px; height: 24px; padding: 0; border: none; background: transparent; cursor: pointer; }
+.es-dot::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 5px;
+  height: 5px;
+  border-radius: var(--r-pill);
+  background: var(--text-3);
+  opacity: 0.5;
+  transform: translate(-50%, -50%);
+  transition: width var(--dur-spring) var(--spring-snappy), opacity var(--dur-2) var(--ease-standard), background var(--dur-2) var(--ease-standard);
+}
+.es-dot:hover::before { opacity: 0.9; }
+.es-dot.is-on::before { width: 14px; opacity: 1; background: var(--text-1); }
+.es-dot:focus-visible { outline: 2px solid color-mix(in oklab, var(--info) 60%, transparent); outline-offset: -2px; border-radius: var(--r-ctl); }
+
+/* ── 浮签：像挂在邮票上的纸条，随指针倾斜 ─────────────────────
+ * 三层结构：.es-note 负责「出现 / 消失」（带 transition）；
+ *          .es-note-sway 负责整体摇摆——绕邮票中央的支点转动，指针偏右 → 顺时针，反之亦然；
+ *          .es-note-card 负责 3D 俯仰（rotateY / rotateX），指针靠上 / 靠下时纸面微微前倾后仰。
+ * 后两层的变量由弹簧逐帧写入，不加 transition。 */
+.es-note {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 22px);
+  z-index: 6;
+  width: min(324px, calc(100vw - 48px));
+  pointer-events: none;
+  opacity: 0;
+  transform: translateX(-50%) translateY(12px) scale(0.94);
+  transform-origin: 50% 100%;
+  transition: opacity var(--dur-2) var(--ease-standard), transform var(--dur-spring) var(--spring-soft);
+}
+.es-stamp-wrap:hover .es-note,
+.es-stamp-wrap:has(.es-stamp:focus-visible) .es-note { opacity: 1; transform: translateX(-50%); }
+.es-note-sway {
+  transform-origin: 50% 165%;
+  transform: rotate(calc(var(--nx) * 10deg));
+}
+.es-note-card {
+  padding: 14px 16px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pop);
+  background: var(--color-popover);
+  box-shadow: var(--shadow-pop);
+  transform: perspective(900px) rotateY(calc(var(--nx) * 12deg)) rotateX(calc(var(--ny) * -7deg));
+}
+.es-note-title { font-size: 14px; font-weight: 650; color: var(--text-1); line-height: 1.4; }
+.es-note-body { margin: 6px 0 0; font-size: 12.5px; line-height: 1.7; color: var(--text-2); }
+.es-note-say {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 6px 10px;
+  border-radius: var(--r-ctl);
+  background: color-mix(in oklab, var(--text-1) 5%, transparent);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-1);
+}
+.es-note-say svg { flex-shrink: 0; margin-top: 3px; color: var(--text-3); }
+/* 减弱 / 关闭动效档：不做跟手摆动与 3D 倾斜（变量恒为 0，浮签只淡入淡出） */
+
+/* ── 用量卡（热力图沿用设置页的绿色分级 .usage-hm-0..4）─────
+ * 宽度 = 输入卡宽度（见 .es-hero-inner 的盒模型说明）；格子按卡宽等比铺满 53 周。 */
+.es-usage {
+  position: relative;
+  width: 100%;
+  padding: 12px 16px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--bg-elevated);
+}
+.es-usage-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4); margin-bottom: 10px; min-height: 30px; }
+.es-usage-sum { font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.es-usage-streak { color: var(--text-2); }
+.es-heat {
+  display: grid;
+  grid-template-columns: repeat(53, minmax(0, 1fr));
+  grid-template-rows: repeat(7, auto);
+  grid-auto-flow: column;
+  gap: 3px;
+  transition: opacity var(--dur-3) var(--ease-standard);
+}
+.es-heat.is-loading { opacity: 0.55; }
+.es-heat .usage-hm-cell { width: auto; height: auto; aspect-ratio: 1 / 1; border-radius: 3px; }
+.es-heat .usage-hm-cell.is-future { visibility: hidden; }
+.es-heat-months { display: grid; grid-template-columns: repeat(53, minmax(0, 1fr)); gap: 3px; height: 14px; margin-top: 6px; }
+.es-heat-month { grid-row: 1; font-size: 10px; line-height: 14px; color: var(--text-3); white-space: nowrap; }

@@ -391,7 +391,7 @@
 :root {
   --titlebar-h: 40px;
   --sidebar-w: 272px;
-  --sidebar-min: 200px;
+  --sidebar-min: 240px;
   --sidebar-max: 480px;
   --rightpanel-w: 360px;
   --rightpanel-min: 200px;
@@ -553,4 +553,100 @@
 
 :root[data-theme="dark"] {
   --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.5), 0 6px 16px rgba(0, 0, 0, 0.35);
+}
+
+/* ═══════════════════════════════════════════════════════════
+ * ⑤ plan-20261009-ui D0：设计体系 v9（统一圆角语义 / 尺寸档 / 表面层 / 图标色 / 项目色板 / 弹簧曲线）
+ *
+ * 为什么新增「语义别名」而不是改原值：原 --r-* 已被数百处引用，改值会造成大面积意外位移；
+ * 新代码只引用语义名（控件 / 卡片 / 浮层 / 胶囊），旧代码在清扫阶段逐步迁移。
+ * 同心圆规则：浮层圆角 14 − 浮层内边距 6 = 菜单项圆角 8，内外圆弧平行，不再出现「外圆里方」。
+ * ═══════════════════════════════════════════════════════════ */
+:root {
+  --r-ctl: var(--r-md);      /* 控件：按钮 / 输入 / 下拉 / 菜单项 / 列表行 */
+  --r-card: var(--r-lg);     /* 卡片：设置卡 / 弹窗内分组卡 / 托盘 */
+  --r-pill: 999px;           /* 胶囊：徽标 / 计数 / 标签 / 分段控件 */
+  --pop-pad: 6px;            /* 浮层内边距（与 --r-pop 构成同心圆） */
+  --pop-gap: 6px;            /* 浮层与触发器的间距 */
+
+  /* 图标按钮与徽标尺寸档（plan-20261009-ui U7：最小可点区 24px） */
+  --ic-btn-xs: 24px;
+  --ic-btn-sm: 28px;
+  --ic-btn-md: 32px;
+  --ic-btn-lg: 36px;
+  --badge-h-xs: 16px;
+  --badge-h-sm: 20px;
+  --badge-h-md: 24px;
+
+  /* 真弹簧曲线（阻尼振动采样为 CSS linear()，零依赖）。
+     snappy 几乎无过冲（按钮/开关/滑块）；soft 轻微回弹（浮层/卡片）；
+     bouncy 明显回弹（形变图标/徽章出现）；wobbly 夸张（趣味贴纸，慎用）。
+     弹簧的「可见运动」集中在前 60% 时长，因此时长取值比贝塞尔略长。 */
+  --spring-snappy: linear(0, 0.022, 0.079, 0.157, 0.246, 0.34, 0.432, 0.52, 0.601, 0.674, 0.738, 0.793, 0.84, 0.879, 0.912, 0.938, 0.958, 0.974, 0.986, 0.995, 1.002, 1.006, 1.009, 1.01, 1.011, 1.011, 1.011, 1.01, 1.009, 1.008, 1.007, 1.006, 1.005, 1.004, 1.003, 1.003, 1);
+  --spring-soft: linear(0, 0.02, 0.071, 0.143, 0.229, 0.322, 0.415, 0.507, 0.593, 0.672, 0.742, 0.805, 0.858, 0.903, 0.939, 0.969, 0.992, 1.009, 1.022, 1.03, 1.035, 1.038, 1.038, 1.037, 1.035, 1.032, 1.029, 1.025, 1.021, 1.018, 1.015, 1.012, 1.009, 1.007, 1.005, 1.003, 1);
+  --spring-bouncy: linear(0, 0.029, 0.106, 0.214, 0.342, 0.477, 0.609, 0.733, 0.843, 0.937, 1.012, 1.07, 1.11, 1.135, 1.146, 1.147, 1.139, 1.126, 1.108, 1.089, 1.069, 1.05, 1.032, 1.017, 1.004, 0.994, 0.987, 0.982, 0.979, 0.978, 0.979, 0.98, 0.983, 0.985, 0.988, 0.991, 0.994, 0.996, 0.998, 1, 1.001, 1.002, 1.003, 1.003, 1.003, 1.003, 1.003, 1.002, 1);
+  --spring-wobbly: linear(0, 0.045, 0.164, 0.33, 0.519, 0.709, 0.885, 1.033, 1.147, 1.224, 1.265, 1.275, 1.258, 1.223, 1.176, 1.123, 1.071, 1.024, 0.985, 0.955, 0.936, 0.926, 0.925, 0.93, 0.941, 0.954, 0.969, 0.983, 0.995, 1.006, 1.013, 1.018, 1.021, 1.021, 1.019, 1.016, 1.012, 1.008, 1.004, 1.001, 0.998, 0.996, 0.995, 0.994, 0.994, 0.995, 0.996, 0.997, 1);
+  --dur-spring: calc(420ms * var(--motion-scale));
+  --dur-spring-long: calc(640ms * var(--motion-scale));
+}
+
+/* 表面层与图标色（浅色） */
+:root,
+:root[data-theme="light"] {
+  /* 弹窗底（参考图1/图2：浅灰底 + 白色分组卡） */
+  --surface-dialog: oklch(97.6% 0.002 260);
+  --surface-inset: var(--color-white);
+  --surface-inset-border: color-mix(in oklab, var(--color-neutral-950) 7%, transparent);
+  --surface-tray: color-mix(in oklab, var(--color-neutral-950) 3.5%, var(--color-background));
+  /* 图标色：闲置 / 弱化 / 强调 + 双色调填充透明度（聚焦态提升） */
+  --ic-color: var(--text-2);
+  --ic-muted: var(--text-3);
+  --ic-strong: var(--text-1);
+  --ic-fill-idle: 0;
+  --ic-fill-hover: 0.13;
+  --ic-fill-active: 0.2;
+  /* 热力图色阶基色（首页用量卡 / 设置页统计共用） */
+  --heat-base: oklch(62% 0.15 150);
+  --heat-empty: color-mix(in oklab, var(--color-neutral-950) 6%, transparent);
+
+  /* 项目色板（13 色，名称落库，明暗主题各自取值） */
+  --pc-graphite: oklch(48% 0.012 260);
+  --pc-forest: oklch(47% 0.09 160);
+  --pc-green: oklch(62% 0.16 150);
+  --pc-lime: oklch(66% 0.17 128);
+  --pc-teal: oklch(60% 0.11 185);
+  --pc-cyan: oklch(63% 0.12 215);
+  --pc-blue: oklch(59% 0.18 255);
+  --pc-indigo: oklch(52% 0.19 275);
+  --pc-violet: oklch(57% 0.21 300);
+  --pc-pink: oklch(63% 0.2 350);
+  --pc-red: oklch(59% 0.2 25);
+  --pc-orange: oklch(67% 0.17 50);
+  --pc-amber: oklch(74% 0.16 78);
+}
+
+/* 表面层与图标色（深色） */
+:root[data-theme="dark"] {
+  --surface-dialog: oklch(22% 0.004 260);
+  --surface-inset: oklch(27% 0.004 260);
+  --surface-inset-border: color-mix(in oklab, var(--color-neutral-50) 8%, transparent);
+  --surface-tray: color-mix(in oklab, var(--color-neutral-50) 4%, var(--color-background));
+  --ic-fill-hover: 0.18;
+  --ic-fill-active: 0.26;
+  --heat-base: oklch(72% 0.16 150);
+  --heat-empty: color-mix(in oklab, var(--color-neutral-50) 7%, transparent);
+
+  --pc-graphite: oklch(76% 0.01 260);
+  --pc-forest: oklch(68% 0.1 160);
+  --pc-green: oklch(74% 0.16 150);
+  --pc-lime: oklch(80% 0.17 128);
+  --pc-teal: oklch(75% 0.11 185);
+  --pc-cyan: oklch(76% 0.11 215);
+  --pc-blue: oklch(72% 0.15 255);
+  --pc-indigo: oklch(70% 0.15 275);
+  --pc-violet: oklch(72% 0.16 300);
+  --pc-pink: oklch(74% 0.16 350);
+  --pc-red: oklch(70% 0.17 25);
+  --pc-orange: oklch(76% 0.15 50);
+  --pc-amber: oklch(82% 0.14 78);
 }

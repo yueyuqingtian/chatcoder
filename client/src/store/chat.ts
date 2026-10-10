@@ -414,7 +414,9 @@ interface ChatState {
   // 动作
   loadBootstrap: () => Promise<void>;
   loadModels: () => Promise<void>;
-  createProject: (path: string, name?: string) => Promise<ProjectOut | null>;
+  createProject: (path: string, name?: string, look?: { icon?: string | null; color?: string | null }) => Promise<ProjectOut | null>;
+  /** plan-20261009-ui U1：编辑项目名称 / 外观（项目弹窗编辑模式） */
+  updateProjectLook: (id: number, patch: { name?: string; icon?: string | null; color?: string | null }) => Promise<boolean>;
   /** plan-278-1391: 恢复被归档项目并选中（确认「恢复并打开」后调用）。 */
   restoreArchivedProject: (projectId: number) => Promise<void>;
   /** plan-278-1391: 关闭归档项目提示（用户取消）。 */
@@ -458,6 +460,13 @@ resumeTurn: () => Promise<void>;
   /** plan-75-332: 清空解释状态（审批结束/取消/卡片卸载时调用）。 */
   resetApprovalExplain: () => void;
   markFileReviewed: (path: string, reviewed: boolean) => void;
+  /** plan-404-1892（图3）：按路径审核——优先归到 turnChanges 中该文件所属的 turn（复用 reviewFiles
+   *  的乐观更新 + 持久化 + 串会话校验）；无 turn 归属的产物清单文件回退本地 reviewedFiles。
+   *  修复目的：面板与消息流共用同一份审核口径，不再各读各的。 */
+  reviewPath: (path: string, reviewed: boolean) => void;
+  /** plan-404-1892（图5）：进入新任务空态——清空全部会话级数据（复用 _resetSessionState），
+   *  保留 currentProjectId 与右面板 tab；sessionState 分桶不动（切回旧会话仍可恢复）。 */
+  startNewTask: () => void;
   /** v11: 拉取指定 turn 的变更审核清单。 */
   loadTurnChanges: (turnId: number) => Promise<void>;
   /** v11: 批量审核（乐观更新 + PUT 持久化，失败回滚并 toast）。 */
@@ -991,10 +1000,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  createProject: async (path, name) => {
+  createProject: async (path, name, look) => {
     try {
-      const project = await api.createProject({ path, name });
-      set((s) => ({ projects: [project, ...s.projects], currentProjectId: project.id }));
+      const project = await api.createProject({ path, name, icon: look?.icon ?? null, color: look?.color ?? null });
+      // plan-20261009-ui U1：同路径幂等返回既有项目时替换原条目，而不是再前插一份（此前侧栏会出现重复项）
+      set((s) => ({
+        projects: s.projects.some((p) => p.id === project.id)
+          ? s.projects.map((p) => (p.id === project.id ? project : p))
+          : [project, ...s.projects],
+        currentProjectId: project.id,
+      }));
       return project;
     } catch (e) {
       // plan-278-1391: 同路径项目已归档 → 不做泛红报错，改为弹「恢复并打开」提示。
@@ -1016,6 +1031,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       set({ error: String(e) });
       return null;
+    }
+  },
+
+  updateProjectLook: async (id, patch) => {
+    try {
+      const project = await api.updateProject(id, patch);
+      set((s) => ({ projects: s.projects.map((p) => (p.id === id ? project : p)) }));
+      return true;
+    } catch (e) {
+      set({ error: `保存项目失败：${String(e)}` });
+      return false;
     }
   },
 
@@ -1617,6 +1643,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
       else delete next[path];
       return { reviewedFiles: next };
     });
+  },
+
+  // plan-404-1892（图3）：按路径审核——同一文件可能出现在多个 turn（多次编辑），逐个提交。
+  reviewPath: (path, reviewed) => {
+    const sel = get();
+    const turnIds = Object.keys(sel.turnChanges)
+      .map(Number)
+      .filter((tid) => (sel.turnChanges[tid] ?? []).some((c) => c.path === path));
+    if (turnIds.length === 0) {
+      // 无 turn 归属（纯产物清单条目）：本地兜底，避免写入不存在的 turn
+      sel.markFileReviewed(path, reviewed);
+      return;
+    }
+    for (const tid of turnIds) void sel.reviewFiles(tid, [path], reviewed);
+  },
+
+  // plan-404-1892（图5）：进入新任务空态——各处入口此前手写清空子集，漏 artifacts / turnChanges /
+  // plansByTurn / todos / 子代理数据等，导致新任务下右侧任务摘要继续渲染上一会话产物。
+  startNewTask: () => {
+    set({ currentSessionId: null, ..._resetSessionState() });
   },
 
   // v11: 拉取该 turn 的变更审核清单（含后端持久化审核状态）。失败静默，下次完成/切会话时重试。

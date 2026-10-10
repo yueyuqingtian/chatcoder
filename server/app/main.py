@@ -36,6 +36,7 @@ from app.gateway.routers import (
     upload,
     usage,
     workbuddy_auth,
+    workspace,
 )
 from app.gateway.ws import ws_router
 
@@ -263,6 +264,8 @@ def create_app() -> FastAPI:
     app.include_router(diagnostics.router, prefix="/api", tags=["diagnostics"])
     # plan-248-1258 M3.2: 代码符号索引管理（索引库页面）
     app.include_router(symbol_index.router, prefix="/api", tags=["symbol-index"])
+    # plan-20261009-ui U1: 目录浏览 / 拖入文件夹定位（新建项目弹窗在无系统选择器的调试环境用）
+    app.include_router(workspace.router, prefix="/api", tags=["utils"])
     app.include_router(ws_router, tags=["websocket"])
 
     # 健康检查

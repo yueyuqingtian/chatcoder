@@ -14,6 +14,7 @@ import { Toast } from "./components/Toast";
 import { SettingsContent, type SettingsTab } from "./components/settings";
 import { CommandCenter } from "./components/CommandCenter";
 import { ArchivedProjectPrompt } from "./components/ArchivedProjectPrompt";
+import { ProjectDialog } from "./components/project/ProjectDialog";
 import { PluginSlot } from "./plugins/registry";
 import { NativeTitleTooltip, PageTransition, TooltipProvider } from "./components/ui";
 import { useUiStore, initUi } from "./store/ui";
@@ -137,11 +138,9 @@ export default function App() {
     if (settingsPanelExpandedRef.current) toggleRightPanel();
     setNav(target.nav);
     if (target.sessionId === null) {
-      useChatStore.setState({ currentSessionId: null, ...{
-        messages: [], turns: [], tasks: [], runningTurnId: null, isRunning: false,
-        interruptedTurnId: null, streamingBuffers: {}, thinkingBuffers: {}, usage: null,
-        pendingApproval: null, pendingPlan: null, reviewedFiles: {},
-      } });
+      // plan-404-1892（图5）：统一走 startNewTask——此前手写子集漏了 artifacts 等字段，
+      // 从设置页回到空会话时右侧任务摘要会残留旧会话产物
+      useChatStore.getState().startNewTask();
     }
     // 退出设置页后自动刷新模型列表
     void useChatStore.getState().loadModels();
@@ -188,6 +187,17 @@ export default function App() {
     return () => window.removeEventListener("chatcoder:leave-settings", handler);
   }, [toggleRightPanel]);
 
+  // plan-20261009-ui A：输入框「+」浮窗里的「探索更多插件 / 技能 / 连接器」需要直接落到左侧「拓展」页
+  // （nav=skills），分类由 store/navIntent 的意图让目标页挂载时预选；与侧栏点「拓展」同一路径（setNav）。
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const target = (e as CustomEvent<{ nav?: string }>).detail?.nav;
+      if (target) setNav(target as NavKey);
+    };
+    window.addEventListener("chatcoder:navigate", handler);
+    return () => window.removeEventListener("chatcoder:navigate", handler);
+  }, []);
+
   // plan-73-323：宠物面板 → 主窗的两个入口
   //  ①「查看会话」：切到目标会话并退出设置页（复用 switchSession 与既有 leave-settings 通道，
   //    该通道不重置 currentSessionId，所以刚切的会话不会被盖掉）；
@@ -233,6 +243,8 @@ export default function App() {
         <WhatsNewModal />
         <CommandCenter />
         <ArchivedProjectPrompt />
+        {/* plan-20261009-ui U1：新建 / 编辑项目弹窗单例（侧栏、输入框工作区选择器共用） */}
+        <ProjectDialog />
         {/* v18 布局重构（对齐 zcode）：左侧栏全高（含 logo/导航箭头），
             右侧 = 顶部标题栏 + 内容行（消息流 + 右侧面板）。 */}
         <div ref={leftPanelElRef} className={`app-pane app-pane-left collapsible${sidebarCollapsed ? " collapsed" : ""}`} style={sidebarCollapsed ? { width: "0px", flexBasis: "0px" } : { width: `${leftPanelWidth}px`, flexBasis: `${leftPanelWidth}px` }}>
@@ -240,12 +252,12 @@ export default function App() {
             /* v19: 设置侧栏经插件 slot 渲染（与外部侧栏共用壳与宽度）。 */
             <PluginSlot slot="settings-sidebar" tab={settingsActiveTab} onTab={setSettingsActiveTab} onBack={leaveSettings} collapsed={sidebarCollapsed} />
           ) : (
-            <PluginSlot slot="sidebar" active={nav} onChange={(k: NavKey) => { if (k === "settings") { openSettings(); return; } setNav(k); if (k === "chat") { useChatStore.setState({ currentSessionId: null, messages: [], turns: [], tasks: [], runningTurnId: null, isRunning: false, interruptedTurnId: null, streamingBuffers: {}, thinkingBuffers: {}, usage: null, pendingApproval: null, pendingPlan: null, reviewedFiles: {} }); } }} onSessionFocus={() => setNav(null)} collapsed={sidebarCollapsed} onToggleCollapse={toggleSidebar} />
+            <PluginSlot slot="sidebar" active={nav} onChange={(k: NavKey) => { if (k === "settings") { openSettings(); return; } setNav(k); if (k === "chat") useChatStore.getState().startNewTask(); }} onSessionFocus={() => setNav(null)} collapsed={sidebarCollapsed} onToggleCollapse={toggleSidebar} />
           )}
         </div>
         {/* RFL-1（plan-329-1647 S4）：不再传 freezeRefs——拖左分隔条时中列内容宽度实时跟随，
             消息流文本逐帧折行（用户反馈「拖拽时排版不实时」）。性能改由 PerfBus 零读预算兜。 */}
-        {!sidebarCollapsed && <ResizeHandle side="left" baseWidth={leftPanelWidth} minWidth={200} maxWidth={480} reservePx={370} panelEl={leftPanelElRef} onCommit={setLeftPanelWidth} />}
+        {!sidebarCollapsed && <ResizeHandle side="left" baseWidth={leftPanelWidth} minWidth={240} maxWidth={480} reservePx={370} panelEl={leftPanelElRef} onCommit={setLeftPanelWidth} />}
         <div className="app-right">
           {/* v19: 标题栏与右面板经插件 slot 渲染。
               plan-41-233：页面态（拓展/定时任务/设置等 nav 页）传 page——隐藏会话标题、项目

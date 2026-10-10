@@ -1,32 +1,50 @@
-/** 任务摘要：与 TodoFloat 同构，只显示真实任务区块、步骤状态和真实产物数据。 */
+/** 任务摘要（plan-20261009-ui U8）：只显示真实任务区块、步骤状态和真实产物数据。
+ *
+ * 信息架构（自上而下）：
+ *  ① 状态头   —— 状态图标 + 状态文案 + 一行说明 + 进度条。**不再展示用户最新消息原文**（那只是「你说了什么」，
+ *               不是「任务现在怎样」；状态头改为实时回答「在做什么、做到哪了」）；
+ *  ② 执行进度 —— 步骤列表（状态图标 + 标题 + 备注，点击定位到对应消息）；进度口径与输入框上方胶囊同源；
+ *  ③ 产物     —— 原「产物」与「文件审查」合并为一段：顶部汇总「N 个文件 · 已审 x/N」+「全部通过」，
+ *               文件行 = 审核勾选 + 文件类型图标 + 文件名 + 目录 + 悬停操作（打开 / 回滚）；
+ *  ④ 浏览过的文件 —— 文件类型图标 chips；
+ *  ⑤ 方案待确认 —— 确认执行 / 停止任务。
+ * 数据源与审核 / 回滚行为不变（reviewedFiles / markFileReviewed / artifacts / requestRollbackPreview）。 */
 import { useMemo } from "react";
 import { useChatStore } from "../../store/chat";
 import { usePanelStore } from "../../store/panel";
-import type { ArtifactOut } from "../../api/client";
-import { IconCheck, IconCheckCircle, IconFileRead, IconExternalLink, IconPause, IconRefresh, IconRotateCcw, IconX } from "../icons";
 import { recordComponentRender } from "../../perf/metrics";
 import { useProgressRows } from "../chat/taskProgress";
+import { IconCheck, IconExternalLink, IconListChecks, IconRefresh, IconRotateCcw } from "../icons";
+import { Badge, Button, Tooltip } from "../ui";
+import { FileIcon, baseName } from "../iconkit/FileIcon";
+import { StatusIcon, type StatusKind } from "../iconkit/StatusIcon";
+import { ToneTile } from "../iconkit/ToneTile";
 
 /** plan-75-334 阶段3：隐藏期的消息占位——稳定空引用，selector 结果不变 ⇒ 不触发重渲染。 */
 const EMPTY_MESSAGES: never[] = [];
 
-function normalizeStatus(status: string): string {
-  return status === "in_progress" ? "running" : status || "pending";
+interface ProductFile {
+  path: string;
+  /** 产出该文件的轮次（可回滚）；仅后端产物清单里出现的文件为 null */
+  turnId: number | null;
+  /** 所属产物标题（后端产物清单提供） */
+  title: string | null;
 }
 
-function StepStatus({ status }: { status: string }) {
-  const state = normalizeStatus(status);
-  if (state === "done") return <span className="ts-step-status done"><IconCheck size={12} /></span>;
-  if (state === "running") return <span className="ts-step-status running"><span className="todo-spinner" /></span>;
-  if (state === "failed") return <span className="ts-step-status failed"><IconX size={11} /></span>;
-  if (state === "cancelled") return <span className="ts-step-status cancelled"><IconPause size={10} /></span>;
-  return <span className="ts-step-status pending" />;
+/** plan-404-1892（图4）：后端 fs.write 产物 title 形如「文件:<完整路径>」（见 orchestration/artifacts.py），
+ *  这类标题只是重复了文件行已有的信息，还会把组头撑成两行。这里归一为「无标题」，
+ *  文件行直接平铺；仅有人工归属的产物组名才保留组头。 */
+function meaningfulTitle(title: string | null): string | null {
+  if (!title) return null;
+  const t = title.trim();
+  if (!t || t.startsWith("文件:")) return null;
+  return t;
 }
 
 export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
   // plan-75-334 阶段0：记录组件渲染（仅采集期间统计，零开销）
   recordComponentRender("taskSummary");
-  
+
   const tasks = useChatStore((state) => state.tasks);
   // plan-75-334 阶段3：不可见时不订阅真实 messages（读稳定空数组），
   // 隐藏标签不再随每个落库 delta 重算派生；恢复可见时 selector 立即切回并补算一次。
@@ -37,7 +55,12 @@ export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
   const refreshTasks = useChatStore((state) => state.refreshTasks);
   const reviewedFiles = useChatStore((state) => state.reviewedFiles);
   const markFileReviewed = useChatStore((state) => state.markFileReviewed);
+  // plan-404-1892（图3）：审核口径与消息流胶囊对齐——需读持久化状态与批量审核 action
+  const reviewPath = useChatStore((state) => state.reviewPath);
+  const reviewFiles = useChatStore((state) => state.reviewFiles);
+  const turnChanges = useChatStore((state) => state.turnChanges);
   const artifacts = useChatStore((state) => state.artifacts);
+  const isRunning = useChatStore((state) => state.isRunning);
   const setPreviewPath = usePanelStore((state) => state.setPreviewPath);
   const openTab = usePanelStore((state) => state.openTab);
 
@@ -65,141 +88,248 @@ export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
   const progressRows = progress.rows;
   const progressDone = progress.done;
 
-  /** 当前任务标题：取最近一个 request 任务（仅用于展示标题，不参与进度） */
-  const currentTasks = useMemo(() => {
-    const visible = tasks.filter((task) => !task.is_hidden);
-    const turnIds = visible.map((task) => task.turn_id).filter((id): id is number => id != null);
-    if (turnIds.length === 0) return visible;
-    const latestTurn = Math.max(...turnIds);
-    return visible.filter((task) => task.turn_id === latestTurn);
-  }, [tasks]);
-
-  const requestTask = currentTasks.find((task) => task.kind === "request" || (task.kind == null && task.parent_task_id == null));
-
-  const artifactFiles = useMemo(() => {
-    const seen = new Set<string>();
-    const result: Array<{ path: string; turnId: number | null }> = [];
+  /** 产物文件 = 轮次产出的 artifact 消息（带 turnId，可回滚）∪ 后端产物清单（带标题），按路径去重合并。
+   *  此前这是「产物」与「文件审查」两段互相重复的列表。 */
+  const productFiles = useMemo<ProductFile[]>(() => {
+    const map = new Map<string, ProductFile>();
     for (const message of messages) {
       const content = message.content as Record<string, unknown>;
       if (message.msg_type !== "artifact" || !Array.isArray(content.files)) continue;
       for (const file of content.files.map(String)) {
-        if (!seen.has(file)) {
-          seen.add(file);
-          result.push({ path: file, turnId: message.turn_id ?? null });
-        }
+        if (!map.has(file)) map.set(file, { path: file, turnId: message.turn_id ?? null, title: null });
       }
     }
-    return result;
-  }, [messages]);
-  const unReviewed = artifactFiles.filter((file) => !reviewedFiles[file.path]);
-  const allReviewed = artifactFiles.length > 0 && unReviewed.length === 0;
-  const orphanArtifacts = artifacts.filter((artifact) => artifact.task_id == null);
+    for (const artifact of artifacts) {
+      // plan-404-1892（图4）：标题归一后可能为空——不再回落为「产物 #N」，避免无意义的组头
+      const title = meaningfulTitle(artifact.title);
+      for (const file of artifact.files ?? []) {
+        const hit = map.get(file);
+        if (hit) { if (!hit.title && title) hit.title = title; }
+        else map.set(file, { path: file, turnId: null, title });
+      }
+    }
+    return [...map.values()];
+  }, [messages, artifacts]);
+
+  /** 按产物标题分组；全部没有标题时不显示组头（单组平铺） */
+  const groups = useMemo(() => {
+    const titled = productFiles.some((f) => f.title);
+    if (!titled) return [{ title: "", files: productFiles }];
+    const order: string[] = [];
+    const by = new Map<string, ProductFile[]>();
+    for (const f of productFiles) {
+      const key = f.title ?? "其他文件";
+      if (!by.has(key)) { by.set(key, []); order.push(key); }
+      by.get(key)!.push(f);
+    }
+    // 「其他文件」（没有归到任何产物的零散文件）固定排在最后
+    order.sort((a, b) => Number(a === "其他文件") - Number(b === "其他文件"));
+    return order.map((title) => ({ title, files: by.get(title)! }));
+  }, [productFiles]);
+
+  /** plan-404-1892（图3）：审核口径以后端持久化状态为准（turnChanges[*].reviewed），
+   *  reviewedFiles 仅兜底「无 turn 归属」的产物清单文件——此前只读 reviewedFiles，
+   *  导致消息流里已审核的文件在面板仍显示未审。 */
+  const reviewedSet = useMemo(() => {
+    const set = new Set<string>();
+    for (const list of Object.values(turnChanges)) {
+      for (const c of list) if (c.reviewed) set.add(c.path);
+    }
+    for (const [p, ok] of Object.entries(reviewedFiles)) if (ok) set.add(p);
+    return set;
+  }, [turnChanges, reviewedFiles]);
+
+  const reviewedCount = productFiles.filter((f) => reviewedSet.has(f.path)).length;
+  const allReviewed = productFiles.length > 0 && reviewedCount === productFiles.length;
+
+  /** plan-404-1892（图3）：「全部通过」按 turn 归组批量提交（每 turn 一次请求），
+   *  无 turn 归属的产物清单文件走本地兜底。 */
+  const approveAll = () => {
+    const byTurn = new Map<number, string[]>();
+    const localOnly: string[] = [];
+    const tids = Object.keys(turnChanges).map(Number);
+    for (const f of productFiles) {
+      const hit = tids.filter((tid) => (turnChanges[tid] ?? []).some((c) => c.path === f.path));
+      if (hit.length === 0) localOnly.push(f.path);
+      else for (const tid of hit) byTurn.set(tid, [...(byTurn.get(tid) ?? []), f.path]);
+    }
+    for (const [tid, paths] of byTurn) void reviewFiles(tid, paths, true);
+    for (const p of localOnly) markFileReviewed(p, true);
+  };
 
   const openFile = (path: string) => {
     setPreviewPath(path);
     openTab("files");
   };
 
-  // 任务进度：plan-282-1441（#3）已改为共享模块 useProgressRows（与输入框上方胶囊同源），
-  // 此处不再自算（旧实现只看 max(turn_id) 并回退 request 任务，与胶囊口径不一致）。
+  /** 状态头：回答「任务现在怎样」。无用户消息原文。 */
+  const head = useMemo<{ status: StatusKind; title: string; sub: string; tone: "info" | "warning" | "success" | "muted" }>(() => {
+    const running = progressRows.find((r) => r.status === "running");
+    if (hasPendingPlan) return { status: "paused", title: "等待确认方案", sub: "确认后开始执行，也可以停止任务", tone: "warning" };
+    if (progress.phase === "interrupted") return { status: "paused", title: "已停止", sub: `${progress.unfinished} 项未完成，可在对话里继续`, tone: "warning" };
+    if (isRunning || progress.phase === "running") {
+      return {
+        status: "running",
+        title: "执行中",
+        sub: progressRows.length > 0 ? (running ? `${progressDone}/${progressRows.length} 步 · ${running.title}` : `${progressDone}/${progressRows.length} 步`) : "正在处理你的请求",
+        tone: "info",
+      };
+    }
+    if (productFiles.length > 0 || tasks.length > 0 || visitedFiles.length > 0) {
+      return { status: "done", title: "已完成", sub: productFiles.length > 0 ? `产出 ${productFiles.length} 个文件，已审 ${reviewedCount}/${productFiles.length}` : "本轮任务已结束", tone: "success" };
+    }
+    return { status: "pending", title: "空闲", sub: "等待你布置任务", tone: "muted" };
+  }, [hasPendingPlan, progress.phase, progress.unfinished, isRunning, progressRows, progressDone, productFiles.length, reviewedCount, tasks.length, visitedFiles.length]);
 
-  const ArtifactRows = ({ items }: { items: ArtifactOut[] }) => (
-    <div className="ts-artifact-list">
-      {items.map((artifact) => (
-        <div className="ts-artifact" key={artifact.id}>
-          <div className="ts-artifact-title">{artifact.title || `产物 #${artifact.id}`}</div>
-          {(artifact.files ?? []).map((file) => (
-            <button className="ts-artifact-file" key={file} onClick={() => openFile(file)} title={file} type="button">
-              {file.split("/").pop()}
-            </button>
-          ))}
-        </div>
-      ))}
-    </div>
-  );
+  const ratio = progressRows.length > 0 ? progressDone / progressRows.length : 0;
+  const hasAnything = progressRows.length > 0 || productFiles.length > 0 || visitedFiles.length > 0 || hasPendingPlan;
 
   return (
-    <div className="rp-body task-summary-redesign">
-      <section className="ts-summary-head">
-        <div className="ts-summary-kicker">当前任务</div>
-        <div className="ts-summary-title">{requestTask?.title || "暂无任务"}</div>
-        {hasPendingPlan && <div className="ts-summary-hint">方案文档待确认</div>}
+    <div className="rp-body ts-panel">
+      {/* ① 状态头 */}
+      <section className={`ts-head is-${head.tone}`}>
+        <div className="ts-head-top">
+          <StatusIcon status={head.status} size={20} />
+          <div className="ts-head-main">
+            <div className="ts-head-title">{head.title}</div>
+            <div className="ts-head-sub">{head.sub}</div>
+          </div>
+          {tasks.length > 0 && (
+            <Tooltip content="刷新任务" side="bottom">
+              <button type="button" className="ui-icon-btn ts-head-refresh" aria-label="刷新任务" onClick={() => refreshTasks()}>
+                <IconRefresh size={14} />
+              </button>
+            </Tooltip>
+          )}
+        </div>
+        {progressRows.length > 0 && (
+          <div className="ts-bar" role="progressbar" aria-valuemin={0} aria-valuemax={progressRows.length} aria-valuenow={progressDone} aria-label="任务进度">
+            <span className="ts-bar-fill" style={{ ["--ratio" as string]: ratio }} />
+          </div>
+        )}
       </section>
 
+      {!hasAnything && (
+        <div className="ts-empty-card">
+          <ToneTile tone="graphite" icon={<IconListChecks size={22} />} size={44} />
+          <div className="ts-empty-title">还没有可展示的内容</div>
+          <div className="ts-empty-sub">在对话里布置任务后，这里会实时显示执行步骤与产出的文件。</div>
+        </div>
+      )}
+
+      {/* ② 执行进度 */}
       {progressRows.length > 0 && (
-        <section className="ts-section ts-real-section">
-          <div className="ts-section-title">任务进度 {progressDone}/{progressRows.length}</div>
-          <div className="ts-step-list">
+        <section className="ts-sec">
+          <div className="ts-sec-head">
+            <span className="ts-sec-title">执行进度</span>
+            <Badge size="xs" tone="neutral">{progressDone}/{progressRows.length}</Badge>
+          </div>
+          <div className="ts-steps">
             {progressRows.map((row, i) => (
-              <div className={`ts-step-item ${row.status}`} key={`${row.key}-${i}`}>
-                <StepStatus status={row.status} />
-                <button
-                  className="ts-step-title ts-step-jump"
-                  type="button"
-                  disabled={row.agentId == null}
-                  title={row.agentId != null ? "点击定位到执行消息" : row.note || row.title}
-                  onClick={() => {
-                    if (row.agentId != null) useChatStore.getState().requestScrollTo({ threadId: row.agentId });
-                  }}
-                >
-                  {row.title}
-                </button>
-                {row.note && <span className="ts-step-note" title={row.note}>{row.note}</span>}
-              </div>
+              <button
+                key={`${row.key}-${i}`}
+                type="button"
+                className={`ts-step is-${row.status}`}
+                disabled={row.agentId == null}
+                onClick={() => { if (row.agentId != null) useChatStore.getState().requestScrollTo({ threadId: row.agentId }); }}
+              >
+                <StatusIcon status={row.status} size={15} />
+                <span className="ts-step-title">{row.title}</span>
+                {row.note && <span className="ts-step-note">{row.note}</span>}
+              </button>
             ))}
           </div>
         </section>
       )}
 
+      {/* ③ 方案待确认 */}
       {hasPendingPlan && (
-        <div className="ts-proposal-actions">
-          <button className="ts-proposal-primary" onClick={() => confirmPlanTurn(true)} type="button">确认执行</button>
-          <button onClick={() => confirmPlanTurn(false)} type="button">停止任务</button>
+        <div className="ts-plan-actions">
+          <Button variant="primary" size="md" onClick={() => confirmPlanTurn(true)}>确认执行</Button>
+          <Button variant="ghost" size="md" onClick={() => confirmPlanTurn(false)}>停止任务</Button>
         </div>
       )}
 
-      {artifacts.length > 0 && (
-        <section className="ts-section">
-          <div className="ts-section-title">产物</div>
-          <ArtifactRows items={artifacts.filter((artifact) => artifact.task_id != null)} />
-          {orphanArtifacts.length > 0 && <ArtifactRows items={orphanArtifacts} />}
-        </section>
-      )}
-
-      {artifactFiles.length > 0 && (
-        <section className="ts-section">
-          <div className="ts-section-title">
-            <span>文件审查</span>
-            <button className="ts-mini-btn" disabled={allReviewed} onClick={() => artifactFiles.forEach((file) => markFileReviewed(file.path, true))} type="button">
-              <IconCheck size={11} /> 全部通过
-            </button>
+      {/* ④ 产物（产物与文件审核合并） */}
+      {productFiles.length > 0 && (
+        <section className="ts-sec">
+          <div className="ts-sec-head">
+            <span className="ts-sec-title">产物</span>
+            <span className="ts-sec-meta">{productFiles.length} 个文件 · 已审 {reviewedCount}/{productFiles.length}</span>
+            <Button
+              size="xs"
+              variant="subtle"
+              className="ts-approve-all"
+              icon={<IconCheck size={12} />}
+              disabled={allReviewed}
+              onClick={approveAll}
+            >
+              全部通过
+            </Button>
           </div>
-          {artifactFiles.map((file) => (
-            <div className={`ts-file-review-row${reviewedFiles[file.path] ? " reviewed" : ""}`} key={file.path}>
-              <button className="artifact-file-review" onClick={() => markFileReviewed(file.path, !reviewedFiles[file.path])} type="button">
-                {reviewedFiles[file.path] && <IconCheck size={11} />}
-              </button>
-              <button className="ts-file-review-name" onClick={() => openFile(file.path)} title={file.path} type="button">{file.path}</button>
-              <div className="ts-file-review-ops">
-                <button className="ts-mini-btn" onClick={() => openFile(file.path)} title="打开文件" type="button"><IconExternalLink size={11} /></button>
-                {file.turnId != null && <button className="ts-mini-btn danger" onClick={() => useChatStore.getState().requestRollbackPreview(file.turnId!)} title="回滚" type="button"><IconRotateCcw size={11} /></button>}
-              </div>
+          {groups.map((g) => (
+            <div className="ts-group" key={g.title || "all"}>
+              {g.title && <div className="ts-group-title">{g.title}</div>}
+              {g.files.map((f) => {
+                const reviewed = reviewedSet.has(f.path);
+                return (
+                  <div className={`ts-file${reviewed ? " is-reviewed" : ""}`} key={f.path}>
+                    <Tooltip content={reviewed ? "取消已审" : "标记为已审"} side="top">
+                      <button
+                        type="button"
+                        role="checkbox"
+                        aria-checked={reviewed}
+                        aria-label={`${reviewed ? "取消已审" : "标记为已审"}：${baseName(f.path)}`}
+                        className="ts-check"
+                        onClick={() => reviewPath(f.path, !reviewed)}
+                      >
+                        <IconCheck size={11} />
+                      </button>
+                    </Tooltip>
+                    {/* plan-404-1892（图4）：只显示文件名（超长省略、不换行），完整路径移到悬停提示 */}
+                    <Tooltip content={f.path} side="top">
+                      <button type="button" className="ts-file-main" onClick={() => openFile(f.path)}>
+                        <FileIcon name={f.path} size={16} />
+                        <span className="ts-file-name">{baseName(f.path)}</span>
+                      </button>
+                    </Tooltip>
+                    <span className="ts-file-ops">
+                      <Tooltip content="在文件面板中打开" side="top">
+                        <button type="button" className="ui-icon-btn" aria-label="打开文件" onClick={() => openFile(f.path)}><IconExternalLink size={13} /></button>
+                      </Tooltip>
+                      {f.turnId != null && (
+                        <Tooltip content="回滚这一轮的改动" side="top">
+                          <button type="button" className="ui-icon-btn is-danger" aria-label="回滚" onClick={() => useChatStore.getState().requestRollbackPreview(f.turnId!)}><IconRotateCcw size={13} /></button>
+                        </Tooltip>
+                      )}
+                    </span>
+                  </div>
+                );
+              })}
             </div>
           ))}
-          {allReviewed && <div className="ts-empty"><IconCheckCircle size={13} /> 全部文件已审查</div>}
         </section>
       )}
 
+      {/* ⑤ 浏览过的文件 */}
       {visitedFiles.length > 0 && (
-        <section className="ts-section">
-          <div className="ts-section-title"><IconFileRead size={12} /> 浏览过的文件</div>
-          <div className="ts-files">
-            {visitedFiles.map((file) => <button className="ts-file" key={file} onClick={() => openFile(file)} title={file} type="button">{file.split("/").pop()}</button>)}
+        <section className="ts-sec">
+          <div className="ts-sec-head">
+            <span className="ts-sec-title">浏览过的文件</span>
+            <Badge size="xs" tone="neutral">{visitedFiles.length}</Badge>
+          </div>
+          <div className="ts-chips">
+            {visitedFiles.map((file) => (
+              <Tooltip key={file} content={file} side="top">
+                <button type="button" className="ts-chip" onClick={() => openFile(file)}>
+                  <FileIcon name={file} size={14} />
+                  <span>{baseName(file)}</span>
+                </button>
+              </Tooltip>
+            ))}
           </div>
         </section>
       )}
-
-      {currentTasks.length > 0 && <button className="ts-refresh-bottom" onClick={() => refreshTasks()} type="button"><IconRefresh size={12} /> 刷新任务</button>}
     </div>
   );
 }

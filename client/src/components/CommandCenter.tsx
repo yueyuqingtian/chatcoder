@@ -162,9 +162,8 @@ export function CommandCenter() {
       const suggest: Entry[] = [
         {
           icon: <IconPlus size={14} />, label: t("cmd.new_task"), hint: "Ctrl+N",
-          run: () => {
-            useChatStore.setState({ currentSessionId: null, messages: [], turns: [], tasks: [], runningTurnId: null, isRunning: false, interruptedTurnId: null, streamingBuffers: {}, thinkingBuffers: {}, usage: null, pendingApproval: null, pendingPlan: null, reviewedFiles: {} });
-          },
+          // plan-404-1892（图5）：统一走 startNewTask（含 artifacts / turnChanges 等会话级字段）
+          run: () => { useChatStore.getState().startNewTask(); },
         },
         { icon: <IconFolderOpen size={14} />, label: t("cmd.open_workspace"), hint: "Ctrl+O", run: () => { void openWorkspace(); } },
         { icon: <IconSettings size={14} />, label: t("cmd.settings"), run: () => window.dispatchEvent(new CustomEvent("chatcoder:open-settings")) },

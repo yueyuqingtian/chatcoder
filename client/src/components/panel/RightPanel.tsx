@@ -1,6 +1,9 @@
 /** 右侧面板（v5）：多标签页 + 全屏按钮 + 加号菜单修复。
  * v19: 标签溢出治理——tab 不再被 flex 压缩（flex-shrink:0 + 文字省略），
  *      支持滚轮横滚；溢出时头部出现「全部标签」下拉，可直接跳转/关闭。
+ * plan-20261009-ui U8：标签条改为「图标 + 文案」胶囊（关闭按钮占固定槽位，悬停才出现，不抖动）；
+ *      加号 / 全部标签菜单统一为 Popover（点外部、Esc、进出场）；头部按钮统一 28px 并用 Tooltip；
+ *      空态由四条灰色长条改为 2×2 工具启动卡（角色色磁贴，闲置灰度、聚焦彩色）。
  */
 import { memo, useEffect, useRef, useState } from "react";
 import { api } from "../../api/client";
@@ -8,14 +11,18 @@ import { isBusy, subscribe } from "../../perf/bus";
 import { usePanelStore, bucketSessionId } from "../../store/panel";
 import type { PanelTab, PanelTabId } from "../../store/panel";
 import { useI18n } from "../../store/i18n";
-import { IconArrowToggle, IconBug, IconChevronDown, IconFolder, IconGlobe, IconTerminal, IconX, IconPlus, IconMaximize, IconMinus } from "../icons";
+import {
+  IconArrowToggle, IconBot, IconBug, IconCheck, IconChevronDown, IconFolderTree, IconGlobe, IconListChecks,
+  IconMaximize, IconMinus, IconPlus, IconRotateCcw, IconSquareTerminal, IconX,
+} from "../icons";
+import { Popover, Tooltip } from "../ui";
+import { ToneTile, type Tone } from "../iconkit/ToneTile";
 import { TaskSummaryPanel } from "./TaskSummaryPanel";
 import { BrowserPanel } from "./BrowserPanel";
 import { FileTreePanel } from "./FileTreePanel";
 import { TerminalPanel } from "./TerminalPanel";
 import { SubagentPanel } from "./SubagentPanel";
 import { DebugPanel } from "./DebugPanel";
-import { useClickOutside } from "../../hooks/useClickOutside";
 import { ErrorBoundary } from "../ErrorBoundary";
 
 /** plan-75-334 阶段3：面板内容按 tab/sessionId/visible 记忆化。
@@ -51,6 +58,23 @@ const GuardedPanelContent = memo(function GuardedPanelContent({ tabKey, tab, ses
   );
 });
 
+/** 标签图标（与加号菜单、启动卡共用同一套） */
+function tabIcon(id: PanelTabId, size: number) {
+  switch (id) {
+    case "task-summary": return <IconListChecks size={size} />;
+    case "browser": return <IconGlobe size={size} />;
+    case "terminal": return <IconSquareTerminal size={size} />;
+    case "files": return <IconFolderTree size={size} />;
+    case "subagent": return <IconBot size={size} />;
+    case "debug": return <IconBug size={size} />;
+  }
+}
+
+/** 启动卡的角色色（取项目色板，明暗主题自适应） */
+const TAB_TONE: Record<PanelTabId, Tone> = {
+  "task-summary": "blue", browser: "violet", terminal: "teal", files: "amber", subagent: "pink", debug: "red",
+};
+
 export function RightPanel() {
   const { t } = useI18n();
   // tabs/activeKey 为「当前会话桶」的投影（见 store/panel.ts）；buckets 用于跨会话保活渲染
@@ -79,20 +103,21 @@ export function RightPanel() {
   };
   useEffect(refreshDebugEnabled, []);
   const tabsRef = useRef<HTMLDivElement>(null);
-  const headActionsRef = useRef<HTMLDivElement>(null);
+  const addBtnRef = useRef<HTMLButtonElement>(null);
+  const tabsBtnRef = useRef<HTMLButtonElement>(null);
   const [tabsOverflow, setTabsOverflow] = useState(false);
-  useClickOutside(headActionsRef, showAddMenu || showTabsMenu, () => {
-    setShowAddMenu(false);
-    setShowTabsMenu(false);
-  });
 
-  const tabMeta: Record<PanelTabId, { label: string; icon: React.ReactNode }> = {
-    "task-summary": { label: t("rp.tab_task_summary"), icon: <span className="rp-tab-dot" /> },
-    browser: { label: t("rp.tab_browser"), icon: <IconGlobe size={13} /> },
-    terminal: { label: t("rp.tab_terminal"), icon: <IconTerminal size={13} /> },
-    files: { label: t("rp.tab_files"), icon: <IconFolder size={13} /> },
-    subagent: { label: t("rp.tab_subagent"), icon: <IconTerminal size={13} /> },
-    debug: { label: t("rp.tab_debug"), icon: <IconBug size={13} /> },
+  const tabLabel = (tTab: PanelTab): string => {
+    const base: Record<PanelTabId, string> = {
+      "task-summary": t("rp.tab_task_summary"),
+      browser: t("rp.tab_browser"),
+      terminal: t("rp.tab_terminal"),
+      files: t("rp.tab_files"),
+      subagent: t("rp.tab_subagent"),
+      debug: t("rp.tab_debug"),
+    };
+    if (tTab.id === "subagent" && tTab.meta?.agentName) return tTab.meta.agentName.slice(0, 10);
+    return tTab.instance > 1 ? `${base[tTab.id]} ${tTab.instance}` : base[tTab.id];
   };
 
   // 标签条溢出检测（scrollWidth > clientWidth 时展示「全部标签」入口）。
@@ -106,7 +131,10 @@ export function RightPanel() {
     const check = () => {
       if (isBusy()) { missed = true; return; }
       missed = false;
-      setTabsOverflow(el.scrollWidth > el.clientWidth + 2);
+      const overflow = el.scrollWidth > el.clientWidth + 2;
+      setTabsOverflow(overflow);
+      // 面板被拖窄后激活的标签可能被挤出可视区：溢出时顺手把它滚回来
+      if (overflow) el.querySelector<HTMLElement>(".rp-tab.is-active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
     };
     check();
     const ro = new ResizeObserver(check);
@@ -114,6 +142,12 @@ export function RightPanel() {
     const off = subscribe((busy) => { if (!busy && missed) check(); });
     return () => { ro.disconnect(); off(); };
   }, [tabs.length]);
+
+  // 激活的标签滚入可视区（标签很多、从菜单跳转时尤其需要）
+  useEffect(() => {
+    const el = tabsRef.current?.querySelector<HTMLElement>(".rp-tab.is-active");
+    el?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [activeKey]);
 
   // 滚轮纵转横：标签过多时直接滚轮浏览
   const onTabsWheel = (e: React.WheelEvent) => {
@@ -126,80 +160,122 @@ export function RightPanel() {
   const handleAdd = (id: PanelTabId) => { openTab(id); setShowAddMenu(false); };
   const handleAddTerminal = () => { openNewTab("terminal"); setShowAddMenu(false); };
 
+  /** 启动卡 / 加号菜单共用的入口清单（调试按条件出现） */
+  const entries: Array<{ id: PanelTabId; title: string; desc: string; onPick: () => void }> = [
+    { id: "task-summary", title: t("rp.tab_task_summary"), desc: t("rp.desc_task"), onPick: () => handleAdd("task-summary") },
+    { id: "browser", title: t("rp.tab_browser"), desc: t("rp.desc_browser"), onPick: () => handleAdd("browser") },
+    { id: "terminal", title: t("rp.tab_terminal"), desc: t("rp.desc_terminal"), onPick: handleAddTerminal },
+    { id: "files", title: t("rp.tab_files_full"), desc: t("rp.desc_files"), onPick: () => handleAdd("files") },
+    ...(debugEnabled ? [{ id: "debug" as const, title: t("rp.tab_debug"), desc: t("rp.desc_debug"), onPick: () => handleAdd("debug") }] : []),
+  ];
+
   return (
     <div className="right-panel">
       <div className="rp-head">
-        <div className="rp-tabs" ref={tabsRef} onWheel={onTabsWheel}>
+        <div className="rp-tabs" ref={tabsRef} onWheel={onTabsWheel} role="tablist">
           {tabs.map((tTab) => {
             const key = `${tTab.id}-${tTab.instance}`;
-            const meta = tabMeta[tTab.id];
-            const label = tTab.id === "subagent" && tTab.meta?.agentName
-              ? tTab.meta.agentName.slice(0, 10)
-              : tTab.instance > 1 ? `${meta.label} ${tTab.instance}` : meta.label;
+            const label = tabLabel(tTab);
+            const active = activeKey === key;
             return (
-              <div key={key} className={`rp-tab${activeKey === key ? " active" : ""}`} title={label} onClick={() => setActiveTab(key)}>
-                {meta.icon}
-                <span>{label}</span>
-                <button className="rp-tab-close" onClick={(e) => { e.stopPropagation(); closeTab(key); }}><IconX size={10} /></button>
+              <div
+                key={key}
+                className={`rp-tab${active ? " is-active" : ""}`}
+                role="tab"
+                aria-selected={active}
+                tabIndex={0}
+                onClick={() => setActiveTab(key)}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setActiveTab(key); } }}
+              >
+                <span className="rp-tab-ic">{tabIcon(tTab.id, 14)}</span>
+                <span className="rp-tab-label">{label}</span>
+                <Tooltip content={t("rp.close_tab")} side="bottom">
+                  <button type="button" className="rp-tab-close" aria-label={`${t("rp.close_tab")}：${label}`} onClick={(e) => { e.stopPropagation(); closeTab(key); }}>
+                    <IconX size={11} />
+                  </button>
+                </Tooltip>
               </div>
             );
           })}
           {tabs.length === 0 && <div className="rp-tabs-empty">{t("rp.tabs_empty")}</div>}
         </div>
-        <div className="rp-head-actions" ref={headActionsRef}>
+        <div className="rp-head-actions">
           {tabsOverflow && (
-            <button className="rp-add-btn" onClick={() => { setShowTabsMenu(!showTabsMenu); setShowAddMenu(false); }} title={t("rp.all_tabs")}>
-              <IconChevronDown size={14} />
-            </button>
-          )}
-          {showTabsMenu && (
-            <div className="rp-add-menu" onClick={() => setShowTabsMenu(false)}>
-              {tabs.map((tTab) => {
-                const key = `${tTab.id}-${tTab.instance}`;
-                const meta = tabMeta[tTab.id];
-                const label = tTab.id === "subagent" && tTab.meta?.agentName
-                  ? tTab.meta.agentName.slice(0, 10)
-                  : tTab.instance > 1 ? `${meta.label} ${tTab.instance}` : meta.label;
-                return (
-                  <button key={key} className={activeKey === key ? "active" : ""} onClick={() => setActiveTab(key)}>
-                    {meta.icon} <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{label}</span>
-                  </button>
-                );
-              })}
+            <div className="rp-anchor">
+              <Tooltip content={t("rp.all_tabs")} side="bottom" disabled={showTabsMenu}>
+                <button
+                  ref={tabsBtnRef}
+                  type="button"
+                  className={"rp-hbtn" + (showTabsMenu ? " is-open" : "")}
+                  aria-label={t("rp.all_tabs")}
+                  aria-expanded={showTabsMenu}
+                  onClick={() => { setShowTabsMenu((v) => !v); setShowAddMenu(false); }}
+                >
+                  <IconChevronDown size={14} />
+                </button>
+              </Tooltip>
+              <Popover open={showTabsMenu} onClose={() => setShowTabsMenu(false)} placement="bottom-end" className="rp-menu" ignoreRefs={[tabsBtnRef]} role="menu" aria-label={t("rp.all_tabs")}>
+                {tabs.map((tTab) => {
+                  const key = `${tTab.id}-${tTab.instance}`;
+                  const active = activeKey === key;
+                  return (
+                    <button key={key} type="button" role="menuitem" className={"pop-item" + (active ? " is-selected" : "")} onClick={() => { setActiveTab(key); setShowTabsMenu(false); }}>
+                      <span className="pop-item-icon">{tabIcon(tTab.id, 15)}</span>
+                      <span className="pop-item-title">{tabLabel(tTab)}</span>
+                      {active && <span className="pop-item-end"><span className="pop-item-check"><IconCheck size={14} /></span></span>}
+                    </button>
+                  );
+                })}
+              </Popover>
             </div>
           )}
-          <button className="rp-add-btn" onClick={() => { const next = !showAddMenu; setShowAddMenu(next); setShowTabsMenu(false); if (next) refreshDebugEnabled(); }} title={t("rp.new_tab")}><IconPlus size={14} /></button>
-          {showAddMenu && (
-            <div className="rp-add-menu" onClick={() => setShowAddMenu(false)}>
-              <button onClick={() => handleAdd("task-summary")}>{t("rp.tab_task_summary")}</button>
-              <button onClick={() => handleAdd("browser")}>{t("rp.tab_browser")}</button>
-              <button onClick={() => handleAddTerminal()}>{t("rp.tab_terminal")}</button>
-              <button onClick={() => handleAdd("files")}>{t("rp.tab_files_full")}</button>
-              {debugEnabled && (
-                <button onClick={() => handleAdd("debug")}>{t("rp.tab_debug")}</button>
-              )}
+          <div className="rp-anchor">
+            <Tooltip content={t("rp.new_tab")} side="bottom" disabled={showAddMenu}>
+              <button
+                ref={addBtnRef}
+                type="button"
+                className={"rp-hbtn" + (showAddMenu ? " is-open" : "")}
+                aria-label={t("rp.new_tab")}
+                aria-expanded={showAddMenu}
+                onClick={() => { const next = !showAddMenu; setShowAddMenu(next); setShowTabsMenu(false); if (next) refreshDebugEnabled(); }}
+              >
+                <IconPlus size={15} />
+              </button>
+            </Tooltip>
+            <Popover open={showAddMenu} onClose={() => setShowAddMenu(false)} placement="bottom-end" className="rp-menu rp-menu-add" ignoreRefs={[addBtnRef]} role="menu" aria-label={t("rp.new_tab")}>
+              {entries.map((en) => (
+                <button key={en.id} type="button" role="menuitem" className="pop-item" onClick={en.onPick}>
+                  <span className="pop-item-icon">{tabIcon(en.id, 16)}</span>
+                  <span className="pop-item-main">
+                    <span className="pop-item-title">{en.title}</span>
+                    <span className="pop-item-desc">{en.desc}</span>
+                  </span>
+                </button>
+              ))}
               {closedStack.length > 0 && (
                 <>
-                  <div className="rp-add-menu-divider" />
-                  {closedStack.slice(0, 5).map((tTab, i) => {
-                    const meta = tabMeta[tTab.id];
-                    const label = tTab.id === "subagent" && tTab.meta?.agentName
-                      ? tTab.meta.agentName.slice(0, 10)
-                      : tTab.instance > 1 ? `${meta.label} ${tTab.instance}` : meta.label;
-                    return (
-                      <button key={`${tTab.id}-${tTab.instance}`} onClick={() => reopenClosedTab(i)} title={t("rp.restore_closed")}>
-                        ↺ {label}
-                      </button>
-                    );
-                  })}
+                  <div className="pop-sep" />
+                  <div className="pop-label">{t("rp.recent_closed")}</div>
+                  {closedStack.slice(0, 5).map((tTab, i) => (
+                    <button key={`${tTab.id}-${tTab.instance}`} type="button" role="menuitem" className="pop-item" onClick={() => { reopenClosedTab(i); setShowAddMenu(false); }}>
+                      <span className="pop-item-icon"><IconRotateCcw size={14} /></span>
+                      <span className="pop-item-title">{tabLabel(tTab)}</span>
+                    </button>
+                  ))}
                 </>
               )}
-            </div>
-          )}
-          <button className={`rp-fullscreen-btn${fullscreen ? " active" : ""}`} onClick={toggleFullscreen} title={fullscreen ? t("rp.scale") : t("rp.fullscreen")}>
-            {fullscreen ? <IconMinus size={14} /> : <IconMaximize size={14} />}
-          </button>
-          <button className="rp-collapse-btn" onClick={closePanel} title={t("rp.collapse")}><IconArrowToggle open={false} size={14} /></button>
+            </Popover>
+          </div>
+          <Tooltip content={fullscreen ? t("rp.scale") : t("rp.fullscreen")} side="bottom">
+            <button type="button" className={`rp-hbtn${fullscreen ? " is-on" : ""}`} aria-label={fullscreen ? t("rp.scale") : t("rp.fullscreen")} aria-pressed={fullscreen} onClick={toggleFullscreen}>
+              {fullscreen ? <IconMinus size={14} /> : <IconMaximize size={14} />}
+            </button>
+          </Tooltip>
+          <Tooltip content={t("rp.collapse")} side="bottom">
+            <button type="button" className="rp-hbtn" aria-label={t("rp.collapse")} onClick={closePanel}>
+              <IconArrowToggle open={false} size={14} />
+            </button>
+          </Tooltip>
         </div>
       </div>
       <div className="rp-content">
@@ -223,12 +299,28 @@ export function RightPanel() {
           })
         )}
         {tabs.length === 0 && (
-          <div className="rp-quick">
-            <button onClick={() => openTab("task-summary")}>{t("rp.tab_task_summary")}</button>
-            <button onClick={() => openTab("browser")}>{t("rp.tab_browser")}</button>
-            <button onClick={() => openNewTab("terminal")}>{t("rp.tab_terminal")}</button>
-            <button onClick={() => openTab("files")}>{t("rp.tab_files_full")}</button>
-            {debugEnabled && <button onClick={() => openTab("debug")}>{t("rp.tab_debug")}</button>}
+          <div className="rp-launch">
+            <div className="rp-launch-head">
+              <div className="rp-launch-title">{t("rp.launch_title")}</div>
+              <div className="rp-launch-sub">{t("rp.launch_sub")}</div>
+            </div>
+            <div className="rp-launch-grid mo-stagger">
+              {entries.map((en, i) => (
+                <button
+                  key={en.id}
+                  type="button"
+                  className="rp-launch-card tone-host"
+                  style={{ ["--i" as string]: i }}
+                  onClick={en.onPick}
+                >
+                  <ToneTile tone={TAB_TONE[en.id]} icon={tabIcon(en.id, 22)} size={42} />
+                  <span className="rp-launch-text">
+                    <span className="rp-launch-name">{en.title}</span>
+                    <span className="rp-launch-desc">{en.desc}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
           </div>
         )}
       </div>

@@ -6,6 +6,8 @@ declare global {
   interface Window {
     chatcoderAPI?: {
       selectDirectory: () => Promise<string | null>;
+      /** plan-20261009-ui U1：拖入的文件 / 文件夹 → 绝对路径（Electron 32+ 已移除 File.path，须经 webUtils；拿不到返回空串） */
+      getPathForFile?: (file: File) => string;
       selectFiles?: (filters?: Array<{ name: string; extensions: string[] }>, opts?: { allowDirectories?: boolean }) => Promise<string[]>;
       getBackendPort?: () => Promise<number>;
       openPath?: (path: string) => Promise<string>;

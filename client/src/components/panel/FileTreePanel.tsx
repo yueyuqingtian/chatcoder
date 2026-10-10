@@ -1,14 +1,26 @@
 /** 文件管理面板（v2）：项目目录树 + 文件预览（monaco）+ 在外部打开。
  * v11: 变更审核 diff 视图——diffPreview.path 匹配当前预览文件时，
  * 用 Monaco DiffEditor 展示 before/after，可切换「变更对比 / 当前内容」。
- */
-import { useEffect, useMemo, useRef, useState } from "react";
+ *
+ * plan-20261009-ui U8：
+ *  · 目录树改为**扁平化 + 虚拟滚动**（@tanstack/react-virtual，项目已有依赖）：上万个节点也只渲染可见行；
+ *  · 文件 / 文件夹统一用 Material 文件类型图标（iconkit/FileIcon），取代文字徽标（TS / JS …）；
+ *  · 树头：项目图标 + 名称 + 刷新 / 全部折叠；下方是过滤框（匹配的文件与其祖先目录自动展开并高亮）；
+ *  · 键盘：↑↓ 移动、→ 展开 / 进入、← 折叠 / 回父级、Enter 打开、Home / End；
+ *  · 预览头：路径面包屑（点目录 → 在树里定位）+ 分段切换（变更对比 / 当前内容，预览 / 源码）+ 外部打开 + 关闭；
+ *  · 没有预览时树占满整个面板，打开预览后树收成侧栏（宽度带弹簧过渡）。 */
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Editor, { DiffEditor } from "@monaco-editor/react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { api, type TreeNode } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { usePanelStore } from "../../store/panel";
-import { IconArrowToggle, IconFileText, IconFolder, IconFolderOpen, IconRefresh } from "../icons";
+import { IconArrowLeft, IconArrowToggle, IconChevronRight, IconCompress, IconExternalLink, IconRefresh, IconSearch, IconX, IconFolderTree } from "../icons";
 import { MarkdownContent } from "../MarkdownContent";
+import { Button, Segmented, Tooltip } from "../ui";
+import { FileIcon } from "../iconkit/FileIcon";
+import { ProjectIcon } from "../project/ProjectIcon";
+import { projectColorKey, projectIconKey } from "../project/projectMeta";
 import { recordComponentRender, recordDerivation } from "../../perf/metrics";
 
 /** 文件扩展名 -> Monaco 语言 ID 映射（后端只返回扩展名，这里兜底转换）。 */
@@ -41,109 +53,107 @@ function toMonacoLang(lang: string | null, filename: string): string {
   return l;
 }
 
-/** 根据文件相对路径计算需要展开的目录路径集合（用于定位文件）。 */
-function ancestorDirs(filePath: string): string[] {
-  const parts = filePath.replace(/\\/g, "/").split("/").filter(Boolean);
-  if (parts.length <= 1) return [];
-  const dirs: string[] = [];
-  for (let i = 1; i < parts.length; i++) {
-    dirs.push(parts.slice(0, i).join("/"));
-  }
-  return dirs;
+/** 路径比较键：统一斜杠与大小写（Windows 路径不区分大小写；预览路径可能来自智能体，大小写未必与磁盘一致） */
+const pathKey = (p: string): string => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+
+/** 项目内相对路径：预览路径可能是绝对路径（目录树点开）、也可能是相对路径（任务摘要 / 引用点开），统一成相对项目根的形式 */
+function relativeTo(root: string, p: string): string {
+  const norm = p.replace(/\\/g, "/").replace(/^\.\//, "");
+  const r = root.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (r && norm.toLowerCase().startsWith(r.toLowerCase() + "/")) return norm.slice(r.length + 1);
+  return norm;
 }
 
-/** S14（plan-41-197）：文件类型徽标映射——按扩展名给出缩写与配色。
- *  此前所有文件都用同一个 IconFileText，无法区分类型（用户反馈“各类文件图标无区分度”）。 */
-const FILE_KIND: Record<string, { label: string; tone: string }> = {
-  ts: { label: "TS", tone: "blue" }, tsx: { label: "TSX", tone: "blue" },
-  js: { label: "JS", tone: "yellow" }, jsx: { label: "JSX", tone: "yellow" },
-  mjs: { label: "JS", tone: "yellow" }, cjs: { label: "JS", tone: "yellow" },
-  py: { label: "PY", tone: "green" }, pyi: { label: "PYI", tone: "green" },
-  json: { label: "JSON", tone: "orange" }, jsonc: { label: "JSON", tone: "orange" },
-  md: { label: "MD", tone: "gray" }, mdx: { label: "MDX", tone: "gray" }, txt: { label: "TXT", tone: "gray" },
-  css: { label: "CSS", tone: "purple" }, scss: { label: "SCSS", tone: "purple" }, less: { label: "LESS", tone: "purple" },
-  html: { label: "HTML", tone: "orange" }, vue: { label: "VUE", tone: "green" }, svelte: { label: "SVE", tone: "red" },
-  yml: { label: "YML", tone: "red" }, yaml: { label: "YML", tone: "red" },
-  toml: { label: "TOML", tone: "red" }, env: { label: "ENV", tone: "red" },
-  sh: { label: "SH", tone: "green" }, ps1: { label: "PS1", tone: "blue" }, bat: { label: "BAT", tone: "gray" },
-  sql: { label: "SQL", tone: "blue" }, rs: { label: "RS", tone: "orange" }, go: { label: "GO", tone: "blue" },
-  java: { label: "JAVA", tone: "red" }, kt: { label: "KT", tone: "purple" },
-  c: { label: "C", tone: "blue" }, cpp: { label: "C++", tone: "blue" }, h: { label: "H", tone: "blue" },
-  png: { label: "IMG", tone: "green" }, jpg: { label: "IMG", tone: "green" },
-  jpeg: { label: "IMG", tone: "green" }, gif: { label: "IMG", tone: "green" },
-  svg: { label: "SVG", tone: "green" }, webp: { label: "IMG", tone: "green" }, ico: { label: "ICO", tone: "green" },
-  lock: { label: "LOCK", tone: "gray" },
-};
+/** 相对路径 → 目录树节点路径（树节点路径是后端给的绝对路径） */
+function toNodePath(root: string, rel: string): string {
+  if (/^([A-Za-z]:\/|\/)/.test(rel)) return rel;
+  const r = root.replace(/\\/g, "/").replace(/\/+$/, "");
+  return r ? `${r}/${rel}` : rel;
+}
 
-function FileRow({ node, depth, onSelect, openPaths, setOpenPaths, selectedPath, registerRow }: {
+/** 文件的所有祖先目录（节点路径），用于展开定位 */
+function ancestorNodePaths(root: string, rel: string): string[] {
+  const parts = rel.split("/").filter(Boolean);
+  const out: string[] = [];
+  for (let i = 1; i < parts.length; i++) out.push(toNodePath(root, parts.slice(0, i).join("/")));
+  return out;
+}
+
+/** 扁平化后的一行（虚拟滚动的最小单位） */
+interface FlatRow {
   node: TreeNode;
   depth: number;
-  onSelect: (path: string) => void;
-  openPaths: Set<string>;
-  setOpenPaths: (fn: (prev: Set<string>) => Set<string>) => void;
-  selectedPath: string | null;
-  registerRow: (path: string, el: HTMLDivElement | null) => void;
-}) {
-  const isDir = node.type === "dir";
-  const open = openPaths.has(node.path);
+  open: boolean;
+  /** 过滤命中的字符区间（用于高亮） */
+  hit: [number, number] | null;
+}
 
-  if (isDir) {
-    return (
-      <>
-        <div
-          className="ft-row"
-          style={{ paddingLeft: `${8 + depth * 14}px` }}
-          onClick={() => setOpenPaths((prev) => {
-            const next = new Set(prev);
-            if (next.has(node.path)) next.delete(node.path);
-            else next.add(node.path);
-            return next;
-          })}
-        >
-          <span className="ft-chev"><IconArrowToggle open={open} size={11} /></span>
-          {open ? <IconFolderOpen size={13} /> : <IconFolder size={13} />}
-          <span className="ft-name">{node.name}</span>
-        </div>
-        {open && node.children?.map((c) => (
-          <FileRow
-            key={c.path}
-            node={c}
-            depth={depth + 1}
-            onSelect={onSelect}
-            openPaths={openPaths}
-            setOpenPaths={setOpenPaths}
-            selectedPath={selectedPath}
-            registerRow={registerRow}
-          />
-        ))}
-      </>
-    );
+const ROW_H = 26;
+/** 面板窄于此值时，目录树与预览不再并排（各 200px 上下的代码预览根本放不下）：打开预览就占满面板，用「返回」回到目录树 */
+const NARROW_PX = 540;
+
+/** 把目录树按展开状态（及过滤词）压平成行列表。
+ *  过滤：文件名命中的文件、含命中后代的目录保留；有命中后代的目录强制展开；
+ *  仅目录名自己命中时按用户的展开状态决定是否展示其子项。 */
+function flatten(nodes: TreeNode[], openPaths: Set<string>, query: string): FlatRow[] {
+  const out: FlatRow[] = [];
+  const q = query.trim().toLowerCase();
+  if (!q) {
+    const walk = (list: TreeNode[], depth: number) => {
+      for (const n of list) {
+        const isDir = n.type === "dir";
+        const open = isDir && openPaths.has(n.path);
+        out.push({ node: n, depth, open, hit: null });
+        if (open && n.children) walk(n.children, depth + 1);
+      }
+    };
+    walk(nodes, 0);
+    return out;
   }
+  const rangeOf = (name: string): [number, number] | null => {
+    const i = name.toLowerCase().indexOf(q);
+    return i >= 0 ? [i, i + q.length] : null;
+  };
+  const walkFiltered = (list: TreeNode[], depth: number): FlatRow[] => {
+    const rows: FlatRow[] = [];
+    for (const n of list) {
+      const hit = rangeOf(n.name);
+      if (n.type !== "dir") {
+        if (hit) rows.push({ node: n, depth, open: false, hit });
+        continue;
+      }
+      const child = walkFiltered(n.children ?? [], depth + 1);
+      if (child.length > 0) {
+        rows.push({ node: n, depth, open: true, hit }, ...child);
+      } else if (hit) {
+        const open = openPaths.has(n.path);
+        rows.push({ node: n, depth, open, hit });
+        if (open && n.children) {
+          const all = (l: TreeNode[], d: number) => {
+            for (const c of l) {
+              const o = c.type === "dir" && openPaths.has(c.path);
+              rows.push({ node: c, depth: d, open: o, hit: null });
+              if (o && c.children) all(c.children, d + 1);
+            }
+          };
+          all(n.children, depth + 1);
+        }
+      }
+    }
+    return rows;
+  };
+  return walkFiltered(nodes, 0);
+}
 
-  // S14（plan-41-197）：文件类型徽标——按扩展名区分（未知类型回落通用文件图标）
-  const _ext = node.name.includes(".") ? node.name.split(".").pop()!.toLowerCase() : "";
-  const _kind = FILE_KIND[_ext];
-  return (
-    <div
-      className={`ft-row ft-file${node.path === selectedPath ? " active" : ""}`}
-      style={{ paddingLeft: `${8 + depth * 14}px` }}
-      onClick={() => onSelect(node.path)}
-      ref={(el) => registerRow(node.path, el)}
-      title={node.path}
-    >
-      <span className="ft-chev" />
-      {_kind
-        ? <span className="ft-kind" data-tone={_kind.tone} aria-hidden>{_kind.label}</span>
-        : <IconFileText size={13} />}
-      <span className="ft-name">{node.name}</span>
-    </div>
-  );
+function Hit({ text, range }: { text: string; range: [number, number] | null }) {
+  if (!range) return <>{text}</>;
+  return <>{text.slice(0, range[0])}<mark className="ft-mark">{text.slice(range[0], range[1])}</mark>{text.slice(range[1])}</>;
 }
 
 export function FileTreePanel({ visible = true }: { visible?: boolean }) {
   // plan-75-334 阶段0：记录组件渲染（仅采集期间统计，零开销）
   recordComponentRender("filePanel");
-  
+
   const currentProjectId = useChatStore((s) => s.currentProjectId);
   const projects = useChatStore((s) => s.projects);
   const previewPath = usePanelStore((s) => s.previewPath);
@@ -153,6 +163,9 @@ export function FileTreePanel({ visible = true }: { visible?: boolean }) {
   const turnChanges = useChatStore((s) => s.turnChanges);
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [openPaths, setOpenPaths] = useState<Set<string>>(new Set());
+  const [filter, setFilter] = useState("");
+  /** 键盘光标（路径）：与「当前预览文件」是两回事——可以先移动再回车打开 */
+  const [cursor, setCursor] = useState<string | null>(null);
   const [content, setContent] = useState<string>("");
   const [contentLang, setContentLang] = useState<string>("plaintext");
   const [contentError, setContentError] = useState<string | null>(null);
@@ -160,8 +173,12 @@ export function FileTreePanel({ visible = true }: { visible?: boolean }) {
   const [viewMode, setViewMode] = useState<"diff" | "content">("diff");
   // v17: Markdown 文件支持 预览/源码 切换（默认预览渲染）
   const [mdView, setMdView] = useState<"preview" | "source">("preview");
+  const panelRef = useRef<HTMLDivElement>(null);
+  const crumbsRef = useRef<HTMLDivElement>(null);
+  const [narrow, setNarrow] = useState(false);
   const treeRef = useRef<HTMLDivElement>(null);
-  const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  /** 待定位的路径：展开祖先目录后，等行列表更新再滚动到它 */
+  const pendingReveal = useRef<string | null>(null);
   // v2.2 (对齐 zcode 3.14.2): Monaco 编辑器实例引用（grep 行号定位）
   const editorRef = useRef<{ revealLineInCenter: (line: number) => void; setPosition: (p: { lineNumber: number; column: number }) => void; focus: () => void } | null>(null);
   /** plan-75-334 阶段2：请求序号——快速切换文件时只允许最新一次响应落地。 */
@@ -170,6 +187,20 @@ export function FileTreePanel({ visible = true }: { visible?: boolean }) {
   const loadedKeyRef = useRef<string>("");
 
   const project = projects.find((p) => p.id === currentProjectId);
+  const projectRoot = project?.path ?? "";
+  /** 预览文件的相对路径 / 树节点路径 / 比较键 */
+  const previewRel = previewPath ? relativeTo(projectRoot, previewPath) : "";
+  const previewNode = previewPath ? toNodePath(projectRoot, previewRel) : "";
+  const previewKey = previewNode ? pathKey(previewNode) : "";
+
+  // 面板宽度分档（只在跨过阈值时更新状态，拖分隔条逐帧改宽度不会逐帧重渲染）
+  useEffect(() => {
+    const el = panelRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([entry]) => setNarrow(entry.contentRect.width < NARROW_PX));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   /** plan-75-334 阶段2：文件加载依赖从**整个 turnChanges** 收窄为「当前预览路径的变更签名」。
    *  此前任意 turn 的任意文件变化都会重读当前预览文件并刷新编辑器内容；
@@ -192,7 +223,8 @@ export function FileTreePanel({ visible = true }: { visible?: boolean }) {
   }, [turnChanges, previewPath]);
 
   // v11: 当前是否处于 diff 视图（diffPreview 与预览文件匹配）
-  const showDiff = viewMode === "diff" && diffPreview != null && diffPreview.path === previewPath;
+  const hasDiff = diffPreview != null && diffPreview.path === previewPath;
+  const showDiff = viewMode === "diff" && hasDiff;
 
   // v11: 新 diff 到达时默认回到「变更对比」视图（用户手动切换「当前内容」不受影响）
   useEffect(() => {
@@ -260,10 +292,12 @@ export function FileTreePanel({ visible = true }: { visible?: boolean }) {
     }
   }, [previewLine, content, contentLang]);
 
-  // 打开文件后自动展开父级目录并滚动定位到该文件
+  // 打开文件后自动展开父级目录，并在行列表更新后滚动定位到该文件
   useEffect(() => {
     if (!previewPath) return;
-    const dirs = ancestorDirs(previewPath);
+    const dirs = ancestorNodePaths(projectRoot, previewRel);
+    pendingReveal.current = previewNode;
+    setCursor(previewNode);
     if (dirs.length === 0) return;
     setOpenPaths((prev) => {
       const next = new Set(prev);
@@ -271,14 +305,7 @@ export function FileTreePanel({ visible = true }: { visible?: boolean }) {
       for (const d of dirs) { if (!next.has(d)) { next.add(d); changed = true; } }
       return changed ? next : prev;
     });
-    // 等待目录展开渲染后滚动
-    const t = setTimeout(() => {
-      const el = rowRefs.current.get(previewPath);
-      const container = treeRef.current;
-      if (el && container) el.scrollIntoView({ block: "nearest", behavior: "smooth" });
-    }, 120);
-    return () => clearTimeout(t);
-  }, [previewPath, tree]);
+  }, [previewPath, tree, projectRoot]);
 
   const openExternal = (relOrAbsPath: string) => {
     if (!relOrAbsPath) return;
@@ -293,53 +320,221 @@ export function FileTreePanel({ visible = true }: { visible?: boolean }) {
     window.chatcoderAPI?.openPath?.(full);
   };
 
+  /* ── 虚拟化的目录树 ── */
+  const rows = useMemo(() => flatten(tree, openPaths, filter), [tree, openPaths, filter]);
+  const indexByPath = useMemo(() => {
+    const m = new Map<string, number>();
+    rows.forEach((r, i) => m.set(r.node.path, i));
+    return m;
+  }, [rows]);
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => treeRef.current,
+    estimateSize: () => ROW_H,
+    overscan: 14,
+  });
+
+  // 行列表更新后兑现待定位请求（展开祖先目录是异步的，不能在同一拍里 scrollToIndex）
+  useEffect(() => {
+    const target = pendingReveal.current;
+    if (!target) return;
+    const i = indexByPath.get(target);
+    if (i == null) return;
+    pendingReveal.current = null;
+    virtualizer.scrollToIndex(i, { align: "auto" });
+  }, [indexByPath, virtualizer]);
+
+  const toggleDir = (path: string) => setOpenPaths((prev) => {
+    const next = new Set(prev);
+    if (next.has(path)) next.delete(path);
+    else next.add(path);
+    return next;
+  });
+
+  const activate = (row: FlatRow) => {
+    setCursor(row.node.path);
+    if (row.node.type === "dir") toggleDir(row.node.path);
+    else setPreviewPath(row.node.path);
+  };
+
+  const onTreeKeyDown = (e: React.KeyboardEvent) => {
+    if (rows.length === 0) return;
+    const cur = cursor != null ? indexByPath.get(cursor) ?? -1 : -1;
+    const go = (i: number) => {
+      const next = Math.max(0, Math.min(rows.length - 1, i));
+      setCursor(rows[next].node.path);
+      virtualizer.scrollToIndex(next, { align: "auto" });
+    };
+    switch (e.key) {
+      case "ArrowDown": e.preventDefault(); go(cur + 1); break;
+      case "ArrowUp": e.preventDefault(); go(cur < 0 ? 0 : cur - 1); break;
+      case "Home": e.preventDefault(); go(0); break;
+      case "End": e.preventDefault(); go(rows.length - 1); break;
+      case "ArrowRight": {
+        const r = rows[cur];
+        if (!r || r.node.type !== "dir") break;
+        e.preventDefault();
+        if (!r.open) toggleDir(r.node.path);
+        else if (rows[cur + 1] && rows[cur + 1].depth > r.depth) go(cur + 1);
+        break;
+      }
+      case "ArrowLeft": {
+        const r = rows[cur];
+        if (!r) break;
+        e.preventDefault();
+        if (r.node.type === "dir" && r.open && !filter.trim()) { toggleDir(r.node.path); break; }
+        for (let i = cur - 1; i >= 0; i--) if (rows[i].depth < r.depth) { go(i); break; }
+        break;
+      }
+      case "Enter":
+      case " ": {
+        const r = rows[cur];
+        if (!r) break;
+        e.preventDefault();
+        activate(r);
+        break;
+      }
+      default: break;
+    }
+  };
+
+  /** 面包屑：点目录 → 展开并在树里定位到它 */
+  const revealDir = (dirRel: string) => {
+    const node = toNodePath(projectRoot, dirRel);
+    setFilter("");
+    if (narrow) setPreviewPath(null); // 窄面板里目录树被预览占满：先回到目录树再定位
+    pendingReveal.current = node;
+    setCursor(node);
+    setOpenPaths((prev) => {
+      const next = new Set(prev);
+      for (const d of [...ancestorNodePaths(projectRoot, `${dirRel}/x`), node]) next.add(d);
+      return next;
+    });
+  };
+
+  const pathParts = previewRel.split("/").filter(Boolean);
+  const fileName = pathParts[pathParts.length - 1] ?? "";
+  const dirParts = pathParts.slice(0, -1);
+  useLayoutEffect(() => {
+    const el = crumbsRef.current;
+    if (el) el.scrollLeft = el.scrollWidth;
+  }, [previewPath, narrow]);
+  const isMd = previewPath ? /\.(md|markdown)$/i.test(previewPath) : false;
+
   return (
-    <div className="ft-panel">
-      <div className="ft-head">
-        <button className="ft-refresh" onClick={loadTree} title="刷新"><IconRefresh size={13} /></button>
-        <span className="ft-root" title={project?.path}>{project?.path.split(/[\\/]/).pop() || "项目"}</span>
-        {previewPath && (
-          <button className="ft-open-ext" onClick={() => openExternal(previewPath)} title="在外部打开">
-            在外部打开
-          </button>
-        )}
-      </div>
-      <div className="ft-body">
-        <div className="ft-tree" ref={treeRef}>
-          {tree.map((n) => (
-            <FileRow
-              key={n.path}
-              node={n}
-              depth={0}
-              onSelect={(p) => setPreviewPath(p)}
-              openPaths={openPaths}
-              setOpenPaths={setOpenPaths}
-              selectedPath={previewPath}
-              registerRow={(path, el) => {
-                if (el) rowRefs.current.set(path, el);
-                else rowRefs.current.delete(path);
-              }}
+    <div className={"ft-panel" + (narrow ? " is-narrow" : "")} ref={panelRef}>
+      <div className={"ft-body" + (previewPath ? " has-preview" : "")}>
+        {/* 左：目录树 */}
+        <div className="ft-tree-col">
+          <div className="ft-tree-head">
+            <span className="ft-root">
+              {project ? <ProjectIcon icon={projectIconKey(project.icon)} color={projectColorKey(project.color)} size={16} /> : <IconFolderTree size={15} />}
+              <span className="ft-root-name">{project?.name || project?.path.split(/[\\/]/).pop() || "项目"}</span>
+            </span>
+            <Tooltip content="刷新" side="bottom">
+              <button type="button" className="ui-icon-btn" aria-label="刷新" onClick={loadTree}><IconRefresh size={14} /></button>
+            </Tooltip>
+            <Tooltip content="全部折叠" side="bottom">
+              <button type="button" className="ui-icon-btn" aria-label="全部折叠" disabled={openPaths.size === 0} onClick={() => setOpenPaths(new Set())}>
+                <IconCompress size={14} />
+              </button>
+            </Tooltip>
+          </div>
+          <label className="ft-filter">
+            <IconSearch size={13} />
+            <input
+              value={filter}
+              placeholder="过滤文件…"
+              aria-label="过滤文件"
+              spellCheck={false}
+              onChange={(e) => setFilter(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Escape" && filter) { e.stopPropagation(); setFilter(""); } }}
             />
-          ))}
-          {tree.length === 0 && <div className="ft-empty">无项目内容</div>}
+            {filter && (
+              <button type="button" className="ft-filter-clear" aria-label="清除过滤" onClick={() => setFilter("")}><IconX size={11} /></button>
+            )}
+          </label>
+          <div className="ft-tree" ref={treeRef} role="tree" tabIndex={0} aria-label="项目文件" onKeyDown={onTreeKeyDown}>
+            <div className="ft-tree-inner" style={{ height: virtualizer.getTotalSize() }}>
+              {virtualizer.getVirtualItems().map((v) => {
+                const r = rows[v.index];
+                const n = r.node;
+                const isDir = n.type === "dir";
+                return (
+                  <div
+                    key={n.path}
+                    role="treeitem"
+                    aria-level={r.depth + 1}
+                    aria-expanded={isDir ? r.open : undefined}
+                    aria-selected={!isDir && pathKey(n.path) === previewKey}
+                    className={"ft-row" + (isDir ? "" : " ft-file") + (!isDir && pathKey(n.path) === previewKey ? " active" : "") + (n.path === cursor ? " is-cursor" : "")}
+                    style={{ height: ROW_H, transform: `translateY(${v.start}px)`, paddingLeft: 6 + r.depth * 14 }}
+                    onClick={() => activate(r)}
+                  >
+                    <span className="ft-chev">{isDir && <IconArrowToggle open={r.open} size={11} />}</span>
+                    <FileIcon name={n.name} folder={isDir} open={r.open} size={16} />
+                    <span className="ft-name"><Hit text={n.name} range={r.hit} /></span>
+                  </div>
+                );
+              })}
+            </div>
+            {rows.length === 0 && (
+              <div className="ft-empty">{filter.trim() ? `没有匹配「${filter.trim()}」的文件` : tree.length === 0 ? "无项目内容" : ""}</div>
+            )}
+          </div>
         </div>
+
+        {/* 右：预览 */}
         {previewPath && (
           <div className="ft-preview">
             <div className="ft-preview-head">
-              <span className="ft-preview-path">{previewPath.split("/").pop()}</span>
-              <div className="ft-diff-toggle">
-                {diffPreview != null && diffPreview.path === previewPath && (
-                  <button className={viewMode === "diff" ? "active" : ""} onClick={() => setViewMode("diff")}>变更对比</button>
+              <div className="ft-ph-row">
+                {narrow && (
+                  <Tooltip content="返回文件列表" side="bottom">
+                    <button type="button" className="ui-icon-btn ft-back" aria-label="返回文件列表" onClick={() => setPreviewPath(null)}><IconArrowLeft size={14} /></button>
+                  </Tooltip>
                 )}
-                <button className={viewMode === "content" ? "active" : ""} onClick={() => setViewMode("content")}>当前内容</button>
+                <span className="ft-ph-file">
+                  <FileIcon name={fileName} size={16} />
+                  <span className="ft-ph-name">{fileName}</span>
+                </span>
+                {hasDiff && (
+                  <Segmented
+                    size="sm"
+                    value={viewMode}
+                    onChange={setViewMode}
+                    aria-label="预览方式"
+                    options={[{ value: "diff", label: "变更对比" }, { value: "content", label: "当前内容" }]}
+                  />
+                )}
+                {isMd && (
+                  <Segmented
+                    size="sm"
+                    value={mdView}
+                    onChange={setMdView}
+                    aria-label="Markdown 视图"
+                    options={[{ value: "preview", label: "预览" }, { value: "source", label: "源码" }]}
+                  />
+                )}
+                <Tooltip content="在外部打开" side="bottom">
+                  <button type="button" className="ui-icon-btn" aria-label="在外部打开" onClick={() => openExternal(previewPath)}><IconExternalLink size={14} /></button>
+                </Tooltip>
+                {!narrow && (
+                  <Tooltip content="关闭预览" side="bottom">
+                    <button type="button" className="ui-icon-btn" aria-label="关闭预览" onClick={() => setPreviewPath(null)}><IconX size={14} /></button>
+                  </Tooltip>
+                )}
               </div>
-              {/\.(md|markdown)$/i.test(previewPath) && (
-                <div className="ft-diff-toggle">
-                  <button className={mdView === "preview" ? "active" : ""} onClick={() => setMdView("preview")}>预览</button>
-                  <button className={mdView === "source" ? "active" : ""} onClick={() => setMdView("source")}>源码</button>
+              {dirParts.length > 0 && (
+                <div className="ft-crumbs" ref={crumbsRef} aria-label="文件路径">
+                  {dirParts.map((seg, i) => (
+                    <span className="ft-crumb-wrap" key={`${i}:${seg}`}>
+                      {i > 0 && <IconChevronRight size={10} className="ft-crumb-sep" />}
+                      <button type="button" className="ft-crumb" onClick={() => revealDir(dirParts.slice(0, i + 1).join("/"))}>{seg}</button>
+                    </span>
+                  ))}
                 </div>
               )}
-              <button className="ft-close" onClick={() => setPreviewPath(null)}>✕</button>
             </div>
             {showDiff ? (
               <div className="ft-diff-body">
@@ -356,9 +551,9 @@ export function FileTreePanel({ visible = true }: { visible?: boolean }) {
             ) : contentError ? (
               <div className="ft-preview-err">
                 <p>{contentError}</p>
-                <button className="btn-ghost" onClick={() => openExternal(previewPath)}>在外部打开</button>
+                <Button variant="outline" size="sm" icon={<IconExternalLink size={13} />} onClick={() => openExternal(previewPath)}>在外部打开</Button>
               </div>
-            ) : /\.(md|markdown)$/i.test(previewPath) && mdView === "preview" ? (
+            ) : isMd && mdView === "preview" ? (
               <div className="ft-md-preview">
                 <MarkdownContent>{displayContent}</MarkdownContent>
               </div>
@@ -378,3 +573,4 @@ export function FileTreePanel({ visible = true }: { visible?: boolean }) {
     </div>
   );
 }
+

@@ -104,7 +104,7 @@
 .models-drag-handle {
   position: absolute; left: 4px; top: 50%; transform: translateY(-50%);
   display: inline-flex; align-items: center; justify-content: center;
-  width: 14px; height: 14px; border-radius: var(--r-sm);
+  width: 24px; height: 24px; left: 0; border-radius: var(--r-ctl);
   color: var(--text-3); opacity: 0; cursor: grab;
   transition: opacity var(--dur-2) var(--ease-standard);
 }
@@ -178,7 +178,7 @@
 .models-cred-toggle:hover { color: var(--text-1); }
 .models-name-input {
   font-size: 16px; font-weight: 600; color: var(--text-1);
-  background: transparent; border: 1px solid transparent; border-radius: var(--r-sm);
+  background: transparent; border: 1px solid transparent; border-radius: var(--r-ctl);
   padding: 2px 6px; width: auto;
   /* 弹性收缩优先：名称输入框先让位，保证右侧徽标/禁用/积分/删除在同一行不被挤压
      （此前 min(320px, 60%) 定宽会把它们压到极窄，出现「已启/用」竖排换行） */
@@ -193,7 +193,7 @@
 .models-badge.warn { background: color-mix(in oklab, var(--warning) 18%, transparent); color: var(--warning); }
 .models-badge.err { background: color-mix(in oklab, var(--error) 16%, transparent); color: var(--error); }
 .models-badge.sm { font-size: 10px; padding: 1px 6px; }
-.models-link { background: none; border: none; color: var(--text-3); font-size: 12px; cursor: pointer; padding: 2px 4px; white-space: nowrap; flex-shrink: 0; }
+.models-link { background: none; border: none; color: var(--text-3); font-size: 12px; cursor: pointer; padding: 4px 6px; border-radius: var(--r-ctl); white-space: nowrap; flex-shrink: 0; }
 .models-link:hover { color: var(--text-1); }
 
 .models-field { display: flex; flex-direction: column; gap: 5px; }
@@ -209,7 +209,7 @@
 .models-cred-list { display: flex; flex-direction: column; gap: 6px; }
 .models-cred-item {
   display: flex; align-items: center; gap: 10px;
-  padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--r-ctl);
 }
 .models-cred-main { flex: 1; min-width: 0; }
 .models-cred-title { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-1); }
@@ -236,7 +236,7 @@
   transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard), border-color var(--dur-2) var(--ease-standard);
 }
 .models-add-model:hover { background: var(--bg-hover); color: var(--text-1); border-color: var(--border-hover); }
-.models-model-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--r-sm); }
+.models-model-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--r-ctl); }
 .models-model-main { flex: 1; min-width: 0; }
 .models-model-name { font-size: 12.5px; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .models-model-desc { display: flex; align-items: center; gap: 6px; margin-top: 2px; font-size: 11px; color: var(--text-3); flex-wrap: wrap; }
@@ -267,7 +267,7 @@
 .ta3-quota-setting-label input { accent-color: var(--accent); }
 .ta3-quota-trend { display: flex; flex-direction: column; gap: 8px; }
 .ta3-quota-trend-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; font-weight: 600; color: var(--text-2); }
-.ta3-quota-seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--r-sm); overflow: hidden; }
+.ta3-quota-seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--r-ctl); overflow: hidden; }
 .ta3-quota-seg button { border: none; background: transparent; padding: 2px 10px; font-size: 11px; color: var(--text-2); cursor: pointer; }
 .ta3-quota-seg button:not(:last-child) { border-right: 1px solid var(--border); }
 .ta3-quota-seg button.active { background: var(--bg-active); color: var(--text-1); font-weight: 600; }
@@ -290,7 +290,7 @@
 .idx-list { display: flex; flex-direction: column; gap: 6px; }
 .idx-item {
   display: flex; align-items: center; gap: 12px;
-  padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-ctl);
 }
 .idx-item-main { flex: 1; min-width: 0; }
 .idx-item-title { display: flex; align-items: center; gap: 8px; }

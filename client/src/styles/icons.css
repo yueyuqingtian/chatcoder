@@ -1,0 +1,190 @@
+/* ═══════════════════════════════════════════════════════════
+ * 图标体系 v2（plan-20261009-ui U3）
+ *
+ * 三态：
+ *  · 闲置   —— 线条 currentColor，双色调填充层（.ic-fill）透明度为 0；
+ *  · 聚焦   —— 宿主（按钮 / 链接 / 菜单项 / 标签 / .ic-host）hover 或键盘聚焦：
+ *             填充层淡入到 --ic-fill-hover，部件做一次微动效（齿轮转、盖子抬、箭头推…）；
+ *  · 状态变更 —— 宿主处于激活/展开（.active / .is-active / [aria-expanded=true] /
+ *             [data-state=open] / [aria-selected=true]）：填充层到 --ic-fill-active。
+ *
+ * 部件类（由 icons.tsx 在需要的路径上标注）：
+ *  .ic-fill   双色调填充层（fill=currentColor，stroke=none）
+ *  .ic-spin   绕自身中心旋转      .ic-flip    绕自身中心半圈
+ *  .ic-up     向上推              .ic-down    向下推
+ *  .ic-right  向右推              .ic-left    向左推
+ *  .ic-lid    盖子绕左端抬起      .ic-swing   以顶部为轴摆动
+ *  .ic-pop    放大                .ic-tilt    轻微倾斜
+ *  .ic-dot    逐个弹跳的点（配合 --d 延迟）
+ *
+ * 所有过渡只动 transform / opacity，时长走令牌（含 --motion-scale）。
+ * ═══════════════════════════════════════════════════════════ */
+
+svg.ic { overflow: visible; flex-shrink: 0; }
+svg.ic .ic-fill {
+  fill: currentColor;
+  stroke: none;
+  opacity: var(--ic-fill-idle, 0);
+  transition: opacity var(--dur-3) var(--ease-standard);
+}
+svg.ic :is(.ic-spin, .ic-flip, .ic-up, .ic-down, .ic-right, .ic-left, .ic-lid, .ic-swing, .ic-pop, .ic-tilt, .ic-dot) {
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: transform var(--dur-spring) var(--spring-bouncy);
+}
+svg.ic .ic-lid { transform-origin: 0% 100%; }
+svg.ic .ic-swing { transform-origin: 50% 0%; }
+
+/* 整枚图标自身的动效（无需部件标注）：齿轮 / 刷新 / 地球 */
+svg.ic.ic-settings,
+svg.ic.ic-refresh,
+svg.ic.ic-rotate-ccw,
+svg.ic.ic-globe,
+svg.ic.ic-sun {
+  transition: transform var(--dur-spring-long) var(--spring-soft);
+}
+
+/* ── 宿主：聚焦态（hover / 键盘聚焦）——不用 CSS 嵌套，避免构建目标降级时语义变化 ── */
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-fill { opacity: var(--ic-fill-hover); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-spin { transform: rotate(90deg); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-flip { transform: rotate(180deg); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-up { transform: translateY(-1.5px); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-down { transform: translateY(1.5px); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-right { transform: translateX(1.5px); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-left { transform: translateX(-1.5px); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-lid { transform: rotate(-14deg) translateY(-0.5px); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-pop { transform: scale(1.12); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-tilt { transform: rotate(-8deg); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-dot { transform: translateY(-1.5px); transition-delay: calc(var(--d, 0) * 40ms * var(--motion-scale)); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-swing { animation: mo-wiggle var(--dur-5) var(--ease-standard) 1; }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic.ic-settings { transform: rotate(60deg); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic.ic-refresh { transform: rotate(180deg); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic.ic-rotate-ccw { transform: rotate(-120deg); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic.ic-globe { transform: rotate(-18deg); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic.ic-sun { transform: rotate(45deg); }
+
+/* 时钟指针绕表盘中心（而非自身包围盒中心）旋转；外链箭头向右上推 */
+svg.ic .ic-hand { transform-box: view-box; transform-origin: 12px 12px; transition: transform var(--dur-spring-long) var(--spring-soft); }
+svg.ic .ic-ne { transform-box: fill-box; transition: transform var(--dur-spring) var(--spring-bouncy); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-hand { transform: rotate(120deg); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-ne { transform: translate(1.5px, -1.5px); }
+
+/* 仪表指针绕刻度中心摆动 */
+svg.ic .ic-needle { transform-box: view-box; transform-origin: 12px 14px; transition: transform var(--dur-spring) var(--spring-bouncy); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-needle { transform: rotate(38deg); }
+
+/* ── 宿主：状态变更（激活 / 展开 / 选中）── */
+:where(.active, .is-active, .is-open, [aria-expanded="true"], [aria-selected="true"], [aria-current="page"], [data-state="open"], [data-state="on"], [data-state="checked"]) svg.ic .ic-fill {
+  opacity: var(--ic-fill-active);
+}
+
+/* 尊重「动画效果：关闭/减弱」：关闭档由 motion.css 全局归零时长；减弱档去掉趣味摆动 */
+:root[data-motion="reduced"] svg.ic .ic-swing { animation: none !important; }
+
+/* ── 形变图标（components/icons/MorphIcons.tsx）── */
+.ic-morph { position: relative; display: inline-grid; place-items: center; flex-shrink: 0; }
+.ic-morph > svg { grid-area: 1 / 1; }
+/* + ↔ ×：整枚旋转 45°，弹簧回弹 */
+.ic-plusx { transition: transform var(--dur-spring) var(--spring-bouncy); }
+.ic-plusx[data-open="true"] { transform: rotate(135deg); }
+/* 发送 ↔ 停止：交叉缩放 + 旋转 */
+.ic-sendstop > .ic-ss-send,
+.ic-sendstop > .ic-ss-stop {
+  transition: transform var(--dur-spring) var(--spring-bouncy), opacity var(--dur-2) var(--ease-standard);
+}
+.ic-sendstop[data-mode="send"] > .ic-ss-stop { opacity: 0; transform: scale(0.4) rotate(-90deg); }
+.ic-sendstop[data-mode="stop"] > .ic-ss-send { opacity: 0; transform: scale(0.4) translateY(4px); }
+.ic-sendstop[data-mode="queue"] > .ic-ss-stop { opacity: 0; transform: scale(0.4) rotate(-90deg); }
+/* 复制 ↔ 完成：对勾描边绘入 */
+.ic-copycheck > .ic-cc-copy,
+.ic-copycheck > .ic-cc-check { transition: transform var(--dur-spring) var(--spring-bouncy), opacity var(--dur-2) var(--ease-standard); }
+.ic-copycheck[data-done="false"] > .ic-cc-check { opacity: 0; transform: scale(0.5); }
+.ic-copycheck[data-done="true"] > .ic-cc-copy { opacity: 0; transform: scale(0.6) rotate(-12deg); }
+.ic-copycheck[data-done="true"] .ic-cc-check path { stroke-dasharray: 1; animation: mo-draw-in var(--dur-4) var(--ease-emphasized-decel) both; }
+/* 文件夹开合：前盖绕底边翻开 */
+.ic-foldermorph .ic-fm-flap {
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+  transition: transform var(--dur-spring) var(--spring-soft), opacity var(--dur-2) var(--ease-standard);
+}
+.ic-foldermorph[data-open="true"] .ic-fm-flap { transform: skewX(-14deg) scaleY(0.78) translateX(1.5px); }
+.ic-foldermorph .ic-fm-paper { opacity: 0; transition: opacity var(--dur-2) var(--ease-standard); }
+.ic-foldermorph[data-open="true"] .ic-fm-paper { opacity: 1; }
+
+/* ── 状态图标（components/icons/StatusIcon.tsx）── */
+.st-icon { display: inline-grid; place-items: center; flex-shrink: 0; color: var(--st-color, var(--text-3)); }
+.st-icon > svg { grid-area: 1 / 1; overflow: visible; }
+.st-icon[data-status="pending"] { --st-color: var(--text-3); }
+.st-icon[data-status="queued"] { --st-color: var(--text-3); }
+.st-icon[data-status="running"] { --st-color: var(--info); }
+.st-icon[data-status="done"] { --st-color: var(--success); }
+.st-icon[data-status="failed"] { --st-color: var(--error); }
+.st-icon[data-status="cancelled"],
+.st-icon[data-status="paused"] { --st-color: var(--warning); }
+.st-icon .st-ring { transition: stroke-dasharray var(--dur-4) var(--ease-standard), opacity var(--dur-2) var(--ease-standard); }
+.st-icon .st-arc { transform-origin: center; transform-box: fill-box; animation: mo-spin var(--dur-spin) linear infinite; }
+.st-icon .st-core { transform-box: fill-box; transform-origin: center; animation: mo-bounce-in var(--dur-spring) var(--spring-bouncy) both; }
+.st-icon .st-mark { stroke-dasharray: 1; animation: mo-draw-in var(--dur-4) var(--ease-emphasized-decel) 60ms both; }
+.st-icon .st-pulse { transform-box: fill-box; transform-origin: center; animation: st-breathe var(--dur-loop) var(--ease-in-out) infinite; }
+@keyframes st-breathe { 0%, 100% { transform: scale(0.7); opacity: 0.55; } 50% { transform: scale(1); opacity: 1; } }
+:root[data-motion="reduced"] .st-icon .st-pulse { animation: none; }
+
+/* ── 角色色磁贴（components/iconkit/ToneTile.tsx）：角色色淡底 + 线性图标；
+ *    闲置灰度（安静）→ 宿主聚焦恢复角色色并轻轻抬起（弹簧），图标自带的部件微动效同时触发 ── */
+.tone-tile {
+  --tone: var(--pc-graphite);
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  border-radius: var(--r-lg);
+  background: color-mix(in oklab, var(--tone) 13%, var(--color-card));
+  color: var(--tone);
+  filter: grayscale(1);
+  opacity: 0.88;
+  transition: filter var(--dur-4) var(--ease-standard), opacity var(--dur-3) var(--ease-standard),
+    transform var(--dur-spring) var(--spring-bouncy), background var(--dur-3) var(--ease-standard);
+}
+:where(button, a, [role="button"], .ic-host, .tone-host):is(:hover, :focus-visible) .tone-tile,
+.tone-tile.is-lit {
+  filter: none;
+  opacity: 1;
+  background: color-mix(in oklab, var(--tone) 19%, var(--color-card));
+  transform: translateY(-1px) scale(1.04);
+}
+
+/* ── 文件类型图标（components/icons/FileIcon.tsx）── */
+.file-ic { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.file-ic > svg { display: block; }
+
+/* ── 项目图标（components/project/ProjectIcon.tsx）：项目色线条 + 双色调底层 ── */
+.proj-ic {
+  --proj-c: var(--pc-graphite);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--proj-c);
+}
+.proj-ic svg { display: block; }
+.proj-ic .ph-duo { opacity: 0.16; transition: opacity var(--dur-3) var(--ease-standard); }
+:where(button, [role="button"], [role="option"], .ic-host):is(:hover, :focus-visible) .proj-ic .ph-duo,
+:where(.active, .is-active, .current, [aria-selected="true"]) .proj-ic .ph-duo { opacity: 0.3; }
+/* 块状（名称输入框左侧 / 选择器预览）：项目色淡底 + 图标 */
+.proj-ic.is-tile {
+  border-radius: var(--r-ctl);
+  background: color-mix(in oklab, var(--proj-c) 14%, transparent);
+}
+
+/* 贴纸内部小动画：仅在聚焦（彩色）时播放，闲置保持安静 */
+@keyframes stk-blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+@keyframes stk-flame { 0%, 100% { transform: scaleY(1); } 50% { transform: scaleY(1.35); } }
+@keyframes stk-eye { 0%, 92%, 100% { transform: scaleY(1); } 95% { transform: scaleY(0.1); } }
+.sticker .stk-flame, .sticker .stk-eye { transform-box: fill-box; transform-origin: 50% 0%; }
+.sticker .stk-eye { transform-origin: center; }
+:where(button, a, [role="button"], .ic-host, .sticker-host):is(:hover, :focus-visible) .sticker .stk-blink,
+.sticker:hover .stk-blink { animation: stk-blink 1s steps(1) infinite; }
+:where(button, a, [role="button"], .ic-host, .sticker-host):is(:hover, :focus-visible) .sticker .stk-flame,
+.sticker:hover .stk-flame { animation: stk-flame 0.36s var(--ease-in-out) infinite; }
+:where(button, a, [role="button"], .ic-host, .sticker-host):is(:hover, :focus-visible) .sticker .stk-eye,
+.sticker:hover .stk-eye { animation: stk-eye 2.4s var(--ease-in-out) infinite; }
+:root[data-motion="reduced"] .sticker * { animation: none !important; }

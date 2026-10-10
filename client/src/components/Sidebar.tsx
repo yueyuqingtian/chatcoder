@@ -18,10 +18,12 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { MergeDialog } from "./worktree/MergeDialog";
 import { AppLogo } from "./AppLogo";
 import { MarkdownContent } from "./MarkdownContent";
-import { Input } from "./ui";
+import { Input, Segmented } from "./ui";
+import { ProjectIcon } from "./project/ProjectIcon";
+import { openProjectDialog } from "../store/projectDialog";
 import {
   IconCalendar, IconChevronDown, IconChevronLeft, IconChevronRight, IconPanelLeft,
-  IconFolder, IconFolderDynamic, IconLayers, IconSortDesc,
+  IconFolder, IconLayers, IconSortDesc, IconPencil,
   IconMoreHorizontal, IconPin, IconPlus, IconRefresh, IconSearch, IconSettings,
   IconFolderPlus, IconDownload, IconArchive, IconGitBranch, IconTrash, IconBox,
 } from "./icons";
@@ -218,7 +220,6 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
   const currentProjectId = useChatStore((s) => s.currentProjectId);
   const loadBootstrap = useChatStore((s) => s.loadBootstrap);
   const switchSession = useChatStore((s) => s.switchSession);
-  const createProject = useChatStore((s) => s.createProject);
   const deleteSession = useChatStore((s) => s.deleteSession);
   const renameSession = useChatStore((s) => s.renameSession);
   const forkSession = useChatStore((s) => s.forkSession);
@@ -422,10 +423,8 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
     });
   };
 
-  const handleNewProject = async () => {
-    const dir = await window.chatcoderAPI?.selectDirectory?.();
-    if (dir) { await createProject(dir); }
-  };
+  /** plan-20261009-ui U1：不再直接弹系统选目录——先打开项目弹窗（名称 / 文件夹 / 图标 / 颜色 / 索引） */
+  const handleNewProject = () => openProjectDialog({ mode: "create" });
 
   const handleNewTaskAt = (projectId: number) => {
     useDraftsStore.getState().patchDraft("home", { projectId });
@@ -569,7 +568,7 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
     return (
       <div className={`sb-project${isCurrent ? " current" : ""}`} onClick={() => toggleProject(p.id)}>
         <span className={`sb-project-chevron${open ? " open" : ""}`} aria-hidden="true"><IconChevronRight size={13} /></span>
-        {isWorktree ? <IconGitBranch size={14} /> : <IconFolderDynamic open={open} size={14} />}
+        {isWorktree ? <IconGitBranch size={14} /> : <ProjectIcon icon={p.icon} color={p.color} size={15} className="sb-project-icon" />}
         <span className="sb-project-name" title={isWorktree ? `${p.worktree_branch || ""} · ${p.path}` : p.path}>
           {p.name || shortPath(p.path)}
         </span>
@@ -586,6 +585,11 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
         </span>
         {projectMenuFor === p.id && (
           <div className="context-menu sb-context-menu" onClick={() => setProjectMenuFor(null)}>
+            {!isWorktree && (
+              <div className="context-menu-item" onClick={() => openProjectDialog({ mode: "edit", projectId: p.id })}>
+                <IconPencil size={13} /> 编辑项目
+              </div>
+            )}
             <div className="context-menu-item" onClick={() => window.chatcoderAPI?.openPath?.(p.path)}>{t("sidebar.ctx_open_in_folder")}</div>
             {isWorktree ? (
               <>
@@ -687,10 +691,17 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
         <>
           {/* 分组|项目切换 + 操作图标 */}
           <div className="sb-viewbar">
-            <div className="sb-view-switch">
-              <button className={view === "group" ? "active" : ""} onClick={() => setView("group")}><IconLayers size={12} /> {t("sidebar.view_group")}</button>
-              <button className={view === "project" ? "active" : ""} onClick={() => setView("project")}><IconFolder size={12} /> {t("sidebar.view_project")}</button>
-            </div>
+            {/* plan-20261009-ui U4：分组 / 项目切换改用统一胶囊分段控件（滑块随选中项平移） */}
+            <Segmented
+              size="sm"
+              value={view}
+              onChange={setView}
+              aria-label={t("sidebar.view_project")}
+              options={[
+                { value: "group", label: t("sidebar.view_group"), icon: <IconLayers size={13} /> },
+                { value: "project", label: t("sidebar.view_project"), icon: <IconFolder size={13} /> },
+              ]}
+            />
             <div className="sb-view-actions">
               <button className={"sb-icon-btn" + (sortMenuOpen ? " active" : "")} title={t("sidebar.sort_title")} onClick={() => setSortMenuOpen(!sortMenuOpen)}><IconSortDesc size={14} /></button>
               <button className="sb-icon-btn" title={t("sidebar.new_project")} onClick={handleNewProject}><IconFolderPlus size={14} /></button>

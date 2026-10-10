@@ -17,6 +17,56 @@ import * as RadixDialog from "@radix-ui/react-dialog";
 import { createContext, useCallback, useContext, useRef, useState, type ReactNode } from "react";
 import { IconX } from "../icons";
 
+/** plan-20261009-ui U4：弹窗正文的分组区块（参考图1/图2）——左侧小标题 + 右侧附加信息，
+ *  内容通常放进 InsetCard（白色圆角分组卡），弹窗底为浅灰，形成「灰底 + 白卡」的层次。 */
+export function DialogSection({ title, aside, children, className = "" }: {
+  title?: ReactNode;
+  aside?: ReactNode;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <section className={`ui-dsec ${className}`.trim()}>
+      {(title || aside) && (
+        <div className="ui-dsec-head">
+          {title ? <div className="ui-dsec-title">{title}</div> : <span />}
+          {aside ? <div className="ui-dsec-aside">{aside}</div> : null}
+        </div>
+      )}
+      {children}
+    </section>
+  );
+}
+
+/** 白色分组卡：行之间以细分隔线区分（InsetRow），圆角 12（卡片档） */
+export function InsetCard({ children, className = "" }: { children: ReactNode; className?: string }) {
+  return <div className={`ui-inset ${className}`.trim()}>{children}</div>;
+}
+
+/** 分组卡中的一行：图标 / 主文 / 次文 / 右侧操作 */
+export function InsetRow({ icon, title, desc, actions, onClick, className = "" }: {
+  icon?: ReactNode;
+  title: ReactNode;
+  desc?: ReactNode;
+  actions?: ReactNode;
+  onClick?: () => void;
+  className?: string;
+}) {
+  const body = (
+    <>
+      {icon ? <span className="ui-inset-row-icon">{icon}</span> : null}
+      <span className="ui-inset-row-main">
+        <span className="ui-inset-row-title">{title}</span>
+        {desc ? <span className="ui-inset-row-desc">{desc}</span> : null}
+      </span>
+      {actions ? <span className="ui-inset-row-actions">{actions}</span> : null}
+    </>
+  );
+  return onClick
+    ? <button type="button" className={`ui-inset-row is-clickable ${className}`.trim()} onClick={onClick}>{body}</button>
+    : <div className={`ui-inset-row ${className}`.trim()}>{body}</div>;
+}
+
 /** 弹窗内容节点（浮层容器）。null = 当前不在弹窗内，调用方回落到默认 body */
 const DialogContentHostContext = createContext<HTMLElement | null>(null);
 
@@ -109,6 +159,8 @@ export function Dialog({
           ref={setContentNode}
           className={`ui-dialog-content ${className}`.trim()}
           style={{ ["--ui-dialog-w" as string]: `${width}px` }}
+          // 无副标题时显式声明无描述，避免 Radix 的无障碍告警
+          {...(subtitle ? {} : { "aria-describedby": undefined })}
           onPointerDownOutside={(e) => { if (!dismissOnOverlay) e.preventDefault(); }}
           onInteractOutside={(e) => { if (!dismissOnOverlay) e.preventDefault(); }}
         >
@@ -121,8 +173,8 @@ export function Dialog({
               <div className="ui-dialog-actions">
                 {actions}
                 {closable && (
-                  <button type="button" className="ui-icon-btn" title="关闭 (Esc)" aria-label="关闭" onClick={onClose}>
-                    <IconX size={15} />
+                  <button type="button" className="ui-icon-btn ui-dialog-close" aria-label="关闭 (Esc)" onClick={onClose}>
+                    <IconX size={16} />
                   </button>
                 )}
               </div>

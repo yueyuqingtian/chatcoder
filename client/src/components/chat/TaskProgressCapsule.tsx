@@ -1,6 +1,5 @@
-/** TaskProgressCapsule —— 输入框上方的任务进度 / 文件变更悬浮胶囊（plan-282-1421 第12项）
- *
- * 取代旧的 `.task-strip`（贴在输入框上沿、与其合并边框、存在即常驻）：
+/** TaskProgressCapsule —— 输入框上方的任务进度 / 文件变更悬浮胶囊（plan-282-1421 第12项；
+ *  plan-20261009-ui U6 视觉重做，逻辑不变）。
  *
  * 【信息架构 · 智能动态】
  *   仅有未完成 AI 任务 → 只显进度；仅有未审核文件 → 只显变更；两者都有 → 分块显示；
@@ -8,25 +7,30 @@
  *
  * 【任务进度只由 AI 更新】
  *   数据源统一走 `chat/taskProgress.ts`（AI 的 todo 清单优先，其次引擎步骤），
- *   与右侧任务摘要面板同源，保证两处显示一致。
+ *   与右侧任务面板同源，保证两处显示一致。
  *
  * 【形态】
  *   悬浮在输入卡上方（absolute，不占布局、不贴边框）；hover / focus 弹浮层展示
- *   任务清单与文件变更（审核 / 查看 diff / 整组回滚）。
+ *   任务清单与文件变更（审核 / 查看 diff / 整组回滚）；点击钉住便于逐个审核。
  *
  * plan-282-1434（B2）：进度与变更拆成**两个独立浮层**——各自独立聚焦/展开/钉住。
- * plan-282-1441（#3）：三处修正——
- *   ① 聚焦**零视觉变化**（不再改边框色/底色）；
- *   ② 浮层提升到**胶囊容器级**并在**胶囊正上方居中**（旧实现相对"某一段"定位，
- *      且居中用的 transform 被入场动画的终态 `transform: none` 覆盖 → 偏移 + 文字发虚）；
- *   ③ 滚动条统一收细到 3px。
- */
+ * plan-282-1441（#3）：聚焦**零颜色与边框变化**；浮层在**胶囊正上方居中**（用独立的 translate 属性居中，
+ *   避免被入场动画终态的 transform 覆盖造成偏移与文字发虚）。
+ * plan-20261009-ui U6：
+ *   · 胶囊：16px 迷你进度环（进行中取信息蓝、被中断取警示色）+ `3/7` + 当前步骤 / 文件叠层图标 + 待审数 + 增删统计；
+ *   · 浮层：标准浮层规格（圆角 14 / 内边距 6）+ 头部细进度条；步骤用状态图标（状态切换有过渡）；
+ *     变更用文件类型图标，操作按钮统一 24px 并走 Tooltip（不再用原生 title）；
+ *   · 浮层进出场走 usePresence（有退场动画）。 */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useChatStore } from "../../store/chat";
 import { usePanelStore } from "../../store/panel";
 import { api, type FileChangeOut } from "../../api/client";
-import { IconCheck, IconChevronUp, IconExternalLink, IconFileText, IconCheckSquare, IconRotateCcw } from "../icons";
-import { FileBadge, splitFilePath } from "./FileBadge";
+import { IconCheck, IconChevronUp, IconExternalLink, IconFileStack, IconRingProgress, IconRotateCcw } from "../icons";
+import { Tooltip } from "../ui";
+import { usePresence } from "../ui/usePresence";
+import { FileIcon } from "../iconkit/FileIcon";
+import { StatusIcon, normalizeStatus } from "../iconkit/StatusIcon";
+import { splitFilePath } from "./FileBadge";
 import { useProgressRows } from "./taskProgress";
 
 interface ChangeGroup {
@@ -72,7 +76,10 @@ function usePopoverControl() {
     const onDown = (e: MouseEvent) => {
       // plan-282-1493：wrapRef.current 为 null（触发段已从 DOM 卸载，如内容清空后胶囊整体隐藏）
       // 时也视为“点击外部”，否则钉住状态会残留，段重新出现时浮层自动弹出。
-      if (!wrapRef.current || !wrapRef.current.contains(e.target as Node)) {
+      const t = e.target as Node;
+      if (!wrapRef.current || !wrapRef.current.contains(t)) {
+        // 浮层本体渲染在胶囊容器级（不在触发段内）：点在浮层里不算外部
+        if ((t as HTMLElement).closest?.(".tcap-pop")) return;
         setPinned(false);
         setOpen(false);
       }
@@ -94,6 +101,17 @@ function usePopoverControl() {
   return { open, setOpen, pinned, setPinned, cancelClose, scheduleClose, scheduleCloseUnlessPinned, wrapRef };
 }
 
+/** 增删统计（+N −N） */
+function Diff({ add, del }: { add: number; del: number }) {
+  if (add <= 0 && del <= 0) return null;
+  return (
+    <span className="tcap-diff">
+      {add > 0 && <span className="add">+{add}</span>}
+      {del > 0 && <span className="del">−{del}</span>}
+    </span>
+  );
+}
+
 export function TaskProgressCapsule({ onVisibilityChange }: {
   /** plan-282-1492：向 ChatPanel 上报"胶囊当前是否真的渲染了"——
    *  消息流据此按需让位（未出现不预占位；出现时用高度过渡把消息流顶上去）。 */
@@ -108,7 +126,7 @@ export function TaskProgressCapsule({ onVisibilityChange }: {
   const openPanel = usePanelStore((s) => s.openPanel);
   const openTab = usePanelStore((s) => s.openTab);
 
-  /** 与右侧任务摘要面板同源（#3）：两处显示的步骤必然一致。
+  /** 与右侧任务面板同源（#3）：两处显示的步骤必然一致。
    *  plan-282-1492：展示口径（是否还该显示、要不要标"进行中"）已收进该模块，
    *  胶囊不再自己判断运行态——避免两处再次分叉。 */
   const progress = useProgressRows();
@@ -156,12 +174,17 @@ export function TaskProgressCapsule({ onVisibilityChange }: {
   const currentTitle = displayRows.find((r) => r.status === "running")?.title
     ?? displayRows.find((r) => r.status !== "done")?.title
     ?? "";
+  const ringTone = displayRows.some((r) => r.status === "running")
+    ? "var(--info)"
+    : displayRows.some((r) => r.status === "interrupted") ? "var(--warning)" : "var(--text-2)";
 
   /** 两个独立浮层（B2）：各自开合。
-   *  plan-282-1441（#3）：浮层统一在胶囊**正上方居中**——定位基数是胶囊本身（见 .tc-pop 的
+   *  plan-282-1441（#3）：浮层统一在胶囊**正上方居中**——定位基数是胶囊本身（见 .tcap-pop 的
    *  `left: 50%` + `translate: -50% 0`），不再随触发分段偏移。 */
   const progressPop = usePopoverControl();
   const filesPop = usePopoverControl();
+  const progressPresence = usePresence(hasProgress && progressPop.open);
+  const filesPresence = usePresence(hasFiles && filesPop.open);
 
   // plan-282-1493：触发段消失（如审核完最后一个文件 / 任务收尾）时，同步清空对应浮层的
   // open/pinned 状态——两者是组件级 state，不随段一起消失；若残留，AI 再次写盘让段回归时
@@ -194,16 +217,16 @@ export function TaskProgressCapsule({ onVisibilityChange }: {
 
   return (
     <div
-      className="task-capsule-wrap"
+      className="tcap-wrap"
       onMouseLeave={() => {
         progressPop.scheduleCloseUnlessPinned();
         filesPop.scheduleCloseUnlessPinned();
       }}
     >
-      <div className="task-capsule">
+      <div className="tcap">
         {hasProgress && (
           <div
-            className="tc-seg-wrap"
+            className="tcap-seg-wrap"
             ref={progressPop.wrapRef}
             onMouseEnter={() => { progressPop.cancelClose(); progressPop.setOpen(true); }}
             onFocusCapture={() => { progressPop.cancelClose(); progressPop.setOpen(true); }}
@@ -214,10 +237,9 @@ export function TaskProgressCapsule({ onVisibilityChange }: {
           >
             <button
               type="button"
-              className={"tc-seg-btn" + (progressPop.open ? " is-open" : "")}
+              className={"tcap-seg" + (progressPop.open ? " is-open" : "")}
               aria-expanded={progressPop.open}
               aria-label={`任务进度 ${done}/${displayRows.length}`}
-              onMouseEnter={() => { progressPop.cancelClose(); progressPop.setOpen(true); }}
               onClick={() => {
                 // 点击 = 钉住（便于在右侧面板逐个审核）；再点或点外部 / Esc 解除
                 progressPop.cancelClose();
@@ -225,21 +247,20 @@ export function TaskProgressCapsule({ onVisibilityChange }: {
                 progressPop.setOpen(true);
               }}
             >
-              <IconCheckSquare size={12} />
-              <span className="tc-seg-num">{done}/{displayRows.length}</span>
-              {/* plan-64-294：不再挂原生 title——hover 本段已经弹出 .tc-pop（内含完整步骤清单与全文），
-                  再接管一个浮层就成两个提示框。 */}
-              {currentTitle && <span className="tc-seg-title">{currentTitle}</span>}
-              <IconChevronUp size={12} className="tc-seg-caret" />
+              <IconRingProgress value={done / displayRows.length} size={16} strokeWidth={2.2} indicatorColor={ringTone} trackColor="var(--border-strong)" />
+              <span className="tcap-num">{done}/{displayRows.length}</span>
+              {/* 不挂原生 title：hover 本段已经弹出浮层（含完整步骤清单与全文） */}
+              {currentTitle && <span className="tcap-title">{currentTitle}</span>}
+              <IconChevronUp size={12} className="tcap-caret" />
             </button>
           </div>
         )}
 
-        {hasProgress && hasFiles && <span className="tc-divider" />}
+        {hasProgress && hasFiles && <span className="tcap-divider" />}
 
         {hasFiles && (
           <div
-            className="tc-seg-wrap"
+            className="tcap-seg-wrap"
             ref={filesPop.wrapRef}
             onMouseEnter={() => { filesPop.cancelClose(); filesPop.setOpen(true); }}
             onFocusCapture={() => { filesPop.cancelClose(); filesPop.setOpen(true); }}
@@ -250,127 +271,116 @@ export function TaskProgressCapsule({ onVisibilityChange }: {
           >
             <button
               type="button"
-              className={"tc-seg-btn" + (filesPop.open ? " is-open" : "")}
+              className={"tcap-seg" + (filesPop.open ? " is-open" : "")}
               aria-expanded={filesPop.open}
               aria-label={`未审核变更 ${fileCount} 个文件`}
-              onMouseEnter={() => { filesPop.cancelClose(); filesPop.setOpen(true); }}
               onClick={() => {
                 filesPop.cancelClose();
                 filesPop.setPinned((p) => !p);
                 filesPop.setOpen(true);
               }}
             >
-              <IconFileText size={12} />
-              <span className="tc-seg-num">{fileCount} 待审</span>
-              {(fileAdds > 0 || fileDels > 0) && (
-                <span className="tc-seg-diff">
-                  {fileAdds > 0 && <span className="add">+{fileAdds}</span>}
-                  {fileDels > 0 && <span className="del">-{fileDels}</span>}
-                </span>
-              )}
-              <IconChevronUp size={12} className="tc-seg-caret" />
+              <IconFileStack size={15} />
+              <span className="tcap-num">{fileCount} 待审</span>
+              <Diff add={fileAdds} del={fileDels} />
+              <IconChevronUp size={12} className="tcap-caret" />
             </button>
           </div>
         )}
 
-      {/* 浮层放在**胶囊内部**渲染：胶囊即其包含块，`--tc-pop-x`（触发段中心相对胶囊的百分比）
-          才能正确换算成"胶囊正上方居中"（#3）。绝对定位不参与 flex 布局，不影响胶囊尺寸。 */}
-      {hasProgress && progressPop.open && (
-        <div className="tc-pop" role="dialog" aria-label="任务进度" onMouseEnter={progressPop.cancelClose}>
-          <div className="tc-pop-head">
-            <span>{useTodo ? "执行清单" : "任务步骤"}</span>
-            <span className="tc-pop-count">{done}/{displayRows.length}</span>
-          </div>
-          <div className="tc-pop-body">
-            {displayRows.map((row) => (
-              <div className={`tc-step ${row.status}`} key={row.key}>
-                <span className={`tc-step-dot ${row.status}`} />
-                <span className="tc-step-title" title={row.title}>{row.title}</span>
-                {row.note && <span className="tc-step-note" title={row.note}>{row.note}</span>}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {hasFiles && filesPop.open && (
-        <div className="tc-pop" role="dialog" aria-label="未审核变更" onMouseEnter={filesPop.cancelClose}>
-          <div className="tc-pop-head">
-            <span>未审核变更</span>
-            <span className="tc-pop-count">{fileCount} 文件</span>
-          </div>
-          <div className="tc-pop-body">
-            {groups.map((g) => (
-              <div className="tc-group" key={g.turnId}>
-                <div className="tc-group-head">
-                  <span className="tc-group-label" title={g.label}>{g.label}</span>
-                  <span className="tc-group-count">{g.files.length} 文件</span>
-                  {(g.additions > 0 || g.deletions > 0) && (
-                    <span className="tc-seg-diff">
-                      {g.additions > 0 && <span className="add">+{g.additions}</span>}
-                      {g.deletions > 0 && <span className="del">-{g.deletions}</span>}
-                    </span>
-                  )}
-                  <span className="tc-group-ops">
-                    <button
-                      type="button"
-                      className="tc-op"
-                      title="该组全部标记为已审核"
-                      onClick={() => reviewFiles(g.turnId, g.files.map((f) => f.path), true)}
-                    >
-                      <IconCheck size={11} />
-                    </button>
-                    <button
-                      type="button"
-                      className="tc-op danger"
-                      title="回滚该组变更（先预览确认）"
-                      onClick={() => void requestRollbackPreview(g.turnId)}
-                    >
-                      <IconRotateCcw size={11} />
-                    </button>
-                  </span>
+        {/* 浮层放在**胶囊内部**渲染：胶囊即其包含块，居中才是"胶囊正上方"（#3）。
+            绝对定位不参与 flex 布局，不影响胶囊尺寸。 */}
+        {hasProgress && progressPresence.mounted && (
+          <div
+            className="tcap-pop mo-pop"
+            data-state={progressPresence.state}
+            role="dialog"
+            aria-label="任务进度"
+            onMouseEnter={progressPop.cancelClose}
+          >
+            <div className="tcap-pop-head">
+              <span className="tcap-pop-title">{useTodo ? "执行清单" : "任务步骤"}</span>
+              <span className="tcap-pop-count">{done}/{displayRows.length}</span>
+            </div>
+            <div className="tcap-bar" aria-hidden><span style={{ width: `${(done / displayRows.length) * 100}%` }} /></div>
+            <div className="tcap-pop-body">
+              {displayRows.map((row) => (
+                <div className={`tcap-step is-${row.status}`} key={row.key}>
+                  <StatusIcon status={normalizeStatus(row.status)} size={15} />
+                  <Tooltip content={row.title} side="top" delay={500}>
+                    <span className="tcap-step-title">{row.title}</span>
+                  </Tooltip>
+                  {row.note && <span className="tcap-step-note">{row.note}</span>}
                 </div>
-                {g.files.map((f) => {
-                  const { dir, name } = splitFilePath(f.path);
-                  return (
-                    <div className="tc-file" key={f.path}>
-                      <FileBadge path={f.path} size={14} />
-                      <span className="tc-file-name" title={f.path} onClick={() => void openDiff(g.turnId, f)}>
-                        {name}
-                        {dir && <span className="tc-file-dir">{dir}</span>}
-                      </span>
-                      {(f.additions > 0 || f.deletions > 0) && (
-                        <span className="tc-seg-diff">
-                          {f.additions > 0 && <span className="add">+{f.additions}</span>}
-                          {f.deletions > 0 && <span className="del">-{f.deletions}</span>}
-                        </span>
-                      )}
-                      <span className="tc-group-ops">
-                        <button
-                          type="button"
-                          className="tc-op"
-                          title="标记为已审核"
-                          onClick={() => reviewFiles(g.turnId, [f.path], true)}
-                        >
-                          <IconCheck size={11} />
-                        </button>
-                        <button
-                          type="button"
-                          className="tc-op"
-                          title="查看 diff"
-                          onClick={() => void openDiff(g.turnId, f)}
-                        >
-                          <IconExternalLink size={11} />
-                        </button>
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
-        </div>
-      )}
+        )}
+
+        {hasFiles && filesPresence.mounted && (
+          <div
+            className="tcap-pop mo-pop"
+            data-state={filesPresence.state}
+            role="dialog"
+            aria-label="未审核变更"
+            onMouseEnter={filesPop.cancelClose}
+          >
+            <div className="tcap-pop-head">
+              <span className="tcap-pop-title">未审核变更</span>
+              <span className="tcap-pop-count">{fileCount} 个文件</span>
+            </div>
+            <div className="tcap-pop-body">
+              {groups.map((g) => (
+                <div className="tcap-group" key={g.turnId}>
+                  <div className="tcap-group-head">
+                    <Tooltip content={g.label} side="top" delay={500}>
+                      <span className="tcap-group-label">{g.label}</span>
+                    </Tooltip>
+                    <span className="tcap-group-count">{g.files.length} 个文件</span>
+                    <Diff add={g.additions} del={g.deletions} />
+                    <span className="tcap-ops">
+                      <Tooltip content="该组全部标记为已审核" side="top">
+                        <button type="button" className="tcap-op" aria-label="该组全部标记为已审核" onClick={() => reviewFiles(g.turnId, g.files.map((f) => f.path), true)}>
+                          <IconCheck size={13} />
+                        </button>
+                      </Tooltip>
+                      <Tooltip content="回滚该组变更（先预览确认）" side="top">
+                        <button type="button" className="tcap-op is-danger" aria-label="回滚该组变更" onClick={() => void requestRollbackPreview(g.turnId)}>
+                          <IconRotateCcw size={13} />
+                        </button>
+                      </Tooltip>
+                    </span>
+                  </div>
+                  {g.files.map((f) => {
+                    const { dir, name } = splitFilePath(f.path);
+                    return (
+                      <div className="tcap-file" key={f.path}>
+                        <FileIcon name={f.path} size={16} />
+                        <button type="button" className="tcap-file-name" onClick={() => void openDiff(g.turnId, f)}>
+                          <span className="tcap-file-base">{name}</span>
+                          {dir && <span className="tcap-file-dir">{dir}</span>}
+                        </button>
+                        <Diff add={f.additions ?? 0} del={f.deletions ?? 0} />
+                        <span className="tcap-ops tcap-file-ops">
+                          <Tooltip content="标记为已审核" side="top">
+                            <button type="button" className="tcap-op" aria-label="标记为已审核" onClick={() => reviewFiles(g.turnId, [f.path], true)}>
+                              <IconCheck size={13} />
+                            </button>
+                          </Tooltip>
+                          <Tooltip content="查看差异" side="top">
+                            <button type="button" className="tcap-op" aria-label="查看差异" onClick={() => void openDiff(g.turnId, f)}>
+                              <IconExternalLink size={13} />
+                            </button>
+                          </Tooltip>
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
