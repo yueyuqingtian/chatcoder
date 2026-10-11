@@ -1,7 +1,7 @@
 /** 拓展二级浮窗（plan-20261009-ui U2，参考图5）：搜索 + 条目列表 + 「管理 / 探索更多」。
  *  点击条目即插入对应引用 chip（与 / 菜单同一套引用语义），键盘上下选择、回车插入、Esc 返回上一级。 */
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Popover } from "../ui";
+import { Empty, Popover } from "../ui";
 import { IconArrowUpRight, IconPlug, IconPuzzle, IconSearch, IconSliders, IconSparkles } from "../icons";
 import { openExtensionMarket, openExtensionsManager, type ExtKind } from "../../store/navIntent";
 
@@ -127,7 +127,7 @@ export function ExtensionPicker({ open, kind, items, onPick, onClose, onLeaveMen
           </button>
         ))}
         {filtered.length === 0 && (
-          <div className="pop-empty">{items.length === 0 ? KIND_TEXT[kind].empty : `没有匹配「${query}」的${noun}`}</div>
+          <Empty size="sm" mood={items.length === 0 ? "calm" : "think"} title={items.length === 0 ? KIND_TEXT[kind].empty : `没有匹配「${query}」的${noun}`} />
         )}
       </div>
       <div className="pop-sep" />

@@ -17,6 +17,7 @@ import {
   IconMoreHorizontal, IconPanelLeft, IconPanelRight,
   IconChevronLeft, IconChevronRight, IconChevronDown, IconCheck,
   IconBrandExplorer, IconBrandVSCode, IconBrandIdea, IconBrandWindowsTerminal,
+  IconPencil, IconArchive, IconTrash,
 } from "./icons";
 
 /** plan-31-152 S5-2：窗口按钮级 no-drag 加固。
@@ -231,7 +232,7 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={() => setMenuOpen(false)}
               >
-                <div className="context-menu-item" onClick={() => setRenaming(session.title || "")}>{t("sidebar.ctx_rename")}</div>
+                <div className="context-menu-item" onClick={() => setRenaming(session.title || "")}><IconPencil size={13} /> {t("sidebar.ctx_rename")}</div>
                 {/* 归档限制：正在执行任务的会话不允许归档（与侧栏一致）——
                     执行中归档会让运行中的 turn 与它所属的会话被拆散。
                     会话未执行过任务（has_running 为假）时照常可用。 */}
@@ -243,9 +244,9 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page
                     if (session.has_running) return;
                     void api.updateSession(session.id, { status: "archived" }).then(() => loadBootstrap());
                   }}
-                >{t("sidebar.ctx_archive")}</div>
+                ><IconArchive size={13} /> {t("sidebar.ctx_archive")}</div>
                 <div className="context-menu-divider" />
-                <div className="context-menu-item danger" onClick={() => setConfirmDelete(true)}>{t("sidebar.ctx_delete")}</div>
+                <div className="context-menu-item danger" onClick={() => setConfirmDelete(true)}><IconTrash size={13} /> {t("sidebar.ctx_delete")}</div>
               </div>
             )}
           </div>

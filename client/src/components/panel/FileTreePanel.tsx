@@ -17,7 +17,7 @@ import { useChatStore } from "../../store/chat";
 import { usePanelStore } from "../../store/panel";
 import { IconArrowLeft, IconArrowToggle, IconChevronRight, IconCompress, IconExternalLink, IconRefresh, IconSearch, IconX, IconFolderTree } from "../icons";
 import { MarkdownContent } from "../MarkdownContent";
-import { Button, Segmented, Tooltip } from "../ui";
+import { Button, Empty, Segmented, Tooltip } from "../ui";
 import { FileIcon } from "../iconkit/FileIcon";
 import { ProjectIcon } from "../project/ProjectIcon";
 import { projectColorKey, projectIconKey } from "../project/projectMeta";
@@ -479,7 +479,9 @@ export function FileTreePanel({ visible = true }: { visible?: boolean }) {
               })}
             </div>
             {rows.length === 0 && (
-              <div className="ft-empty">{filter.trim() ? `没有匹配「${filter.trim()}」的文件` : tree.length === 0 ? "无项目内容" : ""}</div>
+              (filter.trim() || tree.length === 0) && (
+                <Empty size="sm" mood={filter.trim() ? "think" : "calm"} title={filter.trim() ? `没有匹配「${filter.trim()}」的文件` : "项目里还没有文件"} />
+              )
             )}
           </div>
         </div>

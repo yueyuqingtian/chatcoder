@@ -8,6 +8,7 @@ from app.persistence.models.debug_setting import DebugSetting
 from app.persistence.models.desktop_recipe import DesktopRecipe
 from app.persistence.models.exec_policy import ExecPolicyRule
 from app.persistence.models.hook import HookConfig
+from app.persistence.models.kiro_auth import KiroAuth
 from app.persistence.models.knowledge import KnowledgeBase, KnowledgeDoc
 from app.persistence.models.memory import MemoryEntry
 from app.persistence.models.message import Message, Session
@@ -61,6 +62,7 @@ __all__ = [
     "McpServer",
     "SubagentProfile",
     "Ta3Auth",
+    "KiroAuth",
     "WorkBuddyAuth",
     "ToolCall",
     "TraeAuth",

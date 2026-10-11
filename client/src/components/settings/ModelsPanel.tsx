@@ -15,13 +15,15 @@ import {
   api, type ModelOut, type ProviderCredentialOut, type ProviderOut,
 } from "../../api/client";
 import { useChatStore } from "../../store/chat";
-import { IconRefresh, IconPlus, IconX, IconTrash, IconCpu, IconCheck, IconPencil, IconEye, IconEyeOff } from "../icons";
+import { IconRefresh, IconPlus, IconX, IconTrash, IconPencil, IconEye, IconEyeOff } from "../icons";
 import { Modal } from "../Modal";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { Checkbox, Input, Select } from "../ui";
+import { Button, Checkbox, Collapse, Empty, IconButton, Input, PageActions, Segmented, Select, Switch, Tag } from "../ui";
 import { Sw } from "./shared";
 import { Ta3QuotaSection } from "./Ta3QuotaSection";
+import { KiroQuotaSection } from "./KiroQuotaSection";
 import { ProviderSideList } from "./ProviderSideList";
+import { ProviderAvatar } from "./ProviderAvatar";
 
 /** 非阻塞提示：Electron 中 window.alert 是原生模态框，关闭后会破坏窗口焦点
  * （返回会话后输入框无法聚焦），统一改用全局 Toast。 */
@@ -33,12 +35,15 @@ const REASONING_OPTS = ["none", "minimal", "low", "medium", "high", "xhigh", "ma
 const PROVIDER_OPTS = ["openai", "anthropic", "commandcode", "openai_compatible", "azure_openai", "google", "deepseek", "qwen", "zhipu", "moonshot", "yi", "baichuan", "minimax", "custom"];
 
 /** 账号登录类供应商（无 Base URL/Key，走 OAuth） */
-const OAUTH_FORMATS = new Set(["ta3", "workbuddy", "trae"]);
+const OAUTH_FORMATS = new Set(["ta3", "workbuddy", "trae", "kiro"]);
 const OAUTH_DEFAULT_BASE: Record<string, string> = {
   ta3: "https://lc.yinhaiyun.com/newcoder",
   workbuddy: "https://copilot.tencent.com",
   trae: "https://trae-api-cn.mchost.guru",
   commandcode: "https://api.commandcode.ai",
+  // plan-116-456：kiro 的 Base URL 存端点地址（默认为 us-east-1 区域端点；
+  // 留空时后端也按区域自动推导，但显式存值界面与「测试连接」都更直观）
+  kiro: "https://q.us-east-1.amazonaws.com",
 };
 
 const API_FORMAT_LABEL: Record<string, string> = {
@@ -48,6 +53,7 @@ const API_FORMAT_LABEL: Record<string, string> = {
   ta3: "ta3（Ta+3 牛码）",
   workbuddy: "workbuddy（腾讯 CodeBuddy）",
   trae: "trae（TRAE SOLO）",
+  kiro: "kiro（AWS Kiro）",
 };
 
 /** 代理模式选项（plan-248-1258 M2.3） */
@@ -77,6 +83,8 @@ function statusDotClass(p: ProviderOut) {
 function ProviderFormModal({ open, editing, onClose, onSaved }: { open: boolean; editing: ProviderOut | null; onClose: () => void; onSaved: () => void }) {
   const [form, setForm] = useState({ name: "", base_url: "", api_key: "", api_format: "openai", is_active: true, proxy_mode: "inherit", proxy_url: "" });
   const isOAuthFormat = OAUTH_FORMATS.has(form.api_format);
+  // kiro 虽为账号登录型，但 base_url 是「端点覆盖」语义（可留空，留空按区域推导）
+  const isKiro = form.api_format === "kiro";
   useEffect(() => {
     if (editing) {
       setForm({
@@ -91,9 +99,14 @@ function ProviderFormModal({ open, editing, onClose, onSaved }: { open: boolean;
     if (!form.name.trim()) return;
     if (!isOAuthFormat && !form.base_url.trim()) return;
     try {
-      const finalBase = form.api_format === "commandcode" && !form.base_url.trim()
+      const trimmedBase = form.base_url.trim();
+      const finalBase = form.api_format === "commandcode" && !trimmedBase
         ? OAUTH_DEFAULT_BASE.commandcode
-        : (isOAuthFormat ? OAUTH_DEFAULT_BASE[form.api_format] : form.base_url.trim());
+        : isKiro
+          ? (trimmedBase || OAUTH_DEFAULT_BASE.kiro)
+          : isOAuthFormat
+            ? OAUTH_DEFAULT_BASE[form.api_format]
+            : trimmedBase;
       const data: Record<string, unknown> = {
         name: form.name.trim(),
         base_url: finalBase,
@@ -126,10 +139,12 @@ function ProviderFormModal({ open, editing, onClose, onSaved }: { open: boolean;
       <div className="settings-modal-form" style={{ padding: 18 }}>
         <div className="settings-modal-form-row"><label>供应商名称</label><Input placeholder="如 Ta+3 牛码" value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} /></div>
         <div className="settings-modal-form-row"><label>API 格式</label><Select value={form.api_format} onChange={(v) => setForm((p) => ({ ...p, api_format: v, base_url: v === "commandcode" && !p.base_url ? OAUTH_DEFAULT_BASE.commandcode : p.base_url }))} options={Object.entries(API_FORMAT_LABEL).map(([v, l]) => ({ value: v, label: l }))} aria-label="API 格式" /></div>
-        {!isOAuthFormat && <div className="settings-modal-form-row"><label>Base URL</label><Input placeholder={form.api_format === "commandcode" ? "https://api.commandcode.ai" : "https://.../v1"} value={form.base_url} onChange={(e) => setForm((p) => ({ ...p, base_url: e.target.value }))} /></div>}
+        {(!isOAuthFormat || isKiro) && <div className="settings-modal-form-row"><label>{isKiro ? "端点覆盖 / 区域（可选）" : "Base URL"}</label><Input placeholder={isKiro ? "留空默认 us-east-1；可填区域名（如 eu-central-1）或完整端点 URL" : form.api_format === "commandcode" ? "https://api.commandcode.ai" : "https://.../v1"} value={form.base_url} onChange={(e) => setForm((p) => ({ ...p, base_url: e.target.value }))} /></div>}
         {!isOAuthFormat && <div className="settings-modal-form-row"><label>API Key {editing && "(留空不修改)"}</label><Input placeholder={form.api_format === "commandcode" ? "user_..." : "sk-..."} type="password" value={form.api_key} onChange={(e) => setForm((p) => ({ ...p, api_key: e.target.value }))} /></div>}
         {form.api_format === "commandcode" && <div className="models-hint">CommandCode 直连模式，API Key 为以 user_ 开头的密钥（可从 ~/.commandcode/auth.json 或 commandcode.ai/studio 获取）。</div>}
-        {isOAuthFormat && <div className="models-hint">{form.api_format === "ta3"
+        {isOAuthFormat && <div className="models-hint">{form.api_format === "kiro"
+          ? "kiro 类型需先在 Kiro IDE/CLI 中登录；保存后在详情面板点击「登录账号」导入本机登录态。默认使用 us-east-1 端点（模型最全），可在「端点覆盖」中改走其它区域或反代。"
+          : form.api_format === "ta3"
           ? "ta3 类型使用账号登录获取模型，服务端地址已内置（lc.yinhaiyun.com/newcoder）；保存后在详情面板点击「登录账号」。"
           : form.api_format === "workbuddy"
             ? "workbuddy 类型使用账号登录获取模型，服务端地址已内置（copilot.tencent.com）；保存后在详情面板点击「登录账号」，支持登录多个账号。"
@@ -442,7 +457,7 @@ export function ModelsPanel() {
 
   // 选中供应商 → 拉取其模型与凭据。切换时保留旧详情直到新详情准备好，
   // 避免双栏右侧空白/高度跳变；requestId 防止慢响应回写到错误供应商。
-  const loadDetail = useCallback(async (p: ProviderOut | null, force = false) => {
+  const loadDetail = useCallback(async (p: ProviderOut | null, force = false, silent = false) => {
     const requestId = ++detailRequestId.current;
     if (!p) {
       setDetailLoading(false);
@@ -458,7 +473,8 @@ export function ModelsPanel() {
       setDetailLoading(false);
       return;
     }
-    setDetailLoading(true);
+    // plan-114-449：silent 刷新（保存后的后台同步）不切加载态，避免每次修改都闪一下
+    if (!silent) setDetailLoading(true);
     setDetailProviderId(p.id);
     try {
       const [modelsResult, credentialsResult] = await Promise.allSettled([
@@ -477,6 +493,31 @@ export function ModelsPanel() {
   }, []);
   useEffect(() => { void loadDetail(selected); }, [selectedId, loadDetail]);
 
+  // plan-116-456：kiro 的 Base URL 允许留空（端点按区域推导），但空值会让用户
+  // 困惑（实测反馈），通用路径（如「测试连接」）也无从下手。详情打开且为空时按
+  // 账号实际 region 补写内置端点；每供应商只自动补一次，用户手改的值不再干预。
+  const kiroBaseInitRef = useRef<Set<number>>(new Set());
+  useEffect(() => {
+    if (!selected || detailLoading) return;
+    if (selected.api_format !== "kiro" || (selected.base_url || "").trim()) return;
+    const pid = selected.id;
+    if (kiroBaseInitRef.current.has(pid)) return;
+    kiroBaseInitRef.current.add(pid);
+    void (async () => {
+      let region = "";
+      try {
+        const st = await api.kiroLoginStatus(pid);
+        region = (st.region || "").trim();
+      } catch { /* 未登录/请求失败：回落默认区域 */ }
+      const base = region ? `https://q.${region}.amazonaws.com` : OAUTH_DEFAULT_BASE.kiro;
+      try {
+        const updated = await api.updateProvider(pid, { base_url: base });
+        setProviders((prev) => prev.map((p) => (p.id === pid ? { ...p, ...updated } : p)));
+        await loadDetail(updated, true, true);
+      } catch { /* 回填失败不打扰：端点仍按区域自动推导，功能不受影响 */ }
+    })();
+  }, [selected, detailLoading, loadDetail]);
+
   // 切换供应商时重置「编辑名称 / 显示密钥 / 展开多凭据」三个临时态，避免串到下一家
   useEffect(() => {
     setRenamingName(false);
@@ -485,11 +526,14 @@ export function ModelsPanel() {
   }, [selectedId]);
 
   const patchProvider = async (id: number, data: Record<string, unknown>) => {
+    // plan-114-449：乐观更新——先改本地状态让界面即时反馈，再静默同步详情；失败时回滚
+    const prevProviders = providers;
+    setProviders((prev) => prev.map((p) => (p.id === id ? { ...p, ...data } as ProviderOut : p)));
     try {
       const updated = await api.updateProvider(id, data);
       setProviders((prev) => prev.map((p) => (p.id === id ? { ...p, ...updated } : p)));
-      if (selectedId === id) await loadDetail(updated, true);
-    } catch (e) { notify(String(e)); }
+      if (selectedId === id) await loadDetail(updated, true, true);
+    } catch (e) { setProviders(prevProviders); notify(String(e)); }
   };
 
   // ── workbuddy 积分：余额查询结果直接回写 UI，避免写引擎异步落库造成刷新后仍为空 ──
@@ -571,10 +615,12 @@ export function ModelsPanel() {
     try {
       const start = isWorkbuddy ? await api.workbuddyLoginStart(p.id)
         : fmt === "ta3" ? await api.ta3LoginStart(p.id)
-          : await api.traeLoginStart(p.id);
+          : fmt === "kiro" ? await api.kiroLoginStart(p.id)
+            : await api.traeLoginStart(p.id);
       const url = (start as { auth_url?: string; authorize_url?: string }).auth_url || (start as { authorize_url?: string }).authorize_url;
       const statusOf = async () => isWorkbuddy ? api.workbuddyLoginStatus(p.id)
-        : fmt === "ta3" ? api.ta3LoginStatus(p.id) : api.traeLoginStatus(p.id);
+        : fmt === "ta3" ? api.ta3LoginStatus(p.id)
+          : fmt === "kiro" ? api.kiroLoginStatus(p.id) : api.traeLoginStatus(p.id);
       const onLoggedIn = async (label?: string) => {
         setAuthStatus((s) => ({ ...s, [p.id]: { phase: "done", label: label || "已登录" } }));
         if (isWorkbuddy) {
@@ -591,11 +637,17 @@ export function ModelsPanel() {
         await onLoggedIn(wStart.account_label || (wStart.account as Record<string, string>)?.label);
         return;
       }
-      if (!url) throw new Error(start.status === "failed" ? "登录失败" : "未获取到授权地址");
+      // 明确的失败（含 kiro 导入失败）直接回显服务端原因，不再当成「没有授权地址」
+      if (start.status === "failed") {
+        const msg = (start as { error?: string | null }).error || "登录失败";
+        setAuthStatus((s) => ({ ...s, [p.id]: { phase: "failed", error: msg } }));
+        return;
+      }
+      if (!url) throw new Error("未获取到授权地址");
       const w = window as Window & { chatcoderAPI?: { openExternal?: (u: string) => Promise<unknown> } };
       if (w.chatcoderAPI?.openExternal) await w.chatcoderAPI.openExternal(url);
       else window.open(url, "_blank");
-      const deadline = Date.now() + ((start.expires_in ?? 300) + 10) * 1000;
+      const deadline = Date.now() + (((start as { expires_in?: number }).expires_in ?? 300) + 10) * 1000;
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 2000));
         const st = await statusOf();
@@ -619,7 +671,8 @@ export function ModelsPanel() {
     setSyncBusy(p.id);
     try {
       const r = p.api_format === "workbuddy" ? await api.workbuddySync(p.id)
-        : p.api_format === "ta3" ? await api.ta3Sync(p.id) : await api.traeSync(p.id);
+        : p.api_format === "ta3" ? await api.ta3Sync(p.id)
+          : p.api_format === "kiro" ? await api.kiroSync(p.id) : await api.traeSync(p.id);
       if (reloadList) await load();
       await loadDetail(p, true);
       if (showMsg) notify(`同步完成：${r.synced} 个模型`);
@@ -642,6 +695,7 @@ export function ModelsPanel() {
         try {
           if (p.api_format === "workbuddy") await api.workbuddyLogout(p.id, cred?.id);
           else if (p.api_format === "ta3") await api.ta3Logout(p.id);
+          else if (p.api_format === "kiro") await api.kiroLogout(p.id);
           else await api.traeLogout(p.id);
           await load();
           await loadDetail(p, true);
@@ -653,17 +707,12 @@ export function ModelsPanel() {
 
   return (
     <div className="models-page">
-      <div className="models-head">
-        <div>
-          <div className="models-head-title">模型设置</div>
-          <div className="models-head-sub">管理自定义模型供应商，配置后可随时在聊天时切换使用。</div>
-        </div>
-        {/* S18（plan-41-197b）：右上只保留刷新——移除「+ 独立模型」入口，
-            模型统一从供应商详情内添加（先加供应商，再加模型）。 */}
-        <div className="models-head-actions">
-          <button className="btn btn-ghost btn-sm" title="刷新" onClick={load}><IconRefresh size={13} /></button>
-        </div>
-      </div>
+      {/* plan-114-450：页头交还 PageShell（统一标题字号与间距），页面改为填充式——卡片撑满剩余高度，
+          左右两列各自在卡片内滚动（此前 80vh 定高，滚动条悬在卡片内侧无留白，用户觉得怪异） */}
+      <PageActions>
+        <Button variant="secondary" size="sm" icon={<IconRefresh size={13} />} onClick={load}>刷新</Button>
+        <Button variant="primary" size="sm" icon={<IconPlus size={13} />} onClick={() => { setEditingProvider(null); setShowProviderForm(true); }}>添加供应商</Button>
+      </PageActions>
 
       <div className="models-body">
         {/* 左：供应商列表（plan-41-225：无分组标题 + 拖拽排序 + 末尾添加入口） */}
@@ -682,8 +731,9 @@ export function ModelsPanel() {
         <section className="models-detail">
           {!selected ? (
             <div className="models-detail-empty">
-              <IconCpu size={28} />
-              <div>选择左侧供应商以查看配置；还没有供应商时，点击左下「添加供应商」开始。</div>
+              <Empty size="lg" title={providers.length ? "选择左侧供应商查看配置" : "还没有模型供应商"}
+                desc="添加供应商并填好 URL / Key，嗒嗒就能用它来回答你"
+                action={<Button variant="primary" size="sm" icon={<IconPlus size={13} />} onClick={() => { setEditingProvider(null); setShowProviderForm(true); }}>添加供应商</Button>} />
             </div>
           ) : (
             <>
@@ -691,8 +741,11 @@ export function ModelsPanel() {
                 <div className="models-detail-loading" aria-live="polite">正在加载供应商配置…</div>
               )}
               <div className="models-detail-head">
+                <ProviderAvatar name={selected.name} size={36} muted={!selected.is_active} />
                 {/* plan-41-225（右列照图）：名称常态是「标题 + 铅笔」，点铅笔才进入编辑——
                     常驻输入框会让人误以为必须立刻改；「像标题、点铅笔才编辑」是通用心智。 */}
+                <div className="models-detail-title">
+                <div className="models-detail-title-row">
                 {renamingName ? (
                   <input
                     className="models-name-input"
@@ -711,23 +764,20 @@ export function ModelsPanel() {
                   />
                 ) : (
                   <>
-                    <span className="models-detail-name" title={selected.name}>{selected.name}</span>
-                    <button className="ui-icon-btn size-xs" aria-label="重命名供应商" onClick={() => setRenamingName(true)}>
-                      <IconPencil size={13} />
-                    </button>
+                    <span className="models-detail-name">{selected.name}</span>
+                    <IconButton size="xs" title="重命名" icon={<IconPencil size={13} />} onClick={() => setRenamingName(true)} />
                   </>
                 )}
-                {/* 状态双通道：胶囊 = 当前状态（带勾），文字 = 可执行动作——
-                    此前两个元素都在描述状态，用户不知道点哪个。 */}
-                <span className={"models-status-pill" + (selected.is_active ? " on" : "")}>
-                  {selected.is_active && <IconCheck size={11} />}
-                  {selected.is_active ? "启用" : "已禁用"}
-                </span>
-                <button className="models-link" onClick={() => patchProvider(selected.id, { is_active: !selected.is_active })}>
-                  {selected.is_active ? "禁用" : "启用"}
-                </button>
-                <div style={{ marginLeft: "auto" }}>
-                  <button className="btn btn-ghost btn-xs" aria-label="删除供应商" title="删除供应商" onClick={() => setConfirmDialog({
+                </div>
+                <div className="models-detail-sub">
+                  {API_FORMAT_LABEL[selected.api_format] || selected.api_format} · {providerModels.length} 个模型
+                  {!selected.is_active && " · 已禁用"}
+                </div>
+                </div>
+                {/* plan-114-450：启用状态改为一个开关（此前「状态胶囊 + 文字链接」两个元素表达同一件事） */}
+                <div className="models-detail-actions">
+                  <Switch checked={selected.is_active} onChange={(v) => patchProvider(selected.id, { is_active: v })} aria-label="启用该供应商" />
+                  <IconButton size="sm" tone="danger" title="删除供应商" icon={<IconTrash size={14} />} onClick={() => setConfirmDialog({
                     open: true,
                     title: "删除供应商",
                     message: `删除供应商「${selected.name}」及其下所有模型与凭据？`,
@@ -736,24 +786,27 @@ export function ModelsPanel() {
                       closeConfirm();
                       try { await api.deleteProvider(selected.id); await load(); } catch (e) { notify(String(e)); }
                     },
-                  })}><IconTrash size={13} /></button>
+                  })} />
                 </div>
               </div>
 
-              {/* 基本信息 */}
-              <div className="models-field">
+              {/* plan-91-393：连接信息（Base URL / API 格式 / Key）归入同一分组卡片，与账号、额度、模型列表同级 */}
+              {/* plan-114-450：连接区改为「左标签 / 右控件」行（参照 Qoder 设置行），三项对齐在同一条竖线上 */}
+              <div className="models-section models-sec-conn">
+                <div className="models-section-title">连接</div>
+              <div className="models-field is-row">
                 <label>Base URL</label>
                 {/* key=provider.id：defaultValue 不随 props 更新，切换供应商时必须重挂载，
                     否则残留上一个供应商的 URL（OAuth 类禁用态下尤其误导） */}
                 <Input
                   key={`base-${selected.id}`}
                   defaultValue={selected.base_url || ""}
-                  disabled={OAUTH_FORMATS.has(selected.api_format)}
+                  disabled={OAUTH_FORMATS.has(selected.api_format) && selected.api_format !== "kiro"}
                   onBlur={(e) => { if (e.target.value.trim() !== (selected.base_url || "")) patchProvider(selected.id, { base_url: e.target.value.trim() }); }}
                   aria-label="Base URL"
                 />
               </div>
-              <div className="models-field">
+              <div className="models-field is-row">
                 <label>API 格式</label>
                 <Select
                   value={selected.api_format}
@@ -763,28 +816,76 @@ export function ModelsPanel() {
                 />
               </div>
 
+              {/* Key（plan-41-225 右列照图）：主区一个密码框 —— 填 Key 是绝大多数用户的唯一动作；
+                  多 Key/账号轮转是既有能力，收进下方「管理多个…」入口，保持界面专注。 */}
+              {!isOAuth && (
+                <div className="models-field is-row">
+                  <label>API Key</label>
+                  <div className="models-field-ctl">
+                    <Input
+                      key={`key-${selected.id}-${primaryCred?.id ?? "new"}`}
+                      type={showKey ? "text" : "password"}
+                      defaultValue={primaryCred?.api_key_preview || ""}
+                      placeholder="sk-..."
+                      wrapClassName="models-key-wrap"
+                      suffix={
+                        <IconButton size="sm" title={showKey ? "隐藏密钥" : "显示密钥"}
+                          icon={showKey ? <IconEyeOff size={14} /> : <IconEye size={14} />}
+                          onClick={() => setShowKey((v) => !v)} />
+                      }
+                      onBlur={async (e) => {
+                        const v = e.target.value.trim();
+                        // 未改动（含仍是后端返回的掩码）→ 不写库，避免把掩码当成真 key 保存
+                        if (!v || v === (primaryCred?.api_key_preview || "")) return;
+                        try {
+                          if (primaryCred) await api.updateProviderCredential(primaryCred.id, { api_key: v });
+                          else await api.createProviderCredential(selected.id, { label: "默认凭据", api_key: v, priority: 0, is_active: true } as never);
+                          await loadDetail(selected, true, true);
+                          await load();
+                        } catch (err) { notify(String(err)); }
+                      }}
+                      aria-label={`${selected.name} key`}
+                    />
+                  <button className="models-cred-toggle" onClick={() => setShowAllCreds((v) => !v)}>
+                    {showAllCreds ? "收起多 Key 管理" : credentials.length > 1 ? `管理多个 Key（${credentials.length}）` : "添加更多 Key 轮换使用"}
+                  </button>
+                  </div>
+                </div>
+              )}
+
+              </div>
+
               {/* 账号登录型供应商：登录 / 同步 / 退出 */}
               {isOAuth && (
                 <div className="models-section">
                   <div className="models-section-title">账号</div>
-                  <div className="models-inline-row">
-                    <span className="settings-resource-tag">{selected.auth_status === "logged_in" ? `已登录${selected.account_label ? `：${selected.account_label}` : ""}` : "未登录"}</span>
+                  {/* plan-91-393：账号区改为「头像 + 名称 + 状态角标」卡片，操作按钮靠右成组，不再与标签挤在一行 */}
+                  <div className="acct-card">
+                    <span className="acct-avatar" aria-hidden>{(selected.account_label || selected.name || "?").slice(0, 1).toUpperCase()}</span>
+                    <span className="acct-meta">
+                      <span className="acct-name">{selected.auth_status === "logged_in" ? (selected.account_label || "已登录账号") : "尚未登录"}</span>
+                      <span className={"acct-state" + (selected.auth_status === "logged_in" ? " is-on" : "")}>{selected.auth_status === "logged_in" ? "已连接" : "未登录"}</span>
+                    </span>
+                    <span className="acct-actions">
                     {/* plan-271-1364：workbuddy 支持多账号——按钮语义为「登录新账号」，
                         成功后自动新增一条账号凭据；ta3/trae 保持原单账号文案与行为 */}
-                    <button className="btn btn-ghost btn-xs" onClick={() => handleLogin(selected)} disabled={authStatus[selected.id]?.phase === "pending"}>
+                    <button className="btn btn-secondary btn-sm" onClick={() => handleLogin(selected)} disabled={authStatus[selected.id]?.phase === "pending"}>
                       {authStatus[selected.id]?.phase === "pending" ? "登录中…"
                         : selected.api_format === "workbuddy" ? "登录新账号"
                           : selected.auth_status === "logged_in" ? "重新登录" : "登录账号"}
                     </button>
                     {selected.auth_status === "logged_in" && (
                       <>
-                        <button className="btn btn-ghost btn-xs" onClick={() => handleSync(selected)} disabled={syncBusy === selected.id}>{syncBusy === selected.id ? "同步中…" : "同步模型"}</button>
+                        <button className="btn btn-secondary btn-sm" onClick={() => handleSync(selected)} disabled={syncBusy === selected.id}>{syncBusy === selected.id ? "同步中…" : "同步模型"}</button>
                         {/* 多账号：workbuddy 的「退出」逐账号在凭据行内操作，此处保留整体退出 */}
-                        <button className="btn btn-ghost btn-xs" onClick={() => handleLogout(selected)}>{selected.api_format === "workbuddy" ? "退出全部" : "退出"}</button>
+                        <button className="btn btn-ghost btn-sm" onClick={() => handleLogout(selected)}>{selected.api_format === "workbuddy" ? "退出全部" : "退出"}</button>
                       </>
                     )}
-                    {authStatus[selected.id]?.phase === "failed" && <span className="models-err">{authStatus[selected.id]?.error}</span>}
+                    </span>
                   </div>
+                  <Collapse open={authStatus[selected.id]?.phase === "failed"}>
+                    <div className="models-err" style={{ marginTop: 6 }}>{authStatus[selected.id]?.error}</div>
+                  </Collapse>
                   {selected.api_format === "workbuddy" && (
                     <div className="models-hint" style={{ padding: 0, marginTop: 6 }}>
                       点「登录新账号」可累积多个账号，旧账号会保留并参与轮转；每个账号单独显示积分与签到。
@@ -796,48 +897,12 @@ export function ModelsPanel() {
               {/* ta3 额度与用量（plan-270-1358：对齐 Ta+3 v0.4.6 额度查看） */}
               {selected.api_format === "ta3" && <Ta3QuotaSection provider={selected} />}
 
-              {/* Key（plan-41-225 右列照图）：主区一个密码框 —— 填 Key 是绝大多数用户的唯一动作；
-                  多 Key/账号轮转是既有能力，收进下方「管理多个…」入口，保持界面专注。 */}
-              {!isOAuth && (
-                <div className="models-field">
-                  <label>{selected.name} key</label>
-                  <div className="models-key-row">
-                    <Input
-                      key={`key-${selected.id}-${primaryCred?.id ?? "new"}`}
-                      type={showKey ? "text" : "password"}
-                      defaultValue={primaryCred?.api_key_preview || ""}
-                      placeholder="sk-..."
-                      onBlur={async (e) => {
-                        const v = e.target.value.trim();
-                        // 未改动（含仍是后端返回的掩码）→ 不写库，避免把掩码当成真 key 保存
-                        if (!v || v === (primaryCred?.api_key_preview || "")) return;
-                        try {
-                          if (primaryCred) await api.updateProviderCredential(primaryCred.id, { api_key: v });
-                          else await api.createProviderCredential(selected.id, { label: "默认凭据", api_key: v, priority: 0, is_active: true } as never);
-                          await loadDetail(selected, true);
-                          await load();
-                        } catch (err) { notify(String(err)); }
-                      }}
-                      aria-label={`${selected.name} key`}
-                    />
-                    <button
-                      className="ui-icon-btn size-xs"
-                      aria-label={showKey ? "隐藏密钥" : "显示密钥"}
-                      onClick={() => setShowKey((v) => !v)}
-                    >
-                      {showKey ? <IconEyeOff size={13} /> : <IconEye size={13} />}
-                    </button>
-                  </div>
-                  {credentials.length > 1 && (
-                    <button className="models-cred-toggle" onClick={() => setShowAllCreds((v) => !v)}>
-                      {showAllCreds ? "收起多 Key 管理" : `管理多个 Key / 账号（${credentials.length}）`}
-                    </button>
-                  )}
-                </div>
-              )}
+              {/* kiro 剩余积分（plan-116-456：与 Kiro IDE 积分计同源） */}
+              {selected.api_format === "kiro" && <KiroQuotaSection provider={selected} />}
 
-              {/* 凭据管理（多 Key / 多账号）：账号登录类常驻；其余类型由上方入口展开 */}
-              {(isOAuth || showAllCreds) && (
+              {/* 凭据管理（多 Key / 多账号）：账号登录类常驻；其余类型由上方入口展开。
+                  plan-114-449：用 Collapse 做高度过渡，点「管理多个 Key」不再整块跳出 */}
+              <Collapse open={isOAuth || showAllCreds}>
               <div className="models-section">
                 <div className="models-section-title">
                   {credentialsSectionTitle(selected.api_format)}
@@ -846,19 +911,19 @@ export function ModelsPanel() {
                   )}
                 </div>
                 {/* plan-271-1364 M3.2: 取用策略切换（多凭据时才显示） */}
-                {credentials.length > 1 && (
+                <Collapse open={credentials.length > 1}>
                   <div className="models-inline-row" style={{ marginBottom: 8 }}>
                     <span className="models-hint" style={{ padding: 0 }}>取用策略</span>
-                    {STRATEGY_OPTS.map((o) => (
-                      <button
-                        key={o.value}
-                        className={"settings-pill" + (((selected.credential_strategy || "sticky") === o.value) ? " active" : "")}
-                        title={o.desc}
-                        onClick={() => patchProvider(selected.id, { credential_strategy: o.value })}
-                      >{o.label}</button>
-                    ))}
+                    <Segmented
+                      size="sm"
+                      value={selected.credential_strategy || "sticky"}
+                      onChange={(v) => patchProvider(selected.id, { credential_strategy: v })}
+                      aria-label="凭据取用策略"
+                      options={STRATEGY_OPTS.map((o) => ({ value: o.value, label: o.label }))}
+                    />
+                    <span className="models-hint" style={{ padding: 0 }}>{STRATEGY_OPTS.find((o) => o.value === (selected.credential_strategy || "sticky"))?.desc}</span>
                   </div>
-                )}
+                </Collapse>
                 <div className="models-cred-list">
                   {credentials.map((c) => (
                     <div key={c.id} className="models-cred-item">
@@ -884,7 +949,7 @@ export function ModelsPanel() {
                             <button className="btn btn-ghost btn-xs" onClick={() => handleCheckin(selected, c.id)} disabled={busy} title="为该账号签到">签到</button>
                           </>
                         )}
-                        <Sw checked={c.is_active} onChange={async (v) => { try { await api.updateProviderCredential(c.id, { is_active: v }); await loadDetail(selected, true); } catch (e) { notify(String(e)); } }} />
+                        <Sw checked={c.is_active} onChange={async (v) => { try { await api.updateProviderCredential(c.id, { is_active: v }); await loadDetail(selected, true, true); } catch (e) { notify(String(e)); } }} />
                         {!OAUTH_FORMATS.has(selected.api_format) && (
                           <button className="btn btn-ghost btn-xs" onClick={() => { setEditingCred(c); setShowCredForm(true); }}>编辑</button>
                         )}
@@ -899,7 +964,7 @@ export function ModelsPanel() {
                             danger: true,
                             onConfirm: async () => {
                               closeConfirm();
-                              try { await api.deleteProviderCredential(c.id); await loadDetail(selected, true); } catch (e) { notify(String(e)); }
+                              try { await api.deleteProviderCredential(c.id); await loadDetail(selected, true, true); } catch (e) { notify(String(e)); }
                             },
                           })}><IconX size={12} /></button>
                         )}
@@ -930,24 +995,20 @@ export function ModelsPanel() {
                   </div>
                 )}
               </div>
-              )}
+              </Collapse>
 
               {/* 代理配置 */}
               <div className="models-section">
                 <div className="models-section-title">代理</div>
-                <div className="models-proxy-modes">
-                  {PROXY_MODES.map((m) => (
-                    <button
-                      key={m.value}
-                      className={"settings-pill" + ((selected.proxy_mode || "inherit") === m.value ? " active" : "")}
-                      title={m.desc}
-                      onClick={() => patchProvider(selected.id, { proxy_mode: m.value })}
-                    >
-                      {m.label}
-                    </button>
-                  ))}
-                </div>
-                {selected.proxy_mode === "custom" && (
+                {/* plan-114-450：代理模式用统一分段控件（去掉原生 title，说明写在下方常驻一行） */}
+                <Segmented
+                  value={selected.proxy_mode || "inherit"}
+                  onChange={(v) => patchProvider(selected.id, { proxy_mode: v })}
+                  aria-label="代理模式"
+                  options={PROXY_MODES.map((m) => ({ value: m.value, label: m.label }))}
+                />
+                <div className="models-hint" style={{ padding: 0 }}>{PROXY_MODES.find((m) => m.value === (selected.proxy_mode || "inherit"))?.desc}</div>
+                <Collapse open={selected.proxy_mode === "custom"}>
                   <div className="models-field" style={{ marginTop: 8 }}>
                     <label>代理地址</label>
                     <Input
@@ -958,61 +1019,66 @@ export function ModelsPanel() {
                       aria-label="代理地址"
                     />
                   </div>
-                )}
+                </Collapse>
                 <div className="models-inline-row" style={{ marginTop: 8 }}>
                   <button className="btn btn-ghost btn-xs" onClick={() => handleProxyTest(selected)}>测试该配置</button>
-                  {proxyTest && <span className="models-hint" style={{ padding: 0 }}>{proxyTest}</span>}
+                  {/* 结果槽位常驻（空时只占一行高度），出现结果时不推动下方内容 */}
+                  <span className="models-hint models-test-slot" style={{ padding: 0 }} aria-live="polite">{proxyTest || ""}</span>
                 </div>
               </div>
 
               {/* 模型列表 */}
               <div className="models-section">
                 <div className="models-section-title">
-                  模型列表（{providerModels.length}）
-                  {!isOAuth && <button className="btn btn-ghost btn-xs" onClick={() => setScanningProvider(selected)}>扫描模型</button>}
+                  <span>模型 <span className="models-count">{providerModels.length}</span></span>
+                  {!isOAuth && <Button variant="secondary" size="xs" icon={<IconRefresh size={12} />} onClick={() => setScanningProvider(selected)}>扫描模型</Button>}
                 </div>
                 <div className="models-model-list">
                   {providerModels.map((m) => (
                     <div key={m.id} className="models-model-item">
                       <div className="models-model-main">
-                        <div className="models-model-name" title={m.name}>{m.name}</div>
-                        <div className="models-model-desc">
-                          {m.context_window ? <span>{m.context_window} tokens</span> : null}
-                          {m.trae_max_context ? <span className="settings-resource-tag">max {m.trae_max_context}</span> : null}
-                          {m.trae_consumption_rate ? <span className="settings-resource-tag">消耗×{m.trae_consumption_rate}</span> : null}
-                          {m.api_format === "trae" && m.trae_available === false && <span className="settings-resource-tag">不可用</span>}
-                          {m.is_multimodal && <span className="settings-resource-tag">多模态</span>}
-                          {(m.reasoning_efforts?.length ?? 0) > 0 && <span className="settings-resource-tag">思考: {m.reasoning_efforts.join("/")}</span>}
-                        </div>
+                        <div className="models-model-name">{m.name}</div>
+                        {/* plan-114-450：标签统一为 Tag；没有任何标签时不渲染该行，行高由 min-height 保底（不随有无标签跳变） */}
+                        {(m.context_window || m.trae_max_context || m.trae_consumption_rate || m.is_multimodal || (m.reasoning_efforts?.length ?? 0) > 0 || (m.api_format === "trae" && m.trae_available === false)) ? (
+                          <div className="models-model-desc">
+                            {m.context_window ? <Tag>{m.context_window} tokens</Tag> : null}
+                            {m.trae_max_context ? <Tag>max {m.trae_max_context}</Tag> : null}
+                            {m.trae_consumption_rate ? <Tag>消耗 ×{m.trae_consumption_rate}</Tag> : null}
+                            {m.api_format === "trae" && m.trae_available === false && <Tag>不可用</Tag>}
+                            {m.is_multimodal && <Tag>多模态</Tag>}
+                            {(m.reasoning_efforts?.length ?? 0) > 0 && <Tag>思考 {m.reasoning_efforts.join(" / ")}</Tag>}
+                          </div>
+                        ) : null}
                       </div>
                       <div className="models-model-actions">
-                        {/* 启停开关保留（既有能力，且属高频操作）；行尾改图标按钮形态贴齐参考图 */}
-                        <Sw checked={m.is_active} onChange={async (v) => { try { await api.updateModel(m.id, { is_active: v }); await loadDetail(selected, true); } catch (e) { notify(String(e)); } }} />
-                        <button className="ui-icon-btn size-xs" aria-label="编辑模型" onClick={() => { setEditingModel(m); setTargetProviderForModel(selected); setShowModelForm(true); }}>
-                          <IconPencil size={13} />
-                        </button>
-                        <button className="ui-icon-btn size-xs tone-danger" aria-label="删除模型" onClick={() => setConfirmDialog({
+                        {/* plan-114-450：编辑/删除悬停显示（固定槽位只切透明度），开关常驻在最右 */}
+                        <span className="ui-row-hover">
+                        <IconButton size="xs" title="编辑模型" icon={<IconPencil size={13} />} onClick={() => { setEditingModel(m); setTargetProviderForModel(selected); setShowModelForm(true); }} />
+                        <IconButton size="xs" tone="danger" title="删除模型" icon={<IconTrash size={13} />} onClick={() => setConfirmDialog({
                           open: true,
                           title: "删除模型",
                           message: `删除模型「${m.name}」？`,
                           danger: true,
                           onConfirm: async () => {
                             closeConfirm();
-                            try { await api.deleteModel(m.id); await loadDetail(selected, true); } catch (e) { notify(String(e)); }
+                            try { await api.deleteModel(m.id); await loadDetail(selected, true, true); } catch (e) { notify(String(e)); }
                           },
-                        })}><IconTrash size={13} /></button>
+                        })} />
+                        </span>
+                        <Sw checked={m.is_active} onChange={async (v) => { try { await api.updateModel(m.id, { is_active: v }); await loadDetail(selected, true, true); } catch (e) { notify(String(e)); } }} />
                       </div>
                     </div>
                   ))}
                   {providerModels.length === 0 && (
-                    <div className="navpage-empty">{isOAuth ? "暂无模型，请先登录账号并点击「同步模型」" : "暂无模型，点击下方「添加模型」或标题右侧「扫描模型」获取"}</div>
+                    <Empty size="sm" title="还没有模型" desc={isOAuth ? "先登录账号，再点「同步模型」" : "点「扫描模型」自动获取，或在下方手动添加"} />
                   )}
+                  {/* plan-114-450：添加入口是列表的最后一行（通宽、与模型行同高），此前是列表内部左对齐的虚线小按钮，贴边且与行不对齐 */}
                   <button
                     type="button"
-                    className="models-add-model"
+                    className="models-add-row"
                     onClick={() => { setTargetProviderForModel(selected); setEditingModel(null); setShowModelForm(true); }}
                   >
-                    <IconPlus size={13} /> 添加模型
+                    <span className="models-add-row-ic" aria-hidden><IconPlus size={13} /></span> 添加模型
                   </button>
                 </div>
               </div>
@@ -1022,9 +1088,9 @@ export function ModelsPanel() {
       </div>
 
       <ProviderFormModal open={showProviderForm} editing={editingProvider} onClose={() => setShowProviderForm(false)} onSaved={load} />
-      <ScanModelsModal open={!!scanningProvider} provider={scanningProvider} onClose={() => setScanningProvider(null)} onSaved={async () => { await load(); await loadDetail(selected, true); }} />
-      <ModelFormModal open={showModelForm} editing={editingModel} targetProvider={targetProviderForModel} onClose={() => { setShowModelForm(false); setTargetProviderForModel(null); }} onSaved={async () => { await load(); await loadDetail(selected, true); }} />
-      <CredentialFormModal open={showCredForm} providerId={selected?.id ?? null} editing={editingCred} onClose={() => { setShowCredForm(false); setEditingCred(null); }} onSaved={async () => { await loadDetail(selected, true); await load(); }} />
+      <ScanModelsModal open={!!scanningProvider} provider={scanningProvider} onClose={() => setScanningProvider(null)} onSaved={async () => { await load(); await loadDetail(selected, true, true); }} />
+      <ModelFormModal open={showModelForm} editing={editingModel} targetProvider={targetProviderForModel} onClose={() => { setShowModelForm(false); setTargetProviderForModel(null); }} onSaved={async () => { await load(); await loadDetail(selected, true, true); }} />
+      <CredentialFormModal open={showCredForm} providerId={selected?.id ?? null} editing={editingCred} onClose={() => { setShowCredForm(false); setEditingCred(null); }} onSaved={async () => { await loadDetail(selected, true, true); await load(); }} />
       <ConfirmDialog
         open={confirmDialog.open}
         title={confirmDialog.title}

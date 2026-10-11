@@ -17,8 +17,9 @@ import {
   type Ta3QuotaTrendOut,
   type Ta3QuotaWindowOut,
 } from "../../api/client";
-import { IconExternalLink, IconRefresh } from "../icons";
+import { IconBarChart, IconCpu, IconExternalLink, IconGauge, IconRefresh } from "../icons";
 import { fmtTokens } from "./usage/chartUtils";
+import { Tooltip } from "../ui";
 
 const QUOTA_WARN_PERCENT = 80;
 const QUOTA_EXHAUSTED_PERCENT = 100;
@@ -423,12 +424,19 @@ export function Ta3QuotaSection({ provider }: { provider: ProviderOut }) {
       </div>
 
       {!loggedIn ? (
-        <div className="navpage-empty">登录账号后可查看剩余额度、用量趋势与模型状态。</div>
+        <div className="ta3-quota-empty"><span className="ta3-quota-empty-ic" aria-hidden><IconGauge size={16} /></span>登录账号后可查看剩余额度、用量趋势与模型状态。</div>
       ) : (
         <>
           {error && <div className="models-err">{error}</div>}
           {notice && <div className="ta3-quota-hint">{notice}</div>}
-          {!error && loading && !quota && <div className="ta3-quota-loading">正在加载额度信息…</div>}
+          {/* plan-114-449：骨架屏预留与数据区相近的高度，加载完成替换时不推挤下方分区 */}
+          {!error && loading && !quota && (
+            <div className="ta3-quota-skeleton" aria-label="正在加载额度信息" role="status">
+              <span className="mkt-sk" style={{ width: "40%", height: 14 }} />
+              <span className="mkt-sk" style={{ width: "100%", height: 42 }} />
+              <span className="mkt-sk" style={{ width: "100%", height: 42 }} />
+            </div>
+          )}
 
           {quota && (
             <>
@@ -451,42 +459,39 @@ export function Ta3QuotaSection({ provider }: { provider: ProviderOut }) {
                         <div className="ta3-quota-bar-fill" style={{ width: `${w.progressWidth}%` }} />
                       </div>
                     )}
+                    {/* plan-114-450：重置时间 + 阶段说明合并成一行（中点分隔），各窗口行数一致 ⇒ 下方按钮行对齐 */}
                     <div className="ta3-quota-window-foot">
-                      {w.resetMomentText ? `下次重置 ${w.resetMomentText}` : ""}
-                      {w.countdownText ? ` · 剩 ${w.countdownText}` : ""}
+                      {[w.resetMomentText ? `下次重置 ${w.resetMomentText}` : "", w.countdownText ? `剩 ${w.countdownText}` : "", w.selfResetText || ""]
+                        .filter(Boolean).join(" · ") || "\u00a0"}
                     </div>
-                    {w.selfResetText && <div className="ta3-quota-hint">{w.selfResetText}</div>}
                     {w.window === "DAILY" && w.exhausted && !w.unlimited && (
                       <div className="ta3-quota-hint warn">
                         {`今日额度已用尽，请等待明日自动重置，或点击下方重置（透支本周额度）。`}
                       </div>
                     )}
-                    {/* v46: 每日/每周/每月统一提供重置入口——按钮常显，仅在窗口
-                        达到 100% 且服务端允许时才可点击（未达 100% 时置灰并说明原因）。 */}
+                    {/* v46: 每日/每周/每月统一提供重置入口——按钮常显，仅在窗口达到 100% 且服务端允许时才可点击。
+                        plan-114-450：不可点原因放进按钮的 Tooltip（此前挤在按钮右侧折成两行，两个窗口高度不一致） */}
                     {!w.unlimited && w.window !== "" && (
                       <div className="ta3-quota-window-actions">
-                        <button
-                          className="btn btn-ghost btn-xs"
-                          disabled={actionBusy !== null || !w.canResetNow}
-                          onClick={() => void (w.resetActionKind === "overdraft"
-                            ? runOverdraft()
-                            : runReset(w.window === "MONTHLY" ? "MONTHLY" : "WEEKLY"))}
-                          title={w.canResetNow
-                            ? w.resetActionTitle
-                            : w.blockedReason}
-                        >
-                          {actionBusy !== null
-                            ? "正在提交…"
-                            : w.resetActionLabel}
-                        </button>
-                        {!w.canResetNow && (
-                          <span className="ta3-quota-muted">{w.blockedReason}</span>
-                        )}
+                        <Tooltip content={w.canResetNow ? w.resetActionTitle : w.blockedReason}>
+                          <span>
+                            <button
+                              className="btn btn-secondary btn-xs"
+                              disabled={actionBusy !== null || !w.canResetNow}
+                              onClick={() => void (w.resetActionKind === "overdraft"
+                                ? runOverdraft()
+                                : runReset(w.window === "MONTHLY" ? "MONTHLY" : "WEEKLY"))}
+                            >
+                              {actionBusy !== null ? "正在提交…" : w.resetActionLabel}
+                            </button>
+                          </span>
+                        </Tooltip>
+                        {!w.canResetNow && <span className="ta3-quota-muted">用满 100% 后可重置</span>}
                       </div>
                     )}
                   </div>
                 ))}
-                {windows.length === 0 && <div className="ta3-quota-loading">暂无额度窗口数据</div>}
+                {windows.length === 0 && <div className="ta3-quota-empty"><span className="ta3-quota-empty-ic" aria-hidden><IconGauge size={16} /></span>暂无额度窗口数据</div>}
               </div>
             </>
           )}
@@ -520,7 +525,7 @@ export function Ta3QuotaSection({ provider }: { provider: ProviderOut }) {
                 </div>
               </>
             ) : (
-              <div className="ta3-quota-loading">暂无趋势数据</div>
+              <div className="ta3-quota-empty"><span className="ta3-quota-empty-ic" aria-hidden><IconBarChart size={16} /></span>暂无趋势数据</div>
             )}
           </div>
 
@@ -543,7 +548,7 @@ export function Ta3QuotaSection({ provider }: { provider: ProviderOut }) {
                 {m.hintText && <div className="ta3-quota-hint">{m.hintText}</div>}
               </div>
             ))}
-            {models.length === 0 && <div className="ta3-quota-loading">暂无模型状态数据</div>}
+            {models.length === 0 && <div className="ta3-quota-empty"><span className="ta3-quota-empty-ic" aria-hidden><IconCpu size={16} /></span>暂无模型状态数据</div>}
           </div>
         </>
       )}

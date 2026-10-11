@@ -93,6 +93,8 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("models", "workbuddy_meta", "JSON"),
     # ========== models（v25 trae 模型：远端元数据 JSON）==========
     ("models", "trae_meta", "JSON"),
+    # ========== models（v26 kiro 模型：服务端 modelId 映射 JSON）==========
+    ("models", "kiro_meta", "JSON"),
     # ========== team_agents（v1 遗留表，v2 不再使用，仅保留迁移以防旧表有数据）==========
     ("team_agents", "learned_facts", "JSON"),
     ("team_agents", "skill_ids", "JSON"),
@@ -505,7 +507,7 @@ async def _migrate_provider_credentials(db: AsyncSession) -> int:
         created += 1
     if first_cred_by_provider:
         # 旧 OAuth auth 行挂到首条凭据（后续多账号登录会写各自的 credential_id）
-        for table in ("workbuddy_auth", "ta3_auth", "trae_auth"):
+        for table in ("workbuddy_auth", "ta3_auth", "trae_auth", "kiro_auth"):
             if not await _table_exists(db, table):
                 continue
             for pid, cid in first_cred_by_provider.items():

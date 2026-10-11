@@ -188,6 +188,101 @@ async def _build_trae_provider(
     return p, "trae_session"
 
 
+async def _first_logged_in_kiro_auth(db: AsyncSession, provider_id: int | None):
+    """取该供应商下「首个已登录账号」的 kiro auth 行（含带 credential_id 的新式行）。
+
+    与 workbuddy 同因：多账号改造后 auth 行带 credential_id，仅按 provider 级查询
+    会取不到登录态；此处按 id 顺序扫描兜底。
+    """
+    if not provider_id:
+        return None, None
+    from sqlalchemy import select
+
+    from app.persistence.models.kiro_auth import KiroAuth as _Auth
+
+    res = await db.execute(
+        select(_Auth).where(_Auth.provider_id == provider_id).order_by(_Auth.id.asc())
+    )
+    for row in res.scalars().all():
+        if row.access_token:
+            return row, getattr(row, "credential_id", None)
+    return None, None
+
+
+async def _build_kiro_provider(
+    db: AsyncSession, model: "Model | None", provider=None, credential=None,
+) -> tuple["ModelProvider | None", str]:
+    """构造 KiroProvider：token 实时取自 kiro_auth 表（防过期），注入 401 强制刷新回调。
+
+    kiro 模型的 Model.api_key 只是占位符（"__kiro_session__"），真实 accessToken
+    每次构造时从 kiro_auth 动态加载；端点由 region 与供应商 base_url 覆盖推导，
+    这正是「放开地区限制」的落点。
+    """
+    from app.auth.kiro import session as kiro_session
+    from app.auth.kiro.token import DEFAULT_REGION
+    from app.models.providers.kiro import KiroProvider
+    from app.services.credential_service import provider_client_kwargs
+
+    if model is None:
+        return None, "kiro_model_missing"
+    if provider is None:
+        if model.provider_id:
+            from app.persistence.models.model_reg import Provider as _Provider
+
+            provider = await db.get(_Provider, model.provider_id)
+    provider_id = provider.id if provider is not None else model.provider_id
+    resolved_cred_id: int | None = None
+    if credential is not None:
+        auth = await _load_auth_for_credential(db, "kiro", provider_id, credential.id)
+        resolved_cred_id = getattr(auth, "credential_id", None) if auth is not None else credential.id
+    else:
+        auth = await kiro_session.load_auth(db, provider_id)
+        if auth is None or not auth.access_token:
+            auth, resolved_cred_id = await _first_logged_in_kiro_auth(db, provider_id)
+        else:
+            resolved_cred_id = getattr(auth, "credential_id", None)
+    if auth is None or not auth.access_token:
+        return None, "kiro_login_required"
+
+    # plan-116-458: 构造前确保令牌新鲜——此前直接使用库内 accessToken（有效期
+    # 1 小时），过期后对话请求持续被上游以 403「The bearer token included in the
+    # request is invalid」拒绝（用户实测：重新登录能用一会，之后又不行）。
+    # ensure_token 未临期直接返回、临期带锁刷新；刷新类失败 fail-open 沿用旧
+    # 令牌（请求侧 403 兜底仍会再试一次），仅登录态缺失才判不可用。
+    try:
+        access_token = await kiro_session.ensure_token(db, provider_id, provider)
+    except kiro_session.KiroAuthError as e:
+        if e.kind == "login_required":
+            return None, "kiro_login_required"
+        access_token = auth.access_token
+
+    endpoints = kiro_session.endpoints_for(provider, auth)
+    meta = dict(getattr(model, "kiro_meta", None) or {})
+    meta["profile_arn"] = auth.profile_arn or ""
+    meta["region"] = auth.region or DEFAULT_REGION
+    meta["auth_method"] = auth.auth_method or "social"
+    meta["client_id"] = str((auth.account or {}).get("clientId") or "")
+    meta["model_id"] = str(meta.get("model_id") or model.name or "")
+
+    async def _refresh() -> str | None:
+        try:
+            return await kiro_session.force_refresh(db, provider_id, provider)
+        except kiro_session.KiroAuthError:
+            return None
+
+    p = KiroProvider(
+        api_key=access_token,
+        base_url=endpoints.chat,
+        model=model.name,
+        meta=meta,
+        refresh_token=_refresh,
+        client_kwargs=provider_client_kwargs(provider),
+    )
+    if resolved_cred_id is not None:
+        _attach_credential_meta(p, provider_id, resolved_cred_id)
+    return p, "kiro_session"
+
+
 async def _first_logged_in_auth(db: AsyncSession, provider_id: int | None):
     """取该供应商下「首个已登录账号」的 workbuddy auth 行（含带 credential_id 的新式行）。
 
@@ -329,6 +424,8 @@ async def _load_auth_for_credential(db: AsyncSession, api_format: str, provider_
         from app.persistence.models.ta3_auth import Ta3Auth as _Auth
     elif api_format == "trae":
         from app.persistence.models.trae_auth import TraeAuth as _Auth
+    elif api_format == "kiro":
+        from app.persistence.models.kiro_auth import KiroAuth as _Auth
     else:
         return None
     stmt = select(_Auth).where(_Auth.provider_id == provider_id)
@@ -375,7 +472,7 @@ async def _pick_credential(db: AsyncSession, provider, exclude: set[int] | None 
     for c in avail:
         if c.api_key:
             return c, c.api_key
-        if fmt in ("workbuddy", "ta3", "trae"):
+        if fmt in ("workbuddy", "ta3", "trae", "kiro"):
             auth = await _load_auth_for_credential(db, fmt, provider.id, c.id)
             if auth is not None and getattr(auth, "access_token", None):
                 return c, auth.access_token
@@ -441,9 +538,11 @@ class ModelRegistry:
                         # 凭据全部停用/冷却中：明确失败，绝不回落到模型行旧 key 或 auth 兜底，
                         # 否则「停用某个 key/账号后仍被调用」（用户反馈现象）。
                         return None, "provider_credential_unavailable"
-                    if api_format in ("workbuddy", "trae"):
+                    if api_format in ("workbuddy", "trae", "kiro"):
                         if api_format == "workbuddy":
                             p, reason = await _build_workbuddy_provider(db, model, provider, chosen)
+                        elif api_format == "kiro":
+                            p, reason = await _build_kiro_provider(db, model, provider, chosen)
                         else:
                             p, reason = await _build_trae_provider(db, model, provider, chosen)
                         if p is not None:
@@ -482,6 +581,9 @@ class ModelRegistry:
                 # v25: trae 模型 —— token/设备指纹实时取自 trae_auth 表
                 if api_format == "trae":
                     return await _build_trae_provider(db, model)
+                # v26: kiro 模型 —— token 实时取自 kiro_auth 表（Model.api_key 为占位符）
+                if api_format == "kiro":
+                    return await _build_kiro_provider(db, model)
                 # v23: ta3 模型携带远端元数据（系统提示词/协议/目录配置）
                 ta3_meta = getattr(model, "ta3_meta", None) or {}
                 return (
@@ -534,6 +636,8 @@ class ModelRegistry:
             p, reason = await _build_workbuddy_provider(db, model, provider, chosen)
         elif api_format == "trae":
             p, reason = await _build_trae_provider(db, model, provider, chosen)
+        elif api_format == "kiro":
+            p, reason = await _build_kiro_provider(db, model, provider, chosen)
         elif api_format == "ta3":
             ta3_meta = getattr(model, "ta3_meta", None) or {}
             if not (provider.base_url and api_key):

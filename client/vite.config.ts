@@ -1,4 +1,5 @@
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite";
 import dns from "node:dns";
 
@@ -8,7 +9,7 @@ import dns from "node:dns";
 dns.setDefaultResultOrder("ipv4first");
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   // 桌面版用 file:// 加载,必须用相对路径,否则资源找不到导致黑屏
   base: "./",
   // plan-73-323：宠物窗口作为第二个 HTML 入口（独立置顶浮窗）——

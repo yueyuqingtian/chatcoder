@@ -158,11 +158,29 @@ async def scan_models(db: AsyncSession, provider_id: int) -> list[dict]:
     provider = await db.get(Provider, provider_id)
     if provider is None:
         raise ValueError("provider not found")
+
+    api_format = (provider.api_format or "openai").lower()
+
+    # plan-116-456: kiro 无 /models 接口，目录来自内置映射表——不请求网络、
+    # 也不依赖 Base URL（其端点由区域推导，可留空）
+    if api_format == "kiro":
+        from app.auth.kiro.catalog import merge_entries
+
+        return [
+            {
+                "id": str(e["name"]),
+                "context_window": e.get("context_window"),
+                "owned_by": e.get("vendor") or "kiro",
+                "is_multimodal": bool(e.get("is_multimodal")),
+                "reasoning_efforts": e.get("reasoning_efforts"),
+            }
+            for e in merge_entries()
+        ]
+
     if not provider.base_url:
         raise ValueError("供应商未配置 Base URL")
 
     base = provider.base_url.rstrip("/")
-    api_format = (provider.api_format or "openai").lower()
     # plan-248-1258: key 取自凭据（多 Key 时用首个可用）
     _scan_key = await _resolve_scan_key(db, provider)
 
@@ -301,22 +319,58 @@ async def count_models(db: AsyncSession, provider_id: int) -> int:
     return len(res.scalars().all())
 
 
+async def _test_kiro_connectivity(db: AsyncSession, provider_id: int, provider: Provider) -> dict:
+    """kiro 连通性探针：GetUsageLimits（验证登录态 + 端点 + 网络，不消耗对话额度）。"""
+    import time
+
+    from app.auth.kiro import quota as kiro_quota
+    from app.auth.kiro import session as kiro_session
+    from app.services.credential_service import provider_client_kwargs
+
+    t0 = time.monotonic()
+    try:
+        value = await kiro_quota.get_usage_limits(
+            db, provider_id, provider, force=True,
+            client_kwargs=provider_client_kwargs(provider))
+    except kiro_session.KiroAuthError as e:
+        return {"ok": False, "latency_ms": 0, "error": str(e), "model": None, "via": "quota"}
+    except kiro_quota.KiroQuotaError as e:
+        return {"ok": False, "latency_ms": 0, "error": str(e), "model": None, "via": "quota"}
+    latency_ms = int((time.monotonic() - t0) * 1000)
+    remaining = value.get("remaining")
+    return {
+        "ok": True,
+        "latency_ms": latency_ms,
+        "error": None,
+        "model": None,
+        "via": "quota",
+        "detail": f"剩余积分 {remaining}" if remaining is not None else None,
+    }
+
+
 async def test_connectivity(db: AsyncSession, provider_id: int) -> dict:
     """v2.2 (对齐 zcode 3.11): 连通性测试——发一条 max_tokens=1 的 ping。
 
     返回 {"ok": bool, "latency_ms": int, "error": str|None}。
     优先用该供应商下第一个 active 模型；无模型时用 /models 接口探测。
+
+    plan-116-456：kiro 走专用探针（积分接口），同时验证登录态与端点可达，
+    且不消耗对话额度（对话 ping 会产生 credit 费用）。
     """
     import time
 
     provider = await db.get(Provider, provider_id)
     if provider is None:
         raise ValueError("provider not found")
+
+    api_format = (provider.api_format or "openai").lower()
+    if api_format == "kiro":
+        return await _test_kiro_connectivity(db, provider_id, provider)
+
     if not provider.base_url:
         raise ValueError("供应商未配置 Base URL")
 
     base = provider.base_url.rstrip("/")
-    api_format = (provider.api_format or "openai").lower()
     # plan-248-1258: key 取自凭据（多 Key 时用首个可用）
     _test_key = await _resolve_scan_key(db, provider)
 

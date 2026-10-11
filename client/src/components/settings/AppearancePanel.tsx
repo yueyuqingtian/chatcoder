@@ -6,12 +6,33 @@
  *  - 移除「动画效果」配置（固定标准动画，动效统一由 --dur-* / --motion-scale 控制）；
  *  - 移除「面板拖拽排版 / 拖拽自动降级」（按要求固定"实时、不降级"）；
  *  - 移除左/右面板宽度滑杆（改为主界面直接拖拽分隔条，使用合理默认值）。 */
-import { useThemeStore, type Theme } from "../../store/theme";
+import { useState } from "react";
+import { useThemeStore, WORLDS, type Theme, type World } from "../../store/theme";
 import { useUiStore } from "../../store/ui";
 import { Slider } from "../ui";
+import { Dada } from "../mascot/Dada";
 import { Row, Sw } from "./shared";
 
 const THEMES: Record<Theme, string> = { light: "浅色", dark: "深色" };
+
+/** plan-114-447：主题世界——名称 + 一句情绪，卡片里是戴着该世界配件的嗒嗒 */
+const WORLD_META: Record<World, { label: string; mood: string }> = {
+  graphite: { label: "石墨", mood: "安静专注，一支铅笔就够" },
+  forest: { label: "森林", mood: "沉静生长，偶尔落一片叶" },
+  campfire: { label: "篝火", mood: "夜里写代码的那点暖" },
+  breeze: { label: "煦风", mood: "轻快，发出去就像纸飞机" },
+  tide: { label: "潮汐", mood: "冷静，把问题交给漂流瓶" },
+  sakura: { label: "樱时", mood: "柔和，花瓣只落一点点" },
+};
+/** 卡片色标：取各世界强调色（与 themes.css 保持一致） */
+const WORLD_DOT: Record<World, string> = {
+  graphite: "oklch(30% 0.01 260)",
+  forest: "oklch(46% 0.075 150)",
+  campfire: "oklch(58% 0.13 45)",
+  breeze: "oklch(56% 0.08 220)",
+  tide: "oklch(46% 0.11 245)",
+  sakura: "oklch(60% 0.07 0)",
+};
 
 /** S5：玻璃强度三档（0 轻柔 / 1 标准 / 2 深邃）——不透明度由 tokens.css 的
  *  --frost-left-alpha 声明式驱动（深邃透出最多、轻柔最实）。 */
@@ -22,8 +43,10 @@ const GLASS_STRENGTHS: Array<{ value: number; label: string; desc: string }> = [
 ];
 
 export function AppearancePanel() {
-  const { theme, setTheme } = useThemeStore();
+  const { theme, setTheme, world, setWorld } = useThemeStore();
   const ui = useUiStore();
+  // 选中时让该卡片里的嗒嗒眨一下眼；key 递增保证重复点击也会触发
+  const [wink, setWink] = useState(0);
 
   return (
     <div className="settings-card-stack">
@@ -41,6 +64,37 @@ export function AppearancePanel() {
             ))}
           </div>
         </Row>
+        <Row title="主题世界" desc="决定强调色、场景与嗒嗒的装扮；底色与侧栏始终保持中性" />
+        <div className="world-grid" role="radiogroup" aria-label="主题世界">
+          {WORLDS.map((w) => (
+            <button
+              key={w}
+              type="button"
+              role="radio"
+              aria-checked={world === w}
+              className={"world-card" + (world === w ? " active" : "")}
+              onClick={() => { setWorld(w); setWink((n) => n + 1); }}
+            >
+              <span className="world-card-art">
+                <Dada
+                  key={world === w ? `on-${wink}` : "off"}
+                  variant="rich"
+                  size={44}
+                  blink={false}
+                  mood={world === w ? "happy" : "calm"}
+                  className={world === w ? "dada-wink" : undefined}
+                />
+              </span>
+              <span className="world-card-text">
+                <span className="world-card-name">
+                  <i className="world-card-dot" style={{ background: WORLD_DOT[w] }} />
+                  {WORLD_META[w].label}
+                </span>
+                <span className="world-card-mood">{WORLD_META[w].mood}</span>
+              </span>
+            </button>
+          ))}
+        </div>
         <Row
           title="毛玻璃效果"
           desc={ui.glassmorphism ? "左侧面板半透明磨砂，轻微透出桌面壁纸" : "启用左侧面板与启动页的半透明磨砂背景"}

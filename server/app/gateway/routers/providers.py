@@ -336,11 +336,26 @@ async def test_provider_proxy(provider_id: int, db: AsyncSession = Depends(get_d
 
     直连 base_url 根路径（HEAD/GET），验证代理是否可达；仅验证网络层，
     不发送模型请求（避免消耗配额）。
+
+    plan-116-456：kiro 为账号登录型且端点由区域推导（Base URL 可留空），
+    留空时用内置端点兜底，避免误报「供应商未配置 Base URL」；探测路径也不
+    拼 /models（Kiro 无该接口），改探端点根。
     """
     import time
 
     provider = await _require_provider(db, provider_id)
-    if not provider.base_url:
+    fmt = (provider.api_format or "openai").lower()
+    base = (provider.base_url or "").strip().rstrip("/")
+    if base:
+        probe_url = f"{base}/models"
+    elif fmt == "kiro":
+        from app.auth.kiro import session as kiro_session
+        from app.auth.kiro.token import normalize_region
+
+        auth = await kiro_session.load_auth(db, provider_id)
+        region = normalize_region(auth.region if auth is not None else None)
+        probe_url = f"https://q.{region}.amazonaws.com"
+    else:
         raise HTTPException(400, "供应商未配置 Base URL")
     proxy = credential_service.resolve_proxy(provider)
     opts: dict = {"timeout": 10.0, "follow_redirects": True}
@@ -349,7 +364,7 @@ async def test_provider_proxy(provider_id: int, db: AsyncSession = Depends(get_d
     try:
         t0 = time.monotonic()
         async with httpx.AsyncClient(**opts) as client:
-            resp = await client.get(provider.base_url.rstrip("/") + "/models")
+            resp = await client.get(probe_url)
         return ProviderProxyTestOut(
             ok=resp.status_code < 500,
             latency_ms=int((time.monotonic() - t0) * 1000),

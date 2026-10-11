@@ -99,6 +99,7 @@ client/.env
 .vscode/
 .idea/
 .trae/
+.kiro/
 *.swp
 *.swo
 *~
@@ -182,6 +183,7 @@ zsym*.txt
 *.pid
 .chatcoder/
 .codebuddy/
+.agents/
 .pi/
 .ta3-testing/
 .workbuddy/

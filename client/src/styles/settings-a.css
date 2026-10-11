@@ -1,0 +1,137 @@
+/* plan-91-393：设置页分组 a 的排版与样式（由对应面板独占维护） */
+
+/* ───────── 模型管理（plan-91-393） ───────── */
+/* plan-114-450：左列供应商与页面布局移到 settings-models.css（唯一来源） */
+
+/* 右列详情：头部 + 分组卡片 */
+.models-detail { gap: 12px; }
+.models-detail-head { gap: 10px; padding: 2px 2px 6px; }
+.models-detail-head .models-detail-name { font-size: 16px; font-weight: 600; color: var(--text-1); }
+.models-status-pill { border-radius: 999px; padding: 1px 8px; font-size: 11px; }
+/* plan-114-449：分区不再是「卡片套卡片」——无底色无边框，分区之间只用一条发丝线；
+   本文件是 .models-section 的唯一定义来源（model-picker.css / revamp.css 的旧定义已删除） */
+.models-section {
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 18px 2px 4px; border-radius: 0;
+  background: transparent; border: none; border-top: 1px solid var(--border-light);
+}
+.models-detail-head + .models-section { border-top: none; padding-top: 6px; }
+.models-section-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; font-weight: 600; color: var(--text-1); min-height: 24px; margin: 0; }
+.models-section-title > :last-child:not(:first-child) { display: inline-flex; gap: 4px; }
+.models-sec-conn .models-field { margin: 0; }
+.models-section .models-field > label { display: block; margin-bottom: 6px; color: var(--text-2); }
+.models-section .navpage-empty { padding: 18px 0; font-size: 12px; color: var(--text-3); text-align: center; }
+
+/* 模型列表行：名称 / 能力标签 / 操作 对齐；plan-121-482：列表 = 单层卡片，行 = 全宽横线行
+   （此前这里并存两条互相覆盖的定义：先"分隔线列表"后"小卡片"，最终呈现为行小卡——本轮收敛为唯一定义） */
+.models-model-list { display: flex; flex-direction: column; gap: 0; border: 1px solid var(--border-light); border-radius: var(--r-lg); background: var(--bg-main); overflow: hidden; }
+.models-model-item { gap: 12px; padding: var(--row-pad-y) var(--sp-5); min-height: 44px; border-bottom: 1px solid var(--border-light); transition: background var(--dur-2) var(--ease-standard); }
+.models-model-list > .models-model-item:last-child { border-bottom: none; }
+.models-model-item:hover { background: var(--bg-hover); }
+.models-model-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.models-model-name { font-size: 13px; font-weight: 500; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.models-model-desc { display: flex; flex-wrap: wrap; gap: 4px; }
+.models-model-desc .settings-resource-tag { border-radius: 999px; padding: 0 7px; font-size: 10.5px; line-height: 18px; }
+.models-model-actions { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.models-add-model { border-radius: var(--r-md); }
+/* 凭据行：plan-121-482 统一为「单层卡片 + 全宽横线行」 */
+.models-cred-list { gap: 0; border: 1px solid var(--border-light); border-radius: var(--r-lg); background: var(--bg-main); overflow: hidden; }
+.models-cred-item { border: none; border-bottom: 1px solid var(--border-light); border-radius: 0; padding: var(--row-pad-y) var(--sp-5); }
+.models-cred-list > .models-cred-item:last-child { border-bottom: none; }
+/* 额度窗口：从小卡片改为行内进度条（无边框无底色） */
+.ta3-quota-window { border: none; background: transparent; padding: 4px 2px; }
+.ta3-quota-setting, .ta3-quota-model { border: none !important; background: transparent !important; }
+/* 加载态不再插入提示条：绝对定位到详情右上角，不占文档流 ⇒ 显隐零位移 */
+.models-detail { position: relative; }
+.ta3-quota-skeleton { display: flex; flex-direction: column; gap: 10px; padding: 4px 2px; }
+/* 测试结果槽位：常驻一行高度，有无结果都不改变布局 */
+.models-test-slot { min-height: 18px; line-height: 18px; }
+/* 名称标题与重命名输入框等高（28px），切换时不抖动 */
+.models-detail-name, .models-name-input { height: 28px; line-height: 24px; box-sizing: border-box; }
+.models-detail-name { padding: 2px 6px; border: 1px solid transparent; }
+.models-detail-loading {
+  position: absolute; top: 14px; right: 16px; margin: 0; padding: 0;
+  background: none; border: none; display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--text-3); pointer-events: none;
+  animation: mo-fade-in var(--dur-2) var(--ease-out-quart) both;
+}
+.models-detail-loading::before {
+  content: ""; width: 10px; height: 10px; border-radius: 999px;
+  border: 1.5px solid currentColor; border-right-color: transparent;
+  animation: models-spin 0.9s linear infinite;
+}
+@keyframes models-spin { to { transform: rotate(360deg); } }
+
+/* 额度：分段控件与空态 */
+.ta3-quota-seg { padding: 2px; gap: 2px; border: 1px solid var(--surface-inset-border); background: var(--surface-inset); border-radius: var(--r-md); }
+.ta3-quota-seg button { padding: 3px 12px; border-radius: var(--r-md); transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard); }
+.ta3-quota-seg button:not(:last-child) { border-right: none; }
+.ta3-quota-seg button.active { background: var(--bg-main); color: var(--text-1); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08); }
+.ta3-quota-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 20px 12px; font-size: 12px; color: var(--text-3); text-align: center; }
+.ta3-quota-empty-ic { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 999px; background: var(--surface-inset); color: var(--text-3); }
+
+/* ───────── 记忆（plan-91-393） ───────── */
+.mem-group { margin-bottom: 18px; }
+.mem-group-title { align-items: center; gap: 8px; font-size: 13px; color: var(--text-1); margin-bottom: 8px; }
+.mem-group-dot { width: 7px; height: 7px; border-radius: 999px; background: var(--text-3); flex-shrink: 0; }
+.mem-group-dot.scope-global { background: var(--info); }
+.mem-group-dot.scope-project { background: var(--success); }
+.mem-group-count { font-size: 11px; font-weight: 500; color: var(--text-3); background: var(--surface-inset); border-radius: 999px; padding: 0 7px; line-height: 18px; }
+/* plan-121-482：列表 = 单层卡片；行 = 全宽横线行（对齐常规页 settings-card 的观感） */
+.mem-card {
+  display: flex; align-items: flex-start; gap: 10px; padding: var(--row-pad-y) var(--sp-5);
+  border-bottom: 1px solid var(--border-light);
+  transition: background var(--dur-2) var(--ease-standard);
+}
+.mem-card:hover { background: var(--bg-hover); }
+.mem-card.selected { background: var(--color-selected); }
+.mem-card-check { padding-top: 2px; flex-shrink: 0; }
+.mem-card-body { flex: 1; min-width: 0; cursor: pointer; display: flex; flex-direction: column; gap: 6px; outline: none; border-radius: var(--r-md); }
+.mem-card-body:focus-visible { box-shadow: 0 0 0 2px var(--accent-soft); }
+.mem-card-text { font-size: 13px; line-height: 1.55; color: var(--text-1); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
+.mem-card-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; font-size: 11.5px; color: var(--text-3); }
+.mem-tag { display: inline-flex; align-items: center; height: 18px; padding: 0 7px; border-radius: 999px; font-size: 10.5px; font-weight: 500; background: var(--surface-inset); color: var(--text-2); }
+.mem-tag.scope-global { background: color-mix(in oklab, var(--info) 14%, transparent); color: var(--info); }
+.mem-tag.scope-project { background: color-mix(in oklab, var(--success) 14%, transparent); color: var(--success); }
+.mem-tag.cand { background: color-mix(in oklab, var(--warning) 16%, transparent); color: var(--warning); }
+.mem-card-actions { display: inline-flex; gap: 2px; flex-shrink: 0; opacity: 0; transition: opacity var(--dur-2) var(--ease-standard); }
+.mem-card:hover .mem-card-actions, .mem-card:focus-within .mem-card-actions { opacity: 1; }
+
+/* ───────── 关于（plan-91-393） ───────── */
+/* 两区拆为独立卡片，去掉更新历史上方的粗分隔线 */
+.about-stack { gap: 12px; }
+.about-history-card .upd-history-row { border-top: none; border-bottom: none; }
+.about-upd-title { display: flex; align-items: center; gap: 8px; }
+.about-upd-state { display: inline-flex; align-items: center; height: 18px; padding: 0 8px; border-radius: 999px; font-size: 10.5px; font-weight: 500; background: var(--surface-inset); color: var(--text-2); }
+.about-upd-state.st-none { background: color-mix(in oklab, var(--success) 14%, transparent); color: var(--success); }
+.about-upd-state.st-available, .about-upd-state.st-downloaded, .about-upd-state.st-downloading { background: var(--accent-soft); color: var(--accent); }
+.about-upd-state.st-error { background: color-mix(in oklab, var(--error) 14%, transparent); color: var(--error); }
+.about-card .upd-notes-body { border-radius: var(--r-md); border-color: var(--border-light); background: var(--surface-inset); }
+
+.about-history { padding: 0 16px 16px; gap: 6px; }
+.about-history .upd-history-item { border-top: none; padding-top: 0; border-radius: var(--r-md); transition: background var(--dur-2) var(--ease-standard); }
+.about-history .upd-history-item.open { background: var(--surface-inset); }
+.about-history .upd-history-head { padding: 8px 10px; border-radius: var(--r-md); }
+.about-history .upd-history-item.open .upd-history-head { background: transparent; }
+.about-history .upd-history-version { align-items: center; }
+.about-rel-pill { display: inline-flex; align-items: center; height: 20px; padding: 0 9px; border-radius: 999px; font-family: var(--font-mono); font-size: 11.5px; font-weight: 600; background: var(--surface-inset); color: var(--text-1); }
+.about-rel.current .about-rel-pill { background: var(--accent-soft); color: var(--accent); }
+.about-history .upd-history-item.open .about-rel-pill { background: var(--bg-main); }
+.about-history .upd-history-cur { border: none; border-radius: 999px; background: var(--accent-soft); padding: 0 7px; line-height: 18px; }
+.about-history .upd-history-notes { padding: 4px 12px 12px; margin: 0; }
+.about-rel-groups { display: flex; flex-direction: column; gap: 12px; padding: 4px 12px 14px; }
+.about-rel-group-title { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--text-1); margin-bottom: 6px; }
+.about-rel-ic { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 999px; }
+.tone-add .about-rel-ic { background: color-mix(in oklab, var(--success) 16%, transparent); color: var(--success); }
+.tone-opt .about-rel-ic { background: var(--accent-soft); color: var(--accent); }
+.tone-fix .about-rel-ic { background: color-mix(in oklab, var(--warning) 18%, transparent); color: var(--warning); }
+.tone-warn .about-rel-ic { background: color-mix(in oklab, var(--error) 14%, transparent); color: var(--error); }
+.about-rel-list { list-style: none; margin: 0; padding: 0 0 0 24px; display: flex; flex-direction: column; gap: 4px; }
+.about-rel-list li { position: relative; font-size: 12.5px; line-height: 1.6; color: var(--text-2); }
+.about-rel-list li::before { content: ""; position: absolute; left: -12px; top: 0.7em; width: 4px; height: 4px; border-radius: 999px; background: var(--text-3); }
+.about-rel-list li .md-p { margin: 0; }
+.about-history .upd-history-more { margin-top: 6px; }
+/* 收起时卡片不留空白带：折叠容器关闭态高度归零 */
+.about-history-card .ui-collapse[data-open="false"] { margin: 0; padding: 0; }
+.about-history-card .ui-collapse[data-open="false"] .about-history { padding-bottom: 0; }
+.about-history-card { padding-bottom: 0; }

@@ -242,31 +242,35 @@ export function DatabaseConnectionsPanel({ server }: { server?: McpServerOut }) 
             </button>
           </div>
         )}
-        {conns.map((c) => (
-          <div className="settings-resource-item db-conn-item" key={c.id}>
-            <div className="settings-resource-info">
-              <div className="settings-resource-name">
-                {c.name}
-                <span className="db-kind">{KIND_OPTIONS.find((k) => k.value === c.kind)?.label || c.kind}</span>
-                {c.has_password && <span className="db-kind">已设密码</span>}
+        {conns.length > 0 && (
+          <div className="settings-resource-list">
+            {conns.map((c) => (
+              <div className="settings-resource-item db-conn-item" key={c.id}>
+                <div className="settings-resource-info">
+                  <div className="settings-resource-name">
+                    {c.name}
+                    <span className="db-kind">{KIND_OPTIONS.find((k) => k.value === c.kind)?.label || c.kind}</span>
+                    {c.has_password && <span className="db-kind">已设密码</span>}
+                  </div>
+                  <div className="settings-resource-desc">
+                    {c.host}:{c.port} / {c.database || "（未指定库）"}　账号 {c.username || "—"}
+                  </div>
+                  {testMsg[c.id] && (
+                    <div className={`db-test${testMsg[c.id].startsWith("连接成功") ? " ok" : ""}`}>{testMsg[c.id]}</div>
+                  )}
+                </div>
+                <div className="settings-resource-actions db-conn-actions">
+                  <Switch checked={c.is_active} onChange={(v) => void toggleActive(c, v)} />
+                  <button className="btn btn-ghost btn-xs" onClick={() => void testOne(c)} disabled={busy}>测试</button>
+                  <button className="btn btn-ghost btn-xs" onClick={() => openEdit(c)}>编辑</button>
+                  <button className="btn btn-danger btn-xs" onClick={() => setDropTarget(c)} title="删除连接">
+                    <IconTrash size={12} />
+                  </button>
+                </div>
               </div>
-              <div className="settings-resource-desc">
-                {c.host}:{c.port} / {c.database || "（未指定库）"}　账号 {c.username || "—"}
-              </div>
-              {testMsg[c.id] && (
-                <div className={`db-test${testMsg[c.id].startsWith("连接成功") ? " ok" : ""}`}>{testMsg[c.id]}</div>
-              )}
-            </div>
-            <div className="settings-resource-actions db-conn-actions">
-              <Switch checked={c.is_active} onChange={(v) => void toggleActive(c, v)} />
-              <button className="btn btn-ghost btn-xs" onClick={() => void testOne(c)} disabled={busy}>测试</button>
-              <button className="btn btn-ghost btn-xs" onClick={() => openEdit(c)}>编辑</button>
-              <button className="btn btn-danger btn-xs" onClick={() => setDropTarget(c)} title="删除连接">
-                <IconTrash size={12} />
-              </button>
-            </div>
+            ))}
           </div>
-        ))}
+        )}
       </section>
 
       {/* 权限策略（草稿 + 保存，避免逐键写入与请求乱序） */}

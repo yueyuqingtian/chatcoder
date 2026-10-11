@@ -15,6 +15,7 @@ import { recordDerivation } from "../../perf/metrics";
 import { useChatStore } from "../../store/chat";
 import type { PanelTab } from "../../store/panel";
 
+import { Empty } from "../ui";
 interface TerminalPanelProps {
   tab: PanelTab;
   /** plan-41-233：标签所属会话（跨会话保活渲染时不能跟随当前会话漂移——
@@ -226,7 +227,7 @@ export function TerminalPanel({ tab, sessionId, visible = true }: TerminalPanelP
   }, [visible]);
 
   if (!api?.ptySpawn) {
-    return <div className="rp-body"><div className="rp-empty">终端需要桌面版环境</div></div>;
+    return <div className="rp-body"><Empty size="sm" title="终端需要桌面版环境" desc="在桌面版应用中可以直接使用内置终端" /></div>;
   }
 
   return (

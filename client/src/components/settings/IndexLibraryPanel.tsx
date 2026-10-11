@@ -10,8 +10,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api/client";
 import { useChatStore } from "../../store/chat";
-import { IconRefresh, IconSearch, IconZap } from "../icons";
-import { Input, Select } from "../ui";
+import { IconDatabase, IconRefresh, IconSearch, IconZap } from "../icons";
+import { Empty, Input, Select } from "../ui";
 import { isIndexBusy, progressText, resolveSearchTarget } from "./indexProgress";
 
 export interface WorkspaceStat {
@@ -179,18 +179,20 @@ export function IndexLibraryPanel() {
         改动文件后索引会自动增量更新。
       </div>
 
-      <div className="idx-list">
+      <div className="idx-list sc-list">
         {items.map((w) => (
-          <div key={w.workspace} className="idx-item">
-            <div className="idx-item-main">
+          <div key={w.workspace} className="idx-item sc-row">
+            {/* plan-91-393：统一行结构——图标块 + 标题/路径 + 状态 + 右侧操作 */}
+            <span className="sc-tile"><IconDatabase size={15} /></span>
+            <div className="idx-item-main sc-row-main">
               <div className="idx-item-title">
                 <span className={"idx-dot " + w.status} />
-                <span className="idx-name" title={w.workspace}>{w.name || w.workspace}</span>
+                <span className="idx-name">{w.name || w.workspace}</span>
                 <span className={"idx-badge " + w.status}>{STATUS_LABEL[w.status] || w.status}</span>
                 {w.exists === false && <span className="idx-badge error">目录不存在</span>}
               </div>
               <div className="idx-item-desc">
-                <span className="idx-path" title={w.workspace}>{w.workspace}</span>
+                <span className="idx-path sc-mono">{w.workspace}</span>
               </div>
               <div className="idx-item-desc">
                 {isIndexBusy(w.status) ? (
@@ -217,9 +219,9 @@ export function IndexLibraryPanel() {
               {w.error && <span className="idx-err">{w.error}</span>}
               </div>
             </div>
-            <div className="idx-item-actions">
+            <div className="idx-item-actions sc-row-actions">
               <button
-                className="btn btn-ghost btn-xs"
+                className="btn btn-ghost btn-sm"
                 disabled={busy === w.workspace || w.exists === false}
                 onClick={() => void toggle(w, !w.enabled)}
               >
@@ -227,7 +229,7 @@ export function IndexLibraryPanel() {
               </button>
               {w.enabled && (
                 <button
-                  className="btn btn-ghost btn-xs"
+                  className="btn btn-ghost btn-sm"
                   disabled={busy === w.workspace || isIndexBusy(w.status)}
                   onClick={() => void rebuild(w)}
                 >
@@ -237,7 +239,9 @@ export function IndexLibraryPanel() {
             </div>
           </div>
         ))}
-        {items.length === 0 && <div className="navpage-empty">暂无项目。创建项目后即可在此开启索引。</div>}
+        {items.length === 0 && (
+          <Empty title="暂无项目" desc="创建项目后即可在此开启索引" />
+        )}
       </div>
 
       <div className="idx-search">

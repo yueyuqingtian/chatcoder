@@ -1,0 +1,173 @@
+/* 吉祥物「嗒嗒」v5（plan-114-450）：唯一常驻循环动画是眨眼，间隔 ≥5s，reduced-motion 关闭 */
+.dada { display: inline-block; flex-shrink: 0; overflow: visible; }
+.dada .dada-eyes { transform-box: fill-box; transform-origin: center; }
+.dada-blink .dada-eyes { animation: dada-blink 5.6s steps(1, end) infinite; }
+/* 柔和单色版：颜色取自所在文字色的弱化色，空状态里不抢正文 */
+.dada-sketch { color: var(--text-3); }
+
+/* ── 统一空状态（ui/Empty）── */
+.ui-empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
+  gap: 6px; padding: var(--sp-7) var(--sp-5); color: var(--text-3); min-width: 0;
+}
+.ui-empty.is-sm { gap: 4px; padding: var(--sp-5) var(--sp-4); }
+.ui-empty.is-lg { gap: 8px; padding: 64px var(--sp-5); }
+.ui-empty-dada { margin-bottom: 6px; }
+.ui-empty.is-sm .ui-empty-dada { margin-bottom: 2px; }
+.ui-empty-title { font-size: 13px; font-weight: 500; color: var(--text-2); line-height: 1.5; }
+.ui-empty.is-lg .ui-empty-title { font-size: 14px; }
+.ui-empty-desc { font-size: 12px; color: var(--text-3); line-height: 1.55; max-width: 44ch; }
+.ui-empty-action { margin-top: 8px; display: flex; gap: 8px; }
+
+/* ── 嗒嗒加载（ui/DadaLoader）：挤压 → 腾空拉长 → 落地挤压，投影随高度缩放；一周期 900ms ── */
+.dada-loader { display: inline-flex; flex-direction: column; align-items: center; gap: 10px; color: var(--text-3); font-size: 12px; }
+.dada-loader.is-inline { flex-direction: row; gap: 8px; }
+.dada-loader-figure { position: relative; display: block; width: var(--dl-size); height: calc(var(--dl-size) * 1.3); }
+.dada-loader-hop { position: absolute; left: 0; bottom: 0; width: var(--dl-size); height: var(--dl-size); transform-origin: 50% 100%;
+  animation: dada-hop 900ms cubic-bezier(0.45, 0, 0.55, 1) infinite; }
+.dada-loader-hop .dada { display: block; }
+.dada-loader-shadow { position: absolute; left: 18%; right: 18%; bottom: -2px; height: 5px; border-radius: 999px;
+  background: currentColor; opacity: 0.22; animation: dada-hop-shadow 900ms cubic-bezier(0.45, 0, 0.55, 1) infinite; }
+@keyframes dada-hop {
+  0%, 100% { transform: translateY(0) scale(1.08, 0.9); }
+  18% { transform: translateY(0) scale(1, 1); }
+  50% { transform: translateY(-28%) scale(0.95, 1.06); }
+  82% { transform: translateY(0) scale(1, 1); }
+}
+@keyframes dada-hop-shadow { 0%, 100% { transform: scaleX(1); opacity: 0.24; } 50% { transform: scaleX(0.62); opacity: 0.12; } }
+.dada-loader-label { white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) {
+  .dada-loader-hop, .dada-loader-shadow { animation: none; }
+}
+@keyframes dada-blink {
+  0%, 94% { transform: scaleY(1); }
+  95%, 97% { transform: scaleY(0.12); }
+  98%, 100% { transform: scaleY(1); }
+}
+/* 一次性眨眼：选中主题卡等场景挂 .dada-wink */
+.dada-wink .dada-eyes { animation: dada-wink var(--dur-3, 240ms) var(--ease-out-quart) 1; }
+@keyframes dada-wink { 50% { transform: scaleY(0.12); } }
+
+/* ── 外观 → 主题世界卡片：中性底，选中只加深边框，不整卡染色 ── */
+.world-grid {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px;
+  padding: 0 16px 14px;
+}
+.world-card {
+  display: flex; align-items: center; gap: 10px; min-width: 0;
+  padding: 10px 12px; border-radius: var(--r-lg); text-align: left;
+  background: var(--bg-main); border: 1px solid var(--border-light, var(--border));
+  color: var(--text-1); cursor: pointer;
+  transition: border-color var(--dur-2) var(--ease-out-quart), background var(--dur-2) var(--ease-out-quart);
+}
+.world-card:hover { background: var(--sidebar-hover); }
+.world-card.active { border-color: var(--text-1); }
+.world-card-art { display: grid; place-items: center; width: 48px; height: 48px; flex-shrink: 0; }
+.world-card-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.world-card-name { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; }
+.world-card-dot { width: 8px; height: 8px; border-radius: 999px; flex-shrink: 0; }
+.world-card-mood { font-size: 12px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ── 设置 → 嗒嗒乐园（plan-114-449 乐园改版）──
+ * 舞台与底栏同属一张卡片：第一眼是一个有天、有地、有嗒嗒的小世界，而不是一块空白画板。
+ * 舞台配色按世界给出（--pg-*），由 canvas 读取；这里是插画区，允许比界面底色多一点颜色，
+ * 但仍压在低彩度、高明度（深色下低明度）区间，不与主操作抢强调色。 */
+.pg-card {
+  overflow: hidden;
+  border: 1px solid var(--border-light, var(--border)); border-radius: var(--r-lg);
+  background: var(--color-card);
+  box-shadow: 0 1px 2px rgba(20, 20, 30, 0.04), 0 12px 32px rgba(20, 20, 30, 0.07);
+}
+
+.pg-stage {
+  position: relative; overflow: hidden;
+  background: linear-gradient(to bottom, var(--pg-sky-top), var(--pg-sky-bottom));
+  /* 高度随宽度走，夹在 320~460 之间：窄时不成细长条，宽时不留大片空白 */
+  aspect-ratio: 16 / 8.4; min-height: 360px; max-height: 600px;
+  --pg-sky-top: oklch(96.5% 0.006 250); --pg-sky-bottom: var(--color-card);
+  --pg-ground: oklch(94% 0.004 85); --pg-ground-line: oklch(82% 0.006 85);
+  --pg-prop: oklch(85% 0.01 250); --pg-cloud: oklch(99.5% 0.003 230);
+}
+:root[data-world="forest"] .pg-stage {
+  --pg-sky-top: oklch(95% 0.028 170); --pg-sky-bottom: oklch(98% 0.02 95);
+  --pg-ground: oklch(90.5% 0.05 140); --pg-ground-line: oklch(76% 0.07 145); --pg-prop: oklch(84% 0.055 150);
+}
+:root[data-world="campfire"] .pg-stage {
+  --pg-sky-top: oklch(93% 0.03 290); --pg-sky-bottom: oklch(96.5% 0.035 60);
+  --pg-ground: oklch(89% 0.035 60); --pg-ground-line: oklch(73% 0.06 50); --pg-prop: oklch(72% 0.06 50);
+}
+:root[data-world="breeze"] .pg-stage {
+  --pg-sky-top: oklch(92.5% 0.045 230); --pg-sky-bottom: oklch(98% 0.015 200);
+  --pg-ground: oklch(92.5% 0.045 150); --pg-ground-line: oklch(78% 0.065 150); --pg-prop: oklch(80% 0.05 225);
+}
+:root[data-world="tide"] .pg-stage {
+  --pg-sky-top: oklch(94% 0.03 240); --pg-sky-bottom: oklch(97.5% 0.02 210);
+  --pg-ground: oklch(85% 0.06 230); --pg-ground-line: oklch(97% 0.02 220); --pg-prop: oklch(82% 0.05 230);
+}
+:root[data-world="sakura"] .pg-stage {
+  --pg-sky-top: oklch(95% 0.03 355); --pg-sky-bottom: oklch(98% 0.015 60);
+  --pg-ground: oklch(92% 0.032 140); --pg-ground-line: oklch(78% 0.05 140); --pg-prop: oklch(80% 0.08 355);
+}
+:root[data-theme="dark"] .pg-stage {
+  --pg-sky-top: oklch(27% 0.006 250); --pg-sky-bottom: var(--color-card);
+  --pg-ground: oklch(29% 0.004 85); --pg-ground-line: oklch(42% 0.006 85);
+  --pg-prop: oklch(36% 0.01 250); --pg-cloud: oklch(38% 0.02 230);
+}
+:root[data-theme="dark"][data-world="forest"] .pg-stage {
+  --pg-sky-top: oklch(27% 0.03 170); --pg-sky-bottom: oklch(24% 0.015 120);
+  --pg-ground: oklch(31% 0.04 145); --pg-ground-line: oklch(45% 0.06 145); --pg-prop: oklch(34% 0.04 150);
+}
+:root[data-theme="dark"][data-world="campfire"] .pg-stage {
+  --pg-sky-top: oklch(22% 0.03 290); --pg-sky-bottom: oklch(26% 0.03 50);
+  --pg-ground: oklch(30% 0.035 55); --pg-ground-line: oklch(45% 0.06 50); --pg-prop: oklch(42% 0.05 50);
+}
+:root[data-theme="dark"][data-world="breeze"] .pg-stage {
+  --pg-sky-top: oklch(28% 0.04 235); --pg-sky-bottom: oklch(25% 0.015 200);
+  --pg-ground: oklch(32% 0.045 155); --pg-ground-line: oklch(46% 0.06 155); --pg-prop: oklch(45% 0.04 225);
+}
+:root[data-theme="dark"][data-world="tide"] .pg-stage {
+  --pg-sky-top: oklch(26% 0.035 245); --pg-sky-bottom: oklch(24% 0.02 215);
+  --pg-ground: oklch(36% 0.06 235); --pg-ground-line: oklch(55% 0.05 220); --pg-prop: oklch(40% 0.05 230);
+}
+:root[data-theme="dark"][data-world="sakura"] .pg-stage {
+  --pg-sky-top: oklch(28% 0.03 355); --pg-sky-bottom: oklch(24% 0.012 40);
+  --pg-ground: oklch(30% 0.03 140); --pg-ground-line: oklch(44% 0.045 140); --pg-prop: oklch(55% 0.08 355);
+}
+
+.pg-host, .pg-fallback { position: absolute; inset: 0; }
+.pg-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: pointer; touch-action: none; }
+.pg-fallback { display: grid; place-items: center; }
+
+/* 舞台上的玻璃浮条：计数 / 重来 / 起手提示（舞台之外没有底栏） */
+.pg-hud {
+  position: absolute; z-index: 2; display: flex; align-items: center; gap: 6px;
+  padding: 0 12px; height: 32px; border-radius: 999px; font-size: 12px; color: var(--text-1);
+  background: color-mix(in oklab, var(--color-card) 62%, transparent);
+  border: 1px solid color-mix(in oklab, var(--color-card) 55%, transparent);
+  backdrop-filter: blur(10px) saturate(1.3); -webkit-backdrop-filter: blur(10px) saturate(1.3);
+  box-shadow: 0 2px 10px rgba(20, 20, 30, 0.1);
+}
+.pg-hud-tl { top: 14px; left: 14px; font-variant-numeric: tabular-nums; min-width: 64px; }
+.pg-hud-tr { top: 14px; right: 14px; padding: 0 4px; }
+.pg-star-glyph { color: var(--world-2, #e6b34a); filter: drop-shadow(0 0 4px color-mix(in oklab, var(--world-2, #e6b34a) 70%, transparent)); }
+.pg-count { font-weight: 600; min-width: 1.6em; }
+.pg-hint {
+  left: 50%; bottom: 14px; transform: translateX(-50%); color: var(--text-2); white-space: nowrap; max-width: calc(100% - 28px);
+  overflow: hidden; text-overflow: ellipsis; opacity: 0; pointer-events: none;
+  transition: opacity var(--dur-4) var(--ease-out-quart);
+}
+.pg-hint[data-show] { opacity: 1; }
+/* 舞台上沿的一层柔光 + 四周暗角：画面更像「被灯照着的小世界」 */
+.pg-glare {
+  position: absolute; inset: 0; z-index: 1; pointer-events: none;
+  background:
+    radial-gradient(120% 70% at 50% -10%, rgba(255, 255, 255, 0.32), transparent 60%),
+    radial-gradient(90% 90% at 50% 50%, transparent 62%, rgba(10, 12, 30, 0.14) 100%);
+}
+
+/* 关于页嗒嗒：可点击，无按钮外观 */
+.about-dada { display: inline-grid; place-items: center; padding: 0; border: none; background: none; cursor: pointer; }
+
+@media (prefers-reduced-motion: reduce) {
+  .dada-blink .dada-eyes, .dada-wink .dada-eyes { animation: none; }
+}

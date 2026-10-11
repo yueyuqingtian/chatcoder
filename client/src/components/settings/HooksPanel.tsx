@@ -12,10 +12,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type HookConfigOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
-import { IconPlus, IconRefresh, IconX } from "../icons";
+import { IconAnchor, IconPencil, IconPlus, IconRefresh, IconX } from "../icons";
 import { Modal } from "../Modal";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { Input, Textarea } from "../ui";
+import { Empty, Input, Textarea, Tooltip } from "../ui";
 import { Sw } from "./shared";
 
 /** 事件中文名与说明（列表与新建弹窗共用） */
@@ -57,36 +57,38 @@ export function HooksPanel() {
 
       <div className="settings-resource-list">
         {items.map((h) => (
-          <div key={h.id} className="settings-resource-item">
+          <div key={h.id} className={"settings-resource-item sb-item" + (h.enabled ? "" : " is-off")}>
+            <span className="sb-tile" aria-hidden><IconAnchor size={16} /></span>
             <div className="settings-resource-info">
               <div className="settings-resource-name">
-                {eventLabel(h.event)}
+                {/* plan-91-393：事件以徽标呈现，类型次级标签 */}
+                <span className="sb-badge accent">{eventLabel(h.event)}</span>
                 <span className="hook-type-tag">{h.hook_type === "command" ? "执行命令" : "注入提示词"}</span>
               </div>
               <div className="settings-resource-desc">
-                {h.matcher && <span className="settings-resource-tag">工具匹配 {h.matcher}</span>}
-                <span
-                  className="hook-content"
-                  title={h.hook_type === "command" ? h.command : (h.prompt || "")}
-                >
-                  {h.hook_type === "command" ? h.command : (h.prompt || "")}
-                </span>
+                {h.matcher && <span className="settings-resource-tag">匹配 <code className="sb-mono">{h.matcher}</code></span>}
               </div>
+              <Tooltip content={h.hook_type === "command" ? h.command : (h.prompt || "")}>
+                <div className={"sb-preview" + (h.hook_type === "command" ? " sb-mono" : "")}>
+                  {h.hook_type === "command" ? h.command : (h.prompt || "")}
+                </div>
+              </Tooltip>
             </div>
             <div className="settings-resource-actions">
               <Sw checked={h.enabled} onChange={async (v) => {
                 try { await api.updateHook(h.id, { enabled: v }); await load(); }
                 catch (e) { notify("更新失败：" + String(e)); }
               }} />
-              <button className="btn btn-ghost btn-xs" onClick={() => { setEditing(h); setShowForm(true); }}>编辑</button>
-              <button className="btn btn-ghost btn-xs" aria-label="删除" onClick={() => setConfirmTarget(h)}><IconX size={12} /></button>
+              <span className="sb-hover-actions">
+                <Tooltip content="编辑"><button className="btn btn-ghost btn-xs" aria-label="编辑" onClick={() => { setEditing(h); setShowForm(true); }}><IconPencil size={12} /></button></Tooltip>
+                <Tooltip content="删除"><button className="btn btn-ghost btn-xs" aria-label="删除" onClick={() => setConfirmTarget(h)}><IconX size={12} /></button></Tooltip>
+              </span>
             </div>
           </div>
         ))}
         {items.length === 0 && (
-          <div className="navpage-empty">
-            暂无钩子。点击右上「新建钩子」配置第一条：例如在调用终端前注入一段路径约定提示词。
-          </div>
+          <Empty title="暂无钩子" desc="例如在调用终端前注入一段路径约定提示词"
+            action={<button className="btn btn-secondary btn-sm" onClick={() => { setEditing(null); setShowForm(true); }}><IconPlus size={13} /> 新建钩子</button>} />
         )}
       </div>
 

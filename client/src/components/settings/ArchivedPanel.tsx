@@ -12,8 +12,8 @@ import { api, type ProjectOut, type SessionOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { formatRelativeTime } from "../../utils/time";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { Checkbox } from "../ui";
-import { IconFolder, IconHash, IconRotateCcw, IconSearch, IconTrash } from "../icons";
+import { Checkbox, Empty, Tooltip } from "../ui";
+import { IconFolder, IconMessageSquare, IconRotateCcw, IconSearch, IconTrash } from "../icons";
 
 function shortPath(path: string): string {
   const clean = path.replace(/\\/g, "/").replace(/\/$/, "");
@@ -166,7 +166,7 @@ export function ArchivedPanel() {
   return (
     <div className="archive-panel">
       {/* 工具条：搜索 + 全选 + 批量操作 */}
-      <div className="archive-toolbar">
+      <div className="archive-toolbar sc-toolbar">
         <div className="archive-search">
           <IconSearch size={13} />
           <input
@@ -177,74 +177,87 @@ export function ArchivedPanel() {
           />
         </div>
         <span className="archive-picked">已选 {pickedCount} 项</span>
-        <button className="btn btn-ghost btn-xs" onClick={toggleAllShown} disabled={busy || (filteredProjects.length === 0 && filteredSessions.length === 0)}>
+        <button className="btn btn-ghost btn-sm" onClick={toggleAllShown} disabled={busy || (filteredProjects.length === 0 && filteredSessions.length === 0)}>
           {allShownSessions && allShownProjects ? "取消全选" : "全选当前"}
         </button>
-        <button className="btn btn-ghost btn-xs" onClick={() => void restorePicked()} disabled={busy || pickedCount === 0}>
+        <button className="btn btn-ghost btn-sm" onClick={() => void restorePicked()} disabled={busy || pickedCount === 0}>
           <IconRotateCcw size={12} /> 批量恢复
         </button>
-        <button className="btn btn-danger btn-xs" onClick={() => setConfirmDelete(true)} disabled={busy || pickedCount === 0}>
+        <button className="btn btn-danger btn-sm" onClick={() => setConfirmDelete(true)} disabled={busy || pickedCount === 0}>
           <IconTrash size={12} /> 批量删除
         </button>
       </div>
 
-      {projects.length > 0 && (
-        <div className="sb-section-label" style={{ margin: "14px 0 6px" }}>已归档项目</div>
-      )}
-      {filteredProjects.map((p) => (
-        <div key={p.id} className="settings-resource-item">
-          <Checkbox
-            checked={pickedProjects.has(p.id)}
-            onChange={() => toggleProject(p.id)}
-            aria-label={`选择项目 ${p.name || shortPath(p.path)}`}
-          />
-          <div className="settings-resource-info">
-            <div className="settings-resource-name"><IconFolder size={13} /> {p.name || shortPath(p.path)}</div>
-            <div className="settings-resource-desc">{p.path}</div>
-          </div>
-          <div className="settings-resource-actions">
-            <button className="btn btn-ghost btn-xs" disabled={busy}
-              onClick={() => void restoreProject(p.id)} title="恢复项目及其下的会话">
-              <IconRotateCcw size={12} /> 恢复
-            </button>
-          </div>
-        </div>
-      ))}
-
-      {sessions.length > 0 && (
-        <div className="sb-section-label" style={{ margin: "14px 0 6px" }}>已归档会话</div>
-      )}
-      {filteredSessions.map((s) => {
-        const proj = s.project_id != null ? projectById.get(s.project_id) : undefined;
-        return (
-          <div key={s.id} className="settings-resource-item">
-            <Checkbox
-              checked={pickedSessions.has(s.id)}
-              onChange={() => toggleSession(s.id)}
-              aria-label={`选择会话 ${s.title || s.id}`}
-            />
-            <div className="settings-resource-info">
-              <div className="settings-resource-name"><IconHash size={13} /> {s.title || `会话 ${s.id}`}</div>
-              <div className="settings-resource-desc">
-                {proj ? `${proj.name} · ` : ""}归档于 {formatRelativeTime(s.last_activity_at)}
+      {/* plan-91-393：行 = 勾选 + 图标块 + 标题/路径 + 右侧操作；分组标题与空态统一 */}
+      {filteredProjects.length > 0 && <div className="sc-group-label">已归档项目</div>}
+      {filteredProjects.length > 0 && (
+        <div className="sc-list">
+          {filteredProjects.map((p) => (
+            <div key={p.id} className="sc-row">
+              <Checkbox
+                checked={pickedProjects.has(p.id)}
+                onChange={() => toggleProject(p.id)}
+                aria-label={`选择项目 ${p.name || shortPath(p.path)}`}
+              />
+              <span className="sc-tile"><IconFolder size={15} /></span>
+              <div className="sc-row-main">
+                <div className="sc-row-title">{p.name || shortPath(p.path)}</div>
+                <div className="sc-row-desc sc-mono">{p.path}</div>
+              </div>
+              <div className="sc-row-actions">
+                <Tooltip content="恢复项目及其下的会话">
+                  <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void restoreProject(p.id)}>
+                    <IconRotateCcw size={12} /> 恢复
+                  </button>
+                </Tooltip>
               </div>
             </div>
-            <div className="settings-resource-actions">
-              <button className="btn btn-ghost btn-xs" disabled={busy}
-                onClick={() => void restoreSession(s, true)} title="恢复并打开该会话">
-                <IconRotateCcw size={12} /> 恢复并打开
-              </button>
-              <button className="btn btn-ghost btn-xs" disabled={busy}
-                onClick={() => void restoreSession(s)} title="仅恢复到侧栏">
-                <IconRotateCcw size={12} /> 恢复
-              </button>
-            </div>
-          </div>
-        );
-      })}
+          ))}
+        </div>
+      )}
 
-      {empty && <div className="navpage-empty">暂无归档的项目或会话</div>}
-      {noMatch && <div className="navpage-empty">没有匹配「{query}」的归档项</div>}
+      {filteredSessions.length > 0 && <div className="sc-group-label">已归档会话</div>}
+      {filteredSessions.length > 0 && (
+        <div className="sc-list">
+          {filteredSessions.map((s) => {
+            const proj = s.project_id != null ? projectById.get(s.project_id) : undefined;
+            return (
+              <div key={s.id} className="sc-row">
+                <Checkbox
+                  checked={pickedSessions.has(s.id)}
+                  onChange={() => toggleSession(s.id)}
+                  aria-label={`选择会话 ${s.title || s.id}`}
+                />
+                <span className="sc-tile"><IconMessageSquare size={15} /></span>
+                <div className="sc-row-main">
+                  <div className="sc-row-title">{s.title || `会话 ${s.id}`}</div>
+                  <div className="sc-row-desc">{proj ? `${proj.name} · ` : ""}归档于 {formatRelativeTime(s.last_activity_at)}</div>
+                </div>
+                <div className="sc-row-actions">
+                  <Tooltip content="仅恢复到侧栏">
+                    <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void restoreSession(s)}>
+                      <IconRotateCcw size={12} /> 恢复
+                    </button>
+                  </Tooltip>
+                  <Tooltip content="恢复并打开该会话">
+                    <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void restoreSession(s, true)}>
+                      恢复并打开
+                    </button>
+                  </Tooltip>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {empty && (
+        <Empty title="暂无归档的项目或会话" desc="归档后的内容会收在这里，随时可以恢复" />
+      )}
+      {noMatch && (
+        <Empty mood="think" title={`没有匹配「${query}」的归档项`}
+          action={<button className="btn btn-ghost btn-sm" onClick={() => setQuery("")}>清除搜索</button>} />
+      )}
 
       <ConfirmDialog
         open={confirmDelete}

@@ -73,7 +73,7 @@
   transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard), border-color var(--dur-2) var(--ease-standard);
 }
 .mkt-cat:hover { background: var(--bg-hover); color: var(--text-1); }
-.mkt-cat.is-on { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); font-weight: 500; }
+.mkt-cat.is-on { background: var(--text-1); border-color: var(--text-1); color: var(--bg-main); font-weight: 500; }
 .mkt-cat-count { margin-left: 6px; font-size: 11px; font-variant-numeric: tabular-nums; opacity: 0.6; }
 
 /* ── ③ 卡片网格 ──────────────────────────────────────────── */
@@ -154,7 +154,7 @@
 
 /* 骨架卡：形状与真实卡片一致 */
 .mkt-card.is-skeleton { cursor: default; pointer-events: none; }
-.mkt-sk { display: block; border-radius: 6px; background: color-mix(in oklab, var(--text-1) 9%, transparent); animation: mo-skeleton 1.4s ease-in-out infinite; }
+.mkt-sk { display: block; border-radius: var(--r-md); background: color-mix(in oklab, var(--text-1) 9%, transparent); animation: mo-skeleton 1.4s ease-in-out infinite; }
 .mkt-sk-ic { width: 40px; height: 40px; border-radius: var(--r-md); flex-shrink: 0; }
 .mkt-sk-line { height: 11px; }
 .mkt-sk-line.is-sm { height: 9px; margin-top: 3px; }
@@ -196,7 +196,7 @@
 .mkt-socket-face { fill: var(--color-card); stroke: var(--border); stroke-width: 1; }
 .mkt-socket-inset { fill: color-mix(in oklab, var(--text-1) 5%, transparent); }
 .mkt-screw { fill: color-mix(in oklab, var(--text-1) 24%, transparent); }
-.mkt-led { fill: #3cc96e; filter: drop-shadow(0 0 4px #3cc96e); transition: opacity var(--dur-3) var(--ease-standard); animation: mkt-led-on calc(520ms * var(--motion-scale)) var(--ease-standard) calc(620ms * var(--motion-scale)) backwards; }
+.mkt-led { fill: #3cc96e; transition: opacity var(--dur-3) var(--ease-standard); animation: mkt-led-on calc(520ms * var(--motion-scale)) var(--ease-standard) calc(620ms * var(--motion-scale)) backwards; }
 @keyframes mkt-led-on { from { fill: #94a0ae; filter: none; } }
 
 /* 星芒闪烁 / 小圆点漂浮：慢速循环，只做装饰 */

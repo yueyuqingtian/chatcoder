@@ -3,7 +3,8 @@
 import { useState } from "react";
 import { api } from "../../api/client";
 import { useChatStore } from "../../store/chat";
-import { IconRefresh, IconWrench } from "../icons";
+import { IconAlertCircle, IconCheckCircle, IconDatabase, IconRefresh, IconWrench } from "../icons";
+import { Empty } from "../ui";
 
 interface CheckpointStat { workspace: string; file_count: number; size_mb: number; orphan_count: number }
 
@@ -45,44 +46,62 @@ export function DiagnosticsPanel() {
     } catch (e) { useChatStore.setState({ error: String(e) }); }
     finally { setCleaning(false); }
   };
+  const okCount = result?.filter((c) => c.ok).length ?? 0;
+  const failCount = (result?.length ?? 0) - okCount;
   return (
-    <div>
-      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginBottom: 12 }}>
-        <button className="btn btn-primary btn-sm" onClick={run} disabled={running}><IconRefresh size={13} /> {running ? "运行中…" : "运行诊断"}</button>
+    <div className="sc-page">
+      {/* plan-91-393：顶部摘要 + 操作右对齐；检查项分组为带状态图标的行 */}
+      <div className="sc-toolbar">
+        <div className="sc-toolbar-summary">
+          {result == null ? "系统健康检查" : failCount === 0 ? `全部 ${okCount} 项正常` : `${failCount} 项异常 · ${okCount} 项正常`}
+        </div>
+        <span className="sc-flex-spacer" />
         {checkpoints != null && checkpoints.length > 0 && (
           <button className="btn btn-ghost btn-sm" onClick={clean} disabled={cleaning}><IconWrench size={13} /> {cleaning ? "清理中…" : "清理 checkpoint"}</button>
         )}
+        <button className="btn btn-primary btn-sm" onClick={run} disabled={running}>
+          <span className={`sc-icon-slot ${running ? "spin" : ""}`}><IconRefresh size={13} /></span> {running ? "运行中…" : "运行诊断"}
+        </button>
       </div>
-      {result == null && !running && <div className="navpage-empty">点击上方按钮运行系统健康检查</div>}
+      {result == null && !running && (
+        <Empty title="尚未运行诊断" desc="嗒嗒会检查 Git、运行时与存储状态"
+          action={<button className="btn btn-secondary btn-sm" onClick={run}>开始检查</button>} />
+      )}
       {result != null && (
-        <div className="settings-resource-list">
-          {result.map((c) => (
-            <div key={c.name} className="settings-resource-item">
-              <div className="settings-resource-info">
-                <div className="settings-resource-name">{c.name}</div>
-                {c.detail && <div className="settings-resource-desc"><span>{c.detail}</span></div>}
+        <>
+          <div className="sc-group-label">检查项</div>
+          <div className="sc-list">
+            {result.map((c) => (
+              <div key={c.name} className={`sc-row sc-check ${c.ok ? "ok" : "fail"}`}>
+                <span className="sc-status-icon">{c.ok ? <IconCheckCircle size={16} /> : <IconAlertCircle size={16} />}</span>
+                <div className="sc-row-main">
+                  <div className="sc-row-title">{c.name}</div>
+                  {c.detail && <div className="sc-row-desc">{c.detail}</div>}
+                </div>
+                <span className={`sc-badge ${c.ok ? "ok" : "fail"}`}>{c.ok ? "正常" : "异常"}</span>
               </div>
-              <span className="settings-resource-tag" style={{ color: c.ok ? "var(--success)" : "var(--error)", borderColor: c.ok ? "var(--success)" : "var(--error)" }}>
-                {c.ok ? "正常" : "异常"}
-              </span>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        </>
       )}
       {checkpoints != null && checkpoints.length > 0 && (
         <>
-          <div className="sb-section-label" style={{ margin: "14px 0 6px" }}>checkpoint 存储（.chatcoder/checkpoints）</div>
-          <div className="settings-resource-list">
+          <div className="sc-group-label">checkpoint 存储（.chatcoder/checkpoints）</div>
+          <div className="sc-list">
             {checkpoints.map((c) => (
-              <div key={c.workspace} className="settings-resource-item">
-                <div className="settings-resource-info">
-                  <div className="settings-resource-name">{c.workspace}</div>
-                  <div className="settings-resource-desc">{c.file_count} 个文件 · {c.size_mb} MB · 孤儿 {c.orphan_count} 个</div>
+              <div key={c.workspace} className="sc-row">
+                <span className="sc-tile"><IconDatabase size={15} /></span>
+                <div className="sc-row-main">
+                  <div className="sc-row-title sc-mono">{c.workspace}</div>
+                  <div className="sc-row-desc">{c.file_count} 个文件 · {c.size_mb} MB · 孤儿 {c.orphan_count} 个</div>
                 </div>
-                <button className="btn btn-ghost btn-xs" disabled={cleaning}
-                  onClick={async () => { setCleaning(true); try { await api.cleanupCheckpoints(c.workspace); await run(); } catch (e) { useChatStore.setState({ error: String(e) }); } finally { setCleaning(false); } }}>
-                  <IconWrench size={12} /> 清理
-                </button>
+                {c.orphan_count > 0 && <span className="sc-badge warn">有孤儿</span>}
+                <div className="sc-row-actions">
+                  <button className="btn btn-ghost btn-sm" disabled={cleaning}
+                    onClick={async () => { setCleaning(true); try { await api.cleanupCheckpoints(c.workspace); await run(); } catch (e) { useChatStore.setState({ error: String(e) }); } finally { setCleaning(false); } }}>
+                    <IconWrench size={12} /> 清理
+                  </button>
+                </div>
               </div>
             ))}
           </div>

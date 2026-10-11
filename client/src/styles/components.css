@@ -385,26 +385,54 @@
 .ui-card-row-desc { font-size: 12px; color: var(--text-3); line-height: 1.5; margin-top: 2px; }
 .ui-card-row-control { flex-shrink: 0; display: flex; align-items: center; justify-content: flex-end; gap: var(--sp-3); min-width: 0; }
 
-/* 资源列表项（增删列表） */
-.ui-list { display: flex; flex-direction: column; gap: var(--sp-3); }
+/* 资源列表（增删列表）：plan-121-482 行列表统一协议——
+   容器是唯一卡片层，行为全宽横线行（对齐「常规」页 settings-card + settings-row 的观感）。 */
+.ui-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border: 1px solid var(--border-light);
+  border-radius: var(--r-lg);
+  background: var(--bg-main);
+  overflow: hidden;
+}
 .ui-list-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--sp-4);
-  padding: var(--sp-3) var(--sp-4);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--bg-main);
+  padding: var(--row-pad-y) var(--sp-5);
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  border-bottom: 1px solid var(--border-light);
   min-width: 0;
 }
+.ui-list > .ui-list-row:last-child { border-bottom: none; }
 .ui-list-row-info { flex: 1; min-width: 0; }
 .ui-list-row-name { font-size: 13px; font-weight: 500; color: var(--text-1); }
 .ui-list-row-desc { font-size: 12px; color: var(--text-3); margin-top: 2px; line-height: 1.5; word-break: break-word; }
 .ui-list-row-actions { display: flex; align-items: center; gap: var(--sp-3); flex-shrink: 0; }
+/* plan-114-450：资源行统一形态——图标块 + 名称/描述/标签三层 + 右侧控件；悬停才显示次要操作（.ui-row-hover） */
+.ui-list-row-icon {
+  display: grid; place-items: center; flex-shrink: 0; width: 32px; height: 32px; border-radius: var(--r-md);
+  background: color-mix(in oklab, var(--text-1) 5%, transparent); color: var(--text-2);
+}
+.ui-list-row-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; min-width: 0; }
+.ui-list-row.is-muted .ui-list-row-name, .ui-list-row.is-muted .ui-list-row-desc, .ui-list-row.is-muted .ui-list-row-icon { opacity: 0.55; }
+.ui-list-row .ui-row-hover { display: inline-flex; gap: 2px; opacity: 0; transition: opacity var(--dur-2) var(--ease-standard); }
+.ui-list-row:hover .ui-row-hover, .ui-list-row:focus-within .ui-row-hover { opacity: 1; }
+.ui-section .ui-list { border-color: var(--border-light, var(--border)); background: var(--bg-elevated); }
+.ui-section .ui-list-row { padding: 14px var(--sp-5); }
+.ui-tag {
+  display: inline-flex; align-items: center; height: 20px; padding: 0 7px; border-radius: var(--r-sm);
+  font-size: 11px; line-height: 1; color: var(--text-2); white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+  background: color-mix(in oklab, var(--text-1) 5%, transparent);
+}
+.ui-tag.is-mono { font-family: var(--font-mono); font-size: 10.5px; }
 /* 整行可点击（如打开详情弹窗）：悬停给出反馈，与设置页其它可点元素同用动效令牌 */
-.ui-list-row.is-clickable { cursor: pointer; transition: border-color var(--dur-2) var(--ease-standard), background var(--dur-2) var(--ease-standard); }
-.ui-list-row.is-clickable:hover { border-color: var(--border-hover); background: var(--bg-hover); }
+.ui-list-row.is-clickable { cursor: pointer; transition: background var(--dur-2) var(--ease-standard); }
+.ui-list-row.is-clickable:hover { background: var(--bg-hover); }
 
 /* ── ⑨ PageShell：唯一滚动容器 + 固定标题区（防跳变） ──────── */
 .ui-page {
@@ -441,6 +469,28 @@
 .ui-page.is-fill { overflow: hidden; padding-bottom: 0; scrollbar-gutter: auto; }
 .ui-page-inner.is-fill { flex: 1; min-height: 0; height: 100%; padding-bottom: 0; }
 .ui-page-inner.is-fill > .ui-page-cards { flex: 1; min-height: 0; }
+
+/* ── ⑨b 设置页统一排版（plan-114-450，参照 Qoder）──
+ * 页头：标题加大到 22px，说明一行灰字，右上角放该页主操作（PANELS.actions）；
+ * 分组：卡片外一行小号灰色组标题（右侧可挂该组操作），下面一张圆角卡片；卡片内为「标题说明 / 控件」行。 */
+.ui-page-title { font-size: 22px; line-height: 30px; letter-spacing: -0.3px; }
+.ui-page-subtitle { font-size: 13px; line-height: 20px; margin-top: 4px; }
+.ui-page-head { min-height: 54px; margin-bottom: var(--sp-2); }
+.ui-section { display: flex; flex-direction: column; gap: var(--sp-3); min-width: 0; }
+.ui-section-head { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--sp-4); min-height: 28px; padding: 0 2px; }
+.ui-section-head-text { min-width: 0; }
+.ui-section-title { margin: 0; font-size: 13px; font-weight: 500; color: var(--text-3); line-height: 20px; }
+.ui-section-desc { font-size: 12px; color: var(--text-3); line-height: 1.5; margin-top: 2px; }
+.ui-section-actions { display: flex; align-items: center; gap: var(--sp-2); flex-shrink: 0; }
+.ui-section > .ui-card { border-color: var(--border-light, var(--border)); }
+.ui-card.is-flush { padding: 0; }
+/* 卡片里的行：更舒展的行高，与参考图「一项一行」节奏一致 */
+.ui-section .ui-card-row { padding: 14px var(--sp-5); }
+.ui-section .ui-card-row-title { font-size: 13.5px; }
+/* 页内工具条：左侧分段标签，右侧搜索 + 主操作，同一高度对齐 */
+.ui-toolbar { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; min-width: 0; }
+.ui-toolbar-end { display: flex; align-items: center; gap: var(--sp-2); margin-left: auto; min-width: 0; }
+.ui-toolbar-search { width: 240px; max-width: 100%; }
 
 /* ── ⑩ Collapse：grid-template-rows 真实高度过渡 ─────────── */
 /* plan-353-1738 M4a（S4）：与 .tc-collapse / .collapse-grid 统一为 3 档时长（展开/折叠）。

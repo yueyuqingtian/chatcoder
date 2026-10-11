@@ -13,9 +13,9 @@ import { useChatStore } from "../../store/chat";
 import { usePanelStore } from "../../store/panel";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { FormDialog } from "../ui/FormDialog";
-import { Input, Checkbox } from "../ui";
+import { Button, Checkbox, Empty, IconButton, Input, List, ListRow, PageActions, Section, Tag, Tooltip } from "../ui";
 import { MergeDialog } from "../worktree/MergeDialog";
-import { IconGitBranch, IconPlus, IconRefresh, IconTrash, IconFolderOpen } from "../icons";
+import { IconDownload, IconGitBranch, IconPlus, IconRefresh, IconTrash, IconFolderOpen } from "../icons";
 
 /** 项目名：优先 name，否则取路径末段 */
 function projectLabel(p: ProjectOut): string {
@@ -154,111 +154,89 @@ export function WorktreesPanel() {
     } finally { setBusy(false); }
   };
 
-  return (
-    <div className="worktrees-panel">
-      <div className="settings-toolbar">
-        <span className="worktrees-hint">
-          工作树用于在同一项目内开多个隔离工作区并行开发（类似 git worktree）。
-          新建后会在左侧面板作为独立工作区出现，可在其中直接开启会话。
-        </span>
-        <button className="btn btn-ghost btn-sm" onClick={() => void load()} disabled={loading}>
-          <IconRefresh size={13} /> 刷新
-        </button>
-        {/* plan-308-1542 修复：一键清理失效工作树（目录/分支已被外部删除，但左面板仍残留的僵尸项） */}
-        <button
-          className="btn btn-ghost btn-sm"
-          disabled={busy}
-          title="清理目录已不存在、但仍登记在库里的工作树（左面板删不掉的残留项）"
-          onClick={async () => {
-            setBusy(true);
-            setNotice(null);
-            try {
-              const res = await api.cleanupStaleWorktrees();
-              setNotice(res.cleaned > 0
-                ? `已清理 ${res.cleaned} 个失效工作树：${res.stale.map((s) => s.name).join("、")}`
-                : "没有发现失效的工作树");
-              await load();
-              // 左面板同步刷新（否则被清理的项仍显示在项目列表里）
-              await useChatStore.getState().loadBootstrap();
-            } catch (e) {
-              setNotice(`清理失败：${String(e)}`);
-            } finally { setBusy(false); }
-          }}
-        >
-          清理失效工作树
-        </button>
-      </div>
+  const cleanupStale = async () => {
+    setBusy(true);
+    setNotice(null);
+    try {
+      const res = await api.cleanupStaleWorktrees();
+      setNotice(res.cleaned > 0
+        ? `已清理 ${res.cleaned} 个失效工作树：${res.stale.map((s) => s.name).join("、")}`
+        : "没有发现失效的工作树");
+      await load();
+      // 左面板同步刷新（否则被清理的项仍显示在项目列表里）
+      await useChatStore.getState().loadBootstrap();
+    } catch (e) {
+      setNotice(`清理失败：${String(e)}`);
+    } finally { setBusy(false); }
+  };
 
-      {notice && <div className="worktrees-notice">{notice}</div>}
+  return (
+    <>
+      {/* plan-114-450：页级操作收进页头右上；说明文字移到页面副标题（i18n settings.ps.worktrees） */}
+      <PageActions>
+        {/* plan-308-1542：一键清理失效工作树（目录/分支已被外部删除，但左面板仍残留的僵尸项） */}
+        <Tooltip content="清理目录已不存在、但仍登记在库里的工作树（左面板删不掉的残留项）">
+          <Button variant="ghost" size="sm" disabled={busy} onClick={() => void cleanupStale()}>清理失效项</Button>
+        </Tooltip>
+        <Button variant="secondary" size="sm" icon={<IconRefresh size={13} />} loading={loading} onClick={() => void load()}>刷新</Button>
+      </PageActions>
+
+      {notice && <div className="worktrees-notice" role="status">{notice}</div>}
 
       {projects.length === 0 && !loading && (
-        <div className="navpage-empty">暂无项目。请先在左侧添加一个 git 项目。</div>
+        <div className="ui-card"><Empty title="还没有项目" desc="先在左侧添加一个 git 项目，就能在这里给它开并行工作树" /></div>
       )}
 
       {projects.map((p) => {
         const list = byParent.get(p.id) ?? [];
         return (
-          <section className="worktree-group" key={p.id}>
-            <div className="worktree-group-head">
-              <div className="worktree-group-title">
-                <IconFolderOpen size={14} />
-                <span>{projectLabel(p)}</span>
-                <span className="worktree-count">{list.length} 个工作树</span>
-              </div>
-              <button
-                className="btn btn-ghost btn-xs"
-                onClick={() => void openCreate(p)}
-                title="在该项目下创建工作树"
-              >
-                <IconPlus size={12} /> 新建工作树
-              </button>
-            </div>
-
+          <Section
+            key={p.id}
+            bare
+            title={`${projectLabel(p)} · ${list.length} 个工作树`}
+            actions={<Button variant="ghost" size="sm" icon={<IconPlus size={12} />} onClick={() => void openCreate(p)}>新建工作树</Button>}
+          >
             {list.length === 0 ? (
-              <div className="worktree-empty">该项目还没有工作树</div>
+              <div className="ui-card">
+                <Empty size="sm" title="该项目还没有工作树" desc="新建后会在左侧面板作为独立工作区出现" />
+              </div>
             ) : (
-              list.map((wt) => (
-                <div className="settings-resource-item worktree-item" key={wt.id}>
-                  <div className="settings-resource-info">
-                    <div className="settings-resource-name">
-                      <IconGitBranch size={13} /> {wt.name}
-                      {wt.dirty && <span className="worktree-badge dirty">有未提交变更</span>}
-                      {(wt.ahead > 0 || wt.behind > 0) && (
-                        <span className="worktree-badge">
-                          {wt.ahead > 0 && `↑${wt.ahead}`}
-                          {wt.ahead > 0 && wt.behind > 0 && " "}
-                          {wt.behind > 0 && `↓${wt.behind}`}
+              <List>
+                {list.map((wt) => (
+                  <ListRow
+                    key={wt.id}
+                    icon={<IconGitBranch size={15} />}
+                    name={<span className="sc-ellipsis">{wt.name}</span>}
+                    desc={<>分支 {wt.branch || "—"} · <span className="sc-mono">{wt.path}</span></>}
+                    meta={(wt.dirty || wt.ahead > 0 || wt.behind > 0) ? (
+                      <>
+                        {wt.dirty && <Tag>有未提交变更</Tag>}
+                        {wt.ahead > 0 && <Tag>领先 {wt.ahead}</Tag>}
+                        {wt.behind > 0 && <Tag>落后 {wt.behind}</Tag>}
+                      </>
+                    ) : undefined}
+                    actions={
+                      <>
+                        {/* plan-114-450：次要操作悬停显示，常驻只留「合并」主操作，避免每行四个按钮挤在一起 */}
+                        <span className="ui-row-hover">
+                          <IconButton size="xs" title="把主工作区的改动更新到该工作树" icon={<IconDownload size={13} />} disabled={busy}
+                            onClick={() => { setMergeDirection("from_main"); setMergeTarget(wt); }} />
+                          <IconButton size="xs" title="打开目录" icon={<IconFolderOpen size={13} />} disabled={busy}
+                            onClick={() => { usePanelStore.getState().setPreviewPath(wt.path); }} />
+                          <IconButton size="xs" tone="danger" title="删除工作树" icon={<IconTrash size={13} />} disabled={busy}
+                            onClick={() => setDropTarget(wt)} />
                         </span>
-                      )}
-                    </div>
-                    <div className="settings-resource-desc" title={wt.path}>
-                      分支 {wt.branch || "—"} · {wt.path}
-                    </div>
-                  </div>
-                  <div className="settings-resource-actions">
-                    <button className="btn btn-ghost btn-xs" disabled={busy}
-                      onClick={() => { setMergeDirection("to_main"); setMergeTarget(wt); }}
-                      title="合并该工作树的改动到主工作区">
-                      合并到主工作区
-                    </button>
-                    <button className="btn btn-ghost btn-xs" disabled={busy}
-                      onClick={() => { setMergeDirection("from_main"); setMergeTarget(wt); }}
-                      title="把主工作区的改动更新到该工作树">
-                      从主工作区更新
-                    </button>
-                    <button className="btn btn-ghost btn-xs" disabled={busy}
-                      onClick={() => { usePanelStore.getState().setPreviewPath(wt.path); }}>
-                      <IconFolderOpen size={12} />
-                    </button>
-                    <button className="btn btn-danger btn-xs" disabled={busy}
-                      onClick={() => setDropTarget(wt)} title="删除工作树">
-                      <IconTrash size={12} />
-                    </button>
-                  </div>
-                </div>
-              ))
+                        <Tooltip content="合并该工作树的改动到主工作区">
+                          <Button variant="secondary" size="sm" disabled={busy}
+                            onClick={() => { setMergeDirection("to_main"); setMergeTarget(wt); }}>合并到主工作区</Button>
+                        </Tooltip>
+                      </>
+                    }
+                  />
+                ))}
+              </List>
             )}
-          </section>
+          </Section>
         );
       })}
 
@@ -339,6 +317,6 @@ export function WorktreesPanel() {
         onClose={() => setMergeTarget(null)}
         onMerged={() => { setMergeTarget(null); void load(); }}
       />
-    </div>
+    </>
   );
 }

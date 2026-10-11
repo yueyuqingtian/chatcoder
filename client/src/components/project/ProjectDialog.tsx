@@ -255,7 +255,7 @@ export function ProjectDialog() {
       className="pd-dialog"
       footer={
         <>
-          <Button variant="ghost" onClick={hide}>取消</Button>
+          <Button variant="secondary" onClick={hide}>取消</Button>
           <Button variant="primary" onClick={() => void submit()} loading={busy} disabled={mode === "create" && !path}>
             {mode === "edit" ? "保存" : "创建项目"}
           </Button>

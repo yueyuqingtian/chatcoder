@@ -13,6 +13,7 @@ import { api, type ModelOut } from "../../api/client";
 import { providerRank } from "../../utils/modelOrder";
 import { IconCpu, IconCheck, IconChevronRight, IconMultimodal, IconRefresh } from "../icons";
 import { useDialogContentHost } from "../ui/Dialog";
+import { Empty } from "../ui";
 
 interface ModelGroup {
   name: string;
@@ -192,7 +193,7 @@ export function ModelPicker({
             ) : null}
             {groups.length === 0 ? (
               <>
-                <div className="mp-models-empty">暂无可用模型，请先在设置中添加</div>
+                <Empty size="sm" title="暂无可用模型" desc="请先在设置中添加供应商与模型" />
                 <DropdownMenu.Separator className="mp-sep" />
                 <DropdownMenu.Item className="mp-item" onSelect={() => openModelSettings()}>
                   <span className="mp-item-check" />

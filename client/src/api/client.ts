@@ -806,6 +806,23 @@ export const api = {
   },
   ta3AdminWeb: (id: number) => post<{ ok: boolean; url: string }>(`/providers/${id}/ta3/admin-web`, {}),
 
+  // ── kiro（AWS Kiro）供应商（v26）：账号登录型，导入本机 Kiro 登录态 ──
+  kiroLoginStart: (id: number) => post<{
+    status: string; account?: Record<string, unknown> | null;
+    region?: string | null; error?: string | null;
+  }>(`/providers/${id}/kiro/login/start`, {}),
+  kiroLoginCancel: (id: number) => post<{ ok: boolean }>(`/providers/${id}/kiro/login/cancel`, {}),
+  kiroLoginStatus: (id: number) => get<{
+    status: string; account?: Record<string, unknown> | null;
+    region?: string | null; error?: string | null;
+  }>(`/providers/${id}/kiro/login/status`),
+  kiroLogout: (id: number) => post<{ ok: boolean }>(`/providers/${id}/kiro/logout`, {}),
+  kiroSync: (id: number) =>
+    post<{ synced: number; models: Array<{ name: string; model_id: string }> }>(`/providers/${id}/kiro/sync`, {}),
+  /** 剩余积分（GetUsageLimits）；force=true 跳过 10s 缓存 */
+  kiroQuota: (id: number, opts?: { force?: boolean }) =>
+    get<KiroQuotaOut>(`/providers/${id}/kiro/quota${opts?.force ? "?force=true" : ""}`),
+
   // ── workbuddy（腾讯 CodeBuddy/WorkBuddy）供应商（v24）──
   // plan-271-1364: 每次 loginStart 视为「登录一个新账号」，成功后新建凭据行
   workbuddyLoginStart: (id: number) => post<{
@@ -1324,6 +1341,28 @@ export interface Ta3QuotaActionResult {
   status?: string;
   message?: string;
   [k: string]: unknown;
+}
+
+/** v26: kiro 剩余积分额度明细（GetUsageLimits 规范化视图）。 */
+export interface KiroQuotaBreakdownOut {
+  type?: string;
+  used?: number;
+  limit?: number;
+  remaining?: number;
+}
+
+/** v26: kiro 剩余积分（服务端 normalize_usage 输出）。 */
+export interface KiroQuotaOut {
+  available?: boolean;
+  used?: number;
+  limit?: number;
+  remaining?: number;
+  /** 下一次额度重置时刻（ISO 字符串） */
+  reset_at?: string | null;
+  unit?: string;
+  account?: string;
+  breakdown?: KiroQuotaBreakdownOut[];
+  raw?: Record<string, unknown>;
 }
 
 /** v14: 上传文件返回结构（附件统一为文件地址）。 */

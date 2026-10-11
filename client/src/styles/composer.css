@@ -209,7 +209,7 @@
 .composer-ref-remove:hover { opacity: 1; background: color-mix(in oklab, var(--ref-c) 16%, transparent); color: inherit; }
 .composer-attachments { gap: 6px; padding: 0 0 8px; }
 .composer-attach-chip { height: 30px; padding: 0 6px 0 4px; border-radius: var(--r-ctl); background: var(--bg-hover); border: none; font-size: 12px; animation: mo-bounce-in var(--dur-spring) var(--spring-bouncy) both; }
-.composer-attach-chip .attach-chip-thumb { width: 22px; height: 22px; border-radius: 6px; }
+.composer-attach-chip .attach-chip-thumb { width: 22px; height: 22px; border-radius: var(--r-md); }
 .composer-attach-chip .remove { display: inline-flex; width: 18px; height: 18px; align-items: center; justify-content: center; border-radius: var(--r-pill); }
 .composer-attach-chip .remove:hover { background: var(--bg-active); }
 

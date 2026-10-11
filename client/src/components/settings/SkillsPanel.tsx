@@ -3,9 +3,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type SkillOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
-import { IconRefresh, IconPlus, IconX, IconFolder } from "../icons";
+import { IconRefresh, IconPlus, IconX, IconFolder, IconZap, IconGitBranch } from "../icons";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { FormDialog, Input, Textarea } from "../ui";
+import { Empty, FormDialog, Input, Textarea, Tooltip } from "../ui";
 import { Sw } from "./shared";
 
 /** 非阻塞提示：Electron 中 window.alert 是原生模态框，关闭后会破坏窗口焦点，统一改用全局提示条。 */
@@ -137,7 +137,7 @@ export function SkillsPanel() {
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginBottom: 12 }}>
+      <div className="sb-toolbar">
         <button className="btn btn-ghost btn-sm" onClick={() => void scan()} disabled={scanning}>
           <IconRefresh size={13} /> {scanning ? "扫描中…" : "刷新扫描"}
         </button>
@@ -164,7 +164,9 @@ export function SkillsPanel() {
           <div className="settings-card-title">技能仓库（云端 Git）</div>
           <div className="settings-resource-list">
             {repos.map((r) => (
-              <div key={r.id} className="settings-resource-item">
+              <div key={r.id} className="settings-resource-item sb-item">
+                {/* plan-91-393：列表项一律带类型图标瓦片 */}
+                <span className="sb-tile ext-tile" data-kind="repo"><IconGitBranch size={16} /></span>
                 <div className="settings-resource-info">
                   <div className="settings-resource-name">{r.name}</div>
                   <div className="settings-resource-desc">
@@ -176,7 +178,7 @@ export function SkillsPanel() {
                   <button className="btn btn-ghost btn-xs" onClick={() => handleSync(r.id, r.name)} disabled={syncingRepo === r.id}>
                     {syncingRepo === r.id ? "同步中…" : "同步/查看"}
                   </button>
-                  <button className="btn btn-ghost btn-xs" onClick={() => setConfirmDelete({ kind: "repo", id: r.id, name: r.name })}><IconX size={12} /></button>
+                  <Tooltip title="删除仓库"><button className="ui-icon-btn size-xs" aria-label="删除仓库" onClick={() => setConfirmDelete({ kind: "repo", id: r.id, name: r.name })}><IconX size={14} /></button></Tooltip>
                 </div>
               </div>
             ))}
@@ -189,7 +191,8 @@ export function SkillsPanel() {
           <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-2)", marginBottom: 8 }}>仓库技能：{repoSkills.name}</div>
           {repoSkills.skills.length === 0 && <div className="navpage-empty">仓库中未发现技能（请确保仓库含 skills/*.md）</div>}
           {repoSkills.skills.map((sk) => (
-            <div key={sk.name} className="settings-resource-item" style={{ marginBottom: 4 }}>
+            <div key={sk.name} className="settings-resource-item sb-item" style={{ marginBottom: 4 }}>
+              <span className="sb-tile ext-tile" data-kind="skill"><IconZap size={16} /></span>
               <div className="settings-resource-info">
                 <div className="settings-resource-name">{sk.display_name || sk.name}</div>
                 <div className="settings-resource-desc"><span>{sk.description || "无描述"}</span><span className="settings-resource-tag">{sk.path}</span></div>
@@ -202,7 +205,8 @@ export function SkillsPanel() {
 
       <div className="settings-resource-list">
         {items.map((s) => (
-          <div key={s.id} className="settings-resource-item skill-item">
+          <div key={s.id} className={"settings-resource-item skill-item sb-item" + (s.is_active ? "" : " is-off")}>
+            <span className="sb-tile ext-tile" data-kind="skill"><IconZap size={16} /></span>
             <div className="settings-resource-info">
               <div className="settings-resource-name">
                 {s.display_name || s.name}
@@ -210,7 +214,11 @@ export function SkillsPanel() {
                   {expandedSkill === s.id ? "收起" : "详情"}
                 </button>
               </div>
-              <div className="settings-resource-desc"><span>{s.description || "无描述"}</span><span className="settings-resource-tag" title={s.path || undefined}>{s.source}</span></div>
+              <div className="sb-desc">{s.description || "无描述"}</div>
+              <div className="settings-resource-desc sb-badges">
+                <Tooltip title={s.path || undefined} disabled={!s.path}><span className="sb-badge">{s.source}</span></Tooltip>
+                <span className="sb-badge accent">技能</span>
+              </div>
               {expandedSkill === s.id && (
                 <div className="skill-detail">
                   <div className="skill-detail-field">
@@ -233,11 +241,17 @@ export function SkillsPanel() {
             </div>
             <div className="settings-resource-actions">
               <Sw checked={s.is_active} onChange={async (v) => { try { await api.updateSkill(s.id, { is_active: v }); load(); } catch {} }} />
-              <button className="btn btn-ghost btn-xs" onClick={() => setConfirmDelete({ kind: "skill", id: s.id, name: s.display_name || s.name })}><IconX size={12} /></button>
+              {/* plan-91-393：删除悬停显现，固定槽位 */}
+              <span className="sb-hover-actions">
+                <Tooltip title="删除技能"><button className="ui-icon-btn size-xs" aria-label="删除技能" onClick={() => setConfirmDelete({ kind: "skill", id: s.id, name: s.display_name || s.name })}><IconX size={14} /></button></Tooltip>
+              </span>
             </div>
           </div>
         ))}
-        {items.length === 0 && <div className="navpage-empty">暂无技能</div>}
+        {items.length === 0 && (
+          <Empty title="暂无技能" desc="导入本地技能目录，让嗒嗒学会你的工作习惯"
+            action={<button className="btn btn-primary btn-sm" onClick={() => void handleImportLocal()}><IconFolder size={13} /> 导入本地技能</button>} />
+        )}
       </div>
       <ConfirmDialog
         open={confirmDelete !== null}

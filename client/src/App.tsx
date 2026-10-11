@@ -273,7 +273,7 @@ export default function App() {
                   工作区内部导航完全交给 Workspace 内层过渡，任何时刻只播一层。 */}
               <PageTransition id={nav === "settings" ? "settings" : "workspace"}>
                 {nav === "settings"
-                  ? <SettingsContent tab={settingsActiveTab} />
+                  ? <div className="world-tex settings-tex-host"><SettingsContent tab={settingsActiveTab} /></div>
                   : <Workspace nav={nav} onSessionStart={() => setNav(null)} />}
               </PageTransition>
             </main>

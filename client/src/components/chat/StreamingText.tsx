@@ -6,8 +6,9 @@
  *   有正文「处理中…」、无内容「等待响应…」。正文与思考流并存时尾部同样保留该行，
  *   不与上方思考行互相抑制（plan-282-1421 第4项：三点光标已移除，由本行统一承担）。
  */
+import { ToolGlyph } from "../iconkit/ToolGlyphs";
 import { useEffect, useRef, useState } from "react";
-import { IconBrain, IconChevronRight } from "../icons";
+import { IconChevronRight } from "../icons";
 import { StreamingMarkdown } from "./StreamingMarkdown";
 import { isBusy } from "../../perf/bus";
 import { ThinkingTicker } from "./ThinkingTicker";
@@ -115,9 +116,10 @@ export function StreamingText({ active, thinking, text, processingLabel = "处�
         <div className="tc-node thinking-node">
           <div
             className={`tc-row has-output thinking-row${tailOpen ? " expanded" : ""} active`}
+            data-tool-state="running"
             onClick={() => setTailOpen((v) => !v)}
           >
-            <span className="tc-icon"><IconBrain size={16} /></span>
+            <span className="tc-icon"><ToolGlyph tool="thinking" size={16} /></span>
             <span className="tc-verb">正在思考</span>
             {!tailOpen && (
               <span className="thinking-ticker-wrap">
@@ -163,11 +165,24 @@ export function StreamingText({ active, thinking, text, processingLabel = "处�
   );
 }
 
+/** plan-91-393：消息流底部「进行中」标记——三枚圆点沿正弦依次起伏并在末端汇成光标，
+ *  像对方正在输入；颜色跟随主题强调色，动效时长走令牌（降低动效时静止）。 */
+function WaitMark() {
+  return (
+    <svg className="wait-mark" width="22" height="12" viewBox="0 0 22 12" aria-hidden>
+      <circle className="wm-dot" cx="3" cy="6" r="2" style={{ animationDelay: "0ms" }} />
+      <circle className="wm-dot" cx="9" cy="6" r="2" style={{ animationDelay: "140ms" }} />
+      <circle className="wm-dot" cx="15" cy="6" r="2" style={{ animationDelay: "280ms" }} />
+      <rect className="wm-caret" x="19.5" y="1.5" width="1.6" height="9" rx="0.8" />
+    </svg>
+  );
+}
+
 /** 统一"进行中"状态行：呼吸点 + 文案（四态共用，唯一样式出口）。 */
 function StateLine({ label }: { label: string }) {
   return (
     <div className="turn-status-line">
-      <span className="thinking-breath-dot" />
+      <WaitMark />
       <span className="thinking-block-status">{label}</span>
     </div>
   );

@@ -25,7 +25,7 @@ export function FormDialog({ open, onClose, title, subtitle, onSubmit, submitLab
       width={width}
       footer={
         <>
-          <Button variant="ghost" onClick={onClose}>取消</Button>
+          <Button variant="secondary" onClick={onClose}>取消</Button>
           {onSubmit && <Button variant="primary" onClick={onSubmit} disabled={submitDisabled}>{submitLabel}</Button>}
         </>
       }

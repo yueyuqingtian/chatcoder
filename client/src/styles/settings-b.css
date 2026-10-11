@@ -1,0 +1,149 @@
+/* plan-91-393：设置页分组 b 的排版与样式（由对应面板独占维护） */
+
+/* ── plan-91-393：通用列表卡（子代理 / 钩子 / 规则来源） ── */
+.sb-toolbar { display: flex; gap: 8px; justify-content: flex-end; margin-bottom: 12px; }
+/* plan-121-482：卡内工具条下方紧跟贴边列表，卡片已补 16px 内距，去掉叠加的 12px 底距 */
+.ui-card .sb-toolbar { margin-bottom: 0; }
+/* plan-121-482：行外观（单层卡片 + 全宽横线行）由 .settings-resource-item 基础协议承担——
+   此处只保留行内布局差异（顶部对齐、间距）。 */
+.settings-resource-item.sb-item { align-items: flex-start; gap: 12px; }
+.settings-resource-item.sb-item.is-off .sb-tile,
+.settings-resource-item.sb-item.is-off .settings-resource-info { opacity: .6; }
+.sb-item .settings-resource-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.sb-item .settings-resource-name { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; line-height: 20px; }
+.sb-item .settings-resource-actions { align-self: center; gap: 4px; }
+.sb-tile {
+  flex-shrink: 0; width: 32px; height: 32px; border-radius: var(--r-md);
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent-soft); color: var(--accent);
+}
+.sb-desc {
+  font-size: 12px; line-height: 18px; color: var(--text-2);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.sb-badges { gap: 6px; margin-top: 2px; }
+.sb-badge {
+  display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 500; background: var(--surface-inset); color: var(--text-2);
+}
+.sb-badge.accent { background: var(--accent-soft); color: var(--accent); }
+.sb-mono { font-family: var(--font-mono, ui-monospace, SFMono-Regular, Consolas, monospace); font-size: 11px; }
+code.sb-mono { background: none; padding: 0; color: var(--text-1); }
+.sb-path { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-preview {
+  margin-top: 2px; padding: 6px 10px; border-radius: var(--r-md);
+  background: var(--surface-inset); border: 1px solid var(--surface-inset-border);
+  color: var(--text-2); font-size: 12px; line-height: 18px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 悬停显现的次要操作：固定槽位、仅改透明度，避免布局抖动 */
+.sb-hover-actions { display: inline-flex; gap: 2px; opacity: 0; transition: opacity var(--dur-fast) var(--ease-standard); }
+.sb-item:hover .sb-hover-actions, .sb-item:focus-within .sb-hover-actions { opacity: 1; }
+@media (hover: none) { .sb-hover-actions { opacity: 1; } }
+
+/* 空态：图标 + 文案 + 操作 */
+.sb-empty {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 32px 16px; border-radius: var(--r-lg); border: 1px dashed var(--border-light);
+  color: var(--text-3); font-size: 13px; text-align: center;
+}
+.sb-empty-icon {
+  width: 40px; height: 40px; border-radius: var(--r-lg); display: inline-flex; align-items: center; justify-content: center;
+  background: var(--surface-inset); color: var(--text-3);
+}
+
+/* AI 规则：代码编辑器质感 */
+.rules-project-path { color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+textarea.sb-code-editor, .sb-code-editor textarea {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Consolas, monospace);
+  font-size: 12.5px; line-height: 1.65; tab-size: 2;
+  background: var(--surface-inset); border-color: var(--surface-inset-border); border-radius: var(--r-lg);
+  padding: 12px 14px;
+}
+
+/* 执行策略：页签统一为分段控件 */
+.perm-tabs {
+  display: inline-flex; gap: 2px; padding: 3px; margin-bottom: 16px;
+  border: 1px solid var(--surface-inset-border); border-bottom: 1px solid var(--surface-inset-border);
+  border-radius: var(--r-md); background: var(--surface-inset);
+}
+.perm-tab {
+  height: 26px; padding: 0 14px; margin: 0; border: none; border-radius: var(--r-sm);
+  font-size: 12.5px; color: var(--text-2);
+  transition: background var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
+}
+.perm-tab.on { background: var(--bg-main); color: var(--text-1); font-weight: 600; box-shadow: var(--shadow-sm); border-bottom-color: transparent; }
+.sb-model-picker { display: inline-flex; min-width: 220px; justify-content: flex-end; }
+
+/* 拓展管理：已安装行——描述两行截断、开关右对齐、悬停底色 */
+.inst-row { align-items: flex-start; }
+.inst-row .inst-desc { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 18px; }
+.inst-kind { border-radius: 999px; padding: 1px 8px; }
+.inst-empty { border: 1px dashed var(--border-light); border-radius: var(--r-lg); padding: 40px 16px; }
+
+/* ── plan-91-393：拓展管理行卡——36px 类型瓦片、徽标胶囊、悬停操作固定槽位 ── */
+.sb-tile.ext-tile, .inst-tile {
+  flex-shrink: 0; width: 36px; height: 36px; border-radius: var(--r-md); overflow: hidden;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent-soft); color: var(--accent);
+}
+.ext-tile[data-kind="skill"], .inst-tile[data-kind="skill"] { background: var(--pc-amber-soft, var(--accent-soft)); color: var(--pc-amber, var(--accent)); }
+.ext-tile[data-kind="connector"], .inst-tile[data-kind="connector"] { background: var(--pc-green-soft, var(--accent-soft)); color: var(--pc-green, var(--accent)); }
+.ext-tile[data-kind="repo"] { background: var(--surface-inset); color: var(--text-2); }
+.inst-tile .inst-icon-img, .inst-tile .inst-icon { border-radius: var(--r-md); }
+.sb-item .settings-resource-name, .inst-row .inst-name { font-size: 13.5px; font-weight: 600; }
+.sb-item .settings-resource-actions { display: inline-flex; align-items: center; flex-direction: row-reverse; }
+.sb-hover-actions.is-busy { opacity: 1; }
+.ui-icon-btn.is-spinning svg { animation: sb-spin calc(var(--dur-slow, 400ms) * 2) linear infinite; }
+
+/* plan-121-482：.inst-row / .inst-list 的外观与分隔线在 global.css 唯一定义——
+   此处只保留行内布局。 */
+.inst-row .inst-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.inst-row .inst-desc { font-size: 12px; color: var(--text-2); overflow: hidden; }
+.inst-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.inst-row .inst-actions { align-self: center; display: inline-flex; align-items: center; gap: 8px; }
+.inst-row:hover .sb-hover-actions, .inst-row:focus-within .sb-hover-actions { opacity: 1; }
+
+/* 分段计数页签与工具栏对齐 */
+.inst-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.inst-counts {
+  display: inline-flex; gap: 2px; padding: 3px; margin-right: auto;
+  border-radius: var(--r-md); background: var(--surface-inset); border: 1px solid var(--surface-inset-border);
+}
+.inst-count {
+  height: 26px; padding: 0 12px; border: none; border-radius: var(--r-sm); background: transparent;
+  font-size: 12.5px; color: var(--text-2); cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
+}
+.inst-count.on { background: var(--bg-main); color: var(--text-1); font-weight: 600; box-shadow: var(--shadow-sm); }
+.inst-search { height: var(--btn-h-md, 32px); border-radius: var(--r-md); }
+/* plan-114-450：工具条内搜索框与分段标签同高（分段 28 + 内距 6 = 34px），视线在一条水平线上 */
+.ui-toolbar .inst-search { height: 34px; flex: 0 1 240px; }
+.inst-loading { display: grid; place-items: center; padding: 56px 0; }
+.sb-empty .btn { margin-top: 2px; }
+.plugin-slot-row { display: flex; align-items: center; gap: 12px; }
+@keyframes sb-spin { to { transform: rotate(360deg); } }
+
+/* 执行规则行（plan-91-393）：图标块 + 等宽规则名 + 决策胶囊；操作悬停浮现、固定槽位 */
+/* plan-121-482：padding/圆角由基础协议承担，此处只保留行内间距与选中态 */
+.pol-rule { gap: 12px; }
+.pol-rule.is-sel { background: var(--accent-soft); }
+.pol-rule-tile { width: 32px; height: 32px; border-radius: var(--r-md); display: grid; place-items: center; flex-shrink: 0; background: var(--bg-hover); color: var(--text-2); }
+.pol-rule[data-decision="allow"] .pol-rule-tile { background: color-mix(in oklab, var(--success) 14%, transparent); color: var(--success); }
+.pol-rule[data-decision="deny"] .pol-rule-tile { background: color-mix(in oklab, var(--error) 14%, transparent); color: var(--error); }
+.pol-rule[data-decision="ask"] .pol-rule-tile { background: color-mix(in oklab, var(--warning) 16%, transparent); color: var(--warning); }
+.pol-rule-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pol-rule-name code { font-family: var(--font-mono); font-size: 12.5px; font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pol-rule-kind { flex-shrink: 0; font-size: 10.5px; padding: 0 7px; line-height: 18px; border-radius: 999px; background: var(--bg-hover); color: var(--text-3); }
+.pol-rule-meta { display: flex; align-items: center; gap: 8px; margin-top: 4px; font-size: 12px; color: var(--text-3); min-width: 0; }
+.pol-rule-decision { flex-shrink: 0; font-size: 11px; font-weight: 500; padding: 0 8px; line-height: 18px; border-radius: 999px; }
+.pol-rule[data-decision="allow"] .pol-rule-decision { background: color-mix(in oklab, var(--success) 14%, transparent); color: var(--success); }
+.pol-rule[data-decision="deny"] .pol-rule-decision { background: color-mix(in oklab, var(--error) 14%, transparent); color: var(--error); }
+.pol-rule[data-decision="ask"] .pol-rule-decision { background: color-mix(in oklab, var(--warning) 16%, transparent); color: var(--warning); }
+.pol-rule-why { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pol-rule-actions { opacity: 0; transition: opacity var(--dur-2) var(--ease-standard); }
+.pol-rule:hover .pol-rule-actions, .pol-rule:focus-within .pol-rule-actions { opacity: 1; }
+
+/* 执行策略 · 审批解释段（plan-121-482）：不再套第二层卡片，行直接排在卡片上并全宽贴边 */
+.ui-card .explain-sec .ui-card-row { margin-inline: calc(var(--sp-5) * -1); }
+.ui-card .explain-sec > .ui-card-row:last-child { border-bottom: none; }

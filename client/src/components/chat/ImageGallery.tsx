@@ -137,11 +137,16 @@ export function ImageGallery() {
 
   return createPortal(
     <div className="gallery-overlay" onClick={close}>
+      {/* plan-91-393：左上角显示文件名与序号，用户知道正在看哪张 */}
+      <div className="gallery-caption" onClick={(e) => e.stopPropagation()}>
+        <span className="gallery-caption-name">{current.name}</span>
+        {images.length > 1 && <span className="gallery-caption-idx">{index + 1} / {images.length}</span>}
+      </div>
       <div className="gallery-topbar" onClick={(e) => e.stopPropagation()}>
-        <button className="gallery-btn" onClick={download} title="下载原图" type="button">
+        <button className="gallery-btn" onClick={download} aria-label="下载原图" type="button">
           <IconDownload size={16} />
         </button>
-        <button ref={closeBtnRef} className="gallery-btn" onClick={close} title="关闭 (Esc)" aria-label="关闭预览" type="button">
+        <button ref={closeBtnRef} className="gallery-btn" onClick={close} aria-label="关闭预览 (Esc)" type="button">
           <IconX size={16} />
         </button>
       </div>
@@ -224,9 +229,6 @@ export function ImageGallery() {
         </button>
       </div>
 
-      {multi && (
-        <div className="gallery-counter">{index + 1} / {images.length}</div>
-      )}
     </div>,
     document.body,
   );

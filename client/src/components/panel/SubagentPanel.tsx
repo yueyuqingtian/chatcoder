@@ -9,6 +9,7 @@ import { useChatStore } from "../../store/chat";
 import { PluginSlot } from "../../plugins/registry";
 import { parseUtc } from "../../utils/time";
 import { IconCpu, IconSpinner, IconCheck, IconX } from "../icons";
+import { Empty } from "../ui";
 
 export function SubagentPanel({ threadId, agentName, visible = true }: {
   threadId?: number;
@@ -43,7 +44,7 @@ export function SubagentPanel({ threadId, agentName, visible = true }: {
     elapsedLabel = min > 0 ? `${min} 分 ${sec % 60} 秒` : `${sec} 秒`;
   }
 
-  if (threadId == null) return <div className="subagent-panel-empty">未指定子代理</div>;
+  if (threadId == null) return <Empty size="sm" title="未指定子代理" />;
 
   return (
     <div className="subagent-panel">

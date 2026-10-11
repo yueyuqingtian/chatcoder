@@ -14,7 +14,7 @@ import { useChatStore } from "../../store/chat";
 import { SkillsPanel } from "./SkillsPanel";
 import { McpPanel } from "./McpPanel";
 import { FormDialog } from "../ui/FormDialog";
-import { Dialog, Input } from "../ui";
+import { Dialog, Input, Tooltip } from "../ui";
 import { ConfirmDialog } from "../ConfirmDialog";
 import {
   IconBox, IconDownload, IconPlug, IconRefresh, IconSearch, IconTrash, IconZap,
@@ -220,9 +220,12 @@ function PluginsCatalog() {
           <button className="btn btn-ghost btn-sm" onClick={() => { setInstallMode("git"); setInstallValue(""); }}>
             <IconDownload size={13} /> 从 Git 安装
           </button>
-          <button className="btn btn-ghost btn-sm" onClick={() => void load()} disabled={loading} title="重新扫描">
-            <IconRefresh size={13} />
-          </button>
+          {/* plan-91-393：原生 title 迁移为 ui/Tooltip */}
+          <Tooltip title="重新扫描">
+            <button className="btn btn-ghost btn-sm" onClick={() => void load()} disabled={loading} aria-label="重新扫描">
+              <IconRefresh size={13} />
+            </button>
+          </Tooltip>
         </div>
       </div>
 
@@ -275,6 +278,13 @@ function PluginsCatalog() {
               「从目录安装」或「从 Git 安装」手动添加插件。
             </div>
           )}
+          {items.length === 0 ? (
+            <button className="btn btn-primary btn-sm" onClick={() => { setInstallMode("dir"); setInstallValue(""); }}>
+              <IconDownload size={13} /> 从目录安装
+            </button>
+          ) : (
+            <button className="btn btn-ghost btn-sm" onClick={() => setQuery("")}>清除搜索</button>
+          )}
         </div>
       )}
       <div className="catalog-grid">
@@ -289,7 +299,7 @@ function PluginsCatalog() {
                 </span>
               )}
             </div>
-            <div className="catalog-card-desc" title={item.descriptionZh || item.description}>
+            <div className="catalog-card-desc">
               {item.descriptionZh || item.description || "无说明"}
             </div>
             {/* S9：英文说明的插件补一行中文能力标签（本机 manifest 多数只有英文） */}
@@ -415,7 +425,7 @@ function PluginsCatalog() {
                 {detail.path && (
                   <div className="catalog-fact">
                     <span className="catalog-fact-k">插件目录</span>
-                    <span className="catalog-fact-v mono" title={detail.path}>{detail.path}</span>
+                    <span className="catalog-fact-v mono">{detail.path}</span>
                   </div>
                 )}
               </div>

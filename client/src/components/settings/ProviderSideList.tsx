@@ -17,10 +17,12 @@ import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type Poin
 import { api, type ModelOut, type ProviderOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { IconGripVertical, IconPlus } from "../icons";
+import { ProviderAvatar } from "./ProviderAvatar";
 
-/** 行高与行距（与 model-picker.css 的 .models-side-item / .models-side-scroll 一致）——
- *  拖拽步距据此计算，两处必须同步修改，否则会出现"错位半行"。 */
-const ROW_H = 36;
+/** 行高与行距（与 settings-models.css 的 .models-side-item / .models-side-scroll 一致）——
+ *  拖拽步距据此计算，两处必须同步修改，否则会出现"错位半行"。
+ *  plan-114-450：行高 40，容纳 28px 头像。 */
+const ROW_H = 40;
 const ROW_GAP = 2;
 const STEP = ROW_H + ROW_GAP;
 /** 进入拖拽的纵向位移阈值（px） */
@@ -187,7 +189,8 @@ export function ProviderSideList({
           const shift = shiftOf(index);
           return (
             <div className="models-side-row" key={p.id}>
-              {/* 单行供应商无可排序对象，不渲染手柄（渲染会让用户尝试后困惑） */}
+              {/* 单行供应商无可排序对象，不渲染手柄（渲染会让用户尝试后困惑）。
+                  plan-114-450：手柄移到行尾（与状态点同槽位，悬停时互换），此前在行首与头像重叠 */}
               {providers.length > 1 && (
                 <span
                   className="models-drag-handle"
@@ -218,16 +221,14 @@ export function ProviderSideList({
                 }}
               >
                 {/* 首字母图标 + 名称 + 凭据徽标 + 状态圆点（右置：先"是谁"再"怎么样"） */}
-                <span className="models-side-icon" aria-hidden>
-                  {(p.name || "?").trim().slice(0, 1).toUpperCase()}
-                </span>
-                <span className="models-side-name" title={p.name}>{p.name}</span>
+                <ProviderAvatar name={p.name} size={26} muted={!p.is_active} />
+                <span className="models-side-name">{p.name}</span>
                 {(p.credential_count ?? 0) > 1 && (
                   <span className="models-side-badge">
                     {p.credential_count} {oauthFormats.has(p.api_format) ? "账号" : "Key"}
                   </span>
                 )}
-                <span className={statusDotClass(p)} />
+                <span className="models-side-tail"><span className={statusDotClass(p)} /></span>
               </button>
             </div>
           );
@@ -236,7 +237,7 @@ export function ProviderSideList({
 
         {/* 添加入口：列表流末尾、随列表滚动 —— "添加"是列表的延续（加在最后） */}
         <button type="button" className="models-side-add" onClick={onAdd}>
-          <IconPlus size={13} /> 添加供应商
+          <span className="models-side-add-ic" aria-hidden><IconPlus size={14} /></span> 添加供应商
         </button>
 
         {/* 独立模型：与供应商是不同实体，末端小标题做弱分隔（仅存在时渲染） */}
@@ -246,7 +247,7 @@ export function ProviderSideList({
             {independentModels.map((m) => (
               <div key={m.id} className="models-side-item static">
                 <span className={"models-dot " + (m.is_active ? "on" : "off")} />
-                <span className="models-side-name" title={m.name}>{m.name}</span>
+                <span className="models-side-name">{m.name}</span>
               </div>
             ))}
           </>

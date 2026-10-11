@@ -1,0 +1,150 @@
+/* ═══════════════════════════════════════════════════════════
+ * 全局界面换新层（plan-91-393）
+ * 最后加载，同特异度覆盖旧实现；只动视觉与动效，不改结构语义。
+ * ═══════════════════════════════════════════════════════════ */
+
+/* ── 左侧面板：保持单列排版，只优化间距、选中态与图标（plan-91-393 用户要求不拆两列） ── */
+.sidebar.sb-v2 .sb-nav { padding: 6px 8px 6px; gap: 1px; }
+.sidebar.sb-v2 .sb-nav-item {
+  height: 34px; border-radius: var(--r-md); gap: 10px;
+  transition: background var(--dur-2) var(--ease-standard), transform var(--dur-spring) var(--spring-bouncy);
+}
+.sidebar.sb-v2 .sb-nav-item:active { transform: scale(0.97); }
+.sidebar.sb-v2 .sb-nav-item.active { background: var(--sidebar-selected); }
+/* plan-114-447：选中图标跟随文字中性色，避免「底色中性、图标彩色」的割裂 */
+.sidebar.sb-v2 .sb-nav-item.active .sb-nav-icon { color: var(--text-1); }
+.sidebar.sb-v2 .sb-kbd { opacity: 0; transition: opacity var(--dur-2) var(--ease-standard); }
+.sidebar.sb-v2 .sb-nav-item:hover .sb-kbd { opacity: 1; }
+.sidebar.sb-v2 .sb-viewbar { padding: 10px 10px 4px; margin-top: 4px; }
+.sidebar.sb-v2 .sb-section-label { font-size: 11.5px; letter-spacing: 0.02em; color: var(--text-3); padding: 8px 10px 4px; }
+.sidebar.sb-v2 .sb-session { border-radius: var(--r-md); transition: background var(--dur-2) var(--ease-standard); }
+.sidebar.sb-v2 .sb-session.active { background: var(--sidebar-selected); }
+.sidebar.sb-v2 .sb-project { border-radius: var(--r-md); }
+.sidebar.sb-v2 .sb-project-chevron { transition: transform var(--dur-spring) var(--spring-snappy); }
+.sidebar.sb-v2 .sb-user-settings { border-radius: var(--r-md); transition: background var(--dur-2) var(--ease-standard); }
+
+/* ── 主区：浮起卡片 ── */
+
+/* ── 消息流 ── */
+.turn-user-bubble {
+  /* plan-114-447：用户气泡中性化，强调色只留给可操作的主元素 */
+  background: var(--bubble-user); border-radius: 16px 16px 4px 16px;
+  padding: 10px 16px; animation: mo-pop-in var(--dur-3) var(--ease-out-quart) both; --pop-dy: 6px;
+}
+.md-body-stream > :last-child { animation: stream-in var(--dur-4) var(--ease-emphasized-decel) both; }
+@keyframes stream-in { from { opacity: 0; filter: blur(4px); transform: translateY(3px); } to { opacity: 1; filter: none; transform: none; } }
+.md-body h1, .md-body h2, .md-body h3 { margin: 1.1em 0 0.5em; letter-spacing: -0.01em; }
+.md-body pre { border-radius: var(--r-lg); }
+
+/* ── 设置：账号卡片（替换「标签 + 小按钮挤成一行」） ── */
+.acct-card {
+  display: flex; align-items: center; gap: 12px; padding: 12px 14px;
+  border-radius: var(--r-lg); background: var(--surface-inset); border: 1px solid var(--surface-inset-border);
+}
+.acct-avatar {
+  width: 36px; height: 36px; border-radius: 999px; display: grid; place-items: center; flex-shrink: 0;
+  background: var(--accent-soft); color: var(--accent); font-weight: 650; font-size: 15px;
+}
+.acct-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.acct-name { font-size: 13.5px; font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acct-state { font-size: 12px; color: var(--text-3); display: inline-flex; align-items: center; gap: 6px; }
+.acct-state::before { content: ""; width: 6px; height: 6px; border-radius: 999px; background: var(--text-3); }
+.acct-state.is-on { color: var(--success, #16a34a); }
+.acct-state.is-on::before { background: currentColor; }
+.acct-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+/* 设置卡片与控件统一（plan-121-482 补：.ui-card 是设置页另一套卡壳，视觉必须与 .settings-card 完全一致） */
+.settings-card,
+.ui-card { border-radius: var(--r-lg); border: 1px solid var(--border-light); }
+.settings-pill { border-radius: var(--r-md); transition: background var(--dur-2) var(--ease-standard), transform var(--dur-spring) var(--spring-bouncy); }
+.settings-pill:active { transform: scale(0.95); }
+.settings-pill.active { background: var(--text-1); color: var(--bg-main); }
+
+/* 色调选择器 */
+.tone-swatch {
+  display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 8px 6px 6px;
+  border-radius: var(--r-md); color: var(--text-2); font-size: 11.5px;
+  transition: background var(--dur-2) var(--ease-standard);
+}
+.tone-swatch:hover { background: var(--bg-hover); }
+.tone-swatch-dot {
+  width: 24px; height: 24px; border-radius: 999px; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.08);
+  transition: transform var(--dur-spring) var(--spring-bouncy), box-shadow var(--dur-2);
+}
+.tone-swatch:hover .tone-swatch-dot { transform: scale(1.12); }
+.tone-swatch.active { color: var(--text-1); }
+.tone-swatch.active .tone-swatch-dot { box-shadow: 0 0 0 2px var(--bg-main), 0 0 0 4px currentColor; }
+
+/* ── 弹窗：中性底 + 弹簧放大入场 ── */
+.ui-dialog-content[data-state="open"] { animation: dlg-in var(--dur-pop) var(--spring-soft) both; }
+/* 弹窗以 inset+margin 居中（见 components.css），关键帧只能用相对位移，不得写 translate(-50%) */
+@keyframes dlg-in { from { opacity: 0; transform: translateY(8px) scale(0.965); } to { opacity: 1; transform: none; } }
+
+/* ── 右侧面板：弹簧滑入 + 快捷入口卡片 ── */
+.app-pane-right:not(.collapsed) .right-panel { animation: rp-in var(--dur-pop) var(--spring-soft) both; }
+@keyframes rp-in { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: none; } }
+.right-panel { border-radius: var(--r-lg); border: 1px solid var(--border-light); }
+.rp-launch-card {
+  border-radius: var(--r-lg); border: 1px solid var(--border-light); background: var(--bg-main);
+  transition: transform var(--dur-spring) var(--spring-bouncy), box-shadow var(--dur-3) var(--ease-standard);
+}
+.rp-launch-card:hover { transform: translateY(-2px); box-shadow: 0 8px 22px rgba(0, 0, 0, 0.06); }
+.rp-launch-card:active { transform: scale(0.98); }
+
+/* ── 空态首页：纹理层 + 浮签卡片外观 ──
+ * plan-114-452：浮签只在悬停 / 聚焦徽章时出现（显隐规则在 home.css）。此前这里有一条「浮签常驻 + 微倾斜」
+ * 与「邮票翘起 / 顶部 64px」的旧规则，后加载而覆盖了 home.css，导致不聚焦时浮窗也一直挂着、整块内容被压低——已删除。 */
+.workspace-empty { position: relative; isolation: isolate; }
+.es-note-card { border-radius: var(--r-lg); box-shadow: 0 18px 40px rgba(0, 0, 0, 0.08), 0 2px 6px rgba(0, 0, 0, 0.04); background: var(--bg-main); border-color: var(--border-light); padding: 16px 20px; }
+.es-note-title { font-size: 15px; }
+.es-note-body { font-size: 13.5px; color: var(--text-3); }
+
+/* 右面板标签：底色滑块弹簧跟随 */
+.rp-tabs { position: relative; }
+.rp-tab-ind {
+  position: absolute; left: 0; top: 50%; height: 28px; margin-top: -14px; border-radius: var(--r-md);
+  background: var(--color-selected); pointer-events: none; z-index: 0;
+  transition: transform var(--dur-spring) var(--spring-soft), width var(--dur-spring) var(--spring-soft);
+}
+.rp-tab { position: relative; z-index: 1; }
+.rp-tab.is-active { background: transparent; }
+.rp-tab.is-active .rp-tab-ic { color: var(--accent); }
+
+/* ── 模型管理：plan-114-449 扁平化——分区与行项目统一在 settings-a.css 定义，此处不再覆盖 ── */
+.models-section .acct-card { background: transparent; border: none; padding: 2px 0; }
+.models-field > label { font-size: 12.5px; font-weight: 500; }
+/* plan-114-450：模型页左列样式收敛到 settings-models.css（此处旧覆盖已删，它丢了 transform 过渡，拖拽让位变成瞬移） */
+.models-status-pill.on, .models-badge.ok { background: color-mix(in oklab, var(--success) 14%, transparent); }
+
+/* ── 设置页：卡片、行、分组标题与控件统一 ── */
+.settings-card,
+.ui-card { background: var(--bg-main); border-color: var(--border-light); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03); }
+.settings-row { border-bottom-color: var(--border-light); min-height: 60px; }
+.settings-row:last-child { border-bottom: none; }
+.settings-card-title { font-size: 13px; font-weight: 600; color: var(--text-1); }
+.settings-resource-tag { border-radius: 999px; padding: 2px 10px; }
+
+/* 全局控件跟随主题色：开关、滑块、分段、复选 */
+.ui-switch-root[data-state="checked"] { background: var(--accent); }
+.ui-slider-range { background: var(--accent); }
+.ui-slider-thumb { border-color: var(--accent); transition: transform var(--dur-spring) var(--spring-bouncy); }
+.ui-slider-thumb:hover { transform: scale(1.15); }
+.ui-slider-thumb:active { transform: scale(0.92); }
+input[type="checkbox"] { accent-color: var(--accent); }
+
+/* ── 消息流细节 ── */
+.turn-agent-text { line-height: var(--chat-line-height, 1.75); }
+.tc-row.tc-write .tc-add { color: var(--success); font-variant-numeric: tabular-nums; }
+.tc-row.tc-write .tc-del { color: var(--error); font-variant-numeric: tabular-nums; }
+.tc-row.tc-write.expanded { padding-bottom: 6px; }
+.tc-diff-line { border-radius: 4px; }
+.msg-action { border-radius: var(--r-md); transition: background var(--dur-2) var(--ease-standard), color var(--dur-2), transform var(--dur-spring) var(--spring-bouncy); }
+.msg-action:active { transform: scale(0.9); }
+.msg-action.active { color: var(--accent); }
+.turn-divider-line { opacity: 0.6; }
+
+/* 菜单项：图标 + 文案统一间距与图标色（plan-91-393：同一菜单内所有项都带图标） */
+.context-menu-item { display: flex; align-items: center; gap: 8px; }
+.context-menu-item > svg { flex-shrink: 0; color: var(--text-3); }
+.context-menu-item:hover > svg { color: var(--text-1); }
+.context-menu-item.danger > svg { color: currentColor; }

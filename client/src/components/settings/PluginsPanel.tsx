@@ -7,7 +7,8 @@ import {
   listPlugins, listSlotPlugins, getActivePlugin, replaceSlot, resetSlot,
   unregisterExternal, subscribeRegistry, registryVersion, type SlotId,
 } from "../../plugins/registry";
-import { Select } from "../ui";
+import { Select, Tooltip } from "../ui";
+import { IconBox } from "../icons";
 
 const SLOT_LABELS: Record<SlotId, string> = {
   sidebar: "左侧会话栏",
@@ -41,8 +42,12 @@ export function PluginsPanel() {
           const active = getActivePlugin(slot);
           return (
             <div className="plugin-slot-row" key={slot}>
+              {/* plan-91-393：每行带类型图标瓦片 */}
+              <span className="sb-tile ext-tile" data-kind="plugin"><IconBox size={16} /></span>
               <span className="plugin-slot-name">{SLOT_LABELS[slot]}</span>
-              <span className="plugin-slot-desc" title={active?.description}>{active?.description || "—"}</span>
+              <Tooltip title={active?.description} disabled={!active?.description}>
+                <span className="plugin-slot-desc">{active?.description || "—"}</span>
+              </Tooltip>
               <Select
                 value={active?.id ?? ""}
                 onChange={(id) => replaceSlot(slot, id)}
@@ -54,7 +59,7 @@ export function PluginsPanel() {
                 aria-label={`${SLOT_LABELS[slot]} 生效组件`}
               />
               {active && !active.builtin && (
-                <button className="btn btn-ghost btn-xs" title="禁用外挂插件并恢复内置" onClick={() => unregisterExternal(active.id)}>禁用</button>
+                <Tooltip title="禁用外挂插件并恢复内置"><button className="btn btn-ghost btn-xs" onClick={() => unregisterExternal(active.id)}>禁用</button></Tooltip>
               )}
               {active && active.id !== plugins.find((p) => p.builtin)?.id && (
                 <button className="btn btn-ghost btn-xs" onClick={() => resetSlot(slot)}>恢复默认</button>

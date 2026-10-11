@@ -3,122 +3,208 @@
 <head>
 <meta charset="utf-8">
 <style>
+  /* plan-114-450：启动页 v5——用户选定第四轮预览（ai/dada-v5-preview.html）。
+     底色 = 当前主题世界的同色系径向渐变（中心亮、四周深，亮暗各一套），与应用内主题对应；
+     五只大嗒嗒压在四边探头、三只浅色小个子散在内圈，眼神统一望向中心；
+     中心是软件名，沿用旧版「遮罩扫出 + 逐字弹起」（用户要求保留）。
+     入场 q 弹由 GSAP 编排（vendor/gsap.min.js）；GSAP 缺失时直接显示终态，不阻塞启动。
+     对外接口：window.__chatcoderLoading.update(text) / leave()；query：theme / tone / glass / mat。 */
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { width: 100%; height: 100%; overflow: hidden; }
-
-  /* ── plan-308-1555 M7：开屏改为"半透明玻璃"风格 ──
-     用户要求：把 zcode 的半透明做法用到本软件的开屏动画上，
-     只在用户开启毛玻璃效果时生效（glass off 时保持原来的纯色不透明）。
-     实现分层：
-       * 系统层：主进程窗口 transparent + ACCENT/acrylic（由 main.cjs 施加，本页无需处理）
-       * 样式层：本页背景透明 + 玻璃高光/内描边（模拟液态质感）
-       * 动画层：整页淡入（opacity 0→1），避免"啪"地跳出 */
-  html { background: transparent; }
   body {
-    background: transparent; color: #e4e6eb;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    display: flex; flex-direction: column;
-    align-items: center; justify-content: center;
-    opacity: 0;
-    transition: opacity 0.42s cubic-bezier(0.22, 1, 0.36, 1);
+    --a: #7C9BF0; --b: #4F6FD9; --ink: rgba(255,255,255,.94); --shadow: rgba(28,40,110,.30); --tint: #E7ECFC;
+    background: radial-gradient(70% 75% at 50% 46%, var(--a) 0%, var(--b) 100%);
+    color: var(--ink); font-family: "Segoe UI", -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    container-type: size;
   }
-  body.ready { opacity: 1; }
+  /* 六个主题世界：亮色饱满、暗色压低明度，色相与 client/src/styles/themes.css 一致 */
+  body[data-tone="tide"]     { --a: #7C9BF0; --b: #4F6FD9; --shadow: rgba(28,40,110,.30); --tint: #E7ECFC; }
+  body[data-tone="forest"]   { --a: #6BC29E; --b: #34936F; --shadow: rgba(12,60,40,.28);  --tint: #E2F4EB; }
+  body[data-tone="campfire"] { --a: #F6AE73; --b: #E07A3F; --shadow: rgba(110,48,12,.26); --tint: #FCEBDD; }
+  body[data-tone="breeze"]   { --a: #7CC6E6; --b: #3F9CC9; --shadow: rgba(14,60,90,.26);  --tint: #E1F2F9; }
+  body[data-tone="sakura"]   { --a: #F2A6BF; --b: #DA7398; --shadow: rgba(110,30,60,.24); --tint: #FBE6EE; }
+  body[data-tone="graphite"] { --a: #7D8194; --b: #555A6C; --shadow: rgba(10,12,24,.32);  --tint: #E9EAF0; }
+  body.dark[data-tone="tide"]     { --a: #3A4F8F; --b: #1F2C57; }
+  body.dark[data-tone="forest"]   { --a: #2F6B55; --b: #173A2E; }
+  body.dark[data-tone="campfire"] { --a: #8A4E2C; --b: #4A2716; }
+  body.dark[data-tone="breeze"]   { --a: #2F6684; --b: #163447; }
+  body.dark[data-tone="sakura"]   { --a: #8A4660; --b: #4A2232; }
+  body.dark[data-tone="graphite"] { --a: #3D404C; --b: #202229; }
+  body.dark { --ink: rgba(255,255,255,.86); --shadow: rgba(0,0,0,.42); }
 
-  /* glass off：纯色不透明开屏（保持原有观感，不做透明渗色） */
-  body.solid {
-    background: #16181d;
-    opacity: 1;
-    transition: none;
-  }
-  body.solid.light { background: #f2f3f7; color: #23262e; }
+  /* 角色：外层定位（中心点 + 旋转，脚朝向所贴的那条边），pos 负责入场位移，sq 负责挤压，fl 负责漂浮 */
+  .m { position: absolute; left: var(--x); top: var(--y); width: var(--s); aspect-ratio: 1;
+       transform: translate(-50%, -50%) rotate(var(--r)); }
+  .m .pos, .m .sq, .m .fl { width: 100%; height: 100%; }
+  .m .sq { transform-origin: 50% 92%; }
+  .m.top .sq { transform-origin: 50% 8%; }
+  .m.inner .sq { transform-origin: 50% 50%; }
+  .m svg { display: block; width: 100%; height: 100%; overflow: visible; filter: drop-shadow(0 1.1cqw 1.8cqw var(--shadow)); }
+  .lid { transform-box: fill-box; transform-origin: center; }
 
-  /* glass on：**平坦**的低透明底（与左面板同色系、同 alpha 区间）。
-     plan-26-126 M6（去波浪感）——删除三样造成"波浪 / 斜纹"的东西：
-       * 150° 对角渐变高光：大面积亮带随桌面明暗起伏，是波浪感的主因；
-       * 顶部 `inset 0 1px 0` 白色高光：在纯色底上多出一条横线；
-       * `saturate(1.5)` 重饱和：让渗入的壁纸色更脏。
-     模糊只保留极轻一档，且**仅在系统材质不可用时**启用（mat=0）；有系统材质时
-     交给 DWM（acrylic / ACCENT / vibrancy）做高斯模糊，页面不再叠加。 */
-  body.glass {
-    background: rgba(20, 22, 27, 0.90);
-  }
-  body.glass.light {
-    background: rgba(242, 243, 247, 0.92);
-    color: #23262e;
-  }
-  /* mat=0（无系统模糊材质）：用轻量 backdrop-filter 兜底，保持"轻微模糊"而非重度磨砂 */
-  body.glass.mat-fallback {
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
-  }
+  /* 中心名称 + 状态：与旧版同一套「遮罩扫出 + 逐字弹起」 */
+  .title { position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2.2cqh; pointer-events: none; }
+  .name { font-size: clamp(40px, 5.2cqw, 76px); font-weight: 650; letter-spacing: -0.02em; display: flex;
+    text-shadow: 0 2px 18px var(--shadow);
+    -webkit-mask: linear-gradient(90deg, #000 40%, transparent 60%) 100% 0 / 260% 100% no-repeat;
+    -webkit-mask-position: 100% 0; animation: sweep 900ms cubic-bezier(0.2, 0, 0, 1) 520ms forwards; }
+  .name span { display: inline-block; opacity: 0; transform: translateY(14px);
+    animation: letter 560ms cubic-bezier(0.34, 1.56, 0.64, 1) calc(560ms + var(--i) * 45ms) forwards; }
+  @keyframes sweep { to { -webkit-mask-position: 0 0; } }
+  @keyframes letter { to { opacity: 1; transform: none; } }
+  .status { font-size: 13px; font-weight: 600; letter-spacing: .01em; opacity: 0; display: flex; align-items: center; gap: 8px;
+    animation: letter 400ms ease-out 1200ms forwards; }
+  .status i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .6; }
 
-  .logo { display: flex; flex-direction: column; align-items: center; gap: 14px; margin-bottom: 26px; }
-  .logo svg { display: block; filter: drop-shadow(0 6px 18px rgba(90, 60, 220, 0.35)); }
-  .logo-name {
-    font-size: 26px; font-weight: 700; letter-spacing: -0.5px;
-    background: linear-gradient(135deg, #6366f1, #a855f7);
-    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  body.leave { animation: leave 360ms cubic-bezier(0.3, 0, 0.8, 0.15) 220ms forwards; }
+  @keyframes leave { to { opacity: 0; transform: scale(1.03); } }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 1ms !important; animation-delay: 0ms !important; }
   }
-  .spinner {
-    width: 32px; height: 32px;
-    border: 3px solid rgba(255,255,255,0.1);
-    border-top-color: #6366f1;
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-  }
-  body.light .spinner {
-    border-color: rgba(30, 34, 60, 0.12);
-    /* 上面的 border-color 简写会连 top 一起覆盖成轨道灰，导致四边同色、
-       spin 动画虽在跑但视觉完全不可见；必须显式补回 accent 弧光 */
-    border-top-color: #6366f1;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .text { margin-top: 16px; font-size: 13px; color: #8b8fa3; }
-  body.light .text { color: #6b7080; }
 </style>
 </head>
 <body>
-  <div class="logo">
-    <!-- 应用图标（与 electron/build/icon.png 同设计）：渐变圆角方块 + 对话气泡 + </> -->
-    <svg width="72" height="72" viewBox="0 0 512 512" fill="none" aria-label="chatcoder">
-      <defs>
-        <linearGradient id="cc-grad" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
-          <stop stop-color="#1B2552"/>
-          <stop offset="1" stop-color="#7C3AED"/>
-        </linearGradient>
-      </defs>
-      <rect width="512" height="512" rx="115" fill="url(#cc-grad)"/>
-      <rect x="128" y="138" width="256" height="180" rx="46" stroke="#fff" stroke-width="22"/>
-      <path d="M206 314 L168 372 L262 314 Z" fill="#fff"/>
-      <path d="M186 228 L218 204 M186 228 L218 252 M272 194 L240 262 M326 228 L294 204 M326 228 L294 252"
-            stroke="#fff" stroke-width="19" stroke-linecap="round" stroke-linejoin="round"/>
-    </svg>
-    <div class="logo-name">chatcoder</div>
+  <div id="cast" aria-hidden="true"></div>
+  <div class="title">
+    <div class="name" id="name" aria-label="chatcoder"></div>
+    <div class="status"><i></i><span id="msg">正在启动服务…</span></div>
   </div>
-  <div class="spinner"></div>
-  <div class="text" id="msg">正在启动服务…</div>
+  <script src="vendor/gsap.min.js"></script>
   <script>
-    // 主进程通过 query 注入：theme=light|dark（主题）、glass=1|0（是否开启毛玻璃）
     (function () {
-      try {
-        var q = new URLSearchParams(location.search);
-        var theme = q.get("theme");
-        var dark = theme ? theme !== "light" : !window.matchMedia("(prefers-color-scheme: light)").matches;
-        if (!dark) document.body.classList.add("light");
-        // 毛玻璃开启时用玻璃样式（轻微半透明 + 露出下层系统材质），否则纯色不透明
-        var glass = q.get("glass") === "1";
-        document.body.classList.add(glass ? "glass" : "solid");
-        // plan-26-126 M6：只有系统没有可用模糊材质（mat=0）时才叠轻量 backdrop-filter 兜底
-        if (glass && q.get("mat") === "0") document.body.classList.add("mat-fallback");
-        // 下一帧再置 ready，触发淡入过渡（避免与首帧绘制同帧导致动画被跳过）
-        requestAnimationFrame(function () {
-          requestAnimationFrame(function () { document.body.classList.add("ready"); });
-        });
-      } catch (e) {
-        document.body.classList.add("solid");
+      var q = new URLSearchParams(location.search);
+      var tone = q.get("tone") || "tide";
+      // 旧色调值兼容（main.cjs 已迁移，这里兜底）
+      var legacy = { mint: "forest", ocean: "tide", apricot: "campfire", lavender: "breeze" };
+      tone = legacy[tone] || tone;
+      document.body.setAttribute("data-tone", tone);
+      if (q.get("theme") !== "light") document.body.classList.add("dark");
+
+      var el = document.getElementById("name");
+      "chatcoder".split("").forEach(function (ch, i) {
+        var s = document.createElement("span");
+        s.textContent = ch; s.style.setProperty("--i", i); el.appendChild(s);
+      });
+
+      /* 嗒嗒 v5（与 client/src/components/mascot/Dada.tsx 同一造型，120 网格） */
+      var BODY = "M60 20 C87 20 105 40 106 66 C107 93 88 110 60 110 C32 110 13 93 14 66 C15 40 33 20 60 20 Z";
+      var TUFT = "M52 24 C49 17 51 11 56 11 C59 14 58 20 56 24 Z M60 23 C61 15 66 11 71 13 C71 18 66 22 62 25 Z";
+      var uid = 0;
+      function dada(tint) {
+        var id = "g" + (++uid);
+        return '<svg viewBox="0 0 120 120"><defs><radialGradient id="' + id + '" cx="40%" cy="32%" r="78%">' +
+          '<stop offset="0" stop-color="' + tint + '"/><stop offset=".62" stop-color="color-mix(in oklab, ' + tint + ' 96%, #8C93C8)"/>' +
+          '<stop offset="1" stop-color="color-mix(in oklab, ' + tint + ' 86%, #8C93C8)"/></radialGradient></defs>' +
+          '<g fill="color-mix(in oklab, ' + tint + ' 86%, #8C93C8)"><ellipse cx="44" cy="108" rx="11" ry="7"/><ellipse cx="76" cy="108" rx="11" ry="7"/></g>' +
+          '<path d="' + TUFT + '" fill="url(#' + id + ')"/><path d="' + BODY + '" fill="url(#' + id + ')"/>' +
+          '<g fill="#FF8FA8" opacity=".38"><ellipse cx="35" cy="77" rx="7" ry="4"/><ellipse cx="85" cy="77" rx="7" ry="4"/></g>' +
+          '<g class="look"><g class="lid" fill="#1B1A24"><ellipse cx="48" cy="62" rx="7" ry="10.4"/><ellipse cx="72" cy="62" rx="7" ry="10.4"/></g></g></svg>';
       }
+
+      /* 构图：x/y 为中心点占画面百分比，s 为宽度（cqw），r 为旋转；inY 为入场位移方向（自身坐标 yPercent） */
+      var CAST = [
+        { x: 23, y: 2, s: 13, r: 0, edge: 1, inY: -95, top: 1 },
+        { x: 71, y: 4, s: 17, r: 0, edge: 1, inY: -95, top: 1 },
+        { x: -0.5, y: 42, s: 15, r: 90, edge: 1, inY: 95 },
+        { x: 100.5, y: 60, s: 16, r: -90, edge: 1, inY: 95 },
+        { x: 31, y: 101, s: 22, r: 0, edge: 1, inY: 95 },
+        { x: 85, y: 24, s: 7, r: 8 },
+        { x: 13, y: 74, s: 7.5, r: -6 },
+        { x: 66, y: 79, s: 6.4, r: 5 },
+      ];
+      var tint = getComputedStyle(document.body).getPropertyValue("--tint").trim() || "#EEF0FA";
+      var cast = document.getElementById("cast");
+      cast.innerHTML = CAST.map(function (c) {
+        return '<div class="m ' + (c.edge ? "edge" : "inner") + (c.top ? " top" : "") + '" style="--x:' + c.x + '%;--y:' + c.y + '%;--s:' + c.s + 'cqw;--r:' + c.r + 'deg">' +
+          '<div class="pos"><div class="sq"><div class="fl">' + dada(c.edge ? "#FFFFFF" : tint) + '</div></div></div></div>';
+      }).join("");
+
+      /* 眼神：从角色指向目标点，再转回角色自身坐标系（角色可能被旋转了） */
+      function lookVec(c, tx, ty) {
+        var dx = tx - c.x, dy = (ty - c.y) * 0.625;
+        var a = (-c.r * Math.PI) / 180;
+        var lx = dx * Math.cos(a) - dy * Math.sin(a), ly = dx * Math.sin(a) + dy * Math.cos(a);
+        var n = Math.hypot(lx, ly) || 1;
+        return { x: (lx / n) * 4.2, y: (ly / n) * 3.4 };
+      }
+
+      var g = window.gsap;
+      var reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+      var nodes = [].slice.call(cast.querySelectorAll(".m"));
+      var idle = [];
+
+      function startIdle() {
+        nodes.forEach(function (m, i) {
+          var fl = m.querySelector(".fl"), lid = m.querySelector(".lid");
+          // GSAP 对 SVG 元素默认以包围盒左上角为变换原点，眨眼必须显式设到眼睛中心
+          g.set(lid, { transformOrigin: "50% 50%" });
+          // 漂浮：幅度只有自身 3%，节奏错开，避免整齐划一
+          idle.push(g.to(fl, { yPercent: -3 - (i % 3), rotation: i % 2 ? 2 : -2, duration: 2.4 + (i % 4) * 0.35,
+            ease: "sine.inOut", yoyo: true, repeat: -1, delay: i * 0.13 }));
+          // 眨眼：间隔 3~6.5 秒随机，偶尔连眨两下
+          var b = g.timeline({ repeat: -1, repeatDelay: 3 + Math.random() * 3.5, delay: 1 + Math.random() * 3 });
+          b.to(lid, { scaleY: 0.1, duration: 0.07, ease: "power1.in" }).to(lid, { scaleY: 1, duration: 0.1, ease: "power1.out" });
+          if (i % 3 === 0) b.to(lid, { scaleY: 0.1, duration: 0.07, delay: 0.12 }).to(lid, { scaleY: 1, duration: 0.1 });
+          idle.push(b);
+        });
+      }
+
+      if (g && !reduce) {
+        var tl = g.timeline();
+        nodes.forEach(function (m, i) {
+          var c = CAST[i], pos = m.querySelector(".pos"), sq = m.querySelector(".sq"), look = m.querySelector(".look");
+          var at = 0.06 + i * 0.075;
+          g.set(look, { x: 0, y: -1.5 });
+          if (c.edge) {
+            // 从所贴的边外挤进来，越界回弹一点再落定，落定瞬间纵向挤压
+            tl.fromTo(pos, { yPercent: c.inY }, { yPercent: 0, duration: 0.62, ease: "back.out(1.9)" }, at)
+              .fromTo(sq, { scaleX: 0.84, scaleY: 1.16 }, { scaleX: 1, scaleY: 1, duration: 0.9, ease: "elastic.out(1, .42)" }, at + 0.16);
+          } else {
+            tl.fromTo(pos, { scale: 0, rotation: -24 }, { scale: 1, rotation: 0, duration: 0.8, ease: "elastic.out(1, .5)" }, at + 0.1);
+          }
+          tl.to(look, Object.assign(lookVec(c, 50, 50), { duration: 0.35, ease: "power2.out" }), 0.85 + i * 0.03);
+        });
+        tl.add(startIdle, 1.1);
+      } else if (g) {
+        nodes.forEach(function (m, i) { g.set(m.querySelector(".look"), lookVec(CAST[i], 50, 50)); });
+      }
+
+      var hop = 0;
+      window.__chatcoderLoading = {
+        update: function (text) {
+          document.getElementById("msg").textContent = text;
+          if (!g || reduce) return;
+          // 状态变化：大家一起低头看一眼文字，再转回中心；一个小个子跳一下
+          nodes.forEach(function (m, i) {
+            var c = CAST[i], look = m.querySelector(".look");
+            g.timeline().to(look, Object.assign(lookVec(c, 50, 62), { duration: 0.22, ease: "power2.out", delay: i * 0.02 }))
+              .to(look, Object.assign(lookVec(c, 50, 50), { duration: 0.4, ease: "power2.inOut" }), "+=.7");
+          });
+          var inner = nodes.filter(function (_, i) { return !CAST[i].edge; });
+          var m = inner[hop++ % inner.length];
+          if (!m) return;
+          var pos = m.querySelector(".pos"), sq = m.querySelector(".sq");
+          g.timeline()
+            .to(sq, { scaleX: 1.12, scaleY: 0.88, duration: 0.1, ease: "power1.out" })
+            .to(pos, { y: -m.offsetHeight * 0.45, duration: 0.22, ease: "power2.out" }, "<.08")
+            .to(sq, { scaleX: 0.94, scaleY: 1.08, duration: 0.18 }, "<")
+            .to(pos, { y: 0, duration: 0.24, ease: "power2.in" })
+            .to(sq, { scaleX: 1, scaleY: 1, duration: 0.5, ease: "elastic.out(1, .4)" });
+        },
+        leave: function () {
+          // 角色各自缩回画面外，随后整页淡出（body.leave 带 220ms 延迟衔接）
+          if (g && !reduce) {
+            idle.forEach(function (t) { t.kill(); });
+            nodes.forEach(function (m, i) {
+              var c = CAST[i], pos = m.querySelector(".pos");
+              if (c.edge) g.to(pos, { yPercent: c.inY < 0 ? -100 : 100, duration: 0.34, ease: "back.in(1.6)", delay: i * 0.03 });
+              else g.to(pos, { scale: 0, duration: 0.28, ease: "back.in(2)", delay: i * 0.03 });
+            });
+          }
+          document.body.classList.add("leave");
+        },
+      };
     })();
-    window.__chatcoderLoading = { update: function(text) { document.getElementById('msg').textContent = text; } };
   </script>
 </body>
 </html>

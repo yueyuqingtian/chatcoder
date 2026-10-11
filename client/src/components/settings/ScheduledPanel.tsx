@@ -9,7 +9,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api/client";
 import type { ScheduledRunStatus, ScheduledTaskOut } from "@chatcoder/shared";
-import { IconPlay, IconPlus, IconX, IconRefresh, IconChevronDown } from "../icons";
+import { IconClock, IconPlay, IconPlus, IconRefresh, IconChevronDown, IconTrash } from "../icons";
+import { Empty, Tooltip } from "../ui";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { Sw } from "./shared";
 import {
@@ -80,7 +81,7 @@ export function ScheduledPanel() {
   };
 
   return (
-    <div>
+    <div className="sc-page">
       <div className="sched-note">
         自动化任务会在到点时以你的身份向指定会话注入指令并启动一轮对话。服务端未运行时不会触发，
         错过的触发点按任务的「错过策略」处理。
@@ -102,13 +103,15 @@ export function ScheduledPanel() {
         onSaved={() => void load()}
       />
 
-      <div className="settings-resource-list">
+      <div className="settings-resource-list sc-list">
         {tasks.map((t) => {
           const st = t.last_status ? STATUS_META[t.last_status] : null;
           const preview = previews[t.id];
           return (
-            <div key={t.id} className="settings-resource-item sched-item">
-              <div className="settings-resource-info">
+            <div key={t.id} className="settings-resource-item sched-item sc-row">
+              {/* plan-91-393：与其它列表一致的图标块 */}
+              <span className="sc-tile"><IconClock size={15} /></span>
+              <div className="settings-resource-info sc-row-main">
                 <div className="settings-resource-name">
                   {t.name}
                   {st && <span className="sched-status" style={{ color: st.color, borderColor: st.color }}>{st.label}</span>}
@@ -135,21 +138,28 @@ export function ScheduledPanel() {
               </div>
               <div className="settings-resource-actions">
                 <Sw checked={t.enabled} onChange={(v) => void handleToggle(t, v)} />
-                <button className="btn btn-ghost btn-xs" title="立即试跑一次"
-                  disabled={busyId === t.id} onClick={() => void handleRun(t)}>
-                  <IconPlay size={12} /> 试跑
-                </button>
-                <button className="btn btn-ghost btn-xs" title="预览接下来 5 次触发时刻"
-                  disabled={busyId === t.id} onClick={() => void togglePreview(t)}>
-                  <IconChevronDown size={12} /> 排程
-                </button>
-                <button className="btn btn-ghost btn-xs" onClick={() => { setEditing(t); setShowForm(true); }}>编辑</button>
-                <button className="btn btn-ghost btn-xs" onClick={() => setConfirmDelete(t)}><IconX size={12} /></button>
+                <Tooltip content="立即试跑一次">
+                  <button className="btn btn-ghost btn-sm" disabled={busyId === t.id} onClick={() => void handleRun(t)}>
+                    <IconPlay size={12} /> 试跑
+                  </button>
+                </Tooltip>
+                <Tooltip content="预览接下来 5 次触发时刻">
+                  <button className="btn btn-ghost btn-sm" disabled={busyId === t.id} onClick={() => void togglePreview(t)}>
+                    <IconChevronDown size={12} /> 排程
+                  </button>
+                </Tooltip>
+                <button className="btn btn-ghost btn-sm" onClick={() => { setEditing(t); setShowForm(true); }}>编辑</button>
+                <Tooltip content="删除任务">
+                  <button className="btn btn-ghost btn-sm" aria-label="删除任务" onClick={() => setConfirmDelete(t)}><IconTrash size={12} /></button>
+                </Tooltip>
               </div>
             </div>
           );
         })}
-        {tasks.length === 0 && <div className="navpage-empty">暂无自动化任务</div>}
+        {tasks.length === 0 && (
+          <Empty title="暂无自动化任务" desc="定时让嗒嗒去跑一个任务，比如每天早上汇总昨天的提交"
+            action={<button className="btn btn-secondary btn-sm" onClick={() => { setEditing(null); setShowForm(true); }}><IconPlus size={12} /> 新建自动化</button>} />
+        )}
       </div>
 
       <ConfirmDialog

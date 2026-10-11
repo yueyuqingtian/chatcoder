@@ -3,10 +3,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type ExecPolicyToolInfo, type ModelOut, type SubagentProfileOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
-import { IconPlus, IconX } from "../icons";
+import { IconBot, IconPencil, IconPlus, IconTrash } from "../icons";
 import { Modal } from "../Modal";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { Input, Textarea, Tooltip } from "../ui";
+import { Button, CardRow, Empty, IconButton, Input, List, ListRow, PageActions, Section, Tag, Textarea, Tooltip } from "../ui";
 import { Sw } from "./shared";
 import { ModelPicker } from "../chat/ModelPicker";
 
@@ -200,54 +200,66 @@ export function SubagentsPanel() {
     } catch (e) { notify("保存失败: " + String(e)); } finally { setLimitsSaving(false); }
   };
 
+  const openNew = () => { setEditing(null); setShowForm(true); };
+
   return (
-    <div>
-      {/* S10（plan-41-197）：并发与上限改为「摘要行 + 配置弹窗」——此前常驻两行数字输入观感笨重，
-          且保存按钮与全局“修改即保存”协议不一致。 */}
-      <div className="settings-card subagent-limits-summary">
-        <div className="settings-row">
-          <div className="settings-row-info">
-            <div className="settings-row-title">并发与上限</div>
-            <div className="settings-row-desc">
-              同时运行上限 {limits.concurrent} · 每轮派发上限 {limits.perTurn}
-            </div>
+    <>
+      {/* plan-114-450：主操作放页头右上角（此前悬空在「并发与上限」卡片下方，是用户指出的异常排版） */}
+      <PageActions>
+        <Button variant="primary" size="sm" icon={<IconPlus size={13} />} onClick={openNew}>新建子代理类型</Button>
+      </PageActions>
+
+      {/* S10（plan-41-197）：并发与上限 = 摘要行 + 配置弹窗；plan-114-450：独立成组，不与列表混在同一张卡片里 */}
+      <Section title="运行限制">
+        <CardRow title="并发与上限" desc={`同时运行上限 ${limits.concurrent} · 每轮派发上限 ${limits.perTurn}`}>
+          <Button variant="secondary" size="sm" onClick={() => setLimitsOpen(true)}>配置</Button>
+        </CardRow>
+      </Section>
+
+      <Section title={`子代理类型 ${items.length}`} bare>
+        {items.length === 0 ? (
+          <div className="ui-card">
+            <Empty
+              title="还没有自定义子代理类型"
+              desc="内置的 explore / general 由系统注册；新建一个专用代理，嗒嗒会按你的工具与提示词派它干活"
+              action={<Button variant="secondary" size="sm" icon={<IconPlus size={13} />} onClick={openNew}>新建子代理类型</Button>}
+            />
           </div>
-          <div className="settings-row-control">
-            <button className="btn btn-ghost btn-sm" onClick={() => setLimitsOpen(true)}>配置</button>
-          </div>
-        </div>
-      </div>
-      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginBottom: 12 }}>
-        <button className="btn btn-primary btn-sm" onClick={() => { setEditing(null); setShowForm(true); }}><IconPlus size={13} /> 新建子代理类型</button>
-      </div>
-      <div className="settings-resource-list">
-        {items.map((s) => (
-          <div key={s.id} className="settings-resource-item">
-            <div className="settings-resource-info">
-              <div className="settings-resource-name">{s.name}</div>
-              <div className="settings-resource-desc">
-                <span>{s.description || "无描述"}</span>
-                {(s.tools_whitelist?.length ?? 0) > 0
-                  ? <span className="settings-resource-tag">允许 {s.tools_whitelist!.length} 个工具</span>
-                  : <span className="settings-resource-tag">全量工具</span>}
-                {s.model_id != null && <span className="settings-resource-tag">固定模型 {modelLabel(models, s.model_id)}</span>}
-                {s.reasoning_effort && <span className="settings-resource-tag">思考深度 {s.reasoning_effort}</span>}
-                {s.system_prompt && <span className="settings-resource-tag">自定义提示词</span>}
-              </div>
-            </div>
-            <div className="settings-resource-actions">
-              {/* S10：列表开关直接生效（后端已支持部分更新）；失败给出明确提示，不再静默吞错 */}
-              <Sw checked={s.is_active} onChange={async (v) => {
-                try { await api.updateSubagent(s.id, { is_active: v }); await load(); }
-                catch (e) { notify("更新启用状态失败：" + String(e)); }
-              }} />
-              <button className="btn btn-ghost btn-xs" onClick={() => { setEditing(s); setShowForm(true); }}>编辑</button>
-              <button className="btn btn-ghost btn-xs" onClick={() => setConfirmTarget(s)}><IconX size={12} /></button>
-            </div>
-          </div>
-        ))}
-        {items.length === 0 && <div className="navpage-empty">暂无子代理类型（内置 explore / general 由系统注册）</div>}
-      </div>
+        ) : (
+          <List>
+            {items.map((s) => (
+              <ListRow
+                key={s.id}
+                muted={!s.is_active}
+                icon={<IconBot size={16} />}
+                name={s.name}
+                desc={s.description || "无描述"}
+                meta={
+                  <>
+                    <Tag>{(s.tools_whitelist?.length ?? 0) > 0 ? `允许 ${s.tools_whitelist!.length} 个工具` : "全量工具"}</Tag>
+                    {s.model_id != null && <Tag>固定模型 {modelLabel(models, s.model_id)}</Tag>}
+                    {s.reasoning_effort && <Tag>思考深度 {s.reasoning_effort}</Tag>}
+                    {s.system_prompt && <Tag>自定义提示词</Tag>}
+                  </>
+                }
+                actions={
+                  <>
+                    <span className="ui-row-hover">
+                      <IconButton size="xs" title="编辑" icon={<IconPencil size={13} />} onClick={() => { setEditing(s); setShowForm(true); }} />
+                      <IconButton size="xs" tone="danger" title="删除" icon={<IconTrash size={13} />} onClick={() => setConfirmTarget(s)} />
+                    </span>
+                    {/* S10：列表开关直接生效；失败给出明确提示 */}
+                    <Sw checked={s.is_active} onChange={async (v) => {
+                      try { await api.updateSubagent(s.id, { is_active: v }); await load(); }
+                      catch (e) { notify("更新启用状态失败：" + String(e)); }
+                    }} />
+                  </>
+                }
+              />
+            ))}
+          </List>
+        )}
+      </Section>
       <ConfirmDialog
         open={confirmTarget !== null}
         title="删除子代理类型"
@@ -295,6 +307,6 @@ export function SubagentsPanel() {
       </Modal>
 
       <SubagentFormModal open={showForm} editing={editing} models={models} tools={tools} onClose={() => setShowForm(false)} onSaved={load} />
-    </div>
+    </>
   );
 }

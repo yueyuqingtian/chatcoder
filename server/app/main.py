@@ -16,6 +16,7 @@ from app.gateway.routers import (
     diagnostics,
     exec_policy,
     hooks,
+    kiro_auth,
     market,
     memories,
     models,
@@ -260,6 +261,7 @@ def create_app() -> FastAPI:
     app.include_router(ta3_auth.router, prefix="/api", tags=["ta3"])
     app.include_router(workbuddy_auth.router, prefix="/api", tags=["workbuddy"])
     app.include_router(trae_auth.router, prefix="/api", tags=["trae"])
+    app.include_router(kiro_auth.router, prefix="/api", tags=["kiro"])
     app.include_router(upload.router, prefix="/api", tags=["upload"])
     app.include_router(diagnostics.router, prefix="/api", tags=["diagnostics"])
     # plan-248-1258 M3.2: 代码符号索引管理（索引库页面）

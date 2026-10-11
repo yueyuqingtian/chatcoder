@@ -14,7 +14,7 @@ import type { DesktopRecipe, DesktopStatus } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { useI18n } from "../../store/i18n";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { Button, CardRow, Checkbox, FormDialog, Input, List, ListRow, Select, Slider, Textarea } from "../ui";
+import { Button, CardRow, Checkbox, FormDialog, Input, List, ListRow, Segmented, Select, Slider, Textarea } from "../ui";
 import { Field } from "../ui/Field";
 import { Row, Sw } from "./shared";
 
@@ -31,18 +31,10 @@ export function DesktopPanel() {
 
   return (
     <div className="dp-panel">
-      <div className="dp-subtabs" role="tablist">
-        {SUBTABS.map((s) => (
-          <button
-            key={s.key}
-            role="tab"
-            aria-selected={tab === s.key}
-            className={`dp-subtab${tab === s.key ? " active" : ""}`}
-            onClick={() => setTab(s.key)}
-          >
-            <span>{t(s.i18n)}</span>
-          </button>
-        ))}
+      {/* plan-114-450：页内标签统一为灰底分段控件（参照 Qoder），取代私有 .dp-subtab 下划线样式 */}
+      <div className="ui-toolbar">
+        <Segmented value={tab} onChange={setTab} aria-label={t("dp.tab.basic")}
+          options={SUBTABS.map((s) => ({ value: s.key, label: t(s.i18n) }))} />
       </div>
 
       {tab === "basic" && <DesktopBasicSection />}
@@ -177,7 +169,7 @@ function DesktopBasicSection() {
     : t("dp.status.missing");
 
   return (
-    <div className="settings-card-stack">
+    <div className="settings-card-stack sc-stack">
       <div className="settings-card">
         <Row title={t("dp.enable")} desc={t("dp.enable_desc")}>
           <Sw checked={cfg.desktop_enabled} onChange={(v) => patch({ desktop_enabled: v })} />
@@ -374,7 +366,7 @@ function DesktopRecipeSection() {
   }, [keyword, load]);
 
   return (
-    <div className="settings-card-stack">
+    <div className="settings-card-stack sc-stack">
       <div className="settings-card">
         <CardRow title={t("dp.recipe.section")} desc={t("dp.recipe.section_desc")}>
           <Button variant="primary" size="sm" onClick={() => setCreating(true)}>

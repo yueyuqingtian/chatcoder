@@ -616,6 +616,26 @@ class Ta3SyncOut(BaseModel):
     models: list[dict]
 
 
+# ── kiro（AWS Kiro）登录/同步（v26）──
+class KiroLoginStartOut(BaseModel):
+    status: str  # logged_in | failed
+    account: dict | None = None
+    region: str | None = None
+    error: str | None = None
+
+
+class KiroLoginStatusOut(BaseModel):
+    status: str  # pending | logged_in | failed
+    account: dict | None = None
+    region: str | None = None
+    error: str | None = None
+
+
+class KiroSyncOut(BaseModel):
+    synced: int
+    models: list[dict]
+
+
 # ── workbuddy（腾讯 CodeBuddy/WorkBuddy）登录/同步（v24）──
 class WorkBuddyLoginStartOut(BaseModel):
     status: str  # pending | logged_in

@@ -1,6 +1,6 @@
 {
   "name": "chatcoder",
-  "version": "0.7.3",
+  "version": "0.8.0",
   "description": "chatcoder - AI 多 Agent 协同编码工作台(桌面版)",
   "author": "chatcoder",
   "license": "UNLICENSED",
@@ -36,6 +36,7 @@
       "electron/preload.cjs",
       "electron/pty.cjs",
       "electron/loading.html",
+      "electron/vendor/gsap.min.js",
       "electron/glass-diagnostics.cjs",
       "electron/liquid-glass.cjs",
       "electron/pet.cjs",

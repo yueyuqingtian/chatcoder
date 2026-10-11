@@ -15,34 +15,9 @@ _USER_CONFIG_PATH = Path(
     os.environ.get("CHATCODER_USER_CONFIG", str(Path.home() / ".chatcoder" / "config.json"))
 )
 
-# ── AI 规则来源识别（第8点：扫描常见 AI 软件规则文档并按来源启停）──
-# 来源名 → 该软件常见的规则文档相对路径/目录（相对项目根）
-AI_RULE_SOURCES: dict[str, dict] = {
-    "claude": {
-        "label": "Claude Code",
-        "files": ["CLAUDE.md", ".claude/CLAUDE.md"],
-    },
-    "codex": {
-        "label": "Codex",
-        "files": ["AGENTS.md", ".codex/AGENTS.md"],
-    },
-    "codebuddy": {
-        "label": "CodeBuddy",
-        "files": ["CODEBUDDY.md", ".codebuddy/AGENTS.md", ".codebuddy/rules"],
-    },
-    "trae": {
-        "label": "Trae",
-        "files": [".trae/rules", "rules.md"],
-    },
-    "qoder": {
-        "label": "Qoder",
-        "files": ["QODER.md", ".qoder/AGENTS.md"],
-    },
-    "cursor": {
-        "label": "Cursor",
-        "files": [".cursorrules", ".cursor/rules"],
-    },
-}
+# ── AI 规则来源识别 ──
+# plan-114-450：来源表统一由 app.orchestration.rules_loader（RULE_SOURCE_LABELS / source_of）提供，
+# 路由不再自带一份（此前两份不一致：界面能开关的来源 ≠ 注入时过滤的来源）。
 
 
 def _is_dir_candidate(path: Path) -> bool:
@@ -749,18 +724,21 @@ async def scan_ai_rules(path: str = ""):
     root = Path(path) if path else Path(settings.workspace_root)
     if not root.is_dir():
         return []
+    # plan-114-450：与注入侧同一个扫描器（根 + 一级子目录 + 目录形态规则），
+    # 界面看到的文件 = 实际会被加载的文件，每个文件都归属到可开关的来源。
+    from app.orchestration.rules_loader import RULE_SOURCE_LABELS, scan_rules_docs, source_of
     out: list[dict] = []
-    for source, cfg in AI_RULE_SOURCES.items():
-        for rel in cfg["files"]:
-            p = root / rel
-            if p.exists():
-                out.append({
-                    "source": source,
-                    "label": cfg["label"],
-                    "path": rel,
-                    "exists": True,
-                    "kind": "dir" if p.is_dir() else "file",
-                })
+    for rel in await scan_rules_docs(str(root)):
+        source = source_of(rel)
+        if source is None:
+            continue
+        out.append({
+            "source": source,
+            "label": RULE_SOURCE_LABELS.get(source, source),
+            "path": rel,
+            "exists": True,
+            "kind": "file",
+        })
     return out
 
 
@@ -779,17 +757,21 @@ async def get_ai_rules(project_path: str = "") -> AiRulesOut:
     # S11（plan-41-197）：用“键是否存在”判定，不再用 `or` 回落——
     # 用户把来源全部停用时保存的是空数组 []，`[] or 默认全集` 会复活成“全部启用”，
     # 导致重进页面看到“停用未保存成功”（读写两侧同源问题，一起修正）。
-    enabled = set(data["ai_rules_enabled"]) if "ai_rules_enabled" in data else set(AI_RULE_SOURCES.keys())
-    sources = [
-        {"source": s, "label": cfg["label"], "enabled": s in enabled}
-        for s, cfg in AI_RULE_SOURCES.items()
-    ]
     return AiRulesOut(
-        sources=sources,
+        sources=_rule_sources_out(data),
         global_rules=data.get("global_rules", ""),
         workdir_rules=workdir_rules,
         project_path=ws_key,
     )
+
+
+def _rule_sources_out(data: dict) -> list[dict]:
+    """plan-114-450：来源列表取自注入侧 RULE_SOURCE_LABELS（此前路由自有一份 6 项的表，
+    gemini / windsurf / github 等来源注入时生效却在界面上没有开关）。
+    S11：用「键是否存在」判定，空数组是合法值（全部停用）。"""
+    from app.orchestration.rules_loader import RULE_SOURCE_LABELS
+    enabled = set(data["ai_rules_enabled"]) if "ai_rules_enabled" in data else set(RULE_SOURCE_LABELS.keys())
+    return [{"source": s, "label": label, "enabled": s in enabled} for s, label in RULE_SOURCE_LABELS.items()]
 
 
 @router.put("/settings/ai-rules", response_model=AiRulesOut)
@@ -810,16 +792,10 @@ async def set_ai_rules(body: AiRulesIn) -> AiRulesOut:
             "rules": body.workdir_rules, "scope": "workdir", "key": ws_key,
         }
     _save_config(data)
-    # S11（plan-41-197）：同 get_ai_rules——空数组是合法值（全部停用），不得 `or` 回落。
-    enabled = set(data["ai_rules_enabled"]) if "ai_rules_enabled" in data else set(AI_RULE_SOURCES.keys())
-    sources = [
-        {"source": s, "label": cfg["label"], "enabled": s in enabled}
-        for s, cfg in AI_RULE_SOURCES.items()
-    ]
     workdir_data = data.get(_get_scope_rules_key("workdir", ws_key), {})
     workdir_rules = workdir_data.get("rules", "") if isinstance(workdir_data, dict) else str(workdir_data)
     return AiRulesOut(
-        sources=sources,
+        sources=_rule_sources_out(data),
         global_rules=data.get("global_rules", ""),
         workdir_rules=workdir_rules,
         project_path=ws_key,

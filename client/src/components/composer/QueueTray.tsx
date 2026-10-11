@@ -16,15 +16,25 @@ const MODE_TAG: Record<string, string> = { plan: "计划", readonly: "只读" };
 function useExiting<T extends { id: string }>(items: T[], ms = 220): Array<T & { _leaving?: boolean }> {
   const [view, setView] = useState<Array<T & { _leaving?: boolean }>>(items);
   const timers = useRef<Map<string, number>>(new Map());
+  /** 最新 items：退场定时器到点复核用——切走又切回时队列项会「复活」，到点不能再按旧账移除。 */
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
   useEffect(() => {
     const ids = new Set(items.map((i) => i.id));
+    // 复活取消：仍存在于 items 的项，先清掉它待触发的退场定时器。
+    // 缺这一步时：切走（条目进入退场计时）→ 220ms 内切回（条目复活）→ 旧定时器到点
+    // 仍把复活项从 view 移除；此后 items 不再变化 ⇒ effect 不重跑，托盘永久不显示。
+    for (const id of ids) {
+      const t = timers.current.get(id);
+      if (t != null) { window.clearTimeout(t); timers.current.delete(id); }
+    }
     setView((prev) => {
       const next: Array<T & { _leaving?: boolean }> = [];
       // 保持原顺序：先遍历旧列表，标记已移除项；再补入新增项
       for (const p of prev) {
         const cur = items.find((i) => i.id === p.id);
         if (cur) next.push(cur);
-        else next.push({ ...p, _leaving: true });
+        else next.push(p._leaving ? p : { ...p, _leaving: true });
       }
       for (const it of items) if (!prev.some((p) => p.id === it.id)) next.push(it);
       return next;
@@ -33,6 +43,8 @@ function useExiting<T extends { id: string }>(items: T[], ms = 220): Array<T & {
       if (!ids.has(p.id) && !timers.current.has(p.id)) {
         const t = window.setTimeout(() => {
           timers.current.delete(p.id);
+          // 到点复核：等待期间可能已复活（切走又切回），已回来则不移除
+          if (itemsRef.current.some((x) => x.id === p.id)) return;
           setView((v) => v.filter((x) => x.id !== p.id));
         }, ms);
         timers.current.set(p.id, t);

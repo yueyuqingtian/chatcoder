@@ -2,6 +2,7 @@
  * 本文件提供设置项索引（SETTINGS_INDEX，供命令中心搜索）与右侧内容区 SettingsContent。
  * 三组：基础设置 / Agent 能力 / 数据与统计。
  */
+import { SettingsGlyph } from "../iconkit/SettingsGlyphs";
 import { useEffect, useState } from "react";
 import { AppearancePanel } from "./AppearancePanel";
 import { GeneralPanel } from "./GeneralPanel";
@@ -21,18 +22,14 @@ import { WorktreesPanel } from "./WorktreesPanel";
 import { PetsPanel } from "./PetsPanel";
 // plan-334-1661：电脑操控专用设置页（内核常驻，不作为 MCP 注册，故不进连接器页）
 import { DesktopPanel } from "./DesktopPanel";
-import { IconDownload, IconRefresh } from "../icons";
+import { IconAlertTriangle, IconDownload, IconPlus, IconRefresh, IconSparkles, IconWrench } from "../icons";
 import { MarkdownContent } from "../MarkdownContent";
-import { Card, PageShell, PageTransition } from "../ui";
-import { AppLogo } from "../AppLogo";
+import { Card, Collapse, PageShell, PageTransition } from "../ui";
+import { Dada, type DadaMood } from "../mascot/Dada";
+import { PlaygroundPanel } from "./PlaygroundPanel";
 import { useUpdaterStore } from "../../store/updater";
 import { useI18n } from "../../store/i18n";
-import {
-  IconAnchor, IconBarChart, IconBookOpen, IconBrain, IconCalendar,
-  IconChevronDown,
-  IconCpu, IconInfo, IconPalette, IconRotateCcw, IconSettings,
-  IconShield, IconTool, IconUsers, IconBox, IconGitBranch, IconPet, IconMonitor,
-} from "../icons";
+import { IconChevronDown } from "../icons";
 
 export type SettingsTab =
   | "general" | "appearance"
@@ -43,7 +40,8 @@ export type SettingsTab =
   | "archive"
   | "worktrees"
   | "pets"
-  | "desktop";
+  | "desktop"
+  | "playground";
 
 export interface SettingsIndexItem {
   key: SettingsTab;
@@ -55,26 +53,28 @@ export interface SettingsIndexItem {
 
 /** 供命令中心（Cmd+K）搜索：设置项索引 */
 export const SETTINGS_INDEX: SettingsIndexItem[] = [
-  { key: "general", label: "常规", group: "basic", keywords: "语言 代理 终端 Shell 字体 搜索 todos reasoning", icon: <IconSettings size={15} /> },
-  { key: "appearance", label: "外观", group: "basic", keywords: "主题 毛玻璃 布局 字号 颜色 面板", icon: <IconPalette size={15} /> },
-  { key: "pets", label: "宠物", group: "basic", keywords: "宠物 pet petdex 桌面 浮窗 任务 状态 徽标 胶囊", icon: <IconPet size={15} /> },
+  { key: "general", label: "常规", group: "basic", keywords: "语言 代理 终端 Shell 字体 搜索 todos reasoning", icon: <SettingsGlyph name="general" /> },
+  { key: "appearance", label: "外观", group: "basic", keywords: "主题 毛玻璃 布局 字号 颜色 面板", icon: <SettingsGlyph name="appearance" /> },
+  { key: "pets", label: "宠物", group: "basic", keywords: "宠物 pet petdex 桌面 浮窗 任务 状态 徽标 胶囊", icon: <SettingsGlyph name="pets" /> },
   // plan-334-1661：电脑操控（内核常驻的内置工具，不注册为 MCP，因此不在连接器页）
-  { key: "desktop", label: "电脑操控", group: "agent", keywords: "电脑操控 computer use 桌面 鼠标 键盘 截图 uia 无障碍 操作路线 recipe", icon: <IconMonitor size={15} /> },
-  { key: "models", label: "模型设置", group: "basic", keywords: "供应商 模型 上下文 多模态 推理", icon: <IconCpu size={15} /> },
-  { key: "memory", label: "记忆", group: "agent", keywords: "记忆 召回 entries", icon: <IconBrain size={15} /> },
+  { key: "desktop", label: "电脑操控", group: "agent", keywords: "电脑操控 computer use 桌面 鼠标 键盘 截图 uia 无障碍 操作路线 recipe", icon: <SettingsGlyph name="desktop" /> },
+  { key: "models", label: "模型设置", group: "basic", keywords: "供应商 模型 上下文 多模态 推理", icon: <SettingsGlyph name="models" /> },
+  { key: "memory", label: "记忆", group: "agent", keywords: "记忆 召回 entries", icon: <SettingsGlyph name="memory" /> },
   // plan-282-1441（#6）：插件 / 技能 / MCP 三个独立页收拢为一个「拓展」页（子标签分区）
-  { key: "extensions", label: "拓展", group: "agent", keywords: "插件 市场 skill 技能 技能仓库 git 导入 mcp 连接器 外部工具 slot", icon: <IconBox size={15} /> },
-  { key: "subagents", label: "子智能体", group: "agent", keywords: "子代理 profile 工具白名单", icon: <IconUsers size={15} /> },
-  { key: "rules", label: "AI 规则", group: "agent", keywords: "全局规则 项目规则 扫描 命令", icon: <IconBookOpen size={15} /> },
-  { key: "hooks", label: "钩子", group: "agent", keywords: "hook 事件 回调", icon: <IconAnchor size={15} /> },
-  { key: "policy", label: "执行策略", group: "agent", keywords: "命令 审批 allow deny ask", icon: <IconShield size={15} /> },
-  { key: "scheduled", label: "自动化", group: "data", keywords: "cron 定时 自动化 任务", icon: <IconCalendar size={15} /> },
-  { key: "usage", label: "使用统计", group: "data", keywords: "token 用量 统计 context", icon: <IconBarChart size={15} /> },
-  { key: "index", label: "索引库", group: "data", keywords: "索引 符号 codegraph symbol 代码探索", icon: <IconCpu size={15} /> },
-  { key: "worktrees", label: "工作树", group: "data", keywords: "worktree 工作树 分支 隔离 合并 git", icon: <IconGitBranch size={15} /> },
-  { key: "diagnostics", label: "诊断", group: "data", keywords: "健康检查 系统状态 checkpoint", icon: <IconTool size={15} /> },
-  { key: "archive", label: "归档恢复", group: "data", keywords: "归档 恢复 已删除 archived restore", icon: <IconRotateCcw size={15} /> },
-  { key: "about", label: "关于", group: "basic", keywords: "版本 信息", icon: <IconInfo size={15} /> },
+  { key: "extensions", label: "拓展", group: "agent", keywords: "插件 市场 skill 技能 技能仓库 git 导入 mcp 连接器 外部工具 slot", icon: <SettingsGlyph name="extensions" /> },
+  { key: "subagents", label: "子智能体", group: "agent", keywords: "子代理 profile 工具白名单", icon: <SettingsGlyph name="subagents" /> },
+  { key: "rules", label: "AI 规则", group: "agent", keywords: "全局规则 项目规则 扫描 命令", icon: <SettingsGlyph name="rules" /> },
+  { key: "hooks", label: "钩子", group: "agent", keywords: "hook 事件 回调", icon: <SettingsGlyph name="hooks" /> },
+  { key: "policy", label: "执行策略", group: "agent", keywords: "命令 审批 allow deny ask", icon: <SettingsGlyph name="policy" /> },
+  { key: "scheduled", label: "自动化", group: "data", keywords: "cron 定时 自动化 任务", icon: <SettingsGlyph name="scheduled" /> },
+  { key: "usage", label: "使用统计", group: "data", keywords: "token 用量 统计 context", icon: <SettingsGlyph name="usage" /> },
+  { key: "index", label: "索引库", group: "data", keywords: "索引 符号 codegraph symbol 代码探索", icon: <SettingsGlyph name="index" /> },
+  { key: "worktrees", label: "工作树", group: "data", keywords: "worktree 工作树 分支 隔离 合并 git", icon: <SettingsGlyph name="worktrees" /> },
+  { key: "diagnostics", label: "诊断", group: "data", keywords: "健康检查 系统状态 checkpoint", icon: <SettingsGlyph name="diagnostics" /> },
+  { key: "archive", label: "归档恢复", group: "data", keywords: "归档 恢复 已删除 archived restore", icon: <SettingsGlyph name="archive" /> },
+  { key: "about", label: "关于", group: "basic", keywords: "版本 信息", icon: <SettingsGlyph name="about" /> },
+  // plan-114-449：嗒嗒的字块乐园（原创小游戏，放在数据组末尾——设置页里可以喘口气的地方）
+  { key: "playground", label: "嗒嗒乐园", group: "data", keywords: "游乐场 小游戏 嗒嗒 彩蛋 playground", icon: <SettingsGlyph name="playground" /> },
 ];
 
 export const NAV_GROUPS: Array<{ id: SettingsIndexItem["group"]; label: string }> = [
@@ -82,6 +82,8 @@ export const NAV_GROUPS: Array<{ id: SettingsIndexItem["group"]; label: string }
   { id: "agent", label: "Agent 能力" },
   { id: "data", label: "数据与统计" },
 ];
+
+const ABOUT_MOODS: DadaMood[] = ["calm", "happy", "wow", "think", "oops"];
 
 function AboutPanel() {
   const status = useUpdaterStore((s) => s.status);
@@ -99,6 +101,7 @@ function AboutPanel() {
   // 长历史分段加载；头部给出条目数摘要，便于快速定位“这次更新了什么”。
   const [expandedVersions, setExpandedVersions] = useState<Set<string>>(new Set());
   const [historyLimit, setHistoryLimit] = useState(5);
+  const [taps, setTaps] = useState(0);
 
   useEffect(() => { void loadReleaseHistory(); }, [loadReleaseHistory]);
 
@@ -143,11 +146,21 @@ function AboutPanel() {
     return `${(n / 1024 / 1024).toFixed(1)} MB`;
   };
 
+  // plan-91-393：拆为「应用信息 + 软件更新」与「更新历史」两张卡片，去掉两区之间的粗分隔线
   return (
-    <div className="settings-card">
+    <div className="settings-card-stack about-stack">
+    <div className="settings-card about-card">
       <div className="settings-row">
-        <div className="settings-row-info" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <AppLogo size={36} />
+        <div className="settings-row-info" style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          {/* plan-114-449：关于页由嗒嗒丰富版出场；连点 5 次换一种表情（小彩蛋） */}
+          <button
+            type="button"
+            className="about-dada"
+            aria-label="嗒嗒"
+            onClick={() => setTaps((n) => n + 1)}
+          >
+            <Dada variant="rich" size={56} mood={ABOUT_MOODS[Math.floor(taps / 5) % ABOUT_MOODS.length]} />
+          </button>
           <div>
             <div className="settings-row-title">ChatCoder</div>
             <div className="settings-row-desc">项目任务驱动的 AI 编码工作台</div>
@@ -160,7 +173,13 @@ function AboutPanel() {
         <>
           <div className="settings-row">
             <div className="settings-row-info">
-              <div className="settings-row-title">软件更新</div>
+              <div className="settings-row-title about-upd-title">
+                软件更新
+                {status.state !== "idle" && <span className={"about-upd-state st-" + status.state}>{
+                  status.state === "none" ? "已是最新" : status.state === "available" ? "有新版本" :
+                  status.state === "downloading" ? "下载中" : status.state === "downloaded" ? "待重启" :
+                  status.state === "checking" ? "检查中" : status.state === "error" ? "失败" : ""}</span>}
+              </div>
               <div className="settings-row-desc">{hint || "从 GitHub Releases 自动检查新版本"}</div>
             </div>
             <div className="settings-row-control">
@@ -207,7 +226,11 @@ function AboutPanel() {
             </div>
           )}
 
-          {/* 完整更新历史（时间线，按版本分组；离线回落本地 CHANGELOG） */}
+        </>
+      )}
+    </div>
+    {supported && (
+      <div className="settings-card about-history-card">
           <div className="settings-row upd-history-row">
             <div className="settings-row-info">
               <div className="settings-row-title">更新历史</div>
@@ -218,24 +241,23 @@ function AboutPanel() {
               </div>
             </div>
             <div className="settings-row-control">
-              <button className="btn btn-ghost btn-sm" onClick={() => setHistoryOpen((v) => !v)}>
+              <button className="btn btn-ghost btn-sm" onClick={() => setHistoryOpen((v) => !v)} aria-expanded={historyOpen}>
                 <IconChevronDown size={12} className={"upd-notes-caret" + (historyOpen ? " open" : "")} />
                 {historyOpen ? "收起" : "查看"}
               </button>
             </div>
           </div>
-          {historyOpen && (
-            <div className="upd-history">
+          <Collapse open={historyOpen}>
+            <div className="upd-history about-history">
               {releaseHistory.length === 0 && <div className="navpage-empty">暂无更新历史</div>}
               {releaseHistory.slice(0, historyLimit).map((r, i) => {
                 const isCurrent = r.version === appVersion;
                 const key = `${r.version}-${i}`;
                 const expanded = expandedVersions.has(key);
                 const count = countItems(r.notes);
+                const groups = parseReleaseGroups(r.notes);
                 return (
-                  <div key={key} className={"upd-history-item" + (isCurrent ? " current" : "")}>
-                    {/* S7：版本行可点击——默认只看到“版本 + 日期 + 条目数”，
-                        点击展开该版本完整内容，避免多个版本的长文一次性铺开。 */}
+                  <div key={key} className={"upd-history-item about-rel" + (isCurrent ? " current" : "") + (expanded ? " open" : "")}>
                     <button
                       type="button"
                       className={"upd-history-head" + (expanded ? " open" : "")}
@@ -247,7 +269,7 @@ function AboutPanel() {
                       })}
                     >
                       <span className="upd-history-version">
-                        {r.version ? `v${r.version}` : (r.name || "更新日志")}
+                        <span className="about-rel-pill">{r.version ? `v${r.version}` : (r.name || "更新日志")}</span>
                         {isCurrent && <span className="upd-history-cur">当前版本</span>}
                         {r.date && <span className="upd-history-date">{new Date(r.date).toLocaleDateString()}</span>}
                       </span>
@@ -256,9 +278,27 @@ function AboutPanel() {
                         <IconChevronDown size={12} className={"upd-notes-caret" + (expanded ? " open" : "")} />
                       </span>
                     </button>
-                    {expanded && (
-                      <div className="upd-history-notes release-notes"><MarkdownContent>{r.notes || "(无说明)"}</MarkdownContent></div>
-                    )}
+                    <Collapse open={expanded}>
+                      {groups ? (
+                        <div className="about-rel-groups">
+                          {groups.map((g) => (
+                            <div key={g.title} className={"about-rel-group tone-" + g.tone}>
+                              <div className="about-rel-group-title">
+                                <span className="about-rel-ic" aria-hidden>
+                                  {g.tone === "add" ? <IconPlus size={11} /> : g.tone === "fix" ? <IconWrench size={11} /> : g.tone === "warn" ? <IconAlertTriangle size={11} /> : <IconSparkles size={11} />}
+                                </span>
+                                {g.title}
+                              </div>
+                              <ul className="about-rel-list release-notes">
+                                {g.items.map((it, j) => <li key={j}><MarkdownContent>{it}</MarkdownContent></li>)}
+                              </ul>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="upd-history-notes release-notes"><MarkdownContent>{r.notes || "(无说明)"}</MarkdownContent></div>
+                      )}
+                    </Collapse>
                   </div>
                 );
               })}
@@ -268,11 +308,34 @@ function AboutPanel() {
                 </button>
               )}
             </div>
-          )}
-        </>
-      )}
+          </Collapse>
+      </div>
+    )}
     </div>
   );
+}
+
+/** plan-91-393：把 CHANGELOG 版本块按「### 分组 + - 条目」解析为结构化分组；
+ *  不符合该结构（无分组或含其他段落）时返回 null，回落 Markdown 原样渲染。 */
+function parseReleaseGroups(notes?: string): Array<{ title: string; tone: "add" | "opt" | "fix" | "warn"; items: string[] }> | null {
+  if (!notes) return null;
+  const groups: Array<{ title: string; tone: "add" | "opt" | "fix" | "warn"; items: string[] }> = [];
+  for (const raw of notes.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const h = /^#{2,4}\s+(.+)$/.exec(line);
+    if (h) {
+      const title = h[1].trim();
+      const tone = /新增|feat|add/i.test(title) ? "add" : /修复|fix/i.test(title) ? "fix" : /重要|break/i.test(title) ? "warn" : "opt";
+      groups.push({ title, tone, items: [] });
+      continue;
+    }
+    const li = /^[-*]\s+(.+)$/.exec(line);
+    if (li && groups.length > 0) { groups[groups.length - 1].items.push(li[1]); continue; }
+    return null;
+  }
+  const valid = groups.filter((g) => g.items.length > 0);
+  return valid.length > 0 ? valid : null;
 }
 function RowItem({ title, desc }: { title: string; desc: string }) {
   return <div className="settings-row"><div className="settings-row-info"><div className="settings-row-title">{title}</div><div className="settings-row-desc">{desc}</div></div><div className="settings-row-control" /></div>;
@@ -292,12 +355,15 @@ const PANELS: Record<SettingsTab, { Comp: React.ComponentType; width?: "standard
   appearance: { Comp: AppearancePanel },
   // S6（plan-41-197）：模型页自带单卡片左右衔接布局，不外包 Card（避免“卡片套卡片”）
   // S18（plan-41-197b）：自带标题区（模型设置 + 副标题 + 刷新），外层不再渲染标题
-  models: { Comp: ModelsPanel, selfHeader: true },
+  // plan-114-450：模型页也走统一页头 + 填充式（左右两列在卡片内各自滚动），宽档容纳双栏
+  models: { Comp: ModelsPanel, fill: true, width: "wide" },
   // plan-41-198：拓展页 = 已安装管理（市场在左面板「拓展」）；自带标题区 +
   // 头部固定、列表独立滚动（fill）
-  extensions: { Comp: InstalledPanel, selfHeader: true, fill: true },
-  subagents: { Comp: SubagentsPanel, card: true },
-  rules: { Comp: RulesPanel, card: true },
+  // plan-114-450：标题区交还 PageShell（统一页头），「市场」经 PageActions 投送到右上角
+  extensions: { Comp: InstalledPanel, fill: true },
+  // plan-114-450：以下面板改为自带 Section（组标题 + 卡片），外层不再包 Card
+  subagents: { Comp: SubagentsPanel },
+  rules: { Comp: RulesPanel },
   // policy / usage 含表格与图表，走宽档（唯一允许的宽度差异）
   policy: { Comp: PolicyPanel, width: "wide", card: true },
   scheduled: { Comp: ScheduledPanel, card: true },
@@ -307,7 +373,7 @@ const PANELS: Record<SettingsTab, { Comp: React.ComponentType; width?: "standard
   usage: { Comp: UsagePanel, width: "wide", card: true },
   diagnostics: { Comp: DiagnosticsPanel, card: true },
   index: { Comp: IndexLibraryPanel, card: true },
-  worktrees: { Comp: WorktreesPanel, width: "wide", card: true },
+  worktrees: { Comp: WorktreesPanel },
   archive: { Comp: ArchivedPanel, card: true },
   about: { Comp: AboutPanel },
   // plan-73-323 / plan-73-326：宠物分区（面板自带 settings-card 结构，不再外包 Card——
@@ -315,6 +381,8 @@ const PANELS: Record<SettingsTab, { Comp: React.ComponentType; width?: "standard
   pets: { Comp: PetsPanel },
   // plan-334-1661：自带 settings-card-stack / 子标签结构，不外包 Card
   desktop: { Comp: DesktopPanel },
+  // plan-114-449：嗒嗒乐园，宽档画布
+  playground: { Comp: PlaygroundPanel, width: "wide" },
 };
 
 function Panel({ tab }: { tab: SettingsTab }) {

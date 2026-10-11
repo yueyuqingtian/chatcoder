@@ -6,16 +6,19 @@
  *   → 主副标语 → 用量热力图卡片（与输入框同宽）→ 输入框固定在底部（与会话态同位置，发送后不跳位）；输入框左下为工作区。
  */
 import type { NavKey } from "./Sidebar";
+import { useMemo } from "react";
 import { ChatPanel } from "./ChatPanel";
 import { ScheduledPage } from "./NavPages";
 import { MarketPanel } from "./settings/MarketPanel";
 import { useChatStore } from "../store/chat";
 import { useI18n } from "../store/i18n";
 import { ComposerCore } from "./chat/ComposerCore";
+import { WorkspaceChip } from "./composer/WorkspaceChip";
 import { PluginSlot } from "../plugins/registry";
 import { PageTransition } from "./ui";
-import { StampHero } from "./home/StampHero";
+import { BadgeHero } from "./home/BadgeHero";
 import { UsageCard } from "./home/UsageCard";
+import { HomeTexture } from "./home/HomeTexture";
 
 export function Workspace({ nav, onSessionStart }: {
   nav: NavKey | null;
@@ -41,6 +44,7 @@ export function Workspace({ nav, onSessionStart }: {
   if (!currentSessionId) {
     return (
       <main className="workspace workspace-empty">
+        <HomeTexture />
         {/* plan-353-1738 M3（S9）：空态 ⇄ 会话态此前是裸 div 瞬切（外层 id 也不变）。
             这里包一层 PageTransition，让「新建会话 / 退出会话」也有与其它切换一致的入场。
             fill=false：保持原 .ws-body 的盒模型（flex:1 撑满，不引入 height:100%）。 */}
@@ -64,14 +68,28 @@ export function Workspace({ nav, onSessionStart }: {
 /** 空态首页（plan-20261009-ui U2） */
 export function EmptyState({ onStarted }: { onStarted?: () => void }) {
   const { t } = useI18n();
+  const projects = useChatStore((s) => s.projects);
+  const currentProjectId = useChatStore((s) => s.currentProjectId);
+  const activeProjects = useMemo(() => projects.filter((p) => !p.archived), [projects]);
   return (
     <div className="empty-state es-home">
       <div className="es-hero">
         <div className="es-hero-inner mo-stagger">
-          <StampHero />
+          <BadgeHero />
           <div className="es-headline">
             <h1 className="es-title">{t("workspace.tagline")}</h1>
-            <p className="es-sub">{t("workspace.tagline_sub")}</p>
+            {/* plan-114-449：当前工作目录嵌进副标语，点文字即可搜索 / 切换 / 新建（与输入框下的 chip 共用列表） */}
+            <div className="es-sub es-sub-ws">
+              <span>在</span>
+              <WorkspaceChip
+                variant="inline"
+                projects={activeProjects}
+                currentId={currentProjectId ?? null}
+                locked={false}
+                onSelect={(id) => useChatStore.setState({ currentProjectId: id })}
+              />
+              <span>和嗒嗒一起，把想法聊成代码</span>
+            </div>
           </div>
           <UsageCard />
         </div>

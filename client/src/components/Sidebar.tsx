@@ -5,6 +5,7 @@
  * 项目→会话两级列表（会话行带相对时间）
  * 底部用户条（设置 + 更新徽标）
  */
+import { IxNewChat, IxSearch, IxAutomation, IxExtensions, IxSettings } from "./iconkit/StackIcons";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ProjectOut, SessionOut } from "../api/client";
@@ -18,14 +19,14 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { MergeDialog } from "./worktree/MergeDialog";
 import { AppLogo } from "./AppLogo";
 import { MarkdownContent } from "./MarkdownContent";
-import { Input, Segmented } from "./ui";
+import { Empty, Input, Segmented } from "./ui";
 import { ProjectIcon } from "./project/ProjectIcon";
 import { openProjectDialog } from "../store/projectDialog";
 import {
-  IconCalendar, IconChevronDown, IconChevronLeft, IconChevronRight, IconPanelLeft,
+  IconChevronDown, IconChevronLeft, IconChevronRight, IconPanelLeft,
   IconFolder, IconLayers, IconSortDesc, IconPencil,
-  IconMoreHorizontal, IconPin, IconPlus, IconRefresh, IconSearch, IconSettings,
-  IconFolderPlus, IconDownload, IconArchive, IconGitBranch, IconTrash, IconBox,
+  IconMoreHorizontal, IconPin, IconPlus, IconRefresh,
+  IconFolderPlus, IconDownload, IconCopy, IconClock, IconSortAlpha, IconArchive, IconGitBranch, IconTrash,
 } from "./icons";
 
 export type NavKey = "chat" | "scheduled" | "skills" | "mcp" | "settings";
@@ -304,11 +305,11 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
   }, [renaming]);
 
   const navItems = useMemo(() => [
-    { key: "chat", label: t("sidebar.new_task"), icon: <IconPlus size={16} />, shortcut: "Ctrl+N" },
-    { key: "search", label: t("sidebar.search"), icon: <IconSearch size={16} />, shortcut: "Ctrl+K" },
-    { key: "scheduled", label: t("sidebar.automation"), icon: <IconCalendar size={16} /> },
+    { key: "chat", label: t("sidebar.new_task"), icon: <IxNewChat size={17} />, shortcut: "Ctrl+N" },
+    { key: "search", label: t("sidebar.search"), icon: <IxSearch size={17} />, shortcut: "Ctrl+K" },
+    { key: "scheduled", label: t("sidebar.automation"), icon: <IxAutomation size={17} /> },
     // plan-282-1441（#6）：原「技能」入口改为「拓展」（插件/技能/连接器三合一）
-    { key: "skills", label: t("sidebar.extensions"), icon: <IconBox size={16} /> },
+    { key: "skills", label: t("sidebar.extensions"), icon: <IxExtensions size={17} /> },
   ], [t]);
 
   // Ctrl+N 新建任务
@@ -536,10 +537,10 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
         </span>
         {menuFor === s.id && (
           <div className="context-menu sb-context-menu" onClick={() => setMenuFor(null)}>
-            <div className="context-menu-item" onClick={() => { setRenaming({ id: s.id, value: s.title || "" }); setMenuFor(null); }}>{t("sidebar.ctx_rename")}</div>
-            <div className="context-menu-item" onClick={() => { forkSession(s.id); onSessionFocus(); setMenuFor(null); }}>{t("sidebar.ctx_fork")}</div>
-            <div className="context-menu-item" onClick={() => { api.updateSession(s.id, { pinned: !s.pinned }).then(() => loadBootstrap()); setMenuFor(null); }}>{s.pinned ? t("sidebar.ctx_unpin") : t("sidebar.ctx_pin")}</div>
-            <div className="context-menu-item" onClick={() => { api.createWorktree(s.id); setMenuFor(null); }}>{t("sidebar.ctx_worktree")}</div>
+            <div className="context-menu-item" onClick={() => { setRenaming({ id: s.id, value: s.title || "" }); setMenuFor(null); }}><IconPencil size={13} /> {t("sidebar.ctx_rename")}</div>
+            <div className="context-menu-item" onClick={() => { forkSession(s.id); onSessionFocus(); setMenuFor(null); }}><IconCopy size={13} /> {t("sidebar.ctx_fork")}</div>
+            <div className="context-menu-item" onClick={() => { api.updateSession(s.id, { pinned: !s.pinned }).then(() => loadBootstrap()); setMenuFor(null); }}><IconPin size={13} /> {s.pinned ? t("sidebar.ctx_unpin") : t("sidebar.ctx_pin")}</div>
+            <div className="context-menu-item" onClick={() => { api.createWorktree(s.id); setMenuFor(null); }}><IconGitBranch size={13} /> {t("sidebar.ctx_worktree")}</div>
             <div
               className={"context-menu-item" + (s.has_running ? " disabled" : "")}
               title={s.has_running ? t("sidebar.archive_disabled") : ""}
@@ -548,9 +549,9 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
                 if (s.has_running) return;
                 api.updateSession(s.id, { status: "archived" }).then(() => loadBootstrap());
               }}
-            >{t("sidebar.ctx_archive")}</div>
+            ><IconArchive size={13} /> {t("sidebar.ctx_archive")}</div>
             <div className="context-menu-divider" />
-            <div className="context-menu-item danger" onClick={() => { setConfirmDelete(s); setMenuFor(null); }}>{t("sidebar.ctx_delete")}</div>
+            <div className="context-menu-item danger" onClick={() => { setConfirmDelete(s); setMenuFor(null); }}><IconTrash size={13} /> {t("sidebar.ctx_delete")}</div>
           </div>
         )}
       </div>
@@ -590,27 +591,27 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
                 <IconPencil size={13} /> 编辑项目
               </div>
             )}
-            <div className="context-menu-item" onClick={() => window.chatcoderAPI?.openPath?.(p.path)}>{t("sidebar.ctx_open_in_folder")}</div>
+            <div className="context-menu-item" onClick={() => window.chatcoderAPI?.openPath?.(p.path)}><IconFolder size={13} /> {t("sidebar.ctx_open_in_folder")}</div>
             {isWorktree ? (
               <>
                 <div className="context-menu-item" onClick={() => { setMergeDirection("to_main"); setMergeWorktree(p); }}>
-                  <IconGitBranch size={12} /> 合并到主工作区
+                  <IconGitBranch size={13} /> 合并到主工作区
                 </div>
                 <div className="context-menu-item" onClick={() => { setMergeDirection("from_main"); setMergeWorktree(p); }}>
-                  <IconGitBranch size={12} /> 从主工作区更新
+                  <IconGitBranch size={13} /> 从主工作区更新
                 </div>
                 <div className="context-menu-divider" />
                 <div className="context-menu-item danger" onClick={() => setDropWorktree(p)}>
-                  <IconTrash size={12} /> 删除工作树
+                  <IconTrash size={13} /> 删除工作树
                 </div>
               </>
             ) : (
               <>
                 <div className="context-menu-item" onClick={() => { void handleCreateWorktree(p); }}>
-                  <IconGitBranch size={12} /> {t("sidebar.ctx_worktree")}
+                  <IconGitBranch size={13} /> {t("sidebar.ctx_worktree")}
                 </div>
                 <div className="context-menu-divider" />
-                <div className="context-menu-item danger" onClick={() => { api.updateProject(p.id, { archived: true }).then(() => loadBootstrap()); }}>{t("sidebar.ctx_archive_project")}</div>
+                <div className="context-menu-item danger" onClick={() => { api.updateProject(p.id, { archived: true }).then(() => loadBootstrap()); }}><IconArchive size={13} /> {t("sidebar.ctx_archive_project")}</div>
               </>
             )}
           </div>
@@ -663,7 +664,7 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
   };
 
   return (
-    <nav className={`sidebar sb${collapsed ? " collapsed" : ""}`}>
+    <nav className={`sidebar sb sb-v2${collapsed ? " collapsed" : ""}`}>
       {/* 头部：logo + 折叠按钮 + 前进/后退。
           plan-31-151 S3：头部拖拽/双击改由系统 -webkit-app-region:drag 处理（见 global.css）。 */}
       <div className="sb-head">
@@ -708,9 +709,9 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
             </div>
             {sortMenuOpen && (
               <div className="context-menu sb-context-menu sb-sort-menu" onClick={() => setSortMenuOpen(false)}>
-                <div className={"context-menu-item" + (sort === "recent" ? " active" : "")} onClick={() => setSort("recent")}>{t("sidebar.sort_recent")}</div>
-                <div className={"context-menu-item" + (sort === "pinned" ? " active" : "")} onClick={() => setSort("pinned")}>{t("sidebar.sort_pinned")}</div>
-                <div className={"context-menu-item" + (sort === "name" ? " active" : "")} onClick={() => setSort("name")}>{t("sidebar.sort_name")}</div>
+                <div className={"context-menu-item" + (sort === "recent" ? " active" : "")} onClick={() => setSort("recent")}><IconClock size={13} /> {t("sidebar.sort_recent")}</div>
+                <div className={"context-menu-item" + (sort === "pinned" ? " active" : "")} onClick={() => setSort("pinned")}><IconPin size={13} /> {t("sidebar.sort_pinned")}</div>
+                <div className={"context-menu-item" + (sort === "name" ? " active" : "")} onClick={() => setSort("name")}><IconSortAlpha size={13} /> {t("sidebar.sort_name")}</div>
               </div>
             )}
           </div>
@@ -735,10 +736,8 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
                   </div>
                 ))}
                 {visibleProjects.length === 0 && (
-                  <div className="sb-empty">
-                    <p>{t("sidebar.empty_projects")}</p>
-                    <button className="btn btn-ghost btn-sm" onClick={handleNewProject}><IconPlus size={13} /> {t("sidebar.new_project")}</button>
-                  </div>
+                  <Empty size="sm" title={t("sidebar.empty_projects")}
+                    action={<button className="btn btn-secondary btn-sm" onClick={handleNewProject}><IconPlus size={13} /> {t("sidebar.new_project")}</button>} />
                 )}
               </>
             ) : (
@@ -746,10 +745,8 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
                 <div className="sb-section-label">{t("sidebar.section_tasks")}</div>
                 {filteredSessions.map(renderSession)}
                 {filteredSessions.length === 0 && (
-                  <div className="sb-empty">
-                    <p>{t("sidebar.empty_sessions")}</p>
-                    <button className="btn btn-ghost btn-sm" onClick={() => onChange("chat")}><IconPlus size={13} /> {t("sidebar.create_first_task")}</button>
-                  </div>
+                  <Empty size="sm" title={t("sidebar.empty_sessions")}
+                    action={<button className="btn btn-secondary btn-sm" onClick={() => onChange("chat")}><IconPlus size={13} /> {t("sidebar.create_first_task")}</button>} />
                 )}
               </>
             )}
@@ -759,9 +756,10 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
 
       {/* 底部设置入口 */}
       <div className="sb-userbar">
-        <button className={`sb-user-settings${active === "settings" ? " active" : ""}`} title={t("cmd.settings")} onClick={() => onChange("settings")}><IconSettings size={16} />{!collapsed && <span>{t("cmd.settings")}</span>}</button>
+        <button className={`sb-user-settings${active === "settings" ? " active" : ""}`} title={t("cmd.settings")} onClick={() => onChange("settings")}><IxSettings size={17} />{!collapsed && <span>{t("cmd.settings")}</span>}</button>
         <UpdateBadge collapsed={collapsed} />
       </div>
+
 
       <ConfirmDialog
         open={confirmDelete !== null}

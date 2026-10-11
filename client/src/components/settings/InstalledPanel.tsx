@@ -16,9 +16,9 @@ import { useChatStore } from "../../store/chat";
 import { useNavIntentStore } from "../../store/navIntent";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { Modal } from "../Modal";
-import { Input, Menu, Select, Switch } from "../ui";
+import { Button, DadaLoader, Empty, Input, Menu, PageActions, Segmented, Select, Switch, Tooltip } from "../ui";
 import {
-  IconBox, IconPlug, IconPlus, IconRefresh, IconSearch, IconTrash, IconMoreHorizontal, IconZap, IconGitBranch,
+  IconBox, IconPlug, IconPlus, IconRefresh, IconSearch, IconTrash, IconZap, IconGitBranch, IconSettings, IconInfo,
 } from "../icons";
 import { ActionDialogs, toneOf } from "./MarketPanel";
 import { DatabaseConnectionsPanel } from "./DatabaseConnectionsPanel";
@@ -304,52 +304,43 @@ export function InstalledPanel() {
 
   return (
     <div className="inst-page">
-      {/* 自带标题区（与市场页一致的排版；外层 PageShell 不再渲染标题） */}
-      <div className="inst-head">
-        <div>
-          <h1 className="inst-title">扩展管理</h1>
-          {/* 副标题不再包含「智能体」——项目无此管理能力，写了会让用户以为有入口 */}
-          <p className="inst-sub">管理本机已安装的插件、技能和连接器。</p>
-        </div>
-        <button className="btn btn-ghost btn-sm" onClick={gotoMarket}>前往市场</button>
-      </div>
+      {/* plan-114-450：标题区交还外层 PageShell（与其它设置页同一页头），「市场」放页头右上 */}
+      <PageActions>
+        <Button variant="secondary" size="sm" icon={<IconBox size={13} />} onClick={gotoMarket}>市场</Button>
+      </PageActions>
 
-      <div className="inst-toolbar">
-        <div className="inst-counts">
-          {filterTabs.map((c) => (
-            <button
-              key={c.key}
-              type="button"
-              className={"inst-count" + (kindFilter === c.key ? " on" : "")}
-              onClick={() => setKindFilter(c.key)}
-            >
-              {c.label} <b>{c.n}</b>
-            </button>
-          ))}
-        </div>
-        {/* 来源筛选（plan-41-226）：覆盖插件/技能/连接器的来源维度 */}
-        {sourceOptions.length > 1 && (
-          <Select
-            value={sourceFilter}
-            onChange={setSourceFilter}
-            options={[{ value: "", label: "全部来源" }, ...sourceOptions.map((s) => ({ value: s, label: s }))]}
-            style={{ minWidth: 116 }}
-            aria-label="按来源筛选"
-          />
-        )}
-        <div className="inst-search">
-          <IconSearch size={13} />
-          <input
-            placeholder="搜索已安装项"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            aria-label="搜索已安装项"
-          />
-        </div>
-        <Menu
+      {/* plan-114-450：工具条参照 Qoder——左侧灰底分段标签（带计数），右侧来源筛选 + 搜索 + 添加 */}
+      <div className="ui-toolbar is-nowrap inst-toolbar">
+        <Segmented
+          value={kindFilter}
+          onChange={(v) => setKindFilter(v as "all" | InstKind)}
+          aria-label="按类型筛选"
+          options={filterTabs.map((c) => ({ value: c.key, label: c.label, count: c.n }))}
+        />
+        <div className="ui-toolbar-end">
+          {/* 来源筛选（plan-41-226）：覆盖插件/技能/连接器的来源维度 */}
+          {sourceOptions.length > 1 && (
+            <Select
+              value={sourceFilter}
+              onChange={setSourceFilter}
+              options={[{ value: "", label: "全部来源" }, ...sourceOptions.map((s) => ({ value: s, label: s }))]}
+              style={{ minWidth: 116 }}
+              aria-label="按来源筛选"
+            />
+          )}
+          <div className="inst-search ui-toolbar-search">
+            <IconSearch size={13} />
+            <input
+              placeholder="搜索已安装项"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              aria-label="搜索已安装项"
+            />
+          </div>
+          <Menu
           align="end"
           trigger={
-            <button className="btn btn-ghost btn-md">
+            <button className="btn btn-secondary btn-sm">
               <IconPlus size={13} /> 添加
             </button>
           }
@@ -366,6 +357,7 @@ export function InstalledPanel() {
             { label: "刷新列表", icon: <IconRefresh size={13} />, onSelect: () => void load() },
           ]}
         />
+        </div>
       </div>
 
       {/* plan-59-286：每类拓展的常驻使用说明——"装完之后怎么用"必须在界面里说清，
@@ -381,23 +373,19 @@ export function InstalledPanel() {
       </div>
 
       <div className="inst-scroll">
-        {loading && rows.length === 0 && <div className="inst-empty">正在加载已安装内容…</div>}
+        {loading && rows.length === 0 && <div className="inst-loading"><DadaLoader label="正在加载已安装内容…" /></div>}
+        {/* 空态分三种：搜索无结果 / 该类型未安装 / 全空；后两类带「前往市场」引导（plan-114-450 换成嗒嗒空状态） */}
         {!loading && filtered.length === 0 && (
-          <div className="inst-empty">
-            {/* 空态分三种：搜索无结果 / 该类型未安装 / 全空。
-                第二类带主按钮引导——点空类型标签不会“点了没反应”。 */}
+          <div className="ui-card">
             {query ? (
-              `没有匹配「${query}」的已安装项`
-            ) : kindFilter !== "all" ? (
-              <>
-                <div>还没有安装{filterTabs.find((c) => c.key === kindFilter)?.label ?? "该类型"}，去市场看看？</div>
-                <button className="btn btn-primary btn-sm" onClick={gotoMarket}>前往市场</button>
-              </>
+              <Empty mood="think" title={`没有匹配「${query}」的已安装项`}
+                action={<Button variant="ghost" size="sm" onClick={() => setQuery("")}>清除搜索</Button>} />
             ) : (
-              <>
-                <div>还没有安装任何扩展</div>
-                <button className="btn btn-primary btn-sm" onClick={gotoMarket}>前往市场</button>
-              </>
+              <Empty
+                title={kindFilter !== "all" ? `还没有安装${filterTabs.find((c) => c.key === kindFilter)?.label ?? "该类型"}` : "还没有安装任何扩展"}
+                desc="去市场挑几个，嗒嗒的口袋就更鼓了"
+                action={<Button variant="primary" size="sm" onClick={gotoMarket}>前往市场</Button>}
+              />
             )}
           </div>
         )}
@@ -416,35 +404,44 @@ export function InstalledPanel() {
                     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setDetail(row); }
                   }}
                 >
-                  <InstIcon name={row.name} displayName={row.displayName} iconUrl={row.iconUrl} />
+                  {/* plan-91-393：36px 图标瓦片按类型着色，市场图标优先 */}
+                  <span className="inst-tile" data-kind={row.kind}>
+                    {row.iconUrl
+                      ? <InstIcon name={row.name} displayName={row.displayName} iconUrl={row.iconUrl} size={36} />
+                      : KIND_META[row.kind].icon}
+                  </span>
                   <div className="inst-main">
+                    {/* plan-114-452：类型 / 来源标签并入名称行，说明恒占一行（缺省给占位）⇒ 所有行等高 */}
                     <div className="inst-name">
-                      {row.displayName}
-                      <span className="inst-kind">{KIND_META[row.kind].label}</span>
+                      <span className="inst-name-text">{row.displayName}</span>
+                      <span className="sb-badge accent">{KIND_META[row.kind].label}</span>
+                      <span className="sb-badge">{SOURCE_LABEL[row.source] || row.source || "其他"}</span>
                     </div>
-                    {row.description && <div className="inst-desc">{row.description}</div>}
+                    <div className={"inst-desc" + (row.description ? "" : " is-empty")}>{row.description || "暂无说明"}</div>
                   </div>
-                  {/* 操作区阻止冒泡：点开关/菜单不应误开详情 */}
+                  {/* 操作区阻止冒泡：点开关/操作不应误开详情 */}
                   <div className="inst-actions" onClick={(e) => e.stopPropagation()}>
-                    {/* plan-41-225：行内只保留「… + 开关」两件套（对齐参考图）；
-                        配置类动作与移除收进菜单，开关已承担启停（菜单不再重复同一动作）。 */}
-                    <Menu
-                      align="end"
-                      trigger={
-                        <button className="ui-icon-btn size-xs" aria-label="更多操作">
-                          <IconMoreHorizontal size={14} />
+                    {/* plan-91-393：次要操作悬停显现，固定槽位仅改透明度，避免布局抖动 */}
+                    <span className="sb-hover-actions">
+                      {row.kind === "connector" && (row.name === "database" || row.name === "debugger") && (
+                        <Tooltip title="配置">
+                          <button className="ui-icon-btn size-xs" aria-label="配置"
+                            onClick={() => setConfigServer(connectors.find((c) => c.id === row.dbId) ?? null)}>
+                            <IconSettings size={14} />
+                          </button>
+                        </Tooltip>
+                      )}
+                      <Tooltip title="查看详情">
+                        <button className="ui-icon-btn size-xs" aria-label="查看详情" onClick={() => setDetail(row)}>
+                          <IconInfo size={14} />
                         </button>
-                      }
-                      entries={[
-                        ...(row.kind === "connector" && (row.name === "database" || row.name === "debugger")
-                          ? [{
-                              label: "配置",
-                              onSelect: () => setConfigServer(connectors.find((c) => c.id === row.dbId) ?? null),
-                            }]
-                          : []),
-                        { label: "移除", icon: <IconTrash size={12} />, danger: true, onSelect: () => setDropTarget(row) },
-                      ]}
-                    />
+                      </Tooltip>
+                      <Tooltip title={row.kind === "plugin" ? "卸载" : "移除"}>
+                        <button className="ui-icon-btn size-xs" aria-label="移除" onClick={() => setDropTarget(row)}>
+                          <IconTrash size={14} />
+                        </button>
+                      </Tooltip>
+                    </span>
                     {/* 开关统一走 ui/Switch（项目规则：开关不得自绘） */}
                     <Switch
                       checked={row.enabled}
@@ -502,71 +499,79 @@ export function InstalledPanel() {
             </button>
           </div>
           {repos.length === 0 && <div className="inst-empty">暂无技能仓库</div>}
-          {repos.map((r) => (
-            <div key={r.id} className="inst-repo-row">
-              <div className="inst-repo-main">
-                <div className="inst-repo-name">{r.name}</div>
-                <div className="inst-repo-url">{r.url}</div>
-              </div>
-              <button
-                className="btn btn-ghost btn-xs"
-                disabled={repoBusy !== null}
-                onClick={async () => {
-                  setRepoBusy(r.id);
-                  try {
-                    const res = await api.syncSkillRepo(r.id);
-                    setRepoSkills({ repoId: r.id, skills: res.skills });
-                    notify(`已同步「${r.name}」，可导入 ${res.skills.length} 个技能`);
-                  } catch (e) { notify(String(e)); }
-                  finally { setRepoBusy(null); }
-                }}
-              >
-                <IconRefresh size={12} /> {repoBusy === r.id ? "同步中…" : "同步"}
-              </button>
-              <button
-                className="btn btn-ghost btn-xs"
-                aria-label="移除仓库"
-                disabled={repoBusy !== null}
-                onClick={async () => {
-                  setRepoBusy(r.id);
-                  try {
-                    await api.deleteSkillRepo(r.id);
-                    await loadRepos();
-                    if (repoSkills?.repoId === r.id) setRepoSkills(null);
-                  } catch (e) { notify(String(e)); }
-                  finally { setRepoBusy(null); }
-                }}
-              >
-                <IconTrash size={12} />
-              </button>
-            </div>
-          ))}
-          {repoSkills && (
-            <div className="inst-repo-skills">
-              <div className="inst-group-title">可导入技能（{repoSkills.skills.length}）</div>
-              {repoSkills.skills.map((s) => (
-                <div key={s.name} className="inst-repo-skill">
-                  <div className="inst-main">
-                    <div className="inst-name">{s.display_name || s.name}</div>
-                    {s.description && <div className="inst-desc">{s.description}</div>}
+          {repos.length > 0 && (
+            <div className="settings-resource-list">
+              {repos.map((r) => (
+                <div key={r.id} className="inst-repo-row">
+                  <div className="inst-repo-main">
+                    <div className="inst-repo-name">{r.name}</div>
+                    <div className="inst-repo-url">{r.url}</div>
                   </div>
                   <button
-                    className="btn btn-primary btn-xs"
+                    className="btn btn-ghost btn-xs"
                     disabled={repoBusy !== null}
                     onClick={async () => {
-                      setRepoBusy(s.name);
+                      setRepoBusy(r.id);
                       try {
-                        await api.importRepoSkill(repoSkills.repoId, s.name);
-                        await load();
-                        notify(`已导入技能「${s.display_name || s.name}」`);
+                        const res = await api.syncSkillRepo(r.id);
+                        setRepoSkills({ repoId: r.id, skills: res.skills });
+                        notify(`已同步「${r.name}」，可导入 ${res.skills.length} 个技能`);
                       } catch (e) { notify(String(e)); }
                       finally { setRepoBusy(null); }
                     }}
                   >
-                    导入
+                    <IconRefresh size={12} /> {repoBusy === r.id ? "同步中…" : "同步"}
+                  </button>
+                  <button
+                    className="btn btn-ghost btn-xs"
+                    aria-label="移除仓库"
+                    disabled={repoBusy !== null}
+                    onClick={async () => {
+                      setRepoBusy(r.id);
+                      try {
+                        await api.deleteSkillRepo(r.id);
+                        await loadRepos();
+                        if (repoSkills?.repoId === r.id) setRepoSkills(null);
+                      } catch (e) { notify(String(e)); }
+                      finally { setRepoBusy(null); }
+                    }}
+                  >
+                    <IconTrash size={12} />
                   </button>
                 </div>
               ))}
+            </div>
+          )}
+          {repoSkills && (
+            <div className="inst-repo-skills">
+              <div className="inst-group-title">可导入技能（{repoSkills.skills.length}）</div>
+              {repoSkills.skills.length > 0 && (
+                <div className="settings-resource-list">
+                  {repoSkills.skills.map((s) => (
+                    <div key={s.name} className="inst-repo-skill">
+                      <div className="inst-main">
+                        <div className="inst-name">{s.display_name || s.name}</div>
+                        {s.description && <div className="inst-desc">{s.description}</div>}
+                      </div>
+                      <button
+                        className="btn btn-primary btn-xs"
+                        disabled={repoBusy !== null}
+                        onClick={async () => {
+                          setRepoBusy(s.name);
+                          try {
+                            await api.importRepoSkill(repoSkills.repoId, s.name);
+                            await load();
+                            notify(`已导入技能「${s.display_name || s.name}」`);
+                          } catch (e) { notify(String(e)); }
+                          finally { setRepoBusy(null); }
+                        }}
+                      >
+                        导入
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
               {repoSkills.skills.length === 0 && <div className="inst-empty">该仓库未发现可导入技能</div>}
             </div>
           )}

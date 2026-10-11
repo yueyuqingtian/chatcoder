@@ -3,10 +3,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type McpServerOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
-import { IconRefresh, IconPlus, IconX, IconChevronLeft, IconLayers } from "../icons";
+import { IconRefresh, IconPlus, IconX, IconChevronLeft, IconLayers, IconPlug, IconSettings, IconFileText } from "../icons";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { Modal } from "../Modal";
-import { FormDialog, Input, Select, Textarea } from "../ui";
+import { Empty, FormDialog, Input, Select, Textarea, Tooltip } from "../ui";
 import { Sw } from "./shared";
 import { DatabaseConnectionsPanel } from "./DatabaseConnectionsPanel";
 import { DebuggerPanel } from "./DebuggerPanel";
@@ -158,9 +158,9 @@ export function McpPanel() {
         </div>
       ) : (
       <>
-      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginBottom: 12 }}>
+      <div className="sb-toolbar">
         <button className="btn btn-ghost btn-sm" onClick={handleScan} disabled={scanning}><IconRefresh size={13} /> {scanning ? "扫描中…" : "自动扫描本机"}</button>
-        <button className="btn btn-ghost btn-sm" onClick={() => setShowJsonModal(true)}>导入 JSON 配置</button>
+        <button className="btn btn-ghost btn-sm" onClick={() => setShowJsonModal(true)}><IconFileText size={13} /> 导入 JSON 配置</button>
         <button className="btn btn-primary btn-sm" onClick={() => setShowCreate(true)}><IconPlus size={13} /> 手动创建</button>
       </div>
       <FormDialog
@@ -180,27 +180,31 @@ export function McpPanel() {
         {items.map((m) => {
           const toolCount = Array.isArray(m.tools) ? m.tools.length : 0;
           return (
-            <div key={m.id} className="settings-resource-item mcp-item">
+            <div key={m.id} className={"settings-resource-item mcp-item sb-item" + (m.is_active ? "" : " is-off")}>
+              {/* plan-91-393：列表项一律带类型图标瓦片 */}
+              <span className="sb-tile ext-tile" data-kind="connector"><IconPlug size={16} /></span>
               <div className="settings-resource-info">
                 <div className="settings-resource-name">
                   {m.display_name || m.name}
                   {/* plan-230-1144 M1.3: 健康状态徽标——有缓存工具清单=已验证，否则=未验证 */}
-                  <span className={"mcp-health" + (toolCount > 0 ? " ok" : " warn")}
-                    title={toolCount > 0 ? `已缓存 ${toolCount} 个工具` : "尚未拉取到工具清单，点击「刷新工具」验证连接"}>
-                    {toolCount > 0 ? `${toolCount} 个工具` : "未验证"}
-                  </span>
+                  <Tooltip title={toolCount > 0 ? `已缓存 ${toolCount} 个工具` : "尚未拉取到工具清单，点击「刷新工具」验证连接"}>
+                    <span className={"mcp-health" + (toolCount > 0 ? " ok" : " warn")}>
+                      {toolCount > 0 ? `${toolCount} 个工具` : "未验证"}
+                    </span>
+                  </Tooltip>
                   <button className="btn btn-ghost btn-xs mcp-tools-toggle"
                     disabled={toolCount === 0}
                     onClick={() => setExpandedTools(expandedTools === m.id ? null : m.id)}>
                     {expandedTools === m.id ? "收起" : "工具清单"}
                   </button>
                 </div>
-                <div className="settings-resource-desc">
-                  <span className="settings-resource-tag">{m.transport}</span>
-                  <span>{m.transport === "stdio" ? m.command || "stdio" : m.url || "sse"}</span>
-                  <span className="settings-resource-tag" title="引擎按风险等级注入：只读类工具四种模式全可见；写类工具仅完全访问/默认模式注入，只读/计划模式仅可见只读子集">
-                    按风险分级注入
-                  </span>
+                <div className="sb-desc sb-mono">{m.transport === "stdio" ? m.command || "stdio" : m.url || "sse"}</div>
+                <div className="settings-resource-desc sb-badges">
+                  <span className="sb-badge accent">{m.transport}</span>
+                  {m.source && <span className="sb-badge">{m.source}</span>}
+                  <Tooltip title="引擎按风险等级注入：只读类工具四种模式全可见；写类工具仅完全访问/默认模式注入，只读/计划模式仅可见只读子集">
+                    <span className="sb-badge">按风险分级注入</span>
+                  </Tooltip>
                 </div>
                 {expandedTools === m.id && toolCount > 0 && (
                   <div className="mcp-tools-list">
@@ -216,25 +220,35 @@ export function McpPanel() {
               <div className="settings-resource-actions">
                 <Sw checked={m.is_active} onChange={async (v) => { try { await api.updateMcpServer(m.id, { is_active: v }, currentProjectPath); load(); } catch {} }} />
                 {/* plan-282-1441（#7/#8）：内置 MCP 有专属配置页 */}
-                {m.source === "builtin" && (
-                  <button className="btn btn-ghost btn-xs" onClick={() => setDetailServer(m)}
-                    title="打开该内置服务的配置">
-                    配置
-                  </button>
-                )}
-                <button className="btn btn-ghost btn-xs" disabled={refreshingId === m.id}
-                  title="重新握手并拉取工具清单"
-                  onClick={() => void handleRefreshTools(m)}>
-                  <IconRefresh size={12} /> {refreshingId === m.id ? "握手中…" : "刷新工具"}
-                </button>
-                {m.source !== "builtin" && (
-                  <button className="btn btn-ghost btn-xs" onClick={() => setConfirmTarget(m)}><IconX size={12} /></button>
-                )}
+                {/* plan-91-393：次要操作悬停显现（握手中保持可见），固定槽位避免抖动 */}
+                <span className={"sb-hover-actions" + (refreshingId === m.id ? " is-busy" : "")}>
+                  {m.source === "builtin" && (
+                    <Tooltip title="打开该内置服务的配置">
+                      <button className="ui-icon-btn size-xs" aria-label="配置" onClick={() => setDetailServer(m)}>
+                        <IconSettings size={14} />
+                      </button>
+                    </Tooltip>
+                  )}
+                  <Tooltip title={refreshingId === m.id ? "握手中…" : "重新握手并拉取工具清单"}>
+                    <button className={"ui-icon-btn size-xs" + (refreshingId === m.id ? " is-spinning" : "")} aria-label="刷新工具"
+                      disabled={refreshingId === m.id} onClick={() => void handleRefreshTools(m)}>
+                      <IconRefresh size={14} />
+                    </button>
+                  </Tooltip>
+                  {m.source !== "builtin" && (
+                    <Tooltip title="删除">
+                      <button className="ui-icon-btn size-xs" aria-label="删除" onClick={() => setConfirmTarget(m)}><IconX size={14} /></button>
+                    </Tooltip>
+                  )}
+                </span>
               </div>
             </div>
           );
         })}
-        {items.length === 0 && <div className="navpage-empty">暂无 MCP 服务器</div>}
+        {items.length === 0 && (
+          <Empty title="暂无 MCP 服务器" desc="可以自动扫描本机已有的配置，或手动添加"
+            action={<button className="btn btn-primary btn-sm" onClick={handleScan} disabled={scanning}><IconRefresh size={13} /> 自动扫描本机</button>} />
+        )}
       </div>
       <ConfirmDialog
         open={confirmTarget !== null}
@@ -253,7 +267,8 @@ export function McpPanel() {
         <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-2)", marginBottom: 8 }}>扫描候选</div>
           {candidates.map((c, i) => (
-            <div key={`${c.name}-${i}`} className="settings-resource-item" style={{ marginBottom: 4 }}>
+            <div key={`${c.name}-${i}`} className="settings-resource-item sb-item" style={{ marginBottom: 4 }}>
+              <span className="sb-tile ext-tile" data-kind="connector"><IconPlug size={16} /></span>
               <div className="settings-resource-info">
                 <div className="settings-resource-name">{c.name}</div>
                 <div className="settings-resource-desc"><span className="settings-resource-tag">{c.transport}</span></div>
@@ -279,7 +294,7 @@ export function McpPanel() {
       >
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {jsonError && (
-            <div style={{ color: "var(--error)", fontSize: 12, padding: "6px 10px", background: "color-mix(in srgb, var(--error) 10%, transparent)", borderRadius: 6 }}>
+            <div style={{ color: "var(--error)", fontSize: 12, padding: "6px 10px", background: "color-mix(in srgb, var(--error) 10%, transparent)", borderRadius: "var(--r-md)" }}>
               {jsonError}
             </div>
           )}

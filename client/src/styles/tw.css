@@ -1,0 +1,22 @@
+/* plan-91-393：Tailwind v4 仅引入 theme + utilities，不启用 preflight，避免冲掉存量样式。
+   颜色/圆角/曲线映射到项目令牌，令牌仍是唯一来源。 */
+@layer theme, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+@source "../";
+
+@theme inline {
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-fg: var(--text-1);
+  --color-fg-2: var(--text-2);
+  --color-fg-3: var(--text-3);
+  --color-panel: var(--bg-panel);
+  --color-hover: var(--bg-hover);
+  --color-line: var(--border-light);
+  --radius-ctl: var(--r-md);
+  --radius-card: var(--r-lg);
+  --radius-pop: var(--r-pop);
+  --ease-spring: var(--spring-soft);
+  --ease-bounce: var(--ease-bounce);
+}

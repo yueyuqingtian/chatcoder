@@ -57,7 +57,23 @@ _RULE_SOURCE_MAP: list[tuple[str, str]] = [
     ("GEMINI.md", "gemini"),
     (".windsurfrules", "windsurf"),
     (".github/instructions", "github"),
+    # plan-114-450：通用工程约定此前不属于任何来源，导致永远加载、无法在设置里关闭
+    ("CONTRIBUTING.md", "generic"),
 ]
+
+# plan-114-450：来源显示名——设置页来源列表直接取这张表，保证「界面能开关的」与「注入时过滤的」完全一致
+RULE_SOURCE_LABELS: dict[str, str] = {
+    "claude": "Claude Code",
+    "codex": "Codex / AGENTS.md",
+    "codebuddy": "CodeBuddy",
+    "trae": "Trae",
+    "qoder": "Qoder",
+    "cursor": "Cursor",
+    "gemini": "Gemini CLI",
+    "windsurf": "Windsurf",
+    "github": "GitHub Copilot",
+    "generic": "通用工程约定（CONTRIBUTING.md）",
+}
 
 
 def _get_enabled_rule_sources() -> set[str]:
@@ -72,19 +88,36 @@ def _get_enabled_rule_sources() -> set[str]:
         if cfg_path.exists():
             data = _json.loads(cfg_path.read_text(encoding="utf-8"))
             enabled = data.get("ai_rules_enabled")
-            if isinstance(enabled, list) and enabled:
+            # plan-114-450：空数组是合法值（全部停用）。此前 `and enabled` 把它当成未配置，
+            # 用户关掉所有来源后注入侧仍全部加载（路由层 S11 已修，这里同步）。
+            if isinstance(enabled, list):
                 return set(str(x) for x in enabled)
     except Exception:
         pass
     return {s for _, s in _RULE_SOURCE_MAP}
 
 
-def _source_of(rel: str) -> str | None:
-    """判断相对路径所属的规则来源。"""
+def _match_source(rel: str) -> str | None:
     for path, source in _RULE_SOURCE_MAP:
         if rel == path or rel.startswith(path.rstrip("/") + "/"):
             return source
     return None
+
+
+def source_of(rel: str) -> str | None:
+    """判断相对路径所属的规则来源。
+
+    plan-114-450：扫描会进入一级子目录（如 client/AGENTS.md），此前按完整相对路径匹配失败返回 None，
+    这类文件不受来源开关控制、永远被加载——用户「关不掉某个规则来源」的主因之一。
+    现在先按完整路径匹配，失败再去掉第一级目录按子目录内的相对路径匹配。
+    """
+    hit = _match_source(rel)
+    if hit is None and "/" in rel:
+        hit = _match_source(rel.split("/", 1)[1])
+    return hit
+
+
+_source_of = source_of
 
 
 async def scan_rules_docs(root: str) -> list[str]:
@@ -148,8 +181,9 @@ async def collect_rule_docs(workspace: str, rules_docs: list[str] | None = None)
     enabled = _get_enabled_rule_sources()
     auto = await scan_rules_docs(workspace)
     for rel in auto:
-        src = _source_of(rel)
-        if src is not None and src not in enabled:
+        src = source_of(rel)
+        # 自动扫描到的文档必须归属某个来源且该来源已启用；手动配置的 rules_docs 不受来源开关影响
+        if src is None or src not in enabled:
             continue
         p = base / rel
         if p not in candidates:

@@ -5,15 +5,15 @@
  *      加号 / 全部标签菜单统一为 Popover（点外部、Esc、进出场）；头部按钮统一 28px 并用 Tooltip；
  *      空态由四条灰色长条改为 2×2 工具启动卡（角色色磁贴，闲置灰度、聚焦彩色）。
  */
-import { memo, useEffect, useRef, useState } from "react";
+import { IxTasks, IxBrowser, IxTerminal, IxFiles, IxBot, IxBug } from "../iconkit/StackIcons";
+import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api } from "../../api/client";
 import { isBusy, subscribe } from "../../perf/bus";
 import { usePanelStore, bucketSessionId } from "../../store/panel";
 import type { PanelTab, PanelTabId } from "../../store/panel";
 import { useI18n } from "../../store/i18n";
 import {
-  IconArrowToggle, IconBot, IconBug, IconCheck, IconChevronDown, IconFolderTree, IconGlobe, IconListChecks,
-  IconMaximize, IconMinus, IconPlus, IconRotateCcw, IconSquareTerminal, IconX,
+  IconArrowToggle, IconCheck, IconChevronDown, IconMaximize, IconMinus, IconPlus, IconRotateCcw, IconX,
 } from "../icons";
 import { Popover, Tooltip } from "../ui";
 import { ToneTile, type Tone } from "../iconkit/ToneTile";
@@ -61,12 +61,12 @@ const GuardedPanelContent = memo(function GuardedPanelContent({ tabKey, tab, ses
 /** 标签图标（与加号菜单、启动卡共用同一套） */
 function tabIcon(id: PanelTabId, size: number) {
   switch (id) {
-    case "task-summary": return <IconListChecks size={size} />;
-    case "browser": return <IconGlobe size={size} />;
-    case "terminal": return <IconSquareTerminal size={size} />;
-    case "files": return <IconFolderTree size={size} />;
-    case "subagent": return <IconBot size={size} />;
-    case "debug": return <IconBug size={size} />;
+    case "task-summary": return <IxTasks size={size} />;
+    case "browser": return <IxBrowser size={size} />;
+    case "terminal": return <IxTerminal size={size} />;
+    case "files": return <IxFiles size={size} />;
+    case "subagent": return <IxBot size={size} />;
+    case "debug": return <IxBug size={size} />;
   }
 }
 
@@ -149,6 +149,13 @@ export function RightPanel() {
     el?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [activeKey]);
 
+  // plan-91-393：激活标签的底色滑块——量出激活标签位置，滑块用弹簧曲线跟随移动
+  const [ind, setInd] = useState<{ x: number; w: number } | null>(null);
+  useLayoutEffect(() => {
+    const el = tabsRef.current?.querySelector<HTMLElement>(".rp-tab.is-active");
+    setInd(el ? { x: el.offsetLeft, w: el.offsetWidth } : null);
+  }, [activeKey, tabs.length]);
+
   // 滚轮纵转横：标签过多时直接滚轮浏览
   const onTabsWheel = (e: React.WheelEvent) => {
     const el = tabsRef.current;
@@ -173,6 +180,7 @@ export function RightPanel() {
     <div className="right-panel">
       <div className="rp-head">
         <div className="rp-tabs" ref={tabsRef} onWheel={onTabsWheel} role="tablist">
+          {ind && <span className="rp-tab-ind" aria-hidden style={{ transform: `translateX(${ind.x}px)`, width: ind.w }} />}
           {tabs.map((tTab) => {
             const key = `${tTab.id}-${tTab.instance}`;
             const label = tabLabel(tTab);
@@ -299,7 +307,7 @@ export function RightPanel() {
           })
         )}
         {tabs.length === 0 && (
-          <div className="rp-launch">
+          <div className="rp-launch world-tex">
             <div className="rp-launch-head">
               <div className="rp-launch-title">{t("rp.launch_title")}</div>
               <div className="rp-launch-sub">{t("rp.launch_sub")}</div>

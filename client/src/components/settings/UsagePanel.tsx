@@ -10,21 +10,16 @@ import { UsageHeatmap } from "./usage/UsageHeatmap";
 import { UsageTrendChart, type TrendSeries } from "./usage/UsageTrendChart";
 import { UsageDonutChart, type DonutSeg } from "./usage/UsageDonutChart";
 import { fmtTokens, modelColor } from "./usage/chartUtils";
-
-type RangeMode = "today" | "7" | "30" | "custom";
-
-const RANGE_OPTS: Array<{ mode: RangeMode; label: string }> = [
-  { mode: "today", label: "今天" },
-  { mode: "7", label: "近 7 日" },
-  { mode: "30", label: "近 30 日" },
-  { mode: "custom", label: "自定义" },
-];
+import { UsageDateRangePicker, presetRange, type RangeMode } from "./usage/UsageDateRangePicker";
+import { Select, Tooltip } from "../ui";
 
 function buildRangeParams(mode: RangeMode, start: string, end: string, provider?: string): { start?: string; end?: string; days?: number; provider?: string } {
   // plan-308-1542 需求6：「今天」= 本地当日闭区间（days=1）
   if (mode === "today") return { days: 1, provider };
   if (mode === "7") return { days: 7, provider };
   if (mode === "30") return { days: 30, provider };
+  // plan-91-393：「本月」按本地月初至今日的闭区间请求
+  if (mode === "month") { const r = presetRange("month")!; return { start: r[0], end: r[1], provider }; }
   if (start && end) return { start, end, provider };
   return { days: 30, provider };
 }
@@ -60,8 +55,10 @@ export function UsagePanel() {
   useEffect(() => { void load("today", "", ""); }, [load]);
 
   const applyRange = (mode: RangeMode, start = customStart, end = customEnd) => {
-    setRangeMode(mode); // 先切换模式（自定义时立即渲染起止输入框）
+    setRangeMode(mode);
     if (mode === "custom") {
+      setCustomStart(start);
+      setCustomEnd(end);
       if (start && end) void load("custom", start, end); // 填全才刷新
       return;
     }
@@ -140,62 +137,32 @@ export function UsagePanel() {
 
   return (
     <div className="usage-panel">
-      {/* 时间范围 + 刷新 */}
-      <div className="usage-toolbar">
-        <div className="usage-range usage-seg-toggle">
-          {RANGE_OPTS.map((o) => (
-            <button
-              key={o.mode}
-              className={`usage-seg-btn ${rangeMode === o.mode ? "active" : ""}`}
-              disabled={loading}
-              onClick={() => applyRange(o.mode)}
-            >
-              {o.label}
-            </button>
-          ))}
-          {rangeMode === "custom" && (
-            <span className="usage-range-custom">
-              <input
-                type="date"
-                value={customStart}
-                max={customEnd || undefined}
-                onChange={(e) => setCustomStart(e.target.value)}
-                onBlur={() => applyRange("custom")}
-                className="sp-input usage-date-input"
-              />
-              <span className="usage-range-sep">至</span>
-              <input
-                type="date"
-                value={customEnd}
-                min={customStart || undefined}
-                onChange={(e) => setCustomEnd(e.target.value)}
-                onBlur={() => applyRange("custom")}
-                className="sp-input usage-date-input"
-              />
-            </span>
-          )}
-        </div>
+      {/* 时间范围 + 供应商 + 刷新（plan-91-393：日期改为浮层选择器） */}
+      <div className="usage-toolbar sc-usage-toolbar">
+        <UsageDateRangePicker
+          mode={rangeMode}
+          start={customStart}
+          end={customEnd}
+          disabled={loading}
+          onApply={(m, s, e) => applyRange(m, s, e)}
+        />
         {/* plan-308-1542 需求6：按供应商筛选（可切换查看对应供应商的使用情况） */}
-        <select
-          className="sp-input usage-provider-select"
+        <Select
+          size="sm"
+          className="usage-provider-select"
+          aria-label="按供应商筛选用量"
           value={provider}
           disabled={loading}
-          onChange={(e) => applyProvider(e.target.value)}
-          title="按供应商筛选用量"
-        >
-          <option value="">全部供应商</option>
-          {(stats?.providers ?? []).map((p) => (
-            <option key={p} value={p}>{p}</option>
-          ))}
-        </select>
-        <button
-          className="btn btn-ghost btn-sm"
-          onClick={() => applyRange(rangeMode)}
-          disabled={loading}
-          title={rangeMode === "custom" && (!customStart || !customEnd) ? "请先选择起止日期" : undefined}
-        >
-          <IconRefresh size={13} /> {loading ? "加载中…" : "刷新"}
-        </button>
+          onChange={applyProvider}
+          options={[{ value: "", label: "全部供应商" }, ...(stats?.providers ?? []).map((p) => ({ value: p, label: p }))]}
+        />
+        <span className="sc-flex-spacer" />
+        <Tooltip content={rangeMode === "custom" && (!customStart || !customEnd) ? "请先选择起止日期" : "重新加载统计"}>
+          <button className="btn btn-ghost btn-sm" onClick={() => applyRange(rangeMode)} disabled={loading}>
+            <span className={`sc-icon-slot ${loading ? "spin" : ""}`}><IconRefresh size={13} /></span>
+            <span className="sc-fixed-label">{loading ? "加载中" : "刷新"}</span>
+          </button>
+        </Tooltip>
       </div>
       {provider && stats && stats.total.total === 0 && (
         <div className="navpage-empty">「{provider}」在所选区间无用量。</div>
@@ -220,38 +187,29 @@ export function UsagePanel() {
         </div>
       )}
 
-      {/* 统计卡片行 */}
+      {/* KPI 卡片行（plan-91-393：大数字 + 标签 + 辅助对比行） */}
       {total && (
-        <div className="usage-cards">
-          <div className="usage-card usage-card-accent">
-            <div className="usage-card-icon"><IconDatabase size={18} /></div>
-            <div className="usage-card-value">{fmtTokens(total.total)}</div>
-            <div className="usage-card-label">累计 Token</div>
-            <div className="usage-card-sub">
-              <span className="k">输入</span><span className="v">{fmtTokens(total.prompt)}</span>
-              <span className="k">输出</span><span className="v">{fmtTokens(total.completion)}</span>
-              <span className="k">缓存</span><span className="v">{fmtTokens(total.cached)}</span>
-            </div>
+        <div className="sc-kpis">
+          <div className="sc-kpi">
+            <div className="sc-kpi-head"><IconDatabase size={14} /><span>区间 Token</span></div>
+            <div className="sc-kpi-value">{fmtTokens(total.total)}</div>
+            <div className="sc-kpi-delta">输入 {fmtTokens(total.prompt)} · 输出 {fmtTokens(total.completion)} · 缓存 {fmtTokens(total.cached)}</div>
           </div>
-          <div className="usage-card">
-            <div className="usage-card-icon"><IconZap size={18} /></div>
-            <div className="usage-card-value">{fmtTokens(stats?.peak_tokens ?? 0)}</div>
-            <div className="usage-card-label">峰值 Token（单日最高）</div>
+          <div className="sc-kpi">
+            <div className="sc-kpi-head"><IconZap size={14} /><span>历史单日峰值</span></div>
+            <div className="sc-kpi-value">{fmtTokens(stats?.peak_tokens ?? 0)}</div>
+            {/* plan-91-393：峰值取全部历史（与热力图同源），与左侧「区间」口径不同，文案需写明避免误读 */}
+            <div className="sc-kpi-delta">区间日均 {fmtTokens(dates.length ? Math.round(total.total / dates.length) : 0)}</div>
           </div>
-          <div className="usage-card">
-            <div className="usage-card-icon"><IconHash size={18} /></div>
-            <div className="usage-card-value">{total.calls.toLocaleString()}</div>
-            <div className="usage-card-label">调用次数</div>
+          <div className="sc-kpi">
+            <div className="sc-kpi-head"><IconHash size={14} /><span>区间调用</span></div>
+            <div className="sc-kpi-value">{total.calls.toLocaleString()}</div>
+            <div className="sc-kpi-delta">每次约 {fmtTokens(total.calls ? Math.round(total.total / total.calls) : 0)}</div>
           </div>
-          <div className="usage-card">
-            <div className="usage-card-icon"><IconCalendar size={18} /></div>
-            <div className="usage-card-value">{stats?.streak_current ?? 0} 天</div>
-            <div className="usage-card-label">当前连续天数</div>
-          </div>
-          <div className="usage-card">
-            <div className="usage-card-icon"><IconCalendar size={18} /></div>
-            <div className="usage-card-value">{stats?.streak_longest ?? 0} 天</div>
-            <div className="usage-card-label">最长连续天数</div>
+          <div className="sc-kpi">
+            <div className="sc-kpi-head"><IconCalendar size={14} /><span>连续使用</span></div>
+            <div className="sc-kpi-value">{stats?.streak_current ?? 0}<small> 天</small></div>
+            <div className="sc-kpi-delta">最长 {stats?.streak_longest ?? 0} 天</div>
           </div>
         </div>
       )}
@@ -284,6 +242,44 @@ export function UsagePanel() {
             </div>
           </div>
           <UsageDonutChart segments={donutSegs} centerValue={totalTokens} />
+        </div>
+      )}
+
+      {/* 模型/供应商明细表（plan-91-393：等宽数字 + 占比条） */}
+      {byModel.length > 0 && (
+        <div className="usage-section-block">
+          <div className="usage-block-head">
+            <IconHash size={16} />
+            <div className="usage-block-titles">
+              <div className="usage-section-title">模型明细</div>
+              <div className="usage-block-sub">按 Token 用量排序</div>
+            </div>
+          </div>
+          <div className="sc-table" role="table">
+            <div className="sc-tr sc-th" role="row">
+              <span>模型</span><span>输入</span><span>输出</span><span>缓存</span><span>调用</span><span>合计</span>
+            </div>
+            {byModel.map((b, i) => {
+              const pct = totalTokens ? (b.total / totalTokens) * 100 : 0;
+              return (
+                <div className="sc-tr" role="row" key={b.key}>
+                  <span className="sc-td-name">
+                    <i className="sc-dot" style={{ background: modelColor(Math.min(i, 8)) }} />
+                    <span className="sc-ellipsis">{b.display_name}</span>
+                  </span>
+                  <span>{fmtTokens(b.prompt)}</span>
+                  <span>{fmtTokens(b.completion)}</span>
+                  <span>{fmtTokens(b.cached)}</span>
+                  <span>{b.calls.toLocaleString()}</span>
+                  <span className="sc-td-total">
+                    <span>{fmtTokens(b.total)}</span>
+                    <span className="sc-bar"><i style={{ width: `${Math.max(2, pct)}%` }} /></span>
+                    <span className="sc-pct">{pct.toFixed(1)}%</span>
+                  </span>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 

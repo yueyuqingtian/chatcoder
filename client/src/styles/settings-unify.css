@@ -1,0 +1,221 @@
+/* ═══════════════════════════════════════════════════════════
+ * plan-114-450：设置页统一排版的最后一层（main.tsx 最后加载）
+ * 收敛此前散落在 model-picker / revamp / settings-a/b/c / global 中互相覆盖的规则：
+ *  ① 弹窗底部按钮：取消 = secondary（有底色），与主按钮同形；
+ *  ② 列表多选：选中不改行底色（只靠复选框表达），批量操作槽位常驻，全选不引起布局跳变；
+ *  ③ 模型页：填充式双栏卡片、供应商头像、行尾手柄、左标签右控件、柔和滚动条；
+ *  ④ 页内分段标签与下方内容的间距。
+ * ═══════════════════════════════════════════════════════════ */
+
+/* ── ① 弹窗底部按钮 ──
+ * 全站弹窗都走 .ui-dialog-footer；历史上大量手写的「取消」是 btn-ghost（透明 + 描边），
+ * 与右侧实心主按钮放在一起像两套系统。footer 内的 ghost 一律按 secondary 渲染。 */
+.ui-dialog-footer { gap: var(--sp-2); }
+.ui-dialog-footer .btn-ghost {
+  background: var(--bg-hover);
+  border-color: transparent;
+  color: var(--text-1);
+}
+.ui-dialog-footer .btn-ghost:hover:not(:disabled) { background: var(--bg-active); }
+.ui-dialog-footer .btn { min-width: 72px; justify-content: center; }
+
+/* ── ② 列表多选：选中只靠复选框，不改底色 ── */
+.mem-card.selected,
+.mem-row.selected { background: transparent; }
+.mem-card.selected:hover,
+.mem-row.selected:hover { background: var(--bg-hover); }
+/* 批量操作槽位：常驻固定宽度，只切换可见性（不插入/移除节点 ⇒ 工具条不重排、不换行） */
+.ui-batch-slot { display: inline-flex; align-items: center; gap: var(--sp-2); }
+.ui-batch-slot[data-empty] .ui-batch-only { visibility: hidden; }
+
+/* ── ④ 页内分段标签：与下方内容拉开间距（执行策略 / 电脑操控） ── */
+.perm-tabs-bar,
+.dp-panel > .ui-toolbar { margin-bottom: var(--sp-4); }
+
+/* ── ③ 模型页 ─────────────────────────────────────────── */
+/* 填充式：卡片撑满 PageShell 剩余高度，左右两列各自在卡片内滚动 */
+.models-page { display: flex; flex-direction: column; height: 100%; min-height: 0; max-height: none; }
+.models-body {
+  flex: 1; min-height: 0;
+  grid-template-columns: 248px minmax(0, 1fr);
+  border-color: var(--border-light, var(--border));
+  box-shadow: none;
+}
+/* 柔和滚动条：细、圆、只在悬停时加深；滚动区左右留白，滚动条不贴卡片边 */
+.models-side-scroll,
+.models-detail,
+.mem-scroll,
+.inst-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, var(--text-1) 14%, transparent) transparent;
+}
+.models-side-scroll::-webkit-scrollbar,
+.models-detail::-webkit-scrollbar,
+.mem-scroll::-webkit-scrollbar,
+.inst-scroll::-webkit-scrollbar { width: 8px; }
+.models-side-scroll::-webkit-scrollbar-thumb,
+.models-detail::-webkit-scrollbar-thumb,
+.mem-scroll::-webkit-scrollbar-thumb,
+.inst-scroll::-webkit-scrollbar-thumb {
+  border: 2px solid transparent; background-clip: padding-box; border-radius: 999px;
+  background-color: color-mix(in oklab, var(--text-1) 12%, transparent);
+}
+.models-side-scroll:hover::-webkit-scrollbar-thumb,
+.models-detail:hover::-webkit-scrollbar-thumb,
+.mem-scroll:hover::-webkit-scrollbar-thumb,
+.inst-scroll:hover::-webkit-scrollbar-thumb { background-color: color-mix(in oklab, var(--text-1) 22%, transparent); }
+.models-side-scroll::-webkit-scrollbar-track,
+.models-detail::-webkit-scrollbar-track,
+.mem-scroll::-webkit-scrollbar-track,
+.inst-scroll::-webkit-scrollbar-track { background: transparent; }
+
+/* 左列：行高 40（与 ProviderSideList.tsx 的 ROW_H 一致）、行距 2 */
+.models-side { border-right-color: var(--border-light, var(--border)); background: color-mix(in oklab, var(--text-1) 1.5%, transparent); }
+.models-side-scroll { padding: 10px 8px; gap: 2px; scrollbar-gutter: auto; }
+.models-side-item {
+  height: 40px; padding: 0 8px; gap: 10px;
+  border-radius: var(--r-md); font-size: 13px; color: var(--text-1);
+}
+.models-side-item:hover { background: var(--bg-hover); }
+.models-side-item.active { background: var(--color-card); box-shadow: 0 1px 2px rgba(20, 20, 30, .06), 0 0 0 1px var(--border-light, var(--border)); font-weight: 500; }
+:root[data-theme="dark"] .models-side-item.active { background: var(--bg-active); box-shadow: none; }
+.models-side-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 行尾槽位：状态点与拖拽手柄同一位置，悬停时互换（此前手柄在行首绝对定位，压在图标上） */
+.models-side-tail { position: relative; display: grid; place-items: center; width: 20px; height: 20px; flex-shrink: 0; }
+.models-side-row:hover .models-side-tail .models-dot { opacity: 0; }
+.models-drag-handle {
+  left: auto; right: 8px; width: 20px; height: 20px; z-index: 1;
+  border-radius: var(--r-sm); color: var(--text-3);
+}
+.models-side-row:hover .models-drag-handle { opacity: 0.85; }
+.models-side-add {
+  height: 40px; padding: 0 8px; gap: 10px; margin-top: 4px;
+  border-radius: var(--r-md); font-size: 13px; color: var(--text-2);
+}
+.models-side-add-ic {
+  display: grid; place-items: center; width: 26px; height: 26px; border-radius: 8px;
+  border: 1px dashed color-mix(in oklab, var(--text-1) 22%, transparent); color: var(--text-2);
+}
+.models-side-add:hover .models-side-add-ic { border-style: solid; color: var(--text-1); }
+.models-side-group { border-top: 1px solid var(--border-light, var(--border)); padding: 14px 8px 6px; margin-top: 10px; }
+.models-side-empty { padding: 20px 10px; text-align: center; font-size: 12px; color: var(--text-3); }
+
+/* 供应商头像：按名称哈希色相，柔和渐变 + 白字（与嗒嗒同一受光画法，无描边） */
+.prov-avatar {
+  display: inline-grid; place-items: center; flex-shrink: 0;
+  border-radius: 8px; color: #fff; font-weight: 600; line-height: 1; letter-spacing: 0;
+  background: linear-gradient(145deg, oklch(72% 0.09 var(--pa-h)), oklch(58% 0.11 var(--pa-h)));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .22);
+  transition: filter var(--dur-2) var(--ease-standard), opacity var(--dur-2) var(--ease-standard);
+}
+.prov-avatar.is-muted { filter: grayscale(1); opacity: .55; }
+
+/* 右列 */
+.models-detail { padding: 20px 24px 28px; gap: 4px; scrollbar-gutter: stable; }
+.models-detail-empty { height: 100%; display: grid; place-items: center; }
+.models-detail-head { display: flex; align-items: center; gap: 12px; flex-wrap: nowrap; padding: 0 0 16px; }
+.models-detail-title { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.models-detail-title-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.models-detail-name { font-size: 17px; font-weight: 600; padding: 0; border: none; max-width: 100%; }
+.models-detail-sub { font-size: 12px; color: var(--text-3); }
+.models-detail-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.models-detail-loading { top: 22px; right: 24px; }
+
+.models-section { gap: 10px; padding: 18px 0 6px; border-top: 1px solid var(--border-light, var(--border)); }
+.models-detail-head + .models-section { border-top: 1px solid var(--border-light, var(--border)); padding-top: 18px; }
+.models-section-title { font-size: 13px; font-weight: 600; color: var(--text-1); min-height: 26px; }
+.models-count { margin-left: 4px; font-size: 12px; font-weight: 500; color: var(--text-3); font-variant-numeric: tabular-nums; }
+
+/* 连接区：左标签 / 右控件，标签列固定宽度，三项对齐在同一条竖线上 */
+.models-field.is-row { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: start; column-gap: 16px; }
+.models-section .models-field.is-row > label { margin: 0; line-height: var(--ctl-h-md, 32px); font-size: 13px; color: var(--text-2); }
+.models-field-ctl { display: flex; flex-direction: column; min-width: 0; }
+/* API Key：显隐按钮走 Input 的 suffix，贴近输入框右缘（plan-114-452） */
+.models-key-wrap { padding-right: 4px; }
+.models-cred-toggle { margin-top: 6px; }
+
+/* 模型列表：单层卡片，行等高（无标签也不变矮），添加入口是最后一行 */
+.models-model-list { background: var(--color-card); border-color: var(--border-light, var(--border)); }
+.models-model-item { min-height: 56px; padding: 10px 14px 10px 16px; align-items: center; }
+.models-model-main { justify-content: center; gap: 5px; }
+.models-model-actions { gap: 8px; }
+.models-model-item .ui-row-hover { display: inline-flex; gap: 2px; opacity: 0; transition: opacity var(--dur-2) var(--ease-standard); }
+.models-model-item:hover .ui-row-hover, .models-model-item:focus-within .ui-row-hover { opacity: 1; }
+.models-add-row {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  min-height: 48px; padding: 0 16px; border: none; background: transparent;
+  color: var(--text-2); font: inherit; font-size: 13px; text-align: left; cursor: pointer;
+  transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard);
+}
+/* 分隔线只由上一行的 border-bottom 提供（此前再叠一条 border-top，「添加模型」上方变成 2px 粗线） */
+.models-model-list > .ui-empty { border-bottom: 1px solid var(--border-light, var(--border)); }
+.models-add-row:hover { background: var(--bg-hover); color: var(--text-1); }
+.models-add-row-ic {
+  display: grid; place-items: center; width: 22px; height: 22px; border-radius: var(--r-md);
+  border: 1px dashed color-mix(in oklab, var(--text-1) 24%, transparent);
+}
+.models-cred-list { background: var(--color-card); border-color: var(--border-light, var(--border)); }
+
+/* ta3 额度窗口（plan-114-450：用户圈出「今日 / 本周」两栏不对齐）
+ * 根因：两栏说明行数不同（本周多一行「当前阶段不限重置次数」、按钮旁原因文字折行），按钮随内容高度错位。
+ * 现在：固定两列等宽；每栏为纵向 flex，说明合并为单行省略，按钮行用 margin-top:auto 压到栏底 ⇒ 同一水平线。 */
+.ta3-quota-plan { gap: 16px; padding: 2px 0 4px; color: var(--text-3); }
+.ta3-quota-windows { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 24px; align-items: stretch; }
+@media (max-width: 760px) { .ta3-quota-windows { grid-template-columns: 1fr; } }
+.ta3-quota-window { display: flex; flex-direction: column; padding: 0; min-width: 0; }
+.ta3-quota-window-head { align-items: center; min-height: 20px; }
+.ta3-quota-window-label { font-size: 13px; }
+.ta3-quota-window-percent { font-size: 13px; }
+.ta3-quota-bar { height: 6px; margin-top: 8px; background: color-mix(in oklab, var(--text-1) 7%, transparent); }
+.ta3-quota-window-foot { margin-top: 8px; min-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ta3-quota-window .ta3-quota-hint.warn { margin-top: 4px; }
+.ta3-quota-window-actions { margin-top: auto; padding-top: 10px; align-items: center; gap: 8px; min-width: 0; }
+.ta3-quota-window-actions .ta3-quota-muted { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+
+/* ── ⑤ 记忆页 / 拓展页（plan-114-452） ───────────────────────
+ * 记忆页：页头 → AI 开关组 → 工具条 → 单张列表卡；卡片本身是滚动边界，滚动条在卡片内侧，
+ *   组头吸顶、批量操作在卡片顶部的固定表头行（无选中时仍占位 ⇒ 全选 / 取消不引起换行或跳变）。
+ * 工具条 .is-nowrap：左分段标签不收缩，右侧搜索框吃剩余宽度（窄窗收缩而非折行）。 */
+.ui-toolbar.is-nowrap { flex-wrap: nowrap; }
+.ui-toolbar.is-nowrap > :first-child { flex-shrink: 0; }
+.ui-toolbar.is-nowrap .ui-toolbar-end { flex: 1 1 0; justify-content: flex-end; }
+.ui-toolbar.is-nowrap .ui-toolbar-search,
+.ui-toolbar.is-nowrap .inst-search { flex: 1 1 140px; width: auto; min-width: 120px; max-width: 240px; }
+.ui-toolbar.is-nowrap .ui-toolbar-end > * { flex-shrink: 0; }
+.ui-toolbar.is-nowrap .ui-toolbar-end > .ui-toolbar-search,
+.ui-toolbar.is-nowrap .ui-toolbar-end > .inst-search { flex-shrink: 1; }
+
+.mem-page { padding-bottom: var(--sp-5); }
+.mem-listcard { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; border-color: var(--border-light, var(--border)); }
+.mem-listhead {
+  display: flex; align-items: center; gap: 10px; flex-shrink: 0;
+  height: 44px; padding: 0 var(--sp-5);
+  border-bottom: 1px solid var(--border-light, var(--border));
+  font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums;
+}
+.mem-listhead .ui-batch-slot { margin-left: auto; }
+.mem-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 0; scrollbar-gutter: auto; }
+.mem-group { margin: 0; }
+.mem-group-title {
+  position: sticky; top: 0; z-index: 1; margin: 0;
+  display: flex; align-items: center; gap: 8px; padding: 8px var(--sp-5);
+  font-size: 12px; font-weight: 600; color: var(--text-2);
+  background: color-mix(in oklab, var(--text-1) 3%, var(--color-card));
+  border-bottom: 1px solid var(--border-light, var(--border));
+}
+.mem-group-desc { font-weight: 400; color: var(--text-3); }
+.mem-scroll .mem-card:last-child,
+.mem-scroll .mem-group:last-child .mem-card:last-child { border-bottom: none; }
+
+/* 拓展页：行等高（无描述的行不再比有描述的矮）；滚动条悬浮在内容列外侧，卡片右缘与工具条对齐 */
+.inst-row { min-height: 64px; }
+.inst-name-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inst-name .sb-badge { flex-shrink: 0; }
+.inst-row .inst-desc { display: block; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+.inst-desc.is-empty { opacity: .6; }
+.inst-scroll { scrollbar-gutter: auto; margin-right: -14px; padding-right: 14px; }
+
+/* 归档页批量工具条：计数文本定宽（1 位 → 3 位数字不推挤右侧按钮），整行不折行 */
+.archive-toolbar { flex-wrap: nowrap; }
+.archive-picked { min-width: 64px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.archive-toolbar > .btn { flex-shrink: 0; }

@@ -4,7 +4,7 @@
  * 会话中：只读展示当前会话所在项目（锁形图标 + 提示「会话开始后不可更换」），工作树会话额外显示分支。 */
 import { useMemo, useRef, useState, useEffect } from "react";
 import type { ProjectOut } from "../../api/client";
-import { Popover, Tooltip } from "../ui";
+import { Empty, Popover, Tooltip } from "../ui";
 import { IconCheck, IconChevronDown, IconGitBranch, IconLock, IconPlus, IconSearch } from "../icons";
 import { ProjectIcon } from "../project/ProjectIcon";
 import { baseName } from "../iconkit/FileIcon";
@@ -14,7 +14,7 @@ function projectName(p: ProjectOut): string {
   return p.name || baseName(p.path);
 }
 
-export function WorkspaceChip({ projects, currentId, locked, branch, onSelect }: {
+export function WorkspaceChip({ projects, currentId, locked, branch, onSelect, variant = "chip" }: {
   projects: ProjectOut[];
   currentId: number | null;
   /** 会话已开始：只读 */
@@ -22,6 +22,8 @@ export function WorkspaceChip({ projects, currentId, locked, branch, onSelect }:
   /** 工作树会话的分支名 */
   branch?: string | null;
   onSelect: (id: number) => void;
+  /** plan-114-449：inline = 首页标语里的下划线文字触发（浮窗向下弹出），与输入框下的 chip 共用同一列表 */
+  variant?: "chip" | "inline";
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -62,20 +64,22 @@ export function WorkspaceChip({ projects, currentId, locked, branch, onSelect }:
   const pick = (p: ProjectOut) => { onSelect(p.id); setOpen(false); };
 
   return (
-    <div className="cc-anchor">
+    <div className={"cc-anchor" + (variant === "inline" ? " es-ws-anchor" : "")}>
       <button
         ref={btnRef}
         type="button"
-        className={"cc-ws" + (open ? " is-open" : "") + (current ? "" : " is-empty")}
+        className={variant === "inline"
+          ? "es-ws-trigger" + (open ? " is-open" : "")
+          : "cc-ws" + (open ? " is-open" : "") + (current ? "" : " is-empty")}
         aria-haspopup="listbox"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
       >
-        {current ? <ProjectIcon icon={current.icon} color={current.color} size={14} /> : <IconPlus size={13} />}
-        <span className="cc-ws-name">{current ? projectName(current) : "选择项目"}</span>
-        <IconChevronDown size={12} className="cc-chip-caret" />
+        {variant === "chip" && (current ? <ProjectIcon icon={current.icon} color={current.color} size={14} /> : <IconPlus size={13} />)}
+        <span className={variant === "inline" ? "es-ws-name" : "cc-ws-name"}>{current ? projectName(current) : "选择项目"}</span>
+        <IconChevronDown size={variant === "inline" ? 14 : 12} className="cc-chip-caret" />
       </button>
-      <Popover open={open} onClose={() => setOpen(false)} placement="top-start" className="cc-ws-pop" role="dialog" ignoreRefs={[btnRef]} aria-label="选择项目">
+      <Popover open={open} onClose={() => setOpen(false)} placement={variant === "inline" ? "bottom-start" : "top-start"} className="cc-ws-pop" role="dialog" ignoreRefs={[btnRef]} aria-label="选择项目">
         <div className="pop-search">
           <IconSearch size={14} />
           <input
@@ -109,7 +113,7 @@ export function WorkspaceChip({ projects, currentId, locked, branch, onSelect }:
               <span className="pop-item-end">{p.id === currentId && <span className="pop-item-check"><IconCheck size={14} /></span>}</span>
             </button>
           ))}
-          {list.length === 0 && <div className="pop-empty">{projects.length === 0 ? "还没有项目，先新建一个吧" : `没有匹配「${query}」的项目`}</div>}
+          {list.length === 0 && <Empty size="sm" mood={projects.length === 0 ? "calm" : "think"} title={projects.length === 0 ? "还没有项目，先新建一个吧" : `没有匹配「${query}」的项目`} />}
         </div>
         <div className="pop-sep" />
         <button type="button" className="pop-item" onClick={() => { setOpen(false); openProjectDialog({ mode: "create" }); }}>

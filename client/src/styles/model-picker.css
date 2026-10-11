@@ -48,9 +48,11 @@
 .mp-sep { height: 1px; margin: 4px 2px; background: var(--border-light); flex-shrink: 0; }
 
 /* 供应商设置面板 */
-.provider-models-sub { margin: 6px 0 10px 12px; padding-left: 10px; border-left: 2px solid var(--border); display: flex; flex-direction: column; gap: 4px; }
-.scan-list { max-height: 380px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
-.scan-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--r-sm); font-size: 12px; }
+.provider-models-sub { margin: 6px 0 10px 22px; display: flex; flex-direction: column; gap: 4px; }
+/* plan-121-482：扫描列表统一为「单层卡片 + 全宽横线行」 */
+.scan-list { max-height: 380px; overflow-y: auto; display: flex; flex-direction: column; gap: 0; border: 1px solid var(--border-light); border-radius: var(--r-lg); background: var(--bg-main); }
+.scan-item { display: flex; align-items: center; gap: 8px; padding: 10px var(--sp-4); border-bottom: 1px solid var(--border-light); font-size: 12px; }
+.scan-list > .scan-item:last-child { border-bottom: none; }
 .scan-item.off { opacity: 0.55; }
 .scan-item .scan-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 .scan-item .scan-ctx { width: 90px; }
@@ -163,16 +165,13 @@
   background: transparent; padding: 16px; overflow-y: auto; min-height: 0;
 }
 .models-detail-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; height: 100%; color: var(--text-3); font-size: 13px; }
-.models-detail-loading { position: sticky; top: -16px; z-index: 2; margin: -16px -16px -6px; padding: 7px 12px; background: color-mix(in oklab, var(--color-card) 94%, transparent); border-bottom: 1px solid var(--border); color: var(--text-3); font-size: 11px; text-align: center; backdrop-filter: blur(6px); }
+.models-detail-loading { position: sticky; top: -16px; z-index: 2; margin: -16px -16px -6px; padding: 7px 12px; background: color-mix(in oklab, var(--color-card) 94%, transparent); border-bottom: 1px solid var(--border); color: var(--text-3); font-size: 11px; text-align: center; }
 .models-detail-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 /* plan-41-225（右列照图）：名称常态为标题（点铅笔才进入编辑） */
 .models-detail-name { max-width: 320px; font-size: 16px; font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 状态胶囊：当前态（绿底带勾）/ 非当前态（中性）—— 与「禁用/启用」文字按钮构成“状态 + 动作”双通道 */
 .models-status-pill { display: inline-flex; align-items: center; gap: 3px; padding: 2px 8px; border-radius: 999px; background: var(--bg-hover); color: var(--text-3); font-size: 11px; white-space: nowrap; flex-shrink: 0; }
 .models-status-pill.on { background: color-mix(in oklab, var(--success) 16%, transparent); color: var(--success); }
-/* Key 行：密码框 + 显隐按钮 */
-.models-key-row { display: flex; align-items: center; gap: var(--sp-2); }
-.models-key-row > .ui-input { flex: 1; min-width: 0; }
 /* 多凭据附属入口：轻量文字按钮（主区只留一个 Key 框） */
 .models-cred-toggle { align-self: flex-start; margin-top: 6px; padding: 0; border: none; background: transparent; color: var(--text-3); font-size: 12px; cursor: pointer; }
 .models-cred-toggle:hover { color: var(--text-1); }
@@ -199,18 +198,14 @@
 .models-field { display: flex; flex-direction: column; gap: 5px; }
 .models-field > label { font-size: 12px; color: var(--text-2); }
 
-.models-section { display: flex; flex-direction: column; gap: 8px; padding-top: 12px; border-top: 1px solid var(--border); }
 .models-section-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; font-weight: 600; color: var(--text-2); }
 .models-inline-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .models-hint { font-size: 11px; color: var(--text-3); line-height: 1.5; padding: 0 2px 6px; }
 .models-err { font-size: 11px; color: var(--error); }
 
-/* 凭据行 */
-.models-cred-list { display: flex; flex-direction: column; gap: 6px; }
-.models-cred-item {
-  display: flex; align-items: center; gap: 10px;
-  padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--r-ctl);
-}
+/* 凭据行：容器/行外观与分隔线在 settings-a.css 统一（plan-121-482），此处只保留行内布局 */
+.models-cred-list { display: flex; flex-direction: column; }
+.models-cred-item { display: flex; align-items: center; gap: 10px; }
 .models-cred-main { flex: 1; min-width: 0; }
 .models-cred-title { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-1); }
 .models-cred-desc { display: flex; align-items: center; gap: 8px; margin-top: 2px; font-size: 11px; color: var(--text-3); flex-wrap: wrap; }
@@ -222,8 +217,8 @@
 /* 代理模式 */
 .models-proxy-modes { display: flex; gap: 6px; flex-wrap: wrap; }
 
-/* 模型行 */
-.models-model-list { display: flex; flex-direction: column; gap: 4px; }
+/* 模型行：容器/行外观与分隔线在 settings-a.css 统一（plan-121-482），此处只保留行内布局 */
+.models-model-list { display: flex; flex-direction: column; }
 /* S18（plan-41-197b）：模型列表底部的「+ 添加模型」——虚线框、内容宽度左对齐（复刻参考图） */
 .models-add-model {
   align-self: flex-start;
@@ -236,7 +231,7 @@
   transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard), border-color var(--dur-2) var(--ease-standard);
 }
 .models-add-model:hover { background: var(--bg-hover); color: var(--text-1); border-color: var(--border-hover); }
-.models-model-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--r-ctl); }
+.models-model-item { display: flex; align-items: center; gap: 10px; }
 .models-model-main { flex: 1; min-width: 0; }
 .models-model-name { font-size: 12.5px; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .models-model-desc { display: flex; align-items: center; gap: 6px; margin-top: 2px; font-size: 11px; color: var(--text-3); flex-wrap: wrap; }
@@ -287,11 +282,10 @@
 /* ═══════════════════════════════════════════════════════════
  * plan-248-1258 M3.4: 索引库页面
  * ═══════════════════════════════════════════════════════════ */
-.idx-list { display: flex; flex-direction: column; gap: 6px; }
-.idx-item {
-  display: flex; align-items: center; gap: 12px;
-  padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-ctl);
-}
+/* 索引库：行列表外观与分隔线在 settings-c.css 统一（plan-121-482）——
+   IndexLibraryPanel 同时挂 sc-list/sc-row 两个类，本文件只保留行内布局 */
+.idx-list { display: flex; flex-direction: column; }
+.idx-item { display: flex; align-items: center; gap: 12px; }
 .idx-item-main { flex: 1; min-width: 0; }
 .idx-item-title { display: flex; align-items: center; gap: 8px; }
 .idx-name { font-size: 13px; color: var(--text-1); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

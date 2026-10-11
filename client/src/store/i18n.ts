@@ -245,6 +245,8 @@ const DICT: Dict = {
   // plan-282-1441：拓展中心（插件/技能/连接器三合一）与工作树
   "settings.tab.extensions":      ["拓展", "Extensions"],
   "settings.tab.worktrees":       ["工作树", "Worktrees"],
+  // plan-114-449：侧栏按 settings.tab.<key> 取名，漏了这条会直接显示键名
+  "settings.tab.playground":      ["嗒嗒乐园", "Dada's Playground"],
 
   // ── 设置页：页面标题 ──
   "settings.pt.general":    ["常规", "General"],
@@ -270,6 +272,9 @@ const DICT: Dict = {
   "settings.pt.about":      ["关于", "About"],
 
   // ── 设置页：页面副标题 ──
+  "settings.ps.about": ["版本信息、软件更新与更新历史", "Version, updates & release history"],
+  "settings.ps.worktrees": ["为会话创建隔离的 Git 工作树，完成后合并回主工作区", "Isolated Git worktrees per session, merge back when done"],
+  "settings.ps.extensions": ["已安装的插件、技能与连接器", "Installed plugins, skills & connectors"],
   "settings.ps.general":    ["语言、代理、终端与显示选项", "Language, proxy, terminal & display options"],
   "settings.ps.appearance": ["主题、毛玻璃、布局与个性化外观", "Theme, glassmorphism, layout & appearance"],
   "settings.ps.pets":       ["桌面宠物：实时反映任务执行状况；多任务并行时显示数量、步骤与耗时", "Desktop pet: live task status; multi-task count, steps & elapsed time when running in parallel"],
@@ -290,6 +295,8 @@ const DICT: Dict = {
   // plan-334-1661：电脑操控专用页
   "settings.pt.desktop":    ["电脑操控", "Computer Use"],
   "settings.ps.desktop":    ["让 AI 查看屏幕并操作鼠标键盘：开关、安全护栏与操作路线管理", "Let AI see the screen and control mouse/keyboard: switches, guardrails & recipes"],
+  "settings.pt.playground": ["嗒嗒乐园", "Dada's Playground"],
+  "settings.ps.playground": ["移动鼠标，嗒嗒会跟着你跑；点一下让它跳，碰到小星星就能收集", "Move your mouse and Dada follows; click to make it hop, and collect the little stars"],
 
   // ── 电脑操控面板（plan-334-1661）──
   "dp.tab.basic":            ["基础配置", "Basic"],

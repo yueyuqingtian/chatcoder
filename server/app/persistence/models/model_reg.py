@@ -122,4 +122,7 @@ class Model(Base):
     # v25: trae 模型元数据（batch_get_detail_param 下发）：
     # {config_name, title, functions, prompt_max_tokens, max_tokens, multimodal, model_extra_config}
     trae_meta: Mapped[dict | None] = mapped_column(JSON)
+    # v26: kiro 模型元数据（服务端 modelId 映射与展示信息）：
+    # {model_id: "claude-sonnet-4.5", alias: "claude-sonnet-4-5", vendor, context_window}
+    kiro_meta: Mapped[dict | None] = mapped_column(JSON)
     created_at: Mapped[str] = mapped_column(server_default=func.now())

@@ -109,9 +109,9 @@
 /* 淡入淡出 */
 @keyframes mo-fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes mo-fade-out { from { opacity: 1; } to { opacity: 0; } }
-/* 弹性出现（徽章 / 计数变化 / 勾选） */
+/* 出现（徽章 / 计数变化 / 勾选）：plan-114-449 起始缩放收敛到 0.85，配合 ease-out-quart，不再回弹 */
 @keyframes mo-bounce-in {
-  from { opacity: 0; transform: scale(0.6); }
+  from { opacity: 0; transform: scale(0.85); }
   to { opacity: 1; transform: none; }
 }
 /* 盖章：从放大、透明压到纸面，略带回弹（首页邮票邮戳） */

@@ -16,7 +16,8 @@
  */
 import { memo, useState } from "react";
 import { useChatStore } from "../../store/chat";
-import { IconCopy, IconRotateCcw, IconThumbsUp, IconThumbsDown, IconRefresh, IconCheck } from "../icons";
+import { IconCheck } from "../icons";
+import { IxCopy, IxRollback, IxThumbUp, IxThumbDown, IxRegenerate } from "../iconkit/StackIcons";
 import { Tooltip } from "../ui";
 import type { TimelineEntry } from "./timeline";
 import { turnPartToPlainText, turnToPlainText } from "./markdown";
@@ -73,13 +74,13 @@ export const MessageActions = memo(function MessageActions({ entry, onRollback, 
     <div className={cls} data-owner={ownerId}>
       <Tooltip title="复制" side="top">
         <button className={`msg-action${copied ? " active" : ""}`} aria-label="复制" onClick={copy}>
-          {copied ? <IconCheck size={13} /> : <IconCopy size={13} />}
+          {copied ? <IconCheck size={13} /> : <IxCopy size={14} />}
         </button>
       </Tooltip>
       {!copyOnly && scope === "user" && onRollback && (
         <Tooltip title="回滚此消息及其后的更改" side="top">
           <button className="msg-action danger" aria-label="回滚此消息及其后的更改" onClick={onRollback}>
-            <IconRotateCcw size={13} />
+            <IxRollback size={14} />
           </button>
         </Tooltip>
       )}
@@ -91,7 +92,7 @@ export const MessageActions = memo(function MessageActions({ entry, onRollback, 
               aria-label="赞"
               onClick={() => setFeedback(feedback === "up" ? null : "up")}
             >
-              <IconThumbsUp size={13} />
+              <IxThumbUp size={14} />
             </button>
           </Tooltip>
           <Tooltip title="踩" side="top">
@@ -100,12 +101,12 @@ export const MessageActions = memo(function MessageActions({ entry, onRollback, 
               aria-label="踩"
               onClick={() => setFeedback(feedback === "down" ? null : "down")}
             >
-              <IconThumbsDown size={13} />
+              <IxThumbDown size={14} />
             </button>
           </Tooltip>
           <Tooltip title="重新生成此回复" side="top">
             <button className="msg-action msg-action-hover" aria-label="重新生成此回复" onClick={handleRetry}>
-              <IconRefresh size={13} />
+              <IxRegenerate size={14} />
             </button>
           </Tooltip>
         </>

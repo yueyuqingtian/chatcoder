@@ -350,7 +350,7 @@
 .ft-md-preview .md-body h3 { font-size: 14px; }
 .ft-md-preview .md-body p { margin: .7em 0; }
 .ft-md-preview .md-body ul, .ft-md-preview .md-body ol { padding-left: 1.5em; margin: .65em 0; }
-.ft-md-preview .md-body blockquote { margin: .8em 0; padding: 6px 12px; border-left: 3px solid var(--accent); color: var(--text-2); background: var(--bg-hover); }
+.ft-md-preview .md-body blockquote { margin: .8em 0; padding: 8px 14px; border-radius: var(--r-md); color: var(--text-2); background: var(--sidebar-hover); }
 .ft-md-preview .md-body .md-code-pre { overflow-x: auto; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg-hover); }
 .ft-md-preview .md-body .md-table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: .8em 0; }
 .ft-md-preview .md-body .md-th, .ft-md-preview .md-body .md-td { padding: 6px 10px; border: 1px solid var(--border); white-space: nowrap; }

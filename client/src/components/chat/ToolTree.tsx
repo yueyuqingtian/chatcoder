@@ -22,7 +22,10 @@ import { SEARCH_TOOLS, RUN_TOOLS, isWriteLeaf } from "./timeline";
 import { api } from "../../api/client";
 import { usePanelStore } from "../../store/panel";
 import { useChatStore } from "../../store/chat";
-import { FileBadge, splitFilePath } from "./FileBadge";
+import { splitFilePath } from "./FileBadge";
+import { FileIcon } from "../iconkit/FileIcon";
+import { CodeView } from "./CodeView";
+import { ToolGlyph } from "../iconkit/ToolGlyphs";
 import { ChatCollapse } from "./ChatCollapse";
 import { tailClamp } from "../../utils/tailClamp";
 import {
@@ -79,9 +82,11 @@ const TOOL_ICONS: Record<string, React.ReactNode> = {
   mcp: <IconBox size={16} />,
 };
 
+/** plan-91-393：工具图标改为按语义设计、带运行态动画的 ToolGlyph；TOOL_ICONS 仅作兼容保留 */
 function toolIcon(tool: string): React.ReactNode {
-  return TOOL_ICONS[tool] ?? <IconZap size={16} />;
+  return <ToolGlyph tool={tool} size={16} />;
 }
+void TOOL_ICONS; void IconZap;
 
 function toolVerb(tool: string): string {
   return TOOL_VERBS[tool] ?? `已调用 ${tool}`;
@@ -246,9 +251,12 @@ function InlineDiff({ turnId, path, callKey, fallbackLines, onStat }: {
   if (state.kind === "error") return <pre className="tc-plain">变更加载失败：{state.msg}</pre>;
   const hasStat = state.additions > 0 || state.deletions > 0;
   return (
-    <div className="tc-diff-wrap">
-      {(hasStat || state.note) && (
-        <div className="tc-diff-head">
+    <div className="tc-diff-wrap cv">
+      {/* plan-91-393：与读文件代码视图同一编辑器外观——文件头 + 符号槽 + 等宽内容 */}
+      {(hasStat || state.note || path) && (
+        <div className="tc-diff-head cv-head">
+          <FileIcon name={path} size={14} />
+          <span className="cv-name">{splitFilePath(path).name}</span>
           {hasStat && (
             <span className="tc-diff-stat">
               {state.singleEdit ? "本次变更" : "该轮累计"}
@@ -262,7 +270,7 @@ function InlineDiff({ turnId, path, callKey, fallbackLines, onStat }: {
       {state.lines.length > 0 ? (
         <pre className="tc-diff">
           {state.lines.map((l, i) => (
-            <div key={i} className={`tc-diff-line ${l.type}`}>{l.type === "add" ? "+ " : l.type === "del" ? "- " : "  "}{l.text}</div>
+            <div key={i} className={`tc-diff-line ${l.type}`}><span className="cv-ln">{l.type === "add" ? "+" : l.type === "del" ? "−" : ""}</span><code className="cv-code">{l.text || " "}</code></div>
           ))}
         </pre>
       ) : (
@@ -476,14 +484,15 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
 
   return (
     <div className="tc-node">
-      <div className={"tc-row" + (expandable ? " has-output" : "") + (expanded ? " expanded" : "") + (isWrite ? " tc-write" : "")} onClick={() => expandable && setExpanded(!expanded)}>
+      <div className={"tc-row" + (expandable ? " has-output" : "") + (expanded ? " expanded" : "") + (isWrite ? " tc-write" : "")}
+          data-tool-state={ok === null ? "running" : ok === false ? "fail" : "done"} onClick={() => expandable && setExpanded(!expanded)}>
         <span className="tc-icon">{toolIcon(leaf.tool)}</span>
         <span className={"tc-verb" + (ok === null ? " text-shine" : "")}>
           {ok === null ? toolVerb(leaf.tool).replace("已", "正在") : toolVerb(leaf.tool)}
         </span>
         {path && (
           <span className="tc-filelink" title={`${path}（点击查看${isWrite ? "变更" : "文件"}）`} onClick={(e) => void openFilePreview(e, path)}>
-            <FileBadge path={path} size={16} />
+            <FileIcon name={path} size={16} />
             <span className="tc-filename">{name}</span>
           </span>
         )}
@@ -607,7 +616,7 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
               {/* plan-278-1391: ask_user_question 的 output 是 `用户回答:\n{json}`，
                   问答已由上方结构化列表呈现，这里跳过原文，避免重复且可读性差的 JSON。 */}
               {leaf.output && leaf.tool !== "ask_user_question" && (path && /\.(ts|tsx|js|jsx|py|json|md|css|html|go|rs|java|c|cpp|sh)$/i.test(path) ? (
-                <ClampedPre className="tc-code" text={leaf.output} code />
+                <CodeView path={path} text={leaf.output} />
               ) : (
                 <ClampedPre className="tc-plain" text={leaf.output} />
               ))}
@@ -656,7 +665,8 @@ const ActionClusterRow = memo(function ActionClusterRow({ leaves }: { leaves: To
 
   return (
     <div className="tc-node tc-explore">
-      <div className={"tc-row has-output tc-explore-row" + (expanded ? " expanded" : "")} onClick={() => setExpanded(!expanded)}>
+      <div className={"tc-row has-output tc-explore-row" + (expanded ? " expanded" : "")}
+          data-tool-state={running ? "running" : failed ? "fail" : "done"} onClick={() => setExpanded(!expanded)}>
         <span className="tc-icon"><IconOperationCluster size={16} /></span>
         {running ? (
           <span className="tc-verb-roll" key={tick}>
@@ -693,12 +703,13 @@ const WriteMergedRow = memo(function WriteMergedRow({ leaves }: { leaves: ToolLe
 
   return (
     <div className="tc-node">
-      <div className={"tc-row has-output tc-write" + (expanded ? " expanded" : "")} onClick={() => setExpanded(!expanded)}>
+      <div className={"tc-row has-output tc-write" + (expanded ? " expanded" : "")}
+          data-tool-state={running ? "running" : failed ? "fail" : "done"} onClick={() => setExpanded(!expanded)}>
         <span className="tc-icon"><IconFileWrite size={16} /></span>
         <span className={"tc-verb" + (running ? " text-shine" : "")}>{running ? "正在编辑" : `已编辑 ×${leaves.length}`}</span>
         {path && (
           <span className="tc-filelink">
-            <FileBadge path={path} size={16} />
+            <FileIcon name={path} size={16} />
             <span className="tc-filename">{name}</span>
           </span>
         )}

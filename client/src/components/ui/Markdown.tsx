@@ -12,6 +12,7 @@
  *  - 文件链接先校验存在性再允许点击，避免点空。
  */
 import { memo, useState, useCallback, useRef, useEffect, type ReactNode } from "react";
+import { FileIcon } from "../iconkit/FileIcon";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -81,14 +82,24 @@ function FileLink({ href, children }: { href?: string; children?: ReactNode }) {
     return statCache.has(clean) ? statCache.get(clean)! : null;
   });
   const currentProjectId = useChatStore((s) => s.currentProjectId);
+  /** 校验通过时实际要打开的项目内相对路径（绝对路径会被换算） */
+  const relRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!href) return;
-    const clean = href.replace(/^(\.\/|\/)/, "");
-    // 外部链接/绝对路径不校验（保持默认行为）
-    if (/^(https?:|mailto:|[A-Za-z]:[\\/]|\/)/i.test(clean)) { setStat(null); return; }
+    if (currentProjectId == null) { setStat(false); return; }
+    let clean = href.replace(/^(\.\/|\/)/, "");
+    // plan-91-393：绝对路径若落在当前项目根下则换算为相对路径再校验；
+    // 项目外的绝对路径无法在右侧面板打开，直接按不可交互文本展示（不再显示下划线误导用户）
+    if (/^[A-Za-z]:[\\/]/.test(href) || href.startsWith("/")) {
+      const root = (useChatStore.getState().projects.find((p) => p.id === currentProjectId)?.path || "")
+        .replace(/\\/g, "/").replace(/\/$/, "");
+      const abs = href.replace(/\\/g, "/");
+      if (!root || !abs.toLowerCase().startsWith(root.toLowerCase() + "/")) { setStat(false); return; }
+      clean = abs.slice(root.length + 1);
+    }
+    relRef.current = clean;
     if (statCache.has(clean)) { setStat(statCache.get(clean)!); return; }
-    if (currentProjectId == null) { setStat(null); return; }
     let dead = false;
     api.projectStat(currentProjectId, clean)
       .then((r) => {
@@ -97,13 +108,13 @@ function FileLink({ href, children }: { href?: string; children?: ReactNode }) {
         statCache.set(clean, ok);
         setStat(ok);
       })
-      .catch(() => { if (!dead) setStat(null); });
+      .catch(() => { if (!dead) setStat(false); });
     return () => { dead = true; };
   }, [href, currentProjectId]);
 
-  if (stat === false) {
-    // 不存在/目录：纯文本展示，不可点击
-    return <span className="md-a md-file-link-disabled" title="文件不存在">{children}</span>;
+  // 不存在 / 目录 / 项目外 / 校验中：按行内代码文本展示，不可点击；确认可打开后才变为文件芯片
+  if (stat !== true) {
+    return <code className="md-inline-code md-file-link-disabled">{children}</code>;
   }
   return (
     <a
@@ -112,13 +123,14 @@ function FileLink({ href, children }: { href?: string; children?: ReactNode }) {
       onClick={(e) => {
         e.preventDefault();
         if (href) {
-          const clean = href.replace(/^(\.\/|\/)/, "");
+          const clean = relRef.current ?? href.replace(/^(\.\/|\/)/, "");
           usePanelStore.getState().setPreviewPath(clean);
           usePanelStore.getState().openPanel();
           usePanelStore.getState().openTab("files");
         }
       }}
     >
+      <FileIcon name={href || ""} size={13} />
       {children}
     </a>
   );

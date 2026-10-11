@@ -292,7 +292,8 @@
      边缘被抗锯齿按比例稀释，12% 的对比度会被吃到接近不可见。
      这里给一档稳定可辨的对比度：浅色档 22%、深色档 26%（深色档另见下方 dark 覆盖）。 */
   --frost-seam: color-mix(in srgb, var(--color-neutral-950) 22%, transparent);
-  --frost-selected: color-mix(in srgb, var(--color-neutral-950) 6%, transparent);
+  /* plan-114-447：玻璃态选中与普通态共用同一侧栏选中令牌 */
+  --frost-selected: var(--sidebar-selected);
   --frost-selected-line: color-mix(in srgb, var(--color-neutral-950) 5%, transparent);
   --ambient-c1: var(--color-background);
   --ambient-c2: var(--color-background);
@@ -361,11 +362,11 @@
      底色取近黑带一丝白（#14161B）与深色壁纸可辨分层；
      **不使用任何白色边缘描边**（深色下白描边会形成发亮的彩边）；
      分割线 / 选中态改用显式白色低透明度（深色下中性深色不可用）。 */
-  --frost-left-tint: #14161B;
+  --frost-left-tint: var(--sidebar-paper-dark);
   --frost-divider: rgb(255 255 255 / 0.10);
   /* 深色档接缝：显式白色低透明度，比 --frost-divider 更实以抵消 1.5× 屏的抗锯齿稀释 */
   --frost-seam: rgb(255 255 255 / 0.20);
-  --frost-selected: rgb(255 255 255 / 0.07);
+  --frost-selected: var(--sidebar-selected);
   --frost-selected-line: rgb(255 255 255 / 0.05);
 }
 
@@ -523,8 +524,15 @@
   --sidebar-fs: 14px;
   --sidebar-icon: 16px;
   --sidebar-focus: var(--text-1);
-  --sidebar-active-bg: var(--color-selected);
+  --sidebar-active-bg: var(--sidebar-selected);
   --sidebar-active-bar: transparent;
+  /* plan-114-447：侧栏状态唯一来源——悬停/选中都用同一中性墨色的不同浓度，
+     不随主题世界变化，毛玻璃开关也共用，根治「底色/聚焦色割裂」 */
+  --sidebar-hover: color-mix(in oklab, var(--text-1) 5%, transparent);
+  --sidebar-selected: color-mix(in oklab, var(--text-1) 9%, transparent);
+  --sidebar-paper-dark: oklch(18.5% 0.003 80);
+  /* 用户消息气泡：中性底 */
+  --bubble-user: color-mix(in oklab, var(--text-1) 6%, transparent);
   /* 兼容补齐 */
   --ok: var(--success);
   --radius: var(--r-md);

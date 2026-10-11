@@ -5,8 +5,9 @@
  * - 思考结束不在外部展示内容，仅保留「思考过程 持续了 N 秒」；
  * - 最右侧箭头与工具调用对齐，展开时顺畅旋转并展示内嵌 output 块。
  */
+import { ToolGlyph } from "../iconkit/ToolGlyphs";
 import { memo, useEffect, useRef, useState } from "react";
-import { IconChevronRight, IconBrain } from "../icons";
+import { IconChevronRight } from "../icons";
 import { ThinkingTicker } from "./ThinkingTicker";
 import { ThinkingExpanded } from "./ThinkingExpanded";
 import { ChatCollapse } from "./ChatCollapse";
@@ -49,7 +50,7 @@ export const ThinkingBlock = memo(function ThinkingBlock({ text, active, turnId,
         className={`tc-row has-output thinking-row${open ? " expanded" : ""}${active ? " active" : ""}`}
         onClick={() => setOpen(!open)}
       >
-        <span className="tc-icon"><IconBrain size={16} /></span>
+        <span className="tc-icon"><ToolGlyph tool="thinking" size={16} /></span>
         <span className="tc-verb">
           {isThinking ? "正在思考" : "思考过程"}
         </span>

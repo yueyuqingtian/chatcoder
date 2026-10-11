@@ -828,7 +828,24 @@ function readThemePref() {
   } catch { return null; }
 }
 function writeThemePref(theme) {
-  try { fs.writeFileSync(THEME_PREF_FILE, JSON.stringify({ theme: theme === "light" ? "light" : "dark" })); } catch {}
+  try { fs.writeFileSync(THEME_PREF_FILE, JSON.stringify({ theme: theme === "light" ? "light" : "dark", tone: readTonePref() })); } catch {}
+}
+// plan-114-447：主题由「色调」改为「世界」，仍存在 tone 字段里；旧色调值读取时迁移到对应世界
+const TONE_VALUES = ["graphite", "forest", "campfire", "breeze", "tide", "sakura"];
+const LEGACY_TONE_MAP = { mint: "forest", ocean: "tide", apricot: "campfire", lavender: "breeze" };
+function normalizeTone(t) {
+  if (TONE_VALUES.includes(t)) return t;
+  return LEGACY_TONE_MAP[t] || "graphite";
+}
+function readTonePref() {
+  try {
+    return normalizeTone(JSON.parse(fs.readFileSync(THEME_PREF_FILE, "utf8")).tone);
+  } catch { return "graphite"; }
+}
+function writeTonePref(raw) {
+  const tone = normalizeTone(raw);
+  const theme = readThemePref() || "dark";
+  try { fs.writeFileSync(THEME_PREF_FILE, JSON.stringify({ theme, tone })); } catch {}
 }
 
 /** plan-387-1825 A10：应用主题是否为深色——窗口底色与非客户区渲染的**唯一判据**。
@@ -1141,6 +1158,17 @@ function createWindow() {
 
   // plan-26-116：折射面板几何同步（syncLiquid）已随折射模式一并移除。
 
+  // plan-114-450：每次导航完成后重注入窗口状态属性（兜底）。
+  //   属性写在**当前文档**的 <html> 上，导航会换掉整个文档，而 syncWindowChromeState
+  //   有下发缓存（_lastChromeState）——缓存命中即直接 return，主界面属性因此缺失。
+  //   这里清缓存强制重注入；preload 已在文档解析前同步写入一次，本监听保证任何加载
+  //   路径（含 dev server / 加载失败重试）下属性最终就位。
+  mainWindow.webContents.on("dom-ready", () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    _lastChromeState = null; // 文档已被替换：清缓存以强制重新注入
+    try { syncWindowChromeState(mainWindow); } catch { /* 渲染层未就绪时忽略 */ }
+  });
+
   // plan-308-1555 M0：启动即打印一次诊断结论（历史教训：只记"ok"不够，
   // 必须记录**系统回读值**才能在事后判定材质到底有没有生效）
   mainWindow.webContents.once("did-finish-load", async () => {
@@ -1169,7 +1197,7 @@ function createWindow() {
   const loadingPath = path.join(__dirname, "loading.html");
   if (fs.existsSync(loadingPath)) {
     mainWindow.loadFile(loadingPath, {
-      query: { theme: lightStart ? "light" : "dark", glass: loadingGlassQuery, mat: loadingMatQuery },
+      query: { theme: lightStart ? "light" : "dark", tone: readTonePref(), glass: loadingGlassQuery, mat: loadingMatQuery },
     });
   }
 
@@ -1626,7 +1654,25 @@ ipcMain.handle("power:setKeepAwake", (_e, on) => {
   return _psbId !== null;
 });
 
+// ── IPC:窗口 chrome 状态（plan-114-450）──
+// preload 在**文档解析前**同步读取，写入 <html> 的 data-maximized / data-native-corners——
+// 这两个属性决定「窗口四角由 DWM 原生圆角裁剪，还是由 CSS 自绘圆角」。
+// 为什么必须新增同步通道：原有注入走 executeJavaScript 且只覆盖"窗口状态变化"，
+//   页面导航换掉整个文档后属性丢失却不补发（见 syncWindowChromeState 的下发缓存），
+//   渲染层便会退回自绘 12px 圆角，与系统圆角错位成双层弧线。
+ipcMain.on("window:chrome-sync-get", (e) => {
+  try {
+    e.returnValue = {
+      maximized: isMaximizedLike(mainWindow),
+      nativeCorners: supportsNativeRoundedCorners(),
+    };
+  } catch {
+    e.returnValue = { maximized: false, nativeCorners: false };
+  }
+});
+
 // ── IPC:主题偏好落盘（渲染进程切主题时同步，下次启动 loading 页按此适配深浅色）──
+ipcMain.on("theme:setTone", (_e, tone) => { writeTonePref(tone); });
 ipcMain.on("theme:setPref", (_e, theme) => {
   writeThemePref(theme);
   // plan-387-1825 A10：切换主题后立即同步窗口**非客户区**（WS_CAPTION 边框 / 系统标题栏 /

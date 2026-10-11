@@ -14,11 +14,10 @@ import { useChatStore } from "../../store/chat";
 import { usePanelStore } from "../../store/panel";
 import { recordComponentRender } from "../../perf/metrics";
 import { useProgressRows } from "../chat/taskProgress";
-import { IconCheck, IconExternalLink, IconListChecks, IconRefresh, IconRotateCcw } from "../icons";
-import { Badge, Button, Tooltip } from "../ui";
+import { IconCheck, IconExternalLink, IconRefresh, IconRotateCcw } from "../icons";
+import { Badge, Button, Empty, Tooltip } from "../ui";
 import { FileIcon, baseName } from "../iconkit/FileIcon";
 import { StatusIcon, type StatusKind } from "../iconkit/StatusIcon";
-import { ToneTile } from "../iconkit/ToneTile";
 
 /** plan-75-334 阶段3：隐藏期的消息占位——稳定空引用，selector 结果不变 ⇒ 不触发重渲染。 */
 const EMPTY_MESSAGES: never[] = [];
@@ -210,11 +209,7 @@ export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
       </section>
 
       {!hasAnything && (
-        <div className="ts-empty-card">
-          <ToneTile tone="graphite" icon={<IconListChecks size={22} />} size={44} />
-          <div className="ts-empty-title">还没有可展示的内容</div>
-          <div className="ts-empty-sub">在对话里布置任务后，这里会实时显示执行步骤与产出的文件。</div>
-        </div>
+        <Empty title="还没有可展示的内容" desc="在对话里布置任务后，这里会实时显示执行步骤与产出的文件。" />
       )}
 
       {/* ② 执行进度 */}

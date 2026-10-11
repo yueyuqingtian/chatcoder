@@ -46,24 +46,37 @@ interface ListRowProps {
   name: ReactNode;
   desc?: ReactNode;
   actions?: ReactNode;
+  /** plan-114-450：行首图标块（32px 圆角方块），资源列表（子代理 / 规则来源 / 工作树）共用 */
+  icon?: ReactNode;
+  /** plan-114-450：描述下方的元信息行（标签 / 路径） */
+  meta?: ReactNode;
+  /** 停用态：名称与描述变淡，控件仍可操作 */
+  muted?: boolean;
   className?: string;
   /** 整行点击（如打开详情/编辑弹窗）——传入后整行呈现可点击态 */
   onClick?: () => void;
 }
 
-export function ListRow({ name, desc, actions, className = "", onClick }: ListRowProps) {
+export function ListRow({ name, desc, actions, icon, meta, muted = false, className = "", onClick }: ListRowProps) {
   return (
     <div
-      className={`ui-list-row${onClick ? " is-clickable" : ""} ${className}`.trim()}
+      className={`ui-list-row${onClick ? " is-clickable" : ""}${muted ? " is-muted" : ""} ${className}`.trim()}
       onClick={onClick}
     >
+      {icon ? <span className="ui-list-row-icon" aria-hidden>{icon}</span> : null}
       <div className="ui-list-row-info">
         <div className="ui-list-row-name">{name}</div>
         {desc ? <div className="ui-list-row-desc">{desc}</div> : null}
+        {meta ? <div className="ui-list-row-meta">{meta}</div> : null}
       </div>
-      {actions ? <div className="ui-list-row-actions">{actions}</div> : null}
+      {actions ? <div className="ui-list-row-actions" onClick={(e) => e.stopPropagation()}>{actions}</div> : null}
     </div>
   );
+}
+
+/** 行内标签：中性次级色，等高 20px；mono 用于路径 */
+export function Tag({ children, mono = false }: { children: ReactNode; mono?: boolean }) {
+  return <span className={"ui-tag" + (mono ? " is-mono" : "")}>{children}</span>;
 }
 
 export function List({ children }: { children: ReactNode }) {

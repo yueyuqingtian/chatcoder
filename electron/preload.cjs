@@ -89,6 +89,7 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
   // 保持唤醒开关（powerSaveBlocker）
   setKeepAwake: (on) => ipcRenderer.invoke("power:setKeepAwake", !!on),
   // 主题偏好同步（主进程落盘，下次启动 loading 页按此适配深浅色）
+  setTonePref: (tone) => ipcRenderer.send("theme:setTone", String(tone)),
   setThemePref: (theme) => ipcRenderer.send("theme:setPref", theme === "light" ? "light" : "dark"),
   // UI 偏好备份（plan-73-344）：localStorage 之外的第二落盘通道；读取为同步调用
   // （启动时须与 localStorage 比对取较新者，异步会让首帧闪默认值）
@@ -148,5 +149,27 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
 try {
   if (typeof document !== "undefined" && document.documentElement) {
     document.documentElement.setAttribute("data-platform", process.platform);
+  }
+} catch { /* 非浏览器环境忽略 */ }
+
+// plan-114-450：文档解析前同步窗口 chrome 状态属性（与 data-platform 同一最早时机）。
+//   为什么必须前置：data-native-corners 决定窗口四角由 DWM 原生圆角裁剪、还是由 CSS 自绘。
+//   若等主进程在导航后注入，首帧已按自绘圆角渲染 → 与系统圆角错位成双层弧线，
+//   即用户看到的「刚打开软件时四角弧度与边框不一致」。故此处同步（sendSync）取实时值。
+function applyWindowChromeAttrs() {
+  const root = document.documentElement;
+  if (!root) return false;
+  try {
+    const s = ipcRenderer.sendSync("window:chrome-sync-get") || {};
+    root.setAttribute("data-maximized", s.maximized ? "1" : "0");
+    root.setAttribute("data-native-corners", s.nativeCorners ? "1" : "0");
+  } catch { /* 通道不可用：CSS 默认不自绘窗口圆角，不会出现双层弧线 */ }
+  return true;
+}
+try {
+  if (typeof document !== "undefined" && !applyWindowChromeAttrs()) {
+    // documentElement 尚未创建：等 DOM 树一出现就写入（早于 DOMContentLoaded 与首帧）
+    const mo = new MutationObserver(() => { if (applyWindowChromeAttrs()) mo.disconnect(); });
+    mo.observe(document, { childList: true });
   }
 } catch { /* 非浏览器环境忽略 */ }

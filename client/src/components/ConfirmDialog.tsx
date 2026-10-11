@@ -25,7 +25,8 @@ export function ConfirmDialog({
       title={title}
       footer={
         <>
-          <button className="btn btn-ghost btn-sm" onClick={onCancel}>{cancelLabel}</button>
+          {/* plan-114-450：取消按钮用 secondary（有底色），与右侧主按钮同高同形，只在配色上区分主次 */}
+          <button className="btn btn-secondary btn-sm" onClick={onCancel}>{cancelLabel}</button>
           <button className={`btn btn-sm ${danger ? "btn-danger" : "btn-primary"}`} onClick={onConfirm}>{confirmLabel}</button>
         </>
       }

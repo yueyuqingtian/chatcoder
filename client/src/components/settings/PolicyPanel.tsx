@@ -6,11 +6,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type ExecPolicyRuleOut, type ExecPolicyToolInfo, type ModelOut, type PermissionProfileOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
-import { sortModelsByProvider } from "../../utils/modelOrder";
-import { IconRefresh, IconPlus, IconX } from "../icons";
+import { IconRefresh, IconPlus, IconX, IconWrench, IconTerminal, IconPencil, IconTrash } from "../icons";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { Checkbox, FormDialog, Input, Select, Textarea } from "../ui";
+import { Checkbox, FormDialog, Input, Segmented, Select, Textarea, Tooltip } from "../ui";
 import { Row } from "./shared";
+import { ModelPicker } from "../chat/ModelPicker";
 
 const DECISION_OPTS = [
   { value: "allow", label: "放行", color: "var(--success)" },
@@ -133,7 +133,7 @@ function RulesSection() {
         <div className="policy-batch-bar">
           <Checkbox checked={selected.size === rules.length} onChange={toggleSelectAll} aria-label="全选规则" />
           <span>已选 {selected.size}/{rules.length}</span>
-          {selected.size > 0 && (<div className="policy-batch-actions"><button className="btn btn-ghost btn-xs" onClick={() => batchSetDecision("allow")} style={{ color: "var(--success)" }}>批量放行</button><button className="btn btn-ghost btn-xs" onClick={() => batchSetDecision("deny")} style={{ color: "var(--error)" }}>批量拒绝</button><button className="btn btn-ghost btn-xs" onClick={() => batchSetDecision("ask")} style={{ color: "var(--warning)" }}>批量审批</button><button className="btn btn-danger btn-xs" onClick={() => setConfirmDelete({ mode: "batch" })}>批量删除</button></div>)}
+          <div className="policy-batch-actions ui-batch-slot" data-empty={selected.size > 0 ? undefined : ""}><span className="ui-batch-only"><button className="btn btn-ghost btn-xs" onClick={() => batchSetDecision("allow")} style={{ color: "var(--success)" }}>批量放行</button><button className="btn btn-ghost btn-xs" onClick={() => batchSetDecision("deny")} style={{ color: "var(--error)" }}>批量拒绝</button><button className="btn btn-ghost btn-xs" onClick={() => batchSetDecision("ask")} style={{ color: "var(--warning)" }}>批量审批</button><button className="btn btn-danger btn-xs" onClick={() => setConfirmDelete({ mode: "batch" })}>批量删除</button></span></div>
         </div>
       )}
       <FormDialog
@@ -184,16 +184,24 @@ function RulesSection() {
       </FormDialog>
       <div className="settings-resource-list">
         {rules.map((r) => { const dm = decisionMeta(r.decision); const isSel = selected.has(r.id); const isTool = Boolean(r.tool_name); return (
-          <div key={r.id} className="settings-resource-item" style={isSel ? { background: "var(--accent-soft)" } : {}}>
+          // plan-91-393：规则行改为「图标块 + 等宽规则名 + 决策胶囊 + 理由」，操作为悬停出现的图标按钮
+          <div key={r.id} className={"settings-resource-item pol-rule" + (isSel ? " is-sel" : "")} data-decision={r.decision}>
             <Checkbox checked={isSel} onChange={() => toggleSelect(r.id)} aria-label="选择该规则" />
+            <span className="pol-rule-tile" aria-hidden>{isTool ? <IconWrench size={16} /> : <IconTerminal size={16} />}</span>
             <div className="settings-resource-info">
-              <div className="settings-resource-name" style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}>
-                <span className="settings-resource-tag" style={{ color: "var(--text-secondary)", borderColor: "var(--border)" }}>{isTool ? "工具" : "命令"}</span>
-                {isTool ? r.tool_name : r.command_pattern}
+              <div className="pol-rule-name">
+                <code>{isTool ? r.tool_name : r.command_pattern}</code>
+                <span className="pol-rule-kind">{isTool ? "工具" : "命令"}</span>
               </div>
-              <div className="settings-resource-desc"><span className="settings-resource-tag" style={{ color: dm.color, borderColor: dm.color }}>{r.decision}</span>{r.justification && <span>{r.justification}</span>}</div>
+              <div className="pol-rule-meta">
+                <span className="pol-rule-decision">{dm.label}</span>
+                {r.justification && <span className="pol-rule-why">{r.justification}</span>}
+              </div>
             </div>
-            <div className="settings-resource-actions"><button className="btn btn-ghost btn-xs" onClick={() => startEdit(r)}>编辑</button><button className="btn btn-ghost btn-xs" onClick={() => setConfirmDelete({ mode: "one", id: r.id })}><IconX size={12} /></button></div>
+            <div className="settings-resource-actions pol-rule-actions">
+              <Tooltip title="编辑"><button className="btn btn-ghost btn-sm btn-icon" aria-label="编辑规则" onClick={() => startEdit(r)}><IconPencil size={14} /></button></Tooltip>
+              <Tooltip title="删除"><button className="btn btn-ghost btn-sm btn-icon" aria-label="删除规则" onClick={() => setConfirmDelete({ mode: "one", id: r.id })}><IconTrash size={14} /></button></Tooltip>
+            </div>
           </div>); })}
         {rules.length === 0 && <div className="navpage-empty">暂无执行策略规则</div>}
       </div>
@@ -432,6 +440,7 @@ function ApprovalExplainSection() {
   const [effort, setEffort] = useState<string | null>(null);
   const [models, setModels] = useState<ModelOut[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const timerRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -459,11 +468,6 @@ function ApprovalExplainSection() {
   useEffect(() => () => { if (timerRef.current) window.clearTimeout(timerRef.current); }, []);
 
   const selectedModel = models.find((m) => m.id === modelId) ?? null;
-  const modelOptions = [
-    { value: "", label: "跟随会话模型（默认）" },
-    // plan-89-386: 与全局模型选择器同序（设置页供应商顺序）
-    ...sortModelsByProvider(models).map((m) => ({ value: String(m.id), label: m.name })),
-  ];
   // 专用深度必须先选定专用模型且该模型声明了思考档位（否则无法确定可选值）
   const supportsEffort = (selectedModel?.reasoning_efforts?.length ?? 0) > 0;
   const effortOptions = [
@@ -472,25 +476,29 @@ function ApprovalExplainSection() {
   ];
 
   return (
-    <div className="settings-card">
+    // plan-121-482：不再套第二层卡片（外层已是卡片）；行直接排在卡片上，横线由 CSS 贴卡片边缘。
+    <div className="explain-sec">
       <div className="ui-field-hint">
         审批卡左下角「解释」会把当前命令交给 AI 分析用途与风险。默认沿用当前会话的模型与思考深度；
         如需固定为更轻快或更强的组合，可在此单独指定。
       </div>
       <Row title="解释专用模型" desc="留空则跟随当前会话所用模型">
-        <Select
-          value={modelId == null ? "" : String(modelId)}
-          onChange={(v) => {
-            const next = v ? Number(v) : null;
-            // 换模型后旧深度可能不被支持 → 一并重置为「跟随会话深度」
-            setModelId(next);
-            setEffort(null);
-            patch(next, null);
-          }}
-          options={modelOptions}
-          style={{ minWidth: 220 }}
-          aria-label="解释专用模型"
-        />
+        {/* plan-91-393：改用全局模型选择器，与输入框模型弹窗一致（分组/标签/余额） */}
+        <div className="sb-model-picker">
+          <ModelPicker
+            models={models}
+            value={modelId}
+            open={pickerOpen}
+            onToggle={() => setPickerOpen((o) => !o)}
+            side="bottom"
+            inheritLabel="跟随会话模型（默认）"
+            onInherit={() => { setModelId(null); setEffort(null); patch(null, null); setPickerOpen(false); }}
+            onChange={(id) => {
+              // 换模型后旧深度可能不被支持 → 一并重置为「跟随会话深度」
+              setModelId(id); setEffort(null); patch(id, null); setPickerOpen(false);
+            }}
+          />
+        </div>
       </Row>
       <Row
         title="解释专用思考深度"
@@ -514,10 +522,10 @@ export function PolicyPanel() {
   const [tab, setTab] = useState<"rules" | "modes" | "explain">("rules");
   return (
     <div>
-      <div className="perm-tabs">
-        <button type="button" className={"perm-tab" + (tab === "rules" ? " on" : "")} onClick={() => setTab("rules")}>执行规则</button>
-        <button type="button" className={"perm-tab" + (tab === "modes" ? " on" : "")} onClick={() => setTab("modes")}>权限模式</button>
-        <button type="button" className={"perm-tab" + (tab === "explain" ? " on" : "")} onClick={() => setTab("explain")}>审批解释</button>
+      {/* plan-114-450：页内标签统一为分段控件，移除遗留的 .perm-tab（AGENTS.md 点名要迁移的私有类） */}
+      <div className="ui-toolbar perm-tabs-bar">
+        <Segmented value={tab} onChange={setTab} aria-label="执行策略"
+          options={[{ value: "rules", label: "执行规则" }, { value: "modes", label: "权限模式" }, { value: "explain", label: "审批解释" }]} />
       </div>
       {tab === "rules" && <RulesSection />}
       {tab === "modes" && <ModeProfilesSection />}

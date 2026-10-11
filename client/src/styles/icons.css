@@ -188,3 +188,72 @@ svg.ic .ic-needle { transform-box: view-box; transform-origin: 12px 14px; transi
 :where(button, a, [role="button"], .ic-host, .sticker-host):is(:hover, :focus-visible) .sticker .stk-eye,
 .sticker:hover .stk-eye { animation: stk-eye 2.4s var(--ease-in-out) infinite; }
 :root[data-motion="reduced"] .sticker * { animation: none !important; }
+
+/* ── 线性交互图标（plan-91-393，参考图5）：按含义各自微动 / 按下回弹 / 选中着主题色 ── */
+svg.lx { transition: transform var(--dur-spring) var(--ease-jelly), color var(--dur-2) var(--ease-standard); }
+svg.lx [class*="lx-"] { transform-box: fill-box; transform-origin: center; transition: transform var(--dur-spring) var(--spring-bouncy), opacity var(--dur-2); }
+svg.lx .lx-fill { fill: currentColor; fill-opacity: 0; transition: fill-opacity var(--dur-3) var(--ease-standard); }
+svg.lx .lx-lid { transform-origin: 0% 50%; }
+svg.lx .lx-draw { stroke-dasharray: 14; stroke-dashoffset: 0; }
+:where(button, a, [role="button"], [role="tab"], .sb-nav-item, .sb-user-settings, .ic-host):hover svg.lx {
+  .lx-pop { transform: scale(1.3) rotate(90deg); }
+  .lx-scan { transform: translate(-1px, -1px) rotate(-12deg); }
+  .lx-hop { transform: translateY(-1.5px); }
+  .lx-drop { transform: translateY(1.5px); }
+  .lx-lift { transform: translate(1px, -1px) rotate(0deg); }
+  .lx-spin { transform: rotate(60deg); }
+  .lx-nudge { transform: translate(1px, 1px); }
+  .lx-turn { transform: rotate(300deg); }
+  .lx-turn-back { transform: rotate(-300deg); }
+  .lx-squish { transform: scaleX(0.4); }
+  .lx-lid { transform: rotate(-14deg) translateY(-1px); }
+  .lx-blink { animation: lx-blink 0.9s steps(1) infinite; }
+  .lx-wiggle { animation: lx-wiggle 0.5s var(--ease-spin) 2; }
+  .lx-draw { animation: lx-draw var(--dur-5) var(--ease-emphasized-decel); }
+  .lx-fill { fill-opacity: 0.1; }
+}
+:where(button, [role="button"], [role="tab"], .sb-nav-item, .sb-user-settings):active svg.lx { transform: scale(0.88); transition-duration: 90ms; }
+:is(.active, .is-active, [aria-selected="true"], [aria-current="page"], [data-state="open"]) svg.lx { color: var(--ic-accent); }
+:is(.active, .is-active, [aria-selected="true"], [aria-current="page"], [data-state="open"]) svg.lx .lx-fill { fill-opacity: 0.16; }
+@keyframes lx-blink { 50% { opacity: 0; } }
+@keyframes lx-wiggle { 25% { transform: rotate(-6deg); } 75% { transform: rotate(6deg); } }
+@keyframes lx-draw { from { stroke-dashoffset: 14; } }
+@media (prefers-reduced-motion: reduce) { svg.lx, svg.lx [class*="lx-"] { transition: none; animation: none !important; } }
+
+/* ── 设置导航彩色方块图标（plan-91-393，参考图4） ── */
+.sg-tile {
+  display: inline-grid; place-items: center; flex-shrink: 0; border-radius: var(--r-md);
+  background: var(--sg-c, var(--pc-graphite));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 1px 2px rgba(0, 0, 0, 0.12);
+  transition: transform var(--dur-spring) var(--spring-bouncy);
+}
+.sg-tile[data-tone="graphite"] { --sg-c: oklch(56% 0.012 260); }
+.sg-tile[data-tone="violet"] { --sg-c: oklch(58% 0.2 295); }
+.sg-tile[data-tone="pink"] { --sg-c: oklch(64% 0.2 355); }
+.sg-tile[data-tone="blue"] { --sg-c: oklch(60% 0.18 250); }
+.sg-tile[data-tone="indigo"] { --sg-c: oklch(54% 0.19 275); }
+.sg-tile[data-tone="teal"] { --sg-c: oklch(62% 0.12 185); }
+.sg-tile[data-tone="orange"] { --sg-c: oklch(68% 0.17 50); }
+.sg-tile[data-tone="cyan"] { --sg-c: oklch(66% 0.13 220); }
+.sg-tile[data-tone="forest"] { --sg-c: oklch(55% 0.11 160); }
+.sg-tile[data-tone="amber"] { --sg-c: oklch(74% 0.15 75); }
+.sg-tile[data-tone="red"] { --sg-c: oklch(60% 0.2 25); }
+.sg-tile[data-tone="green"] { --sg-c: oklch(64% 0.17 150); }
+.sg-tile[data-tone="lime"] { --sg-c: oklch(66% 0.16 130); }
+.sg-tile svg { overflow: visible; }
+.sg-tile .sg-move { transform-box: fill-box; transform-origin: center; transition: transform var(--dur-spring) var(--spring-bouncy); }
+.sb-nav-item:hover .sg-tile { transform: scale(1.06); }
+.sb-nav-item.active .sg-tile { transform: scale(1.08); }
+.sb-nav-item:hover .sg-spin { transform: rotate(60deg); }
+.sb-nav-item:hover .sg-pop { transform: scale(1.25); }
+.sb-nav-item:hover .sg-hop { transform: translateY(-1.5px); }
+.sb-nav-item:hover .sg-nudge { transform: translateX(1.2px); }
+.sb-nav-item:hover .sg-slide { transform: translateX(1.5px); }
+.sb-nav-item:hover .sg-swing { transform: rotate(-12deg); transform-origin: 50% 0; }
+.sb-nav-item:hover .sg-grow { transform: scaleY(1.15); transform-origin: 50% 100%; }
+.sg-draw { stroke-dasharray: 40; stroke-dashoffset: 0; }
+.sb-nav-item:hover .sg-draw { animation: sg-draw var(--dur-5) var(--ease-emphasized-decel); }
+@keyframes sg-draw { from { stroke-dashoffset: 40; } }
+.settings-sidebar .sb-nav-item { height: 34px; gap: 10px; }
+.settings-sidebar .sb-nav-item.active { background: var(--sidebar-selected); }
+@media (prefers-reduced-motion: reduce) { .sg-tile, .sg-tile .sg-move { transition: none; animation: none; } }

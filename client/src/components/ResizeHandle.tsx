@@ -131,6 +131,11 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
    *  必须用 ref 记住"当初挂上去的那一个"，否则 removeEventListener 摘不掉。 */
   const moveListenerRef = useRef<((e: MouseEvent) => void) | null>(null);
   const upListenerRef = useRef<(() => void) | null>(null);
+  /** 收尾函数最新引用：handleMouseMove 的「左键已松开」兜底需要调用它，
+   *  两个 useCallback 互相引用会形成循环依赖，经 ref 打破。 */
+  const endDragRef = useRef<() => void>(() => {});
+  /** 拖拽期全屏遮罩元素（见 addShield 注释；松手/卸载时移除）。 */
+  const shieldRef = useRef<HTMLDivElement | null>(null);
   /** freezeRefs 的最新值（plan-75-333 性能收口）。
    *  调用方传的是内联数组（App.tsx 为 `[rightPanelElRef]`），每次渲染都是新引用——
    *  直接放进安全网 effect 的依赖里会让它每次渲染都重跑；用 ref 持有后，
@@ -227,6 +232,25 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
     frozenRef.current = [];
   }, []);
 
+  /** 拖拽期插入全屏透明遮罩（drag shield）——修复「松手后移动鼠标，面板宽度仍继续跟随」。
+   *
+   *  根因：拖右分隔条时指针向右必然扫过右面板内容区，其中浏览器标签是独立文档的
+   *  guest（Electron <webview> / iframe）——在 guest 上方松开左键时宿主文档收不到
+   *  mouseup（mousemove 同样被吞），拖拽状态残留：draggingRef 仍为 true、document
+   *  监听器未摘除，回到主文档区域移动鼠标就继续改写面板宽度。
+   *  遮罩让拖拽期的指针事件永远命中宿主文档，与既有 document 监听器口径一致。 */
+  const addShield = useCallback(() => {
+    if (shieldRef.current) return;
+    const el = document.createElement("div");
+    el.className = "panel-drag-shield";
+    document.body.appendChild(el);
+    shieldRef.current = el;
+  }, []);
+  const removeShield = useCallback(() => {
+    shieldRef.current?.remove();
+    shieldRef.current = null;
+  }, []);
+
   // plan-246-1236 S6: 把鼠标相对手柄的 Y 写成 CSS 变量，供渐隐细线定位（不走 React state）。
   // 用缓存的矩形计算，不再每次调用 getBoundingClientRect（避免强制同步布局）。
   const setHandleY = useCallback((clientY: number) => {
@@ -257,6 +281,7 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
    *  提交拖拽中间值会污染用户保存的面板宽度。 */
   useEffect(() => () => {
     if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = 0; }
+    removeShield(); // 遮罩兜底：任何卸载路径都不留下盖住全窗口的残留层
     if (!draggingRef.current) return;
     draggingRef.current = false;
     const move = moveListenerRef.current;
@@ -274,7 +299,7 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
     document.body.style.userSelect = "";
     document.body.classList.remove("panel-dragging");
     release("panel-drag");
-  }, [unfreezeContents]);
+  }, [unfreezeContents, removeShield]);
 
   /** 残留态安全网（plan-75-333）：非拖拽状态下内容根仍带钉住标记，说明上一次拖拽未正常收尾
    *  （mouseup 丢失）。此时面板宽度由 React 单源写入，可能已经变宽，而内容根还钉在旧值上——
@@ -294,6 +319,9 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
 
   const handleMouseMove = useCallback((e: MouseEvent) => {
     if (!draggingRef.current) return;
+    // mouseup 兜底：在 guest / 窗口外松开左键时事件可能丢失，但后续 mousemove 的
+    // buttons 恒反映真实按键状态——检测到左键已松开即按正常路径收尾，避免拖拽残留。
+    if ((e.buttons & 1) === 0) { endDragRef.current(); return; }
     e.preventDefault();
     pendingYRef.current = e.clientY; // 与宽度合并，rAF 内统一写入（见 pendingYRef 声明处）
 
@@ -338,6 +366,7 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
     window.removeEventListener("resize", handleMouseUp);
     moveListenerRef.current = null;
     upListenerRef.current = null;
+    removeShield();
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
     document.body.classList.remove("panel-dragging");
@@ -359,7 +388,10 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
       el ? parseInt(el.style.width, 10) || baseWRef.current : baseWRef.current,
     );
     onCommit(finalWidth);
-  }, [handleMouseMove, panelEl, onCommit, applyWidth, unfreezeContents, followContents]);
+  }, [handleMouseMove, panelEl, onCommit, applyWidth, unfreezeContents, followContents, removeShield]);
+
+  // 保持收尾函数最新引用（endDragRef 声明处：供 mousemove 的「左键已松开」兜底调用）
+  useEffect(() => { endDragRef.current = handleMouseUp; });
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -387,6 +419,7 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
     document.body.classList.add("panel-dragging");
+    addShield(); // 指针永不落到面板内 webview/iframe 上（见 addShield 注释）
     acquire("panel-drag"); // PerfBus：分隔条拖拽期（S3 统一门控口径）
     // plan-31-151 S4：拖拽开始前派发事件——MessageFlow 在此时捕获滚动锚点
     //   （布局尚未被拖拽改写，锚点不被污染）。
@@ -403,7 +436,7 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
     // 取消拖拽、解冻、按当前宽度收尾。
     window.addEventListener("blur", handleMouseUp);
     window.addEventListener("resize", handleMouseUp);
-  }, [baseWidth, clampMax, freezeContents, handleMouseMove, handleMouseUp, setHandleY, readDragLayoutPref]);
+  }, [baseWidth, clampMax, freezeContents, handleMouseMove, handleMouseUp, setHandleY, readDragLayoutPref, addShield]);
 
   return (
     <div

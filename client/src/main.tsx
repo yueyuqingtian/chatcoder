@@ -19,6 +19,16 @@ import "./styles/market.css";
 import "./styles/motion.css";
 import "./styles/focus.css";
 import "./styles/model-picker.css";
+import "./styles/themes.css";
+import "./styles/tw.css";
+import "./styles/revamp.css";
+import "./styles/settings-a.css";
+import "./styles/settings-b.css";
+import "./styles/settings-c.css";
+import "./styles/flow.css";
+import "./styles/mascot.css";
+// plan-114-450：设置页统一排版的最后一层（模型页 / 记忆页 / 拓展页 / 弹窗按钮 / 全选态），必须最后加载
+import "./styles/settings-unify.css";
 
 initTheme();
 initUi();

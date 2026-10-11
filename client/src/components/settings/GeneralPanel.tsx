@@ -128,7 +128,7 @@ export function GeneralPanel() {
   });
 
   return (
-    <div className="settings-card-stack">
+    <div className="settings-card-stack sc-stack">
       <div className="settings-card">
         <Row title={t("gp.language")} desc={t("gp.language_desc")}>
           <Select

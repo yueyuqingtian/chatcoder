@@ -1,0 +1,168 @@
+/* plan-91-393：设置页分组 c 的排版与样式（由对应面板独占维护） */
+
+/* ── 通用：行 / 图标块 / 角标 / 空态（plan-91-393：分组 c 各列表共享同一行结构） ── */
+.sc-page { display: flex; flex-direction: column; gap: 12px; }
+.sc-flex-spacer { flex: 1; }
+.sc-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sc-toolbar-summary { font-size: 13px; font-weight: 600; color: var(--text-1); }
+.sc-group-label { margin: 16px 0 6px; font-size: 12px; font-weight: 600; color: var(--text-3); }
+/* plan-121-482：行列表统一协议——容器是唯一边卡片层，行间全宽细线
+   （归档 / 自动化 / 索引库 / 工作树 / 诊断共用） */
+.sc-list { display: flex; flex-direction: column; gap: 0; border: 1px solid var(--border-light); border-radius: var(--r-lg); background: var(--bg-main); overflow: hidden; }
+.sc-row {
+  display: flex; align-items: center; gap: 12px; padding: var(--row-pad-y) var(--sp-5);
+  border-bottom: 1px solid var(--border-light);
+  transition: background var(--dur-2) var(--ease-standard);
+}
+.sc-list > .sc-row:last-child { border-bottom: none; }
+.sc-row:hover { background: var(--bg-hover); }
+.sc-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.sc-row-title { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; font-weight: 500; color: var(--text-1); }
+.sc-row-desc { font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sc-row-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; margin-left: auto; }
+.sc-mono { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11.5px; }
+.sc-ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.sc-tile {
+  width: 32px; height: 32px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
+  border-radius: var(--r-md); background: var(--accent-soft); color: var(--accent);
+}
+.sc-badge {
+  display: inline-flex; align-items: center; height: 20px; padding: 0 8px; flex-shrink: 0;
+  border-radius: 999px; font-size: 11px; font-weight: 500;
+  background: var(--bg-main); color: var(--text-2); border: 1px solid var(--border-light);
+}
+.sc-badge.ok { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); border-color: transparent; }
+.sc-badge.warn { color: var(--warning); background: color-mix(in srgb, var(--warning) 12%, transparent); border-color: transparent; }
+.sc-badge.fail { color: var(--error); background: color-mix(in srgb, var(--error) 12%, transparent); border-color: transparent; }
+.sc-status-icon { width: 32px; height: 32px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; border-radius: var(--r-md); }
+.sc-check.ok .sc-status-icon { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); }
+.sc-check.fail .sc-status-icon { color: var(--error); background: color-mix(in srgb, var(--error) 12%, transparent); }
+.sc-empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+  padding: 36px 16px; text-align: center; color: var(--text-3); font-size: 13px;
+  border: 1px dashed var(--border-light); border-radius: var(--r-lg);
+}
+.sc-empty-sm { padding: 16px; flex-direction: row; gap: 12px; }
+.sc-empty-icon {
+  width: 44px; height: 44px; display: inline-flex; align-items: center; justify-content: center;
+  border-radius: var(--r-lg); background: var(--surface-inset); color: var(--text-2);
+}
+/* 运行态图标预留固定槽位，避免文字切换抖动 */
+.sc-icon-slot { display: inline-flex; width: 13px; height: 13px; }
+.sc-icon-slot.spin { animation: sc-spin 0.9s linear infinite; }
+.sc-fixed-label { display: inline-block; min-width: 3em; text-align: left; }
+@keyframes sc-spin { to { transform: rotate(360deg); } }
+
+/* 索引库：覆盖旧 idx-item 布局，进度条走强调色 */
+.idx-list.sc-list .idx-item.sc-row { margin: 0; }
+.idx-item.sc-row .idx-progress-bar { height: 6px; border-radius: 999px; background: var(--bg-main); overflow: hidden; }
+.idx-item.sc-row .idx-progress-fill { height: 100%; border-radius: 999px; background: var(--accent); transition: width var(--dur-base) var(--ease-standard); }
+
+/* 归档 / 自动化 / 常规 / 电脑操控 */
+.archive-toolbar.sc-toolbar { margin-bottom: 4px; }
+.sched-item.sc-row { align-items: flex-start; }
+.sched-item.sc-row .sc-row-actions { align-self: center; }
+.sc-stack { gap: 12px; }
+.sc-stack .settings-card { border-radius: var(--r-lg); }
+
+/* ── 使用统计：工具条 / KPI / 明细表（plan-91-393） ── */
+.sc-usage-toolbar > .btn { margin-left: 0; }
+.sc-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.sc-kpi {
+  display: flex; flex-direction: column; gap: 6px; padding: 14px 16px;
+  background: var(--surface-inset); border: 1px solid var(--surface-inset-border); border-radius: var(--r-lg);
+}
+.sc-kpi-head { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-3); }
+.sc-kpi-value { font-size: 24px; font-weight: 650; line-height: 1.15; color: var(--text-1); font-variant-numeric: tabular-nums; }
+.sc-kpi-value small { font-size: 13px; font-weight: 500; color: var(--text-3); }
+.sc-kpi-delta { font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* plan-121-482：明细表统一为「单层卡片 + 全宽横线行」 */
+.sc-table { display: flex; flex-direction: column; font-size: 12.5px; border: 1px solid var(--border-light); border-radius: var(--r-lg); background: var(--bg-main); overflow: hidden; }
+.sc-tr {
+  display: grid; grid-template-columns: minmax(140px, 2fr) repeat(4, minmax(56px, 0.8fr)) minmax(170px, 1.8fr);
+  align-items: center; gap: 10px; padding: 10px var(--sp-5);
+  border-bottom: 1px solid var(--border-light);
+  font-variant-numeric: tabular-nums; color: var(--text-2);
+}
+.sc-tr > span:not(.sc-td-name) { text-align: right; }
+.sc-table > .sc-tr:last-child { border-bottom: none; }
+.sc-tr:not(.sc-th):hover { background: var(--bg-hover); }
+.sc-th { font-size: 11.5px; font-weight: 600; color: var(--text-3); border-radius: 0; }
+.sc-td-name { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--text-1); font-weight: 500; }
+.sc-dot { width: 8px; height: 8px; border-radius: 999px; flex-shrink: 0; }
+.sc-td-total { display: flex; align-items: center; justify-content: flex-end; gap: 8px; color: var(--text-1); font-weight: 600; }
+.sc-bar { flex: 0 0 64px; height: 6px; border-radius: 999px; background: var(--bg-main); overflow: hidden; }
+.sc-bar i { display: block; height: 100%; border-radius: 999px; background: var(--accent); transition: width var(--dur-base) var(--ease-standard); }
+.sc-pct { width: 44px; color: var(--text-3); font-weight: 500; }
+
+/* ── 日期范围浮层 ── */
+.usage-drp { position: relative; }
+.usage-drp-trigger { gap: 6px; font-variant-numeric: tabular-nums; }
+.usage-drp-preset { font-weight: 600; color: var(--text-1); }
+.usage-drp-range { color: var(--text-3); }
+.usage-drp-pop {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 50; width: 288px; padding: 12px;
+  background: var(--bg-main); border: 1px solid var(--border-light); border-radius: var(--r-pop);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  transform-origin: top left; animation: usage-drp-in var(--dur-base) var(--spring-soft) both;
+}
+@keyframes usage-drp-in { from { opacity: 0; transform: translateY(-4px) scale(0.97); } to { opacity: 1; transform: none; } }
+.usage-drp-chips { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 10px; margin-bottom: 8px; border-bottom: 1px solid var(--border-light); }
+.usage-drp-chip {
+  height: 26px; padding: 0 10px; border-radius: 999px; font-size: 12px; cursor: pointer;
+  background: var(--surface-inset); color: var(--text-2); border: 1px solid transparent;
+  transition: background var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
+}
+.usage-drp-chip:hover { color: var(--text-1); border-color: var(--border-light); }
+.usage-drp-chip.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.usage-drp-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.usage-drp-month { font-size: 13px; font-weight: 600; color: var(--text-1); font-variant-numeric: tabular-nums; }
+.usage-drp-nav { padding: 0; width: var(--ctl-h-sm, 28px); justify-content: center; }
+.usage-drp-grid { display: grid; grid-template-columns: repeat(7, 1fr); row-gap: 2px; }
+.usage-drp-wd { text-align: center; font-size: 11px; color: var(--text-3); padding: 4px 0; }
+.usage-drp-day {
+  position: relative; height: 32px; border: 0; background: transparent; cursor: pointer;
+  font-size: 12.5px; color: var(--text-1); font-variant-numeric: tabular-nums; border-radius: var(--r-md);
+  transition: background var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
+}
+.usage-drp-day:hover:not(:disabled) { background: var(--color-selected); }
+.usage-drp-day:disabled { color: var(--text-3); opacity: 0.4; cursor: default; }
+.usage-drp-day.in { background: var(--accent-soft); border-radius: 0; }
+.usage-drp-day.edge { background: var(--accent); color: #fff; border-radius: var(--r-md); font-weight: 600; }
+.usage-drp-day.today::after {
+  content: ""; position: absolute; left: 50%; bottom: 4px; width: 4px; height: 4px; margin-left: -2px;
+  border-radius: 999px; background: var(--accent);
+}
+.usage-drp-day.edge.today::after { background: #fff; }
+.usage-drp-hint { margin-top: 8px; font-size: 11.5px; color: var(--text-3); text-align: center; }
+/* 预设胶囊单行排布：弹层加宽，胶囊不换行 */
+.usage-drp-pop { width: 320px; }
+.usage-drp-chips { flex-wrap: nowrap; }
+.usage-drp-preset { white-space: nowrap; flex-shrink: 0; }
+
+/* ══════════════════════════════════════════════════════════
+ * plan-121-482：设置页行列表统一——特例（本文件最后加载，作最终裁决）
+ * ══════════════════════════════════════════════════════════ */
+
+/* ① 权限模式左列（定宽选择列）：不参与卡内贴边，保持自带卡片壳 */
+.ui-card .perm-modes-list {
+  margin-inline: 0;
+  border: 1px solid var(--border-light);
+  border-radius: var(--r-lg);
+  background: var(--bg-main);
+  overflow: hidden;
+}
+
+/* ② 数据库连接（弹窗内 .db-section 卡片里的连接列表）：跟随分区卡片，透明贴边、分隔线全宽 */
+.db-section > .settings-resource-list {
+  margin-inline: calc(var(--sp-4) * -1);
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
+}
+.db-section > .settings-resource-list > .settings-resource-item { padding-inline: var(--sp-4); }
+
+/* ③ 归档工具条：底线全宽（与列表行分隔线同宽，避免"半截线"观感） */
+.ui-card .archive-toolbar { margin-inline: calc(var(--sp-5) * -1); padding-inline: var(--sp-5); }

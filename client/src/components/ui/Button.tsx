@@ -5,8 +5,9 @@
  *  - 圆角统一 8px（--r-md），与输入框/下拉同档；
  *  - 支持 icon / iconOnly / loading / block；页面不再自造按钮类
  *    （旧的 .perm-tab / .ts-mini-btn / .usage-seg-btn 等逐步迁移到这里）。
+ *  - plan-114-452：forwardRef——被 Tooltip(asChild) / Popover 触发器包裹时 ref 必须透传到原生 button。
  */
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
 
 type Variant = "primary" | "secondary" | "outline" | "ghost" | "subtle" | "danger" | "danger-ghost";
 type Size = "xs" | "sm" | "md" | "lg";
@@ -41,7 +42,7 @@ const sizes: Record<Size, string> = {
   lg: "btn-lg",
 };
 
-export function Button({
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button({
   variant = "ghost",
   size = "sm",
   icon,
@@ -52,7 +53,7 @@ export function Button({
   className = "",
   disabled,
   ...props
-}: ButtonProps) {
+}, ref) {
   const cls = [
     "btn",
     variants[variant],
@@ -65,9 +66,9 @@ export function Button({
     .filter(Boolean)
     .join(" ");
   return (
-    <button className={cls} disabled={disabled || loading} {...props}>
+    <button ref={ref} className={cls} disabled={disabled || loading} {...props}>
       {loading ? <span className="btn-spinner" aria-hidden /> : icon}
       {!iconOnly && children}
     </button>
   );
-}
+});

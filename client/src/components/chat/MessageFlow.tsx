@@ -23,6 +23,7 @@ import { MarkdownContent } from "../MarkdownContent";
 import { MsgType } from "@chatcoder/shared";
 import { useChatStore } from "../../store/chat";
 import { api } from "../../api/client";
+import { Empty } from "../ui";
 
 /** plan-31-152 S5-4：运动期（拖分隔条/窗口缩放）视口 rect 的提交节流间隔（毫秒）。
  *  逐帧提交会让虚拟器每帧 setState → 整棵可见消息树 React 重渲染（含 markdown/工具树），
@@ -1151,7 +1152,7 @@ function MessageFlowCore({
         onScroll={onScroll}
       >
         {totalCount === 0 ? (
-          <div className="flow-empty">{emptyText}</div>
+          <Empty size="lg" title={emptyText} />
         ) : (
           // plan-282-1444：高度改由 `virtualizer.containerRef` 直接写（directDomUpdates），
           // 故 style 里**不得**再声明 height——否则两处写同一属性会互相抖动。
