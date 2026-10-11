@@ -164,7 +164,8 @@ class WorkBuddyAuthError(Exception):
         self.kind = kind
 
 
-async def refresh_access_token(api_base: str, access_token: str, refresh_token: str) -> dict:
+async def refresh_access_token(api_base: str, access_token: str, refresh_token: str,
+                               client_kwargs: dict | None = None) -> dict:
     """POST {api_base}/v2/plugin/auth/token/refresh，refresh_token 轮转。
 
     对齐 CLI：Authorization: Bearer {access_token} + X-Refresh-Token: {refresh_token}
@@ -182,7 +183,8 @@ async def refresh_access_token(api_base: str, access_token: str, refresh_token: 
         "User-Agent": ua,
     }
     try:
-        async with httpx.AsyncClient(timeout=_TOKEN_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_TOKEN_TIMEOUT,
+                                     **(client_kwargs or {})) as client:
             resp = await client.post(url, json={}, headers=headers)
     except httpx.HTTPError as e:
         raise WorkBuddyAuthError(f"WorkBuddy token 刷新请求失败：{url}", "network") from e
@@ -232,6 +234,13 @@ async def refresh_session(db: AsyncSession, provider_id: int, api_base: str,
     if row is None or not row.access_token or not row.refresh_token:
         raise WorkBuddyAuthError("请先登录 WorkBuddy 账号", "login_required")
 
+    # plan-110-438 M4: token 刷新按该供应商的代理配置出网
+    from app.persistence.models.model_reg import Provider
+    from app.services.credential_service import provider_client_kwargs
+
+    _provider = await db.get(Provider, provider_id)
+    _ckw = provider_client_kwargs(_provider)
+
     lock = _get_refresh_lock(provider_id, credential_id)
     async with lock:
         # 双检：等待锁期间可能已被其它协程刷新
@@ -239,7 +248,8 @@ async def refresh_session(db: AsyncSession, provider_id: int, api_base: str,
         if row is None or not row.access_token or not row.refresh_token:
             raise WorkBuddyAuthError("请先登录 WorkBuddy 账号", "login_required")
         try:
-            result = await refresh_access_token(api_base, row.access_token, row.refresh_token)
+            result = await refresh_access_token(api_base, row.access_token, row.refresh_token,
+                                                client_kwargs=_ckw)
         except WorkBuddyAuthError as e:
             if e.kind == "login_required":
                 await clear_auth(db, provider_id, credential_id)

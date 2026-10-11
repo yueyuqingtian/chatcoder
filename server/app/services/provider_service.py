@@ -197,15 +197,11 @@ async def scan_models(db: AsyncSession, provider_id: int) -> list[dict]:
         if _scan_key:
             headers["Authorization"] = f"Bearer {_scan_key}"
 
-    # plan-248-1258 M2.3: 扫描请求同样走该供应商的代理配置
-    from app.services.credential_service import proxy_disabled, resolve_proxy
+    # plan-248-1258 M2.3 / plan-110-438 M1: 扫描请求同样走该供应商的代理配置
+    from app.services.credential_service import provider_client_kwargs
 
-    _proxy = resolve_proxy(provider)
     _client_opts: dict = {"timeout": SCAN_TIMEOUT, "headers": {"Accept-Encoding": "gzip, deflate"}}
-    if _proxy:
-        _client_opts["proxy"] = _proxy
-    elif proxy_disabled(provider):
-        _client_opts["trust_env"] = False
+    _client_opts.update(provider_client_kwargs(provider))
     async with httpx.AsyncClient(**_client_opts) as client:
         resp = await client.get(url, headers=headers)
         resp.raise_for_status()
@@ -338,15 +334,11 @@ async def test_connectivity(db: AsyncSession, provider_id: int) -> dict:
     )).scalars().all()
     model_name = models[0].name if models else None
 
-    # plan-248-1258 M2.3: 连通性测试走该供应商的代理配置
-    from app.services.credential_service import proxy_disabled, resolve_proxy
+    # plan-248-1258 M2.3 / plan-110-438 M1: 连通性测试走该供应商的代理配置
+    from app.services.credential_service import provider_client_kwargs
 
-    _proxy = resolve_proxy(provider)
     _client_opts: dict = {"timeout": 15.0}
-    if _proxy:
-        _client_opts["proxy"] = _proxy
-    elif proxy_disabled(provider):
-        _client_opts["trust_env"] = False
+    _client_opts.update(provider_client_kwargs(provider))
 
     try:
         t0 = time.monotonic()

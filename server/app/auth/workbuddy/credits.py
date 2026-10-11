@@ -86,8 +86,9 @@ def _headers(token: str, api_base: str, account: dict, device_token: str | None 
     return headers
 
 
-async def _post_json(url: str, headers: dict) -> dict:
-    async with httpx.AsyncClient(timeout=_TIMEOUT, headers={"Accept-Encoding": "gzip, deflate"}) as client:
+async def _post_json(url: str, headers: dict, client_kwargs: dict | None = None) -> dict:
+    async with httpx.AsyncClient(timeout=_TIMEOUT, headers={"Accept-Encoding": "gzip, deflate"},
+                                 **(client_kwargs or {})) as client:
         resp = await client.post(url, json={}, headers=headers)
     body = {}
     try:
@@ -173,7 +174,8 @@ def _extract_credits(body: dict) -> float | None:
     return None
 
 
-async def _fetch_enterprise_credits(api_base: str, token: str, account: dict) -> float | None:
+async def _fetch_enterprise_credits(api_base: str, token: str, account: dict,
+                                   client_kwargs: dict | None = None) -> float | None:
     """企业账号积分：POST /v2/billing/meter/get-enterprise-user-usage。
 
     响应 data.limit_num / data.used_num；limit_num=-1 表示不限量（返回 -1，
@@ -187,7 +189,7 @@ async def _fetch_enterprise_credits(api_base: str, token: str, account: dict) ->
     headers["X-Enterprise-Id"] = enterprise_id
     headers["X-Tenant-Id"] = enterprise_id
     try:
-        result = await _post_json(url, headers)
+        result = await _post_json(url, headers, client_kwargs)
     except httpx.HTTPError as e:
         logger.warning("[workbuddy] 企业积分查询网络失败: %s", e)
         return None
@@ -205,11 +207,12 @@ async def _fetch_enterprise_credits(api_base: str, token: str, account: dict) ->
     return round(max(0.0, limit - used), 2)
 
 
-async def fetch_credits(api_base: str, token: str, account: dict) -> float | None:
+async def fetch_credits(api_base: str, token: str, account: dict,
+                        client_kwargs: dict | None = None) -> float | None:
     """查询账号可用积分余额；失败返回 None（不抛错）。"""
     # 企业账号优先走企业口径（个人聚合接口对企业账号不适用）
     if (account or {}).get("enterpriseId"):
-        credits = await _fetch_enterprise_credits(api_base, token, account)
+        credits = await _fetch_enterprise_credits(api_base, token, account, client_kwargs)
         if credits is not None:
             return credits
 
@@ -217,7 +220,7 @@ async def fetch_credits(api_base: str, token: str, account: dict) -> float | Non
     for path in RESOURCE_SUMMARY_PATHS:
         url = f"{_root_base(api_base)}{path}"
         try:
-            result = await _post_json(url, _headers(token, api_base, account))
+            result = await _post_json(url, _headers(token, api_base, account), client_kwargs)
         except httpx.HTTPError as e:
             logger.warning("[workbuddy] 积分查询网络失败 path=%s: %s", path, e)
             continue
@@ -235,11 +238,12 @@ async def fetch_credits(api_base: str, token: str, account: dict) -> float | Non
     return None
 
 
-async def fetch_checkin_status(api_base: str, token: str, account: dict) -> dict | None:
+async def fetch_checkin_status(api_base: str, token: str, account: dict,
+                               client_kwargs: dict | None = None) -> dict | None:
     """查询每日签到状态（含活动信息/按钮文案）；失败返回 None。"""
     url = f"{_root_base(api_base)}{CHECKIN_STATUS_PATH}"
     try:
-        result = await _post_json(url, _headers(token, api_base, account))
+        result = await _post_json(url, _headers(token, api_base, account), client_kwargs)
     except httpx.HTTPError as e:
         logger.warning("[workbuddy] 签到状态查询网络失败: %s", e)
         return None
@@ -250,11 +254,12 @@ async def fetch_checkin_status(api_base: str, token: str, account: dict) -> dict
     return data if isinstance(data, dict) else None
 
 
-async def daily_checkin(api_base: str, token: str, account: dict) -> dict:
+async def daily_checkin(api_base: str, token: str, account: dict,
+                        client_kwargs: dict | None = None) -> dict:
     """执行每日签到。返回 {status, credit?, message?, error?}（失败不抛错）。"""
     url = f"{_root_base(api_base)}{DAILY_CHECKIN_PATH}"
     try:
-        result = await _post_json(url, _headers(token, api_base, account))
+        result = await _post_json(url, _headers(token, api_base, account), client_kwargs)
     except httpx.HTTPError as e:
         return {"status": EVENT_ENDED, "error": f"网络失败：{e.__class__.__name__}"}
     body = result.get("body") or {}
@@ -297,9 +302,13 @@ async def claim_for_credential(db: AsyncSession, provider, credential) -> dict:
         return {"status": "login_required", "error": "账号未登录"}
 
     account = auth.account or {}
-    result = await daily_checkin(api_base, auth.access_token, account)
+    # plan-110-438 M4: 签到/积分请求按该供应商的代理配置出网
+    from app.services.credential_service import provider_client_kwargs
+
+    _ckw = provider_client_kwargs(provider)
+    result = await daily_checkin(api_base, auth.access_token, account, _ckw)
     # 签到后顺手刷新积分余额（无论签到结果，账号额度都可能已变化）
-    credits = await fetch_credits(api_base, auth.access_token, account)
+    credits = await fetch_credits(api_base, auth.access_token, account, _ckw)
     if credits is not None and credential is not None:
         try:
             await credential_service.set_credits(db, credential.id, credits)

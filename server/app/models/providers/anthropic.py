@@ -22,7 +22,10 @@ class AnthropicProvider(ModelProvider):
 
     name = "anthropic"
 
-    def __init__(self, *, api_key: str, base_url: str, model: str):
+    def __init__(self, *, api_key: str, base_url: str, model: str,
+                 client_kwargs: dict | None = None):
+        # plan-110-438 M3: 供应商代理配置注入每次请求的 httpx 客户端
+        self._client_kwargs = dict(client_kwargs or {})
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._default_model = model
@@ -159,7 +162,9 @@ class AnthropicProvider(ModelProvider):
     async def chat(self, request: ChatRequest) -> ChatResponse:
         payload = self._build_payload(request, stream=False)
         headers = self._headers()
-        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT, headers={"Accept-Encoding": "gzip, deflate"}) as client:
+        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT,
+                                     headers={"Accept-Encoding": "gzip, deflate"},
+                                     **self._client_kwargs) as client:
             resp = await client.post(self._endpoint, json=payload, headers=headers)
         resp.raise_for_status()
         data = resp.json()
@@ -202,7 +207,9 @@ class AnthropicProvider(ModelProvider):
         payload = self._build_payload(request, stream=True)
         headers = self._headers()
         timeout = httpx.Timeout(_DEFAULT_TIMEOUT, read=None)
-        async with httpx.AsyncClient(timeout=timeout, headers={"Accept-Encoding": "gzip, deflate"}) as client:
+        async with httpx.AsyncClient(timeout=timeout,
+                                     headers={"Accept-Encoding": "gzip, deflate"},
+                                     **self._client_kwargs) as client:
             async with client.stream("POST", self._endpoint, json=payload, headers=headers) as resp:
                 resp.raise_for_status()
                 event_type = ""
@@ -237,7 +244,9 @@ class AnthropicProvider(ModelProvider):
         payload = self._build_payload(request, stream=True)
         headers = self._headers()
         timeout = httpx.Timeout(_DEFAULT_TIMEOUT, read=None)
-        async with httpx.AsyncClient(timeout=timeout, headers={"Accept-Encoding": "gzip, deflate"}) as client:
+        async with httpx.AsyncClient(timeout=timeout,
+                                     headers={"Accept-Encoding": "gzip, deflate"},
+                                     **self._client_kwargs) as client:
             async with client.stream("POST", self._endpoint, json=payload, headers=headers) as resp:
                 resp.raise_for_status()
                 event_type = ""

@@ -227,7 +227,11 @@ def _identity(model_name: str, meta: dict) -> str:
 class Ta3Provider(ModelProvider):
     name = "ta3"
 
-    def __init__(self, *, api_key: str, base_url: str, model: str, meta: dict | None = None):
+    def __init__(self, *, api_key: str, base_url: str, model: str, meta: dict | None = None,
+                 client_kwargs: dict | None = None):
+        # plan-110-438 M3: 供应商代理配置（provider_client_kwargs）注入每次请求的客户端；
+        # client 每次请求后关闭并按需重建，故存实例属性、由 _make_client 统一注入。
+        self._client_kwargs = dict(client_kwargs or {})
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._model_name = model
@@ -249,6 +253,7 @@ class Ta3Provider(ModelProvider):
             ),
             headers={"Accept-Encoding": "gzip, deflate"},
             follow_redirects=False,
+            **self._client_kwargs,
         )
 
     def _ensure_client(self) -> httpx.AsyncClient:

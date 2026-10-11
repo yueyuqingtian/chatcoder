@@ -66,9 +66,14 @@ def _build_provider(
     （inherit/global/custom/direct，见 credential_service.resolve_proxy）。
     """
     api_format = (api_format or "openai").lower()
-    from app.services.credential_service import proxy_disabled, resolve_proxy
+    from app.services.credential_service import (
+        provider_client_kwargs, proxy_disabled, resolve_proxy,
+    )
 
     proxy = resolve_proxy(provider) if provider is not None else None
+    # plan-110-438 M3: ta3/anthropic/commandcode 同样按供应商代理配置注入
+    # （此前仅 openai 兼容分支注入，其余格式忽略供应商自选代理）
+    _client_kwargs = provider_client_kwargs(provider)
     # 仅当供应商确有代理语义时才注入（见 OpenAICompatibleProvider.__init__ 说明）
     _configured = bool(provider is not None and (
         (getattr(provider, "proxy_mode", None) or "inherit") != "inherit"
@@ -77,15 +82,18 @@ def _build_provider(
     if api_format == "ta3":
         from app.models.providers.ta3 import Ta3Provider
 
-        return Ta3Provider(api_key=api_key, base_url=base_url, model=model, meta=meta or {})
+        return Ta3Provider(api_key=api_key, base_url=base_url, model=model, meta=meta or {},
+                           client_kwargs=_client_kwargs)
     if api_format == "anthropic":
         from app.models.providers.anthropic import AnthropicProvider
 
-        return AnthropicProvider(api_key=api_key, base_url=base_url, model=model)
+        return AnthropicProvider(api_key=api_key, base_url=base_url, model=model,
+                                 client_kwargs=_client_kwargs)
     if api_format == "commandcode":
         from app.models.providers.commandcode import CommandCodeProvider
 
-        return CommandCodeProvider(api_key=api_key, base_url=base_url, model=model)
+        return CommandCodeProvider(api_key=api_key, base_url=base_url, model=model,
+                                   client_kwargs=_client_kwargs)
     return OpenAICompatibleProvider(
         api_key=api_key, base_url=base_url, model=model,
         proxy=proxy, proxy_disabled=proxy_disabled(provider), proxy_configured=_configured,
@@ -105,6 +113,7 @@ async def _build_trae_provider(
     from app.auth.trae import session as trae_session
     from app.core.config import settings as _settings
     from app.models.providers.trae import TraeProvider
+    from app.services.credential_service import provider_client_kwargs
 
     if model is None:
         return None, "trae_model_missing"
@@ -173,6 +182,8 @@ async def _build_trae_provider(
         model=model.name,
         meta=meta,
         refresh_token=_refresh,
+        # plan-110-438 M3: 会话请求按该供应商的代理配置出网
+        client_kwargs=provider_client_kwargs(provider),
     )
     return p, "trae_session"
 
@@ -225,6 +236,7 @@ async def _build_workbuddy_provider(
     """
     from app.auth.workbuddy import session as wb_session
     from app.models.providers.workbuddy import WorkBuddyProvider
+    from app.services.credential_service import provider_client_kwargs
 
     if model is None:
         return None, "workbuddy_model_missing"
@@ -279,6 +291,8 @@ async def _build_workbuddy_provider(
         model=model.name,
         meta=meta,
         refresh_token=_refresh,
+        # plan-110-438 M3: 会话请求按该供应商的代理配置出网
+        client_kwargs=provider_client_kwargs(provider),
     )
     # plan-271-1364 回归修复：占位 key 分支（credential=None）也要标记实际命中的凭据，
     # 否则 agent_loop 的失败上报/凭据轮询拿不到 credential_row_id，无法切换账号。

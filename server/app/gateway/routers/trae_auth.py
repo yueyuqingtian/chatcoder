@@ -24,6 +24,7 @@ from app.gateway.schemas import (
 )
 from app.persistence.database import commit_with_retry, get_db
 from app.services import provider_service
+from app.services.credential_service import provider_client_kwargs
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -102,6 +103,8 @@ async def trae_logout(provider_id: int, db: AsyncSession = Depends(get_db)):
                 client_id=settings.trae_client_id,
                 device_id=auth.device_id or "0",
                 machine_id=auth.machine_id or "",
+                # plan-110-438 M4: 登出请求按该供应商的代理配置出网
+                client_kwargs=provider_client_kwargs(provider),
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("[trae] provider=%s 吊销远端 token 失败（忽略）: %s", provider_id, e)

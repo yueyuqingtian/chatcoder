@@ -493,3 +493,21 @@ def resolve_proxy(provider: Provider | None) -> str | None:
 def proxy_disabled(provider: Provider | None) -> bool:
     """direct 模式需显式关闭 httpx 的环境代理读取（trust_env=False）。"""
     return (getattr(provider, "proxy_mode", None) or "").lower() == "direct"
+
+
+def provider_client_kwargs(provider: Provider | None) -> dict:
+    """plan-110-438 M1: 供应商代理配置 → httpx.AsyncClient 的代理相关 kwargs。
+
+    统一口径（与「测试该配置」按钮完全一致），供该供应商的**全部出站请求**复用：
+    - inherit / global：{"proxy": 全局代理}（settings.http_proxy → 环境变量；均未配置时返回 {}）；
+    - custom ：{"proxy": 供应商自定义地址}（地址为空时回落全局，防误配导致直连失败）；
+    - direct ：{"trust_env": False}（显式屏蔽环境变量代理，保证真直连）。
+
+    返回空字典表示不做任何干预，保持 httpx 默认行为（未配置代理的供应商零行为变化）。
+    """
+    proxy = resolve_proxy(provider)
+    if proxy:
+        return {"proxy": proxy}
+    if proxy_disabled(provider):
+        return {"trust_env": False}
+    return {}

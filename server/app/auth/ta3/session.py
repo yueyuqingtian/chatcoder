@@ -178,7 +178,8 @@ class Ta3AuthError(Exception):
         self.kind = kind
 
 
-async def refresh_access_token(api_base: str, refresh_token: str) -> dict:
+async def refresh_access_token(api_base: str, refresh_token: str,
+                               client_kwargs: dict | None = None) -> dict:
     """POST {api_base}/api/oauth/token（grant_type=refresh_token），refresh 轮转。
 
     返回 {accessToken, refreshToken, loginId, userId, orgId, userName}。
@@ -191,7 +192,8 @@ async def refresh_access_token(api_base: str, refresh_token: str) -> dict:
         "client_id": YINHAI_OAUTH_CLIENT_ID,
     }
     try:
-        async with httpx.AsyncClient(timeout=_TOKEN_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_TOKEN_TIMEOUT,
+                                     **(client_kwargs or {})) as client:
             resp = await client.post(url, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
     except httpx.HTTPError as e:
         raise Ta3AuthError(f"OAuth token 请求失败：{url}", "network") from e
@@ -224,6 +226,13 @@ async def ensure_token(db: AsyncSession, provider_id: int, api_base: str) -> str
     if not row.refresh_token:
         return row.access_token  # IM 静默登录路径无 refresh，直接返回（由调用方在 401 时引导重登）
 
+    # plan-110-438 M2: token 刷新按该供应商的代理配置出网
+    from app.persistence.models.model_reg import Provider
+    from app.services.credential_service import provider_client_kwargs
+
+    _provider = await db.get(Provider, provider_id)
+    _ckw = provider_client_kwargs(_provider)
+
     lock = _get_refresh_lock(provider_id)
     async with lock:
         # 双检：等待锁期间可能已被其它协程刷新
@@ -231,7 +240,7 @@ async def ensure_token(db: AsyncSession, provider_id: int, api_base: str) -> str
         if row is None or not row.access_token:
             raise Ta3AuthError("请先登录 Ta+3 账号", "login_required")
         try:
-            result = await refresh_access_token(api_base, row.refresh_token)
+            result = await refresh_access_token(api_base, row.refresh_token, client_kwargs=_ckw)
         except Ta3AuthError as e:
             if e.kind == "login_required":
                 await clear_auth(db, provider_id)

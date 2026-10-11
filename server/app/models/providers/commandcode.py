@@ -65,7 +65,10 @@ class CommandCodeProvider(ModelProvider):
 
     name = "commandcode"
 
-    def __init__(self, *, api_key: str, base_url: str = "", model: str = ""):
+    def __init__(self, *, api_key: str, base_url: str = "", model: str = "",
+                 client_kwargs: dict | None = None):
+        # plan-110-438 M3: 供应商代理配置注入每次请求的 httpx 客户端
+        self._client_kwargs = dict(client_kwargs or {})
         self._api_key = api_key.strip()
         raw_base = (base_url or DEFAULT_BASE_URL).rstrip("/")
         if raw_base.endswith("/alpha/generate"):
@@ -340,7 +343,9 @@ class CommandCodeProvider(ModelProvider):
         finish_reason = "stop"
         usage = Usage()
 
-        async with httpx.AsyncClient(timeout=timeout, headers={"Accept-Encoding": "gzip, deflate"}) as client:
+        async with httpx.AsyncClient(timeout=timeout,
+                                     headers={"Accept-Encoding": "gzip, deflate"},
+                                     **self._client_kwargs) as client:
             try:
                 async with client.stream("POST", self._endpoint, json=payload, headers=headers) as resp:
                     if resp.status_code != 200:

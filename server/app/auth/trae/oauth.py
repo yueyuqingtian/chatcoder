@@ -95,7 +95,8 @@ def _unwrap_result(resp: httpx.Response, url: str) -> dict:
 
 async def exchange_auth_code(api_host: str, client_id: str, auth_code: str,
                              code_verifier: str, keypair: dict,
-                             *, device_id: str, machine_id: str, ide_version: str) -> LoginResult:
+                             *, device_id: str, machine_id: str, ide_version: str,
+                             client_kwargs: dict | None = None) -> LoginResult:
     """POST {api_host}/trae/api/v3/oauth/ExchangeToken（AuthCode 模式）。"""
     url = f"{api_host.rstrip('/')}{EXCHANGE_TOKEN_PATH}"
     info = trae_device.device_info(
@@ -109,7 +110,8 @@ async def exchange_auth_code(api_host: str, client_id: str, auth_code: str,
         "IDEVersion": ide_version,
     }
     try:
-        async with httpx.AsyncClient(timeout=_TOKEN_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_TOKEN_TIMEOUT,
+                                     **(client_kwargs or {})) as client:
             resp = await client.post(url, json=body, headers=_auth_headers(""))
     except httpx.HTTPError as e:
         raise TraeAuthError(f"TRAE ExchangeToken 请求失败：{url}", "network") from e
@@ -146,24 +148,27 @@ def _parse_result(result: dict) -> LoginResult:
     )
 
 
-async def fetch_user_info(api_host: str, token: str, ide_version: str) -> dict:
+async def fetch_user_info(api_host: str, token: str, ide_version: str,
+                          client_kwargs: dict | None = None) -> dict:
     """POST {api_host}/cloudide/api/v3/trae/GetUserInfo → Result dict。"""
     url = f"{api_host.rstrip('/')}{GET_USER_INFO_PATH}"
     body = {"ReqSource": "Lite", "IDEVersion": ide_version}
     try:
-        async with httpx.AsyncClient(timeout=_TOKEN_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_TOKEN_TIMEOUT,
+                                     **(client_kwargs or {})) as client:
             resp = await client.post(url, json=body, headers=_auth_headers(token))
     except httpx.HTTPError as e:
         raise TraeAuthError(f"TRAE GetUserInfo 请求失败：{url}", "network") from e
     return _unwrap_result(resp, url)
 
 
-async def check_login(api_host: str, token: str, ide_version: str) -> bool:
+async def check_login(api_host: str, token: str, ide_version: str,
+                      client_kwargs: dict | None = None) -> bool:
     """POST {api_host}/cloudide/api/v3/trae/CheckLogin → 是否仍有效。"""
     url = f"{api_host.rstrip('/')}{CHECK_LOGIN_PATH}"
     body = {"IDEVersion": ide_version, "ReqSource": "Lite", "GetAIPayHost": True}
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, **(client_kwargs or {})) as client:
             resp = await client.post(url, json=body, headers=_auth_headers(token))
     except httpx.HTTPError as e:
         raise TraeAuthError(f"TRAE CheckLogin 请求失败：{url}", "network") from e
@@ -172,13 +177,14 @@ async def check_login(api_host: str, token: str, ide_version: str) -> bool:
 
 
 async def revoke_refresh_token(api_host: str, token: str, *, client_id: str,
-                               device_id: str, machine_id: str) -> None:
+                               device_id: str, machine_id: str,
+                               client_kwargs: dict | None = None) -> None:
     """登出：POST /cloudide/api/v3/trae/oauth/ClearRefreshToken（忽略失败）。"""
     url = f"{api_host.rstrip('/')}{CLEAR_REFRESH_TOKEN_PATH}"
     body = {"ClientID": client_id, "DeviceID": device_id,
             "MachineID": machine_id, "PlatformCode": _PLATFORM_CODE}
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, **(client_kwargs or {})) as client:
             await client.post(url, json=body, headers=_auth_headers(token))
     except Exception as e:  # noqa: BLE001
         logger.warning("[trae] ClearRefreshToken 请求失败（忽略）: %s", e)
@@ -232,6 +238,13 @@ async def start_login(db: AsyncSession, provider_id: int, *, api_host: str,
     """
     from app.auth.trae import session as trae_session
 
+    # plan-110-438 M4: 登录换 token 按该供应商的代理配置出网
+    from app.persistence.models.model_reg import Provider
+    from app.services.credential_service import provider_client_kwargs
+
+    _provider = await db.get(Provider, provider_id)
+    _ckw = provider_client_kwargs(_provider)
+
     server = await trae_callback.start_callback_server(timeout_ms)
     authorize_url, code_verifier = await build_authorize_url(
         server, client_id=client_id, console_host=console_host, ide_version=ide_version,
@@ -253,7 +266,8 @@ async def start_login(db: AsyncSession, provider_id: int, *, api_host: str,
                 return {"status": "failed", "error": "未收到授权码，请重试"}
             login = await exchange_auth_code(
                 api_host, client_id, auth_code, code_verifier, keypair,
-                device_id=device_id, machine_id=machine_id, ide_version=ide_version)
+                device_id=device_id, machine_id=machine_id, ide_version=ide_version,
+                client_kwargs=_ckw)
             account = login.account or {}
             user_info = result.get("user_info")
             if isinstance(user_info, dict) and user_info:

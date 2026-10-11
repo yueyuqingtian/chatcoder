@@ -344,10 +344,8 @@ async def test_provider_proxy(provider_id: int, db: AsyncSession = Depends(get_d
         raise HTTPException(400, "供应商未配置 Base URL")
     proxy = credential_service.resolve_proxy(provider)
     opts: dict = {"timeout": 10.0, "follow_redirects": True}
-    if proxy:
-        opts["proxy"] = proxy
-    elif credential_service.proxy_disabled(provider):
-        opts["trust_env"] = False
+    # plan-110-438 M1: 统一走 provider_client_kwargs（与真实请求链路同构）
+    opts.update(credential_service.provider_client_kwargs(provider))
     try:
         t0 = time.monotonic()
         async with httpx.AsyncClient(**opts) as client:

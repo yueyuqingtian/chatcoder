@@ -106,9 +106,14 @@ async def maybe_auto_recover(provider_id: int | None, *, reason: str = "") -> bo
                 return False
 
             from app.auth.ta3 import quota as ta3_quota
+            from app.services.credential_service import provider_client_kwargs
+
+            # plan-110-438 M2: 自动恢复请求同样按供应商代理配置出网
+            _ckw = provider_client_kwargs(provider)
 
             # 报错后查一次最新额度（force 跳过 10s 缓存）
-            payload = await ta3_quota.get_quota(db, provider_id, api_base, force=True)
+            payload = await ta3_quota.get_quota(db, provider_id, api_base, force=True,
+                                                client_kwargs=_ckw)
             windows = payload.get("windows") if isinstance(payload, dict) else None
             target = _pick_exhausted_window(windows)
             if target is None:
@@ -119,11 +124,13 @@ async def maybe_auto_recover(provider_id: int | None, *, reason: str = "") -> bo
             remark = (f"额度自动恢复（{reason}）" if reason else "额度自动恢复")[:200]
 
             if window == "DAILY":
-                result = await ta3_quota.request_overdraft(db, provider_id, api_base, remark=remark)
+                result = await ta3_quota.request_overdraft(db, provider_id, api_base, remark=remark,
+                                                          client_kwargs=_ckw)
                 logger.info("[ta3] provider=%s 已自动提交日额度透支: %s", provider_id, result)
                 return True
 
-            result = await ta3_quota.request_reset(db, provider_id, api_base, window, remark=remark)
+            result = await ta3_quota.request_reset(db, provider_id, api_base, window, remark=remark,
+                                                  client_kwargs=_ckw)
             logger.info("[ta3] provider=%s 已自动提交%s额度重置: %s", provider_id, window, result)
             return True
     except Exception:

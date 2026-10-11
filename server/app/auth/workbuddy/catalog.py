@@ -62,12 +62,17 @@ def _config_headers(token: str, api_base: str, account: dict) -> dict:
     return headers
 
 
-async def fetch_config_raw(api_base: str, token: str, account: dict) -> dict:
-    """GET {api_base}/v3/config → 完整产品配置。401 抛 WorkBuddyUnauthorized。"""
+async def fetch_config_raw(api_base: str, token: str, account: dict,
+                           client_kwargs: dict | None = None) -> dict:
+    """GET {api_base}/v3/config → 完整产品配置。401 抛 WorkBuddyUnauthorized。
+
+    plan-110-438 M4: client_kwargs 由调用方按供应商代理配置传入。
+    """
     url = f"{api_base.rstrip('/')}{CONFIG_PATH}"
     try:
         async with httpx.AsyncClient(timeout=_CATALOG_TIMEOUT,
-                                     headers={"Accept-Encoding": "gzip, deflate"}) as client:
+                                     headers={"Accept-Encoding": "gzip, deflate"},
+                                     **(client_kwargs or {})) as client:
             resp = await client.get(url, headers=_config_headers(token, api_base, account))
     except httpx.HTTPError as e:
         raise RuntimeError(f"WorkBuddy 配置拉取失败：{url}") from e
@@ -138,11 +143,15 @@ async def sync_workbuddy_models(db: AsyncSession, provider, api_base: str,
     token = await wb_session.ensure_token(db, provider.id, api_base, credential_id)
     account = auth.account if auth else {}
 
+    # plan-110-438 M4: 目录同步按该供应商的代理配置出网
+    from app.services.credential_service import provider_client_kwargs
+
+    _ckw = provider_client_kwargs(provider)
     try:
-        config = await fetch_config_raw(api_base, token, account)
+        config = await fetch_config_raw(api_base, token, account, _ckw)
     except WorkBuddyUnauthorized:
         token = await wb_session.refresh_session(db, provider.id, api_base, credential_id)
-        config = await fetch_config_raw(api_base, token, account)
+        config = await fetch_config_raw(api_base, token, account, _ckw)
 
     models = config.get("models") or []
     agents = config.get("agents") or []

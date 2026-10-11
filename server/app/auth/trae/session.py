@@ -142,7 +142,7 @@ def _get_refresh_lock(provider_id: int) -> asyncio.Lock:
 
 
 async def refresh_access_token(api_host: str, row: TraeAuth, *, client_id: str,
-                               ide_version: str) -> dict:
+                               ide_version: str, client_kwargs: dict | None = None) -> dict:
     """POST {api_host}/trae/api/v3/oauth/ExchangeToken（RefreshToken 模式）。
 
     DeviceProof = ECDSA-P256-SHA256 签名（见 device.sign_device_proof）。
@@ -166,7 +166,8 @@ async def refresh_access_token(api_host: str, row: TraeAuth, *, client_id: str,
     }
     url = f"{api_host.rstrip('/')}{EXCHANGE_TOKEN_PATH}"
     try:
-        async with httpx.AsyncClient(timeout=_TOKEN_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_TOKEN_TIMEOUT,
+                                     **(client_kwargs or {})) as client:
             resp = await client.post(url, json=body, headers=_auth_headers(row.access_token or ""))
     except httpx.HTTPError as e:
         raise TraeAuthError(f"TRAE token 刷新请求失败：{url}", "network") from e
@@ -223,6 +224,13 @@ async def refresh_session(db: AsyncSession, provider_id: int, *, api_host: str,
     if row is None or not row.access_token or not row.refresh_token:
         raise TraeAuthError("请先登录 TRAE 账号", "login_required")
 
+    # plan-110-438 M4: token 刷新按该供应商的代理配置出网
+    from app.persistence.models.model_reg import Provider
+    from app.services.credential_service import provider_client_kwargs
+
+    _provider = await db.get(Provider, provider_id)
+    _ckw = provider_client_kwargs(_provider)
+
     lock = _get_refresh_lock(provider_id)
     async with lock:
         # 双检：等待锁期间可能已被其它协程刷新
@@ -231,7 +239,8 @@ async def refresh_session(db: AsyncSession, provider_id: int, *, api_host: str,
             raise TraeAuthError("请先登录 TRAE 账号", "login_required")
         try:
             result = await refresh_access_token(
-                api_host, row, client_id=client_id, ide_version=ide_version)
+                api_host, row, client_id=client_id, ide_version=ide_version,
+                client_kwargs=_ckw)
         except TraeAuthError as e:
             if e.kind == "login_required":
                 await clear_auth(db, provider_id)

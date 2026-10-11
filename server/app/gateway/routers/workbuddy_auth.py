@@ -27,6 +27,7 @@ from app.gateway.schemas import (
 )
 from app.persistence.database import commit_with_retry, get_db
 from app.services import provider_service
+from app.services.credential_service import provider_client_kwargs
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -219,6 +220,8 @@ async def workbuddy_credits(provider_id: int, credential_id: int | None = None,
     """
     provider = await _get_workbuddy_provider(db, provider_id)
     api_base = _resolve_api_base(provider)
+    # plan-110-438 M4: 积分查询按该供应商的代理配置出网
+    _ckw = provider_client_kwargs(provider)
     from app.auth.workbuddy import credits as wb_credits
     from app.auth.workbuddy import session as wb_session
     from app.services import credential_service
@@ -231,7 +234,8 @@ async def workbuddy_credits(provider_id: int, credential_id: int | None = None,
     if not creds:
         legacy_auth = await wb_session.load_auth(db, provider_id)
         if legacy_auth is not None and legacy_auth.access_token:
-            credits_val = await wb_credits.fetch_credits(api_base, legacy_auth.access_token, legacy_auth.account or {})
+            credits_val = await wb_credits.fetch_credits(api_base, legacy_auth.access_token,
+                                                       legacy_auth.account or {}, _ckw)
             out.append({
                 "credential_id": None,
                 "label": (legacy_auth.account or {}).get("label") or (legacy_auth.account or {}).get("nickname") or "WorkBuddy 账号",
@@ -248,7 +252,8 @@ async def workbuddy_credits(provider_id: int, credential_id: int | None = None,
             continue
         credits_val = float(c.credits) if c.credits is not None else None
         if refresh or credits_val is None:
-            credits_val = await wb_credits.fetch_credits(api_base, auth.access_token, auth.account or {})
+            credits_val = await wb_credits.fetch_credits(api_base, auth.access_token,
+                                                       auth.account or {}, _ckw)
             if credits_val is not None:
                 try:
                     await credential_service.set_credits(db, c.id, credits_val)

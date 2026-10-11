@@ -317,10 +317,16 @@ async def _list_assistants(client: httpx.AsyncClient, api_base: str, token: str,
     )
 
 
-async def fetch_catalog_raw(api_base: str, token: str) -> dict:
-    """拉取完整目录（组织 + 各组织 assistants 原始结构），供同步与调试。"""
+async def fetch_catalog_raw(api_base: str, token: str,
+                           client_kwargs: dict | None = None) -> dict:
+    """拉取完整目录（组织 + 各组织 assistants 原始结构），供同步与调试。
+
+    plan-110-438 M2: client_kwargs 由调用方按供应商代理配置传入（见
+    credential_service.provider_client_kwargs），保证「同步模型」与「测试该配置」同口径。
+    """
     async with httpx.AsyncClient(timeout=_CATALOG_TIMEOUT,
-                                 headers={"Accept-Encoding": "gzip, deflate"}) as client:
+                                 headers={"Accept-Encoding": "gzip, deflate"},
+                                 **(client_kwargs or {})) as client:
         organizations = await _list_organizations(client, api_base, token)
         assistants_by_org: dict[str, list[dict]] = {}
         for org in organizations:
@@ -333,7 +339,8 @@ async def fetch_catalog_raw(api_base: str, token: str) -> dict:
         return {"organizations": organizations, "assistants_by_org": assistants_by_org}
 
 
-async def warm_ide_session(api_base: str, token: str) -> None:
+async def warm_ide_session(api_base: str, token: str,
+                           client_kwargs: dict | None = None) -> None:
     """会话预热（plan-90-392）：登录后调一次组织列表接口，完成 IDE 会话初始化。
 
     背景：/api/ai-sso/generate-token 只接受走过 IDE 目录初始化的会话——IM 静默
@@ -342,7 +349,8 @@ async def warm_ide_session(api_base: str, token: str) -> None:
     的目录加载（只取组织列表，不拉各组织配置），失败向上抛出由调用方决定忽略。
     """
     async with httpx.AsyncClient(timeout=_CATALOG_TIMEOUT,
-                                 headers={"Accept-Encoding": "gzip, deflate"}) as client:
+                                 headers={"Accept-Encoding": "gzip, deflate"},
+                                 **(client_kwargs or {})) as client:
         await _list_organizations(client, api_base, token)
 
 
@@ -356,12 +364,16 @@ async def sync_ta3_models(db: AsyncSession, provider, api_base: str) -> list[dic
     """
     from app.persistence.models.model_reg import Model
 
+    # plan-110-438 M2: 目录同步按该供应商的代理配置出网
+    from app.services.credential_service import provider_client_kwargs
+
+    _client_kwargs = provider_client_kwargs(provider)
     token = await ta3_session.ensure_token(db, provider.id, api_base)
     try:
-        catalog = await fetch_catalog_raw(api_base, token)
+        catalog = await fetch_catalog_raw(api_base, token, _client_kwargs)
     except Ta3Unauthorized:
         token = await ta3_session.ensure_token(db, provider.id, api_base)
-        catalog = await fetch_catalog_raw(api_base, token)
+        catalog = await fetch_catalog_raw(api_base, token, _client_kwargs)
 
     # 组织选择：第一个有 assistants 的组织（参考项目默认行为）
     orgs = catalog["organizations"]

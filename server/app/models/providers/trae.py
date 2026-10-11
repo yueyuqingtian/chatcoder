@@ -62,7 +62,9 @@ class TraeProvider(ModelProvider):
     _credit_cache: dict[str, dict[str, float]] = {}
 
     def __init__(self, *, api_key: str, base_url: str, model: str, meta: dict | None = None,
-                 refresh_token=None):
+                 refresh_token=None, client_kwargs: dict | None = None):
+        # plan-110-438 M3: 供应商代理配置注入每次请求的客户端
+        self._client_kwargs = dict(client_kwargs or {})
         self._token = api_key
         self._base_url = base_url.rstrip("/")
         self._model_name = model
@@ -77,6 +79,7 @@ class TraeProvider(ModelProvider):
             timeout=httpx.Timeout(connect=10.0, write=10.0, read=_STREAM_IDLE_TIMEOUT_S, pool=10.0),
             headers={"Accept-Encoding": "gzip, deflate"},
             follow_redirects=False,
+            **self._client_kwargs,
         )
 
     def _ensure_client(self) -> httpx.AsyncClient:

@@ -86,11 +86,12 @@ def _unwrap(body: dict | None) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-async def fetch_auth_state(api_base: str) -> dict:
+async def fetch_auth_state(api_base: str, client_kwargs: dict | None = None) -> dict:
     """POST {api_base}/v2/plugin/auth/state?platform=workbuddy → {authUrl, state}。"""
     url = f"{api_base.rstrip('/')}{AUTH_STATE_PATH}?platform={PLATFORM}"
     try:
-        async with httpx.AsyncClient(timeout=_STATE_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_STATE_TIMEOUT,
+                                     **(client_kwargs or {})) as client:
             resp = await client.post(url, json={}, headers=_no_auth_headers(api_base))
     except httpx.HTTPError as e:
         raise RuntimeError(f"WorkBuddy 登录启动失败：{url}") from e
@@ -111,14 +112,16 @@ async def fetch_auth_state(api_base: str) -> dict:
     return {"auth_url": auth_url, "state": state, **payload}
 
 
-async def poll_auth_token(api_base: str, state: str) -> dict | None:
+async def poll_auth_token(api_base: str, state: str,
+                         client_kwargs: dict | None = None) -> dict | None:
     """GET {api_base}/v2/plugin/auth/token?state=... → token payload。
 
     业务错误码 RetryFetchToken（未完成扫码）时返回 None，调用方继续轮询。
     """
     url = f"{api_base.rstrip('/')}{AUTH_TOKEN_PATH}?state={state}"
     try:
-        async with httpx.AsyncClient(timeout=_TOKEN_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_TOKEN_TIMEOUT,
+                                     **(client_kwargs or {})) as client:
             resp = await client.get(url, headers=_no_auth_headers(api_base))
     except httpx.HTTPError as e:
         raise RuntimeError(f"WorkBuddy 登录状态查询失败：{url}") from e
@@ -136,11 +139,13 @@ async def poll_auth_token(api_base: str, state: str) -> dict | None:
     return None
 
 
-async def poll_auth_account(api_base: str, token: str, state: str) -> dict:
+async def poll_auth_account(api_base: str, token: str, state: str,
+                           client_kwargs: dict | None = None) -> dict:
     """GET {api_base}/v2/plugin/login/account?state=...（Bearer）→ 账号信息。"""
     url = f"{api_base.rstrip('/')}{AUTH_ACCOUNT_PATH}?state={state}"
     try:
-        async with httpx.AsyncClient(timeout=_ACCOUNT_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_ACCOUNT_TIMEOUT,
+                                     **(client_kwargs or {})) as client:
             resp = await client.get(url, headers=_bearer_headers(token, api_base))
     except httpx.HTTPError as e:
         raise RuntimeError(f"WorkBuddy 账号信息查询失败：{url}") from e
@@ -163,7 +168,14 @@ async def start_login(db: AsyncSession, provider_id: int, api_base: str) -> dict
     """
     from app.auth.workbuddy import session as wb_session
 
-    state_payload = await fetch_auth_state(api_base)
+    # plan-110-438 M4: 登录链路（登录发起/轮询/账号信息）按该供应商代理配置出网
+    from app.persistence.models.model_reg import Provider
+    from app.services.credential_service import provider_client_kwargs
+
+    _provider = await db.get(Provider, provider_id)
+    _ckw = provider_client_kwargs(_provider)
+
+    state_payload = await fetch_auth_state(api_base, _ckw)
     auth_url = state_payload["auth_url"]
     state = state_payload["state"]
 
@@ -172,7 +184,7 @@ async def start_login(db: AsyncSession, provider_id: int, api_base: str) -> dict
         token_payload = None
         while asyncio.get_event_loop().time() < deadline:
             try:
-                token_payload = await poll_auth_token(api_base, state)
+                token_payload = await poll_auth_token(api_base, state, _ckw)
             except RuntimeError:
                 token_payload = None
             if token_payload:
@@ -186,7 +198,7 @@ async def start_login(db: AsyncSession, provider_id: int, api_base: str) -> dict
             return {"status": "failed", "error": "登录返回异常（无 accessToken）"}
         refresh_token = (token_payload.get("refreshToken")
                          or token_payload.get("refresh_token") or "")
-        account_raw = await poll_auth_account(api_base, access_token, state)
+        account_raw = await poll_auth_account(api_base, access_token, state, _ckw)
         account = {
             "id": account_raw.get("uid") or account_raw.get("id") or "",
             "uid": account_raw.get("uid") or "",

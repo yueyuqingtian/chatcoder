@@ -52,7 +52,14 @@ async def start_login(db: AsyncSession, provider_id: int, api_base: str,
     """
     from app.auth.ta3 import session as ta3_session
 
-    im_result = await try_im_login(api_base)
+    # plan-110-438 M2: 登录与 token 链路的远端请求同样按供应商代理配置出网
+    from app.persistence.models.model_reg import Provider
+    from app.services.credential_service import provider_client_kwargs
+
+    _provider = await db.get(Provider, provider_id)
+    _ckw = provider_client_kwargs(_provider)
+
+    im_result = await try_im_login(api_base, _ckw)
     if im_result is not None:
         logger.info("[ta3] provider=%s IM 静默登录成功", provider_id)
         await ta3_session.save_auth(
@@ -63,11 +70,13 @@ async def start_login(db: AsyncSession, provider_id: int, api_base: str,
         )
         return {"status": "logged_in", "account": im_result.account, "source": "im"}
 
-    return await start_browser_login(db, provider_id, api_base, timeout_ms=timeout_ms)
+    return await start_browser_login(db, provider_id, api_base, timeout_ms=timeout_ms,
+                                     client_kwargs=_ckw)
 
 
 async def exchange_authorization_code(api_base: str, code: str, code_verifier: str,
-                                      redirect_uri: str) -> LoginResult:
+                                      redirect_uri: str,
+                                      client_kwargs: dict | None = None) -> LoginResult:
     """POST {apiBase}/api/oauth/token（grant_type=authorization_code + code_verifier）。"""
     url = f"{api_base.rstrip('/')}{OAUTH_TOKEN_PATH}"
     data = {
@@ -78,7 +87,8 @@ async def exchange_authorization_code(api_base: str, code: str, code_verifier: s
         "client_id": YINHAI_OAUTH_CLIENT_ID,
     }
     try:
-        async with httpx.AsyncClient(timeout=_TOKEN_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_TOKEN_TIMEOUT,
+                                     **(client_kwargs or {})) as client:
             resp = await client.post(url, data=data,
                                      headers={"Content-Type": "application/x-www-form-urlencoded"})
     except httpx.HTTPError as e:
@@ -110,7 +120,8 @@ async def exchange_authorization_code(api_base: str, code: str, code_verifier: s
 
 
 async def start_browser_login(db: AsyncSession, provider_id: int, api_base: str,
-                              timeout_ms: int = ta3_callback.DEFAULT_TIMEOUT_MS) -> dict:
+                              timeout_ms: int = ta3_callback.DEFAULT_TIMEOUT_MS,
+                              client_kwargs: dict | None = None) -> dict:
     """启动浏览器登录，返回 {authorize_url, state, port, expires_in}。
 
     登录完成（或超时）后自动 exchange code 并存库，返回的 dict 带 result 字段：
@@ -143,6 +154,7 @@ async def start_browser_login(db: AsyncSession, provider_id: int, api_base: str,
                 return {"status": "failed", "error": "未收到授权码，请重试"}
             login = await exchange_authorization_code(
                 api_base, code, verifier, server.callback_base_url,
+                client_kwargs=client_kwargs,
             )
             await ta3_session.save_auth(
                 db, provider_id,
@@ -206,13 +218,15 @@ async def cancel_login(db: AsyncSession, provider_id: int) -> None:
 _active_tasks: dict[int, object] = {}
 
 
-async def try_im_login(api_base: str) -> LoginResult | None:
+async def try_im_login(api_base: str, client_kwargs: dict | None = None) -> LoginResult | None:
     """银海通 IM 静默登录（对齐参考项目 authService.ts:321-357 tryImLogin）。
 
     本机装有银海通（localhost:13631）时优先；失败返回 None 由调用方降级 PKCE。
+    plan-110-438 M2: IM 服务是本机回环地址，必须显式 trust_env=False——全局代理会
+    写入进程 HTTP_PROXY/HTTPS_PROXY，httpx 默认 trust_env=True 会把本机请求送进代理。
     """
     try:
-        async with httpx.AsyncClient(timeout=_IM_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_IM_TIMEOUT, trust_env=False) as client:
             resp = await client.get(IM_SERVICE_URL)
             data = resp.json() if resp.content else {}
         if not data.get("success"):
@@ -224,7 +238,8 @@ async def try_im_login(api_base: str) -> LoginResult | None:
         return None
 
     try:
-        async with httpx.AsyncClient(timeout=_IM_LOGIN_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_IM_LOGIN_TIMEOUT,
+                                     **(client_kwargs or {})) as client:
             resp = await client.post(
                 f"{api_base.rstrip('/')}{AICONTINUE_LOGIN_PATH}",
                 headers={"Authorization": uid},

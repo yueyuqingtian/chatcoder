@@ -232,12 +232,17 @@ def _is_builtin_model(entry: dict) -> bool:
 
 
 async def fetch_catalog_raw(agent_host: str, token: str, meta: dict,
-                            functions: list[str] | None = None) -> dict:
-    """POST {agent_host}/api/ide/v1/batch_get_detail_param → 响应 JSON。"""
+                            functions: list[str] | None = None,
+                            client_kwargs: dict | None = None) -> dict:
+    """POST {agent_host}/api/ide/v1/batch_get_detail_param → 响应 JSON。
+
+    plan-110-438 M4: client_kwargs 由调用方按供应商代理配置传入。
+    """
     url = f"{agent_host.rstrip('/')}{DETAIL_PARAM_PATH}"
     try:
         async with httpx.AsyncClient(timeout=_CATALOG_TIMEOUT,
-                                     headers={"Accept-Encoding": "gzip, deflate"}) as client:
+                                     headers={"Accept-Encoding": "gzip, deflate"},
+                                     **(client_kwargs or {})) as client:
             resp = await client.post(url, json=_detail_param_body(functions),
                                      headers=build_business_headers(token, meta))
     except httpx.HTTPError as e:
@@ -270,13 +275,17 @@ async def sync_trae_models(db: AsyncSession, provider, agent_host: str) -> list[
         db, provider.id, api_host=settings.trae_account_endpoint,
         client_id=settings.trae_client_id, ide_version=settings.trae_ide_version)
 
+    # plan-110-438 M4: 目录同步按该供应商的代理配置出网
+    from app.services.credential_service import provider_client_kwargs
+
+    _ckw = provider_client_kwargs(provider)
     try:
-        payload = await fetch_catalog_raw(agent_host, token, meta)
+        payload = await fetch_catalog_raw(agent_host, token, meta, client_kwargs=_ckw)
     except TraeCatalogUnauthorized:
         token = await trae_session.refresh_session(
             db, provider.id, api_host=settings.trae_account_endpoint,
             client_id=settings.trae_client_id, ide_version=settings.trae_ide_version)
-        payload = await fetch_catalog_raw(agent_host, token, meta)
+        payload = await fetch_catalog_raw(agent_host, token, meta, client_kwargs=_ckw)
 
     # 按 function 分组 → 只保留对话型 function + 内置模型 → 同名去重
     entries: dict[str, dict] = {}

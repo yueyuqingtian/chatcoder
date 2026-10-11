@@ -79,6 +79,45 @@ def test_resolve_proxy_modes(monkeypatch):
     assert credential_service.proxy_disabled(_Provider("direct")) is True
 
 
+def test_provider_client_kwargs_modes(monkeypatch):
+    """plan-110-438 M1: 统一工厂四模式 → httpx 代理 kwargs。
+
+    这是「测试该配置」与同步模型/额度查询/会话请求等真实链路的共同口径，
+    行为必须与 resolve_proxy/proxy_disabled 一致（不满足即视为回归）。
+    """
+    from app.core import http_client
+
+    monkeypatch.setattr(http_client, "get_proxy_url", lambda: "http://127.0.0.1:7897")
+
+    # inherit / global → 显式注入全局代理
+    assert credential_service.provider_client_kwargs(_Provider("inherit")) == {
+        "proxy": "http://127.0.0.1:7897"}
+    assert credential_service.provider_client_kwargs(_Provider("global")) == {
+        "proxy": "http://127.0.0.1:7897"}
+    # custom → 供应商独立地址
+    assert credential_service.provider_client_kwargs(
+        _Provider("custom", "http://10.0.0.1:8080")) == {"proxy": "http://10.0.0.1:8080"}
+    # custom 但地址为空 → 回落全局（防误配直连失败）
+    assert credential_service.provider_client_kwargs(_Provider("custom", "")) == {
+        "proxy": "http://127.0.0.1:7897"}
+    # direct → 显式关闭环境变量代理读取（真直连）
+    assert credential_service.provider_client_kwargs(_Provider("direct")) == {"trust_env": False}
+
+
+def test_provider_client_kwargs_without_global_proxy(monkeypatch):
+    """未配置全局代理时：inherit/global 不做干预（返回 {}，保持 httpx 默认），
+    direct 仍显式关 env；provider 为空（独立模型/服务端默认）同样不干预。"""
+    from app.core import http_client
+
+    monkeypatch.setattr(http_client, "get_proxy_url", lambda: None)
+
+    assert credential_service.provider_client_kwargs(_Provider("inherit")) == {}
+    assert credential_service.provider_client_kwargs(_Provider("global")) == {}
+    assert credential_service.provider_client_kwargs(_Provider("custom", "")) == {}
+    assert credential_service.provider_client_kwargs(_Provider("direct")) == {"trust_env": False}
+    assert credential_service.provider_client_kwargs(None) == {}
+
+
 # ── WorkBuddy 积分解析（对齐客户端 resources[].left 累加口径）──
 
 def test_extract_credits_from_resources():
@@ -345,7 +384,7 @@ def test_workbuddy_refresh_isolated_per_credential(tmp_path, monkeypatch):
     from app.persistence.models.workbuddy_auth import WorkBuddyAuth
     import app.persistence.models  # noqa: F401
 
-    async def _fake_refresh(api_base, access_token, refresh_token):
+    async def _fake_refresh(api_base, access_token, refresh_token, client_kwargs=None):
         return {"accessToken": f"new-{access_token}", "refreshToken": f"new-{refresh_token}"}
 
     monkeypatch.setattr(wb_session, "refresh_access_token", _fake_refresh)

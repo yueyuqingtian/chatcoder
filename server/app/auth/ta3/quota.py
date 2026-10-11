@@ -70,18 +70,21 @@ async def _current_token(db: AsyncSession, provider_id: int) -> str:
 
 async def _request_json(db: AsyncSession, provider_id: int, api_base: str, path: str, *,
                         method: str = "GET", form: dict | None = None,
-                        token: str | None = None, timeout: float = _REQUEST_TIMEOUT) -> dict | list:
+                        token: str | None = None, timeout: float = _REQUEST_TIMEOUT,
+                        client_kwargs: dict | None = None) -> dict | list:
     """发一次额度请求；401 时 refresh（ensure_token）后重试一次。
 
     - token 参数用于复用调用方已读取的 token（避免重复查库），缺省时自行读取。
     - 网络/超时/HTTP/解析错误统一转 Ta3QuotaError（认证失败保持 Ta3AuthError）。
+    - plan-110-438 M2: client_kwargs 由调用方按供应商代理配置传入
+      （credential_service.provider_client_kwargs），额度/趋势/模型状态/SSO 同口径出网。
     """
     url = f"{api_base.rstrip('/')}{path}"
     if token is None:
         token = await _current_token(db, provider_id)
 
     async def _do(t: str) -> httpx.Response:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, **(client_kwargs or {})) as client:
             if form is None:
                 return await client.request(method, url, headers=_headers(t))
             return await client.request(method, url, content=urlencode(form),
@@ -125,21 +128,23 @@ def _as_payload(value: dict | list) -> dict:
 
 
 async def get_quota(db: AsyncSession, provider_id: int, api_base: str, *,
-                    force: bool = False) -> dict:
+                    force: bool = False, client_kwargs: dict | None = None) -> dict:
     """本人额度（窗口百分比、重置时刻、可执行动作）。身份即本人，不传 userId。"""
     token = await _current_token(db, provider_id)
     cached = _quota_cache.get(provider_id)
     if (not force and cached and cached[0] == token
             and time.monotonic() - cached[1] < _QUOTA_CACHE_SECONDS):
         return cached[2]
-    value = _as_payload(await _request_json(db, provider_id, api_base, "/ai/v1/quota", token=token))
+    value = _as_payload(await _request_json(db, provider_id, api_base, "/ai/v1/quota",
+                                           token=token, client_kwargs=client_kwargs))
     _quota_cache[provider_id] = (token, time.monotonic(), value)
     return value
 
 
 async def get_quota_trend(db: AsyncSession, provider_id: int, api_base: str, *,
                           period: str | None = None, start_date: str | None = None,
-                          end_date: str | None = None, call_source: str | None = None) -> dict:
+                          end_date: str | None = None, call_source: str | None = None,
+                          client_kwargs: dict | None = None) -> dict:
     """用量趋势。只允许 DAILY / MONTHLY（不传 HOURLY）；区间校验交给服务端。"""
     params: dict[str, str] = {}
     if period in ("DAILY", "MONTHLY"):
@@ -152,35 +157,37 @@ async def get_quota_trend(db: AsyncSession, provider_id: int, api_base: str, *,
         params["callSource"] = str(call_source)
     qs = urlencode(params)
     value = await _request_json(
-        db, provider_id, api_base, f"/ai/v1/quota/trend{('?' + qs) if qs else ''}")
+        db, provider_id, api_base, f"/ai/v1/quota/trend{('?' + qs) if qs else ''}",
+        client_kwargs=client_kwargs)
     return _as_payload(value)
 
 
 async def request_overdraft(db: AsyncSession, provider_id: int, api_base: str,
-                            remark: str = "") -> dict:
+                            remark: str = "", client_kwargs: dict | None = None) -> dict:
     """日窗透支。只能由用户点击确认后调用（幂等性由服务端保证）。"""
     form = {"remark": remark} if remark else {}
     value = await _request_json(db, provider_id, api_base, "/ai/v1/quota/overdraft",
-                                method="POST", form=form)
+                                method="POST", form=form, client_kwargs=client_kwargs)
     clear_cache(provider_id)
     return _as_payload(value)
 
 
 async def request_reset(db: AsyncSession, provider_id: int, api_base: str,
-                        window_type: str, remark: str = "") -> dict:
+                        window_type: str, remark: str = "",
+                        client_kwargs: dict | None = None) -> dict:
     """周/月窗重置。同样只能由用户手动触发；返回 APPLIED（立即生效）/ PENDING（转人工审批）。"""
     form = {"windowType": "MONTHLY" if window_type == "MONTHLY" else "WEEKLY"}
     if remark:
         form["remark"] = remark
     value = await _request_json(db, provider_id, api_base, "/ai/v1/quota/reset",
-                                method="POST", form=form)
+                                method="POST", form=form, client_kwargs=client_kwargs)
     clear_cache(provider_id)
     return _as_payload(value)
 
 
 async def get_model_status(db: AsyncSession, provider_id: int, api_base: str, *,
                            model: str | None = None, protocol: str | None = None,
-                           force: bool = False) -> dict:
+                           force: bool = False, client_kwargs: dict | None = None) -> dict:
     """模型状态卡（倍率 / 负载 / 可用性）。三端公共契约，用于模型列表与错峰提示。"""
     token = await _current_token(db, provider_id)
     cacheable = not model and not protocol
@@ -195,7 +202,8 @@ async def get_model_status(db: AsyncSession, provider_id: int, api_base: str, *,
         params["protocol"] = str(protocol)
     qs = urlencode(params)
     value = _as_payload(await _request_json(
-        db, provider_id, api_base, f"/ai/v1/model-status{('?' + qs) if qs else ''}", token=token))
+        db, provider_id, api_base, f"/ai/v1/model-status{('?' + qs) if qs else ''}",
+        token=token, client_kwargs=client_kwargs))
     if cacheable:
         _model_status_cache[provider_id] = (token, time.monotonic(), value)
     return value
@@ -242,7 +250,8 @@ async def resolve_app_id(db: AsyncSession, provider_id: int) -> str:
     return app_id if app_id and app_id != LOCAL_ORG_ID else ""
 
 
-async def build_admin_web_url(db: AsyncSession, provider_id: int, api_base: str) -> str:
+async def build_admin_web_url(db: AsyncSession, provider_id: int, api_base: str,
+                              client_kwargs: dict | None = None) -> str:
     """生成「后台网页」SSO 免登链接（对齐 openYinhaiAdminSystem）。
 
     流程：POST {apiBase}/api/ai-sso/generate-token（form: loginId[+appId]）
@@ -260,7 +269,8 @@ async def build_admin_web_url(db: AsyncSession, provider_id: int, api_base: str)
         form["appId"] = app_id
 
     body = await _request_json(db, provider_id, api_base, "/api/ai-sso/generate-token",
-                               method="POST", form=form, timeout=_SSO_TIMEOUT)
+                               method="POST", form=form, timeout=_SSO_TIMEOUT,
+                               client_kwargs=client_kwargs)
     data = body.get("data") if isinstance(body, dict) else None
     sso_token = ""
     if isinstance(data, dict):

@@ -22,6 +22,7 @@ from app.auth.ta3.oauth import DEFAULT_TA3_API_BASE
 from app.gateway.schemas import Ta3LoginStartOut, Ta3LoginStatusOut, Ta3SyncOut
 from app.persistence.database import commit_with_retry, get_db
 from app.services import provider_service
+from app.services.credential_service import provider_client_kwargs
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -170,8 +171,10 @@ async def ta3_quota_get(provider_id: int, force: bool = False,
     """本人额度（窗口百分比、重置时刻、可执行动作）；force=true 跳过 10s 缓存。"""
     provider = await _get_ta3_provider(db, provider_id)
     api_base = _resolve_api_base(provider)
+    # plan-110-438 M2: 额度查询按该供应商的代理配置出网
+    _ckw = provider_client_kwargs(provider)
     try:
-        return await ta3_quota.get_quota(db, provider_id, api_base, force=force)
+        return await ta3_quota.get_quota(db, provider_id, api_base, force=force, client_kwargs=_ckw)
     except Exception as e:  # noqa: BLE001
         _raise_quota_http(e, provider_id, "额度查询")
 
@@ -184,10 +187,12 @@ async def ta3_quota_trend(provider_id: int, period: str | None = None,
     """用量趋势（DAILY/MONTHLY；单区间 ≤366 天，超限服务端返回 400 range_too_large）。"""
     provider = await _get_ta3_provider(db, provider_id)
     api_base = _resolve_api_base(provider)
+    _ckw = provider_client_kwargs(provider)  # plan-110-438 M2
     try:
         return await ta3_quota.get_quota_trend(
             db, provider_id, api_base,
             period=period, start_date=start_date, end_date=end_date, call_source=call_source,
+            client_kwargs=_ckw,
         )
     except Exception as e:  # noqa: BLE001
         _raise_quota_http(e, provider_id, "用量趋势查询")
@@ -199,8 +204,10 @@ async def ta3_quota_overdraft(provider_id: int, body: Ta3QuotaRemarkBody,
     """日窗透支（仅用户点击确认后调用；幂等性由服务端保证）。"""
     provider = await _get_ta3_provider(db, provider_id)
     api_base = _resolve_api_base(provider)
+    _ckw = provider_client_kwargs(provider)  # plan-110-438 M2
     try:
-        return await ta3_quota.request_overdraft(db, provider_id, api_base, body.remark)
+        return await ta3_quota.request_overdraft(db, provider_id, api_base, body.remark,
+                                                client_kwargs=_ckw)
     except Exception as e:  # noqa: BLE001
         _raise_quota_http(e, provider_id, "日窗透支")
 
@@ -211,8 +218,10 @@ async def ta3_quota_reset(provider_id: int, body: Ta3QuotaResetBody,
     """周/月窗重置（返回 APPLIED 立即生效 / PENDING 转人工审批）。"""
     provider = await _get_ta3_provider(db, provider_id)
     api_base = _resolve_api_base(provider)
+    _ckw = provider_client_kwargs(provider)  # plan-110-438 M2
     try:
-        return await ta3_quota.request_reset(db, provider_id, api_base, body.window_type, body.remark)
+        return await ta3_quota.request_reset(db, provider_id, api_base, body.window_type, body.remark,
+                                             client_kwargs=_ckw)
     except Exception as e:  # noqa: BLE001
         _raise_quota_http(e, provider_id, "额度重置")
 
@@ -224,9 +233,11 @@ async def ta3_model_status(provider_id: int, model: str | None = None,
     """模型状态卡（倍率/负载/可用性）；不带 model/protocol 时可缓存 30s。"""
     provider = await _get_ta3_provider(db, provider_id)
     api_base = _resolve_api_base(provider)
+    _ckw = provider_client_kwargs(provider)  # plan-110-438 M2
     try:
         return await ta3_quota.get_model_status(
-            db, provider_id, api_base, model=model, protocol=protocol, force=force)
+            db, provider_id, api_base, model=model, protocol=protocol, force=force,
+            client_kwargs=_ckw)
     except Exception as e:  # noqa: BLE001
         _raise_quota_http(e, provider_id, "模型状态查询")
 
@@ -245,8 +256,11 @@ async def _warm_ide_session(db: AsyncSession, provider_id: int, api_base: str) -
         if not token:
             return
         from app.auth.ta3.catalog import warm_ide_session
+        from app.persistence.models.model_reg import Provider
 
-        await warm_ide_session(api_base, token)
+        # plan-110-438 M2: 预热请求同样按供应商代理配置出网
+        _provider = await db.get(Provider, provider_id)
+        await warm_ide_session(api_base, token, provider_client_kwargs(_provider))
         logger.info("[ta3] provider=%s 会话预热完成", provider_id)
     except Exception as e:  # noqa: BLE001
         logger.warning("[ta3] provider=%s 会话预热失败（忽略）: %s", provider_id, e)
@@ -313,15 +327,16 @@ async def ta3_admin_web(provider_id: int, db: AsyncSession = Depends(get_db)):
     """
     provider = await _get_ta3_provider(db, provider_id)
     api_base = _resolve_api_base(provider)
+    _ckw = provider_client_kwargs(provider)  # plan-110-438 M2
     try:
-        url = await ta3_quota.build_admin_web_url(db, provider_id, api_base)
+        url = await ta3_quota.build_admin_web_url(db, provider_id, api_base, client_kwargs=_ckw)
     except Exception as first_err:  # noqa: BLE001
         logger.info(
             "[ta3] provider=%s 后台网页链接生成失败，静默重登录后重试: %s", provider_id, first_err,
         )
         await _silent_relogin(db, provider_id, api_base)
         try:
-            url = await ta3_quota.build_admin_web_url(db, provider_id, api_base)
+            url = await ta3_quota.build_admin_web_url(db, provider_id, api_base, client_kwargs=_ckw)
         except Exception as e:  # noqa: BLE001
             _raise_quota_http(e, provider_id, "后台网页链接生成")
     return {"ok": True, "url": url}
