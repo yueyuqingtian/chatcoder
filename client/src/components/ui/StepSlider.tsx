@@ -7,6 +7,7 @@
  *  · 动效时长全部来自令牌（--dur-spring），随「动画效果」档位缩放；拖动期间不加过渡，保证 1:1 跟手。
  * 几何：两端各让出半个拇指宽度（--th），档位点 / 档位名都按同一公式与拇指中心对齐。 */
 import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { PixelFlow } from "./PixelFlow";
 
 export interface StepSliderStep {
   key: string;
@@ -18,7 +19,7 @@ export interface StepSliderStep {
 /** 半个拇指宽度（px）——与 CSS 的 --th 同值，指针位置据此换算成档位 */
 const TH = 11;
 
-export function StepSlider({ steps, index, onIndexChange, disabled = false, className = "", ...rest }: {
+export function StepSlider({ steps, index, onIndexChange, disabled = false, className = "", showLabels = true, flowAtMax = false, ...rest }: {
   steps: StepSliderStep[];
   /** 当前档位下标 */
   index: number;
@@ -26,6 +27,10 @@ export function StepSlider({ steps, index, onIndexChange, disabled = false, clas
   onIndexChange: (i: number) => void;
   disabled?: boolean;
   className?: string;
+  /** plan-128-518：是否在轨道下方显示每档名称（默认显示） */
+  showLabels?: boolean;
+  /** plan-128-518：拉到最高档时轨道内出现“从右往左”的粒子流动（仅 CSS 动画） */
+  flowAtMax?: boolean;
   "aria-label"?: string;
 }) {
   const n = steps.length;
@@ -107,7 +112,7 @@ export function StepSlider({ steps, index, onIndexChange, disabled = false, clas
 
   return (
     <div
-      className={`ui-step${drag != null ? " is-dragging" : ""}${jump ? " is-jump" : ""}${disabled ? " is-disabled" : ""} ${className}`.trim()}
+      className={`ui-step${drag != null ? " is-dragging" : ""}${jump ? " is-jump" : ""}${disabled ? " is-disabled" : ""}${flowAtMax && n > 1 && near === max ? " is-max" : ""} ${className}`.trim()}
       style={{ ["--th" as string]: `${TH}px`, ["--pos" as string]: shown, ["--n1" as string]: Math.max(1, max) }}
     >
       <div
@@ -119,6 +124,8 @@ export function StepSlider({ steps, index, onIndexChange, disabled = false, clas
         onPointerCancel={endDrag}
       >
         <div className="ui-step-track">
+          {/* plan-128-518：最高档的像素点阵流动（参考 Claude 的努力程度滑块）：仅在最高档挂载 canvas，离开即卸载，没有常驻开销 */}
+          {flowAtMax && n > 1 && near === max && <PixelFlow className="ui-step-flow" />}
           <span className="ui-step-range" />
           {steps.map((s, i) => (
             <span
@@ -145,7 +152,7 @@ export function StepSlider({ steps, index, onIndexChange, disabled = false, clas
           <span className="ui-step-core" key={tick} data-hit={tick > 0 ? 1 : 0} />
         </span>
       </div>
-      <div className="ui-step-labels">
+      {showLabels && <div className="ui-step-labels">
         {steps.map((s, i) => (
           <button
             key={s.key}
@@ -160,7 +167,7 @@ export function StepSlider({ steps, index, onIndexChange, disabled = false, clas
             {s.badge != null && <span className="ui-step-badge">{s.badge}</span>}
           </button>
         ))}
-      </div>
+      </div>}
     </div>
   );
 }

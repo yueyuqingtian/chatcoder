@@ -20,7 +20,8 @@ import type { TimelineEntry, TurnItem } from "./timeline";
 import { msgText, getTurnById } from "./timeline";
 import { useChatStore } from "../../store/chat";
 import { parseUtc } from "../../utils/time";
-import { MessageImageGrid, MessageFileCards, TokenText, RefChips, refsOf, stripRefLines, attachmentsOf } from "./AttachmentCard";
+import { MessageImageGrid, attachmentsOf } from "./AttachmentCard";
+import { UserBubble } from "./UserBubble";
 import { recordComponentRender } from "../../perf/metrics";
 
 /** plan-282-1421：turn 的「已结束」状态集合——AI 操作行必须在本轮进入这些状态后才显示。 */
@@ -381,16 +382,7 @@ export const TurnGroup = memo(function TurnGroup({
           <div key={i} className="turn-item turn-item-user">
             {/* 会话 228-1142: 图片网格在气泡外部、靠右（对齐参考图 1）；文件卡与文本留在气泡内 */}
             <MessageImageGrid atts={attachmentsOf(item.msg.content)} />
-            <div className="turn-user-bubble">
-              <MessageFileCards atts={attachmentsOf(item.msg.content)} />
-              {/* plan-308-1542 需求2：引用芯片 */}
-              <RefChips refs={refsOf(item.msg.content)} />
-              {stripRefLines(msgText(item.msg.content), refsOf(item.msg.content).length > 0) && (
-                <div className="turn-user-text">
-                  <TokenText text={stripRefLines(msgText(item.msg.content), refsOf(item.msg.content).length > 0)} />
-                </div>
-              )}
-            </div>
+            <UserBubble msg={item.msg} />
             {/* plan-282-1416（问题2 根因 A）：turn 内的非首条用户消息（运行中注入 / 立即发送）
                 此前完全没有操作行，导致「最近一条用户消息」永远没有复制/回滚。
                 现补齐：归属该条消息自身，且与 turn 是否运行无关（终态即可见）。 */}
@@ -544,16 +536,7 @@ export const TurnGroup = memo(function TurnGroup({
           <div className="turn-item turn-item-user">
             {/* 会话 228-1142: 图片网格在气泡外部、靠右（对齐参考图 1）；文件卡与文本留在气泡内 */}
             <MessageImageGrid atts={attachmentsOf(firstUser.msg.content)} />
-            <div className="turn-user-bubble">
-              <MessageFileCards atts={attachmentsOf(firstUser.msg.content)} />
-              {/* plan-308-1542 需求2：引用芯片 */}
-              <RefChips refs={refsOf(firstUser.msg.content)} />
-              {stripRefLines(msgText(firstUser.msg.content), refsOf(firstUser.msg.content).length > 0) && (
-                <div className="turn-user-text">
-                  <TokenText text={stripRefLines(msgText(firstUser.msg.content), refsOf(firstUser.msg.content).length > 0)} />
-                </div>
-              )}
-            </div>
+            <UserBubble msg={firstUser.msg} />
             {/* plan-282-1416（问题2）：门控改本 turn 行状态；最近一条用户消息常显 */}
             {!turnRunning && (
               <MessageActions

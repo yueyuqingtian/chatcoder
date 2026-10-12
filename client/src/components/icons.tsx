@@ -737,7 +737,8 @@ export function IconRingProgress({
     >
       <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={trackColor} strokeWidth={strokeWidth} />
       {loading ? (
-        /* 加载弧：仅显示 1/4 周长的一段，靠 SVG 自转表达"进行中" */
+        /* plan-128-518：加载态 = 左侧会话「执行中」同款转圈——细底环（25% 透明）+ 一段 1/4 周长实色弧，
+           平头线帽、线性匀速（session-spin / --dur-spin）。此前是圆头弧 + 另一套关键帧，两处观感不一致。 */
         <circle
           cx={size / 2}
           cy={size / 2}
@@ -746,7 +747,6 @@ export function IconRingProgress({
           stroke={indicatorColor}
           strokeWidth={strokeWidth}
           strokeDasharray={`${circ / 4} ${circ}`}
-          strokeLinecap="round"
           className="icon-ring-spin"
         />
       ) : (

@@ -48,7 +48,7 @@ export function ApprovalPicker({ open, onToggle, onClose, value, onChange }: {
               className={"pop-item" + (mm.danger ? " is-danger" : "") + (active ? " is-selected" : "")}
               onClick={() => { onChange(m); onClose(); }}
             >
-              <span className="pop-item-icon">{mm.icon(16)}</span>
+              <span className="pop-item-icon is-glyph">{mm.icon(16)}</span>
               <span className="pop-item-main">
                 <span className="pop-item-title">{t(mm.labelKey)}</span>
                 <span className="pop-item-desc">{t(mm.descKey)}</span>

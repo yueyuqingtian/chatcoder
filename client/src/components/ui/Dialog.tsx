@@ -67,7 +67,9 @@ export function InsetRow({ icon, title, desc, actions, onClick, className = "" }
     : <div className={`ui-inset-row ${className}`.trim()}>{body}</div>;
 }
 
-/** 弹窗内容节点（浮层容器）。null = 当前不在弹窗内，调用方回落到默认 body */
+/** 弹窗内容节点（浮层容器）。null = 当前不在弹窗内，调用方回落到默认 body。
+ *  浮层必须挂在这里：挂 body 会被 Dialog 的焦点陷阱判为“外部”而把焦点拉回，菜单随即关闭（一闪即逝）。
+ *  裁切/自动滚动的根因在动画进场填充模式，不在这里（见 revamp.css .ui-dialog-content）。 */
 const DialogContentHostContext = createContext<HTMLElement | null>(null);
 
 /** plan-41-227: 供弹窗内的浮层组件读取浮层容器 */

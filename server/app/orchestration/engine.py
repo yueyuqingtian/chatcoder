@@ -26,7 +26,9 @@ from app.orchestration.agent_loop import run_agent_loop
 from app.orchestration.context_manager import (
     _collect_plan_history, build_main_context, build_subagent_context,
 )
-from app.orchestration.subagent import cleanup, get_subagent_manager
+from app.orchestration.subagent import (
+    cleanup, get_subagent_manager, list_resumable_subagents, resume_subagent,
+)
 from app.orchestration.subagent_tools import (
     SUBAGENT_TOOL_NAMES, append_subagent_tools, load_subagent_type_states,
 )
@@ -473,6 +475,12 @@ def _goal_active(session) -> bool:
     return settings.goal_mode_enabled and (getattr(session, "goal_status", None) or "none") == "active"
 
 
+def _visible_goal_tool(model) -> str:
+    """plan-128-518: 目标完成工具在模型侧的可见名（ta3 模型为伪装名 CompleteGoal，其余为 goal_complete）。"""
+    from app.models.providers.ta3_tool_aliases import visible_tool_name
+    return visible_tool_name("goal_complete", getattr(model, "api_format", "") == "ta3")
+
+
 def _should_continue_goal(session, final_status: str, cancel_event: asyncio.Event) -> bool:
     """turn 完成后的续跑判定：目标激活 + 正常完成 + 轮次未耗尽 + 未被取消。"""
     return (
@@ -534,12 +542,22 @@ async def _continue_goal_turn(session_id: int, prev_turn_id: int) -> None:
             max_turns = settings.goal_max_continuation_turns
             next_n = (session.goal_turns_used or 0) + 1
             todo_summary = await _goal_todo_summary(db, session_id)
+            # plan-128-518: 续跑提示里的工具名同样按模型可见名（ta3 伪装层）引用
+            _goal_tool = "goal_complete"
+            try:
+                from app.persistence.models.model_reg import Model as _Model
+                _mid = getattr(session, "model_id", None)
+                if _mid:
+                    _goal_tool = _visible_goal_tool(await db.get(_Model, _mid))
+            except Exception:
+                logger.debug("[goal] 解析续跑模型失败，沿用真实工具名", exc_info=True)
             prompt = (
                 "[系统提醒] 会话目标尚未完成，请继续朝目标推进。\n\n"
                 f"当前目标：{session.goal_text}\n"
                 f"已自动续跑：{next_n}/{max_turns} 轮\n\n"
                 f"{todo_summary}"
-                "继续执行剩余工作；若目标已实际达成，请调用 goal_complete 工具标记完成并给出总结。"
+                "继续执行剩余工作。声称完成前先做完成审计：对照目标逐条核验证据（运行测试、读取结果）；"
+                f"若目标已实际达成，请调用 {_goal_tool} 工具标记完成并给出总结；未达成就继续推进。"
             )
             user_msg = await message_service.create_message(
                 db, session_id=session_id,
@@ -893,7 +911,11 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             # 权限解析抛异常时引用它会再抛 UnboundLocalError，把可诊断的失败变成无法诊断。
             _fallback_mode = normalize_execution_mode(mode)
             _mode_whitelist = _READONLY_TOOLS if _fallback_mode == "readonly" else (_PLAN_TOOLS if _fallback_mode == "plan" else None)
-        _available_tools = {t.name for t in tool_registry.for_agent(_mode_whitelist)}
+        # plan-128-518：目标工具只在目标模式激活的会话下发（此前无条件下发，模型在普通会话里也会调用）
+        _goal_tools_on = _goal_active(session)
+        _available_tools = {
+            t.name for t in tool_registry.for_agent(_mode_whitelist, include_scoped=_goal_tools_on)
+        }
         # v36: 子代理工具计入「模型可见工具」（提示词引导降级口径一致）
         _available_tools |= {
             n for n in SUBAGENT_TOOL_NAMES
@@ -939,7 +961,11 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             goal={"text": session.goal_text, "turns_used": session.goal_turns_used or 0}
             if (session.goal_status or "none") == "active" and session.goal_text else None,
             available_tools=_available_tools,
+            # plan-128-518: ta3 会话里模型看到的是伪装名 CompleteGoal，提示词必须引用同一个名字
+            goal_tool_name=_visible_goal_tool(selected_model),
             effective_model_id=effective_model_id,
+            # plan-91-394: 中断可续跑的子代理清单（用户说“继续”时主代理据此续跑，而非重新派发）
+            paused_subagents=await list_resumable_subagents(session.id),
         )
 
         # 命令模式：注入模式指令（/chat 只读、/plan 先规划后执行）。用户显式选择的
@@ -991,7 +1017,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         # 用户反馈修复：工具清单只由执行模式（能力边界）决定，与权限模式无关——
         # 此前「完全访问」走全量下发，把 plan 下必然被拒的编辑类工具也发给模型，
         # 模型见得到、试了必被拒：多轮调整计划时反复尝试编辑历史方案文档（用户反馈）。
-        tool_schemas = tool_registry.all_schemas(_schema_whitelist)
+        tool_schemas = tool_registry.all_schemas(_schema_whitelist, include_scoped=_goal_tools_on)
         await _inject_mcp_tools(
             db, main_agent, tool_schemas, turn_id,
             readonly_only=_mode_readonly,
@@ -1028,6 +1054,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             lambda _h, _m=mgr, _sid=session_id: _on_subagent_finished(_m, _sid, _h)
         )
         _turn_managers[turn_id] = mgr
+        mgr.owner_active = True  # plan-91-394: 主代理 turn 存活期间允许子代理保活等待恢复
         out = await run_agent_loop(
             db, session_id=session_id, turn_id=turn_id,
             agent=main_agent, context_messages=bundle.to_messages(),
@@ -1295,6 +1322,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
 
         return {"ok": True, "kind": out.kind, "summary": summary}
     except Exception as _exc:
+        final_status = "failed"  # plan-91-394: 异常结束视为出错，收尾时子代理暂停保存检查点
         # v7: 主 turn 任务异常结束 → 标记 failed，避免任务摘要出现永久 running 的假象
         if main_task is not None:
             try:
@@ -1312,6 +1340,11 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         # plan-330-1648 M7: 有后台子代理/未送达通知时保活 manager（结果跨 turn 送达）
         from app.orchestration.subagent import peek_subagent_manager
         _mgr_final = peek_subagent_manager(session_id)
+        # plan-91-394: 子代理只在主代理中断/出错结束时自动停止（进度保存为可续跑）；
+        # 正常结束仅暂停保活等待中的子代理，正常运行者照常完成并唤醒主代理。
+        if _mgr_final is not None:
+            _mgr_final.pause_for_turn_end(
+                interrupted=locals().get("final_status", "completed") != "completed")
         _cleanup_manager_if_idle(session_id, _mgr_final)
         # v1.1: 无条件广播 session.completed，驱动前端摘除左侧转圈（无论成败）
         # v37: 携带最新活动时间，侧栏排序同步上移（此前仅整表刷新才更新）
@@ -1805,6 +1838,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             lambda _h, _m=manager, _sid=_session_id: _on_subagent_finished(_m, _sid, _h)
         )
         _turn_managers[turn_id] = manager
+        manager.owner_active = True  # plan-91-394: 同上（wakeup 路径）
         # plan-166-767: confirm 执行路径与 start_turn 对齐——按有效模型解析多模态/窗口。
         effective_model_id = _session_model_id or main_agent.model_id
         _model_source = "session" if _session_model_id else "agent"
@@ -1871,6 +1905,8 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             user_message=original_request,
             multimodal=_is_multimodal,
             effective_model_id=effective_model_id,
+            # plan-91-394: 中断可续跑的子代理清单（用户说“继续”时主代理据此续跑，而非重新派发）
+            paused_subagents=await list_resumable_subagents(session.id),
         )
         # plan-19-82 增强（对齐 ZCode PLAN_MODE_EXIT_REMINDER）：确认执行是本会话中
         # 上下文形态切换最剧烈的一刻——规划阶段的对话被整篇方案文档替换，叠加 16000
@@ -1913,6 +1949,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         main_tools = append_subagent_tools(main_tools, _type_states)
         mgr = get_subagent_manager(session.id)
         _turn_managers[turn_id] = mgr
+        mgr.owner_active = True  # plan-91-394: 主代理 turn 存活期间允许子代理保活等待恢复
         out = await run_agent_loop(
             db, session_id=session.id, turn_id=turn_id,
             agent=main_agent, context_messages=bundle.to_messages(),
@@ -1999,6 +2036,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         # plan_restore_after_turn 粘性机制已移除：确认执行后的权限模式保持到手动切换
         return {"ok": True, "kind": out.kind, "summary": summary}
     except Exception as exc:
+        final_status = "failed"  # plan-91-394: 异常结束视为出错，收尾时子代理暂停保存检查点
         logger.exception("确认后执行失败 turn=%s", turn_id)
         try:
             await db.rollback()
@@ -2036,6 +2074,11 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         # plan-330-1648 M7: 同上——有后台子代理时保活 manager
         from app.orchestration.subagent import peek_subagent_manager
         _mgr_final = peek_subagent_manager(_session_id or 0)
+        # plan-91-394: 子代理只在主代理中断/出错结束时自动停止（进度保存为可续跑）；
+        # 正常结束仅暂停保活等待中的子代理，正常运行者照常完成并唤醒主代理。
+        if _mgr_final is not None:
+            _mgr_final.pause_for_turn_end(
+                interrupted=locals().get("final_status", "completed") != "completed")
         _cleanup_manager_if_idle(_session_id or 0, _mgr_final)
         if _session_id:
             # v39: 同 start_turn——携带 subagent_pending 供前端保持等待子代理态
@@ -2077,6 +2120,23 @@ async def retry_failed_step(db: AsyncSession, *, turn_id: int, task_id: int) -> 
         return {"ok": False, "error": "主代理未初始化"}
     workspace = _resolve_workspace(session, project)
     manager = get_subagent_manager(session.id)
+    # plan-91-394: 该步骤子代理保有检查点（中断/暂停）→ 原地续跑，保留已完成进度；不新建子代理
+    if step.agent_id:
+        _rstate, _rdetail = await resume_subagent(
+            session.id, int(step.agent_id), turn_id=turn_id, cancel_event=asyncio.Event(),
+        )
+        if _rstate == "resumed":
+            _rhandle = manager.get(int(step.agent_id))
+            await broadcast(session.id, {"event": "task.updated", "payload": {"task_id": step.id, "status": "running"}})
+            if _rhandle and _rhandle.task:
+                await _rhandle.task
+            _rok = bool(_rhandle and _rhandle.status == "done")
+            if _rok and _rhandle.artifact_ids:
+                await task_service.attach_artifacts(db, step.id, _rhandle.artifact_ids)
+            step = await task_service.get_task(db, task_id)
+            await broadcast(session.id, {"event": "task.updated", "payload": {
+                "task_id": step.id, "status": step.status, "note": step.note or ""}})
+            return {"ok": _rok, "status": step.status}
     effective_model_id = session.model_id or main_agent.model_id
     tool_schemas = tool_registry.all_schemas()
     cancel_event = asyncio.Event()

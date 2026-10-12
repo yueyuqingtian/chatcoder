@@ -1,14 +1,15 @@
 /** 输入框「+」浮窗（plan-20261009-ui U2，参考图4）。
  *
- * 结构：执行模式（智能体 / 计划 / 只读 + 自定义）→ 目标 → 分隔 → 插件 ›、技能 ›、连接器 ›。
+ * 结构：执行模式（智能体 / 计划 / 只读 / 目标 + 自定义）→ 分隔 → 插件 ›、技能 ›、连接器 ›。
+ *      plan-128-518：“目标”已并入执行模式列表（原独立行与输入弹窗已移除）。
  * 交互：
  *  - 「+」按钮打开时图标弹性旋转成 ×（IconPlusX）；工具条上的模式胶囊也能打开同一个浮窗；
  *  - 树节点悬停 120ms 打开右侧二级浮窗（ExtensionPicker），离开有 220ms 宽限期，穿过两层之间的间隙不误关；
  *    点击 / 方向键右也能打开（键盘与触控板用户）；
  *  - Esc 先关二级，再关一级；点外部整体关闭。 */
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
-import { Popover, Badge } from "../ui";
-import { IconCheck, IconChevronRight, IconTarget, IconX } from "../icons";
+import { Popover } from "../ui";
+import { IconCheck, IconChevronRight } from "../icons";
 import { ExtensionPicker, extKindIcon, type ExtItem } from "./ExtensionPicker";
 import type { ExtKind } from "../../store/navIntent";
 
@@ -29,7 +30,7 @@ const EXT_ROWS: Array<{ kind: ExtKind; label: string }> = [
 
 export function PlusMenu({
   open, onClose, anchorRefs, modes, mode, onModeChange,
-  goal, onGoal, onCancelGoal, exts, onPickExt,
+  exts, onPickExt,
 }: {
   open: boolean;
   onClose: () => void;
@@ -38,9 +39,6 @@ export function PlusMenu({
   modes: ModeOption[];
   mode: string;
   onModeChange: (name: string) => void;
-  goal: { visible: boolean; active: boolean; text: string | null };
-  onGoal: () => void;
-  onCancelGoal: () => void;
   exts: Record<ExtKind, ExtItem[]>;
   onPickExt: (kind: ExtKind, item: ExtItem) => void;
 }) {
@@ -91,7 +89,7 @@ export function PlusMenu({
             onMouseEnter={() => setSub(null)}
             onClick={() => { onModeChange(m.name); onClose(); }}
           >
-            <span className="pop-item-icon">{m.icon}</span>
+            <span className="pop-item-icon is-glyph">{m.icon}</span>
             <span className="pop-item-main">
               <span className="pop-item-title">{m.label}</span>
               <span className="pop-item-desc">{m.desc}</span>
@@ -103,24 +101,6 @@ export function PlusMenu({
           </button>
         );
       })}
-
-      {goal.visible && (
-        <div className="cc-goal-row" onMouseEnter={() => setSub(null)}>
-          <button type="button" role="menuitem" className="pop-item cc-mode-item" onClick={() => { onGoal(); onClose(); }}>
-            <span className="pop-item-icon"><IconTarget size={16} /></span>
-            <span className="pop-item-main">
-              <span className="pop-item-title">{goal.active ? "修改目标" : "目标"}</span>
-              <span className="pop-item-desc">{goal.active && goal.text ? goal.text : "设定目标，每轮结束自动续跑直到达成"}</span>
-            </span>
-            <span className="pop-item-end">{goal.active && <Badge size="xs" tone="success">进行中</Badge>}</span>
-          </button>
-          {goal.active && (
-            <button type="button" className="ui-icon-btn cc-goal-cancel" aria-label="取消目标" onClick={() => { onCancelGoal(); onClose(); }}>
-              <IconX size={14} />
-            </button>
-          )}
-        </div>
-      )}
 
       <div className="pop-sep" />
 

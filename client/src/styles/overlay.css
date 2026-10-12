@@ -16,7 +16,10 @@
   border-radius: var(--r-pop);
   box-shadow: 0 24px 64px rgba(0, 0, 0, calc(0.18 * var(--shadow-strength, 1))), 0 4px 14px rgba(0, 0, 0, calc(0.08 * var(--shadow-strength, 1)));
 }
-.ui-dialog-content[data-state="open"] { animation: mo-pop-in var(--dur-spring-long) var(--spring-soft) both; --pop-dy: 10px; }
+/* plan-128-518：overflow:clip 禁止程序化滚动——弹窗内浮层聚焦时浏览器会尝试“把焦点项滚入可视区”，
+ * overflow:hidden 仍可被滚动（弹窗被推走、变大），clip 则根本不可滚动；旧浏览器回落 hidden。 */
+.ui-dialog-content { overflow: hidden; overflow: clip; }
+.ui-dialog-content[data-state="open"] { animation: mo-pop-in var(--dur-spring-long) var(--spring-soft) backwards; --pop-dy: 10px; }
 .ui-dialog-content[data-state="closed"] { animation: mo-pop-out var(--dur-2) var(--ease-emphasized-accel) both; --pop-dy: 6px; }
 .ui-dialog-head {
   align-items: center;
@@ -146,6 +149,12 @@
 .pop-item.is-danger:hover { background: var(--error-soft); }
 .pop-item-icon { display: inline-flex; align-items: center; justify-content: center; width: 18px; flex-shrink: 0; color: var(--text-2); }
 .pop-item.is-danger .pop-item-icon { color: var(--error); }
+/* plan-128-518：模式行图标的弱底板——图标自身的承托（非卡片），选中项加深一档、图标变主色 */
+.pop-item-icon.is-glyph { width: 28px; height: 28px; border-radius: var(--r-md); background: color-mix(in oklab, currentColor 8%, transparent); transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard); }
+.pop-item:hover .pop-item-icon.is-glyph { color: var(--text-1); }
+.pop-item.is-danger:hover .pop-item-icon.is-glyph { color: var(--error); }
+.pop-item.is-selected .pop-item-icon.is-glyph { color: var(--text-1); background: color-mix(in oklab, currentColor 14%, transparent); }
+.pop-item.is-danger.is-selected .pop-item-icon.is-glyph { color: var(--error); }
 .pop-item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .pop-item-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 .pop-item-desc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--text-3); }
@@ -569,8 +578,15 @@
   width: var(--st-x);
   border-radius: var(--r-pill);
   background: color-mix(in oklab, var(--text-1) 17%, transparent);
-  transition: width var(--dur-spring) var(--spring-snappy);
+  transition: width var(--dur-spring) var(--spring-snappy), background var(--dur-3) var(--ease-standard);
 }
+/* plan-128-518：最高档像素点阵流动由 PixelFlow（canvas）绘制，铺满轨道；点阵自带右密左疏的渐变，
+ * 填充条在这一档退为透明，避免两层叠色。渐入用 opacity，不硬切。 */
+.ui-step-flow { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: inherit; pointer-events: none; animation: ui-step-flow-in var(--dur-3) var(--ease-standard) both; }
+@keyframes ui-step-flow-in { from { opacity: 0; } to { opacity: 1; } }
+.ui-step.is-max .ui-step-range { background: transparent; }
+/* 最高档：轨道底色保持中性浅灰，渐变底色与点阵都由 PixelFlow 自绘，不再叠第二层色 */
+.ui-step-track { transition: background var(--dur-3) var(--ease-standard); }
 .ui-step-stop {
   position: absolute;
   top: 50%;

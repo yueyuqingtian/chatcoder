@@ -74,18 +74,23 @@ class ToolRegistry:
     def all(self) -> list[Tool]:
         return list(self._tools.values())
 
-    def for_agent(self, whitelist: list[str] | None) -> list[Tool]:
+    def for_agent(self, whitelist: list[str] | None, include_scoped: bool = False) -> list[Tool]:
         """返回 agent 白名单内的工具。
 
         v2.4: 白名单为空或 None 时返回全量(之前保守返回空导致 agent 无工具可用)。
-        """
-        if not whitelist:
-            return self.all()
-        return [t for t in self._tools.values() if t.name in whitelist]
 
-    def all_schemas(self, whitelist: list[str] | None = None) -> list[dict]:
+        plan-128-518：「会话态工具」（Tool.session_scoped=True，如 goal_complete）默认不下发——
+        它们只在会话处于对应模式（目标模式激活）时才由引擎显式 include_scoped=True 放行。
+        此前它们随全量工具无条件下发，导致用户没用目标模式模型也会调用目标工具。
+        """
+        pool = [t for t in self._tools.values() if include_scoped or not getattr(t, "session_scoped", False)]
+        if not whitelist:
+            return pool
+        return [t for t in pool if t.name in whitelist]
+
+    def all_schemas(self, whitelist: list[str] | None = None, include_scoped: bool = False) -> list[dict]:
         """返回 OpenAI function-calling 的 tools 列表。"""
-        tools = self.for_agent(whitelist)
+        tools = self.for_agent(whitelist, include_scoped=include_scoped)
         return [t.function_schema() for t in tools]
 
 

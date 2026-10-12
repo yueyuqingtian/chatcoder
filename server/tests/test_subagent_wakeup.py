@@ -45,9 +45,12 @@ def test_notify_finished_callback_error_swallowed():
 
 
 def test_subagent_run_notifies_finished_on_terminal_state():
-    """子代理 _run 收尾必须调用 notify_finished（否则完成通知无人接力调度唤醒）。"""
-    src = inspect.getsource(SubagentManager.spawn)
-    assert "self.notify_finished(handle)" in src
+    """子代理终态收尾必须调用 notify_finished（否则完成通知无人接力调度唤醒）。
+
+    plan-91-394: 收尾已从 spawn 内的 _run 迁入 _drive → _after_terminal（暂停态不唤醒）。
+    """
+    assert "self.notify_finished(handle)" in inspect.getsource(SubagentManager._after_terminal)
+    assert "notify=True" in inspect.getsource(SubagentManager._drive)
 
 
 # ── 会话运行计数 ─────────────────────────────────────────

@@ -3,7 +3,6 @@
  */
 import type { ReactNode } from "react";
 import { IconArrowLeft } from "../icons";
-import { AppLogo } from "../AppLogo";
 import { NAV_GROUPS, SETTINGS_INDEX, type SettingsTab } from "./index";
 import { useI18n } from "../../store/i18n";
 
@@ -21,31 +20,25 @@ export function SidebarShell({ collapsed, children, footer }: {
 }
 
 /** 设置页左侧导航（复用侧栏壳；顶部首项「返回工作区」） */
-export function SettingsSidebar({ tab, onTab, onBack, collapsed }: {
+export function SettingsSidebar({ tab, onTab, onBack, collapsed = false }: {
   tab: SettingsTab;
   onTab: (t: SettingsTab) => void;
   onBack: () => void;
-  collapsed: boolean;
+  collapsed?: boolean;
 }) {
   const { t } = useI18n();
   // plan-31-151 S3：设置侧栏头部拖拽/双击改由系统 -webkit-app-region:drag 处理（见 global.css）。
   return (
     <SidebarShell collapsed={collapsed}>
-      <div className="sb-head">
-        <AppLogo size={20} className="sb-logo-img" />
-        {collapsed && (
-          <button className="sb-nav-arrow" onClick={onBack} title={t("titlebar.back")} type="button">
-            <IconArrowLeft size={15} />
-          </button>
-        )}
-      </div>
-      {!collapsed && (
+      {/* plan-128-518：头部只是占位——logo / 折叠 / 前进后退由全局的 WindowNavCluster 悬浮在此；折叠不再卸载内容，由面板收窄裁切 */}
+      <div className="sb-head" aria-hidden />
+      {(
         <button className="sb-back-item" onClick={onBack} title={t("titlebar.back")} type="button">
           <IconArrowLeft size={14} />
           <span>{t("titlebar.back")}</span>
         </button>
       )}
-      {!collapsed && (
+      {(
         <div className="sb-list">
           {NAV_GROUPS.map((g) => (
             <div key={g.id} className="sb-section-group">

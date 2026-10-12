@@ -111,6 +111,8 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("sessions", "goal_status", "VARCHAR(20) DEFAULT 'none' NOT NULL"),
     ("sessions", "goal_turns_used", "INTEGER DEFAULT 0 NOT NULL"),
     ("sessions", "goal_created_at", "VARCHAR(40)"),
+    # ========== agents（子代理断点续跑：中断时保存的检查点 messages + 运行参数）==========
+    ("agents", "checkpoint_json", "JSON"),
     # ========== usage_records（plan-152-704：供应商显示名）==========
     ("usage_records", "provider_name", "VARCHAR(120) DEFAULT ''"),
     # ========== scheduled_tasks（plan-230-1144 M1.1：调度器落地所需的执行状态列）==========

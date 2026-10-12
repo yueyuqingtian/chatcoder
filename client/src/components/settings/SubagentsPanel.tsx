@@ -130,6 +130,7 @@ function SubagentFormModal({ open, editing, models, tools, onClose, onSaved }: {
         <div className="settings-modal-form-row">
           <label>模型覆盖（留空 = 跟随主代理）</label>
           <ModelPicker
+            variant="field"
             models={models}
             value={form.model_id ? Number(form.model_id) : null}
             onChange={(id) => setForm((p) => ({ ...p, model_id: String(id) }))}

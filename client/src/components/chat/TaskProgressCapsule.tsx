@@ -175,7 +175,7 @@ export function TaskProgressCapsule({ onVisibilityChange }: {
     ?? displayRows.find((r) => r.status !== "done")?.title
     ?? "";
   const ringTone = displayRows.some((r) => r.status === "running")
-    ? "var(--info)"
+    ? "var(--accent)"
     : displayRows.some((r) => r.status === "interrupted") ? "var(--warning)" : "var(--text-2)";
 
   /** 两个独立浮层（B2）：各自开合。
@@ -247,7 +247,8 @@ export function TaskProgressCapsule({ onVisibilityChange }: {
                 progressPop.setOpen(true);
               }}
             >
-              <IconRingProgress value={done / displayRows.length} size={16} strokeWidth={2.2} indicatorColor={ringTone} trackColor="var(--border-strong)" />
+              {/* plan-128-518：这里是步骤进度环（x/y），保持原样；仅执行中的颜色与左侧会话转圈统一为 --success */}
+              <IconRingProgress value={done / displayRows.length} size={16} strokeWidth={1.4} indicatorColor={ringTone} trackColor="color-mix(in srgb, var(--text-1) 14%, transparent)" />
               <span className="tcap-num">{done}/{displayRows.length}</span>
               {/* 不挂原生 title：hover 本段已经弹出浮层（含完整步骤清单与全文） */}
               {currentTitle && <span className="tcap-title">{currentTitle}</span>}

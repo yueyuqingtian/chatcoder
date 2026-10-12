@@ -107,6 +107,28 @@ def _retry_plan() -> list[float]:
     return [_retry_wait_seconds(i) for i in range(1, count + 1)]
 
 
+# plan-91-394: 瞬时故障判定——只有网络/网关/超时/空响应/流丢帧类失败才允许子代理保活等待恢复。
+# 确定性失败（输出达到上限、仅生成思考、鉴权、模型不可用、上下文溢出）即使重试也不会好转，不保活。
+_TRANSIENT_HINTS = (
+    "超时", "网关", "空响应", "断流", "丢帧", "截断", "中断",
+    "timeout", "timed out", "connection", "connect", "reset", "eof", "broken pipe",
+    "gateway", "502", "503", "504", "429", "rate limit", "overloaded", "temporarily",
+    "remote disconnected",
+)
+_PERMANENT_HINTS = (
+    "401", "403", "unauthorized", "forbidden", "invalid api key", "authentication",
+    "token 上限", "仅生成思考", "不可用", "model not found", "overflow", "context length",
+)
+
+
+def _is_transient_failure_text(text: str) -> bool:
+    """plan-91-394: 失败文案是否属于瞬时故障（见 _TRANSIENT_HINTS / _PERMANENT_HINTS）。"""
+    low = (text or "").lower()
+    if any(h in low for h in _PERMANENT_HINTS):
+        return False
+    return any(h in low for h in _TRANSIENT_HINTS)
+
+
 def _filter_degenerate_tool_calls(response) -> None:
     """就地丢弃退化工具调用：模型把自身正文片段误发成工具参数的毛刺。
 
@@ -400,6 +422,9 @@ class AgentOutput:
     # v36 (plan-321-1600 M1): 本 loop 累计 token 用量——子代理据此累加到 Task.token_usage，
     # 使子代理消耗对用户可见（此前子任务用量恒为 0）。
     tokens: int = 0
+    # plan-91-394: 失败是否属于网络/网关类瞬时故障（子代理据此保活等待恢复，而非判死）。
+    # 确定性失败（鉴权、模型不可用、输出达到上限）为 False。
+    transient: bool = False
 
 
 def _is_memory_pairing_balanced(messages: list, k: int) -> bool:
@@ -645,6 +670,9 @@ async def run_agent_loop(
     # plan-19-82: 本轮回复语言（zh/en/auto），用于压缩摘要与 checkpoint 文案对齐
     reply_language: str = "auto",
     reply_language_source: str = "user",
+    # plan-91-394: 断点续跑检查点回调——每步开始时把当前 messages 列表引用交给调用方。
+    # 列表原地追加，调用方持有引用即可在失败/暂停时读到最新进度（压缩重建时会再次回调）。
+    checkpoint_sink: Callable[[list], None] | None = None,
 ) -> AgentOutput:
     """运行单个 agent 推理循环。
 
@@ -869,6 +897,12 @@ async def run_agent_loop(
 
     try:
         for step in range(1, loop_step_limit + 1):
+            # plan-91-394: 每步开始登记检查点引用（列表原地追加，失败/暂停时读到的即最新进度）
+            if checkpoint_sink is not None:
+                try:
+                    checkpoint_sink(messages)
+                except Exception:
+                    logger.debug("[agent] checkpoint 回调失败(非阻塞)", exc_info=True)
             if cancel_event and cancel_event.is_set():
                 logger.warning("[agent] task turn=%s 收到中断信号", turn_id)
                 return AgentOutput(kind="cancelled", error="任务被用户中断")
@@ -1264,7 +1298,8 @@ async def run_agent_loop(
                             content={"text": _err_text, "agent_name": agent_name},
                         )
                         if _fatal:
-                            return AgentOutput(kind="error", error=_err_text)
+                            return AgentOutput(kind="error", error=_err_text,
+                                               transient=_is_transient_failure_text(_reason))
             except Exception as api_err:
                 logger.warning("[agent] turn=%s 模型调用失败，尝试修复/压缩: %s", turn_id, str(api_err)[:200])
                 try:
@@ -1444,7 +1479,8 @@ async def run_agent_loop(
                                           agent_id=agent_id, agent_name=agent_name,
                                           msg_type=MsgType.ERROR,
                                           content={"text": f"模型调用失败: {str(api_err)[:200]}", "agent_name": agent_name})
-                    return AgentOutput(kind="error", error=str(api_err))
+                    return AgentOutput(kind="error", error=str(api_err),
+                                       transient=_is_transient_failure_text(str(api_err)))
 
             # 诊断日志：每步模型输出摘要
             logger.info(
@@ -1732,7 +1768,7 @@ async def run_agent_loop(
                     # ── 子代理工具（主代理专用）──
                     if subagent_context and tool_name in (
                         "spawn_subagent", "collect_results", "subagent_inspect", "cancel_subagent",
-                        "send_to_subagent",
+                        "send_to_subagent", "resume_subagent",
                     ):
                         # v21: 子代理工具消息持久化 —— 此前子代理交互（spawn/collect）从不落库，
                         # 停止任务后重建上下文时找不到任何子代理记录，主代理会重新 spawn 重复执行。
@@ -3028,6 +3064,31 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
             f"Instruction delivered to subagent#{_said}; it is injected into its context before "
             "its next model call."
         )
+
+    if tool_name == "resume_subagent":
+        # plan-91-394: 续跑中断/暂停的子代理——保留已完成进度，不新建子代理从头来
+        try:
+            _rid = int(args.get("agent_id"))
+        except (TypeError, ValueError):
+            return "Error: agent_id is required (integer)."
+        from app.orchestration.subagent import resume_subagent as _resume_subagent
+        # 只读/计划模式下不得借续跑恢复可写子代理（沿用原运行模式）
+        _rstate, _rdetail = await _resume_subagent(
+            session_id, _rid, turn_id=turn_id,
+            cancel_event=subagent_context.get("cancel_event"),
+            readonly_only=str(subagent_context.get("permission_mode") or "") in ("readonly", "plan"),
+        )
+        if _rstate == "resumed":
+            return (
+                f"subagent#{_rid} resumed from its checkpoint ({_rdetail}). Completed steps are kept — "
+                "do NOT re-dispatch it. Its completion report is pushed back to you automatically; "
+                "use collect_results(wait=true) if you need to block for it."
+            )
+        if _rstate == "already_running":
+            return f"subagent#{_rid} is already running — nothing to resume."
+        if _rstate == "not_found":
+            return f"No resumable subagent with id {_rid} in this session."
+        return f"subagent#{_rid} cannot be resumed: {_rdetail}"
 
     if tool_name == "spawn_subagent":
         manager = subagent_context.get("manager")

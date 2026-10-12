@@ -5,6 +5,7 @@ import { ApiError } from "../api/client";
 import type { ArtifactOut, ArthasEntryOut, AttachmentInfo, ComposerRefOut, DebugStatusOut, FileChangeOut, MergeReportOut, MessageOut, ModelOut, ProjectOut, ProviderOut, RollbackAffected, RollbackPreviewFile, SessionOut, TaskOut, TurnOut } from "../api/client";
 import { wsClient, globalWsClient } from "../api/ws";
 import { normalizeApprovalMode, normalizeDraftMode } from "./drafts";
+import { parseRefLines } from "../utils/refLines";
 import { isBusy } from "../perf/bus";
 import { registerReconcileTask, RECONCILE_ORDER } from "../perf/reconcile";
 import type { ServerEventName } from "@chatcoder/shared/events";
@@ -76,6 +77,8 @@ export interface QueuedInput {
   attachments?: Record<string, unknown>[];
   reasoningEffort?: string;
   mode?: string | null;
+  /** plan-128-518：引用 chips 的结构化副本——排队编辑回填与出队发送都需要（此前只剩拼接后的文字，chip 丢失） */
+  refs?: ComposerRefOut[];
   /** plan-547: 点击"立即发送"后的注入中状态（等待 user_input.injected 事件确认后移除） */
   flushing?: boolean;
 }
@@ -1393,7 +1396,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set((s) => ({
         queuedInputs: [{
           id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          content, attachments, reasoningEffort, mode,
+          content, attachments, reasoningEffort, mode, refs,
         }, ...s.queuedInputs],
       }));
       return null;
@@ -1406,6 +1409,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           attachments,
           reasoningEffort,
           mode,
+          refs,
         }],
       }));
       return null;
@@ -1841,24 +1845,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // S16（plan-41-197）：撤回回填恢复引用 chips——发送时 refs 被拼装成
       // 「引用文件：/ 使用技能：/ 使用连接器：/ 使用插件：」可读行追加在正文后；
       // 撤回时解析回结构化 refs，输入框恢复 chips 样式（不再只剩纯文本）。
-      const rawText = result.user_message ?? "";
-      const restoredRefs: Array<{ kind: string; value: string; label: string }> = [];
-      const bodyLines: string[] = [];
-      const _kindMap: Record<string, string> = {
-        "引用文件": "file", "使用技能": "skill", "使用连接器": "mcp", "使用插件": "plugin",
-      };
-      for (const line of rawText.split("\n")) {
-        const m = line.match(/^(引用文件|使用技能|使用连接器|使用插件)：(.*)$/);
-        if (!m) { bodyLines.push(line); continue; }
-        const kind = _kindMap[m[1]];
-        for (const part of m[2].split("、")) {
-          const v = part.trim();
-          if (!v) continue;
-          const value = kind === "file" ? v.replace(/^@/, "") : kind === "skill" ? v.replace(/^\$/, "") : v;
-          restoredRefs.push({ kind, value, label: value });
-        }
-      }
-      const restoredText = bodyLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+      // plan-128-518：解析逻辑抽到 utils/refLines，与排队消息编辑共用同一实现
+      const { text: restoredText, refs: restoredRefs } = parseRefLines(result.user_message ?? "");
       set({
         messages, turns, tasks,
         turnChanges: nextChanges,
@@ -2096,7 +2084,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!q || q.flushing) return;
     if (st.runningTurnId == null) {
       set((s) => ({ queuedInputs: s.queuedInputs.filter((x) => x.id !== id) }));
-      await get().sendTurn(q.content, q.attachments, q.reasoningEffort, q.mode);
+      await get().sendTurn(q.content, q.attachments, q.reasoningEffort, q.mode, undefined, q.refs);
       return;
     }
     set((s) => ({
@@ -2107,6 +2095,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         request_id: q.id,
         content: q.content,
         attachments: q.attachments,
+        refs: q.refs,
       });
       // 注入成功由 user_input.injected 事件从队列移除（避免双发）
     } catch (e) {
@@ -2130,7 +2119,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const next = queuedInputs[0];
         if (!next) return;
         set((s) => ({ queuedInputs: s.queuedInputs.slice(1) }));
-        const turnId = await get().sendTurn(next.content, next.attachments, next.reasoningEffort, next.mode);
+        const turnId = await get().sendTurn(next.content, next.attachments, next.reasoningEffort, next.mode, undefined, next.refs);
         if (turnId == null) {
           set((s) => ({ queuedInputs: [next, ...s.queuedInputs] }));
           return;

@@ -7,6 +7,7 @@
 /* ── ① 头部：标签条 + 操作按钮 ───────────────────────────── */
 .right-panel { display: flex; flex-direction: column; width: 100%; height: 100%; min-width: 0; overflow: hidden; background: var(--bg-panel); color: var(--text-1); }
 .rp-head {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -78,7 +79,9 @@
 .rp-tab-close:hover { opacity: 1; background: color-mix(in oklab, var(--text-1) 12%, transparent); color: var(--text-1); }
 .rp-tabs-empty { padding: 0 6px; font-size: 12.5px; color: var(--text-3); white-space: nowrap; }
 .rp-head-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
-.rp-anchor { position: relative; display: inline-flex; }
+/* plan-128-518：菜单以整条标签头（.rp-head）为定位基准而不是按钮——窄面板里 252px 的菜单
+ * 锚在按钮右缘会向左溢出，被面板 overflow:hidden 裁掉；这里改为贴头部右缘、宽度不超过面板 */
+.rp-anchor { position: static; display: inline-flex; }
 .rp-hbtn {
   display: inline-flex;
   align-items: center;
@@ -96,181 +99,113 @@
 .rp-hbtn:hover { background: var(--bg-hover); color: var(--text-1); }
 .rp-hbtn.is-open,
 .rp-hbtn.is-on { background: var(--bg-active); color: var(--text-1); }
-.rp-menu { min-width: 200px; }
-.rp-menu-add { min-width: 252px; }
+.rp-menu { min-width: min(200px, calc(100% - 16px)); max-width: calc(100% - 16px); }
+.rp-menu-add { min-width: min(252px, calc(100% - 16px)); }
+.rp-head .rp-menu.ui-pop { right: 8px; left: auto; }
+.rp-menu .pop-item-title, .rp-menu .pop-item-desc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rp-content { flex: 1; min-height: 0; overflow: hidden; position: relative; background: var(--bg-panel); color: var(--text-1); }
 .rp-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-3); font-size: 13px; }
 .rp-body { height: 100%; overflow-y: auto; background: var(--bg-panel); }
 
 /* ── ② 空态：2×2 工具启动卡（角色色磁贴：闲置灰度，聚焦彩色）──────── */
-.rp-launch { container-type: inline-size; height: 100%; overflow-y: auto; padding: 28px 20px 20px; display: flex; flex-direction: column; gap: 18px; }
-.rp-launch-head { display: flex; flex-direction: column; gap: 4px; }
+/* plan-128-518：参考「打开标签页」样式——整体垂直居中，标题 + 一句说明 + 灰底磁贴；
+ * 磁贴只有一层（图标 + 名称），悬停仅底色加深，无位移、无边框、无阴影；
+ * 窄面板（<420px）单列竖排，宽面板自动 2~3 列，同一份标记不做布局切换。 */
+.rp-launch { container-type: inline-size; height: 100%; overflow-y: auto; padding: 24px 20px; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+.rp-launch-inner { width: 100%; max-width: 440px; display: flex; flex-direction: column; align-items: stretch; gap: 16px; }
+.rp-launch-head { display: flex; flex-direction: column; align-items: center; gap: 4px; text-align: center; }
 .rp-launch-title { font-size: 15px; font-weight: 650; letter-spacing: -0.01em; color: var(--text-1); }
-.rp-launch-sub { font-size: 12.5px; color: var(--text-3); }
-.rp-launch-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.rp-launch-card {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-card);
-  background: var(--color-card);
-  color: var(--text-1);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  /* 用独立的 translate 属性做抬升：入场动画（mo-stagger）以 fill-mode both 持有 transform，会把 hover 的 transform 压住 */
-  transition: border-color var(--dur-2) var(--ease-standard), box-shadow var(--dur-3) var(--ease-standard), translate var(--dur-spring) var(--spring-bouncy);
+.rp-launch-sub { font-size: 12.5px; line-height: 1.5; color: var(--text-3); }
+.rp-launch-list { display: grid; grid-template-columns: 1fr; gap: 8px; }
+.rp-launch-tile {
+  display: flex; align-items: center; gap: 10px;
+  height: 40px; padding: 0 14px;
+  border: 0; border-radius: var(--r-md);
+  background: var(--bg-hover); color: var(--text-1);
+  font: inherit; text-align: left; cursor: pointer;
+  transition: background var(--dur-2) var(--ease-standard);
 }
-.rp-launch-card:hover { border-color: var(--border-strong); box-shadow: 0 8px 20px rgba(0, 0, 0, calc(0.07 * var(--shadow-strength, 1))); translate: 0 -2px; }
-.rp-launch-card:active { translate: 0 0; }
-.rp-launch-card:focus-visible { outline: 2px solid color-mix(in oklab, var(--info) 60%, transparent); outline-offset: 2px; }
-/* 第 5 张（调试）独占一行，横排 */
-.rp-launch-card:nth-child(5):last-child { grid-column: 1 / -1; flex-direction: row; align-items: center; }
-.rp-launch-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.rp-launch-name { font-size: 13.5px; font-weight: 600; }
-.rp-launch-desc { font-size: 12px; line-height: 1.5; color: var(--text-3); }
-@container (max-width: 360px) {
-  .rp-launch-grid { grid-template-columns: minmax(0, 1fr); }
-  .rp-launch-card { flex-direction: row; align-items: center; }
+.rp-launch-tile:hover { background: var(--bg-active); }
+.rp-launch-tile:focus-visible { outline: 2px solid color-mix(in oklab, var(--info) 60%, transparent); outline-offset: -2px; }
+.rp-launch-ic { flex: none; display: inline-flex; color: var(--text-2); transition: color var(--dur-2) var(--ease-standard); }
+.rp-launch-tile:hover .rp-launch-ic { color: var(--text-1); }
+.rp-launch-name { font-size: 13px; font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@container (min-width: 420px) {
+  .rp-launch-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .rp-launch-tile { flex-direction: column; justify-content: center; gap: 6px; height: 68px; padding: 0 10px; }
+  .rp-launch-name { font-size: 12.5px; }
 }
+@container (min-width: 620px) { .rp-launch-list { grid-template-columns: repeat(3, minmax(0, 1fr)); } .rp-launch-inner { max-width: 560px; } }
 
-/* ── ③ 任务摘要 ──────────────────────────────────────────── */
-.ts-panel { padding: 14px 14px 28px; display: flex; flex-direction: column; gap: 20px; }
-.ts-head {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 14px 14px 14px 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-card);
-  background: var(--color-card);
+/* ── ③ 摘要（plan-128-518 重做）──────────────────────────────
+ * 四个固定模块（进度 / 产物 / 子代理 / 拓展），每个模块是一块**封闭**的圆角面（一层，不嵌套）；
+ * 模块之间只靠 10px 留白分隔，不再用开口的细横线。
+ * 行系统统一：[16px 前导槽位] 标题 …… 右侧备注；悬停只变底色。
+ * 圆角同心：卡片 12px = 内边距 4px + 行 8px。 */
+.ts-panel { display: flex; flex-direction: column; gap: 10px; padding: 12px 12px 24px; }
+.ts-card {
+  border: 1px solid var(--surface-inset-border);
+  border-radius: var(--r-lg);
+  background: var(--surface-inset);
 }
-.ts-head-top { display: flex; align-items: center; gap: 12px; }
-.ts-head-main { flex: 1; min-width: 0; }
-.ts-head-title { font-size: 15px; font-weight: 650; letter-spacing: -0.01em; color: var(--text-1); line-height: 1.35; }
-.ts-head.is-warning .ts-head-title { color: var(--warning); }
-.ts-head.is-success .ts-head-title { color: var(--success); }
-.ts-head-sub { margin-top: 2px; font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ts-head-refresh { align-self: flex-start; }
-.ts-bar { height: 4px; border-radius: var(--r-pill); background: color-mix(in oklab, var(--text-1) 8%, transparent); overflow: hidden; }
-.ts-bar-fill { display: block; height: 100%; width: calc(var(--ratio, 0) * 100%); border-radius: var(--r-pill); background: var(--info); transition: width var(--dur-spring) var(--spring-soft), background var(--dur-3) var(--ease-standard); }
-.ts-head.is-success .ts-bar-fill { background: var(--success); }
-.ts-head.is-warning .ts-bar-fill { background: var(--warning); }
-
-.ts-empty-card { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 34px 20px 18px; text-align: center; }
-.ts-empty-title { font-size: 13.5px; font-weight: 600; color: var(--text-1); }
-.ts-empty-sub { max-width: 240px; font-size: 12.5px; line-height: 1.6; color: var(--text-3); }
-
-.ts-sec { display: flex; flex-direction: column; gap: 4px; }
-.ts-sec-head { display: flex; align-items: center; gap: 8px; min-height: 28px; padding: 0 2px; }
-.ts-sec-title { font-size: 12.5px; font-weight: 600; color: var(--text-1); }
-.ts-sec-meta { flex: 1; min-width: 0; text-align: right; font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ts-sec-head > .ui-badge { margin-right: auto; }
-
-.ts-steps { display: flex; flex-direction: column; }
-.ts-step {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 34px;
-  padding: 6px 8px;
-  border: none;
-  border-radius: var(--r-ctl);
-  background: transparent;
-  color: var(--text-1);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition: background var(--dur-1) var(--ease-standard);
+/* 表头：[图标] 标题 计数 …… [折叠箭头]；高度固定，折叠/展开不抖动 */
+.ts-card-head {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; height: 40px; padding: 0 12px;
+  border: 0; border-radius: calc(var(--r-lg) - 1px);
+  background: transparent; color: var(--text-1);
+  font: inherit; text-align: left; cursor: pointer;
 }
-.ts-step:hover:not(:disabled) { background: var(--bg-hover); }
-.ts-step:disabled { cursor: default; }
-.ts-step-title { flex: 1; min-width: 0; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: color var(--dur-3) var(--ease-standard); }
-.ts-step.is-running .ts-step-title { font-weight: 600; }
-.ts-step.is-done .ts-step-title,
-.ts-step.is-pending .ts-step-title { color: var(--text-3); }
-.ts-step.is-interrupted .ts-step-title { color: var(--warning); }
-.ts-step-note { flex-shrink: 0; max-width: 40%; font-size: 11px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ts-card-head:focus-visible { outline: 2px solid color-mix(in oklab, var(--info) 60%, transparent); outline-offset: -2px; }
+.ts-card-ic { flex: none; display: inline-flex; color: var(--text-3); transition: color var(--dur-2) var(--ease-standard); }
+.ts-card-title { font-size: 13px; font-weight: 600; color: var(--text-1); }
+.ts-card-count { font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ts-chev {
+  flex: none; margin-left: auto; width: 16px; height: 16px;
+  display: inline-grid; place-items: center; color: var(--text-3);
+  transition: rotate var(--dur-3) var(--ease-standard), color var(--dur-2) var(--ease-standard);
+}
+.ts-card[data-fold="1"] .ts-chev { rotate: -90deg; }
+.ts-card-head:hover .ts-card-ic,
+.ts-card-head:hover .ts-chev { color: var(--text-1); }
+.ts-card-body { display: flex; flex-direction: column; gap: 8px; padding: 0 4px 6px; }
 
-.ts-plan-actions { display: flex; gap: 8px; }
+/* 行：进度步骤 / 产物文件 / 子代理 / 拓展共用 */
+.ts-rows { display: flex; flex-direction: column; gap: 1px; }
+.ts-row {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; min-height: 32px; padding: 0 8px;
+  border: 0; border-radius: var(--r-md);
+  background: transparent; color: var(--text-1);
+  font: inherit; text-align: left;
+}
+button.ts-row { cursor: pointer; transition: background var(--dur-2) var(--ease-standard); }
+button.ts-row:hover:not(:disabled) { background: var(--bg-hover); }
+button.ts-row:disabled { cursor: default; }
+button.ts-row:focus-visible { outline: 2px solid color-mix(in oklab, var(--info) 60%, transparent); outline-offset: -2px; }
+.ts-row-lead { flex: none; width: 16px; height: 16px; display: inline-grid; place-items: center; color: var(--text-2); }
+.ts-row-title { flex: 1; min-width: 0; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: color var(--dur-3) var(--ease-standard); }
+.ts-row-note { flex: none; max-width: 45%; font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ts-row.is-running .ts-row-title { font-weight: 600; }
+.ts-row.is-done .ts-row-title,
+.ts-row.is-pending .ts-row-title { color: var(--text-3); }
+.ts-row.is-interrupted .ts-row-title { color: var(--warning); }
+.ts-row.is-goal .ts-row-lead { color: var(--accent); }
 
-.ts-group + .ts-group { margin-top: 8px; }
-.ts-group-title { padding: 6px 8px 2px; font-size: 11.5px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ts-file {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 34px;
-  padding: 3px 4px 3px 6px;
-  border-radius: var(--r-ctl);
-  transition: background var(--dur-1) var(--ease-standard);
-}
-.ts-file:hover { background: var(--bg-hover); }
-.ts-check {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 16px;
-  height: 16px;
-  padding: 0;
-  border: 1.5px solid color-mix(in oklab, var(--text-1) 32%, transparent);
-  border-radius: var(--r-pill);
-  background: transparent;
-  color: transparent;
-  cursor: pointer;
-  transition: background var(--dur-2) var(--ease-standard), border-color var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard);
-}
-.ts-check svg { scale: 0.5; transition: scale var(--dur-spring) var(--spring-bouncy); }
-.ts-check:hover { border-color: var(--success); }
-.ts-file.is-reviewed .ts-check { background: var(--success); border-color: var(--success); color: #fff; }
-.ts-file.is-reviewed .ts-check svg { scale: 1; }
-.ts-file-main {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--text-1);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-/* plan-404-1892（图4）：只显示文件名——弹性占满剩余宽度，超长省略不换行；完整路径由悬停提示给出 */
-.ts-file-name { flex: 1; min-width: 0; font-size: 12.5px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: color var(--dur-2) var(--ease-standard); }
-.ts-file.is-reviewed .ts-file-name { color: var(--text-3); }
-.ts-file.is-reviewed .file-ic { opacity: 0.55; }
-.ts-file-ops { display: inline-flex; gap: 2px; flex-shrink: 0; opacity: 0; transition: opacity var(--dur-2) var(--ease-standard); }
-.ts-file:hover .ts-file-ops,
-.ts-file:focus-within .ts-file-ops { opacity: 1; }
-.ts-file-ops .ui-icon-btn { width: 24px; height: 24px; }
+/* 进度总览 + 细进度条 */
+.ts-overview { display: flex; align-items: center; gap: 8px; padding: 2px 8px 0; }
+/* plan-128-518：总览行不设图标槽位——文字左缘与卡片头图标、步骤图标、进度条同在 12px 这条左基准线上 */
+.ts-overview-title { flex: 1; min-width: 0; font-size: 12.5px; font-weight: 600; color: var(--text-1); }
+.ts-overview-title.is-running { color: var(--accent); }
+.ts-overview-title.is-paused { color: var(--warning); }
+.ts-overview-title.is-done { color: var(--text-2); }
+.ts-overview-note { flex: none; font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.ts-bar { height: 4px; margin: 0 8px; border-radius: var(--r-pill); background: color-mix(in oklab, var(--text-1) 8%, transparent); overflow: hidden; }
+.ts-bar-fill { display: block; height: 100%; width: calc(var(--ratio, 0) * 100%); border-radius: var(--r-pill); background: var(--accent); transition: width var(--dur-spring) var(--spring-soft); }
+.ts-plan-actions { display: flex; gap: 8px; padding: 4px 8px 2px; }
+/* 模块无内容时的一行说明：版面恒定，不动态增删模块 */
+.ts-empty { margin: 0; padding: 2px 8px 4px; font-size: 12px; line-height: 1.5; color: var(--text-3); }
 .ui-icon-btn.is-danger:hover:not(:disabled) { color: var(--error); background: var(--error-soft); }
-
-.ts-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 0 0; }
-.ts-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 100%;
-  height: 26px;
-  padding: 0 10px 0 7px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-pill);
-  background: var(--color-card);
-  color: var(--text-2);
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-  transition: background var(--dur-1) var(--ease-standard), color var(--dur-1) var(--ease-standard), border-color var(--dur-1) var(--ease-standard);
-}
-.ts-chip > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ts-chip:hover { background: var(--bg-hover); color: var(--text-1); border-color: var(--border-strong); }
 
 /* ── ④ 文件管理：虚拟化目录树 + 预览 ─────────────────────── */
 .ft-panel { display: flex; flex-direction: column; height: 100%; overflow: hidden; }

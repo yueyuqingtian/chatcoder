@@ -10,7 +10,7 @@ svg.ic-spinner .ic-spinner-arc { transform-box: view-box; transform-origin: 12px
   border-top-color: currentColor; border-radius: 50%;
   animation: session-spin var(--dur-spin) linear infinite;
 }
-.sb-session-pulse.on { color: var(--success); }
+.sb-session-pulse.on { color: var(--accent); }
 .todo-spinner { color: var(--accent); }
 
 /* ── 消息流底部等待标记（SVG）：三点依次起伏，末端光标呼吸 ── */

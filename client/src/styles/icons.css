@@ -116,13 +116,15 @@ svg.ic .ic-needle { transform-box: view-box; transform-origin: 12px 14px; transi
 .st-icon > svg { grid-area: 1 / 1; overflow: visible; }
 .st-icon[data-status="pending"] { --st-color: var(--text-3); }
 .st-icon[data-status="queued"] { --st-color: var(--text-3); }
-.st-icon[data-status="running"] { --st-color: var(--info); }
+/* plan-128-518：执行中转圈与左侧会话「执行中」同色（--accent，随主题世界变色） */
+.st-icon[data-status="running"] { --st-color: var(--accent); }
 .st-icon[data-status="done"] { --st-color: var(--success); }
 .st-icon[data-status="failed"] { --st-color: var(--error); }
 .st-icon[data-status="cancelled"],
 .st-icon[data-status="paused"] { --st-color: var(--warning); }
 .st-icon .st-ring { transition: stroke-dasharray var(--dur-4) var(--ease-standard), opacity var(--dur-2) var(--ease-standard); }
-.st-icon .st-arc { transform-origin: center; transform-box: fill-box; animation: mo-spin var(--dur-spin) linear infinite; }
+/* plan-128-518：与左侧会话同款：以 viewBox 中心为轴、session-spin 同一条关键帧与时长 */
+.st-icon .st-arc { transform-box: view-box; transform-origin: 12px 12px; animation: session-spin var(--dur-spin) linear infinite; }
 .st-icon .st-core { transform-box: fill-box; transform-origin: center; animation: mo-bounce-in var(--dur-spring) var(--spring-bouncy) both; }
 .st-icon .st-mark { stroke-dasharray: 1; animation: mo-draw-in var(--dur-4) var(--ease-emphasized-decel) 60ms both; }
 .st-icon .st-pulse { transform-box: fill-box; transform-origin: center; animation: st-breathe var(--dur-loop) var(--ease-in-out) infinite; }

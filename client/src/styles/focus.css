@@ -45,7 +45,6 @@ button:focus-visible,
 .sb-rename-input:focus,
 .todo-proposal-input:focus,
 .question-custom:focus,
-.browser-start-input:focus,
 .browser-console-input:focus {
   outline: none;
   border-color: var(--text-2);

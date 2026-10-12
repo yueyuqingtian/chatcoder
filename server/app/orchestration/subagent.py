@@ -8,12 +8,20 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.orchestration.agent_loop import run_agent_loop
+from app.models.schemas import ChatMessage
+from app.orchestration.agent_loop import (
+    AgentOutput,
+    _retry_plan,
+    _retry_wait_seconds,
+    _wait_retry_interval,
+    run_agent_loop,
+)
 from app.orchestration.tools.registry import tool_registry
-from app.persistence.database import async_session_factory, commit_with_retry
+from app.persistence.database import async_session_factory, commit_with_retry, run_write_locked
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +32,8 @@ class SubagentHandle:
     task: object = None
     # v36: 归属 turn——每轮派发总量上限按此统计（含已完成/失败）
     turn_id: int | None = None
-    status: str = "running"  # running / done / failed
+    # running / done / failed / paused（中断可续跑）/ cancelled（用户显式取消）
+    status: str = "running"
     summary: str = ""
     error: str = ""
     artifact_ids: list[int] = field(default_factory=list)
@@ -52,6 +61,20 @@ class SubagentHandle:
     # plan-330-1648 M2: 实际生效的模型/思考深度（供汇报与诊断——核对“设置是否生效”）
     model_id: int | None = None
     reasoning_effort: str | None = None
+    # plan-91-394: 断点续跑——检查点与续跑参数
+    # live_messages：run_agent_loop 的 messages 列表引用（每步登记），失败/暂停时即最新进度
+    live_messages: list | None = None
+    # run_spec：续跑所需的可落库运行参数（workspace / 工具名 / 模式 / 档位 …）
+    run_spec: dict = field(default_factory=dict)
+    # tool_schemas：进程内工具 schema（续跑优先复用，落库时按工具名重建）
+    tool_schemas: list = field(default_factory=list)
+    resumable: bool = False
+    # waiting：瞬时故障后保活等待恢复中
+    waiting: bool = False
+    # cancel_requested：用户显式取消（cancel_subagent）→ 终态取消；否则中断一律视为暂停
+    cancel_requested: bool = False
+    # pause_reason：暂停原因文案（主代理中断 / 主代理已结束），写入检查点与卡片备注
+    pause_reason: str = ""
 
 
 class SubagentManager:
@@ -74,6 +97,9 @@ class SubagentManager:
         self._leader_notify = None
         # 后台子代理终态回调（engine 启动 turn 时注册：turn 已结束时据此自动唤醒主代理）
         self._finish_notify = None
+        # plan-91-394: 主代理 turn 是否存活。仅存活期间允许瞬时故障子代理保活等待恢复；
+        # turn 收尾后不再保活（改为暂停保存检查点），避免后台无限重试。
+        self.owner_active = False
 
     def spawn(self, db, *, agent, turn_id: int, task, handoff_summary: str,
               context_bundle, tool_schemas: list[dict], workspace: str,
@@ -102,84 +128,20 @@ class SubagentManager:
         )
         self._handles[agent.id] = handle
 
-        async def _run():
-            try:
-                # 问题3: 子代理用独立 AsyncSession —— 不再与主代理共享 session，
-                # 避免多任务交错 flush/commit 踩踏产生 SQLite database is locked / PendingRollbackError。
-                async with async_session_factory() as s:
-                    # v9: 子任务启动即广播 in_progress（提交任务创建 + 状态），
-                    # 前端任务面板/右上角卡片实时展示新任务的拆分步骤与执行情况。
-                    # 此前子任务创建后从不更新状态，前端看不到子任务步骤执行进度。
-                    await _sync_task_status(s, self.session_id, task.id, "in_progress", None)
-                    out = await run_agent_loop(
-                        s, session_id=self.session_id, turn_id=turn_id,
-                        agent=agent, context_messages=context_bundle.to_messages(),
-                        tool_schemas=tool_schemas, workspace=workspace,
-                        cancel_event=cancel_event, token_budget=token_budget,
-                        task_id=getattr(task, "id", None), model_id=getattr(agent, "model_id", None),
-                        # plan-330-1648 M2: 思考深度随子代理类型设置透传（None = 全局默认）
-                        reasoning_effort=reasoning_effort,
-                        # plan-330-1648 M1: 运行模式按类型锁定（readonly/default），不继承会话模式
-                        subagent_mode=subagent_mode,
-                        # plan-330-1648 M4: 双向通信——①运行中可接收主代理追加指令（inbox 注入）；
-                        # ②通过 subagent_comm 支持 report_to_leader 上报/提问。
-                        injected_inputs_provider=(lambda _aid=agent.id: self.drain_agent_inputs(_aid)),
-                        subagent_comm={
-                            "manager": self,
-                            "agent_id": agent.id,
-                            "sync": bool(is_blocking),
-                        },
-                        # plan-19-82: 子代理压缩摘要同样跟随用户语言
-                        reply_language=getattr(context_bundle, "reply_language", "auto"),
-                        reply_language_source=getattr(context_bundle, "reply_language_source", "user"),
-                    )
-                    handle.status = "done" if out.kind == "message" else "failed"
-                    handle.summary = out.text or ""
-                    handle.error = out.error or ""
-                    handle.artifact_ids = list(out.artifact_ids or [])
-                    # v20: 探索子代理最终输出即结论文本（供主代理 wait 后直接整合）
-                    handle.findings = out.text or ""
-                    # plan-248-1258 M6: 解析结构化汇报（结果/变更文件/关键发现/风险）
-                    _parse_structured_report(handle, out.text or "")
-                    await _sync_task_status(
-                        s, self.session_id, task.id,
-                        "done" if handle.status == "done" else "failed",
-                        (out.text or "")[:300] or None,
-                        agent_id=agent.id,
-                        # v36 (plan-321-1600 M1): 累加子代理 token 用量（此前恒为 0）
-                        token_usage=getattr(out, "tokens", 0) or 0,
-                    )
-            except asyncio.CancelledError:
-                handle.status = "cancelled"
-                handle.error = "用户中断"
-                async with async_session_factory() as s:
-                    await _sync_task_status(s, self.session_id, task.id, "cancelled", "用户中断", agent_id=agent.id)
-                # plan-330-1648 M7: 失败/取消对外可见（卡片与右面板显示原因，不再只留红叉）
-                await _broadcast_subagent_failed(self.session_id, agent.id, "用户中断", "cancelled")
-                raise
-            except Exception as e:
-                handle.status = "failed"
-                handle.error = str(e)
-                async with async_session_factory() as s:
-                    await _sync_task_status(s, self.session_id, task.id, "failed", f"执行异常: {str(e)[:200]}", agent_id=agent.id)
-                logger.exception("[subagent] %s 异常", agent.id)
-                await _broadcast_subagent_failed(self.session_id, agent.id, str(e), "failed")
-            # v956：子代理 loop 结束前 flush 其消息（与主代理共用 turn buffer）
-            try:
-                from app.persistence.write_behind import write_behind
-                await write_behind.get(self.session_id, turn_id).flush()
-            except Exception:
-                logger.debug("[subagent] flush turn buffer failed agent=%s", agent.id, exc_info=True)
-            # v36 (plan-321-1600 M3): 终态入队“完成通知”——主代理下次 LLM 调用前自动收到，
-            # 无需轮询 collect_results（已读集合命中则跳过）。
-            self._enqueue_completion(handle)
-            # 修复：主代理 turn 已结束时仅入队通知没有任何动作送达（要等用户下一条消息）
-            # ——表现为“子代理跑完但主代理没被唤醒”。终态回调让 engine 在会话空闲时
-            # 自动创建续跑 turn，完成报告随新 turn 的注入通道送达主代理。
-            self.notify_finished(handle)
-            logger.info("[subagent] %s 完成 status=%s", agent.id, handle.status)
-
-        handle.task = asyncio.create_task(_run())
+        # plan-91-394: 运行参数与消息检查点随 handle 保存——中断后可从断点续跑（resume_subagent）
+        handle.tool_schemas = list(tool_schemas or [])
+        handle.run_spec = _build_run_spec(
+            agent=agent, task_id=getattr(task, "id", None), turn_id=turn_id,
+            task_title=handle.task_title, workspace=workspace, tool_schemas=tool_schemas,
+            subagent_mode=subagent_mode, reasoning_effort=reasoning_effort, token_budget=token_budget,
+            reply_language=getattr(context_bundle, "reply_language", "auto"),
+            reply_language_source=getattr(context_bundle, "reply_language_source", "user"),
+        )
+        handle.live_messages = list(context_bundle.to_messages())
+        handle.task = asyncio.create_task(self._drive(
+            handle, agent_id=agent.id, task_id=getattr(task, "id", None), turn_id=turn_id,
+            messages=handle.live_messages, cancel_event=cancel_event, is_blocking=bool(is_blocking),
+        ))
         return agent.id
 
     async def spawn_and_wait(self, db, *, agent, turn_id: int, task, handoff_summary: str,
@@ -210,6 +172,180 @@ class SubagentManager:
         if handle is not None and handle.task is not None:
             await handle.task
         return handle
+
+    # ── plan-91-394: 驱动循环 / 检查点 / 暂停 ──────────
+
+    async def _drive(self, handle: "SubagentHandle", *, agent_id: int, task_id: int | None,
+                     turn_id: int, messages: list, cancel_event: asyncio.Event | None,
+                     is_blocking: bool) -> None:
+        """子代理驱动循环：执行 → 瞬时故障保活重试 → 终态或暂停。
+
+        - 成功：status=done，清空检查点；
+        - 瞬时故障（网关/超时/空响应/流丢帧）且设置中的重试次数>0：按最后一个重试间隔等待，
+          从检查点原地续跑（已完成步骤不重做），直到恢复或主代理中断；
+        - 主代理中断（取消信号 / CancelledError）：status=paused，保存检查点（可续跑）；
+        - 用户显式取消（cancel_subagent）：status=cancelled，清空检查点；
+        - 其余失败：status=failed，保留检查点（可由“重试”或 resume_subagent 续跑）。
+        """
+        sid = self.session_id
+        spec = dict(handle.run_spec or {})
+        handle.live_messages = messages
+        attempt_messages = messages
+        try:
+            while True:
+                if task_id is not None:
+                    await _sync_task(sid, task_id, "in_progress", None)
+                try:
+                    from app.persistence.models.agent import Agent as _AgentRow
+                    async with async_session_factory() as s:
+                        agent_row = await s.get(_AgentRow, agent_id)
+                        out = await run_agent_loop(
+                            s, session_id=sid, turn_id=turn_id,
+                            agent=agent_row, context_messages=attempt_messages,
+                            tool_schemas=handle.tool_schemas, workspace=spec.get("workspace") or "",
+                            cancel_event=cancel_event, token_budget=spec.get("token_budget"),
+                            task_id=task_id, model_id=spec.get("model_id"),
+                            reasoning_effort=spec.get("reasoning_effort"),
+                            subagent_mode=spec.get("subagent_mode"),
+                            injected_inputs_provider=(lambda _aid=agent_id: self.drain_agent_inputs(_aid)),
+                            subagent_comm={"manager": self, "agent_id": agent_id, "sync": bool(is_blocking)},
+                            reply_language=spec.get("reply_language", "auto"),
+                            reply_language_source=spec.get("reply_language_source", "user"),
+                            checkpoint_sink=lambda msgs, _h=handle: setattr(_h, "live_messages", msgs),
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    logger.exception("[subagent] %s 异常", agent_id)
+                    out = AgentOutput(kind="error", error=f"执行异常: {str(e)[:300]}")
+
+                if out.kind == "message":
+                    handle.status = "done"
+                    handle.summary = out.text or ""
+                    handle.error = out.error or ""
+                    handle.artifact_ids = list(out.artifact_ids or [])
+                    # v20: 探索子代理最终输出即结论文本（供主代理 wait 后直接整合）
+                    handle.findings = out.text or ""
+                    # plan-248-1258 M6: 解析结构化汇报（结果/变更文件/关键发现/风险）
+                    _parse_structured_report(handle, out.text or "")
+                    handle.resumable = False
+                    handle.waiting = False
+                    await _persist_agent_state(agent_id, "done", None)
+                    await _sync_task(sid, task_id, "done", (out.text or "")[:300] or None,
+                                     agent_id=agent_id, token_usage=getattr(out, "tokens", 0) or 0)
+                    await self._after_terminal(handle, notify=True)
+                    logger.info("[subagent] %s 完成 status=done", agent_id)
+                    return
+
+                if handle.cancel_requested:
+                    await self._finish_cancelled(handle, agent_id=agent_id, task_id=task_id)
+                    return
+                interrupted = out.kind == "cancelled" or bool(cancel_event and cancel_event.is_set())
+                if interrupted:
+                    await self._finish_paused(handle, agent_id=agent_id, task_id=task_id, spec=spec,
+                                              reason=handle.pause_reason or "主代理已中断")
+                    return
+                if out.transient:
+                    waits = _retry_plan()
+                    if waits and self.owner_active:
+                        # 保活：重试耗尽仍是瞬时故障——不判死，按最后一个间隔继续尝试恢复
+                        handle.waiting = True
+                        await _sync_task(sid, task_id, "in_progress",
+                                         "网络或网关异常，等待恢复后自动续跑（进度已保留）")
+                        logger.warning("[subagent] %s 瞬时故障保活等待恢复: %s", agent_id, (out.error or "")[:200])
+                        alive = await _wait_retry_interval(cancel_event, _retry_wait_seconds(len(waits)))
+                        handle.waiting = False
+                        if not alive:
+                            await self._finish_paused(handle, agent_id=agent_id, task_id=task_id, spec=spec,
+                                                      reason=handle.pause_reason or "主代理已中断")
+                            return
+                        attempt_messages = _sanitize_messages(list(handle.live_messages or attempt_messages))
+                        continue
+                    # 未配置重试：瞬时故障也不判死，保存检查点等待主代理/用户续跑
+                    await self._finish_paused(handle, agent_id=agent_id, task_id=task_id, spec=spec,
+                                              reason=out.error or "网络或网关故障")
+                    return
+                await self._finish_failed(handle, agent_id=agent_id, task_id=task_id, spec=spec,
+                                          error=out.error or "未知原因")
+                return
+        except asyncio.CancelledError:
+            # 任务被取消：主代理中断/结束（暂停）或用户显式取消（终态）。收尾后正常结束任务。
+            handle.waiting = False
+            if handle.cancel_requested:
+                await self._finish_cancelled(handle, agent_id=agent_id, task_id=task_id)
+            else:
+                await self._finish_paused(handle, agent_id=agent_id, task_id=task_id, spec=spec,
+                                          reason=handle.pause_reason or "主代理已中断")
+
+    async def _finish_paused(self, handle: "SubagentHandle", *, agent_id: int, task_id: int | None,
+                             spec: dict, reason: str) -> None:
+        """暂停：保存检查点（可续跑）。不通知唤醒——由主代理在用户“继续”时决定续跑。"""
+        handle.status = "paused"
+        handle.waiting = False
+        handle.resumable = True
+        handle.error = f"已暂停（{reason}），进度已保存，可续跑"
+        await _persist_agent_state(agent_id, "paused", _checkpoint_payload(handle, spec, reason))
+        await _sync_task(self.session_id, task_id, "failed", handle.error[:300], agent_id=agent_id)
+        await _broadcast_subagent_failed(self.session_id, agent_id, handle.error, "failed")
+        await self._after_terminal(handle, notify=False)
+        logger.warning("[subagent] %s 已暂停（%s），检查点已保存", agent_id, reason)
+
+    async def _finish_failed(self, handle: "SubagentHandle", *, agent_id: int, task_id: int | None,
+                             spec: dict, error: str) -> None:
+        """非瞬时失败（鉴权/模型不可用/确定性截断等）：终态失败，保留检查点供重试续跑。"""
+        handle.status = "failed"
+        handle.waiting = False
+        handle.error = error
+        handle.resumable = True
+        await _persist_agent_state(agent_id, "failed", _checkpoint_payload(handle, spec, error))
+        await _sync_task(self.session_id, task_id, "failed", f"{error[:200]}（进度已保存，可续跑）",
+                         agent_id=agent_id)
+        await _broadcast_subagent_failed(self.session_id, agent_id, error, "failed")
+        await self._after_terminal(handle, notify=True)
+        logger.info("[subagent] %s 完成 status=failed", agent_id)
+
+    async def _finish_cancelled(self, handle: "SubagentHandle", *, agent_id: int, task_id: int | None) -> None:
+        """用户显式取消：终态，清空检查点（不可续跑）。"""
+        handle.status = "cancelled"
+        handle.waiting = False
+        handle.resumable = False
+        handle.error = handle.error or "用户中断"
+        await _persist_agent_state(agent_id, "cancelled", None)
+        await _sync_task(self.session_id, task_id, "cancelled", "用户中断", agent_id=agent_id)
+        await _broadcast_subagent_failed(self.session_id, agent_id, "用户中断", "cancelled")
+        await self._after_terminal(handle, notify=False)
+
+    async def _after_terminal(self, handle: "SubagentHandle", *, notify: bool) -> None:
+        """子代理收尾：flush 本 turn 消息缓冲；notify=True 时入完成通知并唤醒主代理。"""
+        try:
+            from app.persistence.write_behind import write_behind
+            await write_behind.get(self.session_id, handle.turn_id).flush()
+        except Exception:
+            logger.debug("[subagent] flush turn buffer failed agent=%s", handle.agent_id, exc_info=True)
+        if notify:
+            self._enqueue_completion(handle)
+            self.notify_finished(handle)
+
+    def pause_for_turn_end(self, *, interrupted: bool) -> int:
+        """plan-91-394: 主代理 turn 收尾时决定子代理去留（子代理只在主代理停止/中断时自动停止）。
+
+        - interrupted=True（主代理被中断或出错结束）：运行中的子代理全部暂停（保存检查点）；
+        - interrupted=False（主代理正常结束）：仅暂停处于保活等待中的子代理（避免无限后台重试），
+          正常运行中的子代理照常完成并唤醒主代理。
+        返回被暂停的子代理数量。
+        """
+        self.owner_active = False
+        paused = 0
+        for h in self._handles.values():
+            if h.status != "running" or h.task is None or h.task.done():
+                continue
+            if interrupted or h.waiting:
+                h.pause_reason = "主代理已中断" if interrupted else "主代理已结束"
+                h.task.cancel()
+                paused += 1
+        if paused:
+            logger.warning("[subagent] 主代理 turn 结束(interrupted=%s)，暂停子代理 %d 个", interrupted, paused)
+        return paused
 
     # ── plan-330-1648 M4: 双向通信 ──────────────────────
 
@@ -292,7 +428,7 @@ class SubagentManager:
         """已完成的子代理结构化结果列表（plan-248-1258 M6 加强汇报）。"""
         out = []
         for aid, h in self._handles.items():
-            if h.status in ("done", "failed"):
+            if h.status in ("done", "failed", "paused"):
                 out.append({
                     "agent_id": aid, "status": h.status,
                     "title": h.task_title,
@@ -450,6 +586,8 @@ class SubagentManager:
             return "not_found"
         if h.status != "running" or h.task is None or h.task.done():
             return "not_running"
+        # plan-91-394: 显式取消为终态（区别于主代理中断的暂停）
+        h.cancel_requested = True
         h.task.cancel()
         await asyncio.gather(h.task, return_exceptions=True)
         h.status = "cancelled"
@@ -467,6 +605,225 @@ class SubagentManager:
             if handle.status == "running":
                 handle.status = "cancelled"
 
+
+
+# ── plan-91-394: 断点续跑（检查点 / 续跑 / 列出可续跑子代理） ──
+
+# 续跑时追加到检查点末尾的说明：告知模型这是断点续跑，已完成的步骤不要重做
+_RESUME_NOTE = (
+    "[系统·断点续跑] 你上一次运行因网络/网关故障或主代理中断而暂停，现已从断点恢复。"
+    "以上消息即已完成的全部进度：不要重复已完成的步骤；若最后一步的结果不确定"
+    "（例如刚执行的写入或命令），先用只读工具核实当前状态，再继续完成原任务，并按原汇报格式输出最终结果。"
+)
+
+
+def _sanitize_messages(messages: list) -> list:
+    """修复检查点中的工具调用配对（悬空 tool_calls / 孤立 tool 消息），保证续跑请求合法。"""
+    from app.orchestration.compaction import (
+        ensure_tool_pairing,
+        normalize_tool_sequence,
+        repair_tool_call_ids,
+    )
+    out = repair_tool_call_ids(list(messages))
+    out = ensure_tool_pairing(out)
+    return normalize_tool_sequence(out)
+
+
+def _build_run_spec(*, agent, task_id, turn_id, task_title, workspace, tool_schemas, subagent_mode,
+                    reasoning_effort, token_budget, reply_language, reply_language_source) -> dict:
+    """运行参数（可落库的 JSON 子集）。工具 schema 按名保存，续跑时重建。"""
+    names = [s.get("function", {}).get("name") for s in (tool_schemas or [])]
+    return {
+        "task_id": task_id,
+        "turn_id": turn_id,
+        "task_title": task_title or "",
+        "workspace": workspace or "",
+        "tool_names": [n for n in names if n],
+        "subagent_mode": subagent_mode,
+        "reasoning_effort": reasoning_effort,
+        "token_budget": token_budget,
+        "reply_language": reply_language,
+        "reply_language_source": reply_language_source,
+        "model_id": getattr(agent, "model_id", None),
+    }
+
+
+def _dump_message(m) -> dict | None:
+    if isinstance(m, ChatMessage):
+        return m.model_dump(exclude_none=True)
+    if isinstance(m, dict):
+        return {k: v for k, v in m.items() if v is not None}
+    return None
+
+
+def _checkpoint_payload(handle: "SubagentHandle", spec: dict, reason: str) -> dict:
+    """检查点：完整 messages（含系统/上下文/已完成的工具往返）+ 运行参数。"""
+    msgs = [d for d in (_dump_message(m) for m in (handle.live_messages or [])) if d]
+    return {
+        "messages": msgs,
+        "spec": dict(spec or {}),
+        "reason": (reason or "")[:300],
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _build_tool_schemas(names: list[str] | None) -> list[dict]:
+    """按工具名重建子代理工具 schema（与 spawn 时口径一致：注册表工具 + 子代理自身通信工具）。"""
+    from app.orchestration.subagent_tools import SUBAGENT_OWN_TOOLS
+    wanted = set(names) if names else None
+    out = [
+        s for s in tool_registry.all_schemas()
+        if wanted is None or s.get("function", {}).get("name") in wanted
+    ]
+    have = {s.get("function", {}).get("name") for s in out}
+    for own in SUBAGENT_OWN_TOOLS:
+        name = own["function"]["name"]
+        if (wanted is None or name in wanted) and name not in have:
+            out.append(own)
+    return out
+
+
+async def _persist_agent_state(agent_id: int, status: str, checkpoint: dict | None) -> None:
+    """落库子代理状态与检查点（写引擎单写线程）。失败仅记日志，不影响收尾。"""
+    from app.persistence.models.agent import Agent as _AgentRow
+
+    def _patch(s):
+        row = s.get(_AgentRow, agent_id)
+        if row is None:
+            return
+        row.status = status
+        row.checkpoint_json = checkpoint
+        s.commit()
+
+    try:
+        await run_write_locked(_patch, label=f"subagent.state.{agent_id}")
+    except Exception:
+        logger.warning("[subagent] 子代理状态落库失败 agent=%s status=%s", agent_id, status, exc_info=True)
+
+
+async def _sync_task(session_id: int, task_id: int | None, status: str, note: str | None,
+                     agent_id: int | None = None, token_usage: int | None = None) -> None:
+    """独立会话同步子任务状态（子代理各自独立会话，避免与主代理交错提交）。"""
+    if task_id is None:
+        return
+    async with async_session_factory() as s:
+        await _sync_task_status(s, session_id, task_id, status, note,
+                                agent_id=agent_id, token_usage=token_usage)
+
+
+async def resume_subagent(session_id: int, agent_id: int, *, turn_id: int,
+                          cancel_event: asyncio.Event | None = None,
+                          readonly_only: bool = False) -> tuple[str, str]:
+    """续跑一个中断/暂停的子代理：从检查点继续，已完成步骤与上下文全部保留。
+
+    readonly_only：主代理处于只读/计划模式时为 True——只允许续跑只读探索子代理，
+    不得借续跑绕过模式约束去恢复可写子代理。
+    返回 (state, detail)：state ∈ resumed / already_running / not_found / not_resumable。
+    """
+    from app.persistence.models.agent import Agent as _AgentRow
+
+    manager = get_subagent_manager(session_id)
+    live = manager.get(agent_id)
+    if live is not None and live.status == "running" and live.task is not None and not live.task.done():
+        return "already_running", ""
+
+    async with async_session_factory() as s:
+        row = await s.get(_AgentRow, agent_id)
+        if row is None or row.session_id != session_id or row.kind != "sub":
+            return "not_found", ""
+        ck = dict(row.checkpoint_json or {}) if row.checkpoint_json else {}
+        db_status = row.status
+        row_name = row.name
+
+    if not ck.get("messages"):
+        return "not_resumable", "没有可用的检查点（任务已完成或从未运行）"
+    if db_status == "done":
+        return "not_resumable", "任务已完成，无需续跑"
+    if readonly_only and (ck.get("spec") or {}).get("subagent_mode") != "readonly":
+        return "not_resumable", "当前为只读/计划模式，只能续跑只读探索子代理"
+    try:
+        messages = _sanitize_messages([ChatMessage(**m) for m in ck["messages"]])
+    except Exception:
+        logger.warning("[subagent] 检查点解析失败 agent=%s", agent_id, exc_info=True)
+        return "not_resumable", "检查点已损坏，无法续跑"
+    messages.append(ChatMessage(role="user", content=_RESUME_NOTE))
+
+    spec = dict(ck.get("spec") or {})
+    steps = sum(1 for m in ck["messages"] if m.get("role") == "assistant" and m.get("tool_calls"))
+    handle = live or SubagentHandle(agent_id=agent_id)
+    handle.turn_id = turn_id
+    handle.task_title = handle.task_title or spec.get("task_title", "") or ""
+    handle.status = "running"
+    handle.error = ""
+    handle.resumable = False
+    handle.cancel_requested = False
+    handle.waiting = False
+    handle.pause_reason = ""
+    handle.started_at = time.monotonic()
+    handle.run_spec = spec
+    handle.tool_schemas = _build_tool_schemas(spec.get("tool_names"))
+    handle.live_messages = messages
+    manager._handles[agent_id] = handle
+    # 续跑是新一轮交付：清除该子代理的旧“已读/旧完成通知”，保证续跑结果会正常送达主代理
+    manager._notified.discard(agent_id)
+    manager._completion_queue = [
+        n for n in manager._completion_queue if int(n.get("agent_id") or 0) != agent_id
+    ]
+    await _persist_agent_state(agent_id, "running", ck)
+    handle.task = asyncio.create_task(manager._drive(
+        handle, agent_id=agent_id, task_id=spec.get("task_id"), turn_id=turn_id,
+        messages=messages, cancel_event=cancel_event or asyncio.Event(), is_blocking=False,
+    ))
+    # 与派发路径一致：前端卡片重新进入运行态、待完成计数同步（失败不影响续跑本身）
+    try:
+        from app.orchestration.agent_events import broadcast
+        await broadcast(session_id, {
+            "event": "agent.started",
+            "payload": {"agent_id": agent_id, "kind": "sub", "name": row_name,
+                        "turn_id": turn_id, "task_id": spec.get("task_id")},
+        })
+        await broadcast(session_id, {
+            "event": "subagent.pending",
+            "payload": {"session_id": session_id, "pending": int(manager.pending_count())},
+        })
+    except Exception:
+        logger.debug("[subagent] 续跑事件广播失败(非阻塞)", exc_info=True)
+    logger.info("[subagent] 续跑 agent=%s steps=%d", agent_id, steps)
+    return "resumed", f"已保留 {steps} 步已完成的进度"
+
+
+async def list_resumable_subagents(session_id: int, limit: int = 8) -> list[dict]:
+    """列出本会话中断后可续跑（status=paused 且有检查点）的子代理，供新 turn 注入上下文。"""
+    from sqlalchemy import select
+    from app.persistence.models.agent import Agent as _AgentRow
+
+    try:
+        async with async_session_factory() as s:
+            rows = (await s.execute(
+                select(_AgentRow).where(
+                    _AgentRow.session_id == session_id,
+                    _AgentRow.kind == "sub",
+                    _AgentRow.status == "paused",
+                ).order_by(_AgentRow.id.desc()).limit(limit)
+            )).scalars().all()
+    except Exception:
+        logger.warning("[subagent] 查询可续跑子代理失败 session=%s", session_id, exc_info=True)
+        return []
+    items: list[dict] = []
+    for r in rows:
+        ck = r.checkpoint_json or {}
+        if not ck.get("messages"):
+            continue
+        spec = ck.get("spec") or {}
+        steps = sum(1 for m in ck["messages"] if m.get("role") == "assistant" and m.get("tool_calls"))
+        items.append({
+            "agent_id": int(r.id),
+            "title": spec.get("task_title") or r.name or "",
+            "steps": steps,
+            "reason": ck.get("reason") or "",
+            "saved_at": ck.get("saved_at") or "",
+        })
+    return items
 
 
 # 会话级 manager 注册表
@@ -621,9 +978,10 @@ def _format_completion_note(handle: "SubagentHandle") -> str:
         return note
     if handle.status == "cancelled":
         return f"[子代理 #{handle.agent_id} 已取消] {title}。"
+    _resume_hint = "进度已保存，可用 resume_subagent 从中断处续跑。" if handle.resumable else ""
     return (
         f"[子代理 #{handle.agent_id} 失败] {title}：{(handle.error or '未知原因')[:200]}。"
-        "如需细节可用 subagent_inspect 查看其上下文与轨迹。"
+        f"{_resume_hint}如需细节可用 subagent_inspect 查看其上下文与轨迹。"
     )
 
 

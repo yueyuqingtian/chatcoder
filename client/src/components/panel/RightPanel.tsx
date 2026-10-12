@@ -16,7 +16,6 @@ import {
   IconArrowToggle, IconCheck, IconChevronDown, IconMaximize, IconMinus, IconPlus, IconRotateCcw, IconX,
 } from "../icons";
 import { Popover, Tooltip } from "../ui";
-import { ToneTile, type Tone } from "../iconkit/ToneTile";
 import { TaskSummaryPanel } from "./TaskSummaryPanel";
 import { BrowserPanel } from "./BrowserPanel";
 import { FileTreePanel } from "./FileTreePanel";
@@ -69,11 +68,6 @@ function tabIcon(id: PanelTabId, size: number) {
     case "debug": return <IxBug size={size} />;
   }
 }
-
-/** 启动卡的角色色（取项目色板，明暗主题自适应） */
-const TAB_TONE: Record<PanelTabId, Tone> = {
-  "task-summary": "blue", browser: "violet", terminal: "teal", files: "amber", subagent: "pink", debug: "red",
-};
 
 export function RightPanel() {
   const { t } = useI18n();
@@ -307,27 +301,22 @@ export function RightPanel() {
           })
         )}
         {tabs.length === 0 && (
-          <div className="rp-launch world-tex">
-            <div className="rp-launch-head">
-              <div className="rp-launch-title">{t("rp.launch_title")}</div>
-              <div className="rp-launch-sub">{t("rp.launch_sub")}</div>
-            </div>
-            <div className="rp-launch-grid mo-stagger">
-              {entries.map((en, i) => (
-                <button
-                  key={en.id}
-                  type="button"
-                  className="rp-launch-card tone-host"
-                  style={{ ["--i" as string]: i }}
-                  onClick={en.onPick}
-                >
-                  <ToneTile tone={TAB_TONE[en.id]} icon={tabIcon(en.id, 22)} size={42} />
-                  <span className="rp-launch-text">
-                    <span className="rp-launch-name">{en.title}</span>
-                    <span className="rp-launch-desc">{en.desc}</span>
-                  </span>
-                </button>
-              ))}
+          <div className="rp-launch">
+            <div className="rp-launch-inner">
+              <div className="rp-launch-head">
+                <div className="rp-launch-title">{t("rp.launch_title")}</div>
+                <div className="rp-launch-sub">{t("rp.launch_sub")}</div>
+              </div>
+              <div className="rp-launch-list" role="list">
+                {entries.map((en) => (
+                  <Tooltip key={en.id} content={en.desc} side="bottom">
+                    <button type="button" role="listitem" className="rp-launch-tile" onClick={en.onPick}>
+                      <span className="rp-launch-ic">{tabIcon(en.id, 18)}</span>
+                      <span className="rp-launch-name">{en.title}</span>
+                    </button>
+                  </Tooltip>
+                ))}
+              </div>
             </div>
           </div>
         )}

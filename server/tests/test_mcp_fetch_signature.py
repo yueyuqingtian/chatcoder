@@ -110,6 +110,8 @@ async def test_refresh_endpoint_calls_fetch_with_expanded_args(monkeypatch):
         env = {"K": "V"}
         url = None
         tools = None
+        # plan-59-286：刷新 / 启用路径会写 meta.tools_status，真实模型有该列（skill.py），假对象需同构
+        meta = None
         is_active = False
         transport = "stdio"
 
@@ -168,6 +170,7 @@ async def test_update_mcp_server_fetches_tools_with_four_args(monkeypatch):
         args = ["serve"]
         env = {}
         tools = None
+        meta = None
         is_active = True
         transport = "stdio"
 

@@ -57,6 +57,8 @@ class Tool(ABC):
 
     name: str = "base"
     risk_level: RiskLevel = "low"
+    # plan-128-518：会话态工具标记——True 时不随全量工具下发，由引擎在会话满足条件时显式放行
+    session_scoped: bool = False
     description: str = ""
 
     @abstractmethod

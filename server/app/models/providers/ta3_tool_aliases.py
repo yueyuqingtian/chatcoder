@@ -102,6 +102,8 @@ TO_TA3: dict[str, str] = {
     "cancel_subagent": "TaskCancel",         # agent_id→taskId
     "subagent_inspect": "SubAgentInspect",   # agent_id/section ✓
     "send_to_subagent": "SendToSubagent",    # agent_id/message ✓
+    # plan-91-394: 续跑中断/暂停的子代理（自造伪装名，schema 从真实工具动态派生）
+    "resume_subagent": "ResumeSubagent",     # agent_id ✓
     # v43: 子代理侧上报工具（只在子代理线程暴露）——子代理同样可能运行在 ta3 模型上，
     # 缺映射会让子代理失去向主代理上报/求助的通道。
     "report_to_leader": "ReportToLeader",    # message/kind/wait/timeout_s ✓
@@ -150,7 +152,7 @@ DYNAMIC_SCHEMA_ALIASES: frozenset[str] = frozenset({
     "WebFetch", "CiRun", "Git", "CodebaseSearch",
     "CompactionIndex", "CompactionView", "SkillView", "MemoryWrite",
     # 子代理管理/上报（v43 补齐）
-    "SubAgentInspect", "SendToSubagent", "ReportToLeader",
+    "SubAgentInspect", "SendToSubagent", "ReportToLeader", "ResumeSubagent",
 })
 
 # 出站参数键名适配：真实键 → ta3 键（None = 丢弃该键）
@@ -228,6 +230,18 @@ ARGS_FROM_TA3: dict[str, dict[str, str | None]] = {
 
 # v36 (plan-321-1600 M3): 原 SPAWN_FORCED_ARGS（强制 explore=True）已删除——
 # 它让 ta3 侧调用永远同步阻塞，模型无法并行派发子代理。现按 subagent_type 判定。
+
+
+def visible_tool_name(real_name: str, ta3: bool) -> str:
+    """plan-128-518：模型实际看到的工具名。
+
+    提示词里引用工具名时必须用它：ta3 会话的工具被伪装成 PascalCase 原生名（goal_complete → CompleteGoal），
+    模型根本没见过真实名；提示词若写真实名，会让模型去调用一个不存在的工具。
+    非 ta3 或无映射时原样返回。
+    """
+    if not ta3:
+        return real_name
+    return TO_TA3.get(real_name, real_name)
 
 
 def disguise_args(real_name: str, args: dict) -> dict:

@@ -11,7 +11,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { api, type ModelOut } from "../../api/client";
 import { providerRank } from "../../utils/modelOrder";
-import { IconCpu, IconCheck, IconChevronRight, IconMultimodal, IconRefresh } from "../icons";
+import { IconCpu, IconCheck, IconChevronDown, IconChevronRight, IconMultimodal, IconRefresh } from "../icons";
 import { useDialogContentHost } from "../ui/Dialog";
 import { Empty } from "../ui";
 
@@ -54,6 +54,7 @@ export function ModelPicker({
   inheritLabel,
   onInherit,
   side = "top",
+  variant = "chip",
 }: {
   models: ModelOut[];
   value: number | null;
@@ -66,6 +67,8 @@ export function ModelPicker({
   onInherit?: () => void;
   /** 菜单弹出方向：输入框贴底用 top（默认）；设置弹窗内用 bottom。 */
   side?: "top" | "bottom";
+  /** plan-128-518：chip=输入框内无边框小胶囊（默认）；field=设置页表单控件，与 ui/Select 同高、同边框、带右侧箭头 */
+  variant?: "chip" | "field";
 }) {
   // plan-41-227: 弹窗（ui/Dialog）内使用时，菜单 Portal 挂到弹窗内容节点——浮层若挂在 body 下，
   // 焦点一进入菜单就会被 Dialog 的 FocusScope 判为「弹窗外部」而抢回，级联子菜单刚展开即关闭
@@ -159,13 +162,21 @@ export function ModelPicker({
     : inheritLabel || "模型";
 
   return (
-    <div className="composer-model-wrap">
+    <div className={"composer-model-wrap" + (variant === "field" ? " is-field" : "")}>
       <DropdownMenu.Root open={open} onOpenChange={(next) => { if (next !== open) onToggle(); }}>
         <DropdownMenu.Trigger asChild>
-          <button className="composer-model-badge" type="button" title={label}>
-            <IconCpu size={13} />
-            <span className="mp-label">{label}</span>
-          </button>
+          {variant === "field" ? (
+            <button className={"ui-select-trigger mp-field" + (activeModel ? "" : " is-placeholder")} type="button" aria-label={label}>
+              <IconCpu size={14} />
+              <span className="mp-label">{label}</span>
+              <span className="ui-select-icon"><IconChevronDown size={14} /></span>
+            </button>
+          ) : (
+            <button className="composer-model-badge" type="button" title={label}>
+              <IconCpu size={13} />
+              <span className="mp-label">{label}</span>
+            </button>
+          )}
         </DropdownMenu.Trigger>
         <DropdownMenu.Portal container={overlayHost ?? undefined}>
           {/* side=top：输入框贴近窗口底部，向上展开；align=start 与触发按钮左缘对齐，
