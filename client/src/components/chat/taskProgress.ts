@@ -99,6 +99,7 @@ export function useProgressRows(enabled = true): ProgressResult {
   const tasks = useChatStore((s) => s.tasks);
   const todos = useChatStore((s) => s.todos);
   const todosTurnId = useChatStore((s) => s.todosTurnId);
+  const todosCarried = useChatStore((s) => s.todosCarried);
   const turns = useChatStore((s) => s.turns);
   const runningTurnId = useChatStore((s) => s.runningTurnId);
   const isRunning = useChatStore((s) => s.isRunning);
@@ -146,6 +147,20 @@ export function useProgressRows(enabled = true): ProgressResult {
     // ① AI 清单优先（todo.updated 事件，运行中实时）
     const todoItems = Array.isArray(todos) ? todos.filter((t) => t.content) : [];
     if (todoItems.length > 0) {
+      if (todosCarried) {
+        // 续接清单：上一轮未完成、本轮模型尚未更新。它不是本轮进度，只如实呈现为「待续接」（警示色、不转圈）；
+        // 本轮已结束仍未更新，则收口隐藏，不再把旧清单当成进行中。
+        if (phaseOf(todosTurnId) === "concluded") {
+          return freeze({ rows: [], useTodo: true, done: 0, unfinished: 0, phase: "concluded" });
+        }
+        const carried: ProgressRow[] = todoItems.map((t) => ({
+          key: t.content,
+          title: t.content,
+          note: "待续接",
+          status: normalizeStatus(t.status) === "done" ? "done" : "interrupted",
+        }));
+        return settle(carried, true, "interrupted");
+      }
       const rows: ProgressRow[] = todoItems.map((t) => ({
         key: t.content,
         title: t.content,
@@ -175,5 +190,5 @@ export function useProgressRows(enabled = true): ProgressResult {
     }
 
     return freeze({ rows: [], useTodo: false, done: 0, unfinished: 0, phase: "concluded" });
-  }, [tasks, todos, todosTurnId, turns, runningTurnId, isRunning, enabled]);
+  }, [tasks, todos, todosTurnId, todosCarried, turns, runningTurnId, isRunning, enabled]);
 }

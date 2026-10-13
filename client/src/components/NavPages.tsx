@@ -59,7 +59,7 @@ export function ScheduledPage() {
   // S3（plan-41-197）：开关语义 = “运行会话时保持电脑唤醒”——偏好只在运行期生效：
   //   有任何会话在跑（含后台/自动化任务）时才向主进程申请防休眠，全部跑完自动释放；
   //   主进程侧已改用 prevent-display-sleep（阻止显示器休眠，见 electron/main.cjs）。
-  const anyRunning = useChatStore((s) => s.isRunning || s.sessions.some((x) => x.has_running));
+  const anyRunning = useChatStore((s) => s.isRunning || s.sessions.some((x) => x.has_running || x.workflow_running));
   useEffect(() => {
     void window.chatcoderAPI?.setKeepAwake?.(keepAwake && anyRunning);
     localStorage.setItem("chatcoder.keepAwake", keepAwake ? "1" : "0");

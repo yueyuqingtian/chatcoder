@@ -749,6 +749,8 @@ export const api = {
   /** 用户确认目标完成（goal_complete 工具的同义用户路径） */
   completeSessionGoal: (id: number) => del<GoalOut>(`/sessions/${id}/goal?complete=true`),
   forkSession: (id: number) => post<SessionOut>(`/sessions/${id}/fork`),
+  /** 停止按钮：中断本会话的一切执行（主代理及子代理、后台子代理、运行中的工作流——暂停保留进度） */
+  stopSession: (id: number) => post<{ ok: boolean; turns: number; agent_managers: number; workflows_paused: number }>(`/sessions/${id}/stop`),
   renameSession: (id: number, title: string) =>
     post<SessionOut>(`/sessions/${id}/rename?title=${encodeURIComponent(title)}`),
   createWorktree: (id: number, branch?: string) =>

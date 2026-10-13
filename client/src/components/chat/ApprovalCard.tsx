@@ -186,10 +186,12 @@ export interface ApprovalCardProps {
   onAllowOnce: () => void;
   /** 始终允许（scope: 本会话 / 所有会话） */
   onAlwaysAllow: (scope: "session" | "global") => void;
+  /** 排在本卡之后的待审批数量（多个子代理并行申请时）；大于 0 时在标题行提示 */
+  queuedCount?: number;
 }
 
 export function ApprovalCard({
-  approvalId, detail, onDeny, onAllowOnce, onAlwaysAllow,
+  approvalId, detail, onDeny, onAllowOnce, onAlwaysAllow, queuedCount = 0,
 }: ApprovalCardProps) {
   const [showMore, setShowMore] = useState(false);
   const explain = useChatStore((s) => s.approvalExplain);
@@ -228,6 +230,7 @@ export function ApprovalCard({
           <span className="approval-head-tool">{tool || "工具"}</span>
           <span className="approval-head-action">想要{actionLabel}</span>
         </span>
+        {queuedCount > 0 && <span className="approval-head-queue">另有 {queuedCount} 项待审批</span>}
       </div>
 
       {isOutsideRead && (

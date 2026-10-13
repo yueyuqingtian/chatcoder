@@ -79,6 +79,31 @@ def _notify_symbol_index(tool_name: str, args: dict, ctx: ToolContext) -> None:
         logger.debug("[symbols] 写盘钩子通知失败(非阻塞)", exc_info=True)
 
 
+async def _refresh_approval_mode(ctx: ToolContext) -> None:
+    """把 ctx.approval_mode 刷新为会话当前的权限模式（读不到时沿用 ctx 上的值）。
+
+    子代理与工作流节点的 ctx 在本次运行开始时从会话读取一次，之后用户在输入框切换
+    「询问审批 / 自动审批 / 完全访问」对它们不生效（plan-282-1530）。每次裁决前读取会话最新值，
+    子代理即跟随主代理的当前设置。
+    """
+    session_id = getattr(ctx, "session_id", None)
+    if not session_id:
+        return
+    try:
+        from sqlalchemy import select
+
+        from app.persistence.database import async_session_factory
+        from app.persistence.models.message import Session as SessionRow
+
+        # 独立连接读取：工具所在事务可能持有更早的快照，读不到之后写入的权限切换
+        async with async_session_factory() as db:
+            current = await db.scalar(select(SessionRow.approval_mode).where(SessionRow.id == session_id))
+        if current is not None:
+            ctx.approval_mode = normalize_approval_mode(current)
+    except Exception:  # noqa: BLE001 — 读取失败不阻断裁决，沿用 ctx 上的模式
+        logger.debug("[tool.gate] 读取会话权限模式失败，沿用 ctx 值", exc_info=True)
+
+
 class ToolExecutor(ABC):
     @abstractmethod
     async def execute(
@@ -174,6 +199,7 @@ class ServerToolExecutor(ToolExecutor):
         # agent 白名单校验已由调用方（agent_loop）控制，此处只做统一权限裁决
 
         # ── 统一裁决（plan-75-332）：所有工具调用都过一次策略，不再按 risk_level 分流 ──
+        await _refresh_approval_mode(ctx)
         rules = await self._load_rules(ctx)
         decision = decide(
             tool_name, args or {}, ctx,

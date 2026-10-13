@@ -105,6 +105,8 @@ class SessionOut(BaseModel):
     fork_parent_id: int | None = None
     worktree_path: str | None = None
     has_running: bool = False
+    # 会话有后台执行中的工作流（程序 running）。与 has_running 并列：工作流在跑时本会话可能已没有运行中的 turn
+    workflow_running: bool = False
     # 侧栏工作流标记：attention（待你决定）/ paused / running / draft；无进行中的工作流时为 None
     workflow_state: str | None = None
     has_interrupted_turn: bool = False
@@ -771,6 +773,8 @@ class EvTodoUpdated(WsEventPayload):
     turn_id: int | None = None
     todos: list | None = None
     persisted: bool = False
+    # 续接清单（上一轮未完成的清单，新一轮尚未更新）：前端按「待续接」展示，不当作本轮进度
+    carried: bool = False
 
 
 class EvTaskUpdated(WsEventPayload):

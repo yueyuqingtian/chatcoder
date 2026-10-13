@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type MemoryEntryOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
+import { parseServerTime } from "../../utils/time";
 import { IconArrowUp, IconPencil, IconRefresh, IconSearch, IconTrash } from "../icons";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { Modal } from "../Modal";
@@ -146,7 +147,7 @@ export function MemoryPanel() {
   const visible = q ? items.filter((m) => (m.text || "").toLowerCase().includes(q) || (m.kind || "").toLowerCase().includes(q)) : items;
   const fmtTime = (iso?: string | null) => {
     if (!iso) return "";
-    const t = Date.parse(iso);
+    const t = parseServerTime(iso);
     return Number.isNaN(t) ? "" : new Date(t).toLocaleString(undefined, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
   };
   // plan-91-393：空态统一为「图标 + 主文案 + 次文案」，搜索无结果与真正无记忆区分提示
@@ -198,7 +199,7 @@ export function MemoryPanel() {
             {m.kind && <span className="mem-tag kind">{m.kind}</span>}
             {time && <span>{time}</span>}
             <span>使用 {m.usage_count} 次</span>
-            {m.expires_at && <span>过期 {new Date(Date.parse(m.expires_at)).toLocaleDateString()}</span>}
+            {m.expires_at && <span>过期 {new Date(parseServerTime(m.expires_at)).toLocaleDateString()}</span>}
           </div>
         </div>
         <div className="mem-card-actions">
@@ -333,7 +334,7 @@ export function MemoryPanel() {
               <span>使用 {detail.usage_count} 次</span>
               {detail.candidate && <span className="mem-badge cand">候选</span>}
               {detail.expires_at && (
-                <span>过期 {new Date(Date.parse(detail.expires_at)).toLocaleDateString()}</span>
+                <span>过期 {new Date(parseServerTime(detail.expires_at)).toLocaleDateString()}</span>
               )}
             </div>
             <div className="mem-detail-actions">

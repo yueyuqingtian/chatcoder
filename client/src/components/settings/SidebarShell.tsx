@@ -33,13 +33,12 @@ export function SettingsSidebar({ tab, onTab, onBack, collapsed = false }: {
       {/* plan-128-518：头部只是占位——logo / 折叠 / 前进后退由全局的 WindowNavCluster 悬浮在此；折叠不再卸载内容，由面板收窄裁切 */}
       <div className="sb-head" aria-hidden />
       {(
-        <button className="sb-back-item" onClick={onBack} title={t("titlebar.back")} type="button">
-          <IconArrowLeft size={14} />
-          <span>{t("titlebar.back")}</span>
-        </button>
-      )}
-      {(
         <div className="sb-list">
+          {/* 返回行与导航项同在滚动列内：几何（左右内距、滚动条槽）与导航项天然一致 */}
+          <button className="sb-back-item" onClick={onBack} title={t("titlebar.back")} type="button">
+            <span className="sb-back-icon"><IconArrowLeft size={14} /></span>
+            <span>{t("titlebar.back")}</span>
+          </button>
           {NAV_GROUPS.map((g) => (
             <div key={g.id} className="sb-section-group">
               <div className="sb-section-label">{t(`settingsGroup.${g.id}`)}</div>

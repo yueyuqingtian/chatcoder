@@ -939,6 +939,22 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
 
         await broadcast(session_id, {"event": "turn.started", "payload": {"turn_id": turn_id, "session_id": session_id}})
 
+        # 执行清单续接：上一轮仍有未完成项时，新一轮开始即把清单交给模型判断续接；
+        # 同时以 carried=true 广播（须在 turn.started 之后，前端 turn.started 会清空旧清单），
+        # 让界面立即显示「待续接」的旧清单，而不是等模型下一次更新清单才切换。提示只进入模型上下文。
+        from app.orchestration import todo_carry
+
+        try:
+            carry = await todo_carry.load_carry_steps(db, session_id=session_id, turn_id=turn_id, mid_turn=False)
+        except Exception:
+            logger.debug("[todo] 续接清单读取失败(非阻塞)", exc_info=True)
+            carry = None
+        if carry:
+            inject_input(turn_id, {"content": todo_carry.reminder_text(carry, mid_turn=False)})
+            await broadcast(session_id, {"event": "todo.updated", "payload": {
+                "turn_id": turn_id, "todos": todo_carry.as_todos(carry), "persisted": True, "carried": True,
+            }})
+
         # v38 (plan-482): 删除系统预拆分——是否分步、分几步完全由主代理通过
         # todo_write 自主决定（系统提示词已明确该职责）。此前由 evaluate_complexity +
         # decompose_request 生成 group/steps，该链路长期失败且违背"决策权在模型"原则。
@@ -1462,6 +1478,35 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             await _maybe_run_checkpoint_gc(db, locals().get("workspace"))
         except Exception:
             pass
+
+
+async def stop_session_execution(session_id: int) -> dict[str, int]:
+    """停止按钮的全量停止：中断本会话的一切执行。
+
+    - 运行中的主代理轮次：取消（连带其子代理）；
+    - 主轮已结束、仍在后台跑的子代理（会话级管理器）：全部取消；
+    - 运行中的工作流程序：暂停，保留进度，之后可继续。
+
+    各项数量返回给前端；只有这一个入口，避免“主代理停了、子代理与工作流还在跑”的半停状态。
+    """
+    from app.orchestration.workflow import service as workflow_service
+
+    turn_ids = [tid for tid, sid in list(_running_turn_session.items()) if sid == session_id]
+    cancelled_turns = 0
+    for tid in turn_ids:
+        if await cancel_turn(tid, source="stop_all"):
+            cancelled_turns += 1
+    managers = [m for m in list(_turn_managers.values()) if getattr(m, "session_id", None) == session_id]
+    for mgr in managers:
+        cancel_all = getattr(mgr, "cancel_all", None)
+        if cancel_all is not None:
+            await cancel_all()
+    paused = await workflow_service.on_turn_stopped(session_id)
+    logger.warning(
+        "[cancel] 停止会话全部执行 session=%s turns=%d agent_managers=%d workflows_paused=%d",
+        session_id, cancelled_turns, len(managers), paused,
+    )
+    return {"turns": cancelled_turns, "agent_managers": len(managers), "workflows_paused": paused}
 
 
 async def cancel_turn(turn_id: int, source: str = "unknown") -> bool:

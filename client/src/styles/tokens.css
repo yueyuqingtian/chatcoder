@@ -433,10 +433,8 @@
   --btn-px-lg: 18px;
   /* S0：浮层统一圆角档（菜单/提示/弹窗）与提示展示延迟（聚焦快速响应） */
   --r-pop: var(--r-xl);
-  /* S1（plan-41-197）：用户反馈"聚焦后提示有明显延迟"——首次展示 200ms → 120ms，
-     同排图标间切换 100ms → 60ms（Radix skipDelayDuration）。 */
-  --tooltip-delay: 120ms;
-  --tooltip-skip-delay: 60ms;
+  /* plan-282-1530：提示统一延迟——指针停留或键盘聚焦满此时长才展示，划过与聚焦都不即时弹出 */
+  --tooltip-delay: 300ms;
   --field-gap-y: 6px;
   --row-pad-y: 12px;
   --sp-1: 4px;

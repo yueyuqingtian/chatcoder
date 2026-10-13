@@ -7,7 +7,7 @@
  * 计划、验证、评估问题与尝试记录收在“详情”里按需展开；展开区有高度上限并在内部滚动，
  * 不把消息流压没。补充说明输入移到面板底部，与主代理输入框同一位置、同一视觉。
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type WorkflowAttemptOut } from "../../api/client";
 import { AttemptHistory } from "../workflow/WorkflowPanel";
 import { IssueList } from "../workflow/WorkflowGate";
@@ -50,6 +50,22 @@ function WorkflowNodeHead({ wf }: { wf: WorkflowNodeBrief }) {
   const summary = wf.summary ? summaryLine(wf.summary) : "";
   const hasDetail = !!summary || plan.length > 0 || verification.length > 0 || issues.length > 0 || canHistory;
   const attemptNo = Math.max(1, wf.attempt_no);
+  const headRef = useRef<HTMLDivElement>(null);
+
+  // 详情是浮层：展开时不挤压下方消息流，点击外部或按 Esc 收起（与其它浮层一致）
+  useEffect(() => {
+    if (!detailOpen) return;
+    const onDown = (e: PointerEvent) => {
+      if (headRef.current && !headRef.current.contains(e.target as Node)) setDetailOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setDetailOpen(false); };
+    document.addEventListener("pointerdown", onDown, true);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown, true);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [detailOpen]);
 
   useEffect(() => {
     if (!historyOpen || !canHistory || attempts !== null || wf.program_id == null) return;
@@ -61,7 +77,7 @@ function WorkflowNodeHead({ wf }: { wf: WorkflowNodeBrief }) {
   }, [historyOpen, canHistory, attempts, wf.program_id, wf.flow_key, wf.node_key]);
 
   return (
-    <div className="subagent-wf-head" aria-label="工作流节点">
+    <div ref={headRef} className="subagent-wf-head" aria-label="工作流节点">
       <Tooltip content={trail} side="bottom" delay={400}>
         <span className="subagent-wf-trail">{trail}</span>
       </Tooltip>
@@ -238,24 +254,31 @@ export function SubagentPanel({ threadId, agentName, visible = true }: {
     <div className="subagent-panel">
       <div className="subagent-panel-top">
         <div className="subagent-panel-head">
-          <span className="tc-icon"><IconCpu size={13} /></span>
-          <span className="subagent-panel-name">{agentName || meta?.name || `子代理 #${threadId}`}</span>
-          {running && <span className="tc-status wait"><IconSpinner size={11} /></span>}
-          {done && <span className="tc-status ok"><IconCheck size={11} /></span>}
-          {failed && <span className="tc-status fail"><IconX size={11} /></span>}
-          {/* 失败原因已写在状态文案里，不再用原生 title 重复提示 */}
-          <span className="subagent-panel-status">
-            {running ? "执行中…" : done ? "已完成"
-              : failed ? (meta?.error ? `失败：${meta.error}` : "失败")
-              : meta?.status ?? ""}
-          </span>
-          {/* v36 (plan-321-1600 M2): 用时 / 变更文件数 / token 用量 */}
-          {elapsedLabel && (
-            <span className="subagent-panel-meta">{running ? "已用 " : "用时 "}{elapsedLabel}</span>
-          )}
-          {meta?.filesCount ? <span className="subagent-panel-meta">{meta.filesCount} 个文件</span> : null}
-          {meta?.tokens ? <span className="subagent-panel-meta">{meta.tokens} tokens</span> : null}
-          <span className="subagent-panel-count">{liveCount} 条消息</span>
+          <div className="subagent-panel-title">
+            <span className="subagent-panel-icon"><IconCpu size={13} /></span>
+            <span className="subagent-panel-name">{agentName || meta?.name || `子代理 #${threadId}`}</span>
+            <span className="subagent-panel-count">{liveCount} 条消息</span>
+          </div>
+          {/* 第二行：状态与元信息。图标与状态文字同包一组、不换行；窄面板下按项省略，不把图标拆到另一行 */}
+          <div className="subagent-panel-facts">
+            <span className="subagent-panel-status" data-state={running ? "wait" : done ? "ok" : failed ? "fail" : "idle"}>
+              {running && <IconSpinner size={11} />}
+              {done && <IconCheck size={11} />}
+              {failed && <IconX size={11} />}
+              {/* 失败原因已写在状态文案里，不再用原生 title 重复提示 */}
+              <span className="subagent-panel-status-text">
+                {running ? "执行中…" : done ? "已完成"
+                  : failed ? (meta?.error ? `失败：${meta.error}` : "失败")
+                  : meta?.status ?? ""}
+              </span>
+            </span>
+            {/* v36 (plan-321-1600 M2): 用时 / 变更文件数 / token 用量 */}
+            {elapsedLabel && (
+              <span className="subagent-panel-meta">{running ? "已用 " : "用时 "}{elapsedLabel}</span>
+            )}
+            {meta?.filesCount ? <span className="subagent-panel-meta">{meta.filesCount} 个文件</span> : null}
+            {meta?.tokens ? <span className="subagent-panel-meta">{meta.tokens} tokens</span> : null}
+          </div>
         </div>
         {wf && <WorkflowNodeHead wf={wf} />}
       </div>

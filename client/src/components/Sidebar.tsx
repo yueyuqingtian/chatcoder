@@ -11,6 +11,7 @@ import { createPortal } from "react-dom";
 import type { ProjectOut, SessionOut } from "../api/client";
 import { api } from "../api/client";
 import { useChatStore } from "../store/chat";
+import { sessionWorkflowRunning, useWorkflowStore } from "../store/workflow";
 import { useDraftsStore } from "../store/drafts";
 import { useUpdaterStore } from "../store/updater";
 import { useI18n } from "../store/i18n";
@@ -215,6 +216,11 @@ function saveCollapsedProjects(val: Record<number, boolean>) {
   } catch { /* ignore */ }
 }
 
+/** 会话是否执行中：服务端的轮次 / 工作流标记，或本地得知的后台工作流在跑（工作流在跑时轮次可能已结束） */
+function sessionBusy(s: SessionOut, busyIds: ReadonlySet<number>): boolean {
+  return !!s.has_running || !!s.workflow_running || busyIds.has(s.id);
+}
+
 function shortPath(path: string): string {
   const clean = path.replace(/\\/g, "/").replace(/\/$/, "");
   const parts = clean.split("/");
@@ -234,6 +240,27 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
   const deleteSession = useChatStore((s) => s.deleteSession);
   const renameSession = useChatStore((s) => s.renameSession);
   const forkSession = useChatStore((s) => s.forkSession);
+  // 本地得知的后台工作流执行中的会话（只在 bySession 变化时重算，避免每次工作流事件都重绘侧栏）
+  const wfBySession = useWorkflowStore((s) => s.bySession);
+  const wfBusyIds = useMemo(
+    () => new Set(Object.entries(wfBySession).filter(([, runs]) => sessionWorkflowRunning(runs)).map(([sid]) => Number(sid))),
+    [wfBySession],
+  );
+  // 当前会话的执行态以 store 为准（消息流与输入框同源）；列表标记刷新有延迟，故合并判定，两侧才能一致
+  const currentRunning = useChatStore((s) => s.isRunning || s.runningTurnId != null);
+  const busyIds = useMemo(() => {
+    const ids = new Set(wfBusyIds);
+    if (currentRunning && currentSessionId != null) ids.add(currentSessionId);
+    return ids;
+  }, [wfBusyIds, currentRunning, currentSessionId]);
+  // 项目行运行指示：项目下任一会话执行中即亮起（项目折叠时仍可见，plan-282-1530）
+  const busyProjectIds = useMemo(() => {
+    const ids = new Set<number>();
+    for (const s of sessions) {
+      if (s.project_id != null && sessionBusy(s, busyIds)) ids.add(s.project_id);
+    }
+    return ids;
+  }, [sessions, busyIds]);
   // plan-31-151 S3：侧栏头部拖拽/双击改由系统 -webkit-app-region:drag 处理（见 global.css），
   //   自研 useWindowDrag 已随 frame:false 伪最大化架构一并移除。
 
@@ -381,8 +408,10 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
         if (pb !== pa) return pb - pa;
       }
       // 执行中的任务单独成区：置顶之下、其余会话之上（组内仍按时序）
-      if (!!a.has_running !== !!b.has_running) return a.has_running ? -1 : 1;
-      if (a.has_running && b.has_running) {
+      const busyA = sessionBusy(a, busyIds);
+      const busyB = sessionBusy(b, busyIds);
+      if (busyA !== busyB) return busyA ? -1 : 1;
+      if (busyA && busyB) {
         // 「最新开始执行的在上面」；同刻/缺字段时用 id 兜底，保证顺序确定不抖动
         const ra = runKey(a);
         const rb = runKey(b);
@@ -397,7 +426,7 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
       if (tb !== ta) return tb - ta;
       return b.id - a.id;
     });
-  }, [sessions, sort]);
+  }, [sessions, sort, wfBusyIds]);
 
   const isProjectOpen = (p: ProjectOut) => {
     if (collapsedProjects[p.id] === true) return false;
@@ -478,7 +507,7 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
       <div key={s.id} className={`sb-session${isCurrent ? " active" : ""}`} onClick={() => { if (editing) return; switchSession(s.id); onSessionFocus(); }}>
         {/* S1（plan-41-197）：运行指示移到标题左侧，且**始终占位**（非运行态透明）。
             此前只给运行项渲染 → 运行/非运行切换时整行标题列宽与右侧列位跳动。 */}
-        <span className={"sb-session-pulse" + (s.has_running ? " on" : "")} aria-hidden="true" />
+        <span className={"sb-session-pulse" + (sessionBusy(s, busyIds) ? " on" : "")} aria-hidden="true" />
         {s.workflow_state && (
           <span
             className={"sb-session-wf is-" + s.workflow_state}
@@ -534,11 +563,11 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
         <span className="sb-session-time">{formatRelativeTime(s.last_activity_at, language)}</span>
         {/* v7: 一键归档（三点菜单图标左侧）。运行中的会话禁止归档 */}
         <span
-          className={"sb-session-actions sb-session-archive" + (s.has_running ? " disabled" : "")}
-          title={s.has_running ? t("sidebar.archive_disabled") : t("sidebar.ctx_archive")}
+          className={"sb-session-actions sb-session-archive" + (sessionBusy(s, busyIds) ? " disabled" : "")}
+          title={sessionBusy(s, busyIds) ? t("sidebar.archive_disabled") : t("sidebar.ctx_archive")}
           onClick={(e) => {
             e.stopPropagation();
-            if (s.has_running) return;
+            if (sessionBusy(s, busyIds)) return;
             api.updateSession(s.id, { status: "archived" }).then(() => loadBootstrap());
           }}
         >
@@ -554,11 +583,11 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
             <div className="context-menu-item" onClick={() => { api.updateSession(s.id, { pinned: !s.pinned }).then(() => loadBootstrap()); setMenuFor(null); }}><IconPin size={13} /> {s.pinned ? t("sidebar.ctx_unpin") : t("sidebar.ctx_pin")}</div>
             <div className="context-menu-item" onClick={() => { api.createWorktree(s.id); setMenuFor(null); }}><IconGitBranch size={13} /> {t("sidebar.ctx_worktree")}</div>
             <div
-              className={"context-menu-item" + (s.has_running ? " disabled" : "")}
-              title={s.has_running ? t("sidebar.archive_disabled") : ""}
+              className={"context-menu-item" + (sessionBusy(s, busyIds) ? " disabled" : "")}
+              title={sessionBusy(s, busyIds) ? t("sidebar.archive_disabled") : ""}
               onClick={() => {
                 setMenuFor(null);
-                if (s.has_running) return;
+                if (sessionBusy(s, busyIds)) return;
                 api.updateSession(s.id, { status: "archived" }).then(() => loadBootstrap());
               }}
             ><IconArchive size={13} /> {t("sidebar.ctx_archive")}</div>
@@ -585,6 +614,8 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
         <span className="sb-project-name" title={isWorktree ? `${p.worktree_branch || ""} · ${p.path}` : p.path}>
           {p.name || shortPath(p.path)}
         </span>
+        {/* 运行指示固定占位（非运行透明），与会话行同源；项目折叠时此处仍可见 */}
+        <span className={"sb-session-pulse sb-project-pulse" + (busyProjectIds.has(p.id) ? " on" : "")} aria-hidden="true" />
         {isWorktree && <span className="sb-worktree-tag">{t("titlebar.worktree")}</span>}
         <span
           className="sb-project-actions sb-project-new"
