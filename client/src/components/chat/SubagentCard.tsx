@@ -12,6 +12,9 @@ export interface SubagentMetaLite {
   status: string; // running / done / failed / pending / in_progress
   /** plan-330-1648 M7: 失败/取消原因（有值时在行下方展示，避免“只有红叉没有原因”） */
   error?: string | null;
+  /** plan-20261013-wf-order: 所属轮次与工作流程序——工作流节点卡据此挂靠到同轮的工作流卡之后 */
+  turnId?: number | null;
+  programId?: number | null;
 }
 
 export const SubagentCard = memo(function SubagentCard({ meta }: { meta: SubagentMetaLite }) {

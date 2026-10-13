@@ -376,7 +376,12 @@ class WorkflowRuntime:
         )
 
     async def start(
-        self, program_id: int, *, accept_local_changes: bool = False, shared_workspace: bool = False
+        self,
+        program_id: int,
+        *,
+        accept_local_changes: bool = False,
+        shared_workspace: bool = False,
+        turn_id: int | None = None,
     ) -> None:
         snap = await store.load_program(program_id)
         if snap is None:
@@ -395,7 +400,13 @@ class WorkflowRuntime:
         await self._ensure_worktrees(program_id, snap)
         for flow in snap["flows"]:
             await store.update_run(flow["run"]["id"], status="running")
-        await store.update_run(program_id, status="running", started_at=store.now_iso())
+        # 节点子代理归属本次启动所在的轮次（节点轮次取 last_turn_id，见 store.load_node_context）
+        await store.update_run(
+            program_id,
+            status="running",
+            started_at=store.now_iso(),
+            **({"last_turn_id": turn_id} if turn_id is not None else {}),
+        )
         await self._log(program_id, "工作流开始执行")
         await self._recalc(program_id)
         self._wake_tick()
@@ -433,11 +444,13 @@ class WorkflowRuntime:
         *,
         accept_drift: bool = False,
         automatic: bool = False,
+        turn_id: int | None = None,
     ) -> None:
         """从断点续跑：中断的节点改为 checkpoint 模式重新入队，已完成节点不重跑。
 
         暂停期间写入范围内的文件被外部改动时，未经 accept_drift 确认不得续跑（§6.6）。
         automatic 表示网络恢复后的自动续跑：不重新开放自动续跑次数，手动续跑则重新开放。
+        turn_id 为发起续跑的轮次（工作流工具调用）；无轮次的入口不改变节点的归属轮次。
         """
         snap = await store.load_program(program_id)
         if snap is None:
@@ -484,6 +497,7 @@ class WorkflowRuntime:
             paused_at=None,
             resume_count=(snap["run"]["resume_count"] or 0) + 1,
             fingerprint_json=None,
+            **({"last_turn_id": turn_id} if turn_id is not None else {}),
         )
         suffix = f"：{note}" if note else ""
         confirmed = "；已确认暂停期间的工作区改动" if accept_drift else ""

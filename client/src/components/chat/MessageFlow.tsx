@@ -1269,15 +1269,39 @@ function MainMessageFlow({
 
   const subagentsByTurn = useMemo(() => {
     // plan-330-1648 M7: 透传 error——卡片/面板据此展示失败原因（不再只有一个红叉）
-    const map = new Map<number, Array<{ agentId: number; name: string; status: string; error?: string | null }>>();
+    // plan-20261013-wf-order: 透传 turnId / programId——工作流节点卡据此挂靠到同轮所属的工作流卡
+    const map = new Map<
+      number,
+      Array<{ agentId: number; name: string; status: string; error?: string | null; turnId: number; programId: number | null }>
+    >();
     for (const [aid, m] of Object.entries(subagentMeta)) {
       if (m.turnId == null) continue;
       const list = map.get(m.turnId) ?? [];
-      list.push({ agentId: Number(aid), name: m.name, status: m.status, error: m.error ?? null });
+      list.push({
+        agentId: Number(aid),
+        name: m.name,
+        status: m.status,
+        error: m.error ?? null,
+        turnId: m.turnId,
+        programId: m.programId ?? m.workflow?.program_id ?? null,
+      });
       map.set(m.turnId, list);
     }
     return map;
   }, [subagentMeta]);
+
+  /** 一轮（含并入的续跑轮）内的子代理。续跑轮派发的子代理归属续跑轮的 turn，合并轮须并集各轮，
+   *  否则这些子代理卡不会出现在任何位置（plan-20261013-wf-order）。单轮保持原数组引用，不影响 memo。 */
+  const subagentsOfRound = useCallback(
+    (entry: Extract<TimelineEntry, { kind: "turn" }>) => {
+      const ids = entry.turnIds ?? (entry.turnId != null ? [entry.turnId] : []);
+      if (ids.length === 0) return undefined;
+      if (ids.length === 1) return subagentsByTurn.get(ids[0]);
+      const merged = ids.flatMap((id) => subagentsByTurn.get(id) ?? []);
+      return merged.length > 0 ? merged : undefined;
+    },
+    [subagentsByTurn],
+  );
 
   // plan-41-227: 时间线直接用落库消息本体（按 id 序），位置只由 id 决定。
   //
@@ -1343,7 +1367,7 @@ function MainMessageFlow({
           entry={entry}
           isRunning={roundRunning}
           rolledBack={rolledBack}
-          subagents={entry.turnId != null ? subagentsByTurn.get(entry.turnId) : undefined}
+          subagents={subagentsOfRound(entry)}
           actions={actions}
           hasPlan={hasTurnPlan}
           globalRunning={isRunning}
@@ -1354,7 +1378,7 @@ function MainMessageFlow({
         />
       );
     },
-    [turns, runningTurnId, subagentsByTurn, planTurnId, plansByTurn, actions, isRunning, latestUserId, flowErrorTurnId, hiddenTurnErrors]
+    [turns, runningTurnId, subagentsOfRound, planTurnId, plansByTurn, actions, isRunning, latestUserId, flowErrorTurnId, hiddenTurnErrors]
   );
 
   // S8：流式文本/信号不再在此计算（已下沉到 <StreamingTail> 的精确 selector）。

@@ -139,6 +139,8 @@ export interface SubagentMeta {
   error?: string | null;
   /** 工作流节点的子代理：面板头部展示所属节点（普通子代理为空） */
   workflow?: WorkflowNodeBrief | null;
+  /** 工作流节点的子代理所属程序编号（plan-20261013-wf-order）：启动事件即携带，主消息流据此把节点卡挂到工作流卡之后；REST 回填取自 workflow 简报 */
+  programId?: number | null;
 }
 
 /** plan-75-332: 审批卡「解释」状态。
@@ -1992,6 +1994,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             filesCount: it.files_count ?? prev?.filesCount ?? 0,
             tokens: it.token_usage ?? prev?.tokens ?? 0,
             workflow: it.workflow ?? prev?.workflow ?? null,
+            programId: it.workflow?.program_id ?? prev?.programId ?? null,
             // 终态单向不可逆：本地已 done/failed 不被 REST 滞后的 running/pending 回退
             status: (prev?.status === "done" || prev?.status === "failed") && (it.status === "running" || it.status === "pending")
               ? prev.status
@@ -2628,10 +2631,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const turnId = payload.turn_id != null ? Number(payload.turn_id) : null;
           const taskId = payload.task_id != null ? Number(payload.task_id) : null;
           const name = String(payload.name ?? "") || `子代理 #${aid}`;
+          // 工作流节点子代理：启动事件携带所属程序编号（服务端 _agent_started_extra），卡片据此即刻挂靠
+          const programId = payload.workflow_program_id != null ? Number(payload.workflow_program_id) : null;
           set((s) => ({
             subagentMeta: {
               ...s.subagentMeta,
-              [aid]: { name, turnId: turnId ?? s.subagentMeta[aid]?.turnId ?? null, taskId: taskId ?? s.subagentMeta[aid]?.taskId ?? null, status: "running" },
+              [aid]: {
+                name,
+                turnId: turnId ?? s.subagentMeta[aid]?.turnId ?? null,
+                taskId: taskId ?? s.subagentMeta[aid]?.taskId ?? null,
+                status: "running",
+                programId: programId ?? s.subagentMeta[aid]?.programId ?? null,
+              },
             },
           }));
         }

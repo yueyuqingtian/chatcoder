@@ -643,6 +643,28 @@ def _desktop_obs_scene(tools: list, write_tools: frozenset) -> str:
     return "after_action" if name in write_tools else "after_perceive"
 
 
+async def _agent_started_extra(agent) -> dict:
+    """agent.started 的附加字段：工作流节点子代理带上所属程序编号。
+
+    节点子代理不经 spawn_subagent 工具调用落库，前端无法按消息序定位其卡片；
+    启动事件携带程序编号后，卡片可在出现的那一刻挂到同轮所属工作流卡之后，
+    不必等 REST 回填（回填前卡片会先落到兜底位置再移动）。
+    只读查询，失败只记日志，绝不阻塞子代理启动。
+    """
+    node_id = getattr(agent, "workflow_node_id", None)
+    if not node_id:
+        return {}
+    try:
+        from app.orchestration.workflow import store as workflow_store
+
+        brief = (await workflow_store.node_briefs([int(node_id)])).get(int(node_id))
+        program_id = brief.get("program_id") if brief else None
+        return {"workflow_program_id": int(program_id)} if program_id is not None else {}
+    except Exception:
+        logger.debug("[agent] 工作流节点程序编号解析失败(非阻塞) node=%s", node_id, exc_info=True)
+        return {}
+
+
 async def run_agent_loop(
     db: AsyncSession,
     *,
@@ -824,7 +846,7 @@ async def run_agent_loop(
     await broadcast(session_id, {
         "event": "agent.started",
         "payload": {"agent_id": agent_id, "kind": agent_kind, "name": agent_name,
-                    "turn_id": turn_id},
+                    "turn_id": turn_id, **(await _agent_started_extra(agent))},
     })
     await broadcast(session_id, {
         "event": "agent.updated",

@@ -18,8 +18,15 @@ import { MarkdownContent } from "../MarkdownContent";
 import { SubagentReportCard } from "./SubagentReportCard";
 import { ErrorCard } from "./ErrorCard";
 import { IconRotateCcw, IconArrowToggle } from "../icons";
-import type { TimelineEntry, TurnItem } from "./timeline";
-import { msgText, getTurnById, SYSTEM_CONTINUATION_KINDS } from "./timeline";
+import type { FlowSegment, TimelineEntry, TurnItem } from "./timeline";
+import {
+  msgText,
+  getTurnById,
+  SYSTEM_CONTINUATION_KINDS,
+  isOutsideProcess,
+  placeWorkflowNodeCards,
+  splitFlowSegments,
+} from "./timeline";
 import { useChatStore } from "../../store/chat";
 import { parseUtc } from "../../utils/time";
 import { MessageImageGrid, attachmentsOf } from "./AttachmentCard";
@@ -34,11 +41,6 @@ const TERMINAL_TURN_STATUSES: ReadonlySet<string> = new Set([
   "cancelled",
   "rolled_back",
 ]);
-
-/** 工作流卡与工作流唤醒分隔线不进入「工作过程」折叠：进度、暂停 / 继续需要始终可见。 */
-function isOutsideProcess(item: TurnItem): boolean {
-  return item.kind === "workflow" || item.kind === "workflow-wakeup";
-}
 
 /** 「已工作 X 分 X 秒」计时条与工作过程折叠切换（对齐图 8）。
  *
@@ -360,10 +362,14 @@ export const TurnGroup = memo(function TurnGroup({
     // plan-330-1648 M5-b: 按 agentId 升序（= 派发创建序）稳定排序，刷新前后顺序一致
     .sort((a, b) => a.agentId - b.agentId);
 
+  /** plan-20261013-wf-order：工作流节点子代理挂到同轮所属工作流卡之后（按创建序）；
+   *  挂靠不到（本轮没有对应工作流卡）的仍走兜底槽位。 */
+  const { attached: nodeCardsByItem, unplaced: legacyUnplaced } = placeWorkflowNodeCards(items, unplacedSubagents);
+
   const subagentNode =
-    unplacedSubagents.length > 0 ? (
+    legacyUnplaced.length > 0 ? (
       <div className="turn-subagents">
-        {unplacedSubagents.map((sa) => (
+        {legacyUnplaced.map((sa) => (
           <PluginSlot key={sa.agentId} slot="subagent-card" meta={sa} />
         ))}
       </div>
@@ -391,6 +397,12 @@ export const TurnGroup = memo(function TurnGroup({
     return (
       <Fragment key={`ai-${i}`}>
         {node}
+        {/* plan-20261013-wf-order：挂靠在本工作流卡之后的节点子代理卡（创建序），与卡片同为常显 */}
+        {nodeCardsByItem.get(i)?.map((sa) => (
+          <div key={`node-sa-${sa.agentId}`} className="turn-item turn-item-subagent">
+            <PluginSlot slot="subagent-card" meta={sa} />
+          </div>
+        ))}
         {/* plan-330-1648 M5-b: 未落位的子代理卡片渲染在**最后一个 AI 内容项之后**，
             而不是过程容器末尾——否则卡片会出现在 AI 文本上方（用户反馈问题1）。 */}
         {i === lastAiItemIdx && subagentNode}
@@ -566,6 +578,38 @@ export const TurnGroup = memo(function TurnGroup({
     }
   };
 
+  /** 渲染执行段（见 splitFlowSegments）：常显段原位渲染；过程段装入可折叠容器，collapsed 只作用于过程段。
+   *  尾部内容（内嵌计划卡、兜底子代理卡）挂在最后一个过程段末尾，与原先过程容器内的位置一致。 */
+  const renderFlowSegments = (segments: FlowSegment[], collapsed: boolean) => {
+    const needTail = (hasPlan && !hasPlanMsg) || subagentFallbackInContainer;
+    // 没有任何过程项却需要承载尾部内容时，补一个空过程段
+    const list: FlowSegment[] =
+      needTail && !segments.some((s) => s.kind === "process")
+        ? [...segments, { kind: "process", indices: [] }]
+        : segments;
+    let lastProcess = -1;
+    list.forEach((s, n) => {
+      if (s.kind === "process") lastProcess = n;
+    });
+    return list.map((seg, n) => {
+      if (seg.kind === "sticky") return renderAiItemWithActions(items[seg.index], seg.index);
+      const isLast = n === lastProcess;
+      return (
+        <div
+          key={`proc-${seg.indices.length > 0 ? seg.indices[0] : "tail"}`}
+          className={`turn-process-container${collapsed ? " collapsed" : ""}`}
+        >
+          {/* plan-353-1738 M4a：内层承载 flex + gap 布局，外层（grid）只负责 0fr↔1fr 的真实高度过渡 */}
+          <div className="turn-process-inner">
+            {seg.indices.map((index) => renderAiItemWithActions(items[index], index))}
+            {isLast && hasPlan && !hasPlanMsg && <PluginSlot slot="plan-card" turnId={turnId} embedded />}
+            {isLast && subagentFallbackInContainer ? subagentNode : null}
+          </div>
+        </div>
+      );
+    });
+  };
+
   return (
     <div className="turn-group">
       {rolledBack && (
@@ -621,42 +665,15 @@ export const TurnGroup = memo(function TurnGroup({
             />
           )}
 
-          {/* 1. 有最终汇报时：过程项进入可折叠容器 */}
-          {hasProcess && (
-            <div className={`turn-process-container${processCollapsed ? " collapsed" : ""}`}>
-              {/* plan-353-1738 M4a：内层承载原来的 flex + gap 布局，
-                  外层（grid）只负责 0fr↔1fr 的真实高度过渡 */}
-              <div className="turn-process-inner">
-                {processItems.map(({ item, index }) => renderAiItemWithActions(item, index))}
-                {hasPlan && !hasPlanMsg && <PluginSlot slot="plan-card" turnId={turnId} embedded />}
-                {subagentFallbackInContainer ? subagentNode : null}
-              </div>
-            </div>
-          )}
-
-          {/* 1b. 工作流卡：位于过程折叠之后、最终汇报之前，始终直显 */}
-          {hasProcess &&
-            items.map((item, index) =>
-              index !== firstUserIdx && index < finalReportOriginalIdx && isOutsideProcess(item)
-                ? renderAiItemWithActions(item, index)
-                : null
-            )}
-
-          {/* 2. 无最终汇报时（运行中/异常/纯工具调用无 text 总结）：所有项直显展开，杜绝隐形；
-              子代理面板例外——允许折叠（v36 修复：此前没有折叠入口，长过程无法收起） */}
-          {!hasProcess && (
-            <div className={`turn-process-container${flow === "subagent" && processCollapsed ? " collapsed" : ""}`}>
-              {/* plan-353-1738 M4a：同 hasProcess 分支——内层承担 flex + gap，
-                  外层 grid 承担真实高度过渡 */}
-              <div className="turn-process-inner">
-                {items.map((item, index) =>
-                  index !== firstUserIdx ? renderAiItemWithActions(item, index) : null
-                )}
-                {hasPlan && !hasPlanMsg && <PluginSlot slot="plan-card" turnId={turnId} embedded />}
-                {subagentFallbackInContainer ? subagentNode : null}
-              </div>
-            </div>
-          )}
+          {/* 1. 执行段（plan-20261013-wf-order）：过程项按时间线先后分段，工作流卡及其节点卡常显、原位留在段间，
+              不随折叠 / 最终汇报落库移动。有最终汇报时只折叠最终汇报之前的过程段；
+              无最终汇报（运行中 / 异常 / 纯工具调用）全部直显，子代理面板例外——允许折叠（v36 修复：此前没有折叠入口）。 */}
+          {hasProcess
+            ? renderFlowSegments(splitFlowSegments(items, 0, finalReportOriginalIdx, firstUserIdx), processCollapsed)
+            : renderFlowSegments(
+                splitFlowSegments(items, 0, items.length, firstUserIdx),
+                flow === "subagent" && processCollapsed,
+              )}
 
           {/* 3. 最终汇报（最终 text）与其后的确认/分割线等：有过程时直显在折叠条下方 */}
           {hasProcess &&

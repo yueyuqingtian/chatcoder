@@ -482,13 +482,14 @@ async def run_workflow_tool(
                 "已开始的步骤保持不变，进度可用 workflow_status 查询。"
             )
         if tool_name == "start_workflow":
-            await runtime.start(program_id)
+            await runtime.start(program_id, turn_id=turn_id)
             return f"工作流 {program_id} 已开始执行，进度可用 workflow_status 查询。"
         if tool_name == "resume_workflow":
             await runtime.resume(
                 program_id,
                 str(args.get("note") or ""),
                 accept_drift=bool(args.get("accept_drift")),
+                turn_id=turn_id,
             )
             return f"工作流 {program_id} 已从断点继续，已完成的节点不会重做。"
         if tool_name == "cancel_workflow":
