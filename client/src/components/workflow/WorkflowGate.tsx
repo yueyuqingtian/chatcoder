@@ -143,12 +143,15 @@ export function WorkflowGate({ snap, compact = false }: { snap: WorkflowProgramO
         ? { primary: "再试一次", primaryDecision: "rework" }
         : kind === "conflict"
           ? { primary: "保留现有内容", secondary: "再试一次", primaryDecision: "approve", secondaryDecision: "rework" }
-          : {
-              primary: "采纳当前结果",
-              secondary: roundsLeft != null ? `再返工一轮（剩余 ${roundsLeft} 次）` : "再返工一轮",
-              primaryDecision: "approve",
-              secondaryDecision: "rework",
-            };
+          : node.rework_to
+            ? {
+                primary: "采纳当前结果",
+                secondary: roundsLeft != null ? `再返工一轮（剩余 ${roundsLeft} 次）` : "再返工一轮",
+                primaryDecision: "approve",
+                secondaryDecision: "rework",
+              }
+            // 没有返工目标（如集成阶段的评估）时，返工无处可去，只保留采纳
+            : { primary: "采纳当前结果", primaryDecision: "approve" };
   const notePlaceholder =
     kind === "scope_violation"
       ? "例如：这些文件确实是本步骤需要的，保留即可"

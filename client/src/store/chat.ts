@@ -3143,6 +3143,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       case "workflow.node.updated":
       case "workflow.gate.opened":
       case "workflow.log.appended":
+      case "workflow.conflict.detected":
+      case "workflow.conflict.resolved":
         break;
       default: {
         // 编译期穷举检查：后端新增事件未在 events.ts 登记时此处报错

@@ -2,6 +2,10 @@
  * 数据组装（REST 历史 + 实时桶合并去重）/ 加载态 / 滚动 / 流式渲染全部下沉到消息流插件，
  * 与主界面共用同一注册插件（参考 deepseek-harness「同一渲染引擎 + 数据注入」模式）。
  * 头部显示状态文案（执行中/已完成/失败），对齐消息流子代理卡片图标体系。
+ *
+ * 【头部收敛】工作流节点的头部只留两行：所属路径 + 尝试 / 评估结论 + 详情开关，以及一行摘要。
+ * 计划、验证、评估问题与尝试记录收在“详情”里按需展开；展开区有高度上限并在内部滚动，
+ * 不把消息流压没。补充说明输入移到面板底部，与主代理输入框同一位置、同一视觉。
  */
 import { useEffect, useState } from "react";
 import { api, type WorkflowAttemptOut } from "../../api/client";
@@ -11,32 +15,41 @@ import { subscribeTick } from "../chat/useRunningTicker";
 import { useChatStore } from "../../store/chat";
 import { PluginSlot } from "../../plugins/registry";
 import { parseUtc } from "../../utils/time";
-import { IconCpu, IconSpinner, IconCheck, IconX } from "../icons";
-import { Button, Empty, Textarea } from "../ui";
+import { IconCheck, IconChevronDown, IconCpu, IconSpinner, IconX } from "../icons";
+import { Button, Empty, Tooltip } from "../ui";
+import { IconSendStop } from "../iconkit/MorphIcons";
 import type { WorkflowNodeBrief } from "../../api/client";
 
-/** 评估结论的展示文案（只用于节点头；颜色由 data-verdict 决定） */
+/** 评估结论的展示文案（颜色由 data-verdict 决定） */
 const VERDICT_LABEL: Record<string, string> = {
   pass: "评估通过",
   rework: "评估要求返工",
   escalate: "需要你决定",
 };
 
-/** 工作流节点头：所属程序 › 子工作流 › 节点，尝试次数、模式、返工与评估结论；
- * 产出按节点类型展示（探索的计划、实现的验证、评估的问题），尝试记录可展开（设计 §7.6）。
- */
+/** 摘要的一行预览：去掉代码块与 Markdown 标记并压成单行（完整内容在消息流里） */
+function summaryLine(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/[#*`>~|]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** 工作流节点头：第一行是所属路径（完整显示，超出才省略）；第二行是尝试次数、评估结论与“详情”开关；
+ * 摘要、计划、验证、评估问题与尝试记录都收在详情里，默认不占消息流的空间 */
 function WorkflowNodeHead({ wf }: { wf: WorkflowNodeBrief }) {
   const trail = [wf.program_title, wf.flow_title, wf.node_title].filter(Boolean).join(" › ");
+  const [detailOpen, setDetailOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [attempts, setAttempts] = useState<WorkflowAttemptOut[] | null>(null);
   const canHistory = wf.program_id != null && !!wf.flow_key;
-  const canNote = canHistory && (wf.status === "running" || wf.status === "recovering");
-  const [note, setNote] = useState("");
-  const [sendingNote, setSendingNote] = useState(false);
-  const [noteState, setNoteState] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const plan = wf.detail?.plan ?? [];
   const verification = wf.detail?.verification ?? [];
   const issues = wf.detail?.issues ?? [];
+  const summary = wf.summary ? summaryLine(wf.summary) : "";
+  const hasDetail = !!summary || plan.length > 0 || verification.length > 0 || issues.length > 0 || canHistory;
+  const attemptNo = Math.max(1, wf.attempt_no);
 
   useEffect(() => {
     if (!historyOpen || !canHistory || attempts !== null || wf.program_id == null) return;
@@ -49,85 +62,136 @@ function WorkflowNodeHead({ wf }: { wf: WorkflowNodeBrief }) {
 
   return (
     <div className="subagent-wf-head" aria-label="工作流节点">
-      <span className="subagent-wf-trail">{trail}</span>
-      <span className="subagent-wf-chips">
-        <span className="subagent-wf-chip">第 {Math.max(1, wf.attempt_no)} 次尝试</span>
-        {wf.mode && <span className="subagent-wf-chip">{wf.mode}</span>}
-        {wf.rework_round > 0 && <span className="subagent-wf-chip">返工 {wf.rework_round} 次</span>}
-        {wf.verdict && (
-          <span className="subagent-wf-chip" data-verdict={wf.verdict}>{VERDICT_LABEL[wf.verdict] ?? wf.verdict}</span>
+      <Tooltip content={trail} side="bottom" delay={400}>
+        <span className="subagent-wf-trail">{trail}</span>
+      </Tooltip>
+      <div className="subagent-wf-bar">
+        <span className="subagent-wf-chips">
+          <span className="subagent-wf-chip">第 {attemptNo} 次尝试</span>
+          {wf.verdict && (
+            <span className="subagent-wf-chip" data-verdict={wf.verdict}>{VERDICT_LABEL[wf.verdict] ?? wf.verdict}</span>
+          )}
+        </span>
+        {hasDetail && (
+          <Button
+            variant="ghost"
+            size="xs"
+            className="subagent-wf-toggle"
+            aria-expanded={detailOpen}
+            aria-controls={`wf-detail-${wf.node_id}`}
+            onClick={() => setDetailOpen((v) => !v)}
+          >
+            {issues.length > 0 ? `${issues.length} 条问题` : "详情"}
+            <IconChevronDown size={12} className="subagent-wf-caret" />
+          </Button>
         )}
-      </span>
-      {wf.summary && <p className="subagent-wf-summary">{wf.summary}</p>}
-      {plan.length > 0 && (
-        <div className="subagent-wf-section">
-          <span className="subagent-wf-section-title">计划</span>
-          <ol className="subagent-wf-list">{plan.map((item, i) => <li key={i}>{item}</li>)}</ol>
+      </div>
+      {detailOpen && hasDetail && (
+        <div className="subagent-wf-detail" id={`wf-detail-${wf.node_id}`}>
+          {summary && <p className="subagent-wf-brief">{summary}</p>}
+          {(wf.mode || wf.rework_round > 0) && (
+            <p className="subagent-wf-meta">
+              {wf.mode && <span>模式 {wf.mode}</span>}
+              {wf.rework_round > 0 && <span>返工 {wf.rework_round} 次</span>}
+            </p>
+          )}
+          {plan.length > 0 && (
+            <div className="subagent-wf-section">
+              <span className="subagent-wf-section-title">计划</span>
+              <ol className="subagent-wf-list">{plan.map((item, i) => <li key={i}>{item}</li>)}</ol>
+            </div>
+          )}
+          {verification.length > 0 && (
+            <div className="subagent-wf-section">
+              <span className="subagent-wf-section-title">验证</span>
+              <ul className="subagent-wf-list">{verification.map((item, i) => <li key={i}>{item}</li>)}</ul>
+            </div>
+          )}
+          {issues.length > 0 && (
+            <div className="subagent-wf-section">
+              <span className="subagent-wf-section-title">评估问题</span>
+              <IssueList issues={issues} limit={3} />
+            </div>
+          )}
+          {canHistory && (
+            <div className="subagent-wf-section">
+              <Button
+                variant="ghost"
+                size="xs"
+                aria-expanded={historyOpen}
+                onClick={() => setHistoryOpen((v) => !v)}
+              >
+                {historyOpen ? "收起尝试记录" : `尝试记录 · ${attemptNo} 次`}
+              </Button>
+              {historyOpen && <AttemptHistory attempts={attempts} />}
+            </div>
+          )}
         </div>
       )}
-      {verification.length > 0 && (
-        <div className="subagent-wf-section">
-          <span className="subagent-wf-section-title">验证</span>
-          <ul className="subagent-wf-list">{verification.map((item, i) => <li key={i}>{item}</li>)}</ul>
-        </div>
-      )}
-      {issues.length > 0 && (
-        <div className="subagent-wf-section">
-          <span className="subagent-wf-section-title">评估问题</span>
-          <IssueList issues={issues} limit={3} />
-        </div>
-      )}
-      {canNote && (
-        <form
-          className="subagent-wf-note"
-          onSubmit={async (event) => {
-            event.preventDefault();
-            const text = note.trim();
-            if (!text || sendingNote || wf.program_id == null) return;
-            setSendingNote(true);
-            setNoteState(null);
-            try {
-              await api.addWorkflowNodeNote(wf.program_id, wf.flow_key, wf.node_key, text);
-              setNote("");
-              setNoteState({ tone: "ok", text: "已加入，下一步生效" });
-            } catch (err) {
-              setNoteState({ tone: "error", text: err instanceof Error ? err.message : "发送失败" });
-            } finally {
-              setSendingNote(false);
+    </div>
+  );
+}
+
+/** 运行中节点的补充说明：面板底部的输入卡，与主代理输入框同一位置与视觉，只保留输入与发送 */
+function NodeNoteComposer({ wf }: { wf: WorkflowNodeBrief }) {
+  const [note, setNote] = useState("");
+  const [sending, setSending] = useState(false);
+  const [state, setState] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
+
+  const submit = async () => {
+    const text = note.trim();
+    if (!text || sending || wf.program_id == null) return;
+    setSending(true);
+    setState(null);
+    try {
+      await api.addWorkflowNodeNote(wf.program_id, wf.flow_key, wf.node_key, text);
+      setNote("");
+      setState({ tone: "ok", text: "已加入，下一步生效" });
+    } catch (err) {
+      setState({ tone: "error", text: err instanceof Error ? err.message : "发送失败" });
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <form
+      className="subagent-note"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void submit();
+      }}
+    >
+      <div className="subagent-note-card">
+        <textarea
+          className="subagent-note-input"
+          aria-label="补充说明（下一步生效）"
+          rows={1}
+          value={note}
+          disabled={sending}
+          placeholder="补充说明，下一步生效"
+          onChange={(e) => setNote(e.target.value)}
+          onKeyDown={(e) => {
+            // 与主代理输入框一致：Enter 发送，Shift+Enter 换行；输入法组字中不发送
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              void submit();
             }
           }}
-        >
-          <label className="subagent-wf-note-label" htmlFor={`wf-note-${wf.node_id}`}>补充说明（下一步生效）</label>
-          <div className="subagent-wf-note-row">
-            <Textarea
-              id={`wf-note-${wf.node_id}`}
-              rows={2}
-              value={note}
-              disabled={sendingNote}
-              placeholder="例如：这个接口需要先做余额校验"
-              onChange={(e) => setNote(e.target.value)}
-            />
-            <Button type="submit" variant="secondary" size="xs" disabled={!note.trim() || sendingNote}>
-              发送
-            </Button>
-          </div>
-          {noteState && (
-            <span className="subagent-wf-note-state" data-tone={noteState.tone} role="status">{noteState.text}</span>
-          )}
-        </form>
-      )}
-      {canHistory && (
-        <button
-          type="button"
-          className="subagent-wf-history-toggle"
-          aria-expanded={historyOpen}
-          onClick={() => setHistoryOpen((v) => !v)}
-        >
-          {historyOpen ? "收起尝试记录" : `尝试记录 · ${Math.max(1, wf.attempt_no)} 次`}
-        </button>
-      )}
-      {canHistory && historyOpen && <AttemptHistory attempts={attempts} />}
-    </div>
+        />
+        <Tooltip content="发送（Enter）" side="top">
+          <button
+            type="submit"
+            className="cc-send is-send"
+            disabled={!note.trim() || sending}
+            aria-label="发送补充说明"
+          >
+            <IconSendStop mode="send" size={16} />
+          </button>
+        </Tooltip>
+      </div>
+      {state && <span className="subagent-note-state" data-tone={state.tone} role="status">{state.text}</span>}
+    </form>
   );
 }
 
@@ -166,28 +230,34 @@ export function SubagentPanel({ threadId, agentName, visible = true }: {
 
   if (threadId == null) return <Empty size="sm" title="未指定子代理" />;
 
+  const wf = meta?.workflow;
+  // 与主代理输入框对齐：补充说明只在节点仍在执行时提供（完成后不再出现输入卡）
+  const canNote = !!wf && wf.program_id != null && !!wf.flow_key && (wf.status === "running" || wf.status === "recovering");
+
   return (
     <div className="subagent-panel">
-      {meta?.workflow && <WorkflowNodeHead wf={meta.workflow} />}
-      <div className="subagent-panel-head">
-        <span className="tc-icon"><IconCpu size={13} /></span>
-        <span className="subagent-panel-name">{agentName || meta?.name || `子代理 #${threadId}`}</span>
-        {running && <span className="tc-status wait"><IconSpinner size={11} /></span>}
-        {done && <span className="tc-status ok"><IconCheck size={11} /></span>}
-        {failed && <span className="tc-status fail"><IconX size={11} /></span>}
-        <span className="subagent-panel-status"
-              title={failed && meta?.error ? String(meta.error) : undefined}>
-          {running ? "执行中…" : done ? "已完成"
-            : failed ? (meta?.error ? `失败：${meta.error}` : "失败")
-            : meta?.status ?? ""}
-        </span>
-        {/* v36 (plan-321-1600 M2): 用时 / 变更文件数 / token 用量 */}
-        {elapsedLabel && (
-          <span className="subagent-panel-meta">{running ? "已用 " : "用时 "}{elapsedLabel}</span>
-        )}
-        {meta?.filesCount ? <span className="subagent-panel-meta">{meta.filesCount} 个文件</span> : null}
-        {meta?.tokens ? <span className="subagent-panel-meta">{meta.tokens} tokens</span> : null}
-        <span className="subagent-panel-count">{liveCount} 条消息</span>
+      <div className="subagent-panel-top">
+        <div className="subagent-panel-head">
+          <span className="tc-icon"><IconCpu size={13} /></span>
+          <span className="subagent-panel-name">{agentName || meta?.name || `子代理 #${threadId}`}</span>
+          {running && <span className="tc-status wait"><IconSpinner size={11} /></span>}
+          {done && <span className="tc-status ok"><IconCheck size={11} /></span>}
+          {failed && <span className="tc-status fail"><IconX size={11} /></span>}
+          {/* 失败原因已写在状态文案里，不再用原生 title 重复提示 */}
+          <span className="subagent-panel-status">
+            {running ? "执行中…" : done ? "已完成"
+              : failed ? (meta?.error ? `失败：${meta.error}` : "失败")
+              : meta?.status ?? ""}
+          </span>
+          {/* v36 (plan-321-1600 M2): 用时 / 变更文件数 / token 用量 */}
+          {elapsedLabel && (
+            <span className="subagent-panel-meta">{running ? "已用 " : "用时 "}{elapsedLabel}</span>
+          )}
+          {meta?.filesCount ? <span className="subagent-panel-meta">{meta.filesCount} 个文件</span> : null}
+          {meta?.tokens ? <span className="subagent-panel-meta">{meta.tokens} tokens</span> : null}
+          <span className="subagent-panel-count">{liveCount} 条消息</span>
+        </div>
+        {wf && <WorkflowNodeHead wf={wf} />}
       </div>
       <div className="subagent-panel-body">
         {/* v20: 消息体共享 message-flow 插件（source=subagent，操作仅复制）
@@ -195,6 +265,7 @@ export function SubagentPanel({ threadId, agentName, visible = true }: {
             恢复可见时以当前缓冲一次性对齐（历史消息与线程数据不丢）。 */}
         <PluginSlot slot="message-flow" source="subagent" threadId={threadId} visible={visible} className="subagent-flow" />
       </div>
+      {canNote && wf && <NodeNoteComposer wf={wf} />}
     </div>
   );
 }

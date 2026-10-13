@@ -160,19 +160,4 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
 .gallery-zoom-pct { font-variant-numeric: tabular-nums; border-radius: 999px; height: 26px; }
 .gallery-zoom-pct:hover { color: #fff; background: rgba(255, 255, 255, 0.12); }
 
-/* ── 输入框上方任务进度胶囊：更轻的浮起卡片 + 分段间隔 + 主题色进度 ── */
-.tcap {
-  padding: 4px; gap: 4px; border-color: var(--border-light);
-  background: color-mix(in oklab, var(--color-popover) 92%, transparent);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
-}
-.tcap-seg { height: 26px; padding: 0 10px 0 8px; gap: 6px; transition: background var(--dur-2) var(--ease-standard), transform var(--dur-spring) var(--spring-bouncy); }
-.tcap-seg:active { transform: scale(0.97); }
-.tcap-seg > svg { color: var(--accent); }
-.tcap-num { font-size: 12px; }
-.tcap-title { color: var(--text-2); }
-.tcap-divider { width: 1px; height: 14px; background: var(--border-light); }
-.tcap-pop { border-radius: var(--r-pop); border-color: var(--border-light); box-shadow: 0 16px 40px rgba(0, 0, 0, 0.1); }
-.tcap-step { border-radius: var(--r-md); transition: background var(--dur-2) var(--ease-standard); }
-.tcap-step:hover { background: var(--bg-hover); }
 .tcap-bar { border-radius: 999px; overflow: hidden; }

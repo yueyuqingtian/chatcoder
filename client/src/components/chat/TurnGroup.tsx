@@ -12,6 +12,7 @@ import { useRunningTicker } from "./useRunningTicker";
 import { MessageActions } from "./MessageActions";
 import type { SubagentMetaLite } from "./SubagentCard";
 import { WorkflowCard } from "../workflow/WorkflowCard";
+import { WorkflowNotice } from "../workflow/WorkflowNotice";
 import { PluginSlot } from "../../plugins/registry";
 import { MarkdownContent } from "../MarkdownContent";
 import { SubagentReportCard } from "./SubagentReportCard";
@@ -526,16 +527,13 @@ export const TurnGroup = memo(function TurnGroup({
           </div>
         );
       }
-      // 工作流唤醒消息——细分隔线（系统生成；工作流进入终态或需要决定时自动续跑）
-      case "workflow-wakeup": {
+      // 工作流唤醒消息：系统生成的进展通知（终态或需要决定时），以可展开的工具调用行呈现
+      case "workflow-wakeup":
         return (
-          <div key={i} className="turn-item turn-item-divider workflow-wakeup-divider">
-            <span className="turn-divider-line" />
-            <span className="turn-divider-text">⟳ 工作流有新进展，继续处理</span>
-            <span className="turn-divider-line" />
+          <div key={i} className="turn-item">
+            <WorkflowNotice text={msgText(item.msg.content)} />
           </div>
         );
-      }
       default:
         return null;
     }

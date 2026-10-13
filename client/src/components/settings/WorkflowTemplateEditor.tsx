@@ -182,6 +182,8 @@ export function WorkflowTemplateEditor({
   const [flowToRemove, setFlowToRemove] = useState<number | null>(null);
   const [diags, setDiags] = useState<Diagnostic[]>([]);
   const [saving, setSaving] = useState(false);
+  const [name, setName] = useState(template.name);
+  const [description, setDescription] = useState(template.description ?? "");
   const [newKind, setNewKind] = useState<string>("execute");
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [profiles, setProfiles] = useState<SubagentProfileOut[]>([]);
@@ -369,7 +371,11 @@ export function WorkflowTemplateEditor({
   const save = async () => {
     setSaving(true);
     try {
-      await api.patchWorkflowTemplate(template.key, { plan: cleanPlan(plan) as unknown as Record<string, unknown> });
+      await api.patchWorkflowTemplate(template.key, {
+        name: name.trim(),
+        description: description.trim(),
+        plan: cleanPlan(plan) as unknown as Record<string, unknown>,
+      });
       await loadTemplates();
       onClose();
     } catch (err) {
@@ -395,13 +401,34 @@ export function WorkflowTemplateEditor({
     <FormDialog
       open
       onClose={onClose}
-      title={`编辑模板：${template.name}`}
+      title={`编辑模板：${name.trim() || template.name}`}
       subtitle="增删与调整步骤，修改标题、执行角色、输入来源、验收标准、写入范围、检查命令与返工设置。保存前按与计划相同的规则校验。"
       onSubmit={() => void save()}
       submitLabel={saving ? "保存中…" : "保存"}
-      submitDisabled={saving || flows.length === 0}
+      submitDisabled={saving || flows.length === 0 || !name.trim()}
       width={880}
     >
+      <div className="wf-tpl-meta">
+        <label className="wf-tpl-field">
+          <span className="wf-gate-field-label">模板名称</span>
+          <Input
+            aria-label="模板名称"
+            maxLength={40}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
+          {!name.trim() && <span className="wf-tpl-meta-error" role="alert">名称不能为空</span>}
+        </label>
+        <label className="wf-tpl-field">
+          <span className="wf-gate-field-label">说明（可选）</span>
+          <Input
+            aria-label="模板说明"
+            maxLength={200}
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+          />
+        </label>
+      </div>
       {flows.length === 0 || !node || !flow ? (
         <div className="wf-settings-hint">这个模板没有子工作流，无法编辑。</div>
       ) : (

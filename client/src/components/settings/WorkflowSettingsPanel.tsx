@@ -140,6 +140,8 @@ function Overview() {
   );
 }
 
+const TEMPLATE_DESC = "内置预设只读，可复制后修改。运行结束后可在工作流面板中把计划存为我的模板，之后新的工作流可直接复用。";
+
 function TemplateList() {
   const templates = useWorkflowStore((s) => s.templates);
   const loadTemplates = useWorkflowStore((s) => s.loadTemplates);
@@ -154,10 +156,18 @@ function TemplateList() {
     void loadTemplates();
   }, [loadTemplates]);
 
-  if (templates === null) return <div className="wf-settings-hint">正在读取模板…</div>;
+  if (templates === null) {
+    return (
+      <Section title="模板" desc={TEMPLATE_DESC}>
+        <div className="wf-settings-hint">正在读取模板…</div>
+      </Section>
+    );
+  }
   return (
-    <>
-      <div className="wf-tpl-toolbar">
+    <Section
+      title="模板"
+      desc={TEMPLATE_DESC}
+      actions={(
         <Button
           variant="secondary"
           size="xs"
@@ -171,7 +181,8 @@ function TemplateList() {
         >
           新建模板
         </Button>
-      </div>
+      )}
+    >
       <List>
         {templates.map((tpl) => (
           <ListRow
@@ -220,7 +231,7 @@ function TemplateList() {
           if (target) void deleteTemplate(target.key);
         }}
       />
-    </>
+    </Section>
   );
 }
 
@@ -478,9 +489,7 @@ export function WorkflowSettingsPanel() {
         </div>
       </Section>
 
-      <Section title="模板" desc="内置预设只读，可复制后修改。运行结束后可在工作流面板中把计划存为我的模板，之后新的工作流可直接复用。">
-        <TemplateList />
-      </Section>
+      <TemplateList />
     </>
   );
 }

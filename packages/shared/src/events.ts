@@ -160,6 +160,8 @@ export type ServerWsEvent =
   | { event: "workflow.node.updated"; payload: WorkflowEventPayload }
   | { event: "workflow.gate.opened"; payload: WorkflowEventPayload }
   | { event: "workflow.log.appended"; payload: WorkflowEventPayload }
+  | { event: "workflow.conflict.detected"; payload: WorkflowEventPayload }
+  | { event: "workflow.conflict.resolved"; payload: WorkflowEventPayload }
   | { event: "error"; payload: { code?: string; message?: string } }
   /** 服务端对客户端请求的确认（approval/cancel/sync 等） */
   | { event: "ack"; payload: { ref: string; ok?: boolean; resolved?: boolean } }

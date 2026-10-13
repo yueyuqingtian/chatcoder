@@ -63,7 +63,10 @@ export const WorkflowCard = memo(function WorkflowCard({ programId }: { programI
   const adjusted = run.status === "cancelled" && run.closed_reason === "adjusted";
   const gate = gateOf(snap);
   const openDetail = () => {
-    usePanelStore.getState().openTab("workflow");
+    // 右侧面板可能是收起的：只切标签不展开，用户看不到任何变化，所以先展开面板
+    const panel = usePanelStore.getState();
+    panel.openPanel();
+    panel.openTab("workflow");
     useWorkflowStore.getState().focus(programId);
   };
 

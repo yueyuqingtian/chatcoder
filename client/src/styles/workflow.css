@@ -426,17 +426,16 @@
 }
 
 .wf-run-foot {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-3);
+  gap: 4px var(--sp-3);
   font-size: var(--fs-sm);
   color: var(--text-3);
 }
 
 .wf-run-progress {
   display: flex;
-  flex: 1;
   align-items: center;
   gap: var(--sp-2);
   min-width: 0;
@@ -481,7 +480,8 @@
 }
 
 .wf-run-time {
-  flex-shrink: 0;
+  justify-self: end;
+  white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
 
@@ -818,118 +818,6 @@
   max-width: 100%;
 }
 
-/* ── 输入框上方的工作流胶囊 ──
- * 几何与任务胶囊（composer.css + flow.css 的 .tcap）一致：整宽居中、胶囊高 34px、距输入框 8px。
- * 两者同时出现时本胶囊抬到任务胶囊之上（data-stacked），消息流让位两行（见文件末尾）。 */
-.wf-capsule-wrap {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 100%;
-  margin-bottom: 8px;
-  display: flex;
-  justify-content: center;
-  /* 整宽容器只作居中锚点，事件穿透，避免挡住消息流底部的点击与选择 */
-  pointer-events: none;
-  z-index: 5;
-  animation: mo-rise-in var(--dur-4) var(--spring-soft) both;
-  transition: margin-bottom var(--dur-3) var(--ease-standard);
-}
-.wf-capsule-wrap > * { pointer-events: auto; }
-.wf-capsule-wrap[data-stacked="true"] { margin-bottom: 50px; }
-
-.wf-capsule {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  max-width: min(560px, 80vw);
-  padding: 3px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-pill);
-  background: var(--color-popover);
-  box-shadow: var(--shadow-xs);
-  color: var(--text-2);
-  font-size: 12.5px;
-  transition: box-shadow var(--dur-2) var(--ease-standard);
-}
-.wf-capsule:hover { box-shadow: var(--shadow-sm); }
-
-.wf-capsule-main {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-  height: 26px;
-  padding: 0 9px 0 7px;
-  border: none;
-  border-radius: var(--r-pill);
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-  transition: background var(--dur-2) var(--ease-standard);
-}
-.wf-capsule-main:hover { background: var(--bg-hover); }
-
-.wf-capsule-ic {
-  display: inline-flex;
-  flex-shrink: 0;
-  color: var(--text-3);
-}
-
-.wf-capsule-title {
-  min-width: 0;
-  max-width: 220px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-1);
-  font-weight: 500;
-}
-
-.wf-capsule-count {
-  flex-shrink: 0;
-  color: var(--text-1);
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
-/* 状态点 + 文案：颜色只是辅助，文案本身已说明状态 */
-.wf-capsule-state {
-  display: inline-flex;
-  align-items: center;
-  flex-shrink: 0;
-  gap: 5px;
-  color: var(--text-3);
-  white-space: nowrap;
-}
-.wf-capsule-state::before {
-  content: "";
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-}
-.wf-capsule-state[data-tone="info"] { color: var(--info); }
-.wf-capsule-state[data-tone="warning"] { color: var(--warning); }
-.wf-capsule-state[data-tone="danger"] { color: var(--error); }
-.wf-capsule-state[data-tone="success"] { color: var(--success); }
-
-.wf-capsule-more {
-  flex-shrink: 0;
-  padding: 0 6px;
-  color: var(--text-3);
-  font-size: 11.5px;
-  font-variant-numeric: tabular-nums;
-  cursor: default;
-}
-
-.wf-capsule-resume {
-  flex-shrink: 0;
-  margin-left: 4px;
-}
-
 /* ── 闸门：原因 / 问题 / 冲突对照 / 说明 / 决定 ── */
 .wf-gate-head {
   display: flex;
@@ -950,7 +838,7 @@
 
 .wf-gate-field-label {
   font-size: 11px;
-  color: var(--text-3);
+  color: var(--text-2);
 }
 
 .wf-gate-note {
@@ -1192,11 +1080,6 @@
   min-height: 0;
 }
 
-/* 两个胶囊同时出现：消息流让位两行（单行 44px → 双行 86px，几何与 global.css 的单行规则一致） */
-.chat-panel.has-capsule[data-capsule-rows="2"] .chat-panel-flow .message-flow-capsule-space {
-  height: 86px;
-}
-
 /* 闸门随所在面板的宽度换行：右侧面板宽度由用户拖拽决定，因此按容器宽度而非视口宽度切换 */
 .wf-gate {
   container-type: inline-size;
@@ -1291,7 +1174,7 @@
 .wf-tpl-nav-flow {
   padding: 0 var(--sp-2);
   font-size: 11px;
-  color: var(--text-3);
+  color: var(--text-2);
 }
 
 .wf-tpl-nav-node {
@@ -1321,7 +1204,7 @@
 .wf-tpl-nav-kind {
   flex-shrink: 0;
   font-size: 11px;
-  color: var(--text-3);
+  color: var(--text-2);
 }
 
 .wf-tpl-nav-err {
@@ -1353,7 +1236,7 @@
 
 .wf-tpl-hint {
   font-size: 11px;
-  color: var(--text-3);
+  color: var(--text-2);
 }
 
 .wf-tpl-errors {
@@ -1398,27 +1281,38 @@
   .wf-tpl { grid-template-columns: minmax(0, 1fr); }
 }
 
-/* 子代理面板的工作流节点头：程序 › 子工作流 › 节点，随后是尝试 / 模式 / 评估结论的小标签与产出摘要 */
+/* 子代理面板的工作流节点头：第一行是所属路径、尝试次数与评估结论，右侧是详情开关；第二行一句摘要。
+ * 详情默认收起，展开后高度有上限并在内部滚动，不把消息流压没。 */
 .subagent-wf-head {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: var(--sp-3) var(--sp-4) 0;
+  gap: 4px;
+  min-width: 0;
+  padding: 0 var(--sp-3) var(--sp-2);
+}
+
+.subagent-wf-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
   min-width: 0;
 }
 
 .subagent-wf-trail {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--text-2);
 }
 
 .subagent-wf-chips {
-  display: flex;
-  flex-wrap: wrap;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
   gap: 6px;
 }
 
@@ -1429,24 +1323,60 @@
   padding: 0 8px;
   border-radius: var(--r-pill);
   background: color-mix(in oklab, var(--text-1) 6%, transparent);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-2);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .subagent-wf-chip[data-verdict="pass"] { color: var(--success); }
 .subagent-wf-chip[data-verdict="rework"],
 .subagent-wf-chip[data-verdict="escalate"] { color: var(--warning); }
 
-.subagent-wf-summary {
+.subagent-wf-toggle {
+  flex-shrink: 0;
+  white-space: nowrap;
+  color: var(--text-2);
+}
+
+.subagent-wf-caret { transition: transform var(--dur-spring) var(--spring-snappy); }
+.subagent-wf-toggle[aria-expanded="true"] .subagent-wf-caret { transform: rotate(180deg); }
+
+.subagent-wf-brief {
   margin: 0;
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: var(--fs-sm);
+  line-height: 1.6;
   color: var(--text-2);
+}
+
+/* 详情：默认收起；展开后高度有上限，内部滚动 */
+.subagent-wf-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  max-height: min(40vh, 300px);
+  margin-top: var(--sp-1);
+  padding: var(--sp-2) var(--sp-3);
+  overflow-y: auto;
+  border-radius: var(--r-ctl);
+  background: color-mix(in oklab, var(--text-1) 4%, transparent);
+  scrollbar-width: thin;
+}
+
+.subagent-wf-detail > * { flex-shrink: 0; }
+.subagent-wf-detail .subagent-wf-section { padding-top: 0; }
+
+.subagent-wf-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
 }
 
 /* 侧栏会话条目上的工作流标记：只用图标颜色表达状态（待决定 / 暂停为警示色，进行中为信息色） */
@@ -1873,7 +1803,13 @@
   padding: var(--sp-3);
 }
 
+/* 两行网格：第一行 进度 | 时间，第二行 标记（整行，窄宽时省略）；显式定位，避免时间被自动排到第三行 */
+.wf-run-progress { grid-column: 1; grid-row: 1; }
+.wf-run-time { grid-column: 2; grid-row: 1; }
 .wf-run-meta {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  min-width: 0;
   color: var(--text-3);
   font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
@@ -1966,88 +1902,41 @@
   line-height: 1.55;
 }
 
-.subagent-wf-history-toggle {
-  align-self: flex-start;
-  margin-top: var(--sp-1);
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--text-3);
-  font: inherit;
-  font-size: var(--fs-xs);
-  cursor: pointer;
-}
+/* ─── 统一胶囊的工作流浮层：列表行与步骤行同一几何（图标 + 标题 + 状态 + 步数 + 继续） ─── */
 
-.subagent-wf-history-toggle:hover { color: var(--text-1); }
-
-/* ─── 胶囊的浮层：钉住后列出本会话的工作流，与任务胶囊的浮层口径一致 ─────────── */
-
-.wf-capsule-sep {
-  color: var(--text-3);
-}
-
-.wf-capsule-pop {
-  width: 320px;
-  max-width: calc(100vw - 32px);
-  padding: var(--sp-2);
-  border-radius: var(--r-pop);
-  border: 1px solid var(--surface-inset-border);
-  background: var(--bg-panel);
-  box-shadow: var(--shadow-pop);
-}
-
-.wf-capsule-pop-head {
+.wf-cap-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-2);
-  padding: 2px var(--sp-1) var(--sp-2);
-}
-
-.wf-capsule-pop-title {
-  color: var(--text-1);
-  font-size: var(--fs-sm);
-  font-weight: 600;
-}
-
-.wf-capsule-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.wf-capsule-item {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: var(--sp-2);
+  gap: 9px;
+  min-height: 30px;
+  padding: 4px 6px 4px 10px;
   border-radius: var(--r-ctl);
+  font-size: 12.5px;
+  color: var(--text-2);
 }
 
-.wf-capsule-item:hover { background: var(--bg-hover); }
+.wf-cap-row:hover { background: var(--bg-hover); }
 
-.wf-capsule-item-main {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
+.wf-cap-row-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.wf-cap-row-title {
   min-width: 0;
-}
-
-.wf-capsule-item-title {
+  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-1);
-  font-size: var(--fs-sm);
+  font-weight: 500;
 }
 
-.wf-capsule-item-count {
+.wf-cap-row-count {
+  flex-shrink: 0;
   color: var(--text-3);
-  font-size: var(--fs-xs);
+  font-size: 11.5px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -2060,10 +1949,19 @@
   font-weight: 400;
 }
 
-.wf-tpl-toolbar {
-  display: flex;
-  justify-content: flex-end;
-  padding-bottom: var(--sp-2);
+/* 模板编辑弹窗顶部：名称与说明两列（窄宽度下堆叠） */
+.wf-tpl-meta {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr);
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+}
+.wf-tpl-meta-error {
+  font-size: var(--fs-sm);
+  color: var(--error);
+}
+@media (max-width: 560px) {
+  .wf-tpl-meta { grid-template-columns: minmax(0, 1fr); }
 }
 
 .wf-tpl-flow-preview {
@@ -2090,7 +1988,7 @@
 }
 
 .wf-tpl-mini-arrow {
-  color: var(--text-3);
+  color: var(--text-2);
   font-size: var(--fs-sm);
 }
 
@@ -2114,7 +2012,7 @@
 }
 
 .wf-tpl-mini-kind {
-  color: var(--text-3);
+  color: var(--text-2);
   font-size: 11px;
 }
 
@@ -2141,33 +2039,91 @@
   color: var(--text-2);
 }
 
-/* 运行中步骤的补充说明：一行输入 + 发送，结果就地说明 */
-.subagent-wf-note {
+/* 运行中节点的补充说明：面板底部的输入卡，与主代理输入框同一视觉（圆角卡 + 文本域 + 圆形发送），只保留输入与发送 */
+.subagent-note {
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
-  padding-top: var(--sp-2);
-  border-top: 1px solid var(--surface-inset-border);
-  margin-top: var(--sp-2);
+  flex-shrink: 0;
+  padding: var(--sp-2) var(--sp-3) var(--sp-3);
 }
 
-.subagent-wf-note-label {
-  color: var(--text-3);
-  font-size: var(--fs-xs);
-}
-
-.subagent-wf-note-row {
+.subagent-note-card {
   display: flex;
   align-items: flex-end;
-  gap: var(--sp-2);
+  gap: 6px;
+  padding: 6px 6px 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  background: var(--color-input);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, calc(0.03 * var(--shadow-strength, 1)));
 }
 
-.subagent-wf-note-row > :first-child { flex: 1; min-width: 0; }
+:root[data-theme="dark"] .subagent-note-card {
+  background: color-mix(in oklab, var(--color-neutral-800) 70%, var(--color-background));
+}
 
-.subagent-wf-note-state {
+.subagent-note-input {
+  flex: 1;
+  min-width: 0;
+  max-height: 120px;
+  padding: 5px 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-1);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.55;
+  resize: none;
+  field-sizing: content;
+}
+
+.subagent-note-input::placeholder { color: var(--text-3); }
+.subagent-note-input:disabled { opacity: 0.6; }
+
+.subagent-note-card .cc-send { margin-left: 0; }
+
+.subagent-note-state {
+  padding-left: 12px;
   color: var(--text-3);
   font-size: var(--fs-xs);
 }
 
-.subagent-wf-note-state[data-tone="error"] { color: var(--danger); }
-.subagent-wf-note-state[data-tone="ok"] { color: var(--success); }
+.subagent-note-state[data-tone="error"] { color: var(--error); }
+.subagent-note-state[data-tone="ok"] { color: var(--success); }
+
+/* ── 工作流通知（系统消息）：与工具调用行同一套样式，展开后显示完整通知 ── */
+.wf-notice {
+  margin: 4px 0;
+}
+
+.wf-notice-row {
+  width: 100%;
+  border: none;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.wf-notice-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wf-notice-body {
+  margin: 6px 0 2px 24px;
+  padding: 8px 10px;
+  border-radius: var(--r-ctl);
+  background: var(--surface-inset);
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

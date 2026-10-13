@@ -28,7 +28,7 @@
   background: transparent;
 }
 .ui-dialog-title { font-size: 17px; font-weight: 650; letter-spacing: -0.01em; color: var(--text-1); line-height: 1.35; }
-.ui-dialog-subtitle { font-size: 12.5px; color: var(--text-3); margin-top: 4px; }
+.ui-dialog-subtitle { font-size: 12.5px; color: var(--text-2); margin-top: 4px; }
 .ui-dialog-close { width: var(--ic-btn-md); height: var(--ic-btn-md); border-radius: var(--r-ctl); color: var(--text-2); }
 .ui-dialog-body { padding: 10px 24px 18px; }
 .ui-dialog-footer {

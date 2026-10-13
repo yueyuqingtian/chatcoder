@@ -76,7 +76,9 @@ export function JumpDots({ entries, onJump, activeIndex }: {
 
           return (
             <div
-              key={t.entry.turnId ?? i}
+              // 乐观消息（turnId 为 null）与真实 turn 的 key 不得相撞：此前回退到下标 i，
+              // 会与 turnId 为 1 等数字 key 重复，触发 React 重复 key 警告
+              key={t.entry.turnId != null ? `turn-${t.entry.turnId}` : `entry-${t.entryIdx}`}
               className="jump-dot-wrap"
               onMouseEnter={() => setHovered(i)}
             >
