@@ -122,15 +122,20 @@ export default function App() {
   }, [toggleSidebar]);
 
   const openSettings = useCallback((tab?: string) => {
-    const { currentSessionId } = useChatStore.getState();
-    setReturnLocation({ nav, sessionId: currentSessionId });
+    // 已在设置页内再开（如工作流页的“前往子智能体设置”、命令中心）：只切 tab。
+    // 此时 nav 已是 settings，若照常记录返回位置，离开时会“返回”到设置页本身（回不去）；
+    // 右面板的展开态也会被误记为已折叠而丢失。入场快照只在从工作区进入时记录一次。
+    if (nav !== "settings") {
+      const { currentSessionId } = useChatStore.getState();
+      setReturnLocation({ nav, sessionId: currentSessionId });
+      if (sidebarCollapsed) toggleSidebar();
+      // 问题1: 进入设置页自动折叠右面板（记录展开态，离开时恢复）
+      settingsPanelExpandedRef.current = usePanelStore.getState().expanded;
+      if (settingsPanelExpandedRef.current) toggleRightPanel();
+    }
     if (tab) setSettingsActiveTab(tab as SettingsTab);
     setSettingsTab(tab);
     setNav("settings");
-    if (sidebarCollapsed) toggleSidebar();
-    // 问题1: 进入设置页自动折叠右面板（记录展开态，离开时恢复）
-    settingsPanelExpandedRef.current = usePanelStore.getState().expanded;
-    if (settingsPanelExpandedRef.current) toggleRightPanel();
   }, [nav, sidebarCollapsed, toggleSidebar, toggleRightPanel]);
 
   // 设置页内的跳转（如工作流页“前往子智能体设置”）：页面之间不直接持有导航状态，经事件交给这里
@@ -147,7 +152,8 @@ export default function App() {
     const target = returnLocation;
     // 问题1: 离开设置页恢复右面板展开态
     if (settingsPanelExpandedRef.current) toggleRightPanel();
-    setNav(target.nav);
+    // 返回位置不能是设置页本身（兜底：其它入口若写入了 settings，统一回到工作区首页）
+    setNav(target.nav === "settings" ? null : target.nav);
     if (target.sessionId === null) {
       // plan-404-1892（图5）：统一走 startNewTask——此前手写子集漏了 artifacts 等字段，
       // 从设置页回到空会话时右侧任务摘要会残留旧会话产物
