@@ -223,7 +223,8 @@ def blank_plan(name: str) -> dict[str, Any]:
     """“新建模板”的起点：一个子工作流、一个探索步骤，可在模板编辑器中继续增删。"""
     return {
         "title": name,
-        "goal": "",
+        # 目标必填（PlanSpec.goal）；编辑器没有目标输入框，沿用模板名，否则无法保存
+        "goal": name,
         "rationale": "",
         "flows": [
             {

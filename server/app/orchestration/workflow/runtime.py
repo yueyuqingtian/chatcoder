@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
-from app.orchestration.workflow import isolation, store
+from app.orchestration.workflow import conflict_events, isolation, store
 from app.orchestration.workflow.commands import run_check_command
 from app.orchestration.workflow.conflicts import LeaseOwner, WriteLeaseTable, get_lease_table
 from app.orchestration.workflow.drift import (
@@ -706,6 +706,8 @@ class WorkflowRuntime:
             await self._emit_node(node["id"], status="done", decision="approve")
             await self._log(program_id, f"已采纳当前结果：{flow_key}/{node_key}（风险已记录）")
         elif decision == "rework":
+            if not node.get("rework_to"):
+                raise ValueError("该评估没有可返工的实现步骤，请选择采纳或中止")
             max_rework = (
                 node["max_rework"] if node["max_rework"] is not None else DEFAULT_MAX_REWORK
             ) + 1
@@ -720,6 +722,14 @@ class WorkflowRuntime:
             await self._cancel_flow(program_id, flow)
         else:
             raise ValueError(f"未知的闸门决定：{decision}")
+        if (node.get("conflict") or {}).get("kind") in ("conflict", "integration"):
+            await conflict_events.emit(
+                program_id,
+                conflict_events.RESOLVED,
+                node_key,
+                {"level": "L4", "decision": decision},
+                broadcast=self._broadcast,
+            )
         await self._recalc(program_id)
         self._wake_tick()
 
@@ -875,6 +885,13 @@ class WorkflowRuntime:
             meta["program"],
             f"并入主工作区需要你的决定：{meta['flow_key']}（{reason}）",
             level="warn",
+        )
+        await conflict_events.emit(
+            meta["program"],
+            conflict_events.DETECTED,
+            meta["key"],
+            {"level": "L4", "paths": [str(f) for f in files], "reason": reason},
+            broadcast=self._broadcast,
         )
 
     async def _decide_gate_question(
@@ -1367,6 +1384,14 @@ class WorkflowRuntime:
             },
         )
         await self._emit_node(node_id, status="awaiting_merge")
+        # L3：并入冲突转交合并步骤
+        await conflict_events.emit(
+            meta["program"],
+            conflict_events.DETECTED,
+            meta["key"],
+            {"level": "L3", "paths": paths, "merge_step": merge_key},
+            broadcast=self._broadcast,
+        )
         await self._log(
             meta["program"],
             f"写入冲突转交合并步骤：{meta['flow_key']}/{meta['key']}（{'、'.join(paths[:3])}）",
@@ -1418,6 +1443,13 @@ class WorkflowRuntime:
                 )
                 await self._emit_node(node["id"], status="pending")
                 await self._log(program_id, f"合并完成，继续原步骤：{flow_key}/{node['key']}")
+                await conflict_events.emit(
+                    program_id,
+                    conflict_events.RESOLVED,
+                    node["key"],
+                    {"level": "L3", "paths": [path] if path else [], "result": "merged"},
+                    broadcast=self._broadcast,
+                )
                 continue
             meta = {"program": program_id, "flow_key": flow_key, "key": node["key"]}
             gate = pending.get("gate") or {
@@ -1465,6 +1497,14 @@ class WorkflowRuntime:
             meta["program"],
             f"写入冲突需要你的决定：{meta['flow_key']}/{meta['key']}（{reason}）",
             level="warn",
+        )
+        # L4：重做与合并都未能化解，闸门三栏对照交给用户
+        await conflict_events.emit(
+            meta["program"],
+            conflict_events.DETECTED,
+            meta["key"],
+            {"level": "L4", "path": gate.get("path"), "reason": reason},
+            broadcast=self._broadcast,
         )
 
     async def _on_done(self, node_id: int, request: NodeRequest, result: NodeResult) -> None:
@@ -1533,26 +1573,40 @@ class WorkflowRuntime:
         elif decision.action == "rework":
             await self._schedule_rework(ctx, node, verdict, reason=decision.reason, extra="")
         else:
-            await store.update_node(
-                node_id, status="waiting_human", finished_at=None, reason=decision.reason
-            )
-            await self._emit_node(node_id, status="waiting_human")
-            await self._emit(
-                program_id,
-                "workflow.gate.opened",
-                node["key"],
-                {
-                    "flow_key": ctx["flow_key"],
-                    "reason": decision.reason,
-                    "options": ["approve", "rework", "abort"],
-                    "issues": (verdict or {}).get("issues", []),
-                },
-            )
-            await self._log(
-                program_id,
-                f"需要你的决定：{ctx['flow_key']}/{node['key']}（{decision.reason}）",
-                level="warn",
-            )
+            await self._open_review_gate(ctx, node, verdict, decision.reason)
+
+    async def _open_review_gate(
+        self,
+        ctx: dict[str, Any],
+        node: dict[str, Any],
+        verdict: dict[str, Any] | None,
+        reason: str,
+    ) -> None:
+        """评估结论需要用户决定：节点等待决定，闸门只提供实际可用的选项（有返工目标才有“返工”）。"""
+        program_id = ctx["program_id"]
+        options = ["approve", "abort"]
+        if node.get("rework_to"):
+            options.insert(1, "rework")
+        await store.update_node(
+            node["id"], status="waiting_human", finished_at=None, reason=reason
+        )
+        await self._emit_node(node["id"], status="waiting_human")
+        await self._emit(
+            program_id,
+            "workflow.gate.opened",
+            node["key"],
+            {
+                "flow_key": ctx["flow_key"],
+                "reason": reason,
+                "options": options,
+                "issues": (verdict or {}).get("issues", []),
+            },
+        )
+        await self._log(
+            program_id,
+            f"需要你的决定：{ctx['flow_key']}/{node['key']}（{reason}）",
+            level="warn",
+        )
 
     async def _schedule_rework(
         self,
@@ -1567,10 +1621,9 @@ class WorkflowRuntime:
         target_key = review.get("rework_to")
         target = await store.find_node(ctx["flow_run_id"], target_key) if target_key else None
         if target is None:
-            await store.update_node(
-                review["id"], status="waiting_human", reason="返工目标缺失，需要你决定"
+            await self._open_review_gate(
+                ctx, review, verdict, "评估要求返工，但没有可返工的实现步骤，需要你决定"
             )
-            await self._emit_node(review["id"], status="waiting_human")
             return
         feedback = issues_as_feedback(verdict)
         if extra:

@@ -141,6 +141,39 @@ def _warning(
     res.warnings.append(Diagnostic(code, path, message, suggestion))
 
 
+# Pydantic 错误类型 → 界面文案（界面文案一律简体中文）；未登记的类型统一为「格式不正确」
+_SCHEMA_TEXT: dict[str, str] = {
+    "missing": "缺少必填项",
+    "string_too_short": "不能为空",
+    "string_too_long": "超过长度上限",
+    "string_type": "应为文本",
+    "string_unicode": "文本编码不正确",
+    "int_type": "应为整数",
+    "int_parsing": "应为整数",
+    "bool_type": "应为是或否",
+    "list_type": "应为列表",
+    "dict_type": "应为对象",
+    "literal_error": "取值不在可选范围内",
+    "extra_forbidden": "包含不支持的字段",
+    "too_short": "数量过少",
+    "too_long": "数量超过上限",
+}
+
+
+def _schema_path(loc: tuple[object, ...]) -> str:
+    """Pydantic 错误位置 (flows, 0, nodes, 1, title) → 诊断路径 flows[0].nodes[1].title。
+
+    与其它诊断使用同一格式，编辑器据此把错误标到对应步骤与字段旁边。
+    """
+    path = ""
+    for part in loc:
+        if isinstance(part, int):
+            path += f"[{part}]"
+        else:
+            path += f".{part}" if path else str(part)
+    return path or "$"
+
+
 def parse_plan(data: object) -> tuple[PlanSpec | None, list[Diagnostic]]:
     """解析模型提交的图规格。结构错误与 merge 节点以诊断返回，不抛异常。"""
     if not isinstance(data, Mapping):
@@ -168,8 +201,8 @@ def parse_plan(data: object) -> tuple[PlanSpec | None, list[Diagnostic]]:
         spec = PlanSpec.model_validate(data)
     except ValidationError as exc:
         for err in exc.errors():
-            loc = ".".join(str(part) for part in err["loc"]) or "$"
-            diags.append(Diagnostic("schema", loc, f"字段不合法：{err['msg']}"))
+            text = _SCHEMA_TEXT.get(err.get("type", ""), "格式不正确")
+            diags.append(Diagnostic("schema", _schema_path(err["loc"]), f"字段不合法：{text}"))
         return None, diags
     return spec, []
 

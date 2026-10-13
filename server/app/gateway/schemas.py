@@ -951,6 +951,8 @@ WS_EVENT_PAYLOAD_MODELS: dict[str, type[WsEventPayload]] = {
     "workflow.node.updated": WsEventPayload,
     "workflow.gate.opened": WsEventPayload,
     "workflow.log.appended": WsEventPayload,
+    "workflow.conflict.detected": WsEventPayload,
+    "workflow.conflict.resolved": WsEventPayload,
     "error": EvError,
     "ack": WsEventPayload,
     "sync.response": WsEventPayload,

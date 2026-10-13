@@ -404,6 +404,17 @@ async def test_plan_starts_immediately_when_confirmation_is_disabled(monkeypatch
     assert listed and listed[0]["status"] == "running"
 
 
+async def _wait_for_status(pid: int, expected: str, timeout: float = 3.0) -> str:
+    """自动续跑由定时器与写库队列完成，负载高时可能晚于固定的短暂等待；轮询到期望状态或超时。"""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    status = await _program_status(pid)
+    while status != expected and loop.time() < deadline:
+        await asyncio.sleep(0.02)
+        status = await _program_status(pid)
+    return status
+
+
 async def test_network_pause_auto_resumes_once_when_enabled(tmp_path, monkeypatch):
     monkeypatch.setattr(app_settings, "workflow_auto_resume_on_network", True)
     monkeypatch.setattr(runtime_module, "AUTO_RESUME_DELAY_SEC", 0.01)
@@ -414,8 +425,7 @@ async def test_network_pause_auto_resumes_once_when_enabled(tmp_path, monkeypatc
     await rt.start(pid)
 
     await rt._pause_program(pid, "network", "网络中断，已保留进度")
-    await asyncio.sleep(0.1)
-    assert await _program_status(pid) == "running", "网络恢复后应自动续跑"
+    assert await _wait_for_status(pid, "running") == "running", "网络恢复后应自动续跑"
 
     # 自动续跑只尝试一次：再次因网络暂停时不再自动恢复
     await rt._pause_program(pid, "network", "网络中断，已保留进度")
@@ -426,8 +436,7 @@ async def test_network_pause_auto_resumes_once_when_enabled(tmp_path, monkeypatc
     await rt.resume(pid)
     assert await _program_status(pid) == "running"
     await rt._pause_program(pid, "network", "网络中断，已保留进度")
-    await asyncio.sleep(0.1)
-    assert await _program_status(pid) == "running"
+    assert await _wait_for_status(pid, "running") == "running"
 
 
 # ── 并发池快照 API ───────────────────────────────────────

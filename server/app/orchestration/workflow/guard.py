@@ -27,7 +27,7 @@ from typing import Any
 
 from app.core.config import settings
 from app.orchestration.tools.base import ToolResult
-from app.orchestration.workflow import store
+from app.orchestration.workflow import conflict_events, store
 from app.orchestration.workflow.conflicts import (
     LeaseOwner,
     ReadIndex,
@@ -331,6 +331,12 @@ async def _before_tool(
                 logger.info(
                     "[workflow] 写入冲突已自动合并（三方合并）node=%s path=%s", node_id, rel
                 )
+                # L1：干净合并，冲突在写入前已化解，只发结束事件
+                await conflict_events.emit_for_node(
+                    int(node_id),
+                    conflict_events.RESOLVED,
+                    {"level": "L1", "path": rel, "result": "auto_merged"},
+                )
                 continue
         if tool_name in ("editor_apply_diff", "multi_file_edit", "apply_patch"):
             # 锚点式编辑：工具按原文唯一锚点替换，锚点已失效时工具自身报错（L1 锚点重放）
@@ -384,6 +390,17 @@ async def _conflict(
             conflict=True,
             gated=True,
         )
+    # L2：硬冲突，本次写入不生效，节点排队重做（闸门由运行时在 L4 时创建并发出事件）
+    await conflict_events.emit_for_node(
+        node_id,
+        conflict_events.DETECTED,
+        {
+            "level": "L2",
+            "path": rel,
+            "attempts": count,
+            "reason": "改动落在同一处，需基于最新内容重做",
+        },
+    )
     return _error(
         f"『{rel}』在你读取之后被其它节点改动了。请先重新读取该文件，基于最新内容重新完成修改。",
         conflict=True,
@@ -462,6 +479,8 @@ async def _after_tool(
         return
     if tool_name in _WRITE_TOOLS_ALL:
         targets = _write_targets(tool_name, args) or []
+        # 此前有过冲突的节点，本次写入成功即为 L2 重做完成
+        redone = _CONFLICTS.get(int(node_id), 0) > 0
         _CONFLICTS[int(node_id)] = 0
         for raw in targets:
             resolved = _resolve(workspace, raw)
@@ -471,6 +490,12 @@ async def _after_tool(
             text = _snapshot_text(full) if full.is_file() else None
             if text is not None:
                 _ledger(agent.id).mark_written(rel, text)
+            if redone:
+                await conflict_events.emit_for_node(
+                    int(node_id),
+                    conflict_events.RESOLVED,
+                    {"level": "L2", "path": rel, "result": "redone"},
+                )
             await _notify_readers(int(ctx.session_id), workspace, rel, str(agent.id), node_id)
 
 

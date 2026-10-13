@@ -145,6 +145,27 @@ def test_unknown_fields_are_rejected():
     assert any(d.code == "schema" for d in diags)
 
 
+def test_schema_errors_use_bracket_paths_and_chinese_text():
+    # 路径与其它诊断同格式（编辑器据此挂到步骤字段旁），文案不得回落到 Pydantic 英文原文
+    flow = _backend_flow()
+    flow["nodes"][0]["priority"] = "high"
+    spec, diags = parse_plan(_plan([flow]))
+    assert spec is None
+    errors = [d for d in diags if d.code == "schema"]
+    assert errors
+    assert all(d.path.startswith("flows[0].nodes[0]") for d in errors)
+    assert all(d.message.startswith("字段不合法：") and "String" not in d.message for d in errors)
+
+
+def test_blank_template_plan_passes_schema_validation():
+    # “新建模板”的起点必须能直接通过校验，否则编辑器里无法保存
+    from app.orchestration.workflow.presets import blank_plan
+
+    spec, diags = parse_plan(blank_plan("我的模板"))
+    assert spec is not None
+    assert diags == []
+
+
 def test_dependency_cycle_is_detected():
     a = {"key": "a", "depends_on": ["b"], "nodes": [_node("e", "explore")]}
     b = {"key": "b", "depends_on": ["a"], "nodes": [_node("e", "explore")]}
