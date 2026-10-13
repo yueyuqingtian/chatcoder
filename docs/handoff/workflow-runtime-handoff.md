@@ -231,6 +231,56 @@ npm --prefix client run dev -- --port 5174 --strictPort
 ## 9. 建议的下一步
 
 1. 补齐第 5.1 节的界面走查，保留截图（浅色 / 深色、窄屏）。
-2. 按 AGENTS §3 补写 0.8.0 更新日志（面向用户，不写类名与文件名）。
+2. 更新日志：远端已有 `v0.8.0` 标签（bdcbe4d，已发布），本分支的条目不写入该区块；版本号由维护者决定（见第 10 节）。
 3. 决定第 6 节的三项。
 4. 在新电脑上先跑一次 `python -m pytest tests -q` 与 `npm --prefix client run build`，确认环境一致。
+
+## 10. 2026-10-13 本机复验记录
+
+- 环境：`client/node_modules` 与锁文件不同步（缺 `three`），已执行 `npm --prefix client install`，未改动跟踪文件。
+- 客户端：`npm --prefix client run typecheck` 与 `npm --prefix client run build` 均退出码 0（分包体积警告为既有）。
+- 服务端：首次全量 `python -m pytest tests -q` 为 1318 通过（640 秒，1 条警告）；修复后复跑为 1320 通过（新增 2 项，547 秒，1 条警告），退出码 0。
+- 本次修复（已提交，见 git log）：
+  1. 新建模板的计划 `goal` 为空，导致之后的保存必然失败。`server/app/orchestration/workflow/presets.py` 的 `blank_plan` 改为沿用模板名。
+  2. 校验错误路径改为 `flows[i].nodes[j].字段`，与其它诊断一致，编辑器才能把错误挂到对应字段旁；文案译为中文（此前直接显示 Pydantic 英文原文）。`server/app/orchestration/workflow/graph.py`，新增两条用例（`server/tests/test_workflow_graph.py`）。
+  3. `client/src/components/chat/JumpDots.tsx`：乐观消息（turnId 为 null）与真实 turn 的 React key 相撞，改为带前缀的 key。
+- 已在浏览器（e2e 沙箱）中核对：调整流程（程序 `cancelled` / `adjusted`，草稿卡显示「已调整」）；设置页工作流概览、并发档位、预设与「我的模板」；模板编辑器保存与中文校验提示。
+- 未核对：浅色 / 深色、窄面板、漂移弹层、节点补充说明、尝试分隔线。另外，发送后界面要重新打开会话才会更新，这一点需要在页面可见时复验：测试时内置浏览器页面处于隐藏状态，`requestAnimationFrame` 不触发，聊天状态的批处理更新因此停住。
+- `request_write_scope`（更正）：已对可写工作流节点开放（`server/app/orchestration/workflow/executor_subagent.py` 在可写节点的工具清单中追加 `REQUEST_SCOPE_SCHEMA`），主代理不暴露。上面「未开放」的判断有误。
+- 冲突事件 `workflow.conflict.*`（更正）：已实现，见第 11 节。上文第 2、5.2 节的相关描述已过时。
+- 远端已有 `v0.8.0` 标签（bdcbe4d，已发布）：本分支的更新条目不写入该区块；版本号已由维护者决定为 0.8.1（见第 11 节）。
+
+## 11. 2026-10-13 第二轮整改记录
+
+- 决定（来自维护者）：版本 0.8.1（`package.json` 与 `package-lock.json` 根版本号已更新，CHANGELOG 新增 `## v0.8.1`）；界面英文键不做，工作流文案保持简体中文（AGENTS.md §4）；冲突按设计补齐；启动网页版后由维护者在页面配置模型。
+- 胶囊：工作流胶囊与任务胶囊共用 `client/src/components/ui/useCapsulePopover.ts`，交互一致（聚焦或悬停展开、点击钉住、Esc 与点外部关闭）；浮层居中于胶囊正上方。
+- 设置：「新建模板」移到「模板」区块页头；模板编辑弹窗增加「模板名称」「说明」，保存时一并提交。
+- 深色（设置 → 外观 → 深色）：DOM 层面核对对比度，修正胶囊状态与计数、编辑弹窗标签与说明、共享对话框副标题。遗留：共享危险按钮「删除这个步骤」为 4.42:1（全局配色，未改）。布局的视觉核对待页面可见时补做。
+- 冲突事件：`workflow.conflict.detected / resolved` 已实现。L1 守卫自动合并（resolved）；L2 硬冲突（detected），重做写入成功（resolved）；L3 合并步骤（创建时 detected，合并完成 resolved）；L4 闸门（创建时 detected，决定后 resolved，载荷含 decision）。测试：`server/tests/test_workflow_conflict_events.py`，3 项通过。
+- 调研：搜索工具两次返回模型访问错误，未取得外部资料；依据改为代码（`git merge-file --diff3` 返回码分级，见 `server/app/services/git_merge_engine.py`）。
+- 测试与留痕：见计划文档 `ai/chatcoder-plan-20261013-workflow-round2.md` 的 W8 条目。
+
+## 12. 2026-10-13 第三轮整改记录（真实模型联调与界面问题）
+
+- 真实模型联调（牛码 / deepseek-flash）：程序 16 完整跑完（计划 → 8 节点 → 集成 → 评估闸门 → 返工 → 采纳 → succeeded）。联调中发现并修复三处：
+  1. 闸门没有返工目标（集成阶段的评估）时，节点静默回到「等待人工」却没有闸门与选项。现由 `_open_review_gate` 打开闸门，无返工目标时只提供采纳 / 中止，`decide_gate` 拒绝返工并保留闸门（`server/app/orchestration/workflow/runtime.py`；测试 `server/tests/test_workflow_review_gate.py`，2 项）。
+  2. 工作流结束的系统消息被显示为用户气泡：实时消息的 turn_id 为空，增量时间线漏判。`client/src/components/chat/timeline.ts` 的 `userItemOf` 统一分类；通知改为可展开的行（`client/src/components/workflow/WorkflowNotice.tsx`）。
+  3. 同一程序的工作流卡片在一轮内重复（计划与启动分属两簇工具调用）。`buildTurnItems` 的 `cardedPrograms` 保证每轮每程序只出一张卡。在真实会话 `real-model-workflow-2` 的 DOM 中核对：仅 1 张卡（succeeded）。
+- 胶囊合并（取代第 11 节的“两个胶囊并存”）：任务进度、工作流、未审核变更合并为一个 `.tcap`（`client/src/components/chat/ComposerCapsule.tsx`，取代已删除的 `TaskProgressCapsule.tsx`；工作流数据与浮层内容在 `client/src/components/workflow/WorkflowCapsule.tsx`）。段按有无内容显示，顺序固定为 任务 → 工作流 → 产物。
+  - 浮层由单一状态机 `client/src/components/ui/useCapsulePopover.ts` 管理：同一时间只展开一段，划过即切换（修复：任务浮层在划到产物时不收起）；点击钉住，钉住后划过其它段不切换；点外部或 Esc 解除；段消失时清空状态。
+  - 样式：段样式集中在 `composer.css` 的 `.tcap-*`；`flow.css` 中与之重复的旧覆盖块已删除（其值并入 `composer.css`，视觉口径不变）。
+- 窄宽：`.tcap-wrap` 为 size 容器，宽度收窄时依次隐去段名“工作流”与“+N”、增删统计、状态文案；只有任务段的标题可以省略，其它段整段保留（360px 面板下三段内容完整）。
+- 工作流面板运行行（窄宽重叠）：`.wf-run-foot` 两行网格，进度与时间定位在第一行，标记在第二行（`workflow.css`）。240 / 320 / 420px 下以同结构 DOM 探针核对，无重叠。
+- 子代理补充说明：改为主输入卡同款（圆角卡、文本域、`cc-send` 圆形发送；Enter 发送，Shift+Enter 换行，输入法组字中不发送），只保留输入与发送（`SubagentPanel.tsx`、`workflow.css` 的 `.subagent-wf-note-*`）。
+- 验证方法：用临时验证页（Vite 下挂载真实组件，store 为可控的种子数据）核对胶囊的悬停 / 钉住 / 切换、三段动态显示、360px 窄宽与浅色主题、通知展开、补充说明输入与发送按钮状态；验证页已删除，不入库。
+- 测试：服务端串行 `python -m pytest tests -q` 1325 通过、0 失败（521 秒，退出码 0）。定向 6 个工作流测试文件 63 通过。第二轮的 3 失败 / 5 错误是并发运行共用测试库导致，串行后消失。客户端 `typecheck` 与 `build` 退出码 0。
+- 未做 / 待你确认：`0.7.3copy/` 空目录未删（需你确认）；界面英文键不做（第 11 节）；搜索工具本轮未使用。提交与合并：本分支已提交，并合并到 master，记录见 git log。
+- 进程：已停止沙箱用的 8000、8123、8088 服务；保留 12980 后端与 5174 前端（你在用）。
+
+## 13. 2026-10-13 第四轮整改记录（右侧面板与子代理头部）
+
+- 「查看详情」没有弹出右侧工作流面板：工作流卡片与输入框胶囊的「打开详情」都只切换了标签，面板是收起的，所以看不到变化。两处现在先展开面板，再切到工作流标签并聚焦程序（`client/src/components/workflow/WorkflowCard.tsx`、`WorkflowCapsule.tsx`）。
+- 开发环境的坑（已遇到）：Vite 热更新后，同一个 store 模块可能被不同的导入方加载成多份实例。资源列表里 `store/workflow.ts` 会出现多个 `?t=` 时间戳。症状：面板已展开，却仍停在列表，「查看详情」写入的 store 与面板读取的不是同一份。修复办法：重启 dev server（保留 `VITE_API_PORT=12980`）后刷新页面；之后若再出现，先看资源列表里 `store/workflow.ts` 的 URL 是否只有一个。
+- 子代理面板头部改为三行：名称行；所属路径（完整显示）；尝试次数、评估结论与「详情」开关。摘要、计划、验证、评估问题与尝试记录收在详情里，展开后高度上限 300px、内部滚动。补充说明移到面板底部，与主输入框同位置。头部高度由约 435px 降到约 100px（`SubagentPanel.tsx`、`workflow.css` 的 `.subagent-wf-*`、`global.css` 的 `.subagent-panel-top`）。
+- 验证（真实会话 real-model-workflow-2）：查看详情后面板展开到 418px 并进入详情视图；子代理头部、详情的展开与收起、运行态下的补充说明输入卡，均用 DOM 测量核对。浏览器面板处于隐藏状态时 CSS 过渡不会推进，因此测量时临时禁用了过渡，未截图。
+- 未做：胶囊「打开详情」需要一个进行中的工作流，沙箱会话里没有，未实际点击验证；它与卡片走的是同一段代码。
