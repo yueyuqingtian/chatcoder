@@ -34,6 +34,7 @@ async def _to_out(db: AsyncSession, s) -> SessionOut:
         fork_parent_id=s.fork_parent_id,
         worktree_path=s.worktree_path,
         has_running=await session_service.has_running_turn(db, s.id),
+        workflow_running=await session_service.has_running_workflow(db, s.id),
         has_interrupted_turn=await session_service.has_interrupted_turn(db, s.id),
         last_activity_at=await session_service.last_activity_at(db, s.id),
         running_started_at=await session_service.running_turn_started_at(db, s.id),
@@ -143,6 +144,15 @@ async def delete_session(session_id: int, permanent: bool = False,
 
     await workflow_service.on_session_archived(session_id)
     return {"ok": True}
+
+
+@router.post("/{session_id}/stop", response_model=dict)
+async def stop_session(session_id: int):
+    """停止按钮：中断本会话的一切执行——运行中的主代理（连带子代理）、后台子代理、运行中的工作流（暂停，保留进度）。"""
+    from app.orchestration import engine
+
+    result = await engine.stop_session_execution(session_id)
+    return {"ok": True, **result}
 
 
 @router.post("/{session_id}/fork", response_model=SessionOut)

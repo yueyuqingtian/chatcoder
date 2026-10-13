@@ -358,6 +358,8 @@ export interface SessionOut {
   fork_parent_id: number | null;
   worktree_path: string | null;
   has_running?: boolean;
+  /** 会话有后台执行中的工作流（程序 running）：与 has_running 并列，工作流在跑时本会话可能已没有运行中的 turn */
+  workflow_running?: boolean;
   has_interrupted_turn?: boolean;
   /** 侧栏工作流标记：attention（待你决定）/ paused / running / draft；无进行中的工作流时为空 */
   workflow_state?: "attention" | "paused" | "running" | "draft" | null;

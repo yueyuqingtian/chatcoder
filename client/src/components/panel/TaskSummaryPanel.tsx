@@ -8,6 +8,7 @@
  *  折叠状态按「会话 + 模块」写 localStorage（store/tsFold.ts）。 */
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useChatStore } from "../../store/chat";
+import { sessionWorkflowRunning, useWorkflowStore } from "../../store/workflow";
 import { usePanelStore } from "../../store/panel";
 import { useTsFoldStore } from "../../store/tsFold";
 import { openExtensionsManager, type ExtKind } from "../../store/navIntent";
@@ -75,6 +76,8 @@ export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
   const isRunning = useChatStore((state) => state.isRunning);
   const subagentMeta = useChatStore((state) => state.subagentMeta);
   const session = useChatStore((state) => state.sessions.find((x) => x.id === state.currentSessionId));
+  // 后台工作流在跑时，本会话即为「执行中」（工作流可能已不占用任何轮次）
+  const workflowRunning = useWorkflowStore((s) => sessionWorkflowRunning(session ? s.bySession[session.id] : undefined));
   const setPreviewPath = usePanelStore((state) => state.setPreviewPath);
   const openTab = usePanelStore((state) => state.openTab);
   const openSubagent = usePanelStore((state) => state.openSubagent);
@@ -175,11 +178,14 @@ export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
   /** 总览行：回答「现在怎样」 */
   const head = useMemo<{ status: StatusKind; title: string }>(() => {
     if (hasPendingPlan) return { status: "paused", title: "等待确认方案" };
+    if (isRunning || workflowRunning || progress.phase === "running") {
+      return { status: "running", title: !isRunning && workflowRunning ? "工作流执行中" : "执行中" };
+    }
+    if (progress.rows.some((r) => r.note === "待续接")) return { status: "paused", title: `待续接 · ${progress.unfinished} 项` };
     if (progress.phase === "interrupted") return { status: "paused", title: `已停止 · ${progress.unfinished} 项未完成` };
-    if (isRunning || progress.phase === "running") return { status: "running", title: "执行中" };
     if (progressRows.length > 0 && progressDone === progressRows.length) return { status: "done", title: "已完成" };
     return { status: "pending", title: "空闲" };
-  }, [hasPendingPlan, progress.phase, progress.unfinished, isRunning, progressRows.length, progressDone]);
+  }, [hasPendingPlan, progress.phase, progress.unfinished, isRunning, workflowRunning, progressRows.length, progressDone]);
 
   const ratio = progressRows.length > 0 ? progressDone / progressRows.length : 0;
 

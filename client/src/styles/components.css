@@ -533,11 +533,13 @@
 .ui-menu-label { padding: var(--sp-2) var(--sp-3) var(--sp-1); font-size: 11px; color: var(--text-3); }
 
 /* ── ⑫ Tooltip ────────────────────────────────────────────── */
-/* S1（plan-41-197）：用户反馈"原生 title 是方形丑陋块、聚焦还有延迟"。
-   此处统一为圆角卡片浮层：--r-pop 圆角 + 描边 + shadow-lg + 箭头，
-   入场/退场双向动画（Radix Presence 驱动），延迟由 --tooltip-delay 单源控制。 */
+/* 全站唯一的提示样式（plan-282-1530）：圆角卡片 + 描边 + shadow-lg，无箭头。
+   <Tooltip> 与存量 title 接管共用这一套，由 ui/Tooltip.tsx 的宿主渲染；
+   延迟由 --tooltip-delay 单源控制。 */
 .ui-tooltip {
   z-index: 1300; /* 浮层：最高，避免被同层下拉/菜单遮挡 */
+  /* 提示浮层不接收指针（plan-282-1530）：遮挡在上方的内容仍可点击，指针不会被浮层「截住」 */
+  pointer-events: none;
   /* plan-64-292：宽度上限随视口收缩——窄窗口下不再有「卡片本身宽于视口」的溢出 */
   max-width: min(320px, calc(100vw - 16px));
   padding: var(--sp-2) var(--sp-3);
@@ -554,14 +556,10 @@
      pre-wrap 保留原文换行（多行命令按原样展示），anywhere 允许任意字符处断行 */
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  transform-origin: var(--radix-tooltip-content-transform-origin);
   animation: ui-tooltip-in var(--dur-2) var(--ease-emphasized-decel);
 }
-.ui-tooltip[data-state="closed"] { animation: ui-tooltip-out var(--dur-1) var(--ease-emphasized-accel); }
-.ui-tooltip-arrow { fill: var(--color-tooltip); }
-/* 存量原生 title 接管浮层的定位层（plan-41-197 S1；plan-64-292 修订；plan-64-293 修复）：
-   内层复用 .ui-tooltip 的圆角卡片视觉与动效；pointer-events:none 不遮挡指针。
-   落点仍由 TS 先测实测尺寸、再决策上下翻转与四向夹取，但位移**只能走 transform**
+/* 定位层：宿主依触发元素矩形与浮层实测尺寸算出落点；pointer-events:none 不遮挡指针。
+   落点由 TS 先测实测尺寸、再决策上下翻转与四向夹取，但位移**只能走 transform**
    （top/left 固定为 0）——固定定位元素不设 width 时宽度是 shrink-to-fit，
    可用空间 = 视口宽 − left：一旦用 left/top 定位，改写落点就会改变换行宽度，
    实测尺寸随之变化、再反过来改落点，形成「测量 ↔ 定位」反馈环，
@@ -578,8 +576,7 @@
   z-index: 1300;
   pointer-events: none;
 }
-/* plan-64-292：极端长文本兜底——整卡不高于视口（接管浮层无箭头，裁剪安全；
-   Radix 浮层带箭头，不套用此规则） */
+/* 极端长文本兜底：整卡不高于视口，超出部分裁剪而不是溢出屏幕 */
 .ui-tooltip-anchor .ui-tooltip {
   max-height: calc(100vh - 16px);
   overflow: hidden;
@@ -686,15 +683,10 @@
   from { opacity: 0; transform: translateY(calc(-4px * var(--motion-dist))) scale(0.98); }
   to { opacity: 1; transform: none; }
 }
-/* S1（plan-41-197）：Tooltip 专用入场/退场——从触发元素方向轻微位移 + 缩放，
-   比通用 ui-pop-in 更贴合"从按钮旁弹出"的观感；退场更快（--dur-1）避免拖影。 */
+/* Tooltip 入场：轻微下浮 + 缩放，贴合"从按钮旁弹出"的观感（提示卸载即收起，不做退场动画） */
 @keyframes ui-tooltip-in {
   from { opacity: 0; transform: translateY(calc(3px * var(--motion-dist))) scale(0.96); }
   to { opacity: 1; transform: none; }
-}
-@keyframes ui-tooltip-out {
-  from { opacity: 1; transform: none; }
-  to { opacity: 0; transform: scale(0.98); }
 }
 /* 注：reduced-motion 降级由 motion.css 全局规则统一处理，此处不重复声明。 */
 @keyframes ui-overlay-in { from { opacity: 0; } to { opacity: 1; } }

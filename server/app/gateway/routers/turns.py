@@ -188,6 +188,12 @@ async def inject_turn_input(turn_id: int, body: TurnInjectBody, db: AsyncSession
         "model_id": body.model_id,
     }):
         return {"ok": False, "queued": False, "error": "turn_not_running"}
+    # 运行中补充内容：同样提醒模型对照清单判断续接（提示排在用户消息之后，只进入模型上下文，不落库）
+    from app.orchestration import todo_carry
+
+    carry = await todo_carry.load_carry_steps(db, session_id=turn.session_id, turn_id=turn_id, mid_turn=True)
+    if carry:
+        engine.inject_input(turn_id, {"content": todo_carry.reminder_text(carry, mid_turn=True)})
     # 用户消息立即入库并广播（消息流即时显示；注入内容在下次 LLM 调用前进入上下文）
     user_content: dict = {"text": body.content}
     if body.attachments:

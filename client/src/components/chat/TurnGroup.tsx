@@ -19,7 +19,7 @@ import { SubagentReportCard } from "./SubagentReportCard";
 import { ErrorCard } from "./ErrorCard";
 import { IconRotateCcw, IconArrowToggle } from "../icons";
 import type { TimelineEntry, TurnItem } from "./timeline";
-import { msgText, getTurnById } from "./timeline";
+import { msgText, getTurnById, SYSTEM_CONTINUATION_KINDS } from "./timeline";
 import { useChatStore } from "../../store/chat";
 import { parseUtc } from "../../utils/time";
 import { MessageImageGrid, attachmentsOf } from "./AttachmentCard";
@@ -48,7 +48,7 @@ function isOutsideProcess(item: TurnItem): boolean {
  * 计时条消失且过程区再无折叠入口。现在无时间数据也不再整条消失（退化为「工作过程」
  * 文案），保证折叠入口始终可点。 */
 function WorkTimer({
-  turnId,
+  turnIds,
   agentId,
   flow = "main",
   isRunning,
@@ -56,7 +56,8 @@ function WorkTimer({
   collapsed,
   onToggleCollapsed,
 }: {
-  turnId: number | null;
+  /** 整轮的 turn id（含并入的续跑轮）：计时从最早开始算起，到最晚完成为止 */
+  turnIds: readonly number[];
   agentId?: number;
   flow?: "main" | "subagent";
   isRunning: boolean;
@@ -74,12 +75,29 @@ function WorkTimer({
   const subEnd = useChatStore((s) =>
     subagentFlow && agentId != null ? s.subagentMeta[agentId]?.endedAt ?? null : null
   );
-  const turnStart = useChatStore((s) =>
-    subagentFlow ? null : getTurnById(s.turns, turnId)?.started_at ?? null
-  );
-  const turnEnd = useChatStore((s) =>
-    subagentFlow ? null : getTurnById(s.turns, turnId)?.completed_at ?? null
-  );
+  // 整轮起止（plan-282-1530）：起点取最早开始，终点取最晚完成——续跑轮并入后计时不因唤醒而重置
+  const turnStart = useChatStore((s) => {
+    if (subagentFlow) return null;
+    let best: string | null = null;
+    let bestMs = Infinity;
+    for (const id of turnIds) {
+      const raw = getTurnById(s.turns, id)?.started_at;
+      const ms = raw ? parseUtc(raw) : 0;
+      if (ms > 0 && ms < bestMs) { best = raw ?? null; bestMs = ms; }
+    }
+    return best;
+  });
+  const turnEnd = useChatStore((s) => {
+    if (subagentFlow) return null;
+    let best: string | null = null;
+    let bestMs = 0;
+    for (const id of turnIds) {
+      const raw = getTurnById(s.turns, id)?.completed_at;
+      const ms = raw ? parseUtc(raw) : 0;
+      if (ms > bestMs) { best = raw ?? null; bestMs = ms; }
+    }
+    return best;
+  });
   // S8c：改用共享秒级 ticker（原先每处各自 setInterval，运行期多处独立唤醒 + 各自重渲染）。
   useRunningTicker(isRunning);
 
@@ -167,13 +185,15 @@ export const TurnGroup = memo(function TurnGroup({
   const requestRollbackPreview = useChatStore((s) => s.requestRollbackPreview);
   const items = entry.items;
   const turnId = entry.turnId;
+  /** 本条目覆盖的全部 turn（一轮可能并入了续跑轮）；计时、错误归属都按整轮计算 */
+  const roundIds: readonly number[] = entry.turnIds ?? (turnId != null ? [turnId] : []);
 
   /** plan-41-228：turn 内 ERROR 消息与末尾错误卡（FlowErrorCard）是同一错误的两个渲染位。
-   *  flowError 命中本 turn（或该 turn 已被「关闭」）时由末尾卡独家呈现（带重试/关闭），
+   *  flowError 命中本轮任一 turn（或已被「关闭」）时由末尾卡独家呈现（带重试/关闭），
    *  这里不再重复渲染同一条错误。 */
   const suppressTurnError =
     flow === "main" && turnId != null
-    && (flowErrorTurnId === turnId || hiddenTurnErrors.includes(turnId));
+    && roundIds.some((id) => flowErrorTurnId === id || hiddenTurnErrors.includes(id));
 
   // v41: 首条用户消息（turn 触发消息）固定渲染在 turn 顶部用户消息区；
   // 其余 user item 为运行中注入，就地渲染在时间序位置（见 flowItems）
@@ -301,6 +321,13 @@ export const TurnGroup = memo(function TurnGroup({
   for (let k = items.length - 1; k >= 0; k--) {
     if (items[k].kind !== "user") { lastAiItemIdx = k; break; }
   }
+  /** 操作行锚点：最后一个非用户、且不是系统续跑的 AI 项。仅含续跑（唤醒通知尚无回复）的轮次没有锚点，不渲染操作行，
+   *  避免通知下方出现一排与回复无关的复制 / 重新生成按钮。 */
+  let actionAnchorIdx = -1;
+  for (let k = items.length - 1; k >= 0; k--) {
+    const kind = items[k].kind;
+    if (kind !== "user" && !SYSTEM_CONTINUATION_KINDS.has(kind)) { actionAnchorIdx = k; break; }
+  }
 
   /** 安全取项的消息 id（tools / plan 分组项无 msg，回落到 -1 仅供 key 使用） */
   const itemMsgId = (item: TurnItem): number =>
@@ -367,7 +394,7 @@ export const TurnGroup = memo(function TurnGroup({
         {/* plan-330-1648 M5-b: 未落位的子代理卡片渲染在**最后一个 AI 内容项之后**，
             而不是过程容器末尾——否则卡片会出现在 AI 文本上方（用户反馈问题1）。 */}
         {i === lastAiItemIdx && subagentNode}
-        {i === lastAiItemIdx && turnFinished && (
+        {i === actionAnchorIdx && turnFinished && (
           <MessageActions
             entry={entry}
             onRollback={onRollback}
@@ -584,7 +611,7 @@ export const TurnGroup = memo(function TurnGroup({
               WorkTimer，否则发送初期/纯思考阶段「已工作 N 秒」计时条缺失 */}
           {(canCollapse || isRunning) && (
             <WorkTimer
-              turnId={turnId}
+              turnIds={roundIds}
               agentId={agentId}
               flow={flow}
               isRunning={isRunning}

@@ -1282,8 +1282,9 @@
 }
 
 /* 子代理面板的工作流节点头：第一行是所属路径、尝试次数与评估结论，右侧是详情开关；第二行一句摘要。
- * 详情默认收起，展开后高度有上限并在内部滚动，不把消息流压没。 */
+ * 详情默认收起，展开时以浮层覆盖在消息流上方（不撑高头部、不压缩消息流），点击外部或按 Esc 收起。 */
 .subagent-wf-head {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -1353,17 +1354,24 @@
   color: var(--text-2);
 }
 
-/* 详情：默认收起；展开后高度有上限，内部滚动 */
+/* 详情浮层：悬浮在头部下方、覆盖消息流上缘，不参与布局；高度有上限，内部滚动 */
 .subagent-wf-detail {
+  position: absolute;
+  top: 100%;
+  left: var(--sp-3);
+  right: var(--sp-3);
+  z-index: 30;
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
-  max-height: min(40vh, 300px);
+  max-height: min(56vh, 420px);
   margin-top: var(--sp-1);
-  padding: var(--sp-2) var(--sp-3);
+  padding: var(--sp-3);
   overflow-y: auto;
-  border-radius: var(--r-ctl);
-  background: color-mix(in oklab, var(--text-1) 4%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pop);
+  background: var(--color-popover);
+  box-shadow: var(--shadow-pop);
   scrollbar-width: thin;
 }
 

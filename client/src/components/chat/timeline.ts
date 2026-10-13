@@ -79,8 +79,67 @@ export type TurnItem =
   | { kind: "workflow"; programId: number };
 
 export type TimelineEntry =
-  | { kind: "turn"; turnId: number | null; items: TurnItem[] }
+  /** turnIds：并入续跑轮后的全部轮 id（首个即 turnId）；未并入时缺省，见 createRoundMerger */
+  | { kind: "turn"; turnId: number | null; turnIds?: number[]; items: TurnItem[] }
   | { kind: "standalone"; msg: MessageOut };
+
+/** 系统续跑条目：工作流 / 子代理唤醒、目标续跑。它们各自成轮，但没有用户消息，是上一段回复的延续。 */
+export const SYSTEM_CONTINUATION_KINDS: ReadonlySet<string> = new Set([
+  "workflow-wakeup",
+  "subagent-wakeup",
+  "goal-continuation",
+]);
+
+type TurnEntry = Extract<TimelineEntry, { kind: "turn" }>;
+
+/** 续跑轮：有 turn_id、没有用户消息、首项是系统续跑（唤醒后模型接着回复的那一轮）。 */
+function isContinuationTurn(e: TimelineEntry): e is TurnEntry {
+  return e.kind === "turn" && e.turnId != null && e.items.length > 0
+    && SYSTEM_CONTINUATION_KINDS.has(e.items[0].kind)
+    && !e.items.some((it) => it.kind === "user");
+}
+
+/** 把续跑轮并入紧邻的前一个 AI 轮，使「一轮」只有一个「已工作」计时条与一排操作按钮（plan-282-1530 阶段 D）。
+ *
+ *  基底 = 带 turnId 的非续跑 turn 条目；其后紧邻的续跑轮依次并入，直到遇到用户气泡、独立消息或新的基底。
+ *  无基底的续跑轮原样保留。返回新数组；未参与合并的条目保持原引用。
+ *  合并结果按「基底引用 + 各续跑轮引用」缓存：流式更新只动尾部一轮时，其余合并轮的引用不变，下游 memo 继续命中。 */
+export function createRoundMerger(): (entries: TimelineEntry[]) => TimelineEntry[] {
+  const cache = new WeakMap<TurnEntry, { parts: TurnEntry[]; merged: TurnEntry }>();
+
+  const mergedOf = (parts: TurnEntry[]): TurnEntry => {
+    const base = parts[0];
+    const hit = cache.get(base);
+    if (hit && sameRefs(hit.parts, parts)) return hit.merged;
+    const merged: TurnEntry = {
+      kind: "turn",
+      turnId: base.turnId,
+      turnIds: parts.map((p) => p.turnId as number),
+      items: parts.flatMap((p) => p.items),
+    };
+    cache.set(base, { parts, merged });
+    return merged;
+  };
+
+  return (entries) => {
+    const out: TimelineEntry[] = [];
+    let group: TurnEntry[] | null = null;
+    for (const e of entries) {
+      if (group && isContinuationTurn(e)) {
+        group.push(e);
+        continue;
+      }
+      if (group) {
+        out.push(group.length === 1 ? group[0] : mergedOf(group));
+        group = null;
+      }
+      if (e.kind === "turn" && e.turnId != null && !isContinuationTurn(e)) group = [e];
+      else out.push(e);
+    }
+    if (group) out.push(group.length === 1 ? group[0] : mergedOf(group));
+    return out;
+  };
+}
 
 export function msgText(c: Record<string, unknown>): string {
   const t = c.text;

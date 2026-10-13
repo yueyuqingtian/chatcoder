@@ -50,7 +50,7 @@ export type ServerWsEvent =
   /** v7(B): 运行中工具（terminal_exec 等）逐帧增量输出——前端实时展示 */
   | { event: "tool.output"; payload: { turn_id: number; tool: string; call_key?: string; chunk: string } }
   | { event: "file.change"; payload: { turn_id: number; path?: string; session_id?: number } }
-  | { event: "todo.updated"; payload: { turn_id: number; todos: unknown[]; persisted: boolean } }
+  | { event: "todo.updated"; payload: { turn_id: number; todos: unknown[]; persisted: boolean; carried?: boolean } }
   /** v38 (plan-482): 语义改为「方案文档已生成、等待用户确认」——
    *  不再携带拆分步骤（steps 恒为空，保留字段避免老前端断协议）。 */
   | { event: "task.proposed"; payload: { turn_id: number; request_task_id?: number; group_task_id?: number; reasons?: string[]; plan_doc_path?: string; steps?: unknown[]; session_id?: number } }

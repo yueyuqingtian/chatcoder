@@ -5,6 +5,7 @@
 import type { BadgeTone } from "../ui";
 import type { StatusKind } from "../iconkit/StatusIcon";
 import type { WorkflowNodeOut, WorkflowProgramOut, WorkflowRunOut } from "../../api/client";
+import { parseServerTime } from "../../utils/time";
 
 export interface RunStatusView {
   label: string;
@@ -165,11 +166,11 @@ export function driftMessage(files: string[]): string {
   return `工作区在暂停期间有改动：${shown.join("、")}${tail}。继续可能覆盖这些改动，确定仍要继续吗？`;
 }
 
+/** 工作流时间文案：服务端时间按 UTC 解析后换算为本机时区（见 utils/time.parseServerTime） */
 export function formatTime(iso: string | null | undefined): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  const ts = parseServerTime(iso);
+  if (Number.isNaN(ts)) return "";
+  return new Date(ts).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
 /** 所在子工作流的标题（找不到时退回标识） */
@@ -257,7 +258,7 @@ export function issuesOf(node: WorkflowNodeOut): ReviewIssue[] {
 /** 网络重试的倒计时文案（绝对时间本地计算）：固定槽位，由调用方预留宽度 */
 export function retryCountdown(nextRetryAt: string | null | undefined, now: number): string {
   if (!nextRetryAt) return "";
-  const left = Math.ceil((Date.parse(nextRetryAt) - now) / 1000);
+  const left = Math.ceil((parseServerTime(nextRetryAt) - now) / 1000);
   if (!Number.isFinite(left)) return "";
   return left <= 0 ? "即将重试" : `${left} 秒后`;
 }
@@ -269,8 +270,8 @@ export function durationText(
   now: number,
 ): string {
   if (!startIso) return "";
-  const start = Date.parse(startIso);
-  const end = endIso ? Date.parse(endIso) : now;
+  const start = parseServerTime(startIso);
+  const end = endIso ? parseServerTime(endIso) : now;
   if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return "";
   const seconds = Math.round((end - start) / 1000);
   if (seconds < 60) return `${seconds} 秒`;

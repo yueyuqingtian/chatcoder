@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.message import Message, Session
 from app.persistence.models.turn import Turn
+from app.persistence.models.workflow import WorkflowRun
 
 
 def _legacy_default_for_type(type_name: str) -> object:
@@ -405,6 +406,22 @@ async def has_running_turn(db: AsyncSession, session_id: int) -> bool:
         select(Turn.id).where(
             Turn.session_id == session_id,
             Turn.status == "running",
+        ).limit(1)
+    )
+    return res.scalars().first() is not None
+
+
+async def has_running_workflow(db: AsyncSession, session_id: int) -> bool:
+    """会话是否有正在后台执行的工作流程序（status=running）。
+
+    工作流在后台跑时，本会话可能已经没有运行中的 turn（例如「开始执行」只是启动了程序，
+    主代理的 turn 随即结束）。侧栏 / 输入框 / 摘要的「执行中」必须把它算进来，否则会出现
+    工作流在跑、界面却显示停止的矛盾。
+    """
+    res = await db.execute(
+        select(WorkflowRun.id).where(
+            WorkflowRun.session_id == session_id,
+            WorkflowRun.status == "running",
         ).limit(1)
     )
     return res.scalars().first() is not None

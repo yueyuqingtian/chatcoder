@@ -43,15 +43,7 @@ export const SubagentCard = memo(function SubagentCard({ meta }: { meta: Subagen
       </div>
       {/* plan-330-1648 M7: 失败原因（单行截断，完整内容见 title / 右面板） */}
       {errText && (
-        <div
-          className="tc-subagent-error"
-          title={errText}
-          style={{
-            fontSize: 11, lineHeight: 1.5, padding: "1px 0 3px 22px",
-            color: "var(--danger, #e5484d)", whiteSpace: "nowrap",
-            overflow: "hidden", textOverflow: "ellipsis",
-          }}
-        >
+        <div className="tc-subagent-error" title={errText}>
           {errText}
         </div>
       )}

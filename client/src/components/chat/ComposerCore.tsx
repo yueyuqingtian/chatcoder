@@ -49,6 +49,7 @@ import { ModelPicker } from "./ModelPicker";
 // plan-75-332: 审批卡——与 QuestionWizardBox 同构，需要审批时替换输入框主体
 import { ApprovalCard } from "./ApprovalCard";
 import { useChatStore, persistLastReasoning, type UsageDetail } from "../../store/chat";
+import { sessionWorkflowRunning, useWorkflowStore } from "../../store/workflow";
 import { useDraftsStore, normalizeDraftMode, normalizeApprovalMode, type ApprovalMode } from "../../store/drafts";
 import { useI18n } from "../../store/i18n";
 import { parseRefLines } from "../../utils/refLines";
@@ -112,6 +113,12 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   const isRunning = useChatStore((s) => s.isRunning);
   const currentSessionId = useChatStore((s) => s.currentSessionId);
   const currentProjectId = useChatStore((s) => s.currentProjectId);
+  // 会话级「执行中」：主代理轮次在跑、后台工作流在跑、或后台子代理未结束——任一即算。
+  // 工作流可能已不占用任何轮次（如「开始执行」只启动了程序），停止按钮要能中断它与子代理。
+  const workflowRunning = useWorkflowStore((s) => sessionWorkflowRunning(currentSessionId == null ? undefined : s.bySession[currentSessionId]));
+  const pendingSubagents = useChatStore((s) => s.pendingSubagents);
+  const busy = isRunning || workflowRunning || pendingSubagents > 0;
+  const stopSessionExecution = useChatStore((s) => s.stopSessionExecution);
   const projects = useChatStore((s) => s.projects);
   const models = useChatStore((s) => s.models);
   const lastReasoningEffort = useChatStore((s) => s.lastReasoningEffort);
@@ -120,6 +127,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   const isCompacting = useChatStore((s) => s.isCompacting);
   const usage = useChatStore((s) => s.usage);
   const pendingApproval = useChatStore((s) => s.pendingApproval);
+  const approvalQueueLength = useChatStore((s) => s.approvalQueue.length);
   const pendingPlan = useChatStore((s) => s.pendingPlan);
   const sessions = useChatStore((s) => s.sessions);
 
@@ -857,7 +865,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
       useChatStore.setState({
         messages: [], turns: [], tasks: [], runningTurnId: null, isRunning: false,
         interruptedTurnId: null, streamingBuffers: {}, thinkingBuffers: {}, usage: null,
-        pendingApproval: null, pendingPlan: null, reviewedFiles: {},
+        pendingApproval: null, approvalQueue: [], pendingPlan: null, reviewedFiles: {},
       });
       setInput("");
       setShowSlash(false);
@@ -990,7 +998,9 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   const canSend = Boolean(input.trim() || attachments.length > 0 || composerBrowserRefs.length > 0);
 
   const handleCancel = () => {
-    void cancelTurn();
+    // 停止 = 中断本会话的一切执行：运行中的主代理（连带子代理）、后台子代理、运行中的工作流（暂停，保留进度）
+    if (isRunning) void cancelTurn();
+    void stopSessionExecution();
   };
 
   const [sending, setSending] = useState(false);
@@ -1252,6 +1262,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
           onAllowOnce={() => respondApproval(pendingApproval.approvalId, true)}
           onAlwaysAllow={(scope) =>
             respondApproval(pendingApproval.approvalId, true, true, undefined, scope)}
+          queuedCount={Math.max(0, approvalQueueLength - 1)}
         />
       ) : (
         <div className={`composer-main${dragOver ? " is-drag-over" : ""}`}>
@@ -1664,10 +1675,11 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
                 </div>
               )}
               {/* plan-547 → plan-20261009-ui U2：发送 / 停止 / 排队为同一个按钮的三种形态（图标弹性形变，位置不跳）——
-                  空闲：发送；运行中且输入为空：停止；运行中有输入：加入排队（任务结束后自动发送）。 */}
+                  空闲：发送；执行中（含后台工作流 / 子代理）且输入为空：停止；主代理轮次运行中有输入：加入排队；仅后台执行时有输入：直接发送。 */}
               {(() => {
-                const sendState: "send" | "stop" | "queue" = !isHome && isRunning ? (canSend ? "queue" : "stop") : "send";
-                const tip = sendState === "stop" ? "停止当前任务" : sendState === "queue" ? "加入排队（当前任务结束后发送）" : "发送 (Enter)";
+                // 执行中：输入为空 → 停止（中断主代理、子代理与工作流）；主代理轮次运行中有输入 → 排队；仅后台执行时有输入 → 直接发送
+                const sendState: "send" | "stop" | "queue" = !isHome && busy ? (canSend ? (isRunning ? "queue" : "send") : "stop") : "send";
+                const tip = sendState === "stop" ? "停止：中断主代理、子代理与工作流" : sendState === "queue" ? "加入排队（当前任务结束后发送）" : "发送 (Enter)";
                 return (
                   <Tooltip content={tip} side="top">
                     <button

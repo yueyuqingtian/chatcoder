@@ -6,6 +6,7 @@ import type { ArtifactOut, ArthasEntryOut, AttachmentInfo, ComposerRefOut, Debug
 import { wsClient, globalWsClient } from "../api/ws";
 import { normalizeApprovalMode, normalizeDraftMode } from "./drafts";
 import { parseRefLines } from "../utils/refLines";
+import { parseServerTime } from "../utils/time";
 import { isBusy } from "../perf/bus";
 import { registerReconcileTask, RECONCILE_ORDER } from "../perf/reconcile";
 import type { ServerEventName } from "@chatcoder/shared/events";
@@ -143,6 +144,12 @@ export interface SubagentMeta {
 /** plan-75-332: 审批卡「解释」状态。
  *  按 approvalId 键控（与 questionDraft 同法）——切换页面/会话后返回仍可恢复；
  *  approval.request 到达时重置，审批结束/取消时清空。 */
+/** 待审批项：同一会话可能同时有多个审批（如并行子代理各自请求），按到达顺序排队逐个作答。 */
+export interface ApprovalQueueItem {
+  approvalId: string;
+  detail: Record<string, unknown>;
+}
+
 export interface ApprovalExplainState {
   approvalId: string;
   status: "idle" | "loading" | "streaming" | "done" | "error";
@@ -168,6 +175,8 @@ export interface SessionSlice {
   /** plan-282-1441（#8）：调试现场（按 web/java 分桶，随会话 slice 保存/恢复） */
   debugState: Record<string, DebugStatusOut> | null;
   pendingApproval: { approvalId: string; detail: Record<string, unknown> } | null;
+  /** 待审批队列（队首即 pendingApproval），随会话切片保存/恢复 */
+  approvalQueue: ApprovalQueueItem[];
   /** plan-238-1188: 提问作答草稿随会话 slice 一起保存/恢复，切走再回来不丢。 */
   questionDraft: { approvalId: string; stepIndex: number; answers: Record<string, string> } | null;
   /** plan-75-332: 审批卡解释内容（同样随切片保存/恢复）。 */
@@ -184,6 +193,8 @@ export interface SessionSlice {
   todos: TodoItem[] | null;
   /** plan-282-1492：AI 清单所属 turn——判定"这份清单还活着吗"的判据（随会话分桶保存/恢复）。 */
   todosTurnId: number | null;
+  /** 续接清单：上一轮未完成、本轮模型尚未更新的清单（显示为「待续接」，不当作本轮进度） */
+  todosCarried: boolean;
   todoPersisted: boolean;
   agentActivity: Record<number, string>;
   queuedInputs: QueuedInput[];
@@ -231,6 +242,7 @@ function _snapshotSlice(s: ChatState): SessionSlice {
     debugState: s.debugState,
     usageCacheTotals: s.usageCacheTotals,
     pendingApproval: s.pendingApproval,
+    approvalQueue: s.approvalQueue,
     questionDraft: s.questionDraft,
     approvalExplain: s.approvalExplain,
     pendingPlan: s.pendingPlan,
@@ -241,6 +253,7 @@ function _snapshotSlice(s: ChatState): SessionSlice {
     turnChanges: s.turnChanges,
     todos: s.todos,
     todosTurnId: s.todosTurnId,
+    todosCarried: s.todosCarried,
     todoPersisted: s.todoPersisted,
     agentActivity: s.agentActivity,
     queuedInputs: s.queuedInputs,
@@ -324,8 +337,10 @@ interface ChatState {
   compactingInfo: { usedTokens?: number; contextWindow?: number; ratio?: number } | null;
   /** v30: 最近一次压缩结果（compact.summary 载荷，压缩完成后消息流渲染摘要卡）。 */
   lastCompact: CompactSummaryPayload | null;
-  /** 待审批请求。 */
+  /** 待审批请求（队首）。 */
   pendingApproval: { approvalId: string; detail: Record<string, unknown> } | null;
+  /** 待审批队列：并行子代理可能同时请求审批，前一个未作答时后一个入队而不是覆盖它（否则前者无人应答、超时失败）。 */
+  approvalQueue: ApprovalQueueItem[];
   /** plan-238-1188: AI 提问向导的作答草稿（按 approvalId 键控）。
    *  提问卡渲染在 ComposerCore 内部（本地 state），切到设置页会卸载组件、
    *  已选答案随之丢失；上移到 store 后返回原会话可完整恢复。
@@ -362,6 +377,8 @@ interface ChatState {
   todos: TodoItem[] | null;
   /** plan-282-1492: 清单所属 turnId（todo.updated 载荷）——清单是否仍"活着"靠它判定。 */
   todosTurnId: number | null;
+  /** 续接清单：上一轮未完成、本轮模型尚未更新的清单（显示为「待续接」，不当作本轮进度） */
+  todosCarried: boolean;
   /** v15: 清单是否已持久化到任务区块（已持久化时由任务卡片展示，内嵌卡片隐藏）。 */
   todoPersisted: boolean;
   /** v15: 子代理实时活动（agentId -> 最新工具调用摘要，来自 tool.call 事件）。 */
@@ -440,6 +457,8 @@ interface ChatState {
 /** plan-547: 返回新 turn id（null=未创建，如运行中入队/发送失败），供队列续发失败回队判断。 */
 sendTurn: (content: string, attachments?: Record<string, unknown>[], reasoningEffort?: string, mode?: string | null, modelId?: number | null, refs?: ComposerRefOut[]) => Promise<number | null>;
 cancelTurn: () => Promise<void>;
+  /** 停止按钮的全量停止：中断主代理（连带子代理）、后台子代理与运行中的工作流（暂停保留进度） */
+  stopSessionExecution: () => Promise<void>;
   forceStop: () => Promise<void>;
 resumeTurn: () => Promise<void>;
   rollbackTurn: (turnId: number, restoreToComposer?: boolean) => Promise<void>;
@@ -887,6 +906,7 @@ function _resetSessionState(): Partial<ChatState> {
     compactingInfo: null,
     lastCompact: null,
     pendingApproval: null,
+    approvalQueue: [],
     questionDraft: null,
     approvalExplain: null,
     pendingPlan: null,
@@ -897,6 +917,7 @@ function _resetSessionState(): Partial<ChatState> {
     turnChanges: {},
     todos: null,
     todosTurnId: null,
+    todosCarried: false,
     todoPersisted: false,
     agentActivity: {},
     runningToolOutput: {},
@@ -946,6 +967,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   compactingInfo: null,
   lastCompact: null,
   pendingApproval: null,
+  approvalQueue: [],
   questionDraft: null,
   approvalExplain: null,
   pendingPlan: null,
@@ -956,6 +978,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   turnChanges: {},
   todos: null,
   todosTurnId: null,
+  todosCarried: false,
   todoPersisted: false,
   agentActivity: {},
   runningToolOutput: {},
@@ -1320,7 +1343,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           task: reqTask?.title || t.summary || "任务执行计划",
           planDocPath,
           status: (t.plan_status && planStatusToCard[t.plan_status]) || (t.status === "awaiting_confirmation" ? "awaiting_confirmation" : "confirmed"),
-          createdAt: t.started_at ? new Date(t.started_at).getTime() : Date.now(),
+          createdAt: parseServerTime(t.started_at) || Date.now(),
           anchorMsgId,
         };
       }
@@ -1645,7 +1668,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
     // 本地立即关闭横幅，避免等待广播返回造成的 UI 延迟
     // plan-75-332: 一并清掉解释内容（本次审批已结束，保留下来只会串到下个审批卡）
-    set({ pendingApproval: null, questionDraft: null, approvalExplain: null });
+    // 只摘掉本次作答的那一项：队列里其余待审批继续排队展示（不能像单槽那样整体清空）
+    set((s) => {
+      const queue = s.approvalQueue.filter((x) => x.approvalId !== approvalId);
+      return {
+        approvalQueue: queue,
+        pendingApproval: queue[0] ?? null,
+        questionDraft: s.questionDraft?.approvalId === approvalId ? null : s.questionDraft,
+        approvalExplain: s.approvalExplain?.approvalId === approvalId ? null : s.approvalExplain,
+      };
+    });
   },
 
   /** plan-238-1188: 提问向导作答草稿写回（切设置页/换会话后仍可恢复）。 */
@@ -1751,6 +1783,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
+  stopSessionExecution: async () => {
+    const sid = get().currentSessionId;
+    if (sid == null) return;
+    try {
+      await api.stopSession(sid);
+    } catch (e) {
+      set({ error: `停止失败：${String(e)}` });
+      return;
+    }
+    // 运行中的工作流已在服务端暂停：刷新本会话的程序状态（事件推送之外的兜底）
+    void useWorkflowStore.getState().loadSession(sid);
+  },
+
   cancelTurn: async () => {
     const st = get();
     const runningTurnId = st.runningTurnId;
@@ -1803,6 +1848,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 否则残留的 pendingSubagents>0 会在消息流尾部留一条「等待子代理结束…」兜底行。
       pendingSubagents: 0,
       pendingApproval: null,
+      approvalQueue: [],
       questionDraft: null,
       approvalExplain: null,
       sessions: s.sessions.map((x) => (x.id === s.currentSessionId ? setSessionRunning(x, false) : x)),
@@ -2304,6 +2350,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             runningToolResults: {},
             todos: null,
             todosTurnId: null,
+            todosCarried: false,
             todoPersisted: false,
             // plan-282-1421（第10项）：新 turn 重置缓存均值统计——
             // "平均缓存命中率"应是当前任务的滑动均值，跨 turn 累加会越来越钝。
@@ -2732,6 +2779,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           // plan-282-1492: 记下清单归属 turn——首载（重启）后即便清单还在，
           // 也要先判断这一轮是否已经结束，避免把结束任务的残留清单当成进行中进度。
           todosTurnId: Number(payload.turn_id) || null,
+          // 续接清单（服务端在新一轮开始时广播，carried=true）：本轮模型尚未更新，界面按「待续接」展示
+          todosCarried: payload.carried === true,
           todoPersisted: Boolean(payload.persisted),
         });
         break;
@@ -2991,15 +3040,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const evtSid = Number(detail.session_id ?? 0);
         const curSid = get().currentSessionId;
         if (evtSid > 0 && curSid != null && evtSid !== curSid) break;
-        // 新提问到达：清掉上一轮作答草稿（approvalId 键控，避免残留串答）
-        set({ pendingApproval: { approvalId: String(payload.approval_id ?? ""), detail }, questionDraft: null });
+        // 作答草稿按 approvalId 键控，这里不动它（草稿只在本提问被作答 / 取消 / 回执时清）。
+        // 切回会话时 WS 的 sync 会按序重放历史审批事件：若这里清草稿，中间那些已结束审批的
+        // request 会把仍在等待的提问已填好的答案冲掉（“切走再回来草稿丢失”的根因）。
+        const approvalId = String(payload.approval_id ?? "");
+        // 入队而不是覆盖：并行子代理可能同时请求审批，前一个未作答时它仍在等服务端回执，
+        // 必须留在队列里可见（队首即 pendingApproval，依次作答）。同一 id 的重放只保留一条。
+        set((s) => {
+          const queue = s.approvalQueue.some((x) => x.approvalId === approvalId)
+            ? s.approvalQueue
+            : [...s.approvalQueue, { approvalId, detail }];
+          return { approvalQueue: queue, pendingApproval: queue[0] ?? null };
+        });
         break;
       }
-      case "approval.response":
-        // 审批结果广播回前端（含其他窗口），关闭本地审批横幅
-        // plan-75-332: 一并清掉解释内容（本次审批已结束，保留只会串到下个审批卡）
-        set({ pendingApproval: null, questionDraft: null, approvalExplain: null });
+      case "approval.response": {
+        // 审批结果广播回前端（含其他窗口），关闭本地审批横幅。
+        // plan-75-332: 一并清掉解释内容（本次审批已结束，保留只会串到下个审批卡）。
+        // 只清属于该审批的状态：切回会话时 sync 重放的历史回执不能误清当前仍在等待的提问及其草稿。
+        const respondedId = String(payload.approval_id ?? "");
+        set((s) => {
+          if (!respondedId) return { approvalQueue: [], pendingApproval: null, questionDraft: null, approvalExplain: null };
+          const patch: Partial<ChatState> = {};
+          const queue = s.approvalQueue.filter((x) => x.approvalId !== respondedId);
+          if (queue.length !== s.approvalQueue.length) {
+            patch.approvalQueue = queue;
+            patch.pendingApproval = queue[0] ?? null;
+          }
+          if (s.approvalExplain?.approvalId === respondedId) patch.approvalExplain = null;
+          if (s.questionDraft?.approvalId === respondedId) patch.questionDraft = null;
+          return patch;
+        });
         break;
+      }
       case "approval.explain.delta": {
         // plan-75-332: 解释流式增量。按 approvalId 严格过滤——审批已被处理时
         // 后端仍可能推送尾部事件，不过滤会把内容写到已消失的卡片（下次审批复活）。

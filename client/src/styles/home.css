@@ -19,18 +19,19 @@
   overflow-y: auto;
   overscroll-behavior: contain;
 }
-/* margin:auto 的「安全居中」：内容矮时垂直居中，高于容器时从顶部起排并可滚动（不会被上沿裁掉） */
+/* 纵向布局：内容区至少占满首页可视高度，徽章 / 标语 / 热力图三组之间的剩余空间均分——
+   上、中、下留白相等，窗口变高时整组按比例下移，不会堆在一端，也不会留出大块空白。
+   内容超出时由 .es-hero 滚动，不被裁切。gap 为三组之间的最小间距。 */
 .es-hero-inner {
   width: 100%;
   max-width: var(--content-max-w);
-  margin: auto;
+  min-height: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: space-evenly;
   gap: 22px;
-  /* 不再为浮签固定预留 168px 净空（那是邮票版本把整块内容压低的原因）：
-     顶部只留一点呼吸，底部留一段让内容整体上移；浮签放得下才弹（BadgeHero 量上方空间） */
-  padding: 24px 32px clamp(0px, 10vh, 110px);
+  padding: 16px 32px 12px;
 }
 .es-headline { display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; }
 .es-title { margin: 0; font-size: 28px; font-weight: 650; letter-spacing: -0.02em; line-height: 1.25; color: var(--text-1); }
@@ -41,9 +42,6 @@
 .es-composer .composer { max-width: var(--content-max-w); }
 .es-composer .composer-home .composer-input { min-height: 52px; font-size: 14px; }
 
-/* 低矮窗口：先让出用量卡，保证邮票、标语与输入框不被挤压 */
-@media (max-height: 800px) { .es-usage { display: none; } }
-@media (max-height: 640px) { .es-hero-inner { padding-top: 0; } }
 
 /* ── 嗒嗒徽章（plan-114-452）──────────────────────────────────
  * 以 em 为唯一尺寸单位：整枚徽章按 font-size 等比缩放（矮窗口时降档），版面比例不变。
@@ -52,6 +50,7 @@
   position: relative;
   width: fit-content;
   font-size: 16px;
+  margin-top: var(--note-slot, 0px); /* 浮签预留（由 BadgeHero 按放得下与否写入；放不下为 0） */
   margin-bottom: 0.9em; /* 印章下沿探出徽章，给它留出位置，避免压到下方标语 */
   --nx: 0;
   --ny: 0;
@@ -225,22 +224,23 @@
  *          .es-note-sway 负责整体摇摆——绕邮票中央的支点转动，指针偏右 → 顺时针，反之亦然；
  *          .es-note-card 负责 3D 俯仰（rotateY / rotateX），指针靠上 / 靠下时纸面微微前倾后仰。
  * 后两层的变量由弹簧逐帧写入，不加 transition。 */
+/* 浮签挂在 body 下（BadgeHero 用 portal），fixed 定位，不被首页滚动容器裁切；
+   位置由 BadgeHero 计算：恒在徽章上方（上方空间由首页预留），水平钳制在首页可视区内。
+   隐藏时仍占位（visibility），让定位能量到真实尺寸。 */
 .es-note {
-  position: absolute;
-  left: 50%;
-  bottom: calc(100% + 22px);
-  z-index: 6;
-  width: min(324px, calc(100vw - 48px));
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 40;
+  width: min(324px, calc(100vw - 16px));
   pointer-events: none;
   opacity: 0;
-  transform: translateX(-50%) translateY(12px) scale(0.94);
+  visibility: hidden;
+  transform: translateY(12px) scale(0.94);
   transform-origin: 50% 100%;
-  transition: opacity var(--dur-2) var(--ease-standard), transform var(--dur-spring) var(--spring-soft);
+  transition: opacity var(--dur-2) var(--ease-standard), transform var(--dur-spring) var(--spring-soft), visibility 0s linear var(--dur-2);
 }
-.es-badge-wrap:hover .es-note,
-.es-badge-wrap:has(.es-badge:focus-visible) .es-note { opacity: 1; transform: translateX(-50%); }
-/* 上方放不下浮签（窗口太矮）就不弹 */
-.es-badge-wrap[data-room="no"] .es-note { display: none; }
+.es-note[data-open="true"] { opacity: 1; visibility: visible; transform: none; transition-delay: 0s; }
 .es-note-sway {
   transform-origin: 50% 165%;
   transform: rotate(calc(var(--nx) * 10deg));

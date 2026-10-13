@@ -253,7 +253,7 @@ export default function App() {
       {/* S1（plan-41-197）：接管存量原生 title——全站悬停提示统一为圆角卡片浮层，
           与 ui/Tooltip 共享展示延迟（不再出现浏览器自带的方形浮块）。 */}
       <NativeTitleTooltip />
-      <div className="app-shell">
+      <div className="app-shell" style={{ ["--pane-w" as string]: sidebarCollapsed ? "0px" : `${leftPanelWidth}px` }}>
         {/* plan-128-518：左上角 logo / 折叠 / 前进后退——全局固定层，折叠展开都是同一个实例、同一个位置 */}
         <WindowNavCluster collapsed={sidebarCollapsed} onToggle={toggleSidebar} onSessionFocus={() => setNav(null)} />
         <Toast />
@@ -275,10 +275,10 @@ export default function App() {
             <PluginSlot slot="sidebar" active={nav} onChange={(k: NavKey) => { if (k === "settings") { openSettings(); return; } setNav(k); if (k === "chat") useChatStore.getState().startNewTask(); }} onSessionFocus={() => setNav(null)} collapsed={sidebarCollapsed} onToggleCollapse={toggleSidebar} />
           )}
         </div>
-        {/* RFL-1（plan-329-1647 S4）：不再传 freezeRefs——拖左分隔条时中列内容宽度实时跟随，
-            消息流文本逐帧折行（用户反馈「拖拽时排版不实时」）。性能改由 PerfBus 零读预算兜。 */}
+        {/* RFL-1（plan-329-1647 S4）：中列不冻结——拖左分隔条时中列内容宽度实时跟随，消息流文本逐帧折行。
+            左侧例外（plan-282-1520）：侧栏内容根 freezeRefs 钉住后逐帧跟随面板宽，拖拽期不留空白带。 */}
         {/* 折叠时不再卸载分隔条（否则边框会瞬间消失）：它随左面板收窄一起左移，收到 0 后禁用拖拽命中 */}
-        <ResizeHandle side="left" baseWidth={leftPanelWidth} minWidth={240} maxWidth={480} reservePx={370} panelEl={leftPanelElRef} onCommit={setLeftPanelWidth} disabled={sidebarCollapsed} />
+        <ResizeHandle side="left" baseWidth={leftPanelWidth} minWidth={240} maxWidth={480} reservePx={370} panelEl={leftPanelElRef} onCommit={setLeftPanelWidth} freezeRefs={[leftPanelElRef]} disabled={sidebarCollapsed} />
         <div className="app-right">
           {/* v19: 标题栏与右面板经插件 slot 渲染。
               plan-41-233：页面态（拓展/定时任务/设置等 nav 页）传 page——隐藏会话标题、项目

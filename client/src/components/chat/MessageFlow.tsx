@@ -8,7 +8,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, memo, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { TimelineEntry, ToolNode, TurnItem } from "./timeline";
-import { createTimelineBuilder, msgText, lastPersistedText, getTurnById } from "./timeline";
+import { createTimelineBuilder, createRoundMerger, msgText, lastPersistedText, getTurnById } from "./timeline";
 import { isBusy, subscribe } from "../../perf/bus";
 import { registerReconcileTask, RECONCILE_ORDER } from "../../perf/reconcile";
 import { recordComponentRender } from "../../perf/metrics";
@@ -22,6 +22,7 @@ import { useTextHighlight } from "../../hooks/useTextHighlight";
 import { MarkdownContent } from "../MarkdownContent";
 import { MsgType } from "@chatcoder/shared";
 import { useChatStore } from "../../store/chat";
+import { sessionWorkflowRunning, useWorkflowStore } from "../../store/workflow";
 import { api } from "../../api/client";
 import { Empty } from "../ui";
 
@@ -1290,7 +1291,9 @@ function MainMessageFlow({
   // S8b：改用增量构建器——单条消息落库只重建它所在的那个 turn，其余 turn 的 entry
   // 对象逐项复用（引用不变）⇒ 下游 memo 的 TurnGroup 继续命中，不再全量重渲染。
   const buildEntries = useMemo(() => createTimelineBuilder(), []);
-  const entries = useMemo(() => buildEntries(messages), [buildEntries, messages]);
+  // 续跑轮（工作流 / 子代理唤醒后的回复）并入前一轮：一轮只有一个计时条、一排操作按钮（plan-282-1530 阶段 D）
+  const mergeRounds = useMemo(() => createRoundMerger(), []);
+  const entries = useMemo(() => mergeRounds(buildEntries(messages)), [mergeRounds, buildEntries, messages]);
 
   /** 强制贴底信号：用户消息条数。
    *
@@ -1327,13 +1330,18 @@ function MainMessageFlow({
       // plan-75-334 阶段1：一次查询同时供「回滚横幅」与「turn 行状态 props」使用
       const turnRow = getTurnById(turns, entry.turnId);
       const rolledBack = turnRow?.status === "rolled_back";
+      // 并入续跑轮时整轮的运行态与行状态取最后一个 turn：整轮结束才算结束
+      const tailTurnId = entry.turnIds?.[entry.turnIds.length - 1] ?? entry.turnId;
+      const turnRowStatus = getTurnById(turns, tailTurnId)?.status;
+      const roundRunning = entry.turnIds
+        ? runningTurnId != null && entry.turnIds.includes(runningTurnId)
+        : runningTurnId === entry.turnId;
       // 计划卡内嵌到其归属 turn 内部规划说明之后、执行操作之前（彻底根治时序倒挂沉底 Bug）
       const hasTurnPlan = entry.turnId != null && (plansByTurn[entry.turnId] != null || entry.turnId === planTurnId);
-      const turnRowStatus = turnRow?.status;
       return (
         <TurnGroup
           entry={entry}
-          isRunning={runningTurnId === entry.turnId}
+          isRunning={roundRunning}
           rolledBack={rolledBack}
           subagents={entry.turnId != null ? subagentsByTurn.get(entry.turnId) : undefined}
           actions={actions}
@@ -1351,6 +1359,9 @@ function MainMessageFlow({
 
   // S8：流式文本/信号不再在此计算（已下沉到 <StreamingTail> 的精确 selector）。
   const turnStatus = useChatStore((s) => s.turnStatus);
+  // 主代理未在跑、但后台工作流在执行：消息流下方显示「等待响应…」（工作流才是此刻的执行者）
+  const workflowRunning = useWorkflowStore((s) => sessionWorkflowRunning(currentSessionId == null ? undefined : s.bySession[currentSessionId]));
+  const workflowOnly = !isRunning && workflowRunning;
   // plan-308-1542 需求1：任务执行类错误卡（只进消息流，不弹右上角 Toast）
   const flowError = useChatStore((s) => s.flowError);
   const clearFlowError = useChatStore((s) => s.clearFlowError);
@@ -1360,15 +1371,16 @@ function MainMessageFlow({
     <MessageFlowCore
       key={currentSessionId}
       entries={entries}
-      running={isRunning}
+      // 主代理未跑但工作流在跑时同样开启流式槽位（否则尾部「等待响应…」不渲染）
+      running={isRunning || workflowRunning}
       renderEntry={renderEntry}
       streamingNode={
         // v42: 压缩期间状态行改显「压缩中…」（优先于「处理中…／等待响应…」；
         // 若同时存在 turn 级瞬态提示（如重试），瞬态提示仍优先）。
         <StreamingTail
-          active={Boolean(isRunning && runningTurnId)}
+          active={Boolean((isRunning && runningTurnId) || workflowOnly)}
           statusLabel={turnStatus ?? (isCompacting ? "压缩中…" : undefined)}
-          persistedText={lastPersistedText(entries)}
+          persistedText={workflowOnly ? "" : lastPersistedText(entries)}
         />
       }
       trailingNode={

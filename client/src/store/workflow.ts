@@ -19,6 +19,12 @@ export type WorkflowAction = "start" | "pause" | "resume" | "cancel";
 /** approve 采纳 / 保留；rework 再试或再返工；abort 中止；include 把越界改动的文件纳入本步骤范围 */
 export type GateDecision = "approve" | "rework" | "abort" | "include";
 
+/** 会话是否有正在后台执行的工作流（程序 running）。它与轮次运行态并列：工作流在跑时，
+ *  本会话可能已经没有运行中的 turn（如「开始执行」只启动了程序），侧栏 / 输入框 / 摘要的「执行中」都要算进来。 */
+export function sessionWorkflowRunning(runs: WorkflowRunOut[] | undefined): boolean {
+  return !!runs && runs.some((r) => r.status === "running");
+}
+
 const ACTION_LABEL: Record<WorkflowAction, string> = {
   start: "开始执行", pause: "暂停", resume: "继续", cancel: "取消",
 };

@@ -40,7 +40,10 @@ a { color: var(--accent); text-decoration: none; }
    无原生圆角的平台由下方 [data-native-corners="0"] 分支显式开启。
    此前这里默认自绘 12px 圆角（并叠加下方 3810 行的 1px 描边），在原生圆角窗口上
    与系统弧线错位成"双层圆角 + 错位边框"，即用户反馈的"四角弧度与边框不一致"。 */
-.app-shell { position: relative; display: flex; flex-direction: row; height: 100vh; overflow: hidden; background: var(--bg-sidebar); }
+/* 左栏实时宽度 --pane-w：折叠 / 展开的唯一驱动量（由 App 写入）。注册为 <length> 才能被 transition 逐帧插值；
+   左栏宽度、导航条底色分界、标题栏左缘都由它派生，三者共用同一条过渡曲线，任何一帧都不会错位。 */
+@property --pane-w { syntax: "<length>"; inherits: true; initial-value: 264px; }
+.app-shell { position: relative; display: flex; flex-direction: row; height: 100vh; overflow: hidden; background: var(--bg-sidebar); transition: --pane-w var(--dur-pane) var(--ease-drawer); }
 .app-right { display: flex; flex-direction: column; flex: 1; min-width: 0; overflow: hidden; }
 .app-body { display: flex; flex: 1; overflow: hidden; min-height: 0; }
 .app-pane { flex-shrink: 0; overflow: hidden; transition: width var(--dur-pane) var(--ease-drawer), flex-basis var(--dur-pane) var(--ease-drawer); }
@@ -55,9 +58,12 @@ a { color: var(--accent); text-decoration: none; }
   background: var(--bg-sidebar);
   border-right: 1px solid transparent;
   background-clip: border-box;
+  /* 占位边框与宽度同曲线过渡：DPR≠1 时 1px 边框实际约 0.67px，折叠终点若仍保留它，
+     标题栏左缘与导航条之间会残留一条发丝缝；收到 0 必须逐帧过渡，不能在起点瞬间去掉（否则 1px 跳变） */
+  transition: width var(--dur-pane) var(--ease-drawer), flex-basis var(--dur-pane) var(--ease-drawer), border-right-width var(--dur-pane) var(--ease-drawer);
 }
-/* plan-128-518：折叠不再去掉 border-right（透明 1px 占位）——否则收窄终点处会多出 1px 跳变；用 min-width:0 让宽度可收到 0 */
-.app-pane-left.collapsed { width: 0 !important; flex-basis: 0 !important; min-width: 0; border-right-color: transparent; }
+/* 折叠：宽度与占位边框一并收到 0（min-width:0 让宽度可收到 0）；线由分隔条绘制，占位无需保留 */
+.app-pane-left.collapsed { width: 0 !important; flex-basis: 0 !important; min-width: 0; border-right-width: 0; }
 /* 右面板：同上——只管占位与背景裁剪，线由分隔条绘制。
    background-clip 必须显式保持 border-box：padding-box 会让该 1px 列直接叠在透明父容器上、
    透出窗口底/桌面（历史坑："中间和右侧面板间一条透明线"，颜色由壁纸决定）。
@@ -690,6 +696,7 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   opacity: 1;
   pointer-events: auto;
 }
+/* 回复之后紧跟系统续跑轮（工作流 / 子代理唤醒）：操作行仅悬停显示，避免与通知行叠成两排按钮 */
 /* 兼容：AI 消息项内嵌操作行（旧结构） */
 .turn-item-text .msg-actions {
   display: flex;
@@ -2709,6 +2716,8 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   color: var(--text-1);
 }
 .approval-head-action { font-size: 13px; color: var(--text-2); }
+/* 排队提示靠右，不抢标题行的工具名（plan-282-1530：多个审批依次处理时告知还有几项） */
+.approval-head-queue { margin-left: auto; font-size: 12px; color: var(--text-3); white-space: nowrap; }
 .approval-outside-hint {
   display: flex; align-items: center; gap: 6px;
   font-size: 11.5px; color: var(--warning);
@@ -3845,16 +3854,26 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 /* plan-128-518：.sb-head 退化为纯占位（控件由全局固定层 .nav-cluster 悬浮在此） */
 .sb-head { height: var(--titlebar-h); flex-shrink: 0; }
 /* 左上角导航控件组：绝对定位在窗口左上角，折叠 / 展开 / 设置页都不动。
-   尺寸只有这一份：左内边距 10px、间距 4px、按钮 24px，最大化时跟随标题栏的 8px 外扩补偿。 */
+   尺寸只有这一份：宽 --nav-cluster-w（标题栏让出的左侧宽度）、左内边距 10px、间距 4px、按钮 24px，最大化时跟随标题栏的 8px 外扩补偿。
+   底色与底线不做「瞬时切换」：由左栏实时宽度 --pane-w 切出分界——分界左侧透明（透出左栏自身材质），
+   分界右侧才是标题栏同款底色与底线。分界与左栏右缘逐帧同位，顶部与下方不会错开。 */
 .nav-cluster {
   position: absolute; left: 0; top: 0; z-index: 30;
-  height: var(--titlebar-h); display: flex; align-items: center; gap: 4px;
+  width: var(--nav-cluster-w); height: var(--titlebar-h); display: flex; align-items: center; gap: 4px;
   padding: 0 10px; -webkit-app-region: no-drag;
+  background-image:
+    linear-gradient(to right, transparent var(--pane-w), var(--border) var(--pane-w)),
+    linear-gradient(to right, transparent var(--pane-w), var(--bg-panel) var(--pane-w));
+  background-repeat: no-repeat;
+  background-size: 100% 1px, 100% 100%;
+  background-position: left bottom, left top;
 }
-body.maximized .nav-cluster { padding-top: 8px; padding-left: 16px; height: calc(var(--titlebar-h) + 8px); }
+/* 最大化：标题栏内容区下移 8px（padding-top），导航控件同 padding 同高，内容中心才与标题对齐（此前高度多加 8px，图标低约 4px） */
+body.maximized .nav-cluster { padding-top: 8px; padding-left: 16px; height: var(--titlebar-h); }
 .nav-cluster .sb-logo-img { margin: 0 4px 0 6px; }
 .nav-cluster button { -webkit-app-region: no-drag; }
-:root { --nav-cluster-w: 140px; }
+/* 导航控件让出的左侧宽度：标题栏左缘的下限（见下方 .titlebar） */
+:root { --nav-cluster-w: 148px; }
 .titlebar-workspace { display: flex; align-items: center; gap: 10px; min-width: 0; max-width: min(720px, 42vw); height: 100%; }
 .titlebar-workspace-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-1); font-size: 13px; font-weight: 600; }
 .titlebar-workspace-project { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font-size: 11px; }
@@ -3863,10 +3882,14 @@ body.maximized .nav-cluster { padding-top: 8px; padding-left: 16px; height: calc
    而后者原先 padding-left:0，logo 自身 margin 不变 → 水平位置跳变约 10px。
    这里补同等左内边距，使 logo 在折叠/展开间位置连续。 */
 .titlebar-left { flex: 0 0 0; width: 0; padding: 0; overflow: hidden; transition: flex-basis var(--dur-pane) var(--ease-drawer), width var(--dur-pane) var(--ease-drawer); }
-/* plan-128-518：折叠时标题栏为固定控件组留出宽度，会话标题随中间面板平滑左移到它右侧（同一条 --dur-pane 曲线） */
-.titlebar.left-collapsed .titlebar-left { flex-basis: var(--nav-cluster-w); width: var(--nav-cluster-w); }
+/* 标题栏左缘 = max(左栏实时宽, 导航控件宽)。标题栏是系统拖拽区，不能压在导航控件（按钮）之下，
+   否则 Electron 命中测试会把按钮点击当成拖拽吞掉（折叠后无法再展开）。
+   margin 直接由同一个实时值 --pane-w 派生、不另起过渡：标题栏左缘与左栏右缘逐帧同位。
+   此前 margin 与左栏宽各走一条曲线、导航宽又瞬时切换，顶部会露出一截左栏底色（短竖线）与一条发丝缝。
+   折叠后会话标题仍在 160：148（导航宽）+ 12（padding）。 */
+.titlebar { margin-left: max(0px, calc(var(--nav-cluster-w) - var(--pane-w))); }
+.titlebar.left-collapsed .titlebar-left { flex-basis: 0; width: 0; }
 .titlebar.left-collapsed .titlebar-brand { display: none; }
-.titlebar.left-collapsed .titlebar-workspace { margin-left: 8px; }
 .titlebar-mid { flex: 1 1 auto; min-width: 8px; }
 /* 问题1: 右侧面板完整显示 - 三栏 flex 正确收缩 */
 .app-body { display: flex; flex: 1; overflow: hidden; min-height: 0; }
@@ -4773,24 +4796,33 @@ body.maximized .nav-cluster { padding-top: 8px; padding-left: 16px; height: calc
 
 /* v19: 子代理卡片（消息流） */
 .tc-subagent-row .tc-query { color: var(--text-1); font-weight: 600; }
+/* 失败原因行：缩进 = 行内图标槽（13px）+ 行内间距（7px），与子代理名称左对齐 */
+.tc-subagent-error { font-size: 11px; line-height: 1.5; padding: 1px 0 3px calc(13px + 7px); color: var(--danger, #e5484d); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tc-status.ok { color: var(--ok, #3fb950); display: inline-flex; }
 
 /* v19: 子代理详情面板（右面板，复用消息流样式） */
 .subagent-panel { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .subagent-panel-top { flex-shrink: 0; border-bottom: 1px solid var(--border); }
-.subagent-panel-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 8px 12px; flex-shrink: 0; }
-/* 名称占用剩余空间并可截断；元信息在窄宽度下截断，不挤压名称 */
-.subagent-panel-name { flex: 1 1 auto; min-width: 56px; font-size: 12px; font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.subagent-panel-status { font-size: 11px; color: var(--text-3); flex-shrink: 0; }
-/* v36 (plan-321-1600 M2): 头部元信息（用时 / 文件数 / 用量），以分隔线区分 */
-.subagent-panel-meta { font-size: 11px; color: var(--text-3); flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.subagent-panel-status + .subagent-panel-meta::before,
-.subagent-panel-meta + .subagent-panel-meta::before {
-  content: "·";
-  margin-right: 6px;
-  opacity: 0.6;
-}
-.subagent-panel-count { font-size: 11px; color: var(--text-3); margin-left: auto; flex-shrink: 0; }
+/* 头部两行：第一行「图标 + 名称 + 计数」，第二行「状态 + 元信息」。
+   每组图标与文字包在同一个 nowrap 容器里，窄面板下只省略、不拆行（此前 flex-wrap 会把图标与文字分到两行）。 */
+.subagent-panel-head { display: flex; flex-direction: column; gap: 4px; padding: 10px 14px 8px; flex-shrink: 0; min-width: 0; }
+.subagent-panel-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.subagent-panel-icon { display: inline-flex; flex-shrink: 0; color: var(--text-2); }
+.subagent-panel-name { flex: 1 1 auto; min-width: 0; font-size: 13px; line-height: 20px; font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subagent-panel-count { flex-shrink: 0; font-size: 11px; line-height: 20px; color: var(--text-3); white-space: nowrap; }
+.subagent-panel-facts { display: flex; align-items: center; min-width: 0; font-size: 11px; line-height: 16px; color: var(--text-3); white-space: nowrap; overflow: hidden; }
+.subagent-panel-facts > * { flex-shrink: 0; }
+.subagent-panel-facts > .subagent-panel-status { flex-shrink: 1; min-width: 0; }
+.subagent-panel-facts > .subagent-panel-meta { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.subagent-panel-facts > * + *::before { content: "·"; margin: 0 6px; opacity: 0.6; }
+.subagent-panel-status { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
+.subagent-panel-status svg { flex-shrink: 0; }
+.subagent-panel-status[data-state="wait"] { color: var(--text-2); }
+.subagent-panel-status[data-state="ok"] { color: var(--success); }
+.subagent-panel-status[data-state="fail"] { color: var(--error); }
+.subagent-panel-status-text { overflow: hidden; text-overflow: ellipsis; }
+/* v36 (plan-321-1600 M2): 头部元信息（用时 / 文件数 / 用量） */
+.subagent-panel-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* v20: 消息体交给共享 message-flow 插件（自身不滚动，滚动由插件容器承担） */
 .subagent-panel-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0; }
 .subagent-panel-empty { padding: 24px 12px; text-align: center; color: var(--text-3); font-size: 12px; }
@@ -4833,8 +4865,10 @@ body.maximized .nav-cluster { padding-top: 8px; padding-left: 16px; height: calc
 /* 条目行：勾/叉图标 + 正文；正文走 .md-body，与消息流同字号 / 行高 / 颜色 */
 .sr-list { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .sr-list li { display: flex; align-items: flex-start; gap: 8px; font-size: var(--fs-md, 13px); line-height: var(--chat-line-height, 2.2); color: var(--text-1); }
-.sr-list .sr-mark { flex-shrink: 0; display: inline-flex; margin-top: 4px; }
+/* 图标槽高度 = 首行行高，图标居中：与首行文字同一条中线（此前靠写死的 margin-top: 4px，图标会偏高） */
+.sr-list .sr-mark { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: calc(var(--fs-md, 13px) * var(--chat-line-height, 2.2)); }
 .sr-list .md-body { flex: 1; min-width: 0; }
+.sr-list .md-body > :first-child { margin-top: 0; }
 .sr-list .sr-mark.ok { color: var(--success); }
 .sr-list .sr-mark.no { color: var(--error); }
 .sr-list .sr-mark.warn { color: var(--warning, #d29922); }
@@ -4874,7 +4908,12 @@ body.maximized .nav-cluster { padding-top: 8px; padding-left: 16px; height: calc
 .terminal-error-msg { color: var(--danger, #f85149); font-size: 12px; }
 
 /* v19: 设置侧栏（并入主布局后复用侧栏壳样式） */
-.settings-sidebar .sb-back-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px; margin: 2px 6px; border-radius: var(--r-ctl); font-size: 12px; color: var(--text-2); cursor: pointer; transition: background var(--dur-fast), color var(--dur-fast); }
+/* 「返回工作区」行与导航项同一套几何：行高 34、左内边距 10、图标槽 22（与导航图标同中心）、文字与导航文字同起点；
+   上方留 8px（列内 4px 内距 + 4px 外距，与顶部导航图标拉开 16px），下方留 16px 再接首个分组标题，上下对称。 */
+.settings-sidebar .sb-back-item { display: flex; align-items: center; gap: 10px; width: 100%; height: 34px; margin: 4px 0 16px; padding: 0 10px; border-radius: var(--r-md); font-size: var(--sidebar-fs, 14px); color: var(--text-2); cursor: pointer; transition: background var(--dur-fast), color var(--dur-fast); }
+.settings-sidebar .sb-back-icon { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 22px; height: 22px; }
+/* 首个分组标题紧接返回行：去掉标题自身的上内距，间距只由返回行的下外距决定 */
+.settings-sidebar .sb-list > .sb-section-group:first-child > .sb-section-label { padding-top: 0; }
 /* plan-26-126 P7：按钮底色与既有导航项**同一套语言**（不再用 --bg-hover）。
  *  问题（用户实测）：鼠标点过该按钮后，按钮上残留一块**明显的灰底**。
  *  根因有两条，缺一不可：
