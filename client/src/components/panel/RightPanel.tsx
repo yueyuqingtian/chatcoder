@@ -5,7 +5,7 @@
  *      加号 / 全部标签菜单统一为 Popover（点外部、Esc、进出场）；头部按钮统一 28px 并用 Tooltip；
  *      空态由四条灰色长条改为 2×2 工具启动卡（角色色磁贴，闲置灰度、聚焦彩色）。
  */
-import { IxTasks, IxBrowser, IxTerminal, IxFiles, IxBot, IxBug } from "../iconkit/StackIcons";
+import { IxTasks, IxBrowser, IxTerminal, IxFiles, IxBot, IxBug, IxWorkflow } from "../iconkit/StackIcons";
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api } from "../../api/client";
 import { isBusy, subscribe } from "../../perf/bus";
@@ -22,6 +22,7 @@ import { FileTreePanel } from "./FileTreePanel";
 import { TerminalPanel } from "./TerminalPanel";
 import { SubagentPanel } from "./SubagentPanel";
 import { DebugPanel } from "./DebugPanel";
+import { WorkflowPanel } from "../workflow/WorkflowPanel";
 import { ErrorBoundary } from "../ErrorBoundary";
 
 /** plan-75-334 阶段3：面板内容按 tab/sessionId/visible 记忆化。
@@ -35,6 +36,7 @@ const PanelContent = memo(function PanelContent({ tab, sessionId, visible }: { t
     case "files": return <FileTreePanel visible={visible} />;
     case "subagent": return <SubagentPanel threadId={tab.meta?.threadId} agentName={tab.meta?.agentName} visible={visible} />;
     case "debug": return <DebugPanel sessionId={sessionId} />;
+    case "workflow": return <WorkflowPanel sessionId={sessionId} visible={visible} />;
     default: return null;
   }
 });
@@ -66,6 +68,7 @@ function tabIcon(id: PanelTabId, size: number) {
     case "files": return <IxFiles size={size} />;
     case "subagent": return <IxBot size={size} />;
     case "debug": return <IxBug size={size} />;
+    case "workflow": return <IxWorkflow size={size} />;
   }
 }
 
@@ -109,6 +112,7 @@ export function RightPanel() {
       files: t("rp.tab_files"),
       subagent: t("rp.tab_subagent"),
       debug: t("rp.tab_debug"),
+      workflow: t("rp.tab_workflow"),
     };
     if (tTab.id === "subagent" && tTab.meta?.agentName) return tTab.meta.agentName.slice(0, 10);
     return tTab.instance > 1 ? `${base[tTab.id]} ${tTab.instance}` : base[tTab.id];
@@ -167,6 +171,7 @@ export function RightPanel() {
     { id: "browser", title: t("rp.tab_browser"), desc: t("rp.desc_browser"), onPick: () => handleAdd("browser") },
     { id: "terminal", title: t("rp.tab_terminal"), desc: t("rp.desc_terminal"), onPick: handleAddTerminal },
     { id: "files", title: t("rp.tab_files_full"), desc: t("rp.desc_files"), onPick: () => handleAdd("files") },
+    { id: "workflow", title: t("rp.tab_workflow"), desc: t("rp.desc_workflow"), onPick: () => handleAdd("workflow") },
     ...(debugEnabled ? [{ id: "debug" as const, title: t("rp.tab_debug"), desc: t("rp.desc_debug"), onPick: () => handleAdd("debug") }] : []),
   ];
 

@@ -827,6 +827,29 @@ def _build_paused_subagents_block(items: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _build_paused_workflows_block(items: list[dict]) -> str:
+    """工作流运行时（设计 §6.7）：可续跑的工作流清单（developer 段）。
+
+    用户说“继续”时应先调用 resume_workflow 续跑对应程序，而不是重新规划。
+    """
+    lines = [
+        "## Paused Workflows — resumable",
+        "以下工作流已暂停（网络中断、应用重启或用户暂停），已完成的节点与进度都已保留。",
+    ]
+    for it in items[:5]:
+        progress = it.get("progress") or {}
+        head = f"- program_id={it.get('program_id')}「{it.get('title') or '未命名工作流'}」— 已完成 {progress.get('done', 0)}/{progress.get('total', 0)} 个节点"
+        if it.get("pause_reason"):
+            head += f"；暂停原因：{str(it['pause_reason'])[:120]}"
+        lines.append(head)
+    lines.append(
+        "【续跑规则】用户本条消息若表达续做意图（如“继续 / 接着 / 恢复 / 刚才断了 / continue / resume”），"
+        "请对上述工作流调用 resume_workflow(program_id=…) 续跑；不要重新 plan_workflow，也不要重新派发其中的节点。"
+    )
+    lines.append("若本条消息是全新的、与之无关的任务，则不要续跑它们，并在回复中简要告知用户它们仍可续跑或放弃。")
+    return "\n".join(lines)
+
+
 async def build_main_context(
     db: AsyncSession, *, agent, session, project, turn, user_message: str,
     attachments: list[dict] | None = None,
@@ -847,6 +870,8 @@ async def build_main_context(
     # plan-91-394: 中断可续跑的子代理清单（list_resumable_subagents 产出）。非空时注入 developer 段，
     # 让模型在用户说“继续”时知道有哪些子代理可以续跑，并主动调用 resume_subagent。
     paused_subagents: list[dict] | None = None,
+    # 工作流运行时：可续跑的暂停工作流清单（list_paused_workflows 产出）
+    paused_workflows: list[dict] | None = None,
 ) -> ContextBundle:
     """构建主代理上下文。
 
@@ -921,6 +946,8 @@ async def build_main_context(
     # 保证“继续”类意图与可续跑清单在注意力最高处同时出现。
     if paused_subagents and enable_subagents:
         bundle.developer_parts.append(_build_paused_subagents_block(paused_subagents))
+    if paused_workflows:
+        bundle.developer_parts.append(_build_paused_workflows_block(paused_workflows))
     # 1.2 Rule Documents（plan-19-82 步骤 4）：规则段**前移**到 developer 段最前部并加 MANDATORY 语义。
     # 现状（本轮改造前）规则在第 4/4.1 位且标题无强制语义，模型容易忽略 → 遵循度不足。
     # 加载提前到此，顺序：Global Rules（优先级最高）→ Project Rules（工作区文档 + 工作目录规则）。

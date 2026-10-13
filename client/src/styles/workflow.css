@@ -1,0 +1,2173 @@
+/* 工作流：聊天卡片、步骤轨道、右侧面板与设置页的样式。
+ * 只用设计令牌（圆角 / 间距 / 字色 / 状态色）；状态靠图标、徽标与文案表达，不用左侧色条。
+ * 状态相关的槽位（耗时、进度、状态文案）预留固定宽度，切换时不引起抖动。
+ */
+
+/* ── 聊天卡片 ── */
+
+.wf-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: var(--sp-4);
+  border-radius: var(--r-card);
+  border: 1px solid var(--surface-inset-border);
+  background: var(--surface-inset);
+  color: var(--text-1);
+  font-size: var(--fs-md);
+}
+
+.wf-card.is-loading {
+  min-height: 56px;
+  justify-content: center;
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+}
+
+.wf-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.wf-card-ic {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-ctl);
+  background: color-mix(in oklab, var(--text-1) 6%, transparent);
+  color: var(--text-2);
+}
+
+.wf-card-titles {
+  flex: 1;
+  min-width: 0;
+}
+
+.wf-card-title {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wf-card-meta {
+  margin-top: 2px;
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.wf-card-rationale {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  line-height: 1.6;
+}
+
+.wf-card-flows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.wf-card-flow-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-1);
+  min-width: 0;
+}
+
+.wf-card-flow-name {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wf-card-flow-dep {
+  font-size: 11px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.wf-card-note {
+  margin: 0;
+  min-height: 18px;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.wf-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+}
+
+.wf-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+/* ── 步骤轨道 ── */
+
+.wf-track {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.wf-track::-webkit-scrollbar {
+  display: none;
+}
+
+.wf-step {
+  display: flex;
+  align-items: center;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/* 步骤之间的连线：前一步完成则着成功色，表示已经走过 */
+.wf-step + .wf-step::before {
+  content: "";
+  flex-shrink: 0;
+  width: 16px;
+  height: 1px;
+  margin: 0 var(--sp-2);
+  background: var(--border-strong);
+}
+
+.wf-step[data-status="done"] + .wf-step::before {
+  background: var(--success);
+}
+
+.wf-step-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  cursor: pointer;
+  transition: background var(--dur-2) ease;
+}
+
+.wf-step-btn:hover {
+  background: color-mix(in oklab, var(--text-1) 6%, transparent);
+}
+
+.wf-step-btn.is-static {
+  cursor: default;
+}
+
+.wf-step-btn.is-static:hover {
+  background: transparent;
+}
+
+.wf-step-ic {
+  display: inline-flex;
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+}
+
+.wf-step-name {
+  min-width: 0;
+  max-width: 120px;
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wf-step[data-status="running"] .wf-step-name {
+  color: var(--text-1);
+}
+
+.wf-step[data-status="failed"] .wf-step-name {
+  color: var(--error);
+}
+
+/* 返工轮次：角标形式，不换行、不被压缩，与步骤名保持同一行 */
+.wf-step-rework {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  height: 16px;
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  background: color-mix(in oklab, var(--warning) 14%, transparent);
+  color: var(--warning);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.wf-track.is-compact .wf-step-name {
+  max-width: 88px;
+  font-size: 11px;
+}
+
+/* 子工作流标题行：名称与删除入口同一行 */
+.wf-tpl-nav-flowrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.wf-tpl-flow-add {
+  align-self: flex-start;
+}
+
+/* 子工作流依赖：每个其它子工作流一个开关，按下即表示本子工作流依赖它 */
+.wf-tpl-dep-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.wf-tpl-dep {
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    background var(--dur-2) ease,
+    color var(--dur-2) ease,
+    border-color var(--dur-2) ease;
+}
+
+.wf-tpl-dep:hover {
+  background: color-mix(in oklab, var(--text-1) 6%, transparent);
+}
+
+.wf-tpl-dep[aria-pressed="true"] {
+  border-color: color-mix(in oklab, var(--info) 45%, transparent);
+  background: color-mix(in oklab, var(--info) 14%, transparent);
+  color: var(--text-1);
+}
+
+/* ── 开始前确认：未提交改动的说明 ── */
+
+.wf-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.wf-confirm-lead {
+  margin: 0;
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  color: var(--text-1);
+}
+
+.wf-confirm-files {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  list-style: none;
+  border-radius: var(--r-ctl);
+  background: var(--surface-inset);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-2);
+  word-break: break-all;
+}
+
+.wf-confirm-more {
+  font-family: inherit;
+  color: var(--text-3);
+}
+
+.wf-confirm-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: 0;
+}
+
+.wf-confirm-options dt {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.wf-confirm-options dd {
+  margin: 2px 0 0;
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  color: var(--text-2);
+}
+
+/* ── 右侧面板：列表 ── */
+
+.wf-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  height: 100%;
+  min-height: 0;
+  box-sizing: border-box;
+  padding: var(--sp-4);
+  overflow: auto;
+}
+
+/* 加载中：嗒嗒小跳 + 返回入口，同一行，槽位高度固定 */
+.wf-panel-loading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  min-height: 44px;
+}
+
+.wf-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-ctl);
+  background: color-mix(in oklab, var(--error) 10%, transparent);
+  color: var(--error);
+  font-size: var(--fs-sm);
+}
+
+.wf-error-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.wf-toolbar {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.wf-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wf-run {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--surface-inset-border);
+  border-radius: var(--r-card);
+  background: var(--surface-inset);
+  color: var(--text-1);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-2) ease;
+}
+
+.wf-run:hover {
+  background: color-mix(in oklab, var(--text-1) 4%, var(--surface-inset));
+}
+
+.wf-run-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.wf-run-title {
+  min-width: 0;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wf-run-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+}
+
+.wf-run-progress {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.wf-run-bar {
+  position: relative;
+  flex: 1;
+  height: 4px;
+  border-radius: var(--r-pill);
+  background: color-mix(in oklab, var(--text-1) 8%, transparent);
+  overflow: hidden;
+}
+
+.wf-run-bar-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  border-radius: inherit;
+  background: var(--info);
+  transition: width var(--dur-3) var(--ease-emphasized-decel);
+}
+
+.wf-run[data-status="succeeded"] .wf-run-bar-fill {
+  background: var(--success);
+}
+
+.wf-run[data-status="paused"] .wf-run-bar-fill,
+.wf-run[data-status="waiting_human"] .wf-run-bar-fill {
+  background: var(--warning);
+}
+
+.wf-run[data-status="failed"] .wf-run-bar-fill {
+  background: var(--error);
+}
+
+.wf-run-count {
+  min-width: 40px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.wf-run-time {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── 右侧面板：详情 ── */
+
+.wf-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.wf-detail-top {
+  display: flex;
+}
+
+.wf-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.wf-detail-titles {
+  min-width: 0;
+}
+
+.wf-detail-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text-1);
+  overflow-wrap: anywhere;
+}
+
+.wf-detail-meta {
+  margin-top: 2px;
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.wf-detail-note {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.wf-detail-rationale {
+  margin: 0;
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  color: var(--text-3);
+  overflow-wrap: anywhere;
+}
+
+.wf-detail-actions:empty {
+  display: none;
+}
+
+.wf-gate {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-4);
+  border-radius: var(--r-card);
+  border: 1px solid color-mix(in oklab, var(--warning) 24%, transparent);
+  background: color-mix(in oklab, var(--warning) 7%, var(--surface-inset));
+}
+
+.wf-gate-title {
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+
+.wf-gate-reason {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.wf-issues {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wf-issue {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  font-size: var(--fs-sm);
+}
+
+.wf-issue-sev {
+  flex-shrink: 0;
+  padding: 1px 8px;
+  border-radius: var(--r-pill);
+  background: color-mix(in oklab, var(--text-1) 8%, transparent);
+  color: var(--text-2);
+  font-size: 11px;
+}
+
+.wf-issue-sev[data-sev="blocker"] {
+  background: color-mix(in oklab, var(--error) 14%, transparent);
+  color: var(--error);
+}
+
+.wf-issue-sev[data-sev="major"] {
+  background: color-mix(in oklab, var(--warning) 16%, transparent);
+  color: var(--warning);
+}
+
+.wf-issue-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.wf-issue-text {
+  color: var(--text-1);
+  overflow-wrap: anywhere;
+}
+
+.wf-issue-loc {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-3);
+  overflow-wrap: anywhere;
+}
+
+.wf-issue-fix {
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.wf-detail-flows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.wf-flow {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+  border-radius: var(--r-card);
+  border: 1px solid var(--surface-inset-border);
+  background: var(--surface-inset);
+}
+
+.wf-flow-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.wf-flow-name {
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+
+.wf-flow-dep {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.wf-node-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wf-node-row + .wf-node-row {
+  border-top: 1px solid var(--surface-inset-border);
+}
+
+.wf-node-btn {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--sp-2);
+  border: 0;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--text-1);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-2) ease;
+}
+
+.wf-node-btn:hover {
+  background: color-mix(in oklab, var(--text-1) 5%, transparent);
+}
+
+.wf-node-btn.is-static {
+  cursor: default;
+}
+
+.wf-node-btn.is-static:hover {
+  background: transparent;
+}
+
+.wf-node-ic {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.wf-node-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.wf-node-title {
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wf-node-sub {
+  font-size: 11px;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 状态文案预留宽度，切换状态时不挤动左侧标题 */
+.wf-node-status {
+  flex-shrink: 0;
+  min-width: 72px;
+  font-size: 11px;
+  color: var(--text-2);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.wf-node-reason {
+  padding: 0 var(--sp-2) var(--sp-2) 28px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-3);
+  overflow-wrap: anywhere;
+}
+
+.wf-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.wf-section-title {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.wf-events {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wf-event {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: var(--sp-3);
+  font-size: var(--fs-sm);
+}
+
+.wf-event-time {
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.wf-event-text {
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+/* ── 设置页 ── */
+
+/* 分档滑块位于设置行的右侧：根节点必须有明确宽度。轨道与档位名都是绝对定位，
+ * 宽度为 0 时所有档位会叠在同一点上（「不限」压住数字）。 */
+.wf-step-slider {
+  width: 280px;
+  max-width: 100%;
+}
+
+.wf-settings-hint {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-4) 0;
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+}
+
+.wf-settings-hint.is-error {
+  color: var(--error);
+}
+
+.wf-settings-warn {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  color: var(--warning);
+}
+
+.turn-item-workflow {
+  max-width: 100%;
+}
+
+/* ── 输入框上方的工作流胶囊 ──
+ * 几何与任务胶囊（composer.css + flow.css 的 .tcap）一致：整宽居中、胶囊高 34px、距输入框 8px。
+ * 两者同时出现时本胶囊抬到任务胶囊之上（data-stacked），消息流让位两行（见文件末尾）。 */
+.wf-capsule-wrap {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  margin-bottom: 8px;
+  display: flex;
+  justify-content: center;
+  /* 整宽容器只作居中锚点，事件穿透，避免挡住消息流底部的点击与选择 */
+  pointer-events: none;
+  z-index: 5;
+  animation: mo-rise-in var(--dur-4) var(--spring-soft) both;
+  transition: margin-bottom var(--dur-3) var(--ease-standard);
+}
+.wf-capsule-wrap > * { pointer-events: auto; }
+.wf-capsule-wrap[data-stacked="true"] { margin-bottom: 50px; }
+
+.wf-capsule {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: min(560px, 80vw);
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--color-popover);
+  box-shadow: var(--shadow-xs);
+  color: var(--text-2);
+  font-size: 12.5px;
+  transition: box-shadow var(--dur-2) var(--ease-standard);
+}
+.wf-capsule:hover { box-shadow: var(--shadow-sm); }
+
+.wf-capsule-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  height: 26px;
+  padding: 0 9px 0 7px;
+  border: none;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: background var(--dur-2) var(--ease-standard);
+}
+.wf-capsule-main:hover { background: var(--bg-hover); }
+
+.wf-capsule-ic {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+
+.wf-capsule-title {
+  min-width: 0;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-1);
+  font-weight: 500;
+}
+
+.wf-capsule-count {
+  flex-shrink: 0;
+  color: var(--text-1);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 状态点 + 文案：颜色只是辅助，文案本身已说明状态 */
+.wf-capsule-state {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 5px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.wf-capsule-state::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.wf-capsule-state[data-tone="info"] { color: var(--info); }
+.wf-capsule-state[data-tone="warning"] { color: var(--warning); }
+.wf-capsule-state[data-tone="danger"] { color: var(--error); }
+.wf-capsule-state[data-tone="success"] { color: var(--success); }
+
+.wf-capsule-more {
+  flex-shrink: 0;
+  padding: 0 6px;
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+}
+
+.wf-capsule-resume {
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+
+/* ── 闸门：原因 / 问题 / 冲突对照 / 说明 / 决定 ── */
+.wf-gate-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.wf-gate.is-compact {
+  padding: var(--sp-3) var(--sp-4);
+}
+
+.wf-gate-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.wf-gate-field-label {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.wf-gate-note {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 44px;
+  resize: vertical;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-ctl);
+  border: 1px solid var(--surface-inset-border);
+  background: var(--surface-inset);
+  color: var(--text-1);
+  font: inherit;
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+
+.wf-gate-note:focus {
+  outline: none;
+  border-color: var(--border-strong);
+}
+
+.wf-gate-note:disabled {
+  opacity: 0.6;
+}
+
+/* ── 冲突对照（三栏：读取时 / 当前磁盘 / 本次待写入） ── */
+.wf-conflict {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.wf-conflict-path {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.wf-conflict-panes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--sp-2);
+}
+
+.wf-conflict-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  margin: 0;
+  border-radius: var(--r-ctl);
+  background: color-mix(in oklab, var(--text-1) 4%, transparent);
+  overflow: hidden;
+}
+
+.wf-conflict-cap {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: var(--sp-2) var(--sp-3) 0;
+}
+
+.wf-conflict-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.wf-conflict-hint {
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
+.wf-conflict-body {
+  margin: 0;
+  max-height: 150px;
+  overflow: auto;
+  padding: var(--sp-2) var(--sp-3) var(--sp-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ── 并发占用与预算 ── */
+.wf-pool {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--sp-2) 0 var(--sp-3);
+}
+
+.wf-pool-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+}
+
+.wf-pool-label {
+  color: var(--text-3);
+}
+
+.wf-pool-count {
+  color: var(--text-1);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.wf-pool-sep {
+  color: var(--text-3);
+}
+
+.wf-pool-bar,
+.wf-budget-bar {
+  position: relative;
+  display: block;
+  height: 3px;
+  border-radius: var(--r-pill);
+  background: color-mix(in oklab, var(--text-1) 8%, transparent);
+  overflow: hidden;
+}
+
+.wf-pool-fill,
+.wf-budget-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  border-radius: inherit;
+  transition: width var(--dur-3) var(--ease-emphasized-decel);
+}
+
+.wf-pool-fill {
+  background: var(--info);
+}
+
+.wf-budget {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: var(--sp-2);
+}
+
+.wf-budget-fill {
+  background: var(--warning);
+}
+
+.wf-budget-text {
+  font-size: 11px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.wf-budget[data-over="true"] .wf-budget-text {
+  color: var(--error);
+}
+
+.wf-budget[data-over="true"] .wf-budget-fill {
+  background: var(--error);
+}
+
+/* ── 详情头部操作 / 模板表单 ── */
+.wf-detail-top {
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.wf-detail-top-end {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.wf-saved-hint {
+  font-size: 11px;
+  color: var(--success);
+}
+
+.wf-template-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+/* ── 设置页：概览与热点文件 ── */
+.wf-overview {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-4);
+}
+
+.wf-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: var(--sp-4);
+  border-radius: var(--r-card);
+  border: 1px solid var(--surface-inset-border);
+  background: var(--surface-inset);
+}
+
+.wf-stat-value {
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.wf-stat-label {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.wf-hot-files textarea {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+/* ── 工作流卡：子工作流分组、列表容器 ── */
+.wf-card-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.wf-list-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-height: 0;
+}
+
+/* 两个胶囊同时出现：消息流让位两行（单行 44px → 双行 86px，几何与 global.css 的单行规则一致） */
+.chat-panel.has-capsule[data-capsule-rows="2"] .chat-panel-flow .message-flow-capsule-space {
+  height: 86px;
+}
+
+/* 闸门随所在面板的宽度换行：右侧面板宽度由用户拖拽决定，因此按容器宽度而非视口宽度切换 */
+.wf-gate {
+  container-type: inline-size;
+}
+
+@container (max-width: 460px) {
+  .wf-conflict-panes {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.wf-gate-head {
+  flex-wrap: wrap;
+}
+
+.wf-gate-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.wf-actions {
+  flex-wrap: wrap;
+}
+
+/* ── 越界改动 / 冲突文件清单（闸门内）：命令单行截断，路径等宽，超出折叠为数量 ── */
+.wf-scope {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.wf-scope-cmd-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.wf-scope-cmd {
+  display: block;
+  min-width: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-ctl);
+  background: color-mix(in oklab, var(--text-1) 4%, transparent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wf-scope-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wf-scope-path {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.wf-scope-more {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+/* ── 模板编辑器（设置 → 工作流 → 模板）：左侧步骤导航，右侧步骤表单，错误标注到对应步骤 ── */
+.wf-tpl {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: var(--sp-4);
+  min-height: 320px;
+}
+
+.wf-tpl-nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+  max-height: 56vh;
+  overflow-y: auto;
+}
+
+.wf-tpl-nav-flow {
+  padding: 0 var(--sp-2);
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.wf-tpl-nav-node {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 32px;
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-ctl);
+  font-size: 12.5px;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background var(--dur-2) var(--ease-standard);
+}
+
+.wf-tpl-nav-node:hover { background: var(--bg-hover); }
+.wf-tpl-nav-node[aria-current="true"] { background: var(--bg-active); color: var(--text-1); }
+
+.wf-tpl-nav-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wf-tpl-nav-kind {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.wf-tpl-nav-err {
+  flex-shrink: 0;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: var(--r-pill);
+  background: color-mix(in oklab, var(--error) 14%, transparent);
+  color: var(--error);
+  font-size: 10.5px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.wf-tpl-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.wf-tpl-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.wf-tpl-hint {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.wf-tpl-errors {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-card);
+  background: color-mix(in oklab, var(--error) 8%, transparent);
+  list-style: none;
+  font-size: 12px;
+  color: var(--text-1);
+}
+
+.wf-tpl-errors small {
+  display: block;
+  color: var(--text-3);
+}
+
+/* 步骤的增删与调整：左侧底部的“添加”面板，右侧底部的上移 / 下移 / 删除 */
+.wf-tpl-add {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+  padding: var(--sp-3);
+  border-radius: var(--r-ctl);
+  background: color-mix(in oklab, var(--text-1) 3%, transparent);
+}
+
+.wf-tpl-step-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--surface-inset-border);
+}
+
+@media (max-width: 720px) {
+  .wf-tpl { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* 子代理面板的工作流节点头：程序 › 子工作流 › 节点，随后是尝试 / 模式 / 评估结论的小标签与产出摘要 */
+.subagent-wf-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--sp-3) var(--sp-4) 0;
+  min-width: 0;
+}
+
+.subagent-wf-trail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.subagent-wf-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.subagent-wf-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: var(--r-pill);
+  background: color-mix(in oklab, var(--text-1) 6%, transparent);
+  font-size: 11px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.subagent-wf-chip[data-verdict="pass"] { color: var(--success); }
+.subagent-wf-chip[data-verdict="rework"],
+.subagent-wf-chip[data-verdict="escalate"] { color: var(--warning); }
+
+.subagent-wf-summary {
+  margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+/* 侧栏会话条目上的工作流标记：只用图标颜色表达状态（待决定 / 暂停为警示色，进行中为信息色） */
+.sb-session-wf {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+
+.sb-session-wf.is-running { color: var(--info); }
+.sb-session-wf.is-attention,
+.sb-session-wf.is-paused { color: var(--warning); }
+
+/* 独立工作树的子工作流：标题旁的小标签（不用色条，只用文字与颜色） */
+.wf-card-flow-tag {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--info);
+}
+
+/* ─── 第 5 轮：草稿计划卡、子工作流级轨道、返工弧、调整与漂移差异 ─────────────── */
+
+/* 步骤轨道可量出位置（返工弧依据各步骤的中心），因此轨道本身是定位容器 */
+.wf-track {
+  position: relative;
+}
+
+.wf-track-wrap {
+  min-width: 0;
+}
+
+.wf-track-arcs {
+  display: block;
+  overflow: visible;
+  margin-top: -2px;
+  pointer-events: none;
+}
+
+.wf-track-arc {
+  fill: none;
+  stroke: var(--text-3);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  stroke-linecap: round;
+}
+
+/* 子工作流级轨道：折叠态的整体进度 */
+.wf-flow-track {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wf-flow-step {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.wf-flow-step + .wf-flow-step::before {
+  content: "";
+  width: 14px;
+  height: 1px;
+  margin-right: var(--sp-3);
+  background: var(--border-strong);
+}
+
+.wf-flow-step[data-status="done"] + .wf-flow-step::before {
+  background: var(--success);
+}
+
+.wf-flow-step-body {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+}
+
+.wf-flow-step[data-status="done"] .wf-flow-step-body { color: var(--text-1); }
+
+.wf-flow-step-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 14em;
+}
+
+/* 草稿计划正文 */
+.wf-plan {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.wf-plan-explain {
+  margin: 0;
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+}
+
+.wf-plan-flows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wf-plan-flow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-ctl);
+  border: 1px solid var(--surface-inset-border);
+  background: var(--surface-inset);
+}
+
+.wf-plan-flow-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.wf-plan-flow-name {
+  color: var(--text-1);
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+
+.wf-plan-flow-chain {
+  grid-column: 1;
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+}
+
+.wf-plan-flow-scope {
+  grid-column: 1;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wf-plan-flow-swap {
+  grid-column: 2;
+  grid-row: 1 / span 3;
+  align-self: center;
+  min-width: 11em;
+}
+
+.wf-plan-flow-note {
+  grid-column: 2;
+  grid-row: 1 / span 3;
+  align-self: center;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+
+.wf-plan-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.wf-plan-meta-sep { color: var(--text-3); }
+
+.wf-plan-hint {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+
+.wf-plan-errors {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  list-style: none;
+  border-radius: var(--r-ctl);
+  background: color-mix(in oklab, var(--danger) 10%, transparent);
+}
+
+.wf-plan-error {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--text-1);
+  font-size: var(--fs-sm);
+}
+
+.wf-plan-error-fix {
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+}
+
+/* 卡片的补充行：通知、重试、展开的详情 */
+.wf-card-notice {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-ctl);
+  background: color-mix(in oklab, var(--warning) 10%, transparent);
+  color: var(--text-1);
+  font-size: var(--fs-sm);
+}
+
+.wf-card-retry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-1) var(--sp-3);
+}
+
+.wf-retry-attempt {
+  color: var(--text-2);
+}
+
+.wf-countdown {
+  display: inline-block;
+  min-width: 5.5em;
+  text-align: right;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.wf-card-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--surface-inset-border);
+}
+
+.wf-issues-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.wf-issues-more {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.wf-issues-more:hover { color: var(--text-1); }
+
+/* 调整草稿的说明弹层 */
+.wf-adjust {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.wf-adjust-lead {
+  margin: 0;
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+}
+
+.wf-adjust-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: var(--fs-sm);
+}
+
+/* 续跑前的漂移弹层：文件清单与差异 */
+.wf-drift {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.wf-drift-lead,
+.wf-drift-head {
+  margin: 0;
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+}
+
+.wf-drift-files {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wf-drift-file {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  min-width: 0;
+  padding: 4px var(--sp-2);
+  border-radius: var(--r-ctl);
+}
+
+.wf-drift-file[data-open="true"] {
+  background: var(--surface-inset);
+}
+
+.wf-drift-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-1);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+
+.wf-drift-more {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  padding: 0 var(--sp-2);
+}
+
+.wf-drift-state {
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+}
+
+.wf-drift-diff {
+  max-height: 260px;
+  margin: 0;
+  overflow: auto;
+  padding: var(--sp-2) 0;
+  border-radius: var(--r-ctl);
+  border: 1px solid var(--surface-inset-border);
+  background: var(--surface-inset);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.55;
+}
+
+.wf-diff-line {
+  display: block;
+  padding: 0 var(--sp-3);
+  white-space: pre;
+  color: var(--text-2);
+}
+
+.wf-diff-line[data-kind="add"] { color: var(--success); background: color-mix(in oklab, var(--success) 10%, transparent); }
+.wf-diff-line[data-kind="del"] { color: var(--danger); background: color-mix(in oklab, var(--danger) 10%, transparent); }
+.wf-diff-line[data-kind="hunk"] { color: var(--info); }
+.wf-diff-line[data-kind="meta"] { color: var(--text-3); }
+
+/* ─── 右侧面板：列表的空态入口、预设、进度环行、尝试记录、目标 ──────────────── */
+
+.wf-starters {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+
+.wf-preset-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wf-preset {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+  border-radius: var(--r-ctl);
+  border: 1px solid var(--surface-inset-border);
+  background: var(--surface-inset);
+}
+
+.wf-preset-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.wf-preset-name {
+  color: var(--text-1);
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+
+.wf-preset-desc,
+.wf-preset-chain {
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+}
+
+.wf-preset-chain { color: var(--text-3); font-size: var(--fs-xs); }
+
+.wf-preset-empty {
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+  padding: var(--sp-3);
+}
+
+.wf-run-meta {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wf-detail-goal {
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+}
+
+.wf-detail-goal summary {
+  cursor: pointer;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  list-style: none;
+}
+
+.wf-detail-goal summary::-webkit-details-marker { display: none; }
+
+.wf-detail-goal p {
+  margin: var(--sp-1) 0 0;
+  line-height: 1.6;
+}
+
+.wf-attempts-toggle {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-3);
+  font: inherit;
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.wf-attempts-toggle:hover { color: var(--text-1); }
+
+.wf-attempts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: var(--sp-2) 0 0 var(--sp-3);
+  list-style: none;
+}
+
+.wf-attempt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px var(--sp-2);
+  font-size: var(--fs-xs);
+}
+
+.wf-attempt-head { color: var(--text-1); }
+.wf-attempt-time { color: var(--text-3); font-variant-numeric: tabular-nums; }
+.wf-attempt-reason { flex-basis: 100%; color: var(--text-2); }
+.wf-attempt[data-status="failed"] .wf-attempt-head { color: var(--danger); }
+
+.wf-attempts-state {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+
+/* 子代理面板的工作流节点头：产出分段与尝试记录 */
+.subagent-wf-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding-top: var(--sp-2);
+}
+
+.subagent-wf-section-title {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.02em;
+}
+
+.subagent-wf-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0 0 0 1.2em;
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+}
+
+.subagent-wf-history-toggle {
+  align-self: flex-start;
+  margin-top: var(--sp-1);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-3);
+  font: inherit;
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.subagent-wf-history-toggle:hover { color: var(--text-1); }
+
+/* ─── 胶囊的浮层：钉住后列出本会话的工作流，与任务胶囊的浮层口径一致 ─────────── */
+
+.wf-capsule-sep {
+  color: var(--text-3);
+}
+
+.wf-capsule-pop {
+  width: 320px;
+  max-width: calc(100vw - 32px);
+  padding: var(--sp-2);
+  border-radius: var(--r-pop);
+  border: 1px solid var(--surface-inset-border);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-pop);
+}
+
+.wf-capsule-pop-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: 2px var(--sp-1) var(--sp-2);
+}
+
+.wf-capsule-pop-title {
+  color: var(--text-1);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+.wf-capsule-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wf-capsule-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  border-radius: var(--r-ctl);
+}
+
+.wf-capsule-item:hover { background: var(--bg-hover); }
+
+.wf-capsule-item-main {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.wf-capsule-item-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-1);
+  font-size: var(--fs-sm);
+}
+
+.wf-capsule-item-count {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ─── 设置页：概览的单位、模板工具条；模板编辑器：迷你流程图与字段级错误 ───── */
+
+.wf-stat-unit {
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+  font-weight: 400;
+}
+
+.wf-tpl-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding-bottom: var(--sp-2);
+}
+
+.wf-tpl-flow-preview {
+  gap: var(--sp-2);
+}
+
+.wf-tpl-mini {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-2);
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  list-style: none;
+  border-radius: var(--r-ctl);
+  border: 1px solid var(--surface-inset-border);
+  background: var(--surface-inset);
+}
+
+.wf-tpl-mini-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.wf-tpl-mini-arrow {
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+}
+
+.wf-tpl-mini-step {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px var(--sp-2);
+  border: 1px solid var(--surface-inset-border);
+  border-radius: var(--r-ctl);
+  background: var(--bg-panel);
+  color: var(--text-1);
+  font: inherit;
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.wf-tpl-mini-step[aria-current="true"] {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-sm);
+}
+
+.wf-tpl-mini-kind {
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.wf-tpl-mini-rework {
+  color: var(--warning);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.wf-tpl-field-errors {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: var(--sp-1) var(--sp-2);
+  list-style: none;
+  border-radius: var(--r-ctl);
+  background: color-mix(in oklab, var(--danger) 10%, transparent);
+  color: var(--danger);
+  font-size: var(--fs-xs);
+}
+
+.wf-tpl-field-errors small {
+  color: var(--text-2);
+}
+
+/* 运行中步骤的补充说明：一行输入 + 发送，结果就地说明 */
+.subagent-wf-note {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--surface-inset-border);
+  margin-top: var(--sp-2);
+}
+
+.subagent-wf-note-label {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+
+.subagent-wf-note-row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-2);
+}
+
+.subagent-wf-note-row > :first-child { flex: 1; min-width: 0; }
+
+.subagent-wf-note-state {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+
+.subagent-wf-note-state[data-tone="error"] { color: var(--danger); }
+.subagent-wf-note-state[data-tone="ok"] { color: var(--success); }

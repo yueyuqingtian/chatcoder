@@ -497,11 +497,19 @@ async def list_session_subagents(session_id: int, turn_id: int | None = None,
     # v36 (plan-321-1600 M2): 右面板头部需要“用时 + 文件数”——文件清单只存于运行期
     # handle（内存），任务行无此列，故从会话管理器只读取用（不创建）。
     from app.orchestration.subagent import peek_subagent_manager
+    from app.orchestration.workflow import store as workflow_store
+
     _mgr = peek_subagent_manager(session_id)
+    rows = res.all()
+    # 工作流节点的子代理：附带节点信息，面板据此显示“工作流节点”头（普通子代理为 None）
+    briefs = await workflow_store.node_briefs(
+        [agent.workflow_node_id for agent, _task in rows if agent.workflow_node_id]
+    )
     out: list[dict] = []
-    for agent, task in res.all():
+    for agent, task in rows:
         _h = _mgr.get(agent.id) if _mgr is not None else None
         out.append({
+            "workflow": briefs.get(agent.workflow_node_id) if agent.workflow_node_id else None,
             "agent_id": agent.id,
             "name": agent.name or f"子代理 #{agent.id}",
             "turn_id": agent.turn_id,

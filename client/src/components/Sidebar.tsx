@@ -5,7 +5,7 @@
  * 项目→会话两级列表（会话行带相对时间）
  * 底部用户条（设置 + 更新徽标）
  */
-import { IxNewChat, IxSearch, IxAutomation, IxExtensions, IxSettings } from "./iconkit/StackIcons";
+import { IxNewChat, IxSearch, IxAutomation, IxExtensions, IxSettings, IxWorkflow } from "./iconkit/StackIcons";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ProjectOut, SessionOut } from "../api/client";
@@ -44,6 +44,14 @@ const STORAGE_KEY_COLLAPSED_PROJECTS = "chatcoder:collapsed-projects";
 /** plan-387-1825 E1：项目下会话列表的分批展开步长与「一次全开」阈值。
  *  语义：首次显示 5 条，每次点「显示更多」+5；已显示达到 10 条后，
  *  按钮文案变为「展开全部（剩余 N 项）」，点击一次全部展开。 */
+/** 会话条目上的工作流标记（aria-label 与样式共用同一状态名） */
+const WORKFLOW_STATE_LABEL: Record<string, string> = {
+  attention: "工作流等待你的决定",
+  paused: "工作流已暂停",
+  running: "工作流进行中",
+  draft: "工作流待确认",
+};
+
 const SESSION_PAGE_STEP = 5;
 const SESSION_EXPAND_ALL_THRESHOLD = 10;
 
@@ -471,6 +479,14 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
         {/* S1（plan-41-197）：运行指示移到标题左侧，且**始终占位**（非运行态透明）。
             此前只给运行项渲染 → 运行/非运行切换时整行标题列宽与右侧列位跳动。 */}
         <span className={"sb-session-pulse" + (s.has_running ? " on" : "")} aria-hidden="true" />
+        {s.workflow_state && (
+          <span
+            className={"sb-session-wf is-" + s.workflow_state}
+            aria-label={WORKFLOW_STATE_LABEL[s.workflow_state]}
+          >
+            <IxWorkflow size={12} />
+          </span>
+        )}
         {s.pinned && <span title={t("sidebar.ctx_pin")} className="sb-pin"><IconPin size={11} /></span>}
         {editing ? (
           <Input className="sb-rename-input" ref={renameInputRef} autoFocus value={renaming.value} onFocus={(e) => e.target.select()}

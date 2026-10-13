@@ -101,13 +101,24 @@ export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
     openTab("files");
   };
 
-  /** 子代理：运行中置顶，其余按 id 升序；已取消不是错误，用中性“已停止”态 */
+  /** 子代理：运行中置顶；工作流的节点按所属程序分组（标注“工作流 · 节点名”），其余按 id 升序；
+   * 已取消不是错误，用中性“已停止”态 */
   const subagents = useMemo(() => {
     const rows = Object.entries(subagentMeta).map(([id, m]) => {
       const st = normalizeStatus(m.status);
-      return { id: Number(id), meta: m, status: (st === "cancelled" ? "paused" : st) as StatusKind };
+      return {
+        id: Number(id),
+        meta: m,
+        status: (st === "cancelled" ? "paused" : st) as StatusKind,
+        programId: m.workflow?.program_id ?? 0,
+      };
     });
-    rows.sort((a, b) => Number(b.status === "running") - Number(a.status === "running") || a.id - b.id);
+    rows.sort(
+      (a, b) =>
+        Number(b.status === "running") - Number(a.status === "running") ||
+        a.programId - b.programId ||
+        a.id - b.id,
+    );
     return rows;
   }, [subagentMeta]);
   const runningSubagents = subagents.filter((r) => r.status === "running").length;
@@ -250,7 +261,9 @@ export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
             {subagents.map((r) => (
               <button key={r.id} type="button" className={`ts-row is-${r.status}`} onClick={() => openSubagent(r.id, r.meta.name)}>
                 <span className="ts-row-lead"><StatusIcon status={r.status} size={15} /></span>
-                <span className="ts-row-title">{r.meta.name}</span>
+                <span className="ts-row-title">
+                  {r.meta.workflow ? `工作流 · ${r.meta.workflow.node_title}` : r.meta.name}
+                </span>
                 <span className="ts-row-note">{fmtDuration(r.meta.startedAt, r.meta.endedAt)}</span>
               </button>
             ))}

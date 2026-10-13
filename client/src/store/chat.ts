@@ -2,13 +2,14 @@
 import { create } from "zustand";
 import { api } from "../api/client";
 import { ApiError } from "../api/client";
-import type { ArtifactOut, ArthasEntryOut, AttachmentInfo, ComposerRefOut, DebugStatusOut, FileChangeOut, MergeReportOut, MessageOut, ModelOut, ProjectOut, ProviderOut, RollbackAffected, RollbackPreviewFile, SessionOut, TaskOut, TurnOut } from "../api/client";
+import type { ArtifactOut, ArthasEntryOut, AttachmentInfo, ComposerRefOut, DebugStatusOut, FileChangeOut, MergeReportOut, MessageOut, ModelOut, ProjectOut, ProviderOut, RollbackAffected, RollbackPreviewFile, SessionOut, TaskOut, TurnOut, WorkflowNodeBrief } from "../api/client";
 import { wsClient, globalWsClient } from "../api/ws";
 import { normalizeApprovalMode, normalizeDraftMode } from "./drafts";
 import { parseRefLines } from "../utils/refLines";
 import { isBusy } from "../perf/bus";
 import { registerReconcileTask, RECONCILE_ORDER } from "../perf/reconcile";
 import type { ServerEventName } from "@chatcoder/shared/events";
+import { useWorkflowStore } from "./workflow";
 import type { CompactSummaryPayload } from "@chatcoder/shared/events";
 
 /** v7: 全局最近选择思考深度的 localStorage 持久化 key——重启后仍能恢复上次选择 */
@@ -135,6 +136,8 @@ export interface SubagentMeta {
   tokens?: number;
   /** plan-330-1648 M7: 失败/取消原因——主消息流卡片与子代理面板据此展示（不再只有一个红叉） */
   error?: string | null;
+  /** 工作流节点的子代理：面板头部展示所属节点（普通子代理为空） */
+  workflow?: WorkflowNodeBrief | null;
 }
 
 /** plan-75-332: 审批卡「解释」状态。
@@ -520,6 +523,24 @@ let _drainingQueue = false;
 let _wsUnsub: (() => void) | null = null;
 /** v37: 全局通道订阅的清理函数（与 App 生命周期绑定） */
 let _globalWsUnsub: (() => void) | null = null;
+let _workflowRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** 工作流状态变化：防抖刷新侧栏的工作流标记；只合并 workflow_state，不覆盖其它运行态字段 */
+function scheduleWorkflowSessionRefresh(): void {
+  if (_workflowRefreshTimer !== null) return;
+  _workflowRefreshTimer = setTimeout(() => {
+    _workflowRefreshTimer = null;
+    void api
+      .listSessions()
+      .then((fresh) => {
+        const states = new Map(fresh.map((x) => [x.id, x.workflow_state ?? null]));
+        useChatStore.setState((s) => ({
+          sessions: s.sessions.map((x) => (states.has(x.id) ? { ...x, workflow_state: states.get(x.id) } : x)),
+        }));
+      })
+      .catch(() => { /* 侧栏标记刷新失败不影响主流程 */ });
+  }, 400);
+}
 let _heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
 const HEARTBEAT_TIMEOUT = 60_000; // 60s 无事件超时兜底复位
 const _stoppingTurnIds = new Set<number>();
@@ -1924,6 +1945,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             endedAt: it.updated_at ?? prev?.endedAt ?? null,
             filesCount: it.files_count ?? prev?.filesCount ?? 0,
             tokens: it.token_usage ?? prev?.tokens ?? 0,
+            workflow: it.workflow ?? prev?.workflow ?? null,
             // 终态单向不可逆：本地已 done/failed 不被 REST 滞后的 running/pending 回退
             status: (prev?.status === "done" || prev?.status === "failed") && (it.status === "running" || it.status === "pending")
               ? prev.status
@@ -2158,6 +2180,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const st = get();
     // 运行中收到任何 WS 事件时重置心跳（§9.1 #3：60s 无事件超时兜底）
     if (st.isRunning) _startHeartbeat();
+    // 工作流事件不进入会话消息流：统一转发到工作流 store（以快照为准，事件只作刷新信号）
+    if (event.startsWith("workflow.")) {
+      useWorkflowStore.getState().applyEvent(payload);
+      return;
+    }
     // v2.1: 事件名契约化（packages/shared/src/events.ts 穷举），default 走 never 编译期兜底
     const ev = event as ServerEventName;
     switch (ev) {
@@ -3111,6 +3138,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
         break;
       }
+      // 工作流事件已在上方转发到工作流 store，此处仅作穷举登记（不进入消息流）
+      case "workflow.run.updated":
+      case "workflow.node.updated":
+      case "workflow.gate.opened":
+      case "workflow.log.appended":
+        break;
       default: {
         // 编译期穷举检查：后端新增事件未在 events.ts 登记时此处报错
         const _exhaustive: never = ev;
@@ -3136,6 +3169,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       const sid = Number(p.session_id ?? 0);
       if (!sid) return;
+      if (ev.event === "workflow.run.updated") {
+        scheduleWorkflowSessionRefresh();
+        return;
+      }
       const event = ev.event as ServerEventName;
       if (event === "session.completed") {
         const ts = typeof p.last_activity_at === "string" ? p.last_activity_at : null;

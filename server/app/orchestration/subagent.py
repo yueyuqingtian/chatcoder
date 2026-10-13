@@ -75,6 +75,15 @@ class SubagentHandle:
     cancel_requested: bool = False
     # pause_reason：暂停原因文案（主代理中断 / 主代理已结束），写入检查点与卡片备注
     pause_reason: str = ""
+    # 工作流节点子代理：结果由工作流运行时收取，不推送主代理、不计入每轮派发总量
+    internal: bool = False
+    workflow_node_id: int | None = None
+    # 所属的工作流尝试（工具调用台账按尝试归属）
+    workflow_attempt_id: int | None = None
+    # 累计 token 用量（每个驱动段结束时累加）：工作流按节点差值计入程序预算
+    tokens_used: int = 0
+    # 每个执行步骤的监听回调（参数为当前消息列表）：工作流据此写入增量检查点日志
+    on_step: object | None = None
 
 
 class SubagentManager:
@@ -211,7 +220,7 @@ class SubagentManager:
                             subagent_comm={"manager": self, "agent_id": agent_id, "sync": bool(is_blocking)},
                             reply_language=spec.get("reply_language", "auto"),
                             reply_language_source=spec.get("reply_language_source", "user"),
-                            checkpoint_sink=lambda msgs, _h=handle: setattr(_h, "live_messages", msgs),
+                            checkpoint_sink=lambda msgs, _h=handle: _on_step(_h, msgs),
                         )
                 except asyncio.CancelledError:
                     raise
@@ -219,6 +228,7 @@ class SubagentManager:
                     logger.exception("[subagent] %s 异常", agent_id)
                     out = AgentOutput(kind="error", error=f"执行异常: {str(e)[:300]}")
 
+                handle.tokens_used += int(getattr(out, "tokens", 0) or 0)
                 if out.kind == "message":
                     handle.status = "done"
                     handle.summary = out.text or ""
@@ -322,7 +332,7 @@ class SubagentManager:
             await write_behind.get(self.session_id, handle.turn_id).flush()
         except Exception:
             logger.debug("[subagent] flush turn buffer failed agent=%s", handle.agent_id, exc_info=True)
-        if notify:
+        if notify and not handle.internal:
             self._enqueue_completion(handle)
             self.notify_finished(handle)
 
@@ -460,7 +470,7 @@ class SubagentManager:
         """
         if turn_id is None:
             return 0
-        return sum(1 for h in self._handles.values() if h.turn_id == turn_id)
+        return sum(1 for h in self._handles.values() if h.turn_id == turn_id and not h.internal)
 
     def queue_leader_note(self, text: str) -> None:
         """plan-330-1648 M4: turn 已结束（后台子代理续跑）时，把子代理上报/提问挂到
@@ -656,6 +666,17 @@ def _dump_message(m) -> dict | None:
     return None
 
 
+def _on_step(handle: "SubagentHandle", msgs: list) -> None:
+    """每个执行步骤开始时的回调：登记最新消息引用，并通知可选的监听者（工作流增量检查点）。"""
+    handle.live_messages = msgs
+    listener = handle.on_step
+    if listener is not None:
+        try:
+            listener(msgs)
+        except Exception:  # 监听者失败不影响子代理运行
+            logger.debug("[subagent] 步骤监听回调失败(非阻塞)", exc_info=True)
+
+
 def _checkpoint_payload(handle: "SubagentHandle", spec: dict, reason: str) -> dict:
     """检查点：完整 messages（含系统/上下文/已完成的工具往返）+ 运行参数。"""
     msgs = [d for d in (_dump_message(m) for m in (handle.live_messages or [])) if d]
@@ -713,7 +734,8 @@ async def _sync_task(session_id: int, task_id: int | None, status: str, note: st
 
 async def resume_subagent(session_id: int, agent_id: int, *, turn_id: int,
                           cancel_event: asyncio.Event | None = None,
-                          readonly_only: bool = False) -> tuple[str, str]:
+                          readonly_only: bool = False,
+                          extra_note: str | None = None) -> tuple[str, str]:
     """续跑一个中断/暂停的子代理：从检查点继续，已完成步骤与上下文全部保留。
 
     readonly_only：主代理处于只读/计划模式时为 True——只允许续跑只读探索子代理，
@@ -747,6 +769,8 @@ async def resume_subagent(session_id: int, agent_id: int, *, turn_id: int,
         logger.warning("[subagent] 检查点解析失败 agent=%s", agent_id, exc_info=True)
         return "not_resumable", "检查点已损坏，无法续跑"
     messages.append(ChatMessage(role="user", content=_RESUME_NOTE))
+    if extra_note:
+        messages.append(ChatMessage(role="user", content=extra_note))
 
     spec = dict(ck.get("spec") or {})
     steps = sum(1 for m in ck["messages"] if m.get("role") == "assistant" and m.get("tool_calls"))
@@ -792,6 +816,42 @@ async def resume_subagent(session_id: int, agent_id: int, *, turn_id: int,
     return "resumed", f"已保留 {steps} 步已完成的进度"
 
 
+async def continue_subagent(session_id: int, agent_id: int, *, turn_id: int, note: str) -> tuple[str, str]:
+    """同一子代理线程续做（工作流的返工 / 格式修复）：沿用进程内上下文，追加一条说明后重新驱动。
+
+    仅当本进程仍保留该子代理的上下文时可用（已完成的子代理同样保留）；否则返回 not_resumable，
+    由调用方改为以交接摘要新建子代理。返回 (state, detail)：state ∈ resumed / already_running / not_resumable。
+    """
+    manager = get_subagent_manager(session_id)
+    live = manager.get(agent_id)
+    if live is None or not live.live_messages:
+        return "not_resumable", "进程内没有该子代理的上下文"
+    if live.task is not None and not live.task.done():
+        return "already_running", ""
+    messages = _sanitize_messages(list(live.live_messages))
+    messages.append(ChatMessage(role="user", content=note))
+    spec = dict(live.run_spec or {})
+    live.turn_id = turn_id
+    live.status = "running"
+    live.error = ""
+    live.resumable = False
+    live.cancel_requested = False
+    live.waiting = False
+    live.pause_reason = ""
+    live.started_at = time.monotonic()
+    live.live_messages = messages
+    manager._notified.discard(agent_id)
+    manager._completion_queue = [
+        n for n in manager._completion_queue if int(n.get("agent_id") or 0) != agent_id
+    ]
+    await _persist_agent_state(agent_id, "running", None)
+    live.task = asyncio.create_task(manager._drive(
+        live, agent_id=agent_id, task_id=spec.get("task_id"), turn_id=turn_id,
+        messages=messages, cancel_event=asyncio.Event(), is_blocking=False,
+    ))
+    return "resumed", "已在原子代理上下文中继续"
+
+
 async def list_resumable_subagents(session_id: int, limit: int = 8) -> list[dict]:
     """列出本会话中断后可续跑（status=paused 且有检查点）的子代理，供新 turn 注入上下文。"""
     from sqlalchemy import select
@@ -804,6 +864,7 @@ async def list_resumable_subagents(session_id: int, limit: int = 8) -> list[dict
                     _AgentRow.session_id == session_id,
                     _AgentRow.kind == "sub",
                     _AgentRow.status == "paused",
+                    _AgentRow.workflow_node_id.is_(None),
                 ).order_by(_AgentRow.id.desc()).limit(limit)
             )).scalars().all()
     except Exception:

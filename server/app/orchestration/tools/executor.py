@@ -90,6 +90,7 @@ class ToolExecutor(ABC):
         agent: "Agent",
         ctx: ToolContext,
         on_approval_request: Any = None,
+        llm_call_id: str | None = None,
     ) -> ToolResult:
         """执行一次工具调用。"""
 
@@ -124,7 +125,48 @@ class ServerToolExecutor(ToolExecutor):
         agent: "Agent",
         ctx: ToolContext,
         on_approval_request: Any = None,
+        llm_call_id: str | None = None,
     ) -> ToolResult:
+        # 工作流节点的写入契约（设计 §5A.1）：范围 / 一致性 / git 状态检查先于权限裁决，
+        # 越界或过期的写入不会弹出审批，直接以工具错误回到模型
+        from app.orchestration.workflow import guard as workflow_guard
+
+        blocked = await workflow_guard.before_tool(
+            tool_name, args if args is not None else {}, agent=agent, ctx=ctx
+        )
+        if blocked is not None:
+            return blocked
+        # 工作流节点的调用台账（§6.5）：通过检查后开始记录，有结果时补写；中断则保持“结果未知”
+        ticket = await workflow_guard.ledger_begin(
+            agent, tool_name, args, llm_call_id, ctx.workspace_root
+        )
+        result: ToolResult | None = None
+        try:
+            result = await self._execute_permitted(
+                tool_name=tool_name,
+                args=args,
+                call_key=call_key,
+                agent=agent,
+                ctx=ctx,
+                on_approval_request=on_approval_request,
+            )
+            return result
+        finally:
+            await workflow_guard.ledger_end(ticket, ok=result.ok if result is not None else None)
+
+    async def _execute_permitted(
+        self,
+        *,
+        tool_name: str,
+        args: dict[str, Any],
+        call_key: str,
+        agent: "Agent",
+        ctx: ToolContext,
+        on_approval_request: Any = None,
+    ) -> ToolResult:
+        """已通过工作流约束检查的工具调用：权限裁决、超时控制与结果记账。"""
+        from app.orchestration.workflow import guard as workflow_guard
+
         tool = tool_registry.get(tool_name)
         if tool is None:
             return ToolResult(ok=False, output="", error=f"未知工具: {tool_name}")
@@ -212,6 +254,9 @@ class ServerToolExecutor(ToolExecutor):
             # 使已开启索引的工作区在文件变更后自动更新（需求：修改文件时自动更新）。
             if result.ok:
                 _notify_symbol_index(tool_name, args, ctx)
+                await workflow_guard.after_tool(
+                    tool_name, args if args is not None else {}, agent=agent, ctx=ctx, result=result
+                )
             return result
         except asyncio.TimeoutError:
             logger.error("工具执行超时 %s", tool_name)

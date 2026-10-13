@@ -11,6 +11,7 @@ import { useCallback, memo, useState, useMemo, Fragment } from "react";
 import { useRunningTicker } from "./useRunningTicker";
 import { MessageActions } from "./MessageActions";
 import type { SubagentMetaLite } from "./SubagentCard";
+import { WorkflowCard } from "../workflow/WorkflowCard";
 import { PluginSlot } from "../../plugins/registry";
 import { MarkdownContent } from "../MarkdownContent";
 import { SubagentReportCard } from "./SubagentReportCard";
@@ -32,6 +33,11 @@ const TERMINAL_TURN_STATUSES: ReadonlySet<string> = new Set([
   "cancelled",
   "rolled_back",
 ]);
+
+/** 工作流卡与工作流唤醒分隔线不进入「工作过程」折叠：进度、暂停 / 继续需要始终可见。 */
+function isOutsideProcess(item: TurnItem): boolean {
+  return item.kind === "workflow" || item.kind === "workflow-wakeup";
+}
 
 /** 「已工作 X 分 X 秒」计时条与工作过程折叠切换（对齐图 8）。
  *
@@ -244,7 +250,7 @@ export const TurnGroup = memo(function TurnGroup({
     () => (finalReportOriginalIdx >= 0
       ? items
           .map((item, index) => ({ item, index }))
-          .filter(({ index }) => index !== firstUserIdx && index < finalReportOriginalIdx)
+          .filter(({ item, index }) => index !== firstUserIdx && index < finalReportOriginalIdx && !isOutsideProcess(item))
       : []),
     [items, firstUserIdx, finalReportOriginalIdx]
   );
@@ -411,6 +417,12 @@ export const TurnGroup = memo(function TurnGroup({
         );
       case "tools":
         return <PluginSlot key={i} slot="tool-tree" nodes={item.nodes} />;
+      case "workflow":
+        return (
+          <div key={i} className="turn-item turn-item-workflow">
+            <WorkflowCard programId={item.programId} />
+          </div>
+        );
       case "subagent": {
         const c = item.msg.content as Record<string, unknown>;
         const args = (c?.args && typeof c.args === "object" ? c.args : {}) as Record<string, unknown>;
@@ -514,6 +526,16 @@ export const TurnGroup = memo(function TurnGroup({
           </div>
         );
       }
+      // 工作流唤醒消息——细分隔线（系统生成；工作流进入终态或需要决定时自动续跑）
+      case "workflow-wakeup": {
+        return (
+          <div key={i} className="turn-item turn-item-divider workflow-wakeup-divider">
+            <span className="turn-divider-line" />
+            <span className="turn-divider-text">⟳ 工作流有新进展，继续处理</span>
+            <span className="turn-divider-line" />
+          </div>
+        );
+      }
       default:
         return null;
     }
@@ -586,6 +608,14 @@ export const TurnGroup = memo(function TurnGroup({
               </div>
             </div>
           )}
+
+          {/* 1b. 工作流卡：位于过程折叠之后、最终汇报之前，始终直显 */}
+          {hasProcess &&
+            items.map((item, index) =>
+              index !== firstUserIdx && index < finalReportOriginalIdx && isOutsideProcess(item)
+                ? renderAiItemWithActions(item, index)
+                : null
+            )}
 
           {/* 2. 无最终汇报时（运行中/异常/纯工具调用无 text 总结）：所有项直显展开，杜绝隐形；
               子代理面板例外——允许折叠（v36 修复：此前没有折叠入口，长过程无法收起） */}

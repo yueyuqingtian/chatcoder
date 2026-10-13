@@ -100,6 +100,15 @@ export function IxTasks(p: P) {
     <circle cx="6.2" cy="17" r="1.2" />
   </Line>;
 }
+/** 工作流：三节点分支，末端节点悬停时沿分支滑入 */
+export function IxWorkflow(p: P) {
+  return <Line {...p} name="workflow">
+    <circle cx="6" cy="6" r="2" />
+    <circle cx="6" cy="18" r="2" />
+    <circle className="lx-fill" cx="18" cy="12" r="2.2" />
+    <path d="M6 8v8M8 6.5c4 0 6 2 7.8 4.6M8 17.5c4 0 6-2 7.8-4.6" />
+  </Line>;
+}
 export function IxBrowser(p: P) {
   return <Line {...p} name="browser">
     <circle className="lx-fill" cx="12" cy="12" r="8" />

@@ -9,6 +9,7 @@ import { GeneralPanel } from "./GeneralPanel";
 import { ModelsPanel } from "./ModelsPanel";
 import { InstalledPanel } from "./InstalledPanel";
 import { SubagentsPanel } from "./SubagentsPanel";
+import { WorkflowSettingsPanel } from "./WorkflowSettingsPanel";
 import { RulesPanel } from "./RulesPanel";
 import { ScheduledPanel } from "./ScheduledPanel";
 import { PolicyPanel } from "./PolicyPanel";
@@ -33,7 +34,7 @@ import { IconChevronDown } from "../icons";
 
 export type SettingsTab =
   | "general" | "appearance"
-  | "models" | "extensions" | "subagents" | "rules"
+  | "models" | "extensions" | "subagents" | "workflows" | "rules"
   | "policy"
   | "scheduled" | "hooks" | "memory" | "usage" | "diagnostics" | "about"
   | "index"
@@ -63,6 +64,7 @@ export const SETTINGS_INDEX: SettingsIndexItem[] = [
   // plan-282-1441（#6）：插件 / 技能 / MCP 三个独立页收拢为一个「拓展」页（子标签分区）
   { key: "extensions", label: "拓展", group: "agent", keywords: "插件 市场 skill 技能 技能仓库 git 导入 mcp 连接器 外部工具 slot", icon: <SettingsGlyph name="extensions" /> },
   { key: "subagents", label: "子智能体", group: "agent", keywords: "子代理 profile 工具白名单", icon: <SettingsGlyph name="subagents" /> },
+  { key: "workflows", label: "工作流", group: "agent", keywords: "工作流 并发 上限 子代理 返工 预算 步骤 运行时", icon: <SettingsGlyph name="workflows" /> },
   { key: "rules", label: "AI 规则", group: "agent", keywords: "全局规则 项目规则 扫描 命令", icon: <SettingsGlyph name="rules" /> },
   { key: "hooks", label: "钩子", group: "agent", keywords: "hook 事件 回调", icon: <SettingsGlyph name="hooks" /> },
   { key: "policy", label: "执行策略", group: "agent", keywords: "命令 审批 allow deny ask", icon: <SettingsGlyph name="policy" /> },
@@ -363,6 +365,7 @@ const PANELS: Record<SettingsTab, { Comp: React.ComponentType; width?: "standard
   extensions: { Comp: InstalledPanel, fill: true },
   // plan-114-450：以下面板改为自带 Section（组标题 + 卡片），外层不再包 Card
   subagents: { Comp: SubagentsPanel },
+  workflows: { Comp: WorkflowSettingsPanel },
   rules: { Comp: RulesPanel },
   // policy / usage 含表格与图表，走宽档（唯一允许的宽度差异）
   policy: { Comp: PolicyPanel, width: "wide", card: true },

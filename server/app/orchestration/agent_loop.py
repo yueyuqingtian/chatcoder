@@ -30,6 +30,7 @@ from app._diag import log_tool_error, summarize_args  # v36: 工具错误诊断�
 from app.persistence.database import async_session_factory
 from app.orchestration.tools import ToolContext, tool_executor
 from app.orchestration.tools.registry import tool_registry
+from app.orchestration.workflow.tools import WORKFLOW_TOOL_NAMES, run_workflow_tool
 from app.services import hook_service, message_service, rollback_service, task_service
 
 logger = logging.getLogger(__name__)
@@ -1816,6 +1817,37 @@ async def run_agent_loop(
                         _tool_executed = True
                         continue
 
+                    # ── 工作流工具（主代理专用，设计 §5.8）：与子代理工具同一特判通道 ──
+                    if subagent_context and tool_name in WORKFLOW_TOOL_NAMES:
+                        await message_service.create_message(
+                            db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
+                            sender_type=SenderType.AGENT.value, sender_id=agent_id,
+                            msg_type=MsgType.TOOL_CALL.value,
+                            content={"tool": tool_name, "args": args, "call_key": tc.get("id", ""),
+                                     "agent_name": agent_name},
+                            buffered=True,
+                        )
+                        tool_output = await run_workflow_tool(
+                            tool_name, args,
+                            session_id=session_id, turn_id=turn_id, workspace=workspace,
+                            readonly_only=permission_mode in ("readonly", "plan"),
+                        )
+                        messages.append(ChatMessage(
+                            role="tool", content=tool_output,
+                            name=tool_name, tool_call_id=tc.get("id", ""),
+                        ))
+                        await message_service.create_message(
+                            db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
+                            sender_type=SenderType.AGENT.value, sender_id=agent_id,
+                            msg_type=MsgType.TOOL_RESULT.value,
+                            content={"tool": tool_name, "call_key": tc.get("id", ""),
+                                     "ok": True, "output": tool_output[:MAX_TOOL_OUTPUT_CHARS],
+                                     "error": "", "agent_name": agent_name},
+                            buffered=True,
+                        )
+                        _tool_executed = True
+                        continue
+
                     # ── plan-330-1648 M4: 子代理 → 主代理上报/提问（不走 executor）──
                     if subagent_comm and tool_name == "report_to_leader":
                         tool_output = await _run_report_to_leader(
@@ -1933,6 +1965,7 @@ async def run_agent_loop(
                             tool_name=tool_name, args=args, call_key=call_key,
                             agent=agent, ctx=ctx,
                             on_approval_request=_make_approval_emitter(session_id, _pending_reminders),
+                            llm_call_id=tc.get("id"),
                         ))
                         try:
                             if tool_name == "ask_user_question":

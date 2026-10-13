@@ -104,6 +104,14 @@ TO_TA3: dict[str, str] = {
     "send_to_subagent": "SendToSubagent",    # agent_id/message ✓
     # plan-91-394: 续跑中断/暂停的子代理（自造伪装名，schema 从真实工具动态派生）
     "resume_subagent": "ResumeSubagent",     # agent_id ✓
+    # 工作流工具（设计 §5.8）：主代理专用，经同一别名通道映射
+    "plan_workflow": "PlanWorkflow",
+    "start_workflow": "StartWorkflow",
+    "workflow_status": "WorkflowStatus",
+    "resume_workflow": "ResumeWorkflow",
+    "cancel_workflow": "CancelWorkflow",
+    "amend_workflow": "AmendWorkflow",
+    "request_write_scope": "RequestWriteScope",
     # v43: 子代理侧上报工具（只在子代理线程暴露）——子代理同样可能运行在 ta3 模型上，
     # 缺映射会让子代理失去向主代理上报/求助的通道。
     "report_to_leader": "ReportToLeader",    # message/kind/wait/timeout_s ✓
@@ -147,6 +155,9 @@ DYNAMIC_SCHEMA_ALIASES: frozenset[str] = frozenset({
     "BrowserType", "BrowserSnapshot", "BrowserEvaluate",
     # 附件与图片读取（plan-147-674）
     "ReadAttachment", "ViewImage",
+    # 工作流工具（设计 §5.8）：schema 从真实工具派生，参数与描述随 workflow/tools.py 同步
+    "PlanWorkflow", "StartWorkflow", "WorkflowStatus", "ResumeWorkflow", "CancelWorkflow", "AmendWorkflow",
+    "RequestWriteScope",
     # 其余自造工具（v43 全量补齐）
     "CompleteGoal", "AskUser", "MultiFileEdit", "SymbolSearch",
     "WebFetch", "CiRun", "Git", "CodebaseSearch",

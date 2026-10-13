@@ -42,4 +42,7 @@ class RollbackWrite(Base):
     # plan-89-387: 工具调用键——同一 turn 内同文件多次编辑时，前端按 call_key
     # 精确取「这一次编辑」的前后内容，而不是整轮累积 diff（老记录为 NULL，回退累积口径）
     call_key: Mapped[str | None] = mapped_column(String(64))
+    # 工作流运行时：写入归属的运行与 attempt（回滚与冲突基线；普通写入为空）
+    workflow_run_id: Mapped[int | None] = mapped_column(BigInteger)
+    attempt_id: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[str] = mapped_column(server_default=func.now())

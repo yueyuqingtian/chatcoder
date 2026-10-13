@@ -9,13 +9,13 @@ import type { ReactNode } from "react";
 export type SettingsGlyphKey =
   | "general" | "appearance" | "pets" | "desktop" | "models" | "memory" | "extensions"
   | "subagents" | "rules" | "hooks" | "policy" | "scheduled" | "usage" | "index"
-  | "worktrees" | "diagnostics" | "archive" | "about" | "playground";
+  | "worktrees" | "diagnostics" | "archive" | "about" | "playground" | "workflows";
 
 const TONE: Record<SettingsGlyphKey, string> = {
   general: "graphite", appearance: "violet", pets: "pink", desktop: "blue", models: "indigo",
   memory: "teal", extensions: "orange", subagents: "cyan", rules: "forest", hooks: "amber",
   policy: "red", scheduled: "green", usage: "blue", index: "lime", worktrees: "violet",
-  diagnostics: "orange", archive: "graphite", about: "cyan", playground: "amber",
+  diagnostics: "orange", archive: "graphite", about: "cyan", playground: "amber", workflows: "indigo",
 };
 
 /** 字形：24 网格，白色描边；.sg-move 为 hover 微动部件 */
@@ -38,6 +38,8 @@ const GLYPH: Record<SettingsGlyphKey, ReactNode> = {
   diagnostics: <><path d="M4 12h3.5l2-4.5 3.5 9 2-4.5H20" className="sg-move sg-draw" /></>,
   archive: <><rect x="4" y="5" width="16" height="4" rx="1.2" /><path d="M5.5 9v8.5a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V9" /><path className="sg-move sg-hop" d="M10 13h4" /></>,
   about: <><circle cx="12" cy="12" r="7.5" /><path d="M12 11v5" /><circle className="sg-move sg-hop" cx="12" cy="8.2" r="1" fill="#fff" stroke="none" /></>,
+  // 工作流：三节点分支，末端节点沿分支滑入（hover 微动）
+  workflows: <><circle cx="6" cy="6" r="2.2" /><circle cx="6" cy="18" r="2.2" /><g className="sg-move sg-slide"><circle cx="17.5" cy="12" r="2.2" /></g><path d="M6 8.2v7.6M8.2 6.4c4.2 0 5.6 2 7 4.2M8.2 17.6c4.2 0 5.6-2 7-4.2" /></>,
   // plan-114-449：乐园玩法是「字块堆叠」，图标即两块垫底 + 一块跳上顶
   playground: <><rect x="4.5" y="13" width="6.5" height="6.5" rx="1.5" /><rect x="13" y="13" width="6.5" height="6.5" rx="1.5" /><rect className="sg-move sg-hop" x="8.75" y="4.5" width="6.5" height="6.5" rx="1.5" /></>,
 };

@@ -8,6 +8,7 @@ import { install as installPerfMetrics } from "./perf/metrics";
 import "./styles/global.css";
 // plan-282-1416: 组件库样式层（依赖 tokens.css，须在 global.css 之后以便覆盖旧兼容类）
 import "./styles/components.css";
+import "./styles/workflow.css";
 // plan-20261009-ui：本轮重做的新类名样式层（只承载新类名，避免与 global.css 旧规则互相覆盖），
 // 必须在 components 之后、motion/focus 之前加载——动效降级与焦点规则仍需最后生效。
 import "./styles/overlay.css";

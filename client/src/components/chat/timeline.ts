@@ -71,8 +71,12 @@ export type TurnItem =
   | { kind: "goal-continuation"; msg: MessageOut }
   /** v39: 子代理完成唤醒消息（系统生成）——同样渲染为细分隔线 */
   | { kind: "subagent-wakeup"; msg: MessageOut }
+  /** 工作流唤醒消息（进入终态或需要你决定时的自动续跑）——同样渲染为细分隔线 */
+  | { kind: "workflow-wakeup"; msg: MessageOut }
   /** plan-865: 计划预览/确认消息——按数据库时间线位置渲染计划卡 */
-  | { kind: "plan"; msg: MessageOut };
+  | { kind: "plan"; msg: MessageOut }
+  /** 工作流卡：由 plan / start / resume 工作流工具的调用推导出程序编号，卡片状态来自工作流 store */
+  | { kind: "workflow"; programId: number };
 
 export type TimelineEntry =
   | { kind: "turn"; turnId: number | null; items: TurnItem[] }
@@ -216,7 +220,9 @@ export function buildTimeline(messages: MessageOut[]): TimelineEntry[] {
         kind: "turn", turnId: null,
         items: ucU?.subagent_wakeup === true
           ? [{ kind: "subagent-wakeup", msg: m }]
-          : [{ kind: "user", msg: m }],
+          : ucU?.workflow_wakeup === true
+            ? [{ kind: "workflow-wakeup", msg: m }]
+            : [{ kind: "user", msg: m }],
       });
       continue;
     }
@@ -444,6 +450,32 @@ export function createTimelineBuilder(): (messages: MessageOut[]) => TimelineEnt
   };
 }
 
+/** 会在消息流里展示工作流卡的工具（只读的 workflow_status 不出卡片） */
+const WORKFLOW_CARD_TOOLS = new Set(["plan_workflow", "start_workflow", "resume_workflow"]);
+
+/** 工作流工具调用 → 程序编号：plan 从结果文本取（编号由服务端生成），start / resume 从参数取；
+ *  同一轮内同一程序只出一张卡。 */
+function workflowProgramsOf(calls: MessageOut[], resultsByKey: Map<string, MessageOut>): number[] {
+  const ids: number[] = [];
+  for (const call of calls) {
+    const cc = call.content as Record<string, unknown>;
+    const tool = String(cc.tool ?? "");
+    if (!WORKFLOW_CARD_TOOLS.has(tool)) continue;
+    let programId = 0;
+    if (tool === "plan_workflow") {
+      const result = resultsByKey.get(String(cc.call_key ?? call.id));
+      const rc = (result?.content ?? {}) as Record<string, unknown>;
+      const m = /program_id=(\d+)/.exec(String(rc.output ?? ""));
+      programId = m ? Number(m[1]) : 0;
+    } else {
+      const args = (cc.args && typeof cc.args === "object" ? cc.args : {}) as Record<string, unknown>;
+      programId = Number(args.program_id ?? 0);
+    }
+    if (programId > 0 && !ids.includes(programId)) ids.push(programId);
+  }
+  return ids;
+}
+
 /** turn 内消息归类：严格按消息时间序；相邻 tool_call 合并 cluster；系统消息 → divider。 */
 function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
   // §3.3: 相邻 tool_call 合并为 tool-cluster，AI 文字切段时新开 cluster
@@ -456,6 +488,9 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
     if (pendingTools.length > 0) {
       const nodes = buildToolTree(pendingTools, resultsByKey);
       items.push({ kind: "tools", nodes });
+      for (const programId of workflowProgramsOf(pendingTools, resultsByKey)) {
+        items.push({ kind: "workflow", programId });
+      }
       pendingTools.length = 0;
     }
   };
@@ -470,9 +505,11 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
       // v39: 子代理完成唤醒消息同样不渲染为用户气泡（系统生成，对应「等待子代理结束…」的续跑轮）
       items.push(uc.subagent_wakeup === true
         ? { kind: "subagent-wakeup", msg: m }
-        : uc.goal_continuation === true
-          ? { kind: "goal-continuation", msg: m }
-          : { kind: "user", msg: m });
+        : uc.workflow_wakeup === true
+          ? { kind: "workflow-wakeup", msg: m }
+          : uc.goal_continuation === true
+            ? { kind: "goal-continuation", msg: m }
+            : { kind: "user", msg: m });
       continue;
     }
     const c = m.content as Record<string, unknown>;

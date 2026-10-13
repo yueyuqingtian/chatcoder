@@ -103,6 +103,11 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("rollback_writes", "binary", "BOOLEAN DEFAULT 0 NOT NULL"),
     # plan-89-387: 写盘记录关联工具调用键——同轮同文件多次编辑按 call_key 取本次变更
     ("rollback_writes", "call_key", "VARCHAR(64)"),
+    # ========== rollback_writes（工作流写入归属：回滚与冲突基线，nullable）==========
+    ("rollback_writes", "workflow_run_id", "BIGINT"),
+    ("rollback_writes", "attempt_id", "BIGINT"),
+    # ========== workflow_nodes（冲突闸门载荷：L4 三栏决定所需的基线 / 当前 / 待写入）==========
+    ("workflow_nodes", "conflict_json", "JSON"),
     # ========== turns（plan-644：计划模式字段持久化，多轮迭代需求全集与卡片恢复的数据源）==========
     ("turns", "plan_doc_path", "VARCHAR(512)"),
     ("turns", "plan_status", "VARCHAR(20)"),
@@ -113,6 +118,10 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("sessions", "goal_created_at", "VARCHAR(40)"),
     # ========== agents（子代理断点续跑：中断时保存的检查点 messages + 运行参数）==========
     ("agents", "checkpoint_json", "JSON"),
+    # ========== agents（工作流运行时：子代理归属的工作流节点，nullable）==========
+    ("agents", "workflow_node_id", "BIGINT"),
+    ("workflow_tool_calls", "effect_json", "TEXT"),
+    ("workflow_runs", "closed_reason", "VARCHAR(32)"),
     # ========== usage_records（plan-152-704：供应商显示名）==========
     ("usage_records", "provider_name", "VARCHAR(120) DEFAULT ''"),
     # ========== scheduled_tasks（plan-230-1144 M1.1：调度器落地所需的执行状态列）==========

@@ -133,6 +133,16 @@ export default function App() {
     if (settingsPanelExpandedRef.current) toggleRightPanel();
   }, [nav, sidebarCollapsed, toggleSidebar, toggleRightPanel]);
 
+  // 设置页内的跳转（如工作流页“前往子智能体设置”）：页面之间不直接持有导航状态，经事件交给这里
+  useEffect(() => {
+    const onOpenTab = (event: Event) => {
+      const tab = (event as CustomEvent<{ tab?: string }>).detail?.tab;
+      if (tab) openSettings(tab);
+    };
+    window.addEventListener("chatcoder:open-settings-tab", onOpenTab);
+    return () => window.removeEventListener("chatcoder:open-settings-tab", onOpenTab);
+  }, [openSettings]);
+
   const leaveSettings = useCallback(() => {
     const target = returnLocation;
     // 问题1: 离开设置页恢复右面板展开态

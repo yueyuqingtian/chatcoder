@@ -19,6 +19,8 @@ from app.orchestration.approval_policy import (
     normalize_execution_mode,
 )
 from app.core.enums import MsgType, SenderType
+from app.orchestration.workflow.store import list_paused_workflows
+from app.orchestration.workflow.tools import append_workflow_tools
 from app.models.base import resolve_reasoning
 from app.orchestration.agent_events import (broadcast, broadcast_session_completed,
                                             broadcast_turn_updated)
@@ -40,6 +42,8 @@ logger = logging.getLogger(__name__)
 
 # 会话级运行锁（SQLite 串行写）
 _running_turns: set[int] = set()
+# 运行中 turn → 会话（工作流通知与“停止当前轮”暂停工作流据此定位会话）
+_running_turn_session: dict[int, int] = {}
 _cancel_events: dict[int, asyncio.Event] = {}
 _turn_managers: dict[int, object] = {}
 _turn_tasks: dict[int, asyncio.Task] = {}
@@ -680,6 +684,95 @@ async def _wakeup_turn_for_subagents(session_id: int) -> None:
         _subagent_wakeups.pop(session_id, None)
 
 
+# ── 工作流通知与唤醒（设计 §5.8）─────────────────────────
+# 工作流进入完成 / 失败 / 等待决定等关键状态时，主代理需要知道并向用户汇报。
+# 通知先入队，等会话空闲后统一送达（唤醒一轮）：同一时段的多条通知合并为一轮，
+# 当前轮未结束时等待，不会因为 turn 提前结束而丢失。
+WORKFLOW_WAKEUP_DELAY_SEC = 2.0
+WORKFLOW_WAKEUP_POLL_SEC = 1.0
+# 用户主动停止当前轮的来源（工作流据此暂停；回滚、内部取消不暂停）
+_USER_STOP_SOURCES = frozenset({"ws", "pet", "unknown"})
+_workflow_notes: dict[int, list[str]] = {}
+_workflow_wakeups: dict[int, asyncio.Task] = {}
+
+
+async def notify_workflow(session_id: int, text: str) -> None:
+    """工作流关键状态变化 → 主代理：入队，并在会话空闲后唤醒一轮送达。"""
+    _workflow_notes.setdefault(session_id, []).append(text)
+    existing = _workflow_wakeups.get(session_id)
+    if existing is not None and not existing.done():
+        return  # 已有唤醒在途：本条随该次唤醒一并送达
+    _workflow_wakeups[session_id] = asyncio.get_running_loop().create_task(
+        _wakeup_turn_for_workflow(session_id)
+    )
+
+
+async def _wakeup_turn_for_workflow(session_id: int) -> None:
+    from app.persistence.database import async_session_factory
+
+    try:
+        await asyncio.sleep(WORKFLOW_WAKEUP_DELAY_SEC)
+        while _session_turn_busy(session_id):
+            await asyncio.sleep(WORKFLOW_WAKEUP_POLL_SEC)
+        notes = _workflow_notes.pop(session_id, [])
+        if not notes:
+            return
+        prompt = "\n\n".join(notes)
+        async with async_session_factory() as db:
+            try:
+                session = await session_service.get_session(db, session_id)
+                if session is None:
+                    return
+                user_msg = await message_service.create_message(
+                    db, session_id=session_id,
+                    sender_type=SenderType.USER.value,
+                    msg_type=MsgType.TEXT.value,
+                    content={"text": prompt, "workflow_wakeup": True},
+                    broadcast=True,
+                )
+                turn_id_new = await turn_service.create_turn(
+                    db, session_id=session_id, user_message_id=user_msg.id,
+                )
+                await _patch_message(user_msg.id, turn_id=turn_id_new)
+                logger.info("[workflow] 唤醒 turn=%s session=%s", turn_id_new, session_id)
+
+                async def _run():
+                    async with async_session_factory() as s:
+                        try:
+                            await start_turn(s, turn_id=turn_id_new)
+                            await s.commit()
+                        except Exception:
+                            await s.rollback()
+                            logger.warning("[workflow] 唤醒 turn=%s 执行异常", turn_id_new, exc_info=True)
+                            try:
+                                await turn_service.update_turn_status(
+                                    s, turn_id_new, "failed", summary="唤醒轮执行异常", completed=True)
+                                await s.commit()
+                                await broadcast_turn_updated(session_id, turn_id_new, "failed")
+                            except Exception:
+                                pass
+
+                _turn_tasks[turn_id_new] = asyncio.get_event_loop().create_task(_run())
+            except Exception:
+                await db.rollback()
+                # 唤醒失败：通知退回队列，下一次通知到来时一并送达
+                _workflow_notes[session_id] = notes + _workflow_notes.get(session_id, [])
+                logger.warning("[workflow] 唤醒轮创建失败 session=%s", session_id, exc_info=True)
+    finally:
+        _workflow_wakeups.pop(session_id, None)
+
+
+async def _pause_workflows_on_stop(session_id: int) -> None:
+    try:
+        from app.orchestration.workflow import service as workflow_service
+
+        paused = await workflow_service.on_turn_stopped(session_id)
+        if paused:
+            logger.info("[workflow] 用户停止当前轮，已暂停 %d 个工作流 session=%s", paused, session_id)
+    except Exception:
+        logger.warning("[workflow] 停止当前轮时暂停工作流失败 session=%s", session_id, exc_info=True)
+
+
 async def _emit_goal_exhausted(db: AsyncSession, session_id: int, turn_id: int) -> None:
     """续跑轮次耗尽：落一条系统提示消息并广播 goal.stopped（幂等由调用方保证单次触发）。"""
     max_turns = settings.goal_max_continuation_turns
@@ -719,6 +812,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
     if turn_id in _running_turns:
         return {"ok": False, "error": "turn already running"}
     _running_turns.add(turn_id)
+    _running_turn_session[turn_id] = session_id
     cancel_event = _cancel_events.setdefault(turn_id, asyncio.Event())
     # v39: 会话运行计数——后台子代理终态据此判断会话是否空闲（空闲才唤醒）
     _session_turn_enter(session_id)
@@ -966,6 +1060,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             effective_model_id=effective_model_id,
             # plan-91-394: 中断可续跑的子代理清单（用户说“继续”时主代理据此续跑，而非重新派发）
             paused_subagents=await list_resumable_subagents(session.id),
+            paused_workflows=await list_paused_workflows(session.id),
         )
 
         # 命令模式：注入模式指令（/chat 只读、/plan 先规划后执行）。用户显式选择的
@@ -1040,6 +1135,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             explore_only=_mode_readonly,
             allowed=_subagent_allowed,
         )
+        tool_schemas = append_workflow_tools(tool_schemas, readonly_only=bool(_mode_readonly))
         # 3. 运行主代理
         # v10/v13: 会话级模型覆盖；同一模型也用于规划评估与拆分。
         from app.orchestration.subagent import get_subagent_manager
@@ -1333,6 +1429,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         raise
     finally:
         _running_turns.discard(turn_id)
+        _running_turn_session.pop(turn_id, None)
         _cancel_events.pop(turn_id, None)
         _turn_managers.pop(turn_id, None)
         discard_injected_inputs(turn_id)  # plan-547: 丢弃残留注入项
@@ -1386,6 +1483,10 @@ async def cancel_turn(turn_id: int, source: str = "unknown") -> bool:
         "[cancel] 收到停止信号 turn=%s source=%s 运行态(cancel_event=%s manager=%s main_task=%s) stack=%s",
         turn_id, source, ev is not None, manager is not None, main_task is not None, _stack,
     )
+    # 用户停止当前轮：会话内运行中的工作流暂停（保留进度，可由用户继续）
+    stopped_session = _running_turn_session.get(turn_id)
+    if source in _USER_STOP_SOURCES and stopped_session is not None:
+        asyncio.get_running_loop().create_task(_pause_workflows_on_stop(stopped_session))
     if ev is None and manager is None and main_task is None:
         # 非运行态也返回真实存在性，避免前端把不存在的 turn 当成已取消。
         from app.persistence.database import async_session_factory
@@ -1806,6 +1907,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         turn = await turn_service.get_turn(db, turn_id)
         if turn is None:
             return {"ok": False, "error": "turn not found"}
+        _running_turn_session[turn_id] = turn.session_id
         session = await session_service.get_session(db, turn.session_id)
         _session_id = session.id if session else turn.session_id
         # v39: 会话运行计数（同 start_turn）——后台子代理终态据此判断是否空闲唤醒。
@@ -1907,6 +2009,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             effective_model_id=effective_model_id,
             # plan-91-394: 中断可续跑的子代理清单（用户说“继续”时主代理据此续跑，而非重新派发）
             paused_subagents=await list_resumable_subagents(session.id),
+            paused_workflows=await list_paused_workflows(session.id),
         )
         # plan-19-82 增强（对齐 ZCode PLAN_MODE_EXIT_REMINDER）：确认执行是本会话中
         # 上下文形态切换最剧烈的一刻——规划阶段的对话被整篇方案文档替换，叠加 16000
@@ -1947,6 +2050,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             logger.warning("[engine] 确认执行路径 MCP 工具加载失败(非阻塞)", exc_info=True)
         _type_states = await load_subagent_type_states(db)
         main_tools = append_subagent_tools(main_tools, _type_states)
+        main_tools = append_workflow_tools(main_tools, readonly_only=False)
         mgr = get_subagent_manager(session.id)
         _turn_managers[turn_id] = mgr
         mgr.owner_active = True  # plan-91-394: 主代理 turn 存活期间允许子代理保活等待恢复
@@ -2067,6 +2171,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         return {"ok": False, "error": str(exc)}
     finally:
         _running_turns.discard(turn_id)
+        _running_turn_session.pop(turn_id, None)
         _cancel_events.pop(turn_id, None)
         _turn_managers.pop(turn_id, None)
         discard_injected_inputs(turn_id)  # plan-547: 丢弃残留注入项

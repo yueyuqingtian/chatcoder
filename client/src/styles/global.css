@@ -4777,11 +4777,18 @@ body.maximized .nav-cluster { padding-top: 8px; padding-left: 16px; height: calc
 
 /* v19: 子代理详情面板（右面板，复用消息流样式） */
 .subagent-panel { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-.subagent-panel-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
-.subagent-panel-name { font-size: 12px; font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subagent-panel-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+/* 名称占用剩余空间并可截断；元信息在窄宽度下截断，不挤压名称 */
+.subagent-panel-name { flex: 1 1 auto; min-width: 56px; font-size: 12px; font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .subagent-panel-status { font-size: 11px; color: var(--text-3); flex-shrink: 0; }
 /* v36 (plan-321-1600 M2): 头部元信息（用时 / 文件数 / 用量），以分隔线区分 */
-.subagent-panel-meta { font-size: 11px; color: var(--text-3); flex-shrink: 0; padding-left: 8px; border-left: 1px solid var(--border); }
+.subagent-panel-meta { font-size: 11px; color: var(--text-3); flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.subagent-panel-status + .subagent-panel-meta::before,
+.subagent-panel-meta + .subagent-panel-meta::before {
+  content: "·";
+  margin-right: 6px;
+  opacity: 0.6;
+}
 .subagent-panel-count { font-size: 11px; color: var(--text-3); margin-left: auto; flex-shrink: 0; }
 /* v20: 消息体交给共享 message-flow 插件（自身不滚动，滚动由插件容器承担） */
 .subagent-panel-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0; }

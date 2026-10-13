@@ -8,6 +8,7 @@ from app.gateway.schemas import (
     CompactionIndexOut, GoalOut, GoalSetBody, MessageOut, SessionCreate, SessionOut, SessionUpdate,
 )
 from app.orchestration.agent_events import broadcast
+from app.orchestration.workflow import store as workflow_store
 from app.persistence.database import get_db
 from app.services import compression_service, message_service, session_service, worktree_service
 
@@ -59,7 +60,12 @@ async def list_sessions(project_id: int | None = None, include_archived: bool = 
                         db: AsyncSession = Depends(get_db)):
     """会话列表；include_archived=true 时返回含归档会话（归档恢复面板用）。"""
     sessions = await session_service.list_sessions(db, project_id=project_id, include_archived=include_archived)
-    return [await _to_out(db, s) for s in sessions]
+    # 工作流状态按会话批量查询一次（侧栏标记），不逐个会话查询
+    states = await workflow_store.session_workflow_states([s.id for s in sessions])
+    out = [await _to_out(db, s) for s in sessions]
+    for item in out:
+        item.workflow_state = states.get(item.id)
+    return out
 
 
 @router.get("/{session_id}", response_model=SessionOut)
@@ -91,6 +97,10 @@ async def update_session(session_id: int, body: SessionUpdate, db: AsyncSession 
     )
     if result_status is None:
         raise HTTPException(404, "会话不存在")
+    if body.status == "archived":
+        from app.orchestration.workflow import service as workflow_service
+
+        await workflow_service.on_session_archived(session_id)
     session = await session_service.get_session(db, session_id)
     # v2.2 (对齐 zcode 3.11): 模型切换 divider——换模型时写一条 SYSTEM 分割消息
     if body.model_id is not None and old_model_id is not None and old_model_id != body.model_id:
@@ -119,6 +129,9 @@ async def delete_session(session_id: int, permanent: bool = False,
     永久删除会级联清理该会话的 messages/turns/tasks/agents/audit/rollback/会话记忆。
     """
     if permanent:
+        from app.orchestration.workflow import service as workflow_service
+
+        await workflow_service.on_session_deleted(session_id)
         result = await session_service.delete_session_permanent(db, session_id)
         if result is None:
             raise HTTPException(404, "会话不存在")
@@ -126,6 +139,9 @@ async def delete_session(session_id: int, permanent: bool = False,
     status = await session_service.update_session(db, session_id, status="archived")
     if status is None:
         raise HTTPException(404, "会话不存在")
+    from app.orchestration.workflow import service as workflow_service
+
+    await workflow_service.on_session_archived(session_id)
     return {"ok": True}
 
 

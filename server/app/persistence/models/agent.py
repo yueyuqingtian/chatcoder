@@ -15,6 +15,8 @@ class Agent(Base):
     session_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("sessions.id"))
     turn_id: Mapped[int | None] = mapped_column(BigInteger)  # 子代理归属 turn
     parent_agent_id: Mapped[int | None] = mapped_column(BigInteger)  # 主代理 id
+    # 工作流运行时：该子代理所属的工作流节点（workflow_nodes.id）；非工作流子代理为空
+    workflow_node_id: Mapped[int | None] = mapped_column(BigInteger)
     # idle/running/done/failed/terminated；paused = 中断后保留检查点、可由主代理续跑
     status: Mapped[str] = mapped_column(String(20), default="idle")
     # 断点续跑检查点：{messages: [ChatMessage dict...], spec: {运行参数}, saved_at}；完成后清空

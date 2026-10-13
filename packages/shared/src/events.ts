@@ -18,6 +18,14 @@ export interface WsEnvelope {
 
 // ── 服务端 → 客户端 ──
 
+/** 工作流事件载荷：服务端统一注入 run_id / node_key / run_seq，其余字段随事件类型变化 */
+export interface WorkflowEventPayload {
+  run_id: number;
+  node_key: string | null;
+  run_seq: number;
+  [key: string]: unknown;
+}
+
 export type ServerWsEvent =
   | { event: "message.created"; payload: { msg: Record<string, unknown> } }
   | { event: "turn.started"; payload: { turn_id: number; session_id?: number } }
@@ -147,6 +155,11 @@ export type ServerWsEvent =
   | { event: "subagent.pending"; payload: { session_id: number; pending: number } }
   /** v39: 子代理完成唤醒——服务端自动创建新 turn 送达完成报告（前端渲染分隔线） */
   | { event: "subagent.wakeup"; payload: { session_id: number; turn_id: number } }
+  /** 工作流运行时（设计 §5.7）：run_seq 为程序内序号，不是会话 seq；前端以快照为准，事件只作刷新信号 */
+  | { event: "workflow.run.updated"; payload: WorkflowEventPayload }
+  | { event: "workflow.node.updated"; payload: WorkflowEventPayload }
+  | { event: "workflow.gate.opened"; payload: WorkflowEventPayload }
+  | { event: "workflow.log.appended"; payload: WorkflowEventPayload }
   | { event: "error"; payload: { code?: string; message?: string } }
   /** 服务端对客户端请求的确认（approval/cancel/sync 等） */
   | { event: "ack"; payload: { ref: string; ok?: boolean; resolved?: boolean } }

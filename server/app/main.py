@@ -1,4 +1,5 @@
 """FastAPI 应用工厂（v2）。"""
+
 import os
 from contextlib import asynccontextmanager
 
@@ -37,6 +38,7 @@ from app.gateway.routers import (
     upload,
     usage,
     workbuddy_auth,
+    workflows,
     workspace,
 )
 from app.gateway.ws import ws_router
@@ -50,6 +52,7 @@ async def lifespan(app: FastAPI):
         from app.persistence.database import init_db, async_session_factory
         from app.persistence.migrations import run_migrations
         from app.persistence.seed import seed
+
         await init_db()
         # 幂等补列(与打包入口 run_server.py 保持一致)
         async with async_session_factory() as db:
@@ -60,7 +63,9 @@ async def lifespan(app: FastAPI):
             from app.persistence.models.agent import Agent
             from datetime import datetime, timezone
 
-            stale = list((await db.execute(select(Turn).where(Turn.status == "running"))).scalars().all())
+            stale = list(
+                (await db.execute(select(Turn).where(Turn.status == "running"))).scalars().all()
+            )
             if stale:
                 # 启动修复：running → interrupted / 任务 cancelled / agent terminated
                 # 经 WriteEngine 单写线程（无锁单写者；async db 仅读）
@@ -74,15 +79,19 @@ async def lifespan(app: FastAPI):
                         t.status = "interrupted"
                         t.summary = t.summary or "应用关闭时任务已停止"
                         t.completed_at = t.completed_at or datetime.now(timezone.utc).isoformat()
-                        rows = s.execute(select(Task).where(
-                            Task.turn_id == turn.id,
-                            Task.status.in_(["proposed", "pending", "running", "in_progress"]),
-                        ))
+                        rows = s.execute(
+                            select(Task).where(
+                                Task.turn_id == turn.id,
+                                Task.status.in_(["proposed", "pending", "running", "in_progress"]),
+                            )
+                        )
                         for task in rows.scalars().all():
                             if task.status != "cancelled":
                                 task.status = "cancelled"
                                 task.note = task.note or "应用关闭时任务已停止"
-                        agents = s.execute(select(Agent).where(Agent.turn_id == turn.id, Agent.status == "running"))
+                        agents = s.execute(
+                            select(Agent).where(Agent.turn_id == turn.id, Agent.status == "running")
+                        )
                         for agent in agents.scalars().all():
                             agent.status = "terminated"
                     s.commit()
@@ -105,6 +114,7 @@ async def lifespan(app: FastAPI):
             logging.getLogger(__name__).info("启动技能扫描完成: %s", _res)
         except Exception:  # noqa: BLE001
             import logging
+
             logging.getLogger(__name__).exception("启动技能扫描失败（不阻塞服务）")
 
         # plan-308-1542 修复：启动时自愈"git 侧已不存在、数据库仍登记"的失效工作树。
@@ -120,57 +130,90 @@ async def lifespan(app: FastAPI):
                 logging.getLogger(__name__).info("启动工作树自愈完成: %s", _res)
         except Exception:  # noqa: BLE001
             import logging
+
             logging.getLogger(__name__).exception("启动工作树自愈失败（不阻塞服务）")
 
         # plan-230-1144 M1.1: 启动定时任务调度循环（此前该表无任何消费者，任务永不执行）
         try:
             from app.services import scheduler_loop
+
             await scheduler_loop.start()
         except Exception:  # noqa: BLE001
             import logging
+
             logging.getLogger(__name__).exception("定时任务调度循环启动失败（不阻塞服务）")
         # plan-248-1258 M2.6: 启动 WorkBuddy 每日自动签到循环（打开软件后后台自动签到）
         try:
             from app.services import workbuddy_checkin
+
             await workbuddy_checkin.start()
         except Exception:  # noqa: BLE001
             import logging
+
             logging.getLogger(__name__).exception("WorkBuddy 自动签到循环启动失败（不阻塞服务）")
         # plan-248-1258 M3.1: 启动符号索引自动增量循环（已开启索引的工作区保持最新）
         try:
             from app.services import symbol_index_manager
+
             await symbol_index_manager.start()
         except Exception:  # noqa: BLE001
             import logging
+
             logging.getLogger(__name__).exception("符号索引自动增量循环启动失败（不阻塞服务）")
+        # 工作流运行时：启动恢复扫描（运行中的节点转为可续跑）+ 后台调度循环
+        try:
+            from app.orchestration.workflow import service as workflow_service
+
+            await workflow_service.start_background()
+        except Exception:  # noqa: BLE001
+            import logging
+
+            logging.getLogger(__name__).exception("工作流运行时启动失败（不阻塞服务）")
     except Exception as e:  # noqa: BLE001
         import logging
+
         logging.getLogger(__name__).exception("数据库初始化失败: %s", e)
     yield
+    # 工作流调度循环先停（在途节点随进程结束，下次启动由恢复扫描转为可续跑）
+    try:
+        from app.orchestration.workflow import service as workflow_service
+
+        await workflow_service.stop_background()
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).debug("shutdown workflow loop failed", exc_info=True)
     # plan-230-1144 M1.1: 先停调度循环，再排空写缓冲
     try:
         from app.services import scheduler_loop
+
         await scheduler_loop.stop()
     except Exception:
         import logging
+
         logging.getLogger(__name__).debug("shutdown scheduler loop failed", exc_info=True)
     # plan-248-1258 M2.6: 停止 WorkBuddy 自动签到循环
     try:
         from app.services import workbuddy_checkin
+
         await workbuddy_checkin.stop()
     except Exception:
         import logging
+
         logging.getLogger(__name__).debug("shutdown workbuddy checkin loop failed", exc_info=True)
     # plan-248-1258 M3.1: 停止符号索引自动增量循环
     try:
         from app.services import symbol_index_manager
+
         await symbol_index_manager.stop()
     except Exception:
         import logging
+
         logging.getLogger(__name__).debug("shutdown symbol index loop failed", exc_info=True)
     # 优雅关停：排空 write-behind 缓冲，避免未落库消息在进程退出时丢失。
     try:
         from app.persistence.write_behind import write_behind
+
         await write_behind.shutdown()
     except Exception:
         logging.getLogger(__name__).debug("shutdown drain write-behind failed", exc_info=True)
@@ -179,6 +222,7 @@ async def lifespan(app: FastAPI):
     # （Windows 无进程组级联退出），既占着命名管道也让下次启动连到旧实例。
     try:
         from app.core.desktop_env import shutdown_desktop_core
+
         await shutdown_desktop_core()
     except Exception:
         logging.getLogger(__name__).debug("shutdown desktop core failed", exc_info=True)
@@ -213,21 +257,29 @@ def create_app() -> FastAPI:
     # 统一错误响应（规范 §4.8）
     @app.exception_handler(StarletteHTTPException)
     async def http_exc_handler(request: Request, exc: StarletteHTTPException):
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"error": {"code": f"http_{exc.status_code}", "message": str(exc.detail)}},
-        )
+        error: dict = {"code": f"http_{exc.status_code}", "message": str(exc.detail)}
+        # 结构化的详情（例如工作流开始前的改动文件清单、模板的校验错误）原样保留，界面据此分支处理
+        if isinstance(exc.detail, (dict, list)):
+            error["detail"] = exc.detail
+        return JSONResponse(status_code=exc.status_code, content={"error": error})
 
     @app.exception_handler(RequestValidationError)
     async def validation_exc_handler(request: Request, exc: RequestValidationError):
         return JSONResponse(
             status_code=422,
-            content={"error": {"code": "validation_error", "message": "请求参数错误", "detail": exc.errors()}},
+            content={
+                "error": {
+                    "code": "validation_error",
+                    "message": "请求参数错误",
+                    "detail": exc.errors(),
+                }
+            },
         )
 
     @app.exception_handler(Exception)
     async def unhandled_exc_handler(request: Request, exc: Exception):
         import logging
+
         logging.getLogger("app").exception("未处理异常: %s", exc)
         return JSONResponse(
             status_code=500,
@@ -258,6 +310,8 @@ def create_app() -> FastAPI:
     app.include_router(settings_routes.router, prefix="/api", tags=["settings"])
     app.include_router(usage.router, prefix="/api", tags=["usage"])
     app.include_router(subagents.router, prefix="/api", tags=["subagents"])
+    app.include_router(workflows.router, prefix="/api", tags=["workflows"])
+    app.include_router(workflows.session_router, prefix="/api", tags=["workflows"])
     app.include_router(ta3_auth.router, prefix="/api", tags=["ta3"])
     app.include_router(workbuddy_auth.router, prefix="/api", tags=["workbuddy"])
     app.include_router(trae_auth.router, prefix="/api", tags=["trae"])
@@ -275,10 +329,12 @@ def create_app() -> FastAPI:
     async def health():
         # Electron 用稳定标识区分 ChatCoder 后端与同端口的其它本地服务。
         from app.persistence.database import database_info
+
         info = database_info()
         # plan-248-1273 M1: 诊断当前实际运行实例，避免 Electron 继续启动旧 exe/旧前端。
         try:
             from app.services import symbol_index_manager
+
             worker_info = symbol_index_manager.worker_diagnostics()
         except Exception:
             worker_info = {"mode": "legacy-thread", "workers": []}

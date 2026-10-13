@@ -13,7 +13,7 @@
 import { create } from "zustand";
 import { applyPaneUpdate } from "../perf/paneTransition";
 
-export type PanelTabId = "task-summary" | "browser" | "terminal" | "files" | "subagent" | "debug";
+export type PanelTabId = "task-summary" | "browser" | "terminal" | "files" | "subagent" | "debug" | "workflow";
 export interface PanelTab {
   id: PanelTabId;
   instance: number;

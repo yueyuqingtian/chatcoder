@@ -4,12 +4,132 @@
  * 头部显示状态文案（执行中/已完成/失败），对齐消息流子代理卡片图标体系。
  */
 import { useEffect, useState } from "react";
+import { api, type WorkflowAttemptOut } from "../../api/client";
+import { AttemptHistory } from "../workflow/WorkflowPanel";
+import { IssueList } from "../workflow/WorkflowGate";
 import { subscribeTick } from "../chat/useRunningTicker";
 import { useChatStore } from "../../store/chat";
 import { PluginSlot } from "../../plugins/registry";
 import { parseUtc } from "../../utils/time";
 import { IconCpu, IconSpinner, IconCheck, IconX } from "../icons";
-import { Empty } from "../ui";
+import { Button, Empty, Textarea } from "../ui";
+import type { WorkflowNodeBrief } from "../../api/client";
+
+/** 评估结论的展示文案（只用于节点头；颜色由 data-verdict 决定） */
+const VERDICT_LABEL: Record<string, string> = {
+  pass: "评估通过",
+  rework: "评估要求返工",
+  escalate: "需要你决定",
+};
+
+/** 工作流节点头：所属程序 › 子工作流 › 节点，尝试次数、模式、返工与评估结论；
+ * 产出按节点类型展示（探索的计划、实现的验证、评估的问题），尝试记录可展开（设计 §7.6）。
+ */
+function WorkflowNodeHead({ wf }: { wf: WorkflowNodeBrief }) {
+  const trail = [wf.program_title, wf.flow_title, wf.node_title].filter(Boolean).join(" › ");
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [attempts, setAttempts] = useState<WorkflowAttemptOut[] | null>(null);
+  const canHistory = wf.program_id != null && !!wf.flow_key;
+  const canNote = canHistory && (wf.status === "running" || wf.status === "recovering");
+  const [note, setNote] = useState("");
+  const [sendingNote, setSendingNote] = useState(false);
+  const [noteState, setNoteState] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
+  const plan = wf.detail?.plan ?? [];
+  const verification = wf.detail?.verification ?? [];
+  const issues = wf.detail?.issues ?? [];
+
+  useEffect(() => {
+    if (!historyOpen || !canHistory || attempts !== null || wf.program_id == null) return;
+    let cancelled = false;
+    void api.workflowNodeAttempts(wf.program_id, wf.flow_key, wf.node_key)
+      .then((rows) => { if (!cancelled) setAttempts(rows); })
+      .catch(() => { if (!cancelled) setAttempts([]); });
+    return () => { cancelled = true; };
+  }, [historyOpen, canHistory, attempts, wf.program_id, wf.flow_key, wf.node_key]);
+
+  return (
+    <div className="subagent-wf-head" aria-label="工作流节点">
+      <span className="subagent-wf-trail">{trail}</span>
+      <span className="subagent-wf-chips">
+        <span className="subagent-wf-chip">第 {Math.max(1, wf.attempt_no)} 次尝试</span>
+        {wf.mode && <span className="subagent-wf-chip">{wf.mode}</span>}
+        {wf.rework_round > 0 && <span className="subagent-wf-chip">返工 {wf.rework_round} 次</span>}
+        {wf.verdict && (
+          <span className="subagent-wf-chip" data-verdict={wf.verdict}>{VERDICT_LABEL[wf.verdict] ?? wf.verdict}</span>
+        )}
+      </span>
+      {wf.summary && <p className="subagent-wf-summary">{wf.summary}</p>}
+      {plan.length > 0 && (
+        <div className="subagent-wf-section">
+          <span className="subagent-wf-section-title">计划</span>
+          <ol className="subagent-wf-list">{plan.map((item, i) => <li key={i}>{item}</li>)}</ol>
+        </div>
+      )}
+      {verification.length > 0 && (
+        <div className="subagent-wf-section">
+          <span className="subagent-wf-section-title">验证</span>
+          <ul className="subagent-wf-list">{verification.map((item, i) => <li key={i}>{item}</li>)}</ul>
+        </div>
+      )}
+      {issues.length > 0 && (
+        <div className="subagent-wf-section">
+          <span className="subagent-wf-section-title">评估问题</span>
+          <IssueList issues={issues} limit={3} />
+        </div>
+      )}
+      {canNote && (
+        <form
+          className="subagent-wf-note"
+          onSubmit={async (event) => {
+            event.preventDefault();
+            const text = note.trim();
+            if (!text || sendingNote || wf.program_id == null) return;
+            setSendingNote(true);
+            setNoteState(null);
+            try {
+              await api.addWorkflowNodeNote(wf.program_id, wf.flow_key, wf.node_key, text);
+              setNote("");
+              setNoteState({ tone: "ok", text: "已加入，下一步生效" });
+            } catch (err) {
+              setNoteState({ tone: "error", text: err instanceof Error ? err.message : "发送失败" });
+            } finally {
+              setSendingNote(false);
+            }
+          }}
+        >
+          <label className="subagent-wf-note-label" htmlFor={`wf-note-${wf.node_id}`}>补充说明（下一步生效）</label>
+          <div className="subagent-wf-note-row">
+            <Textarea
+              id={`wf-note-${wf.node_id}`}
+              rows={2}
+              value={note}
+              disabled={sendingNote}
+              placeholder="例如：这个接口需要先做余额校验"
+              onChange={(e) => setNote(e.target.value)}
+            />
+            <Button type="submit" variant="secondary" size="xs" disabled={!note.trim() || sendingNote}>
+              发送
+            </Button>
+          </div>
+          {noteState && (
+            <span className="subagent-wf-note-state" data-tone={noteState.tone} role="status">{noteState.text}</span>
+          )}
+        </form>
+      )}
+      {canHistory && (
+        <button
+          type="button"
+          className="subagent-wf-history-toggle"
+          aria-expanded={historyOpen}
+          onClick={() => setHistoryOpen((v) => !v)}
+        >
+          {historyOpen ? "收起尝试记录" : `尝试记录 · ${Math.max(1, wf.attempt_no)} 次`}
+        </button>
+      )}
+      {canHistory && historyOpen && <AttemptHistory attempts={attempts} />}
+    </div>
+  );
+}
 
 export function SubagentPanel({ threadId, agentName, visible = true }: {
   threadId?: number;
@@ -48,6 +168,7 @@ export function SubagentPanel({ threadId, agentName, visible = true }: {
 
   return (
     <div className="subagent-panel">
+      {meta?.workflow && <WorkflowNodeHead wf={meta.workflow} />}
       <div className="subagent-panel-head">
         <span className="tc-icon"><IconCpu size={13} /></span>
         <span className="subagent-panel-name">{agentName || meta?.name || `子代理 #${threadId}`}</span>
