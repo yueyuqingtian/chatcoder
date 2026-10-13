@@ -6,9 +6,9 @@
  *
  * 交互（全部是指针跟手，静止即停）：
  *  · 整枚徽章 3D 微倾 + 一层高光随指针移动；插画三层按景深视差；嗒嗒的眼睛看向指针；
- *  · 悬停 / 键盘聚焦才出现浮签（今天这件事的说明 + 示例对话）；
+ *  · 悬停 / 键盘聚焦、且徽章上方放得下时才出现浮签（今天这件事的说明 + 示例对话）；
  *  · 浮签挂在 body 下、用 fixed 定位，不会被首页滚动容器裁切，恒浮在徽章上方：上方放得下时首页为它
- *    预留空间（卡片与热力图下移），放不下则叠在卡片上缘，水平方向钳制在首页可视区内；
+ *    预留空间（卡片与热力图下移），放不下则整张隐藏、绝不叠在卡片上；水平方向钳制在首页可视区内；
  *  · 点击换下一枚（绕竖轴翻转），下方圆点同样可切换；一天一枚，刷新不换。
  * 减弱动效档：不做倾斜 / 视差 / 翻转，只保留淡入淡出。 */
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
@@ -104,10 +104,13 @@ export function BadgeHero() {
   const [idx, setIdx] = useState(() => todayBadgeIndex());
   const [phase, setPhase] = useState<"idle" | "out" | "in">("idle");
   const [look, setLook] = useState({ x: 0, y: 0 });
-  /** 悬停（指针在徽章组上）与键盘聚焦（focus-visible）分开记，任一为真即显示浮签 */
+  /** 悬停（指针在徽章组上）与键盘聚焦（focus-visible）分开记 */
   const [hover, setHover] = useState(false);
   const [kbd, setKbd] = useState(false);
-  const open = hover || kbd;
+  /** 徽章上方放得下浮签（由 measureRoom 量得）。放不下时浮签整张隐藏，不叠在卡片上 */
+  const [room, setRoom] = useState(false);
+  /** 浮签显示条件：悬停或键盘聚焦任一为真，且上方放得下 */
+  const open = (hover || kbd) && room;
   const wrapRef = useRef<HTMLDivElement>(null);
   const badgeRef = useRef<HTMLButtonElement>(null);
   const noteRef = useRef<HTMLDivElement>(null);
@@ -119,7 +122,7 @@ export function BadgeHero() {
   useEffect(() => () => { timers.current.forEach((t) => window.clearTimeout(t)); }, []);
 
   /** 浮签定位：恒在徽章上方（不翻到下方），水平钳制在首页可视区内。
-   *  上方的空间由 measureRoom 预留；预留不下时浮签上缘贴住可视区上缘，叠在卡片上缘。
+   *  上方的空间由 measureRoom 预留；预留不下时浮签根本不打开（见 open），这里的钳制只作兜底。
    *  可视区 = 首页滚动容器 .es-hero（它的边缘就是裁切线）；拿不到时退回视口。
    *  浮签 fixed 定位在 body 下，位置在打开、换枚、滚动、缩放时重算。 */
   const placeNote = () => {
@@ -140,7 +143,7 @@ export function BadgeHero() {
   };
 
   /** 首页留白：徽章上方放得下浮签时，预留「浮签高度 + 间距」，卡片、标语、热力图随之整体下移。
-   *  判据：不含预留的内容高度 + 预留 ≤ 首页可用高度。放不下则不预留，浮签叠在卡片上缘（见 placeNote）。
+   *  判据：不含预留的内容高度 + 预留 ≤ 首页可用高度。放不下则不预留，同时 room 置假，浮签整张隐藏（见 open）。
    *  判据刻意不读取预留本身：徽章包裹层带 transition，写入 margin 后立即读取会拿到过渡起点的值，
    *  决定会随读取时机摇摆；这里只累加其余内容的高度与间距，结果与当前是否预留无关。
    *  预留量写在徽章包裹层的 --note-slot 上（margin-top），不改变悬停区域。 */
@@ -162,7 +165,9 @@ export function BadgeHero() {
     const hcs = getComputedStyle(hero);
     const avail = hero.clientHeight - (parseFloat(hcs.paddingTop) || 0) - (parseFloat(hcs.paddingBottom) || 0);
     const need = note.offsetHeight + NOTE_GAP;
-    wrap.style.setProperty("--note-slot", content + need <= avail + 1 ? `${need}px` : "0px");
+    const fits = content + need <= avail + 1;
+    wrap.style.setProperty("--note-slot", fits ? `${need}px` : "0px");
+    setRoom(fits);
   }, []);
 
   // 换枚（浮签文字变化）与首页视口尺寸变化后重算预留；须先于定位执行，定位才基于新的徽章位置
