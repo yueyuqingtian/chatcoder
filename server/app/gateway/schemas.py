@@ -105,6 +105,8 @@ class SessionOut(BaseModel):
     fork_parent_id: int | None = None
     worktree_path: str | None = None
     has_running: bool = False
+    # 侧栏工作流标记：attention（待你决定）/ paused / running / draft；无进行中的工作流时为 None
+    workflow_state: str | None = None
     has_interrupted_turn: bool = False
     last_activity_at: str | None = None  # 最近一条消息时间（侧栏相对时间展示）
     # 运行中 turn 的开始时间——侧栏「执行中任务」的稳定排序键（无运行中 turn 时为 None）
@@ -944,6 +946,13 @@ WS_EVENT_PAYLOAD_MODELS: dict[str, type[WsEventPayload]] = {
     "subagent.pending": WsEventPayload,
     "subagent.wakeup": WsEventPayload,
     "subagent.failed": WsEventPayload,
+    # 工作流运行时（设计 §5.7）：运行 / 节点 / 闸门 / 日志；payload.run_seq 为程序内序号
+    "workflow.run.updated": WsEventPayload,
+    "workflow.node.updated": WsEventPayload,
+    "workflow.gate.opened": WsEventPayload,
+    "workflow.log.appended": WsEventPayload,
+    "workflow.conflict.detected": WsEventPayload,
+    "workflow.conflict.resolved": WsEventPayload,
     "error": EvError,
     "ack": WsEventPayload,
     "sync.response": WsEventPayload,

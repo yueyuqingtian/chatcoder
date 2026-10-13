@@ -9,13 +9,12 @@ import { useChatStore } from "../store/chat";
 import { usePanelStore } from "../store/panel";
 import { useI18n } from "../store/i18n";
 import { ConfirmDialog } from "./ConfirmDialog";
-import { AppLogo } from "./AppLogo";
 import { Input } from "./ui";
 import {
   IconMinus, IconSquare, IconX, IconFolder,
   IconGitBranch, IconTerminal,
-  IconMoreHorizontal, IconPanelLeft, IconPanelRight,
-  IconChevronLeft, IconChevronRight, IconChevronDown, IconCheck,
+  IconMoreHorizontal, IconPanelRight,
+  IconChevronDown, IconCheck,
   IconBrandExplorer, IconBrandVSCode, IconBrandIdea, IconBrandWindowsTerminal,
   IconPencil, IconArchive, IconTrash,
 } from "./icons";
@@ -34,14 +33,13 @@ interface TitleBarProps {
   /** plan-41-233：页面态（拓展/定时任务/设置等 nav 页）——不展示会话标题与右侧图标组；
    *  左侧 logo/折叠/前进后退属导航控件，**始终保留**（用户反馈：这组不能被页面态隐藏）。 */
   page?: boolean;
-  onToggleLeft: () => void;
+  /** 兼容插件槽位契约：左侧导航控件已提到 WindowNavCluster，标题栏不再使用这两个回调 */
+  onToggleLeft?: () => void;
   onToggleRight: () => void;
-  /** plan-41-233：点击前进/后退时通知外部「进入会话视图」（退出 nav 页）。
-   *  否则在页面态点箭头会切会话但内容区仍停在 nav 页，按钮看起来没反应。 */
   onSessionFocus?: () => void;
 }
 
-export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page = false, onToggleLeft, onToggleRight, onSessionFocus }: TitleBarProps) {
+export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page = false, onToggleRight }: TitleBarProps) {
   const { t } = useI18n();
   // plan-41-233：裸态 = 设置页 ∪ 页面态——仅约束「会话标题 / 项目 chip / 右侧图标组」；
   // 左侧 logo/折叠/前进后退不在其内（用户要求保留）。
@@ -68,12 +66,6 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page
   const menuRef = useRef<HTMLDivElement>(null);
   const folderMenuRef = useRef<HTMLDivElement>(null);
 
-  // 会话前进/后退历史（共享 store 栈；侧栏展开时在侧栏头部展示，折叠时移到这里）
-  const sessionHist = useChatStore((s) => s.sessionHist);
-  const sessionHistIdx = useChatStore((s) => s.sessionHistIdx);
-  const histGo = useChatStore((s) => s.histGo);
-  const canBack = sessionHistIdx > 0;
-  const canForward = sessionHistIdx >= 0 && sessionHistIdx < sessionHist.length - 1;
 
   useEffect(() => {
     if (!menuOpen && !folderMenuOpen) return;
@@ -159,22 +151,9 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page
     <div
       className={`titlebar${leftCollapsed ? " left-collapsed" : ""}`}
     >
-      <div className="titlebar-left">
-        {/* 侧栏折叠时：logo 与前进/后退 + 展开按钮移到标题栏左侧（展开态折叠入口在侧栏头部）。
-            plan-41-233：这组导航控件不随页面态/设置页隐藏——用户明确要求保留。 */}
-        {leftCollapsed && (
-          <>
-            <AppLogo size={20} className="sb-logo-img" />
-            {/* plan-234-1171 R6: 传 open 让图标随状态变形态（展开=实心块 / 折叠=虚线空框），
-                此前未传导致图标在面板开合后外观毫无变化。 */}
-            <button className="titlebar-btn collapsed" onClick={onToggleLeft} title={t("sidebar.expand_tip")}>
-              <IconPanelLeft size={15} open={false} />
-            </button>
-            <button className="sb-nav-arrow" disabled={!canBack} onClick={() => { histGo(-1); onSessionFocus?.(); }} title={t("sidebar.history_back")}><IconChevronLeft size={15} /></button>
-            <button className="sb-nav-arrow" disabled={!canForward} onClick={() => { histGo(1); onSessionFocus?.(); }} title={t("sidebar.history_forward")}><IconChevronRight size={15} /></button>
-          </>
-        )}
-      </div>
+      {/* plan-128-518：logo / 折叠 / 前进后退已提到 App 层的 WindowNavCluster（全局固定，折叠不再换 DOM）；
+          折叠态下这里只给它留一段固定宽度，会话标题随中间面板一起左移到它右侧。 */}
+      <div className="titlebar-left" aria-hidden />
 
       <div className="titlebar-workspace">
         {bare ? (

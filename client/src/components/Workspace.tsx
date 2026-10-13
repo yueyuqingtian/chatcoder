@@ -8,6 +8,7 @@
 import type { NavKey } from "./Sidebar";
 import { useMemo } from "react";
 import { ChatPanel } from "./ChatPanel";
+import { WorkflowConfirmHost } from "./workflow/WorkflowActions";
 import { ScheduledPage } from "./NavPages";
 import { MarketPanel } from "./settings/MarketPanel";
 import { useChatStore } from "../store/chat";
@@ -61,6 +62,8 @@ export function Workspace({ nav, onSessionStart }: {
       <PageTransition id={currentSessionId ?? 0} className="ws-body">
         <ChatPanel />
       </PageTransition>
+      {/* 工作流确认弹层：会话期间只挂载这一处，卡片、胶囊与右侧面板共用同一份确认状态 */}
+      <WorkflowConfirmHost />
     </main>
   );
 }

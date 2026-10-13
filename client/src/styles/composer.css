@@ -174,18 +174,19 @@
 .cc-ws-pop { width: 340px; }
 
 /* 思考深度：分档滑块（参考图6） */
-.cc-effort-pop { width: 312px; }
-.cc-effort-head { display: flex; align-items: center; gap: var(--sp-3); padding: 8px 10px 0; }
+/* plan-128-518：弹窗缩到 240px，标题行 + 带端点的滑块行 + 一行次要操作，不再显示刻度名与“推荐” */
+.cc-effort-pop { width: 240px; padding-bottom: 6px; }
+.cc-effort-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-3); padding: 10px 14px 0; }
 .cc-effort-title { font-size: 13px; color: var(--text-2); }
 .cc-effort-value { font-size: 14px; font-weight: 600; color: var(--text-1); }
-.cc-effort-help { margin-left: auto; display: inline-flex; color: var(--text-3); cursor: help; border-radius: var(--r-pill); }
-.cc-effort-ends { display: flex; justify-content: space-between; padding: 10px 12px 8px; font-size: 11.5px; color: var(--text-3); }
-/* 分档滑块本体见 overlay.css 的 .ui-step*；这里只定它在浮窗里的边距 */
-.cc-effort-pop .ui-step { margin: 0 12px 2px; }
+.cc-effort-slider { display: flex; align-items: center; gap: var(--sp-3); padding: 8px 14px 4px; }
+.cc-effort-slider .ui-step { flex: 1 1 auto; min-width: 0; }
+.cc-effort-end { flex: none; font-size: 11px; color: var(--text-3); }
+.cc-effort-manage { display: flex; align-items: center; justify-content: center; gap: 6px; width: calc(100% - 12px); margin: 4px 6px 0; height: 28px; border: 0; border-radius: var(--r-md); background: transparent; font: inherit; font-size: 12px; color: var(--text-3); cursor: pointer; transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard); }
+.cc-effort-manage:hover { background: var(--bg-hover); color: var(--text-1); }
 /* 档位名切换：新值从下方轻轻升起（key 随档位变化重挂载，动画自动重放） */
 .cc-effort-value { display: inline-block; animation: cc-effort-swap var(--dur-spring) var(--spring-soft) both; }
 @keyframes cc-effort-swap { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
-.cc-effort-manage .pop-item-desc { white-space: normal; }
 
 /* ── 引用 / 附件 chips：胶囊 + 按类型着色 ──────────────── */
 .composer-refs { gap: 6px; padding: 0 0 8px; }
@@ -263,8 +264,9 @@
 .cc-queue-item.is-flushing .cc-queue-ops { opacity: 1; }
 
 /* 目标胶囊（输入卡内顶部）：与引用 chips 同一胶囊语言 */
-.goal-pill { height: 28px; padding: 0 4px 0 6px; margin: 0 0 8px; border: none; background: color-mix(in oklab, var(--success) 9%, transparent); }
-.goal-pill-label { padding: 2px 8px; background: color-mix(in oklab, var(--success) 16%, transparent); color: var(--success); font-weight: 600; }
+/* plan-128-518：目标胶囊配色改走 --accent，随主题世界变化（此前固定绿色） */
+.goal-pill { height: 28px; padding: 0 4px 0 6px; margin: 0 0 8px; border: none; background: color-mix(in oklab, var(--accent) 9%, transparent); }
+.goal-pill-label { padding: 2px 8px; background: color-mix(in oklab, var(--accent) 16%, transparent); color: var(--accent); font-weight: 600; }
 .goal-pill-btn { width: 22px; height: 22px; }
 
 /* 窄面板收档：useToolbarFit 按工具条宽度写入 data-fit（空格分隔的已收起项），
@@ -305,48 +307,68 @@
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 2px;
-  max-width: min(560px, 80vw);
-  padding: 3px;
-  border: 1px solid var(--border);
+  gap: 4px;
+  max-width: min(640px, calc(100% - 16px));
+  padding: 4px;
+  border: 1px solid var(--border-light);
   border-radius: var(--r-pill);
-  background: var(--color-popover);
-  box-shadow: var(--shadow-xs);
+  background: color-mix(in oklab, var(--color-popover) 92%, transparent);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
   color: var(--text-2);
   font-size: 12.5px;
   transition: box-shadow var(--dur-2) var(--ease-standard);
 }
 .tcap:hover { box-shadow: var(--shadow-sm); }
 .tcap::before { content: ""; position: absolute; left: 0; right: 0; bottom: 100%; height: 10px; }
-.tcap-seg-wrap { position: relative; display: inline-flex; min-width: 0; }
+.tcap-seg-wrap { position: relative; display: inline-flex; align-items: center; gap: 4px; min-width: 0; flex-shrink: 0; }
+/* 只有任务段的标题可以被压缩（省略号），其它段整段保留，避免按比例挤压后内容被裁切 */
+.tcap-seg-wrap.is-shrinkable { flex-shrink: 1; }
 .tcap-seg {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   min-width: 0;
-  height: 22px;
-  padding: 0 9px 0 7px;
+  height: 26px;
+  padding: 0 10px 0 8px;
   border: none;
   border-radius: var(--r-pill);
   background: transparent;
   color: inherit;
   font: inherit;
   cursor: pointer;
-  transition: background var(--dur-2) var(--ease-standard);
+  transition: background var(--dur-2) var(--ease-standard), transform var(--dur-spring) var(--spring-bouncy);
 }
 .tcap-seg:hover { background: var(--bg-hover); }
+.tcap-seg:active { transform: scale(0.97); }
 /* 聚焦 / 展开不改底色（#3） */
 .tcap-seg:focus, .tcap-seg:focus-visible, .tcap-seg.is-open { outline: none; }
 .tcap-seg:focus-visible, .tcap-seg.is-open:not(:hover) { background: transparent; }
-.tcap-seg > svg { flex-shrink: 0; color: var(--text-3); }
-.tcap-num { flex-shrink: 0; color: var(--text-1); font-weight: 600; font-variant-numeric: tabular-nums; }
-.tcap-title { min-width: 0; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); }
-.tcap-caret { transition: transform var(--dur-spring) var(--spring-snappy); }
+.tcap-seg > svg { flex-shrink: 0; color: var(--accent); }
+.tcap-num { flex-shrink: 0; font-size: 12px; color: var(--text-1); font-weight: 600; font-variant-numeric: tabular-nums; }
+.tcap-title { min-width: 0; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+/* 工作流段的状态文案：小圆点 + 文字；颜色只是辅助，文案本身已说明状态 */
+.tcap-state { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 160px; color: var(--text-2); white-space: nowrap; }
+.tcap-state::before { content: ""; flex-shrink: 0; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.tcap-state-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tcap-state[data-tone="info"] { color: var(--info); }
+.tcap-state[data-tone="warning"] { color: var(--warning); }
+.tcap-state[data-tone="danger"] { color: var(--error); }
+.tcap-state[data-tone="success"] { color: var(--success); }
+.tcap-more { flex-shrink: 0; padding: 0 2px; font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; cursor: default; }
+.tcap-resume { flex-shrink: 0; margin-right: 2px; }
+.tcap-caret { flex-shrink: 0; color: var(--text-3); transition: transform var(--dur-spring) var(--spring-snappy); }
 .tcap-seg.is-open .tcap-caret { transform: rotate(180deg); }
 .tcap-diff { display: inline-flex; gap: 4px; flex-shrink: 0; font-variant-numeric: tabular-nums; font-size: 12px; }
 .tcap-diff .add { color: var(--success); }
 .tcap-diff .del { color: var(--error); }
-.tcap-divider { width: 1px; height: 14px; margin: 0 2px; flex-shrink: 0; background: var(--border); }
+/* 窄宽：胶囊随所在面板收窄，按优先级让出空间——先隐去段名与“+N”，再隐去增删统计；标题与状态文案可省略 */
+.tcap-wrap { container-type: inline-size; }
+@container (max-width: 560px) {
+  .tcap-seg-word, .tcap-more { display: none; }
+}
+@container (max-width: 400px) {
+  .tcap-diff, .tcap-state { display: none; }
+}
 
 /* 浮层：标准浮层规格（圆角 14 / 内边距 6），在胶囊正上方居中 */
 .tcap-pop {
@@ -362,10 +384,10 @@
   max-width: min(420px, 86vw);
   max-height: 340px;
   padding: var(--pop-pad);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-light);
   border-radius: var(--r-pop);
   background: var(--color-popover);
-  box-shadow: var(--shadow-pop);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.1);
   transform-origin: 50% 100%;
   cursor: default;
   --pop-dy: 6px;
@@ -393,7 +415,7 @@
   scrollbar-color: var(--border-strong) transparent;
 }
 /* 步骤行：状态图标 + 标题 + 备注 */
-.tcap-step { display: flex; align-items: center; gap: 9px; min-height: 30px; padding: 4px 10px; border-radius: var(--r-ctl); font-size: 12.5px; color: var(--text-2); }
+.tcap-step { display: flex; align-items: center; gap: 9px; min-height: 30px; padding: 4px 10px; border-radius: var(--r-ctl); font-size: 12.5px; color: var(--text-2); transition: background var(--dur-2) var(--ease-standard); }
 .tcap-step:hover { background: var(--bg-hover); }
 .tcap-step-title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tcap-step.is-running .tcap-step-title { color: var(--text-1); font-weight: 500; }

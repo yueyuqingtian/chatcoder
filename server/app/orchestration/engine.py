@@ -19,6 +19,8 @@ from app.orchestration.approval_policy import (
     normalize_execution_mode,
 )
 from app.core.enums import MsgType, SenderType
+from app.orchestration.workflow.store import list_paused_workflows
+from app.orchestration.workflow.tools import append_workflow_tools
 from app.models.base import resolve_reasoning
 from app.orchestration.agent_events import (broadcast, broadcast_session_completed,
                                             broadcast_turn_updated)
@@ -26,7 +28,9 @@ from app.orchestration.agent_loop import run_agent_loop
 from app.orchestration.context_manager import (
     _collect_plan_history, build_main_context, build_subagent_context,
 )
-from app.orchestration.subagent import cleanup, get_subagent_manager
+from app.orchestration.subagent import (
+    cleanup, get_subagent_manager, list_resumable_subagents, resume_subagent,
+)
 from app.orchestration.subagent_tools import (
     SUBAGENT_TOOL_NAMES, append_subagent_tools, load_subagent_type_states,
 )
@@ -38,6 +42,8 @@ logger = logging.getLogger(__name__)
 
 # 会话级运行锁（SQLite 串行写）
 _running_turns: set[int] = set()
+# 运行中 turn → 会话（工作流通知与“停止当前轮”暂停工作流据此定位会话）
+_running_turn_session: dict[int, int] = {}
 _cancel_events: dict[int, asyncio.Event] = {}
 _turn_managers: dict[int, object] = {}
 _turn_tasks: dict[int, asyncio.Task] = {}
@@ -473,6 +479,12 @@ def _goal_active(session) -> bool:
     return settings.goal_mode_enabled and (getattr(session, "goal_status", None) or "none") == "active"
 
 
+def _visible_goal_tool(model) -> str:
+    """plan-128-518: 目标完成工具在模型侧的可见名（ta3 模型为伪装名 CompleteGoal，其余为 goal_complete）。"""
+    from app.models.providers.ta3_tool_aliases import visible_tool_name
+    return visible_tool_name("goal_complete", getattr(model, "api_format", "") == "ta3")
+
+
 def _should_continue_goal(session, final_status: str, cancel_event: asyncio.Event) -> bool:
     """turn 完成后的续跑判定：目标激活 + 正常完成 + 轮次未耗尽 + 未被取消。"""
     return (
@@ -534,12 +546,22 @@ async def _continue_goal_turn(session_id: int, prev_turn_id: int) -> None:
             max_turns = settings.goal_max_continuation_turns
             next_n = (session.goal_turns_used or 0) + 1
             todo_summary = await _goal_todo_summary(db, session_id)
+            # plan-128-518: 续跑提示里的工具名同样按模型可见名（ta3 伪装层）引用
+            _goal_tool = "goal_complete"
+            try:
+                from app.persistence.models.model_reg import Model as _Model
+                _mid = getattr(session, "model_id", None)
+                if _mid:
+                    _goal_tool = _visible_goal_tool(await db.get(_Model, _mid))
+            except Exception:
+                logger.debug("[goal] 解析续跑模型失败，沿用真实工具名", exc_info=True)
             prompt = (
                 "[系统提醒] 会话目标尚未完成，请继续朝目标推进。\n\n"
                 f"当前目标：{session.goal_text}\n"
                 f"已自动续跑：{next_n}/{max_turns} 轮\n\n"
                 f"{todo_summary}"
-                "继续执行剩余工作；若目标已实际达成，请调用 goal_complete 工具标记完成并给出总结。"
+                "继续执行剩余工作。声称完成前先做完成审计：对照目标逐条核验证据（运行测试、读取结果）；"
+                f"若目标已实际达成，请调用 {_goal_tool} 工具标记完成并给出总结；未达成就继续推进。"
             )
             user_msg = await message_service.create_message(
                 db, session_id=session_id,
@@ -662,6 +684,95 @@ async def _wakeup_turn_for_subagents(session_id: int) -> None:
         _subagent_wakeups.pop(session_id, None)
 
 
+# ── 工作流通知与唤醒（设计 §5.8）─────────────────────────
+# 工作流进入完成 / 失败 / 等待决定等关键状态时，主代理需要知道并向用户汇报。
+# 通知先入队，等会话空闲后统一送达（唤醒一轮）：同一时段的多条通知合并为一轮，
+# 当前轮未结束时等待，不会因为 turn 提前结束而丢失。
+WORKFLOW_WAKEUP_DELAY_SEC = 2.0
+WORKFLOW_WAKEUP_POLL_SEC = 1.0
+# 用户主动停止当前轮的来源（工作流据此暂停；回滚、内部取消不暂停）
+_USER_STOP_SOURCES = frozenset({"ws", "pet", "unknown"})
+_workflow_notes: dict[int, list[str]] = {}
+_workflow_wakeups: dict[int, asyncio.Task] = {}
+
+
+async def notify_workflow(session_id: int, text: str) -> None:
+    """工作流关键状态变化 → 主代理：入队，并在会话空闲后唤醒一轮送达。"""
+    _workflow_notes.setdefault(session_id, []).append(text)
+    existing = _workflow_wakeups.get(session_id)
+    if existing is not None and not existing.done():
+        return  # 已有唤醒在途：本条随该次唤醒一并送达
+    _workflow_wakeups[session_id] = asyncio.get_running_loop().create_task(
+        _wakeup_turn_for_workflow(session_id)
+    )
+
+
+async def _wakeup_turn_for_workflow(session_id: int) -> None:
+    from app.persistence.database import async_session_factory
+
+    try:
+        await asyncio.sleep(WORKFLOW_WAKEUP_DELAY_SEC)
+        while _session_turn_busy(session_id):
+            await asyncio.sleep(WORKFLOW_WAKEUP_POLL_SEC)
+        notes = _workflow_notes.pop(session_id, [])
+        if not notes:
+            return
+        prompt = "\n\n".join(notes)
+        async with async_session_factory() as db:
+            try:
+                session = await session_service.get_session(db, session_id)
+                if session is None:
+                    return
+                user_msg = await message_service.create_message(
+                    db, session_id=session_id,
+                    sender_type=SenderType.USER.value,
+                    msg_type=MsgType.TEXT.value,
+                    content={"text": prompt, "workflow_wakeup": True},
+                    broadcast=True,
+                )
+                turn_id_new = await turn_service.create_turn(
+                    db, session_id=session_id, user_message_id=user_msg.id,
+                )
+                await _patch_message(user_msg.id, turn_id=turn_id_new)
+                logger.info("[workflow] 唤醒 turn=%s session=%s", turn_id_new, session_id)
+
+                async def _run():
+                    async with async_session_factory() as s:
+                        try:
+                            await start_turn(s, turn_id=turn_id_new)
+                            await s.commit()
+                        except Exception:
+                            await s.rollback()
+                            logger.warning("[workflow] 唤醒 turn=%s 执行异常", turn_id_new, exc_info=True)
+                            try:
+                                await turn_service.update_turn_status(
+                                    s, turn_id_new, "failed", summary="唤醒轮执行异常", completed=True)
+                                await s.commit()
+                                await broadcast_turn_updated(session_id, turn_id_new, "failed")
+                            except Exception:
+                                pass
+
+                _turn_tasks[turn_id_new] = asyncio.get_event_loop().create_task(_run())
+            except Exception:
+                await db.rollback()
+                # 唤醒失败：通知退回队列，下一次通知到来时一并送达
+                _workflow_notes[session_id] = notes + _workflow_notes.get(session_id, [])
+                logger.warning("[workflow] 唤醒轮创建失败 session=%s", session_id, exc_info=True)
+    finally:
+        _workflow_wakeups.pop(session_id, None)
+
+
+async def _pause_workflows_on_stop(session_id: int) -> None:
+    try:
+        from app.orchestration.workflow import service as workflow_service
+
+        paused = await workflow_service.on_turn_stopped(session_id)
+        if paused:
+            logger.info("[workflow] 用户停止当前轮，已暂停 %d 个工作流 session=%s", paused, session_id)
+    except Exception:
+        logger.warning("[workflow] 停止当前轮时暂停工作流失败 session=%s", session_id, exc_info=True)
+
+
 async def _emit_goal_exhausted(db: AsyncSession, session_id: int, turn_id: int) -> None:
     """续跑轮次耗尽：落一条系统提示消息并广播 goal.stopped（幂等由调用方保证单次触发）。"""
     max_turns = settings.goal_max_continuation_turns
@@ -701,6 +812,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
     if turn_id in _running_turns:
         return {"ok": False, "error": "turn already running"}
     _running_turns.add(turn_id)
+    _running_turn_session[turn_id] = session_id
     cancel_event = _cancel_events.setdefault(turn_id, asyncio.Event())
     # v39: 会话运行计数——后台子代理终态据此判断会话是否空闲（空闲才唤醒）
     _session_turn_enter(session_id)
@@ -893,7 +1005,11 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             # 权限解析抛异常时引用它会再抛 UnboundLocalError，把可诊断的失败变成无法诊断。
             _fallback_mode = normalize_execution_mode(mode)
             _mode_whitelist = _READONLY_TOOLS if _fallback_mode == "readonly" else (_PLAN_TOOLS if _fallback_mode == "plan" else None)
-        _available_tools = {t.name for t in tool_registry.for_agent(_mode_whitelist)}
+        # plan-128-518：目标工具只在目标模式激活的会话下发（此前无条件下发，模型在普通会话里也会调用）
+        _goal_tools_on = _goal_active(session)
+        _available_tools = {
+            t.name for t in tool_registry.for_agent(_mode_whitelist, include_scoped=_goal_tools_on)
+        }
         # v36: 子代理工具计入「模型可见工具」（提示词引导降级口径一致）
         _available_tools |= {
             n for n in SUBAGENT_TOOL_NAMES
@@ -939,7 +1055,12 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             goal={"text": session.goal_text, "turns_used": session.goal_turns_used or 0}
             if (session.goal_status or "none") == "active" and session.goal_text else None,
             available_tools=_available_tools,
+            # plan-128-518: ta3 会话里模型看到的是伪装名 CompleteGoal，提示词必须引用同一个名字
+            goal_tool_name=_visible_goal_tool(selected_model),
             effective_model_id=effective_model_id,
+            # plan-91-394: 中断可续跑的子代理清单（用户说“继续”时主代理据此续跑，而非重新派发）
+            paused_subagents=await list_resumable_subagents(session.id),
+            paused_workflows=await list_paused_workflows(session.id),
         )
 
         # 命令模式：注入模式指令（/chat 只读、/plan 先规划后执行）。用户显式选择的
@@ -991,7 +1112,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         # 用户反馈修复：工具清单只由执行模式（能力边界）决定，与权限模式无关——
         # 此前「完全访问」走全量下发，把 plan 下必然被拒的编辑类工具也发给模型，
         # 模型见得到、试了必被拒：多轮调整计划时反复尝试编辑历史方案文档（用户反馈）。
-        tool_schemas = tool_registry.all_schemas(_schema_whitelist)
+        tool_schemas = tool_registry.all_schemas(_schema_whitelist, include_scoped=_goal_tools_on)
         await _inject_mcp_tools(
             db, main_agent, tool_schemas, turn_id,
             readonly_only=_mode_readonly,
@@ -1014,6 +1135,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             explore_only=_mode_readonly,
             allowed=_subagent_allowed,
         )
+        tool_schemas = append_workflow_tools(tool_schemas, readonly_only=bool(_mode_readonly))
         # 3. 运行主代理
         # v10/v13: 会话级模型覆盖；同一模型也用于规划评估与拆分。
         from app.orchestration.subagent import get_subagent_manager
@@ -1028,6 +1150,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             lambda _h, _m=mgr, _sid=session_id: _on_subagent_finished(_m, _sid, _h)
         )
         _turn_managers[turn_id] = mgr
+        mgr.owner_active = True  # plan-91-394: 主代理 turn 存活期间允许子代理保活等待恢复
         out = await run_agent_loop(
             db, session_id=session_id, turn_id=turn_id,
             agent=main_agent, context_messages=bundle.to_messages(),
@@ -1295,6 +1418,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
 
         return {"ok": True, "kind": out.kind, "summary": summary}
     except Exception as _exc:
+        final_status = "failed"  # plan-91-394: 异常结束视为出错，收尾时子代理暂停保存检查点
         # v7: 主 turn 任务异常结束 → 标记 failed，避免任务摘要出现永久 running 的假象
         if main_task is not None:
             try:
@@ -1305,6 +1429,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         raise
     finally:
         _running_turns.discard(turn_id)
+        _running_turn_session.pop(turn_id, None)
         _cancel_events.pop(turn_id, None)
         _turn_managers.pop(turn_id, None)
         discard_injected_inputs(turn_id)  # plan-547: 丢弃残留注入项
@@ -1312,6 +1437,11 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         # plan-330-1648 M7: 有后台子代理/未送达通知时保活 manager（结果跨 turn 送达）
         from app.orchestration.subagent import peek_subagent_manager
         _mgr_final = peek_subagent_manager(session_id)
+        # plan-91-394: 子代理只在主代理中断/出错结束时自动停止（进度保存为可续跑）；
+        # 正常结束仅暂停保活等待中的子代理，正常运行者照常完成并唤醒主代理。
+        if _mgr_final is not None:
+            _mgr_final.pause_for_turn_end(
+                interrupted=locals().get("final_status", "completed") != "completed")
         _cleanup_manager_if_idle(session_id, _mgr_final)
         # v1.1: 无条件广播 session.completed，驱动前端摘除左侧转圈（无论成败）
         # v37: 携带最新活动时间，侧栏排序同步上移（此前仅整表刷新才更新）
@@ -1353,6 +1483,10 @@ async def cancel_turn(turn_id: int, source: str = "unknown") -> bool:
         "[cancel] 收到停止信号 turn=%s source=%s 运行态(cancel_event=%s manager=%s main_task=%s) stack=%s",
         turn_id, source, ev is not None, manager is not None, main_task is not None, _stack,
     )
+    # 用户停止当前轮：会话内运行中的工作流暂停（保留进度，可由用户继续）
+    stopped_session = _running_turn_session.get(turn_id)
+    if source in _USER_STOP_SOURCES and stopped_session is not None:
+        asyncio.get_running_loop().create_task(_pause_workflows_on_stop(stopped_session))
     if ev is None and manager is None and main_task is None:
         # 非运行态也返回真实存在性，避免前端把不存在的 turn 当成已取消。
         from app.persistence.database import async_session_factory
@@ -1773,6 +1907,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         turn = await turn_service.get_turn(db, turn_id)
         if turn is None:
             return {"ok": False, "error": "turn not found"}
+        _running_turn_session[turn_id] = turn.session_id
         session = await session_service.get_session(db, turn.session_id)
         _session_id = session.id if session else turn.session_id
         # v39: 会话运行计数（同 start_turn）——后台子代理终态据此判断是否空闲唤醒。
@@ -1805,6 +1940,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             lambda _h, _m=manager, _sid=_session_id: _on_subagent_finished(_m, _sid, _h)
         )
         _turn_managers[turn_id] = manager
+        manager.owner_active = True  # plan-91-394: 同上（wakeup 路径）
         # plan-166-767: confirm 执行路径与 start_turn 对齐——按有效模型解析多模态/窗口。
         effective_model_id = _session_model_id or main_agent.model_id
         _model_source = "session" if _session_model_id else "agent"
@@ -1871,6 +2007,9 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             user_message=original_request,
             multimodal=_is_multimodal,
             effective_model_id=effective_model_id,
+            # plan-91-394: 中断可续跑的子代理清单（用户说“继续”时主代理据此续跑，而非重新派发）
+            paused_subagents=await list_resumable_subagents(session.id),
+            paused_workflows=await list_paused_workflows(session.id),
         )
         # plan-19-82 增强（对齐 ZCode PLAN_MODE_EXIT_REMINDER）：确认执行是本会话中
         # 上下文形态切换最剧烈的一刻——规划阶段的对话被整篇方案文档替换，叠加 16000
@@ -1911,8 +2050,10 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             logger.warning("[engine] 确认执行路径 MCP 工具加载失败(非阻塞)", exc_info=True)
         _type_states = await load_subagent_type_states(db)
         main_tools = append_subagent_tools(main_tools, _type_states)
+        main_tools = append_workflow_tools(main_tools, readonly_only=False)
         mgr = get_subagent_manager(session.id)
         _turn_managers[turn_id] = mgr
+        mgr.owner_active = True  # plan-91-394: 主代理 turn 存活期间允许子代理保活等待恢复
         out = await run_agent_loop(
             db, session_id=session.id, turn_id=turn_id,
             agent=main_agent, context_messages=bundle.to_messages(),
@@ -1999,6 +2140,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         # plan_restore_after_turn 粘性机制已移除：确认执行后的权限模式保持到手动切换
         return {"ok": True, "kind": out.kind, "summary": summary}
     except Exception as exc:
+        final_status = "failed"  # plan-91-394: 异常结束视为出错，收尾时子代理暂停保存检查点
         logger.exception("确认后执行失败 turn=%s", turn_id)
         try:
             await db.rollback()
@@ -2029,6 +2171,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         return {"ok": False, "error": str(exc)}
     finally:
         _running_turns.discard(turn_id)
+        _running_turn_session.pop(turn_id, None)
         _cancel_events.pop(turn_id, None)
         _turn_managers.pop(turn_id, None)
         discard_injected_inputs(turn_id)  # plan-547: 丢弃残留注入项
@@ -2036,6 +2179,11 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         # plan-330-1648 M7: 同上——有后台子代理时保活 manager
         from app.orchestration.subagent import peek_subagent_manager
         _mgr_final = peek_subagent_manager(_session_id or 0)
+        # plan-91-394: 子代理只在主代理中断/出错结束时自动停止（进度保存为可续跑）；
+        # 正常结束仅暂停保活等待中的子代理，正常运行者照常完成并唤醒主代理。
+        if _mgr_final is not None:
+            _mgr_final.pause_for_turn_end(
+                interrupted=locals().get("final_status", "completed") != "completed")
         _cleanup_manager_if_idle(_session_id or 0, _mgr_final)
         if _session_id:
             # v39: 同 start_turn——携带 subagent_pending 供前端保持等待子代理态
@@ -2077,6 +2225,23 @@ async def retry_failed_step(db: AsyncSession, *, turn_id: int, task_id: int) -> 
         return {"ok": False, "error": "主代理未初始化"}
     workspace = _resolve_workspace(session, project)
     manager = get_subagent_manager(session.id)
+    # plan-91-394: 该步骤子代理保有检查点（中断/暂停）→ 原地续跑，保留已完成进度；不新建子代理
+    if step.agent_id:
+        _rstate, _rdetail = await resume_subagent(
+            session.id, int(step.agent_id), turn_id=turn_id, cancel_event=asyncio.Event(),
+        )
+        if _rstate == "resumed":
+            _rhandle = manager.get(int(step.agent_id))
+            await broadcast(session.id, {"event": "task.updated", "payload": {"task_id": step.id, "status": "running"}})
+            if _rhandle and _rhandle.task:
+                await _rhandle.task
+            _rok = bool(_rhandle and _rhandle.status == "done")
+            if _rok and _rhandle.artifact_ids:
+                await task_service.attach_artifacts(db, step.id, _rhandle.artifact_ids)
+            step = await task_service.get_task(db, task_id)
+            await broadcast(session.id, {"event": "task.updated", "payload": {
+                "task_id": step.id, "status": step.status, "note": step.note or ""}})
+            return {"ok": _rok, "status": step.status}
     effective_model_id = session.model_id or main_agent.model_id
     tool_schemas = tool_registry.all_schemas()
     cancel_event = asyncio.Event()

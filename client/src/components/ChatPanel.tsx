@@ -3,12 +3,13 @@
  */
 import { useCallback, useState } from "react";
 import { PluginSlot } from "../plugins/registry";
-import { TaskProgressCapsule } from "./chat/TaskProgressCapsule";
+import { ComposerCapsule } from "./chat/ComposerCapsule";
 
 export function ChatPanel() {
   /** plan-282-1492：胶囊可见性（由胶囊上报）。
    *  只在胶囊真的出现时给消息流让位——未出现不预留空白；出现时靠占位块的高度过渡
-   *  把消息流平滑顶上去（过渡期间消息流逐帧贴底，见 MessageFlow 的占位块 RO）。 */
+   *  把消息流平滑顶上去（过渡期间消息流逐帧贴底，见 MessageFlow 的占位块 RO）。
+   *  任务进度 / 工作流 / 产物合并为同一个胶囊，只占一行。 */
   const [hasCapsule, setHasCapsule] = useState(false);
   const onCapsuleVisibilityChange = useCallback((visible: boolean) => setHasCapsule(visible), []);
 
@@ -25,7 +26,8 @@ export function ChatPanel() {
       <div className="chat-panel-composer">
         {/* plan-282-1421（第12项）：旧 .task-strip 贴条（与输入框共享边框、存在即常驻）
             已替换为悬浮胶囊：智能分块、无任务时完全不渲染、hover 出浮层。 */}
-        <TaskProgressCapsule onVisibilityChange={onCapsuleVisibilityChange} />
+        {/* 统一胶囊：任务进度 / 工作流 / 产物三段，按有无内容动态出现；同一时间只展开一段的浮层 */}
+        <ComposerCapsule onVisibilityChange={onCapsuleVisibilityChange} />
         <PluginSlot slot="composer" />
       </div>
     </div>

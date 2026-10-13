@@ -40,7 +40,7 @@ a { color: var(--accent); text-decoration: none; }
    无原生圆角的平台由下方 [data-native-corners="0"] 分支显式开启。
    此前这里默认自绘 12px 圆角（并叠加下方 3810 行的 1px 描边），在原生圆角窗口上
    与系统弧线错位成"双层圆角 + 错位边框"，即用户反馈的"四角弧度与边框不一致"。 */
-.app-shell { display: flex; flex-direction: row; height: 100vh; overflow: hidden; background: var(--bg-sidebar); }
+.app-shell { position: relative; display: flex; flex-direction: row; height: 100vh; overflow: hidden; background: var(--bg-sidebar); }
 .app-right { display: flex; flex-direction: column; flex: 1; min-width: 0; overflow: hidden; }
 .app-body { display: flex; flex: 1; overflow: hidden; min-height: 0; }
 .app-pane { flex-shrink: 0; overflow: hidden; transition: width var(--dur-pane) var(--ease-drawer), flex-basis var(--dur-pane) var(--ease-drawer); }
@@ -56,7 +56,8 @@ a { color: var(--accent); text-decoration: none; }
   border-right: 1px solid transparent;
   background-clip: border-box;
 }
-.app-pane-left.collapsed { width: 0 !important; flex-basis: 0 !important; border-right: none; }
+/* plan-128-518：折叠不再去掉 border-right（透明 1px 占位）——否则收窄终点处会多出 1px 跳变；用 min-width:0 让宽度可收到 0 */
+.app-pane-left.collapsed { width: 0 !important; flex-basis: 0 !important; min-width: 0; border-right-color: transparent; }
 /* 右面板：同上——只管占位与背景裁剪，线由分隔条绘制。
    background-clip 必须显式保持 border-box：padding-box 会让该 1px 列直接叠在透明父容器上、
    透出窗口底/桌面（历史坑："中间和右侧面板间一条透明线"，颜色由壁纸决定）。
@@ -296,7 +297,8 @@ body.maximized .titlebar { padding-top: 8px; padding-left: 16px; padding-right: 
 /* S1（plan-41-197）：运行指示固定槽位——始终占位（10px），运行态才显示旋转环。
    此前仅运行项条件渲染 → 运行/非运行切换时标题列宽与右侧列位整体跳动。 */
 .sb-session-pulse { width: 10px; height: 10px; border-radius: 50%; border: 2px solid transparent; flex-shrink: 0; opacity: 0; transition: opacity var(--dur-2) var(--ease-standard); }
-.sb-session-pulse.on { border-color: color-mix(in srgb, var(--success) 25%, transparent); border-top-color: var(--success); animation: session-spin var(--dur-spin) linear infinite; opacity: 1; }
+/* plan-128-518：「执行中」转圈统一用 --accent（随主题世界变色），摘要 / 胶囊 / 工具行的转圈同源 */
+.sb-session-pulse.on { border-color: color-mix(in srgb, var(--accent) 25%, transparent); border-top-color: var(--accent); animation: session-spin var(--dur-spin) linear infinite; opacity: 1; }
 @keyframes session-spin { to { transform: rotate(360deg); } }
 .sb-rename-input { flex: 1; min-width: 0; padding: 1px 4px; font-size: 12px; }
 /* plan-41-199: 会话行内重命名框改用 ui/Input —— 按 32px 行高收敛为 sm 档（28px）、
@@ -507,8 +509,12 @@ body.maximized .titlebar { padding-top: 8px; padding-left: 16px; padding-right: 
    时长走 --dur-spin（图形级约定），不影响 --dur-* 交互阶梯。 */
 .icon-ring-spin {
   transform-origin: center;
-  animation: icon-ring-rotate var(--dur-spin) linear infinite;
+  transform-box: fill-box;
+  /* plan-128-518：与左侧会话「执行中」同一条关键帧与时长 */
+  animation: session-spin var(--dur-spin) linear infinite;
 }
+/* 加载态的底环固定 25% 透明，和 IconSpinner 一致 */
+svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25; }
 @keyframes icon-ring-rotate {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
@@ -1258,6 +1264,14 @@ body.maximized .titlebar { padding-top: 8px; padding-left: 16px; padding-right: 
 .attach-card-size { font-size: 10px; color: var(--text-3); flex-shrink: 0; }
 /* v14: 仅附件无文字的用户消息 */
 .turn-user-bubble .turn-user-text { margin-bottom: 2px; }
+/* plan-128-518：超长用户消息折叠——高度限制为 6 行 + 底部渐隐遮罩（mask，不叠色块），展开时去掉限制。箭头按钮占固定槽位，展开/收起只转角度 */
+.turn-user-bubble { position: relative; }
+.turn-user-bubble .ub-text.is-collapsed { max-height: calc(var(--chat-line-height, 2.2) * 1em * 6); overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, #000 62%, transparent); mask-image: linear-gradient(to bottom, #000 62%, transparent); }
+.ub-toggle { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; margin: 4px auto 0; padding: 0; border: 1px solid var(--border); border-radius: var(--r-pill); background: var(--bg-main); color: var(--text-2); cursor: pointer; transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard); }
+.ub-toggle:hover { background: var(--bg-hover); color: var(--text-1); }
+.ub-toggle:focus-visible { outline: 2px solid color-mix(in oklab, var(--info) 60%, transparent); outline-offset: 2px; }
+.ub-toggle svg { transition: rotate var(--dur-3) var(--ease-standard); }
+.ub-toggle.is-open svg { rotate: 180deg; }
 .composer-main { display: flex; flex-direction: column; border-radius: var(--r-lg); background: var(--bg-main); border: 1px solid var(--border); box-shadow: none; padding: 6px 8px; transition: border-color var(--dur-fast); position: relative; }
 :root[data-theme="light"] .chat-panel-composer { background: var(--bg-panel); }
 :root[data-theme="light"] .composer-main { background: var(--color-input); }
@@ -1441,22 +1455,10 @@ body.maximized .titlebar { padding-top: 8px; padding-left: 16px; padding-right: 
 .browser-mirror-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--color-browser-blue); }
 
 /* 浏览器空起始页 */
-.browser-start-page { display: flex; align-items: center; justify-content: center; height: 100%; width: 100%; padding: 24px; background: var(--bg-main); }
-.browser-start-card { max-width: 440px; width: 100%; text-align: center; display: flex; flex-direction: column; align-items: center; }
-.browser-start-logo { width: 54px; height: 54px; border-radius: var(--r-pop); background: var(--bg-elevated); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; color: var(--accent); margin-bottom: 12px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05); }
-.browser-start-title { font-size: 16px; font-weight: 600; color: var(--text-1); margin: 0 0 6px 0; }
-.browser-start-subtitle { font-size: 12px; color: var(--text-3); margin: 0 0 18px 0; line-height: 1.4; }
-.browser-start-form { display: flex; width: 100%; gap: 6px; margin-bottom: 20px; }
-.browser-start-input { flex: 1; padding: 8px 12px; border-radius: var(--r-ctl); border: 1px solid var(--border); background: var(--bg-elevated); color: var(--text-1); font-size: 12px; outline: none; }
-/* plan-230-1144 M5.2: focus 统一至 focus.css */
-.browser-start-btn { width: 34px; height: 34px; border-radius: var(--r-ctl); border: none; background: var(--accent); color: #fff; display: flex; align-items: center; justify-content: center; cursor: pointer; }
-.browser-start-quick { width: 100%; margin-bottom: 20px; text-align: left; }
-.browser-start-quick-title { font-size: 11px; font-weight: 600; color: var(--text-3); margin-bottom: 8px; }
-.browser-start-quick-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
-.browser-start-quick-item { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: var(--r-ctl); background: var(--bg-elevated); border: 1px solid var(--border); color: var(--text-2); font-size: 11px; cursor: pointer; text-align: left; }
-.browser-start-quick-item:hover { background: var(--bg-hover); color: var(--text-1); border-color: var(--border-hover, var(--border)); }
-.browser-start-features { width: 100%; display: flex; flex-direction: column; gap: 6px; font-size: 11px; color: var(--text-3); text-align: left; }
-.browser-start-feature { display: flex; align-items: center; gap: 6px; }
+/* plan-128-518：空白新标签页——只有居中的嗒嗒，无纹理、无文案 */
+.browser-start-page { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; height: 100%; width: 100%; background: var(--bg-panel); }
+.browser-start-dada { opacity: 0.9; }
+.browser-start-hint { margin: 0; font-size: 12.5px; color: var(--text-3); }
 
 /* 浏览器视口容器：由 flex 分配剩余高度（不设 height:100%，避免与 flex-basis:0 冲突
    导致内容溢出被裁剪），作为内部绝对定位框架的定位基准 */
@@ -3706,6 +3708,8 @@ body.maximized .titlebar { padding-top: 8px; padding-left: 16px; padding-right: 
   pointer-events: none;
   isolation: isolate;
 }
+/* plan-128-518：折叠中的分隔条只承载边框，不接收指针；左面板宽度收到 0 后整条线贴左缘（与左面板同一条曲线位移） */
+.resize-handle.is-disabled { pointer-events: none; cursor: default; }
 .resize-handle-left::after { right: 50%; }
 .resize-handle-right::after { left: 50%; }
 /* 毛玻璃：颜色换更实的 --frost-seam（宽度不用改，已由 --seam-w 统一）。 */
@@ -3838,8 +3842,19 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 .titlebar-left { flex: 0 0 auto; min-width: 0; }
 /* 侧栏头部（logo + 前进/后退）：与标题栏同高。
    plan-26-126 P2：同样取消系统 drag 区（原因见 .titlebar），保留布局与内边距不变。 */
-.sb-head { height: var(--titlebar-h); display: flex; align-items: center; gap: 4px; padding: 0 10px; flex-shrink: 0; }
-.sb-head button, .sb-head .sb-logo { -webkit-app-region: no-drag; }
+/* plan-128-518：.sb-head 退化为纯占位（控件由全局固定层 .nav-cluster 悬浮在此） */
+.sb-head { height: var(--titlebar-h); flex-shrink: 0; }
+/* 左上角导航控件组：绝对定位在窗口左上角，折叠 / 展开 / 设置页都不动。
+   尺寸只有这一份：左内边距 10px、间距 4px、按钮 24px，最大化时跟随标题栏的 8px 外扩补偿。 */
+.nav-cluster {
+  position: absolute; left: 0; top: 0; z-index: 30;
+  height: var(--titlebar-h); display: flex; align-items: center; gap: 4px;
+  padding: 0 10px; -webkit-app-region: no-drag;
+}
+body.maximized .nav-cluster { padding-top: 8px; padding-left: 16px; height: calc(var(--titlebar-h) + 8px); }
+.nav-cluster .sb-logo-img { margin: 0 4px 0 6px; }
+.nav-cluster button { -webkit-app-region: no-drag; }
+:root { --nav-cluster-w: 140px; }
 .titlebar-workspace { display: flex; align-items: center; gap: 10px; min-width: 0; max-width: min(720px, 42vw); height: 100%; }
 .titlebar-workspace-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-1); font-size: 13px; font-weight: 600; }
 .titlebar-workspace-project { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font-size: 11px; }
@@ -3847,16 +3862,17 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 /* plan-234-1171 R6: 左栏折叠时 logo 从 .sb-head（padding 0 10px）搬到 .titlebar-left，
    而后者原先 padding-left:0，logo 自身 margin 不变 → 水平位置跳变约 10px。
    这里补同等左内边距，使 logo 在折叠/展开间位置连续。 */
-.titlebar.left-collapsed { padding-left: 10px; }
-.titlebar.left-collapsed .titlebar-left { flex-basis: auto; width: auto; gap: 4px; padding-right: 4px; }
+.titlebar-left { flex: 0 0 0; width: 0; padding: 0; overflow: hidden; transition: flex-basis var(--dur-pane) var(--ease-drawer), width var(--dur-pane) var(--ease-drawer); }
+/* plan-128-518：折叠时标题栏为固定控件组留出宽度，会话标题随中间面板平滑左移到它右侧（同一条 --dur-pane 曲线） */
+.titlebar.left-collapsed .titlebar-left { flex-basis: var(--nav-cluster-w); width: var(--nav-cluster-w); }
 .titlebar.left-collapsed .titlebar-brand { display: none; }
-.titlebar.left-collapsed .titlebar-workspace { margin-left: 16px; }
+.titlebar.left-collapsed .titlebar-workspace { margin-left: 8px; }
 .titlebar-mid { flex: 1 1 auto; min-width: 8px; }
 /* 问题1: 右侧面板完整显示 - 三栏 flex 正确收缩 */
 .app-body { display: flex; flex: 1; overflow: hidden; min-height: 0; }
 /* v19: 左栏边界由面板自身的 1px border-right 绘制，拖拽条仅保留命中区。 */
 .app-pane-left { flex: 0 0 auto; overflow: hidden; min-height: 0; display: flex; flex-direction: column; }
-.app-pane-left.collapsed { width: 0 !important; flex-basis: 0 !important; border-right: none; }
+.app-pane-left.collapsed { width: 0 !important; flex-basis: 0 !important; min-width: 0; border-right-color: transparent; }
 .app-main { flex: 1 1 480px; min-width: 480px; overflow: hidden; }
 /* 拖拽期失效边界（本轮拖拽卡顿治理 P0-1）：中列宽度逐帧变化，是唯一会逐帧重排的容器。
    layout 隔离让折行只在面板内重算；paint 让重绘范围被裁剪在本面板内、不向左右面板扩散。
@@ -3901,12 +3917,9 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 :root[data-theme="light"] .right-panel,
 :root[data-theme="light"] .rp-content { background: var(--bg-panel); }
 /* 分隔条负 margin 叠在面板接缝上，避免中间/右侧多出一条空隙 */
-/* 折叠态 = 56px 图标轨（保留 logo/导航图标/头像，隐藏文字与列表） */
-.sidebar.collapsed { display: flex; width: 56px; overflow-x: hidden; }
-.sidebar.collapsed .sb-top { justify-content: center; padding: 8px 4px 4px; }
-.sidebar.collapsed .sb-nav { padding: 6px 4px; align-items: center; }
-.sidebar.collapsed .sb-nav-item { justify-content: center; width: 40px; padding: 0; }
-.sidebar.collapsed .sb-userbar { justify-content: center; padding: 8px 4px; }
+/* plan-128-518：侧栏折叠不再重排内容——内容始终按展开宽度布局（--left-w），由左面板宽度收窄 + overflow:hidden 裁切呈现，
+   所以折叠时左侧内容原地不动，只有右边缘（边框）与中间面板向左移。 */
+.app-pane-left > .sidebar { width: var(--left-w, 264px); flex: 0 0 auto; }
 
 .right-panel { display: flex; flex-direction: column; height: 100%; overflow: hidden; min-width: 0; background: var(--bg-panel); color: var(--text-1); }
 .rp-content { flex: 1; overflow: hidden; position: relative; min-height: 0; background: var(--bg-panel); color: var(--text-1); }
@@ -4764,11 +4777,19 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 
 /* v19: 子代理详情面板（右面板，复用消息流样式） */
 .subagent-panel { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-.subagent-panel-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
-.subagent-panel-name { font-size: 12px; font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subagent-panel-top { flex-shrink: 0; border-bottom: 1px solid var(--border); }
+.subagent-panel-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 8px 12px; flex-shrink: 0; }
+/* 名称占用剩余空间并可截断；元信息在窄宽度下截断，不挤压名称 */
+.subagent-panel-name { flex: 1 1 auto; min-width: 56px; font-size: 12px; font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .subagent-panel-status { font-size: 11px; color: var(--text-3); flex-shrink: 0; }
 /* v36 (plan-321-1600 M2): 头部元信息（用时 / 文件数 / 用量），以分隔线区分 */
-.subagent-panel-meta { font-size: 11px; color: var(--text-3); flex-shrink: 0; padding-left: 8px; border-left: 1px solid var(--border); }
+.subagent-panel-meta { font-size: 11px; color: var(--text-3); flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.subagent-panel-status + .subagent-panel-meta::before,
+.subagent-panel-meta + .subagent-panel-meta::before {
+  content: "·";
+  margin-right: 6px;
+  opacity: 0.6;
+}
 .subagent-panel-count { font-size: 11px; color: var(--text-3); margin-left: auto; flex-shrink: 0; }
 /* v20: 消息体交给共享 message-flow 插件（自身不滚动，滚动由插件容器承担） */
 .subagent-panel-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0; }

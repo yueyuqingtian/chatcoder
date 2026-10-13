@@ -63,6 +63,8 @@ _GLOBAL_FORWARD_EVENTS = frozenset({
     "subagent.pending",
     "subagent.wakeup",
     "message.created",
+    # 工作流进度（侧栏会话标记）：只携带状态摘要，详情仍由工作流自身的会话通道提供
+    "workflow.run.updated",
 })
 
 

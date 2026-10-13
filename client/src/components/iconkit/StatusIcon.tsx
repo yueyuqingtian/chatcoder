@@ -44,36 +44,38 @@ export const StatusIcon = memo(function StatusIcon({ status, size = 14, classNam
       aria-hidden={label ? undefined : true}
     >
       <svg key={status} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
-        {status === "pending" && <circle className="st-ring" cx="12" cy="12" r="8.25" strokeWidth={1.9} strokeDasharray="2.6 3.3" />}
+        {/* plan-128-518：所有环状态统一同一径同一线宽（r=8、线宽 2，外缘半径 9）——与转圈环大小完全一致，状态切换不再大小跳动；
+            实心圆（完成/失败）半径同样取外缘 9 */}
+        {status === "pending" && <circle className="st-ring" cx="12" cy="12" r="8" strokeWidth={2} strokeDasharray="2.4 3.1" />}
         {status === "queued" && (
           <>
-            <circle className="st-ring" cx="12" cy="12" r="8.25" strokeWidth={1.9} />
-            <path d="M12 8v4.2l2.6 1.6" strokeWidth={1.9} />
+            <circle className="st-ring" cx="12" cy="12" r="8" strokeWidth={2} />
+            <path d="M12 8v4.2l2.6 1.6" strokeWidth={2} />
           </>
         )}
         {status === "running" && (
           <>
-            <circle cx="12" cy="12" r="8.25" strokeWidth={2} opacity={0.22} />
-            <circle className="st-arc" cx="12" cy="12" r="8.25" strokeWidth={2.2} strokeDasharray="13 52" />
-            <circle className="st-pulse" cx="12" cy="12" r="2.6" fill="currentColor" stroke="none" />
+            {/* plan-128-518：运行态 = 左侧会话执行中同款转圈（细底环 25% + 单段实色弧，线性匀速） */}
+            <circle cx="12" cy="12" r="8" strokeWidth={2} strokeOpacity={0.25} />
+            <path className="st-arc" d="M12 4a8 8 0 0 1 8 8" strokeWidth={2} />
           </>
         )}
         {status === "done" && (
           <>
-            <circle className="st-core" cx="12" cy="12" r="9.5" fill="currentColor" stroke="none" />
-            <path className="st-mark" d="M7.8 12.4l2.8 2.8 5.6-5.8" stroke="var(--st-on, #fff)" strokeWidth={2.3} pathLength={1} />
+            <circle className="st-core" cx="12" cy="12" r="9" fill="currentColor" stroke="none" />
+            <path className="st-mark" d="M8 12.3l2.7 2.7 5.4-5.6" stroke="var(--st-on, #fff)" strokeWidth={2.2} pathLength={1} />
           </>
         )}
         {status === "failed" && (
           <>
-            <circle className="st-core" cx="12" cy="12" r="9.5" fill="currentColor" stroke="none" />
-            <path className="st-mark" d="M9 9l6 6M15 9l-6 6" stroke="var(--st-on, #fff)" strokeWidth={2.3} pathLength={1} />
+            <circle className="st-core" cx="12" cy="12" r="9" fill="currentColor" stroke="none" />
+            <path className="st-mark" d="M9 9l6 6M15 9l-6 6" stroke="var(--st-on, #fff)" strokeWidth={2.2} pathLength={1} />
           </>
         )}
         {(status === "cancelled" || status === "paused" || status === "interrupted") && (
           <>
-            <circle className="st-ring" cx="12" cy="12" r="8.25" strokeWidth={1.9} />
-            <path d="M10 9.2v5.6M14 9.2v5.6" strokeWidth={2.1} />
+            <circle className="st-ring" cx="12" cy="12" r="8" strokeWidth={2} />
+            <path d="M10 9.2v5.6M14 9.2v5.6" strokeWidth={2} />
           </>
         )}
       </svg>

@@ -6,7 +6,7 @@
   z-index: 1200;
   min-width: 236px;
   padding: 5px;
-  border-radius: var(--r-lg);
+  border-radius: var(--r-pop);
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   box-shadow: var(--shadow-md);
@@ -17,6 +17,14 @@
 .mp-sub-menu { min-width: 236px; max-height: min(60vh, 420px); overflow-y: auto; }
 .mp-menu-head { padding: 5px 8px 6px; font-size: 11px; color: var(--text-3); text-align: left; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mp-label { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* plan-128-518：field 形态——复用 .ui-select-trigger（边框/圆角/高度/hover/open 态完全一致），仅补左图标与标签占位 */
+.composer-model-wrap.is-field { width: 100%; min-width: 0; }
+.mp-field { width: 100%; justify-content: flex-start; gap: var(--sp-2); text-align: left; }
+.mp-field > svg { flex-shrink: 0; color: var(--text-2); }
+.mp-field .mp-label { flex: 1 1 auto; min-width: 0; max-width: none; }
+.mp-field.is-placeholder .mp-label { color: var(--text-3); }
+.mp-field .ui-select-icon { margin-left: auto; }
+.mp-field[data-state="open"] { border-color: var(--text-2); }
 .mp-models-empty { padding: 10px 8px; font-size: 11px; color: var(--text-3); text-align: center; }
 /* 一级：供应商行——单行省略 + 右侧 ›（当前模型所在项显示 ✓） */
 .mp-group { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border-radius: var(--r-md); font-size: 12.5px; color: var(--text-2); cursor: pointer; border: none; background: transparent; text-align: left; outline: none; transition: background var(--dur-fast), color var(--dur-fast); }

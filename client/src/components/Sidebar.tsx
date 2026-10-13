@@ -5,7 +5,7 @@
  * 项目→会话两级列表（会话行带相对时间）
  * 底部用户条（设置 + 更新徽标）
  */
-import { IxNewChat, IxSearch, IxAutomation, IxExtensions, IxSettings } from "./iconkit/StackIcons";
+import { IxNewChat, IxSearch, IxAutomation, IxExtensions, IxSettings, IxWorkflow } from "./iconkit/StackIcons";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ProjectOut, SessionOut } from "../api/client";
@@ -17,13 +17,12 @@ import { useI18n } from "../store/i18n";
 import { formatRelativeTime, parseUtc } from "../utils/time";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { MergeDialog } from "./worktree/MergeDialog";
-import { AppLogo } from "./AppLogo";
 import { MarkdownContent } from "./MarkdownContent";
 import { Empty, Input, Segmented } from "./ui";
 import { ProjectIcon } from "./project/ProjectIcon";
 import { openProjectDialog } from "../store/projectDialog";
 import {
-  IconChevronDown, IconChevronLeft, IconChevronRight, IconPanelLeft,
+  IconChevronDown, IconChevronRight,
   IconFolder, IconLayers, IconSortDesc, IconPencil,
   IconMoreHorizontal, IconPin, IconPlus, IconRefresh,
   IconFolderPlus, IconDownload, IconCopy, IconClock, IconSortAlpha, IconArchive, IconGitBranch, IconTrash,
@@ -35,8 +34,9 @@ interface SidebarProps {
   active: NavKey | null;
   onChange: (key: NavKey) => void;
   onSessionFocus: () => void;
-  collapsed: boolean;
-  onToggleCollapse: () => void;
+  /** 兼容插件槽位契约：侧栏渲染不再依赖折叠态（见组件注释） */
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
 }
 
 const STORAGE_KEY_COLLAPSED_PROJECTS = "chatcoder:collapsed-projects";
@@ -44,6 +44,14 @@ const STORAGE_KEY_COLLAPSED_PROJECTS = "chatcoder:collapsed-projects";
 /** plan-387-1825 E1：项目下会话列表的分批展开步长与「一次全开」阈值。
  *  语义：首次显示 5 条，每次点「显示更多」+5；已显示达到 10 条后，
  *  按钮文案变为「展开全部（剩余 N 项）」，点击一次全部展开。 */
+/** 会话条目上的工作流标记（aria-label 与样式共用同一状态名） */
+const WORKFLOW_STATE_LABEL: Record<string, string> = {
+  attention: "工作流等待你的决定",
+  paused: "工作流已暂停",
+  running: "工作流进行中",
+  draft: "工作流待确认",
+};
+
 const SESSION_PAGE_STEP = 5;
 const SESSION_EXPAND_ALL_THRESHOLD = 10;
 
@@ -213,7 +221,9 @@ function shortPath(path: string): string {
   return parts[parts.length - 1] || clean;
 }
 
-export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleCollapse }: SidebarProps) {
+// plan-128-518：折叠状态不再改变侧栏自身渲染——内容始终按展开态挂载，由左面板的宽度收窄 + overflow 裁切呈现，
+// 折叠时左侧内容原地不动、只有右边缘（边框）与中间面板向左移；logo/折叠/前进后退已提到全局固定层（WindowNavCluster）。
+export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
   const { t, language } = useI18n();
   const projects = useChatStore((s) => s.projects);
   const sessions = useChatStore((s) => s.sessions);
@@ -224,12 +234,6 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
   const deleteSession = useChatStore((s) => s.deleteSession);
   const renameSession = useChatStore((s) => s.renameSession);
   const forkSession = useChatStore((s) => s.forkSession);
-  // 会话前进/后退（与折叠态标题栏共用 store 历史栈）
-  const sessionHist = useChatStore((s) => s.sessionHist);
-  const sessionHistIdx = useChatStore((s) => s.sessionHistIdx);
-  const histGo = useChatStore((s) => s.histGo);
-  const canBack = sessionHistIdx > 0;
-  const canForward = sessionHistIdx >= 0 && sessionHistIdx < sessionHist.length - 1;
   // plan-31-151 S3：侧栏头部拖拽/双击改由系统 -webkit-app-region:drag 处理（见 global.css），
   //   自研 useWindowDrag 已随 frame:false 伪最大化架构一并移除。
 
@@ -475,6 +479,14 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
         {/* S1（plan-41-197）：运行指示移到标题左侧，且**始终占位**（非运行态透明）。
             此前只给运行项渲染 → 运行/非运行切换时整行标题列宽与右侧列位跳动。 */}
         <span className={"sb-session-pulse" + (s.has_running ? " on" : "")} aria-hidden="true" />
+        {s.workflow_state && (
+          <span
+            className={"sb-session-wf is-" + s.workflow_state}
+            aria-label={WORKFLOW_STATE_LABEL[s.workflow_state]}
+          >
+            <IxWorkflow size={12} />
+          </span>
+        )}
         {s.pinned && <span title={t("sidebar.ctx_pin")} className="sb-pin"><IconPin size={11} /></span>}
         {editing ? (
           <Input className="sb-rename-input" ref={renameInputRef} autoFocus value={renaming.value} onFocus={(e) => e.target.select()}
@@ -664,15 +676,9 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
   };
 
   return (
-    <nav className={`sidebar sb sb-v2${collapsed ? " collapsed" : ""}`}>
-      {/* 头部：logo + 折叠按钮 + 前进/后退。
-          plan-31-151 S3：头部拖拽/双击改由系统 -webkit-app-region:drag 处理（见 global.css）。 */}
-      <div className="sb-head">
-        <AppLogo size={20} className="sb-logo-img" />
-        <button className="sb-nav-arrow" onClick={onToggleCollapse} title={collapsed ? t("sidebar.expand_tip") : t("sidebar.collapse_tip")}><IconPanelLeft size={15} open={!collapsed} /></button>
-        <button className="sb-nav-arrow" disabled={!canBack} onClick={() => { histGo(-1); onSessionFocus(); }} title={t("sidebar.history_back")}><IconChevronLeft size={15} /></button>
-        <button className="sb-nav-arrow" disabled={!canForward} onClick={() => { histGo(1); onSessionFocus(); }} title={t("sidebar.history_forward")}><IconChevronRight size={15} /></button>
-      </div>
+    <nav className="sidebar sb sb-v2">
+      {/* 头部占位：logo / 折叠 / 前进后退由 App 层的 WindowNavCluster 悬浮在此位置，折叠前后坐标恒定 */}
+      <div className="sb-head" aria-hidden />
 
       {/* 主导航 */}
       <div className="sb-nav">
@@ -682,13 +688,13 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
             onClick={() => (item.key === "search" ? openCommandCenter() : onChange(item.key as NavKey))}
             title={item.label}>
             <span className="sb-nav-icon">{item.icon}</span>
-            {!collapsed && <span className="sb-nav-label">{item.label}</span>}
-            {!collapsed && item.shortcut && <kbd className="sb-kbd">{item.shortcut}</kbd>}
+            <span className="sb-nav-label">{item.label}</span>
+            {item.shortcut && <kbd className="sb-kbd">{item.shortcut}</kbd>}
           </div>
         ))}
       </div>
 
-      {!collapsed && (
+      {(
         <>
           {/* 分组|项目切换 + 操作图标 */}
           <div className="sb-viewbar">
@@ -756,8 +762,8 @@ export function Sidebar({ active, onChange, onSessionFocus, collapsed, onToggleC
 
       {/* 底部设置入口 */}
       <div className="sb-userbar">
-        <button className={`sb-user-settings${active === "settings" ? " active" : ""}`} title={t("cmd.settings")} onClick={() => onChange("settings")}><IxSettings size={17} />{!collapsed && <span>{t("cmd.settings")}</span>}</button>
-        <UpdateBadge collapsed={collapsed} />
+        <button className={`sb-user-settings${active === "settings" ? " active" : ""}`} title={t("cmd.settings")} onClick={() => onChange("settings")}><IxSettings size={17} /><span>{t("cmd.settings")}</span></button>
+        <UpdateBadge />
       </div>
 
 

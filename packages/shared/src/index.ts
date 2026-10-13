@@ -359,6 +359,8 @@ export interface SessionOut {
   worktree_path: string | null;
   has_running?: boolean;
   has_interrupted_turn?: boolean;
+  /** 侧栏工作流标记：attention（待你决定）/ paused / running / draft；无进行中的工作流时为空 */
+  workflow_state?: "attention" | "paused" | "running" | "draft" | null;
   last_activity_at?: string | null;
   /** 运行中 turn 的开始时间——侧栏「执行中任务」稳定排序键（运行期间不变，避免上下跳动） */
   running_started_at?: string | null;
@@ -712,35 +714,7 @@ export interface FileDiffOut {
 
 // ── WebSocket 事件 ──
 
-/** 服务端 → 客户端 */
-export type ServerWsEvent =
-  | { event: "message.created"; payload: { msg: MessageOut } }
-  | { event: "turn.started"; payload: { turn_id: number } }
-  | { event: "turn.updated"; payload: { turn_id: number; status: string } }
-  | { event: "turn.completed"; payload: { turn_id: number; summary: string | null; artifact_ids: number[] } }
-  | { event: "turn.interrupted"; payload: { turn_id: number; last_message_id: number | null } }
-  | { event: "turn.failed"; payload: { turn_id: number; status: string; summary: string | null; error: string | null } }
-  | { event: "turn.rolled_back"; payload: { turn_id: number; rolled_back_msgs: number; file_recovery: Record<string, unknown> } }
-  | { event: "agent.started"; payload: { agent_id: number; kind: string; name: string; turn_id: number | null } }
-  | { event: "agent.updated"; payload: { agent_id: number; status: string; tool?: string; step?: number } }
-  | { event: "agent.completed"; payload: { agent_id: number; summary: string | null; artifact_ids: number[] } }
-  | { event: "subagent.failed"; payload: { agent_id: number; status: string; error: string | null } }
-  | { event: "thinking.delta"; payload: { agent_id: number; turn_id: number | null; delta: string } }
-  | { event: "thinking.done"; payload: { agent_id: number; turn_id: number | null; full_text: string } }
-  | { event: "token.delta"; payload: { agent_id: number; turn_id: number | null; delta: string } }
-  | { event: "token.done"; payload: { agent_id: number; turn_id: number | null; full_text: string } }
-  /** v35: turn 级瞬态状态（重试/恢复提示），前端流式状态行展示；text 空串 = 清除 */
-  | { event: "turn.status"; payload: { turn_id: number; thread_id?: number | null; text: string } }
-  | { event: "tool.call"; payload: { turn_id: number; agent_id: number; tool: string; args_preview: string } }
-  | { event: "tool.result"; payload: { turn_id: number; tool: string; ok: boolean; duration_ms: number; output_preview: string } }
-  | { event: "task.updated"; payload: { task_id: number; status: string; note?: string } }
-  | { event: "usage.update"; payload: Record<string, unknown> }
-  | { event: "approval.request"; payload: { approval_id: string; detail: Record<string, unknown> } }
-  | { event: "approval.response"; payload: { approval_id: string; approved: boolean } }
-  | { event: "session.completed"; payload: { session_id: number } }
-  | { event: "config.changed"; payload: { profile_id: number; changed_keys: string[] } }
-  | { event: "scheduled.triggered"; payload: { task_id: number; turn_id: number } }
-  | { event: "error"; payload: { code: string; message: string } };
+/* ServerWsEvent 以 events.ts 为唯一定义（经 export * 导出），此处不再重复声明 */
 
 /** 客户端 → 服务端 */
 export type ClientWsEvent =

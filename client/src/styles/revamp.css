@@ -76,7 +76,11 @@
 .tone-swatch.active .tone-swatch-dot { box-shadow: 0 0 0 2px var(--bg-main), 0 0 0 4px currentColor; }
 
 /* ── 弹窗：中性底 + 弹簧放大入场 ── */
-.ui-dialog-content[data-state="open"] { animation: dlg-in var(--dur-pop) var(--spring-soft) both; }
+/* plan-128-518：进场只用 backwards 填充，不再用 both。
+ * 根因：animation-fill-mode: both/forwards 会让动画结束后弹窗仍被浏览器当作“正在做 transform 动画”的元素，
+ * 从而成为 position:fixed 后代的包含块——弹窗内的菜单/下拉被弹窗的 overflow:hidden 裁切，
+ * 还会把弹窗正文的滚动区擑大、聚焦时自动滚动。结束帧本就是 transform:none，去掉填充视觉无差别。 */
+.ui-dialog-content[data-state="open"] { animation: dlg-in var(--dur-pop) var(--spring-soft) backwards; }
 /* 弹窗以 inset+margin 居中（见 components.css），关键帧只能用相对位移，不得写 translate(-50%) */
 @keyframes dlg-in { from { opacity: 0; transform: translateY(8px) scale(0.965); } to { opacity: 1; transform: none; } }
 
@@ -84,12 +88,7 @@
 .app-pane-right:not(.collapsed) .right-panel { animation: rp-in var(--dur-pop) var(--spring-soft) both; }
 @keyframes rp-in { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: none; } }
 .right-panel { border-radius: var(--r-lg); border: 1px solid var(--border-light); }
-.rp-launch-card {
-  border-radius: var(--r-lg); border: 1px solid var(--border-light); background: var(--bg-main);
-  transition: transform var(--dur-spring) var(--spring-bouncy), box-shadow var(--dur-3) var(--ease-standard);
-}
-.rp-launch-card:hover { transform: translateY(-2px); box-shadow: 0 8px 22px rgba(0, 0, 0, 0.06); }
-.rp-launch-card:active { transform: scale(0.98); }
+/* plan-128-518：入口页改为单层行式列表，悬停只变底色，旧的卡片位移样式已移除（见 panel.css .rp-launch-row） */
 
 /* ── 空态首页：纹理层 + 浮签卡片外观 ──
  * plan-114-452：浮签只在悬停 / 聚焦徽章时出现（显隐规则在 home.css）。此前这里有一条「浮签常驻 + 微倾斜」

@@ -6,14 +6,14 @@
  *  ② 每个会话独立：tabs / activeKey / closedStack / 预览状态按会话分桶存储，切换会话只
  *     切换投影，不再出现「A 会话的子代理标签出现在 B 会话」。
  *
- *  为什么顶层仍保留同名字段：ToolTree / TaskProgressCapsule / FileTreePanel 等调用点都按
+ *  为什么顶层仍保留同名字段：ToolTree / ComposerCapsule / FileTreePanel 等调用点都按
  *  「当前会话」语义直接读写这些字段，保留同名投影让它们零改动继续工作；真正的数据源是
  *  `buckets`，顶层字段只是当前桶的镜像（任何写入都会同步回桶），读取方无需感知分桶。
  */
 import { create } from "zustand";
 import { applyPaneUpdate } from "../perf/paneTransition";
 
-export type PanelTabId = "task-summary" | "browser" | "terminal" | "files" | "subagent" | "debug";
+export type PanelTabId = "task-summary" | "browser" | "terminal" | "files" | "subagent" | "debug" | "workflow";
 export interface PanelTab {
   id: PanelTabId;
   instance: number;

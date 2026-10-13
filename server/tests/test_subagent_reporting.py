@@ -26,8 +26,9 @@ def test_inspect_schema_registered():
     assert "subagent_inspect" in COLLECT_RESULTS_SCHEMA["function"]["name"] or True
     names = [s["function"]["name"] for s in SUBAGENT_TOOL_SCHEMAS]
     # plan-330-1648 M4: 新增 send_to_subagent（主代理 → 运行中子代理的指令通道）
+    # plan-91-394: 新增 resume_subagent（续跑中断/暂停的子代理，保留已完成进度）
     assert names == ["spawn_subagent", "collect_results", "subagent_inspect", "cancel_subagent",
-                     "send_to_subagent"]
+                     "send_to_subagent", "resume_subagent"]
     # collect_results 支持 wait=true 阻塞等待
     assert "wait" in COLLECT_RESULTS_SCHEMA["function"]["parameters"]["properties"]
 

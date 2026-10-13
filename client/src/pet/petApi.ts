@@ -72,6 +72,8 @@ export interface SessionSnapshot {
   title: string | null;
   project_id: number | null;
   has_running: boolean;
+  /** 工作流状态（侧栏标记同源）：attention 待你决定 / paused 已暂停；其它为空 */
+  workflow_state?: string | null;
   running_started_at: string | null;
   last_activity_at: string | null;
   goal_text: string | null;

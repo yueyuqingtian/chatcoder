@@ -801,6 +801,55 @@ async def _resolve_session_language(db: AsyncSession, session_id: int | None,
     return LANG_AUTO
 
 
+def _build_paused_subagents_block(items: list[dict]) -> str:
+    """plan-91-394: 可续跑子代理清单（developer 段）。
+
+    告知模型：哪些子代理中断后保留了进度；用户的续做意图应直接续跑它们，而不是重新派发。
+    """
+    lines = [
+        "## Paused Subagents — resumable",
+        "以下子代理在上一轮因网络/网关故障或主代理被中断而暂停，已保存完整进度（已完成的步骤与上下文都在）。",
+    ]
+    for it in items[:8]:
+        head = f"- agent_id={it.get('agent_id')}「{it.get('title') or '未命名子任务'}」— 已完成 {it.get('steps', 0)} 步"
+        if it.get("reason"):
+            head += f"；暂停原因：{str(it['reason'])[:120]}"
+        if it.get("saved_at"):
+            head += f"；保存于 {str(it['saved_at'])[:19].replace('T', ' ')}"
+        lines.append(head)
+    lines.append(
+        "【续跑规则】用户本条消息若表达续做意图（如“继续 / 接着 / 恢复 / 刚才断了 / 重试 / continue / resume / go on”），"
+        "请对上述每个子代理调用 resume_subagent(agent_id=…) 续跑；严禁用 spawn_subagent 重新派发同一任务。"
+    )
+    lines.append(
+        "若本条消息是全新的、与之无关的任务，则不要续跑它们，并在回复中简要告知用户它们仍可续跑。"
+    )
+    return "\n".join(lines)
+
+
+def _build_paused_workflows_block(items: list[dict]) -> str:
+    """工作流运行时（设计 §6.7）：可续跑的工作流清单（developer 段）。
+
+    用户说“继续”时应先调用 resume_workflow 续跑对应程序，而不是重新规划。
+    """
+    lines = [
+        "## Paused Workflows — resumable",
+        "以下工作流已暂停（网络中断、应用重启或用户暂停），已完成的节点与进度都已保留。",
+    ]
+    for it in items[:5]:
+        progress = it.get("progress") or {}
+        head = f"- program_id={it.get('program_id')}「{it.get('title') or '未命名工作流'}」— 已完成 {progress.get('done', 0)}/{progress.get('total', 0)} 个节点"
+        if it.get("pause_reason"):
+            head += f"；暂停原因：{str(it['pause_reason'])[:120]}"
+        lines.append(head)
+    lines.append(
+        "【续跑规则】用户本条消息若表达续做意图（如“继续 / 接着 / 恢复 / 刚才断了 / continue / resume”），"
+        "请对上述工作流调用 resume_workflow(program_id=…) 续跑；不要重新 plan_workflow，也不要重新派发其中的节点。"
+    )
+    lines.append("若本条消息是全新的、与之无关的任务，则不要续跑它们，并在回复中简要告知用户它们仍可续跑或放弃。")
+    return "\n".join(lines)
+
+
 async def build_main_context(
     db: AsyncSession, *, agent, session, project, turn, user_message: str,
     attachments: list[dict] | None = None,
@@ -813,9 +862,16 @@ async def build_main_context(
     plan_history: str = "",
     goal: dict | None = None,
     available_tools: set[str] | None = None,
+    # plan-128-518: 模型可见的目标完成工具名（ta3 会话为伪装名 CompleteGoal，其它为 goal_complete）
+    goal_tool_name: str = "goal_complete",
     # plan-166-767: 请求携带的权威模型（切换模型后立即发送时优先），
     # 决定摘要阈值/注入预算按「目标模型窗口」计算。
     effective_model_id: int | None = None,
+    # plan-91-394: 中断可续跑的子代理清单（list_resumable_subagents 产出）。非空时注入 developer 段，
+    # 让模型在用户说“继续”时知道有哪些子代理可以续跑，并主动调用 resume_subagent。
+    paused_subagents: list[dict] | None = None,
+    # 工作流运行时：可续跑的暂停工作流清单（list_paused_workflows 产出）
+    paused_workflows: list[dict] | None = None,
 ) -> ContextBundle:
     """构建主代理上下文。
 
@@ -876,7 +932,8 @@ async def build_main_context(
     if goal and goal.get("text"):
         bundle.developer_parts.append(
             f"## Current Goal\n{goal['text'][:2000]}\n"
-            f"（目标模式激活：持续朝该目标工作，完成时调用 goal_complete；已续跑 {goal.get('turns_used', 0)} 轮）"
+            f"（目标模式激活：持续朝该目标工作；完成前先对照目标逐条核验证据（运行测试/读取结果），"
+            f"确认达成后调用 {goal_tool_name}，未达成就继续推进，不要提前宣告完成；已续跑 {goal.get('turns_used', 0)} 轮）"
         )
         bundle.developer_parts.append(f"## Current Task\n{user_message[:2000]}")
     else:
@@ -885,6 +942,12 @@ async def build_main_context(
     # 语言纪律已作为系统提示首尾双锚注入，这里再在注意力最高处落一行单锚，降低漂移。
     from app.orchestration.prompts.language import build_language_pin_line
     bundle.developer_parts.append(build_language_pin_line(_reply_lang, source=_lang_source))
+    # 1.3 Paused Subagents（plan-91-394）：上一轮中断、已保存进度的子代理。紧贴本轮用户消息之后，
+    # 保证“继续”类意图与可续跑清单在注意力最高处同时出现。
+    if paused_subagents and enable_subagents:
+        bundle.developer_parts.append(_build_paused_subagents_block(paused_subagents))
+    if paused_workflows:
+        bundle.developer_parts.append(_build_paused_workflows_block(paused_workflows))
     # 1.2 Rule Documents（plan-19-82 步骤 4）：规则段**前移**到 developer 段最前部并加 MANDATORY 语义。
     # 现状（本轮改造前）规则在第 4/4.1 位且标题无强制语义，模型容易忽略 → 遵循度不足。
     # 加载提前到此，顺序：Global Rules（优先级最高）→ Project Rules（工作区文档 + 工作目录规则）。

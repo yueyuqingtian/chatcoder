@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 class GoalCompleteTool(Tool):
     name = "goal_complete"
     risk_level = "low"
+    # plan-128-518：会话态工具——仅目标模式激活的会话对主代理下发（见 ToolRegistry.for_agent），其它场景模型看不到它
+    session_scoped = True
     description = (
         "标记当前会话目标已达成。仅当会话目标模式激活（上下文含「Current Goal」段）"
         "且你确认目标描述的工作已全部完成时调用；调用后系统停止自动续跑。"

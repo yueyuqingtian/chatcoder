@@ -46,6 +46,20 @@ export interface TaskCard {
   goalTurnsUsed: number;
   /** 最近一次收到该会话事件的时间（静默超时与快照校正的保护依据） */
   lastEventAt: number;
+  /** 工作流在等你（待决定 / 已暂停）时的状态；为空表示与工作流无关 */
+  workflowWaiting: WorkflowWaitState | null;
+}
+
+/** 工作流需要用户处理的两种状态（宠物以“等待确认”提示） */
+export type WorkflowWaitState = "attention" | "paused";
+
+const WORKFLOW_WAIT_LABEL: Record<WorkflowWaitState, string> = {
+  attention: "工作流等待你的决定",
+  paused: "工作流已暂停，可继续",
+};
+
+function workflowWaitState(s: { workflow_state?: string | null }): WorkflowWaitState | null {
+  return s.workflow_state === "attention" || s.workflow_state === "paused" ? s.workflow_state : null;
 }
 
 export interface RecentDone {
@@ -138,6 +152,7 @@ function newCard(sessionId: number, now: number, patch?: Partial<TaskCard>): Tas
     goalText: "",
     goalTurnsUsed: 0,
     lastEventAt: now,
+    workflowWaiting: null,
     ...patch,
   };
 }
@@ -268,7 +283,22 @@ export function useTaskCards(
       if (snap.title) card.title = snap.title;
       if (snap.goal_text) card.goalText = snap.goal_text;
       if (snap.goal_turns_used != null) card.goalTurnsUsed = Number(snap.goal_turns_used) || 0;
-      if (!snap.has_running && now - card.lastEventAt > SNAPSHOT_GUARD_MS) {
+      const wfState = workflowWaitState(snap);
+      if (wfState) {
+        // 工作流在等你：宠物以“等待确认”提示；不压过正在等待的审批
+        card.workflowWaiting = wfState;
+        if (card.status !== "failed" && !card.pendingApprovalId) {
+          card.status = "waiting";
+          card.waitingReason = WORKFLOW_WAIT_LABEL[wfState];
+        }
+      } else if (card.workflowWaiting) {
+        card.workflowWaiting = null;
+        if (card.waitingReason === WORKFLOW_WAIT_LABEL.attention || card.waitingReason === WORKFLOW_WAIT_LABEL.paused) {
+          card.waitingReason = "";
+        }
+        if (card.status === "waiting" && !card.pendingApprovalId) card.status = "running";
+      }
+      if (!snap.has_running && !card.workflowWaiting && now - card.lastEventAt > SNAPSHOT_GUARD_MS) {
         // 快照说它没在跑，且近期也没有事件 —— 判定为幽灵卡（丢失 session.completed 的兜底）
         map.delete(sid);
         recentRef.current = [
@@ -279,13 +309,17 @@ export function useTaskCards(
     }
 
     for (const s of list) {
-      if (!s.has_running || map.has(s.id)) continue;
+      const wfState = workflowWaitState(s);
+      if (map.has(s.id) || (!s.has_running && !wfState)) continue;
       const started = parseIso(s.running_started_at) ?? now;
       map.set(s.id, newCard(s.id, now, {
         title: s.title || `会话 ${s.id}`,
         startedAt: started,
         goalText: s.goal_text || "",
         goalTurnsUsed: Number(s.goal_turns_used) || 0,
+        ...(wfState
+          ? { status: "waiting" as const, waitingReason: WORKFLOW_WAIT_LABEL[wfState], workflowWaiting: wfState }
+          : {}),
       }));
     }
     markDirty();

@@ -8,6 +8,7 @@ import { WhatsNewModal } from "./components/WhatsNewModal";
 import { ResizeHandle } from "./components/ResizeHandle";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Toast } from "./components/Toast";
+import { WindowNavCluster } from "./components/WindowNavCluster";
 // plan-24-106 M5：原 `@tomagranate/liquid-glass` 折射叠加层已整体移除（该包不可用，
 // 且其 SVG feDisplacementMap 只对元素背后的背景副本做位移，无法采样窗口外桌面）。
 // 真正的桌面折射改由主进程的原生面板承担（electron/liquid-glass.cjs）。
@@ -132,6 +133,16 @@ export default function App() {
     if (settingsPanelExpandedRef.current) toggleRightPanel();
   }, [nav, sidebarCollapsed, toggleSidebar, toggleRightPanel]);
 
+  // 设置页内的跳转（如工作流页“前往子智能体设置”）：页面之间不直接持有导航状态，经事件交给这里
+  useEffect(() => {
+    const onOpenTab = (event: Event) => {
+      const tab = (event as CustomEvent<{ tab?: string }>).detail?.tab;
+      if (tab) openSettings(tab);
+    };
+    window.addEventListener("chatcoder:open-settings-tab", onOpenTab);
+    return () => window.removeEventListener("chatcoder:open-settings-tab", onOpenTab);
+  }, [openSettings]);
+
   const leaveSettings = useCallback(() => {
     const target = returnLocation;
     // 问题1: 离开设置页恢复右面板展开态
@@ -237,6 +248,8 @@ export default function App() {
           与 ui/Tooltip 共享展示延迟（不再出现浏览器自带的方形浮块）。 */}
       <NativeTitleTooltip />
       <div className="app-shell">
+        {/* plan-128-518：左上角 logo / 折叠 / 前进后退——全局固定层，折叠展开都是同一个实例、同一个位置 */}
+        <WindowNavCluster collapsed={sidebarCollapsed} onToggle={toggleSidebar} onSessionFocus={() => setNav(null)} />
         <Toast />
         <RollbackConfirmModal />
         <ImageGallery />
@@ -247,22 +260,24 @@ export default function App() {
         <ProjectDialog />
         {/* v18 布局重构（对齐 zcode）：左侧栏全高（含 logo/导航箭头），
             右侧 = 顶部标题栏 + 内容行（消息流 + 右侧面板）。 */}
-        <div ref={leftPanelElRef} className={`app-pane app-pane-left collapsible${sidebarCollapsed ? " collapsed" : ""}`} style={sidebarCollapsed ? { width: "0px", flexBasis: "0px" } : { width: `${leftPanelWidth}px`, flexBasis: `${leftPanelWidth}px` }}>
+        {/* plan-128-518：--left-w 恒等于展开宽度，侧栏内容始终按它布局；折叠只把面板宽度收到 0 并裁切 */}
+        <div ref={leftPanelElRef} className={`app-pane app-pane-left collapsible${sidebarCollapsed ? " collapsed" : ""}`} style={{ ["--left-w" as string]: `${leftPanelWidth}px`, ...(sidebarCollapsed ? { width: "0px", flexBasis: "0px" } : { width: `${leftPanelWidth}px`, flexBasis: `${leftPanelWidth}px` }) }}>
           {nav === "settings" ? (
             /* v19: 设置侧栏经插件 slot 渲染（与外部侧栏共用壳与宽度）。 */
-            <PluginSlot slot="settings-sidebar" tab={settingsActiveTab} onTab={setSettingsActiveTab} onBack={leaveSettings} collapsed={sidebarCollapsed} />
+            <PluginSlot slot="settings-sidebar" tab={settingsActiveTab} onTab={setSettingsActiveTab} onBack={leaveSettings} />
           ) : (
             <PluginSlot slot="sidebar" active={nav} onChange={(k: NavKey) => { if (k === "settings") { openSettings(); return; } setNav(k); if (k === "chat") useChatStore.getState().startNewTask(); }} onSessionFocus={() => setNav(null)} collapsed={sidebarCollapsed} onToggleCollapse={toggleSidebar} />
           )}
         </div>
         {/* RFL-1（plan-329-1647 S4）：不再传 freezeRefs——拖左分隔条时中列内容宽度实时跟随，
             消息流文本逐帧折行（用户反馈「拖拽时排版不实时」）。性能改由 PerfBus 零读预算兜。 */}
-        {!sidebarCollapsed && <ResizeHandle side="left" baseWidth={leftPanelWidth} minWidth={240} maxWidth={480} reservePx={370} panelEl={leftPanelElRef} onCommit={setLeftPanelWidth} />}
+        {/* 折叠时不再卸载分隔条（否则边框会瞬间消失）：它随左面板收窄一起左移，收到 0 后禁用拖拽命中 */}
+        <ResizeHandle side="left" baseWidth={leftPanelWidth} minWidth={240} maxWidth={480} reservePx={370} panelEl={leftPanelElRef} onCommit={setLeftPanelWidth} disabled={sidebarCollapsed} />
         <div className="app-right">
           {/* v19: 标题栏与右面板经插件 slot 渲染。
               plan-41-233：页面态（拓展/定时任务/设置等 nav 页）传 page——隐藏会话标题、项目
               与右侧图标组；左侧 logo/折叠/前进后退保留，页面态的会话聚焦由 Sidebar 抑制。 */}
-          <PluginSlot slot="titlebar" leftCollapsed={sidebarCollapsed} rightCollapsed={!rightExpanded} page={nav !== null && nav !== "chat"} onToggleLeft={toggleSidebar} onToggleRight={toggleRightPanel} onSessionFocus={() => setNav(null)} />
+          <PluginSlot slot="titlebar" leftCollapsed={sidebarCollapsed} rightCollapsed={!rightExpanded} page={nav !== null && nav !== "chat"} onToggleRight={toggleRightPanel} />
           <div className="app-body">
             <main ref={mainElRef} className={`app-main${!rightExpanded ? " right-panel-collapsed" : ""}`}>
               {/* plan-282-1421（第3项）：设置 ↔ 工作区切换过渡（id 为页面标识）。
@@ -273,7 +288,7 @@ export default function App() {
                   工作区内部导航完全交给 Workspace 内层过渡，任何时刻只播一层。 */}
               <PageTransition id={nav === "settings" ? "settings" : "workspace"}>
                 {nav === "settings"
-                  ? <div className="world-tex settings-tex-host"><SettingsContent tab={settingsActiveTab} /></div>
+                  ? <div className="settings-tex-host"><SettingsContent tab={settingsActiveTab} /></div>
                   : <Workspace nav={nav} onSessionStart={() => setNav(null)} />}
               </PageTransition>
             </main>

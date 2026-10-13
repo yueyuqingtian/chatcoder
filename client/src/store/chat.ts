@@ -2,12 +2,14 @@
 import { create } from "zustand";
 import { api } from "../api/client";
 import { ApiError } from "../api/client";
-import type { ArtifactOut, ArthasEntryOut, AttachmentInfo, ComposerRefOut, DebugStatusOut, FileChangeOut, MergeReportOut, MessageOut, ModelOut, ProjectOut, ProviderOut, RollbackAffected, RollbackPreviewFile, SessionOut, TaskOut, TurnOut } from "../api/client";
+import type { ArtifactOut, ArthasEntryOut, AttachmentInfo, ComposerRefOut, DebugStatusOut, FileChangeOut, MergeReportOut, MessageOut, ModelOut, ProjectOut, ProviderOut, RollbackAffected, RollbackPreviewFile, SessionOut, TaskOut, TurnOut, WorkflowNodeBrief } from "../api/client";
 import { wsClient, globalWsClient } from "../api/ws";
 import { normalizeApprovalMode, normalizeDraftMode } from "./drafts";
+import { parseRefLines } from "../utils/refLines";
 import { isBusy } from "../perf/bus";
 import { registerReconcileTask, RECONCILE_ORDER } from "../perf/reconcile";
 import type { ServerEventName } from "@chatcoder/shared/events";
+import { useWorkflowStore } from "./workflow";
 import type { CompactSummaryPayload } from "@chatcoder/shared/events";
 
 /** v7: 全局最近选择思考深度的 localStorage 持久化 key——重启后仍能恢复上次选择 */
@@ -76,6 +78,8 @@ export interface QueuedInput {
   attachments?: Record<string, unknown>[];
   reasoningEffort?: string;
   mode?: string | null;
+  /** plan-128-518：引用 chips 的结构化副本——排队编辑回填与出队发送都需要（此前只剩拼接后的文字，chip 丢失） */
+  refs?: ComposerRefOut[];
   /** plan-547: 点击"立即发送"后的注入中状态（等待 user_input.injected 事件确认后移除） */
   flushing?: boolean;
 }
@@ -132,6 +136,8 @@ export interface SubagentMeta {
   tokens?: number;
   /** plan-330-1648 M7: 失败/取消原因——主消息流卡片与子代理面板据此展示（不再只有一个红叉） */
   error?: string | null;
+  /** 工作流节点的子代理：面板头部展示所属节点（普通子代理为空） */
+  workflow?: WorkflowNodeBrief | null;
 }
 
 /** plan-75-332: 审批卡「解释」状态。
@@ -517,6 +523,24 @@ let _drainingQueue = false;
 let _wsUnsub: (() => void) | null = null;
 /** v37: 全局通道订阅的清理函数（与 App 生命周期绑定） */
 let _globalWsUnsub: (() => void) | null = null;
+let _workflowRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** 工作流状态变化：防抖刷新侧栏的工作流标记；只合并 workflow_state，不覆盖其它运行态字段 */
+function scheduleWorkflowSessionRefresh(): void {
+  if (_workflowRefreshTimer !== null) return;
+  _workflowRefreshTimer = setTimeout(() => {
+    _workflowRefreshTimer = null;
+    void api
+      .listSessions()
+      .then((fresh) => {
+        const states = new Map(fresh.map((x) => [x.id, x.workflow_state ?? null]));
+        useChatStore.setState((s) => ({
+          sessions: s.sessions.map((x) => (states.has(x.id) ? { ...x, workflow_state: states.get(x.id) } : x)),
+        }));
+      })
+      .catch(() => { /* 侧栏标记刷新失败不影响主流程 */ });
+  }, 400);
+}
 let _heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
 const HEARTBEAT_TIMEOUT = 60_000; // 60s 无事件超时兜底复位
 const _stoppingTurnIds = new Set<number>();
@@ -1393,7 +1417,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set((s) => ({
         queuedInputs: [{
           id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          content, attachments, reasoningEffort, mode,
+          content, attachments, reasoningEffort, mode, refs,
         }, ...s.queuedInputs],
       }));
       return null;
@@ -1406,6 +1430,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           attachments,
           reasoningEffort,
           mode,
+          refs,
         }],
       }));
       return null;
@@ -1841,24 +1866,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // S16（plan-41-197）：撤回回填恢复引用 chips——发送时 refs 被拼装成
       // 「引用文件：/ 使用技能：/ 使用连接器：/ 使用插件：」可读行追加在正文后；
       // 撤回时解析回结构化 refs，输入框恢复 chips 样式（不再只剩纯文本）。
-      const rawText = result.user_message ?? "";
-      const restoredRefs: Array<{ kind: string; value: string; label: string }> = [];
-      const bodyLines: string[] = [];
-      const _kindMap: Record<string, string> = {
-        "引用文件": "file", "使用技能": "skill", "使用连接器": "mcp", "使用插件": "plugin",
-      };
-      for (const line of rawText.split("\n")) {
-        const m = line.match(/^(引用文件|使用技能|使用连接器|使用插件)：(.*)$/);
-        if (!m) { bodyLines.push(line); continue; }
-        const kind = _kindMap[m[1]];
-        for (const part of m[2].split("、")) {
-          const v = part.trim();
-          if (!v) continue;
-          const value = kind === "file" ? v.replace(/^@/, "") : kind === "skill" ? v.replace(/^\$/, "") : v;
-          restoredRefs.push({ kind, value, label: value });
-        }
-      }
-      const restoredText = bodyLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+      // plan-128-518：解析逻辑抽到 utils/refLines，与排队消息编辑共用同一实现
+      const { text: restoredText, refs: restoredRefs } = parseRefLines(result.user_message ?? "");
       set({
         messages, turns, tasks,
         turnChanges: nextChanges,
@@ -1936,6 +1945,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             endedAt: it.updated_at ?? prev?.endedAt ?? null,
             filesCount: it.files_count ?? prev?.filesCount ?? 0,
             tokens: it.token_usage ?? prev?.tokens ?? 0,
+            workflow: it.workflow ?? prev?.workflow ?? null,
             // 终态单向不可逆：本地已 done/failed 不被 REST 滞后的 running/pending 回退
             status: (prev?.status === "done" || prev?.status === "failed") && (it.status === "running" || it.status === "pending")
               ? prev.status
@@ -2096,7 +2106,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!q || q.flushing) return;
     if (st.runningTurnId == null) {
       set((s) => ({ queuedInputs: s.queuedInputs.filter((x) => x.id !== id) }));
-      await get().sendTurn(q.content, q.attachments, q.reasoningEffort, q.mode);
+      await get().sendTurn(q.content, q.attachments, q.reasoningEffort, q.mode, undefined, q.refs);
       return;
     }
     set((s) => ({
@@ -2107,6 +2117,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         request_id: q.id,
         content: q.content,
         attachments: q.attachments,
+        refs: q.refs,
       });
       // 注入成功由 user_input.injected 事件从队列移除（避免双发）
     } catch (e) {
@@ -2130,7 +2141,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const next = queuedInputs[0];
         if (!next) return;
         set((s) => ({ queuedInputs: s.queuedInputs.slice(1) }));
-        const turnId = await get().sendTurn(next.content, next.attachments, next.reasoningEffort, next.mode);
+        const turnId = await get().sendTurn(next.content, next.attachments, next.reasoningEffort, next.mode, undefined, next.refs);
         if (turnId == null) {
           set((s) => ({ queuedInputs: [next, ...s.queuedInputs] }));
           return;
@@ -2169,6 +2180,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const st = get();
     // 运行中收到任何 WS 事件时重置心跳（§9.1 #3：60s 无事件超时兜底）
     if (st.isRunning) _startHeartbeat();
+    // 工作流事件不进入会话消息流：统一转发到工作流 store（以快照为准，事件只作刷新信号）
+    if (event.startsWith("workflow.")) {
+      useWorkflowStore.getState().applyEvent(payload);
+      return;
+    }
     // v2.1: 事件名契约化（packages/shared/src/events.ts 穷举），default 走 never 编译期兜底
     const ev = event as ServerEventName;
     switch (ev) {
@@ -3122,6 +3138,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
         break;
       }
+      // 工作流事件已在上方转发到工作流 store，此处仅作穷举登记（不进入消息流）
+      case "workflow.run.updated":
+      case "workflow.node.updated":
+      case "workflow.gate.opened":
+      case "workflow.log.appended":
+      case "workflow.conflict.detected":
+      case "workflow.conflict.resolved":
+        break;
       default: {
         // 编译期穷举检查：后端新增事件未在 events.ts 登记时此处报错
         const _exhaustive: never = ev;
@@ -3147,6 +3171,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       const sid = Number(p.session_id ?? 0);
       if (!sid) return;
+      if (ev.event === "workflow.run.updated") {
+        scheduleWorkflowSessionRefresh();
+        return;
+      }
       const event = ev.event as ServerEventName;
       if (event === "session.completed") {
         const ts = typeof p.last_activity_at === "string" ? p.last_activity_at : null;

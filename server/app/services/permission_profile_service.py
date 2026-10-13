@@ -60,7 +60,9 @@ BUILTIN_PROFILES: list[dict] = [
             "symbol_search", "outline",
             # v36 (plan-321-1600 R1): 四模式全支持子代理——只读模式仅暴露只读探索
             # 子代理（运行时强制 explore；可写 general 类型不暴露）。
-            "spawn_subagent", "collect_results", "subagent_inspect", "cancel_subagent",
+            "spawn_subagent", "collect_results", "subagent_inspect", "cancel_subagent", "resume_subagent",
+            # 工作流（设计 §5.8）：只读模式可规划与查询；启动 / 续跑 / 取消在运行时拒绝
+            "plan_workflow", "workflow_status",
         ],
         "hint": (
             "【审阅模式】当前处于只读审阅模式，你只能查看、检索、分析代码，"
@@ -83,7 +85,8 @@ BUILTIN_PROFILES: list[dict] = [
             "symbol_search", "outline",
             "fs_write", "terminal_exec",
             # v36 (plan-321-1600 R1): 计划模式同样支持子代理（仅只读探索，运行时强制 explore）
-            "spawn_subagent", "collect_results", "subagent_inspect", "cancel_subagent",
+            "spawn_subagent", "collect_results", "subagent_inspect", "cancel_subagent", "resume_subagent",
+            "plan_workflow", "workflow_status",
         ],
         # plan 的完整提示词较长且含 {session_id}/{turn_id} 占位符，
         # 仍由 engine._MODE_HINTS 维护（格式化处理在那边）；这里留空表示沿用。

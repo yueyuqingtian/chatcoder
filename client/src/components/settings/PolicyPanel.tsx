@@ -486,6 +486,7 @@ function ApprovalExplainSection() {
         {/* plan-91-393：改用全局模型选择器，与输入框模型弹窗一致（分组/标签/余额） */}
         <div className="sb-model-picker">
           <ModelPicker
+            variant="field"
             models={models}
             value={modelId}
             open={pickerOpen}

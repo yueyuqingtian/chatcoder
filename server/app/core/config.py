@@ -302,6 +302,33 @@ class Settings(BaseSettings):
     # 新派发先排队等任意一个结束（不再像旧行为那样直接拒绝）。
     # v36 优化：默认由 4 上调至 6；设置中心「子代理」可改（1~16）。
     max_concurrent_subagents: int = 6
+    # ── 工作流运行时（设计 §8）：并发上限与默认返工次数；0 = 不限（仅并发上限支持）──
+    workflow_enabled: bool = True
+    workflow_max_concurrent_global: int = 3  # 所有会话的工作流子代理合计，保守默认
+    workflow_max_concurrent_per_session: int = 2  # 同一会话合计，保守默认
+    workflow_max_parallel_nodes_per_flow: int = 2  # 单个子工作流内并行节点
+    workflow_default_max_rework: int = 2
+    workflow_token_budget_per_run: int = 0
+    # 计划生成后是否需要用户确认才开始执行（关闭则规划后直接开始）
+    workflow_confirm_before_start: bool = True
+    # 网络中断暂停后是否自动续跑一次（默认关闭：不替用户做决定）
+    workflow_auto_resume_on_network: bool = False
+    # 组装方式：runtime（主代理自主组装，默认）/ presets_only（只允许基于预设或用户模板）
+    workflow_composition_mode: str = "runtime"
+    # 评估节点的确定性检查：开启时检查失败不得判通过（改判返工）；关闭则只记录结果
+    workflow_require_checks: bool = True
+    # 同文件真冲突的处理：queue 先自动重做、多次失败再进入合并与决定；ask 每次真冲突都请你决定
+    workflow_conflict_policy: str = "queue"
+    # 允许自动三方合并（两侧改动区域不重叠时直接合并）；关闭则直接转入重做
+    workflow_auto_merge: bool = True
+    # 子工作流未声明隔离方式时的默认值：shared 共享工作区 / worktree 独立 git 工作树
+    workflow_isolation_default: str = "shared"
+    # 热点文件（逗号或换行分隔）：计划期若两个并行子工作流都要写入，直接给出串行化建议
+    workflow_hot_files: str = (
+        "package.json,package-lock.json,CHANGELOG.md,packages/shared/src/events.ts,"
+        "server/app/persistence/migrations.py,server/app/gateway/schemas.py,"
+        "client/src/store/i18n.ts,server/app/orchestration/engine.py"
+    )
     # v36: 排队等待上限（秒）——等不到空位时不再干等，直接放行，避免阻塞主代理。
     subagent_queue_wait_s: float = 60.0
     # plan-330-1648 M7: 单个子代理的 token 预算上限（0 = 不限）。

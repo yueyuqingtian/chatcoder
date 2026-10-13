@@ -176,6 +176,30 @@ CANCEL_SUBAGENT_SCHEMA = {
     },
 }
 
+RESUME_SUBAGENT_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "resume_subagent",
+        "description": (
+            "Resume a subagent that was INTERRUPTED (network/gateway failure, or the previous turn was "
+            "stopped) and kept its checkpoint. It continues from where it stopped with all completed "
+            "steps and context intact — use this instead of spawn_subagent whenever the user asks to "
+            "continue / resume / retry earlier work and a paused subagent is listed in your context "
+            "(## Paused Subagents). Never re-dispatch the same task with spawn_subagent in that case."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "integer",
+                    "description": "Id of the paused subagent to resume (listed under ## Paused Subagents).",
+                },
+            },
+            "required": ["agent_id"],
+        },
+    },
+}
+
 SEND_TO_SUBAGENT_SCHEMA = {
     "type": "function",
     "function": {
@@ -237,7 +261,7 @@ REPORT_TO_LEADER_SCHEMA = {
 
 SUBAGENT_TOOL_SCHEMAS = [
     SPAWN_SUBAGENT_SCHEMA, COLLECT_RESULTS_SCHEMA, SUBAGENT_INSPECT_SCHEMA, CANCEL_SUBAGENT_SCHEMA,
-    SEND_TO_SUBAGENT_SCHEMA,
+    SEND_TO_SUBAGENT_SCHEMA, RESUME_SUBAGENT_SCHEMA,
 ]
 
 # plan-330-1648 M4: 子代理自身可用的通信工具（只在**子代理**侧暴露，主代理不可见）。
@@ -256,6 +280,7 @@ SUBAGENT_TOOL_RISK: dict[str, str] = {
     "subagent_inspect": "low",
     "cancel_subagent": "low",
     "send_to_subagent": "low",
+    "resume_subagent": "medium",
     "report_to_leader": "low",
 }
 
@@ -389,7 +414,8 @@ def append_subagent_tools(tool_schemas: list[dict],
     if allow_spawn and _permitted("spawn_subagent") and "spawn_subagent" not in names:
         out.append(_spawn_schema(explore_only))
         names.add("spawn_subagent")
-    for _schema in (COLLECT_RESULTS_SCHEMA, SUBAGENT_INSPECT_SCHEMA, CANCEL_SUBAGENT_SCHEMA):
+    for _schema in (COLLECT_RESULTS_SCHEMA, SUBAGENT_INSPECT_SCHEMA, CANCEL_SUBAGENT_SCHEMA,
+                    RESUME_SUBAGENT_SCHEMA):
         _name = _schema["function"]["name"]
         if allow_collect and _permitted(_name) and _name not in names:
             out.append(_schema)

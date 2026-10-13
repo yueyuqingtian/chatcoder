@@ -39,6 +39,8 @@ interface Props {
    *  历史收益记录（冻结方案本来的动机，保留备查）：tmp_scroll_repro/ab_drag.mjs，
    *  220 条重内容下每帧强制布局读 2.37ms → 1.53ms。 */
   freezeRefs?: Array<React.RefObject<HTMLElement | null>>;
+  /** plan-128-518：禁用拖拽（侧栏折叠期间分隔条保留以承载边框的平滑左移，但不可拖） */
+  disabled?: boolean;
 }
 
 /** 内容根钉住标记（plan-75-333）。
@@ -102,7 +104,7 @@ export function unfreezePaneContents(list: PaneFollowEntry[]) {
   }
 }
 
-export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 0, panelEl, onCommit, freezeRefs }: Props) {
+export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 0, panelEl, onCommit, freezeRefs, disabled = false }: Props) {
   const startXRef = useRef(0);
   const baseWRef = useRef(baseWidth);
   const draggingRef = useRef(false);
@@ -441,8 +443,8 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
   return (
     <div
       ref={handleRef}
-      className={`resize-handle resize-handle-${side}`}
-      onMouseDown={handleMouseDown}
+      className={`resize-handle resize-handle-${side}${disabled ? " is-disabled" : ""}`}
+      onMouseDown={disabled ? undefined : handleMouseDown}
       onMouseMove={(e) => { if (!draggingRef.current) setHandleY(e.clientY); }}
       role="separator"
       aria-orientation="vertical"

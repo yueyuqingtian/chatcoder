@@ -171,6 +171,29 @@ def load_persisted_workspace() -> None:
             settings.max_subagents_per_turn = max(1, min(32, int(data["max_subagents_per_turn"])))
         except (TypeError, ValueError):
             pass
+    # 工作流运行时：恢复并发上限 / 返工 / 预算；取值与 PUT 共用同一夹紧口径
+    if "workflow_enabled" in data:
+        settings.workflow_enabled = bool(data["workflow_enabled"])
+    for _flag in (
+        "workflow_confirm_before_start",
+        "workflow_auto_resume_on_network",
+        "workflow_require_checks",
+        "workflow_auto_merge",
+    ):
+        if _flag in data:
+            setattr(settings, _flag, bool(data[_flag]))
+    if "workflow_composition_mode" in data:
+        settings.workflow_composition_mode = _composition_mode(data["workflow_composition_mode"])
+    if "workflow_conflict_policy" in data:
+        settings.workflow_conflict_policy = _conflict_policy(data["workflow_conflict_policy"])
+    if "workflow_isolation_default" in data:
+        settings.workflow_isolation_default = _isolation_default(data["workflow_isolation_default"])
+    for _key, (_lo, _hi) in _WORKFLOW_INT_BOUNDS.items():
+        if _key in data:
+            try:
+                setattr(settings, _key, max(_lo, min(_hi, int(data[_key]))))
+            except (TypeError, ValueError):
+                pass
 
 
 @router.get("/settings/workspace", response_model=WorkspaceOut)
@@ -253,6 +276,56 @@ class GlobalSettingsOut(BaseModel):
     # plan-75-332: 审批卡「解释」专用模型 / 思考深度（0/空 = 跟随会话）
     approval_explain_model_id: int = 0
     approval_explain_reasoning_effort: str = ""
+    # 工作流运行时（设置 → 工作流）：并发上限 0 = 不限
+    workflow_enabled: bool = True
+    workflow_max_concurrent_global: int = 3
+    workflow_max_concurrent_per_session: int = 2
+    workflow_max_parallel_nodes_per_flow: int = 2
+    workflow_default_max_rework: int = 2
+    workflow_token_budget_per_run: int = 0
+    workflow_confirm_before_start: bool = True
+    workflow_auto_resume_on_network: bool = False
+    workflow_composition_mode: str = "runtime"
+    workflow_hot_files: str = ""
+    workflow_require_checks: bool = True
+    workflow_conflict_policy: str = "queue"
+    workflow_auto_merge: bool = True
+    workflow_isolation_default: str = "shared"
+
+
+# 工作流数值设置的取值范围（0 = 不限，仅并发上限支持）；PUT 与启动恢复共用同一口径
+_WORKFLOW_INT_BOUNDS: dict[str, tuple[int, int]] = {
+    "workflow_max_concurrent_global": (0, 16),
+    "workflow_max_concurrent_per_session": (0, 16),
+    "workflow_max_parallel_nodes_per_flow": (1, 4),
+    "workflow_default_max_rework": (0, 3),
+    "workflow_token_budget_per_run": (0, 100_000_000),
+}
+
+
+_COMPOSITION_MODES = ("runtime", "presets_only")
+
+
+def _composition_mode(value: object) -> str:
+    """工作流组装方式只接受两种取值，其它输入回落为默认的 runtime。"""
+    text = str(value or "").strip()
+    return text if text in _COMPOSITION_MODES else "runtime"
+
+
+_CONFLICT_POLICIES = ("queue", "ask")
+_ISOLATION_MODES = ("shared", "worktree")
+
+
+def _conflict_policy(value: object) -> str:
+    """同文件冲突策略只接受 queue / ask，其它输入回落为默认的 queue。"""
+    text = str(value or "").strip()
+    return text if text in _CONFLICT_POLICIES else "queue"
+
+
+def _isolation_default(value: object) -> str:
+    """默认隔离方式只接受 shared / worktree，其它输入回落为默认的 shared。"""
+    text = str(value or "").strip()
+    return text if text in _ISOLATION_MODES else "shared"
 
 
 class GlobalSettingsIn(BaseModel):
@@ -306,6 +379,21 @@ class GlobalSettingsIn(BaseModel):
     # plan-75-332: 审批卡「解释」专用模型 / 思考深度（0/空 = 跟随会话）
     approval_explain_model_id: int | None = None
     approval_explain_reasoning_effort: str | None = None
+    # 工作流运行时
+    workflow_enabled: bool | None = None
+    workflow_max_concurrent_global: int | None = None
+    workflow_max_concurrent_per_session: int | None = None
+    workflow_max_parallel_nodes_per_flow: int | None = None
+    workflow_default_max_rework: int | None = None
+    workflow_token_budget_per_run: int | None = None
+    workflow_confirm_before_start: bool | None = None
+    workflow_auto_resume_on_network: bool | None = None
+    workflow_composition_mode: str | None = None
+    workflow_hot_files: str | None = None
+    workflow_require_checks: bool | None = None
+    workflow_conflict_policy: str | None = None
+    workflow_auto_merge: bool | None = None
+    workflow_isolation_default: str | None = None
 
 
 def _global_settings_out(data: dict) -> GlobalSettingsOut:
@@ -386,6 +474,29 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
         # v36: 子代理并发治理
         max_concurrent_subagents=data.get("max_concurrent_subagents", settings.max_concurrent_subagents),
         max_subagents_per_turn=data.get("max_subagents_per_turn", settings.max_subagents_per_turn),
+        # 工作流运行时：取值在 PUT 与启动恢复时已夹紧，此处只读
+        **{k: int(data.get(k, getattr(settings, k))) for k in _WORKFLOW_INT_BOUNDS},
+        workflow_enabled=bool(data.get("workflow_enabled", settings.workflow_enabled)),
+        workflow_confirm_before_start=bool(
+            data.get("workflow_confirm_before_start", settings.workflow_confirm_before_start)
+        ),
+        workflow_auto_resume_on_network=bool(
+            data.get("workflow_auto_resume_on_network", settings.workflow_auto_resume_on_network)
+        ),
+        workflow_composition_mode=_composition_mode(
+            data.get("workflow_composition_mode", settings.workflow_composition_mode)
+        ),
+        workflow_hot_files=str(data.get("workflow_hot_files", settings.workflow_hot_files) or ""),
+        workflow_require_checks=bool(
+            data.get("workflow_require_checks", settings.workflow_require_checks)
+        ),
+        workflow_conflict_policy=_conflict_policy(
+            data.get("workflow_conflict_policy", settings.workflow_conflict_policy)
+        ),
+        workflow_auto_merge=bool(data.get("workflow_auto_merge", settings.workflow_auto_merge)),
+        workflow_isolation_default=_isolation_default(
+            data.get("workflow_isolation_default", settings.workflow_isolation_default)
+        ),
     )
 
 
@@ -600,6 +711,42 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         _mt = max(1, min(32, int(body.max_subagents_per_turn)))
         data["max_subagents_per_turn"] = _mt
         settings.max_subagents_per_turn = _mt
+    # 工作流运行时：夹紧后写入配置；并发上限由服务每拍读取，保存即生效
+    if body.workflow_enabled is not None:
+        data["workflow_enabled"] = bool(body.workflow_enabled)
+        settings.workflow_enabled = bool(body.workflow_enabled)
+    for _flag in (
+        "workflow_confirm_before_start",
+        "workflow_auto_resume_on_network",
+        "workflow_require_checks",
+        "workflow_auto_merge",
+    ):
+        _flag_value = getattr(body, _flag)
+        if _flag_value is not None:
+            data[_flag] = bool(_flag_value)
+            setattr(settings, _flag, bool(_flag_value))
+    if body.workflow_composition_mode is not None:
+        _mode = _composition_mode(body.workflow_composition_mode)
+        data["workflow_composition_mode"] = _mode
+        settings.workflow_composition_mode = _mode
+    if body.workflow_conflict_policy is not None:
+        _policy = _conflict_policy(body.workflow_conflict_policy)
+        data["workflow_conflict_policy"] = _policy
+        settings.workflow_conflict_policy = _policy
+    if body.workflow_isolation_default is not None:
+        _isolation = _isolation_default(body.workflow_isolation_default)
+        data["workflow_isolation_default"] = _isolation
+        settings.workflow_isolation_default = _isolation
+    if body.workflow_hot_files is not None:
+        _hot = str(body.workflow_hot_files)[:2000]
+        data["workflow_hot_files"] = _hot
+        settings.workflow_hot_files = _hot
+    for _key, (_lo, _hi) in _WORKFLOW_INT_BOUNDS.items():
+        _val = getattr(body, _key)
+        if _val is not None:
+            _clamped = max(_lo, min(_hi, int(_val)))
+            data[_key] = _clamped
+            setattr(settings, _key, _clamped)
     _save_config(data)
     # 运行时更新 context compaction 设置
     if body.auto_compact_enabled is not None:

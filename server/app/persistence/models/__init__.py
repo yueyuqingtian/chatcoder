@@ -29,6 +29,15 @@ from app.persistence.models.tenant import Tenant, User
 from app.persistence.models.turn import Turn
 from app.persistence.models.usage_record import UsageRecord
 from app.persistence.models.workbuddy_auth import WorkBuddyAuth
+# 工作流运行时（设计 §5.2）：程序 / 子工作流 / 节点 / 尝试 / 增量检查点 / 事件 / 计划修订
+from app.persistence.models.workflow import (
+    WorkflowAttempt,
+    WorkflowEvent,
+    WorkflowMessage,
+    WorkflowNode,
+    WorkflowPlanRevision,
+    WorkflowRun,
+)
 
 __all__ = [
     "Tenant",
@@ -67,4 +76,10 @@ __all__ = [
     "ToolCall",
     "TraeAuth",
     "UsageRecord",
+    "WorkflowRun",
+    "WorkflowNode",
+    "WorkflowAttempt",
+    "WorkflowMessage",
+    "WorkflowEvent",
+    "WorkflowPlanRevision",
 ]

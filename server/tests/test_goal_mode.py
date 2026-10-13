@@ -147,6 +147,46 @@ def test_goal_complete_registered():
     assert get_tool_registry().get("goal_complete") is not None
 
 
+def _schema_names(schemas):
+    return {s.get("function", {}).get("name") for s in schemas}
+
+
+def test_goal_tool_hidden_by_default():
+    """plan-128-518：未激活目标模式时，goal_complete 不得随全量工具下发给模型（用户反馈：没开目标模式 AI 也会调用）。"""
+    reg = get_tool_registry()
+    assert "goal_complete" not in _schema_names(reg.all_schemas())
+    assert "goal_complete" not in {t.name for t in reg.for_agent(None)}
+    # 白名单显式点名也不应绕过门控
+    assert "goal_complete" not in _schema_names(reg.all_schemas(["goal_complete", "fs_read"]))
+
+
+def test_goal_tool_hidden_in_ta3_disguise_by_default():
+    """ta3 伪装层：未激活目标时 CompleteGoal 同样不可见；激活时以伪装名下发。"""
+    from app.models.providers.ta3_tool_schemas import disguise_tools
+
+    reg = get_tool_registry()
+    assert "CompleteGoal" not in _schema_names(disguise_tools(reg.all_schemas()))
+    assert "CompleteGoal" in _schema_names(disguise_tools(reg.all_schemas(include_scoped=True)))
+
+
+def test_visible_goal_tool_name_follows_ta3_alias():
+    """提示词引用的工具名必须与模型实际看到的一致（ta3 会话为 CompleteGoal）。"""
+    from app.models.providers.ta3_tool_aliases import visible_tool_name
+
+    assert visible_tool_name("goal_complete", ta3=False) == "goal_complete"
+    assert visible_tool_name("goal_complete", ta3=True) == "CompleteGoal"
+    assert visible_tool_name("not_mapped_tool", ta3=True) == "not_mapped_tool"
+
+
+def test_goal_tool_exposed_when_goal_active():
+    """目标模式激活时由引擎显式放行（include_scoped=True）。"""
+    reg = get_tool_registry()
+    assert "goal_complete" in _schema_names(reg.all_schemas(include_scoped=True))
+    assert "goal_complete" in _schema_names(reg.all_schemas(["goal_complete"], include_scoped=True))
+    # 其余工具不受影响
+    assert "fs_read" in _schema_names(reg.all_schemas())
+
+
 # ───────────────── 续跑判定矩阵 ─────────────────
 
 

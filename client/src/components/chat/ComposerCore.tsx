@@ -41,7 +41,7 @@ import { ApprovalPicker } from "../composer/ApprovalPicker";
 import { WorkspaceChip } from "../composer/WorkspaceChip";
 import { QueueTray } from "../composer/QueueTray";
 import { useToolbarFit } from "../composer/useToolbarFit";
-import { BUILTIN_MODES, MODE_META, customModeIcon, EFFORT_RANK } from "../composer/modeMeta";
+import { BUILTIN_MODES, GOAL_MODE, MODE_META, customModeIcon, EFFORT_RANK } from "../composer/modeMeta";
 import type { ExtKind } from "../../store/navIntent";
 import { Modal } from "../Modal";
 import { createPortal } from "react-dom";
@@ -51,7 +51,8 @@ import { ApprovalCard } from "./ApprovalCard";
 import { useChatStore, persistLastReasoning, type UsageDetail } from "../../store/chat";
 import { useDraftsStore, normalizeDraftMode, normalizeApprovalMode, type ApprovalMode } from "../../store/drafts";
 import { useI18n } from "../../store/i18n";
-import { api, resolveFileUrl, type AttachmentInfo, type McpServerOut, type PermissionProfileOut, type PluginMarketItem, type SkillOut, type TreeNode } from "../../api/client";
+import { parseRefLines } from "../../utils/refLines";
+import { api, resolveFileUrl, type AttachmentInfo, type ComposerRefOut, type McpServerOut, type PermissionProfileOut, type PluginMarketItem, type SkillOut, type TreeNode } from "../../api/client";
 import { openGallery } from "../../store/gallery";
 // plan-75-332: 权限模式菜单说明文案走统一 Tooltip（遵循“禁止新增原生 title”）
 import { Tooltip } from "../ui";
@@ -138,11 +139,16 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   const goalText = isHome ? homeGoalText : (currentSession?.goal_text ?? null);
   const goalStatus = isHome ? (homeGoalText ? "active" : "none") : (currentSession?.goal_status ?? "none");
   const goalTurnsUsed = currentSession?.goal_turns_used ?? 0;
-  const [showGoalModal, setShowGoalModal] = useState(false);
+  // plan-128-518：目标是执行模式菜单的第四项——选中即“待命”，下一条发送的消息就是目标（无二次弹窗）。
+  // 待命态只存在于输入框本地；发送后目标写入会话（goal_status=active），由目标胶囊接管展示。
+  const [goalArmed, setGoalArmed] = useState(false);
+  /** 目标模式是否生效：待命中，或会话已有激活目标 */
+  const goalOn = goalArmed || goalStatus === "active";
+  // 切换会话 / 回首页时待命态复位（待命只属于当前输入框，不跨会话携带）
+  useEffect(() => { setGoalArmed(false); }, [currentSessionId]);
   // 工具条收窄：用 state 持有节点（问答 / 审批态下工具条不渲染，之后再出现时需要重新观察）
   const [toolbarEl, setToolbarEl] = useState<HTMLDivElement | null>(null);
   useToolbarFit(toolbarEl);
-  const [goalInput, setGoalInput] = useState("");
   /** goal.completed 后的 3 秒过渡展示（label「已完成」→ 淡出） */
   const [goalCompletedVisible, setGoalCompletedVisible] = useState(false);
   const prevGoalStatusRef = useRef(goalStatus);
@@ -181,23 +187,8 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     }));
   };
 
-  const submitGoal = () => {
-    const text = goalInput.trim();
-    if (!text) return;
-    // plan-676: 首页无会话——本地暂存入 home 草稿，随会话创建一次落准
-    if (isHome || currentSessionId == null) {
-      setHomeGoalText(text);
-      useDraftsStore.getState().patchDraft("home", { goalText: text });
-      setShowGoalModal(false);
-      return;
-    }
-    void api.setSessionGoal(currentSessionId, text)
-      .then((out) => applyGoalOut(out))
-      .catch(() => { /* 设定失败保持现状，WS 不触发 */ });
-    setShowGoalModal(false);
-  };
-
   const cancelGoal = () => {
+    setGoalArmed(false);
     // plan-676: 首页移除 = 清本地暂存与草稿
     if (isHome || currentSessionId == null) {
       setHomeGoalText(null);
@@ -955,6 +946,24 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     }
   };
 
+  /** plan-128-518：模式菜单的统一入口。
+   *  选「目标」= 切到智能体能力边界并“待命”，下一条发送的消息即目标（无二次弹窗）；
+   *  选其它模式 = 退出目标（目标激活中则一并结束，避免续跑轮在受限模式下空转）。 */
+  const pickMode = (name: string) => {
+    if (name === GOAL_MODE) {
+      if (composerMode !== "agent") setMode("agent");
+      setGoalArmed(true);
+      setShowPlus(false);
+      window.setTimeout(() => taRef.current?.focus(), 0);
+      return;
+    }
+    if (goalOn) {
+      setGoalArmed(false);
+      if (goalStatus === "active") cancelGoal();
+    }
+    setMode(name);
+  };
+
   /** plan-75-332: 切换权限模式（询问审批 / 自动审批 / 完全访问）。
    *  会话内立即 PATCH 持久化；首页只改本地状态，随创建会话一次落准。 */
   const changeApprovalMode = (mode: ApprovalMode) => {
@@ -1019,7 +1028,9 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
       (refTextParts.length ? `${input.trim() ? "\n\n" : ""}${refTextParts.join("\n\n")}` : "") +
       (refsSuffix ? `${hasPriorText ? "\n\n" : ""}${refsSuffix}` : "");
     const attachmentPayload = [...attachments.map((a) => ({ ...a })), ...refAttachments];
-    const mode = composerMode;
+    // plan-128-518：目标模式待命中——这条消息的正文就是目标；目标不是后端执行模式，能力边界按智能体处理
+    const goalText0 = goalArmed ? input.trim() : "";
+    const mode = composerMode === GOAL_MODE ? "agent" : composerMode;
 
     if (composerBrowserRefs.length > 0) {
       clearComposerBrowserRefs();
@@ -1039,7 +1050,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
           model_id: usedModelId,
           permission_mode: mode,
           approval_mode: approvalMode,
-          goal_text: homeGoalText,
+          goal_text: goalText0 || homeGoalText,
         });
         if (sessionId == null) return;
         useDraftsStore.getState().patchDraft(`s${sessionId}`, { reasoningEffort: sendEffort ?? null });
@@ -1059,6 +1070,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
         // 发送后清空首页草稿：再点新建任务得到全新空态首页（模式默认、模型/深度承接最近值）
         useDraftsStore.getState().clearDraft("home");
         setHomeGoalText(null);
+        setGoalArmed(false);
         onStarted?.();
       } catch {
         /* ignore */
@@ -1070,7 +1082,18 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     // 运行中发送 → sendTurn 内部入队，turn 完成后自动续发
     // plan-75-332: 同首页口径——agent 透传 null（引擎默认全量工具），其余模式名一律透传。
     const sendMode = mode === "agent" ? null : mode;
-        await sendTurn(content, attachmentPayload, sendEffort, sendMode, sessionModelId, refPayload);
+    // plan-128-518：目标待命——先把正文设为会话目标（写库 + 广播），再发送，引擎该 turn 起即按目标模式下发工具与续跑。
+    if (goalText0 && currentSessionId != null) {
+      try {
+        applyGoalOut(await api.setSessionGoal(currentSessionId, goalText0));
+      } catch {
+        useChatStore.setState({ error: "目标设定失败，请重试" });
+        setSending(false);
+        return;
+      }
+    }
+    await sendTurn(content, attachmentPayload, sendEffort, sendMode, sessionModelId, refPayload);
+    if (goalText0) setGoalArmed(false);
     skipDraftSyncRef.current = true;
     setInput("");
     setAttachments([]);
@@ -1096,20 +1119,31 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   }, [permProfiles]);
 
   /** + 浮窗的模式项：内置模式取 modeMeta（图标 + 短名 + 一行说明），自定义模式取配置的名称与描述 */
-  const modeOptions: ModeOption[] = useMemo(() => modeMenuProfiles.map((p) => {
-    const meta = MODE_META[p.name];
-    return meta
-      ? { name: p.name, label: t(meta.shortKey), desc: t(meta.descKey), icon: meta.icon(16), kbd: p.name === "plan" ? "⇧ Tab" : undefined }
-      : { name: p.name, label: p.display_name || p.name, desc: p.description || "自定义执行模式", icon: customModeIcon(16) };
-  }), [modeMenuProfiles, t]);
-  const modeMeta = MODE_META[composerMode];
+  const modeOptions: ModeOption[] = useMemo(() => {
+    const base = modeMenuProfiles.map((p) => {
+      const meta = MODE_META[p.name];
+      return meta
+        ? { name: p.name, label: t(meta.shortKey), desc: t(meta.descKey), icon: meta.icon(16), kbd: p.name === "plan" ? "⇧ Tab" : undefined }
+        : { name: p.name, label: p.display_name || p.name, desc: p.description || "自定义执行模式", icon: customModeIcon(16) };
+    });
+    // plan-128-518：“目标”排在内置三项之后、自定义模式之前
+    const gm = MODE_META[GOAL_MODE];
+    const goalOpt: ModeOption = { name: GOAL_MODE, label: t(gm.shortKey), desc: t(gm.descKey), icon: gm.icon(16) };
+    const at = base.findIndex((o) => !BUILTIN_MODE_ORDER.includes(o.name));
+    return at < 0 ? [...base, goalOpt] : [...base.slice(0, at), goalOpt, ...base.slice(at)];
+  }, [modeMenuProfiles, t]);
+  /** 菜单中的“当前项”：目标生效时高亮“目标”，否则是真实执行模式 */
+  const shownMode = goalOn ? GOAL_MODE : composerMode;
+  const modeMeta = MODE_META[shownMode];
   const modeShort = modeMeta
     ? t(modeMeta.shortKey)
-    : (permProfiles.find((x) => x.name === composerMode)?.display_name ?? composerMode);
+    : (permProfiles.find((x) => x.name === shownMode)?.display_name ?? shownMode);
   const modeTone = modeMeta?.tone ?? "neutral";
 
   /** Shift+Tab：在内置三种执行模式间循环（输入框聚焦时，与参考图4的快捷键提示一致） */
   const cycleMode = () => {
+    // plan-128-518：目标模式下锁定模式循环（续跑中途被切走会让目标空转），需要退出请在菜单里选其它模式
+    if (goalOn) return;
     const order = BUILTIN_MODE_ORDER;
     const i = order.indexOf(composerMode);
     setMode(order[(i + 1) % order.length]);
@@ -1136,10 +1170,18 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   };
 
   /** 排队项「编辑」：移出队列并回填输入框（已有正文时追加在后面，不覆盖用户正在写的内容） */
-  const editQueued = (q: { id: string; content: string; attachments?: Record<string, unknown>[] }) => {
+  const editQueued = (q: { id: string; content: string; attachments?: Record<string, unknown>[]; refs?: ComposerRefOut[] }) => {
     updateQueuedInput(q.id, null);
-    setInput((cur) => (cur.trim() ? `${cur}
-${q.content}` : q.content));
+    // plan-128-518：排队项的 content 里带着拼接的「使用技能：…」引用行，直接回填会变成原始文字。
+    // 剪掉引用行后把结构化 refs（旧队列项无 refs 时从文本解析兜底）恢复成输入框 chips。
+    const parsed = parseRefLines(q.content);
+    const restored: ComposerRef[] = ((q.refs && q.refs.length > 0 ? q.refs : parsed.refs) as ComposerRef[])
+      .map((r) => ({ kind: r.kind, value: r.value, label: r.label }));
+    const body = parsed.text;
+    setInput((cur) => (cur.trim() ? (body ? `${cur}\n${body}` : cur) : body));
+    if (restored.length > 0) {
+      setRefs((prev) => [...prev, ...restored.filter((r) => !prev.some((p) => p.kind === r.kind && p.value === r.value))]);
+    }
     const atts = (q.attachments ?? []) as unknown as AttachmentInfo[];
     if (atts.length > 0) setAttachments((prev) => [...prev, ...atts]);
     window.setTimeout(() => taRef.current?.focus(), 0);
@@ -1156,7 +1198,9 @@ ${q.content}` : q.content));
   const isApprovalMode = !isHome && pendingApproval != null && !isQuestionMode;
 
   /** 会话 229: 输入框 placeholder（textarea 文字透明后由标签层渲染，保持视觉一致） */
-  const placeholderText = isHome
+  const placeholderText = goalArmed
+    ? t("composer.goal_placeholder")
+    : isHome
     ? t("composer.placeholder_home")
     : pendingPlan
     ? t("composer.placeholder_plan")
@@ -1314,6 +1358,16 @@ ${q.content}` : q.content));
           )}
           {/* plan-671: 目标胶囊——输入框内顶部（排队胶囊上方），复用胶囊语言（对齐 zcode 低打扰）。
               plan-676: 首页变体仅 label+文本+移除（无轮次计数/完成打勾——会话未创建无续跑语义） */}
+          {/* plan-128-518：目标待命——已选「目标」模式但还没发送，提示“下一条消息就是目标”，可点 × 退出 */}
+          {goalArmed && !goalPillVisible && (
+            <div className="goal-pill">
+              <span className="goal-pill-label">目标</span>
+              <span className="goal-pill-text">下一条消息将作为目标，自动推进直到达成</span>
+              <button className="goal-pill-btn" onClick={() => setGoalArmed(false)} title="退出目标模式" type="button">
+                <IconX size={11} />
+              </button>
+            </div>
+          )}
           {goalPillVisible && (
             <div
               className={`goal-pill${isRunning ? " running" : ""}${goalStatus === "completed" ? " done" : ""}`}
@@ -1545,15 +1599,8 @@ ${q.content}` : q.content));
                   onClose={() => setShowPlus(false)}
                   anchorRefs={[plusBtnRef, modeChipRef]}
                   modes={modeOptions}
-                  mode={composerMode}
-                  onModeChange={setMode}
-                  goal={{
-                    visible: currentSessionId != null || isHome,
-                    active: goalStatus === "active",
-                    text: goalText,
-                  }}
-                  onGoal={() => { setGoalInput(goalStatus === "active" ? (goalText ?? "") : ""); setShowGoalModal(true); }}
-                  onCancelGoal={cancelGoal}
+                  mode={shownMode}
+                  onModeChange={pickMode}
                   exts={extItems}
                   onPickExt={pickExt}
                 />
@@ -1655,39 +1702,6 @@ ${q.content}` : q.content));
 
       {/* plan-282-1421（图4）：原 .composer-drag-overlay 外挂虚线遮罩已移除，
           拖拽提示改由 .composer-main.is-drag-over 的边框 + 卡内 .composer-drop-hint 承载。 */}
-
-      {/* plan-671: 设定/修改目标弹层（复用 Modal 与现有输入样式） */}
-      <Modal
-        open={showGoalModal}
-        onClose={() => setShowGoalModal(false)}
-        title={goalStatus === "active" ? "修改目标" : "设定目标"}
-        subtitle="目标激活后，每轮结束若未标记完成将自动续跑推进，直至达成或达轮次上限"
-        width={520}
-        footer={
-          <>
-            <button className="btn" onClick={() => setShowGoalModal(false)}>取消</button>
-            <button className="btn primary" onClick={submitGoal} disabled={!goalInput.trim()}>
-              {goalStatus === "active" ? "更新目标" : "设定目标"}
-            </button>
-          </>
-        }
-      >
-        <div className="goal-modal-body">
-          <input
-            className="sb-rename-input"
-            value={goalInput}
-            onChange={(e) => setGoalInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && goalInput.trim()) {
-                e.preventDefault();
-                submitGoal();
-              }
-            }}
-            placeholder="用一句话描述要达成的目标，例如：修复登录页在深色主题下的样式问题"
-            autoFocus
-          />
-        </div>
-      </Modal>
 
       {/* 浏览器标注详情预览弹窗（对齐图 2） */}
       <Modal

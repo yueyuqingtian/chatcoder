@@ -66,6 +66,12 @@ export function BrowserPanel({ sessionId, visible = true }: {
   const selecting = browserState.selecting;
 
   const [inputUrl, setInputUrl] = useState(activeTab?.current || "");
+  // plan-128-518：空白新标签页出现时自动聚焦地址栏，用户第一眼就知道在上方输入网址
+  const urlInputRef = useRef<HTMLInputElement>(null);
+  const activeIsBlank = !!activeTab && !activeTab.current;
+  useEffect(() => {
+    if (visible && activeIsBlank) urlInputRef.current?.focus({ preventScroll: true });
+  }, [visible, activeIsBlank, activeTabId]);
   const [annotState, setAnnotState] = useState<{ x: number; y: number; source: string; info: ElementInfo | null; screenshotDataUrl?: string } | null>(null);
   const [annotText, setAnnotText] = useState("");
   const [sentToast, setSentToast] = useState<string | null>(null);
@@ -720,6 +726,7 @@ export function BrowserPanel({ sessionId, visible = true }: {
         <div className="browser-url">
           <IconGlobe size={12} />
           <input
+            ref={urlInputRef}
             value={inputUrl}
             onChange={(e) => setInputUrl(e.target.value)}
             onKeyDown={(e) => {

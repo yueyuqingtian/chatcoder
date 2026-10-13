@@ -122,10 +122,16 @@ function errorMessage(res: Response, raw: string): string {
 function parseErrorBody(raw: string): { message?: string; code?: string; data?: unknown } | null {
   try {
     const body = JSON.parse(raw) as {
-      error?: { message?: string; code?: string };
+      error?: { message?: string; code?: string; detail?: unknown };
       detail?: unknown;
     };
     if (body?.error?.message || body?.error?.code) {
+      // 服务端保留的结构化详情（HTTPException 的 dict 详情）优先：界面按它分支处理
+      const structured = body.error.detail;
+      if (structured && typeof structured === "object" && !Array.isArray(structured)) {
+        const s = structured as { message?: string; code?: string };
+        return { message: s.message ?? body.error.message, code: s.code ?? body.error.code, data: structured };
+      }
       return { message: body.error?.message, code: body.error?.code, data: body.error };
     }
     const d = body?.detail;
@@ -182,7 +188,7 @@ async function postCancel<T>(path: string): Promise<T> {
   });
   if (!res.ok) {
     const detail = await res.text();
-    throw new Error(errorMessage(res, detail));
+    throw toApiError(res, detail);
   }
   return res.json() as Promise<T>;
 }
@@ -191,7 +197,7 @@ async function get<T>(path: string): Promise<T> {
   const res = await fetchWithRetry(`${await baseForFetch()}${path}`);
   if (!res.ok) {
     const detail = await res.text();
-    throw new Error(errorMessage(res, detail));
+    throw toApiError(res, detail);
   }
   return res.json();
 }
@@ -204,7 +210,7 @@ async function patch<T>(path: string, body?: unknown): Promise<T> {
   });
   if (!res.ok) {
     const detail = await res.text();
-    throw new Error(errorMessage(res, detail));
+    throw toApiError(res, detail);
   }
   return res.json();
 }
@@ -213,7 +219,7 @@ async function del<T>(path: string): Promise<T> {
   const res = await fetchWithRetry(`${await baseForFetch()}${path}`, { method: "DELETE" });
   if (!res.ok) {
     const detail = await res.text();
-    throw new Error(errorMessage(res, detail));
+    throw toApiError(res, detail);
   }
   return res.json();
 }
@@ -226,7 +232,7 @@ async function put<T>(path: string, body?: unknown): Promise<T> {
   });
   if (!res.ok) {
     const detail = await res.text();
-    throw new Error(errorMessage(res, detail));
+    throw toApiError(res, detail);
   }
   return res.json();
 }
@@ -373,6 +379,167 @@ export interface UsageStatsOut {
   peak_tokens: number;
   streak_current: number;
   streak_longest: number;
+}
+
+/* ── 工作流（设计 §5.9）：程序快照与操作 ── */
+/** 并发池占用（服务端 scheduler.snapshot）：limit 为 0 表示不限 */
+export interface WorkflowPoolOut {
+  global: { in_use: number; limit: number };
+  session: { limit: number; in_use: Record<string, number> };
+  queued: number;
+  /** 跨会话的工作流计数（设置页概览）：运行中（含等待决定）与已暂停 */
+  programs?: { running: number; paused: number };
+}
+
+/** 工作流模板：内置预设（只读）与用户模板（可改名、停用、删除） */
+export interface WorkflowTemplateOut {
+  key: string;
+  name: string;
+  description: string;
+  source: "preset" | "user";
+  enabled: boolean;
+  plan: Record<string, unknown>;
+  updated_at?: string | null;
+}
+
+/** 续跑前的工作区报告（设计 §6.6） */
+export interface WorkflowDriftOut {
+  files: string[];
+  head: { from: string | null; to: string | null } | null;
+}
+
+/** 单个改动文件的差异：diff 为空时 reason 说明原因 */
+export interface WorkflowDriftDiffOut {
+  path: string;
+  status: "added" | "modified" | "deleted";
+  diff: string | null;
+  reason: string | null;
+}
+
+/** 节点的一次尝试（设计 §7.6 尝试历史） */
+export interface WorkflowAttemptOut {
+  attempt_no: number;
+  mode: "fresh" | "checkpoint" | "rework" | "repair" | string;
+  status: string;
+  reason: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+}
+
+/* 字段与服务端 store._run_dict / _node_dict 一一对应：服务端新增字段时这里同步补齐 */
+export type WorkflowRunStatus =
+  | "draft" | "running" | "waiting_human" | "paused" | "succeeded" | "failed" | "cancelled";
+
+export interface WorkflowRunOut {
+  id: number;
+  session_id: number;
+  parent_run_id: number | null;
+  kind: string;
+  package_key: string | null;
+  title: string;
+  goal: string;
+  rationale: string;
+  based_on: string | null;
+  status: WorkflowRunStatus | string;
+  pause_kind: string | null;
+  pause_reason: string | null;
+  /** 结束原因：user（用户取消）/ adjusted（已按新的要求调整，由新计划替代） */
+  closed_reason?: string | null;
+  paused_at: string | null;
+  resume_count: number;
+  rework_total: number;
+  token_used: number;
+  token_budget: number;
+  workspace: string;
+  isolation: string;
+  /** 计划图（plan_workflow 规范化结果）：flows[].key / title / depends_on / nodes */
+  graph: Record<string, unknown> | null;
+  plan_rev: number;
+  origin_turn_id: number | null;
+  last_turn_id: number | null;
+  /** 程序内事件序号（非会话级 seq） */
+  last_seq: number;
+  /** 步骤完成情况：仅列表摘要携带（快照接口由节点直接推导） */
+  progress?: { done: number; total: number };
+  started_at: string | null;
+  updated_at: string | null;
+  finished_at: string | null;
+  error: Record<string, unknown> | null;
+}
+
+export interface WorkflowNodeOut {
+  id: number;
+  run_id: number;
+  key: string;
+  title: string;
+  kind: string;
+  role: string | null;
+  task: string;
+  inputs: string[];
+  acceptance: string[];
+  write_scope: string[];
+  commands: string[];
+  rework_to: string | null;
+  max_rework: number | null;
+  question: string | null;
+  status: string;
+  reason: string | null;
+  attempt_no: number;
+  rework_round: number;
+  output: Record<string, unknown> | null;
+  verdict: Record<string, unknown> | null;
+  checks: Array<Record<string, unknown>> | null;
+  agent_id: number | null;
+  next_retry_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  error: Record<string, unknown> | null;
+  pending: Record<string, unknown> | null;
+  /** 冲突闸门载荷：基线 / 当前 / 待写入三栏数据（仅写入冲突时存在） */
+  conflict: Record<string, unknown> | null;
+  token_used: number;
+}
+
+export interface WorkflowFlowOut {
+  run: WorkflowRunOut;
+  nodes: WorkflowNodeOut[];
+}
+
+export interface WorkflowProgramOut {
+  run: WorkflowRunOut;
+  flows: WorkflowFlowOut[];
+}
+
+/** 子代理面板的工作流节点头：节点、所属子工作流与程序、最近一次尝试的模式、评估结论与产出摘要 */
+export interface WorkflowNodeBrief {
+  node_id: number;
+  node_key: string;
+  node_title: string;
+  kind: string;
+  status: string;
+  attempt_no: number;
+  rework_round: number;
+  mode: string;
+  verdict: string;
+  summary: string;
+  flow_key: string;
+  flow_title: string;
+  program_id: number | null;
+  program_title: string;
+  /** 产出明细（按节点类型）：explore → plan；execute → verification；review → issues */
+  detail: {
+    plan?: string[];
+    verification?: string[];
+    issues?: Array<{ severity: string; file: string; line: number | null; problem: string; fix_hint: string }>;
+  };
+}
+
+export interface WorkflowEventOut {
+  seq: number;
+  type: string;
+  node_key: string | null;
+  payload: Record<string, unknown>;
+  created_at: string;
 }
 
 export const api = {
@@ -592,7 +759,7 @@ export const api = {
   // ── 轮次（turn）──
   createTurn: (body: TurnCreateBody) => post<TurnOut>("/turns", body),
   /** plan-547: 向运行中的 turn 注入用户消息（下次 LLM 调用前传达，不新开 turn） */
-  injectTurnInput: (turnId: number, body: { request_id?: string; content: string; attachments?: Record<string, unknown>[] }) =>
+  injectTurnInput: (turnId: number, body: { request_id?: string; content: string; attachments?: Record<string, unknown>[]; refs?: ComposerRefOut[] }) =>
     post<{ ok: boolean; queued: boolean; error?: string }>(`/turns/${turnId}/inputs`, body),
   listTurns: (sessionId: number) => get<TurnOut[]>(`/turns/sessions/${sessionId}`),
   cancelTurn: (turnId: number) => postCancel<{ ok: boolean }>(`/turns/${turnId}/cancel?source=main`),
@@ -630,6 +797,8 @@ export const api = {
       /** v36 (plan-321-1600 M2): 面板头部“用时 / 文件数 / 用量”展示字段 */
       created_at?: string | null; updated_at?: string | null;
       token_usage?: number; files_count?: number;
+      /** 工作流节点的子代理：节点信息（普通子代理为空） */
+      workflow?: WorkflowNodeBrief | null;
     }>>(`/turns/sessions/${sessionId}/subagents`),
   listSessionTasks: (sessionId: number) => get<TaskOut[]>(`/turns/sessions/${sessionId}/tasks`),
   /** v38 (plan-482): 确认/取消方案文档（不再涉及 group/steps）。 */
@@ -1020,6 +1189,89 @@ export const api = {
 
   // ── 全局设置（v2.2: 设置中心持久化统一）──
   getGlobalSettings: () => get<GlobalSettingsOut>("/settings/global"),
+
+  // ── 工作流 ──
+  listWorkflows: (sessionId: number) => get<WorkflowRunOut[]>(`/sessions/${sessionId}/workflows`),
+  /** “从预设开始”：以预设骨架生成一个待确认的工作流（编辑后再开始） */
+  startWorkflowFromPreset: (sessionId: number, preset: string) =>
+    post<WorkflowProgramOut>(`/sessions/${sessionId}/workflows/draft`, { preset }),
+  getWorkflow: (programId: number) => get<WorkflowProgramOut>(`/workflows/${programId}`),
+  workflowEvents: (programId: number, afterSeq = 0) =>
+    get<WorkflowEventOut[]>(`/workflows/${programId}/events?after_seq=${afterSeq}`),
+  /** 续跑前的工作区漂移预览：暂停期间写入范围内被外部改动的文件 */
+  /** 续跑前的工作区报告：改动文件与暂停期间 HEAD 的变化（用户提交过） */
+  workflowDrift: (programId: number) =>
+    get<WorkflowDriftOut>(`/workflows/${programId}/drift`),
+  /** 某个改动文件自暂停以来的差异（统一格式）；reason 说明为什么无法展示差异 */
+  workflowDriftDiff: (programId: number, path: string) =>
+    get<WorkflowDriftDiffOut>(`/workflows/${programId}/drift/diff?path=${encodeURIComponent(path)}`),
+  /** 取消运行；reason=adjusted 表示草稿已按新的要求调整，由新计划替代 */
+  cancelWorkflowRun: (programId: number, reason: "user" | "adjusted" = "user") =>
+    post<WorkflowProgramOut>(`/workflows/${programId}/cancel`, { reason }),
+  /** 草稿计划中把某个子工作流的模板换成另一个模板的子工作流（只允许草稿） */
+  swapWorkflowFlowTemplate: (programId: number, flowKey: string, template: string, flow: string) =>
+    post<WorkflowProgramOut>(
+      `/workflows/${programId}/flows/${encodeURIComponent(flowKey)}/template`,
+      { template, flow },
+    ),
+  /** 新建模板：从一个探索步骤起步，在模板编辑器中补全 */
+  createWorkflowTemplate: (name: string, description = "") =>
+    post<WorkflowTemplateOut>("/workflows/templates", { name, description }),
+  /** 运行中的步骤补充说明：经子代理的指令通道，下一次模型调用前送达 */
+  addWorkflowNodeNote: (programId: number, flowKey: string, nodeKey: string, content: string) =>
+    post<{ ok: boolean }>(
+      `/workflows/${programId}/nodes/${encodeURIComponent(flowKey)}/${encodeURIComponent(nodeKey)}/note`,
+      { content },
+    ),
+  /** 节点的尝试历史（时间、模式、结果、原因） */
+  workflowNodeAttempts: (programId: number, flowKey: string, nodeKey: string) =>
+    get<WorkflowAttemptOut[]>(
+      `/workflows/${programId}/nodes/${encodeURIComponent(flowKey)}/${encodeURIComponent(nodeKey)}/attempts`,
+    ),
+  workflowAction: (
+    programId: number,
+    action: "start" | "pause" | "resume" | "cancel",
+    note?: string,
+    acceptDrift = false,
+    acceptLocalChanges = false,
+    sharedWorkspace = false,
+  ) =>
+    post<WorkflowProgramOut>(
+      `/workflows/${programId}/${action}`,
+      action === "resume"
+        ? { note: note ?? "", accept_drift: acceptDrift }
+        : action === "start"
+          ? { accept_local_changes: acceptLocalChanges, shared_workspace: sharedWorkspace }
+          : undefined,
+    ),
+  workflowPool: () => get<WorkflowPoolOut>("/workflows/pool"),
+  listWorkflowTemplates: () => get<WorkflowTemplateOut[]>("/workflows/templates"),
+  saveWorkflowTemplate: (programId: number, name: string, description = "") =>
+    post<WorkflowTemplateOut>(`/workflows/${programId}/template`, { name, description }),
+  copyWorkflowPreset: (key: string) =>
+    post<WorkflowTemplateOut>(`/workflows/templates/${encodeURIComponent(key)}/copy`),
+  patchWorkflowTemplate: (
+    key: string,
+    body: { name?: string; description?: string; enabled?: boolean; plan?: Record<string, unknown> },
+  ) => patch<WorkflowTemplateOut>(`/workflows/templates/${encodeURIComponent(key)}`, body),
+  deleteWorkflowTemplate: (key: string) =>
+    del<{ ok: boolean }>(`/workflows/templates/${encodeURIComponent(key)}`),
+  decideWorkflowGate: (
+    programId: number, flowKey: string, nodeKey: string,
+    decision: "approve" | "rework" | "abort" | "include", feedback = "",
+  ) =>
+    post<WorkflowProgramOut>(
+      `/workflows/${programId}/gates/${encodeURIComponent(flowKey)}/${encodeURIComponent(nodeKey)}`,
+      { decision, feedback },
+    ),
+  /** 重试失败的节点：checkpoint 从断点继续，fresh 从头重做该步骤；其它已完成的步骤保持不动 */
+  retryWorkflowNode: (
+    programId: number, flowKey: string, nodeKey: string, mode: "checkpoint" | "fresh",
+  ) =>
+    post<WorkflowProgramOut>(
+      `/workflows/${programId}/nodes/${encodeURIComponent(flowKey)}/${encodeURIComponent(nodeKey)}/retry`,
+      { mode },
+    ),
   setGlobalSettings: (data: Partial<GlobalSettingsIn>) => put<GlobalSettingsOut>("/settings/global", data),
   /** 问题7/8: 终端 Shell 存在性探测 + 候选等宽字体 */
   getTerminalOptions: () => get<TerminalOptionsOut>("/settings/terminal/options"),
@@ -1216,6 +1468,34 @@ export interface GlobalSettingsOut {
   max_concurrent_subagents?: number;
   /** v36: 每轮子代理派发总量上限（含已完成，1~32） */
   max_subagents_per_turn?: number;
+  /** 工作流运行时（设置 → 工作流）：关闭后主代理不再规划新的工作流 */
+  workflow_enabled?: boolean;
+  /** 所有会话的工作流子代理合计上限（0 = 不限） */
+  workflow_max_concurrent_global?: number;
+  /** 同一会话内工作流子代理合计上限（0 = 不限） */
+  workflow_max_concurrent_per_session?: number;
+  /** 单个子工作流内并行节点上限（1~4） */
+  workflow_max_parallel_nodes_per_flow?: number;
+  /** 模板未指定时的返工上限（0~3） */
+  workflow_default_max_rework?: number;
+  /** 单次运行的 token 预算（0 = 不限） */
+  workflow_token_budget_per_run?: number;
+  /** 计划生成后是否需要用户确认才开始（关闭则规划后直接执行） */
+  workflow_confirm_before_start?: boolean;
+  /** 网络中断暂停后是否自动续跑一次（默认关闭） */
+  workflow_auto_resume_on_network?: boolean;
+  /** 组装方式：runtime（主代理自主组装）/ presets_only（只允许预设或用户模板） */
+  workflow_composition_mode?: "runtime" | "presets_only";
+  /** 热点文件（逗号或换行分隔）：规划期并行写入时给出串行化建议 */
+  workflow_hot_files?: string;
+  /** 评估的确定性检查必须通过（关闭则检查结果只记录，不阻止通过） */
+  workflow_require_checks?: boolean;
+  /** 自动三方合并不重叠的改动（关闭则直接转入重做） */
+  workflow_auto_merge?: boolean;
+  /** 同一处真冲突：queue 先自动重做、多次失败再决定；ask 每次都由用户决定 */
+  workflow_conflict_policy?: "queue" | "ask";
+  /** 子工作流未声明隔离方式时的默认值：shared 共享工作区 / worktree 独立工作树 */
+  workflow_isolation_default?: "shared" | "worktree";
 }
 
 export type GlobalSettingsIn = Partial<Omit<GlobalSettingsOut, never>>;

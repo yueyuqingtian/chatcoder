@@ -71,8 +71,12 @@ export type TurnItem =
   | { kind: "goal-continuation"; msg: MessageOut }
   /** v39: 子代理完成唤醒消息（系统生成）——同样渲染为细分隔线 */
   | { kind: "subagent-wakeup"; msg: MessageOut }
+  /** 工作流唤醒消息（进入终态或需要你决定时的自动续跑）——同样渲染为细分隔线 */
+  | { kind: "workflow-wakeup"; msg: MessageOut }
   /** plan-865: 计划预览/确认消息——按数据库时间线位置渲染计划卡 */
-  | { kind: "plan"; msg: MessageOut };
+  | { kind: "plan"; msg: MessageOut }
+  /** 工作流卡：由 plan / start / resume 工作流工具的调用推导出程序编号，卡片状态来自工作流 store */
+  | { kind: "workflow"; programId: number };
 
 export type TimelineEntry =
   | { kind: "turn"; turnId: number | null; items: TurnItem[] }
@@ -210,14 +214,8 @@ export function buildTimeline(messages: MessageOut[]): TimelineEntry[] {
       continue;
     }
     if (m.sender_type === SenderType.User) {
-      // v39: 子代理完成唤醒消息（turn_id 回填前/独立到达）按分隔线渲染，不显示为用户气泡
-      const ucU = m.content as Record<string, unknown>;
-      entries.push({
-        kind: "turn", turnId: null,
-        items: ucU?.subagent_wakeup === true
-          ? [{ kind: "subagent-wakeup", msg: m }]
-          : [{ kind: "user", msg: m }],
-      });
+      // 唤醒消息（turn_id 回填前/独立到达）按分隔线渲染，不显示为用户气泡
+      entries.push({ kind: "turn", turnId: null, items: [userItemOf(m)] });
       continue;
     }
     if (lastTurnId != null) turnMap.get(lastTurnId)!.push(m);
@@ -299,7 +297,7 @@ export function createTimelineBuilder(): (messages: MessageOut[]) => TimelineEnt
       if (m.sender_type === SenderType.User) {
         let e = msgEntryCache.get(m);
         if (!e) {
-          e = { kind: "turn", turnId: null, items: [{ kind: "user", msg: m }] };
+          e = { kind: "turn", turnId: null, items: [userItemOf(m)] };
           msgEntryCache.set(m, e);
         }
         slots.push({ kind: "entry", entry: e });
@@ -384,7 +382,7 @@ export function createTimelineBuilder(): (messages: MessageOut[]) => TimelineEnt
         // 与安全路径一致：null-turn 用户消息独立成组，且不改变「当前 turn」归属
         let e = msgEntryCache.get(m);
         if (!e) {
-          e = { kind: "turn", turnId: null, items: [{ kind: "user", msg: m }] };
+          e = { kind: "turn", turnId: null, items: [userItemOf(m)] };
           msgEntryCache.set(m, e);
         }
         slots.push({ kind: "entry", entry: e });
@@ -444,18 +442,61 @@ export function createTimelineBuilder(): (messages: MessageOut[]) => TimelineEnt
   };
 }
 
+/** 会在消息流里展示工作流卡的工具（只读的 workflow_status 不出卡片） */
+const WORKFLOW_CARD_TOOLS = new Set(["plan_workflow", "start_workflow", "resume_workflow"]);
+
+/** 用户消息的条目类型：子代理 / 工作流唤醒、目标续跑等系统生成的消息不渲染为用户气泡。
+ *  完整构建与增量构建共用此判定，保证实时到达的消息与刷新后的显示一致。 */
+function userItemOf(m: MessageOut): TurnItem {
+  const uc = (m.content ?? {}) as Record<string, unknown>;
+  if (uc.subagent_wakeup === true) return { kind: "subagent-wakeup", msg: m };
+  if (uc.workflow_wakeup === true) return { kind: "workflow-wakeup", msg: m };
+  if (uc.goal_continuation === true) return { kind: "goal-continuation", msg: m };
+  return { kind: "user", msg: m };
+}
+
+/** 工作流工具调用 → 程序编号：plan 从结果文本取（编号由服务端生成），start / resume 从参数取；
+ *  同一轮内同一程序只出一张卡。 */
+function workflowProgramsOf(calls: MessageOut[], resultsByKey: Map<string, MessageOut>): number[] {
+  const ids: number[] = [];
+  for (const call of calls) {
+    const cc = call.content as Record<string, unknown>;
+    const tool = String(cc.tool ?? "");
+    if (!WORKFLOW_CARD_TOOLS.has(tool)) continue;
+    let programId = 0;
+    if (tool === "plan_workflow") {
+      const result = resultsByKey.get(String(cc.call_key ?? call.id));
+      const rc = (result?.content ?? {}) as Record<string, unknown>;
+      const m = /program_id=(\d+)/.exec(String(rc.output ?? ""));
+      programId = m ? Number(m[1]) : 0;
+    } else {
+      const args = (cc.args && typeof cc.args === "object" ? cc.args : {}) as Record<string, unknown>;
+      programId = Number(args.program_id ?? 0);
+    }
+    if (programId > 0 && !ids.includes(programId)) ids.push(programId);
+  }
+  return ids;
+}
+
 /** turn 内消息归类：严格按消息时间序；相邻 tool_call 合并 cluster；系统消息 → divider。 */
 function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
   // §3.3: 相邻 tool_call 合并为 tool-cluster，AI 文字切段时新开 cluster
   const items: TurnItem[] = [];
   const pendingTools: MessageOut[] = [];
   const resultsByKey = new Map<string, MessageOut>();
+  // 同一轮内同一程序只出一张卡：plan 与 start 常被助手文字隔开，分属两次 flush
+  const cardedPrograms = new Set<number>();
 
   // flush 待处理工具调用为一个 tools item（cluster）
   const flushTools = () => {
     if (pendingTools.length > 0) {
       const nodes = buildToolTree(pendingTools, resultsByKey);
       items.push({ kind: "tools", nodes });
+      for (const programId of workflowProgramsOf(pendingTools, resultsByKey)) {
+        if (cardedPrograms.has(programId)) continue;
+        cardedPrograms.add(programId);
+        items.push({ kind: "workflow", programId });
+      }
       pendingTools.length = 0;
     }
   };
@@ -465,14 +506,8 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
   for (const m of msgs) {
     if (m.sender_type === SenderType.User) {
       flushTools();
-      // plan-671: 目标续跑消息不渲染为用户气泡（对齐 zcode providerContextOnly）
-      const uc = m.content as Record<string, unknown>;
-      // v39: 子代理完成唤醒消息同样不渲染为用户气泡（系统生成，对应「等待子代理结束…」的续跑轮）
-      items.push(uc.subagent_wakeup === true
-        ? { kind: "subagent-wakeup", msg: m }
-        : uc.goal_continuation === true
-          ? { kind: "goal-continuation", msg: m }
-          : { kind: "user", msg: m });
+      // plan-671 / v39：目标续跑、子代理与工作流唤醒消息都是系统生成的，不渲染为用户气泡
+      items.push(userItemOf(m));
       continue;
     }
     const c = m.content as Record<string, unknown>;
