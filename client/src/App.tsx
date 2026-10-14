@@ -59,6 +59,11 @@ export default function App() {
   const rightPanelWidth = usePanelStore((s) => s.width);
   const rightFullscreen = usePanelStore((s) => s.fullscreen);
   const setRightPanelWidth = usePanelStore((s) => s.setWidth);
+  // plan-memory-fix：拓展/自动化等页面态不属于任何会话，右面板（会话工作台）一律收起；
+  // 只派生显示态、不改面板桶状态，回到会话时自然恢复原先的展开与否。
+  const pageMode = nav !== null && nav !== "chat";
+  const rightShown = rightExpanded && !pageMode;
+  const rightFull = rightShown && rightFullscreen;
 
   /** 左栏折叠/展开（S7）：与右栏同走 applyPaneUpdate——View Transition 快照动画，
    *  布局一次性到位、主线程逐帧零布局；能力缺失或用户要求减少动效时自动退化。 */
@@ -283,9 +288,9 @@ export default function App() {
           {/* v19: 标题栏与右面板经插件 slot 渲染。
               plan-41-233：页面态（拓展/定时任务/设置等 nav 页）传 page——隐藏会话标题、项目
               与右侧图标组；左侧 logo/折叠/前进后退保留，页面态的会话聚焦由 Sidebar 抑制。 */}
-          <PluginSlot slot="titlebar" leftCollapsed={sidebarCollapsed} rightCollapsed={!rightExpanded} page={nav !== null && nav !== "chat"} onToggleRight={toggleRightPanel} />
+          <PluginSlot slot="titlebar" leftCollapsed={sidebarCollapsed} rightCollapsed={!rightShown} page={pageMode} onToggleRight={toggleRightPanel} />
           <div className="app-body">
-            <main ref={mainElRef} className={`app-main${!rightExpanded ? " right-panel-collapsed" : ""}`}>
+            <main ref={mainElRef} className={`app-main${!rightShown ? " right-panel-collapsed" : ""}`}>
               {/* plan-282-1421（第3项）：设置 ↔ 工作区切换过渡（id 为页面标识）。
                   plan-353-1738 M3（S1）：id 收敛为二值语义——此前用 `ws-${nav}`，
                   工作区内每次导航（chat ↔ scheduled ↔ skills）都会**同时**改变外层与本层 id，
@@ -301,8 +306,8 @@ export default function App() {
             {/* plan-95: reservePx=主区 min-width 480 + 手柄宽 10，动态上限防溢出裁剪。
                 RFL-1（S4）：freezeRefs 收窄为仅右面板内容根——中列实时跟随（消息流逐帧折行），
                 右面板内的 Monaco/xterm 不逐帧重排，松手后由收敛序列一次解冻。 */}
-            {rightExpanded && !rightFullscreen && <ResizeHandle side="right" baseWidth={rightPanelWidth} minWidth={280} maxWidth={1200} reservePx={490} panelEl={rightPanelElRef} onCommit={setRightPanelWidth} freezeRefs={[rightPanelElRef]} />}
-            <div ref={rightPanelElRef} className={`app-pane app-pane-right${rightExpanded ? "" : " collapsed"}${rightFullscreen ? " fullscreen" : ""}`} style={{ width: rightExpanded ? (rightFullscreen ? "100%" : `${rightPanelWidth}px`) : "0px", flexBasis: rightExpanded ? (rightFullscreen ? "100%" : `${rightPanelWidth}px`) : "0px" }}>
+            {rightShown && !rightFull && <ResizeHandle side="right" baseWidth={rightPanelWidth} minWidth={280} maxWidth={1200} reservePx={490} panelEl={rightPanelElRef} onCommit={setRightPanelWidth} freezeRefs={[rightPanelElRef]} />}
+            <div ref={rightPanelElRef} className={`app-pane app-pane-right${rightShown ? "" : " collapsed"}${rightFull ? " fullscreen" : ""}`} style={{ width: rightShown ? (rightFull ? "100%" : `${rightPanelWidth}px`) : "0px", flexBasis: rightShown ? (rightFull ? "100%" : `${rightPanelWidth}px`) : "0px" }}>
               {/* plan-41-233：内容常驻挂载——折叠只变几何（width:0 + visibility:hidden），
                   终端 PTY 与浏览器页面不再因折叠被卸载重建（用户诉求：折叠再展开保留状态）。 */}
               <PluginSlot slot="right-panel" />

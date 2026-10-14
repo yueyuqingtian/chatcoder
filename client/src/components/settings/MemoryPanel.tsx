@@ -31,6 +31,12 @@ const SCOPE_META: Record<string, { label: string; color: string; desc: string }>
   session: { label: "会话", color: "var(--text-2)", desc: "本会话事实，30 天过期" },
 };
 
+/** plan-memory-fix：记忆类型以中文呈现（后端存英文枚举） */
+const KIND_LABEL: Record<string, string> = { fact: "事实", convention: "约定", pitfall: "踩坑", decision: "决策" };
+
+type ScopeCounts = { all: number; global: number; project: number; session: number };
+const ZERO_COUNTS: ScopeCounts = { all: 0, global: 0, project: 0, session: 0 };
+
 export function MemoryPanel() {
   const [memoryEnabled, setMemoryEnabled] = useState(true);
   const [items, setItems] = useState<MemoryEntryOut[]>([]);
@@ -46,8 +52,12 @@ export function MemoryPanel() {
   const [detail, setDetail] = useState<MemoryEntryOut | null>(null);
   const [detailText, setDetailText] = useState("");
   const [detailSaving, setDetailSaving] = useState(false);
-  // plan-91-393：本地关键词过滤（纯前端，不改变后端查询口径）
+  // plan-memory-fix：关键词搜索交给服务端（列表有条数上限，本地过滤搜不到上限外的记忆），300ms 防抖
   const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  // plan-memory-fix：页签计数取服务端总数，与当前筛选无关（此前由已加载列表现算，切页签后其它作用域变 0）
+  const [counts, setCounts] = useState<ScopeCounts>(ZERO_COUNTS);
+  const [loaded, setLoaded] = useState(false);
 
   const loadSettings = useCallback(async () => {
     try {
@@ -58,11 +68,18 @@ export function MemoryPanel() {
 
   const load = useCallback(async () => {
     try {
-      const list = await api.listMemories({
-        scope: scopeFilter === "all" ? undefined : scopeFilter,
-        includeCandidate,
-      });
+      const [list, c] = await Promise.all([
+        api.listMemories({
+          scope: scopeFilter === "all" ? undefined : scopeFilter,
+          includeCandidate,
+          q: debouncedQuery || undefined,
+        }),
+        api.countMemories(includeCandidate),
+      ]);
       setItems(list);
+      setCounts(c);
+      setLoaded(true);
+      setErr(null);
       // 清理已不存在项的选中态（换作用域/刷新后避免"幽灵选中"）
       setSelected((prev) => {
         if (prev.size === 0) return prev;
@@ -71,8 +88,12 @@ export function MemoryPanel() {
         return next.size === prev.size ? prev : next;
       });
     } catch (e) { setErr(String(e)); }
-  }, [scopeFilter, includeCandidate]);
+  }, [scopeFilter, includeCandidate, debouncedQuery]);
 
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebouncedQuery(query.trim()), 300);
+    return () => window.clearTimeout(t);
+  }, [query]);
   useEffect(() => { loadSettings(); }, [loadSettings]);
   useEffect(() => { void load(); }, [load]);
 
@@ -143,8 +164,8 @@ export function MemoryPanel() {
     finally { setDetailSaving(false); }
   };
 
-  const q = query.trim().toLowerCase();
-  const visible = q ? items.filter((m) => (m.text || "").toLowerCase().includes(q) || (m.kind || "").toLowerCase().includes(q)) : items;
+  const q = debouncedQuery;
+  const visible = items;
   const fmtTime = (iso?: string | null) => {
     if (!iso) return "";
     const t = parseServerTime(iso);
@@ -172,12 +193,16 @@ export function MemoryPanel() {
   })();
 
   /** S8：单行摘要行——点击信息区打开详情，复选框用于批量管理；
-   *  plan-91-393：改为卡片行（作用域角标 + 正文 + 元信息），操作悬停显现，选中态用底色而非边线 */
+   *  plan-memory-fix：作用域已由分组/页签表达，行内不再重复角标；类型中文化，元信息用间隔点串联 */
   const renderItem = (m: MemoryEntryOut) => {
-    const scopeKey = (m.scope as string) || "session";
-    const meta = SCOPE_META[scopeKey] || SCOPE_META.session;
     const checked = selected.has(m.id);
     const time = fmtTime(m.generated_at);
+    const kind = m.kind ? (KIND_LABEL[m.kind] || m.kind) : "";
+    const metaParts = [
+      time,
+      `使用 ${m.usage_count} 次`,
+      m.expires_at ? `${new Date(parseServerTime(m.expires_at)).toLocaleDateString()} 过期` : "",
+    ].filter(Boolean);
     return (
       <div key={m.id} className={"mem-card" + (checked ? " selected" : "")}>
         <span className="mem-card-check"><Checkbox checked={checked} onChange={() => toggleSelect(m.id)} /></span>
@@ -190,16 +215,13 @@ export function MemoryPanel() {
         >
           <div className="mem-card-text">{m.text}</div>
           <div className="mem-card-meta">
-            <span className={"mem-tag scope-" + scopeKey}>{meta.label}</span>
+            {kind && <span className={"mem-tag kind-" + (m.kind || "fact")}>{kind}</span>}
             {m.candidate && (
               <Tooltip content="低置信记忆：不注入 prompt，但可被检索；编辑或提升后转为正式记忆">
                 <span className="mem-tag cand">候选</span>
               </Tooltip>
             )}
-            {m.kind && <span className="mem-tag kind">{m.kind}</span>}
-            {time && <span>{time}</span>}
-            <span>使用 {m.usage_count} 次</span>
-            {m.expires_at && <span>过期 {new Date(parseServerTime(m.expires_at)).toLocaleDateString()}</span>}
+            <span className="mem-card-info">{metaParts.join(" · ")}</span>
           </div>
         </div>
         <div className="mem-card-actions">
@@ -214,8 +236,9 @@ export function MemoryPanel() {
     );
   };
 
-  const scopeCount = (s: ScopeFilter) =>
-    s === "all" ? items.length : items.filter((m) => ((m.scope as string) || "session") === s).length;
+  const scopeCount = (s: ScopeFilter) => counts[s];
+  // 列表受服务端条数上限截断时给出提示（不搜索时才能与总数比对）
+  const truncated = !q && items.length < scopeCount(scopeFilter);
   const someSelected = selected.size > 0;
 
   /** 列表分组：全部视图按作用域分组（组头在卡片内），单作用域视图平铺 */
@@ -224,7 +247,8 @@ export function MemoryPanel() {
         <div key={g.scope} className="mem-group">
           <div className="mem-group-title">
             <span className={"mem-group-dot scope-" + g.scope} aria-hidden />
-            {SCOPE_META[g.scope].label}记忆<span className="mem-group-count">{g.list.length}</span>
+            <span className="mem-group-name">{SCOPE_META[g.scope].label}记忆</span>
+            <span className="mem-group-count">{q ? g.list.length : counts[g.scope]}</span>
             <span className="mem-group-desc">{SCOPE_META[g.scope].desc}</span>
           </div>
           {g.list.map(renderItem)}
@@ -283,7 +307,9 @@ export function MemoryPanel() {
             disabled={items.length === 0}
             aria-label="全选"
           />
-          <span className="mem-listhead-text">{someSelected ? `已选 ${selected.size} 条` : `共 ${visible.length} 条`}</span>
+          <span className="mem-listhead-text">
+            {someSelected ? `已选 ${selected.size} 条` : q ? `找到 ${visible.length} 条` : `共 ${scopeCount(scopeFilter)} 条`}
+          </span>
           <span className="ui-batch-slot" data-empty={someSelected ? undefined : ""}>
             <span className="ui-batch-only">
               <Button variant="danger-ghost" size="sm" icon={<IconTrash size={12} />} onClick={() => setConfirmBatch(true)} disabled={!someSelected}>删除所选</Button>
@@ -292,8 +318,11 @@ export function MemoryPanel() {
         </div>
         <div className="mem-scroll">
           {visible.length === 0
-            ? emptyState(scopeFilter === "all" ? "暂无记忆" : "该作用域暂无记忆")
+            ? (loaded ? emptyState(scopeFilter === "all" ? "暂无记忆" : "该作用域暂无记忆") : null)
             : body}
+          {truncated && visible.length > 0 && (
+            <div className="mem-more-hint">已显示最常用的 {items.length} 条，其余记忆可通过搜索查找</div>
+          )}
         </div>
       </div>
 
@@ -303,7 +332,7 @@ export function MemoryPanel() {
         onClose={() => setDetail(null)}
         title="记忆详情"
         subtitle={detail
-          ? `${SCOPE_META[(detail.scope as string) || "session"]?.label || "会话"}记忆 · ${detail.kind}`
+          ? `${SCOPE_META[(detail.scope as string) || "session"]?.label || "会话"}记忆 · ${KIND_LABEL[detail.kind] || detail.kind}`
           : undefined}
         width={620}
         footer={

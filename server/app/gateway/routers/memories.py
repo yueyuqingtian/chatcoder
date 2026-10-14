@@ -16,14 +16,21 @@ async def list_memories(
     scope: str | None = None,
     project_id: int | None = None,
     include_candidate: bool = True,
+    q: str | None = None,
     db: AsyncSession = Depends(get_db),
 ):
     """列出记忆。可按 scope（session/project/global）与 project_id 过滤；
-    include_candidate=false 时隐藏候选区（低置信未注入项）。"""
+    include_candidate=false 时隐藏候选区（低置信未注入项）；q 为正文关键词。"""
     return await memory_service.list_memories(
         db, session_id, scope=scope, project_id=project_id,
-        include_candidate=include_candidate,
+        include_candidate=include_candidate, q=q,
     )
+
+
+@router.get("/counts", response_model=dict)
+async def count_memories(include_candidate: bool = True, db: AsyncSession = Depends(get_db)):
+    """各作用域记忆总数（与列表筛选无关，供页签计数）。"""
+    return await memory_service.count_memories(db, include_candidate=include_candidate)
 
 
 class MemoryPromote(BaseModel):

@@ -906,8 +906,9 @@ export const api = {
 
   // ── 记忆 ──
   // plan-230-1144 M4.1: 三层化——可按 scope/project 过滤、可提升作用域
-  listMemories: (opts?: { sessionId?: number; scope?: string; projectId?: number; includeCandidate?: boolean }) => {
+  listMemories: (opts?: { sessionId?: number; scope?: string; projectId?: number; includeCandidate?: boolean; q?: string }) => {
     const q = new URLSearchParams();
+    if (opts?.q) q.set("q", opts.q);
     if (opts?.sessionId != null) q.set("session_id", String(opts.sessionId));
     if (opts?.scope) q.set("scope", opts.scope);
     if (opts?.projectId != null) q.set("project_id", String(opts.projectId));
@@ -915,6 +916,10 @@ export const api = {
     const qs = q.toString();
     return get<MemoryEntryOut[]>(`/memories${qs ? `?${qs}` : ""}`);
   },
+  /** plan-memory-fix：各作用域总数（与列表筛选无关） */
+  countMemories: (includeCandidate = true) =>
+    get<{ all: number; global: number; project: number; session: number }>(
+      `/memories/counts${includeCandidate ? "" : "?include_candidate=false"}`),
   deleteMemory: (id: number) => del<{ ok: boolean }>(`/memories/${id}`),
   /** S8（plan-41-197）：编辑记忆文本/类型（编辑即人工确认，候选标记清除） */
   updateMemory: (id: number, data: { text?: string; kind?: string }) =>

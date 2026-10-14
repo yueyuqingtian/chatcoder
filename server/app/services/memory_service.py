@@ -13,7 +13,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.memory import MemoryEntry
@@ -168,9 +168,15 @@ def _active(entries: list[MemoryEntry]) -> list[MemoryEntry]:
 
 async def list_memories(db: AsyncSession, session_id: int | None = None,
                         scope: str | None = None, project_id: int | None = None,
-                        include_candidate: bool = True) -> list[MemoryEntry]:
-    """列出记忆（管理面板用）。可按 scope/project 过滤；默认含候选区。"""
+                        include_candidate: bool = True, q: str | None = None,
+                        limit: int = 500) -> list[MemoryEntry]:
+    """列出记忆（管理面板用）。可按 scope/project 过滤；默认含候选区。
+
+    plan-memory-fix：列表有条数上限，关键词搜索放到服务端做，
+    否则上限之外的记忆永远搜不到。"""
     stmt = select(MemoryEntry).order_by(MemoryEntry.usage_count.desc(), MemoryEntry.generated_at.desc())
+    if q and q.strip():
+        stmt = stmt.where(MemoryEntry.text.contains(q.strip()))
     if session_id is not None:
         stmt = stmt.where(MemoryEntry.session_id == session_id)
     if scope:
@@ -179,8 +185,25 @@ async def list_memories(db: AsyncSession, session_id: int | None = None,
         stmt = stmt.where(MemoryEntry.project_id == project_id)
     if not include_candidate:
         stmt = stmt.where(MemoryEntry.candidate.is_(False))
-    res = await db.execute(stmt.limit(500))
+    res = await db.execute(stmt.limit(max(1, min(limit, 2000))))
     return list(res.scalars().all())
+
+
+async def count_memories(db: AsyncSession, include_candidate: bool = True) -> dict[str, int]:
+    """按作用域统计记忆总数（plan-memory-fix）。
+
+    作用域页签的计数必须与当前筛选无关；此前前端用"当前已加载列表"现算，
+    切换页签后其它作用域的计数会变成 0，且全部视图受列表上限截断。"""
+    stmt = select(MemoryEntry.scope, func.count()).group_by(MemoryEntry.scope)
+    if not include_candidate:
+        stmt = stmt.where(MemoryEntry.candidate.is_(False))
+    res = await db.execute(stmt)
+    out = {"global": 0, "project": 0, "session": 0}
+    for scope, n in res.all():
+        key = scope if scope in out else "session"
+        out[key] += int(n)
+    out["all"] = out["global"] + out["project"] + out["session"]
+    return out
 
 
 async def delete_memory(db: AsyncSession, memory_id: int) -> bool:
