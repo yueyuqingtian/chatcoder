@@ -62,7 +62,7 @@
 
 - `client`：`npm run typecheck` 通过；`npm run build` 通过（只有既有的 chunk 体积告警）。
 - `client/tests/workflow-card-order.test.ts`：9/9 通过；既有 `client/tests/timeline-performance.test.ts`：12/12 通过。
-- `server`：`py_compile` 通过；`tests/test_plan_20261013_wf_order.py` 9/9 通过；`test_workflow_runtime.py`、`test_workflow_tools_api.py`、`test_plan_330_1648_subagent.py` 与之合计 45 项通过。
+- `server`：`py_compile` 通过；`tests/test_plan_20261013_wf_order.py` 9/9 通过；`test_workflow_runtime.py`、`test_workflow_tools_api.py`、`test_plan_330_1648_subagent.py` 与之合计 46 项通过（四个文件一起运行）。
 - SSR 结构验证（真实 `TurnGroup`，`renderToStaticMarkup`，派发时刻为模拟值）：三个状态（已启动、唤醒后、最终汇报落库后）的输出顺序都符合创建序；最终汇报落库后过程段折叠，工作流卡与节点卡位置不变。
 - 实时页面（会话 416）：把各节点的派发时刻近似为 `startedAt` 之前最后一条消息的 id + 0.5（秒级精度，仅用于核对）后，DOM 顺序为：节点 `audit·explore_ops`、`audit·write_report` 位于启动工具簇之后、「工作流已启动」文字之前；`audit·review_report`、`integration·verify` 位于「工作流 11 正在正常运行中」文字之后。控制台无错误。
 
