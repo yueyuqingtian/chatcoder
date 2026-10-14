@@ -7,6 +7,7 @@ import { wsClient, globalWsClient } from "../api/ws";
 import { normalizeApprovalMode, normalizeDraftMode } from "./drafts";
 import { parseRefLines } from "../utils/refLines";
 import { parseServerTime } from "../utils/time";
+import { adoptWakeupTurn } from "../utils/wakeupMessages";
 import { isBusy } from "../perf/bus";
 import { registerReconcileTask, RECONCILE_ORDER } from "../perf/reconcile";
 import type { ServerEventName } from "@chatcoder/shared/events";
@@ -563,6 +564,51 @@ function scheduleWorkflowSessionRefresh(): void {
       })
       .catch(() => { /* 侧栏标记刷新失败不影响主流程 */ });
   }, 400);
+}
+
+/** 待唤醒标记（workflow.wakeup）的兜底时长。服务端一定会用 pending=false（或带 turn_id 的接管）收尾，
+ *  这里只防事件丢失（断线 / 服务端重启）造成永久忙碌：到时自行清除；本会话的主代理仍在跑时顺延——
+ *  服务端等会话空闲才唤醒，此时唤醒本就在等它结束。（plan-20261014-actions-wait） */
+const WAKEUP_PENDING_TTL_MS = 60_000;
+const _wakeupTtlTimers = new Map<number, ReturnType<typeof setTimeout>>();
+
+/** 置位 / 清除会话的待唤醒标记，并同步兜底定时器。 */
+function _setWakeupPending(sessionId: number, pending: boolean): void {
+  useWorkflowStore.getState().setWakeupPending(sessionId, pending);
+  const prev = _wakeupTtlTimers.get(sessionId);
+  if (prev !== undefined) {
+    clearTimeout(prev);
+    _wakeupTtlTimers.delete(sessionId);
+  }
+  if (!pending) return;
+  const arm = () => {
+    _wakeupTtlTimers.set(sessionId, setTimeout(() => {
+      _wakeupTtlTimers.delete(sessionId);
+      const st = useChatStore.getState();
+      if (st.currentSessionId === sessionId && st.isRunning) { arm(); return; }
+      useWorkflowStore.getState().setWakeupPending(sessionId, false);
+    }, WAKEUP_PENDING_TTL_MS));
+  };
+  arm();
+}
+
+/** 工作流唤醒状态（会话通道）：pending=true 置位；pending=false 清除，带 turn_id 表示唤醒轮已创建
+ *  （服务端先于启动该轮广播）——立即接管运行态（同 subagent.wakeup），并把对应的唤醒消息归入该轮，
+ *  上一轮与唤醒轮立即合为一轮。先接管、后清除标记：即使两次更新之间渲染一帧，忙碌指示也不会断。 */
+function _onWorkflowWakeup(payload: Record<string, unknown>): void {
+  const sid = Number(payload.session_id ?? 0);
+  if (!sid) return;
+  const pending = payload.pending === true;
+  const turnId = Number(payload.turn_id ?? 0) || null;
+  if (!pending && turnId != null) {
+    useChatStore.setState((s) => ({
+      ...(sid === s.currentSessionId
+        ? { isRunning: true, runningTurnId: s.runningTurnId ?? turnId, messages: adoptWakeupTurn(s.messages, turnId) }
+        : {}),
+      sessions: s.sessions.map((x) => (x.id === sid ? setSessionRunning(x, true) : x)),
+    }));
+  }
+  _setWakeupPending(sid, pending);
 }
 let _heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
 const HEARTBEAT_TIMEOUT = 60_000; // 60s 无事件超时兜底复位
@@ -1796,6 +1842,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ error: `停止失败：${String(e)}` });
       return;
     }
+    // 待送达的唤醒已在服务端取消（事件之外的兜底：事件丢失也不会残留忙碌）
+    _setWakeupPending(sid, false);
     // 运行中的工作流已在服务端暂停：刷新本会话的程序状态（事件推送之外的兜底）
     void useWorkflowStore.getState().loadSession(sid);
   },
@@ -2232,6 +2280,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const st = get();
     // 运行中收到任何 WS 事件时重置心跳（§9.1 #3：60s 无事件超时兜底）
     if (st.isRunning) _startHeartbeat();
+    // 工作流唤醒状态（待唤醒 / 唤醒轮接管 / 放弃）不是程序快照的刷新信号，单独处理，不转发给工作流 store
+    if (event === "workflow.wakeup") {
+      _onWorkflowWakeup(payload);
+      return;
+    }
     // 工作流事件不进入会话消息流：统一转发到工作流 store（以快照为准，事件只作刷新信号）
     if (event.startsWith("workflow.")) {
       useWorkflowStore.getState().applyEvent(payload);
@@ -3227,7 +3280,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
         break;
       }
-      // 工作流事件已在上方转发到工作流 store，此处仅作穷举登记（不进入消息流）
+      // 工作流事件已在上方转发到工作流 store（workflow.wakeup 在上方单独处理），此处仅作穷举登记（不进入消息流）
+      case "workflow.wakeup":
       case "workflow.run.updated":
       case "workflow.node.updated":
       case "workflow.gate.opened":
@@ -3262,6 +3316,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (!sid) return;
       if (ev.event === "workflow.run.updated") {
         scheduleWorkflowSessionRefresh();
+        return;
+      }
+      if (ev.event === "workflow.wakeup") {
+        // 非当前会话的侧栏转圈也要在「工作流结束 → 唤醒轮启动」的空档里保持（当前会话由会话通道处理，两条通道的置位幂等）。
+        // 唤醒轮已创建（带 turn_id）时先置运行标记再清待唤醒标记——转圈不断，不必等随后的 turn.started
+        const pending = p.pending === true;
+        if (!pending && Number(p.turn_id ?? 0) > 0) {
+          set((s) => {
+            if (!s.sessions.some((x) => x.id === sid)) return {};
+            return { sessions: s.sessions.map((x) => (x.id === sid ? setSessionRunning(x, true) : x)) };
+          });
+        }
+        _setWakeupPending(sid, pending);
         return;
       }
       const event = ev.event as ServerEventName;

@@ -957,6 +957,8 @@ WS_EVENT_PAYLOAD_MODELS: dict[str, type[WsEventPayload]] = {
     "workflow.log.appended": WsEventPayload,
     "workflow.conflict.detected": WsEventPayload,
     "workflow.conflict.resolved": WsEventPayload,
+    # 工作流结束 → 主代理被唤醒之间的状态（pending / 接管的 turn_id / 放弃），前端据此接上忙碌指示的空档
+    "workflow.wakeup": WsEventPayload,
     "error": EvError,
     "ack": WsEventPayload,
     "sync.response": WsEventPayload,

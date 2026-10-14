@@ -17,7 +17,7 @@ import { useEffect, useMemo, type FocusEvent } from "react";
 import { useChatStore } from "../../store/chat";
 import { usePanelStore } from "../../store/panel";
 import { api, type FileChangeOut } from "../../api/client";
-import { IconCheck, IconChevronUp, IconExternalLink, IconFileStack, IconRingProgress, IconRotateCcw } from "../icons";
+import { IconCheck, IconExternalLink, IconFileStack, IconRingProgress, IconRotateCcw } from "../icons";
 import { IxWorkflow } from "../iconkit/StackIcons";
 import { Badge, Button, Tooltip } from "../ui";
 import { useCapsulePopover } from "../ui/useCapsulePopover";
@@ -254,7 +254,6 @@ export function ComposerCapsule({ onVisibilityChange }: {
               <span className="tcap-num">{done}/{displayRows.length}</span>
               {/* 不挂原生 title：hover 本段已经弹出浮层（含完整步骤清单与全文） */}
               {currentTitle && <span className="tcap-title">{currentTitle}</span>}
-              <IconChevronUp size={12} className="tcap-caret" />
             </button>
           </div>
         )}
@@ -282,7 +281,6 @@ export function ComposerCapsule({ onVisibilityChange }: {
                   <span className="tcap-more">+{wf.active.length - 1}</span>
                 </Tooltip>
               )}
-              <IconChevronUp size={12} className="tcap-caret" />
             </button>
             {wf.focus.status === "paused" && (
               <Button
@@ -315,7 +313,6 @@ export function ComposerCapsule({ onVisibilityChange }: {
               <IconFileStack size={15} />
               <span className="tcap-num">{fileCount} 待审</span>
               <Diff add={fileAdds} del={fileDels} />
-              <IconChevronUp size={12} className="tcap-caret" />
             </button>
           </div>
         )}

@@ -146,7 +146,11 @@ export function BadgeHero() {
    *  判据：不含预留的内容高度 + 预留 ≤ 首页可用高度。放不下则不预留，同时 room 置假，浮签整张隐藏（见 open）。
    *  判据刻意不读取预留本身：徽章包裹层带 transition，写入 margin 后立即读取会拿到过渡起点的值，
    *  决定会随读取时机摇摆；这里只累加其余内容的高度与间距，结果与当前是否预留无关。
-   *  预留量写在徽章包裹层的 --note-slot 上（margin-top），不改变悬停区域。 */
+   *  预留量写在徽章包裹层的 --note-slot 上（margin-top），不改变悬停区域。
+   *
+   *  plan-20261014-home-stable：浮签高度取容器高度——8 枚浮签叠在同一格（见 note），容器恒为最高的那一枚，
+   *  所以预留量只随窗口尺寸变化，与当前是哪一枚无关；此前按「当前这枚」的高度预留，
+   *  各枚正文行数不同，换枚时预留差几十像素，下方内容跟着整体上下跳。 */
   const measureRoom = useCallback(() => {
     const wrap = wrapRef.current;
     const note = noteRef.current;
@@ -170,27 +174,31 @@ export function BadgeHero() {
     setRoom(fits);
   }, []);
 
-  // 换枚（浮签文字变化）与首页视口尺寸变化后重算预留；须先于定位执行，定位才基于新的徽章位置
+  // 挂载后量一次预留；须先于定位执行，定位才基于新的徽章位置。
+  // 换枚不再重算（plan-20261014-home-stable）：浮签容器高度与当前是哪一枚无关，换枚时版面零位移。
   useLayoutEffect(() => {
     measureRoom();
-  }, [idx, world, measureRoom]);
+  }, [measureRoom]);
 
-  // 视口变化，或内容撑出 / 收回首页高度（热力图加载、预留增减）时重算：溢出会让内容列的高度变化，故两者都观察
+  // 视口变化，或内容撑出 / 收回首页高度（热力图加载、预留增减）时重算：溢出会让内容列的高度变化，故两者都观察。
+  // 浮签自身尺寸变化（字体加载完成、窄窗口下宽度被钳制导致折行）同样要重算——它在 body 下，不随首页容器变化。
   useEffect(() => {
     const hero = wrapRef.current?.closest(".es-hero") as HTMLElement | null;
     const inner = wrapRef.current?.closest(".es-hero-inner") as HTMLElement | null;
+    const note = noteRef.current;
     if (!hero || typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver(() => measureRoom());
     ro.observe(hero);
     if (inner) ro.observe(inner);
+    if (note) ro.observe(note);
     return () => ro.disconnect();
   }, [measureRoom]);
 
-  // 打开 / 换枚后定位（布局阶段执行，首帧就在正确位置）
+  // 打开后定位（布局阶段执行，首帧就在正确位置）；换枚不改变浮签容器与徽章的位置，无需重算
   useLayoutEffect(() => {
     if (open) placeNote();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, idx]);
+  }, [open]);
 
   // 打开期间：滚动（任何滚动容器）与缩放都要重新定位，否则浮签会离开徽章
   useEffect(() => {
@@ -223,19 +231,24 @@ export function BadgeHero() {
   const step = (delta: number) => goTo((idx + delta + BADGES.length) % BADGES.length);
   const d = scene.dada;
 
-  // 浮签挂到 body 下：不受首页滚动容器与其 overflow 裁切，位置由 placeNote 决定
+  // 浮签挂到 body 下：不受首页滚动容器与其 overflow 裁切，位置由 placeNote 决定。
+  // plan-20261014-home-stable：8 枚的浮签叠在同一格里、只显示当前一枚，容器高度恒为最高的那一枚——
+  // 首页为浮签预留的空间因此与当前是哪一枚无关，换枚时卡片、标语、热力图不再上下跳。
+  // 未选中的浮签只做占位（visibility 隐藏、aria-hidden），当前一枚贴着容器底部，与徽章的间距不变。
   const note = createPortal(
     <div ref={noteRef} className="es-note" role="note" data-open={open ? "true" : "false"} aria-hidden={!open}>
-      <div className="es-note-sway">
-        <div className="es-note-card">
-          <div className="es-note-title">{def.title}</div>
-          <p className="es-note-body">{def.body}</p>
-          <div className="es-note-say">
-            <IconMessageSquare size={13} />
-            <span>试试说：「{def.ask}」</span>
+      {BADGES.map((b, i) => (
+        <div key={b.id} className="es-note-sway" data-on={i === idx ? "true" : "false"} aria-hidden={i !== idx}>
+          <div className="es-note-card">
+            <div className="es-note-title">{b.title}</div>
+            <p className="es-note-body">{b.body}</p>
+            <div className="es-note-say">
+              <IconMessageSquare size={13} />
+              <span>试试说：「{b.ask}」</span>
+            </div>
           </div>
         </div>
-      </div>
+      ))}
     </div>,
     document.body,
   );

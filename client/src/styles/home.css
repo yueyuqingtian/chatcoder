@@ -227,12 +227,15 @@
  * 后两层的变量由弹簧逐帧写入，不加 transition。 */
 /* 浮签挂在 body 下（BadgeHero 用 portal），fixed 定位，不被首页滚动容器裁切；
    位置由 BadgeHero 计算：恒在徽章上方（上方空间由首页预留，放不下则整张不显示），水平钳制在首页可视区内。
-   隐藏时仍占位（visibility），让定位能量到真实尺寸。 */
+   隐藏时仍占位（visibility），让定位能量到真实尺寸。
+   plan-20261014-home-stable：8 枚浮签叠在同一格（grid），容器高度 = 最高的一枚，与当前是哪一枚无关——
+   首页按这个高度预留空间，换枚时版面零位移；当前一枚贴容器底部（align-self: end），与徽章的间距不变。 */
 .es-note {
   position: fixed;
   left: 0;
   top: 0;
   z-index: 40;
+  display: grid;
   width: min(324px, calc(100vw - 16px));
   pointer-events: none;
   opacity: 0;
@@ -243,9 +246,14 @@
 }
 .es-note[data-open="true"] { opacity: 1; visibility: visible; transform: none; transition-delay: 0s; }
 .es-note-sway {
+  grid-area: 1 / 1;
+  align-self: end;
+  visibility: hidden; /* 未选中：只占位 */
   transform-origin: 50% 165%;
   transform: rotate(calc(var(--nx) * 10deg));
 }
+/* 选中：跟随容器的显隐（inherit 而非 visible——容器隐藏时它也必须隐藏，且沿用容器的延迟隐藏过渡） */
+.es-note-sway[data-on="true"] { visibility: inherit; }
 .es-note-card {
   padding: 14px 16px 13px;
   border: 1px solid var(--border);

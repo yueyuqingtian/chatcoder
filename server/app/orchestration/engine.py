@@ -4,6 +4,7 @@
 收集结果 → turn 完成摘要 → 记忆提取（异步）→ 广播。
 """
 import asyncio
+import contextlib
 import logging
 import re
 import time
@@ -706,6 +707,8 @@ WORKFLOW_WAKEUP_POLL_SEC = 1.0
 _USER_STOP_SOURCES = frozenset({"ws", "pet", "unknown"})
 _workflow_notes: dict[int, list[str]] = {}
 _workflow_wakeups: dict[int, asyncio.Task] = {}
+# 唤醒轮正在创建的会话：消息与轮次之间不能被打断（见 cancel_workflow_wakeup）
+_workflow_wakeup_creating: set[int] = set()
 
 
 async def notify_workflow(session_id: int, text: str) -> None:
@@ -719,10 +722,32 @@ async def notify_workflow(session_id: int, text: str) -> None:
     )
 
 
+async def _announce_workflow_wakeup(session_id: int, *, pending: bool, turn_id: int | None = None) -> None:
+    """广播工作流唤醒状态（plan-20261014-actions-wait）：把「工作流结束 → 主代理被唤醒」之间的空档接上。
+
+    工作流进入终态后，服务端要等一小段时间（合并同一时段的通知）、且待会话空闲，才创建唤醒轮。
+    这段时间里没有运行中的程序、也没有运行中的 turn，前端的各处「执行中」指示若只看这两项就会回到空闲，
+    唤醒轮启动后又恢复——输入框、侧栏转圈与消息流都会闪一下。本事件让前端在整段时间内保持忙碌：
+    - pending=True：通知已入队，唤醒即将进行；
+    - pending=False 且带 turn_id：唤醒轮已创建（先于启动该轮广播，前端据此立即接管运行态）；
+    - pending=False 且无 turn_id：唤醒被放弃（无通知 / 会话不存在 / 创建失败 / 被取消）。
+    广播失败不影响唤醒本身。"""
+    try:
+        await broadcast(session_id, {
+            "event": "workflow.wakeup",
+            "payload": {"session_id": session_id, "pending": pending, "turn_id": turn_id},
+        })
+    except Exception:
+        logger.debug("[workflow] workflow.wakeup 广播失败(非阻塞) session=%s pending=%s", session_id, pending, exc_info=True)
+
+
 async def _wakeup_turn_for_workflow(session_id: int) -> None:
     from app.persistence.database import async_session_factory
 
+    # 接管事件已发出（唤醒轮已创建）；否则 finally 补发「放弃」，保证前端的待唤醒标记一定收尾
+    handed_over = False
     try:
+        await _announce_workflow_wakeup(session_id, pending=True)
         await asyncio.sleep(WORKFLOW_WAKEUP_DELAY_SEC)
         while _session_turn_busy(session_id):
             await asyncio.sleep(WORKFLOW_WAKEUP_POLL_SEC)
@@ -730,6 +755,7 @@ async def _wakeup_turn_for_workflow(session_id: int) -> None:
         if not notes:
             return
         prompt = "\n\n".join(notes)
+        _workflow_wakeup_creating.add(session_id)
         async with async_session_factory() as db:
             try:
                 session = await session_service.get_session(db, session_id)
@@ -747,6 +773,10 @@ async def _wakeup_turn_for_workflow(session_id: int) -> None:
                 )
                 await _patch_message(user_msg.id, turn_id=turn_id_new)
                 logger.info("[workflow] 唤醒 turn=%s session=%s", turn_id_new, session_id)
+                # 先于启动该轮广播：前端立即接管运行态（不留空窗），并把上面那条唤醒消息归入这一轮
+                # （消息先于轮次广播，当时还没有 turn_id；_patch_message 只写库不广播）
+                handed_over = True
+                await _announce_workflow_wakeup(session_id, pending=False, turn_id=turn_id_new)
 
                 async def _run():
                     async with async_session_factory() as s:
@@ -772,6 +802,28 @@ async def _wakeup_turn_for_workflow(session_id: int) -> None:
                 logger.warning("[workflow] 唤醒轮创建失败 session=%s", session_id, exc_info=True)
     finally:
         _workflow_wakeups.pop(session_id, None)
+        _workflow_wakeup_creating.discard(session_id)
+        if not handed_over:
+            await _announce_workflow_wakeup(session_id, pending=False)
+
+
+async def cancel_workflow_wakeup(session_id: int) -> bool:
+    """取消待送达的工作流唤醒，并丢弃队列里尚未送达的通知（plan-20261014-actions-wait）。
+
+    用户点了「停止」就是要停下本会话的一切，停止之后不应又冒出一轮唤醒。
+    唤醒轮正在创建（消息已写、轮次未建好）时不能打断——否则会留下没有轮次的唤醒消息——
+    此时返回 False，由随后取消运行中轮次的步骤收尾。返回是否取消了在途的唤醒。"""
+    if session_id in _workflow_wakeup_creating:
+        return False
+    task = _workflow_wakeups.get(session_id)
+    if task is None or task.done():
+        return False
+    _workflow_notes.pop(session_id, None)
+    task.cancel()
+    # 等任务收尾：其 finally 会广播 pending=false，返回时前端的待唤醒标记已清除
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await task
+    return True
 
 
 async def _pause_workflows_on_stop(session_id: int) -> None:
@@ -1497,12 +1549,15 @@ async def stop_session_execution(session_id: int) -> dict[str, int]:
 
     - 运行中的主代理轮次：取消（连带其子代理）；
     - 主轮已结束、仍在后台跑的子代理（会话级管理器）：全部取消；
-    - 运行中的工作流程序：暂停，保留进度，之后可继续。
+    - 运行中的工作流程序：暂停，保留进度，之后可继续；
+    - 待送达的工作流唤醒：取消并丢弃通知（plan-20261014-actions-wait：停止之后不再冒出一轮）。
 
     各项数量返回给前端；只有这一个入口，避免“主代理停了、子代理与工作流还在跑”的半停状态。
     """
     from app.orchestration.workflow import service as workflow_service
 
+    # 先取消待送达的唤醒：否则下面取消轮次、暂停工作流期间它可能恰好触发，停止后反而又起一轮
+    wakeup_cancelled = await cancel_workflow_wakeup(session_id)
     turn_ids = [tid for tid, sid in list(_running_turn_session.items()) if sid == session_id]
     cancelled_turns = 0
     for tid in turn_ids:
@@ -1515,10 +1570,15 @@ async def stop_session_execution(session_id: int) -> dict[str, int]:
             await cancel_all()
     paused = await workflow_service.on_turn_stopped(session_id)
     logger.warning(
-        "[cancel] 停止会话全部执行 session=%s turns=%d agent_managers=%d workflows_paused=%d",
-        session_id, cancelled_turns, len(managers), paused,
+        "[cancel] 停止会话全部执行 session=%s turns=%d agent_managers=%d workflows_paused=%d wakeup_cancelled=%d",
+        session_id, cancelled_turns, len(managers), paused, int(wakeup_cancelled),
     )
-    return {"turns": cancelled_turns, "agent_managers": len(managers), "workflows_paused": paused}
+    return {
+        "turns": cancelled_turns,
+        "agent_managers": len(managers),
+        "workflows_paused": paused,
+        "wakeup_cancelled": int(wakeup_cancelled),
+    }
 
 
 async def cancel_turn(turn_id: int, source: str = "unknown") -> bool:

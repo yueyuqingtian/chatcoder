@@ -240,12 +240,15 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
   const deleteSession = useChatStore((s) => s.deleteSession);
   const renameSession = useChatStore((s) => s.renameSession);
   const forkSession = useChatStore((s) => s.forkSession);
-  // 本地得知的后台工作流执行中的会话（只在 bySession 变化时重算，避免每次工作流事件都重绘侧栏）
+  // 本地得知的后台工作流执行中的会话（只在 bySession 变化时重算，避免每次工作流事件都重绘侧栏）；
+  // 加上「待唤醒」的会话（工作流结束到主代理被唤醒之间的空档，转圈不断；plan-20261014-actions-wait）
   const wfBySession = useWorkflowStore((s) => s.bySession);
-  const wfBusyIds = useMemo(
-    () => new Set(Object.entries(wfBySession).filter(([, runs]) => sessionWorkflowRunning(runs)).map(([sid]) => Number(sid))),
-    [wfBySession],
-  );
+  const wfWakeupPending = useWorkflowStore((s) => s.wakeupPending);
+  const wfBusyIds = useMemo(() => {
+    const ids = new Set(Object.entries(wfBySession).filter(([, runs]) => sessionWorkflowRunning(runs)).map(([sid]) => Number(sid)));
+    for (const sid of Object.keys(wfWakeupPending)) ids.add(Number(sid));
+    return ids;
+  }, [wfBySession, wfWakeupPending]);
   // 当前会话的执行态以 store 为准（消息流与输入框同源）；列表标记刷新有延迟，故合并判定，两侧才能一致
   const currentRunning = useChatStore((s) => s.isRunning || s.runningTurnId != null);
   const busyIds = useMemo(() => {

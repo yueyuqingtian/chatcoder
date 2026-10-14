@@ -19,11 +19,8 @@ export type WorkflowAction = "start" | "pause" | "resume" | "cancel";
 /** approve 采纳 / 保留；rework 再试或再返工；abort 中止；include 把越界改动的文件纳入本步骤范围 */
 export type GateDecision = "approve" | "rework" | "abort" | "include";
 
-/** 会话是否有正在后台执行的工作流（程序 running）。它与轮次运行态并列：工作流在跑时，
- *  本会话可能已经没有运行中的 turn（如「开始执行」只启动了程序），侧栏 / 输入框 / 摘要的「执行中」都要算进来。 */
-export function sessionWorkflowRunning(runs: WorkflowRunOut[] | undefined): boolean {
-  return !!runs && runs.some((r) => r.status === "running");
-}
+// 「后台活动」口径（纯函数）放在 workflowBusy.ts 便于单测；这里统一再导出，各处仍从本模块引用
+export { sessionWorkflowRunning, sessionWorkflowBusy, selectSessionWorkflowBusy, latestWorkflowEndMs } from "./workflowBusy";
 
 const ACTION_LABEL: Record<WorkflowAction, string> = {
   start: "开始执行", pause: "暂停", resume: "继续", cancel: "取消",
@@ -32,6 +29,11 @@ const ACTION_LABEL: Record<WorkflowAction, string> = {
 interface WorkflowState {
   /** 会话 id → 程序列表（摘要；每次写入快照时同步其中的对应行） */
   bySession: Record<number, WorkflowRunOut[]>;
+  /** 会话 id → 服务端正要唤醒主代理送达工作流通知（只记 true 的会话；见 workflow.wakeup 事件）。
+   *  程序进入终态到唤醒轮启动之间没有运行中的程序也没有运行中的 turn，此标记把这段空档接上，
+   *  各处「执行中」指示不再回到空闲（plan-20261014-actions-wait）。 */
+  wakeupPending: Record<number, boolean>;
+  setWakeupPending: (sessionId: number, pending: boolean) => void;
   /** 程序 id → 程序快照（含子工作流与节点） */
   snapshots: Record<number, WorkflowProgramOut>;
   /** 正在执行动作的程序 id，用于按钮禁用 */
@@ -146,6 +148,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => {
 
   return {
     bySession: {},
+    wakeupPending: {},
     snapshots: {},
     busy: {},
     focusId: null,
@@ -159,6 +162,15 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => {
     error: null,
 
     focus: (programId) => set({ focusId: programId }),
+
+    setWakeupPending: (sessionId, pending) =>
+      set((s) => {
+        if (!!s.wakeupPending[sessionId] === pending) return s; // 无变化：不触发订阅者
+        const next = { ...s.wakeupPending };
+        if (pending) next[sessionId] = true;
+        else delete next[sessionId];
+        return { wakeupPending: next };
+      }),
 
     loadPool: async () => {
       try {

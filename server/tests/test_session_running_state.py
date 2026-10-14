@@ -44,7 +44,8 @@ async def test_stop_session_execution_pauses_the_running_workflows_and_reports_c
 
     result = await engine.stop_session_execution(sid)
 
-    assert result == {"turns": 0, "agent_managers": 0, "workflows_paused": 1}
+    # wakeup_cancelled（plan-20261014-actions-wait）：待送达的工作流唤醒被取消的数量；这里没有待送达的唤醒
+    assert result == {"turns": 0, "agent_managers": 0, "workflows_paused": 1, "wakeup_cancelled": 0}
     assert await _program_status(pid) == "paused"
 
 

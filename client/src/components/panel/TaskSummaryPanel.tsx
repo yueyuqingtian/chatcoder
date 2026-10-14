@@ -8,7 +8,7 @@
  *  折叠状态按「会话 + 模块」写 localStorage（store/tsFold.ts）。 */
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useChatStore } from "../../store/chat";
-import { sessionWorkflowRunning, useWorkflowStore } from "../../store/workflow";
+import { selectSessionWorkflowBusy, useWorkflowStore } from "../../store/workflow";
 import { usePanelStore } from "../../store/panel";
 import { useTsFoldStore } from "../../store/tsFold";
 import { openExtensionsManager, type ExtKind } from "../../store/navIntent";
@@ -82,8 +82,8 @@ export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
   const isRunning = useChatStore((state) => state.isRunning);
   const subagentMeta = useChatStore((state) => state.subagentMeta);
   const session = useChatStore((state) => state.sessions.find((x) => x.id === state.currentSessionId));
-  // 后台工作流在跑时，本会话即为「执行中」（工作流可能已不占用任何轮次）
-  const workflowRunning = useWorkflowStore((s) => sessionWorkflowRunning(session ? s.bySession[session.id] : undefined));
+  // 后台工作流在跑（含结束后等待唤醒主代理的空档）时，本会话即为「执行中」（工作流可能已不占用任何轮次）
+  const workflowRunning = useWorkflowStore((s) => selectSessionWorkflowBusy(s, session?.id));
   const setPreviewPath = usePanelStore((state) => state.setPreviewPath);
   const openTab = usePanelStore((state) => state.openTab);
   const openSubagent = usePanelStore((state) => state.openSubagent);

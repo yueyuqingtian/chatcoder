@@ -162,6 +162,10 @@ export type ServerWsEvent =
   | { event: "workflow.log.appended"; payload: WorkflowEventPayload }
   | { event: "workflow.conflict.detected"; payload: WorkflowEventPayload }
   | { event: "workflow.conflict.resolved"; payload: WorkflowEventPayload }
+  /** 工作流进入终态 / 需要决定后，服务端要稍等再唤醒主代理送达通知。这段空档里既没有运行中的程序也没有运行中的 turn，
+   *  前端据此保持忙碌：pending=true 通知已入队、唤醒即将进行；pending=false 且带 turn_id 唤醒轮已创建（立即接管运行态，
+   *  并把对应的唤醒消息归入该轮）；pending=false 且无 turn_id 唤醒被放弃（含用户停止）。 */
+  | { event: "workflow.wakeup"; payload: { session_id: number; pending: boolean; turn_id?: number | null } }
   | { event: "error"; payload: { code?: string; message?: string } }
   /** 服务端对客户端请求的确认（approval/cancel/sync 等） */
   | { event: "ack"; payload: { ref: string; ok?: boolean; resolved?: boolean } }
@@ -240,6 +244,7 @@ export const ORDERED_EVENTS: ReadonlySet<string> = new Set([
   "subagent.failed",
   "subagent.pending",
   "subagent.wakeup",
+  "workflow.wakeup",
   "usage.update",
   "debug.paused",
   // plan-308-1542：AI 合并进度（有序，保证前端进度行不跳序）

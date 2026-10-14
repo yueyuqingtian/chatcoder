@@ -8,7 +8,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, memo, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { TimelineEntry, ToolNode, TurnItem } from "./timeline";
-import { createTimelineBuilder, createRoundMerger, msgText, lastPersistedText, getTurnById } from "./timeline";
+import { createTimelineBuilder, createRoundMerger, msgText, lastPersistedText, getTurnById, tailRoundIndex } from "./timeline";
 import { isBusy, subscribe } from "../../perf/bus";
 import { registerReconcileTask, RECONCILE_ORDER } from "../../perf/reconcile";
 import { recordComponentRender } from "../../perf/metrics";
@@ -22,7 +22,7 @@ import { useTextHighlight } from "../../hooks/useTextHighlight";
 import { MarkdownContent } from "../MarkdownContent";
 import { MsgType } from "@chatcoder/shared";
 import { useChatStore } from "../../store/chat";
-import { sessionWorkflowRunning, useWorkflowStore } from "../../store/workflow";
+import { latestWorkflowEndMs, selectSessionWorkflowBusy, useWorkflowStore } from "../../store/workflow";
 import { api } from "../../api/client";
 import { Empty } from "../ui";
 
@@ -1246,6 +1246,10 @@ function MainMessageFlow({
   // v39: 后台子代理运行数——主会话等待子代理时显示「等待子代理结束…」
   const pendingSubagents = useChatStore((s) => s.pendingSubagents);
   const currentSessionId = useChatStore((s) => s.currentSessionId);
+  // 主代理未在跑、但后台工作流在执行（含工作流结束后等待唤醒主代理的空档）：消息流下方显示「等待响应…」（工作流才是此刻的执行者）
+  const workflowBusy = useWorkflowStore((s) => selectSessionWorkflowBusy(s, currentSessionId));
+  // 本会话已启动的工作流里最晚的结束时刻（完成 / 取消 / 暂停）：整轮「已工作」用时的终点下限，见 TurnGroup
+  const backgroundEndedAt = useWorkflowStore((s) => (currentSessionId == null ? 0 : latestWorkflowEndMs(s.bySession[currentSessionId])));
   const subagentMeta = useChatStore((s) => s.subagentMeta);
   // S8（FlowEngine）：**不再**订阅 streamingBuffers / thinkingBuffers。
   // 缓冲每帧换新引用，此前会让整棵消息流每帧重渲染（运行期“更卡”的头号来源）。
@@ -1355,8 +1359,16 @@ function MainMessageFlow({
   const flowErrorTurnId = useChatStore((s) => s.flowError?.turnId ?? null);
   const hiddenTurnErrors = useChatStore((s) => s.hiddenTurnErrors);
 
+  // plan-20261014-actions-wait：后台（工作流 / 子代理）仍在跑时，消息流尾部那一轮不算结束——
+  // 主代理即使已收工（turn 行状态为 completed），后台跑完后服务端还会唤醒续跑并并入该轮。
+  // 口径与输入框 busy、底部「等待响应… / 等待子代理结束…」一致；只作用于尾部一轮，
+  // 之后若又有了新一轮，更早的轮次即视为已结束。
+  // 尾部一轮跳过 turn_id 回填前的唤醒孤儿条目（它马上并入前一轮），避免唤醒消息到达的瞬间上一轮不再是尾部。
+  const backgroundBusy = workflowBusy || pendingSubagents > 0;
+  const tailIndex = tailRoundIndex(entries);
+
   const renderEntry = useCallback(
-    (entry: TimelineEntry) => {
+    (entry: TimelineEntry, index: number) => {
       if (entry.kind !== "turn") return <StandaloneEntry entry={entry} />;
       // v12: 已回滚 turn 显示专用横幅（回滚后消息被软删，以此占位区分「回滚了」与「没执行」）
       // plan-334-1661 S3: 改用 O(1) 索引（原先每次渲染每个可见条目都做一次 O(turns) 的 find）
@@ -1384,17 +1396,17 @@ function MainMessageFlow({
           flowErrorTurnId={flowErrorTurnId}
           hiddenTurnErrors={hiddenTurnErrors}
           turnStatus={turnRowStatus}
+          awaitingBackground={backgroundBusy && index === tailIndex}
+          backgroundEndedAt={index === tailIndex ? backgroundEndedAt : 0}
         />
       );
     },
-    [turns, runningTurnId, subagentsOfRound, planTurnId, plansByTurn, actions, isRunning, latestUserId, flowErrorTurnId, hiddenTurnErrors]
+    [turns, runningTurnId, subagentsOfRound, planTurnId, plansByTurn, actions, isRunning, latestUserId, flowErrorTurnId, hiddenTurnErrors, backgroundBusy, tailIndex, backgroundEndedAt]
   );
 
   // S8：流式文本/信号不再在此计算（已下沉到 <StreamingTail> 的精确 selector）。
   const turnStatus = useChatStore((s) => s.turnStatus);
-  // 主代理未在跑、但后台工作流在执行：消息流下方显示「等待响应…」（工作流才是此刻的执行者）
-  const workflowRunning = useWorkflowStore((s) => sessionWorkflowRunning(currentSessionId == null ? undefined : s.bySession[currentSessionId]));
-  const workflowOnly = !isRunning && workflowRunning;
+  const workflowOnly = !isRunning && workflowBusy;
   // plan-308-1542 需求1：任务执行类错误卡（只进消息流，不弹右上角 Toast）
   const flowError = useChatStore((s) => s.flowError);
   const clearFlowError = useChatStore((s) => s.clearFlowError);
@@ -1405,7 +1417,7 @@ function MainMessageFlow({
       key={currentSessionId}
       entries={entries}
       // 主代理未跑但工作流在跑时同样开启流式槽位（否则尾部「等待响应…」不渲染）
-      running={isRunning || workflowRunning}
+      running={isRunning || workflowBusy}
       renderEntry={renderEntry}
       streamingNode={
         // v42: 压缩期间状态行改显「压缩中…」（优先于「处理中…／等待响应…」；

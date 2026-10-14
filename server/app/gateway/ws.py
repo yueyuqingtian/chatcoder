@@ -65,6 +65,9 @@ _GLOBAL_FORWARD_EVENTS = frozenset({
     "message.created",
     # 工作流进度（侧栏会话标记）：只携带状态摘要，详情仍由工作流自身的会话通道提供
     "workflow.run.updated",
+    # 工作流结束 → 主代理被唤醒之间的待唤醒状态（plan-20261014-actions-wait）：
+    # 侧栏转圈要在这段空档里保持，非当前会话同样需要感知；低频、载荷极小
+    "workflow.wakeup",
 })
 
 

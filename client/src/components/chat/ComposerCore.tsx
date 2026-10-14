@@ -49,7 +49,7 @@ import { ModelPicker } from "./ModelPicker";
 // plan-75-332: 审批卡——与 QuestionWizardBox 同构，需要审批时替换输入框主体
 import { ApprovalCard } from "./ApprovalCard";
 import { useChatStore, persistLastReasoning, type UsageDetail } from "../../store/chat";
-import { sessionWorkflowRunning, useWorkflowStore } from "../../store/workflow";
+import { selectSessionWorkflowBusy, useWorkflowStore } from "../../store/workflow";
 import { useDraftsStore, normalizeDraftMode, normalizeApprovalMode, type ApprovalMode } from "../../store/drafts";
 import { useI18n } from "../../store/i18n";
 import { parseRefLines } from "../../utils/refLines";
@@ -113,11 +113,11 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   const isRunning = useChatStore((s) => s.isRunning);
   const currentSessionId = useChatStore((s) => s.currentSessionId);
   const currentProjectId = useChatStore((s) => s.currentProjectId);
-  // 会话级「执行中」：主代理轮次在跑、后台工作流在跑、或后台子代理未结束——任一即算。
-  // 工作流可能已不占用任何轮次（如「开始执行」只启动了程序），停止按钮要能中断它与子代理。
-  const workflowRunning = useWorkflowStore((s) => sessionWorkflowRunning(currentSessionId == null ? undefined : s.bySession[currentSessionId]));
+  // 会话级「执行中」：主代理轮次在跑、后台工作流在跑（含工作流结束后等待唤醒主代理的空档）、或后台子代理未结束——任一即算。
+  // 工作流可能已不占用任何轮次（如「开始执行」只启动了程序），停止按钮要能中断它与子代理，也要能取消待送达的唤醒。
+  const workflowBusy = useWorkflowStore((s) => selectSessionWorkflowBusy(s, currentSessionId));
   const pendingSubagents = useChatStore((s) => s.pendingSubagents);
-  const busy = isRunning || workflowRunning || pendingSubagents > 0;
+  const busy = isRunning || workflowBusy || pendingSubagents > 0;
   const stopSessionExecution = useChatStore((s) => s.stopSessionExecution);
   const projects = useChatStore((s) => s.projects);
   const models = useChatStore((s) => s.models);

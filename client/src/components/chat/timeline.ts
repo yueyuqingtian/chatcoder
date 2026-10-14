@@ -254,6 +254,21 @@ export function createRoundMerger(): (entries: TimelineEntry[]) => TimelineEntry
   };
 }
 
+/** turn_id 回填前的续跑孤儿条目：没有 turn_id、只含系统续跑项（唤醒消息先于其轮次广播，当时还没有 turn_id）。
+ *  它不会成为独立的一轮——回填后会并入前一轮（见 createRoundMerger / adoptWakeupTurn）。 */
+export function isOrphanContinuation(e: TimelineEntry): boolean {
+  return e.kind === "turn" && e.turnId == null && e.items.length > 0
+    && e.items.every((it) => SYSTEM_CONTINUATION_KINDS.has(it.kind));
+}
+
+/** 消息流尾部那一轮的下标（没有则 -1）。跳过尾部的续跑孤儿条目：它马上并入前一轮，
+ *  真正的尾部一轮是它之前的那一轮——否则唤醒消息到达的瞬间，上一轮不再是尾部，其「整轮未结束」的判定会闪断。 */
+export function tailRoundIndex(entries: readonly TimelineEntry[]): number {
+  let i = entries.length - 1;
+  while (i >= 0 && isOrphanContinuation(entries[i])) i--;
+  return i;
+}
+
 export function msgText(c: Record<string, unknown>): string {
   const t = c.text;
   return typeof t === "string" ? t : "";

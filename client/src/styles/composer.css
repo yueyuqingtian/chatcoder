@@ -356,8 +356,6 @@
 .tcap-state[data-tone="success"] { color: var(--success); }
 .tcap-more { flex-shrink: 0; padding: 0 2px; font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; cursor: default; }
 .tcap-resume { flex-shrink: 0; margin-right: 2px; }
-.tcap-caret { flex-shrink: 0; color: var(--text-3); transition: transform var(--dur-spring) var(--spring-snappy); }
-.tcap-seg.is-open .tcap-caret { transform: rotate(180deg); }
 .tcap-diff { display: inline-flex; gap: 4px; flex-shrink: 0; font-variant-numeric: tabular-nums; font-size: 12px; }
 .tcap-diff .add { color: var(--success); }
 .tcap-diff .del { color: var(--error); }

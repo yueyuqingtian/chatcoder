@@ -55,6 +55,7 @@ function WorkTimer({
   agentId,
   flow = "main",
   isRunning,
+  endFloorMs = 0,
   canCollapse,
   collapsed,
   onToggleCollapsed,
@@ -63,7 +64,12 @@ function WorkTimer({
   turnIds: readonly number[];
   agentId?: number;
   flow?: "main" | "subagent";
+  /** 整轮是否仍在进行（含主代理已收工、后台工作流 / 子代理仍在跑）：进行中计时走动、箭头隐藏 */
   isRunning: boolean;
+  /** plan-20261014-actions-wait：整轮含后台程序时的终点下限（毫秒）——已结束时终点取「最晚完成轮」与它较晚者。
+   *  工作流在后台跑，主代理那一轮早已结束；用户中途停止工作流、之后也没有唤醒轮时，只取最晚完成轮会让用时
+   *  从走动中的数字倒退回主代理那一轮的时长。0 = 无。 */
+  endFloorMs?: number;
   /** 本轮结构上可折叠（有过程且有最终汇报）：据此预留箭头槽位，运行中也占位、不显示 */
   canCollapse?: boolean;
   collapsed?: boolean;
@@ -117,7 +123,7 @@ function WorkTimer({
     let end = Date.now();
     if (!isRunning && endRaw) {
       const completed = parseUtc(endRaw);
-      if (completed > 0) end = completed;
+      if (completed > 0) end = Math.max(completed, endFloorMs);
     }
     const sec = Math.max(0, Math.round((end - start) / 1000));
     const min = Math.floor(sec / 60);
@@ -170,6 +176,8 @@ export const TurnGroup = memo(function TurnGroup({
   flowErrorTurnId,
   hiddenTurnErrors,
   turnStatus,
+  awaitingBackground = false,
+  backgroundEndedAt = 0,
 }: {
   entry: Extract<TimelineEntry, { kind: "turn" }>;
   isRunning: boolean;
@@ -195,6 +203,13 @@ export const TurnGroup = memo(function TurnGroup({
   flowErrorTurnId: number | null;
   hiddenTurnErrors: number[];
   turnStatus: string | undefined;
+  /** plan-20261014-actions-wait：本条目是消息流尾部一轮，且后台工作流 / 子代理仍在跑——
+   *  主代理已收工但整轮没有结束（结束后服务端会唤醒续跑并并入本轮）。由 MainMessageFlow 统一计算后传入；
+   *  缺省 false，子代理面板等其它宿主不受影响。 */
+  awaitingBackground?: boolean;
+  /** plan-20261014-actions-wait：本会话已启动的工作流里最晚的结束时刻（毫秒，0 = 无），仅尾部一轮传入。
+   *  整轮结束后「已工作」用时的终点不早于它（见 WorkTimer 的 endFloorMs）。 */
+  backgroundEndedAt?: number;
 }) {
   // plan-75-334 阶段0：记录组件渲染（仅采集期间统计，零开销）
   recordComponentRender("turnGroup");
@@ -271,13 +286,18 @@ export const TurnGroup = memo(function TurnGroup({
    *  故直接用宿主传入的本面板运行态，与改造前行为一致。
    *
    *  plan-282-1422：turnRunning（本 turn 确在运行）优先判「未结束」——计划确认执行
-   *  复用规划 turn 且行状态可能仍是 awaiting_confirmation，若只看行状态会误判已结束。 */
+   *  复用规划 turn 且行状态可能仍是 awaiting_confirmation，若只看行状态会误判已结束。
+   *
+   *  plan-20261014-actions-wait：主代理发起工作流 / 子代理后即收工，本 turn 行状态早已是 completed、
+   *  isRunning 也是 false，但整轮并没有结束——后台跑完后服务端还会唤醒续跑，回复并入本轮。
+   *  只看 turn 终态会让操作行在消息流底部「等待响应…」之上提前出现，唤醒后又消失 / 下移；
+   *  故后台仍在跑（awaitingBackground，仅尾部一轮）一律视为未结束，与输入框的忙碌口径一致。 */
   const turnFinished =
     flow === "subagent"
       ? !isRunning
       : entry.turnId == null
         ? true
-        : turnRunning
+        : turnRunning || awaitingBackground
           ? false
           : turnRowStatus != null
             ? TERMINAL_TURN_STATUSES.has(turnRowStatus)
@@ -309,12 +329,18 @@ export const TurnGroup = memo(function TurnGroup({
     () => items.some((it, index) => it.kind === "user" && index !== firstUserIdx),
     [items, firstUserIdx]
   );
+  /** plan-20261014-actions-wait：整轮是否仍在进行——本 turn 在跑，或尾部一轮在等后台（工作流 / 子代理 / 待送达的唤醒）。
+   *  计时条、折叠箭头与过程自动折叠都以它为准：主代理收工后后台仍在跑的期间，计时继续走动、箭头隐藏、过程保持展开，
+   *  整轮结束后才停表并折叠（与「运行中不可折叠」同一规则）；此前这些按主代理那一轮的结束判断，
+   *  工作流后台运行期间计时停住、箭头出现、过程已折叠，唤醒轮结束时用时又一下跳到含工作流的总时长。
+   *  思考块的「进行中」仍只认主代理真实在跑（isRunning）。 */
+  const roundActive = isRunning || awaitingBackground;
   /** plan-20261014-fix4（用户反馈「运行中也可以折叠」）：运行中强制展开、不可折叠；
    *  每次进入运行都清掉手动折叠记录——本轮（含并入的续跑轮）完成后按默认规则自动折叠，之后才可手动切换。 */
   useEffect(() => {
-    if (isRunning) setUserToggledCollapsed(null);
-  }, [isRunning]);
-  const processCollapsed = isRunning
+    if (roundActive) setUserToggledCollapsed(null);
+  }, [roundActive]);
+  const processCollapsed = roundActive
     ? false
     : userToggledCollapsed !== null
       ? userToggledCollapsed
@@ -689,16 +715,17 @@ export const TurnGroup = memo(function TurnGroup({
           无最终汇报（纯工具、执行中、异常中断等）时全量直显，绝对不吞工具调用与思考块。 */}
       {/* plan-1094: 运行中即使尚无任何 AI 内容落库（发送初期/纯思考阶段）
           也渲染 turn-flow，保证「已工作 N 秒」计时条不缺失 */}
-      {(hasAnyAiContent || isRunning) && (
+      {(hasAnyAiContent || roundActive) && (
         <div className="turn-flow">
           {/* plan-1094: 运行中即使尚无最终汇报文本（hasProcess=false）也必须渲染
               WorkTimer，否则发送初期/纯思考阶段「已工作 N 秒」计时条缺失 */}
-          {(canCollapse || isRunning) && (
+          {(canCollapse || roundActive) && (
             <WorkTimer
               turnIds={roundIds}
               agentId={agentId}
               flow={flow}
-              isRunning={isRunning}
+              isRunning={roundActive}
+              endFloorMs={backgroundEndedAt}
               canCollapse={canCollapse}
               collapsed={processCollapsed}
               onToggleCollapsed={() => setUserToggledCollapsed(!processCollapsed)}
