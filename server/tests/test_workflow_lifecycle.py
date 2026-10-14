@@ -247,8 +247,11 @@ async def test_gate_notifies_and_tells_the_agent_not_to_decide_for_the_user(tmp_
 
     assert await _program_status(pid) == "waiting_human"
     assert len(notes) == 1
-    assert "需要用户决定" in notes[0]
-    assert "不要自行替用户决定" in notes[0]
+    assert "等待确认" in notes[0]
+    assert "不要替用户做决定" in notes[0]
+    # plan-workflow-collab：通知带上问题清单与可选决定，主代理确认后经 decide_workflow 提交
+    assert "decide_workflow" in notes[0]
+    assert "node_key=review" in notes[0]
 
 
 async def test_user_stop_schedules_pause_but_rollback_does_not(monkeypatch):

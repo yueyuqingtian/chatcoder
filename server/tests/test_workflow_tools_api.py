@@ -86,7 +86,7 @@ async def test_plan_workflow_creates_draft_and_start_is_refused_in_plan_mode(
         workspace=str(tmp_path),
         readonly_only=True,
     )
-    assert f"工作流 {program_id}" in status and "draft" in status
+    assert f"program_id={program_id}" in status and "draft" in status
 
 
 async def test_programs_are_scoped_to_their_session(fresh_runtime, tmp_path):

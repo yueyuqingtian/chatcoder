@@ -8,7 +8,7 @@ import type { AttachmentInfo } from "../api/client";
  *  plan-75-332: 内置模式改为 3 档（agent 智能体 / plan 计划 / readonly 只读）——“计划执行”
  *  （accept_edits）已取消（它与 agent 能力相同），旧值 default 更名为 agent。
  *  旧 localStorage 里的旧值由 normalizeDraftMode 归一化，避免模式菜单选不中任何一项。 */
-export const BUILTIN_DRAFT_MODES = ["agent", "plan", "readonly"] as const;
+export const BUILTIN_DRAFT_MODES = ["agent", "workflow", "plan", "readonly"] as const;
 export type BuiltinDraftMode = (typeof BUILTIN_DRAFT_MODES)[number];
 export type ComposerDraftMode = string;
 

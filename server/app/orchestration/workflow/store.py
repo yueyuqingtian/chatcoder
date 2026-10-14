@@ -878,6 +878,35 @@ async def list_paused_workflows(session_id: int, limit: int = 5) -> list[dict[st
         return items
 
 
+async def list_pending_gates(session_id: int, limit: int = 3) -> list[dict[str, Any]]:
+    """本会话中等待确认的步骤（plan-workflow-collab）：新一轮注入上下文，用户在输入框回复即可决定。"""
+    from app.orchestration.workflow import report
+
+    async with async_session_factory() as s:
+        ids = (
+            (
+                await s.execute(
+                    select(WorkflowRun.id)
+                    .where(
+                        WorkflowRun.session_id == session_id,
+                        WorkflowRun.kind == "program",
+                        WorkflowRun.status == "waiting_human",
+                    )
+                    .order_by(WorkflowRun.id.desc())
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    items: list[dict[str, Any]] = []
+    for program_id in ids:
+        snap = await load_program(program_id)
+        if snap is not None:
+            items.extend(report.pending_gates(snap))
+    return items
+
+
 async def _progress_by_program(s, program_ids: list[int]) -> dict[int, dict[str, int]]:
     """各程序的步骤完成情况（done 含 skipped）；一次分组查询，避免逐个程序访问数据库。"""
     if not program_ids:

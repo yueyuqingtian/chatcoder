@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -34,6 +35,9 @@ class NodeRequest:
     turn_id: int | None = None  # 归属的主代理轮次
     commands: tuple[str, ...] = ()  # 检查节点的命令（确定性执行，不调用模型）
     question: str = ""  # 闸门节点等待决定的问题
+    rework_source: str = ""  # 返工来源：review 表示评估打回（记入返工记录）；其它为冲突重做等
+    # 子代理一经派发即回报（plan-workflow-collab）：节点运行中就指向当前子代理，点开不会进错线程
+    on_agent: Callable[[int], Awaitable[None]] | None = field(default=None, compare=False)
 
 
 @dataclass

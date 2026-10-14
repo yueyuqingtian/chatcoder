@@ -178,6 +178,7 @@ def load_persisted_workspace() -> None:
         "workflow_confirm_before_start",
         "workflow_auto_resume_on_network",
         "workflow_require_checks",
+        "workflow_rework_confirm",
         "workflow_auto_merge",
     ):
         if _flag in data:
@@ -288,6 +289,7 @@ class GlobalSettingsOut(BaseModel):
     workflow_composition_mode: str = "runtime"
     workflow_hot_files: str = ""
     workflow_require_checks: bool = True
+    workflow_rework_confirm: bool = True
     workflow_conflict_policy: str = "queue"
     workflow_auto_merge: bool = True
     workflow_isolation_default: str = "shared"
@@ -391,6 +393,7 @@ class GlobalSettingsIn(BaseModel):
     workflow_composition_mode: str | None = None
     workflow_hot_files: str | None = None
     workflow_require_checks: bool | None = None
+    workflow_rework_confirm: bool | None = None
     workflow_conflict_policy: str | None = None
     workflow_auto_merge: bool | None = None
     workflow_isolation_default: str | None = None
@@ -489,6 +492,9 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
         workflow_hot_files=str(data.get("workflow_hot_files", settings.workflow_hot_files) or ""),
         workflow_require_checks=bool(
             data.get("workflow_require_checks", settings.workflow_require_checks)
+        ),
+        workflow_rework_confirm=bool(
+            data.get("workflow_rework_confirm", settings.workflow_rework_confirm)
         ),
         workflow_conflict_policy=_conflict_policy(
             data.get("workflow_conflict_policy", settings.workflow_conflict_policy)
@@ -719,6 +725,7 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         "workflow_confirm_before_start",
         "workflow_auto_resume_on_network",
         "workflow_require_checks",
+        "workflow_rework_confirm",
         "workflow_auto_merge",
     ):
         _flag_value = getattr(body, _flag)

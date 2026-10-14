@@ -67,8 +67,10 @@ ACTION_LABELS: dict[str, str] = {
 MODE_READONLY = "readonly"
 MODE_PLAN = "plan"
 MODE_AGENT = "agent"
+# plan-workflow-collab：工作流模式——能力边界同智能体，区别只在模式提示词要求以工作流完成任务
+MODE_WORKFLOW = "workflow"
 
-EXECUTION_MODES = (MODE_READONLY, MODE_PLAN, MODE_AGENT)
+EXECUTION_MODES = (MODE_READONLY, MODE_PLAN, MODE_AGENT, MODE_WORKFLOW)
 
 # 旧值归一化：default（原「完全访问」）与 accept_edits（原「计划执行」）都并入 agent。
 # plan-75-332：accept_edits 取消——它与 default 的实际能力完全相同（全量工具 + 免审批），

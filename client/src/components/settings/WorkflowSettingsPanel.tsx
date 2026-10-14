@@ -35,6 +35,7 @@ interface WorkflowConfig {
   workflow_composition_mode: Composition;
   workflow_hot_files: string;
   workflow_require_checks: boolean;
+  workflow_rework_confirm: boolean;
   workflow_auto_merge: boolean;
   workflow_conflict_policy: ConflictPolicy;
   workflow_isolation_default: Isolation;
@@ -53,6 +54,7 @@ const DEFAULTS: WorkflowConfig = {
   workflow_composition_mode: "runtime",
   workflow_hot_files: "",
   workflow_require_checks: true,
+  workflow_rework_confirm: true,
   workflow_auto_merge: true,
   workflow_conflict_policy: "queue",
   workflow_isolation_default: "shared",
@@ -71,6 +73,7 @@ function pickConfig(g: GlobalSettingsOut): WorkflowConfig {
     workflow_composition_mode: g.workflow_composition_mode ?? DEFAULTS.workflow_composition_mode,
     workflow_hot_files: g.workflow_hot_files ?? DEFAULTS.workflow_hot_files,
     workflow_require_checks: g.workflow_require_checks ?? DEFAULTS.workflow_require_checks,
+    workflow_rework_confirm: g.workflow_rework_confirm ?? DEFAULTS.workflow_rework_confirm,
     workflow_auto_merge: g.workflow_auto_merge ?? DEFAULTS.workflow_auto_merge,
     workflow_conflict_policy: g.workflow_conflict_policy ?? DEFAULTS.workflow_conflict_policy,
     workflow_isolation_default: g.workflow_isolation_default ?? DEFAULTS.workflow_isolation_default,
@@ -419,6 +422,15 @@ export function WorkflowSettingsPanel() {
           <Switch
             checked={cfg.workflow_require_checks}
             onChange={(v) => update({ workflow_require_checks: v })}
+          />
+        </CardRow>
+        <CardRow
+          title="返工前先确认"
+          desc="评估发现需要修改的问题时，先由嗒嗒核实并向你汇报，你确认后再返工；关闭则按评估结论自动返工。只有次要问题时不会返工。"
+        >
+          <Switch
+            checked={cfg.workflow_rework_confirm}
+            onChange={(v) => update({ workflow_rework_confirm: v })}
           />
         </CardRow>
         <CardRow title="单次运行 token 预算" desc="超出后运行暂停，调高预算即可继续；0 表示不限">

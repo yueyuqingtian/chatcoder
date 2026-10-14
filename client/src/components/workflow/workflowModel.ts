@@ -16,7 +16,7 @@ export interface RunStatusView {
 const RUN_STATUS: Record<string, RunStatusView> = {
   draft: { label: "待确认", tone: "neutral", variant: "outline" },
   running: { label: "运行中", tone: "info", variant: "soft" },
-  waiting_human: { label: "待你决定", tone: "warning", variant: "soft" },
+  waiting_human: { label: "待你确认", tone: "warning", variant: "soft" },
   paused: { label: "已暂停", tone: "warning", variant: "solid" },
   succeeded: { label: "已完成", tone: "success", variant: "soft" },
   failed: { label: "失败", tone: "danger", variant: "soft" },
@@ -29,7 +29,7 @@ const NODE_STATUS: Record<string, { label: string; icon: StatusKind }> = {
   running: { label: "进行中", icon: "running" },
   recovering: { label: "网络重试中", icon: "running" },
   waiting_approval: { label: "等待工具审批", icon: "paused" },
-  waiting_human: { label: "等待你的决定", icon: "paused" },
+  waiting_human: { label: "待你确认", icon: "paused" },
   awaiting_merge: { label: "等待合并步骤完成", icon: "queued" },
   done: { label: "已完成", icon: "done" },
   failed: { label: "失败", icon: "failed" },
@@ -118,19 +118,28 @@ export function failedNodeOf(snap: WorkflowProgramOut): { flowKey: string; node:
 export function currentNote(snap: WorkflowProgramOut): string {
   const run = snap.run;
   if (run.status === "draft") return "计划已生成，确认后开始执行";
-  if (run.status === "succeeded") return "全部步骤已完成";
+  if (run.status === "succeeded") {
+    const remaining = remainingIssueCount(snap);
+    return remaining > 0
+      ? `全部步骤已完成，评估留下 ${remaining} 个未返工的问题，嗒嗒会在汇报里说明`
+      : "全部步骤已完成";
+  }
   if (run.status === "cancelled") {
     return run.closed_reason === "adjusted"
       ? "已按新的要求调整，由新计划替代"
       : "已取消，已完成的改动保留在工作区";
   }
   const gate = gateOf(snap);
-  if (gate) return `等待你的决定：${gate.node.reason || gate.node.question || gate.node.title}`;
+  if (gate) return `等待你确认：${flowTitleOf(snap, gate.node)} · ${gate.node.title}`;
   const nodes = allNodes(snap);
   const active = nodes.find((n) => n.status === "running" || n.status === "recovering");
   if (active?.status === "recovering") return `网络波动，正在重试：${active.title}`;
-  if (active?.kind === "execute" && active.rework_round > 0) {
-    return `评估未通过，正在返工：${flowTitleOf(snap, active)} · ${active.title}（第 ${active.rework_round} 次）`;
+  const reworkRound = active?.kind === "execute" ? pendingReworkOf(snap, active) : 0;
+  if (active && reworkRound > 0) {
+    return `正在按评估返工：${flowTitleOf(snap, active)} · ${active.title}（第 ${reworkRound} 轮）`;
+  }
+  if (active?.kind === "review" && active.rework_round > 0) {
+    return `正在复审：${flowTitleOf(snap, active)} · ${active.title}（第 ${active.rework_round + 1} 轮评估）`;
   }
   if (active) {
     const attempt = active.attempt_no > 1 ? `（第 ${active.attempt_no} 次尝试）` : "";
@@ -304,3 +313,61 @@ export const ATTEMPT_STATUS_LABEL: Record<string, string> = {
   cancelled: "已取消",
   stalled: "长时间无进展",
 };
+
+/** 评估每一轮的记录（服务端写在评估步骤产出的 rounds 中） */
+export interface ReviewRound {
+  round: number;
+  reason: string;
+  summary: string;
+  issues: ReviewIssue[];
+  checks_ok: boolean | null;
+  outcome: string;
+  user_note: string;
+}
+
+export const ROUND_OUTCOME_LABEL: Record<string, string> = {
+  passed: "通过",
+  rework: "已返工",
+  accepted: "已采纳",
+  aborted: "已中止",
+  pending: "待你确认",
+  recorded: "问题已记入汇报",
+};
+
+export function reviewRoundsOf(node: WorkflowNodeOut): ReviewRound[] {
+  const raw = ((node.output as Record<string, unknown> | null)?.rounds as unknown[] | undefined) ?? [];
+  return raw
+    .filter((r): r is Record<string, unknown> => !!r && typeof r === "object")
+    .map((r) => ({
+      round: Number(r.round ?? 0),
+      reason: String(r.reason ?? ""),
+      summary: String(r.summary ?? ""),
+      issues: issuesOf({ verdict: { issues: r.issues } } as unknown as WorkflowNodeOut),
+      checks_ok: typeof r.checks_ok === "boolean" ? r.checks_ok : null,
+      outcome: String(r.outcome ?? ""),
+      user_note: String(r.user_note ?? ""),
+    }));
+}
+
+/** 实现步骤已完成的返工轮数（服务端写在产出的 reworks 中）；评估步骤取已返工的轮数 */
+export function reworkCount(node: WorkflowNodeOut): number {
+  if (node.kind === "review") return node.rework_round ?? 0;
+  const raw = (node.output as Record<string, unknown> | null)?.reworks;
+  return Array.isArray(raw) ? raw.length : 0;
+}
+
+/** 正在返工的实现步骤：对应评估步骤记的返工轮次（0 表示不是因评估返工） */
+function pendingReworkOf(snap: WorkflowProgramOut, node: WorkflowNodeOut): number {
+  for (const flow of snap.flows) {
+    const review = flow.nodes.find((n) => n.kind === "review" && n.rework_to === node.key);
+    if (review && review.rework_round > reworkCount(node)) return review.rework_round;
+  }
+  return 0;
+}
+
+/** 已完成的评估留下、未返工的问题数（采纳或只剩次要问题时） */
+export function remainingIssueCount(snap: WorkflowProgramOut): number {
+  return allNodes(snap)
+    .filter((n) => n.kind === "review" && n.status === "done")
+    .reduce((sum, n) => sum + issuesOf(n).length, 0);
+}

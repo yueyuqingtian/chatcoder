@@ -32,6 +32,18 @@ export function MgPlan(p: P) {
     <path d="M14.4 9.6h2M8.2 15h8" />
   </Glyph>;
 }
+/** 工作流（plan-workflow-collab）：三个步骤节点串成一条链，末端节点为淡面（产出），悬停时末端轻移 */
+export function MgWorkflow(p: P) {
+  return <Glyph {...p} name="mg-workflow">
+    <rect x="3.5" y="4" width="6" height="6" rx="2" />
+    <path d="M9.5 7h2.5a2.5 2.5 0 0 1 2.5 2.5V14" />
+    <path d="M6.5 10v4.5a2.5 2.5 0 0 0 2.5 2.5h1" />
+    <g className="lx-nudge">
+      <rect className="lx-fill" x="10.5" y="14" width="6" height="6" rx="2" />
+      <rect x="10.5" y="14" width="6" height="6" rx="2" />
+    </g>
+  </Glyph>;
+}
 /** 只读：眼睛 + 底部短横（锁定观看），悬停时瞳孔轻移 */
 export function MgReadonly(p: P) {
   return <Glyph {...p} name="mg-readonly">

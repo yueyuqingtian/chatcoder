@@ -1,15 +1,14 @@
-/** 右侧「工作流」标签：本会话的运行列表 → 单个运行的详情（目标、子工作流与步骤、待决定的闸门、进展时间线）。
- * 列表与详情都以快照为准；时间线按程序内序号增量拉取，断线后从上次位置补齐。
+/** 右侧「工作流」标签：本会话的运行列表 → 单个运行的详情（目标、待确认的步骤、子工作流与步骤、评估记录）。
+ * 列表与详情都以快照为准。plan-workflow-collab：不再展示内部事件时间线与并发 / 排队条——
+ * 过程用每一步的状态、评估记录与返工次数说清楚，调度细节只在需要等待时以一句话说明。
  * 列表为空时给出两个入口：让嗒嗒规划（发消息给主代理）与从预设开始（生成待确认的骨架）。
  */
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   api,
   type WorkflowAttemptOut,
-  type WorkflowEventOut,
   type WorkflowFlowOut,
   type WorkflowNodeOut,
-  type WorkflowPoolOut,
   type WorkflowProgramOut,
   type WorkflowRunOut,
 } from "../../api/client";
@@ -25,6 +24,7 @@ import {
   ATTEMPT_MODE_LABEL,
   ATTEMPT_STATUS_LABEL,
   KIND_LABEL,
+  ROUND_OUTCOME_LABEL,
   currentNote,
   dependencyLabel,
   durationText,
@@ -32,17 +32,14 @@ import {
   isOpenRun,
   nodeStatusView,
   progressOf,
+  reviewRoundsOf,
+  reworkCount,
   roleChain,
   runStatusView,
   subflowCount,
 } from "./workflowModel";
 
 type ListFilter = "open" | "paused" | "all";
-
-/** 时间线首次加载只取最近的一段，之后按序号向后增量；界面每次露出一页 */
-const TIMELINE_TAIL = 60;
-const TIMELINE_KEEP = 200;
-const TIMELINE_PAGE = 50;
 
 export function WorkflowPanel({ sessionId, visible }: { sessionId: number | null; visible: boolean }) {
   const focusId = useWorkflowStore((s) => s.focusId);
@@ -53,7 +50,6 @@ export function WorkflowPanel({ sessionId, visible }: { sessionId: number | null
   const snap = useWorkflowStore((s) => (focusId == null ? undefined : s.snapshots[focusId]));
   const error = useWorkflowStore((s) => s.error);
   const clearError = useWorkflowStore((s) => s.clearError);
-  const pool = useWorkflowStore((s) => s.pool);
   const [filter, setFilter] = useState<ListFilter>("open");
 
   useEffect(() => {
@@ -104,35 +100,7 @@ export function WorkflowPanel({ sessionId, visible }: { sessionId: number | null
           <Button variant="ghost" size="xs" onClick={clearError}>知道了</Button>
         </div>
       )}
-      {pool && <PoolBar pool={pool} sessionId={sessionId} />}
       {body}
-    </div>
-  );
-}
-
-const limitText = (n: number) => (n === 0 ? "不限" : String(n));
-
-/** 并发占用：全局与本会话的占用 / 上限，排队数；上限为 0（不限）时不画进度条 */
-function PoolBar({ pool, sessionId }: { pool: WorkflowPoolOut; sessionId: number | null }) {
-  const used = pool.global.in_use;
-  const limit = pool.global.limit;
-  const sessionUsed = sessionId != null ? (pool.session.in_use[String(sessionId)] ?? 0) : 0;
-  const pct = limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0;
-  return (
-    <div className="wf-pool" aria-label="并发占用">
-      <div className="wf-pool-main">
-        <span className="wf-pool-label">并发</span>
-        <span className="wf-pool-count">{used}/{limitText(limit)}</span>
-        <span className="wf-pool-sep" aria-hidden>·</span>
-        <span className="wf-pool-label">本会话</span>
-        <span className="wf-pool-count">{sessionUsed}/{limitText(pool.session.limit)}</span>
-        {pool.queued > 0 && <Badge tone="info" variant="soft" size="xs">排队 {pool.queued}</Badge>}
-      </div>
-      {limit > 0 && (
-        <span className="wf-pool-bar" aria-hidden>
-          <span className="wf-pool-fill" style={{ width: `${pct}%` }} />
-        </span>
-      )}
     </div>
   );
 }
@@ -340,20 +308,15 @@ function WorkflowDetail({ snap, onBack }: { snap: WorkflowProgramOut; onBack: ()
   const view = runStatusView(run.status, run.closed_reason);
   const { done, total } = progressOf(snap);
   const saveTemplate = useWorkflowStore((s) => s.saveTemplate);
-  const pool = useWorkflowStore((s) => s.pool);
   const [templateOpen, setTemplateOpen] = useState(false);
   const [templateName, setTemplateName] = useState("");
   const [templateNote, setTemplateNote] = useState("");
   const [savedName, setSavedName] = useState<string | null>(null);
-  const poolText = pool
-    ? `并发 ${pool.global.in_use}/${limitText(pool.global.limit)} · 排队 ${pool.queued}`
-    : "";
   const stats = [
     `${done}/${total} 步`,
     run.rework_total > 0 ? `返工 ${run.rework_total} 次` : "",
     run.resume_count > 0 ? `已续跑 ${run.resume_count} 次` : "",
     run.started_at ? `开始于 ${formatTime(run.started_at)}` : "",
-    poolText,
   ].filter(Boolean).join(" · ");
   return (
     <div className="wf-detail">
@@ -400,7 +363,6 @@ function WorkflowDetail({ snap, onBack }: { snap: WorkflowProgramOut; onBack: ()
           <FlowBlock key={flow.run.id} snap={snap} flow={flow} />
         ))}
       </section>
-      <WorkflowTimeline programId={run.id} lastSeq={run.last_seq} />
       <FormDialog
         open={templateOpen}
         onClose={() => setTemplateOpen(false)}
@@ -454,10 +416,11 @@ function NodeRow({ programId, flowKey, node }: { programId: number; flowKey: str
   const view = nodeStatusView(node.status);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [attempts, setAttempts] = useState<WorkflowAttemptOut[] | null>(null);
+  const reworks = reworkCount(node);
   const sub = [
     KIND_LABEL[node.kind] ?? node.kind,
     node.role,
-    node.attempt_no > 1 ? `第 ${node.attempt_no} 次` : "",
+    reworks > 0 ? `返工 ${reworks} 轮` : "",
   ].filter(Boolean).join(" · ");
 
   useEffect(() => {
@@ -496,7 +459,9 @@ function NodeRow({ programId, flowKey, node }: { programId: number; flowKey: str
       ) : (
         <div className="wf-node-btn is-static">{content}</div>
       )}
-      {node.reason && <div className="wf-node-reason">{node.reason}</div>}
+      {/* 待确认的步骤由上方确认卡说明原因，这里不再重复 */}
+      {node.reason && node.status !== "waiting_human" && <div className="wf-node-reason">{node.reason}</div>}
+      {node.kind === "review" && <ReviewRounds node={node} />}
       {node.attempt_no > 0 && (
         <button
           type="button"
@@ -533,71 +498,34 @@ export function AttemptHistory({ attempts }: { attempts: WorkflowAttemptOut[] | 
   );
 }
 
-function eventText(ev: WorkflowEventOut): string {
-  const p = ev.payload;
-  switch (ev.type) {
-    case "workflow.log.appended":
-      return String(p.text ?? "");
-    case "workflow.node.updated":
-      return `${ev.node_key ?? "步骤"} · ${nodeStatusView(String(p.status ?? "")).label}`;
-    case "workflow.run.updated":
-      return `运行状态：${runStatusView(String(p.status ?? "")).label}`;
-    case "workflow.gate.opened":
-      return `等待你的决定：${ev.node_key ?? ""}`;
-    default:
-      return ev.type;
-  }
-}
-
-function WorkflowTimeline({ programId, lastSeq }: { programId: number; lastSeq: number }) {
-  const [events, setEvents] = useState<WorkflowEventOut[]>([]);
-  const [visible, setVisible] = useState(TIMELINE_PAGE);
-  // 已拉取到的程序内序号；-1 表示尚未初始化（首次只取最近一段）
-  const cursor = useRef(-1);
-
-  useEffect(() => {
-    cursor.current = -1;
-    setEvents([]);
-    setVisible(TIMELINE_PAGE);
-  }, [programId]);
-
-  useEffect(() => {
-    if (lastSeq <= 0 || cursor.current >= lastSeq) return;
-    let cancelled = false;
-    const from = cursor.current < 0 ? Math.max(0, lastSeq - TIMELINE_TAIL) : cursor.current;
-    void api.workflowEvents(programId, from)
-      .then((rows) => {
-        if (cancelled || rows.length === 0) return;
-        cursor.current = rows[rows.length - 1].seq;
-        setEvents((prev) => [...prev, ...rows].slice(-TIMELINE_KEEP));
-      })
-      .catch(() => { /* 时间线是辅助信息，失败不打断面板 */ });
-    return () => { cancelled = true; };
-  }, [programId, lastSeq]);
-
-  const ordered = events.slice().reverse();
+/** 评估记录（plan-workflow-collab）：每一轮的结论、问题数与处理结果，回答“为什么返工、改好了没有” */
+function ReviewRounds({ node }: { node: WorkflowNodeOut }) {
+  const rounds = reviewRoundsOf(node);
+  const [open, setOpen] = useState(false);
+  if (rounds.length === 0) return null;
+  const last = rounds[rounds.length - 1];
   return (
-    <section className="wf-timeline" aria-label="进展时间线">
-      <h4 className="wf-section-title">进展</h4>
-      {events.length === 0 ? (
-        <Empty size="sm" mood="calm" title="还没有进展记录" />
-      ) : (
-        <>
-          <ol className="wf-events">
-            {ordered.slice(0, visible).map((ev) => (
-              <li key={ev.seq} className="wf-event">
-                <span className="wf-event-time">{formatTime(ev.created_at)}</span>
-                <span className="wf-event-text">{eventText(ev)}</span>
-              </li>
-            ))}
-          </ol>
-          {ordered.length > visible && (
-            <Button variant="ghost" size="xs" onClick={() => setVisible((v) => v + TIMELINE_PAGE)}>
-              加载更多（还有 {ordered.length - visible} 条）
-            </Button>
-          )}
-        </>
+    <div className="wf-rounds">
+      <button type="button" className="wf-attempts-toggle" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        {open ? "收起评估记录" : `评估记录 · ${rounds.length} 轮 · 最近：${ROUND_OUTCOME_LABEL[last.outcome] ?? last.reason}`}
+      </button>
+      {open && (
+        <ol className="wf-rounds-list" aria-label="评估记录">
+          {rounds.map((r) => (
+            <li key={r.round} className="wf-round">
+              <span className="wf-round-head">
+                第 {r.round} 轮 · {r.issues.length > 0 ? `${r.issues.length} 个问题` : "无问题"}
+                {r.checks_ok === false ? " · 检查未通过" : ""}
+                <span className="wf-round-outcome" data-outcome={r.outcome}>
+                  {ROUND_OUTCOME_LABEL[r.outcome] ?? ""}
+                </span>
+              </span>
+              {r.summary && <span className="wf-round-summary">{r.summary}</span>}
+              {r.user_note && <span className="wf-round-note">你的说明：{r.user_note}</span>}
+            </li>
+          ))}
+        </ol>
       )}
-    </section>
+    </div>
   );
 }

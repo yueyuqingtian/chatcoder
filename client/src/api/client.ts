@@ -1513,6 +1513,8 @@ export interface GlobalSettingsOut {
   workflow_hot_files?: string;
   /** 评估的确定性检查必须通过（关闭则检查结果只记录，不阻止通过） */
   workflow_require_checks?: boolean;
+  /** 返工前确认：评估要求返工时先交给主代理核实、由用户确认后再返工（关闭则自动返工） */
+  workflow_rework_confirm?: boolean;
   /** 自动三方合并不重叠的改动（关闭则直接转入重做） */
   workflow_auto_merge?: boolean;
   /** 同一处真冲突：queue 先自动重做、多次失败再决定；ask 每次都由用户决定 */

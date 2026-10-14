@@ -1,5 +1,4 @@
-"""评估结论需要用户决定（设计 §7.7）：没有返工目标的评估，闸门只提供“采纳”与“中止”；
-决定返工会被拒绝，且不改动节点状态与返工计数。"""
+"""没有返工目标的评估（集成验收、汇总等）：不通过时不开闸门，结论记入汇报后完成（plan-workflow-collab）。"""
 
 import pytest
 
@@ -9,7 +8,6 @@ from tests.test_workflow_runtime import (
     REWORK_TEXT,
     ScriptedExecutor,
     _backend_plan,
-    _node_status,
     _program_status,
     _runtime,
     _session,
@@ -28,13 +26,31 @@ async def _review_node(program_id: int) -> dict:
     return next(n for f in snap["flows"] for n in f["nodes"] if n["key"] == "review")
 
 
-async def _last_gate_options(program_id: int) -> list[str]:
-    events = await store.list_events(program_id)
-    gates = [e for e in events if e["type"] == "workflow.gate.opened"]
-    return gates[-1]["payload"]["options"]
+async def test_review_without_rework_target_records_issues_and_completes(tmp_path):
+    notes: list[str] = []
+
+    async def record(session_id: int, text: str) -> None:
+        notes.append(text)
+
+    executor = ScriptedExecutor({"review": [NodeResult(status="done", text=REWORK_TEXT)]})
+    rt = _runtime(executor, notify=record)
+    pid = await rt.create_program(
+        session_id=await _session(), plan=_plan_without_rework_target(), workspace=str(tmp_path)
+    )
+    await rt.start(pid)
+    await rt.run_until_idle(timeout=20)
+
+    # plan-workflow-collab：没有返工目标的评估不卡在闸门上，结论记入汇报后完成
+    assert await _program_status(pid) == "succeeded"
+    review = await _review_node(pid)
+    assert review["status"] == "done"
+    assert "已记入汇报" in (review["reason"] or "")
+    assert review["output"]["rounds"][0]["outcome"] == "recorded"
+    assert len(notes) == 1
+    assert "遗留问题" in notes[0] and "缺余额校验" in notes[0]
 
 
-async def _start_until_gate(tmp_path):
+async def test_decision_on_a_step_that_is_not_waiting_is_refused(tmp_path):
     executor = ScriptedExecutor({"review": [NodeResult(status="done", text=REWORK_TEXT)]})
     rt = _runtime(executor)
     pid = await rt.create_program(
@@ -42,35 +58,6 @@ async def _start_until_gate(tmp_path):
     )
     await rt.start(pid)
     await rt.run_until_idle(timeout=20)
-    return rt, pid
 
-
-async def test_review_without_rework_target_gates_with_approve_and_abort_only(tmp_path):
-    rt, pid = await _start_until_gate(tmp_path)
-
-    assert await _program_status(pid) == "waiting_human"
-    assert await _node_status(pid, "backend", "review") == "waiting_human"
-    assert await _last_gate_options(pid) == ["approve", "abort"]
-
-    # 结束程序，避免后台调度在用例之后继续读写数据库
-    await rt.decide_gate(pid, "backend", "review", "abort")
-    await rt.run_until_idle(timeout=20)
-    assert await _program_status(pid) in {"cancelled", "failed", "succeeded"}
-
-
-async def test_rework_decision_without_target_is_refused_and_keeps_the_gate(tmp_path):
-    rt, pid = await _start_until_gate(tmp_path)
-    before = await _review_node(pid)
-
-    with pytest.raises(ValueError, match="没有可返工的实现步骤"):
+    with pytest.raises(ValueError, match="不在等待决定状态"):
         await rt.decide_gate(pid, "backend", "review", "rework", "再来一次")
-
-    after = await _review_node(pid)
-    assert after["status"] == "waiting_human"
-    assert after["rework_round"] == before["rework_round"]
-    assert after["max_rework"] == before["max_rework"]
-    assert await _program_status(pid) == "waiting_human"
-
-    await rt.decide_gate(pid, "backend", "review", "approve")
-    await rt.run_until_idle(timeout=20)
-    assert await _program_status(pid) == "succeeded"

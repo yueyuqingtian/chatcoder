@@ -22,6 +22,17 @@ from app.orchestration.workflow.executor import NodeRequest, NodeResult
 logger = logging.getLogger(__name__)
 
 READONLY_KINDS = frozenset({"explore", "review"})
+# 评估结论契约与严重程度口径（plan-workflow-collab）：口径写清，避免把风格偏好当成需要返工的问题
+REVIEW_CONTRACT = (
+    "请以一个 JSON 对象作为最终结论：decision（pass / rework / escalate）、summary、"
+    "criteria（[{id, result: met|unmet|unverified, evidence}]）、"
+    "issues（[{severity: blocker|major|minor, file, line, problem, fix_hint}]）。\n"
+    "严重程度口径：blocker = 不满足验收标准、功能错误、无法构建或测试失败；"
+    "major = 很可能引发缺陷或回归的问题；minor = 风格、命名、可选优化等不影响正确性的建议。"
+    "只有 blocker / major 或未满足的验收项才需要返工（decision=rework）；"
+    "只有 minor 时 decision 应为 pass，minor 写入 issues 供汇报参考。"
+    "每个问题都要给出可核实的证据（文件与行号、命令输出），不确定的不要列为 blocker。"
+)
 UPSTREAM_BUDGET_CHARS = 6000
 # 停滞判定（§5.5）：轮询间隔、停滞阈值与心跳落库节流（秒）。
 # 进展信号 = 工具步骤数、子代理状态与等待重试；超过阈值无进展即停止子代理，按瞬时故障重试。
@@ -45,6 +56,15 @@ def _attach_recorder(manager: Any, agent_id: int, req: NodeRequest) -> None:
         recorder.record(dumped, dict(handle.run_spec or {}))
 
     handle.on_step = _listen
+
+
+def _adopt(manager: Any, req: NodeRequest) -> None:
+    """续做 / 续跑的子代理重新标记为工作流节点：从检查点还原的句柄不带这些标记，
+    缺了会让结果推送给主代理、完成时清空上下文。"""
+    handle = manager.get(req.agent_id) if req.agent_id is not None else None
+    if handle is not None:
+        handle.internal = True
+        handle.workflow_node_id = req.node_id
 
 
 def _tokens_of(manager: Any, agent_id: int | None) -> int:
@@ -72,13 +92,20 @@ def _description(req: NodeRequest) -> str:
     if req.write_scope and req.kind in ("execute", "merge"):
         lines.append("只能修改以下路径（越界写入会被拒绝）：" + "、".join(req.write_scope))
     if req.kind == "review":
+        lines.append(REVIEW_CONTRACT)
+    if req.kind == "execute":
         lines.append(
-            "请以一个 JSON 对象作为最终结论：decision（pass / rework / escalate）、summary、"
-            "criteria（[{id, result: met|unmet|unverified, evidence}]）、"
-            "issues（[{severity: blocker|major|minor, file, line, problem, fix_hint}]）。"
+            "完成后在最终汇报中写清：改了哪些文件、如何验证（运行了什么、结果如何）、还有什么风险。"
         )
-    if req.feedback and req.mode == "fresh":
-        lines.append(f"上一次执行的反馈：{req.feedback}")
+    if req.feedback:
+        # 回落为新建子代理时（原上下文不可用），返工说明与用户补充同样必须送达
+        # （plan-workflow-collab）
+        label = {
+            "rework": "这是返工：上一版的改动已在工作区中，请在其基础上处理以下问题",
+            "repair": "上一条输出的格式问题",
+            "checkpoint": "续跑补充说明",
+        }.get(req.mode, "上一次执行的反馈")
+        lines.append(f"{label}：\n{req.feedback}")
     return "\n".join(lines)
 
 
@@ -189,6 +216,7 @@ class SubagentNodeExecutor:
             )
             if state in ("resumed", "already_running"):
                 await _mark_attempt(req, "续跑")
+                _adopt(manager, req)
                 _attach_recorder(manager, req.agent_id, req)
                 return await self._wait(manager, req.agent_id, req, baseline)
             logger.info("[workflow] 检查点续跑不可用（%s），回落为新建子代理", detail)
@@ -200,8 +228,12 @@ class SubagentNodeExecutor:
                 note=req.feedback,
             )
             if state in ("resumed", "already_running"):
-                label = "返工" if req.mode == "rework" else "修复格式"
+                if req.mode == "repair":
+                    label = "修复格式"
+                else:
+                    label = "复审" if req.kind == "review" else "返工"
                 await _mark_attempt(req, label)
+                _adopt(manager, req)
                 _attach_recorder(manager, req.agent_id, req)
                 return await self._wait(manager, req.agent_id, req, baseline)
             logger.info("[workflow] 同一子代理上下文不可用（%s），回落为新建子代理", detail)
@@ -365,4 +397,9 @@ class SubagentNodeExecutor:
             handle.internal = True
             handle.workflow_node_id = req.node_id
         _attach_recorder(manager, agent_id, req)
+        if req.on_agent is not None:
+            try:
+                await req.on_agent(agent_id)
+            except Exception:  # 回报只影响界面跳转，不影响执行
+                logger.debug("[workflow] 节点子代理回报失败", exc_info=True)
         return await self._wait(manager, agent_id, req)

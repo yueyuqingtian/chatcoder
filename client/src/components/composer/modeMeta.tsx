@@ -3,10 +3,11 @@
 import type { ReactNode } from "react";
 import type { ApprovalMode } from "../../store/drafts";
 import { IconShield } from "../icons";
-import { MgAgent, MgAsk, MgAuto, MgFull, MgGoal, MgPlan, MgReadonly } from "../iconkit/ModeGlyphs";
+import { MgAgent, MgAsk, MgAuto, MgFull, MgGoal, MgPlan, MgReadonly, MgWorkflow } from "../iconkit/ModeGlyphs";
 
-/** 内置执行模式（顺序即 + 浮窗中的顺序：智能体 → 计划 → 只读，最常用在最上） */
-export const BUILTIN_MODES = ["agent", "plan", "readonly"] as const;
+/** 内置执行模式（顺序即 + 浮窗中的顺序：智能体 → 工作流 → 计划 → 只读，最常用在最上）。
+ *  plan-workflow-collab：工作流是真实的执行模式（能力同智能体，模式提示词要求以工作流完成任务）。 */
+export const BUILTIN_MODES = ["agent", "workflow", "plan", "readonly"] as const;
 
 /** plan-128-518：「目标」是菜单里的第四项，但不是后端的执行模式——它的能力边界等同智能体（会话 permission_mode 仍为 agent），
  *  是否处于目标模式由会话的 goal_status 决定。前端用此伪模式名在菜单里表达选中态。 */
@@ -29,6 +30,13 @@ export const MODE_META: Record<string, ModeMeta> = {
     descKey: "composer.mode_agent_desc",
     icon: (s = 16) => <MgAgent size={s} />,
     tone: "neutral",
+  },
+  workflow: {
+    labelKey: "composer.mode_workflow",
+    shortKey: "composer.mode_workflow_short",
+    descKey: "composer.mode_workflow_desc",
+    icon: (s = 16) => <MgWorkflow size={s} />,
+    tone: "accent",
   },
   plan: {
     labelKey: "composer.mode_plan",

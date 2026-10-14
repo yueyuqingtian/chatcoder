@@ -10,7 +10,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from app.orchestration.workflow import service, store
+from app.orchestration.workflow import report, service, store
 from app.orchestration.workflow.graph import parse_plan, validate_plan
 
 WORKFLOW_TOOL_NAMES: frozenset[str] = frozenset(
@@ -21,6 +21,7 @@ WORKFLOW_TOOL_NAMES: frozenset[str] = frozenset(
         "resume_workflow",
         "cancel_workflow",
         "amend_workflow",
+        "decide_workflow",
     }
 )
 WORKFLOW_TOOL_RISK: dict[str, str] = {
@@ -30,6 +31,7 @@ WORKFLOW_TOOL_RISK: dict[str, str] = {
     "resume_workflow": "medium",
     "cancel_workflow": "medium",
     "amend_workflow": "medium",
+    "decide_workflow": "medium",
 }
 # 计划模式 / 只读模式下允许的工作流工具
 READONLY_ALLOWED: frozenset[str] = frozenset({"plan_workflow", "workflow_status"})
@@ -177,7 +179,9 @@ def workflow_tool_schemas() -> list[dict[str, Any]]:
                 "name": "workflow_status",
                 "description": (
                     "查询工作流进度：不传 program_id 时列出本会话的工作流；"
-                    "传入则返回该工作流各节点状态与原因。"
+                    "传入则返回过程报告：各步骤状态与产出、改动文件、验证结果、每轮评估的问题、"
+                    "返工原因与整改说明、遗留问题、待确认的步骤，以及各步骤的子代理编号"
+                    "（需要更多细节时可用 subagent_inspect 查看）。"
                 ),
                 "parameters": {
                     "type": "object",
@@ -220,6 +224,40 @@ def workflow_tool_schemas() -> list[dict[str, Any]]:
                     "type": "object",
                     "properties": {"program_id": {"type": "integer"}},
                     "required": ["program_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "decide_workflow",
+                "description": (
+                    "提交工作流中“待确认”步骤的决定（评估发现问题、返工次数用尽、写入冲突等）。"
+                    "必须先向用户说明情况并得到用户确认后才调用，不要替用户决定。"
+                    "approve 采纳当前结果并继续；rework 返工（评估问题会自动交给实现步骤，"
+                    "feedback 写用户的补充要求或你核实后的结论，例如哪些问题不需要改）；"
+                    "abort 中止该子工作流；include 把越界改动的文件纳入范围并继续。"
+                    "待确认的步骤见上下文中的 Workflow Decisions 段或 workflow_status。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "program_id": {"type": "integer"},
+                        "flow_key": {"type": "string", "description": "子工作流标识"},
+                        "node_key": {"type": "string", "description": "步骤标识"},
+                        "decision": {
+                            "type": "string",
+                            "enum": ["approve", "rework", "abort", "include"],
+                        },
+                        "feedback": {
+                            "type": "string",
+                            "description": (
+                                "交给该步骤的说明（返工要求、用户补充、需要忽略的误报等）；"
+                                "用户附了图片或文件时写明要点与附件编号"
+                            ),
+                        },
+                    },
+                    "required": ["program_id", "flow_key", "node_key", "decision"],
                 },
             },
         },
@@ -420,17 +458,19 @@ async def _owned_program(program_id: int, session_id: int) -> dict[str, Any] | s
 
 
 def _status_text(snap: dict[str, Any]) -> str:
+    """过程报告（plan-workflow-collab）：状态之外还有产出、评估轮次、返工原因与整改情况。"""
     run = snap["run"]
-    lines = [
-        f"工作流 {run['id']}「{run['title']}」：{run['status']}"
-        + (f"（{run['pause_reason']}）" if run.get("pause_reason") else "")
-    ]
-    for flow in snap["flows"]:
-        lines.append(f"- 子工作流 {flow['run']['package_key']}：{flow['run']['status']}")
-        for node in flow["nodes"]:
-            reason = f" · {node['reason']}" if node.get("reason") else ""
-            lines.append(f"  · {node['key']}（{node['kind']}）：{node['status']}{reason}")
-    return "\n".join(lines)
+    head = f"状态：{run['status']}" + (
+        f"（{run['pause_reason']}）" if run.get("pause_reason") else ""
+    )
+    parts = [head, report.program_report(snap)]
+    gates = report.pending_gates(snap)
+    if gates:
+        parts.append(
+            "待确认的步骤（向用户说明并得到确认后调用 decide_workflow）：\n"
+            + "\n".join(report.gate_block(g) for g in gates)
+        )
+    return "\n".join(parts)
 
 
 async def run_workflow_tool(
@@ -443,10 +483,7 @@ async def run_workflow_tool(
     readonly_only: bool,
 ) -> str:
     """执行一个工作流工具，返回给模型的文本结果（失败也以文本返回，便于模型修正）。"""
-    if (
-        tool_name in ("start_workflow", "resume_workflow", "cancel_workflow", "amend_workflow")
-        and readonly_only
-    ):
+    if tool_name in _WRITE_TOOLS and readonly_only:
         return (
             "当前为只读/计划模式，不能启动、续跑、修订或取消工作流。"
             "请先退出计划模式，或改用只读探索。"
@@ -502,6 +539,35 @@ async def run_workflow_tool(
         if tool_name == "cancel_workflow":
             await runtime.cancel(program_id)
             return f"工作流 {program_id} 已取消。"
+        if tool_name == "decide_workflow":
+            return await _decide(runtime, program_id, args)
     except ValueError as exc:
         return f"无法执行：{exc}"
     return f"未知的工作流工具：{tool_name}"
+
+
+_WRITE_TOOLS = frozenset(
+    {"start_workflow", "resume_workflow", "cancel_workflow", "amend_workflow", "decide_workflow"}
+)
+_DECIDED = {
+    "approve": "已采纳当前结果，工作流继续推进",
+    "rework": "已交回返工，评估问题与补充说明已送达对应步骤；返工完成后由同一个评估子代理复审",
+    "abort": "已中止该子工作流，其它子工作流不受影响",
+    "include": "越界文件已纳入范围，该步骤将核对后继续",
+}
+
+
+async def _decide(runtime: Any, program_id: int, args: dict[str, Any]) -> str:
+    """decide_workflow：主代理转达用户对待确认步骤的决定（plan-workflow-collab）。"""
+    flow_key = str(args.get("flow_key") or "")
+    node_key = str(args.get("node_key") or "")
+    decision = str(args.get("decision") or "")
+    if decision not in _DECIDED:
+        return "decision 只能是 approve / rework / abort / include。"
+    await runtime.decide_gate(
+        program_id, flow_key, node_key, decision, str(args.get("feedback") or "")[:2000]
+    )
+    return (
+        f"工作流 {program_id} 的『{flow_key}/{node_key}』：{_DECIDED[decision]}。"
+        "完成或再次需要确认时会自动通知你，不需要轮询。"
+    )

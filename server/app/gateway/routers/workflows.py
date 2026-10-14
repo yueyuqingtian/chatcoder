@@ -38,7 +38,7 @@ class StartIn(BaseModel):
 
 class GateIn(BaseModel):
     decision: str = Field(pattern="^(approve|rework|abort|include)$")
-    feedback: str = Field(default="", max_length=800)
+    feedback: str = Field(default="", max_length=2000)
 
 
 class CancelIn(BaseModel):

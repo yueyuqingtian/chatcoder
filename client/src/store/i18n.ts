@@ -141,6 +141,10 @@ const DICT: Dict = {
   "composer.mode_agent_desc":     ["自主读写文件、运行命令，端到端完成任务", "Reads, edits and runs commands to finish the task end to end"],
   "composer.mode_plan_desc":      ["先给出方案，确认后再动手执行", "Proposes a plan first and executes after you confirm"],
   "composer.mode_readonly_desc":  ["只阅读与分析代码，不做任何修改", "Reads and analyzes only, never changes anything"],
+  // plan-workflow-collab：工作流模式
+  "composer.mode_workflow":       ["工作流模式", "Workflow Mode"],
+  "composer.mode_workflow_short": ["工作流", "Workflow"],
+  "composer.mode_workflow_desc":  ["拆成多步协同完成，评估把关，确认后再返工", "Splits work into coordinated steps with reviews, reworking only after you confirm"],
   // plan-128-518：目标模式
   "composer.mode_goal":           ["目标模式", "Goal Mode"],
   "composer.mode_goal_short":     ["目标", "Goal"],
@@ -212,6 +216,7 @@ const DICT: Dict = {
   "cmd.no_match":                 ["没有匹配结果", "No matching results"],
   "cmd.file_search_unimpl":       ["文件搜索功能尚未实现", "File search is not implemented yet"],
   "cmd.slash_plan":               ["先规划再执行", "Plan before executing"],
+  "cmd.slash_workflow":           ["切换为工作流模式", "Switch to workflow mode"],
   "cmd.slash_chat":               ["只读审阅模式", "Read-only review mode"],
   "cmd.slash_clear":              ["清空当前对话", "Clear current chat"],
   "cmd.slash_compact":            ["压缩上下文", "Compact context"],

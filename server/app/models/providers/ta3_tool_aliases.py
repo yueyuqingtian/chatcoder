@@ -111,6 +111,7 @@ TO_TA3: dict[str, str] = {
     "resume_workflow": "ResumeWorkflow",
     "cancel_workflow": "CancelWorkflow",
     "amend_workflow": "AmendWorkflow",
+    "decide_workflow": "DecideWorkflow",
     "request_write_scope": "RequestWriteScope",
     # v43: 子代理侧上报工具（只在子代理线程暴露）——子代理同样可能运行在 ta3 模型上，
     # 缺映射会让子代理失去向主代理上报/求助的通道。
@@ -157,6 +158,7 @@ DYNAMIC_SCHEMA_ALIASES: frozenset[str] = frozenset({
     "ReadAttachment", "ViewImage",
     # 工作流工具（设计 §5.8）：schema 从真实工具派生，参数与描述随 workflow/tools.py 同步
     "PlanWorkflow", "StartWorkflow", "WorkflowStatus", "ResumeWorkflow", "CancelWorkflow", "AmendWorkflow",
+    "DecideWorkflow",
     "RequestWriteScope",
     # 其余自造工具（v43 全量补齐）
     "CompleteGoal", "AskUser", "MultiFileEdit", "SymbolSearch",

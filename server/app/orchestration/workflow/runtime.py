@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
-from app.orchestration.workflow import conflict_events, isolation, store
+from app.orchestration.workflow import conflict_events, isolation, report, store
 from app.orchestration.workflow.commands import CommandGate, gate_check_command, run_check_command
 from app.orchestration.workflow.conflicts import LeaseOwner, WriteLeaseTable, get_lease_table
 from app.orchestration.workflow.drift import (
@@ -57,9 +57,11 @@ from app.orchestration.workflow.state import (
     ready_node_keys,
 )
 from app.orchestration.workflow.verdict import (
+    ReviewDecision,
     decide_review,
     issues_as_feedback,
     parse_verdict,
+    rereview_note,
     validate_verdict,
 )
 
@@ -71,11 +73,13 @@ REPAIR_HINT = (
 logger = logging.getLogger(__name__)
 
 _POOL_REASON_TEXT = {
-    REASON_GLOBAL_FULL: "等待并发名额：全局上限已满",
-    REASON_SESSION_FULL: "等待并发名额：本会话上限已满",
-    REASON_FLOW_FULL: "等待并发名额：子工作流内并行上限已满",
+    # plan-workflow-collab：排队原因用通俗说法，不暴露“并发名额 / 上限”等调度术语
+    REASON_GLOBAL_FULL: "排队中：同时进行的步骤较多，空出后自动开始",
+    REASON_SESSION_FULL: "排队中：本会话同时进行的步骤较多，空出后自动开始",
+    REASON_FLOW_FULL: "排队中：等这个子工作流里正在进行的步骤先完成",
 }
 
+_QUEUED_TEXT = "排队中，即将开始"
 _TERMINAL_FLOW = frozenset({"succeeded", "failed", "cancelled"})
 # 同一节点在一次运行中最多追加的合并步骤数（L3）；超过后直接转入用户决定（L4）
 MAX_MERGE_STEPS = 2
@@ -121,9 +125,20 @@ def _nodes_of(snap: dict[str, Any]) -> list[dict[str, Any]]:
 def _succeeded_notice(snap: dict[str, Any]) -> str:
     nodes = _nodes_of(snap)
     done = sum(1 for n in nodes if n["status"] in ("done", "skipped"))
+    remaining = report.remaining_issue_count(snap)
+    tail = (
+        f"评估留下 {remaining} 个未返工的问题（见报告中的“遗留问题”）：请先自行核实哪些是真问题，"
+        "再向用户说明并询问是否需要整改；用户确认整改时可直接修改，或规划一个新的工作流。"
+        if remaining
+        else "询问用户是否需要后续调整。"
+    )
     return (
         f"[系统通知] 工作流『{snap['run']['title']}』已全部完成（{done}/{len(nodes)} 步）。"
-        "请向用户汇报：各子工作流的产出、关键改动、验证结果与剩余风险，并询问是否需要后续调整。"
+        "以下是过程报告。请向用户汇报：各子工作流的产出与关键改动、验证结果、"
+        "是否返工及原因、每轮评估发现的问题与整改情况、剩余风险。"
+        + tail
+        + "\n\n"
+        + report.program_report(snap)
     )
 
 
@@ -135,22 +150,38 @@ def _failed_notice(snap: dict[str, Any]) -> str:
         detail = f"（节点『{failed['key']}』：{message}）"
     return (
         f"[系统通知] 工作流『{snap['run']['title']}』执行失败{detail}。"
-        "请向用户说明原因，并询问是重试该节点、从断点继续，还是调整计划。"
+        "请向用户说明原因与已完成的进展，并询问是重试该节点、从断点继续，还是调整计划。"
+        "\n\n" + report.program_report(snap)
     )
 
 
-def _gate_notice(snap: dict[str, Any]) -> str:
-    for flow in snap["flows"]:
-        for node in flow["nodes"]:
-            if node["status"] == "waiting_human":
-                reason = node.get("reason") or "需要你确认当前结果"
-                return (
-                    f"[系统通知] 工作流『{snap['run']['title']}』在"
-                    f"『{flow['run']['package_key']}/{node['key']}』需要用户决定：{reason}。"
-                    "请向用户说明情况与可选项（采纳当前结果 / 再返工一轮 / 中止该子工作流），"
-                    "等待用户在工作流面板中决定，不要自行替用户决定。"
-                )
-    return f"[系统通知] 工作流『{snap['run']['title']}』需要用户决定，请向用户说明情况。"
+_GATE_GUIDE = (
+    "请这样处理：1. 先核实——评估问题是否成立（读相关代码、必要时运行命令，"
+    "或用 subagent_inspect 查看评估子代理的过程）；"
+    "2. 向用户汇报：哪些是真问题、哪些可能是误判或次要问题，"
+    "给出你的建议（返工 / 采纳 / 中止）；3. 等用户确认后，调用 decide_workflow 提交决定，"
+    "用户的补充要求写进 feedback（用户附了图片或文件时，把要点与附件编号一并写进去）。"
+    "不要替用户做决定；用户已在工作流卡片上直接决定时无需再调用。"
+)
+
+
+def _gate_notice(snap: dict[str, Any], node_id: int | None = None) -> str:
+    gates = report.pending_gates(snap)
+    if node_id is not None:
+        keys = {
+            (f["run"]["package_key"], n["key"])
+            for f in snap["flows"]
+            for n in f["nodes"]
+            if n["id"] == node_id
+        }
+        gates = [g for g in gates if (g["flow_key"], g["node_key"]) in keys] or gates
+    if not gates:
+        return f"[系统通知] 工作流『{snap['run']['title']}』需要用户决定，请向用户说明情况。"
+    blocks = "\n".join(report.gate_block(g) for g in gates)
+    return (
+        f"[系统通知] 工作流『{snap['run']['title']}』有步骤在等待确认，相关子工作流已暂停推进"
+        "（其它子工作流照常运行）：\n" + blocks + "\n" + _GATE_GUIDE
+    )
 
 
 def _default_retry_plan() -> list[float]:
@@ -695,7 +726,9 @@ class WorkflowRuntime:
         if (node.get("conflict") or {}).get("kind") == "gate":
             await self._decide_gate_question(program_id, node, decision)
             return
-        if (node.get("conflict") or {}).get("kind") == "integration":
+        if (node.get("conflict") or {}).get("kind") == "review":
+            await self._decide_review_gate(program_id, flow, node, decision, feedback)
+        elif (node.get("conflict") or {}).get("kind") == "integration":
             await self._decide_integration(program_id, flow_key, node_key, node, decision, flow)
         elif (node.get("conflict") or {}).get("kind") == "scope_violation":
             await self._decide_scope_violation(
@@ -972,6 +1005,74 @@ class WorkflowRuntime:
         await self._recalc(program_id)
         self._wake_tick()
 
+    async def _decide_review_gate(
+        self,
+        program_id: int,
+        flow: dict[str, Any],
+        node: dict[str, Any],
+        decision: str,
+        feedback: str,
+    ) -> None:
+        """评估待确认（plan-workflow-collab）：用户（或主代理转达用户的决定）确认后才返工。
+
+        approve 采纳当前结果（问题记入汇报）；rework 带着评估问题与用户补充返工；
+        abort 中止子工作流。
+        """
+        gate = node.get("conflict") or {}
+        note = feedback.strip()
+        if decision == "approve":
+            await self._set_round_outcome(node["id"], "accepted", note)
+            await store.update_node(
+                node["id"],
+                status="done",
+                finished_at=store.now_iso(),
+                reason=None,
+                conflict_json=None,
+            )
+            await self._emit_node(node["id"], status="done", decision="approve")
+            await self._log(
+                program_id, f"已采纳当前结果：{flow['run']['package_key']}/{node['key']}"
+            )
+        elif decision == "rework":
+            if not node.get("rework_to"):
+                raise ValueError("这一步没有可返工的实现步骤，请选择采纳或中止")
+            if gate.get("stage") in ("exhausted", "escalate"):
+                # 返工次数已用尽（或评估者请求人工决定）时由用户追加一轮
+                current = (
+                    node["max_rework"] if node["max_rework"] is not None else DEFAULT_MAX_REWORK
+                )
+                await store.update_node(
+                    node["id"], max_rework=max(current, int(node["rework_round"] or 0)) + 1
+                )
+            await self._set_round_outcome(node["id"], "rework", note)
+            ctx = await store.load_node_context(node["id"])
+            if ctx is None:
+                raise ValueError("节点上下文缺失")
+            await self._schedule_rework(
+                ctx, ctx["node"], node.get("verdict"), reason="已确认返工", extra=note
+            )
+        elif decision == "abort":
+            await self._set_round_outcome(node["id"], "aborted", note)
+            await self._cancel_flow(program_id, flow)
+        else:
+            raise ValueError("评估结论只能选择采纳、返工或中止")
+
+    async def _set_round_outcome(self, node_id: int, outcome: str, note: str = "") -> None:
+        """记下最近一轮评估的处理结果（过程报告据此说明“返工 / 采纳 / 中止”及用户说明）。"""
+        ctx = await store.load_node_context(node_id)
+        if ctx is None:
+            return
+        output = dict(ctx["node"].get("output") or {})
+        rounds = [dict(r) for r in output.get("rounds") or []]
+        if rounds:
+            rounds[-1]["outcome"] = outcome
+            if note:
+                rounds[-1]["user_note"] = note[:600]
+        output["rounds"] = rounds
+        if note:
+            output["user_note"] = note[:600]
+        await store.update_node(node_id, output_json=output)
+
     async def _decide_integration(
         self,
         program_id: int,
@@ -1178,8 +1279,8 @@ class WorkflowRuntime:
                 flow_key=f"{program['id']}:{flow['package_key']}",
             )
         )
-        await store.update_node(node_id, status="queued", reason="等待并发名额")
-        self._reason_cache[node_id] = "等待并发名额"
+        await store.update_node(node_id, status="queued", reason=_QUEUED_TEXT)
+        self._reason_cache[node_id] = _QUEUED_TEXT
         await self._emit_node(node_id, status="queued")
 
     def _accept(self, slot: Slot) -> bool:
@@ -1197,7 +1298,10 @@ class WorkflowRuntime:
         granted, conflicts = self._leases.acquire(meta["workspace"], owner, scope)
         if not granted:
             first = conflicts[0]
-            self._lease_block[node_id] = f"等待『{first.holder.node_key}』释放 {first.requested}"
+            self._lease_block[node_id] = (
+                f"排队中：等『{first.holder.node_key}』改完 {first.requested} 再开始，"
+                "避免同时改同一处"
+            )
             return False
         self._lease_block.pop(node_id, None)
         self._owners[node_id] = owner
@@ -1211,9 +1315,9 @@ class WorkflowRuntime:
             if pool_reason is None:
                 continue
             if pool_reason == REASON_GRANTED:
-                text = self._lease_block.get(node_id, "等待写入范围释放")
+                text = self._lease_block.get(node_id, "排队中：等其它步骤改完相关文件再开始")
             else:
-                text = _POOL_REASON_TEXT.get(pool_reason, "等待并发名额")
+                text = _POOL_REASON_TEXT.get(pool_reason, _QUEUED_TEXT)
             if self._reason_cache.get(node_id) != text:
                 self._reason_cache[node_id] = text
                 await store.update_node(node_id, reason=text)
@@ -1260,9 +1364,16 @@ class WorkflowRuntime:
             turn_id=ctx["turn_id"],
             commands=tuple(node.get("commands") or ()),
             question=str(node.get("question") or ""),
+            rework_source=str(pending.get("source") or ""),
+            on_agent=lambda agent_id, _nid=node_id: self._bind_agent(_nid, agent_id),
         )
         self._tasks[node_id] = asyncio.create_task(self._run(node_id, request))
         await self._emit_node(node_id, status="running", attempt_no=attempt_no, mode=mode)
+
+    async def _bind_agent(self, node_id: int, agent_id: int) -> None:
+        """新建的节点子代理立即写回节点（plan-workflow-collab）：运行中点开节点就是当前子代理。"""
+        await store.update_node(node_id, agent_id=agent_id)
+        await self._emit_node(node_id, status="running", agent_id=agent_id)
 
     def _release(self, node_id: int) -> None:
         self._pool.release(str(node_id))
@@ -1560,12 +1671,27 @@ class WorkflowRuntime:
         if request.kind == "review":
             await self._handle_review(node_id, result)
             return
+        output = dict(result.output or {"text": result.text[:4000]})
+        if request.kind == "execute":
+            # 返工记录（plan-workflow-collab）：每轮要处理什么、整改说明是什么，随过程报告交给主代理
+            ctx = await store.load_node_context(node_id)
+            previous = list(((ctx or {}).get("node", {}).get("output") or {}).get("reworks") or [])
+            if request.rework_source == "review" and request.feedback:
+                previous.append(
+                    {
+                        "round": len(previous) + 1,
+                        "feedback": request.feedback[:800],
+                        "summary": str(output.get("summary") or output.get("text") or "")[:800],
+                    }
+                )
+            if previous:
+                output["reworks"] = previous[-6:]
         await store.update_node(
             node_id,
             status="done",
             finished_at=store.now_iso(),
             error_json=None,
-            output_json=result.output or {"text": result.text[:4000]},
+            output_json=output,
         )
         await self._emit_node(node_id, status="done")
         await self._log(meta["program"], f"节点『{meta['flow_key']}/{meta['key']}』已完成")
@@ -1589,13 +1715,13 @@ class WorkflowRuntime:
             await store.update_node(
                 node_id,
                 status="pending",
-                output_json={"text": result.text[:2000]},
                 pending_json={"mode": "repair", "feedback": REPAIR_HINT},
                 reason="评估输出不合规，追问一次格式修复",
             )
             await self._emit_node(node_id, status="pending")
             await self._log(program_id, f"评估输出不合规，已追问一次格式修复：{node['key']}")
             return
+        self._repaired.discard(node_id)  # 每一轮评估都可以追问一次格式修复
         origin = f"工作流评估『{ctx['flow_key']}/{node['key']}』"
         checks = [
             await self._run_command(
@@ -1605,29 +1731,51 @@ class WorkflowRuntime:
         ]
         checks_passed = all(bool(c.get("ok")) for c in checks)
         # 检查结果始终记录；关闭“必须通过检查”后，检查失败不再阻止判定为通过
+        checks_ok = checks_passed or not settings.workflow_require_checks
         max_rework = node["max_rework"] if node["max_rework"] is not None else DEFAULT_MAX_REWORK
         decision = decide_review(
             verdict,
-            checks_passed=checks_passed or not settings.workflow_require_checks,
+            checks_passed=checks_ok,
             rework_round=node["rework_round"],
             max_rework=max_rework,
         )
+        if not node.get("rework_to") and decision.action != "pass":
+            # 没有返工目标的评估（如集成验收、汇总）无事可返：结论记入汇报，
+            # 由主代理与用户决定是否整改
+            # （plan-workflow-collab：不再卡在“采纳 / 中止”的闸门上）
+            base = decision.reason.split("；返工次数已用尽")[0]
+            decision = ReviewDecision("record", f"{base}，已记入汇报")
+        output = dict(result.output or {"text": result.text[:4000]})
+        rounds = list(((node.get("output") or {}).get("rounds")) or [])
+        rounds.append(_round_entry(len(rounds) + 1, decision, verdict, checks, checks_ok))
+        output["rounds"] = rounds[-8:]
         await store.update_node(
-            node_id,
-            verdict_json=verdict,
-            checks_json=checks,
-            output_json=result.output or {"text": result.text[:4000]},
+            node_id, verdict_json=verdict, checks_json=checks, output_json=output
         )
+        flow_node = f"{ctx['flow_key']}/{node['key']}"
         if decision.action == "pass":
             await store.update_node(
                 node_id, status="done", finished_at=store.now_iso(), reason=None
             )
             await self._emit_node(node_id, status="done", verdict="pass")
-            await self._log(program_id, f"评估通过：{ctx['flow_key']}/{node['key']}")
+            await self._log(program_id, f"评估通过：{flow_node}")
+        elif decision.action == "record":
+            await store.update_node(
+                node_id, status="done", finished_at=store.now_iso(), reason=decision.reason
+            )
+            await self._emit_node(node_id, status="done", verdict="record")
+            await self._log(program_id, f"评估完成，遗留问题已记入汇报：{flow_node}", level="warn")
+        elif decision.action == "rework" and not settings.workflow_rework_confirm:
+            await self._schedule_rework(
+                ctx, node, verdict, reason=decision.reason, extra="", checks=checks
+            )
         elif decision.action == "rework":
-            await self._schedule_rework(ctx, node, verdict, reason=decision.reason, extra="")
+            await self._open_review_gate(
+                ctx, node, verdict, f"评估发现需要修改的问题：{decision.reason}", stage="confirm"
+            )
         else:
-            await self._open_review_gate(ctx, node, verdict, decision.reason)
+            stage = "escalate" if verdict and verdict.get("decision") == "escalate" else "exhausted"
+            await self._open_review_gate(ctx, node, verdict, decision.reason, stage=stage)
 
     async def _open_review_gate(
         self,
@@ -1635,14 +1783,26 @@ class WorkflowRuntime:
         node: dict[str, Any],
         verdict: dict[str, Any] | None,
         reason: str,
+        *,
+        stage: str = "confirm",
     ) -> None:
-        """评估结论需要用户决定：节点等待决定，闸门只提供实际可用的选项（有返工目标才有“返工”）。"""
+        """评估结论待确认：节点等待决定，结论交给主代理核实并向用户汇报（plan-workflow-collab）。
+
+        stage：confirm 返工前确认；exhausted 返工次数已用尽；escalate 评估者请求人工决定。
+        闸门只提供实际可用的选项（有返工目标才有“返工”）。
+        """
         program_id = ctx["program_id"]
         options = ["approve", "abort"]
         if node.get("rework_to"):
             options.insert(1, "rework")
+        before = await store.load_program(program_id)
         await store.update_node(
-            node["id"], status="waiting_human", finished_at=None, reason=reason
+            node["id"],
+            status="waiting_human",
+            finished_at=None,
+            reason=reason,
+            conflict_json={"kind": "review", "stage": stage, "message": reason},
+            pending_json=None,
         )
         await self._emit_node(node["id"], status="waiting_human")
         await self._emit(
@@ -1658,9 +1818,14 @@ class WorkflowRuntime:
         )
         await self._log(
             program_id,
-            f"需要你的决定：{ctx['flow_key']}/{node['key']}（{reason}）",
+            f"等待确认：{ctx['flow_key']}/{node['key']}（{reason}）",
             level="warn",
         )
+        # 程序已在等待确认（另一处闸门）时不会再有状态转换，这里单独把本步骤交给主代理
+        if before is not None and before["run"]["status"] == "waiting_human":
+            await self._notify_program(
+                program_id, lambda snap, _nid=node["id"]: _gate_notice(snap, _nid)
+            )
 
     async def _schedule_rework(
         self,
@@ -1670,36 +1835,54 @@ class WorkflowRuntime:
         *,
         reason: str,
         extra: str,
+        checks: list[dict[str, Any]] | None = None,
     ) -> None:
-        """把评估问题交回实现节点（同一子代理线程续做），评估节点记一轮返工并等待实现完成。"""
+        """把评估问题交回实现节点（同一子代理线程续做）；评估节点记一轮返工，
+        待实现完成后在同一个评估子代理中复审（plan-workflow-collab：同一把尺子，避免标准漂移）。"""
         target_key = review.get("rework_to")
         target = await store.find_node(ctx["flow_run_id"], target_key) if target_key else None
         if target is None:
             await self._open_review_gate(
-                ctx, review, verdict, "评估要求返工，但没有可返工的实现步骤，需要你决定"
+                ctx,
+                review,
+                verdict,
+                "评估要求返工，但没有可返工的实现步骤，需要你决定",
+                stage="escalate",
             )
             return
         feedback = issues_as_feedback(verdict)
+        failed_checks = [c for c in (checks or review.get("checks") or []) if not c.get("ok")]
+        if failed_checks:
+            feedback += "\n未通过的检查：\n" + "\n".join(
+                f"- {c.get('cmd') or c.get('command')}：{str(c.get('output') or '')[-400:]}"
+                for c in failed_checks[:3]
+            )
         if extra:
-            feedback = f"{feedback}\n补充说明：{extra}"
+            feedback = f"{feedback}\n{report.USER_NOTE_MARK}{extra}"
+        round_no = (review["rework_round"] or 0) + 1
         await store.update_node(
             target["id"],
             status="pending",
             reason=None,
-            pending_json={"mode": "rework", "feedback": feedback},
+            pending_json={"mode": "rework", "feedback": feedback, "source": "review"},
         )
         await store.update_node(
             review["id"],
             status="pending",
-            rework_round=(review["rework_round"] or 0) + 1,
-            reason=f"等待『{target_key}』返工完成",
+            rework_round=round_no,
+            reason=f"等待『{target_key}』返工完成后复审",
+            conflict_json=None,
+            pending_json={
+                "mode": "rework",
+                "feedback": rereview_note(verdict, round_no=round_no, extra=extra),
+            },
         )
         await store.bump_rework_total(ctx["program_id"])
         await self._emit_node(target["id"], status="pending")
         await self._emit_node(review["id"], status="pending")
         await self._log(
             ctx["program_id"],
-            f"{reason}：第 {(review['rework_round'] or 0) + 1} 轮返工，已交回『{target_key}』",
+            f"{reason}：第 {round_no} 轮返工，已交回『{target_key}』",
             level="warn",
         )
 
@@ -2030,6 +2213,38 @@ class WorkflowRuntime:
 
     async def _command(self, command: str, cwd: str) -> dict[str, Any]:
         return await self._command_runner(command, cwd)
+
+
+def _round_entry(
+    round_no: int,
+    decision: ReviewDecision,
+    verdict: dict[str, Any] | None,
+    checks: list[dict[str, Any]],
+    checks_ok: bool,
+) -> dict[str, Any]:
+    """一轮评估的记录：结论、问题与处理结果（过程报告与面板“评估记录”共用）。"""
+    outcome = {"pass": "passed", "record": "recorded"}.get(decision.action, "pending")
+    if decision.action == "rework" and not settings.workflow_rework_confirm:
+        outcome = "rework"
+    issues = [
+        {
+            "severity": i.get("severity"),
+            "file": i.get("file"),
+            "line": i.get("line"),
+            "problem": str(i.get("problem") or "")[:300],
+        }
+        for i in (verdict or {}).get("issues", [])
+    ][:12]
+    return {
+        "round": round_no,
+        "action": decision.action,
+        "reason": decision.reason,
+        "summary": str((verdict or {}).get("summary") or "")[:400],
+        "issues": issues,
+        "checks_ok": checks_ok and all(bool(c.get("ok")) for c in checks),
+        "outcome": outcome,
+        "at": store.now_iso(),
+    }
 
 
 def _merge_allowed(gate: dict[str, Any]) -> bool:

@@ -481,6 +481,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     () => [
       { cmd: "/clear", desc: "清空当前会话历史" },
       { cmd: "/plan", desc: "切换为规划模式" },
+      { cmd: "/workflow", desc: "切换为工作流模式：复杂任务拆成多步协同完成" },
       { cmd: "/full", desc: "切换为完全访问模式" },
       { cmd: "/read", desc: "切换为只读模式" },
     ],
@@ -877,6 +878,13 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
       setShowSlash(false);
       return;
     }
+    if (cmd === "/workflow") {
+      // plan-workflow-collab：经 pickMode 进入，目标模式激活时一并退出（与菜单选择一致）
+      pickMode("workflow");
+      setInput("");
+      setShowSlash(false);
+      return;
+    }
     if (cmd === "/full") {
       setMode("default");
       setInput("");
@@ -1120,7 +1128,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   const modeMenuProfiles = useMemo(() => {
     const base: PermissionProfileOut[] = permProfiles.length > 0
       ? permProfiles
-      : ([{ name: "agent" }, { name: "plan" }, { name: "readonly" }] as PermissionProfileOut[]);
+      : ([{ name: "agent" }, { name: "workflow" }, { name: "plan" }, { name: "readonly" }] as PermissionProfileOut[]);
     const rank = (n: string) => {
       const i = BUILTIN_MODE_ORDER.indexOf(n);
       return i < 0 ? BUILTIN_MODE_ORDER.length : i;

@@ -180,7 +180,11 @@ async def test_happy_path_runs_in_order_and_succeeds(tmp_path):
     assert {"workflow.node.updated", "workflow.run.updated", "workflow.log.appended"} <= types
 
 
-async def test_rework_sends_issues_back_to_implementer_then_passes(tmp_path):
+async def test_rework_sends_issues_back_to_implementer_then_passes(tmp_path, monkeypatch):
+    from app.core.config import settings
+
+    # 关闭“返工前确认”：按评估结论自动返工（确认路径见 test_workflow_collab）
+    monkeypatch.setattr(settings, "workflow_rework_confirm", False)
     executor = ScriptedExecutor({"review": [NodeResult(status="done", text=REWORK_TEXT)]})
     rt = _runtime(executor)
     pid = await rt.create_program(
@@ -195,7 +199,8 @@ async def test_rework_sends_issues_back_to_implementer_then_passes(tmp_path):
         ("impl", "fresh"),
         ("review", "fresh"),
         ("impl", "rework"),
-        ("review", "fresh"),
+        # 复审在同一个评估子代理中继续（plan-workflow-collab）
+        ("review", "rework"),
     ]
     rework_feedback = executor.calls[3][3]
     assert "缺余额校验" in rework_feedback and "server/app/points.py:3" in rework_feedback

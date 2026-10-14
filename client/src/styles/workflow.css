@@ -738,49 +738,10 @@
 }
 
 .wf-node-reason {
-  padding: 0 var(--sp-2) var(--sp-2) 28px;
+  padding: 0 var(--sp-2) var(--sp-1) 28px;
   font-size: 11px;
   line-height: 1.5;
   color: var(--text-3);
-  overflow-wrap: anywhere;
-}
-
-.wf-timeline {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-}
-
-.wf-section-title {
-  margin: var(--sp-2) 0 0;
-  font-size: var(--fs-sm);
-  font-weight: 600;
-  color: var(--text-2);
-}
-
-.wf-events {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.wf-event {
-  display: grid;
-  grid-template-columns: 96px minmax(0, 1fr);
-  gap: var(--sp-3);
-  font-size: var(--fs-sm);
-}
-
-.wf-event-time {
-  color: var(--text-3);
-  font-variant-numeric: tabular-nums;
-}
-
-.wf-event-text {
-  color: var(--text-2);
   overflow-wrap: anywhere;
 }
 
@@ -841,28 +802,45 @@
   color: var(--text-2);
 }
 
-.wf-gate-note {
-  width: 100%;
-  box-sizing: border-box;
-  min-height: 44px;
-  resize: vertical;
-  padding: var(--sp-2) var(--sp-3);
-  border-radius: var(--r-ctl);
-  border: 1px solid var(--surface-inset-border);
-  background: var(--surface-inset);
-  color: var(--text-1);
-  font: inherit;
+/* 标题 + 所在位置（子工作流 · 步骤）：一眼看出“哪一步、为什么停下” */
+.wf-gate-titles {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.wf-gate-where {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  overflow-wrap: anywhere;
+}
+
+/* 说明“点了按钮会发生什么”：弱化一级，放在按钮正上方 */
+.wf-gate-hint {
+  margin: 0;
   font-size: var(--fs-sm);
-  line-height: 1.5;
+  color: var(--text-2);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 
-.wf-gate-note:focus {
-  outline: none;
-  border-color: var(--border-strong);
+/* 决定按钮在左，“补充说明”在右；窄容器下自然换行 */
+.wf-gate-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
 }
 
-.wf-gate-note:disabled {
-  opacity: 0.6;
+/* 卡片内的闸门：去掉外框，只保留淡底色，避免卡中套卡 */
+.wf-card .wf-gate.is-compact {
+  border-color: transparent;
+}
+
+.wf-issue-fix {
+  font-size: var(--fs-xs);
 }
 
 /* ── 冲突对照（三栏：读取时 / 当前磁盘 / 本次待写入） ── */
@@ -926,37 +904,7 @@
   overflow-wrap: anywhere;
 }
 
-/* ── 并发占用与预算 ── */
-.wf-pool {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: var(--sp-2) 0 var(--sp-3);
-}
-
-.wf-pool-main {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--fs-sm);
-}
-
-.wf-pool-label {
-  color: var(--text-3);
-}
-
-.wf-pool-count {
-  color: var(--text-1);
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
-.wf-pool-sep {
-  color: var(--text-3);
-}
-
-.wf-pool-bar,
+/* ── 预算 ── */
 .wf-budget-bar {
   position: relative;
   display: block;
@@ -966,7 +914,6 @@
   overflow: hidden;
 }
 
-.wf-pool-fill,
 .wf-budget-fill {
   position: absolute;
   top: 0;
@@ -974,10 +921,6 @@
   left: 0;
   border-radius: inherit;
   transition: width var(--dur-3) var(--ease-emphasized-decel);
-}
-
-.wf-pool-fill {
-  background: var(--info);
 }
 
 .wf-budget {
@@ -2125,6 +2068,8 @@
 }
 
 .wf-notice-body {
+  max-height: 360px;
+  overflow: auto;
   margin: 6px 0 2px 24px;
   padding: 8px 10px;
   border-radius: var(--r-ctl);
@@ -2134,4 +2079,54 @@
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* ── 评估记录（右侧面板的评估步骤下）：每轮结论、问题数与处理结果 ── */
+.wf-rounds {
+  padding: 0 var(--sp-2) var(--sp-2) 28px;
+}
+
+.wf-rounds-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: var(--sp-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wf-round {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+}
+
+.wf-round-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.wf-round-outcome {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+
+.wf-round-outcome[data-outcome="passed"] {
+  color: var(--success);
+}
+
+.wf-round-outcome[data-outcome="pending"] {
+  color: var(--warning);
+}
+
+.wf-round-summary,
+.wf-round-note {
+  color: var(--text-3);
+  overflow-wrap: anywhere;
 }

@@ -20,7 +20,7 @@ from app.orchestration.approval_policy import (
     normalize_execution_mode,
 )
 from app.core.enums import MsgType, SenderType
-from app.orchestration.workflow.store import list_paused_workflows
+from app.orchestration.workflow.store import list_paused_workflows, list_pending_gates
 from app.orchestration.workflow.tools import append_workflow_tools
 from app.models.base import resolve_reasoning
 from app.orchestration.agent_events import (broadcast, broadcast_session_completed,
@@ -370,6 +370,19 @@ _READONLY_TOOLS = [
 _PLAN_TOOLS = _READONLY_TOOLS + ["fs_write", "terminal_exec"]
 
 _MODE_HINTS = {
+    # plan-workflow-collab：工作流模式——用户显式选择以工作流完成任务（多步协同、评估把关、确认后返工）
+    "workflow": (
+        "【工作流模式】用户选择了工作流模式：本轮的任务默认用工作流完成，而不是你自己直接改代码。\n"
+        "1. 先做必要的只读探索，弄清涉及的模块、约束与验收方式（可以派只读探索子代理）。\n"
+        "2. 用 plan_workflow 规划：按“探索 → 实现 → 评估”组织步骤，评估步骤写清可核验的 acceptance 并 rework_to 对应的实现步骤；"
+        "能并行的独立部分拆成多个子工作流（写入范围不重叠，否则用 depends_on 串行）；多个子工作流时用 after 做集成验收；"
+        "能用命令验证的（测试、类型检查、构建）写进 commands。\n"
+        "3. 在回复里用几句话说明拆分思路，等用户确认计划后再 start_workflow（设置为无需确认时会直接开始）。\n"
+        "4. 运行中不要自己动手做工作流里的步骤；有步骤待确认时，按通知先核实、再向用户汇报并给出建议，"
+        "用户决定后调用 decide_workflow。\n"
+        "5. 完成后按过程报告详细汇报：产出、改动、验证、返工原因与整改情况、遗留问题。\n"
+        "例外：纯问答、解释代码、查看状态、一两步就能完成的小改动，直接处理即可，并说明为什么没有用工作流。"
+    ),
     "readonly": (
         "【审阅模式】当前处于只读审阅模式，你只能查看、检索、分析代码，"
         "严禁执行任何修改操作（禁止写入文件、运行命令、应用补丁）。"
@@ -1141,6 +1154,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             # plan-91-394: 中断可续跑的子代理清单（用户说“继续”时主代理据此续跑，而非重新派发）
             paused_subagents=await list_resumable_subagents(session.id),
             paused_workflows=await list_paused_workflows(session.id),
+            workflow_decisions=await list_pending_gates(session.id),
         )
 
         # 命令模式：注入模式指令（/chat 只读、/plan 先规划后执行）。用户显式选择的
@@ -1148,7 +1162,9 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         # plan-230-1144 M2: 自定义模式的提示词从配置读取（resolve_hint），
         # 内置模式沿用 _MODE_HINTS。
         _mode_hint = ""
-        if _mode in _MODE_HINTS:
+        if _mode == "workflow" and not settings.workflow_enabled:
+            _mode_hint = "【工作流模式】工作流功能已在设置中关闭，本轮按智能体模式直接完成任务，并提醒用户可在设置 → 工作流中开启。"
+        elif _mode in _MODE_HINTS:
             _mode_hint = _MODE_HINTS[_mode]
         else:
             try:
@@ -2127,6 +2143,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             # plan-91-394: 中断可续跑的子代理清单（用户说“继续”时主代理据此续跑，而非重新派发）
             paused_subagents=await list_resumable_subagents(session.id),
             paused_workflows=await list_paused_workflows(session.id),
+            workflow_decisions=await list_pending_gates(session.id),
         )
         # plan-19-82 增强（对齐 ZCode PLAN_MODE_EXIT_REMINDER）：确认执行是本会话中
         # 上下文形态切换最剧烈的一刻——规划阶段的对话被整篇方案文档替换，叠加 16000

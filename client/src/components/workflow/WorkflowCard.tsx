@@ -97,7 +97,8 @@ export const WorkflowCard = memo(function WorkflowCard({ programId }: { programI
           {retrying ? (
             <RetryLine node={retrying} now={now} />
           ) : (
-            <p className="wf-card-note" aria-live="polite">{currentNote(snap)}</p>
+            // 待确认时下方确认卡已写明“哪一步、为什么”，不再重复一行进展
+            !gate && <p className="wf-card-note" aria-live="polite">{currentNote(snap)}</p>
           )}
           {notice && <p className="wf-card-notice" role="status">{notice}</p>}
           {gate && <WorkflowGate snap={snap} compact />}

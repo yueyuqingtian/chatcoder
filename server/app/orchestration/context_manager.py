@@ -850,6 +850,22 @@ def _build_paused_workflows_block(items: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _build_workflow_decisions_block(items: list[dict]) -> str:
+    """待确认的工作流步骤（plan-workflow-collab）：用户在输入框里的回复多半就是对它们的决定。"""
+    from app.orchestration.workflow.report import gate_block
+
+    lines = [
+        "## Workflow Decisions — waiting for the user",
+        "以下工作流步骤正在等待确认（评估发现的问题、返工次数用尽、写入冲突等），对应子工作流暂停推进：",
+        *[gate_block(it) for it in items[:6]],
+        "【决定规则】用户本条消息若是在回应这些步骤（如“返工吧 / 按你说的改 / 第二条不用改 / 采纳 / 不改了 / 停掉”），"
+        "据此调用 decide_workflow 提交决定，用户的补充要求（含附件要点）写进 feedback；"
+        "意图不明确时先向用户确认。用户还没表态时，先核实问题并给出建议，不要替用户决定。"
+        "本条消息与这些步骤无关时正常处理，并顺带提醒用户还有待确认的步骤。",
+    ]
+    return "\n".join(lines)
+
+
 async def build_main_context(
     db: AsyncSession, *, agent, session, project, turn, user_message: str,
     attachments: list[dict] | None = None,
@@ -872,6 +888,8 @@ async def build_main_context(
     paused_subagents: list[dict] | None = None,
     # 工作流运行时：可续跑的暂停工作流清单（list_paused_workflows 产出）
     paused_workflows: list[dict] | None = None,
+    # 等待确认的工作流步骤（list_pending_gates 产出）
+    workflow_decisions: list[dict] | None = None,
 ) -> ContextBundle:
     """构建主代理上下文。
 
@@ -948,6 +966,8 @@ async def build_main_context(
         bundle.developer_parts.append(_build_paused_subagents_block(paused_subagents))
     if paused_workflows:
         bundle.developer_parts.append(_build_paused_workflows_block(paused_workflows))
+    if workflow_decisions:
+        bundle.developer_parts.append(_build_workflow_decisions_block(workflow_decisions))
     # 1.2 Rule Documents（plan-19-82 步骤 4）：规则段**前移**到 developer 段最前部并加 MANDATORY 语义。
     # 现状（本轮改造前）规则在第 4/4.1 位且标题无强制语义，模型容易忽略 → 遵循度不足。
     # 加载提前到此，顺序：Global Rules（优先级最高）→ Project Rules（工作区文档 + 工作目录规则）。

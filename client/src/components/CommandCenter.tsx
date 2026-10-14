@@ -79,6 +79,7 @@ export function CommandCenter() {
 
   const slashCommands = useMemo(() => [
     { cmd: "/plan", desc: t("cmd.slash_plan") },
+    { cmd: "/workflow", desc: t("cmd.slash_workflow") },
     { cmd: "/chat", desc: t("cmd.slash_chat") },
     { cmd: "/clear", desc: t("cmd.slash_clear") },
     { cmd: "/compact", desc: t("cmd.slash_compact") },

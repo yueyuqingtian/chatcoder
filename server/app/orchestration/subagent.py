@@ -240,7 +240,12 @@ class SubagentManager:
                     _parse_structured_report(handle, out.text or "")
                     handle.resumable = False
                     handle.waiting = False
-                    await _persist_agent_state(agent_id, "done", None)
+                    # plan-workflow-collab：工作流节点子代理完成后仍保留上下文——返工 / 复审要在同一子代理里
+                    # 继续（进程重启后从这里还原），普通子代理完成即清空
+                    await _persist_agent_state(
+                        agent_id, "done",
+                        _checkpoint_payload(handle, spec, "done") if handle.internal else None,
+                    )
                     await _sync_task(sid, task_id, "done", (out.text or "")[:300] or None,
                                      agent_id=agent_id, token_usage=getattr(out, "tokens", 0) or 0)
                     await self._after_terminal(handle, notify=True)
@@ -819,18 +824,38 @@ async def resume_subagent(session_id: int, agent_id: int, *, turn_id: int,
 async def continue_subagent(session_id: int, agent_id: int, *, turn_id: int, note: str) -> tuple[str, str]:
     """同一子代理线程续做（工作流的返工 / 格式修复）：沿用进程内上下文，追加一条说明后重新驱动。
 
-    仅当本进程仍保留该子代理的上下文时可用（已完成的子代理同样保留）；否则返回 not_resumable，
-    由调用方改为以交接摘要新建子代理。返回 (state, detail)：state ∈ resumed / already_running / not_resumable。
+    优先沿用进程内上下文；进程内没有时从落库的检查点还原（plan-workflow-collab：工作流子代理完成时
+    保留检查点，重启后返工仍回到同一子代理）。两者都没有返回 not_resumable，由调用方改为新建子代理。
+    返回 (state, detail)：state ∈ resumed / already_running / not_resumable。
     """
+    from app.persistence.models.agent import Agent as _AgentRow
+
     manager = get_subagent_manager(session_id)
     live = manager.get(agent_id)
-    if live is None or not live.live_messages:
-        return "not_resumable", "进程内没有该子代理的上下文"
-    if live.task is not None and not live.task.done():
+    if live is not None and live.task is not None and not live.task.done():
         return "already_running", ""
-    messages = _sanitize_messages(list(live.live_messages))
+    async with async_session_factory() as s:
+        row = await s.get(_AgentRow, agent_id)
+        row_name = row.name if row is not None else ""
+        ck = dict(row.checkpoint_json or {}) if row is not None and row.session_id == session_id else {}
+    if live is not None and live.live_messages:
+        messages = _sanitize_messages(list(live.live_messages))
+        spec = dict(live.run_spec or {})
+    elif ck.get("messages"):
+        try:
+            messages = _sanitize_messages([ChatMessage(**m) for m in ck["messages"]])
+        except Exception:
+            logger.warning("[subagent] 检查点解析失败 agent=%s", agent_id, exc_info=True)
+            return "not_resumable", "检查点已损坏"
+        spec = dict(ck.get("spec") or {})
+        live = live or SubagentHandle(agent_id=agent_id)
+        live.task_title = live.task_title or spec.get("task_title", "") or row_name or ""
+        live.run_spec = spec
+        live.tool_schemas = _build_tool_schemas(spec.get("tool_names"))
+        manager._handles[agent_id] = live
+    else:
+        return "not_resumable", "没有该子代理的上下文"
     messages.append(ChatMessage(role="user", content=note))
-    spec = dict(live.run_spec or {})
     live.turn_id = turn_id
     live.status = "running"
     live.error = ""
@@ -844,11 +869,21 @@ async def continue_subagent(session_id: int, agent_id: int, *, turn_id: int, not
     manager._completion_queue = [
         n for n in manager._completion_queue if int(n.get("agent_id") or 0) != agent_id
     ]
-    await _persist_agent_state(agent_id, "running", None)
+    await _persist_agent_state(agent_id, "running", _checkpoint_payload(live, spec, "continue"))
     live.task = asyncio.create_task(manager._drive(
         live, agent_id=agent_id, task_id=spec.get("task_id"), turn_id=turn_id,
         messages=messages, cancel_event=asyncio.Event(), is_blocking=False,
     ))
+    # 与派发 / 续跑一致：子代理面板与卡片重新进入运行态（否则节点在转圈、点开却显示已完成）
+    try:
+        from app.orchestration.agent_events import broadcast
+        await broadcast(session_id, {
+            "event": "agent.started",
+            "payload": {"agent_id": agent_id, "kind": "sub", "name": row_name or live.task_title,
+                        "turn_id": turn_id, "task_id": spec.get("task_id")},
+        })
+    except Exception:
+        logger.debug("[subagent] 续做事件广播失败(非阻塞)", exc_info=True)
     return "resumed", "已在原子代理上下文中继续"
 
 

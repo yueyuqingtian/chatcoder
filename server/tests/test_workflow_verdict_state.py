@@ -54,7 +54,10 @@ def test_pass_is_overridden_by_blocker_or_unmet_criterion():
 
 
 def test_exhausted_rework_goes_to_gate():
-    verdict = parse_verdict('{"decision": "rework", "criteria": [], "issues": []}')
+    verdict = parse_verdict(
+        '{"decision": "rework", "criteria": [], '
+        '"issues": [{"severity": "major", "problem": "边界未处理"}]}'
+    )
     decision = decide_review(verdict, checks_passed=True, rework_round=2, max_rework=2)
     assert decision.action == "gate"
     assert "已用尽" in decision.reason

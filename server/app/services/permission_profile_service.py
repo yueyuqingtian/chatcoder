@@ -104,6 +104,17 @@ BUILTIN_PROFILES: list[dict] = [
         "tools": [],  # 空列表 = 全量工具（不限制）
         "hint": "",
     },
+    {
+        # plan-workflow-collab：工作流模式——能力同智能体，任务默认以工作流（多步协同、评估返工）完成；
+        # 模式提示词由 engine._MODE_HINTS 维护
+        "name": "workflow",
+        "display_name": "工作流模式",
+        "kind": "full",
+        "builtin": True,
+        "description": "全量工具；复杂任务默认拆成工作流，多步协同、评估把关、确认后返工",
+        "tools": [],
+        "hint": "",
+    },
 ]
 
 _BY_NAME = {p["name"]: p for p in BUILTIN_PROFILES}

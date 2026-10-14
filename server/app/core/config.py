@@ -317,6 +317,9 @@ class Settings(BaseSettings):
     workflow_composition_mode: str = "runtime"
     # 评估节点的确定性检查：开启时检查失败不得判通过（改判返工）；关闭则只记录结果
     workflow_require_checks: bool = True
+    # 返工前确认（plan-workflow-collab）：评估要求返工时先把结论交给主代理核实、由你确认后再返工；
+    # 关闭则按评估结论自动返工
+    workflow_rework_confirm: bool = True
     # 同文件真冲突的处理：queue 先自动重做、多次失败再进入合并与决定；ask 每次真冲突都请你决定
     workflow_conflict_policy: str = "queue"
     # 允许自动三方合并（两侧改动区域不重叠时直接合并）；关闭则直接转入重做
