@@ -203,7 +203,7 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page
               }}
               type="button"
             >
-              <IconMoreHorizontal size={15} />
+              <IconMoreHorizontal size={16} />
             </button>
             {menuOpen && (
               <div
@@ -310,7 +310,7 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page
         </div>
         {/* 终端入口移至顶栏右上 */}
         <button className="titlebar-btn" onClick={() => usePanelStore.getState().openNewTab("terminal")} title={t("titlebar.terminal_btn")}>
-          <IconTerminal size={14} />
+          <IconTerminal size={16} />
         </button>
         </>
         )}
@@ -321,7 +321,7 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page
           title={rightCollapsed ? t("titlebar.panel_expand") : t("titlebar.panel_collapse")}
         >
           {/* plan-234-1171 R6: 传 open 让图标随右面板开合变形态 */}
-          <IconPanelRight size={14} open={!rightCollapsed} />
+          <IconPanelRight size={16} open={!rightCollapsed} />
         </button>
         )}
         <span className="titlebar-sep" />

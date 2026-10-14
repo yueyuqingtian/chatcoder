@@ -28,17 +28,17 @@ export function WindowNavCluster({ collapsed, onToggle, onSessionFocus }: {
       <AppLogo size={20} className="sb-logo-img" />
       <Tooltip content={toggleLabel} side="bottom">
         <button type="button" className="sb-nav-arrow" aria-label={toggleLabel} onClick={onToggle}>
-          <IconPanelLeft size={15} open={!collapsed} />
+          <IconPanelLeft size={16} open={!collapsed} />
         </button>
       </Tooltip>
       <Tooltip content={t("sidebar.history_back")} side="bottom">
         <button type="button" className="sb-nav-arrow" aria-label={t("sidebar.history_back")} disabled={!canBack} onClick={() => { histGo(-1); onSessionFocus(); }}>
-          <IconChevronLeft size={15} />
+          <IconChevronLeft size={16} />
         </button>
       </Tooltip>
       <Tooltip content={t("sidebar.history_forward")} side="bottom">
         <button type="button" className="sb-nav-arrow" aria-label={t("sidebar.history_forward")} disabled={!canForward} onClick={() => { histGo(1); onSessionFocus(); }}>
-          <IconChevronRight size={15} />
+          <IconChevronRight size={16} />
         </button>
       </Tooltip>
     </div>

@@ -195,6 +195,18 @@ def _session_turn_busy(session_id: int) -> bool:
     return _running_session_turns.get(session_id, 0) > 0
 
 
+def session_has_live_execution(session_id: int) -> bool:
+    """会话是否仍有运行中的主代理轮次或后台子代理（plan-20261014-fix4：永久删除前先停止）。"""
+    if _session_turn_busy(session_id) or session_id in _running_turn_session.values():
+        return True
+    return any(getattr(m, "session_id", None) == session_id for m in list(_turn_managers.values()))
+
+
+def any_live_execution() -> bool:
+    """全局是否有主代理轮次或后台子代理在运行（回收数据库空间前判断，避免阻塞进行中的对话）。"""
+    return bool(_running_session_turns) or bool(_running_turn_session) or bool(_turn_managers)
+
+
 def _session_turn_enter(session_id: int | None) -> None:
     """会话运行 turn 计数 +1（start_turn / execute_confirmed_plan 进入时调用）。"""
     if session_id is None:

@@ -40,7 +40,7 @@ MAX_NODES_TOTAL = 30
 MAX_REWORK = 3
 
 _KEY_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
-# 确定性检查命令白名单：匹配则直接执行；不匹配的命令进入既有审批流程
+# 内置常用检查：任何权限模式下都直接执行；其余命令按会话的权限模式裁决（见 workflow/commands.py）
 _COMMAND_ALLOWLIST = tuple(
     re.compile(p)
     for p in (
@@ -61,6 +61,24 @@ INTEGRATION_FLOW_KEY = "integration"
 def command_allowed(command: str) -> bool:
     cmd = command.strip()
     return any(p.match(cmd) for p in _COMMAND_ALLOWLIST)
+
+
+# 规划期命令提示：返回 (诊断代码, 文案)；None 表示该命令无需提示
+CommandNote = Callable[[str], "tuple[str, str] | None"]
+
+
+def default_command_note(command: str) -> tuple[str, str] | None:
+    """没有会话上下文时（模板编辑等）的口径。
+
+    plan-20261014-fix4：是否需要审批取决于运行时会话的权限模式，规划期只能如实说明，
+    不能断言「需要审批」——完全访问下这类提示曾误导模型反复改计划。有会话时由调用方按当前模式判定。
+    """
+    if command_allowed(command):
+        return None
+    return (
+        "command_needs_approval",
+        f"命令『{command}』不是内置检查，执行时按会话的权限模式决定是否需要审批",
+    )
 
 
 class NodeSpec(BaseModel):
@@ -213,8 +231,9 @@ def validate_plan(
     role_exists: Callable[[str], bool] = lambda _name: True,
     readonly_only: bool = False,
     hot_patterns: Iterable[str] = (),
+    command_note: CommandNote = default_command_note,
 ) -> ValidationResult:
-    """校验规格：节点类型规则、角色、计划模式权限天花板、命令白名单、结构上限与计划期冲突预检。"""
+    """校验规格：节点类型规则、角色、计划模式权限天花板、命令提示、结构上限与计划期冲突预检。"""
     res = ValidationResult()
     original = spec
     # 程序级集成验收先展开为一个子工作流，之后与其它子工作流一样参与全部校验
@@ -278,7 +297,15 @@ def validate_plan(
         index = {key: i for i, key in enumerate(node_keys)}
         for ni, node in enumerate(flow.nodes):
             _check_node(
-                res, node, f"{fp}.nodes[{ni}]", ni, flow.nodes, index, role_exists, readonly_only
+                res,
+                node,
+                f"{fp}.nodes[{ni}]",
+                ni,
+                flow.nodes,
+                index,
+                role_exists,
+                readonly_only,
+                command_note,
             )
 
     if total_nodes > MAX_NODES_TOTAL:
@@ -302,13 +329,9 @@ def validate_plan(
         )
     if original.after is not None:
         for cmd in original.after.commands:
-            if not command_allowed(cmd):
-                _warning(
-                    res,
-                    "command_needs_approval",
-                    "after.commands",
-                    f"命令『{cmd}』不在白名单内，执行前需要审批",
-                )
+            note = command_note(cmd)
+            if note is not None:
+                _warning(res, note[0], "after.commands", note[1])
 
     pairs = _check_concurrent_conflicts(res, spec, hot_patterns)
     res.stats = _stats(spec, total_nodes, pairs)
@@ -367,6 +390,7 @@ def _check_node(
     index: Mapping[str, int],
     role_exists: Callable[[str], bool],
     readonly_only: bool,
+    command_note: CommandNote = default_command_note,
 ) -> None:
     if not _KEY_RE.match(node.key):
         _error(
@@ -434,13 +458,9 @@ def _check_node(
     if kind == "check" and not node.commands:
         _error(res, "missing_commands", f"{path}.commands", f"检查节点『{node.key}』必须给出命令")
     for cmd in node.commands:
-        if not command_allowed(cmd):
-            _warning(
-                res,
-                "command_needs_approval",
-                f"{path}.commands",
-                f"命令『{cmd}』不在白名单内，执行前需要审批",
-            )
+        note = command_note(cmd)
+        if note is not None:
+            _warning(res, note[0], f"{path}.commands", note[1])
     if kind == "gate" and not node.question:
         _error(
             res,

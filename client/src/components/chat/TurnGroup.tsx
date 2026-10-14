@@ -7,7 +7,7 @@
  * - 最终回答（Markdown/产物/摘要）与计划卡始终展示
 
  */
-import { useCallback, memo, useState, useMemo, Fragment } from "react";
+import { useCallback, memo, useEffect, useState, useMemo, Fragment, type KeyboardEvent } from "react";
 import { useRunningTicker } from "./useRunningTicker";
 import { MessageActions } from "./MessageActions";
 import type { SubagentMetaLite } from "./SubagentCard";
@@ -18,6 +18,7 @@ import { MarkdownContent } from "../MarkdownContent";
 import { SubagentReportCard } from "./SubagentReportCard";
 import { ErrorCard } from "./ErrorCard";
 import { IconRotateCcw, IconArrowToggle } from "../icons";
+import { Tooltip } from "../ui";
 import type { FlowSegment, TimelineEntry, TurnItem } from "./timeline";
 import {
   msgText,
@@ -63,10 +64,13 @@ function WorkTimer({
   agentId?: number;
   flow?: "main" | "subagent";
   isRunning: boolean;
+  /** 本轮结构上可折叠（有过程且有最终汇报）：据此预留箭头槽位，运行中也占位、不显示 */
   canCollapse?: boolean;
   collapsed?: boolean;
   onToggleCollapsed?: () => void;
 }) {
+  // plan-20261014-fix4：运行中不可折叠——箭头槽位保留（隐藏），完成后淡入，计时条宽度不跳动
+  const toggleable = Boolean(canCollapse) && !isRunning;
   const subagentFlow = flow === "subagent";
   // plan-75-334 阶段1：只订阅**起止时间 primitive**。此前返回整个 turn / subagentMeta 对象，
   // turns 列表或 meta 上任何字段变化都会让每个可见计时条重渲染；primitive 只在起止时间
@@ -124,19 +128,30 @@ function WorkTimer({
   // 子代理面板的条是唯一折叠入口——只要可折叠就继续渲染（无秒数时展示「工作过程」）。
   if (!label && !canCollapse) return null;
 
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (!toggleable || (e.key !== "Enter" && e.key !== " ")) return;
+    e.preventDefault();
+    onToggleCollapsed?.();
+  };
+
   return (
-    <div
-      className={`turn-worktime${canCollapse ? " clickable" : ""}`}
-      onClick={canCollapse ? onToggleCollapsed : undefined}
-      title={canCollapse ? (collapsed ? "展开工作过程" : "折叠工作过程") : undefined}
-    >
-      <span>{label ? `已工作 ${label}` : "工作过程"}</span>
-      {canCollapse && (
-        <span className="turn-worktime-arrow">
-          <IconArrowToggle open={!collapsed} size={11} />
-        </span>
-      )}
-    </div>
+    <Tooltip content={collapsed ? "展开工作过程" : "折叠工作过程"} disabled={!toggleable}>
+      <div
+        className={`turn-worktime${toggleable ? " clickable" : ""}`}
+        onClick={toggleable ? onToggleCollapsed : undefined}
+        onKeyDown={onKeyDown}
+        role={toggleable ? "button" : undefined}
+        tabIndex={toggleable ? 0 : undefined}
+        aria-expanded={toggleable ? !collapsed : undefined}
+      >
+        <span>{label ? `已工作 ${label}` : "工作过程"}</span>
+        {canCollapse && (
+          <span className={`turn-worktime-arrow${toggleable ? "" : " is-hidden"}`} aria-hidden>
+            <IconArrowToggle open={!collapsed} size={11} />
+          </span>
+        )}
+      </div>
+    </Tooltip>
   );
 }
 
@@ -294,10 +309,16 @@ export const TurnGroup = memo(function TurnGroup({
     () => items.some((it, index) => it.kind === "user" && index !== firstUserIdx),
     [items, firstUserIdx]
   );
-  const processCollapsed =
-    userToggledCollapsed !== null
+  /** plan-20261014-fix4（用户反馈「运行中也可以折叠」）：运行中强制展开、不可折叠；
+   *  每次进入运行都清掉手动折叠记录——本轮（含并入的续跑轮）完成后按默认规则自动折叠，之后才可手动切换。 */
+  useEffect(() => {
+    if (isRunning) setUserToggledCollapsed(null);
+  }, [isRunning]);
+  const processCollapsed = isRunning
+    ? false
+    : userToggledCollapsed !== null
       ? userToggledCollapsed
-      : (!isRunning && hasProcess && !isAwaitingConfirmation && !hasInjectedUser);
+      : (hasProcess && !isAwaitingConfirmation && !hasInjectedUser);
 
   let lastThinkingIdx = -1;
   for (let k = items.length - 1; k >= 0; k--) {

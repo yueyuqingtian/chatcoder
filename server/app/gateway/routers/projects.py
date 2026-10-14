@@ -64,10 +64,12 @@ async def update_project(project_id: int, body: ProjectUpdate, db: AsyncSession 
 
 @router.delete("/{project_id}", response_model=dict)
 async def delete_project(project_id: int, db: AsyncSession = Depends(get_db)):
-    ok = await project_service.delete_project(db, project_id)
-    if not ok:
+    """永久删除项目：级联其工作树子项目与名下全部会话（plan-20261014-fix4，原实现直接删行必报外键错误）。"""
+    from app.services import archive_service
+
+    if await project_service.get_project(db, project_id) is None:
         raise HTTPException(404, "项目不存在")
-    return {"ok": True}
+    return await archive_service.purge(project_ids=[project_id], session_ids=[])
 
 
 @router.get("/{project_id}/scan-rules", response_model=list[str])

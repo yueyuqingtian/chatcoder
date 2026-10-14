@@ -5,6 +5,7 @@
  *  · done：静止线稿，hover 展开行时部件微动一次；
  *  · fail：线色转为 --error。 */
 import type { ReactNode } from "react";
+import { opticalStroke } from "../icons";
 
 type K =
   | "read" | "write" | "patch" | "list" | "grep" | "term" | "web" | "search" | "git"
@@ -51,7 +52,8 @@ export function toolGlyphKey(tool: string): K {
 export function ToolGlyph({ tool, size = 16 }: { tool: string; size?: number }) {
   const k = toolGlyphKey(tool);
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6}
+    // plan-20261014-fix4：固定 1.6 单位在 13~16px 下实际线宽不足 1.1px，改为按尺寸换算的光学线宽
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={opticalStroke(size)}
       strokeLinecap="round" strokeLinejoin="round" aria-hidden className={`ic tg tg-${k}`}>
       {G[k]}
     </svg>

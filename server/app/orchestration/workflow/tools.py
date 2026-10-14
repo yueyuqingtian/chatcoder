@@ -88,7 +88,10 @@ _FLOW_SCHEMA: dict[str, Any] = {
                     "commands": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "确定性检查命令（白名单）",
+                        "description": (
+                            "确定性检查命令（check / review 节点）；"
+                            "按会话权限模式执行，完全访问下直接运行"
+                        ),
                     },
                     "rework_to": {
                         "type": "string",
@@ -370,11 +373,15 @@ async def _plan(
     if spec is None:
         return "计划格式不正确，请修正后重新提交：\n" + _format_diags(diags)
     roles = await _role_names()
+    from app.orchestration.workflow.commands import command_note_for_session
+
     result = validate_plan(
         spec,
         role_exists=lambda name: name in roles,
         readonly_only=readonly_only,
         hot_patterns=_hot_patterns(),
+        # plan-20261014-fix4：命令提示按会话当前权限模式判定（完全访问下不再误报「需要审批」）
+        command_note=await command_note_for_session(session_id, workspace),
     )
     if not result.ok:
         return "计划未通过校验，请按提示修正后重新提交 plan_workflow：\n" + _format_diags(

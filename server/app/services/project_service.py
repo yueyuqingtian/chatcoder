@@ -110,18 +110,17 @@ async def update_project(db: AsyncSession, project_id: int, **kwargs) -> str | N
 
 
 async def delete_project(db: AsyncSession, project_id: int) -> bool:
-    """删除项目（写引擎单写线程）。返回是否存在。"""
-    from app.persistence.database import run_write_locked
+    """永久删除项目及其工作树子项目、名下全部会话与关联数据。返回是否存在。
 
-    def patch(s):
-        project = s.get(Project, project_id)
-        if project is None:
-            return False
-        s.delete(project)
-        s.commit()
-        return True
+    plan-20261014-fix4：原实现直接删项目行，项目下还有会话即触发
+    `FOREIGN KEY constraint failed`；级联清理统一由 archive_service.purge 完成。
+    """
+    from app.services import archive_service
 
-    return await run_write_locked(patch, label=f"project.delete.{project_id}")
+    if await db.get(Project, project_id) is None:
+        return False
+    await archive_service.purge(project_ids=[project_id], session_ids=[])
+    return True
 
 
 async def resolve_project_path(db: AsyncSession, project_id: int) -> str:

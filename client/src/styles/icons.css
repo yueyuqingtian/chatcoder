@@ -45,38 +45,62 @@ svg.ic.ic-sun {
 }
 
 /* ── 宿主：聚焦态（hover / 键盘聚焦）——不用 CSS 嵌套，避免构建目标降级时语义变化 ── */
-:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-fill { opacity: var(--ic-fill-hover); }
-:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-spin { transform: rotate(90deg); }
-:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-flip { transform: rotate(180deg); }
-:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-up { transform: translateY(-1.5px); }
-:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-down { transform: translateY(1.5px); }
-:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-right { transform: translateX(1.5px); }
-:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-left { transform: translateX(-1.5px); }
-:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-lid { transform: rotate(-14deg) translateY(-0.5px); }
-:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-pop { transform: scale(1.12); }
-:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-tilt { transform: rotate(-8deg); }
-:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-dot { transform: translateY(-1.5px); transition-delay: calc(var(--d, 0) * 40ms * var(--motion-scale)); }
-:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-swing { animation: mo-wiggle var(--dur-5) var(--ease-standard) 1; }
-:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic.ic-settings { transform: rotate(60deg); }
-:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic.ic-refresh { transform: rotate(180deg); }
-:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic.ic-rotate-ccw { transform: rotate(-120deg); }
-:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic.ic-globe { transform: rotate(-18deg); }
-:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic.ic-sun { transform: rotate(45deg); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host, .sb-nav-item):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-fill { opacity: max(var(--ic-fill-hover), var(--ic-fill-floor, 0)); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host, .sb-nav-item):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-spin { transform: rotate(90deg); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host, .sb-nav-item):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-flip { transform: rotate(180deg); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host, .sb-nav-item):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-up { transform: translateY(-1.5px); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host, .sb-nav-item):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-down { transform: translateY(1.5px); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host, .sb-nav-item):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-right { transform: translateX(1.5px); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host, .sb-nav-item):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-left { transform: translateX(-1.5px); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host, .sb-nav-item):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-lid { transform: rotate(-14deg) translateY(-0.5px); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host, .sb-nav-item):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-pop { transform: scale(1.12); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host, .sb-nav-item):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-tilt { transform: rotate(-8deg); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host, .sb-nav-item):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-dot { transform: translateY(-1.5px); transition-delay: calc(var(--d, 0) * 40ms * var(--motion-scale)); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host, .sb-nav-item):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-swing { animation: mo-wiggle var(--dur-5) var(--ease-standard) 1; }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host, .sb-nav-item):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic.ic-settings { transform: rotate(45deg); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host, .sb-nav-item):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic.ic-refresh { transform: rotate(180deg); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host, .sb-nav-item):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic.ic-rotate-ccw { transform: rotate(-120deg); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host, .sb-nav-item):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic.ic-globe { transform: rotate(-18deg); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host, .sb-nav-item):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic.ic-sun { transform: rotate(45deg); }
 
 /* 时钟指针绕表盘中心（而非自身包围盒中心）旋转；外链箭头向右上推 */
 svg.ic .ic-hand { transform-box: view-box; transform-origin: 12px 12px; transition: transform var(--dur-spring-long) var(--spring-soft); }
 svg.ic .ic-ne { transform-box: fill-box; transition: transform var(--dur-spring) var(--spring-bouncy); }
-:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-hand { transform: rotate(120deg); }
-:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-ne { transform: translate(1.5px, -1.5px); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host, .sb-nav-item):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-hand { transform: rotate(120deg); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host, .sb-nav-item):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-ne { transform: translate(1.5px, -1.5px); }
 
 /* 仪表指针绕刻度中心摆动 */
 svg.ic .ic-needle { transform-box: view-box; transform-origin: 12px 14px; transition: transform var(--dur-spring) var(--spring-bouncy); }
-:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-needle { transform: rotate(38deg); }
+:where(button, a, label, summary, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], .ic-host, .sb-nav-item):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) svg.ic .ic-needle { transform: rotate(38deg); }
 
 /* ── 宿主：状态变更（激活 / 展开 / 选中）── */
 :where(.active, .is-active, .is-open, [aria-expanded="true"], [aria-selected="true"], [aria-current="page"], [data-state="open"], [data-state="on"], [data-state="checked"]) svg.ic .ic-fill {
   opacity: var(--ic-fill-active);
 }
+
+/* ── 聚焦（plan-20261014-fix4）：选中 / 展开 / 按下 ──
+ * 三态口径：常规 = 单色线稿；悬停（含键盘聚焦）= 填充层淡入 + 部件微动（见上）；
+ * 聚焦 = 强调部件 .ic-ac（描边）/ .ic-ac-fill（实心点）着主题强调色，填充层改为强调色淡底——
+ * 主线稿保持中性，只点亮一处，形成双色层次；不加描边与外圈（focus.css 的无描边约定）。
+ * 键盘聚焦不触发强调色：弹层关闭后焦点会回到触发按钮，强调色会残留到点击别处为止。 */
+svg.ic .ic-ac { transition: stroke var(--dur-2) var(--ease-standard); }
+svg.ic .ic-ac-fill { transition: fill var(--dur-2) var(--ease-standard); }
+svg.ic .ic-fill { transition: opacity var(--dur-3) var(--ease-standard), fill var(--dur-2) var(--ease-standard); }
+:where(.active, .is-active, .is-open, [aria-expanded="true"], [aria-selected="true"], [aria-current="page"], [aria-pressed="true"], [data-state="open"], [data-state="on"], [data-state="checked"]) svg.ic .ic-ac {
+  stroke: var(--ic-accent);
+}
+:where(.active, .is-active, .is-open, [aria-expanded="true"], [aria-selected="true"], [aria-current="page"], [aria-pressed="true"], [data-state="open"], [data-state="on"], [data-state="checked"]) svg.ic .ic-ac-fill {
+  fill: var(--ic-accent);
+}
+:where(.active, .is-active, .is-open, [aria-expanded="true"], [aria-selected="true"], [aria-current="page"], [aria-pressed="true"], [data-state="open"], [data-state="on"], [data-state="checked"]) svg.ic .ic-fill {
+  fill: var(--ic-accent);
+  opacity: var(--ic-fill-active);
+}
+/* 聚焦 / 打开状态下悬停：填充层取两者较深者，不因悬停反而变淡（悬停规则用 max() 读取此下限） */
+:where(.active, .is-active, .is-open, [aria-expanded="true"], [aria-selected="true"], [aria-current="page"], [aria-pressed="true"], [data-state="open"], [data-state="on"], [data-state="checked"]) svg.ic,
+svg.ic[data-open="true"] { --ic-fill-floor: var(--ic-fill-active); }
+/* 面板开关：对应面板打开时，该侧窗格铺一层淡底（状态提示） */
+svg.ic[data-open="true"] .ic-pane { opacity: var(--ic-fill-active); }
 
 /* 尊重「动画效果：关闭/减弱」：关闭档由 motion.css 全局归零时长；减弱档去掉趣味摆动 */
 :root[data-motion="reduced"] svg.ic .ic-swing { animation: none !important; }
@@ -169,7 +193,7 @@ svg.ic .ic-needle { transform-box: view-box; transform-origin: 12px 14px; transi
 }
 .proj-ic svg { display: block; }
 .proj-ic .ph-duo { opacity: 0.16; transition: opacity var(--dur-3) var(--ease-standard); }
-:where(button, [role="button"], [role="option"], .ic-host):is(:hover, :focus-visible) .proj-ic .ph-duo,
+:where(button, [role="button"], [role="option"], .ic-host, .sb-nav-item):is(:hover, :focus-visible) .proj-ic .ph-duo,
 :where(.active, .is-active, .current, [aria-selected="true"]) .proj-ic .ph-duo { opacity: 0.3; }
 /* 块状（名称输入框左侧 / 选择器预览）：项目色淡底 + 图标 */
 .proj-ic.is-tile {
@@ -203,7 +227,8 @@ svg.lx .lx-draw { stroke-dasharray: 14; stroke-dashoffset: 0; }
   .lx-hop { transform: translateY(-1.5px); }
   .lx-drop { transform: translateY(1.5px); }
   .lx-lift { transform: translate(1px, -1px) rotate(0deg); }
-  .lx-spin { transform: rotate(60deg); }
+  .lx-spin { transform: rotate(45deg); }
+  .lx-zap { transform: scale(1.12); }
   .lx-nudge { transform: translate(1px, 1px); }
   .lx-turn { transform: rotate(300deg); }
   .lx-turn-back { transform: rotate(-300deg); }
@@ -215,7 +240,7 @@ svg.lx .lx-draw { stroke-dasharray: 14; stroke-dashoffset: 0; }
   .lx-fill { fill-opacity: 0.1; }
 }
 :where(button, [role="button"], [role="tab"], .sb-nav-item, .sb-user-settings):active svg.lx { transform: scale(0.88); transition-duration: 90ms; }
-:is(.active, .is-active, [aria-selected="true"], [aria-current="page"], [data-state="open"]) svg.lx { color: var(--ic-accent); }
+:is(.active, .is-active, [aria-selected="true"], [aria-current="page"], [data-state="open"]) svg.lx:not(.ic-duo) { color: var(--ic-accent); }
 :is(.active, .is-active, [aria-selected="true"], [aria-current="page"], [data-state="open"]) svg.lx .lx-fill { fill-opacity: 0.16; }
 @keyframes lx-blink { 50% { opacity: 0; } }
 @keyframes lx-wiggle { 25% { transform: rotate(-6deg); } 75% { transform: rotate(6deg); } }

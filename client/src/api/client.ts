@@ -278,6 +278,21 @@ export interface RollbackParams {
   restore_to_composer?: boolean;
 }
 
+/** 归档批量永久删除结果（plan-20261014-fix4，对应 POST /archive/purge）。 */
+export interface ArchivePurgeResult {
+  ok: boolean;
+  deleted_projects: number;
+  deleted_sessions: number;
+  /** 已不存在的 id（重复提交或列表未刷新），不视为错误 */
+  missing: { projects: number[]; sessions: number[] };
+  /** 清理的附件目录与回滚备份文件数 */
+  files_removed: number;
+  /** 是否执行了数据库空间回收；有任务在运行或空闲空间很少时跳过 */
+  compacted: boolean;
+  freed_bytes: number;
+  skipped?: "busy" | "small" | "unsupported" | "error";
+}
+
 export interface AuditLogOut {
   id: number;
   session_id: number | null;
@@ -742,6 +757,10 @@ export const api = {
   /** 删除会话。默认语义 = 归档（可恢复）；permanent=true 走物理删除（plan-282-1441 #4） */
   deleteSession: (id: number, permanent = false) =>
     del<{ ok: boolean }>(`/sessions/${id}${permanent ? "?permanent=true" : ""}`),
+  /** plan-20261014-fix4：归档页批量永久删除——项目（含工作树子项目与其下全部会话）与会话一次请求完成；
+   *  已不存在的 id 计入 missing 而不报错。POST 自带 10 分钟超时，足够覆盖删除后的空间回收。 */
+  purgeArchived: (data: { project_ids: number[]; session_ids: number[] }) =>
+    post<ArchivePurgeResult>("/archive/purge", data),
   // ── 目标模式（plan-671）──
   getSessionGoal: (id: number) => get<GoalOut>(`/sessions/${id}/goal`),
   setSessionGoal: (id: number, text: string) => post<GoalOut>(`/sessions/${id}/goal`, { text }),

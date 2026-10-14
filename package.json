@@ -27,7 +27,7 @@
     "productName": "chatcoder",
     "copyright": "Copyright © 2026 chatcoder",
     "directories": {
-      "output": "0.7.3copy",
+      "output": "0.7.3",
       "buildResources": "electron/build"
     },
     "npmRebuild": false,

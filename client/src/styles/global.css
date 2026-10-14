@@ -930,7 +930,8 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .turn-worktime.clickable {
   cursor: pointer;
 }
-.turn-worktime.clickable:hover {
+.turn-worktime.clickable:hover,
+.turn-worktime.clickable:focus-visible {
   color: var(--text-1);
 }
 .turn-worktime-arrow {
@@ -939,9 +940,14 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   justify-content: center;
   color: var(--text-3);
   /* plan-353-1738 M4b（S5）：旋转统一 --dur-3 + --ease-spring（原 --dur-fast 且无曲线） */
-  transition: transform var(--dur-3) var(--ease-spring), color var(--dur-fast);
+  transition: transform var(--dur-3) var(--ease-spring), color var(--dur-fast), opacity var(--dur-3) var(--ease-standard);
 }
-.turn-worktime.clickable:hover .turn-worktime-arrow {
+/* plan-20261014-fix4：运行中不可折叠——箭头保留槽位但不显示，轮次完成后淡入 */
+.turn-worktime-arrow.is-hidden {
+  opacity: 0;
+}
+.turn-worktime.clickable:hover .turn-worktime-arrow,
+.turn-worktime.clickable:focus-visible .turn-worktime-arrow {
   color: var(--text-1);
 }
 /* 工作过程容器（思考/工具/子代理），支持折叠与平滑过渡；间距交给 .turn-flow gap
@@ -2897,6 +2903,14 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 }
 .archive-search input::placeholder { color: var(--text-3); }
 .archive-picked { font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+/* plan-20261014-fix4：永久删除结果（中性说明，保留到下一次操作，不做定时消失以免列表跳动）；
+   状态色只落在图标上，文字保持次级色 */
+.archive-result {
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding-top: var(--sp-3);
+  font-size: 12px; color: var(--text-2); font-variant-numeric: tabular-nums;
+}
+.archive-result svg { color: var(--success); flex-shrink: 0; }
 /* 归档条目：复选框 + 信息（占满）+ 操作 */
 .archive-panel .settings-resource-item { justify-content: flex-start; }
 .archive-panel .settings-resource-item .settings-resource-info { flex: 1; min-width: 0; }

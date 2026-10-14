@@ -13,7 +13,7 @@ import { useChatStore } from "../../store/chat";
 import { formatRelativeTime } from "../../utils/time";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { Checkbox, Empty, Tooltip } from "../ui";
-import { IconFolder, IconMessageSquare, IconRotateCcw, IconSearch, IconTrash } from "../icons";
+import { IconCheck, IconFolder, IconMessageSquare, IconRotateCcw, IconSearch, IconTrash } from "../icons";
 
 function shortPath(path: string): string {
   const clean = path.replace(/\\/g, "/").replace(/\/$/, "");
@@ -21,12 +21,40 @@ function shortPath(path: string): string {
   return parts[parts.length - 1] || clean;
 }
 
+function formatBytes(n: number): string {
+  if (n >= 1024 * 1024 * 1024) return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(n / 1024))} KB`;
+}
+
+/** 删除确认文案：写清影响范围——归档项目名下的会话（含未归档的）会一并删除 */
+function deleteMessage(scope: { projects: number; projectSessions: number; sessions: number }): string {
+  const parts: string[] = [];
+  if (scope.projects > 0) {
+    parts.push(
+      scope.projectSessions > 0
+        ? `${scope.projects} 个项目（含其下 ${scope.projectSessions} 个会话）`
+        : `${scope.projects} 个项目`,
+    );
+  }
+  if (scope.sessions > 0) parts.push(`${scope.sessions} 个会话`);
+  return (
+    `将永久删除 ${parts.join("、") || "所选内容"}，以及它们的全部消息、轮次、任务、工作流记录与附件。\n\n` +
+    "此操作不可恢复，无法通过归档页找回；项目目录中的代码文件不受影响。"
+  );
+}
+
 export function ArchivedPanel() {
   const loadBootstrap = useChatStore((s) => s.loadBootstrap);
   const switchSession = useChatStore((s) => s.switchSession);
   const [projects, setProjects] = useState<ProjectOut[]>([]);
   const [sessions, setSessions] = useState<SessionOut[]>([]);
+  /** 全部会话（含活跃）：归档项目名下的会话通常仍是活跃状态，删除确认要把它们算进影响范围 */
+  const [allSessions, setAllSessions] = useState<SessionOut[]>([]);
   const [busy, setBusy] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  /** 最近一次永久删除的结果（工具条下方的中性说明，保留到下一次操作；失败仍走错误提示条） */
+  const [lastResult, setLastResult] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   /** 选中集合：会话与项目分开，避免 id 空间冲突 */
   const [pickedSessions, setPickedSessions] = useState<Set<number>>(new Set());
@@ -44,6 +72,7 @@ export function ArchivedPanel() {
       const archivedSessions = ss.filter((s) => s.status === "archived");
       setProjects(archivedProjects);
       setSessions(archivedSessions);
+      setAllSessions(ss);
       // 数据刷新后剔除已不存在的选中项
       const pids = new Set(archivedProjects.map((p) => p.id));
       const sids = new Set(archivedSessions.map((s) => s.id));
@@ -72,24 +101,29 @@ export function ArchivedPanel() {
 
   const projectById = useMemo(() => new Map(projects.map((p) => [p.id, p])), [projects]);
 
-  const toggleSession = (id: number) =>
+  const toggleSession = (id: number) => {
+    setLastResult(null);
     setPickedSessions((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
-  const toggleProject = (id: number) =>
+  };
+  const toggleProject = (id: number) => {
+    setLastResult(null);
     setPickedProjects((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
+  };
 
   const allShownSessions = filteredSessions.length > 0 && filteredSessions.every((s) => pickedSessions.has(s.id));
   const allShownProjects = filteredProjects.length > 0 && filteredProjects.every((p) => pickedProjects.has(p.id));
   const pickedCount = pickedSessions.size + pickedProjects.size;
 
   const toggleAllShown = () => {
+    setLastResult(null);
     if (allShownSessions && allShownProjects) {
       setPickedSessions(new Set());
       setPickedProjects(new Set());
@@ -100,6 +134,7 @@ export function ArchivedPanel() {
   };
 
   const restoreProject = async (id: number) => {
+    setLastResult(null);
     setBusy(true);
     try {
       await api.updateProject(id, { archived: false });
@@ -110,6 +145,7 @@ export function ArchivedPanel() {
   };
 
   const restoreSession = async (s: SessionOut, open = false) => {
+    setLastResult(null);
     setBusy(true);
     try {
       await api.updateSession(s.id, { status: "active" });
@@ -129,6 +165,7 @@ export function ArchivedPanel() {
   /** 批量恢复（项目恢复其下会话由后端语义保证） */
   const restorePicked = async () => {
     if (pickedCount === 0) return;
+    setLastResult(null);
     setBusy(true);
     try {
       await Promise.all([
@@ -143,21 +180,46 @@ export function ArchivedPanel() {
     finally { setBusy(false); }
   };
 
-  /** 批量永久删除 */
+  /** 删除影响范围：选中项目名下的全部会话（含活跃）+ 单独选中、且不属于这些项目的会话 */
+  const deleteScope = useMemo(() => {
+    const underProjects = allSessions.filter((s) => s.project_id != null && pickedProjects.has(s.project_id));
+    const underIds = new Set(underProjects.map((s) => s.id));
+    const loose = [...pickedSessions].filter((id) => !underIds.has(id)).length;
+    return { projects: pickedProjects.size, projectSessions: underProjects.length, sessions: loose };
+  }, [allSessions, pickedProjects, pickedSessions]);
+
+  /** 批量永久删除。plan-20261014-fix4：一次请求完成整批删除（原先并发逐个删，任一失败即中断且不刷新，
+   *  已删掉的会话仍显示且保持选中，再点就报「会话不存在」）；无论成败都刷新列表。 */
   const deletePicked = async () => {
     setBusy(true);
+    setDeleting(true);
+    let done: string | null = null;
+    let failed: string | null = null;
     try {
-      await Promise.all([
-        ...[...pickedProjects].map((id) => api.deleteProject(id)),
-        ...[...pickedSessions].map((id) => api.deleteSession(id, true)),
-      ]);
+      const r = await api.purgeArchived({
+        project_ids: [...pickedProjects],
+        session_ids: [...pickedSessions],
+      });
       setPickedProjects(new Set());
       setPickedSessions(new Set());
       setConfirmDelete(false);
-      await loadBootstrap();
-      await load();
-    } catch (e) { useChatStore.setState({ error: String(e) }); }
-    finally { setBusy(false); }
+      const parts: string[] = [];
+      if (r.deleted_projects > 0) parts.push(`${r.deleted_projects} 个项目`);
+      if (r.deleted_sessions > 0) parts.push(`${r.deleted_sessions} 个会话`);
+      const head = parts.length > 0 ? `已永久删除 ${parts.join("、")}` : "所选内容已不存在，列表已刷新";
+      const tail = r.compacted && r.freed_bytes > 0 ? ` · 释放 ${formatBytes(r.freed_bytes)} 存储空间` : "";
+      done = head + tail;
+    } catch (e) {
+      failed = `删除失败：${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      setDeleting(false);
+      setBusy(false);
+    }
+    // 先刷新再提示：loadBootstrap 开始时会清空错误提示条
+    await loadBootstrap().catch(() => {});
+    await load();
+    setLastResult(done);
+    if (failed) useChatStore.setState({ error: failed });
   };
 
   const empty = projects.length === 0 && sessions.length === 0;
@@ -187,6 +249,13 @@ export function ArchivedPanel() {
           <IconTrash size={12} /> 批量删除
         </button>
       </div>
+
+      {lastResult && (
+        <div className="archive-result" role="status">
+          <IconCheck size={13} />
+          <span>{lastResult}</span>
+        </div>
+      )}
 
       {/* plan-91-393：行 = 勾选 + 图标块 + 标题/路径 + 右侧操作；分组标题与空态统一 */}
       {filteredProjects.length > 0 && <div className="sc-group-label">已归档项目</div>}
@@ -262,11 +331,10 @@ export function ArchivedPanel() {
       <ConfirmDialog
         open={confirmDelete}
         title="永久删除归档项"
-        message={
-          `将永久删除 ${pickedProjects.size} 个项目与 ${pickedSessions.size} 个会话，` +
-          `及其全部消息、轮次、任务与审核记录。\n\n此操作不可恢复，无法通过归档页找回。`
-        }
+        message={deleteMessage(deleteScope)}
         confirmLabel="永久删除"
+        busy={deleting}
+        busyLabel="删除中…"
         danger
         onCancel={() => setConfirmDelete(false)}
         onConfirm={() => void deletePicked()}

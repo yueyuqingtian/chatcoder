@@ -18,7 +18,7 @@ from typing import Any
 
 from app.core.config import settings
 from app.orchestration.workflow import conflict_events, isolation, store
-from app.orchestration.workflow.commands import run_check_command
+from app.orchestration.workflow.commands import CommandGate, gate_check_command, run_check_command
 from app.orchestration.workflow.conflicts import LeaseOwner, WriteLeaseTable, get_lease_table
 from app.orchestration.workflow.drift import (
     ABSENT,
@@ -84,6 +84,8 @@ AUTO_RESUME_DELAY_SEC = 60.0
 
 Broadcast = Callable[[int, dict[str, Any]], Awaitable[None]]
 CommandRunner = Callable[[str, str], Awaitable[dict[str, Any]]]
+# 检查命令的权限门控：(命令, session_id=, workspace=, origin=) → 放行 / 不运行及原因
+CommandGateFn = Callable[..., Awaitable[CommandGate]]
 # 程序关键状态变化时通知主代理（会话、文本）：空闲则唤醒一轮，忙则注入当前轮
 Notify = Callable[[int, str], Awaitable[None]]
 # 续跑 / 重试前的模型可达性预检：(可达, 不可达原因)，参数为会话编号
@@ -273,6 +275,7 @@ class WorkflowRuntime:
         limits: PoolLimits | None = None,
         leases: WriteLeaseTable | None = None,
         command_runner: CommandRunner | None = None,
+        command_gate: CommandGateFn | None = None,
         retry_plan: Callable[[], list[float]] | None = None,
         broadcast: Broadcast | None = None,
         notify: Notify | None = None,
@@ -283,6 +286,7 @@ class WorkflowRuntime:
         self._pool = WorkflowPool(limits or PoolLimits())
         self._leases = leases if leases is not None else get_lease_table()
         self._command_runner: CommandRunner = command_runner or run_check_command
+        self._command_gate: CommandGateFn = command_gate or gate_check_command
         self._retry_plan = retry_plan or _default_retry_plan
         self._broadcast: Broadcast = broadcast or _default_broadcast
         self._notify: Notify = notify or _no_notify
@@ -302,6 +306,11 @@ class WorkflowRuntime:
     @property
     def pool(self) -> WorkflowPool:
         return self._pool
+
+    @property
+    def busy(self) -> bool:
+        """是否有节点正在执行（回收数据库空间前判断，避免长事务阻塞进行中的节点写入）。"""
+        return bool(self._tasks)
 
     def pool_snapshot(self) -> dict[str, object]:
         """并发池占用快照（界面展示用）：全局 / 会话占用、排队数与上限。"""
@@ -812,16 +821,40 @@ class WorkflowRuntime:
             return NodeResult(status="gate", error=request.question or "需要你确认是否继续")
         return await self._executor.run(request)
 
+    async def _run_command(
+        self, command: str, cwd: str, *, session_id: int | None, origin: str
+    ) -> dict[str, Any]:
+        """运行一条检查命令：先过权限门控（plan-20261014-fix4：跟随会话权限模式），再执行。
+
+        门控不放行时不执行，结果带 blocked 与原因，与命令失败区分开。
+        """
+        gate = await self._command_gate(
+            command, session_id=session_id, workspace=cwd, origin=origin
+        )
+        if not gate.allowed:
+            return {
+                "cmd": command,
+                "ok": False,
+                "exit_code": None,
+                "blocked": True,
+                "output": gate.reason,
+            }
+        return await self._command_runner(command, cwd)
+
     async def _run_check_node(self, request: NodeRequest) -> NodeResult:
-        """检查节点（设计 §4.5）：不调用模型，按顺序运行白名单命令；全部通过则完成，否则失败。"""
+        """检查节点（设计 §4.5）：不调用模型，按顺序运行命令；全部通过则完成，否则失败。"""
         results: list[dict[str, Any]] = []
+        origin = f"工作流步骤『{request.flow_key}/{request.node_key}』"
         for command in request.commands:
-            outcome = await self._command_runner(command, request.workspace)
+            outcome = await self._run_command(
+                command, request.workspace, session_id=request.session_id, origin=origin
+            )
             results.append(
                 {
                     "command": command,
                     "ok": bool(outcome.get("ok")),
                     "output": str(outcome.get("output") or "")[-600:],
+                    **({"blocked": True} if outcome.get("blocked") else {}),
                 }
             )
             if not outcome.get("ok"):
@@ -829,11 +862,12 @@ class WorkflowRuntime:
         failed = [item for item in results if not item["ok"]]
         if failed:
             first = failed[0]
-            return NodeResult(
-                status="failed",
-                error=f"检查未通过：{first['command']}",
-                output={"checks": results},
+            error = (
+                f"检查未执行：{first['command']}（{first['output']}）"
+                if first.get("blocked")
+                else f"检查未通过：{first['command']}"
             )
+            return NodeResult(status="failed", error=error, output={"checks": results})
         return NodeResult(
             status="done",
             text=f"检查通过：{len(results)} 条命令",
@@ -1562,7 +1596,13 @@ class WorkflowRuntime:
             await self._emit_node(node_id, status="pending")
             await self._log(program_id, f"评估输出不合规，已追问一次格式修复：{node['key']}")
             return
-        checks = [await self._command_runner(cmd, ctx["workspace"]) for cmd in node["commands"]]
+        origin = f"工作流评估『{ctx['flow_key']}/{node['key']}』"
+        checks = [
+            await self._run_command(
+                cmd, ctx["workspace"], session_id=ctx.get("session_id"), origin=origin
+            )
+            for cmd in node["commands"]
+        ]
         checks_passed = all(bool(c.get("ok")) for c in checks)
         # 检查结果始终记录；关闭“必须通过检查”后，检查失败不再阻止判定为通过
         max_rework = node["max_rework"] if node["max_rework"] is not None else DEFAULT_MAX_REWORK
@@ -1721,6 +1761,8 @@ class WorkflowRuntime:
             finished_at=store.now_iso(),
             reason=result.error[:300],
             error_json={"message": result.error[:300]},
+            # 检查节点失败时保留逐条命令结果（哪条未通过 / 未执行及原因），面板据此展示
+            **({"output_json": result.output} if result.output else {}),
         )
         await self._emit_node(node_id, status="failed")
         await self._log(

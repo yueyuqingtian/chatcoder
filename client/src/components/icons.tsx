@@ -16,6 +16,12 @@
  *  - `IconChevron` 统一折叠/展开箭头——单一图标 + rotate 过渡，
  *    取代"展开/折叠切换两个图标组件"的硬切；
  *  - aria-hidden 默认 true 但可被调用方覆盖（按钮内唯一元素需可访问名）。
+ *
+ * plan-20261014-fix4 高精度与三态：
+ *  - 默认描边改为按尺寸换算的光学线宽（见 opticalStroke），横竖线落整数坐标；
+ *  - 界面骨架图标（面板开关 / 终端 / 更多 / 搜索 / 设置 / 文件夹）重绘：图形更饱满、留白统一；
+ *  - 三态：常规单色线稿 → 悬停（含键盘聚焦）填充层淡入 + 微动 → 聚焦（选中 / 展开 / 按下）
+ *    强调部件 `.ic-ac` / `.ic-ac-fill` 着主题强调色、填充层改为强调色淡底，规则见 styles/icons.css。
  */
 
 import { CSSProperties, SVGProps } from "react";
@@ -32,6 +38,19 @@ const _SIZE_TIERS: Record<string, number> = { xs: 12, sm: 14, md: 16, lg: 20 };
 function resolveSize(size: IconSize): number {
   if (typeof size === "number") return size;
   return _SIZE_TIERS[size] ?? 14;
+}
+
+/** 各图标的默认描边（调用方未显式传 strokeWidth 时即为此值），由 baseProps 换算为光学线宽 */
+const DEFAULT_STROKE = 1.75;
+
+/** plan-20261014-fix4：光学线宽（24 网格单位）。
+ *
+ * 固定 1.75 单位时，13~14px 渲染的实际线宽只有约 1px，叠加半像素坐标后发虚发灰（用户反馈「图标不精细」）。
+ * 现在按渲染尺寸换算：16px 及以下取 2 单位——1.5 倍缩放屏上 16px 图标正好 1 单位 = 1 物理像素，
+ * 2 单位描边落在整数坐标上即为 2 个整像素；更大尺寸逐步收窄，实际线宽稳定在约 1.33~1.5px。 */
+export function opticalStroke(px: number): number {
+  if (px <= 16) return 2;
+  return Math.round(((1.333 + (px - 16) * 0.021) * 24 / px) * 1000) / 1000;
 }
 
 interface IconProps extends Omit<SVGProps<SVGSVGElement>, "size" | "color"> {
@@ -55,7 +74,7 @@ const baseProps = (
   viewBox: "0 0 24 24",
   fill: "none",
   stroke: color || "currentColor",
-  strokeWidth,
+  strokeWidth: strokeWidth === DEFAULT_STROKE ? opticalStroke(resolveSize(size)) : strokeWidth,
   strokeLinecap: "round" as const,
   strokeLinejoin: "round" as const,
   "aria-hidden": true,
@@ -65,13 +84,18 @@ const baseProps = (
 
 /* ── 主图标 ──────────────────────────────────────────────── */
 
-/** 设置 (齿轮) */
+/** 齿轮外形（plan-20261014-fix4）：8 齿、齿顶与齿根均为圆弧，按 24 网格计算得到；
+ *  原路径的齿沿细碎曲线在 13~16px 下糊成一团，现齿形简洁、齿间留白均匀。 */
+export const GEAR_D =
+  "M10.68 2.59A9.5 9.5 0 0 1 13.32 2.59L13.74 5.01A7.2 7.2 0 0 1 15.71 5.83L17.72 4.41A9.5 9.5 0 0 1 19.59 6.28L18.17 8.29A7.2 7.2 0 0 1 18.99 10.26L21.41 10.68A9.5 9.5 0 0 1 21.41 13.32L18.99 13.74A7.2 7.2 0 0 1 18.17 15.71L19.59 17.72A9.5 9.5 0 0 1 17.72 19.59L15.71 18.17A7.2 7.2 0 0 1 13.74 18.99L13.32 21.41A9.5 9.5 0 0 1 10.68 21.41L10.26 18.99A7.2 7.2 0 0 1 8.29 18.17L6.28 19.59A9.5 9.5 0 0 1 4.41 17.72L5.83 15.71A7.2 7.2 0 0 1 5.01 13.74L2.59 13.32A9.5 9.5 0 0 1 2.59 10.68L5.01 10.26A7.2 7.2 0 0 1 5.83 8.29L4.41 6.28A9.5 9.5 0 0 1 6.28 4.41L8.29 5.83A7.2 7.2 0 0 1 10.26 5.01L10.68 2.59Z";
+
+/** 设置 (齿轮)：轴心为聚焦态强调部件 */
 export function IconSettings({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
     <svg {...baseProps(size, color, strokeWidth, rest, "settings")}>
-      <path className="ic-fill" d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.36.15.65.41.86.73.21.32.31.7.31 1.08V11a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-      <circle cx="12" cy="12" r="3" />
-      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.36.15.65.41.86.73.21.32.31.7.31 1.08V11a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+      <path className="ic-fill" d={GEAR_D} />
+      <path d={GEAR_D} />
+      <circle className="ic-ac" cx="12" cy="12" r="3" />
     </svg>
   );
 }
@@ -100,12 +124,16 @@ export function IconPet({ size = 18, color = "currentColor", strokeWidth = 1.75,
   );
 }
 
+/** 文件夹外形（plan-20261014-fix4：横边落在 y=4 / 7 / 20 整数坐标，原 4.5 / 19.5 在小尺寸下发虚） */
+const FOLDER_D =
+  "M3 6.5A2.5 2.5 0 0 1 5.5 4h3.59a2 2 0 0 1 1.41.59L12.41 6.5c.38.38.89.5 1.42.5H18.5A2.5 2.5 0 0 1 21 9.5v8a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z";
+
 /** 工作目录(文件夹，闭合态，对齐图 2) */
 export function IconFolder({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
     <svg {...baseProps(size, color, strokeWidth, rest, "folder")}>
-      <path className="ic-fill" d="M3 6.5C3 5.39543 3.89543 4.5 5 4.5H9.17157C9.70201 4.5 10.2107 4.71071 10.5858 5.08579L12.4142 6.91421C12.7893 7.28929 13.298 7.5 13.8284 7.5H19C20.1046 7.5 21 8.39543 21 9.5V17.5C21 18.6046 20.1046 19.5 19 19.5H5C3.89543 19.5 3 18.6046 3 17.5V6.5Z" />
-      <path d="M3 6.5C3 5.39543 3.89543 4.5 5 4.5H9.17157C9.70201 4.5 10.2107 4.71071 10.5858 5.08579L12.4142 6.91421C12.7893 7.28929 13.298 7.5 13.8284 7.5H19C20.1046 7.5 21 8.39543 21 9.5V17.5C21 18.6046 20.1046 19.5 19 19.5H5C3.89543 19.5 3 18.6046 3 17.5V6.5Z" />
+      <path className="ic-fill" d={FOLDER_D} />
+      <path d={FOLDER_D} />
     </svg>
   );
 }
@@ -217,34 +245,25 @@ export function IconChevron({
   );
 }
 
-/** 左面板切换（支持 open 状态微形变：展开为图 4 实心指示块，折叠为图 5 细线框） */
+/** 左面板切换。plan-20261014-fix4：原折叠态的 1px 虚线小框缩小后成了噪点（用户指出的不精细图标之一）；
+ *  现为整数坐标的外框 + 分隔线，面板打开时（data-open）左栏铺一层淡底，分隔线为聚焦态强调部件。 */
 export function IconPanelLeft({ size = 18, color = "currentColor", strokeWidth = 1.75, open = false, ...rest }: IconProps & { open?: boolean }) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest, "panel-left")}>
-      <rect x="3" y="4" width="18" height="16" rx="3" ry="3" />
-      <line x1="9" y1="4" x2="9" y2="20" />
-      {open ? (
-        /* 图 4：展开态，左侧实心块 */
-        <rect x="4.25" y="5.25" width="3.5" height="13.5" rx="2" fill={color || "currentColor"} stroke="none" />
-      ) : (
-        /* 图 5：折叠态，左侧细空心框 */
-        <rect x="4.75" y="6" width="2.5" height="12" rx="1.6" strokeWidth={1.2} strokeDasharray="1 1" opacity={0.6} />
-      )}
+    <svg {...baseProps(size, color, strokeWidth, rest, "panel-left")} data-open={open ? "true" : "false"}>
+      <path className="ic-fill ic-pane" d="M9 4H6.5A3.5 3.5 0 0 0 3 7.5v9A3.5 3.5 0 0 0 6.5 20H9z" />
+      <rect x="3" y="4" width="18" height="16" rx="3.5" />
+      <path className="ic-ac" d="M9 4v16" />
     </svg>
   );
 }
 
-/** 右面板切换（支持 open 状态微形变） */
+/** 右面板切换（与左面板开关同一套造型，镜像） */
 export function IconPanelRight({ size = 18, color = "currentColor", strokeWidth = 1.75, open = false, ...rest }: IconProps & { open?: boolean }) {
   return (
-    <svg {...baseProps(size, color, strokeWidth, rest, "panel-right")}>
-      <rect x="3" y="4" width="18" height="16" rx="3" ry="3" />
-      <line x1="15" y1="4" x2="15" y2="20" />
-      {open ? (
-        <rect x="16.25" y="5.25" width="3.5" height="13.5" rx="2" fill={color || "currentColor"} stroke="none" />
-      ) : (
-        <rect x="16.75" y="6" width="2.5" height="12" rx="1.6" strokeWidth={1.2} strokeDasharray="1 1" opacity={0.6} />
-      )}
+    <svg {...baseProps(size, color, strokeWidth, rest, "panel-right")} data-open={open ? "true" : "false"}>
+      <path className="ic-fill ic-pane" d="M15 4h2.5A3.5 3.5 0 0 1 21 7.5v9a3.5 3.5 0 0 1-3.5 3.5H15z" />
+      <rect x="3" y="4" width="18" height="16" rx="3.5" />
+      <path className="ic-ac" d="M15 4v16" />
     </svg>
   );
 }
@@ -430,8 +449,9 @@ export function IconCompress({ size = 18, color = "currentColor", strokeWidth = 
 export function IconTerminal({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
     <svg {...baseProps(size, color, strokeWidth, rest, "terminal")}>
-      <polyline className="ic-right" points="4 17 10 11 4 5" />
-      <line x1="12" y1="19" x2="20" y2="19" />
+      {/* plan-20261014-fix4：提示符与光标整体居中（4.5→19.5 × 7→17），光标为聚焦态强调部件 */}
+      <path className="ic-right" d="M4.5 7 9.5 12l-5 5" />
+      <path className="ic-ac" d="M12 17h7.5" />
     </svg>
   );
 }
@@ -502,9 +522,10 @@ export function IconRefresh({ size = 18, color = "currentColor", strokeWidth = 1
 export function IconMoreHorizontal({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
     <svg {...baseProps(size, color, strokeWidth, rest, "more-horizontal")}>
-      <circle className="ic-dot" style={{ ["--d" as string]: 0 }} cx="5" cy="12" r="1" />
-      <circle className="ic-dot" style={{ ["--d" as string]: 1 }} cx="12" cy="12" r="1" />
-      <circle className="ic-dot" style={{ ["--d" as string]: 2 }} cx="19" cy="12" r="1" />
+      {/* plan-20261014-fix4：描边小圆在小尺寸下发糊，改为实心圆点；中间点为聚焦态强调部件 */}
+      <circle className="ic-dot" style={{ ["--d" as string]: 0 }} cx="5" cy="12" r="1.75" fill={color || "currentColor"} stroke="none" />
+      <circle className="ic-dot ic-ac-fill" style={{ ["--d" as string]: 1 }} cx="12" cy="12" r="1.75" fill={color || "currentColor"} stroke="none" />
+      <circle className="ic-dot" style={{ ["--d" as string]: 2 }} cx="19" cy="12" r="1.75" fill={color || "currentColor"} stroke="none" />
     </svg>
   );
 }
@@ -552,9 +573,9 @@ export function IconMoon({ size = 18, color = "currentColor", strokeWidth = 1.75
 export function IconSearch({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
     <svg {...baseProps(size, color, strokeWidth, rest, "search")}>
-      <circle className="ic-fill" cx="11" cy="11" r="8" />
-      <circle className="ic-pop" cx="11" cy="11" r="8" />
-      <line x1="21" y1="21" x2="16.65" y2="16.65" />
+      <circle className="ic-fill" cx="11" cy="11" r="7.5" />
+      <circle className="ic-pop" cx="11" cy="11" r="7.5" />
+      <path className="ic-ac" d="m16.5 16.5 4 4" />
     </svg>
   );
 }
@@ -1453,11 +1474,11 @@ export function IconCamera({ size = 18, color = "currentColor", strokeWidth = 1.
 export function IconFolderPlus({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
     <svg {...baseProps(size, color, strokeWidth, rest, "folder-plus")}>
-      <path className="ic-fill" d="M12 19H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h4.5l2 2.5H19a2 2 0 0 1 2 2v2.5" />
-      <path d="M12 19H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h4.5l2 2.5H19a2 2 0 0 1 2 2v2.5" />
+      {/* plan-20261014-fix4：与文件夹同一外形，加号收进夹身中央（整数坐标），为聚焦态强调部件 */}
+      <path className="ic-fill" d={FOLDER_D} />
+      <path d={FOLDER_D} />
       <g className="ic-spin">
-        <line x1="18" y1="14" x2="18" y2="20" />
-        <line x1="15" y1="17" x2="21" y2="17" />
+        <path className="ic-ac" d="M12 10v6M9 13h6" />
       </g>
     </svg>
   );

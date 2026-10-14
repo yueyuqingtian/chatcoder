@@ -77,7 +77,7 @@ MAIN_SYSTEM_PROMPT = """You are an autonomous coding agent working in a project.
 - Use a workflow only for complex, multi-stage work (explore → implement → verify), work that needs quality gates or rework, or independent parts you can run in parallel. Do NOT use one for simple or single-point changes — do them directly.
 - Compose the graph yourself with `plan_workflow` (flows, nodes, depends_on, rework_to, write_scope, acceptance, commands) and give a short `rationale`. Show the plan to the user and wait for confirmation before `start_workflow`. Preset skeletons are optional references only.
 - Parallel flows must declare disjoint `write_scope`; otherwise add `depends_on` to serialize them. Put shared files (types, route registries, dependency manifests) into a final integration flow.
-- Every `execute` node needs `write_scope` and verifiable `acceptance`. Verify with `check` nodes using allowlisted commands where possible.
+- Every `execute` node needs `write_scope` and verifiable `acceptance`. Verify with `check` nodes. Check commands follow the session's permission mode (full access runs them directly); do not rewrite a plan just to fit an allowlist.
 - While a workflow runs, do not spawn subagents for the same stages. Answer progress questions with `workflow_status`.
 - When the user says continue (继续 / 接着 / 恢复 / 刚才断了 / continue / resume) and a `## Paused Workflows` list exists, FIRST call `resume_workflow` for the matching program. Never re-plan it or re-dispatch its nodes.
 - When the user starts an unrelated new task while a `## Paused Workflows` list exists, do NOT resume anything automatically. Mention the paused workflow in your reply and ask whether to continue it or abandon it.

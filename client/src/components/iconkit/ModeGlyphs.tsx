@@ -3,12 +3,14 @@
  *  由宿主行状态控制（默认次级色、选中主色、危险项错误色）。悬停微动复用 icons.css 的 .lx-* 约定，
  *  只动点睛部件，不位移整枚图标。 */
 import type { ReactNode } from "react";
+import { opticalStroke } from "../icons";
 
 type P = { size?: number };
 
 function Glyph({ size = 16, name, children }: P & { name: string; children: ReactNode }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6}
+    // plan-20261014-fix4：描边改为按尺寸换算的光学线宽，与其余界面图标同一笔触
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={opticalStroke(size)}
       strokeLinecap="round" strokeLinejoin="round" aria-hidden className={`ic lx lx-${name}`}>
       {children}
     </svg>

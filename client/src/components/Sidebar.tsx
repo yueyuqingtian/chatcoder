@@ -328,11 +328,11 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
   }, [renaming]);
 
   const navItems = useMemo(() => [
-    { key: "chat", label: t("sidebar.new_task"), icon: <IxNewChat size={17} />, shortcut: "Ctrl+N" },
-    { key: "search", label: t("sidebar.search"), icon: <IxSearch size={17} />, shortcut: "Ctrl+K" },
-    { key: "scheduled", label: t("sidebar.automation"), icon: <IxAutomation size={17} /> },
+    { key: "chat", label: t("sidebar.new_task"), icon: <IxNewChat size={16} />, shortcut: "Ctrl+N" },
+    { key: "search", label: t("sidebar.search"), icon: <IxSearch size={16} />, shortcut: "Ctrl+K" },
+    { key: "scheduled", label: t("sidebar.automation"), icon: <IxAutomation size={16} /> },
     // plan-282-1441（#6）：原「技能」入口改为「拓展」（插件/技能/连接器三合一）
-    { key: "skills", label: t("sidebar.extensions"), icon: <IxExtensions size={17} /> },
+    { key: "skills", label: t("sidebar.extensions"), icon: <IxExtensions size={16} /> },
   ], [t]);
 
   // Ctrl+N 新建任务
@@ -783,7 +783,7 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
 
       {/* 底部设置入口 */}
       <div className="sb-userbar">
-        <button className={`sb-user-settings${active === "settings" ? " active" : ""}`} title={t("cmd.settings")} onClick={() => onChange("settings")}><IxSettings size={17} /><span>{t("cmd.settings")}</span></button>
+        <button className={`sb-user-settings${active === "settings" ? " active" : ""}`} title={t("cmd.settings")} onClick={() => onChange("settings")}><IxSettings size={16} /><span>{t("cmd.settings")}</span></button>
         <UpdateBadge />
       </div>
 

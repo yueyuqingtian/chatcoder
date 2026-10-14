@@ -200,10 +200,16 @@ def purge_session_children(s, session_ids: list[int]) -> dict:
          "只删会话级记忆"的过滤让它们变成孤儿并阻断 sessions 删除。
     另外补齐 exec_policy_rules / scheduled_tasks / file_reviews（按 turn_id 关联）。
 
+    plan-20261014-fix4：补齐工作流 7 张表——workflow_nodes / workflow_attempts.agent_id 引用 agents.id、
+    workflow_runs.session_id 引用 sessions.id，用过工作流的会话此前永久删除必报外键错误。
+    派生集合一律用子查询（不把 id 展开成参数），大会话不会撞上 SQLite 的参数个数上限；
+    usage_records 是用量统计与首页热力图的数据源，只解除与会话的关联、不删除，删会话不改写历史用量。
+
     返回各表删除行数（供提示与测试断言）。调用方负责 commit。
     """
     from sqlalchemy import delete as _delete
     from sqlalchemy import select as _select
+    from sqlalchemy import update as _update
 
     from app.persistence.models.agent import Agent
     from app.persistence.models.audit import AuditLog
@@ -216,42 +222,69 @@ def purge_session_children(s, session_ids: list[int]) -> dict:
     from app.persistence.models.task import Artifact, Task
     from app.persistence.models.tool_call import ToolCall
     from app.persistence.models.turn import Turn
+    from app.persistence.models.usage_record import UsageRecord
+    from app.persistence.models.workflow import (
+        WorkflowAttempt,
+        WorkflowEvent,
+        WorkflowMessage,
+        WorkflowNode,
+        WorkflowPlanRevision,
+        WorkflowRun,
+        WorkflowToolCall,
+    )
 
     counts: dict[str, int] = {}
-    if not session_ids:
+    ids = sorted({int(x) for x in session_ids})
+    if not ids:
         return counts
 
     def _purge(model, *criteria) -> None:
         res = s.execute(_delete(model).where(*criteria))
         counts[model.__tablename__] = counts.get(model.__tablename__, 0) + int(res.rowcount or 0)
 
-    # 先取 turn / task id：artifacts 与 file_reviews 没有 session_id 列，只能按 id 关联清理
-    turn_ids = [int(x) for x in s.execute(
-        _select(Turn.id).where(Turn.session_id.in_(session_ids))
-    ).scalars().all()]
-    task_ids = [int(x) for x in s.execute(
-        _select(Task.id).where(Task.session_id.in_(session_ids))
-    ).scalars().all()]
+    # 分批：每批会话 id 数远低于 SQLite 参数上限
+    for start in range(0, len(ids), 400):
+        chunk = ids[start:start + 400]
+        turns_q = _select(Turn.id).where(Turn.session_id.in_(chunk))
+        tasks_q = _select(Task.id).where(Task.session_id.in_(chunk))
+        runs_q = _select(WorkflowRun.id).where(WorkflowRun.session_id.in_(chunk))
+        nodes_q = _select(WorkflowNode.id).where(WorkflowNode.run_id.in_(runs_q))
+        attempts_q = _select(WorkflowAttempt.id).where(WorkflowAttempt.node_id.in_(nodes_q))
 
-    # 1) 最底层叶子：**先删 artifacts**（引用 tasks.id；顺序错即报外键错，正是本 bug 根因）
-    if task_ids:
-        _purge(Artifact, Artifact.task_id.in_(task_ids))
-    _purge(Message, Message.session_id.in_(session_ids))
-    _purge(ToolCall, ToolCall.session_id.in_(session_ids))
-    _purge(RollbackWrite, RollbackWrite.session_id.in_(session_ids))
-    _purge(TurnSnapshot, TurnSnapshot.session_id.in_(session_ids))
-    _purge(AuditLog, AuditLog.session_id.in_(session_ids))
-    _purge(ExecPolicyRule, ExecPolicyRule.session_id.in_(session_ids))
-    _purge(ScheduledTask, ScheduledTask.session_id.in_(session_ids))
-    if turn_ids:
-        _purge(FileReview, FileReview.turn_id.in_(turn_ids))
-    # 2) 记忆：session_id 是 NOT NULL 外键——**所有**引用这些会话的行都必须删，
-    #    否则孤儿行会阻断 sessions 删除（project/global 记忆只在删除这些会话时受影响）。
-    _purge(MemoryEntry, MemoryEntry.session_id.in_(session_ids))
-    # 3) 任务与代理，最后 turns
-    _purge(Task, Task.session_id.in_(session_ids))
-    _purge(Agent, Agent.session_id.in_(session_ids))
-    _purge(Turn, Turn.session_id.in_(session_ids))
+        # 0) 工作流：工具台账 / 检查点日志 → 尝试 → 节点 → 事件与修订 → 子工作流 → 程序（均先于 agents）
+        _purge(WorkflowToolCall, WorkflowToolCall.node_id.in_(nodes_q))
+        _purge(WorkflowMessage, WorkflowMessage.attempt_id.in_(attempts_q))
+        _purge(WorkflowAttempt, WorkflowAttempt.node_id.in_(nodes_q))
+        _purge(WorkflowNode, WorkflowNode.run_id.in_(runs_q))
+        _purge(WorkflowEvent, WorkflowEvent.run_id.in_(runs_q))
+        _purge(WorkflowPlanRevision, WorkflowPlanRevision.run_id.in_(runs_q))
+        _purge(WorkflowRun, WorkflowRun.session_id.in_(chunk), WorkflowRun.parent_run_id.is_not(None))
+        _purge(WorkflowRun, WorkflowRun.session_id.in_(chunk))
+
+        # 1) 最底层叶子：**先删 artifacts**（引用 tasks.id；顺序错即报外键错，正是 plan-308-1542 根因）
+        _purge(Artifact, Artifact.task_id.in_(tasks_q))
+        _purge(Message, Message.session_id.in_(chunk))
+        _purge(ToolCall, ToolCall.session_id.in_(chunk))
+        _purge(RollbackWrite, RollbackWrite.session_id.in_(chunk))
+        _purge(TurnSnapshot, TurnSnapshot.session_id.in_(chunk))
+        _purge(AuditLog, AuditLog.session_id.in_(chunk))
+        _purge(ExecPolicyRule, ExecPolicyRule.session_id.in_(chunk))
+        _purge(ScheduledTask, ScheduledTask.session_id.in_(chunk))
+        _purge(FileReview, FileReview.turn_id.in_(turns_q))
+        # 2) 记忆：session_id 是 NOT NULL 外键——**所有**引用这些会话的行都必须删，
+        #    否则孤儿行会阻断 sessions 删除（project/global 记忆只在删除这些会话时受影响）。
+        _purge(MemoryEntry, MemoryEntry.session_id.in_(chunk))
+        # 3) 用量流水：只解除关联（保留历史用量）
+        res = s.execute(
+            _update(UsageRecord)
+            .where(UsageRecord.session_id.in_(chunk))
+            .values(session_id=None, turn_id=None, agent_id=None)
+        )
+        counts["usage_records_detached"] = counts.get("usage_records_detached", 0) + int(res.rowcount or 0)
+        # 4) 任务与代理，最后 turns
+        _purge(Task, Task.session_id.in_(chunk))
+        _purge(Agent, Agent.session_id.in_(chunk))
+        _purge(Turn, Turn.session_id.in_(chunk))
     return counts
 
 
