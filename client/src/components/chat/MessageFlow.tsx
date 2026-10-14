@@ -1269,10 +1269,18 @@ function MainMessageFlow({
 
   const subagentsByTurn = useMemo(() => {
     // plan-330-1648 M7: 透传 error——卡片/面板据此展示失败原因（不再只有一个红叉）
-    // plan-20261013-wf-order: 透传 turnId / programId——工作流节点卡据此挂靠到同轮所属的工作流卡
+    // plan-20261013-wf-order: 透传 turnId / programId / spawnMessageId——工作流节点卡据此定位到其创建位置
     const map = new Map<
       number,
-      Array<{ agentId: number; name: string; status: string; error?: string | null; turnId: number; programId: number | null }>
+      Array<{
+        agentId: number;
+        name: string;
+        status: string;
+        error?: string | null;
+        turnId: number;
+        programId: number | null;
+        spawnMessageId: number | null;
+      }>
     >();
     for (const [aid, m] of Object.entries(subagentMeta)) {
       if (m.turnId == null) continue;
@@ -1284,6 +1292,7 @@ function MainMessageFlow({
         error: m.error ?? null,
         turnId: m.turnId,
         programId: m.programId ?? m.workflow?.program_id ?? null,
+        spawnMessageId: m.spawnMessageId ?? null,
       });
       map.set(m.turnId, list);
     }

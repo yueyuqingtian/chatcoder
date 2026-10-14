@@ -2,10 +2,12 @@
  * 工作流卡与节点子代理卡按创建序固化的回归测试（plan-20261013-wf-order）。
  *
  * 纯逻辑测试（不依赖 DOM），验证：
- *   ① 时间线：工作流卡记录其工具调用所在的轮；
- *   ② 分段：常显项（工作流卡、工作流唤醒分隔线）各自成段，过程项只在常显项之间连续归段；
- *   ③ 挂靠：节点子代理挂到同轮同程序的工作流卡之后，按创建序排列，挂不到的原样交给兜底；
- *   ④ 漂移回归：内容逐步追加（节点陆续启动、唤醒、最终汇报落库）时，已渲染项的相对顺序不变。
+ *   ① 时间线：工作流卡记录其工具调用所在的轮与首条调用的 id；
+ *   ② 分段：常显项（工作流卡、工作流唤醒分隔线）各自成段，过程项只在常显项之间连续归段，
+ *      挂靠的节点卡所在条目之后紧跟挂靠段；
+ *   ③ 定位：节点子代理按派发时刻（线程首条消息 id）挂到派发前最后一个条目之后；
+ *      无派发时刻时回退为挂到同轮同程序的工作流卡之后；首条用户消息不作锚点；
+ *   ④ 漂移回归：内容逐步追加（节点陆续启动、消息陆续落库、最终汇报落库）时，已渲染项的相对顺序不变。
  *
  * 运行方式（client 目录，无测试框架，用 esbuild 打包后由 node 直接执行）：
  *   npx esbuild tests/workflow-card-order.test.ts --bundle --format=esm --platform=node \
@@ -19,7 +21,7 @@ import {
   placeWorkflowNodeCards,
   splitFlowSegments,
 } from "../src/components/chat/timeline";
-import type { TimelineEntry, TurnItem, WorkflowNodeCard } from "../src/components/chat/timeline";
+import type { FlowSegment, TimelineEntry, TurnItem, WorkflowNodeCard } from "../src/components/chat/timeline";
 import { MsgType, SenderType } from "@chatcoder/shared";
 import type { MessageOut } from "@chatcoder/shared";
 
@@ -44,13 +46,13 @@ function msg(
   };
 }
 
-/** 子代理卡片（只含挂靠所需字段）。 */
+/** 子代理卡片（只含定位所需字段）。 */
 interface Card extends WorkflowNodeCard {
   name: string;
 }
 
-function card(agentId: number, turnId: number | null, programId: number | null): Card {
-  return { agentId, name: `audit•${agentId}`, turnId, programId };
+function card(agentId: number, turnId: number | null, programId: number | null, spawnMessageId?: number): Card {
+  return { agentId, name: `audit•${agentId}`, turnId, programId, spawnMessageId: spawnMessageId ?? null };
 }
 
 /** 占位的 turn 项（只为分段 / 挂靠测试提供 kind 与必要字段）。 */
@@ -74,6 +76,25 @@ function scenario(upto: number): MessageOut[] {
   return all.slice(0, upto);
 }
 
+/** 与真实会话同形的场景：工作流卡之后，计划文字、启动文字与各次进度文字交错，节点陆续派发。
+ *  派发时刻（spawnMessageId）取节点线程首条消息的 id，它们不在主消息流中，因此 id 有间隔。 */
+const SPAWN_21 = 6;
+const SPAWN_22 = 8;
+const SPAWN_23 = 10;
+function interleaved(upto: number): MessageOut[] {
+  const all = [
+    msg(1, T, MsgType.Text, { text: "开始执行" }, SenderType.User),
+    msg(2, T, MsgType.ToolCall, { tool: "read_file", call_key: "k2", args: {} }),
+    msg(3, T, MsgType.ToolCall, { tool: "start_workflow", call_key: "k3", args: { program_id: PROGRAM } }),
+    msg(4, T, MsgType.Text, { text: "计划已生成" }),
+    msg(5, T, MsgType.Text, { text: "工作流已启动" }),
+    msg(7, T, MsgType.Text, { text: "工作流进行中" }),
+    msg(9, T, MsgType.Text, { text: "正在运行" }),
+    msg(11, T, MsgType.Text, { text: "最终汇报" }),
+  ];
+  return all.filter((m) => m.id <= upto);
+}
+
 /** 取场景 turn 的时间线项。 */
 function timelineItems(messages: MessageOut[]): TurnItem[] {
   const entries: TimelineEntry[] = buildTimeline(messages);
@@ -85,7 +106,7 @@ function timelineItems(messages: MessageOut[]): TurnItem[] {
 /**
  * 按渲染顺序输出线性键序列，与 TurnGroup 的执行段渲染规则一致：
  * 有最终汇报时只分段渲染最终汇报之前的项，最终汇报及其后的项按序直显；
- * 每个工作流卡之后紧跟其挂靠的节点子代理卡。
+ * 挂靠了节点卡的条目之后紧跟其挂靠段（节点卡）。
  */
 function renderOrder(items: TurnItem[], cards: Card[]): string[] {
   const firstUser = items.findIndex((it) => it.kind === "user");
@@ -97,23 +118,24 @@ function renderOrder(items: TurnItem[], cards: Card[]): string[] {
     }
   }
   const { attached } = placeWorkflowNodeCards(items, cards);
+  const attachedIdx = new Set(attached.keys());
   const hasProcess =
     finalIdx >= 0 && items.some((it, i) => i !== firstUser && i < finalIdx && !isOutsideProcess(it));
-  const segments = hasProcess
-    ? splitFlowSegments(items, 0, finalIdx, firstUser)
-    : splitFlowSegments(items, 0, items.length, firstUser);
 
   const order: string[] = [];
-  const emit = (index: number) => {
-    order.push(`item:${index}`);
-    for (const c of attached.get(index) ?? []) order.push(`card:${c.agentId}`);
+  const emit = (segments: FlowSegment[]) => {
+    for (const seg of segments) {
+      if (seg.kind === "sticky") order.push(`item:${seg.index}`);
+      else if (seg.kind === "attached") {
+        for (const c of attached.get(seg.index) ?? []) order.push(`card:${c.agentId}`);
+      } else for (const index of seg.indices) order.push(`item:${index}`);
+    }
   };
-  for (const seg of segments) {
-    if (seg.kind === "sticky") emit(seg.index);
-    else for (const index of seg.indices) emit(index);
-  }
   if (hasProcess) {
-    for (let i = finalIdx; i < items.length; i++) if (i !== firstUser) emit(i);
+    emit(splitFlowSegments(items, 0, finalIdx, firstUser, attachedIdx));
+    emit(splitFlowSegments(items, finalIdx, items.length, firstUser, attachedIdx));
+  } else {
+    emit(splitFlowSegments(items, 0, items.length, firstUser, attachedIdx));
   }
   return order;
 }
@@ -123,9 +145,9 @@ function test(name: string, fn: () => void) {
   cases.push([name, fn]);
 }
 
-test("时间线：工作流卡记录其工具调用所在的轮", () => {
-  const card = timelineItems(scenario(3)).find((it) => it.kind === "workflow");
-  assert.deepEqual(card, { kind: "workflow", programId: PROGRAM, turnId: T });
+test("时间线：工作流卡记录其工具调用所在的轮，以及该簇首条调用的 id", () => {
+  const cardItem = timelineItems(scenario(3)).find((it) => it.kind === "workflow");
+  assert.deepEqual(cardItem, { kind: "workflow", programId: PROGRAM, turnId: T, firstId: 2 });
 });
 
 test("分段：常显项各自成段，过程项只在常显项之间连续归段，跳过首条用户消息", () => {
@@ -138,7 +160,21 @@ test("分段：常显项各自成段，过程项只在常显项之间连续归�
   ]);
 });
 
-test("挂靠：节点卡挂到同轮同程序工作流卡之后，按创建序排列；无程序或无对应卡的原样交给兜底", () => {
+test("分段：挂靠了节点卡的条目之后紧跟挂靠段", () => {
+  const items = [item("user"), item("tools"), item("workflow"), item("text"), item("text"), item("text"), item("text")];
+  assert.deepEqual(splitFlowSegments(items, 0, 7, 0, new Set([4, 5, 6])), [
+    { kind: "process", indices: [1] },
+    { kind: "sticky", index: 2 },
+    { kind: "process", indices: [3, 4] },
+    { kind: "attached", index: 4 },
+    { kind: "process", indices: [5] },
+    { kind: "attached", index: 5 },
+    { kind: "process", indices: [6] },
+    { kind: "attached", index: 6 },
+  ]);
+});
+
+test("回退挂靠：无派发时刻时，节点卡挂到同轮、同程序工作流卡之后", () => {
   const items = [item("user"), { kind: "workflow", programId: PROGRAM, turnId: T } as TurnItem, item("text")];
   const { attached, unplaced } = placeWorkflowNodeCards(items, [
     card(23, T, PROGRAM),
@@ -151,7 +187,7 @@ test("挂靠：节点卡挂到同轮同程序工作流卡之后，按创建序�
   assert.deepEqual(unplaced.map((c) => c.agentId), [30, 31]);
 });
 
-test("挂靠：同程序多张工作流卡时同轮优先，本轮无同轮卡则取该程序的最后一张卡", () => {
+test("回退挂靠：同程序多张工作流卡时同轮优先，本轮无同轮卡则取该程序的最后一张卡", () => {
   const items = [
     { kind: "workflow", programId: PROGRAM, turnId: 10 } as TurnItem,
     item("text"),
@@ -162,8 +198,66 @@ test("挂靠：同程序多张工作流卡时同轮优先，本轮无同轮卡�
   assert.deepEqual(attached.get(2)?.map((c) => c.agentId), [22, 23]);
 });
 
-test("漂移回归：内容逐步追加（节点陆续启动、唤醒、最终汇报落库）时，已渲染项的相对顺序不变", () => {
-  // [消息条数, 已启动的节点子代理]
+test("定位：节点卡位于派发前最后一个条目之后，而不是工作流卡之后（与真实会话同形）", () => {
+  const items = timelineItems(interleaved(11));
+  const cards = [card(21, T, PROGRAM, SPAWN_21), card(22, T, PROGRAM, SPAWN_22), card(23, T, PROGRAM, SPAWN_23)];
+  assert.deepEqual(renderOrder(items, cards), [
+    "item:1",
+    "item:2",
+    "item:3",
+    "item:4",
+    "card:21",
+    "item:5",
+    "card:22",
+    "item:6",
+    "card:23",
+    "item:7",
+  ]);
+});
+
+test("定位：派发时刻早于所有条目（或只能锚定首条用户消息）时回退到工作流卡", () => {
+  const items = timelineItems(interleaved(11));
+  const { attached } = placeWorkflowNodeCards(items, [card(21, T, PROGRAM, 1)]);
+  assert.equal(attached.has(0), false, "首条用户消息不作锚点");
+  assert.deepEqual(attached.get(2)?.map((c) => c.agentId), [21]);
+});
+
+test("漂移回归：内容逐步追加（节点陆续启动、消息陆续落库、最终汇报落库）时，已渲染项的相对顺序不变", () => {
+  // [已落库消息的最大 id, 已启动的节点子代理]
+  const steps: Array<[number, Card[]]> = [
+    [5, []],
+    [5, [card(21, T, PROGRAM, SPAWN_21)]],
+    [7, [card(21, T, PROGRAM, SPAWN_21), card(22, T, PROGRAM, SPAWN_22)]],
+    [9, [card(21, T, PROGRAM, SPAWN_21), card(22, T, PROGRAM, SPAWN_22), card(23, T, PROGRAM, SPAWN_23)]],
+    [11, [card(21, T, PROGRAM, SPAWN_21), card(22, T, PROGRAM, SPAWN_22), card(23, T, PROGRAM, SPAWN_23)]],
+  ];
+  let prev: string[] | null = null;
+  let last: string[] = [];
+  for (const [upto, cards] of steps) {
+    const order = renderOrder(timelineItems(interleaved(upto)), cards);
+    if (prev) {
+      const kept = order.filter((k) => prev!.includes(k));
+      assert.deepEqual(kept, prev, `消息 id ≤ ${upto} 时既有项的相对顺序被改变`);
+    }
+    prev = order;
+    last = order;
+  }
+  assert.deepEqual(last, [
+    "item:1",
+    "item:2",
+    "item:3",
+    "item:4",
+    "card:21",
+    "item:5",
+    "card:22",
+    "item:6",
+    "card:23",
+    "item:7",
+  ]);
+});
+
+test("漂移回归（旧数据回退）：无派发时刻时，最终汇报落库前后工作流卡与节点卡的相对顺序不变", () => {
+  // [消息条数, 已启动的节点子代理]（无派发时刻，回退到工作流卡之后）
   const steps: Array<[number, number[]]> = [
     [3, []],
     [3, [21]],
@@ -184,7 +278,6 @@ test("漂移回归：内容逐步追加（节点陆续启动、唤醒、最终�
     prev = order;
     last = order;
   }
-  // 创建序：工作流卡 → 其节点卡（按子代理创建序）→ 已启动文字 → 唤醒 → 工具 → 最终汇报
   assert.deepEqual(last, [
     "item:1",
     "item:2",

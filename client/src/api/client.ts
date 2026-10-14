@@ -801,6 +801,8 @@ export const api = {
       token_usage?: number; files_count?: number;
       /** 工作流节点的子代理：节点信息（普通子代理为空） */
       workflow?: WorkflowNodeBrief | null;
+      /** 工作流节点的子代理：派发时刻（线程首条消息 id），主消息流据此定位节点卡（普通子代理为空） */
+      spawn_message_id?: number | null;
     }>>(`/turns/sessions/${sessionId}/subagents`),
   listSessionTasks: (sessionId: number) => get<TaskOut[]>(`/turns/sessions/${sessionId}/tasks`),
   /** v38 (plan-482): 确认/取消方案文档（不再涉及 group/steps）。 */
