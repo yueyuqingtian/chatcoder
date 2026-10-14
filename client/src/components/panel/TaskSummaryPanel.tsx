@@ -1,6 +1,6 @@
 /** 摘要（plan-128-518 重做）：四个固定模块，始终显示，不做动态增删。
  *
- *  ① 进度   —— 一行总览（状态 + x/y + 细进度条）+ 步骤列表；方案待确认的「确认执行 / 停止」、目标行也在这里；
+ *  ① 进度   —— 状态行（图标 + 状态 + 百分比）+ 细进度条 + 步骤列表；方案待确认的「确认执行 / 停止」、目标行也在这里；
  *  ② 产物   —— 本会话产出的文件（点击在文件面板打开），只读展示：不在这里做审核、回滚（那些操作留在消息流的改动条里）；
  *  ③ 子代理 —— 本会话派出的子代理（运行中置顶），点击打开其详情标签；
  *  ④ 拓展   —— 本会话用到的技能 / 插件 / 连接器（来自用户引用与模型调用）。
@@ -25,8 +25,12 @@ import { StatusIcon, normalizeStatus, type StatusKind } from "../iconkit/StatusI
 
 /** plan-75-334 阶段3：隐藏期的消息占位——稳定空引用，selector 结果不变 ⇒ 不触发重渲染。 */
 const EMPTY_MESSAGES: never[] = [];
+/** 续接清单每一项的备注（taskProgress 写入）。总览行已说明「待续接 · N 项」，逐行重复这两个字只是噪音，
+ *  因此行上不展示，但仍用它识别续接态（plan-20261014-summary）。 */
+const CARRIED_NOTE = "待续接";
 
-/** 模块卡片：整条表头可点折叠；箭头占固定槽位，折叠只转角度，不挤标题 */
+/** 模块卡片：整条表头可点折叠。计数与箭头收在表头右侧（计数用统一徽标，与拓展行的计数同款），
+ *  折叠只转角度，不挤标题（plan-20261014-summary） */
 function SummaryCard({ id, title, icon, count, children }: {
   id: string;
   title: string;
@@ -43,8 +47,10 @@ function SummaryCard({ id, title, icon, count, children }: {
       <button type="button" className="ts-card-head" aria-expanded={!folded} onClick={() => toggle(key)}>
         <span className="ts-card-ic">{icon}</span>
         <span className="ts-card-title">{title}</span>
-        {count != null && <span className="ts-card-count">{count}</span>}
-        <span className="ts-chev" aria-hidden><IconChevronDown size={14} /></span>
+        <span className="ts-card-end">
+          {count != null && <Badge size="sm" count>{count}</Badge>}
+          <span className="ts-chev" aria-hidden><IconChevronDown size={14} /></span>
+        </span>
       </button>
       <Collapse open={!folded}><div className="ts-card-body">{children}</div></Collapse>
     </section>
@@ -175,17 +181,22 @@ export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
 
   const goalActive = !!session && session.goal_status === "active" && !!session.goal_text;
 
-  /** 总览行：回答「现在怎样」 */
-  const head = useMemo<{ status: StatusKind; title: string }>(() => {
-    if (hasPendingPlan) return { status: "paused", title: "等待确认方案" };
+  /** 总览行：回答「现在怎样」。标题之外的说明只在需要时给出（空闲 / 无步骤的执行中 / 待确认），
+   *  避免每种状态都挤一段文字（plan-20261014-summary） */
+  const head = useMemo<{ status: StatusKind; title: string; hint?: string }>(() => {
+    if (hasPendingPlan) return { status: "paused", title: "等待确认方案", hint: "确认后按方案执行，或停止这次任务。" };
     if (isRunning || workflowRunning || progress.phase === "running") {
-      return { status: "running", title: !isRunning && workflowRunning ? "工作流执行中" : "执行中" };
+      return {
+        status: "running",
+        title: !isRunning && workflowRunning ? "工作流执行中" : "执行中",
+        hint: progressRows.length === 0 ? "正在执行，步骤会陆续出现在这里。" : undefined,
+      };
     }
-    if (progress.rows.some((r) => r.note === "待续接")) return { status: "paused", title: `待续接 · ${progress.unfinished} 项` };
+    if (progressRows.some((r) => r.note === CARRIED_NOTE)) return { status: "paused", title: `待续接 · ${progress.unfinished} 项` };
     if (progress.phase === "interrupted") return { status: "paused", title: `已停止 · ${progress.unfinished} 项未完成` };
     if (progressRows.length > 0 && progressDone === progressRows.length) return { status: "done", title: "已完成" };
-    return { status: "pending", title: "空闲" };
-  }, [hasPendingPlan, progress.phase, progress.unfinished, isRunning, workflowRunning, progressRows.length, progressDone]);
+    return { status: "pending", title: "空闲", hint: "布置任务后，这里会显示执行步骤。" };
+  }, [hasPendingPlan, progress.phase, progress.unfinished, isRunning, workflowRunning, progressRows, progressDone]);
 
   const ratio = progressRows.length > 0 ? progressDone / progressRows.length : 0;
 
@@ -200,34 +211,39 @@ export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
             <span className="ts-row-note">{`第 ${session!.goal_turns_used ?? 0} 轮`}</span>
           </div>
         )}
-        {/* plan-128-518：总览行不再放状态图标——下方进行中的步骤已经有一个转圈，两个同时转会重复。状态用文字扩表达。 */}
-        <div className="ts-overview">
-          <span className={`ts-overview-title is-${head.status}`}>{head.title}</span>
-          {progressRows.length > 0 && <span className="ts-overview-note">{Math.round(ratio * 100)}%</span>}
-        </div>
-        {progressRows.length > 0 ? (
-          <>
-            <div className="ts-bar" role="progressbar" aria-valuemin={0} aria-valuemax={progressRows.length} aria-valuenow={progressDone} aria-label="任务进度">
+        {/* 进度组：状态行与进度条同属一组，步骤列表在其下（plan-20261014-summary）。
+         *  执行中的总览用静态圆点——步骤行已有转圈，总览再转会重复（plan-128-518 的约定）。 */}
+        <div className="ts-progress">
+          <div className="ts-status">
+            <span className="ts-status-lead">
+              {head.status === "running" ? <span className="ts-status-dot" aria-hidden /> : <StatusIcon status={head.status} size={14} />}
+            </span>
+            <span className={`ts-status-title is-${head.status}`}>{head.title}</span>
+            {progressRows.length > 0 && <span className="ts-status-note">{Math.round(ratio * 100)}%</span>}
+            {head.hint && <p className="ts-status-hint">{head.hint}</p>}
+          </div>
+          {progressRows.length > 0 && (
+            <div className="ts-bar" data-tone={head.status} role="progressbar" aria-valuemin={0} aria-valuemax={progressRows.length} aria-valuenow={progressDone} aria-label="任务进度">
               <span className="ts-bar-fill" style={{ ["--ratio" as string]: ratio }} />
             </div>
-            <div className="ts-rows">
-              {progressRows.map((row, i) => (
-                <button
-                  key={`${row.key}-${i}`}
-                  type="button"
-                  className={`ts-row is-${row.status}`}
-                  disabled={row.agentId == null}
-                  onClick={() => { if (row.agentId != null) useChatStore.getState().requestScrollTo({ threadId: row.agentId }); }}
-                >
-                  <span className="ts-row-lead"><StatusIcon status={row.status} size={15} /></span>
-                  <span className="ts-row-title">{row.title}</span>
-                  {row.note && <span className="ts-row-note">{row.note}</span>}
-                </button>
-              ))}
-            </div>
-          </>
-        ) : (
-          <p className="ts-empty">布置任务后，这里会显示执行步骤。</p>
+          )}
+        </div>
+        {progressRows.length > 0 && (
+          <div className="ts-rows">
+            {progressRows.map((row, i) => (
+              <button
+                key={`${row.key}-${i}`}
+                type="button"
+                className={`ts-row is-${row.status}`}
+                disabled={row.agentId == null}
+                onClick={() => { if (row.agentId != null) useChatStore.getState().requestScrollTo({ threadId: row.agentId }); }}
+              >
+                <span className="ts-row-lead"><StatusIcon status={row.status} size={14} /></span>
+                <span className="ts-row-title">{row.title}</span>
+                {row.note && row.note !== CARRIED_NOTE && <span className="ts-row-note">{row.note}</span>}
+              </button>
+            ))}
+          </div>
         )}
         {hasPendingPlan && (
           <div className="ts-plan-actions">
@@ -244,7 +260,7 @@ export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
             {productFiles.map((path) => (
               <Tooltip key={path} content={path} side="top">
                 <button type="button" className="ts-row" onClick={() => openFile(path)}>
-                  <span className="ts-row-lead"><FileIcon name={path} size={16} /></span>
+                  <span className="ts-row-lead"><FileIcon name={path} size={14} /></span>
                   <span className="ts-row-title">{baseName(path)}</span>
                 </button>
               </Tooltip>
@@ -266,7 +282,7 @@ export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
           <div className="ts-rows">
             {subagents.map((r) => (
               <button key={r.id} type="button" className={`ts-row is-${r.status}`} onClick={() => openSubagent(r.id, r.meta.name)}>
-                <span className="ts-row-lead"><StatusIcon status={r.status} size={15} /></span>
+                <span className="ts-row-lead"><StatusIcon status={r.status} size={14} /></span>
                 <span className="ts-row-title">
                   {r.meta.workflow ? `工作流 · ${r.meta.workflow.node_title}` : r.meta.name}
                 </span>

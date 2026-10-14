@@ -26,6 +26,7 @@
   width: 100%;
   max-width: var(--content-max-w);
   min-height: 100%;
+  margin: 0 auto; /* 水平居中：.es-hero 是横向 flex，缺这一句时整组贴左缘，与居中的输入框错开 */
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -225,7 +226,7 @@
  *          .es-note-card 负责 3D 俯仰（rotateY / rotateX），指针靠上 / 靠下时纸面微微前倾后仰。
  * 后两层的变量由弹簧逐帧写入，不加 transition。 */
 /* 浮签挂在 body 下（BadgeHero 用 portal），fixed 定位，不被首页滚动容器裁切；
-   位置由 BadgeHero 计算：恒在徽章上方（上方空间由首页预留），水平钳制在首页可视区内。
+   位置由 BadgeHero 计算：恒在徽章上方（上方空间由首页预留，放不下则整张不显示），水平钳制在首页可视区内。
    隐藏时仍占位（visibility），让定位能量到真实尺寸。 */
 .es-note {
   position: fixed;

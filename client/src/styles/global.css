@@ -4912,8 +4912,10 @@ body.maximized .nav-cluster { padding-top: 8px; padding-left: 16px; height: var(
    上方留 8px（列内 4px 内距 + 4px 外距，与顶部导航图标拉开 16px），下方留 16px 再接首个分组标题，上下对称。 */
 .settings-sidebar .sb-back-item { display: flex; align-items: center; gap: 10px; width: 100%; height: 34px; margin: 4px 0 16px; padding: 0 10px; border-radius: var(--r-md); font-size: var(--sidebar-fs, 14px); color: var(--text-2); cursor: pointer; transition: background var(--dur-fast), color var(--dur-fast); }
 .settings-sidebar .sb-back-icon { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 22px; height: 22px; }
-/* 首个分组标题紧接返回行：去掉标题自身的上内距，间距只由返回行的下外距决定 */
-.settings-sidebar .sb-list > .sb-section-group:first-child > .sb-section-label { padding-top: 0; }
+/* 首个分组标题紧接返回行：去掉标题自身的上内距，间距只由返回行的下外距决定。
+   选择器用相邻兄弟而非 :first-child：返回行是 .sb-list 的首个子元素，:first-child 永远不会命中分组，
+   标题会多出 10px 上内距，返回行到标题文字的间距变成 26px，与上方 16px 不对称。 */
+.settings-sidebar .sb-back-item + .sb-section-group > .sb-section-label { padding-top: 0; }
 /* plan-26-126 P7：按钮底色与既有导航项**同一套语言**（不再用 --bg-hover）。
  *  问题（用户实测）：鼠标点过该按钮后，按钮上残留一块**明显的灰底**。
  *  根因有两条，缺一不可：

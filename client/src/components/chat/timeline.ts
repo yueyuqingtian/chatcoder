@@ -61,7 +61,8 @@ export type TurnItem =
   | { kind: "user"; msg: MessageOut }
   | { kind: "thinking"; msg: MessageOut }
   | { kind: "text"; msg: MessageOut }
-  | { kind: "tools"; nodes: ToolNode[] }
+  /** firstId：工具簇首条调用消息的 id，用于按创建先后定位节点子代理卡（见 firstIdOf） */
+  | { kind: "tools"; nodes: ToolNode[]; firstId?: number }
   | { kind: "subagent"; msg: MessageOut }
   | { kind: "summary"; msg: MessageOut }
   | { kind: "error"; msg: MessageOut }
@@ -75,8 +76,9 @@ export type TurnItem =
   | { kind: "workflow-wakeup"; msg: MessageOut }
   /** plan-865: 计划预览/确认消息——按数据库时间线位置渲染计划卡 */
   | { kind: "plan"; msg: MessageOut }
-  /** 工作流卡：由 plan / start / resume 工作流工具的调用推导出程序编号，卡片状态来自工作流 store */
-  | { kind: "workflow"; programId: number };
+  /** 工作流卡：由 plan / start / resume 工作流工具的调用推导出程序编号（turnId 为该工具调用所在轮，
+   *  节点子代理卡据此挂靠），卡片状态来自工作流 store */
+  | { kind: "workflow"; programId: number; turnId: number | null; firstId?: number };
 
 export type TimelineEntry =
   /** turnIds：并入续跑轮后的全部轮 id（首个即 turnId）；未并入时缺省，见 createRoundMerger */
@@ -89,6 +91,117 @@ export const SYSTEM_CONTINUATION_KINDS: ReadonlySet<string> = new Set([
   "subagent-wakeup",
   "goal-continuation",
 ]);
+
+/** 常显项（不进入「工作过程」折叠）：工作流卡与工作流唤醒分隔线——进度、暂停 / 继续需要始终可见。 */
+export function isOutsideProcess(item: TurnItem): boolean {
+  return item.kind === "workflow" || item.kind === "workflow-wakeup";
+}
+
+/** 执行段的切分结果（见 splitFlowSegments）。 */
+export type FlowSegment =
+  /** 常显项：原位独立渲染（工作流卡、工作流唤醒分隔线） */
+  | { kind: "sticky"; index: number }
+  /** 过程段：两块常显项之间的连续过程项，整段装入可折叠容器 */
+  | { kind: "process"; indices: number[] }
+  /** 挂靠段：该项挂靠的节点子代理卡（常显，紧随该项之后；该项的尾部兜底卡与操作行一并渲染在此段） */
+  | { kind: "attached"; index: number };
+
+/** 按时间线先后切分 [from, to) 内的 AI 项，跳过 skipIndex（turn 顶部单独渲染的首条用户消息）。
+ *
+ *  段的先后即时间线先后：常显项各自成段，过程段只夹在它们之间。折叠 / 展开过程段
+ *  只改变段内高度，不改变任何项相对于其它段的位置——这是工作流卡不随最终汇报落库而漂移的前提。
+ *  挂靠了节点子代理卡的项之后紧跟一个挂靠段，使这些卡片同样原位留在段间。 */
+export function splitFlowSegments(
+  items: readonly TurnItem[],
+  from: number,
+  to: number,
+  skipIndex: number,
+  attached?: ReadonlySet<number>,
+): FlowSegment[] {
+  const segments: FlowSegment[] = [];
+  for (let index = from; index < to; index++) {
+    if (index === skipIndex) continue;
+    if (isOutsideProcess(items[index])) {
+      segments.push({ kind: "sticky", index });
+    } else {
+      const last = segments[segments.length - 1];
+      if (last && last.kind === "process") last.indices.push(index);
+      else segments.push({ kind: "process", indices: [index] });
+    }
+    if (attached?.has(index)) segments.push({ kind: "attached", index });
+  }
+  return segments;
+}
+
+/** 可挂靠到消息流的工作流节点子代理卡片（SubagentMetaLite 的必要字段）。 */
+export interface WorkflowNodeCard {
+  agentId: number;
+  turnId?: number | null;
+  programId?: number | null;
+  /** 派发时刻：线程首条消息的 id（见 placeWorkflowNodeCards） */
+  spawnMessageId?: number | null;
+}
+
+/** 条目的起始消息 id，即创建先后的依据：消息类条目取其消息 id；工具簇与工作流卡取其首条工具调用的 id。 */
+export function firstIdOf(item: TurnItem): number | null {
+  if (item.kind === "tools" || item.kind === "workflow") return item.firstId ?? null;
+  return "msg" in item && item.msg ? Number(item.msg.id) : null;
+}
+
+/** 工作流节点子代理的落位（plan-20261013-wf-order）。
+ *
+ *  节点子代理不经 spawn_subagent 工具调用，消息流里没有它的消息。它的创建时刻记为派发时刻
+ *  spawnMessageId（线程首条消息的 id）：派发前的主线程消息都已落库（见 _spawn 的 flush 屏障），
+ *  其 id 均小于它，派发后产生的消息 id 均大于它。因此：
+ *  ① 有派发时刻：挂到派发前最后一个条目之后，即按消息 id 定位的创建位置（首条用户消息不作锚点）；
+ *  ② 无派发时刻（旧数据）：挂到同轮、同程序工作流卡之后，同轮优先，否则取该程序在本轮的最后一张卡；
+ *  ③ 都找不到的原样放入 unplaced，由调用方兜底。
+ *  同一锚点下按子代理创建序（agentId 升序）排列。attached 以 items 下标为键。 */
+export function placeWorkflowNodeCards<T extends WorkflowNodeCard>(
+  items: readonly TurnItem[],
+  cards: readonly T[],
+): { attached: Map<number, T[]>; unplaced: T[] } {
+  const firstUser = items.findIndex((it) => it.kind === "user");
+  const cardItemsByProgram = new Map<number, Array<{ index: number; turnId: number | null }>>();
+  items.forEach((item, index) => {
+    if (item.kind !== "workflow") return;
+    const list = cardItemsByProgram.get(item.programId) ?? [];
+    list.push({ index, turnId: item.turnId });
+    cardItemsByProgram.set(item.programId, list);
+  });
+
+  const attached = new Map<number, T[]>();
+  const place = (index: number, card: T) => {
+    const list = attached.get(index) ?? [];
+    list.push(card);
+    attached.set(index, list);
+  };
+  const unplaced: T[] = [];
+  for (const card of [...cards].sort((a, b) => a.agentId - b.agentId)) {
+    const spawn = card.spawnMessageId;
+    if (spawn != null) {
+      let anchor = -1;
+      for (let i = 0; i < items.length; i++) {
+        if (i === firstUser) continue;
+        const id = firstIdOf(items[i]);
+        if (id != null && id <= spawn) anchor = i;
+      }
+      if (anchor >= 0) {
+        place(anchor, card);
+        continue;
+      }
+    }
+    const candidates = card.programId != null ? cardItemsByProgram.get(card.programId) : undefined;
+    if (!candidates || candidates.length === 0) {
+      unplaced.push(card);
+      continue;
+    }
+    const sameTurn = candidates.filter((c) => c.turnId === (card.turnId ?? null));
+    const pool = sameTurn.length > 0 ? sameTurn : candidates;
+    place(pool[pool.length - 1].index, card);
+  }
+  return { attached, unplaced };
+}
 
 type TurnEntry = Extract<TimelineEntry, { kind: "turn" }>;
 
@@ -545,16 +658,20 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
   const resultsByKey = new Map<string, MessageOut>();
   // 同一轮内同一程序只出一张卡：plan 与 start 常被助手文字隔开，分属两次 flush
   const cardedPrograms = new Set<number>();
+  // 本段消息所属轮（工作流卡记下它，节点子代理卡据此挂靠到同轮的卡）
+  const turnId = msgs[0]?.turn_id ?? null;
 
   // flush 待处理工具调用为一个 tools item（cluster）
   const flushTools = () => {
     if (pendingTools.length > 0) {
       const nodes = buildToolTree(pendingTools, resultsByKey);
-      items.push({ kind: "tools", nodes });
+      // 簇的创建位置取其首条调用消息（工作流卡与节点子代理卡的定位依据，见 firstIdOf）
+      const firstId = Number(pendingTools[0].id);
+      items.push({ kind: "tools", nodes, firstId });
       for (const programId of workflowProgramsOf(pendingTools, resultsByKey)) {
         if (cardedPrograms.has(programId)) continue;
         cardedPrograms.add(programId);
-        items.push({ kind: "workflow", programId });
+        items.push({ kind: "workflow", programId, turnId, firstId });
       }
       pendingTools.length = 0;
     }

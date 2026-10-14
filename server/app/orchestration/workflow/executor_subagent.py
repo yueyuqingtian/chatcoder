@@ -313,6 +313,11 @@ class SubagentNodeExecutor:
 
             schemas = [*schemas, REQUEST_SCOPE_SCHEMA]
 
+        # 派发时刻的锚点是线程首条消息的 id（见 agent_loop._agent_started_extra）：先把已入队的主线程消息
+        # 全部落库（屏障），使派发前产生的消息 id 都小于它，前端据此把节点卡放在派发前最后一条消息之后。
+        from app.persistence.write_behind import write_behind as _write_behind
+
+        await _write_behind.flush_all()
         async with async_session_factory() as db:
             agent_row = await db.get(AgentRow, agent_id)
             task_row = await db.get(TaskRow, task_id)

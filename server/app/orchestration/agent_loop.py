@@ -643,6 +643,48 @@ def _desktop_obs_scene(tools: list, write_tools: frozenset) -> str:
     return "after_action" if name in write_tools else "after_perceive"
 
 
+async def _agent_started_extra(agent) -> dict:
+    """agent.started 的附加字段：工作流节点子代理带上所属程序编号与派发时刻。
+
+    节点子代理不经 spawn_subagent 工具调用落库，前端无法按消息序定位其卡片：
+    - workflow_program_id：所属程序，卡片挂到同轮该程序的工作流卡附近；
+    - spawn_message_id：派发时刻 = 线程首条消息（任务说明）的 id。派发前的主线程消息都已落库（见
+      _spawn 的 flush 屏障），其 id 均小于它；卡片据此放在派发前最后一条消息之后。
+    两者都由数据库事实推导，实时事件与 REST 回填（子代理列表）结果一致。
+    只读查询，失败只记日志，绝不阻塞子代理启动。
+    """
+    node_id = getattr(agent, "workflow_node_id", None)
+    if not node_id:
+        return {}
+    extra: dict = {}
+    try:
+        from app.orchestration.workflow import store as workflow_store
+
+        brief = (await workflow_store.node_briefs([int(node_id)])).get(int(node_id))
+        program_id = brief.get("program_id") if brief else None
+        if program_id is not None:
+            extra["workflow_program_id"] = int(program_id)
+    except Exception:
+        logger.debug("[agent] 工作流节点程序编号解析失败(非阻塞) node=%s", node_id, exc_info=True)
+    agent_id = getattr(agent, "id", None)
+    if agent_id is not None:
+        try:
+            from sqlalchemy import func, select
+
+            from app.persistence.database import async_session_factory
+            from app.persistence.models.message import Message
+
+            async with async_session_factory() as s:
+                spawn_id = (
+                    await s.execute(select(func.min(Message.id)).where(Message.thread_id == int(agent_id)))
+                ).scalar()
+            if spawn_id is not None:
+                extra["spawn_message_id"] = int(spawn_id)
+        except Exception:
+            logger.debug("[agent] 派发时刻解析失败(非阻塞) agent=%s", agent_id, exc_info=True)
+    return extra
+
+
 async def run_agent_loop(
     db: AsyncSession,
     *,
@@ -824,7 +866,7 @@ async def run_agent_loop(
     await broadcast(session_id, {
         "event": "agent.started",
         "payload": {"agent_id": agent_id, "kind": agent_kind, "name": agent_name,
-                    "turn_id": turn_id},
+                    "turn_id": turn_id, **(await _agent_started_extra(agent))},
     })
     await broadcast(session_id, {
         "event": "agent.updated",

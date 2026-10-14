@@ -253,14 +253,6 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
     if (currentRunning && currentSessionId != null) ids.add(currentSessionId);
     return ids;
   }, [wfBusyIds, currentRunning, currentSessionId]);
-  // 项目行运行指示：项目下任一会话执行中即亮起（项目折叠时仍可见，plan-282-1530）
-  const busyProjectIds = useMemo(() => {
-    const ids = new Set<number>();
-    for (const s of sessions) {
-      if (s.project_id != null && sessionBusy(s, busyIds)) ids.add(s.project_id);
-    }
-    return ids;
-  }, [sessions, busyIds]);
   // plan-31-151 S3：侧栏头部拖拽/双击改由系统 -webkit-app-region:drag 处理（见 global.css），
   //   自研 useWindowDrag 已随 frame:false 伪最大化架构一并移除。
 
@@ -614,8 +606,6 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
         <span className="sb-project-name" title={isWorktree ? `${p.worktree_branch || ""} · ${p.path}` : p.path}>
           {p.name || shortPath(p.path)}
         </span>
-        {/* 运行指示固定占位（非运行透明），与会话行同源；项目折叠时此处仍可见 */}
-        <span className={"sb-session-pulse sb-project-pulse" + (busyProjectIds.has(p.id) ? " on" : "")} aria-hidden="true" />
         {isWorktree && <span className="sb-worktree-tag">{t("titlebar.worktree")}</span>}
         <span
           className="sb-project-actions sb-project-new"
