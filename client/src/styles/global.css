@@ -322,76 +322,6 @@ body.maximized .titlebar { padding-top: 8px; padding-left: 16px; padding-right: 
 .sb-user-settings { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; height: 30px; padding: 0 8px; border-radius: var(--r-ctl); color: var(--text-2); font-size: 13px; text-align: left; }
 .sb-user-settings:hover, .sb-user-settings.active { background: var(--sidebar-hover); color: var(--text-1); }
 .sb-user-settings svg { flex-shrink: 0; }
-/* plan-246-1236 S4: 更新徽标——描边圆钮 + 环形进度 + hover changelog */
-.sb-update-wrap { position: relative; flex-shrink: 0; display: flex; align-items: center; }
-.sb-update-btn {
-  display: flex; align-items: center; justify-content: center;
-  width: 26px; height: 26px; padding: 0; flex-shrink: 0;
-  border: 1px solid color-mix(in srgb, #1e7a3c 70%, transparent);
-  border-radius: 50%;
-  background: color-mix(in srgb, #1e7a3c 18%, transparent);
-  color: #1e7a3c; cursor: pointer;
-  transition: background var(--dur-3), border-color var(--dur-3), color var(--dur-3);
-}
-.sb-update-btn:hover { background: color-mix(in srgb, #1e7a3c 28%, transparent); border-color: #1e7a3c; }
-.sb-update-btn:disabled { cursor: default; }
-.sb-update-btn svg { display: block; }
-.sb-update-btn-progress {
-  width: auto; min-width: 26px; padding: 0 6px; gap: 4px; border-radius: 999px;
-  background: color-mix(in srgb, #1e7a3c 88%, transparent); color: #fff; border-color: transparent;
-}
-.sb-update-btn-progress:hover { background: color-mix(in srgb, #1e7a3c 88%, transparent); }
-.sb-update-ring { display: block; flex-shrink: 0; }
-.sb-update-progress { font-size: 10px; font-weight: 600; color: #fff; white-space: nowrap; }
-.sb-update-restart {
-  display: flex; align-items: center; justify-content: center;
-  height: 26px; padding: 0 12px; flex-shrink: 0; gap: 4px;
-  border: none; border-radius: 999px;
-  background: #1e7a3c; color: #fff;
-  font-size: 12px; font-weight: 600; cursor: pointer;
-  transition: background var(--dur-3);
-}
-.sb-update-restart:hover { background: #268c47; }
-.sb-update-restart svg { display: block; }
-.sidebar.collapsed .sb-update-restart { padding: 0; width: 26px; border-radius: var(--r-ctl); }
-/* plan-246-1236 S4 / 重构: 更新 changelog 悬浮卡。
- * Portal 渲染到 body + fixed 定位（坐标由 UpdateBadge 按按钮 rect 计算）：
- * 此前是侧栏内绝对定位，被 .sidebar 的 overflow:hidden 裁剪、
- * 且绘制层级低于右侧面板，表现为弹窗被中间面板遮挡。显隐由 React hover 态驱动。
- *
- * plan-283-1428：浮窗自身可接收鼠标——用户可以移入浮窗滚动查看完整更新说明
- * （此前 pointer-events:none + 内容超出被裁掉，无法阅读全文）。为此浮窗外包一层
- * 透明 hover 容器 .sb-update-notes-hover，左侧 padding 覆盖浮窗与按钮之间的空隙，
- * 鼠标穿过空隙时不会先触发按钮 mouseleave 而误关闭。 */
-.sb-update-notes-hover {
-  position: fixed;
-  z-index: 1200;
-  padding-left: 12px;
-  /* 容器只做命中区，间隙自身不绘制任何像素 */
-  background: transparent;
-}
-.sb-update-notes {
-  position: relative;
-  width: 420px; max-width: min(420px, calc(100vw - 16px));
-  /* plan-270-1358: 视觉对齐通用弹窗（Modal）：圆角/阴影 token 统一 */
-  border-radius: var(--r-lg);
-  background: var(--color-popover);
-  border: 1px solid var(--border);
-  box-shadow: var(--shadow-xl);
-  overflow: hidden;
-  animation: sb-notes-in var(--dur-fast) var(--ease-out);
-}
-@keyframes sb-notes-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
-.sb-update-notes-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--bg-elevated); }
-.sb-update-notes-badge { font-size: 9px; font-weight: 700; letter-spacing: 0.08em; color: #fff; background: var(--accent); border-radius: var(--r-sm); padding: 2px 5px; line-height: 1.2; }
-.sb-update-notes-ver { font-size: 13px; font-weight: 700; color: var(--text-1); }
-.sb-update-notes-label { margin-left: auto; font-size: 12px; color: var(--text-3); }
-/* plan-64-294：操作提示行——原本是按钮上的原生 title，与浮窗同时弹出会叠两个提示框，
-   现并入浮窗内部（head 之下、正文之上）。 */
-.sb-update-notes-hint { padding: 8px 14px 0; font-size: 11px; color: var(--text-3); }
-/* 正文区：可滚轮读完全文（配合浮窗自身接收鼠标事件） */
-.sb-update-notes-body { max-height: 380px; overflow-y: auto; overscroll-behavior: contain; padding: 10px 14px 12px; scrollbar-gutter: stable; }
-.sb-update-notes-empty { padding: 14px; font-size: 12px; color: var(--text-3); }
 .sidebar.collapsed .sb-user-settings { justify-content: center; padding: 0; }
 .sb-user { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .sb-avatar { width: 24px; height: 24px; border-radius: 50%; background: linear-gradient(135deg, #d9a05b, #b4622d); color: #fff; font-size: 11px; font-weight: 600; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
@@ -5231,55 +5161,6 @@ body.maximized .nav-cluster { padding-top: 8px; padding-left: 16px; height: var(
 .mem-detail-text { min-height: 130px; width: 100%; }
 .mem-detail-meta { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--text-3); }
 .mem-detail-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; border-top: 1px solid var(--border); padding-top: 12px; }
-/* ══ S7（plan-41-197）：关于页更新历史——可点击版本行 + 条目数摘要 + 分段加载 ══ */
-.upd-history-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; padding: 8px 10px; border: none; background: transparent; border-radius: var(--r-md); cursor: pointer; text-align: left; transition: background var(--dur-2) var(--ease-standard); }
-.upd-history-head:hover { background: var(--bg-hover); }
-.upd-history-head.open { background: var(--bg-hover); }
-.upd-history-head .upd-history-version { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
-.upd-history-meta { display: inline-flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-3); flex-shrink: 0; }
-.upd-history-more { display: flex; margin: 8px auto 4px; }
-
-/* ══ plan-230-1144 M4.2: 软件更新（进度条 / 更新说明 / 更新历史）══ */
-.upd-progress-wrap { padding: 8px 16px 12px; }
-.upd-progress-bar { height: 6px; border-radius: 999px; background: var(--surface); overflow: hidden; }
-.upd-progress-fill { height: 100%; border-radius: 999px; background: var(--accent); transition: width var(--dur-med) var(--ease-out); }
-.upd-progress-meta { display: flex; gap: 12px; margin-top: 6px; font-size: 11px; color: var(--text-3); }
-/* plan-283-1428：设置页两处更新内容展示（折叠区 / 更新历史）统一走 .release-notes 排版。
- * 此前这里的 h1/h2/h3 与 ul/ol 覆写、以及内层 max-height+overflow 会造成：
- *  - 与 .release-notes 规则互相打架（后者特异性更高，旧覆写实际失效但仍误导）；
- *  - 设置页本身可滚动，内层再滚动形成滚动嵌套（滚到卡片里就出不来）。
- * 现只保留容器职责（内边距/边框/底色），排版全部交给 .release-notes。 */
-.upd-notes { padding: 0 16px 12px; }
-.upd-notes-head { display: flex; align-items: center; gap: 6px; border: none; background: transparent; color: var(--text-2); font-size: 12px; font-weight: 600; cursor: pointer; padding: 4px 0; }
-.upd-notes-head:hover { color: var(--text-1); }
-.upd-notes-caret { transition: transform var(--dur-fast) var(--ease-out); }
-.upd-notes-caret.open { transform: rotate(180deg); }
-.upd-notes-body { margin-top: 6px; padding: 10px 12px; border-radius: var(--r-sm); border: 1px solid var(--border); background: var(--surface); }
-.upd-history-row { border-top: 1px solid var(--border); }
-.upd-history { padding: 4px 16px 14px; display: flex; flex-direction: column; gap: 10px; }
-/* plan-270-1358: 更新历史不使用左侧竖线——条目以上分隔线区分（首条除外） */
-.upd-history-item { border-top: 1px solid var(--border); padding-top: 10px; }
-.upd-history-item:first-child { border-top: none; padding-top: 0; }
-.upd-history-version { font-size: 12px; font-weight: 600; color: var(--text-1); display: flex; align-items: baseline; gap: 8px; }
-.upd-history-cur { font-size: 10px; font-weight: 400; color: var(--accent); border: 1px solid var(--accent); border-radius: var(--r-xs); padding: 0 4px; }
-.upd-history-date { font-size: 11px; font-weight: 400; color: var(--text-3); }
-/* 历史条目内容不再单独滚动（设置页整体滚动），避免嵌套滚动条 */
-.upd-history-notes { margin-top: 6px; min-width: 0; }
-/* 升级后首启"本次更新"弹窗（plan-283-1428 排版优化）
- * - 不再内层滚动：滚动统一交给 .ui-dialog-body，避免双滚动条；
- * - 每个版本一张卡片；卡片内「版本头部 / 内容区」用分隔线切开，
- *   长说明（列表、标题、表格）在卡片内自成一块，边界清晰。 */
-.whatsnew-body { display: flex; flex-direction: column; gap: var(--sp-4); }
-.whatsnew-summary { font-size: 12px; color: var(--text-3); }
-/* 升级后首启「本次更新」卡片：与通用弹窗（Modal）一致的普通卡片样式。
- * plan-270-1358: 移除左侧粗竖线（border-left: 3px）——更新内容展示统一不使用
- * 左侧竖线样式，避免与通用弹窗视觉不一致。 */
-.whatsnew-item { border: 1px solid var(--border); border-radius: var(--r-md); padding: 12px 14px; background: var(--bg-elevated); }
-.whatsnew-ver { display: flex; align-items: center; gap: 8px; padding-bottom: 8px; margin-bottom: 10px; border-bottom: 1px solid var(--border-light); }
-.whatsnew-ver-badge { font-size: 12px; font-weight: 700; color: var(--text-1); background: var(--bg-hover); border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px; line-height: 1.4; }
-.whatsnew-date { font-size: 11px; color: var(--text-3); }
-.whatsnew-notes { min-width: 0; }
-
 /* ── 发布说明 Markdown 排版（.release-notes）──
  * .md-body 的元素级样式此前全部挂在聊天作用域（.turn-agent-text 等）下，
  * 更新弹窗/更新历史/设置页直接复用 MarkdownContent 时标题、列表全是

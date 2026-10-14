@@ -44,12 +44,11 @@ const DICT: Dict = {
   "sidebar.expand_tip":           ["展开侧栏 (Ctrl+B)", "Expand Sidebar (Ctrl+B)"],
   "sidebar.history_back":         ["后退", "Back"],
   "sidebar.history_forward":      ["前进", "Forward"],
-  "sidebar.restart":              ["更新", "Update"],
-  "sidebar.update_notes":         ["更新内容", "What's New"],
-  "sidebar.update_notes_empty":   ["暂无更新说明", "No release notes"],
-  "sidebar.download_update_tip":  ["发现新版本 v{version}，点击下载", "Version v{version} available. Click to download"],
+  "sidebar.restart":              ["重启", "Restart"],
+  "sidebar.update":               ["更新", "Update"],
+  "sidebar.download_update_tip":  ["发现新版本 v{version}，点击下载；更新内容见「设置 › 关于」", "Version v{version} available. Click to download; see Settings › About for details"],
   "sidebar.downloading_update":   ["正在下载更新 {percent}%", "Downloading update {percent}%"],
-  "sidebar.restart_update_tip":   ["新版本 v{version} 已就绪，点击重启安装", "Version v{version} ready. Click to restart"],
+  "sidebar.restart_update_tip":   ["v{version} 已下载完成，点击重启完成更新", "v{version} downloaded. Click to restart and update"],
 
   // ── 通用 / 弹窗 ──
   "common.save":                  ["保存", "Save"],

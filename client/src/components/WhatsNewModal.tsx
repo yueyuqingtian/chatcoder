@@ -1,21 +1,16 @@
 /** 升级后首启"本次更新"弹窗（plan-230-1144 M4.2）。
  *
- * 此前更新前后都看不到版本变更内容（问题6）：主进程 `update-available` 回调
- * 丢弃了 releaseNotes，渲染侧也没有任何展示入口。本弹窗在应用升级后首次启动
- * 时展示「从上次看到的版本 → 当前版本」之间的全部 Release Notes（GitHub
- * Releases 拉取，离线回落状态机携带的 notes）。
+ * 在应用升级后首次启动时展示「从上次看到的版本 → 当前版本」之间的全部 Release Notes
+ * （GitHub Releases 拉取，离线回落状态机携带的 notes）。展示时机由主进程 `consumeWhatsNew`
+ * 判定（lastSeenVersion < appVersion 时为 true，消费后落盘），同一版本只弹一次。
  *
- * 展示时机由主进程 `consumeWhatsNew` 判定（lastSeenVersion < appVersion 时为 true，
- * 消费后落盘），确保同一版本只弹一次。
- *
- * plan-283-1428 排版：多版本说明此前是「版本行 + 无分隔的连续 Markdown」，
- * 长说明通篇平铺、条目之间没有视觉切分；且 .whatsnew-body 自带 max-height
- * 滚动，嵌在同样可滚动的弹窗 body 内形成双滚动条。现改为：
- *  - 每个版本一张卡片（版本徽标 + 日期头部 + 分隔线 + 内容区），条目边界清晰；
- *  - 去掉内层滚动，滚动统一交给弹窗 body，不再出现双滚动条与滚动穿透。 */
+ * plan-405-1900：此前是「版本胶囊 + 卡片套卡片 + 原样 Markdown」，信息被框线切得很碎。
+ * 现改为：头部用应用图标 + 「已更新到 vX」交代结果；正文按版本分段（仅跨多个版本时显示段头），
+ * 每段与关于页共用 ReleaseNotesView 的「分组标签 + 条目」排版；滚动只交给弹窗 body。 */
 import { useUpdaterStore } from "../store/updater";
-import { Modal } from "./Modal";
-import { MarkdownContent } from "./MarkdownContent";
+import { AppLogo } from "./AppLogo";
+import { Button, Dialog } from "./ui";
+import { ReleaseNotesView } from "./update/ReleaseNotes";
 
 export function WhatsNewModal() {
   const pending = useUpdaterStore((s) => s.pendingWhatsNew);
@@ -24,34 +19,38 @@ export function WhatsNewModal() {
 
   const releases = pending || [];
   const open = releases.length > 0;
+  const version = appVersion || releases[0]?.version || "";
+  const multi = releases.length > 1;
   return (
-    <Modal
+    <Dialog
       open={open}
       onClose={dismiss}
-      title="本次更新内容"
-      subtitle={appVersion ? `当前版本 v${appVersion}` : undefined}
-      width={640}
-      footer={
-        <button className="btn btn-primary btn-sm" onClick={dismiss}>知道了</button>
+      width={600}
+      className="whatsnew-dialog"
+      title={
+        <span className="wn-hero">
+          <AppLogo size={44} />
+          <span className="wn-hero-text">
+            <span className="wn-hero-title">已更新到 {version ? `v${version}` : "新版本"}</span>
+            <span className="wn-hero-sub">{multi ? `以下是最近 ${releases.length} 个版本带来的变化` : "以下是这个版本带来的变化"}</span>
+          </span>
+        </span>
       }
+      footer={<Button variant="primary" size="sm" onClick={dismiss}>开始使用</Button>}
     >
-      <div className="whatsnew-body">
-        {/* 多版本时先给出行数概览，避免用户逐条猜测本次跨度 */}
-        {releases.length > 1 && (
-          <div className="whatsnew-summary">含 {releases.length} 个版本的更新说明</div>
-        )}
+      <div className="wn-body">
         {releases.map((r, i) => (
-          <div key={`${r.version}-${i}`} className="whatsnew-item">
-            <div className="whatsnew-ver">
-              <span className="whatsnew-ver-badge">{r.version ? `v${r.version}` : "更新说明"}</span>
-              {r.date && <span className="whatsnew-date">{new Date(r.date).toLocaleDateString()}</span>}
-            </div>
-            <div className="whatsnew-notes release-notes">
-              <MarkdownContent>{r.notes || "(无说明)"}</MarkdownContent>
-            </div>
-          </div>
+          <section key={`${r.version}-${i}`} className="wn-rel">
+            {multi && (
+              <div className="wn-rel-head">
+                <span className="wn-rel-ver">{r.version ? `v${r.version}` : "更新说明"}</span>
+                {r.date && <span className="wn-rel-date">{new Date(r.date).toLocaleDateString()}</span>}
+              </div>
+            )}
+            <ReleaseNotesView notes={r.notes} empty="这个版本没有附带更新说明" />
+          </section>
         ))}
       </div>
-    </Modal>
+    </Dialog>
   );
 }

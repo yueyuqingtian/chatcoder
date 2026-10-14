@@ -23,10 +23,10 @@ import { WorktreesPanel } from "./WorktreesPanel";
 import { PetsPanel } from "./PetsPanel";
 // plan-334-1661：电脑操控专用设置页（内核常驻，不作为 MCP 注册，故不进连接器页）
 import { DesktopPanel } from "./DesktopPanel";
-import { IconAlertTriangle, IconDownload, IconPlus, IconRefresh, IconSparkles, IconWrench } from "../icons";
-import { MarkdownContent } from "../MarkdownContent";
-import { Card, Collapse, PageShell, PageTransition } from "../ui";
-import { Dada, type DadaMood } from "../mascot/Dada";
+import { IconAlertCircle, IconArrowDown, IconCheck, IconCopy, IconRefresh, IconSpinner } from "../icons";
+import { Button, Card, Collapse, PageShell, PageTransition } from "../ui";
+import { AppLogo } from "../AppLogo";
+import { ReleaseNotesView, UpdateProgress, countReleaseItems } from "../update/ReleaseNotes";
 import { PlaygroundPanel } from "./PlaygroundPanel";
 import { useUpdaterStore } from "../../store/updater";
 import { useI18n } from "../../store/i18n";
@@ -85,8 +85,11 @@ export const NAV_GROUPS: Array<{ id: SettingsIndexItem["group"]; label: string }
   { id: "data", label: "数据与统计" },
 ];
 
-const ABOUT_MOODS: DadaMood[] = ["calm", "happy", "wow", "think", "oops"];
-
+/** 关于页（plan-405-1900 重排）：
+ *  - 顶部身份区用 AppLogo，与左上角应用图标保持一致（此前是嗒嗒插画，两处形象对不上）；
+ *  - 「软件更新」收成一行：固定槽位的状态图标 + 主文案 + 操作按钮，下载中在下方给进度条，
+ *    有新版本时内联展示更新内容；
+ *  - 更新历史为版本行列表（水平分隔），展开后与首启弹窗共用 ReleaseNotesView 排版。 */
 function AboutPanel() {
   const status = useUpdaterStore((s) => s.status);
   const appVersion = useUpdaterStore((s) => s.appVersion);
@@ -96,251 +99,137 @@ function AboutPanel() {
   const releaseHistory = useUpdaterStore((s) => s.releaseHistory);
   const releaseSource = useUpdaterStore((s) => s.releaseSource);
   const loadReleaseHistory = useUpdaterStore((s) => s.loadReleaseHistory);
-  // plan-230-1144 M4.2: 更新说明展开态与历史区展开态
-  const [notesOpen, setNotesOpen] = useState<boolean>(true);
-  const [historyOpen, setHistoryOpen] = useState<boolean>(false);
-  // S7（plan-41-197）：更新历史展示重构——版本行可逐条展开/收起（默认展开最新版本），
-  // 长历史分段加载；头部给出条目数摘要，便于快速定位“这次更新了什么”。
   const [expandedVersions, setExpandedVersions] = useState<Set<string>>(new Set());
   const [historyLimit, setHistoryLimit] = useState(5);
-  const [taps, setTaps] = useState(0);
 
   useEffect(() => { void loadReleaseHistory(); }, [loadReleaseHistory]);
 
-  // S7：首次拉到历史时自动展开最新版本（用户最关心“这次更新了什么”）
+  // 首次拉到历史时自动展开最新版本（用户最关心“这次更新了什么”）
   useEffect(() => {
     if (releaseHistory.length === 0) return;
-    setExpandedVersions((prev) => {
-      if (prev.size > 0) return prev;
-      const first = releaseHistory[0];
-      return new Set([`${first.version}-0`]);
-    });
+    setExpandedVersions((prev) => (prev.size > 0 ? prev : new Set([`${releaseHistory[0].version}-0`])));
   }, [releaseHistory]);
 
-  /** S7：更新条目计数（只数 "- 条目"，分组标题不计） */
-  const countItems = (notes?: string) =>
-    (notes || "").split("\n").filter((l) => /^\s*-\s+/.test(l)).length;
-
-  // dev 模式无 preload 更新 API，显示纯静态信息
+  // dev 模式无 preload 更新 API，只显示静态信息
   const supported = status.state !== "unsupported";
-  const hint =
-    status.state === "checking" ? "正在检查更新…" :
-    status.state === "available" ? `发现新版本 v${status.version}（当前 v${appVersion}）` :
-    status.state === "downloading" ? `正在下载更新 ${status.percent}%…` :
-    status.state === "downloaded" ? `新版本 v${status.version} 已就绪` :
-    status.state === "none" ? `已是最新版本（v${appVersion}）` :
-    status.state === "error" ? `检查更新失败：${status.message}` : "";
+  const cur = appVersion ? `v${appVersion}` : "";
+  const sourceText = releaseSource === "mirror" ? "镜像源" : "GitHub Releases";
 
-  // plan-230-1144 M4.2: 状态机携带的 release notes（available/downloaded 时可用）
-  const activeNotes = (status.state === "available" || status.state === "downloaded") ? (status.notes || "") : "";
+  const view: { tone: "ok" | "new" | "busy" | "err" | "idle"; icon: React.ReactNode; title: string; desc: string } =
+    status.state === "checking" ? { tone: "busy", icon: <IconSpinner size={16} />, title: "正在检查更新…", desc: `当前 ${cur}` } :
+    status.state === "available" ? { tone: "new", icon: <IconArrowDown size={16} />, title: `发现新版本 v${status.version}`, desc: `当前 ${cur}，下载完成后重启即可更新` } :
+    status.state === "downloading" ? { tone: "busy", icon: <IconArrowDown size={16} />, title: `正在下载${status.version ? ` v${status.version}` : "更新"}`, desc: "下载在后台进行，可以继续使用" } :
+    status.state === "downloaded" ? { tone: "new", icon: <IconRefresh size={16} />, title: `v${status.version} 已准备就绪`, desc: "重启应用即可完成更新" } :
+    status.state === "none" ? { tone: "ok", icon: <IconCheck size={16} />, title: "已是最新版本", desc: `${cur} · 来自 ${sourceText}` } :
+    status.state === "error" ? { tone: "err", icon: <IconAlertCircle size={16} />, title: "检查更新失败", desc: status.message } :
+    { tone: "idle", icon: <IconRefresh size={16} />, title: "软件更新", desc: `当前 ${cur}，自动从 ${sourceText} 检查新版本` };
+
   const activeVersion = (status.state === "available" || status.state === "downloaded") ? status.version : "";
+  const activeNotes = (status.state === "available" || status.state === "downloaded") ? (status.notes || "") : "";
+  const busy = status.state === "checking" || status.state === "downloading";
 
-  const updateBtn =
-    status.state === "downloaded" ? (
-      <button className="btn btn-primary btn-sm" onClick={() => void installUpdate()}><IconDownload size={13} /> 重启更新</button>
-    ) : status.state === "available" ? (
-      <button className="btn btn-primary btn-sm" onClick={() => void downloadUpdate()}><IconDownload size={13} /> 下载更新</button>
-    ) : null;
+  const toggleVersion = (key: string) => setExpandedVersions((prev) => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
 
-  const fmtBytes = (n?: number) => {
-    if (!n || n <= 0) return "";
-    if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
-    return `${(n / 1024 / 1024).toFixed(1)} MB`;
-  };
-
-  // plan-91-393：拆为「应用信息 + 软件更新」与「更新历史」两张卡片，去掉两区之间的粗分隔线
   return (
     <div className="settings-card-stack about-stack">
-    <div className="settings-card about-card">
-      <div className="settings-row">
-        <div className="settings-row-info" style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          {/* plan-114-449：关于页由嗒嗒丰富版出场；连点 5 次换一种表情（小彩蛋） */}
-          <button
-            type="button"
-            className="about-dada"
-            aria-label="嗒嗒"
-            onClick={() => setTaps((n) => n + 1)}
-          >
-            <Dada variant="rich" size={56} mood={ABOUT_MOODS[Math.floor(taps / 5) % ABOUT_MOODS.length]} />
-          </button>
-          <div>
-            <div className="settings-row-title">ChatCoder</div>
-            <div className="settings-row-desc">项目任务驱动的 AI 编码工作台</div>
+      <div className="settings-card about-card">
+        <div className="about-hero">
+          <AppLogo size={64} className="about-logo" />
+          <div className="about-hero-text">
+            <div className="about-name">ChatCoder</div>
+            <div className="about-tagline">项目任务驱动的 AI 编码工作台</div>
+          </div>
+          {cur && <span className="about-ver">{cur}</span>}
+        </div>
+
+        {supported && (
+          <div className="about-upd">
+            <div className="about-upd-row">
+              <span className={"about-upd-ic tone-" + view.tone} aria-hidden>{view.icon}</span>
+              <div className="about-upd-text">
+                <div className="about-upd-title">{view.title}</div>
+                <div className={"about-upd-desc" + (view.tone === "err" ? " is-err" : "")}>{view.desc}</div>
+              </div>
+              <div className="about-upd-actions">
+                {status.state === "error" && (
+                  <Button variant="ghost" size="sm" icon={<IconCopy size={13} />} onClick={() => { void navigator.clipboard.writeText(status.message).catch(() => { /* ignore */ }); }}>复制错误</Button>
+                )}
+                {status.state !== "downloaded" && (
+                  <Button variant={status.state === "available" ? "ghost" : "secondary"} size="sm" disabled={busy} onClick={() => void checkForUpdates()}>
+                    {status.state === "error" ? "重试" : "检查更新"}
+                  </Button>
+                )}
+                {status.state === "available" && (
+                  <Button variant="primary" size="sm" icon={<IconArrowDown size={13} />} onClick={() => void downloadUpdate()}>下载更新</Button>
+                )}
+                {status.state === "downloaded" && (
+                  <Button variant="primary" size="sm" icon={<IconRefresh size={13} />} onClick={() => void installUpdate()}>重启并更新</Button>
+                )}
+              </div>
+            </div>
+
+            {status.state === "downloading" && (
+              <UpdateProgress percent={status.percent} transferred={status.transferred} total={status.total} bytesPerSecond={status.bytesPerSecond} />
+            )}
+
+            {activeNotes && (
+              <div className="about-upd-notes">
+                <div className="about-sub-title">v{activeVersion} 更新内容</div>
+                <ReleaseNotesView notes={activeNotes} />
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {supported && (
+        <div className="settings-card about-history-card">
+          <div className="about-history-head">
+            <div className="about-history-title">更新历史</div>
+            <div className="about-history-desc">
+              {releaseSource === "local" ? "离线模式，显示本地更新日志" :
+               releaseSource === "none" ? "暂时无法获取更新历史" :
+               releaseHistory.length > 0 ? `共 ${releaseHistory.length} 个版本` : ""}
+            </div>
+          </div>
+          <div className="about-history">
+            {releaseHistory.length === 0 && <div className="about-history-empty">暂无更新历史</div>}
+            {releaseHistory.slice(0, historyLimit).map((r, i) => {
+              const isCurrent = !!appVersion && r.version === appVersion;
+              const key = `${r.version}-${i}`;
+              const expanded = expandedVersions.has(key);
+              const count = countReleaseItems(r.notes);
+              return (
+                <div key={key} className={"about-rel" + (expanded ? " open" : "")}>
+                  <button type="button" className="about-rel-head" aria-expanded={expanded} onClick={() => toggleVersion(key)}>
+                    <span className="about-rel-ver">{r.version ? `v${r.version}` : (r.name || "更新日志")}</span>
+                    {isCurrent && <span className="about-rel-cur">当前</span>}
+                    <span className="about-rel-meta">
+                      {r.date && <span>{new Date(r.date).toLocaleDateString()}</span>}
+                      {count > 0 && <span>{count} 项</span>}
+                    </span>
+                    <IconChevronDown size={14} className={"about-rel-caret" + (expanded ? " open" : "")} />
+                  </button>
+                  <Collapse open={expanded}>
+                    <div className="about-rel-body"><ReleaseNotesView notes={r.notes} /></div>
+                  </Collapse>
+                </div>
+              );
+            })}
+            {releaseHistory.length > historyLimit && (
+              <button type="button" className="about-history-more" onClick={() => setHistoryLimit((n) => n + 10)}>
+                显示更早的版本（{releaseHistory.length - historyLimit}）
+              </button>
+            )}
           </div>
         </div>
-        <div className="settings-row-control" />
-      </div>
-      <RowItem title="当前版本" desc={appVersion ? `v${appVersion}` : "v0.1.0"} />
-      {supported && (
-        <>
-          <div className="settings-row">
-            <div className="settings-row-info">
-              <div className="settings-row-title about-upd-title">
-                软件更新
-                {status.state !== "idle" && <span className={"about-upd-state st-" + status.state}>{
-                  status.state === "none" ? "已是最新" : status.state === "available" ? "有新版本" :
-                  status.state === "downloading" ? "下载中" : status.state === "downloaded" ? "待重启" :
-                  status.state === "checking" ? "检查中" : status.state === "error" ? "失败" : ""}</span>}
-              </div>
-              <div className="settings-row-desc">{hint || "从 GitHub Releases 自动检查新版本"}</div>
-            </div>
-            <div className="settings-row-control">
-              {updateBtn}
-              <button className="btn btn-ghost btn-sm" disabled={status.state === "checking" || status.state === "downloading"} onClick={() => void checkForUpdates()}><IconRefresh size={13} /> 检查更新</button>
-            </div>
-          </div>
-
-          {/* 下载进度条（此前仅显示百分数文本；transferred/total/bytesPerSecond 数据主进程早已提供） */}
-          {status.state === "downloading" && (
-            <div className="upd-progress-wrap">
-              <div className="upd-progress-bar"><div className="upd-progress-fill" style={{ width: `${status.percent}%` }} /></div>
-              <div className="upd-progress-meta">
-                <span>{status.percent}%</span>
-                {status.total ? <span>{fmtBytes(status.transferred)} / {fmtBytes(status.total)}</span> : null}
-                {status.bytesPerSecond ? <span>{fmtBytes(status.bytesPerSecond)}/s</span> : null}
-              </div>
-            </div>
-          )}
-
-          {/* 更新说明：版本可用/已就绪时内联展示（问题6 核心修复——更新前可见更新内容） */}
-          {activeNotes && (
-            <div className="upd-notes">
-              <button className="upd-notes-head" onClick={() => setNotesOpen((v) => !v)}>
-                <IconChevronDown size={12} className={"upd-notes-caret" + (notesOpen ? " open" : "")} />
-                新版本 v{activeVersion} 更新内容
-              </button>
-              {notesOpen && (
-                <div className="upd-notes-body release-notes">
-                  <MarkdownContent>{activeNotes}</MarkdownContent>
-                </div>
-              )}
-            </div>
-          )}
-          {status.state === "error" && (
-            <div className="settings-row">
-              <div className="settings-row-info">
-                <div className="settings-row-desc" style={{ color: "var(--error)" }}>{status.message}</div>
-              </div>
-              <div className="settings-row-control">
-                <button className="btn btn-ghost btn-sm" onClick={() => void checkForUpdates()}><IconRefresh size={13} /> 重试</button>
-                <button className="btn btn-ghost btn-sm" onClick={() => { void navigator.clipboard.writeText(status.message).catch(() => { /* ignore */ }); }}>复制错误</button>
-              </div>
-            </div>
-          )}
-
-        </>
       )}
     </div>
-    {supported && (
-      <div className="settings-card about-history-card">
-          <div className="settings-row upd-history-row">
-            <div className="settings-row-info">
-              <div className="settings-row-title">更新历史</div>
-              <div className="settings-row-desc">
-                {releaseSource === "local" ? "离线模式：显示本地更新日志" :
-                 releaseSource === "none" ? "暂无法获取更新历史（网络不可用且无本地日志）" :
-                 `共 ${releaseHistory.length} 个版本`}
-              </div>
-            </div>
-            <div className="settings-row-control">
-              <button className="btn btn-ghost btn-sm" onClick={() => setHistoryOpen((v) => !v)} aria-expanded={historyOpen}>
-                <IconChevronDown size={12} className={"upd-notes-caret" + (historyOpen ? " open" : "")} />
-                {historyOpen ? "收起" : "查看"}
-              </button>
-            </div>
-          </div>
-          <Collapse open={historyOpen}>
-            <div className="upd-history about-history">
-              {releaseHistory.length === 0 && <div className="navpage-empty">暂无更新历史</div>}
-              {releaseHistory.slice(0, historyLimit).map((r, i) => {
-                const isCurrent = r.version === appVersion;
-                const key = `${r.version}-${i}`;
-                const expanded = expandedVersions.has(key);
-                const count = countItems(r.notes);
-                const groups = parseReleaseGroups(r.notes);
-                return (
-                  <div key={key} className={"upd-history-item about-rel" + (isCurrent ? " current" : "") + (expanded ? " open" : "")}>
-                    <button
-                      type="button"
-                      className={"upd-history-head" + (expanded ? " open" : "")}
-                      aria-expanded={expanded}
-                      onClick={() => setExpandedVersions((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(key)) next.delete(key); else next.add(key);
-                        return next;
-                      })}
-                    >
-                      <span className="upd-history-version">
-                        <span className="about-rel-pill">{r.version ? `v${r.version}` : (r.name || "更新日志")}</span>
-                        {isCurrent && <span className="upd-history-cur">当前版本</span>}
-                        {r.date && <span className="upd-history-date">{new Date(r.date).toLocaleDateString()}</span>}
-                      </span>
-                      <span className="upd-history-meta">
-                        {count > 0 && <span>{count} 条更新</span>}
-                        <IconChevronDown size={12} className={"upd-notes-caret" + (expanded ? " open" : "")} />
-                      </span>
-                    </button>
-                    <Collapse open={expanded}>
-                      {groups ? (
-                        <div className="about-rel-groups">
-                          {groups.map((g) => (
-                            <div key={g.title} className={"about-rel-group tone-" + g.tone}>
-                              <div className="about-rel-group-title">
-                                <span className="about-rel-ic" aria-hidden>
-                                  {g.tone === "add" ? <IconPlus size={11} /> : g.tone === "fix" ? <IconWrench size={11} /> : g.tone === "warn" ? <IconAlertTriangle size={11} /> : <IconSparkles size={11} />}
-                                </span>
-                                {g.title}
-                              </div>
-                              <ul className="about-rel-list release-notes">
-                                {g.items.map((it, j) => <li key={j}><MarkdownContent>{it}</MarkdownContent></li>)}
-                              </ul>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <div className="upd-history-notes release-notes"><MarkdownContent>{r.notes || "(无说明)"}</MarkdownContent></div>
-                      )}
-                    </Collapse>
-                  </div>
-                );
-              })}
-              {releaseHistory.length > historyLimit && (
-                <button className="btn btn-ghost btn-sm upd-history-more" onClick={() => setHistoryLimit((n) => n + 10)}>
-                  显示更早的版本（还有 {releaseHistory.length - historyLimit} 个）
-                </button>
-              )}
-            </div>
-          </Collapse>
-      </div>
-    )}
-    </div>
   );
-}
-
-/** plan-91-393：把 CHANGELOG 版本块按「### 分组 + - 条目」解析为结构化分组；
- *  不符合该结构（无分组或含其他段落）时返回 null，回落 Markdown 原样渲染。 */
-function parseReleaseGroups(notes?: string): Array<{ title: string; tone: "add" | "opt" | "fix" | "warn"; items: string[] }> | null {
-  if (!notes) return null;
-  const groups: Array<{ title: string; tone: "add" | "opt" | "fix" | "warn"; items: string[] }> = [];
-  for (const raw of notes.split("\n")) {
-    const line = raw.trim();
-    if (!line) continue;
-    const h = /^#{2,4}\s+(.+)$/.exec(line);
-    if (h) {
-      const title = h[1].trim();
-      const tone = /新增|feat|add/i.test(title) ? "add" : /修复|fix/i.test(title) ? "fix" : /重要|break/i.test(title) ? "warn" : "opt";
-      groups.push({ title, tone, items: [] });
-      continue;
-    }
-    const li = /^[-*]\s+(.+)$/.exec(line);
-    if (li && groups.length > 0) { groups[groups.length - 1].items.push(li[1]); continue; }
-    return null;
-  }
-  const valid = groups.filter((g) => g.items.length > 0);
-  return valid.length > 0 ? valid : null;
-}
-function RowItem({ title, desc }: { title: string; desc: string }) {
-  return <div className="settings-row"><div className="settings-row-info"><div className="settings-row-title">{title}</div><div className="settings-row-desc">{desc}</div></div><div className="settings-row-control" /></div>;
 }
 
 /** plan-282-1416（问题1 根治）：设置页装饰——tab → 内容组件 / 宽度档位。

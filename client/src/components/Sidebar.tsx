@@ -7,7 +7,6 @@
  */
 import { IxNewChat, IxSearch, IxAutomation, IxExtensions, IxSettings, IxWorkflow } from "./iconkit/StackIcons";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import type { ProjectOut, SessionOut } from "../api/client";
 import { api } from "../api/client";
 import { useChatStore } from "../store/chat";
@@ -18,15 +17,14 @@ import { useI18n } from "../store/i18n";
 import { formatRelativeTime, parseUtc } from "../utils/time";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { MergeDialog } from "./worktree/MergeDialog";
-import { MarkdownContent } from "./MarkdownContent";
-import { Empty, Input, Segmented } from "./ui";
+import { Empty, Input, Segmented, Tooltip } from "./ui";
 import { ProjectIcon } from "./project/ProjectIcon";
 import { openProjectDialog } from "../store/projectDialog";
 import {
   IconChevronDown, IconChevronRight,
   IconFolder, IconLayers, IconSortDesc, IconPencil,
   IconMoreHorizontal, IconPin, IconPlus, IconRefresh,
-  IconFolderPlus, IconDownload, IconCopy, IconClock, IconSortAlpha, IconArchive, IconGitBranch, IconTrash,
+  IconFolderPlus, IconArrowDown, IconCopy, IconClock, IconSortAlpha, IconArchive, IconGitBranch, IconTrash,
 } from "./icons";
 
 export type NavKey = "chat" | "scheduled" | "skills" | "mcp" | "settings";
@@ -56,147 +54,50 @@ const WORKFLOW_STATE_LABEL: Record<string, string> = {
 const SESSION_PAGE_STEP = 5;
 const SESSION_EXPAND_ALL_THRESHOLD = 10;
 
-/** 更新徽标：主进程发现新版本时在设置按钮右侧出现。
- * available 点击开始下载 → downloading 显示环形进度 → downloaded 显示「更新」按钮；
- * hover 弹出该版本 changelog（plan-246-1236 S4）。
- *
- * changelog 弹窗用 Portal + fixed 定位：此前是侧栏内绝对定位，
- * 被 .sidebar 的 overflow:hidden 裁剪、且绘制层级低于右侧面板，
- * 表现为弹窗被中间面板遮挡/只露出一条。
- *
- * plan-283-1428：浮窗可接收鼠标（移入后停留并滚动查看完整说明）。
- * 显隐由 React 态驱动而非 CSS hover，故关闭延迟加长、且浮窗自身的
- * mouseenter 会取消关闭；浮窗外层 .sb-update-notes-hover 的左侧 padding
- * 覆盖浮窗与按钮间的空隙，避免鼠标跨越空隙时误关闭。 */
-function UpdateBadge({ collapsed = false }: { collapsed?: boolean }) {
+/** 更新入口：主进程发现新版本时在设置按钮右侧出现（plan-405-1900）。
+ * 三态共用同一个固定宽度胶囊槽位——可更新（点击下载）/ 下载中（胶囊底色即进度）/ 已就绪（点击重启），
+ * 状态切换只换内容不换尺寸，避免此前「描边圆钮 → 绿色进度胶囊 → 重启按钮」来回跳动。
+ * 悬停不再弹出整篇更新说明（遮挡内容、聚焦即弹），只用 Tooltip 一句话说明；完整内容在「设置 › 关于」。 */
+function UpdateBadge() {
   const { t } = useI18n();
   const status = useUpdaterStore((s) => s.status);
   const downloadUpdate = useUpdaterStore((s) => s.downloadUpdate);
   const installUpdate = useUpdaterStore((s) => s.installUpdate);
-  const wrapRef = useRef<HTMLDivElement>(null);
-  const closeTimer = useRef<number | null>(null);
-  const [anchor, setAnchor] = useState<{ left: number; bottom: number } | null>(null);
-  const visible = status.state === "available" || status.state === "downloading" || status.state === "downloaded";
+  if (status.state !== "available" && status.state !== "downloading" && status.state !== "downloaded") return null;
 
-  useEffect(() => () => {
-    if (closeTimer.current) window.clearTimeout(closeTimer.current);
-  }, []);
-
-  if (!visible) return null;
-
-  const version = "version" in status ? status.version : "";
-  const notes = (status.state === "available" || status.state === "downloaded") ? (status.notes || "") : "";
-  const showNotes = status.state === "available" || status.state === "downloaded";
-  const percent = status.state === "downloading" ? (status.percent ?? 0) : 0;
-  const ring = 2 * Math.PI * 7;
-
-  /** 浮窗宽度：与 .sb-update-notes 的 CSS 宽度保持一致；
-   * HOVER_PAD 与 .sb-update-notes-hover 的 padding-left 一致，用于覆盖
-   * 浮窗与按钮之间的水平空隙（容器左缘贴按钮右缘，避免遮挡按钮热区）。 */
-  const NOTES_W = 420;
-  const HOVER_PAD = 12;
-
-  const cancelClose = () => {
-    if (closeTimer.current) { window.clearTimeout(closeTimer.current); closeTimer.current = null; }
-  };
-
-  const openNotes = () => {
-    if (!showNotes) return;
-    cancelClose();
-    const rect = wrapRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    // 从按钮右缘向右弹出、底部与按钮对齐（向上生长）；右侧空间不足时向左收
-    const total = NOTES_W + HOVER_PAD;
-    const left = Math.max(8, Math.min(rect.right, window.innerWidth - total - 12));
-    setAnchor({ left, bottom: Math.max(8, window.innerHeight - rect.bottom) });
-  };
-  const scheduleClose = () => {
-    cancelClose();
-    // 留出从按钮移到浮窗的缓冲时间（浮窗 mouseenter 会取消该定时器）
-    closeTimer.current = window.setTimeout(() => { setAnchor(null); closeTimer.current = null; }, 320);
-  };
-
-  /** 操作提示（plan-64-294）：原先是按钮上的原生 title，hover 时与更新日志浮窗
-   *  同时出现会「两个提示叠着弹」；现在并入浮窗内部展示，信息不丢且只有一处提示。 */
-  const actionHint = status.state === "downloaded"
-    ? t("sidebar.restart_update_tip", { version: version ?? "" })
-    : status.state === "available"
-      ? t("sidebar.download_update_tip", { version: version ?? "" })
-      : "";
-
-  const popover = showNotes && anchor ? createPortal(
-    <div
-      className="sb-update-notes-hover"
-      style={{ left: anchor.left, bottom: anchor.bottom }}
-      onMouseEnter={cancelClose}
-      onMouseLeave={scheduleClose}
-    >
-      <div className="sb-update-notes" role="tooltip">
-        <div className="sb-update-notes-head">
-          <span className="sb-update-notes-badge">NEW</span>
-          <span className="sb-update-notes-ver">{version ? `v${version}` : ""}</span>
-          <span className="sb-update-notes-label">{t("sidebar.update_notes")}</span>
-        </div>
-        {actionHint && <div className="sb-update-notes-hint">{actionHint}</div>}
-        {notes
-          ? <div className="sb-update-notes-body release-notes"><MarkdownContent>{notes}</MarkdownContent></div>
-          : <div className="sb-update-notes-empty">{t("sidebar.update_notes_empty")}</div>}
-      </div>
-    </div>,
-    document.body,
-  ) : null;
-
-  const notesHoverProps = { ref: wrapRef, onMouseEnter: openNotes, onMouseLeave: scheduleClose };
-
+  const version = status.version ?? "";
   if (status.state === "downloading") {
+    const percent = Math.max(0, Math.min(100, Math.round(status.percent ?? 0)));
     return (
-      <div className="sb-update-wrap">
-        <button
-          className="sb-update-btn sb-update-btn-progress"
-          title={t("sidebar.downloading_update", { percent })}
-          disabled
+      <Tooltip content={t("sidebar.downloading_update", { percent })} side="top">
+        <span
+          className="sb-upd is-downloading"
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={percent}
+          aria-label={t("sidebar.downloading_update", { percent })}
+          style={{ ["--p" as string]: `${percent}%` }}
         >
-          <svg className="sb-update-ring" width="18" height="18" viewBox="0 0 18 18" aria-hidden>
-            <circle cx="9" cy="9" r="7" fill="none" stroke="rgba(255,255,255,0.28)" strokeWidth="2" />
-            <circle
-              cx="9" cy="9" r="7" fill="none" stroke="#fff" strokeWidth="2"
-              strokeLinecap="round"
-              strokeDasharray={ring}
-              strokeDashoffset={ring * (1 - percent / 100)}
-              transform="rotate(-90 9 9)"
-            />
-          </svg>
-          <span className="sb-update-progress">{percent}%</span>
-        </button>
-      </div>
+          <span className="sb-upd-label">{percent}%</span>
+        </span>
+      </Tooltip>
     );
   }
-  if (status.state === "downloaded") {
-    return (
-      <div className="sb-update-wrap" {...notesHoverProps}>
-        <button
-          className="sb-update-restart"
-          aria-label={t("sidebar.restart_update_tip", { version: version ?? "" })}
-          onClick={() => { void installUpdate(); }}
-        >
-          {!collapsed && <span>{t("sidebar.restart")}</span>}
-          {collapsed && <IconRefresh size={14} color="#fff" />}
-        </button>
-        {popover}
-      </div>
-    );
-  }
+  const ready = status.state === "downloaded";
+  const tip = ready ? t("sidebar.restart_update_tip", { version }) : t("sidebar.download_update_tip", { version });
   return (
-    <div className="sb-update-wrap" {...notesHoverProps}>
+    <Tooltip content={tip} side="top">
       <button
-        className="sb-update-btn"
-        aria-label={t("sidebar.download_update_tip", { version: version ?? "" })}
-        onClick={() => { void downloadUpdate(); }}
+        type="button"
+        className={"sb-upd " + (ready ? "is-ready" : "is-available")}
+        aria-label={tip}
+        onClick={() => { void (ready ? installUpdate() : downloadUpdate()); }}
       >
-        <IconDownload size={16} />
+        {ready ? <IconRefresh size={13} /> : <IconArrowDown size={13} />}
+        <span className="sb-upd-label">{ready ? t("sidebar.restart") : t("sidebar.update")}</span>
       </button>
-      {popover}
-    </div>
+    </Tooltip>
   );
 }
 
