@@ -311,7 +311,7 @@ const DICT: Dict = {
   "settings.pt.desktop":    ["电脑操控", "Computer Use"],
   "settings.ps.desktop":    ["让 AI 查看屏幕并操作鼠标键盘：开关、安全护栏与操作路线管理", "Let AI see the screen and control mouse/keyboard: switches, guardrails & recipes"],
   "settings.pt.playground": ["嗒嗒乐园", "Dada's Playground"],
-  "settings.ps.playground": ["移动鼠标，嗒嗒会跟着你跑；点一下让它跳，碰到小星星就能收集", "Move your mouse and Dada follows; click to make it hop, and collect the little stars"],
+  "settings.ps.playground": ["每个主题世界都有一种和嗒嗒一起玩的小游戏，切换外观主题就能换场景和玩法", "Each theme world has its own mini-game with Dada — switch the theme to change the scene and the game"],
 
   // ── 电脑操控面板（plan-334-1661）──
   "dp.tab.basic":            ["基础配置", "Basic"],

@@ -1,7 +1,9 @@
-/** 乐园特效（plan-114-452）：软边光点粒子池 + 环境漂浮光点 + 发光精灵贴图。
- * 全部是 additive 软圆点（一个 Points 一次 draw call），用于：移动拖尾、收集爆发、被戳冒心、环境尘光 / 萤火 / 花瓣 / 火星。 */
+/** 乐园特效（plan-114-452；plan-playground-v2 增补彩纸）：软边光点粒子池 + 环境漂浮光点 + 彩纸 + 发光精灵贴图。
+ * 光点全部是 additive 软圆点（一个 Points 一次 draw call），用于：移动拖尾、收集爆发、被戳冒心、环境尘光 / 萤火 / 火星；
+ * 彩纸是实例化小方片（一次 draw call），用于过关、大成绩的庆祝。 */
 import {
-  AdditiveBlending, BufferAttribute, BufferGeometry, CanvasTexture, Color, Points, ShaderMaterial, type Texture,
+  AdditiveBlending, BufferAttribute, BufferGeometry, CanvasTexture, Color, DoubleSide, DynamicDrawUsage, InstancedMesh,
+  Matrix4, MeshStandardMaterial, Object3D, PlaneGeometry, Points, ShaderMaterial, type Texture,
 } from "three";
 
 const VERT = /* glsl */ `
@@ -140,4 +142,56 @@ export function makeGlowTexture(): Texture {
   g.fillStyle = grd;
   g.fillRect(0, 0, 128, 128);
   return new CanvasTexture(c);
+}
+
+/** 彩纸：实例化小方片，带翻转与空气阻力，落地后淡出（缩小） */
+export class Confetti {
+  readonly obj: InstancedMesh;
+  private readonly geo = new PlaneGeometry(0.16, 0.1);
+  private readonly mat = new MeshStandardMaterial({ roughness: 0.6, side: DoubleSide });
+  private readonly ps: Array<{ life: number; x: number; y: number; z: number; vx: number; vy: number; vz: number; rx: number; ry: number; sx: number; sy: number }>;
+  private head = 0;
+  private readonly e = new Object3D();
+  private readonly hidden = new Matrix4().makeScale(0, 0, 0);
+  constructor(private readonly n = 160, colors = ["#ff8a80", "#ffd166", "#7bdcb5", "#8ecbff", "#c3a6ff", "#ff9ecf"]) {
+    this.obj = new InstancedMesh(this.geo, this.mat, n);
+    this.obj.instanceMatrix.setUsage(DynamicDrawUsage);
+    this.obj.frustumCulled = false;
+    const c = new Color();
+    for (let i = 0; i < n; i++) { this.obj.setMatrixAt(i, this.hidden); this.obj.setColorAt(i, c.set(colors[i % colors.length])); }
+    this.ps = Array.from({ length: n }, () => ({ life: 0, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, rx: 0, ry: 0, sx: 0, sy: 0 }));
+  }
+  burst(x: number, y: number, z: number, count = 40, power = 4) {
+    for (let k = 0; k < count; k++) {
+      const p = this.ps[this.head]; this.head = (this.head + 1) % this.n;
+      const a = Math.random() * Math.PI * 2, u = 0.3 + Math.random() * 0.7;
+      Object.assign(p, {
+        life: 2.4 + Math.random() * 0.8, x, y, z,
+        vx: Math.cos(a) * power * u * 0.6, vy: power * (0.8 + Math.random() * 0.6), vz: Math.sin(a) * power * u * 0.6,
+        rx: Math.random() * 6, ry: Math.random() * 6, sx: (Math.random() - 0.5) * 14, sy: (Math.random() - 0.5) * 14,
+      });
+    }
+  }
+  update(dt: number) {
+    const e = this.e;
+    for (let i = 0; i < this.n; i++) {
+      const p = this.ps[i];
+      if (p.life <= 0) continue;
+      p.life -= dt;
+      if (p.life <= 0) { this.obj.setMatrixAt(i, this.hidden); continue; }
+      p.vy -= 7 * dt;
+      const drag = Math.pow(0.12, dt);
+      p.vx *= drag; p.vz *= drag; if (p.vy < -1.6) p.vy = -1.6;
+      p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+      if (p.y < 0.02) { p.y = 0.02; p.vx = p.vz = 0; p.sx *= 0.9; p.sy *= 0.9; }
+      p.rx += p.sx * dt; p.ry += p.sy * dt;
+      e.position.set(p.x + Math.sin(p.rx) * 0.05, p.y, p.z);
+      e.rotation.set(p.rx, p.ry, 0);
+      e.scale.setScalar(Math.min(1, p.life * 2));
+      e.updateMatrix();
+      this.obj.setMatrixAt(i, e.matrix);
+    }
+    this.obj.instanceMatrix.needsUpdate = true;
+  }
+  dispose() { this.geo.dispose(); this.mat.dispose(); this.obj.dispose(); }
 }
