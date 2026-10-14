@@ -511,11 +511,25 @@ async def list_session_subagents(session_id: int, turn_id: int | None = None,
     briefs = await workflow_store.node_briefs(
         [agent.workflow_node_id for agent, _task in rows if agent.workflow_node_id]
     )
+    # 工作流节点的派发时刻 = 线程首条消息的 id（与实时事件 agent.started 的 spawn_message_id 同口径）
+    from app.persistence.models.message import Message as _Message
+    from sqlalchemy import func as _func
+
+    node_thread_ids = [agent.id for agent, _task in rows if agent.workflow_node_id]
+    spawn_ids: dict[int, int] = {}
+    if node_thread_ids:
+        spawn_rows = await db.execute(
+            select(_Message.thread_id, _func.min(_Message.id))
+            .where(_Message.thread_id.in_(node_thread_ids))
+            .group_by(_Message.thread_id)
+        )
+        spawn_ids = {int(tid): int(mid) for tid, mid in spawn_rows.all() if tid is not None}
     out: list[dict] = []
     for agent, task in rows:
         _h = _mgr.get(agent.id) if _mgr is not None else None
         out.append({
             "workflow": briefs.get(agent.workflow_node_id) if agent.workflow_node_id else None,
+            "spawn_message_id": spawn_ids.get(agent.id) if agent.workflow_node_id else None,
             "agent_id": agent.id,
             "name": agent.name or f"子代理 #{agent.id}",
             "turn_id": agent.turn_id,
