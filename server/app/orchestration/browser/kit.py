@@ -14,11 +14,17 @@
 约定：`window.__ccKit.call(fn, args)` 统一入口，返回 `{ok, value}` 或 `{ok:false, error}`，
 任何异常都不外抛到宿主（宿主只需区分“脚本执行失败”与“动作语义失败”）。
 ref 以 WeakMap 绑定元素：同一文档内同一元素的 ref 始终不变，导航后整体失效。
+
+准确性约定（plan-20261015-browser-perf）：
+- ref 记录所在行/列表项的上下文文字：表格翻页、虚拟列表复用节点只换文字时，旧 ref 报错而不是点到别的行；
+- 按文字定位有多个同等候选时报错列出候选，不静默取第一个；
+- 坐标点击校验截图之后的滚动/视口/地址变化，落在可交互元素外 10px 内时就近吸附；
+- 变化监听过滤高频噪声节点（时钟、JS 动画），并在节点插入的当下记录提示文字（之后消失也能回报）。
 """
 from __future__ import annotations
 
 # 每次修改 KIT_SOURCE 都必须递增：已打开的页面靠版本号判断是否需要重新注入新的页面工具包
-KIT_VERSION = 5
+KIT_VERSION = 6
 
 KIT_SOURCE = r"""
 (() => {
@@ -125,15 +131,59 @@ KIT_SOURCE = r"""
     return docsOf().some((d) => ((d.body && d.body.innerText) || '').toLowerCase().includes(want));
   }
 
+  // ref → 分配（或最近一次回报）时所在行的文字；每次回报 ref 都刷新为当前内容
+  const refCtx = new Map();
+  function rowOf(el) {
+    let n = el.parentElement;
+    for (let i = 0; n && i < 8; i++, n = n.parentElement) {
+      if (n === n.ownerDocument.body || n === n.ownerDocument.documentElement) return null;
+      const role = (n.getAttribute('role') || '').toLowerCase();
+      if (n.tagName === 'TR' || n.tagName === 'LI' || role === 'row' || role === 'listitem' || role === 'option' || role === 'treeitem') return n;
+      const p = n.parentElement;
+      if (p && p.childElementCount >= 2 && p.childElementCount <= 500) {
+        const cls = String(n.getAttribute('class') || '');
+        for (const c of p.children) if (c !== n && c.tagName === n.tagName && String(c.getAttribute('class') || '') === cls) return n;
+      }
+    }
+    return null;
+  }
+  function ctxOf(el) {
+    const row = rowOf(el);
+    return row ? clip(row.textContent, 120) : '';
+  }
+  function similar(a, b) {
+    if (a === b) return 1;
+    const grams = (s) => { s = s.replace(/\s+/g, ''); const m = new Map(); for (let i = 0; i < s.length - 1; i++) { const g = s.slice(i, i + 2); m.set(g, (m.get(g) || 0) + 1); } return m; };
+    const ga = grams(a), gb = grams(b);
+    let na = 0, nb = 0, both = 0;
+    for (const v of ga.values()) na += v;
+    for (const [g, v] of gb) { nb += v; both += Math.min(v, ga.get(g) || 0); }
+    return na + nb ? (2 * both) / (na + nb) : 1;
+  }
   function refOf(el) {
     let id = ids.get(el);
     if (!id) { id = 'ref_' + (++seq); ids.set(el, id); refs.set(id, new WeakRef(el)); }
+    refCtx.set(id, ctxOf(el));
     return id;
   }
   function byRef(ref) {
     const r = refs.get(String(ref).trim());
     const el = r && r.deref();
     return el && el.isConnected ? el : null;
+  }
+  /** 取 ref 对应元素并校验所在行没有被「就地换内容」 */
+  function byRefChecked(ref) {
+    const id = String(ref).trim();
+    const el = byRef(id);
+    if (!el) throw new Error(id + ' 已失效：页面已变化或已导航，请重新执行 browser_snapshot');
+    const was = refCtx.get(id);
+    if (was) {
+      const now = ctxOf(el);
+      if (now !== was && similar(was, now) < 0.5) {
+        throw new Error(id + ' 所在行已从「' + clip(was, 40) + '」变为「' + clip(now, 40) + '」（列表可能翻页或重新渲染），请重新 browser_snapshot 后再操作');
+      }
+    }
+    return el;
   }
 
   function visible(el) {
@@ -462,8 +512,9 @@ KIT_SOURCE = r"""
   function findByText(text) {
     const want = String(text).replace(/\s+/g, ' ').trim().toLowerCase();
     if (!want) return null;
-    let best = null, bestScore = 0, scanned = 0;
-    outer: for (const d of docsOf()) {
+    let bestScore = 0, scanned = 0;
+    let tops = [];
+    for (const d of docsOf()) {
       const walker = d.createTreeWalker(d.body || d.documentElement, NodeFilter.SHOW_ELEMENT);
       for (let el = walker.currentNode; el && scanned < 8000; el = walker.nextNode()) {
         scanned++;
@@ -479,15 +530,25 @@ KIT_SOURCE = r"""
         if (!score) continue;
         if (inter) score += 3;
         if (!visible(el)) continue;
-        if (inViewport(el)) score += 1;
-        if (score > bestScore) { best = el; bestScore = score; if (score >= 10) break outer; }
+        // 是否在视口内不参与「谁更匹配」：同名元素只因位置不同就选中其一，正是误点的来源
+        if (score > bestScore) { tops = [el]; bestScore = score; }
+        else if (score === bestScore) tops.push(el);
       }
     }
-    return best;
+    // 嵌套重复（按钮与其内部文字）只保留最内层；有打开的对话框时优先对话框内的候选
+    tops = tops.filter((el) => !tops.some((o) => o !== el && composedContains(el, o)));
+    const dlg = openDialog();
+    if (dlg) { const inDlg = tops.filter((el) => composedContains(dlg, el)); if (inDlg.length) tops = inDlg; }
+    if (tops.length > 1) {
+      const list = tops.slice(0, 8).map((el) => { const c = ctxOf(el); return '- ' + labelOf(el) + ' [' + refOf(el) + ']' + (c ? '（所在行：' + clip(c, 40) + '）' : ''); });
+      throw new Error('文字「' + text + '」匹配到 ' + tops.length + ' 个同等的元素，无法确定是哪一个：\n' + list.join('\n')
+        + (tops.length > 8 ? '\n…' : '') + '\n请改用对应的 ref（或更具体的文字 / selector）');
+    }
+    return tops[0] || null;
   }
 
   function pick(a) {
-    if (a.ref) { const el = byRef(a.ref); if (!el) throw new Error(a.ref + ' 已失效：页面已变化或已导航，请重新执行 browser_snapshot'); return el; }
+    if (a.ref) return byRefChecked(a.ref);
     if (a.selector) {
       const el = queryAny(a.selector);
       if (!el) throw new Error('未找到匹配选择器 ' + a.selector + ' 的元素');
@@ -506,13 +567,108 @@ KIT_SOURCE = r"""
     return { x: Math.round(r.left + o.x), y: Math.round(r.top + o.y), width: Math.round(r.width), height: Math.round(r.height) };
   }
 
+  /** 元素上真正能点中它的点（五点命中检测）；命中的若是目标的祖先，只在该祖先本身可交互时才算 */
+  function hitPoint(el) {
+    const rect = rectOf(el);
+    const pts = [[0.5, 0.5], [0.25, 0.5], [0.75, 0.5], [0.5, 0.25], [0.5, 0.75]];
+    let cover = null;
+    for (const [fx, fy] of pts) {
+      const x = Math.round(rect.x + rect.width * fx), y = Math.round(rect.y + rect.height * fy);
+      if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) continue;
+      const hit = deepFromPoint(x, y);
+      if (hit && (composedContains(el, hit) || (composedContains(hit, el) && isClickableAncestor(hit))
+          || (el.labels && Array.from(el.labels).some((l) => composedContains(l, hit))))) return { rect, pt: { x, y } };
+      if (!cover && hit) cover = hit;
+    }
+    return { rect, pt: null, cover };
+  }
+  function isClickableAncestor(n) {
+    if (!isEl(n) || n === n.ownerDocument.body || n === n.ownerDocument.documentElement) return false;
+    return isInteractive(n, roleOf(n));
+  }
+  /** 自身或 6 层内祖先是可交互元素（含可编辑区） */
+  function interactiveAt(n) {
+    for (let i = 0; n && isEl(n) && i < 6; i++, n = n.parentElement) {
+      if (n === n.ownerDocument.body || n === n.ownerDocument.documentElement) return null;
+      if (isInteractive(n, roleOf(n)) || isEditable(n)) return n;
+    }
+    return null;
+  }
+  /** 坐标附近 10px 内的可交互元素：唯一或明显最近时返回，否则不吸附 */
+  function nearInteractive(x, y) {
+    const found = new Map();
+    for (const r of [3, 6, 10]) {
+      for (let k = 0; k < 8; k++) {
+        const ang = (Math.PI / 4) * k;
+        const px = Math.round(x + r * Math.cos(ang)), py = Math.round(y + r * Math.sin(ang));
+        if (px < 0 || py < 0 || px >= innerWidth || py >= innerHeight) continue;
+        const el = interactiveAt(deepFromPoint(px, py));
+        if (el && !found.has(el)) {
+          const b = absRect(el);
+          const dx = Math.max(b.left - x, 0, x - b.right), dy = Math.max(b.top - y, 0, y - b.bottom);
+          found.set(el, Math.hypot(dx, dy));
+        }
+      }
+    }
+    const list = Array.from(found.entries()).filter((e) => e[1] <= 10).sort((p, q2) => p[1] - q2[1]);
+    if (!list.length) return null;
+    if (list.length > 1 && list[1][1] - list[0][1] < 3) return null;
+    return list[0][0];
+  }
+  /** 截图坐标 → 当前视口坐标：补偿截图后的滚动；视口尺寸或地址变化则拒绝（坐标已过期） */
+  function shotToViewport(x, y, s) {
+    const noHash = (u) => String(u || '').split('#')[0];
+    if (s.url && noHash(s.url) !== noHash(location.href)) {
+      throw new Error('截图之后页面已跳转到 ' + clip(location.href, 80) + '，截图上的坐标已失效，请重新 browser_screenshot');
+    }
+    if (s.kind === 'full') {
+      // 整页截图：坐标是文档坐标，先把该点滚入视口
+      if (y < scrollY || y >= scrollY + innerHeight || x < scrollX || x >= scrollX + innerWidth) {
+        window.scrollTo({ left: Math.max(0, x - innerWidth / 2), top: Math.max(0, y - innerHeight / 2), behavior: 'instant' });
+      }
+      return { x: Math.round(x - scrollX), y: Math.round(y - scrollY), note: '' };
+    }
+    if (s.vw && s.vh && (Math.abs(s.vw - innerWidth) > 1 || Math.abs(s.vh - innerHeight) > 1)) {
+      throw new Error('截图之后视口尺寸已变化（' + s.vw + '×' + s.vh + ' → ' + innerWidth + '×' + innerHeight + '），截图上的坐标已失效，请重新 browser_screenshot');
+    }
+    const sx = Number(s.sx) || 0, sy = Number(s.sy) || 0;
+    const ddx = Math.round(scrollX - sx), ddy = Math.round(scrollY - sy);
+    if (!ddx && !ddy) return { x, y, note: '' };
+    const docX = x + sx, docY = y + sy;
+    if (docY < scrollY || docY >= scrollY + innerHeight || docX < scrollX || docX >= scrollX + innerWidth) {
+      window.scrollTo({ left: Math.max(0, docX - innerWidth / 2), top: Math.max(0, docY - innerHeight / 2), behavior: 'instant' });
+    }
+    const parts = [];
+    if (ddy) parts.push('纵向 ' + ddy + 'px');
+    if (ddx) parts.push('横向 ' + ddx + 'px');
+    return { x: Math.round(docX - scrollX), y: Math.round(docY - scrollY), note: '截图后页面滚动过（' + parts.join('，') + '），已按滚动补偿坐标' };
+  }
+
   function resolve(a) {
     a = a || {};
     if (!a.ref && !a.selector && !a.text && a.x != null && a.y != null) {
-      const x = Number(a.x), y = Number(a.y);
+      let x = Number(a.x), y = Number(a.y), note = '';
+      if (a.shot) { const c = shotToViewport(x, y, a.shot); x = c.x; y = c.y; note = c.note; }
+      if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) {
+        throw new Error('坐标 (' + Math.round(x) + ', ' + Math.round(y) + ') 超出当前视口（' + innerWidth + '×' + innerHeight + '），点下去会落空：请先滚动或重新截图');
+      }
       const el = deepFromPoint(x, y);
-      return { x, y, label: el ? labelOf(el) : '坐标 (' + x + ', ' + y + ')', rect: el ? rectOf(el) : null, ref: el ? refOf(el) : null,
+      const out = { x, y, label: el ? labelOf(el) : '坐标 (' + x + ', ' + y + ')', rect: el ? rectOf(el) : null, ref: el ? refOf(el) : null,
         editable: !!(el && isEditable(el)), point: true };
+      if (note) out.note = note;
+      // 落点不在任何可交互元素上（画布、编辑区、框架除外）：10px 内唯一/明显最近的可交互元素作为目标
+      const special = el && (el.tagName === 'CANVAS' || isFrame(el) || isEditable(el) || (el.closest && el.closest('[contenteditable]')));
+      if (el && !special && !interactiveAt(el)) {
+        const near = nearInteractive(x, y);
+        if (near) {
+          const h = hitPoint(near);
+          if (h.pt) {
+            Object.assign(out, { x: h.pt.x, y: h.pt.y, label: labelOf(near), rect: h.rect, ref: refOf(near), editable: isEditable(near),
+              point: false, snapped: true, role: roleOf(near) });
+          }
+        }
+      }
+      return out;
     }
     const el = pick(a);
     if (!el) throw new Error('需要提供 ref、selector、text 或 x/y 之一');
@@ -524,26 +680,75 @@ KIT_SOURCE = r"""
     }
     const ar = absRect(el);
     const fully = ar.top >= 0 && ar.left >= 0 && ar.bottom <= innerHeight && ar.right <= innerWidth;
-    if (a.scroll !== false && !fully) { el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); }
-    const rect = rectOf(el);
-    const pts = [[0.5, 0.5], [0.25, 0.5], [0.75, 0.5], [0.5, 0.25], [0.5, 0.75]];
-    let pt = null, cover = null;
-    for (const [fx, fy] of pts) {
-      const x = Math.round(rect.x + rect.width * fx), y = Math.round(rect.y + rect.height * fy);
-      if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) continue;
-      const hit = deepFromPoint(x, y);
-      if (hit && (composedContains(el, hit) || composedContains(hit, el) || (el.labels && Array.from(el.labels).some((l) => composedContains(l, hit))))) { pt = { x, y }; break; }
-      if (!cover && hit) cover = hit;
-    }
+    // 横向用 nearest：窄视口下 center 会把整页横向挪开，让上一张截图的坐标全部失效
+    if (a.scroll !== false && !fully) { el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }); }
+    const h = hitPoint(el);
+    const rect = h.rect;
     const out = { rect, label: labelOf(el), ref: refOf(el), role: roleOf(el), editable: isEditable(el),
       disabled: !!(el.disabled || el.getAttribute('aria-disabled') === 'true') };
-    if (pt) { out.x = pt.x; out.y = pt.y; }
+    if (a.selector) {
+      try { let n = 0; for (const d of docsOf()) n += d.querySelectorAll(a.selector).length; if (n > 1) out.matches = n; } catch (e) {}
+    }
+    if (h.pt) { out.x = h.pt.x; out.y = h.pt.y; }
     else {
       out.x = Math.round(rect.x + rect.width / 2); out.y = Math.round(rect.y + rect.height / 2);
-      if (cover) out.covered_by = labelOf(cover);
+      if (h.cover) out.covered_by = labelOf(h.cover);
       if (out.x < 0 || out.y < 0 || out.x >= innerWidth || out.y >= innerHeight) out.offscreen = true;
     }
     return out;
+  }
+
+  /** 派发鼠标前的最终校准：等目标停止移动（展开动画、过渡结束），再重新算命中点并复核。
+   *  定位与点击之间页面还在动时，按旧坐标点会落空或点到别的选项。 */
+  function aim(a) {
+    a = a || {};
+    const el = byRefChecked(a.ref);
+    if (!visible(el)) throw new Error(labelOf(el) + ' 已不可见（菜单或弹层可能已收起），请重新定位');
+    const doc = el.ownerDocument;
+    const moving = () => {
+      try {
+        const list = document.getAnimations().concat(doc !== document ? doc.getAnimations() : []);
+        for (const an of list) {
+          if (an.playState !== 'running') continue;
+          const timing = an.effect && an.effect.getTiming ? an.effect.getTiming() : {};
+          if (timing.iterations === Infinity) continue;
+          const t = an.effect && an.effect.target;
+          if (t && composedContains(t, el)) return true;
+        }
+      } catch (e) {}
+      return false;
+    };
+    return new Promise((done, fail) => {
+      const t0 = performance.now();
+      let prev = '', same = 0;
+      const next = () => {
+        let fired = false;
+        const go = () => { if (!fired) { fired = true; tick(); } };
+        requestAnimationFrame(go);
+        setTimeout(go, 20);
+      };
+      const tick = () => {
+        try {
+          if (!el.isConnected) throw new Error(labelOf(el) + ' 已从页面移除，请重新 browser_snapshot');
+          const r = absRect(el);
+          const key = [r.left, r.top, r.width, r.height].map(Math.round).join(',');
+          same = key === prev ? same + 1 : 0;
+          prev = key;
+          const waited = performance.now() - t0;
+          if ((same >= 1 && !moving()) || waited > 800) {
+            const h = hitPoint(el);
+            if (!h.pt) {
+              if (h.cover) throw new Error(labelOf(el) + ' 此刻被 ' + labelOf(h.cover) + ' 遮挡，未点击');
+              throw new Error(labelOf(el) + ' 已移出可视区域，未点击');
+            }
+            done({ x: h.pt.x, y: h.pt.y, rect: h.rect, label: labelOf(el), waited: Math.round(waited) });
+            return;
+          }
+          next();
+        } catch (e) { fail(e); }
+      };
+      tick();
+    });
   }
 
   function isEditable(el) {
@@ -721,8 +926,91 @@ KIT_SOURCE = r"""
   // 变化监听覆盖顶层与各同源框架文档；框架新加载后，下一次 watch 时补上
   const observed = new WeakSet();
   let mo = null, mut = 0, last = 0;
+  // 高频变化节点（时钟、JS 动画每帧改 style）不刷新「最近变化时间」，否则稳定判定要等满预算
+  const rate = new WeakMap();
+  function noisy(node, now) {
+    const b = Math.floor(now / 1000);
+    let r = rate.get(node);
+    if (!r) { r = { b, c: 0, p: 0 }; rate.set(node, r); }
+    if (r.b !== b) { r.p = r.b === b - 1 ? r.c : 0; r.c = 0; r.b = b; }
+    r.c++;
+    return r.c + r.p > 12;
+  }
+  // 动作期间出现的提示（toast / 消息条 / 表单校验文字）：插入当下就记下文字，之后被移除也能回报
+  const NOTICE_CLS = /toast|snackbar|notif|notice|message|msg|alert|error|invalid|explain/i;
+  let notices = [], noticeKeys = new Set(), addedRoots = [], shownCands = [], dlgAtWatch = null;
+  function noticeKind(el) {
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    if (role === 'alert' || role === 'alertdialog' || role === 'status') return 'role';
+    const live = el.getAttribute('aria-live');
+    if (live && live !== 'off') return 'role';
+    if (el.hasAttribute('data-sonner-toast')) return 'role';
+    const cls = String(el.getAttribute('class') || '');
+    return cls && NOTICE_CLS.test(cls) ? 'cls' : '';
+  }
+  function positioned(el) {
+    for (let i = 0, n = el; n && isEl(n) && i < 4; i++, n = n.parentElement) {
+      const p = winOf(n).getComputedStyle(n).position;
+      if (p === 'fixed' || p === 'absolute' || p === 'sticky') return true;
+    }
+    return false;
+  }
+  function levelOf(cls, text) {
+    const s = (cls + ' ' + text).toLowerCase();
+    if (/error|danger|fail|invalid|错误|失败|异常|不能|无法|不足|不正确|不存在|超时|拒绝|有误/.test(s)) return 'error';
+    if (/warn|警告|注意/.test(s)) return 'warning';
+    if (/success|成功|已保存|完成/.test(s)) return 'success';
+    return 'info';
+  }
+  function noteNotice(el) {
+    if (notices.length >= 12) return;
+    let n = el, kind = '';
+    for (let i = 0; n && isEl(n) && i < 4; i++, n = n.parentElement) {
+      if (n === n.ownerDocument.body || n === n.ownerDocument.documentElement) return;
+      kind = noticeKind(n);
+      if (kind) break;
+    }
+    if (!kind || !n) return;
+    const raw = n.textContent || '';
+    if (raw.length > 400) return; // 大容器（聊天记录、整块表单）不是提示
+    const text = clip(raw, 200);
+    if (text.length < 2 || noticeKeys.has(text)) return;
+    const cls = String(n.getAttribute('class') || '');
+    try {
+      if (!visible(n)) return; // 还没显示：等它显示出来的那次变化再记
+      if (kind === 'cls' && !/error|invalid|explain/i.test(cls) && !positioned(n)) return;
+    } catch (e) { return; }
+    noticeKeys.add(text);
+    notices.push({ text, node: new WeakRef(n), level: levelOf(cls, text) });
+  }
   function observeAll() {
-    if (!mo) mo = new MutationObserver((recs) => { mut += recs.length; last = performance.now(); });
+    if (!mo) mo = new MutationObserver((recs) => {
+      const now = performance.now();
+      const seen = new Set();
+      let real = 0;
+      for (const r of recs) {
+        const t = r.type === 'characterData' ? r.target.parentNode : r.target;
+        if (!t) continue;
+        if (!seen.has(t)) { seen.add(t); if (!noisy(t, now)) real++; }
+        try {
+          if (r.type === 'childList') {
+            for (const n of r.addedNodes) {
+              if (!isEl(n)) continue;
+              noteNotice(n);
+              if (addedRoots.length < 60) addedRoots.push(new WeakRef(n));
+            }
+            if (isEl(t) && r.addedNodes.length) noteNotice(t);
+          } else if (r.type === 'attributes' && isEl(t)) {
+            const an = r.attributeName;
+            if (an === 'class' || an === 'style' || an === 'hidden' || an === 'open' || an === 'aria-hidden') {
+              noteNotice(t);
+              if (shownCands.length < 60) shownCands.push({ ref: new WeakRef(t), attr: an });
+            }
+          } else if (r.type === 'characterData' && isEl(t)) noteNotice(t);
+        } catch (e) {}
+      }
+      if (real) { mut += real; last = now; }
+    });
     for (const d of docsOf()) {
       if (observed.has(d)) continue;
       observed.add(d);
@@ -732,7 +1020,77 @@ KIT_SOURCE = r"""
   function watch() {
     observeAll();
     mut = 0; last = performance.now();
+    notices = []; noticeKeys = new Set(); addedRoots = []; shownCands = [];
+    dlgAtWatch = openDialog();
     return true;
+  }
+  function itemLine(el) {
+    const role = roleOf(el);
+    const name = nameOf(el);
+    const st = states(el, role).filter((x) => x !== 'focused');
+    return (role || el.tagName.toLowerCase()) + (name ? ' ' + q(name) : '') + ' [' + refOf(el) + ']' + (st.length ? ' ' + st.join(' ') : '');
+  }
+  /** 动作期间的变化摘要：提示文字（含已消失的）、新出现的可操作元素（新弹出的菜单、对话框、浮层里的按钮） */
+  function changes() {
+    const out = { notices: [], added: [], dialog: '' };
+    const order = { error: 0, warning: 1, info: 2, success: 3 };
+    for (const n of notices.slice().sort((p, q2) => order[p.level] - order[q2.level]).slice(0, 3)) {
+      const el = n.node.deref();
+      out.notices.push({ text: n.text, level: n.level, gone: !el || !el.isConnected || !visible(el) });
+    }
+    const roots = [];
+    const dlg = openDialog();
+    if (dlg && dlg !== dlgAtWatch) { roots.push(dlg); out.dialog = labelOf(dlg); }
+    const okRoot = (el) => el && el.isConnected && el !== el.ownerDocument.body && el !== el.ownerDocument.documentElement
+      && visible(el) && el.getElementsByTagName('*').length <= 400;
+    for (const w of addedRoots) { const el = w.deref(); if (okRoot(el) && !roots.includes(el)) roots.push(el); }
+    for (const c of shownCands) {
+      const el = c.ref.deref();
+      if (!okRoot(el) || roots.includes(el)) continue;
+      // 只改 class/style 的静态元素多半是样式切换（悬停、选中态）；只有浮层类（绝对/固定定位）才算「弹出」
+      if ((c.attr === 'class' || c.attr === 'style') && !positioned(el)) continue;
+      roots.push(el);
+    }
+    const top = roots.filter((r) => !roots.some((o) => o !== r && composedContains(o, r)));
+    const seenEl = new Set();
+    let chars = 0;
+    outer: for (const r of top) {
+      const walker = r.ownerDocument.createTreeWalker(r, NodeFilter.SHOW_ELEMENT);
+      for (let el = walker.currentNode; el; el = walker.nextNode()) {
+        if (seenEl.has(el) || SKIP.has(el.tagName)) continue;
+        if (!isInteractive(el, roleOf(el)) || !visible(el) || !inViewport(el)) continue;
+        seenEl.add(el);
+        const line = itemLine(el);
+        if (out.added.length >= 20 || chars + line.length > 1200) { out.more = true; break outer; }
+        out.added.push(line); chars += line.length;
+      }
+    }
+    return out;
+  }
+  /** 导航后的摘要：正文开头 + 视口内可交互元素，省去一次 snapshot 往返 */
+  function digest(a) {
+    a = a || {};
+    const t = pageText({ max_chars: 600 });
+    let snap = '';
+    try { snap = snapshot({ viewport_only: true, max_chars: Number(a.max_chars) || 1500 }).text; } catch (e) {}
+    return { text: t.text, snapshot: snap };
+  }
+  /** 视口内可交互元素的编号框（截图上画框用，不改页面） */
+  function marks() {
+    const out = [];
+    for (const d of docsOf()) {
+      const walker = d.createTreeWalker(d.body || d.documentElement, NodeFilter.SHOW_ELEMENT);
+      for (let el = walker.currentNode; el && out.length < 60; el = walker.nextNode()) {
+        if (SKIP.has(el.tagName) || isFrame(el)) continue;
+        if (!isInteractive(el, roleOf(el)) || !visible(el) || !inViewport(el)) continue;
+        const r = rectOf(el);
+        if (r.width < 4 || r.height < 4) continue;
+        if (out.some((m) => composedContains(m.el, el) && Math.abs(m.rect.x - r.x) < 3 && Math.abs(m.rect.y - r.y) < 3)) continue;
+        out.push({ el, rect: r });
+      }
+    }
+    return { items: out.map((m, i) => ({ n: i + 1, ref: refOf(m.el), label: itemLine(m.el), rect: m.rect })),
+      viewport: { width: innerWidth, height: innerHeight } };
   }
   function state() {
     const act = deepActive();
@@ -740,7 +1098,7 @@ KIT_SOURCE = r"""
     return { url: location.href, title: document.title, ready: document.readyState,
       focus: act ? labelOf(act) : '',
       dialog: dlg ? labelOf(dlg) : '', mutations: mut,
-      // 距最近一次 DOM 变更（或 watch 起点）多少毫秒：宿主据此在自己一侧轮询「稳定」，不依赖页面计时器
+      // 距最近一次（非噪声）DOM 变更多少毫秒：宿主据此在自己一侧轮询「稳定」，不依赖页面计时器
       idle_ms: mo ? Math.round(performance.now() - last) : 1e9,
       scroll: { x: Math.round(scrollX), y: Math.round(scrollY), max_y: Math.max(0, Math.round(document.documentElement.scrollHeight - innerHeight)) },
       viewport: { width: innerWidth, height: innerHeight } };
@@ -864,7 +1222,7 @@ KIT_SOURCE = r"""
     if (!el.isConnected) throw new Error('目标元素已从页面移除，请重新执行 browser_snapshot');
     if (!visible(el)) throw new Error(labelOf(el) + ' 当前不可见（被隐藏或尺寸为 0）');
     if (el.disabled || el.getAttribute('aria-disabled') === 'true') throw new Error(labelOf(el) + ' 处于禁用状态，点击不会生效');
-    el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
     const w = winOf(el);
     const r = el.getBoundingClientRect();
     const base = { bubbles: true, cancelable: true, composed: true, view: w, button: 0,
@@ -884,7 +1242,7 @@ KIT_SOURCE = r"""
   }
 
   const FN = { snapshot, resolve, focus: focusTarget, selectAll, selection, cut: cutSelection, paste, fill, text: pageText,
-    watch, quiet, state, check, scrollTo, scrollPos, wait: waitFor, elementAt, activate };
+    watch, quiet, state, check, scrollTo, scrollPos, wait: waitFor, elementAt, activate, aim, changes, digest, marks };
 
   window.__ccKit = {
     v: V,

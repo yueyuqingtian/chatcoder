@@ -17,7 +17,7 @@ import { globalWsClient } from "../api/ws";
 import { IDLE_AGENT, normalizeUrl, sessionKey, useBrowserStore, type BrowserTabState } from "../store/browser";
 import { bucketKeyOf, usePanelStore } from "../store/panel";
 import {
-  findFrameByWcId, getFrame, waitFrameReady, waitNavigationSettled, type FrameRecord,
+  findFrameByWcId, getFrame, hostSleep, waitFrameReady, waitNavigationSettled, type FrameRecord,
 } from "./frames";
 
 const PROTOCOL = 1;
@@ -37,7 +37,8 @@ const COUNTED_KIT = new Set(["snapshot", "text", "fill", "wait", "scrollTo", "se
 let lastKeyAt = 0;
 let composing = false;
 
-const sleep = (ms: number) => new Promise<void>((r) => window.setTimeout(r, ms));
+// 宿主等待走主进程计时：应用窗口被遮挡时页面定时器被节流到秒级（plan-20261015-browser-perf R1）
+const sleep = hostSleep;
 
 function withTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -194,14 +195,15 @@ function scheduleIdle(sid: string) {
 }
 
 let vizSeq = 0;
-function showTarget(sid: string, rect: unknown, x?: number, y?: number) {
+/** zoom：网页缩放系数——页面坐标是 CSS 像素，面板叠加层按宿主像素绘制 */
+function showTarget(sid: string, rect: unknown, x?: number, y?: number, zoom = 1) {
   const store = useBrowserStore.getState();
   const r = rect && typeof rect === "object" ? (rect as Record<string, number>) : null;
   const patch: Record<string, unknown> = {};
   if (r && Number.isFinite(r.width) && Number.isFinite(r.height)) {
-    patch.highlight = { x: r.x, y: r.y, width: r.width, height: r.height, seq: ++vizSeq };
+    patch.highlight = { x: r.x * zoom, y: r.y * zoom, width: r.width * zoom, height: r.height * zoom, seq: ++vizSeq };
   }
-  if (Number.isFinite(x) && Number.isFinite(y)) patch.cursor = { x: x as number, y: y as number };
+  if (Number.isFinite(x) && Number.isFinite(y)) patch.cursor = { x: (x as number) * zoom, y: (y as number) * zoom };
   if (Object.keys(patch).length) store.patchAgent(sid, patch);
 }
 
@@ -244,22 +246,110 @@ async function baseOf(sid: string, tabId: string, rec: FrameRecord | null) {
   return { tab: tabId, url: t?.url ?? "", title: t?.title ?? "", events: await drainEvents(sid, rec) };
 }
 
-/** 动作后的「稳定」判定：先看是否发生跳转（跳转则等加载结束），再轮询页面最近一次 DOM 变更距今多久，
- *  静默 120 ms 即返回。轮询在宿主侧做，不依赖网页自己的计时器（网页计时器被节流时等待会被拉长到秒级）。 */
-async function settleAfter(sid: string, tabId: string, rec: FrameRecord, since: number, settleMs: number) {
+interface SettleOpts {
+  /** 动作起点的网络序号（主进程 aiWindow 返回）；null 表示网络记录不可用 */
+  netSeq: number | null;
+  /** 动作起点的控制台序号 */
+  consoleSeq: number;
+  /** 动作起点的 DOM 就绪序号（判断跳转后的新页面是否已就绪） */
+  domSince: number;
+  /** 模型要求动作完成即截图 */
+  shot: boolean;
+  visible: boolean;
+}
+
+/** 动作后的「稳定」判定（plan-20261015-browser-perf）：单循环约 30 ms 一轮——
+ *  导航检测与 DOM 静默并行；只统计动作起点之后页面脚本发起的请求，在途数为 0 才算稳定（点击后等接口返回，
+ *  报错提示随之出现）；DOM 静默由页面工具包过滤掉高频噪声节点。最短观察 60 ms、静默 100 ms，预算由动作决定。
+ *  结束时一次取回：提示文字（含已消失的）、新出现的可操作元素、接口错误、控制台报错；出错时同一次调用里截图。 */
+async function settleAfter(sid: string, tabId: string, rec: FrameRecord, since: number, settleMs: number, o: SettleOpts) {
   if (!settleMs) return { navigated: rec.navSeq !== since };
-  const navigated = await waitNavigationSettled(sid, tabId, since, Math.max(settleMs, 12000));
-  const budget = navigated ? 800 : settleMs;
   const t0 = performance.now();
+  let budget = settleMs;
+  let navigated = false;
   let st: Record<string, any> = {};
-  try {
-    for (;;) {
-      st = await evalKit(rec, "state", {}, 4000);
-      if (Number(st.idle_ms ?? 1e9) >= 120 || performance.now() - t0 >= budget) break;
-      await sleep(40);
+  let pending = 0;
+  for (;;) {
+    if (!navigated && rec.navSeq !== since) {
+      navigated = true;
+      await waitNavigationSettled(sid, tabId, since, 12000, { domSince: o.domSince, graceMs: 0 });
+      budget = performance.now() - t0 + 800;
     }
-  } catch { /* 跳转中或页面忙：只回报导航结论 */ }
-  return { ...st, navigated };
+    const [s1, n1] = await Promise.all([
+      evalKit(rec, "state", {}, 4000).catch(() => null),
+      o.netSeq !== null ? mainExec(rec, "netSince", { since: o.netSeq }).catch(() => null) : Promise.resolve(null),
+    ]);
+    if (s1) st = s1;
+    pending = Number(n1?.pending) || 0;
+    const el = performance.now() - t0;
+    if (s1 && el >= 60 && Number(st.idle_ms ?? 1e9) >= 100 && pending === 0) break;
+    if (!s1 && !navigated && rec.navSeq === since && el >= 60) break; // 页面忙且没在跳转：不空等
+    if (el >= budget) break;
+    await sleep(30);
+  }
+  const out: Record<string, any> = { ...st, navigated, waited: Math.round(performance.now() - t0) };
+  if (pending > 0) out.pending = pending;
+  const [chg, net] = await Promise.all([
+    evalKit(rec, "changes", {}, 4000).catch(() => null),
+    o.netSeq !== null ? mainExec(rec, "netSince", { since: o.netSeq, bodies: true }).catch(() => null) : Promise.resolve(null),
+  ]);
+  if (chg) {
+    if (chg.notices?.length) out.notices = chg.notices;
+    if (chg.added?.length) out.added = chg.added;
+    if (chg.more) out.added_more = true;
+    if (chg.dialog) out.new_dialog = chg.dialog;
+  }
+  if (net?.errors?.length) out.net_errors = net.errors;
+  const cerr = rec.console.filter((e) => e.seq > o.consoleSeq && e.level === "error").slice(-3);
+  if (cerr.length) out.console_errors = cerr.map((e) => e.text.slice(0, 300));
+  const hasError = !!(out.net_errors || out.new_dialog || (out.notices || []).some((n: any) => n.level === "error"));
+  if (o.shot || hasError) {
+    try {
+      out.shot = await mainExec(rec, "capture", { max_side: 1280, quality: 72 });
+      out.shot_reason = o.shot ? "requested" : "error";
+      if (o.visible) {
+        const store = useBrowserStore.getState();
+        store.patchAgent(sid, { flash: store.getSessionState(sid).agent.flash + 1 });
+      }
+    } catch (e) {
+      out.shot_error = errText(e);
+    }
+  }
+  return out;
+}
+
+/** marks 截图：在截图上画编号框（只改图片，不改页面 DOM、不改面板视觉），模型按编号对应的 ref 操作 */
+async function drawMarks(res: Record<string, any>, items: Array<Record<string, any>>): Promise<Record<string, unknown>> {
+  const raw = atob(String(res.base64 || ""));
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  const bmp = await createImageBitmap(new Blob([bytes], { type: String(res.mime || "image/jpeg") }));
+  const canvas = new OffscreenCanvas(bmp.width, bmp.height);
+  const g = canvas.getContext("2d");
+  if (!g) throw new Error("no 2d");
+  g.drawImage(bmp, 0, 0);
+  const k = bmp.width / Math.max(1, Number(res.css_width) || bmp.width);
+  g.lineWidth = 2;
+  g.font = "bold 12px sans-serif";
+  g.textBaseline = "top";
+  for (const m of items) {
+    const r = m.rect || {};
+    const x = r.x * k, y = r.y * k, w = r.width * k, h = r.height * k;
+    g.strokeStyle = "#e5484d";
+    g.strokeRect(x, y, w, h);
+    const label = String(m.n);
+    const tw = g.measureText(label).width + 6;
+    const ly = y >= 15 ? y - 15 : y;
+    g.fillStyle = "#e5484d";
+    g.fillRect(x, ly, tw, 15);
+    g.fillStyle = "#ffffff";
+    g.fillText(label, x + 3, ly + 1);
+  }
+  const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.8 });
+  const buf = new Uint8Array(await blob.arrayBuffer());
+  let bin = "";
+  for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+  return { base64: btoa(bin), mime: "image/jpeg", width: bmp.width, height: bmp.height };
 }
 
 /** 等待条件（文字 / 元素出现或消失、加载完成）：宿主侧轮询页面的同步检查，理由同上 */
@@ -314,9 +404,17 @@ function mouseButtons(mods: string[]): string[] {
   return mods.map((m) => m.toLowerCase()).filter((m) => ["control", "shift", "alt", "meta"].includes(m));
 }
 
-async function dispatchMouse(el: any, a: Record<string, any>) {
-  const x = Math.round(Number(a.x) || 0);
-  const y = Math.round(Number(a.y) || 0);
+/** 网页缩放系数：sendInputEvent 的坐标是 DIP，页面坐标是 CSS 像素，缩放不是 100% 时必须换算（R10） */
+function zoomOf(rec: FrameRecord): number {
+  try {
+    const z = typeof rec.el?.getZoomFactor === "function" ? Number(rec.el.getZoomFactor()) : 1;
+    return Number.isFinite(z) && z > 0 ? z : 1;
+  } catch { return 1; }
+}
+
+async function dispatchMouse(el: any, a: Record<string, any>, zoom = 1) {
+  const x = Math.round((Number(a.x) || 0) * zoom);
+  const y = Math.round((Number(a.y) || 0) * zoom);
   const button = a.button === "right" ? "right" : a.button === "middle" ? "middle" : "left";
   const modifiers = mouseButtons(Array.isArray(a.modifiers) ? a.modifiers : []);
   const action = String(a.action || "click");
@@ -332,8 +430,8 @@ async function dispatchMouse(el: any, a: Record<string, any>) {
     return;
   }
   if (action === "drag") {
-    const tx = Math.round(Number(a.to_x) || x);
-    const ty = Math.round(Number(a.to_y) || y);
+    const tx = a.to_x != null ? Math.round(Number(a.to_x) * zoom) : x;
+    const ty = a.to_y != null ? Math.round(Number(a.to_y) * zoom) : y;
     const steps = Math.max(2, Math.min(Number(a.steps) || 12, 40));
     el.sendInputEvent({ type: "mouseMove", x, y, modifiers });
     el.sendInputEvent({ type: "mouseDown", x, y, button: "left", clickCount: 1, modifiers });
@@ -368,16 +466,21 @@ async function listTabs(sid: string) {
   };
 }
 
+/** 导航默认等到主框架 DOM 就绪、页面脚本的请求与 DOM 稳定即返回（R4）；wait=load 才等图片、字体等全部加载完。 */
 async function navigateTab(sid: string, tab: BrowserTabState, a: Record<string, any>) {
   const action = a.action as string | undefined;
   const timeout = Math.max(3000, Math.min(Number(a.timeout_ms) || 30000, 60000));
+  const untilLoad = a.wait === "load";
   if (action === "back" || action === "forward" || action === "reload") {
     const rec = await ensureFrame(sid, tab);
     const since = rec.navSeq;
+    const domSince = rec.domSeq;
+    const netSeq = await netMark(rec);
     if (action === "back") { if (!rec.el.canGoBack()) throw new Error("没有可后退的页面"); rec.el.goBack(); }
     else if (action === "forward") { if (!rec.el.canGoForward()) throw new Error("没有可前进的页面"); rec.el.goForward(); }
     else rec.el.reload();
-    await waitNavigationSettled(sid, tab.id, since, timeout);
+    await waitNavigationSettled(sid, tab.id, since, timeout, { untilLoad, domSince, graceMs: 1500 });
+    if (!untilLoad) await quietAfterNav(rec, netSeq, 1500);
     return { rec, status: undefined };
   }
   const url = normalizeUrl(String(a.url || ""));
@@ -387,25 +490,63 @@ async function navigateTab(sid: string, tab: BrowserTabState, a: Record<string, 
   const rec0 = getFrame(sid, tab.id);
   if (rec0?.ready && typeof rec0.el?.loadURL === "function") {
     store.updateTab(sid, tab.id, { url, loading: true, error: undefined });
-    try {
-      await withTimeout(Promise.resolve(rec0.el.loadURL(url)), timeout, "__TIMEOUT__");
-    } catch (e) {
-      const m = errText(e);
-      if (m !== "__TIMEOUT__") throw new Error(`页面加载失败：${loadErrorText(m, url)}`);
+    const since = rec0.navSeq;
+    const domSince = rec0.domSeq;
+    const netSeq = await netMark(rec0);
+    let failed: string | null = null;
+    let finished = false;
+    Promise.resolve(rec0.el.loadURL(url)).then(
+      () => { finished = true; },
+      (e: unknown) => { failed = errText(e); finished = true; },
+    );
+    const t0 = performance.now();
+    while (performance.now() - t0 < timeout) {
+      if (failed) throw new Error(`页面加载失败：${loadErrorText(failed, url)}`);
+      if (finished) break;
+      if (!untilLoad && rec0.navSeq !== since && rec0.domSeq > domSince) break;
+      await sleep(30);
     }
+    if (!untilLoad) await quietAfterNav(rec0, netSeq, 1500);
     return { rec: rec0, status: undefined };
   }
   store.navigate(sid, url, tab.id);
   const rec = await waitFrameReady(sid, tab.id, 15000);
   if (!rec) throw new Error("浏览器标签未能就绪，请稍后重试");
+  // 首次挂载：webview 就绪即 DOM 就绪；只有显式要求完整加载时继续等
   const t0 = performance.now();
   while (performance.now() - t0 < timeout) {
     const t = tabsOf(sid).find((x) => x.id === tab.id);
     if (t?.error) throw new Error(`页面加载失败：${loadErrorText(t.error, url)}`);
-    if (!rec.loading && !t?.loading) break;
-    await sleep(60);
+    if (!untilLoad || (!rec.loading && !t?.loading)) break;
+    await sleep(30);
   }
+  if (!untilLoad) await quietAfterNav(rec, await netMark(rec), 1500);
   return { rec, status: undefined };
+}
+
+/** 当前网络序号（之后发起的请求才算本次动作的） */
+async function netMark(rec: FrameRecord): Promise<number | null> {
+  if (!rec.wcId) return null;
+  try {
+    const r = await mainExec(rec, "netSince", { since: Number.MAX_SAFE_INTEGER });
+    return r?.available ? Number(r.seq) || 0 : null;
+  } catch { return null; }
+}
+
+/** 新页面 DOM 就绪后：页面脚本的首批请求返回、DOM 静默 100 ms 即可（上限 budget） */
+async function quietAfterNav(rec: FrameRecord, netSeq: number | null, budget: number) {
+  const t0 = performance.now();
+  try { await evalKit(rec, "watch", {}, 3000); } catch { return; }
+  for (;;) {
+    const [st, n] = await Promise.all([
+      evalKit(rec, "state", {}, 3000).catch(() => null),
+      netSeq !== null ? mainExec(rec, "netSince", { since: netSeq }).catch(() => null) : Promise.resolve(null),
+    ]);
+    const el = performance.now() - t0;
+    if (!st || el >= budget) return;
+    if (el >= 60 && Number(st.idle_ms ?? 1e9) >= 100 && !(Number(n?.pending) > 0)) return;
+    await sleep(30);
+  }
 }
 
 function loadErrorText(raw: string, url: string): string {
@@ -496,51 +637,84 @@ async function dispatch(sid: string, op: string, a: Record<string, any>): Promis
   if (op === "mouse" || op === "keys" || op === "text") {
     begin(sid, tab.id, label || (op === "mouse" ? "点击页面" : op === "keys" ? "按键" : "输入文字"), true);
     const settleMs = Math.max(0, Math.min(Number(a.settle_ms) || 0, 8000));
-    // AI 动作窗口：期间网页弹窗按 AI 策略应答（不弹系统对话框、不卡页面）
-    try {
-      await mainExec(rec, "aiWindow", { ms: settleMs + 4000, accept: a.on_dialog !== "dismiss", prompt_text: a.prompt_text || "" });
-    } catch { /* 主进程能力缺失时降级 */ }
-    try { await evalKit(rec, "watch", {}, 4000); } catch { /* 页面在跳转：settle 时只看导航 */ }
+    const consoleSeq = rec.console.length ? rec.console[rec.console.length - 1].seq : 0;
+    // 准备步骤并行（R3）：AI 动作窗口（期间网页弹窗按 AI 策略应答）+ 开始记录页面变化
+    const [win] = await Promise.all([
+      mainExec(rec, "aiWindow", { ms: settleMs + 4000, accept: a.on_dialog !== "dismiss", prompt_text: a.prompt_text || "" }).catch(() => null),
+      evalKit(rec, "watch", {}, 4000).catch(() => null), // 页面在跳转：settle 时只看导航
+    ]);
+    const netSeq = win && typeof win.net_seq === "number" ? win.net_seq : null;
     const since = rec.navSeq;
-    if (op === "mouse") {
-      if (a.action !== "wheel") await politeness();
-      if (visible) {
-        showTarget(sid, a.rect, Number(a.x), Number(a.y));
-        if (a.action !== "wheel") await sleep(150); // 光标先到位再点击，让用户看清 AI 要点哪里
-      }
-      const release = guardFocus(rec.el, hostFocus());
-      try {
-        // activate：目标被遮挡时直接在元素上派发点击（不经过坐标命中，遮挡物拦不住）
-        if (a.action === "activate") await evalKit(rec, "activate", { ref: a.ref }, 8000);
-        else await dispatchMouse(rec.el, a);
-      } finally {
-        await sleep(30);
-        release();
-      }
-      if (visible && ((a.action || "click") === "click" || a.action === "activate")) {
-        store.patchAgent(sid, { ripple: { x: Number(a.x), y: Number(a.y), seq: ++vizSeq } });
-      }
-    } else if (op === "keys") {
-      if (visible && a.rect) showTarget(sid, a.rect);
-      const keys: string[] = Array.isArray(a.keys) ? a.keys.map(String) : [];
-      const repeat = Math.max(1, Math.min(Number(a.repeat) || 1, 50));
-      for (let r = 0; r < repeat; r++) {
-        for (const combo of keys) {
-          sendKeyCombo(rec.el, combo);
-          if (keys.length > 1 || repeat > 1) await sleep(12);
+    const domSince = rec.domSeq;
+    const zoom = zoomOf(rec);
+    let release = () => {};
+    let aimed: Record<string, any> | null = null;
+    try {
+      if (op === "mouse") {
+        const act = String(a.action || "click");
+        if (act !== "wheel") await politeness();
+        let x = Number(a.x);
+        let y = Number(a.y);
+        // 光标先到位再点击，让用户看清 AI 要点哪里；与点击前校准重叠进行，不额外加等待
+        let cursor: Promise<void> = Promise.resolve();
+        if (visible && act !== "wheel") {
+          showTarget(sid, a.rect, x, y, zoom);
+          cursor = sleep(100);
         }
+        if (a.ref && (act === "click" || act === "move")) {
+          // 点击前最终校准（R11）：等目标停止移动（展开动画）、复核命中，按最终坐标派发
+          const [r] = await Promise.all([evalKit(rec, "aim", { ref: a.ref }, 4000), cursor]);
+          aimed = r;
+          if (Math.abs(r.x - x) > 2 || Math.abs(r.y - y) > 2) {
+            x = r.x;
+            y = r.y;
+            if (visible) showTarget(sid, r.rect, x, y, zoom);
+          }
+        } else {
+          await cursor;
+        }
+        release = guardFocus(rec.el, hostFocus());
+        // activate：目标被遮挡时直接在元素上派发点击（不经过坐标命中，遮挡物拦不住）
+        if (act === "activate") await evalKit(rec, "activate", { ref: a.ref }, 8000);
+        else await dispatchMouse(rec.el, { ...a, x, y }, zoom);
+        if (visible && (act === "click" || act === "activate")) {
+          store.patchAgent(sid, { ripple: { x: x * zoom, y: y * zoom, seq: ++vizSeq } });
+        }
+      } else if (op === "keys") {
+        if (visible && a.rect) showTarget(sid, a.rect, undefined, undefined, zoom);
+        const keys: string[] = Array.isArray(a.keys) ? a.keys.map(String) : [];
+        const repeat = Math.max(1, Math.min(Number(a.repeat) || 1, 50));
+        for (let r = 0; r < repeat; r++) {
+          for (const combo of keys) {
+            sendKeyCombo(rec.el, combo);
+            if (keys.length > 1 || repeat > 1) await sleep(12);
+          }
+        }
+      } else {
+        if (visible && a.rect) showTarget(sid, a.rect, undefined, undefined, zoom);
+        await Promise.resolve(rec.el.insertText(String(a.text ?? "")));
       }
-    } else {
-      if (visible && a.rect) showTarget(sid, a.rect);
-      await Promise.resolve(rec.el.insertText(String(a.text ?? "")));
+      const settle = await settleAfter(sid, tab.id, rec, since, settleMs, {
+        netSeq, consoleSeq, domSince, shot: !!a.shot, visible,
+      });
+      return { ...(await baseOf(sid, tab.id, rec)), settle, ...(aimed ? { aimed } : {}) };
+    } finally {
+      // 焦点守卫覆盖整个稳定观察期：网页随后抢焦点也会被即时还原（取代原来的固定 30 ms 等待）
+      release();
     }
-    const settle = await settleAfter(sid, tab.id, rec, since, settleMs);
-    return { ...(await baseOf(sid, tab.id, rec)), settle };
   }
 
   if (op === "capture") {
     begin(sid, tab.id, label || "截图", true);
-    const res = await mainExec(rec, "capture", a);
+    let marks: Record<string, any> | null = null;
+    if (a.marks) {
+      try { marks = await evalKit(rec, "marks", {}, 8000); } catch { marks = null; }
+    }
+    let res = await mainExec(rec, "capture", a);
+    if (marks?.items?.length) {
+      try { res = { ...res, ...(await drawMarks(res, marks.items)) }; } catch { /* 画框失败时返回原图 */ }
+      res.marks = marks.items.map((m: any) => ({ n: m.n, ref: m.ref, label: m.label }));
+    }
     if (visible) store.patchAgent(sid, { flash: store.getSessionState(sid).agent.flash + 1 });
     return { ...(await baseOf(sid, tab.id, rec)), ...res };
   }

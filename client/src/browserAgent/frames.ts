@@ -25,6 +25,8 @@ export interface FrameRecord {
   ready: boolean;
   prepared: boolean;
   navSeq: number;
+  /** 主框架 DOM 就绪次数：导航默认等到 DOM 就绪即返回，不等图片、字体等全部加载完 */
+  domSeq: number;
   loading: boolean;
   console: ConsoleEntry[];
 }
@@ -59,7 +61,7 @@ export function registerFrame(sid: string, tabId: string, el: any): FrameRecord 
   if (prev && prev.el === el) return prev;
   const rec: FrameRecord = {
     key, sid, tabId, el, wcId: null, ready: false, prepared: false,
-    navSeq: prev?.navSeq ?? 0, loading: false, console: prev?.console ?? [],
+    navSeq: prev?.navSeq ?? 0, domSeq: prev?.domSeq ?? 0, loading: false, console: prev?.console ?? [],
   };
   frames.set(key, rec);
   return rec;
@@ -78,6 +80,7 @@ export function markFrameReady(sid: string, tabId: string, el: any) {
   const rec = frames.get(frameKey(sid, tabId));
   if (!rec || rec.el !== el) return;
   rec.ready = true;
+  rec.domSeq++;
   if (typeof el.getWebContentsId === "function") {
     try { rec.wcId = el.getWebContentsId(); } catch { rec.wcId = null; }
   }
@@ -107,6 +110,16 @@ export function pushConsole(sid: string, tabId: string, level: string, text: str
   if (rec.console.length > CONSOLE_MAX) rec.console.splice(0, rec.console.length - CONSOLE_MAX);
 }
 
+/** 宿主侧等待（plan-20261015-browser-perf）：应用窗口被遮挡/最小化时宿主页面被判为 hidden，
+ *  window.setTimeout 会被节流到约 1 秒；改由主进程计时（IPC 回包不受节流），无桌面 API 时退回页面计时器。 */
+export function hostSleep(ms: number): Promise<void> {
+  const api = window.chatcoderAPI;
+  if (ms > 0 && api?.browserAgentExec) {
+    return api.browserAgentExec(0, "sleep", { ms }).then(() => undefined, () => new Promise<void>((r) => window.setTimeout(r, ms)));
+  }
+  return new Promise<void>((r) => window.setTimeout(r, ms));
+}
+
 /** 等待某标签的 webview 挂载并就绪；超时返回 null（调用方给出可读错误）。 */
 export function waitFrameReady(sid: string, tabId: string, timeoutMs: number): Promise<FrameRecord | null> {
   const key = frameKey(sid, tabId);
@@ -134,17 +147,25 @@ export function waitFrameReady(sid: string, tabId: string, timeoutMs: number): P
   });
 }
 
-/** 等待「导航结束」：navSeq 自 since 起有变化且 loading 已停，或超时。 */
-export async function waitNavigationSettled(sid: string, tabId: string, since: number, timeoutMs: number): Promise<boolean> {
+/** 等待「导航结束」：navSeq 自 since 起有变化且（DOM 就绪或加载结束），或超时。
+ *  untilLoad=false 时 DOM 就绪即返回（不等图片等资源）；没有发生跳转时 graceMs 后即返回 false。 */
+export async function waitNavigationSettled(
+  sid: string, tabId: string, since: number, timeoutMs: number,
+  opts: { untilLoad?: boolean; graceMs?: number; domSince?: number } = {},
+): Promise<boolean> {
   const t0 = performance.now();
+  const grace = opts.graceMs ?? 120;
   let navigated = false;
   while (performance.now() - t0 < timeoutMs) {
     const rec = frames.get(frameKey(sid, tabId));
     if (!rec) return navigated;
     if (rec.navSeq !== since) navigated = true;
-    if (navigated && !rec.loading && rec.ready) return true;
-    if (!navigated && performance.now() - t0 > 120) return false;
-    await new Promise((r) => window.setTimeout(r, 40));
+    if (navigated && rec.ready) {
+      if (!rec.loading) return true;
+      if (!opts.untilLoad && opts.domSince !== undefined && rec.domSeq > opts.domSince) return true;
+    }
+    if (!navigated && performance.now() - t0 > grace) return false;
+    await hostSleep(30);
   }
   return navigated;
 }

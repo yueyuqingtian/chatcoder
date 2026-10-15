@@ -6,7 +6,10 @@
 
 ## 0. 现状一句话
 
-**调查与改造前基线测量已完成，业务代码零改动**（本次只提交了文档与测试脚手架）。下一步：先让用户确认计划 §七 的取舍，然后从计划 §四「阶段 1 · 后台不变慢」开工。代码行号均以提交 `40c70ec` 为准。
+**计划阶段 1–5 已全部实施并验证（2026-10-15 第二次提交），结果见 §11。** §七 取舍按计划默认项执行：
+不加 `CalculateNativeWinOcclusion` 开关（改为截图那一刻临时放开主窗口节流，实测最小化时可截）；
+自动截图只在报错 / 新对话框时附带，其余靠 `screenshot: true`；歧义文字与旧 ref 一律报错列候选。
+下文 §2–§4 的代码行号以改造前的提交 `40c70ec` 为准。
 
 ## 1. 用户原始诉求（原话）
 
@@ -225,3 +228,56 @@ node --check electron/main.cjs && node --check electron/browser-agent.cjs && nod
 - 修复截图后页面滚动再按坐标点击点错位置
 - 修复窗口被遮挡或最小化时截图超时
 ```
+
+## 11. 实施结果（改造后，2026-10-15）
+
+### 11.1 做了什么（按计划 §三 编号）
+
+| 项 | 实现位置 |
+|---|---|
+| 3.1-1 宿主等待不受节流 | `browser-agent.cjs` 新 op `sleep`（在 guest 检查之前）；`frames.ts` `hostSleep`，host.ts / frames.ts 所有轮询改用它 |
+| 3.1-2 截图兜底 | `browser-agent.cjs` `captureViewport`：主窗口处于节流时**临时** `setBackgroundThrottling(false)` 让它出帧，截完恢复；capturePage 2 s → CDP 2 s → 可读报错；最小化后刚失败过则直接报错不空等 |
+| 3.1-3 稳定判定重写 | host.ts `settleAfter` 单循环 30 ms：导航与 DOM 静默并行；`netSince` 统计动作起点后的 XHR/Fetch 在途数；kit MutationObserver 按节点频次过滤噪声；最短 60 ms / 静默 100 ms；预算见 driver.py `_SETTLE_*` |
+| 3.1-4 准备并行 | `aiWindow` 与 `watch` 并行；光标等待 150 → 100 ms 且与 `aim` 重叠；`sleep(30)` 去掉，焦点守卫覆盖整个稳定观察期；光标过渡 `--dur-2` |
+| 3.1-5 导航 | host.ts `navigateTab`：DOM 就绪（frames.ts `domSeq`）+ `quietAfterNav`；`wait_until=load` 才等完整加载；driver 一次 kit `digest` 取摘要 + 视口内元素 |
+| 3.1-6 / 3.2 结果增强 | kit `changes`：插入当下记录提示文字（`gone` 标记已消失）、新出现的可操作元素（≤20 项 / 1200 字）、新对话框；`netSince(bodies)`：HTTP ≥400、请求失败、200 业务错误码（附响应体摘要与 request_id）；控制台 error；有错误/新对话框时同一次调用内截图（`settle.shot`），动作参数 `screenshot: true` |
+| 3.3-1 缩放换算 | host.ts `zoomOf` × 坐标（点击、拖拽、滚轮、可视化叠加层） |
+| 3.3-2 点击前校准 | kit `aim`：等目标矩形连续两帧不变且祖先无运行中的有限动画（上限 800 ms），重算命中点；mouse 原语带 `ref` 时两种宿主都调用 |
+| 3.3-3 旧 ref | kit `refOf` 记录所在行文字（tr/li/row/listitem/option/treeitem 或同 tag+class 兄弟），`byRefChecked` 用二元组相似度 < 0.5 报错；每次回报 ref 刷新 |
+| 3.3-4 歧义 | kit `findByText` 同分候选（去嵌套、对话框优先，不计视口加分）> 1 报错列前 8 个；`selector` 多匹配在结果里说明 |
+| 3.3-5 截图坐标守卫 | 截图返回 `scroll / viewport / page_url`；driver `_to_css` 带 `shot` 元信息，kit `shotToViewport` 补偿滚动、视口或地址变化拒绝、整页截图按文档坐标滚入；元素截图坐标拒绝；坐标超出视口直接报错 |
+| 3.3-6 吸附 | kit `nearInteractive`：落点不在可交互元素上时 3/6/10 px 三圈采样，唯一或领先 ≥3 px 才吸附 |
+| 3.3-7 命中收紧 | kit `hitPoint`：祖先命中仅限非 body/html 的可交互祖先；`scrollIntoView` 横向改 `nearest` |
+| 3.3-8 marks | kit `marks` + host.ts `drawMarks`（OffscreenCanvas）/ playwright_host `_draw_marks`（PIL）；结果列「编号 → 元素 ref」 |
+| 3.3-9 R17 | BrowserPanel `syncFrameSize`：视口容器未挂载时仍给停泊 webview 赋估算尺寸（防御性修复；首轮 1×1 现象本次未能复现，未写入 CHANGELOG） |
+| 两种宿主同步 | playwright_host.py：`requestfinished` 记完成、`_settle` / `_net_errors` / `_biz_error` / `aim` / 截图元信息 / marks 与桌面端一致；`KIT_VERSION` 5 → 6 |
+
+### 11.2 E2E 复测（真实 Electron 宿主链路）
+
+原始数据：`browser-perf-e2e/after-20261015-visible.json`、`after-20261015-minimized.json`。本机 DPR 1.5、面板宽 418 px。
+
+| 动作 | 改造前（被遮挡） | 改造后·窗口可见 | 改造后·窗口最小化（宿主 hidden，页面定时器 ≈1000 ms） |
+|---|---|---|---|
+| click（ref / selector / 无变化） | ≈2000 ms | 108–132 ms | 108–132 ms |
+| hover | 2000 ms | 108 ms | 139 ms |
+| type（10 字） | 1004 ms | 122 ms | 124 ms |
+| press（End） | 997 ms | 122 ms | 138 ms |
+| scroll 方向滚动 | 2004 ms | 108 ms | 125 ms |
+| screenshot | 15016 ms 失败 | 13 ms | 26 ms（成功） |
+| navigate（同页） | 36 ms | 153 ms（含 DOM 就绪后的接口/DOM 静默与视口元素摘要） | 165 ms |
+
+准确性（两种窗口状态结果一致）：动画菜单 10/10 选中「选项三」；「保存」结果含提示文字 + HTTP 500 + 响应体 + 自动截图（≈460 ms）；「提交订单」含业务报错「库存不足」+ 截图；慢接口等到返回再报告变化；旧 ref 报「所在行已从张三…变为李四…」未点错；歧义「删除」报错列 3 个候选；坐标偏出图标 5 px 吸附命中；截图后滚动按补偿命中「目标乙」；125% 缩放命中「远处按钮」；marks 截图编号框正确。
+
+单测与真实浏览器测试：`test_browser_agent.py`、`test_browser_kit_frames.py`、新增 `test_browser_kit_accuracy.py`（含经 Playwright 兜底宿主的端到端）共 38 项通过。真实浏览器测试在 Playwright 自带 Chromium 不可用时自动退回本机 Edge / Chrome。
+
+### 11.3 脚手架变更与注意
+
+- `main.cjs`：preload 用 `sendSync` 读的 `window:chrome-sync-get`、`ui-prefs:load` 必须用 `ipcMain.on` 应答，否则测试窗口渲染进程卡死、宿主不登记；`window:minimize` / `window:maximizeToggle` 接到真实窗口。
+- 新增 `window_state.py minimize|restore`：测「后台」场景。
+- `bench.py` 的「坐标偏出图标」先把图标横向滚入视口（窄面板下图标在视口外，原写法的坐标本身就在视口外）。
+- `bench.py` 末尾的缩放步骤用 Playwright `connect_over_cdp` 接管页面；接管后紧接着再跑其它脚本时出现过 webview 不再接收输入事件，重启测试窗口即恢复——属测试工具干扰，生产链路不经过它。需要连续多轮测试时每轮重启测试窗口。
+
+### 11.4 遗留
+
+- 「窗口被其它窗口遮挡（非最小化）」本机无法稳定复现，只验证了最小化；截图兜底对遮挡同样生效（只要主窗口处于节流就临时放开），但未实测。
+- R17 未复现，仅做防御性修复。

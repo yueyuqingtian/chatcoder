@@ -20,6 +20,17 @@ from app.orchestration.browser.kit import KIT_SOURCE, kit_call_expression
 
 playwright_api = pytest.importorskip("playwright.async_api")
 
+
+async def launch_any(pw):
+    """Playwright 自带 Chromium 不可用时退回本机 Edge / Chrome（plan-20261015-browser-perf：换机后测试不再整体跳过）；都没有则跳过。"""
+    errors = []
+    for channel in (None, "msedge", "chrome"):
+        try:
+            return await pw.chromium.launch(headless=True, **({"channel": channel} if channel else {}))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{channel or 'chromium'}: {str(exc).splitlines()[0][:80]}")
+    pytest.skip("没有可用的 Chromium 内核浏览器：" + "；".join(errors))
+
 _EXT_PAGE = """<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0">
 <button id="ext-btn" onclick="parent.postMessage('ext-clicked', '*')">外部按钮</button></body></html>"""
 
@@ -104,10 +115,7 @@ def site_url():
 @asynccontextmanager
 async def _open_page(site_url: str):
     async with playwright_api.async_playwright() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as exc:  # 本机没有 Playwright 浏览器时跳过
-            pytest.skip(f"没有可用的 Playwright Chromium：{exc}")
+        browser = await launch_any(pw)
         try:
             ctx = await browser.new_context(viewport={"width": 1000, "height": 700})
             page = await ctx.new_page()

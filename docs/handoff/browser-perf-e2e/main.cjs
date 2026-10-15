@@ -20,14 +20,20 @@ for (const ch of [
   "shell:openExternal", "shell:openInApp", "app:selectApp", "app:relaunch",
   "dialog:selectDirectory", "dialog:selectFiles", "plugins:list",
   "pty:spawn", "window:fixTextInput", "window:setGlass", "theme:setPref", "theme:setTone",
-  "ui-prefs:load", "ui-prefs:save", "window:chrome-sync-get", "browser:openDevTools", "browser:capturePage",
+  "ui-prefs:save", "browser:openDevTools", "browser:capturePage",
   "webview:annotate", "pet:getPref", "pet:setPref", "pet:listInstalled", "pet:listManifest",
   "pet:install", "pet:remove", "pet:importLocal", "pet:openPetPage", "pet:revealPet", "pet:showPet",
 ]) {
   if (ipcMain._events[ch]) continue;
   try { ipcMain.handle(ch, () => null); } catch { /* 已注册 */ }
 }
-for (const ch of ["pty:write", "pty:kill", "pty:resize", "window:minimize", "window:maximizeToggle", "window:close", "window:setExternalBackdrop"]) {
+// preload 用 sendSync 读的通道：只注册 handle 不会应答，渲染进程会一直卡住
+ipcMain.on("window:chrome-sync-get", (e) => { e.returnValue = {}; });
+ipcMain.on("ui-prefs:load", (e) => { e.returnValue = null; });
+// 测「最小化」时由测试脚本经 CDP 调 chatcoderAPI.minimizeWindow() / toggleMaximize()（恢复）
+ipcMain.on("window:minimize", () => { const w = BrowserWindow.getAllWindows()[0]; if (w) w.minimize(); });
+ipcMain.on("window:maximizeToggle", () => { const w = BrowserWindow.getAllWindows()[0]; if (w) w.restore(); });
+for (const ch of ["pty:write", "pty:kill", "pty:resize", "window:close", "window:setExternalBackdrop"]) {
   if (!ipcMain._events[ch]) { try { ipcMain.on(ch, () => {}); } catch { /* ignore */ } }
 }
 

@@ -1,0 +1,168 @@
+{
+  "latency": {
+    "navigate(同页刷新)": {
+      "median_ms": 165,
+      "all": [
+        152,
+        165,
+        168
+      ]
+    },
+    "snapshot": {
+      "median_ms": 2,
+      "all": [
+        2,
+        2,
+        2
+      ]
+    },
+    "click(ref,DOM变化)": {
+      "median_ms": 132,
+      "all": [
+        132,
+        122,
+        154,
+        124,
+        154
+      ]
+    },
+    "click(selector)": {
+      "median_ms": 108,
+      "all": [
+        107,
+        108,
+        108,
+        108,
+        107
+      ]
+    },
+    "click(无变化)": {
+      "median_ms": 126,
+      "all": [
+        154,
+        126,
+        150,
+        123,
+        122
+      ]
+    },
+    "hover": {
+      "median_ms": 139,
+      "all": [
+        139,
+        139,
+        108,
+        139,
+        138
+      ]
+    },
+    "type(10字)": {
+      "median_ms": 124,
+      "all": [
+        139,
+        124,
+        107,
+        123,
+        124
+      ]
+    },
+    "press(End)": {
+      "median_ms": 138,
+      "all": [
+        139,
+        138,
+        139,
+        123,
+        137
+      ]
+    },
+    "scroll(down)": {
+      "median_ms": 125,
+      "all": [
+        125,
+        138,
+        123,
+        138,
+        122
+      ]
+    },
+    "scroll(top)": {
+      "median_ms": 2,
+      "all": [
+        2,
+        2,
+        1,
+        2,
+        1
+      ]
+    },
+    "screenshot": {
+      "median_ms": 26,
+      "all": [
+        62,
+        28,
+        21,
+        26,
+        15
+      ]
+    },
+    "get_text": {
+      "median_ms": 2,
+      "all": [
+        2,
+        2,
+        1
+      ]
+    }
+  },
+  "accuracy": {
+    "animated_menu": [
+      "[\"3\"]",
+      "[\"3\"]",
+      "[\"3\"]"
+    ],
+    "toast_error": {
+      "mentions_msg": true,
+      "mentions_500": true,
+      "has_image": true,
+      "ms": 469,
+      "text": "已点击 按钮「保存」（ref_2）\n页面内容有变化（1 处 DOM 更新）\n页面提示（错误）：「保存失败：名称不能为空」\n接口错误：POST http://127.0.0.1:22973/e2e-site/api/fail → HTTP 500，响应：{\"code\":500,\"msg\":\"名称不能为空\"}（request_id=24560.6）\n焦点在 按钮「保存」\n检测到报错，已在动作完成时附上截图\n截图 418×753（视口截图：图上像素坐标可直接用于 browser_click 的 x/y）"
+    },
+    "biz_error": {
+      "mentions_msg": true,
+      "ms": 418,
+      "text": "已点击 按钮「提交订单」（ref_3）\n页面内容有变化（1 处 DOM 更新）\n页面提示（错误）：「库存不足，无法下单」\n接口业务报错：GET http://127.0.0.1:22973/e2e-site/api/biz → 库存不足，无法下单（HTTP 200，request_id=24560.7）\n焦点在 按钮「提交订单」\n检测到报错，已在动作完成时附上截图\n截图 418×753（视口截图：图上像素坐标可直接用于 browser_click 的 x/y）"
+    },
+    "slow_api": {
+      "reports_change": true,
+      "ms": 618,
+      "text": "已点击 按钮「慢接口」（ref_4）\n页面内容有变化（1 处 DOM 更新）\n焦点在 按钮「慢接口」"
+    },
+    "stale_ref": {
+      "deleted": "[]",
+      "ok": false,
+      "error": "ref_5 所在行已从「张三删除」变为「李四删除」（列表可能翻页或重新渲染），请重新 browser_snapshot 后再操作"
+    },
+    "ambiguous_text": {
+      "deleted": "[]",
+      "ok": false,
+      "error": "文字「删除」匹配到 3 个同等的元素，无法确定是哪一个：\n- 按钮「删除」 [ref_5]（所在行：张三删除）\n- 按钮「删除」 [ref_6]（所在行：王五删除）\n- 按钮「删除」 [ref_7]（所在行：赵六删除）\n请改用对应的 ref（或更具体的文字 / selector）"
+    },
+    "near_miss_coordinate": {
+      "icon_clicks": 1,
+      "text": "已点击 按钮「设置」（ref_16）\n已对准 按钮「设置」（坐标落在它外侧几像素，已吸附到该元素）\n页面没有可见变化\n焦点在 按钮「设置」",
+      "error": ""
+    },
+    "stale_shot_scroll": {
+      "targets": "[\"b\"]",
+      "text": "已点击 按钮「目标乙」\n截图后页面滚动过（纵向 3px），已按滚动补偿坐标\n页面内容有变化（1 处 DOM 更新）\n焦点在 按钮「目标乙」",
+      "error": ""
+    },
+    "zoom_125": {
+      "far_clicks": 1,
+      "text": "已点击 按钮「远处按钮」（ref_17）\n页面没有可见变化\n焦点在 按钮「远处按钮」",
+      "error": ""
+    }
+  },
+  "notes": []
+}

@@ -48,6 +48,7 @@ _TEXT_TARGET = {"type": "string", "description": "按可见文字定位元素（
 _X = {"type": "number", "description": "横坐标：最近一次视口截图上的像素位置"}
 _Y = {"type": "number", "description": "纵坐标：最近一次视口截图上的像素位置"}
 _TAB = {"type": "string", "description": "标签 id（缺省为 AI 当前标签）"}
+_SHOT = {"type": "boolean", "description": "动作完成的当下附带视口截图（省去再调 browser_screenshot；出现报错时会自动附图）"}
 _ON_DIALOG = {"type": "string", "enum": ["accept", "dismiss"], "description": "动作触发网页确认框时确认还是取消，默认 accept"}
 
 
@@ -102,14 +103,15 @@ class BrowserNavigateTool(_BrowserTool):
     def _desc(self):
         return (
             "在内置浏览器（右侧面板，用户可实时看到）打开网址，或 action=back/forward/reload。"
-            "返回标题、地址与正文摘要；localhost:5173 这类本地地址会自动补 http://。"
+            "返回标题、地址、正文摘要与视口内的可交互元素（带 ref，可直接点击）；页面 DOM 就绪且接口安静即返回。"
+            "localhost:5173 这类本地地址会自动补 http://。"
             "默认在 AI 自己的标签里打开，不会覆盖用户正在看的页面。",
             {
                 "url": {"type": "string", "description": "目标网址"},
                 "action": {"type": "string", "enum": ["back", "forward", "reload"], "description": "不传 url 时的导航动作"},
                 "new_tab": {"type": "boolean", "description": "在新标签中打开"},
                 "tab_id": _TAB,
-                "wait_until": {"type": "string", "enum": ["load", "domcontentloaded", "commit"], "description": "等待条件，默认 load"},
+                "wait_until": {"type": "string", "enum": ["load", "domcontentloaded", "commit"], "description": "等待条件，默认 domcontentloaded（load 等图片等全部加载完）"},
             },
             None,
         )
@@ -179,9 +181,12 @@ class BrowserScreenshotTool(_BrowserTool):
     def _desc(self):
         return (
             "截取当前页面：默认视口截图（图上像素坐标可直接用于 browser_click 的 x/y），"
-            "full_page=true 截整页，ref / selector 截单个元素。面板隐藏时也能截。读文字内容请优先用 browser_get_text。",
+            "full_page=true 截整页（图上坐标为整页位置，点击时自动滚到该处），ref / selector 截单个元素。"
+            "marks=true 在图上给可交互元素画编号框并列出编号对应的 ref，看图定位后按 ref 点击最准。"
+            "面板隐藏时也能截。读文字内容请优先用 browser_get_text。",
             {
                 "full_page": {"type": "boolean", "description": "截取整页长图"},
+                "marks": {"type": "boolean", "description": "在截图上标出可交互元素的编号"},
                 "ref": _REF,
                 "selector": _SELECTOR,
                 "url": {"type": "string", "description": "（兼容旧参数）先打开该网址再截图"},
@@ -199,7 +204,9 @@ class BrowserClickTool(_BrowserTool):
     def _desc(self):
         return (
             "点击页面元素：优先用 ref；也可用 selector、text（可见文字）或截图坐标 x/y。"
-            "目标不在视口时会自动滚入；被弹窗遮挡或禁用时会报错说明。返回点击后页面是否跳转/变化。",
+            "目标不在视口时会自动滚入；被弹窗遮挡或禁用时会报错说明；text 匹配到多个同名元素时报错并列出候选 ref。"
+            "点击后等页面接口返回再报告：跳转/变化、报错提示（即使一闪而过）、接口错误、新弹出的菜单或对话框里的元素（带 ref）；"
+            "出现报错时自动附截图。",
             {
                 "ref": _REF, "selector": _SELECTOR, "text": _TEXT_TARGET, "x": _X, "y": _Y,
                 "button": {"type": "string", "enum": ["left", "right", "middle"], "description": "默认 left"},
@@ -207,6 +214,7 @@ class BrowserClickTool(_BrowserTool):
                 "modifiers": {"type": "array", "items": {"type": "string", "enum": ["Control", "Shift", "Alt", "Meta"]}, "description": "按住的修饰键"},
                 "force": {"type": "boolean", "description": "目标被遮挡/禁用时仍然点击"},
                 "on_dialog": _ON_DIALOG,
+                "screenshot": _SHOT,
             },
             None,
         )
@@ -228,6 +236,7 @@ class BrowserTypeTool(_BrowserTool):
                 "clear": {"type": "boolean", "description": "输入前清空，默认 true"},
                 "submit": {"type": "boolean", "description": "输入后按 Enter"},
                 "press_enter": {"type": "boolean", "description": "同 submit（兼容旧参数）"},
+                "screenshot": _SHOT,
                 "clear_before": {"type": "boolean", "description": "同 clear（兼容旧参数）"},
             },
             ["text"],
@@ -249,6 +258,7 @@ class BrowserPressTool(_BrowserTool):
                 "repeat": {"type": "integer", "description": "重复次数，默认 1"},
                 "ref": _REF,
                 "on_dialog": _ON_DIALOG,
+                "screenshot": _SHOT,
             },
             ["keys"],
         )
@@ -282,7 +292,7 @@ class BrowserHoverTool(_BrowserTool):
     def _desc(self):
         return (
             "把鼠标悬停到元素上，用于展开悬停菜单、显示提示等。",
-            {"ref": _REF, "selector": _SELECTOR, "text": _TEXT_TARGET, "x": _X, "y": _Y},
+            {"ref": _REF, "selector": _SELECTOR, "text": _TEXT_TARGET, "x": _X, "y": _Y, "screenshot": _SHOT},
             None,
         )
 
@@ -426,6 +436,7 @@ class BrowserBatchTool(_BrowserTool):
                     "description": "如 [{\"action\":\"type\",\"ref\":\"ref_3\",\"text\":\"hi\"},{\"action\":\"click\",\"ref\":\"ref_5\"}]",
                 },
                 "then": {"type": "string", "enum": ["screenshot", "snapshot"]},
+                "screenshot": {"type": "boolean", "description": "同 then=screenshot：全部完成后附带截图"},
             },
             ["actions"],
         )

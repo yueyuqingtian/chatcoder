@@ -5,6 +5,9 @@
 所以模型拿到的 ref、文案与桌面端完全一致，只是用户看不到实时画面。
 
 每个会话一个独立浏览器上下文（Cookie/存储互不串），标签以 `pw_<n>` 编号。
+
+稳定判定、接口错误回报、点击前校准与截图元信息与桌面端（host.ts + browser-agent.cjs）一致
+（plan-20261015-browser-perf）：同一个动作在两条路径上回报的内容相同。
 """
 from __future__ import annotations
 
@@ -12,7 +15,9 @@ import asyncio
 import base64
 import io
 import itertools
+import json
 import logging
+import time
 from collections import deque
 from typing import Any
 
@@ -27,6 +32,7 @@ _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, lik
        "Chrome/124.0.0.0 Safari/537.36 chatcoder")
 _LOG_MAX = 400
 _BODY_MAX = 120
+_API_TYPES = ("xhr", "fetch")
 
 
 class _Tab:
@@ -37,6 +43,7 @@ class _Tab:
         self.network: deque = deque(maxlen=_LOG_MAX)
         self.responses: dict[str, Any] = {}
         self.events: list[dict] = []
+        self.net_seq = 0
         self.dialog_accept = True
         self.prompt_text = ""
 
@@ -118,8 +125,17 @@ class PlaywrightHost(BrowserHost):
         def on_request(req):
             rid = f"r{next(self._req_ids)}"
             req._cc_id = rid  # type: ignore[attr-defined]
-            tab.network.append({"seq": next(self._log_seq), "id": rid, "method": req.method, "url": req.url[:500],
-                                "type": req.resource_type, "status": None})
+            tab.net_seq += 1
+            tab.network.append({"seq": next(self._log_seq), "nseq": tab.net_seq, "id": rid, "method": req.method,
+                                "url": req.url[:500], "type": req.resource_type, "status": None,
+                                "started_at": time.time(), "done": False})
+
+        def on_finished(req):
+            rid = getattr(req, "_cc_id", None)
+            for e in reversed(tab.network):
+                if e["id"] == rid:
+                    e["done"] = True
+                    break
 
         def on_response(resp):
             rid = getattr(resp.request, "_cc_id", None)
@@ -138,6 +154,7 @@ class PlaywrightHost(BrowserHost):
             for e in reversed(tab.network):
                 if e["id"] == rid:
                     e["status"] = "failed"
+                    e["done"] = True
                     e["error"] = (req.failure or "")[:200] if isinstance(req.failure, str) else str(req.failure)[:200]
                     break
 
@@ -169,6 +186,7 @@ class PlaywrightHost(BrowserHost):
         page.on("pageerror", on_error)
         page.on("request", on_request)
         page.on("response", on_response)
+        page.on("requestfinished", on_finished)
         page.on("requestfailed", on_failed)
         page.on("dialog", on_dialog)
         page.on("popup", on_popup)
@@ -224,25 +242,102 @@ class PlaywrightHost(BrowserHost):
             raise HostCallError(str(res.get("error") or "页面工具执行失败"))
         return res.get("value")
 
-    async def _settle(self, tab: _Tab, before_url: str, settle_ms: int) -> dict:
-        page = tab.page
-        await asyncio.sleep(0.08)
-        navigated = page.url != before_url
-        if navigated:
-            try:
-                await page.wait_for_load_state("domcontentloaded", timeout=max(settle_ms, 8000))
-            except Exception:  # noqa: BLE001
-                pass
-        if settle_ms <= 0:
-            return {"navigated": navigated, "url": page.url}
+    def _pending(self, tab: _Tab, since: int) -> int:
+        return sum(1 for e in tab.network if e.get("nseq", 0) > since and e.get("type") in _API_TYPES and not e.get("done"))
+
+    async def _net_errors(self, tab: _Tab, since: int) -> list[dict]:
+        """与桌面端 netSince(bodies) 一致：HTTP ≥400 / 失败的接口（附响应体摘要），以及 200 但带错误码的业务报错。"""
+        mine = [e for e in tab.network if e.get("nseq", 0) > since and e.get("type") in _API_TYPES]
+        out: list[dict] = []
+        failed = [e for e in mine if e.get("status") == "failed" or (isinstance(e.get("status"), int) and e["status"] >= 400)]
+        for e in failed[-2:]:
+            body = "" if e.get("status") == "failed" else (await self._body_head(tab, e["id"]))[:300]
+            out.append({"id": e["id"], "method": e["method"], "url": e["url"], "status": e["status"],
+                        "error": e.get("error") or "", "body": body})
+        ok_json = [e for e in mine if e.get("done") and isinstance(e.get("status"), int) and e["status"] < 400
+                   and "json" in str(e.get("mime") or "").lower()][-4:]
+        for e in ok_json:
+            if len(out) >= 3:
+                break
+            body = await self._body_head(tab, e["id"], 4000)
+            biz = _biz_error(body)
+            if biz:
+                out.append({"id": e["id"], "method": e["method"], "url": e["url"], "status": e["status"], "biz": biz,
+                            "body": body[:300]})
+        return out
+
+    async def _body_head(self, tab: _Tab, rid: str, limit: int = 300) -> str:
+        resp = tab.responses.get(rid)
+        if resp is None:
+            return ""
         try:
-            st = await self._kit(page, "quiet", {"quiet_ms": 120, "timeout_ms": settle_ms})
+            return (await asyncio.wait_for(resp.body(), 1.5)).decode("utf-8", errors="replace")[:limit]
         except Exception:  # noqa: BLE001
-            st = {"url": page.url}
+            return ""
+
+    async def _settle(self, tab: _Tab, mark: dict, settle_ms: int, shot: bool = False) -> dict:
+        page = tab.page
+        before_url = mark["url"]
+        if settle_ms <= 0:
+            await asyncio.sleep(0.03)
+            return {"navigated": page.url != before_url, "url": page.url}
+        t0 = time.monotonic()
+        budget = settle_ms / 1000
+        navigated = False
+        st: dict = {"url": page.url}
+        pending = 0
+        while True:
+            if not navigated and page.url != before_url:
+                navigated = True
+                try:
+                    await page.wait_for_load_state("domcontentloaded", timeout=12000)
+                except Exception:  # noqa: BLE001
+                    pass
+                budget = time.monotonic() - t0 + 0.8
+            try:
+                st = await self._kit(page, "state", {})
+            except Exception:  # noqa: BLE001
+                st = {"url": page.url}
+            pending = self._pending(tab, mark["net"])
+            el = time.monotonic() - t0
+            if el >= 0.06 and float(st.get("idle_ms", 1e9)) >= 100 and pending == 0:
+                break
+            if el >= budget:
+                break
+            await asyncio.sleep(0.03)
         st["navigated"] = navigated or st.get("url") != before_url
+        st["waited"] = int((time.monotonic() - t0) * 1000)
+        if pending:
+            st["pending"] = pending
+        try:
+            chg = await self._kit(page, "changes", {})
+        except Exception:  # noqa: BLE001
+            chg = None
+        if chg:
+            if chg.get("notices"):
+                st["notices"] = chg["notices"]
+            if chg.get("added"):
+                st["added"] = chg["added"]
+            if chg.get("more"):
+                st["added_more"] = True
+            if chg.get("dialog"):
+                st["new_dialog"] = chg["dialog"]
+        errs = await self._net_errors(tab, mark["net"])
+        if errs:
+            st["net_errors"] = errs
+        cerr = [e["text"][:300] for e in tab.console if e["seq"] > mark["console"] and e.get("level") in ("error", "assert")][-3:]
+        if cerr:
+            st["console_errors"] = cerr
+        has_error = bool(errs or st.get("new_dialog") or any(n.get("level") == "error" for n in st.get("notices") or []))
+        if shot or has_error:
+            try:
+                st["shot"] = await self._capture(tab, {"max_side": 1280, "quality": 72})
+                st["shot_reason"] = "requested" if shot else "error"
+            except Exception as e:  # noqa: BLE001
+                st["shot_error"] = str(e)[:200]
         return st
 
-    async def _before_input(self, tab: _Tab, args: dict) -> str:
+    async def _before_input(self, tab: _Tab, args: dict) -> dict:
         on = str(args.get("on_dialog") or "accept")
         tab.dialog_accept = on != "dismiss"
         tab.prompt_text = str(args.get("prompt_text") or "")
@@ -250,7 +345,8 @@ class PlaywrightHost(BrowserHost):
             await self._kit(tab.page, "watch", {})
         except Exception:  # noqa: BLE001
             pass
-        return tab.page.url
+        last = tab.console[-1]["seq"] if tab.console else 0
+        return {"url": tab.page.url, "net": tab.net_seq, "console": last}
 
     # ── 原语 ─────────────────────────────────────────────
     async def call(self, session_id: int, op: str, args: dict, timeout: float,
@@ -300,8 +396,8 @@ class PlaywrightHost(BrowserHost):
                 self._agent[sid] = tab.id
                 page = tab.page
             action = a.get("action")
-            wait = str(a.get("wait") or "load")
-            wu = wait if wait in ("load", "domcontentloaded", "commit") else "load"
+            wait = str(a.get("wait") or "domcontentloaded")
+            wu = wait if wait in ("load", "domcontentloaded", "commit") else "domcontentloaded"
             to = int(a.get("timeout_ms") or 30000)
             status = None
             try:
@@ -317,6 +413,8 @@ class PlaywrightHost(BrowserHost):
                 raise
             except Exception as e:  # noqa: BLE001
                 raise HostCallError(f"页面加载失败：{str(e).splitlines()[0][:200]}") from e
+            if wu != "load":
+                await self._quiet_after_nav(tab)
             base = await self._base(tab)
             base["status"] = status
             return base
@@ -334,25 +432,33 @@ class PlaywrightHost(BrowserHost):
             base["value"] = value
             return base
         if op == "mouse":
-            before = await self._before_input(tab, a)
+            mark = await self._before_input(tab, a)
+            aimed = None
+            act = str(a.get("action") or "click")
+            if a.get("ref") and act in ("click", "move"):
+                # 点击前最终校准：等目标停止移动、复核命中（与桌面端一致）
+                aimed = await self._kit(page, "aim", {"ref": str(a["ref"])})
+                a = {**a, "x": aimed["x"], "y": aimed["y"]}
             await self._mouse(page, a)
-            st = await self._settle(tab, before, int(a.get("settle_ms") or 0))
+            st = await self._settle(tab, mark, int(a.get("settle_ms") or 0), bool(a.get("shot")))
             base = await self._base(tab)
             base["settle"] = st
+            if aimed:
+                base["aimed"] = aimed
             return base
         if op == "keys":
-            before = await self._before_input(tab, a)
+            mark = await self._before_input(tab, a)
             for _ in range(max(1, min(int(a.get("repeat") or 1), 50))):
                 for combo in a.get("keys") or []:
                     await page.keyboard.press("Space" if combo == " " else combo)
-            st = await self._settle(tab, before, int(a.get("settle_ms") or 0))
+            st = await self._settle(tab, mark, int(a.get("settle_ms") or 0), bool(a.get("shot")))
             base = await self._base(tab)
             base["settle"] = st
             return base
         if op == "text":
-            before = await self._before_input(tab, a)
+            mark = await self._before_input(tab, a)
             await page.keyboard.insert_text(str(a.get("text") or ""))
-            st = await self._settle(tab, before, int(a.get("settle_ms") or 0))
+            st = await self._settle(tab, mark, int(a.get("settle_ms") or 0), bool(a.get("shot")))
             base = await self._base(tab)
             base["settle"] = st
             return base
@@ -379,9 +485,26 @@ class PlaywrightHost(BrowserHost):
             raise HostCallError("后台浏览器无法访问系统剪贴板（system=true 仅桌面端可用），请使用默认的 AI 剪贴板")
         raise HostCallError(f"未知的浏览器原语：{op}")
 
+    async def _quiet_after_nav(self, tab: _Tab, budget: float = 1.5) -> None:
+        """DOM 就绪后：页面脚本的首批请求返回、DOM 静默 100 ms 即可（与桌面端 quietAfterNav 一致）。"""
+        t0 = time.monotonic()
+        since = tab.net_seq
+        try:
+            await self._kit(tab.page, "watch", {})
+        except Exception:  # noqa: BLE001
+            return
+        while time.monotonic() - t0 < budget:
+            try:
+                st = await self._kit(tab.page, "state", {})
+            except Exception:  # noqa: BLE001
+                return
+            if time.monotonic() - t0 >= 0.06 and float(st.get("idle_ms", 1e9)) >= 100 and self._pending(tab, since) == 0:
+                return
+            await asyncio.sleep(0.03)
+
     async def _goto(self, tab: _Tab, url: str, a: dict):
-        wait = str(a.get("wait") or "load")
-        wu = wait if wait in ("load", "domcontentloaded", "commit") else "load"
+        wait = str(a.get("wait") or "domcontentloaded")
+        wu = wait if wait in ("load", "domcontentloaded", "commit") else "domcontentloaded"
         resp = await tab.page.goto(url, wait_until=wu, timeout=int(a.get("timeout_ms") or 30000))
         return resp.status if resp else None
 
@@ -425,22 +548,42 @@ class PlaywrightHost(BrowserHost):
             opts["clip"] = {k: float(clip[k]) for k in ("x", "y", "width", "height")}
         elif a.get("full_page"):
             opts["full_page"] = True
+        marks = None
+        if a.get("marks") and not clip and not a.get("full_page"):
+            try:
+                marks = await self._kit(page, "marks", {})
+            except Exception:  # noqa: BLE001
+                marks = None
+        try:
+            metrics = await page.evaluate("[scrollX, scrollY, innerWidth, innerHeight, location.href]")
+        except Exception:  # noqa: BLE001
+            metrics = [0, 0, vp["width"], vp["height"], page.url]
         raw = await page.screenshot(**opts)
         from PIL import Image
 
         img = Image.open(io.BytesIO(raw))
         css_w, css_h = img.size
         max_side = int(a.get("max_side") or 1280)
+        changed = False
         if max(img.size) > max_side:
             ratio = max_side / max(img.size)
             img = img.resize((max(1, int(img.width * ratio)), max(1, int(img.height * ratio))))
+            changed = True
+        items = (marks or {}).get("items") or []
+        if items:
+            img = _draw_marks(img, items, img.width / max(1, css_w))
+            changed = True
+        if changed:
             buf = io.BytesIO()
             img.convert("RGB").save(buf, format="JPEG", quality=quality)
             raw = buf.getvalue()
         base = await self._base(tab)
         base.update({"base64": base64.b64encode(raw).decode("ascii"), "mime": "image/jpeg",
                      "width": img.width, "height": img.height, "css_width": css_w, "css_height": css_h,
-                     "viewport": vp})
+                     "scroll": {"x": round(metrics[0] or 0), "y": round(metrics[1] or 0)},
+                     "viewport": {"width": metrics[2], "height": metrics[3]}, "page_url": metrics[4]})
+        if items:
+            base["marks"] = [{"n": m["n"], "ref": m["ref"], "label": m["label"]} for m in items]
         return base
 
     def _logs(self, tab: _Tab, a: dict) -> dict:
@@ -461,3 +604,39 @@ class PlaywrightHost(BrowserHost):
         if a.get("clear"):
             src.clear()
         return {"tab": tab.id, "entries": entries, "total": total}
+
+
+def _biz_error(body: str) -> str:
+    """200 的 JSON 响应里 success=false 或 code 非 0/200 且带提示文字（与桌面端 bizError 一致）。"""
+    try:
+        j = json.loads(body)
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(j, dict):
+        return ""
+    msg = j.get("msg") or j.get("message") or j.get("errMsg") or j.get("error_msg") or j.get("errorMessage") \
+        or (j.get("error") if isinstance(j.get("error"), str) else "")
+    code = next((j[k] for k in ("code", "errcode", "errCode") if k in j), None)
+    bad = code is not None and str(code).lower() not in ("0", "200", "00000", "success", "ok")
+    if j.get("success") is False or j.get("ok") is False or bad:
+        return str(msg or f"错误码 {code}")[:200]
+    return ""
+
+
+def _draw_marks(img, items: list[dict], k: float):
+    """marks 截图：在图上画编号框（与桌面端 drawMarks 一致）。"""
+    from PIL import ImageDraw
+
+    img = img.convert("RGB")
+    d = ImageDraw.Draw(img)
+    red = (229, 72, 77)
+    for m in items:
+        r = m.get("rect") or {}
+        x, y, w, h = r.get("x", 0) * k, r.get("y", 0) * k, r.get("width", 0) * k, r.get("height", 0) * k
+        d.rectangle([x, y, x + w, y + h], outline=red, width=2)
+        label = str(m.get("n"))
+        tw = 7 * len(label) + 6
+        ly = y - 15 if y >= 15 else y
+        d.rectangle([x, ly, x + tw, ly + 15], fill=red)
+        d.text((x + 3, ly + 2), label, fill=(255, 255, 255))
+    return img

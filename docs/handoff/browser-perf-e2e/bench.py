@@ -167,8 +167,9 @@ def main() -> None:
     acc["ambiguous_text"] = {"deleted": got, "ok": r.get("ok"), "error": r.get("error")}
     print(f"  歧义文字「删除」：删除了 {got} ok={r.get('ok')} {(r.get('error') or '')[:120]}")
 
-    # g. 坐标点在小图标按钮外 5px
+    # g. 坐标点在小图标按钮外 5px（窄视口下图标在视口右侧之外：先横向滚入，保证坐标在视口内）
     run("scroll", {"to": "top"})
+    page("document.getElementById('icon-btn').scrollIntoView({block: 'nearest', inline: 'center'}); 1")
     shot, _ = run("screenshot", {})
     w = (shot.get("data") or {}).get("width") or 0
     geo = page("(() => { const r = document.getElementById('icon-btn').getBoundingClientRect(); return {x: r.right + 5, y: r.top + r.height / 2, vw: innerWidth}; })()")

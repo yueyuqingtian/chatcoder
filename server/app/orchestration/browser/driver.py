@@ -9,19 +9,24 @@
 | tabs.list | — | tabs[{id,url,title,loading,active,owner}], active, agent_tab, visible |
 | tabs.open | url?, activate? | 新标签 |
 | tabs.select / tabs.close | tab | — |
-| nav | tab?, url? / action(back·forward·reload), new_tab?, wait, timeout_ms | status? |
+| nav | tab?, url? / action(back·forward·reload), new_tab?, wait(domcontentloaded·load), timeout_ms | status? |
 | kit | tab?, fn, args, label?, rect? | value（页面工具包返回值） |
 | eval | tab?, script | value |
-| mouse | tab?, action(click·move·wheel·drag), x, y, button, count, modifiers, dx, dy, to_x, to_y, label, rect, on_dialog, settle_ms | settle |
-| keys | tab?, keys[], repeat, label, on_dialog, settle_ms | settle |
-| text | tab?, text, label, rect, settle_ms | settle |
-| capture | tab?, full_page?, clip?, max_side, quality, label | base64, mime, width, height, css_width, css_height |
+| mouse | tab?, action(click·move·wheel·drag·activate), x, y, ref?, button, count, modifiers, dx, dy, to_x, to_y, label, rect, on_dialog, settle_ms, shot? | settle, aimed? |
+| keys | tab?, keys[], repeat, label, on_dialog, settle_ms, shot? | settle |
+| text | tab?, text, label, rect, settle_ms, shot? | settle |
+| capture | tab?, full_page?, clip?, marks?, max_side, quality, label | base64, mime, width, height, css_width, css_height, scroll, viewport, page_url, marks? |
 | logs | tab?, kind(console·network), limit, only_errors, pattern, clear | entries, total |
 | net_body | tab?, request_id | body, base64, mime |
 | viz | tab?, label, rect? | — |
 | clipboard | action(read·write), text? | text |
 
-坐标一律为页面 CSS 像素；模型给的坐标若来自截图，按最近一次视口截图的缩放比换算。
+坐标一律为页面 CSS 像素；模型给的坐标若来自截图，按最近一次截图的缩放比换算，并带上截图时的滚动/视口/地址，
+由页面工具包补偿滚动或拒绝过期坐标。
+
+settle（plan-20261015-browser-perf）：navigated, mutations, focus, dialog, waited, pending?, notices[{text,level,gone}]?,
+added[行]?, new_dialog?, net_errors[{method,url,status,error?,biz?,body?,id}]?, console_errors[]?, shot{截图字段}?。
+mouse 带 ref 时宿主在派发前调用 kit aim（等目标停止移动、复核命中）；宿主按网页缩放换算派发坐标。
 """
 from __future__ import annotations
 
@@ -49,6 +54,13 @@ _T_KIT = 20.0
 _T_CAPTURE = 25.0
 _T_DEFAULT = 15.0
 
+# 动作后稳定判定的预算（ms）：宿主在网络与 DOM 都安静后提前返回，预算只是上限（plan-20261015-browser-perf）
+_SETTLE_CLICK = 3000
+_SETTLE_KEYS = 2000
+_SETTLE_HOVER = 400
+_SETTLE_WHEEL = 250
+_SETTLE_TEXT = 300
+
 
 @dataclass
 class Outcome:
@@ -68,7 +80,8 @@ class ActionError(Exception):
 class _SessionState:
     host_kind: str = ""
     tab: str | None = None
-    shot_scale: dict[str, float] = field(default_factory=dict)
+    # 标签 → 最近一次截图的元信息：scale（图像像素/CSS 像素）、kind（viewport·full·element）、滚动、视口、地址
+    shots: dict[str, dict] = field(default_factory=dict)
     clipboard: str = ""
     urls: dict[str, str] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -151,21 +164,59 @@ def _events_lines(resp: dict) -> list[str]:
     return out
 
 
+_LEVEL_ZH = {"error": "错误", "warning": "警告", "success": "成功", "info": "提示"}
+
+
 def _settle_lines(resp: dict, before_url: str = "") -> list[str]:
     st = resp.get("settle") or {}
     lines = []
     url = st.get("url") or resp.get("url") or ""
     if st.get("navigated") or (before_url and url and url != before_url):
         lines.append(f"页面已跳转：{_clip(st.get('title') or resp.get('title') or '', 60)} — {url}")
-    elif st.get("mutations"):
-        lines.append(f"页面内容有变化（{st.get('mutations')} 处 DOM 更新）")
+    elif st.get("mutations") or st.get("notices") or st.get("added"):
+        lines.append(f"页面内容有变化（{st.get('mutations') or 0} 处 DOM 更新）")
     else:
         lines.append("页面没有可见变化")
-    if st.get("dialog"):
+    if st.get("pending"):
+        lines.append(f"仍有 {st['pending']} 个接口请求未返回（已等待 {st.get('waited', 0)} ms），结果可能还会变化")
+    # 报错类信息放在最前：提示文字（哪怕一闪而过已消失）、接口错误、控制台报错
+    for n in st.get("notices") or []:
+        gone = "（已消失）" if n.get("gone") else ""
+        lines.append(f"页面提示（{_LEVEL_ZH.get(n.get('level'), '提示')}）：「{_clip(n.get('text'), 160)}」{gone}")
+    for e in st.get("net_errors") or []:
+        where = f"{e.get('method') or ''} {_clip(e.get('url'), 120)}".strip()
+        if e.get("biz"):
+            lines.append(f"接口业务报错：{where} → {_clip(e.get('biz'), 160)}（HTTP {e.get('status')}，request_id={e.get('id')}）")
+        elif e.get("status") == "failed":
+            lines.append(f"接口请求失败：{where} → {e.get('error') or '网络错误'}（request_id={e.get('id')}）")
+        else:
+            body = f"，响应：{_clip(e.get('body'), 200)}" if e.get("body") else ""
+            lines.append(f"接口错误：{where} → HTTP {e.get('status')}{body}（request_id={e.get('id')}）")
+    for c in st.get("console_errors") or []:
+        lines.append(f"控制台报错：{_clip(c, 200)}")
+    if st.get("new_dialog"):
+        lines.append(f"页面打开了对话框 {st.get('new_dialog')}")
+    elif st.get("dialog"):
         lines.append(f"页面当前有打开的对话框 {st.get('dialog')}")
+    added = st.get("added") or []
+    if added:
+        more = "（更多请 browser_snapshot）" if st.get("added_more") else ""
+        lines.append("新出现的可操作元素（可直接用 ref 操作，无需重新 snapshot）" + more + "：\n"
+                     + "\n".join(f"  - {a}" for a in added))
     if st.get("focus"):
         lines.append(f"焦点在 {st.get('focus')}")
+    if st.get("shot"):
+        why = "按要求" if st.get("shot_reason") == "requested" else "检测到报错，已在动作完成时"
+        lines.append(f"{why}附上截图")
+    elif st.get("shot_error"):
+        lines.append(f"截图失败：{st['shot_error']}")
     return lines + _events_lines(resp)
+
+
+def _flag(v: Any) -> bool:
+    if isinstance(v, str):
+        return v.strip().lower() not in ("", "false", "0", "no", "off")
+    return bool(v)
 
 
 def _target_args(args: dict) -> dict:
@@ -196,7 +247,7 @@ class BrowserDriver:
                 # 宿主切换（桌面端上线/下线）：标签编号体系不同，缓存全部作废
                 self.st.host_kind = self.host.kind
                 self.st.tab = None
-                self.st.shot_scale.clear()
+                self.st.shots.clear()
                 self.st.urls.clear()
         return self.host
 
@@ -238,18 +289,52 @@ class BrowserDriver:
         resp = await self.call("kit", payload, timeout=timeout)
         return resp.get("value")
 
-    def _to_css(self, x: Any, y: Any) -> tuple[float, float]:
+    def _to_css(self, x: Any, y: Any) -> tuple[float, float, dict | None]:
+        """截图坐标 → 页面 CSS 坐标；附带截图时的滚动/视口/地址，由页面工具包补偿滚动或拒绝过期坐标（R14）。"""
         try:
             fx, fy = float(x), float(y)
         except (TypeError, ValueError) as e:
             raise ActionError("x / y 必须是数字") from e
-        scale = self.st.shot_scale.get(self.st.tab or "", 1.0) or 1.0
-        return round(fx / scale, 1), round(fy / scale, 1)
+        shot = self.st.shots.get(self.st.tab or "")
+        if not shot:
+            return round(fx, 1), round(fy, 1), None
+        if shot.get("kind") == "element":
+            raise ActionError("最近一次截图是单个元素的截图，图上坐标不能用于点击：请先截视口截图（不传 ref / selector）")
+        scale = shot.get("scale") or 1.0
+        guard = {k: shot[k] for k in ("kind", "sx", "sy", "vw", "vh", "url") if shot.get(k) is not None}
+        return round(fx / scale, 1), round(fy / scale, 1), (guard or None)
+
+    def _remember_shot(self, resp: dict, kind: str) -> None:
+        w = int(resp.get("width") or 0)
+        css_w = float(resp.get("css_width") or w or 1)
+        tab = str(resp.get("tab") or self.st.tab or "")
+        scroll = resp.get("scroll") or {}
+        vp = resp.get("viewport") or {}
+        self.st.shots[tab] = {
+            "scale": (w / css_w) if (w and css_w) else 1.0, "kind": kind,
+            "sx": scroll.get("x"), "sy": scroll.get("y"), "vw": vp.get("width"), "vh": vp.get("height"),
+            "url": resp.get("page_url") or resp.get("url") or "",
+        }
+
+    def _attach_shot(self, out: "Outcome", resp: dict) -> "Outcome":
+        """动作结果里带回的截图（出错自动截或 screenshot=true）：落盘、记为最新视口截图、附到结果上。"""
+        shot = (resp.get("settle") or {}).get("shot")
+        if not isinstance(shot, dict) or not shot.get("base64"):
+            return out
+        shot = {**shot, "tab": resp.get("tab")}
+        self._remember_shot(shot, "viewport")
+        rel, abs_path = _save_shot(shot["base64"], shot.get("mime") or "image/jpeg")
+        out.image_b64 = shot["base64"]
+        out.image_mime = shot.get("mime") or "image/jpeg"
+        out.data.update({"screenshot_path": rel, "abs_path": abs_path, "width": shot.get("width"), "height": shot.get("height")})
+        out.text += f"\n截图 {shot.get('width')}×{shot.get('height')}（视口截图：图上像素坐标可直接用于 browser_click 的 x/y）"
+        return out
 
     # ── 动作 ─────────────────────────────────────────────
     async def navigate(self, args: dict) -> Outcome:
         action = str(args.get("action") or "").strip().lower()
-        payload: dict = {"wait": args.get("wait_until") or "load", "timeout_ms": 30000}
+        # 默认 DOM 就绪 + 接口与 DOM 稳定即返回；显式 wait_until=load 才等图片、字体等全部加载完（R4）
+        payload: dict = {"wait": args.get("wait_until") or "domcontentloaded", "timeout_ms": 30000}
         if args.get("tab_id"):
             payload["tab"] = str(args["tab_id"])
         if action in ("back", "forward", "reload"):
@@ -265,15 +350,22 @@ class BrowserDriver:
         lines = [f"已打开：{_clip(resp.get('title') or '(无标题)', 60)} — {resp.get('url') or ''}"
                  + (f"（HTTP {resp['status']}）" if isinstance(resp.get("status"), int) and resp["status"] >= 400 else "")]
         lines.append(f"标签：{resp.get('tab')}")
+        snap = ""
         try:
-            digest = await self.kit("text", {"max_chars": 600})
-            preview = (digest or {}).get("text") or ""
+            # 摘要与视口内可交互元素一次取回，省去紧接着的 snapshot 往返
+            digest = await self.kit("digest", {"max_chars": 1500}) or {}
+            preview = digest.get("text") or ""
             if preview:
                 lines.append("页面摘要：" + _clip(preview, 500))
+            snap = digest.get("snapshot") or ""
         except Exception:  # noqa: BLE001
             pass
         lines += _events_lines(resp)
-        lines.append("下一步：browser_snapshot 获取可交互元素（含 ref），或 browser_get_text 读正文。")
+        if snap:
+            lines.append("视口内的可交互元素（可直接用 ref 操作）：\n" + snap)
+            lines.append("需要视口外或完整结构时再 browser_snapshot。")
+        else:
+            lines.append("下一步：browser_snapshot 获取可交互元素（含 ref），或 browser_get_text 读正文。")
         return Outcome(True, "\n".join(lines), data={"url": resp.get("url"), "title": resp.get("title"), "tab": resp.get("tab")})
 
     async def tabs(self, args: dict) -> Outcome:
@@ -354,6 +446,7 @@ class BrowserDriver:
         payload: dict = {"max_side": 1280, "quality": 72, "label": "截图"}
         target = _target_args(args)
         viewport_shot = True
+        kind = "viewport"
         if target:
             info = await self.kit("resolve", target, label="定位截图区域")
             r = info.get("rect") or {}
@@ -362,23 +455,30 @@ class BrowserDriver:
                                "width": max(1, r.get("width", 1) + pad * 2), "height": max(1, r.get("height", 1) + pad * 2)}
             payload["label"] = f"截图 {info.get('label') or ''}"
             viewport_shot = False
+            kind = "element"
         elif args.get("full_page"):
             payload["full_page"] = True
             payload["label"] = "整页截图"
             viewport_shot = False
+            kind = "full"
+        elif _flag(args.get("marks")):
+            payload["marks"] = True
         resp = await self.call("capture", payload, timeout=_T_CAPTURE)
         b64 = resp.get("base64") or ""
         if not b64:
             raise ActionError("截图失败：没有拿到图像数据")
         w, h = int(resp.get("width") or 0), int(resp.get("height") or 0)
-        css_w = float(resp.get("css_width") or w or 1)
         tab = str(resp.get("tab") or self.st.tab or "")
-        if viewport_shot and css_w:
-            self.st.shot_scale[tab] = (w / css_w) if w else 1.0
+        self._remember_shot({**resp, "tab": tab}, kind)
         rel, abs_path = _save_shot(b64, resp.get("mime") or "image/jpeg")
-        lines = [f"截图完成：{_clip(resp.get('title') or '', 60)} — {resp.get('url') or ''}",
-                 f"图片 {w}×{h}" + ("（视口截图：图上像素坐标可直接用于 browser_click 的 x/y）" if viewport_shot
-                                   else "（非视口截图，坐标不能直接用于点击）")]
+        hint = {"viewport": "（视口截图：图上像素坐标可直接用于 browser_click 的 x/y）",
+                "full": "（整页截图：图上坐标为整页位置，点击时会自动滚到该处）",
+                "element": "（元素截图，坐标不能用于点击）"}[kind]
+        lines = [f"截图完成：{_clip(resp.get('title') or '', 60)} — {resp.get('url') or ''}", f"图片 {w}×{h}" + hint]
+        marks = resp.get("marks") or []
+        if marks:
+            lines.append("图上编号对应的元素（按 ref 操作最准）：")
+            lines += [f"  [{m.get('n')}] {m.get('label')}" for m in marks]
         if abs_path:
             lines.append(f"已保存: path=`{abs_path}`（模型不支持看图时可用 view_image 读取）")
         lines += _events_lines(resp)
@@ -390,9 +490,13 @@ class BrowserDriver:
         target = _target_args(args)
         if not target:
             if args.get("x") is not None and args.get("y") is not None:
-                x, y = self._to_css(args.get("x"), args.get("y"))
-                info = await self.kit("resolve", {"x": x, "y": y}, label=f"{label_prefix}坐标 ({int(x)}, {int(y)})")
-                info["x"], info["y"] = x, y
+                x, y, guard = self._to_css(args.get("x"), args.get("y"))
+                a: dict = {"x": x, "y": y}
+                if guard:
+                    a["shot"] = guard
+                info = await self.kit("resolve", a, label=f"{label_prefix}坐标 ({int(x)}, {int(y)})")
+                if info.get("offscreen") or info.get("x") is None:
+                    info["x"], info["y"] = x, y
                 return info
             raise ActionError("需要指定目标：ref（来自 browser_snapshot）、selector、text 或 x/y 坐标")
         info = await self.kit("resolve", target, label=f"定位{label_prefix}目标")
@@ -413,33 +517,40 @@ class BrowserDriver:
         verb = {1: "点击", 2: "双击", 3: "三击"}[count] if button == "left" else ("右键点击" if button == "right" else "中键点击")
         mods = _modifiers(args.get("modifiers"))
         before = self.st.urls.get(self.st.tab or "", "")
+        shot = _flag(args.get("screenshot"))
         if covered and info.get("ref"):
             # 目标被遮挡且已确认（force）：坐标会落在遮挡物上，改为直接在元素上派发点击
             if count != 1 or button != "left" or mods:
                 raise ActionError(f"{info.get('label')} 被 {covered} 遮挡，强制点击只支持左键单击（去掉双击、右键或修饰键）")
             resp = await self.call("mouse", {
                 "action": "activate", "ref": info["ref"], "x": info["x"], "y": info["y"],
-                "label": f"点击{info.get('label') or ''}", "rect": info.get("rect"), "settle_ms": 1500,
+                "label": f"点击{info.get('label') or ''}", "rect": info.get("rect"), "settle_ms": _SETTLE_CLICK, "shot": shot,
             }, timeout=_T_INPUT)
             lines = [f"已点击 {info.get('label') or ''}（{info['ref']}）：{covered} 遮挡了它，已直接在元素上触发点击"] \
                 + _settle_lines(resp, before)
-            return Outcome(True, "\n".join(lines), data={"url": resp.get("url"), "title": resp.get("title")})
-        resp = await self.call("mouse", {
+            return self._attach_shot(Outcome(True, "\n".join(lines), data={"url": resp.get("url"), "title": resp.get("title")}), resp)
+        payload = {
             "action": "click", "x": info["x"], "y": info["y"], "button": button, "count": count, "modifiers": mods,
             "label": f"{verb}{info.get('label') or ''}", "rect": info.get("rect"),
             "on_dialog": args.get("on_dialog") or "accept", "prompt_text": args.get("prompt_text") or "",
-            "settle_ms": 1500,
-        }, timeout=_T_INPUT)
-        ref = f"（{info['ref']}）" if info.get("ref") else ""
-        lines = [f"已{verb} {info.get('label') or ''}{ref}"] + _settle_lines(resp, before)
-        return Outcome(True, "\n".join(lines), data={"url": resp.get("url"), "title": resp.get("title")})
+            "settle_ms": _SETTLE_CLICK, "shot": shot,
+        }
+        if info.get("ref") and not info.get("point"):
+            payload["ref"] = info["ref"]  # 宿主派发前按 ref 做最终校准（动画结束、命中复核）
+        resp = await self.call("mouse", payload, timeout=_T_INPUT)
+        ref = f"（{info['ref']}）" if info.get("ref") and not info.get("point") else ""
+        lines = [f"已{verb} {info.get('label') or ''}{ref}"] + _target_notes(info) + _settle_lines(resp, before)
+        return self._attach_shot(Outcome(True, "\n".join(lines), data={"url": resp.get("url"), "title": resp.get("title")}), resp)
 
     async def hover(self, args: dict) -> Outcome:
         info = await self._resolve(args, "悬停")
-        resp = await self.call("mouse", {"action": "move", "x": info["x"], "y": info["y"],
-                                         "label": f"悬停在{info.get('label') or ''}", "rect": info.get("rect"),
-                                         "settle_ms": 500}, timeout=_T_INPUT)
-        return Outcome(True, "\n".join([f"已悬停在 {info.get('label') or ''}"] + _settle_lines(resp)))
+        payload = {"action": "move", "x": info["x"], "y": info["y"], "label": f"悬停在{info.get('label') or ''}",
+                   "rect": info.get("rect"), "settle_ms": _SETTLE_HOVER, "shot": _flag(args.get("screenshot"))}
+        if info.get("ref") and not info.get("point"):
+            payload["ref"] = info["ref"]
+        resp = await self.call("mouse", payload, timeout=_T_INPUT)
+        out = Outcome(True, "\n".join([f"已悬停在 {info.get('label') or ''}"] + _target_notes(info) + _settle_lines(resp)))
+        return self._attach_shot(out, resp)
 
     async def type_text(self, args: dict) -> Outcome:
         text = args.get("text")
@@ -453,17 +564,22 @@ class BrowserDriver:
         label = info.get("label") or "输入框"
         before = self.st.urls.get(self.st.tab or "", "")
         submit = bool(args.get("submit") or args.get("press_enter"))
+        shot = _flag(args.get("screenshot"))
         resp = await self.call("text", {"text": text, "label": f"在{label}输入", "rect": info.get("rect"),
-                                        "settle_ms": 0 if submit else 600}, timeout=_T_INPUT)
+                                        "settle_ms": 0 if submit else _SETTLE_TEXT, "shot": shot and not submit},
+                               timeout=_T_INPUT)
         lines = [f"已在 {label} 输入 {len(text)} 个字符" + ("（先清空了原内容）" if clear else "")]
         if submit:
-            resp = await self.call("keys", {"keys": ["Enter"], "label": "按下 Enter 提交", "settle_ms": 2000,
-                                            "on_dialog": args.get("on_dialog") or "accept"}, timeout=_T_INPUT)
+            resp = await self.call("keys", {"keys": ["Enter"], "label": "按下 Enter 提交", "settle_ms": _SETTLE_CLICK,
+                                            "on_dialog": args.get("on_dialog") or "accept", "shot": shot}, timeout=_T_INPUT)
             lines.append("已按 Enter 提交")
             lines += _settle_lines(resp, before)
         else:
-            lines += _events_lines(resp)
-        return Outcome(True, "\n".join(lines), data={"url": resp.get("url")})
+            st = resp.get("settle") or {}
+            # 纯输入只回报报错类信息（如输入即校验的错误提示），不重复「内容有变化」
+            lines += [ln for ln in _settle_lines(resp) if ln.startswith(("页面提示", "接口", "控制台报错", "新出现", "按要求", "检测到报错"))] \
+                if (st.get("notices") or st.get("net_errors") or st.get("added") or st.get("shot")) else _events_lines(resp)
+        return self._attach_shot(Outcome(True, "\n".join(lines), data={"url": resp.get("url")}), resp)
 
     async def press(self, args: dict) -> Outcome:
         try:
@@ -476,9 +592,9 @@ class BrowserDriver:
         shown = " ".join(describe(c) for c in combos) + (f" ×{repeat}" if repeat > 1 else "")
         before = self.st.urls.get(self.st.tab or "", "")
         resp = await self.call("keys", {"keys": combos, "repeat": repeat, "label": f"按键 {shown}",
-                                        "on_dialog": args.get("on_dialog") or "accept", "settle_ms": 1200},
-                               timeout=_T_INPUT)
-        return Outcome(True, "\n".join([f"已按下 {shown}"] + _settle_lines(resp, before)))
+                                        "on_dialog": args.get("on_dialog") or "accept", "settle_ms": _SETTLE_KEYS,
+                                        "shot": _flag(args.get("screenshot"))}, timeout=_T_INPUT)
+        return self._attach_shot(Outcome(True, "\n".join([f"已按下 {shown}"] + _settle_lines(resp, before))), resp)
 
     async def scroll(self, args: dict) -> Outcome:
         to = str(args.get("to") or "").lower()
@@ -507,7 +623,7 @@ class BrowserDriver:
             info = await self.kit("resolve", target, label="定位滚动区域")
             x, y = info["x"], info["y"]
         elif args.get("x") is not None and args.get("y") is not None:
-            x, y = self._to_css(args.get("x"), args.get("y"))
+            x, y, _ = self._to_css(args.get("x"), args.get("y"))
         else:
             x, y = vp["width"] / 2, vp["height"] / 2
         before = await self.kit("scrollPos", {"x": x, "y": y})
@@ -515,7 +631,7 @@ class BrowserDriver:
         dy = px if direction == "down" else (-px if direction == "up" else 0)
         zh = {"up": "向上", "down": "向下", "left": "向左", "right": "向右"}[direction]
         await self.call("mouse", {"action": "wheel", "x": x, "y": y, "dx": dx, "dy": dy,
-                                  "label": f"{zh}滚动", "settle_ms": 350}, timeout=_T_INPUT)
+                                  "label": f"{zh}滚动", "settle_ms": _SETTLE_WHEEL}, timeout=_T_INPUT)
         after = await self.kit("scrollPos", {"x": x, "y": y})
         moved = abs((after or {}).get("top", 0) - (before or {}).get("top", 0)) + abs((after or {}).get("left", 0) - (before or {}).get("left", 0))
         where = f"{(after or {}).get('label') or '页面'} 位置 {(after or {}).get('top', 0)}/{(after or {}).get('max', 0)}"
@@ -530,7 +646,7 @@ class BrowserDriver:
             dst = await self.kit("resolve", _target_args(to_args), label="定位放置目标")
             tx, ty, dlabel = dst["x"], dst["y"], dst.get("label")
         elif to_args.get("x") is not None and to_args.get("y") is not None:
-            tx, ty = self._to_css(to_args.get("x"), to_args.get("y"))
+            tx, ty, _ = self._to_css(to_args.get("x"), to_args.get("y"))
             dlabel = f"坐标 ({int(tx)}, {int(ty)})"
         else:
             raise ActionError("需要放置目标：to_ref / to_selector / to_text 或 to_x + to_y")
@@ -687,11 +803,18 @@ async def run_batch(driver: BrowserDriver, args: dict) -> Outcome:
         if not out.ok:
             lines.append(f"{i}. {name} 失败：{out.error}")
             return Outcome(False, "\n".join(lines), error=f"第 {i} 步（{name}）失败：{out.error}")
-        body = out.text if name in ("snapshot", "get_text", "evaluate") else out.text.split("\n")[0]
+        if name in ("snapshot", "get_text", "evaluate") or i == len(steps):
+            body = out.text
+        else:
+            # 中间步骤只留首行与报错类信息（报错一闪而过也要让模型看到）
+            parts = out.text.split("\n")
+            body = "\n".join([parts[0]] + [ln for ln in parts[1:] if ln.startswith(_ALERT_PREFIXES)])
         lines.append(f"{i}. {body}")
         if out.image_b64:
             image = out
     then = str(args.get("then") or "").lower()
+    if _flag(args.get("screenshot")):
+        then = "screenshot"
     if then == "screenshot":
         image = await driver.screenshot({})
         lines.append("末尾截图：" + image.text.split("\n")[0])
@@ -701,6 +824,21 @@ async def run_batch(driver: BrowserDriver, args: dict) -> Outcome:
     out = Outcome(True, f"批量执行完成（{len(steps)} 步）：\n" + "\n".join(lines))
     if image is not None:
         out.image_b64, out.image_mime, out.data = image.image_b64, image.image_mime, image.data
+    return out
+
+
+_ALERT_PREFIXES = ("页面提示", "接口", "控制台报错", "页面打开了对话框", "仍有", "截图后页面", "已对准", "选择器匹配")
+
+
+def _target_notes(info: dict) -> list[str]:
+    """定位过程中值得模型知道的修正：吸附、滚动补偿、选择器多匹配。"""
+    out = []
+    if info.get("note"):
+        out.append(info["note"])
+    if info.get("snapped"):
+        out.append(f"已对准 {info.get('label')}（坐标落在它外侧几像素，已吸附到该元素）")
+    if info.get("matches"):
+        out.append(f"选择器匹配 {info['matches']} 个元素，已用第 1 个；如不是目标请改用 ref")
     return out
 
 

@@ -111,10 +111,10 @@ export function BrowserPanel({ sessionId, visible = true }: {
    *  从未量到过尺寸的元素先给估算值——否则停泊容器只有 1px，页面会按 1px 排版。 */
   const syncFrameSize = useCallback(() => {
     const vp = viewportRef.current;
-    if (!vp) return;
+    // 视口容器尚未挂载（面板从未展开）时也要给停泊的 webview 估算尺寸，否则页面按 1px 排版、点击全部落空（plan-20261015-browser-perf R17）
     let w = 0;
     let h = 0;
-    if (shownRef.current) {
+    if (vp && shownRef.current) {
       w = vp.clientWidth;
       h = vp.clientHeight;
     }

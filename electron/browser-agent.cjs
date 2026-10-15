@@ -7,11 +7,17 @@
 //      并卡住页面（实测），AI 操作期间由 AI 按策略应答，用户操作触发的转给渲染层用应用内对话框询问；
 //   ③ 网页打开新窗口（target=_blank / window.open）一律转成面板里的新标签，不再静默失败。
 // 截图走 capturePage(stayHidden)：webview 停泊在视口内时，即使面板隐藏也能截（实测 7–12 ms）。
+// plan-20261015-browser-perf：主窗口被遮挡/最小化时合成器不出帧，capturePage 会一直等；
+// 此时限时后改走 CDP 截图兜底，仍失败就在几秒内给出可读原因，而不是卡满 15 秒。
+// 同样因为宿主页面此时被判为 hidden、定时器被节流到 1 秒级，宿主的等待一律走这里的 sleep（主进程计时不受影响）。
 //
 // 只接受「宿主是主窗口」的 webview guest，任何其它 webContents 一律拒绝。
 const { ipcMain, webContents, clipboard, nativeImage } = require("electron");
 
 const NET_MAX = 400;
+// 动作结果里回报的接口：只看页面脚本发起的请求（图片、样式等资源的失败不算业务报错）
+const API_TYPES = new Set(["XHR", "Fetch"]);
+const BODY_MAX = 300;
 
 function withTimeout(promise, ms, msg) {
   return Promise.race([
@@ -29,6 +35,9 @@ function clampInt(v, lo, hi, dflt) {
 module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
   /** wcId → { wc, attached, net: [], netById: Map, seq, aiUntil, accept, promptText, events: [], pendingDialog } */
   const guests = new Map();
+  // 最近一次「宿主隐藏导致截图失败」的时刻与窗口：最小化期间不重复空等
+  let lastHiddenFail = 0;
+  let hiddenFailWin = 0;
 
   function emit(payload) {
     const mw = getMainWindow();
@@ -56,6 +65,7 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
       const entry = {
         seq: ++st.seq, id: params.requestId, method: (params.request && params.request.method) || "GET",
         url: String((params.request && params.request.url) || "").slice(0, 500), type: params.type || "", status: null,
+        startedAt: Date.now(), done: false,
       };
       st.net.push(entry);
       st.netById.set(params.requestId, entry);
@@ -66,9 +76,12 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
     } else if (method === "Network.responseReceived") {
       const e = st.netById.get(params.requestId);
       if (e && params.response) { e.status = params.response.status; e.mime = String(params.response.mimeType || "").slice(0, 80); }
+    } else if (method === "Network.loadingFinished") {
+      const e = st.netById.get(params.requestId);
+      if (e) e.done = true;
     } else if (method === "Network.loadingFailed") {
       const e = st.netById.get(params.requestId);
-      if (e) { e.status = "failed"; e.error = params.canceled ? "已取消" : String(params.errorText || "").slice(0, 200); }
+      if (e) { e.status = "failed"; e.done = true; e.error = params.canceled ? "已取消" : String(params.errorText || "").slice(0, 200); }
     } else if (method === "Page.javascriptDialogOpening") {
       const dlg = { type: params.type, message: String(params.message || "").slice(0, 500), defaultPrompt: params.defaultPrompt || "" };
       if (Date.now() < st.aiUntil) {
@@ -120,10 +133,13 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
 
   async function capture(wc, st, a) {
     const metrics = await withTimeout(
-      wc.executeJavaScript("[innerWidth, innerHeight, document.documentElement.scrollWidth, document.documentElement.scrollHeight]", false),
+      wc.executeJavaScript("[innerWidth, innerHeight, document.documentElement.scrollWidth, document.documentElement.scrollHeight, scrollX, scrollY, location.href]", false),
       5000, "读取页面尺寸超时",
     );
-    const [vw, vh, sw, sh] = metrics.map((n) => Math.max(1, Math.round(Number(n) || 1)));
+    const [vw, vh, sw, sh] = metrics.slice(0, 4).map((n) => Math.max(1, Math.round(Number(n) || 1)));
+    // 截图时的滚动位置、视口与地址：之后按截图坐标点击时据此补偿滚动、拒绝过期坐标
+    const scroll = { x: Math.round(Number(metrics[4]) || 0), y: Math.round(Number(metrics[5]) || 0) };
+    const pageUrl = String(metrics[6] || "");
     const quality = clampInt(a.quality, 30, 95, 72);
     const maxSide = clampInt(a.max_side, 320, 4096, 1280);
     let img = null;
@@ -154,7 +170,7 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
         cssW = rect.width;
         cssH = rect.height;
       }
-      img = await withTimeout(wc.capturePage(rect, { stayHidden: true, stayAwake: true }), 15000, "截图超时（页面未在渲染）");
+      img = await captureViewport(wc, st, rect, quality);
     }
     if (!img || img.isEmpty()) throw new Error("截图为空（页面可能尚未加载完成）");
     // 输出按 CSS 像素（再按最长边限幅）：截图像素坐标与页面坐标一一对应，模型可直接拿来点击
@@ -165,7 +181,96 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
     const size = img.getSize();
     if (size.width !== tw || size.height !== th) img = img.resize({ width: tw, height: th, quality: "good" });
     const buf = img.toJPEG(quality);
-    return { base64: buf.toString("base64"), mime: "image/jpeg", width: tw, height: th, css_width: cssW, css_height: cssH };
+    return {
+      base64: buf.toString("base64"), mime: "image/jpeg", width: tw, height: th, css_width: cssW, css_height: cssH,
+      scroll, viewport: { width: vw, height: vh }, page_url: pageUrl,
+    };
+  }
+
+  /** 视口截图：先 capturePage（快）。主窗口被遮挡/最小化时合成器不出帧：临时关闭主窗口的后台节流让它出帧，
+   *  截完立即恢复（只在截图这一刻多耗电）；仍不行再试 CDP 截图，失败就在几秒内给出可读原因。 */
+  async function captureViewport(wc, st, rect, quality) {
+    const mw = getMainWindow();
+    const hostHidden = !!(mw && !mw.isDestroyed() && (mw.isMinimized() || !mw.isVisible() || isOccluded(mw)));
+    if (hostHidden && Date.now() - lastHiddenFail < 30000 && hiddenFailWin === mw.id && mw.isMinimized()) {
+      // 刚确认过最小化时截不到：不再空等，直接说明
+      throw new Error("截图失败：应用窗口最小化时页面不渲染，请把窗口切到前台后重试");
+    }
+    // 被遮挡不一定能检测到（isOccluded 视平台而定），所以只要主窗口处于节流状态就临时放开；可见时这是空操作
+    let restore = null;
+    try {
+      const throttled = typeof mw?.webContents.getBackgroundThrottling === "function" ? mw.webContents.getBackgroundThrottling() : hostHidden;
+      if (mw && !mw.isDestroyed() && throttled) {
+        mw.webContents.setBackgroundThrottling(false);
+        restore = () => { try { if (!mw.isDestroyed()) mw.webContents.setBackgroundThrottling(true); } catch { /* 窗口已关闭 */ } };
+        if (hostHidden) wc.invalidate();
+      }
+    } catch { restore = null; }
+    try {
+      try {
+        return await withTimeout(wc.capturePage(rect, { stayHidden: true, stayAwake: true }), 2000, "__CAPTURE_TIMEOUT__");
+      } catch (err) {
+        if (!st || !st.attached) throw new Error("截图超时：应用窗口被遮挡或最小化时页面不渲染，请把窗口切到前台后重试");
+        log("[browser-agent] capturePage 未出帧，改用 CDP 截图:", err && err.message);
+      }
+      const params = { format: "jpeg", quality };
+      if (rect) params.clip = { x: rect.x, y: rect.y, width: rect.width, height: rect.height, scale: 1 };
+      try {
+        const res = await withTimeout(cdp(st, "Page.captureScreenshot", params), 2000, "CDP 截图超时");
+        return nativeImage.createFromBuffer(Buffer.from(res.data, "base64"));
+      } catch (err) {
+        if (hostHidden && mw && !mw.isDestroyed()) { lastHiddenFail = Date.now(); hiddenFailWin = mw.id; }
+        throw new Error("截图失败：应用窗口被遮挡或最小化时页面不渲染（" + ((err && err.message) || "未知原因") + "），请把窗口切到前台后重试");
+      }
+    } finally {
+      if (restore) restore();
+    }
+  }
+
+  function isOccluded(mw) {
+    try { return typeof mw.isOccluded === "function" ? mw.isOccluded() : false; } catch { return false; }
+  }
+
+  /** 动作起点之后页面脚本发起的请求：在途数、错误请求（含响应体摘要）与业务报错（200 但响应里带错误码）。 */
+  async function netSince(st, a) {
+    if (!st || !st.attached) return { available: false, pending: 0, errors: [] };
+    const since = Number(a.since) || 0;
+    const mine = st.net.filter((e) => e.seq > since && API_TYPES.has(e.type));
+    const pending = mine.filter((e) => !e.done).length;
+    const out = { available: true, pending, errors: [], seq: st.seq };
+    if (!a.bodies) return out;
+    const failed = mine.filter((e) => e.status === "failed" || (typeof e.status === "number" && e.status >= 400));
+    for (const e of failed.slice(-2)) {
+      out.errors.push({ id: e.id, method: e.method, url: e.url, status: e.status, error: e.error || "", body: e.status === "failed" ? "" : await bodyHead(st, e) });
+    }
+    // 业务报错：HTTP 200 的 JSON 响应里 success=false 或 code 非 0/200 且带提示文字
+    const okJson = mine.filter((e) => e.done && typeof e.status === "number" && e.status < 400 && /json/i.test(e.mime || "")).slice(-4);
+    for (const e of okJson) {
+      if (out.errors.length >= 3) break;
+      const body = await bodyHead(st, e, 4000);
+      const biz = bizError(body);
+      if (biz) out.errors.push({ id: e.id, method: e.method, url: e.url, status: e.status, biz, body: body.slice(0, BODY_MAX) });
+    }
+    return out;
+  }
+
+  async function bodyHead(st, e, max) {
+    try {
+      const res = await withTimeout(cdp(st, "Network.getResponseBody", { requestId: e.id }), 1500, "读取响应体超时");
+      if (res.base64Encoded) return "";
+      return String(res.body || "").slice(0, max || BODY_MAX);
+    } catch { return ""; }
+  }
+
+  function bizError(body) {
+    let j;
+    try { j = JSON.parse(body); } catch { return ""; }
+    if (!j || typeof j !== "object" || Array.isArray(j)) return "";
+    const msg = j.msg || j.message || j.errMsg || j.error_msg || j.errorMessage || (typeof j.error === "string" ? j.error : "");
+    const code = j.code ?? j.errcode ?? j.errCode;
+    const badCode = code !== undefined && code !== null && !["0", "200", "00000", "success", "ok"].includes(String(code).toLowerCase());
+    if (j.success === false || j.ok === false || badCode) return String(msg || ("错误码 " + code)).slice(0, 200);
+    return "";
   }
 
   function netLogs(st, a) {
@@ -185,6 +290,11 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
       if (a.action === "write") { clipboard.writeText(String(a.text || "")); return { text: String(a.text || "") }; }
       return { text: clipboard.readText() };
     }
+    if (op === "sleep") {
+      // 宿主页面被判为 hidden 时自身定时器被节流到秒级；主进程计时不受影响（plan-20261015-browser-perf）
+      await new Promise((r) => setTimeout(r, clampInt(a.ms, 0, 2000, 0)));
+      return {};
+    }
     const wc = panelGuest(wcId);
     if (!wc) throw new Error("目标网页已关闭或不属于浏览器面板");
     const st = guests.get(wc.id) || (prepare(wc.id).ok ? guests.get(wc.id) : null);
@@ -203,8 +313,13 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
           st.events.push({ type: "dialog", dialog_type: d.type, message: d.message, accepted: d.type === "alert" });
           emit({ type: "dialog-closed", wcId: wc.id });
         }
-        return {};
+        // 动作起点：之后发起的请求才算本次动作触发的
+        return { net_seq: st.seq };
       }
+      case "netSince":
+        return netSince(st, a);
+      case "zoom":
+        return { factor: wc.getZoomFactor() };
       case "events": {
         if (!st) return { events: [] };
         const events = st.events;

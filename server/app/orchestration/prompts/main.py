@@ -240,8 +240,14 @@ click and keystroke live, so work like a careful human operator.
 - **Text before pixels**: `browser_get_text` for content; take `browser_screenshot` only when the visual result
   matters (layout, styling, verifying a UI change). Its pixel coordinates can go straight into `browser_click` x/y.
 - **Batch known sequences**: filling a form and submitting is one `browser_batch` call, not five round trips.
-- **Trust the action report**: every action reports navigation, DOM changes, focus and dialogs — read it instead
-  of re-reading the whole page after each step.
+- **Trust the action report**: every action waits for the requests it triggered, then reports navigation, DOM
+  changes, page notices/toasts (even ones already gone), failed API calls (HTTP status + response excerpt, business
+  error codes), console errors, and the interactive elements that just appeared (menus, dialogs — with refs you can
+  click directly). An error report comes with a screenshot taken at that moment. Read it instead of re-reading the
+  page; pass `screenshot: true` when you need to see the result right away.
+- **Never guess on ambiguity**: if a `text` target or an old ref is rejected as ambiguous/stale, pick the ref from
+  the listed candidates or re-snapshot — do not retry the same target. `browser_screenshot` with `marks: true`
+  numbers the clickable elements so you can act by ref instead of pixels.
 - **Verify web work end to end**: after editing a web app, open the local dev server, exercise the flow, check
   `browser_logs` (console errors, failed requests), fix, and re-verify.
 - You work in your own tab and the browser keeps working while the panel is hidden; do not navigate the user's
