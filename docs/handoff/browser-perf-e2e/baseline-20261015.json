@@ -1,0 +1,158 @@
+{
+  "latency": {
+    "navigate(同页刷新)": {
+      "median_ms": 36,
+      "all": [
+        26,
+        36,
+        47
+      ]
+    },
+    "snapshot": {
+      "median_ms": 6,
+      "all": [
+        6,
+        20,
+        5
+      ]
+    },
+    "click(ref,DOM变化)": {
+      "median_ms": 2000,
+      "all": [
+        1387,
+        2008,
+        1999,
+        2000,
+        2001
+      ]
+    },
+    "click(selector)": {
+      "median_ms": 1997,
+      "all": [
+        1991,
+        2003,
+        2005,
+        1996,
+        1997
+      ]
+    },
+    "click(无变化)": {
+      "median_ms": 1998,
+      "all": [
+        1995,
+        1998,
+        2013,
+        1991,
+        2002
+      ]
+    },
+    "hover": {
+      "median_ms": 2000,
+      "all": [
+        1999,
+        2000,
+        1996,
+        2003,
+        2002
+      ]
+    },
+    "type(10字)": {
+      "median_ms": 1004,
+      "all": [
+        1009,
+        993,
+        997,
+        1004,
+        1006
+      ]
+    },
+    "press(End)": {
+      "median_ms": 997,
+      "all": [
+        994,
+        997,
+        1007,
+        993,
+        1005
+      ]
+    },
+    "scroll(down)": {
+      "median_ms": 2004,
+      "all": [
+        2004,
+        1993,
+        2007,
+        1991,
+        2008
+      ]
+    },
+    "scroll(top)": {
+      "median_ms": 4,
+      "all": [
+        4,
+        4,
+        3,
+        19,
+        4
+      ]
+    },
+    "screenshot": {
+      "median_ms": 15016,
+      "all": [
+        4,
+        15005,
+        15018,
+        15019,
+        15016
+      ]
+    },
+    "get_text": {
+      "median_ms": 4,
+      "all": [
+        4,
+        3,
+        4
+      ]
+    }
+  },
+  "accuracy": {
+    "animated_menu": [
+      "[\"3\"]",
+      "[\"3\"]",
+      "[\"3\"]"
+    ],
+    "toast_error": {
+      "mentions_msg": false,
+      "mentions_500": false,
+      "has_image": false,
+      "ms": 1994,
+      "text": "已点击 按钮「保存」（ref_3）\n页面内容有变化（2 处 DOM 更新）\n焦点在 按钮「保存」"
+    },
+    "biz_error": {
+      "mentions_msg": false,
+      "ms": 2005,
+      "text": "已点击 按钮「提交订单」（ref_4）\n页面内容有变化（3 处 DOM 更新）\n焦点在 按钮「提交订单」"
+    },
+    "slow_api": {
+      "reports_change": true,
+      "ms": 1999,
+      "text": "已点击 按钮「慢接口」（ref_5）\n页面内容有变化（1 处 DOM 更新）\n焦点在 按钮「慢接口」"
+    },
+    "stale_ref": {
+      "deleted": "[\"李四\"]",
+      "ok": true,
+      "error": ""
+    },
+    "ambiguous_text": {
+      "deleted": "[\"张三\"]",
+      "ok": true,
+      "error": ""
+    },
+    "zoom_125": {
+      "far_clicks": 0,
+      "text": "已点击 按钮「远处按钮」（ref_7）\n页面没有可见变化",
+      "error": ""
+    }
+  },
+  "notes": []
+}

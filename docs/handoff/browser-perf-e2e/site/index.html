@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>E2E 测试页</title>
+  <style>
+    body { font-family: system-ui, "Microsoft YaHei", sans-serif; margin: 0; padding: 24px; background: #0f1115; color: #e6e8ee; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    p.hint { color: #9aa3b2; font-size: 13px; margin: 0 0 20px; }
+    .card { border: 1px solid #262b36; border-radius: 12px; padding: 16px; margin-bottom: 14px; background: #161a22; }
+    button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid #2f3646; background: #232a36; color: #e6e8ee; cursor: pointer; margin-right: 8px; }
+    button:hover { background: #2c3442; }
+    input[type="text"], select { font: inherit; padding: 8px 10px; border-radius: 8px; border: 1px solid #2f3646; background: #0f1115; color: #e6e8ee; min-width: 220px; }
+    #result { margin-top: 10px; color: #7ee0a8; font-weight: 600; }
+    .hover-target { display: inline-block; padding: 8px 14px; border-radius: 8px; background: #232a36; }
+    .hover-target.hot { background: #3a7bd5; color: #fff; }
+    .tall { height: 1800px; background: linear-gradient(#161a22, #101319); padding-top: 8px; color: #6b7385; }
+    code { color: #ffd479; }
+  </style>
+</head>
+<body>
+  <h1 id="page-title">E2E 测试页</h1>
+  <p class="hint">供内置浏览器 AI 工具的端到端实测使用（点击 / 输入 / 滚动 / 悬停 / 表单 / 弹窗 / 控制台）。</p>
+
+  <div class="card">
+    <h2 style="font-size:15px;margin:0 0 10px">1. 点击回流</h2>
+    <button id="btn-hello" data-test="hello">点击我</button>
+    <button id="btn-twice" data-test="twice">点两次</button>
+    <div id="result" data-test="result">（尚未点击）</div>
+  </div>
+
+  <div class="card">
+    <h2 style="font-size:15px;margin:0 0 10px">2. 文本输入</h2>
+    <input id="input-text" type="text" placeholder="在此输入文字" data-test="text" autocomplete="off" />
+    <button id="btn-echo" data-test="echo">回显</button>
+    <div id="echo" style="margin-top:10px;color:#9ecbff">（等待回显）</div>
+  </div>
+
+  <div class="card">
+    <h2 style="font-size:15px;margin:0 0 10px">3. 表单控件</h2>
+    <label><input id="chk-a" type="checkbox" data-test="check" /> 选项 A</label>
+    <label style="margin-left:12px"><input id="radio-a" type="radio" name="r" data-test="radio" /> 单选 A</label>
+    <select id="sel-a" data-test="select" style="margin-left:12px">
+      <option value="one">一</option>
+      <option value="two">二</option>
+      <option value="three">三</option>
+    </select>
+    <div id="form-state" style="margin-top:10px;color:#ffd479">（未变更）</div>
+  </div>
+
+  <div class="card">
+    <h2 style="font-size:15px;margin:0 0 10px">4. 悬停</h2>
+    <span class="hover-target" id="hover-me" data-test="hover">把鼠标移上来</span>
+    <div id="hover-state" style="margin-top:10px;color:#9aa3b2">（未悬停）</div>
+  </div>
+
+  <div class="card">
+    <h2 style="font-size:15px;margin:0 0 10px">5. 弹窗 / 控制台</h2>
+    <button id="btn-confirm" data-test="confirm">触发 confirm</button>
+    <button id="btn-log" data-test="log">写控制台</button>
+    <button id="btn-fetch" data-test="fetch">发请求</button>
+    <div id="dialog-state" style="margin-top:10px;color:#9aa3b2">（未触发弹窗）</div>
+  </div>
+
+  <div class="card">
+    <h2 style="font-size:15px;margin:0 0 10px">6. 长页面（滚动）</h2>
+    <div id="scroll-anchor" style="color:#9ecbff">滚动锚点</div>
+  </div>
+  <div class="tall">下方为长内容区（用于验证滚动）。<code>#bottom-marker</code> 在页面底部。</div>
+  <div id="bottom-marker" data-test="bottom" style="padding:12px 0;color:#7ee0a8">已到页面底部</div>
+
+  <script>
+    // 记录页面内的交互痕迹，供 E2E 断言读取
+    window.__e2eLog = [];
+    const log = (m) => { window.__e2eLog.push(m); };
+
+    let clicks = 0;
+    document.getElementById("btn-hello").addEventListener("click", () => {
+      document.getElementById("result").textContent = "已点击 " + (++clicks) + " 次";
+      log("hello:" + clicks);
+    });
+    document.getElementById("btn-twice").addEventListener("click", () => {
+      document.getElementById("result").textContent = "双击计数：" + (++clicks);
+      log("twice:" + clicks);
+    });
+    document.getElementById("btn-echo").addEventListener("click", () => {
+      document.getElementById("echo").textContent = "输入内容：" + document.getElementById("input-text").value;
+      log("echo");
+    });
+    document.getElementById("input-text").addEventListener("input", (e) => {
+      log("input:" + e.target.value);
+    });
+
+    const st = () => {
+      document.getElementById("form-state").textContent =
+        "checkbox=" + document.getElementById("chk-a").checked +
+        " radio=" + document.getElementById("radio-a").checked +
+        " select=" + document.getElementById("sel-a").value;
+    };
+    ["chk-a", "radio-a", "sel-a"].forEach((id) => {
+      document.getElementById(id).addEventListener("change", () => { log("change:" + id); st(); });
+    });
+
+    const hov = document.getElementById("hover-me");
+    hov.addEventListener("mouseenter", () => {
+      hov.classList.add("hot");
+      document.getElementById("hover-state").textContent = "已悬停";
+      log("hover");
+    });
+    hov.addEventListener("mouseleave", () => { hov.classList.remove("hot"); });
+
+    document.getElementById("btn-confirm").addEventListener("click", () => {
+      const ok = window.confirm("E2E：请确认此对话框");
+      document.getElementById("dialog-state").textContent = "confirm 返回 " + ok;
+      log("confirm:" + ok);
+    });
+    document.getElementById("btn-log").addEventListener("click", () => {
+      console.log("E2E-CONSOLE-MARK");
+      console.error("E2E-CONSOLE-ERROR-MARK");
+      log("console");
+    });
+    document.getElementById("btn-fetch").addEventListener("click", async () => {
+      try {
+        const r = await fetch("/e2e-site/ping.txt?t=" + Date.now());
+        const t = await r.text();
+        document.getElementById("dialog-state").textContent = "请求成功：" + t.trim();
+      } catch (e) {
+        document.getElementById("dialog-state").textContent = "请求失败：" + e.message;
+      }
+      log("fetch");
+    });
+  </script>
+</body>
+</html>

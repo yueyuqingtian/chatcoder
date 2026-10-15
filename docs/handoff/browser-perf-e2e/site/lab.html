@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>准确性实验页</title>
+  <style>
+    body { font-family: system-ui, "Microsoft YaHei", sans-serif; margin: 0; padding: 20px; background: #fff; color: #222; }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 14px; margin-bottom: 12px; position: relative; }
+    button { font: inherit; padding: 6px 12px; border-radius: 8px; border: 1px solid #bbb; background: #f4f4f4; cursor: pointer; }
+    .menu { position: absolute; left: 14px; top: 52px; width: 160px; background: #fff; border: 1px solid #ccc; border-radius: 8px;
+      box-shadow: 0 4px 16px rgba(0,0,0,.15); z-index: 10; transform-origin: top;
+      transition: transform 500ms ease, opacity 500ms ease; }
+    .menu.enter { transform: translateY(-90px) scaleY(0.5); opacity: 0.2; }
+    .mi { padding: 8px 12px; cursor: pointer; }
+    .mi:hover { background: #eef; }
+    .toast { position: fixed; top: 16px; left: 50%; transform: translateX(-50%); padding: 8px 16px; border-radius: 8px; z-index: 100; }
+    .toast-error { background: #fde2e2; color: #c00; }
+    #msgbox { position: fixed; top: 60px; right: 20px; padding: 8px 14px; border-radius: 8px; background: #fff3cd; color: #8a6d3b; display: none; }
+    table td { padding: 4px 10px; }
+    .icon-btn { position: absolute; left: 520px; top: 14px; width: 24px; height: 24px; padding: 0; border-radius: 8px; }
+    #far-btn { position: absolute; left: 640px; top: 40px; }
+    .spacer { height: 1600px; }
+  </style>
+</head>
+<body>
+  <div class="card" id="menu-card" style="height:240px">
+    <button id="menu-btn">打开菜单</button>
+    <div id="menu" class="menu" hidden>
+      <div class="mi" role="menuitem" data-v="1">选项一</div>
+      <div class="mi" role="menuitem" data-v="2">选项二</div>
+      <div class="mi" role="menuitem" data-v="3">选项三</div>
+      <div class="mi" role="menuitem" data-v="4">选项四</div>
+      <div class="mi" role="menuitem" data-v="5">选项五</div>
+    </div>
+    <span id="menu-result" style="margin-left:200px">（未选择）</span>
+    <button class="icon-btn" id="icon-btn" aria-label="设置">⚙</button>
+    <button id="far-btn">远处按钮</button>
+  </div>
+
+  <div class="card">
+    <button id="save-btn">保存</button>
+    <button id="order-btn">提交订单</button>
+    <button id="slow-btn">慢接口</button>
+    <span id="slow-result">（未请求）</span>
+  </div>
+  <div id="msgbox" class="message"></div>
+
+  <div class="card">
+    <table id="tbl">
+      <tr><td class="nm">张三</td><td><button class="del">删除</button></td></tr>
+      <tr><td class="nm">王五</td><td><button class="del">删除</button></td></tr>
+      <tr><td class="nm">赵六</td><td><button class="del">删除</button></td></tr>
+    </table>
+    <button id="next-page">下一页</button>
+    <span id="del-result">（未删除）</span>
+  </div>
+
+  <div class="card">
+    <button id="scroll-target-a">目标甲</button>
+    <div style="height:60px"></div>
+    <button id="scroll-target-b">目标乙</button>
+    <div style="height:60px"></div>
+    <button id="scroll-target-c">目标丙</button>
+    <span id="scroll-result">（未点击）</span>
+  </div>
+  <div class="spacer"></div>
+
+  <script>
+    window.__lab = { menu: [], deleted: [], icon: 0, far: 0, targets: [] };
+    const menu = document.getElementById('menu');
+    document.getElementById('menu-btn').addEventListener('click', () => {
+      menu.hidden = false;
+      menu.classList.add('enter');
+      void menu.offsetHeight;
+      requestAnimationFrame(() => menu.classList.remove('enter'));
+    });
+    menu.addEventListener('click', (e) => {
+      const mi = e.target.closest('.mi');
+      if (!mi) return;
+      window.__lab.menu.push(mi.dataset.v);
+      document.getElementById('menu-result').textContent = '已选择 ' + mi.textContent;
+      menu.hidden = true;
+    });
+    document.getElementById('icon-btn').addEventListener('click', () => { window.__lab.icon++; });
+    document.getElementById('far-btn').addEventListener('click', () => { window.__lab.far++; });
+
+    function toast(text) {
+      const t = document.createElement('div');
+      t.className = 'toast toast-error';
+      t.setAttribute('role', 'alert');
+      t.textContent = text;
+      document.body.appendChild(t);
+      setTimeout(() => t.remove(), 1200);
+    }
+    document.getElementById('save-btn').addEventListener('click', async () => {
+      const r = await fetch('/e2e-site/api/fail', { method: 'POST', body: '{}' });
+      const j = await r.json();
+      toast('保存失败：' + j.msg);
+    });
+    document.getElementById('order-btn').addEventListener('click', async () => {
+      const r = await fetch('/e2e-site/api/biz');
+      const j = await r.json();
+      if (j.code !== 0) {
+        const box = document.getElementById('msgbox');
+        box.textContent = j.msg;
+        box.style.display = 'block';
+        setTimeout(() => { box.style.display = 'none'; }, 1000);
+      }
+    });
+    document.getElementById('slow-btn').addEventListener('click', async () => {
+      const r = await fetch('/e2e-site/api/slow');
+      const j = await r.json();
+      document.getElementById('slow-result').textContent = '慢接口返回：' + j.value;
+    });
+
+    const pages = [['张三', '王五', '赵六'], ['李四', '钱七', '孙八']];
+    let pg = 0;
+    document.getElementById('next-page').addEventListener('click', () => {
+      pg = (pg + 1) % pages.length;
+      document.querySelectorAll('#tbl .nm').forEach((td, i) => { td.textContent = pages[pg][i]; });
+    });
+    document.querySelectorAll('#tbl .del').forEach((b) => b.addEventListener('click', () => {
+      const nm = b.closest('tr').querySelector('.nm').textContent;
+      window.__lab.deleted.push(nm);
+      document.getElementById('del-result').textContent = '已删除 ' + nm;
+    }));
+    ['a', 'b', 'c'].forEach((k) => document.getElementById('scroll-target-' + k).addEventListener('click', () => {
+      window.__lab.targets.push(k);
+      document.getElementById('scroll-result').textContent = '点击了 ' + k;
+    }));
+  </script>
+</body>
+</html>
