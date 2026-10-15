@@ -16,6 +16,7 @@ import "./styles/icons.css";
 import "./styles/composer.css";
 import "./styles/home.css";
 import "./styles/panel.css";
+import "./styles/browser.css";
 import "./styles/market.css";
 import "./styles/motion.css";
 import "./styles/focus.css";

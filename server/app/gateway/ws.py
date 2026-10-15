@@ -2,6 +2,8 @@
 
 服务端 → 客户端事件见 packages/shared（turn/agent/thinking/token/tool/usage/approval/error 等）。
 客户端 → 服务端：approval.response / terminal.input / browser.command / cancel / sync.request。
+全局通道（/ws/global）另承载内置浏览器宿主协议：browser.host.hello / browser.request / browser.response
+（plan-20261015-browser-agent，见 orchestration/browser/bridge.py）。
 
 v2.1（对齐 zcode 方案 3.2）：每条广播事件带会话级单调 seq + 环形缓冲区，
 客户端重连后发 sync.request(last_seq) 补发断线期间丢失的事件。
@@ -198,14 +200,33 @@ async def ws_global_endpoint(ws: WebSocket) -> None:
     """
     await ws.accept()
     manager.connect_global(ws)
+    from app.orchestration.browser.bridge import bridge as browser_bridge
     try:
         while True:
-            await ws.receive_text()
+            raw = await ws.receive_text()
+            # plan-20261015-browser-agent：桌面端经全局通道登记为内置浏览器宿主并回传执行结果
+            # （全局通道常驻，后台会话里的 AI 也能用浏览器）；其余消息仍只是心跳。
+            if "browser." not in raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            event = data.get("event")
+            payload = data.get("payload") or {}
+            if event == "browser.response":
+                browser_bridge.resolve(payload)
+            elif event == "browser.host.hello":
+                await browser_bridge.register(ws, payload)
+            elif event == "browser.host.bye":
+                browser_bridge.unregister(ws)
     except WebSocketDisconnect:
         manager.disconnect_global(ws)
+        browser_bridge.unregister(ws)
     except Exception:
         logger.debug("[ws] 全局连接异常关闭", exc_info=True)
         manager.disconnect_global(ws)
+        browser_bridge.unregister(ws)
 
 
 @ws_router.websocket("/ws/sessions/{session_id}")

@@ -57,7 +57,62 @@ const TOOL_VERBS: Record<string, string> = {
   todo_write: "已更新任务清单",
   ask_user_question: "已询问用户",
   mcp: "已调用",
+  // plan-20261015-browser-agent：内置浏览器与电脑操控工具（运行中自动替换为「正在…」）
+  browser_navigate: "已打开网页",
+  browser_tabs: "已管理标签",
+  browser_snapshot: "已读取页面结构",
+  browser_get_text: "已读取网页正文",
+  browser_screenshot: "已截图",
+  browser_click: "已点击",
+  browser_type: "已输入",
+  browser_press: "已按键",
+  browser_scroll: "已滚动",
+  browser_hover: "已悬停",
+  browser_drag: "已拖拽",
+  browser_fill: "已填写表单",
+  browser_clipboard: "已操作剪贴板",
+  browser_wait: "已等待",
+  browser_evaluate: "已执行页面脚本",
+  browser_logs: "已查看页面日志",
+  browser_batch: "已批量操作网页",
+  desktop_screenshot: "已截屏",
+  desktop_click: "已点击",
+  desktop_type: "已输入",
+  desktop_keys: "已按键",
+  desktop_scroll: "已滚动",
+  desktop_snapshot: "已读取界面",
+  desktop_windows: "已列出窗口",
+  desktop_focus: "已切换窗口",
+  desktop_find_text: "已查找文字",
 };
+
+/** plan-20261015-browser-agent：浏览器工具的行内摘要——完成后取结果首行里的操作对象（如「按钮「登录」」），
+ *  运行中按参数推断（网址 / 文字 / 按键 / 方向），一行就能看清 AI 在页面上做了什么。 */
+function browserSummary(leaf: ToolLeaf): string {
+  const a = (leaf.args ?? {}) as Record<string, unknown>;
+  const str = (v: unknown) => (typeof v === "string" ? v : "");
+  if (leaf.ok !== null && leaf.output && leaf.tool !== "browser_snapshot" && leaf.tool !== "browser_get_text") {
+    const first = leaf.output.split("\n")[0].trim();
+    const stripped = first.replace(/^(已打开|截图完成)[：:]\s*/, "").replace(/^已[^\s：:]{1,6}\s+/, "");
+    if (stripped) return stripped;
+  }
+  switch (leaf.tool) {
+    case "browser_navigate":
+      return str(a.url) || ({ back: "后退", forward: "前进", reload: "刷新" } as Record<string, string>)[str(a.action)] || "";
+    case "browser_type": return str(a.text) ? `「${str(a.text).slice(0, 40)}」` : "";
+    case "browser_press": return str(a.keys);
+    case "browser_scroll":
+      if (str(a.to)) return a.to === "top" ? "到顶部" : "到底部";
+      return ({ up: "向上", down: "向下", left: "向左", right: "向右" } as Record<string, string>)[str(a.direction)] || "";
+    case "browser_batch": return Array.isArray(a.actions) ? `${a.actions.length} 步` : "";
+    case "browser_snapshot": return str(a.query) ? `查找「${str(a.query)}」` : "";
+    case "browser_tabs":
+      return ({ list: "查看标签", new: "新建标签", select: "切换标签", close: "关闭标签" } as Record<string, string>)[str(a.action) || "list"] || "";
+    case "browser_clipboard":
+      return ({ copy: "复制", cut: "剪切", paste: "粘贴", select_all: "全选" } as Record<string, string>)[str(a.action)] || "";
+    default: return str(a.text) || str(a.ref) || str(a.selector) || "";
+  }
+}
 
 const TOOL_ICONS: Record<string, React.ReactNode> = {
   fs_read: <IconFileRead size={16} />,
@@ -114,6 +169,7 @@ function leafSummary(leaf: ToolLeaf): string {
     const qs = (leaf.args?.questions as Array<{ question?: string }> | undefined) || [];
     return qs.length > 0 ? `已询问 ${qs.length} 个问题` : "向用户发起询问";
   }
+  if (leaf.tool.startsWith("browser_")) return browserSummary(leaf);
   const cmd = leaf.args?.command ?? leaf.args?.cmd;
   if (typeof cmd === "string" && cmd) return cmd.split("\n")[0];
   const q = leaf.args?.query ?? leaf.args?.pattern ?? leaf.args?.url;
@@ -588,31 +644,6 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
                   );
                 })()
               )}
-              {/* v32: 浏览器截图工具调用展开直接渲染图片预览 */}
-              {leaf.tool === "browser_screenshot" && (
-                (() => {
-                  const m = leaf.output?.match(/path=`([^`]+)`/);
-                  const screenshotPath = m ? m[1] : null;
-                  if (screenshotPath) {
-                    const norm = screenshotPath.replace(/\\/g, "/");
-                    const idx = norm.indexOf("uploads/");
-                    const rel = idx >= 0 ? norm.slice(idx + 8) : "";
-                    const imgUrl = rel ? `/api/uploads/${rel}` : null;
-                    if (imgUrl) {
-                      return (
-                        <div style={{ padding: "8px 0" }}>
-                          <img
-                            src={imgUrl}
-                            alt="Browser Screenshot"
-                            style={{ maxWidth: "100%", maxHeight: 320, borderRadius: 6, border: "1px solid var(--border)", objectFit: "contain" }}
-                          />
-                        </div>
-                      );
-                    }
-                  }
-                  return null;
-                })()
-              )}
               {/* plan-278-1391: ask_user_question 的 output 是 `用户回答:\n{json}`，
                   问答已由上方结构化列表呈现，这里跳过原文，避免重复且可读性差的 JSON。 */}
               {leaf.output && leaf.tool !== "ask_user_question" && (path && /\.(ts|tsx|js|jsx|py|json|md|css|html|go|rs|java|c|cpp|sh)$/i.test(path) ? (
@@ -648,8 +679,10 @@ const ActionClusterRow = memo(function ActionClusterRow({ leaves }: { leaves: To
     const search = leaves.filter((l) => SEARCH_TOOLS.has(l.tool)).length;
     const run = leaves.filter((l) => RUN_TOOLS.has(l.tool)).length;
     const read = leaves.filter((l) => ["fs_read", "fs_list", "view_image", "read_attachment"].includes(l.tool)).length;
-    const other = leaves.length - search - run - read;
+    const web = leaves.filter((l) => l.tool.startsWith("browser_")).length;
+    const other = leaves.length - search - run - read - web;
     const parts: string[] = [];
+    if (web > 0) parts.push(`${web} 网页操作`);
     if (search > 0) parts.push(`${search} 搜索`);
     if (read > 0) parts.push(`${read} 读取`);
     if (run > 0) parts.push(`${run} 运行`);

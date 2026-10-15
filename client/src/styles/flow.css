@@ -161,3 +161,34 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
 .gallery-zoom-pct:hover { color: #fff; background: rgba(255, 255, 255, 0.12); }
 
 .tcap-bar { border-radius: 999px; overflow: hidden; }
+
+/* ══ 截图卡（plan-20261015-browser-agent）══════════════════════════════════
+   浏览器 / 电脑操控截图在时间线上的常显预览：与工具行同一左边界、同一字号层级；
+   缩略图高度固定（运行中的占位与最终图同高，图到达后不推动下方内容），点击看大图。 */
+.turn-item-shot { max-width: 100%; }
+.shot-card { display: flex; flex-direction: column; gap: 6px; margin: 2px 0 6px; max-width: 100%; }
+.shot-head {
+  display: flex; align-items: center; gap: 7px; min-width: 0;
+  font-size: var(--fs-md, 13px); color: var(--text-2);
+  line-height: var(--chat-line-height, 2.2);
+}
+.shot-head-ic { display: inline-flex; color: var(--text-3); flex-shrink: 0; }
+.shot-head-label { flex-shrink: 0; }
+.shot-head-src { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font-size: 12px; }
+.shot-head-link {
+  display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; margin-left: 2px;
+  height: 22px; padding: 0 8px; border: none; border-radius: var(--r-pill);
+  background: transparent; color: var(--text-3); font-size: 12px; cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
+}
+.shot-head-link:hover { background: var(--bg-hover); color: var(--text-1); }
+.shot-thumb {
+  display: block; flex-shrink: 0; align-self: flex-start; max-width: 100%; padding: 0; border: none; overflow: hidden;
+  border-radius: var(--r-lg); background: var(--bg-hover); cursor: zoom-in;
+  box-shadow: var(--shadow-xs, 0 1px 2px rgba(0, 0, 0, 0.06));
+  transition: box-shadow var(--dur-fast) var(--ease-standard), transform var(--dur-fast) var(--ease-standard);
+}
+.shot-thumb:hover { box-shadow: var(--shadow-md); }
+.shot-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top left; user-select: none; }
+/* 运行中的占位：与最终图同高的静态底色块（不做循环闪烁） */
+.shot-thumb.is-loading { cursor: default; box-shadow: none; }

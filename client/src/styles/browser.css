@@ -1,0 +1,180 @@
+/* ══ 内置浏览器面板（plan-20261015-browser-agent）════════════════════════
+   标签条 + 工具栏 + 视口；AI 操作可视化层（光标 / 高亮 / 波纹 / 闪白 / 状态胶囊）。
+   设计约束：圆角只用令牌、按钮走 ui/IconButton、无装饰描边、无循环动画、动效走 --dur-*。 */
+
+.bp { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--bg-panel); color: var(--text-1); }
+
+/* ── 标签条 ── */
+.bp-tabs { display: flex; align-items: center; gap: 4px; height: 38px; padding: 5px 8px 0; flex-shrink: 0; }
+.bp-tabs-list { display: flex; align-items: center; gap: 2px; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.bp-tabs-list::-webkit-scrollbar { display: none; }
+.bp-tab {
+  display: flex; align-items: center; gap: 6px;
+  height: 28px; min-width: 76px; max-width: 176px; flex: 0 1 176px;
+  padding: 0 4px 0 9px; border-radius: var(--r-md);
+  color: var(--text-3); font-size: 12px; cursor: pointer; user-select: none;
+  transition: background var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
+}
+.bp-tab:hover { background: var(--bg-hover); color: var(--text-2); }
+.bp-tab.is-active { background: var(--bg-active); color: var(--text-1); }
+.bp-tab-ic { width: 14px; height: 14px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.bp-tab-ic img { width: 14px; height: 14px; border-radius: var(--r-xs); object-fit: contain; }
+.bp-tab.is-ai .bp-tab-ic { color: var(--accent); }
+.bp-tab-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* AI 正在该标签操作：静态状态点（不呼吸、不闪烁） */
+.bp-tab-dot { width: 6px; height: 6px; border-radius: var(--r-pill); background: var(--accent); flex-shrink: 0; }
+/* 关闭按钮占固定槽位：悬停 / 激活才显形，不挤动标题 */
+.bp-tab-close {
+  width: 18px; height: 18px; flex-shrink: 0; padding: 0; border: none; border-radius: var(--r-sm);
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; color: var(--text-3); cursor: pointer; opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-standard), background var(--dur-fast) var(--ease-standard);
+}
+.bp-tab:hover .bp-tab-close, .bp-tab.is-active .bp-tab-close, .bp-tab-close:focus-visible { opacity: 1; }
+.bp-tab-close:hover { background: var(--bg-hover); color: var(--text-1); }
+
+/* ── 工具栏 ── */
+.bp-toolbar {
+  position: relative; display: flex; align-items: center; gap: 2px;
+  height: 42px; padding: 0 8px; flex-shrink: 0; border-bottom: 1px solid var(--border-light);
+}
+.bp-toolbar .bp-url { flex: 1; min-width: 0; margin: 0 6px; }
+.bp-url .ui-input { font-size: 12.5px; }
+.bp-url-ic { display: inline-flex; align-items: center; color: var(--text-3); }
+.bp-more-anchor { position: relative; display: inline-flex; }
+.bp-menu.ui-pop { min-width: 188px; }
+/* 加载进度：一次性推进到 85%，加载结束即淡出（不循环） */
+.bp-load {
+  position: absolute; left: 0; bottom: -1px; height: 2px; width: 0;
+  background: var(--accent); opacity: 0; pointer-events: none;
+  transition: opacity var(--dur-3) var(--ease-standard);
+}
+.bp-load.is-loading { opacity: 1; animation: bp-load calc(1800ms * var(--motion-scale)) var(--ease-out) forwards; }
+@keyframes bp-load { from { width: 0; } to { width: 85%; } }
+
+/* ── 视口与标签框架 ── */
+.bp-viewport { background: var(--bg-main); }
+.browser-tab-frame-wrapper.is-hidden { display: none; }
+/* 停泊：面板不在屏幕上或标签不在前台时，webview 收进视口内 1px 的近透明容器，保持原逻辑尺寸继续渲染。
+   切勿改成 display:none / visibility:hidden / 移出视口 / 零尺寸裁剪——实测这几种会让页面视口归零
+   （AI 无法操作）或停止渲染（截图超时）。见 ai/chatcoder-plan-20261015-browser-agent.md §3。 */
+.browser-tab-frame-wrapper.is-parked {
+  position: fixed !important;
+  inset: 0 auto auto 0 !important;
+  width: 1px !important; height: 1px !important;
+  min-width: 0 !important; min-height: 0 !important; max-width: none !important; max-height: none !important;
+  overflow: hidden !important;
+  opacity: 0.01;
+  visibility: visible !important;
+  pointer-events: none !important;
+  z-index: 0;
+}
+.browser-tab-frame-wrapper.is-parked .browser-frame-element {
+  min-width: 0 !important; min-height: 0 !important; max-width: none !important; max-height: none !important;
+}
+.bp-error {
+  position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; padding: 24px; text-align: center; background: var(--bg-panel);
+}
+.bp-error-title { font-size: 14px; font-weight: 600; color: var(--text-1); }
+.bp-error-msg { max-width: 360px; font-size: 12px; color: var(--text-3); word-break: break-all; }
+.bp-toast {
+  position: absolute; top: 10px; left: 50%; z-index: 50; transform: translateX(-50%);
+  padding: 6px 12px; border-radius: var(--r-pill); background: var(--color-popover); color: var(--text-1);
+  box-shadow: var(--shadow-pop); font-size: 12px; white-space: nowrap;
+  animation: bpa-drop-in var(--dur-3) var(--ease-out) both;
+}
+
+/* ── AI 操作可视化层 ── */
+.bpa-layer { position: absolute; inset: 0; z-index: 15; overflow: hidden; pointer-events: none; }
+.bpa-highlight {
+  position: absolute; left: 0; top: 0; border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  animation: bpa-fade-in var(--dur-3) var(--ease-out) both;
+}
+.bpa-cursor {
+  position: absolute; left: 0; top: 0; display: flex; align-items: flex-start;
+  transition: transform var(--dur-3) var(--ease-standard), opacity var(--dur-4) var(--ease-standard);
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.28));
+  will-change: transform;
+}
+.bpa-cursor.is-resting { opacity: 0.5; }
+/* 指针尖端（24 网格的 (5,3)）对准目标点 */
+.bpa-cursor-glyph { margin: -2px 0 0 -4px; flex-shrink: 0; }
+.bpa-cursor-tag {
+  margin: 12px 0 0 -2px; padding: 0 6px; border-radius: var(--r-pill);
+  background: var(--accent); color: var(--accent-contrast, #fff);
+  font-size: 10px; font-weight: 600; line-height: 16px; letter-spacing: 0.02em;
+}
+.bpa-ripple {
+  position: absolute; width: 28px; height: 28px; margin: -14px 0 0 -14px; border-radius: var(--r-pill);
+  background: color-mix(in srgb, var(--accent) 34%, transparent);
+  animation: bpa-ripple calc(420ms * var(--motion-scale)) var(--ease-out) forwards;
+}
+@keyframes bpa-ripple { from { transform: scale(0.3); opacity: 1; } to { transform: scale(1.7); opacity: 0; } }
+.bpa-flash { position: absolute; inset: 0; background: #fff; animation: bpa-flash calc(260ms * var(--motion-scale)) var(--ease-out) forwards; }
+@keyframes bpa-flash { from { opacity: 0.4; } to { opacity: 0; } }
+@keyframes bpa-fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* 底部状态胶囊：悬浮在视口之上，不挤占页面（出现 / 消失不触发网页重排） */
+.bpa-capsule {
+  position: absolute; left: 50%; bottom: 14px; z-index: 40; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 8px;
+  min-width: 232px; max-width: calc(100% - 32px); height: 36px; padding: 0 6px 0 12px;
+  border-radius: var(--r-pill); background: var(--color-popover); color: var(--text-1);
+  box-shadow: var(--shadow-pop); font-size: 12px; pointer-events: auto;
+  animation: bpa-rise-in var(--dur-3) var(--ease-out) both;
+}
+.bpa-capsule.is-done { min-width: 0; padding-right: 14px; }
+.bpa-capsule-ic { display: inline-flex; color: var(--accent); flex-shrink: 0; }
+.bpa-capsule.is-done .bpa-capsule-ic { color: var(--ok); }
+.bpa-capsule-main { display: flex; align-items: baseline; gap: 6px; flex: 1; min-width: 0; }
+.bpa-capsule-who { color: var(--text-2); flex-shrink: 0; }
+.bpa-capsule-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; color: var(--text-1); }
+.bpa-capsule-step { flex-shrink: 0; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.bpa-capsule-stop { flex-shrink: 0; }
+@keyframes bpa-rise-in { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }
+@keyframes bpa-drop-in { from { opacity: 0; transform: translate(-50%, -6px); } to { opacity: 1; transform: translate(-50%, 0); } }
+
+/* AI 在另一个标签工作的提示 */
+.bpa-elsewhere {
+  position: absolute; top: 10px; left: 50%; z-index: 40; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 4px; height: 32px; padding: 0 4px 0 10px;
+  border-radius: var(--r-pill); background: var(--color-popover); color: var(--accent);
+  box-shadow: var(--shadow-pop); font-size: 12px; white-space: nowrap;
+  animation: bpa-drop-in var(--dur-3) var(--ease-out) both;
+}
+.bpa-elsewhere-text { margin: 0 2px; color: var(--text-1); max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+
+/* 网页弹窗（应用内对话框） */
+.bpa-dialog-scrim {
+  position: absolute; inset: 0; z-index: 60; display: flex; align-items: flex-start; justify-content: center;
+  padding-top: 48px; background: color-mix(in srgb, var(--bg-main) 45%, transparent);
+}
+.bpa-dialog {
+  width: min(360px, calc(100% - 32px)); display: flex; flex-direction: column; gap: 10px; padding: 16px;
+  border-radius: var(--r-pop); background: var(--color-popover); box-shadow: var(--shadow-pop);
+  animation: ui-pop-in var(--dur-3) var(--ease-emphasized-decel);
+}
+.bpa-dialog-title { font-size: 13px; font-weight: 600; color: var(--text-1); }
+.bpa-dialog-msg { max-height: 200px; overflow: auto; font-size: 12.5px; line-height: 1.55; color: var(--text-2); white-space: pre-wrap; word-break: break-word; }
+.bpa-dialog-input { width: 100%; }
+.bpa-dialog-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 2px; }
+
+/* 右侧面板「浏览器」标签与标题栏面板开关：AI 正在操作浏览器时的静态状态点 */
+.rp-tab-ai-dot,
+.tb-ai-dot { width: 6px; height: 6px; border-radius: var(--r-pill); background: var(--accent); flex-shrink: 0; }
+.app-pane-toggle { position: relative; }
+.app-pane-toggle .tb-ai-dot { position: absolute; top: 5px; right: 5px; }
+
+/* 减少动效：光标直接跳到目标、不播放波纹与闪白 */
+:root[data-motion="reduced"] .bpa-cursor { transition: none; }
+:root[data-motion="reduced"] .bpa-ripple,
+:root[data-motion="reduced"] .bpa-flash { display: none; }
+@media (prefers-reduced-motion: reduce) {
+  .bpa-cursor { transition: none; }
+  .bpa-ripple, .bpa-flash { display: none; }
+}
+
+/* 右面板里非激活的浏览器标签：不可见、不可点，但保留布局（见 RightPanel keepAlive 注释） */
+.rp-keepalive { position: absolute; inset: 0; visibility: hidden; pointer-events: none; }

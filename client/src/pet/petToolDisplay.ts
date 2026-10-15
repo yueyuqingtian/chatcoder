@@ -77,6 +77,17 @@ function browserDisplay(tool: string): { kind: ActivityKind; verb: string; doneV
     type: "输入内容",
     snapshot: "读取页面",
     evaluate: "执行脚本",
+    tabs: "管理标签",
+    get_text: "读取正文",
+    press: "按键",
+    scroll: "滚动页面",
+    hover: "悬停",
+    drag: "拖拽",
+    fill: "填写表单",
+    clipboard: "复制粘贴",
+    wait: "等待页面",
+    logs: "查看日志",
+    batch: "批量操作网页",
   };
   return { kind: "web", verb: label[tail] || "操作浏览器", doneVerb: "已操作" };
 }

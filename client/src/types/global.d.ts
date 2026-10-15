@@ -11,6 +11,8 @@ declare global {
       selectFiles?: (filters?: Array<{ name: string; extensions: string[] }>, opts?: { allowDirectories?: boolean }) => Promise<string[]>;
       getBackendPort?: () => Promise<number>;
       openPath?: (path: string) => Promise<string>;
+      /** 用系统默认浏览器打开外部链接 */
+      openExternal?: (url: string) => Promise<unknown>;
       showItemInFolder?: (path: string) => Promise<void>;
       openInApp?: (target: string, path: string) => Promise<{ ok: boolean; launcher?: string; error?: string }>;
       /** plan-308-1542 需求5：手动指定外部应用可执行文件（自动探测失败兜底） */
@@ -26,6 +28,12 @@ declare global {
       onBrowserAnnotation?: (cb: (payload: unknown) => void) => () => void;
       openBrowserDevTools?: (webContentsId?: number) => Promise<boolean>;
       captureBrowserPage?: (webContentsId?: number) => Promise<string | null>;
+      /** plan-20261015-browser-agent：面板 webview 交给主进程（关闭节流、挂 CDP、接管弹窗与新窗口） */
+      browserAgentPrepare?: (webContentsId: number) => Promise<{ ok: boolean; debugger?: boolean; error?: string }>;
+      /** 主进程侧浏览器操作：capture / network / netBody / aiWindow / events / dialogReply / clipboard */
+      browserAgentExec?: (webContentsId: number, op: string, args?: Record<string, unknown>) => Promise<{ ok: boolean; result?: any; error?: string }>;
+      /** 主进程事件：网页弹窗待用户处理（dialog / dialog-closed）、网页请求新窗口（popup） */
+      onBrowserAgentEvent?: (cb: (payload: { type: string; wcId: number; [k: string]: unknown }) => void) => () => void;
       minimizeWindow?: () => void;
       toggleMaximize?: () => void;
       closeWindow?: () => void;

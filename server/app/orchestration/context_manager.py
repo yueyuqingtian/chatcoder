@@ -930,11 +930,17 @@ async def build_main_context(
         )
         logger.info("[context] 会话 %s 使用 ta3 还原式系统提示词", session.id if session else "-")
     else:
+        # plan-20261015-browser-agent：浏览器工具实际下发给模型时才注入浏览器使用规范
+        _browser_on = available_tools is None or "browser_snapshot" in available_tools
+        if _browser_on:
+            from app.orchestration.tools.browser import browser_tools_enabled
+            _browser_on = browser_tools_enabled()
         system_prompt = build_main_system_prompt(enable_subagents=enable_subagents,
                                                  plan_flow_enabled=_is_plan_mode,
                                                  language=_reply_lang,
                                                  language_source=_lang_source,
-                                                 desktop_enabled=bool(getattr(settings, "desktop_enabled", False)))
+                                                 desktop_enabled=bool(getattr(settings, "desktop_enabled", False)),
+                                                 browser_enabled=_browser_on)
     bundle = ContextBundle(
         system=system_prompt,
         instruction=user_message,

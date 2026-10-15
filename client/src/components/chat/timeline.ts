@@ -11,6 +11,7 @@
  * - 思考内容（thinking）不进入主消息流文本，由 ThinkingBlock 独立消费
  */
 import type { MessageOut } from "../../api/client";
+import type { ToolImage } from "../../store/chat";
 import { MsgType, SenderType } from "@chatcoder/shared";
 import type { TurnOut } from "@chatcoder/shared";
 import { recordDerivation } from "../../perf/metrics";
@@ -31,6 +32,8 @@ export interface ToolLeaf {
   durationMs: number | null;
   /** v2.2: 行级变更统计（写盘工具，+N -M 摘要） */
   changeStat: { path: string; additions: number; deletions: number } | null;
+  /** plan-20261015-browser-agent：截图类工具结果的预览图（落库在工具结果消息里，刷新后仍在原位） */
+  image: ToolImage | null;
 }
 
 export type ToolNode =
@@ -78,7 +81,10 @@ export type TurnItem =
   | { kind: "plan"; msg: MessageOut }
   /** 工作流卡：由 plan / start / resume 工作流工具的调用推导出程序编号（turnId 为该工具调用所在轮，
    *  节点子代理卡据此挂靠），卡片状态来自工作流 store */
-  | { kind: "workflow"; programId: number; turnId: number | null; firstId?: number };
+  | { kind: "workflow"; programId: number; turnId: number | null; firstId?: number }
+  /** plan-20261015-browser-agent：截图卡——截图类工具调用之后的截图预览，固定在该次调用的时间线位置，
+   *  随所在的「工作过程」一起折叠（汇报之后的截图仍常显）；firstId 为该次调用消息 id */
+  | { kind: "shot"; leaf: ToolLeaf; firstId?: number };
 
 export type TimelineEntry =
   /** turnIds：并入续跑轮后的全部轮 id（首个即 turnId）；未并入时缺省，见 createRoundMerger */
@@ -92,7 +98,8 @@ export const SYSTEM_CONTINUATION_KINDS: ReadonlySet<string> = new Set([
   "goal-continuation",
 ]);
 
-/** 常显项（不进入「工作过程」折叠）：工作流卡与工作流唤醒分隔线——进度、暂停 / 继续需要始终可见。 */
+/** 常显项（不进入「工作过程」折叠）：工作流卡与工作流唤醒分隔线——进度、暂停 / 继续需要始终可见。
+ *  截图卡不在此列：它是执行过程的一部分，完成后应与过程一起折叠，否则汇报区会被截图占满。 */
 export function isOutsideProcess(item: TurnItem): boolean {
   return item.kind === "workflow" || item.kind === "workflow-wakeup";
 }
@@ -144,7 +151,7 @@ export interface WorkflowNodeCard {
 
 /** 条目的起始消息 id，即创建先后的依据：消息类条目取其消息 id；工具簇与工作流卡取其首条工具调用的 id。 */
 export function firstIdOf(item: TurnItem): number | null {
-  if (item.kind === "tools" || item.kind === "workflow") return item.firstId ?? null;
+  if (item.kind === "tools" || item.kind === "workflow" || item.kind === "shot") return item.firstId ?? null;
   return "msg" in item && item.msg ? Number(item.msg.id) : null;
 }
 
@@ -313,7 +320,29 @@ function buildLeaf(call: MessageOut, result?: MessageOut): ToolLeaf {
     changeStat: statRaw && typeof statRaw.path === "string"
       ? { path: statRaw.path, additions: Number(statRaw.additions ?? 0), deletions: Number(statRaw.deletions ?? 0) }
       : null,
+    image: rc.image && typeof (rc.image as { url?: unknown }).url === "string" ? (rc.image as ToolImage) : null,
   };
+}
+
+/** 截图类工具：调用时即可确定会产出截图（截图卡从调用起就占好位置，结果到达后填图，不发生跳动） */
+const SHOT_TOOLS = new Set(["browser_screenshot", "desktop_screenshot"]);
+
+/** 这次调用是否在时间线上产出截图卡：截图工具本身、带「动作后截图」的操作、或结果里实际带了图 */
+export function isShotCall(call: MessageOut, result?: MessageOut): boolean {
+  const cc = call.content as Record<string, unknown>;
+  const tool = String(cc.tool ?? "");
+  const rc = (result?.content ?? {}) as Record<string, unknown>;
+  if (result && rc.ok === false && !rc.image) return false; // 截图失败：失败原因由过程里的工具行展示
+  if (rc.image && typeof (rc.image as { url?: unknown }).url === "string") return true;
+  if (SHOT_TOOLS.has(tool)) return true;
+  const args = (cc.args && typeof cc.args === "object" ? cc.args : {}) as Record<string, unknown>;
+  if (tool.startsWith("desktop_") && args.then_shot === true) return true;
+  if (tool === "browser_batch") {
+    if (args.then === "screenshot") return true;
+    const steps = Array.isArray(args.actions) ? args.actions : [];
+    return steps.some((st) => st && typeof st === "object" && String((st as Record<string, unknown>).action ?? "") === "screenshot");
+  }
+  return false;
 }
 
 /** plan-547: 导出供锚定/展示复用——从工具 leaf 提取规范化的目标路径（正斜杠）。 */
@@ -676,20 +705,35 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
   // 本段消息所属轮（工作流卡记下它，节点子代理卡据此挂靠到同轮的卡）
   const turnId = msgs[0]?.turn_id ?? null;
 
-  // flush 待处理工具调用为一个 tools item（cluster）
-  const flushTools = () => {
-    if (pendingTools.length > 0) {
-      const nodes = buildToolTree(pendingTools, resultsByKey);
-      // 簇的创建位置取其首条调用消息（工作流卡与节点子代理卡的定位依据，见 firstIdOf）
-      const firstId = Number(pendingTools[0].id);
-      items.push({ kind: "tools", nodes, firstId });
-      for (const programId of workflowProgramsOf(pendingTools, resultsByKey)) {
-        if (cardedPrograms.has(programId)) continue;
-        cardedPrograms.add(programId);
-        items.push({ kind: "workflow", programId, turnId, firstId });
-      }
-      pendingTools.length = 0;
+  // 一段连续工具调用 → 一个 tools item（cluster）+ 其中涉及的工作流卡
+  const pushCluster = (calls: MessageOut[]) => {
+    if (calls.length === 0) return;
+    const nodes = buildToolTree(calls, resultsByKey);
+    // 簇的创建位置取其首条调用消息（工作流卡与节点子代理卡的定位依据，见 firstIdOf）
+    const firstId = Number(calls[0].id);
+    items.push({ kind: "tools", nodes, firstId });
+    for (const programId of workflowProgramsOf(calls, resultsByKey)) {
+      if (cardedPrograms.has(programId)) continue;
+      cardedPrograms.add(programId);
+      items.push({ kind: "workflow", programId, turnId, firstId });
     }
+  };
+
+  // flush 待处理工具调用。plan-20261015-browser-agent：截图类调用之后断开工具簇并插入截图卡——
+  // 截图卡固定在该次调用的时间线位置，随所在的「工作过程」一起折叠
+  const flushTools = () => {
+    if (pendingTools.length === 0) return;
+    let start = 0;
+    for (let i = 0; i < pendingTools.length; i++) {
+      const call = pendingTools[i];
+      const result = resultsByKey.get(String((call.content as Record<string, unknown>).call_key ?? call.id));
+      if (!isShotCall(call, result)) continue;
+      pushCluster(pendingTools.slice(start, i + 1));
+      items.push({ kind: "shot", leaf: buildLeaf(call, result), firstId: Number(call.id) });
+      start = i + 1;
+    }
+    pushCluster(pendingTools.slice(start));
+    pendingTools.length = 0;
   };
 
   // §3.3 (plan-548): 全部消息按时间序归类。用户消息不再强制提升到 turn 开头——

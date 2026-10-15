@@ -27,13 +27,14 @@
     "productName": "chatcoder",
     "copyright": "Copyright © 2026 chatcoder",
     "directories": {
-      "output": "0.7.3copy",
+      "output": "0.7.3",
       "buildResources": "electron/build"
     },
     "npmRebuild": false,
     "files": [
       "electron/main.cjs",
       "electron/preload.cjs",
+      "electron/browser-agent.cjs",
       "electron/pty.cjs",
       "electron/loading.html",
       "electron/vendor/gsap.min.js",

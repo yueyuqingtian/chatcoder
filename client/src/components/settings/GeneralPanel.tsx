@@ -37,7 +37,7 @@ export function GeneralPanel() {
     agent_max_steps: 1000,
     agent_retry_count: 3,
     agent_retry_intervals: "10,20,30",
-    browser_enabled: false,
+    browser_enabled: true,
     browser_headless: true,
     // plan-278-1391: 上下文压缩触发阈值（占模型窗口比例，默认 0.90）
     auto_compact_threshold_ratio: 0.90,
@@ -110,7 +110,8 @@ export function GeneralPanel() {
         agent_max_steps: typeof g.agent_max_steps === "number" ? g.agent_max_steps : 1000,
         agent_retry_count: typeof g.agent_retry_count === "number" ? g.agent_retry_count : 3,
         agent_retry_intervals: typeof g.agent_retry_intervals === "string" ? g.agent_retry_intervals : "10,20,30",
-        browser_enabled: g.browser_enabled === true,
+        // plan-20261015-browser-agent：服务端默认开启（AI 操作的是用户看得见的面板浏览器）
+        browser_enabled: g.browser_enabled !== false,
         browser_headless: g.browser_headless !== false,
         // plan-278-1391: 压缩触发阈值（后端可能未返回，回退默认 0.90）
         auto_compact_threshold_ratio: typeof g.auto_compact_threshold_ratio === "number"

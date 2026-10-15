@@ -1220,6 +1220,16 @@ function createWindow() {
     return { action: "allow" };
   });
 
+  // plan-20261015-browser-agent：右侧浏览器面板的 webview 一律是普通网页沙箱——
+  // 剥离预载与 Node 集成；创建时即关闭后台节流（面板隐藏/窗口最小化时 AI 仍可在后台操作页面）。
+  mainWindow.webContents.on("will-attach-webview", (_event, webPreferences) => {
+    delete webPreferences.preload;
+    webPreferences.nodeIntegration = false;
+    webPreferences.nodeIntegrationInSubFrames = false;
+    webPreferences.contextIsolation = true;
+    webPreferences.backgroundThrottling = false;
+  });
+
   // 窗口重新获得焦点：交由 OS 与 Chromium 自动恢复文档焦点，绝不手动抢焦点
   mainWindow.on("focus", () => {
     // 不再调用 webContents.focus()：会与 <webview> guest 焦点协商并重置
@@ -1753,6 +1763,10 @@ ipcMain.on("pty:kill", (_event, id) => {
     ptyProcs.delete(id);
   }
 });
+
+// ── 内置浏览器 · AI 驱动（plan-20261015-browser-agent）──
+// 面板 webview 的后台节流、CDP 网络/弹窗接管、隐藏态截图与新窗口转标签，详见 browser-agent.cjs。
+require("./browser-agent.cjs")({ getMainWindow: () => mainWindow, log, logErr });
 
 // ── IPC:webview 元素标注与开发者工具 ──
 ipcMain.on("webview:annotate", (_event, payload) => {

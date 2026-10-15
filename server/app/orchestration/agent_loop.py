@@ -2200,34 +2200,21 @@ async def run_agent_loop(
                                             "session_id": session_id},
                             })
 
+                    # plan-20261015-browser-agent：截图类结果落盘，消息流在该调用的时间线位置展示预览
+                    from app.orchestration.tool_images import persist_tool_image
+                    _tool_image = persist_tool_image(tool_name, result)
                     await broadcast(session_id, {
                         "event": "tool.result",
                         # v7(H): 补 call_key——前端据此精确关联写操作/命令行，运行中即可展示 +N-M/diff
                         "payload": {"turn_id": turn_id, "tool": tool_name, "call_key": call_key,
                                     "ok": result.ok, "duration_ms": _dur,
                                     "output_preview": (result.output or result.error)[:300],
-                                    **({"change_stat": _change_stat} if _change_stat else {})},
+                                    **({"change_stat": _change_stat} if _change_stat else {}),
+                                    **({"image": _tool_image} if _tool_image else {})},
                     })
 
-                    # v32: 当 AI 调用 browser_* 工具成功时，向前端广播 browser.mirror 事件，驱动右侧面板自动打开与可视化
-                    if tool_name.startswith("browser_") and result.ok:
-                        _b_action = tool_name.replace("browser_", "")
-                        # plan-75-332 R6 修复：变量名写错（tool_args 从未定义，本处应为
-                        # 同循环内 1631 行的 args）——每次浏览器工具调用成功都会抛 NameError，
-                        # 表现为「浏览器操作已执行、前端却报任务执行出错」。
-                        _b_args = args if isinstance(args, dict) else {}
-                        await broadcast(session_id, {
-                            "event": "browser.mirror",
-                            "payload": {
-                                "session_id": session_id,
-                                "action": _b_action,
-                                "url": _b_args.get("url"),
-                                "selector": _b_args.get("selector"),
-                                "text": _b_args.get("text"),
-                                "summary": (result.output or "")[:120].split("\n")[0],
-                                "ok": result.ok,
-                            },
-                        })
+                    # plan-20261015-browser-agent：原 browser.mirror 镜像广播已移除——浏览器工具现在直接
+                    # 驱动右侧面板里的真实网页（桌面端宿主自带可视化），不再需要“镜像一个 URL”。
                     await message_service.create_message(
                         db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
                         sender_type=SenderType.AGENT.value, sender_id=agent_id,
@@ -2236,7 +2223,8 @@ async def run_agent_loop(
                                  "ok": result.ok, "output": result.output[:MAX_TOOL_OUTPUT_CHARS],
                                  "error": result.error, "duration_ms": _dur,
                                  "agent_name": agent_name,
-                                 **({"change_stat": _change_stat} if _change_stat else {})},
+                                 **({"change_stat": _change_stat} if _change_stat else {}),
+                                 **({"image": _tool_image} if _tool_image else {})},
                         buffered=True,
                     )
                     messages.append(ChatMessage(

@@ -12,6 +12,7 @@ import { useRunningTicker } from "./useRunningTicker";
 import { MessageActions } from "./MessageActions";
 import type { SubagentMetaLite } from "./SubagentCard";
 import { WorkflowCard } from "../workflow/WorkflowCard";
+import { ToolShotCard } from "./ToolShotCard";
 import { WorkflowNotice } from "../workflow/WorkflowNotice";
 import { PluginSlot } from "../../plugins/registry";
 import { MarkdownContent } from "../MarkdownContent";
@@ -230,6 +231,11 @@ export const TurnGroup = memo(function TurnGroup({
   // v41: 首条用户消息（turn 触发消息）固定渲染在 turn 顶部用户消息区；
   // 其余 user item 为运行中注入，就地渲染在时间序位置（见 flowItems）
   const firstUserIdx = useMemo(() => items.findIndex((it) => it.kind === "user"), [items]);
+  // plan-20261015-browser-agent：本轮全部截图卡（大图查看器在本轮截图之间左右切换）
+  const shotLeaves = useMemo(
+    () => items.flatMap((it) => (it.kind === "shot" ? [it.leaf] : [])),
+    [items],
+  );
 
   // 找到最后一个 text 项作为 AI 的最终总结汇报
   let finalReportOriginalIdx = -1;
@@ -525,6 +531,13 @@ export const TurnGroup = memo(function TurnGroup({
         return (
           <div key={i} className="turn-item turn-item-workflow">
             <WorkflowCard programId={item.programId} />
+          </div>
+        );
+      case "shot":
+        // plan-20261015-browser-agent：截图卡固定在该次调用的时间线位置（常显，不随工作过程折叠）
+        return (
+          <div key={i} className="turn-item turn-item-shot">
+            <ToolShotCard leaf={item.leaf} siblings={shotLeaves} />
           </div>
         );
       case "subagent": {

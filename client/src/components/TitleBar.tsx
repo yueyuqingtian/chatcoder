@@ -7,6 +7,7 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { api } from "../api/client";
 import { useChatStore } from "../store/chat";
 import { usePanelStore } from "../store/panel";
+import { sessionKey, useBrowserStore } from "../store/browser";
 import { useI18n } from "../store/i18n";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { Input } from "./ui";
@@ -45,6 +46,8 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page
   // 左侧 logo/折叠/前进后退不在其内（用户要求保留）。
   const bare = settings || page;
   const currentSessionId = useChatStore((s) => s.currentSessionId);
+  // plan-20261015-browser-agent：面板收起时 AI 仍可能在后台操作浏览器——开关上给出状态点
+  const browserAgentBusy = useBrowserStore((s) => (s.sessions[sessionKey(currentSessionId)]?.agent.phase ?? "idle") === "working");
   const sessions = useChatStore((s) => s.sessions);
   const projects = useChatStore((s) => s.projects);
   const currentProjectId = useChatStore((s) => s.currentProjectId);
@@ -318,10 +321,11 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page
         <button
           className={`app-pane-toggle titlebar-btn${rightCollapsed ? " collapsed" : ""}`}
           onClick={onToggleRight}
-          title={rightCollapsed ? t("titlebar.panel_expand") : t("titlebar.panel_collapse")}
+          title={rightCollapsed && browserAgentBusy ? "AI 正在操作浏览器，展开面板查看" : rightCollapsed ? t("titlebar.panel_expand") : t("titlebar.panel_collapse")}
         >
           {/* plan-234-1171 R6: 传 open 让图标随右面板开合变形态 */}
           <IconPanelRight size={16} open={!rightCollapsed} />
+          {rightCollapsed && browserAgentBusy && <span className="tb-ai-dot" aria-hidden />}
         </button>
         )}
         <span className="titlebar-sep" />

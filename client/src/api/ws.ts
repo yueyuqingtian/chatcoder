@@ -159,6 +159,8 @@ export const wsClient = new WsClient();
 export class GlobalWsClient {
   private ws: WebSocket | null = null;
   private handlers: Set<Handler> = new Set();
+  /** plan-20261015-browser-agent：每次（重）连上时回调——内置浏览器宿主借此重新登记 */
+  private openHandlers: Set<() => void> = new Set();
   private reconnectTimer: number | null = null;
   private reconnectAttempt = 0;
   private intentionalClose = false;
@@ -199,6 +201,7 @@ export class GlobalWsClient {
     sock.onopen = () => {
       if (this.ws !== sock) return;
       this.reconnectAttempt = 0;
+      this.openHandlers.forEach((h) => { try { h(); } catch { /* 回调异常不影响连接 */ } });
     };
 
     sock.onmessage = (e) => {
@@ -240,6 +243,28 @@ export class GlobalWsClient {
   on(handler: Handler) {
     this.handlers.add(handler);
     return () => this.handlers.delete(handler);
+  }
+
+  /** 连上（含重连）时回调；若当前已连上会立即回调一次。 */
+  onOpen(handler: () => void) {
+    this.openHandlers.add(handler);
+    if (this.ws?.readyState === WebSocket.OPEN) handler();
+    return () => this.openHandlers.delete(handler);
+  }
+
+  /** plan-20261015-browser-agent：全局通道此前只收不发；内置浏览器宿主经它回传执行结果。 */
+  send(event: string, payload: Record<string, unknown>): boolean {
+    if (this.ws?.readyState !== WebSocket.OPEN) return false;
+    try {
+      this.ws.send(JSON.stringify({ event, payload }));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  get connected() {
+    return this.ws?.readyState === WebSocket.OPEN;
   }
 }
 

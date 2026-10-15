@@ -181,7 +181,7 @@ Produce the final result in the main window with a clear summary of what changed
 # 根因是：把缩放图坐标换算成屏幕坐标交给模型心算，是误点的最大来源；锚点 + 工具侧校验
 # 把这个环节从「模型的算术」变成「确定性代码 + 点前核对」。
 DESKTOP_TASK_PROMPT = """## Computer-Control Tasks — recall first, point by anchor, settle after
-When a task actually operates the desktop (`desktop_*` tools) or the built-in browser on the user's machine:
+When a task actually operates desktop apps with the `desktop_*` tools (the built-in browser panel has its own `browser_*` tools and needs no recipes):
 - **Recall before probing**: check the saved routes first — `desktop_recipe` (action=recall) with the app
   name and intent. A saved route is the fastest path available and removes UI re-exploration entirely.
 - **Settle the route before you end the turn**: after a successful operation on a given app, call
@@ -229,11 +229,33 @@ When a task actually operates the desktop (`desktop_*` tools) or the built-in br
 """
 
 
+# plan-20261015-browser-agent：内置浏览器使用规范。仅在浏览器工具下发给模型时注入。
+# 核心：读元素树用 ref 操作（快且准）、能批量就批量、读文字优先于截图、结果里已报告页面变化。
+BROWSER_TASK_PROMPT = """## Built-in Browser — act on the real page, read before you look
+The `browser_*` tools drive the browser panel inside this app: the user sees every page you open and every
+click and keystroke live, so work like a careful human operator.
+- **Read, then act by ref**: `browser_snapshot` lists interactive elements with refs (`ref_12`); pass `ref` to
+  `browser_click` / `browser_type` / `browser_fill` — the fastest and most precise target. Use `query` to search a
+  large page. Refs die when the page navigates or re-renders that part; re-snapshot then, not before every step.
+- **Text before pixels**: `browser_get_text` for content; take `browser_screenshot` only when the visual result
+  matters (layout, styling, verifying a UI change). Its pixel coordinates can go straight into `browser_click` x/y.
+- **Batch known sequences**: filling a form and submitting is one `browser_batch` call, not five round trips.
+- **Trust the action report**: every action reports navigation, DOM changes, focus and dialogs — read it instead
+  of re-reading the whole page after each step.
+- **Verify web work end to end**: after editing a web app, open the local dev server, exercise the flow, check
+  `browser_logs` (console errors, failed requests), fix, and re-verify.
+- You work in your own tab and the browser keeps working while the panel is hidden; do not navigate the user's
+  tabs unless asked, and do not ask the user to open the panel unless they must act themselves.
+- Never type passwords, payment or identity data for the user — ask them to do it in the panel.
+"""
+
+
 def build_main_system_prompt(extra_context: str = "", enable_subagents: bool = True,
                              plan_flow_enabled: bool = False,
                              language: str = "auto",
                              language_source: str = "user",
-                             desktop_enabled: bool = False) -> str:
+                             desktop_enabled: bool = False,
+                             browser_enabled: bool = False) -> str:
     """构建主代理系统提示词。
 
     如果用户关闭了子代理，剔除关于 spawn_subagent 的引导与决策章节。
@@ -285,6 +307,9 @@ def build_main_system_prompt(extra_context: str = "", enable_subagents: bool = T
 
     if desktop_enabled:
         prompt = prompt + "\n\n" + DESKTOP_TASK_PROMPT
+
+    if browser_enabled:
+        prompt = prompt + "\n\n" + BROWSER_TASK_PROMPT
 
     if extra_context:
         prompt = prompt + "\n\n" + extra_context

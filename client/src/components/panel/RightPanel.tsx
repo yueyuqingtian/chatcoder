@@ -10,6 +10,7 @@ import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api } from "../../api/client";
 import { isBusy, subscribe } from "../../perf/bus";
 import { usePanelStore, bucketSessionId } from "../../store/panel";
+import { sessionKey, useBrowserStore } from "../../store/browser";
 import type { PanelTab, PanelTabId } from "../../store/panel";
 import { useI18n } from "../../store/i18n";
 import {
@@ -90,6 +91,8 @@ export function RightPanel() {
   const toggleFullscreen = usePanelStore((s) => s.toggleFullscreen);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [showTabsMenu, setShowTabsMenu] = useState(false);
+  // plan-20261015-browser-agent：当前会话的 AI 正在操作浏览器——「浏览器」标签上给出状态点
+  const browserAgentBusy = useBrowserStore((s) => (s.sessions[sessionKey(bucketSessionId(activeBucket))]?.agent.phase ?? "idle") === "working");
   /** 连接器「开发调试」是否已启用——启用后才提供调试面板入口（需求：如果 mcp 开启了）。
    *  面板入口是低频操作，在打开「+」菜单时重查即可，无需全局订阅。 */
   const [debugEnabled, setDebugEnabled] = useState(false);
@@ -196,6 +199,7 @@ export function RightPanel() {
               >
                 <span className="rp-tab-ic">{tabIcon(tTab.id, 14)}</span>
                 <span className="rp-tab-label">{label}</span>
+                {tTab.id === "browser" && browserAgentBusy && <span className="rp-tab-ai-dot" aria-label="AI 正在操作浏览器" />}
                 <Tooltip content={t("rp.close_tab")} side="bottom">
                   <button type="button" className="rp-tab-close" aria-label={`${t("rp.close_tab")}：${label}`} onClick={(e) => { e.stopPropagation(); closeTab(key); }}>
                     <IconX size={11} />
@@ -294,11 +298,15 @@ export function RightPanel() {
           bucket.tabs.map((tTab) => {
             const key = `${tTab.id}-${tTab.instance}`;
             const isActive = bKey === activeBucket && key === activeKey;
+            // plan-20261015-browser-agent：浏览器标签不能 display:none（网页视口会变 0×0，AI 无法在后台操作），
+            // 改为不可见但保留布局；其中的 webview 由 BrowserPanel 停泊在视口内继续渲染
+            const keepAlive = !isActive && tTab.id === "browser";
             return (
               <div
                 key={`${bKey}:${key}`}
-                className={isActive ? "ui-tab-enter" : ""}
-                style={{ display: isActive ? "block" : "none", height: "100%" }}
+                className={isActive ? "ui-tab-enter" : keepAlive ? "rp-keepalive" : ""}
+                style={{ display: isActive || keepAlive ? "block" : "none", height: "100%" }}
+                aria-hidden={!isActive || undefined}
               >
                 <GuardedPanelContent tabKey={`${bKey}:${key}`} tab={tTab} sessionId={bucketSessionId(bKey)} visible={isActive} />
               </div>

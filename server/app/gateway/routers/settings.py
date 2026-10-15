@@ -254,7 +254,7 @@ class GlobalSettingsOut(BaseModel):
     agent_retry_count: int = 3
     agent_retry_intervals: str = "10,20,30"
     # 浏览器自动化开关与无头模式
-    browser_enabled: bool = False
+    browser_enabled: bool = True
     browser_headless: bool = True
     # plan-334-1661: 电脑操控（内核常驻的内置工具集，不作为 MCP 注册）
     # 注意：这些字段必须同时出现在 Out 与 In 两个模型里——只加 In 会导致

@@ -26,6 +26,7 @@ import { initTheme } from "./store/theme";
 import { installFocusGuard } from "./utils/focusGuard";
 import { setWindowMotion } from "./perf/bus";
 import { applyPaneUpdate } from "./perf/paneTransition";
+import { startBrowserAgentHost } from "./browserAgent/host";
 
 /** S7（plan-329-1647）：面板折叠/展开的过渡已整体改为 View Transition。
  *
@@ -87,6 +88,8 @@ export default function App() {
     useUpdaterStore.getState().init();
     // 启动全局状态通道：跨会话运行态/活动时间（侧栏实时化，不随会话切换重建）
     useChatStore.getState().connectGlobalEvents();
+    // plan-20261015-browser-agent：桌面端登记为内置浏览器宿主（AI 直接操作右侧面板里的网页）
+    const stopBrowserHost = startBrowserAgentHost();
     // 启动时立即触发 Bootstrap（加载项目、会话、模型与提供商列表）
     void useChatStore.getState().loadBootstrap();
 
@@ -106,9 +109,16 @@ export default function App() {
       guard.dispose();
       offMotion?.();
       offMaximizeChange?.();
+      stopBrowserHost();
       useChatStore.getState().disconnectGlobalEvents();
     };
   }, []);
+
+  // plan-20261015-browser-agent：右面板是否真的在屏幕上（页面态下面板收起）——浏览器面板据此
+  // 决定 webview 正常显示还是停泊在后台继续运行，AI 宿主据此决定是否播放可视化动画
+  useEffect(() => {
+    usePanelStore.getState().setOnScreen(rightShown);
+  }, [rightShown]);
 
   // Ctrl+B 切换侧栏（对齐 zcode）
   useEffect(() => {

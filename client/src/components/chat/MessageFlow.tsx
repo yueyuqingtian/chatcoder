@@ -89,7 +89,7 @@ function nodeToolText(n: ToolNode): string {
 
 /** turn 条目可搜索文本 */
 function itemText(it: TurnItem): string {
-  if (it.kind === "tools" || it.kind === "workflow") return "";
+  if (it.kind === "tools" || it.kind === "workflow" || it.kind === "shot") return "";
   return msgText(it.msg.content);
 }
 

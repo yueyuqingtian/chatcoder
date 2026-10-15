@@ -45,6 +45,11 @@ ACTION_MANAGE = "manage"
 # plan-334-1661：电脑操控写操作（点击/输入/按键）——直接作用于用户的真实桌面，
 # 语义上既不是文件写也不是命令执行，单独成类才能在审批卡上给出准确措辞。
 ACTION_DESKTOP = "desktop"
+# plan-20261015-browser-agent：内置浏览器里的写操作（点击/输入/执行脚本）。
+# 作用范围是右侧面板里的网页，不碰用户桌面，所以与电脑操控分开；本地页面
+# （localhost / 127.0.0.1 / file）单列一类免确认——对齐 Claude Code「本地开发服务器免审批」。
+ACTION_BROWSER = "browser"
+ACTION_BROWSER_LOCAL = "browser_local"
 
 # 审批卡标题用的动作短语（前端可直接展示，不必再拼工具名）
 ACTION_LABELS: dict[str, str] = {
@@ -59,6 +64,8 @@ ACTION_LABELS: dict[str, str] = {
     ACTION_NETWORK: "访问网络",
     ACTION_MANAGE: "管理系统进程",
     ACTION_DESKTOP: "操作电脑（鼠标/键盘）",
+    ACTION_BROWSER: "操作网页（点击/输入）",
+    ACTION_BROWSER_LOCAL: "操作本地网页",
 }
 
 # ══════════════════════════════════════════════════════════
@@ -165,6 +172,9 @@ _MATRIX: dict[str, dict[str, str]] = {
     # 电脑操控写操作（plan-334-1661）：直接操作真实鼠标键盘，
     # 与「风险命令」同档——自动审批下仍要问（点错窗口成本很高），完全访问才自动放行。
     ACTION_DESKTOP: {APPROVAL_ASK: VERDICT_ASK, APPROVAL_AUTO: VERDICT_ASK, APPROVAL_FULL: VERDICT_ALLOW},
+    # 网页写操作：只作用于面板里的网页，自动审批即放行；询问审批下外部网站要确认
+    ACTION_BROWSER: {APPROVAL_ASK: VERDICT_ASK, APPROVAL_AUTO: VERDICT_ALLOW, APPROVAL_FULL: VERDICT_ALLOW},
+    ACTION_BROWSER_LOCAL: {APPROVAL_ASK: VERDICT_ALLOW, APPROVAL_AUTO: VERDICT_ALLOW, APPROVAL_FULL: VERDICT_ALLOW},
 }
 
 # ══════════════════════════════════════════════════════════
@@ -197,12 +207,26 @@ _EDIT_TOOLS = frozenset({"editor_apply_diff", "multi_file_edit", "apply_patch"})
 # 读磁盘时可能带上"列目录/读文件"语义的路径参数名
 _PATH_KEYS = ("path", "file_path", "filepath", "file")
 
-# 网络 / 浏览器：外发或外部读取
-_NETWORK_TOOLS = frozenset({
-    "web_fetch", "web_search",
-    "browser_navigate", "browser_screenshot", "browser_click",
-    "browser_type", "browser_snapshot", "browser_evaluate",
+# 网络：外发或外部读取
+_NETWORK_TOOLS = frozenset({"web_fetch", "web_search"})
+
+# 内置浏览器（plan-20261015-browser-agent）：读页面 / 改页面两类；导航按目标地址判定
+_BROWSER_READ_TOOLS = frozenset({
+    "browser_tabs", "browser_snapshot", "browser_get_text", "browser_screenshot",
+    "browser_scroll", "browser_hover", "browser_wait", "browser_logs",
 })
+_BROWSER_WRITE_TOOLS = frozenset({
+    "browser_click", "browser_type", "browser_press", "browser_drag", "browser_fill", "browser_evaluate",
+})
+# 批量步骤名 → 真实工具名（与 browser driver 的批量动作表一致）
+_BROWSER_BATCH_ALIASES = {
+    "navigate": "browser_navigate", "open": "browser_navigate", "click": "browser_click", "type": "browser_type",
+    "fill": "browser_fill", "press": "browser_press", "key": "browser_press", "scroll": "browser_scroll",
+    "hover": "browser_hover", "drag": "browser_drag", "wait": "browser_wait", "clipboard": "browser_clipboard",
+    "screenshot": "browser_screenshot", "snapshot": "browser_snapshot", "get_text": "browser_get_text",
+    "evaluate": "browser_evaluate", "tabs": "browser_tabs",
+}
+_BROWSER_SEVERITY = {ACTION_READ: 0, ACTION_BROWSER_LOCAL: 1, ACTION_NETWORK: 2, ACTION_BROWSER: 3}
 
 # 进程 / 服务管理
 _MANAGE_TOOLS = frozenset({"terminal_bg_kill"})
@@ -358,12 +382,78 @@ def _classify_mcp(risk_level: str) -> ActionInfo:
     return ActionInfo(ACTION_NETWORK, label="调用外部工具")
 
 
+def _browser_page_is_local(ctx) -> bool:
+    """AI 当前操作的网页是否为本地页面（读 driver 缓存的最新地址；未知按外部处理）。"""
+    try:
+        from app.orchestration.browser.driver import current_url, is_local_url
+
+        return is_local_url(current_url(int(getattr(ctx, "session_id", 0) or 0)))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _browser_step_action(tool_name: str, args: dict, page_local: bool) -> str:
+    from app.orchestration.browser.driver import is_local_url
+
+    if tool_name == "browser_navigate":
+        url = str(args.get("url") or "")
+        if not url:  # back / forward / reload：留在当前站点范围内
+            return ACTION_READ if page_local else ACTION_NETWORK
+        return ACTION_READ if is_local_url(url) else ACTION_NETWORK
+    if tool_name in ("browser_tabs", "browser_screenshot") and args.get("url"):
+        return ACTION_READ if is_local_url(str(args.get("url"))) else ACTION_NETWORK
+    if tool_name == "browser_clipboard":
+        if str(args.get("action") or "copy").lower() in ("copy", "select_all"):
+            return ACTION_READ
+        return ACTION_BROWSER_LOCAL if page_local else ACTION_BROWSER
+    if tool_name in _BROWSER_WRITE_TOOLS:
+        return ACTION_BROWSER_LOCAL if page_local else ACTION_BROWSER
+    return ACTION_READ
+
+
+def _classify_browser(tool_name: str, args: dict, ctx) -> ActionInfo:
+    """内置浏览器工具分类：读页面放行；改页面按当前页面是否本地区分；批量取最严一步。"""
+    page_local = _browser_page_is_local(ctx)
+    if tool_name == "browser_batch":
+        steps = args.get("actions") or args.get("steps") or []
+        worst = ACTION_READ
+        local = page_local
+        for step in steps if isinstance(steps, list) else []:
+            if not isinstance(step, dict):
+                continue
+            name = _BROWSER_BATCH_ALIASES.get(str(step.get("action") or "").replace("browser_", "").lower())
+            if not name:
+                continue
+            params = step.get("args") if isinstance(step.get("args"), dict) else step
+            act = _browser_step_action(name, params, local)
+            if name == "browser_navigate" and params.get("url"):
+                # 批量里先导航再操作：后续步骤按新页面判定是否本地
+                from app.orchestration.browser.driver import is_local_url
+
+                local = is_local_url(str(params.get("url")))
+            if _BROWSER_SEVERITY.get(act, 0) > _BROWSER_SEVERITY.get(worst, 0):
+                worst = act
+        action = worst
+    else:
+        action = _browser_step_action(tool_name, args, page_local)
+    if action == ACTION_READ:
+        return ActionInfo(ACTION_READ, label="读取网页" if tool_name != "browser_navigate" else "打开本地网页")
+    if action == ACTION_NETWORK:
+        return ActionInfo(ACTION_NETWORK, label="打开外部网页" if tool_name != "browser_batch" else "访问外部网页")
+    if action == ACTION_BROWSER:
+        return ActionInfo(ACTION_BROWSER, risk_note="将在外部网页上点击或输入（可能提交表单）")
+    return ActionInfo(ACTION_BROWSER_LOCAL)
+
+
 def classify(tool_name: str, args: dict, ctx, *, risk_level: str = "low") -> ActionInfo:
     """把一个工具调用归类为动作类别。"""
     args = args or {}
 
     if tool_name.startswith("mcp_"):
         return _classify_mcp(risk_level)
+
+    if tool_name.startswith("browser_"):
+        return _classify_browser(tool_name, args, ctx)
 
     if tool_name in _COMMAND_TOOLS:
         return _classify_shell(str(args.get("command") or ""))
@@ -453,6 +543,8 @@ def _mode_boundary(
             return "只读模式不允许管理系统进程"
         if info.action == ACTION_DESKTOP:
             return "只读模式不允许操作电脑（鼠标/键盘）"
+        if info.action in (ACTION_BROWSER, ACTION_BROWSER_LOCAL):
+            return "只读模式不允许操作网页（点击/输入/执行脚本），只能打开与读取网页"
         return None
 
     if execution_mode == MODE_PLAN:
@@ -480,6 +572,8 @@ def _mode_boundary(
             return "计划模式不允许管理系统进程"
         if info.action == ACTION_DESKTOP:
             return "计划模式不允许操作电脑（鼠标/键盘）"
+        if info.action in (ACTION_BROWSER, ACTION_BROWSER_LOCAL):
+            return "计划模式不允许操作网页（点击/输入/执行脚本），只能打开与读取网页"
         return None
 
     return None

@@ -4,14 +4,7 @@ from functools import lru_cache
 from app.orchestration.tools.base import Tool
 from app.orchestration.tools.ask_user import AskUserQuestionTool
 from app.orchestration.tools.bg_process import TerminalBgStatusTool, TerminalBgKillTool
-from app.orchestration.tools.browser import (
-    BrowserNavigateTool,
-    BrowserScreenshotTool,
-    BrowserClickTool,
-    BrowserTypeTool,
-    BrowserSnapshotTool,
-    BrowserEvaluateTool,
-)
+from app.orchestration.tools.browser import ALL_BROWSER_TOOLS
 from app.orchestration.tools.ci import CiRunTool
 from app.orchestration.tools.codebase_search import CodebaseSearchTool
 from app.orchestration.tools.compaction_view import CompactionIndexTool, CompactionViewTool
@@ -50,6 +43,17 @@ from app.orchestration.tools.web_fetch import WebFetchTool
 from app.orchestration.tools.web_search import WebSearchTool
 
 
+def _gated_off(tool: Tool) -> bool:
+    """工具声明了 feature_enabled（功能开关）且当前关闭。"""
+    gate = getattr(tool, "feature_enabled", None)
+    if gate is None:
+        return False
+    try:
+        return not gate()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
@@ -83,7 +87,12 @@ class ToolRegistry:
         它们只在会话处于对应模式（目标模式激活）时才由引擎显式 include_scoped=True 放行。
         此前它们随全量工具无条件下发，导致用户没用目标模式模型也会调用目标工具。
         """
-        pool = [t for t in self._tools.values() if include_scoped or not getattr(t, "session_scoped", False)]
+        # plan-20261015-browser-agent：功能开关关闭的工具（如浏览器套件）不下发 schema——
+        # 关着的能力模型调了也只会报错，白占每轮几千 token；执行与历史回放仍可经 get() 取到。
+        pool = [
+            t for t in self._tools.values()
+            if (include_scoped or not getattr(t, "session_scoped", False)) and not _gated_off(t)
+        ]
         if not whitelist:
             return pool
         return [t for t in pool if t.name in whitelist]
@@ -113,9 +122,8 @@ def _build_default_registry() -> ToolRegistry:
         SymbolSearchTool, OutlineTool,
         # plan-230-1144 M4.1: 记忆三层化——AI 主动写记忆（此前只有 turn 后被动抽取）
         MemoryWriteTool,
-        # v32: 浏览器工具套件（Playwright / DOM快照 / 截图 / 点击 / 填写）
-        BrowserNavigateTool, BrowserScreenshotTool, BrowserClickTool,
-        BrowserTypeTool, BrowserSnapshotTool, BrowserEvaluateTool,
+        # plan-20261015-browser-agent：浏览器工具套件（驱动右侧面板内置浏览器，无桌面端时回退后台浏览器）
+        *ALL_BROWSER_TOOLS,
         # 目标模式（plan-671）：模型标记会话目标完成，停止自动续跑
         GoalCompleteTool,
         # v1.0 (plan-153-705): 后台进程查询/终止（配合 terminal_exec waitForCompletion=false）

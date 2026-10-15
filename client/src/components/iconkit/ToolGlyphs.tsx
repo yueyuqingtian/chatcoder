@@ -40,11 +40,14 @@ const TOOL_KEY: Record<string, K> = {
   git_diff: "git", git_root: "git", spawn_subagent: "agent", ask_subagent: "agent",
   collect_results: "collect", ci_run: "ci", memory_search: "memory", view_image: "image",
   todo_write: "todo", ask_user_question: "question", mcp: "mcp", thinking: "think",
+  // plan-20261015-browser-agent：截图类工具用图片图形，其余浏览器工具用网页图形
+  browser_screenshot: "image", desktop_screenshot: "image",
 };
 
 export function toolGlyphKey(tool: string): K {
   if (TOOL_KEY[tool]) return TOOL_KEY[tool];
   if (tool.startsWith("mcp")) return "mcp";
+  if (tool.startsWith("browser_")) return "web";
   if (tool.startsWith("db_")) return "collect";
   return "other";
 }

@@ -1,27 +1,19 @@
-"""v1.0 / v32: 浏览器自动化与 DOM/截图工具 — 基于 Playwright 与无障碍/多模态支持。
+"""浏览器工具套件（plan-20261015-browser-agent）。
 
-提供：
-- browser_navigate: 页面导航与状态加载
-- browser_click: 元素点击（支持 selector/坐标/文本）
-- browser_type: 元素输入与提交
-- browser_snapshot: 提取精简 DOM 树与可交互元素快照（供非多模态/文本模型感知）
-- browser_screenshot: 页面截图并返回 base64 及图像元数据（供多模态模型识别）
-- browser_evaluate: 执行 JavaScript 获取动态页面数据
+工具直接操作右侧面板里的**内置浏览器**（用户看到的就是 AI 操作的页面）；没有桌面端连接时
+自动回退到服务端后台浏览器。动作编排与文案在 `orchestration/browser/driver.py`，本文件只声明
+工具 schema 并把调用转给 driver。
 
-标记 risk_level="high"，需审批；且受全局设置 browser_enabled 控制。
+保留 0.8.1 的 6 个工具名（browser_navigate / screenshot / click / type / snapshot / evaluate）
+与旧参数（selector、press_enter、clear_before、wait_until、url）——用户的执行策略规则、
+自定义模式白名单与 TA3 别名都按名字引用它们。
 """
-import asyncio
-import base64
-import logging
+from __future__ import annotations
+
 from typing import Any
 
-from app.core.browser_env import ensure_bundled_browsers_path
 from app.core.config import settings
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
-
-logger = logging.getLogger(__name__)
-
-_TIMEOUT = 30000  # ms
 
 
 def _check_browser_enabled() -> str | None:
@@ -40,461 +32,410 @@ def _check_browser_enabled() -> str | None:
     ):
         return None
     return (
-        "浏览器工具当前未启用。可在「设置 → 电脑操控 → 浏览器操作」开启，"
-        "或在「设置 → 常规 → 内置浏览器工具」中开启。"
+        "浏览器工具当前未启用。可在「设置 → 常规 → 内置浏览器工具」中开启，"
+        "或在「设置 → 电脑操控 → 浏览器操作」开启。"
     )
 
 
-class _BrowserSessionManager:
-    """管理单例 Playwright 实例与活动页面，支持跨工具连续操作。"""
-    _pw = None
-    _browser = None
-    _context = None
-    _page = None
-    _lock = asyncio.Lock()
-    # 内置浏览器目录路径；非 None 表示使用随安装包分发的完整版 Chromium
-    _bundled_browsers_path: str | None = None
-
-    @classmethod
-    async def get_page(cls, headless: bool = True):
-        async with cls._lock:
-            if cls._pw is None:
-                # 必须在 start() 前注入内置浏览器目录：driver 是 node 子进程，
-                # 只在启动时继承 PLAYWRIGHT_BROWSERS_PATH，之后再改无效
-                cls._bundled_browsers_path = ensure_bundled_browsers_path()
-                from playwright.async_api import async_playwright
-                cls._pw = await async_playwright().start()
-            if cls._browser is None or not cls._browser.is_connected():
-                launch_kwargs: dict[str, Any] = {
-                    "headless": headless,
-                    "args": ["--disable-web-security", "--no-sandbox", "--disable-setuid-sandbox"],
-                }
-                if cls._bundled_browsers_path:
-                    # 内置的只有完整版 Chromium（未内置 chromium-headless-shell 以省体积），
-                    # 指定 channel 让无头模式也走完整版，否则 Playwright 会去找 headless-shell 报未安装
-                    launch_kwargs["channel"] = "chromium"
-                try:
-                    cls._browser = await cls._pw.chromium.launch(**launch_kwargs)
-                except Exception as launch_err:
-                    # plan-219: 区分「chromium 浏览器未安装」与「playwright 模块缺失」，避免误导用户重装 pip 包
-                    if "Executable doesn't exist" in str(launch_err) or "looks like Playwright was just installed" in str(launch_err):
-                        raise RuntimeError(
-                            "Chromium 浏览器不可用（内置浏览器缺失或损坏）。请重装应用，"
-                            "或在服务端运行: playwright install chromium"
-                        ) from launch_err
-                    raise
-                cls._context = await cls._browser.new_context(
-                    viewport={"width": 1280, "height": 800},
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 ChatCoder/1.0",
-                )
-                cls._page = await cls._context.new_page()
-            elif cls._page is None or cls._page.is_closed():
-                cls._page = await cls._context.new_page()
-            return cls._page
-
-    @classmethod
-    async def close_all(cls):
-        async with cls._lock:
-            if cls._page and not cls._page.is_closed():
-                try:
-                    await cls._page.close()
-                except Exception:
-                    pass
-            if cls._browser and cls._browser.is_connected():
-                try:
-                    await cls._browser.close()
-                except Exception:
-                    pass
-            if cls._pw:
-                try:
-                    await cls._pw.stop()
-                except Exception:
-                    pass
-            cls._pw = None
-            cls._browser = None
-            cls._context = None
-            cls._page = None
+def browser_tools_enabled() -> bool:
+    return _check_browser_enabled() is None
 
 
-class BrowserNavigateTool(Tool):
+# ── 参数片段 ─────────────────────────────────────────────
+_REF = {"type": "string", "description": "元素 ref（来自 browser_snapshot，如 ref_12）——首选的定位方式"}
+_SELECTOR = {"type": "string", "description": "CSS 选择器（没有 ref 时使用）"}
+_TEXT_TARGET = {"type": "string", "description": "按可见文字定位元素（如「登录」）"}
+_X = {"type": "number", "description": "横坐标：最近一次视口截图上的像素位置"}
+_Y = {"type": "number", "description": "纵坐标：最近一次视口截图上的像素位置"}
+_TAB = {"type": "string", "description": "标签 id（缺省为 AI 当前标签）"}
+_ON_DIALOG = {"type": "string", "enum": ["accept", "dismiss"], "description": "动作触发网页确认框时确认还是取消，默认 accept"}
+
+
+def _schema(name: str, desc: str, props: dict[str, Any], required: list[str] | None = None) -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": desc,
+            "parameters": {"type": "object", "properties": props, **({"required": required} if required else {})},
+        },
+    }
+
+
+class _BrowserTool(Tool):
+    action: str = ""
+    risk_level = "low"
+    # 功能开关：关闭时注册表不下发本工具 schema（见 ToolRegistry.for_agent）
+    feature_enabled = staticmethod(browser_tools_enabled)
+
+    def _desc(self) -> tuple[str, dict, list[str] | None]:  # pragma: no cover - 子类覆盖
+        raise NotImplementedError
+
+    def function_schema(self) -> dict:
+        desc, props, required = self._desc()
+        return _schema(self.name, desc, props, required)
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        err = _check_browser_enabled()
+        if err:
+            return ToolResult(ok=False, output="", error=err)
+        from app.orchestration.browser.driver import execute
+
+        out = await execute(ctx.session_id, self.action, dict(args or {}), ctx.cancel_event)
+        data = dict(out.data or {})
+        if out.image_b64:
+            # agent_loop 只认 data.base64 / data.filename（据扩展名推断 mime）把图片送进多模态对话
+            data["base64"] = out.image_b64
+            data["filename"] = "browser-shot.png" if "png" in out.image_mime else "browser-shot.jpg"
+            data["mime_type"] = out.image_mime
+        if not out.ok:
+            return ToolResult(ok=False, output=out.text, error=out.error or "浏览器操作失败", data=data)
+        return ToolResult(ok=True, output=out.text, data=data)
+
+
+class BrowserNavigateTool(_BrowserTool):
     name = "browser_navigate"
+    action = "navigate"
     risk_level = "high"
-    description = "在内置浏览器中导航到指定 URL，支持加载页面并返回精简标题和摘要。需审批，需在设置中启用浏览器。"
+    description = "在右侧面板的内置浏览器中打开网址（用户可实时看到），或后退/前进/刷新。"
 
-    def function_schema(self) -> dict:
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string", "description": "目标 URL"},
-                        "wait_until": {"type": "string", "enum": ["load", "domcontentloaded", "networkidle"], "description": "页面等待条件，默认 domcontentloaded"},
-                    },
-                    "required": ["url"],
-                },
+    def _desc(self):
+        return (
+            "在内置浏览器（右侧面板，用户可实时看到）打开网址，或 action=back/forward/reload。"
+            "返回标题、地址与正文摘要；localhost:5173 这类本地地址会自动补 http://。"
+            "默认在 AI 自己的标签里打开，不会覆盖用户正在看的页面。",
+            {
+                "url": {"type": "string", "description": "目标网址"},
+                "action": {"type": "string", "enum": ["back", "forward", "reload"], "description": "不传 url 时的导航动作"},
+                "new_tab": {"type": "boolean", "description": "在新标签中打开"},
+                "tab_id": _TAB,
+                "wait_until": {"type": "string", "enum": ["load", "domcontentloaded", "commit"], "description": "等待条件，默认 load"},
             },
-        }
-
-    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        err = _check_browser_enabled()
-        if err:
-            return ToolResult(ok=False, output="", error=err)
-
-        url = (args.get("url") or "").strip()
-        if not url:
-            return ToolResult(ok=False, output="", error="url 不能为空")
-        if not (url.startswith("http://") or url.startswith("https://") or url.startswith("file://")):
-            url = "https://" + url
-
-        wait_until = args.get("wait_until", "domcontentloaded")
-        headless = getattr(settings, "browser_headless", True)
-        try:
-            page = await _BrowserSessionManager.get_page(headless=headless)
-            response = await page.goto(url, timeout=_TIMEOUT, wait_until=wait_until)
-            status_code = response.status if response else 200
-            title = await page.title()
-            current_url = page.url
-
-            # 简要提取页面主要文字
-            try:
-                body_text = await page.inner_text("body", timeout=5000)
-                if len(body_text) > 4000:
-                    body_text = body_text[:4000] + "\n...(内容已截断，如需更多可使用 browser_snapshot 读取 DOM 树)"
-            except Exception:
-                body_text = "(无法提取文本内容)"
-
-            return ToolResult(
-                ok=True,
-                output=f"成功导航到: {current_url}\n页面标题: {title}\n状态码: {status_code}\n\n页面摘要:\n{body_text}",
-                data={"url": current_url, "title": title, "status": status_code},
-            )
-        except ImportError:
-            return ToolResult(ok=False, output="", error="playwright 未安装。请在服务端运行: pip install playwright && playwright install chromium")
-        except Exception as e:
-            return ToolResult(ok=False, output="", error=f"浏览器导航失败: {e}")
+            None,
+        )
 
 
-class BrowserScreenshotTool(Tool):
-    name = "browser_screenshot"
-    risk_level = "high"
-    description = "对当前页面或指定 URL 进行截图，返回 base64 图片及多模态元数据。需审批，需在设置中启用浏览器。"
+class BrowserTabsTool(_BrowserTool):
+    name = "browser_tabs"
+    action = "tabs"
+    description = "列出、新建、切换、关闭内置浏览器的标签。"
 
-    def function_schema(self) -> dict:
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string", "description": "目标 URL（可选，若不传则对当前已打开的页面截图）"},
-                        "full_page": {"type": "boolean", "description": "是否截取完整长图，默认 false"},
-                    },
-                },
+    def _desc(self):
+        return (
+            "管理内置浏览器标签：list 列出（含 AI/用户标签与当前页面）、new 新建（可带 url）、"
+            "select 切换后续动作操作的标签、close 关闭。",
+            {
+                "action": {"type": "string", "enum": ["list", "new", "select", "close"], "description": "默认 list"},
+                "tab_id": _TAB,
+                "url": {"type": "string", "description": "new 时打开的网址"},
             },
-        }
-
-    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        err = _check_browser_enabled()
-        if err:
-            return ToolResult(ok=False, output="", error=err)
-
-        url = (args.get("url") or "").strip()
-        full_page = bool(args.get("full_page", False))
-        headless = getattr(settings, "browser_headless", True)
-        try:
-            page = await _BrowserSessionManager.get_page(headless=headless)
-            if url:
-                if not (url.startswith("http://") or url.startswith("https://") or url.startswith("file://")):
-                    url = "https://" + url
-                await page.goto(url, timeout=_TIMEOUT)
-            
-            current_url = page.url
-            title = await page.title()
-            screenshot_bytes = await page.screenshot(full_page=full_page, type="png")
-            b64 = base64.b64encode(screenshot_bytes).decode("ascii")
-
-            # v32: 截图同时持久化落盘到 uploads/browser-shots 目录，使非多模态模型可通过 read_attachment/view_image 读取
-            screenshot_rel_path = ""
-            abs_path_str = ""
-            try:
-                from pathlib import Path
-                import time
-                import uuid
-                uploads_root = Path(settings.uploads_dir).resolve()
-                shot_dir = uploads_root / "browser-shots"
-                shot_dir.mkdir(parents=True, exist_ok=True)
-                shot_name = f"shot_{int(time.time())}_{uuid.uuid4().hex[:6]}.png"
-                shot_file = shot_dir / shot_name
-                shot_file.write_bytes(screenshot_bytes)
-                screenshot_rel_path = f"browser-shots/{shot_name}"
-                abs_path_str = str(shot_file).replace("\\", "/")
-            except Exception as se:
-                logger.warning("save screenshot file failed: %s", se)
-            
-            output_msg = f"截图成功: {current_url} ({title})\n图片大小: {len(screenshot_bytes)} 字节"
-            if abs_path_str:
-                output_msg += f"\n- 图片已保存: path=`{abs_path_str}` (如模型不支持识图，可通过 read_attachment 或 view_image 工具读取该路径)"
-
-            return ToolResult(
-                ok=True,
-                output=output_msg,
-                data={
-                    "url": current_url,
-                    "title": title,
-                    "screenshot_base64": b64,
-                    "screenshot_path": screenshot_rel_path,
-                    "abs_path": abs_path_str,
-                    "mime_type": "image/png",
-                    "bytes_len": len(screenshot_bytes),
-                },
-            )
-        except ImportError:
-            return ToolResult(ok=False, output="", error="playwright 未安装")
-        except Exception as e:
-            return ToolResult(ok=False, output="", error=f"截图失败: {e}")
+            None,
+        )
 
 
-class BrowserClickTool(Tool):
-    name = "browser_click"
-    risk_level = "high"
-    description = "在当前浏览器页面中点击元素。支持 CSS 选择器或页面坐标 (x, y)。需审批。"
-
-    def function_schema(self) -> dict:
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "selector": {"type": "string", "description": "CSS 选择器或元素文本选择器（如 'button:has-text(\"登录\")' 或 '#submit-btn'）"},
-                        "x": {"type": "number", "description": "点击的横坐标（可选）"},
-                        "y": {"type": "number", "description": "点击的纵坐标（可选）"},
-                    },
-                },
-            },
-        }
-
-    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        err = _check_browser_enabled()
-        if err:
-            return ToolResult(ok=False, output="", error=err)
-
-        selector = args.get("selector")
-        x = args.get("x")
-        y = args.get("y")
-        headless = getattr(settings, "browser_headless", True)
-        try:
-            page = await _BrowserSessionManager.get_page(headless=headless)
-            if selector:
-                await page.click(selector, timeout=10000)
-                target_desc = f"选择器 '{selector}'"
-            elif x is not None and y is not None:
-                await page.mouse.click(float(x), float(y))
-                target_desc = f"坐标 ({x}, {y})"
-            else:
-                return ToolResult(ok=False, output="", error="必须提供 selector 或 (x, y) 坐标")
-
-            # 等待微小交互与状态更新
-            await asyncio.sleep(0.5)
-            new_title = await page.title()
-            return ToolResult(
-                ok=True,
-                output=f"已成功点击 {target_desc}。当前页面: {page.url} ({new_title})",
-                data={"url": page.url, "title": new_title},
-            )
-        except Exception as e:
-            return ToolResult(ok=False, output="", error=f"浏览器点击失败: {e}")
-
-
-class BrowserTypeTool(Tool):
-    name = "browser_type"
-    risk_level = "high"
-    description = "在当前页面的输入框中填写或输入文本，可选择是否按回车提交。需审批。"
-
-    def function_schema(self) -> dict:
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "selector": {"type": "string", "description": "目标输入框的 CSS 选择器"},
-                        "text": {"type": "string", "description": "要输入的文本内容"},
-                        "press_enter": {"type": "boolean", "description": "输入完成后是否按下 Enter 键，默认 false"},
-                        "clear_before": {"type": "boolean", "description": "输入前是否先清空输入框，默认 true"},
-                    },
-                    "required": ["selector", "text"],
-                },
-            },
-        }
-
-    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        err = _check_browser_enabled()
-        if err:
-            return ToolResult(ok=False, output="", error=err)
-
-        selector = args.get("selector", "").strip()
-        text = args.get("text", "")
-        press_enter = bool(args.get("press_enter", False))
-        clear_before = bool(args.get("clear_before", True))
-
-        if not selector:
-            return ToolResult(ok=False, output="", error="selector 不能为空")
-
-        headless = getattr(settings, "browser_headless", True)
-        try:
-            page = await _BrowserSessionManager.get_page(headless=headless)
-            if clear_before:
-                await page.fill(selector, text, timeout=10000)
-            else:
-                await page.type(selector, text, timeout=10000)
-
-            if press_enter:
-                await page.press(selector, "Enter")
-                await asyncio.sleep(0.5)
-
-            return ToolResult(
-                ok=True,
-                output=f"已成功向 '{selector}' 输入文本 (长度: {len(text)} 字符){' 并按下回车' if press_enter else ''}。当前页面: {page.url}",
-                data={"url": page.url, "selector": selector},
-            )
-        except Exception as e:
-            return ToolResult(ok=False, output="", error=f"浏览器输入失败: {e}")
-
-
-class BrowserSnapshotTool(Tool):
+class BrowserSnapshotTool(_BrowserTool):
     name = "browser_snapshot"
-    risk_level = "normal"
-    description = "获取当前页面的精简可交互 DOM 树快照（包括按钮、输入框、链接及选择器），供模型精确感知与决策。需在设置中启用浏览器。"
+    action = "snapshot"
+    risk_level = "low"
+    description = "读取当前页面的可交互元素树，每个元素带 ref，供点击/输入精确定位。"
 
-    def function_schema(self) -> dict:
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "max_depth": {"type": "integer", "description": "DOM 树遍历深度，默认 4"},
-                    },
-                },
+    def _desc(self):
+        return (
+            "读取当前页面结构：按钮、链接、输入框等可交互元素（带 ref，如 ref_12）与标题/分区。"
+            "同源 iframe 的内容会按「框架「名称」」分组一并列出；跨域 iframe 的内容无法读取，需截图后用坐标操作。"
+            "后续 browser_click / browser_type 等直接传 ref，最快最准；页面变化或跳转后 ref 会失效，需要重新读取。"
+            "读页面优先用它或 browser_get_text，只在需要看视觉效果时截图。",
+            {
+                "query": {"type": "string", "description": "关键词筛选（按名称/角色/状态匹配），相当于在页面里查找元素"},
+                "filter": {"type": "string", "enum": ["interactive", "all"], "description": "interactive（默认）只列可交互元素；all 同时列出文本"},
+                "ref": {"type": "string", "description": "只读取某个元素的子树"},
+                "viewport_only": {"type": "boolean", "description": "只列当前可视区域内的元素"},
+                "max_chars": {"type": "integer", "description": "输出字符上限，默认 12000"},
+                "tab_id": _TAB,
             },
-        }
-
-    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        err = _check_browser_enabled()
-        if err:
-            return ToolResult(ok=False, output="", error=err)
-
-        headless = getattr(settings, "browser_headless", True)
-        try:
-            page = await _BrowserSessionManager.get_page(headless=headless)
-            # 通过 evaluate 提取页面中关键可交互元素列表
-            extract_script = """
-            () => {
-                const elements = [];
-                const interactiveSelectors = 'a, button, input, textarea, select, [role="button"], [role="link"], [role="tab"], [role="menuitem"], [onclick]';
-                const nodes = document.querySelectorAll(interactiveSelectors);
-                let idx = 1;
-                for (const el of nodes) {
-                    if (idx > 100) break; // 最多收集前 100 个核心交互项
-                    const rect = el.getBoundingClientRect();
-                    if (rect.width === 0 && rect.height === 0) continue; // 跳过不可见元素
-                    const tag = el.tagName.toLowerCase();
-                    const text = (el.innerText || el.value || el.placeholder || el.getAttribute('aria-label') || '').trim().slice(0, 80);
-                    const id = el.id ? `#${el.id}` : '';
-                    const name = el.getAttribute('name') ? `[name="${el.getAttribute('name')}"]` : '';
-                    const type = el.getAttribute('type') ? `[type="${el.getAttribute('type')}"]` : '';
-                    let selector = tag + id + name + type;
-                    if (!id && !name && el.className && typeof el.className === 'string') {
-                        const cls = el.className.trim().split(/\\s+/).slice(0, 2).join('.');
-                        if (cls) selector += `.${cls}`;
-                    }
-                    elements.push({
-                        index: idx++,
-                        tag: tag,
-                        text: text,
-                        selector: selector,
-                        href: el.href || null,
-                        disabled: el.disabled || false,
-                        visible: rect.top >= 0 && rect.top <= window.innerHeight
-                    });
-                }
-                return {
-                    title: document.title,
-                    url: window.location.href,
-                    elementsCount: elements.length,
-                    elements: elements
-                };
-            }
-            """
-            snapshot = await page.evaluate(extract_script)
-            summary_lines = [
-                f"=== 页面快照: {snapshot.get('title')} ===",
-                f"URL: {snapshot.get('url')}",
-                f"找到 {snapshot.get('elementsCount')} 个可交互 DOM 元素:\n",
-            ]
-            for el in snapshot.get("elements", []):
-                summary_lines.append(f"[{el['index']}] <{el['tag']}> {el['text']} (选择器: `{el['selector']}`) {'[视口内]' if el.get('visible') else ''}")
-
-            formatted_output = "\n".join(summary_lines)
-            return ToolResult(
-                ok=True,
-                output=formatted_output,
-                data=snapshot,
-            )
-        except Exception as e:
-            return ToolResult(ok=False, output="", error=f"提取 DOM 快照失败: {e}")
+            None,
+        )
 
 
-class BrowserEvaluateTool(Tool):
-    name = "browser_evaluate"
+class BrowserGetTextTool(_BrowserTool):
+    name = "browser_get_text"
+    action = "get_text"
+    description = "读取页面（或某个元素）的正文文本。"
+
+    def _desc(self):
+        return (
+            "读取页面正文（自动选主体区域，去掉导航等杂项），或用 ref / selector 读取某个元素内的文字。",
+            {"ref": _REF, "selector": _SELECTOR, "max_chars": {"type": "integer", "description": "字符上限，默认 8000"}},
+            None,
+        )
+
+
+class BrowserScreenshotTool(_BrowserTool):
+    name = "browser_screenshot"
+    action = "screenshot"
+    risk_level = "low"
+    description = "截取内置浏览器当前页面（视口 / 整页 / 单个元素）。"
+
+    def _desc(self):
+        return (
+            "截取当前页面：默认视口截图（图上像素坐标可直接用于 browser_click 的 x/y），"
+            "full_page=true 截整页，ref / selector 截单个元素。面板隐藏时也能截。读文字内容请优先用 browser_get_text。",
+            {
+                "full_page": {"type": "boolean", "description": "截取整页长图"},
+                "ref": _REF,
+                "selector": _SELECTOR,
+                "url": {"type": "string", "description": "（兼容旧参数）先打开该网址再截图"},
+            },
+            None,
+        )
+
+
+class BrowserClickTool(_BrowserTool):
+    name = "browser_click"
+    action = "click"
     risk_level = "high"
-    description = "在当前浏览器页面上下文中执行一段 JavaScript 代码并获取返回值。需审批。"
+    description = "点击页面元素（ref / 选择器 / 文字 / 坐标），支持右键、双击与修饰键。"
 
-    def function_schema(self) -> dict:
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "script": {"type": "string", "description": "要执行的 JavaScript 表达式或函数字符串"},
-                    },
-                    "required": ["script"],
-                },
+    def _desc(self):
+        return (
+            "点击页面元素：优先用 ref；也可用 selector、text（可见文字）或截图坐标 x/y。"
+            "目标不在视口时会自动滚入；被弹窗遮挡或禁用时会报错说明。返回点击后页面是否跳转/变化。",
+            {
+                "ref": _REF, "selector": _SELECTOR, "text": _TEXT_TARGET, "x": _X, "y": _Y,
+                "button": {"type": "string", "enum": ["left", "right", "middle"], "description": "默认 left"},
+                "click_count": {"type": "integer", "description": "2 为双击，3 为三击"},
+                "modifiers": {"type": "array", "items": {"type": "string", "enum": ["Control", "Shift", "Alt", "Meta"]}, "description": "按住的修饰键"},
+                "force": {"type": "boolean", "description": "目标被遮挡/禁用时仍然点击"},
+                "on_dialog": _ON_DIALOG,
             },
-        }
+            None,
+        )
 
-    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        err = _check_browser_enabled()
-        if err:
-            return ToolResult(ok=False, output="", error=err)
 
-        script = args.get("script", "").strip()
-        if not script:
-            return ToolResult(ok=False, output="", error="script 不能为空")
+class BrowserTypeTool(_BrowserTool):
+    name = "browser_type"
+    action = "type_text"
+    risk_level = "high"
+    description = "向输入框输入文字（默认先清空），可回车提交。"
 
-        headless = getattr(settings, "browser_headless", True)
-        try:
-            page = await _BrowserSessionManager.get_page(headless=headless)
-            result = await page.evaluate(script)
-            return ToolResult(
-                ok=True,
-                output=f"JavaScript 执行结果:\n{result}",
-                data={"result": result},
-            )
-        except Exception as e:
-            return ToolResult(ok=False, output="", error=f"JavaScript 执行失败: {e}")
+    def _desc(self):
+        return (
+            "向输入框 / 文本域 / 富文本编辑区输入文字。用 ref / selector / text 指定目标，不指定则输入到当前焦点。"
+            "默认先清空原内容（clear=false 追加）；submit=true 输入后按 Enter。支持中文。",
+            {
+                "text": {"type": "string", "description": "要输入的文字"},
+                "ref": _REF, "selector": _SELECTOR,
+                "clear": {"type": "boolean", "description": "输入前清空，默认 true"},
+                "submit": {"type": "boolean", "description": "输入后按 Enter"},
+                "press_enter": {"type": "boolean", "description": "同 submit（兼容旧参数）"},
+                "clear_before": {"type": "boolean", "description": "同 clear（兼容旧参数）"},
+            },
+            ["text"],
+        )
+
+
+class BrowserPressTool(_BrowserTool):
+    name = "browser_press"
+    action = "press"
+    risk_level = "high"
+    description = "按键或组合键（Enter、Tab、Escape、Control+A…）。"
+
+    def _desc(self):
+        return (
+            "在页面中按键：单键（Enter、Tab、Escape、Backspace、ArrowDown…）或组合键（Control+A、Shift+Tab）；"
+            "空格分隔表示依次按下（\"Tab Tab Enter\"）。可先用 ref 聚焦目标。",
+            {
+                "keys": {"type": "string", "description": "按键，如 \"Enter\"、\"Control+A\"、\"Tab Tab Enter\""},
+                "repeat": {"type": "integer", "description": "重复次数，默认 1"},
+                "ref": _REF,
+                "on_dialog": _ON_DIALOG,
+            },
+            ["keys"],
+        )
+
+
+class BrowserScrollTool(_BrowserTool):
+    name = "browser_scroll"
+    action = "scroll"
+    description = "滚动页面或某个滚动区域，或把元素滚入视口。"
+
+    def _desc(self):
+        return (
+            "滚动：direction=up/down/left/right（amount 为像素，或 ≤10 的数字表示屏数，默认 0.8 屏）；"
+            "带 ref 且不带 direction 时把该元素滚入视口中央；带 ref 和 direction 时滚动该元素所在的区域；"
+            "to=top/bottom 直达顶部或底部。",
+            {
+                "direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
+                "amount": {"type": "number", "description": "像素，或 ≤10 表示屏数"},
+                "ref": _REF, "selector": _SELECTOR, "text": _TEXT_TARGET,
+                "to": {"type": "string", "enum": ["top", "bottom"]},
+            },
+            None,
+        )
+
+
+class BrowserHoverTool(_BrowserTool):
+    name = "browser_hover"
+    action = "hover"
+    description = "把鼠标悬停到元素上（展开悬停菜单、查看提示）。"
+
+    def _desc(self):
+        return (
+            "把鼠标悬停到元素上，用于展开悬停菜单、显示提示等。",
+            {"ref": _REF, "selector": _SELECTOR, "text": _TEXT_TARGET, "x": _X, "y": _Y},
+            None,
+        )
+
+
+class BrowserDragTool(_BrowserTool):
+    name = "browser_drag"
+    action = "drag"
+    risk_level = "high"
+    description = "拖拽：从一个元素/坐标拖到另一个元素/坐标。"
+
+    def _desc(self):
+        return (
+            "拖拽：起点用 from_ref / from_selector / from_x+from_y，终点用 to_ref / to_selector / to_x+to_y。",
+            {
+                "from_ref": _REF, "from_selector": _SELECTOR, "from_x": _X, "from_y": _Y,
+                "to_ref": _REF, "to_selector": _SELECTOR, "to_x": _X, "to_y": _Y,
+            },
+            None,
+        )
+
+
+class BrowserFillTool(_BrowserTool):
+    name = "browser_fill"
+    action = "fill"
+    risk_level = "high"
+    description = "直接设置表单控件的值：下拉框选项、复选/单选/开关、输入框（可一次填多项）。"
+
+    def _desc(self):
+        return (
+            "直接设置表单控件的值并触发 input/change：下拉框按选项文字或值选择；复选框/开关传 true/false；"
+            "输入框整体替换。用 fields 一次填写多项：[{\"ref\":\"ref_3\",\"value\":\"张三\"}, …]。",
+            {
+                "fields": {
+                    "type": "array",
+                    "items": {"type": "object", "properties": {"ref": {"type": "string"}, "selector": {"type": "string"}, "value": {}}},
+                    "description": "多项填写",
+                },
+                "ref": _REF, "selector": _SELECTOR,
+                "value": {"description": "单项填写的值"},
+            },
+            None,
+        )
+
+
+class BrowserClipboardTool(_BrowserTool):
+    name = "browser_clipboard"
+    action = "clipboard"
+    risk_level = "high"
+    description = "页面内复制、剪切、粘贴、全选（默认用 AI 剪贴板，不影响用户的系统剪贴板）。"
+
+    def _desc(self):
+        return (
+            "复制 / 剪切 / 粘贴 / 全选：copy 复制当前选中内容（或 ref 指定元素的全部文字），cut 剪切，"
+            "paste 把剪贴板（或 text 参数）粘贴到焦点或 ref 指定的输入框，select_all 全选。"
+            "默认使用 AI 自己的剪贴板；system=true 才读写用户的系统剪贴板。",
+            {
+                "action": {"type": "string", "enum": ["copy", "cut", "paste", "select_all"]},
+                "ref": _REF, "selector": _SELECTOR,
+                "text": {"type": "string", "description": "paste 时直接粘贴这段文字"},
+                "system": {"type": "boolean", "description": "使用系统剪贴板"},
+            },
+            ["action"],
+        )
+
+
+class BrowserWaitTool(_BrowserTool):
+    name = "browser_wait"
+    action = "wait"
+    description = "等待文字/元素出现或消失、页面加载完成，或固定时长。"
+
+    def _desc(self):
+        return (
+            "等待条件满足：text 文字出现、selector / ref 元素出现（gone=true 等它消失）；都不传则等页面加载完成；"
+            "只传 ms 为固定等待（上限 30 秒）。",
+            {
+                "text": {"type": "string"}, "selector": _SELECTOR, "ref": _REF,
+                "gone": {"type": "boolean"},
+                "timeout_ms": {"type": "integer", "description": "默认 10000"},
+                "ms": {"type": "integer", "description": "固定等待毫秒数"},
+            },
+            None,
+        )
+
+
+class BrowserEvaluateTool(_BrowserTool):
+    name = "browser_evaluate"
+    action = "evaluate"
+    risk_level = "high"
+    description = "在当前页面执行 JavaScript 并返回结果。"
+
+    def _desc(self):
+        return (
+            "在当前页面上下文执行 JavaScript，返回最后一个表达式的值（支持 Promise）。"
+            "常规操作请用专用工具，它们更快且对用户可见。",
+            {"script": {"type": "string", "description": "JavaScript 代码"}},
+            ["script"],
+        )
+
+
+class BrowserLogsTool(_BrowserTool):
+    name = "browser_logs"
+    action = "logs"
+    description = "读取页面控制台消息或网络请求（含响应体）。"
+
+    def _desc(self):
+        return (
+            "读取当前标签的控制台消息（kind=console）或网络请求（kind=network），可按 pattern 过滤、only_errors 只看错误；"
+            "传 request_id 读取某个请求的响应体。用于调试前端报错与接口问题。",
+            {
+                "kind": {"type": "string", "enum": ["console", "network"], "description": "默认 console"},
+                "only_errors": {"type": "boolean"},
+                "pattern": {"type": "string", "description": "关键词过滤"},
+                "limit": {"type": "integer", "description": "默认 50"},
+                "request_id": {"type": "string", "description": "读取该请求的响应体"},
+                "clear": {"type": "boolean", "description": "读取后清空"},
+            },
+            None,
+        )
+
+
+_BATCH_ACTION_NAMES = ["navigate", "click", "type", "fill", "press", "scroll", "hover", "drag", "wait",
+                       "clipboard", "screenshot", "snapshot", "get_text", "evaluate", "tabs"]
+
+
+class BrowserBatchTool(_BrowserTool):
+    name = "browser_batch"
+    action = "batch"
+    risk_level = "high"
+    description = "一次按顺序执行多个浏览器动作（任一步失败即停止）。"
+
+    def _desc(self):
+        return (
+            "一次执行多步浏览器动作，省去逐步往返：每步是 {\"action\": 动作名, ...该动作的参数}，"
+            "动作名为 navigate / click / type / fill / press / scroll / hover / drag / wait / clipboard / "
+            "screenshot / snapshot / get_text / evaluate / tabs；任一步失败立即停止并说明。"
+            "流程明确时（如填表并提交）优先用它；then=screenshot/snapshot 在末尾附带截图或页面结构。",
+            {
+                "actions": {
+                    "type": "array",
+                    "items": {"type": "object", "properties": {"action": {"type": "string", "enum": _BATCH_ACTION_NAMES}}, "required": ["action"]},
+                    "description": "如 [{\"action\":\"type\",\"ref\":\"ref_3\",\"text\":\"hi\"},{\"action\":\"click\",\"ref\":\"ref_5\"}]",
+                },
+                "then": {"type": "string", "enum": ["screenshot", "snapshot"]},
+            },
+            ["actions"],
+        )
+
+
+ALL_BROWSER_TOOLS = (
+    BrowserNavigateTool, BrowserTabsTool, BrowserSnapshotTool, BrowserGetTextTool, BrowserScreenshotTool,
+    BrowserClickTool, BrowserTypeTool, BrowserPressTool, BrowserScrollTool, BrowserHoverTool,
+    BrowserDragTool, BrowserFillTool, BrowserClipboardTool, BrowserWaitTool, BrowserEvaluateTool,
+    BrowserLogsTool, BrowserBatchTool,
+)
+
+BROWSER_TOOL_NAMES = frozenset(cls.name for cls in ALL_BROWSER_TOOLS)

@@ -57,8 +57,11 @@ class Settings(BaseSettings):
     # v3.5: 不再用固定步数限制，改为边际效应递减检测 + token 预算驱动
     # 0 或负数表示不限制步数
     agent_max_steps: int = 1000
-    # 浏览器自动化开关（可通过设置中心持久化配置，0.5 默认关闭，开启后注册浏览器工具集）
-    browser_enabled: bool = False
+    # 内置浏览器工具开关（可通过设置中心持久化配置）。
+    # plan-20261015-browser-agent：默认开启——工具操作的是右侧面板里用户看得见、随时可接管的浏览器，
+    # 外部网页的点击/输入仍按权限模式审批；关闭后浏览器工具不再下发给模型。
+    browser_enabled: bool = True
+    # 仅作用于无桌面端连接时的后台兜底浏览器（Playwright）：是否无头运行
     browser_headless: bool = True
 
     # ── 电脑操控（plan-334-1661）──

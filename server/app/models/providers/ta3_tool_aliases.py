@@ -80,6 +80,18 @@ TO_TA3: dict[str, str] = {
     "browser_type": "BrowserType",               # selector/text/press_enter/clear_before ✓
     "browser_snapshot": "BrowserSnapshot",       # max_depth ✓
     "browser_evaluate": "BrowserEvaluate",       # script ✓
+    # plan-20261015-browser-agent：内置浏览器新增工具（参数键名与真实工具一致，schema 动态派生）
+    "browser_tabs": "BrowserTabs",
+    "browser_get_text": "BrowserGetText",
+    "browser_press": "BrowserPress",
+    "browser_scroll": "BrowserScroll",
+    "browser_hover": "BrowserHover",
+    "browser_drag": "BrowserDrag",
+    "browser_fill": "BrowserFill",
+    "browser_clipboard": "BrowserClipboard",
+    "browser_wait": "BrowserWait",
+    "browser_logs": "BrowserLogs",
+    "browser_batch": "BrowserBatch",
     # plan-334-1661: 电脑操控工具集（内置原生工具）。
     # 缺映射会被 disguise_tools 整体剔除——ta3 会话里模型既看不到也调不动，
     # 而本能力正是为提升界面任务效率而建，故必须补齐。参数键名与真实工具一致，无需 ARGS 适配。
@@ -154,6 +166,8 @@ DYNAMIC_SCHEMA_ALIASES: frozenset[str] = frozenset({
     # 浏览器套件（v43 补映射）
     "BrowserNavigate", "BrowserScreenshot", "BrowserClick",
     "BrowserType", "BrowserSnapshot", "BrowserEvaluate",
+    "BrowserTabs", "BrowserGetText", "BrowserPress", "BrowserScroll", "BrowserHover", "BrowserDrag",
+    "BrowserFill", "BrowserClipboard", "BrowserWait", "BrowserLogs", "BrowserBatch",
     # 附件与图片读取（plan-147-674）
     "ReadAttachment", "ViewImage",
     # 工作流工具（设计 §5.8）：schema 从真实工具派生，参数与描述随 workflow/tools.py 同步

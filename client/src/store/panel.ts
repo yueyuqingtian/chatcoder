@@ -87,6 +87,9 @@ function saveWidth(width: number) { try { localStorage.setItem(STORAGE_KEY, JSON
 
 interface PanelState extends PanelBucket {
   expanded: boolean;
+  /** plan-20261015-browser-agent：右面板此刻是否真的显示在屏幕上（展开且不在设置/拓展等页面态）。
+   *  由 App 按 rightShown 同步；浏览器面板据此决定 webview 是正常显示还是“停泊”在后台继续运行。 */
+  onScreen: boolean;
   width: number;
   fullscreen: boolean;
   /** v10: 主窗口顶部任务卡显隐开关（TitleBar 折叠按钮控制） */
@@ -106,6 +109,10 @@ interface PanelState extends PanelBucket {
   toggleTaskCard: () => void;
   setWidth: (w: number) => void;
   openTab: (id: PanelTabId) => void;
+  /** plan-20261015-browser-agent：确保**指定会话**的面板里有该标签（AI 在后台会话里用浏览器时也能挂上），
+   *  不展开面板；面板没在显示该会话时把它设为当前标签——用户一展开就停在 AI 打开的网页上。 */
+  ensureTabIn: (sessionId: number | null, id: PanelTabId) => void;
+  setOnScreen: (on: boolean) => void;
   /** v2.2 (对齐 zcode 3.15): 强制新开实例（终端多标签等场景，不去重） */
   openNewTab: (id: PanelTabId) => void;
   /** v2.2 (对齐 zcode 3.13): 打开子代理详情 tab（每线程独立实例，可多开） */
@@ -122,6 +129,7 @@ interface PanelState extends PanelBucket {
 const initial = loadState();
 export const usePanelStore = create<PanelState>((set, get) => ({
   expanded: false,
+  onScreen: false,
   width: initial.width,
   fullscreen: false,
   taskCardVisible: false, // v13: 对齐 zcode——待办在消息流内嵌展示，底部浮窗默认关闭（标题栏可再开）
@@ -180,6 +188,23 @@ export const usePanelStore = create<PanelState>((set, get) => ({
     const tab: PanelTab = { id, instance: b.tabs.filter((t) => t.id === id).length + 1 };
     writeBucket(key, (cur) => ({ ...cur, tabs: [...cur.tabs, tab], activeKey: tabKey(tab) }));
   },
+
+  ensureTabIn: (sessionId, id) => {
+    const key = bucketKeyOf(sessionId);
+    const s = get();
+    const b = s.buckets[key] ?? emptyBucket();
+    const existing = b.tabs.find((t) => t.id === id);
+    // 用户此刻正看着这个会话的面板：只补标签不切换（不打断用户）；否则设为当前标签
+    const userWatching = s.onScreen && s.activeBucket === key && b.activeKey != null;
+    if (existing) {
+      if (!userWatching && b.activeKey !== tabKey(existing)) writeBucket(key, (cur) => ({ ...cur, activeKey: tabKey(existing) }));
+      return;
+    }
+    const tab: PanelTab = { id, instance: b.tabs.filter((t) => t.id === id).length + 1 };
+    writeBucket(key, (cur) => ({ ...cur, tabs: [...cur.tabs, tab], activeKey: userWatching ? cur.activeKey : tabKey(tab) }));
+  },
+
+  setOnScreen: (on) => { if (get().onScreen !== on) set({ onScreen: on }); },
 
   openNewTab: (id) => {
     const key = get().activeBucket;

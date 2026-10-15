@@ -38,12 +38,16 @@ const FIELD_LABELS: Record<string, string> = {
   content: "写入内容", old_text: "原文本", new_text: "新文本", replace_all: "替换全部",
   edits: "批量编辑", url: "地址", method: "请求方法", body: "请求体", headers: "请求头",
   sql: "SQL", goal: "目标", question: "问题", task_title: "子任务",
+  // plan-20261015-browser-agent：浏览器动作参数
+  ref: "页面元素", selector: "选择器", text: "文字", keys: "按键", script: "脚本", actions: "批量步骤",
+  value: "值", fields: "表单项", direction: "方向", button: "鼠标按键", tab_id: "标签",
 };
 
 /** 动作类别 → 图标（后端 approval_policy 的 action 字段）。 */
 function actionIcon(action: string): ReactNode {
   if (action.startsWith("exec_")) return <IconTerminal size={15} />;
   if (action.startsWith("write") || action === "delete") return <IconFileText size={15} />;
+  if (action === "network" || action.startsWith("browser")) return <IconGlobe size={15} />;
   return <IconAlertTriangle size={15} />;
 }
 

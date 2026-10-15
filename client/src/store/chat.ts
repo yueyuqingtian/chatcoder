@@ -70,6 +70,17 @@ export interface RunningToolResult {
   output_preview?: string;
   change_stat?: { path: string; additions: number; deletions: number };
   duration_ms?: number;
+  /** plan-20261015-browser-agent：截图类工具的预览（落库前即可在时间线原位显示） */
+  image?: ToolImage;
+}
+
+/** 截图类工具结果的预览图（服务端 tool_images.persist_tool_image 产出） */
+export interface ToolImage {
+  url: string;
+  width?: number;
+  height?: number;
+  page?: string;
+  title?: string;
 }
 
 /** v2.2: 排队输入项（运行中发送的消息进入队列，turn 完成后自动续发）。
@@ -2815,6 +2826,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
               ? (payload.change_stat as RunningToolResult["change_stat"])
               : prev?.change_stat),
             duration_ms: (typeof payload.duration_ms === "number" ? payload.duration_ms : prev?.duration_ms),
+            image: (payload.image && typeof (payload.image as { url?: unknown }).url === "string"
+              ? (payload.image as ToolImage)
+              : prev?.image),
           };
           set((s) => ({
             runningToolResults: { ...s.runningToolResults, [rk]: nextResult },

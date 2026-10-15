@@ -47,6 +47,14 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
   },
   openBrowserDevTools: (webContentsId) => ipcRenderer.invoke("browser:openDevTools", webContentsId),
   captureBrowserPage: (webContentsId) => ipcRenderer.invoke("browser:capturePage", webContentsId),
+  // plan-20261015-browser-agent：AI 驱动内置浏览器（节流 / CDP / 隐藏态截图 / 弹窗与新窗口事件）
+  browserAgentPrepare: (webContentsId) => ipcRenderer.invoke("browserAgent:prepare", webContentsId),
+  browserAgentExec: (webContentsId, op, args) => ipcRenderer.invoke("browserAgent:exec", webContentsId, op, args || {}),
+  onBrowserAgentEvent: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on("browserAgent:event", handler);
+    return () => ipcRenderer.removeListener("browserAgent:event", handler);
+  },
   // 窗口控制
   minimizeWindow: () => ipcRenderer.send("window:minimize"),
   toggleMaximize: () => ipcRenderer.send("window:maximizeToggle"),

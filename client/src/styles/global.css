@@ -1373,29 +1373,8 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   overflow: hidden;
   background: var(--bg-main);
 }
-.browser-tabs-bar { display: flex; align-items: center; background: var(--bg-elevated); border-bottom: 1px solid var(--border); padding: 3px 6px 0; gap: 4px; overflow-x: auto; flex-shrink: 0; }
-.browser-tabs-list { display: flex; align-items: center; gap: 3px; flex: 1; min-width: 0; }
-.browser-tab-item { display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: var(--r-ctl) var(--r-sm) 0 0; background: transparent; color: var(--text-3); font-size: 11px; cursor: pointer; max-width: 140px; min-width: 80px; user-select: none; border: 1px solid transparent; border-bottom: none; transition: all var(--dur-fast); }
-.browser-tab-item:hover { background: var(--bg-hover); color: var(--text-1); }
-.browser-tab-item.active { background: var(--bg-main); color: var(--text-1); font-weight: 500; border-color: var(--border); }
-.browser-tab-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.browser-tab-close { display: flex; align-items: center; justify-content: center; width: 14px; height: 14px; border-radius: 50%; border: none; background: transparent; color: var(--text-3); cursor: pointer; padding: 0; }
-.browser-tab-close:hover { background: var(--bg-active); color: var(--text-1); }
-.browser-new-tab-btn { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; flex-shrink: 0; border-radius: var(--r-ctl); border: none; background: transparent; color: var(--text-3); cursor: pointer; margin-bottom: 3px; }
-.browser-new-tab-btn:hover { background: var(--bg-hover); color: var(--text-1); }
 
-.browser-toolbar { display: flex; align-items: center; gap: 4px; padding: 6px 10px; border-bottom: 1px solid var(--border); flex-shrink: 0; background: var(--bg-main); }
-.browser-btn { width: 26px; height: 26px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; border-radius: var(--r-ctl); color: var(--text-3); cursor: pointer; border: none; background: transparent; transition: all var(--dur-fast); }
-.browser-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-1); }
-.browser-btn:disabled { opacity: 0.3; cursor: not-allowed; }
-.browser-btn.active { background: var(--sidebar-selected); color: var(--text-1); }
-.browser-url { flex: 1; display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: var(--r-ctl); border: 1px solid var(--border); background: var(--bg-elevated); }
-.browser-url input { flex: 1; border: none; outline: none; background: transparent; font-size: 12px; color: var(--text-1); }
-.browser-url input::placeholder { color: var(--text-3); }
 
-.browser-toast-bar { padding: 5px 12px; background: var(--success-soft); color: var(--success); font-size: 11px; border-bottom: 1px solid var(--border); }
-.browser-mirror-banner { display: flex; align-items: center; gap: 6px; padding: 4px 12px; background: color-mix(in srgb, var(--color-browser-blue) 12%, transparent); color: var(--color-browser-blue); font-size: 11px; border-bottom: 1px solid color-mix(in srgb, var(--color-browser-blue) 20%, transparent); animation: pulse var(--dur-loop) ease-in-out infinite; }
-.browser-mirror-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--color-browser-blue); }
 
 /* 浏览器空起始页 */
 /* plan-128-518：空白新标签页——只有居中的嗒嗒，无纹理、无文案 */
@@ -1429,10 +1408,6 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   max-height: 100%;
   box-sizing: border-box;
   overflow: hidden;
-}
-.browser-tab-frame-wrapper.hidden {
-  display: none !important;
-  pointer-events: none !important;
 }
 /* webview（Electron guest 宿主）与 iframe 均为可替换/外部托管元素，
    仅靠 CSS 百分比在面板折叠恢复、全屏切换、窗口 resize 等时机不会自动重算，
@@ -3766,7 +3741,6 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 :is(html[data-window-motion="1"], body.panel-dragging) .turn-status-line > span:last-child,
 :is(html[data-window-motion="1"], body.panel-dragging) .goal-pill.running .goal-pill-label,
 :is(html[data-window-motion="1"], body.panel-dragging) .icon-ring-spin,
-:is(html[data-window-motion="1"], body.panel-dragging) .browser-mirror-banner,
 :is(html[data-window-motion="1"], body.panel-dragging) .idx-dot {
   animation-play-state: paused !important;
 }
@@ -4661,8 +4635,7 @@ body.maximized .nav-cluster { padding-top: 8px; padding-left: 16px; height: var(
    ══════════════════════════════════════════════════════════════════ */
 :root[data-glass="on"] .usage-skeleton-card,
 :root[data-glass="on"] .usage-skeleton-block,
-:root[data-glass="on"] .goal-pill-label,
-:root[data-glass="on"] .browser-mirror-banner {
+:root[data-glass="on"] .goal-pill-label {
   animation: none !important;
 }
 

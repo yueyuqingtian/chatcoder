@@ -767,6 +767,8 @@ class EvToolResult(WsEventPayload):
     duration_ms: int | None = None
     output_preview: str | None = None
     change_stat: dict | None = None
+    # plan-20261015-browser-agent：截图类工具的预览（url / width / height / page / title）
+    image: dict | None = None
 
 
 class EvTodoUpdated(WsEventPayload):
