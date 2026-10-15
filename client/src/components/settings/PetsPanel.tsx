@@ -8,7 +8,7 @@
  * 展示时必须裁出**左上角第一帧**，否则卡片里会露出一整排 8 个帧、认不出是什么宠物。
  */
 import { useEffect, useState } from "react";
-import { Button, Input, List, ListRow, Slider, Switch } from "../ui";
+import { Button, Input, List, ListRow, Segmented, Slider, Switch } from "../ui";
 import { Row } from "./shared";
 import { usePetsStore } from "../../store/pets";
 import type { GalleryPet } from "../../store/pets";
@@ -206,6 +206,18 @@ export function PetsPanel() {
             value={pref?.maxCapsuleRows ?? 3}
             onChange={(v) => void setPref({ maxCapsuleRows: v })}
             format={(v) => `${v} 个`}
+          />
+        </Row>
+        <Row title="浮窗底色" desc="按桌面壁纸深浅选择，浅色壁纸上推荐浅色">
+          <Segmented
+            size="sm"
+            value={pref?.blockTheme === "light" ? "light" : "dark"}
+            onChange={(v) => void setPref({ blockTheme: v })}
+            aria-label="浮窗底色"
+            options={[
+              { value: "dark", label: "深色" },
+              { value: "light", label: "浅色" },
+            ]}
           />
         </Row>
         <Row

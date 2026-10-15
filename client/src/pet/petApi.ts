@@ -42,6 +42,8 @@ export interface PetPref {
   showCapsule: boolean;
   /** 悬停展开后最多显示的任务块数（未悬停时固定只显示最新一条） */
   maxCapsuleRows: number;
+  /** 浮窗任务行底色（浅色 / 深色） */
+  blockTheme: "dark" | "light";
   showBadge: boolean;
   hideOnFullscreen: boolean;
   hideOnMinimize: boolean;

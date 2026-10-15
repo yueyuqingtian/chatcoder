@@ -69,6 +69,7 @@ function defaultPref(): PetBoot["pref"] {
     clickThrough: true,
     showCapsule: true,
     maxCapsuleRows: 3,
+    blockTheme: "dark",
     showBadge: true,
     hideOnFullscreen: false,
     hideOnMinimize: true,
@@ -445,8 +446,9 @@ export function PetApp() {
   const onPetPointerMove = useCallback((e: React.PointerEvent) => {
     const d = dragRef.current;
     if (!d.active) return;
-    // 按键已释放（事件可能丢失）→ 立即结束，杜绝"无点击也跟随鼠标"
-    if (e.buttons === 0) {
+    // 按键已释放（事件可能丢失）→ 立即结束，杜绝"无点击也跟随鼠标"。
+    // 拖拽已交给主进程后不在此收尾：失去捕获时 buttons 可能误报 0（见 onPetPointerCancel）
+    if (e.buttons === 0 && !d.moved) {
       d.active = false;
       d.moved = false;
       setDragging(false);
@@ -465,7 +467,17 @@ export function PetApp() {
       // 鼠标相对窗口不再移动，本地判定会把方向冻结在启动值。
       const initialDir: "left" | "right" | null = Math.abs(dx) >= 2 ? (dx > 0 ? "right" : "left") : null;
       setDragDir(initialDir);
-      void petApi()?.dragBegin(d.offX, d.offY, initialDir);
+      void petApi()
+        ?.dragBegin(d.offX, d.offY, initialDir)
+        .then((r) => {
+          if (r && r.ok) return;
+          // 主进程未接管（窗口销毁竞态）：本地复位，避免视觉态卡在拖拽中
+          dragRef.current.active = false;
+          dragRef.current.moved = false;
+          setDragging(false);
+          setDragDir(null);
+        })
+        .catch(() => { /* 忽略：收尾由主进程 interactionEnded 兜底 */ });
     }
   }, []);
 
@@ -476,9 +488,8 @@ export function PetApp() {
     d.active = false;
     d.moved = false;
     if (moved) {
-      // 交互由主进程判定按键松开后收尾；这里只做本地视觉复位
-      setDragging(false);
-      setDragDir(null);
+      // plan-20261016 D1：只请求收尾，视觉复位等主进程 interactionEnded 回推 ——
+      // 主进程会核对左键真实状态，误报的抬起不会把拖拽掐断，本地也就不能先复位
       void petApi()?.interactionEnd();
       return;
     }
@@ -489,10 +500,21 @@ export function PetApp() {
     });
   }, []);
 
-  // 窗口级兜底复位（指针在窗口外松开、被取消、失焦、页面隐藏）
+  /** 指针被取消：拖拽已交给主进程时忽略。
+   *  plan-20261016 D1：主窗最小化后宠物窗口拿不到全局鼠标捕获，光标一越出窗口 Chromium 就派发
+   *  pointercancel —— 此前它被当成「松手」收尾，表现为「只能拖一点点就拖不动」。
+   *  拖拽的结束只认主进程的按键轮询（interactionEnded）。 */
+  const onPetPointerCancel = useCallback(() => {
+    const d = dragRef.current;
+    if (!d.active || d.moved) return;
+    d.active = false;
+  }, []);
+
+  // 窗口级兜底复位（指针在窗口外松开、被取消、失焦、页面隐藏）。
+  // 已进入拖拽的会话不在此复位：拖拽由主进程按左键真实状态收尾并回推 interactionEnded（plan-20261016 D1）
   useEffect(() => {
     const reset = () => {
-      if (!dragRef.current.active) return;
+      if (!dragRef.current.active || dragRef.current.moved) return;
       dragRef.current.active = false;
       dragRef.current.moved = false;
       setDragging(false);
@@ -616,7 +638,10 @@ export function PetApp() {
       style={{ "--pet-w": `${petW}px`, "--pet-h": `${petH}px` } as React.CSSProperties}
     >
       {/* 浮窗块区：默认只显示最新一条，鼠标移到浮窗上才展开 */}
-      <div className={`pet-blocks-wrap${blockCount > 0 ? " is-open" : ""}`} ref={blocksRef}>
+      <div
+        className={`pet-blocks-wrap${blockCount > 0 ? " is-open" : ""} is-${pref.blockTheme === "light" ? "light" : "dark"}`}
+        ref={blocksRef}
+      >
         {blockCount > 0 && (
           <StatusCapsule
             cards={activeCards}
@@ -660,7 +685,7 @@ export function PetApp() {
           onPointerDown={onPetPointerDown}
           onPointerMove={onPetPointerMove}
           onPointerUp={onPetPointerUp}
-          onPointerCancel={onPetPointerUp}
+          onPointerCancel={onPetPointerCancel}
           onContextMenu={onPetContextMenu}
         >
           {pref.showBadge && <TaskBadge ref={badgeRef} count={aggregate.total} status={aggregate.status} />}

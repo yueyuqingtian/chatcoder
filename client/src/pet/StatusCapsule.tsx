@@ -343,13 +343,16 @@ export function StatusCapsule({
             key={c.sessionId}
             data-sid={c.sessionId}
             className={`pet-block is-${c.status}${isDragging ? " is-reordering" : ""}`}
-            style={blockStyle(c.sessionId, idx)}
+            // --i：展开时按离宠物由近及远依次入场（plan-20261016 D2），不影响内联位移
+            style={{ ...blockStyle(c.sessionId, idx), "--i": idx } as CSSProperties}
             onPointerDown={(e) => onBlockPointerDown(e, c.sessionId)}
             onPointerMove={onBlockPointerMove}
             onPointerUp={onBlockPointerUp}
             onPointerCancel={onBlockPointerCancel}
           >
             <div className="pet-block-row1">
+              {/* 状态点：固定槽位，运行中呼吸、等待为绿、失败为红（不用左侧色条表达状态） */}
+              <span className="pet-block-dot" aria-hidden="true" />
               <span className="pet-block-title">{c.title}</span>
               {/* 超出展示数量的任务数并入标题行（不单独占行，避免超出窗口高度） */}
               {isPrimary && rest > 0 && <span className="pet-block-sub">+{rest}</span>}
@@ -362,7 +365,7 @@ export function StatusCapsule({
                   onClick={() => onFocusSession(c.sessionId)}
                   aria-label="有待处理的事项，点击回到会话"
                 >
-                  <IconAsk size={14} />
+                  <IconAsk size={15} />
                 </button>
               ) : (
                 <span className="pet-block-actions">

@@ -110,6 +110,8 @@ const DEFAULT_PREF = {
   showCapsule: true,
   /** 聚焦展开后最多显示的任务块数（未聚焦时固定折叠为 1 块，对齐 qoder） */
   maxCapsuleRows: 3,
+  /** 浮窗任务行底色：dark / light（plan-20261016 D2：桌面壁纸深浅不一，由用户按观感选择） */
+  blockTheme: "dark",
   showBadge: true,
   hideOnFullscreen: false,
   hideOnMinimize: true,
@@ -1176,8 +1178,22 @@ function registerPetIpc(options) {
     return beginDrag(p.offsetX, p.offsetY, p.initialDir);
   });
 
-  /** 拖拽提前收尾（渲染层监听到 pointerup 时调用；主进程也会自行判定按键松开收尾） */
-  ipcMain.handle("pet:interactionEnd", () => { endInteraction(true); return true; });
+  /** 拖拽提前收尾（渲染层监听到 pointerup 时调用；主进程也会自行判定按键松开收尾）
+   *
+   * plan-20261016 D1（「主窗最小化后宠物只能拖一点点」）：主窗最小化后前台线程属于其他进程，
+   * 宠物窗口（不可激活）调用 SetCapture 只能拿到「光标在窗口内」的鼠标消息 —— 拖拽中窗口
+   * 每 16ms 才追一次光标，光标稍快就越出窗口，Chromium 随即丢失捕获并派发 pointercancel，
+   * 渲染层据此请求收尾，拖拽被提前掐断。主窗在前台时同一 UI 线程即前台线程，捕获正常，故只在最小化后复现。
+   * 渲染层事件不可信，按键真实状态才是唯一依据：左键仍按着就忽略这次收尾请求，
+   * 交给自循环在松手时收尾（查询不可用时返回 null，退回按请求收尾）。 */
+  ipcMain.handle("pet:interactionEnd", () => {
+    if (interaction && glassDiag.isLeftButtonDown() === true) {
+      if (debugOn) log("[debug] 忽略收尾请求：左键仍按下");
+      return false;
+    }
+    endInteraction(true);
+    return true;
+  });
 
   /** 缩放开始：只改偏好（渲染层据此调宠物尺寸），窗口尺寸不变 */
   ipcMain.handle("pet:scaleBegin", (_e, startScale) => beginScale(startScale));
