@@ -163,8 +163,9 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
   const [view, setView] = useState<"group" | "project">(() => {
     return (localStorage.getItem("chatcoder:sidebar-view") as "group" | "project") || "project";
   });
-  const [sort, setSort] = useState<"recent" | "pinned" | "name">(() => {
-    return (localStorage.getItem("chatcoder:sidebar-sort") as "recent" | "pinned" | "name") || "recent";
+  // plan-20261016-ux（问题 9）：置顶会话单独成区后「按置顶」排序已无意义（旧存储值按「最近」处理）
+  const [sort, setSort] = useState<"recent" | "name">(() => {
+    return localStorage.getItem("chatcoder:sidebar-sort") === "name" ? "name" : "recent";
   });
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [collapsedProjects, setCollapsedProjects] = useState<Record<number, boolean>>(loadCollapsedProjects);
@@ -287,42 +288,57 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
   const [mergeDirection, setMergeDirection] = useState<"to_main" | "from_main">("to_main");
   const [dropWorktree, setDropWorktree] = useState<ProjectOut | null>(null);
 
-  const filteredSessions = useMemo(() => {
-    const list = sessions.filter((s) => s.status !== "archived");
-    // v7: 置顶会话恒在顶部（与所选排序无关）；置顶组内按 pinned_at 倒序（后置顶在上）
-    const pinnable = (s: SessionOut) => parseUtc(s.pinned_at) || 0;
-    // 运行中任务的排序键：用「开始执行时间」而非 last_activity_at——后者随每条流式消息
-    // 刷新，同一项目内多个并发任务会互相超车导致上下跳动。started_at 运行期间恒定。
-    // 缺字段（如极短的乐观窗口）不倒回活动时间，否则又会跳；统一用 id 兜底保持确定性。
+  /** plan-20261016-ux（问题 9）：置顶会话脱离项目，单独放在「置顶」分区（分组/项目切换条之下、项目标题之上）。
+   *
+   *  两个分区的排序规则一致地以「运行中优先」开头：
+   *  - 运行中的会话排在前面，组内按「开始执行时间」倒序（后运行的在上）。不用 last_activity_at——
+   *    它随每条流式消息刷新，多个并发任务会互相超车、上下跳动；running_started_at 运行期间恒定，顺序不跳变；
+   *  - 置顶分区其余会话按置顶时间倒序（后置顶的在上）；项目 / 任务列表按所选排序（最近 / 名称）。
+   *  id 兜底保证任何情况下顺序确定。 */
+  const { pinnedSessions, filteredSessions } = useMemo(() => {
     const runKey = (s: SessionOut) => parseUtc(s.running_started_at);
-    return list.sort((a, b) => {
-      if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
-      if (a.pinned && b.pinned) {
-        // 后置顶在上；pinned_at 缺失时回退 updated/last_activity
-        const pa = pinnable(a) || parseUtc(a.last_activity_at);
-        const pb = pinnable(b) || parseUtc(b.last_activity_at);
-        if (pb !== pa) return pb - pa;
-      }
-      // 执行中的任务单独成区：置顶之下、其余会话之上（组内仍按时序）
+    const byRunning = (a: SessionOut, b: SessionOut): number | null => {
       const busyA = sessionBusy(a, busyIds);
       const busyB = sessionBusy(b, busyIds);
       if (busyA !== busyB) return busyA ? -1 : 1;
       if (busyA && busyB) {
-        // 「最新开始执行的在上面」；同刻/缺字段时用 id 兜底，保证顺序确定不抖动
         const ra = runKey(a);
         const rb = runKey(b);
-        if (rb !== ra) return rb - ra;
-        return b.id - a.id;
+        return rb !== ra ? rb - ra : b.id - a.id;
       }
-      if (sort === "name") {
-        return (a.title || "").localeCompare(b.title || "");
-      }
+      return null;
+    };
+    const live = sessions.filter((s) => s.status !== "archived");
+    const pinned = live.filter((s) => s.pinned).sort((a, b) => {
+      const r = byRunning(a, b);
+      if (r !== null) return r;
+      // pinned_at 缺失（极老数据）时回退最近活动时间
+      const pa = parseUtc(a.pinned_at) || parseUtc(a.last_activity_at);
+      const pb = parseUtc(b.pinned_at) || parseUtc(b.last_activity_at);
+      return pb !== pa ? pb - pa : b.id - a.id;
+    });
+    const rest = live.filter((s) => !s.pinned).sort((a, b) => {
+      const r = byRunning(a, b);
+      if (r !== null) return r;
+      if (sort === "name") return (a.title || "").localeCompare(b.title || "");
       const ta = parseUtc(a.last_activity_at);
       const tb = parseUtc(b.last_activity_at);
-      if (tb !== ta) return tb - ta;
-      return b.id - a.id;
+      return tb !== ta ? tb - ta : b.id - a.id;
     });
-  }, [sessions, sort, wfBusyIds]);
+    return { pinnedSessions: pinned, filteredSessions: rest };
+    // 依赖用 busyIds（含当前会话的运行态）——此前写成 wfBusyIds，当前会话开始运行时列表不会重排
+  }, [sessions, sort, busyIds]);
+
+  /** 置顶 / 取消置顶：先本地更新（会话立刻移入 / 移出置顶分区），再落库；失败时以服务端为准重新拉取 */
+  const togglePin = (s: SessionOut) => {
+    const pinned = !s.pinned;
+    useChatStore.setState((st) => ({
+      sessions: st.sessions.map((x) => (x.id === s.id
+        ? { ...x, pinned, pinned_at: pinned ? new Date().toISOString() : null }
+        : x)),
+    }));
+    api.updateSession(s.id, { pinned }).then(() => loadBootstrap()).catch(() => loadBootstrap());
+  };
 
   const isProjectOpen = (p: ProjectOut) => {
     if (collapsedProjects[p.id] === true) return false;
@@ -412,7 +428,7 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
             <IxWorkflow size={12} />
           </span>
         )}
-        {s.pinned && <span title={t("sidebar.ctx_pin")} className="sb-pin"><IconPin size={11} /></span>}
+        {/* plan-20261016-ux（问题 9）：置顶会话只出现在「置顶」分区，分区标题已说明状态，行内不再重复钉子图标 */}
         {editing ? (
           <Input className="sb-rename-input" ref={renameInputRef} autoFocus value={renaming.value} onFocus={(e) => e.target.select()}
             onChange={(e) => setRenaming({ id: s.id, value: e.target.value })}
@@ -476,7 +492,7 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
           <div className="context-menu sb-context-menu" onClick={() => setMenuFor(null)}>
             <div className="context-menu-item" onClick={() => { setRenaming({ id: s.id, value: s.title || "" }); setMenuFor(null); }}><IconPencil size={13} /> {t("sidebar.ctx_rename")}</div>
             <div className="context-menu-item" onClick={() => { forkSession(s.id); onSessionFocus(); setMenuFor(null); }}><IconCopy size={13} /> {t("sidebar.ctx_fork")}</div>
-            <div className="context-menu-item" onClick={() => { api.updateSession(s.id, { pinned: !s.pinned }).then(() => loadBootstrap()); setMenuFor(null); }}><IconPin size={13} /> {s.pinned ? t("sidebar.ctx_unpin") : t("sidebar.ctx_pin")}</div>
+            <div className="context-menu-item" onClick={() => { togglePin(s); setMenuFor(null); }}><IconPin size={13} /> {s.pinned ? t("sidebar.ctx_unpin") : t("sidebar.ctx_pin")}</div>
             <div className="context-menu-item" onClick={() => { api.createWorktree(s.id); setMenuFor(null); }}><IconGitBranch size={13} /> {t("sidebar.ctx_worktree")}</div>
             <div
               className={"context-menu-item" + (sessionBusy(s, busyIds) ? " disabled" : "")}
@@ -641,7 +657,6 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
             {sortMenuOpen && (
               <div className="context-menu sb-context-menu sb-sort-menu" onClick={() => setSortMenuOpen(false)}>
                 <div className={"context-menu-item" + (sort === "recent" ? " active" : "")} onClick={() => setSort("recent")}><IconClock size={13} /> {t("sidebar.sort_recent")}</div>
-                <div className={"context-menu-item" + (sort === "pinned" ? " active" : "")} onClick={() => setSort("pinned")}><IconPin size={13} /> {t("sidebar.sort_pinned")}</div>
                 <div className={"context-menu-item" + (sort === "name" ? " active" : "")} onClick={() => setSort("name")}><IconSortAlpha size={13} /> {t("sidebar.sort_name")}</div>
               </div>
             )}
@@ -649,6 +664,13 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
 
           {/* 列表区 */}
           <div className="sb-list">
+            {/* plan-20261016-ux（问题 9）：置顶分区——在「项目 / 任务」标题之上；置顶会话从项目列表移出 */}
+            {pinnedSessions.length > 0 && (
+              <div className="sb-pinned">
+                <div className="sb-section-label">{t("sidebar.section_pinned")}</div>
+                {pinnedSessions.map(renderSession)}
+              </div>
+            )}
             {view === "project" ? (
               <>
                 <div className="sb-section-label">{t("sidebar.section_projects")}</div>
@@ -675,7 +697,7 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
               <>
                 <div className="sb-section-label">{t("sidebar.section_tasks")}</div>
                 {filteredSessions.map(renderSession)}
-                {filteredSessions.length === 0 && (
+                {filteredSessions.length === 0 && pinnedSessions.length === 0 && (
                   <Empty size="sm" title={t("sidebar.empty_sessions")}
                     action={<button className="btn btn-secondary btn-sm" onClick={() => onChange("chat")}><IconPlus size={13} /> {t("sidebar.create_first_task")}</button>} />
                 )}

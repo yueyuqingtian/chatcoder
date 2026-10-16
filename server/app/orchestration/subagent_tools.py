@@ -19,6 +19,9 @@ EXPLORE_TOOLS = [
     "fs_read", "fs_list", "fs_grep", "git_diff",
     "memory_search", "web_fetch", "web_search", "view_image",
     "read_attachment", "codebase_search",
+    # plan-20261016-ux（问题 7）：符号检索 / 文件骨架 / 技能查阅同属纯读，探索子代理此前缺失——
+    # 已开索引的项目里子代理只能逐个文件 grep，调研又慢又费 token
+    "symbol_search", "outline", "skill_view",
 ]
 
 SPAWN_SUBAGENT_SCHEMA = {

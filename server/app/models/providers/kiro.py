@@ -31,6 +31,7 @@ from typing import Any
 import httpx
 
 from app.models.base import ModelProvider
+from app.models.providers.tool_args import parse_tool_args
 from app.models.schemas import ChatMessage, ChatRequest, ChatResponse, Usage
 
 logger = logging.getLogger(__name__)
@@ -576,10 +577,7 @@ class KiroProvider(ModelProvider):
                         continue
                     raw_args = tc.get("arguments")
                     if isinstance(raw_args, str):
-                        try:
-                            raw_args = json.loads(raw_args) if raw_args.strip() else {}
-                        except ValueError:
-                            raw_args = {}
+                        raw_args = parse_tool_args(raw_args)
                     if not isinstance(raw_args, dict):
                         raw_args = {}
                     tool_uses.append({
@@ -806,10 +804,8 @@ class KiroProvider(ModelProvider):
         for tc in tool_calls_map.values():
             args = tc.get("arguments") or ""
             if isinstance(args, str):
-                try:
-                    args = json.loads(args) if args.strip() else {}
-                except ValueError:
-                    args = {"_raw": args}
+                # plan-20261016-ux（问题 3）：宽松解析，失败带 _parse_error（执行器直接回告模型）
+                args = parse_tool_args(args)
             final_tool_calls.append({"id": tc["id"], "name": tc["name"], "arguments": args})
 
         yield {

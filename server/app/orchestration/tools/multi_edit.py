@@ -9,6 +9,15 @@ from typing import Any
 
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 from app.orchestration.tools.safe_path import resolve_loose
+from app.orchestration.tools.text_edit import (
+    STRATEGY_NOTES,
+    TextFile,
+    TextFileError,
+    apply_replacement,
+    encode_text,
+    pick_arg,
+    read_text_file,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,14 +71,24 @@ class MultiFileEditTool(Tool):
         if len(edits) > _MAX_EDITS:
             return ToolResult(ok=False, output="", error=f"单次最多 {_MAX_EDITS} 个编辑")
 
-        # Phase 1: 验证所有编辑（不写入）
-        validated: list[tuple[Path, str, str]] = []
+        # Phase 1: 在内存里按顺序应用全部编辑（不写盘）。
+        # plan-20261016-ux（问题 3）：同一文件的多处编辑按顺序叠加校验——旧实现每处都对照「原始内容」
+        # 校验，后一处依赖前一处结果时必然报未找到；读写走 text_edit（原编码 / BOM / 换行），
+        # 匹配支持空白与行号容错，GBK 文件不再因严格 UTF-8 解码抛出未捕获异常。
+        files: dict[Path, tuple[TextFile, str, str]] = {}  # resolved -> (原文件, 当前内容, 显示路径)
+        order: list[Path] = []
+        notes: list[str] = []
         errors: list[str] = []
 
         for i, edit in enumerate(edits):
-            path_str = edit.get("path", "")
-            old_text = edit.get("old_text", "")
-            new_text = edit.get("new_text", "")
+            if not isinstance(edit, dict):
+                errors.append(f"edit[{i}]: 格式错误（应为对象）")
+                continue
+            path_str = str(pick_arg(edit, "path", "file_path", "filepath") or "")
+            old_text = pick_arg(edit, "old_text", "old_string", "oldString", "old_str")
+            new_text = pick_arg(edit, "new_text", "new_string", "newString", "new_str")
+            if new_text is None:
+                new_text = edit.get("content")
 
             if not path_str:
                 errors.append(f"edit[{i}]: path 为空")
@@ -85,62 +104,58 @@ class MultiFileEditTool(Tool):
                 continue
             resolved = Path(_resolved)
 
-            # 读取文件验证 old_text 存在
-            if not resolved.exists():
-                errors.append(f"edit[{i}]: 文件不存在: {path_str}")
-                continue
+            if resolved not in files:
+                if not resolved.exists():
+                    errors.append(f"edit[{i}]: 文件不存在: {path_str}")
+                    continue
+                try:
+                    tf = read_text_file(resolved)
+                except TextFileError as e:
+                    errors.append(f"edit[{i}]: {e}: {path_str}")
+                    continue
+                files[resolved] = (tf, tf.text, path_str)
+                order.append(resolved)
 
-            try:
-                content = resolved.read_text(encoding="utf-8")
-            except OSError as e:
-                errors.append(f"edit[{i}]: 读取失败: {e}")
+            tf, current, shown = files[resolved]
+            res = apply_replacement(current, str(old_text), str(new_text or ""))
+            if not res.ok:
+                errors.append(f"edit[{i}]（{path_str}）: {res.error}")
                 continue
-
-            # 验证 old_text 唯一匹配
-            count = content.count(old_text)
-            if count == 0:
-                errors.append(f"edit[{i}]: old_text 在 {path_str} 中未找到")
-                continue
-            if count > 1:
-                errors.append(f"edit[{i}]: old_text 在 {path_str} 中匹配 {count} 次(需唯一)")
-                continue
-
-            validated.append((resolved, old_text, new_text))
+            files[resolved] = (tf, res.text, shown)
+            note = STRATEGY_NOTES.get(res.strategy)
+            if note:
+                notes.append(f"edit[{i}] {note}")
 
         if errors:
             return ToolResult(
                 ok=False, output="",
-                error="验证失败:\n" + "\n".join(errors),
+                error="验证失败（未修改任何文件）:\n" + "\n".join(errors),
             )
 
-        # Phase 2: 原子性写入（先备份，全部成功或回滚）
-        backups: list[tuple[Path, str]] = []
+        # Phase 2: 原子性写入（先备份原始字节，全部成功或回滚）
+        backups: list[tuple[Path, bytes]] = []
         applied: list[str] = []
         new_contents: dict[str, str] = {}  # plan-1085: 各文件写后新内容（统计/回滚兜底数据源）
 
         try:
-            for resolved, old_text, new_text in validated:
-                # 备份原始内容
-                original = resolved.read_text(encoding="utf-8")
-                backups.append((resolved, original))
-
-                # 执行替换
-                new_content = original.replace(old_text, new_text, 1)
-                resolved.write_text(new_content, encoding="utf-8")
+            for resolved in order:
+                tf, text, _shown = files[resolved]
+                backups.append((resolved, resolved.read_bytes()))
+                resolved.write_bytes(encode_text(tf, text))
                 # plan-75-332: 越界写入时相对路径算不出来，回退绝对路径（仅影响展示）
                 try:
                     _rel = str(resolved.relative_to(ctx.workspace_root))
                 except ValueError:
                     _rel = str(resolved)
                 applied.append(_rel)
-                if len(new_content) <= _NEW_CONTENT_MAX_CHARS:
-                    new_contents[_rel] = new_content
+                if len(text) <= _NEW_CONTENT_MAX_CHARS:
+                    new_contents[_rel] = text
 
         except Exception as e:
-            # 回滚所有已写入的文件
-            for path, content in backups:
+            # 回滚所有已写入的文件（按原始字节恢复，编码与换行完全不变）
+            for path, data in backups:
                 try:
-                    path.write_text(content, encoding="utf-8")
+                    path.write_bytes(data)
                 except OSError:
                     logger.error("[multi_edit] 回滚失败: %s", path)
             return ToolResult(
@@ -148,8 +163,11 @@ class MultiFileEditTool(Tool):
                 error=f"写入异常，已全部回滚: {e}",
             )
 
+        output = f"成功编辑 {len(applied)} 个文件:\n" + "\n".join(f"  - {p}" for p in applied)
+        if notes:
+            output += "\n" + "；".join(notes)
         return ToolResult(
             ok=True,
-            output=f"成功编辑 {len(applied)} 个文件:\n" + "\n".join(f"  - {p}" for p in applied),
+            output=output,
             data={"files": applied, "count": len(applied), "new_contents": new_contents},
         )

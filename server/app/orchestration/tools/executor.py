@@ -152,6 +152,21 @@ class ServerToolExecutor(ToolExecutor):
         on_approval_request: Any = None,
         llm_call_id: str | None = None,
     ) -> ToolResult:
+        # plan-20261016-ux（问题 3）：参数 JSON 解析失败时不进入工具——此前工具拿到 {"_raw": ...}，
+        # 报「路径非法 / old_text 未匹配」这类与真实原因无关的错误，模型照原样重试、反复失败。
+        # 这里直接说明原因与写法要求，模型下一步即可改正。
+        from app.models.providers.tool_args import args_parse_error
+
+        _parse_err = args_parse_error(args)
+        if _parse_err:
+            return ToolResult(
+                ok=False, output="",
+                error=(
+                    f"{_parse_err}，本次调用未执行。请重新调用 {tool_name}，并确保参数是完整、合法的 JSON 对象："
+                    "字符串里的换行写成 \\n、制表符写成 \\t、反斜杠写成 \\\\、双引号写成 \\\"；"
+                    "要写入或替换的内容很长时，拆成几次较小的编辑。"
+                ),
+            )
         # 工作流节点的写入契约（设计 §5A.1）：范围 / 一致性 / git 状态检查先于权限裁决，
         # 越界或过期的写入不会弹出审批，直接以工具错误回到模型
         from app.orchestration.workflow import guard as workflow_guard

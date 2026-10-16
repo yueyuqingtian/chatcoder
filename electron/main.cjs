@@ -607,7 +607,10 @@ function syncWindowChromeState(win) {
   // plan-387-1825 A10：把「应用是否深色」并入状态键——主题切换会改变窗口非客户区配色，
   // 必须触发一次重放，否则小窗四周会一直停留在切换前的颜色。
   const dark = isAppDarkTheme();
-  const key = `${maximized ? 1 : 0}|${native ? 1 : 0}|${dark ? 1 : 0}`;
+  // plan-20261016-ux（问题 6）：外扩量并入状态键——最大化动画结束、尺寸落定后才是最终几何，
+  // resized 收尾时再调用本函数即可补发（值未变则零成本返回）。
+  const inset = clientInsetOf(win);
+  const key = `${maximized ? 1 : 0}|${native ? 1 : 0}|${dark ? 1 : 0}|${inset.top},${inset.left},${inset.right}`;
   if (key === _lastChromeState) return; // 状态未变：不注入、不跑 FFI
   _lastChromeState = key;
   try {
@@ -615,6 +618,9 @@ function syncWindowChromeState(win) {
       `(() => { const r = document.documentElement;`
       + ` r.setAttribute('data-maximized', ${maximized ? "'1'" : "'0'"});`
       + ` r.setAttribute('data-native-corners', ${native ? "'1'" : "'0'"});`
+      + ` r.style.setProperty('--win-inset-top', '${inset.top}px');`
+      + ` r.style.setProperty('--win-inset-left', '${inset.left}px');`
+      + ` r.style.setProperty('--win-inset-right', '${inset.right}px');`
       + ` return true; })()`, true);
   } catch { /* 渲染层未就绪时忽略 */ }
   applyWindowCorners(win);
@@ -701,6 +707,31 @@ function screenModule() {
 function isMaximizedLike(win) {
   if (!win || win.isDestroyed()) return false;
   try { return win.isMaximized() || win.isFullScreen(); } catch { return false; }
+}
+
+/** plan-20261016-ux（问题 6）：最大化 / 全屏时客户区超出可见区域的实际外扩量（逻辑像素）。
+ *  旧做法假定外扩固定 8px，在 CSS 里给标题栏与导航区统一补 8px 上边距；而当前版本最大化时
+ *  客户区与工作区精确贴合（本机实测 contentBounds === workArea，外扩为 0），
+ *  这 8px 反而把顶部 logo、图标与标题整体压低约 4px。改为按真实几何计算，正常为 0；
+ *  个别环境若仍外扩，按实际值补偿（上限 16px，防异常几何把内容推出视口）。 */
+function clientInsetOf(win) {
+  const zero = { top: 0, left: 0, right: 0 };
+  if (!isMaximizedLike(win)) return zero;
+  try {
+    const scr = screenModule();
+    if (!scr) return zero;
+    const cb = win.getContentBounds();
+    const disp = scr.getDisplayMatching(win.getBounds());
+    const area = win.isFullScreen() ? disp.bounds : disp.workArea;
+    const clamp = (v) => Math.max(0, Math.min(16, Math.round(v)));
+    return {
+      top: clamp(area.y - cb.y),
+      left: clamp(area.x - cb.x),
+      right: clamp(cb.x + cb.width - (area.x + area.width)),
+    };
+  } catch {
+    return zero;
+  }
 }
 
 // ── plan-31-151 S3：伪最大化辅助函数已整体删除 ──
@@ -1060,13 +1091,15 @@ function createWindow() {
     flushUiPrefsBackup();
     flushDomStorage();
   });
+  // plan-20261016-ux（问题 6）：随最大化状态一并下发真实外扩量（见 clientInsetOf），
+  // 渲染层据此补偿标题栏，不再假定固定 8px。
   mainWindow.on("maximize", () => {
     syncWindowGlass(mainWindow);
-    try { mainWindow.webContents.send("window:maximize-change", true); } catch { /* 渲染层未就绪时忽略 */ }
+    try { mainWindow.webContents.send("window:maximize-change", true, clientInsetOf(mainWindow)); } catch { /* 渲染层未就绪时忽略 */ }
   });
   mainWindow.on("unmaximize", () => {
     syncWindowGlass(mainWindow);
-    try { mainWindow.webContents.send("window:maximize-change", false); } catch { /* 渲染层未就绪时忽略 */ }
+    try { mainWindow.webContents.send("window:maximize-change", false, clientInsetOf(mainWindow)); } catch { /* 渲染层未就绪时忽略 */ }
   });
   for (const ev of ["show", "restore", "enter-full-screen", "leave-full-screen"]) {
     mainWindow.on(ev, () => syncWindowGlass(mainWindow));
@@ -1675,9 +1708,10 @@ ipcMain.on("window:chrome-sync-get", (e) => {
     e.returnValue = {
       maximized: isMaximizedLike(mainWindow),
       nativeCorners: supportsNativeRoundedCorners(),
+      inset: clientInsetOf(mainWindow),
     };
   } catch {
-    e.returnValue = { maximized: false, nativeCorners: false };
+    e.returnValue = { maximized: false, nativeCorners: false, inset: { top: 0, left: 0, right: 0 } };
   }
 });
 

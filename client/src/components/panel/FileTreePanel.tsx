@@ -15,7 +15,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { api, type TreeNode } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { usePanelStore } from "../../store/panel";
-import { IconArrowLeft, IconArrowToggle, IconChevronRight, IconCompress, IconExternalLink, IconRefresh, IconSearch, IconX, IconFolderTree } from "../icons";
+import { IconArrowLeft, IconArrowToggle, IconChevronRight, IconCompress, IconExternalLink, IconPanelLeft, IconRefresh, IconSearch, IconX, IconFolderTree } from "../icons";
 import { MarkdownContent } from "../MarkdownContent";
 import { Button, Empty, Segmented, Tooltip } from "../ui";
 import { FileIcon } from "../iconkit/FileIcon";
@@ -91,6 +91,13 @@ interface FlatRow {
 const ROW_H = 26;
 /** 面板窄于此值时，目录树与预览不再并排（各 200px 上下的代码预览根本放不下）：打开预览就占满面板，用「返回」回到目录树 */
 const NARROW_PX = 540;
+/** 面板宽于此值（典型为全屏）时，目录树即使没有预览也只占侧栏宽度，不让文件名横跨整个屏幕 */
+const WIDE_PX = 960;
+/** 打开预览时目录树是否收起（plan-20261016-ux 问题 10：按需腾出预览空间；记住用户选择） */
+const TREE_COLLAPSED_KEY = "chatcoder.ft.treeCollapsed";
+function loadTreeCollapsed(): boolean {
+  try { return localStorage.getItem(TREE_COLLAPSED_KEY) === "1"; } catch { return false; }
+}
 
 /** 把目录树按展开状态（及过滤词）压平成行列表。
  *  过滤：文件名命中的文件、含命中后代的目录保留；有命中后代的目录强制展开；
@@ -176,6 +183,12 @@ export function FileTreePanel({ visible = true }: { visible?: boolean }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const crumbsRef = useRef<HTMLDivElement>(null);
   const [narrow, setNarrow] = useState(false);
+  const [treeCollapsed, setTreeCollapsed] = useState(loadTreeCollapsed);
+  const toggleTree = () => setTreeCollapsed((v) => {
+    const next = !v;
+    try { localStorage.setItem(TREE_COLLAPSED_KEY, next ? "1" : "0"); } catch { /* 存储不可用时只在本次生效 */ }
+    return next;
+  });
   const treeRef = useRef<HTMLDivElement>(null);
   /** 待定位的路径：展开祖先目录后，等行列表更新再滚动到它 */
   const pendingReveal = useRef<string | null>(null);
@@ -194,10 +207,15 @@ export function FileTreePanel({ visible = true }: { visible?: boolean }) {
   const previewKey = previewNode ? pathKey(previewNode) : "";
 
   // 面板宽度分档（只在跨过阈值时更新状态，拖分隔条逐帧改宽度不会逐帧重渲染）
+  // plan-20261016-ux（问题 10）：宽面板（全屏）档——没有预览时目录树也收成侧栏，右侧给空态说明
+  const [wide, setWide] = useState(false);
   useEffect(() => {
     const el = panelRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(([entry]) => setNarrow(entry.contentRect.width < NARROW_PX));
+    const ro = new ResizeObserver(([entry]) => {
+      setNarrow(entry.contentRect.width < NARROW_PX);
+      setWide(entry.contentRect.width >= WIDE_PX);
+    });
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
@@ -423,9 +441,9 @@ export function FileTreePanel({ visible = true }: { visible?: boolean }) {
 
   return (
     <div className={"ft-panel" + (narrow ? " is-narrow" : "")} ref={panelRef}>
-      <div className={"ft-body" + (previewPath ? " has-preview" : "")}>
-        {/* 左：目录树 */}
-        <div className="ft-tree-col">
+      <div className={"ft-body" + (previewPath ? " has-preview" : "") + (wide ? " is-wide" : "") + (previewPath && treeCollapsed && !narrow ? " tree-collapsed" : "")}>
+        {/* 左：目录树（预览时可收起；收起后不可聚焦，见 panel.css .tree-collapsed） */}
+        <div className="ft-tree-col" aria-hidden={previewPath && treeCollapsed && !narrow ? true : undefined}>
           <div className="ft-tree-head">
             <span className="ft-root">
               {project ? <ProjectIcon icon={projectIconKey(project.icon)} color={projectColorKey(project.color)} size={16} /> : <IconFolderTree size={15} />}
@@ -486,14 +504,33 @@ export function FileTreePanel({ visible = true }: { visible?: boolean }) {
           </div>
         </div>
 
+        {/* 宽面板且没有预览：右侧空态说明（引导点选左侧文件） */}
+        {wide && !previewPath && (
+          <div className="ft-wide-empty">
+            <Empty size="sm" mood="calm" title="选择左侧文件进行预览" />
+          </div>
+        )}
+
         {/* 右：预览 */}
         {previewPath && (
           <div className="ft-preview">
             <div className="ft-preview-head">
               <div className="ft-ph-row">
-                {narrow && (
+                {narrow ? (
                   <Tooltip content="返回文件列表" side="bottom">
                     <button type="button" className="ui-icon-btn ft-back" aria-label="返回文件列表" onClick={() => setPreviewPath(null)}><IconArrowLeft size={14} /></button>
+                  </Tooltip>
+                ) : (
+                  <Tooltip content={treeCollapsed ? "展开目录" : "收起目录"} side="bottom">
+                    <button
+                      type="button"
+                      className="ui-icon-btn ft-tree-toggle"
+                      aria-label={treeCollapsed ? "展开目录" : "收起目录"}
+                      aria-pressed={!treeCollapsed}
+                      onClick={toggleTree}
+                    >
+                      <IconPanelLeft size={16} open={!treeCollapsed} />
+                    </button>
                   </Tooltip>
                 )}
                 <span className="ft-ph-file">

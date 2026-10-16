@@ -23,6 +23,7 @@ import httpx
 
 from app.core.config import settings
 from app.models.base import ModelProvider
+from app.models.providers.tool_args import parse_tool_args
 from app.models.schemas import ChatMessage, ChatRequest, ChatResponse, Usage
 
 logger = logging.getLogger(__name__)
@@ -126,10 +127,7 @@ class CommandCodeProvider(ModelProvider):
                     for tc in m.tool_calls:
                         args = tc.get("arguments") or {}
                         if isinstance(args, str):
-                            try:
-                                args = json.loads(args)
-                            except Exception:
-                                args = {}
+                            args = parse_tool_args(args)
                         content_blocks.append({
                             "type": "tool-call",
                             "toolCallId": tc.get("id") or f"call_{uuid.uuid4().hex[:8]}",
@@ -449,10 +447,8 @@ class CommandCodeProvider(ModelProvider):
         for tc in tool_calls_map.values():
             args = tc["arguments"]
             if isinstance(args, str):
-                try:
-                    args = json.loads(args) if args else {}
-                except Exception:
-                    args = {"_raw": args}
+                # plan-20261016-ux（问题 3）：宽松解析，失败带 _parse_error（执行器直接回告模型）
+                args = parse_tool_args(args)
             final_tool_calls.append({
                 "id": tc["id"],
                 "name": tc["name"],

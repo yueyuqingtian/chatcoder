@@ -38,6 +38,7 @@ from app.orchestration.subagent_tools import (
 from app.orchestration.tools.registry import tool_registry
 from app.persistence.write_behind import write_behind
 from app.services import audit_service, message_service, project_service, rollback_service, session_service, task_service, turn_service
+from app.services import permission_profile_service as _pps_defaults
 
 logger = logging.getLogger(__name__)
 
@@ -349,25 +350,15 @@ def _cleanup_manager_if_idle(session_id: int, manager) -> None:
 # 命令模式：只读审阅（/chat）工具白名单
 # v7: 追加 ask_user_question/todo_write 为通用工具——四种模式（只读/计划/完全访问/计划执行）
 # 全部可用：结构化提问（需求澄清）与执行清单是通用能力，不因模式受限。
-_READONLY_TOOLS = [
-    "fs_read", "fs_list", "fs_grep", "git_diff",
-    "memory_search", "web_fetch", "web_search", "view_image",
-    "read_attachment", "codebase_search",
-    "ask_user_question", "todo_write",
-    # plan-230-1144 M1.2: 技能加载是纯读操作，四种模式全部可用——
-    # 只读/计划模式下 AI 同样需要查阅技能知识（如审阅规范、计划模板）。
-    "skill_view",
-    # plan-230-1144 M1.2 配套: 压缩回看同属纯读，计划/只读模式也应可检索早期上下文（问题4）
-    "compaction_index", "compaction_view",
-    # plan-230-1144 M3: 符号索引检索/文件骨架（纯读探索能力；正常路径由
-    # permission_profile_service 白名单供给，此处兜底保持行为一致）
-    "symbol_search", "outline",
-]
+# plan-230-1144 M1.2 起技能加载 / 压缩回看 / 符号检索等纯读能力四种模式全部可用。
+# plan-20261016-ux（问题 7）：兜底白名单与 permission_profile_service 的默认集合同源，
+# 不再各写一份（此前两边各自增删，兜底路径一走就「缺工具」）。
+_READONLY_TOOLS = list(_pps_defaults.READONLY_TOOLS)
 # 规划模式（/plan）：只读 + 允许写计划文档 + 命令行
 # v3.0 (plan-88): 追加 terminal_exec——计划模式 AI 可执行命令（只读命令免审批，
 # 其余走审批卡；cwd 是否可越出工作区由 plan_mode_allow_outside_access 开关控制）。
 # todo_write/ask_user_question 已属通用工具（见 _READONLY_TOOLS），此处不再重复。
-_PLAN_TOOLS = _READONLY_TOOLS + ["fs_write", "terminal_exec"]
+_PLAN_TOOLS = list(_pps_defaults.PLAN_TOOLS)
 
 _MODE_HINTS = {
     # plan-workflow-collab：工作流模式——用户显式选择以工作流完成任务（多步协同、评估把关、确认后返工）
@@ -385,7 +376,8 @@ _MODE_HINTS = {
     ),
     "readonly": (
         "【审阅模式】当前处于只读审阅模式，你只能查看、检索、分析代码，"
-        "严禁执行任何修改操作（禁止写入文件、运行命令、应用补丁）。"
+        "严禁执行任何修改操作（禁止写入文件、运行命令、应用补丁）；"
+        "可以用 git 工具查看提交历史与差异（log / blame / show / diff），可以打开与读取网页。"
         "请直接给出审阅意见、发现的问题与改进建议。"
     ),
     "plan": (

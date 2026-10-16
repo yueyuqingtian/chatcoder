@@ -7,7 +7,8 @@
  *   不与上方思考行互相抑制（plan-282-1421 第4项：三点光标已移除，由本行统一承担）。
  */
 import { ToolGlyph } from "../iconkit/ToolGlyphs";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { rewriteDsmlForStream } from "./dsmlStream";
 import { IconChevronRight } from "../icons";
 import { StreamingMarkdown } from "./StreamingMarkdown";
 import { isBusy } from "../../perf/bus";
@@ -104,6 +105,9 @@ export function StreamingText({ active, thinking, text, processingLabel = "处�
   const thinkingText = thinking.trim();
   const smoothThinking = useSmoothText(thinkingText);
   const smoothBody = useSmoothText(text);
+  // plan-20261016-ux（问题 5）：正文里以 DSML 标签写出的工具调用（DeepSeek / 智谱）在流式期间改写成
+  // 「正在准备 …」+ 代码块——正在输出的代码直接进代码框，而不是夹着标签的普通文本（见 dsmlStream）
+  const displayBody = useMemo(() => rewriteDsmlForStream(smoothBody), [smoothBody]);
   // v41: 思考尾部行可展开——展开后隐藏右侧刷字 ticker，下方渲染实时更新的思考全文
   const [tailOpen, setTailOpen] = useState(false);
 
@@ -136,10 +140,10 @@ export function StreamingText({ active, thinking, text, processingLabel = "处�
           </ChatCollapse>
         </div>
       )}
-      {smoothBody && (
+      {displayBody && (
         <div className="turn-item turn-item-text">
           <div className="turn-agent-text">
-            <StreamingMarkdown>{smoothBody}</StreamingMarkdown>
+            <StreamingMarkdown>{displayBody}</StreamingMarkdown>
             {/* plan-282-1421（第4项）：移除流式尾部三点光标（.stream-caret）。
                 它与状态行的呼吸点在语义上重复、且不同步；现统一由下方状态行
                 （呼吸点 + 文案）承担"进行中"表达，视觉只保留一种语言。 */}

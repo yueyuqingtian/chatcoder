@@ -106,9 +106,23 @@ async def update_session(session_id: int, body: SessionUpdate, db: AsyncSession 
     # v2.2 (对齐 zcode 3.11): 模型切换 divider——换模型时写一条 SYSTEM 分割消息
     if body.model_id is not None and old_model_id is not None and old_model_id != body.model_id:
         try:
-            from sqlalchemy import select
+            from sqlalchemy import func, select
 
+            from app.persistence.models.message import Message
             from app.persistence.models.model_reg import Model
+
+            # plan-20261016-ux（问题 8）：会话里还没有任何对话（新建未发送、发送后又撤销）时不写提示——
+            # 分割线标记的是「此前的对话与之后的对话用了不同模型」，空会话里只剩一条孤零零的「模型已切换」
+            _has_dialog = await db.scalar(
+                select(func.count()).select_from(Message).where(
+                    Message.session_id == session_id,
+                    Message.deleted == False,  # noqa: E712 撤销（回滚）的消息是软删
+                    Message.thread_id.is_(None),
+                    Message.sender_type != "system",
+                )
+            )
+            if not _has_dialog:
+                return await _to_out(db, session)
             _m = await db.get(Model, body.model_id)
             _model_name = _m.name if _m else f"#{body.model_id}"
             await session_service.create_system_message(

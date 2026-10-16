@@ -57,6 +57,14 @@ async def _mk_session(db, *, session_id: int = 1, model_id: int | None = None) -
     await db.commit()
 
 
+async def _add_user_message(db, *, session_id: int = 1, deleted: bool = False) -> None:
+    db.add(Message(
+        session_id=session_id, sender_type="user", msg_type="text",
+        content={"text": "你好"}, deleted=deleted,
+    ))
+    await db.commit()
+
+
 async def _system_messages(db) -> list[Message]:
     rows = await db.execute(select(Message).where(Message.msg_type == "system"))
     return list(rows.scalars().all())
@@ -94,6 +102,7 @@ async def test_update_session_writes_divider_only_on_real_change(db_env, capture
     """模型真变化 → 写一条 divider 并广播；重复 PATCH 同一模型 → 不再出提示。"""
     db = db_env
     await _mk_session(db, model_id=1)
+    await _add_user_message(db)
 
     await update_session(1, SessionUpdate(model_id=2), db)
     rows = await _system_messages(db)
@@ -106,6 +115,25 @@ async def test_update_session_writes_divider_only_on_real_change(db_env, capture
     await update_session(1, SessionUpdate(model_id=2), db)
     assert len(await _system_messages(db)) == 1
     assert len(captured) == 1
+
+
+async def test_update_session_no_divider_in_empty_session(db_env, captured):
+    """plan-20261016-ux（问题 8）：会话里没有对话（新建未发送 / 发送后撤销）时切模型不写提示。"""
+    db = db_env
+    await _mk_session(db, model_id=1)
+
+    await update_session(1, SessionUpdate(model_id=2), db)
+    assert await _system_messages(db) == []
+
+    # 发送后又撤销：用户消息被软删，仍视为空会话
+    await _add_user_message(db, deleted=True)
+    await update_session(1, SessionUpdate(model_id=3), db)
+    assert await _system_messages(db) == []
+    assert captured == []
+
+    # 模型确实已经切换（只是不写提示）
+    refreshed = await session_service.get_session(db, 1)
+    assert refreshed is not None and refreshed.model_id == 3
 
 
 async def test_update_session_divider_not_written_for_other_fields(db_env, captured):

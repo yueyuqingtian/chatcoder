@@ -26,6 +26,7 @@ import httpx
 
 from app.core.config import settings
 from app.models.base import ModelProvider
+from app.models.providers.tool_args import parse_tool_args
 from app.models.providers.workbuddy_model_caps import get_model_caps, map_reasoning_effort
 from app.models.schemas import ChatMessage, ChatRequest, ChatResponse, Usage
 
@@ -207,10 +208,7 @@ class WorkBuddyProvider(ModelProvider):
                     name = str(tc.get("name") or "")
                     args = tc.get("arguments") or {}
                     if isinstance(args, str):
-                        try:
-                            args = json.loads(args)
-                        except (json.JSONDecodeError, TypeError):
-                            args = {}
+                        args = parse_tool_args(args)
                     tc_list.append({
                         "id": str(tc.get("id") or f"call_{len(tc_list):02d}"),
                         "type": "function",
@@ -380,12 +378,8 @@ class WorkBuddyProvider(ModelProvider):
         tool_calls = []
         for idx in sorted(monitor["tool_calls"].keys()):
             slot = monitor["tool_calls"][idx]
-            try:
-                args = json.loads(slot["arguments"]) if slot["arguments"] else {}
-            except (json.JSONDecodeError, TypeError):
-                args = {"_raw": slot["arguments"]}
-            if not isinstance(args, dict):
-                args = {"_raw": str(args)}
+            # plan-20261016-ux（问题 3）：宽松解析，失败带 _parse_error（执行器直接回告模型）
+            args = parse_tool_args(slot["arguments"])
             tool_calls.append({
                 "id": slot["id"] or f"call_{idx:02d}",
                 "name": slot["name"],

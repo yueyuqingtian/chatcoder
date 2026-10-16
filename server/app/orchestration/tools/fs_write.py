@@ -7,6 +7,7 @@ from typing import Any
 
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 from app.orchestration.tools.safe_path import resolve_loose
+from app.orchestration.tools.text_edit import TextFileError, encode_text, pick_arg, read_text_file
 
 # plan-1085: data 带回写入内容上限（对齐 agent_loop.MAX_TOOL_OUTPUT_CHARS）；超限不带，走磁盘读取兜底路径
 _NEW_CONTENT_MAX_CHARS = 16000
@@ -45,7 +46,8 @@ class FsWriteTool(Tool):
         }
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        path = args.get("path", "")
+        # plan-20261016-ux（问题 3）：参数名容错（file_path / filepath）
+        path = str(pick_arg(args, "path", "file_path", "filepath") or "")
         # v35: content 缺失时报错而非静默写空文件——schema 声明 required，
         # 缺参即模型毛刺（真实案例：误创建 0 字节文件"写入才算完成"）
         if "content" not in args:
@@ -64,9 +66,21 @@ class FsWriteTool(Tool):
             return ToolResult(ok=False, output="", error=f"路径非法: {path}")
         target = Path(resolved)
 
+        # plan-20261016-ux（问题 3）：覆盖已有文本文件时沿用其编码、BOM 与换行风格——
+        # 旧实现一律 UTF-8 + 平台换行写入：GBK 文件被转成 UTF-8、LF 文件被整份改成 CRLF。
+        # 新文件（或原文件无法按文本识别）保持旧行为。
+        data: bytes | None = None
+        if target.is_file():
+            try:
+                data = encode_text(read_text_file(target), str(content))
+            except (TextFileError, UnicodeEncodeError):
+                data = None
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
+            if data is not None:
+                target.write_bytes(data)
+            else:
+                target.write_text(content, encoding="utf-8")
         except OSError as e:
             return ToolResult(ok=False, output="", error=f"写入失败: {e}")
 

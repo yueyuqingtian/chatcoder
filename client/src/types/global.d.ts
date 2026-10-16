@@ -37,8 +37,9 @@ declare global {
       minimizeWindow?: () => void;
       toggleMaximize?: () => void;
       closeWindow?: () => void;
-      /** plan-31-151 S2：主进程 maximize/unmaximize 事件通知（修复最大化 8px 溢出裁切） */
-      onMaximizeChange?: (cb: (isMax: boolean) => void) => () => void;
+      /** plan-31-151 S2：主进程 maximize/unmaximize 事件通知。
+       *  plan-20261016-ux：第二个参数为客户区真实外扩量（逻辑像素，正常为 0），供标题栏补偿 */
+      onMaximizeChange?: (cb: (isMax: boolean, inset: { top: number; left: number; right: number } | null) => void) => () => void;
       /** plan-31-151 S3：自研拖拽通道已移除（标题栏改回系统 -webkit-app-region:drag） */
       /** plan-26-126 P1：一键重启（毛玻璃开关改为重启后生效） */
       relaunchApp?: () => Promise<{ ok: boolean; reason?: string }>;

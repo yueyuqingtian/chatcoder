@@ -228,6 +228,16 @@ button.ts-row:focus-visible { outline: 2px solid color-mix(in oklab, var(--info)
 /* 没有预览时树占满面板；打开预览后收成侧栏（flex-basis 带弹簧过渡） */
 .ft-tree-col { display: flex; flex-direction: column; flex: 1 1 100%; min-width: 0; overflow: hidden; transition: flex-basis var(--dur-spring) var(--spring-soft); }
 .ft-body.has-preview .ft-tree-col { flex: 0 0 clamp(172px, 34%, 264px); border-right: 1px solid var(--border); }
+/* plan-20261016-ux（问题 10）：预览时收起目录树，预览占满面板。宽度沿用同一条弹簧过渡；
+   visibility 在收起方向延迟到过渡结束再隐藏（展开立即可见），收起后树内元素不再参与 Tab 聚焦 */
+.ft-tree-col { transition: flex-basis var(--dur-spring) var(--spring-soft), visibility 0s linear 0s; }
+.ft-body.has-preview.tree-collapsed .ft-tree-col {
+  flex-basis: 0;
+  border-right-color: transparent;
+  visibility: hidden;
+  transition: flex-basis var(--dur-spring) var(--spring-soft), visibility 0s linear var(--dur-spring);
+}
+.ft-tree-toggle { margin-left: -2px; }
 .ft-tree-head { display: flex; align-items: center; gap: 2px; height: 40px; padding: 0 6px 0 12px; flex-shrink: 0; }
 .ft-root { flex: 1; min-width: 0; display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--text-1); }
 .ft-root-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -309,3 +319,106 @@ button.ts-row:focus-visible { outline: 2px solid color-mix(in oklab, var(--info)
 .ft-preview-err { padding: 16px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; color: var(--error); font-size: 12px; }
 .ft-diff-body { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
 .ft-diff-truncated { flex-shrink: 0; padding: 4px 12px; font-size: 11px; color: var(--warning); background: var(--warning-soft); border-top: 1px solid var(--border); }
+
+/* ══ plan-20261016-ux（问题 10）：右侧面板全屏 + 主对话小窗 ══════════════════════════════ */
+
+/* 文件管理在宽面板（全屏）下：没有预览时目录树也收成侧栏，右侧给出空态说明，
+   不再让一行行文件名横跨整个屏幕 */
+.ft-body.is-wide:not(.has-preview) .ft-tree-col { flex: 0 0 clamp(240px, 26%, 340px); border-right: 1px solid var(--border); }
+.ft-wide-empty { flex: 1 1 0; min-width: 0; display: flex; align-items: center; justify-content: center; }
+
+/* 小窗：浮层卡片（浮层圆角 --r-pop），右下角；高度不超过可视区 */
+.mini-chat {
+  position: fixed; right: 16px; bottom: 16px; z-index: 120;
+  display: flex; flex-direction: column;
+  width: min(380px, calc(100vw - 32px));
+  height: min(540px, calc(100vh - var(--titlebar-h) - 32px));
+  border: 1px solid var(--border);
+  border-radius: var(--r-pop);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-pop);
+  overflow: hidden;
+  animation: mini-chat-in var(--dur-4) var(--ease-emphasized-decel) both;
+}
+@keyframes mini-chat-in {
+  from { opacity: 0; transform: translateY(calc(10px * var(--motion-dist, 1))) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+.mini-chat-head {
+  display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  height: 44px; padding: 0 8px 0 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-2);
+}
+.mini-chat-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-1); font-size: 13px; font-weight: 600; }
+.mini-chat-state { flex-shrink: 0; min-width: 3.2em; text-align: right; font-size: 11.5px; color: var(--text-3); }
+.mini-chat-state[data-running="1"] { color: var(--accent); }
+.mini-chat-btn { width: 28px; height: 28px; color: var(--text-3); }
+.mini-chat-btn:hover { color: var(--text-1); }
+.mini-chat-btn.is-on { color: var(--accent); background: var(--accent-soft); }
+
+.mini-chat-body {
+  flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 12px 14px;
+  scrollbar-width: thin;
+}
+.mini-chat-empty { margin: auto; color: var(--text-3); font-size: 12.5px; }
+.mini-chat-user {
+  align-self: flex-end; max-width: 85%;
+  padding: 7px 12px; border-radius: var(--r-lg);
+  background: var(--bg-hover); color: var(--text-1);
+  font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+}
+/* AI 正文：沿用消息流 Markdown 作用域（.turn-agent-text），只把行距收紧到小窗尺度 */
+.mini-chat .mini-chat-ai,
+.mini-chat .mini-chat-ai .md-body { font-size: 13px; line-height: 1.7; }
+.mini-chat .mini-chat-ai .md-body .md-p,
+.mini-chat .mini-chat-ai .md-body .md-li { line-height: 1.7; }
+.mini-chat .mini-chat-ai .md-body > :first-child { margin-top: 0; }
+.mini-chat .mini-chat-ai .md-body > :last-child { margin-bottom: 0; }
+.mini-chat .mini-chat-ai .md-code-block { margin: 8px 0; }
+.mini-chat .mini-chat-ai .md-table-block { margin: 8px 0; }
+/* 小窗只有 380px：表格按内容宽度横向滚动（单列限宽），不再把三列表挤成一字一行 */
+.mini-chat .md-body .md-table-card .md-table { width: max-content; min-width: 100%; }
+.mini-chat .md-body .md-table-card .md-th,
+.mini-chat .md-body .md-table-card .md-td { max-width: 220px; padding: 7px 10px; }
+.mini-chat-tools,
+.mini-chat-error {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--text-3);
+}
+.mini-chat-tools svg { flex-shrink: 0; }
+.mini-chat-tools.is-running { color: var(--text-2); }
+.mini-chat-error { color: var(--error); }
+
+.mini-chat-composer {
+  display: flex; align-items: flex-end; gap: 8px; flex-shrink: 0;
+  margin: 0 10px 10px; padding: 8px 8px 8px 12px;
+  border: 1px solid var(--border); border-radius: var(--r-lg);
+  background: var(--color-input, var(--bg-panel));
+}
+.mini-chat-input {
+  flex: 1; min-width: 0; min-height: 32px; max-height: 120px;
+  padding: 6px 0; border: none; outline: none; resize: none;
+  background: transparent; color: var(--text-1);
+  font: inherit; font-size: 13px; line-height: 1.5;
+}
+.mini-chat-input::placeholder { color: var(--text-3); }
+.mini-chat-composer .cc-send { margin-left: 0; }
+
+/* 隐藏态：右下角小胶囊 */
+.mini-chat-pill {
+  position: fixed; right: 16px; bottom: 16px; z-index: 120;
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 36px; padding: 0 14px;
+  border: 1px solid var(--border); border-radius: var(--r-pill);
+  background: var(--bg-elevated); color: var(--text-1);
+  box-shadow: var(--shadow-lg);
+  font: inherit; font-size: 13px; cursor: pointer;
+  transition: background var(--dur-2) var(--ease-standard), transform var(--dur-spring) var(--spring-bouncy);
+  animation: mini-chat-in var(--dur-4) var(--ease-emphasized-decel) both;
+}
+.mini-chat-pill:hover { background: var(--bg-hover); }
+.mini-chat-pill:active { transform: scale(0.96); }
+.mini-chat-pill svg { color: var(--text-2); }

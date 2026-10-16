@@ -77,6 +77,11 @@ a { color: var(--accent); text-decoration: none; }
   display: flex;
   flex-direction: column;
   height: 100%;
+  /* plan-20261016-ux（问题 1）：渲染期钳制——保存的宽度来自别的布局（左栏折叠时拖宽、窗口缩小、换屏）时，
+     「左栏 + 中列最小宽 + 右栏」会超出窗口，.app-body 的 overflow:hidden 把右面板最右一截裁掉，
+     要拖一下分隔条才恢复。上限按容器实时宽度计算（百分比相对 .app-body；分隔条净宽为 0），
+     任何时刻都不会溢出；折叠 / 全屏规则带 !important，不受影响。 */
+  max-width: calc(100% - var(--main-min-w, 420px));
   /* plan-353-1738 M2：收起方向「内容瞬隐」修复。
      折叠态带 visibility:hidden，而 visibility 不在 .app-pane 的过渡列表里 ⇒ 一加
      .collapsed 内容立即消失，只剩空壳在收缩。这里把 visibility 纳入过渡：
@@ -150,8 +155,14 @@ a { color: var(--accent); text-decoration: none; }
   -webkit-app-region: no-drag !important;
 }
 .titlebar { height: var(--titlebar-h); display: flex; align-items: center; justify-content: space-between; padding: 0 8px 0 12px; background: var(--bg-panel); border-bottom: 1px solid var(--border); flex-shrink: 0; cursor: default; }
-/* plan-31-151 S2：最大化时客户区外扩 8px 非客户区，标题栏/布局补 padding 避免裁切 */
-body.maximized .titlebar { padding-top: 8px; padding-left: 16px; padding-right: 16px; }
+/* plan-20261016-ux（问题 6）：最大化补偿改为主进程实测的客户区外扩量（--win-inset-*，正常为 0）。
+   旧规则固定补 8px（plan-31-151 S2），在客户区与工作区精确贴合的环境里把整行内容压低约 4px。
+   外扩时被裁掉的是顶部 inset 那一截，内容在剩余可见高度里居中。 */
+.titlebar {
+  padding-top: var(--win-inset-top, 0px);
+  padding-left: calc(12px + var(--win-inset-left, 0px));
+  padding-right: calc(8px + var(--win-inset-right, 0px));
+}
 .titlebar-left, .titlebar-right { display: flex; align-items: center; gap: 8px; -webkit-app-region: no-drag; }
 .titlebar-left .titlebar-btn,
 .titlebar-right .titlebar-btn { margin: 0 2px; }
@@ -280,6 +291,8 @@ body.maximized .titlebar { padding-top: 8px; padding-left: 16px; padding-right: 
 /* plan-41-232：层级关系由缩进表达即可——竖线在密集会话列表里只是视觉噪音，用户要求去掉 */
 .sb-project-children { margin-left: 14px; padding-left: 10px; display: flex; flex-direction: column; gap: 2px; padding-top: 2px; padding-bottom: 2px; }
 .sb-project-children .sb-session { padding-left: 8px; }
+/* plan-20261016-ux（问题 9）：置顶分区——会话行与项目下的会话同一行距（gap 2px），分区与「项目」标题间靠标题自身留白分隔 */
+.sb-pinned { display: flex; flex-direction: column; gap: 2px; padding-bottom: 2px; }
 .sb-project:hover { background: var(--sidebar-hover); color: var(--text-1); }
 .sb-project.current { color: var(--text-1); font-weight: 500; }
 .sb-project-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -3786,8 +3799,9 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
   background-size: 100% 1px, 100% 100%;
   background-position: left bottom, left top;
 }
-/* 最大化：标题栏内容区下移 8px（padding-top），导航控件同 padding 同高，内容中心才与标题对齐（此前高度多加 8px，图标低约 4px） */
-body.maximized .nav-cluster { padding-top: 8px; padding-left: 16px; height: var(--titlebar-h); }
+/* 最大化补偿与标题栏同源（plan-20261016-ux 问题 6）：只按实测外扩量下移 / 内缩，正常为 0，
+   导航控件与标题栏始终同高、同一中线，左栏折叠 / 展开不影响其纵向位置 */
+.nav-cluster { padding-top: var(--win-inset-top, 0px); padding-left: calc(10px + var(--win-inset-left, 0px)); }
 .nav-cluster .sb-logo-img { margin: 0 4px 0 6px; }
 .nav-cluster button { -webkit-app-region: no-drag; }
 /* 导航控件让出的左侧宽度：标题栏左缘的下限（见下方 .titlebar） */
@@ -3814,7 +3828,7 @@ body.maximized .nav-cluster { padding-top: 8px; padding-left: 16px; height: var(
 /* v19: 左栏边界由面板自身的 1px border-right 绘制，拖拽条仅保留命中区。 */
 .app-pane-left { flex: 0 0 auto; overflow: hidden; min-height: 0; display: flex; flex-direction: column; }
 .app-pane-left.collapsed { width: 0 !important; flex-basis: 0 !important; min-width: 0; border-right-color: transparent; }
-.app-main { flex: 1 1 480px; min-width: 480px; overflow: hidden; }
+.app-main { flex: 1 1 var(--main-min-w, 420px); min-width: var(--main-min-w, 420px); overflow: hidden; }
 /* 拖拽期失效边界（本轮拖拽卡顿治理 P0-1）：中列宽度逐帧变化，是唯一会逐帧重排的容器。
    layout 隔离让折行只在面板内重算；paint 让重绘范围被裁剪在本面板内、不向左右面板扩散。
    安全性：本元素已有 overflow:hidden，paint containment 的裁剪语义与现状一致；

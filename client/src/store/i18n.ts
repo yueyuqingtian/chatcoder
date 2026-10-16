@@ -22,6 +22,7 @@ const DICT: Dict = {
   "sidebar.sort_name":            ["按名称", "Name"],
   "sidebar.new_project":          ["新建项目", "New Project"],
   "sidebar.new_task_at_project":  ["为此项目新建任务（保留首页未发送内容）", "New task for this project"],
+  "sidebar.section_pinned":       ["置顶", "Pinned"],
   "sidebar.section_projects":     ["项目", "Projects"],
   "sidebar.section_tasks":        ["任务", "Tasks"],
   "sidebar.show_more":            ["显示更多（剩余 {count} 项）", "Show more ({count} remaining)"],

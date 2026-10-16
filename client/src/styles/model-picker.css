@@ -337,7 +337,9 @@
 .idx-search { margin-top: 18px; }
 .idx-search-title { font-size: 12px; font-weight: 600; color: var(--text-2); margin-bottom: 8px; }
 .idx-search-row { display: flex; align-items: center; gap: 8px; }
-.idx-search-row .ui-select { width: 180px; flex-shrink: 0; }
+/* plan-20261016-ux（问题 2）：ui/Select 的触发器类名是 .ui-select-trigger（旧规则写成 .ui-select 不生效，
+   触发器被挤窄后名称折成两行）；固定宽度、不收缩，长名称交给值区省略号截断 */
+.idx-search-row .ui-select-trigger { width: 200px; flex: 0 0 auto; }
 .idx-hits { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
 .idx-hit { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--r-sm); font-size: 12px; }
 .idx-hit-kind { font-size: 10px; padding: 1px 6px; border-radius: var(--r-xs); background: var(--bg-hover); color: var(--text-3); flex-shrink: 0; }

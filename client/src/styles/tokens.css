@@ -394,6 +394,9 @@
   --sidebar-w: 272px;
   --sidebar-min: 240px;
   --sidebar-max: 480px;
+  /* plan-20261016-ux（问题 1/10）：中列最小宽——右面板渲染上限 = 容器宽 − 它（见 .app-pane-right），
+     拖拽上限与 App.tsx 的 MAIN_MIN_W 同值 */
+  --main-min-w: 420px;
   --rightpanel-w: 360px;
   --rightpanel-min: 200px;
   --rightpanel-max: 1600px;

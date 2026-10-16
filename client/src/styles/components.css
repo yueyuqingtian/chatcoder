@@ -175,13 +175,16 @@
   cursor: pointer;
   outline: none;
   transition: border-color var(--dur-2) var(--ease-standard);
+  /* plan-20261016-ux（问题 2）：触发器被挤压时值区截断，而不是按按钮默认居中排版折行 */
+  white-space: nowrap;
+  text-align: left;
 }
 .ui-select-trigger:hover { border-color: var(--border-hover); }
 .ui-select-trigger[data-state="open"] { border-color: var(--text-2); }
 .ui-select-trigger:disabled { border-color: var(--border-light); background: var(--bg-hover); color: var(--text-3); cursor: not-allowed; }
 .ui-select-trigger.size-sm { min-height: var(--ctl-h-sm); font-size: 12px; }
 .ui-select-trigger.size-lg { min-height: var(--ctl-h-lg); }
-.ui-select-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ui-select-value { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ui-select-value[data-placeholder] { color: var(--text-3); }
 .ui-select-icon { color: var(--text-3); flex-shrink: 0; display: inline-flex; }
 

@@ -8,7 +8,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, memo, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { TimelineEntry, ToolNode, TurnItem } from "./timeline";
-import { createTimelineBuilder, createRoundMerger, msgText, lastPersistedText, getTurnById, tailRoundIndex } from "./timeline";
+import { createTimelineBuilder, createRoundMerger, msgText, lastPersistedText, getTurnById, tailRoundIndex, pruneModelDividers } from "./timeline";
 import { isBusy, subscribe } from "../../perf/bus";
 import { registerReconcileTask, RECONCILE_ORDER } from "../../perf/reconcile";
 import { recordComponentRender } from "../../perf/metrics";
@@ -1330,7 +1330,8 @@ function MainMessageFlow({
   const buildEntries = useMemo(() => createTimelineBuilder(), []);
   // 续跑轮（工作流 / 子代理唤醒后的回复）并入前一轮：一轮只有一个计时条、一排操作按钮（plan-282-1530 阶段 D）
   const mergeRounds = useMemo(() => createRoundMerger(), []);
-  const entries = useMemo(() => mergeRounds(buildEntries(messages)), [mergeRounds, buildEntries, messages]);
+  // plan-20261016-ux（问题 8）：空会话 / 连续切换时的「模型已切换」分隔线不展示（见 pruneModelDividers）
+  const entries = useMemo(() => mergeRounds(buildEntries(pruneModelDividers(messages))), [mergeRounds, buildEntries, messages]);
 
   /** 强制贴底信号：用户消息条数。
    *

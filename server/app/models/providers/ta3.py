@@ -30,6 +30,7 @@ import httpx
 
 from app.core.config import settings
 from app.models.base import ModelProvider
+from app.models.providers.tool_args import parse_tool_args
 from app.models.providers.ta3_tool_aliases import FROM_TA3, TO_TA3, disguise_args, restore_args
 from app.models.providers.ta3_mcp import (
     is_mcp_alias, is_mcp_tool, mcp_alias, resolve_mcp_alias,
@@ -389,10 +390,7 @@ class Ta3Provider(ModelProvider):
                     name = str(tc.get("name") or "")
                     args = tc.get("arguments") or {}
                     if isinstance(args, str):
-                        try:
-                            args = json.loads(args)
-                        except (json.JSONDecodeError, TypeError):
-                            args = {}
+                        args = parse_tool_args(args)
                     alias = TO_TA3.get(name)
                     if alias is None and is_mcp_tool(name):
                         # MCP 工具（mcp_<server>_<tool>）：不在静态映射表里，改名为
@@ -442,10 +440,7 @@ class Ta3Provider(ModelProvider):
             name = str(tc.get("name") or "")
             args = tc.get("arguments") or {}
             if isinstance(args, str):
-                try:
-                    args = json.loads(args) if args else {}
-                except (json.JSONDecodeError, TypeError):
-                    args = {"_raw": args}
+                args = parse_tool_args(args)
             if not isinstance(args, dict):
                 args = {"_raw": str(args)}
             real = FROM_TA3.get(name)
@@ -693,10 +688,7 @@ class Ta3Provider(ModelProvider):
                             continue
                         args = tc.get("arguments") or {}
                         if isinstance(args, str):
-                            try:
-                                args = json.loads(args)
-                            except (json.JSONDecodeError, TypeError):
-                                args = {}
+                            args = parse_tool_args(args)
                         clean_args = sanitize_outbound_structure(
                             disguise_args(name, args if isinstance(args, dict) else {})
                         )
@@ -856,12 +848,8 @@ class Ta3Provider(ModelProvider):
         out = []
         for idx in sorted(monitor["anthropic_tools"].keys()):
             slot = monitor["anthropic_tools"][idx]
-            try:
-                args = json.loads(slot["arguments"]) if slot["arguments"] else {}
-            except (json.JSONDecodeError, TypeError):
-                args = {"_raw": slot["arguments"]}
-            if not isinstance(args, dict):
-                args = {"_raw": str(args)}
+            # plan-20261016-ux（问题 3）：宽松解析，失败带 _parse_error（执行器直接回告模型）
+            args = parse_tool_args(slot["arguments"])
             name = slot["name"]
             real = FROM_TA3.get(name)
             if real is not None:
@@ -994,12 +982,8 @@ class Ta3Provider(ModelProvider):
             tool_calls = []
             for idx in sorted(monitor["tool_calls"].keys()):
                 slot = monitor["tool_calls"][idx]
-                try:
-                    args = json.loads(slot["arguments"]) if slot["arguments"] else {}
-                except (json.JSONDecodeError, TypeError):
-                    args = {"_raw": slot["arguments"]}
-                if not isinstance(args, dict):
-                    args = {"_raw": str(args)}
+                # plan-20261016-ux（问题 3）：宽松解析，失败带 _parse_error（执行器直接回告模型）
+                args = parse_tool_args(slot["arguments"])
                 name = slot["name"]
                 real = FROM_TA3.get(name)
                 if real is not None:

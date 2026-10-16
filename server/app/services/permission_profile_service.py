@@ -43,6 +43,44 @@ _CFG_PATH = Path(
 # 按能力由窄到宽递进，故内置列表按此顺序声明；list_profiles 按本列表顺序
 # 返回，前端菜单直接消费（agent 定义已移至列表末尾）。
 
+# plan-20261016-ux（问题 7）：只读 / 计划模式的默认白名单补齐——此前缺少审批策略本已允许的工具，
+# 新用户开箱即「缺工具」：目标模式下无法 goal_complete 结束续跑、计划模式能后台跑命令却查不了状态、
+# 浏览器只能打开不能读取、git 历史看不了、记忆写不进。补齐范围严格对齐 approval_policy 的执行模式边界：
+# 只放行在只读 / 计划模式下会被裁决为「读」的工具（git 写子命令、网页点击输入、电脑键鼠操作仍由边界拒绝）。
+_READ_CORE = [
+    "fs_read", "fs_list", "fs_grep", "git_diff",
+    "memory_search", "web_fetch", "web_search", "view_image",
+    "read_attachment", "codebase_search",
+    "ask_user_question", "todo_write",
+    "skill_view", "compaction_index", "compaction_view",
+    # plan-230-1144 M3: 符号检索/文件骨架属纯读探索能力
+    "symbol_search", "outline",
+    # git 只读子命令（log / blame / show / status / diff …）；写操作由执行模式边界拒绝
+    "git",
+    # 记忆写入与目标完成：两者都不改项目文件，审批策略按「读」裁决
+    "memory_write", "goal_complete",
+]
+# 内置浏览器：打开与读取页面（点击 / 输入 / 执行脚本由执行模式边界拒绝，不放进白名单）
+_BROWSER_READ = [
+    "browser_navigate", "browser_tabs", "browser_snapshot", "browser_get_text",
+    "browser_screenshot", "browser_scroll", "browser_hover", "browser_wait", "browser_logs",
+]
+# 电脑操控：读屏类（键鼠操作与切换窗口不放进白名单）
+_DESKTOP_READ = [
+    "desktop_windows", "desktop_snapshot", "desktop_hit", "desktop_find_text", "desktop_screenshot",
+]
+# v36 (plan-321-1600 R1): 四模式全支持子代理——只读 / 计划模式仅暴露只读探索子代理（运行时强制 explore）
+_SUBAGENT = [
+    "spawn_subagent", "collect_results", "subagent_inspect", "cancel_subagent", "resume_subagent",
+    "send_to_subagent",
+]
+# 工作流（设计 §5.8）：只读 / 计划模式可规划与查询；启动 / 续跑 / 取消在运行时拒绝
+_WORKFLOW_READ = ["plan_workflow", "workflow_status"]
+
+READONLY_TOOLS: list[str] = [*_READ_CORE, *_BROWSER_READ, *_DESKTOP_READ, *_SUBAGENT, *_WORKFLOW_READ]
+# 计划模式：只读 + 写计划文档（fs_write，限 ai/*.md）+ 命令行（只读命令）+ 后台命令状态查询
+PLAN_TOOLS: list[str] = [*READONLY_TOOLS, "fs_write", "terminal_exec", "terminal_bg_status"]
+
 BUILTIN_PROFILES: list[dict] = [
     {
         "name": "readonly",
@@ -50,23 +88,11 @@ BUILTIN_PROFILES: list[dict] = [
         "kind": "readonly",
         "builtin": True,
         "description": "仅查看、检索、分析，禁止任何修改",
-        "tools": [
-            "fs_read", "fs_list", "fs_grep", "git_diff",
-            "memory_search", "web_fetch", "web_search", "view_image",
-            "read_attachment", "codebase_search",
-            "ask_user_question", "todo_write",
-            "skill_view", "compaction_index", "compaction_view",
-            # plan-230-1144 M3: 符号检索/文件骨架属纯读探索能力，只读模式可用
-            "symbol_search", "outline",
-            # v36 (plan-321-1600 R1): 四模式全支持子代理——只读模式仅暴露只读探索
-            # 子代理（运行时强制 explore；可写 general 类型不暴露）。
-            "spawn_subagent", "collect_results", "subagent_inspect", "cancel_subagent", "resume_subagent",
-            # 工作流（设计 §5.8）：只读模式可规划与查询；启动 / 续跑 / 取消在运行时拒绝
-            "plan_workflow", "workflow_status",
-        ],
+        "tools": [*READONLY_TOOLS],
         "hint": (
             "【审阅模式】当前处于只读审阅模式，你只能查看、检索、分析代码，"
-            "严禁执行任何修改操作（禁止写入文件、运行命令、应用补丁）。"
+            "严禁执行任何修改操作（禁止写入文件、运行命令、应用补丁）；"
+            "可以用 git 工具查看提交历史与差异（log / blame / show / diff），可以打开与读取网页。"
             "请直接给出审阅意见、发现的问题与改进建议。"
         ),
     },
@@ -76,18 +102,7 @@ BUILTIN_PROFILES: list[dict] = [
         "kind": "plan",
         "builtin": True,
         "description": "先规划后执行：只读工具 + 计划文档写入 + 命令行",
-        "tools": [
-            "fs_read", "fs_list", "fs_grep", "git_diff",
-            "memory_search", "web_fetch", "web_search", "view_image",
-            "read_attachment", "codebase_search",
-            "ask_user_question", "todo_write",
-            "skill_view", "compaction_index", "compaction_view",
-            "symbol_search", "outline",
-            "fs_write", "terminal_exec",
-            # v36 (plan-321-1600 R1): 计划模式同样支持子代理（仅只读探索，运行时强制 explore）
-            "spawn_subagent", "collect_results", "subagent_inspect", "cancel_subagent", "resume_subagent",
-            "plan_workflow", "workflow_status",
-        ],
+        "tools": [*PLAN_TOOLS],
         # plan 的完整提示词较长且含 {session_id}/{turn_id} 占位符，
         # 仍由 engine._MODE_HINTS 维护（格式化处理在那边）；这里留空表示沿用。
         "hint": "",

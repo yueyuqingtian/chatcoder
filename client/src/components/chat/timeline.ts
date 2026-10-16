@@ -401,6 +401,35 @@ function buildToolTree(calls: MessageOut[], resultsByKey: Map<string, MessageOut
   return nodes;
 }
 
+/** 模型切换分隔线的展示裁剪（plan-20261016-ux 问题 8）：
+ *  ① 会话里还没有任何对话（新建未发送、发送后又撤销）时一条都不展示——分隔线标记的是「前后对话用了
+ *     不同模型」，空会话里只剩一条孤零零的「模型已切换」；
+ *  ② 连续多次切换、中间没有新对话时只保留最后一条。
+ *  后端已不再为空会话写入分隔消息，这里兜住存量数据。没有需要裁剪的内容时原样返回同一数组（memo 稳定）。 */
+export function pruneModelDividers(messages: MessageOut[]): MessageOut[] {
+  const isDivider = (m: MessageOut) =>
+    m.sender_type === SenderType.System && (m.content as { divider?: unknown } | null)?.divider === "model_changed";
+  let dividers = 0;
+  let hasDialog = false;
+  for (const m of messages) {
+    if (isDivider(m)) dividers++;
+    else if (m.sender_type !== SenderType.System && m.thread_id == null) hasDialog = true;
+  }
+  if (dividers === 0) return messages;
+  if (!hasDialog) return messages.filter((m) => !isDivider(m));
+  let drop: Set<number> | null = null;
+  let pending: MessageOut | null = null;
+  for (const m of messages) {
+    if (isDivider(m)) {
+      if (pending) (drop ??= new Set()).add(pending.id);
+      pending = m;
+    } else if (m.sender_type !== SenderType.System && m.thread_id == null) {
+      pending = null;
+    }
+  }
+  return drop ? messages.filter((m) => !drop!.has(m.id)) : messages;
+}
+
 /** 从扁平消息构建时间线。
  *  关键修复：turn 排序依据是该 turn 首条消息在输入数组中的原始位置，而非 turn_id 数值。
  *  这保证用户消息（先落库）所在的 turn 始终排在 AI 回复 turn 之前。

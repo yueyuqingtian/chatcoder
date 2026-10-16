@@ -61,8 +61,9 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
   closeWindow: () => ipcRenderer.send("window:close"),
   // plan-31-151 S2：主进程在 maximize/unmaximize 时通知渲染层——修复 frame:true +
   //   titleBarStyle:"hidden" 最大化时客户区外扩 8px 非客户区导致的边缘内容裁切。
+  // plan-20261016-ux（问题 6）：第二个参数为客户区真实外扩量 { top, left, right }（正常为 0）
   onMaximizeChange: (cb) => {
-    const handler = (_e, isMax) => cb(isMax === true);
+    const handler = (_e, isMax, inset) => cb(isMax === true, inset && typeof inset === "object" ? inset : null);
     ipcRenderer.on("window:maximize-change", handler);
     return () => ipcRenderer.removeListener("window:maximize-change", handler);
   },
@@ -171,6 +172,11 @@ function applyWindowChromeAttrs() {
     const s = ipcRenderer.sendSync("window:chrome-sync-get") || {};
     root.setAttribute("data-maximized", s.maximized ? "1" : "0");
     root.setAttribute("data-native-corners", s.nativeCorners ? "1" : "0");
+    // plan-20261016-ux（问题 6）：首帧即按真实外扩量补偿标题栏（正常为 0，不再假定 8px）
+    const inset = s.inset || {};
+    root.style.setProperty("--win-inset-top", `${Number(inset.top) || 0}px`);
+    root.style.setProperty("--win-inset-left", `${Number(inset.left) || 0}px`);
+    root.style.setProperty("--win-inset-right", `${Number(inset.right) || 0}px`);
   } catch { /* 通道不可用：CSS 默认不自绘窗口圆角，不会出现双层弧线 */ }
   return true;
 }

@@ -9,6 +9,7 @@ from typing import Any
 
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 from app.orchestration.tools.safe_path import safe_resolve_read
+from app.orchestration.tools.text_edit import TextFileError, read_text_file
 
 _MAX_LINES = 400  # v15: 200→400，配合字符上限(tool_output_chars_read=16000)提升单次读取量，减少分页重读
 
@@ -97,12 +98,20 @@ class FsReadTool(Tool):
         if not target.is_file():
             return ToolResult(ok=False, output="", error=f"不是文件: {path}")
 
+        # plan-20261016-ux（问题 3）：与编辑工具同一解码器——GBK/GB18030 文件显示真实中文（此前是「�」，
+        # 模型照着乱码写 old_text 必然匹配失败）；只按换行符切行，行号与编辑器、编辑工具一致
+        # （splitlines 会把换页符、U+2028 等也当换行，行号错位）。
         try:
-            text = target.read_text(encoding="utf-8", errors="replace")
-        except OSError as e:
-            return ToolResult(ok=False, output="", error=f"读取失败: {e}")
+            tf = read_text_file(target, strict=False)
+        except TextFileError as e:
+            return ToolResult(ok=False, output="", error=str(e))
+        text = tf.text
 
-        lines = text.splitlines()
+        lines = text.split("\n")
+        if len(lines) > 1 and lines[-1] == "":
+            lines.pop()
+        if lines == [""]:
+            lines = []
         total_lines = len(lines)
 
         # 行号范围
@@ -127,6 +136,8 @@ class FsReadTool(Tool):
 
         # 头部信息
         header = f"文件: {path} (共 {total_lines} 行)"
+        if tf.encoding != "utf-8":
+            header += f" | 编码 {tf.encoding.upper()}"
         if start > 1 or end <= total_lines:
             header += f" | 显示第 {start}-{min(end - 1, total_lines)} 行"
 

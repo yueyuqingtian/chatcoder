@@ -16,6 +16,7 @@ from openai import APIConnectionError, APIError, APITimeoutError, AsyncOpenAI
 
 from app.core.config import settings
 from app.models.base import ModelProvider
+from app.models.providers.tool_args import parse_tool_args
 from app.models.schemas import ChatRequest, ChatResponse, Usage
 
 logger = logging.getLogger(__name__)
@@ -322,10 +323,8 @@ class OpenAICompatibleProvider(ModelProvider):
         for idx in sorted(tool_calls_map.keys()):
             tc = tool_calls_map[idx]
             args_raw = tc["arguments"] or "{}"
-            try:
-                args = json.loads(args_raw) if args_raw else {}
-            except (json.JSONDecodeError, TypeError):
-                args = {"_raw": args_raw}
+            # plan-20261016-ux（问题 3）：宽松解析（原始 Tab/换行、非法转义），失败带 _parse_error
+            args = parse_tool_args(args_raw)
             # 网关偶发返回空/重复 id：uuid 兜底并去重，保证全局唯一
             call_id = tc["id"] or _new_call_id()
             if call_id in _seen_ids:
@@ -518,10 +517,8 @@ class OpenAICompatibleProvider(ModelProvider):
         for idx in sorted(tool_calls_map.keys()):
             tc = tool_calls_map[idx]
             args_raw = tc["arguments"] or "{}"
-            try:
-                args = json.loads(args_raw) if args_raw else {}
-            except (json.JSONDecodeError, TypeError):
-                args = {"_raw": args_raw}
+            # plan-20261016-ux（问题 3）：宽松解析（原始 Tab/换行、非法转义），失败带 _parse_error
+            args = parse_tool_args(args_raw)
             # 网关偶发返回空/重复 id：uuid 兜底并去重，保证全局唯一
             call_id = tc["id"] or _new_call_id()
             if call_id in _seen_ids:

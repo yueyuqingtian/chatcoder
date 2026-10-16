@@ -18,8 +18,11 @@ interface Props {
   baseWidth: number;
   /** 最小宽度(px) */
   minWidth: number;
-  /** 最大宽度(px) */
+  /** 最大宽度(px)；传 Infinity 表示只受可用空间（reservePx）约束 */
   maxWidth: number;
+  /** plan-20261016-ux（问题 10）：按窗口宽放大的上限比例——静态上限取 max(maxWidth, 窗口宽 × 比例)，
+   *  大屏上面板可以拖得更宽，小屏仍保持 maxWidth；拖拽开始时按当时的窗口宽计算。 */
+  maxViewportRatio?: number;
   /** plan-95: 拖拽方向上其余区域需保留的最小空间(px)，动态上限 = 容器宽 - reservePx */
   reservePx?: number;
   /** 拖拽过程中直接操作的 DOM 元素 ref */
@@ -104,7 +107,7 @@ export function unfreezePaneContents(list: PaneFollowEntry[]) {
   }
 }
 
-export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 0, panelEl, onCommit, freezeRefs, disabled = false }: Props) {
+export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, maxViewportRatio = 0, reservePx = 0, panelEl, onCommit, freezeRefs, disabled = false }: Props) {
   const startXRef = useRef(0);
   const baseWRef = useRef(baseWidth);
   const draggingRef = useRef(false);
@@ -266,8 +269,11 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
   const clampMax = useCallback(() => {
     const parent = panelEl.current?.parentElement;
     const avail = parent ? parent.clientWidth - reservePx : Number.POSITIVE_INFINITY;
-    effectiveMaxRef.current = Math.max(minWidth, Math.min(maxWidth, avail));
-  }, [maxWidth, minWidth, panelEl, reservePx]);
+    const staticMax = maxViewportRatio > 0
+      ? Math.max(maxWidth, Math.round(window.innerWidth * maxViewportRatio))
+      : maxWidth;
+    effectiveMaxRef.current = Math.max(minWidth, Math.min(staticMax, avail));
+  }, [maxWidth, maxViewportRatio, minWidth, panelEl, reservePx]);
 
   const applyWidth = useCallback((w: number) => {
     const el = panelEl.current;
@@ -401,8 +407,12 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
     draggingRef.current = true;
     handleRef.current?.classList.add("is-dragging");
     startXRef.current = e.clientX;
-    baseWRef.current = baseWidth;
-    pendingWRef.current = baseWidth;
+    // plan-20261016-ux（问题 1）：以面板**实际渲染宽度**为拖拽基准——保存值可能大于当前可用空间
+    // （CSS 已按容器宽钳制显示），若仍从保存值起算，前一段拖动会落在不可见的超限区间里「拖了没反应」。
+    const rendered = panelEl.current ? Math.round(panelEl.current.getBoundingClientRect().width) : 0;
+    const base = rendered > 0 ? Math.min(baseWidth, rendered) : baseWidth;
+    baseWRef.current = base;
+    pendingWRef.current = base;
     clampMax();
     // RFL-5：本次拖拽从设置档位起步（reduced-motion 自动降一档），并重置闸门统计
     const pref = readDragLayoutPref();
@@ -438,7 +448,7 @@ export function ResizeHandle({ side, baseWidth, minWidth, maxWidth, reservePx = 
     // 取消拖拽、解冻、按当前宽度收尾。
     window.addEventListener("blur", handleMouseUp);
     window.addEventListener("resize", handleMouseUp);
-  }, [baseWidth, clampMax, freezeContents, handleMouseMove, handleMouseUp, setHandleY, readDragLayoutPref, addShield]);
+  }, [baseWidth, clampMax, freezeContents, handleMouseMove, handleMouseUp, setHandleY, readDragLayoutPref, addShield, panelEl]);
 
   return (
     <div

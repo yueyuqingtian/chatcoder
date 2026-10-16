@@ -152,7 +152,8 @@ function loadPrefs(): UiPrefs {
   if (stored.chatLineHeight === 1.7) stored.chatLineHeight = DEFAULTS.chatLineHeight;
   // plan-404-1892（图1）：左面板最小宽 200 → 240——「分组/项目」胶囊 + 两个操作图标在 200px 下必然换行。
   // 历史保存的 200px 偏好按新下限校正；上限 480 不变。
-  stored.leftPanelWidth = Math.max(240, Math.min(480, Math.round(Number(stored.leftPanelWidth) || DEFAULTS.leftPanelWidth)));
+  // plan-20261016-ux（问题 10）：上限放宽到 640（大屏可拖宽，实际上限由 ResizeHandle 按窗口宽计算）
+  stored.leftPanelWidth = Math.max(240, Math.min(640, Math.round(Number(stored.leftPanelWidth) || DEFAULTS.leftPanelWidth)));
   // S5（plan-41-197）：外观页已移除「动画效果 / 面板拖拽排版 / 拖拽自动降级」配置，
   // 对应行为固定：标准动画、拖拽实时排版、不降级（旧存储值一并纠正，避免行为与界面不一致）。
   stored.motionLevel = "full";
@@ -328,7 +329,7 @@ export const useUiStore = create<UiState>((set, get) => ({
 
   setLeftPanelWidth: (w) => {
     // plan-404-1892（图1）：下限与 App.tsx 的 ResizeHandle / tokens.css 的 --sidebar-min 保持 240 一致
-    const clamped = Math.max(240, Math.min(480, Math.round(w)));
+    const clamped = Math.max(240, Math.min(640, Math.round(w)));
     set({ leftPanelWidth: clamped });
     savePrefs({ ...get(), leftPanelWidth: clamped });
     applyUiVars({ ...get(), leftPanelWidth: clamped });

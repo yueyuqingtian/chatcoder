@@ -24,6 +24,8 @@ import { usePanelStore } from "../../store/panel";
 import { useChatStore } from "../../store/chat";
 import { api, resolveFileUrl } from "../../api/client";
 import { openGallery } from "../../store/gallery";
+import { TableBlock } from "./TableBlock";
+import { Tooltip } from "./Tooltip";
 
 /** 相对链接存在性校验缓存（path → 存在且为文件） */
 const statCache = new Map<string, boolean>();
@@ -58,15 +60,17 @@ function CodeBlockWrapper({ children }: { children: ReactNode }) {
         <span className="md-code-lang">{detectedLang || "code"}</span>
         {/* plan-282-1416：复制按钮图标化（原「复制」文字改为纯图标 + aria-label），
             头部更安静，同时保留已复制反馈（图标换勾 + copied 态着色） */}
-        <button
-          className={`md-code-copy-btn${copied ? " copied" : ""}`}
-          onClick={handleCopy}
-          title={copied ? "已复制到剪贴板" : "复制代码"}
-          aria-label={copied ? "已复制" : "复制代码"}
-          type="button"
-        >
-          {copied ? <IconCheck size={12} /> : <IconCopy size={12} />}
-        </button>
+        {/* plan-20261016-ux（问题 8）：悬停提示改用统一 Tooltip（不再用原生 title） */}
+        <Tooltip content={copied ? "已复制到剪贴板" : "复制代码"} side="top">
+          <button
+            className={`md-code-copy-btn${copied ? " copied" : ""}`}
+            onClick={handleCopy}
+            aria-label={copied ? "已复制" : "复制代码"}
+            type="button"
+          >
+            {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
+          </button>
+        </Tooltip>
       </div>
       <pre className="md-code-pre" ref={preRef}>{children}</pre>
     </div>
@@ -174,7 +178,8 @@ export const markdownComponents: Components = {
     );
   },
   blockquote({ children }) { return <blockquote className="md-blockquote">{children}</blockquote>; },
-  table({ children }) { return <table className="md-table">{children}</table>; },
+  // plan-20261016-ux（问题 8）：表格统一走 TableBlock——卡片样式 + 复制 Markdown / 下载 CSV / 展开浮窗
+  table({ children }) { return <TableBlock>{children}</TableBlock>; },
   th({ children }) { return <th className="md-th">{children}</th>; },
   td({ children }) { return <td className="md-td">{children}</td>; },
 };

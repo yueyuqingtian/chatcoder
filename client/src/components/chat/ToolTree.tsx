@@ -32,8 +32,13 @@ import {
   IconFileRead, IconFileWrite, IconFolder, IconGlobe, IconTerminal,
   IconUsers, IconBox, IconZap, IconFlask, IconGitBranch, IconBrain,
   IconSpinner, IconX, IconImage, IconChevronRight,
-  IconFilePatch, IconFileSearch, IconOperationCluster, IconChecklist, IconCopy,
+  IconFilePatch, IconFileSearch, IconOperationCluster, IconChecklist, IconCopy, IconInfo,
 } from "../icons";
+
+/** plan-20261016-ux（问题 4）：命令类工具——完成后即使没有输出也可展开，展开区给出「没有输出」提示卡 */
+const COMMAND_TOOLS = new Set([...RUN_TOOLS, "git", "terminal_bg_status", "terminal_bg_kill"]);
+/** 读文件类工具：只要有路径，展开区一律用编辑器式代码视图（不再按扩展名白名单判断） */
+const FILE_CONTENT_TOOLS = new Set(["fs_read", "read_file_range"]);
 
 /** 工具 → 中文动作动词（对齐 zcode 行首文案） */
 const TOOL_VERBS: Record<string, string> = {
@@ -510,10 +515,21 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
     [isWrite, leaf.callKey, path],
   );
   const hasOutput = (leaf.output && leaf.output.length > 0) || !!leaf.error;
+  const isCommand = COMMAND_TOOLS.has(leaf.tool);
   // v7(B): 运行中（ok===null）恒可展开——即使 output 尚未落库，也能看实时输出
-  const expandable = hasOutput || isWrite || leaf.ok === null;
+  // plan-20261016-ux（问题 4）：命令类工具完成后无输出也可展开，展开区显示「没有输出」提示卡
+  const expandable = hasOutput || isWrite || leaf.ok === null || isCommand;
   const grepHits = leaf.tool === "fs_grep" && leaf.output ? parseGrepLines(leaf.output) : [];
   const summary = path ? "" : leafSummary(leaf);
+  const showsLive = leaf.ok === null && liveOutput != null && liveOutput.length > 0;
+  /** 展开区是否有任何实际内容；没有时渲染提示卡（此前只剩 .tc-output 上下边框贴成的一根细线） */
+  const hasBody = showsLive || grepHits.length > 0 || leaf.tool.startsWith("db_") || leaf.tool === "ask_user_question"
+    || !!leaf.output || !!leaf.error || (isWrite && path == null && !!liveResult?.change_stat);
+  const emptyText = leaf.ok === null
+    ? (isCommand ? "命令执行中，暂时还没有输出" : "正在执行，暂时还没有返回内容")
+    : leaf.ok === false
+      ? "执行失败，没有返回错误信息"
+      : (isCommand ? "命令已执行完成，没有输出" : "执行完成，没有返回内容");
 
   const openGrepHit = (e: React.MouseEvent, hit: { path: string; line: number }) => {
     e.stopPropagation();
@@ -587,8 +603,15 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
                 <pre className="tc-plain tc-live">已变更 +{liveResult.change_stat.additions} -{liveResult.change_stat.deletions}</pre>
               )}
               {/* v7(B): 运行中命令行的实时输出 */}
-              {leaf.ok === null && liveOutput != null && liveOutput.length > 0 && (
-                <ClampedPre className="tc-plain tc-live" text={liveOutput} />
+              {showsLive && (
+                <ClampedPre className="tc-plain tc-live" text={liveOutput!} />
+              )}
+              {/* plan-20261016-ux（问题 4）：没有任何内容时的提示卡（运行中 / 完成 / 失败三态文案） */}
+              {!hasBody && (
+                <div className="tc-empty" data-state={leaf.ok === null ? "running" : leaf.ok === false ? "fail" : "done"}>
+                  {leaf.ok === null ? <IconSpinner size={12} /> : <IconInfo size={14} />}
+                  <span>{emptyText}</span>
+                </div>
               )}
               {grepHits.length > 0 && (
                 <div className="tc-grep-hits">
@@ -646,7 +669,9 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
               )}
               {/* plan-278-1391: ask_user_question 的 output 是 `用户回答:\n{json}`，
                   问答已由上方结构化列表呈现，这里跳过原文，避免重复且可读性差的 JSON。 */}
-              {leaf.output && leaf.tool !== "ask_user_question" && (path && /\.(ts|tsx|js|jsx|py|json|md|css|html|go|rs|java|c|cpp|sh)$/i.test(path) ? (
+              {/* plan-20261016-ux（问题 5）：读文件类工具只要有路径一律走代码视图——此前按扩展名白名单判断，
+                  xml / yml / sql / properties 等（子代理调研 MyBatis 映射、配置文件时最常见）都退化成纯文本 */}
+              {leaf.output && leaf.tool !== "ask_user_question" && (path && (FILE_CONTENT_TOOLS.has(leaf.tool) || /\.(ts|tsx|js|jsx|py|json|md|css|html|go|rs|java|c|cpp|sh)$/i.test(path)) ? (
                 <CodeView path={path} text={leaf.output} />
               ) : (
                 <ClampedPre className="tc-plain" text={leaf.output} />

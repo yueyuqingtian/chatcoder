@@ -27,6 +27,10 @@ import { installFocusGuard } from "./utils/focusGuard";
 import { setWindowMotion } from "./perf/bus";
 import { applyPaneUpdate } from "./perf/paneTransition";
 import { startBrowserAgentHost } from "./browserAgent/host";
+import { MiniChat } from "./components/panel/MiniChat";
+
+/** 中列最小宽（px）：与 tokens.css 的 --main-min-w 同值——拖拽上限与 CSS 渲染期钳制同口径（plan-20261016-ux）。 */
+const MAIN_MIN_W = 420;
 
 /** S7（plan-329-1647）：面板折叠/展开的过渡已整体改为 View Transition。
  *
@@ -65,14 +69,37 @@ export default function App() {
   const pageMode = nav !== null && nav !== "chat";
   const rightShown = rightExpanded && !pageMode;
   const rightFull = rightShown && rightFullscreen;
+  /** plan-20261016-ux（问题 10）：右面板全屏时左栏按折叠处理——全屏面板盖住了左栏，但左上角导航区仍按
+   *  左栏宽度画侧栏底色，顶部出现一块颜色不一致的区域和一道接缝；折叠后导航区与标题栏连成一条。
+   *  只派生显示态，不改用户的折叠偏好，退出全屏即恢复。 */
+  const sidebarHidden = sidebarCollapsed || rightFull;
+  const rightFullRef = useRef(rightFull);
+  rightFullRef.current = rightFull;
 
   /** 左栏折叠/展开（S7）：与右栏同走 applyPaneUpdate——View Transition 快照动画，
-   *  布局一次性到位、主线程逐帧零布局；能力缺失或用户要求减少动效时自动退化。 */
+   *  布局一次性到位、主线程逐帧零布局；能力缺失或用户要求减少动效时自动退化。
+   *  全屏时点「展开侧栏」= 退出全屏并展开左栏（全屏下左栏不可见，按钮不能点了没反应）。 */
   const toggleSidebar = useCallback(() => {
+    if (rightFullRef.current) {
+      applyPaneUpdate(() => {
+        usePanelStore.setState({ fullscreen: false });
+        setSidebarCollapsed(false);
+      });
+      return;
+    }
     applyPaneUpdate(() => setSidebarCollapsed((v) => !v));
   }, []);
+  /** 进出设置页时暂存 / 恢复右面板：全屏态保持不动（页面态本就会隐藏面板，回来时原样恢复全屏） */
   const toggleRightPanel = useCallback(() => {
     if (usePanelStore.getState().fullscreen) return;
+    usePanelStore.getState().togglePanel();
+  }, []);
+  /** 标题栏的右面板开关：全屏时此前直接 return（点了没反应），现在等同收起面板（同时退出全屏） */
+  const toggleRightPanelFromTitlebar = useCallback(() => {
+    if (usePanelStore.getState().fullscreen) {
+      usePanelStore.getState().closePanel();
+      return;
+    }
     usePanelStore.getState().togglePanel();
   }, []);
 
@@ -81,8 +108,15 @@ export default function App() {
     // plan-31-151 S3：data-window-drag 分流已移除——标题栏统一走系统 -webkit-app-region:drag。
     // plan-31-151 S2：监听主进程 maximize/unmaximize 事件，修复 frame:true +
     //   titleBarStyle:"hidden" 最大化时客户区外扩 8px 非客户区导致的边缘内容裁切。
-    const offMaximizeChange = window.chatcoderAPI?.onMaximizeChange?.((isMax) => {
+    const offMaximizeChange = window.chatcoderAPI?.onMaximizeChange?.((isMax, inset) => {
       document.body.classList.toggle("maximized", isMax);
+      // plan-20261016-ux（问题 6）：标题栏补偿只认主进程算出的真实外扩量（正常为 0）
+      if (inset) {
+        const root = document.documentElement.style;
+        root.setProperty("--win-inset-top", `${inset.top || 0}px`);
+        root.setProperty("--win-inset-left", `${inset.left || 0}px`);
+        root.setProperty("--win-inset-right", `${inset.right || 0}px`);
+      }
     });
     // 更新状态通道：订阅主进程推送（侧栏/关于页共享）
     useUpdaterStore.getState().init();
@@ -143,7 +177,8 @@ export default function App() {
     if (nav !== "settings") {
       const { currentSessionId } = useChatStore.getState();
       setReturnLocation({ nav, sessionId: currentSessionId });
-      if (sidebarCollapsed) toggleSidebar();
+      // 设置页需要左栏（设置导航）：直接展开，不走 toggleSidebar（后者在全屏时会退出全屏）
+      if (sidebarCollapsed) applyPaneUpdate(() => setSidebarCollapsed(false));
       // 问题1: 进入设置页自动折叠右面板（记录展开态，离开时恢复）
       settingsPanelExpandedRef.current = usePanelStore.getState().expanded;
       if (settingsPanelExpandedRef.current) toggleRightPanel();
@@ -268,9 +303,9 @@ export default function App() {
       {/* S1（plan-41-197）：接管存量原生 title——全站悬停提示统一为圆角卡片浮层，
           与 ui/Tooltip 共享展示延迟（不再出现浏览器自带的方形浮块）。 */}
       <NativeTitleTooltip />
-      <div className="app-shell" style={{ ["--pane-w" as string]: sidebarCollapsed ? "0px" : `${leftPanelWidth}px` }}>
+      <div className="app-shell" style={{ ["--pane-w" as string]: sidebarHidden ? "0px" : `${leftPanelWidth}px` }}>
         {/* plan-128-518：左上角 logo / 折叠 / 前进后退——全局固定层，折叠展开都是同一个实例、同一个位置 */}
-        <WindowNavCluster collapsed={sidebarCollapsed} onToggle={toggleSidebar} onSessionFocus={() => setNav(null)} />
+        <WindowNavCluster collapsed={sidebarHidden} onToggle={toggleSidebar} onSessionFocus={() => setNav(null)} />
         <Toast />
         <RollbackConfirmModal />
         <ImageGallery />
@@ -282,23 +317,24 @@ export default function App() {
         {/* v18 布局重构（对齐 zcode）：左侧栏全高（含 logo/导航箭头），
             右侧 = 顶部标题栏 + 内容行（消息流 + 右侧面板）。 */}
         {/* plan-128-518：--left-w 恒等于展开宽度，侧栏内容始终按它布局；折叠只把面板宽度收到 0 并裁切 */}
-        <div ref={leftPanelElRef} className={`app-pane app-pane-left collapsible${sidebarCollapsed ? " collapsed" : ""}`} style={{ ["--left-w" as string]: `${leftPanelWidth}px`, ...(sidebarCollapsed ? { width: "0px", flexBasis: "0px" } : { width: `${leftPanelWidth}px`, flexBasis: `${leftPanelWidth}px` }) }}>
+        <div ref={leftPanelElRef} className={`app-pane app-pane-left collapsible${sidebarHidden ? " collapsed" : ""}`} style={{ ["--left-w" as string]: `${leftPanelWidth}px`, ...(sidebarHidden ? { width: "0px", flexBasis: "0px" } : { width: `${leftPanelWidth}px`, flexBasis: `${leftPanelWidth}px` }) }}>
           {nav === "settings" ? (
             /* v19: 设置侧栏经插件 slot 渲染（与外部侧栏共用壳与宽度）。 */
             <PluginSlot slot="settings-sidebar" tab={settingsActiveTab} onTab={setSettingsActiveTab} onBack={leaveSettings} />
           ) : (
-            <PluginSlot slot="sidebar" active={nav} onChange={(k: NavKey) => { if (k === "settings") { openSettings(); return; } setNav(k); if (k === "chat") useChatStore.getState().startNewTask(); }} onSessionFocus={() => setNav(null)} collapsed={sidebarCollapsed} onToggleCollapse={toggleSidebar} />
+            <PluginSlot slot="sidebar" active={nav} onChange={(k: NavKey) => { if (k === "settings") { openSettings(); return; } setNav(k); if (k === "chat") useChatStore.getState().startNewTask(); }} onSessionFocus={() => setNav(null)} collapsed={sidebarHidden} onToggleCollapse={toggleSidebar} />
           )}
         </div>
         {/* RFL-1（plan-329-1647 S4）：中列不冻结——拖左分隔条时中列内容宽度实时跟随，消息流文本逐帧折行。
             左侧例外（plan-282-1520）：侧栏内容根 freezeRefs 钉住后逐帧跟随面板宽，拖拽期不留空白带。 */}
         {/* 折叠时不再卸载分隔条（否则边框会瞬间消失）：它随左面板收窄一起左移，收到 0 后禁用拖拽命中 */}
-        <ResizeHandle side="left" baseWidth={leftPanelWidth} minWidth={240} maxWidth={480} reservePx={370} panelEl={leftPanelElRef} onCommit={setLeftPanelWidth} freezeRefs={[leftPanelElRef]} disabled={sidebarCollapsed} />
+        {/* plan-20261016-ux（问题 10）：左栏上限随窗口宽适度放大（max(480, 窗口宽 × 24%)，store 兜底 640） */}
+        <ResizeHandle side="left" baseWidth={leftPanelWidth} minWidth={240} maxWidth={480} maxViewportRatio={0.24} reservePx={MAIN_MIN_W} panelEl={leftPanelElRef} onCommit={setLeftPanelWidth} freezeRefs={[leftPanelElRef]} disabled={sidebarHidden} />
         <div className="app-right">
           {/* v19: 标题栏与右面板经插件 slot 渲染。
               plan-41-233：页面态（拓展/定时任务/设置等 nav 页）传 page——隐藏会话标题、项目
               与右侧图标组；左侧 logo/折叠/前进后退保留，页面态的会话聚焦由 Sidebar 抑制。 */}
-          <PluginSlot slot="titlebar" leftCollapsed={sidebarCollapsed} rightCollapsed={!rightShown} page={pageMode} onToggleRight={toggleRightPanel} />
+          <PluginSlot slot="titlebar" leftCollapsed={sidebarHidden} rightCollapsed={!rightShown} page={pageMode} onToggleRight={toggleRightPanelFromTitlebar} />
           <div className="app-body">
             <main ref={mainElRef} className={`app-main${!rightShown ? " right-panel-collapsed" : ""}`}>
               {/* plan-282-1421（第3项）：设置 ↔ 工作区切换过渡（id 为页面标识）。
@@ -313,10 +349,12 @@ export default function App() {
                   : <Workspace nav={nav} onSessionStart={() => setNav(null)} />}
               </PageTransition>
             </main>
-            {/* plan-95: reservePx=主区 min-width 480 + 手柄宽 10，动态上限防溢出裁剪。
+            {/* plan-95: 动态上限 = 容器宽 − reservePx，防溢出裁剪。
+                plan-20261016-ux（问题 10）：去掉静态 1200px 上限（大屏上只能拖到约一半），只保留中列最小宽；
+                渲染期另有 CSS max-width 同口径钳制（见 .app-pane-right）。
                 RFL-1（S4）：freezeRefs 收窄为仅右面板内容根——中列实时跟随（消息流逐帧折行），
                 右面板内的 Monaco/xterm 不逐帧重排，松手后由收敛序列一次解冻。 */}
-            {rightShown && !rightFull && <ResizeHandle side="right" baseWidth={rightPanelWidth} minWidth={280} maxWidth={1200} reservePx={490} panelEl={rightPanelElRef} onCommit={setRightPanelWidth} freezeRefs={[rightPanelElRef]} />}
+            {rightShown && !rightFull && <ResizeHandle side="right" baseWidth={rightPanelWidth} minWidth={280} maxWidth={Number.POSITIVE_INFINITY} reservePx={MAIN_MIN_W} panelEl={rightPanelElRef} onCommit={setRightPanelWidth} freezeRefs={[rightPanelElRef]} />}
             <div ref={rightPanelElRef} className={`app-pane app-pane-right${rightShown ? "" : " collapsed"}${rightFull ? " fullscreen" : ""}`} style={{ width: rightShown ? (rightFull ? "100%" : `${rightPanelWidth}px`) : "0px", flexBasis: rightShown ? (rightFull ? "100%" : `${rightPanelWidth}px`) : "0px" }}>
               {/* plan-41-233：内容常驻挂载——折叠只变几何（width:0 + visibility:hidden），
                   终端 PTY 与浏览器页面不再因折叠被卸载重建（用户诉求：折叠再展开保留状态）。 */}
@@ -324,6 +362,8 @@ export default function App() {
             </div>
           </div>
         </div>
+        {/* plan-20261016-ux（问题 10）：右面板全屏时右下角的主对话小窗（隐藏 / 打开 / 常驻） */}
+        {rightFull && <MiniChat />}
       </div>
       </TooltipProvider>
     </ErrorBoundary>

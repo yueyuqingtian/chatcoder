@@ -141,24 +141,28 @@ function WorkTimer({
     onToggleCollapsed?.();
   };
 
+  // plan-20261016-ux（问题 8）：外包一层整行容器，下边画浅色分隔线，把「工作过程」与下方内容分出层次
+  // （对齐参考图 4）；运行中同样显示，整轮结束时不出现线条跳入。可点击区域仍只是文字本身。
   return (
-    <Tooltip content={collapsed ? "展开工作过程" : "折叠工作过程"} disabled={!toggleable}>
-      <div
-        className={`turn-worktime${toggleable ? " clickable" : ""}`}
-        onClick={toggleable ? onToggleCollapsed : undefined}
-        onKeyDown={onKeyDown}
-        role={toggleable ? "button" : undefined}
-        tabIndex={toggleable ? 0 : undefined}
-        aria-expanded={toggleable ? !collapsed : undefined}
-      >
-        <span>{label ? `已工作 ${label}` : "工作过程"}</span>
-        {canCollapse && (
-          <span className={`turn-worktime-arrow${toggleable ? "" : " is-hidden"}`} aria-hidden>
-            <IconArrowToggle open={!collapsed} size={11} />
-          </span>
-        )}
-      </div>
-    </Tooltip>
+    <div className="turn-worktime-bar">
+      <Tooltip content={collapsed ? "展开工作过程" : "折叠工作过程"} disabled={!toggleable}>
+        <div
+          className={`turn-worktime${toggleable ? " clickable" : ""}`}
+          onClick={toggleable ? onToggleCollapsed : undefined}
+          onKeyDown={onKeyDown}
+          role={toggleable ? "button" : undefined}
+          tabIndex={toggleable ? 0 : undefined}
+          aria-expanded={toggleable ? !collapsed : undefined}
+        >
+          <span>{label ? `已工作 ${label}` : "工作过程"}</span>
+          {canCollapse && (
+            <span className={`turn-worktime-arrow${toggleable ? "" : " is-hidden"}`} aria-hidden>
+              <IconArrowToggle open={!collapsed} size={11} />
+            </span>
+          )}
+        </div>
+      </Tooltip>
+    </div>
   );
 }
 
