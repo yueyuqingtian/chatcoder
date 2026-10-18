@@ -67,6 +67,9 @@ async def test_the_event_log_keeps_only_the_latest_entries_of_a_run(tmp_path, mo
 
 
 def test_the_prompt_tells_the_main_agent_not_to_resume_on_unrelated_requests():
-    assert "do NOT resume anything automatically" in MAIN_SYSTEM_PROMPT
-    assert '"全部"' in MAIN_SYSTEM_PROMPT
-    assert '"算了"' in MAIN_SYSTEM_PROMPT
+    # plan-156-619 S9：工作流提示词改为中文「拼积木」口径，
+    # 断言随之改为语义等价的表述（不再匹配英文原句）；
+    # 关键词用中文引号「」——与提示词源文写法保持一致。
+    assert "不要自动续跑任何暂停的工作流" in MAIN_SYSTEM_PROMPT
+    assert "「全部」" in MAIN_SYSTEM_PROMPT
+    assert "「算了」" in MAIN_SYSTEM_PROMPT

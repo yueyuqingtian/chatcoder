@@ -148,6 +148,79 @@ _PRESETS: dict[str, dict[str, Any]] = {
             ],
         },
     },
+    # plan-156-619 S9：两个「最小骨架」——它们刻意只有 2~3 个节点、没有 review，
+    # 用来告诉使用者「工作流可以是这么小的东西」，不需要凑齐「探索→实现→评估」三段。
+    "parallel_only": {
+        "name": "纯并行 · 各自收口",
+        "description": "两个互不依赖的子工作流并行跑完即结束，不设汇总、不设评估；适合两处独立改动。",
+        "plan": {
+            "title": "纯并行 · 各自收口",
+            "goal": "把两处互不依赖的改动并行推进，各自完成后直接结束",
+            "rationale": "两处改动无交集、无依赖，并行是最短路径；额外加汇总节点只会拖长时间。",
+            "flows": [
+                {
+                    "key": "part_a",
+                    "title": "A 部分",
+                    "nodes": [
+                        {
+                            "key": "do_a",
+                            "kind": "execute",
+                            "task": "完成 A 部分改动，只修改本流写入范围内的文件。",
+                            "write_scope": ["src/a/**"],
+                        },
+                    ],
+                },
+                {
+                    "key": "part_b",
+                    "title": "B 部分",
+                    "nodes": [
+                        {
+                            "key": "do_b",
+                            "kind": "execute",
+                            "task": "完成 B 部分改动，只修改本流写入范围内的文件。",
+                            "write_scope": ["src/b/**"],
+                        },
+                    ],
+                },
+            ],
+        },
+    },
+    "serial_chain": {
+        "name": "串行链 · 一步接一步",
+        "description": "三步严格串行（改 A → 改 B → 跑检查），每步依赖前一步的产出；最简的线性图。",
+        "plan": {
+            "title": "串行链 · 一步接一步",
+            "goal": "按依赖顺序推进多个步骤，最后用检查命令收口",
+            "rationale": "后续步骤需要前一步的中间产物，只能串行；用 check 节点客观验证，不额外加评估节点。",
+            "flows": [
+                {
+                    "key": "chain",
+                    "title": "串行链",
+                    "nodes": [
+                        {
+                            "key": "step_a",
+                            "kind": "execute",
+                            "task": "第一步：完成基础改动，为后续步骤提供接口或数据结构。",
+                            "write_scope": ["src/**"],
+                        },
+                        {
+                            "key": "step_b",
+                            "kind": "execute",
+                            "inputs": ["step_a"],
+                            "task": "第二步：基于第一步的产出继续实现，不重复第一步的工作。",
+                            "write_scope": ["src/**"],
+                        },
+                        {
+                            "key": "verify",
+                            "kind": "check",
+                            "inputs": ["step_b"],
+                            "commands": ["pytest -q"],
+                        },
+                    ],
+                },
+            ],
+        },
+    },
 }
 
 

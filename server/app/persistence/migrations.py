@@ -48,6 +48,8 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("sessions", "shared_context", "JSON"),
     # ========== sessions（v7：置顶时间——"后置顶在上"排序依据）==========
     ("sessions", "pinned_at", "VARCHAR(40)"),
+    # plan-156-619 S8：标题来源（auto = AI 归纳 / manual = 用户手改，手改后不再被覆盖）
+    ("sessions", "title_source", "VARCHAR(10) DEFAULT 'auto' NOT NULL"),
     # ========== projects（plan-282-1441 #5：工作树复用 Project 表）==========
     ("projects", "is_worktree", "BOOLEAN DEFAULT 0 NOT NULL"),
     ("projects", "parent_project_id", "BIGINT"),
@@ -70,6 +72,8 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     # ========== tasks（v1 缺 turn_id / agent_id / note，assigned_agent_id→agent_id 重命名）==========
     ("tasks", "turn_id", "BIGINT"),
     ("tasks", "agent_id", "BIGINT"),
+    # plan-156-619 S6：清单步骤的执行者子会话（sessions.id）；NULL = 主代理自己执行
+    ("tasks", "subsession_id", "BIGINT"),
     ("tasks", "note", "VARCHAR(500)"),
     ("tasks", "kind", "VARCHAR(16) DEFAULT 'request' NOT NULL"),
     ("tasks", "depends_on", "JSON"),

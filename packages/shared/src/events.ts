@@ -155,6 +155,20 @@ export type ServerWsEvent =
   | { event: "subagent.pending"; payload: { session_id: number; pending: number } }
   /** v39: 子代理完成唤醒——服务端自动创建新 turn 送达完成报告（前端渲染分隔线） */
   | { event: "subagent.wakeup"; payload: { session_id: number; turn_id: number } }
+  /** plan-156-619 S10：AI 提出了后续任务建议（消息流底部渲染卡片） */
+  | {
+      event: "suggestion.created";
+      payload: {
+        session_id: number;
+        suggestion_id: number;
+        turn_id?: number | null;
+        title: string;
+        summary?: string;
+        steps?: string[];
+        mode?: string;
+        rationale?: string;
+      };
+    }
   /** 工作流运行时（设计 §5.7）：run_seq 为程序内序号，不是会话 seq；前端以快照为准，事件只作刷新信号 */
   | { event: "workflow.run.updated"; payload: WorkflowEventPayload }
   | { event: "workflow.node.updated"; payload: WorkflowEventPayload }

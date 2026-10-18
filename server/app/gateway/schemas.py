@@ -90,6 +90,17 @@ class SessionUpdate(BaseModel):
     approval_mode: str | None = None  # plan-75-332: 权限模式 ask / auto / full
 
 
+class SubsessionCreate(BaseModel):
+    """创建执行子会话（plan-156-619 S5）：创建即下发首条任务。"""
+
+    title: str
+    task: str
+    # 背景上下文：已完成什么、不要做什么。子会话看不到主会话对话，必须自包含
+    context: str | None = None
+    # 执行模式由调用方（主代理 / 用户）指定；空 = agent
+    mode: str | None = None
+
+
 class SessionOut(BaseModel):
     id: int
     project_id: int | None = None
@@ -218,6 +229,9 @@ class TaskOut(BaseModel):
     description: str | None = None
     acceptance_criteria: str | None = None
     agent_id: int | None = None
+    # plan-156-619 S6：该步骤由哪个子会话执行（sessions.id）；None = 主代理自己执行。
+    # 前端进程行据此显示「子会话」chip，点击可切换到对应子会话。
+    subsession_id: int | None = None
     status: str = "pending"
     priority: int = 0
     artifact_ids: list[int] | None = None

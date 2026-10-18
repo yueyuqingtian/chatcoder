@@ -11,6 +11,13 @@ class Session(Base):
     id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
     project_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("projects.id"))
     title: Mapped[str | None] = mapped_column(String(160))  # 自动命名（首条消息 AI 生成）
+    # plan-156-619 S8：标题来源。auto = AI 归纳（可被后续轮次更新）；
+    # manual = 用户手动重命名（此后自动命名不再覆盖）。
+    # 此前没有这个字段，无法区分「AI 写的标题」与「用户改的标题」，
+    # 自动归纳一旦上线就会把用户手改的名字冲掉。
+    title_source: Mapped[str] = mapped_column(
+        String(10), default="auto", server_default="auto", nullable=False,
+    )
     model_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("models.id"))  # 会话级模型
     status: Mapped[str] = mapped_column(String(20), default="active")  # active / archived
     pinned: Mapped[bool] = mapped_column(Boolean, default=False)

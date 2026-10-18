@@ -67,6 +67,15 @@ class TodoWriteTool(Tool):
                                         "type": "string",
                                         "enum": ["pending", "in_progress", "completed"],
                                     },
+                                    # plan-156-619 S6：步骤执行者。交给子会话并行时填子会话 id，
+                                    # 不填 = 你自己执行（进程行不显示归属 chip）。
+                                    "owner": {
+                                        "type": "integer",
+                                        "description": (
+                                            "执行该步骤的子会话 id（create_subsession 的返回值）。"
+                                            "只有你把这一步交给子会话并行时才填；自己执行的步骤不填。"
+                                        ),
+                                    },
                                 },
                                 "required": ["content", "status"],
                             },
@@ -84,7 +93,7 @@ class TodoWriteTool(Tool):
         if len(raw) > _MAX_TODOS:
             return ToolResult(ok=False, output="", error=f"清单最多 {_MAX_TODOS} 项")
 
-        todos: list[dict[str, str]] = []
+        todos: list[dict[str, Any]] = []
         seen: set[str] = set()
         seen_in_progress = False
         for item in raw:
@@ -105,10 +114,18 @@ class TodoWriteTool(Tool):
                 if seen_in_progress:
                     status = "pending"
                 seen_in_progress = True
+            # plan-156-619 S6：步骤执行者（子会话 id）。非法值静默丢弃（不因此拒整份清单）
+            owner_raw = item.get("owner")
+            owner_id: int | None = None
+            if isinstance(owner_raw, int):
+                owner_id = owner_raw or None
+            elif isinstance(owner_raw, str) and owner_raw.strip().isdigit():
+                owner_id = int(owner_raw.strip()) or None
             todos.append({
                 "content": content[:200],
                 "activeForm": str(item.get("activeForm", "")).strip()[:200],
                 "status": status,
+                "owner": owner_id,
             })
 
         turn_id = ctx.task_id  # ToolContext.task_id 传入的是 turn_id
@@ -131,11 +148,16 @@ class TodoWriteTool(Tool):
             data={"todos": todos, "persisted": persisted},
         )
 
-    async def _sync_to_db(self, ctx: ToolContext, turn_id: int, todos: list[dict[str, str]]) -> bool:
+    async def _sync_to_db(self, ctx: ToolContext, turn_id: int, todos: list[dict[str, Any]]) -> bool:
         """把模型提交的清单如实写入 Task 表（WriteEngine 单写线程，无锁单写者）。
 
         plan-482: 删除"与引擎 group 按标题匹配/追加步骤"的加工逻辑——
         系统不再预拆分，清单即权威，模型提交什么就落什么。
+
+        plan-156-619 S6：新增 `owner` → `Task.subsession_id` 写入。
+        主代理把某一步交给子会话并行时填该子会话 id，进程栏目据此显示归属 chip 并可点击跳转；
+        不填（None）表示主代理自己执行。写入时与 status 同批次提交，保证「清单更新」与
+        「归属更新」不会出现半更新状态。
         """
         from app.persistence.database import run_write_locked
 
@@ -170,11 +192,13 @@ class TodoWriteTool(Tool):
             for index, todo in enumerate(todos):
                 step = by_title.get(todo["content"])
                 new_status = _STATUS_MAP[todo["status"]]
+                owner_id = todo.get("owner")
                 if step is None:
                     step = Task(
                         session_id=ctx.session_id, turn_id=turn_id,
                         parent_task_id=todo_group.id, kind="step",
                         title=todo["content"], priority=index, status=new_status,
+                        subsession_id=owner_id,
                     )
                     s.add(step)
                     s.flush()
@@ -183,13 +207,16 @@ class TodoWriteTool(Tool):
                     step.is_hidden = False
                     if step.status != new_status:
                         step.status = new_status
+                    # 归属允许被清空（模型把该步收回自己做）：None 也要写入，不能跳过
+                    if step.subsession_id != owner_id:
+                        step.subsession_id = owner_id
                 used.add(step.id)
-                changed.append((step.id, step.status, step.note or ""))
+                changed.append((step.id, step.status, step.note or "", step.subsession_id))
             for step in steps:
                 if step.id not in used and not step.is_hidden:
                     step.is_hidden = True
                     step.status = "cancelled"
-                    changed.append((step.id, step.status, step.note or ""))
+                    changed.append((step.id, step.status, step.note or "", step.subsession_id))
 
             done_count = sum(1 for t in todos if t["status"] == "completed")
             todo_group.status = "done" if done_count == len(todos) else "running"
@@ -200,10 +227,12 @@ class TodoWriteTool(Tool):
             changed = await run_write_locked(_do, label="todo.write")
         except Exception:
             raise
-        for tid, status, note in changed:
+        for tid, status, note, subsession_id in changed:
             await broadcast(ctx.session_id, {
                 "event": "task.updated",
-                "payload": {"task_id": tid, "status": status, "note": note},
+                # plan-156-619 S6：subsession_id 随事件下发，前端进度行无需额外请求即可显示归属 chip
+                "payload": {"task_id": tid, "status": status, "note": note,
+                            "subsession_id": subsession_id},
             })
         logger.info("[todo] _sync_to_db 写引擎落库成功 turn=%s items=%d", turn_id, len(todos))
         return True

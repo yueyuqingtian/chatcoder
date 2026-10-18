@@ -33,6 +33,8 @@ from app.gateway.routers import (
     settings as settings_routes,
     skills_mcp,
     subagents,
+    # plan-156-619 S10：后续任务建议（消息流底部卡片）
+    suggestions,
     symbol_index,
     ta3_auth,
     trae_auth,
@@ -291,6 +293,8 @@ def create_app() -> FastAPI:
     # 路由
     app.include_router(projects.router, prefix="/api", tags=["projects"])
     app.include_router(sessions.router, prefix="/api", tags=["sessions"])
+    # plan-156-619 S10：后续任务建议（消息流底部卡片）
+    app.include_router(suggestions.router, prefix="/api", tags=["suggestions"])
     app.include_router(git.router, prefix="/api", tags=["git"])
     # plan-20261014-fix4：归档页批量永久删除（项目 / 会话及全部关联数据，一次请求完成）
     app.include_router(archive.router, prefix="/api", tags=["archive"])

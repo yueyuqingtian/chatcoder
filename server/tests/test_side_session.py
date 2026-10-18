@@ -58,13 +58,27 @@ async def test_side_session_inherits_parent_and_is_hidden_from_list():
     assert [c["id"] for c in children] == [child["id"]]
 
 
-async def test_side_session_cannot_nest():
+async def test_subsession_can_create_sibling_not_nested():
+    """plan-156-619 S5：子会话可以再建子会话，但结果必须是**同级**（一层扁平）。
+
+    旧实现直接 400 拒绝（`test_side_session_cannot_nest`），导致子会话无法派生同级；
+    新语义：`side_parent_id` 一律指向根主会话，因此永远不会出现三级嵌套。
+    """
     _, parent_id = await _project_and_session()
     client = TestClient(_app())
     child_id = client.post(f"/sessions/{parent_id}/side-sessions").json()["id"]
 
     res = client.post(f"/sessions/{child_id}/side-sessions")
-    assert res.status_code == 400
+    assert res.status_code == 200, res.text
+    sibling = res.json()
+    # 关键断言：新会话挂在**根主会话**下，而不是挂在 child 下
+    assert sibling["side_parent_id"] == parent_id
+    assert sibling["side_parent_id"] != child_id
+
+    # 与第一个子会话同级：两者都从主会话的列表里能查到
+    children = client.get(f"/sessions/{parent_id}/side-sessions").json()
+    assert {c["id"] for c in children} == {child_id, sibling["id"]}
+
 
 
 async def test_side_session_requires_project():

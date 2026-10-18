@@ -462,13 +462,16 @@ def _check_node(
                 f"{path}.write_scope",
                 f"写入范围『{scope}』必须是工作区内的相对路径",
             )
+    # plan-156-619 S9：验收标准从「必填 error」降为「建议 warning」。
+    # 用户口径是「工作流自由度要高，拼积木，不强制审查」——把 acceptance 当硬门槛，
+    # 模型会为了凑格式反复改计划（历史上就出现过这种返工）。
+    # 真正不能省的是 write_scope（安全边界），那条仍是 error。
     if kind in ("execute", "review") and not node.acceptance:
-        _error(
+        _warning(
             res,
             "missing_acceptance",
             f"{path}.acceptance",
-            f"节点『{node.key}』缺少验收标准",
-            "逐条写出可验证的标准",
+            f"节点『{node.key}』没有写验收标准（建议补一条可核对的描述，便于之后判断做没做到）",
         )
     if kind == "check" and not node.commands:
         _error(res, "missing_commands", f"{path}.commands", f"检查节点『{node.key}』必须给出命令")

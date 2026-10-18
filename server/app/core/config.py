@@ -259,6 +259,15 @@ class Settings(BaseSettings):
     # v1.1: 消息流展示开关（后端缓存值，前端启动时拉取）
     show_todos: bool = True
     show_reasoning: bool = True
+    # plan-156-619 S2：消息区搜索入口按钮（左上角）。默认关闭；关闭只隐藏入口，Ctrl+F 仍可唤起搜索条
+    show_message_search: bool = False
+    # plan-156-619 S4d：子会话默认模型 / 思考深度（0 / 空 = 跟随主代理）
+    subagent_model_id: int = 0
+    subagent_reasoning_effort: str = ""
+    # plan-156-619 S4e：子代理 / 子会话总开关（类型级开关已从 UI 移除，由它统一控制）
+    subagent_enabled: bool = True
+    # plan-156-619 S7：综合工具卡各栏目的全局默认展开策略（true = 默认全展开）
+    tool_card_sections_expanded: bool = True
 
     # v2.2: AI 主动生成记忆开关（设置中心「记忆」面板；关闭后 turn 结束不再自动提取记忆）
     auto_memory_enabled: bool = True

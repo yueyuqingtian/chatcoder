@@ -24,7 +24,17 @@ async def create_session(db: AsyncSession, *, project_id: int, title: str | None
                          permission_mode: str | None = None,
                          approval_mode: str | None = None,
                          goal_text: str | None = None,
-                         side_parent_id: int | None = None) -> int:
+                         side_parent_id: int | None = None,
+                         title_source: str = "auto") -> int:
+    """创建会话。
+
+    plan-156-619 S8：新增 `title_source`，用于区分三种标题来源：
+      · `auto`  —— 前端建会话时附带的占位标题（首条消息截断），**允许 AI 归纳覆盖**；
+      · `named` —— 正式给定的标题（子会话任务名 / fork 分支名），不再归纳；
+      · `manual`—— 用户手改的标题，永不覆盖。
+    此前没有这个区分，`auto_title_session` 只看「title 是否为空」——
+    而前端创建时总会带一个截断标题，于是 AI 归纳永远不会被触发（真实缺陷）。
+    """
     from datetime import datetime, timezone
 
     from app.orchestration.approval_policy import (
@@ -52,6 +62,8 @@ async def create_session(db: AsyncSession, *, project_id: int, title: str | None
         }
         for name, val in (
             ("title", title),
+            # plan-156-619 S8：标题来源随会话一起落库（auto / named / manual）
+            ("title_source", title_source),
             ("model_id", model_id),
             ("fork_parent_id", fork_parent_id),
             ("side_parent_id", side_parent_id),
@@ -98,6 +110,7 @@ async def create_session(db: AsyncSession, *, project_id: int, title: str | None
 
         session = Session(
             project_id=project_id, title=title or None,
+            title_source=title_source,
             model_id=model_id, fork_parent_id=fork_parent_id,
             side_parent_id=side_parent_id,
             # plan-75-332 R3 修复：此处必须显式写入两种模式——此前漏传 approval_mode，
@@ -128,13 +141,43 @@ async def get_session(db: AsyncSession, session_id: int) -> Session | None:
 
 
 async def auto_title_session(db: AsyncSession, session: Session, first_text: str) -> str | None:
-    """为尚未命名的会话生成首条用户消息标题（写引擎单写线程）。"""
-    if session.title:
+    """为尚未正式命名的会话生成标题（写引擎单写线程）。
+
+    plan-156-619 S8：从「截首条消息前 30 字」改为「一次轻量 AI 归纳」。
+    标题来源三态（`title_source`）驱动是否允许覆盖：
+
+      · `auto`   —— 前端建会话附带的**占位标题**（首条消息截断）。允许归纳覆盖，
+                    归纳成功后写回 `named`，避免以后每轮重复调模型；
+      · `named`  —— 已是正式标题（AI 归纳结果 / 子会话任务名 / fork 分支名），跳过；
+      · `manual` —— 用户手改的标题，永不覆盖。
+
+    此前只有「title 是否为空」一个判据，而前端创建时总会带一个截断标题，
+    于是自动命名永远不会触发（真实缺陷）。
+    """
+    source = getattr(session, "title_source", "auto") or "auto"
+    if source != "auto":
         return None
-    title = first_text.strip().replace("\n", " ")[:30]
-    if not title:
+
+    fallback = first_text.strip().replace("\n", " ")[:30]
+    if not fallback:
         return None
-    await patch_session(session.id, title=title)
+
+    # 只处理「占位标题」：空标题，或标题恰好等于首条消息的截断结果。
+    # 存量会话迁移后 title_source 都是 auto，但它们已有正式标题（旧逻辑生成）——
+    # 若不加这一判定，用户下次发消息会把所有历史会话标题一起改掉。
+    existing = (session.title or "").strip()
+    if existing and existing != fallback:
+        return None
+
+    # 归纳：失败即回落（不抛异常、不阻塞发送）
+    from app.services.title_service import summarize_title
+
+    title = await summarize_title(
+        db, first_text=first_text, model_id=getattr(session, "model_id", None),
+    ) or fallback
+
+    # 写回 named：下一轮不再重复归纳（模型调用有成本，且同一会话标题不该反复变）
+    await patch_session(session.id, title=title, title_source="named")
     return title
 
 
@@ -336,6 +379,9 @@ async def fork_session(db: AsyncSession, session_id: int, title: str | None = No
         new_session = Session(
             project_id=src.project_id,
             title=title or f"{src.title or '会话'} · 分支",
+            # plan-156-619 S8：fork 出的会话标题是正式名称（分支名），
+            # 标 named 避免被首条消息的自动归纳覆盖。
+            title_source="named",
             model_id=src.model_id,
             fork_parent_id=session_id,
             status="active",

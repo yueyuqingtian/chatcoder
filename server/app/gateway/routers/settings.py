@@ -85,6 +85,9 @@ def load_persisted_workspace() -> None:
         settings.show_todos = bool(data["show_todos"])
     if "show_reasoning" in data:
         settings.show_reasoning = bool(data["show_reasoning"])
+    # plan-156-619 S2：消息搜索入口开关（默认关闭，关闭时只隐藏入口按钮，Ctrl+F 仍可用）
+    if "show_message_search" in data:
+        settings.show_message_search = bool(data["show_message_search"])
     if "memory_enabled" in data:
         settings.auto_memory_enabled = bool(data["memory_enabled"])
     if "agent_max_steps" in data:
@@ -171,6 +174,19 @@ def load_persisted_workspace() -> None:
             settings.max_subagents_per_turn = max(1, min(32, int(data["max_subagents_per_turn"])))
         except (TypeError, ValueError):
             pass
+    # plan-156-619 S4d：子会话默认模型与思考深度（设置中心「子代理」面板只留这两项）
+    if "subagent_model_id" in data:
+        try:
+            settings.subagent_model_id = max(0, int(data["subagent_model_id"]))
+        except (TypeError, ValueError):
+            pass
+    if "subagent_reasoning_effort" in data:
+        settings.subagent_reasoning_effort = str(data["subagent_reasoning_effort"] or "")[:20]
+    if "subagent_enabled" in data:
+        settings.subagent_enabled = bool(data["subagent_enabled"])
+    # plan-156-619 S7：工具卡栏目的全局默认展开策略
+    if "tool_card_sections_expanded" in data:
+        settings.tool_card_sections_expanded = bool(data["tool_card_sections_expanded"])
     # 工作流运行时：恢复并发上限 / 返工 / 预算；取值与 PUT 共用同一夹紧口径
     if "workflow_enabled" in data:
         settings.workflow_enabled = bool(data["workflow_enabled"])
@@ -236,6 +252,8 @@ class GlobalSettingsOut(BaseModel):
     enhanced_search: bool = True  # ripgrep 增强搜索
     show_todos: bool = True  # 消息流显示 todos 卡片
     show_reasoning: bool = True  # 消息流显示 reasoning 块
+    # plan-156-619 S2：消息区搜索入口按钮（左上角）。默认关闭；关闭只隐藏入口，Ctrl+F 仍可唤起
+    show_message_search: bool = False
     # v3.0 (plan-88): 计划模式允许访问工作区外路径
     plan_mode_allow_outside_access: bool = False
     # v32 (plan-89): 沙箱模式（三态：workspace-write / read-only / danger-full-access）
@@ -274,6 +292,14 @@ class GlobalSettingsOut(BaseModel):
     # v36: 子代理并发治理（设置中心「子代理」面板可配，运行时立即生效）
     max_concurrent_subagents: int = 6   # 同时运行上限（超出排队等待，1~16）
     max_subagents_per_turn: int = 10    # 每轮派发总量上限（含已完成，1~32）
+    # plan-156-619 S4d：子会话默认模型 / 思考深度（0 / 空 = 跟随主代理）。
+    # 工具范围与执行模式由主代理在创建时决定，设置里只保留这两项可调项。
+    subagent_model_id: int = 0
+    subagent_reasoning_effort: str = ""
+    # plan-156-619 S4e：子代理 / 子会话总开关
+    subagent_enabled: bool = True
+    # plan-156-619 S7：工具卡栏目全局默认展开策略（true = 默认全展开）
+    tool_card_sections_expanded: bool = True
     # plan-75-332: 审批卡「解释」专用模型 / 思考深度（0/空 = 跟随会话）
     approval_explain_model_id: int = 0
     approval_explain_reasoning_effort: str = ""
@@ -348,6 +374,7 @@ class GlobalSettingsIn(BaseModel):
     enhanced_search: bool | None = None
     show_todos: bool | None = None
     show_reasoning: bool | None = None
+    show_message_search: bool | None = None
     plan_mode_allow_outside_access: bool | None = None
     sandbox_mode: str | None = None
     # v36 (plan-321-1600 R2): 工作目录外读取自动审批
@@ -378,6 +405,13 @@ class GlobalSettingsIn(BaseModel):
     # v36: 子代理并发治理
     max_concurrent_subagents: int | None = None
     max_subagents_per_turn: int | None = None
+    # plan-156-619 S4d：子会话默认模型 / 思考深度
+    subagent_model_id: int | None = None
+    subagent_reasoning_effort: str | None = None
+    # plan-156-619 S4e：子代理 / 子会话总开关
+    subagent_enabled: bool | None = None
+    # plan-156-619 S7：工具卡栏目全局默认展开策略
+    tool_card_sections_expanded: bool | None = None
     # plan-75-332: 审批卡「解释」专用模型 / 思考深度（0/空 = 跟随会话）
     approval_explain_model_id: int | None = None
     approval_explain_reasoning_effort: str | None = None
@@ -427,6 +461,7 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
         enhanced_search=data.get("enhanced_search", True),
         show_todos=data.get("show_todos", True),
         show_reasoning=data.get("show_reasoning", True),
+        show_message_search=data.get("show_message_search", False),
         plan_mode_allow_outside_access=data.get("plan_mode_allow_outside_access", False),
         sandbox_mode=data.get("sandbox_mode", settings.sandbox_mode),
         # v36 (plan-321-1600 R2/R3): 两项自动审批/自动额度开关（回填持久化值）
@@ -477,6 +512,13 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
         # v36: 子代理并发治理
         max_concurrent_subagents=data.get("max_concurrent_subagents", settings.max_concurrent_subagents),
         max_subagents_per_turn=data.get("max_subagents_per_turn", settings.max_subagents_per_turn),
+        # plan-156-619 S4d：子会话默认模型 / 思考深度
+        subagent_model_id=data.get("subagent_model_id", settings.subagent_model_id),
+        subagent_reasoning_effort=data.get("subagent_reasoning_effort", settings.subagent_reasoning_effort),
+        subagent_enabled=bool(data.get("subagent_enabled", settings.subagent_enabled)),
+        tool_card_sections_expanded=bool(data.get(
+            "tool_card_sections_expanded", settings.tool_card_sections_expanded,
+        )),
         # 工作流运行时：取值在 PUT 与启动恢复时已夹紧，此处只读
         **{k: int(data.get(k, getattr(settings, k))) for k in _WORKFLOW_INT_BOUNDS},
         workflow_enabled=bool(data.get("workflow_enabled", settings.workflow_enabled)),
@@ -633,6 +675,9 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
     if body.show_reasoning is not None:
         data["show_reasoning"] = body.show_reasoning
         settings.show_reasoning = body.show_reasoning
+    if body.show_message_search is not None:
+        data["show_message_search"] = body.show_message_search
+        settings.show_message_search = body.show_message_search
     if body.plan_mode_allow_outside_access is not None:
         data["plan_mode_allow_outside_access"] = body.plan_mode_allow_outside_access
         settings.plan_mode_allow_outside_access = body.plan_mode_allow_outside_access
@@ -719,6 +764,21 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         _mt = max(1, min(32, int(body.max_subagents_per_turn)))
         data["max_subagents_per_turn"] = _mt
         settings.max_subagents_per_turn = _mt
+    # plan-156-619 S4d：子会话默认模型 / 思考深度（子代理设置面板仅保留这两项可调项）
+    if body.subagent_model_id is not None:
+        _sm = max(0, int(body.subagent_model_id))
+        data["subagent_model_id"] = _sm
+        settings.subagent_model_id = _sm
+    if body.subagent_reasoning_effort is not None:
+        _se = str(body.subagent_reasoning_effort or "")[:20]
+        data["subagent_reasoning_effort"] = _se
+        settings.subagent_reasoning_effort = _se
+    if body.subagent_enabled is not None:
+        data["subagent_enabled"] = bool(body.subagent_enabled)
+        settings.subagent_enabled = bool(body.subagent_enabled)
+    if body.tool_card_sections_expanded is not None:
+        data["tool_card_sections_expanded"] = bool(body.tool_card_sections_expanded)
+        settings.tool_card_sections_expanded = bool(body.tool_card_sections_expanded)
     # 工作流运行时：夹紧后写入配置；并发上限由服务每拍读取，保存即生效
     if body.workflow_enabled is not None:
         data["workflow_enabled"] = bool(body.workflow_enabled)

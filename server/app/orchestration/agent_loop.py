@@ -31,7 +31,19 @@ from app.persistence.database import async_session_factory
 from app.orchestration.tools import ToolContext, tool_executor
 from app.orchestration.tools.registry import tool_registry
 from app.orchestration.workflow.tools import WORKFLOW_TOOL_NAMES, run_workflow_tool
+# plan-156-619 S4：子会话工具（主代理 4 个 + 子会话自身 2 个）与执行分发。
+# 与探索子代理分成两个模块：探索走 _run_subagent_tool，执行走 subsession_tool_runner。
+from app.orchestration.subsession_tools import (
+    SUBSESSION_OWN_TOOLS as SUBSESSION_OWN_TOOL_SCHEMAS,
+    SUBSESSION_TOOL_NAMES,
+)
+from app.orchestration.subsession_tool_runner import run_own_tool, run_subsession_tool
 from app.services import hook_service, message_service, rollback_service, task_service
+
+# 子会话自身可用的通信工具名集合（用于分发判定）
+SUBSESSION_OWN_TOOL_NAMES: set[str] = {
+    s["function"]["name"] for s in SUBSESSION_OWN_TOOL_SCHEMAS
+}
 
 logger = logging.getLogger(__name__)
 
@@ -1890,6 +1902,49 @@ async def run_agent_loop(
                         _tool_executed = True
                         continue
 
+                    # ── plan-156-619 S4：子会话工具（主代理 4 个 / 子会话自身 2 个）──
+                    # 与探索子代理分文件：探索走 _run_subagent_tool，执行走 subsession_tool_runner，
+                    # 避免两套语义在同一条 if 链里交错。
+                    # 落库顺序与子代理工具一致：TOOL_CALL 先落库并排空，保证前端先有调用消息再有其结果。
+                    if tool_name in SUBSESSION_TOOL_NAMES:
+                        await message_service.create_message(
+                            db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
+                            sender_type=SenderType.AGENT.value, sender_id=agent_id,
+                            msg_type=MsgType.TOOL_CALL.value,
+                            content={"tool": tool_name, "args": args, "call_key": tc.get("id", ""),
+                                     "agent_name": agent_name},
+                            buffered=True,
+                        )
+                        try:
+                            from app.persistence.write_behind import write_behind as _wb2
+                            await _wb2.get(session_id, turn_id).flush()
+                        except Exception:
+                            logger.debug("[agent] 子会话调用消息落库屏障失败(非阻塞)", exc_info=True)
+                        if tool_name in SUBSESSION_OWN_TOOL_NAMES:
+                            tool_output = await run_own_tool(
+                                tool_name, args, session_id=session_id, db=db,
+                            )
+                        else:
+                            tool_output = await run_subsession_tool(
+                                tool_name, args, session_id=session_id, db=db,
+                            )
+                        messages.append(ChatMessage(
+                            role="tool", content=tool_output,
+                            name=tool_name, tool_call_id=tc.get("id", ""),
+                        ))
+                        await message_service.create_message(
+                            db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
+                            sender_type=SenderType.AGENT.value, sender_id=agent_id,
+                            msg_type=MsgType.TOOL_RESULT.value,
+                            content={"tool": tool_name, "call_key": tc.get("id", ""),
+                                     "ok": not str(tool_output).startswith("Error:"),
+                                     "output": str(tool_output)[:MAX_TOOL_OUTPUT_CHARS],
+                                     "error": "", "agent_name": agent_name},
+                            buffered=True,
+                        )
+                        _tool_executed = True
+                        continue
+
                     # ── plan-330-1648 M4: 子代理 → 主代理上报/提问（不走 executor）──
                     if subagent_comm and tool_name == "report_to_leader":
                         tool_output = await _run_report_to_leader(
@@ -3258,7 +3313,13 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         # plan-330-1648 M2: 模型/思考深度改为「设置中心子代理类型优先 → 会话 → 主代理」；
         # 设置里指定的模型若已删除/停用，回落会话模型并留 warning（不硬失败）。
         _spawn_model_id = subagent_context.get("model_id") or agent_model_id
-        _profile_model_id = getattr(_profile, "model_id", None) if _profile is not None else None
+        # plan-156-619 S4e：设置中心改为「只配模型 + 思考深度」，工具范围与执行模式由主代理
+        # 在创建时按能力矩阵决定。因此这里的优先级翻转为：**全局设置 → 类型档案 → 会话**。
+        # 0 / 空 = 未设置，继续向下回落（旧库里的 profile 配置仍作为兜底，不丢用户历史设置）。
+        _global_model_id = int(getattr(settings, "subagent_model_id", 0) or 0)
+        _profile_model_id = _global_model_id or (
+            getattr(_profile, "model_id", None) if _profile is not None else None
+        )
         if _profile_model_id:
             _mrow = None
             try:
@@ -3275,8 +3336,10 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
                     _profile_name, _profile_model_id, _spawn_model_id,
                 )
         # None = run_agent_loop 内回落 settings.agent_reasoning_effort（全局默认档位）
+        # plan-156-619 S4e：同一优先级翻转——全局设置（思考深度）> 类型档案 > 本 turn 档位。
         _spawn_effort = (
-            (getattr(_profile, "reasoning_effort", None) if _profile is not None else None)
+            (getattr(settings, "subagent_reasoning_effort", "") or "")
+            or (getattr(_profile, "reasoning_effort", None) if _profile is not None else None)
             or subagent_context.get("reasoning_effort")
             or None
         )

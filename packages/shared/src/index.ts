@@ -448,6 +448,9 @@ export interface TaskOut {
   description: string | null;
   acceptance_criteria: string | null;
   agent_id: number | null;
+  /** plan-156-619 S6：该步骤由哪个子会话执行（sessions.id）；null/undefined = 主代理自己执行。
+   *  进程行据此显示「子会话」chip，点击可跳转到对应子会话。 */
+  subsession_id?: number | null;
   status: string;
   priority: number;
   artifact_ids: number[] | null;

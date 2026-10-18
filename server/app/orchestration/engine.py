@@ -35,6 +35,12 @@ from app.orchestration.subagent import (
 from app.orchestration.subagent_tools import (
     SUBAGENT_TOOL_NAMES, append_subagent_tools, load_subagent_type_states,
 )
+# plan-156-619 S4：执行模式 → 子代理 / 子会话能力矩阵，以及子会话工具组。
+# 这一层是边界唯一事实源；engine 只按矩阵决定下发哪组 schema，不再用布尔开关拼条件。
+from app.orchestration.subagent_capabilities import (
+    CAP_EXPLORE_AGENT, CAP_SUBSESSION, capabilities_for,
+)
+from app.orchestration.subsession_tools import append_subsession_tools
 from app.orchestration.tools.registry import tool_registry
 from app.persistence.write_behind import write_behind
 from app.services import audit_service, message_service, project_service, rollback_service, session_service, task_service, turn_service
@@ -1215,14 +1221,37 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         # v36 (plan-321-1600 R1): 四种权限模式都支持子代理（此前 readonly/plan 完全禁用）。
         # 只读/计划模式仅暴露只读探索子代理（explore_only，运行时强制 explore）；
         # 白名单模式尊重用户在权限面板勾选的子代理工具子集（未勾选不暴露）。
+        #
+        # plan-156-619 S4：能力边界收敛到 subagent_capabilities 矩阵，不再用 `_mode_readonly` 当开关：
+        #   readonly → 探索子代理与子会话都不下发（审阅时不该偷偷派发）
+        #   plan     → 只下发只读探索子代理
+        #   agent    → 探索子代理 + 子会话
+        #   workflow → 只下发只读探索子代理（执行统一走工作流节点，避免两套机制重复派发）
+        _caps = capabilities_for(_mode)
+        _allow_explore = CAP_EXPLORE_AGENT in _caps
+        _allow_subsession = CAP_SUBSESSION in _caps
         _subagent_allowed: set[str] | None = None
         if _schema_whitelist is not None:
             _subagent_allowed = SUBAGENT_TOOL_NAMES & set(_schema_whitelist)
-        tool_schemas = append_subagent_tools(
-            tool_schemas, _type_states,
-            explore_only=_mode_readonly,
-            allowed=_subagent_allowed,
-        )
+        if _allow_explore:
+            tool_schemas = append_subagent_tools(
+                tool_schemas, _type_states,
+                explore_only=_mode_readonly,
+                allowed=_subagent_allowed,
+            )
+        else:
+            # 只读模式：剔除白名单可能带进来的子代理工具，保证口径唯一
+            from app.orchestration.subagent_tools import SUBAGENT_TOOL_NAMES as _SAN
+            tool_schemas = [
+                s for s in tool_schemas
+                if s.get("function", {}).get("name") not in _SAN
+            ]
+        tool_schemas = append_subsession_tools(tool_schemas, enabled=_allow_subsession)
+        # plan-156-619 S4：子会话自己（side_parent_id != null）追加与主代理 / 同级通信的工具。
+        # 与主代理侧的子会话工具互补：主代理能派发，子会话能汇报与横向对齐，两者不重叠。
+        if getattr(session, "side_parent_id", None) is not None:
+            from app.orchestration.subsession_tools import append_own_tools
+            tool_schemas = append_own_tools(tool_schemas)
         tool_schemas = append_workflow_tools(tool_schemas, readonly_only=bool(_mode_readonly))
         # 3. 运行主代理
         # v10/v13: 会话级模型覆盖；同一模型也用于规划评估与拆分。

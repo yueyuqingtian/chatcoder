@@ -117,9 +117,12 @@ def workflow_tool_schemas() -> list[dict[str, Any]]:
             "function": {
                 "name": "plan_workflow",
                 "description": (
-                    "为复杂、多阶段的任务现场规划一个工作流（探索 → 实现 → 评估，可并行与返工）。"
-                    "只生成计划，不执行；返回计划编号与校验结果，用户确认后再调用 start_workflow。"
-                    "简单任务直接完成，不要为了用工作流而用工作流。"
+                    "为复杂任务现场拼一个工作流：把彼此独立的阶段拆成并行子工作流，"
+                    "把有依赖的阶段用 depends_on 串起来，需要收口时加一个汇总节点。"
+                    "节点类型按需选（explore / execute / check / review / gate），"
+                    "审查（review）与集成验收（after）都是可选项，不是必做流程。"
+                    "只生成计划、不执行；返回计划编号与校验结果，用户确认后再调用 start_workflow。"
+                    "单点修改或两三步就能完成的事直接做，不要为了用工作流而用工作流。"
                 ),
                 "parameters": {
                     "type": "object",

@@ -22,6 +22,10 @@ class Task(Base):
     description: Mapped[str | None]
     acceptance_criteria: Mapped[str | None]
     agent_id: Mapped[int | None] = mapped_column(BigInteger)  # 执行子代理
+    # plan-156-619 S6：该步骤由哪个**子会话**执行（sessions.id）。
+    # 与 agent_id 分开：agent_id 指探索子代理（agents 表），这里是执行子会话（sessions 表），
+    # 两套机制并存，复用一个列会让“这一步到底交给了谁”无法区分。
+    subsession_id: Mapped[int | None] = mapped_column(BigInteger)
     status: Mapped[str] = mapped_column(String(20), default="pending")  # pending/running/done/failed/cancelled
     priority: Mapped[int] = mapped_column(Integer, default=0)
     artifact_ids: Mapped[list | None] = mapped_column(JSON)

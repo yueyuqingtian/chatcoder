@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.gateway.schemas import (
     CompactionIndexOut, GoalOut, GoalSetBody, MessageOut, SessionCreate, SessionOut, SessionUpdate,
+    SubsessionCreate,
 )
 from app.orchestration.agent_events import broadcast
 from app.orchestration.workflow import store as workflow_store
@@ -75,24 +76,78 @@ async def create_side_session(session_id: int, db: AsyncSession = Depends(get_db
     """从主会话开一个侧边会话（子会话）。
 
     子会话沿用主会话的项目、模型、执行/权限模式与工作树，之后的 turn 与主会话走同一条流水线，
-    因此工具调用与消息展示完全一致。侧边会话不能再开侧边会话，避免嵌套。
+    因此工具调用与消息展示完全一致。
+
+    plan-156-619 S5：**允许子会话再开子会话，但结果仍是同级**——
+    旧实现直接 400 拒绝，导致子会话无法派生同级；现在统一把 `side_parent_id` 指向
+    根主会话（一层扁平），因此左侧栏永远只有「主会话 → 子会话」两层，不会出现三级嵌套。
     """
     parent = await session_service.get_session(db, session_id)
     if parent is None:
         raise HTTPException(status_code=404, detail="会话不存在")
-    if getattr(parent, "side_parent_id", None) is not None:
-        raise HTTPException(status_code=400, detail="侧边会话不能再开侧边会话")
     if parent.project_id is None:
         raise HTTPException(status_code=400, detail="该会话没有所属项目，无法开启侧边会话")
+
+    from app.services import subsession_service
+
+    root = parent.side_parent_id or parent.id
+    try:
+        await subsession_service.assert_can_create(db, root)
+    except subsession_service.SubsessionError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
     sid = await session_service.create_session(
         db, project_id=parent.project_id, title="侧边会话", model_id=parent.model_id,
         permission_mode=parent.permission_mode, approval_mode=parent.approval_mode,
-        side_parent_id=parent.id,
+        side_parent_id=root,
+        # plan-156-619 S8：侧边会话标题是固定占位，标 named 不参与自动归纳
+        title_source="named",
     )
     if parent.worktree_path:
         await session_service.update_session(db, sid, worktree_path=parent.worktree_path)
     child = await session_service.get_session(db, sid)
     return await _to_out(db, child)
+
+
+@router.post("/{session_id}/subsessions", response_model=SessionOut)
+async def create_subsession(
+    session_id: int, body: SubsessionCreate, db: AsyncSession = Depends(get_db),
+):
+    """创建一个执行子会话并立即下发首条任务（plan-156-619 S5）。
+
+    与 `/side-sessions` 的区别：这里带 `task` / `context` / `mode`，创建即开工，
+    供前端「子会话」入口与建议卡「在新子会话执行」使用；
+    `/side-sessions` 只建空会话，供侧边对话面板使用。
+    """
+    from app.services import subsession_service
+
+    try:
+        sid = await subsession_service.create_subsession(
+            db,
+            parent_session_id=session_id,
+            title=body.title,
+            task=body.task,
+            context=body.context or "",
+            mode=body.mode,
+        )
+    except subsession_service.SubsessionError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    child = await session_service.get_session(db, sid)
+    return await _to_out(db, child)
+
+
+@router.get("/{session_id}/subsessions", response_model=list[SessionOut])
+async def list_subsessions(session_id: int, db: AsyncSession = Depends(get_db)):
+    """某主会话下的全部子会话（含运行态字段）。
+
+    左栏子会话行的**唯一**数据源：`list_sessions` 会过滤掉子会话，
+    因此刷新后必须由本接口重建；WS 事件只做增量。
+    """
+    if await session_service.get_session(db, session_id) is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    children = await subsession_service.list_children(db, session_id)
+    return [await _to_out(db, c) for c in children]
+
 
 
 @router.get("/{session_id}/side-sessions", response_model=list[SessionOut])
@@ -189,11 +244,16 @@ async def fork_session(session_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.post("/{session_id}/rename", response_model=SessionOut)
 async def rename_session(session_id: int, title: str, db: AsyncSession = Depends(get_db)):
-    status = await session_service.update_session(db, session_id, title=title)
+    # plan-156-619 S8：用户手动重命名 → 标记 title_source=manual，
+    # 此后自动归纳不再覆盖（否则用户改的名字会被下一轮 AI 标题冲掉）。
+    status = await session_service.update_session(
+        db, session_id, title=title, title_source="manual",
+    )
     if status is None:
         raise HTTPException(404, "会话不存在")
     session = await session_service.get_session(db, session_id)
     return await _to_out(db, session)
+
 
 
 @router.post("/{session_id}/worktree", response_model=dict)

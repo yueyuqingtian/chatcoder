@@ -116,6 +116,15 @@ TO_TA3: dict[str, str] = {
     "send_to_subagent": "SendToSubagent",    # agent_id/message ✓
     # plan-91-394: 续跑中断/暂停的子代理（自造伪装名，schema 从真实工具动态派生）
     "resume_subagent": "ResumeSubagent",     # agent_id ✓
+    # plan-156-619 S4：执行子会话工具（与探索子代理分开的一组）
+    "create_subsession": "CreateSubsession",      # title/task/context/mode/background ✓
+    "send_to_subsession": "SendToSubsession",     # subsession_id/message ✓
+    "get_subsession_progress": "SubsessionProgress",  # subsession_id/wait ✓
+    "interrupt_subsession": "InterruptSubsession",    # subsession_id ✓
+    "message_main": "MessageMain",                # message/kind/wait/timeout_s ✓
+    "message_peer": "MessagePeer",                # subsession_id/message ✓
+    # plan-156-619 S10：后续任务建议（收尾时提一条可执行的下一步）
+    "suggest_next_task": "SuggestNextTask",       # title/summary/steps/mode/rationale ✓
     # 工作流工具（设计 §5.8）：主代理专用，经同一别名通道映射
     "plan_workflow": "PlanWorkflow",
     "start_workflow": "StartWorkflow",
@@ -186,6 +195,11 @@ DYNAMIC_SCHEMA_ALIASES: frozenset[str] = frozenset({
     "CompactionIndex", "CompactionView", "SkillView", "MemoryWrite",
     # 子代理管理/上报（v43 补齐）
     "SubAgentInspect", "SendToSubagent", "ReportToLeader", "ResumeSubagent",
+    # plan-156-619 S4：执行子会话工具（与探索子代理分开的一组，参数与真实工具一致）
+    "CreateSubsession", "SendToSubsession", "SubsessionProgress", "InterruptSubsession",
+    "MessageMain", "MessagePeer",
+    # plan-156-619 S10：后续任务建议
+    "SuggestNextTask",
 })
 
 # 出站参数键名适配：真实键 → ta3 键（None = 丢弃该键）

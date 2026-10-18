@@ -12,6 +12,7 @@ from app.gateway.routers import (  # noqa: F401
     projects,
     scheduled,
     sessions,
+    suggestions,
     turns,
 )
 
@@ -19,6 +20,7 @@ __all__ = [
     "projects",
     "sessions",
     "turns",
+    "suggestions",
     "scheduled",
     "profiles",
     "permission_profiles",

@@ -35,6 +35,8 @@ from app.orchestration.tools.memory_write import MemoryWriteTool
 from app.orchestration.tools.multi_edit import MultiFileEditTool
 from app.orchestration.tools.read_attachment import ReadAttachmentTool
 from app.orchestration.tools.skill_view import SkillViewTool
+# plan-156-619 S10：后续任务建议（收尾时向用户提一条可执行的下一步）
+from app.orchestration.tools.suggestion import SuggestNextTaskTool
 from app.orchestration.tools.symbol_search import OutlineTool, SymbolSearchTool
 from app.orchestration.tools.terminal import TerminalExecTool
 from app.orchestration.tools.todo import TodoWriteTool
@@ -133,6 +135,8 @@ def _build_default_registry() -> ToolRegistry:
         DesktopScreenshotTool, DesktopFindTextTool,
         DesktopClickTool, DesktopTypeTool, DesktopKeysTool, DesktopScrollTool,
         DesktopFocusTool, DesktopAppsTool, DesktopRecipeTool,
+        # plan-156-619 S10：后续任务建议卡（消息流底部）
+        SuggestNextTaskTool,
     ):
         reg.register(tool_cls())
     return reg

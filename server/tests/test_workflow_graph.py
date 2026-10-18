@@ -82,9 +82,18 @@ def test_unknown_role_is_error():
 
 
 def test_execute_requires_write_scope_and_acceptance():
+    """plan-156-619 S9：写入范围仍是硬门槛（安全边界），验收标准降为建议。
+
+    用户口径是「工作流自由度要高、拼积木、不强制审查」——把 acceptance 当 error
+    会让模型为了凑格式反复改计划。这里同时锁定两条：
+      · 缺 write_scope → error（不可省）；
+      · 缺 acceptance   → 只出 warning（不阻断启动）。
+    """
     flow = {"key": "f", "nodes": [{"key": "impl", "kind": "execute"}]}
     res = validate_plan(_parse_ok(_plan([flow])))
-    assert {"missing_write_scope", "missing_acceptance"} <= _codes(res)
+    assert "missing_write_scope" in _codes(res)
+    assert "missing_acceptance" not in _codes(res)
+    assert "missing_acceptance" in _warn_codes(res)
 
 
 def test_readonly_node_cannot_declare_write_scope():

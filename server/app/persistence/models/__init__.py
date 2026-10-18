@@ -19,6 +19,8 @@ from app.persistence.models.rollback import RollbackWrite, TurnSnapshot
 from app.persistence.models.scheduled import ScheduledTask
 from app.persistence.models.skill import McpServer, Skill
 from app.persistence.models.subagent_profile import SubagentProfile
+# plan-156-619 S10：后续任务建议（新表，靠 create_all 建立）
+from app.persistence.models.suggestion import TaskSuggestion
 from app.persistence.models.ta3_auth import Ta3Auth
 from app.persistence.models.task import Artifact, Task
 # plan-282-1441：ToolCall 此前**遗漏**在本聚合之外——Base.metadata 里没有 tool_calls 表，
@@ -70,6 +72,8 @@ __all__ = [
     "Skill",
     "McpServer",
     "SubagentProfile",
+    # plan-156-619 S10：后续任务建议
+    "TaskSuggestion",
     "Ta3Auth",
     "KiroAuth",
     "WorkBuddyAuth",
