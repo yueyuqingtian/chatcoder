@@ -26,7 +26,7 @@ export function WorkflowNotice({ text }: { text: string }) {
         aria-expanded={expanded}
         onClick={() => setExpanded((v) => !v)}
       >
-        <span className="tc-icon"><IxWorkflow size={14} /></span>
+        <span className="tc-icon"><IxWorkflow size={16} /></span>
         <span className="tc-verb">工作流</span>
         <span className="tc-query wf-notice-title">{title}</span>
       </button>

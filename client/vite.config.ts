@@ -8,6 +8,10 @@ import dns from "node:dns";
 // 改用 verbatim 模式，让 DNS 返回原始顺序，配合后端监听双栈避免 ECONNREFUSED。
 dns.setDefaultResultOrder("ipv4first");
 
+// plan-20261017-frontend-polish：沙箱验证环境用 CHATCODER_BACKEND 指向独立后端（默认仍是本机 8000）。
+const backendTarget = process.env.CHATCODER_BACKEND || "http://localhost:8000";
+const backendWsTarget = backendTarget.replace(/^http/, "ws");
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   // 桌面版用 file:// 加载,必须用相对路径,否则资源找不到导致黑屏
@@ -26,7 +30,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/api": {
-        target: "http://localhost:8000",
+        target: backendTarget,
         changeOrigin: true,
         // 绕过 http-proxy 的 DNS 解析问题：用 configure 钩子强制 agent 走 IPv4
         configure: (proxy) => {
@@ -36,7 +40,7 @@ export default defineConfig({
         },
       },
       "/ws": {
-        target: "ws://localhost:8000",
+        target: backendWsTarget,
         ws: true,
       },
     },

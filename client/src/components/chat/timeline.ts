@@ -10,6 +10,7 @@
  * - tool_tree 中同工具连续 ≥2 次聚为 group 节点
  * - 思考内容（thinking）不进入主消息流文本，由 ThinkingBlock 独立消费
  */
+import { normalizeToolName } from "./toolLabels";
 import type { MessageOut } from "../../api/client";
 import type { ToolImage } from "../../store/chat";
 import { MsgType, SenderType } from "@chatcoder/shared";
@@ -308,7 +309,8 @@ function buildLeaf(call: MessageOut, result?: MessageOut): ToolLeaf {
   const statRaw = rc.change_stat as { path?: unknown; additions?: unknown; deletions?: unknown } | undefined;
   return {
     callKey: String(cc.call_key ?? call.id),
-    tool: String(cc.tool ?? "tool"),
+    // plan-20261017-ux-overhaul：ta3 伪装名（Edit / Bash …）归一为真实名，写操作判定、图标、文案才能一致
+    tool: normalizeToolName(String(cc.tool ?? "tool")),
     args: (cc.args && typeof cc.args === "object" ? cc.args : {}) as Record<string, unknown>,
     agentName: String(cc.agent_name ?? ""),
     threadId: call.thread_id != null ? Number(call.thread_id) : null,
@@ -330,7 +332,7 @@ const SHOT_TOOLS = new Set(["browser_screenshot", "desktop_screenshot"]);
 /** 这次调用是否在时间线上产出截图卡：截图工具本身、带「动作后截图」的操作、或结果里实际带了图 */
 export function isShotCall(call: MessageOut, result?: MessageOut): boolean {
   const cc = call.content as Record<string, unknown>;
-  const tool = String(cc.tool ?? "");
+  const tool = normalizeToolName(String(cc.tool ?? ""));
   const rc = (result?.content ?? {}) as Record<string, unknown>;
   if (result && rc.ok === false && !rc.image) return false; // 截图失败：失败原因由过程里的工具行展示
   if (rc.image && typeof (rc.image as { url?: unknown }).url === "string") return true;
@@ -347,10 +349,19 @@ export function isShotCall(call: MessageOut, result?: MessageOut): boolean {
 
 /** plan-547: 导出供锚定/展示复用——从工具 leaf 提取规范化的目标路径（正斜杠）。 */
 export function leafPathOf(leaf: ToolLeaf): string {
-  const p = leaf.args?.path;
-  if (typeof p === "string" && p) return p.replace(/\\/g, "/");
-  const f = leaf.args?.file_path;
-  if (typeof f === "string" && f) return f.replace(/\\/g, "/");
+  const norm = (v: unknown) => (typeof v === "string" && v ? v.replace(/\\/g, "/") : "");
+  const direct = norm(leaf.args?.path) || norm(leaf.args?.file_path) || norm(leaf.args?.filepath);
+  if (direct) return direct;
+  // multi_file_edit：路径在 edits[].path（ta3 伪装参数也可能写成 filepath）
+  const edits = leaf.args?.edits;
+  if (Array.isArray(edits)) {
+    for (const e of edits) {
+      if (!e || typeof e !== "object") continue;
+      const rec = e as Record<string, unknown>;
+      const p = norm(rec.path) || norm(rec.file_path) || norm(rec.filepath);
+      if (p) return p;
+    }
+  }
   // v25: 非白名单写盘工具（terminal_exec 等）路径来自 change_stat
   if (leaf.changeStat?.path) return leaf.changeStat.path.replace(/\\/g, "/");
   return "";
@@ -427,6 +438,9 @@ export function pruneModelDividers(messages: MessageOut[]): MessageOut[] {
       pending = null;
     }
   }
+  // plan-20261017-ux-overhaul：分隔线现在只在发送时写入，其后必有用户消息；
+  // 末尾悬空的一条只可能是旧版本「切换即写入」留下的，切了没发，不展示
+  if (pending) (drop ??= new Set()).add(pending.id);
   return drop ? messages.filter((m) => !drop!.has(m.id)) : messages;
 }
 

@@ -7,6 +7,7 @@
  * 工作树本身在数据库里是一条 Project 行（is_worktree=true），因此左侧面板
  * 会把它当作独立工作区展示，可在其中直接新建会话。
  */
+import { notify } from "../../store/toast";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, type ProjectOut, type RepoCandidate, type WorktreeOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
@@ -104,7 +105,7 @@ export function WorktreesPanel() {
   const handleCreate = async () => {
     if (!createFor) return;
     if (pickedRepos.size === 0) {
-      useChatStore.setState({ error: "请至少选择一个仓库" });
+      notify.warning("请至少选择一个仓库");
       return;
     }
     setBusy(true);
@@ -121,7 +122,7 @@ export function WorktreesPanel() {
       // 刷新侧栏，让新工作树立即可见
       await useChatStore.getState().loadBootstrap();
       if (res?.count > 1) {
-        useChatStore.setState({ error: `已在 ${res.count} 个仓库创建工作树` });
+        notify.success(`已在 ${res.count} 个仓库创建工作树`);
       }
     } catch (e) {
       useChatStore.setState({ error: `创建工作树失败：${String(e)}` });

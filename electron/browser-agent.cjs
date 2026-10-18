@@ -97,6 +97,11 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
     } else if (method === "Page.javascriptDialogClosed") {
       if (st.pendingDialog) { st.pendingDialog = null; emit({ type: "dialog-closed", wcId: st.wc.id }); }
     }
+    // 动作后的稳定判定在等这些事件：请求开始 / 结束、网页弹窗都要立刻唤醒重判，而不是等下一轮轮询
+    if (st.wakers.size && (method === "Network.requestWillBeSent" || method === "Network.loadingFinished"
+      || method === "Network.loadingFailed" || method === "Page.javascriptDialogOpening")) {
+      for (const w of Array.from(st.wakers)) w();
+    }
   }
 
   function prepare(wcId) {
@@ -104,8 +109,10 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
     if (!wc) return { ok: false, error: "不是面板内的网页" };
     const existing = guests.get(wc.id);
     if (existing) return { ok: true, debugger: existing.attached };
-    const st = { wc, attached: false, net: [], netById: new Map(), seq: 0, aiUntil: 0, accept: true, promptText: "", events: [], pendingDialog: null };
+    const st = { wc, attached: false, net: [], netById: new Map(), seq: 0, aiUntil: 0, accept: true, promptText: "", events: [], pendingDialog: null, wakers: new Set(), needFrame: true };
     guests.set(wc.id, st);
+    // 新文档提交后、出第一帧前，输入事件会被丢弃（见 pumpFrame）
+    wc.on("did-navigate", () => { st.needFrame = true; });
     try { wc.setBackgroundThrottling(false); } catch { /* 旧版本无此 API 时忽略 */ }
     try {
       wc.setWindowOpenHandler(({ url, disposition }) => {
@@ -170,7 +177,7 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
         cssW = rect.width;
         cssH = rect.height;
       }
-      img = await captureViewport(wc, st, rect, quality);
+      img = await captureViewport(wc, st, rect, quality, rect ? null : { width: vw, height: vh });
     }
     if (!img || img.isEmpty()) throw new Error("截图为空（页面可能尚未加载完成）");
     // 输出按 CSS 像素（再按最长边限幅）：截图像素坐标与页面坐标一一对应，模型可直接拿来点击
@@ -188,8 +195,9 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
   }
 
   /** 视口截图：先 capturePage（快）。主窗口被遮挡/最小化时合成器不出帧：临时关闭主窗口的后台节流让它出帧，
-   *  截完立即恢复（只在截图这一刻多耗电）；仍不行再试 CDP 截图，失败就在几秒内给出可读原因。 */
-  async function captureViewport(wc, st, rect, quality) {
+   *  截完立即恢复（只在截图这一刻多耗电）；仍不行再试 CDP 截图，失败就在几秒内给出可读原因。
+   *  expect：不裁剪时的页面视口（CSS 像素），用来识别「拿到的图远小于视口」的残缺截图（plan-20261017-ux-overhaul 阶段 F）。 */
+  async function captureViewport(wc, st, rect, quality, expect) {
     const mw = getMainWindow();
     const hostHidden = !!(mw && !mw.isDestroyed() && (mw.isMinimized() || !mw.isVisible() || isOccluded(mw)));
     if (hostHidden && Date.now() - lastHiddenFail < 30000 && hiddenFailWin === mw.id && mw.isMinimized()) {
@@ -208,15 +216,28 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
     } catch { restore = null; }
     try {
       try {
-        return await withTimeout(wc.capturePage(rect, { stayHidden: true, stayAwake: true }), 2000, "__CAPTURE_TIMEOUT__");
+        // 不传 rect 即截 webview 自身的完整区域（与它在宿主里露出多少无关）
+        const img = await withTimeout(wc.capturePage(rect, { stayHidden: true, stayAwake: true }), 2000, "__CAPTURE_TIMEOUT__");
+        if (usableShot(img, rect, expect, wc)) return img;
+        if (!st || !st.attached) {
+          if (img && !img.isEmpty()) return img;
+          throw new Error("截图为空：页面当前没有可用的渲染帧，请稍后重试");
+        }
+        log("[browser-agent] capturePage 结果残缺，改用 CDP 截图:", img && !img.isEmpty() ? JSON.stringify(img.getSize()) : "空图");
       } catch (err) {
-        if (!st || !st.attached) throw new Error("截图超时：应用窗口被遮挡或最小化时页面不渲染，请把窗口切到前台后重试");
+        if (!st || !st.attached) {
+          if (err && /截图为空/.test(err.message || "")) throw err;
+          throw new Error("截图超时：应用窗口被遮挡或最小化时页面不渲染，请把窗口切到前台后重试");
+        }
         log("[browser-agent] capturePage 未出帧，改用 CDP 截图:", err && err.message);
       }
-      const params = { format: "jpeg", quality };
+      const params = { format: "jpeg", quality, optimizeForSpeed: true };
       if (rect) params.clip = { x: rect.x, y: rect.y, width: rect.width, height: rect.height, scale: 1 };
+      // CDP 截图取 guest 自身的合成表面，与宿主里面板是否展开、webview 是否在前台无关；
+      // 先 invalidate 让 guest 立即出一帧，避免等到页面下一次自发重绘
+      try { wc.invalidate(); } catch { /* 忽略 */ }
       try {
-        const res = await withTimeout(cdp(st, "Page.captureScreenshot", params), 2000, "CDP 截图超时");
+        const res = await withTimeout(cdp(st, "Page.captureScreenshot", params), 3000, "CDP 截图超时");
         return nativeImage.createFromBuffer(Buffer.from(res.data, "base64"));
       } catch (err) {
         if (hostHidden && mw && !mw.isDestroyed()) { lastHiddenFail = Date.now(); hiddenFailWin = mw.id; }
@@ -225,6 +246,49 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
     } finally {
       if (restore) restore();
     }
+  }
+
+  /** 逼 guest 出一帧（plan-20261017-hidden-input）。
+   *  根因：Chromium 在新文档出第一帧之前丢弃发给它的输入事件——sendInputEvent 静默丢弃、CDP Input 等不到回执。
+   *  宿主窗口被遮挡 / 最小化时合成器不出帧，隐藏期间导航（或刷新）后的页面就一直收不到点击和按键，
+   *  直到用户把窗口切回前台。实测出过一帧之后输入恢复正常，直到下一次导航。
+   *  做法同截图兜底：临时放开主窗口节流 + invalidate，再截一个 1×1 像素逼合成器出帧；不行再试 CDP 截图。 */
+  async function pumpFrame(wc, st) {
+    const mw = getMainWindow();
+    let restore = null;
+    try {
+      const throttled = typeof mw?.webContents.getBackgroundThrottling === "function" ? mw.webContents.getBackgroundThrottling() : true;
+      if (mw && !mw.isDestroyed() && throttled) {
+        mw.webContents.setBackgroundThrottling(false);
+        restore = () => { try { if (!mw.isDestroyed()) mw.webContents.setBackgroundThrottling(true); } catch { /* 窗口已关闭 */ } };
+      }
+    } catch { restore = null; }
+    try {
+      try { wc.invalidate(); } catch { /* 忽略 */ }
+      try {
+        const img = await withTimeout(wc.capturePage({ x: 0, y: 0, width: 1, height: 1 }, { stayHidden: true, stayAwake: true }), 1500, "__PUMP_TIMEOUT__");
+        if (img && !img.isEmpty()) return true;
+      } catch { /* 改走 CDP */ }
+      if (!st || !st.attached) return false;
+      try {
+        await withTimeout(cdp(st, "Page.captureScreenshot", { format: "jpeg", quality: 30, optimizeForSpeed: true, clip: { x: 0, y: 0, width: 1, height: 1, scale: 1 } }), 1500, "出帧超时");
+        return true;
+      } catch { return false; }
+    } finally {
+      if (restore) restore();
+    }
+  }
+
+  /** capturePage 的结果是否可用：非空，且不裁剪时尺寸不小于页面视口的一半。
+   *  停泊容器裁掉 webview 时会拿到 1×1 之类的残图——这种直接走 CDP 兜底。 */
+  function usableShot(img, rect, expect, wc) {
+    if (!img || img.isEmpty()) return false;
+    const size = img.getSize();
+    if (size.width < 4 || size.height < 4) return false;
+    if (rect || !expect) return true;
+    let zoom = 1;
+    try { zoom = Number(wc.getZoomFactor()) || 1; } catch { zoom = 1; }
+    return size.width >= expect.width * zoom * 0.5 && size.height >= expect.height * zoom * 0.5;
   }
 
   function isOccluded(mw) {
@@ -239,17 +303,86 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
     const pending = mine.filter((e) => !e.done).length;
     const out = { available: true, pending, errors: [], seq: st.seq };
     if (!a.bodies) return out;
-    const failed = mine.filter((e) => e.status === "failed" || (typeof e.status === "number" && e.status >= 400));
-    for (const e of failed.slice(-2)) {
-      out.errors.push({ id: e.id, method: e.method, url: e.url, status: e.status, error: e.error || "", body: e.status === "failed" ? "" : await bodyHead(st, e) });
-    }
+    const failed = mine.filter((e) => e.status === "failed" || (typeof e.status === "number" && e.status >= 400)).slice(-2);
     // 业务报错：HTTP 200 的 JSON 响应里 success=false 或 code 非 0/200 且带提示文字
     const okJson = mine.filter((e) => e.done && typeof e.status === "number" && e.status < 400 && /json/i.test(e.mime || "")).slice(-4);
-    for (const e of okJson) {
-      if (out.errors.length >= 3) break;
-      const body = await bodyHead(st, e, 4000);
-      const biz = bizError(body);
-      if (biz) out.errors.push({ id: e.id, method: e.method, url: e.url, status: e.status, biz, body: body.slice(0, BODY_MAX) });
+    // 响应体一次并发取回（plan-20261017-ux-overhaul 阶段 F：原先逐个 await，最多 6 次串行 CDP 往返）
+    const [failedBodies, okBodies] = await Promise.all([
+      Promise.all(failed.map((e) => (e.status === "failed" ? "" : bodyHead(st, e)))),
+      Promise.all(okJson.map((e) => bodyHead(st, e, 4000))),
+    ]);
+    failed.forEach((e, i) => {
+      out.errors.push({ id: e.id, method: e.method, url: e.url, status: e.status, error: e.error || "", body: failedBodies[i] });
+    });
+    okJson.forEach((e, i) => {
+      if (out.errors.length >= 3) return;
+      const biz = bizError(okBodies[i]);
+      if (biz) out.errors.push({ id: e.id, method: e.method, url: e.url, status: e.status, biz, body: okBodies[i].slice(0, BODY_MAX) });
+    });
+    return out;
+  }
+
+  /** 动作后的稳定判定（plan-20261017-ux-overhaul 阶段 F）：一次 IPC 内完成，取代宿主「每 30 ms 一轮、每轮两次往返」的轮询。
+   *  三路先到先得：① 主框架开始跳转（立即返回 navigated，由宿主等新页面就绪）；② 稳定 = 本次动作发起的接口全部返回
+   *  且 DOM 静默 quiet_ms（页面内 MutationObserver 计时，见 kit quiet）；③ 预算用尽。
+   *  接口在途时不轮询：挂在 CDP 网络事件上等唤醒。collect=true 时顺带取回页面变化与接口错误，省掉收尾的两次往返。 */
+  async function settle(wc, st, a) {
+    const t0 = Date.now();
+    const budget = clampInt(a.budget_ms, 0, 15000, 3000);
+    const quietMs = clampInt(a.quiet_ms, 30, 1000, 100);
+    const deadline = t0 + budget;
+    const since = a.since === null || a.since === undefined ? null : Number(a.since) || 0;
+    const netOn = since !== null && !!(st && st.attached);
+    const pendingNow = () => (netOn ? st.net.filter((e) => e.seq > since && !e.done && API_TYPES.has(e.type)).length : 0);
+    let navigated = false;
+    const wakers = st ? st.wakers : new Set();
+    let wakeNav = () => {};
+    const navP = new Promise((resolve) => { wakeNav = resolve; });
+    // Electron ≥ 25 只传 details（isMainFrame / isSameDocument）；旧签名为 (event, url, isInPlace, isMainFrame)
+    const onNav = (d, _url, inPlace, mainFrame) => {
+      const isMain = d && typeof d.isMainFrame === "boolean" ? d.isMainFrame : !!mainFrame;
+      const same = d && typeof d.isSameDocument === "boolean" ? d.isSameDocument : !!inPlace;
+      if (isMain && !same) { navigated = true; wakeNav(); for (const w of Array.from(wakers)) w(); }
+    };
+    wc.on("did-start-navigation", onNav);
+    /** 等到任一网络 / 跳转事件或 ms 到期 */
+    const nap = (ms) => new Promise((resolve) => {
+      const done = () => { clearTimeout(t); wakers.delete(done); resolve(); };
+      const t = setTimeout(done, Math.max(0, ms));
+      wakers.add(done);
+    });
+    let state = null;
+    let pending = 0;
+    try {
+      for (;;) {
+        const left = deadline - Date.now();
+        if (navigated || left <= 0) break;
+        pending = pendingNow();
+        if (pending > 0) { await nap(left); continue; }
+        // DOM 静默：页面内一次往返等到静默或预算用尽；跳转发生时立即放弃等待
+        const expr = "window.__ccKit ? window.__ccKit.call('quiet', " + JSON.stringify({ quiet_ms: quietMs, timeout_ms: Math.max(quietMs, left) }) + ") : null";
+        const r = await Promise.race([
+          withTimeout(wc.executeJavaScript(expr, false), left + 1000, "__QUIET_TIMEOUT__").catch(() => null),
+          navP.then(() => null),
+        ]);
+        if (navigated) break;
+        if (r && r.ok) state = r.value;
+        pending = pendingNow();
+        // 静默期间又发起了请求：等它返回后再判一次静默（报错提示通常随接口返回出现）
+        if (pending > 0 && Date.now() < deadline) continue;
+        break;
+      }
+    } finally {
+      wc.removeListener("did-start-navigation", onNav);
+    }
+    const out = { navigated, pending: pendingNow(), state, waited: Date.now() - t0 };
+    if (a.collect && !navigated) {
+      const [chg, net] = await Promise.all([
+        withTimeout(wc.executeJavaScript("window.__ccKit ? window.__ccKit.call('changes', {}) : null", false), 4000, "读取页面变化超时").catch(() => null),
+        netOn ? netSince(st, { since, bodies: true }).catch(() => null) : Promise.resolve(null),
+      ]);
+      if (chg && chg.ok) out.changes = chg.value;
+      if (net) out.net = net;
     }
     return out;
   }
@@ -318,6 +451,8 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
       }
       case "netSince":
         return netSince(st, a);
+      case "settle":
+        return settle(wc, st, a);
       case "zoom":
         return { factor: wc.getZoomFactor() };
       case "events": {
@@ -341,6 +476,32 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
         if (!st || !st.attached) throw new Error("网络记录不可用（调试通道未连接）");
         const res = await withTimeout(cdp(st, "Network.getResponseBody", { requestId: String(a.request_id || "") }), 8000, "读取响应体超时");
         return { body: String(res.body || "").slice(0, 400000), base64: !!res.base64Encoded, mime: (st.netById.get(String(a.request_id)) || {}).mime || "" };
+      }
+      case "ensureFrame": {
+        // 宿主在后台时、输入动作之前调用：页面导航后还没出过帧才补一帧；force 用于点击校验失败后的重试
+        if (!st) return { pumped: false };
+        if (!a.force && !st.needFrame) return { pumped: false };
+        const ok = await pumpFrame(wc, st);
+        if (ok) st.needFrame = false;
+        return { pumped: ok };
+      }
+      case "mouseCdp": {
+        // 点击的备用通道（plan-20261017-hidden-input）：宿主校验到 sendInputEvent 的点击没有送达页面时改走 CDP。
+        // 坐标是页面 CSS 像素（实测 CDP 不需要像 sendInputEvent 那样乘网页缩放）
+        if (!st || !st.attached) throw new Error("调试通道未连接");
+        const x = Number(a.x) || 0;
+        const y = Number(a.y) || 0;
+        const button = a.button === "right" ? "right" : a.button === "middle" ? "middle" : "left";
+        const count = clampInt(a.count, 1, 3, 1);
+        const mods = Array.isArray(a.modifiers) ? a.modifiers.map((m) => String(m).toLowerCase()) : [];
+        const modifiers = (mods.includes("alt") ? 1 : 0) | (mods.includes("control") ? 2 : 0) | (mods.includes("meta") ? 4 : 0) | (mods.includes("shift") ? 8 : 0);
+        const send = (type, extra) => withTimeout(cdp(st, "Input.dispatchMouseEvent", { type, x, y, modifiers, ...extra }), 3000, "派发鼠标事件超时");
+        await send("mouseMoved", { button: "none" });
+        for (let i = 1; i <= count; i++) {
+          await send("mousePressed", { button, clickCount: i });
+          await send("mouseReleased", { button, clickCount: i });
+        }
+        return {};
       }
       case "setZoom": {
         const z = Number(a.factor);

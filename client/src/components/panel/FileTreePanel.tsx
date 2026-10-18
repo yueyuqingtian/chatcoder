@@ -14,7 +14,7 @@ import Editor, { DiffEditor } from "@monaco-editor/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api, type TreeNode } from "../../api/client";
 import { useChatStore } from "../../store/chat";
-import { usePanelStore } from "../../store/panel";
+import { bucketKeyOf, usePanelStore } from "../../store/panel";
 import { IconArrowLeft, IconArrowToggle, IconChevronRight, IconCompress, IconExternalLink, IconPanelLeft, IconRefresh, IconSearch, IconX, IconFolderTree } from "../icons";
 import { MarkdownContent } from "../MarkdownContent";
 import { Button, Empty, Segmented, Tooltip } from "../ui";
@@ -22,6 +22,7 @@ import { FileIcon } from "../iconkit/FileIcon";
 import { ProjectIcon } from "../project/ProjectIcon";
 import { projectColorKey, projectIconKey } from "../project/projectMeta";
 import { recordComponentRender, recordDerivation } from "../../perf/metrics";
+import { isBusy, subscribe } from "../../perf/bus";
 
 /** 文件扩展名 -> Monaco 语言 ID 映射（后端只返回扩展名，这里兜底转换）。 */
 const EXT_LANG_MAP: Record<string, string> = {
@@ -157,7 +158,7 @@ function Hit({ text, range }: { text: string; range: [number, number] | null }) 
   return <>{text.slice(0, range[0])}<mark className="ft-mark">{text.slice(range[0], range[1])}</mark>{text.slice(range[1])}</>;
 }
 
-export function FileTreePanel({ visible = true }: { visible?: boolean }) {
+export function FileTreePanel({ visible = true, sessionId = null }: { visible?: boolean; sessionId?: number | null }) {
   // plan-75-334 阶段0：记录组件渲染（仅采集期间统计，零开销）
   recordComponentRender("filePanel");
 
@@ -167,6 +168,8 @@ export function FileTreePanel({ visible = true }: { visible?: boolean }) {
   const previewLine = usePanelStore((s) => s.previewLine);
   const setPreviewPath = usePanelStore((s) => s.setPreviewPath);
   const diffPreview = usePanelStore((s) => s.diffPreview);
+  // 按本实例所属会话桶读取「计划查看后收起目录树」请求（各会话的文件面板常驻挂载，不能共用投影值）
+  const planCollapsePending = usePanelStore((s) => s.buckets[bucketKeyOf(sessionId)]?.planCollapsePending ?? false);
   const turnChanges = useChatStore((s) => s.turnChanges);
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [openPaths, setOpenPaths] = useState<Set<string>>(new Set());
@@ -184,6 +187,13 @@ export function FileTreePanel({ visible = true }: { visible?: boolean }) {
   const crumbsRef = useRef<HTMLDivElement>(null);
   const [narrow, setNarrow] = useState(false);
   const [treeCollapsed, setTreeCollapsed] = useState(loadTreeCollapsed);
+  // 计划模式查看完整计划：目录树自动收起，给计划正文腾出宽度。只改本次状态，不覆盖用户记住的偏好；
+  // 用户仍可用按钮手动展开。请求只在面板可见时消费（打开计划时文件标签通常是随后才激活的）。
+  useEffect(() => {
+    if (!visible || !planCollapsePending) return;
+    setTreeCollapsed(true);
+    usePanelStore.getState().ackPlanCollapse();
+  }, [visible, planCollapsePending]);
   const toggleTree = () => setTreeCollapsed((v) => {
     const next = !v;
     try { localStorage.setItem(TREE_COLLAPSED_KEY, next ? "1" : "0"); } catch { /* 存储不可用时只在本次生效 */ }
@@ -209,15 +219,29 @@ export function FileTreePanel({ visible = true }: { visible?: boolean }) {
   // 面板宽度分档（只在跨过阈值时更新状态，拖分隔条逐帧改宽度不会逐帧重渲染）
   // plan-20261016-ux（问题 10）：宽面板（全屏）档——没有预览时目录树也收成侧栏，右侧给空态说明
   const [wide, setWide] = useState(false);
+  // plan-20261017-goal12 项 8：拖拽 / 窗口运动期间不切换布局档（跨阈值时目录树与空态会整块跳变），
+  // 记下最新宽度，松手后由 PerfBus 通知统一落档，让 CSS 过渡一次性平滑完成。
   useEffect(() => {
     const el = panelRef.current;
     if (!el) return;
+    let pendingWidth: number | null = null;
+    const apply = (w: number) => {
+      setNarrow(w < NARROW_PX);
+      setWide(w >= WIDE_PX);
+    };
     const ro = new ResizeObserver(([entry]) => {
-      setNarrow(entry.contentRect.width < NARROW_PX);
-      setWide(entry.contentRect.width >= WIDE_PX);
+      const w = entry.contentRect.width;
+      if (isBusy()) { pendingWidth = w; return; }
+      pendingWidth = null;
+      apply(w);
     });
     ro.observe(el);
-    return () => ro.disconnect();
+    const off = subscribe((busy) => {
+      if (busy || pendingWidth == null) return;
+      apply(pendingWidth);
+      pendingWidth = null;
+    });
+    return () => { ro.disconnect(); off(); };
   }, []);
 
   /** plan-75-334 阶段2：文件加载依赖从**整个 turnChanges** 收窄为「当前预览路径的变更签名」。

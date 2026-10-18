@@ -5,16 +5,17 @@
  * 亮暗由 data-theme 决定，世界由 data-world 决定，两者正交组合。
  * ═══════════════════════════════════════════════════════════ */
 
-/* 弹窗与浮层：中性微暖（plan-91-393：用户反馈弹窗偏青） */
+/* 弹窗与浮层底色（plan-20261017-goal12 项 11）：与主面板同一中性底（--bg-panel），
+ * 弹窗不再比主面板更亮、更偏色；白色分组卡在深色下取 neutral-800，与浮层同一层级。 */
 :root,
 :root[data-theme="light"] {
-  --surface-dialog: #FAFAFA;
+  --surface-dialog: var(--bg-panel);
   --surface-inset: var(--color-white);
   --bg-overlay: color-mix(in srgb, oklch(25% 0.01 60) 26%, transparent);
 }
 :root[data-theme="dark"] {
-  --surface-dialog: oklch(23% 0.003 70);
-  --surface-inset: oklch(27.5% 0.003 70);
+  --surface-dialog: var(--bg-panel);
+  --surface-inset: var(--color-neutral-800);
   --bg-overlay: color-mix(in srgb, #000 52%, transparent);
 }
 

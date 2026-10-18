@@ -514,14 +514,18 @@
 
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  /* zcode 消息流阅读列宽 */
-  --content-max-w: 768px;
+  /* 消息流阅读列宽（由外观设置覆盖：默认 1000px，上限 1600px；0=不限时写 100%） */
+  --content-max-w: 1000px;
   /* v40.1: 消息流统一垂直节奏——工具/思考行高直接取正文行高（同一 token 派生），
      项间距随字号缩放；运行时 applyUiVars 会用外观设置覆盖 --fs-md/--chat-line-height，
      行与文本始终等高、间距始终一致（节距 = 行高 + --flow-gap = 段落节奏）。
      注意 --chat-line-height 是无单位倍率（与外观设置语义一致）。 */
   --chat-line-height: 2.2;
   --flow-gap: calc(var(--fs-md, 13px) * 0.62);
+  /* plan-20261017-ux-overhaul 阶段 B：四处消息流（主流 / 子代理 / 侧边对话 / 工作流）共用的工具行规格 */
+  --flow-icon: 16px;          /* 工具图标槽位，图标替换 / 运行态切换不改变宽度 */
+  --flow-icon-gap: 8px;       /* 图标与动作文字 */
+  --flow-item-gap: 6px;       /* 动作、文件名、目录、摘要之间 */
   --sidebar-fs: 14px;
   --sidebar-icon: 16px;
   --sidebar-focus: var(--text-1);
@@ -602,7 +606,7 @@
 /* 表面层与图标色（浅色） */
 :root,
 :root[data-theme="light"] {
-  /* 弹窗底（参考图1/图2：浅灰底 + 白色分组卡） */
+  /* 弹窗底（参考图1/图2：浅灰底 + 白色分组卡；themes.css 统一为主面板底色） */
   --surface-dialog: oklch(97.6% 0.002 260);
   --surface-inset: var(--color-white);
   --surface-inset-border: color-mix(in oklab, var(--color-neutral-950) 7%, transparent);

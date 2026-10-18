@@ -11,6 +11,8 @@ import { sessionKey, useBrowserStore } from "../store/browser";
 import { useI18n } from "../store/i18n";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { Input } from "./ui";
+import { WorktreeCreateDialog } from "./worktree/WorktreeCreateDialog";
+import { IconGitBranch as IconGitBranchTb } from "./icons";
 import {
   IconMinus, IconSquare, IconX, IconFolder,
   IconGitBranch, IconTerminal,
@@ -59,6 +61,8 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page
   const winApi = window.chatcoderAPI;
 
   const [menuOpen, setMenuOpen] = useState(false);
+  /** 会话级独立工作树弹窗（plan-20261017-goal12 项 6） */
+  const [wtOpen, setWtOpen] = useState(false);
   const [folderMenuOpen, setFolderMenuOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -193,6 +197,25 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page
           <span className="titlebar-workspace-project" title={session.worktree_path}>
             <IconGitBranch size={13} /> {t("titlebar.worktree")}
           </span>
+        )}
+        {session && !session.worktree_path && currentSessionId != null && (
+          <>
+            <button type="button" className="tb-wt-btn" onClick={() => setWtOpen(true)}
+              title="在独立工作树中继续本会话，改动只落在该工作树分支上">
+              <IconGitBranchTb size={13} />
+              <span>工作树</span>
+            </button>
+            <WorktreeCreateDialog
+              open={wtOpen}
+              subtitle={`为「${session.title || "当前会话"}」切换到独立工作树`}
+              explain="本会话之后的改动只落在该工作树的分支上，主工作区保持不变；需要时可在侧栏合并回主分支。"
+              onClose={() => setWtOpen(false)}
+              onCreate={async (opts) => {
+                await api.createWorktree(currentSessionId, opts.branch);
+                await useChatStore.getState().loadBootstrap();
+              }}
+            />
+          </>
         )}
         {session && (
           <div className="titlebar-more" ref={menuRef}>

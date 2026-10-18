@@ -5,6 +5,7 @@ import { initUi, useUiStore } from "./store/ui";
 import { registerBuiltinPlugins } from "./plugins/builtin";
 import { loadExternalPlugins } from "./plugins/external";
 import { install as installPerfMetrics } from "./perf/metrics";
+import "./styles/fonts.css";
 import "./styles/global.css";
 // plan-282-1416: 组件库样式层（依赖 tokens.css，须在 global.css 之后以便覆盖旧兼容类）
 import "./styles/components.css";
@@ -16,6 +17,11 @@ import "./styles/icons.css";
 import "./styles/composer.css";
 import "./styles/home.css";
 import "./styles/panel.css";
+// plan-20261017-frontend-polish：侧边对话 / Git / 工作树三块右侧面板各自独立样式层（sd- / gx- / wtc- 前缀），
+// 不再与 settings-c.css 等共用类名；紧随 panel.css 之后，随后续层正常覆盖。
+import "./styles/side-chat.css";
+import "./styles/git-panel.css";
+import "./styles/worktree.css";
 import "./styles/browser.css";
 import "./styles/market.css";
 import "./styles/motion.css";
@@ -28,6 +34,8 @@ import "./styles/settings-a.css";
 import "./styles/settings-b.css";
 import "./styles/settings-c.css";
 import "./styles/flow.css";
+import "./styles/connector.css";
+import "./styles/debug.css";
 import "./styles/mascot.css";
 // plan-114-450：设置页统一排版的最后一层（模型页 / 记忆页 / 拓展页 / 弹窗按钮 / 全选态），必须最后加载
 import "./styles/settings-unify.css";

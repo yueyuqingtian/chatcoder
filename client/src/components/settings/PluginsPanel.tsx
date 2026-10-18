@@ -9,6 +9,7 @@ import {
 } from "../../plugins/registry";
 import { Select, Tooltip } from "../ui";
 import { IconBox } from "../icons";
+import { CordisPluginsSection } from "./CordisPluginsSection";
 
 const SLOT_LABELS: Record<SlotId, string> = {
   sidebar: "左侧会话栏",
@@ -68,6 +69,7 @@ export function PluginsPanel() {
           );
         })}
       </div>
+      <CordisPluginsSection />
       <div className="settings-row" style={{ marginTop: 12 }}>
         <div className="settings-row-info">
           <div className="settings-row-title">外挂插件协议</div>

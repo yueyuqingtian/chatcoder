@@ -184,7 +184,7 @@ export const PlanCard = memo(function PlanCard({
             type="button"
             className="plan-inline-view"
             onClick={() => {
-              usePanelStore.getState().setPreviewPath(planDocPath);
+              usePanelStore.getState().openPlanPreview(planDocPath);
               usePanelStore.getState().openPanel();
               usePanelStore.getState().openTab("files");
             }}

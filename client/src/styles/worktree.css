@@ -1,0 +1,147 @@
+/* ═══════════════════════════════════════════════════════════
+ * 工作树（components/worktree/*、侧栏工作树行）—— wtc- 前缀
+ * 规划：ai/chatcoder-plan-20261017-frontend-polish.md
+ *
+ * 弹窗结构：说明卡 → 仓库选择（多仓库时）→ 名称与分支 → 起点说明。
+ * 仓库行把「选哪个仓库、它在哪个分支、有没有未提交改动」放在同一行，
+ * 创建前即可判断改动会落在哪里。
+ *
+ * 间距只取四档：2（图标组）/ 4（控件组）/ 8（分组内）/ 12~16（区块间）。
+ * 容器底一律实色：--bg-hover / --bg-active 带 alpha，用作卡片底会透出下层内容。
+ * ═══════════════════════════════════════════════════════════ */
+
+.wtc-repos {
+  --wtc-muted: color-mix(in oklab, var(--text-1) 88%, transparent);
+  --wtc-subtle: color-mix(in oklab, var(--text-1) 78%, transparent);
+  --wtc-surface-sunken: color-mix(in oklab, var(--text-1) 6%, var(--bg-panel));
+  --wtc-surface-selected: color-mix(in oklab, var(--accent) 8%, var(--bg-panel));
+
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wtc-repo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--r-md);
+  background: var(--wtc-surface-sunken);
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-standard), border-color var(--dur-1) var(--ease-standard);
+}
+.wtc-repo:hover { background: color-mix(in oklab, var(--text-1) 9%, var(--bg-panel)); }
+.wtc-repo.is-picked {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  background: var(--wtc-surface-selected);
+}
+.wtc-repo.is-disabled { opacity: 0.6; cursor: default; }
+.wtc-repo input {
+  flex-shrink: 0;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.wtc-repo-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.wtc-repo-name {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+.wtc-repo-tag {
+  flex-shrink: 0;
+  padding: 0 8px;
+  border-radius: var(--r-pill);
+  background: var(--wtc-surface-sunken);
+  color: var(--wtc-muted);
+  font-size: 10px;
+  line-height: 16px;
+  font-weight: 500;
+}
+.wtc-repo-tag.is-warn { color: var(--warning); }
+.wtc-repo-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--wtc-muted);
+}
+.wtc-repo-side {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  max-width: 40%;
+}
+.wtc-repo-branch {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--wtc-muted);
+}
+.wtc-repo-dirty {
+  font-size: 10.5px;
+  color: var(--warning);
+  white-space: nowrap;
+}
+
+.wtc-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.wtc-hint {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--wtc-muted);
+}
+.wtc-base {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--r-md);
+  background: var(--wtc-surface-sunken);
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--wtc-muted);
+}
+.wtc-base svg { flex-shrink: 0; margin-top: 2px; color: var(--wtc-subtle); }
+.wtc-base b { font-weight: 600; color: var(--text-1); }
+.wtc-base code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-1);
+}
+.wtc-base.is-warn {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 10%, var(--bg-panel));
+}
+.wtc-error {
+  margin-top: 12px;
+  font-size: 12.5px;
+  color: var(--error);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wtc-repo { transition: none; }
+}

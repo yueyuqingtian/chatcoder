@@ -28,7 +28,7 @@ export function AttachmentCard({ att }: { att: AttachmentInfo }) {
   return (
     <div className="attach-card" onClick={open} title={`${att.filename}（点击预览）`}>
       {isImageAtt(att) ? (
-        <img className="attach-card-thumb" src={url} alt={att.filename} loading="lazy" />
+        <img className="attach-card-thumb" src={url} alt={att.filename} loading="lazy" decoding="async" />
       ) : (
         <span className="attach-card-icon"><IconPaperclip size={13} /></span>
       )}
@@ -62,6 +62,7 @@ export function MessageImageGrid({ atts }: { atts: AttachmentInfo[] }) {
           alt={a.filename}
           title={`${a.filename}（点击查看大图）`}
           loading="lazy"
+          decoding="async"
           draggable={false}
           onClick={() => openImage(a)}
         />

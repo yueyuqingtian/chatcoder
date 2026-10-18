@@ -13,7 +13,7 @@
 import { create } from "zustand";
 import { applyPaneUpdate } from "../perf/paneTransition";
 
-export type PanelTabId = "task-summary" | "browser" | "terminal" | "files" | "subagent" | "debug" | "workflow";
+export type PanelTabId = "task-summary" | "browser" | "terminal" | "files" | "subagent" | "debug" | "workflow" | "side" | "git";
 export interface PanelTab {
   id: PanelTabId;
   instance: number;
@@ -40,6 +40,8 @@ export interface PanelBucket {
   previewLine: number | null;
   /** v11: 变更审核 diff 预览（path 匹配 previewPath 时 FileTreePanel 展示 DiffEditor） */
   diffPreview: DiffPreview | null;
+  /** 从计划卡打开完整计划后置位：文件管理在可见时消费一次，收起目录树（用户仍可手动展开） */
+  planCollapsePending: boolean;
 }
 
 const STORAGE_KEY = "chatcoder.panel";
@@ -61,7 +63,7 @@ export function bucketSessionId(key: string): number | null {
 }
 
 function emptyBucket(): PanelBucket {
-  return { tabs: [], activeKey: null, closedStack: [], previewPath: null, previewLine: null, diffPreview: null };
+  return { tabs: [], activeKey: null, closedStack: [], previewPath: null, previewLine: null, diffPreview: null, planCollapsePending: false };
 }
 /** 桶 → 顶层投影（当前桶字段镜像）。 */
 function projectionOf(b: PanelBucket) {
@@ -72,6 +74,7 @@ function projectionOf(b: PanelBucket) {
     previewPath: b.previewPath,
     previewLine: b.previewLine,
     diffPreview: b.diffPreview,
+    planCollapsePending: b.planCollapsePending,
   };
 }
 function tabKey(t: PanelTab) { return `${t.id}-${t.instance}`; }
@@ -123,6 +126,10 @@ interface PanelState extends PanelBucket {
   reopenClosedTab: (index: number) => void;
   setActiveTab: (key: string) => void;
   setPreviewPath: (path: string | null, line?: number | null) => void;
+  /** 计划模式「查看完整计划」：预览计划文档，并请求文件管理收起目录树 */
+  openPlanPreview: (path: string) => void;
+  /** 文件管理在可见时消费「收起目录树」请求 */
+  ackPlanCollapse: () => void;
   setDiffPreview: (diff: DiffPreview | null) => void;
   reset: () => void;
 }
@@ -274,6 +281,9 @@ export const usePanelStore = create<PanelState>((set, get) => ({
   // v2.2: 支持行号定位（grep path:line 跳转）
   setPreviewPath: (path, line = null) => writeBucket(get().activeBucket,
     (b) => ({ ...b, previewPath: path, previewLine: line, diffPreview: null })),
+  openPlanPreview: (path) => writeBucket(get().activeBucket,
+    (b) => ({ ...b, previewPath: path, previewLine: null, diffPreview: null, planCollapsePending: true })),
+  ackPlanCollapse: () => writeBucket(get().activeBucket, (b) => ({ ...b, planCollapsePending: false })),
   setDiffPreview: (diff) => writeBucket(get().activeBucket, (b) => ({ ...b, diffPreview: diff })),
 
   reset: () => set({ expanded: false, fullscreen: false, buckets: {}, activeBucket: HOME_BUCKET, ...projectionOf(emptyBucket()) }),

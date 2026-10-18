@@ -503,37 +503,29 @@
 .ui-collapse[data-open="true"] { grid-template-rows: 1fr; opacity: 1; }
 .ui-collapse > .ui-collapse-inner { overflow: hidden; min-height: 0; }
 
-/* ── ⑪ Menu（Radix DropdownMenu） ─────────────────────────── */
+/* ── ⑪ Menu（Radix DropdownMenu） ───────────────────────────
+ * 这里只保留结构项（层级、最小宽、背景、描边）；
+ * 尺寸/圆角/阴影/字号统一由 overlay.css 的浮层规格（--pop-pad / --r-pop / --shadow-pop）承载，
+ * 两处不再各写一套——否则同一浮层会出现两种行高与圆角（用户反馈的「浮窗样式不统一」）。 */
 .ui-menu-content {
   z-index: 1200; /* 浮层：与 Select 下拉同层，须高于 Dialog(1000/1001) */
   min-width: 150px;
-  padding: var(--sp-1);
   border: 1px solid var(--border);
-  border-radius: var(--r-md);
   background: var(--color-popover);
-  box-shadow: var(--shadow-md);
-  animation: ui-pop-in var(--dur-3) var(--ease-emphasized-decel);
 }
 .ui-menu-item {
   display: flex;
   align-items: center;
-  gap: var(--sp-3);
-  height: var(--ctl-h-sm);
-  padding: 0 var(--sp-3);
-  border-radius: var(--r-ctl);
-  font-size: 12px;
   color: var(--text-1);
   cursor: pointer;
   outline: none;
   user-select: none;
 }
-.ui-menu-item[data-highlighted] { background: var(--bg-hover); }
 .ui-menu-item.is-danger { color: var(--color-destructive); }
-.ui-menu-item.is-danger[data-highlighted] { background: var(--error-soft); }
 .ui-menu-item.is-active { background: var(--bg-active); font-weight: 500; }
 .ui-menu-item[data-disabled] { opacity: 0.45; pointer-events: none; }
-.ui-menu-sep { height: 1px; margin: var(--sp-1) 0; background: var(--border); }
-.ui-menu-label { padding: var(--sp-2) var(--sp-3) var(--sp-1); font-size: 11px; color: var(--text-3); }
+.ui-menu-sep { height: 1px; background: var(--border); }
+.ui-menu-label { color: var(--text-3); }
 
 /* ── ⑫ Tooltip ────────────────────────────────────────────── */
 /* 全站唯一的提示样式（plan-282-1530）：圆角卡片 + 描边 + shadow-lg，无箭头。

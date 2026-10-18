@@ -258,12 +258,17 @@ interface SettleOpts {
   visible: boolean;
 }
 
-/** 动作后的「稳定」判定（plan-20261015-browser-perf）：单循环约 30 ms 一轮——
+/** 动作后的「稳定」判定（plan-20261015-browser-perf）。桌面端优先走 settleViaMain（一次 IPC，事件驱动）；
+ *  下面的轮询只在主进程不可用（非 webview 宿主 / 主进程尚未更新）时兜底。单循环约 30 ms 一轮——
  *  导航检测与 DOM 静默并行；只统计动作起点之后页面脚本发起的请求，在途数为 0 才算稳定（点击后等接口返回，
  *  报错提示随之出现）；DOM 静默由页面工具包过滤掉高频噪声节点。最短观察 60 ms、静默 100 ms，预算由动作决定。
  *  结束时一次取回：提示文字（含已消失的）、新出现的可操作元素、接口错误、控制台报错；出错时同一次调用里截图。 */
 async function settleAfter(sid: string, tabId: string, rec: FrameRecord, since: number, settleMs: number, o: SettleOpts) {
   if (!settleMs) return { navigated: rec.navSeq !== since };
+  if (rec.wcId) {
+    const fast = await settleViaMain(sid, tabId, rec, since, settleMs, o);
+    if (fast) return fast;
+  }
   const t0 = performance.now();
   let budget = settleMs;
   let navigated = false;
@@ -293,6 +298,37 @@ async function settleAfter(sid: string, tabId: string, rec: FrameRecord, since: 
     evalKit(rec, "changes", {}, 4000).catch(() => null),
     o.netSeq !== null ? mainExec(rec, "netSince", { since: o.netSeq, bodies: true }).catch(() => null) : Promise.resolve(null),
   ]);
+  return finishSettle(sid, rec, out, chg, net, o);
+}
+
+/** 稳定判定走主进程一次完成（plan-20261017-ux-overhaul 阶段 F）：导航 / 接口返回 / DOM 静默先到先得，
+ *  收尾的页面变化与接口错误也在同一次 IPC 里带回。跳转时等新页面 DOM 就绪，再给新页面一次短预算的静默判定。
+ *  主进程不可用时返回 null，由调用方退回宿主轮询。 */
+async function settleViaMain(sid: string, tabId: string, rec: FrameRecord, since: number, settleMs: number, o: SettleOpts) {
+  const t0 = performance.now();
+  const first: Record<string, any> | null = await mainExec(rec, "settle", { since: o.netSeq, budget_ms: settleMs, quiet_ms: 100, collect: true }).catch(() => null);
+  if (!first) return null;
+  let r: Record<string, any> = first;
+  let navigated = !!r.navigated || rec.navSeq !== since;
+  if (navigated) {
+    // 主进程先于宿主收到跳转：宿主的 navSeq 可能还差一拍，给 300 ms 宽限，确实没跳就按未跳转收尾
+    const moved = await waitNavigationSettled(sid, tabId, since, 12000, { domSince: o.domSince, graceMs: 300 });
+    if (moved) {
+      // 新文档没有工具包：watch 注入并开始记录变化，再判一次静默
+      await evalKit(rec, "watch", {}, 3000).catch(() => null);
+      r = await mainExec(rec, "settle", { since: o.netSeq, budget_ms: 800, quiet_ms: 100, collect: true }).catch(() => null) ?? {};
+    } else {
+      navigated = false;
+      r = await mainExec(rec, "settle", { since: o.netSeq, budget_ms: Math.max(0, settleMs - (performance.now() - t0)), quiet_ms: 100, collect: true }).catch(() => null) ?? {};
+    }
+  }
+  const out: Record<string, any> = { ...(r.state ?? {}), navigated, waited: Math.round(performance.now() - t0) };
+  if (Number(r.pending) > 0) out.pending = Number(r.pending);
+  return finishSettle(sid, rec, out, r.changes ?? null, r.net ?? null, o);
+}
+
+/** 稳定判定收尾：合并页面变化、接口错误、控制台报错；出错或模型要求时同一次调用里截图 */
+async function finishSettle(sid: string, rec: FrameRecord, out: Record<string, any>, chg: Record<string, any> | null, net: Record<string, any> | null, o: SettleOpts) {
   if (chg) {
     if (chg.notices?.length) out.notices = chg.notices;
     if (chg.added?.length) out.added = chg.added;
@@ -452,6 +488,58 @@ async function dispatchMouse(el: any, a: Record<string, any>, zoom = 1) {
   }
 }
 
+// ── 点击送达校验（plan-20261017-hidden-input）────────────
+// 应用窗口被遮挡 / 最小化时，sendInputEvent 的鼠标事件曾被观察到完全到不了网页，而结果照报「已点击」。
+// 派发前在页面挂一个只认可信事件的探针，派发后确认 pointerdown / mousedown 真的到达；没到就改走 CDP 再派发一次，
+// 仍然没到就如实报错。目标落在 iframe 里时顶层页面收不到事件，无从判断，此时不校验（也就不会重复点击）。
+const PROBE_INSTALL = (x: number, y: number) => `(() => {
+  const p = window.__ccInputProbe || (window.__ccInputProbe = { n: 0, on: false });
+  p.n = 0;
+  if (!p.on) {
+    p.on = true;
+    const f = (e) => { if (e.isTrusted) p.n++; };
+    // 多认几种事件：页面在 window 捕获阶段拦掉其中一种时不至于误判为未送达
+    for (const t of ["pointerdown", "mousedown", "pointerup", "mouseup", "click", "contextmenu"]) window.addEventListener(t, f, true);
+  }
+  const el = document.elementFromPoint(${x}, ${y});
+  return el ? el.tagName : "";
+})()`;
+// 页面内等待：guest 已关后台节流，定时器不受宿主隐藏影响；事件一到立即返回
+const PROBE_CHECK = `new Promise((resolve) => {
+  const p = window.__ccInputProbe; const t0 = performance.now();
+  const tick = () => {
+    if (!p) return resolve(-1);
+    if (p.n > 0) return resolve(p.n);
+    if (performance.now() - t0 > 300) return resolve(0);
+    setTimeout(tick, 8);
+  };
+  tick();
+})`;
+const FRAME_TAGS = new Set(["IFRAME", "FRAME", "EMBED", "OBJECT"]);
+
+/** 装探针；返回 false 表示这次点击无法校验（目标在框架内或页面脚本不可用） */
+async function probeInstall(rec: FrameRecord, x: number, y: number): Promise<boolean> {
+  try {
+    const tag = await withTimeout(Promise.resolve(rec.el.executeJavaScript(PROBE_INSTALL(x, y), false)), 3000, "probe");
+    return typeof tag === "string" && !FRAME_TAGS.has(tag);
+  } catch { return false; }
+}
+
+/** true = 已送达；false = 确认未送达；null = 无法判断（页面已跳转、脚本被弹窗阻塞等，按已送达处理，避免重复点击） */
+async function probeCheck(rec: FrameRecord, navSince: number): Promise<boolean | null> {
+  if (rec.navSeq !== navSince) return null;
+  try {
+    const n = await withTimeout(Promise.resolve(rec.el.executeJavaScript(PROBE_CHECK, false)), 3000, "probe");
+    if (rec.navSeq !== navSince) return null;
+    return typeof n === "number" && n >= 0 ? n > 0 : null;
+  } catch { return null; }
+}
+
+/** 宿主窗口当前是否处于后台（被遮挡 / 最小化时宿主页面会被判为 hidden），用于报错说明 */
+function hostBackground(): boolean {
+  return document.visibilityState === "hidden";
+}
+
 // ── 原语分派 ─────────────────────────────────────────────
 async function listTabs(sid: string) {
   const st = useBrowserStore.getState().getSessionState(sid);
@@ -537,6 +625,12 @@ async function netMark(rec: FrameRecord): Promise<number | null> {
 async function quietAfterNav(rec: FrameRecord, netSeq: number | null, budget: number) {
   const t0 = performance.now();
   try { await evalKit(rec, "watch", {}, 3000); } catch { return; }
+  if (rec.wcId) {
+    // 主进程一次判定（接口返回 + DOM 静默，事件驱动）；主进程不支持时退回下面的轮询
+    const left = Math.max(0, budget - (performance.now() - t0));
+    const r = await mainExec(rec, "settle", { since: netSeq, budget_ms: left, quiet_ms: 100 }).catch(() => null);
+    if (r) return;
+  }
   for (;;) {
     const [st, n] = await Promise.all([
       evalKit(rec, "state", {}, 3000).catch(() => null),
@@ -642,6 +736,8 @@ async function dispatch(sid: string, op: string, a: Record<string, any>): Promis
     const [win] = await Promise.all([
       mainExec(rec, "aiWindow", { ms: settleMs + 4000, accept: a.on_dialog !== "dismiss", prompt_text: a.prompt_text || "" }).catch(() => null),
       evalKit(rec, "watch", {}, 4000).catch(() => null), // 页面在跳转：settle 时只看导航
+      // 应用窗口在后台时：页面导航后若还没出过帧，先补一帧，否则输入事件全被丢弃（plan-20261017-hidden-input）
+      hostBackground() ? mainExec(rec, "ensureFrame", {}).catch(() => null) : Promise.resolve(null),
     ]);
     const netSeq = win && typeof win.net_seq === "number" ? win.net_seq : null;
     const since = rec.navSeq;
@@ -649,6 +745,7 @@ async function dispatch(sid: string, op: string, a: Record<string, any>): Promis
     const zoom = zoomOf(rec);
     let release = () => {};
     let aimed: Record<string, any> | null = null;
+    let deliveredVia = "";
     try {
       if (op === "mouse") {
         const act = String(a.action || "click");
@@ -676,7 +773,34 @@ async function dispatch(sid: string, op: string, a: Record<string, any>): Promis
         release = guardFocus(rec.el, hostFocus());
         // activate：目标被遮挡时直接在元素上派发点击（不经过坐标命中，遮挡物拦不住）
         if (act === "activate") await evalKit(rec, "activate", { ref: a.ref }, 8000);
-        else await dispatchMouse(rec.el, { ...a, x, y }, zoom);
+        else if (act === "click") {
+          const checkable = await probeInstall(rec, x, y);
+          await dispatchMouse(rec.el, { ...a, x, y }, zoom);
+          if (checkable && (await probeCheck(rec, since)) === false) {
+            // 没送达（plan-20261017-hidden-input）：先强制补一帧按原通道重派；仍不行改走 CDP；再不行如实报错
+            const bg = hostBackground();
+            let viaErr = "";
+            await mainExec(rec, "ensureFrame", { force: true }).catch(() => null);
+            await probeInstall(rec, x, y);
+            await dispatchMouse(rec.el, { ...a, x, y }, zoom);
+            let ok = await probeCheck(rec, since);
+            if (ok === false) {
+              try {
+                await probeInstall(rec, x, y);
+                // CDP 坐标是页面 CSS 像素，不乘缩放
+                await mainExec(rec, "mouseCdp", {
+                  x, y, button: a.button, count: a.count, modifiers: Array.isArray(a.modifiers) ? a.modifiers : [],
+                });
+              } catch (e) { viaErr = errText(e); }
+              ok = viaErr ? false : await probeCheck(rec, since);
+              if (ok !== false) deliveredVia = "cdp";
+            } else deliveredVia = "retry";
+            if (ok === false) {
+              throw new Error(`点击没有送达页面${bg ? "：应用窗口在后台（被遮挡或最小化）时网页收不到鼠标事件" : ""}`
+                + `${viaErr ? `（备用通道失败：${viaErr}）` : ""}，请把应用窗口切到前台后重试`);
+            }
+          }
+        } else await dispatchMouse(rec.el, { ...a, x, y }, zoom);
         if (visible && (act === "click" || act === "activate")) {
           store.patchAgent(sid, { ripple: { x: x * zoom, y: y * zoom, seq: ++vizSeq } });
         }
@@ -697,7 +821,7 @@ async function dispatch(sid: string, op: string, a: Record<string, any>): Promis
       const settle = await settleAfter(sid, tab.id, rec, since, settleMs, {
         netSeq, consoleSeq, domSince, shot: !!a.shot, visible,
       });
-      return { ...(await baseOf(sid, tab.id, rec)), settle, ...(aimed ? { aimed } : {}) };
+      return { ...(await baseOf(sid, tab.id, rec)), settle, ...(aimed ? { aimed } : {}), ...(deliveredVia ? { delivered_via: deliveredVia } : {}) };
     } finally {
       // 焦点守卫覆盖整个稳定观察期：网页随后抢焦点也会被即时还原（取代原来的固定 30 ms 等待）
       release();

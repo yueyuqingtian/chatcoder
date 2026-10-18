@@ -1,0 +1,383 @@
+/* ═══════════════════════════════════════════════════════════
+ * 侧边对话（components/panel/SidePanel.tsx）—— sd- 前缀
+ * 规划：ai/chatcoder-plan-20261017-frontend-polish.md
+ *
+ * 结构：顶栏（会话标签 + 引用 / 发回 / 删除 / 新建）→ 引用选择器（内联卡片）
+ *       → 消息流 → 上下文注入条 → 输入卡。
+ * 与主对话一致：消息流与输入区同底色，输入卡自带边框与阴影，二者之间不加分割线。
+ *
+ * 间距只取四档：2（图标组）/ 4（控件组）/ 8（分组内）/ 12~16（区块间）；
+ * 同一容器内左右内边距必须相等，不能一边 14 一边 8。
+ * 容器底一律实色：--bg-hover / --bg-active 带 alpha，作卡片底会透出下层内容。
+ * ═══════════════════════════════════════════════════════════ */
+
+.sd-panel {
+  /* 次要文字：text-2/text-3 带 alpha（实测 3.31:1 / 2.08:1），这里抬到 4.5:1 以上 */
+  --sd-muted: color-mix(in oklab, var(--text-1) 88%, transparent);
+  --sd-subtle: color-mix(in oklab, var(--text-1) 78%, transparent);
+  /* 容器底：实色（不用带 alpha 的 hover/active 令牌） */
+  --sd-surface: var(--bg-panel);
+  --sd-surface-sunken: color-mix(in oklab, var(--text-1) 6%, var(--bg-panel));
+  --sd-surface-selected: color-mix(in oklab, var(--accent) 8%, var(--bg-panel));
+
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg-panel);
+  color: var(--text-1);
+}
+
+/* ── 顶栏：会话标签 + 操作 ───────────────────────────────── */
+.sd-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  min-height: 44px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid var(--border);
+}
+.sd-tabs {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.sd-tabs::-webkit-scrollbar { display: none; }
+.sd-head-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--sd-muted);
+  white-space: nowrap;
+}
+.sd-head-title svg { color: var(--sd-subtle); }
+.sd-tab {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--sd-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-standard), color var(--dur-1) var(--ease-standard);
+}
+.sd-tab:hover { background: var(--bg-hover); color: var(--text-1); }
+.sd-tab.is-active { background: var(--bg-active); color: var(--text-1); font-weight: 600; }
+.sd-tab-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--sd-subtle);
+}
+.sd-tab-dot.is-live {
+  background: var(--accent);
+  animation: sd-live 1.8s var(--ease-in-out) infinite;
+}
+@keyframes sd-live {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* ── 顶栏右侧操作区：四个操作同一行，控件之间 4px ───────── */
+.sd-head-ops {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+/* 引用按钮：与发回/删除/新建同为图标按钮；已引用时右上角显示轮数 */
+.sd-quote-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.sd-quote-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 4px;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  color: var(--bg-panel);
+  font-size: 9px;
+  line-height: 14px;
+  font-weight: 600;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+/* 引用面板打开时，触发按钮保持选中底色：否则看不出来面板是从哪里打开的 */
+.sd-head-ops button[aria-expanded="true"] {
+  background: var(--bg-active);
+  color: var(--text-1);
+}
+
+/* ── 内容区 ─────────────────────────────────────────────── */
+.sd-convo {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  /* 引用面板是它的浮层（absolute） */
+  position: relative;
+}
+
+/* ── 引用选择器：消息流上方的浮层 ───────────────────
+ * 为何用 absolute：它是临时选择器，若占据文档流，展开时会压矮消息流，
+ * 空态插图（嗒嗒）刚点开就上下跳一下。浮层不参与排版，消息流布局完全不变。
+ * 宽度与输入卡一致：面板宽减两侧 12px；点外与 Esc 关闭由组件负责。 */
+.sd-picker {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  width: min(calc(100% - 24px), calc(var(--content-max-w) - 24px));
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--sd-surface);
+  box-shadow: 0 12px 28px -18px rgba(0, 0, 0, calc(0.5 * var(--shadow-strength, 1)));
+  overflow: hidden;
+}
+.sd-picker-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  /* 左右同为 12px：关闭按钮右边缘与底部操作按钮对齐 */
+  padding: 12px 12px 8px;
+}
+.sd-picker-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--text-1);
+}
+.sd-picker-sub {
+  font-size: 11.5px;
+  font-weight: 400;
+  line-height: 1.55;
+  color: var(--sd-muted);
+}
+.sd-picker-list {
+  max-height: min(260px, 38vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* 4px 容器内边距 + 条目自身 8px = 12px 基线 */
+  padding: 0 4px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sd-pick {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px;
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-standard);
+}
+.sd-pick:hover { background: var(--bg-hover); }
+.sd-pick.is-checked { background: var(--sd-surface-selected); }
+.sd-pick input {
+  flex-shrink: 0;
+  margin: 4px 0 0;
+  accent-color: var(--accent);
+}
+.sd-pick-index {
+  flex-shrink: 0;
+  min-width: 20px;
+  height: 20px;
+  border-radius: var(--r-sm);
+  background: var(--sd-surface-sunken);
+  color: var(--sd-muted);
+  font-size: 10.5px;
+  line-height: 20px;
+  font-weight: 600;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.sd-pick.is-checked .sd-pick-index {
+  background: var(--sd-surface-selected);
+  color: var(--text-1);
+}
+.sd-pick-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sd-pick-q {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  /* 行高必须显式给定：窄面板里依赖默认行高会把两行文字挤成一团 */
+  line-height: 1.55;
+  color: var(--text-1);
+}
+.sd-pick-a {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--sd-muted);
+}
+.sd-picker-empty {
+  padding: 0 12px 12px;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--sd-muted);
+}
+.sd-picker-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-light);
+  /* 实色底：此前用 55% 的 hover 混色，列表滚上来会透出文字 */
+  background: var(--sd-surface-sunken);
+}
+.sd-picker-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.sd-link {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--sd-muted);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.sd-link:hover { color: var(--text-1); }
+.sd-picker-count {
+  font-size: 11.5px;
+  color: var(--sd-muted);
+  font-variant-numeric: tabular-nums;
+}
+.sd-picker-btns { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+
+/* ── 消息流与输入区：同底色、无分割线 ───────────────────── */
+.sd-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.sd-composer {
+  flex-shrink: 0;
+  padding: 8px 12px 12px;
+}
+
+/* 主对话的输入卡与消息流自带 32px 内边距与宽度上限；侧边是窄栏，收为 12px。
+   输入卡是所有内容的宽度基准：引用面板 / 上下文条 / 提示条都用同一条 min() 公式，
+   保证左右边界与输入卡边框严格一致（面板窄时铺满，宽时才受内容展示宽度限制）。 */
+.sd-panel .composer {
+  width: 100%;
+  min-width: 0;
+  max-width: min(100%, var(--content-max-w));
+  margin: 0 auto;
+  padding: 0 12px;
+}
+.sd-panel .mf-list {
+  max-width: min(100%, var(--content-max-w));
+  margin: 0 auto;
+  padding: 0 12px;
+}
+
+/* ── 上下文注入条：贴在输入卡上方，说明「发一次就移除」 ─── */
+.sd-context {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  width: min(calc(100% - 24px), calc(var(--content-max-w) - 24px));
+  margin: 0 auto 8px;
+  padding: 8px 12px;
+  border-radius: var(--r-md);
+  background: var(--sd-surface-selected);
+  color: var(--sd-muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.sd-context > svg { flex-shrink: 0; color: var(--text-1); }
+.sd-context-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sd-context-sub { color: var(--sd-subtle); }
+.sd-context-x {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--sd-muted);
+  cursor: pointer;
+}
+.sd-context-x:hover { background: var(--bg-active); color: var(--text-1); }
+
+/* ── 提示与空态 ─────────────────────────────────────────── */
+.sd-notice {
+  flex-shrink: 0;
+  width: min(calc(100% - 24px), calc(var(--content-max-w) - 24px));
+  margin: 0 auto 8px;
+  padding: 8px 12px;
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--error) 10%, var(--bg-panel));
+  color: var(--error);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.sd-empty {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 16px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sd-tab-dot.is-live { animation: none; }
+}

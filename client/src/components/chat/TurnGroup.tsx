@@ -632,7 +632,7 @@ export const TurnGroup = memo(function TurnGroup({
         return (
           <div key={i} className="turn-item turn-item-divider goal-continuation-divider">
             <span className="turn-divider-line" />
-            <span className="turn-divider-text">{gn > 0 ? `⟳ 目标续跑 · 第 ${gn} 轮` : "⟳ 目标续跑"}</span>
+            <span className="turn-divider-text">{gn > 0 ? `目标续跑 · 第 ${gn} 轮` : "目标续跑"}</span>
             <span className="turn-divider-line" />
           </div>
         );
@@ -642,7 +642,7 @@ export const TurnGroup = memo(function TurnGroup({
         return (
           <div key={i} className="turn-item turn-item-divider subagent-wakeup-divider">
             <span className="turn-divider-line" />
-            <span className="turn-divider-text">⟳ 子代理已完成，继续执行</span>
+            <span className="turn-divider-text">子代理已完成，继续执行</span>
             <span className="turn-divider-line" />
           </div>
         );

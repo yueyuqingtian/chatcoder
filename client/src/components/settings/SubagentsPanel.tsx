@@ -69,12 +69,14 @@ function SubagentFormModal({ open, editing, models, tools, onClose, onSaved }: {
   const handleSave = async () => {
     if (!form.name.trim()) return;
     try {
+      // 清空覆盖必须显式传 null：undefined 会被 JSON.stringify 丢弃，后端 PATCH 按
+      // exclude_unset 视为“未修改”，导致「固定模型改回跟随主代理」等清空操作不生效。
       const data = {
         name: form.name.trim(),
-        description: form.description.trim() || undefined,
-        tools_whitelist: form.tools_whitelist.size > 0 ? [...form.tools_whitelist] : undefined,
-        model_id: form.model_id ? Number(form.model_id) : undefined,
-        system_prompt: form.system_prompt || undefined,
+        description: form.description.trim() || null,
+        tools_whitelist: form.tools_whitelist.size > 0 ? [...form.tools_whitelist] : null,
+        model_id: form.model_id ? Number(form.model_id) : null,
+        system_prompt: form.system_prompt || null,
         // plan-330-1648 M2: 显式 null = 清除覆盖（回落会话档位）
         reasoning_effort: form.reasoning_effort || null,
         is_active: form.is_active,

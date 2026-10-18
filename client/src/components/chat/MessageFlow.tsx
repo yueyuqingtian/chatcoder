@@ -22,6 +22,7 @@ import { useTextHighlight } from "../../hooks/useTextHighlight";
 import { MarkdownContent } from "../MarkdownContent";
 import { MsgType } from "@chatcoder/shared";
 import { useChatStore } from "../../store/chat";
+import { useScoped, useScopedGetter } from "./convoScope";
 import { latestWorkflowEndMs, selectSessionWorkflowBusy, useWorkflowStore } from "../../store/workflow";
 import { api } from "../../api/client";
 import { Empty } from "../ui";
@@ -110,6 +111,8 @@ export interface MessageStreamProps {
   /** 滚动目标：当外部点击任务卡时传 { turnId } 或 { threadId }，滚动到对应节点 */
   scrollTarget?: { threadId?: number; turnId?: number } | null;
   clearScrollTarget?: () => void;
+  /** 主消息流为空时的提示文案（嵌入场景可自定义，如侧边对话） */
+  emptyText?: string;
   /** plan-75-334 阶段3：宿主可见性。false 时子代理尾部不推进流式视觉更新
    *  （恢复可见时以当前缓冲一次性对齐）。主会话不传（默认可见）。 */
   visible?: boolean;
@@ -265,6 +268,11 @@ function MessageFlowCore({
   >(null);
   const lastWidthRef = useRef(0);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
+  /** 宽度收尾期间（面板展开/折叠/拖分隔条）暂停跟随判定：
+   *  内容先重排变高、scrollTop 随后才被还原，中间读到的 distance 只反映瞬时状态，
+   *  据此更新会把「贴底」误判成「用户已离开底部」（按钮常驻 + 新消息不自动滚动）。
+   *  抑制解除时由 finishRestore() 按最终几何统一同步一次。 */
+  const suppressFollowRef = useRef(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchKeyword, setSearchKeyword] = useState("");
   const [activeMatchIndex, setActiveMatchIndex] = useState(0);
@@ -525,6 +533,8 @@ function MessageFlowCore({
       clearProgrammaticScroll();
     }
     if (!el) return;
+    // 宽度收尾期间不更新跟随态：重排尚未完成，distance 不代表用户意图。
+    if (suppressFollowRef.current) return;
     const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
     // 恢复 v0.2.0 贴底阈值 60px（抵抗高 DPI 缩放浮点舍入与末尾元素 margin/padding 波动）
     const isNearBottom = distance < 60;
@@ -692,6 +702,8 @@ function MessageFlowCore({
     if (!el || typeof ResizeObserver === "undefined") return;
 
     const capture = () => {
+      // 从这里到 restore 完成，跟随态一律由 finishRestore() 收口（见 suppressFollowRef 注释）
+      suppressFollowRef.current = true;
       const nodes = Array.from(el.querySelectorAll<HTMLElement>("[data-index]"));
       const viewportTop = el.getBoundingClientRect().top + el.clientTop;
       const firstNode = nodes.find((node) => node.getBoundingClientRect().bottom > viewportTop);
@@ -729,10 +741,27 @@ function MessageFlowCore({
       };
     };
 
+    /** 宽度收尾结束：解除跟随判定抑制，并按**最终几何**同步一次跟随态。
+     *  为什么必须显式同步：贴底分支只写 scrollTop，而这次写入产生的 scroll 事件落在
+     *  程序滚动宽限内被早退，之后不会再有第二个 scroll 事件回来修正 autoScroll /
+     *  showScrollBottom——状态于是停在「视觉贴底、逻辑却判为已离开底部」，
+     *  表现为回到底部按钮常驻、点它位置不变、且新消息不再自动滚动。 */
+    const finishRestore = () => {
+      suppressFollowRef.current = false;
+      const el2 = parentRef.current;
+      if (!el2) return;
+      const distance = el2.scrollHeight - el2.scrollTop - el2.clientHeight;
+      const atBottom = distance < 60;
+      if (atBottom) userScrollOverrideRef.current = false;
+      autoScrollRef.current = atBottom;
+      setAutoScroll(atBottom);
+      setShowScrollBottom(distance > 120);
+    };
+
     const restore = () => {
       const anchor = widthAnchorRef.current;
       const el2 = parentRef.current;
-      if (!anchor || !el2) return;
+      if (!anchor || !el2) { suppressFollowRef.current = false; return; }
       markProgrammaticScroll();
       const max = el2.scrollHeight - el2.clientHeight;
       // plan-387-1825 A13：锚点不可信（容器宽为 0、几何塌缩）时**禁止**走「贴底」分支——
@@ -743,7 +772,7 @@ function MessageFlowCore({
         // 标记因而永久为真 → onScroll 永久早退 → 「展开/拖拉/折叠面板之后就再也不自动贴底」，
         // 且上滑接管态再也无法通过「滚回贴底」自行解除（只能点回到底部按钮强制复位）。
         // 这里显式复位，并再跨一帧兜住「scroll 事件异步派发」的时序。
-        requestAnimationFrame(() => clearProgrammaticScroll());
+        requestAnimationFrame(() => { clearProgrammaticScroll(); finishRestore(); });
       } else if (anchor.index >= 0) {
         // ① 粗还原：按虚拟器几何把锚点项放回它原来的视口偏移。
         const offsetTop = virtualizer.getOffsetForIndex(anchor.index)?.[0];
@@ -771,12 +800,12 @@ function MessageFlowCore({
             if (Math.abs(delta) > 1) el2.scrollTop += delta;
           }
           if (remaining > 0) requestAnimationFrame(() => correctAnchor(remaining - 1));
-          else clearProgrammaticScroll();
+          else { clearProgrammaticScroll(); finishRestore(); }
         };
         requestAnimationFrame(() => correctAnchor(5));
       } else {
         if (max > 0) el2.scrollTop = anchor.ratio * max;
-        requestAnimationFrame(() => { clearProgrammaticScroll(); });
+        requestAnimationFrame(() => { clearProgrammaticScroll(); finishRestore(); });
       }
     };
 
@@ -814,6 +843,8 @@ function MessageFlowCore({
             missedDuringMotion = false;
             restoreStartedAt = 0;
             lastProbeW = -1;
+            // 容器已卸载：必须解除抑制，否则跟随判定会永久失效
+            suppressFollowRef.current = false;
             return;
           }
           const w = el2.clientWidth;
@@ -1233,36 +1264,39 @@ function MainMessageFlow({
   scrollTarget,
   clearScrollTarget,
   className,
+  emptyText,
 }: {
   actions?: "full" | "copy-only" | "none";
   scrollTarget?: { threadId?: number; turnId?: number } | null;
   clearScrollTarget?: () => void;
   className?: string;
+  emptyText?: string;
 }) {
-  const messages = useChatStore((s) => s.messages);
-  const turns = useChatStore((s) => s.turns);
-  const isRunning = useChatStore((s) => s.isRunning);
-  const runningTurnId = useChatStore((s) => s.runningTurnId);
+  const getScoped = useScopedGetter();
+  const messages = useScoped("messages");
+  const turns = useScoped("turns");
+  const isRunning = useScoped("isRunning");
+  const runningTurnId = useScoped("runningTurnId");
   // v39: 后台子代理运行数——主会话等待子代理时显示「等待子代理结束…」
-  const pendingSubagents = useChatStore((s) => s.pendingSubagents);
-  const currentSessionId = useChatStore((s) => s.currentSessionId);
+  const pendingSubagents = useScoped("pendingSubagents");
+  const currentSessionId = useScoped("currentSessionId");
   // 主代理未在跑、但后台工作流在执行（含工作流结束后等待唤醒主代理的空档）：消息流下方显示「等待响应…」（工作流才是此刻的执行者）
   const workflowBusy = useWorkflowStore((s) => selectSessionWorkflowBusy(s, currentSessionId));
   // 本会话已启动的工作流里最晚的结束时刻（完成 / 取消 / 暂停）：整轮「已工作」用时的终点下限，见 TurnGroup
   const backgroundEndedAt = useWorkflowStore((s) => (currentSessionId == null ? 0 : latestWorkflowEndMs(s.bySession[currentSessionId])));
-  const subagentMeta = useChatStore((s) => s.subagentMeta);
+  const subagentMeta = useScoped("subagentMeta");
   // S8（FlowEngine）：**不再**订阅 streamingBuffers / thinkingBuffers。
   // 缓冲每帧换新引用，此前会让整棵消息流每帧重渲染（运行期“更卡”的头号来源）。
   // 现在订阅下沉到 <StreamingTail>（只重渲染那一个组件），主树与 delta 解耦。
   // plan-95: 计划卡归属 turn——卡片内嵌到该 turn 行尾随时间线滚动，
   // 不再固定在消息流最底部（与后续新消息脱节）
-  const planTurnId = useChatStore((s) => s.pendingPlan?.turnId ?? null);
+  const planTurnId = useScoped("pendingPlan")?.turnId ?? null;
   // v30: 压缩中状态（compact.started 载荷）——v42: 不再在消息流尾部渲染「正在压缩上下文」
   // 统计卡片（用户反馈与状态行重复、样式突兀），改为把流式状态行文案从「处理中…」切换为「压缩中…」。
-  const isCompacting = useChatStore((s) => s.isCompacting);
+  const isCompacting = useScoped("isCompacting");
   // plan-282-1441（#8）：调试现场——AI 调试试过程中在消息流尾部展示“停在哪一行”。
   // 这是“用户能看到断点进行到哪一行代码”在消息流侧的落点（另一处在调试面板）。
-  const debugState = useChatStore((s) => s.debugState);
+  const debugState = useScoped("debugState");
   const activeDebug = useMemo(() => {
     for (const t of ["web", "java"] as const) {
       const st = debugState?.[t];
@@ -1345,7 +1379,7 @@ function MainMessageFlow({
     [messages],
   );
 
-  const plansByTurn = useChatStore((s) => s.plansByTurn);
+  const plansByTurn = useScoped("plansByTurn");
 
   // plan-75-334 阶段1：在父层一次性计算全局派生值，避免每个 TurnGroup 重复 selector
   // 1. 最近用户消息 ID（从尾部扫描，每个 TurnGroup 都需要判断是否为最新）
@@ -1357,8 +1391,8 @@ function MainMessageFlow({
   }, [messages]);
 
   // 2. 流错误相关状态（每个 TurnGroup 都需要判断是否需要隐藏错误消息）
-  const flowErrorTurnId = useChatStore((s) => s.flowError?.turnId ?? null);
-  const hiddenTurnErrors = useChatStore((s) => s.hiddenTurnErrors);
+  const flowErrorTurnId = useScoped("flowError")?.turnId ?? null;
+  const hiddenTurnErrors = useScoped("hiddenTurnErrors");
 
   // plan-20261014-actions-wait：后台（工作流 / 子代理）仍在跑时，消息流尾部那一轮不算结束——
   // 主代理即使已收工（turn 行状态为 completed），后台跑完后服务端还会唤醒续跑并并入该轮。
@@ -1406,12 +1440,12 @@ function MainMessageFlow({
   );
 
   // S8：流式文本/信号不再在此计算（已下沉到 <StreamingTail> 的精确 selector）。
-  const turnStatus = useChatStore((s) => s.turnStatus);
+  const turnStatus = useScoped("turnStatus");
   const workflowOnly = !isRunning && workflowBusy;
   // plan-308-1542 需求1：任务执行类错误卡（只进消息流，不弹右上角 Toast）
-  const flowError = useChatStore((s) => s.flowError);
-  const clearFlowError = useChatStore((s) => s.clearFlowError);
-  const dismissTurnError = useChatStore((s) => s.dismissTurnError);
+  const flowError = useScoped("flowError");
+  const clearFlowError = useScoped("clearFlowError");
+  const dismissTurnError = useScoped("dismissTurnError");
 
   return (
     <MessageFlowCore
@@ -1441,7 +1475,7 @@ function MainMessageFlow({
               onRetry={() => {
                 // 重试 = 重发最近一条用户消息（若可定位），否则仅清除提示
                 const lastUser = [...messages].reverse().find((m) => m.sender_type === "user");
-                if (lastUser) void useChatStore.getState().sendTurn(msgText(lastUser.content));
+                if (lastUser) void getScoped().sendTurn(msgText(lastUser.content));
               }}
               // plan-41-228：关闭 = 清除末尾卡 + 隐藏该 turn 内同源 ERROR 消息（否则同一条错误换个样式又冒出来）
               onClose={() => { dismissTurnError(flowError.turnId); clearFlowError(); }}
@@ -1456,7 +1490,7 @@ function MainMessageFlow({
       scrollTarget={scrollTarget}
       clearScrollTarget={clearScrollTarget}
       className={className}
-      emptyText="选择或创建会话，开始你的任务"
+      emptyText={emptyText ?? "选择或创建会话，开始你的任务"}
     />
   );
 }
@@ -1474,12 +1508,12 @@ function SubagentMessageFlow({
   visible?: boolean;
   className?: string;
 }) {
-  const currentSessionId = useChatStore((s) => s.currentSessionId);
+  const currentSessionId = useScoped("currentSessionId");
   const storeMessages = useChatStore((s) => (threadId != null ? s.subagentMessages[threadId] || [] : []));
   // S8：子代理流式文本同样下沉到 <StreamingTail>（见其注释），此处不再订阅缓冲。
   const subagentMeta = useChatStore((s) => (threadId != null ? s.subagentMeta[threadId] : undefined));
   // plan-75-334 阶段1：turn 行状态改由本层统一查询（与改造前每个 TurnGroup 各自查询语义一致）
-  const turns = useChatStore((s) => s.turns);
+  const turns = useScoped("turns");
 
   // v36 修复：与 SubagentPanel / SubagentCard 口径统一——后端存在 in_progress 状态，
   // 只判 running 会把运行中的面板当成终态（计时条消失、汇报卡片提前生效、运行态标记误判）。
@@ -1597,6 +1631,7 @@ export function MessageFlow(props: MessageStreamProps) {
       scrollTarget={props.scrollTarget}
       clearScrollTarget={props.clearScrollTarget}
       className={props.className}
+      emptyText={props.emptyText}
     />
   );
 }

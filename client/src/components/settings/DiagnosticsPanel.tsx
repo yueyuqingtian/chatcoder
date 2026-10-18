@@ -1,5 +1,6 @@
 /** 设置中心：诊断（v2.2 对齐 zcode 3.18）。系统健康检查 + checkpoint 占用与清理。
  * 代码符号索引的状态/开关/重建已统一收敛到「索引库」页面（本页不再展示，避免两处入口数据口径不一）。 */
+import { notify } from "../../store/toast";
 import { useState } from "react";
 import { api } from "../../api/client";
 import { useChatStore } from "../../store/chat";
@@ -41,7 +42,7 @@ export function DiagnosticsPanel() {
     try {
       const r = await api.cleanupCheckpoints();
       const deleted = (r.results as Array<{ deleted?: number }>).reduce((a, b) => a + (b.deleted ?? 0), 0);
-      useChatStore.setState({ error: `已清理 ${deleted} 个 checkpoint 文件` });
+      notify.success(`已清理 ${deleted} 个 checkpoint 文件`);
       await run();
     } catch (e) { useChatStore.setState({ error: String(e) }); }
     finally { setCleaning(false); }

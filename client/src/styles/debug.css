@@ -1,0 +1,362 @@
+/* 右侧面板「调试」（components/panel/DebugPanel.tsx）。
+ * 结构：纵向三块卡片（连接 / 观测 / 断点）+ 仅真断点连接时出现的断点会话卡。
+ * 层次靠卡片底色与留白，不用左侧色条；状态用圆点与角标表达。
+ * 共用的断点会话细节类（.dbg-location / .dbg-block / .dbg-stack-* / .dbg-var-*）仍在 global.css，与设置页调试配置共用。
+ *
+ * 间距只取四档：2（图标组）/ 4（控件组）/ 8（分组内）/ 12~16（区块间）。
+ * 卡片底用实色混合：--bg-hover / --bg-active 带 alpha，深色主题下 0.1 的 alpha 几乎全透明。
+ * 次要文字用局部 muted（≥4.5:1），不用 --text-3（实测 2.08:1）。 */
+
+.dbgp {
+  --dbgp-muted: color-mix(in oklab, var(--text-1) 88%, transparent);
+  --dbgp-subtle: color-mix(in oklab, var(--text-1) 78%, transparent);
+  --dbgp-surface: color-mix(in oklab, var(--text-1) 4%, var(--bg-panel));
+  --dbgp-surface-sunken: color-mix(in oklab, var(--text-1) 7%, var(--bg-panel));
+
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 12px 20px;
+  height: 100%;
+  min-width: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.dbgp-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--warning) 12%, var(--bg-panel));
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-1);
+}
+.dbgp-notice-text { min-width: 0; overflow-wrap: anywhere; }
+
+.dbgp-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px;
+  border-radius: var(--r-lg);
+  background: var(--dbgp-surface);
+}
+
+.dbgp-card-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  min-height: 24px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+.dbgp-card-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+.dbgp-card-title svg { color: var(--dbgp-muted); flex-shrink: 0; }
+.dbgp-card-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--dbgp-muted);
+}
+.dbgp-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* 卡片内的分区：区块之间用一条细线分隔，避免三块同权大卡片平铺 */
+.dbgp-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.dbgp-group + .dbgp-group {
+  padding-top: 12px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+
+.dbgp-status-line {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--dbgp-muted);
+  overflow-wrap: anywhere;
+}
+.dbgp-status-line code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-1);
+}
+
+.dbgp-subhead {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--dbgp-muted);
+}
+.dbgp-subhead-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dbgp-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--dbgp-muted);
+  overflow-wrap: anywhere;
+}
+.dbgp-hint code,
+.dbgp-env code,
+.dbgp-job-cmd,
+.dbgp-bp-target {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.dbgp-empty {
+  padding: 4px 0;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--dbgp-muted);
+  overflow-wrap: anywhere;
+}
+.dbgp-dim { color: var(--dbgp-subtle); }
+
+.dbgp-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--dbgp-subtle);
+}
+.dbgp-dot.is-live { background: var(--success); }
+
+/* 角标：状态用文案 + 颜色表达，不占据版面 */
+.dbgp-tag {
+  flex-shrink: 0;
+  padding: 0 8px;
+  border-radius: var(--r-pill);
+  background: var(--dbgp-surface-sunken);
+  font-size: 10px;
+  line-height: 16px;
+  white-space: nowrap;
+  color: var(--dbgp-muted);
+}
+.dbgp-tag.is-ok { color: var(--success); }
+.dbgp-tag.is-warn { color: var(--warning); }
+
+/* ── 连接：进程列表 + 环境信息 ── */
+.dbgp-procs,
+.dbgp-jobs,
+.dbgp-hits,
+.dbgp-bps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.dbgp-proc {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 0;
+}
+.dbgp-proc-pid {
+  flex-shrink: 0;
+  min-width: 48px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--dbgp-muted);
+}
+.dbgp-proc-main {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-1);
+}
+
+.dbgp-env {
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--dbgp-muted);
+}
+.dbgp-env summary {
+  cursor: pointer;
+  color: var(--dbgp-muted);
+}
+.dbgp-env > div { min-width: 0; overflow-wrap: anywhere; }
+.dbgp-env code { color: var(--text-1); word-break: break-all; }
+
+/* ── 观测：作业与命中 ── */
+.dbgp-job {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 12px;
+  border-radius: var(--r-md);
+  background: var(--dbgp-surface-sunken);
+}
+.dbgp-job-cmd {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-1);
+}
+
+.dbgp-hit {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 8px 12px;
+  border-radius: var(--r-md);
+  background: var(--dbgp-surface-sunken);
+}
+.dbgp-hit-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: 11px;
+}
+.dbgp-hit-time {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  color: var(--dbgp-muted);
+}
+.dbgp-hit-target {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  color: var(--text-1);
+}
+.dbgp-hit-cost {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--dbgp-muted);
+}
+.dbgp-hit-value {
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--dbgp-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.dbgp-hit-value.is-error { color: var(--error); }
+
+/* ── 断点：IDEA 与本软件两组，同一行版式 ── */
+.dbgp-bp {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 12px;
+  border-radius: var(--r-md);
+  background: var(--dbgp-surface-sunken);
+}
+.dbgp-bp-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dbgp-bp-line1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.dbgp-bp-file {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-1);
+}
+.dbgp-bp-lineno {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--dbgp-muted);
+}
+.dbgp-bp-dir {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--dbgp-muted);
+}
+.dbgp-bp-target {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dbgp-muted);
+}
+.dbgp-bp-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ── 断点会话（Web/Java 真断点）：卡片内再分块 ── */
+.dbgp-session {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.dbgp-session + .dbgp-session {
+  padding-top: 12px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+.dbgp-session .dbgp-card-actions { margin-left: 0; flex-wrap: wrap; }
+
+@media (prefers-reduced-motion: reduce) {
+  .dbgp-dot { transition: none; }
+}

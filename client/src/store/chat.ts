@@ -2,7 +2,7 @@
 import { create } from "zustand";
 import { api } from "../api/client";
 import { ApiError } from "../api/client";
-import type { ArtifactOut, ArthasEntryOut, AttachmentInfo, ComposerRefOut, DebugStatusOut, FileChangeOut, MergeReportOut, MessageOut, ModelOut, ProjectOut, ProviderOut, RollbackAffected, RollbackPreviewFile, SessionOut, TaskOut, TurnOut, WorkflowNodeBrief } from "../api/client";
+import type { ArtifactOut, ArthasEntryOut, AttachmentInfo, ComposerRefOut, DebugStatusOut, FileChangeOut, MergeReportOut, MessageOut, ModelOut, ProjectOut, ProviderOut, RollbackAffected, RollbackConflict, RollbackPreviewFile, SessionOut, TaskOut, TurnOut, WorkflowNodeBrief } from "../api/client";
 import { wsClient, globalWsClient } from "../api/ws";
 import { normalizeApprovalMode, normalizeDraftMode } from "./drafts";
 import { parseRefLines } from "../utils/refLines";
@@ -204,7 +204,7 @@ export interface SessionSlice {
   /** 计划卡片按 turnId 持久化字典：按时间线固定展示，执行与完成后不消失 */
   plansByTurn: Record<number, PlanCardInfo>;
   reviewedFiles: Record<string, boolean>;
-  rollbackPending: { turnId: number; files: RollbackPreviewFile[]; affected: RollbackAffected } | null;
+  rollbackPending: { turnId: number; files: RollbackPreviewFile[]; conflicts: RollbackConflict[]; affected: RollbackAffected } | null;
   turnChanges: Record<number, FileChangeOut[]>;
   todos: TodoItem[] | null;
   /** plan-282-1492：AI 清单所属 turn——判定"这份清单还活着吗"的判据（随会话分桶保存/恢复）。 */
@@ -300,6 +300,13 @@ function _sliceToView(slice: SessionSlice | undefined): Partial<ChatState> {
   return { ...slice };
 }
 
+/** 按会话 id 读取会话切片（侧边会话统一的基础设施，plan 20261017-side-session P1）。
+ *  当前会话取顶层投影的快照；其它会话取分桶缓存。只读，不改变任何现有消费方的行为。 */
+export function sessionSliceOf(state: ChatState, sid: number): SessionSlice | null {
+  if (sid === state.currentSessionId) return _snapshotSlice(state);
+  return state.sessionState[sid] ?? null;
+}
+
 interface ChatState {
   projects: ProjectOut[];
   sessions: SessionOut[];
@@ -386,7 +393,7 @@ interface ChatState {
   /** v6: 已审查的产物文件（path -> true），用于审查清单展示。 */
   reviewedFiles: Record<string, boolean>;
   /** v9: 回滚确认弹窗数据（点击回滚先预览，确认后执行）。v12: 含连带影响统计。 */
-  rollbackPending: { turnId: number; files: RollbackPreviewFile[]; affected: RollbackAffected } | null;
+  rollbackPending: { turnId: number; files: RollbackPreviewFile[]; conflicts: RollbackConflict[]; affected: RollbackAffected } | null;
   /** v11: turn 完成后的变更审核清单缓存（turnId -> FileChangeOut[]）。 */
   turnChanges: Record<number, FileChangeOut[]>;
   /** v15: 当前 turn 模型自主维护的执行清单（todo.updated 事件）。 */
@@ -477,11 +484,12 @@ cancelTurn: () => Promise<void>;
   stopSessionExecution: () => Promise<void>;
   forceStop: () => Promise<void>;
 resumeTurn: () => Promise<void>;
-  rollbackTurn: (turnId: number, restoreToComposer?: boolean) => Promise<void>;
+  /** 返回是否回滚成功；失败时错误已写入 error，调用方可据此重新预览 */
+  rollbackTurn: (turnId: number, restoreToComposer?: boolean, allowPartial?: boolean) => Promise<boolean>;
   /** v9: 请求回滚预览（拉取文件级回滚对比），返回是否成功（失败时 error 已设置）。 */
   requestRollbackPreview: (turnId: number) => Promise<boolean>;
   /** v9: 确认执行回滚（预览弹窗点确认后调用）。 */
-  confirmRollback: (restoreToComposer?: boolean) => Promise<void>;
+  confirmRollback: (opts?: { restoreToComposer?: boolean; allowPartial?: boolean }) => Promise<void>;
   /** v9: 取消回滚（关闭弹窗）。 */
   cancelRollback: () => void;
   confirmPlan: (task: string) => Promise<void>;
@@ -508,6 +516,8 @@ resumeTurn: () => Promise<void>;
   /** plan-404-1892（图5）：进入新任务空态——清空全部会话级数据（复用 _resetSessionState），
    *  保留 currentProjectId 与右面板 tab；sessionState 分桶不动（切回旧会话仍可恢复）。 */
   startNewTask: () => void;
+  /** 调试面板「清空观测命中」：只清前端流水，不影响 Arthas 侧的观测作业。 */
+  clearArthasEntries: () => void;
   /** v11: 拉取指定 turn 的变更审核清单。 */
   loadTurnChanges: (turnId: number) => Promise<void>;
   /** v11: 批量审核（乐观更新 + PUT 持久化，失败回滚并 toast）。 */
@@ -736,32 +746,17 @@ let _highLoadUntil = 0;
 const FLUSH_COST_BUDGET_MS = 6;
 const HIGH_LOAD_GAP_MS = 33;
 const HIGH_LOAD_HOLD_MS = 600;
-let _flushWaitListening = false;
+/** 几何运动期间复查 flush 条件的间隔（毫秒） */
+const GEOMETRY_POLL_MS = 100;
 function _scheduleDeltaFlush() {
   if (_flushScheduled) return;
   _flushScheduled = true;
   const tick = () => {
     if (_geometryBusy()) {
-      // 运动期间不做每帧 rAF 空转：pending 留在模块缓冲，只注册一次结束监听。
-      if (!_flushWaitListening) {
-        _flushWaitListening = true;
-        const settle = () => {
-          if (_geometryBusy()) return;
-          window.removeEventListener("chatcoder:window-motion", onMotion);
-          window.removeEventListener("pointerup", onPointerUp, true);
-          window.removeEventListener("chatcoder:panel-drag-end", onPanelDragEnd);
-          _flushWaitListening = false;
-          requestAnimationFrame(tick);
-        };
-        const onMotion = (e: Event) => {
-          if ((e as CustomEvent<{ active?: boolean }>).detail?.active === false) settle();
-        };
-        const onPointerUp = () => settle();
-        const onPanelDragEnd = () => settle();
-        window.addEventListener("chatcoder:window-motion", onMotion);
-        window.addEventListener("pointerup", onPointerUp, true);
-        window.addEventListener("chatcoder:panel-drag-end", onPanelDragEnd);
-      }
+      // 运动期间不做每帧 rAF 空转：pending 留在模块缓冲，每 GEOMETRY_POLL_MS 复查一次。
+      // 此前只靠 pointerup / 面板结束事件唤醒：事件被吞或顺序错开时，流式文本会一直留在缓冲里，
+      // 直到下一次指针移动才显示（表现为「消息刷新不及时」）。轮询不依赖事件，最多滞后一个周期。
+      window.setTimeout(() => requestAnimationFrame(tick), GEOMETRY_POLL_MS);
       return;
     }
     // S10b：高负载降级期降低 flush 频率（逐帧 → 约 30fps）；无待 flush 内容时停表。
@@ -1777,6 +1772,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     for (const tid of turnIds) void sel.reviewFiles(tid, [path], reviewed);
   },
 
+  clearArthasEntries: () => {
+    const prev = get().arthasState;
+    if (prev) set({ arthasState: { ...prev, entries: [] } });
+  },
   // plan-404-1892（图5）：进入新任务空态——各处入口此前手写清空子集，漏 artifacts / turnChanges /
   // plansByTurn / todos / 子代理数据等，导致新任务下右侧任务摘要继续渲染上一会话产物。
   startNewTask: () => {
@@ -1945,16 +1944,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  rollbackTurn: async (turnId, restoreToComposer = true) => {
+  rollbackTurn: async (turnId, restoreToComposer = true, allowPartial = false) => {
     const { currentSessionId } = get();
-    if (!currentSessionId) return;
+    if (!currentSessionId) return false;
     try {
       // 若该 turn 正在运行，先取消
       if (get().runningTurnId === turnId) {
         await api.cancelTurn(turnId);
         set({ runningTurnId: null, isRunning: false });
       }
-      const result = await api.rollbackTurn(turnId, { restore_to_composer: restoreToComposer });
+      const result = await api.rollbackTurn(turnId, { restore_to_composer: restoreToComposer, allow_partial: allowPartial });
       // v2.2: 后端原样返回 content.attachments，结构即 AttachmentInfo；校验 file_id 后回填
       const restoredAttachments: AttachmentInfo[] = Array.isArray(result.user_attachments)
         ? result.user_attachments
@@ -1996,8 +1995,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // v38: 回滚完成后同步快照到 sessionState 分桶，避免切走再切回时闪现已撤销消息
       const slice = _snapshotSlice(get());
       set((s) => ({ sessionState: { ...s.sessionState, [currentSessionId]: slice } }));
+      return true;
     } catch (e) {
       set({ error: String(e) });
+      return false;
     }
   },
 
@@ -2012,7 +2013,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set({ runningTurnId: null, isRunning: false });
       }
       const preview = await api.rollbackPreview(turnId);
-      set({ rollbackPending: { turnId, files: preview.files, affected: preview.affected } });
+      set({ rollbackPending: { turnId, files: preview.files, conflicts: preview.conflicts ?? [], affected: preview.affected } });
       return true;
     } catch (e) {
       const msg = String(e);
@@ -2026,12 +2027,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  confirmRollback: async (restoreToComposer = true) => {
+  confirmRollback: async (opts) => {
     const pending = get().rollbackPending;
     if (!pending) return;
     const turnId = pending.turnId;
     set({ rollbackPending: null });
-    await get().rollbackTurn(turnId, restoreToComposer);
+    const ok = await get().rollbackTurn(turnId, opts?.restoreToComposer ?? true, opts?.allowPartial ?? false);
+    // 回滚被后端拒绝（典型：确认前手动改动又与之冲突，返回 409）：重新读取预览，
+    // 让用户在弹窗里看到最新的冲突清单并选择跳过，而不是只剩一条错误且要重新打开
+    if (!ok) await get().requestRollbackPreview(turnId);
   },
 
   cancelRollback: () => set({ rollbackPending: null }),

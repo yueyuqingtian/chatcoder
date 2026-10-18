@@ -55,19 +55,22 @@
 /* ── 视口与标签框架 ── */
 .bp-viewport { background: var(--bg-main); }
 .browser-tab-frame-wrapper.is-hidden { display: none; }
-/* 停泊：面板不在屏幕上或标签不在前台时，webview 收进视口内 1px 的近透明容器，保持原逻辑尺寸继续渲染。
+/* 停泊：面板不在屏幕上或标签不在前台时，webview 收进视口左上角、保持原逻辑尺寸继续渲染。
+   容器必须覆盖 webview 的完整区域：OOPIF 只光栅化「视口交集」内的图块，旧实现的 1px 容器让交集只剩 1×1，
+   面板折叠后截图拿到空白 / 空图（plan-20261017-ux-overhaul 阶段 F）。改为铺满视口、压到底层（z-index:-1）
+   并近透明，被应用自身的不透明内容盖住，用户看不见、也不拦截任何点击。
    切勿改成 display:none / visibility:hidden / 移出视口 / 零尺寸裁剪——实测这几种会让页面视口归零
    （AI 无法操作）或停止渲染（截图超时）。见 ai/chatcoder-plan-20261015-browser-agent.md §3。 */
 .browser-tab-frame-wrapper.is-parked {
   position: fixed !important;
   inset: 0 auto auto 0 !important;
-  width: 1px !important; height: 1px !important;
+  width: 100vw !important; height: 100vh !important;
   min-width: 0 !important; min-height: 0 !important; max-width: none !important; max-height: none !important;
   overflow: hidden !important;
   opacity: 0.01;
   visibility: visible !important;
   pointer-events: none !important;
-  z-index: 0;
+  z-index: -1;
 }
 .browser-tab-frame-wrapper.is-parked .browser-frame-element {
   min-width: 0 !important; min-height: 0 !important; max-width: none !important; max-height: none !important;

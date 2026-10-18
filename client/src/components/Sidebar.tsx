@@ -5,6 +5,7 @@
  * 项目→会话两级列表（会话行带相对时间）
  * 底部用户条（设置 + 更新徽标）
  */
+import { notify } from "../store/toast";
 import { IxNewChat, IxSearch, IxAutomation, IxExtensions, IxSettings, IxWorkflow } from "./iconkit/StackIcons";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ProjectOut, SessionOut } from "../api/client";
@@ -17,6 +18,7 @@ import { useI18n } from "../store/i18n";
 import { formatRelativeTime, parseUtc } from "../utils/time";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { MergeDialog } from "./worktree/MergeDialog";
+import { WorktreeCreateDialog } from "./worktree/WorktreeCreateDialog";
 import { Empty, Input, Segmented, Tooltip } from "./ui";
 import { ProjectIcon } from "./project/ProjectIcon";
 import { openProjectDialog } from "../store/projectDialog";
@@ -173,6 +175,8 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
   const [renaming, setRenaming] = useState<{ id: number; value: string } | null>(null);
   const [menuFor, setMenuFor] = useState<number | null>(null);
   const [projectMenuFor, setProjectMenuFor] = useState<number | null>(null);
+  /** 新建工作树弹窗的目标项目（null = 关闭） */
+  const [worktreeFor, setWorktreeFor] = useState<ProjectOut | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<SessionOut | null>(null);
   // plan-41-233：页面态 = nav 落在「拓展/定时任务/设置」等页面（会话页 chat 不算）。
   // 页面态下抑制会话行的聚焦高亮——避免 nav 项与会话行同时「双聚焦」。
@@ -378,17 +382,11 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
     onChange("chat");
   };
 
-  /** plan-282-1441（#5）：一键为项目创建工作树（默认命名），完成后刷新侧栏。 */
-  const handleCreateWorktree = async (p: ProjectOut) => {
-    try {
-      const res = await api.createWorktreeForProject(p.id, {});
-      // 展开父项目，让新工作树立即可见
-      setCollapsedProjects((prev) => ({ ...prev, [p.id]: false }));
-      await loadBootstrap();
-      useChatStore.setState({ error: `已创建工作树「${res.name}」（分支 ${res.branch}）` });
-    } catch (e) {
-      useChatStore.setState({ error: `创建工作树失败：${String(e)}` });
-    }
+  /** 新建工作树：打开命名弹窗（侧栏悬停入口与右键菜单共用）；创建成功后展开父项目，让新工作树立即可见 */
+  const handleCreateWorktree = (p: ProjectOut) => setWorktreeFor(p);
+  const onWorktreeCreated = (parent: ProjectOut, name: string, branch: string) => {
+    setCollapsedProjects((prev) => ({ ...prev, [parent.id]: false }));
+    notify.success(`已创建工作树「${name}」（分支 ${branch}）`);
   };
 
   /** 删除工作树（未提交变更时后端会拒绝）。
@@ -519,23 +517,53 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
     // S1（plan-41-197）：唯一聚焦——选中会话后其所属项目行不再同时高亮，
     // 只有“未选中任何会话”（首页新建态）时项目才显示 current。
     const isCurrent = p.id === currentProjectId && currentSessionId == null;
+    const displayName = p.name || shortPath(p.path);
+    // plan-20261017-sbwt：分支名与工作树名相同（最常见）时不再重复显示标签，避免一行里出现两遍同一串文字
+    const branchTag = isWorktree && p.worktree_branch && p.worktree_branch !== displayName ? p.worktree_branch : null;
+    const menuOpen = projectMenuFor === p.id;
     return (
-      <div className={`sb-project${isCurrent ? " current" : ""}`} onClick={() => toggleProject(p.id)}>
+      <div
+        className={`sb-project${isCurrent ? " current" : ""}${isWorktree ? " is-wt" : ""}${menuOpen ? " menu-open" : ""}`}
+        onClick={() => toggleProject(p.id)}
+      >
         <span className={`sb-project-chevron${open ? " open" : ""}`} aria-hidden="true"><IconChevronRight size={13} /></span>
         {isWorktree ? <IconGitBranch size={14} /> : <ProjectIcon icon={p.icon} color={p.color} size={15} className="sb-project-icon" />}
-        <span className="sb-project-name" title={isWorktree ? `${p.worktree_branch || ""} · ${p.path}` : p.path}>
-          {p.name || shortPath(p.path)}
+        {/* plan-20261017-sbwt：名称与标签放进同一主区，悬停操作以叠加层浮在右侧并淡出主区尾部，
+            不再参与排版——此前操作按钮 display:none→flex 会挤压名称与标签造成跳变 */}
+        <span className="sb-project-main">
+          <span className="sb-project-name" title={isWorktree ? `${p.worktree_branch || ""} · ${p.path}` : p.path}>
+            {displayName}
+          </span>
+          {branchTag && (
+            <Tooltip content={`分支 ${branchTag}`} side="top">
+              <span className="sb-worktree-tag">{branchTag}</span>
+            </Tooltip>
+          )}
         </span>
-        {isWorktree && <span className="sb-worktree-tag">{t("titlebar.worktree")}</span>}
-        <span
-          className="sb-project-actions sb-project-new"
-          title={t("sidebar.new_task_at_project")}
-          onClick={(e) => { e.stopPropagation(); handleNewTaskAt(p.id); }}
-        >
-          <IconPlus size={12} />
-        </span>
-        <span className="sb-project-actions" onClick={(e) => { e.stopPropagation(); setProjectMenuFor(projectMenuFor === p.id ? null : p.id); }}>
-          <IconMoreHorizontal size={13} />
+        <span className="sb-project-tools">
+          {!isWorktree && (
+            <Tooltip content="新建工作树" side="top">
+              <span
+                className="sb-project-actions"
+                aria-label="新建工作树"
+                onClick={(e) => { e.stopPropagation(); handleCreateWorktree(p); }}
+              >
+                <IconGitBranch size={12} />
+              </span>
+            </Tooltip>
+          )}
+          <Tooltip content={t("sidebar.new_task_at_project")} side="top">
+            <span
+              className="sb-project-actions"
+              aria-label={t("sidebar.new_task_at_project")}
+              onClick={(e) => { e.stopPropagation(); handleNewTaskAt(p.id); }}
+            >
+              <IconPlus size={12} />
+            </span>
+          </Tooltip>
+          <span className="sb-project-actions" onClick={(e) => { e.stopPropagation(); setProjectMenuFor(menuOpen ? null : p.id); }}>
+            <IconMoreHorizontal size={13} />
+          </span>
         </span>
         {projectMenuFor === p.id && (
           <div className="context-menu sb-context-menu" onClick={() => setProjectMenuFor(null)}>
@@ -560,7 +588,7 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
               </>
             ) : (
               <>
-                <div className="context-menu-item" onClick={() => { void handleCreateWorktree(p); }}>
+                <div className="context-menu-item" onClick={() => { handleCreateWorktree(p); }}>
                   <IconGitBranch size={13} /> {t("sidebar.ctx_worktree")}
                 </div>
                 <div className="context-menu-divider" />
@@ -706,6 +734,22 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
           </div>
         </>
       )}
+
+      <WorktreeCreateDialog
+        open={worktreeFor != null}
+        subtitle={worktreeFor ? `基于「${worktreeFor.name || worktreeFor.path}」创建` : undefined}
+        withName
+        explain="在单独的目录里检出新分支，并行尝试方案时不会干扰主工作区；合并回主分支可在侧栏完成。"
+        loadRepos={worktreeFor ? () => api.listRepoCandidates(worktreeFor.id) : undefined}
+        onClose={() => setWorktreeFor(null)}
+        onCreate={async (opts) => {
+          const parent = worktreeFor;
+          if (!parent) return;
+          const res = await api.createWorktreeForProject(parent.id, opts);
+          await loadBootstrap();
+          onWorktreeCreated(parent, res.name, res.branch);
+        }}
+      />
 
       {/* 底部设置入口 */}
       <div className="sb-userbar">

@@ -12,6 +12,7 @@
  * 旧弹窗的四个动作全部保留，只是把低频的两个（始终允许）收进展开面板，
  * 让常规判断路径只有「拒绝 / 允许一次」两个按钮。
  */
+import { toolTitle } from "./toolLabels";
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useChatStore } from "../../store/chat";
@@ -231,7 +232,7 @@ export function ApprovalCard({
       <div className="approval-head">
         <span className="approval-head-icon">{actionIcon(action)}</span>
         <span className="approval-head-text">
-          <span className="approval-head-tool">{tool || "工具"}</span>
+          <span className="approval-head-tool">{tool ? toolTitle(tool) : "工具"}</span>
           <span className="approval-head-action">想要{actionLabel}</span>
         </span>
         {queuedCount > 0 && <span className="approval-head-queue">另有 {queuedCount} 项待审批</span>}

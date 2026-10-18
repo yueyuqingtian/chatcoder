@@ -1,71 +1,135 @@
-import { useEffect, useState } from "react";
+/** 全局提示（plan-20261017-ux-overhaul 阶段 A）。
+ *
+ * - 位置从右上角改到窗口正上方居中（标题栏下方）：右上角与右侧面板工具条重叠，且视线不在那里；
+ * - 四种语气共用同一张卡片，只有图标色区分，不用彩色边框或色条；
+ * - 悬停暂停计时，移开后按剩余时长继续；Esc 关闭最新一条；
+ * - 离场先播退出动画再卸载，堆叠的其余条目用 FLIP 平移补位，不跳动。
+ */
+import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useChatStore } from "../store/chat";
-import { IconInfo, IconX } from "./icons";
+import { useToastStore, type ToastItem } from "../store/toast";
+import { IconAlertCircle, IconAlertTriangle, IconCheckCircle, IconInfo, IconX } from "./icons";
+import { IconButton } from "./ui/IconButton";
 
-export function Toast() {
-  const error = useChatStore((s) => s.error);
-  // 离场状态：先播放退出动画，再真正卸载，避免 toast 生硬消失
+const TONE_ICON = {
+  info: <IconInfo size={16} />,
+  success: <IconCheckCircle size={16} />,
+  warning: <IconAlertTriangle size={16} />,
+  error: <IconAlertCircle size={16} />,
+} as const;
+
+/** 退出动画时长，需与 .toast-out 的 --dur-normal 对齐（含 motion-scale 时由 animationend 兜底） */
+const LEAVE_MS = 220;
+
+const ToastCard = memo(function ToastCard({ item }: { item: ToastItem }) {
+  const dismiss = useToastStore((s) => s.dismiss);
   const [leaving, setLeaving] = useState(false);
+  const remaining = useRef(item.duration);
+  const startedAt = useRef(0);
+  const timer = useRef<number | undefined>(undefined);
+
+  const start = () => {
+    if (item.duration <= 0) return;
+    startedAt.current = Date.now();
+    timer.current = window.setTimeout(() => setLeaving(true), remaining.current);
+  };
+  const pause = () => {
+    if (timer.current === undefined) return;
+    window.clearTimeout(timer.current);
+    timer.current = undefined;
+    remaining.current = Math.max(800, remaining.current - (Date.now() - startedAt.current));
+  };
 
   useEffect(() => {
-    if (!error) { setLeaving(false); return; }
-    const timer = setTimeout(() => setLeaving(true), 4000);
-    return () => clearTimeout(timer);
-  }, [error]);
+    start();
+    return () => window.clearTimeout(timer.current);
+    // 仅挂载时启动计时；悬停暂停 / 恢复由事件驱动
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (!leaving) return;
-    const t = setTimeout(() => {
-      useChatStore.setState({ error: null });
-      setLeaving(false);
-    }, 220);
-    return () => clearTimeout(t);
-  }, [leaving]);
-
-  if (!error) return null;
+    const t = window.setTimeout(() => dismiss(item.id), LEAVE_MS + 40);
+    return () => window.clearTimeout(t);
+  }, [leaving, dismiss, item.id]);
 
   return (
-    <div className={"toast" + (leaving ? " toast-out" : "")}>
-      <div className="toast-content">
-        <IconInfo size={14} />
-        <span>{error}</span>
+    <div
+      className={`toast toast-${item.tone}${leaving ? " toast-out" : ""}`}
+      role={item.tone === "error" || item.tone === "warning" ? "alert" : "status"}
+      data-toast-id={item.id}
+      onMouseEnter={pause}
+      onMouseLeave={() => { if (!leaving) start(); }}
+      onAnimationEnd={(e) => { if (leaving && e.animationName === "toast-leave") dismiss(item.id); }}
+    >
+      <span className="toast-icon">{TONE_ICON[item.tone]}</span>
+      <div className="toast-body">
+        {item.title && <div className="toast-title">{item.title}</div>}
+        <div className="toast-text">{item.text}</div>
       </div>
-      <button className="toast-close" onClick={() => setLeaving(true)} title="关闭">
-        <IconX size={12} />
-      </button>
-      <style>{`
-        .toast {
-          position: fixed; top: 54px; right: 20px; z-index: 2000;
-          display: flex; align-items: center; gap: 10px;
-          padding: 10px 12px 10px 12px; border-radius: var(--r-md);
-          /* 与消息流错误卡片（turn-item-error）视觉统一：error 软底 + error 描边 */
-          background: color-mix(in srgb, var(--error) 5%, var(--bg-elevated, transparent));
-          border: 1px solid color-mix(in srgb, var(--error) 22%, transparent);
-          box-shadow: var(--shadow-lg);
-          font-size: 12px; line-height: 1.55; color: var(--text-1);
-          max-width: 380px; word-break: break-word;
-          animation: toast-in var(--dur-normal) var(--ease-out);
-        }
-        .toast.toast-out { animation: toast-out var(--dur-normal) var(--ease-out) forwards; }
-        .toast-content { display: flex; align-items: flex-start; gap: 8px; flex: 1; min-width: 0; }
-        .toast-content svg { color: var(--error); margin-top: 1px; flex-shrink: 0; }
-        .toast-close {
-          flex-shrink: 0; width: 24px; height: 24px; padding: 0;
-          display: flex; align-items: center; justify-content: center;
-          color: var(--text-3); border-radius: var(--r-xs);
-          transition: background var(--dur-fast) var(--ease-out),
-                      color var(--dur-fast) var(--ease-out);
-        }
-        .toast-close:hover { background: var(--bg-hover); color: var(--text-1); transform: none; }
-        @keyframes toast-in {
-          from { opacity: 0; transform: translateX(16px); }
-          to { opacity: 1; transform: translateX(0); }
-        }
-        @keyframes toast-out {
-          from { opacity: 1; transform: translateX(0); }
-          to { opacity: 0; transform: translateX(16px); }
-        }
-      `}</style>
+      <IconButton
+        size="xs"
+        className="toast-close"
+        icon={<IconX size={12} />}
+        title="关闭"
+        onClick={() => setLeaving(true)}
+      />
+    </div>
+  );
+});
+
+export function Toast() {
+  const items = useToastStore((s) => s.items);
+  const listRef = useRef<HTMLDivElement>(null);
+  const prevTops = useRef(new Map<string, number>());
+
+  // 兼容存量：chat.error 写入即转发为错误提示并清空，64 处 setState({ error }) 无需改动
+  useEffect(() => {
+    const forward = (err: string | null) => {
+      if (!err) return;
+      useToastStore.getState().push("error", err);
+      useChatStore.setState({ error: null });
+    };
+    forward(useChatStore.getState().error);
+    return useChatStore.subscribe((s, prev) => { if (s.error !== prev.error) forward(s.error); });
+  }, []);
+
+  // Esc 关闭最新一条（不拦截事件：弹窗等其他 Esc 行为照常）
+  useEffect(() => {
+    if (items.length === 0) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      const last = listRef.current?.lastElementChild?.querySelector<HTMLButtonElement>(".toast-close");
+      last?.click();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [items.length]);
+
+  // FLIP：有条目离开后，其余条目从旧位置平滑移到新位置，避免整列瞬跳
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const next = new Map<string, number>();
+    list.querySelectorAll<HTMLElement>(".toast").forEach((el) => {
+      const id = el.dataset.toastId!;
+      const top = el.offsetTop;
+      next.set(id, top);
+      const before = prevTops.current.get(id);
+      if (before !== undefined && before !== top) {
+        el.animate(
+          [{ transform: `translateY(${before - top}px)` }, { transform: "translateY(0)" }],
+          { duration: 200, easing: "cubic-bezier(0.2, 0, 0, 1)" },
+        );
+      }
+    });
+    prevTops.current = next;
+  }, [items]);
+
+  if (items.length === 0) return null;
+  return (
+    <div className="toast-stack" ref={listRef} aria-live="polite">
+      {items.map((t) => <ToastCard key={t.id} item={t} />)}
     </div>
   );
 }

@@ -462,7 +462,8 @@ export function InstalledPanel() {
         open={configServer !== null}
         onClose={() => setConfigServer(null)}
         title={configServer?.name === "database" ? "数据库连接配置" : configServer?.name === "debugger" ? "开发调试配置" : "连接器配置"}
-        subtitle={configServer?.description || undefined}
+        /* 内置的数据库 / 调试连接器，其描述已在主卡片中展示，标题栏不再重复 */
+        subtitle={configServer?.name === "database" || configServer?.name === "debugger" ? undefined : (configServer?.description || undefined)}
         width={860}
       >
         {configServer?.name === "database" && <DatabaseConnectionsPanel server={configServer} />}

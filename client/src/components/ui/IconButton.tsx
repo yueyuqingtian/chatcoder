@@ -6,8 +6,11 @@
  *
  * S1（plan-41-197）：`title` 不再落到原生属性，改由 ui/Tooltip 渲染统一圆角卡片浮层
  * （原生 title 是浏览器方形浮块且聚焦延迟明显）；`aria-label` 缺省时以 title 兜底。
+ *
+ * plan-20261017-frontend-polish：补 forwardRef。被 Menu / Popover 的 asChild 触发器包裹时，
+ * Radix 必须拿到原生 button 才能锚定与触发；此前缺失会导致「三个点」点不开。
  */
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { Tooltip } from "./Tooltip";
 
 type Size = "xs" | "sm" | "lg";
@@ -21,7 +24,10 @@ interface IconButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, 
   tone?: "default" | "danger";
 }
 
-export function IconButton({ icon, size = "sm", active = false, tone = "default", className = "", title, ...props }: IconButtonProps) {
+export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(function IconButton(
+  { icon, size = "sm", active = false, tone = "default", className = "", title, ...props },
+  ref,
+) {
   const cls = [
     "ui-icon-btn",
     size !== "sm" ? `size-${size}` : "",
@@ -31,9 +37,9 @@ export function IconButton({ icon, size = "sm", active = false, tone = "default"
   ].filter(Boolean).join(" ");
   const label = props["aria-label"] ?? (typeof title === "string" ? title : undefined);
   const btn = (
-    <button type="button" className={cls} aria-label={label} {...props}>
+    <button ref={ref} type="button" className={cls} aria-label={label} {...props}>
       {icon}
     </button>
   );
   return typeof title === "string" && title ? <Tooltip title={title} side="top">{btn}</Tooltip> : btn;
-}
+});

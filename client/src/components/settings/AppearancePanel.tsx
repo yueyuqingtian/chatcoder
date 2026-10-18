@@ -8,8 +8,8 @@
  *  - 移除左/右面板宽度滑杆（改为主界面直接拖拽分隔条，使用合理默认值）。 */
 import { useState } from "react";
 import { useThemeStore, WORLDS, type Theme, type World } from "../../store/theme";
-import { useUiStore } from "../../store/ui";
-import { Slider } from "../ui";
+import { useUiStore, UI_FONT_OPTIONS } from "../../store/ui";
+import { Select, Slider } from "../ui";
 import { Dada } from "../mascot/Dada";
 import { Row, Sw } from "./shared";
 
@@ -120,6 +120,14 @@ export function AppearancePanel() {
       </div>
 
       <div className="settings-card">
+        <Row title="界面字体" desc={(UI_FONT_OPTIONS[ui.uiFontFamily] ?? UI_FONT_OPTIONS.inter).desc}>
+          <Select
+            value={UI_FONT_OPTIONS[ui.uiFontFamily] ? ui.uiFontFamily : "inter"}
+            onChange={(v) => ui.setPrefs({ uiFontFamily: v })}
+            options={Object.entries(UI_FONT_OPTIONS).map(([value, f]) => ({ value, label: f.label }))}
+            aria-label="界面字体"
+          />
+        </Row>
         <Row title="对话字号" desc="控制对话消息的文字大小（立即生效）">
           <Slider min={11} max={18} step={1} value={ui.chatFontSize}
             onChange={(v) => ui.setPrefs({ chatFontSize: v })} format={(v) => `${v}px`} aria-label="对话字号" />
@@ -128,8 +136,8 @@ export function AppearancePanel() {
           <Slider min={1.2} max={2.2} step={0.05} value={ui.chatLineHeight}
             onChange={(v) => ui.setPrefs({ chatLineHeight: v })} format={(v) => v.toFixed(2)} aria-label="消息行距" />
         </Row>
-        <Row title="内容展示宽度" desc="0 表示不限制，填满可视区域">
-          <Slider min={0} max={1200} step={50} value={ui.contentMaxWidth}
+        <Row title="内容展示宽度" desc="消息与输入区的最大宽度，0 表示铺满整个内容区">
+          <Slider min={0} max={1600} step={50} value={ui.contentMaxWidth}
             onChange={(v) => ui.setPrefs({ contentMaxWidth: v })}
             format={(v) => (v === 0 ? "不限" : `${v}px`)} aria-label="内容展示宽度" />
         </Row>

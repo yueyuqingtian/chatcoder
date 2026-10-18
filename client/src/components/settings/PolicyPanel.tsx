@@ -446,7 +446,12 @@ function ApprovalExplainSection() {
   useEffect(() => {
     api.getGlobalSettings()
       .then((g) => {
-        setModelId(typeof g.approval_explain_model_id === "number" ? g.approval_explain_model_id : null);
+        // 0 / 缺省 = 跟随会话（后端约定），统一归为 null——否则「跟随会话」项不会显示勾选
+        setModelId(
+          typeof g.approval_explain_model_id === "number" && g.approval_explain_model_id > 0
+            ? g.approval_explain_model_id
+            : null,
+        );
         setEffort(g.approval_explain_reasoning_effort || null);
       })
       .catch(() => { /* 读取失败保持“跟随会话”默认 */ });

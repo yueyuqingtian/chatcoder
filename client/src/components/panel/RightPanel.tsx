@@ -14,7 +14,7 @@ import { sessionKey, useBrowserStore } from "../../store/browser";
 import type { PanelTab, PanelTabId } from "../../store/panel";
 import { useI18n } from "../../store/i18n";
 import {
-  IconArrowToggle, IconCheck, IconChevronDown, IconMaximize, IconMinus, IconPlus, IconRotateCcw, IconX,
+  IconArrowToggle, IconCheck, IconChevronDown, IconGitBranch, IconMaximize, IconMessageSquare, IconMinus, IconPlus, IconRotateCcw, IconX,
 } from "../icons";
 import { Popover, Tooltip } from "../ui";
 import { TaskSummaryPanel } from "./TaskSummaryPanel";
@@ -24,6 +24,8 @@ import { TerminalPanel } from "./TerminalPanel";
 import { SubagentPanel } from "./SubagentPanel";
 import { DebugPanel } from "./DebugPanel";
 import { WorkflowPanel } from "../workflow/WorkflowPanel";
+import { SidePanel } from "./SidePanel";
+import { GitPanel } from "./GitPanel";
 import { ErrorBoundary } from "../ErrorBoundary";
 
 /** plan-75-334 阶段3：面板内容按 tab/sessionId/visible 记忆化。
@@ -34,10 +36,12 @@ const PanelContent = memo(function PanelContent({ tab, sessionId, visible }: { t
     case "task-summary": return <TaskSummaryPanel visible={visible} />;
     case "browser": return <BrowserPanel sessionId={sessionId} visible={visible} />;
     case "terminal": return <TerminalPanel tab={tab} sessionId={sessionId} visible={visible} />;
-    case "files": return <FileTreePanel visible={visible} />;
+    case "files": return <FileTreePanel visible={visible} sessionId={sessionId} />;
     case "subagent": return <SubagentPanel threadId={tab.meta?.threadId} agentName={tab.meta?.agentName} visible={visible} />;
     case "debug": return <DebugPanel sessionId={sessionId} />;
     case "workflow": return <WorkflowPanel sessionId={sessionId} visible={visible} />;
+    case "side": return <SidePanel />;
+    case "git": return <GitPanel visible={visible} />;
     default: return null;
   }
 });
@@ -70,6 +74,8 @@ function tabIcon(id: PanelTabId, size: number) {
     case "subagent": return <IxBot size={size} />;
     case "debug": return <IxBug size={size} />;
     case "workflow": return <IxWorkflow size={size} />;
+    case "side": return <IconMessageSquare size={size} />;
+    case "git": return <IconGitBranch size={size} />;
   }
 }
 
@@ -116,6 +122,8 @@ export function RightPanel() {
       subagent: t("rp.tab_subagent"),
       debug: t("rp.tab_debug"),
       workflow: t("rp.tab_workflow"),
+      side: "侧边对话",
+      git: "Git",
     };
     if (tTab.id === "subagent" && tTab.meta?.agentName) return tTab.meta.agentName.slice(0, 10);
     return tTab.instance > 1 ? `${base[tTab.id]} ${tTab.instance}` : base[tTab.id];
@@ -175,6 +183,8 @@ export function RightPanel() {
     { id: "terminal", title: t("rp.tab_terminal"), desc: t("rp.desc_terminal"), onPick: handleAddTerminal },
     { id: "files", title: t("rp.tab_files_full"), desc: t("rp.desc_files"), onPick: () => handleAdd("files") },
     { id: "workflow", title: t("rp.tab_workflow"), desc: t("rp.desc_workflow"), onPick: () => handleAdd("workflow") },
+    { id: "side", title: "侧边对话", desc: "单独提问，可按需挑选主对话的上下文", onPick: () => handleAdd("side") },
+    { id: "git", title: "Git", desc: "查看变更、暂存、提交、同步与切换分支", onPick: () => handleAdd("git") },
     ...(debugEnabled ? [{ id: "debug" as const, title: t("rp.tab_debug"), desc: t("rp.desc_debug"), onPick: () => handleAdd("debug") }] : []),
   ];
 

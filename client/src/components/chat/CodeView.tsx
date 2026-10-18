@@ -51,6 +51,20 @@ export function langOf(path: string): string | null {
   return EXT_LANG[(path.split(".").pop() || "").toLowerCase()] ?? null;
 }
 
+/** 供其它视图（如 Git 差异）复用同一套语言注册与高亮口径。
+ *  整块高亮后按行切分：同一段连续代码一起送进 hljs，跨行的块注释、模板字符串也能正确着色；
+ *  未知扩展名返回 null，调用方退回纯文本。 */
+export function highlightLines(path: string, lines: string[]): string[] | null {
+  const lang = langOf(path);
+  if (!lang || lines.length === 0) return null;
+  try {
+    const html = hljs.highlight(lines.join("\n"), { language: lang, ignoreIllegals: true }).value;
+    return html.split("\n");
+  } catch {
+    return null;
+  }
+}
+
 export const CodeView = memo(function CodeView({ path, text }: { path: string; text: string }) {
   const { text: shown, omitted } = useMemo(() => tailClamp(text), [text]);
   const { lines, start } = useMemo(() => {

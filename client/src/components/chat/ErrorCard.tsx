@@ -13,7 +13,7 @@
  * 设计约束（AGENTS.md）：层次只用留白 / 字号字重 / 颜色表达，不引入左侧彩色竖线。
  */
 import { memo, useState } from "react";
-import { IconAlertCircle, IconChevron, IconX } from "../icons";
+import { IconAlertCircle, IconCheck, IconChevron, IconCopy, IconX } from "../icons";
 import { Button } from "../ui/Button";
 import { Collapse } from "../ui/Collapse";
 import { IconButton } from "../ui/IconButton";
@@ -57,6 +57,31 @@ function splitErrorText(text: string): { summary: string; detail: string | null 
   return { summary: clipped, detail: clipped === raw ? null : raw };
 }
 
+/** plan-20261017-ux-overhaul 阶段 A：按报错特征归类，标题直接说清「是哪类问题」，
+ *  并给一句可执行的建议——用户不必读懂 HTTP 原文也知道下一步做什么。
+ *  只在调用方未显式传 title 时生效；匹配不到时沿用「执行出错」。 */
+const ERROR_KINDS: Array<{ re: RegExp; title: string; hint: string }> = [
+  { re: /\b(401|403)\b|unauthori[sz]ed|forbidden|invalid[_ ]?api[_ ]?key|authentication|鉴权|认证失败/i,
+    title: "鉴权失败", hint: "检查该供应商的 API Key 是否有效或已过期" },
+  { re: /\b429\b|rate[_ ]?limit|too many requests|请求过于频繁|限流/i,
+    title: "请求过于频繁", hint: "供应商限流，稍等片刻后重试" },
+  { re: /quota|insufficient|balance|余额|额度|billing/i,
+    title: "额度不足", hint: "检查账户余额或套餐额度" },
+  { re: /context[_ ]?length|maximum context|too many tokens|prompt is too long|上下文.*(超|过)长/i,
+    title: "上下文超长", hint: "压缩会话或新开会话后重试" },
+  { re: /timed? ?out|timeout|超时/i,
+    title: "请求超时", hint: "网络较慢或服务繁忙，可直接重试" },
+  { re: /ECONN|ENOTFOUND|EAI_AGAIN|network|fetch failed|socket|连接(失败|被拒|中断)|网络/i,
+    title: "网络连接异常", hint: "检查网络或代理设置后重试" },
+  { re: /\b5\d\d\b|internal server error|bad gateway|service unavailable|overloaded/i,
+    title: "服务端错误", hint: "供应商服务暂时不可用，稍后重试" },
+];
+
+function classify(text: string): { title: string; hint: string } | null {
+  for (const k of ERROR_KINDS) if (k.re.test(text)) return { title: k.title, hint: k.hint };
+  return null;
+}
+
 interface Props {
   /** 错误正文（store 的 flowError.text 或消息 content 的 text） */
   text: string;
@@ -72,11 +97,19 @@ interface Props {
 }
 
 export const ErrorCard = memo(function ErrorCard({
-  text, title = "执行出错", onRetry, onClose, className, variant = "inline",
+  text, title, onRetry, onClose, className, variant = "inline",
 }: Props) {
   const [showDetail, setShowDetail] = useState(false);
+  const [copied, setCopied] = useState(false);
   const { summary, detail } = splitErrorText(text);
-  const hasActions = Boolean(detail || onRetry || onClose);
+  const kind = title ? null : classify(text);
+  const heading = title ?? kind?.title ?? "执行出错";
+  const copy = () => {
+    void navigator.clipboard?.writeText(text).then(() => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    });
+  };
   return (
     <div
       className={`turn-item turn-item-error${variant === "trailing" ? " flow-error-card" : ""}${className ? ` ${className}` : ""}`}
@@ -84,11 +117,11 @@ export const ErrorCard = memo(function ErrorCard({
       <div className="err-head">
         <IconAlertCircle size={14} className="err-icon" />
         <div className="err-text">
-          <span className="err-title">{title}</span>
-          <span className="err-summary">{summary || text}</span>
+          <div className="err-title">{heading}</div>
+          <div className="err-summary">{summary || text}</div>
+          {kind && <div className="err-hint">{kind.hint}</div>}
         </div>
-        {hasActions && (
-          <div className="err-actions">
+        <div className="err-actions">
             {detail && (
               <Button
                 type="button"
@@ -101,14 +134,20 @@ export const ErrorCard = memo(function ErrorCard({
                 <IconChevron direction="down" open={showDetail} size={12} />
               </Button>
             )}
+            {/* 复制图标固定槽位：复制后原位换成对勾，不改变按钮宽度 */}
+            <IconButton
+              size="xs"
+              icon={copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
+              title={copied ? "已复制" : "复制报错"}
+              onClick={copy}
+            />
             {onRetry && (
               <Button type="button" size="xs" variant="ghost" onClick={onRetry}>
                 重试
               </Button>
             )}
             {onClose && <IconButton size="xs" icon={<IconX size={14} />} title="关闭" onClick={onClose} />}
-          </div>
-        )}
+        </div>
       </div>
       {/* 长报错原文（HTTP/JSON/堆栈）默认收起；展开走高度过渡，详情与卡片同底 */}
       {detail && (

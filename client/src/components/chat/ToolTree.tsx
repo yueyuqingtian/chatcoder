@@ -27,6 +27,7 @@ import { FileIcon } from "../iconkit/FileIcon";
 import { CodeView } from "./CodeView";
 import { ToolGlyph } from "../iconkit/ToolGlyphs";
 import { ChatCollapse } from "./ChatCollapse";
+import { toolVerb, runningVerb, toolDisplayName } from "./toolLabels";
 import { tailClamp } from "../../utils/tailClamp";
 import {
   IconFileRead, IconFileWrite, IconFolder, IconGlobe, IconTerminal,
@@ -39,57 +40,6 @@ import {
 const COMMAND_TOOLS = new Set([...RUN_TOOLS, "git", "terminal_bg_status", "terminal_bg_kill"]);
 /** 读文件类工具：只要有路径，展开区一律用编辑器式代码视图（不再按扩展名白名单判断） */
 const FILE_CONTENT_TOOLS = new Set(["fs_read", "read_file_range"]);
-
-/** 工具 → 中文动作动词（对齐 zcode 行首文案） */
-const TOOL_VERBS: Record<string, string> = {
-  fs_read: "已读取",
-  fs_write: "已编辑",
-  editor_apply_diff: "已编辑",
-  fs_list: "已列出",
-  fs_grep: "已搜索",
-  codebase_search: "已搜索",
-  terminal_exec: "已运行",
-  web_fetch: "已抓取",
-  web_search: "已搜索",
-  git_diff: "已检查",
-  git_root: "已定位",
-  spawn_subagent: "已创建子代理",
-  ask_subagent: "已询问子代理",
-  collect_results: "已收集结果",
-  ci_run: "已运行 CI",
-  memory_search: "已搜索记忆",
-  view_image: "已查看图片",
-  todo_write: "已更新任务清单",
-  ask_user_question: "已询问用户",
-  mcp: "已调用",
-  // plan-20261015-browser-agent：内置浏览器与电脑操控工具（运行中自动替换为「正在…」）
-  browser_navigate: "已打开网页",
-  browser_tabs: "已管理标签",
-  browser_snapshot: "已读取页面结构",
-  browser_get_text: "已读取网页正文",
-  browser_screenshot: "已截图",
-  browser_click: "已点击",
-  browser_type: "已输入",
-  browser_press: "已按键",
-  browser_scroll: "已滚动",
-  browser_hover: "已悬停",
-  browser_drag: "已拖拽",
-  browser_fill: "已填写表单",
-  browser_clipboard: "已操作剪贴板",
-  browser_wait: "已等待",
-  browser_evaluate: "已执行页面脚本",
-  browser_logs: "已查看页面日志",
-  browser_batch: "已批量操作网页",
-  desktop_screenshot: "已截屏",
-  desktop_click: "已点击",
-  desktop_type: "已输入",
-  desktop_keys: "已按键",
-  desktop_scroll: "已滚动",
-  desktop_snapshot: "已读取界面",
-  desktop_windows: "已列出窗口",
-  desktop_focus: "已切换窗口",
-  desktop_find_text: "已查找文字",
-};
 
 /** plan-20261015-browser-agent：浏览器工具的行内摘要——完成后取结果首行里的操作对象（如「按钮「登录」」），
  *  运行中按参数推断（网址 / 文字 / 按键 / 方向），一行就能看清 AI 在页面上做了什么。 */
@@ -148,9 +98,6 @@ function toolIcon(tool: string): React.ReactNode {
 }
 void TOOL_ICONS; void IconZap;
 
-function toolVerb(tool: string): string {
-  return TOOL_VERBS[tool] ?? `已调用 ${tool}`;
-}
 
 function leafPath(leaf: ToolLeaf): string | null {
   const p = leaf.args?.path;
@@ -271,7 +218,7 @@ function InlineDiff({ turnId, path, callKey, fallbackLines, onStat }: {
     };
     if (turnId == null) {
       if (!showFallback("无写盘记录，展示调用参数中的本次编辑内容")) {
-        setState({ kind: "error", msg: "无 turn 信息，无法拉取变更" });
+        setState({ kind: "error", msg: "该调用没有写盘记录（可能未成功执行）" });
       }
       return;
     }
@@ -302,7 +249,13 @@ function InlineDiff({ turnId, path, callKey, fallbackLines, onStat }: {
       .catch((e) => {
         if (cancelled) return;
         if (!showFallback("写盘记录尚未落库，展示调用参数中的本次编辑内容")) {
-          setState({ kind: "error", msg: String(e) });
+          const raw = String(e);
+          setState({
+            kind: "error",
+            msg: raw.includes("无此文件的写盘记录")
+              ? "本次调用未产生写盘记录（编辑未成功或尚未落库）"
+              : raw,
+          });
         }
       });
     return () => { cancelled = true; };
@@ -445,6 +398,35 @@ function countDiffLines(lines: Array<{ type: "add" | "del" | "ctx" }>): { additi
  *  用途：写盘记录尚未落库（运行中）或该 turn 无记录（老数据）时，让展开区仍能看到
  *  本次变更内容；覆盖 fs_write / editor_apply_diff / multi_file_edit 三种写工具。
  *  只使用调用参数（无法拿到写前内容时退化为全量新增行），落库后由权威 diff 覆盖。 */
+function _pickStr(obj: Record<string, unknown>, keys: string[]): string {
+  for (const k of keys) {
+    const v = obj[k];
+    if (typeof v === "string" && v) return v;
+  }
+  return "";
+}
+
+/** edits 允许是数组，也允许模型把它作为 JSON 字符串传入（与后端容错保持一致）。 */
+function _coerceEdits(raw: unknown): Array<Record<string, unknown>> {
+  const keep = (v: unknown): Array<Record<string, unknown>> =>
+    Array.isArray(v) ? (v.filter((e) => e && typeof e === "object") as Array<Record<string, unknown>>) : [];
+  if (typeof raw !== "string") return keep(raw);
+  if (!raw.trim()) return [];
+  try {
+    return keep(JSON.parse(raw));
+  } catch {
+    return [];
+  }
+}
+
+function _editPath(e: Record<string, unknown>): string {
+  for (const k of ["path", "file_path", "filepath"]) {
+    const v = e[k];
+    if (typeof v === "string" && v) return v.replace(/\\/g, "/");
+  }
+  return "";
+}
+
 function leafFallbackDiff(leaf: ToolLeaf, path: string | null): Array<{ type: "add" | "del" | "ctx"; text: string }> | null {
   const a = (leaf.args ?? {}) as Record<string, unknown>;
   if (leaf.tool === "fs_write") {
@@ -452,23 +434,32 @@ function leafFallbackDiff(leaf: ToolLeaf, path: string | null): Array<{ type: "a
     return typeof c === "string" && c ? simpleLineDiff("", c) : null;
   }
   if (leaf.tool === "editor_apply_diff") {
-    const oldT = typeof a.old_text === "string" ? a.old_text : "";
-    const newT = typeof a.new_text === "string" ? a.new_text : "";
+    const oldT = _pickStr(a, ["old_text", "old_string", "oldString"]);
+    const newT = _pickStr(a, ["new_text", "new_string", "newString"]);
     if (!oldT && !newT) return null;
     return simpleLineDiff(oldT, newT);
   }
   if (leaf.tool === "multi_file_edit") {
-    const edits = a.edits as Array<{ path?: unknown; old_text?: unknown; new_text?: unknown; content?: unknown }> | undefined;
-    if (Array.isArray(edits)) {
-      const rel = (path || "").replace(/\\/g, "/");
-      const hit = edits.find((e) => (typeof e.path === "string" ? e.path.replace(/\\/g, "/") : "").endsWith(rel));
-      if (hit) {
-        const oldT = typeof hit.old_text === "string" ? hit.old_text : "";
-        const newT = typeof hit.new_text === "string" ? hit.new_text : (typeof hit.content === "string" ? hit.content : "");
-        if (!oldT && !newT) return null;
-        return simpleLineDiff(oldT, newT);
-      }
+    const edits = _coerceEdits(a.edits);
+    if (!edits.length) return null;
+    const rel = (path || "").replace(/\\/g, "/");
+    // 优先匹配当前卡片路径；模型漏写 path 或路径写法不同时，若全部 edit 指向
+    // 同一文件，直接取第一条（否则展开只能看到「变更加载失败」）。
+    let hit = rel
+      ? edits.find((e) => {
+          const p = _editPath(e);
+          return !!p && (p === rel || p.endsWith(rel) || rel.endsWith(p));
+        })
+      : edits[0];
+    if (!hit) {
+      const paths = new Set(edits.map(_editPath).filter(Boolean));
+      if (paths.size === 1) hit = edits[0];
     }
+    if (!hit) return null;
+    const oldT = _pickStr(hit, ["old_text", "old_string", "oldString"]);
+    const newT = _pickStr(hit, ["new_text", "new_string", "newString", "content"]);
+    if (!oldT && !newT) return null;
+    return simpleLineDiff(oldT, newT);
   }
   return null;
 }
@@ -560,7 +551,7 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
           data-tool-state={ok === null ? "running" : ok === false ? "fail" : "done"} onClick={() => expandable && setExpanded(!expanded)}>
         <span className="tc-icon">{toolIcon(leaf.tool)}</span>
         <span className={"tc-verb" + (ok === null ? " text-shine" : "")}>
-          {ok === null ? toolVerb(leaf.tool).replace("已", "正在") : toolVerb(leaf.tool)}
+          {ok === null ? runningVerb(leaf.tool) : toolVerb(leaf.tool)}
         </span>
         {path && (
           <span className="tc-filelink" title={`${path}（点击查看${isWrite ? "变更" : "文件"}）`} onClick={(e) => void openFilePreview(e, path)}>
@@ -569,7 +560,7 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
           </span>
         )}
         {path && dir && <span className="tc-dir" title={path}>{dir}</span>}
-        {!path && !TOOL_VERBS[leaf.tool] && <span className="tc-tool-name" title={leaf.tool}>{leaf.tool}</span>}
+        {!path && toolDisplayName(leaf.tool) && <span className="tc-tool-name">{toolDisplayName(leaf.tool)}</span>}
         {!path && summary && <span className="tc-query" title={summary}>{summary}</span>}
         {/* v7(H): 写操作运行中 changeStat 未落库时回退到实时结果；
             plan-89-387: 历史消息缺统计时，展开后按「本次变更」回填行数 */}
@@ -588,7 +579,7 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
       {expandable ? (
         <ChatCollapse open={expanded}>
           <div className="tc-output">
-            {isWrite && path ? (
+            {isWrite && path && leaf.ok !== false ? (
             <InlineDiff
               turnId={leaf.turnId}
               path={path}
@@ -718,7 +709,7 @@ const ActionClusterRow = memo(function ActionClusterRow({ leaves }: { leaves: To
   const rolling = rollingPool[Math.min(tick % Math.max(1, rollingPool.length), rollingPool.length - 1)];
   const rollingPath = rolling ? leafPath(rolling) : null;
   const rollingText = rolling
-    ? `${toolVerb(rolling.tool).replace("已", "正在")} ${rollingPath ? splitFilePath(rollingPath).name : leafSummary(rolling)}`.trim()
+    ? `${runningVerb(rolling.tool)} ${rollingPath ? splitFilePath(rollingPath).name : leafSummary(rolling)}`.trim()
     : "";
 
   return (

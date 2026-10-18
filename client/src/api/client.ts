@@ -20,6 +20,7 @@ import type {
   ScannedModel,
   ScheduledMissedPolicy,
   RollbackAffected,
+  RollbackConflict,
   RollbackPreviewFile,
   RollbackPreviewOut,
   RollbackResult,
@@ -276,6 +277,8 @@ export interface TurnCreateBody {
 
 export interface RollbackParams {
   restore_to_composer?: boolean;
+  /** 跳过与手动改动冲突的文件，回滚其余（用户在确认弹窗里明确选择后才传 true） */
+  allow_partial?: boolean;
 }
 
 /** 归档批量永久删除结果（plan-20261014-fix4，对应 POST /archive/purge）。 */
@@ -557,6 +560,47 @@ export interface WorkflowEventOut {
   created_at: string;
 }
 
+/** Git 面板数据（plan-20261017-goal12 项 5）。 */
+export interface GitFileEntry { path: string; code: string; old_path: string | null }
+export interface GitStatusOut {
+  root: string;
+  branch: string | null;
+  detached: boolean;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  oid: string | null;
+  state: "normal" | "merging" | "rebasing";
+  staged: GitFileEntry[];
+  unstaged: GitFileEntry[];
+  untracked: GitFileEntry[];
+  conflicts: GitFileEntry[];
+  clean: boolean;
+}
+export interface GitDiffOut { path: string; text: string; truncated: boolean; binary: boolean; new: boolean }
+/** 提交上的引用装饰（分支 / 远端分支 / 标签 / HEAD），历史行上以小标签展示。 */
+export interface GitRefOut { name: string; kind: "head" | "branch" | "remote" | "tag" }
+export interface GitLogEntry {
+  sha: string; short: string; author: string; date: string; subject: string;
+  parents: string[]; refs: GitRefOut[];
+}
+export interface GitCommitFileOut {
+  path: string;
+  /** 变更类型首字母：A 新增 / M 修改 / D 删除 / T 类型变更 */
+  code: string;
+  additions: number | null;
+  deletions: number | null;
+}
+export interface GitCommitDetailOut {
+  sha: string; short: string; author: string; email: string; date: string;
+  subject: string; message: string; parents: string[]; merge: boolean;
+  files: GitCommitFileOut[]; additions: number; deletions: number;
+}
+export interface GitBranchesOut {
+  local: Array<{ name: string; current: boolean; upstream: string | null; date: string }>;
+  remote: Array<{ name: string; date: string }>;
+}
+
 export const api = {
   // ── 项目 ──
   listProjects: (params?: { include_archived?: boolean }) =>
@@ -725,8 +769,17 @@ export const api = {
     post<ArthasStatusOut>("/debug/arthas/attach", { session_id: sessionId, pid }),
   arthasStop: (sessionId: number) =>
     post<{ ok: boolean; message?: string; pid?: number }>("/debug/arthas/stop", { session_id: sessionId }),
-  arthasExec: (sessionId: number, command: string) =>
-    post<Record<string, unknown>>("/debug/arthas/exec", { session_id: sessionId, command }),
+  /** observe=true：建立持续观测（异步作业 + 后台泵推送命中），面板「建立观测」用它；
+   *  不传则为同步执行（一次性命令）。 */
+  arthasExec: (sessionId: number, command: string, opts: { observe?: boolean } = {}) =>
+    post<{ ok: boolean; job_id?: string | number | null; error?: string | null; command?: string }>(
+      "/debug/arthas/exec",
+      opts.observe
+        ? { session_id: sessionId, command, async: true, observe: true }
+        : { session_id: sessionId, command }),
+  arthasInterrupt: (sessionId: number, jobId: string | number) =>
+    post<{ ok: boolean; message?: string; error?: string | null }>(
+      "/debug/arthas/interrupt", { session_id: sessionId, job_id: jobId }),
   arthasConfig: () => post<ArthasConfigOut>("/debug/arthas/config", {}),
   setArthasConfig: (patch: Record<string, unknown>) =>
     put<{ ok: boolean; error?: string }>("/debug/arthas/config", patch),
@@ -752,6 +805,9 @@ export const api = {
   createSession: (data: { project_id: number; title?: string; model_id?: number; permission_mode?: string; approval_mode?: string; goal_text?: string }) =>
     post<SessionOut>("/sessions", data),
   getSession: (id: number) => get<SessionOut>(`/sessions/${id}`),
+  /** 从主会话开一个侧边会话（子会话）：沿用主会话的项目、模型与模式，之后走同一条 turn 流水线。 */
+  createSideSession: (parentId: number) => post<SessionOut>(`/sessions/${parentId}/side-sessions`),
+  listSideSessions: (parentId: number) => get<SessionOut[]>(`/sessions/${parentId}/side-sessions`),
   updateSession: (id: number, data: { title?: string; model_id?: number; pinned?: boolean; status?: string; permission_mode?: string; approval_mode?: string }) =>
     patch<SessionOut>(`/sessions/${id}`, data),
   /** 删除会话。默认语义 = 归档（可恢复）；permanent=true 走物理删除（plan-282-1441 #4） */
@@ -786,10 +842,49 @@ export const api = {
   cancelTurn: (turnId: number) => postCancel<{ ok: boolean }>(`/turns/${turnId}/cancel?source=main`),
   resumeTurn: (turnId: number) => post<TurnOut>(`/turns/${turnId}/resume`),
   rollbackTurn: (turnId: number, params: RollbackParams = {}) => {
-    const q = params.restore_to_composer === false ? "?restore_to_composer=false" : "";
+    const qs = new URLSearchParams();
+    if (params.restore_to_composer === false) qs.set("restore_to_composer", "false");
+    if (params.allow_partial) qs.set("allow_partial", "true");
+    const q = qs.toString() ? `?${qs.toString()}` : "";
     return post<RollbackResult>(`/turns/${turnId}/rollback${q}`);
   },
   rollbackPreview: (turnId: number) => get<RollbackPreviewOut>(`/turns/${turnId}/rollback_preview`),
+  // ── Git（plan-20261017-goal12 项 5）──
+  gitStatus: (projectId: number) => get<GitStatusOut>(`/git/status?project_id=${projectId}`),
+  gitDiff: (projectId: number, path: string, staged = false) =>
+    get<GitDiffOut>(`/git/diff?project_id=${projectId}&path=${encodeURIComponent(path)}&staged=${staged ? "true" : "false"}`),
+  gitLog: (projectId: number, limit = 40, skip = 0) =>
+    get<GitLogEntry[]>(`/git/log?project_id=${projectId}&limit=${limit}&skip=${skip}`),
+  gitCommitDetail: (projectId: number, sha: string) =>
+    get<GitCommitDetailOut>(`/git/commit?project_id=${projectId}&sha=${encodeURIComponent(sha)}`),
+  gitCommitDiff: (projectId: number, sha: string, path: string) =>
+    get<GitDiffOut>(`/git/commit/diff?project_id=${projectId}&sha=${encodeURIComponent(sha)}&path=${encodeURIComponent(path)}`),
+  gitBranches: (projectId: number) => get<GitBranchesOut>(`/git/branches?project_id=${projectId}`),
+  gitStage: (projectId: number, paths: string[]) => post<{ ok: boolean }>("/git/stage", { project_id: projectId, paths }),
+  gitUnstage: (projectId: number, paths: string[]) => post<{ ok: boolean }>("/git/unstage", { project_id: projectId, paths }),
+  gitDiscard: (projectId: number, paths: string[], untracked: string[]) =>
+    post<{ ok: boolean }>("/git/discard", { project_id: projectId, paths, untracked }),
+  gitCommit: (projectId: number, message: string, amend = false) =>
+    post<{ ok: boolean; sha: string }>("/git/commit", { project_id: projectId, message, amend }),
+  // 拉取冲突不抛错：conflict/conflicts/state 交给面板直接进入冲突处理
+  gitSync: (projectId: number, action: "fetch" | "pull" | "push") =>
+    post<{ ok: boolean; output: string; conflict?: boolean; conflicts?: string[]; state?: string }>(
+      "/git/sync", { project_id: projectId, action }),
+  // 切换分支时可能返回 switched=false + reason=dirty：界面据此让用户选择暂存或放弃改动
+  gitBranch: (projectId: number, action: "checkout" | "create" | "delete", name: string,
+    opts: { base?: string; force?: boolean; onDirty?: "stash" | "discard" } = {}) =>
+    post<{
+      ok: boolean; output: string;
+      switched?: boolean; stashed?: boolean; created?: boolean; deleted?: boolean;
+      reason?: "dirty"; files?: string[];
+      conflict?: boolean; conflicts?: string[]; state?: string;
+    }>("/git/branch", {
+      project_id: projectId, action, name,
+      base: opts.base, force: opts.force, on_dirty: opts.onDirty,
+    }),
+  gitResolve: (projectId: number, path: string, side: "ours" | "theirs") =>
+    post<{ ok: boolean }>("/git/resolve", { project_id: projectId, path, side }),
+  gitMergeAbort: (projectId: number) => post<{ ok: boolean }>("/git/merge/abort", { project_id: projectId }),
   getTurnSnapshot: (turnId: number) => get<TurnSnapshotOut>(`/turns/${turnId}/snapshot`),
 
   // ── 变更审核（v11）──
@@ -1331,14 +1426,14 @@ export const api = {
   // ── 子代理类型（v2.2: 对齐 zcode 3.13）──
   listSubagents: () => get<SubagentProfileOut[]>("/subagents"),
   createSubagent: (data: {
-    name: string; description?: string; tools_whitelist?: string[];
-    model_id?: number; system_prompt?: string; is_active?: boolean;
+    name: string; description?: string | null; tools_whitelist?: string[] | null;
+    model_id?: number | null; system_prompt?: string | null; is_active?: boolean;
     /** plan-330-1648 M2: 思考深度档位（null = 跟随会话本轮档位） */
     reasoning_effort?: string | null;
   }) => post<SubagentProfileOut>("/subagents", data),
   updateSubagent: (id: number, data: {
-    name?: string; description?: string; tools_whitelist?: string[];
-    model_id?: number; system_prompt?: string; is_active?: boolean;
+    name?: string; description?: string | null; tools_whitelist?: string[] | null;
+    model_id?: number | null; system_prompt?: string | null; is_active?: boolean;
     reasoning_effort?: string | null;
   }) => patch<SubagentProfileOut>(`/subagents/${id}`, data),
   deleteSubagent: (id: number) => del<{ ok: boolean }>(`/subagents/${id}`),
@@ -1352,7 +1447,7 @@ export type {
   DebugSettingsOut,
   ArthasStatusOut, ArthasEntryOut, ArthasProcessOut, ArthasConfigOut,
   ExecPolicyRuleOut, HookConfigOut, MemoryEntryOut, ScheduledTaskOut,
-  RollbackPreviewFile, RollbackAffected, RollbackPreviewOut, FileChangeOut, FileDiffOut,
+  RollbackPreviewFile, RollbackAffected, RollbackConflict, RollbackPreviewOut, FileChangeOut, FileDiffOut,
 };
 
 /** plan-41-198：市场条目类型与三种来源：

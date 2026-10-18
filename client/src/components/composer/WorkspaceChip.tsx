@@ -2,9 +2,9 @@
  *
  * 首页：可点击 → 浮窗（搜索名称或路径 / 项目列表带图标与路径 / 新建项目）；
  * 会话中：只读展示当前会话所在项目（锁形图标 + 提示「会话开始后不可更换」），工作树会话额外显示分支。 */
-import { useMemo, useRef, useState, useEffect } from "react";
+import { useMemo, useRef, useState, useEffect, useLayoutEffect } from "react";
 import type { ProjectOut } from "../../api/client";
-import { Empty, Popover, Tooltip } from "../ui";
+import { Empty, Popover, Tooltip, type PopoverPlacement } from "../ui";
 import { IconCheck, IconChevronDown, IconGitBranch, IconLock, IconPlus, IconSearch } from "../icons";
 import { ProjectIcon } from "../project/ProjectIcon";
 import { baseName } from "../iconkit/FileIcon";
@@ -13,6 +13,11 @@ import { openProjectDialog } from "../../store/projectDialog";
 function projectName(p: ProjectOut): string {
   return p.name || baseName(p.path);
 }
+
+/** 列表高度上下限与浮层非列表部分（搜索框 + 分隔线 + 新建行 + 内边距）的近似高度 */
+const LIST_MAX_PX = 320;
+const LIST_MIN_PX = 120;
+const CHROME_PX = 120;
 
 export function WorkspaceChip({ projects, currentId, locked, branch, onSelect, variant = "chip" }: {
   projects: ProjectOut[];
@@ -30,6 +35,9 @@ export function WorkspaceChip({ projects, currentId, locked, branch, onSelect, v
   const [hl, setHl] = useState(0);
   const btnRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  /** 弹出方向与列表可用高度：按触发器上下两侧的剩余空间决定，保证浮层完整可见、列表内部滚动 */
+  const [place, setPlace] = useState<PopoverPlacement>(variant === "inline" ? "bottom-start" : "top-start");
+  const [listMax, setListMax] = useState(LIST_MAX_PX);
   const current = projects.find((p) => p.id === currentId) ?? null;
   const q = query.trim().toLowerCase();
   const list = useMemo(
@@ -45,6 +53,21 @@ export function WorkspaceChip({ projects, currentId, locked, branch, onSelect, v
     return () => window.clearTimeout(t);
   }, [open, projects, currentId]);
   useEffect(() => { setHl(0); }, [q]);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const r = btnRef.current?.getBoundingClientRect();
+    if (!r) return;
+    // 首选方向：inline 向下（标语下方），chip 向上（输入框上方）；首选侧空间不足且另一侧更宽时翻转。
+    // 扣掉搜索框、分隔线与「新建项目」行的占位后，剩余空间即列表的可用高度。
+    const below = window.innerHeight - r.bottom;
+    const above = r.top;
+    const preferDown = variant === "inline";
+    const down = preferDown ? below >= LIST_MIN_PX + CHROME_PX || below >= above : below > above && below >= LIST_MIN_PX + CHROME_PX;
+    const room = down ? below : above;
+    setPlace(down ? "bottom-start" : "top-start");
+    setListMax(Math.max(LIST_MIN_PX, Math.min(LIST_MAX_PX, Math.floor(room - CHROME_PX))));
+  }, [open, variant]);
 
   if (locked) {
     return (
@@ -79,7 +102,7 @@ export function WorkspaceChip({ projects, currentId, locked, branch, onSelect, v
         <span className={variant === "inline" ? "es-ws-name" : "cc-ws-name"}>{current ? projectName(current) : "选择项目"}</span>
         <IconChevronDown size={variant === "inline" ? 14 : 12} className="cc-chip-caret" />
       </button>
-      <Popover open={open} onClose={() => setOpen(false)} placement={variant === "inline" ? "bottom-start" : "top-start"} className="cc-ws-pop" role="dialog" ignoreRefs={[btnRef]} aria-label="选择项目">
+      <Popover open={open} onClose={() => setOpen(false)} placement={place} className="cc-ws-pop" role="dialog" ignoreRefs={[btnRef]} aria-label="选择项目">
         <div className="pop-search">
           <IconSearch size={14} />
           <input
@@ -94,7 +117,7 @@ export function WorkspaceChip({ projects, currentId, locked, branch, onSelect, v
             }}
           />
         </div>
-        <div className="pop-scroll" role="listbox" aria-label="项目">
+        <div className="pop-scroll" role="listbox" aria-label="项目" style={{ maxHeight: listMax }}>
           {list.map((p, i) => (
             <button
               key={p.id}

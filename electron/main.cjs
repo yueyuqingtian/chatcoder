@@ -1363,6 +1363,121 @@ ipcMain.handle("plugins:list", () => {
   return out;
 });
 
+// ── plan-20261017-goal12 项 12：Cordis 兼容插件宿主（dsh 插件协议）──
+const { createHost: createCordisHost } = require("./cordis-host.cjs");
+const { startPluginBridge } = require("./plugin-bridge.cjs");
+// 第三方插件安装在 ~/.chatcoder/plugins/<包名安全化>/（dsh 包格式，组合文件由 dsh.bundle.patch 指定）；
+// 安装、加载、启停与卸载都在主进程完成，界面通过 IPC 发起操作并读取状态。
+const cordisHost = createCordisHost({
+  log: (...args) => log("[cordis]", ...args),
+  logErr: (...args) => logErr("[cordis]", ...args),
+  sendToRenderer: (channel, payload) => {
+    try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload); } catch { /* 渲染层未就绪时忽略 */ }
+  },
+});
+ipcMain.handle("cordis:status", () => cordisHost.status());
+/** 插件集合变化（安装 / 启停 / 卸载 / 重载）后广播给所有窗口：设置页与插件界面即时刷新，无需重开页面。 */
+function broadcastCordisChanged() {
+  const plugins = cordisHost.status();
+  for (const win of BrowserWindow.getAllWindows()) {
+    try { if (!win.isDestroyed()) win.webContents.send("cordis:changed", plugins); } catch { /* 未就绪窗口忽略 */ }
+  }
+}
+ipcMain.handle("cordis:reload", async () => {
+  const r = await cordisHost.load();
+  void syncPluginConnector();
+  broadcastCordisChanged();
+  return r;
+});
+
+// 第三方插件的工具经本机桥接暴露给 Agent：桥接在主进程启动，连接器（MCP 桥）登记在后端。
+const PLUGIN_CONNECTOR = "dsh-plugins";
+let pluginBridge = null;
+async function ensurePluginBridge() {
+  if (!pluginBridge) {
+    pluginBridge = await startPluginBridge({ host: cordisHost, root: cordisHost.root(), log: (...a) => log("[cordis]", ...a) });
+  }
+  return pluginBridge;
+}
+function backendApi(pathname, init = {}) {
+  return fetch(`http://127.0.0.1:${BACKEND_PORT}/api${pathname}`, {
+    ...init,
+    headers: { "content-type": "application/json", ...(init.headers || {}) },
+  }).then(async (r) => {
+    if (!r.ok) throw new Error(`后端返回 ${r.status}`);
+    return r.status === 204 ? null : r.json();
+  });
+}
+/** 同步「第三方插件」连接器：登记或修正启动参数；已启用时刷新工具清单（插件增删后 Agent 立即看到变化）。 */
+async function syncPluginConnector() {
+  try {
+    const bridge = await ensurePluginBridge();
+    const want = {
+      command: process.execPath,
+      args: [path.join(__dirname, "plugin-mcp.cjs"), bridge.file],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+    };
+    const rows = (await backendApi("/mcp-servers?source=plugin")) || [];
+    let row = rows.find((r) => r.name === PLUGIN_CONNECTOR);
+    if (!row) {
+      row = await backendApi("/mcp-servers", {
+        method: "POST",
+        body: JSON.stringify({
+          name: PLUGIN_CONNECTOR,
+          display_name: "第三方插件",
+          description: "在应用内安装的 dsh 第三方插件提供的工具。插件安装后，在此启用连接器即可让 AI 调用。",
+          source: "plugin",
+          transport: "stdio",
+          ...want,
+          is_active: false,
+        }),
+      });
+    } else if (JSON.stringify(row.args) !== JSON.stringify(want.args) || row.command !== want.command) {
+      await backendApi(`/mcp-servers/${row.id}`, { method: "PATCH", body: JSON.stringify(want) });
+    }
+    if (row && row.is_active) await backendApi(`/mcp-servers/${row.id}/refresh-tools`, { method: "POST" });
+  } catch (e) {
+    logErr("[cordis] 同步第三方插件连接器失败：", e && e.message);
+  }
+}
+// 安装：选择插件目录或 npm pack 生成的 .tgz；校验失败时把原因原样返回给界面
+ipcMain.handle("cordis:install", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "选择 dsh 插件",
+    properties: ["openFile", "openDirectory"],
+    filters: [{ name: "插件包", extensions: ["tgz"] }],
+  });
+  if (result.canceled || !result.filePaths[0]) return { ok: false, canceled: true };
+  try {
+    const plugin = await cordisHost.install(result.filePaths[0]);
+    void syncPluginConnector();
+    broadcastCordisChanged();
+    return { ok: true, plugin, plugins: cordisHost.status() };
+  } catch (e) {
+    return { ok: false, error: String(e && e.message ? e.message : e) };
+  }
+});
+ipcMain.handle("cordis:uninstall", async (_e, name) => {
+  try {
+    await cordisHost.uninstall(String(name));
+    void syncPluginConnector();
+    broadcastCordisChanged();
+    return { ok: true, plugins: cordisHost.status() };
+  } catch (e) {
+    return { ok: false, error: String(e && e.message ? e.message : e) };
+  }
+});
+ipcMain.handle("cordis:setEnabled", async (_e, name, enabled) => {
+  try {
+    const plugin = await cordisHost.setEnabled(String(name), Boolean(enabled));
+    void syncPluginConnector();
+    broadcastCordisChanged();
+    return { ok: true, plugin, plugins: cordisHost.status() };
+  } catch (e) {
+    return { ok: false, error: String(e && e.message ? e.message : e) };
+  }
+});
+
 // ── IPC:系统集成 ──
 ipcMain.handle("shell:openPath", (_event, p) => {
   if (p) shell.openPath(p);
@@ -2188,6 +2303,10 @@ if (!gotLock) {
 // ── 应用生命周期 ──
 app.whenReady().then(async () => {
   log("[chatcoder] app ready, isPackaged =", app.isPackaged);
+  // Cordis 兼容插件在后台加载，不阻塞窗口与后端启动；结果通过 cordis:status 查询
+  void cordisHost.load().catch((e) => logErr("[cordis] 启动加载失败：", e && e.message));
+  // 后端启动需要数秒，延迟同步连接器；失败只记日志，之后安装或重新加载时会再次同步
+  setTimeout(() => { void syncPluginConnector(); }, 8000);
 
   // 1. 立即创建窗口并显示加载页
   try {
@@ -2271,6 +2390,7 @@ app.on("before-quit", () => {
   // plan-73-344：退出前兜底落盘（关窗路径已在 close 事件 flush，此处覆盖系统注销等其余退出路径）
   flushUiPrefsBackup();
   flushDomStorage();
+  try { cordisHost.unload(); } catch { /* 退出路径尽力而为 */ }
   killBackend();
 });
 app.on("will-quit", () => { killBackend(); });

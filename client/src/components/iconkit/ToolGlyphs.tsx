@@ -6,6 +6,7 @@
  *  · fail：线色转为 --error。 */
 import type { ReactNode } from "react";
 import { opticalStroke } from "../icons";
+import { normalizeToolName } from "../chat/toolLabels";
 
 type K =
   | "read" | "write" | "patch" | "list" | "grep" | "term" | "web" | "search" | "git"
@@ -42,9 +43,18 @@ const TOOL_KEY: Record<string, K> = {
   todo_write: "todo", ask_user_question: "question", mcp: "mcp", thinking: "think",
   // plan-20261015-browser-agent：截图类工具用图片图形，其余浏览器工具用网页图形
   browser_screenshot: "image", desktop_screenshot: "image",
+  // plan-20261017-ux-overhaul：补齐此前落到「other」闪电图标的常用工具
+  multi_file_edit: "patch", apply_patch: "patch", read_file_range: "read", read_attachment: "read",
+  symbol_search: "search", outline: "list", shell_exec: "term", terminal_bg_status: "term", terminal_bg_kill: "term",
+  git: "git", memory_write: "memory", skill_view: "read", compaction_index: "memory", compaction_view: "memory",
+  goal_complete: "todo", cancel_subagent: "agent", subagent_inspect: "agent",
+  send_to_subagent: "agent", resume_subagent: "agent", report_to_leader: "agent",
+  plan_workflow: "todo", start_workflow: "todo", workflow_status: "todo", resume_workflow: "todo",
+  cancel_workflow: "todo", amend_workflow: "todo", decide_workflow: "todo", request_write_scope: "write",
 };
 
-export function toolGlyphKey(tool: string): K {
+export function toolGlyphKey(raw: string): K {
+  const tool = normalizeToolName(raw);
   if (TOOL_KEY[tool]) return TOOL_KEY[tool];
   if (tool.startsWith("mcp")) return "mcp";
   if (tool.startsWith("browser_")) return "web";

@@ -140,7 +140,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .msg-action { border-radius: var(--r-md); transition: background var(--dur-2) var(--ease-standard), color var(--dur-2), transform var(--dur-spring) var(--spring-bouncy); }
 .msg-action:active { transform: scale(0.9); }
 .msg-action.active { color: var(--accent); }
-.turn-divider-line { opacity: 0.6; }
+/* plan-20261017-ux-overhaul：分割线线型与「已工作」计时条统一，不再额外降透明度 */
 
 /* 菜单项：图标 + 文案统一间距与图标色（plan-91-393：同一菜单内所有项都带图标） */
 .context-menu-item { display: flex; align-items: center; gap: 8px; }

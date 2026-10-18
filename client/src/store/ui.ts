@@ -21,8 +21,10 @@ export interface UiPrefs {
   glassGradientC2: string;
   /** 阴影强度:0=无 0.5=轻柔 1=标准 1.5=深邃 2=戏剧 */
   shadowStrength: number;
-  /** 对话字体族 */
+  /** 对话字体族（历史字段，无界面入口；system 时跟随全局字体） */
   chatFontFamily: string;
+  /** 全局界面字体（plan-20261017-ux-overhaul 阶段 C），取值见 UI_FONT_OPTIONS */
+  uiFontFamily: string;
   /** 对话字号(px) */
   chatFontSize: number;
   /** 对话气泡最大宽度(%) */
@@ -31,7 +33,7 @@ export interface UiPrefs {
   chatLineHeight: number;
   /** 主界面基础字号(px) */
   uiBaseFontSize: number;
-  /** 内容区最大宽度(px),0=不限 */
+  /** 内容区最大宽度(px)，默认 1000、上限 1600，0=不限（铺满） */
   contentMaxWidth: number;
   /** 左面板文字大小(px) */
   sidebarFontSize: number;
@@ -70,11 +72,12 @@ const DEFAULTS: UiPrefs = {
   glassGradientC2: "",
   shadowStrength: 1,
   chatFontFamily: "system",
+  uiFontFamily: "inter",
   chatFontSize: 13,
   chatBubbleWidth: 70,
   chatLineHeight: 2.2,
   uiBaseFontSize: 13,
-  contentMaxWidth: 1120,
+  contentMaxWidth: 1000,
   sidebarFontSize: 14,
   sidebarIconSize: 16,
   sidebarFocusColor: "",
@@ -90,6 +93,33 @@ const FONT_OPTIONS: Record<string, string> = {
   serif: '"Georgia", "Noto Serif SC", "Source Han Serif SC", serif',
   mono: '"JetBrains Mono", "SF Mono", "Cascadia Code", Consolas, monospace',
   rounded: '"SF Pro Rounded", "Hiragino Maru Gothic Pro", "Microsoft YaHei", sans-serif',
+};
+
+/** 全局界面字体（plan-20261017-ux-overhaul 阶段 C）。
+ *  默认「Inter + 微软雅黑 UI」：Inter 为屏幕显示设计，字怀大、笔画对齐像素网格，小字号下比
+ *  Segoe UI 更锐利；Inter 随应用内置（仅拉丁字符集，按需加载），中文交给系统 UI 黑体。
+ *  其余选项依赖本机已安装的字体，未安装时按栈逐级回退，不会出现方块字。 */
+export const UI_FONT_OPTIONS: Record<string, { label: string; desc: string; stack: string }> = {
+  inter: {
+    label: "Inter（推荐）", desc: "内置字体，小字号清晰锐利",
+    stack: '"Inter Variable", "Microsoft YaHei UI", "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif',
+  },
+  system: {
+    label: "系统默认", desc: "Segoe UI / 苹方 + 微软雅黑",
+    stack: 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
+  },
+  harmony: {
+    label: "HarmonyOS Sans", desc: "需本机已安装",
+    stack: '"HarmonyOS Sans SC", "HarmonyOS Sans", "Microsoft YaHei UI", "PingFang SC", sans-serif',
+  },
+  sourcehan: {
+    label: "思源黑体", desc: "需本机已安装",
+    stack: '"Source Han Sans SC", "Noto Sans SC", "Noto Sans CJK SC", "Microsoft YaHei UI", "PingFang SC", sans-serif',
+  },
+  yahei: {
+    label: "微软雅黑", desc: "Windows 自带",
+    stack: '"Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif',
+  },
 };
 
 /** 主进程备份的进程内缓存：启动期只读一次（loadPrefs 会被 main / App / store 创建三处调用），
@@ -142,8 +172,14 @@ function loadPrefs(): UiPrefs {
     }
   }
   if (!stored) return DEFAULTS;
-  // v14: 840px 是旧版默认值；仅迁移未主动调整过的旧默认，不覆盖用户自定义宽度。
-  if (stored.contentMaxWidth === 840) stored.contentMaxWidth = DEFAULTS.contentMaxWidth;
+  // 内容展示宽度：上一版曾用百分比保存（<=100），现恢复为 px；残留百分比值迁回默认 1000。
+  // 0（不限）与合理的像素值保持不变。
+  if (typeof stored.contentMaxWidth === "number") {
+    if (stored.contentMaxWidth > 0 && stored.contentMaxWidth <= 100) {
+      stored.contentMaxWidth = DEFAULTS.contentMaxWidth;
+    }
+    if (stored.contentMaxWidth > 1600) stored.contentMaxWidth = 1600;
+  }
   // S1（plan-41-197）：左栏字号/图标默认值上修（12→14 / 14→16）。
   // 旧默认值（12/14）视作“用户未自定义”，迁移到新默认；手动调过的值保持不变。
   if (stored.sidebarFontSize === 12) stored.sidebarFontSize = 14;
@@ -200,10 +236,17 @@ export function applyUiVars(p: UiPrefs, opts?: { glassToggle?: boolean }) {
   const root = document.documentElement;
   root.style.setProperty("--sidebar-w", `${p.leftPanelWidth}px`);
   root.style.setProperty("--fs-md", `${p.chatFontSize}px`);
-  root.style.setProperty("--chat-font", FONT_OPTIONS[p.chatFontFamily] || FONT_OPTIONS.system);
+  root.style.setProperty("--font-sans", (UI_FONT_OPTIONS[p.uiFontFamily] ?? UI_FONT_OPTIONS.inter).stack);
+  // 对话字体无独立入口时跟随全局字体，避免消息区与界面字体不一致
+  root.style.setProperty("--chat-font", p.chatFontFamily && p.chatFontFamily !== "system"
+    ? (FONT_OPTIONS[p.chatFontFamily] || "var(--font-sans)") : "var(--font-sans)");
   root.style.setProperty("--chat-bubble-w", `${p.chatBubbleWidth}%`);
   root.style.setProperty("--chat-line-height", `${p.chatLineHeight}`);
-  root.style.setProperty("--content-max-w", p.contentMaxWidth > 0 ? `${p.contentMaxWidth}px` : "none");
+  // 0 表示不限：写成 100%（而不是 none），下游 min()/calc() 才能始终成立
+  root.style.setProperty(
+    "--content-max-w",
+    p.contentMaxWidth > 0 ? `${Math.min(1600, p.contentMaxWidth)}px` : "100%",
+  );
   root.style.setProperty("--ui-base-fs", `${p.uiBaseFontSize}px`);
   root.style.setProperty("--sidebar-fs", `${p.sidebarFontSize}px`);
   root.style.setProperty("--sidebar-icon", `${p.sidebarIconSize}px`);

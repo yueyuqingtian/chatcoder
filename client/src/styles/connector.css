@@ -1,0 +1,144 @@
+/* ═══════════════════════════════════════════════════════════
+ * 内置连接器配置（数据库连接 / 开发调试）——plan-20261017-goal12 项 10
+ * 与弹窗同一分组语言：分组卡（InsetCard）+ 行（InsetRow）+ 两列栅格表单。
+ * 圆角只用令牌（控件 --r-md、卡片 --r-lg、胶囊 --r-pill），不再硬编码。
+ * ═══════════════════════════════════════════════════════════ */
+
+.cx-panel { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+
+/* 图标磁贴：与卡片同层级，圆角走控件档 */
+.cx-tile {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px; flex-shrink: 0;
+  border-radius: var(--r-md);
+  background: var(--bg-hover);
+  color: var(--text-2);
+}
+
+.cx-danger { color: var(--warning); }
+
+/* 保存条：固定在分组底部，提示文案与按钮同行，有修改时提示变色 */
+.cx-savebar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  min-height: 36px; padding: 0 2px;
+}
+.cx-savebar-hint { min-width: 0; font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cx-savebar-hint.is-dirty { color: var(--warning); }
+
+/* 项目选择器与刷新按钮同行 */
+.cx-project-select { min-width: 200px; max-width: 280px; }
+
+/* 连接空态：说明 + 主操作同一行，不留大块留白 */
+.cx-empty { display: flex; align-items: center; gap: 14px; padding: 14px 16px; }
+.cx-empty-text { flex: 1; min-width: 0; font-size: 12.5px; line-height: 1.6; color: var(--text-2); }
+
+/* 连接行：名称与标签一行，地址等宽次要色，操作收成图标 */
+.cx-conn { display: flex; align-items: center; gap: 12px; padding: 12px 10px 12px 16px; }
+.cx-conn + .cx-conn { border-top: 1px solid var(--surface-inset-border); }
+.cx-conn-main { flex: 1; min-width: 0; }
+.cx-conn-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.cx-conn-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; color: var(--text-1); }
+.cx-tag {
+  flex-shrink: 0; padding: 1px 8px; border-radius: var(--r-pill);
+  font-size: 11px; line-height: 1.6; color: var(--text-2); background: var(--bg-hover);
+}
+.cx-conn-addr {
+  margin-top: 3px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--font-mono); font-size: 11.5px; color: var(--text-3);
+}
+.cx-conn-test { margin-top: 4px; font-size: 12px; color: var(--text-3); }
+.cx-conn-test.is-ok { color: var(--success); }
+.cx-conn-test.is-error { color: var(--error); }
+.cx-conn-ops { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+
+/* 权限数值：两列，标签在上、控件在下 */
+.cx-limits { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 16px; padding: 14px 16px; }
+
+/* 连接表单：两列栅格；地址行主机占满、端口固定宽 */
+.cx-form { display: flex; flex-direction: column; gap: 14px; }
+.cx-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 16px; }
+.cx-form-grid.is-address { grid-template-columns: minmax(0, 1fr) 128px; }
+
+/* Web / Java 子区块：卡内分隔，留白统一 */
+.cx-block { padding: 12px 16px; border-top: 1px solid var(--surface-inset-border); }
+.cx-port { width: 104px; }
+
+/* 调试状态 */
+.cx-status-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.cx-status-title { font-size: 13px; font-weight: 600; color: var(--text-1); }
+.cx-status-desc { margin-left: auto; min-width: 0; font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cx-status.is-idle .cx-status-title { color: var(--text-2); }
+.cx-status-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.cx-var-value { color: var(--text-2); }
+
+/* JDWP 启动参数：代码块样式与复制按钮同一行 */
+.cx-jdwp { padding: 12px 16px; }
+.cx-jdwp-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.cx-jdwp-title { font-size: 13px; font-weight: 600; color: var(--text-1); }
+.cx-jdwp-code {
+  display: block; margin-top: 8px; padding: 8px 10px;
+  border-radius: var(--r-md); background: var(--bg-hover);
+  font-family: var(--font-mono); font-size: 11.5px; line-height: 1.6; color: var(--text-2);
+  word-break: break-all;
+}
+
+@media (max-width: 560px) {
+  .cx-limits, .cx-form-grid, .cx-form-grid.is-address { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* 新建工作树弹窗（plan-20261017-goal12 项 6） */
+.wt-form { display: flex; flex-direction: column; gap: 14px; }
+.wt-error { margin-top: 10px; font-size: 12.5px; color: var(--error); }
+
+/* Cordis 兼容插件（plan-20261017-goal12 项 12）：加载状态列表与插件消息 */
+.cx-plugins { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+.cx-plugins-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.cx-plugins-summary { font-size: 12px; color: var(--text-3); }
+.cx-plugins-empty { display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; line-height: 1.6; color: var(--text-3); }
+.cx-plugins-empty svg { flex-shrink: 0; margin-top: 3px; color: var(--text-3); }
+.cx-plugins-empty code { font-family: var(--font-mono); font-size: 11.5px; }
+.cx-plugin-list { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: var(--r-lg); overflow: hidden; }
+.cx-plugin-row { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-3); padding: 10px 14px; }
+.cx-plugin-actions { display: flex; align-items: center; gap: var(--sp-2); flex-shrink: 0; }
+.cx-plugins-actions { display: flex; align-items: center; gap: var(--sp-2); }
+.cx-plugins-notice { font-size: 12.5px; line-height: 1.6; padding: var(--sp-2) var(--sp-3); border-radius: var(--r-md); word-break: break-word; }
+.cx-plugins-notice.is-ok { color: var(--success); background: color-mix(in srgb, var(--success) 10%, transparent); }
+.cx-plugins-notice.is-error { color: var(--error); background: color-mix(in srgb, var(--error) 10%, transparent); }
+.cx-plugin-version { flex-shrink: 0; font-family: var(--font-mono); font-size: 11px; color: var(--text-3); }
+/* 含 dsh 客户端模块：只运行宿主半，界面扩展不显示——用中性标签说明，不用警示色 */
+.cx-plugin-tag {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  background: var(--bg-active);
+  color: var(--text-3);
+  font-size: 10.5px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.cx-plugin-desc { margin-top: 2px; font-size: 12px; line-height: 1.5; color: var(--text-3); word-break: break-word; }
+.cx-plugin-row + .cx-plugin-row { border-top: 1px solid var(--border); }
+.cx-plugin-main { min-width: 0; }
+.cx-plugin-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.cx-plugin-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; color: var(--text-1); }
+.cx-plugin-badge { flex-shrink: 0; padding: 0 8px; border-radius: var(--r-pill); font-size: 11px; line-height: 18px; background: var(--bg-hover); color: var(--text-2); }
+.cx-plugin-badge.is-loaded { color: var(--success); }
+.cx-plugin-badge.is-failed { color: var(--error); }
+.cx-plugin-badge.is-disabled { color: var(--text-3); }
+.cx-plugin-path { margin-top: 2px; font-family: var(--font-mono); font-size: 11px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cx-plugin-warn { margin-top: 4px; font-size: 12px; line-height: 1.5; color: var(--warning); word-break: break-word; }
+.cx-plugin-error { margin-top: 4px; font-size: 12px; line-height: 1.5; color: var(--error); word-break: break-word; }
+.cx-plugin-notes { display: flex; flex-direction: column; gap: 4px; }
+.cx-plugin-note { display: flex; gap: 8px; font-size: 12px; line-height: 1.5; color: var(--text-2); }
+.cx-plugin-note-who { flex-shrink: 0; color: var(--text-3); }
+.cx-plugin-note-text { min-width: 0; word-break: break-word; }
+
+/* 标题栏：为当前会话切换到独立工作树的入口（plan-20261017-goal12 项 6） */
+.tb-wt-btn {
+  display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0;
+  height: 26px; padding: 0 8px; border: none; border-radius: var(--r-md);
+  background: transparent; color: var(--text-2); font: inherit; font-size: 12px; cursor: pointer;
+  transition: background var(--dur-1) var(--ease-standard), color var(--dur-1) var(--ease-standard);
+}
+.tb-wt-btn:hover { background: var(--bg-hover); color: var(--text-1); }
+.tb-wt-btn svg { flex-shrink: 0; }

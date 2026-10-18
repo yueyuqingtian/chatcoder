@@ -1,9 +1,10 @@
 /** ChatPanel（v4 r3 完全重写）：聊天面板容器。
  * 顶部错误横幅（可关闭） + 消息流 + ComposerBox
  */
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { PluginSlot } from "../plugins/registry";
 import { ComposerCapsule } from "./chat/ComposerCapsule";
+import { ContentWidthResizer } from "./chat/ContentWidthResizer";
 
 export function ChatPanel() {
   /** plan-282-1492：胶囊可见性（由胶囊上报）。
@@ -12,11 +13,12 @@ export function ChatPanel() {
    *  任务进度 / 工作流 / 产物合并为同一个胶囊，只占一行。 */
   const [hasCapsule, setHasCapsule] = useState(false);
   const onCapsuleVisibilityChange = useCallback((visible: boolean) => setHasCapsule(visible), []);
+  const panelRef = useRef<HTMLDivElement>(null);
 
   return (
-    <div className={"chat-panel" + (hasCapsule ? " has-capsule" : "")}>
+    <div ref={panelRef} className={"chat-panel" + (hasCapsule ? " has-capsule" : "")}>
       {/* plan-282-1421（第7项）：移除标题栏与消息流之间的错误横幅。
-          系统级错误统一由右上角 Toast 呈现，任务执行错误由消息流内
+          系统级错误统一由顶部居中的全局提示呈现，任务执行错误由消息流内
           （turn-item-error / MsgType.ERROR）呈现——同一条错误此前会被
           横幅与 Toast 同时渲染两遍。 */}
       <div className="chat-panel-flow">
@@ -30,6 +32,8 @@ export function ChatPanel() {
         <ComposerCapsule onVisibilityChange={onCapsuleVisibilityChange} />
         <PluginSlot slot="composer" />
       </div>
+      {/* plan-20261017-ux-overhaul 阶段 C：消息列边缘停留 1 秒出现拖拽柄，拖动调整内容宽度 */}
+      <ContentWidthResizer hostRef={panelRef} />
     </div>
   );
 }

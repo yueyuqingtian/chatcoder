@@ -171,6 +171,7 @@ export const markdownComponents: Components = {
         src={url}
         alt={alt || ""}
         loading="lazy"
+        decoding="async"
         onClick={() => {
           if (url) openGallery([{ url, name: alt || "image" }], 0);
         }}
@@ -234,19 +235,28 @@ function mdCacheSet(key: string, node: ReactNode): void {
   }
 }
 
+/** 插件数组提到模块级：每次渲染新建数组会让下游无法做引用比较 */
+const REMARK_PLUGINS = [remarkGfm, remarkMath];
+const REHYPE_PLUGINS = [rehypeHighlight, rehypeKatex];
+
+/** plan-20261017-ux-overhaul 阶段 E：直接调用 react-markdown 的同步函数，拿到「解析 + 高亮后」的元素树。
+ *  此前缓存的是 `<ReactMarkdown>` 元素本身——虚拟列表重新挂载时 React 仍会再次执行该组件，
+ *  unified 解析与 rehype-highlight / katex 一次都没省下，缓存形同虚设。
+ *  react-markdown v10 的同步 `Markdown` 是无 hook 的纯函数（hook 版本是 MarkdownHooks），可安全直接调用。 */
+function renderMarkdownTree(text: string): ReactNode {
+  return (ReactMarkdown as unknown as (o: Parameters<typeof ReactMarkdown>[0]) => ReactNode)({
+    children: text,
+    remarkPlugins: REMARK_PLUGINS,
+    rehypePlugins: REHYPE_PLUGINS,
+    components: markdownComponents,
+  });
+}
+
 export const Markdown = memo(function Markdown({ children, cache = true }: { children: string; cache?: boolean }) {
   // 命中缓存则直接复用内层元素树（跳过解析与 highlight/katex）；外层 .md-body 每次新建，
   // 保证无论是否命中缓存，DOM 结构恒为单层 .md-body。
   const cached = cache ? mdCacheGet(children) : undefined;
-  const inner = cached !== undefined ? cached : (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm, remarkMath]}
-      rehypePlugins={[rehypeHighlight, rehypeKatex]}
-      components={markdownComponents}
-    >
-      {children}
-    </ReactMarkdown>
-  );
+  const inner = cached !== undefined ? cached : renderMarkdownTree(children);
   if (cache && cached === undefined) mdCacheSet(children, inner);
   return <div className="md-body">{inner}</div>;
 });

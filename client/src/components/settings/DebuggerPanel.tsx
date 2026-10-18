@@ -1,6 +1,6 @@
 /** DebuggerPanel —— 开发调试配置（plan-282-1441 #8）。
  *
- * 作为内置 MCP「开发调试」的详情页，嵌入「拓展 → 连接器」：
+ * 作为内置 MCP「开发调试」的详情页，嵌入「拓展 → 连接器」的配置弹窗中：
  *  - 内置 MCP 启用开关（默认关闭）
  *  - Web 前端调试：调试端口、当前状态（停在哪一行）
  *  - Java 调试：JDWP 主机/端口、**启动参数一键复制**
@@ -8,12 +8,16 @@
  *
  * 用户可见性：这里展示的"已暂停：文件:行号 + 调用栈 + 变量"正是需求里
  * "能看到断点进行到哪一行代码"的落点；AI 侧的调试过程也会同步反映在此。
+ *
+ * 排版（plan-20261017-goal12 项 10）：两个分组（Web / Java）各自是分组卡，端口走两列栅格，
+ * 调试状态作为卡内子区块展示；外壳见 ConnectorShell。
  */
 import { useCallback, useEffect, useState } from "react";
 import { api, type DebugStatusOut, type McpServerOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
-import { Input, Switch } from "../ui";
+import { Button, DialogSection, Field, InsetCard, InsetRow, Input, Tooltip } from "../ui";
 import { IconBug, IconRefresh, IconTerminal } from "../icons";
+import { ConnectorMaster, ConnectorSaveBar } from "./ConnectorShell";
 
 const JDWP_HINT = (port: number) =>
   `-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:${port}`;
@@ -118,15 +122,14 @@ export function DebuggerPanel({ server }: { server?: McpServerOut }) {
   };
 
   const renderStatus = (label: string, st: DebugStatusOut | null, target: "web" | "java") => (
-    /* plan-17-78（C4/D4）：未连接时用紧凑状态行（去灰底与多余内距），
-       避免只装一行"未连接"却渲染成整条空旷灰带；暂停态仍保留高亮块。 */
-    <div className={`dbg-status${st?.connected ? "" : " is-idle"}`}>
-      <div className="dbg-status-head">
+    <div className={`cx-status${st?.connected ? "" : " is-idle"}`}>
+      <div className="cx-status-head">
         <span className={`dbg-dot${st?.paused ? " paused" : st?.connected ? " live" : ""}`} />
-        <span className="dbg-status-title">{label}</span>
-        <span className="dbg-status-desc">
-          {!st?.connected ? "未连接" : st.paused ? "已暂停" : "运行中"}
-          {st?.connected ? ` · 断点 ${st.breakpoints} · 命中 ${st.hitCount} 次` : ""}
+        <span className="cx-status-title">{label}</span>
+        <span className="cx-status-desc">
+          {!st?.connected
+            ? (currentSessionId == null ? "在会话中可查看实时状态" : "未连接")
+            : `${st.paused ? "已暂停" : "运行中"} · 断点 ${st.breakpoints} · 命中 ${st.hitCount} 次`}
         </span>
       </div>
       {st?.connected && st.line != null && (
@@ -153,104 +156,94 @@ export function DebuggerPanel({ server }: { server?: McpServerOut }) {
           {st.variables.slice(0, 20).map((v, i) => (
             <div className="dbg-var-row" key={i}>
               <code>{v.name}</code>
-              <span>= {String(v.value ?? "")}</span>
+              <span className="cx-var-value">= {String(v.value ?? "")}</span>
               {v.type ? <span className="dbg-var-type">{v.type}</span> : null}
             </div>
           ))}
         </div>
       )}
       {st?.connected && (
-        <div className="dbg-actions">
-          <button className="btn btn-ghost btn-xs" onClick={() => void act(target, "resume")}>继续</button>
+        <div className="cx-status-actions">
+          <Button variant="ghost" size="sm" onClick={() => void act(target, "resume")}>继续</Button>
           {target === "web" && (
             <>
-              <button className="btn btn-ghost btn-xs" onClick={() => void act(target, "step", { action: "over" })}>跳过</button>
-              <button className="btn btn-ghost btn-xs" onClick={() => void act(target, "step", { action: "into" })}>步入</button>
-              <button className="btn btn-ghost btn-xs" onClick={() => void act(target, "step", { action: "out" })}>跳出</button>
+              <Button variant="ghost" size="sm" onClick={() => void act(target, "step", { action: "over" })}>跳过</Button>
+              <Button variant="ghost" size="sm" onClick={() => void act(target, "step", { action: "into" })}>步入</Button>
+              <Button variant="ghost" size="sm" onClick={() => void act(target, "step", { action: "out" })}>跳出</Button>
             </>
           )}
-          <button className="btn btn-ghost btn-xs danger" onClick={() => void act(target, "stop")}>停止调试</button>
+          <Button variant="danger-ghost" size="sm" onClick={() => void act(target, "stop")}>停止调试</Button>
         </div>
       )}
     </div>
   );
 
   return (
-    <div className="dbg-panel">
+    <div className="cx-panel">
       {server && (
-        <section className="db-section db-master">
-          <div className="db-master-info">
-            <div className="db-master-title"><IconBug size={14} /> {server.display_name || server.name}</div>
-            <div className="db-master-desc">
-              {server.description || "让 AI 调用接口、在代码中设断点读取现场数据。"}
-            </div>
-          </div>
-          <Switch checked={server.is_active} onChange={(v) => void toggleServer(v)} />
-        </section>
+        <ConnectorMaster
+          icon={<IconBug size={16} />}
+          title={server.display_name || server.name}
+          desc={server.description || "让 AI 调用接口、在代码中设断点读取现场数据。"}
+          checked={server.is_active}
+          onChange={(v) => void toggleServer(v)}
+        />
       )}
 
-      <section className="db-section">
-        <div className="db-section-head">
-          <span>Web 前端调试</span>
-          <button className="btn btn-ghost btn-xs" onClick={() => void refresh()} disabled={busy}>
-            <IconRefresh size={12} /> 刷新状态
-          </button>
-        </div>
-        <div className="dbg-hint">
-          需先让浏览器开启调试端口（Chrome / Edge 加启动参数
-          <code>--remote-debugging-port={webPort}</code>，或用内置浏览器面板），
-          然后让 AI 通过 <code>/</code> 调用本连接器。
-        </div>
-        <div className="db-form-row">
-          <span className="db-label">调试端口</span>
-          <div className="db-controls">
-            <Input type="number" value={String(webPort)} className="db-num"
-              onChange={(e) => setWebPort(Number(e.target.value) || 9222)} aria-label="Web 调试端口" />
-          </div>
-        </div>
-        {renderStatus("Web（CDP）", webStatus, "web")}
-      </section>
+      <DialogSection
+        title="Web 前端调试"
+        aside={(
+          <Tooltip content="重新读取调试状态" side="top">
+            <Button variant="ghost" size="sm" icon={<IconRefresh size={13} />} onClick={() => void refresh()} disabled={busy}>
+              刷新状态
+            </Button>
+          </Tooltip>
+        )}
+      >
+        <InsetCard>
+          <InsetRow
+            title="调试端口"
+            desc={`浏览器需开启远程调试端口（Chrome / Edge 启动参数 --remote-debugging-port=${webPort}，或使用内置浏览器面板）`}
+            actions={(
+              <Input type="number" value={String(webPort)} className="cx-port"
+                onChange={(e) => setWebPort(Number(e.target.value) || 9222)} aria-label="Web 调试端口" />
+            )}
+          />
+          <div className="cx-block">{renderStatus("Web（CDP）", webStatus, "web")}</div>
+        </InsetCard>
+      </DialogSection>
 
-      <section className="db-section">
-        <div className="db-section-head"><span>Java 调试</span></div>
-        <div className="dbg-hint">
-          以调试模式启动 JVM（下方参数），再让 AI 附加并下断点。
-        </div>
-        {/* JDWP 参数：独立成行（长参数不再与标签挤在同一行导致横向溢出） */}
-        <div className="db-form-row">
-          <span className="db-label">JDWP 参数</span>
-          <div className="db-controls">
-            <code className="dbg-jdwp">{JDWP_HINT(javaPort)}</code>
-            <button className="btn btn-ghost btn-xs" onClick={() => void copyJdwp()}>
-              <IconTerminal size={12} /> {copied ? "已复制" : "复制"}
-            </button>
+      <DialogSection title="Java 调试" aside="以调试模式启动 JVM 后附加">
+        <InsetCard>
+          <div className="cx-jdwp">
+            <div className="cx-jdwp-head">
+              <span className="cx-jdwp-title">JDWP 启动参数</span>
+              <Button variant="ghost" size="sm" icon={<IconTerminal size={13} />} onClick={() => void copyJdwp()}>
+                {copied ? "已复制" : "复制"}
+              </Button>
+            </div>
+            <code className="cx-jdwp-code">{JDWP_HINT(javaPort)}</code>
           </div>
-        </div>
-        <div className="db-form-row">
-          <span className="db-label">主机 / 端口</span>
-          <div className="db-controls">
-            <Input value={host} className="db-host" onChange={(e) => setHost(e.target.value)} aria-label="JDWP 主机" />
-            <Input type="number" value={String(javaPort)} className="db-num"
-              onChange={(e) => setJavaPort(Number(e.target.value) || 5005)} aria-label="JDWP 端口" />
+          <div className="cx-form-grid is-address cx-block">
+            <Field label="主机">
+              <Input value={host} aria-label="JDWP 主机" onChange={(e) => setHost(e.target.value)} />
+            </Field>
+            <Field label="端口">
+              <Input type="number" value={String(javaPort)} aria-label="JDWP 端口"
+                onChange={(e) => setJavaPort(Number(e.target.value) || 5005)} />
+            </Field>
           </div>
-        </div>
-        {renderStatus("Java（JDWP）", javaStatus, "java")}
-      </section>
+          <div className="cx-block">{renderStatus("Java（JDWP）", javaStatus, "java")}</div>
+        </InsetCard>
+      </DialogSection>
 
       {/* 保存条：配置落库（此前这些输入只存在组件 state 里，重进面板即丢） */}
-      <div className="dbg-savebar">
-        <span className={`dbg-savebar-hint${dirty ? " dirty" : ""}`}>
-          {saving
-            ? "保存中…"
-            : dirty
-            ? "有未保存的修改"
-            : saveMsg || (savedAt ? `已保存（${savedAt}）` : "配置会保存到数据库，重新进入面板自动读回")}
-        </span>
-        <button className="btn btn-primary btn-sm" onClick={() => void save()}
-          disabled={!dirty || saving}>
-          保存
-        </button>
-      </div>
+      <ConnectorSaveBar
+        dirty={dirty}
+        saving={saving}
+        idleText={saveMsg || (savedAt ? `已保存（${savedAt}）` : "配置会保存到数据库，重新进入自动读回")}
+        onSave={() => void save()}
+      />
     </div>
   );
 }

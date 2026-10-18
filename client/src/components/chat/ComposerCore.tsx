@@ -49,6 +49,7 @@ import { ModelPicker } from "./ModelPicker";
 // plan-75-332: 审批卡——与 QuestionWizardBox 同构，需要审批时替换输入框主体
 import { ApprovalCard } from "./ApprovalCard";
 import { useChatStore, persistLastReasoning, type UsageDetail } from "../../store/chat";
+import { useScoped } from "./convoScope";
 import { selectSessionWorkflowBusy, useWorkflowStore } from "../../store/workflow";
 import { useDraftsStore, normalizeDraftMode, normalizeApprovalMode, type ApprovalMode } from "../../store/drafts";
 import { useI18n } from "../../store/i18n";
@@ -110,25 +111,25 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   const taRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  const isRunning = useChatStore((s) => s.isRunning);
-  const currentSessionId = useChatStore((s) => s.currentSessionId);
+  const isRunning = useScoped("isRunning");
+  const currentSessionId = useScoped("currentSessionId");
   const currentProjectId = useChatStore((s) => s.currentProjectId);
   // 会话级「执行中」：主代理轮次在跑、后台工作流在跑（含工作流结束后等待唤醒主代理的空档）、或后台子代理未结束——任一即算。
   // 工作流可能已不占用任何轮次（如「开始执行」只启动了程序），停止按钮要能中断它与子代理，也要能取消待送达的唤醒。
   const workflowBusy = useWorkflowStore((s) => selectSessionWorkflowBusy(s, currentSessionId));
-  const pendingSubagents = useChatStore((s) => s.pendingSubagents);
+  const pendingSubagents = useScoped("pendingSubagents");
   const busy = isRunning || workflowBusy || pendingSubagents > 0;
-  const stopSessionExecution = useChatStore((s) => s.stopSessionExecution);
+  const stopSessionExecution = useScoped("stopSessionExecution");
   const projects = useChatStore((s) => s.projects);
   const models = useChatStore((s) => s.models);
   const lastReasoningEffort = useChatStore((s) => s.lastReasoningEffort);
   const lastModelId = useChatStore((s) => s.lastModelId);
-  const queuedInputs = useChatStore((s) => s.queuedInputs);
-  const isCompacting = useChatStore((s) => s.isCompacting);
-  const usage = useChatStore((s) => s.usage);
-  const pendingApproval = useChatStore((s) => s.pendingApproval);
-  const approvalQueueLength = useChatStore((s) => s.approvalQueue.length);
-  const pendingPlan = useChatStore((s) => s.pendingPlan);
+  const queuedInputs = useScoped("queuedInputs");
+  const isCompacting = useScoped("isCompacting");
+  const usage = useScoped("usage");
+  const pendingApproval = useScoped("pendingApproval");
+  const approvalQueueLength = useScoped("approvalQueue").length;
+  const pendingPlan = useScoped("pendingPlan");
   const sessions = useChatStore((s) => s.sessions);
 
   const currentSession = sessions.find((s) => s.id === currentSessionId);
@@ -328,15 +329,15 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     return () => { cancelled = true; };
   }, []);
 
-  const sendTurn = useChatStore((s) => s.sendTurn);
-  const cancelTurn = useChatStore((s) => s.cancelTurn);
-  const updateQueuedInput = useChatStore((s) => s.updateQueuedInput);
-  const flushQueuedInput = useChatStore((s) => s.flushQueuedInput);
-  const respondApproval = useChatStore((s) => s.respondApproval);
+  const sendTurn = useScoped("sendTurn");
+  const cancelTurn = useScoped("cancelTurn");
+  const updateQueuedInput = useScoped("updateQueuedInput");
+  const flushQueuedInput = useScoped("flushQueuedInput");
+  const respondApproval = useScoped("respondApproval");
 
-  const composerBrowserRefs = useChatStore((s) => s.composerBrowserRefs);
-  const removeComposerBrowserRef = useChatStore((s) => s.removeComposerBrowserRef);
-  const clearComposerBrowserRefs = useChatStore((s) => s.clearComposerBrowserRefs);
+  const composerBrowserRefs = useScoped("composerBrowserRefs");
+  const removeComposerBrowserRef = useScoped("removeComposerBrowserRef");
+  const clearComposerBrowserRefs = useScoped("clearComposerBrowserRefs");
   const [browserRefPreview, setBrowserRefPreview] = useState<any | null>(null);
 
   const [uploading, setUploading] = useState(false);
@@ -671,9 +672,20 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
       if (retry < 30) requestAnimationFrame(() => resizeTextarea(el, retry + 1));
       return;
     }
+    // 宽度过窄时不能测：侧边对话首次打开时面板尚未完成布局，textarea 只有二十余像素宽，
+    // 占位文字因此被折成多行、scrollHeight 随之变大；写进去的固定高度之后不会自己收回
+    // （表现为「首次打开输入框很高，点一下页面才恢复正常」）。等宽度就绪再测。
+    if (el.clientWidth < 80) {
+      if (retry < 60) requestAnimationFrame(() => resizeTextarea(el, retry + 1));
+      return;
+    }
+    const prev = el.style.height;
     el.style.height = "auto";
     const clamped = Math.max(36, Math.min(el.scrollHeight, 400));
-    el.style.height = `${clamped}px`;
+    const next = `${clamped}px`;
+    // 高度没变就不重复赋值：拖拽期每次写入都会让输入框重新布局一次，
+    // 进而带动整个中间列抖动（消息流滚动位置随之漂移）。
+    el.style.height = prev === next ? prev : next;
     // 高度收缩后清掉残留滚动，避免可视区停在中部（"原本有字的地方空白"）
     if (el.scrollHeight <= el.clientHeight + 1 && el.scrollTop !== 0) el.scrollTop = 0;
   };
@@ -718,6 +730,50 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
       window.removeEventListener("resize", onResize);
       window.removeEventListener("chatcoder:window-motion", onMotionEnd);
       window.removeEventListener("pointerup", onPointerUp, true);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 输入框自身宽度变化时重测高度：侧边对话首次布局完成（宽度从 0 / 二十余像素 → 正常值）、
+  // 标签切入动画、拖动分隔条，都属于「不产生 window resize 的宽度变化」，
+  // 之前只能等 pointerup 碰巧纠正。只认宽度：写 height 本身也会触发 ResizeObserver，
+  // 按宽度过滤可避免自激循环。
+  useEffect(() => {
+    const el = taRef.current;
+    if (!el) return;
+    let raf = 0;
+    let lastW = -1;
+    let pending = false;
+    const measure = () => {
+      // 运动期（拖分隔条 / 面板展开折叠）必须跳过，与既有 remeasure 同一口径：
+      // resizeTextarea 先写 height:auto 再读 scrollHeight（强制同步布局），
+      // 每帧执行会让输入框高度反复塌陷又写回 —— 中间列容器高度随之抖动，
+      // 消息流的滚动锚点（capture → 等宽度稳定 → 像素校正）就在半程布局上执行，
+      // 表现为「展开 / 折叠 / 拖拉左右面板后消息流位置不再保持」。
+      if (isBusy()) { pending = true; return; }
+      pending = false;
+      if (taRef.current) resizeTextarea(taRef.current);
+    };
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width ?? 0;
+      if (Math.abs(w - lastW) < 1) return;
+      lastW = w;
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(measure);
+    });
+    ro.observe(el);
+    // 运动结束补测一次：首次打开侧边对话时宽度变化发生在面板动画期间，
+    // 当时只记了 pending；不补测就会让高度停在旧值（问题回到原点）。
+    const onMotionEnd = (e: Event) => {
+      if ((e as CustomEvent<{ active?: boolean }>).detail?.active !== false || !pending) return;
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(measure);
+    };
+    window.addEventListener("chatcoder:window-motion", onMotionEnd);
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+      window.removeEventListener("chatcoder:window-motion", onMotionEnd);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -916,9 +972,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
             sessions: s.sessions.map((x) => (x.id === currentSessionId ? { ...x, model_id: modelId } : x)),
             lastModelId: modelId,
           }));
-          // plan-41-229: 后端已把「模型已切换」divider 落库并广播；此处再拉一次做兜底——
-          // 覆盖广播丢失、断线重连中或消息列表尚未回流的情况，保证提示不滞后到下次发送。
-          void useChatStore.getState().refreshMessages();
+          // plan-20261017-ux-overhaul：切换当下不再写分隔线（发送时由后端按需写入），无需再拉消息
         })
         .catch(() => {
           useChatStore.setState({ error: "切换模型失败，请重试" });
@@ -2116,8 +2170,8 @@ function QuestionWizardBox({
   // plan-238-1188: 作答草稿持久化到 store（按 approvalId 键控）。
   // 此前 answers/stepIndex/customText 全为组件本地 state，切到设置页会卸载
   // ComposerCore，返回后已选答案与当前题号全部丢失。
-  const questionDraft = useChatStore((s) => s.questionDraft);
-  const setQuestionDraft = useChatStore((s) => s.setQuestionDraft);
+  const questionDraft = useScoped("questionDraft");
+  const setQuestionDraft = useScoped("setQuestionDraft");
 
   const draft = questionDraft && questionDraft.approvalId === approvalId ? questionDraft : null;
   const stepIndex = draft?.stepIndex ?? 0;

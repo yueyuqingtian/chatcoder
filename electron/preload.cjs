@@ -108,6 +108,23 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
   },
   // v19: 外挂插件列表（manifest + 源码文本）
   listUserPlugins: () => ipcRenderer.invoke("plugins:list"),
+  // Cordis 兼容插件（dsh 协议）：状态查询、重新加载、插件发来的界面通知
+  cordisStatus: () => ipcRenderer.invoke("cordis:status"),
+  cordisReload: () => ipcRenderer.invoke("cordis:reload"),
+  cordisInstall: () => ipcRenderer.invoke("cordis:install"),
+  cordisUninstall: (name) => ipcRenderer.invoke("cordis:uninstall", name),
+  cordisSetEnabled: (name, enabled) => ipcRenderer.invoke("cordis:setEnabled", name, enabled),
+  onCordisNotify: (cb) => {
+    const handler = (_event, payload) => cb(payload);
+    ipcRenderer.on("cordis:notify", handler);
+    return () => ipcRenderer.removeListener("cordis:notify", handler);
+  },
+  // 插件集合变化（安装 / 启停 / 卸载）后主进程主动推送，界面据此即时刷新
+  onCordisChanged: (cb) => {
+    const handler = (_event, plugins) => cb(plugins);
+    ipcRenderer.on("cordis:changed", handler);
+    return () => ipcRenderer.removeListener("cordis:changed", handler);
+  },
   // 自动更新（electron-updater + GitHub Releases）
   checkForUpdates: () => ipcRenderer.invoke("app:checkForUpdates"),
   getUpdateState: () => ipcRenderer.invoke("app:getUpdateState"),

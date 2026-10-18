@@ -139,6 +139,13 @@ export function Dialog({
   className = "",
   children,
 }: DialogProps) {
+  // 关闭时保留「最后一次打开时」的内容快照：退场动画播放期间，调用方往往已在 onClose 之后清空表单状态，
+  // 若直接渲染新 props，弹窗会先变成空白的小框再消失（跳变）。快照只在 open 为真时更新。
+  const liveView: DialogView = { title, subtitle, actions, footer, width, closable, bodyClassName, className, children };
+  const frozenRef = useRef<DialogView | null>(null);
+  if (open) frozenRef.current = liveView;
+  const view = open || !frozenRef.current ? liveView : frozenRef.current;
+
   // plan-41-227: 用回调 ref 收集内容节点（React.useRef + useEffect 在部分挂载时序下会拿到 null）
   const [contentHost, setContentHost] = useState<HTMLElement | null>(null);
   // plan-41-230：回调 ref 需固定引用——内联箭头函数每次渲染都变，React 会反复 detach/attach，
@@ -159,33 +166,46 @@ export function Dialog({
         <RadixDialog.Overlay className="ui-dialog-overlay" />
         <RadixDialog.Content
           ref={setContentNode}
-          className={`ui-dialog-content ${className}`.trim()}
-          style={{ ["--ui-dialog-w" as string]: `${width}px` }}
+          className={`ui-dialog-content ${view.className}`.trim()}
+          style={{ ["--ui-dialog-w" as string]: `${view.width}px` }}
           // 无副标题时显式声明无描述，避免 Radix 的无障碍告警
-          {...(subtitle ? {} : { "aria-describedby": undefined })}
+          {...(view.subtitle ? {} : { "aria-describedby": undefined })}
           onPointerDownOutside={(e) => { if (!dismissOnOverlay) e.preventDefault(); }}
           onInteractOutside={(e) => { if (!dismissOnOverlay) e.preventDefault(); }}
         >
           <DialogContentHostContext.Provider value={contentHost}>
             <div className="ui-dialog-head">
               <div className="ui-dialog-title-wrap">
-                <RadixDialog.Title className="ui-dialog-title">{title}</RadixDialog.Title>
-                {subtitle ? <RadixDialog.Description className="ui-dialog-subtitle">{subtitle}</RadixDialog.Description> : null}
+                <RadixDialog.Title className="ui-dialog-title">{view.title}</RadixDialog.Title>
+                {view.subtitle ? <RadixDialog.Description className="ui-dialog-subtitle">{view.subtitle}</RadixDialog.Description> : null}
               </div>
               <div className="ui-dialog-actions">
-                {actions}
-                {closable && (
+                {view.actions}
+                {view.closable && (
                   <button type="button" className="ui-icon-btn ui-dialog-close" aria-label="关闭 (Esc)" onClick={onClose}>
                     <IconX size={16} />
                   </button>
                 )}
               </div>
             </div>
-            <div className={`ui-dialog-body ${bodyClassName}`.trim()}>{children}</div>
-            {footer ? <div className="ui-dialog-footer">{footer}</div> : null}
+            <div className={`ui-dialog-body ${view.bodyClassName}`.trim()}>{view.children}</div>
+            {view.footer ? <div className="ui-dialog-footer">{view.footer}</div> : null}
           </DialogContentHostContext.Provider>
         </RadixDialog.Content>
       </RadixDialog.Portal>
     </RadixDialog.Root>
   );
+}
+
+/** 弹窗渲染所需的全部内容与外观（用于关闭期间冻结快照） */
+interface DialogView {
+  title: ReactNode;
+  subtitle?: ReactNode;
+  actions?: ReactNode;
+  footer?: ReactNode;
+  width: number;
+  closable: boolean;
+  bodyClassName: string;
+  className: string;
+  children: ReactNode;
 }

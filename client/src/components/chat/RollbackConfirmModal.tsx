@@ -1,9 +1,13 @@
-/** 回滚确认弹窗（v9）：
- * 点击回滚（高风险操作）先展示本次将撤销的文件清单 + 回滚前后内容对比，
- * 用户审核确认后才执行；存在冲突（用户手动改动与 AI 改动重叠）的文件明确标注跳过。
+/** 回滚确认弹窗（plan-20261017-goal12 项 3 / 项 11）：
+ *
+ * 点击回滚（高风险操作）先展示本次将撤销的文件清单 + 回滚前后内容对比，用户审核后才执行。
+ * 与手动改动重叠的文件默认让整次回滚拒绝执行（不改任何文件）；用户可选择「跳过冲突文件，回滚其余」，
+ * 此时冲突文件保持现状，确认按钮文案明确写出跳过的数量。
+ * 外壳统一为 ui/Dialog（与全站弹窗同一退场与配色）。
  */
 import { useState } from "react";
 import { useChatStore } from "../../store/chat";
+import { Button, Dialog, DialogSection, InsetCard } from "../ui";
 import { IconAlertTriangle } from "../icons";
 import type { RollbackPreviewFile } from "../../api/client";
 
@@ -16,7 +20,7 @@ function diffLines(a: string, b: string): DiffRow[] {
   const n = al.length;
   const m = bl.length;
   if (n === 0 && m === 0) return [];
-  // 保护：超 200 行或 100k 单元格时退化为逐行对比
+  // 保护：行数乘积超过 10 万单元格（DP 表过大）时退化为逐行对比
   if (n * m > 100_000) {
     const out: DiffRow[] = [];
     const len = Math.max(n, m);
@@ -85,78 +89,105 @@ export function RollbackConfirmModal() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
 
-  if (!pending) return null;
-  const { turnId, files, affected } = pending;
-  const conflictCount = files.filter((f) => f.conflict).length;
+  const files = pending?.files ?? [];
+  const conflictCount = pending?.conflicts.length ?? files.filter((f) => f.conflict).length;
+  const safeCount = files.filter((f) => !f.conflict).length;
+  const hasConflict = conflictCount > 0;
+  const turnId = pending?.turnId ?? 0;
+  const affected = pending?.affected ?? { tasks: 0, messages: 0 };
+
+  const run = async (allowPartial: boolean) => {
+    setConfirming(true);
+    try {
+      await confirmRollback({ allowPartial });
+    } finally {
+      setConfirming(false);
+    }
+  };
+
+  const confirmLabel = files.length === 0
+    ? "确认撤回"
+    : hasConflict
+      ? `跳过 ${conflictCount} 个冲突文件并回滚`
+      : "确认回滚";
 
   return (
-    <div className="rc-overlay" onClick={cancelRollback}>
-      <div className="rc-modal" onClick={(e) => e.stopPropagation()}>
-        <header className="rc-header">
-          <h3>回滚确认</h3>
-          <button className="rc-close" onClick={cancelRollback} title="取消">×</button>
-        </header>
-        <div className="rc-body">
-          {files.length === 0 ? (
-            <p className="rc-desc">
-              将撤回 <b>turn #{turnId}</b> 及其后的对话（<b>本次不修改任何代码文件</b>）。
-            </p>
+    <Dialog
+      open={pending != null}
+      onClose={cancelRollback}
+      title="回滚确认"
+      subtitle="撤销 AI 的改动，保留你的手动改动"
+      width={680}
+      footer={
+        <>
+          <Button variant="secondary" onClick={cancelRollback}>取消</Button>
+          {hasConflict ? (
+            <Button variant="danger" loading={confirming} disabled={safeCount === 0 && affected.messages === 0 && affected.tasks === 0} onClick={() => void run(true)}>
+              {confirmLabel}
+            </Button>
           ) : (
-            <p className="rc-desc">
-              将回滚 <b>turn #{turnId}</b> 及其后的更改（撤销 AI 的改动，保留你的手动改动）。
-              共涉及 <b>{files.length}</b> 个文件：
-            </p>
+            <Button variant="danger" loading={confirming} onClick={() => void run(false)}>
+              {confirmLabel}
+            </Button>
           )}
-          {(affected.tasks > 0 || affected.messages > 0) && (
-            <p className="rc-conflict-note" style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
-              <IconAlertTriangle size={13} style={{ flexShrink: 0, marginTop: 1 }} />
-              <span>
-                将连带撤销该 turn 之后的执行结果：
-                {affected.tasks > 0 && <>取消 <b>{affected.tasks}</b> 个任务</>}
-                {affected.tasks > 0 && affected.messages > 0 && "、"}
-                {affected.messages > 0 && <>软删 <b>{affected.messages}</b> 条消息</>}
-                。
-              </span>
-            </p>
-          )}
-          {conflictCount > 0 && (
-            <p className="rc-conflict-note" style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
-              <IconAlertTriangle size={13} style={{ flexShrink: 0, marginTop: 1 }} />
-              <span>{conflictCount} 个文件与你的手动改动存在重叠，回滚将<b>跳过</b>它们（不会覆盖你的改动）。</span>
-            </p>
-          )}
-          <div className="rc-file-list">
-            {files.length === 0 && <div className="rc-empty">该轮次无文件写盘记录，工作区代码将 100% 保持原样。</div>}
-            {files.map((f) => (
-              <div key={f.path} className={`rc-file${f.conflict ? " conflict" : ""}`}>
-                <div className="rc-file-head" onClick={() => setExpanded(expanded === f.path ? null : f.path)}>
-                  <span className={`rc-file-action ${f.action}`}>
-                    {f.action === "delete" ? "删除" : "恢复"}
-                  </span>
-                  <span className="rc-file-path">{f.path}</span>
-                  {f.conflict ? <span className="rc-file-flag conflict">冲突跳过</span> : <span className="rc-file-flag">可安全回滚</span>}
-                  <span className="rc-file-toggle">{expanded === f.path ? "▲" : "▼"}</span>
+        </>
+      }
+    >
+      <DialogSection
+        title={files.length === 0 ? `turn #${turnId}` : `涉及 ${files.length} 个文件`}
+        aside={files.length > 0 ? `${safeCount} 可安全回滚 · ${conflictCount} 冲突` : undefined}
+      >
+        <p className="rc-desc">
+          {files.length === 0
+            ? <>将撤回 <b>turn #{turnId}</b> 及其后的对话，<b>本次不修改任何代码文件</b>。</>
+            : <>将回滚 <b>turn #{turnId}</b> 及其后的更改，按时间倒序逐个撤销。</>}
+        </p>
+        {(affected.tasks > 0 || affected.messages > 0) && (
+          <p className="rc-conflict-note">
+            <IconAlertTriangle size={13} />
+            <span>
+              将连带撤销该 turn 之后的执行结果：
+              {affected.tasks > 0 && <>取消 <b>{affected.tasks}</b> 个任务</>}
+              {affected.tasks > 0 && affected.messages > 0 && "、"}
+              {affected.messages > 0 && <>软删 <b>{affected.messages}</b> 条消息</>}
+              。
+            </span>
+          </p>
+        )}
+        {hasConflict && (
+          <p className="rc-conflict-note">
+            <IconAlertTriangle size={13} />
+            <span>
+              有 <b>{conflictCount}</b> 个文件与你的手动改动重叠。默认整体拒绝回滚；
+              选择下方按钮可跳过它们、回滚其余文件，被跳过的文件保持现状。
+            </span>
+          </p>
+        )}
+      </DialogSection>
+
+      {files.length > 0 && (
+        <DialogSection title="文件清单" aside="点击展开查看改动">
+          <InsetCard>
+            <div className="rc-file-list">
+              {files.map((f) => (
+                <div key={f.path} className={`rc-file${f.conflict ? " conflict" : ""}`}>
+                  <button
+                    type="button"
+                    className="rc-file-head"
+                    aria-expanded={expanded === f.path}
+                    onClick={() => setExpanded(expanded === f.path ? null : f.path)}
+                  >
+                    <span className={`rc-file-action ${f.action}`}>{f.action === "delete" ? "删除" : "恢复"}</span>
+                    <span className="rc-file-path">{f.path}</span>
+                    <span className={`rc-file-flag${f.conflict ? " conflict" : ""}`}>{f.conflict ? "冲突跳过" : "可安全回滚"}</span>
+                  </button>
+                  {expanded === f.path && <FileDiff file={f} />}
                 </div>
-                {expanded === f.path && <FileDiff file={f} />}
-              </div>
-            ))}
-          </div>
-        </div>
-        <footer className="rc-footer">
-          <button className="btn btn-ghost" onClick={cancelRollback}>取消</button>
-          <button
-            className="btn btn-danger"
-            disabled={confirming}
-            onClick={async () => {
-              setConfirming(true);
-              await confirmRollback();
-              setConfirming(false);
-            }}
-          >
-            {confirming ? (files.length === 0 ? "撤回中…" : "回滚中…") : (files.length === 0 ? "确认撤回" : "确认回滚")}
-          </button>
-        </footer>
-      </div>
-    </div>
+              ))}
+            </div>
+          </InsetCard>
+        </DialogSection>
+      )}
+    </Dialog>
   );
 }
