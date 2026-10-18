@@ -85,7 +85,11 @@ async def test_high_risk_with_approval(tmp_path, isolated_executor):
     executor, mgr = isolated_executor
 
     async def approver():
-        await asyncio.sleep(0.02)
+        # 轮询等待审批登记（固定 sleep 在慢机器上会早于登记，导致审批被超时拒绝）
+        for _ in range(500):
+            if mgr._pending:
+                break
+            await asyncio.sleep(0.01)
         # 找到 pending 的 approval_id 并 approve
         for aid in list(mgr._pending.keys()):
             mgr.resolve(aid, True)
@@ -362,7 +366,11 @@ async def test_ask_mode_keeps_approval_card(tmp_path, isolated_executor):
     ctx.approval_mode = "ask"  # 默认：风险动作仍走审批
 
     async def approver():
-        await asyncio.sleep(0.02)
+        # 轮询等待审批登记（固定 sleep 在慢机器上会早于登记，导致审批被超时拒绝）
+        for _ in range(500):
+            if mgr._pending:
+                break
+            await asyncio.sleep(0.01)
         for aid in list(mgr._pending.keys()):
             mgr.resolve(aid, True)
 

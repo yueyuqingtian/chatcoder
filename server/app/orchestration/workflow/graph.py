@@ -239,15 +239,25 @@ def validate_plan(
     # 程序级集成验收先展开为一个子工作流，之后与其它子工作流一样参与全部校验
     spec = _expand_after(spec)
     flows = spec.flows
+    # plan-20261017-flow-limit：after 展开的集成验收也占子工作流名额，但模型提交时看不到它。
+    # 超限提示必须说明这 N 个的来源，否则「提交 6 个却提示 7 个」会被误判成数组解析错误。
+    integration_flows = len(flows) - len(original.flows)
+    integration_nodes = sum(len(f.nodes) for f in flows[len(original.flows) :])
     if not flows:
         _error(res, "empty_program", "flows", "至少需要一个子工作流")
     if len(flows) > MAX_FLOWS:
+        keys = "、".join(f.key for f in flows)
+        auto = (
+            f"；其中 {integration_flows} 个由 after 自动展开为集成验收"
+            if integration_flows
+            else ""
+        )
         _error(
             res,
             "too_many_flows",
             "flows",
-            f"子工作流最多 {MAX_FLOWS} 个，当前 {len(flows)} 个",
-            "合并相近的子工作流",
+            f"子工作流最多 {MAX_FLOWS} 个，当前 {len(flows)} 个（{keys}{auto}）",
+            "合并相近的子工作流；若使用了 based_on，未提交的骨架子工作流会保留并占用名额",
         )
     flow_keys = [f.key for f in flows]
     _report_duplicates(res, flow_keys, "flows", "duplicate_flow_key")
@@ -309,11 +319,16 @@ def validate_plan(
             )
 
     if total_nodes > MAX_NODES_TOTAL:
+        auto = (
+            f"，其中集成验收展开占 {integration_nodes} 个节点"
+            if integration_nodes
+            else ""
+        )
         _error(
             res,
             "too_many_nodes_total",
             "flows",
-            f"整个程序最多 {MAX_NODES_TOTAL} 个节点，当前 {total_nodes} 个",
+            f"整个程序最多 {MAX_NODES_TOTAL} 个节点，当前 {total_nodes} 个{auto}",
             "减少节点或分期运行",
         )
     cycle = _find_cycle({f.key: list(f.depends_on) for f in flows})
@@ -334,7 +349,7 @@ def validate_plan(
                 _warning(res, note[0], "after.commands", note[1])
 
     pairs = _check_concurrent_conflicts(res, spec, hot_patterns)
-    res.stats = _stats(spec, total_nodes, pairs)
+    res.stats = _stats(spec, total_nodes, pairs, integration_flows)
     if res.ok:
         res.normalized = _normalize(spec)
     return res
@@ -594,7 +609,9 @@ def _find_cycle(graph: Mapping[str, Sequence[str]]) -> list[str] | None:
     return None
 
 
-def _stats(spec: PlanSpec, total_nodes: int, pairs: int) -> dict[str, int]:
+def _stats(
+    spec: PlanSpec, total_nodes: int, pairs: int, integration_flows: int = 0
+) -> dict[str, int]:
     nodes = [n for flow in spec.flows for n in flow.nodes]
     llm = sum(1 for n in nodes if n.kind in LLM_KINDS)
     checks = sum(1 for n in nodes if n.kind == "check")
@@ -605,6 +622,8 @@ def _stats(spec: PlanSpec, total_nodes: int, pairs: int) -> dict[str, int]:
     )
     return {
         "flows": len(spec.flows),
+        # 其中由 after 自动展开的集成验收数量：界面与工具文案据此区分“你提交的”与“自动生成的”
+        "integration_flows": integration_flows,
         "nodes": total_nodes,
         "llm_nodes": llm,
         "check_nodes": checks,

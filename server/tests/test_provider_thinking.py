@@ -1,5 +1,6 @@
 """v21: 对齐 deepseek-harness/zcode 的 thinking 模式 wire 参数测试。"""
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -235,3 +236,398 @@ class TestAnthropicExplicitOff:
     def test_unspecified_leaves_no_thinking(self):
         payload = self._p()._build_payload(ChatRequest(messages=[], model="m"), stream=True)
         assert "thinking" not in payload
+
+
+# ───────────── plan-20261017-claude-thinking: Claude 5.x adaptive 协议 ─────────────
+
+class TestAdaptiveThinkingDetection:
+    @pytest.mark.parametrize("model,expected", [
+        ("claude-haiku-5-5", True),
+        ("claude-opus-5-5", True),
+        ("claude-sonnet-5", True),
+        ("claude-opus-4-7", False),
+        ("claude-sonnet-4-5", False),
+        ("claude-3-7-sonnet-20250219", False),
+        ("gpt-5", False),
+        ("", False),
+    ])
+    def test_detection(self, model, expected):
+        from app.models.providers.anthropic import _uses_adaptive_thinking
+
+        assert _uses_adaptive_thinking(model) is expected
+
+
+class TestAdaptivePayload:
+    def _payload(self, model: str = "claude-haiku-5-5", effort: str = "high", **kw) -> dict:
+        from app.models.providers.anthropic import AnthropicProvider
+
+        p = AnthropicProvider(api_key="k", base_url="https://gw.example/v1", model=model)
+        return p._build_payload(
+            ChatRequest(messages=[], model=model, reasoning_effort=effort, **kw), stream=True,
+        )
+
+    def test_claude5_uses_adaptive(self):
+        """Claude 5.x 只接受 adaptive；display 缺失时上游不返回思考明文。"""
+        payload = self._payload()
+        assert payload["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert payload["output_config"] == {"effort": "high"}
+        assert payload["temperature"] == 1
+
+    def test_effort_passthrough_and_fallback(self):
+        assert self._payload(effort="max")["output_config"] == {"effort": "max"}
+        assert self._payload(effort="xhigh")["output_config"] == {"effort": "xhigh"}
+        # minimal 是 OpenAI 侧档位，Anthropic 无对应值 → low
+        assert self._payload(effort="minimal")["output_config"] == {"effort": "low"}
+
+    def test_claude4_keeps_enabled(self):
+        payload = self._payload(model="claude-sonnet-4-5")
+        assert payload["thinking"] == {"type": "enabled"}
+        assert "output_config" not in payload
+
+    def test_claude5_none_still_disabled(self):
+        payload = self._payload(effort="none")
+        assert payload["thinking"] == {"type": "disabled"}
+        assert "output_config" not in payload
+
+
+class TestThinkingDegrade:
+    def test_requires_adaptive_converts_payload(self):
+        from app.models.providers.anthropic import _degrade_thinking_payload
+
+        out = _degrade_thinking_payload(
+            {"thinking": {"type": "enabled"}},
+            "claude-haiku-5-5 requires adaptive thinking; omit thinking or use "
+            "thinking.type=adaptive and output_config.effort",
+        )
+        assert out["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert out["output_config"] == {"effort": "high"}
+
+    def test_output_config_rejected_is_stripped(self):
+        from app.models.providers.anthropic import _degrade_thinking_payload
+
+        out = _degrade_thinking_payload(
+            {"thinking": {"type": "adaptive", "display": "summarized"},
+             "output_config": {"effort": "high"}},
+            "400 UNKNOWN_FIELD: output_config",
+        )
+        assert "output_config" not in out
+        assert out["thinking"]["type"] == "adaptive"
+
+    def test_budget_tokens_rejected_is_stripped(self):
+        from app.models.providers.anthropic import _degrade_thinking_payload
+
+        out = _degrade_thinking_payload(
+            {"thinking": {"type": "enabled", "budget_tokens": 16384}},
+            "400 UNKNOWN_FIELD: thinking.budget_tokens",
+        )
+        assert out["thinking"] == {"type": "enabled"}
+
+    def test_no_degrade_when_already_adaptive(self):
+        from app.models.providers.anthropic import _degrade_thinking_payload
+
+        assert _degrade_thinking_payload(
+            {"thinking": {"type": "adaptive"}}, "requires adaptive thinking",
+        ) is None
+
+    def test_unrelated_400_not_degraded(self):
+        from app.models.providers.anthropic import _degrade_thinking_payload
+
+        assert _degrade_thinking_payload(
+            {"thinking": {"type": "adaptive"}}, "max_tokens: field required",
+        ) is None
+
+
+class _FakeResponse:
+    def __init__(self, payload: dict, status_code: int = 200, text: str = "") -> None:
+        self._payload = payload
+        self.status_code = status_code
+        self.text = text
+
+    def json(self) -> dict:
+        return self._payload
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise AssertionError(f"unexpected status {self.status_code}")
+
+
+class _FakeAsyncClient:
+    """替代 httpx.AsyncClient，返回预置响应。"""
+
+    def __init__(self, responses: list[_FakeResponse]) -> None:
+        self._responses = responses
+        self.posted: list[dict] = []
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, json=None, headers=None):
+        self.posted.append(json or {})
+        return self._responses.pop(0)
+
+
+class TestChatParsesThinking:
+    async def test_thinking_block_collected(self, monkeypatch):
+        """非流式回退路径此前只解析 text/tool_use，thinking block 被整段丢弃。"""
+        from app.models.providers import anthropic as mod
+
+        resp = _FakeResponse({
+            "content": [
+                {"type": "thinking", "thinking": "先设鸡为 x", "signature": "sig"},
+                {"type": "text", "text": "鸡 23 只，兔 12 只。"},
+            ],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 30,
+                "output_tokens_details": {"thinking_tokens": 12},
+            },
+        })
+        fake = _FakeAsyncClient([resp])
+        monkeypatch.setattr(mod.httpx, "AsyncClient", fake)
+
+        p = mod.AnthropicProvider(api_key="k", base_url="https://gw.example/v1",
+                                  model="claude-haiku-5-5")
+        result = await p.chat(ChatRequest(
+            messages=[ChatMessage(role="user", content="鸡兔同笼")],
+            model="claude-haiku-5-5",
+            reasoning_effort="high",
+        ))
+
+        assert result.thinking == "先设鸡为 x"
+        assert result.content == "鸡 23 只，兔 12 只。"
+        assert result.usage.reasoning_tokens == 12
+
+    async def test_400_adaptive_retry(self, monkeypatch):
+        """网关要求 adaptive 时自动降级重试，不让整轮对话失败。"""
+        from app.models.providers import anthropic as mod
+
+        first = _FakeResponse(
+            {}, status_code=400,
+            text="claude-haiku-5-5 requires adaptive thinking; omit thinking",
+        )
+        second = _FakeResponse({
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        })
+        fake = _FakeAsyncClient([first, second])
+        monkeypatch.setattr(mod.httpx, "AsyncClient", fake)
+
+        # 用 4.x 模型名构造，确保首轮走 enabled，从而触发降级
+        p = mod.AnthropicProvider(api_key="k", base_url="https://gw.example/v1",
+                                  model="claude-sonnet-4-5")
+        result = await p.chat(ChatRequest(
+            messages=[], model="claude-sonnet-4-5", reasoning_effort="high",
+        ))
+
+        assert result.content == "ok"
+        assert fake.posted[0]["thinking"] == {"type": "enabled"}
+        assert fake.posted[1]["thinking"] == {"type": "adaptive", "display": "summarized"}
+
+
+# ───────────── plan-20261017-claude-tools: 流式工具调用解析 ─────────────
+
+class _FakeStreamResponse:
+    """替代 httpx 的流式响应：按行回放 SSE。"""
+
+    def __init__(self, lines: list[str], status_code: int = 200) -> None:
+        self._lines = lines
+        self.status_code = status_code
+
+    async def aread(self) -> bytes:
+        return b""
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise AssertionError(f"unexpected status {self.status_code}")
+
+    async def aiter_lines(self):
+        for line in self._lines:
+            yield line
+
+
+class _FakeStreamCtx:
+    def __init__(self, resp: _FakeStreamResponse) -> None:
+        self._resp = resp
+
+    async def __aenter__(self) -> _FakeStreamResponse:
+        return self._resp
+
+    async def __aexit__(self, *exc) -> bool:
+        return False
+
+
+class _FakeStreamClient:
+    """替代 httpx.AsyncClient：client.stream(...) 返回预置 SSE 响应。"""
+
+    def __init__(self, lines: list[str]) -> None:
+        self._lines = lines
+        self.posted: list[dict] = []
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def stream(self, method, url, json=None, headers=None):
+        self.posted.append(json or {})
+        return _FakeStreamCtx(_FakeStreamResponse(self._lines))
+
+
+def _sse(event: str, payload: dict) -> list[str]:
+    return [f"event: {event}", f"data: {json.dumps(payload, ensure_ascii=False)}", ""]
+
+
+def _reply_with_tool_use(*, partials: list[str], stop_reason: str = "tool_use",
+                         tool_input: dict | None = None) -> list[str]:
+    """拼一段 Anthropic 流式响应：一个 tool_use 块 + 若干参数增量。"""
+    lines: list[str] = []
+    lines += _sse("message_start", {
+        "type": "message_start",
+        "message": {"usage": {"input_tokens": 12}},
+    })
+    lines += _sse("content_block_start", {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+            "type": "tool_use", "id": "toolu_1", "name": "fs_read",
+            "input": tool_input if tool_input is not None else {},
+        },
+    })
+    for piece in partials:
+        lines += _sse("content_block_delta", {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": piece},
+        })
+    lines += _sse("content_block_stop", {"type": "content_block_stop", "index": 0})
+    lines += _sse("message_delta", {
+        "type": "message_delta",
+        "delta": {"stop_reason": stop_reason},
+        "usage": {"output_tokens": 20},
+    })
+    lines += _sse("message_stop", {"type": "message_stop"})
+    return lines
+
+
+class TestStreamToolUse:
+    async def _collect(self, monkeypatch, lines: list[str]) -> list[dict]:
+        from app.models.providers import anthropic as mod
+
+        fake = _FakeStreamClient(lines)
+        monkeypatch.setattr(mod.httpx, "AsyncClient", fake)
+        p = mod.AnthropicProvider(api_key="k", base_url="https://gw.example/v1",
+                                  model="claude-haiku-5-5")
+        out = []
+        async for ev in p.stream_structured(ChatRequest(
+            messages=[], model="claude-haiku-5-5", reasoning_effort="high",
+        )):
+            out.append(ev)
+        return out
+
+    async def test_tool_use_collected(self, monkeypatch):
+        """此前完全不解析 tool_use 块，tool_calls 恒为空 —— 模型"说一句话就停"。"""
+        events = await self._collect(monkeypatch, _reply_with_tool_use(
+            partials=['{"path": ', '"README.md"}'],
+        ))
+        done = [e for e in events if e["type"] == "done"][0]
+        assert done["finish_reason"] == "tool_calls"
+        assert done["tool_calls"] == [{
+            "id": "toolu_1", "name": "fs_read", "arguments": {"path": "README.md"},
+        }]
+
+    async def test_cumulative_frames_not_duplicated(self, monkeypatch):
+        """网关重复投递累计式完整内容时不能拼出重复 JSON，否则参数解析失败。"""
+        events = await self._collect(monkeypatch, _reply_with_tool_use(
+            partials=['{"path": ', '{"path": "README.md"}'],
+        ))
+        done = [e for e in events if e["type"] == "done"][0]
+        assert done["tool_calls"][0]["arguments"] == {"path": "README.md"}
+
+    async def test_start_frame_full_input(self, monkeypatch):
+        """部分网关在 start 帧直接给完整 input，没有增量帧。"""
+        events = await self._collect(monkeypatch, _reply_with_tool_use(
+            partials=[], tool_input={"path": "CLAUDE.md"},
+        ))
+        done = [e for e in events if e["type"] == "done"][0]
+        assert done["tool_calls"][0]["arguments"] == {"path": "CLAUDE.md"}
+
+    async def test_text_and_tool_use_coexist(self, monkeypatch):
+        """正文与工具调用同时存在时都要保留（前者说明意图，后者驱动执行）。"""
+        lines: list[str] = []
+        lines += _sse("message_start", {
+            "type": "message_start", "message": {"usage": {"input_tokens": 5}},
+        })
+        lines += _sse("content_block_start", {
+            "type": "content_block_start", "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        })
+        lines += _sse("content_block_delta", {
+            "type": "content_block_delta", "index": 0,
+            "delta": {"type": "text_delta", "text": "我先看一下文件。"},
+        })
+        lines += _reply_with_tool_use(partials=['{"path": "a.py"}'])
+        events = await self._collect(monkeypatch, lines)
+        content = "".join(e["delta"] for e in events if e["type"] == "content")
+        done = [e for e in events if e["type"] == "done"][0]
+        assert content == "我先看一下文件。"
+        assert done["tool_calls"][0]["name"] == "fs_read"
+
+    async def test_no_tool_use_keeps_stop(self, monkeypatch):
+        lines: list[str] = []
+        lines += _sse("message_start", {
+            "type": "message_start", "message": {"usage": {"input_tokens": 3}},
+        })
+        lines += _sse("content_block_start", {
+            "type": "content_block_start", "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        })
+        lines += _sse("content_block_delta", {
+            "type": "content_block_delta", "index": 0,
+            "delta": {"type": "text_delta", "text": "好的。"},
+        })
+        lines += _sse("message_delta", {
+            "type": "message_delta", "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 4},
+        })
+        lines += _sse("message_stop", {"type": "message_stop"})
+        events = await self._collect(monkeypatch, lines)
+        done = [e for e in events if e["type"] == "done"][0]
+        assert done["finish_reason"] == "end_turn"
+        assert done["tool_calls"] == []
+
+
+class TestChatToolUseFinishReason:
+    async def test_stop_reason_tool_use_mapped(self, monkeypatch):
+        """非流式同样要映射成 tool_calls，否则畸形流检测会误判。"""
+        from app.models.providers import anthropic as mod
+
+        resp = _FakeResponse({
+            "content": [
+                {"type": "text", "text": "我看一下。"},
+                {"type": "tool_use", "id": "toolu_9", "name": "fs_read",
+                 "input": {"path": "README.md"}},
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 8, "output_tokens": 12},
+        })
+        fake = _FakeAsyncClient([resp])
+        monkeypatch.setattr(mod.httpx, "AsyncClient", fake)
+
+        p = mod.AnthropicProvider(api_key="k", base_url="https://gw.example/v1",
+                                  model="claude-haiku-5-5")
+        result = await p.chat(ChatRequest(messages=[], model="claude-haiku-5-5"))
+
+        assert result.finish_reason == "tool_calls"
+        assert result.tool_calls[0]["arguments"] == {"path": "README.md"}

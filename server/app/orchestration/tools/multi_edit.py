@@ -3,10 +3,12 @@
 支持在一次调用中对多个文件执行 search-replace 操作。
 原子性保证：全部成功或全部回滚（先验证所有 old_text 存在）。
 """
+import json
 import logging
 from pathlib import Path
 from typing import Any
 
+from app.models.providers.tool_args import args_parse_error
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 from app.orchestration.tools.safe_path import resolve_loose
 from app.orchestration.tools.text_edit import (
@@ -24,6 +26,24 @@ logger = logging.getLogger(__name__)
 _MAX_EDITS = 20  # 单次最多编辑文件数
 # plan-1085: data 带回单文件新内容上限（对齐 agent_loop.MAX_TOOL_OUTPUT_CHARS）
 _NEW_CONTENT_MAX_CHARS = 16000
+
+_EDIT_PATH_KEYS = ("path", "file_path", "filepath", "filePath")
+_EDIT_OLD_KEYS = ("old_text", "old_string", "oldString", "old_str", "old")
+_EDIT_NEW_KEYS = ("new_text", "new_string", "newString", "new_str", "new")
+
+
+def _coerce_edits(raw: Any) -> list[dict] | None:
+    """edits 允许是数组，也允许模型把整个数组作为 JSON 字符串传入。"""
+    if isinstance(raw, list):
+        return [e for e in raw if isinstance(e, dict)]
+    if isinstance(raw, str) and raw.strip():
+        try:
+            val = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+        if isinstance(val, list):
+            return [e for e in val if isinstance(e, dict)]
+    return None
 
 
 class MultiFileEditTool(Tool):
@@ -65,7 +85,15 @@ class MultiFileEditTool(Tool):
         }
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        edits = args.get("edits") or []
+        parse_error = args_parse_error(args)
+        if parse_error:
+            return ToolResult(
+                ok=False, output="",
+                error=f"参数不是合法 JSON（{parse_error}），未修改任何文件；请原样重发完整参数。",
+            )
+        edits = _coerce_edits(args.get("edits"))
+        if edits is None:
+            return ToolResult(ok=False, output="", error="edits 必须是编辑对象数组")
         if not edits:
             return ToolResult(ok=False, output="", error="edits 列表为空")
         if len(edits) > _MAX_EDITS:
@@ -80,19 +108,30 @@ class MultiFileEditTool(Tool):
         notes: list[str] = []
         errors: list[str] = []
 
+        # 模型偶尔漏写某个 edit 的 path（同文件多处编辑时最常见）。本次调用中
+        # 只出现过一个文件路径时，缺 path 的 edit 直接复用它，避免整批失败重来。
+        known_paths: list[str] = []
+        for e in edits:
+            p = str(pick_arg(e, *_EDIT_PATH_KEYS) or "").strip()
+            if p and p not in known_paths:
+                known_paths.append(p)
+        sole_path = known_paths[0] if len(known_paths) == 1 else ""
+
         for i, edit in enumerate(edits):
-            if not isinstance(edit, dict):
-                errors.append(f"edit[{i}]: 格式错误（应为对象）")
-                continue
-            path_str = str(pick_arg(edit, "path", "file_path", "filepath") or "")
-            old_text = pick_arg(edit, "old_text", "old_string", "oldString", "old_str")
-            new_text = pick_arg(edit, "new_text", "new_string", "newString", "new_str")
+            path_str = str(pick_arg(edit, *_EDIT_PATH_KEYS) or "").strip()
+            old_text = pick_arg(edit, *_EDIT_OLD_KEYS)
+            new_text = pick_arg(edit, *_EDIT_NEW_KEYS)
             if new_text is None:
                 new_text = edit.get("content")
 
             if not path_str:
-                errors.append(f"edit[{i}]: path 为空")
-                continue
+                if sole_path:
+                    path_str = sole_path
+                else:
+                    errors.append(
+                        f"edit[{i}]: 缺少 path（每个 edit 都要写 path；多个文件时无法推断）"
+                    )
+                    continue
             if not old_text:
                 errors.append(f"edit[{i}]: old_text 为空")
                 continue

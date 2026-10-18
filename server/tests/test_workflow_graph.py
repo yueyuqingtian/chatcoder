@@ -244,6 +244,32 @@ def test_structural_limits():
     assert "too_many_nodes_total" in _codes(validate_plan(_parse_ok(_plan(flows))))
 
 
+def test_flow_limit_names_every_flow_and_the_generated_integration():
+    """6 个提交 + after：提示要说清第 7 个来自 after 展开，而不是笼统报 7 个。"""
+    flows = [{"key": f"f{i}", "nodes": [_node("e", "explore")]} for i in range(6)]
+    spec = _parse_ok(_plan(flows, after={"acceptance": ["整体通过"]}))
+
+    res = validate_plan(spec)
+
+    error = next(d for d in res.errors if d.code == "too_many_flows")
+    assert "当前 7 个" in error.message
+    assert "f0" in error.message and "integration" in error.message
+    assert "after 自动展开" in error.message
+    assert "骨架子工作流" in error.suggestion
+
+
+def test_stats_keep_the_generated_integration_flow_separate():
+    """5 个提交 + after：总数 6 个，但集成验收单独记 1 个，供工具文案标注来源。"""
+    flows = [{"key": f"f{i}", "nodes": [_node("e", "explore")]} for i in range(5)]
+    spec = _parse_ok(_plan(flows, after={"acceptance": ["整体通过"]}))
+
+    res = validate_plan(spec)
+
+    assert res.ok, res.errors
+    assert res.stats["flows"] == 6
+    assert res.stats["integration_flows"] == 1
+
+
 def test_absolute_or_parent_write_scope_is_rejected():
     flow = {
         "key": "f",

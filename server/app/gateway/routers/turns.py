@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import MsgType, SenderType
 from app.gateway.schemas import (ArtifactOut, FileChangeOut, FileDiffOut, MessageOut, ReviewBatchBody,
-                                 RollbackPreviewFile, RollbackPreviewOut,
+                                 RollbackConflict, RollbackPreviewFile, RollbackPreviewOut,
                                  RollbackResult, TaskConfirmBody, TaskOut, TurnCreate, TurnInjectBody, TurnOut, TurnSnapshotOut)
 from app.orchestration import engine
 from app.persistence.database import commit_with_retry, get_db
@@ -17,6 +17,45 @@ from app.services import audit_service, message_service, project_service, rollba
 router = APIRouter(prefix="/turns", tags=["turns"])
 
 logger = logging.getLogger(__name__)
+
+
+async def _write_model_divider_if_changed(db: AsyncSession, session_id: int, model_id: int) -> None:
+    """上一条主线程用户消息记录的模型与本次不同 → 写一条模型切换分割线（非阻塞）。
+
+    历史消息没有 model_id（本字段新增前发送的）时不写：无法判断是否真的换过模型。
+    同一会话里来回切多次再发送，只按「上次发送 vs 本次发送」比较，天然只留一条。
+    """
+    try:
+        from app.persistence.models.message import Message
+        from app.persistence.models.model_reg import Model, Provider
+
+        last = await db.scalar(
+            select(Message).where(
+                Message.session_id == session_id,
+                Message.deleted == False,  # noqa: E712 撤销（回滚）的消息是软删
+                Message.thread_id.is_(None),
+                Message.sender_type == SenderType.USER.value,
+            ).order_by(Message.id.desc()).limit(1)
+        )
+        prev_id = (last.content or {}).get("model_id") if last is not None and isinstance(last.content, dict) else None
+        if not prev_id or int(prev_id) == model_id:
+            return
+        model = await db.get(Model, model_id)
+        if model is None:
+            return
+        provider_name = ""
+        if model.provider_id:
+            prov = await db.get(Provider, model.provider_id)
+            provider_name = prov.name if prov else ""
+        provider_name = provider_name or (model.provider or "")
+        label = f"{provider_name} / {model.name}" if provider_name else model.name
+        await session_service.create_system_message(
+            db, session_id=session_id,
+            content={"text": f"已切换至 {label}", "divider": "model_changed",
+                     "model_id": model_id, "provider": provider_name, "model": model.name},
+        )
+    except Exception:
+        logger.warning("[turns] 模型切换分割线写入失败(非阻塞)", exc_info=True)
 
 
 @router.post("", response_model=TurnOut)
@@ -29,6 +68,13 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
     # 用户消息入库（v14: 附件以文件地址形式持久化到 content.attachments，
     # 前端从历史消息可直接展示附件卡片并点击预览）
     user_content: dict = {"text": body.content}
+    # plan-20261017-ux-overhaul 阶段 D：用户消息记下本次实际使用的模型，并在与上一条用户消息
+    # 所用模型不同时，于用户消息之前写入「已切换至 供应商 / 模型」分割线。
+    # 之前在切换（PATCH）当下就写，用户只是试着切一下、没发消息也会留下分割线。
+    _effective_model_id = body.model_id or session.model_id
+    if _effective_model_id:
+        user_content["model_id"] = int(_effective_model_id)
+        await _write_model_divider_if_changed(db, body.session_id, int(_effective_model_id))
     if body.attachments:
         user_content["attachments"] = body.attachments
     # plan-308-1542 需求2: 引用 chips 结构化落库（消息流据此渲染带图标芯片）
@@ -321,14 +367,23 @@ async def resume_turn(turn_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{turn_id}/rollback", response_model=RollbackResult)
-async def rollback(turn_id: int, restore_to_composer: bool = True,
+async def rollback(turn_id: int, restore_to_composer: bool = True, allow_partial: bool = False,
                    db: AsyncSession = Depends(get_db)):
-    """回滚指定 turn（精确文件恢复 + 消息软删 + 可回填输入框）。"""
+    """回滚指定 turn（精确文件恢复 + 消息软删 + 可回填输入框）。
+
+    存在与手动改动冲突的文件时默认整体拒绝（409，附冲突清单，未改动任何内容）；
+    allow_partial=true 时跳过冲突文件、回滚其余，由用户在确认弹窗里明确选择。
+    """
     try:
         result = await rollback_service.rollback_turn(
-            db, turn_id=turn_id, restore_to_composer=restore_to_composer,
+            db, turn_id=turn_id, restore_to_composer=restore_to_composer, allow_partial=allow_partial,
         )
         if not result.get("ok"):
+            if result.get("code") == "conflict":
+                # 错误体是纯文本：列出冲突文件，便于界面直接展示（结构化清单见回滚预览接口）
+                paths = [c.get("path", "") for c in result.get("conflicts", [])]
+                shown = "、".join(paths[:5]) + (" 等" if len(paths) > 5 else "")
+                raise HTTPException(409, detail=f"{result.get('reason', '存在冲突')}：{shown}")
             raise HTTPException(400, result.get("reason", "回滚失败"))
         return result
     except HTTPException:
@@ -344,21 +399,17 @@ async def rollback_preview(turn_id: int, db: AsyncSession = Depends(get_db)):
     前端确认弹窗据此展示文件清单与 diff 对比，供用户审核后确认执行。
     """
     try:
-        snap = await rollback_service._snapshot_for_turn(db, turn_id)
-        if snap is None:
-            raise HTTPException(404, "该 turn 无快照")
-        if snap.rolled_back:
-            raise HTTPException(400, "该 turn 已回滚，不可重复操作")
-        _, workspace = await rollback_service.resolve_turn_workspace(db, turn_id)
-        writes = await rollback_service.list_turn_writes(db, snap.session_id, turn_id)
-        if not writes or not workspace:
-            files: list[RollbackPreviewFile] = []
-        else:
-            files = [RollbackPreviewFile(**f) for f in await rollback_service.preview_turn_files(workspace, writes, snap)]
-        # v12: 连带影响统计（该 turn 及其之后将被取消的任务/软删的消息）
-        affected = await rollback_service.count_rollback_affected(db, snap.session_id, turn_id)
-        return RollbackPreviewOut(ok=True, turn_id=turn_id, files=files,
-                                  affected=affected)
+        data = await rollback_service.build_turn_preview(db, turn_id)
+        return RollbackPreviewOut(
+            ok=True, turn_id=turn_id,
+            files=[RollbackPreviewFile(**f) for f in data["files"]],
+            conflicts=[RollbackConflict(**c) for c in data["conflicts"]],
+            affected=data["affected"],
+        )
+    except LookupError:
+        raise HTTPException(404, "该 turn 无快照")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     except HTTPException:
         raise
     except Exception as e:

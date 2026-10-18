@@ -50,7 +50,15 @@ class EditorApplyDiffTool(Tool):
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         # plan-20261016-ux（问题 3）：参数名容错——模型偶尔沿用其它工具的命名（file_path / old_string …）
-        path = str(pick_arg(args, "path", "file_path", "filepath") or "")
+        from app.models.providers.tool_args import args_parse_error
+
+        parse_error = args_parse_error(args)
+        if parse_error:
+            return ToolResult(
+                ok=False, output="",
+                error=f"参数不是合法 JSON（{parse_error}），未修改文件；请原样重发完整参数。",
+            )
+        path = str(pick_arg(args, "path", "file_path", "filepath", "filePath", "file") or "")
         old_text = pick_arg(args, "old_text", "old_string", "oldString", "old_str")
         new_text = pick_arg(args, "new_text", "new_string", "newString", "new_str")
         replace_all = bool(pick_arg(args, "replace_all", "replaceAll") or False)

@@ -25,6 +25,9 @@ class Session(Base):
         String(20), default="ask", server_default="ask", nullable=False
     )
     fork_parent_id: Mapped[int | None] = mapped_column(BigInteger)  # 分支来源会话 id
+    # 侧边会话（子会话）：指向所属主会话 id。子会话不进入会话列表，只由主会话的侧边面板访问；
+    # 子会话仍是完整会话，turn 流水线与工具展示与主会话一致（plan-20261017-side-session P4）。
+    side_parent_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     worktree_path: Mapped[str | None] = mapped_column(String(512))  # git 工作树路径（有则优先作为工作目录）
     plan_confirmed: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")  # 计划确认门
     created_at: Mapped[str] = mapped_column(server_default=func.now())

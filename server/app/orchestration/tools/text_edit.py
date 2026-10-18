@@ -10,7 +10,9 @@
    写回时还原为原编码、原 BOM、原换行。无法可靠解码或含 NUL 的文件拒绝改写，避免损坏。
 
 2. 匹配过死：只认精确子串，行尾空白、Tab/空格缩进差异、把 fs_read 的行号前缀带进 old_text
-   都会判「未匹配」。现在精确匹配失败后依次尝试：去行号前缀 → 忽略行尾空白 → 忽略缩进与行内空白差异，
+   都会判「未匹配」。现在精确匹配失败后依次尝试：去行号前缀（含只有部分行带行号的形态）→
+   忽略行尾空白 → 忽略缩进与行内空白差异 → 字面转义解码 → **跨行空白归一化**
+   （模型常把两行合并成一行、或把一行拆成多行，逐行比对永远对不上），
    且**必须唯一命中**（replace_all 除外）；缩进不同时按文件实际缩进重排 new_text。
 
 3. 失败无线索：旧错误只有「old_text 在文件中未匹配」，模型只能原样重试。现在附上文件里最相近的原文
@@ -112,8 +114,10 @@ def write_text_file(path: Path, tf: TextFile, text: str) -> None:
 
 # ───────────────────────── 匹配与替换 ─────────────────────────
 
-# fs_read 输出形如「  12: code」（空行为「  13: 」，模型常把末尾空格丢掉）；兼容 cat -n 的 Tab 与「12→」
-_LINE_NO = re.compile(r"^\s*(\d+)(?:: |:$|\t|→)")
+# fs_read 输出形如「  12: code」（空行为「  13: 」，模型常把末尾空格丢掉）；兼容 cat -n 的 Tab、「12→」与「12 | code」
+_LINE_NO = re.compile(r"^\s*(\d+)(?:: |:$|\t|→|\s*\|\s*)")
+# 模型双重转义产生的字面转义序列（只在没有真实控制字符时尝试还原）
+_LITERAL_ESCAPE = re.compile(r"\\(n|t|r|\"|')")
 
 
 @dataclass
@@ -130,6 +134,8 @@ STRATEGY_NOTES = {
     "line_numbers": "已自动去掉 old_text 中的行号前缀",
     "trailing_ws": "已忽略行尾空白差异",
     "indent": "已忽略缩进差异，并按文件实际缩进调整了 new_text",
+    "whitespace": "已忽略换行与空白位置差异（old_text 与原文的换行方式不同）",
+    "literal_escapes": "已还原 old_text 中的字面 \\n / \\t 转义",
 }
 
 
@@ -174,6 +180,103 @@ def _strip_line_numbers_loose(text: str) -> str:
     if hits * 2 < len(non_empty):
         return text
     return "\n".join((l[_LINE_NO.match(l).end():] if _LINE_NO.match(l) else l) for l in lines)
+
+
+def _strip_line_numbers_partial(text: str) -> str | None:
+    """部分行带行号的宽松处理（模型复制一段时经常只保留首行行号）。
+
+    判定条件（同时满足才生效，避免误伤内容本身以「数字:」开头的代码）：
+    - 至少两行非空内容；
+    - 首个非空行带行号；
+    - 带行号的行号严格递增。
+    只去掉**带行号的行**的前缀，未带行号的行原样保留。
+    """
+    lines = text.split("\n")
+    if len([l for l in lines if l.strip()]) < 2:
+        return None
+    first = next((i for i, l in enumerate(lines) if l.strip()), None)
+    if first is None or not _LINE_NO.match(lines[first]):
+        return None
+    out: list[str] = []
+    last = -1
+    seen = 0
+    for line in lines:
+        if not line.strip():
+            out.append(line)
+            continue
+        m = _LINE_NO.match(line)
+        if not m:
+            out.append(line)
+            continue
+        n = int(m.group(1))
+        if n <= last:
+            return None
+        last = n
+        seen += 1
+        out.append(line[m.end():])
+    if seen < 1:
+        return None
+    return "\n".join(out)
+
+
+def _decode_literal_escapes(text: str) -> str:
+    """把模型双重转义产生的字面 ``\\n`` / ``\\t`` / ``\\r`` 还原成真实控制字符。
+
+    仅在文本**不含**任何真实换行/制表符时尝试（否则可能是代码里的字符串字面量，
+    不能碰）；调用方只在精确匹配失败后才使用，且仍要求唯一命中。
+    """
+    if not text or "\n" in text or "\t" in text or "\r" in text:
+        return text
+    if "\\" not in text:
+        return text
+
+    def _repl(m: re.Match[str]) -> str:
+        return {"n": "\n", "t": "\t", "r": "\r", '"': '"', "'": "'"}[m.group(1)]
+
+    return _LITERAL_ESCAPE.sub(_repl, text)
+
+
+def _normalize_ws_with_map(text: str) -> tuple[str, list[int]]:
+    """把连续空白压缩成单个空格，并记录归一化后每个字符在原文中的下标。
+
+    返回 (归一化文本, 下标表)。下标表用于把归一化匹配区间映射回原文区间。
+    """
+    out: list[str] = []
+    pos: list[int] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i].isspace():
+            j = i
+            while j < n and text[j].isspace():
+                j += 1
+            out.append(" ")
+            pos.append(i)
+            i = j
+        else:
+            out.append(text[i])
+            pos.append(i)
+            i += 1
+    return "".join(out), pos
+
+
+def _whitespace_hits(content: str, old_text: str) -> list[int]:
+    """跨行空白归一化后的命中位置（归一化文本下标）。"""
+    norm_content, _ = _normalize_ws_with_map(content)
+    norm_old, _ = _normalize_ws_with_map(old_text)
+    target = norm_old.strip()
+    # 太短的片段不做跨行宽松匹配，避免把普通单词/符号误配到别处
+    if len(target.replace(" ", "")) < 6:
+        return []
+    hits: list[int] = []
+    start = 0
+    while True:
+        i = norm_content.find(target, start)
+        if i < 0:
+            break
+        hits.append(i)
+        start = i + 1
+    return hits
 
 
 def _lead(line: str) -> str:
@@ -268,10 +371,60 @@ def _nearest_hint(file_lines: list[str], old_lines: list[str]) -> str:
     )
 
 
+def _whitespace_replace(content: str, old_text: str, new_text: str,
+                        replace_all: bool) -> ReplaceResult | None:
+    """跨行空白归一化替换：允许 old_text 与文件的换行位置不同（模型常把两行并成一行）。
+
+    返回 None 表示未命中，交由调用方继续走失败提示。
+    """
+    hits = _whitespace_hits(content, old_text)
+    if not hits:
+        return None
+    _, pos = _normalize_ws_with_map(content)
+    target_len = len(_normalize_ws_with_map(old_text)[0].strip())
+    if len(hits) > 1 and not replace_all:
+        lines = ", ".join(str(_line_no_of(content, pos[i])) for i in hits[:10])
+        return ReplaceResult(
+            False,
+            error=(
+                f"old_text（忽略换行与空白差异后）匹配 {len(hits)} 处（第 {lines} 行），"
+                "请带上更多上下文使其唯一，或设置 replace_all=true"
+            ),
+        )
+    old_lines = _split_lines(old_text)
+    old_first = next((l for l in old_lines if l.strip()), "")
+    old_ind = _lead(old_first)
+    out = content
+    applied = 0
+    last_start = len(out) + 1
+    # 归一化命中位置 → 原文字符区间；从后往前替换，前面下标不受影响
+    for i in sorted(hits, reverse=True):
+        raw_start = pos[i]
+        raw_end = pos[i + target_len - 1] + 1
+        if raw_end > last_start:
+            continue
+        line_start = out.rfind("\n", 0, raw_start) + 1
+        file_ind = out[line_start:raw_start]
+        if file_ind.strip():
+            file_ind = ""  # 命中位置在行中间，行首到该位置不是纯缩进
+        new_lines = _split_lines(new_text) if new_text else []
+        if file_ind and old_ind:
+            # 替换区间从行首缩进之后开始：文件原有缩进已保留，new_text 首行
+            # 若再带一份 old_ind 会叠成双倍缩进，先去掉再按文件缩进重排。
+            if new_lines and _lead(new_lines[0]) == old_ind:
+                new_lines[0] = new_lines[0][len(old_ind):]
+            new_lines = _reindent(new_lines, old_ind, file_ind)
+        out = out[:raw_start] + "\n".join(new_lines) + out[raw_end:]
+        applied += 1
+        last_start = raw_start
+    return ReplaceResult(True, out, applied, "whitespace")
+
+
 def apply_replacement(content: str, old_text: str, new_text: str, replace_all: bool = False) -> ReplaceResult:
     """在 content（\\n 换行）里把 old_text 替换为 new_text。
 
-    精确匹配 → 去行号前缀 → 忽略行尾空白 → 忽略缩进/行内空白差异；除 replace_all 外必须唯一命中。
+    精确匹配 → 去行号前缀 → 忽略行尾空白 → 忽略缩进/行内空白差异 → 跨行空白归一化；
+    除 replace_all 外必须唯一命中。
     """
     old_text = (old_text or "").replace("\r\n", "\n")
     new_text = (new_text or "").replace("\r\n", "\n")
@@ -298,7 +451,15 @@ def apply_replacement(content: str, old_text: str, new_text: str, replace_all: b
             ),
         )
 
-    # 2) old_text 带了 fs_read 的行号前缀：去掉后整体重来（失败时的提示也按去掉行号后的原文给出）
+    # 2) 字面转义（模型双重转义）：只在精确匹配失败后尝试，还原后整体重走匹配
+    unescaped = _decode_literal_escapes(old_text)
+    if unescaped != old_text:
+        res = apply_replacement(content, unescaped, _decode_literal_escapes(new_text), replace_all)
+        if res.ok and res.strategy == "exact":
+            res.strategy = "literal_escapes"
+        return res
+
+    # 3) old_text 带了 fs_read 的行号前缀：去掉后整体重来（失败时的提示也按去掉行号后的原文给出）
     stripped = _strip_line_numbers(old_text)
     if stripped and stripped != old_text:
         res = apply_replacement(content, stripped, _strip_line_numbers_loose(new_text), replace_all)
@@ -306,7 +467,15 @@ def apply_replacement(content: str, old_text: str, new_text: str, replace_all: b
             res.strategy = "line_numbers"
         return res
 
-    # 3) / 4) 整行宽松匹配
+    # 3b) 只有部分行带行号（模型复制片段时常只保留首行行号）
+    partial = _strip_line_numbers_partial(old_text)
+    if partial and partial != old_text:
+        res = apply_replacement(content, partial, _strip_line_numbers_loose(new_text), replace_all)
+        if res.ok and res.strategy == "exact":
+            res.strategy = "line_numbers"
+        return res
+
+    # 4) / 5) 整行宽松匹配
     file_lines = content.split("\n")
     old_lines = _split_lines(old_text)
     new_lines = _split_lines(new_text) if new_text else []
@@ -347,6 +516,11 @@ def apply_replacement(content: str, old_text: str, new_text: str, replace_all: b
             applied += 1
             last_start = i
         return ReplaceResult(True, "\n".join(out), applied, strategy)
+
+    # 6) 跨行空白归一化：允许换行位置不同（模型把两行并成一行 / 把一行拆成多行）
+    ws_res = _whitespace_replace(content, old_text, new_text, replace_all)
+    if ws_res is not None:
+        return ws_res
 
     return ReplaceResult(False, error="old_text 在文件中未匹配。" + _nearest_hint(file_lines, old_lines))
 

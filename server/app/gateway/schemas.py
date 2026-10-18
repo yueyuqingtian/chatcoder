@@ -103,6 +103,8 @@ class SessionOut(BaseModel):
     permission_mode: str = "agent"  # plan-75-332: 执行模式 readonly / plan / agent
     approval_mode: str = "ask"  # plan-75-332: 权限模式 ask / auto / full
     fork_parent_id: int | None = None
+    # 侧边会话（子会话）所属主会话 id；普通会话为 None
+    side_parent_id: int | None = None
     worktree_path: str | None = None
     has_running: bool = False
     # 会话有后台执行中的工作流（程序 running）。与 has_running 并列：工作流在跑时本会话可能已没有运行中的 turn
@@ -390,10 +392,17 @@ class RollbackAffected(BaseModel):
     messages: int = 0
 
 
+class RollbackConflict(BaseModel):
+    """回滚冲突（plan-20261017-goal12 项 3）：该文件与用户手动改动重叠，默认整体拒绝回滚。"""
+    path: str
+    reason: str
+
+
 class RollbackPreviewOut(BaseModel):
     ok: bool
     turn_id: int
     files: list[RollbackPreviewFile]
+    conflicts: list[RollbackConflict] = []
     affected: RollbackAffected = RollbackAffected()
 
 

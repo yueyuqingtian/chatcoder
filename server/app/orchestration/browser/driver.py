@@ -435,6 +435,8 @@ class BrowserDriver:
         v = await self.kit("text", a, label="读取页面正文")
         v = v or {}
         head = f"{v.get('label') or '页面'}正文（{v.get('total', 0)} 字）— {v.get('url') or ''}"
+        if v.get("overlays"):
+            head += f"\n（页面有 {v['overlays']} 个弹窗 / 浮层，其文字已放在最前）"
         body = v.get("text") or "（没有可读文本）"
         if v.get("cross_frames"):
             body += f"\n（页面含 {v['cross_frames']} 个跨域框架，其内容不在正文中：请截图查看，再用坐标点击或输入）"
@@ -539,7 +541,11 @@ class BrowserDriver:
             payload["ref"] = info["ref"]  # 宿主派发前按 ref 做最终校准（动画结束、命中复核）
         resp = await self.call("mouse", payload, timeout=_T_INPUT)
         ref = f"（{info['ref']}）" if info.get("ref") and not info.get("point") else ""
-        lines = [f"已{verb} {info.get('label') or ''}{ref}"] + _target_notes(info) + _settle_lines(resp, before)
+        lines = [f"已{verb} {info.get('label') or ''}{ref}"] + _target_notes(info)
+        if resp.get("delivered_via") in ("cdp", "retry"):
+            # plan-20261017-hidden-input：首次派发没送达页面，宿主已补帧重派（或改走调试通道）并确认送达
+            lines.append("首次点击未送达页面（应用窗口可能在后台），已重新派发并确认送达")
+        lines += _settle_lines(resp, before)
         return self._attach_shot(Outcome(True, "\n".join(lines), data={"url": resp.get("url"), "title": resp.get("title")}), resp)
 
     async def hover(self, args: dict) -> Outcome:

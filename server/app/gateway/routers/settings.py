@@ -657,12 +657,14 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         data["agent_max_steps"] = int(body.agent_max_steps)
         settings.agent_max_steps = int(body.agent_max_steps)
     # plan-75-332: 审批卡「解释」专用模型 / 思考深度（0/空 = 跟随会话）
-    if body.approval_explain_model_id is not None:
-        _emid = int(body.approval_explain_model_id)
+    # 改回「跟随会话」时前端显式传 null，必须用 model_fields_set 区分「未提供」与
+    # 「显式清空」：否则 `is not None` 会把清空当成未修改，设置不生效。
+    if "approval_explain_model_id" in body.model_fields_set:
+        _emid = int(body.approval_explain_model_id or 0)
         data["approval_explain_model_id"] = _emid
         settings.approval_explain_model_id = _emid or None
-    if body.approval_explain_reasoning_effort is not None:
-        _meff = str(body.approval_explain_reasoning_effort).strip()
+    if "approval_explain_reasoning_effort" in body.model_fields_set:
+        _meff = str(body.approval_explain_reasoning_effort or "").strip()
         data["approval_explain_reasoning_effort"] = _meff
         settings.approval_explain_reasoning_effort = _meff
     # v45: 异常自动重试策略（次数 + 间隔序列），运行时立即生效

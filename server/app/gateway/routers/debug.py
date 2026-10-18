@@ -277,6 +277,8 @@ class ArthasAttach(Sid):
 class ArthasExec(Sid):
     command: str
     exec_timeout_ms: int = 10000
+    # 面板「建立观测」：异步作业 + 后台泵推送命中（同步执行的 watch 会在超时后被中断）
+    observe: bool = False
     # `async` 是 Python 关键字，用别名接收（MCP 侧传 "async"）
     run_async: bool = Field(default=False, alias="async")
 
@@ -318,9 +320,10 @@ async def arthas_attach(body: ArthasAttach):
 @router.post("/arthas/exec", response_model=dict)
 async def arthas_exec(body: ArthasExec):
     from app.services import arthas_service as svc
-    if body.run_async:
+    if body.run_async or body.observe:
         return _guard(await svc.async_command(body.session_id, body.command,
-                                              exec_timeout_ms=body.exec_timeout_ms))
+                                              exec_timeout_ms=body.exec_timeout_ms,
+                                              observe=body.observe))
     return _guard(await svc.exec_command(body.session_id, body.command,
                                         exec_timeout_ms=body.exec_timeout_ms))
 

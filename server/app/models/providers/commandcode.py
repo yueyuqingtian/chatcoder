@@ -23,6 +23,7 @@ import httpx
 
 from app.core.config import settings
 from app.models.base import ModelProvider
+from app.models.providers.temperature_policy import pick_temperature
 from app.models.providers.tool_args import parse_tool_args
 from app.models.schemas import ChatMessage, ChatRequest, ChatResponse, Usage
 
@@ -255,8 +256,17 @@ class CommandCodeProvider(ModelProvider):
             "model": request.model or self._default_model,
             "messages": messages,
             "stream": True,
-            "temperature": request.temperature if request.temperature is not None else 0.3,
         }
+        # 模型名任一来源携带 claude 字样时不下发温度；其余模型保持原 0.3 兜底。
+        _temp = pick_temperature(
+            request.temperature,
+            model_name=request.model,
+            extra_names=(self._default_model,),
+            base_url=self._base_url,
+            non_claude_default=0.3,
+        )
+        if _temp is not None:
+            params["temperature"] = _temp
         # plan-53-258 R2: 下发用户配置的思考深度。
         # 根因：此前从不发 reasoning_effort，上游因此**完全不产出 reasoning 事件**
         # （实测同一 prompt：不带该字段事件流只有 text-*；带 high 时出现

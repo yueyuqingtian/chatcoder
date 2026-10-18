@@ -105,7 +105,7 @@ def _fmt_watch_item(item: dict) -> list[str]:
     if item.get("cost") is not None:
         head += f"  cost={item['cost']}ms"
     lines = [head]
-    # value = 观测表达式（默认 {params, returnObj, throwable}）的结果，可能多行
+    # value = 观测表达式（默认 {params, returnObj, throwExp}）的结果，可能多行
     if item.get("value") is not None:
         lines.append(_indent(item["value"]))
     params = item.get("params")

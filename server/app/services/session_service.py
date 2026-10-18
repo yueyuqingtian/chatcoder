@@ -23,7 +23,8 @@ async def create_session(db: AsyncSession, *, project_id: int, title: str | None
                          model_id: int | None = None, fork_parent_id: int | None = None,
                          permission_mode: str | None = None,
                          approval_mode: str | None = None,
-                         goal_text: str | None = None) -> int:
+                         goal_text: str | None = None,
+                         side_parent_id: int | None = None) -> int:
     from datetime import datetime, timezone
 
     from app.orchestration.approval_policy import (
@@ -53,6 +54,7 @@ async def create_session(db: AsyncSession, *, project_id: int, title: str | None
             ("title", title),
             ("model_id", model_id),
             ("fork_parent_id", fork_parent_id),
+            ("side_parent_id", side_parent_id),
             # plan-676: 首页目标随创建一次落准（对齐 set_goal 端点写法；空时维持默认 none）
             ("goal_text", goal_text.strip()[:2000] if goal_active else None),
             ("goal_status", "active" if goal_active else None),
@@ -97,6 +99,7 @@ async def create_session(db: AsyncSession, *, project_id: int, title: str | None
         session = Session(
             project_id=project_id, title=title or None,
             model_id=model_id, fork_parent_id=fork_parent_id,
+            side_parent_id=side_parent_id,
             # plan-75-332 R3 修复：此处必须显式写入两种模式——此前漏传 approval_mode，
             # 新建会话一律落到 ORM 默认值 "ask"，表现为「首页选完全访问，发出后变询问审批」；
             # permission_mode 一并改用归一化值（原本写的 "default" 是已废弃的旧名）。
@@ -158,7 +161,15 @@ async def list_sessions(db: AsyncSession, project_id: int | None = None,
         stmt = stmt.where(Session.project_id == project_id)
     if not include_archived:
         stmt = stmt.where(Session.status != "archived")
+    # 侧边会话（子会话）不进入会话列表：只能从所属主会话的侧边面板访问
+    stmt = stmt.where(Session.side_parent_id.is_(None))
     res = await db.execute(stmt.order_by(Session.pinned.desc(), Session.pinned_at.desc(), Session.updated_at.desc()))
+    return list(res.scalars().all())
+
+
+async def list_side_sessions(db: AsyncSession, parent_id: int) -> list[Session]:
+    """某主会话下的侧边会话（按创建先后）。归档的子会话同样返回，由前端决定如何展示。"""
+    res = await db.execute(select(Session).where(Session.side_parent_id == parent_id).order_by(Session.id))
     return list(res.scalars().all())
 
 

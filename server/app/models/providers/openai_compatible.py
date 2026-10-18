@@ -16,6 +16,10 @@ from openai import APIConnectionError, APIError, APITimeoutError, AsyncOpenAI
 
 from app.core.config import settings
 from app.models.base import ModelProvider
+from app.models.providers.temperature_policy import (
+    is_temperature_rejected,
+    pick_temperature,
+)
 from app.models.providers.tool_args import parse_tool_args
 from app.models.schemas import ChatRequest, ChatResponse, Usage
 
@@ -181,6 +185,22 @@ class OpenAICompatibleProvider(ModelProvider):
         kwargs["extra_body"] = {"thinking": thinking}
         kwargs.pop("temperature", None)
 
+    def _apply_temperature(self, kwargs: dict, request: "ChatRequest") -> None:
+        """统一下发采样温度。
+
+        Claude/Anthropic 系（如 claude-haiku-5-5）只接受默认温度，携带
+        0.3/0.7 会被网关 400 "does not support non-default temperature"；
+        策略收敛在 temperature_policy，各通道共用同一判定。
+        """
+        value = pick_temperature(
+            request.temperature,
+            model_name=request.model,
+            extra_names=(self._default_model,),
+            base_url=self._base_url,
+        )
+        if value is not None:
+            kwargs["temperature"] = value
+
     async def _create_compat(self, kwargs: dict):
         """v23.1: 思考参数的兼容性重试（保留思考深度配置，自动降级字段）。
 
@@ -189,26 +209,38 @@ class OpenAICompatibleProvider(ModelProvider):
         触发 400 UNKNOWN_FIELD。此时自动降级重试一次：
         剥离 thinking.budget_tokens（仅保留 type:"enabled"），并将 max 降为 xhigh。
         思考深度能力不丢：支持该字段的网关（官方 Anthropic）仍在首次请求中携带。
+
+        另：模型别名未命中静态识别、网关仍报 "does not support non-default
+        temperature" 时，移除 temperature 再试一次，避免整轮对话直接失败。
         """
-        try:
-            return await self._client.chat.completions.create(**kwargs)
-        except APIError as e:
-            msg = str(getattr(e, "message", "") or "")
-            unknown_thinking_field = getattr(e, "status_code", None) == 400 and (
-                "budget_tokens" in msg or ("UNKNOWN_FIELD" in msg and "thinking" in msg)
-            )
-            if not unknown_thinking_field:
-                raise
-            retry = dict(kwargs)
-            eb = dict(retry.get("extra_body") or {})
-            th = eb.get("thinking")
-            if isinstance(th, dict):
-                eb["thinking"] = {k: v for k, v in th.items() if k != "budget_tokens"}
-                retry["extra_body"] = eb
-            if retry.get("reasoning_effort") == "max":
-                retry["reasoning_effort"] = "xhigh"
-            logger.warning("[provider] 网关拒绝 thinking 字段(400 UNKNOWN_FIELD)，降级重试一次")
-            return await self._client.chat.completions.create(**retry)
+        retry = dict(kwargs)
+        for attempt in range(3):
+            try:
+                return await self._client.chat.completions.create(**retry)
+            except APIError as e:
+                msg = str(getattr(e, "message", "") or "")
+                status = getattr(e, "status_code", None)
+                can_retry = attempt < 2
+                if (can_retry and is_temperature_rejected(status, msg)
+                        and "temperature" in retry):
+                    retry.pop("temperature", None)
+                    logger.warning(
+                        "[provider] 网关拒绝非默认 temperature(400)，移除该字段重试一次"
+                    )
+                    continue
+                unknown_thinking_field = status == 400 and (
+                    "budget_tokens" in msg or ("UNKNOWN_FIELD" in msg and "thinking" in msg)
+                )
+                if not (can_retry and unknown_thinking_field):
+                    raise
+                eb = dict(retry.get("extra_body") or {})
+                th = eb.get("thinking")
+                if isinstance(th, dict):
+                    eb["thinking"] = {k: v for k, v in th.items() if k != "budget_tokens"}
+                    retry["extra_body"] = eb
+                if retry.get("reasoning_effort") == "max":
+                    retry["reasoning_effort"] = "xhigh"
+                logger.warning("[provider] 网关拒绝 thinking 字段(400 UNKNOWN_FIELD)，降级重试一次")
 
     async def chat(self, request: ChatRequest) -> ChatResponse:
         """非流式调用，内部用 stream=True 收集。"""
@@ -219,8 +251,7 @@ class OpenAICompatibleProvider(ModelProvider):
             "stream": True,  # ← 始终 stream=True
             "stream_options": {"include_usage": True},  # v1.2: 要求网关在末尾 chunk 返回 usage
         }
-        if request.temperature is not None:
-            kwargs["temperature"] = request.temperature
+        self._apply_temperature(kwargs, request)
         if request.max_tokens:
             kwargs["max_tokens"] = request.max_tokens
         if request.tools:
@@ -380,8 +411,7 @@ class OpenAICompatibleProvider(ModelProvider):
             "stream": True,
             "stream_options": {"include_usage": True},  # v1.2: 要求网关在末尾 chunk 返回 usage
         }
-        if request.temperature is not None:
-            kwargs["temperature"] = request.temperature
+        self._apply_temperature(kwargs, request)
         if request.max_tokens:
             kwargs["max_tokens"] = request.max_tokens
         if request.tools:
@@ -417,8 +447,7 @@ class OpenAICompatibleProvider(ModelProvider):
             "stream": True,
             "stream_options": {"include_usage": True},  # v1.2: 要求网关在末尾 chunk 返回 usage
         }
-        if request.temperature is not None:
-            kwargs["temperature"] = request.temperature
+        self._apply_temperature(kwargs, request)
         if request.max_tokens:
             kwargs["max_tokens"] = request.max_tokens
         if request.tools:

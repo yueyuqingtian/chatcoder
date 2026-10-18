@@ -24,7 +24,7 @@ ref 以 WeakMap 绑定元素：同一文档内同一元素的 ref 始终不变�
 from __future__ import annotations
 
 # 每次修改 KIT_SOURCE 都必须递增：已打开的页面靠版本号判断是否需要重新注入新的页面工具包
-KIT_VERSION = 6
+KIT_VERSION = 7
 
 KIT_SOURCE = r"""
 (() => {
@@ -398,10 +398,12 @@ KIT_SOURCE = r"""
       if (chars + line.length + 1 > maxChars) { truncated = true; return; }
       lines.push(line); chars += line.length + 1;
     };
+    let skip = null;
     const walk = (node, depth) => {
       for (const el of kids(node)) {
         if (truncated) return;
         if (SKIP.has(el.tagName)) continue;
+        if (skip && skip.has(el)) continue;
         if (isFrame(el)) {
           if (!visible(el)) continue;
           const sd = subDoc(el);
@@ -458,18 +460,136 @@ KIT_SOURCE = r"""
         walk(el, depth);
       }
     };
-    walk(root, 0);
+    // 弹窗 / 浮层优先（plan-20261017-ux-overhaul 阶段 F）：门户层常挂在 body 末尾，按文档顺序会被 max_chars 截掉；
+    // 先把它们列在最前，主遍历再跳过，保证不截图也能读到浮层里的内容
+    const ov = a.ref ? [] : overlays();
+    if (ov.length) {
+      skip = new Set(ov);
+      for (const o of ov) {
+        if (truncated) break;
+        emit(0, overlayLabel(o) + ' [' + refOf(o) + ']');
+        walk(o, 1);
+      }
+      if (!truncated) emit(0, '页面其余部分');
+      walk(root, 1);
+    } else {
+      walk(root, 0);
+    }
     const dlg = openDialog();
     const head = [];
     head.push('# 页面: ' + clip(document.title || '(无标题)', 80) + ' — ' + location.href);
     head.push('# 视口 ' + innerWidth + '×' + innerHeight + '，滚动 ' + Math.round(scrollY) + '/' + Math.max(0, Math.round(document.documentElement.scrollHeight - innerHeight)) + '；可交互元素 ' + interactive + ' 个（视口外 ' + offscreen + ' 个，点击时会自动滚入）');
-    if (dlg) head.push('# 注意：页面有打开的对话框 ' + labelOf(dlg) + '，后面的元素可能被遮挡');
+    if (ov.length) head.push('# 页面有 ' + ov.length + ' 个弹窗 / 浮层，已优先列在最前；其后的页面元素可能被它们遮挡');
+    else if (dlg) head.push('# 注意：页面有打开的对话框 ' + labelOf(dlg) + '，后面的元素可能被遮挡');
     if (query) head.push('# 关键词「' + a.query + '」匹配 ' + lines.length + ' 项');
     const tail = [];
     if (truncated) tail.push('（内容已截断：用 ref 指定子树、query 过滤或调大 max_chars 查看其余部分）');
     if (crossFrames) tail.push('（页面含 ' + crossFrames + ' 个跨域框架，其内部内容无法读取：请截图查看，再用坐标点击或输入）');
     if (!lines.length) tail.push(query ? '（没有匹配的元素）' : '（未找到可见的可交互元素）');
-    return { text: head.concat(lines, tail).join('\n'), count: lines.length, truncated, url: location.href, title: document.title, cross_frames: crossFrames };
+    return { text: head.concat(lines, tail).join('\n'), count: lines.length, truncated, url: location.href, title: document.title, cross_frames: crossFrames, overlays: ov.length };
+  }
+
+  /** 当前打开的弹窗 / 浮层（最外层，按层级从高到低，最多 6 个）：
+   *  显式语义（dialog[open]、role=dialog / alertdialog、aria-modal、已弹出的 popover）优先；
+   *  其次是门户层（body 下 3 层以内）里 position:fixed 且 z-index ≥ 10、或 absolute 且 z-index ≥ 1000 的元素。
+   *  固定页头 / 导航条 / 页脚与没有内容的遮罩不算。 */
+  function overlays() {
+    const found = [];
+    const add = (el, z) => {
+      if (found.some((f) => f.el === el) || !visible(el)) return;
+      const r = el.getBoundingClientRect();
+      if (r.width < 24 || r.height < 16) return;
+      if (!el.shadowRoot && !(el.textContent || '').trim() && !el.querySelector('input,textarea,select,button,iframe,img,svg')) return;
+      found.push({ el, z });
+    };
+    const zOf = (el) => { try { return parseInt(winOf(el).getComputedStyle(el).zIndex, 10) || 0; } catch (e) { return 0; } };
+    const isBar = (el, r) => {
+      if (/^(HEADER|NAV|FOOTER|ASIDE)$/.test(el.tagName)) return true;
+      const role = el.getAttribute('role');
+      if (role === 'banner' || role === 'navigation' || role === 'contentinfo' || role === 'complementary' || role === 'toolbar') return true;
+      // 没有语义的吸顶 / 吸底条：贴着视口上下边、几乎通栏且不高
+      const w = winOf(el);
+      return r.width >= w.innerWidth * 0.9 && r.height <= 96 && (r.top <= 1 || r.bottom >= w.innerHeight - 1);
+    };
+    for (const d of docsOf()) {
+      let explicit;
+      try { explicit = d.querySelectorAll('dialog[open],[role=dialog],[role=alertdialog],[aria-modal=true],[popover]'); } catch (e) { explicit = []; }
+      for (const el of explicit) {
+        if (el.hasAttribute('popover')) { let open = false; try { open = el.matches(':popover-open'); } catch (e) {} if (!open) continue; }
+        add(el, 1e6 + zOf(el));
+      }
+      const scan = (node, depth) => {
+        for (const el of node.children) {
+          if (SKIP.has(el.tagName) || isFrame(el)) continue;
+          let s;
+          try { s = winOf(el).getComputedStyle(el); } catch (e) { continue; }
+          if (s.display === 'none') continue;
+          const z = parseInt(s.zIndex, 10) || 0;
+          if ((s.position === 'fixed' && z >= 10) || (s.position === 'absolute' && z >= 1000)) {
+            if (!isBar(el, el.getBoundingClientRect())) add(el, z);
+            continue;
+          }
+          if (depth < 3) scan(el, depth + 1);
+        }
+      };
+      if (d.body) scan(d.body, 0);
+    }
+    // 门户容器里套着显式对话框时只留对话框（名称更准）；其余只留最外层
+    const EXPLICIT = 1e6;
+    const kept = found.filter((f) => f.z >= EXPLICIT || !found.some((g) => g.z >= EXPLICIT && composedContains(f.el, g.el)));
+    const outer = kept.filter((f) => !kept.some((g) => g !== f && composedContains(g.el, f.el)));
+    outer.sort((x, y) => y.z - x.z);
+    return outer.slice(0, 6).map((f) => f.el);
+  }
+
+  /** 浮层的称呼：有语义角色用角色名（对话框「标题」），否则「浮层「开头文字」」 */
+  function overlayLabel(o) {
+    if (roleOf(o)) return labelOf(o);
+    const t = clip(o.innerText || o.textContent || '', 30);
+    return t ? '浮层「' + t + '」' : '浮层';
+  }
+
+  /** 组合树文本：穿过 open shadow root、slot 与同源框架（innerText 读不到这些），按块级元素换行。 */
+  function composedText(root, max) {
+    const out = [];
+    let n = 0;
+    const BLOCK = /^(block|flex|grid|list-item|table|table-row|table-caption|flow-root)$/;
+    const walkN = (node) => {
+      if (n > max) return;
+      if (node.nodeType === 3) {
+        const t = node.nodeValue.replace(/\s+/g, ' ');
+        if (t.trim()) { out.push(t); n += t.length; }
+        return;
+      }
+      if (!isEl(node) || SKIP.has(node.tagName)) return;
+      if (node.tagName === 'BR') { out.push('\n'); return; }
+      let disp = '';
+      try {
+        const s = winOf(node).getComputedStyle(node);
+        if (s.display === 'none' || s.visibility === 'hidden') return;
+        disp = s.display;
+      } catch (e) {}
+      const block = BLOCK.test(disp);
+      const inlineBox = !block && /^inline-(block|flex|grid)$/.test(disp);
+      if (block) out.push('\n'); else if (inlineBox) out.push(' ');
+      if (isFrame(node)) { const sd = subDoc(node); if (sd && sd.body) walkN(sd.body); }
+      else if (node.shadowRoot && node.shadowRoot.mode === 'open') { for (const c of node.shadowRoot.childNodes) walkN(c); }
+      else if (node.tagName === 'SLOT') { const as = node.assignedNodes({ flatten: true }); for (const c of (as.length ? as : node.childNodes)) walkN(c); }
+      else { for (const c of node.childNodes) walkN(c); }
+      if (block) out.push('\n'); else if (inlineBox) out.push(' ');
+    };
+    walkN(root);
+    return out.join('').replace(/[ \t]*\n[ \t]*/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  }
+  /** 元素可读文本：子树含 open shadow root 或同源框架时走组合树遍历，否则用 innerText（保留排版换行） */
+  function readText(el, max) {
+    let deep = false;
+    try {
+      for (const fe of el.querySelectorAll('iframe,frame')) if (subDoc(fe)) { deep = true; break; }
+      if (!deep) { const all = el.querySelectorAll('*'); for (let i = 0; i < all.length && i < 20000; i++) if (all[i].shadowRoot) { deep = true; break; } }
+    } catch (e) {}
+    if (deep) return composedText(el, max);
+    return (el.innerText || el.textContent || '').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
   }
 
   function openDialog() {
@@ -911,16 +1031,26 @@ KIT_SOURCE = r"""
     const max = Math.max(500, Math.min(Number(a.max_chars) || 8000, 100000));
     let el = null;
     if (a.ref || a.selector || a.text) el = pick(a);
+    // 没指定目标时，打开的弹窗 / 浮层文字放在最前（门户层不在 main / article 里，旧实现会整段漏掉）
+    const ov = el ? [] : overlays();
     if (!el) {
       const cands = [];
       for (const d of docsOf()) for (const c of d.querySelectorAll('main,[role=main],article')) if (visible(c)) cands.push(c);
       el = cands.sort((x, y) => (y.innerText || '').length - (x.innerText || '').length)[0] || document.body;
     }
-    let t = (el.innerText || el.textContent || '').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    const parts = [];
+    for (const o of ov) {
+      if (composedContains(o, el)) continue;
+      const ot = readText(o, max);
+      if (ot) parts.push('【' + overlayLabel(o) + '】\n' + ot);
+    }
+    let main = readText(el, max);
+    if (parts.length && main) main = '【' + (el === document.body ? '页面' : labelOf(el)) + '】\n' + main;
+    let t = parts.concat(main ? [main] : []).join('\n\n');
     const total = t.length;
     if (t.length > max) t = t.slice(0, max) + '\n…（已截断，共 ' + total + ' 字）';
     return { text: t, total, label: el === document.body ? '整个页面' : labelOf(el), url: location.href, title: document.title,
-      cross_frames: crossFrameList().length };
+      cross_frames: crossFrameList().length, overlays: parts.length };
   }
 
   // 变化监听覆盖顶层与各同源框架文档；框架新加载后，下一次 watch 时补上
@@ -1103,21 +1233,31 @@ KIT_SOURCE = r"""
       scroll: { x: Math.round(scrollX), y: Math.round(scrollY), max_y: Math.max(0, Math.round(document.documentElement.scrollHeight - innerHeight)) },
       viewport: { width: innerWidth, height: innerHeight } };
   }
+  /** 等 DOM 静默：最近一次（非噪声）变更后 quietMs 内没有新变更即返回，最长 capMs。
+   *  定时器直接定到「最近变更 + quietMs」，期间又有变更就顺延，不做固定间隔轮询（plan-20261017-ux-overhaul 阶段 F）。 */
+  function quietFor(quietMs, capMs) {
+    if (!mo) { observeAll(); last = performance.now(); }
+    else observeAll(); // 动作后新加载的同源框架补上监听
+    const start = performance.now();
+    return new Promise((resolve) => {
+      const check = () => {
+        const now = performance.now();
+        const wait = Math.min(quietMs - (now - last), capMs - (now - start));
+        if (wait <= 0) resolve(Math.round(now - start));
+        else setTimeout(check, Math.max(4, wait));
+      };
+      check();
+    });
+  }
   function quiet(a) {
     a = a || {};
     const quietMs = Math.max(30, Number(a.quiet_ms) || 120);
     const timeout = Math.max(quietMs, Number(a.timeout_ms) || 1500);
-    const start = performance.now();
     if (!mo) watch();
-    return new Promise((resolve) => {
-      const tick = () => {
-        const now = performance.now();
-        if (now - last >= quietMs || now - start >= timeout) { const s = state(); s.waited = Math.round(now - start); resolve(s); }
-        else setTimeout(tick, 25);
-      };
-      setTimeout(tick, Math.min(quietMs, 50));
-    });
+    return quietFor(quietMs, timeout).then((waited) => { const s = state(); s.waited = waited; return s; });
   }
+  /** 读取前先等 DOM 静默（120 ms，上限 800 ms）：弹窗 / 浮层刚插入、还在渲染时读不全 */
+  const settled = (fn) => (a) => quietFor(120, 800).then(() => fn(a || {}));
 
   function scrollTo(a) {
     a = a || {};
@@ -1241,7 +1381,7 @@ KIT_SOURCE = r"""
     return { label: labelOf(el), ref: refOf(el), rect: rectOf(el) };
   }
 
-  const FN = { snapshot, resolve, focus: focusTarget, selectAll, selection, cut: cutSelection, paste, fill, text: pageText,
+  const FN = { snapshot: settled(snapshot), resolve, focus: focusTarget, selectAll, selection, cut: cutSelection, paste, fill, text: settled(pageText),
     watch, quiet, state, check, scrollTo, scrollPos, wait: waitFor, elementAt, activate, aim, changes, digest, marks };
 
   window.__ccKit = {

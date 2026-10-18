@@ -388,7 +388,8 @@ def tool_idea_method_at_line(args: dict) -> tuple[str, dict]:
 # IDEA 调试启动的进程连不上（实测 ConnectionRefused）；Arthas 走 Attach API，
 # 是另一条独立通道，可并存。代价是只能"观测"，没有真断点/单步。
 
-_WATCH_DEFAULT_EXPRESS = "{params, returnObj, throwable}"
+# Arthas 的异常属性名是 throwExp（写 throwable 会 NoSuchPropertyException，watch 立即终止，实测）
+_WATCH_DEFAULT_EXPRESS = "{params, returnObj, throwExp}"
 
 
 def _exec_sync(command: str, timeout_ms: int = 20000) -> tuple[str, dict]:
@@ -865,7 +866,7 @@ def _build_tools() -> list[ToolSpec]:
             {"type": "object", "properties": {
                 "class_name": {"type": "string", "description": "全限定类名，如 com.x.DemoService"},
                 "method": {"type": "string", "description": "方法名"},
-                "express": {"type": "string", "description": "观测表达式，默认 '{params, returnObj, throwable}'"},
+                "express": {"type": "string", "description": "观测表达式，默认 '{params, returnObj, throwExp}'"},
                 "condition": {"type": "string", "description": "条件表达式（可选，如 'params[0]==1'）"},
                 "times": {"type": "integer", "description": "最多观测次数（-n），默认 5"},
                 "depth": {"type": "integer", "description": "对象展开层数（-x），默认 2"},

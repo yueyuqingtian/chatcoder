@@ -4,7 +4,8 @@
 覆盖用户反馈「切换模型后必须再发一条消息才提示切换了模型」：
 - `session_service.create_system_message` 在落库 SYSTEM 消息后广播 `message.created`，
   前端切换模型当场即收到提示，不再等到下一次消息刷新。
-- `PATCH /sessions/{id}`：仅在模型真正变化时写入 divider；重复选择同一模型不产生新提示。
+- plan-20261017-ux-overhaul：分割线改为发送时写入（与上一条用户消息所用模型比较，带供应商名），
+  `PATCH /sessions/{id}` 切换当下不再写入。
 """
 import pytest
 from sqlalchemy import select
@@ -98,23 +99,70 @@ async def test_create_system_message_broadcasts_message_created(db_env, captured
     assert payload["content"]["text"] == "模型已切换为 测试模型"
 
 
-async def test_update_session_writes_divider_only_on_real_change(db_env, captured):
-    """模型真变化 → 写一条 divider 并广播；重复 PATCH 同一模型 → 不再出提示。"""
+async def _mk_model(db, *, model_id: int, name: str, provider_name: str = "") -> None:
+    from app.persistence.models.model_reg import Model, Provider
+    prov_id = None
+    if provider_name:
+        db.add(Provider(id=model_id, name=provider_name))
+        prov_id = model_id
+    db.add(Model(id=model_id, name=name, provider_id=prov_id, source_type="custom"))
+    await db.commit()
+
+
+async def _add_user_message_with_model(db, *, model_id: int, session_id: int = 1) -> None:
+    db.add(Message(
+        session_id=session_id, sender_type="user", msg_type="text",
+        content={"text": "你好", "model_id": model_id},
+    ))
+    await db.commit()
+
+
+async def test_patch_model_writes_no_divider(db_env, captured):
+    """plan-20261017-ux-overhaul：切换当下不写分割线（只切不发不留痕迹）。"""
     db = db_env
     await _mk_session(db, model_id=1)
     await _add_user_message(db)
 
     await update_session(1, SessionUpdate(model_id=2), db)
+    assert await _system_messages(db) == []
+    assert captured == []
+    refreshed = await session_service.get_session(db, 1)
+    assert refreshed is not None and refreshed.model_id == 2
+
+
+async def test_divider_written_on_send_with_provider(db_env, captured):
+    """发送时与上一条用户消息所用模型不同 → 写「已切换至 供应商 / 模型」；相同则不写。"""
+    from app.gateway.routers.turns import _write_model_divider_if_changed
+
+    db = db_env
+    await _mk_session(db, model_id=2)
+    await _mk_model(db, model_id=1, name="glm-4.6", provider_name="智谱")
+    await _mk_model(db, model_id=2, name="glm-4.6", provider_name="硅基流动")
+    await _add_user_message_with_model(db, model_id=1)
+
+    await _write_model_divider_if_changed(db, 1, 2)
     rows = await _system_messages(db)
     assert len(rows) == 1
-    assert "已切换" in rows[0].content["text"]
-    assert len(captured) == 1
-    assert captured[0][1]["event"] == "message.created"
+    assert rows[0].content["divider"] == "model_changed"
+    assert rows[0].content["text"] == "已切换至 硅基流动 / glm-4.6"
 
-    # 重复 PATCH 同一模型：不应再刷出「模型已切换」（旧实现曾重复写，现已加判重）
-    await update_session(1, SessionUpdate(model_id=2), db)
+    # 上一条用户消息已用同一模型：不再写
+    await _add_user_message_with_model(db, model_id=2)
+    await _write_model_divider_if_changed(db, 1, 2)
     assert len(await _system_messages(db)) == 1
-    assert len(captured) == 1
+
+
+async def test_divider_skipped_without_history_model(db_env, captured):
+    """空会话或历史消息没有记录模型（旧数据）时不写分割线。"""
+    from app.gateway.routers.turns import _write_model_divider_if_changed
+
+    db = db_env
+    await _mk_session(db, model_id=2)
+    await _mk_model(db, model_id=2, name="m2")
+    await _write_model_divider_if_changed(db, 1, 2)
+    await _add_user_message(db)  # 旧数据：content 无 model_id
+    await _write_model_divider_if_changed(db, 1, 2)
+    assert await _system_messages(db) == []
 
 
 async def test_update_session_no_divider_in_empty_session(db_env, captured):

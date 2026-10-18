@@ -89,6 +89,63 @@ async def test_plan_workflow_creates_draft_and_start_is_refused_in_plan_mode(
     assert f"program_id={program_id}" in status and "draft" in status
 
 
+async def test_plan_workflow_explains_flows_kept_from_the_preset(fresh_runtime, tmp_path):
+    """基于骨架提交 6 个新子工作流：合并后 7 个，提示要指出多出的 main 来自骨架保留。"""
+    sid = await _session()
+    flows = [
+        {"key": f"f{i}", "nodes": [{"key": "explore", "kind": "explore", "task": "x"}]}
+        for i in range(6)
+    ]
+    text = await run_workflow_tool(
+        "plan_workflow",
+        {"title": "合并后超限", "goal": "g", "based_on": "fix_and_verify", "flows": flows},
+        session_id=sid,
+        turn_id=None,
+        workspace=str(tmp_path),
+        readonly_only=False,
+    )
+    assert "当前 7 个" in text
+    assert "main" in text and "f5" in text
+    assert "骨架子工作流" in text
+
+
+async def test_plan_workflow_labels_the_generated_integration_flow(fresh_runtime, tmp_path):
+    """5 个提交 + after：成功提示标注集成验收来自自动展开，模型能对上自己提交的数量。"""
+    sid = await _session()
+    flows = [
+        {"key": f"f{i}", "nodes": [{"key": "explore", "kind": "explore", "task": "x"}]}
+        for i in range(5)
+    ]
+    text = await run_workflow_tool(
+        "plan_workflow",
+        {
+            "title": "含集成验收",
+            "goal": "g",
+            "flows": flows,
+            "after": {"acceptance": ["整体通过"]},
+        },
+        session_id=sid,
+        turn_id=None,
+        workspace=str(tmp_path),
+        readonly_only=False,
+    )
+    assert "子工作流 6 个（含 after 自动展开的集成验收 1 个）" in text
+
+
+async def test_plan_workflow_rejects_a_non_array_flows_argument(fresh_runtime, tmp_path):
+    """flows 传成对象时应返回可读提示，而不是在合并骨架时抛异常。"""
+    sid = await _session()
+    text = await run_workflow_tool(
+        "plan_workflow",
+        {"title": "坏参数", "goal": "g", "based_on": "fix_and_verify", "flows": {"key": "x"}},
+        session_id=sid,
+        turn_id=None,
+        workspace=str(tmp_path),
+        readonly_only=False,
+    )
+    assert "flows 必须是数组" in text
+
+
 async def test_programs_are_scoped_to_their_session(fresh_runtime, tmp_path):
     owner = await _session()
     other = await _session()

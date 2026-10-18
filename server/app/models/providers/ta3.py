@@ -30,6 +30,7 @@ import httpx
 
 from app.core.config import settings
 from app.models.base import ModelProvider
+from app.models.providers.temperature_policy import pick_temperature
 from app.models.providers.tool_args import parse_tool_args
 from app.models.providers.ta3_tool_aliases import FROM_TA3, TO_TA3, disguise_args, restore_args
 from app.models.providers.ta3_mcp import (
@@ -65,6 +66,27 @@ _KIMI_EFFORT_MAP = {
     "xhigh": "max",
     "max": "max",
 }
+
+
+def _merge_stream_text(current: str, chunk: str) -> str:
+    """合并流式工具名/参数增量，兼容三种常见网关行为。
+
+    - 标准增量：直接追加；
+    - 累计式：每帧给的是「截至目前的完整内容」，chunk.startswith(current) 时替换；
+    - 重复帧：部分网关在首个 delta 后重复发送完整内容，chunk == current 时跳过。
+
+    不能简单用 endswith 判重——参数里出现重复字符（如 ``"a"`` 连续两次）是合法的；
+    只有「完全相同」或「包含已累积前缀」才视为非增量。
+    """
+    if not chunk:
+        return current
+    if not current:
+        return chunk
+    if chunk == current:
+        return current
+    if len(chunk) > len(current) and chunk.startswith(current):
+        return chunk
+    return current + chunk
 
 # ─────────────── 工作区指纹（x-ws-id，plan-270-1358）───────────────
 # 对齐 Ta+3 v0.4.6 gitWorkspaceService.getWorkspaceFingerprint：
@@ -523,10 +545,19 @@ class Ta3Provider(ModelProvider):
             "model": request.model or self._model_name,
             "messages": self._sanitize_openai_tool_pairing(raw_msgs),
             "stream": True,
-            # 对齐参考项目：temperature 用目录 completionOptions，默认 0.1
-            # （覆盖当前项目 0.3/0.7 —— ta3 网关/训练环境按 0.1 系指纹）
-            "temperature": opts.get("temperature", _DEFAULT_TEMPERATURE),
         }
+        # 对齐参考项目：temperature 用目录 completionOptions，默认 0.1。
+        # 模型名任一来源携带 claude 字样时只发默认温度，非默认值会被网关 400 拒绝。
+        _temp = pick_temperature(
+            None,
+            model_name=_identity(self._model_name, self._meta),
+            extra_names=(request.model,),
+            base_url=self._base_url,
+            catalog_default=opts.get("temperature"),
+            non_claude_default=_DEFAULT_TEMPERATURE,
+        )
+        if _temp is not None:
+            body["temperature"] = _temp
         max_tokens = opts.get("maxTokens") or opts.get("max_tokens")
         if max_tokens:
             body["max_tokens"] = max_tokens
@@ -593,14 +624,28 @@ class Ta3Provider(ModelProvider):
         if delta.get("tool_calls"):
             for tc in delta["tool_calls"]:
                 idx = int(tc.get("index") or 0)
-                slot = monitor["tool_calls"].setdefault(idx, {"id": "", "name": "", "arguments": ""})
-                if tc.get("id"):
-                    slot["id"] = tc["id"]
+                slot = monitor["tool_calls"].get(idx)
+                new_id = str(tc.get("id") or "")
+                # 部分网关（少数 OpenAI 兼容层）所有工具都发 index=0：
+                # id 变化说明是新的工具调用，另开槽位，避免多个工具的参数互相拼接。
+                if slot is not None and new_id and slot.get("id") and new_id != slot["id"]:
+                    idx = max(monitor["tool_calls"].keys(), default=-1) + 1
+                    slot = None
+                if slot is None:
+                    slot = {"id": "", "name": "", "arguments": ""}
+                    monitor["tool_calls"][idx] = slot
+                if new_id:
+                    slot["id"] = new_id
                 fn = tc.get("function") or {}
-                if fn.get("name"):
-                    slot["name"] += fn["name"]
-                if fn.get("arguments"):
-                    slot["arguments"] += fn["arguments"]
+                name = fn.get("name")
+                if isinstance(name, str) and name:
+                    slot["name"] = _merge_stream_text(slot["name"], name)
+                arg = fn.get("arguments")
+                if isinstance(arg, str) and arg:
+                    slot["arguments"] = _merge_stream_text(slot["arguments"], arg)
+                elif isinstance(arg, dict):
+                    # 非标准网关可能直接给对象，统一转成 JSON 文本交给 finalize 解析
+                    slot["arguments"] = json.dumps(arg, ensure_ascii=False)
         finish_reason = choice.get("finish_reason") or choice.get("finishReason")
         if finish_reason:
             monitor["finish_reason"] = str(finish_reason)
@@ -728,8 +773,21 @@ class Ta3Provider(ModelProvider):
             "model": request.model or self._model_name,
             "messages": messages,
             "stream": True,
-            "temperature": 0.2 if is_kimi else opts.get("temperature", _DEFAULT_TEMPERATURE),
         }
+        # kimi 保留专用采样温度；模型名任一来源携带 claude 字样时只发默认温度。
+        if is_kimi:
+            body["temperature"] = 0.2
+        else:
+            _temp = pick_temperature(
+                None,
+                model_name=_identity(self._model_name, self._meta),
+                extra_names=(request.model,),
+                base_url=self._base_url,
+                catalog_default=opts.get("temperature"),
+                non_claude_default=_DEFAULT_TEMPERATURE,
+            )
+            if _temp is not None:
+                body["temperature"] = _temp
         if _catalog_max:
             body["max_tokens"] = int(min(request.max_tokens or _catalog_max, _catalog_max))
         elif request.max_tokens:
@@ -798,11 +856,27 @@ class Ta3Provider(ModelProvider):
             block = payload.get("content_block") or {}
             if block.get("type") == "tool_use":
                 idx = payload.get("index", 0)
-                monitor["anthropic_tools"][idx] = {
-                    "id": block.get("id", ""),
-                    "name": block.get("name", ""),
-                    "arguments": "",
-                }
+                new_id = str(block.get("id") or "")
+                slot = monitor["anthropic_tools"].get(idx)
+                # 与 OpenAI 支路同理：网关若把所有工具都放在 index=0，按 id 另开槽位
+                if slot is not None and new_id and slot.get("id") and new_id != slot["id"]:
+                    idx = max(monitor["anthropic_tools"].keys(), default=-1) + 1
+                    slot = None
+                if slot is None:
+                    slot = {"id": "", "name": "", "arguments": ""}
+                    monitor["anthropic_tools"][idx] = slot
+                if new_id:
+                    slot["id"] = new_id
+                _name = block.get("name")
+                if isinstance(_name, str) and _name:
+                    slot["name"] = _name
+                # 部分 Anthropic 兼容网关在 start 帧直接给完整 input（没有后续
+                # input_json_delta），只认 partial_json 会导致参数永远为空。
+                _input = block.get("input")
+                if isinstance(_input, dict) and _input:
+                    slot["arguments"] = json.dumps(_input, ensure_ascii=False)
+                elif isinstance(_input, str) and _input.strip() and _input.strip() != "{}":
+                    slot["arguments"] = _input
         elif etype == "content_block_delta":
             delta = payload.get("delta") or {}
             dtype = delta.get("type")
@@ -816,10 +890,15 @@ class Ta3Provider(ModelProvider):
                 monitor["content_parts"].append(delta["text"])
             elif _th:
                 monitor["thinking_parts"].append(_th)
-            elif dtype == "input_json_delta" and delta.get("partial_json"):
+            elif isinstance(delta.get("partial_json"), str) and delta["partial_json"]:
                 slot = monitor["anthropic_tools"].get(idx)
                 if slot is not None:
-                    slot["arguments"] += delta["partial_json"]
+                    slot["arguments"] = _merge_stream_text(
+                        slot["arguments"], delta["partial_json"])
+            elif isinstance(delta.get("input"), dict) and delta["input"]:
+                slot = monitor["anthropic_tools"].get(idx)
+                if slot is not None:
+                    slot["arguments"] = json.dumps(delta["input"], ensure_ascii=False)
         elif etype == "message_delta":
             delta = payload.get("delta") or {}
             stop_reason = delta.get("stop_reason")

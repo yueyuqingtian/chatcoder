@@ -32,6 +32,7 @@ async def _to_out(db: AsyncSession, s) -> SessionOut:
         # plan-20261009-ui U2：首页用量热力图按「创建日」统计会话数
         created_at=str(s.created_at) if getattr(s, "created_at", None) else None,
         fork_parent_id=s.fork_parent_id,
+        side_parent_id=getattr(s, "side_parent_id", None),
         worktree_path=s.worktree_path,
         has_running=await session_service.has_running_turn(db, s.id),
         workflow_running=await session_service.has_running_workflow(db, s.id),
@@ -69,6 +70,40 @@ async def list_sessions(project_id: int | None = None, include_archived: bool = 
     return out
 
 
+@router.post("/{session_id}/side-sessions", response_model=SessionOut)
+async def create_side_session(session_id: int, db: AsyncSession = Depends(get_db)):
+    """从主会话开一个侧边会话（子会话）。
+
+    子会话沿用主会话的项目、模型、执行/权限模式与工作树，之后的 turn 与主会话走同一条流水线，
+    因此工具调用与消息展示完全一致。侧边会话不能再开侧边会话，避免嵌套。
+    """
+    parent = await session_service.get_session(db, session_id)
+    if parent is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if getattr(parent, "side_parent_id", None) is not None:
+        raise HTTPException(status_code=400, detail="侧边会话不能再开侧边会话")
+    if parent.project_id is None:
+        raise HTTPException(status_code=400, detail="该会话没有所属项目，无法开启侧边会话")
+    sid = await session_service.create_session(
+        db, project_id=parent.project_id, title="侧边会话", model_id=parent.model_id,
+        permission_mode=parent.permission_mode, approval_mode=parent.approval_mode,
+        side_parent_id=parent.id,
+    )
+    if parent.worktree_path:
+        await session_service.update_session(db, sid, worktree_path=parent.worktree_path)
+    child = await session_service.get_session(db, sid)
+    return await _to_out(db, child)
+
+
+@router.get("/{session_id}/side-sessions", response_model=list[SessionOut])
+async def list_side_sessions(session_id: int, db: AsyncSession = Depends(get_db)):
+    """主会话下的侧边会话列表（按创建先后）。"""
+    if await session_service.get_session(db, session_id) is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    children = await session_service.list_side_sessions(db, session_id)
+    return [await _to_out(db, s) for s in children]
+
+
 @router.get("/{session_id}", response_model=SessionOut)
 async def get_session(session_id: int, db: AsyncSession = Depends(get_db)):
     session = await session_service.get_session(db, session_id)
@@ -84,12 +119,6 @@ async def update_session(session_id: int, body: SessionUpdate, db: AsyncSession 
         normalize_approval_mode, normalize_execution_mode,
     )
 
-    # 先取旧值：模型切换 divider 仅在模型真正发生变化时写入，
-    # 否则重复 PATCH（同一模型/自动绑定）会在消息流顶部刷出多条「模型已切换」。
-    old_model_id: int | None = None
-    if body.model_id is not None:
-        old = await session_service.get_session(db, session_id)
-        old_model_id = old.model_id if old else None
     result_status = await session_service.update_session(
         db, session_id,
         title=body.title, model_id=body.model_id, pinned=body.pinned, status=body.status,
@@ -103,34 +132,8 @@ async def update_session(session_id: int, body: SessionUpdate, db: AsyncSession 
 
         await workflow_service.on_session_archived(session_id)
     session = await session_service.get_session(db, session_id)
-    # v2.2 (对齐 zcode 3.11): 模型切换 divider——换模型时写一条 SYSTEM 分割消息
-    if body.model_id is not None and old_model_id is not None and old_model_id != body.model_id:
-        try:
-            from sqlalchemy import func, select
-
-            from app.persistence.models.message import Message
-            from app.persistence.models.model_reg import Model
-
-            # plan-20261016-ux（问题 8）：会话里还没有任何对话（新建未发送、发送后又撤销）时不写提示——
-            # 分割线标记的是「此前的对话与之后的对话用了不同模型」，空会话里只剩一条孤零零的「模型已切换」
-            _has_dialog = await db.scalar(
-                select(func.count()).select_from(Message).where(
-                    Message.session_id == session_id,
-                    Message.deleted == False,  # noqa: E712 撤销（回滚）的消息是软删
-                    Message.thread_id.is_(None),
-                    Message.sender_type != "system",
-                )
-            )
-            if not _has_dialog:
-                return await _to_out(db, session)
-            _m = await db.get(Model, body.model_id)
-            _model_name = _m.name if _m else f"#{body.model_id}"
-            await session_service.create_system_message(
-                db, session_id=session_id,
-                content={"text": f"模型已切换为 {_model_name}", "divider": "model_changed"},
-            )
-        except Exception:
-            logger.warning("[sessions] 模型切换消息写入失败(非阻塞)", exc_info=True)
+    # plan-20261017-ux-overhaul 阶段 D：模型切换分割线改在用户发送时写入（见 turns._write_model_divider_if_changed），
+    # 切换当下不再落库——只切不发不留痕迹，连续切换也只在发送时比较一次。
     return await _to_out(db, session)
 
 
@@ -146,6 +149,11 @@ async def delete_session(session_id: int, permanent: bool = False,
     if permanent:
         from app.orchestration.workflow import service as workflow_service
 
+        # 侧边会话（子会话）随主会话一并永久删除，不留下不可见的残留会话
+        child_ids = [c.id for c in await session_service.list_side_sessions(db, session_id)]
+        for child_id in child_ids:
+            await workflow_service.on_session_deleted(child_id)
+            await session_service.delete_session_permanent(db, child_id)
         await workflow_service.on_session_deleted(session_id)
         result = await session_service.delete_session_permanent(db, session_id)
         if result is None:

@@ -27,6 +27,7 @@ from app.gateway.routers import (
     profiles,
     projects,
     providers,
+    git,
     scheduled,
     sessions,
     settings as settings_routes,
@@ -290,6 +291,7 @@ def create_app() -> FastAPI:
     # 路由
     app.include_router(projects.router, prefix="/api", tags=["projects"])
     app.include_router(sessions.router, prefix="/api", tags=["sessions"])
+    app.include_router(git.router, prefix="/api", tags=["git"])
     # plan-20261014-fix4：归档页批量永久删除（项目 / 会话及全部关联数据，一次请求完成）
     app.include_router(archive.router, prefix="/api", tags=["archive"])
     app.include_router(turns.router, prefix="/api", tags=["turns"])

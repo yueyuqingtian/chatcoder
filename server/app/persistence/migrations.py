@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 _MIGRATIONS: list[tuple[str, str, str]] = [
     # ========== sessions（v1 缺 project_id / model_id / pinned / fork_parent / worktree / updated_at）==========
     ("sessions", "project_id", "BIGINT"),
+    # 侧边会话（子会话）所属主会话 id；旧库缺列时启动迁移补齐，NULL = 普通会话
+    ("sessions", "side_parent_id", "BIGINT"),
     ("sessions", "workspace_root", "VARCHAR(512)"),
     ("sessions", "knowledge_base_ids", "JSON"),
     ("sessions", "rules_doc", "VARCHAR(512)"),

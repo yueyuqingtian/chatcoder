@@ -379,6 +379,12 @@ async def _plan(
             "parallel_research / fix_and_verify）或用户模板（user:<key>）后再规划。"
         )
     flows = args.get("flows") or []
+    if not isinstance(flows, list):
+        # plan-20261017-flow-limit：flows 不是数组时在合并骨架前直接给出可读提示，
+        # 避免后续按字符串迭代抛异常、让模型误以为是自己提交的数组被错误解析。
+        return "flows 必须是数组（每个元素是一个子工作流对象），请修正后重新提交 plan_workflow。"
+    if any(not isinstance(flow, dict) or not isinstance(flow.get("key"), str) for flow in flows):
+        return "flows 的每一项都必须是带字符串 key 的子工作流对象，请修正后重新提交 plan_workflow。"
     if based_on:
         if presets.is_user_ref(based_on):
             template = await _store.get_user_template(based_on[len(presets.USER_PREFIX) :])
@@ -432,9 +438,21 @@ async def _plan(
         origin_turn_id=turn_id,
     )
     stats = result.stats
+    # plan-20261017-flow-limit：合并骨架或展开 after 后，实际子工作流数可能多于模型提交的数量。
+    # 文案里分开标注来源，避免模型把「自动生成/保留的」误认为自己的数组被重复解析。
+    submitted = len({f["key"] for f in flows if isinstance(f, dict) and "key" in f})
+    integration = stats.get("integration_flows", 0)
+    kept = stats["flows"] - submitted - integration
+    parts: list[str] = []
+    if kept > 0:
+        parts.append(f"本次提交 {submitted} 个")
+        parts.append(f"骨架保留 {kept} 个")
+    if integration:
+        parts.append(f"含 after 自动展开的集成验收 {integration} 个")
+    flow_note = f"（{'；'.join(parts)}）" if parts else ""
     lines = [
         f"已生成工作流计划（program_id={program_id}，待用户确认）：{result.normalized.title}",
-        f"子工作流 {stats['flows']} 个，节点 {stats['nodes']} 个，"
+        f"子工作流 {stats['flows']} 个{flow_note}，节点 {stats['nodes']} 个，"
         f"预计代理调用约 {stats['estimated_agent_calls']} 次。",
     ]
     if result.warnings:

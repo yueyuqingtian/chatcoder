@@ -236,3 +236,76 @@ def test_executor_rejects_unparsed_args(tmp_path):
     assert not r.ok
     assert "未执行" in r.error and "JSON" in r.error
     assert not (tmp_path / "a").exists()
+
+
+# ───────────────── 跨行 / 转义容错（plan-20261017） ─────────────────
+
+def test_cross_line_whitespace_tolerated():
+    """模型把两行合并成一行（或拆开）时，按空白归一化仍能唯一定位。"""
+    content = (
+        "/**\n"
+        " * S1（plan-41-197）：`title` 不再落到原生属性，改由 ui/Tooltip 渲染统一圆角卡片浮层\n"
+        " * （原生 title 是浏览器方形浮块且聚焦延迟明显）；`aria-label` 缺省时以 title 兜底。\n"
+        " */\n"
+        'import type { ButtonHTMLAttributes, ReactNode } from "react";\n'
+    )
+    old = (
+        " * S1（plan-41-197）：`title` 不再落到原生属性，改由 ui/Tooltip 渲染统一圆角卡片浮层\n"
+        " * （原生 title 是浏览器方形浮块且聚焦延迟明显）；`aria-label` 缺省时以 title 兜底。 */\n"
+        'import type { ButtonHTMLAttributes, ReactNode } from "react";'
+    )
+    new = ' * S1 已更新\n */\nimport type { ReactNode } from "react";'
+    res = apply_replacement(content, old, new)
+    assert res.ok, res.error
+    assert res.strategy == "whitespace"
+    assert "S1 已更新" in res.text
+    assert " * （原生 title" not in res.text
+
+
+def test_cross_line_whitespace_requires_unique():
+    content = "alpha beta\ngamma\n\nalpha beta\ngamma\n"
+    res = apply_replacement(content, "alpha beta\ngamma", "x")
+    assert not res.ok
+    assert "匹配 2 处" in res.error
+
+
+def test_partial_line_number_prefix_stripped():
+    content = "def foo():\n    return 1\n\nx = 2\n"
+    old = "  1: def foo():\n    return 1"
+    res = apply_replacement(content, old, "def foo():\n    return 2")
+    assert res.ok, res.error
+    assert res.strategy == "line_numbers"
+    assert res.text.startswith("def foo():\n    return 2\n")
+
+
+def test_literal_escape_decoded():
+    content = "a = 1\nb = 2\n"
+    res = apply_replacement(content, "a = 1\\nb = 2", "a = 10\nb = 20")
+    assert res.ok, res.error
+    assert res.strategy == "literal_escapes"
+    assert res.text == "a = 10\nb = 20\n"
+
+
+def test_multi_edit_missing_path_reuses_sole_path(tmp_path):
+    """同文件多处编辑时模型漏写某个 edit 的 path，复用本次唯一路径。"""
+    f = tmp_path / "m.py"
+    f.write_bytes(b"a = 1\nb = 2\n")
+    r = asyncio.run(MultiFileEditTool().run({"edits": [
+        {"old_text": "a = 1", "new_text": "a = 10"},
+        {"path": "m.py", "old_text": "b = 2", "new_text": "b = 20"},
+    ]}, _ctx(tmp_path)))
+    assert r.ok, r.error
+    assert f.read_bytes() == b"a = 10\nb = 20\n"
+
+
+def test_multi_edit_accepts_json_string_edits(tmp_path):
+    """部分模型把 edits 整个作为 JSON 字符串传入。"""
+    import json
+
+    f = tmp_path / "m.py"
+    f.write_bytes(b"a = 1\n")
+    r = asyncio.run(MultiFileEditTool().run({"edits": json.dumps([
+        {"path": "m.py", "old_text": "a = 1", "new_text": "a = 2"},
+    ])}, _ctx(tmp_path)))
+    assert r.ok, r.error
+    assert f.read_bytes() == b"a = 2\n"

@@ -137,6 +137,12 @@ FROM_TA3.update({
     "SubAgentAsync": "spawn_subagent",
     "TaskQuery": "collect_results",
     "TaskCancel": "cancel_subagent",
+    # ta3 参考项目的另一套编辑工具：schema 已随 TA3_NATIVE_SCHEMAS 定义，此前
+    # 入站未映射，模型一旦按参考项目习惯调用就会落到「未知工具」。语义与
+    # editor_apply_diff 一致（精确字符串替换），补成入站别名。
+    "single_find_and_replace": "editor_apply_diff",
+    # 技能读取：语义与 skill_view 完全一致（名称→正文）
+    "ReadSkill": "skill_view",
 })
 
 # ── plan-365-1769 F1：动态派生 schema 的自造伪装名 ──
@@ -253,6 +259,14 @@ ARGS_FROM_TA3: dict[str, dict[str, str | None]] = {
     "BashKill": {"shellId": "shell_id"},
     # plan-248-1258 M3.3: 文件骨架入站适配（filepath → path）
     "get_file_outline": {"filepath": "path"},
+    # ta3 参考项目的编辑/技能工具别名（见 FROM_TA3 同名条目）
+    "single_find_and_replace": {
+        "filepath": "path",
+        "old_string": "old_text",
+        "new_string": "new_text",
+        "replace_all": "replace_all",
+    },
+    "ReadSkill": {"skillName": "name"},
 }
 
 # v36 (plan-321-1600 M3): 原 SPAWN_FORCED_ARGS（强制 explore=True）已删除——

@@ -86,6 +86,9 @@ class ArthasSession:
     last_active: float = field(default_factory=time.time)
     # 作业表：job_id -> {command, created_at}（watch/trace 等持续输出命令）
     jobs: dict[str, dict] = field(default_factory=dict)
+    # 面板发起的观测作业：后台泵定时拉取结果并推给前端（AI 自己发起的作业仍由 AI 按需 pull）
+    observe_jobs: set[str] = field(default_factory=set)
+    pumps: dict[str, Any] = field(default_factory=dict)
     # arthas-boot 的输出尾部（attach 失败时用于回报关键行）
     output_tail: list[str] = field(default_factory=list)
     # Arthas 会话 id：一次性命令会自动建临时会话（响应顶层回显），
@@ -826,8 +829,13 @@ def _short(value: Any, limit: int = 600) -> Any:
 
 
 @_safe
-async def async_command(session_id: int, command: str, *, exec_timeout_ms: int = 10000) -> dict:
-    """异步提交（watch/trace 等持续输出命令）：立即拿 job_id，随后用 pull 取结果。"""
+async def async_command(session_id: int, command: str, *, exec_timeout_ms: int = 10000,
+                        observe: bool = False) -> dict:
+    """异步提交（watch/trace 等持续输出命令）：立即拿 job_id，随后用 pull 取结果。
+
+    observe=True（面板「建立观测」）：提交后由后台泵持续拉取命中并推给前端，作业结束或被中断后自动停止。
+    同步执行会在超时后把 watch 作业一并中断，观测无法持续，因此观测一律走异步作业。
+    """
     from app.mcp_servers.arthas_client import ArthasClient, ArthasError
 
     sess, err = _require(session_id)
@@ -845,7 +853,11 @@ async def async_command(session_id: int, command: str, *, exec_timeout_ms: int =
         return {"ok": False, "error": f"Arthas 不可用：{e}"}
     job_id = data.get("job_id")
     if job_id:
-        sess.jobs[str(job_id)] = {"command": cmd, "created_at": time.time()}
+        jid = str(job_id)
+        sess.jobs[jid] = {"command": cmd, "created_at": time.time()}
+        if observe:
+            sess.observe_jobs.add(jid)
+            sess.pumps[jid] = asyncio.create_task(_pump_job(session_id, jid))
     await _broadcast(session_id, {
         "phase": "job_started", "command": cmd, "job_id": job_id,
         "summary": f"已提交异步观测：{cmd}",
@@ -863,6 +875,52 @@ def _submit_error(data: dict, sess: ArthasSession) -> str:
         return (f"已有进行中的观测作业（Arthas 同一会话同时只允许一个作业）："
                 f"先调 arthas_pull 取回结果，或对作业 {pending} 调 arthas_interrupt 中止后重试。")
     return msg
+
+
+async def _pump_job(session_id: int, jid: str) -> None:
+    """后台泵：周期拉取面板发起的观测作业结果（命中由 pull 内部广播到前端）。
+
+    结束条件：作业已不在作业表（终态被 pull 移除 / 被中断）、会话已断开，或连续多次拉取失败。
+    """
+    misses = 0
+    try:
+        while True:
+            sess, err = _require(session_id)
+            if err or sess is None or jid not in sess.jobs:
+                break
+            res = await pull(session_id, jid, timeout_s=3.0)
+            if res.get("ok"):
+                misses = 0
+                continue
+            misses += 1
+            if misses >= 3:
+                sess2, _ = _require(session_id)
+                if sess2 is not None:
+                    sess2.jobs.pop(jid, None)
+                await _broadcast(session_id, {
+                    "phase": "job_failed", "job_id": jid,
+                    "summary": f"观测作业 {jid} 已停止：{res.get('error') or '拉取失败'}",
+                })
+                break
+            await asyncio.sleep(1.0)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("[arthas] 观测泵异常 job=%s", jid)
+    finally:
+        sess3 = get_session(session_id)
+        if sess3 is not None:
+            sess3.pumps.pop(jid, None)
+            sess3.observe_jobs.discard(jid)
+
+
+def _cancel_pumps(sess: ArthasSession, jid: str | None = None) -> None:
+    """停止观测泵（jid 为空则全部）。"""
+    for key in ([jid] if jid else list(sess.pumps)):
+        task = sess.pumps.pop(key, None)
+        if task is not None and not task.done():
+            task.cancel()
+        sess.observe_jobs.discard(key)
 
 
 @_safe
@@ -894,11 +952,29 @@ async def pull(session_id: int, job_id: str | int | None = None, *, timeout_s: f
     if not data.get("ok"):
         return {"ok": False, "error": data.get("message") or data.get("state") or "拉取失败"}
     res = _annotate(sess, sess.jobs.get(jid, {}).get("command", ""), data)
+    # Arthas 的表达式错误等失败以 status 消息（statusCode≠0）给出，作业随即终止，但 jobStatus 不一定回填。
+    # 不在这里收口的话，后台泵会对一个已死作业永久空轮询（实测：watch 表达式写错后泵一直不退出）。
+    failed = next((r for r in (res.get("results") or [])
+                   if isinstance(r, dict) and r.get("type") == "status"
+                   and r.get("statusCode") not in (None, 0)), None)
+    if failed is not None:
+        res["job_status"] = "FAILED"
+        res["error"] = str(failed.get("message") or "观测失败")
+        await _broadcast(session_id, {
+            "phase": "job_failed", "job_id": jid, "command": res.get("command"),
+            "summary": f"观测失败：{res['error']}",
+        })
     # 作业结束后不再保留，避免把已完成 job 反复 pull 出重复结果。
     # 注意：一次性命令的 jobStatus 是 **TERMINATED**（实测 arthas 4.3.5），
     # 持久观测命令（watch/trace -n）命中足够次数后也是 TERMINATED。
     if str(res.get("job_status") or "").upper() in ("FINISHED", "TERMINATED",
                                                      "FAILED", "CANCELED"):
+        if jid in sess.jobs and failed is None:
+            # 正常结束（如 watch -n 次数用完）：通知面板把作业从“进行中”移除
+            await _broadcast(session_id, {
+                "phase": "job_done", "job_id": jid, "command": res.get("command"),
+                "summary": f"观测作业 {jid} 已结束",
+            })
         sess.jobs.pop(jid, None)
     await _broadcast_observation(session_id, res, job_id=jid)
     return res
@@ -913,11 +989,15 @@ async def interrupt(session_id: int, job_id: str | int) -> dict:
     if err:
         return err
     assert sess is not None
+    _cancel_pumps(sess, str(job_id))
+    # 本地作业表无论结果如何都要清掉：作业已被 Arthas 终止时（“no foreground job”）中断会失败，
+    # 留着它只会让状态面板一直显示一个不存在的作业（实测）。
     try:
         sid, cid = await _ensure_arthas_session(sess)
         data = await ArthasClient(sess.http_port, session_id=sid,
                                   consumer_id=cid).interrupt_job(job_id)
     except ArthasError as e:
+        sess.jobs.pop(str(job_id), None)
         return {"ok": False, "error": f"Arthas 不可用：{e}"}
     sess.jobs.pop(str(job_id), None)
     return {"ok": bool(data.get("ok")), "message": "已请求中断该观测作业。",
@@ -947,6 +1027,8 @@ async def stop(session_id: int, *, reason: str = "user") -> dict:
     """
     k = _key(session_id)
     sess = _sessions.pop(k, None)
+    if sess is not None:
+        _cancel_pumps(sess)
     if sess is None:
         return {"ok": True, "message": "当前没有 Arthas 会话。"}
 

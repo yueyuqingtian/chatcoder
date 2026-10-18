@@ -318,61 +318,181 @@ def _run_jps() -> str:
 # 4) 源码定位：文件:行 → class#method（供建立 Arthas 观测）
 # ───────────────────────────────────────────────────────────────
 
-_METHOD_RE = re.compile(
-    r"^\s*(?:public|private|protected|static|final|synchronized|native|abstract|"
-    r"default|strictfp|\s)*[\w<>\[\],.\s?]+\s+(?P<name>[\w$]+)\s*\(")
+_JAVA_NOT_A_METHOD = {
+    "if", "for", "while", "switch", "catch", "return", "new", "synchronized", "throw",
+    "else", "do", "try", "case", "assert", "yield", "super", "this",
+}
+_JAVA_MODIFIERS = (
+    "public|private|protected|static|final|synchronized|native|abstract|default|strictfp|transient|volatile"
+)
+_JAVA_CLASS_RE = re.compile(r"\b(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)")
+_JAVA_METHOD_RE = re.compile(
+    r"^\s*(?:@[\w.$]+(?:\([^)]*\))?\s+)*"
+    rf"(?:(?:{_JAVA_MODIFIERS})\s+)*"
+    r"(?:<[^>]+>\s*)?"
+    r"(?:(?P<ret>[A-Za-z_$][\w$.<>\[\],?\s]*?)\s+)?"
+    r"(?P<name>[A-Za-z_$][\w$]*)\s*\("
+)
+
+
+def _java_code_lines(lines: list[str]) -> list[str]:
+    """去掉字符串 / 字符常量与注释（保留行号），让括号计数与签名匹配只看代码。"""
+    out: list[str] = []
+    in_block = False
+    for raw in lines:
+        buf: list[str] = []
+        i, n = 0, len(raw)
+        while i < n:
+            if in_block:
+                j = raw.find("*/", i)
+                if j < 0:
+                    i = n
+                    break
+                in_block = False
+                i = j + 2
+                continue
+            if raw.startswith("//", i):
+                break
+            if raw.startswith("/*", i):
+                in_block = True
+                i += 2
+                continue
+            ch = raw[i]
+            if ch in "\"'":
+                i += 1
+                while i < n:
+                    if raw[i] == "\\":
+                        i += 2
+                        continue
+                    if raw[i] == ch:
+                        i += 1
+                        break
+                    i += 1
+                buf.append(ch * 2)
+                continue
+            buf.append(ch)
+            i += 1
+        out.append("".join(buf))
+    return out
+
+
+def _brace_depths(code: list[str]) -> list[int]:
+    """每行开始时的花括号深度。"""
+    depths: list[int] = []
+    d = 0
+    for line in code:
+        depths.append(d)
+        d += line.count("{") - line.count("}")
+    return depths
+
+
+def _find_open_brace(code: list[str], start: int, span: int = 4) -> int | None:
+    """自 start 起在若干行内找到声明体的 `{`（遇到 `;` 视为声明而非定义，返回 None）。"""
+    for k in range(start, min(len(code), start + span)):
+        seg = code[k]
+        if "{" in seg:
+            return k
+        if ";" in seg:
+            return None
+    return None
 
 
 def method_at_line(project_path: str, file: str, line: int) -> dict:
     """由 Java 源文件 + 行号推导 `class#method`（用于 Arthas 方法级观测）。
 
-    实现是轻量正则自该行向上找最近的方法签名——足以覆盖绝大多数常规 Java 代码；
-    失败时返回 ok=False 并提示手填，不阻塞流程。
+    按花括号结构定位：先识别类体（含嵌套类，Arthas 使用 `Outer$Inner` 命名），再识别类体内直接声明的
+    方法 / 构造函数（构造函数记为 `<init>`），最后取包含该行的最内层方法。断点不在任何方法体内（字段初始化、
+    静态块等）时明确返回失败，不再把语句误判成方法名。
     """
     rel = (file or "").replace("\\", "/").lstrip("/")
     p = Path(project_path) / rel
     if not p.is_file():
         return {"ok": False, "error": f"源文件不存在：{rel}"}
     try:
-        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        raw_lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as e:
         return {"ok": False, "error": str(e)}
-    if line < 1 or line > len(lines):
-        return {"ok": False, "error": f"行号越界（文件共 {len(lines)} 行）"}
+    if line < 1 or line > len(raw_lines):
+        return {"ok": False, "error": f"行号越界（文件共 {len(raw_lines)} 行）"}
 
-    # 包名
+    code = _java_code_lines(raw_lines)
+    depth = _brace_depths(code)
+    n = len(code)
+
     pkg = ""
-    for ln in lines[:60]:
+    for ln in code[:80]:
         m = re.match(r"^\s*package\s+([\w.]+)\s*;", ln)
         if m:
             pkg = m.group(1)
             break
-    # 类名
-    cls = ""
-    for ln in lines[:200]:
-        m = re.match(r"^\s*(?:public|final|abstract|\s)*(?:class|interface|enum|record)\s+([\w$]+)", ln)
-        if m:
-            cls = m.group(1)
-            break
-    if not cls:
-        cls = p.stem
-    # 自该行向上找方法签名
-    method = ""
-    for i in range(min(line, len(lines)) - 1, -1, -1):
-        m = _METHOD_RE.match(lines[i])
-        if m:
-            name = m.group("name")
-            if name in ("if", "for", "while", "switch", "catch", "return", "new", "synchronized"):
-                continue
-            method = name
-            break
 
-    fqcn = f"{pkg}.{cls}" if pkg else cls
+    # 类体：(起始行, 类体深度, 类名, 父类索引, 结束行)
+    classes: list[dict] = []
+    for idx in range(n):
+        m = _JAVA_CLASS_RE.search(code[idx])
+        if not m:
+            continue
+        j = _find_open_brace(code, idx)
+        if j is None:
+            continue
+        body = depth[j] + 1
+        end = next((k for k in range(j + 1, n) if depth[k] < body), n)
+        parent = None
+        for ci, c in enumerate(classes):
+            if c["start"] < idx < c["end"] and c["body"] == depth[idx]:
+                parent = ci
+        classes.append({"start": idx, "body": body, "name": m.group(1), "end": end, "parent": parent})
+
+    def class_chain(ci: int | None) -> str:
+        names: list[str] = []
+        while ci is not None:
+            names.append(classes[ci]["name"])
+            ci = classes[ci]["parent"]
+        return "$".join(reversed(names))
+
+    # 方法 / 构造函数：直接位于某个类体内（深度等于类体深度）
+    methods: list[dict] = []
+    for idx in range(n):
+        text = code[idx]
+        m = _JAVA_METHOD_RE.match(text)
+        if not m:
+            continue
+        name = m.group("name")
+        ret = m.group("ret")
+        if name in _JAVA_NOT_A_METHOD or (ret and ret.split()[0] in _JAVA_NOT_A_METHOD):
+            continue
+        owner = None
+        for ci, c in enumerate(classes):
+            if c["start"] <= idx < c["end"] and c["body"] == depth[idx]:
+                owner = ci
+        if owner is None:
+            continue
+        if ret is None:
+            if name != classes[owner]["name"]:
+                continue
+            name = "<init>"
+        j = _find_open_brace(code, idx, span=6)
+        if j is None:
+            continue
+        body_depth = depth[idx]
+        end = next((k for k in range(j + 1, n) if depth[k] <= body_depth), n)
+        methods.append({"start": idx, "end": end, "name": name, "owner": owner})
+
+    target = line - 1
+    hits = [m for m in methods if m["start"] <= target < m["end"]]
+    if not hits:
+        return {
+            "ok": False, "class": None, "method": None, "target": None, "line": int(line),
+            "error": "断点不在方法体内（如字段初始化、静态块），请改为在方法内下断点，或手动指定 class#method",
+        }
+    best = max(hits, key=lambda m: m["start"])
+    owner_chain = class_chain(best["owner"])
+    fqcn = f"{pkg}.{owner_chain}" if pkg else owner_chain
     return {
-        "ok": bool(method),
+        "ok": True,
         "class": fqcn,
-        "method": method or None,
-        "target": f"{fqcn}#{method}" if method else None,
+        "method": best["name"],
+        "target": f"{fqcn}#{best['name']}",
         "line": int(line),
-        "error": None if method else "未能从该行向上识别方法签名，请手动指定 class#method",
+        "error": None,
     }
