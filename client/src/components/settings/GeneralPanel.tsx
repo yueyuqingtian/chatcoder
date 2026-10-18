@@ -6,7 +6,7 @@ import { api } from "../../api/client";
 import { useUiStore } from "../../store/ui";
 import { useChatStore } from "../../store/chat";
 import { useI18n } from "../../store/i18n";
-import { Input, Select, Slider } from "../ui";
+import { Button, Input, Select, Slider } from "../ui";
 import { Row, Sw } from "./shared";
 
 const TERMINAL_SHELLS = [
@@ -43,6 +43,8 @@ export function GeneralPanel() {
     auto_compact_threshold_ratio: 0.90,
     // plan-156-619 S2：消息区搜索入口按钮（默认关闭）
     show_message_search: false,
+    // plan-156-621：优先用子会话并行处理的提示词注入（默认开启）
+    parallel_subsession_hint: true,
   });
   // S4（plan-41-197）：改为「修改即保存」——移除底部保存按钮，所有项在改动后
   // 300ms 内自动落盘（config.json），与外观/模型等页操作逻辑统一（用户反馈
@@ -120,6 +122,8 @@ export function GeneralPanel() {
           ? g.auto_compact_threshold_ratio : 0.90,
         // plan-156-619 S2：搜索入口默认关闭
         show_message_search: g.show_message_search === true,
+        // plan-156-621：后端缺省视为开启
+        parallel_subsession_hint: g.parallel_subsession_hint !== false,
       });
     } catch {}
   }, []);
@@ -164,6 +168,12 @@ export function GeneralPanel() {
             与综合工具卡抢位；关闭只隐藏按钮，Ctrl+F 仍可唤起搜索条。 */}
         <Row title={t("gp.message_search")} desc={t("gp.message_search_desc")}>
           <Sw checked={cfg.show_message_search ?? false} onChange={(v) => patch({ show_message_search: v })} />
+        </Row>
+        {/* plan-156-621：并行分派子会话的提示词开关。关闭后不再注入；
+            plan-156-623：计划模式下不下发子会话工具，但会要求把可并行步骤分组写进方案文档，
+            确认执行时按分组派发（只读 / 工作流模式仍不生效）。 */}
+        <Row title={t("gp.parallel_subsession")} desc={t("gp.parallel_subsession_desc")}>
+          <Sw checked={cfg.parallel_subsession_hint} onChange={(v) => patch({ parallel_subsession_hint: v })} />
         </Row>
         <Row title={t("gp.memory")} desc={t("gp.memory_desc")}>
           <Sw checked={cfg.memory_enabled} onChange={(v) => patch({ memory_enabled: v })} />
@@ -247,6 +257,7 @@ export function GeneralPanel() {
             onChange={(v) => { if (cfg.browser_enabled) patch({ browser_headless: v }); }}
           />
         </Row>
+        <BrowserDownloadDirRow />
         <Row title={t("gp.density")} desc={t("gp.density_desc")}>
           <Select
             value={ui.msgDensity}
@@ -258,5 +269,53 @@ export function GeneralPanel() {
       </div>
 
     </div>
+  );
+}
+
+/** plan-20261018-operator-boost：内置浏览器下载目录。
+ * 下载不再弹系统保存框，统一保存到这里（默认安装目录下的 downloads，不存在会自动创建）；
+ * 目录由 Electron 主进程持有（下载拦截发生在主进程），因此只在桌面端显示。选择目录即保存。 */
+function BrowserDownloadDirRow() {
+  const { t } = useI18n();
+  const exec = typeof window !== "undefined" ? window.chatcoderAPI?.browserAgentExec : undefined;
+  const pick = typeof window !== "undefined" ? window.chatcoderAPI?.selectDirectory : undefined;
+  const [info, setInfo] = useState<{ dir: string; custom: boolean; fallback: boolean } | null>(null);
+
+  const run = useCallback(async (args: Record<string, unknown>) => {
+    if (!exec) return;
+    try {
+      const r = await exec(0, "downloadDir", args);
+      if (!r?.ok) throw new Error(r?.error || "操作失败");
+      const v = r.result as { dir: string; custom: boolean; fallback: boolean };
+      setInfo({ dir: String(v.dir || ""), custom: !!v.custom, fallback: !!v.fallback });
+    } catch (e) {
+      useChatStore.setState({ error: String((e as Error)?.message || e) });
+    }
+  }, [exec]);
+
+  useEffect(() => { void run({ action: "get" }); }, [run]);
+  if (!exec) return null;
+
+  const where = info ? info.dir + (info.custom ? "" : t("gp.download_dir_default_tag")) : "…";
+  return (
+    <Row
+      title={t("gp.download_dir")}
+      desc={`${t("gp.download_dir_desc")}${where}${info?.fallback ? t("gp.download_dir_fallback") : ""}`}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)" }}>
+        {pick && (
+          <Button variant="secondary" size="sm" onClick={async () => {
+            const dir = await pick();
+            if (dir) await run({ action: "set", dir });
+          }}>{t("gp.download_dir_change")}</Button>
+        )}
+        <Button variant="ghost" size="sm" onClick={() => void run({ action: "open" })}>{t("gp.download_dir_open")}</Button>
+        {info?.custom && (
+          <Button variant="ghost" size="sm" onClick={() => void run({ action: "set", dir: "" })}>
+            {t("gp.download_dir_reset")}
+          </Button>
+        )}
+      </div>
+    </Row>
   );
 }

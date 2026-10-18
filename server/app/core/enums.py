@@ -21,6 +21,20 @@ class SenderType(str, Enum):
     SYSTEM = "system"
 
 
+class SideKind(str, Enum):
+    """挂在主会话下的会话种类（`sessions.side_parent_id` 非空时才有意义）。
+
+    plan-156-620：两类会话此前共用 `side_parent_id` 而没有区分字段，
+    右侧「侧边对话」面板把执行子会话一并列出并接管执行，左栏又看不到它——
+    用户看到的就是「点了在子会话执行，结果跑到右侧面板」。
+    """
+
+    # 右侧面板的侧边对话（用户手动开，临时问答）
+    SIDE = "side"
+    # 左栏缩进展示的执行子会话（主代理 / 建议卡派发）
+    SUB = "sub"
+
+
 class TurnStatus(str, Enum):
     AWAITING_CONFIRMATION = "awaiting_confirmation"
     RUNNING = "running"

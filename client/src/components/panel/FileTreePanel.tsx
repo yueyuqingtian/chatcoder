@@ -268,6 +268,35 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
   const hasDiff = diffPreview != null && diffPreview.path === previewPath;
   const showDiff = viewMode === "diff" && hasDiff;
 
+  /** plan-20261018-turn-changes: diff 的 model 唯一键。
+   *  连续点不同轮次的「审查」时，@monaco-editor/react 会复用同一 model URI；
+   *  旧 model 在卸载时被 dispose，新实例又用同一 URI，于是抛
+   *  "TextModel got disposed before DiffEditorWidget model got reset"。
+   *  用「文件 + 两侧内容规模」生成唯一键，让每次不同的 diff 各自持有独立 model。 */
+  const diffModelKey = diffPreview
+    ? `${diffPreview.path}#${(diffPreview.before ?? "").length}-${(diffPreview.after ?? "").length}`
+    : "";
+
+  /** plan-20261018-turn-changes: Monaco 的 dispose/create 竞态规避。
+   *  @monaco-editor/react 在 React 卸载阶段 dispose 旧 TextModel，而同一批 effect
+   *  里新实例又 createModel/setModel，monaco 0.55 会抛
+   *  "TextModel got disposed before DiffEditorWidget model got reset"（仅控制台报错，
+   *  但会污染日志）。这里先让旧实例卸载，隔一帧再挂载新实例，把两步彻底错开。 */
+  const [mountedDiffKey, setMountedDiffKey] = useState("");
+  useEffect(() => {
+    if (!showDiff || !diffModelKey) {
+      setMountedDiffKey("");
+      return;
+    }
+    if (mountedDiffKey === diffModelKey) return;
+    setMountedDiffKey("");                       // 第一步：卸载旧实例
+    const timer = window.setTimeout(() => setMountedDiffKey(diffModelKey), 60);  // 第二步：延迟挂载
+    return () => window.clearTimeout(timer);
+    // 刻意不依赖 mountedDiffKey：否则 setMountedDiffKey("") 会再次触发本 effect，
+    // 定时器被反复清理，diff 永远挂不上。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showDiff, diffModelKey]);
+
   // v11: 新 diff 到达时默认回到「变更对比」视图（用户手动切换「当前内容」不受影响）
   useEffect(() => {
     if (diffPreview != null && diffPreview.path === previewPath) {
@@ -601,14 +630,25 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
             </div>
             {showDiff ? (
               <div className="ft-diff-body">
-                <DiffEditor
-                  height="100%"
-                  language={contentLang}
-                  original={diffPreview!.before ?? ""}
-                  modified={diffPreview!.after ?? ""}
-                  theme={document.documentElement.getAttribute("data-theme") === "dark" ? "vs-dark" : "light"}
-                  options={{ readOnly: true, minimap: { enabled: false }, fontSize: 12, renderSideBySide: true }}
-                />
+                {/* plan-20261018-turn-changes: 只有 mountedDiffKey 与当前 diff 一致时才挂载编辑器。
+                    旧实例先卸载、隔一帧再挂载新实例，避免 monaco 0.55 在同一个 tick 里
+                    dispose 旧 TextModel 又 reset 新 model，抛
+                    "TextModel got disposed before DiffEditorWidget model got reset"。 */}
+                {mountedDiffKey === diffModelKey && (
+                  <DiffEditor
+                    key={mountedDiffKey}
+                    originalModelPath={`inmemory://chatcoder/${encodeURIComponent(mountedDiffKey)}/original`}
+                    modifiedModelPath={`inmemory://chatcoder/${encodeURIComponent(mountedDiffKey)}/modified`}
+                    keepCurrentOriginalModel
+                    keepCurrentModifiedModel
+                    height="100%"
+                    language={contentLang}
+                    original={diffPreview!.before ?? ""}
+                    modified={diffPreview!.after ?? ""}
+                    theme={document.documentElement.getAttribute("data-theme") === "dark" ? "vs-dark" : "light"}
+                    options={{ readOnly: true, minimap: { enabled: false }, fontSize: 12, renderSideBySide: true }}
+                  />
+                )}
                 {diffPreview!.truncated && <div className="ft-diff-truncated">变更行数过大，内容已截断显示</div>}
               </div>
             ) : contentError ? (

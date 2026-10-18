@@ -24,6 +24,8 @@ import type {
   RollbackPreviewFile,
   RollbackPreviewOut,
   RollbackResult,
+  RevertFilesResult,
+  RevertLockOut,
   ScheduledTaskOut,
   GoalOut,
   SessionOut,
@@ -826,6 +828,9 @@ export const api = {
     post<SessionOut>(`/sessions/${parentId}/subsessions`, data),
   /** plan-156-619 S5：主会话下全部子会话——左栏子会话行的唯一数据源（list_sessions 会过滤掉子会话）。 */
   listSubsessions: (parentId: number) => get<SessionOut[]>(`/sessions/${parentId}/subsessions`),
+  /** plan-156-620：全部未归档执行子会话（一次请求，前端按 side_parent_id 分桶）。
+   *  替代「每个主会话各请求一次」——上百个并发请求曾拖慢所有接口。 */
+  listSubsessionIndex: () => get<SessionOut[]>(`/sessions/subsession-index`),
   /** plan-156-619 S10：取会话当前待处理的后续任务建议（刷新后重建卡片）。 */
   getLatestSuggestion: (sessionId: number) =>
     get<{ suggestion: TaskSuggestionOut | null }>(`/sessions/${sessionId}/suggestions/latest`),
@@ -921,6 +926,13 @@ export const api = {
     get<FileDiffOut>(`/turns/${turnId}/changes/diff?path=${encodeURIComponent(path)}${callKey ? `&call_key=${encodeURIComponent(callKey)}` : ""}`),
   reviewFiles: (turnId: number, paths: string[], reviewed: boolean) =>
     put<{ ok: boolean; updated: number }>(`/turns/${turnId}/reviews`, { paths, reviewed }),
+  /** plan-20261018-turn-changes: 仅撤销该轮的文件改动（不删消息、不改 turn 状态）。
+   *  后端会强校验「更新的轮次必须先撤销」，乱序请求返回 409 order_violation。 */
+  revertTurnFiles: (turnId: number, allowPartial = false) =>
+    post<RevertFilesResult>(`/turns/${turnId}/revert_files?allow_partial=${allowPartial ? "true" : "false"}`),
+  /** plan-20261018-turn-changes: 撤销顺序锁——该会话当前唯一可撤销的轮次。 */
+  getRevertLock: (sessionId: number) =>
+    get<RevertLockOut>(`/turns/sessions/${sessionId}/revert_lock`),
 
   // ── 会话数据查询 ──
   listSessionMessages: (sessionId: number, threadId?: number) =>
@@ -1248,6 +1260,10 @@ export const api = {
     get<{ candidates: Array<{ name: string; path: string; score: number }> }>(
       `/utils/resolve-dir?name=${encodeURIComponent(name)}&children=${encodeURIComponent(children.slice(0, 80).join(","))}`,
     ),
+  /** plan-20261018-turn-changes: 网页调试环境下用本机后端代开文件 / 目录
+   *  （桌面版走 Electron IPC；后端只接受本机页面调用）。 */
+  openPathOnHost: (path: string, target: "explorer" | "vscode" | "idea" | "terminal" = "explorer") =>
+    post<{ ok: boolean; error?: string }>("/utils/open-path", { path, target }),
 
   // ── 技能 ──
   listSkills: (source?: string) =>
@@ -1435,11 +1451,11 @@ export const api = {
       `/desktop/recipes${keyword ? `?keyword=${encodeURIComponent(keyword)}` : ""}`,
     ),
   createDesktopRecipe: (data: {
-    app_name: string; intent: string; principle: string; pitfalls?: string;
+    app_name: string; intent: string; principle: string; pitfalls?: string; scope?: RecipeScope;
   }) => post<{ created: boolean; item: DesktopRecipe }>("/desktop/recipes", data),
   updateDesktopRecipe: (
     id: number,
-    data: { app_name?: string; intent?: string; principle?: string; pitfalls?: string },
+    data: { app_name?: string; intent?: string; principle?: string; pitfalls?: string; scope?: RecipeScope },
   ) => put<{ item: DesktopRecipe }>(`/desktop/recipes/${id}`, data),
   deleteDesktopRecipes: (ids: number[]) =>
     post<{ deleted: number }>("/desktop/recipes/delete", { ids }),
@@ -1575,6 +1591,8 @@ export interface GlobalSettingsOut {
   show_reasoning: boolean;
   /** plan-156-619 S2：消息区搜索入口按钮（左上角）。默认关闭；关闭只隐藏入口，Ctrl+F 仍可唤起 */
   show_message_search?: boolean;
+  /** plan-156-621：每轮用户消息注入「优先用子会话并行处理」的提示词（默认开启） */
+  parallel_subsession_hint?: boolean;
   /** v3.0 (plan-88): 计划模式允许访问工作区外路径（plan-75-332 废弃） */
   plan_mode_allow_outside_access: boolean;
   /** v32 (plan-89): 沙箱模式（plan-75-332 废弃） */
@@ -1626,6 +1644,10 @@ export interface GlobalSettingsOut {
   subagent_model_id?: number;
   /** plan-156-619 S4e: 子代理思考深度档位；空 = 跟随会话档位 */
   subagent_reasoning_effort?: string;
+  /** plan-20261018-operator-boost: GUI 操作（电脑操控 / 内置浏览器）交给操控子会话 */
+  operator_subsession_enabled?: boolean;
+  /** plan-20261018-operator-boost: 操控子会话思考深度（lowest = 模型最低档 / follow = 跟随子会话设置 / 具体档位） */
+  operator_reasoning_effort?: string;
   /** plan-156-619 S7: 综合工具卡各栏目的全局默认展开策略（true = 默认全展开） */
   tool_card_sections_expanded?: boolean;
   /** 工作流运行时（设置 → 工作流）：关闭后主代理不再规划新的工作流 */
@@ -1677,8 +1699,12 @@ export interface ExecPolicyToolInfo {
 }
 
 /** plan-334-1661: 电脑操控操作路线（应用 + 意图 → 通用原则） */
+/** plan-20261018-operator-boost：路线类型——desktop 桌面应用（电脑操控）/ browser 网页（内置浏览器） */
+export type RecipeScope = "desktop" | "browser";
+
 export interface DesktopRecipe {
   id: number;
+  scope?: RecipeScope;
   app_name: string;
   intent: string;
   /** 通用原则：跨界面版本仍成立的操作知识，是复用时的核心依据 */

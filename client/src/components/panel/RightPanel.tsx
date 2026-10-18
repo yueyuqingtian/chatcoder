@@ -191,7 +191,7 @@ export function RightPanel() {
   return (
     <div className="right-panel">
       <div className="rp-head">
-        <div className="rp-tabs" ref={tabsRef} onWheel={onTabsWheel} role="tablist">
+        <div className={"rp-tabs" + (tabsOverflow ? " is-overflow" : "")} ref={tabsRef} onWheel={onTabsWheel} role="tablist">
           {ind && <span className="rp-tab-ind" aria-hidden style={{ transform: `translateX(${ind.x}px)`, width: ind.w }} />}
           {tabs.map((tTab) => {
             const key = `${tTab.id}-${tTab.instance}`;

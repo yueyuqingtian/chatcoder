@@ -32,9 +32,12 @@ class RecipeIn(BaseModel):
     principle: str = Field(min_length=1)
     pitfalls: str = ""
     steps: list | None = None
+    # plan-20261018-operator-boost：desktop 桌面应用 / browser 网页
+    scope: str = "desktop"
 
 
 class RecipeUpdateIn(BaseModel):
+    scope: str | None = None
     app_name: str | None = None
     intent: str | None = None
     principle: str | None = None
@@ -123,6 +126,7 @@ async def create_recipe(body: RecipeIn, db: AsyncSession = Depends(get_db)) -> d
             pitfalls=body.pitfalls,
             steps=body.steps,
             source="user",
+            scope=body.scope,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -135,6 +139,7 @@ async def update_recipe(recipe_id: int, body: RecipeUpdateIn, db: AsyncSession =
     try:
         row = await desktop_recipe_service.update_recipe(
             db, recipe_id,
+            scope=body.scope,
             app_name=body.app_name,
             intent=body.intent,
             principle=body.principle,

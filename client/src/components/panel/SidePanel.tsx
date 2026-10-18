@@ -17,11 +17,26 @@ import { ConfirmDialog } from "../ConfirmDialog";
 import { Button, Empty, IconButton, Tooltip } from "../ui";
 import { IconArrowUpRight, IconAt, IconMessageSquare, IconPlus, IconTrash, IconX } from "../icons";
 
-/** 主对话的一轮：用户提问 + 其后的 AI 正文（仅作为引用候选，不含工具调用与思考） */
-interface MainTurn { key: string; user: string; agent: string }
+/** 主对话的一轮：用户提问 + 其后的 AI 正文（仅作为引用候选，不含工具调用与思考）。
+ *  agentFinal 是该轮最后一段 AI 正文（通常就是结论），引用超出篇幅时优先完整保留它。 */
+interface MainTurn { key: string; user: string; agent: string; agentFinal: string }
 
-/** 每轮引用的字数上限（与后端口径保持一致，避免无谓的长请求） */
-const TURN_CLIP = 4000;
+/** plan-156-620：引用的总篇幅预算（字符）。此前每轮硬截到 4000 字，长结论被拦腰截断；
+ *  现在不截单轮，只有所选轮次合计超出预算时才省略各轮的「过程说明」，用户提问与结论始终完整。 */
+const QUOTE_BUDGET_CHARS = 60000;
+
+/** 组装引用：先尝试全文；超预算时每轮只保留提问与结论，并明确标注省略了什么。 */
+function quoteTurns(chosen: MainTurn[]): Array<{ user: string; assistant: string }> {
+  const full = chosen.map((t) => ({ user: t.user, assistant: t.agent }));
+  const total = full.reduce((n, t) => n + t.user.length + t.assistant.length, 0);
+  if (total <= QUOTE_BUDGET_CHARS) return full;
+  return chosen.map((t) => ({
+    user: t.user,
+    assistant: t.agentFinal === t.agent
+      ? t.agent
+      : `（本轮过程说明共 ${t.agent.length - t.agentFinal.length} 字，因引用篇幅较大已省略；以下为本轮结论原文）\n${t.agentFinal}`,
+  }));
+}
 
 function buildTurns(messages: MessageOut[]): MainTurn[] {
   const turns: MainTurn[] = [];
@@ -32,7 +47,7 @@ function buildTurns(messages: MessageOut[]): MainTurn[] {
     if (m.sender_type === "user") {
       const text = msgText(m.content).trim();
       if (!text) continue;
-      cur = { key: `m${m.id}`, user: text, agent: "" };
+      cur = { key: `m${m.id}`, user: text, agent: "", agentFinal: "" };
       turns.push(cur);
       agentParts.push([]);
       continue;
@@ -42,11 +57,13 @@ function buildTurns(messages: MessageOut[]): MainTurn[] {
     const text = msgText(m.content).trim();
     if (text) agentParts[agentParts.length - 1].push(text);
   }
-  turns.forEach((t, i) => { t.agent = agentParts[i].join("\n\n"); });
+  turns.forEach((t, i) => {
+    t.agent = agentParts[i].join("\n\n");
+    t.agentFinal = agentParts[i][agentParts[i].length - 1] ?? "";
+  });
   return turns;
 }
 
-const clip = (s: string) => (s.length > TURN_CLIP ? `${s.slice(0, TURN_CLIP)}…（已截断）` : s);
 const oneLine = (s: string, n = 40) => {
   const t = s.replace(/\s+/g, " ").trim();
   return t.length > n ? `${t.slice(0, n)}…` : t;
@@ -104,6 +121,10 @@ export function SidePanel() {
 
   // 打开当前子会话的连接；切换或离开时关闭，避免后台连接堆积
   useEffect(() => {
+    // plan-156-621：切换侧边标签时清空引用勾选并收起选择器——此前勾选残留，
+    // 「已选 N 轮」会带到新标签，确认后把上一标签选的轮次写进另一个会话。
+    setPicked(new Set());
+    setRefPicking(false);
     if (activeId == null) return;
     void useSideChatStore.getState().openSide(activeId);
     return () => { useSideChatStore.getState().closeSide(activeId); };
@@ -187,7 +208,7 @@ export function SidePanel() {
   const applyContext = () => {
     if (activeId == null) return;
     const chosen = mainTurns.filter((t) => picked.has(t.key));
-    const block = buildContextBlock(chosen.map((t) => ({ user: clip(t.user), assistant: clip(t.agent) })));
+    const block = buildContextBlock(quoteTurns(chosen));
     useSideChatStore.getState().setSideContext(activeId, block);
     setRefPicking(false);
   };
@@ -350,7 +371,7 @@ export function SidePanel() {
                   否则切换侧边标签时会短暂看到上一个会话的内容。 */}
               <MessageFlow
                 key={activeId}
-                features={{ jumpDots: false, search: false, planCard: false }}
+                features={{ jumpDots: false, search: false, planCard: false, suggestionCard: false }}
                 emptyText="这是新的侧边会话，直接在下方提问"
               />
             </div>

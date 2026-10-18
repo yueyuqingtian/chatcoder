@@ -16,7 +16,7 @@
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type MutableRefObject, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import { api, resolveFileUrl, type AttachmentInfo } from "../../api/client";
-import { useChatStore } from "../../store/chat";
+import { useChatStore, useCurrentSession } from "../../store/chat";
 import { useDraftsStore, normalizeDraftMode } from "../../store/drafts";
 import { useMergedStreamText } from "../../store/streamMerged";
 import { openGallery } from "../../store/gallery";
@@ -204,7 +204,7 @@ export function MiniChat() {
     try { localStorage.setItem(STATE_KEY, next); } catch { /* 存储不可用时只在本次生效 */ }
   };
   const currentSessionId = useChatStore((s) => s.currentSessionId);
-  const session = useChatStore((s) => s.sessions.find((x) => x.id === s.currentSessionId));
+  const session = useCurrentSession();
   const messages = useChatStore((s) => s.messages);
   const isRunning = useChatStore((s) => s.isRunning || s.runningTurnId != null);
   const turnStatus = useChatStore((s) => s.turnStatus);

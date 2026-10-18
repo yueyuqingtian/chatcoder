@@ -26,6 +26,16 @@
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
+  /* plan-20261018-tabs-overflow：标签溢出滚动时，scrollIntoView 会停在「刚够露出激活标签」
+     的位置，左侧上一个标签只剩半个图标（用户反馈的「图标展示溢出」）。
+     这里给滚动对齐留余量，并让溢出侧渐隐，避免出现被硬切一半的图标。 */
+  scroll-padding-inline: 10px;
+  scroll-behavior: smooth;
+}
+/* 溢出时两侧渐隐：被裁切的边缘自然淡出，而不是硬切半个图标 */
+.rp-tabs.is-overflow {
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 10px, #000 calc(100% - 10px), transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 10px, #000 calc(100% - 10px), transparent 100%);
 }
 .rp-tabs::-webkit-scrollbar { display: none; }
 .rp-tab {
@@ -327,24 +337,46 @@ button.ts-row:focus-visible { outline: 2px solid color-mix(in oklab, var(--info)
 .ft-md-preview .md-body blockquote > :last-child { margin-bottom: 0; }
 .ft-md-preview .md-body hr { border: none; border-top: 1px solid var(--border); margin: 1.6em 0; }
 .ft-md-preview .md-body a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent); }
-.ft-md-preview .md-body .md-inline-code { font-family: var(--font-mono); font-size: 0.88em; color: var(--info); background: var(--bg-hover); padding: 1px 5px; border-radius: var(--r-sm); }
-/* 代码块卡片：头部（语言 + 复制）+ 正文，与聊天消息里的代码块同一视觉语言 */
-.ft-md-preview .md-body .md-code-block { position: relative; margin: 1em 0; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg-elevated); overflow: hidden; }
-.ft-md-preview .md-body .md-code-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; padding: 0 6px 0 12px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--border) 18%, transparent); }
-.ft-md-preview .md-body .md-code-lang { font-family: var(--font-mono); font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-3); }
+/* plan-156-620：右侧 Markdown 预览与消息流同一套「安静」样式——
+   · 行内代码：中性底 + 细描边、正文色（不再整篇蓝字）；只作用于段落内的行内代码；
+   · 代码块：朴素代码窗口（细边框、无灰底、头部不加底色）；块内 code 清掉行内代码样式
+     （Markdown 组件给所有 code 都挂了 md-inline-code，此前代码块每一行都被染成蓝底）；
+   · 表格：只保留内层卡片一圈边框（外层块不再加边框，避免卡片套卡片），表头 / 行样式沿用消息流。 */
+.ft-md-preview .md-body :not(pre) > .md-inline-code {
+  font-family: var(--font-mono); font-size: 0.86em;
+  color: var(--text-1);
+  background: color-mix(in oklab, var(--text-1) 6%, transparent);
+  border: 1px solid color-mix(in oklab, var(--text-1) 8%, transparent);
+  /* plan-156-621：内距收进项目间距档（2/4/8/12），5px 不在档位内 */
+  padding: 0 4px; border-radius: var(--r-sm);
+  overflow-wrap: anywhere;
+}
+.ft-md-preview .md-body .md-code-block {
+  position: relative; margin: 1em 0;
+  border: 1px solid var(--border); border-radius: var(--r-lg);
+  background: transparent; overflow: hidden;
+}
+.ft-md-preview .md-body .md-code-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  min-height: 32px; padding: 0 6px 0 14px;
+  border-bottom: 1px solid var(--border); background: transparent;
+}
+.ft-md-preview .md-body .md-code-lang { font-family: var(--font-mono); font-size: 11.5px; font-weight: 500; color: var(--text-3); }
 .ft-md-preview .md-body .md-code-copy-btn { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; border: none; border-radius: var(--r-md); background: transparent; color: var(--text-3); cursor: pointer; transition: background var(--dur-1) var(--ease-standard), color var(--dur-1) var(--ease-standard); }
 .ft-md-preview .md-body .md-code-copy-btn:hover { background: var(--bg-hover); color: var(--text-1); }
-.ft-md-preview .md-body .md-code-copy-btn:active { transform: scale(0.94); }
-.ft-md-preview .md-body .md-code-copy-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .ft-md-preview .md-body .md-code-copy-btn.copied { color: var(--success); }
-.ft-md-preview .md-body .md-code-pre { margin: 0; padding: 12px 16px; overflow-x: auto; font-size: 12.5px; line-height: 1.65; background: transparent; border: none; }
-/* 表格：外层卡片圆角裁切，表头底色区分，横向溢出时滚动 */
-.ft-md-preview .md-body .md-table-block,
-.ft-md-preview .md-body .md-table-card { margin: 1em 0; border: 1px solid var(--border); border-radius: var(--r-md); overflow: auto; }
-.ft-md-preview .md-body .md-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-.ft-md-preview .md-body .md-th, .ft-md-preview .md-body .md-td { padding: 7px 12px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--border); }
-.ft-md-preview .md-body tr:last-child > .md-td { border-bottom: none; }
-.ft-md-preview .md-body .md-th { background: var(--bg-hover); font-weight: 600; color: var(--text-1); white-space: nowrap; }
+.ft-md-preview .md-body .md-code-pre {
+  margin: 0; padding: 12px 16px 14px; overflow-x: auto;
+  font-size: 12.5px; line-height: 1.7; tab-size: 2;
+  background: transparent; border: none;
+}
+.ft-md-preview .md-body .md-code-pre code,
+.ft-md-preview .md-body .md-code-pre code.md-inline-code {
+  display: block; padding: 0; border: none; border-radius: 0;
+  background: transparent; color: var(--text-1);
+  font-size: inherit; overflow-wrap: normal; white-space: pre;
+}
+.ft-md-preview .md-body .md-table-block { margin: 1em 0; border: none; border-radius: 0; overflow: visible; }
 .ft-md-preview .md-body img { max-width: 100%; border-radius: var(--r-md); }
 .ft-preview-err { padding: 16px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; color: var(--error); font-size: 12px; }
 .ft-diff-body { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }

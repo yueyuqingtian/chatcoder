@@ -299,9 +299,41 @@ a { color: var(--accent); text-decoration: none; }
 .sb-project:hover { background: var(--sidebar-hover); color: var(--text-1); }
 .sb-project.current { color: var(--text-1); font-weight: 500; }
 .sb-project-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sb-project-actions, .sb-session-actions { display: none; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: var(--r-ctl); color: var(--text-3); flex-shrink: 0; }
-.sb-project:hover .sb-project-actions, .sb-session:hover .sb-session-actions { display: flex; }
-.sb-project-actions:hover, .sb-session-actions:hover { background: var(--sidebar-selected); color: var(--text-1); }
+/* 项目行：保持「悬停才占位」——项目名可用宽度不受影响（三个按钮常驻会挤占 60px） */
+.sb-project-actions {
+  display: none; align-items: center; justify-content: center;
+  width: 20px; height: 20px; border-radius: var(--r-ctl);
+  color: var(--text-3); flex-shrink: 0;
+}
+.sb-project:hover .sb-project-actions { display: flex; }
+.sb-project-actions:hover { background: var(--sidebar-selected); color: var(--text-1); }
+/* plan-156-622：会话行尾操作按钮改为「常驻占位 + 淡入」。
+   根因复盘：旧实现是 display:none → flex（只有悬停才参与布局），真鼠标点击时若样式
+   还没重算，指针就落在命中区之外、穿透到行背景，触发的是「切换会话」——用户看到的
+   就是「这点没反应」。（程序化 element.click() 不受布局与 pointer-events 影响，
+   所以自动化点击会误判为正常，必须用真实鼠标验证。）
+   现在两个按钮绝对定位、始终占位，只靠 opacity 表达出现：
+   · ⋯ 只弹菜单、可撤销 → 常驻可点，任何时机点击都能命中；
+   · 归档不可撤销 → 仍只在本行悬停 / 菜单打开时放开命中，避免点到看不见的区域。 */
+.sb-session-actions {
+  display: flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; border-radius: var(--r-ctl);
+  color: var(--text-3); flex-shrink: 0;
+  padding: 0; border: none; background: transparent;
+  font: inherit; line-height: 1;
+  opacity: 0; pointer-events: none;
+  transition: opacity var(--dur-fast), background var(--dur-fast), color var(--dur-fast);
+}
+/* 会话行尾的两个按钮叠在时间槽位上：绝对定位保证「时间 ↔ 按钮」互斥显示时布局不跳动 */
+.sb-session-actions { position: absolute; top: 50%; transform: translateY(-50%); }
+.sb-session-archive { right: 22px; }
+.sb-session-more { right: 0; pointer-events: auto; }
+.sb-session:hover .sb-session-actions,
+.sb-session.menu-open .sb-session-actions,
+.sb-session-actions.is-armed { opacity: 1; pointer-events: auto; }
+.sb-session-actions:hover { background: var(--sidebar-selected); color: var(--text-1); }
+.sb-session-actions:focus-visible { opacity: 1; pointer-events: auto; background: var(--sidebar-selected); color: var(--text-1); }
+.sb-session-actions.sb-session-more.is-open { background: var(--sidebar-selected); color: var(--text-1); opacity: 1; }
 /* v7: 左侧会话行一键归档按钮——运行中禁用 */
 .sb-session-archive.disabled { opacity: .4; cursor: not-allowed; pointer-events: none; }
 .sb-session { display: flex; align-items: center; gap: var(--sb-row-gap); height: 32px; padding: 0 var(--sb-row-pad); border-radius: var(--r-md); font-size: var(--sidebar-fs, 14px); color: var(--text-1); cursor: pointer; position: relative; transition: background var(--dur-fast); }
@@ -313,8 +345,12 @@ a { color: var(--accent); text-decoration: none; }
 .sb-session-title > .sb-title-inner { display: inline-block; transform: translateX(0); }
 .sb-session-title.is-marquee { text-overflow: clip; }
 .sb-session-title.is-marquee > .sb-title-inner { transform: translateX(var(--marquee-x, 0px)); transition: transform var(--marquee-dur, 1.4s) linear; will-change: transform; }
-.sb-session-time { font-size: 11px; color: var(--text-3); flex-shrink: 0; }
+/* plan-156-621：时间文字可能超出槽位（「12月31日」约 50px），限制宽度并省略，避免溢出挤乱行。
+   plan-20261018-sidebar-toggle：折叠图标用负 margin 吃掉了槽位左侧 8px，
+   时间相应让出这段宽度，两者才不会重叠（极端长日期会更早出现省略号）。 */
+.sb-session-time { font-size: 11px; color: var(--text-3); flex-shrink: 0; max-width: calc(100% - 8px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sb-session:hover .sb-session-time { display: none; }
+.sb-session.menu-open .sb-session-time { display: none; }
 .sb-pin { display: inline-flex; color: var(--text-3); flex-shrink: 0; }
 /* plan-156-619 修复：会话行首列固定 20px 槽位（--sb-icon-slot），宽度恒定不跳动。
    槽内同一时刻只出现一个：运行中转圈 / 置顶按钮（悬停时淡入）。 */
@@ -324,68 +360,93 @@ a { color: var(--accent); text-decoration: none; }
   flex-shrink: 0; color: var(--text-3); border-radius: var(--r-sm);
   transition: color var(--dur-fast), background var(--dur-fast);
 }
-/* 置顶入口：**悬停会话行时出现**（用户口径）。
+/* 置顶入口：**只在悬停会话行时出现**（用户口径）。
    · 槽位宽度恒定，所以图标淡入淡出不会让标题起点位移；
    · 默认 opacity 0 且 pointer-events: none——避免「看不见却能点到」的隐形热区；
-   · 悬停整行或键盘聚焦到行内时淡入；
+   · 不响应 :focus-within：点击行内子会话开关等元素后焦点会残留，图钉会一直挂着，
+     看起来像行首常驻了一个置顶标记（用户反馈）；
    · 任何状态都用同一枚普通图钉（不带斜线），是否已置顶只靠颜色（accent）与
      tooltip 文案区分——置顶会话位于「置顶」分区，分区标题已经表达过一次状态。 */
+/* plan-156-622：图钉**常驻可点**，只靠 opacity 表达出现。
+   根因复盘：此前默认 pointer-events:none，只靠 `.sb-session:hover .sb-slot-pin` 放开。
+   真鼠标点击时，一旦样式重算/动画还没跟上，指针落在 none 的元素上就穿透到行背景，
+   触发的是「切换会话」而不是置顶——用户看到的就是「这点没反应」。
+   （程序化 element.click() 不受 pointer-events 影响，所以自动化测试会误判为正常。）
+   现在命中区始终存在，视觉仍只在悬停 / 已置顶 / 键盘聚焦时可见。 */
 .sb-slot-pin {
   display: inline-flex; align-items: center; justify-content: center;
   width: var(--sb-icon-slot); height: var(--sb-icon-slot);
   border-radius: var(--r-sm);
+  /* plan-156-622：改为 <button> 后必须重置浏览器默认外观 */
+  padding: 0; border: none; background: transparent; font: inherit; line-height: 1;
   color: var(--text-3);
-  opacity: 0; pointer-events: none;
+  opacity: 0;
+  pointer-events: auto;
+  cursor: pointer;
   transition: opacity var(--dur-fast), color var(--dur-fast), background var(--dur-fast);
 }
 .sb-session:hover .sb-slot-pin,
-.sb-session:focus-within .sb-slot-pin { opacity: 1; pointer-events: auto; cursor: pointer; }
+.sb-slot-pin.is-armed,
+.sb-slot-pin:focus-visible { opacity: 1; }
 .sb-slot-pin:hover { background: var(--sidebar-selected); color: var(--text-1); }
+.sb-slot-pin:focus-visible { background: var(--sidebar-selected); color: var(--text-1); }
 /* 已置顶：悬停时用 accent 表达「当前已置顶」，与未置顶的 --text-1 区分开 */
 .sb-slot-pin.is-pinned:hover { color: var(--accent); }
-/* plan-156-619 S5：子会话行——与普通会话行同一几何（同一 --sb-row-pad / --sb-icon-slot），
-   仅整体缩进一级（一个图标槽宽），并在行尾带一个「子会话」细标识。
-   层级只用缩进 + 字号表达，不加色块、不加左侧竖线（项目规则禁止装饰性竖线）。 */
-.sb-subsessions { display: flex; flex-direction: column; gap: 2px; padding-top: 1px; padding-bottom: 1px; }
+/* plan-156-619 S5 / plan-156-620：子会话行——与普通会话行同一几何（同一 --sb-row-pad / --sb-icon-slot），
+   整体缩进一级（一个图标槽宽），状态槽（转圈）随之右移，标题起点落在父会话标题之后。
+   层级只用缩进 + 字号表达，不加色块、标签与左侧竖线（项目规则禁止装饰性竖线）。 */
+/* 展开收起走 grid 行高过渡（0fr ↔ 1fr）：高度随内容自适应，又不是 0 动画硬切 */
+.sb-subsessions {
+  display: grid; grid-template-rows: 1fr;
+  transition: grid-template-rows var(--dur-2, 160ms) var(--ease-standard, ease);
+}
+.sb-subsessions.is-collapsed { grid-template-rows: 0fr; }
+.sb-subsessions-inner { display: flex; flex-direction: column; gap: 2px; min-height: 0; overflow: hidden; padding: 1px 0; }
+.sb-subsessions.is-collapsed .sb-subsessions-inner { padding: 0; }
+/* 子会话行与主会话行同字号、同字色、同交互（置顶 / 归档 / 三点菜单），只缩进一个图标槽：
+   用户反馈此前子会话字号更小、颜色更淡，看起来又细又弱。 */
 .sb-subsession { padding-left: calc(var(--sb-row-pad) + var(--sb-icon-slot)); }
-.sb-subsession .sb-session-title { font-size: calc(var(--sidebar-fs, 14px) - 1px); color: var(--text-2); }
-.sb-subsession.active .sb-session-title { color: var(--text-1); }
-.sb-subsession-tag {
-  flex-shrink: 0; font-size: 10px; line-height: 1.6;
-  color: var(--text-3); background: var(--bg-hover);
-  border-radius: 999px; padding: 0 6px; white-space: nowrap;
-}
 
-/* plan-156-619 S5e：子会话的返回导航条。
-   子会话按普通会话渲染，用户需要一个明确出口回到主会话；
-   只用留白 + 箭头表达层级，不加色块、不加左侧竖线（项目设计规则）。
-   与消息列同宽同左边距，视觉上属于内容列而不是面板装饰。 */
-.chat-subsession-bar {
-  display: flex; align-items: center; gap: 8px;
-  flex-shrink: 0;
-  width: var(--content-col-w);
-  max-width: none;
-  margin-left: var(--content-col-left);
-  margin-right: 0;
-  box-sizing: border-box;
-  padding: 8px 32px 0;
+/* plan-156-620：行尾固定宽度槽位——平时显示时间，悬停 / 菜单打开时同一位置换成归档与三点按钮。
+   槽位宽度不变，标题与子会话开关不会因悬停而位移（此前时间隐藏、按钮出现会让左侧元素跳动）。 */
+.sb-session-trail {
+  position: relative;
+  display: inline-flex; align-items: center; justify-content: flex-end; gap: 2px;
+  /* plan-156-621：44px 放不下「12月31日」，放宽到 52px（仍为固定槽位，悬停不位移） */
+  flex-shrink: 0; width: 52px;
 }
-.chat-subsession-back {
-  display: inline-flex; align-items: center; gap: 5px;
-  height: 26px; padding: 0 8px 0 6px;
-  border: none; border-radius: var(--r-md);
-  background: transparent; color: var(--text-2);
-  font-size: 12px; cursor: pointer;
+.sb-session.menu-open .sb-session-time { display: none; }
+.sb-session.menu-open .sb-session-actions { display: flex; }
+
+/* 父会话行的子会话开关：与行尾归档 / 三点同规格的 20px 图标按钮，紧跟标题之后；
+   子会话有在运行时图标用强调色。
+   plan-20261018-sidebar-toggle：原为「数量 + 箭头」胶囊（实测宽 35px），比行尾图标宽 15px，
+   且与归档相隔 18px（行 gap 8 + 槽位为长时间文本预留的 10px 左空）——用户反馈偏散、占位置。
+   现改为纯图标（数量移入 Tooltip），并用负 margin 吃掉那 10px 预留空档，
+   使「子会话 / 归档 / 三点」三处图标间距一致（均为 2px）。 */
+.sb-sub-toggle {
+  position: relative;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px;
+  flex-shrink: 0;
+  /* 行尾槽位宽 52px、两个图标只占 42px，左侧 10px 是给长时间文本预留的；
+     负 margin 把这段空档让出来（再加上行 gap 里的一小段），折叠图标才会与归档贴合。
+     时间文字相应让出这段宽度（见 .sb-session-time 的 max-width），两者不会重叠。 */
+  margin-right: -16px;
+  padding: 0; border: none; border-radius: var(--r-ctl);
+  background: transparent; color: var(--text-3);
+  font: inherit; line-height: 1;
+  cursor: pointer;
   transition: background var(--dur-fast), color var(--dur-fast);
 }
-.chat-subsession-back:hover { background: var(--bg-hover); color: var(--text-1); }
-.chat-subsession-back > svg { flex-shrink: 0; }
-.chat-subsession-back-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
-.chat-subsession-kind {
-  flex-shrink: 0; font-size: 11px; line-height: 1.6;
-  color: var(--text-3); background: var(--bg-hover);
-  border-radius: 999px; padding: 0 7px; white-space: nowrap;
-}
+/* 可点区向上、左各扩 3px（20 → 26px 高），不撑高行；
+   右缘刻意不外扩——归档是不可撤销操作，与折叠图标只隔 2px，
+   扩过去会形成 1px 重叠命中区，点折叠图标右边缘可能误触归档。 */
+.sb-sub-toggle::after { content: ""; position: absolute; inset: -3px 0 -3px -3px; }
+.sb-sub-toggle:hover { background: var(--sidebar-selected); color: var(--text-1); }
+.sb-sub-toggle.is-running { color: var(--accent); }
+.sb-sub-toggle > svg { transition: transform var(--dur-fast); }
+.sb-sub-toggle[aria-expanded="false"] > svg { transform: rotate(-90deg); }
 .sb-session-slot .sb-session-pulse { width: 12px; height: 12px; border-radius: 50%; border: 2px solid transparent; opacity: 1; }
 /* plan-128-518：「执行中」转圈统一用 --accent（随主题世界变色），摘要 / 胶囊 / 工具行的转圈同源 */
 .sb-session-slot .sb-session-pulse.on { border-color: color-mix(in srgb, var(--accent) 25%, transparent); border-top-color: var(--accent); animation: session-spin var(--dur-spin) linear infinite; opacity: 1; }
@@ -396,6 +457,19 @@ a { color: var(--accent); text-decoration: none; }
    基础 .sb-rename-input 规则保留给目标弹层复用，勿动。 */
 .sb-session .sb-rename-input { flex: 1; min-width: 0; min-height: var(--ctl-h-sm); padding: 0 8px; font-size: inherit; }
 .sb-context-menu { right: 0; top: 100%; margin-top: 2px; z-index: 50; }
+/* plan-156-622：会话菜单 portal 到 body 后用 fixed + left/top 定位。
+   必须排在 .sb-context-menu 之后并抬高选择器优先级——否则被它的 right:0/top:100%
+   盖掉，fixed 元素会同时受 left 与 right 约束，横向拉伸成一整条（实测寛 1822px）。 */
+.context-menu.sb-floating-menu {
+  position: fixed;
+  right: auto;
+  top: auto;
+  margin-top: 0;
+  width: max-content;
+  min-width: 168px;
+  max-width: 260px;
+  z-index: 80;
+}
 .sb-sort-menu { position: absolute; }
 .sb-more-btn { display: flex; align-items: center; justify-content: center; gap: 4px; width: 100%; height: 28px; margin-top: 2px; margin-bottom: 4px; border-radius: var(--r-md); border: none; background: transparent; color: var(--text-3); font-size: 11px; cursor: pointer; transition: background var(--dur-fast), color var(--dur-fast); }
 /* plan-114-449：悬停/聚焦与侧栏其它行同一套透明墨色，不再出现实心灰块与虚线框 */
@@ -806,13 +880,24 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .rc-close:hover { background: var(--bg-hover); color: var(--text-1); }
 .rc-body { padding: 12px 16px; overflow-y: auto; flex: 1; }
 .rc-desc { margin: 0 0 8px; font-size: 13px; color: var(--text-2); }
+/* plan-20261018-turn-changes：图标 + 文字必须走 flex，否则 svg 是行内元素，
+   会贴着基线摆放并随行高被压扁（实测显示成一小块红点）。 */
 .rc-conflict-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
   margin: 0 0 10px;
   font-size: 12px;
+  line-height: 1.6;
   color: var(--error);
   background: color-mix(in srgb, var(--error) 8%, transparent);
-  border-radius: var(--r-xs);
+  border-radius: var(--r-sm);
   padding: 6px 10px;
+}
+/* 图标固定槽位，不参与伸缩；2px 让它的中心落在首行文字的中线上 */
+.rc-conflict-note > svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
 }
 .rc-file-list { display: flex; flex-direction: column; gap: 6px; }
 .rc-empty { font-size: 13px; color: var(--text-3); padding: 8px 0; }
@@ -2180,15 +2265,21 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .usage-card-sub .v { color: var(--text-2); font-family: var(--font-mono); text-align: right; }
 
 .usage-section-block { display: flex; flex-direction: column; gap: 12px; }
+/* plan-20261018-turn-changes：标题行 = 图标槽 + 标题 + 副标题。
+   图标固定槽位并禁用收缩；标题与副标题按基线对齐，两者各带稳定行高，
+   避免不同字号（14 / 11）叠加默认 line-height 后基线漂移、看起来图标与文字不齐。 */
 .usage-block-head { display: flex; align-items: center; gap: 8px; color: var(--text-2); }
+.usage-block-head > svg { flex: 0 0 auto; }
 .usage-block-titles { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-.usage-block-sub { font-size: 11px; color: var(--text-3); }
-.usage-section-title { font-size: 14px; font-weight: 600; color: var(--text-1); }
+.usage-block-sub { font-size: 11px; line-height: 1.5; color: var(--text-3); white-space: nowrap; }
+.usage-section-title { font-size: 14px; font-weight: 600; line-height: 1.4; color: var(--text-1); white-space: nowrap; }
 
 /* Token 活动热力图 */
 .usage-heatmap { position: relative; display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--border); border-radius: var(--r-lg); padding: 16px; background: var(--bg-elevated); }
 .usage-heatmap-head { display: flex; align-items: center; justify-content: space-between; }
-.usage-heatmap-title { font-size: 14px; font-weight: 600; color: var(--text-1); }
+/* plan-20261018-turn-changes：补稳定行高，与 .usage-section-title 同档，
+   保证同一行里的 14px 标题与 11px 副标题基线一致、图标与文字居中对齐 */
+.usage-heatmap-title { font-size: 14px; font-weight: 600; line-height: 1.4; color: var(--text-1); }
 .usage-seg-toggle { display: inline-flex; gap: 2px; background: var(--bg-hover); border-radius: var(--r-md); padding: 2px; }
 .usage-seg-btn { border: none; background: transparent; color: var(--text-2); font-size: 12px; padding: 4px 12px; border-radius: var(--r-md); cursor: pointer; transition: all var(--dur-fast); }
 .usage-seg-btn.active { background: var(--bg-elevated); color: var(--text-1); font-weight: 500; box-shadow: inset 0 0 0 1px var(--border); }
@@ -3904,16 +3995,52 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
   .app-main.todo-card-active .todo-float { display: none; }
 }
 
-/* ══ plan-156-619 S3：内容列定宽（需求 C1 的落地点） ══
-   三个变量由 useContentColumnGeometry 写到 `.chat-panel` 上：
-     --content-col-w     内容列宽度（冻结值：只在几何纪元变化时重算）
-     --content-col-left  内容列左边距（卡片/尺寸变化只改它）
-     --card-reserve      右侧卡片占位（展开 336 / 胶囊与隐藏 0）
-   兜底值让「hook 尚未写入」的极短瞬间也保持近似居中，不出现宽度 0 的塌陷。 */
+/* ══ plan-156-619 S3：内容列定宽（需求 C1 的落地点；plan-20261018 抖动根治） ══
+   宽度与位置**全部由 CSS 在布局阶段实时求解**，JS 只提供两个输入变量：
+
+     --content-col-max        用户偏好宽度（px）；100cqw = 不限（与 store 的 0 语义对齐）
+     --content-col-clearance  右上角卡片需要让出的右侧空间（px）
+
+   为什么不再由 JS 写 px：旧实现每帧在 rAF 里写 --content-col-w / --content-col-left，
+   而宿主宽度是异步观察到的，写入时宿主又变了 —— 实测一次拖拽收尾里列左缘出现
+   `421 → 173 → 297` 的跳变（248px），就是用户看到的左右抖动。改为纯 CSS 后，
+   浏览器按**当前**包含块一次算完，拖面板时内容列与宿主同帧变化，不存在滞后。
+
+   基准统一用 100cqw（`.chat-panel` 为容器）：
+   · `.mf-list` 的父（.message-flow）被滚动条挤掉 10px，而 `.composer` 的父用
+     padding-right 预留 12px——两者各自的 100% 不同，会错位 2px；cqw 只认容器，
+     两处基准因此严格一致，拖拽柄也能用同一套变量定位。
+   · 内容列可用宽扣掉 --scrollbar-gutter-w（与输入框的预留同源，两处对齐的前提）。
+
+   与 contentColumnGeometry.ts 的 shortfall 判据保持同源，改一处必须同步另一处。 */
 .chat-panel {
-  --content-col-w: calc(100% - 64px);
-  --content-col-left: 32px;
-  --card-reserve: 0px;
+  /* 容器查询基准：内联尺寸 containment（宽度本就由外部 flex 决定，不影响布局结果） */
+  container-type: inline-size;
+
+  --content-col-pad: 16px;      /* 与 COLUMN_PAD 同值 */
+  --content-col-min: 560px;     /* 与 MIN_COL_W 同值 */
+  --content-col-max: 100cqw;    /* JS 写 px；100cqw = 不限 */
+  --content-col-clearance: 0px; /* JS 按卡片形态写 */
+
+  /* 内容列可用宽 = 宿主宽 − 滚动条 gutter（与输入框预留 12px 同口径） */
+  --content-col-avail: calc(100cqw - var(--scrollbar-gutter-w, 12px));
+
+  /* 宽度优先级：物理可用宽 > 用户偏好 > 理想下限（与 contentColumnGeometry 同序） */
+  --content-col-w: max(0px, min(
+    calc(var(--content-col-avail) - var(--content-col-pad) * 2),
+    max(var(--content-col-min), var(--content-col-max))
+  ));
+
+  /* 原本的居中位置（宿主更窄时退化为 0，不会出现负边距） */
+  --content-col-ideal: max(0px, calc((var(--content-col-avail) - var(--content-col-w)) / 2));
+  /* 只移「右缘侵入卡片区域」的那一段：右侧本来放得下就一点不动 */
+  --content-col-intrusion: max(0px, calc(
+    var(--content-col-ideal) + var(--content-col-w) - var(--content-col-avail) + var(--content-col-clearance)
+  ));
+  /* 能左移的上限：不能突破左内距 */
+  --content-col-max-shift: max(0px, calc(var(--content-col-ideal) - var(--content-col-pad)));
+  --content-col-shift: min(var(--content-col-intrusion), var(--content-col-max-shift));
+  --content-col-left: calc(var(--content-col-ideal) - var(--content-col-shift));
 }
 .chat-panel .mf-list,
 .chat-panel .composer {
@@ -4861,7 +4988,9 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 .usage-overview-label { font-size: 11px; color: var(--text-3); margin-bottom: 4px; }
 .usage-overview-value { font-size: 20px; font-weight: 600; color: var(--text-1); font-family: var(--font-mono, ui-monospace, Consolas, monospace); }
 .usage-section { margin-bottom: 16px; }
-.usage-section-title { font-size: 12px; font-weight: 600; color: var(--text-2); margin-bottom: 8px; }
+/* plan-20261018-turn-changes：此处原有第二条 .usage-section-title（12px + margin-bottom: 8px），
+   属旧版折叠面板遗留，会覆盖上面的正式定义并把标题盒撑高，导致标题行图标与文字错位。
+   旧结构（.usage-section / .usage-collapse-btn）已无组件引用，故移除避免继续冲突。 */
 .usage-collapse-btn {
   display: flex; align-items: center; gap: 6px; padding: 6px 0;
   border: none; background: transparent; cursor: pointer;

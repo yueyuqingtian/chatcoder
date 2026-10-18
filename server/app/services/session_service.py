@@ -3,12 +3,20 @@
 plan-206-975：写操作经 WriteEngine 单写线程（无锁单写者）；读保留 async 会话。
 写函数返回标量（id/title/status 等），不返回跨层 ORM 对象。
 """
+import logging
+from dataclasses import dataclass
+
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.message import Message, Session
 from app.persistence.models.turn import Turn
 from app.persistence.models.workflow import WorkflowRun
+
+logger = logging.getLogger(__name__)
+
+# 自动标题的回落截断长度（AI 归纳失败时用首条消息前若干字）
+AUTO_TITLE_FALLBACK_CHARS = 30
 
 
 def _legacy_default_for_type(type_name: str) -> object:
@@ -25,6 +33,7 @@ async def create_session(db: AsyncSession, *, project_id: int, title: str | None
                          approval_mode: str | None = None,
                          goal_text: str | None = None,
                          side_parent_id: int | None = None,
+                         side_kind: str | None = None,
                          title_source: str = "auto") -> int:
     """创建会话。
 
@@ -67,6 +76,8 @@ async def create_session(db: AsyncSession, *, project_id: int, title: str | None
             ("model_id", model_id),
             ("fork_parent_id", fork_parent_id),
             ("side_parent_id", side_parent_id),
+            # plan-156-620：挂靠会话的种类（side 侧边对话 / sub 执行子会话）
+            ("side_kind", side_kind if side_parent_id is not None else None),
             # plan-676: 首页目标随创建一次落准（对齐 set_goal 端点写法；空时维持默认 none）
             ("goal_text", goal_text.strip()[:2000] if goal_active else None),
             ("goal_status", "active" if goal_active else None),
@@ -113,6 +124,7 @@ async def create_session(db: AsyncSession, *, project_id: int, title: str | None
             title_source=title_source,
             model_id=model_id, fork_parent_id=fork_parent_id,
             side_parent_id=side_parent_id,
+            side_kind=side_kind if side_parent_id is not None else None,
             # plan-75-332 R3 修复：此处必须显式写入两种模式——此前漏传 approval_mode，
             # 新建会话一律落到 ORM 默认值 "ask"，表现为「首页选完全访问，发出后变询问审批」；
             # permission_mode 一并改用归一化值（原本写的 "default" 是已废弃的旧名）。
@@ -154,19 +166,8 @@ async def auto_title_session(db: AsyncSession, session: Session, first_text: str
     此前只有「title 是否为空」一个判据，而前端创建时总会带一个截断标题，
     于是自动命名永远不会触发（真实缺陷）。
     """
-    source = getattr(session, "title_source", "auto") or "auto"
-    if source != "auto":
-        return None
-
-    fallback = first_text.strip().replace("\n", " ")[:30]
-    if not fallback:
-        return None
-
-    # 只处理「占位标题」：空标题，或标题恰好等于首条消息的截断结果。
-    # 存量会话迁移后 title_source 都是 auto，但它们已有正式标题（旧逻辑生成）——
-    # 若不加这一判定，用户下次发消息会把所有历史会话标题一起改掉。
-    existing = (session.title or "").strip()
-    if existing and existing != fallback:
+    fallback = _auto_title_fallback(session, first_text)
+    if fallback is None:
         return None
 
     # 归纳：失败即回落（不抛异常、不阻塞发送）
@@ -176,9 +177,90 @@ async def auto_title_session(db: AsyncSession, session: Session, first_text: str
         db, first_text=first_text, model_id=getattr(session, "model_id", None),
     ) or fallback
 
-    # 写回 named：下一轮不再重复归纳（模型调用有成本，且同一会话标题不该反复变）
-    await patch_session(session.id, title=title, title_source="named")
+    # 写回 named：下一轮不再重复归纳（模型调用有成本，且同一会话标题不该反复变）。
+    # plan-156-620：归纳在后台进行，期间用户可能已手动改名——条件写，只覆盖仍是 auto 的标题。
+    if not await _patch_title_if_auto(session.id, title):
+        return None
     return title
+
+
+async def _patch_title_if_auto(session_id: int, title: str) -> bool:
+    """仅当会话标题来源仍是 auto 时写入归纳标题（单写线程内比较并设置）。"""
+    from app.persistence.database import run_write_locked
+
+    def _do(s) -> bool:
+        row = s.get(Session, session_id)
+        if row is None or (row.title_source or "auto") != "auto":
+            return False
+        row.title = title
+        row.title_source = "named"
+        s.commit()
+        return True
+
+    return bool(await run_write_locked(_do, label="session.auto_title"))
+
+
+def _auto_title_fallback(session, first_text: str) -> str | None:
+    """判定会话是否需要自动归纳标题；需要时返回截断回落标题，否则返回 None。"""
+    source = getattr(session, "title_source", "auto") or "auto"
+    if source != "auto":
+        return None
+
+    normalized_text = (first_text or "").strip().replace("\n", " ")
+    fallback = normalized_text[:AUTO_TITLE_FALLBACK_CHARS]
+    if not fallback:
+        return None
+
+    # 只处理「占位标题」：空标题，或标题是首条消息的前缀截断（前端建会话时带的占位）。
+    # 存量会话迁移后 title_source 都是 auto，但它们已有正式标题（旧逻辑生成）——
+    # 若不加这一判定，用户下次发消息会把所有历史会话标题一起改掉。
+    # plan-156-620：前端占位截断长度与这里不同，按「是首条消息前缀」判定，而不是要求完全相等。
+    existing = (session.title or "").strip().rstrip("…").rstrip()
+    if existing and not normalized_text.startswith(existing):
+        return None
+    return fallback
+
+
+def schedule_auto_title(session, first_text: str) -> bool:
+    """后台归纳会话标题，完成后广播 session.updated；返回是否已调度。
+
+    plan-156-620：此前发送接口里同步 `await` 归纳（模型调用，超时上限 8 秒），
+    首条消息的发送请求因此被拖慢数秒——与 title_service「不阻塞」的设计约束相反。
+    这里先在请求内做零成本的资格判定，真正的模型调用放到后台任务。
+    """
+    from types import SimpleNamespace
+
+    from app.core.background import spawn_background
+
+    if _auto_title_fallback(session, first_text) is None:
+        return False
+    # 只带标量进后台任务：请求结束后 ORM 实例随会话关闭，不能跨任务访问
+    snapshot = SimpleNamespace(
+        id=session.id, title=session.title,
+        title_source=getattr(session, "title_source", "auto"),
+        model_id=getattr(session, "model_id", None),
+    )
+
+    async def _run() -> None:
+        from app.orchestration.agent_events import broadcast
+        from app.persistence.database import async_session_factory
+
+        try:
+            async with async_session_factory() as db:
+                title = await auto_title_session(db, snapshot, first_text)
+            if title:
+                await broadcast(snapshot.id, {
+                    "event": "session.updated",
+                    "payload": {"session_id": snapshot.id, "title": title},
+                })
+        except Exception:  # noqa: BLE001 — 命名失败不影响任何业务
+            logger.warning("[title] 后台归纳失败 sid=%s", snapshot.id, exc_info=True)
+
+    try:
+        spawn_background(_run(), name=f"auto-title-{snapshot.id}")
+    except RuntimeError:
+        return False
+    return True
 
 
 async def patch_session(session_id: int, **fields) -> None:
@@ -211,8 +293,22 @@ async def list_sessions(db: AsyncSession, project_id: int | None = None,
 
 
 async def list_side_sessions(db: AsyncSession, parent_id: int) -> list[Session]:
-    """某主会话下的侧边会话（按创建先后）。归档的子会话同样返回，由前端决定如何展示。"""
-    res = await db.execute(select(Session).where(Session.side_parent_id == parent_id).order_by(Session.id))
+    """某主会话下的侧边对话（右侧面板，按创建先后）。归档的同样返回，由前端决定如何展示。
+
+    plan-156-620：只返回 side 种类——执行子会话在左栏展示，若在这里一并返回，
+    右侧面板会自动选中最新一条并接管它的执行流（用户看到「子会话跑到了右侧」）。
+    """
+    from app.core.enums import SideKind
+
+    res = await db.execute(
+        select(Session)
+        # side_kind 为空 = 字段上线前的存量行且回填未成功：按侧边对话兜底，宁可留在右侧也不凭空消失
+        .where(
+            Session.side_parent_id == parent_id,
+            (Session.side_kind == SideKind.SIDE.value) | Session.side_kind.is_(None),
+        )
+        .order_by(Session.id)
+    )
     return list(res.scalars().all())
 
 
@@ -362,7 +458,30 @@ async def delete_session_permanent(db: AsyncSession, session_id: int) -> dict | 
         s.commit()
         return {"ok": True, "deleted": counts}
 
-    return await run_write_locked(patch, label=f"session.delete_permanent.{session_id}")
+    result = await run_write_locked(patch, label=f"session.delete_permanent.{session_id}")
+    if result is not None:
+        _purge_tool_outputs(session_id)
+    return result
+
+
+def _purge_tool_outputs(session_id: int) -> None:
+    """plan-156-621：删除会话时清理它的长工具输出落盘目录。
+
+    落盘文件名带 uuid，无法按会话内消息反查；不跟随会话删除会一直累积
+    （每次超预算输出最多 2MB）。清理失败只记日志，不影响删除结果。
+    """
+    import shutil
+    from pathlib import Path
+
+    try:
+        from app.core.config import settings
+        from app.orchestration.output_paging import SPILL_DIRNAME
+
+        folder = Path(settings.uploads_dir).resolve() / SPILL_DIRNAME / str(session_id)
+        if folder.is_dir():
+            shutil.rmtree(folder, ignore_errors=True)
+    except Exception:  # noqa: BLE001 — 清理失败不影响会话删除
+        logger.debug("清理工具输出落盘失败 sid=%s", session_id, exc_info=True)
 
 
 async def fork_session(db: AsyncSession, session_id: int, title: str | None = None) -> int:
@@ -473,6 +592,69 @@ async def list_thread_messages(db: AsyncSession, session_id: int, thread_id: int
         stmt = stmt.limit(limit)
     res = await db.execute(stmt)
     return list(res.scalars().all())
+
+
+@dataclass(frozen=True)
+class SessionFlags:
+    """会话列表行的运行态字段（与下方逐会话函数同口径）。"""
+
+    has_running: bool = False
+    workflow_running: bool = False
+    has_interrupted_turn: bool = False
+    last_activity_at: str | None = None
+    running_started_at: str | None = None
+
+
+# IN 子句单批上限（SQLite 变量数默认上限 999，留足余量）
+_FLAGS_BATCH = 500
+
+
+async def session_flags_batch(db: AsyncSession, sessions: list[Session]) -> dict[int, SessionFlags]:
+    """批量计算会话列表的运行态字段：固定 4 条聚合查询，替代逐会话 5 条查询。
+
+    plan-156-620：会话列表此前对每个会话串行跑 has_running / workflow_running /
+    has_interrupted / last_activity / running_started 五条查询（N+1）。
+    百余个会话时单次 /sessions 要 5~6 秒，启动、切会话、任何触发列表刷新的操作都被拖慢。
+    """
+    ids = [s.id for s in sessions]
+    running: dict[int, str | None] = {}
+    interrupted: set[int] = set()
+    wf_running: set[int] = set()
+    last_msg: dict[int, str | None] = {}
+    for i in range(0, len(ids), _FLAGS_BATCH):
+        chunk = ids[i:i + _FLAGS_BATCH]
+        for sid, started in (await db.execute(
+            select(Turn.session_id, func.max(Turn.started_at))
+            .where(Turn.session_id.in_(chunk), Turn.status == "running")
+            .group_by(Turn.session_id)
+        )).all():
+            running[sid] = started
+        interrupted.update((await db.execute(
+            select(Turn.session_id)
+            .where(Turn.session_id.in_(chunk), Turn.status == "interrupted")
+            .distinct()
+        )).scalars().all())
+        wf_running.update((await db.execute(
+            select(WorkflowRun.session_id)
+            .where(WorkflowRun.session_id.in_(chunk), WorkflowRun.status == "running")
+            .distinct()
+        )).scalars().all())
+        for sid, ts in (await db.execute(
+            select(Message.session_id, func.max(Message.created_at))
+            .where(Message.session_id.in_(chunk), Message.deleted.is_(False))
+            .group_by(Message.session_id)
+        )).all():
+            last_msg[sid] = ts
+    return {
+        s.id: SessionFlags(
+            has_running=s.id in running,
+            workflow_running=s.id in wf_running,
+            has_interrupted_turn=s.id in interrupted,
+            last_activity_at=last_msg.get(s.id) or s.created_at,
+            running_started_at=running.get(s.id),
+        )
+        for s in sessions
+    }
 
 
 async def last_activity_at(db: AsyncSession, session_id: int) -> str | None:

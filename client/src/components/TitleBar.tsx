@@ -5,7 +5,7 @@
  */
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { api } from "../api/client";
-import { useChatStore } from "../store/chat";
+import { useChatStore, useCurrentSession } from "../store/chat";
 import { usePanelStore } from "../store/panel";
 import { sessionKey, useBrowserStore } from "../store/browser";
 import { useI18n } from "../store/i18n";
@@ -50,13 +50,13 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page
   const currentSessionId = useChatStore((s) => s.currentSessionId);
   // plan-20261015-browser-agent：面板收起时 AI 仍可能在后台操作浏览器——开关上给出状态点
   const browserAgentBusy = useBrowserStore((s) => (s.sessions[sessionKey(currentSessionId)]?.agent.phase ?? "idle") === "working");
-  const sessions = useChatStore((s) => s.sessions);
   const projects = useChatStore((s) => s.projects);
   const currentProjectId = useChatStore((s) => s.currentProjectId);
   const loadBootstrap = useChatStore((s) => s.loadBootstrap);
   const deleteSession = useChatStore((s) => s.deleteSession);
   const renameSession = useChatStore((s) => s.renameSession);
-  const session = sessions.find((s) => s.id === currentSessionId);
+  // plan-156-620：子会话不在主会话列表里，统一走 findSession（否则标题栏显示「新任务」）
+  const session = useCurrentSession();
   const project = projects.find((p) => p.id === (session?.project_id ?? currentProjectId));
   const winApi = window.chatcoderAPI;
 
@@ -198,7 +198,9 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page
             <IconGitBranch size={13} /> {t("titlebar.worktree")}
           </span>
         )}
-        {session && !session.worktree_path && currentSessionId != null && (
+        {/* plan-156-621：子会话不提供工作树入口——它跟随主会话的工作区，
+            以子会话 id 调 createWorktree 语义未定义（侧栏也只对主会话提供该入口）。 */}
+        {session && !session.worktree_path && session.side_parent_id == null && currentSessionId != null && (
           <>
             <button type="button" className="tb-wt-btn" onClick={() => setWtOpen(true)}
               title="在独立工作树中继续本会话，改动只落在该工作树分支上">

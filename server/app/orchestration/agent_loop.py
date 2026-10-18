@@ -48,6 +48,8 @@ SUBSESSION_OWN_TOOL_NAMES: set[str] = {
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_OUTPUT_CHARS = 16000  # v15: 与 fs_read 上限(settings.tool_output_chars_read)对齐；历史上曾为 8000
+# subagent_inspect 诊断 JSON 的单次展示上限（超出时显式提示，结论全文走 collect_results 分段）
+_INSPECT_PAYLOAD_CHARS = 8000
 _STREAM_CHUNK_SIZE = 80
 _STREAM_INTERVAL = 0.01
 
@@ -194,11 +196,19 @@ def _filter_degenerate_tool_calls(response) -> None:
     response.tool_calls = kept
 
 
-def _truncate_output(text: str, limit: int = MAX_TOOL_OUTPUT_CHARS) -> str:
-    if not text or len(text) <= limit:
-        return text
-    half = limit // 2
-    return text[:half] + f"\n\n... [已截断,原始 {len(text)} 字符] ...\n\n" + text[-half:]
+def _present_tool_output(text: object, *, tool_name: str, session_id: int, call_key: str) -> str:
+    """工具结果进入模型上下文与落库的统一形态（plan-156-620）。
+
+    此前：上下文里是「头尾各半 + 中间截断」，落库是「只取开头、无标记」——下一轮从库里重建的
+    历史与本轮模型看到的不一致；被截掉的中间部分也没有任何办法取回。
+    现在：两处用同一份文本；超出预算时完整输出落盘，结果里写明总字数与 read_attachment 续读方式。
+    """
+    from app.orchestration.output_paging import present_output
+
+    return present_output(
+        str(text or ""), MAX_TOOL_OUTPUT_CHARS,
+        session_id=session_id, tag=f"{tool_name}-{call_key or 'call'}",
+    )
 
 
 # v33: 上下文溢出错误识别（对齐 deepseek-harness CONTEXT_WINDOW_EXCEEDED_CODE）。
@@ -765,6 +775,11 @@ async def run_agent_loop(
         except Exception:
             logger.warning("[agent] turn=%s 读取会话执行模式失败，用 agent", turn_id, exc_info=True)
 
+    # plan-156-621：排队消息（运行中「立即发送」）也要带上并行分派提醒。
+    # 与 turn 开始时的完整提示同一套开关：设置关闭或该模式不下发子会话工具时为空串。
+    from app.orchestration.prompts.parallel_subsession import parallel_subsession_hint
+    _parallel_reminder = parallel_subsession_hint(permission_mode, full=False)
+
     # plan-75-332: 权限模式（ask / auto / full）——与执行模式正交，注入本 turn 所有
     # ToolContext（主代理/子代理共用此入口）。子代理同样继承会话权限模式：子代理的
     # 写操作也应按用户所选口径裁决，不因是子代理就绕开询问。
@@ -818,6 +833,9 @@ async def run_agent_loop(
             # v36 修复：主路径无原因（如 model_id 未传）时用回落原因兜底，
             # 否则 reason 停留在 None → 对外显示「模型不可用(None)」，错误信息为空。
             reason = _primary_reason or _fb_reason
+    # plan-156-620：续读提示里的工具调用写法跟随当前模型（Ta3 会话用伪装名 / 伪装参数键）
+    from app.orchestration.output_paging import set_ta3_visible
+    set_ta3_visible(getattr(_cur_model, "api_format", "") == "ta3")
     if provider is None:
         await _emit_agent_msg(db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
                               agent_id=agent_id, agent_name=agent_name,
@@ -889,6 +907,9 @@ async def run_agent_loop(
     total_tokens = 0
     final_text = ""
     write_paths: list[str] = []
+    # plan-20261018-operator-boost：操作路线沉淀守卫——本轮完成了 GUI 操作却没沉淀时，收尾前提醒一次
+    from app.orchestration.op_route_guard import OpRouteGuard
+    _route_guard = OpRouteGuard(enabled=bool(getattr(settings, "desktop_recipe_enabled", True)))
     # v2.2 (对齐 zcode 3.9): todo 提醒机制——模型维护的执行清单连续 N 步未更新时注入提醒
     _todo_active = False       # 本 turn 是否已创建过清单
     _todo_updated_at_step = 0  # 清单最后一次更新的步数
@@ -991,6 +1012,9 @@ async def run_agent_loop(
                         # plan-166-767: 纯图片（无文字）注入项只要有图片块即保留，不再被 continue 丢弃
                         if not _txt and not _blocks:
                             continue
+                        # plan-156-621：用户排队消息补一条并行分派提醒；子会话汇报等系统注入项不加
+                        if _parallel_reminder and not _inj.get("_persist_on_drop"):
+                            _suffix = f"{_suffix}\n\n{_parallel_reminder}"
                         _msg = ChatMessage(role="user", content=(_txt + _suffix).strip() or None)
                         if _blocks:
                             _msg.content_blocks = _blocks
@@ -1855,6 +1879,7 @@ async def run_agent_loop(
                             agent_model_id=agent_model_id,
                             parent_agent_id=agent_id,
                         )
+                        tool_output = _present_tool_output(tool_output, tool_name=tool_name, session_id=session_id, call_key=tc.get("id", ""))
                         messages.append(ChatMessage(
                             role="tool", content=tool_output,
                             name=tool_name, tool_call_id=tc.get("id", ""),
@@ -1864,7 +1889,7 @@ async def run_agent_loop(
                             sender_type=SenderType.AGENT.value, sender_id=agent_id,
                             msg_type=MsgType.TOOL_RESULT.value,
                             content={"tool": tool_name, "call_key": tc.get("id", ""),
-                                     "ok": True, "output": tool_output[:MAX_TOOL_OUTPUT_CHARS],
+                                     "ok": True, "output": tool_output,
                                      "error": "", "agent_name": agent_name},
                             buffered=True,
                         )
@@ -1886,6 +1911,7 @@ async def run_agent_loop(
                             session_id=session_id, turn_id=turn_id, workspace=workspace,
                             readonly_only=permission_mode in ("readonly", "plan"),
                         )
+                        tool_output = _present_tool_output(tool_output, tool_name=tool_name, session_id=session_id, call_key=tc.get("id", ""))
                         messages.append(ChatMessage(
                             role="tool", content=tool_output,
                             name=tool_name, tool_call_id=tc.get("id", ""),
@@ -1895,7 +1921,7 @@ async def run_agent_loop(
                             sender_type=SenderType.AGENT.value, sender_id=agent_id,
                             msg_type=MsgType.TOOL_RESULT.value,
                             content={"tool": tool_name, "call_key": tc.get("id", ""),
-                                     "ok": True, "output": tool_output[:MAX_TOOL_OUTPUT_CHARS],
+                                     "ok": True, "output": tool_output,
                                      "error": "", "agent_name": agent_name},
                             buffered=True,
                         )
@@ -1928,6 +1954,7 @@ async def run_agent_loop(
                             tool_output = await run_subsession_tool(
                                 tool_name, args, session_id=session_id, db=db,
                             )
+                        tool_output = _present_tool_output(tool_output, tool_name=tool_name, session_id=session_id, call_key=tc.get("id", ""))
                         messages.append(ChatMessage(
                             role="tool", content=tool_output,
                             name=tool_name, tool_call_id=tc.get("id", ""),
@@ -1938,7 +1965,7 @@ async def run_agent_loop(
                             msg_type=MsgType.TOOL_RESULT.value,
                             content={"tool": tool_name, "call_key": tc.get("id", ""),
                                      "ok": not str(tool_output).startswith("Error:"),
-                                     "output": str(tool_output)[:MAX_TOOL_OUTPUT_CHARS],
+                                     "output": tool_output,
                                      "error": "", "agent_name": agent_name},
                             buffered=True,
                         )
@@ -1952,6 +1979,7 @@ async def run_agent_loop(
                             session_id=session_id, turn_id=turn_id, thread_id=thread_id,
                             agent_id=agent_id, agent_name=agent_name, db=db,
                         )
+                        tool_output = _present_tool_output(tool_output, tool_name=tool_name, session_id=session_id, call_key=tc.get("id", ""))
                         messages.append(ChatMessage(
                             role="tool", content=tool_output,
                             name=tool_name, tool_call_id=tc.get("id", ""),
@@ -1969,7 +1997,7 @@ async def run_agent_loop(
                             sender_type=SenderType.AGENT.value, sender_id=agent_id,
                             msg_type=MsgType.TOOL_RESULT.value,
                             content={"tool": tool_name, "call_key": tc.get("id", ""),
-                                     "ok": True, "output": tool_output[:MAX_TOOL_OUTPUT_CHARS],
+                                     "ok": True, "output": tool_output,
                                      "error": "", "agent_name": agent_name},
                             buffered=True,
                         )
@@ -2268,6 +2296,10 @@ async def run_agent_loop(
                                     **({"image": _tool_image} if _tool_image else {})},
                     })
 
+                    # plan-156-620：落库与上下文使用同一份呈现文本（超长时完整输出落盘并给出续读方式）
+                    _presented_output = _present_tool_output(
+                        result.output, tool_name=tool_name, session_id=session_id, call_key=call_key,
+                    )
                     # plan-20261015-browser-agent：原 browser.mirror 镜像广播已移除——浏览器工具现在直接
                     # 驱动右侧面板里的真实网页（桌面端宿主自带可视化），不再需要“镜像一个 URL”。
                     await message_service.create_message(
@@ -2275,7 +2307,7 @@ async def run_agent_loop(
                         sender_type=SenderType.AGENT.value, sender_id=agent_id,
                         msg_type=MsgType.TOOL_RESULT.value,
                         content={"tool": tool_name, "call_key": call_key,
-                                 "ok": result.ok, "output": result.output[:MAX_TOOL_OUTPUT_CHARS],
+                                 "ok": result.ok, "output": _presented_output,
                                  "error": result.error, "duration_ms": _dur,
                                  "agent_name": agent_name,
                                  **({"change_stat": _change_stat} if _change_stat else {}),
@@ -2283,12 +2315,16 @@ async def run_agent_loop(
                         buffered=True,
                     )
                     messages.append(ChatMessage(
-                        role="tool", content=_truncate_output(result.output or result.error),
+                        role="tool", content=_presented_output if result.output else (result.error or ""),
                         name=tool_name, tool_call_id=tc.get("id", ""),
                     ))
                     # L3.1（plan-340-1705）：登记本步的电脑操控调用，供下一步的观测埋点使用
                     if tool_name.startswith("desktop_"):
                         _obs_tools.append((tool_name, bool(result.ok)))
+                    try:
+                        _route_guard.observe(tool_name, args, bool(result.ok), result.data)
+                    except Exception:  # noqa: BLE001 — 守卫只做登记，失败不影响主流程
+                        logger.debug("[agent] 路线守卫登记失败 tool=%s", tool_name, exc_info=True)
                     # 步级提交：结束主 db 零星写（checkpoint/任务态）形成短事务边界，
                     # 避免消息缓冲化后主 db 长事务悬挂（违背短事务原则）。
                     try:
@@ -2360,6 +2396,21 @@ async def run_agent_loop(
                         ),
                     ))
                     continue
+
+            # plan-20261018-operator-boost：GUI 操作完成却未沉淀路线 → 注入一次提醒再走一步
+            _route_note = _route_guard.reminder()
+            if _route_note:
+                if response.content:
+                    await message_service.create_message(
+                        db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
+                        sender_type=SenderType.AGENT.value, sender_id=agent_id,
+                        msg_type=MsgType.TEXT.value,
+                        content={"text": response.content, "agent_name": agent_name},
+                    )
+                    messages.append(ChatMessage(role="assistant", content=response.content))
+                logger.info("[agent] turn=%s 注入操作路线沉淀提醒", turn_id)
+                messages.append(ChatMessage(role="user", content=_route_note))
+                continue
 
             # 最终文本
             final_text = response.content or ""
@@ -3067,6 +3118,10 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
                 _only = int(args.get("agent_id"))
             except (TypeError, ValueError):
                 return "Error: agent_id must be an integer."
+        try:
+            _report_offset = max(0, int(args.get("report_offset") or 0))
+        except (TypeError, ValueError):
+            _report_offset = 0
         # plan-248-1258 M6: wait=true 时阻塞等待全部子代理完成（替代反复轮询空转）
         if bool(args.get("wait", False)) and manager.pending_count() > 0:
             await manager.wait_all()
@@ -3097,8 +3152,16 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
             body_lines = [head]
             detail = (r.get("findings") or r.get("summary") or r.get("error") or "").strip()
             if detail:
-                # M6: 不再截 500 字符——完整 findings（上限 4000）让主代理能精准整合
-                body_lines.append(detail[:4000])
+                # plan-156-620：结论不再静默截到 4000 字——单个子代理按 report_offset 分段给全文，
+                # 汇总多个时先给开头，并写明总字数与续读方式（与子会话同一口径）
+                from app.orchestration.subsession_report import (
+                    REPORT_PAGE_CHARS, REPORT_PREVIEW_CHARS, page_of, paging_hint, tool_ref,
+                )
+                _offset = _report_offset if _only is not None else 0
+                _page = page_of(detail, _offset, REPORT_PAGE_CHARS if _only is not None else REPORT_PREVIEW_CHARS)
+                body_lines.append(_page.text + paging_hint(
+                    _page, tool_ref("collect_results", agent_id=r["agent_id"], report_offset="{offset}"),
+                ))
             if r.get("error") and r.get("summary"):
                 body_lines.append(f"Error: {r['error'][:300]}")
             if r.get("files_touched"):
@@ -3132,7 +3195,15 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         if data is None:
             known = ", ".join(f"#{i}" for i in manager.agent_ids()) or "(none)"
             return f"No subagent with id {aid}. Known subagents: {known}."
-        _payload = _json.dumps(data, ensure_ascii=False, indent=2)[:8000]
+        _full_payload = _json.dumps(data, ensure_ascii=False, indent=2)
+        _payload = _full_payload[:_INSPECT_PAYLOAD_CHARS]
+        if len(_full_payload) > _INSPECT_PAYLOAD_CHARS:
+            from app.orchestration.output_paging import tool_ref as _tool_ref
+            # plan-156-620：不再静默截断——写明截断与取全文的方式（结论走 collect_results 分段读取）
+            _payload += (
+                f"\n…（诊断信息共 {len(_full_payload)} 字，以上为前 {_INSPECT_PAYLOAD_CHARS} 字；"
+                f"子代理结论全文请用 {_tool_ref('collect_results', agent_id=aid, report_offset=0)} 分段读取）"
+            )
         # plan-64-291: running 状态追加等待期纪律尾注——上一轮实测正是在此触点失守
         # （inspect 看到 running 后转而自己动手做子代理的任务，最终重复劳动、双倍消耗）。
         if str(data.get("status")) == "running":

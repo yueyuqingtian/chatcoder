@@ -91,7 +91,17 @@ class _BrowserTool(Tool):
             data["mime_type"] = out.image_mime
         if not out.ok:
             return ToolResult(ok=False, output=out.text, error=out.error or "浏览器操作失败", data=data)
-        return ToolResult(ok=True, output=out.text, data=data)
+        text = out.text
+        if self.action == "navigate":
+            # plan-20261018-operator-boost：打开站点即附上该站点已沉淀的操作路线（同会话同条只附一次）
+            from app.orchestration.route_hints import host_of, route_hint
+
+            host = host_of(str(data.get("url") or ""))
+            hint = await route_hint(ctx, scope="browser", names=[host], target_label=host) if host else ""
+            if hint:
+                text += hint
+                data["route_hint"] = True
+        return ToolResult(ok=True, output=text, data=data)
 
 
 class BrowserNavigateTool(_BrowserTool):
@@ -442,11 +452,119 @@ class BrowserBatchTool(_BrowserTool):
         )
 
 
+class BrowserDownloadsTool(_BrowserTool):
+    name = "browser_downloads"
+    action = "downloads"
+    description = "查看内置浏览器的下载记录（保存路径、进度），可等待下载完成。"
+
+    def _desc(self):
+        return (
+            "列出内置浏览器最近的下载：保存路径（设置里的「浏览器下载目录」）、状态与大小。"
+            "导出 / 下载类操作后用它拿到文件的完整路径；下载未完成时传 wait_ms 等待完成。"
+            "拿到路径后按需核对内容：fs_read（文本）、terminal_exec（脚本校验表格 / 数据）、电脑操控打开关联软件看排版。",
+            {
+                "wait_ms": {"type": "integer", "description": "等待进行中的下载完成的最长毫秒数（默认 0 = 不等），最多 120000"},
+                "limit": {"type": "integer", "description": "最多列出多少条，默认 10"},
+            },
+            None,
+        )
+
+
+class BrowserRecipeTool(Tool):
+    """网页操作路线（plan-20261018-operator-boost）：与电脑操控共用路线表，scope=browser，按站点 host 存。"""
+
+    name = "browser_recipe"
+    risk_level = "low"
+    feature_enabled = staticmethod(browser_tools_enabled)
+    description = (
+        "记录或查询内置浏览器的「操作路线」——某站点某操作意图的通用做法，用于下次直接复用、少走弯路。\n"
+        "action=recall：在某站点做不熟悉的操作前查一次（browser_navigate 打开站点时也会自动附上已有路线）。\n"
+        "action=save：一次多步网页操作成功后沉淀：site 填站点 host（如 localhost:5173、erp.example.com），"
+        "intent 一句话目标，principle 写怎么定位元素、按什么顺序、哪些步骤可合并，pitfalls 写踩过的坑。\n"
+        "**存通用做法，不存 ref / 坐标**——它们每次都会变。同站点同意图只保留一条，重复保存会更新内容。"
+    )
+
+    def function_schema(self) -> dict:
+        return _schema(self.name, self.description, {
+            "action": {"type": "string", "enum": ["recall", "save"], "description": "recall（查询）或 save（保存）"},
+            "site": {"type": "string", "description": "站点 host（如 localhost:5173）；recall 时可省略，默认当前页面"},
+            "intent": {"type": "string", "description": "操作意图，一句话（如「导出本月订单为 Excel」）"},
+            "principle": {"type": "string", "description": "action=save 时必填：通用做法"},
+            "pitfalls": {"type": "string", "description": "action=save 时可选：踩过的坑"},
+        }, ["action"])
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        err = _check_browser_enabled()
+        if err:
+            return ToolResult(ok=False, output="", error=err)
+        if not getattr(settings, "desktop_recipe_enabled", True):
+            return ToolResult(ok=False, output="", error="操作路线功能已在「设置 → 电脑操控」中关闭。")
+        if ctx.db is None:
+            return ToolResult(ok=False, output="", error="当前上下文没有数据库会话，无法读写操作路线。")
+        from app.orchestration.browser.driver import current_url
+        from app.orchestration.route_hints import host_of, note_recalled
+        from app.services import desktop_recipe_service as svc
+
+        action = str(args.get("action") or "").lower()
+        site = str(args.get("site") or "").strip()
+        site = host_of(site) if ("/" in site or "://" in site) else site.lower()
+        if not site:
+            site = host_of(current_url(ctx.session_id))
+        intent = str(args.get("intent") or "")
+
+        if action == "recall":
+            if not site and not intent:
+                return ToolResult(ok=False, output="", error="至少提供 site 或 intent 之一（或先打开目标站点）。")
+            hits = []
+            if site:
+                hits = await svc.match_for_target(ctx.db, scope=svc.SCOPE_BROWSER, names=[site], limit=5)
+                if intent:
+                    low = intent.casefold()
+                    hits.sort(key=lambda h: 0 if (low in (h.intent or "").casefold() or (h.intent or "").casefold() in low) else 1)
+                # match_for_target 不计数（它也服务于自动附带）；显式查询命中才算一次复用
+                for h in hits[:3]:
+                    h.usage_count = (h.usage_count or 0) + 1
+            else:
+                hits = await svc.recall_recipe(ctx.db, intent=intent, limit=3, scope=svc.SCOPE_BROWSER)
+            if not hits:
+                return ToolResult(ok=True, output=(
+                    f"没有找到「{site or intent}」的网页操作路线。按常规方式操作；"
+                    "成功完成多步操作后用 action=save 沉淀，下次同类操作即可直接复用。"
+                ), data={"count": 0})
+            await ctx.db.commit()
+            note_recalled(ctx.session_id, [h.id for h in hits])
+            lines = [f"找到 {len(hits)} 条网页操作路线，按做法直接执行："]
+            for h in hits[:3]:
+                lines.append(f"\n【{h.app_name} / {h.intent}】（已复用 {h.usage_count} 次）")
+                lines.append(f"  做法：{h.principle}")
+                if h.pitfalls:
+                    lines.append(f"  注意：{h.pitfalls}")
+            return ToolResult(ok=True, output="\n".join(lines), data={"count": len(hits)})
+
+        if action == "save":
+            try:
+                row, is_new = await svc.save_recipe(
+                    ctx.db, app_name=site, intent=intent,
+                    principle=str(args.get("principle") or ""), pitfalls=str(args.get("pitfalls") or ""),
+                    scope=svc.SCOPE_BROWSER,
+                )
+            except ValueError as exc:
+                msg = str(exc).replace("app_name", "site（站点 host）")
+                return ToolResult(ok=False, output="", error=msg)
+            # 工具专用会话：必须 commit，否则工具结束即回滚（同 desktop_recipe）
+            await ctx.db.commit()
+            verb = "已记录" if is_new else "已更新"
+            return ToolResult(ok=True, output=f"{verb}网页操作路线「{row.app_name} / {row.intent}」。",
+                              data={"id": row.id, "created": is_new})
+
+        return ToolResult(ok=False, output="", error="action 必须是 recall 或 save。")
+
+
 ALL_BROWSER_TOOLS = (
     BrowserNavigateTool, BrowserTabsTool, BrowserSnapshotTool, BrowserGetTextTool, BrowserScreenshotTool,
     BrowserClickTool, BrowserTypeTool, BrowserPressTool, BrowserScrollTool, BrowserHoverTool,
     BrowserDragTool, BrowserFillTool, BrowserClipboardTool, BrowserWaitTool, BrowserEvaluateTool,
-    BrowserLogsTool, BrowserBatchTool,
+    BrowserLogsTool, BrowserBatchTool, BrowserDownloadsTool, BrowserRecipeTool,
 )
 
 BROWSER_TOOL_NAMES = frozenset(cls.name for cls in ALL_BROWSER_TOOLS)

@@ -17,7 +17,8 @@ from app.orchestration.tools.safe_path import safe_resolve
 from app.services.doc_parser import extract_plain_text, is_image
 
 _MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8MB
-_MAX_TEXT_CHARS = 16000
+# 单次返回的文本页长（plan-156-620：低于执行层的上下文预算 16000，保证分页结果不会被再次落盘）
+_MAX_TEXT_CHARS = 12000
 
 
 def _find_by_name(root: Path, rel: str) -> Path | None:
@@ -44,7 +45,9 @@ class ReadAttachmentTool(Tool):
         "也兼容相对路径（如 '1a2b3c/报告.docx'）。\n"
         "支持 docx / pdf / xlsx / csv / txt / md 等文本类（返回解析文本）"
         "以及 png/jpg/jpeg/gif/webp 图片（返回 base64 与元信息，多模态模型可直接理解）。\n"
-        "path 取自用户消息中附件的 path 字段，或对话上下文「用户上传的附件」列表中的路径。"
+        "path 取自用户消息中附件的 path 字段，或对话上下文「用户上传的附件」列表中的路径。\n"
+        "也用于读取被保存的长工具输出（工具结果里给出的 path 与 offset）。"
+        "内容较长时分段返回：结果末尾提示尚未读完时，按给出的 offset 再次调用，直到读完。"
     )
     risk_level = "low"
 
@@ -60,6 +63,10 @@ class ReadAttachmentTool(Tool):
                         "path": {
                             "type": "string",
                             "description": "附件路径——优先使用消息中给出的服务器绝对路径（如 'C:/Users/xx/AppData/Local/chatcoder/uploads/1a2b3c/报告.docx'），相对路径（'1a2b3c/报告.docx'）亦可",
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "从第几个字符开始读取（默认 0）；长内容按结果末尾提示的值续读",
                         },
                     },
                     "required": ["path"],
@@ -103,13 +110,29 @@ class ReadAttachmentTool(Tool):
                 data={"path": rel, "filename": target.name, "size": file_size, "base64": b64},
             )
 
-        text = extract_plain_text(target.name, data)
+        from app.orchestration.output_paging import SPILL_DIRNAME
+
+        if SPILL_DIRNAME in target.parts:
+            # 落盘的长工具输出：按原始字节解码，不经过附件解析的包装与首尾裁剪，
+            # 保证续读提示里的 offset 与原文逐字对齐（plan-156-620）
+            text = data.decode("utf-8", errors="replace")
+        else:
+            # AI 主动读附件时表格不限行数（篇幅由下方分段控制），此前只给前 200 行
+            text = extract_plain_text(target.name, data, max_rows=None)
         if text is None:
             return ToolResult(ok=False, output=f"无法解析附件内容: {rel}（不支持的类型）")
-        if len(text) > _MAX_TEXT_CHARS:
-            text = text[:_MAX_TEXT_CHARS] + "\n...(内容过长已截断)"
+        # plan-156-620：长内容按 offset 分段返回，不再截掉后半段且无法取回
+        from app.orchestration.output_paging import page_of, paging_hint, tool_ref
+
+        try:
+            offset = max(0, int(args.get("offset") or 0))
+        except (TypeError, ValueError):
+            offset = 0
+        page = page_of(text, offset, _MAX_TEXT_CHARS)
+        hint = paging_hint(page, tool_ref("read_attachment", path=rel, offset="{offset}"))
         return ToolResult(
             ok=True,
-            output=f"附件 {target.name} 内容:\n{text}",
-            data={"path": rel, "filename": target.name, "size": file_size, "text": text},
+            output=f"附件 {target.name} 内容:\n{page.text}{hint}",
+            data={"path": rel, "filename": target.name, "size": file_size, "text": page.text,
+                  "offset": page.offset, "total": page.total},
         )

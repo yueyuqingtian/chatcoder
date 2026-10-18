@@ -116,6 +116,8 @@ class SessionOut(BaseModel):
     fork_parent_id: int | None = None
     # 侧边会话（子会话）所属主会话 id；普通会话为 None
     side_parent_id: int | None = None
+    # plan-156-620：挂靠会话种类（side 侧边对话 / sub 执行子会话；主会话为 None）
+    side_kind: str | None = None
     worktree_path: str | None = None
     has_running: bool = False
     # 会话有后台执行中的工作流（程序 running）。与 has_running 并列：工作流在跑时本会话可能已没有运行中的 turn
@@ -418,6 +420,30 @@ class RollbackPreviewOut(BaseModel):
     files: list[RollbackPreviewFile]
     conflicts: list[RollbackConflict] = []
     affected: RollbackAffected = RollbackAffected()
+
+
+class RevertFilesResult(BaseModel):
+    """仅撤销单轮文件改动（plan-20261018-turn-changes）。
+
+    成功时返回恢复/删除/跳过数量与涉及文件；失败路径实际以 HTTP 4xx 返回，
+    code/reason 字段保留用于直接透传 service 结果，便于前端统一处理。
+    """
+    ok: bool
+    turn_id: int | None = None
+    restored: int = 0
+    deleted: int = 0
+    skipped: int = 0
+    conflicts: list[RollbackConflict] = []
+    files: list[str] = []
+    code: str | None = None
+    reason: str | None = None
+    later_turn_ids: list[int] = []
+
+
+class RevertLockOut(BaseModel):
+    """撤销顺序锁：latest_turn_id 为当前唯一可撤销的轮次。"""
+    latest_turn_id: int | None = None
+    pending_turn_ids: list[int] = []
 
 
 # ── 变更审核 ──

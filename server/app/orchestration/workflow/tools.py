@@ -185,10 +185,18 @@ def workflow_tool_schemas() -> list[dict[str, Any]]:
                     "传入则返回过程报告：各步骤状态与产出、改动文件、验证结果、每轮评估的问题、"
                     "返工原因与整改说明、遗留问题、待确认的步骤，以及各步骤的子代理编号"
                     "（需要更多细节时可用 subagent_inspect 查看）。"
+                    "过程报告里每个步骤只给结论开头；需要某个步骤的完整结论时传 node_key"
+                    "（同名步骤分布在多个子工作流时再传 flow_key），过长会分段返回，"
+                    "按结果末尾提示的 report_offset 续读到读完为止。"
                 ),
                 "parameters": {
                     "type": "object",
-                    "properties": {"program_id": {"type": "integer"}},
+                    "properties": {
+                        "program_id": {"type": "integer"},
+                        "node_key": {"type": "string", "description": "只看这个步骤的完整结论"},
+                        "flow_key": {"type": "string", "description": "步骤所在子工作流（node_key 重名时用于区分）"},
+                        "report_offset": {"type": "integer", "description": "分段读取结论的起始字符位置，默认 0"},
+                    },
                 },
             },
         },
@@ -494,6 +502,45 @@ def _status_text(snap: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def _node_report_text(snap: dict[str, Any], args: dict[str, Any]) -> str:
+    """单个步骤的完整结论（plan-156-620）：过程报告只给开头，这里按 report_offset 分段给全文。"""
+    from app.orchestration.subsession_report import REPORT_PAGE_CHARS, page_of, paging_hint, tool_ref
+
+    node_key = str(args.get("node_key") or "").strip()
+    flow_key = str(args.get("flow_key") or "").strip()
+    hits = [
+        (flow, node)
+        for flow in snap["flows"]
+        for node in flow["nodes"]
+        if node.get("key") == node_key
+        and (not flow_key or flow["run"].get("package_key") == flow_key)
+    ]
+    if not hits:
+        return f"工作流 {snap['run']['id']} 中没有步骤 {node_key}" + (f"（子工作流 {flow_key}）" if flow_key else "")
+    if len(hits) > 1:
+        flows = "、".join(str(f["run"].get("package_key")) for f, _ in hits)
+        return f"步骤 {node_key} 出现在多个子工作流中（{flows}），请同时传 flow_key 指定。"
+    flow, node = hits[0]
+    output = node.get("output") or {}
+    conclusion = str(output.get("findings") or output.get("summary") or output.get("text") or "").strip()
+    head = (
+        f"步骤『{flow['run'].get('package_key')}/{node_key}』{node.get('title') or ''}"
+        f"：{report.STATUS_LABEL.get(str(node.get('status')), str(node.get('status')))}"
+    )
+    if not conclusion:
+        return head + "\n（该步骤没有文字结论）"
+    try:
+        offset = max(0, int(args.get("report_offset") or 0))
+    except (TypeError, ValueError):
+        offset = 0
+    page = page_of(conclusion, offset, REPORT_PAGE_CHARS)
+    keys: dict[str, object] = {"program_id": snap["run"]["id"], "node_key": node_key}
+    if flow_key:
+        keys["flow_key"] = flow_key
+    call = tool_ref("workflow_status", **keys, report_offset="{offset}")
+    return f"{head}\n结论原文：\n{page.text}{paging_hint(page, call)}"
+
+
 async def run_workflow_tool(
     tool_name: str,
     args: dict[str, Any],
@@ -525,7 +572,11 @@ async def run_workflow_tool(
                     return "本会话还没有工作流。"
                 return "\n".join(f"- {p['id']} {p['title']}：{p['status']}" for p in programs[:10])
             snap = await _owned_program(int(args["program_id"]), session_id)
-            return snap if isinstance(snap, str) else _status_text(snap)
+            if isinstance(snap, str):
+                return snap
+            if args.get("node_key"):
+                return _node_report_text(snap, args)
+            return _status_text(snap)
         program_id = int(args.get("program_id") or 0)
         snap = await _owned_program(program_id, session_id)
         if isinstance(snap, str):

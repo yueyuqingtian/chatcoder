@@ -8,10 +8,11 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app.core.http_client import build_http_client
+from app.orchestration.output_paging import cap_raw
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 
 _TIMEOUT_SEC = 15
-_MAX_OUTPUT = 8000
+
 
 # v1.0: SSRF 防护配置
 _ALLOWED_SCHEMES = {"http", "https"}
@@ -70,7 +71,7 @@ def _validate_url(url: str) -> str | None:
 class WebFetchTool(Tool):
     name = "web_fetch"
     risk_level = "medium"
-    description = "HTTP GET 抓取 URL 的文本响应(超时 15s,截断 8KB)。需用户审批。"
+    description = "HTTP GET 抓取 URL 的文本响应(超时 15s；内容较长时完整保存并分段读取)。需用户审批。"
 
     def function_schema(self) -> dict:
         return {
@@ -107,8 +108,8 @@ class WebFetchTool(Tool):
                 text = resp.text
         except Exception as e:
             return ToolResult(ok=False, output="", error=f"抓取失败: {e}")
-        if len(text) > _MAX_OUTPUT:
-            text = text[:_MAX_OUTPUT] + "\n...(已截断)"
+        # plan-156-620：不再硬截断；超出上下文预算由执行层落盘并给出续读方式
+        text = cap_raw(text)
         return ToolResult(
             ok=True,
             output=text,

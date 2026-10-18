@@ -65,9 +65,10 @@ class Settings(BaseSettings):
     browser_headless: bool = True
 
     # ── 电脑操控（plan-334-1661）──
-    # 总开关：控制 desktop_* 工具集是否可用。默认关闭——这类能力会真实操作鼠标键盘，
-    # 必须由用户显式开启。
-    desktop_enabled: bool = False
+    # 总开关：控制 desktop_* 工具集是否可用。
+    # plan-20261018-operator-boost：改为默认开启——写操作仍受「仅前台窗口操作」护栏与权限模式审批约束，
+    # 用户要求开箱即可让 AI 操控电脑做自测与文件核对。
+    desktop_enabled: bool = True
     # 普通电脑操作子开关（点击/输入/截图/UIA 感知等）
     desktop_plain_ops_enabled: bool = True
     # 浏览器操作子开关（本能力统一入口；与 browser_enabled 的区别见设置页说明）
@@ -75,16 +76,19 @@ class Settings(BaseSettings):
     # 安全：写操作是否要求目标窗口处于前台。默认开启——这是防止「输入打到错误窗口」
     # 的关键护栏，关闭后风险自负。
     desktop_require_foreground: bool = True
-    # 截图默认画质（JPEG）与缩放长边。实测 maxDim 是体积的主要杠杆，
-    # JPEG q75 在速度上显著优于 PNG（本机 30ms vs 72ms）。
-    desktop_screenshot_quality: int = 75
-    desktop_screenshot_max_dim: int = 1600
+    # 截图默认画质（JPEG）与缩放长边（0 = 自动适配模型可见尺寸）。
+    # plan-20261018-operator-boost：画质默认 100；长边 0 起初表示「不缩放」，实测整屏原图会被模型服务端
+    # 再次缩小、模型按缩小后的图读坐标，点击整体偏到窗口外——因此 0 改为「自动缩到模型可见尺寸」，
+    # 显式设置的值也不会超过该尺寸（见 tools/desktop.py _model_safe_max_dim）。
+    desktop_screenshot_quality: int = 100
+    desktop_screenshot_max_dim: int = 0
     # 操作路线沉淀：命中已有路线时复用「通用原则」，降低模型思考与推理开销
     desktop_recipe_enabled: bool = True
     # plan-365-1757：「点准」相关开关。
-    # 截图元素编号：在截图上叠加编号矩形，模型按编号点击而不是自己换算像素坐标
-    # （微软 OmniParser 实测把图标正确标记率从 70.5% 提到 93.8%）。默认开启。
-    desktop_mark_shot: bool = True
+    # 截图元素编号：在截图上叠加编号矩形，模型按编号点击而不是自己换算像素坐标。
+    # plan-20261018-operator-boost：默认关闭——编号需要枚举元素并重绘图片（数百毫秒），
+    # 密集界面里编号框互相遮挡反而让模型选错号；不缩放截图 + 文字锚点更快也更准。
+    desktop_mark_shot: bool = False
     # 点击前校验档位（plan-365-1769 F5）：off / lenient / strict，默认 lenient。
     # 旧值布尔由 normalize_verify_mode 兼容迁移：true→lenient、false→off。
     # 为什么默认宽松：plan-365-1757 的「找不到目标即拒绝」在真实任务中造成操作反复失败；
@@ -266,6 +270,16 @@ class Settings(BaseSettings):
     subagent_reasoning_effort: str = ""
     # plan-156-619 S4e：子代理 / 子会话总开关（类型级开关已从 UI 移除，由它统一控制）
     subagent_enabled: bool = True
+    # plan-156-621：每轮用户消息注入「优先用子会话并行处理」的提示词。
+    # 关闭后不注入；只读 / 计划 / 工作流等不下发子会话工具的模式本身也不会注入。
+    parallel_subsession_hint: bool = True
+    # plan-20261018-operator-boost：GUI 操作（电脑操控 / 内置浏览器的多步操作）交给「操控子会话」执行。
+    # 操作本身不需要深度推理，却是延迟大户（每步一次模型往返）；交给低思考档的子会话，
+    # 主会话保留高思考深度处理设计、编码与结论。只在下发子会话工具的模式下生效。
+    operator_subsession_enabled: bool = True
+    # 操控子会话的思考深度："lowest" = 当前模型支持的最低非关闭档（默认）；
+    # "follow" = 跟随子会话默认设置；其余为具体档位（none / minimal / low / medium / high …）。
+    operator_reasoning_effort: str = "lowest"
     # plan-156-619 S7：综合工具卡各栏目的全局默认展开策略（true = 默认全展开）
     tool_card_sections_expanded: bool = True
 

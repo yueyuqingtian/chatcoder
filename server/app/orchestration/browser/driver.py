@@ -20,6 +20,10 @@
 | net_body | tab?, request_id | body, base64, mime |
 | viz | tab?, label, rect? | — |
 | clipboard | action(read·write), text? | text |
+| downloads | wait_ms?, limit?（仅桌面端） | dir, items[{id,filename,path,state,received,total,url}] |
+
+下载（plan-20261018-operator-boost）：主进程把面板网页的下载保存到「浏览器下载目录」，开始 / 结束都作为
+events[{type:download, state(started·completed·cancelled·interrupted), filename, path, bytes?}] 随动作结果回报。
 
 坐标一律为页面 CSS 像素；模型给的坐标若来自截图，按最近一次截图的缩放比换算，并带上截图时的滚动/视口/地址，
 由页面工具包补偿滚动或拒绝过期坐标。
@@ -156,12 +160,49 @@ def _events_lines(resp: dict) -> list[str]:
         elif t == "popup":
             out.append(f"页面打开了新窗口，已作为新标签 {ev.get('tab')}：{ev.get('url') or ''}")
         elif t == "download":
-            out.append(f"触发下载：{ev.get('filename') or ev.get('url') or ''}")
+            out.append(_download_line(ev))
         elif t == "crash":
             out.append("页面渲染进程崩溃，已重新加载")
         elif t == "nav_error":
             out.append(f"页面加载失败：{ev.get('message') or ''}")
     return out
+
+
+def _size_text(n: Any) -> str:
+    try:
+        b = int(n or 0)
+    except (TypeError, ValueError):
+        return ""
+    if b <= 0:
+        return ""
+    if b < 1024:
+        return f"{b} B"
+    if b < 1024 * 1024:
+        return f"{b / 1024:.1f} KB"
+    return f"{b / 1024 / 1024:.1f} MB"
+
+
+# plan-20261018-operator-boost：下载完成后的下一步建议——让模型马上决定用哪种工具核对文件，
+# 而不是只报一句「已下载」就结束（表格 / 文档类最常见的问题是格式与数据，需要打开看）。
+_DOWNLOAD_NEXT = (
+    "可用 fs_read 读取文本类文件，或 terminal_exec 用脚本校验（如 python 读取 xlsx/csv 核对行数与表头）；"
+    "需要看排版时用电脑操控 desktop_apps 打开关联软件（如 WPS / Excel）查看。"
+)
+
+
+def _download_line(ev: dict) -> str:
+    """下载事件（主进程回报）→ 一行文案。started 只说明去向，completed 给出路径、大小与核对建议。"""
+    state = str(ev.get("state") or "")
+    name = ev.get("filename") or ev.get("url") or ""
+    where = ev.get("path") or ""
+    if state == "completed":
+        size = _size_text(ev.get("bytes"))
+        return f"下载完成：{where}" + (f"（{size}）" if size else "") + "。" + _DOWNLOAD_NEXT
+    if state in ("cancelled", "interrupted"):
+        return f"下载{'已取消' if state == 'cancelled' else '中断'}：{name}"
+    if state == "started":
+        return f"开始下载：{name} → {where}（完成情况用 browser_downloads 查看，wait_ms 可等待完成）"
+    return f"触发下载：{name}"
 
 
 _LEVEL_ZH = {"error": "错误", "warning": "警告", "success": "成功", "info": "提示"}
@@ -171,7 +212,11 @@ def _settle_lines(resp: dict, before_url: str = "") -> list[str]:
     st = resp.get("settle") or {}
     lines = []
     url = st.get("url") or resp.get("url") or ""
-    if st.get("navigated") or (before_url and url and url != before_url):
+    # plan-20261018-operator-boost：点击下载链接会触发一次「开始导航」随即转为下载，页面并没有离开——
+    # 地址没变且本次有下载事件时不报「已跳转」，否则模型会以为页面换了而去重新读取
+    downloaded = any((ev or {}).get("type") == "download" for ev in resp.get("events") or [])
+    fake_nav = downloaded and (not before_url or url == before_url)
+    if (st.get("navigated") and not fake_nav) or (before_url and url and url != before_url):
         lines.append(f"页面已跳转：{_clip(st.get('title') or resp.get('title') or '', 60)} — {url}")
     elif st.get("mutations") or st.get("notices") or st.get("added"):
         lines.append(f"页面内容有变化（{st.get('mutations') or 0} 处 DOM 更新）")
@@ -367,6 +412,35 @@ class BrowserDriver:
         else:
             lines.append("下一步：browser_snapshot 获取可交互元素（含 ref），或 browser_get_text 读正文。")
         return Outcome(True, "\n".join(lines), data={"url": resp.get("url"), "title": resp.get("title"), "tab": resp.get("tab")})
+
+    async def downloads(self, args: dict) -> Outcome:
+        """最近的下载（plan-20261018-operator-boost）：文件都保存在设置的「浏览器下载目录」，wait_ms 可等进行中的完成。"""
+        try:
+            wait_ms = max(0, min(int(args.get("wait_ms") or 0), 120000))
+            limit = max(1, min(int(args.get("limit") or 10), 50))
+        except (TypeError, ValueError) as e:
+            raise ActionError("wait_ms / limit 必须是数字") from e
+        host = await self._host()
+        if host.kind != "desktop":
+            return Outcome(True, "当前没有连接桌面端（使用后台兜底浏览器），下载记录不可用；页面触发的下载会在动作结果中提示。")
+        resp = await self.call("downloads", {"wait_ms": wait_ms, "limit": limit}, timeout=_T_DEFAULT + wait_ms / 1000)
+        items = resp.get("items") or []
+        lines = [f"下载目录：{resp.get('dir') or '(未知)'}"]
+        if not items:
+            lines.append("还没有下载记录。触发下载的点击结果里会提示「开始下载」。")
+            return Outcome(True, "\n".join(lines), data=resp)
+        zh = {"progressing": "下载中", "completed": "已完成", "cancelled": "已取消", "interrupted": "已中断"}
+        for d in reversed(items):
+            state = str(d.get("state") or "")
+            size = _size_text(d.get("received"))
+            total = _size_text(d.get("total"))
+            prog = f"（{size} / {total}）" if state == "progressing" and total else (f"（{size}）" if size else "")
+            lines.append(f"- {zh.get(state, state)}{prog}：{d.get('path') or d.get('filename')}")
+        if any(str(d.get("state")) == "completed" for d in items):
+            lines.append(_DOWNLOAD_NEXT)
+        if any(str(d.get("state")) == "progressing" for d in items):
+            lines.append("仍有下载未完成：可传 wait_ms（如 15000）等待完成后再核对文件。")
+        return Outcome(True, "\n".join(lines), data=resp)
 
     async def tabs(self, args: dict) -> Outcome:
         action = str(args.get("action") or "list").lower()

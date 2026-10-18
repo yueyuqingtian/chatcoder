@@ -5,7 +5,7 @@
  * 共享内核 MessageFlowCore：虚拟化 + 贴底滚动 + 跳底按钮 + 入场动画 + 搜索 + JumpDots，
  * 与参考项目「同一渲染引擎 + 数据注入」对齐——中间面板与右面板共用同一注册插件。
  */
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, memo, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, useId, memo, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { TimelineEntry, ToolNode, TurnItem } from "./timeline";
 import { createTimelineBuilder, createRoundMerger, msgText, lastPersistedText, getTurnById, tailRoundIndex, pruneModelDividers } from "./timeline";
@@ -45,6 +45,23 @@ const MOTION_RECT_THROTTLE_MS = 120;
  *  正常路径（双帧补滚 / 锚点还原最多 5 帧校正）均在该窗口内完成，
  *  超时即视为标记泄漏，自动恢复真实滚动判定。 */
 const PROGRAMMATIC_SCROLL_GRACE_MS = 320;
+
+/** 进入「贴底跟随」的距离阈值（px）。
+ *  取 60 而非 0：抵抗高 DPI 缩放的浮点舍入与末尾元素的 margin/padding 波动。 */
+const NEAR_BOTTOM_ENTER_PX = 60;
+
+/** 解除「用户接管」的宽松阈值（px）。
+ *  【plan-20261018-sticky-fix】这里必须明显大于 `NEAR_BOTTOM_ENTER_PX`：
+ *  滚动容器的 `scrollHeight` 存在**结构性余量**（实测 39px：虚拟列表总高 + 尾部留白
+ *  与实际内容末端不相等）。用户把滚动条拖到最底时物理 `scrollTop` 已到 maxScroll，
+ *  但 `distance` 仍是 39 —— 旧实现要求 `distance < 8` 才解除接管，于是永远解不开：
+ *  既不再自动贴底，也不再显示「回到底部」（39 < 120）。 */
+const STICKY_RELEASE_PX = 72;
+
+/** `suppressFollowRef` 的兜底有效期（ms）。宽度收尾正常在数帧内完成（含 5 帧像素校正
+ *  + 320ms 程序滚动宽限），超过该时长仍为 true 即视为标记泄漏，恢复真实滚动判定——
+ *  否则一旦某条路径漏复位，onScroll 会永久早退（贴底 / 接管解除 / 按钮显隐全部冻结）。 */
+const SUPPRESS_FOLLOW_MAX_MS = 1500;
 
 /** plan-75-334 阶段1：子代理面板不消费「turn 错误抑制列表」——固定传空数组，
  *  避免每次渲染新建 [] 破坏 TurnGroup 的 memo 命中。 */
@@ -108,6 +125,9 @@ export interface MessageStreamProps {
     jumpDots?: boolean;
     search?: boolean;
     planCard?: boolean;
+    /** plan-156-621：后续任务建议卡。侧边对话复用本组件时关闭——
+     *  建议属于主会话那轮收尾，显示在侧边对话里会把用户切离当前会话。 */
+    suggestionCard?: boolean;
     /** 消息操作行能力：full=完整（赞踩/重试/回滚）；copy-only=仅复制；none=无操作行 */
     actions?: "full" | "copy-only" | "none";
   };
@@ -229,7 +249,15 @@ function MessageFlowCore({
 }: MessageFlowCoreProps) {
   // plan-75-334 阶段0：记录组件渲染（仅采集期间统计，零开销）
   recordComponentRender("messageFlowCore");
-  
+
+  /* plan-20261018-sticky-fix：本实例的唯一标识。
+     同页可能同时存在多个 MessageFlowCore（主消息流 + 右面板「侧边对话」+「子代理」，
+     且右面板标签常驻挂载）。reconcile 任务表以 id 为键、后注册者覆盖前者，
+     固定 id 会让主实例的「还原滚动锚点 / 提交虚拟器视口尺寸」被别处顶掉——
+     锚点还原永不执行、suppressFollowRef 永久为真、onScroll 早退，
+     表现就是「展开过右面板后新消息不再自动贴底，手动下滚也救不回来」。 */
+  const instanceId = useId();
+
   const parentRef = useRef<HTMLDivElement>(null);
   /** plan-547: 虚拟内容容器（RO 监听测高变化保持贴底） */
   // plan-282-1444：显式含 null 联合类型，保证 ref 可变（需在回调里同时交给虚拟列表）
@@ -274,6 +302,12 @@ function MessageFlowCore({
    *  据此更新会把「贴底」误判成「用户已离开底部」（按钮常驻 + 新消息不自动滚动）。
    *  抑制解除时由 finishRestore() 按最终几何统一同步一次。 */
   const suppressFollowRef = useRef(false);
+  /** 上述抑制标记的置位时刻：用于超时兜底（见 SUPPRESS_FOLLOW_MAX_MS）。 */
+  const suppressFollowAtRef = useRef(0);
+  /** 最近一次滚轮方向：1=向下，-1=向上，0=未知（滚动条拖拽 / 键盘翻页）。
+   *  解除用户接管需要方向信息——只有「用户主动向下滚到底」才放宽到 STICKY_RELEASE_PX，
+   *  否则轻微上滑（几十像素）会被宽松阈值立刻判回跟随，又变成「划不动」的鬼畜循环。 */
+  const lastWheelDirRef = useRef(0);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchKeyword, setSearchKeyword] = useState("");
   const [activeMatchIndex, setActiveMatchIndex] = useState(0);
@@ -535,17 +569,32 @@ function MessageFlowCore({
     }
     if (!el) return;
     // 宽度收尾期间不更新跟随态：重排尚未完成，distance 不代表用户意图。
-    if (suppressFollowRef.current) return;
+    // 但必须有超时兜底——抑制标记一旦漏复位，onScroll 会永久早退（见 SUPPRESS_FOLLOW_MAX_MS）。
+    if (suppressFollowRef.current) {
+      if (performance.now() - suppressFollowAtRef.current < SUPPRESS_FOLLOW_MAX_MS) return;
+      suppressFollowRef.current = false;
+    }
     const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-    // 恢复 v0.2.0 贴底阈值 60px（抵抗高 DPI 缩放浮点舍入与末尾元素 margin/padding 波动）
-    const isNearBottom = distance < 60;
+    // 物理到底：scrollTop 已到浏览器允许的最大值。这是唯一不受 scrollHeight 结构性余量
+    // 影响的判定（见 STICKY_RELEASE_PX 注释），命中即一定处于「看到内容末端」。
+    const atPhysicalBottom = el.scrollTop >= el.scrollHeight - el.clientHeight - 2;
+    const isNearBottom = distance < NEAR_BOTTOM_ENTER_PX;
     if (userScrollOverrideRef.current) {
-      // 用户接管期间：只有真正滚回贴底（< 8px）才恢复跟随；否则"还差几十像素"的轻微
-      // 上滑会被 isNearBottom(60px) 立刻判回跟随 → 内容增长再拉回底部（鬼畜）
-      if (distance < 8) {
+      /* 用户接管期间：只有「确实回到底部」才恢复跟随。
+         三条放行条件（任一成立即解除）：
+           ① 物理到底 —— 覆盖 scrollHeight 余量，用户拖到底一定解开；
+           ② 距离 < 8px —— 无余量时的精确贴底；
+           ③ 正在向下滚且进入宽松贴底区 —— 用户明确在回底部途中，不必逼他精确到底。 */
+      const backToBottom = atPhysicalBottom
+        || distance < 8
+        || (lastWheelDirRef.current > 0 && distance <= STICKY_RELEASE_PX);
+      if (backToBottom) {
         userScrollOverrideRef.current = false;
         setAutoScroll(true);
         autoScrollRef.current = true;
+        setShowScrollBottom(false);
+        scheduleSpy();
+        return;
       }
     } else {
       setAutoScroll(isNearBottom);
@@ -565,6 +614,8 @@ function MessageFlowCore({
     const el = parentRef.current;
     if (!el) return;
     const onWheelCapture = (e: WheelEvent) => {
+      // 记录方向：解除用户接管时用它区分「回到底部途中」与「继续上滑」。
+      if (e.deltaY !== 0) lastWheelDirRef.current = e.deltaY > 0 ? 1 : -1;
       if (e.deltaY < 0 && !userScrollOverrideRef.current) {
         userScrollOverrideRef.current = true;
         autoScrollRef.current = false;
@@ -652,7 +703,24 @@ function MessageFlowCore({
       if ((e as CustomEvent<{ active?: boolean }>).detail?.active === false) stickAfterMotion();
     };
     const onPointerUp = () => stickAfterMotion();
+    /* plan-20261018-sticky-fix：面板展开/折叠（panel-anim）收尾补一次贴底。
+       右面板展开走的是 applyPaneUpdate（登记 panel-anim，结束派发 chatcoder:panel-drag-end），
+       它的收尾时刻**早于**本次 pointerup、也没有窗口几何运动——此前三条补做路径全都不命中，
+       RO 在运动期记下的 missedStick 无人消费，于是「展开面板后新消息不再自动贴底」。 */
+    const onPaneSettled = () => stickAfterMotion();
+    /* 内容增长本身不派发 scroll 事件：若用户上一次滚动已把跟随态关掉（例如展开面板导致
+       scrollHeight 瞬变被误判为「离开了底部」），这里就不会再有任何东西把它拉回来。
+       因此 RO 回调里除贴底外，还按当前几何同步一次跟随态与「回到底部」按钮。 */
+    const syncFollowState = () => {
+      if (userScrollOverrideRef.current) return; // 用户接管期间不打扰
+      const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+      const atBottom = distance < NEAR_BOTTOM_ENTER_PX;
+      autoScrollRef.current = atBottom;
+      setAutoScroll(atBottom);
+      setShowScrollBottom(distance > 120);
+    };
     window.addEventListener("chatcoder:window-motion", onMotionEnd);
+    window.addEventListener("chatcoder:panel-drag-end", onPaneSettled);
     window.addEventListener("pointerup", onPointerUp, true);
     const ro = new ResizeObserver(() => {
       // 问题4 回退：内容高度变化时若处于跟随态直接贴底；用户上滑已由 onScroll
@@ -661,10 +729,12 @@ function MessageFlowCore({
       // 本轮补充：用户接管期间（已上滑）RO 也不得贴底，否则内容增长会把视图拉回底部。
       if (inMotion()) { missedStick = true; return; } // 运动中不读布局属性（见上方说明）
       stick();
+      syncFollowState();
     });
     ro.observe(inner);
     return () => {
       window.removeEventListener("chatcoder:window-motion", onMotionEnd);
+      window.removeEventListener("chatcoder:panel-drag-end", onPaneSettled);
       window.removeEventListener("pointerup", onPointerUp, true);
       ro.disconnect();
     };
@@ -684,6 +754,7 @@ function MessageFlowCore({
     const capture = () => {
       // 从这里到 restore 完成，跟随态一律由 finishRestore() 收口（见 suppressFollowRef 注释）
       suppressFollowRef.current = true;
+      suppressFollowAtRef.current = performance.now();
       const nodes = Array.from(el.querySelectorAll<HTMLElement>("[data-index]"));
       const viewportTop = el.getBoundingClientRect().top + el.clientTop;
       const firstNode = nodes.find((node) => node.getBoundingClientRect().bottom > viewportTop);
@@ -731,7 +802,9 @@ function MessageFlowCore({
       const el2 = parentRef.current;
       if (!el2) return;
       const distance = el2.scrollHeight - el2.scrollTop - el2.clientHeight;
-      const atBottom = distance < 60;
+      // 与 onScroll 同口径：物理到底优先（scrollHeight 的结构性余量会让 distance 恒 >0）
+      const atPhysicalBottom = el2.scrollTop >= el2.scrollHeight - el2.clientHeight - 2;
+      const atBottom = atPhysicalBottom || distance < NEAR_BOTTOM_ENTER_PX;
       if (atBottom) userScrollOverrideRef.current = false;
       autoScrollRef.current = atBottom;
       setAutoScroll(atBottom);
@@ -850,9 +923,9 @@ function MessageFlowCore({
     };
     // plan-31-151 S4：锚点收尾路径去重——删除 pointerup 捕获监听与 panel-drag-end 事件，
     //   只保留 reconcile order 30 一条路径；窗口 resize 路径仍走 chatcoder:window-motion。
-    const offRect = registerReconcileTask("mf-virtualizer-rect", RECONCILE_ORDER.virtualizerRect,
+    const offRect = registerReconcileTask(`mf-virtualizer-rect:${instanceId}`, RECONCILE_ORDER.virtualizerRect,
       "提交虚拟器视口尺寸", () => settleRectRef.current?.());
-    const offAnchor = registerReconcileTask("mf-scroll-anchor", RECONCILE_ORDER.scrollAnchor,
+    const offAnchor = registerReconcileTask(`mf-scroll-anchor:${instanceId}`, RECONCILE_ORDER.scrollAnchor,
       "还原滚动锚点", () => settleAfterMotion());
     const onMotionEnd = (e: Event) => {
       const active = (e as CustomEvent<{ active?: boolean }>).detail?.active;
@@ -907,8 +980,11 @@ function MessageFlowCore({
       window.removeEventListener("chatcoder:panel-drag-start", onDragStart);
       window.removeEventListener("chatcoder:pane-change-start", onPaneChangeStart);
       ro.disconnect();
+      /* 卸载兜底：本 effect 重跑会丢掉在途的 restore，若此时仍留着抑制标记，
+         新闭包里没有任何东西会清除它（onScroll 从此永久早退）。 */
+      suppressFollowRef.current = false;
     };
-  }, [virtualizer, markProgrammaticScroll, clearProgrammaticScroll]);
+  }, [virtualizer, markProgrammaticScroll, clearProgrammaticScroll, instanceId]);
 
   /** 已做过"会话首次填充贴底"的会话标识（切换会话时重新进入首次填充分支） */
   const initSessionKeyRef = useRef<string | number | null>(null);
@@ -1270,12 +1346,15 @@ function MainMessageFlow({
   clearScrollTarget,
   className,
   emptyText,
+  suggestionCard,
 }: {
   actions?: "full" | "copy-only" | "none";
   scrollTarget?: { threadId?: number; turnId?: number } | null;
   clearScrollTarget?: () => void;
   className?: string;
   emptyText?: string;
+  /** plan-156-621：false 时不渲染主会话的后续任务建议卡（侧边对话场景） */
+  suggestionCard?: boolean;
 }) {
   const getScoped = useScopedGetter();
   const messages = useScoped("messages");
@@ -1472,7 +1551,8 @@ function MainMessageFlow({
         // plan-156-619 S10：后续任务建议卡优先级最高——它是本轮收尾后的「下一步」，
         // 与错误卡同为收尾信息，但建议是正向出口，放在更靠前的位置更容易被看到。
         // 运行中 / 等待子代理时不展示：建议只属于「已收口」的一轮。
-        !isRunning && pendingSubagents === 0 && !activeDebug && !flowError ? <SuggestionCard />
+        // plan-156-621：侧边对话等复用场景可通过 suggestionCard=false 关闭。
+        !isRunning && pendingSubagents === 0 && !activeDebug && !flowError && suggestionCard !== false ? <SuggestionCard />
           // v39: 后台子代理运行期间主会话保持“运行中”——主 turn 未跑但有子代理在跑时，
           // 用与流式状态行同款样式显示「等待子代理结束…」（完成后服务端自动唤醒新一轮）。
           : !isRunning && pendingSubagents > 0 ? <SubagentWaitingLine count={pendingSubagents} />
@@ -1626,6 +1706,7 @@ export function MessageFlow(props: MessageStreamProps) {
   return (
     <MainMessageFlow
       actions={props.features?.actions ?? "full"}
+      suggestionCard={props.features?.suggestionCard ?? true}
       scrollTarget={props.scrollTarget}
       clearScrollTarget={props.clearScrollTarget}
       className={props.className}

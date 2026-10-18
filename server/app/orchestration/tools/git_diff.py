@@ -8,13 +8,14 @@ import asyncio
 import logging
 from typing import Any
 
+from app.orchestration.output_paging import cap_raw
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 from app.orchestration.tools.git_root import resolve_repo_for_cwd, list_git_repos
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_MAX_OUTPUT = 6000
+
 
 
 class GitDiffTool(Tool):
@@ -128,8 +129,8 @@ class GitDiffTool(Tool):
                 if fname and not fname.endswith(("files changed", "file changed")):
                     changed_files.append(fname)
 
-        if len(out) > _MAX_OUTPUT:
-            out = out[:_MAX_OUTPUT] + f"\n...(已截断,共 {len(out)} 字符)"
+        # plan-156-620：不再硬截断；超出上下文预算由执行层落盘并给出续读方式
+        out = cap_raw(out)
 
         logger.debug("git.diff repo=%s files=%s", repo_root, changed_files)
         return ToolResult(

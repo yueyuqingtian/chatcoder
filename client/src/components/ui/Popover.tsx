@@ -6,7 +6,7 @@
  *  - 关闭：点外部（pointerdown 捕获阶段）+ Esc；嵌套浮层渲染为父浮层的 DOM 后代，
  *    点击子浮层不算父浮层「外部」，Esc 只关闭最上层；
  *  - 进出场：usePresence 驱动 data-state，退场动画播完再卸载。 */
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEventHandler, type ReactNode, type RefObject } from "react";
 import { usePresence } from "./usePresence";
 
 export type PopoverPlacement =
@@ -44,6 +44,9 @@ export interface PopoverProps {
   "aria-label"?: string;
   onMouseEnter?: () => void;
   onMouseLeave?: () => void;
+  /** plan-156-621：键盘支持——菜单打开后可用方向键在选项间移动 */
+  onKeyDown?: KeyboardEventHandler<HTMLDivElement>;
+  tabIndex?: number;
 }
 
 export function Popover({

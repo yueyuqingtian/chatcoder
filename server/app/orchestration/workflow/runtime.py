@@ -1671,7 +1671,7 @@ class WorkflowRuntime:
         if request.kind == "review":
             await self._handle_review(node_id, result)
             return
-        output = dict(result.output or {"text": result.text[:4000]})
+        output = dict(result.output or {"text": result.text})  # plan-156-620：产出原样落库，不截断
         if request.kind == "execute":
             # 返工记录（plan-workflow-collab）：每轮要处理什么、整改说明是什么，随过程报告交给主代理
             ctx = await store.load_node_context(node_id)
@@ -1745,7 +1745,7 @@ class WorkflowRuntime:
             # （plan-workflow-collab：不再卡在“采纳 / 中止”的闸门上）
             base = decision.reason.split("；返工次数已用尽")[0]
             decision = ReviewDecision("record", f"{base}，已记入汇报")
-        output = dict(result.output or {"text": result.text[:4000]})
+        output = dict(result.output or {"text": result.text})  # plan-156-620：产出原样落库，不截断
         rounds = list(((node.get("output") or {}).get("rounds")) or [])
         rounds.append(_round_entry(len(rounds) + 1, decision, verdict, checks, checks_ok))
         output["rounds"] = rounds[-8:]

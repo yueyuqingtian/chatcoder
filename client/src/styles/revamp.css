@@ -86,7 +86,10 @@
 @keyframes dlg-in { from { opacity: 0; transform: translateY(8px) scale(0.965); } to { opacity: 1; transform: none; } }
 
 /* ── 右侧面板：弹簧滑入 + 快捷入口卡片 ── */
-.app-pane-right:not(.collapsed) .right-panel { animation: rp-in var(--dur-pop) var(--spring-soft) both; }
+/* plan-20261018-operator-boost：填充模式用 backwards 而不是 both——both 会在动画结束后一直保留 transform，
+   使 .right-panel 成为 position:fixed 后代的包含块：浏览器停泊容器（fixed 铺满视口）被收进面板范围并裁剪，
+   面板展开但前台是别的标签时，停泊的网页可能只剩一部分在渲染。backwards 只在动画开始前生效，结束后不留痕。 */
+.app-pane-right:not(.collapsed) .right-panel { animation: rp-in var(--dur-pop) var(--spring-soft) backwards; }
 @keyframes rp-in { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: none; } }
 .right-panel { border-radius: var(--r-lg); border: 1px solid var(--border-light); }
 /* plan-128-518：入口页改为单层行式列表，悬停只变底色，旧的卡片位移样式已移除（见 panel.css .rp-launch-row） */

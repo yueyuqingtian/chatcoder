@@ -19,6 +19,10 @@ app.commandLine.appendSwitch("enable-gpu-rasterization");        // GPU 光栅�
 app.commandLine.appendSwitch("enable-zero-copy");                // 零拷贝纹理上传，降低显存带宽占用
 app.commandLine.appendSwitch("force_high_performance_gpu");      // 多显示适配器（含虚拟显示器）时优先独显
 app.commandLine.appendSwitch("disable-gpu-process-crash-limit"); // GPU 进程崩溃后不永久降级为软件渲染
+// plan-20261018-operator-boost：关闭 Windows 原生遮挡检测。Chromium 会把被其它窗口完全盖住的窗口按「后台标签」处理
+// （停止出帧、JS 节流），用户切到别的软件时 AI 在内置浏览器里的截图与输入就会受阻。自动化框架（Playwright 等）
+// 同样默认关闭遮挡降级；代价是被遮挡时仍按可见渲染，最小化不受影响（仍按隐藏处理）。
+app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion");
 // 实验结论（plan-75-335）：num-raster-threads 在渲染进程的有效上限为 4（实测设 2 生效为 2、
 // 设 8 被收敛为 4），本机默认已在上限，故不设置该开关，避免无效配置。
 

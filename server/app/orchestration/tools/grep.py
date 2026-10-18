@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
+from app.orchestration.output_paging import cap_raw
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 from app.orchestration.tools.safe_path import safe_resolve
 
@@ -20,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_FILE_SIZE = 512 * 1024  # 跳过大于 512KB 的文件
 _MAX_MATCHES = 50            # 最多返回 50 个匹配
-_MAX_OUTPUT = 10000          # 输出上限（字符）
+
 _MAX_FILES_SCAN = 2000       # 最多扫描 2000 个文件
 _DEFAULT_EXCLUDE_DIRS = {
     ".git", "node_modules", "__pycache__", ".venv", "venv",
@@ -219,8 +220,8 @@ class GrepTool(Tool):
             body = "\n".join(results)
             output = f"{header}\n\n{body}"
 
-        if len(output) > _MAX_OUTPUT:
-            output = output[:_MAX_OUTPUT] + "\n...(已截断)"
+        # plan-156-620：不再按 _MAX_OUTPUT 硬截断（截掉的匹配无法取回）；超出上下文预算由执行层落盘续读
+        output = cap_raw(output)
 
         logger.debug(
             "grep pattern=%s path=%s matches=%d files=%d",
@@ -309,8 +310,8 @@ class GrepTool(Tool):
                 header += f" (已达上限 {_MAX_MATCHES}，可能还有更多)"
             output = header + "\n\n" + "\n".join(lines)
 
-        if len(output) > _MAX_OUTPUT:
-            output = output[:_MAX_OUTPUT] + "\n...(已截断)"
+        # plan-156-620：同上，超出上下文预算由执行层落盘续读
+        output = cap_raw(output)
 
         return ToolResult(
             ok=True,

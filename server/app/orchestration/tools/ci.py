@@ -7,6 +7,7 @@ import asyncio
 from typing import Any
 
 from app.core.config import settings
+from app.orchestration.output_paging import cap_raw
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 
 
@@ -81,8 +82,8 @@ class CiRunTool(Tool):
         out = (stdout or b"").decode("utf-8", errors="replace")
         err = (stderr or b"").decode("utf-8", errors="replace")
         combined = out + (("\n-- stderr --\n" + err) if err else "")
-        if len(combined) > 6000:
-            combined = combined[:6000] + "\n...(已截断)"
+        # plan-156-620：不再截到 6000 字（失败日志的关键报错常在末尾）；超出上下文预算由执行层落盘续读
+        combined = cap_raw(combined)
 
         return ToolResult(
             ok=proc.returncode == 0,

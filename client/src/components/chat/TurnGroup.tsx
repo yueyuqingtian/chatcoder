@@ -29,6 +29,7 @@ import {
   splitFlowSegments,
 } from "./timeline";
 import { useChatStore } from "../../store/chat";
+import { TurnChangesCard } from "./TurnChangesCard";
 import { parseUtc } from "../../utils/time";
 import { MessageImageGrid, attachmentsOf } from "./AttachmentCard";
 import { UserBubble } from "./UserBubble";
@@ -444,6 +445,14 @@ export const TurnGroup = memo(function TurnGroup({
   /** plan-282-1416（问题3）：把 AI 操作行渲染在「AI 内容块末尾」。
    *  plan-282-1421：门控改为 turnFinished——执行中（含乐观发送与状态未落库的空档）
    *  一律不渲染，避免按钮随流式新增条目上下跳动；必须等本轮进入终态才出现。 */
+  /** plan-20261018-turn-changes：本轮是否有文件变更卡片。
+   *  有卡片时把 AI 操作行移到卡片下方（用户要求：复制按钮组在变更卡片之下）；
+   *  没有卡片时保持原位置（紧跟最后一个 AI 内容项），否则运行中注入的用户消息
+   *  会被这条操作行包进来（见 plan-282-1416）。selector 返回布尔，值不变不重渲染。 */
+  const hasChangeCards = useChatStore((s) =>
+    roundIds.some((id) => (s.turnChanges[id]?.length ?? 0) > 0),
+  );
+
   /** 条目的尾部：未落位的兜底子代理卡（最后一个 AI 内容项之后）与 AI 操作行（锚点条目，终态后显示）。
    *  挂靠了节点卡的条目，尾部改由挂靠段渲染，使操作行位于节点卡之后。 */
   const renderItemTail = (i: number) => (
@@ -451,7 +460,7 @@ export const TurnGroup = memo(function TurnGroup({
       {/* plan-330-1648 M5-b: 未落位的子代理卡片渲染在**最后一个 AI 内容项之后**，
           而不是过程容器末尾——否则卡片会出现在 AI 文本上方（用户反馈问题1）。 */}
       {i === lastAiItemIdx && subagentNode}
-      {i === actionAnchorIdx && turnFinished && (
+      {i === actionAnchorIdx && turnFinished && !hasChangeCards && (
         <MessageActions
           entry={entry}
           onRollback={onRollback}
@@ -682,7 +691,7 @@ export const TurnGroup = memo(function TurnGroup({
   };
 
   return (
-    <div className="turn-group">
+    <div className={`turn-group${turnFinished && flow === "main" && !rolledBack && hasChangeCards ? " has-changes" : ""}`}>
       {rolledBack && (
         <div className="turn-rolledback-banner">
           <IconRotateCcw size={12} />
@@ -762,6 +771,31 @@ export const TurnGroup = memo(function TurnGroup({
           {/* plan-282-1416（问题3 根治）：AI 操作行不再挂在 .turn-flow 底部——
               它已由 renderAiItemWithActions 紧跟最后一个 AI 内容项输出，
               因此运行中注入的用户消息（时间序在后）不再被这条操作行包进来。 */}
+        </div>
+      )}
+
+      {/* plan-20261018-turn-changes：本轮文件变更卡片。
+          只在本轮进入终态后展示（运行中不闪），且只读该轮自己的写盘记录——
+          上一轮的卡片内容随轮次固定，不会因为新轮次完成而被覆盖。
+          合并续跑轮（roundIds 多个）时逐轮各出一张卡，撤销仍是按轮粒度的批次。 */}
+      {turnFinished && flow === "main" && !rolledBack && roundIds.length > 0 && (
+        <div className="turn-changes-stack">
+          {roundIds.map((id) => <TurnChangesCard key={id} turnId={id} />)}
+        </div>
+      )}
+
+      {/* plan-20261018-turn-changes：有变更卡片时，本轮 AI 操作行（复制 / 赞 / 踩 / 重新生成 / 回滚）
+          改挂到卡片下方，形成「内容 → 变更清单 → 操作行」的顺序。
+          无卡片时仍由 renderItemTail 紧跟最后一个 AI 内容项，避免把运行中注入的用户消息包进来。 */}
+      {turnFinished && hasChangeCards && actionAnchorIdx >= 0 && (
+        <div className="turn-changes-actions">
+          <MessageActions
+            entry={entry}
+            onRollback={onRollback}
+            scope="ai"
+            actions={actions}
+            ownerId={itemMsgId(items[actionAnchorIdx])}
+          />
         </div>
       )}
     </div>

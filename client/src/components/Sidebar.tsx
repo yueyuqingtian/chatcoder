@@ -7,10 +7,11 @@
  */
 import { notify } from "../store/toast";
 import { IxNewChat, IxSearch, IxAutomation, IxExtensions, IxSettings, IxWorkflow } from "./iconkit/StackIcons";
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { ProjectOut, SessionOut } from "../api/client";
 import { api } from "../api/client";
-import { useChatStore } from "../store/chat";
+import { patchSession, useChatStore } from "../store/chat";
 import { sessionWorkflowRunning, useWorkflowStore } from "../store/workflow";
 import { useDraftsStore } from "../store/drafts";
 import { useUpdaterStore } from "../store/updater";
@@ -120,6 +121,9 @@ function saveCollapsedProjects(val: Record<number, boolean>) {
 }
 
 /** 会话是否执行中：服务端的轮次 / 工作流标记，或本地得知的后台工作流在跑（工作流在跑时轮次可能已结束） */
+/** plan-156-620：左栏子会话折叠状态的本地存储键 */
+const SUBS_COLLAPSED_KEY = "chatcoder:sidebar-subs-collapsed";
+
 function sessionBusy(s: SessionOut, busyIds: ReadonlySet<number>): boolean {
   return !!s.has_running || !!s.workflow_running || busyIds.has(s.id);
 }
@@ -141,7 +145,6 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
   const loadBootstrap = useChatStore((s) => s.loadBootstrap);
   /** plan-156-619 S5：主会话 id → 子会话列表（子会话不进入 list_sessions，必须单独取）。 */
   const subsessionsByParent = useChatStore((s) => s.subsessionsByParent);
-  const loadSubsessions = useChatStore((s) => s.loadSubsessions);
   const switchSession = useChatStore((s) => s.switchSession);
   const deleteSession = useChatStore((s) => s.deleteSession);
   const renameSession = useChatStore((s) => s.renameSession);
@@ -176,7 +179,31 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
   const [collapsedProjects, setCollapsedProjects] = useState<Record<number, boolean>>(loadCollapsedProjects);
   const [projectLimits, setProjectLimits] = useState<Record<number, number>>({});
   const [renaming, setRenaming] = useState<{ id: number; value: string } | null>(null);
+  /** plan-156-620：折叠了子会话的主会话 id（本地记忆；默认展开） */
+  const [collapsedSubs, setCollapsedSubs] = useState<Set<number>>(() => {
+    try {
+      const raw = JSON.parse(localStorage.getItem(SUBS_COLLAPSED_KEY) || "[]");
+      return new Set(Array.isArray(raw) ? raw.filter((x): x is number => typeof x === "number") : []);
+    } catch { return new Set(); }
+  });
+  const toggleSubs = (parentId: number) => {
+    setCollapsedSubs((prev) => {
+      const next = new Set(prev);
+      if (next.has(parentId)) next.delete(parentId); else next.add(parentId);
+      try { localStorage.setItem(SUBS_COLLAPSED_KEY, JSON.stringify([...next])); } catch { /* 存储不可用时只在本次生效 */ }
+      return next;
+    });
+  };
   const [menuFor, setMenuFor] = useState<number | null>(null);
+  /** plan-156-622：会话菜单的浮层坐标。
+   *  旧实现用行内的 position:absolute 菜单，子会话行会被 .sb-subsessions-inner 的
+   *  overflow:hidden 整体裁掉（点击后 DOM 里确实有菜单，但屏幕上看不见），
+   *  用户反馈就是「三个点点击无反应」。改为 portal 到 body + fixed 定位，不受任何祖先裁切。 */
+  const [menuPos, setMenuPos] = useState<{ left: number; top: number } | null>(null);
+  const sessionMenuRef = useRef<HTMLDivElement>(null);
+  /** plan-156-622：当前悬停的会话行。行内图钉默认 pointer-events:none（防隐形热区误触），
+   *  只靠 CSS :hover 放开在快速移入后立即点击时会点空；用 React 状态提前放开，点击能稳定命中。 */
+  const [hoveredRow, setHoveredRow] = useState<number | null>(null);
   const [projectMenuFor, setProjectMenuFor] = useState<number | null>(null);
   /** 新建工作树弹窗的目标项目（null = 关闭） */
   const [worktreeFor, setWorktreeFor] = useState<ProjectOut | null>(null);
@@ -212,7 +239,7 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
   const anyMenuOpen = menuFor !== null || projectMenuFor !== null || sortMenuOpen;
   useEffect(() => {
     if (!anyMenuOpen) return;
-    const closeAll = () => { setMenuFor(null); setProjectMenuFor(null); setSortMenuOpen(false); };
+    const closeAll = () => { setMenuFor(null); setMenuPos(null); setProjectMenuFor(null); setSortMenuOpen(false); };
     const onDown = (e: PointerEvent) => {
       const el = e.target as HTMLElement | null;
       if (el?.closest(".sb-context-menu, .sb-session-actions, .sb-project-actions, .sb-icon-btn")) return;
@@ -238,6 +265,24 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
     document.addEventListener("pointerdown", onDown, true);
     return () => document.removeEventListener("pointerdown", onDown, true);
   }, [renaming]);
+
+  /* plan-156-622：菜单挂到 body 后量一次实际尺寸，越出视口就夹回来——
+     行可能贴着窗口底部，按行底边展开会把菜单推到屏幕外。 */
+  useLayoutEffect(() => {
+    if (menuFor === null) return;
+    const el = sessionMenuRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const pad = 8;
+    let { left, top } = menuPos ?? { left: r.left, top: r.top };
+    if (r.right > window.innerWidth - pad) left -= r.right - (window.innerWidth - pad);
+    if (r.bottom > window.innerHeight - pad) top -= r.bottom - (window.innerHeight - pad);
+    if (left < pad) left = pad;
+    if (top < pad) top = pad;
+    if (Math.abs(left - r.left) > 0.5 || Math.abs(top - r.top) > 0.5) setMenuPos({ left, top });
+    // 只在打开与内容变化时校正；夹取后再渲染不会形成回路（位置已收敛）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [menuFor]);
 
   const navItems = useMemo(() => [
     { key: "chat", label: t("sidebar.new_task"), icon: <IxNewChat size={16} />, shortcut: "Ctrl+N" },
@@ -271,16 +316,8 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
     try { localStorage.setItem("chatcoder:sidebar-sort", sort); } catch { /* ignore */ }
   }, [sort]);
 
-  /** plan-156-619 S5：进入侧栏时补齐子会话。
-   *  `list_sessions` 过滤掉 side_parent_id 非空的会话，子会话只能单独拉取；
-   *  这里对当前可见会话做一次按需加载（已有桶的跳过，避免重复请求）。 */
-  useEffect(() => {
-    for (const s of sessions) {
-      if (s.side_parent_id != null) continue;
-      if (subsessionsByParent[s.id] !== undefined) continue;
-      void loadSubsessions(s.id);
-    }
-  }, [sessions, subsessionsByParent, loadSubsessions]);
+  /* plan-156-620：子会话桶由 store.loadSubsessionIndex 一次性重建（启动 + subsession.created），
+     不再按会话逐个请求——旧做法每次进侧栏发上百个 /subsessions，拖慢全部接口。 */
 
   /** 主项目（排除工作树——工作树作为其父项目下的独立工作区单独渲染） */
   const visibleProjects = useMemo(() => {
@@ -327,7 +364,13 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
       return null;
     };
     const live = sessions.filter((s) => s.status !== "archived");
-    const pinned = live.filter((s) => s.pinned).sort((a, b) => {
+    /* plan-156-623：子会话与主会话同一套置顶语义——置顶后同样移到「置顶」分区。
+       此前只把 sessions 里的主会话放进分区，子会话置顶后原地不动，
+       用户点了置顶除了图钉变个色看不到别的变化，自然判定为「没反应」。 */
+    const liveChildren = Object.values(subsessionsByParent)
+      .flat()
+      .filter((c) => c.status !== "archived");
+    const pinned = [...live, ...liveChildren].filter((s) => s.pinned).sort((a, b) => {
       const r = byRunning(a, b);
       if (r !== null) return r;
       // pinned_at 缺失（极老数据）时回退最近活动时间
@@ -345,17 +388,40 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
     });
     return { pinnedSessions: pinned, filteredSessions: rest };
     // 依赖用 busyIds（含当前会话的运行态）——此前写成 wfBusyIds，当前会话开始运行时列表不会重排
-  }, [sessions, sort, busyIds]);
+  }, [sessions, subsessionsByParent, sort, busyIds]);
 
   /** 置顶 / 取消置顶：先本地更新（会话立刻移入 / 移出置顶分区），再落库；失败时以服务端为准重新拉取 */
   const togglePin = (s: SessionOut) => {
     const pinned = !s.pinned;
-    useChatStore.setState((st) => ({
-      sessions: st.sessions.map((x) => (x.id === s.id
-        ? { ...x, pinned, pinned_at: pinned ? new Date().toISOString() : null }
-        : x)),
-    }));
-    api.updateSession(s.id, { pinned }).then(() => loadBootstrap()).catch(() => loadBootstrap());
+    const name = (s.title || `会话 ${s.id}`).slice(0, 20);
+    // plan-156-623：主会话与子会话同一套语义——置顶后都会移到「置顶」分区。
+    // 同时给一条 toast：点击后即使列表滚动位置没变（会话本来就在首屏），也有明确反馈。
+    notify.success(pinned ? `已置顶「${name}」` : `已取消置顶「${name}」`);
+    // plan-156-620：子会话不在 sessions 里，统一走 patchSession（主会话列表或子会话桶）
+    useChatStore.setState((st) => patchSession(st, s.id, (x) => ({
+      ...x, pinned, pinned_at: pinned ? new Date().toISOString() : null,
+    })));
+    api.updateSession(s.id, { pinned })
+      .then(() => loadBootstrap())
+      .catch(() => {
+        notify.warning("置顶状态保存失败，已按服务端数据刷新");
+        loadBootstrap();
+      });
+  };
+
+  /** plan-156-622：关闭会话菜单（同时清掉浮层坐标，下次打开按新行位置重算）。 */
+  const closeSessionMenu = () => { setMenuFor(null); setMenuPos(null); };
+
+  /** plan-156-622：打开会话菜单。
+   *  坐标按触发按钮所在行的右缘对齐、行下方展开；此时先给一个估算值，
+   *  菜单挂载后由 useLayoutEffect 量实际尺寸并夹回视口内。 */
+  const openSessionMenu = (e: React.MouseEvent<HTMLElement>, id: number) => {
+    if (menuFor === id) { closeSessionMenu(); return; }
+    const row = (e.currentTarget as HTMLElement).closest(".sb-session") as HTMLElement | null;
+    if (!row) return;
+    const r = row.getBoundingClientRect();
+    setMenuPos({ left: Math.max(8, r.right - 180), top: r.bottom + 2 });
+    setMenuFor(id);
   };
 
   const isProjectOpen = (p: ProjectOut) => {
@@ -424,7 +490,11 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
     }
   };
 
-  const renderSession = (s: SessionOut) => {
+  /** plan-156-620：主会话与子会话共用同一套行渲染（悬停跑马灯、置顶、归档、三点菜单完全一致），
+   *  子会话只多一级缩进；`child` 时不再向下展开子级，也不提供分支 / 工作树（它们属于主会话）。
+   *  `inPinnedSection`：该行渲染在「置顶」分区里——分区标题已表达状态，行内不再常驻钉子；
+   *  此时子会话也不再缩进（它已脱离父会话组，缩进会让人误以为上一条是它的父级）。 */
+  const renderSessionRow = (s: SessionOut, child: boolean, inPinnedSection = false) => {
     const isCurrent = s.id === currentSessionId && !pageMode;
     const editing = renaming?.id === s.id;
     const busy = sessionBusy(s, busyIds);
@@ -433,27 +503,44 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
     // 槽位宽度恒定，图标只在 hover 时淡入 —— 标题起点不会因为出现/消失而位移。
     // 运行中优先显示转圈：此时不提供置顶入口，避免「边跑边改排序」造成列表跳动。
     // plan-156-619 S5：主会话下的子会话（不含子会话自身——子项不再向下嵌套，一层扁平）
-    const children = s.side_parent_id == null ? (subsessionsByParent[s.id] || []) : [];
+    // plan-156-623：已置顶的子会话移到「置顶」分区，父组里不再重复显示。
+    const children = !child && s.side_parent_id == null
+      ? [...(subsessionsByParent[s.id] || [])].filter((c) => !c.pinned).sort((a, b) => a.id - b.id)
+      : [];
+    // plan-156-620：当前就在某个子会话里时强制展开，避免活动会话被折叠藏起来
+    const subsOpen = !collapsedSubs.has(s.id) || children.some((c) => c.id === currentSessionId);
+    const childRunning = children.some((c) => sessionBusy(c, busyIds));
+    const indent = child && !inPinnedSection;
     return (
       <Fragment key={s.id}>
-      <div className={`sb-session${isCurrent ? " active" : ""}`} onClick={() => { if (editing) return; switchSession(s.id); onSessionFocus(); }}>
+      <div
+        className={`sb-session${indent ? " sb-subsession" : ""}${isCurrent ? " active" : ""}${menuFor === s.id ? " menu-open" : ""}`}
+        onPointerEnter={() => setHoveredRow(s.id)}
+        onPointerLeave={() => setHoveredRow((cur) => (cur === s.id ? null : cur))}
+        onClick={() => { if (editing) return; switchSession(s.id); onSessionFocus(); }}
+      >
         {/* plan-156-619 修复：行首固定槽位，悬停时淡入置顶按钮。
             已置顶与未置顶共用同一枚图钉图标（用户明确要求「非置顶图标」），
-            状态差异只由颜色（accent）与 tooltip 文案表达，不换图标形状。 */}
+            状态差异只由颜色（accent）与 tooltip 文案表达，不换图标形状。
+            plan-156-623：已置顶的行统一在「置顶」分区，那里不再重复钉子（分区标题已表达状态）。 */}
         <span className="sb-session-slot">
           {busy ? (
             <span className="sb-session-pulse on" aria-hidden="true" />
           ) : (
             <Tooltip content={s.pinned ? t("sidebar.ctx_unpin") : t("sidebar.ctx_pin")} side="top">
-              <span
-                className={"sb-slot-pin" + (s.pinned ? " is-pinned" : "")}
-                role="button"
+              {/* plan-156-622：改用 button——旧实现是 span+role，键盘不可达；
+                  is-armed 由行的 pointerenter 驱动，不依赖 CSS :hover 的重算时机（快速移入后点击不会点空）。 */}
+              <button
+                type="button"
+                className={"sb-slot-pin"
+                  + (s.pinned ? " is-pinned" : "")
+                  + (hoveredRow === s.id ? " is-armed" : "")}
                 aria-label={s.pinned ? t("sidebar.ctx_unpin") : t("sidebar.ctx_pin")}
                 aria-pressed={s.pinned}
                 onClick={(e) => { e.stopPropagation(); togglePin(s); }}
               >
                 <IconPin size={13} />
-              </span>
+              </button>
             </Tooltip>
           )}
         </span>
@@ -502,7 +589,26 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
             <span className="sb-title-inner">{s.title || t("sidebar.new_task")}</span>
           </span>
         )}
-        <span className="sb-session-time">{formatRelativeTime(s.last_activity_at, language)}</span>
+        {/* plan-156-620：子会话开关——点击折叠 / 展开该会话下的子会话（记忆选择）。
+            plan-20261018-sidebar-toggle：由「数量 + 箭头」胶囊改为与行尾归档 / 三点同规格的
+            20px 图标按钮——胶囊比图标宽 15px，且与行尾图标相隔 18px（行 gap 8 + 槽位左空 10），
+            视觉上明显偏散；数量移入 Tooltip，图标只剩折叠箭头。 */}
+        {children.length > 0 && !editing && (
+          <Tooltip
+            content={`${children.length} 个子会话 · ${subsOpen ? "收起" : "展开"}`}
+            side="top"
+          >
+            <button
+              type="button"
+              className={"sb-sub-toggle" + (childRunning ? " is-running" : "")}
+              aria-expanded={subsOpen}
+              aria-label={`${children.length} 个子会话，${subsOpen ? "收起" : "展开"}`}
+              onClick={(e) => { e.stopPropagation(); toggleSubs(s.id); }}
+            >
+              <IconChevronDown size={13} />
+            </button>
+          </Tooltip>
+        )}
         {/* plan-156-619 S1：工作流标记从「标题左侧」移到「标题右侧、时间之前」——
             它此前与运行指示并排，两者同时出现会把标题起点往右推，破坏与项目名的左对齐。 */}
         {s.workflow_state && (
@@ -513,74 +619,91 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
             <IxWorkflow size={12} />
           </span>
         )}
-        {/* v7: 一键归档（三点菜单图标左侧）。运行中的会话禁止归档 */}
-        <span
-          className={"sb-session-actions sb-session-archive" + (sessionBusy(s, busyIds) ? " disabled" : "")}
-          title={sessionBusy(s, busyIds) ? t("sidebar.archive_disabled") : t("sidebar.ctx_archive")}
-          onClick={(e) => {
-            e.stopPropagation();
-            if (sessionBusy(s, busyIds)) return;
-            api.updateSession(s.id, { status: "archived" }).then(() => loadBootstrap());
-          }}
-        >
-          <IconArchive size={14} />
+        {/* plan-156-620：行尾固定宽度槽位——平时显示时间，悬停 / 菜单打开时同一位置换成归档与三点按钮。
+            槽位宽度不变，标题与子会话开关不会因悬停而位移（此前时间隐藏、按钮出现会让左侧元素跳动）。 */}
+        <span className="sb-session-trail">
+          <span className="sb-session-time">{formatRelativeTime(s.last_activity_at, language)}</span>
+          {/* v7: 一键归档（三点菜单图标左侧）。运行中的会话禁止归档。
+              plan-156-622：改 button，并用 is-armed 跟随行 hover；归档会改数据，
+              因此仍保持「看不见不可点」，仅 ⋯ 常驻命中。 */}
+          <Tooltip content={sessionBusy(s, busyIds) ? t("sidebar.archive_disabled") : t("sidebar.ctx_archive")} side="top">
+            <button
+              type="button"
+              className={"sb-session-actions sb-session-archive"
+                + (sessionBusy(s, busyIds) ? " disabled" : "")
+                + (hoveredRow === s.id ? " is-armed" : "")}
+              aria-label={t("sidebar.ctx_archive")}
+              aria-disabled={sessionBusy(s, busyIds)}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (sessionBusy(s, busyIds)) return;
+                api.updateSession(s.id, { status: "archived" }).then(() => loadBootstrap());
+              }}
+            >
+              <IconArchive size={14} />
+            </button>
+          </Tooltip>
+          {/* plan-156-622：⋯ 常驻可点（只靠 opacity 淡入）——它只弹菜单、不改数据，
+              常驻命中可以彻底避开「悬停太早/太快→样式没跟上→点空」的时序问题。 */}
+          <Tooltip content={t("sidebar.ctx_more")} side="top">
+            <button
+              type="button"
+              className={"sb-session-actions sb-session-more" + (menuFor === s.id ? " is-open" : "")}
+              aria-label={t("sidebar.ctx_more")}
+              aria-haspopup="menu"
+              aria-expanded={menuFor === s.id}
+              onClick={(e) => { e.stopPropagation(); openSessionMenu(e, s.id); }}
+            >
+              <IconMoreHorizontal size={14} />
+            </button>
+          </Tooltip>
         </span>
-        <span className="sb-session-actions" onClick={(e) => { e.stopPropagation(); setMenuFor(menuFor === s.id ? null : s.id); }}>
-          <IconMoreHorizontal size={14} />
-        </span>
-        {menuFor === s.id && (
-          <div className="context-menu sb-context-menu" onClick={() => setMenuFor(null)}>
-            <div className="context-menu-item" onClick={() => { setRenaming({ id: s.id, value: s.title || "" }); setMenuFor(null); }}><IconPencil size={13} /> {t("sidebar.ctx_rename")}</div>
-            <div className="context-menu-item" onClick={() => { forkSession(s.id); onSessionFocus(); setMenuFor(null); }}><IconCopy size={13} /> {t("sidebar.ctx_fork")}</div>
-            <div className="context-menu-item" onClick={() => { togglePin(s); setMenuFor(null); }}><IconPin size={13} /> {s.pinned ? t("sidebar.ctx_unpin") : t("sidebar.ctx_pin")}</div>
-            <div className="context-menu-item" onClick={() => { api.createWorktree(s.id); setMenuFor(null); }}><IconGitBranch size={13} /> {t("sidebar.ctx_worktree")}</div>
+        {/* plan-156-622：菜单 portal 到 body——旧实现挂在行内，子会话行会被
+            .sb-subsessions-inner 的 overflow:hidden 整体裁掉（DOM 里有菜单、屏幕上看不见），
+            用户看到的就是「三个点点击无反应」。 */}
+        {menuFor === s.id && createPortal(
+          <div
+            ref={sessionMenuRef}
+            className="context-menu sb-context-menu sb-floating-menu"
+            style={menuPos ?? undefined}
+            role="menu"
+            aria-label={t("sidebar.ctx_more")}
+            onClick={closeSessionMenu}
+          >
+            <div className="context-menu-item" onClick={() => { setRenaming({ id: s.id, value: s.title || "" }); closeSessionMenu(); }}><IconPencil size={13} /> {t("sidebar.ctx_rename")}</div>
+            {!child && <div className="context-menu-item" onClick={() => { forkSession(s.id); onSessionFocus(); closeSessionMenu(); }}><IconCopy size={13} /> {t("sidebar.ctx_fork")}</div>}
+            <div className="context-menu-item" onClick={() => { togglePin(s); closeSessionMenu(); }}><IconPin size={13} /> {s.pinned ? t("sidebar.ctx_unpin") : t("sidebar.ctx_pin")}</div>
+            {!child && <div className="context-menu-item" onClick={() => { api.createWorktree(s.id); closeSessionMenu(); }}><IconGitBranch size={13} /> {t("sidebar.ctx_worktree")}</div>}
             <div
               className={"context-menu-item" + (sessionBusy(s, busyIds) ? " disabled" : "")}
-              title={sessionBusy(s, busyIds) ? t("sidebar.archive_disabled") : ""}
               onClick={() => {
-                setMenuFor(null);
                 if (sessionBusy(s, busyIds)) return;
+                closeSessionMenu();
                 api.updateSession(s.id, { status: "archived" }).then(() => loadBootstrap());
               }}
             ><IconArchive size={13} /> {t("sidebar.ctx_archive")}</div>
             <div className="context-menu-divider" />
-            <div className="context-menu-item danger" onClick={() => { setConfirmDelete(s); setMenuFor(null); }}><IconTrash size={13} /> {t("sidebar.ctx_delete")}</div>
-          </div>
+            <div className="context-menu-item danger" onClick={() => { setConfirmDelete(s); closeSessionMenu(); }}><IconTrash size={13} /> {t("sidebar.ctx_delete")}</div>
+          </div>,
+          document.body,
         )}
       </div>
       {/* plan-156-619 S5：父会话下缩进一级列出子会话（一层扁平，子会话不再向下嵌套）。
           几何与普通会话行一致（同一 20px 状态槽），只多一个「子会话」细标识——
           不加色块、不加左侧竖线（项目规则禁止装饰性竖线表达层级）。 */}
       {children.length > 0 && (
-        <div className="sb-subsessions">
-          {children.map((c) => renderSubsessionRow(c))}
+        <div className={"sb-subsessions" + (subsOpen ? "" : " is-collapsed")} aria-hidden={!subsOpen}>
+          <div className="sb-subsessions-inner">
+            {children.map((c) => renderSessionRow(c, true))}
+          </div>
         </div>
       )}
       </Fragment>
     );
   };
 
-  /** 子会话行（plan-156-619 S5）：复用会话行的状态槽几何，额外带「子会话」细标识。 */
-  const renderSubsessionRow = (c: SessionOut) => {
-    const isCurrent = c.id === currentSessionId && !pageMode;
-    const busy = sessionBusy(c, busyIds);
-    return (
-      <div
-        key={c.id}
-        className={"sb-session sb-subsession" + (isCurrent ? " active" : "")}
-        onClick={() => { switchSession(c.id); onSessionFocus(); }}
-        title={c.title || `子会话 ${c.id}`}
-      >
-        <span className="sb-session-slot" aria-hidden="true">
-          {busy && <span className="sb-session-pulse on" />}
-        </span>
-        <span className="sb-session-title">
-          <span className="sb-title-inner">{c.title || "子会话"}</span>
-        </span>
-        <span className="sb-subsession-tag">子会话</span>
-      </div>
-    );
-  };
+  /** 列表入口（可直接传给 `.map`：不能把下标误当成 child 参数） */
+  const renderSession = (s: SessionOut) => renderSessionRow(s, false);
 
   /** 项目行：普通项目与工作树共用同一套结构与样式（问题3——
    * 工作树此前被塞在父项目子层级、额外缩进且名称变灰，与普通项目割裂）。
@@ -767,11 +890,12 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
 
           {/* 列表区 */}
           <div className="sb-list">
-            {/* plan-20261016-ux（问题 9）：置顶分区——在「项目 / 任务」标题之上；置顶会话从项目列表移出 */}
+            {/* plan-20261016-ux（问题 9）：置顶分区——在「项目 / 任务」标题之上；置顶会话从项目列表移出。
+                plan-156-623：子会话置顶后同样进这里（`child` 只用于限制菜单项，缩进由 inPinnedSection 关掉）。 */}
             {pinnedSessions.length > 0 && (
               <div className="sb-pinned">
                 <div className="sb-section-label">{t("sidebar.section_pinned")}</div>
-                {pinnedSessions.map(renderSession)}
+                {pinnedSessions.map((p) => renderSessionRow(p, p.side_parent_id != null, true))}
               </div>
             )}
             {view === "project" ? (

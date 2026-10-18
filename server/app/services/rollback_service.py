@@ -907,9 +907,10 @@ async def list_turn_changes(db: AsyncSession, *, session_id: int, turn_id: int,
     主/子代理写盘同 turn_id，一并聚合；按 path 分组：
     - before = 首条写盘的 old_content，after = 本轮**末条**写盘记录的 new_content
       （plan-89-387：原先直接读当前磁盘，会把该轮之后的编辑并入本轮统计，
-      表现为审核清单行数偏大；记录缺失时回退磁盘内容）
-    - action：全部 old_content 为 None → added；文件当前不存在 → deleted；否则 modified
-    - difflib.unified_diff 统计增删行数
+      表现为审核清单行数偏大；plan-20261018-turn-changes：末条写盘是删除时
+      after 保持 None，只有老记录没有存写盘后内容才回退磁盘）
+    - action：全部 old_content 为 None → added；本轮把文件删掉 → deleted；否则 modified
+    - difflib.unified_diff 统计增删行数（与 get_file_diff 同源）
     - reviewed 来自 FileReview（turn_id+path 唯一键），与实际磁盘内容无关
     """
     res = await db.execute(
@@ -931,8 +932,15 @@ async def list_turn_changes(db: AsyncSession, *, session_id: int, turn_id: int,
     for path, recs in by_path.items():
         binary = all(getattr(r, "binary", False) for r in recs)
         before = recs[0].old_content
-        after = recs[-1].new_content
-        if after is None:
+        last = recs[-1]
+        if last.new_content is not None:
+            after = last.new_content
+        elif last.old_content is not None:
+            # plan-20261018-turn-changes：本轮最后一次写盘把文件删掉了。
+            # 不能回退磁盘（后续轮次可能重建了同名文件），否则会被误判成 modified，
+            # 且与 get_file_diff 的删除口径不一致。
+            after = None
+        else:
             after = _read_file_text(workspace, path)
         if binary:
             action = "modified"  # 二进制/大文件：按写盘前备份恢复，不展示文本 diff
@@ -961,8 +969,10 @@ async def get_file_diff(db: AsyncSession, *, session_id: int, turn_id: int,
     plan-89-387: 传 call_key 时按「这一次写盘」返回——before/after 取该条记录自身的
     old_content / new_content（写盘后内容缺失时回退当前磁盘），同一轮内同一文件
     被多次编辑时，每次展开只展示本次变更，行数与工具卡 +N -M 同源一致。
-    未传 call_key 或未命中（老记录无该列）时回退累积口径：
-    before=首条写盘前内容，after=当前磁盘内容（大文件截断）。
+    plan-20261018-turn-changes: 未传 call_key 时按「整轮口径」返回——
+    before=该轮首条写盘前内容，after=该轮末条写盘后的内容（删除则为 None）。
+    旧实现 after 读当前磁盘，会把该轮之后的编辑并入本轮，导致上一轮审查里
+    出现更新轮次的改动；现按写盘记录边界取值，任意一轮都只展示自己的改动。
 
     返回 None 表示该 turn 无此文件写盘记录。
     兼容正反斜杠与工作区相对/绝对路径归一化匹配。
@@ -1040,8 +1050,19 @@ async def get_file_diff(db: AsyncSession, *, session_id: int, turn_id: int,
             "single_edit": False,
         }
 
+    # plan-20261018-turn-changes: 无 call_key 时按「该轮最后一次写盘」的边界取 after。
+    # 旧实现 after 直接读当前磁盘，会把该轮之后其它轮次对同一文件的编辑并入本轮 diff
+    # （表现为点上一轮的审查，内容里出现更新轮次的改动，且与卡片 +N -M 不一致）。
     before = writes[0].old_content
-    after = _read_file_text(workspace, path)
+    last = writes[-1]
+    if last.new_content is not None:
+        after = last.new_content
+    elif last.old_content is not None:
+        # 该轮最后一次写盘把文件删掉了：该轮口径的 after 就是「不存在」
+        after = None
+    else:
+        # 老记录没有存写盘后内容，只能回退磁盘现状（唯一无法规避的兼容分支）
+        after = _read_file_text(workspace, path)
     add, dele = _diff_stats(before, after)
     truncated = (add + dele) > _MAX_DIFF_CHANGE_LINES
     b_disp, a_disp = _truncate_window(before, after)
@@ -1466,7 +1487,17 @@ def build_plan(workspace: str, writes: list[RollbackWrite],
                 plan.steps.append(_Step(rel, rec.turn_id, "noop", True, "文件已被手动修改，回滚已跳过"))
             continue
         if cur is None:
-            plan.steps.append(_Step(rel, rec.turn_id, "noop", True, "文件当前不存在，已跳过"))
+            # plan-20261018-turn-changes：磁盘上已没有该文件。
+            if after is None:
+                # 本轮就是删除它（before 有内容、after 为空）：撤销 = 恢复删除前的内容。
+                # 旧实现一律按「文件当前不存在」判冲突，导致含删除的轮次整单撤销被拒（只看到 409）；
+                # 也不能当 noop——那样会「撤销成功」但文件没被找回。
+                virt[rel] = before
+                plan.finals[rel] = _FinalOp(kind="write", text=before, tf=tfs.get(rel))
+                plan.steps.append(_Step(rel, rec.turn_id, "restore"))
+            else:
+                # 本轮写了内容、文件却已不存在（被手动删掉等）：无法安全还原，跳过并说明
+                plan.steps.append(_Step(rel, rec.turn_id, "noop", True, "文件当前不存在，已跳过"))
             continue
         if before == after:
             plan.steps.append(_Step(rel, rec.turn_id, "noop"))
@@ -1647,3 +1678,126 @@ async def list_snapshots(db: AsyncSession, session_id: int) -> list[TurnSnapshot
         .order_by(TurnSnapshot.id.desc())
     )
     return list(res.scalars().all())
+
+
+# ── 仅撤销单轮文件改动（plan-20261018-turn-changes）──
+
+async def revert_turn_files(db: AsyncSession, *, turn_id: int, allow_partial: bool = False) -> dict:
+    """只反向应用该 turn 的写盘改动，不删消息、不改 turn.status、不标记 rolled_back。
+
+    与 rollback_turn 的区别：rollback_turn 是「回滚到该 turn」，会连带软删消息并把
+    本 turn 及之后的 turn 置 rolled_back；本函数供「变更卡片 → 撤销本批次」使用，
+    只关心文件，轮次与消息保持原样。
+
+    顺序门控（plan-20261018-turn-changes）：写盘记录在撤销/回滚时会被物理删除，
+    因此「同会话仍有 turn_id > 本 turn 的写盘记录」即代表更新的改动尚未撤销。
+    此时直接拒绝且不改任何文件，避免先撤旧轮导致新轮改动失去基线。
+    """
+    snap = await _snapshot_for_turn(db, turn_id)
+    if snap is None:
+        return {"ok": False, "code": "no_snapshot", "reason": "该轮次无可撤销的文件改动"}
+    if snap.rolled_back:
+        return {"ok": False, "code": "rolled_back", "reason": "该轮次已回滚，不可重复操作"}
+
+    # 1. 顺序门控：只能从最新一轮往前撤，且必须在动文件之前判断
+    later_res = await db.execute(
+        select(RollbackWrite.turn_id).where(
+            RollbackWrite.session_id == snap.session_id,
+            RollbackWrite.turn_id > turn_id,
+        ).distinct()
+    )
+    later_turn_ids = sorted({int(t) for t in later_res.scalars().all() if t is not None})
+    if later_turn_ids:
+        return {
+            "ok": False,
+            "code": "order_violation",
+            "reason": f"请先撤销更晚轮次（#{later_turn_ids[0]}）的改动",
+            "later_turn_ids": later_turn_ids,
+        }
+
+    workspace = await _workspace_for_session(db, snap.session_id)
+    if not workspace:
+        return {"ok": False, "code": "no_workspace", "reason": "该会话没有可用的工作区"}
+
+    # 2. 只取本 turn 的写盘记录；list_turn_writes 是 >= 语义，不能用于精确撤销
+    write_res = await db.execute(
+        select(RollbackWrite).where(
+            RollbackWrite.session_id == snap.session_id,
+            RollbackWrite.turn_id == turn_id,
+        ).order_by(RollbackWrite.id.asc())
+    )
+    writes = list(write_res.scalars().all())
+    if not writes:
+        return {"ok": False, "code": "no_writes", "reason": "该轮次没有文件改动"}
+
+    # 3. 复用三路合并规划：冲突时默认整体拒绝，未改动任何文件
+    plan = build_plan(workspace, writes, lambda rec: _checkpoint_for_path(snap, rec.path))
+    conflicts = _conflict_list(plan)
+    if conflicts and not allow_partial:
+        return {
+            "ok": False,
+            "code": "conflict",
+            "reason": f"{len(conflicts)} 个文件与你的手动改动冲突，撤销已取消，未修改任何文件",
+            "conflicts": conflicts,
+        }
+
+    applied = _apply_plan_sync(plan)
+    if not applied.get("ok"):
+        return {"ok": False, "code": "apply_failed", "reason": applied.get("error", "撤销失败，工作区已还原")}
+
+    # 4. 清理记录与快照登记：文件已撤销，写盘记录与 checkpoint 登记不能留，
+    #    否则后续 rollback 会从旧 checkpoint 把已撤销内容重新写回磁盘。
+    from sqlalchemy import delete as _delete, update as _update
+    from app.persistence.database import run_write_locked
+
+    def _persist(s):
+        s.execute(_delete(RollbackWrite).where(
+            RollbackWrite.session_id == snap.session_id,
+            RollbackWrite.turn_id == turn_id,
+        ))
+        s.execute(_delete(FileReview).where(FileReview.turn_id == turn_id))
+        s.execute(_update(TurnSnapshot).where(TurnSnapshot.id == snap.id).values(
+            file_list=[], new_files=[],
+        ))
+        s.commit()
+
+    await run_write_locked(_persist, label=f"rollback.revert.{turn_id}")
+
+    # 5. 广播 + 审计：前端据此清除该 turn 的变更卡片缓存并重拉撤销锁
+    from app.orchestration.agent_events import broadcast
+    await broadcast(snap.session_id, {
+        "event": "turn.files_reverted",
+        "payload": {"turn_id": turn_id, "session_id": snap.session_id},
+    })
+
+    from app.services import audit_service
+    await audit_service.log(db, action="revert_files", session_id=snap.session_id,
+                            turn_id=turn_id,
+                            detail={"restored": applied.get("restored", 0),
+                                    "deleted": applied.get("deleted", 0),
+                                    "conflicts": conflicts})
+
+    return {
+        "ok": True,
+        "turn_id": turn_id,
+        "restored": applied.get("restored", 0),
+        "deleted": applied.get("deleted", 0),
+        "skipped": len(conflicts),
+        "conflicts": conflicts,
+        "files": list(dict.fromkeys(w.path for w in writes)),
+    }
+
+
+async def revert_lock(db: AsyncSession, session_id: int) -> dict:
+    """撤销顺序锁：返回该会话「仍有写盘记录」的 turn id（升序）与其中最新一个。
+
+    前端据此只允许撤销最新一轮；后端 revert_turn_files 仍做二次强校验，
+    避免前端缓存过期时发生乱序撤销。
+    """
+    res = await db.execute(
+        select(RollbackWrite.turn_id).where(
+            RollbackWrite.session_id == session_id,
+        ).distinct()
+    )
+    pending = sorted({int(t) for t in res.scalars().all() if t is not None})
+    return {"latest_turn_id": pending[-1] if pending else None, "pending_turn_ids": pending}

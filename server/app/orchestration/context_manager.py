@@ -21,6 +21,7 @@ from app.orchestration.approval_policy import (
     normalize_execution_mode,
 )
 from app.orchestration.prompts import build_main_system_prompt, build_subagent_system_prompt
+from app.orchestration.subsession_report import SUBSESSION_REPORT_FLAG as _SUBSESSION_REPORT_FLAG
 from app.orchestration.rules_loader import load_session_rules, project_structure_brief
 from app.orchestration.tools.shell_env import shell_hint
 
@@ -966,6 +967,29 @@ async def build_main_context(
     # 语言纪律已作为系统提示首尾双锚注入，这里再在注意力最高处落一行单锚，降低漂移。
     from app.orchestration.prompts.language import build_language_pin_line
     bundle.developer_parts.append(build_language_pin_line(_reply_lang, source=_lang_source))
+    # 1.15 并行分派子会话（plan-156-621；plan-156-623 补计划阶段）：
+    # 设置开启时——执行模式注入「派发要求」，计划模式注入「把并行分组写进文档」的要求。
+    # 计划模式不下发 create_subsession，旧实现因此整段跳过，计划文档里没有任何并行拆分信息。
+    from app.orchestration.prompts.parallel_subsession import (
+        parallel_subsession_hint, plan_parallel_subsession_hint,
+    )
+    _parallel_hint = (
+        parallel_subsession_hint(_execution_mode)
+        or plan_parallel_subsession_hint(_execution_mode)
+    )
+    if _parallel_hint:
+        bundle.developer_parts.append(_parallel_hint)
+    # 1.16 GUI 操作交给操控子会话（plan-20261018-operator-boost）：电脑操控或内置浏览器可用、
+    # 且当前模式下发子会话工具时才注入；子会话自身不注入（它没有 create_subsession）。
+    from app.orchestration.prompts.parallel_subsession import operator_subsession_hint
+    from app.orchestration.tools.browser import browser_tools_enabled as _browser_tools_enabled
+    _gui_tools = bool(getattr(settings, "desktop_enabled", False)) or _browser_tools_enabled()
+    _operator_hint = operator_subsession_hint(
+        _execution_mode, gui_tools=_gui_tools,
+        is_subsession=bool(session is not None and getattr(session, "side_kind", None) == "sub"),
+    )
+    if _operator_hint:
+        bundle.developer_parts.append(_operator_hint)
     # 1.3 Paused Subagents（plan-91-394）：上一轮中断、已保存进度的子代理。紧贴本轮用户消息之后，
     # 保证“继续”类意图与可续跑清单在注意力最高处同时出现。
     if paused_subagents and enable_subagents:
@@ -1259,7 +1283,13 @@ async def build_main_context(
                             else "如需内容请调用 read_attachment 读取 path"
                         )
                         att_note = "（该消息附带附件：\n" + att_note + f"\n{_read_hint}）"
-                if m.sender_type == "user":
+                if m.sender_type == "system" and m.content.get(_SUBSESSION_REPORT_FLAG) is True and text:
+                    # plan-156-620：主代理空闲时落库的子会话汇报——作为一条独立输入交给主代理。
+                    # 此前与其它非用户文本一样进 _pending_agent_text，被当成主代理自己的话，
+                    # 且会被后面一段正文覆盖，汇报内容整段丢失。
+                    _flush_agent_text()
+                    bundle.history.append(_CM(role="user", content=text))
+                elif m.sender_type == "user":
                     # v14: 历史用户消息若带附件（文件地址），把路径一并注入，
                     # AI 可随时通过 read_attachment 回读附件内容；仅附件无文字的消息也注入
                     if not text and not att_note:

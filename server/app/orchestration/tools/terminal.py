@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
+from app.orchestration.output_paging import RAW_OUTPUT_CEILING, present_output
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 from app.orchestration.tools.bg_process import (
     bg_process_registry, decode_output, kill_process_tree,
@@ -289,9 +290,12 @@ class TerminalExecTool(Tool):
                             await ctx.on_tool_output(text)
                         except Exception:
                             logger.debug("[term] on_tool_output 回调失败(非阻塞)", exc_info=True)
-                    # 防内存无限膨胀：仅保留尾部若干字符（与最终截断口径一致）
-                    if len("".join(sink)) > max_output * 2:
-                        sink[:] = ["".join(sink)[-max_output:]]
+                    # 防内存无限膨胀：超过原始输出上限才丢弃最早的部分（保留尾部——报错通常在末尾）。
+                    # plan-156-620：此前按上下文预算（max_output 的 2 倍）就开始丢头部，
+                    # 最终又按 max_output 截开头，长输出中间与结尾的报错都可能丢失且无法取回。
+                    if sum(len(x) for x in sink) > RAW_OUTPUT_CEILING:
+                        joined = "".join(sink)
+                        sink[:] = ["...（更早的输出超过保留上限已丢弃）\n" + joined[-RAW_OUTPUT_CEILING:]]
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -341,7 +345,10 @@ class TerminalExecTool(Tool):
         if err:
             combined += ("\n-- stderr --\n" + err) if combined else err
         if len(combined) > max_output:
-            combined = combined[:max_output] + "\n...(已截断)"
+            # plan-156-620：不再按上下文预算硬截断；超出预算的部分由执行层落盘，给出续读方式
+            combined = present_output(
+                combined, max_output, session_id=getattr(ctx, "session_id", None), tag="terminal",
+            )
 
         # v36: 从 debug 提到 info——生产默认 INFO，出问题时才有据可查；
         # 输出长度与退出码是判断「命令是否真的生效」的关键。

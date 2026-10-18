@@ -592,6 +592,18 @@ export function IconMaximize({ size = 14, color = "currentColor", strokeWidth = 
   );
 }
 
+/** 收起（两角向内的对角箭头）：浮层卡片收回为胶囊（plan-156-620） */
+export function IconMinimize({ size = 14, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "minimize")}>
+      <polyline points="4 14 10 14 10 20" />
+      <polyline points="20 10 14 10 14 4" />
+      <line x1="14" y1="10" x2="21" y2="3" />
+      <line x1="3" y1="21" x2="10" y2="14" />
+    </svg>
+  );
+}
+
 /** 自动化调度（日历外框 + 底部调度循环齿轮/脉冲回路） */
 export function IconCalendar({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (

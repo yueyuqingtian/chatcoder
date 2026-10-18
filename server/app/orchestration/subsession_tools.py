@@ -39,18 +39,23 @@ CREATE_SUBSESSION_SCHEMA = {
     "function": {
         "name": TOOL_CREATE,
         "description": (
-            "创建一个子会话，把可以独立完成、且不依赖当前步骤的**执行**任务交给它。\n"
-            "\n## 什么时候用\n"
-            "- 任务清单里有彼此独立的步骤，可以并行推进（例如第 5 步、第 7 步；其余步骤你自己做）。\n"
+            "创建一个子会话，把写入范围独立、可独立验证的**执行**任务交给它。\n"
+            "\n## 什么时候该用（开工前先想这一步）\n"
+            "- 任务清单里有两项以上写入范围互不相交的工作（改动的文件集合不重叠），派出去并行推进。\n"
             "- 某一步会长时间占用上下文（大量文件读写、反复试错），交给子会话可以保住你的上下文。\n"
+            "- 纯样式 / 纯文案、独立模块、补测试、更新日志与文档归类，都是典型可派对象。\n"
             "\n## 什么时候不要用\n"
             "- 只是查资料、读代码、做调研 —— 那是探索，用只读子代理（`spawn_subagent`），不要建子会话。\n"
             "- 步骤之间有强依赖（后一步需要前一步的中间产物）—— 串行自己做。\n"
-            "- 一两次工具调用就能完成的小事 —— 直接做。\n"
+            "- 单文件单处修改、纯问答、一两次工具调用就能完成的小事 —— 直接做。\n"
+            "- 多个工作点共用同一个验证环境（同一浏览器标签 / 测试库 / 端口）—— "
+            "仍应**串行派发**（先 A 后 B），不要因为只能逐个验证就全部自己做。\n"
             "\n## 写法要求\n"
             "- `task` 必须是自包含的：子会话看不到你的对话，把问题、要求、参考位置（文件 / 符号）都写清。\n"
             "- `context` 交代背景：你已经完成了什么、它不要重复做什么、有哪些约束。\n"
             "- `mode` 决定子会话的能力边界，默认 `agent`；纯调研用 `readonly`。\n"
+            "- 多步界面操作（内置浏览器 / 电脑操控）设 `purpose=operator`：以最低思考深度快速执行；"
+            "需要它的结论才能继续时同时设 `background=false`。\n"
             "\n## 之后\n"
             "- 子会话会出现在用户左侧栏，用户可自行接管或中断；你也可以用 "
             "`get_subsession_progress` 查进度、`send_to_subsession` 补充要求、"
@@ -93,6 +98,15 @@ CREATE_SUBSESSION_SCHEMA = {
                         "只有「下一步马上就要用到它的结果」时才设 false 阻塞等待。"
                     ),
                 },
+                "purpose": {
+                    "type": "string",
+                    "enum": ["", "operator"],
+                    "description": (
+                        "operator = 操控子会话：专门执行多步界面操作（内置浏览器测试 / 导出、电脑操控），"
+                        "以最低思考深度运行，快且不占你的上下文；task 写清要打开的地址 / 应用、操作步骤、"
+                        "要核对什么、要带回什么（看到的关键现象、报错原文、下载文件路径）。普通任务留空。"
+                    ),
+                },
             },
             "required": ["title", "task"],
         },
@@ -130,8 +144,10 @@ GET_SUBSESSION_PROGRESS_SCHEMA = {
     "function": {
         "name": TOOL_PROGRESS,
         "description": (
-            "查询子会话的进度与结果：状态、已改动文件、最近输出、风险 / 未决问题。"
-            "不传 subsession_id 时汇总本会话创建的全部子会话；"
+            "查询子会话的进度与结果：状态、步骤进度、已改动文件，以及子会话最近一轮的**完整结论原文**。"
+            "不传 subsession_id 时汇总本会话创建的全部子会话（每个结论给出开头部分并标明总字数）；"
+            "传 subsession_id 时返回该子会话结论全文，过长时分段返回，"
+            "按结果末尾提示的 report_offset 继续读取，直到读完——不要根据开头部分臆测结论。"
             "wait=true 时阻塞到它们全部结束（优先用它，而不是反复轮询）。"
         ),
         "parameters": {
@@ -144,6 +160,10 @@ GET_SUBSESSION_PROGRESS_SCHEMA = {
                 "wait": {
                     "type": "boolean",
                     "description": "true = 阻塞到目标子会话结束再返回（默认 false）",
+                },
+                "report_offset": {
+                    "type": "integer",
+                    "description": "分段读取结论原文的起始字符位置（配合 subsession_id 使用，默认 0）",
                 },
             },
             "required": [],
@@ -176,7 +196,8 @@ MESSAGE_MAIN_SCHEMA = {
         "description": (
             "向主代理汇报进度或提问（仅子会话可用）。消息会进入主代理下一次模型调用的上下文，"
             "同时显示在你自己的会话里。kind=progress（默认）是异步状态更新；"
-            "kind=question 且 wait=true 会阻塞到主代理回复。"
+            "kind=question 用于标记「需要主代理决定」——同样是异步送达，"
+            "不要在等待回复上空转，把未决问题写进自己的最终结论即可。"
         ),
         "parameters": {
             "type": "object",
@@ -185,14 +206,6 @@ MESSAGE_MAIN_SCHEMA = {
                 "kind": {
                     "type": "string",
                     "description": "progress（默认）= 状态更新；question = 需要主代理决定",
-                },
-                "wait": {
-                    "type": "boolean",
-                    "description": "仅 kind=question 有效：true = 阻塞等待主代理回复",
-                },
-                "timeout_s": {
-                    "type": "integer",
-                    "description": "wait=true 时的最长等待秒数（默认 300）",
                 },
             },
             "required": ["message"],

@@ -26,7 +26,10 @@ class DesktopRecipe(Base):
     id: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
     )
-    # 应用标识：进程名（如 QQMusic）或窗口标题关键词。用进程名更稳定。
+    # 路线类型（plan-20261018-operator-boost）：desktop = 桌面应用（电脑操控）/ browser = 网页（内置浏览器）。
+    # 两类共用一张表与同一套管理界面，去重键带上类型，避免同名应用与站点互相覆盖。
+    scope: Mapped[str] = mapped_column(String(10), default="desktop", server_default="desktop", nullable=False)
+    # 应用标识：进程名（如 QQMusic）或窗口标题关键词，用进程名更稳定；网页路线为站点 host（如 localhost:5173）。
     app_name: Mapped[str] = mapped_column(String(120), nullable=False)
     # 操作意图：一句话目标（如「搜索并播放指定歌曲」）
     intent: Mapped[str] = mapped_column(String(255), nullable=False)

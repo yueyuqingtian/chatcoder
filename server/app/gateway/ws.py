@@ -70,6 +70,8 @@ _GLOBAL_FORWARD_EVENTS = frozenset({
     # 工作流结束 → 主代理被唤醒之间的待唤醒状态（plan-20261014-actions-wait）：
     # 侧栏转圈要在这段空档里保持，非当前会话同样需要感知；低频、载荷极小
     "workflow.wakeup",
+    # plan-156-620：新建执行子会话 → 左栏在任意会话下都能即时插入子会话行（低频）
+    "subsession.created",
 })
 
 

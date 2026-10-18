@@ -175,6 +175,9 @@ analyze_payload.py
 /server/test_*.py
 /server/test_out.txt
 
+# 后端单实例运行的进程锁文件（运行时生成，内容为当前 pid）
+/server/backend.instance.lock
+
 # ========================================
 # Forensic / debug artifacts (health check P0: ignore, keep files)
 # ========================================

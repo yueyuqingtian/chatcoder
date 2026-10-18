@@ -23,6 +23,7 @@ import {
   markFrameReady, noteLoadingStop, noteNavigationStart, pushConsole, registerFrame, unregisterFrame,
 } from "../../browserAgent/frames";
 import { isBusy, subscribe } from "../../perf/bus";
+import { healParkedWrapper, releaseParkHeal } from "../../browserAgent/parkGuard";
 import { registerReconcileTask, RECONCILE_ORDER } from "../../perf/reconcile";
 import { recordDerivation } from "../../perf/metrics";
 import { IconButton, Input, Popover } from "../ui";
@@ -96,6 +97,16 @@ export function BrowserPanel({ sessionId, visible = true }: {
   const [cursorPos, setCursorPos] = useState<{ x: number; y: number } | null>(null);
 
   const viewportRef = useRef<HTMLDivElement>(null);
+  // plan-20261018-operator-boost：停泊 / 取消停泊后检查停泊网页是否仍在视口原点（被祖先包含块带离视口会不出帧），
+  // 取消停泊后还原守卫临时覆盖的祖先样式。放在下一帧做：等面板几何与类名都已提交。
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => {
+      const root = viewportRef.current;
+      root?.querySelectorAll<HTMLElement>(".browser-tab-frame-wrapper.is-parked").forEach((w) => { healParkedWrapper(w); });
+      releaseParkHeal();
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [shown, activeTabId, tabView, tabs.length]);
   const tabFrameRefs = useRef<Map<string, HTMLIFrameElement | any>>(new Map());
   const frameBridge = useFrameBridge();
   /** 每个标签挂载 webview 时使用的地址：之后的导航走命令式 API，src 不再随地址变化（否则会二次加载） */

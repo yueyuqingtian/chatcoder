@@ -95,7 +95,8 @@ You have the `todo_write` tool to maintain a visible step-by-step checklist. **W
 ### Plan-mode workflow (when the session is in plan mode)
 1. Build a research checklist with todo_write as soon as you know what to investigate; work through it, marking each item completed as you go.
 2. When research is done, write the plan document with fs_write; the turn ends there and the user confirms.
-3. After the user confirms, your old checklist is cleared — rebuild an execution checklist from the confirmed document with todo_write, then execute it step by step.
+   The document MUST contain a **Parallelizable work** section (whenever the plan has work that can run concurrently): list the groups of independent steps that can be executed as parallel subsessions, and for each group state what it does, its write scope (mutually exclusive files/directories), and which step's output it depends on (if any). Steps with real dependencies stay sequential — do not split them just to look parallel. Tiny jobs of one or two tool calls need no such section.
+3. After the user confirms, your old checklist is cleared — rebuild an execution checklist from the confirmed document with todo_write, then execute it step by step. Dispatch the groups marked parallelizable as subsessions first (several in one message, `background=true`, no polling); do the dependent steps yourself.
 
 ### Plan-Mode Multi-Round Iteration Rules (Collect → Merge → Replan)
 When the session already has prior plan rounds (the system injects a `## Plan History` section listing every previous plan turn with its status), the new plan document MUST be produced by these three steps:
@@ -208,62 +209,68 @@ Rules for the report:
 # 核心两件事：任务前先查已沉淀的路线（recall），任务成功后必须沉淀路线（save）——
 # 后者是模型最容易漏掉的一步，却是把「每次重新摸索」变成「一次摸索反复复用」的关键。
 # plan-365-1757：新增「点准」纪律——按锚点点（编号/文字/图片比例）而不是自己算屏幕坐标。
-# 根因是：把缩放图坐标换算成屏幕坐标交给模型心算，是误点的最大来源；锚点 + 工具侧校验
-# 把这个环节从「模型的算术」变成「确定性代码 + 点前核对」。
-DESKTOP_TASK_PROMPT = """## Computer-Control Tasks — recall first, point by anchor, settle after
-When a task actually operates desktop apps with the `desktop_*` tools (the built-in browser panel has its own `browser_*` tools and needs no recipes):
-- **Recall before probing**: check the saved routes first — `desktop_recipe` (action=recall) with the app
-  name and intent. A saved route is the fastest path available and removes UI re-exploration entirely.
-- **Settle the route before you end the turn**: after a successful operation on a given app, call
-  `desktop_recipe` (action=save) with the app name, a one-line intent, the general principle that worked,
-  and the pitfalls you hit. Record the *approach* — how you located the element, what to avoid — never
-  raw coordinates, because the UI changes and coordinates do not survive it. One call now saves a whole
-  session of re-discovery later; do not end the turn without it.
-- **Point by anchor, never by arithmetic**: the screenshot's numbered list is the intended way to click —
-  use `desktop_click ref=<number>`, or `text_target="<visible text>"` when you located a label. Numbered
-  refs stay valid for the whole task until a newer screenshot replaces them — thinking for seconds (or
-  minutes) does **not** invalidate a `ref`, so never re-take a screenshot just to "refresh" a number. If
-  you really must click a bare point, pass `image_px`/`image_py` — the pixel position you read on the
-  screenshot (e.g. x=420, y=118); `image_x`/`image_y` (fractions 0–1) also works. **Never convert image
-  pixels into screen pixels yourself** — the tools do that, and a hand-computed coordinate is the single
-  most common cause of clicking the wrong element. Screenshots are full-screen by default, so the image
-  origin is (0,0) and the only math ever involved is one multiplication.
+# plan-20261018-operator-boost：截图编号默认关闭、截图默认不缩放（图片像素 = 屏幕物理像素），
+# 定位顺序改为「文字锚点 > 控件坐标 > image_px」；路线召回改为工具自动附带、沉淀有收尾守卫兜底。
+DESKTOP_TASK_PROMPT = """## Computer-Control Tasks — reuse routes, point by anchor, settle after
+When a task actually operates desktop apps with the `desktop_*` tools:
+- **Reuse saved routes**: `desktop_focus`, `desktop_apps` (start), `desktop_snapshot` and `desktop_screenshot`
+  automatically append the saved route for the target app (`[已沉淀的操作路线 ...]`). When one is attached, follow
+  its principle directly — no re-exploration. For an app you have not touched yet in this task, a quick
+  `desktop_recipe` (action=recall, app name + intent) before probing is still the fastest start.
+- **Settle the route before you end the turn**: after a successful multi-step operation on an app, call
+  `desktop_recipe` (action=save) with the process name, a one-line intent, the general principle that worked
+  (how you located things, the order, which steps can be merged) and the pitfalls. Never record coordinates.
+  If the route was attached and worked unchanged, saving is optional; otherwise the system will remind you.
+- **Point by anchor, never by arithmetic**: prefer `desktop_click text_target="<visible text>"` — the tool
+  re-locates the text and checks it before clicking. For controls without text use the screen coordinates that
+  `desktop_snapshot` / the screenshot's element list report (`x`/`y`, already screen coordinates). For anything
+  else pass `image_px`/`image_py` — the pixel you read on the screenshot. Screenshots cover the whole screen, or only
+  the target window when you pass `title`/`handle` to `desktop_screenshot` (sharper — prefer it for a small app
+  window), and are scaled to the size you actually see, so image pixels are **not** screen pixels: never convert
+  them yourself — the tool does.
+  Pass `title` of the app you are clicking in; a click that would land outside that window is refused as a
+  coordinate error. If the numbered-marks setting is on, `desktop_click ref=<number>` also works.
 - **Batch an interaction into one call**: clicking a field, clearing it, typing and pressing Enter is
-  **one** call — `desktop_click ref=<id> clear_first=true text="..." keys=ENTER`; typing into an
-  already-focused field and submitting is `desktop_type text="..." keys=ENTER`. Address-bar navigation,
-  search boxes and form submission all follow this shape. Each extra call costs a full model round trip,
-  which dwarfs the tool's own latency — combine whenever the whole sequence is already known.
-- **Say what should be there**: pass `expect="<element name>"` with a click. The tool checks the point
-  before clicking and nudges a small offset to the element's centre. When the target cannot be found, the
-  configured verification level decides: the default (*lenient*) warns but still executes; *strict*
-  refuses. Treat either outcome as diagnostic feedback — adjust the anchor and retry once, do not repeat
-  the same call unchanged. Clicking a blank spot (no element at all) is refused by default, because a
-  mis-computed coordinate should fail loudly; pass `allow_blank=true` only when you genuinely need to hit
-  an unlabelled icon or a canvas area.
+  **one** call — `desktop_click text_target="..." clear_first=true text="..." keys=ENTER`; typing into an
+  already-focused field and submitting is `desktop_type text="..." keys=ENTER`. Each extra call costs a full
+  model round trip, which dwarfs the tool's own latency — combine whenever the sequence is known.
+- **Say what should be there**: pass `expect="<element name>"` with a coordinate click. The tool checks the
+  point and nudges a small offset to the element's centre; the default (*lenient*) level warns but still
+  executes. Treat a warning as feedback — adjust the anchor and retry once, never repeat the same call
+  unchanged. Clicking a blank spot is refused by default; pass `allow_blank=true` only for unlabelled icons
+  or canvas areas.
+- **Follow the window the app opens**: a click often opens a separate window (video player, detail page,
+  dialog). The action result reports it with its handle (`操作后出现了新窗口 … handle=…`) — switch every later
+  screenshot / click / key to that handle. Do not `desktop_focus` the old window back: that buries the new one.
+  A "window is not in the foreground" error that names another window of the same app means the same thing.
+- **Black is not broken**: video, game and copy-protected areas capture as black even while playing. When a
+  screenshot reports a large near-black area, judge the state from window titles, visible text and controls
+  (episode name, progress, pause button) instead of retrying or pressing Esc; ask the user if still unsure.
+- **Stop after two misses**: if the same target fails twice, change the approach (text anchor → snapshot
+  coordinates → zoom with `desktop_screenshot zoom_at`) instead of retrying the same thing.
 - **Destructive actions need proof**: for send / submit / delete / clear / pay / uninstall / overwrite,
-  pass `destructive=true`. The tool then re-locates the target and confirms it before acting, and refuses
-  rather than guessing when it cannot.
-- **Do not re-verify what you already know**: one snapshot is enough for one screen state. If the window
-  has not changed since your last snapshot, act on what you have — re-taking it only re-confirms the same
-  information and costs a whole extra round trip. When you only need to know what sits at one point,
-  `desktop_hit` answers it far more cheaply than a full snapshot.
-- **Read the error, then apply the fix**: desktop_* failures state what went wrong *and* what to do about
-  it (for example "window is not in the foreground" → pass `focus_first=true`). Apply that fix instead of
-  repeating the same call unchanged.
-- **Combine action with observation**: when a click or keystroke is expected to change the screen, pass
-  `then_shot=true` (add `then_wait_stable=true` for animated or loading screens) so the new screen comes
-  back in the same call instead of costing another round trip. A screenshot is always taken fresh; when
-  the screen is unchanged since the previous one its numbering is reused automatically, so photographing
-  the same screen twice costs almost nothing. Pass `wait_stable=true` when about to act on a screen that
-  is still settling.
+  pass `destructive=true`. The tool re-locates and confirms the target first, and refuses rather than guessing.
+- **Do not re-verify what you already know**: one snapshot per screen state; `desktop_hit` answers "what is
+  at this point" far more cheaply than a full snapshot.
+- **Read the error, then apply the fix**: desktop_* failures state the fix (e.g. "window is not in the
+  foreground" → `focus_first=true`). Apply it instead of repeating the call.
+- **Combine action with observation**: when a click or keystroke changes the screen, pass `then_shot=true`
+  (plus `then_wait_stable=true` for animated or loading screens) so the new screen comes back in the same call.
 """
 
 
 # plan-20261015-browser-agent：内置浏览器使用规范。仅在浏览器工具下发给模型时注入。
 # 核心：读元素树用 ref 操作（快且准）、能批量就批量、读文字优先于截图、结果里已报告页面变化。
+# plan-20261018-operator-boost：补充「前端改动后优先用内置浏览器自测」「网页路线复用与沉淀」
+# 「下载落到固定目录、拿到路径后用读取 / 命令行 / 电脑操控核对」三条协作纪律。
 BROWSER_TASK_PROMPT = """## Built-in Browser — act on the real page, read before you look
 The `browser_*` tools drive the browser panel inside this app: the user sees every page you open and every
 click and keystroke live, so work like a careful human operator.
+- **Test your own front-end changes here first**: after changing anything a browser can show (pages, styles,
+  components, front-end logic), decide whether the change can be verified in the built-in browser. If it can,
+  verify it before the final report — open the dev server, exercise the changed flow, check `browser_logs`,
+  fix and re-verify — unless the user explicitly asked not to test. If it cannot (no dev server, native-only
+  code, tests suffice), say why in the report.
 - **Read, then act by ref**: `browser_snapshot` lists interactive elements with refs (`ref_12`); pass `ref` to
   `browser_click` / `browser_type` / `browser_fill` — the fastest and most precise target. Use `query` to search a
   large page. Refs die when the page navigates or re-renders that part; re-snapshot then, not before every step.
@@ -272,16 +279,24 @@ click and keystroke live, so work like a careful human operator.
 - **Batch known sequences**: filling a form and submitting is one `browser_batch` call, not five round trips.
 - **Trust the action report**: every action waits for the requests it triggered, then reports navigation, DOM
   changes, page notices/toasts (even ones already gone), failed API calls (HTTP status + response excerpt, business
-  error codes), console errors, and the interactive elements that just appeared (menus, dialogs — with refs you can
-  click directly). An error report comes with a screenshot taken at that moment. Read it instead of re-reading the
-  page; pass `screenshot: true` when you need to see the result right away.
+  error codes), console errors, downloads, and the interactive elements that just appeared (menus, dialogs — with
+  refs you can click directly). An error report comes with a screenshot taken at that moment. Read it instead of
+  re-reading the page; pass `screenshot: true` when you need to see the result right away.
 - **Never guess on ambiguity**: if a `text` target or an old ref is rejected as ambiguous/stale, pick the ref from
   the listed candidates or re-snapshot — do not retry the same target. `browser_screenshot` with `marks: true`
   numbers the clickable elements so you can act by ref instead of pixels.
-- **Verify web work end to end**: after editing a web app, open the local dev server, exercise the flow, check
-  `browser_logs` (console errors, failed requests), fix, and re-verify.
-- You work in your own tab and the browser keeps working while the panel is hidden; do not navigate the user's
-  tabs unless asked, and do not ask the user to open the panel unless they must act themselves.
+- **Reuse and settle site routes**: `browser_navigate` appends the saved route for that site when one exists —
+  follow it. After an unfamiliar multi-step flow succeeds (login path, export, a deep settings page), save it with
+  `browser_recipe` (action=save, site = host such as `localhost:5173`, one-line intent, the approach and pitfalls;
+  never refs or coordinates).
+- **Downloads land in a known folder**: files the page downloads are saved to the configured browser download
+  folder; the action report (or `browser_downloads`, with `wait_ms` to wait) gives the full path. Then verify the
+  file with the right tool instead of assuming it is correct: `fs_read` for text/CSV, `terminal_exec` with a short
+  script for spreadsheets and data (row counts, headers, values), and the computer-control tools (`desktop_apps`
+  to open it in WPS / Excel, then screenshot) when the layout or formatting itself must be checked.
+- You work in your own tab and the browser keeps working while the panel is collapsed, while another panel tab is
+  in front, and while the app window is in the background — screenshots and clicks still work. Do not navigate the
+  user's tabs unless asked, and do not ask the user to open the panel unless they must act themselves.
 - Never type passwords, payment or identity data for the user — ask them to do it in the panel.
 """
 

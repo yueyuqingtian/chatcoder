@@ -6,7 +6,8 @@
  * 状态在打开面板、完成操作、AI 结束一轮改动后刷新。 */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type GitBranchesOut, type GitCommitDetailOut, type GitDiffOut, type GitLogEntry, type GitStatusOut } from "../../api/client";
-import { useChatStore } from "../../store/chat";
+import { findSession, useChatStore } from "../../store/chat";
+import { bucketSessionId, usePanelStore } from "../../store/panel";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { Button, Checkbox, Dialog, Empty, FormDialog, IconButton, Input, Menu, Popover, Segmented, Tooltip } from "../ui";
 import { IconAlertTriangle, IconArrowDown, IconArrowUp, IconCheck, IconChevronDown, IconChevronRight, IconDownload, IconGitBranch, IconGlobe, IconMoreHorizontal, IconPlus, IconRefresh, IconTrash, IconX } from "../icons";
@@ -132,7 +133,15 @@ function DiffView({ diff, path }: { diff: GitDiffOut; path: string }) {
 }
 
 export function GitPanel({ visible = true }: { visible?: boolean }) {
-  const projectId = useChatStore((s) => s.currentProjectId);
+  // plan-156-621：Git 面板绑定「当前面板桶所属会话」的项目，而不是全局当前项目——
+  // 面板按会话保活，切会话后后台桶不应跟随当前项目漂移；桶里没有会话时才回退全局。
+  const activeBucket = usePanelStore((s) => s.activeBucket);
+  const fallbackProjectId = useChatStore((s) => s.currentProjectId);
+  const bucketProjectId = useChatStore((s) => {
+    const sid = bucketSessionId(activeBucket);
+    return sid == null ? null : findSession(s, sid)?.project_id ?? null;
+  });
+  const projectId = bucketProjectId ?? fallbackProjectId;
   const isRunning = useChatStore((s) => s.isRunning);
 
   const [status, setStatus] = useState<GitStatusOut | null>(null);
@@ -277,6 +286,21 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
     void loadHistory(true);
     // 仅在项目 / 视图切换时整页重读；翻页由「加载更多」负责
   }, [projectId, visible, view]);
+
+  /** plan-156-620：工具卡点击文件 → 状态就绪后切到变更视图并展开该文件差异（消费一次即清空）。 */
+  const gitFocus = usePanelStore((s) => s.gitFocus);
+  useEffect(() => {
+    if (!visible || !gitFocus || !status) return;
+    usePanelStore.getState().clearGitFocus();
+    // plan-156-621：焦点不属于本面板项目时直接丢弃——跨项目保活时把旧路径拿到当前仓库请求差异，
+    // 只会得到「文件不存在」或读到同名但无关的文件。
+    if (gitFocus.projectId != null && projectId != null && gitFocus.projectId !== projectId) return;
+    setView("changes");
+    if (selected?.path === gitFocus.path) return;
+    setSelected({ path: gitFocus.path, staged: gitFocus.staged });
+    void loadDiff(gitFocus.path, gitFocus.staged);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gitFocus, status, visible, projectId]);
 
   // AI 一轮结束（运行态回落）后，工作区很可能已变化：刷新一次
   const wasRunning = useRef(isRunning);

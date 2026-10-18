@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import MsgType, SenderType
 from app.gateway.schemas import (ArtifactOut, FileChangeOut, FileDiffOut, MessageOut, ReviewBatchBody,
+                                 RevertFilesResult, RevertLockOut,
                                  RollbackConflict, RollbackPreviewFile, RollbackPreviewOut,
                                  RollbackResult, TaskConfirmBody, TaskOut, TurnCreate, TurnInjectBody, TurnOut, TurnSnapshotOut)
 from app.orchestration import engine
@@ -95,7 +96,9 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
     # plan-41-227: patch 只改库、不回填本对象——广播 payload 必须自带 turn_id，
     # 否则前端按 turn 分组时会把该消息当成独立条目排到消息流末尾。
     user_msg.turn_id = turn_id
-    generated_title = await session_service.auto_title_session(db, session, body.content)
+    # plan-156-620：标题归纳改为后台任务（完成后自行广播 session.updated），
+    # 不再在发送请求里同步等模型——此前首条消息的发送会被拖慢最多 8 秒。
+    session_service.schedule_auto_title(session, body.content)
     # v37: 用户消息落库时间即会话最新活动时间（侧栏排序依据）
     _last_activity = str(user_msg.created_at) if user_msg.created_at is not None else None
 
@@ -116,7 +119,7 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
         logger.debug("turn 快照预创建失败(非阻塞)", exc_info=True)
 
     # 标题在用户消息入库后立即同步，不依赖后台 turn 是否成功完成。
-    if generated_title or _last_activity:
+    if _last_activity:
         try:
             from app.orchestration.agent_events import broadcast
             await broadcast(body.session_id, {
@@ -125,7 +128,6 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
                 # 此前只有整表刷新（进/出设置页）才更新，表现为"发消息后会话不上移"。
                 "payload": {
                     "session_id": body.session_id,
-                    **({"title": generated_title} if generated_title else {}),
                     **({"last_activity_at": _last_activity} if _last_activity else {}),
                 },
             })
@@ -416,6 +418,38 @@ async def rollback_preview(turn_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(500, str(e))
 
 
+@router.post("/{turn_id}/revert_files", response_model=RevertFilesResult)
+async def revert_files(turn_id: int, allow_partial: bool = False, db: AsyncSession = Depends(get_db)):
+    """仅撤销该 turn 的文件改动（plan-20261018-turn-changes）。
+
+    与 /rollback 的区别：不删消息、不改 turn.status、不回填输入框，只把该轮写盘改动
+    反向应用。撤销顺序严格从新到旧，仍有更晚轮次写盘记录时返回 409 order_violation；
+    存在手动改动冲突时默认整体拒绝（409 conflict），allow_partial=true 时跳过冲突文件。
+    """
+    try:
+        result = await rollback_service.revert_turn_files(
+            db, turn_id=turn_id, allow_partial=allow_partial,
+        )
+    except Exception as e:
+        logger.exception("[revert] 撤销文件改动失败 turn=%s", turn_id)
+        raise HTTPException(500, str(e))
+
+    if result.get("ok"):
+        return RevertFilesResult(**result)
+
+    code = result.get("code") or "apply_failed"
+    detail = {
+        "code": code,
+        "message": result.get("reason") or "撤销失败",
+        "turn_id": turn_id,
+        "conflicts": result.get("conflicts") or [],
+        "later_turn_ids": result.get("later_turn_ids") or [],
+    }
+    # 409：顺序门控 / 手动改动冲突 / 已回滚，均属「当前状态不允许撤销」
+    status_code = 409 if code in ("order_violation", "conflict", "rolled_back") else 400
+    raise HTTPException(status_code, detail=detail)
+
+
 # ── 变更审核（v11）──
 
 @router.get("/{turn_id}/changes", response_model=list[FileChangeOut])
@@ -588,7 +622,12 @@ async def list_session_subagents(session_id: int, turn_id: int | None = None,
             "task_title": task.title if task else None,
             "status": (task.status if task else None) or ({"running": "running", "done": "done", "failed": "failed", "terminated": "terminated"}.get(agent.status, agent.status or "terminated")),
             # v36: 头部展示字段（created_at→updated_at 即任务起止，前端据此算用时）
-            "created_at": str(task.created_at) if task and task.created_at else None,
+            # plan-156-624：没有关联任务行时回退子代理自身的创建时刻——否则面板完全没有用时
+            # 数据。结束时刻仍只认 task.updated_at（终态才由前端采用），不拿 agents.created_at 冒充。
+            "created_at": (
+                str(task.created_at) if task and task.created_at
+                else (str(agent.created_at) if agent.created_at else None)
+            ),
             "updated_at": str(task.updated_at) if task and task.updated_at else None,
             "token_usage": (task.token_usage or 0) if task else 0,
             "files_count": len(_h.files_touched) if _h is not None else 0,
@@ -799,6 +838,16 @@ async def list_session_artifacts(session_id: int, db: AsyncSession = Depends(get
 @router.get("/sessions/{session_id}/snapshots", response_model=list[TurnSnapshotOut])
 async def list_snapshots(session_id: int, db: AsyncSession = Depends(get_db)):
     return await rollback_service.list_snapshots(db, session_id)
+
+
+@router.get("/sessions/{session_id}/revert_lock", response_model=RevertLockOut)
+async def get_revert_lock(session_id: int, db: AsyncSession = Depends(get_db)):
+    """撤销顺序锁（plan-20261018-turn-changes）：只有最新有写盘记录的 turn 可撤销。"""
+    try:
+        return RevertLockOut(**await rollback_service.revert_lock(db, session_id))
+    except Exception as e:
+        logger.warning("[revert] 查询撤销锁失败: session=%s err=%s", session_id, e, exc_info=True)
+        raise HTTPException(500, str(e))
 
 
 @router.get("/sessions/{session_id}/audit", response_model=list)

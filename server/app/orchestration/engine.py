@@ -246,9 +246,13 @@ def drain_injected_inputs(turn_id: int) -> list[dict]:
     return _pending_inputs.pop(turn_id, [])
 
 
-def discard_injected_inputs(turn_id: int) -> None:
-    """turn 结束时丢弃残留注入项（防内存泄漏；正常路径已被 drain 清空）。"""
-    _pending_inputs.pop(turn_id, None)
+def discard_injected_inputs(turn_id: int) -> list[dict]:
+    """turn 结束时取走残留注入项（防内存泄漏；正常路径已被 drain 清空）。
+
+    plan-156-621：改为返回被丢弃的项。带 `_persist_on_drop` 标记的项（子会话结论汇报）
+    必须由收尾方落库——注入与收尾同刻发生时，它既没进上下文也没落库，结论会彻底消失。
+    """
+    return _pending_inputs.pop(turn_id, None) or []
 
 
 def _on_agent_report(manager, session_id: int, turn_id: int,
@@ -898,6 +902,15 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         session = await session_service.get_session(db, session_id)
         if session is None:
             return {"ok": False, "error": "session not found"}
+        # plan-156-620：调用方未显式给模式时以会话落库的执行模式为准。
+        # 子会话首轮 / 子代理唤醒轮 / 定时任务等内部入口都不传 mode，此前一律按智能体执行——
+        # 主代理建的只读子会话因此拥有写权限，与界面显示的「只读」不符。
+        if not mode:
+            mode = getattr(session, "permission_mode", None)
+        # plan-20261018-operator-boost：调用方未给思考深度时用会话级档位（操控子会话落库为最低档，
+        # 之后的每一轮——含主代理追加消息、从检查点续跑——都沿用，不回落到全局的高档位）。
+        if not reasoning_effort:
+            reasoning_effort = (getattr(session, "reasoning_effort", None) or "").strip() or None
         project = await project_service.get_project(db, session.project_id) if session.project_id else None
         if project is None:
             return {"ok": False, "error": "项目不存在，请先关联项目"}
@@ -1115,7 +1128,12 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                 n for n in _available_tools if n in TO_TA3 or is_mcp_tool(n)
             }
         _type_states = await load_subagent_type_states(db)
-        _allow_subagents = bool(_type_states.get("explore", True) or _type_states.get("general", True))
+        # plan-156-624：设置中心「启用子代理与子会话」总开关此前只存在配置里、engine 从未读取，
+        # 关掉也不生效。这里统一门控两套机制；默认 True，升级用户开箱即用。
+        _subagents_on = bool(getattr(settings, "subagent_enabled", True))
+        _allow_subagents = _subagents_on and bool(
+            _type_states.get("explore", True) or _type_states.get("general", True)
+        )
         # plan-644: plan 模式收集本会话此前各轮计划需求全集并注入（多轮迭代
         # 零丢失的机制保证）；非 plan 模式不注入、零开销
         _plan_history = ""
@@ -1228,11 +1246,16 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         #   agent    → 探索子代理 + 子会话
         #   workflow → 只下发只读探索子代理（执行统一走工作流节点，避免两套机制重复派发）
         _caps = capabilities_for(_mode)
-        _allow_explore = CAP_EXPLORE_AGENT in _caps
-        _allow_subsession = CAP_SUBSESSION in _caps
+        _allow_explore = CAP_EXPLORE_AGENT in _caps and _subagents_on
+        # plan-156-624：总开关关闭时子会话工具一并撤销（两套机制同一口径）
+        _allow_subsession = CAP_SUBSESSION in _caps and _subagents_on
         _subagent_allowed: set[str] | None = None
         if _schema_whitelist is not None:
-            _subagent_allowed = SUBAGENT_TOOL_NAMES & set(_schema_whitelist)
+            _picked = SUBAGENT_TOOL_NAMES & set(_schema_whitelist)
+            # plan-156-624：旧版本保存的模式白名单里没有子代理工具（那时还没有这套能力），
+            # 空交集不能当作「全部未勾选」——否则升级后子代理整组被撤掉，用户得重新去
+            # 权限面板逐个勾选。只有白名单确实勾过至少一个子代理工具时才按其过滤。
+            _subagent_allowed = _picked or None
         if _allow_explore:
             tool_schemas = append_subagent_tools(
                 tool_schemas, _type_states,
@@ -1465,6 +1488,9 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                         "artifact_ids": out.artifact_ids,
                         "session_id": session_id},
         })
+        # plan-156-620：执行子会话的 turn 收尾 → 结果回报主代理（后台执行；非子会话内部直接跳过）
+        from app.services.subsession_service import schedule_finish_report
+        schedule_finish_report(session_id, turn_id, final_status, summary)
         # v45: 失败兜底——确认消息流内已有可见的错误消息，否则补一条，杜绝静默终止。
         if final_status == "failed":
             try:
@@ -1549,7 +1575,14 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         _running_turn_session.pop(turn_id, None)
         _cancel_events.pop(turn_id, None)
         _turn_managers.pop(turn_id, None)
-        discard_injected_inputs(turn_id)  # plan-547: 丢弃残留注入项
+        _dropped_inputs = discard_injected_inputs(turn_id)  # plan-547: 取走残留注入项
+        if _dropped_inputs:
+            # plan-156-621：子会话汇报若没赶上本轮上下文，收尾时补落库，下一轮仍能读到
+            try:
+                from app.services.subsession_service import persist_dropped_inputs
+                await persist_dropped_inputs(_dropped_inputs)
+            except Exception:  # noqa: BLE001 — 收尾兜底失败不得影响 turn 终态
+                logger.warning("[engine] 丢弃注入项落库失败 turn=%s", turn_id, exc_info=True)
         _session_turn_leave(session_id)
         # plan-330-1648 M7: 有后台子代理/未送达通知时保活 manager（结果跨 turn 送达）
         from app.orchestration.subagent import peek_subagent_manager
@@ -1733,6 +1766,10 @@ async def _finalize_cancelled_turn(turn_id: int) -> None:
                             "session_id": session_id},
             })
             await broadcast_session_completed(session_id)
+            # plan-156-620：被中断的执行子会话同样回报主代理（此前只有正常收尾路径回报，
+            # 用户 / 主代理中断子会话后主代理无从得知）
+            from app.services.subsession_service import schedule_finish_report
+            schedule_finish_report(session_id, turn_id, "interrupted", result.get("summary") or "")
     except asyncio.CancelledError:
         logger.info("[cancel] finalizer cancelled turn=%s", turn_id)
     except Exception:
@@ -2176,6 +2213,10 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
                 source=bundle.reply_language_source,
             )
         )
+        # plan-156-623：确认执行阶段也注入并行要求——计划文档里的「可并行子会话执行」
+        # 分组只有在这里被读到，执行指令若仍写死「串行推进」等于让计划白拆。
+        from app.orchestration.prompts.parallel_subsession import execute_parallel_subsession_hint
+        _exec_parallel = execute_parallel_subsession_hint()
         bundle.instruction = (
             (bundle.rules_anchor + "\n\n" if bundle.rules_anchor else "")
             + "用户已确认以下方案文档，现在按它执行：\n\n"
@@ -2183,11 +2224,13 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             "【执行要求】\n"
             "1. 先用 todo_write 按文档重建执行清单——分几步、每步粒度由你决定，"
             "以可独立验证的交付物为界；之前的调研清单已清空。\n"
-            "2. 再串行推进：自行阅读、编辑、验证。\n"
+            "2. 再按文档推进：文档标注为可并行子会话执行的独立步骤，优先派发子会话并行处理"
+            "（派发后继续推进其余步骤，不要轮询）；有前后依赖的步骤自己串行做。\n"
             "3. 每完成一步立即用 todo_write 把该项标记为 completed、下一项标记为"
             " in_progress，不要事后批量补标。\n"
             "4. 执行中发现划分不合理时，先更新清单再继续。\n"
             "5. 完成后用一段话总结改动与验证结果。"
+            + (f"\n\n{_exec_parallel}" if _exec_parallel else "")
             + _open_section
         )
         main_tools = tool_registry.all_schemas()
@@ -2204,7 +2247,13 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         except Exception:
             logger.warning("[engine] 确认执行路径 MCP 工具加载失败(非阻塞)", exc_info=True)
         _type_states = await load_subagent_type_states(db)
-        main_tools = append_subagent_tools(main_tools, _type_states)
+        # plan-156-624：确认执行路径与 start_turn 同口径——接入「启用子代理与子会话」总开关，
+        # 并补下发子会话工具。此前这里只追加子代理工具，计划文档里标好的并行分组到了执行期
+        # 无 create_subsession 可用，只能串行做完。
+        _subagents_on = bool(getattr(settings, "subagent_enabled", True))
+        if _subagents_on:
+            main_tools = append_subagent_tools(main_tools, _type_states)
+        main_tools = append_subsession_tools(main_tools, enabled=_subagents_on)
         main_tools = append_workflow_tools(main_tools, readonly_only=False)
         mgr = get_subagent_manager(session.id)
         _turn_managers[turn_id] = mgr
@@ -2280,6 +2329,9 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
                         "error": _fail_reason2 if final_status == "failed" else None,
                         "artifact_ids": out.artifact_ids, "session_id": _session_id},
         })
+        # plan-156-620：执行子会话按已确认计划执行完毕，同样回报主代理
+        from app.services.subsession_service import schedule_finish_report
+        schedule_finish_report(_session_id, turn_id, final_status, summary)
         if request_task is not None:
             await broadcast(_session_id, {"event": "task.updated", "payload": {
                 "task_id": request_task.id, "status": request_task.status}})
@@ -2329,7 +2381,14 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         _running_turn_session.pop(turn_id, None)
         _cancel_events.pop(turn_id, None)
         _turn_managers.pop(turn_id, None)
-        discard_injected_inputs(turn_id)  # plan-547: 丢弃残留注入项
+        _dropped_inputs = discard_injected_inputs(turn_id)  # plan-547: 取走残留注入项
+        if _dropped_inputs:
+            # plan-156-621：与上方收尾路径同口径，子会话汇报丢弃时补落库
+            try:
+                from app.services.subsession_service import persist_dropped_inputs
+                await persist_dropped_inputs(_dropped_inputs)
+            except Exception:  # noqa: BLE001 — 收尾兜底失败不得影响 turn 终态
+                logger.warning("[engine] 丢弃注入项落库失败 turn=%s", turn_id, exc_info=True)
         _session_turn_leave(_session_id)
         # plan-330-1648 M7: 同上——有后台子代理时保活 manager
         from app.orchestration.subagent import peek_subagent_manager

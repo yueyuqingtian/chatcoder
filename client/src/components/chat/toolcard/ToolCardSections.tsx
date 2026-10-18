@@ -1,122 +1,186 @@
-/** 工具卡五个栏目的展示体（plan-156-619 S7c）。
+/** 工具卡五个栏目的展示体（plan-156-619 S7c；plan-156-620 重做样式与交互）。
  *
- * 分工：本文件只有「怎么显示」，取数与派生在 `useToolCardData.ts`，容器与折叠在
- * `SessionToolCard.tsx`。每个栏目一个独立组件、各自的空态返回 null——容器的渲染顺序
- * 因此天然与「有无内容」解耦。
+ * 分工：本文件只有「怎么显示 / 点了去哪」，取数与派生在 `useToolCardData.ts`，
+ * 容器与折叠在 `SessionToolCard.tsx`。
+ *
+ * 交互（plan-156-620）：每一行都通向右侧面板里的详情——
+ *  · Git 文件 → Git 标签并展开该文件差异；分支行 → Git 标签（提交 / 推送）；
+ *  · 计划 → 文件标签预览计划文档；
+ *  · 子代理 → 子代理标签查看执行过程；
+ *  · 工作流 → 工作流标签并定位到该运行；
+ *  · 进程步骤由子会话执行时，行尾「子会话」标记切换到该子会话。
+ * 文本被省略时，悬停或键盘聚焦该行显示完整内容（ui/Tooltip，不用原生 title）。
  *
  * 视觉约定（项目规则）：
  *  · 不使用左侧装饰性竖线表达层级；层次靠间距 / 字重 / 底色；
- *  · 圆角只用令牌（卡片 --r-lg、内部控件 --r-md、胶囊 999px）；
- *  · 提示统一 ui/Tooltip，不新增原生 title。
+ *  · 行首图标统一放在 `.tcard-ic` 固定槽位（--flow-icon，与消息流工具行同规格），
+ *    状态切换（转圈 → 勾）不改变文字起点。
  */
-import { memo, useState } from "react";
-import { IconCheck, IconCpu, IconGitBranch, IconSpinner } from "../../icons";
+import { memo, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { IconArrowRight, IconCheckCircle, IconCpu, IconGitBranch, IconListChecks, IconSpinner } from "../../icons";
 import { IxWorkflow } from "../../iconkit/StackIcons";
 import { FileIcon } from "../../iconkit/FileIcon";
-import { StatusIcon, normalizeStatus } from "../../iconkit/StatusIcon";
-import { Tooltip } from "../../ui";
+import { StatusIcon } from "../../iconkit/StatusIcon";
+import { Button, Tooltip } from "../../ui";
 import { useChatStore } from "../../../store/chat";
+import { usePanelStore } from "../../../store/panel";
+import { useWorkflowStore } from "../../../store/workflow";
+import type { ProgressRow } from "../taskProgress";
 import {
   GIT_LIST_LIMIT, SUBAGENT_COLLAPSE_AT,
-  openGitPanel, openPlanDoc,
+  openGitPanel, openPlanDoc, revealPanelTab,
   type GitSectionData, type PlanSectionData, type ProcessSectionData,
   type SubagentSectionData, type WorkflowSectionData,
 } from "./useToolCardData";
 
-/** 子会话标题（进程行 chip 的悬浮提示与标签） */
-function useSubsessionTitle(id: number | null | undefined): string {
-  const subsessionsByParent = useChatStore((s) => s.subsessionsByParent);
-  if (id == null) return "";
-  for (const list of Object.values(subsessionsByParent)) {
-    const hit = list.find((c) => c.id === id);
-    if (hit) return hit.title || `子会话 #${id}`;
-  }
-  return `子会话 #${id}`;
+/** 文本是否被省略（单行 ellipsis 或多行 clamp）；尺寸变化时重测。 */
+function useOverflow(ref: RefObject<HTMLElement | null>, text: string): boolean {
+  const [over, setOver] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const check = () => setOver(el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1);
+    check();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ref, text]);
+  return over;
 }
 
-/** 进程行尾的「子会话」chip：点击切到该子会话（plan-156-619 S6 的落地点）。 */
+interface RowProps {
+  icon: ReactNode;
+  text: string;
+  /** 允许两行（进程步骤），否则单行省略 */
+  wrap?: boolean;
+  strong?: boolean;
+  className?: string;
+  /** 行尾附加（状态码 / 计数 / 子会话标记） */
+  trailing?: ReactNode;
+  /** 固定提示（如 Git 完整路径）；缺省时仅在文本被省略时提示全文 */
+  tip?: string;
+  onClick?: () => void;
+}
+
+/** 卡片里的一行：可点击时是按钮（可聚焦），省略时悬停 / 聚焦提示全文。 */
+const Row = memo(function Row({ icon, text, wrap, strong, className = "", trailing, tip, onClick }: RowProps) {
+  const textRef = useRef<HTMLSpanElement>(null);
+  const over = useOverflow(textRef, text);
+  const tipText = tip ?? (over ? text : null);
+  const textCls = "tcard-row-text" + (wrap ? " tcard-row-wrap" : "") + (strong ? " tcard-row-strong" : "");
+  const inner = (
+    <>
+      <span className="tcard-ic">{icon}</span>
+      <span ref={textRef} className={textCls}>{text}</span>
+      {trailing}
+    </>
+  );
+  const el = onClick ? (
+    <button type="button" className={`tcard-row tcard-row-btn ${className}`} onClick={onClick}>{inner}</button>
+  ) : (
+    // 被省略的不可点击行也要能被键盘聚焦，才能看到完整内容
+    <div className={`tcard-row ${className}`} tabIndex={over ? 0 : undefined}>{inner}</div>
+  );
+  return <Tooltip content={tipText} disabled={!tipText} side="left">{el}</Tooltip>;
+});
+
+/** 子会话标题（进程行标记的提示） */
+function useSubsessionTitle(id: number): string {
+  return useChatStore((s) => {
+    for (const list of Object.values(s.subsessionsByParent)) {
+      const hit = list.find((c) => c.id === id);
+      if (hit) return hit.title || `子会话 #${id}`;
+    }
+    return `子会话 #${id}`;
+  });
+}
+
+/** 进程行尾的「子会话」标记：点击切到该子会话。 */
 const OwnerChip = memo(function OwnerChip({ id }: { id: number }) {
   const title = useSubsessionTitle(id);
   const switchSession = useChatStore((s) => s.switchSession);
   return (
-    <Tooltip content={`由「${title}」执行，点击切换`} side="left">
+    <Tooltip content={`由子会话「${title}」执行，点击切换`} side="left">
       <button
         type="button"
-        className="tcard-chip tcard-chip-owner"
+        className="tcard-chip"
         onClick={(e) => { e.stopPropagation(); void switchSession(id); }}
       >
-        <IconCpu size={10} />
-        <span className="tcard-chip-text">{title}</span>
+        <IconCpu size={11} />
+        <span className="tcard-chip-text">子会话</span>
       </button>
     </Tooltip>
   );
 });
 
+/** 进程行状态图标：完成 = 圆勾、进行中 = 转圈、待办 = 箭头、中断 = 警示。 */
+function ProcessIcon({ status }: { status: ProgressRow["status"] }) {
+  if (status === "done") return <IconCheckCircle size={15} />;
+  if (status === "running") return <IconSpinner size={14} />;
+  if (status === "interrupted") return <StatusIcon status="interrupted" size={14} />;
+  return <IconArrowRight size={14} />;
+}
+
 export const GitSection = memo(function GitSection({ data }: { data: GitSectionData }) {
+  const openGitFile = usePanelStore((s) => s.openGitFile);
+  // plan-156-621：焦点带上项目标识，GitPanel 消费时校验，避免跨项目把旧路径当当前仓库的变更
+  const projectId = useChatStore((s) => s.currentProjectId);
+  const rest = data.fileCount - GIT_LIST_LIMIT;
   return (
     <>
-      {data.clean ? (
-        <div className="tcard-empty">工作区干净</div>
-      ) : (
-        <>
-          <div className="tcard-git-tools">
-            <span className="tcard-git-branch">
-              <IconGitBranch size={12} />
-              <span className="tcard-git-branch-name">{data.branch || "detached"}</span>
-            </span>
-            <span className="tcard-git-count">{data.fileCount} 个文件</span>
-            <button type="button" className="tcard-link" onClick={openGitPanel}>查看全部</button>
-          </div>
-          <div className="tcard-git-list">
-            {data.items.slice(0, GIT_LIST_LIMIT).map((f) => (
-              <Tooltip content={`${f.path}${f.staged ? "（已暂存）" : ""}`} side="left" key={f.path}>
-                <div className="tcard-git-row">
-                  <FileIcon name={f.path} size={13} />
-                  <span className="tcard-git-name">{f.path.split(/[\\/]/).pop()}</span>
-                  <span className="tcard-git-code" data-code={f.code.toUpperCase()}>{f.code.toUpperCase()}</span>
-                </div>
-              </Tooltip>
-            ))}
-          </div>
-        </>
-      )}
+      {data.items.slice(0, GIT_LIST_LIMIT).map((f) => (
+        <Row
+          key={f.path}
+          icon={<FileIcon name={f.path} size={14} />}
+          text={f.path.split(/[\\/]/).pop() || f.path}
+          tip={`${f.path}${f.staged ? "（已暂存）" : ""} · 点击查看差异`}
+          trailing={<span className="tcard-git-code" data-code={f.code.toUpperCase()}>{f.code.toUpperCase()}</span>}
+          onClick={() => openGitFile(f.path, f.staged, projectId)}
+        />
+      ))}
+      <Row
+        className="tcard-row-sub"
+        icon={<IconGitBranch size={14} />}
+        text={`${data.branch || "detached"}${rest > 0 ? ` · 另有 ${rest} 个文件` : ""}`}
+        trailing={<span className="tcard-row-hint">提交与推送</span>}
+        onClick={openGitPanel}
+      />
     </>
   );
 });
 
 export const PlanSection = memo(function PlanSection({ data }: { data: PlanSectionData }) {
   return (
-    <button type="button" className="tcard-plan-row" onClick={() => openPlanDoc(data.planDocPath)}>
-      <span className="tcard-plan-title">{data.task || "任务执行计划"}</span>
-      <span className={"tcard-plan-state" + (data.awaiting ? " is-await" : "")}>
-        {data.awaiting ? "待执行" : "执行中"}
-      </span>
-    </button>
+    <Row
+      icon={<IconListChecks size={15} />}
+      text={data.title}
+      strong
+      tip={`${data.title} · 点击查看计划文档`}
+      onClick={() => openPlanDoc(data.planDocPath)}
+    />
   );
 });
 
 export const ProcessSection = memo(function ProcessSection({ data }: { data: ProcessSectionData }) {
   return (
     <>
-      <div className="tcard-progress-bar" aria-hidden>
-        <span style={{ width: `${data.total > 0 ? (data.done / data.total) * 100 : 0}%` }} />
-      </div>
-      <div className="tcard-proc-list">
-        {data.rows.map((row) => (
-          <div className={`tcard-proc-row is-${row.status}`} key={row.key}>
-            <StatusIcon status={normalizeStatus(row.status)} size={13} />
-            <Tooltip content={row.title} side="left">
-              <span className="tcard-proc-title">{row.title}</span>
-            </Tooltip>
-            {row.owner != null && <OwnerChip id={row.owner} />}
-          </div>
-        ))}
-      </div>
+      {data.rows.map((row) => (
+        <Row
+          key={row.key}
+          className={`tcard-proc is-${row.status}`}
+          icon={<ProcessIcon status={row.status} />}
+          text={row.title}
+          wrap
+          trailing={row.owner != null ? <OwnerChip id={row.owner} /> : undefined}
+        />
+      ))}
     </>
   );
 });
 
 export const SubagentSection = memo(function SubagentSection({ data }: { data: SubagentSectionData }) {
+  const openSubagent = usePanelStore((s) => s.openSubagent);
   // 已结束条目超过阈值才折叠（用户指定：> 4 个）；运行中 / 当前轮次永不折叠
   const collapsible = data.finished.length > SUBAGENT_COLLAPSE_AT;
   const [expandedFinished, setExpandedFinished] = useState(false);
@@ -124,40 +188,53 @@ export const SubagentSection = memo(function SubagentSection({ data }: { data: S
     ? data.finished.slice(0, SUBAGENT_COLLAPSE_AT)
     : data.finished;
   return (
-    <div className="tcard-sub-list">
+    <>
       {data.running.map((s) => (
-        <div className="tcard-sub-row" key={`run-${s.id}`}>
-          <IconSpinner size={12} />
-          <Tooltip content={s.name} side="left"><span className="tcard-sub-name">{s.name}</span></Tooltip>
-        </div>
+        <Row
+          key={`run-${s.id}`}
+          icon={<IconSpinner size={14} />}
+          text={s.name}
+          tip={`${s.name} · 点击查看执行过程`}
+          onClick={() => openSubagent(s.id, s.name)}
+        />
       ))}
       {visibleFinished.map((s) => (
-        <div className="tcard-sub-row is-done" key={`done-${s.id}`}>
-          <IconCheck size={12} />
-          <Tooltip content={s.name} side="left"><span className="tcard-sub-name">{s.name}</span></Tooltip>
-        </div>
+        <Row
+          key={`done-${s.id}`}
+          className="is-done"
+          icon={<IconCheckCircle size={15} />}
+          text={s.name}
+          tip={`${s.name} · 点击查看执行过程`}
+          onClick={() => openSubagent(s.id, s.name)}
+        />
       ))}
       {collapsible && (
-        <button
-          type="button"
-          className="tcard-sub-more"
-          onClick={(e) => { e.stopPropagation(); setExpandedFinished((v) => !v); }}
+        <Button
+          variant="ghost"
+          size="xs"
+          className="tcard-more"
+          onClick={() => setExpandedFinished((v) => !v)}
         >
-          {expandedFinished
-            ? "收起"
-            : `已完成 ${data.finished.length} 项`}
-        </button>
+          {expandedFinished ? "收起已完成" : `展开其余 ${data.finished.length - SUBAGENT_COLLAPSE_AT} 个已完成`}
+        </Button>
       )}
-    </div>
+    </>
   );
 });
 
 export const WorkflowSection = memo(function WorkflowSection({ data }: { data: WorkflowSectionData }) {
+  const openWorkflow = () => {
+    // 先定位到该运行，再打开工作流标签：面板挂载时直接呈现这一份详情
+    useWorkflowStore.getState().focus(data.id);
+    revealPanelTab("workflow");
+  };
   return (
-    <div className="tcard-wf-row">
-      <IxWorkflow size={12} />
-      <Tooltip content={data.title} side="left"><span className="tcard-wf-title">{data.title}</span></Tooltip>
-      <span className="tcard-wf-count">{data.done}/{data.total}</span>
-    </div>
+    <Row
+      icon={<IxWorkflow size={14} />}
+      text={data.title}
+      tip={`${data.title} · 点击查看工作流详情`}
+      trailing={<span className="tcard-row-hint">{data.done}/{data.total}</span>}
+      onClick={openWorkflow}
+    />
   );
 });

@@ -121,11 +121,21 @@ interface PanelState extends PanelBucket {
   openNewTab: (id: PanelTabId) => void;
   /** v2.2 (对齐 zcode 3.13): 打开子代理详情 tab（每线程独立实例，可多开） */
   openSubagent: (threadId: number, agentName?: string) => void;
+  /** plan-156-620：待在 Git 面板展开差异的文件（工具卡点击文件时写入，GitPanel 消费后清空）。
+   *  plan-156-621：带上项目标识——面板跨项目保活时，旧项目的路径不能拿到当前仓库请求差异。 */
+  gitFocus: { path: string; staged: boolean; projectId: number | null } | null;
+  /** plan-156-620：打开 Git 标签并展开某文件的差异。 */
+  openGitFile: (path: string, staged: boolean, projectId?: number | null) => void;
+  clearGitFocus: () => void;
   closeTab: (key: string) => void;
   /** v2.2 (对齐 zcode 3.3.3): 恢复最近关闭的标签（同时从栈中移除） */
   reopenClosedTab: (index: number) => void;
   setActiveTab: (key: string) => void;
   setPreviewPath: (path: string | null, line?: number | null) => void;
+  /** plan-20261018-turn-changes：一次性打开「文件 + 该文件的 diff」。
+   *  卡片点「审查」时用：先设预览路径再写 diff 会让 DiffEditor 先卸载再挂载，
+   *  Monaco 会抛 "TextModel got disposed before DiffEditorWidget model got reset"。 */
+  openDiffPreview: (path: string, diff: DiffPreview) => void;
   /** 计划模式「查看完整计划」：预览计划文档，并请求文件管理收起目录树 */
   openPlanPreview: (path: string) => void;
   /** 文件管理在可见时消费「收起目录树」请求 */
@@ -223,6 +233,14 @@ export const usePanelStore = create<PanelState>((set, get) => ({
     apply();
   },
 
+  gitFocus: null,
+  openGitFile: (path, staged, projectId = null) => {
+    set({ gitFocus: { path, staged, projectId } });
+    get().openPanel();
+    get().openTab("git");
+  },
+  clearGitFocus: () => set({ gitFocus: null }),
+
   openSubagent: (threadId, agentName) => {
     const key = get().activeBucket;
     const b = get().buckets[key] ?? emptyBucket();
@@ -285,6 +303,9 @@ export const usePanelStore = create<PanelState>((set, get) => ({
     (b) => ({ ...b, previewPath: path, previewLine: null, diffPreview: null, planCollapsePending: true })),
   ackPlanCollapse: () => writeBucket(get().activeBucket, (b) => ({ ...b, planCollapsePending: false })),
   setDiffPreview: (diff) => writeBucket(get().activeBucket, (b) => ({ ...b, diffPreview: diff })),
+  // plan-20261018-turn-changes: 预览路径与 diff 一次写入，避免中间态让 DiffEditor 卸载重建
+  openDiffPreview: (path, diff) => writeBucket(get().activeBucket,
+    (b) => ({ ...b, previewPath: path, previewLine: null, diffPreview: diff })),
 
   reset: () => set({ expanded: false, fullscreen: false, buckets: {}, activeBucket: HOME_BUCKET, ...projectionOf(emptyBucket()) }),
 }));

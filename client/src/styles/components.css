@@ -659,7 +659,10 @@
    而是靠"类名从无到有"触发同一套入场关键帧。
    plan-353-1738 M3（S6）：本类不经过 PageTransition，取不到 --pt-dist，
    此前回退值 6px 恒定、不随 --motion-dist 缩放；现回退值与 PageTransition 内联值同源。 */
-.ui-tab-enter { animation: ui-page-in-up var(--dur-4) var(--ease-emphasized-decel) both; }
+/* plan-20261018-operator-boost：填充模式用 backwards——both 会在动画结束后一直保留 transform，
+   让标签容器成为 position:fixed 后代的包含块。右侧面板折叠后，浏览器的停泊容器（fixed 铺满视口）被带到
+   面板位置（屏幕右缘外）并被宽度为 0 的面板裁掉，网页完全不出帧：截图超时、点击变慢。 */
+.ui-tab-enter { animation: ui-page-in-up var(--dur-4) var(--ease-emphasized-decel) backwards; }
 @keyframes ui-page-in-up {
   from { opacity: 0; transform: translateY(var(--pt-dist, calc(10px * var(--motion-dist, 1)))); }
   to { opacity: 1; transform: none; }

@@ -10,11 +10,11 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api/client";
-import type { DesktopRecipe, DesktopStatus } from "../../api/client";
+import type { DesktopRecipe, DesktopStatus, RecipeScope } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { useI18n } from "../../store/i18n";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { Button, CardRow, Checkbox, FormDialog, Input, List, ListRow, Segmented, Select, Slider, Textarea } from "../ui";
+import { Badge, Button, CardRow, Checkbox, FormDialog, Input, List, ListRow, Segmented, Select, Slider, Textarea } from "../ui";
 import { Field } from "../ui/Field";
 import { Row, Sw } from "./shared";
 
@@ -73,15 +73,16 @@ function normalizeVerifyMode(raw: unknown): string {
   return "lenient";
 }
 
+// plan-20261018-operator-boost：默认开启电脑操控；截图不缩放、画质 100、元素编号关闭（与后端 config.py 一致）
 const DEFAULTS: DesktopCfg = {
-  desktop_enabled: false,
+  desktop_enabled: true,
   desktop_plain_ops_enabled: true,
   desktop_browser_ops_enabled: true,
   desktop_require_foreground: true,
-  desktop_screenshot_quality: 75,
-  desktop_screenshot_max_dim: 1600,
+  desktop_screenshot_quality: 100,
+  desktop_screenshot_max_dim: 0,
   desktop_recipe_enabled: true,
-  desktop_mark_shot: true,
+  desktop_mark_shot: false,
   desktop_verify_click: "lenient",
   desktop_destructive_words: DEFAULT_DESTRUCTIVE_WORDS,
 };
@@ -112,16 +113,16 @@ function DesktopBasicSection() {
     try {
       const g = await api.getGlobalSettings();
       setCfg({
-        desktop_enabled: g.desktop_enabled === true,
+        desktop_enabled: g.desktop_enabled !== false,
         desktop_plain_ops_enabled: g.desktop_plain_ops_enabled !== false,
         desktop_browser_ops_enabled: g.desktop_browser_ops_enabled !== false,
         desktop_require_foreground: g.desktop_require_foreground !== false,
         desktop_screenshot_quality: typeof g.desktop_screenshot_quality === "number"
-          ? g.desktop_screenshot_quality : 75,
+          ? g.desktop_screenshot_quality : 100,
         desktop_screenshot_max_dim: typeof g.desktop_screenshot_max_dim === "number"
-          ? g.desktop_screenshot_max_dim : 1600,
+          ? g.desktop_screenshot_max_dim : 0,
         desktop_recipe_enabled: g.desktop_recipe_enabled !== false,
-        desktop_mark_shot: g.desktop_mark_shot !== false,
+        desktop_mark_shot: g.desktop_mark_shot === true,
         desktop_verify_click: normalizeVerifyMode(g.desktop_verify_click),
         desktop_destructive_words: typeof g.desktop_destructive_words === "string"
           ? g.desktop_destructive_words : DEFAULT_DESTRUCTIVE_WORDS,
@@ -466,6 +467,10 @@ function DesktopRecipeSection() {
                       />
                     </span>
                     <span className="dp-recipe-title-text">{it.app_name} · {it.intent}</span>
+                    {/* plan-20261018-operator-boost：网页路线（内置浏览器）与桌面应用路线共用列表，用角标区分 */}
+                    {it.scope === "browser" && (
+                      <Badge size="xs" tone="info">{t("dp.recipe.scope_web")}</Badge>
+                    )}
                     {it.source === "user" && (
                       <span style={{ fontSize: 11, color: "var(--text-3)" }}>
                         {t("dp.recipe.edited")}
@@ -541,6 +546,7 @@ function RecipeEditor({
   onSaved: () => void | Promise<void>;
 }) {
   const { t } = useI18n();
+  const [scope, setScope] = useState<RecipeScope>("desktop");
   const [appName, setAppName] = useState("");
   const [intent, setIntent] = useState("");
   const [principle, setPrinciple] = useState("");
@@ -553,6 +559,7 @@ function RecipeEditor({
   // 打开时用当前记录（或空）重置表单——避免上一次的残留内容串到下一次编辑
   useEffect(() => {
     if (!open) return;
+    setScope(recipe?.scope === "browser" ? "browser" : "desktop");
     setAppName(recipe?.app_name ?? "");
     setIntent(recipe?.intent ?? "");
     setPrinciple(recipe?.principle ?? "");
@@ -574,9 +581,9 @@ function RecipeEditor({
     setErr("");
     try {
       if (recipe) {
-        await api.updateDesktopRecipe(recipe.id, { app_name: appName, intent, principle, pitfalls });
+        await api.updateDesktopRecipe(recipe.id, { app_name: appName, intent, principle, pitfalls, scope });
       } else {
-        await api.createDesktopRecipe({ app_name: appName, intent, principle, pitfalls });
+        await api.createDesktopRecipe({ app_name: appName, intent, principle, pitfalls, scope });
       }
       await onSaved();
     } catch (e) {
@@ -584,7 +591,7 @@ function RecipeEditor({
     } finally {
       setSaving(false);
     }
-  }, [appName, intent, principle, pitfalls, recipe, onSaved, t]);
+  }, [appName, intent, principle, pitfalls, scope, recipe, onSaved, t]);
 
   return (
     <FormDialog
@@ -598,7 +605,22 @@ function RecipeEditor({
       width={640}
     >
       <div style={{ display: "flex", flexDirection: "column", gap: "var(--sp-4)" }}>
-        <Field label={t("dp.recipe.app_name")} hint={t("dp.recipe.app_name_hint")} required>
+        <Field label={t("dp.recipe.scope")}>
+          <Segmented
+            value={scope}
+            onChange={setScope}
+            aria-label={t("dp.recipe.scope")}
+            options={[
+              { value: "desktop", label: t("dp.recipe.scope_desktop") },
+              { value: "browser", label: t("dp.recipe.scope_web") },
+            ]}
+          />
+        </Field>
+        <Field
+          label={scope === "browser" ? t("dp.recipe.site") : t("dp.recipe.app_name")}
+          hint={scope === "browser" ? t("dp.recipe.site_hint") : t("dp.recipe.app_name_hint")}
+          required
+        >
           <Input value={appName} onChange={(e) => setAppName(e.target.value)} />
         </Field>
         <Field label={t("dp.recipe.intent")} hint={t("dp.recipe.intent_hint")} required>

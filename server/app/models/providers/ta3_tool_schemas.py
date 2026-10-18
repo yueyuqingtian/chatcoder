@@ -178,7 +178,11 @@ _TASK: list[dict] = [
        }),
     _f("TaskQuery", "按 taskId 查询异步子代理任务的状态与结果（仅在需要立即获取时使用；任务完成时会自动推送，无需轮询）。", {
         "type": "object", "required": ["taskId"],
-        "properties": {"taskId": {"type": "string", "description": "SubAgentAsync 返回的 taskId。"}},
+        "properties": {
+            "taskId": {"type": "string", "description": "SubAgentAsync 返回的 taskId。"},
+            # plan-156-620：长结论分段读取（结果末尾提示未读完时按给出的值续读）
+            "reportOffset": {"type": "integer", "description": "分段读取结论的起始字符位置；结果提示尚未读完时按提示的值再次查询，直到读完。"},
+        },
     }),
     _f("TaskCancel", "取消仍在运行的异步子代理任务（任务不再需要时及时取消，避免继续消耗额度）。", {
         "type": "object", "required": ["taskId"],

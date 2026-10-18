@@ -66,6 +66,33 @@ def _persist_workspace(path: str) -> None:
     _save_config(data)
 
 
+# plan-20261018-operator-boost：电脑操控默认值修订。键 → (旧默认, 新默认)。
+# 设置页「修改即保存」会把整页字段一并落盘，因此「已落盘」不代表用户改过；
+# 仍等于旧默认值的项视为未定制，一次性升级为新默认；用户改成其它值的保持不动。
+_DESKTOP_DEFAULTS_REV = 2
+_DESKTOP_DEFAULT_UPGRADES: dict[str, tuple[object, object]] = {
+    "desktop_enabled": (False, True),
+    "desktop_screenshot_quality": (75, 100),
+    "desktop_screenshot_max_dim": (1600, 0),
+    "desktop_mark_shot": (True, False),
+}
+
+
+def _upgrade_desktop_defaults(data: dict) -> None:
+    """把仍等于旧默认值的电脑操控配置升级为新默认（幂等，只执行一次）。"""
+    try:
+        rev = int(data.get("desktop_defaults_rev") or 0)
+    except (TypeError, ValueError):
+        rev = 0
+    if rev >= _DESKTOP_DEFAULTS_REV:
+        return
+    for key, (old, new) in _DESKTOP_DEFAULT_UPGRADES.items():
+        if key in data and data[key] == old:
+            data[key] = new
+    data["desktop_defaults_rev"] = _DESKTOP_DEFAULTS_REV
+    _save_config(data)
+
+
 def load_persisted_workspace() -> None:
     """启动时从用户配置恢复工作目录及全局设置。"""
     data = _load_config()
@@ -107,6 +134,8 @@ def load_persisted_workspace() -> None:
         settings.browser_enabled = bool(data["browser_enabled"])
     if "browser_headless" in data:
         settings.browser_headless = bool(data["browser_headless"])
+    # plan-20261018-operator-boost：电脑操控默认值升级（只升级「仍等于旧默认值」的项，用户改过的不动）
+    _upgrade_desktop_defaults(data)
     # plan-334-1661: 电脑操控相关开关
     # plan-365-1757: 追加「点准」开关（截图元素编号 / 点击前校验）
     # plan-365-1769: desktop_verify_click 由布尔改为三档字符串（off/lenient/strict），
@@ -184,6 +213,11 @@ def load_persisted_workspace() -> None:
         settings.subagent_reasoning_effort = str(data["subagent_reasoning_effort"] or "")[:20]
     if "subagent_enabled" in data:
         settings.subagent_enabled = bool(data["subagent_enabled"])
+    # plan-20261018-operator-boost：GUI 操作交给操控子会话 / 操控子会话思考深度
+    if "operator_subsession_enabled" in data:
+        settings.operator_subsession_enabled = bool(data["operator_subsession_enabled"])
+    if "operator_reasoning_effort" in data:
+        settings.operator_reasoning_effort = str(data["operator_reasoning_effort"] or "lowest")[:20]
     # plan-156-619 S7：工具卡栏目的全局默认展开策略
     if "tool_card_sections_expanded" in data:
         settings.tool_card_sections_expanded = bool(data["tool_card_sections_expanded"])
@@ -211,6 +245,17 @@ def load_persisted_workspace() -> None:
                 setattr(settings, _key, max(_lo, min(_hi, int(data[_key]))))
             except (TypeError, ValueError):
                 pass
+    # plan-156-624：升级默认值——旧版本没有这两个键时补写为开启并落盘，用户升级后
+    # 无需手动去「设置 → 子代理 / 常规」打开子会话与并行分派。只补缺失键：
+    # 已存在的 false 是用户显式关闭，不覆盖。
+    _defaults_added = False
+    for _key, _default in (("subagent_enabled", True), ("parallel_subsession_hint", True)):
+        if _key not in data:
+            data[_key] = _default
+            setattr(settings, _key, _default)
+            _defaults_added = True
+    if _defaults_added:
+        _save_config(data)
 
 
 @router.get("/settings/workspace", response_model=WorkspaceOut)
@@ -254,6 +299,8 @@ class GlobalSettingsOut(BaseModel):
     show_reasoning: bool = True  # 消息流显示 reasoning 块
     # plan-156-619 S2：消息区搜索入口按钮（左上角）。默认关闭；关闭只隐藏入口，Ctrl+F 仍可唤起
     show_message_search: bool = False
+    # plan-156-621：每轮用户消息注入「优先用子会话并行处理」的提示词（默认开启）
+    parallel_subsession_hint: bool = True
     # v3.0 (plan-88): 计划模式允许访问工作区外路径
     plan_mode_allow_outside_access: bool = False
     # v32 (plan-89): 沙箱模式（三态：workspace-write / read-only / danger-full-access）
@@ -277,15 +324,16 @@ class GlobalSettingsOut(BaseModel):
     # plan-334-1661: 电脑操控（内核常驻的内置工具集，不作为 MCP 注册）
     # 注意：这些字段必须同时出现在 Out 与 In 两个模型里——只加 In 会导致
     # _global_settings_out 传入的 kwarg 被 pydantic 静默丢弃，前端表现为"改了不保存"。
-    desktop_enabled: bool = False
+    desktop_enabled: bool = True
     desktop_plain_ops_enabled: bool = True
     desktop_browser_ops_enabled: bool = True
     desktop_require_foreground: bool = True
-    desktop_screenshot_quality: int = 75
-    desktop_screenshot_max_dim: int = 1600
+    desktop_screenshot_quality: int = 100
+    desktop_screenshot_max_dim: int = 0
     desktop_recipe_enabled: bool = True
     # plan-365-1757: 「点准」开关（截图元素编号 / 点击前校验 / 破坏性操作词表）
-    desktop_mark_shot: bool = True
+    # plan-20261018-operator-boost：编号默认关闭
+    desktop_mark_shot: bool = False
     # plan-365-1769 F5: 点击前校验档位（off / lenient / strict），默认宽松
     desktop_verify_click: str = "lenient"
     desktop_destructive_words: str = ""
@@ -298,6 +346,9 @@ class GlobalSettingsOut(BaseModel):
     subagent_reasoning_effort: str = ""
     # plan-156-619 S4e：子代理 / 子会话总开关
     subagent_enabled: bool = True
+    # plan-20261018-operator-boost：GUI 操作交给操控子会话 / 操控子会话思考深度
+    operator_subsession_enabled: bool = True
+    operator_reasoning_effort: str = "lowest"
     # plan-156-619 S7：工具卡栏目全局默认展开策略（true = 默认全展开）
     tool_card_sections_expanded: bool = True
     # plan-75-332: 审批卡「解释」专用模型 / 思考深度（0/空 = 跟随会话）
@@ -375,6 +426,8 @@ class GlobalSettingsIn(BaseModel):
     show_todos: bool | None = None
     show_reasoning: bool | None = None
     show_message_search: bool | None = None
+    # plan-156-621：优先使用子会话并行处理的提示词注入开关
+    parallel_subsession_hint: bool | None = None
     plan_mode_allow_outside_access: bool | None = None
     sandbox_mode: str | None = None
     # v36 (plan-321-1600 R2): 工作目录外读取自动审批
@@ -410,6 +463,9 @@ class GlobalSettingsIn(BaseModel):
     subagent_reasoning_effort: str | None = None
     # plan-156-619 S4e：子代理 / 子会话总开关
     subagent_enabled: bool | None = None
+    # plan-20261018-operator-boost：操控子会话
+    operator_subsession_enabled: bool | None = None
+    operator_reasoning_effort: str | None = None
     # plan-156-619 S7：工具卡栏目全局默认展开策略
     tool_card_sections_expanded: bool | None = None
     # plan-75-332: 审批卡「解释」专用模型 / 思考深度（0/空 = 跟随会话）
@@ -462,6 +518,14 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
         show_todos=data.get("show_todos", True),
         show_reasoning=data.get("show_reasoning", True),
         show_message_search=data.get("show_message_search", False),
+        # plan-156-621：优先使用子会话并行处理的提示词注入（默认开启）。
+        # plan-156-622：只有持久化值**显式为 false** 才关闭；键缺失或值为 null
+        # （旧配置文件、手工编辑）都回落到运行时默认 true，避免默认值被翻成关闭。
+        parallel_subsession_hint=(
+            data["parallel_subsession_hint"]
+            if isinstance(data.get("parallel_subsession_hint"), bool)
+            else bool(getattr(settings, "parallel_subsession_hint", True))
+        ),
         plan_mode_allow_outside_access=data.get("plan_mode_allow_outside_access", False),
         sandbox_mode=data.get("sandbox_mode", settings.sandbox_mode),
         # v36 (plan-321-1600 R2/R3): 两项自动审批/自动额度开关（回填持久化值）
@@ -481,7 +545,7 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
         browser_enabled=data.get("browser_enabled", settings.browser_enabled),
         browser_headless=data.get("browser_headless", settings.browser_headless),
         # plan-334-1661: 电脑操控（新增字段只需改这里，不会再漏——见本函数 docstring）
-        desktop_enabled=data.get("desktop_enabled", getattr(settings, "desktop_enabled", False)),
+        desktop_enabled=data.get("desktop_enabled", getattr(settings, "desktop_enabled", True)),
         desktop_plain_ops_enabled=data.get(
             "desktop_plain_ops_enabled", getattr(settings, "desktop_plain_ops_enabled", True)),
         desktop_browser_ops_enabled=data.get(
@@ -489,14 +553,14 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
         desktop_require_foreground=data.get(
             "desktop_require_foreground", getattr(settings, "desktop_require_foreground", True)),
         desktop_screenshot_quality=int(data.get(
-            "desktop_screenshot_quality", getattr(settings, "desktop_screenshot_quality", 75))),
+            "desktop_screenshot_quality", getattr(settings, "desktop_screenshot_quality", 100))),
         desktop_screenshot_max_dim=int(data.get(
-            "desktop_screenshot_max_dim", getattr(settings, "desktop_screenshot_max_dim", 1600))),
+            "desktop_screenshot_max_dim", getattr(settings, "desktop_screenshot_max_dim", 0))),
         desktop_recipe_enabled=data.get(
             "desktop_recipe_enabled", getattr(settings, "desktop_recipe_enabled", True)),
         # plan-365-1757: 「点准」开关
         desktop_mark_shot=data.get(
-            "desktop_mark_shot", getattr(settings, "desktop_mark_shot", True)),
+            "desktop_mark_shot", getattr(settings, "desktop_mark_shot", False)),
         # plan-365-1769 F5: 三档归一化输出（旧布尔值自动迁移）
         desktop_verify_click=normalize_verify_mode(data.get(
             "desktop_verify_click", getattr(settings, "desktop_verify_click", "lenient"))),
@@ -516,6 +580,10 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
         subagent_model_id=data.get("subagent_model_id", settings.subagent_model_id),
         subagent_reasoning_effort=data.get("subagent_reasoning_effort", settings.subagent_reasoning_effort),
         subagent_enabled=bool(data.get("subagent_enabled", settings.subagent_enabled)),
+        operator_subsession_enabled=bool(data.get(
+            "operator_subsession_enabled", settings.operator_subsession_enabled)),
+        operator_reasoning_effort=str(data.get(
+            "operator_reasoning_effort", settings.operator_reasoning_effort) or "lowest"),
         tool_card_sections_expanded=bool(data.get(
             "tool_card_sections_expanded", settings.tool_card_sections_expanded,
         )),
@@ -678,6 +746,9 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
     if body.show_message_search is not None:
         data["show_message_search"] = body.show_message_search
         settings.show_message_search = body.show_message_search
+    if body.parallel_subsession_hint is not None:
+        data["parallel_subsession_hint"] = body.parallel_subsession_hint
+        settings.parallel_subsession_hint = body.parallel_subsession_hint
     if body.plan_mode_allow_outside_access is not None:
         data["plan_mode_allow_outside_access"] = body.plan_mode_allow_outside_access
         settings.plan_mode_allow_outside_access = body.plan_mode_allow_outside_access
@@ -776,6 +847,13 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
     if body.subagent_enabled is not None:
         data["subagent_enabled"] = bool(body.subagent_enabled)
         settings.subagent_enabled = bool(body.subagent_enabled)
+    if body.operator_subsession_enabled is not None:
+        data["operator_subsession_enabled"] = bool(body.operator_subsession_enabled)
+        settings.operator_subsession_enabled = bool(body.operator_subsession_enabled)
+    if body.operator_reasoning_effort is not None:
+        _oe = str(body.operator_reasoning_effort or "lowest")[:20]
+        data["operator_reasoning_effort"] = _oe
+        settings.operator_reasoning_effort = _oe
     if body.tool_card_sections_expanded is not None:
         data["tool_card_sections_expanded"] = bool(body.tool_card_sections_expanded)
         settings.tool_card_sections_expanded = bool(body.tool_card_sections_expanded)

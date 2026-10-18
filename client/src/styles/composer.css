@@ -297,12 +297,21 @@
 .ui-icon-btn.size-xs { width: var(--ic-btn-xs); height: var(--ic-btn-xs); }
 
 /* ── 内容宽度拖拽柄（plan-20261017-ux-overhaul 阶段 C）──
-   只在边缘停留 1 秒后出现：一条居中的短胶囊，拖拽中加深；不占布局、不遮挡文字。 */
+   在边缘停留 0.5 秒后出现：一条居中的短胶囊，拖拽中加深；不占布局、不遮挡文字。
+   0.5 秒是本轮按用户要求收紧的（原 1 秒等待偏钝，拖宽是高频微调动作）。
+   横向位置**由内容列几何变量驱动**（与 .mf-list 同源，见 global.css「内容列定宽」段）：
+   拖宽时列边缘逐帧移动，柄与列边缘同帧跟随；此前靠 JS 每帧回写 left，
+   一旦几何改由 CSS 求解就会停在按下时的旧位置（用户反馈的问题）。 */
 .cw-handle {
   position: absolute; z-index: 30; width: 16px; margin-left: -8px;
+  left: var(--content-col-left);
   display: flex; align-items: center; justify-content: center;
   cursor: col-resize; touch-action: none;
   animation: cw-handle-in var(--dur-3) var(--ease-emphasized-decel);
+}
+/* 右柄贴在内容列右缘 */
+.cw-handle[data-side="right"] {
+  left: calc(var(--content-col-left) + var(--content-col-w));
 }
 .cw-handle-grip {
   width: 4px; height: 48px; border-radius: 999px;
@@ -311,4 +320,11 @@
 }
 .cw-handle:hover .cw-handle-grip,
 .cw-handle.is-dragging .cw-handle-grip { height: 72px; background: var(--accent); }
+/* plan-156-621：键盘聚焦时给出与悬停一致的可点反馈——此前拖拽柄没有 tabIndex，键盘用户无法调整宽度 */
+.cw-handle:focus-visible { outline: none; }
+.cw-handle:focus-visible .cw-handle-grip {
+  height: 72px;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+}
 @keyframes cw-handle-in { from { opacity: 0; } to { opacity: 1; } }

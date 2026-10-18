@@ -14,6 +14,8 @@
  *   面板不可见时跳过一切动画等待，AI 全速执行。
  */
 import { globalWsClient } from "../api/ws";
+import { notify } from "../store/toast";
+import { healParkedFrame } from "./parkGuard";
 import { IDLE_AGENT, normalizeUrl, sessionKey, useBrowserStore, type BrowserTabState } from "../store/browser";
 import { bucketKeyOf, usePanelStore } from "../store/panel";
 import {
@@ -158,6 +160,8 @@ async function ensureFrame(sid: string, tab: BrowserTabState): Promise<FrameReco
   const rec = await waitFrameReady(sid, tab.id, 12000);
   if (!rec) throw new Error("浏览器标签未能就绪（页面仍在加载或面板尚未挂载），请稍后重试");
   if (typeof rec.el?.executeJavaScript !== "function") throw new Error("当前环境不支持操作页面");
+  // plan-20261018-operator-boost：停泊网页若被祖先包含块带离视口会完全不出帧，动作前先确保它在视口原点
+  try { healParkedFrame(rec.el as unknown as Element); } catch { /* 守卫失败不影响动作 */ }
   return rec;
 }
 
@@ -659,6 +663,8 @@ async function dispatch(sid: string, op: string, a: Record<string, any>): Promis
   const store = useBrowserStore.getState();
   if (op === "tabs.list") return listTabs(sid);
   if (op === "clipboard") return mainExec(null, "clipboard", a);
+  // plan-20261018-operator-boost：下载记录由主进程维护（保存到设置的下载目录），与标签无关
+  if (op === "downloads") return mainExec(null, "downloads", a);
   if (op === "tabs.open") {
     begin(sid, "", a.label || "新建标签", true);
     const tab = openAgentTab(sid, a.url ? normalizeUrl(String(a.url)) : "");
@@ -736,8 +742,10 @@ async function dispatch(sid: string, op: string, a: Record<string, any>): Promis
     const [win] = await Promise.all([
       mainExec(rec, "aiWindow", { ms: settleMs + 4000, accept: a.on_dialog !== "dismiss", prompt_text: a.prompt_text || "" }).catch(() => null),
       evalKit(rec, "watch", {}, 4000).catch(() => null), // 页面在跳转：settle 时只看导航
-      // 应用窗口在后台时：页面导航后若还没出过帧，先补一帧，否则输入事件全被丢弃（plan-20261017-hidden-input）
-      hostBackground() ? mainExec(rec, "ensureFrame", {}).catch(() => null) : Promise.resolve(null),
+      // 应用窗口在后台时：页面导航后若还没出过帧，先补一帧，否则输入事件全被丢弃（plan-20261017-hidden-input）。
+      // plan-20261018-operator-boost：是否在后台交给主进程判断（它看得到窗口最小化 / 遮挡）——AI 操作期间主窗口
+      // 不节流，页面可见性不再可靠；窗口在前台或无需补帧时主进程立即返回。
+      mainExec(rec, "ensureFrame", {}).catch(() => null),
     ]);
     const netSeq = win && typeof win.net_seq === "number" ? win.net_seq : null;
     const since = rec.navSeq;
@@ -900,6 +908,14 @@ function onMainEvent(ev: { type: string; wcId: number; [k: string]: unknown }) {
     if (cur && cur.wcId === Number(ev.wcId)) store.setDialog(rec.sid, null);
     return;
   }
+  if (ev.type === "download") {
+    // plan-20261018-operator-boost：下载不再弹系统保存框，完成时告诉用户文件存到了哪里
+    const state = String(ev.state || "");
+    const name = String(ev.filename || "");
+    if (state === "completed") notify.success(`已下载「${name}」，保存在 ${String(ev.path || "")}`);
+    else if (state === "interrupted") notify.warning(`「${name}」下载中断`);
+    return;
+  }
   if (ev.type === "popup") {
     const url = String(ev.url || "");
     if (!url) return;
@@ -941,7 +957,7 @@ export function startBrowserAgentHost(): () => void {
     globalWsClient.send("browser.host.hello", {
       host_id: HOST_ID,
       protocol: PROTOCOL,
-      capabilities: ["tabs", "nav", "kit", "eval", "mouse", "keys", "text", "capture", "logs", "network", "dialogs"],
+      capabilities: ["tabs", "nav", "kit", "eval", "mouse", "keys", "text", "capture", "logs", "network", "dialogs", "downloads"],
     });
   });
   const offMain = api.onBrowserAgentEvent?.((ev) => onMainEvent(ev));

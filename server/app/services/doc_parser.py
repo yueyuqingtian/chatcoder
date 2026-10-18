@@ -45,11 +45,13 @@ def _image_to_data_url(data: bytes, suffix: str) -> str:
     return f"data:image/{ext};base64,{b64}"
 
 
-def _parse_csv_like(data: bytes, delimiter: str = ",") -> str:
-    """解析 CSV/TSV 为 Markdown 表格文本。"""
+def _parse_csv_like(data: bytes, delimiter: str = ",", max_rows: int | None = MAX_SPREADSHEET_ROWS) -> str:
+    """解析 CSV/TSV 为 Markdown 表格文本。max_rows=None 表示不限行数（AI 分段读取附件时用）。"""
     text = data.decode("utf-8", errors="replace")
-    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
-    rows = list(reader)[:MAX_SPREADSHEET_ROWS]
+    all_rows = list(csv.reader(io.StringIO(text), delimiter=delimiter))
+    # plan-156-620：此前先切片再用已耗尽的 reader 判断「是否还有更多行」，结果恒为 0，
+    # 超出 200 行时被静默截断、连「仅显示前 N 行」的提示都没有
+    rows = all_rows if max_rows is None else all_rows[:max_rows]
     if not rows:
         return "(空文件)"
     # 构造 Markdown 表格
@@ -61,12 +63,12 @@ def _parse_csv_like(data: bytes, delimiter: str = ",") -> str:
         while len(row) < len(header):
             row.append("")
         lines.append("| " + " | ".join(row) + " |")
-    if len(list(reader)) > MAX_SPREADSHEET_ROWS:
-        lines.append(f"\n(仅显示前 {MAX_SPREADSHEET_ROWS} 行)")
+    if len(rows) < len(all_rows):
+        lines.append(f"\n(共 {len(all_rows)} 行，仅显示前 {len(rows)} 行)")
     return "\n".join(lines)
 
 
-def _parse_excel(data: bytes) -> str:
+def _parse_excel(data: bytes, max_rows: int | None = MAX_SPREADSHEET_ROWS) -> str:
     """解析 .xlsx/.xls 为 Markdown 表格文本。"""
     try:
         import openpyxl  # type: ignore
@@ -85,8 +87,8 @@ def _parse_excel(data: bytes) -> str:
         parts.append(f"### Sheet: {sheet_name}\n")
         row_count = 0
         for row in ws.iter_rows(values_only=True):
-            if row_count >= MAX_SPREADSHEET_ROWS:
-                parts.append(f"(仅显示前 {MAX_SPREADSHEET_ROWS} 行)")
+            if max_rows is not None and row_count >= max_rows:
+                parts.append(f"(仅显示前 {max_rows} 行)")
                 break
             cells = [str(c) if c is not None else "" for c in row]
             if row_count == 0:
@@ -141,7 +143,7 @@ def _parse_pdf(data: bytes) -> str:
         return f"(PDF 解析失败: {e})"
 
 
-def parse_file(filename: str, data: bytes) -> dict:
+def parse_file(filename: str, data: bytes, max_rows: int | None = MAX_SPREADSHEET_ROWS) -> dict:
     """解析上传文件，返回 {type, content, data_url, mime}。
 
     type: "image" | "text" | "spreadsheet" | "document" | "unsupported"
@@ -170,11 +172,11 @@ def parse_file(filename: str, data: bytes) -> dict:
 
     if is_spreadsheet(filename):
         if suffix.lower() in (".csv",):
-            text = _parse_csv_like(data, ",")
+            text = _parse_csv_like(data, ",", max_rows)
         elif suffix.lower() == ".tsv":
             text = _parse_csv_like(data, "\t")
         else:
-            text = _parse_excel(data)
+            text = _parse_excel(data, max_rows)
         return {
             "type": "spreadsheet",
             "content": f"📎 **{filename}**\n\n{text}",
@@ -211,13 +213,13 @@ def parse_file(filename: str, data: bytes) -> dict:
     }
 
 
-def extract_plain_text(filename: str, data: bytes) -> str | None:
+def extract_plain_text(filename: str, data: bytes, max_rows: int | None = MAX_SPREADSHEET_ROWS) -> str | None:
     """提取文件的纯文本内容（供 AI 工具阅读或上下文注入）。
 
     图片返回 None（AI 应通过 view_image 读取）；
     文本/表格/文档返回提取后的文本；不支持的返回 None。
     """
-    parsed = parse_file(filename, data)
+    parsed = parse_file(filename, data, max_rows)
     if parsed["type"] == "unsupported" or parsed["type"] == "image":
         return None
     content = parsed.get("content") or ""

@@ -7,6 +7,8 @@ const path = require("path");
 const PORT = process.env.E2E_PORT || "22973";
 // 本文件位于 docs/handoff/browser-perf-e2e/，仓库根目录在上三级
 const ROOT = process.env.REPO_ROOT || path.resolve(__dirname, "..", "..", "..");
+// 与 electron/main.cjs 一致：关闭 Windows 原生遮挡检测（plan-20261018-operator-boost）
+app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion");
 app.commandLine.appendSwitch("remote-debugging-port", process.env.E2E_CDP || "9339");
 
 function log(...a) { console.log("[e2e-main]", ...a); }

@@ -92,6 +92,9 @@ TO_TA3: dict[str, str] = {
     "browser_wait": "BrowserWait",
     "browser_logs": "BrowserLogs",
     "browser_batch": "BrowserBatch",
+    # plan-20261018-operator-boost：下载记录 / 网页操作路线
+    "browser_downloads": "BrowserDownloads",
+    "browser_recipe": "BrowserRecipe",
     # plan-334-1661: 电脑操控工具集（内置原生工具）。
     # 缺映射会被 disguise_tools 整体剔除——ta3 会话里模型既看不到也调不动，
     # 而本能力正是为提升界面任务效率而建，故必须补齐。参数键名与真实工具一致，无需 ARGS 适配。
@@ -183,6 +186,7 @@ DYNAMIC_SCHEMA_ALIASES: frozenset[str] = frozenset({
     "BrowserType", "BrowserSnapshot", "BrowserEvaluate",
     "BrowserTabs", "BrowserGetText", "BrowserPress", "BrowserScroll", "BrowserHover", "BrowserDrag",
     "BrowserFill", "BrowserClipboard", "BrowserWait", "BrowserLogs", "BrowserBatch",
+    "BrowserDownloads", "BrowserRecipe",
     # 附件与图片读取（plan-147-674）
     "ReadAttachment", "ViewImage",
     # 工作流工具（设计 §5.8）：schema 从真实工具派生，参数与描述随 workflow/tools.py 同步
@@ -234,7 +238,8 @@ ARGS_TO_TA3: dict[str, dict[str, str | None]] = {
     "outline": {"path": "filepath"},
     # v43: 子代理管理工具出站键名适配（ta3 侧查询/取消按 taskId 定位）
     # wait 无对应键（ta3 TaskQuery 为即时查询语义），出站丢弃该键
-    "collect_results": {"agent_id": "taskId", "wait": None},
+    # plan-156-620：结论分段读取的起点（TaskQuery 侧键名 reportOffset）
+    "collect_results": {"agent_id": "taskId", "wait": None, "report_offset": "reportOffset"},
     "cancel_subagent": {"agent_id": "taskId"},
 }
 
@@ -266,7 +271,7 @@ ARGS_FROM_TA3: dict[str, dict[str, str | None]] = {
         "description": "task_title",
         "subagent_type": None,
     },
-    "TaskQuery": {"taskId": "agent_id"},
+    "TaskQuery": {"taskId": "agent_id", "reportOffset": "report_offset"},
     "TaskCancel": {"taskId": "agent_id"},
     # plan-153-705: 后台进程工具入站适配（BashStatus/BashKill）
     "BashStatus": {"shellId": "shell_id"},

@@ -34,6 +34,8 @@ export type ServerWsEvent =
   | { event: "turn.interrupted"; payload: { turn_id: number; last_message_id?: number | null; session_id?: number } }
   | { event: "turn.failed"; payload: { turn_id: number; status?: string; summary?: string | null; error?: string | null; session_id?: number } }
   | { event: "turn.rolled_back"; payload: { turn_id: number; rolled_back_msgs?: number; file_recovery?: Record<string, unknown> } }
+  /** plan-20261018-turn-changes: 仅撤销单轮文件改动完成（消息与会话状态不变）。 */
+  | { event: "turn.files_reverted"; payload: { turn_id: number; session_id?: number; restored?: number; deleted?: number } }
   | { event: "agent.started"; payload: { agent_id: number; kind?: string; name?: string; turn_id?: number | null } }
   | { event: "agent.updated"; payload: { agent_id: number; status?: string; tool?: string; step?: number } }
   | { event: "agent.completed"; payload: { agent_id: number; summary?: string | null; artifact_ids?: number[] } }
@@ -252,6 +254,7 @@ export const ORDERED_EVENTS: ReadonlySet<string> = new Set([
   "turn.started",
   "turn.updated",
   "turn.completed",
+  "turn.files_reverted",
   "agent.started",
   "agent.updated",
   "agent.completed",

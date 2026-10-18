@@ -21,7 +21,7 @@ const MAX_VISIBLE_STEPS = 3;
 export const SuggestionCard = memo(function SuggestionCard() {
   const suggestion = useChatStore((s) => s.pendingSuggestion);
   const dismissSuggestion = useChatStore((s) => s.dismissSuggestion);
-  const loadSubsessions = useChatStore((s) => s.loadSubsessions);
+  const loadSubsessionIndex = useChatStore((s) => s.loadSubsessionIndex);
   const switchSession = useChatStore((s) => s.switchSession);
   const currentSessionId = useChatStore((s) => s.currentSessionId);
 
@@ -43,9 +43,10 @@ export const SuggestionCard = memo(function SuggestionCard() {
       const res = await api.acceptSuggestion(suggestion.id);
       // 先清卡片：后端已置 accepted，本地保留会与「已消费」状态不一致
       useChatStore.setState({ pendingSuggestion: null });
-      if (res?.session_id != null) {
-        await loadSubsessions(res.session_id);
-        // 切到新子会话后，父会话的子会话桶已刷新，左栏能立即看到
+      if (res?.subsession_id != null) {
+        // plan-156-620：后端返回的 session_id 是根主会话；子会话桶整体重建，
+        // 无论建议来自主会话还是子会话，新子会话都出现在左栏同一父会话下方
+        await loadSubsessionIndex();
         await switchSession(res.subsession_id);
       }
     } catch (e) {

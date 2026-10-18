@@ -8,13 +8,14 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from app.orchestration.output_paging import cap_raw
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 
 logger = logging.getLogger(__name__)
 
 # v1.0 (plan-153-705): 15s → 60s——大仓库 git status/log/blame 会超 15s
 _TIMEOUT = 60
-_MAX_OUTPUT = 6000
+
 
 
 async def _run_git(args: list[str], cwd: str) -> tuple[int, str]:
@@ -41,9 +42,8 @@ async def _run_git(args: list[str], cwd: str) -> tuple[int, str]:
     out = (stdout or b"").decode("utf-8", errors="replace")
     err = (stderr or b"").decode("utf-8", errors="replace")
     combined = out + (("\n-- stderr --\n" + err) if err else "")
-    if len(combined) > _MAX_OUTPUT:
-        combined = combined[:_MAX_OUTPUT] + "\n...(截断)"
-    return proc.returncode or 0, combined
+    # plan-156-620：不再按 _MAX_OUTPUT 硬截断（git log / diff 后半段无法取回）；超出上下文预算由执行层落盘续读
+    return proc.returncode or 0, cap_raw(combined)
 
 
 class GitTool(Tool):

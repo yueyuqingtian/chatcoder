@@ -26,18 +26,19 @@ def _session(**kw):
 async def test_auto_title_session_normalizes_and_truncates_first_message(monkeypatch):
     calls: list[tuple] = []
 
-    async def fake_patch(sid, **kw):
-        calls.append((sid, kw))
+    async def fake_patch_if_auto(sid, title):
+        calls.append((sid, title))
+        return True
 
-    monkeypatch.setattr(session_service, "patch_session", fake_patch)
+    # plan-156-620：写回改为「仅当仍是 auto 才写」的条件写（防后台归纳覆盖用户手改的名字）
+    monkeypatch.setattr(session_service, "_patch_title_if_auto", fake_patch_if_auto)
     # db=None → summarize_title 直接回落，这里验证的是「回落路径 + 写回 named」
     session = _session()
 
     title = await auto_title_session(None, session, "  abcdefghijklmnop\nqrstuvwxyz1234567890  ")
 
     assert title == "abcdefghijklmnop qrstuvwxyz123"
-    # 写回后来源变 named：同会话不再重复调模型归纳
-    assert calls == [(7, {"title": "abcdefghijklmnop qrstuvwxyz123", "title_source": "named"})]
+    assert calls == [(7, "abcdefghijklmnop qrstuvwxyz123")]
     assert session.title is None  # 对象不再被直接修改（写引擎负责落库）
 
 

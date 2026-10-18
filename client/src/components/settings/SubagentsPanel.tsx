@@ -25,6 +25,15 @@ import { ModelPicker } from "../chat/ModelPicker";
 
 /** plan-330-1648 M2: 思考深度档位候选（与 ModelsPanel REASONING_OPTS 同口径） */
 const REASONING_OPTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+/** plan-20261018-operator-boost：操控子会话思考深度——操作类工作只需低档，候选只给低档位 */
+const OPERATOR_EFFORT_OPTS: Array<{ value: string; label: string }> = [
+  { value: "lowest", label: "最低档" },
+  { value: "none", label: "none" },
+  { value: "minimal", label: "minimal" },
+  { value: "low", label: "low" },
+  { value: "medium", label: "medium" },
+  { value: "follow", label: "跟随子会话" },
+];
 
 /** 非阻塞提示：Electron 中 window.alert 是原生模态框，关闭后会破坏窗口焦点，统一改用全局提示条。 */
 function notify(msg: string) {
@@ -40,6 +49,8 @@ export function SubagentsPanel() {
     reasoningEffort: "",   // "" = 跟随会话档位
   });
   const [modelOpen, setModelOpen] = useState(false);
+  // plan-20261018-operator-boost：GUI 操作交给操控子会话 / 其思考深度
+  const [op, setOp] = useState({ enabled: true, effort: "lowest" });
   // v36: 并发治理配置（全局设置）——同时运行上限 + 每轮派发总量上限
   const [limits, setLimits] = useState({ concurrent: 6, perTurn: 10 });
   const [limitsSaving, setLimitsSaving] = useState(false);
@@ -54,6 +65,10 @@ export function SubagentsPanel() {
         enabled: g.subagent_enabled !== false,
         modelId: typeof g.subagent_model_id === "number" ? g.subagent_model_id : 0,
         reasoningEffort: g.subagent_reasoning_effort || "",
+      });
+      setOp({
+        enabled: g.operator_subsession_enabled !== false,
+        effort: g.operator_reasoning_effort || "lowest",
       });
       setLimits({
         concurrent: typeof g.max_concurrent_subagents === "number" ? g.max_concurrent_subagents : 6,
@@ -76,6 +91,21 @@ export function SubagentsPanel() {
       });
     } catch (e) {
       setCfg(prev);
+      notify("保存失败：" + String(e));
+    }
+  };
+
+  const patchOperator = async (partial: Partial<{ enabled: boolean; effort: string }>) => {
+    const prev = op;
+    const next = { ...op, ...partial };
+    setOp(next);
+    try {
+      await api.setGlobalSettings({
+        operator_subsession_enabled: next.enabled,
+        operator_reasoning_effort: next.effort,
+      });
+    } catch (e) {
+      setOp(prev);
       notify("保存失败：" + String(e));
     }
   };
@@ -141,6 +171,33 @@ export function SubagentsPanel() {
                 className={"settings-chip" + (cfg.reasoningEffort === eff ? " on" : "")}
                 onClick={() => void patch({ reasoningEffort: eff })}
               >{eff}</button>
+            ))}
+          </div>
+        </CardRow>
+      </Section>
+
+      {/* plan-20261018-operator-boost：界面操作交给低思考档的操控子会话，主会话保留高思考深度 */}
+      <Section title="操控子会话">
+        <CardRow
+          className={cfg.enabled ? undefined : "settings-row-disabled"}
+          title="界面操作交给操控子会话"
+          desc="内置浏览器自测、导出文件、电脑操控等多步界面操作交给子会话以低思考深度执行，响应更快；主会话继续用当前思考深度处理其它工作。仅智能体模式生效"
+        >
+          <Sw checked={op.enabled} onChange={(v) => void patchOperator({ enabled: v })} />
+        </CardRow>
+        <CardRow
+          className={cfg.enabled && op.enabled ? undefined : "settings-row-disabled"}
+          title="操控子会话思考深度"
+          desc="默认「最低档」：使用当前模型支持的最低档位（不关闭思考）"
+        >
+          <div className="settings-chips">
+            {OPERATOR_EFFORT_OPTS.map((o) => (
+              <button
+                key={o.value}
+                type="button"
+                className={"settings-chip" + (op.effort === o.value ? " on" : "")}
+                onClick={() => void patchOperator({ effort: o.value })}
+              >{o.label}</button>
             ))}
           </div>
         </CardRow>

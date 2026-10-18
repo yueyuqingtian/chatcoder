@@ -281,3 +281,79 @@ def _safe_is_dir(entry: "os.DirEntry[str]") -> bool:
         return entry.is_dir()
     except OSError:
         return False
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# plan-20261018-turn-changes：本机打开文件 / 目录
+# 桌面版走 Electron IPC；浏览器调试环境没有 Electron，此前「在资源管理器中打开」
+# 之类入口只能置灰。后端与浏览器同机运行，这里代为一跳——与 pick-directory 一样
+# 只接受本机页面调用，避免远程客户端让服务器打开任意路径。
+# ═══════════════════════════════════════════════════════════════════════
+
+_OPEN_TARGETS = ("explorer", "vscode", "idea", "terminal")
+
+
+class OpenPathBody(BaseModel):
+    path: str
+    target: str = "explorer"
+
+
+def _is_loopback_request(request: Request) -> bool:
+    client_host = request.client.host if request.client else ""
+    origin = request.headers.get("origin")
+    origin_host = (urlparse(origin).hostname or "") if origin and origin != "null" else ""
+    return client_host in _LOOPBACK_HOSTS and (not origin_host or origin_host in _LOOPBACK_HOSTS)
+
+
+@router.post("/open-path", response_model=dict)
+async def open_path(request: Request, body: OpenPathBody) -> dict:
+    """在**后端所在机器**上用指定应用打开文件或目录。
+
+    返回 {ok, error}：网页调试模式下替代 Electron 的 shell.openPath / openInApp；
+    target 只认四个取值，路径必须真实存在（不存在直接 404，避免拼错路径也弹窗）。
+    """
+    import subprocess
+
+    if not _is_loopback_request(request):
+        raise HTTPException(403, "只允许本机页面调用（远程客户端无法在你的桌面上打开）")
+    target = (body.target or "explorer").strip().lower()
+    if target not in _OPEN_TARGETS:
+        raise HTTPException(400, f"不支持的打开方式：{target}")
+
+    raw = (body.path or "").strip()
+    if not raw:
+        raise HTTPException(400, "路径为空")
+    try:
+        p = Path(raw).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        raise HTTPException(400, "路径无效")
+    if not p.exists():
+        raise HTTPException(404, "文件或目录不存在")
+
+    # 目录用于「终端」等按目录打开的入口；文件则取其父目录
+    folder = p if p.is_dir() else p.parent
+    try:
+        if target == "explorer":
+            if sys.platform == "win32":
+                if p.is_dir():
+                    subprocess.Popen(["explorer", str(p)])
+                else:
+                    # /select 会选中该文件（等价于「在资源管理器中显示」）
+                    subprocess.Popen(["explorer", "/select,", str(p)])
+            else:
+                subprocess.Popen(["xdg-open", str(folder)])
+        elif target == "terminal":
+            if sys.platform == "win32":
+                subprocess.Popen(["wt.exe", "-d", str(folder)])
+            else:
+                subprocess.Popen(["xdg-open", str(folder)])
+        elif target == "vscode":
+            subprocess.Popen(["code", str(p)])
+        else:  # idea
+            subprocess.Popen(["idea", str(p)])
+    except FileNotFoundError:
+        display = {"explorer": "资源管理器", "vscode": "VS Code", "idea": "IDEA", "terminal": "终端"}[target]
+        return {"ok": False, "error": f"未找到 {display} 的可执行文件（未安装或不在 PATH 中）"}
+    except OSError as exc:
+        return {"ok": False, "error": f"打开失败：{exc}"}
+    return {"ok": True}

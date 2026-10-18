@@ -316,7 +316,7 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 0 8px 8px;
+  padding: 0 12px 8px;
 }
 .gp-conflict-row {
   display: flex;
@@ -346,8 +346,11 @@
   z-index: 2;
   display: flex;
   align-items: center;
+  /* plan-20261018-git-indent：统一左内距 12px（与 .gp-head / .gp-views / .gp-commit 一致）。
+     此前组头 8px、行 16px（容器 8 + 行 8）、头部 12px 三套口径，父级分组行比子行少缩进一半，
+     吸顶滚动时又与顶部内容错位——看起来像「父级框没有左间距」。 */
   gap: 4px;
-  padding: 0 8px;
+  padding: 0 12px;
   min-height: 32px;
   background: var(--gp-surface);
   box-shadow: inset 0 -1px 0 var(--border-light);
@@ -387,13 +390,15 @@
 }
 /* 分组头右侧批量操作：文字按钮与更多菜单之间留 4px */
 .gp-section-actions { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
-.gp-section-body { display: flex; flex-direction: column; padding: 0 8px 4px; }
+.gp-section-body { display: flex; flex-direction: column; padding: 0 12px 4px; }
 .gp-row {
   display: flex;
   align-items: center;
   gap: 4px;
   min-height: 28px;
-  padding-left: 8px;
+  /* 行内不再重复缩进：复选框与组头复选框同一列（都落在 12px），
+     此前这里再叠 8px，导致父级分组头与子行复选框错位 8px。 */
+  padding-left: 0;
   border-radius: var(--r-md);
 }
 /* 行首复选框：勾选 = 加入本次提交（IDEA 式），是暂存的唯一入口 */
@@ -494,7 +499,9 @@
 /* 行 + 它的差异包在一起：差异就展开在被点的那一行下方，不再跑到列表末尾 */
 .gp-row-wrap { display: flex; flex-direction: column; }
 .gp-diff-inline {
-  margin: 4px 0 8px 28px;
+  /* 12px 容器内距 + 20px = 32px，与行内容（复选框 16 + 间距 4）左缘对齐；
+     改统一内距前是 8 + 28 = 36px。 */
+  margin: 4px 0 8px 20px;
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   overflow: hidden;

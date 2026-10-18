@@ -33,7 +33,9 @@ REVIEW_CONTRACT = (
     "只有 minor 时 decision 应为 pass，minor 写入 issues 供汇报参考。"
     "每个问题都要给出可核实的证据（文件与行号、命令输出），不确定的不要列为 blocker。"
 )
-UPSTREAM_BUDGET_CHARS = 6000
+# 下游节点交接文本中「上游产出」的总预算与每个上游的保底份额（plan-156-620：由 6000 放宽并按上游分配）
+UPSTREAM_BUDGET_CHARS = 24000
+UPSTREAM_MIN_SHARE_CHARS = 4000
 # 停滞判定（§5.5）：轮询间隔、停滞阈值与心跳落库节流（秒）。
 # 进展信号 = 工具步骤数、子代理状态与等待重试；超过阈值无进展即停止子代理，按瞬时故障重试。
 POLL_SEC = 2.0
@@ -109,16 +111,50 @@ def _description(req: NodeRequest) -> str:
     return "\n".join(lines)
 
 
+def _upstream_block(key: str, output: dict[str, Any], budget: int) -> str:
+    """单个上游节点的交接文本：结论原文 + 结构化要点。
+
+    plan-156-620：此前把上游 output 整个 json.dumps 后与其它上游拼在一起，再整体截到 6000 字——
+    summary 与 findings 往往是同一段文字（重复占预算），且截断无任何标记，下游拿到半截结论。
+    现在：结论只给一份（findings 优先），结构化字段逐项列出；超出本上游的预算时写明总字数。
+    """
+    conclusion = str(output.get("findings") or output.get("summary") or output.get("text") or "").strip()
+    lines = [f"【上游『{key}』产出】"]
+    extras: list[str] = []
+    for label, field_name in (("改动文件", "files_touched"), ("验证", "verification"),
+                              ("验收", "acceptance"), ("风险", "risks")):
+        items = [str(x) for x in output.get(field_name) or [] if str(x).strip()]
+        if items:
+            extras.append(f"{label}：" + "；".join(items))
+    # 其余结构化字段（检查结果、冲突等）原样保留，键名不认识也不丢
+    known = {"findings", "summary", "text", "files_touched", "verification", "acceptance", "risks"}
+    rest = {k: v for k, v in output.items() if k not in known and v not in (None, "", [], {})}
+    if rest:
+        extras.append("其它：" + json.dumps(rest, ensure_ascii=False))
+    room = max(0, budget - sum(len(x) + 1 for x in extras) - len(lines[0]))
+    if conclusion:
+        if len(conclusion) > room:
+            lines.append(conclusion[:room])
+            lines.append(f"（结论共 {len(conclusion)} 字，受交接篇幅限制此处给出前 {room} 字；"
+                         "如需其余部分，请在汇报中说明依赖缺口）")
+        else:
+            lines.append(conclusion)
+    lines.extend(extras)
+    return "\n".join(lines)
+
+
 def _handoff(req: NodeRequest) -> str:
     parts = [
         f"工作流程序目标：{req.goal}",
         f"所属子工作流：{req.flow_key}",
         f"节点：{req.node_key}（{req.kind}）",
     ]
-    for key, item in req.upstream.items():
-        body = json.dumps(item.get("output") or {}, ensure_ascii=False)
-        parts.append(f"【上游『{key}』产出】{body}")
-    return "\n".join(parts)[:UPSTREAM_BUDGET_CHARS]
+    if req.upstream:
+        # 预算按上游平均分配：一个上游很长也不会把其它上游挤没
+        share = max(UPSTREAM_MIN_SHARE_CHARS, UPSTREAM_BUDGET_CHARS // len(req.upstream))
+        for key, item in req.upstream.items():
+            parts.append(_upstream_block(key, item.get("output") or {}, share))
+    return "\n".join(parts)
 
 
 def _to_result(handle: Any, agent_id: int) -> NodeResult:
@@ -126,9 +162,11 @@ def _to_result(handle: Any, agent_id: int) -> NodeResult:
 
     text = handle.summary or handle.findings or ""
     if handle.status == "done":
+        # plan-156-620：节点产出原样落库，不再截到 2000 / 4000 字——
+        # 截断发生在落库时，之后任何地方（下游节点、过程报告、主代理查询）都再也拿不到全文
         output = {
-            "summary": text[:2000],
-            "findings": (handle.findings or "")[:4000],
+            "summary": text,
+            "findings": handle.findings or "",
             "files_touched": list(handle.files_touched or []),
             "risks": list(handle.risks or []),
             "verification": list(handle.verification or []),

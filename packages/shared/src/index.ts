@@ -358,6 +358,8 @@ export interface SessionOut {
   fork_parent_id: number | null;
   /** 侧边会话（子会话）所属主会话 id；普通会话为 null。子会话不进入会话列表。 */
   side_parent_id?: number | null;
+  /** plan-156-620：挂靠会话种类——side 右侧侧边对话 / sub 左栏执行子会话；主会话为 null。 */
+  side_kind?: "side" | "sub" | null;
   worktree_path: string | null;
   has_running?: boolean;
   /** 会话有后台执行中的工作流（程序 running）：与 has_running 并列，工作流在跑时本会话可能已没有运行中的 turn */
@@ -724,6 +726,28 @@ export interface FileDiffOut {
   deletions?: number;
   /** true=按 call_key 命中的本次编辑；false=整轮累积（老数据回退） */
   single_edit?: boolean;
+}
+
+/** plan-20261018-turn-changes: 仅撤销单轮文件改动的结果（不涉及消息与会话状态）。 */
+export interface RevertFilesResult {
+  ok: boolean;
+  turn_id?: number | null;
+  restored: number;
+  deleted: number;
+  skipped: number;
+  conflicts: RollbackConflict[];
+  files: string[];
+  /** 失败原因码：order_violation / conflict / no_writes / rolled_back ... */
+  code?: string | null;
+  reason?: string | null;
+  /** order_violation 时：仍需先撤销的更晚轮次 */
+  later_turn_ids: number[];
+}
+
+/** plan-20261018-turn-changes: 撤销顺序锁——只有 latest_turn_id 这一轮允许撤销。 */
+export interface RevertLockOut {
+  latest_turn_id: number | null;
+  pending_turn_ids: number[];
 }
 
 // ── WebSocket 事件 ──

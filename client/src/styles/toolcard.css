@@ -1,233 +1,240 @@
-/* 会话右上角综合工具卡（plan-156-619 S7）
+/* 会话右上角综合工具卡（plan-156-619 S7；plan-156-620 重做）
  *
- * 命名：`tcard-` 前缀。**不能沿用 `tc-`**——工具树（ToolTree）已占用 `.tc-*` 共 38 处
- * （.tc-row / .tc-output / .tc-empty …），复用前缀会让工具卡继承工具树的盒模型与配色。
+ * 命名：`tcard-` 前缀。**不能沿用 `tc-`**——工具树（ToolTree）已占用 `.tc-*`。
+ *
+ * plan-156-620 调整：
+ *  · 去掉「会话工具」顶栏，第一个栏目标题行右侧承载「⋯ / 收起」（参考动态组卡片）；
+ *  · 字号跟随设置 --fs-md、行首图标槽位跟随 --flow-icon，与消息流同规格（此前写死 11.5px，比消息流小一号）；
+ *  · 胶囊加大到 36px 高、正文字号，折叠态也能一眼读清；
+ *  · 进程栏目去掉横向进度条，状态只用行首图标表达（完成圆勾 / 进行中转圈 / 待办箭头）。
  *
  * 约束（AGENTS.md）：
- *  · 圆角只用令牌：卡片 --r-lg、内部控件 --r-md、胶囊 999px、浮层 --r-pop；
+ *  · 圆角只用令牌：浮层 --r-pop、内部控件 --r-md、胶囊 999px；
  *  · 不用左侧装饰性竖线表达层级——层次靠间距、字号字重、底色；
- *  · 浮层不透明（--bg-panel / --bg-elevated 纯色），不用半透明叠下层文字；
- *  · 面板内文字显式写 line-height（窄面板 ≤360px 极易挤行）。
+ *  · 浮层不透明（--bg-panel 纯色）。
+ *
+ * 几何令牌与 contentColumnGeometry.ts 的 CARD_W / CAPSULE_MAX_W / CARD_INSET 同源，改一处必须同步另一处。
  */
+.chat-panel {
+  --tcard-w: 280px;
+  --tcard-cap-max-w: 260px;
+  --tcard-inset: 14px;
+  --tcard-fs: var(--fs-md, 13px);
+  /* plan-156-621：派生字号收成变量——此前 calc(-0.5px/-1px/-2px) 散落在各规则里，
+     产生 12.5px 这类子像素字号，改基准时还得逐条找 */
+  --tcard-fs-md: calc(var(--tcard-fs) - 0.5px);
+  --tcard-fs-sm: calc(var(--tcard-fs) - 1px);
+  --tcard-fs-xs: calc(var(--tcard-fs) - 2px);
+  --tcard-lh: 1.55;
+  --tcard-pad-x: 14px;
+}
 
 /* ── 卡片本体：绝对定位覆盖在右上角，不占列宽 ── */
 .tcard-card {
   position: absolute;
   top: 10px;
-  right: 14px;
+  right: var(--tcard-inset);
   z-index: 17;
-  width: 320px;
-  max-height: min(60vh, 520px);
+  width: var(--tcard-w);
+  /* 最大高度：不超过面板可视高度的一半多一点，超出部分在卡片内部滚动 */
+  --tcard-max-h: min(56vh, 460px);
+  max-height: var(--tcard-max-h);
   display: flex;
   flex-direction: column;
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: var(--r-lg);
+  border-radius: var(--r-pop);
   box-shadow: var(--shadow-md);
-  overflow: hidden;
+  font-size: var(--tcard-fs);
+  line-height: var(--tcard-lh);
+  color: var(--text-1);
+  transform-origin: 100% 0;
+  animation: tcard-in var(--dur-3) var(--ease-emphasized-decel) both;
+}
+@keyframes tcard-in {
+  from { opacity: 0; transform: scale(.96); }
+  to { opacity: 1; transform: none; }
 }
 
-/* ── 卡片头 ── */
-.tcard-card-head {
+/* ── 操作区：叠在第一个栏目标题行右侧；在滚动容器之外，浮层不会被裁切 ── */
+.tcard-card-ops {
+  position: absolute;
+  top: 7px;
+  right: 8px;
+  z-index: 1;
   display: flex;
   align-items: center;
-  gap: var(--sp-2, 8px);
-  flex-shrink: 0;
-  height: 34px;
-  padding: 0 8px 0 12px;
-  border-bottom: 1px solid var(--border);
+  gap: 2px;
+  /* 栏目滚动到操作区下方时用底色遮住，按钮始终清晰可点 */
+  background: var(--bg-panel);
+  border-radius: var(--r-md);
 }
-.tcard-card-title {
-  flex: 1;
-  min-width: 0;
-  font-size: 11.5px;
-  font-weight: 600;
-  line-height: 1.6;
-  color: var(--text-2);
-  letter-spacing: 0.02em;
-}
-.tcard-card-head-ops { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
-.tcard-card-op {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 22px; height: 22px;
-  border: none; border-radius: var(--r-md);
-  background: transparent; color: var(--text-3);
-  cursor: pointer;
-  transition: background var(--dur-fast), color var(--dur-fast);
-}
-.tcard-card-op:hover { background: var(--bg-hover); color: var(--text-1); }
-
-/* ── 卡片体：栏目列表，超出内部滚动 ── */
+/* ── 卡片体：栏目列表，超出内部滚动（圆角跟随卡片，内容不溢出圆角） ── */
 .tcard-card-body {
-  flex: 1;
+  flex: 1 1 auto;
   min-height: 0;
+  max-height: var(--tcard-max-h);
   overflow-y: auto;
-  padding: 4px 0 6px;
+  overscroll-behavior: contain;
+  border-radius: inherit;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
 }
 
-/* ── 栏目 ── */
-.tcard-sec { display: flex; flex-direction: column; }
+/* ── 栏目：分隔线只用在栏目之间（横向细线，非左侧竖线） ── */
+.tcard-sec { padding: 8px var(--tcard-pad-x) 10px; }
 .tcard-sec + .tcard-sec { border-top: 1px solid var(--border); }
+/* 标题行：标签 → 计数 → 折叠箭头依次紧挨（箭头跟在文字后面，而不是推到最右侧） */
 .tcard-sec-head {
-  display: flex; align-items: center; gap: 6px;
-  width: 100%;
-  padding: 7px 10px 7px 12px;
+  display: flex; align-items: center; justify-content: flex-start; gap: 6px;
+  width: 100%; min-height: 26px;
+  padding: 0;
   border: none; background: transparent;
-  color: var(--text-2);
-  font-size: 11.5px; font-weight: 600; line-height: 1.6;
+  color: var(--text-3);
+  font-size: var(--tcard-fs-md); font-weight: 500; line-height: var(--tcard-lh);
   text-align: left; cursor: pointer;
-  transition: background var(--dur-fast), color var(--dur-fast);
+  transition: color var(--dur-fast);
 }
-.tcard-sec-head:hover { background: var(--bg-hover); color: var(--text-1); }
-.tcard-sec-label { flex: 1; min-width: 0; }
+/* 第一个栏目的标题行要给右侧「⋯ / 收起」留位 */
+.tcard-sec.is-first .tcard-sec-head { padding-right: 58px; }
+.tcard-sec-head:hover { color: var(--text-1); }
+.tcard-sec-label { flex-shrink: 0; }
 .tcard-sec-meta { flex-shrink: 0; font-weight: 400; color: var(--text-3); font-variant-numeric: tabular-nums; }
-.tcard-sec-caret { flex-shrink: 0; color: var(--text-3); transition: transform var(--dur-fast); }
-.tcard-sec-caret.is-open { transform: rotate(180deg); }
-.tcard-sec-body { display: flex; flex-direction: column; gap: 6px; padding: 0 12px 8px; }
+.tcard-sec-meta:empty { display: none; }
+/* 折叠箭头：紧跟在标题文字后；展开朝下、折叠朝右，悬停加深 */
+.tcard-sec-caret {
+  flex-shrink: 0; color: var(--text-3);
+  opacity: .75;
+  transform: rotate(-90deg);
+  transition: transform var(--dur-fast), opacity var(--dur-fast), color var(--dur-fast);
+}
+.tcard-sec-caret.is-open { transform: none; }
+.tcard-sec-head:hover .tcard-sec-caret,
+.tcard-sec-head:focus-visible .tcard-sec-caret { opacity: 1; color: var(--text-1); }
+.tcard-sec-body { display: flex; flex-direction: column; gap: 1px; margin-top: 4px; }
 
-/* ── 通用小件 ── */
-.tcard-empty { font-size: 11.5px; line-height: 1.7; color: var(--text-3); padding: 2px 0; }
-.tcard-link {
+/* ── 通用行：行首固定图标槽 + 文本 + 行尾附加 ── */
+.tcard-row {
+  display: flex; align-items: flex-start; gap: var(--flow-icon-gap, 8px);
+  min-width: 0;
+  padding: 3px 6px; margin: 0 -6px;
+  border-radius: var(--r-md);
+  font-size: var(--tcard-fs); line-height: var(--tcard-lh);
+  color: var(--text-1);
+}
+.tcard-ic {
+  display: inline-flex; align-items: center; justify-content: center;
   flex-shrink: 0;
-  border: none; background: transparent;
-  color: var(--accent); font-size: 11px; line-height: 1.6;
-  cursor: pointer; padding: 0;
+  width: var(--flow-icon, 16px);
+  height: calc(var(--tcard-fs) * var(--tcard-lh));
+  color: var(--text-2);
 }
-.tcard-link:hover { text-decoration: underline; }
-
-/* ── Git 栏目 ── */
-.tcard-git-tools { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.tcard-git-branch { display: inline-flex; align-items: center; gap: 4px; min-width: 0; color: var(--text-2); }
-.tcard-git-branch-name { font-size: 11.5px; line-height: 1.6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tcard-git-count { flex-shrink: 0; font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
-.tcard-git-list { display: flex; flex-direction: column; gap: 1px; }
-.tcard-git-row {
-  display: flex; align-items: center; gap: 6px;
-  min-width: 0; padding: 3px 4px;
-  border-radius: var(--r-sm);
-  transition: background var(--dur-fast);
+.tcard-row-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 进程步骤最多两行，超出省略（用户口径）；长路径 / 英文串也要能断行，否则省略号不生效 */
+.tcard-row-wrap {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical;
 }
-.tcard-git-row:hover { background: var(--bg-hover); }
-.tcard-git-name { flex: 1; min-width: 0; font-size: 11.5px; line-height: 1.6; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tcard-git-code { flex-shrink: 0; font-size: 10px; font-weight: 600; color: var(--text-3); }
-
-/* ── 计划栏目 ── */
-.tcard-plan-row {
-  display: flex; align-items: center; gap: 8px;
-  width: 100%; min-width: 0;
-  padding: 5px 6px; border: none; border-radius: var(--r-md);
-  background: transparent; text-align: left; cursor: pointer;
-  transition: background var(--dur-fast);
-}
-.tcard-plan-row:hover { background: var(--bg-hover); }
-.tcard-plan-title { flex: 1; min-width: 0; font-size: 12px; line-height: 1.6; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tcard-plan-state {
-  flex-shrink: 0; font-size: 10.5px; line-height: 1.6;
-  color: var(--text-2); background: var(--bg-hover);
-  border-radius: 999px; padding: 0 7px;
-}
-.tcard-plan-state.is-await { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
-
-/* ── 进程栏目 ── */
-.tcard-progress-bar {
-  height: 3px; border-radius: 999px;
-  background: color-mix(in srgb, var(--text-1) 10%, transparent);
-  overflow: hidden;
-}
-.tcard-progress-bar > span { display: block; height: 100%; background: var(--accent); transition: width var(--dur-3) var(--ease-standard); }
-.tcard-proc-list { display: flex; flex-direction: column; gap: 2px; }
-.tcard-proc-row {
-  display: flex; align-items: flex-start; gap: 6px;
-  min-width: 0; padding: 2px 0;
-  font-size: 11.5px; line-height: 1.6;
-}
-.tcard-proc-row > svg { flex-shrink: 0; margin-top: 2px; }
-.tcard-proc-title { flex: 1; min-width: 0; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tcard-proc-row.is-done .tcard-proc-title { color: var(--text-3); }
-.tcard-proc-row.is-interrupted .tcard-proc-title { color: var(--warning, #d29922); }
-
-/* 步骤归属 chip（子会话执行） */
-.tcard-chip {
-  display: inline-flex; align-items: center; gap: 3px;
-  flex-shrink: 0; max-width: 116px;
-  padding: 0 6px; height: 17px;
-  border: 1px solid var(--border); border-radius: 999px;
-  background: var(--bg-elevated);
-  color: var(--text-2); font-size: 10px; line-height: 1.6;
+.tcard-row-strong { font-weight: 500; }
+.tcard-row-hint { flex-shrink: 0; color: var(--text-3); font-size: var(--tcard-fs-sm); font-variant-numeric: tabular-nums; }
+.tcard-row-btn {
+  width: calc(100% + 12px);
+  border: none; background: transparent; text-align: left; font-family: inherit;
   cursor: pointer;
-  transition: border-color var(--dur-fast), color var(--dur-fast);
+  transition: background var(--dur-fast);
 }
-.tcard-chip:hover { border-color: var(--border-hover); color: var(--text-1); }
+.tcard-row-btn:hover { background: var(--bg-hover); }
+.tcard-row-sub { color: var(--text-2); }
+.tcard-row.is-done { color: var(--text-3); }
+.tcard-row:focus-visible { outline: none; background: var(--bg-hover); }
+
+/* ── 进程行：完成 = 绿色圆勾 + 删除线淡出；进行中 = 强调色转圈；待办 = 箭头；中断 = 警示色 ── */
+.tcard-proc.is-done .tcard-ic { color: var(--success); }
+.tcard-proc.is-done .tcard-row-text { color: var(--text-3); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--text-3) 60%, transparent); }
+.tcard-proc.is-running .tcard-ic { color: var(--accent); }
+.tcard-proc.is-running .tcard-row-text { font-weight: 500; }
+.tcard-proc.is-pending .tcard-ic { color: var(--text-3); }
+.tcard-proc.is-interrupted .tcard-ic { color: var(--warning, #d29922); }
+
+/* 步骤归属标记（子会话执行）：点击切换到该子会话 */
+.tcard-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  flex-shrink: 0; align-self: center;
+  height: 20px; padding: 0 8px;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--bg-panel);
+  color: var(--text-2); font-size: var(--tcard-fs-xs); line-height: 1;
+  cursor: pointer;
+  transition: border-color var(--dur-fast), color var(--dur-fast), background var(--dur-fast);
+}
+.tcard-chip:hover { border-color: var(--border-hover); color: var(--text-1); background: var(--bg-hover); }
 .tcard-chip > svg { flex-shrink: 0; }
-.tcard-chip-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tcard-chip-text { white-space: nowrap; }
 
-/* ── 子代理栏目 ── */
-.tcard-sub-list { display: flex; flex-direction: column; gap: 2px; }
-.tcard-sub-row {
-  display: flex; align-items: center; gap: 6px;
-  min-width: 0; padding: 2px 0;
-  font-size: 11.5px; line-height: 1.6; color: var(--text-1);
-}
-.tcard-sub-row > svg { flex-shrink: 0; }
-.tcard-sub-row.is-done { color: var(--text-3); }
-.tcard-sub-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tcard-sub-more {
-  align-self: flex-start;
-  margin-top: 1px; padding: 1px 6px;
-  border: none; border-radius: var(--r-sm);
-  background: transparent; color: var(--text-3);
-  font-size: 10.5px; line-height: 1.7; cursor: pointer;
-  transition: background var(--dur-fast), color var(--dur-fast);
-}
-.tcard-sub-more:hover { background: var(--bg-hover); color: var(--text-2); }
+/* ── Git 行尾状态码 ── */
+.tcard-git-code { flex-shrink: 0; font-size: var(--tcard-fs-xs); font-weight: 600; color: var(--text-3); font-family: var(--font-mono); }
+.tcard-git-code[data-code="A"], .tcard-git-code[data-code="??"] { color: var(--success); }
+.tcard-git-code[data-code="D"] { color: var(--danger, #d1242f); }
+.tcard-git-code[data-code="M"] { color: var(--warning, #d29922); }
 
-/* ── 工作流栏目 ── */
-.tcard-wf-row { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 11.5px; line-height: 1.6; color: var(--text-1); }
-.tcard-wf-row > svg { flex-shrink: 0; color: var(--text-2); }
-.tcard-wf-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tcard-wf-count { flex-shrink: 0; color: var(--text-3); font-variant-numeric: tabular-nums; }
+/* ── 「展开其余」类次要按钮 ── */
+/* 只负责位置：按钮外观来自 ui/Button（ghost / xs） */
+.tcard-more { align-self: flex-start; margin: 2px 0 0 calc(var(--flow-icon, 16px) + var(--flow-icon-gap, 8px) - 6px); }
 
 /* ── 折叠态胶囊：单行，只显示优先级最高的一项 ── */
 .tcard-capsule {
   position: absolute;
   top: 10px;
-  right: 14px;
+  right: var(--tcard-inset);
   z-index: 17;
-  display: inline-flex; align-items: center; gap: 6px;
-  max-width: 260px;
-  height: 28px; padding: 0 10px;
+  display: inline-flex; align-items: center; gap: 8px;
+  max-width: var(--tcard-cap-max-w);
+  height: 36px; padding: 0 14px 0 10px;
   border: 1px solid var(--border); border-radius: 999px;
-  background: var(--bg-elevated); color: var(--text-1);
-  box-shadow: var(--shadow-sm);
-  font-size: 11.5px; line-height: 1.6;
+  background: var(--bg-panel); color: var(--text-1);
+  box-shadow: var(--shadow-md);
+  font-size: var(--tcard-fs); line-height: 1; font-family: inherit;
   cursor: pointer;
-  transition: border-color var(--dur-fast), box-shadow var(--dur-fast), transform var(--dur-fast);
+  transform-origin: 100% 50%;
+  animation: tcard-in var(--dur-3) var(--ease-emphasized-decel) both;
+  transition: box-shadow var(--dur-fast), background var(--dur-fast);
 }
-.tcard-capsule:hover { border-color: var(--border-hover); box-shadow: var(--shadow-md); transform: translateY(-1px); }
-.tcard-capsule > svg { flex-shrink: 0; }
+/* plan-156-623：悬停只加深底色，不改边框色——浅色主题下 --border-hover 是 20% 黑，
+   1px 描边在胶囊轮廓上会读成一圈黑边（用户明确要求悬停不出现黑边）。
+   可点反馈由底色 + 既有投影承担，与项目「用底色/字重表达层次，不用描边」一致。 */
+.tcard-capsule:hover { background: var(--bg-hover); }
+.tcard-capsule[aria-disabled="true"] { cursor: default; }
+.tcard-capsule .tcard-ic { height: 20px; color: var(--text-2); }
 .tcard-cap-num { flex-shrink: 0; color: var(--text-2); font-variant-numeric: tabular-nums; }
-.tcard-cap-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-1); }
+.tcard-cap-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.4; }
 .tcard-cap-more {
   flex-shrink: 0;
-  margin-left: 2px; padding: 0 5px;
+  padding: 2px 7px;
   border-radius: 999px;
   background: var(--bg-hover); color: var(--text-3);
-  font-size: 10px; line-height: 1.7;
+  font-size: var(--tcard-fs-xs); line-height: 1.4; font-variant-numeric: tabular-nums;
 }
 
 /* ── ⋯ 折叠策略浮层：不透明底 + 当前项勾选 ── */
-.tcard-menu { min-width: 168px; }
+.tcard-menu { min-width: 176px; padding: 4px; }
+.tcard-menu-caption {
+  padding: 4px 10px 2px;
+  font-size: var(--tcard-fs-sm); line-height: 1.6;
+  color: var(--text-3);
+}
 .tcard-menu-item {
-  display: flex; align-items: center; gap: 6px;
-  height: 30px; padding: 0 10px;
-  border-radius: var(--r-md);
-  font-size: 12px; line-height: 1.6; color: var(--text-1);
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; height: 32px; padding: 0 10px;
+  border: none; border-radius: var(--r-md);
+  background: transparent; text-align: left; font-family: inherit;
+  font-size: var(--fs-md, 13px); line-height: 1.6; color: var(--text-1);
   cursor: pointer;
   transition: background var(--dur-fast);
 }
 .tcard-menu-item:hover { background: var(--bg-hover); }
-.tcard-menu-item.is-on { color: var(--accent); font-weight: 500; }
-.tcard-menu-item.is-on::after { content: "✓"; margin-left: auto; font-size: 11px; }
+.tcard-menu-label { flex: 1; min-width: 0; }
+.tcard-menu-check { display: inline-flex; width: 14px; flex-shrink: 0; color: var(--accent); }
 
-/* ── 运动期降级：面板拖拽/过渡时不播放进度条宽度过渡 ── */
-:is(html[data-window-motion="1"], body.panel-dragging) .tcard-progress-bar > span { transition: none; }
+/* ── 运动期降级：面板拖拽/窗口缩放时不播放入场动画 ── */
+:is(html[data-window-motion="1"], body.panel-dragging) :is(.tcard-card, .tcard-capsule) { animation: none; }

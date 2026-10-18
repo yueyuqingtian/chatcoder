@@ -1,0 +1,350 @@
+/* 每轮文件变更卡片（plan-20261018-turn-changes）
+ *
+ * 视觉对齐参考图：整卡白底（深色为主题面板色）、无内部横线，
+ * 用行高与留白分隔层级；层次只用字号字重、底色与图标表达，不用左侧色条。
+ * 全部颜色/圆角/动效走 tokens.css 语义令牌，浅色与深色主题自动跟随。
+ */
+
+/* ── 卡片外层：一轮可能并入多个 turn（续跑轮），逐轮各一张卡 ───── */
+
+/* 间距不写死像素：正文 → 卡片、卡片 → 操作行都取 --flow-gap，
+   与 .turn-flow 内部各项（文字/思考/工具行）用的是同一个变量，
+   所以调整「对话字号 / 消息密度」时整条消息流的节距一起变化，不会出现
+   「卡片上下偏松、正文之间偏紧」的割裂。
+   有卡片时 .turn-flow 的 padding-bottom 归零，避免与这里叠加成双倍间隙。 */
+.turn-changes-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--flow-gap, 8px);
+  margin-top: var(--flow-gap, 8px);
+}
+
+/* 本轮无任何变更卡片时不留空隙（操作行仍在原位置） */
+.turn-changes-stack:empty {
+  display: none;
+}
+
+/* 有变更卡片时，AI 操作行（复制 / 赞 / 踩 / 重新生成）挂在卡片下方。
+   间距同上取 --flow-gap；末尾补回 .turn-flow 原有的 12px 底部留白，
+   使本轮与下一轮之间的节奏与「无变更卡片」时完全一致。 */
+.turn-changes-actions {
+  margin-top: var(--flow-gap, 8px);
+  padding-bottom: 12px;
+}
+
+/* 操作行移出 .turn-flow 后，原 `.turn-flow .msg-actions.scope-ai` 不再命中；
+   这里补齐同等布局（高度 24px、不换行、边距归零由外层 margin 统一控制），
+   否则会退回组件默认样式，行高与图标间距都跟消息流其它位置不一致。 */
+.turn-changes-actions .msg-actions.scope-ai {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  height: 24px;
+  margin: 0;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* 有卡片时 turn-flow 底部留白交给卡片承担，避免正文与卡片之间空出双倍间隙 */
+.turn-group.has-changes .turn-flow {
+  padding-bottom: 0;
+}
+
+/* ── 卡片本体 ─────────────────────────────────────────────── */
+
+/* 扁平卡片：不投影，只用一层浅底 + 1px 边框与消息流区分。
+   消息流底色是 --bg-panel；卡片用 --bg-elevated（浅色白底、深色亮一档），
+   两个主题都能看出层次，又不靠阴影制造「浮起感」。 */
+.tcc-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  /* 列表底色：浅色档按用户指定 #FBFBFB（比纯白表头低一档，形成「表头 / 内容」两层）；
+     深色档没有对应的中性色令牌，用同等比例的混色得到相近对比度，
+     避免纯白值在深色主题下刺眼。声明为卡片局部令牌，不污染全局调色板。 */
+  --tcc-list-bg: #fbfbfb;
+}
+
+:root[data-theme="dark"] .tcc-card {
+  --tcc-list-bg: color-mix(in oklab, var(--bg-elevated) 96%, var(--text-3) 4%);
+}
+
+/* ── 头部：箭头 + 计数 + 合计 + 撤销 ──────────────────────── */
+
+/* 表头保持纯色（与卡片同色），列表用 --tcc-list-bg 区分——
+   与参考图一致：白净的表头是「标题栏」，下方列表浅一层。
+   整行可点开/收起，所以给手型光标。
+   高度不写死：从 --fs-md（设置-对话字号）派生，字号调小时表头同步变矮。 */
+.tcc-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: calc(var(--fs-md, 13px) * 3.2);
+  padding: 0 10px 0 8px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+}
+
+/* 收起时没有列表，分隔线随之撤销（否则卡片底部多一条悬空横线） */
+.tcc-card.is-collapsed .tcc-head {
+  border-bottom-color: transparent;
+}
+
+/* 折叠箭头：尺寸随字号缩放（仍保持固定占位，展开/收起不抖动） */
+.tcc-chev {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: calc(var(--fs-md, 13px) * 2);
+  height: calc(var(--fs-md, 13px) * 2);
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background var(--dur-2, 160ms) ease, color var(--dur-2, 160ms) ease;
+}
+
+.tcc-chev:hover {
+  background: var(--bg-hover);
+  color: var(--text-1);
+}
+
+.tcc-chev svg {
+  transition: transform var(--dur-2, 160ms) ease;
+  transform: rotate(-90deg);
+}
+
+.tcc-chev.is-open svg {
+  transform: rotate(0deg);
+}
+
+.tcc-count {
+  flex: 0 0 auto;
+  font-size: calc(var(--fs-md, 13px) + 1px);
+  /* 表头标题不加粗：靠字号与主文案色形成层次，不靠字重抢眼 */
+  font-weight: 400;
+  line-height: 1.45;
+  color: var(--text-1);
+  white-space: nowrap;
+}
+
+.tcc-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  font-size: calc(var(--fs-md, 13px) - 0.5px);
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.tcc-add {
+  color: var(--success);
+}
+
+.tcc-del {
+  color: var(--error);
+}
+
+/* 把右侧撤销推到行尾（不用 margin-left:auto 以免影响中间省略） */
+.tcc-spacer {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 撤销：禁用时把鼠标事件交给外层 span，Tooltip 才能在不置灰的按钮上正常出现 */
+.tcc-revert {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.tcc-revert > .btn:disabled {
+  pointer-events: none;
+}
+
+/* ── 文件行 ───────────────────────────────────────────────── */
+
+.tcc-list {
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  background: var(--tcc-list-bg);
+}
+
+/* 行之间不加分隔线：靠行高和悬停底色划分。
+   行高随字号派生（13px 字号≈38px），字号调小时整张卡跟着变矮，
+   既不浪费纵向空间，也不会出现“字小了但行还很宽”的失衡。 */
+.tcc-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: calc(var(--fs-md, 13px) * 2.9);
+  padding: 0 6px;
+  border-radius: var(--r-md);
+  transition: background var(--dur-2, 160ms) ease;
+}
+
+.tcc-row:hover {
+  background: var(--bg-hover);
+}
+
+.tcc-row .file-badge {
+  flex: 0 0 auto;
+}
+
+.tcc-name {
+  flex: 0 1 auto;
+  max-width: 46%;
+  font-size: var(--fs-md, 13px);
+  line-height: 1.4;
+  font-weight: 500;
+  color: var(--text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tcc-dir {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: calc(var(--fs-md, 13px) - 1px);
+  line-height: 1.4;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 删除态：文件名划线 + 行内小标记，不靠颜色条表达 */
+.tcc-row.is-deleted .tcc-name {
+  text-decoration: line-through;
+  color: var(--text-2);
+}
+
+.tcc-tag {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--error-soft);
+  color: var(--error);
+  font-size: calc(var(--fs-md, 13px) - 2px);
+  line-height: 1.45;
+  white-space: nowrap;
+}
+
+/* ── 行内操作区 ───────────────────────────────────────────── */
+
+/* 按钮尺寸随「对话字号」缩放：只在本卡片内覆盖 --btn-* 令牌（不新增页面私有按钮类），
+   字号调小时按钮跟着变小，与行高变化同步，不会出现「字小了按钮还是原来那么大」。
+   13px 字号下 ≈ 28px 高 / 12px 横向内边距，与组件库 sm 档一致。 */
+.tcc-row-ops {
+  --btn-h-sm: calc(var(--fs-md, 13px) * 2.15);
+  --btn-px-sm: calc(var(--fs-md, 13px) * 0.92);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+/* 字号没有对应令牌，随 --fs-md 派生（比正文小 1px，保持按钮的次要视觉重量） */
+.tcc-row-ops .btn {
+  font-size: calc(var(--fs-md, 13px) - 1px);
+}
+
+/* 「审查」与「打开」都是描边胶囊：在卡片底色上保持自身底色，避免露出发灰的块 */
+.tcc-row-ops .btn-outline {
+  background: var(--bg-elevated);
+}
+
+.tcc-row-ops .btn-outline:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+/* 「打开 ⌄」分体按钮：左半是主操作、右半只负责选应用，两者共享一条外边框 */
+.tcc-split {
+  display: inline-flex;
+  align-items: stretch;
+  flex: 0 0 auto;
+}
+
+.tcc-split > .btn {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+/* 分体角标宽度随字号同步，保证左右两半比例不变 */
+.tcc-split-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(var(--fs-md, 13px) * 1.7);
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-left: 0;
+  border-top-right-radius: var(--r-md);
+  border-bottom-right-radius: var(--r-md);
+  background: var(--bg-elevated);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background var(--dur-2, 160ms) ease, color var(--dur-2, 160ms) ease;
+}
+
+.tcc-split-caret:hover {
+  background: var(--bg-hover);
+  color: var(--text-1);
+}
+
+.tcc-split-caret:focus-visible {
+  outline: 2px solid var(--focus-ring, var(--color-accent));
+  outline-offset: -2px;
+}
+
+/* ── 展开其余 ─────────────────────────────────────────────── */
+
+/* 「展开其余 N 个文件」行：高度随字号派生，字号调小时不与列表行脱节 */
+.tcc-more {
+  display: flex;
+  align-items: center;
+  min-height: calc(var(--fs-md, 13px) * 2.6);
+  padding: 0 8px;
+}
+
+.tcc-more .btn {
+  color: var(--text-2);
+  font-size: calc(var(--fs-md, 13px) - 1px);
+}
+
+.tcc-more .btn:hover:not(:disabled) {
+  color: var(--text-1);
+}
+
+/* ── 窄宽度：目录名先让位，文件名与操作区优先 ─────────────── */
+
+@media (max-width: 520px) {
+  .tcc-dir {
+    display: none;
+  }
+
+  .tcc-name {
+    max-width: none;
+  }
+}
+
+/* 极窄（侧边对话等）：只保留「打开 ⌄」的角标入口，避免按钮换行挤压文件名。
+   角标菜单里仍有「审查」以外的全部打开方式与复制路径，功能不丢失。 */
+@media (max-width: 380px) {
+  .tcc-row-ops > .btn-outline {
+    display: none;
+  }
+
+  .tcc-split > .btn {
+    display: none;
+  }
+}

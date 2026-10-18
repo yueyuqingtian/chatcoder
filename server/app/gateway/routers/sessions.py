@@ -17,13 +17,22 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 
-async def _to_out(db: AsyncSession, s) -> SessionOut:
+async def _to_out(db: AsyncSession, s, flags: "session_service.SessionFlags | None" = None) -> SessionOut:
+    """会话 → 输出模型。列表场景传入批量算好的 flags（plan-156-620：避免逐会话 5 条查询）。"""
     # plan-75-332: 模式值统一走内核归一化——存量会话可能是旧值
     # （permission_mode=default/accept_edits），直接丢给前端会让模式菜单选不中任何一项。
     from app.orchestration.approval_policy import (
         normalize_approval_mode, normalize_execution_mode,
     )
 
+    if flags is None:
+        flags = session_service.SessionFlags(
+            has_running=await session_service.has_running_turn(db, s.id),
+            workflow_running=await session_service.has_running_workflow(db, s.id),
+            has_interrupted_turn=await session_service.has_interrupted_turn(db, s.id),
+            last_activity_at=await session_service.last_activity_at(db, s.id),
+            running_started_at=await session_service.running_turn_started_at(db, s.id),
+        )
     return SessionOut(
         id=s.id, project_id=s.project_id, title=s.title, model_id=s.model_id,
         status=s.status, pinned=s.pinned,
@@ -34,16 +43,23 @@ async def _to_out(db: AsyncSession, s) -> SessionOut:
         created_at=str(s.created_at) if getattr(s, "created_at", None) else None,
         fork_parent_id=s.fork_parent_id,
         side_parent_id=getattr(s, "side_parent_id", None),
+        side_kind=getattr(s, "side_kind", None),
         worktree_path=s.worktree_path,
-        has_running=await session_service.has_running_turn(db, s.id),
-        workflow_running=await session_service.has_running_workflow(db, s.id),
-        has_interrupted_turn=await session_service.has_interrupted_turn(db, s.id),
-        last_activity_at=await session_service.last_activity_at(db, s.id),
-        running_started_at=await session_service.running_turn_started_at(db, s.id),
+        has_running=flags.has_running,
+        workflow_running=flags.workflow_running,
+        has_interrupted_turn=flags.has_interrupted_turn,
+        last_activity_at=flags.last_activity_at,
+        running_started_at=flags.running_started_at,
         goal_text=s.goal_text,
         goal_status=s.goal_status or "none",
         goal_turns_used=s.goal_turns_used or 0,
     )
+
+
+async def _list_out(db: AsyncSession, rows: list) -> list[SessionOut]:
+    """批量输出：运行态字段一次聚合查询算完。"""
+    flags = await session_service.session_flags_batch(db, rows)
+    return [await _to_out(db, r, flags.get(r.id)) for r in rows]
 
 
 @router.post("", response_model=SessionOut)
@@ -65,10 +81,24 @@ async def list_sessions(project_id: int | None = None, include_archived: bool = 
     sessions = await session_service.list_sessions(db, project_id=project_id, include_archived=include_archived)
     # 工作流状态按会话批量查询一次（侧栏标记），不逐个会话查询
     states = await workflow_store.session_workflow_states([s.id for s in sessions])
-    out = [await _to_out(db, s) for s in sessions]
+    out = await _list_out(db, sessions)
     for item in out:
         item.workflow_state = states.get(item.id)
     return out
+
+
+@router.get("/subsession-index", response_model=list[SessionOut])
+async def list_subsession_index(project_id: int | None = None, db: AsyncSession = Depends(get_db)):
+    """全部未归档执行子会话（左栏一次性重建子会话行，前端按 side_parent_id 分桶）。
+
+    plan-156-620：替代「每个主会话各请求一次 /subsessions」——上百个并发请求
+    曾把后端请求队列塞满，进入会话时卡片与其它接口都明显变慢。
+    必须声明在 `/{session_id}` 之前，否则会被当成会话 id 解析。
+    """
+    from app.services import subsession_service
+
+    children = await subsession_service.list_all_children(db, project_id=project_id)
+    return await _list_out(db, children)
 
 
 @router.post("/{session_id}/side-sessions", response_model=SessionOut)
@@ -88,18 +118,16 @@ async def create_side_session(session_id: int, db: AsyncSession = Depends(get_db
     if parent.project_id is None:
         raise HTTPException(status_code=400, detail="该会话没有所属项目，无法开启侧边会话")
 
-    from app.services import subsession_service
+    from app.core.enums import SideKind
 
+    # plan-156-620：侧边对话与执行子会话是两类会话，容量门禁只约束执行子会话
     root = parent.side_parent_id or parent.id
-    try:
-        await subsession_service.assert_can_create(db, root)
-    except subsession_service.SubsessionError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
 
     sid = await session_service.create_session(
         db, project_id=parent.project_id, title="侧边会话", model_id=parent.model_id,
         permission_mode=parent.permission_mode, approval_mode=parent.approval_mode,
         side_parent_id=root,
+        side_kind=SideKind.SIDE.value,
         # plan-156-619 S8：侧边会话标题是固定占位，标 named 不参与自动归纳
         title_source="named",
     )
@@ -146,7 +174,7 @@ async def list_subsessions(session_id: int, db: AsyncSession = Depends(get_db)):
     if await session_service.get_session(db, session_id) is None:
         raise HTTPException(status_code=404, detail="会话不存在")
     children = await subsession_service.list_children(db, session_id)
-    return [await _to_out(db, c) for c in children]
+    return await _list_out(db, children)
 
 
 
@@ -156,7 +184,7 @@ async def list_side_sessions(session_id: int, db: AsyncSession = Depends(get_db)
     if await session_service.get_session(db, session_id) is None:
         raise HTTPException(status_code=404, detail="会话不存在")
     children = await session_service.list_side_sessions(db, session_id)
-    return [await _to_out(db, s) for s in children]
+    return await _list_out(db, children)
 
 
 @router.get("/{session_id}", response_model=SessionOut)
@@ -203,9 +231,17 @@ async def delete_session(session_id: int, permanent: bool = False,
     """
     if permanent:
         from app.orchestration.workflow import service as workflow_service
+        from app.services import subsession_service
 
-        # 侧边会话（子会话）随主会话一并永久删除，不留下不可见的残留会话
+        # 挂靠会话随主会话一并永久删除，不留下不可见的残留会话。
+        # plan-156-621：list_side_sessions 现在只返回侧边对话（side），执行子会话必须另行取，
+        # 否则 sub 子会话会变成用户既看不到、也删不掉的孤儿行。
         child_ids = [c.id for c in await session_service.list_side_sessions(db, session_id)]
+        seen = set(child_ids)
+        for child in await subsession_service.list_children(db, session_id):
+            if child.id not in seen:
+                child_ids.append(child.id)
+                seen.add(child.id)
         for child_id in child_ids:
             await workflow_service.on_session_deleted(child_id)
             await session_service.delete_session_permanent(db, child_id)

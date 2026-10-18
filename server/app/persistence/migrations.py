@@ -50,6 +50,12 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("sessions", "pinned_at", "VARCHAR(40)"),
     # plan-156-619 S8：标题来源（auto = AI 归纳 / manual = 用户手改，手改后不再被覆盖）
     ("sessions", "title_source", "VARCHAR(10) DEFAULT 'auto' NOT NULL"),
+    # plan-156-620：挂在主会话下的会话种类（side 侧边对话 / sub 执行子会话），回填见 _backfill_side_kind
+    ("sessions", "side_kind", "VARCHAR(8)"),
+    # plan-20261018-operator-boost：会话级思考深度（操控子会话用最低档；空 = 跟随全局）
+    ("sessions", "reasoning_effort", "VARCHAR(20)"),
+    # plan-20261018-operator-boost：操作路线类型（desktop 桌面应用 / browser 网页）
+    ("desktop_recipes", "scope", "VARCHAR(10) DEFAULT 'desktop' NOT NULL"),
     # ========== projects（plan-282-1441 #5：工作树复用 Project 表）==========
     ("projects", "is_worktree", "BOOLEAN DEFAULT 0 NOT NULL"),
     ("projects", "parent_project_id", "BIGINT"),
@@ -383,6 +389,29 @@ async def run_migrations(db: AsyncSession) -> dict:
         except Exception:
             pass
 
+    # plan-156-620: 数据迁移 -- 回填子会话种类（幂等，只处理 side_kind 为空的行）
+    try:
+        await _backfill_side_kind(db)
+    except Exception as e:
+        # plan-156-621：回填失败不阻塞启动，但必须让人看得见——回填不到位的存量会话
+        # 会被 list_children / _require_subsession 直接当成「不存在」，用户无法操作。
+        logger.error("子会话种类回填失败：存量执行子会话将无法操作，重启或手动修复后重试: %s", e,
+                     exc_info=True)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
+    # plan-156-624: 数据迁移 -- 旧执行模式名回填为 agent（幂等，只改 default/accept_edits）
+    try:
+        await _backfill_legacy_permission_mode(db)
+    except Exception as e:
+        logger.warning("执行模式回填失败(非阻塞，读取侧仍会归一化): %s", e)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
     # v6.0: 数据迁移 -- 升级核心角色模板提示词（幂等，仅旧版才升级）
     try:
         await _upgrade_template_prompts(db)
@@ -416,6 +445,61 @@ async def run_migrations(db: AsyncSession) -> dict:
     if migrated:
         logger.info("数据库迁移完成: 新增 %d 列, 跳过 %d, 失败 %d", migrated, skipped, errors)
     return {"migrated": migrated, "skipped": skipped, "errors": errors}
+
+
+# 侧边对话创建时的固定占位标题（sessions.create_side_session），回填据此识别存量侧边对话
+_SIDE_SESSION_PLACEHOLDER_TITLE = "侧边会话"
+
+
+async def _backfill_side_kind(db: AsyncSession) -> int:
+    """plan-156-620：为存量挂靠会话补 side_kind。
+
+    字段上线前两类会话无法区分；侧边对话的标题恒为固定占位（标 named 不参与归纳），
+    执行子会话的标题是任务名——按此判定，其余兜底为侧边对话（宁可留在右侧，也不误入左栏）。
+
+    plan-156-621：用户重命名过的侧边对话也会脱离占位标题（rename 端点置 title_source='manual'），
+    只按标题判定会把它误判成执行子会话，从右侧面板消失却出现在左栏。因此 manual 一律兜底为 side。
+    """
+    from app.core.enums import SideKind
+
+    if not await _column_exists(db, "sessions", "side_kind"):
+        return 0
+    res_sub = await db.execute(text(
+        "UPDATE sessions SET side_kind = :sub "
+        "WHERE side_parent_id IS NOT NULL AND side_kind IS NULL "
+        "AND title IS NOT NULL AND title <> :placeholder "
+        "AND COALESCE(title_source, 'auto') <> 'manual'"
+    ), {"sub": SideKind.SUB.value, "placeholder": _SIDE_SESSION_PLACEHOLDER_TITLE})
+    res_side = await db.execute(text(
+        "UPDATE sessions SET side_kind = :side "
+        "WHERE side_parent_id IS NOT NULL AND side_kind IS NULL"
+    ), {"side": SideKind.SIDE.value})
+    await db.commit()
+    as_sub = int(res_sub.rowcount or 0)
+    as_side = int(res_side.rowcount or 0)
+    if as_sub or as_side:
+        logger.info("子会话种类回填完成：sub=%s side=%s", as_sub, as_side)
+    return as_sub + as_side
+
+
+async def _backfill_legacy_permission_mode(db: AsyncSession) -> int:
+    """plan-156-624：把历史上保存的旧执行模式名回填为 agent。
+
+    旧名 default / accept_edits 与 agent 能力完全相同（读取侧早已归一化），但库里留着
+    旧值会让「子会话工具可用的模式」在统计与设置页上口径不一致，升级用户看起来像
+    "还需要手动改模式"。只迁移这两个旧名，用户显式选择的 readonly / plan / workflow 不动。
+    """
+    if not await _column_exists(db, "sessions", "permission_mode"):
+        return 0
+    res = await db.execute(text(
+        "UPDATE sessions SET permission_mode = 'agent' "
+        "WHERE permission_mode IN ('default', 'accept_edits')"
+    ))
+    await db.commit()
+    count = int(res.rowcount or 0)
+    if count:
+        logger.info("执行模式回填完成：%s 个会话由旧名迁到 agent", count)
+    return count
 
 
 async def _upgrade_template_prompts(db: AsyncSession) -> int:

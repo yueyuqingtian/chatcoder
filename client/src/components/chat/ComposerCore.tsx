@@ -48,7 +48,7 @@ import { createPortal } from "react-dom";
 import { ModelPicker } from "./ModelPicker";
 // plan-75-332: 审批卡——与 QuestionWizardBox 同构，需要审批时替换输入框主体
 import { ApprovalCard } from "./ApprovalCard";
-import { useChatStore, persistLastReasoning, type UsageDetail } from "../../store/chat";
+import { useChatStore, persistLastReasoning, patchSession, useCurrentSession, type UsageDetail } from "../../store/chat";
 import { useScoped } from "./convoScope";
 import { selectSessionWorkflowBusy, useWorkflowStore } from "../../store/workflow";
 import { useDraftsStore, normalizeDraftMode, normalizeApprovalMode, type ApprovalMode } from "../../store/drafts";
@@ -130,9 +130,9 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
   const pendingApproval = useScoped("pendingApproval");
   const approvalQueueLength = useScoped("approvalQueue").length;
   const pendingPlan = useScoped("pendingPlan");
-  const sessions = useChatStore((s) => s.sessions);
 
-  const currentSession = sessions.find((s) => s.id === currentSessionId);
+  // plan-156-620：子会话不在主会话列表里——不走 findSession 时模型 / 执行模式 / 权限模式会回落默认值
+  const currentSession = useCurrentSession();
 
   /** plan-546: 草稿 key——home 变体固定 "home"，会话变体取 sessionId（"new"=无会话兜底，不持久化） */
   const draftKey = isHome ? "home" : currentSessionId != null ? String(currentSessionId) : "new";
@@ -184,16 +184,12 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
 
   const applyGoalOut = (out: { text?: string | null; status: string; turns_used?: number }) => {
     if (currentSessionId == null) return;
-    useChatStore.setState((s) => ({
-      sessions: s.sessions.map((x) => (x.id === currentSessionId
-        ? {
-            ...x,
-            goal_text: out.text ?? null,
-            goal_status: (out.status || "none") as typeof x.goal_status,
-            goal_turns_used: out.turns_used ?? 0,
-          }
-        : x)),
-    }));
+    useChatStore.setState((s) => patchSession(s, currentSessionId, (x) => ({
+      ...x,
+      goal_text: out.text ?? null,
+      goal_status: (out.status || "none") as typeof x.goal_status,
+      goal_turns_used: out.turns_used ?? 0,
+    })));
   };
 
   const cancelGoal = () => {
@@ -969,7 +965,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
       void api.updateSession(currentSessionId, { model_id: modelId })
         .then(() => {
           useChatStore.setState((s) => ({
-            sessions: s.sessions.map((x) => (x.id === currentSessionId ? { ...x, model_id: modelId } : x)),
+            ...patchSession(s, currentSessionId, (x) => ({ ...x, model_id: modelId })),
             lastModelId: modelId,
           }));
           // plan-20261017-ux-overhaul：切换当下不再写分隔线（发送时由后端按需写入），无需再拉消息
@@ -1006,13 +1002,11 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
       void api.updateSession(currentSessionId, { permission_mode: next }).catch((e) => {
         setComposerMode(prev);
         useChatStore.setState((s) => ({
-          sessions: s.sessions.map((x) => (x.id === currentSessionId ? { ...x, permission_mode: prev } : x)),
+          ...patchSession(s, currentSessionId, (x) => ({ ...x, permission_mode: prev })),
           error: `执行模式保存失败：${String(e)}`,
         }));
       });
-      useChatStore.setState((s) => ({
-        sessions: s.sessions.map((x) => (x.id === currentSessionId ? { ...x, permission_mode: next } : x)),
-      }));
+      useChatStore.setState((s) => patchSession(s, currentSessionId, (x) => ({ ...x, permission_mode: next })));
     }
   };
 
@@ -1046,13 +1040,11 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
       void api.updateSession(currentSessionId, { approval_mode: mode }).catch((e) => {
         setApprovalMode(prev);
         useChatStore.setState((s) => ({
-          sessions: s.sessions.map((x) => (x.id === currentSessionId ? { ...x, approval_mode: prev } : x)),
+          ...patchSession(s, currentSessionId, (x) => ({ ...x, approval_mode: prev })),
           error: `权限模式保存失败：${String(e)}`,
         }));
       });
-      useChatStore.setState((s) => ({
-        sessions: s.sessions.map((x) => (x.id === currentSessionId ? { ...x, approval_mode: mode } : x)),
-      }));
+      useChatStore.setState((s) => patchSession(s, currentSessionId, (x) => ({ ...x, approval_mode: mode })));
     }
   };
 

@@ -124,13 +124,41 @@ _CDP_FAILED: dict[int, float] = {}
 _CDP_FAIL_TTL_S = 60.0
 
 
-async def _resolve_window(handle: int, title: str) -> dict | None:
-    """按 handle 或 title 取窗口信息（cls / pid / rect），供通道分流判断。"""
+# 最近一次窗口列表（plan-20261018-operator-boost）：动作前解析目标窗口时顺带记下，动作后与新列表比对，
+# 就能发现「点了之后应用弹出了新窗口」——不必为此在动作前多付一次 ~200 ms 的枚举。
+_LAST_WINDOWS: dict[str, Any] = {"at": 0.0, "items": []}
+
+
+async def _window_list() -> list[dict]:
     try:
         data = await _call("windows", {"limit": 120})
     except Exception:  # noqa: BLE001
+        return []
+    items = list(data.get("items") or [])
+    _LAST_WINDOWS.update(at=time.monotonic(), items=items)
+    return items
+
+
+def _same_app(a: dict | None, b: dict | None) -> bool:
+    """两个窗口是否属于同一应用（同进程，或进程名相同——播放器常是同名子进程）。"""
+    if not a or not b:
+        return False
+    if a.get("pid") and a.get("pid") == b.get("pid"):
+        return True
+    pa, pb = str(a.get("proc") or "").casefold(), str(b.get("proc") or "").casefold()
+    return bool(pa) and pa == pb
+
+
+def _describe_window(w: dict) -> str:
+    return (f"「{w.get('title') or '(无标题)'}」（handle={w.get('h')}，进程 {w.get('proc') or '?'}，"
+            f"中心点 {w.get('x')},{w.get('y')}）")
+
+
+async def _resolve_window(handle: int, title: str) -> dict | None:
+    """按 handle 或 title 取窗口信息（cls / pid / rect），供通道分流判断。"""
+    items = await _window_list()
+    if not items:
         return None
-    items = data.get("items") or []
     if handle:
         for it in items:
             if int(it.get("h") or 0) == handle:
@@ -212,6 +240,17 @@ def _render_items(items: list[dict], limit: int = 120) -> list[str]:
         suffix = f"  [{', '.join(extra)}]" if extra else ""
         lines.append(f"- {label}  ({it.get('x')},{it.get('y')}){suffix}")
     return lines
+
+
+async def _desktop_hint(ctx: ToolContext, win: dict | None, *names: str) -> str:
+    """按窗口（进程名 / 标题）与额外名称匹配已沉淀路线，返回附在结果末尾的文本（plan-20261018-operator-boost）。"""
+    from app.orchestration.route_hints import route_hint
+
+    pool = [str((win or {}).get("proc") or ""), str((win or {}).get("title") or ""), *names]
+    pool = [p for p in pool if p.strip()]
+    if not pool:
+        return ""
+    return await route_hint(ctx, scope="desktop", names=pool, target_label=pool[0])
 
 
 def _first_step_of(recipe: object) -> str:
@@ -406,14 +445,65 @@ def _shot_text_hits(rec: Any, text: str) -> list[dict]:
 
 async def _foreground_window() -> dict | None:
     """取当前前台窗口（「不指定窗口就按前台来」是最常见的用法）。"""
-    try:
-        data = await _call("windows", {"limit": 120})
-    except Exception:  # noqa: BLE001
-        return None
-    for it in data.get("items") or []:
+    for it in await _window_list():
         if it.get("fg"):
             return it
     return None
+
+
+async def _window_change_note(target: dict | None) -> tuple[str, dict | None]:
+    """动作后窗口变化（plan-20261018-operator-boost）：返回 (给模型的说明, 应跟随的新前台窗口)。
+
+    真实故障：腾讯视频首页点开剧集后弹出独立的播放窗口并成为前台，工具不说，模型继续对首页窗口截图 / 按键，
+    每次都报「不在前台」，只能反复 focus 首页——把播放窗口又压到后面，越操作越乱。
+    """
+    before_items = list(_LAST_WINDOWS.get("items") or [])
+    fresh = time.monotonic() - float(_LAST_WINDOWS.get("at") or 0) < 30
+    after = await _window_list()
+    if not after:
+        return "", None
+    fg = next((w for w in after if w.get("fg")), None)
+    before_h = {int(w.get("h") or 0) for w in before_items} if fresh else set()
+    new = [w for w in after if before_h and int(w.get("h") or 0) not in before_h and not w.get("min")
+           and (target is None or _same_app(w, target))]
+    lines: list[str] = []
+    follow: dict | None = None
+    if new:
+        for w in new[:3]:
+            lines.append("操作后出现了新窗口" + _describe_window(w) + ("，它现在在前台" if w.get("fg") else ""))
+        follow = next((w for w in new if w.get("fg")), None)
+    elif fg and target and int(fg.get("h") or 0) != int(target.get("h") or 0):
+        if _same_app(fg, target):
+            lines.append("操作后前台切换到了同一应用的另一个窗口" + _describe_window(fg))
+            follow = fg
+        else:
+            lines.append("操作后前台变成了其他程序的窗口" + _describe_window(fg))
+    if not lines:
+        return "", None
+    if follow is not None:
+        old = f"原窗口 handle={target.get('h')} 仍在；" if target else ""
+        lines.append(f"后续操作新窗口请把 handle 换成 {follow.get('h')}（截图、点击、按键都一样），{old}"
+                     "不要再 desktop_focus 原窗口——那会把新窗口压到后面。")
+    return "\n".join(lines), follow
+
+
+async def _not_foreground_hint(exc: Exception, handle: int, title: str) -> str:
+    """内核报「目标窗口不在前台」时补充真实前台是谁：多数情况是同一应用弹出了新窗口。"""
+    msg = str(exc)
+    if "不在前台" not in msg:
+        return msg
+    items = await _window_list()
+    fg = next((w for w in items if w.get("fg")), None)
+    target = next((w for w in items if handle and int(w.get("h") or 0) == handle), None)
+    if target is None and title:
+        target = next((w for w in items if title.lower() in str(w.get("title") or "").lower()), None)
+    if fg is None:
+        return msg
+    if target is not None and _same_app(fg, target):
+        return (msg + f"\n当前前台是同一应用的另一个窗口{_describe_window(fg)}——界面很可能已切到这个窗口"
+                "（例如点开后弹出的播放 / 详情窗口）。要操作它就改用 handle="
+                f"{fg.get('h')}；确实要回原窗口才用 focus_first=true。")
+    return msg + f"\n当前前台是{_describe_window(fg)}。"
 
 
 async def _window_frame(win: dict | None) -> list[int] | None:
@@ -596,6 +686,13 @@ async def _collect_elements(
             })
             items = list(data.get("items") or [])
             if items:
+                # plan-20261018-operator-boost：自绘 / 内嵌网页的应用（如腾讯视频）UIA 只暴露顶栏几个按钮，
+                # 内容区全是「空白」——点击卡片被当成点空白拒绝，按文字也找不到。控件树稀疏时补上 OCR 文字。
+                frame = await _window_frame(win)
+                if _uia_sparse(items, frame):
+                    boxes = await _ocr_boxes(meta, clip=frame)
+                    if boxes:
+                        return _dedupe_items(items + _boxes_to_items(boxes)), "uia+ocr"
                 return _dedupe_items(items), "uia"
         except Exception:  # noqa: BLE001 - 取不到就往下走 OCR 兜底
             pass
@@ -605,6 +702,17 @@ async def _collect_elements(
     if boxes:
         return _dedupe_items(_boxes_to_items(boxes)), "ocr"
     return [], "none"
+
+
+def _uia_sparse(items: list[dict], frame: list[int] | None) -> bool:
+    """控件树是否「稀疏」：元素很少，且只分布在窗口里很窄的一条（典型是只有顶栏）。"""
+    if len(items) >= 30:
+        return False
+    if not frame or frame[3] <= 0:
+        return len(items) < 15
+    ys = [int(it.get("y") or 0) for it in items]
+    span = (max(ys) - min(ys)) if ys else 0
+    return span < frame[3] * 0.3
 
 
 def _dedupe_items(items: list[dict]) -> list[dict]:
@@ -637,6 +745,85 @@ async def _wait_stable(win: dict | None, timeout_ms: int = 3000) -> dict[str, An
         return {}
 
 
+def _dark_ratio(path: str) -> float:
+    """截图中接近纯黑的像素占比（64x40 灰度缩略图，约 3 ms）；取不到返回 0。
+
+    plan-20261018-operator-boost：视频 / 游戏等硬件加速或受版权保护的画面截屏时是黑的（实测腾讯视频
+    播放中截图 17–20 KB、几乎全黑），模型据此判断「黑屏 / 还在加载」并反复重试。识别出来就明确告诉它。
+    """
+    try:
+        from PIL import Image
+
+        with Image.open(path) as img:
+            px = list(img.convert("L").resize((64, 40), Image.BILINEAR).getdata())
+        return sum(1 for v in px if v < 20) / max(1, len(px))
+    except Exception:  # noqa: BLE001 — 只用于提示，取不到就不提示
+        return 0.0
+
+
+def _shot_notes(path: str, win: dict | None, explicit_target: bool) -> list[str]:
+    """截图附加说明：画面大面积纯黑、目标窗口被其它窗口盖住。"""
+    notes: list[str] = []
+    ratio = _dark_ratio(path)
+    if ratio >= 0.55:
+        notes.append(
+            f"注意：截图中约 {round(ratio * 100)}% 的区域接近纯黑。视频、游戏或受版权保护的画面通常无法被截屏"
+            "（截出来是黑的），这不代表黑屏或仍在加载——请结合窗口标题、可见文字与控件（剧集名、播放进度、"
+            "暂停按钮等）判断状态，不要因此反复截图或重试。"
+        )
+    if explicit_target and win and not win.get("fg"):
+        fg = next((w for w in (_LAST_WINDOWS.get("items") or []) if w.get("fg")), None)
+        if fg and int(fg.get("h") or 0) != int(win.get("h") or 0):
+            line = ("注意：目标窗口当前不在前台，截图截的是它所在的屏幕区域，画面里可能叠着前台窗口"
+                    + _describe_window(fg) + "。")
+            if _same_app(fg, win):
+                line += f"它属于同一应用，界面很可能已切到这个窗口，请改用 handle={fg.get('h')} 截图和操作。"
+            notes.append(line)
+    return notes
+
+
+def _setting_max_dim() -> int:
+    """设置里的截图缩放长边（0 = 自动适配模型可见尺寸）。"""
+    try:
+        return max(0, int(getattr(settings, "desktop_screenshot_max_dim", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+# plan-20261018-operator-boost：模型「实际看到」的图片尺寸上限。
+# 多数视觉模型服务端会把大图再缩小（OpenAI 高清模式：短边 768；Anthropic：长边约 1568 / 约 1.15 MP；
+# 部分供应商适配层也会缩，如 kiro 的 _render_image）。截图若大于这个尺寸，模型是在缩小后的图上读坐标，
+# 工具却按原图像素换算——点击整体往左上偏，小窗口时直接落到窗口外（用户实测）。
+# 因此截图一律缩到模型可见尺寸以内，换算比例由工具记录，模型读到的像素与工具换算口径一致。
+_MODEL_LONG_MAX = 1568
+_MODEL_SHORT_MAX = 768
+
+
+def _model_safe_max_dim(src_w: int, src_h: int, requested: int) -> int:
+    """按源区域尺寸给出传给内核的 maxDim（0 = 不缩放）：不超过模型可见尺寸，显式设置更小时用设置值。"""
+    long_edge, short_edge = max(src_w, src_h), min(src_w, src_h)
+    if long_edge <= 0 or short_edge <= 0:
+        return requested if requested > 0 else _MODEL_LONG_MAX
+    limit = min(_MODEL_LONG_MAX, int(long_edge * _MODEL_SHORT_MAX / short_edge))
+    if requested > 0:
+        return min(requested, limit)
+    return limit if long_edge > limit else 0
+
+
+_SCREEN_CACHE: dict[str, Any] = {"at": 0.0, "size": None}
+
+
+async def _screen_size() -> tuple[int, int]:
+    """整屏截图的源尺寸（虚拟桌面），缓存 30 秒——分辨率很少变化，不值得每次截图多一次内核往返。"""
+    now = time.monotonic()
+    if _SCREEN_CACHE["size"] and now - float(_SCREEN_CACHE["at"]) < 30:
+        return _SCREEN_CACHE["size"]
+    vs = await _virtual_screen()
+    size = (vs[2], vs[3]) if vs else (0, 0)
+    _SCREEN_CACHE.update(at=now, size=size)
+    return size
+
+
 def _obs(event: str, **fields: Any) -> None:
     """电脑操控观测埋点（plan-340-1705 起沿用，plan-365-1757 扩展「点准」维度）。
 
@@ -656,19 +843,30 @@ async def _take_shot(
     title: str = "",
     region: str = "",
     fmt: str = "jpg",
-    want_mark: bool = True,
+    want_mark: bool | None = None,
     with_list: bool = True,
-    max_dim: int = 1600,
+    max_dim: int | None = None,
     out_path: str = "",
 ) -> tuple[dict[str, Any], str]:
     """截一张图并登记到任务缓存，返回 (图片结果数据, 给模型看的文本)。
 
     抽出来是为了让 desktop_screenshot 与「动作后附带截图」（then_shot）用同一条路径——
     否则两处的编号/缓存/内联行为迟早会不一致。
+    want_mark / max_dim 为 None 时跟随设置（plan-20261018-operator-boost：此前两处都写死
+    「编号开 + 长边 1600」，设置页这两个选项实际从未生效）。
     """
+    if want_mark is None:
+        want_mark = bool(getattr(settings, "desktop_mark_shot", False))
+    if max_dim is None:
+        max_dim = _setting_max_dim()
     win = await _resolve_window(handle, title) if (handle or title) else await _foreground_window()
     win_title = str((win or {}).get("title") or title or "")
-    rect, region_src = await _capture_region(win, region)
+    # plan-20261018-operator-boost：指定了目标窗口就只截该窗口。plan-365-1773 默认整屏是为了让模型心算时原点为 0；
+    # 现在图上坐标一律由工具换算（image_px / 元素坐标），原点不再是负担，而 4K 整屏缩到模型可见尺寸后小字发糊、
+    # 小窗口在图里只剩一小块——裁到窗口能把有效分辨率提高数倍，直接减少认错和点错。
+    rect, region_src = await _capture_region(win, region, prefer_window=bool(handle or title))
+    src_w, src_h = (rect[2], rect[3]) if rect else await _screen_size()
+    max_dim = _model_safe_max_dim(int(src_w), int(src_h), int(max_dim))
 
     params: dict[str, Any] = {
         "maxDim": int(max_dim),
@@ -748,14 +946,28 @@ async def _take_shot(
         )
     elif marks:
         lines.append(f"\n（元素编号已叠加在图上，共 {len(marks)} 个；可直接 desktop_click ref=<编号>。）")
+    elif not want_mark and items and with_list:
+        # plan-20261018-operator-boost：编号默认关闭，改为列出识别到的元素与屏幕坐标——
+        # 模型按文字锚点或这里的坐标点击，不必在图上估算像素，也省掉重绘编号图的耗时。
+        lines.append(f"\n识别到的元素（屏幕坐标，共 {len(items)} 个，列前 40 个）：")
+        lines.extend(_render_items(items, limit=40))
+        lines.append(
+            "点击优先用 desktop_click text_target=\"可见文字\"（工具重新定位并核对）；"
+            "没有文字的目标用上面的坐标 x/y，或你在图上量到的 image_px/image_py。"
+        )
+    elif not want_mark:
+        lines.append(
+            "\n（元素编号已关闭，也没有识别到元素。按你在图上量到的像素用 image_px/image_py 点击。）"
+        )
     else:
         lines.append("\n（本次未生成元素编号：该界面既没有可读控件树，也没有识别到文字行框。）")
     lines.append(
-        "需要按坐标点击时用 image_x/image_y（相对图片的 0~1 比例），"
-        "例如图片中心是 image_x=0.5 image_y=0.5；不要自己换算屏幕坐标。"
+        "需要按坐标点击时用 image_px/image_py（你在图上量到的像素位置）或 image_x/image_y（0~1 比例），"
+        "不要自己换算屏幕坐标。"
     )
     if channel:
         lines.append(f"元素来源通道：{channel}")
+    lines.extend(_shot_notes(meta["path"], win, bool(handle or title)))
     _obs("screenshot", channel=channel or "none", marks=len(marks), region=region_src,
          size=f"{meta['width']}x{meta['height']}")
 
@@ -836,7 +1048,18 @@ async def _attach_after_action(
 
     点击 / 输入 / 按键三处共用，保证「动作后看结果」的行为完全一致；
     附带观察失败只追加一行说明，绝不让动作本身报错。
+    plan-20261018-operator-boost：动作后检查窗口变化——同一应用弹出新窗口 / 前台换了窗口时如实说明，
+    并让动作后的截图跟随新的前台窗口（而不是继续截已被遮住的原窗口）。
     """
+    before = {"items": list(_LAST_WINDOWS.get("items") or []), "at": float(_LAST_WINDOWS.get("at") or 0)}
+    target = None
+    for it in before["items"]:
+        if (handle and int(it.get("h") or 0) == handle) or (
+                not handle and title and title.lower() in str(it.get("title") or "").lower()):
+            target = it
+            break
+    if target is None and not (handle or title):
+        target = next((it for it in before["items"] if it.get("fg")), None)
     if bool(args.get("then_wait_stable", False)):
         win = await _resolve_window(handle, title) if (handle or title) else None
         st = await _wait_stable(win)
@@ -844,10 +1067,19 @@ async def _attach_after_action(
             output += ("\n（已等待画面稳定："
                        + ("稳定" if st.get("stable") else "超时未稳定")
                        + f"，{st.get('elapsedMs')} ms）")
+    try:
+        _LAST_WINDOWS.update(before)
+        note, follow = await _window_change_note(target)
+    except Exception:  # noqa: BLE001 — 窗口比对只是附加信息
+        note, follow = "", None
+    if note:
+        output += "\n" + note
+        data["window_change"] = {"follow_handle": (follow or {}).get("h")}
+    if follow is not None:
+        handle, title = int(follow.get("h") or 0), ""
     if bool(args.get("then_shot", False)):
         try:
-            shot_data, shot_text = await _take_shot(
-                ctx, handle=handle, title=title, want_mark=True)
+            shot_data, shot_text = await _take_shot(ctx, handle=handle, title=title)
             output += "\n\n[动作后的界面]\n" + shot_text
             try:
                 with open(str(shot_data.get("mark_path") or shot_data.get("path")), "rb") as f:
@@ -981,10 +1213,16 @@ class DesktopSnapshotTool(Tool):
         # 依据是本机同窗口实测——UIA 171 ms 且只返回窗口边框按钮，CDP 20 ms 且返回
         # 网页内全部可交互元素；信息完整度直接决定模型要不要靠推理去补全。
         win = await _resolve_window(handle, title)
+        # plan-20261018-operator-boost：观察某个应用时顺带附上它已沉淀的操作路线
+        route = await _desktop_hint(ctx, win, title)
         if win and desktop_cdp.is_chromium_window(str(win.get("cls") or "")):
             cdp = await _try_cdp(win)
             if cdp:
-                return _cdp_result(cdp, int(args.get("budget") or 200))
+                res = _cdp_result(cdp, int(args.get("budget") or 200))
+                if route:
+                    res.output += route
+                    res.data = {**(res.data or {}), "route_hint": True}
+                return res
 
         try:
             data = await _call("snapshot", {
@@ -1026,7 +1264,17 @@ class DesktopSnapshotTool(Tool):
         hint = _next_step_hint(items)
         if hint:
             lines.append(hint)
-        return ToolResult(ok=True, output=_text(lines), data=data)
+        # plan-20261018-operator-boost：控件树只覆盖窗口一小条（常见于自绘 / 内嵌网页的应用）时直说，
+        # 否则模型会以为内容区「什么都没有」而判断成黑屏或加载中
+        if win and _uia_sparse(items, await _window_frame(win)):
+            lines.append(
+                "注意：控件树只覆盖了窗口顶部一小块，内容区是自绘的、读不到控件——这不代表内容区为空。"
+                "请用 desktop_screenshot（会附带识别到的文字与坐标）或 desktop_find_text 按可见文字定位，"
+                "点击时用 text_target。"
+            )
+        if route:
+            data = {**data, "route_hint": True}
+        return ToolResult(ok=True, output=_text(lines) + route, data=data)
 
 
 class DesktopHitTool(Tool):
@@ -1092,10 +1340,10 @@ class DesktopScreenshotTool(Tool):
         "截取屏幕（或指定区域），保存为图片并返回路径与尺寸。\n"
         "只在前两种感知方式都无效时使用（自绘界面，如部分音乐/游戏客户端）：\n"
         "先试 desktop_snapshot（能直接给出可点击坐标），再试 desktop_hit。\n"
-        "默认做两件让「点准」更容易的事：\n"
-        "1) 给画面里的元素叠加编号（#1、#2…）并返回编号清单；\n"
-        "2) 默认截取整个屏幕（原点为 0，坐标换算只有一步乘法）。\n"
-        "看到图后请优先用 desktop_click ref=<编号> 或 text_target=<可见文字>；\n"
+        "默认截取整个屏幕；给了 title/handle 时只截该窗口（更清晰，小窗口优先这样截）。\n"
+        "图片会缩放到模型可见尺寸，按图上像素点击时由工具换算回屏幕坐标，\n"
+        "并列出识别到的元素与屏幕坐标；「设置 → 电脑操控 → 截图元素编号」开启时改为在图上叠加编号。\n"
+        "看到图后请优先用 desktop_click text_target=<可见文字>（编号开启时也可 ref=<编号>）；\n"
         "确实要按坐标点击时用 image_px/image_py（你在图上量到的像素位置），"
         "不要自己把图片坐标换算成屏幕坐标——换算由工具完成，你不必也不应该心算。\n"
         "小目标看不清可用 zoom_at=\"x,y\" 放大复核；动效/加载界面可用 wait_stable=true 等画面稳定。\n"
@@ -1113,12 +1361,12 @@ class DesktopScreenshotTool(Tool):
                     "type": "object",
                     "properties": {
                         "handle": {"type": "integer", "description": "目标窗口句柄（来自 desktop_windows）"},
-                        "title": {"type": "string", "description": "目标窗口标题（包含匹配）；用于限定元素编号与识别范围"},
+                        "title": {"type": "string", "description": "目标窗口标题（包含匹配）；给了就只截该窗口（更清晰），并限定元素识别范围"},
                         "region": {
                             "type": "string",
                             "description": '截图区域 "x,y,w,h"（屏幕物理像素）；不填则截取整个屏幕',
                         },
-                        "max_dim": {"type": "integer", "description": "缩放后长边像素，默认 1600；0 表示不缩放"},
+                        "max_dim": {"type": "integer", "description": "缩放后长边像素；默认跟随设置（0 = 自动适配模型可见尺寸），任何取值都不会超过模型可见尺寸"},
                         "format": {"type": "string", "description": "jpg 或 png，默认 jpg"},
                         "mark": {
                             "type": "boolean",
@@ -1164,7 +1412,7 @@ class DesktopScreenshotTool(Tool):
             return await self._zoom(zoom_at, args, ctx)
 
         inline = bool(args.get("inline", True))
-        want_mark = bool(args.get("mark", getattr(settings, "desktop_mark_shot", True)))
+        want_mark = bool(args.get("mark", getattr(settings, "desktop_mark_shot", False)))
         want_list = bool(args.get("with_elements", True))
         fmt = str(args.get("format") or "jpg")
         region_raw = str(args.get("region") or "").strip()
@@ -1187,7 +1435,7 @@ class DesktopScreenshotTool(Tool):
                 fmt=fmt,
                 want_mark=want_mark,
                 with_list=want_list,
-                max_dim=int(args.get("max_dim") if args.get("max_dim") is not None else 1600),
+                max_dim=(int(args["max_dim"]) if args.get("max_dim") is not None else None),
                 out_path=str(args.get("out_path") or "").strip(),
             )
         except Exception as exc:  # noqa: BLE001
@@ -1203,6 +1451,11 @@ class DesktopScreenshotTool(Tool):
                 text += f"\n（图片内联失败，可自行用 view_image 查看：{exc}）"
         else:
             text += "\n可用 view_image 查看该图片。"
+        # plan-20261018-operator-boost：截图对象（前台窗口或指定窗口）已沉淀的路线随结果附上
+        route = await _desktop_hint(ctx, win, title)
+        if route:
+            text += route
+            data["route_hint"] = True
         return ToolResult(ok=True, output=text, data=data)
 
     async def _zoom(self, zoom_at: str, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -1225,7 +1478,10 @@ class DesktopScreenshotTool(Tool):
             "x": zx,
             "y": zy,
             "radius": int(args.get("zoom_radius") or 160),
-            "maxDim": int(args.get("max_dim") if args.get("max_dim") is not None else 1200),
+            # 放大图同样不能超过模型可见尺寸（方形区域即短边 768），否则模型读到的像素与换算口径不一致
+            "maxDim": _model_safe_max_dim(
+                2 * int(args.get("zoom_radius") or 160), 2 * int(args.get("zoom_radius") or 160),
+                int(args.get("max_dim") if args.get("max_dim") is not None else 1200)),
             "format": fmt,
             "quality": int(getattr(settings, "desktop_screenshot_quality", 75)),
             "path": str(args.get("out_path") or "").strip() or _default_shot_path(ctx, fmt),
@@ -1354,8 +1610,12 @@ class DesktopClickTool(Tool):
                             "description": "是否允许点击空白/无名称区域（默认 false）。仅在确需点击"
                                            "无名称图标或画布时开启；坐标算错落到空白处会被拦截提示。",
                         },
-                        "title": {"type": "string", "description": "目标窗口标题（包含匹配），用于安全校验"},
+                        "title": {"type": "string", "description": "目标窗口标题（包含匹配），用于安全校验；给了就会拒绝落在该窗口外的点击"},
                         "handle": {"type": "integer", "description": "目标窗口句柄"},
+                        "allow_outside": {
+                            "type": "boolean",
+                            "description": "给了 title/handle 但确需点击窗口外（如任务栏）时设 true，默认 false",
+                        },
                         "button": {"type": "string", "description": "left / right / middle，默认 left"},
                         "count": {"type": "integer", "description": "点击次数，2 表示双击，默认 1"},
                         "focus_first": {"type": "boolean", "description": "点击前先激活目标窗口，默认 false"},
@@ -1618,6 +1878,28 @@ class DesktopClickTool(Tool):
             )
 
         x, y = decision.x, decision.y
+        # plan-20261018-operator-boost：给了目标窗口时，点位必须落在该窗口可见范围内。
+        # 坐标换算出错（例如模型在被缩小的图上读坐标）时点击会落到窗口外、点中别的程序或桌面——
+        # 宁可拒绝并说明，也不静默点错。确需点窗口外（任务栏、托盘）时去掉 title/handle 或设 allow_outside。
+        # 最小化的窗口边界在屏幕外（-32000），focus_first 会先还原它，此时不校验
+        if win and not win.get("min") and not bool(args.get("allow_outside", False)):
+            frame = await _window_frame(win)
+            if frame:
+                fx, fy, fw, fh = frame
+                if not (fx <= x < fx + fw and fy <= y < fy + fh):
+                    _obs("click_outside_window", at=f"{x},{y}", frame=f"{fx},{fy},{fw},{fh}",
+                         source=resolved.coord_source)
+                    return ToolResult(
+                        ok=False, output="",
+                        error=(
+                            f"点击点 ({x},{y}) 不在目标窗口「{win.get('title') or title}」的范围内"
+                            f"（窗口区域 x={fx} y={fy} 宽 {fw} 高 {fh}），已拒绝执行——多半是坐标换算有误。"
+                            "请改用 text_target=\"可见文字\"，或按截图上量到的像素传 image_px/image_py（换算由工具完成），"
+                            "不要自己把图片坐标换算成屏幕坐标；确需点击窗口外时去掉 title/handle 或设 allow_outside=true。"
+                        ),
+                        data={"action": "refuse", "at": [x, y], "frame": frame,
+                              "coord_source": resolved.coord_source},
+                    )
         params = {
             "x": x,
             "y": y,
@@ -1634,7 +1916,7 @@ class DesktopClickTool(Tool):
         try:
             data = await _call("click", params)
         except Exception as exc:  # noqa: BLE001
-            return _fail(exc)
+            return ToolResult(ok=False, output="", error=await _not_foreground_hint(exc, handle, title))
 
         # 动作已改变界面：动作前的截图不再代表「当前画面」（plan-365-1769 F4）。
         # 必须在 _attach_after_action 之前——其内部的 then_shot 会写入新截图。
@@ -1754,7 +2036,8 @@ class DesktopTypeTool(Tool):
                 "requireForeground": bool(getattr(settings, "desktop_require_foreground", True)),
             })
         except Exception as exc:  # noqa: BLE001
-            return _fail(exc)
+            return ToolResult(ok=False, output="", error=await _not_foreground_hint(
+                exc, int(args.get("handle") or 0), str(args.get("title") or "")))
 
         # 输入会改变界面：旧截图不再代表「当前画面」（plan-365-1769 F4）
         desktop_shots.mark_stale(ctx)
@@ -1835,7 +2118,8 @@ class DesktopKeysTool(Tool):
                 "requireForeground": bool(getattr(settings, "desktop_require_foreground", True)),
             })
         except Exception as exc:  # noqa: BLE001
-            return _fail(exc)
+            return ToolResult(ok=False, output="", error=await _not_foreground_hint(
+                exc, int(args.get("handle") or 0), str(args.get("title") or "")))
 
         # 按键同样可能改变界面（回车提交/关闭等）：旧截图不再代表当前画面（F4）
         desktop_shots.mark_stale(ctx)
@@ -1938,7 +2222,9 @@ class DesktopFocusTool(Tool):
             return _fail(exc)
 
         if data.get("foreground"):
-            return ToolResult(ok=True, output="窗口已激活到前台。", data=data)
+            hint = await _desktop_hint(ctx, None, str(args.get("proc") or ""), str(args.get("title") or ""),
+                                       str(data.get("title") or ""))
+            return ToolResult(ok=True, output="窗口已激活到前台。" + hint, data={**data, "route_hint": bool(hint)})
         return ToolResult(
             ok=False, output="",
             error="无法把该窗口激活到前台（可能被系统限制）。",
@@ -2067,6 +2353,8 @@ class DesktopRecipeTool(Tool):
         "记录或查询「操作路线」——某应用某操作意图的通用原则，用于减少重复推演。\n"
         "action=recall：在操控某个应用之前先查一次。若命中已有路线，按其 principle 执行即可，\n"
         "不必重新摸索界面（这是本工具的主要价值：降低模型思考与推理开销）。\n"
+        "desktop_focus / desktop_apps start / desktop_snapshot / desktop_screenshot 确定目标应用时也会自动附上已有路线。\n"
+        "网页（内置浏览器）的路线用 browser_recipe。\n"
         "action=save：一次操控成功后，把「怎么做才有效、踩了什么坑」沉淀下来。\n"
         "**存的是通用原则，不是坐标回放**——界面会变，原则不会。\n"
         "同一应用同一意图只保留一条：重复保存会累加使用次数并更新原则，不会产生重复条目。\n"
@@ -2121,7 +2409,8 @@ class DesktopRecipeTool(Tool):
         if action == "recall":
             if not app_name and not intent:
                 return ToolResult(ok=False, output="", error="至少提供 app_name 或 intent 之一。")
-            hits = await svc.recall_recipe(ctx.db, app_name=app_name, intent=intent, limit=3)
+            hits = await svc.recall_recipe(ctx.db, app_name=app_name, intent=intent, limit=3,
+                                           scope=svc.SCOPE_DESKTOP)
             if not hits:
                 return ToolResult(
                     ok=True,
@@ -2134,6 +2423,9 @@ class DesktopRecipeTool(Tool):
                 )
             # 命中会累加 usage_count（「常用路线优先」依赖它），同样需要提交落库
             await ctx.db.commit()
+            from app.orchestration.route_hints import note_recalled
+
+            note_recalled(ctx.session_id, [h.id for h in hits])
             lines = [f"找到 {len(hits)} 条参考路线，按原则执行即可，不必重新摸索界面："]
             for h in hits:
                 used = f"（已成功复用 {h.usage_count} 次）" if (h.usage_count or 0) > 0 else ""
@@ -2213,7 +2505,7 @@ class DesktopAppsTool(Tool):
         if action == "find":
             return await self._find(str(args.get("keyword") or ""))
         if action == "start":
-            return await self._start(str(args.get("exe") or ""), str(args.get("keyword") or ""))
+            return await self._start(str(args.get("exe") or ""), str(args.get("keyword") or ""), ctx)
         return ToolResult(ok=False, output="", error="action 必须是 find 或 start。")
 
     async def _find(self, keyword: str) -> ToolResult:
@@ -2233,7 +2525,7 @@ class DesktopAppsTool(Tool):
         lines.append("可用 action=start 并传入 exe 启动。")
         return ToolResult(ok=True, output=_text(lines), data=data)
 
-    async def _start(self, exe: str, keyword: str) -> ToolResult:
+    async def _start(self, exe: str, keyword: str, ctx: ToolContext) -> ToolResult:
         if not exe and not keyword:
             return ToolResult(ok=False, output="", error="需要提供 exe 或 keyword。")
         try:
@@ -2241,15 +2533,20 @@ class DesktopAppsTool(Tool):
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
+        # plan-20261018-operator-boost：启动应用即附上它已沉淀的操作路线
+        exe_name = Path(str(data.get("exe") or exe or "")).stem
+        route = await _desktop_hint(ctx, None, exe_name, keyword, str(data.get("title") or ""))
+        if route:
+            data = {**data, "route_hint": True}
         if data.get("title"):
             return ToolResult(
                 ok=True,
                 output=f"已启动「{data.get('title')}」（handle={data.get('handle')}，"
-                       f"中心点 {data.get('x')},{data.get('y')}）。",
+                       f"中心点 {data.get('x')},{data.get('y')}）。" + route,
                 data=data,
             )
         return ToolResult(
             ok=True,
-            output=f"已启动 {data.get('exe')}，但未在超时内检测到窗口。",
+            output=f"已启动 {data.get('exe')}，但未在超时内检测到窗口。" + route,
             data=data,
         )

@@ -48,6 +48,8 @@ OUTCOME_LABEL = {
     "recorded": "问题已记入汇报",
 }
 REPORT_LIMIT = 7000
+# 过程报告里每个步骤结论给出的开头长度（全文经 workflow_status 的 node_key 读取）
+NODE_SUMMARY_CHARS = 320
 # 返工说明里用户补充的起始标记（runtime._schedule_rework 写入）
 USER_NOTE_MARK = "用户补充说明（优先遵循）："
 
@@ -88,7 +90,16 @@ def _node_lines(node: dict[str, Any]) -> list[str]:
         lines.append(f"    原因：{_clip(node['reason'], 200)}")
     summary = output.get("summary") or output.get("text")
     if kind in ("explore", "execute", "merge") and summary:
-        lines.append(f"    结果：{_clip(summary, 320)}")
+        lines.append(f"    结果：{_clip(summary, NODE_SUMMARY_CHARS)}")
+        # plan-156-620：只给开头时写明全文入口，主代理不必凭开头臆测结论
+        full = str(output.get("findings") or summary)
+        if len(full) > NODE_SUMMARY_CHARS:
+            from app.orchestration.output_paging import tool_ref
+
+            lines.append(
+                f"    （结论共 {len(full)} 字，全文：{tool_ref('workflow_status', node_key=str(node.get('key')))}"
+                "，并带上本工作流的 program_id）"
+            )
     if kind == "execute":
         files = [str(f) for f in output.get("files_touched") or []]
         if files:
@@ -160,7 +171,10 @@ def program_report(snap: dict[str, Any], *, limit: int = REPORT_LIMIT) -> str:
             lines.extend(_node_lines(node))
     text = "\n".join(lines)
     if len(text) > limit:
-        text = text[: limit - 40] + "\n…（报告较长已截断，可用 workflow_status 查询）"
+        text = text[: limit - 80] + (
+            f"\n…（过程报告共 {len(text)} 字，此处为开头部分；"
+            "各步骤结论全文用 workflow_status(program_id, node_key) 逐个读取）"
+        )
     return text
 
 

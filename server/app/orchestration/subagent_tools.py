@@ -131,6 +131,14 @@ COLLECT_RESULTS_SCHEMA = {
                         "Omit to report every subagent spawned this turn."
                     ),
                 },
+                "report_offset": {
+                    "type": "integer",
+                    "description": (
+                        "Character offset for reading a long result in pages (use with agent_id). "
+                        "When a result says it is not finished, call again with the offset it gives "
+                        "and keep reading until the whole result is read."
+                    ),
+                },
             },
             "required": [],
         },

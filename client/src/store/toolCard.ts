@@ -48,6 +48,11 @@ interface ToolCardState {
   globalSectionsExpanded: boolean;
   /** 从全局设置同步默认策略（applyUi/settings 加载完成后调用一次） */
   setGlobalDefault: (expanded: boolean) => void;
+  /** 启动时从后端设置注水（只改默认值，不清会话记录） */
+  hydrateGlobalDefault: (expanded: boolean) => void;
+  /** 是否已从后端读过全局默认（只读一次，避免每次挂载卡片都请求设置接口） */
+  hydrated: boolean;
+  markHydrated: () => void;
   /** 切换卡片整体展开态 */
   setExpanded: (sessionId: number, expanded: boolean) => void;
   /** 切换某栏目展开态（首次操作时用全局默认补齐其余栏目） */
@@ -58,12 +63,33 @@ interface ToolCardState {
   isExpanded: (sessionId: number | null) => boolean;
 }
 
+const allCollapsed = (): SectionMap => ({
+  git: false, plan: false, process: false, subagent: false, workflow: false,
+});
+
+/** 订阅某会话的栏目展开表（plan-156-620）。
+ *
+ * 旧写法 `useToolCardStore((s) => s.sectionsOf)(id)` 订阅的是**函数引用本身**——
+ * 它永远不变，toggleSection 改了 sectionsBySession 组件也不会重渲染，
+ * 表现为「栏目折叠按钮点了没反应」。这里改为订阅真正的数据字段。 */
+export function useSectionsOf(sessionId: number | null): SectionMap {
+  const own = useToolCardStore((s) => (sessionId == null ? undefined : s.sectionsBySession[sessionId]));
+  const globalExpanded = useToolCardStore((s) => s.globalSectionsExpanded);
+  if (own) return own;
+  return globalExpanded ? allExpanded() : allCollapsed();
+}
+
 export const useToolCardStore = create<ToolCardState>((set, get) => ({
   expandedBySession: {},
   sectionsBySession: {},
   globalSectionsExpanded: true,
+  hydrated: false,
+  markHydrated: () => set({ hydrated: true }),
 
-  setGlobalDefault: (expanded) => set({ globalSectionsExpanded: expanded }),
+  /* plan-156-620：改全局策略即时作用于所有会话（清掉会话级手动记录）——
+     用户在 ⋯ 菜单里选「默认折叠」时期望眼前的卡片立刻折叠，而不是只影响「还没碰过的会话」。 */
+  setGlobalDefault: (expanded) => set({ globalSectionsExpanded: expanded, sectionsBySession: {} }),
+  hydrateGlobalDefault: (expanded) => set({ globalSectionsExpanded: expanded }),
 
   setExpanded: (sessionId, expanded) => set((s) => ({
     expandedBySession: { ...s.expandedBySession, [sessionId]: expanded },
@@ -71,9 +97,7 @@ export const useToolCardStore = create<ToolCardState>((set, get) => ({
 
   toggleSection: (sessionId, section) => set((s) => {
     const base = s.sectionsBySession[sessionId]
-      ?? (s.globalSectionsExpanded ? allExpanded() : {
-        git: false, plan: false, process: false, subagent: false, workflow: false,
-      });
+      ?? (s.globalSectionsExpanded ? allExpanded() : allCollapsed());
     return {
       sectionsBySession: {
         ...s.sectionsBySession,
@@ -87,9 +111,7 @@ export const useToolCardStore = create<ToolCardState>((set, get) => ({
     const own = get().sectionsBySession[sessionId];
     if (own) return own;
     // 未记录 → 全局默认（不写 state，避免读操作产生副作用）
-    return get().globalSectionsExpanded
-      ? allExpanded()
-      : { git: false, plan: false, process: false, subagent: false, workflow: false };
+    return get().globalSectionsExpanded ? allExpanded() : allCollapsed();
   },
 
   isExpanded: (sessionId) => {

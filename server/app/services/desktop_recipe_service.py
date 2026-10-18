@@ -33,14 +33,30 @@ def _norm(value: str | None) -> str:
     return (value or "").strip()
 
 
-def _key(app_name: str, intent: str) -> tuple[str, str]:
-    """归一化去重键：忽略大小写与首尾空白，避免「QQMusic」与「qqmusic」算两条。"""
-    return (app_name.strip().casefold(), intent.strip().casefold())
+# plan-20261018-operator-boost：路线类型。桌面应用（电脑操控）与网页（内置浏览器）共用一张表。
+SCOPE_DESKTOP = "desktop"
+SCOPE_BROWSER = "browser"
+_SCOPES = (SCOPE_DESKTOP, SCOPE_BROWSER)
+
+
+def norm_scope(value: str | None) -> str:
+    v = (value or "").strip().lower()
+    return v if v in _SCOPES else SCOPE_DESKTOP
+
+
+def _scope_of(row: DesktopRecipe) -> str:
+    return norm_scope(getattr(row, "scope", None))
+
+
+def _key(app_name: str, intent: str, scope: str = SCOPE_DESKTOP) -> tuple[str, str, str]:
+    """归一化去重键：忽略大小写与首尾空白，避免「QQMusic」与「qqmusic」算两条；类型不同不算重复。"""
+    return (norm_scope(scope), app_name.strip().casefold(), intent.strip().casefold())
 
 
 def to_dict(row: DesktopRecipe) -> dict[str, Any]:
     return {
         "id": row.id,
+        "scope": _scope_of(row),
         "app_name": row.app_name,
         "intent": row.intent,
         "principle": row.principle,
@@ -63,11 +79,13 @@ async def save_recipe(
     pitfalls: str = "",
     steps: list | None = None,
     source: str = "agent",
+    scope: str = SCOPE_DESKTOP,
 ) -> tuple[DesktopRecipe, bool]:
     """保存一条路线。返回 (记录, 是否新建)。
 
-    已存在同 (app, intent) 时不新建，而是累加使用次数并更新知识内容。
+    已存在同 (类型, app, intent) 时不新建，而是累加使用次数并更新知识内容。
     """
+    scope = norm_scope(scope)
     app_name = _norm(app_name)
     intent = _norm(intent)
     principle = _norm(principle)
@@ -79,8 +97,8 @@ async def save_recipe(
         raise ValueError("principle（通用原则）不能为空——它是本功能的核心价值")
 
     rows = list((await db.execute(select(DesktopRecipe))).scalars().all())
-    target_key = _key(app_name, intent)
-    existing = next((r for r in rows if _key(r.app_name, r.intent) == target_key), None)
+    target_key = _key(app_name, intent, scope)
+    existing = next((r for r in rows if _key(r.app_name, r.intent, _scope_of(r)) == target_key), None)
 
     now = _now()
     if existing is not None:
@@ -100,6 +118,7 @@ async def save_recipe(
         return existing, False
 
     row = DesktopRecipe(
+        scope=scope,
         app_name=app_name,
         intent=intent,
         principle=principle,
@@ -121,13 +140,17 @@ async def recall_recipe(
     app_name: str = "",
     intent: str = "",
     limit: int = 3,
+    scope: str | None = None,
 ) -> list[DesktopRecipe]:
     """按应用名与/或意图检索路线，命中即累加使用次数。
 
     匹配策略（宽到窄）：应用名与意图都命中 > 仅应用名命中；两边都是子串匹配，
-    因为调用方给出的措辞不会与保存时完全一致。
+    因为调用方给出的措辞不会与保存时完全一致。scope 为空时不按类型过滤。
     """
     rows = list((await db.execute(select(DesktopRecipe))).scalars().all())
+    if scope:
+        want = norm_scope(scope)
+        rows = [r for r in rows if _scope_of(r) == want]
     if not rows:
         return []
 
@@ -174,6 +197,53 @@ async def recall_recipe(
     return hits
 
 
+def _host_matches(recipe_app: str, host: str) -> bool:
+    """网页路线的站点匹配：完全相同、子域名，或路线未写端口时忽略端口比较。"""
+    a = recipe_app.strip().casefold()
+    h = host.strip().casefold()
+    if not a or not h:
+        return False
+    if a == h or h.endswith("." + a):
+        return True
+    if ":" not in a:
+        hn = h.split(":", 1)[0]
+        return hn == a or hn.endswith("." + a)
+    return False
+
+
+async def match_for_target(
+    db: AsyncSession,
+    *,
+    scope: str,
+    names: list[str],
+    limit: int = 3,
+) -> list[DesktopRecipe]:
+    """按「当前正在操作的目标」找路线（plan-20261018-operator-boost 自动召回）。
+
+    与 recall_recipe 的区别：这是工具在打开应用 / 站点时**自动**附带的参考，模型未必采用，
+    因此不累加使用次数；匹配只看目标名（桌面：进程名 / 窗口标题；网页：host），不看意图。
+    """
+    scope = norm_scope(scope)
+    keys = [n.strip().casefold() for n in names if n and n.strip()]
+    if not keys:
+        return []
+    rows = [r for r in (await db.execute(select(DesktopRecipe))).scalars().all() if _scope_of(r) == scope]
+    hits: list[DesktopRecipe] = []
+    for r in rows:
+        app = (r.app_name or "").strip().casefold()
+        if not app:
+            continue
+        if scope == SCOPE_BROWSER:
+            ok = any(_host_matches(app, k) for k in keys)
+        else:
+            # 进程名精确匹配，或应用名出现在窗口标题里（标题常为「文档名 - 应用名」）
+            ok = any(app == k or (len(app) >= 2 and app in k) for k in keys)
+        if ok:
+            hits.append(r)
+    hits.sort(key=lambda r: (-(r.usage_count or 0), r.updated_at or ""))
+    return hits[: max(1, limit)]
+
+
 async def list_recipes(
     db: AsyncSession,
     *,
@@ -189,6 +259,9 @@ async def list_recipes(
             or kw in (r.intent or "").casefold()
             or kw in (r.principle or "").casefold()
             or kw in (r.pitfalls or "").casefold()
+            # 「网页」「桌面」也能当关键词筛类型
+            or (kw in ("网页", "web", "browser") and _scope_of(r) == SCOPE_BROWSER)
+            or (kw in ("桌面", "desktop") and _scope_of(r) == SCOPE_DESKTOP)
         ]
     # 常用且最近的排前面
     rows.sort(key=lambda r: (-(r.usage_count or 0), r.updated_at or r.created_at or ""), reverse=False)
@@ -203,6 +276,7 @@ async def update_recipe(
     db: AsyncSession,
     recipe_id: int,
     *,
+    scope: str | None = None,
     app_name: str | None = None,
     intent: str | None = None,
     principle: str | None = None,
@@ -213,6 +287,8 @@ async def update_recipe(
     if row is None:
         return None
 
+    if scope is not None:
+        row.scope = norm_scope(scope)
     if app_name is not None:
         v = _norm(app_name)
         if not v:
@@ -264,6 +340,7 @@ async def export_recipes(db: AsyncSession) -> dict:
         "count": len(rows),
         "items": [
             {
+                "scope": _scope_of(r),
                 "app_name": r.app_name,
                 "intent": r.intent,
                 "principle": r.principle,
@@ -300,6 +377,7 @@ async def import_recipes(db: AsyncSession, payload: dict) -> dict:
                 pitfalls=str(it.get("pitfalls") or ""),
                 steps=it.get("steps") if isinstance(it.get("steps"), list) else None,
                 source="user",
+                scope=str(it.get("scope") or SCOPE_DESKTOP),
             )
             if is_new:
                 created += 1

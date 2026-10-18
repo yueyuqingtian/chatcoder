@@ -200,7 +200,8 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   align-items: center;
   gap: 6px;
   min-width: 0;
-  font-size: 11.5px;
+  /* plan-156-621：字号走令牌跟随外观设置，此前硬编码 11.5px 比消息流小一号 */
+  font-size: var(--fs-sm);
   line-height: 1.7;
   color: var(--text-3);
 }
@@ -216,14 +217,14 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   color: var(--text-1);
 }
 .sg-summary {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.75;
   color: var(--text-2);
   overflow-wrap: anywhere;
 }
 
 .sg-steps { display: flex; flex-direction: column; gap: 4px; margin: 2px 0 0; padding: 0; list-style: none; }
-.sg-steps li { display: flex; align-items: flex-start; gap: 7px; min-width: 0; font-size: 12px; line-height: 1.75; color: var(--text-2); }
+.sg-steps li { display: flex; align-items: flex-start; gap: 7px; min-width: 0; font-size: var(--fs-sm); line-height: 1.75; color: var(--text-2); }
 .sg-step-idx {
   flex-shrink: 0;
   width: 16px; height: 16px;
@@ -232,7 +233,7 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   border-radius: 999px;
   background: var(--bg-hover);
   color: var(--text-3);
-  font-size: 10px;
+  font-size: calc(var(--fs-sm) - 2px);
   font-variant-numeric: tabular-nums;
 }
 .sg-step-text { min-width: 0; overflow-wrap: anywhere; }
@@ -244,7 +245,7 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   border: none; border-radius: var(--r-sm);
   background: transparent;
   color: var(--text-3);
-  font-size: 11px; line-height: 1.7;
+  font-size: calc(var(--fs-sm) - 1px); line-height: 1.7;
   cursor: pointer;
   transition: background var(--dur-fast), color var(--dur-fast);
 }
@@ -253,7 +254,7 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
 .sg-steps-caret.is-open { transform: rotate(180deg); }
 
 .sg-error {
-  font-size: 11.5px;
+  font-size: var(--fs-sm);
   line-height: 1.7;
   color: var(--danger, #e5484d);
   overflow-wrap: anywhere;
@@ -468,3 +469,11 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
 
 /* 消息层次：用户消息（气泡）> AI 正文（主色）> 工作过程（工具 / 思考，次级色、略小） */
 .turn-flow .turn-process-container .tc-row { font-size: calc(var(--fs-md, 13px) - 0.5px); }
+
+/* plan-156-620：Markdown 组件给所有 code 都挂了 md-inline-code（含代码块里的），
+   各容器的行内代码样式优先级参差，代码块会被染成「每行一块底色」。这里统一清掉块内的行内外观。 */
+.md-body .md-code-pre code.md-inline-code {
+  padding: 0; border: none; border-radius: 0;
+  background: transparent; color: var(--text-1);
+  font-size: inherit;
+}
