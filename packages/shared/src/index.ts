@@ -356,6 +356,8 @@ export interface SessionOut {
   // plan-75-332: 权限模式（与执行模式正交）——ask 询问审批 / auto 自动审批 / full 完全访问
   approval_mode?: string;
   fork_parent_id: number | null;
+  /** 侧边会话（子会话）所属主会话 id；普通会话为 null。子会话不进入会话列表。 */
+  side_parent_id?: number | null;
   worktree_path: string | null;
   has_running?: boolean;
   /** 会话有后台执行中的工作流（程序 running）：与 has_running 并列，工作流在跑时本会话可能已没有运行中的 turn */
@@ -664,10 +666,17 @@ export interface RollbackAffected {
   messages: number;
 }
 
+/** 回滚冲突：该文件与用户手动改动重叠，默认整体拒绝回滚（plan-20261017-goal12 项 3）。 */
+export interface RollbackConflict {
+  path: string;
+  reason: string;
+}
+
 export interface RollbackPreviewOut {
   ok: boolean;
   turn_id: number;
   files: RollbackPreviewFile[];
+  conflicts: RollbackConflict[];
   affected: RollbackAffected;
 }
 
