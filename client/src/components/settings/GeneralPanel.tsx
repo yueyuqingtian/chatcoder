@@ -41,6 +41,8 @@ export function GeneralPanel() {
     browser_headless: true,
     // plan-278-1391: 上下文压缩触发阈值（占模型窗口比例，默认 0.90）
     auto_compact_threshold_ratio: 0.90,
+    // plan-156-619 S2：消息区搜索入口按钮（默认关闭）
+    show_message_search: false,
   });
   // S4（plan-41-197）：改为「修改即保存」——移除底部保存按钮，所有项在改动后
   // 300ms 内自动落盘（config.json），与外观/模型等页操作逻辑统一（用户反馈
@@ -116,6 +118,8 @@ export function GeneralPanel() {
         // plan-278-1391: 压缩触发阈值（后端可能未返回，回退默认 0.90）
         auto_compact_threshold_ratio: typeof g.auto_compact_threshold_ratio === "number"
           ? g.auto_compact_threshold_ratio : 0.90,
+        // plan-156-619 S2：搜索入口默认关闭
+        show_message_search: g.show_message_search === true,
       });
     } catch {}
   }, []);
@@ -155,6 +159,11 @@ export function GeneralPanel() {
       <div className="settings-card">
         <Row title={t("gp.enhanced_search")} desc={t("gp.enhanced_search_desc")}>
           <Sw checked={cfg.enhanced_search} onChange={(v) => patch({ enhanced_search: v })} />
+        </Row>
+        {/* plan-156-619 S2：消息区搜索入口开关。默认关闭——入口按钮此前常驻右上角，
+            与综合工具卡抢位；关闭只隐藏按钮，Ctrl+F 仍可唤起搜索条。 */}
+        <Row title={t("gp.message_search")} desc={t("gp.message_search_desc")}>
+          <Sw checked={cfg.show_message_search ?? false} onChange={(v) => patch({ show_message_search: v })} />
         </Row>
         <Row title={t("gp.memory")} desc={t("gp.memory_desc")}>
           <Sw checked={cfg.memory_enabled} onChange={(v) => patch({ memory_enabled: v })} />

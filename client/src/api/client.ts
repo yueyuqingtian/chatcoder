@@ -560,6 +560,19 @@ export interface WorkflowEventOut {
   created_at: string;
 }
 
+/** plan-156-619 S10：后续任务建议（消息流底部卡片的数据契约）。 */
+export interface TaskSuggestionOut {
+  id: number;
+  session_id: number;
+  turn_id: number | null;
+  title: string;
+  summary: string;
+  steps: string[];
+  /** 建议在子会话里用什么执行模式 */
+  mode: string;
+  rationale?: string;
+}
+
 /** Git 面板数据（plan-20261017-goal12 项 5）。 */
 export interface GitFileEntry { path: string; code: string; old_path: string | null }
 export interface GitStatusOut {
@@ -808,6 +821,20 @@ export const api = {
   /** 从主会话开一个侧边会话（子会话）：沿用主会话的项目、模型与模式，之后走同一条 turn 流水线。 */
   createSideSession: (parentId: number) => post<SessionOut>(`/sessions/${parentId}/side-sessions`),
   listSideSessions: (parentId: number) => get<SessionOut[]>(`/sessions/${parentId}/side-sessions`),
+  /** plan-156-619 S5：创建**执行子会话**（带任务，创建即开工）。子会话派生出来仍是同级。 */
+  createSubsession: (parentId: number, data: { title: string; task: string; context?: string; mode?: string }) =>
+    post<SessionOut>(`/sessions/${parentId}/subsessions`, data),
+  /** plan-156-619 S5：主会话下全部子会话——左栏子会话行的唯一数据源（list_sessions 会过滤掉子会话）。 */
+  listSubsessions: (parentId: number) => get<SessionOut[]>(`/sessions/${parentId}/subsessions`),
+  /** plan-156-619 S10：取会话当前待处理的后续任务建议（刷新后重建卡片）。 */
+  getLatestSuggestion: (sessionId: number) =>
+    get<{ suggestion: TaskSuggestionOut | null }>(`/sessions/${sessionId}/suggestions/latest`),
+  /** 接受建议 → 新建子会话执行（返回新子会话 id）。 */
+  acceptSuggestion: (suggestionId: number) =>
+    post<{ subsession_id: number; session_id: number }>(`/suggestions/${suggestionId}/accept`),
+  /** 取消建议 → 永久不再展示。 */
+  dismissSuggestion: (suggestionId: number) =>
+    post<{ ok: boolean }>(`/suggestions/${suggestionId}/dismiss`),
   updateSession: (id: number, data: { title?: string; model_id?: number; pinned?: boolean; status?: string; permission_mode?: string; approval_mode?: string }) =>
     patch<SessionOut>(`/sessions/${id}`, data),
   /** 删除会话。默认语义 = 归档（可恢复）；permanent=true 走物理删除（plan-282-1441 #4） */
@@ -1546,6 +1573,8 @@ export interface GlobalSettingsOut {
   enhanced_search: boolean;
   show_todos: boolean;
   show_reasoning: boolean;
+  /** plan-156-619 S2：消息区搜索入口按钮（左上角）。默认关闭；关闭只隐藏入口，Ctrl+F 仍可唤起 */
+  show_message_search?: boolean;
   /** v3.0 (plan-88): 计划模式允许访问工作区外路径（plan-75-332 废弃） */
   plan_mode_allow_outside_access: boolean;
   /** v32 (plan-89): 沙箱模式（plan-75-332 废弃） */
@@ -1591,6 +1620,14 @@ export interface GlobalSettingsOut {
   max_concurrent_subagents?: number;
   /** v36: 每轮子代理派发总量上限（含已完成，1~32） */
   max_subagents_per_turn?: number;
+  /** plan-156-619 S4e: 子代理 / 子会话总开关（关闭后主代理不再派发） */
+  subagent_enabled?: boolean;
+  /** plan-156-619 S4e: 子代理默认模型 id；0 = 跟随主代理 */
+  subagent_model_id?: number;
+  /** plan-156-619 S4e: 子代理思考深度档位；空 = 跟随会话档位 */
+  subagent_reasoning_effort?: string;
+  /** plan-156-619 S7: 综合工具卡各栏目的全局默认展开策略（true = 默认全展开） */
+  tool_card_sections_expanded?: boolean;
   /** 工作流运行时（设置 → 工作流）：关闭后主代理不再规划新的工作流 */
   workflow_enabled?: boolean;
   /** 所有会话的工作流子代理合计上限（0 = 不限） */

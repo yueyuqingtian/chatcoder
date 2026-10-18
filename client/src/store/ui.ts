@@ -338,6 +338,8 @@ interface UiState extends UiPrefs {
   /** v1.1: 后端全局设置缓存（show_todos/show_reasoning 等） */
   showTodos: boolean;
   showReasoning: boolean;
+  /** plan-156-619 S2：消息区搜索入口按钮（左上角）；默认关闭，关闭只隐藏入口，Ctrl+F 仍可用 */
+  showMessageSearch: boolean;
   refreshGlobalFlags: () => Promise<void>;
   /** plan-26-126 M5：本次开启玻璃**未即时生效**（极少数环境需重启）——
    *  仅用于设置页一次性提示，不持久化、不常驻。 */
@@ -355,6 +357,8 @@ export const useUiStore = create<UiState>((set, get) => ({
   // v1.1: 消息流显示开关默认开，启动后由后端全局设置刷新
   showTodos: true,
   showReasoning: true,
+  // plan-156-619 S2：搜索入口默认关闭（用户要求），由后端全局设置刷新
+  showMessageSearch: false,
   glassNeedRestart: false, // plan-26-126 M5：瞬时状态，由 setGlassMode 回包驱动
   glassRestartNotice: false, // 毛玻璃「重启生效」徽标的一次性展示开关
   consumeGlassRestartNotice: () => set({ glassRestartNotice: false }),
@@ -366,6 +370,7 @@ export const useUiStore = create<UiState>((set, get) => ({
       set({
         showTodos: data.show_todos !== false,
         showReasoning: data.show_reasoning !== false,
+        showMessageSearch: data.show_message_search === true,
       });
     } catch { /* 后端不可达时保持默认 */ }
   },

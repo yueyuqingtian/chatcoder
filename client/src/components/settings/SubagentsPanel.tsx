@@ -1,12 +1,25 @@
-/** 设置中心：子代理类型（v2.2 对齐 zcode 3.13；v3.0 (plan-88) 工具权限改 checkbox 多选）。
- * 管理 SubagentProfile：工具权限（勾选=允许，留空=全量）、模型覆盖、系统提示词、启停。 */
+/** 设置中心：子代理（plan-156-619 S4e 精简）。
+ *
+ * 【为什么只剩这几个开关】
+ * 旧面板让用户按「类型」配置工具白名单、系统提示词、模型、思考深度，再启用/停用类型。
+ * 实际上工具范围应当由**执行模式**决定（只读 / 计划 / 智能体 / 工作流），
+ * 而执行模式由主代理在创建子会话时按能力矩阵指定——让用户在这里手工勾选工具，
+ * 等于把「能不能写文件」这件事交给两份配置互相覆盖。
+ *
+ * 现在只保留真正该由用户决定的：
+ *   · 总开关（关闭后主代理不再派发任何子代理 / 子会话）；
+ *   · 默认模型（空 = 跟随主代理）；
+ *   · 思考深度（空 = 跟随会话档位）；
+ *   · 运行限制（并发上限 / 每轮派发上限）。
+ *
+ * 历史数据（subagent_profiles 表）保留不删，仅作为模型/思考深度的兜底来源，
+ * 回滚到旧版本时用户配置不会丢失。
+ */
 import { useCallback, useEffect, useState } from "react";
-import { api, type ExecPolicyToolInfo, type ModelOut, type SubagentProfileOut } from "../../api/client";
+import { api, type ModelOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
-import { IconBot, IconPencil, IconPlus, IconTrash } from "../icons";
 import { Modal } from "../Modal";
-import { ConfirmDialog } from "../ConfirmDialog";
-import { Button, CardRow, Empty, IconButton, Input, List, ListRow, PageActions, Section, Tag, Textarea, Tooltip } from "../ui";
+import { Button, CardRow, Input, Section } from "../ui";
 import { Sw } from "./shared";
 import { ModelPicker } from "../chat/ModelPicker";
 
@@ -18,170 +31,30 @@ function notify(msg: string) {
   useChatStore.setState({ error: msg });
 }
 
-/** v36: 模型显示名——「供应商/模型名」（与消息输入框模型选择器同口径）。
- *  模型已被删除时回落 #id，避免标签空白。 */
-function modelLabel(models: ModelOut[], id: number): string {
-  const m = models.find((x) => x.id === id);
-  if (!m) return `#${id}`;
-  return m.provider_name ? `${m.provider_name}/${m.name}` : m.name;
-}
-
-function SubagentFormModal({ open, editing, models, tools, onClose, onSaved }: {
-  open: boolean; editing: SubagentProfileOut | null; models: ModelOut[]; tools: ExecPolicyToolInfo[];
-  onClose: () => void; onSaved: () => void;
-}) {
-  const [form, setForm] = useState({
-    name: "", description: "",
-    tools_whitelist: new Set<string>(),
-    model_id: "", system_prompt: "", is_active: true,
-    /** plan-330-1648 M2: 思考深度档位（"" = 跟随会话本轮档位） */
-    reasoning_effort: "",
-  });
-  // v36: 模型选择器（消息输入框同款）展开态——弹窗关闭/切换编辑对象时收起，避免菜单残留
-  const [modelOpen, setModelOpen] = useState(false);
-  useEffect(() => {
-    setModelOpen(false);
-    if (editing) {
-      setForm({
-        name: editing.name, description: editing.description || "",
-        tools_whitelist: new Set(editing.tools_whitelist || []),
-        model_id: editing.model_id != null ? String(editing.model_id) : "",
-        system_prompt: editing.system_prompt || "",
-        reasoning_effort: editing.reasoning_effort || "",
-        is_active: editing.is_active,
-      });
-    } else {
-      setForm({ name: "", description: "", tools_whitelist: new Set(), model_id: "", system_prompt: "", reasoning_effort: "", is_active: true });
-    }
-  }, [editing, open]);
-  const toggleTool = (name: string) => setForm((p) => {
-    const next = new Set(p.tools_whitelist);
-    if (next.has(name)) next.delete(name); else next.add(name);
-    return { ...p, tools_whitelist: next };
-  });
-  const setAllTools = (checked: boolean) => setForm((p) => ({
-    ...p, tools_whitelist: new Set(checked ? tools.map((t) => t.name) : []),
-  }));
-  /** plan-330-1648 M2: 档位候选——优先所选模型支持的档位，未选模型时给全档位 */
-  const _mid = form.model_id ? Number(form.model_id) : null;
-  const _selModel = _mid != null ? models.find((x) => x.id === _mid) : null;
-  const effortOptions = _selModel?.reasoning_efforts?.length ? _selModel.reasoning_efforts : REASONING_OPTS;
-  const handleSave = async () => {
-    if (!form.name.trim()) return;
-    try {
-      // 清空覆盖必须显式传 null：undefined 会被 JSON.stringify 丢弃，后端 PATCH 按
-      // exclude_unset 视为“未修改”，导致「固定模型改回跟随主代理」等清空操作不生效。
-      const data = {
-        name: form.name.trim(),
-        description: form.description.trim() || null,
-        tools_whitelist: form.tools_whitelist.size > 0 ? [...form.tools_whitelist] : null,
-        model_id: form.model_id ? Number(form.model_id) : null,
-        system_prompt: form.system_prompt || null,
-        // plan-330-1648 M2: 显式 null = 清除覆盖（回落会话档位）
-        reasoning_effort: form.reasoning_effort || null,
-        is_active: form.is_active,
-      };
-      if (editing) await api.updateSubagent(editing.id, data);
-      else await api.createSubagent(data);
-      onSaved();
-      onClose();
-    } catch (e) { notify(String(e)); }
-  };
-  return (
-    <Modal
-      open={open}
-      onClose={onClose}
-      title={editing ? "编辑子代理类型" : "新建子代理类型"}
-      width={640}
-      height="auto"
-      footer={
-        <>
-          <button className="btn btn-ghost btn-sm" onClick={onClose}>取消</button>
-          <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={!form.name.trim()}>{editing ? "保存" : "创建"}</button>
-        </>
-      }
-    >
-      <div className="settings-modal-form" style={{ padding: 18 }}>
-        <div className="settings-modal-form-row"><label>类型名称</label><Input placeholder="如 explore / code-reviewer" value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} /></div>
-        <div className="settings-modal-form-row"><label>描述</label><Input placeholder="该子代理的职责说明" value={form.description} onChange={(e) => setForm((p) => ({ ...p, description: e.target.value }))} /></div>
-        <div className="settings-modal-form-row">
-          <label>工具权限（勾选 = 允许该工具，留空 = 全量工具）</label>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-            <button type="button" className="btn btn-ghost btn-xs" onClick={() => setAllTools(true)}>全选</button>
-            <button type="button" className="btn btn-ghost btn-xs" onClick={() => setAllTools(false)}>清空</button>
-            <span style={{ fontSize: 12, color: "var(--text-2)" }}>已选 {form.tools_whitelist.size}/{tools.length}</span>
-          </div>
-          <div className="subagent-tool-grid">
-            {tools.map((t) => {
-              const checked = form.tools_whitelist.has(t.name);
-              return (
-                <label key={t.name} className={"subagent-tool-cell" + (checked ? " on" : "")}>
-                  <input type="checkbox" checked={checked} onChange={() => toggleTool(t.name)} />
-                  {/* plan-41-227: 长工具名单行省略，悬停经统一 Tooltip 查看完整名称 */}
-                  <Tooltip content={t.name}>
-                    <span className="subagent-tool-name">{t.name}</span>
-                  </Tooltip>
-                  <span className="subagent-tool-risk">{t.risk_level}</span>
-                </label>
-              );
-            })}
-          </div>
-        </div>
-        {/* v36: 模型覆盖改用消息输入框同款选择器（「供应商/模型」+ 供应商二级分组菜单）——
-            此前是扁平下拉只列模型名，看不出模型属于哪个供应商（用户反馈）。 */}
-        <div className="settings-modal-form-row">
-          <label>模型覆盖（留空 = 跟随主代理）</label>
-          <ModelPicker
-            variant="field"
-            models={models}
-            value={form.model_id ? Number(form.model_id) : null}
-            onChange={(id) => setForm((p) => ({ ...p, model_id: String(id) }))}
-            open={modelOpen}
-            onToggle={() => setModelOpen((v) => !v)}
-            inheritLabel="跟随主代理"
-            onInherit={() => setForm((p) => ({ ...p, model_id: "" }))}
-            side="bottom"
-          />
-        </div>
-        {/* plan-330-1648 M2: 思考深度覆盖——留空跟随会话；档位候选随所选模型能力收敛 */}
-        <div className="settings-modal-form-row">
-          <label>思考深度（留空 = 跟随会话）</label>
-          <div className="settings-chips">
-            <button type="button"
-                    className={"settings-chip" + (form.reasoning_effort === "" ? " on" : "")}
-                    onClick={() => setForm((p) => ({ ...p, reasoning_effort: "" }))}>跟随会话</button>
-            {effortOptions.map((eff) => (
-              <button key={eff} type="button"
-                      className={"settings-chip" + (form.reasoning_effort === eff ? " on" : "")}
-                      onClick={() => setForm((p) => ({ ...p, reasoning_effort: eff }))}>{eff}</button>
-            ))}
-          </div>
-        </div>
-        <div className="settings-modal-form-row"><label>系统提示词</label><Textarea rows={3} placeholder="可选，覆盖默认子代理系统提示词…" value={form.system_prompt} onChange={(e) => setForm((p) => ({ ...p, system_prompt: e.target.value }))} aria-label="系统提示词" /></div>
-        <div className="settings-modal-form-row"><label>启用状态</label><Sw checked={form.is_active} onChange={(v) => setForm((p) => ({ ...p, is_active: v }))} /></div>
-      </div>
-    </Modal>
-  );
-}
-
 export function SubagentsPanel() {
-  const [items, setItems] = useState<SubagentProfileOut[]>([]);
   const [models, setModels] = useState<ModelOut[]>([]);
-  const [tools, setTools] = useState<ExecPolicyToolInfo[]>([]);
-  const [showForm, setShowForm] = useState(false);
-  const [editing, setEditing] = useState<SubagentProfileOut | null>(null);
-  const [confirmTarget, setConfirmTarget] = useState<SubagentProfileOut | null>(null);
+  /** 全局设置：总开关 / 默认模型 / 思考深度 */
+  const [cfg, setCfg] = useState({
+    enabled: true,
+    modelId: 0,            // 0 = 跟随主代理
+    reasoningEffort: "",   // "" = 跟随会话档位
+  });
+  const [modelOpen, setModelOpen] = useState(false);
   // v36: 并发治理配置（全局设置）——同时运行上限 + 每轮派发总量上限
   const [limits, setLimits] = useState({ concurrent: 6, perTurn: 10 });
   const [limitsSaving, setLimitsSaving] = useState(false);
   // S10（plan-41-197）：并发配置收进弹窗（按钮触发），不再常驻表单
   const [limitsOpen, setLimitsOpen] = useState(false);
+
   const load = useCallback(async () => {
-    try { setItems(await api.listSubagents()); } catch {}
-    try { setModels(await api.listModels()); } catch {}
-    try { setTools(await api.listExecPolicyTools()); } catch {}
+    try { setModels(await api.listModels()); } catch { /* 模型列表失败不阻塞其它项 */ }
     try {
       const g = await api.getGlobalSettings();
+      setCfg({
+        enabled: g.subagent_enabled !== false,
+        modelId: typeof g.subagent_model_id === "number" ? g.subagent_model_id : 0,
+        reasoningEffort: g.subagent_reasoning_effort || "",
+      });
       setLimits({
         concurrent: typeof g.max_concurrent_subagents === "number" ? g.max_concurrent_subagents : 6,
         perTurn: typeof g.max_subagents_per_turn === "number" ? g.max_subagents_per_turn : 10,
@@ -189,6 +62,23 @@ export function SubagentsPanel() {
     } catch { /* 拉取失败沿用默认值 */ }
   }, []);
   useEffect(() => { load(); }, [load]);
+
+  /** 修改即保存（与设置页其它面板一致）：单项立即落盘，失败回滚并提示 */
+  const patch = async (partial: Partial<{ enabled: boolean; modelId: number; reasoningEffort: string }>) => {
+    const prev = cfg;
+    const next = { ...cfg, ...partial };
+    setCfg(next);
+    try {
+      await api.setGlobalSettings({
+        subagent_enabled: next.enabled,
+        subagent_model_id: next.modelId,
+        subagent_reasoning_effort: next.reasoningEffort,
+      });
+    } catch (e) {
+      setCfg(prev);
+      notify("保存失败：" + String(e));
+    }
+  };
 
   /** v36: 保存并发上限（后端夹紧到合法区间并即时生效，无需重启） */
   const saveLimits = async () => {
@@ -203,14 +93,58 @@ export function SubagentsPanel() {
     } catch (e) { notify("保存失败: " + String(e)); } finally { setLimitsSaving(false); }
   };
 
-  const openNew = () => { setEditing(null); setShowForm(true); };
+  // 档位候选：优先所选模型支持的档位，未选模型时给全档位
+  const selModel = cfg.modelId ? models.find((x) => x.id === cfg.modelId) : null;
+  const effortOptions = selModel?.reasoning_efforts?.length ? selModel.reasoning_efforts : REASONING_OPTS;
 
   return (
     <>
-      {/* plan-114-450：主操作放页头右上角（此前悬空在「并发与上限」卡片下方，是用户指出的异常排版） */}
-      <PageActions>
-        <Button variant="primary" size="sm" icon={<IconPlus size={13} />} onClick={openNew}>新建子代理类型</Button>
-      </PageActions>
+      <Section title="子代理">
+        <CardRow
+          title="启用子代理与子会话"
+          desc="关闭后主代理不再派发任何子代理 / 子会话，全部工作在当前会话内完成"
+        >
+          <Sw checked={cfg.enabled} onChange={(v) => void patch({ enabled: v })} />
+        </CardRow>
+        <CardRow
+          className={cfg.enabled ? undefined : "settings-row-disabled"}
+          title="默认模型"
+          desc="子代理与子会话使用的模型；留空则跟随主代理"
+        >
+          <ModelPicker
+            variant="field"
+            models={models}
+            value={cfg.modelId || null}
+            onChange={(id) => void patch({ modelId: Number(id) })}
+            open={modelOpen}
+            onToggle={() => setModelOpen((v) => !v)}
+            inheritLabel="跟随主代理"
+            onInherit={() => void patch({ modelId: 0 })}
+            side="bottom"
+          />
+        </CardRow>
+        <CardRow
+          className={cfg.enabled ? undefined : "settings-row-disabled"}
+          title="思考深度"
+          desc="子代理与子会话的推理档位；留空则跟随会话当前档位"
+        >
+          <div className="settings-chips">
+            <button
+              type="button"
+              className={"settings-chip" + (cfg.reasoningEffort === "" ? " on" : "")}
+              onClick={() => void patch({ reasoningEffort: "" })}
+            >跟随会话</button>
+            {effortOptions.map((eff) => (
+              <button
+                key={eff}
+                type="button"
+                className={"settings-chip" + (cfg.reasoningEffort === eff ? " on" : "")}
+                onClick={() => void patch({ reasoningEffort: eff })}
+              >{eff}</button>
+            ))}
+          </div>
+        </CardRow>
+      </Section>
 
       {/* S10（plan-41-197）：并发与上限 = 摘要行 + 配置弹窗；plan-114-450：独立成组，不与列表混在同一张卡片里 */}
       <Section title="运行限制">
@@ -219,63 +153,6 @@ export function SubagentsPanel() {
         </CardRow>
       </Section>
 
-      <Section title={`子代理类型 ${items.length}`} bare>
-        {items.length === 0 ? (
-          <div className="ui-card">
-            <Empty
-              title="还没有自定义子代理类型"
-              desc="内置的 explore / general 由系统注册；新建一个专用代理，嗒嗒会按你的工具与提示词派它干活"
-              action={<Button variant="secondary" size="sm" icon={<IconPlus size={13} />} onClick={openNew}>新建子代理类型</Button>}
-            />
-          </div>
-        ) : (
-          <List>
-            {items.map((s) => (
-              <ListRow
-                key={s.id}
-                muted={!s.is_active}
-                icon={<IconBot size={16} />}
-                name={s.name}
-                desc={s.description || "无描述"}
-                meta={
-                  <>
-                    <Tag>{(s.tools_whitelist?.length ?? 0) > 0 ? `允许 ${s.tools_whitelist!.length} 个工具` : "全量工具"}</Tag>
-                    {s.model_id != null && <Tag>固定模型 {modelLabel(models, s.model_id)}</Tag>}
-                    {s.reasoning_effort && <Tag>思考深度 {s.reasoning_effort}</Tag>}
-                    {s.system_prompt && <Tag>自定义提示词</Tag>}
-                  </>
-                }
-                actions={
-                  <>
-                    <span className="ui-row-hover">
-                      <IconButton size="xs" title="编辑" icon={<IconPencil size={13} />} onClick={() => { setEditing(s); setShowForm(true); }} />
-                      <IconButton size="xs" tone="danger" title="删除" icon={<IconTrash size={13} />} onClick={() => setConfirmTarget(s)} />
-                    </span>
-                    {/* S10：列表开关直接生效；失败给出明确提示 */}
-                    <Sw checked={s.is_active} onChange={async (v) => {
-                      try { await api.updateSubagent(s.id, { is_active: v }); await load(); }
-                      catch (e) { notify("更新启用状态失败：" + String(e)); }
-                    }} />
-                  </>
-                }
-              />
-            ))}
-          </List>
-        )}
-      </Section>
-      <ConfirmDialog
-        open={confirmTarget !== null}
-        title="删除子代理类型"
-        message={confirmTarget ? `删除子代理类型「${confirmTarget.name}」？` : ""}
-        danger
-        onCancel={() => setConfirmTarget(null)}
-        onConfirm={async () => {
-          const it = confirmTarget;
-          setConfirmTarget(null);
-          if (!it) return;
-          try { await api.deleteSubagent(it.id); load(); } catch { /* ignore */ }
-        }}
-      />
       {/* S10（plan-41-197）：并发与上限配置弹窗（保存后即时生效） */}
       <Modal
         open={limitsOpen}
@@ -308,8 +185,6 @@ export function SubagentsPanel() {
           </div>
         </div>
       </Modal>
-
-      <SubagentFormModal open={showForm} editing={editing} models={models} tools={tools} onClose={() => setShowForm(false)} onSaved={load} />
     </>
   );
 }

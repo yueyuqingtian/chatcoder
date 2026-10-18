@@ -18,10 +18,13 @@ import { DebugCard } from "./DebugCard";
 import { StreamingTail } from "./StreamingTail";
 import { IconSearch, IconChevronUp, IconChevronDown, IconX, IconArrowDown } from "../icons";
 import { ErrorCard } from "./ErrorCard";
+// plan-156-619 S10：后续任务建议卡（消息流底部收尾卡）
+import { SuggestionCard } from "./SuggestionCard";
 import { useTextHighlight } from "../../hooks/useTextHighlight";
 import { MarkdownContent } from "../MarkdownContent";
 import { MsgType } from "@chatcoder/shared";
 import { useChatStore } from "../../store/chat";
+import { useUiStore } from "../../store/ui";
 import { useScoped, useScopedGetter } from "./convoScope";
 import { latestWorkflowEndMs, selectSessionWorkflowBusy, useWorkflowStore } from "../../store/workflow";
 import { api } from "../../api/client";
@@ -231,8 +234,6 @@ function MessageFlowCore({
   /** plan-547: 虚拟内容容器（RO 监听测高变化保持贴底） */
   // plan-282-1444：显式含 null 联合类型，保证 ref 可变（需在回调里同时交给虚拟列表）
   const innerRef = useRef<HTMLDivElement | null>(null);
-  /** plan-282-1492：悬浮胶囊的底部占位块（高度 0 ↔ 44px 由 CSS 过渡驱动）。 */
-  const capsuleSpaceRef = useRef<HTMLDivElement | null>(null);
   const scrollIdleTimerRef = useRef(0);
   const [autoScroll, setAutoScroll] = useState(true);
   /** autoScroll 的 ref 镜像：ResizeObserver 回调读取，避免每次回调 setState */
@@ -669,27 +670,6 @@ function MessageFlowCore({
     };
   }, [hasContent]);
 
-  /** plan-282-1492：胶囊占位块 0 ↔ 44px 的**高度过渡期间逐帧贴底**。
-   *
-   *  胶囊是悬浮元素（absolute，不占布局），出现前不预留、出现时靠占位块的高度过渡
-   *  把消息流顶上去；高度过渡每帧都会触发 ResizeObserver 回调，正好用来逐帧把
-   *  scrollTop 拉到 scrollHeight —— 于是"顶上去"的全过程都停在最底部、保持自动滚动。
-   *  用户已上滑接管时一律不动（沿用全局接管协议）。 */
-  useEffect(() => {
-    const space = capsuleSpaceRef.current;
-    const el = parentRef.current;
-    if (!space || !el || typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(() => {
-      // 本轮优化：几何运动中不读布局属性（scrollHeight 会强制同步布局），
-      // 与高度 RO 同一口径——运动结束后由事件收尾统一补一次。
-      if (isBusy()) return;
-      if (!autoScrollRef.current || userScrollOverrideRef.current) return;
-      el.scrollTop = el.scrollHeight;
-    });
-    ro.observe(space);
-    return () => ro.disconnect();
-  }, []);
-
   /** plan-282-1441（#2）：宽度变化 → 锚点补偿。
    *
    *  与上面"高度 RO"分工明确：
@@ -1101,6 +1081,29 @@ function MessageFlowCore({
   /** 搜索面板开启且有关键字时才对渲染层做命中标记（否则零开销） */
   const isSearching = searchOpen && searchKeyword.trim().length > 0;
 
+  /** plan-156-619 S2：搜索入口按钮是否显示（默认关闭，可在「设置 → 常规」打开）。
+   *  只隐藏**入口按钮**：Ctrl+F 仍然可用——关闭一个可视化入口不应连带夺走搜索能力。 */
+  const searchEntryVisible = useUiStore((s) => s.showMessageSearch);
+
+  /** plan-156-619 S2：Ctrl+F / Cmd+F 唤起搜索条。
+   *  此前按钮 title 写着「Ctrl+F」但全项目没有绑定该快捷键（点按钮才能开），
+   *  入口一旦按开关隐藏就彻底没有搜索入口，因此这里把快捷键补实。 */
+  useEffect(() => {
+    if (!search) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      if (e.key !== "f" && e.key !== "F") return;
+      // 焦点在输入框/可编辑区时不抢占（用户可能在打字，浏览器原生查找也让位）
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || t?.isContentEditable) return;
+      e.preventDefault();
+      setSearchOpen(true);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [search]);
+
   useEffect(() => {
     setActiveMatchIndex(0);
     if (matchedIndices.length > 0) {
@@ -1128,7 +1131,9 @@ function MessageFlowCore({
 
   return (
     <div className={`message-flow-outer ${className || ""}`}>
-      {search && (
+      {/* plan-156-619 S2：入口按钮受「设置 → 常规 → 消息搜索按钮」控制；
+          搜索条一旦打开则始终显示（否则 Ctrl+F 唤起后看不到输入框）。 */}
+      {search && (searchOpen || searchEntryVisible) && (
         <div className="flow-search-toggle">
           {!searchOpen ? (
             <button
@@ -1238,9 +1243,9 @@ function MessageFlowCore({
             })}
           </div>
         )}
-        {/* plan-282-1492：悬浮胶囊的底部安全区（高度过渡见 .message-flow-capsule-space）。
-            未出现时高度 0（不预留空白），出现时过渡到 44px——胶囊"顶上去"消息流且不盖住末行。 */}
-        <div ref={capsuleSpaceRef} className="message-flow-capsule-space" aria-hidden="true" />
+        {/* plan-156-619 S7：输入框上方的悬浮胶囊已下线（改由右上角综合工具卡承载），
+            这里原先的 `.message-flow-capsule-space` 占位块一并移除——
+            没有胶囊就不需要为它预留高度过渡的安全区。 */}
       </div>
 
       {showScrollBottom && (
@@ -1464,9 +1469,13 @@ function MainMessageFlow({
         />
       }
       trailingNode={
-        // v39: 后台子代理运行期间主会话保持“运行中”——主 turn 未跑但有子代理在跑时，
-        // 用与流式状态行同款样式显示「等待子代理结束…」（完成后服务端自动唤醒新一轮）。
-        !isRunning && pendingSubagents > 0 ? <SubagentWaitingLine count={pendingSubagents} />
+        // plan-156-619 S10：后续任务建议卡优先级最高——它是本轮收尾后的「下一步」，
+        // 与错误卡同为收尾信息，但建议是正向出口，放在更靠前的位置更容易被看到。
+        // 运行中 / 等待子代理时不展示：建议只属于「已收口」的一轮。
+        !isRunning && pendingSubagents === 0 && !activeDebug && !flowError ? <SuggestionCard />
+          // v39: 后台子代理运行期间主会话保持“运行中”——主 turn 未跑但有子代理在跑时，
+          // 用与流式状态行同款样式显示「等待子代理结束…」（完成后服务端自动唤醒新一轮）。
+          : !isRunning && pendingSubagents > 0 ? <SubagentWaitingLine count={pendingSubagents} />
           : activeDebug ? <DebugCard status={activeDebug} />
           // plan-308-1542 需求1：任务执行类错误统一在消息流末尾报（不弹右上角）
           : flowError ? (
@@ -1547,18 +1556,8 @@ function SubagentMessageFlow({
   const buildEntries = useMemo(() => createTimelineBuilder(), []);
   const entries = useMemo(() => buildEntries(storeMessages), [buildEntries, storeMessages]);
 
-  // v36 (plan-321-1600 M2): 末条非空 text 消息 = 子代理的结构化汇报，交结构化卡片渲染。
-  // plan-330-1648 M6: **仅在子代理终态启用**——运行中每落一段新文本都会改写“最后一条
-  // text”的判定，使面板在“结构化卡片 ↔ 普通 markdown”之间反复切换（用户反馈问题3：
-  // 先正常排版、随后内容消失又重新输出）。
-  const reportMessageId = useMemo(() => {
-    if (isRunning || !subagentMeta) return undefined;
-    for (let i = storeMessages.length - 1; i >= 0; i--) {
-      const m = storeMessages[i];
-      if (m.msg_type === "text" && msgText(m.content).trim()) return m.id;
-    }
-    return undefined;
-  }, [storeMessages, isRunning, subagentMeta]);
+  // plan-156-619 S5d：取消「末条 text = 结构化汇报卡」的判定。
+  // 子会话就是普通会话，它的输出与主会话同排版（不再六节橙卡），因此无需定位该消息。
 
   const renderEntry = useCallback(
     (entry: TimelineEntry) => {
@@ -1575,7 +1574,6 @@ function SubagentMessageFlow({
           actions={actions || "copy-only"}
           flow="subagent"
           agentId={threadId ?? undefined}
-          reportMessageId={reportMessageId}
           globalRunning={isRunning}
           latestUserId={-1}
           flowErrorTurnId={null}
@@ -1584,7 +1582,7 @@ function SubagentMessageFlow({
         />
       );
     },
-    [isRunning, actions, reportMessageId, threadId, turns]
+    [isRunning, actions, threadId, turns]
   );
 
 

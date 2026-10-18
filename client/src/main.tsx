@@ -34,6 +34,8 @@ import "./styles/settings-a.css";
 import "./styles/settings-b.css";
 import "./styles/settings-c.css";
 import "./styles/flow.css";
+/* plan-156-619 S7：会话右上角综合工具卡（tcard- 前缀，避开工具树的 .tc-*）。 */
+import "./styles/toolcard.css";
 import "./styles/connector.css";
 import "./styles/debug.css";
 import "./styles/mascot.css";

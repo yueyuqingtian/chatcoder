@@ -16,7 +16,6 @@ import { ToolShotCard } from "./ToolShotCard";
 import { WorkflowNotice } from "../workflow/WorkflowNotice";
 import { PluginSlot } from "../../plugins/registry";
 import { MarkdownContent } from "../MarkdownContent";
-import { SubagentReportCard } from "./SubagentReportCard";
 import { ErrorCard } from "./ErrorCard";
 import { IconRotateCcw, IconArrowToggle } from "../icons";
 import { Tooltip } from "../ui";
@@ -175,7 +174,6 @@ export const TurnGroup = memo(function TurnGroup({
   hasPlan = false,
   flow = "main",
   agentId,
-  reportMessageId,
   globalRunning,
   latestUserId,
   flowErrorTurnId,
@@ -196,9 +194,6 @@ export const TurnGroup = memo(function TurnGroup({
   /** v36 修复：子代理线程 id（=agentId）。右面板计时条改取 subagentMeta 的起止时间，
    *  不再依赖主会话 turns（主会话列表缺该 turn 时计时条会整条消失、无法折叠）。 */
   agentId?: number;
-  /** v36 (plan-321-1600 M2)：子代理面板的最终汇报消息 id——命中时改由结构化汇报卡片渲染；
-   *  主消息流（flow="main"）不传该参数，渲染完全不变。 */
-  reportMessageId?: number;
   /** plan-75-334 阶段1：父层统一计算的全局派生值（必需）。
    *  此前每个 TurnGroup 各自订阅 isRunning / flowError / hiddenTurnErrors / turns / messages，
    *  运行期任何相关 store 更新都会让所有可见 turn 重复执行 selector；
@@ -565,15 +560,8 @@ export const TurnGroup = memo(function TurnGroup({
         );
       }
       case "text":
-        // v36 (plan-321-1600 M2): 子代理面板的最终汇报交结构化卡片（文件芯片/验证/验收/风险）；
-        // 主流不传 reportMessageId，渲染路径不变。
-        if (flow === "subagent" && reportMessageId != null && item.msg.id === reportMessageId) {
-          return (
-            <div key={i} className="turn-item turn-item-text">
-              <SubagentReportCard text={msgText(item.msg.content)} />
-            </div>
-          );
-        }
+        // plan-156-619 S5d：子会话按普通会话渲染——不再把最终汇报换成六节结构化橙卡。
+        // 子会话本身就是完整会话，它的输出应当与主会话同排版，否则用户会看到两套视觉语言。
         return (
           <div key={i} className="turn-item turn-item-text">
             <div className="turn-agent-text">

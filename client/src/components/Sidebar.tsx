@@ -7,7 +7,7 @@
  */
 import { notify } from "../store/toast";
 import { IxNewChat, IxSearch, IxAutomation, IxExtensions, IxSettings, IxWorkflow } from "./iconkit/StackIcons";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { ProjectOut, SessionOut } from "../api/client";
 import { api } from "../api/client";
 import { useChatStore } from "../store/chat";
@@ -23,7 +23,7 @@ import { Empty, Input, Segmented, Tooltip } from "./ui";
 import { ProjectIcon } from "./project/ProjectIcon";
 import { openProjectDialog } from "../store/projectDialog";
 import {
-  IconChevronDown, IconChevronRight,
+  IconChevronDown,
   IconFolder, IconLayers, IconSortDesc, IconPencil,
   IconMoreHorizontal, IconPin, IconPlus, IconRefresh,
   IconFolderPlus, IconArrowDown, IconCopy, IconClock, IconSortAlpha, IconArchive, IconGitBranch, IconTrash,
@@ -139,6 +139,9 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
   const currentSessionId = useChatStore((s) => s.currentSessionId);
   const currentProjectId = useChatStore((s) => s.currentProjectId);
   const loadBootstrap = useChatStore((s) => s.loadBootstrap);
+  /** plan-156-619 S5：主会话 id → 子会话列表（子会话不进入 list_sessions，必须单独取）。 */
+  const subsessionsByParent = useChatStore((s) => s.subsessionsByParent);
+  const loadSubsessions = useChatStore((s) => s.loadSubsessions);
   const switchSession = useChatStore((s) => s.switchSession);
   const deleteSession = useChatStore((s) => s.deleteSession);
   const renameSession = useChatStore((s) => s.renameSession);
@@ -267,6 +270,17 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
   useEffect(() => {
     try { localStorage.setItem("chatcoder:sidebar-sort", sort); } catch { /* ignore */ }
   }, [sort]);
+
+  /** plan-156-619 S5：进入侧栏时补齐子会话。
+   *  `list_sessions` 过滤掉 side_parent_id 非空的会话，子会话只能单独拉取；
+   *  这里对当前可见会话做一次按需加载（已有桶的跳过，避免重复请求）。 */
+  useEffect(() => {
+    for (const s of sessions) {
+      if (s.side_parent_id != null) continue;
+      if (subsessionsByParent[s.id] !== undefined) continue;
+      void loadSubsessions(s.id);
+    }
+  }, [sessions, subsessionsByParent, loadSubsessions]);
 
   /** 主项目（排除工作树——工作树作为其父项目下的独立工作区单独渲染） */
   const visibleProjects = useMemo(() => {
@@ -413,17 +427,32 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
   const renderSession = (s: SessionOut) => {
     const isCurrent = s.id === currentSessionId && !pageMode;
     const editing = renaming?.id === s.id;
+    const busy = sessionBusy(s, busyIds);
+    // plan-156-619 S1：状态槽互斥优先级——运行中转圈 > 聚焦态置顶图标 > 空。
+    // 聚焦 = 当前会话，此时槽内给置顶入口（未运行时）；置顶会话在「置顶」分区同样如此。
+    const showPin = !busy && isCurrent;
+    // plan-156-619 S5：主会话下的子会话（不含子会话自身——子项不再向下嵌套，一层扁平）
+    const children = s.side_parent_id == null ? (subsessionsByParent[s.id] || []) : [];
     return (
-      <div key={s.id} className={`sb-session${isCurrent ? " active" : ""}`} onClick={() => { if (editing) return; switchSession(s.id); onSessionFocus(); }}>
-        {/* S1（plan-41-197）：运行指示移到标题左侧，且**始终占位**（非运行态透明）。
-            此前只给运行项渲染 → 运行/非运行切换时整行标题列宽与右侧列位跳动。 */}
-        <span className={"sb-session-pulse" + (sessionBusy(s, busyIds) ? " on" : "")} aria-hidden="true" />
-        {s.workflow_state && (
-          <span
-            className={"sb-session-wf is-" + s.workflow_state}
-            aria-label={WORKFLOW_STATE_LABEL[s.workflow_state]}
-          >
-            <IxWorkflow size={12} />
+      <Fragment key={s.id}>
+      <div className={`sb-session${isCurrent ? " active" : ""}`} onClick={() => { if (editing) return; switchSession(s.id); onSessionFocus(); }}>
+        {/* plan-156-619 S1：行首固定 20px 状态槽（宽度恒定，运行/聚焦切换时标题不位移）。
+            槽内只出现一个元素：运行转圈 / 置顶图标 / 空。
+            此前是 10px 常驻占位环，且置顶图标已从行内移除——聚焦时没有任何置顶入口。 */}
+        {showPin ? (
+          <Tooltip content={s.pinned ? t("sidebar.ctx_unpin") : t("sidebar.ctx_pin")} side="top">
+            <span
+              className={"sb-session-slot is-pinnable" + (s.pinned ? " is-pinned" : "")}
+              role="button"
+              aria-label={s.pinned ? t("sidebar.ctx_unpin") : t("sidebar.ctx_pin")}
+              onClick={(e) => { e.stopPropagation(); togglePin(s); }}
+            >
+              <IconPin size={13} />
+            </span>
+          </Tooltip>
+        ) : (
+          <span className="sb-session-slot" aria-hidden="true">
+            {busy && <span className="sb-session-pulse on" />}
           </span>
         )}
         {/* plan-20261016-ux（问题 9）：置顶会话只出现在「置顶」分区，分区标题已说明状态，行内不再重复钉子图标 */}
@@ -471,6 +500,16 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
           </span>
         )}
         <span className="sb-session-time">{formatRelativeTime(s.last_activity_at, language)}</span>
+        {/* plan-156-619 S1：工作流标记从「标题左侧」移到「标题右侧、时间之前」——
+            它此前与运行指示并排，两者同时出现会把标题起点往右推，破坏与项目名的左对齐。 */}
+        {s.workflow_state && (
+          <span
+            className={"sb-session-wf is-" + s.workflow_state}
+            aria-label={WORKFLOW_STATE_LABEL[s.workflow_state]}
+          >
+            <IxWorkflow size={12} />
+          </span>
+        )}
         {/* v7: 一键归档（三点菜单图标左侧）。运行中的会话禁止归档 */}
         <span
           className={"sb-session-actions sb-session-archive" + (sessionBusy(s, busyIds) ? " disabled" : "")}
@@ -506,6 +545,37 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
           </div>
         )}
       </div>
+      {/* plan-156-619 S5：父会话下缩进一级列出子会话（一层扁平，子会话不再向下嵌套）。
+          几何与普通会话行一致（同一 20px 状态槽），只多一个「子会话」细标识——
+          不加色块、不加左侧竖线（项目规则禁止装饰性竖线表达层级）。 */}
+      {children.length > 0 && (
+        <div className="sb-subsessions">
+          {children.map((c) => renderSubsessionRow(c))}
+        </div>
+      )}
+      </Fragment>
+    );
+  };
+
+  /** 子会话行（plan-156-619 S5）：复用会话行的状态槽几何，额外带「子会话」细标识。 */
+  const renderSubsessionRow = (c: SessionOut) => {
+    const isCurrent = c.id === currentSessionId && !pageMode;
+    const busy = sessionBusy(c, busyIds);
+    return (
+      <div
+        key={c.id}
+        className={"sb-session sb-subsession" + (isCurrent ? " active" : "")}
+        onClick={() => { switchSession(c.id); onSessionFocus(); }}
+        title={c.title || `子会话 ${c.id}`}
+      >
+        <span className="sb-session-slot" aria-hidden="true">
+          {busy && <span className="sb-session-pulse on" />}
+        </span>
+        <span className="sb-session-title">
+          <span className="sb-title-inner">{c.title || "子会话"}</span>
+        </span>
+        <span className="sb-subsession-tag">子会话</span>
+      </div>
     );
   };
 
@@ -513,7 +583,6 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
    * 工作树此前被塞在父项目子层级、额外缩进且名称变灰，与普通项目割裂）。
    * 工作树仅额外带一个「工作树」标识，其余（图标位、+、更多菜单）完全一致。 */
   const renderProjectRow = (p: ProjectOut, isWorktree: boolean) => {
-    const open = isProjectOpen(p);
     // S1（plan-41-197）：唯一聚焦——选中会话后其所属项目行不再同时高亮，
     // 只有“未选中任何会话”（首页新建态）时项目才显示 current。
     const isCurrent = p.id === currentProjectId && currentSessionId == null;
@@ -526,8 +595,11 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
         className={`sb-project${isCurrent ? " current" : ""}${isWorktree ? " is-wt" : ""}${menuOpen ? " menu-open" : ""}`}
         onClick={() => toggleProject(p.id)}
       >
-        <span className={`sb-project-chevron${open ? " open" : ""}`} aria-hidden="true"><IconChevronRight size={13} /></span>
-        {isWorktree ? <IconGitBranch size={14} /> : <ProjectIcon icon={p.icon} color={p.color} size={15} className="sb-project-icon" />}
+        {/* plan-156-619 S1：去掉展开/折叠箭头——整行点击即展开收起，展开态由子项是否出现表达。
+            图标套进固定宽度槽（--sb-icon-slot），使项目名与会话标题文本起点严格一致。 */}
+        <span className="sb-project-slot">
+          {isWorktree ? <IconGitBranch size={14} /> : <ProjectIcon icon={p.icon} color={p.color} size={15} />}
+        </span>
         {/* plan-20261017-sbwt：名称与标签放进同一主区，悬停操作以叠加层浮在右侧并淡出主区尾部，
             不再参与排版——此前操作按钮 display:none→flex 会挤压名称与标签造成跳变 */}
         <span className="sb-project-main">

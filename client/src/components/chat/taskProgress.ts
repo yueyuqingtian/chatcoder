@@ -36,9 +36,11 @@ export interface ProgressRow {
   title: string;
   note: string;
   status: ProgressStatus;
-  /** plan-282-1441：来源子代理 id（仅引擎步骤有）——右侧面板用它做"定位到执行消息"，
-   *  输入框胶囊不使用。 */
+  /** plan-282-1441：来源子代理 id（仅引擎步骤有）——右侧面板用它做"定位到执行消息"。 */
   agentId?: number | null;
+  /** plan-156-619 S6：执行该步骤的子会话 id（sessions.id）；null/缺省 = 主代理自己执行。
+   *  进程栏目据此显示「子会话」chip，点击可切换到该子会话。 */
+  owner?: number | null;
 }
 
 /** 轮次活跃态——进度"是否还活着"的唯一判据（plan-282-1492）。 */
@@ -158,6 +160,8 @@ export function useProgressRows(enabled = true): ProgressResult {
           title: t.content,
           note: "待续接",
           status: normalizeStatus(t.status) === "done" ? "done" : "interrupted",
+          // plan-156-619 S6：交接清单同样保留归属，否则续接后 chip 会消失
+          owner: t.owner ?? null,
         }));
         return settle(carried, true, "interrupted");
       }
@@ -166,6 +170,7 @@ export function useProgressRows(enabled = true): ProgressResult {
         title: t.content,
         note: t.activeForm || "",
         status: normalizeStatus(t.status),
+        owner: t.owner ?? null,
       }));
       return settle(rows, true, phaseOf(todosTurnId));
     }
@@ -185,6 +190,8 @@ export function useProgressRows(enabled = true): ProgressResult {
         note: s.note || "",
         status: normalizeStatus(s.status),
         agentId: s.agent_id ?? null,
+        // plan-156-619 S6：todo 清单落库时写下的子会话归属（sessions.id）
+        owner: s.subsession_id ?? null,
       }));
       return settle(rows, false, phaseOf(turnId));
     }

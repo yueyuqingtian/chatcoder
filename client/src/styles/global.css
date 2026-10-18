@@ -283,14 +283,17 @@ a { color: var(--accent); text-decoration: none; }
 .sb-icon-btn.active { background: var(--sidebar-selected); color: var(--text-1); }
 /* 列表 */
 .sb-list { flex: 1; overflow-y: auto; padding: 4px 8px 12px; }
-.sb-section-label { font-size: 11px; color: var(--text-3); padding: 10px 6px 6px; user-select: none; }
+/* plan-156-619 S1：分区小字 / 项目行 / 会话行共用 --sb-row-pad 左内距，
+   使「置顶」「项目」小字与该分区下第一个图标槽左缘对齐。 */
+.sb-section-label { font-size: 11px; color: var(--text-3); padding: 10px var(--sb-row-pad) 6px; user-select: none; }
 .sb-project-group { margin-bottom: 2px; }
-.sb-project { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 8px; border-radius: var(--r-md); font-size: var(--sidebar-fs, 14px); color: var(--text-2); cursor: pointer; position: relative; transition: background var(--dur-fast); }
-.sb-project-chevron { display: inline-flex; align-items: center; justify-content: center; width: 14px; color: var(--text-3); flex-shrink: 0; transition: transform var(--dur-fast); }
-.sb-project-chevron.open { transform: rotate(90deg); }
-/* plan-41-232：层级关系由缩进表达即可——竖线在密集会话列表里只是视觉噪音，用户要求去掉 */
-.sb-project-children { margin-left: 14px; padding-left: 10px; display: flex; flex-direction: column; gap: 2px; padding-top: 2px; padding-bottom: 2px; }
-.sb-project-children .sb-session { padding-left: 8px; }
+.sb-project { display: flex; align-items: center; gap: var(--sb-row-gap); height: 32px; padding: 0 var(--sb-row-pad); border-radius: var(--r-md); font-size: var(--sidebar-fs, 14px); color: var(--text-2); cursor: pointer; position: relative; transition: background var(--dur-fast); }
+/* plan-156-619 S1：项目图标槽与界面状态槽同宽（--sb-icon-slot），
+   项目名起点 = 列表内距 8 + row-pad 6 + slot 20 + gap 8 = 42，与会话标题起点一致。 */
+.sb-project-slot { display: inline-flex; align-items: center; justify-content: center; width: var(--sb-icon-slot); height: var(--sb-icon-slot); flex-shrink: 0; }
+/* plan-41-232：层级关系由缩进表达即可——竖线在密集会话列表里只是视觉噪音，用户要求去掉。
+   plan-156-619 S1：子项不再叠加 margin/padding 缩进，会话行靠状态槽与项目名对齐。 */
+.sb-project-children { display: flex; flex-direction: column; gap: 2px; padding-top: 2px; padding-bottom: 2px; }
 /* plan-20261016-ux（问题 9）：置顶分区——会话行与项目下的会话同一行距（gap 2px），分区与「项目」标题间靠标题自身留白分隔 */
 .sb-pinned { display: flex; flex-direction: column; gap: 2px; padding-bottom: 2px; }
 .sb-project:hover { background: var(--sidebar-hover); color: var(--text-1); }
@@ -301,7 +304,7 @@ a { color: var(--accent); text-decoration: none; }
 .sb-project-actions:hover, .sb-session-actions:hover { background: var(--sidebar-selected); color: var(--text-1); }
 /* v7: 左侧会话行一键归档按钮——运行中禁用 */
 .sb-session-archive.disabled { opacity: .4; cursor: not-allowed; pointer-events: none; }
-.sb-session { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 8px; border-radius: var(--r-md); font-size: var(--sidebar-fs, 14px); color: var(--text-1); cursor: pointer; position: relative; transition: background var(--dur-fast); }
+.sb-session { display: flex; align-items: center; gap: var(--sb-row-gap); height: 32px; padding: 0 var(--sb-row-pad); border-radius: var(--r-md); font-size: var(--sidebar-fs, 14px); color: var(--text-1); cursor: pointer; position: relative; transition: background var(--dur-fast); }
 .sb-session:hover { background: var(--sidebar-hover); color: var(--text-1); }
 .sb-session.active { background: var(--sidebar-selected); color: var(--text-1); font-weight: 500; }
 .sb-session-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-1); }
@@ -313,11 +316,66 @@ a { color: var(--accent); text-decoration: none; }
 .sb-session-time { font-size: 11px; color: var(--text-3); flex-shrink: 0; }
 .sb-session:hover .sb-session-time { display: none; }
 .sb-pin { display: inline-flex; color: var(--text-3); flex-shrink: 0; }
-/* S1（plan-41-197）：运行指示固定槽位——始终占位（10px），运行态才显示旋转环。
-   此前仅运行项条件渲染 → 运行/非运行切换时标题列宽与右侧列位整体跳动。 */
-.sb-session-pulse { width: 10px; height: 10px; border-radius: 50%; border: 2px solid transparent; flex-shrink: 0; opacity: 0; transition: opacity var(--dur-2) var(--ease-standard); }
+/* plan-156-619 S1：会话行首列改「状态槽」——固定 20px（--sb-icon-slot），宽度恒定不跳动。
+   槽内同一时刻只出现一个：运行中转圈 / 聚焦态置顶图标 / 空。
+   此前是 10px 的 .sb-session-pulse 常驻占位，运行态才显环，且置顶图标已从行内移除，
+   导致「聚焦时没有置顶入口、运行指示与图标槽不对齐」。 */
+.sb-session-slot {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: var(--sb-icon-slot); height: var(--sb-icon-slot);
+  flex-shrink: 0; color: var(--text-3); border-radius: var(--r-sm);
+  transition: color var(--dur-fast), background var(--dur-fast);
+}
+/* 置顶图标可点击：仅在聚焦（选中的当前会话）与非运行态时出现 */
+.sb-session-slot.is-pinnable { cursor: pointer; }
+.sb-session-slot.is-pinnable:hover { background: var(--sidebar-selected); color: var(--text-1); }
+.sb-session-slot.is-pinned { color: var(--accent); }
+/* plan-156-619 S5：子会话行——与普通会话行同一几何（同一 --sb-row-pad / --sb-icon-slot），
+   仅整体缩进一级（一个图标槽宽），并在行尾带一个「子会话」细标识。
+   层级只用缩进 + 字号表达，不加色块、不加左侧竖线（项目规则禁止装饰性竖线）。 */
+.sb-subsessions { display: flex; flex-direction: column; gap: 2px; padding-top: 1px; padding-bottom: 1px; }
+.sb-subsession { padding-left: calc(var(--sb-row-pad) + var(--sb-icon-slot)); }
+.sb-subsession .sb-session-title { font-size: calc(var(--sidebar-fs, 14px) - 1px); color: var(--text-2); }
+.sb-subsession.active .sb-session-title { color: var(--text-1); }
+.sb-subsession-tag {
+  flex-shrink: 0; font-size: 10px; line-height: 1.6;
+  color: var(--text-3); background: var(--bg-hover);
+  border-radius: 999px; padding: 0 6px; white-space: nowrap;
+}
+
+/* plan-156-619 S5e：子会话的返回导航条。
+   子会话按普通会话渲染，用户需要一个明确出口回到主会话；
+   只用留白 + 箭头表达层级，不加色块、不加左侧竖线（项目设计规则）。
+   与消息列同宽同左边距，视觉上属于内容列而不是面板装饰。 */
+.chat-subsession-bar {
+  display: flex; align-items: center; gap: 8px;
+  flex-shrink: 0;
+  width: var(--content-col-w);
+  max-width: none;
+  margin-left: var(--content-col-left);
+  margin-right: 0;
+  box-sizing: border-box;
+  padding: 8px 32px 0;
+}
+.chat-subsession-back {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 26px; padding: 0 8px 0 6px;
+  border: none; border-radius: var(--r-md);
+  background: transparent; color: var(--text-2);
+  font-size: 12px; cursor: pointer;
+  transition: background var(--dur-fast), color var(--dur-fast);
+}
+.chat-subsession-back:hover { background: var(--bg-hover); color: var(--text-1); }
+.chat-subsession-back > svg { flex-shrink: 0; }
+.chat-subsession-back-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+.chat-subsession-kind {
+  flex-shrink: 0; font-size: 11px; line-height: 1.6;
+  color: var(--text-3); background: var(--bg-hover);
+  border-radius: 999px; padding: 0 7px; white-space: nowrap;
+}
+.sb-session-slot .sb-session-pulse { width: 12px; height: 12px; border-radius: 50%; border: 2px solid transparent; opacity: 1; }
 /* plan-128-518：「执行中」转圈统一用 --accent（随主题世界变色），摘要 / 胶囊 / 工具行的转圈同源 */
-.sb-session-pulse.on { border-color: color-mix(in srgb, var(--accent) 25%, transparent); border-top-color: var(--accent); animation: session-spin var(--dur-spin) linear infinite; opacity: 1; }
+.sb-session-slot .sb-session-pulse.on { border-color: color-mix(in srgb, var(--accent) 25%, transparent); border-top-color: var(--accent); animation: session-spin var(--dur-spin) linear infinite; opacity: 1; }
 @keyframes session-spin { to { transform: rotate(360deg); } }
 .sb-rename-input { flex: 1; min-width: 0; padding: 1px 4px; font-size: 12px; }
 /* plan-41-199: 会话行内重命名框改用 ui/Input —— 按 32px 行高收敛为 sm 档（28px）、
@@ -419,7 +477,10 @@ a { color: var(--accent); text-decoration: none; }
 .message-flow-wrap { flex: 1; display: flex; overflow: hidden; position: relative; min-height: 0; min-width: 0; background: var(--bg-panel); }
 /* v41: MessageFlow 重构后的外层容器（列向 flex：搜索/跳底按钮绝对定位悬浮，.message-flow 独占滚动） */
 .message-flow-outer { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; min-height: 0; min-width: 0; background: var(--bg-panel); }
-.flow-search-toggle { position: absolute; top: 10px; right: 18px; z-index: 16; display: flex; align-items: center; }
+/* plan-156-619 S2：搜索入口从右上角移到左上角——
+   右上角让位给综合工具卡（SessionToolCard），两者同层绝对定位会互相遮挡。
+   左上角与标题栏/导航不重叠，且不占用列宽。 */
+.flow-search-toggle { position: absolute; top: 10px; left: 18px; z-index: 16; display: flex; align-items: center; }
 .flow-search-btn {
   width: 28px; height: 28px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
@@ -477,6 +538,8 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .message-flow { flex: 1 1 auto; min-width: 0; overflow-x: hidden; overflow-y: auto; padding: 10px 0 4px; width: 100%; background: var(--bg-panel); color: var(--text-1); }
 .mf-empty { display: flex; align-items: center; justify-content: center; padding: 60px 20px; color: var(--text-3); font-size: 13px; }
 .mf-list { display: flex; flex-direction: column; align-items: stretch; max-width: var(--content-max-w); margin: 0 auto; padding: 0 24px 4px; }
+/* plan-156-619 S3：主聊天面板（.chat-panel）内的内容列改用「定宽 + 显式左边距」，
+   见文件末尾「内容列定宽」段；其它宿主（首页 / 侧边对话 / 子代理面板）保持原居中语义。 */
 .mf-entry { width: 100%; }
 .mf-search { display: flex; align-items: center; gap: 8px; padding: 5px 10px; margin: 6px 16px; border-radius: var(--r-ctl); background: var(--bg-elevated); border: 1px solid var(--border); box-shadow: var(--shadow-sm); }
 .mf-search input { flex: 1; border: none; outline: none; background: transparent; font-size: 12px; color: var(--text-1); }
@@ -1052,6 +1115,7 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
  * TaskStatusPanel 展示；仅保留其复用的 .artifact-file-review 审核勾选框样式。 */
 /* ── 输入框 ── */
 .composer { position: relative; max-width: var(--content-max-w); margin: 0 auto; padding: 4px 24px 10px; }
+/* plan-156-619 S3：主聊天面板内改为定宽（见文件末尾「内容列定宽」段）。 */
 /* v2.2: 排队消息胶囊 + 模式切换按钮 */
 /* plan-282-1421（第5项）：排队消息区重做。
    结构：head（标签 + 计数）+ 列表；每条 = 序号 + 模式标签 + 摘要 + 附件数 + 两个图标按钮。
@@ -3708,7 +3772,6 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 :is(html[data-window-motion="1"], body.panel-dragging) .usage-skeleton-card,
 :is(html[data-window-motion="1"], body.panel-dragging) .usage-skeleton-block,
 :is(html[data-window-motion="1"], body.panel-dragging) .todo-float-item .status-icon.running,
-:is(html[data-window-motion="1"], body.panel-dragging) .tc-step-dot.running,
 :is(html[data-window-motion="1"], body.panel-dragging) .debug-card-dot.paused,
 :is(html[data-window-motion="1"], body.panel-dragging) .dbg-dot.paused,
 /* 本轮补全（拖拽期卡顿治理）：此前漏掉的运动期常驻循环动画——
@@ -3807,22 +3870,45 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 /* v45: 输入框容器保留与消息流同宽的滚动条 gutter，居中基准才能与 .mf-list 一致
    （消息流内容盒被滚动条挤掉 --scrollbar-gutter-w，这里补上同等预留）。 */
 .app-main.todo-card-active .chat-panel-composer { width: 100%; max-width: none; padding-right: var(--scrollbar-gutter-w, 12px); }
+/* plan-156-619 S3（需求 C1）：任务卡避让**不再改宽度**。
+   旧实现 `width: min(--content-max-w, calc(100% - 360px))` 让宽度参与卡片占位计算，
+   卡片出现/消失时消息列整体重排、阅读位置丢失。现在宽度只由「几何纪元」决定
+   （窗口缩放 / 拖面板 / 折叠展开面板 / 用户改内容宽度），卡片只推动水平位置。 */
 .app-main.todo-card-active .mf-list,
 .app-main.todo-card-active .composer {
-  width: min(var(--content-max-w), calc(100% - 360px));
-  max-width: none;
-  margin-left: max(0px, calc((100% - 360px - var(--content-max-w)) / 2));
+  margin-left: max(0px, calc(var(--content-col-left, 0px) - 180px));
   margin-right: 0;
   box-sizing: border-box;
 }
 .app-main.todo-card-active .todo-float { right: 20px; width: min(288px, calc(100% - 40px)); }
-/* 中间区较窄时自动收起任务卡，并恢复完整消息/输入宽度。 */
+/* 中间区较窄时自动收起任务卡——优先保住内容列宽度（降级卡片，而不是压窄消息流）。 */
 @container main-pane (max-width: 960px) {
   .app-main.todo-card-active .mf-list,
   .app-main.todo-card-active .composer {
-    width: 100%; max-width: var(--content-max-w); margin-left: auto; margin-right: auto;
+    margin-left: var(--content-col-left, auto);
+    margin-right: 0;
   }
   .app-main.todo-card-active .todo-float { display: none; }
+}
+
+/* ══ plan-156-619 S3：内容列定宽（需求 C1 的落地点） ══
+   三个变量由 useContentColumnGeometry 写到 `.chat-panel` 上：
+     --content-col-w     内容列宽度（冻结值：只在几何纪元变化时重算）
+     --content-col-left  内容列左边距（卡片/尺寸变化只改它）
+     --card-reserve      右侧卡片占位（展开 336 / 胶囊与隐藏 0）
+   兜底值让「hook 尚未写入」的极短瞬间也保持近似居中，不出现宽度 0 的塌陷。 */
+.chat-panel {
+  --content-col-w: calc(100% - 64px);
+  --content-col-left: 32px;
+  --card-reserve: 0px;
+}
+.chat-panel .mf-list,
+.chat-panel .composer {
+  width: var(--content-col-w);
+  max-width: none;
+  margin-left: var(--content-col-left);
+  margin-right: 0;
+  box-sizing: border-box;
 }
 
 :root[data-theme="light"] .app-main,
@@ -3879,25 +3965,10 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 .message-flow::-webkit-scrollbar-track {
   background: transparent;
 }
-/* plan-282-1492：底部安全区改为"按需出现 + 动画让位"。
- *
- * 旧实现（plan-282-1434 A1 → 1441 #11）在滚动容器上**恒定预留** 44px，理由是"条件性
- * padding 会让任务开始/结束时消息流高度跳变"。代价是：胶囊还没出现时，这段留白就是
- * 输入框与消息流之间的一条空白。
- *
- * 现在拆成两步（占位块由 MessageFlow 渲染在消息内容之后）：
- *   - 胶囊未出现：占位块高度 0 —— 不预留、无空白；
- *   - 胶囊出现时：高度过渡到 44px（与胶囊入场同为 --dur-4），消息流侧的 ResizeObserver
- *     在过渡期间逐帧补滚（见 MessageFlow 的占位块 RO）→ 内容被平滑顶上去，且"顶"的
- *     全过程都停在最底部、保持自动滚动；胶囊消失时反向收回。
- * 44px 算式沿用旧值：胶囊 ~30px + 底边间隙 8px − composer padding-top 4px + 净空 ~10px。
- * 限定 .chat-panel-flow 后代，避免影响右面板内的子代理会话流。 */
-.chat-panel-flow .message-flow-capsule-space {
-  height: 0;
-  transition: height var(--dur-4) var(--ease-emphasized-decel);
-}
-/* 胶囊可见性由 ChatPanel 打根类（胶囊上报）——沿用项目既有"根容器状态类驱动布局"的写法。 */
-.chat-panel.has-capsule .chat-panel-flow .message-flow-capsule-space { height: 44px; }
+/* plan-156-619 S7：输入框上方的悬浮胶囊已下线（改由右上角综合工具卡承载），
+   此处原先的 `.message-flow-capsule-space` 占位块与 `.has-capsule` 根类规则一并移除——
+   没有胶囊就不需要 44px 让位区，也不需要为它做高度过渡。
+   注：只保留 `.message-flow.is-positioning` 的首帧隐藏逻辑（与胶囊无关）。 */
 /* plan-282-1434（B6）：会话首次填充贴底完成前隐藏内容。
    配合 initialOffset（首帧即落在底部区域）与双帧补滚，使"点击会话"直接呈现底部，
    不再出现"先渲染顶部、再滚下去"的过程。用 visibility 而非 display，保留滚动几何。 */
@@ -3921,6 +3992,8 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 .message-flow::-webkit-scrollbar-thumb:hover {
   background-color: color-mix(in srgb, var(--text-2) 80%, transparent);
 }
+/* plan-156-619 S3：这里此前也定义了一份 `max-width + margin: 0 auto`，与文件前段重复。
+   保留同一口径（后定义生效），宽度切换由末尾的主面板定宽段承担。 */
 .mf-list { display: flex; flex-direction: column; max-width: var(--content-max-w); margin: 0 auto; padding: 0 32px; }
 .mf-entry { width: 100%; }
 .turn-group { margin-bottom: 4px; padding: 0; width: 100%; }
@@ -4027,6 +4100,7 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 /* v40: 旧 StreamingText 展开式思考卡样式已移除——思考流统一走 tc-row + ThinkingTicker 紧凑行 */
 /* 输入框与消息流同宽同 padding */
 /* plan-20261009-ui：工作区胶囊行已在输入卡下方，底部留白从 10+16 收到 4+6（胶囊底到窗口边约 10px），不再像「悬空」 */
+/* plan-156-619 S3：主聊天面板内由「内容列定宽」段接管宽度与位置，这里保留原居中口径作为其它宿主的兜底。 */
 .composer { position: relative; width: 100%; min-width: 360px; max-width: var(--content-max-w); margin: 0 auto; padding: 4px 32px 4px; }
 .chat-panel-composer { min-width: 360px; flex-shrink: 0; border-bottom: 1px solid var(--border); }
 .composer-main { min-height: 60px; padding: 8px 10px; }
@@ -4038,19 +4112,13 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
  * 于是输入框比消息列右移了半个 gutter（6px）。
  * 处理：给 composer 容器预留同一宽度的右侧 gutter，使两者居中基准一致（左边界重合）。 */
 .chat-panel-composer { padding-bottom: 6px; padding-right: var(--scrollbar-gutter-w, 12px); flex-shrink: 0; border-bottom: 1px solid var(--border); }
-/* plan-20261009-ui U6：悬浮胶囊（任务进度 / 文件变更）已迁至 styles/composer.css 的 .tcap-* 系列；
- * 旧 .task-capsule* / .tc-seg* / .tc-pop* / .tc-step* / .tc-group* / .tc-file* / .tc-op 规则整体删除。 */
+/* plan-156-619 S7：输入框上方的悬浮胶囊已整体下线（任务进度 / 工作流 / 产物三段改由
+   右上角综合工具卡承载），因此旧胶囊的样式与降级规则一并移除：
+   .task-capsule* / .tc-seg* / .tc-pop* / .tc-step* / .tc-group* / .tc-file* / .tc-op / .tcap-* / .has-capsule。 */
 .chat-panel-composer { position: relative; }
 
 /* plan-282-1434（B2）：旧单浮层的横排/分隔线媒体查询已不再需要
    （两个浮层各自纵向：固定标题 + 滚动体）。 */
-@media (prefers-reduced-motion: reduce) {
-  .task-capsule-wrap, .tc-pop { animation: none; }
-  .tc-step-dot.running { animation: none; }
-  .tc-seg-caret { transition: none; }
-  /* plan-282-1492：占位块直接到位，不做高度过渡 */
-  .message-flow-capsule-space { transition: none; }
-}
 .composer-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 4px; padding-top: 6px; }
 .composer-image-preview { display: block; max-width: 100%; max-height: 70vh; margin: 0 auto; object-fit: contain; border-radius: var(--r-sm); }
 .usage-detail-title { font-weight: 600; color: var(--text-1); margin-bottom: 4px; }
@@ -4382,8 +4450,8 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 .sidebar.sb { font-size: var(--sidebar-fs, 14px); }
 .sidebar.sb .sb-nav-icon svg,
 .sidebar.sb .sb-icon-btn svg,
-.sidebar.sb .sb-project > svg,
-.sidebar.sb .sb-project-chevron svg,
+.sidebar.sb .sb-project-slot svg,
+.sidebar.sb .sb-session-slot svg,
 .sidebar.sb .sb-session svg,
 .sidebar.sb .sb-user-settings svg,
 .sidebar.sb .sb-nav-arrow svg { width: var(--sidebar-icon, 16px); height: var(--sidebar-icon, 16px); }
@@ -4736,61 +4804,9 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 .subagent-panel-body .flow-scroll-bottom-btn { right: 16px; bottom: 16px; }
 .subagent-panel-body .jump-dots { display: none; }
 
-/* ── v36 (plan-321-1600 M2): 子代理结构化汇报卡片（仅右面板渲染） ──
-   六节汇报渲染为分区视图：文件芯片 / 验证 / 验收 / 风险；
-   解析失败时走 .subagent-report-raw 原样 markdown，保证不吞内容。
-   v42：卡片根改挂 .turn-agent-text（见 SubagentReportCard），内部 markdown 直接继承
-   主消息流排版；此处只保留「分区头 / 条目行 / 文件芯片」等结构化专属样式，
-   字号一律由正文基准（--fs-md / --chat-line-height）派生，不再另立一套小字号体系。 */
-.subagent-report { display: flex; flex-direction: column; gap: 14px; margin: 2px 0; }
-.subagent-report-raw { gap: 0; }
-/* 分区头：与主消息流 h3 同级（1.08em / 600 / --text-1），图标随标题层级放大 */
-.sr-sec { display: flex; flex-direction: column; gap: 8px; }
-.sr-sec-head { display: flex; align-items: center; gap: 6px; font-size: 1.08em; font-weight: 600; line-height: 1.45; color: var(--text-1); }
-.sr-sec-head > svg { flex-shrink: 0; color: var(--text-2); }
-.sr-sec-head .sr-count { font-size: 11px; font-weight: 400; color: var(--text-3); background: var(--bg-hover); border-radius: 999px; padding: 1px 7px; }
-.sr-files { display: flex; flex-wrap: wrap; gap: 6px; }
-.sr-file { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 3px 9px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg-elevated); color: var(--text-1); font-size: 12.5px; cursor: pointer; transition: border-color var(--dur-fast), background var(--dur-fast); }
-.sr-file:hover { border-color: var(--border-hover); background: var(--bg-hover); }
-.sr-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* 条目行：勾/叉图标 + 正文；正文走 .md-body，与消息流同字号 / 行高 / 颜色 */
-.sr-list { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
-.sr-list li { display: flex; align-items: flex-start; gap: 8px; font-size: var(--fs-md, 13px); line-height: var(--chat-line-height, 2.2); color: var(--text-1); }
-/* 图标槽高度 = 首行行高，图标居中：与首行文字同一条中线（此前靠写死的 margin-top: 4px，图标会偏高） */
-.sr-list .sr-mark { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: calc(var(--fs-md, 13px) * var(--chat-line-height, 2.2)); }
-.sr-list .md-body { flex: 1; min-width: 0; }
-.sr-list .md-body > :first-child { margin-top: 0; }
-.sr-list .sr-mark.ok { color: var(--success); }
-.sr-list .sr-mark.no { color: var(--error); }
-.sr-list .sr-mark.warn { color: var(--warning, #d29922); }
-.sr-list .sr-mark.plain { color: var(--text-3); }
-.sr-risks { border: 1px solid color-mix(in srgb, var(--warning, #d29922) 28%, transparent); background: color-mix(in srgb, var(--warning, #d29922) 8%, transparent); border-radius: var(--r-sm); padding: 8px 10px; }
-.sr-risks .sr-list li { color: var(--text-1); }
-/* plan-387-1825 D1-3：条目内的围栏代码块。
- * .md-body 是块级容器，代码块本就占满整行；此处只需统一上下留白，
- * 让代码框与同条目的其他行之间有呼吸感。层次只用留白与圆角表达，
- * 不引入左侧竖线（项目设计规则）。 */
-.sr-list .md-code-block { margin: 6px 0; }
-.sr-list .md-body > .md-code-block:first-child { margin-top: 0; }
-.sr-list .md-body > .md-code-block:last-child { margin-bottom: 0; }
-
-/* ── v42 修复：卡片内 markdown 排版归还主消息流 ──
- * 此前本卡片自定义了一套 12.5px / 1.65 / --text-2 的独立排版：比正文（.turn-agent-text
- * 的 13px / 1.7 / --text-1）更小更灰、标题层级被压平，于是同一份汇报出现
- * 「运行中＝普通 markdown（图一，优雅）→ 终态＝结构化卡片（图二，紧凑丑陋）」的落差
- * （用户反馈）。现在卡片根挂 .turn-agent-text，内部 markdown 全量继承主消息流的
- * 元素级规则（.turn-agent-text .md-body 下的标题 / 列表 / 行内代码 / 代码块 / 表格 / 引用），
- * 本段只保留「窄面板必需、主消息流未覆盖」的兜底，不再另立第二套字号体系。 */
-.subagent-report .md-body,
-.subagent-report .md-body .md-p,
-.subagent-report .md-body .md-li { overflow-wrap: anywhere; word-break: break-word; }
-/* 分节由 .sr-sec 的 flex gap 控距，首末块级元素 margin 归零避免双倍间距 */
-.subagent-report .md-body > :first-child { margin-top: 0; }
-.subagent-report .md-body > :last-child { margin-bottom: 0; }
-/* 宽表格在窄面板内横向滚动，而不是撑破容器 */
-.subagent-report .md-body .md-table { display: block; max-width: 100%; overflow-x: auto; }
-/* 文件链接禁用态（文件不存在）：主流未定义该状态，卡片内补一条以保住「不可点击」语义 */
-.subagent-report .md-body .md-file-link-disabled { color: var(--text-3); }
+/* plan-156-619 S5d：**已移除**子代理结构化汇报卡片（.subagent-report / .sr-* 共 50+ 条规则）。
+   子会话现在是普通会话，其输出与主会话同排版——保留两套视觉语言只会让用户困惑
+   （同一份内容在主会话是 markdown、在子会话变成六节分区卡）。 */
 
 /* v19: 终端失败覆盖层 + 容器防 0 高 */
 .terminal-wrap { position: relative; height: 100%; min-height: 120px; }

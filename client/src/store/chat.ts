@@ -2,7 +2,7 @@
 import { create } from "zustand";
 import { api } from "../api/client";
 import { ApiError } from "../api/client";
-import type { ArtifactOut, ArthasEntryOut, AttachmentInfo, ComposerRefOut, DebugStatusOut, FileChangeOut, MergeReportOut, MessageOut, ModelOut, ProjectOut, ProviderOut, RollbackAffected, RollbackConflict, RollbackPreviewFile, SessionOut, TaskOut, TurnOut, WorkflowNodeBrief } from "../api/client";
+import type { ArtifactOut, ArthasEntryOut, AttachmentInfo, ComposerRefOut, DebugStatusOut, FileChangeOut, MergeReportOut, MessageOut, ModelOut, ProjectOut, ProviderOut, RollbackAffected, RollbackConflict, RollbackPreviewFile, SessionOut, TaskOut, TaskSuggestionOut, TurnOut, WorkflowNodeBrief } from "../api/client";
 import { wsClient, globalWsClient } from "../api/ws";
 import { normalizeApprovalMode, normalizeDraftMode } from "./drafts";
 import { parseRefLines } from "../utils/refLines";
@@ -62,6 +62,9 @@ export interface TodoItem {
   content: string;
   activeForm?: string;
   status: "pending" | "in_progress" | "completed";
+  /** plan-156-619 S6：执行该步骤的子会话 id；缺省 = 主代理自己执行。
+   *  进程行据此显示「子会话」chip，点击可跳转到该子会话。 */
+  owner?: number | null;
 }
 
 /** v7(H): 运行中工具结果实时视图（tool.result 事件投影，含 change_stat） */
@@ -454,11 +457,24 @@ interface ChatState {
     report: MergeReportOut | null;
   } | null;
   wsConnected: boolean;
+  /** plan-156-619 S5：主会话 id → 其下子会话列表（左栏子会话行的数据源）。
+   *  `list_sessions` 会过滤掉 side_parent_id 非空的会话，因此子会话必须单独拉取；
+   *  WS 只做增量（subsession.created / session.updated），刷新后由本桶重建。 */
+  subsessionsByParent: Record<number, SessionOut[]>;
+  /** plan-156-619 S10：当前会话待处理的后续任务建议（消息流底部卡片数据源）。
+   *  取消（dismiss）后由后端置 dismissed 并移除本地状态，刷新不会复活。 */
+  pendingSuggestion: TaskSuggestionOut | null;
   /** plan-278-1391: 添加同路径已归档项目时的提示（前端弹「恢复并打开」确认框）。 */
   archivedProjectPrompt: { projectId: number; name: string; path: string } | null;
 
   // 动作
   loadBootstrap: () => Promise<void>;
+  /** plan-156-619 S5：拉取某主会话下的子会话（左栏进入项目分组时按需调用）。 */
+  loadSubsessions: (parentId: number) => Promise<void>;
+  /** plan-156-619 S10：拉取当前会话的建议（切换会话 / 刷新后重建卡片）。 */
+  loadSuggestion: (sessionId: number) => Promise<void>;
+  /** plan-156-619 S10：取消建议（后端置 dismissed，本地清空）。 */
+  dismissSuggestion: () => Promise<void>;
   loadModels: () => Promise<void>;
   createProject: (path: string, name?: string, look?: { icon?: string | null; color?: string | null }) => Promise<ProjectOut | null>;
   /** plan-20261009-ui U1：编辑项目名称 / 外观（项目弹窗编辑模式） */
@@ -1057,8 +1073,51 @@ export const useChatStore = create<ChatState>((set, get) => ({
   hiddenTurnErrors: [],
   mergeProgress: null,
   wsConnected: false,
+  /** plan-156-619 S5：主会话 id → 子会话列表（左栏子会话行数据源） */
+  subsessionsByParent: {},
+  /** plan-156-619 S10：当前会话待处理的后续任务建议（默认无） */
+  pendingSuggestion: null,
   /** plan-278-1391: 同路径项目已归档提示（默认无）。 */
   archivedProjectPrompt: null,
+
+  /** plan-156-619 S5：拉取主会话下的子会话。
+   *  `list_sessions` 过滤了 side_parent_id 非空的行，所以子会话必须单独取；
+   *  这里按 parentId 存桶，切会话时不重复请求同一主会话。 */
+  loadSubsessions: async (parentId) => {
+    try {
+      const list = await api.listSubsessions(parentId);
+      set((s) => ({ subsessionsByParent: { ...s.subsessionsByParent, [parentId]: list } }));
+    } catch {
+      // 拉取失败保持旧值：左栏宁可少显示，也不要因为网络抖动清空已有子会话行
+    }
+  },
+
+  /** plan-156-619 S10：拉取当前会话的待处理建议。
+   *  接口只返回 pending，因此「取消过」的建议刷新后天然不再出现，无需前端额外过滤。 */
+  loadSuggestion: async (sessionId) => {
+    try {
+      const res = await api.getLatestSuggestion(sessionId);
+      // 请求返回时会话可能已经切走：只在仍是当前会话时写入，避免卡片串到别的会话
+      if (get().currentSessionId !== sessionId) return;
+      set({ pendingSuggestion: res.suggestion ?? null });
+    } catch {
+      // 拉取失败不清空：宁可保留已有卡片，也不要因一次网络抖动把它抹掉
+    }
+  },
+
+  /** plan-156-619 S10：取消建议。
+   *  先请求后端置 dismissed（保证跨刷新不再出现），成功后再清本地；
+   *  失败则保留卡片并提示，否则用户会以为「点了取消但其实没生效」。 */
+  dismissSuggestion: async () => {
+    const cur = get().pendingSuggestion;
+    if (!cur) return;
+    try {
+      await api.dismissSuggestion(cur.id);
+      set({ pendingSuggestion: null });
+    } catch (e) {
+      set({ error: "取消建议失败：" + String(e) });
+    }
+  },
 
   loadModels: async () => {
     // allSettled：单边请求失败时保留旧值；成功的空结果必须生效，
@@ -1243,6 +1302,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const payload = ev.payload as Record<string, unknown>;
       get().handleWs(ev.event, payload);
     });
+
+    /** plan-156-619 S10：切会话后拉一次待处理建议。
+     *  建议卡只在「最新一轮」展示，所以必须由后端按会话给出 pending 记录；
+     *  接口只返回 pending，取消过的建议天然不会再回来。 */
+    void get().loadSuggestion(sessionId);
 
     if (cached) {
       // v2.2: 缓存命中——零重载切换，静默补齐运行状态与任务（后台期间可能已变化）
@@ -2861,6 +2925,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
               content: String(t.content ?? ""),
               activeForm: t.activeForm ? String(t.activeForm) : undefined,
               status: (["pending", "in_progress", "completed"].includes(String(t.status)) ? String(t.status) : "pending") as TodoItem["status"],
+              // plan-156-619 S6：保留步骤执行者（子会话 id），进程行据此显示归属 chip
+              owner: typeof t.owner === "number" && t.owner > 0 ? t.owner : null,
             }))
             .filter((t) => t.content),
           // plan-282-1492: 记下清单归属 turn——首载（重启）后即便清单还在，
@@ -3229,6 +3295,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
               : x)),
           }));
         }
+        break;
+      }
+      case "suggestion.created": {
+        // plan-156-619 S10：AI 在收尾时提了一条后续任务建议 → 消息流底部渲染卡片。
+        // 只接受当前会话的事件（多会话并发时避免卡片串到别的会话）。
+        const sid = Number(payload.session_id ?? 0);
+        if (sid > 0 && sid !== get().currentSessionId) break;
+        const suggestionId = Number(payload.suggestion_id ?? 0);
+        if (suggestionId <= 0) break;
+        set({
+          pendingSuggestion: {
+            id: suggestionId,
+            session_id: sid,
+            turn_id: payload.turn_id != null ? Number(payload.turn_id) : null,
+            title: String(payload.title ?? "下一步建议"),
+            summary: String(payload.summary ?? ""),
+            steps: Array.isArray(payload.steps) ? payload.steps.map((s) => String(s)) : [],
+            mode: String(payload.mode ?? "agent"),
+            rationale: payload.rationale ? String(payload.rationale) : undefined,
+          },
+        });
         break;
       }
       case "session.completed": {

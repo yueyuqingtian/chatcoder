@@ -387,6 +387,8 @@ const DICT: Dict = {
   "gp.terminal_font_desc":        ["选择集成终端使用的字体（留空继承系统终端字体）", "Terminal font (empty = inherit system)"],
   "gp.enhanced_search":           ["增强搜索（ripgrep）", "Enhanced Search (ripgrep)"],
   "gp.enhanced_search_desc":      ["使用 ripgrep 进行更快的全库文本搜索", "Use ripgrep for faster full-repo text search"],
+  "gp.message_search":            ["消息搜索按钮", "Message search button"],
+  "gp.message_search_desc":       ["在消息区左上角显示搜索入口；关闭后仅隐藏按钮，Ctrl+F 仍可唤起搜索", "Show a search button at the top-left of the message area; hiding it keeps Ctrl+F working"],
   "gp.memory":                    ["AI 主动生成记忆", "Auto Memory"],
   "gp.memory_desc":               ["每轮对话结束时 AI 自主提取关键事实/偏好写入记忆库", "AI extracts key facts/preferences into memory after each turn"],
   "gp.reasoning":                 ["消息流显示 reasoning", "Show reasoning in message flow"],

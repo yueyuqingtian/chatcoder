@@ -20,7 +20,8 @@
 .sidebar.sb-v2 .sb-session { border-radius: var(--r-md); transition: background var(--dur-2) var(--ease-standard); }
 .sidebar.sb-v2 .sb-session.active { background: var(--sidebar-selected); }
 .sidebar.sb-v2 .sb-project { border-radius: var(--r-md); }
-.sidebar.sb-v2 .sb-project-chevron { transition: transform var(--dur-spring) var(--spring-snappy); }
+/* plan-156-619 S1：项目行折叠箭头已移除（整行点击即展开收起），对应过渡规则一并删除。 */
+.sidebar.sb-v2 .sb-session-slot { transition: color var(--dur-2) var(--ease-standard), background var(--dur-2) var(--ease-standard); }
 .sidebar.sb-v2 .sb-user-settings { border-radius: var(--r-md); transition: background var(--dur-2) var(--ease-standard); }
 
 /* ── 主区：浮起卡片 ── */

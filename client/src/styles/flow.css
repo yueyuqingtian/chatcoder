@@ -4,13 +4,13 @@
 svg.ic-spinner { animation: none; }
 svg.ic-spinner .ic-spinner-arc { transform-box: view-box; transform-origin: 12px 12px; animation: session-spin var(--dur-spin) linear infinite; }
 .todo-spinner,
-.btn .btn-spinner,
-.sb-session-pulse.on {
+.btn .btn-spinner {
   border: 2px solid color-mix(in srgb, currentColor 25%, transparent);
   border-top-color: currentColor; border-radius: 50%;
   animation: session-spin var(--dur-spin) linear infinite;
 }
-.sb-session-pulse.on { color: var(--accent); }
+/* plan-156-619 S1：侧栏运行指示已收进 .sb-session-slot，尺寸与配色统一由 global.css 定义
+   （此前这里也有一条 .sb-session-pulse.on，两处各写一半、靠加载顺序生效，容易分叉）。 */
 .todo-spinner { color: var(--accent); }
 
 /* ── 消息流底部等待标记（SVG）：三点依次起伏，末端光标呼吸 ── */
@@ -177,7 +177,90 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
 .gallery-zoom-pct { font-variant-numeric: tabular-nums; border-radius: 999px; height: 26px; }
 .gallery-zoom-pct:hover { color: #fff; background: rgba(255, 255, 255, 0.12); }
 
-.tcap-bar { border-radius: 999px; overflow: hidden; }
+/* plan-156-619 S7：`.tcap-bar` 随输入框上方胶囊一并下线（进度条改由工具卡 .tcard-progress-bar 承载）。 */
+
+/* ══ 后续任务建议卡（plan-156-619 S10）══════════════════════════════════════
+   位置：消息流底部的收尾卡（MessageFlow trailingNode）。
+   视觉纪律：
+     · 纯色底 + 1px 边框 + --r-lg，不用渐变 / 毛玻璃（浮层不透明原则）；
+     · 不用左侧装饰性竖线表达层级，层次靠留白、字号字重、底色；
+     · 按钮走 ui/Button，圆角与间距全部用令牌。 */
+.sg-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 8px 0 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--bg-panel);
+}
+.sg-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--text-3);
+}
+.sg-head-icon { display: inline-flex; flex-shrink: 0; color: var(--accent); }
+.sg-head-title { flex-shrink: 0; font-weight: 600; color: var(--text-2); letter-spacing: 0.02em; }
+.sg-head-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.sg-body { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.sg-title {
+  font-size: var(--fs-md, 13px);
+  font-weight: 600;
+  line-height: 1.6;
+  color: var(--text-1);
+}
+.sg-summary {
+  font-size: 12px;
+  line-height: 1.75;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.sg-steps { display: flex; flex-direction: column; gap: 4px; margin: 2px 0 0; padding: 0; list-style: none; }
+.sg-steps li { display: flex; align-items: flex-start; gap: 7px; min-width: 0; font-size: 12px; line-height: 1.75; color: var(--text-2); }
+.sg-step-idx {
+  flex-shrink: 0;
+  width: 16px; height: 16px;
+  margin-top: 3px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  color: var(--text-3);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.sg-step-text { min-width: 0; overflow-wrap: anywhere; }
+
+.sg-steps-more {
+  align-self: flex-start;
+  display: inline-flex; align-items: center; gap: 4px;
+  margin-top: 1px; padding: 2px 6px;
+  border: none; border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-3);
+  font-size: 11px; line-height: 1.7;
+  cursor: pointer;
+  transition: background var(--dur-fast), color var(--dur-fast);
+}
+.sg-steps-more:hover { background: var(--bg-hover); color: var(--text-2); }
+.sg-steps-caret { flex-shrink: 0; transition: transform var(--dur-fast); }
+.sg-steps-caret.is-open { transform: rotate(180deg); }
+
+.sg-error {
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--danger, #e5484d);
+  overflow-wrap: anywhere;
+}
+
+/* 操作行：主操作在前，取消在后；两者之间 8px（项目规则：并列按钮必须有间距） */
+.sg-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 /* ══ 截图卡（plan-20261015-browser-agent）══════════════════════════════════
    浏览器 / 电脑操控截图在时间线上的常显预览：与工具行同一左边界、同一字号层级；
