@@ -1100,26 +1100,6 @@ export function IconPin({ size = 18, color = "currentColor", strokeWidth = 1.6, 
   );
 }
 
-/** 图钉（取消置顶）：与 IconPin 同外形、同重心，加一道 45° 斜线表示「已固定 → 点击解除」。
- *  为什么不用「另一枚图钉 + 颜色区分」：置顶态本身已经是 accent 色，
- *  再靠颜色表达反操作会让「外观相同、行为相反」的控件难以分辨——
- *  图标形状必须自己说明「这是解除动作」，颜色只承担状态强调。 */
-export function IconPinOff({ size = 18, color = "currentColor", strokeWidth = 1.6, ...rest }: IconProps) {
-  return (
-    <svg {...baseProps(size, color, strokeWidth, rest, "pin-off")}>
-      {/* 填充层与 IconPin 同形：两枚图标在同一槽位互切，
-          缺了这层会让「置顶 ↔ 取消置顶」切换时悬停反馈不一致（一个有填充一个没有）。 */}
-      <path className="ic-fill" d="M5 17h14v-2l-2-2V7a5 5 0 0 0-10 0v6l-2 2v2z" />
-      <g className="ic-tilt">
-        <line x1="12" y1="17" x2="12" y2="22" />
-        <path d="M5 17h14v-2l-2-2V7a5 5 0 0 0-10 0v6l-2 2v2z" />
-      </g>
-      {/* 斜线单独一层：不参与 .ic-tilt 倾斜，保证解除语义在任何角度下都读得出来 */}
-      <line x1="4" y1="20" x2="20" y2="4" />
-    </svg>
-  );
-}
-
 /** 魔术棒（星星）——AI 智能合并/建议（plan-282-1441 #5） */
 export function IconWand({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (

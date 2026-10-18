@@ -25,7 +25,7 @@ import { openProjectDialog } from "../store/projectDialog";
 import {
   IconChevronDown,
   IconFolder, IconLayers, IconSortDesc, IconPencil,
-  IconMoreHorizontal, IconPin, IconPinOff, IconPlus, IconRefresh,
+  IconMoreHorizontal, IconPin, IconPlus, IconRefresh,
   IconFolderPlus, IconArrowDown, IconCopy, IconClock, IconSortAlpha, IconArchive, IconGitBranch, IconTrash,
 } from "./icons";
 
@@ -428,35 +428,36 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
     const isCurrent = s.id === currentSessionId && !pageMode;
     const editing = renaming?.id === s.id;
     const busy = sessionBusy(s, busyIds);
-    // plan-156-619 S1：状态槽互斥优先级——运行中转圈 > 聚焦态置顶图标 > 空。
-    // 聚焦 = 当前会话，此时槽内给置顶入口（未运行时）；置顶会话在「置顶」分区同样如此。
-    const showPin = !busy && isCurrent;
+    // plan-156-619 修复（用户口径）：置顶入口不再绑定「聚焦」，而是**悬停会话行即出现**，
+    // 且始终是同一枚普通图钉（不因已置顶换成别的图标）。
+    // 槽位宽度恒定，图标只在 hover 时淡入 —— 标题起点不会因为出现/消失而位移。
+    // 运行中优先显示转圈：此时不提供置顶入口，避免「边跑边改排序」造成列表跳动。
     // plan-156-619 S5：主会话下的子会话（不含子会话自身——子项不再向下嵌套，一层扁平）
     const children = s.side_parent_id == null ? (subsessionsByParent[s.id] || []) : [];
     return (
       <Fragment key={s.id}>
       <div className={`sb-session${isCurrent ? " active" : ""}`} onClick={() => { if (editing) return; switchSession(s.id); onSessionFocus(); }}>
-        {/* plan-156-619 修复：状态槽在「未运行 + 聚焦」时提供置顶入口，并区分两种图标——
-            未置顶 → IconPin（点击置顶）、已置顶 → IconPinOff（点击取消置顶）。
-            此前两种情况都用同一个 IconPin，置顶后图标外形不变、只是变蓝，
-            用户看不出“再点一下是取消”，也无法区分“置顶”与“取消置顶”两个相反动作。 */}
-        {showPin ? (
-          <Tooltip content={s.pinned ? t("sidebar.ctx_unpin") : t("sidebar.ctx_pin")} side="top">
-            <span
-              className={"sb-session-slot is-pinnable" + (s.pinned ? " is-pinned" : "")}
-              role="button"
-              aria-label={s.pinned ? t("sidebar.ctx_unpin") : t("sidebar.ctx_pin")}
-              aria-pressed={s.pinned}
-              onClick={(e) => { e.stopPropagation(); togglePin(s); }}
-            >
-              {s.pinned ? <IconPinOff size={13} /> : <IconPin size={13} />}
-            </span>
-          </Tooltip>
-        ) : (
-          <span className="sb-session-slot" aria-hidden="true">
-            {busy && <span className="sb-session-pulse on" />}
-          </span>
-        )}
+        {/* plan-156-619 修复：行首固定槽位，悬停时淡入置顶按钮。
+            已置顶与未置顶共用同一枚图钉图标（用户明确要求「非置顶图标」），
+            状态差异只由颜色（accent）与 tooltip 文案表达，不换图标形状。 */}
+        <span className="sb-session-slot">
+          {busy ? (
+            <span className="sb-session-pulse on" aria-hidden="true" />
+          ) : (
+            <Tooltip content={s.pinned ? t("sidebar.ctx_unpin") : t("sidebar.ctx_pin")} side="top">
+              <span
+                className={"sb-slot-pin" + (s.pinned ? " is-pinned" : "")}
+                role="button"
+                aria-label={s.pinned ? t("sidebar.ctx_unpin") : t("sidebar.ctx_pin")}
+                aria-pressed={s.pinned}
+                onClick={(e) => { e.stopPropagation(); togglePin(s); }}
+              >
+                <IconPin size={13} />
+              </span>
+            </Tooltip>
+          )}
+        </span>
+
         {/* plan-20261016-ux（问题 9）：置顶会话只出现在「置顶」分区，分区标题已说明状态，行内不再重复钉子图标 */}
         {editing ? (
           <Input className="sb-rename-input" ref={renameInputRef} autoFocus value={renaming.value} onFocus={(e) => e.target.select()}
@@ -531,7 +532,7 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
           <div className="context-menu sb-context-menu" onClick={() => setMenuFor(null)}>
             <div className="context-menu-item" onClick={() => { setRenaming({ id: s.id, value: s.title || "" }); setMenuFor(null); }}><IconPencil size={13} /> {t("sidebar.ctx_rename")}</div>
             <div className="context-menu-item" onClick={() => { forkSession(s.id); onSessionFocus(); setMenuFor(null); }}><IconCopy size={13} /> {t("sidebar.ctx_fork")}</div>
-            <div className="context-menu-item" onClick={() => { togglePin(s); setMenuFor(null); }}>{s.pinned ? <IconPinOff size={13} /> : <IconPin size={13} />} {s.pinned ? t("sidebar.ctx_unpin") : t("sidebar.ctx_pin")}</div>
+            <div className="context-menu-item" onClick={() => { togglePin(s); setMenuFor(null); }}><IconPin size={13} /> {s.pinned ? t("sidebar.ctx_unpin") : t("sidebar.ctx_pin")}</div>
             <div className="context-menu-item" onClick={() => { api.createWorktree(s.id); setMenuFor(null); }}><IconGitBranch size={13} /> {t("sidebar.ctx_worktree")}</div>
             <div
               className={"context-menu-item" + (sessionBusy(s, busyIds) ? " disabled" : "")}

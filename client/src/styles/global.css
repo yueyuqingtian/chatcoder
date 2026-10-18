@@ -316,24 +316,33 @@ a { color: var(--accent); text-decoration: none; }
 .sb-session-time { font-size: 11px; color: var(--text-3); flex-shrink: 0; }
 .sb-session:hover .sb-session-time { display: none; }
 .sb-pin { display: inline-flex; color: var(--text-3); flex-shrink: 0; }
-/* plan-156-619 S1：会话行首列改「状态槽」——固定 20px（--sb-icon-slot），宽度恒定不跳动。
-   槽内同一时刻只出现一个：运行中转圈 / 聚焦态置顶图标 / 空。
-   此前是 10px 的 .sb-session-pulse 常驻占位，运行态才显环，且置顶图标已从行内移除，
-   导致「聚焦时没有置顶入口、运行指示与图标槽不对齐」。 */
+/* plan-156-619 修复：会话行首列固定 20px 槽位（--sb-icon-slot），宽度恒定不跳动。
+   槽内同一时刻只出现一个：运行中转圈 / 置顶按钮（悬停时淡入）。 */
 .sb-session-slot {
   display: inline-flex; align-items: center; justify-content: center;
   width: var(--sb-icon-slot); height: var(--sb-icon-slot);
   flex-shrink: 0; color: var(--text-3); border-radius: var(--r-sm);
   transition: color var(--dur-fast), background var(--dur-fast);
 }
-/* 置顶图标可点击：仅在聚焦（选中的当前会话）与非运行态时出现 */
-.sb-session-slot.is-pinnable { cursor: pointer; }
-.sb-session-slot.is-pinnable:hover { background: var(--sidebar-selected); color: var(--text-1); }
-/* 已置顶：常态强调色，**悬停也保持 accent**。
-   原先 `.is-pinnable:hover` 的特异性（0-3-0）高于 `.is-pinned`（0-2-0），
-   鼠标一移上去强调色就被压成 --text-1，「已置顶」这个状态在交互瞬间反而看不见了。 */
-.sb-session-slot.is-pinnable.is-pinned,
-.sb-session-slot.is-pinnable.is-pinned:hover { color: var(--accent); }
+/* 置顶入口：**悬停会话行时出现**（用户口径）。
+   · 槽位宽度恒定，所以图标淡入淡出不会让标题起点位移；
+   · 默认 opacity 0 且 pointer-events: none——避免「看不见却能点到」的隐形热区；
+   · 悬停整行或键盘聚焦到行内时淡入；
+   · 任何状态都用同一枚普通图钉（不带斜线），是否已置顶只靠颜色（accent）与
+     tooltip 文案区分——置顶会话位于「置顶」分区，分区标题已经表达过一次状态。 */
+.sb-slot-pin {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: var(--sb-icon-slot); height: var(--sb-icon-slot);
+  border-radius: var(--r-sm);
+  color: var(--text-3);
+  opacity: 0; pointer-events: none;
+  transition: opacity var(--dur-fast), color var(--dur-fast), background var(--dur-fast);
+}
+.sb-session:hover .sb-slot-pin,
+.sb-session:focus-within .sb-slot-pin { opacity: 1; pointer-events: auto; cursor: pointer; }
+.sb-slot-pin:hover { background: var(--sidebar-selected); color: var(--text-1); }
+/* 已置顶：悬停时用 accent 表达「当前已置顶」，与未置顶的 --text-1 区分开 */
+.sb-slot-pin.is-pinned:hover { color: var(--accent); }
 /* plan-156-619 S5：子会话行——与普通会话行同一几何（同一 --sb-row-pad / --sb-icon-slot），
    仅整体缩进一级（一个图标槽宽），并在行尾带一个「子会话」细标识。
    层级只用缩进 + 字号表达，不加色块、不加左侧竖线（项目规则禁止装饰性竖线）。 */
