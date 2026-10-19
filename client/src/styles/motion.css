@@ -46,6 +46,22 @@
   min-height: 0; /* grid 子项默认 min-height:auto 会撑开行高，必须复位 */
 }
 
+/* ── plan-20261019-motion-sweep：折叠容器作为「带 gap 的 flex 容器」的子项 ──
+ * 0 高度的子项在 flex / grid 容器里仍会占一份 gap，于是把原来的条件渲染换成 Collapse 后，
+ * 折叠态会凭空多出一段空白（改前没有这个节点）。
+ * 用法：容器声明 --collapse-gap（= 它的 gap 值），折叠容器加 .in-gap——折叠态用等量负 margin 抵消，
+ * 展开时 margin 与高度一起过渡，整个过程布局与「节点不存在 → 存在」一致。
+ * 只适用于纵向排布、且该子项不是第一个（首个子项前面没有 gap 可抵消）。
+ * 选择器叠了一层类名：.ui-collapse（components.css）晚于本文件加载，同特异性会盖掉这里的 transition。 */
+:is(.ui-collapse, .tc-collapse).in-gap {
+  margin-top: calc(var(--collapse-gap, 0px) * -1);
+  transition:
+    grid-template-rows var(--dur-3) var(--ease-emphasized-decel),
+    opacity var(--dur-2) var(--ease-emphasized-decel),
+    margin-top var(--dur-3) var(--ease-emphasized-decel);
+}
+:is(.ui-collapse, .tc-collapse).in-gap[data-open="true"] { margin-top: 0; }
+
 /* ── plan-248-1258 M1: 消息流内联折叠容器（ChatCollapse 组件专用）──
  * 与 collapse-grid 同机制但专用类名（避免与既有标记类撞名，见文件头警示），
  * 曲线用 emphasized-decel（入场顺滑），时长 --dur-3；位移随 --motion-dist 缩放，

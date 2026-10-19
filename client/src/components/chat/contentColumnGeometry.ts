@@ -22,7 +22,7 @@ export const MIN_COL_W = 560;
 
 /** 工具卡展开态宽度（与 toolcard.css 的 --tcard-w 同源）。 */
 export const CARD_W = 280;
-/** 胶囊最大宽度（与 toolcard.css 的 --tcard-cap-max-w 同源）。 */
+/** 胶囊最大宽度（与 toolcard.css 的 --tcard-cap-max-w 同源）；胶囊不再让位，仅作样式同源参考。 */
 export const CAPSULE_MAX_W = 260;
 /** 卡片 / 胶囊距宿主右缘的距离（与 toolcard.css 的 --tcard-inset 同源）。 */
 export const CARD_INSET = 14;
@@ -31,26 +31,20 @@ export const CARD_GAP = 16;
 
 /** 卡片形态对右侧空间的需求（px，按宿主「含滚动条 gutter 的外宽」计）。 */
 export const CLEARANCE_EXPANDED = CARD_W + CARD_INSET + CARD_GAP;
-export const CLEARANCE_CAPSULE = CAPSULE_MAX_W + CARD_INSET + CARD_GAP;
 export const CLEARANCE_NONE = 0;
+/** 宿主窄于此值时连胶囊也不显示：胶囊（最宽 260px）会盖住半个消息列。 */
+export const MIN_CAPSULE_HOST_W = 440;
 
 /**
- * 胶囊实际需要让出的右侧空间。
+ * 按形态取需要的让位空间。
  *
- * 折叠后的胶囊是**内容自适应宽度**（「39 子代理已完成 +1」实测不到 200px），
- * 旧实现一律按 `CAPSULE_MAX_W` 让位，右侧明明放得下也会把消息列与输入框整体左移。
- * 传入实测宽度就按实测算；尚未测到时才退回上限（宁可多让，不能压住正文）。
+ * plan-20261019-toolcard-v2：胶囊**悬浮**在右上角，不再让位——消息列与输入框保持居中排版，
+ * 胶囊只是盖在右侧留白（或极窄窗口时盖住一小角正文）之上。展开卡片体量大、会长时间压住正文，
+ * 仍按需让位（内容列只在右缘真的会被遮住时才左移，且只移需要的那一段）。
+ * 旧实现按胶囊实测宽度让位，折叠 / 展开的每次切换都会让整列正文跟着平移，用户明确不要。
  */
-export function capsuleClearance(measuredW?: number): number {
-  const w = measuredW && measuredW > 0 ? Math.min(measuredW, CAPSULE_MAX_W) : CAPSULE_MAX_W;
-  return w + CARD_INSET + CARD_GAP;
-}
-
-/** 按形态取需要的让位空间；胶囊按实测宽，其余形态宽度固定。 */
-export function clearanceForForm(form: "expanded" | "capsule" | "hidden", measuredW?: number): number {
-  if (form === "hidden") return CLEARANCE_NONE;
-  if (form === "expanded") return CLEARANCE_EXPANDED;
-  return capsuleClearance(measuredW);
+export function clearanceForForm(form: "expanded" | "capsule" | "hidden"): number {
+  return form === "expanded" ? CLEARANCE_EXPANDED : CLEARANCE_NONE;
 }
 
 export interface ColumnGeoInput {

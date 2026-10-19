@@ -68,13 +68,77 @@ namespace DesktopCore
             return t;
         }
 
+        // 最近一次 MoveTo 的落点读回：点击 / 移动 / 拖动的响应据此报告「光标实际停在哪、差了多少」
+        public static int LastX, LastY;
+        public static int LastErr;
+        // 校正前 SendInput 本身的落点偏差（calib 自检据此评估归一化公式的质量）
+        public static int LastRawErr;
+        public static bool LastCorrected;
+
         public static bool MoveTo(int x, int y)
+        {
+            return MoveTo(x, y, true);
+        }
+
+        /// <summary>
+        /// 把光标移到屏幕物理像素 (x, y)，并读回系统实际位置。
+        ///
+        /// 为什么要读回（plan-20261019-desktop-targeting）：SendInput 的绝对坐标要经过 0..65535 归一化再由系统
+        /// 反算回像素，多显示器、混合 DPI 或个别驱动下会差几个像素，而「发出去的坐标」与「光标实际所在」之间
+        /// 过去没有任何校验。这里读回光标，不一致就用 SetCursorPos（本进程是 Per-Monitor-V2，按物理像素）直接校正，
+        /// 并把偏差记到 LastErr 供调用方上报。拖动的中间步骤传 verify=false 以免拖慢手势。
+        /// </summary>
+        public static bool MoveTo(int x, int y, bool verify)
         {
             int nx, ny;
             Native.Normalize(x, y, out nx, out ny);
-            return Native.Send(new[] {
+            bool ok = Native.Send(new[] {
                 Native.MouseInput(Native.MOUSEEVENTF_MOVE | Native.MOUSEEVENTF_ABSOLUTE | Native.MOUSEEVENTF_VIRTUALDESK, nx, ny, 0)
             });
+            if (!verify) return ok;
+
+            Native.POINT p = new Native.POINT();
+            bool landed = false;
+            // SendInput 只是入队，光标位置要等输入线程处理完才更新：最多轮询约 24 ms
+            for (int i = 0; i < 12; i++)
+            {
+                Native.GetCursorPos(out p);
+                if (p.X == x && p.Y == y) { landed = true; break; }
+                Thread.Sleep(2);
+            }
+            LastCorrected = false;
+            LastRawErr = Math.Max(Math.Abs(p.X - x), Math.Abs(p.Y - y));
+            if (!landed)
+            {
+                Native.SetCursorPos(x, y);
+                LastCorrected = true;
+                Thread.Sleep(2);
+                Native.GetCursorPos(out p);
+            }
+            LastX = p.X; LastY = p.Y;
+            LastErr = Math.Max(Math.Abs(p.X - x), Math.Abs(p.Y - y));
+            return ok;
+        }
+
+        /// <summary>
+        /// 按下之前再确认一次光标就在目标点上，不在就用 SetCursorPos 拉回来。
+        ///
+        /// 为什么需要（plan-20261019-desktop-targeting）：从 MoveTo 到真正按下之间要等悬停态生效、还要做点击点命中测试
+        /// （最长 250 ms），这段时间里用户的真实鼠标一动，按下就落在别处。点击前最后一刻读回并校正，
+        /// 把「被用户碰了一下鼠标」造成的偏移压到最小。校正过才会改写 LastX / LastY / LastErr。
+        /// </summary>
+        public static bool EnsureAt(int x, int y)
+        {
+            Native.POINT p = new Native.POINT();
+            Native.GetCursorPos(out p);
+            if (p.X == x && p.Y == y) return true;
+            Native.SetCursorPos(x, y);
+            LastCorrected = true;
+            Thread.Sleep(2);
+            Native.GetCursorPos(out p);
+            LastX = p.X; LastY = p.Y;
+            LastErr = Math.Max(Math.Abs(p.X - x), Math.Abs(p.Y - y));
+            return LastErr == 0;
         }
 
         public static bool Click(int x, int y, string button, int count, bool restoreCursor)
@@ -106,16 +170,15 @@ namespace DesktopCore
                 default: down = Native.MOUSEEVENTF_LEFTDOWN; up = Native.MOUSEEVENTF_LEFTUP; break;
             }
 
+            // 按键事件只带按钮标志、不带 ABSOLUTE：位置由前面的 MoveTo 决定。
+            // 旧写法给按键事件也挂了 ABSOLUTE|VIRTUALDESK 且坐标为 (0,0)，一旦系统把它当作位置事件处理，
+            // 点击就会落到屏幕左上角——这是不必要的风险（plan-20261019-desktop-targeting）。
             bool ok = true;
             for (int i = 0; i < Math.Max(1, count); i++)
             {
-                ok &= Native.Send(new[] {
-                    Native.MouseInput(down | Native.MOUSEEVENTF_ABSOLUTE | Native.MOUSEEVENTF_VIRTUALDESK, 0, 0, 0),
-                });
+                ok &= Native.Send(new[] { Native.MouseInput(down, 0, 0, 0) });
                 Thread.Sleep(10);
-                ok &= Native.Send(new[] {
-                    Native.MouseInput(up | Native.MOUSEEVENTF_ABSOLUTE | Native.MOUSEEVENTF_VIRTUALDESK, 0, 0, 0),
-                });
+                ok &= Native.Send(new[] { Native.MouseInput(up, 0, 0, 0) });
                 if (i + 1 < count) Thread.Sleep(60);
             }
             return ok;
@@ -124,17 +187,7 @@ namespace DesktopCore
         private static void GetCursor(out Native.POINT p)
         {
             p = new Native.POINT();
-            try
-            {
-                // SetCursorPos needs a value; reading the current position is optional here.
-                System.Reflection.MethodInfo mi = typeof(Native).GetMethod("GetCursorPos");
-                if (mi != null)
-                {
-                    object[] args = new object[] { p };
-                    mi.Invoke(null, args);
-                    p = (Native.POINT)args[0];
-                }
-            }
+            try { Native.GetCursorPos(out p); }
             catch { }
         }
 
@@ -156,18 +209,19 @@ namespace DesktopCore
         {
             MoveTo(x1, y1);
             Thread.Sleep(40);
-            Native.Send(new[] { Native.MouseInput(Native.MOUSEEVENTF_LEFTDOWN | Native.MOUSEEVENTF_ABSOLUTE | Native.MOUSEEVENTF_VIRTUALDESK, 0, 0, 0) });
+            Native.Send(new[] { Native.MouseInput(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0) });
 
             int steps = Math.Max(4, Math.Min(40, durationMs / 15));
             for (int i = 1; i <= steps; i++)
             {
                 int px = x1 + (x2 - x1) * i / steps;
                 int py = y1 + (y2 - y1) * i / steps;
-                MoveTo(px, py);
+                // 中间步骤不读回光标（逐步轮询会拖慢手势）；终点步骤读回并校正
+                MoveTo(px, py, i == steps);
                 Thread.Sleep(Math.Max(1, durationMs / steps));
             }
 
-            return Native.Send(new[] { Native.MouseInput(Native.MOUSEEVENTF_LEFTUP | Native.MOUSEEVENTF_ABSOLUTE | Native.MOUSEEVENTF_VIRTUALDESK, 0, 0, 0) });
+            return Native.Send(new[] { Native.MouseInput(Native.MOUSEEVENTF_LEFTUP, 0, 0, 0) });
         }
 
         /// <summary>Types a string with KEYEVENTF_UNICODE so non-ASCII arrives intact.</summary>
@@ -289,6 +343,37 @@ namespace DesktopCore
                     Native.Send(new[] { Native.KeyInput(m, 0, Native.KEYEVENTF_KEYUP) });
             }
 
+            return "";
+        }
+
+        /// <summary>
+        /// 按键序列：空格分隔的多个按键依次发送（"TAB TAB TAB"、"DOWN DOWN ENTER"、"ctrl+c ctrl+v"），
+        /// repeat 把整串重复若干次（1–50）。返回错误文本，空串表示全部发送成功；pressed 为成功发出的按键次数。
+        ///
+        /// 为什么要支持（plan-20261019-desktop-targeting）：模型习惯把连按写成「TAB TAB TAB」或额外传 repeat，
+        /// 旧实现把整串当成一个未知按键报错，或忽略 repeat 只按一次却回报成功，模型据此误判焦点位置。
+        /// </summary>
+        public static string KeysSeq(string raw, int repeat, out int pressed)
+        {
+            pressed = 0;
+            if (string.IsNullOrEmpty(raw) || raw.Trim().Length == 0) return "未提供按键";
+            // 「ctrl + a」这类带空格的写法先收成「ctrl+a」，免得被当成三个按键
+            raw = System.Text.RegularExpressions.Regex.Replace(raw, @"\s*\+\s*", "+");
+            string[] chords = raw.Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+            if (chords.Length == 0) return "未提供按键";
+            if (repeat < 1) repeat = 1;
+            if (repeat > 50) repeat = 50;
+            bool many = chords.Length * repeat > 1;
+            for (int r = 0; r < repeat; r++)
+            {
+                for (int c = 0; c < chords.Length; c++)
+                {
+                    string err = Keys(chords[c]);
+                    if (err.Length > 0) return err;
+                    pressed++;
+                    if (many) Thread.Sleep(35);
+                }
+            }
             return "";
         }
 

@@ -50,7 +50,7 @@ class Frame:
 
 @dataclass
 class ElementTable:
-    """一次 desktop_snapshot 的元素编号表。"""
+    """一次元素读取（desktop_snapshot / 截图附带清单）的元素编号表。"""
 
     items: dict[str, dict[str, Any]]
     handle: int = 0
@@ -58,15 +58,28 @@ class ElementTable:
     channel: str = ""
     created: float = field(default_factory=time.monotonic)
     stale: bool = False
+    # 清单内容签名（类型 + 名称的序列，不含位置）：动作后新清单与上一份签名相同就不必再把整份清单
+    # 打给模型一遍（编号沿用），表单录入这类步骤里清单几乎不变，每步重复附带只会白白撑大上下文
+    sig: str = ""
 
     def age(self) -> float:
         return max(0.0, time.monotonic() - self.created)
+
+
+def list_signature(items: dict[str, dict[str, Any]]) -> str:
+    """清单签名：有网页内容（d=1）时只看网页内容，忽略浏览器标签页标题这类会自己变的界面。"""
+    scoped = [it for it in items.values() if it.get("d")] or list(items.values())
+    parts = [f"{it.get('ct') or ''}|{it.get('n') or it.get('name') or it.get('_label') or ''}" for it in scoped]
+    return str(hash(tuple(parts))) if parts else ""
 
 
 _lock = threading.Lock()
 _frames: dict[tuple[int, int], Frame] = {}
 _elements: dict[tuple[int, int], ElementTable] = {}
 _last_points: dict[tuple[int, int], tuple[int, int, float]] = {}
+# 叠加层开关（marks 元素编号框 / grid 参考网格）：模型要一次就一直生效，直到它自己关掉——
+# 否则每张动作后截图都要重新声明，等于没有
+_overlays: dict[tuple[int, int], dict[str, bool]] = {}
 
 
 def _key(ctx: Any) -> tuple[int, int]:
@@ -109,7 +122,8 @@ def store_elements(
     mapping = {f"e{i}": dict(it) for i, it in enumerate(items, start=1)}
     with _lock:
         _elements[_key(ctx)] = ElementTable(
-            items=mapping, handle=int(handle or 0), title=str(title or ""), channel=channel)
+            items=mapping, handle=int(handle or 0), title=str(title or ""), channel=channel,
+            sig=list_signature(mapping))
     return mapping
 
 
@@ -128,12 +142,39 @@ def lookup_element(ctx: Any, ref: str) -> tuple[dict[str, Any], ElementTable] | 
         return dict(item), table
 
 
+def get_table(ctx: Any) -> ElementTable | None:
+    """当前元素编号表（含 stale 标记）；超过有效期视为没有。"""
+    with _lock:
+        table = _elements.get(_key(ctx))
+        if table is None or table.age() > ELEMENT_TTL_S:
+            return None
+        return table
+
+
 def mark_stale(ctx: Any) -> None:
     """写动作后元素编号过期：界面可能已变，再点时需要按名称重新定位。坐标系不受影响。"""
     with _lock:
         table = _elements.get(_key(ctx))
         if table is not None:
             table.stale = True
+
+
+def get_overlay(ctx: Any) -> dict[str, bool]:
+    """本任务的叠加层开关（默认全关）。"""
+    with _lock:
+        cur = _overlays.get(_key(ctx)) or {}
+        return {"marks": bool(cur.get("marks")), "grid": bool(cur.get("grid"))}
+
+
+def set_overlay(ctx: Any, *, marks: bool | None = None, grid: bool | None = None) -> dict[str, bool]:
+    """更新叠加层开关（None 表示不改），返回更新后的状态。"""
+    with _lock:
+        cur = _overlays.setdefault(_key(ctx), {"marks": False, "grid": False})
+        if marks is not None:
+            cur["marks"] = bool(marks)
+        if grid is not None:
+            cur["grid"] = bool(grid)
+        return {"marks": bool(cur["marks"]), "grid": bool(cur["grid"])}
 
 
 def note_point(ctx: Any, x: int, y: int) -> None:
@@ -157,8 +198,10 @@ def clear(ctx: Any | None = None) -> None:
             _frames.clear()
             _elements.clear()
             _last_points.clear()
+            _overlays.clear()
             return
         key = _key(ctx)
         _frames.pop(key, None)
         _elements.pop(key, None)
         _last_points.pop(key, None)
+        _overlays.pop(key, None)

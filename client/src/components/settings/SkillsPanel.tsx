@@ -5,7 +5,7 @@ import { api, type SkillOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { IconRefresh, IconPlus, IconX, IconFolder, IconZap, IconGitBranch } from "../icons";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { Empty, FormDialog, Input, Textarea, Tooltip } from "../ui";
+import { Collapse, Empty, FormDialog, Input, Textarea, Tooltip } from "../ui";
 import { Sw } from "./shared";
 
 /** 非阻塞提示：Electron 中 window.alert 是原生模态框，关闭后会破坏窗口焦点，统一改用全局提示条。 */
@@ -219,25 +219,29 @@ export function SkillsPanel() {
                 <Tooltip title={s.path || undefined} disabled={!s.path}><span className="sb-badge">{s.source}</span></Tooltip>
                 <span className="sb-badge accent">技能</span>
               </div>
-              {expandedSkill === s.id && (
-                <div className="skill-detail">
-                  <div className="skill-detail-field">
-                    <label className="settings-field-label">触发条件（AI 何时该用此技能）</label>
-                    <Textarea
-                      rows={2} placeholder="如：当任务涉及浏览器自动化操作时"
-                      value={triggerDrafts[s.id] ?? s.trigger ?? ""}
-                      onChange={(e) => setTriggerDrafts((p) => ({ ...p, [s.id]: e.target.value }))}
-                      aria-label="触发条件"
-                      onBlur={() => void saveTrigger(s)}
-                    />
+              {/* plan-20261019-motion-sweep：技能详情展开走 Collapse（此前只有淡入、没有高度过渡与收起动画）；
+                  lazy：折叠时不挂载，触发条件草稿存在 triggerDrafts 里，不随折叠丢失 */}
+              <Collapse open={expandedSkill === s.id} lazy className="in-gap">
+                {() => (
+                  <div className="skill-detail">
+                    <div className="skill-detail-field">
+                      <label className="settings-field-label">触发条件（AI 何时该用此技能）</label>
+                      <Textarea
+                        rows={2} placeholder="如：当任务涉及浏览器自动化操作时"
+                        value={triggerDrafts[s.id] ?? s.trigger ?? ""}
+                        onChange={(e) => setTriggerDrafts((p) => ({ ...p, [s.id]: e.target.value }))}
+                        aria-label="触发条件"
+                        onBlur={() => void saveTrigger(s)}
+                      />
+                    </div>
+                    <div className="skill-detail-field">
+                      <label className="settings-field-label">AI 可见性预览（实际注入系统提示词的内容）</label>
+                      <pre className="skill-prompt-preview">{renderSkillPromptLine(s)}</pre>
+                      <div className="skill-preview-hint">AI 通过 skill_view 工具按需加载正文（{s.content ? `正文 ${s.content.length} 字符` : "正文为空，AI 加载不到指令"}）</div>
+                    </div>
                   </div>
-                  <div className="skill-detail-field">
-                    <label className="settings-field-label">AI 可见性预览（实际注入系统提示词的内容）</label>
-                    <pre className="skill-prompt-preview">{renderSkillPromptLine(s)}</pre>
-                    <div className="skill-preview-hint">AI 通过 skill_view 工具按需加载正文（{s.content ? `正文 ${s.content.length} 字符` : "正文为空，AI 加载不到指令"}）</div>
-                  </div>
-                </div>
-              )}
+                )}
+              </Collapse>
             </div>
             <div className="settings-resource-actions">
               <Sw checked={s.is_active} onChange={async (v) => { try { await api.updateSkill(s.id, { is_active: v }); load(); } catch {} }} />

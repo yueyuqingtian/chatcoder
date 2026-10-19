@@ -7,13 +7,16 @@ from __future__ import annotations
 import asyncio
 import codecs
 import difflib
+import glob as _glob
 import hashlib
 import logging
+import os
 import re as _re
 import shutil
 import time as _time
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 
 from sqlalchemy import delete, select
@@ -160,7 +163,10 @@ async def _get_git_head(workspace: str) -> str | None:
 
 def checkpoint_file(workspace_root: str, file_path: str,
                     session_id: int | None = None, turn_id: int | None = None) -> str | None:
-    """fs_write 前复制文件到 .chatcoder/checkpoints/。返回快照路径。
+    """写盘 / 命令**执行前**复制文件到 .chatcoder/checkpoints/。返回快照路径。
+
+    plan-20261019-toolcard-v2：调用方必须在工具执行之前调用——此前在执行之后才调用，
+    复制到的是写后内容，二进制文件被改写 / 删除后无从恢复。
 
     v26: 文件名保留原相对路径（超长时截断并追加路径哈希），
     配合 TurnSnapshot.file_list 的 {ckpt, path} 登记可反查原文件，
@@ -174,6 +180,8 @@ def checkpoint_file(workspace_root: str, file_path: str,
             src = Path(workspace_root) / file_path
         if not src.exists():
             return None  # 新文件无需快照
+        if not src.is_file() or src.stat().st_size > _CKPT_MAX_BYTES:
+            return None  # 目录不备份；过大的文件不复制（plan-20261019-toolcard-v2：以免拖慢每次命令）
         root = Path(workspace_root).resolve()
         ckpt_dir = root / _CHECKPOINT_DIR
         if session_id is not None:
@@ -311,7 +319,7 @@ def record_checkpoint(snap: TurnSnapshot, checkpoint_path: str, new_file: str | 
 
 
 async def record_checkpoint_for_turn(db: AsyncSession, turn_id: int, checkpoint_path: str,
-                                     rel_path: str, new_file: str | None = None) -> None:
+                                     rel_path: str, new_file: str | None = None) -> bool:
     """按 turn 登记 checkpoint（写线程内查快照并追加 file_list/new_files）。失败非阻塞。
 
     rel_path：原文件相对工作区的路径（恢复时反查目标）。
@@ -319,37 +327,42 @@ async def record_checkpoint_for_turn(db: AsyncSession, turn_id: int, checkpoint_
     后续重复写盘跳过备份，避免 checkpoint 目录膨胀。
     v975：经 WriteEngine 单写线程（读-改-写在写线程内一条事务，去重可靠；
     async 侧不再持有 checkpoint 写事务，消除"写后悬挂"长持锁）。
+    返回是否**新登记**了一条（plan-20261019-toolcard-v2：被去重 / 失败时为 False，
+    调用方据此清理多取的备份文件）。
     """
     if not checkpoint_path and not new_file:
-        return
+        return False
     try:
         from app.persistence.database import run_write_locked
 
-        def _persist(s):
+        def _persist(s) -> bool:
             from sqlalchemy import select as _select
             from app.persistence.models.rollback import TurnSnapshot
             snap = s.execute(
                 _select(TurnSnapshot).where(TurnSnapshot.turn_id == turn_id)
             ).scalars().first()
             if snap is None:
-                return
+                return False
             if new_file:
                 files = list(snap.new_files or [])
-                if new_file not in files:
-                    files.append(new_file)
-                    snap.new_files = files
+                if new_file in files:
+                    return False
+                files.append(new_file)
+                snap.new_files = files
             else:
                 entry = {"ckpt": checkpoint_path, "path": rel_path}
                 items = list(snap.file_list or [])
                 if any(isinstance(it, dict) and it.get("path") == rel_path for it in items):
-                    return  # 该文件本 turn 已备份，无需重复
+                    return False  # 该文件本 turn 已备份，无需重复
                 items.append(entry)
                 snap.file_list = items
             s.commit()
+            return True
 
-        await run_write_locked(_persist, label=f"rollback.ckpt.{turn_id}")
+        return bool(await run_write_locked(_persist, label=f"rollback.ckpt.{turn_id}"))
     except Exception:
         logger.debug("[checkpoint] 登记失败(非阻塞): turn=%s %s", turn_id, rel_path, exc_info=True)
+        return False
 
 
 # ── 回滚执行 ──
@@ -587,7 +600,7 @@ def _conflict_result(turn_id: int, plan: RollbackPlan) -> dict:
         "code": "conflict",
         "turn_id": turn_id,
         "conflicts": conflicts,
-        "reason": f"{len(conflicts)} 个文件与你的手动改动冲突，回滚已取消，未修改任何文件",
+        "reason": f"回滚已取消：{len(conflicts)} 个文件在这些轮次之后被改动过，为避免覆盖，未修改任何文件",
     }
 
 
@@ -782,8 +795,183 @@ def extract_shell_write_paths(command: str) -> list[str]:
     return out
 
 
+# ── 删除 / 移动类命令（plan-20261019-toolcard-v2）──
+# 此前只识别「写」：模型用 rm / del / Remove-Item 清理临时文件时没有任何记录，
+# 于是本轮新建的文件仍留在变更清单里（磁盘上却已经没有），之前就存在、被本轮删除的文件
+# 则根本不会出现在清单里。这里补齐删除与「移走源文件」两类目标；识别是启发式的，
+# 真正是否发生了变更仍由 agent_loop 对比执行前后的文件内容决定，识别多了不会误记。
+
+_DELETE_WORDS = frozenset({"rm", "del", "erase", "rd", "rmdir", "unlink", "ri", "remove-item"})
+_MOVE_WORDS = frozenset({"mv", "move", "move-item", "mi"})
+_CD_WORDS = frozenset({"cd", "chdir", "pushd", "sl", "set-location"})
+# 这些命令带 Windows 风格的 /s /q /f 开关（单字母），不能当成路径
+_WIN_FLAG_WORDS = frozenset({"del", "erase", "rd", "rmdir", "move"})
+_PS_VALUE_PARAMS = frozenset({"-include", "-exclude", "-filter", "-stream", "-credential"})
+_PS_PATH_PARAMS = frozenset({"-path", "-literalpath"})
+_TOKEN_RE = _re.compile(r'"((?:\\.|[^"\\])*)"|\'([^\']*)\'|(\S+)')
+_REDIRECT_TOKEN_RE = _re.compile(r'^\d*[<>]')
+_INLINE_DELETE_RES = (
+    _re.compile(r'\bos\.(?:remove|unlink|rmdir)\(\s*[rRuUbBfF]*(?P<q>["\'])(?P<p>.*?)(?P=q)'),
+    _re.compile(r'\bshutil\.rmtree\(\s*[rRuUbBfF]*(?P<q>["\'])(?P<p>.*?)(?P=q)'),
+    _re.compile(r'\bPath\(\s*[rRuUbBfF]*(?P<q>["\'])(?P<p>.*?)(?P=q)\s*\)\.unlink'),
+    _re.compile(r'\bfs\.(?:unlinkSync|rmSync|rmdirSync|unlink|rm|rmdir)\(\s*(?P<q>["\'`])(?P<p>.*?)(?P=q)'),
+    # require('fs').unlinkSync('x') 这种不经变量的链式写法
+    _re.compile(r'require\(\s*["\'](?:node:)?fs["\']\s*\)\s*\.\s*(?:unlinkSync|rmSync|rmdirSync|unlink|rm|rmdir)'
+                r'\(\s*(?P<q>["\'`])(?P<p>.*?)(?P=q)'),
+)
+# 删除目录时最多展开多少个文件、哪些目录永不展开（巨型目录无法逐文件记录，也恢复不了）
+_DIR_EXPAND_MAX_FILES = 300
+_DIR_EXPAND_SKIP = frozenset({".git", "node_modules", ".chatcoder", "__pycache__", ".venv", "venv"})
+
+
+def _split_statements(command: str) -> list[str]:
+    """按 ; | & 与换行切分语句（引号内的分隔符不切）。"""
+    out: list[str] = []
+    buf: list[str] = []
+    quote = ""
+    for ch in command:
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = ""
+        elif ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+        elif ch in (";", "|", "&", "\n", "\r"):
+            out.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    out.append("".join(buf))
+    return [s.strip() for s in out if s.strip()]
+
+
+def _tokenize(stmt: str) -> list[str]:
+    """按空白切词（引号内保持整体并去掉外层引号，不做反斜杠转义，Windows 路径原样保留）。"""
+    out: list[str] = []
+    for m in _TOKEN_RE.finditer(stmt):
+        tok = m.group(1) if m.group(1) is not None else (m.group(2) if m.group(2) is not None else m.group(3))
+        if tok:
+            out.append(tok)
+    return out
+
+
+def _split_commas(token: str) -> list[str]:
+    """PowerShell 的 a.txt,b.txt 列表写法。"""
+    return [t.strip() for t in token.split(",") if t.strip()]
+
+
+def _positional_args(args: list[str], *, win_flags: bool) -> list[str]:
+    """从参数里取出路径：跳过 -flag / -Recurse / 值参数，认 -Path / -LiteralPath；`--` 之后全是路径。"""
+    out: list[str] = []
+    only_pos = False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        low = a.lower()
+        if only_pos:
+            out.extend(_split_commas(a))
+        elif a == "--":
+            only_pos = True
+        elif _REDIRECT_TOKEN_RE.match(a):
+            pass  # 2>&1 之类的重定向残片
+        elif low in _PS_PATH_PARAMS and i + 1 < len(args):
+            out.extend(_split_commas(args[i + 1]))
+            i += 1
+        elif low in _PS_VALUE_PARAMS:
+            i += 1  # 连同它的值一起跳过
+        elif a.startswith("-") and len(a) > 1:
+            pass
+        elif win_flags and _re.fullmatch(r"/[A-Za-z]", a):
+            pass
+        else:
+            out.extend(_split_commas(a))
+        i += 1
+    return out
+
+
+def _command_head(token: str) -> str:
+    """命令词归一：小写、去目录前缀（/bin/rm、C:\\Windows\\System32\\cmd.exe 之类）与 .exe 后缀。"""
+    head = token.lower().replace("\\", "/").rsplit("/", 1)[-1]
+    return head[:-4] if head.endswith(".exe") else head
+
+
+def _delete_and_move_targets(command: str) -> tuple[list[str], list[str]]:
+    """(被删除 / 被移走的源路径, 移动的目标路径)。含 rm / del / Remove-Item / git rm / mv / Move-Item。"""
+    dels: list[str] = []
+    dests: list[str] = []
+    for stmt in _split_statements(command):
+        toks = _tokenize(stmt)
+        if not toks:
+            continue
+        head = _command_head(toks[0])
+        args = toks[1:]
+        if head == "git" and args and args[0].lower() == "rm":
+            if "--cached" in args:
+                continue  # 只移出索引，工作区文件还在
+            dels.extend(_positional_args(args[1:], win_flags=False))
+        elif head in _DELETE_WORDS:
+            dels.extend(_positional_args(args, win_flags=head in _WIN_FLAG_WORDS or head in ("remove-item", "ri")))
+        elif head in _MOVE_WORDS:
+            pos = _positional_args(args, win_flags=True)
+            if len(pos) >= 2:
+                dels.extend(pos[:-1])
+                dests.append(pos[-1])
+                # 目标是已存在的目录时，文件落在「目录/原文件名」下
+                for src in pos[:-1]:
+                    name = src.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+                    if name:
+                        dests.append(pos[-1].rstrip("/\\") + "/" + name)
+    return dels, dests
+
+
+def _inline_delete_targets(command: str) -> list[str]:
+    """内联脚本删文件：python os.remove / shutil.rmtree / Path.unlink、node fs.unlinkSync / rmSync。"""
+    out: list[str] = []
+    for rx in _INLINE_DELETE_RES:
+        for m in rx.finditer(command):
+            p = m.group("p")
+            if p:
+                out.append(p)
+    return out
+
+
+def extract_shell_delete_paths(command: str) -> list[str]:
+    """从 shell 命令解析候选「被删除 / 被移走」的路径（去重保序，可能含通配符与目录，未做工作区归一化）。"""
+    dels, _ = _delete_and_move_targets(command)
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in dels + _inline_delete_targets(command):
+        if p and p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+def extract_shell_move_dests(command: str) -> list[str]:
+    """从 mv / Move-Item 解析移动的目标路径（新文件在这里出现）。"""
+    _, dests = _delete_and_move_targets(command)
+    return list(dict.fromkeys(p for p in dests if p))
+
+
+def _cd_dirs(command: str) -> list[str]:
+    """命令里出现过的 `cd 目录`——后续语句的相对路径可能相对于它们，候选里一并带上。"""
+    out: list[str] = []
+    for stmt in _split_statements(command):
+        toks = _tokenize(stmt)
+        if toks and _command_head(toks[0]) in _CD_WORDS:
+            pos = [t for t in _positional_args(toks[1:], win_flags=True) if t not in ("-", "~")]
+            if pos:
+                out.append(pos[0])
+    return list(dict.fromkeys(out))
+
+
 def resolve_command_write_paths(tool_name: str, args: dict, workspace: str) -> list[str]:
-    """非白名单写盘工具（terminal_exec 等）的候选写盘路径（相对工作区，越界剔除）。"""
+    """非白名单写盘工具（terminal_exec 等）的候选变更路径（相对工作区，越界剔除）。
+
+    plan-20261019-toolcard-v2：除「写」之外，还包含被删除 / 被移走的源路径、移动目标，
+    通配符会就地展开（最多 300 个）；目录原样返回，由 expand_directory_targets 在执行前展开成文件。
+    """
     if tool_name != "terminal_exec":
         return []
     command = str((args or {}).get("command") or "")
@@ -794,29 +982,183 @@ def resolve_command_write_paths(tool_name: str, args: dict, workspace: str) -> l
     root = Path(workspace).resolve()
     cwd = str((args or {}).get("cwd") or "").strip()
     base = (root / cwd) if cwd else root
-    seen: set[str] = set()
-    out: list[str] = []
-    for raw in extract_shell_write_paths(command):
-        if not raw:
-            continue
+    # 候选基准目录：命令自身的 cwd，加上命令里 `cd x` 指向的目录（相对 cwd，越界的在下面被剔除）
+    bases = [base]
+    for d in _cd_dirs(command):
         try:
-            p = Path(raw)
-            full = p.resolve() if p.is_absolute() else (base / p).resolve()
-            rel = full.relative_to(root)
+            dp = Path(d)
+            bases.append(dp if dp.is_absolute() else (base / dp))
         except (OSError, ValueError):
             continue
+    raws = (extract_shell_write_paths(command) + extract_shell_delete_paths(command)
+            + extract_shell_move_dests(command))
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def _add(full: Path) -> None:
+        try:
+            rel = full.resolve().relative_to(root)
+        except (OSError, ValueError):
+            return
         rel_s = rel.as_posix()
-        if rel_s and rel_s not in seen:
+        if rel_s and rel_s != "." and rel_s not in seen:
             seen.add(rel_s)
             out.append(rel_s)
+
+    for raw in raws:
+        if not raw:
+            continue
+        has_glob = any(c in raw for c in "*?[")
+        for b in bases:
+            try:
+                p = Path(raw)
+                if has_glob:
+                    pattern = str(p if p.is_absolute() else (b / p))
+                    for hit in _glob.glob(pattern, recursive=True)[:_DIR_EXPAND_MAX_FILES]:
+                        _add(Path(hit))
+                else:
+                    _add(p if p.is_absolute() else (b / p))
+            except (OSError, ValueError):
+                continue
     return out
+
+
+def expand_directory_targets(workspace: str, rels: list[str], max_files: int = _DIR_EXPAND_MAX_FILES) -> list[str]:
+    """把候选路径里的目录展开成其中的文件（相对工作区）。必须在命令执行**之前**调用——
+    执行后被删除的目录已经不存在，没法再列出文件。
+
+    超过 max_files 个文件的目录整体不记录（逐文件记录与恢复都不现实）；.git / node_modules 等永不展开。
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    root = Path(workspace)
+    for rel in rels:
+        p = root / rel
+        try:
+            is_dir = p.is_dir()
+        except OSError:
+            is_dir = False
+        if not is_dir:
+            if rel not in seen:
+                seen.add(rel)
+                out.append(rel)
+            continue
+        if any(part in _DIR_EXPAND_SKIP for part in Path(rel).parts):
+            continue
+        found: list[str] = []
+        too_many = False
+        for dirpath, dirnames, filenames in os.walk(p):
+            dirnames[:] = [d for d in dirnames if d not in _DIR_EXPAND_SKIP]
+            for fn in filenames:
+                found.append((Path(dirpath) / fn).relative_to(root).as_posix())
+                if len(found) > max_files:
+                    too_many = True
+                    break
+            if too_many:
+                break
+        if too_many:
+            logger.info("[rollback] 目录 %s 文件过多（>%d），删除不逐个记录", rel, max_files)
+            continue
+        for f in found:
+            if f not in seen:
+                seen.add(f)
+                out.append(f)
+    return out
+
+
+# ── 写盘操作类型与内容指纹（plan-20261019-toolcard-v2）──
+#
+# 变更清单与撤销都要回答两个问题：「这个文件在本轮开始前存在吗」「本轮结束时还在吗」。
+# 文本记录靠 old_content / new_content 是否为 None 勉强能答，但：
+#  · 二进制 / 超限文本不存全文，新建与删除无从区分；
+#  · 「新建 → 删除」序列里，删除那条的 old_content 有值，旧逻辑据此把「本轮新建的文件」误判成「之前就存在」。
+# 因此每条新记录显式带上 op（create / modify / delete），并附写后字节指纹 after_hash，
+# 供撤销 / 回滚前精确判断「本轮之后文件有没有被改过」。旧记录没有这两个字段，按内容推断（见 rec_*）。
+
+OP_CREATE = "create"
+OP_MODIFY = "modify"
+OP_DELETE = "delete"
+# 超过此大小不计算指纹（读全文太贵）：严格校验对这类文件退回文本比较 / 跳过
+_DIGEST_MAX_BYTES = 64 * 1024 * 1024
+# 写前备份的单文件上限：更大的文件不复制（删除后无法恢复，宁可不记录也不拖慢命令）
+_CKPT_MAX_BYTES = 128 * 1024 * 1024
+
+
+def path_exists(workspace: str, rel: str) -> bool:
+    """工作区内该路径是否是一个存在的文件（目录不算）。"""
+    try:
+        return _fs_path(workspace, rel).is_file()
+    except OSError:
+        return False
+
+
+def file_digest(workspace: str, rel: str) -> str | None:
+    """文件字节的 sha1；文件不存在 / 过大 / 读取失败返回 None。"""
+    try:
+        p = _fs_path(workspace, rel)
+        if not p.is_file() or p.stat().st_size > _DIGEST_MAX_BYTES:
+            return None
+        h = hashlib.sha1()
+        with open(p, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def write_op(existed_before: bool, exists_after: bool) -> str | None:
+    """由写前 / 写后是否存在推出操作类型；前后都不存在（没有发生任何事）返回 None。"""
+    if exists_after:
+        return OP_MODIFY if existed_before else OP_CREATE
+    return OP_DELETE if existed_before else None
+
+
+def rec_existed_before(rec: Any) -> bool:
+    """这条写盘记录写之前，文件是否存在。旧记录（无 op）按内容推断。"""
+    op = getattr(rec, "op", None)
+    if op == OP_CREATE:
+        return False
+    if op in (OP_MODIFY, OP_DELETE):
+        return True
+    if rec.old_content is not None or getattr(rec, "diff_before", None):
+        return True
+    # 旧的二进制记录不存任何内容，无从判断：按「已存在」处理，沿用此前的「修改」口径
+    return bool(getattr(rec, "binary", False))
+
+
+def rec_exists_after(rec: Any) -> bool | None:
+    """这条写盘记录写完之后，文件是否还在。None = 旧记录没存写后内容，调用方需读磁盘兜底。"""
+    op = getattr(rec, "op", None)
+    if op in (OP_CREATE, OP_MODIFY):
+        return True
+    if op == OP_DELETE:
+        return False
+    if rec.new_content is not None or getattr(rec, "diff_after", None):
+        return True
+    if getattr(rec, "binary", False):
+        return True
+    # 写前有内容、写后内容为空：这一次写盘把文件删掉了（plan-20261018-turn-changes 的口径）
+    return False if rec.old_content is not None else None
+
+
+def discard_checkpoint(ckpt_path: str | None) -> None:
+    """删除一份没有被登记的写前备份（命令并未真正改动该文件时，避免备份目录里堆满孤儿文件）。"""
+    if not ckpt_path:
+        return
+    try:
+        Path(ckpt_path).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 async def record_turn_write(db: AsyncSession, *, session_id: int, turn_id: int,
                             tool: str, path: str, before: str | None, after: str | None,
                             binary: bool = False, call_key: str | None = None,
                             diff_before: str | None = None,
-                            diff_after: str | None = None) -> None:
+                            diff_after: str | None = None,
+                            op: str | None = None,
+                            after_hash: str | None = None) -> None:
     """记录一次写盘操作的前后内容（精确回滚依据）。失败不阻塞（非关键路径）。
 
     binary=True 表示二进制/超限文件：不存文本前后内容，回滚走 checkpoint 备份恢复。
@@ -824,6 +1166,8 @@ async def record_turn_write(db: AsyncSession, *, session_id: int, turn_id: int,
     仍能生成 UI diff 与 +N -M，避免大 md 文档只显示「二进制/大文件」。
     plan-89-387: call_key 关联发起该次写盘的工具调用——同一 turn 内同文件多次编辑时，
     前端据此精确取「这一次编辑」的前后内容（见 get_file_diff）。
+    plan-20261019-toolcard-v2: op 记录这次写盘是新建 / 修改 / 删除，after_hash 为写后字节指纹，
+    撤销与回滚据此严格校验「本轮之后文件有没有被改过」。
     v975：经 WriteEngine 单写线程（写事务不阻塞事件循环、无锁单写者）。
     """
     try:
@@ -834,7 +1178,8 @@ async def record_turn_write(db: AsyncSession, *, session_id: int, turn_id: int,
             s.add(RollbackWrite(session_id=session_id, turn_id=turn_id, tool=tool,
                                 path=path, old_content=before, new_content=after,
                                 binary=binary, call_key=call_key,
-                                diff_before=diff_before, diff_after=diff_after))
+                                diff_before=diff_before, diff_after=diff_after,
+                                op=op, after_hash=after_hash))
             s.commit()
 
         await run_write_locked(_persist, label=f"rollback.write.{turn_id}")
@@ -844,6 +1189,82 @@ async def record_turn_write(db: AsyncSession, *, session_id: int, turn_id: int,
         # 不再用 debug 静默吞掉。
         logger.warning("[rollback] 写盘记录失败（变更面板将无该文件 diff）: %s %s",
                        tool, path, exc_info=True)
+
+
+async def reconcile_turn_writes(db: AsyncSession, *, session_id: int, turn_id: int, workspace: str) -> int:
+    """轮次收尾对账：核对「本轮已记录过的文件」在磁盘上的现状，是否与最后一条记录写完的样子一致。
+
+    plan-20261019-toolcard-v2：命令里的删除 / 改写不一定都能从命令文本里解析出来
+    （脚本里 os.remove、构建脚本清理产物、git checkout 还原……）。这类变更发生在已被记录过的文件上时，
+    清单会停在旧状态——例如本轮新建的临时文件被脚本删掉，清单里却还显示「+41 新增」。
+    收尾时补一条 turn_sync 记录，让清单与撤销看到本轮的真实结果：
+      · 记录说文件在、磁盘上没有了 → 补「删除」；
+      · 记录说文件已删、磁盘上又有了 → 补「新建」；
+      · 内容与记录不同（按写后字节指纹，旧记录退回文本比较）→ 补「修改」。
+    只处理本轮已记录过的路径，不做全盘扫描。返回补记条数；非关键路径，任何异常只记日志。
+    """
+    if not workspace:
+        return 0
+    try:
+        res = await db.execute(
+            select(RollbackWrite).where(
+                RollbackWrite.session_id == session_id,
+                RollbackWrite.turn_id == turn_id,
+            ).order_by(RollbackWrite.id.asc())
+        )
+        by_path: dict[str, list[RollbackWrite]] = {}
+        for w in res.scalars().all():
+            by_path.setdefault(w.path, []).append(w)
+        added = 0
+        for path, recs in by_path.items():
+            if not _is_safe_rel_path(path):
+                continue
+            last = recs[-1]
+            exists_now = path_exists(workspace, path)
+            expect_after = rec_exists_after(last)
+            if expect_after is False:
+                if not exists_now:
+                    continue
+                op = OP_CREATE
+            elif not exists_now:
+                op = OP_DELETE
+            else:
+                expected = getattr(last, "after_hash", None)
+                digest = file_digest(workspace, path)
+                if expected:
+                    if digest is None or digest == expected:
+                        continue
+                else:
+                    # 旧记录没有指纹：文本记录退回文本比较，二进制无从对账
+                    if last.binary or last.new_content is None:
+                        continue
+                    cur_text = _read_file_text(workspace, path)
+                    if cur_text is None or cur_text == last.new_content:
+                        continue
+                op = OP_MODIFY
+            as_binary = bool(last.binary)
+            after_text: str | None = None
+            if exists_now:
+                kind, _size = inspect_write_target(workspace, path, settings.rollback_record_max_bytes)
+                as_binary = as_binary or kind != FILE_KIND_TEXT
+                if not as_binary:
+                    after_text = _read_file_text(workspace, path)
+                    if after_text is None:
+                        as_binary = True  # 读不出文本：按二进制记录，撤销走备份
+            await record_turn_write(
+                db, session_id=session_id, turn_id=turn_id, tool="turn_sync", path=path,
+                before=None if as_binary else last.new_content,
+                after=None if as_binary else after_text,
+                binary=as_binary, op=op,
+                after_hash=file_digest(workspace, path) if exists_now else None,
+            )
+            added += 1
+        if added:
+            logger.info("[rollback] 轮次收尾对账：turn=%s 补记 %d 条磁盘现状与记录不一致的变更", turn_id, added)
+        return added
+    except Exception:  # noqa: BLE001 — 对账只是兜底，绝不能影响轮次收尾
+        logger.warning("[rollback] 轮次收尾对账失败（非阻塞）: turn=%s", turn_id, exc_info=True)
+        return 0
 
 
 async def list_turn_writes(db: AsyncSession, session_id: int, turn_id: int) -> list[RollbackWrite]:
@@ -1026,7 +1447,8 @@ async def list_turn_changes(db: AsyncSession, *, session_id: int, turn_id: int,
       （plan-89-387：原先直接读当前磁盘，会把该轮之后的编辑并入本轮统计，
       表现为审核清单行数偏大；plan-20261018-turn-changes：末条写盘是删除时
       after 保持 None，只有老记录没有存写盘后内容才回退磁盘）
-    - action：全部 old_content 为 None → added；本轮把文件删掉 → deleted；否则 modified
+    - action：写前不存在 → added；本轮把文件删掉 → deleted；否则 modified；
+      净效果为零（新建后又删除、改了又改回）的文件不进清单（见 _net_state）
     - difflib.unified_diff 统计增删行数（与 get_file_diff 同源）
     - reviewed 来自 FileReview（turn_id+path 唯一键），与实际磁盘内容无关
     """
@@ -1047,44 +1469,114 @@ async def list_turn_changes(db: AsyncSession, *, session_id: int, turn_id: int,
     reviewed = await reviewed_paths(db, turn_id)
     changes: list[dict] = []
     for path, recs in by_path.items():
-        binary = all(getattr(r, "binary", False) for r in recs)
-        # plan-20261019-diff: 超限文本带展示窗口时按窗口统计，不再固定 +0 -0
-        window_before = getattr(recs[0], "diff_before", None)
-        window_after = getattr(recs[-1], "diff_after", None)
-        has_window = window_before is not None or window_after is not None
-        existed_before = any(r.old_content is not None for r in recs) or bool(window_before)
-        if has_window:
-            before, after = window_before, window_after
-        else:
-            before = recs[0].old_content
-            last = recs[-1]
-            if last.new_content is not None:
-                after = last.new_content
-            elif last.old_content is not None:
-                # plan-20261018-turn-changes：本轮最后一次写盘把文件删掉了。
-                # 不能回退磁盘（后续轮次可能重建了同名文件），否则会被误判成 modified，
-                # 且与 get_file_diff 的删除口径不一致。
-                after = None
-            else:
-                after = _read_file_text(workspace, path)
-        if binary and not has_window:
-            action = "modified"  # 真二进制：按写盘前备份恢复，不展示文本 diff
-        elif not existed_before:
-            action = "added"
-        elif after is None:
-            action = "deleted"
-        else:
-            action = "modified"
-        additions, deletions = diff_stats(before, after)
+        net = _net_state(workspace, path, recs)
+        if net is None:
+            continue  # 净效果为零（本轮新建又被删除、改了又改回）：不展示
+        additions, deletions = diff_stats(net.before, net.after)
         changes.append({
             "path": path,
-            "action": action,
+            "action": net.action,
             "additions": additions,
             "deletions": deletions,
             "reviewed": reviewed.get(path, False),
         })
     changes.sort(key=lambda c: c["path"])
     return changes
+
+
+def _action_of(existed_before: bool, exists_after: bool) -> str:
+    return "added" if not existed_before else ("modified" if exists_after else "deleted")
+
+
+@dataclass
+class _NetState:
+    """同一路径在一个 turn 内的「净变更」：写前是否存在、写后是否还在，以及用于统计 / 展示的前后内容。"""
+    existed_before: bool
+    exists_after: bool
+    before: str | None
+    after: str | None
+    binary: bool
+    has_window: bool
+
+    @property
+    def action(self) -> str:
+        return _action_of(self.existed_before, self.exists_after)
+
+
+def _net_state(workspace: str, path: str, recs: list[RollbackWrite]) -> _NetState | None:
+    """把同一路径在本轮的全部写盘记录折成净变更；None = 净效果为零，不应出现在清单里。
+
+    plan-20261019-toolcard-v2：此前用「任一记录的 old_content 非空」判定「写前是否存在」，
+    「新建 → 删除」序列里删除那条的 old_content 有值，会把本轮新建的文件误判成「之前就存在」。
+    现在只看**首条**记录的写前状态与**末条**记录的写后状态：
+      · 写前不存在、写后也不在 → 零净变更（新建后又删除），不展示；
+      · 写前存在、写后不在 → deleted；写前不存在、写后在 → added。
+    """
+    first, last = recs[0], recs[-1]
+    binary = all(getattr(r, "binary", False) for r in recs)
+    # plan-20261019-diff: 超限文本带展示窗口时按窗口统计，不再固定 +0 -0
+    window_before = getattr(first, "diff_before", None)
+    window_after = getattr(last, "diff_after", None)
+    has_window = window_before is not None or window_after is not None
+    existed_before = rec_existed_before(first)
+    exists_after = rec_exists_after(last)
+    if has_window:
+        before, after = window_before, window_after
+    else:
+        before = first.old_content
+        if last.new_content is not None:
+            after = last.new_content
+        elif exists_after is False:
+            # 本轮最后一次写盘把文件删掉了。不能回退磁盘（后续轮次可能重建了同名文件），
+            # 否则会被误判成 modified，且与 get_file_diff 的删除口径不一致。
+            after = None
+        else:
+            # 旧记录没存写后内容，只能回退磁盘现状（唯一无法规避的兼容分支）
+            after = _read_file_text(workspace, path)
+    if exists_after is None:
+        exists_after = after is not None
+    if not existed_before and not exists_after:
+        return None
+    return _NetState(existed_before, exists_after, before, after, binary, has_window)
+
+
+async def visible_change_turns(db: AsyncSession, session_id: int) -> list[int]:
+    """有「净变更」的轮次 id（升序）。撤销顺序锁据此判定——只留下零净变更记录的轮次
+    （例如只新建又删除了临时文件）既不会出现变更卡片，也不应该拦住更早一轮的撤销。
+
+    判定口径与 _net_state 一致（写前是否存在 / 写后是否还在），但只取「是否有内容」的轻量列，
+    不把每条记录的前后全文载入内存——撤销锁在每轮结束、每次切会话时都会被查询。
+    旧记录没存写后内容时 _net_state 会读磁盘兜底，这里保守地视为有变更。
+    """
+    res = await db.execute(
+        select(
+            RollbackWrite.turn_id, RollbackWrite.path, RollbackWrite.op, RollbackWrite.binary,
+            RollbackWrite.old_content.is_not(None).label("has_old"),
+            RollbackWrite.new_content.is_not(None).label("has_new"),
+            RollbackWrite.diff_before.is_not(None).label("has_dbefore"),
+            RollbackWrite.diff_after.is_not(None).label("has_dafter"),
+        ).where(RollbackWrite.session_id == session_id).order_by(RollbackWrite.id.asc())
+    )
+    by_turn: dict[int, dict[str, list[Any]]] = {}
+    for row in res.all():
+        if row.turn_id is None:
+            continue
+        # 用占位字符串顶替内容（只关心「有没有」），复用 rec_existed_before / rec_exists_after 的判定
+        light = SimpleNamespace(
+            op=row.op, binary=bool(row.binary),
+            old_content="x" if row.has_old else None, new_content="x" if row.has_new else None,
+            diff_before="x" if row.has_dbefore else None, diff_after="x" if row.has_dafter else None,
+        )
+        by_turn.setdefault(int(row.turn_id), {}).setdefault(row.path, []).append(light)
+    visible: list[int] = []
+    for tid in sorted(by_turn):
+        for recs in by_turn[tid].values():
+            existed_before = rec_existed_before(recs[0])
+            exists_after = rec_exists_after(recs[-1])
+            if existed_before or exists_after is not False:
+                visible.append(tid)
+                break
+    return visible
 
 
 async def get_file_diff(db: AsyncSession, *, session_id: int, turn_id: int,
@@ -1149,12 +1641,15 @@ async def get_file_diff(db: AsyncSession, *, session_id: int, turn_id: int,
         if all((getattr(w, "call_key", None) or "") for w in writes):
             return None
 
+    # plan-20261019-toolcard-v2：整轮口径先折成净变更——新建后又删除、改了又改回的文件没有可展示的变更
+    net = _net_state(workspace, path, writes)
+    if net is None:
+        return None
+
     # plan-20261019-diff: 超限文本的展示窗口优先（全文不落库，回滚仍按 checkpoint）
-    window_before = getattr(writes[0], "diff_before", None)
-    window_after = getattr(writes[-1], "diff_after", None)
-    if window_before is not None or window_after is not None:
+    if net.has_window:
         return _build_diff_payload(
-            path, window_before, window_after, single_edit=False,
+            path, net.before, net.after, single_edit=False, action=net.action,
             reason="文件较大，仅展示变更窗口；完整内容按写盘前备份恢复",
         )
 
@@ -1166,46 +1661,44 @@ async def get_file_diff(db: AsyncSession, *, session_id: int, turn_id: int,
         _after_now = _read_file_text(workspace, path)
         if _fb is not None and _after_now is not None:
             return _build_diff_payload(
-                path, _fb.old_content, _after_now, single_edit=False,
+                path, _fb.old_content, _after_now, single_edit=False, action=net.action,
                 reason="该轮部分编辑文件读取失败，已降级展示最近可用版本 diff",
             )
         # 二进制/大文件：不展示文本 diff，提示按写盘前备份恢复
-        return _binary_diff_payload(path, single_edit=False)
+        return _binary_diff_payload(path, single_edit=False, action=net.action)
 
-    # plan-20261018-turn-changes: 无 call_key 时按「该轮最后一次写盘」的边界取 after。
-    # 旧实现 after 直接读当前磁盘，会把该轮之后其它轮次对同一文件的编辑并入本轮 diff
-    # （表现为点上一轮的审查，内容里出现更新轮次的改动，且与卡片 +N -M 不一致）。
-    before = writes[0].old_content
-    last = writes[-1]
-    if last.new_content is not None:
-        after = last.new_content
-    elif last.old_content is not None:
-        # 该轮最后一次写盘把文件删掉了：该轮口径的 after 就是「不存在」
-        after = None
-    else:
-        # 老记录没有存写盘后内容，只能回退磁盘现状（唯一无法规避的兼容分支）
-        after = _read_file_text(workspace, path)
-    return _build_diff_payload(path, before, after, single_edit=False)
+    # plan-20261018-turn-changes: 无 call_key 时按「该轮最后一次写盘」的边界取 after
+    # （由 _net_state 折算）。旧实现 after 直接读当前磁盘，会把该轮之后其它轮次对同一文件的编辑
+    # 并入本轮 diff（表现为点上一轮的审查，内容里出现更新轮次的改动，且与卡片 +N -M 不一致）。
+    return _build_diff_payload(path, net.before, net.after, single_edit=False, action=net.action)
 
 
-def _binary_diff_payload(path: str, *, single_edit: bool) -> dict:
+def _binary_diff_payload(path: str, *, single_edit: bool, action: str | None = None) -> dict:
     """真二进制/无任何文本证据：不展示文本 diff。"""
+    reason = "二进制/大文件，不展示文本 diff，回滚按写盘前备份恢复"
+    if action == "deleted":
+        reason = "二进制/大文件，本轮已删除，不展示文本 diff，撤销时按写盘前备份恢复"
     return {
         "path": path,
         "before": None,
         "after": None,
         "truncated": False,
-        "reason": "二进制/大文件，不展示文本 diff，回滚按写盘前备份恢复",
+        "reason": reason,
         "lines": None,
         "additions": 0,
         "deletions": 0,
         "single_edit": single_edit,
+        "action": action,
     }
 
 
 def _build_diff_payload(path: str, before: str | None, after: str | None, *,
-                        single_edit: bool, reason: str | None = None) -> dict:
-    """统一生成 diff 响应：统计 / 行级 diff / 展示窗口同源，保证摘要与展开一致。"""
+                        single_edit: bool, reason: str | None = None,
+                        action: str | None = None) -> dict:
+    """统一生成 diff 响应：统计 / 行级 diff / 展示窗口同源，保证摘要与展开一致。
+
+    action（added / modified / deleted）供前端区分「文件已被删除」——删除后没有「当前内容」可看。
+    未显式给出时按前后内容是否为空推断。"""
     add, dele = diff_stats(before, after)
     lines = _diff_lines(before, after)
     truncated = (add + dele) > _MAX_DIFF_CHANGE_LINES
@@ -1213,6 +1706,8 @@ def _build_diff_payload(path: str, before: str | None, after: str | None, *,
         lines = lines[:_MAX_DIFF_LINES_RENDER]
         truncated = True
     b_disp, a_disp = _truncate_window(before, after)
+    if action is None:
+        action = _action_of(before is not None, after is not None)
     return {
         "path": path,
         "before": b_disp,
@@ -1223,6 +1718,7 @@ def _build_diff_payload(path: str, before: str | None, after: str | None, *,
         "additions": add,
         "deletions": dele,
         "single_edit": single_edit,
+        "action": action,
     }
 
 
@@ -1235,18 +1731,25 @@ def _single_write_diff(workspace: str, path: str, recs: list[RollbackWrite]) -> 
     """
     window_before = getattr(recs[0], "diff_before", None)
     window_after = getattr(recs[-1], "diff_after", None)
+    existed_before = rec_existed_before(recs[0])
+    exists_after = rec_exists_after(recs[-1])
     if window_before is not None or window_after is not None:
         return _build_diff_payload(
             path, window_before, window_after, single_edit=True,
+            action=_action_of(existed_before, exists_after is not False),
             reason="文件较大，仅展示变更窗口；完整内容按写盘前备份恢复",
         )
     if all(getattr(r, "binary", False) for r in recs):
-        return _binary_diff_payload(path, single_edit=True)
+        return _binary_diff_payload(
+            path, single_edit=True, action=_action_of(existed_before, exists_after is not False))
     before = recs[0].old_content
     after = recs[-1].new_content
-    if after is None:
+    if after is None and exists_after is not False:
+        # 写后内容缺失且并非「这次把文件删了」：旧记录兜底读磁盘
         after = _read_file_text(workspace, path)
-    return _build_diff_payload(path, before, after, single_edit=True)
+    return _build_diff_payload(
+        path, before, after, single_edit=True,
+        action=_action_of(existed_before, after is not None))
 
 
 async def reviewed_paths(db: AsyncSession, turn_id: int) -> dict[str, bool]:
@@ -1570,30 +2073,145 @@ def _read_disk_text(workspace: str, rel: str) -> tuple[str | None, Any]:
     return tf.text, tf
 
 
-def build_plan(workspace: str, writes: list[RollbackWrite],
-               ckpt_for: Callable[[RollbackWrite], str | None]) -> RollbackPlan:
-    """按倒序（最后写入先撤销）模拟回滚整段序列，只读不写。
+# plan-20261019-toolcard-v2：撤销 / 回滚被拒绝时对用户说明的原因。
+_REASON_MODIFIED = "文件在本轮之后被修改过（手动改动或其他程序所致），撤销会覆盖这些改动"
+_REASON_DELETED = "文件在本轮之后已被删除，无法恢复到本轮之前的状态"
+_REASON_RECREATED = "本轮删除了该文件，之后它又被重新创建（或恢复）了，撤销会覆盖现有文件"
+_REASON_CHAIN = "文件在相邻两轮之间被改动过，无法安全衔接撤销"
+_REASON_NO_BACKUP = "缺少写盘前备份，无法恢复该文件"
 
-    虚拟盘面 `virt` 记录每个文件在前序步骤之后的内容，使同一文件的多次改写能逐步推进；
-    冲突步骤不推进盘面（保持用户手动改动），后续步骤基于真实盘面继续判断。
+
+def _state_mismatch_reason(workspace: str, rec: RollbackWrite) -> str | None:
+    """磁盘上的文件是否仍是这条记录写完之后的样子；不是就返回原因（有人在这之后动过它）。
+
+    优先比对写后字节指纹（不受 GBK / BOM / 换行归一化影响）；旧记录没有指纹时，
+    文本记录退回文本比较（与记录时同一读取口径），二进制旧记录无从校验，放行。
     """
-    plan = RollbackPlan(workspace=workspace)
+    rel = rec.path
+    exists = path_exists(workspace, rel)
+    if rec_exists_after(rec) is False:
+        return _REASON_RECREATED if exists else None
+    if not exists:
+        return _REASON_DELETED
+    digest = getattr(rec, "after_hash", None)
+    if digest:
+        cur = file_digest(workspace, rel)
+        return _REASON_MODIFIED if (cur is not None and cur != digest) else None
+    if not getattr(rec, "binary", False) and rec.new_content is not None:
+        cur_text = _read_file_text(workspace, rel)
+        if cur_text is not None and cur_text != rec.new_content:
+            return _REASON_MODIFIED
+    return None
+
+
+def _chain_gap_reason(workspace: str, prev_last: RollbackWrite, next_first: RollbackWrite,
+                      next_ckpt: str | None) -> str | None:
+    """相邻两轮的衔接校验：后一轮写之前的状态，必须等于前一轮写完之后的状态。
+    只在回滚多轮（同一文件被连续几轮改写）时才会用到。"""
+    prev_absent = rec_exists_after(prev_last) is False
+    next_absent = getattr(next_first, "op", None) == OP_CREATE
+    if prev_absent != next_absent:
+        return _REASON_CHAIN
+    if prev_absent:
+        return None
+    digest = getattr(prev_last, "after_hash", None)
+    if digest and next_ckpt:
+        ck_digest = file_digest(workspace, next_ckpt)
+        if ck_digest is not None and ck_digest != digest:
+            return _REASON_CHAIN
+    return None
+
+
+def _plan_path_grouped(plan: RollbackPlan, workspace: str, rel: str, recs: list[RollbackWrite],
+                       ckpt_for: Callable[[RollbackWrite], str | None], *, strict: bool) -> None:
+    """新格式记录（带 op）的单文件规划：校验「最新状态未被动过」后，直接还原到最早一轮写之前的状态。
+
+    与逐条三路合并不同，这里不依赖对文本的反向推演，因此 GBK / BOM / 换行 / 二进制都按字节还原：
+      · 最早一轮写之前文件不存在 → 删除它；
+      · 否则从该轮首次写盘前的备份（checkpoint）按字节恢复，没有备份时文本记录退回写前文本。
+    """
+    groups: list[list[RollbackWrite]] = []
+    for rec in recs:
+        if groups and groups[-1][0].turn_id == rec.turn_id:
+            groups[-1].append(rec)
+        else:
+            groups.append([rec])
+    # 二进制 / 超限文件不读全文（预览也用不到），避免为一次规划把大文件整个读进内存
+    if any(getattr(r, "binary", False) for r in recs):
+        disk_text, tf = None, None
+    else:
+        disk_text, tf = _read_disk_text(workspace, rel)
+    plan.disk.setdefault(rel, disk_text)
+    latest = groups[-1][-1]
+    first = groups[0][0]
+    if strict:
+        reason = _state_mismatch_reason(workspace, latest)
+        if reason:
+            plan.steps.append(_Step(rel, latest.turn_id, "noop", True, reason))
+            return
+    ckpts = [None if g[0].op == OP_CREATE else ckpt_for(g[0]) for g in groups]
+    if strict:
+        for i in range(len(groups) - 1, 0, -1):
+            reason = _chain_gap_reason(workspace, groups[i - 1][-1], groups[i][0], ckpts[i])
+            if reason:
+                plan.steps.append(_Step(rel, groups[i][0].turn_id, "noop", True, reason))
+                return
+    if first.op == OP_CREATE:
+        if path_exists(workspace, rel):
+            plan.finals[rel] = _FinalOp(kind="delete")
+            plan.steps.append(_Step(rel, first.turn_id, "delete"))
+        else:
+            plan.steps.append(_Step(rel, first.turn_id, "noop"))
+        return
+    ck = ckpts[0]
+    if ck and _fs_path(workspace, ck).is_file():
+        plan.finals[rel] = _FinalOp(kind="ckpt", ckpt=ck, text=None if first.binary else first.old_content)
+        plan.steps.append(_Step(rel, first.turn_id, "restore"))
+        return
+    if not first.binary and first.old_content is not None:
+        plan.finals[rel] = _FinalOp(kind="write", text=first.old_content, tf=tf)
+        plan.steps.append(_Step(rel, first.turn_id, "restore"))
+        return
+    plan.steps.append(_Step(rel, first.turn_id, "noop", True, _REASON_NO_BACKUP))
+
+
+def _plan_path_legacy(plan: RollbackPlan, workspace: str, rel: str, recs: list[RollbackWrite],
+                      ckpt_for: Callable[[RollbackWrite], str | None], *, strict: bool) -> None:
+    """旧格式记录（无 op）的单文件规划：按倒序（最后写入先撤销）逐条模拟，沿用三路合并。
+
+    虚拟盘面 `virt` 记录文件在前序步骤之后的内容，使同一文件的多次改写能逐步推进；
+    冲突步骤不推进盘面（保持用户手动改动），后续步骤基于真实盘面继续判断。
+    strict 时先校验最新一条记录：磁盘不再是它写完的样子即整文件冲突，不进入三路合并。
+    """
     virt: dict[str, object] = {}
     tfs: dict[str, Any] = {}
 
-    def current(rel: str) -> object:
-        if rel not in virt:
-            text, tf = _read_disk_text(workspace, rel)
-            tfs[rel] = tf
-            plan.disk.setdefault(rel, text)
-            virt[rel] = text
-        return virt[rel]
+    def current(r: str) -> object:
+        if r not in virt:
+            text, tf = _read_disk_text(workspace, r)
+            tfs[r] = tf
+            plan.disk.setdefault(r, text)
+            virt[r] = text
+        return virt[r]
 
-    for rec in reversed(writes):
-        rel = rec.path
-        if not _is_safe_rel_path(rel):
-            plan.steps.append(_Step(rel, rec.turn_id, "noop", True, "路径不在工作区内，已跳过"))
+    verified = False
+    blocked = False
+    for rec in reversed(recs):
+        if blocked:
+            plan.steps.append(_Step(rel, rec.turn_id, "noop"))
             continue
+        if strict and not verified:
+            reason = _state_mismatch_reason(workspace, rec)
+            if reason:
+                current(rel)
+                plan.steps.append(_Step(rel, rec.turn_id, "noop", True, reason))
+                blocked = True
+                continue
+            # 校验通过：把盘面视为这条记录写完的样子（指纹一致时，文本解码差异不再造成误冲突）
+            if not rec.binary and rec.new_content is not None:
+                current(rel)
+                virt[rel] = rec.new_content
+        verified = True
         if rec.binary:
             ckpt = ckpt_for(rec)
             if not ckpt:
@@ -1645,14 +2263,42 @@ def build_plan(workspace: str, writes: list[RollbackWrite],
         plan.finals[rel] = _FinalOp(kind="write", text=merged, tf=tfs.get(rel))
         plan.steps.append(_Step(rel, rec.turn_id, "restore"))
 
-    # 只保留真正改变磁盘的终态：内容与盘面一致的写回、盘面已不存在的删除都不做
+
+def build_plan(workspace: str, writes: list[RollbackWrite],
+               ckpt_for: Callable[[RollbackWrite], str | None], *,
+               strict: bool = True) -> RollbackPlan:
+    """规划「把写盘序列倒着撤销」的结果，只读不写。
+
+    plan-20261019-toolcard-v2 严格模式（默认）：撤销前先校验磁盘上的文件**是否仍是最新一条记录写完的样子**。
+    本轮之后有人手动改过它、删过它、或被其他程序改写，就整文件判为冲突并给出原因——
+    撤销与回滚默认整体拒绝，不再把用户的手动改动「三路合并」进撤销结果（此前非重叠的手动改动会被静默合并）。
+    """
+    plan = RollbackPlan(workspace=workspace)
+    by_path: dict[str, list[RollbackWrite]] = {}
+    for rec in reversed(writes):  # 路径按「最近写入」倒序出现，与此前的步骤顺序一致
+        by_path.setdefault(rec.path, [])
+    for rec in writes:
+        by_path[rec.path].append(rec)
+    for rel, recs in by_path.items():
+        if not _is_safe_rel_path(rel):
+            plan.steps.append(_Step(rel, recs[-1].turn_id, "noop", True, "路径不在工作区内，已跳过"))
+        elif all(getattr(r, "op", None) is not None for r in recs):
+            _plan_path_grouped(plan, workspace, rel, recs, ckpt_for, strict=strict)
+        else:
+            _plan_path_legacy(plan, workspace, rel, recs, ckpt_for, strict=strict)
+
+    # 只保留真正改变磁盘的终态：内容与盘面一致的写回、盘面已不存在的删除、备份与盘面字节相同的恢复都不做
     for rel in list(plan.finals):
         op = plan.finals[rel]
         disk_text = plan.disk.get(rel)
         if op.kind == "write" and op.text == disk_text:
             del plan.finals[rel]
-        elif op.kind == "delete" and disk_text is None:
+        elif op.kind == "delete" and disk_text is None and not path_exists(workspace, rel):
             del plan.finals[rel]
+        elif op.kind == "ckpt":
+            ck_digest = file_digest(workspace, op.ckpt or "")
+            if ck_digest is not None and ck_digest == file_digest(workspace, rel):
+                del plan.finals[rel]
     return plan
 
 
@@ -1673,20 +2319,22 @@ def plan_preview_rows(plan: RollbackPlan) -> list[dict]:
         elif op.kind == "delete":
             action, after = "delete", ""
         elif op.kind == "ckpt":
-            action, after = "restore", None
+            # 文本文件按备份字节恢复时带着写前文本，预览能展示恢复后的内容；二进制没有文本可展示
+            action, after = "restore", op.text
         else:
             action, after = "restore", op.text
         if conflict_steps and op is not None:
             # 冲突与改动并存（同一文件多步，部分跳过）：预览保持磁盘现状，明确标注
             after = current
+        binary_restore = op is not None and op.kind == "ckpt" and op.text is None
         reason = conflict_steps[0].reason if conflict_steps else (
-            "二进制文件，回滚按写盘前备份恢复" if op is not None and op.kind == "ckpt" else None)
+            "二进制文件，回滚按写盘前备份恢复" if binary_restore else None)
         rows.append({
             "path": rel,
             "action": action,
             "conflict": bool(conflict_steps),
             "reason": reason,
-            "before": "" if (op is not None and op.kind == "ckpt") else (current or ""),
+            "before": "" if binary_restore else (current or ""),
             "after": after or "",
         })
     return rows
@@ -1834,14 +2482,11 @@ async def revert_turn_files(db: AsyncSession, *, turn_id: int, allow_partial: bo
     if snap.rolled_back:
         return {"ok": False, "code": "rolled_back", "reason": "该轮次已回滚，不可重复操作"}
 
-    # 1. 顺序门控：只能从最新一轮往前撤，且必须在动文件之前判断
-    later_res = await db.execute(
-        select(RollbackWrite.turn_id).where(
-            RollbackWrite.session_id == snap.session_id,
-            RollbackWrite.turn_id > turn_id,
-        ).distinct()
-    )
-    later_turn_ids = sorted({int(t) for t in later_res.scalars().all() if t is not None})
+    # 1. 顺序门控：只能从最新一轮往前撤，且必须在动文件之前判断。
+    #    plan-20261019-toolcard-v2：只看「有净变更」的轮次——只留下零净变更记录的轮次
+    #    （如只新建又删除了临时文件）没有变更卡片，不能拦住更早一轮的撤销。
+    visible_turns = await visible_change_turns(db, snap.session_id)
+    later_turn_ids = [t for t in visible_turns if t > turn_id]
     if later_turn_ids:
         return {
             "ok": False,
@@ -1869,10 +2514,11 @@ async def revert_turn_files(db: AsyncSession, *, turn_id: int, allow_partial: bo
     plan = build_plan(workspace, writes, lambda rec: _checkpoint_for_path(snap, rec.path))
     conflicts = _conflict_list(plan)
     if conflicts and not allow_partial:
+        # plan-20261019-toolcard-v2：本轮之后被改动过的文件一律拒绝撤销，并逐个说明原因（conflicts[].reason）
         return {
             "ok": False,
             "code": "conflict",
-            "reason": f"{len(conflicts)} 个文件与你的手动改动冲突，撤销已取消，未修改任何文件",
+            "reason": f"撤销已取消：{len(conflicts)} 个文件在本轮之后被改动过，为避免覆盖，未修改任何文件",
             "conflicts": conflicts,
         }
 
@@ -1929,10 +2575,6 @@ async def revert_lock(db: AsyncSession, session_id: int) -> dict:
     前端据此只允许撤销最新一轮；后端 revert_turn_files 仍做二次强校验，
     避免前端缓存过期时发生乱序撤销。
     """
-    res = await db.execute(
-        select(RollbackWrite.turn_id).where(
-            RollbackWrite.session_id == session_id,
-        ).distinct()
-    )
-    pending = sorted({int(t) for t in res.scalars().all() if t is not None})
+    # plan-20261019-toolcard-v2：只统计「有净变更」的轮次，与变更卡片可见性一致
+    pending = await visible_change_turns(db, session_id)
     return {"latest_turn_id": pending[-1] if pending else None, "pending_turn_ids": pending}

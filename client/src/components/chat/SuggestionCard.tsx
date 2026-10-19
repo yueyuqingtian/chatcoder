@@ -13,7 +13,7 @@
 import { memo, useState } from "react";
 import { useChatStore } from "../../store/chat";
 import { IconSparkles, IconChevronDown, IconCheck, IconCpu } from "../icons";
-import { Button } from "../ui";
+import { Button, Collapse } from "../ui";
 import { api } from "../../api/client";
 
 const MAX_VISIBLE_STEPS = 3;
@@ -32,8 +32,16 @@ export const SuggestionCard = memo(function SuggestionCard() {
   if (!suggestion) return null;
 
   const steps = suggestion.steps || [];
-  const shown = expanded ? steps : steps.slice(0, MAX_VISIBLE_STEPS);
-  const hidden = steps.length - shown.length;
+  // plan-20261019-motion-sweep：超出的步骤放进独立的折叠容器，「还有 N 步」是高度过渡而不是整段弹出
+  const headSteps = steps.slice(0, MAX_VISIBLE_STEPS);
+  const restSteps = steps.slice(MAX_VISIBLE_STEPS);
+  const hidden = restSteps.length;
+  const stepItem = (s: string, i: number) => (
+    <li key={`${i}-${s.slice(0, 12)}`}>
+      <span className="sg-step-idx">{i + 1}</span>
+      <span className="sg-step-text">{s}</span>
+    </li>
+  );
 
   /** 接受建议：建子会话 → 清卡片 → 刷新左栏子会话桶 → 切到新子会话。 */
   const onAccept = async () => {
@@ -72,15 +80,19 @@ export const SuggestionCard = memo(function SuggestionCard() {
 
         {steps.length > 0 && (
           <>
-            <ul className="sg-steps">
-              {shown.map((s, i) => (
-                <li key={`${i}-${s.slice(0, 12)}`}>
-                  <span className="sg-step-idx">{i + 1}</span>
-                  <span className="sg-step-text">{s}</span>
-                </li>
-              ))}
-            </ul>
-            {(hidden > 0 || expanded) && (
+            <div className="sg-steps-wrap">
+              <ul className="sg-steps">{headSteps.map(stepItem)}</ul>
+              {hidden > 0 && (
+                <Collapse open={expanded} lazy>
+                  {() => (
+                    <ul className="sg-steps sg-steps-rest">
+                      {restSteps.map((s, i) => stepItem(s, i + MAX_VISIBLE_STEPS))}
+                    </ul>
+                  )}
+                </Collapse>
+              )}
+            </div>
+            {hidden > 0 && (
               <button
                 type="button"
                 className="sg-steps-more"

@@ -6,7 +6,7 @@ import { useChatStore } from "../../store/chat";
 import { IconRefresh, IconPlus, IconX, IconChevronLeft, IconLayers, IconPlug, IconSettings, IconFileText } from "../icons";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { Modal } from "../Modal";
-import { Empty, FormDialog, Input, Select, Textarea, Tooltip } from "../ui";
+import { Collapse, Empty, FormDialog, Input, Select, Textarea, Tooltip } from "../ui";
 import { Sw } from "./shared";
 import { DatabaseConnectionsPanel } from "./DatabaseConnectionsPanel";
 import { DebuggerPanel } from "./DebuggerPanel";
@@ -206,16 +206,19 @@ export function McpPanel() {
                     <span className="sb-badge">按风险分级注入</span>
                   </Tooltip>
                 </div>
-                {expandedTools === m.id && toolCount > 0 && (
-                  <div className="mcp-tools-list">
-                    {(m.tools as Array<Record<string, unknown>>).map((t, i) => (
-                      <div key={String(t.name || i)} className="mcp-tool-item">
-                        <code>{String(t.name || "?")}</code>
-                        <span>{String(t.description || "").slice(0, 120)}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                {/* plan-20261019-motion-sweep：工具清单展开走 Collapse（此前是条件渲染，瞬间出现 / 消失） */}
+                <Collapse open={expandedTools === m.id && toolCount > 0} lazy className="in-gap">
+                  {() => (
+                    <div className="mcp-tools-list">
+                      {(m.tools as Array<Record<string, unknown>>).map((t, i) => (
+                        <div key={String(t.name || i)} className="mcp-tool-item">
+                          <code>{String(t.name || "?")}</code>
+                          <span>{String(t.description || "").slice(0, 120)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </Collapse>
               </div>
               <div className="settings-resource-actions">
                 <Sw checked={m.is_active} onChange={async (v) => { try { await api.updateMcpServer(m.id, { is_active: v }, currentProjectPath); load(); } catch {} }} />

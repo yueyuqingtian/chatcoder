@@ -46,6 +46,12 @@ class RollbackWrite(Base):
     # plan-89-387: 工具调用键——同一 turn 内同文件多次编辑时，前端按 call_key
     # 精确取「这一次编辑」的前后内容，而不是整轮累积 diff（老记录为 NULL，回退累积口径）
     call_key: Mapped[str | None] = mapped_column(String(64))
+    # plan-20261019-toolcard-v2：这次写盘对文件做了什么（create / modify / delete；旧记录为 NULL，按内容推断）。
+    # 二进制 / 超限文本不存全文，「新建」与「删除」只能靠它区分。
+    op: Mapped[str | None] = mapped_column(String(8))
+    # 写盘后文件字节的 sha1：撤销 / 回滚前据此精确判断「本轮之后文件有没有被改过」，
+    # 不受 GBK / BOM / 换行归一化影响（旧记录为 NULL，回退文本比较）。
+    after_hash: Mapped[str | None] = mapped_column(String(40))
     # 工作流运行时：写入归属的运行与 attempt（回滚与冲突基线；普通写入为空）
     workflow_run_id: Mapped[int | None] = mapped_column(BigInteger)
     attempt_id: Mapped[int | None] = mapped_column(BigInteger)

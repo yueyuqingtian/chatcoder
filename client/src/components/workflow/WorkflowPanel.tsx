@@ -16,7 +16,7 @@ import { IconRingProgress } from "../icons";
 import { StatusIcon } from "../iconkit/StatusIcon";
 import { usePanelStore } from "../../store/panel";
 import { useWorkflowStore } from "../../store/workflow";
-import { Badge, Button, DadaLoader, Dialog, Empty, FormDialog, Input, Segmented, Textarea } from "../ui";
+import { Badge, Button, Collapse, DadaLoader, Dialog, Empty, FormDialog, Input, Segmented, Textarea } from "../ui";
 import { WorkflowActions } from "./WorkflowActions";
 import { WorkflowGate } from "./WorkflowGate";
 import { WorkflowStepTrack } from "./WorkflowStepTrack";
@@ -472,9 +472,8 @@ function NodeRow({ programId, flowKey, node }: { programId: number; flowKey: str
           {historyOpen ? "收起尝试记录" : `尝试记录 · ${node.attempt_no} 次`}
         </button>
       )}
-      {historyOpen && (
-        <AttemptHistory attempts={attempts} />
-      )}
+      {/* plan-20261019-motion-sweep：尝试记录 / 评估记录展开走 Collapse（此前是条件渲染，瞬间出现 / 消失） */}
+      <Collapse open={historyOpen} lazy>{() => <AttemptHistory attempts={attempts} />}</Collapse>
     </li>
   );
 }
@@ -509,23 +508,25 @@ function ReviewRounds({ node }: { node: WorkflowNodeOut }) {
       <button type="button" className="wf-attempts-toggle" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
         {open ? "收起评估记录" : `评估记录 · ${rounds.length} 轮 · 最近：${ROUND_OUTCOME_LABEL[last.outcome] ?? last.reason}`}
       </button>
-      {open && (
-        <ol className="wf-rounds-list" aria-label="评估记录">
-          {rounds.map((r) => (
-            <li key={r.round} className="wf-round">
-              <span className="wf-round-head">
-                第 {r.round} 轮 · {r.issues.length > 0 ? `${r.issues.length} 个问题` : "无问题"}
-                {r.checks_ok === false ? " · 检查未通过" : ""}
-                <span className="wf-round-outcome" data-outcome={r.outcome}>
-                  {ROUND_OUTCOME_LABEL[r.outcome] ?? ""}
+      <Collapse open={open} lazy>
+        {() => (
+          <ol className="wf-rounds-list" aria-label="评估记录">
+            {rounds.map((r) => (
+              <li key={r.round} className="wf-round">
+                <span className="wf-round-head">
+                  第 {r.round} 轮 · {r.issues.length > 0 ? `${r.issues.length} 个问题` : "无问题"}
+                  {r.checks_ok === false ? " · 检查未通过" : ""}
+                  <span className="wf-round-outcome" data-outcome={r.outcome}>
+                    {ROUND_OUTCOME_LABEL[r.outcome] ?? ""}
+                  </span>
                 </span>
-              </span>
-              {r.summary && <span className="wf-round-summary">{r.summary}</span>}
-              {r.user_note && <span className="wf-round-note">你的说明：{r.user_note}</span>}
-            </li>
-          ))}
-        </ol>
-      )}
+                {r.summary && <span className="wf-round-summary">{r.summary}</span>}
+                {r.user_note && <span className="wf-round-note">你的说明：{r.user_note}</span>}
+              </li>
+            ))}
+          </ol>
+        )}
+      </Collapse>
     </div>
   );
 }

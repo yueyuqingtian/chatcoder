@@ -20,7 +20,7 @@ import { formatRelativeTime, parseUtc } from "../utils/time";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { MergeDialog } from "./worktree/MergeDialog";
 import { WorktreeCreateDialog } from "./worktree/WorktreeCreateDialog";
-import { Empty, Input, Segmented, Tooltip } from "./ui";
+import { Collapse, Empty, Input, Segmented, Tooltip } from "./ui";
 import { ProjectIcon } from "./project/ProjectIcon";
 import { openProjectDialog } from "../store/projectDialog";
 import {
@@ -691,12 +691,14 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
       {/* plan-156-619 S5：父会话下缩进一级列出子会话（一层扁平，子会话不再向下嵌套）。
           几何与普通会话行一致（同一 20px 状态槽），只多一个「子会话」细标识——
           不加色块、不加左侧竖线（项目规则禁止装饰性竖线表达层级）。 */}
+      {/* plan-20261019-motion-sweep：展开 / 收起改用统一 Collapse（--dur-3 + emphasized-decel，带淡入淡出），
+          此前自带的 grid 过渡只有 --dur-2 的 120ms，视觉上几乎等同瞬切。 */}
       {children.length > 0 && (
-        <div className={"sb-subsessions" + (subsOpen ? "" : " is-collapsed")} aria-hidden={!subsOpen}>
+        <Collapse open={subsOpen} className="sb-subsessions">
           <div className="sb-subsessions-inner">
             {children.map((c) => renderSessionRow(c, true))}
           </div>
-        </div>
+        </Collapse>
       )}
       </Fragment>
     );
@@ -807,37 +809,52 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
     const remaining = projSessions.length - limit;
     // 达到阈值后按钮语义从「再显示一批」切换为「一次全开」
     const canExpandAll = limit >= SESSION_EXPAND_ALL_THRESHOLD && remaining > 0;
+    // plan-20261019-motion-sweep：首批之外的每一批各包一层 Collapse（appear），点「显示更多」时
+    // 新增的行从 0 高度平滑展开、下方按钮随之滑动，而不是整块瞬间弹出。批的 key 用序号：
+    // 排序变化只换批内的行，不会让已展开的批重播入场。
+    const batches: SessionOut[][] = [];
+    for (let i = SESSION_PAGE_STEP; i < shown.length; i += SESSION_PAGE_STEP) {
+      batches.push(shown.slice(i, i + SESSION_PAGE_STEP));
+    }
     return (
       <div className="sb-project-children">
-        {shown.map(renderSession)}
+        {shown.slice(0, SESSION_PAGE_STEP).map(renderSession)}
+        {batches.map((rows, n) => (
+          <Collapse key={`batch-${n}`} open appear className="in-gap">
+            <div className="sb-batch-list">{rows.map(renderSession)}</div>
+          </Collapse>
+        ))}
         {emptyHint && projSessions.length === 0 && (
           <div className="sb-worktree-empty">还没有会话，点 + 开始</div>
         )}
-        {remaining > 0 && (
-          <div className="sb-more-wrapper">
-            <button
-              type="button"
-              className="sb-more-btn"
-              onClick={(e) => {
-                e.stopPropagation();
-                const total = projSessions.length;
-                setProjectLimits((prev) => {
-                  const cur = prev[p.id] ?? SESSION_PAGE_STEP;
-                  // 已达阈值：一次展开全部（slice 会自然收敛到总数，按钮随之消失）
-                  const next = cur >= SESSION_EXPAND_ALL_THRESHOLD ? total : cur + SESSION_PAGE_STEP;
-                  return { ...prev, [p.id]: next };
-                });
-              }}
-            >
-              <IconChevronDown size={12} />
-              <span>
-                {canExpandAll
-                  ? t("sidebar.expand_all", { count: remaining })
-                  : t("sidebar.show_more", { count: remaining })}
-              </span>
-            </button>
-          </div>
-        )}
+        {/* 剩余 0 项时按钮随同一条曲线收拢；收起期间 Collapse 冻结最后一次的文案，不会闪成「剩余 0 项」 */}
+        <Collapse open={remaining > 0} lazy className="in-gap">
+          {() => (
+            <div className="sb-more-wrapper">
+              <button
+                type="button"
+                className="sb-more-btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const total = projSessions.length;
+                  setProjectLimits((prev) => {
+                    const cur = prev[p.id] ?? SESSION_PAGE_STEP;
+                    // 已达阈值：一次展开全部（slice 会自然收敛到总数，按钮随之收拢）
+                    const next = cur >= SESSION_EXPAND_ALL_THRESHOLD ? total : cur + SESSION_PAGE_STEP;
+                    return { ...prev, [p.id]: next };
+                  });
+                }}
+              >
+                <IconChevronDown size={12} />
+                <span>
+                  {canExpandAll
+                    ? t("sidebar.expand_all", { count: remaining })
+                    : t("sidebar.show_more", { count: remaining })}
+                </span>
+              </button>
+            </div>
+          )}
+        </Collapse>
       </div>
     );
   };
@@ -898,19 +915,25 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
                 {pinnedSessions.map((p) => renderSessionRow(p, p.side_parent_id != null, true))}
               </div>
             )}
+            {/* plan-20261019-motion-sweep：分组 / 项目切换时内容整体淡入（key=view 让两种视图各自挂载一次）。
+                包一层不影响布局：内部仍是自上而下的块流，与此前直接铺在 .sb-list 里一致。 */}
+            <div key={view} className="sb-view-pane">
             {view === "project" ? (
               <>
                 <div className="sb-section-label">{t("sidebar.section_projects")}</div>
                 {visibleProjects.map((p) => (
                   <div key={p.id} className="sb-project-group">
                     {renderProjectRow(p, false)}
-                    {isProjectOpen(p) && renderProjectChildren(p)}
+                    {/* plan-20261019-motion-sweep：项目展开 / 收起走 Collapse（lazy：收起过渡结束才卸载会话行，
+                        children 用函数——收起的项目不构造会话行元素）。此前是 `isProjectOpen && …` 条件渲染，
+                        点一下整块瞬间出现 / 消失。 */}
+                    <Collapse open={isProjectOpen(p)} lazy>{() => renderProjectChildren(p)}</Collapse>
                     {/* 问题3：工作树与父项目**同级**、紧随其后（不再嵌在父项目子层级），
                         独立折叠不随父项目收起；样式与普通项目完全一致，仅多一个「工作树」标识 */}
                     {(worktreesByParent.get(p.id) ?? []).map((wt) => (
                       <div key={`wt-${wt.id}`} className="sb-project-group sb-worktree-entry">
                         {renderProjectRow(wt, true)}
-                        {isProjectOpen(wt) && renderProjectChildren(wt, true)}
+                        <Collapse open={isProjectOpen(wt)} lazy>{() => renderProjectChildren(wt, true)}</Collapse>
                       </div>
                     ))}
                   </div>
@@ -930,6 +953,7 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
                 )}
               </>
             )}
+            </div>
           </div>
         </>
       )}

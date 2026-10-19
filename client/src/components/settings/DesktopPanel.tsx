@@ -45,6 +45,8 @@ export function DesktopPanel() {
 
 /* ── 基础配置 ── */
 
+type CoordMode = "auto" | "pixel" | "norm1000";
+
 type DesktopCfg = {
   desktop_enabled: boolean;
   desktop_plain_ops_enabled: boolean;
@@ -53,10 +55,12 @@ type DesktopCfg = {
   desktop_screenshot_quality: number;
   desktop_screenshot_max_dim: number;
   desktop_recipe_enabled: boolean;
+  desktop_coord_mode: CoordMode;
 };
 
 // plan-20261018-operator-boost：默认开启电脑操控；截图自动适配模型可见尺寸、画质 100（与后端 config.py 一致）。
 // plan-20261019-desktop-precision：截图元素编号、点击前校验、破坏性操作词表随 OCR 一并移除。
+// plan-20261019-desktop-targeting：新增「坐标口径」，模型总点偏时可手动换口径。
 const DEFAULTS: DesktopCfg = {
   desktop_enabled: true,
   desktop_plain_ops_enabled: true,
@@ -65,7 +69,37 @@ const DEFAULTS: DesktopCfg = {
   desktop_screenshot_quality: 100,
   desktop_screenshot_max_dim: 0,
   desktop_recipe_enabled: true,
+  desktop_coord_mode: "auto",
 };
+
+function toCoordMode(v: unknown): CoordMode {
+  return v === "pixel" || v === "norm1000" ? v : "auto";
+}
+
+/** 「检测」结果的一句话：分辨率、各显示器缩放、DPI 感知级别（不是 PerMonitorV2 时明确提示会偏移）、落点自检。 */
+function describeProbe(info: Record<string, unknown>, calib?: Record<string, unknown>): string {
+  const screen = (info.screen as number[] | undefined) ?? [];
+  const monitors = (info.monitors as Array<{ w?: number; h?: number; scale?: number }> | undefined) ?? [];
+  const aware = typeof info.dpiAwareness === "string" ? info.dpiAwareness : "";
+  const parts = [
+    `内核可用，版本 ${info.version ?? "?"}`,
+    monitors.length > 0
+      ? `显示器 ${monitors.map((m) => `${m.w ?? "?"}×${m.h ?? "?"}（缩放 ${m.scale ?? 100}%）`).join("、")}`
+      : `分辨率 ${screen[0] ?? "?"}×${screen[1] ?? "?"}`,
+  ];
+  if (aware) {
+    parts.push(aware === "PerMonitorV2"
+      ? "DPI 感知正常（坐标为物理像素，不受缩放影响）"
+      : `DPI 感知为 ${aware}，坐标可能被系统缩放，建议更新应用或重启`);
+  }
+  if (calib && typeof calib.finalMax === "number") {
+    parts.push(calib.finalMax === 0
+      ? "光标落点自检通过（5 个点位偏差 0 像素）"
+      : `光标落点自检最大偏差 ${calib.finalMax} 像素（已自动校正）`);
+  }
+  parts.push(`进程 ${info.pid ?? "?"}`);
+  return parts.join("，") + "。";
+}
 
 function DesktopBasicSection() {
   const { t } = useI18n();
@@ -102,6 +136,7 @@ function DesktopBasicSection() {
         desktop_screenshot_max_dim: typeof g.desktop_screenshot_max_dim === "number"
           ? g.desktop_screenshot_max_dim : 0,
         desktop_recipe_enabled: g.desktop_recipe_enabled !== false,
+        desktop_coord_mode: toCoordMode(g.desktop_coord_mode),
       });
     } catch { /* 拉取失败沿用默认值 */ }
   }, []);
@@ -123,12 +158,7 @@ function DesktopBasicSection() {
     setProbeMsg("");
     try {
       const r = await api.probeDesktop();
-      const info = r.info as Record<string, unknown>;
-      const screen = (info.screen as number[] | undefined) ?? [];
-      setProbeMsg(
-        `内核可用，版本 ${info.version ?? "?"}，分辨率 ${screen[0] ?? "?"}×${screen[1] ?? "?"}，`
-        + `进程 ${info.pid ?? "?"}。`,
-      );
+      setProbeMsg(describeProbe(r.info as Record<string, unknown>, r.calib));
       api.getDesktopStatus().then(setStatus).catch(() => { /* 状态展示非关键 */ });
     } catch (e) {
       setProbeMsg("检测失败：" + String(e));
@@ -181,6 +211,16 @@ function DesktopBasicSection() {
             value={cfg.desktop_screenshot_max_dim}
             disabled={dimPlain}
             onChange={(e) => patch({ desktop_screenshot_max_dim: Math.max(0, parseInt(e.target.value) || 0) })}
+          />
+        </Row>
+        <Row title={t("dp.coord_mode")} desc={t("dp.coord_mode_desc")} disabled={dimPlain}>
+          <Segmented
+            value={cfg.desktop_coord_mode}
+            onChange={(v) => patch({ desktop_coord_mode: v })}
+            aria-label={t("dp.coord_mode")}
+            options={(["auto", "pixel", "norm1000"] as const).map((m) => ({
+              value: m, label: t(`dp.coord_mode.${m}`),
+            }))}
           />
         </Row>
         <Row title={t("dp.quality")} desc={t("dp.quality_desc")} disabled={dimPlain}>

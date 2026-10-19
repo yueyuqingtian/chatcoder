@@ -903,6 +903,40 @@
   font-size: 11px;
 }
 
+/* ── 动效（plan-20261019-motion-sweep）──────────────────────
+ * 此前整份样式只有 4 处 hover 过渡：分组折叠、差异展开、提示条出现 / 关闭、视图切换全是瞬切。
+ * 折叠类一律由 ui/Collapse（grid 0fr↔1fr，--dur-3 + emphasized-decel）承担；
+ * 其余「整块出现」用 mo-fade-in。fill 只取 backwards：结束后不残留 opacity 动画层，
+ * 分组头的 sticky 与内部浮层的层叠不受影响。 */
+
+/* 分组箭头：同一枚图标旋转表达开合，与分组体高度过渡同时长同曲线 */
+.gp-section-caret {
+  transform: rotate(-90deg);
+  transition: transform var(--dur-3) var(--ease-emphasized-decel);
+}
+.gp-section-caret.is-open { transform: none; }
+
+/* 提示条 / 冲突区等由 Collapse 包裹的块直接挂在纵向 flex 的面板上：不参与收缩，
+   否则面板很矮时它会先被压扁（Collapse 内层 min-height:0，flex 最小尺寸会降到 0） */
+.gp-panel > .ui-collapse { flex: 0 0 auto; }
+
+/* 视图切换（变更 ↔ 历史 ↔ 提交详情）与首次出现的块：挂载即淡入一次 */
+.gp-body,
+.gp-history,
+.gp-cv,
+.gp-commit,
+.gp-clean,
+.gp-loading,
+.gp-empty-wrap,
+.gp-hist-list,
+.gp-diff {
+  animation: mo-fade-in var(--dur-3) var(--ease-emphasized-decel) backwards;
+}
+
+/* 顶栏的待推送角标 / 领先落后胶囊：出现时弹入，数字变化不重播（节点不重建） */
+.gp-push-badge { animation: mo-bounce-in var(--dur-3) var(--ease-emphasized-decel) backwards; }
+.gp-sync-chip { animation: mo-fade-in var(--dur-3) var(--ease-emphasized-decel) backwards; }
+
 @media (prefers-reduced-motion: reduce) {
   .gp-row-ops { transition: none; }
 }

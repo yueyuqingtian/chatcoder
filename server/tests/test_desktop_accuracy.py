@@ -55,26 +55,56 @@ def _ctx(tmp_path=None, *, session_id: int = 1, task_id: int = 1, model: str = "
     ("gpt-6-astra", PIXEL),
     ("openai/o3", PIXEL),
     ("Qwen2.5-VL-72B-Instruct", PIXEL),
-    ("deepseek-flash", NORM1000),
-    ("deepseek/deepseek-v4.1-flash", NORM1000),
+    # DeepSeek 与未知模型：没有原生 0–1000 口径，一律图上像素（实录：deepseek-flash 在像素口径下点得准，
+    # 在 0–1000 口径下 x 轴换算了、y 轴没换，20 多次点击全部落空）
+    ("deepseek-flash", PIXEL),
+    ("deepseek/deepseek-v4.1-flash", PIXEL),
+    ("MiniMaxAI/MiniMax-M2.7", PIXEL),
+    ("space-bunny", PIXEL),
+    ("", PIXEL),
+    # 训练时就用 0–1000 归一化坐标的模型族
     ("glm-5.3-flash", NORM1000),
+    ("zai-org/GLM-5.1", NORM1000),
     ("Qwen/Qwen3.8-Flash", NORM1000),
     ("kimi-k3", NORM1000),
+    ("moonshotai/Kimi-K2.6", NORM1000),
     ("gemini-3.8-flash-high", NORM1000),
     ("doubao-seed-1.6-vision", NORM1000),
-    ("space-bunny", NORM1000),
-    ("", NORM1000),
+    ("UI-TARS-1.5", NORM1000),
 ])
 def test_coord_mode_follows_model_family(name, mode):
-    """Claude / GPT / Qwen2.5-VL 报截图像素；DeepSeek、Qwen3、GLM、Kimi、Gemini 等与未知模型走 0–1000。"""
+    """Claude / GPT / Qwen2.5-VL / DeepSeek 与未知模型报图上像素；Gemini、Qwen3、GLM、Kimi、豆包等原生 0–1000 的走比例。"""
     assert desktop_coords.coord_mode_for(name) == mode
 
 
 def test_coord_mode_override_wins():
-    assert desktop_coords.coord_mode_for("deepseek-flash", "pixel") == PIXEL
+    assert desktop_coords.coord_mode_for("deepseek-flash", "norm1000") == NORM1000
+    assert desktop_coords.coord_mode_for("gemini-3-pro", "pixel") == PIXEL
     assert desktop_coords.coord_mode_for("claude-opus-5", "norm1000") == NORM1000
     # 无法识别的覆盖值按 auto 处理
     assert desktop_coords.coord_mode_for("claude-opus-5", "bogus") == PIXEL
+    assert desktop_coords.coord_mode_for("gemini-3-pro", "bogus") == NORM1000
+
+
+def test_coord_mode_name_with_both_families_prefers_pixel():
+    """名字里同时带像素族与比例族的词（经网关改名的 claude / gpt 之类）以像素为准。"""
+    assert desktop_coords.coord_mode_for("kimi-via-claude-proxy") == PIXEL
+    assert desktop_coords.coord_mode_for("gpt-4o-glm-gateway") == PIXEL
+
+
+def test_convention_line_states_anchor_and_both_axes():
+    """口径行写明图中心数值作锚点；比例口径强调两个轴都要换算（实录里模型只换了 x 轴）。"""
+    px = desktop_coords.convention_line(PIXEL, 1286, 768)
+    assert "图上像素" in px and "(643,384)" in px and "不要换算成比例" in px
+    nm = desktop_coords.convention_line(NORM1000, 1286, 768)
+    assert "0–1000" in nm and "都" in nm and "500,500" in nm
+
+
+def test_to_image_px_echoes_normalized_point():
+    """比例口径回显它落在图上的哪个像素：(770, 336) → 图上 (990, 258)，模型当场可对出 y 轴没换算。"""
+    m = {"srcX": 0, "srcY": 0, "srcW": 2560, "srcH": 1529, "width": 1286, "height": 768}
+    sx, sy, _ = desktop_coords.to_screen(m, 770, 336, NORM1000)
+    assert desktop_coords.to_image_px(m, sx, sy) == (990, 258)
 
 
 def test_to_screen_pixel_full_screen():
@@ -287,7 +317,7 @@ def core(monkeypatch):
 async def test_screenshot_states_convention_and_sets_frame(core, tmp_path):
     from app.orchestration.tools import desktop as D
 
-    ctx = _ctx(tmp_path, model="deepseek-flash")
+    ctx = _ctx(tmp_path, model="gemini-3.8-flash")
     res = await D.DesktopScreenshotTool().run({}, ctx)
     assert res.ok, res.error
     assert "坐标口径：0–1000 比例" in res.output
@@ -298,6 +328,10 @@ async def test_screenshot_states_convention_and_sets_frame(core, tmp_path):
 
     res2 = await D.DesktopScreenshotTool().run({}, _ctx(tmp_path, task_id=2, model="claude-opus-5-5"))
     assert "坐标口径：图上像素" in res2.output and "1228" in res2.output
+
+    # DeepSeek 等没有原生 0–1000 口径的模型：图上像素
+    res3 = await D.DesktopScreenshotTool().run({}, _ctx(tmp_path, task_id=3, model="deepseek-flash"))
+    assert "坐标口径：图上像素" in res3.output
 
 
 @pytest.mark.asyncio

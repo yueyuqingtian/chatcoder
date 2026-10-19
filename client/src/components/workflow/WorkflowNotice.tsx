@@ -4,6 +4,7 @@
  */
 import { useState } from "react";
 import { IxWorkflow } from "../iconkit/StackIcons";
+import { ChatCollapse } from "../chat/ChatCollapse";
 
 const PREFIX = /^\[系统通知\]\s*/;
 
@@ -30,7 +31,8 @@ export function WorkflowNotice({ text }: { text: string }) {
         <span className="tc-verb">工作流</span>
         <span className="tc-query wf-notice-title">{title}</span>
       </button>
-      {expanded && <div className="wf-notice-body">{body}</div>}
+      {/* plan-20261019-motion-sweep：展开 / 收起走 ChatCollapse（此前是条件渲染，瞬间出现 / 消失） */}
+      <ChatCollapse open={expanded}><div className="wf-notice-body">{body}</div></ChatCollapse>
     </div>
   );
 }

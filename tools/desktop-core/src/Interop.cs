@@ -51,6 +51,8 @@ namespace DesktopCore
         [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
         [DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
         [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);
+        // 旧系统 / 清单未生效时的兜底：至少让坐标是物理像素（System-Aware 在单显示器上与 PMv2 等价）
+        [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
         [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
         [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
@@ -60,6 +62,17 @@ namespace DesktopCore
         [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint attach, uint attachTo, bool fAttach);
         [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
         [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+        // 光标读回：点击落点校验要读「系统实际把光标放在了哪」，而不是相信发出去的坐标
+        [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
+        // DPI 自检（plan-20261019-desktop-targeting）：进程 / 线程是否真的处于 Per-Monitor-V2，
+        // 以及每块显示器的有效 DPI。感知级别不对时所有坐标都会被系统虚拟化，必须能被发现。
+        [DllImport("user32.dll")] public static extern IntPtr GetThreadDpiAwarenessContext();
+        [DllImport("user32.dll")] public static extern bool AreDpiAwarenessContextsEqual(IntPtr a, IntPtr b);
+        [DllImport("user32.dll")] public static extern int GetAwarenessFromDpiAwarenessContext(IntPtr ctx);
+        public delegate bool MonitorEnumProc(IntPtr hMon, IntPtr hdc, ref RECT rc, IntPtr data);
+        [DllImport("user32.dll")] public static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr clip, MonitorEnumProc cb, IntPtr data);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool GetMonitorInfoW(IntPtr hMon, ref MONITORINFOEX mi);
+        [DllImport("shcore.dll")] public static extern int GetDpiForMonitor(IntPtr hMon, int type, out uint dx, out uint dy);
         [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr hWnd);
         [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
         [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] p, int cb);
@@ -128,6 +141,16 @@ namespace DesktopCore
         [StructLayout(LayoutKind.Sequential)]
         public struct RECT { public int Left, Top, Right, Bottom; }
 
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        public struct MONITORINFOEX
+        {
+            public int cbSize;
+            public RECT rcMonitor;
+            public RECT rcWork;
+            public uint dwFlags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string szDevice;
+        }
+
         [StructLayout(LayoutKind.Sequential)]
         public struct PROCESS_BASIC_INFORMATION
         {
@@ -184,15 +207,50 @@ namespace DesktopCore
         /// <summary>
         /// Absolute mouse coordinates must be normalized into 0..65535 across the whole
         /// virtual desktop, otherwise multi-monitor and scaled setups land in the wrong place.
+        ///
+        /// 映射口径（plan-20261019-desktop-targeting）：系统把 0..65535 线性映射到虚拟桌面，
+        /// 像素 = nx * 宽 / 65536。要命中像素 x，取 nx = ceil(x * 65536 / 宽)，往返不丢像素；
+        /// 旧写法按 65535 / (宽 - 1) 取整，在 2560 级分辨率上会有 1 像素偏差。
+        /// 无论公式多准，落点都由 Input.MoveTo 读回光标位置并用 SetCursorPos 校正，这里只负责「尽量一次到位」。
         /// </summary>
         public static void Normalize(int x, int y, out int nx, out int ny)
         {
-            int vx = GetSystemMetrics(SM_XVIRTUALSCREEN), vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
-            int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN), vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-            if (vw <= 0) vw = GetSystemMetrics(SM_CXSCREEN);
-            if (vh <= 0) vh = GetSystemMetrics(SM_CYSCREEN);
-            nx = (int)Math.Round((x - vx) * 65535.0 / Math.Max(1, vw - 1));
-            ny = (int)Math.Round((y - vy) * 65535.0 / Math.Max(1, vh - 1));
+            int vx, vy, vw, vh;
+            VirtualScreen(out vx, out vy, out vw, out vh);
+            nx = (int)Math.Ceiling((x - vx) * 65536.0 / vw);
+            ny = (int)Math.Ceiling((y - vy) * 65536.0 / vh);
+            if (nx < 0) nx = 0; else if (nx > 65535) nx = 65535;
+            if (ny < 0) ny = 0; else if (ny > 65535) ny = 65535;
+        }
+
+        /// <summary>虚拟桌面矩形（物理像素）；取不到时退回主屏。</summary>
+        public static void VirtualScreen(out int vx, out int vy, out int vw, out int vh)
+        {
+            vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            if (vw <= 0) vw = Math.Max(1, GetSystemMetrics(SM_CXSCREEN));
+            if (vh <= 0) vh = Math.Max(1, GetSystemMetrics(SM_CYSCREEN));
+        }
+
+        /// <summary>
+        /// 当前线程的 DPI 感知级别：PerMonitorV2 / PerMonitor / System / Unaware。
+        /// 不是 PerMonitorV2 时，系统会把坐标按缩放比虚拟化——截图、窗口矩形、点击落点各自缩放不一致，
+        /// 这正是「不同缩放比例下点击偏移」最典型的底层原因，所以必须能在运行时被检测出来。
+        /// </summary>
+        public static string DpiAwarenessName()
+        {
+            try
+            {
+                IntPtr ctx = GetThreadDpiAwarenessContext();
+                if (AreDpiAwarenessContextsEqual(ctx, PMv2)) return "PerMonitorV2";
+                int a = GetAwarenessFromDpiAwarenessContext(ctx);
+                if (a == 2) return "PerMonitor";
+                if (a == 1) return "System";
+                return "Unaware";
+            }
+            catch { return "Unknown"; }
         }
 
         public static bool Send(INPUT[] arr)

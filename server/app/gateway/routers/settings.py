@@ -47,6 +47,25 @@ def _save_config(data: dict) -> None:
         pass
 
 
+# plan-20261019-toolcard-v2：会话工具卡设置的取值夹紧（与前端 store/toolCard.ts 的栏目键一致）
+_TOOL_CARD_SECTIONS = ("git", "plan", "process", "subagent", "workflow")
+
+
+def _tool_card_form(value) -> str:
+    """工具卡默认形态：只认 capsule / expanded，其余一律回落 capsule。"""
+    return "expanded" if str(value or "").strip().lower() == "expanded" else "capsule"
+
+
+def _tool_card_sections(value) -> dict[str, bool]:
+    """逐栏默认展开：只保留已知栏目的布尔值，未知键与非法值丢弃。"""
+    out: dict[str, bool] = {}
+    if isinstance(value, dict):
+        for key in _TOOL_CARD_SECTIONS:
+            if key in value:
+                out[key] = bool(value[key])
+    return out
+
+
 # ── 工作目录 ──
 
 class WorkspaceOut(BaseModel):
@@ -139,11 +158,13 @@ def load_persisted_workspace() -> None:
     _DESKTOP_BOOL_KEYS = (
         "desktop_enabled", "desktop_plain_ops_enabled", "desktop_browser_ops_enabled",
         "desktop_require_foreground", "desktop_recipe_enabled",
+        # plan-20261019-desktop-targeting：截图附带元素清单（隐藏配置，只读 config.json）
+        "desktop_auto_elements",
     )
     for _k in _DESKTOP_BOOL_KEYS:
         if _k in data:
             setattr(settings, _k, bool(data[_k]))
-    # 坐标口径：隐藏配置（只读 config.json），auto 以外的取值才覆盖按模型族自动选择
+    # 坐标口径（设置页「坐标口径」）：auto 以外的取值才覆盖按模型族自动选择
     if "desktop_coord_mode" in data:
         _mode = str(data["desktop_coord_mode"] or "auto").strip().lower()
         settings.desktop_coord_mode = _mode if _mode in ("auto", "pixel", "norm1000") else "auto"
@@ -216,6 +237,11 @@ def load_persisted_workspace() -> None:
     # plan-156-619 S7：工具卡栏目的全局默认展开策略
     if "tool_card_sections_expanded" in data:
         settings.tool_card_sections_expanded = bool(data["tool_card_sections_expanded"])
+    # plan-20261019-toolcard-v2：工具卡默认形态 / 逐栏默认展开
+    if "tool_card_default_form" in data:
+        settings.tool_card_default_form = _tool_card_form(data["tool_card_default_form"])
+    if "tool_card_section_defaults" in data:
+        settings.tool_card_section_defaults = _tool_card_sections(data["tool_card_section_defaults"])
     # 工作流运行时：恢复并发上限 / 返工 / 预算；取值与 PUT 共用同一夹紧口径
     if "workflow_enabled" in data:
         settings.workflow_enabled = bool(data["workflow_enabled"])
@@ -326,6 +352,8 @@ class GlobalSettingsOut(BaseModel):
     desktop_screenshot_quality: int = 100
     desktop_screenshot_max_dim: int = 0
     desktop_recipe_enabled: bool = True
+    # plan-20261019-desktop-targeting：坐标口径 auto / pixel / norm1000
+    desktop_coord_mode: str = "auto"
     # v36: 子代理并发治理（设置中心「子代理」面板可配，运行时立即生效）
     max_concurrent_subagents: int = 6   # 同时运行上限（超出排队等待，1~16）
     max_subagents_per_turn: int = 10    # 每轮派发总量上限（含已完成，1~32）
@@ -340,6 +368,9 @@ class GlobalSettingsOut(BaseModel):
     operator_reasoning_effort: str = "lowest"
     # plan-156-619 S7：工具卡栏目全局默认展开策略（true = 默认全展开）
     tool_card_sections_expanded: bool = True
+    # plan-20261019-toolcard-v2：工具卡默认形态与逐栏默认展开
+    tool_card_default_form: str = "capsule"
+    tool_card_section_defaults: dict[str, bool] = {}
     # plan-75-332: 审批卡「解释」专用模型 / 思考深度（0/空 = 跟随会话）
     approval_explain_model_id: int = 0
     approval_explain_reasoning_effort: str = ""
@@ -439,6 +470,7 @@ class GlobalSettingsIn(BaseModel):
     desktop_screenshot_quality: int | None = None
     desktop_screenshot_max_dim: int | None = None
     desktop_recipe_enabled: bool | None = None
+    desktop_coord_mode: str | None = None
     # v36: 子代理并发治理
     max_concurrent_subagents: int | None = None
     max_subagents_per_turn: int | None = None
@@ -452,6 +484,9 @@ class GlobalSettingsIn(BaseModel):
     operator_reasoning_effort: str | None = None
     # plan-156-619 S7：工具卡栏目全局默认展开策略
     tool_card_sections_expanded: bool | None = None
+    # plan-20261019-toolcard-v2：工具卡默认形态与逐栏默认展开
+    tool_card_default_form: str | None = None
+    tool_card_section_defaults: dict[str, bool] | None = None
     # plan-75-332: 审批卡「解释」专用模型 / 思考深度（0/空 = 跟随会话）
     approval_explain_model_id: int | None = None
     approval_explain_reasoning_effort: str | None = None
@@ -542,6 +577,8 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
             "desktop_screenshot_max_dim", getattr(settings, "desktop_screenshot_max_dim", 0))),
         desktop_recipe_enabled=data.get(
             "desktop_recipe_enabled", getattr(settings, "desktop_recipe_enabled", True)),
+        desktop_coord_mode=str(
+            data.get("desktop_coord_mode", getattr(settings, "desktop_coord_mode", "auto")) or "auto"),
         # plan-75-332: 审批卡「解释」专用模型 / 思考深度（0/空 = 跟随会话）
         approval_explain_model_id=int(data.get("approval_explain_model_id", 0) or 0),
         approval_explain_reasoning_effort=str(
@@ -563,6 +600,10 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
         tool_card_sections_expanded=bool(data.get(
             "tool_card_sections_expanded", settings.tool_card_sections_expanded,
         )),
+        tool_card_default_form=_tool_card_form(data.get(
+            "tool_card_default_form", settings.tool_card_default_form)),
+        tool_card_section_defaults=_tool_card_sections(data.get(
+            "tool_card_section_defaults", settings.tool_card_section_defaults)),
         # 工作流运行时：取值在 PUT 与启动恢复时已夹紧，此处只读
         **{k: int(data.get(k, getattr(settings, k))) for k in _WORKFLOW_INT_BOUNDS},
         workflow_enabled=bool(data.get("workflow_enabled", settings.workflow_enabled)),
@@ -791,6 +832,11 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         _d = max(0, int(body.desktop_screenshot_max_dim))
         data["desktop_screenshot_max_dim"] = _d
         settings.desktop_screenshot_max_dim = _d
+    if body.desktop_coord_mode is not None:
+        _cm = str(body.desktop_coord_mode or "auto").strip().lower()
+        _cm = _cm if _cm in ("auto", "pixel", "norm1000") else "auto"
+        data["desktop_coord_mode"] = _cm
+        settings.desktop_coord_mode = _cm
     # v36: 子代理并发治理（夹紧上限，运行时立即生效——agent_loop 每次派发前读取）
     if body.max_concurrent_subagents is not None:
         _mc = max(1, min(16, int(body.max_concurrent_subagents)))
@@ -822,6 +868,15 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
     if body.tool_card_sections_expanded is not None:
         data["tool_card_sections_expanded"] = bool(body.tool_card_sections_expanded)
         settings.tool_card_sections_expanded = bool(body.tool_card_sections_expanded)
+    # plan-20261019-toolcard-v2：默认形态 / 逐栏默认展开（取值夹紧，未知栏目丢弃）
+    if body.tool_card_default_form is not None:
+        _form = _tool_card_form(body.tool_card_default_form)
+        data["tool_card_default_form"] = _form
+        settings.tool_card_default_form = _form
+    if body.tool_card_section_defaults is not None:
+        _secs = _tool_card_sections(body.tool_card_section_defaults)
+        data["tool_card_section_defaults"] = _secs
+        settings.tool_card_section_defaults = _secs
     # 工作流运行时：夹紧后写入配置；并发上限由服务每拍读取，保存即生效
     if body.workflow_enabled is not None:
         data["workflow_enabled"] = bool(body.workflow_enabled)

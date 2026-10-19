@@ -14,6 +14,7 @@ import { api } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { MarkdownContent } from "../MarkdownContent";
 import { IconChevronRight, IconCompress, IconRotateCcw } from "../icons";
+import { ChatCollapse } from "./ChatCollapse";
 
 const OPEN_TAG = "<compacted-summary>";
 const CLOSE_TAG = "</compacted-summary>";
@@ -117,7 +118,9 @@ export const CompactCard = memo(function CompactCard({ msg }: { msg: MessageOut 
           <IconChevronRight size={14} />
         </span>
       </div>
-      {open && (
+      {/* plan-20261019-motion-sweep：展开 / 收起走 ChatCollapse（消息流内联展开块的统一容器）；
+          此前是 `{open && …}` 条件渲染，点一下整块瞬间出现 / 消失。 */}
+      <ChatCollapse open={open}>
         <div className="compact-card-body">
           <div className="compact-card-meta">
             {shadowedIds.length > 0 && <span>遮蔽 {shadowedIds.length} 条消息（ID {shadowedIds[0]}…{shadowedIds[shadowedIds.length - 1]}）</span>}
@@ -157,7 +160,7 @@ export const CompactCard = memo(function CompactCard({ msg }: { msg: MessageOut 
             </div>
           )}
         </div>
-      )}
+      </ChatCollapse>
     </div>
   );
 });

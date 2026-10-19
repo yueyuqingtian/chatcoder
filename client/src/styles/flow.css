@@ -224,6 +224,9 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
 }
 
 .sg-steps { display: flex; flex-direction: column; gap: 4px; margin: 2px 0 0; padding: 0; list-style: none; }
+/* plan-20261019-motion-sweep：超出 3 步的部分放在 Collapse 里的第二个列表——与上一个列表的 4px 间距
+   写在容器内部（折叠时随内层一起被裁成 0 高度），不依赖 flex gap */
+.sg-steps.sg-steps-rest { margin: 0; padding-top: 4px; }
 .sg-steps li { display: flex; align-items: flex-start; gap: 7px; min-width: 0; font-size: var(--fs-sm); line-height: 1.75; color: var(--text-2); }
 .sg-step-idx {
   flex-shrink: 0;
@@ -250,7 +253,7 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   transition: background var(--dur-fast), color var(--dur-fast);
 }
 .sg-steps-more:hover { background: var(--bg-hover); color: var(--text-2); }
-.sg-steps-caret { flex-shrink: 0; transition: transform var(--dur-fast); }
+.sg-steps-caret { flex-shrink: 0; transition: transform var(--dur-3) var(--ease-emphasized-decel); }
 .sg-steps-caret.is-open { transform: rotate(180deg); }
 
 .sg-error {

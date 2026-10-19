@@ -7,7 +7,7 @@
  */
 import { useState } from "react";
 import { useChatStore } from "../../store/chat";
-import { Button, Dialog, DialogSection, InsetCard } from "../ui";
+import { Button, Collapse, Dialog, DialogSection, InsetCard } from "../ui";
 import { IconAlertTriangle } from "../icons";
 import type { RollbackPreviewFile } from "../../api/client";
 
@@ -181,7 +181,8 @@ export function RollbackConfirmModal() {
                     <span className="rc-file-path">{f.path}</span>
                     <span className={`rc-file-flag${f.conflict ? " conflict" : ""}`}>{f.conflict ? "冲突跳过" : "可安全回滚"}</span>
                   </button>
-                  {expanded === f.path && <FileDiff file={f} />}
+                  {/* plan-20261019-motion-sweep：对比展开走 Collapse（lazy 保留「展开才计算 LCS」的开销特性） */}
+                  <Collapse open={expanded === f.path} lazy>{() => <FileDiff file={f} />}</Collapse>
                 </div>
               ))}
             </div>

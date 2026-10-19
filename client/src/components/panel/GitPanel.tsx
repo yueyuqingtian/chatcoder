@@ -9,8 +9,8 @@ import { api, type GitBranchesOut, type GitCommitDetailOut, type GitDiffOut, typ
 import { findSession, useChatStore } from "../../store/chat";
 import { bucketSessionId, usePanelStore } from "../../store/panel";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { Button, Checkbox, Dialog, Empty, FormDialog, IconButton, Input, Menu, Popover, Segmented, Tooltip } from "../ui";
-import { IconAlertTriangle, IconArrowDown, IconArrowUp, IconCheck, IconChevronDown, IconChevronRight, IconDownload, IconGitBranch, IconGlobe, IconLayers, IconMoreHorizontal, IconPlus, IconRefresh, IconTrash, IconX } from "../icons";
+import { Button, Checkbox, Collapse, Dialog, Empty, FormDialog, IconButton, Input, Menu, Popover, Segmented, Tooltip } from "../ui";
+import { IconAlertTriangle, IconArrowDown, IconArrowUp, IconCheck, IconChevronDown, IconDownload, IconGitBranch, IconGlobe, IconLayers, IconMoreHorizontal, IconPlus, IconRefresh, IconTrash, IconX } from "../icons";
 import { FileIcon } from "../iconkit/FileIcon";
 import { highlightLines } from "../chat/CodeView";
 
@@ -625,15 +625,19 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
           )}
         </span>
         </div>
-        {active && (
-          <div className="gp-diff-inline">
-            {diffLoading
-              ? <div className="gp-diff-note">读取差异…</div>
-              : diff && diff.path === r.path
-                ? <DiffView diff={diff} path={r.path} />
-                : <div className="gp-diff-note">没有可显示的差异</div>}
-          </div>
-        )}
+        {/* plan-20261019-motion-sweep：差异就地展开 / 收起走 Collapse（高度过渡，收起结束才卸载）；
+            收起时 openDiff 会同步清空 diff，Collapse 冻结最后一次展开的内容，不会在收起过程中闪成「没有可显示的差异」。 */}
+        <Collapse open={active} lazy>
+          {() => (
+            <div className="gp-diff-inline">
+              {diffLoading
+                ? <div className="gp-diff-note">读取差异…</div>
+                : diff && diff.path === r.path
+                  ? <DiffView diff={diff} path={r.path} />
+                  : <div className="gp-diff-note">没有可显示的差异</div>}
+            </div>
+          )}
+        </Collapse>
       </div>
     );
   };
@@ -666,7 +670,8 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
             onChange={() => toggleAllRows(rows, !all)}
           />
           <button type="button" className="gp-section-title" aria-expanded={open} onClick={() => toggleSection(key)}>
-            {open ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}
+            {/* 同一枚箭头旋转表达开合（此前展开 / 收起互换两个图标，是硬切） */}
+            <IconChevronDown size={12} className={"gp-section-caret" + (open ? " is-open" : "")} />
             <span>{title}</span>
             <span className="gp-count">{rows.length}</span>
           </button>
@@ -692,7 +697,7 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
             ]}
           />
         </div>
-        {open && <div className="gp-section-body">{rows.map(changeRow)}</div>}
+        <Collapse open={open} lazy>{() => <div className="gp-section-body">{rows.map(changeRow)}</div>}</Collapse>
       </div>
     );
   };
@@ -1001,14 +1006,18 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
         />
       </div>
 
-      {(notice || error) && (
-        <div className={`gp-notice${error ? " is-error" : noticeTone === "warn" ? " is-warn" : ""}`} role={error ? "alert" : "status"}>
-          <span className="gp-notice-text">{error ?? notice}</span>
-          <button type="button" className="gp-notice-x" aria-label="关闭提示" onClick={() => { setNotice(null); setError(null); setNoticeTone("info"); }}>
-            <IconX size={11} />
-          </button>
-        </div>
-      )}
+      {/* plan-20261019-motion-sweep：提示条走 Collapse——出现时自上而下展开、关闭时收拢，下方列表随之滑动；
+          此前是条件渲染，整块瞬间插入把列表顶下去。关闭时内容冻结，文案不会先清空再收拢。 */}
+      <Collapse open={!!(notice || error)} lazy>
+        {() => (
+          <div className={`gp-notice${error ? " is-error" : noticeTone === "warn" ? " is-warn" : ""}`} role={error ? "alert" : "status"}>
+            <span className="gp-notice-text">{error ?? notice}</span>
+            <button type="button" className="gp-notice-x" aria-label="关闭提示" onClick={() => { setNotice(null); setError(null); setNoticeTone("info"); }}>
+              <IconX size={11} />
+            </button>
+          </div>
+        )}
+      </Collapse>
 
       {view === "history" && historyView}
 
@@ -1021,37 +1030,41 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
 
       {view === "changes" && status && (
         <div className="gp-body">
-          {merging && (
-            <div className="gp-merge-banner">
-              <IconAlertTriangle size={14} />
-              <span className="gp-merge-text">
-                {conflictCount > 0 ? `合并进行中，${conflictCount} 个文件有冲突` : "合并进行中，冲突已全部解决，可提交完成合并"}
-              </span>
-              <Button variant="ghost" size="sm" disabled={busy != null}
-                onClick={() => void run("abort", async () => { await api.gitMergeAbort(projectId!, { repo }); return "已中止合并"; })}>
-                中止合并
-              </Button>
-            </div>
-          )}
-
-          {conflictCount > 0 && (
-            <>
-              <div className="gp-conflict-help">冲突文件需先选择保留哪一边，处理完再一起提交。</div>
-              <div className="gp-conflict-actions">
-                {status.conflicts.map((c) => (
-                  <div key={`cf-${c.path}`} className="gp-conflict-row">
-                    <Tooltip title={c.path} side="top">
-                      <span className="gp-conflict-name">{c.path}</span>
-                    </Tooltip>
-                    <Button variant="ghost" size="sm" disabled={busy != null}
-                      onClick={() => void run("resolve", async () => { await api.gitResolve(projectId!, c.path, "ours", { repo }); })}>采用我方</Button>
-                    <Button variant="ghost" size="sm" disabled={busy != null}
-                      onClick={() => void run("resolve", async () => { await api.gitResolve(projectId!, c.path, "theirs", { repo }); })}>采用对方</Button>
-                  </div>
-                ))}
+          <Collapse open={merging} lazy>
+            {() => (
+              <div className="gp-merge-banner">
+                <IconAlertTriangle size={14} />
+                <span className="gp-merge-text">
+                  {conflictCount > 0 ? `合并进行中，${conflictCount} 个文件有冲突` : "合并进行中，冲突已全部解决，可提交完成合并"}
+                </span>
+                <Button variant="ghost" size="sm" disabled={busy != null}
+                  onClick={() => void run("abort", async () => { await api.gitMergeAbort(projectId!, { repo }); return "已中止合并"; })}>
+                  中止合并
+                </Button>
               </div>
-            </>
-          )}
+            )}
+          </Collapse>
+
+          <Collapse open={conflictCount > 0} lazy>
+            {() => (
+              <>
+                <div className="gp-conflict-help">冲突文件需先选择保留哪一边，处理完再一起提交。</div>
+                <div className="gp-conflict-actions">
+                  {status.conflicts.map((c) => (
+                    <div key={`cf-${c.path}`} className="gp-conflict-row">
+                      <Tooltip title={c.path} side="top">
+                        <span className="gp-conflict-name">{c.path}</span>
+                      </Tooltip>
+                      <Button variant="ghost" size="sm" disabled={busy != null}
+                        onClick={() => void run("resolve", async () => { await api.gitResolve(projectId!, c.path, "ours", { repo }); })}>采用我方</Button>
+                      <Button variant="ghost" size="sm" disabled={busy != null}
+                        onClick={() => void run("resolve", async () => { await api.gitResolve(projectId!, c.path, "theirs", { repo }); })}>采用对方</Button>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </Collapse>
 
           {/* 两类对象分开列：已跟踪文件的改动 / 从未纳入 git 的新文件。
               组内勾选只改是否加入本次提交，行不会跨组移动。 */}

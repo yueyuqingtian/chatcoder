@@ -107,6 +107,35 @@
 .ui-pop.pl-left-start { right: calc(100% + var(--pop-gap)); top: calc(-1 * var(--pop-pad) - 1px); transform-origin: 100% 0%; --pop-dy: 0px; }
 .ui-pop.pl-left-end { right: calc(100% + var(--pop-gap)); bottom: calc(-1 * var(--pop-pad) - 1px); transform-origin: 100% 100%; --pop-dy: 0px; }
 
+/* ── ②-b Floating（plan-20261019-toolcard-v2）：portal + 固定定位的锚定浮层 ──
+   外层只负责定位（位移走 transform，left/top 恒为 0，宽度只由内容与 max-width 决定，避免测量 ↔ 定位反馈环）；
+   内层是浮层本体，沿用 Popover 的圆角 / 底色 / 阴影令牌。 */
+.ui-floating-anchor {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 1100;
+  width: max-content;
+  max-width: calc(100vw - 16px);
+  pointer-events: none;
+  will-change: transform;
+}
+.ui-floating {
+  pointer-events: auto;
+  max-height: calc(100vh - 16px);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pop);
+  background: var(--color-popover);
+  color: var(--text-1);
+  box-shadow: var(--shadow-pop);
+  outline: none;
+}
+.ui-floating[data-side="left"] { transform-origin: 100% 0%; --pop-dy: 0px; }
+.ui-floating[data-side="right"] { transform-origin: 0% 0%; --pop-dy: 0px; }
+.ui-floating[data-side="top"] { transform-origin: 50% 100%; --pop-dy: 6px; }
+.ui-floating[data-side="bottom"] { transform-origin: 50% 0%; --pop-dy: -6px; }
+
 /* 浮层内通用结构：分组标题 / 菜单项 / 分隔 / 搜索 / 空态 / 底部入口 */
 .pop-label {
   display: flex;

@@ -10,7 +10,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api/client";
 import type { ScheduledRunStatus, ScheduledTaskOut } from "@chatcoder/shared";
 import { IconClock, IconPlay, IconPlus, IconRefresh, IconChevronDown, IconTrash } from "../icons";
-import { Empty, Tooltip } from "../ui";
+import { Collapse, Empty, Tooltip } from "../ui";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { Sw } from "./shared";
 import {
@@ -128,13 +128,16 @@ export function ScheduledPanel() {
                   <span title={absTime(t.last_run_at)}>上次：{relTime(t.last_run_at, nowMs)}</span>
                 </div>
                 {t.last_error && <div className="sched-last-error">{t.last_error}</div>}
-                {expandedPreview === t.id && preview && (
-                  <div className="sched-preview">
-                    {preview.length === 0
-                      ? <span className="sched-preview-empty">该表达式不会触发</span>
-                      : preview.map((p, i) => <div key={i} title={p}>{i + 1}. {absTime(p)}</div>)}
-                  </div>
-                )}
+                {/* plan-20261019-motion-sweep：排程预览展开走 Collapse（此前只有淡入、没有高度过渡与收起动画） */}
+                <Collapse open={expandedPreview === t.id && !!preview} lazy className="in-gap">
+                  {() => (
+                    <div className="sched-preview">
+                      {(preview ?? []).length === 0
+                        ? <span className="sched-preview-empty">该表达式不会触发</span>
+                        : (preview ?? []).map((p, i) => <div key={i} title={p}>{i + 1}. {absTime(p)}</div>)}
+                    </div>
+                  )}
+                </Collapse>
               </div>
               <div className="settings-resource-actions">
                 <Sw checked={t.enabled} onChange={(v) => void handleToggle(t, v)} />

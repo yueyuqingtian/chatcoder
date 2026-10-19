@@ -9,6 +9,8 @@
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
+  /* 步骤明细的折叠容器（.in-gap）据此抵消 0 高度子项占的那一份 gap，见 motion.css */
+  --collapse-gap: var(--sp-3);
   width: 100%;
   max-width: 100%;
   box-sizing: border-box;
@@ -573,6 +575,10 @@
   padding: 0;
   list-style: none;
 }
+
+/* 「展开全部」的第二个列表放在 Collapse 里：与上一个列表的间距写在容器内部（折叠时随内层被裁成 0），
+   不依赖外层 flex gap（plan-20261019-motion-sweep） */
+.wf-issues.wf-issues-rest { padding-top: var(--sp-2); }
 
 .wf-issue {
   display: flex;
@@ -1316,6 +1322,9 @@
   background: var(--color-popover);
   box-shadow: var(--shadow-pop);
   scrollbar-width: thin;
+  /* 进出场（.mo-pop）：从头部下沿向下展开，与 ui/Popover 的 bottom-start 同一锚点与位移 */
+  transform-origin: 50% 0;
+  --pop-dy: -6px;
 }
 
 .subagent-wf-detail > * { flex-shrink: 0; }
@@ -1833,6 +1842,8 @@
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
+  /* 尝试记录的折叠容器（.in-gap）据此抵消 0 高度子项占的那一份 gap，见 motion.css */
+  --collapse-gap: var(--sp-1);
   padding-top: var(--sp-2);
 }
 

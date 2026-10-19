@@ -72,7 +72,10 @@
  * 各层不透明度 4%~9%，大半径柔边，彼此融合成一张很轻的画面。
  * --world-scene 铺在主区与设置页；--world-scene-side 是侧栏版（更收敛，只取两层）。
  * --world-2 为副色，供热力图、插画使用。 */
-:root[data-world] { --world-2: var(--accent); --color-panel: var(--color-background); }
+/* plan-20261019-toolcard-v2：不再把 --color-panel 绑到世界底色——消息流 / 标题栏 / 右侧面板的底色
+   固定为中性（浅 #F8F8F8 / 深 neutral-900，见 tokens.css），不随主题世界变化；
+   世界只保留强调色、场景渐变（首页 / 设置页）与配件。 */
+:root[data-world] { --world-2: var(--accent); }
 
 :root[data-world="graphite"] {
   --color-background: oklch(98.6% 0.001 85);
@@ -188,11 +191,13 @@
 .app-main { background-image: var(--world-scene, none); }
 :root:not([data-glass="on"]) .sidebar { background-image: var(--world-scene-side, none); }
 /* 设置卡片与首页卡片微透：让风景淡淡透过来，又不影响文字对比
-   （plan-121-482：.mem-list / .inst-list 是「记忆 / 拓展」页的独立列表卡片，跟随同一半透规则） */
+   （plan-121-482：.mem-list / .inst-list 是「记忆 / 拓展」页的独立列表卡片，跟随同一半透规则；
+    plan-20261019-dsh-ui：第三方插件分组的空态壳也是同页卡片，必须同源，否则与相邻列表背景割裂） */
 :root[data-world] .settings-card,
 :root[data-world] .ui-card,
 :root[data-world] .mem-list,
-:root[data-world] .inst-list { background: color-mix(in oklab, var(--color-card) 82%, transparent); }
+:root[data-world] .inst-list,
+:root[data-world] .cx-plugins-blank { background: color-mix(in oklab, var(--color-card) 82%, transparent); }
 
 /* ── plan-114-448：面板级轻纹理（CSS 平铺 SVG，透明度极低）──
  * 只铺在「留白多」的地方：设置页底、右侧面板启动页；每个世界的纹理各不相同，与首页 canvas 纹理同族。

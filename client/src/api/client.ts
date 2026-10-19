@@ -618,6 +618,27 @@ export interface GitBranchesOut {
   local: Array<{ name: string; current: boolean; upstream: string | null; date: string }>;
   remote: Array<{ name: string; date: string }>;
 }
+/** plan-20261019-toolcard-v2：工具卡 Git 栏的一个仓库摘要——分支 / 领先落后 / 未提交改动文件数与增删行数 */
+export interface GitCardRepoOut {
+  rel: string;
+  name: string;
+  branch: string | null;
+  detached: boolean;
+  oid: string | null;
+  ahead: number;
+  behind: number;
+  /** 未提交改动的文件数（已暂存 + 未暂存 + 未跟踪 + 冲突，同一文件只算一次） */
+  files: number;
+  /** 未提交改动新增行数（已暂存 + 未暂存相对 HEAD，加未跟踪文本文件的行数） */
+  additions: number;
+  deletions: number;
+}
+export interface GitDiffStatOut {
+  additions: number;
+  deletions: number;
+  files: number;
+  repos: GitCardRepoOut[];
+}
 /** plan-20261019-git-multirepo：项目内的一个仓库（根仓库 rel 为空串） */
 export interface GitRepoOut {
   rel: string;
@@ -924,6 +945,9 @@ export const api = {
   /** 汇总全部仓库的状态（路径带仓库前缀），供工具卡按项目展示改动 */
   gitStatusAll: (projectId: number, scope: GitScope = {}) =>
     get<GitStatusOut>(`/git/status-all?${gitQs(projectId, { sessionId: scope.sessionId })}`),
+  /** plan-20261019-toolcard-v2: 全部仓库未提交改动的增删行数合计（含未跟踪文本文件），供工具卡「更改 +N −M」 */
+  gitDiffStat: (projectId: number, scope: GitScope = {}) =>
+    get<GitDiffStatOut>(`/git/diff-stat?${gitQs(projectId, { sessionId: scope.sessionId })}`),
   gitStatus: (projectId: number, scope: GitScope = {}) => get<GitStatusOut>(`/git/status?${gitQs(projectId, scope)}`),
   gitDiff: (projectId: number, path: string, staged = false, scope: GitScope = {}) =>
     get<GitDiffOut>(`/git/diff?${gitQs(projectId, scope)}&path=${encodeURIComponent(path)}&staged=${staged ? "true" : "false"}`),
@@ -1492,7 +1516,7 @@ export const api = {
   // ── 电脑操控（plan-334-1661）──
   getDesktopStatus: () => get<DesktopStatus>("/desktop/status"),
   /** 主动拉起内核并取回环境信息（设置页「立即检测」） */
-  probeDesktop: () => post<{ ok: boolean; info: Record<string, unknown> }>("/desktop/probe", {}),
+  probeDesktop: () => post<{ ok: boolean; info: Record<string, unknown>; calib?: Record<string, unknown> }>("/desktop/probe", {}),
   listDesktopRecipes: (keyword = "") =>
     get<{ count: number; items: DesktopRecipe[] }>(
       `/desktop/recipes${keyword ? `?keyword=${encodeURIComponent(keyword)}` : ""}`,
@@ -1675,6 +1699,8 @@ export interface GlobalSettingsOut {
   desktop_screenshot_max_dim?: number;
   /** plan-334-1661: 操作路线沉淀开关 */
   desktop_recipe_enabled?: boolean;
+  /** plan-20261019-desktop-targeting: 电脑操控坐标口径（auto 按模型自动 / pixel 图上像素 / norm1000 0–1000 比例） */
+  desktop_coord_mode?: string;
   /** v36: 子代理同时运行上限（超出后新派发排队等待，1~16） */
   max_concurrent_subagents?: number;
   /** v36: 每轮子代理派发总量上限（含已完成，1~32） */
@@ -1689,8 +1715,12 @@ export interface GlobalSettingsOut {
   operator_subsession_enabled?: boolean;
   /** plan-20261018-operator-boost: 操控子会话思考深度（lowest = 模型最低档 / follow = 跟随子会话设置 / 具体档位） */
   operator_reasoning_effort?: string;
-  /** plan-156-619 S7: 综合工具卡各栏目的全局默认展开策略（true = 默认全展开） */
+  /** plan-156-619 S7: 综合工具卡各栏目的全局默认展开策略（true = 默认全展开）。旧字段，仅作逐栏默认缺省时的回落 */
   tool_card_sections_expanded?: boolean;
+  /** plan-20261019-toolcard-v2: 工具卡默认形态（capsule = 右上角悬浮胶囊 / expanded = 展开卡片） */
+  tool_card_default_form?: "capsule" | "expanded";
+  /** plan-20261019-toolcard-v2: 逐栏默认展开（git / plan / process / subagent / workflow），缺省的栏目回落旧布尔 */
+  tool_card_section_defaults?: Partial<Record<"git" | "plan" | "process" | "subagent" | "workflow", boolean>>;
   /** 工作流运行时（设置 → 工作流）：关闭后主代理不再规划新的工作流 */
   workflow_enabled?: boolean;
   /** 所有会话的工作流子代理合计上限（0 = 不限） */
@@ -1737,6 +1767,8 @@ export interface ExecPolicyToolInfo {
   name: string;
   risk_level: string;
   description: string;
+  /** plan-20261019-policy-search：工具类别（core / subagent / mcp），权限模式白名单按类分组 */
+  group?: string;
 }
 
 /** plan-334-1661: 电脑操控操作路线（应用 + 意图 → 通用原则） */

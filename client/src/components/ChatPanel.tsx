@@ -1,7 +1,7 @@
 /** ChatPanel（v4 r3 完全重写）：聊天面板容器。
  * 顶部错误横幅（可关闭） + 消息流 + ComposerBox
  */
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { PluginSlot } from "../plugins/registry";
 import { ContentWidthResizer } from "./chat/ContentWidthResizer";
 import { useContentColumnGeometry } from "./chat/useContentColumnGeometry";
@@ -9,16 +9,32 @@ import { SessionToolCard } from "./chat/toolcard/SessionToolCard";
 import { CLEARANCE_NONE, clearanceForForm } from "./chat/contentColumnGeometry";
 import type { ToolCardForm } from "./chat/toolcard/useToolCardFit";
 
+/** 内容列随工具卡形态平移的过渡窗口（ms）：略长于 --dur-4（240ms），覆盖整段卡片形变。 */
+const SHIFT_WINDOW_MS = 420;
+
 export function ChatPanel() {
   const panelRef = useRef<HTMLDivElement>(null);
 
   /** plan-156-619 S7 / plan-156-620：工具卡对右侧空间的需求随形态变化（展开 / 胶囊 / 隐藏）。
    *  内容列只在右缘真的会被遮住时才左移，且只移需要的那一段（宽度冻结）。
-   *  plan-20261019：胶囊是内容自适应宽度，按实测宽让位——此前一律按上限 260px 计算，
-   *  折叠后右侧明明放得下也会把消息列与输入框整体左移。 */
+   *  plan-20261019-toolcard-v2：胶囊悬浮在右上角、不让位，消息列保持居中；只有展开卡片才会按需左移。 */
   const [clearance, setClearance] = useState(CLEARANCE_NONE);
-  const onCardFormChange = useCallback((form: ToolCardForm, capsuleW?: number) => {
-    setClearance(clearanceForForm(form, capsuleW));
+  /** 用户手动展开 / 收起卡片时，内容列的平移需要与卡片形变同步过渡；
+   *  窗口缩放 / 拖面板造成的几何变化不能过渡（会让正文逐帧滞后于容器），所以只在这个窗口内开启 */
+  const [shifting, setShifting] = useState(false);
+  const shiftTimer = useRef<number | null>(null);
+  const onCardFormChange = useCallback((form: ToolCardForm, animate = false) => {
+    setClearance(clearanceForForm(form));
+    if (!animate) return;
+    setShifting(true);
+    if (shiftTimer.current != null) window.clearTimeout(shiftTimer.current);
+    shiftTimer.current = window.setTimeout(() => {
+      shiftTimer.current = null;
+      setShifting(false);
+    }, SHIFT_WINDOW_MS);
+  }, []);
+  useEffect(() => () => {
+    if (shiftTimer.current != null) window.clearTimeout(shiftTimer.current);
   }, []);
 
   /** plan-156-619 S3（需求 C1）；plan-156-623 性能重做：内容列宽度只由宿主宽与用户偏好
@@ -27,7 +43,7 @@ export function ChatPanel() {
   const fit = useContentColumnGeometry(panelRef, clearance);
 
   return (
-    <div ref={panelRef} className="chat-panel">
+    <div ref={panelRef} className={"chat-panel" + (shifting ? " is-tcard-shifting" : "")}>
       {/* plan-156-620：子会话顶部的「返回主会话」条已移除（用户反馈多余且不美观）——
           层级与返回入口由左栏「主会话 → 缩进子会话」承担，标题栏显示子会话自身标题。 */}
       {/* plan-282-1421（第7项）：移除标题栏与消息流之间的错误横幅。

@@ -9,6 +9,7 @@ import { IxWorkflow } from "../iconkit/StackIcons";
 import { usePanelStore } from "../../store/panel";
 import { useWorkflowStore } from "../../store/workflow";
 import { Badge, Button } from "../ui";
+import { ChatCollapse } from "../chat/ChatCollapse";
 import { WorkflowActions } from "./WorkflowActions";
 import { WorkflowFlowTrack, WorkflowStepTrack } from "./WorkflowStepTrack";
 import { IssueList, WorkflowGate } from "./WorkflowGate";
@@ -102,7 +103,8 @@ export const WorkflowCard = memo(function WorkflowCard({ programId }: { programI
           )}
           {notice && <p className="wf-card-notice" role="status">{notice}</p>}
           {gate && <WorkflowGate snap={snap} compact />}
-          {expanded && (
+          {/* plan-20261019-motion-sweep：步骤明细展开 / 收起走 ChatCollapse（此前是条件渲染，瞬间出现 / 消失） */}
+          <ChatCollapse open={expanded} className="in-gap">
             <div className="wf-card-detail">
               {snap.flows.map((flow) => {
                 const dep = dependencyLabel(snap, flow.run.package_key);
@@ -120,7 +122,7 @@ export const WorkflowCard = memo(function WorkflowCard({ programId }: { programI
                 );
               })}
             </div>
-          )}
+          </ChatCollapse>
         </>
       )}
 

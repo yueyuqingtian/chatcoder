@@ -704,7 +704,8 @@ export interface RollbackPreviewOut {
 /** 变更审核：单文件变更元数据（不含文件全文）。 */
 export interface FileChangeOut {
   path: string;
-  /** "modified"（修改）/ "added"（新增）/ "deleted"（删除） */
+  /** "modified"（修改）/ "added"（新增）/ "deleted"（删除，文件已不在磁盘上）；
+   *  本轮新建又被删除的文件净效果为零，不会出现在清单里（plan-20261019-toolcard-v2） */
   action: string;
   /** 新增行数 */
   additions: number;
@@ -742,6 +743,8 @@ export interface FileDiffOut {
   deletions?: number;
   /** true=按 call_key 命中的本次编辑；false=整轮累积（老数据回退） */
   single_edit?: boolean;
+  /** plan-20261019-toolcard-v2：added / modified / deleted。deleted = 文件已不在磁盘上，没有「当前内容」可看 */
+  action?: "added" | "modified" | "deleted" | null;
 }
 
 /** plan-20261018-turn-changes: 仅撤销单轮文件改动的结果（不涉及消息与会话状态）。 */

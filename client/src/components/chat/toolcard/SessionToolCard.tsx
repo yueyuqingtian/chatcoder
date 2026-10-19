@@ -1,62 +1,105 @@
-/** 会话右上角综合工具卡（plan-156-619 S7；plan-156-620 重做）。
+/** 会话右上角综合工具卡（plan-156-619 S7；plan-156-620 重做；plan-20261019-toolcard-v2 再造）。
  *
  * 【定位】
- * 绝对定位覆盖在 `.chat-panel` 右上角，**不占列宽**、不参与 flex 布局；
- * 内容列只在右缘真的会被卡片遮住时才按需左移（宽度由宿主与偏好决定，见 useContentColumnGeometry）。
+ * 绝对定位覆盖在 `.chat-panel` 右上角，**不占列宽**、不参与 flex 布局。
+ *  · 胶囊（收缩态）悬浮在右上角，**不让位**——消息列与输入框保持居中排版，胶囊只盖在右侧留白上；
+ *  · 展开卡片体量大，才按需让位：内容列只在右缘真的会被遮住时左移（几何见 useContentColumnGeometry）。
  *
  * 【三形态】
  * · expanded：完整卡片，栏目可分别折叠；
  * · capsule ：单行胶囊，只显示优先级最高的一项（进程 > 工作流 > 子代理 > 计划 > git），
  *             尾部 `+N` 表示还有几个栏目有内容；
- * · hidden  ：五项全无，或连胶囊都会遮挡会话内容（小窗）。
+ * · hidden  ：五项全无，或宿主窄到连胶囊都会盖住半个消息列。
  *
- * 【plan-156-620 结构调整】
+ * 【胶囊 ↔ 卡片的形变（plan-20261019-toolcard-v2）】
+ * 两种形态共用同一个外壳 `.tcard-shell`：用户点胶囊 / 收起按钮时，外壳的宽、高、圆角在两种尺寸之间过渡
+ * （CSS 关键帧，起止尺寸来自 FLIP 式实测），胶囊内容与卡片内容在壳内交叉淡入淡出，阴影与描边随外壳自然伸缩。
+ * 此前是「旧形态原地淡出 + 新形态缩放入场」两块东西叠着换，观感是换了一个东西而不是同一张卡在变形。
+ * 内容列的平移（展开需要让位时）同步过渡，由 ChatPanel 在这一小段时间内打开过渡开关。
+ * 窗口缩放 / 拖面板造成的形态变化不做过渡（逐帧滞后的正文比瞬切更难看）。
+ *
+ * 【结构要点】
  * · 去掉「会话工具」顶栏——第一个栏目的标题行右侧直接放「⋯」与「收起」（参考动态组卡片）；
- * · 操作区放在滚动容器之外：旧实现的折叠策略浮层被卡片 overflow 裁掉，点了「没反应」；
+ * · 「⋯」设置浮层走 ui/Floating（portal）：卡片体是滚动容器，挂在体内的浮层会被裁掉；
  * · 字号 / 图标槽位跟随设置（--fs-md / --flow-icon），与消息流一致。
  */
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { IconCheck, IconChevronDown, IconCpu, IconGitBranch, IconListChecks, IconMinimize, IconMoreHorizontal, IconRingProgress } from "../../icons";
+import {
+  useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent, type CSSProperties,
+} from "react";
+import {
+  IconChevronDown, IconCpu, IconGitBranch, IconListChecks, IconMinimize, IconMoreHorizontal, IconRingProgress,
+} from "../../icons";
 import { IxWorkflow } from "../../iconkit/StackIcons";
-import { IconButton, Popover, Tooltip } from "../../ui";
-import { api } from "../../../api/client";
+import { Collapse, Floating, IconButton, Segmented, Switch, Tooltip } from "../../ui";
+import { motionDisabled } from "../../ui/usePresence";
 import { useChatStore } from "../../../store/chat";
 import {
-  CAPSULE_PRIORITY, SECTION_LABEL, TOOL_CARD_SECTIONS, useSectionsOf, useToolCardStore,
-  type ToolCardSection,
+  CAPSULE_PRIORITY, SECTION_LABEL, TOOL_CARD_SECTIONS,
+  hydrateToolCardPrefs, saveToolCardForm, saveToolCardSection,
+  useSectionsOf, useToolCardStore, useWantExpanded,
+  type ToolCardDefaultForm, type ToolCardSection,
 } from "../../../store/toolCard";
 import { pickForm, type ToolCardFit, type ToolCardForm } from "./useToolCardFit";
 import { useToolCardData, type ToolCardData } from "./useToolCardData";
+import { GitToolSection } from "./GitToolSection";
 import {
-  GitSection, PlanSection, ProcessSection, SubagentSection, WorkflowSection,
+  PlanSection, ProcessSection, SubagentSection, ToolCardEdgeContext, WorkflowSection,
 } from "./ToolCardSections";
+
+interface InertProps {
+  /** React 18 的 DOM 类型未内置 inert，用字符串透传（离场中的内容不可聚焦、不可点击） */
+  inert?: string;
+}
+
+/** 形变请求在多久内有效（ms）：形态没有真的变化（如放不下展开卡片）时，不让它影响之后无关的形态切换。 */
+const MORPH_REQUEST_TTL = 500;
+/** 卡片体限高（px）：面板高度减去上下留白（顶部 10 + 底部 14），上限 720、下限 180。 */
+const CARD_MAX_H = 720;
+const CARD_MIN_MAX_H = 180;
+const CARD_V_GAP = 24;
 
 /** 某栏目是否有内容（决定是否渲染 + 胶囊优先级）。 */
 function hasContent(data: ToolCardData, section: ToolCardSection): boolean {
   return data[section] != null;
 }
 
+/** 胶囊上「还有几个栏目有内容」：Git 栏在没有任何改动 / 待推送时很安静，不计入（否则 git 项目里永远 +1）。 */
+function otherCount(data: ToolCardData, present: ToolCardSection[], top: ToolCardSection): number {
+  return present.filter((s) => {
+    if (s === top) return false;
+    if (s === "git" && data.git && data.git.files === 0 && data.git.repo.ahead === 0) return false;
+    return true;
+  }).length;
+}
+
 /** 胶囊摘要：一行字的「图标 + 主信息」，随栏目变化。 */
 function CapsuleSummary({ section, data }: { section: ToolCardSection; data: ToolCardData }) {
   if (section === "process" && data.process) {
-    const { done, total } = data.process;
+    const { done, total, currentTitle } = data.process;
     return (
       <>
         <span className="tcard-ic">
-          <IconRingProgress value={total > 0 ? done / total : 0} size={15} strokeWidth={1.6}
+          <IconRingProgress value={total > 0 ? done / total : 0} size={16} strokeWidth={2}
             indicatorColor="var(--accent)" trackColor="color-mix(in srgb, var(--text-1) 14%, transparent)" />
         </span>
         <span className="tcard-cap-num">{done}/{total}</span>
-        {data.process.currentTitle && <span className="tcard-cap-text">{data.process.currentTitle}</span>}
+        {currentTitle && <span className="tcard-cap-text">{currentTitle}</span>}
       </>
     );
   }
   if (section === "workflow" && data.workflow) {
+    const first = data.workflow.open[0];
     return (
       <>
-        <span className="tcard-ic"><IxWorkflow size={15} /></span>
-        <span className="tcard-cap-num">{data.workflow.done}/{data.workflow.total}</span>
-        <span className="tcard-cap-text">{data.workflow.title}</span>
+        <span className="tcard-ic"><IxWorkflow size={16} /></span>
+        {first ? (
+          <>
+            {first.total > 0 && <span className="tcard-cap-num">{first.done}/{first.total}</span>}
+            <span className="tcard-cap-text">{first.title}</span>
+          </>
+        ) : (
+          <span className="tcard-cap-text">工作流已完成</span>
+        )}
       </>
     );
   }
@@ -64,7 +107,7 @@ function CapsuleSummary({ section, data }: { section: ToolCardSection; data: Too
     const running = data.subagent.running.length;
     return (
       <>
-        <span className="tcard-ic"><IconCpu size={15} /></span>
+        <span className="tcard-ic"><IconCpu size={16} /></span>
         <span className="tcard-cap-num">{running || data.subagent.finished.length}</span>
         <span className="tcard-cap-text">{running > 0 ? "子代理执行中" : "子代理已完成"}</span>
       </>
@@ -73,17 +116,25 @@ function CapsuleSummary({ section, data }: { section: ToolCardSection; data: Too
   if (section === "plan" && data.plan) {
     return (
       <>
-        <span className="tcard-ic"><IconListChecks size={15} /></span>
+        <span className="tcard-ic"><IconListChecks size={16} /></span>
         <span className="tcard-cap-text">{data.plan.title}</span>
       </>
     );
   }
   if (section === "git" && data.git) {
+    const { repo, additions, deletions, files, hasLineStats } = data.git;
+    const branch = repo.detached ? `游离 ${repo.oid ?? ""}`.trim() : (repo.branch ?? "—");
     return (
       <>
-        <span className="tcard-ic"><IconGitBranch size={15} /></span>
-        <span className="tcard-cap-num">{data.git.fileCount}</span>
-        <span className="tcard-cap-text">个文件未提交</span>
+        <span className="tcard-ic"><IconGitBranch size={16} /></span>
+        <span className="tcard-cap-text">{branch}</span>
+        {files === 0 ? (
+          <span className="tcard-cap-num">无更改</span>
+        ) : hasLineStats ? (
+          <span className="tcard-diffstat"><span className="is-add">+{additions}</span><span className="is-del">-{deletions}</span></span>
+        ) : (
+          <span className="tcard-cap-num">{files} 个文件</span>
+        )}
       </>
     );
   }
@@ -92,7 +143,6 @@ function CapsuleSummary({ section, data }: { section: ToolCardSection; data: Too
 
 /** 栏目头右侧的紧凑计数（折叠态也能看出概况）。 */
 function sectionMeta(section: ToolCardSection, data: ToolCardData): string {
-  if (section === "git") return data.git ? `${data.git.fileCount}` : "";
   if (section === "plan") return data.plan?.awaiting ? "待确认" : "";
   if (section === "process") return data.process ? `${data.process.done}/${data.process.total}` : "";
   if (section === "subagent") {
@@ -100,41 +150,58 @@ function sectionMeta(section: ToolCardSection, data: ToolCardData): string {
     if (data.subagent.running.length > 0) return `${data.subagent.running.length} 运行中`;
     return `${data.subagent.finished.length}`;
   }
-  if (section === "workflow") return data.workflow ? `${data.workflow.done}/${data.workflow.total}` : "";
+  if (section === "workflow") {
+    if (!data.workflow) return "";
+    if (data.workflow.open.length > 0) return `${data.workflow.open.length} 运行中`;
+    return `${data.workflow.finished.length}`;
+  }
   return "";
+}
+
+/** CSS 时间串（"0.24s" / "240ms"）→ 毫秒；读不到返回 0。 */
+function parseCssTime(raw: string): number {
+  const first = raw.split(",")[0]?.trim() ?? "";
+  const n = Number.parseFloat(first);
+  if (!Number.isFinite(n)) return 0;
+  return first.endsWith("ms") ? n : n * 1000;
+}
+
+interface Morph {
+  dir: "expanding" | "collapsing";
+  fromW: number;
+  fromH: number;
+  toW: number;
+  toH: number;
 }
 
 export interface SessionToolCardProps {
   /** 几何缺口（来自 useContentColumnGeometry）：决定能否展开 / 能否显示胶囊。 */
   fit: ToolCardFit;
   /** 形态变化回调：父层据此告诉几何层需要让出多少右侧空间（宽度冻结，只改位置）。
-   *  胶囊形态附带实测宽度——折叠后胶囊窄于上限时，右侧够用就不左移内容列。 */
-  onFormChange?: (form: ToolCardForm, capsuleW?: number) => void;
+   *  animate = 这次变化来自用户手动展开 / 收起（内容列的平移要与卡片形变同步过渡）。 */
+  onFormChange?: (form: ToolCardForm, animate?: boolean) => void;
 }
 
 export function SessionToolCard({ fit, onFormChange }: SessionToolCardProps) {
   const sessionId = useChatStore((s) => s.currentSessionId);
   const data = useToolCardData(sessionId);
 
-  const wantExpanded = useToolCardStore((s) => sessionId != null && s.expandedBySession[sessionId] === true);
+  const wantExpanded = useWantExpanded(sessionId);
   const setExpanded = useToolCardStore((s) => s.setExpanded);
   const toggleSection = useToolCardStore((s) => s.toggleSection);
   const sections = useSectionsOf(sessionId);
-  const globalExpanded = useToolCardStore((s) => s.globalSectionsExpanded);
-  const setGlobalDefault = useToolCardStore((s) => s.setGlobalDefault);
-  const hydrateGlobalDefault = useToolCardStore((s) => s.hydrateGlobalDefault);
-  const hydrated = useToolCardStore((s) => s.hydrated);
-  const markHydrated = useToolCardStore((s) => s.markHydrated);
+  const defaultForm = useToolCardStore((s) => s.defaultForm);
+  const sectionDefaults = useToolCardStore((s) => s.sectionDefaults);
 
   const [menuOpen, setMenuOpen] = useState(false);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
-  // plan-156-621：菜单键盘导航——打开即聚焦首项，方向键在选项间轮转
-  const menuItemsRef = useRef<Array<HTMLButtonElement | null>>([]);
+  const shellRef = useRef<HTMLDivElement>(null);
 
   /** 有内容的栏目（按固定展示顺序）。 */
   const present = useMemo(
     () => TOOL_CARD_SECTIONS.filter((s) => hasContent(data, s)),
-    [data],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [data.git, data.plan, data.process, data.subagent, data.workflow],
   );
 
   const form = useMemo<ToolCardForm>(
@@ -142,159 +209,184 @@ export function SessionToolCard({ fit, onFormChange }: SessionToolCardProps) {
     [sessionId, fit, wantExpanded, present.length],
   );
 
-  // 形态变化通知父层：宽度冻结，只有位置随需求变化。
-  // plan-156-621：用 useLayoutEffect——此前是 useEffect，卡片本体已按新形态绘制、
-  // 内容列左移却晚一帧，展开瞬间会看到「卡片先压住正文再让位」的闪动。
-  // plan-20261019：胶囊形态先量真实宽度再上报——折叠后胶囊是内容自适应宽度，
-  // 按上限 260px 让位会让消息列白白左移；同一 layout 周期内量完，不会先移再回弹。
-  const capsuleRef = useRef<HTMLButtonElement>(null);
-  const capsuleWRef = useRef(0);
+  /** 全局默认只从后端读一次（store 记忆），不随卡片挂载重复请求；首屏先用本地缓存。 */
+  useEffect(() => { hydrateToolCardPrefs(); }, []);
 
+  // 卡片体限高：按面板高度实测成绝对像素，直接写在外壳的 CSS 变量上（不走 React 状态，拖窗口时逐帧变化也不重渲染）。
+  // 必须是像素而不是百分比：百分比限高会随外壳在形变动画里的高度一起变，卡片体被压小就会冒出滚动条再消失。
+  const visible = form !== "hidden" && sessionId != null;
   useLayoutEffect(() => {
-    if (form !== "capsule") {
-      capsuleWRef.current = 0;
-      onFormChange?.(form);
-      return;
-    }
-    const el = capsuleRef.current;
-    if (!el) return;
-    const report = () => {
-      const w = Math.ceil(el.offsetWidth);
-      if (!(w > 0) || Math.abs(w - capsuleWRef.current) < 1) return;
-      capsuleWRef.current = w;
-      onFormChange?.("capsule", w);
+    if (!visible) return;
+    const shell = shellRef.current;
+    const host = shell?.offsetParent as HTMLElement | null | undefined;
+    if (!shell || !host) return;
+    const apply = () => {
+      const h = host.clientHeight;
+      if (h > 0) shell.style.setProperty("--tcard-max-h", `${Math.max(CARD_MIN_MAX_H, Math.min(CARD_MAX_H, h - CARD_V_GAP))}px`);
     };
-    report();
-    // 计数 / 文案变化会改胶囊宽度：跟着上报，内容列只让出真正需要的那一段
-    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(report) : null;
-    ro?.observe(el);
-    return () => ro?.disconnect();
+    apply();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(apply);
+    ro.observe(host);
+    return () => ro.disconnect();
+  }, [visible]);
+
+  // ── 形变：胶囊 ↔ 卡片 ──
+  const [morph, setMorph] = useState<Morph | null>(null);
+  /** 用户发起的形变请求：记下点击瞬间外壳的尺寸（FLIP 的 First），形态真正变化后在 layout 阶段消费 */
+  const morphFromRef = useRef<{ w: number; h: number; to: "expanded" | "capsule"; at: number } | null>(null);
+
+  const captureMorph = useCallback((to: "expanded" | "capsule") => {
+    const el = shellRef.current;
+    if (!el || motionDisabled()) return;
+    const r = el.getBoundingClientRect();
+    morphFromRef.current = { w: r.width, h: r.height, to, at: performance.now() };
+  }, []);
+
+  const requestForm = useCallback((to: "expanded" | "capsule") => {
+    if (sessionId == null) return;
+    captureMorph(to);
+    setExpanded(sessionId, to === "expanded");
+  }, [sessionId, captureMorph, setExpanded]);
+
+  // 形态变化通知父层：宽度冻结，只有位置随需求变化。
+  // plan-156-621：用 useLayoutEffect——卡片本体已按新形态绘制、内容列左移却晚一帧，
+  // 展开瞬间会看到「卡片先压住正文再让位」的闪动。必须排在下面的形变 effect 之前（它要读尚未被消费的请求）。
+  useLayoutEffect(() => {
+    const req = morphFromRef.current;
+    const animate = req != null && performance.now() - req.at < MORPH_REQUEST_TTL
+      && (form === "expanded") === (req.to === "expanded");
+    onFormChange?.(form, animate);
   }, [form, onFormChange]);
+
+  // 形态变化后：外壳已按新形态排好最终布局（只含新形态的内容），此刻量出终点尺寸，再让离场内容挂上，开始形变。
+  // 同一个 layout 周期内完成，浏览器首次绘制已经是形变的起点，不会闪出终态。
+  useLayoutEffect(() => {
+    const req = morphFromRef.current;
+    if (!req) return;
+    if (form !== "expanded" && form !== "capsule") { morphFromRef.current = null; return; }
+    if (performance.now() - req.at > MORPH_REQUEST_TTL) { morphFromRef.current = null; return; }
+    if ((form === "expanded") !== (req.to === "expanded")) return; // 形态没按请求变（放不下）：留着等它过期
+    morphFromRef.current = null;
+    const el = shellRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setMorph({
+      dir: form === "expanded" ? "expanding" : "collapsing",
+      fromW: req.w, fromH: req.h, toW: r.width, toH: r.height,
+    });
+  }, [form]);
+
+  // 形变结束兜底：animationend 在隐藏窗格 / 减弱动效下可能不触发
+  useEffect(() => {
+    if (!morph) return;
+    const el = shellRef.current;
+    const dur = el ? parseCssTime(getComputedStyle(el).animationDuration) : 0;
+    const timer = window.setTimeout(() => setMorph(null), dur > 0 ? dur + 120 : 0);
+    return () => window.clearTimeout(timer);
+  }, [morph]);
+
+  // 首次出现（隐藏 → 可见）才播入场动画；形态切换走形变，不重播
+  const [entering, setEntering] = useState(false);
+  const wasHiddenRef = useRef(true);
+  useLayoutEffect(() => {
+    const hidden = form === "hidden" || sessionId == null;
+    if (!hidden && wasHiddenRef.current && !motionDisabled()) setEntering(true);
+    wasHiddenRef.current = hidden;
+  }, [form, sessionId]);
+  useEffect(() => {
+    if (!entering) return;
+    const timer = window.setTimeout(() => setEntering(false), 600);
+    return () => window.clearTimeout(timer);
+  }, [entering]);
+
   // 收起 / 隐藏时关掉浮层，避免它悬空残留
   useEffect(() => { if (form !== "expanded") setMenuOpen(false); }, [form]);
-  // plan-156-621：菜单打开后把焦点移到首项（此前 Tab 要穿过触发按钮才能到达选项）
-  useEffect(() => {
-    if (menuOpen) menuItemsRef.current.find(Boolean)?.focus();
-  }, [menuOpen]);
 
-  /** plan-156-621：方向键在两项间轮转——此前 role=menuitemradio 只有语义、没有键盘行为。 */
-  const onMenuKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
-    e.preventDefault();
-    const items = menuItemsRef.current.filter((x): x is HTMLButtonElement => Boolean(x));
-    if (items.length === 0) return;
-    const idx = items.indexOf(document.activeElement as HTMLButtonElement);
-    const next = e.key === "ArrowDown"
-      ? (idx + 1) % items.length
-      : (idx <= 0 ? items.length - 1 : idx - 1);
-    items[next].focus();
+  const onShellAnimationEnd = (e: AnimationEvent<HTMLDivElement>) => {
+    if (e.target !== e.currentTarget) return;
+    if (e.animationName === "tcard-morph") setMorph(null);
+    else if (e.animationName === "tcard-in") setEntering(false);
   };
-
-  /** 全局默认策略只从后端读一次（store 记忆），不随卡片挂载重复请求。 */
-  useEffect(() => {
-    if (hydrated) return;
-    markHydrated();
-    void api.getGlobalSettings()
-      .then((g) => {
-        if (typeof g.tool_card_sections_expanded === "boolean") hydrateGlobalDefault(g.tool_card_sections_expanded);
-      })
-      .catch(() => { /* 读不到就用默认展开 */ });
-  }, [hydrated, markHydrated, hydrateGlobalDefault]);
 
   if (form === "hidden" || sessionId == null) return null;
 
-  /** 胶囊：优先级最高的有内容栏目 + 其余数量。 */
-  if (form === "capsule") {
-    const top = CAPSULE_PRIORITY.find((s) => present.includes(s)) ?? present[0];
-    const rest = present.length - 1;
-    const canExpand = fit.expandedShortfall <= 0;
-    return (
-      <Tooltip
-        content={canExpand ? "展开会话工具" : "窗口较窄，放大窗口后可展开"}
-        side="bottom"
-      >
-        <button
-          ref={capsuleRef}
-          type="button"
-          className="tcard-capsule"
-          onClick={() => { if (canExpand) setExpanded(sessionId, true); }}
-          aria-label="展开会话工具"
-          aria-disabled={!canExpand}
-        >
-          <CapsuleSummary section={top} data={data} />
-          {rest > 0 && <span className="tcard-cap-more">+{rest}</span>}
-        </button>
-      </Tooltip>
-    );
-  }
+  const isCard = form === "expanded";
+  const showCapsule = form === "capsule" || morph?.dir === "expanding";
+  const showCard = isCard || morph?.dir === "collapsing";
+  const canExpand = fit.expandedShortfall <= 0;
 
-  const applyGlobal = (expanded: boolean) => {
+  const top = CAPSULE_PRIORITY.find((s) => present.includes(s)) ?? present[0];
+  const rest = otherCount(data, present, top);
+
+  const applyDefaultForm = (next: ToolCardDefaultForm) => {
+    // 默认形态变了：当前会话的卡片也立刻照着变（store 会清掉会话级记录），并走同一套形变
+    const current: ToolCardDefaultForm = isCard ? "expanded" : "capsule";
+    if (next !== current) captureMorph(next);
     setMenuOpen(false);
-    setGlobalDefault(expanded);
-    void api.setGlobalSettings({ tool_card_sections_expanded: expanded }).catch(() => {
-      /* 落库失败仅影响下次启动 */
-    });
+    saveToolCardForm(next);
   };
 
-  // expanded：完整卡片
-  return (
-    <div className="tcard-card" role="region" aria-label="会话工具">
-      {/* 浮层锚点：与「⋯」同位，但留在滚动容器之外——菜单挂在卡片体里会被 overflow 裁掉
-          （plan-156-620 踩过的坑）。锚点本身不接收指针事件，只提供定位基准。 */}
-      <div className="tcard-menu-anchor">
-        <Popover
-          open={menuOpen}
-          onClose={() => setMenuOpen(false)}
-          placement="bottom-end"
-          className="tcard-menu"
-          role="menu"
-          aria-label="折叠策略"
-          ignoreRefs={[menuBtnRef]}
-          onKeyDown={onMenuKeyDown}
-        >
-          <div className="tcard-menu-caption">栏目默认状态</div>
-          {([true, false] as const).map((value) => (
-            <button
-              type="button"
-              key={String(value)}
-              ref={(el) => { menuItemsRef.current[value ? 0 : 1] = el; }}
-              className={"tcard-menu-item" + (globalExpanded === value ? " is-on" : "")}
-              role="menuitemradio"
-              aria-checked={globalExpanded === value}
-              onClick={() => applyGlobal(value)}
-            >
-              <span className="tcard-menu-label">{value ? "全部展开" : "全部折叠"}</span>
-              <span className="tcard-menu-check">{globalExpanded === value && <IconCheck size={13} />}</span>
-            </button>
-          ))}
-        </Popover>
-      </div>
+  const shellStyle: CSSProperties | undefined = morph
+    ? ({
+      ["--tc-from-w" as string]: `${morph.fromW}px`,
+      ["--tc-from-h" as string]: `${morph.fromH}px`,
+      ["--tc-to-w" as string]: `${morph.toW}px`,
+      ["--tc-to-h" as string]: `${morph.toH}px`,
+    } as CSSProperties)
+    : undefined;
 
-      {/* 滚动时菜单的锚点已经移走，留一份悬浮菜单会错位——直接关掉 */}
+  const capsuleLeaving = morph?.dir === "expanding";
+  const cardLeaving = morph?.dir === "collapsing";
+
+  const capsule = (
+    <button
+      type="button"
+      className={"tcard-capsule" + (capsuleLeaving ? " is-leaving" : "")}
+      onClick={() => { if (canExpand) requestForm("expanded"); }}
+      aria-label="展开会话工具"
+      aria-disabled={!canExpand}
+      tabIndex={capsuleLeaving ? -1 : undefined}
+      aria-hidden={capsuleLeaving || undefined}
+    >
+      <CapsuleSummary section={top} data={data} />
+      {rest > 0 && <span className="tcard-cap-more">+{rest}</span>}
+    </button>
+  );
+
+  const card = (
+    <div
+      className={"tcard-card" + (cardLeaving ? " is-leaving" : "")}
+      role={cardLeaving ? undefined : "region"}
+      aria-label={cardLeaving ? undefined : "会话工具"}
+      aria-hidden={cardLeaving || undefined}
+      {...(cardLeaving ? ({ inert: "" } as InertProps) : {})}
+    >
+      {/* 滚动时菜单的锚点已经移走：直接关掉 */}
       <div
         className="tcard-card-body"
         onScroll={menuOpen ? () => setMenuOpen(false) : undefined}
       >
         {/* 操作区：与第一个栏目标题行同高，随栏目一起滚动，滚出后被卡片体裁切。
-            它按内容坐标贴在顶部，不依赖第一个栏目是哪一类（Git / 进程 / 计划都成立）。 */}
+            它按内容坐标贴在顶部，不依赖第一个栏目是哪一类。 */}
         <div className="tcard-card-ops">
           {/* 项目规则：图标按钮统一 ui/IconButton（自带 Tooltip），不新增私有按钮类 */}
           <IconButton
-            ref={menuBtnRef}
+            ref={cardLeaving ? undefined : menuBtnRef}
             size="xs"
-            icon={<IconMoreHorizontal size={15} />}
-            title="折叠策略"
+            icon={<IconMoreHorizontal size={16} />}
+            title="工具卡设置"
             active={menuOpen}
-            aria-haspopup="menu"
+            aria-haspopup="dialog"
             aria-expanded={menuOpen}
             onClick={() => setMenuOpen((v) => !v)}
           />
           <IconButton
             size="xs"
-            icon={<IconMinimize size={14} />}
+            icon={<IconMinimize size={16} />}
             title="收起"
             aria-label="收起为胶囊"
-            onClick={() => setExpanded(sessionId, false)}
+            onClick={() => requestForm("capsule")}
           />
         </div>
         {present.map((section, index) => {
@@ -311,19 +403,79 @@ export function SessionToolCard({ fit, onFormChange }: SessionToolCardProps) {
                 <span className="tcard-sec-meta">{sectionMeta(section, data)}</span>
                 <IconChevronDown size={13} className={"tcard-sec-caret" + (open ? " is-open" : "")} />
               </button>
-              {open && (
-                <div className="tcard-sec-body">
-                  {section === "git" && data.git && <GitSection data={data.git} />}
-                  {section === "plan" && data.plan && <PlanSection data={data.plan} />}
-                  {section === "process" && data.process && <ProcessSection data={data.process} />}
-                  {section === "subagent" && data.subagent && <SubagentSection data={data.subagent} />}
-                  {section === "workflow" && data.workflow && <WorkflowSection data={data.workflow} />}
-                </div>
-              )}
+              {/* plan-20261019-motion-sweep：栏目展开 / 收起走 Collapse（高度过渡 + 淡入淡出，收起结束才卸载） */}
+              <Collapse open={open} lazy>
+                {() => (
+                  <div className="tcard-sec-body">
+                    {section === "git" && data.git && <GitToolSection data={data.git} actions={data.actions} />}
+                    {section === "plan" && data.plan && <PlanSection data={data.plan} />}
+                    {section === "process" && data.process && <ProcessSection data={data.process} />}
+                    {section === "subagent" && data.subagent && <SubagentSection data={data.subagent} />}
+                    {section === "workflow" && data.workflow && <WorkflowSection data={data.workflow} />}
+                  </div>
+                )}
+              </Collapse>
             </section>
           );
         })}
       </div>
     </div>
+  );
+
+  return (
+    <ToolCardEdgeContext.Provider value={shellRef}>
+      <div
+        ref={shellRef}
+        className={
+          "tcard-shell " + (isCard ? "is-card" : "is-capsule")
+          + (morph ? ` is-morphing is-${morph.dir}` : "")
+          + (entering && !morph ? " is-entering" : "")
+        }
+        style={shellStyle}
+        onAnimationEnd={onShellAnimationEnd}
+      >
+        {showCapsule && (capsuleLeaving ? capsule : (
+          <Tooltip content={canExpand ? "展开会话工具" : "窗口较窄，放大窗口后可展开"} side="bottom">
+            {capsule}
+          </Tooltip>
+        ))}
+        {showCard && card}
+      </div>
+
+      {/* 「⋯」设置：默认形态 + 逐栏默认展开（修改即保存）。浮层走 portal，不被卡片的滚动体裁切 */}
+      <Floating
+        open={menuOpen && isCard && !morph}
+        anchorRef={menuBtnRef}
+        onClose={() => setMenuOpen(false)}
+        side="bottom"
+        align="end"
+        gap={6}
+        className="tcard-menu"
+        role="dialog"
+        aria-label="工具卡设置"
+        ignoreRefs={[menuBtnRef]}
+      >
+        <div className="tcard-menu-cap">默认显示</div>
+        <Segmented
+          size="sm"
+          block
+          value={defaultForm}
+          onChange={applyDefaultForm}
+          aria-label="工具卡默认显示形态"
+          options={[{ value: "capsule", label: "胶囊" }, { value: "expanded", label: "展开" }]}
+        />
+        <div className="tcard-menu-cap">栏目默认展开</div>
+        {TOOL_CARD_SECTIONS.map((s) => (
+          <div className="tcard-menu-row" key={s}>
+            <span className="tcard-menu-label">{SECTION_LABEL[s]}</span>
+            <Switch
+              checked={sectionDefaults[s]}
+              onChange={(v) => saveToolCardSection(s, v)}
+              aria-label={`${SECTION_LABEL[s]}默认展开`}
+            />
+          </div>
+        ))}
+      </Floating>
+    </ToolCardEdgeContext.Provider>
   );
 }

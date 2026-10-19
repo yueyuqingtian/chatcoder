@@ -105,15 +105,16 @@
 .cx-plugins-notice.is-ok { color: var(--success); background: color-mix(in srgb, var(--success) 10%, transparent); }
 .cx-plugins-notice.is-error { color: var(--error); background: color-mix(in srgb, var(--error) 10%, transparent); }
 .cx-plugin-version { flex-shrink: 0; font-family: var(--font-mono); font-size: 11px; color: var(--text-3); }
-/* 含 dsh 客户端模块：只运行宿主半，界面扩展不显示——用中性标签说明，不用警示色 */
+/* 含 dsh 客户端模块：只运行宿主半，界面扩展不显示——用中性标签说明，不用警示色。
+   与 .cx-plugin-badge 同字号/行高/内边距：并排时两块标签高度一致，不显得一高一扁。 */
 .cx-plugin-tag {
   flex-shrink: 0;
-  padding: 0 6px;
+  padding: 0 8px;
   border-radius: var(--r-pill);
-  background: var(--bg-active);
-  color: var(--text-3);
-  font-size: 10.5px;
-  line-height: 16px;
+  background: var(--bg-hover);
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 18px;
   white-space: nowrap;
 }
 .cx-plugin-desc { margin-top: 2px; font-size: 12px; line-height: 1.5; color: var(--text-3); word-break: break-word; }
@@ -132,6 +133,32 @@
 .cx-plugin-note { display: flex; gap: 8px; font-size: 12px; line-height: 1.5; color: var(--text-2); }
 .cx-plugin-note-who { flex-shrink: 0; color: var(--text-3); }
 .cx-plugin-note-text { min-width: 0; word-break: break-word; }
+
+/* 嵌入「设置 → 拓展」已安装页（plan-20261019-dsh-ui）：
+   列表直接复用 .inst-list / .inst-row（结构与背景天然一致），此处只处理分组标题的排版。 */
+.cx-plugins.is-embedded { margin-top: 0; gap: var(--sp-2); }
+.cx-plugins-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; }
+.cx-plugins-head-title {
+  display: flex; align-items: baseline; gap: var(--sp-3); min-width: 0;
+  font-size: 12px; font-weight: 600; color: var(--text-2);
+}
+.cx-plugins-count { font-size: 11.5px; font-weight: 400; color: var(--text-3); }
+/* 嵌入时的状态徽标：沿用 .sb-badge 的尺寸与胶囊形，只按状态补颜色区分
+   （已启用绿 / 加载失败红 / 其余中性）——否则三种状态在列表里长得一样，看不出差异。 */
+.sb-badge.cx-sb-status.is-loaded { background: var(--success-soft); color: var(--success); }
+.sb-badge.cx-sb-status.is-failed { background: var(--error-soft); color: var(--error); }
+/* 嵌入时的空态/无结果：与 .inst-list 同底色、同圆角、同边框（world 主题的半透由 themes.css 一并接管），
+   水平内边距与行对齐，避免出现「另一张颜色不同的卡片」。 */
+.cx-plugins-blank {
+  padding: var(--sp-4) var(--sp-5);
+  border: 1px solid var(--border-light);
+  border-radius: var(--r-lg);
+  background: var(--bg-main);
+  font-size: 12px; line-height: 1.7; color: var(--text-3);
+}
+.cx-plugins-blank code { font-family: var(--font-mono); font-size: 11.5px; }
+/* dsh 分组与下方「已安装」分组的间距：与 .inst-group + .inst-group 保持一致 */
+.inst-dsh { margin-bottom: var(--sp-5); }
 
 /* 标题栏：为当前会话切换到独立工作树的入口（plan-20261017-goal12 项 6） */
 .tb-wt-btn {

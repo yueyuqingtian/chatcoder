@@ -59,6 +59,10 @@ _READ_CORE = [
     "git",
     # 记忆写入与目标完成：两者都不改项目文件，审批策略按「读」裁决
     "memory_write", "goal_complete",
+    # plan-20261019-suggestion-priority：后续任务建议只写建议表（不改项目文件，
+    # approval_policy 按 low 风险归为「读」），只读 / 计划模式下也应能给出下一步建议；
+    # 此前不在白名单，模型在两种模式下根本看不到该工具，是触发率极低的原因之一
+    "suggest_next_task",
 ]
 # 内置浏览器：打开与读取页面（点击 / 输入 / 执行脚本由执行模式边界拒绝，不放进白名单）
 _BROWSER_READ = [

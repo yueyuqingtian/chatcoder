@@ -118,6 +118,9 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("rollback_writes", "diff_after", "TEXT"),
     # plan-89-387: 写盘记录关联工具调用键——同轮同文件多次编辑按 call_key 取本次变更
     ("rollback_writes", "call_key", "VARCHAR(64)"),
+    # plan-20261019-toolcard-v2：写盘操作类型（create / modify / delete）与写后内容指纹（sha1）
+    ("rollback_writes", "op", "VARCHAR(8)"),
+    ("rollback_writes", "after_hash", "VARCHAR(40)"),
     # ========== rollback_writes（工作流写入归属：回滚与冲突基线，nullable）==========
     ("rollback_writes", "workflow_run_id", "BIGINT"),
     ("rollback_writes", "attempt_id", "BIGINT"),

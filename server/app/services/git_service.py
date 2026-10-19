@@ -234,6 +234,89 @@ async def status_all(root_path: str) -> dict:
     return merged
 
 
+# ── 未提交改动的增删行数（plan-20261019-toolcard-v2）─────────────────────────────
+#
+# 工具卡 Git 栏的「更改 +N −M」：当前分支上所有未提交改动的行数合计——已暂存 + 未暂存相对 HEAD，
+# 再加上未跟踪的新文本文件（整文件算新增，与「提交时会新增多少行」的直觉一致）。
+
+# 统计未跟踪文件时的上限：文件数、单文件大小（超过的不数，避免被构建产物 / 日志拖慢）
+_STAT_UNTRACKED_MAX_FILES = 300
+_STAT_UNTRACKED_MAX_BYTES = 1_000_000
+
+
+def _parse_numstat(out: str) -> tuple[int, int]:
+    """git diff --numstat 输出 → (新增行, 删除行)。二进制文件（- -）不计行数。"""
+    add = dele = 0
+    for line in out.splitlines():
+        cols = line.split("\t", 2)
+        if len(cols) < 3:
+            continue
+        a, d = cols[0], cols[1]
+        if a.isdigit():
+            add += int(a)
+        if d.isdigit():
+            dele += int(d)
+    return add, dele
+
+
+def _count_untracked_lines(root: str, files: list[str]) -> int:
+    """未跟踪文本文件的总行数（同步，放线程里跑）。二进制 / 过大 / 读不到的文件跳过。"""
+    total = 0
+    for rel in files[:_STAT_UNTRACKED_MAX_FILES]:
+        p = Path(root) / rel
+        try:
+            if not p.is_file() or p.stat().st_size > _STAT_UNTRACKED_MAX_BYTES:
+                continue
+            raw = p.read_bytes()
+        except OSError:
+            continue
+        if not raw or b"\x00" in raw[:8192]:
+            continue
+        total += raw.count(b"\n") + (0 if raw.endswith(b"\n") else 1)
+    return total
+
+
+async def _repo_diff_stat(rel: str, path: str) -> dict:
+    """一个仓库的卡片摘要：分支 / 领先落后 + 改动文件数 + 增删行数（两条 git 命令取齐）。"""
+    st = await status(path)  # porcelain v2 + 逐个未跟踪文件：分支、领先落后、各类改动文件一次到手
+    root = st["root"]
+    if await _has_head(root):
+        out = await _must(root, "diff", "HEAD", "--numstat", "--no-renames", "--no-ext-diff")
+        add, dele = _parse_numstat(out)
+    else:
+        # 还没有任何提交：已暂存（相对空树）与未暂存各算一次
+        a1, d1 = _parse_numstat(await _must(root, "diff", "--cached", "--numstat", "--no-renames", "--no-ext-diff"))
+        a2, d2 = _parse_numstat(await _must(root, "diff", "--numstat", "--no-renames", "--no-ext-diff"))
+        add, dele = a1 + a2, d1 + d2
+    # 末尾带 / 的未跟踪条目是内嵌的子仓库目录（多仓库项目里它们单独成仓，这里不重复计入）
+    untracked = [e["path"] for e in st["untracked"] if not e["path"].endswith("/")]
+    if untracked:
+        add += await asyncio.to_thread(_count_untracked_lines, root, untracked)
+    paths = {e["path"] for key in ("staged", "unstaged", "conflicts") for e in st[key]} | set(untracked)
+    files = len(paths)
+    return {
+        "rel": rel, "name": Path(path).name,
+        "branch": st["branch"], "detached": st["detached"], "oid": st["oid"],
+        "ahead": st["ahead"], "behind": st["behind"],
+        "files": files, "additions": add, "deletions": dele,
+    }
+
+
+async def diff_stat(root_path: str) -> dict:
+    """项目内全部仓库的卡片摘要（并列出各仓库，供多仓库项目分别展示）与改动合计。"""
+    dirs = await repo_dirs(root_path)
+    results = await asyncio.gather(*(_repo_diff_stat(rel, p) for rel, p in dirs), return_exceptions=True)
+    repos = [r for r in results if not isinstance(r, BaseException)]
+    if not repos:
+        raise GitError("当前项目不是 Git 仓库（可在终端执行 git init 后再使用）")
+    return {
+        "additions": sum(r["additions"] for r in repos),
+        "deletions": sum(r["deletions"] for r in repos),
+        "files": sum(r["files"] for r in repos),
+        "repos": repos,
+    }
+
+
 async def repo_root(path: str) -> str:
     """返回仓库根目录；不是 Git 仓库时给出中文提示。"""
     if not path or not Path(path).is_dir():

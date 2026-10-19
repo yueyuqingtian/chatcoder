@@ -46,12 +46,16 @@ foreach ($s in $sources) {
     if (-not (Test-Path $s)) { throw "缺少源文件：$s" }
 }
 
+# 应用清单：声明 Per-Monitor-V2 DPI 感知（进程创建时即生效，比启动后调 API 可靠），见 src\app.manifest
+$manifest = Join-Path $root 'src\app.manifest'
+if (-not (Test-Path $manifest)) { throw "缺少应用清单：$manifest" }
+
 if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Force -Path $OutDir | Out-Null }
 $out = Join-Path $OutDir 'desktop-core.exe'
 
 $args = @('/nologo', '/target:exe', '/optimize+')
 if ($CheckOnly) { $args += '/target:library'; $args += "/out:$env:TEMP\desktop-core-check.dll" }
-else { $args += "/out:$out" }
+else { $args += "/out:$out"; $args += "/win32manifest:$manifest" }
 foreach ($r in $refs) { $args += "/reference:$r" }
 $args += '/reference:System.Drawing.dll'
 $args += $sources

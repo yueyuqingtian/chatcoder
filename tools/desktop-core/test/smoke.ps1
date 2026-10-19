@@ -86,7 +86,11 @@ try {
     $info = $r.Raw | ConvertFrom-Json
     Assert 'info 返回版本' ($null -ne $info.data.version) $r.Raw
     Assert 'info 返回物理分辨率' ($info.data.screen[0] -gt 0) $r.Raw
-    Write-Host ("        分辨率={0}x{1}  DPI感知=物理像素" -f $info.data.screen[0], $info.data.screen[1])
+    # 真实检查而不是打印一句固定文案：感知级别不是 PerMonitorV2 时系统会虚拟化坐标，点击会整体偏移
+    Assert 'info 报告 DPI 感知为 PerMonitorV2' ($info.data.dpiAwareness -eq 'PerMonitorV2') $r.Raw
+    Assert 'info 报告显示器与缩放' (@($info.data.monitors).Count -ge 1 -and $info.data.monitors[0].scale -ge 100) $r.Raw
+    Write-Host ("        分辨率={0}x{1}  DPI感知={2}  缩放={3}%" -f $info.data.screen[0], $info.data.screen[1],
+        $info.data.dpiAwareness, $info.data.monitors[0].scale)
 
     # windows
     $r = Call '{"op":"windows","limit":10}'

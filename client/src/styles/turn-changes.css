@@ -70,6 +70,19 @@
   --tcc-list-bg: color-mix(in oklab, var(--bg-elevated) 96%, var(--text-3) 4%);
 }
 
+/* plan-20261019-motion-sweep：卡片第一次出现时轻轻上浮淡入（只播一次，见 TurnChangesCard 的 enteredTurns）。
+   只用 backwards 填充：入场结束后不残留 transform，卡片内的浮层定位不受影响。 */
+.tcc-card.is-entering {
+  animation: tcc-in var(--dur-4) var(--ease-emphasized-decel) backwards;
+}
+
+@keyframes tcc-in {
+  from {
+    opacity: 0;
+    transform: translateY(calc(6px * var(--motion-dist)));
+  }
+}
+
 /* ── 头部：箭头 + 计数 + 合计 + 撤销 ──────────────────────── */
 
 /* 表头保持纯色（与卡片同色），列表用 --tcc-list-bg 区分——
@@ -86,6 +99,8 @@
   border-bottom: 1px solid var(--border);
   cursor: pointer;
   user-select: none;
+  /* 分隔线随列表的高度过渡同步淡出 / 淡入（见 .is-collapsed），不是收起结束才消失 */
+  transition: border-color var(--dur-3) var(--ease-emphasized-decel);
 }
 
 /* 收起时没有列表，分隔线随之撤销（否则卡片底部多一条悬空横线） */
@@ -107,7 +122,7 @@
   background: transparent;
   color: var(--text-2);
   cursor: pointer;
-  transition: background var(--dur-2, 160ms) ease, color var(--dur-2, 160ms) ease;
+  transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard);
 }
 
 .tcc-chev:hover {
@@ -115,8 +130,9 @@
   color: var(--text-1);
 }
 
+/* 箭头与列表的高度过渡同一时长同一曲线：转动和展开是一个动作 */
 .tcc-chev svg {
-  transition: transform var(--dur-2, 160ms) ease;
+  transition: transform var(--dur-3) var(--ease-emphasized-decel);
   transform: rotate(-90deg);
 }
 
@@ -190,7 +206,7 @@
   min-height: calc(var(--fs-md, 13px) * 2.9);
   padding: 0 6px;
   border-radius: var(--r-md);
-  transition: background var(--dur-2, 160ms) ease;
+  transition: background var(--dur-2) var(--ease-standard);
 }
 
 .tcc-row:hover {
@@ -295,7 +311,7 @@
   background: var(--bg-elevated);
   color: var(--text-2);
   cursor: pointer;
-  transition: background var(--dur-2, 160ms) ease, color var(--dur-2, 160ms) ease;
+  transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard);
 }
 
 .tcc-split-caret:hover {

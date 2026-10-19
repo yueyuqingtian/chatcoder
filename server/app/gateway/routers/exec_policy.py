@@ -21,6 +21,9 @@ class ExecPolicyToolInfo(BaseModel):
     name: str
     risk_level: str
     description: str = ""
+    # plan-20261019-policy-search：工具类别（core / subagent / mcp）——
+    # 权限模式白名单矩阵按类别分组展示，避免几十个工具平铺、新工具埋在末尾找不到
+    group: str = "core"
 
 
 @router.get("/tools", response_model=list[ExecPolicyToolInfo])
@@ -34,7 +37,9 @@ async def list_tools(db: AsyncSession = Depends(get_db)):
         if t.name in _INTERNAL_TOOLS:
             continue
         first_line = t.description.strip().splitlines()[0][:80] if t.description else ""
-        out.append(ExecPolicyToolInfo(name=t.name, risk_level=t.risk_level, description=first_line))
+        out.append(ExecPolicyToolInfo(
+            name=t.name, risk_level=t.risk_level, description=first_line, group="core",
+        ))
         seen.add(t.name)
 
     # v36 (plan-321-1600 R1): 子代理编排工具（agent_loop 特判执行，无 registry 实例）——
@@ -55,7 +60,7 @@ async def list_tools(db: AsyncSession = Depends(get_db)):
             _d = _sub_desc.get(_n, "").strip().splitlines()
             out.append(ExecPolicyToolInfo(
                 name=_n, risk_level=SUBAGENT_TOOL_RISK.get(_n, "medium"),
-                description=_d[0][:80] if _d else "",
+                description=_d[0][:80] if _d else "", group="subagent",
             ))
             seen.add(_n)
     except Exception:
@@ -75,7 +80,7 @@ async def list_tools(db: AsyncSession = Depends(get_db)):
                 continue
             first_line = mt.description.strip().splitlines()[0][:80] if mt.description else ""
             out.append(ExecPolicyToolInfo(
-                name=mt.name, risk_level=mt.risk_level, description=first_line,
+                name=mt.name, risk_level=mt.risk_level, description=first_line, group="mcp",
             ))
             seen.add(mt.name)
     except Exception:

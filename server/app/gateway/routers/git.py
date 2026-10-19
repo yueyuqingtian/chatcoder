@@ -109,6 +109,13 @@ async def status_all(project_id: int = Query(...), session_id: int | None = Quer
     return await _call(git_service.status_all(await _workspace(db, project_id, session_id)))
 
 
+@router.get("/diff-stat")
+async def diff_stat(project_id: int = Query(...), session_id: int | None = Query(None),
+                    db: AsyncSession = Depends(get_db)):
+    """未提交改动的增删行数合计（已暂存 + 未暂存 + 未跟踪文本文件），供工具卡 Git 栏的「更改 +N −M」。"""
+    return await _call(git_service.diff_stat(await _workspace(db, project_id, session_id)))
+
+
 @router.get("/status")
 async def status(project_id: int = Query(...), repo: str | None = _REPO_Q, session_id: int | None = Query(None),
                  db: AsyncSession = Depends(get_db)):

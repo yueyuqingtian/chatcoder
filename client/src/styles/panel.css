@@ -288,6 +288,23 @@ button.ts-row:focus-visible { outline: 2px solid color-mix(in oklab, var(--info)
   user-select: none;
   transition: background var(--dur-1) var(--ease-standard), color var(--dur-1) var(--ease-standard);
 }
+/* plan-20261019-motion-sweep：目录展开 / 收起。行是绝对定位 + 内联 transform（虚拟列表），
+   位移过渡只在 .is-toggling 窗口内挂上（由 FileTreePanel 在点开 / 收起目录的瞬间开启、480ms 后关闭），
+   所以过滤输入、滚动引起的行位置变化不会拖出滑动。新露出的后代行用独立的 translate 属性做入场，
+   不与内联 transform 打架；错峰档位 --i 由组件写入。 */
+.ft-tree.is-toggling .ft-row {
+  transition:
+    transform var(--dur-3) var(--ease-emphasized-decel),
+    background var(--dur-1) var(--ease-standard),
+    color var(--dur-1) var(--ease-standard);
+}
+.ft-row.is-entering {
+  animation: ft-row-in var(--dur-3) var(--ease-emphasized-decel) backwards;
+  animation-delay: calc(var(--i, 0) * 16ms * var(--motion-scale));
+}
+@keyframes ft-row-in {
+  from { opacity: 0; translate: 0 calc(-6px * var(--motion-dist)); }
+}
 .ft-row:hover { background: var(--bg-hover); color: var(--text-1); }
 .ft-row.active { background: var(--bg-active); color: var(--text-1); font-weight: 500; }
 .ft-tree:focus-visible .ft-row.is-cursor { box-shadow: inset 0 0 0 1.5px color-mix(in oklab, var(--info) 65%, transparent); }

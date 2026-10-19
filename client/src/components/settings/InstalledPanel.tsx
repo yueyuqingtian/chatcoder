@@ -23,6 +23,7 @@ import {
 import { ActionDialogs, toneOf } from "./MarketPanel";
 import { DatabaseConnectionsPanel } from "./DatabaseConnectionsPanel";
 import { DebuggerPanel } from "./DebuggerPanel";
+import { CordisPluginsSection } from "./CordisPluginsSection";
 
 type InstKind = "plugin" | "skill" | "connector";
 
@@ -119,6 +120,8 @@ export function InstalledPanel() {
   const [dialog, setDialog] = useState<null | InstKind>(null);
   /** 内置连接器（database / debugger）的专属配置面板（plan-41-198：保留原配置能力） */
   const [configServer, setConfigServer] = useState<McpServerOut | null>(null);
+  /** dsh 第三方插件数量（由子组件上报）：有插件时不再显示整页空态，避免「装了却提示没装」 */
+  const [dshCount, setDshCount] = useState(0);
   /** 技能仓库管理：添加 / 同步 / 按需导入 / 移除（保留现有技能仓库导入方式） */
   const [repoOpen, setRepoOpen] = useState(false);
   const [repos, setRepos] = useState<Array<{ id: string; name: string; url: string; skill_count?: number }>>([]);
@@ -295,9 +298,14 @@ export function InstalledPanel() {
    *  用户反馈「没有插件选项」。标签是**导航**（告诉用户有哪些类型可看），不是结果列表；
    *  数量为 0 本身就是有效信息（“我还没装插件”），标签消失反而让人以为该类型不被支持。
    *  点击空类型时给明确空态与前往市场引导，因此不存在“点了没反应”的问题。 */
+  /** dsh 第三方插件只在「全部 / 插件」筛选下展示：它属于插件，但与市场插件不同源 */
+  const showCordis = kindFilter === "all" || kindFilter === "plugin";
+  /** 切到其它筛选时分组会卸载：计数随之归零，避免「插件 N」与列表实际内容对不上 */
+  useEffect(() => { if (!showCordis) setDshCount(0); }, [showCordis]);
+
   const filterTabs: Array<{ key: "all" | InstKind; label: string; n: number }> = [
-    { key: "all", label: "全部", n: counts.plugin + counts.skill + counts.connector },
-    { key: "plugin", label: "插件", n: counts.plugin },
+    { key: "all", label: "全部", n: counts.plugin + counts.skill + counts.connector + (showCordis ? dshCount : 0) },
+    { key: "plugin", label: "插件", n: counts.plugin + (showCordis ? dshCount : 0) },
     { key: "skill", label: "技能", n: counts.skill },
     { key: "connector", label: "连接器", n: counts.connector },
   ];
@@ -374,8 +382,16 @@ export function InstalledPanel() {
 
       <div className="inst-scroll">
         {loading && rows.length === 0 && <div className="inst-loading"><DadaLoader label="正在加载已安装内容…" /></div>}
-        {/* 空态分三种：搜索无结果 / 该类型未安装 / 全空；后两类带「前往市场」引导（plan-114-450 换成嗒嗒空状态） */}
-        {!loading && filtered.length === 0 && (
+        {/* dsh 第三方插件：独立数据源（桌面端主进程），作为插件分组置顶——
+            安装入口在已安装页第一眼可见；搜索词与页面搜索框共用。 */}
+        {showCordis && (
+          <div className="inst-dsh">
+            <CordisPluginsSection embedded query={query} onCountChange={setDshCount} />
+          </div>
+        )}
+        {/* 空态分三种：搜索无结果 / 该类型未安装 / 全空；后两类带「前往市场」引导（plan-114-450 换成嗒嗒空状态）
+            dsh 插件存在时不显示整页空态，否则会出现「装了第三方插件却提示没装」。 */}
+        {!loading && filtered.length === 0 && !(showCordis && dshCount > 0) && (
           <div className="ui-card">
             {query ? (
               <Empty mood="think" title={`没有匹配「${query}」的已安装项`}
@@ -394,33 +410,35 @@ export function InstalledPanel() {
             <div className="inst-group-title">{label}</div>
             <div className="inst-list">
               {list.map((row) => (
-                <div
-                  key={row.key}
-                  className="inst-row"
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => setDetail(row)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setDetail(row); }
-                  }}
-                >
-                  {/* plan-91-393：36px 图标瓦片按类型着色，市场图标优先 */}
-                  <span className="inst-tile" data-kind={row.kind}>
-                    {row.iconUrl
-                      ? <InstIcon name={row.name} displayName={row.displayName} iconUrl={row.iconUrl} size={36} />
-                      : KIND_META[row.kind].icon}
-                  </span>
-                  <div className="inst-main">
-                    {/* plan-114-452：类型 / 来源标签并入名称行，说明恒占一行（缺省给占位）⇒ 所有行等高 */}
-                    <div className="inst-name">
-                      <span className="inst-name-text">{row.displayName}</span>
-                      <span className="sb-badge accent">{KIND_META[row.kind].label}</span>
-                      <span className="sb-badge">{SOURCE_LABEL[row.source] || row.source || "其他"}</span>
+                <div key={row.key} className="inst-row">
+                  {/* plan-20261019-dsh-ui：只有图标与文字区域可点开详情，
+                      行右侧留白不再响应点击（此前整行 role=button，空白处也会误开详情） */}
+                  <div
+                    className="inst-hit"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setDetail(row)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setDetail(row); }
+                    }}
+                  >
+                    {/* plan-91-393：36px 图标瓦片按类型着色，市场图标优先 */}
+                    <span className="inst-tile" data-kind={row.kind}>
+                      {row.iconUrl
+                        ? <InstIcon name={row.name} displayName={row.displayName} iconUrl={row.iconUrl} size={36} />
+                        : KIND_META[row.kind].icon}
+                    </span>
+                    <div className="inst-main">
+                      {/* plan-114-452：类型 / 来源标签并入名称行，说明恒占一行（缺省给占位）⇒ 所有行等高 */}
+                      <div className="inst-name">
+                        <span className="inst-name-text">{row.displayName}</span>
+                        <span className="sb-badge accent">{KIND_META[row.kind].label}</span>
+                        <span className="sb-badge">{SOURCE_LABEL[row.source] || row.source || "其他"}</span>
+                      </div>
+                      <div className={"inst-desc" + (row.description ? "" : " is-empty")}>{row.description || "暂无说明"}</div>
                     </div>
-                    <div className={"inst-desc" + (row.description ? "" : " is-empty")}>{row.description || "暂无说明"}</div>
                   </div>
-                  {/* 操作区阻止冒泡：点开关/操作不应误开详情 */}
-                  <div className="inst-actions" onClick={(e) => e.stopPropagation()}>
+                  <div className="inst-actions">
                     {/* plan-91-393：次要操作悬停显现，固定槽位仅改透明度，避免布局抖动 */}
                     <span className="sb-hover-actions">
                       {row.kind === "connector" && (row.name === "database" || row.name === "debugger") && (

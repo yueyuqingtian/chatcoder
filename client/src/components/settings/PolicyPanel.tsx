@@ -3,7 +3,7 @@
  * 工具规则：下拉选择工具 + 三态决策 chips（作用于工具本身，executor 按 tool_name 匹配）。
  * plan-230-1144 M2: 新增「权限模式」页签——内置 4 模式白名单/提示词可覆盖，
  * 支持新建自定义模式（从全量工具勾选白名单），模式列表供输入框模式菜单动态消费。 */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type ExecPolicyRuleOut, type ExecPolicyToolInfo, type ModelOut, type PermissionProfileOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { IconRefresh, IconPlus, IconX, IconWrench, IconTerminal, IconPencil, IconTrash } from "../icons";
@@ -254,6 +254,21 @@ const MODE_TEMPLATES: Array<{
   },
 ];
 
+/** plan-20261019-policy-search：工具白名单按类别分组——几十个工具平铺时，
+ *  新加的工具（如 suggest_next_task）总在末尾被 MCP / 子代理工具压起来，用户找不到。 */
+const TOOL_GROUP_LABEL: Record<string, string> = {
+  core: "基础能力",
+  subagent: "子代理 / 子会话",
+  mcp: "MCP 工具",
+};
+const TOOL_GROUP_ORDER = ["core", "subagent", "mcp"] as const;
+const TOOL_GROUP_FILTERS = [
+  { key: "all", label: "全部" },
+  { key: "core", label: "基础" },
+  { key: "subagent", label: "子代理" },
+  { key: "mcp", label: "MCP" },
+] as const;
+
 function ModeProfilesSection() {
   const [profiles, setProfiles] = useState<PermissionProfileOut[]>([]);
   const [tools, setTools] = useState<ExecPolicyToolInfo[]>([]);
@@ -261,6 +276,10 @@ function ModeProfilesSection() {
   const [isNew, setIsNew] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  // plan-20261019-policy-search：白名单矩阵的搜索 / 类别筛选 / 只看已选
+  const [toolQuery, setToolQuery] = useState("");
+  const [toolGroup, setToolGroup] = useState<"all" | "core" | "subagent" | "mcp">("all");
+  const [pickedOnly, setPickedOnly] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -294,6 +313,27 @@ function ModeProfilesSection() {
       tools: prev.tools.includes(name) ? prev.tools.filter((t) => t !== name) : [...prev.tools, name],
     });
   };
+
+  /** plan-20261019-policy-search：白名单矩阵的可见项。
+   *  搜索时平铺匹配结果（避免分组标题把命中项拆散），无搜索时按类别分组。 */
+  const toolView = useMemo(() => {
+    const q = toolQuery.trim().toLowerCase();
+    const picked = new Set(editing?.tools ?? []);
+    const list = tools.filter((t) => {
+      if (pickedOnly && !picked.has(t.name)) return false;
+      if (toolGroup !== "all" && (t.group || "core") !== toolGroup) return false;
+      if (!q) return true;
+      return t.name.toLowerCase().includes(q) || (t.description || "").toLowerCase().includes(q);
+    });
+    if (q) return [{ key: "match", label: "匹配结果", items: list }];
+    return TOOL_GROUP_ORDER
+      .map((key) => ({
+        key,
+        label: TOOL_GROUP_LABEL[key],
+        items: list.filter((t) => (t.group || "core") === key),
+      }))
+      .filter((g) => g.items.length > 0);
+  }, [tools, toolQuery, toolGroup, pickedOnly, editing?.tools]);
   const handleSave = async () => {
     if (!editing) return;
     setErr(null); setSaving(true);
@@ -397,15 +437,47 @@ function ModeProfilesSection() {
                 onChange={(e) => setEditing((p) => p && { ...p, description: e.target.value })} />
             </div>
             <div className="settings-form-field">
-              <label className="settings-field-label">工具白名单（不勾选 = 全量工具）</label>
-              <div className="perm-tool-grid">
-                {tools.map((t) => (
-                  <label key={t.name} className="perm-tool-check" title={t.description || undefined}>
-                    <Checkbox checked={editing.tools.includes(t.name)} onChange={() => startToolToggle(t.name)} aria-label={`${t.name} 白名单`} />
-                    <code>{t.name}</code>
-                    <span className="perm-tool-risk" data-risk={t.risk_level}>{t.risk_level}</span>
+              <div className="perm-tool-head">
+                <label className="settings-field-label">工具白名单（不勾选 = 全量工具）</label>
+                <span className="perm-tool-count">
+                  {editing.tools.length === 0 ? "未限制（全量工具）" : `已选 ${editing.tools.length} 个`}
+                </span>
+              </div>
+              <div className="perm-tool-filter">
+                <Input value={toolQuery} placeholder="搜索工具名或说明，如 suggest、建议"
+                  aria-label="搜索工具"
+                  onChange={(e) => setToolQuery(e.target.value)} />
+                <div className="settings-chips">
+                  {TOOL_GROUP_FILTERS.map((g) => (
+                    <button key={g.key} type="button"
+                      className={"settings-chip" + (toolGroup === g.key ? " on" : "")}
+                      onClick={() => setToolGroup(g.key)}>
+                      {g.label}
+                    </button>
+                  ))}
+                  <label className="perm-tool-picked">
+                    <Checkbox checked={pickedOnly} onChange={() => setPickedOnly((v) => !v)}
+                      aria-label="只看已选工具" />
+                    <span>只看已选</span>
                   </label>
+                </div>
+              </div>
+              <div className="perm-tool-grid">
+                {toolView.map((g) => (
+                  <Fragment key={g.key}>
+                    <div className="perm-tool-group">{g.label}（{g.items.length}）</div>
+                    {g.items.map((t) => (
+                      <label key={t.name} className="perm-tool-check" title={t.description || undefined}>
+                        <Checkbox checked={editing.tools.includes(t.name)} onChange={() => startToolToggle(t.name)} aria-label={`${t.name} 白名单`} />
+                        <code>{t.name}</code>
+                        <span className="perm-tool-risk" data-risk={t.risk_level}>{t.risk_level}</span>
+                      </label>
+                    ))}
+                  </Fragment>
                 ))}
+                {toolView.every((g) => g.items.length === 0) && (
+                  <div className="perm-tool-empty">没有匹配的工具</div>
+                )}
               </div>
             </div>
             <div className="settings-form-field">

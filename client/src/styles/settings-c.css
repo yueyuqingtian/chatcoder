@@ -16,7 +16,7 @@
 }
 .sc-list > .sc-row:last-child { border-bottom: none; }
 .sc-row:hover { background: var(--bg-hover); }
-.sc-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.sc-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; --collapse-gap: 3px; /* 排程预览的折叠容器据此抵消 0 高度占的 gap，见 motion.css .in-gap */ }
 .sc-row-title { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; font-weight: 500; color: var(--text-1); }
 .sc-row-desc { font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sc-row-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; margin-left: auto; }

@@ -10,7 +10,7 @@
  */
 import { useEffect, useMemo, useState } from "react";
 
-import { api } from "../../api/client";
+import { api, type FileChangeOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { usePanelStore } from "../../store/panel";
 import { useUiStore } from "../../store/ui";
@@ -25,11 +25,15 @@ import {
   IconCopy,
   IconRotateCcw,
 } from "../icons";
-import { Button, Menu, Tooltip, type MenuEntry } from "../ui";
+import { Button, Collapse, Menu, Tooltip, type MenuEntry } from "../ui";
 import { FileBadge, splitFilePath } from "./FileBadge";
 
 /** 模块级 in-flight 去重：同一轮可能在消息流与折叠区同时挂载，只允许发一次请求 */
 const inflight = new Set<number>();
+
+/** 已经出现过的轮次卡片：入场动画只在「第一次出现」时播放。
+ *  消息流是虚拟列表，卡片滚出视口再滚回会重新挂载——不记下来的话每次滚动都会重播一遍。 */
+const enteredTurns = new Set<number>();
 
 /** 列表首次展示的最大行数（其余收进「展开」）。
  *  默认 5 行：变更卡片是每轮都出现的辅助信息，默认铺 10 行会把消息流拉得很长。 */
@@ -108,6 +112,11 @@ export function TurnChangesCard({ turnId }: { turnId: number }) {
   const [reverting, setReverting] = useState(false);
   /** 刚复制的菜单项 key；2 秒后回退文案（不依赖全局 toast） */
   const [copied, setCopied] = useState<string | null>(null);
+  /** 首次挂载时读一次：这张卡此前从未展示过才播放入场（见 enteredTurns） */
+  const [playEnter] = useState(() => !enteredTurns.has(turnId));
+  useEffect(() => {
+    if (files && files.length > 0) enteredTurns.add(turnId);
+  }, [files, turnId]);
 
   // 未加载时补拉：effect 内直接读最新 store，不依赖 files——否则「加载完成」会再触发一次拉取
   useEffect(() => {
@@ -136,8 +145,11 @@ export function TurnChangesCard({ turnId }: { turnId: number }) {
   if (!files || files.length === 0) return null;
 
   const root = projects.find((p) => p.id === currentProjectId)?.path ?? "";
-  const shown = showAll ? files : files.slice(0, PAGE_SIZE);
-  const restCount = files.length - PAGE_SIZE;
+  // plan-20261019-motion-sweep：首屏 PAGE_SIZE 行常显，其余行放进独立的折叠容器——
+  // 「展开其余」是高度过渡而不是整块弹出（此前按 showAll 切片，列表瞬间变长）
+  const headFiles = files.slice(0, PAGE_SIZE);
+  const restFiles = files.slice(PAGE_SIZE);
+  const restCount = restFiles.length;
   // 撤销顺序锁：只有最新有文件改动的轮次可撤销，更早的轮次要先撤销后面的。
   // 锁未拉到（切会话瞬间 / 请求失败）时按钮也禁用，但提示文案必须说实话——
   // 此前一律显示「请先撤销更新轮次的改动」，把加载态误报成「你可能还有更晚的改动」。
@@ -242,8 +254,49 @@ export function TurnChangesCard({ turnId }: { turnId: number }) {
     }
   }
 
+  /** 单个文件行（首屏行与「展开其余」里的行共用） */
+  const renderRow = (c: FileChangeOut) => {
+    const rel = c.path.replace(/\\/g, "/");
+    const abs = toAbsPath(root, c.path);
+    const { dir, name } = splitFilePath(c.path);
+    const deleted = c.action === "deleted";
+    return (
+      <div className={`tcc-row${deleted ? " is-deleted" : ""}`} key={c.path}>
+        <FileBadge path={c.path} size={badgeSize} />
+        <span className="tcc-name">{name}</span>
+        {dir && <span className="tcc-dir">{dir}</span>}
+        {deleted && <span className="tcc-tag">已删除</span>}
+        <span className="tcc-spacer" />
+        <span className="tcc-stat">
+          <span className="tcc-add">+{c.additions}</span>
+          {c.deletions > 0 && <span className="tcc-del">-{c.deletions}</span>}
+        </span>
+        <div className="tcc-row-ops">
+          <Button variant="outline" size="sm" onClick={() => void openDiff(c.path)}>
+            审查
+          </Button>
+          {/* 「打开 ⌄」是分体按钮：左侧直接打开，右侧角标选应用 */}
+          <span className="tcc-split">
+            <Button variant="outline" size="sm" onClick={() => void openWith("explorer", abs)}>
+              打开
+            </Button>
+            <Menu
+              align="end"
+              trigger={
+                <button type="button" className="tcc-split-caret" aria-label={`选择打开方式：${name}`}>
+                  <IconChevronDown size={iconSmall} />
+                </button>
+              }
+              entries={menuEntries(rel, abs)}
+            />
+          </span>
+        </div>
+      </div>
+    );
+  };
+
   return (
-    <div className={`tcc-card${collapsed ? " is-collapsed" : ""}`}>
+    <div className={`tcc-card${collapsed ? " is-collapsed" : ""}${playEnter ? " is-entering" : ""}`}>
       {/* 表头整行都可点开/收起（用户直觉：点标题行就该展开），
           内部箭头与撤销按钮各自 stopPropagation，避免一次点击触发两次或误触撤销。 */}
       <div
@@ -280,57 +333,25 @@ export function TurnChangesCard({ turnId }: { turnId: number }) {
         </Tooltip>
       </div>
 
-      {!collapsed && (
-        <div className="tcc-list">
-          {shown.map((c) => {
-            const rel = c.path.replace(/\\/g, "/");
-            const abs = toAbsPath(root, c.path);
-            const { dir, name } = splitFilePath(c.path);
-            const deleted = c.action === "deleted";
-            return (
-              <div className={`tcc-row${deleted ? " is-deleted" : ""}`} key={c.path}>
-                <FileBadge path={c.path} size={badgeSize} />
-                <span className="tcc-name">{name}</span>
-                {dir && <span className="tcc-dir">{dir}</span>}
-                {deleted && <span className="tcc-tag">已删除</span>}
-                <span className="tcc-spacer" />
-                <span className="tcc-stat">
-                  <span className="tcc-add">+{c.additions}</span>
-                  {c.deletions > 0 && <span className="tcc-del">-{c.deletions}</span>}
-                </span>
-                <div className="tcc-row-ops">
-                  <Button variant="outline" size="sm" onClick={() => void openDiff(c.path)}>
-                    审查
-                  </Button>
-                  {/* 「打开 ⌄」是分体按钮：左侧直接打开，右侧角标选应用 */}
-                  <span className="tcc-split">
-                    <Button variant="outline" size="sm" onClick={() => void openWith("explorer", abs)}>
-                      打开
-                    </Button>
-                    <Menu
-                      align="end"
-                      trigger={
-                        <button type="button" className="tcc-split-caret" aria-label={`选择打开方式：${name}`}>
-                          <IconChevronDown size={iconSmall} />
-                        </button>
-                      }
-                      entries={menuEntries(rel, abs)}
-                    />
-                  </span>
-                </div>
-              </div>
-            );
-          })}
+      {/* plan-20261019-motion-sweep：整张列表的展开 / 收起走 Collapse（真实高度过渡，收起结束才卸载，
+          children 用函数——折叠时不构造文件行），此前是 `{!collapsed && …}` 条件渲染，
+          点表头列表瞬间出现 / 消失。 */}
+      <Collapse open={!collapsed} lazy>
+        {() => (
+          <div className="tcc-list">
+            {headFiles.map(renderRow)}
+            {restCount > 0 && <Collapse open={showAll} lazy>{() => restFiles.map(renderRow)}</Collapse>}
 
-          {restCount > 0 && (
-            <div className="tcc-more">
-              <Button variant="ghost" size="xs" onClick={() => setShowAll((v) => !v)}>
-                {showAll ? "收起" : `展开其余 ${restCount} 个文件`}
-              </Button>
-            </div>
-          )}
-        </div>
-      )}
+            {restCount > 0 && (
+              <div className="tcc-more">
+                <Button variant="ghost" size="xs" onClick={() => setShowAll((v) => !v)}>
+                  {showAll ? "收起" : `展开其余 ${restCount} 个文件`}
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
+      </Collapse>
 
       <ConfirmDialog
         open={confirmOpen}

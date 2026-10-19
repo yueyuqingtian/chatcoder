@@ -9,7 +9,7 @@
 .settings-resource-item.sb-item { align-items: flex-start; gap: 12px; }
 .settings-resource-item.sb-item.is-off .sb-tile,
 .settings-resource-item.sb-item.is-off .settings-resource-info { opacity: .6; }
-.sb-item .settings-resource-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.sb-item .settings-resource-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; --collapse-gap: 4px; /* 行内展开区（技能详情 / MCP 工具清单）的折叠容器据此抵消 0 高度占的 gap，见 motion.css .in-gap */ }
 .sb-item .settings-resource-name { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; line-height: 20px; }
 .sb-item .settings-resource-actions { align-self: center; gap: 4px; }
 .sb-tile {

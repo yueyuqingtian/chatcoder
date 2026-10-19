@@ -450,7 +450,7 @@ class RevertLockOut(BaseModel):
 class FileChangeOut(BaseModel):
     """变更审核清单单文件：仅元数据（不含文件全文），reviewed 为后端持久化状态。"""
     path: str
-    action: str  # "modified"（修改）/ "added"（新增）/ "deleted"（删除）
+    action: str  # "modified"（修改）/ "added"（新增）/ "deleted"（删除，文件已不在磁盘上）
     additions: int = 0  # 新增行数
     deletions: int = 0  # 删除行数
     reviewed: bool = False  # 后端持久化审核状态
@@ -477,6 +477,9 @@ class FileDiffOut(BaseModel):
     deletions: int = 0
     # True = 按 call_key 命中的本次编辑口径；False = 整轮累积（老数据回退）
     single_edit: bool = False
+    # plan-20261019-toolcard-v2：added / modified / deleted——前端据此区分「文件已被删除」
+    # （删除后没有「当前内容」可看，审查面板不再提供它）
+    action: str | None = None
 
 
 class ReviewBatchBody(BaseModel):

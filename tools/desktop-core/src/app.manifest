@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  desktop-core 应用清单（plan-20261019-desktop-targeting）。
+
+  为什么必须用清单声明 DPI 感知，而不是只靠启动后调用 SetProcessDpiAwarenessContext：
+  进程启动到 API 调用之间 CLR 与托管类库可能已经读取过屏幕度量，之后系统不再允许改动感知级别，
+  调用静默失败（返回值此前还被忽略）→ 进程停在「未感知」状态，GetSystemMetrics、窗口矩形、UIA 矩形、
+  截图尺寸全部被系统按缩放比虚拟化，点击落点与截图各偏各的，且没有任何报错。
+  清单在进程创建时就生效，不存在这个时序窗口；Main 里的 API 调用只保留为兜底。
+-->
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 / 11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
+    </application>
+  </compatibility>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2,PerMonitor</dpiAwareness>
+    </windowsSettings>
+  </application>
+</assembly>

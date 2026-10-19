@@ -450,6 +450,28 @@ def _resolve_write_record(*, bin_pre: bool | None, bin_post: bool | None,
     return is_bin, after
 
 
+async def _register_pre_checkpoint(db, *, turn_id: int, target: str, target_rel: str | None,
+                                   existed_before: bool, ckpt: str | None,
+                                   registered: set[str], consumed: set[str]) -> None:
+    """登记一次写盘的备份信息（plan-20261019-toolcard-v2）。
+
+    备份是工具执行**之前**取的（见调用处的 _pre_ckpt）：
+      · 文件原本存在 → 把备份登记到本轮快照（同一文件每轮只登记首次写盘前的样子）；
+        该文件本轮已有备份而登记被去重时，这份多取的立即删除，不留孤儿文件；
+      · 文件原本不存在 → 登记为「本轮新建」，回滚时删除。
+    """
+    key = target_rel or target
+    if existed_before:
+        reg = await rollback_service.record_checkpoint_for_turn(db, turn_id, ckpt or "", key)
+        if reg:
+            registered.add(key)
+        elif ckpt:
+            rollback_service.discard_checkpoint(ckpt)
+        consumed.add(key)
+    else:
+        await rollback_service.record_checkpoint_for_turn(db, turn_id, "", key, new_file=key)
+
+
 @dataclass
 class AgentOutput:
     kind: str  # message | done | error | cancelled | skipped
@@ -926,6 +948,8 @@ async def run_agent_loop(
     total_tokens = 0
     final_text = ""
     write_paths: list[str] = []
+    # plan-20261019-toolcard-v2：本轮已登记过写前备份的文件（相对工作区路径）——每个文件每轮只备份首次写盘前的样子
+    _ckpt_registered: set[str] = set()
     # plan-20261018-operator-boost：操作路线沉淀守卫——本轮完成了 GUI 操作却没沉淀时，收尾前提醒一次
     from app.orchestration.op_route_guard import OpRouteGuard
     _route_guard = OpRouteGuard(enabled=bool(getattr(settings, "desktop_recipe_enabled", True)))
@@ -967,6 +991,11 @@ async def run_agent_loop(
     # 已有产出时 finish=stop 空响应 = 任务完成正常结束（对齐 zcode/AI SDK），
     # 不重试不报错；零产出时保留重试兜底瞬时故障。
     _tool_executed = False
+    # plan-20261019-suggestion-priority：收尾建议守卫——模型准备收工时若本轮有实际产出
+    # 却未生成建议卡，注入提醒再走一步（只催一次）。实测数十轮只触发一次，
+    # 根因是「建议卡」全靠模型自觉，提示词与运行时都没有固定钩子。
+    _suggestion_offered = False
+    _suggestion_nudged = False
     # plan-547 C1: 进度提醒计数——连续 N 步无面向用户的文字输出时注入提醒
     _steps_since_last_text = 0
     # plan-547 C3: 最近一次 todo_write 的清单全集（plan 模式每步注入状态标记）
@@ -2102,10 +2131,34 @@ async def run_agent_loop(
                         # 使"改文件"在工具卡展开/输入框贴条中可见，且回滚记录完整。
                         _guess_paths = (rollback_service.resolve_command_write_paths(tool_name, args, workspace)
                                         if tool_name not in _WRITE_TOOLS else [])
+                        # plan-20261019-toolcard-v2：删除目标是目录时，在执行前展开成其中的文件
+                        # （执行之后目录已经不存在，没法再列出里面有哪些文件被删了）。
+                        if _guess_paths:
+                            _guess_paths = rollback_service.expand_directory_targets(workspace, _guess_paths)
                         _guess_before = {p: rollback_service._read_file_text(workspace, p) for p in _guess_paths}
                         _guess_kind = {p: rollback_service.inspect_write_target(
                             workspace, p, settings.rollback_record_max_bytes)[0] for p in _guess_paths}
                         _guess_bin = {p: _write_kind_to_bin(_guess_kind[p]) for p in _guess_paths}
+                        # plan-20261019-toolcard-v2：写前是否存在 + 字节指纹。写后据此判定新建 / 修改 / 删除，
+                        # 并按指纹（而不是有损的文本解码结果）判断命令有没有真的改动文件。
+                        _guess_existed = {p: rollback_service.path_exists(workspace, p) for p in _guess_paths}
+                        _guess_digest = {p: rollback_service.file_digest(workspace, p) for p in _guess_paths}
+                        _pre_existed = {p: rollback_service.path_exists(workspace, p) for p in _pre_paths}
+                        # plan-20261019-toolcard-v2：写前备份必须在工具执行**之前**取。此前在执行之后才复制，
+                        # 备份里装的是写后内容，二进制文件被改写 / 删除后无从恢复。
+                        # 同一文件每轮只备份一次（登记的是首次写盘前的样子）；没有被登记的备份在下面清理。
+                        _pre_ckpt: dict[str, str | None] = {}
+                        _ckpt_consumed: set[str] = set()
+                        for _cp in [*_pre_paths, *_guess_paths]:
+                            if _cp in _pre_ckpt:
+                                continue
+                            _pre_ckpt[_cp] = None
+                            _cp_key = rollback_service.normalize_workspace_path(workspace, _cp) or _cp
+                            if _cp_key in _ckpt_registered:
+                                continue
+                            if _pre_existed.get(_cp) or _guess_existed.get(_cp):
+                                _pre_ckpt[_cp] = rollback_service.checkpoint_file(
+                                    workspace, _cp, session_id=session_id, turn_id=turn_id)
                         # v10: 对已存在的目标文件额外建立磁盘 checkpoint（.chatcoder/checkpoints 兜底备份），
                         # 与精确回滚的 before/after 记录双保险，防数据库记录异常时无法恢复。
                         # v1.1: 取消穿透——长工具执行期间轮询 cancel_event，命中即取消底层任务
@@ -2228,16 +2281,14 @@ async def run_agent_loop(
                                 if _diff_after_text is not None:
                                     _diff_before, _diff_after = rollback_service.build_diff_window(
                                         _before_text, _diff_after_text)
-                            if _pre_before.get(target) is not None:
-                                _ckpt = rollback_service.checkpoint_file(workspace, target,
-                                                                        session_id=session_id, turn_id=turn_id)
-                                await rollback_service.record_checkpoint_for_turn(
-                                    db, turn_id, _ckpt or "", _target_rel or target,
-                                )
-                            else:
-                                await rollback_service.record_checkpoint_for_turn(
-                                    db, turn_id, "", _target_rel or target, new_file=_target_rel or target,
-                                )
+                            # plan-20261019-toolcard-v2：写前存在性来自执行前的探测；备份是执行前取的
+                            _existed_pre = bool(_pre_existed.get(target)) or _pre_before.get(target) is not None
+                            await _register_pre_checkpoint(
+                                db, turn_id=turn_id, target=target, target_rel=_target_rel,
+                                existed_before=_existed_pre, ckpt=_pre_ckpt.get(target),
+                                registered=_ckpt_registered, consumed=_ckpt_consumed,
+                            )
+                            _exists_post = rollback_service.path_exists(workspace, target)
                             await rollback_service.record_turn_write(
                                 db, session_id=session_id, turn_id=turn_id, tool=tool_name,
                                 path=target,
@@ -2249,6 +2300,9 @@ async def run_agent_loop(
                                 # plan-20261019-diff: 超限文本的展示窗口
                                 diff_before=_diff_before,
                                 diff_after=_diff_after,
+                                # plan-20261019-toolcard-v2：操作类型 + 写后字节指纹（撤销前校验「本轮之后有没有被改过」）
+                                op=rollback_service.write_op(_existed_pre, _exists_post),
+                                after_hash=rollback_service.file_digest(workspace, target) if _exists_post else None,
                             )
                             # v2.2 (对齐 zcode 3.7): 行级变更统计（+N -M），工具卡摘要展示
                             if not _is_bin:
@@ -2283,8 +2337,18 @@ async def run_agent_loop(
                         _total_del = 0
                         for target in _guess_paths:
                             _after = rollback_service._read_file_text(workspace, target)
-                            if _guess_before.get(target) == _after:
-                                continue
+                            # plan-20261019-toolcard-v2：先看存在性与字节指纹——删除（前有后无）与新建都必须登记；
+                            # 前后都存在时按指纹判断有没有真改动，指纹不可得（过大 / 读取失败）才退回文本比较。
+                            _existed_g = bool(_guess_existed.get(target))
+                            _exists_post_g = rollback_service.path_exists(workspace, target)
+                            _digest_pre_g = _guess_digest.get(target)
+                            _digest_post_g = rollback_service.file_digest(workspace, target) if _exists_post_g else None
+                            if _existed_g == _exists_post_g:
+                                if _digest_pre_g is not None and _digest_post_g is not None:
+                                    if _digest_pre_g == _digest_post_g:
+                                        continue
+                                elif _guess_before.get(target) == _after:
+                                    continue
                             write_paths.append(target)
                             _detected.append(target)
                             # v26: 伪装写盘同样登记 checkpoint 到 turn 快照
@@ -2316,16 +2380,11 @@ async def run_agent_loop(
                                 if _diff_after_text_g is not None:
                                     _diff_before_g, _diff_after_g = rollback_service.build_diff_window(
                                         _before_text_g, _diff_after_text_g)
-                            if _guess_before.get(target) is not None:
-                                _ckpt = rollback_service.checkpoint_file(workspace, target,
-                                                                        session_id=session_id, turn_id=turn_id)
-                                await rollback_service.record_checkpoint_for_turn(
-                                    db, turn_id, _ckpt or "", _target_rel or target,
-                                )
-                            else:
-                                await rollback_service.record_checkpoint_for_turn(
-                                    db, turn_id, "", _target_rel or target, new_file=_target_rel or target,
-                                )
+                            await _register_pre_checkpoint(
+                                db, turn_id=turn_id, target=target, target_rel=_target_rel,
+                                existed_before=_existed_g, ckpt=_pre_ckpt.get(target),
+                                registered=_ckpt_registered, consumed=_ckpt_consumed,
+                            )
                             await rollback_service.record_turn_write(
                                 db, session_id=session_id, turn_id=turn_id, tool=tool_name,
                                 path=target, before=None if _is_bin else _before_text_g,
@@ -2335,6 +2394,9 @@ async def run_agent_loop(
                                 # plan-20261019-diff: 超限文本的展示窗口
                                 diff_before=_diff_before_g,
                                 diff_after=_diff_after_g,
+                                # plan-20261019-toolcard-v2：命令可能新建 / 修改 / 删除文件，按前后状态记录
+                                op=rollback_service.write_op(_existed_g, _exists_post_g),
+                                after_hash=_digest_post_g,
                             )
                             if not _is_bin:
                                 _add, _del = rollback_service.diff_stats(_before_text_g, _after)
@@ -2357,6 +2419,12 @@ async def run_agent_loop(
                                 "payload": {"turn_id": turn_id, "path": str(_detected[0]),
                                             "session_id": session_id},
                             })
+
+                    # plan-20261019-toolcard-v2：命令并没有真的改动这些文件（或工具失败）时，
+                    # 执行前取的备份没有被登记，清掉——避免备份目录里堆满孤儿文件。
+                    for _cp, _ck in _pre_ckpt.items():
+                        if _ck and (rollback_service.normalize_workspace_path(workspace, _cp) or _cp) not in _ckpt_consumed:
+                            rollback_service.discard_checkpoint(_ck)
 
                     # plan-20261015-browser-agent：截图类结果落盘，消息流在该调用的时间线位置展示预览
                     from app.orchestration.tool_images import persist_tool_image
@@ -2407,6 +2475,10 @@ async def run_agent_loop(
                     except Exception:
                         await db.rollback()
                         logger.debug("[agent] 步级提交失败 turn=%s tool=%s", turn_id, tool_name, exc_info=True)
+                    # plan-20261019-suggestion-priority：记录本轮是否已生成建议卡
+                    # （真实名 / ta3 伪装名都认），收尾兜底提醒据此只催一次
+                    if tool_name in ("suggest_next_task", "SuggestNextTask"):
+                        _suggestion_offered = True
                     # v2.2: todo_write 成功 → 重置 todo 提醒计数
                     if tool_name == "todo_write" and result.ok:
                         _todo_active = True
@@ -2489,6 +2561,30 @@ async def run_agent_loop(
                     messages.append(ChatMessage(role="assistant", content=response.content))
                 logger.info("[agent] turn=%s 注入操作路线沉淀提醒", turn_id)
                 messages.append(ChatMessage(role="user", content=_route_note))
+                continue
+
+            # plan-20261019-suggestion-priority：收尾建议兜底——模型准备结束本轮、
+            # 且本轮真实动过工具（纯问答不触发），但没给下一步建议时，提醒一次再走一步。
+            # 为什么不靠提示词就够：长会话里工具描述与系统提示词会被稀释，实测触发率极低。
+            # 只催一次（_suggestion_nudged），用户不想要时可以取消卡片，不会被反复骚扰。
+            if (agent_kind == "main" and _tool_executed and response.content
+                    and not _suggestion_offered and not _suggestion_nudged):
+                _suggestion_nudged = True
+                logger.info("[agent] turn=%s 注入收尾建议提醒", turn_id)
+                await message_service.create_message(
+                    db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
+                    sender_type=SenderType.AGENT.value, sender_id=agent_id,
+                    msg_type=MsgType.TEXT.value,
+                    content={"text": response.content, "agent_name": agent_name},
+                )
+                messages.append(ChatMessage(role="assistant", content=response.content))
+                messages.append(ChatMessage(role="user", content=(
+                    "[系统提醒] 本轮已有实际产出，收尾还差一步：调用 suggest_next_task "
+                    "给出一条具体可执行的下一步建议（用户会以卡片形式看到，可一键在新子会话执行）。\n"
+                    "写「做什么 + 为什么值得做 + 2~5 步」，不要写客套式提问。\n"
+                    "例外：纯问答/解释、用户明确还要接着做、或确实没有合适的下一步——"
+                    "此时用一句话说明为什么不需要，然后直接结束本轮。不要复述本条提示。"
+                )))
                 continue
 
             # 最终文本

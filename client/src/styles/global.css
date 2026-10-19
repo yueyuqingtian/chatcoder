@@ -287,6 +287,8 @@ a { color: var(--accent); text-decoration: none; }
    使「置顶」「项目」小字与该分区下第一个图标槽左缘对齐。 */
 .sb-section-label { font-size: 11px; color: var(--text-3); padding: 10px var(--sb-row-pad) 6px; user-select: none; }
 .sb-project-group { margin-bottom: 2px; }
+/* plan-20261019-motion-sweep：分组 / 项目视图切换时内容淡入一次（挂载即播放，fill 只取 backwards：结束后不残留动画层） */
+.sb-view-pane { animation: mo-fade-in var(--dur-3) var(--ease-emphasized-decel) backwards; }
 .sb-project { display: flex; align-items: center; gap: var(--sb-row-gap); height: 32px; padding: 0 var(--sb-row-pad); border-radius: var(--r-md); font-size: var(--sidebar-fs, 14px); color: var(--text-2); cursor: pointer; position: relative; transition: background var(--dur-fast); }
 /* plan-156-619 S1：项目图标槽与界面状态槽同宽（--sb-icon-slot），
    项目名起点 = 列表内距 8 + row-pad 6 + slot 20 + gap 8 = 42，与会话标题起点一致。 */
@@ -395,14 +397,15 @@ a { color: var(--accent); text-decoration: none; }
 /* plan-156-619 S5 / plan-156-620：子会话行——与普通会话行同一几何（同一 --sb-row-pad / --sb-icon-slot），
    整体缩进一级（一个图标槽宽），状态槽（转圈）随之右移，标题起点落在父会话标题之后。
    层级只用缩进 + 字号表达，不加色块、标签与左侧竖线（项目规则禁止装饰性竖线）。 */
-/* 展开收起走 grid 行高过渡（0fr ↔ 1fr）：高度随内容自适应，又不是 0 动画硬切 */
-.sb-subsessions {
-  display: grid; grid-template-rows: 1fr;
-  transition: grid-template-rows var(--dur-2, 160ms) var(--ease-standard, ease);
-}
-.sb-subsessions.is-collapsed { grid-template-rows: 0fr; }
-.sb-subsessions-inner { display: flex; flex-direction: column; gap: 2px; min-height: 0; overflow: hidden; padding: 1px 0; }
-.sb-subsessions.is-collapsed .sb-subsessions-inner { padding: 0; }
+/* plan-20261019-motion-sweep：展开收起由 ui/Collapse（.ui-collapse，grid 0fr↔1fr + 淡入淡出，--dur-3）承担，
+   此前自带的 grid 过渡只有 --dur-2 的 120ms，几乎等同瞬切。本类只管内部排版：
+   折叠时内层高度被压成 0，上下 1px 内距随之被裁掉，无需另行清零。 */
+.sb-subsessions-inner { display: flex; flex-direction: column; gap: 2px; padding: 1px 0; }
+/* 项目下「显示更多」的分批容器与按钮槽（Collapse 加 .in-gap，见 motion.css）：
+   它们是 .sb-project-children（flex，gap 2px）的直接子项，折叠的 0 高度子项仍会占一份 gap，
+   由 --collapse-gap 声明 gap 值，让「0 高度」与「不存在」等价。 */
+.sb-project-children { --collapse-gap: 2px; }
+.sb-batch-list { display: flex; flex-direction: column; gap: 2px; }
 /* 子会话行与主会话行同字号、同字色、同交互（置顶 / 归档 / 三点菜单），只缩进一个图标槽：
    用户反馈此前子会话字号更小、颜色更淡，看起来又细又弱。 */
 .sb-subsession { padding-left: calc(var(--sb-row-pad) + var(--sb-icon-slot)); }
@@ -557,7 +560,9 @@ a { color: var(--accent); text-decoration: none; }
 .es-project-select { flex: 1; padding: 5px 10px; border-radius: var(--r-ctl); border: 1px solid var(--border); background: var(--bg-elevated); color: var(--text-1); font-size: 12px; cursor: pointer; outline: none; }
 .es-project-select:hover { border-color: var(--text-3); }
 /* ── 聊天面板 + 消息流 ── */
-.chat-panel { position: relative; display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+/* plan-20261019-toolcard-v2：整列（消息流 + 输入区）统一舞台底色——此前输入区在深色下是透明的，
+   会透出 .app-main 上的主题世界场景渐变，与消息流的纯色底出现色差。 */
+.chat-panel { position: relative; display: flex; flex-direction: column; height: 100%; overflow: hidden; background: var(--bg-panel); }
 /* plan-282-1421（第7项）：.chat-error-banner 已删除——系统级错误只由右上角 Toast 呈现，
    任务执行错误只由消息流内（turn-item-error）呈现，不再有第三条横幅通道。 */
 .chat-panel-flow { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
@@ -576,7 +581,7 @@ a { color: var(--accent); text-decoration: none; }
   transition: color var(--dur-fast), transform var(--dur-fast), box-shadow var(--dur-fast);
 }
 .flow-search-btn:hover { color: var(--text-1); transform: translateY(-2px); box-shadow: var(--shadow-pop); }
-.flow-search-bar { display: flex; align-items: center; gap: 8px; padding: 5px 10px; border-radius: var(--r-ctl); background: var(--bg-elevated); border: 1px solid var(--border); box-shadow: var(--shadow-sm); }
+.flow-search-bar { display: flex; align-items: center; gap: 8px; padding: 5px 10px; border-radius: var(--r-ctl); background: var(--bg-elevated); border: 1px solid var(--border); box-shadow: var(--shadow-sm); transform-origin: 0 0; --pop-dy: -4px; animation: mo-pop-in var(--dur-spring) var(--spring-soft) backwards; /* plan-20261019-motion-sweep：由入口按钮换成搜索条时弹出（此前瞬间替换） */ }
 .flow-search-bar input { flex: 1; border: none; outline: none; background: transparent; font-size: 12px; color: var(--text-1); }
 .flow-search-bar input::placeholder { color: var(--text-3); }
 .flow-search-count { font-size: 11px; color: var(--text-3); white-space: nowrap; }
@@ -1401,7 +1406,13 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .turn-user-bubble .turn-user-text { margin-bottom: 2px; }
 /* plan-128-518：超长用户消息折叠——高度限制为 6 行 + 底部渐隐遮罩（mask，不叠色块），展开时去掉限制。箭头按钮占固定槽位，展开/收起只转角度 */
 .turn-user-bubble { position: relative; }
-.turn-user-bubble .ub-text.is-collapsed { max-height: calc(var(--chat-line-height, 2.2) * 1em * 6); overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, #000 62%, transparent); mask-image: linear-gradient(to bottom, #000 62%, transparent); }
+/* plan-20261019-motion-sweep：折叠高度由 max-height 改为 height，配合 interpolate-size 让「6 行 ↔ 自适应」可过渡
+   （max-height: none 无法插值，此前展开 / 收起是瞬切；不支持 interpolate-size 的内核自然退化为瞬切）。
+   overflow:hidden 常驻在超长气泡上——过渡中途内容超出当前高度，不能露出来；短消息没有 .is-overflow，零开销。
+   过渡只在用户点过按钮之后（.is-animating）才挂上，避免长消息一出现就从全高缩到 6 行。 */
+.turn-user-bubble .ub-text.is-overflow { overflow: hidden; interpolate-size: allow-keywords; }
+.turn-user-bubble .ub-text.is-animating { transition: height var(--dur-3) var(--ease-emphasized-decel); }
+.turn-user-bubble .ub-text.is-collapsed { height: calc(var(--chat-line-height, 2.2) * 1em * 6); -webkit-mask-image: linear-gradient(to bottom, #000 62%, transparent); mask-image: linear-gradient(to bottom, #000 62%, transparent); }
 .ub-toggle { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; margin: 4px auto 0; padding: 0; border: 1px solid var(--border); border-radius: var(--r-pill); background: var(--bg-main); color: var(--text-2); cursor: pointer; transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard); }
 .ub-toggle:hover { background: var(--bg-hover); color: var(--text-1); }
 .ub-toggle:focus-visible { outline: 2px solid color-mix(in oklab, var(--info) 60%, transparent); outline-offset: 2px; }
@@ -5178,7 +5189,7 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 .sched-times { display: flex; gap: 14px; margin-top: 3px; font-size: 11px; color: var(--text-3); }
 .sched-times b { color: var(--text-2); font-weight: 500; }
 .sched-last-error { margin-top: 3px; padding: 3px 8px; border-radius: var(--r-xs); background: var(--error-soft); color: var(--error); font-size: 11px; word-break: break-all; }
-.sched-preview { margin-top: 6px; padding: 6px 10px; border-radius: var(--r-sm); border: 1px dashed var(--border); font-size: 11px; color: var(--text-2); display: flex; flex-direction: column; gap: 2px; animation: fadeIn var(--dur-fast) var(--ease-out); }
+.sched-preview { margin-top: 6px; padding: 6px 10px; border-radius: var(--r-sm); border: 1px dashed var(--border); font-size: 11px; color: var(--text-2); display: flex; flex-direction: column; gap: 2px; }
 .sched-preview-empty { color: var(--text-3); }
 .sched-cron-input.invalid { border-color: var(--error); }
 .sched-cron-hint { margin-top: 4px; font-size: 11px; min-height: 16px; color: var(--text-3); }
@@ -5190,7 +5201,7 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 /* ══ plan-230-1144 M1.2: 技能详情（trigger 编辑 + AI 可见性预览）══ */
 .skill-item { flex-wrap: wrap; }
 .skill-expand { margin-left: 8px; font-weight: 400; }
-.skill-detail { width: 100%; margin-top: 8px; padding: 10px; border-radius: var(--r-sm); border: 1px solid var(--border); background: var(--surface); display: flex; flex-direction: column; gap: 10px; animation: fadeIn var(--dur-fast) var(--ease-out); }
+.skill-detail { width: 100%; margin-top: 8px; padding: 10px; border-radius: var(--r-sm); border: 1px solid var(--border); background: var(--surface); display: flex; flex-direction: column; gap: 10px; }
 .skill-detail-field { display: flex; flex-direction: column; gap: 4px; }
 .skill-prompt-preview { margin: 0; padding: 8px 10px; border-radius: var(--r-sm); background: var(--bg-elevated); border: 1px solid var(--border); font-family: var(--font-mono); font-size: 11px; line-height: 1.5; color: var(--text-2); white-space: pre-wrap; word-break: break-word; }
 .skill-preview-hint { font-size: 11px; color: var(--text-3); }
@@ -5201,7 +5212,7 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 .mcp-health.ok { color: var(--success); border-color: var(--success); }
 .mcp-health.warn { color: var(--warning); border-color: var(--warning); }
 .mcp-tools-toggle { margin-left: 8px; font-weight: 400; }
-.mcp-tools-list { width: 100%; margin-top: 8px; padding: 8px 10px; border-radius: var(--r-sm); border: 1px solid var(--border); background: var(--surface); display: flex; flex-direction: column; gap: 4px; animation: fadeIn var(--dur-fast) var(--ease-out); }
+.mcp-tools-list { width: 100%; margin-top: 8px; padding: 8px 10px; border-radius: var(--r-sm); border: 1px solid var(--border); background: var(--surface); display: flex; flex-direction: column; gap: 4px; }
 .mcp-tool-item { display: flex; align-items: baseline; gap: 8px; font-size: 11px; color: var(--text-2); }
 .mcp-tool-item code { flex-shrink: 0; font-family: var(--font-mono); font-size: 11px; padding: 0 4px; border-radius: var(--r-xs); background: var(--color-tag); color: var(--text-1); }
 .mcp-tool-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); }
@@ -5243,6 +5254,17 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
   font-size: 12px;
   text-align: center;
 }
+/* plan-20261019-policy-search：白名单矩阵的搜索 / 分类筛选 / 已选计数。
+   此前几十个工具平铺在一个滚动框里，新加的工具（如 suggest_next_task）排在末尾、
+   被 MCP 与子代理工具压住，用户找不到；搜索 + 分组后可直接定位。 */
+.perm-tool-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.perm-tool-count { flex-shrink: 0; font-size: 11px; color: var(--text-3); }
+.perm-tool-filter { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 6px 0 8px; }
+.perm-tool-filter > .ui-input { flex: 0 1 220px; min-width: 150px; max-width: 260px; }
+.perm-tool-picked { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-2); cursor: pointer; }
+.perm-tool-group { grid-column: 1 / -1; margin: 6px 0 0; font-size: 11px; font-weight: 600; color: var(--text-3); }
+.perm-tool-group:first-child { margin-top: 0; }
+.perm-tool-empty { grid-column: 1 / -1; padding: 14px 0; text-align: center; font-size: 12px; color: var(--text-3); }
 .perm-tool-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 4px 10px; max-height: 260px; overflow-y: auto; padding: 8px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface); scrollbar-gutter: stable; }
 .perm-tool-check { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-2); cursor: pointer; min-width: 0; }
 .perm-tool-check code { font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-1); }
@@ -5462,7 +5484,11 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 .inst-group-title { font-size: 12px; font-weight: 600; color: var(--text-2); margin-bottom: var(--sp-2); }
 .inst-list { display: flex; flex-direction: column; gap: 0; border: 1px solid var(--border-light); border-radius: var(--r-lg); background: var(--bg-main); overflow: hidden; }
 /* plan-121-482：行改为全宽横线行（plan-41-226 的"无边框"意图延续，补上卡片壳与分隔线） */
-.inst-row { display: flex; align-items: center; gap: var(--sp-3); padding: var(--row-pad-y) var(--sp-5); border-bottom: 1px solid var(--border-light); cursor: pointer; transition: background var(--dur-2) var(--ease-standard); }
+.inst-row { display: flex; align-items: center; gap: var(--sp-3); padding: var(--row-pad-y) var(--sp-5); border-bottom: 1px solid var(--border-light); cursor: default; transition: background var(--dur-2) var(--ease-standard); }
+/* plan-20261019-dsh-ui：可点区只覆盖图标与文字（宽度随内容），
+   行右侧留白与操作区不响应点击/不显示手型——此前整行可点，右侧空白也会误开详情。 */
+.inst-hit { flex: 0 1 auto; min-width: 0; display: flex; align-items: flex-start; gap: var(--sp-3); cursor: pointer; }
+.inst-hit:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r-md); }
 .inst-list > .inst-row:last-child { border-bottom: none; }
 .inst-row:hover, .inst-row:focus-visible { background: var(--bg-hover); outline: none; }
 .inst-icon { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: var(--r-md); font-size: 13px; font-weight: 700; flex-shrink: 0; background: var(--bg-hover); color: var(--text-2); }
@@ -5472,7 +5498,7 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 .inst-name { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; color: var(--text-1); min-width: 0; }
 .inst-kind { flex-shrink: 0; padding: 1px 6px; border-radius: var(--r-sm); background: var(--bg-hover); color: var(--text-3); font-size: 10.5px; font-weight: 400; }
 .inst-desc { margin-top: 2px; font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.inst-actions { display: flex; align-items: center; gap: var(--sp-2); flex-shrink: 0; }
+.inst-actions { display: flex; align-items: center; gap: var(--sp-2); flex-shrink: 0; margin-left: auto; }
 /* 常驻使用说明（plan-59-286）：装完之后"怎么用"要一直看得见 */
 .inst-hint { flex-shrink: 0; font-size: 12px; line-height: 1.6; color: var(--text-3); }
 /* 空态：图标/说明 + 主按钮引导（计划 41-226：点空类型标签时有“去市场”出口，不会“点了没反应”） */

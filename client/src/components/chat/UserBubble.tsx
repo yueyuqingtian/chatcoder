@@ -20,6 +20,9 @@ export function UserBubble({ msg }: { msg: MessageOut }) {
   const textRef = useRef<HTMLDivElement>(null);
   const [overflow, setOverflow] = useState(false);
   const [expanded, setExpanded] = useState(() => expandedIds.get(msg.id) ?? false);
+  /** plan-20261019-motion-sweep：只有用户点过展开 / 收起之后才挂高度过渡——
+   *  首次测出「超长」时的那次折叠（挂载即发生）若也走过渡，每条长消息出现时都会从全高「缩」到 6 行。 */
+  const [animate, setAnimate] = useState(false);
 
   // 判定是否超长：用「行高 × 行数」换算像素阈值，宽度变化（窗口缩放、右面板折叠）时重新判定
   useLayoutEffect(() => {
@@ -42,6 +45,7 @@ export function UserBubble({ msg }: { msg: MessageOut }) {
     // 不派发 pane-change 事件——那组事件需要 applyPaneUpdate 的收尾配对，单独派发会让锚点状态悬挂。
     const next = !expanded;
     expandedIds.set(msg.id, next);
+    setAnimate(true);
     setExpanded(next);
   };
 
@@ -52,7 +56,10 @@ export function UserBubble({ msg }: { msg: MessageOut }) {
       {/* plan-308-1542 需求2：引用芯片 */}
       <RefChips refs={refs} />
       {text && (
-        <div className={"turn-user-text ub-text" + (collapsed ? " is-collapsed" : "")} ref={textRef}>
+        <div
+          className={"turn-user-text ub-text" + (overflow ? " is-overflow" : "") + (collapsed ? " is-collapsed" : "") + (animate ? " is-animating" : "")}
+          ref={textRef}
+        >
           <TokenText text={text} />
         </div>
       )}

@@ -24,10 +24,10 @@
  * 为什么仍然用 CSS 变量而不是 React state 下发：变量只影响布局，React 不参与；
  * 形态判定带滞回，且只在「放得下 / 放不下」档位真正变化时才 setState。
  */
-import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { useUiStore } from "../../store/ui";
 import {
-  CLEARANCE_CAPSULE, CLEARANCE_EXPANDED, contentColumnGeometry, COLUMN_PAD, MIN_COL_W,
+  CLEARANCE_EXPANDED, contentColumnGeometry, COLUMN_PAD, MIN_CAPSULE_HOST_W, MIN_COL_W,
 } from "./contentColumnGeometry";
 
 /** 宿主宽度变化小于该值视为抖动（字体 hinting 取整），不重新求解。 */
@@ -68,7 +68,8 @@ function settleShortfall(prev: number, next: number): number {
 export interface ContentColumnHandle {
   /** 展开卡片在最大左移后仍缺的空间（>0 → 只能降级为胶囊）。 */
   expandedShortfall: number;
-  /** 胶囊在最大左移后仍缺的空间（>0 → 连胶囊都会遮挡会话，整卡隐藏）。 */
+  /** 宿主比胶囊的最小可用宽度还窄多少（>0 → 胶囊会盖住半个消息列，整卡隐藏）。
+   *  plan-20261019-toolcard-v2：胶囊悬浮不让位，此值只由宿主宽度决定。 */
   capsuleShortfall: number;
 }
 
@@ -146,7 +147,8 @@ export function useContentColumnGeometry(
     const geo = solve(wanted, clearanceRef.current);
     const prev = lastShortfallsRef.current;
     const rawExpanded = solve(geo.width, CLEARANCE_EXPANDED).shortfall;
-    const rawCapsule = solve(geo.width, CLEARANCE_CAPSULE).shortfall;
+    // plan-20261019-toolcard-v2：胶囊悬浮、不让位，「放不下」只看宿主是否窄到胶囊会盖住半个消息列
+    const rawCapsule = Math.max(0, MIN_CAPSULE_HOST_W - hostW);
     const next: ContentColumnHandle = {
       expandedShortfall: settleShortfall(prev.expandedShortfall, rawExpanded),
       capsuleShortfall: settleShortfall(prev.capsuleShortfall, rawCapsule),
@@ -178,8 +180,10 @@ export function useContentColumnGeometry(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [preferredW]);
 
-  // 卡片形态变化：只改避让量，一次布局内完成
-  useEffect(() => { applyRef.current(); }, [clearance]);
+  // 卡片形态变化：只改避让量，一次布局内完成。
+  // plan-20261019-toolcard-v2：用 layout effect——与卡片形变同一帧写入变量，内容列的平移过渡
+  // 才会和卡片形变同时起步（passive effect 会晚一帧，正文总是慢半拍）。
+  useLayoutEffect(() => { applyRef.current(); }, [clearance]);
 
   useEffect(() => {
     const host = hostRef.current;

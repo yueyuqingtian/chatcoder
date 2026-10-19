@@ -83,7 +83,14 @@ async def desktop_probe() -> dict:
         info = await core.call("info")
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(400, f"内核不可用：{exc}") from exc
-    return {"ok": True, "info": info}
+    # 光标落点自检（plan-20261019-desktop-targeting）：把光标依次移到屏幕上 5 个点并读回，
+    # 证明当前缩放 / 多显示器配置下「发出去的坐标」与「光标实际落点」一致。老内核没有该 op 时跳过。
+    calib: dict = {}
+    try:
+        calib = await core.call("calib")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[desktop] 落点自检不可用: %s", exc)
+    return {"ok": True, "info": info, "calib": calib}
 
 
 # ── 操作路线 ──────────────────────────────────────────────

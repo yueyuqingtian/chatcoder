@@ -103,6 +103,10 @@ def _build_default_registry() -> ToolRegistry:
         ReadAttachmentTool, TodoWriteTool,
         # v2.2 (对齐 zcode 3.14): 补注册——多文件编辑/git 操作/代码库搜索/结构化提问
         MultiFileEditTool, GitTool, CodebaseSearchTool, AskUserQuestionTool,
+        # plan-20261019-suggestion-priority：后续任务建议卡（消息流底部）。
+        # 前移到常用工具组——此前注册在清单最末尾，长工具表里模型对末尾工具注意力明显偏低，
+        # 是「几十轮只有一次触发」的原因之一
+        SuggestNextTaskTool,
         # v30.1: 压缩索引查看（AI 按需查看压缩前会话）
         CompactionIndexTool, CompactionViewTool,
         # plan-230-1144 M1.2: 技能正文按需加载（此前 content 从未送达模型，AI 无法主动使用技能）
@@ -120,8 +124,6 @@ def _build_default_registry() -> ToolRegistry:
         # plan-334-1661: 电脑操控（内置原生工具，非 MCP——内核常驻，详见 tools/desktop.py）
         # plan-20261019-desktop-precision：去掉 OCR 文字定位与命中测试，新增批量动作
         *ALL_DESKTOP_TOOLS,
-        # plan-156-619 S10：后续任务建议卡（消息流底部）
-        SuggestNextTaskTool,
     ):
         reg.register(tool_cls())
     return reg

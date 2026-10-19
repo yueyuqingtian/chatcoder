@@ -246,8 +246,8 @@ namespace DesktopCore
         /// 注意：TreeWalker 返回的元素**不支持 Cached**（会抛异常，表现为永远 0 个元素），
         /// 必须读 `.Current`。
         /// </summary>
-        public static string Snapshot(IntPtr root, int budget, bool interactiveOnly, int depthLimit,
-                                      int timeBudgetMs)
+        public static string SnapshotWalk(IntPtr root, int budget, bool interactiveOnly, int depthLimit,
+                                          int timeBudgetMs)
         {
             if (budget <= 0) budget = 200;
             // 网页/Electron 的 UIA 树可达数十层；不设上限等于放开整棵树遍历。
@@ -351,7 +351,332 @@ namespace DesktopCore
             }
 
             return "{\"nodes\":" + n + ",\"items\":[" + sb + "],\"visited\":" + visited
-                 + ",\"truncated\":" + (truncated ? "true" : "false") + "}";
+                 + ",\"truncated\":" + (truncated ? "true" : "false") + ",\"path\":\"walk\"}";
+        }
+
+        // ── 快速快照（plan-20261019-desktop-targeting）────────────────────────────
+        //
+        // 为什么重写：旧实现用 TreeWalker 逐节点读 .Current，Chrome 上每节点 1–4 ms，而且只从窗口顶层向下 12 层，
+        // 网页内容（Document 在第 6 层，页面 DOM 又嵌套十几层）基本进不了结果；叠加 Chromium 的 UIA 树是「惰性」的——
+        // 首次访问才开始构建——一次性快照常只看到标题栏按钮（README 与 diag-chrome-uia.ps1 实测的现象），
+        // 于是浏览器里的网页被判定为「读不到控件」，只能靠模型看图估坐标。
+        //
+        // 本机实测（Chrome，150% 缩放）：
+        //   · 首次访问后约 0.2–0.5 s 网页树就绪，之后一直保持（同一窗口无需再预热）；
+        //   · FindAll(Descendants) 配 CacheRequest 并带 IsOffscreen=false 条件：Chromium 的 provider 在服务端过滤，
+        //     7000 节点的页面只回传屏幕内的 168 个，耗时 125 ms（无条件 FindAll 要 1.3 s，逐节点遍历要 2 s）；
+        //   · UIA 给的矩形就是物理像素，与截图、点击同一坐标系，不需要任何换算。
+        // 因此：Chromium 窗口先预热、再一次性取「屏幕内可见节点」，网页元素与原生控件一样可按编号点击。
+
+        /// <summary>Chromium / CEF / Gecko 窗口类名前缀：命中说明 UIA 网页树是惰性构建的，首次访问后需要预热。</summary>
+        private static readonly string[] ChromiumClassPrefixes = new string[] {
+            "Chrome_WidgetWin_", "CefWebViewWnd", "Chrome_RenderWidgetHostHWND", "MozillaWindowClass" };
+
+        public static bool IsChromiumLike(IntPtr h)
+        {
+            StringBuilder cls = new StringBuilder(256);
+            Native.GetClassNameW(h, cls, 256);
+            string c = cls.ToString();
+            foreach (string p in ChromiumClassPrefixes)
+                if (c.StartsWith(p, StringComparison.Ordinal)) return true;
+            return false;
+        }
+
+        // 已预热窗口：Chromium 的无障碍模式一旦打开会保持到进程结束，同一 hwnd 之后不必再等
+        private static readonly Dictionary<long, long> WarmWindows = new Dictionary<long, long>();
+
+        private static bool IsWarm(IntPtr h)
+        {
+            lock (WarmWindows) { return WarmWindows.ContainsKey(h.ToInt64()); }
+        }
+
+        private static void MarkWarm(IntPtr h)
+        {
+            lock (WarmWindows)
+            {
+                if (WarmWindows.Count > 256) WarmWindows.Clear();
+                WarmWindows[h.ToInt64()] = DateTime.UtcNow.Ticks;
+            }
+        }
+
+        /// <summary>
+        /// 后台触发 Chromium 窗口的网页无障碍树构建（focus 时顺手调用）：等模型真正取元素时树已经就绪，
+        /// 省掉首次读取的等待。只对 Chromium 系窗口、且只触发一次。
+        /// </summary>
+        public static void WarmAsync(IntPtr h)
+        {
+            if (h == IntPtr.Zero || IsWarm(h) || !IsChromiumLike(h)) return;
+            System.Threading.Thread t = new System.Threading.Thread(delegate()
+            {
+                try
+                {
+                    AutomationElement top = AutomationElement.FromHandle(h);
+                    top.FindFirst(TreeScope.Descendants,
+                        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Document));
+                }
+                catch { /* 预热失败不影响后续的正式读取 */ }
+            });
+            t.IsBackground = true;
+            t.SetApartmentState(System.Threading.ApartmentState.MTA);
+            t.Start();
+        }
+
+        /// <summary>一个可见节点的缓存属性快照（读完即与 UIA 解耦）。</summary>
+        private sealed class SnapItem
+        {
+            public int Index;
+            public string Name = "", Id = "", Cls = "", Ct = "";
+            public bool Enabled, Focusable, Interactive;
+            public double L, T, W, H;
+            public bool InDoc;
+        }
+
+        private static bool IsContainerCt(string ct)
+        {
+            switch (ct)
+            {
+                case "Document": case "Window": case "Pane": case "TitleBar": case "ScrollBar": case "ToolBar":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>在工作线程里做一次「屏幕内可见节点」查询；超时返回 null 并置 timedOut。</summary>
+        private static List<SnapItem> FastCollect(IntPtr root, int timeBudgetMs, out bool timedOut)
+        {
+            timedOut = false;
+            List<SnapItem> result = null;
+            System.Threading.Thread t = new System.Threading.Thread(delegate()
+            {
+                try { result = FastCollectCore(root); }
+                catch { result = null; }
+            });
+            t.IsBackground = true;
+            t.SetApartmentState(System.Threading.ApartmentState.MTA);
+            t.Start();
+            if (!t.Join(Math.Max(100, timeBudgetMs)))
+            {
+                // COM 调用无法取消：线程留在后台自行结束，本次放弃
+                timedOut = true;
+                return null;
+            }
+            return result;
+        }
+
+        private static List<SnapItem> FastCollectCore(IntPtr root)
+        {
+            AutomationElement top = AutomationElement.FromHandle(root);
+            if (top == null) return new List<SnapItem>();
+
+            CacheRequest cr = new CacheRequest();
+            cr.Add(AutomationElement.NameProperty);
+            cr.Add(AutomationElement.AutomationIdProperty);
+            cr.Add(AutomationElement.ClassNameProperty);
+            cr.Add(AutomationElement.ControlTypeProperty);
+            cr.Add(AutomationElement.IsEnabledProperty);
+            cr.Add(AutomationElement.IsKeyboardFocusableProperty);
+            cr.Add(AutomationElement.BoundingRectangleProperty);
+            cr.TreeScope = TreeScope.Element;
+            // 只要缓存值、不要活的元素引用：节点多时明显更省
+            cr.AutomationElementMode = AutomationElementMode.None;
+
+            Condition onScreen = new PropertyCondition(AutomationElement.IsOffscreenProperty, false);
+            List<SnapItem> list = new List<SnapItem>();
+            using (cr.Activate())
+            {
+                AutomationElementCollection col = top.FindAll(TreeScope.Descendants, onScreen);
+                for (int i = 0; i < col.Count; i++)
+                {
+                    try
+                    {
+                        AutomationElement e = col[i];
+                        System.Windows.Rect r = e.Cached.BoundingRectangle;
+                        if (r.IsEmpty || double.IsInfinity(r.Width) || double.IsInfinity(r.Height)) continue;
+                        SnapItem s = new SnapItem();
+                        s.Index = i;
+                        s.Name = (e.Cached.Name ?? "").Trim();
+                        s.Id = e.Cached.AutomationId ?? "";
+                        s.Cls = e.Cached.ClassName ?? "";
+                        s.Ct = CtName(e.Cached.ControlType);
+                        s.Enabled = e.Cached.IsEnabled;
+                        s.Focusable = e.Cached.IsKeyboardFocusable;
+                        s.L = r.Left; s.T = r.Top; s.W = r.Width; s.H = r.Height;
+                        s.Interactive = IsInteractiveCt(s.Ct) || (s.Focusable && !IsContainerCt(s.Ct));
+                        list.Add(s);
+                    }
+                    catch { /* 单个节点读取失败（元素已消失）直接跳过 */ }
+                }
+            }
+            return list;
+        }
+
+        /// <summary>找出页面 Document（取面积最大的一个）；没有返回 null。</summary>
+        private static SnapItem FindDocument(List<SnapItem> items)
+        {
+            SnapItem best = null;
+            foreach (SnapItem s in items)
+            {
+                if (s.Ct != "Document" || s.W <= 0 || s.H <= 0) continue;
+                if (best == null || s.W * s.H > best.W * best.H) best = s;
+            }
+            return best;
+        }
+
+        private static bool CenterInside(SnapItem s, SnapItem doc)
+        {
+            double cx = s.L + s.W / 2, cy = s.T + s.H / 2;
+            return cx >= doc.L && cx <= doc.L + doc.W && cy >= doc.T && cy <= doc.T + doc.H;
+        }
+
+        /// <summary>
+        /// 快照入口：Chromium 窗口先预热（最多 warmupMs），再一次性取屏幕内可见节点；
+        /// 查询失败或超时时回退到 TreeWalker 逐层遍历（旧实现），保证最差情况不劣于改动前。
+        /// </summary>
+        public static string Snapshot(IntPtr root, int budget, bool interactiveOnly, int depthLimit,
+                                      int timeBudgetMs, int warmupMs)
+        {
+            if (budget <= 0) budget = 200;
+            if (timeBudgetMs <= 0) timeBudgetMs = DefaultTimeBudgetMs;
+            bool chromium = IsChromiumLike(root);
+            bool needWarm = chromium && warmupMs > 0 && !IsWarm(root);
+
+            System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+            List<SnapItem> items = null;
+            bool timedOut = false;
+            bool warmed = false;
+            SnapItem doc = null;
+            while (true)
+            {
+                items = FastCollect(root, timeBudgetMs, out timedOut);
+                if (items == null) break;
+                doc = FindDocument(items);
+                if (!needWarm) break;
+                // 网页树就绪的判据：Document 在屏幕上，且它的范围内已经有节点
+                int inside = 0;
+                if (doc != null)
+                    foreach (SnapItem s in items)
+                        if (s != doc && CenterInside(s, doc)) { inside++; if (inside > 0) break; }
+                if (doc != null && inside > 0) { warmed = true; MarkWarm(root); break; }
+                if (sw.ElapsedMilliseconds >= warmupMs)
+                {
+                    // 超时也记下：空白页 / 无网页内容的窗口不必每次都等满
+                    MarkWarm(root);
+                    break;
+                }
+                // 连 Document 都没出现：多半是应用关闭了渲染进程的无障碍（如部分 Electron 套壳），
+                // 实测 0.9 s 内不出现就不会出现——不必为它等满预热上限
+                if (doc == null && sw.ElapsedMilliseconds >= Math.Min(warmupMs, 900))
+                {
+                    MarkWarm(root);
+                    break;
+                }
+                System.Threading.Thread.Sleep(120);
+            }
+
+            if (items == null)
+            {
+                // 回退：老办法（有时间预算，最差也只多花一个预算）
+                string walked = SnapshotWalk(root, budget, interactiveOnly, depthLimit,
+                                             Math.Max(300, timeBudgetMs / 2));
+                int cut = walked.LastIndexOf('}');
+                return (cut > 0 ? walked.Substring(0, cut) : walked)
+                     + ",\"chromium\":" + (chromium ? "true" : "false")
+                     + ",\"fallback\":\"" + (timedOut ? "timeout" : "error") + "\"}";
+            }
+
+            // 筛选：有矩形；有名称或可交互；容器类（Document/Pane/Window…）本身不列
+            List<SnapItem> keep = new List<SnapItem>();
+            foreach (SnapItem s in items)
+            {
+                if (s.W < 1 || s.H < 1) continue;
+                if (IsContainerCt(s.Ct)) continue;
+                if (s.Name.Length == 0 && !s.Interactive) continue;
+                if (interactiveOnly && !s.Interactive) continue;
+                if (doc != null) s.InDoc = CenterInside(s, doc);
+                keep.Add(s);
+            }
+            int total = keep.Count;
+            bool truncated = false;
+            if (keep.Count > budget)
+            {
+                // 超预算时优先保留可交互元素，其余用有名称的文字补满，输出仍按原树序
+                truncated = true;
+                List<SnapItem> chosen = new List<SnapItem>();
+                foreach (SnapItem s in keep) if (s.Interactive && chosen.Count < budget) chosen.Add(s);
+                foreach (SnapItem s in keep) if (!s.Interactive && chosen.Count < budget) chosen.Add(s);
+                chosen.Sort(delegate(SnapItem a, SnapItem b) { return a.Index.CompareTo(b.Index); });
+                keep = chosen;
+            }
+
+            StringBuilder sb = new StringBuilder(16384);
+            for (int i = 0; i < keep.Count; i++)
+            {
+                SnapItem s = keep[i];
+                if (i > 0) sb.Append(',');
+                sb.Append("{\"n\":\"").Append(Js.Esc(s.Name))
+                  .Append("\",\"id\":\"").Append(Js.Esc(s.Id))
+                  .Append("\",\"ct\":\"").Append(Js.Esc(s.Ct))
+                  .Append("\",\"cls\":\"").Append(Js.Esc(s.Cls))
+                  .Append("\",\"en\":").Append(s.Enabled ? "true" : "false")
+                  .Append(",\"ix\":").Append(s.Interactive ? "true" : "false")
+                  .Append(",\"d\":").Append(s.InDoc ? "1" : "0")
+                  .Append(",\"x\":").Append((int)(s.L + s.W / 2))
+                  .Append(",\"y\":").Append((int)(s.T + s.H / 2))
+                  .Append(",\"r\":[").Append((int)s.L).Append(',').Append((int)s.T)
+                  .Append(',').Append((int)s.W).Append(',').Append((int)s.H).Append("]}");
+            }
+            string docJson = doc == null ? "null"
+                : "[" + (int)doc.L + "," + (int)doc.T + "," + (int)doc.W + "," + (int)doc.H + "]";
+            return "{\"nodes\":" + keep.Count + ",\"items\":[" + sb + "],\"visited\":" + items.Count
+                 + ",\"total\":" + total
+                 + ",\"truncated\":" + (truncated ? "true" : "false")
+                 + ",\"path\":\"findall\",\"chromium\":" + (chromium ? "true" : "false")
+                 + ",\"warmed\":" + (warmed ? "true" : "false")
+                 + ",\"warmMs\":" + sw.ElapsedMilliseconds
+                 + ",\"doc\":" + docJson + "}";
+        }
+
+        /// <summary>
+        /// 点击点下的元素简述（点击前取，约 4 ms）：返回 {n,id,ct,cls,ix,r} 的 JSON 对象文本；
+        /// 取不到或超时返回 null。放到工作线程里并设上限——对话框卡死的应用上 UIA 调用可能阻塞很久，
+        /// 不能让它拖住整个内核。
+        /// </summary>
+        public static string HitBrief(int x, int y, int timeoutMs)
+        {
+            string res = null;
+            System.Threading.Thread t = new System.Threading.Thread(delegate()
+            {
+                try
+                {
+                    AutomationElement e = AutomationElement.FromPoint(new System.Windows.Point(x, y));
+                    if (e == null) return;
+                    string name = e.Current.Name ?? "";
+                    string id = e.Current.AutomationId ?? "";
+                    string cls = e.Current.ClassName ?? "";
+                    string ct = CtName(e.Current.ControlType);
+                    bool focusable = e.Current.IsKeyboardFocusable;
+                    System.Windows.Rect r = e.Current.BoundingRectangle;
+                    bool ix = IsInteractiveCt(ct) || (focusable && !IsContainerCt(ct));
+                    StringBuilder sb = new StringBuilder(256);
+                    sb.Append("{\"n\":\"").Append(Js.Esc(name.Length > 80 ? name.Substring(0, 80) : name))
+                      .Append("\",\"id\":\"").Append(Js.Esc(id))
+                      .Append("\",\"ct\":\"").Append(Js.Esc(ct))
+                      .Append("\",\"cls\":\"").Append(Js.Esc(cls))
+                      .Append("\",\"ix\":").Append(ix ? "true" : "false");
+                    if (!r.IsEmpty && !double.IsInfinity(r.Width))
+                        sb.Append(",\"r\":[").Append((int)r.Left).Append(',').Append((int)r.Top)
+                          .Append(',').Append((int)r.Width).Append(',').Append((int)r.Height).Append(']');
+                    sb.Append('}');
+                    res = sb.ToString();
+                }
+                catch { res = null; }
+            });
+            t.IsBackground = true;
+            t.SetApartmentState(System.Threading.ApartmentState.MTA);
+            t.Start();
+            if (!t.Join(Math.Max(50, timeoutMs))) return null;
+            return res;
         }
 
         private static bool IsInteractiveCt(string ct)

@@ -375,6 +375,8 @@ def _persist_batch(batch: list[WriteItem], s) -> list[dict]:
                 binary=bool(p.get("binary")),
                 # plan-20261019-diff: 超限文本的展示窗口随记录一起落库
                 diff_before=p.get("diff_before"), diff_after=p.get("diff_after"),
+                # plan-20261019-toolcard-v2：操作类型与写后指纹（撤销 / 回滚的严格校验依据）
+                op=p.get("op"), after_hash=p.get("after_hash"),
             ))
         elif kind == "rollback_ckpt":
             # checkpoint 登记：查 turn 快照并追加 file_list/new_files（同 turn 同文件去重）。

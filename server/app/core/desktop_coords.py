@@ -3,10 +3,15 @@
 **一个坐标系**：模型给出的所有坐标都取自「最近一次截图」，换算回屏幕物理像素全部由这里完成，
 模型不接触屏幕坐标（此前截图结果里同时出现图片坐标与屏幕坐标，两套口径混用是点错的来源之一）。
 
-**口径跟随模型**：同类产品的做法一致——Anthropic / OpenAI 的 computer use 让模型报截图像素；
-Gemini Computer Use、字节 Midscene.js 的模型适配层则表明 DeepSeek、Qwen3、GLM、豆包 / UI-TARS、
-Gemini 等原生使用 0–1000 归一化坐标（Midscene 默认即 0–1000，只有 GPT 与 Qwen2.5-VL 用像素，
-Kimi 用 0–1 小数）。强迫原生 0–1000 的模型报像素，等于让它心算换算。
+**口径跟随模型**：Anthropic / OpenAI 的 computer use 让模型报截图像素；Gemini、Qwen3-VL、GLM-V、
+豆包 / UI-TARS 等**训练时就用 0–1000 归一化坐标做界面定位**（Midscene.js 的模型适配层同此结论，
+Kimi 用 0–1 小数）。强迫它们报像素，等于让模型心算换算。
+
+**但「没有原生口径」的模型一律用图上像素**（plan-20261019-desktop-targeting 的修正）：此前把 DeepSeek 与
+所有未知模型都划给 0–1000，实录里 deepseek-flash 在「图上像素」口径下点得很准（图 1210×768 上点
+(1030,419) 命中用户名输入框），换成 0–1000 后要心算换算，x 轴换了、y 轴没换，(770,336) 落在标题文字上，
+接着 20 多次点击都落空，它还一直以为点中了——**口径选错比没有口径更糟**。口径按「已知原生 0–1000 的模型族」
+白名单判定，其余走像素；个别模型名识别不准时可在「设置 → 电脑操控」里手动指定。
 
 **容差**（模型偶尔不按口径给值时，能判断的就按其真实意图换算，并在结果里说明）：
 - 任何口径下 x、y 都在 0~1 且带小数 → 按比例理解（Kimi 等的 0–1 习惯）；
@@ -23,13 +28,26 @@ PIXEL = "pixel"
 NORM1000 = "norm1000"
 MODES = (PIXEL, NORM1000)
 
-# 原生按截图像素报坐标的模型族：Anthropic、OpenAI（含 o 系列与 computer-use 专用模型）、Qwen2.5-VL。
-# 其余（含未知模型）走 0–1000，与 Midscene 默认口径一致。
+# 明确按截图像素报坐标的模型族：Anthropic、OpenAI（含 o 系列与 computer-use 专用模型）、Qwen2.5-VL。
+# 它们优先于下面的 0–1000 名单（名字里同时带两类词时以像素为准）。
 _PIXEL_RE = re.compile(
     r"claude|anthropic|opus|sonnet|haiku|fable"
     r"|gpt|openai|chatgpt|codex|computer-use"
     r"|(?:^|[^a-z0-9])o[134](?:$|[^a-z0-9])"
     r"|qwen2(?:\.5)?-?vl"
+)
+
+# 训练时就用 0–1000 归一化坐标做界面定位的模型族（白名单）：
+# Gemini 系、Qwen3 起（Qwen3-VL 改用 0–1000 相对坐标）、GLM（V 系列框坐标 0–999）、
+# 字节豆包 / Seed / UI-TARS、Kimi（Midscene 适配层归入此类，0–1 小数另有容错）。
+# 不在名单里的一律走像素：DeepSeek、MiniMax、Llama、Mistral 以及无法识别的名字。
+_NORM_RE = re.compile(
+    r"gemini|gemma"
+    r"|qwen[-_ ]?3|qvq"
+    r"|glm|autoglm|cogagent"
+    r"|doubao|seed[-_ ]?\d|ui-?tars"
+    r"|kimi|moonshot"
+    r"|internvl|intern[-_ ]?vl"
 )
 
 # 模型实际看到的图片上限：多数视觉模型服务端会把超限的图再缩小（Anthropic 长边约 1568、
@@ -41,14 +59,21 @@ MODEL_MAX_PIXELS = 1_150_000
 
 
 def coord_mode_for(model_name: str | None, override: str | None = "auto") -> str:
-    """按模型名选择坐标口径；override 为 pixel / norm1000 时直接采用（隐藏配置 desktop_coord_mode）。"""
+    """按模型名选择坐标口径；override 为 pixel / norm1000 时直接采用（设置 desktop_coord_mode）。
+
+    默认像素：只有明确属于「原生 0–1000」名单的模型族才用比例口径（理由见模块说明）。
+    """
     forced = str(override or "").strip().lower()
     if forced in MODES:
         return forced
     name = str(model_name or "").strip().lower()
-    if name and _PIXEL_RE.search(name):
+    if not name:
         return PIXEL
-    return NORM1000
+    if _PIXEL_RE.search(name):
+        return PIXEL
+    if _NORM_RE.search(name):
+        return NORM1000
+    return PIXEL
 
 
 def model_safe_max_dim(src_w: int, src_h: int, requested: int = 0) -> int:
@@ -157,10 +182,24 @@ def parse_region(meta: dict[str, Any], raw: Any, mode: str) -> tuple[int, int, i
     return left, top, max(1, right - left), max(1, bottom - top)
 
 
+def to_image_px(meta: dict[str, Any], sx: float, sy: float) -> tuple[int, int]:
+    """屏幕物理像素 → 图上像素（回显用：让模型看到它给的比例坐标落在图上的哪个像素）。"""
+    src_w = float(meta.get("srcW") or 0) or 1.0
+    src_h = float(meta.get("srcH") or 0) or 1.0
+    return (int(round((float(sx) - int(meta.get("srcX") or 0)) * float(meta.get("width") or 0) / src_w)),
+            int(round((float(sy) - int(meta.get("srcY") or 0)) * float(meta.get("height") or 0) / src_h)))
+
+
 def convention_line(mode: str, width: int, height: int) -> str:
-    """截图结果里的「坐标口径」行：模型据此给坐标。"""
+    """截图结果里的「坐标口径」行：模型据此给坐标。
+
+    写明图中心的数值作为锚点：模型能当场核对「我理解的坐标系」与工具一致（实录里有模型 x 轴按 0–1000、
+    y 轴却按像素给值，两个轴口径不一致）。
+    """
     if mode == PIXEL:
-        return (f"坐标口径：图上像素——x/y 填你在这张图上量到的位置（图宽 {width}、高 {height}，"
-                "左上角为 0,0）。换算由工具完成，不要自己换算成屏幕坐标。")
-    return ("坐标口径：0–1000 比例——x/y 填目标在这张图中的相对位置（左上角 0,0、右下角 1000,1000，"
-            "与图片像素尺寸无关）。换算由工具完成。")
+        return (f"坐标口径：图上像素——x/y 直接填目标在这张图上的像素位置（图宽 {width}、高 {height}，"
+                f"左上角 0,0，图中心约 ({width // 2},{height // 2})），不要换算成比例。"
+                "换算成屏幕坐标由工具完成。")
+    return ("坐标口径：0–1000 比例——x 与 y **都**按目标在图中的相对位置给 0–1000"
+            "（左上角 0,0、右下角 1000,1000、图中心 500,500，与图片像素尺寸无关；"
+            "x = 横向位置÷图宽×1000，y = 纵向位置÷图高×1000）。换算成屏幕坐标由工具完成。")

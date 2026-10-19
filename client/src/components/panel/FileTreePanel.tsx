@@ -415,12 +415,45 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
     virtualizer.scrollToIndex(i, { align: "auto" });
   }, [indexByPath, virtualizer]);
 
-  const toggleDir = (path: string) => setOpenPaths((prev) => {
-    const next = new Set(prev);
-    if (next.has(path)) next.delete(path);
-    else next.add(path);
-    return next;
-  });
+  /** plan-20261019-motion-sweep：目录展开 / 收起的过渡窗口。
+   *  虚拟列表的行是绝对定位 + transform，展开时下方的行整体位移、新露出的行凭空出现——此前全是瞬切。
+   *  这里只在「用户点开 / 收起目录」的这一小段时间里：① 给行的位移挂过渡（.is-toggling）；
+   *  ② 给新露出的后代行入场动画（revealDirPath 标出是哪个目录刚被展开）。
+   *  过滤输入、滚动、窗口缩放引起的行位置变化不在窗口内，不会有拖泥带水的滑动。 */
+  const [toggling, setToggling] = useState(false);
+  const [revealDirPath, setRevealDirPath] = useState<string | null>(null);
+  const toggleTimer = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (toggleTimer.current != null) window.clearTimeout(toggleTimer.current);
+  }, []);
+  const toggleDir = (path: string) => {
+    const opening = !openPaths.has(path);
+    setOpenPaths((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+    setToggling(true);
+    setRevealDirPath(opening ? path : null);
+    if (toggleTimer.current != null) window.clearTimeout(toggleTimer.current);
+    // 200ms 位移 + 最多 12 行 × 16ms 的错峰，留出余量再复位
+    toggleTimer.current = window.setTimeout(() => {
+      toggleTimer.current = null;
+      setToggling(false);
+      setRevealDirPath(null);
+    }, 480);
+  };
+  /** 刚被展开的目录的后代行在 rows 里的下标区间（含端点）；没有进行中的展开则为 null */
+  const revealRange = useMemo(() => {
+    if (revealDirPath == null) return null;
+    const di = indexByPath.get(revealDirPath);
+    if (di == null) return null;
+    const base = rows[di].depth;
+    let end = di;
+    while (end + 1 < rows.length && rows[end + 1].depth > base) end += 1;
+    return end > di ? ([di + 1, end] as const) : null;
+  }, [revealDirPath, rows, indexByPath]);
 
   const activate = (row: FlatRow) => {
     setCursor(row.node.path);
@@ -525,12 +558,13 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
               <button type="button" className="ft-filter-clear" aria-label="清除过滤" onClick={() => setFilter("")}><IconX size={11} /></button>
             )}
           </label>
-          <div className="ft-tree" ref={treeRef} role="tree" tabIndex={0} aria-label="项目文件" onKeyDown={onTreeKeyDown}>
+          <div className={"ft-tree" + (toggling ? " is-toggling" : "")} ref={treeRef} role="tree" tabIndex={0} aria-label="项目文件" onKeyDown={onTreeKeyDown}>
             <div className="ft-tree-inner" style={{ height: virtualizer.getTotalSize() }}>
               {virtualizer.getVirtualItems().map((v) => {
                 const r = rows[v.index];
                 const n = r.node;
                 const isDir = n.type === "dir";
+                const entering = revealRange != null && v.index >= revealRange[0] && v.index <= revealRange[1];
                 return (
                   <div
                     key={n.path}
@@ -538,8 +572,14 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
                     aria-level={r.depth + 1}
                     aria-expanded={isDir ? r.open : undefined}
                     aria-selected={!isDir && pathKey(n.path) === previewKey}
-                    className={"ft-row" + (isDir ? "" : " ft-file") + (!isDir && pathKey(n.path) === previewKey ? " active" : "") + (n.path === cursor ? " is-cursor" : "")}
-                    style={{ height: ROW_H, transform: `translateY(${v.start}px)`, paddingLeft: 6 + r.depth * 14 }}
+                    className={"ft-row" + (isDir ? "" : " ft-file") + (!isDir && pathKey(n.path) === previewKey ? " active" : "") + (n.path === cursor ? " is-cursor" : "") + (entering ? " is-entering" : "")}
+                    style={{
+                      height: ROW_H,
+                      transform: `translateY(${v.start}px)`,
+                      paddingLeft: 6 + r.depth * 14,
+                      // 入场错峰：越靠下的行越晚出现，最多错开 12 档
+                      ...(entering ? { ["--i" as string]: Math.min(v.index - revealRange[0], 12) } : null),
+                    }}
                     onClick={() => activate(r)}
                   >
                     <span className="ft-chev">{isDir && <IconArrowToggle open={r.open} size={11} />}</span>

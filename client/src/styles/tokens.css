@@ -71,7 +71,9 @@
   --color-background-win-alt: var(--color-neutral-200);
   --color-sidebar: #ECECEF;
   --color-header: var(--color-neutral-100);
-  --color-panel: var(--color-neutral-50);
+  /* plan-20261019-toolcard-v2：舞台底色（消息流 / 标题栏 / 右侧面板，及一切以 --bg-panel 为「页面底」的派生混色）。
+     浅色固定 #F8F8F8，且不再随主题世界染色（themes.css 不再覆盖本令牌）；深色见下方 neutral-900。 */
+  --color-panel: #f8f8f8;
   --color-card: var(--color-white);
   --color-card-selected: var(--color-neutral-200);
   --color-card-border: var(--color-border);

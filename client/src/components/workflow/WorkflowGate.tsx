@@ -7,7 +7,7 @@ import { useState } from "react";
 import type { WorkflowProgramOut } from "../../api/client";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { useWorkflowStore, type GateDecision } from "../../store/workflow";
-import { Badge, Button, Tooltip } from "../ui";
+import { Badge, Button, Collapse, Tooltip } from "../ui";
 import { flowTitleOf, gateOf } from "./workflowModel";
 
 interface IssueItem {
@@ -93,23 +93,31 @@ export function IssueList({ issues, limit }: { issues: IssueItem[]; limit: numbe
   const sorted = [...issues].sort(
     (a, b) => (SEVERITY_RANK[a.severity ?? "minor"] ?? 3) - (SEVERITY_RANK[b.severity ?? "minor"] ?? 3),
   );
-  const shown = all ? sorted : sorted.slice(0, limit);
+  // plan-20261019-motion-sweep：超出 limit 的问题放进独立的折叠容器，「展开全部」是高度过渡而不是整段弹出
+  const headIssues = sorted.slice(0, limit);
+  const restIssues = sorted.slice(limit);
+  const renderIssue = (item: IssueItem, i: number) => (
+    <li key={i} className="wf-issue">
+      <span className="wf-issue-sev" data-sev={item.severity ?? "minor"}>
+        {SEVERITY_LABEL[item.severity ?? "minor"] ?? "问题"}
+      </span>
+      <span className="wf-issue-body">
+        <span className="wf-issue-text">{item.problem}</span>
+        {item.file && <span className="wf-issue-loc">{item.file}{item.line ? `:${item.line}` : ""}</span>}
+        {item.fix_hint && <span className="wf-issue-fix">建议：{item.fix_hint}</span>}
+      </span>
+    </li>
+  );
   return (
     <div className="wf-issues-wrap">
-      <ul className="wf-issues" aria-label="评估问题">
-        {shown.map((item, i) => (
-          <li key={i} className="wf-issue">
-            <span className="wf-issue-sev" data-sev={item.severity ?? "minor"}>
-              {SEVERITY_LABEL[item.severity ?? "minor"] ?? "问题"}
-            </span>
-            <span className="wf-issue-body">
-              <span className="wf-issue-text">{item.problem}</span>
-              {item.file && <span className="wf-issue-loc">{item.file}{item.line ? `:${item.line}` : ""}</span>}
-              {item.fix_hint && <span className="wf-issue-fix">建议：{item.fix_hint}</span>}
-            </span>
-          </li>
-        ))}
-      </ul>
+      <div>
+        <ul className="wf-issues" aria-label="评估问题">{headIssues.map(renderIssue)}</ul>
+        {restIssues.length > 0 && (
+          <Collapse open={all} lazy>
+            {() => <ul className="wf-issues wf-issues-rest">{restIssues.map((item, i) => renderIssue(item, i + limit))}</ul>}
+          </Collapse>
+        )}
+      </div>
       {issues.length > limit && (
         <button type="button" className="wf-issues-more" aria-expanded={all} onClick={() => setAll((v) => !v)}>
           {all ? "收起" : `展开全部 ${issues.length} 条`}

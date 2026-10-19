@@ -16,7 +16,7 @@ import { useChatStore } from "../../store/chat";
 import { PluginSlot } from "../../plugins/registry";
 import { parseUtc } from "../../utils/time";
 import { IconCheck, IconChevronDown, IconCpu, IconSpinner, IconX } from "../icons";
-import { Button, Empty, Tooltip } from "../ui";
+import { Button, Collapse, Empty, Tooltip, usePresence } from "../ui";
 import { IconSendStop } from "../iconkit/MorphIcons";
 import type { WorkflowNodeBrief } from "../../api/client";
 
@@ -51,6 +51,9 @@ function WorkflowNodeHead({ wf }: { wf: WorkflowNodeBrief }) {
   const hasDetail = !!summary || plan.length > 0 || verification.length > 0 || issues.length > 0 || canHistory;
   const attemptNo = Math.max(1, wf.attempt_no);
   const headRef = useRef<HTMLDivElement>(null);
+  // plan-20261019-motion-sweep：详情是悬浮层，进出场走 usePresence + mo-pop（与 ui/Popover 同一套弹簧入场、加速退场），
+  // 此前是条件渲染，点开瞬间出现、点外部瞬间消失。
+  const detailPresence = usePresence(detailOpen && hasDetail);
 
   // 详情是浮层：展开时不挤压下方消息流，点击外部或按 Esc 收起（与其它浮层一致）
   useEffect(() => {
@@ -102,8 +105,8 @@ function WorkflowNodeHead({ wf }: { wf: WorkflowNodeBrief }) {
           </Button>
         )}
       </div>
-      {detailOpen && hasDetail && (
-        <div className="subagent-wf-detail" id={`wf-detail-${wf.node_id}`}>
+      {detailPresence.mounted && (
+        <div className="subagent-wf-detail mo-pop" data-state={detailPresence.state} id={`wf-detail-${wf.node_id}`}>
           {summary && <p className="subagent-wf-brief">{summary}</p>}
           {(wf.mode || wf.rework_round > 0) && (
             <p className="subagent-wf-meta">
@@ -139,7 +142,7 @@ function WorkflowNodeHead({ wf }: { wf: WorkflowNodeBrief }) {
               >
                 {historyOpen ? "收起尝试记录" : `尝试记录 · ${attemptNo} 次`}
               </Button>
-              {historyOpen && <AttemptHistory attempts={attempts} />}
+              <Collapse open={historyOpen} lazy className="in-gap">{() => <AttemptHistory attempts={attempts} />}</Collapse>
             </div>
           )}
         </div>

@@ -1469,6 +1469,11 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         # v45: 失败原因必须对用户可见——agent_loop 的 out.error / 已有摘要择一，兜底通用文案。
         _fail_reason = ((out.error or "").strip() or summary.strip()
                         or "任务执行失败，未返回具体原因")[:500]
+        # plan-20261019-toolcard-v2：收尾对账——补记命令里解析不到的删除 / 改写（脚本里 os.remove、
+        # 构建清理产物等），让变更清单与撤销看到本轮的真实结果；必须在广播 turn.completed 之前完成，
+        # 前端收到事件会立刻重拉变更清单。
+        await rollback_service.reconcile_turn_writes(
+            db, session_id=session_id, turn_id=turn_id, workspace=workspace)
         await turn_service.update_turn_status(
             db, turn_id, final_status,
             summary=(summary[:500] or _fail_reason) if final_status != "interrupted" else (summary[:500] or "用户中断"),
@@ -2299,6 +2304,9 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         # v45: 失败原因必须可见（与主路径同口径）
         _fail_reason2 = ((out.error or "").strip() or summary.strip()
                          or "任务执行失败，未返回具体原因")[:500]
+        # plan-20261019-toolcard-v2：收尾对账（同主路径）
+        await rollback_service.reconcile_turn_writes(
+            db, session_id=_session_id, turn_id=turn_id, workspace=workspace)
         await turn_service.update_turn_status(
             db, turn_id, final_status,
             summary=(summary[:500] or _fail_reason2) if final_status != "interrupted" else (summary[:500] or "用户中断"),

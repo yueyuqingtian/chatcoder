@@ -957,6 +957,45 @@ export function IconGitBranch({ size = 18, color = "currentColor", strokeWidth =
   );
 }
 
+/** 文件差异（带 ± 的文档）：工具卡 Git 栏「更改」。24 网格整数坐标，描边 2 单位。 */
+export function IconFileDiff({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "file-diff")}>
+      <path className="ic-fill" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6z" />
+      <path d="M14 2v4a2 2 0 0 0 2 2h4" />
+      <path className="ic-pop" d="M12 11v4M10 13h4" />
+      <path d="M10 18h4" />
+    </svg>
+  );
+}
+
+/** Git 提交（线上一个圆点）：工具卡 Git 栏「提交或推送」 */
+export function IconGitCommit({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "git-commit")}>
+      <circle className="ic-fill" cx="12" cy="12" r="3" />
+      <path d="M3 12h6M15 12h6" />
+      <circle className="ic-pop" cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+/** Git 图谱（主干两端节点 + 一条旁支）：分支弹窗里的「Git 图谱」入口 */
+export function IconGitGraph({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "git-graph")}>
+      <circle className="ic-fill" cx="6" cy="5" r="2" />
+      <circle className="ic-fill" cx="6" cy="19" r="2" />
+      <circle className="ic-fill" cx="18" cy="12" r="2" />
+      <path d="M6 7v10M6 12h10" />
+      <circle cx="6" cy="5" r="2" />
+      <circle cx="6" cy="19" r="2" />
+      <circle className="ic-pop" cx="18" cy="12" r="2" />
+    </svg>
+  );
+}
+
 /** 左箭头(返回) */
 export function IconArrowLeft({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (

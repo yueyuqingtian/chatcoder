@@ -84,10 +84,14 @@ class Settings(BaseSettings):
     desktop_screenshot_max_dim: int = 0
     # 操作路线沉淀：命中已有路线时复用「通用原则」，降低模型思考与推理开销
     desktop_recipe_enabled: bool = True
-    # plan-20261019-desktop-precision：坐标口径（auto / pixel / norm1000）。默认按模型族自动选择，
-    # 只读 config.json、不在设置页展示——个别模型名识别不准时手工指定。
+    # plan-20261019-desktop-precision：坐标口径（auto / pixel / norm1000）。默认按模型族自动选择；
+    # plan-20261019-desktop-targeting：改为设置页可见——个别模型名识别不准、或模型对口径不适应（实录里
+    # deepseek-flash 在 0–1000 口径下 x 轴换算了、y 轴没换）时，可在「设置 → 电脑操控」里手动指定。
     # 截图元素编号、点击前校验、破坏性操作词表随 OCR 一并移除（识别结果不可用、链路慢数百毫秒）。
     desktop_coord_mode: str = "auto"
+    # plan-20261019-desktop-targeting：截图 / 动作后自动附带「页面元素」编号清单（来自无障碍树，含网页内容）。
+    # 默认开启；只读 config.json、不在设置页展示——嫌上下文偏长时可手工关闭，关闭后仍可 desktop_snapshot 手动读取。
+    desktop_auto_elements: bool = True
 
     # 验证模式:自动批准副作用工具(fs.write/terminal.exec 等),跳过人工审批门
     # v1.0: 默认关闭，高风险工具始终需要审批
@@ -271,6 +275,10 @@ class Settings(BaseSettings):
     operator_reasoning_effort: str = "lowest"
     # plan-156-619 S7：综合工具卡各栏目的全局默认展开策略（true = 默认全展开）
     tool_card_sections_expanded: bool = True
+    # plan-20261019-toolcard-v2：工具卡默认形态（capsule = 右上角悬浮胶囊 / expanded = 展开卡片）
+    tool_card_default_form: str = "capsule"
+    # 逐栏默认展开（git / plan / process / subagent / workflow）；缺省的栏目回落 tool_card_sections_expanded
+    tool_card_section_defaults: dict[str, bool] = {}
 
     # v2.2: AI 主动生成记忆开关（设置中心「记忆」面板；关闭后 turn 结束不再自动提取记忆）
     auto_memory_enabled: bool = True

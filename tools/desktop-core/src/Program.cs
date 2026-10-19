@@ -28,7 +28,9 @@ namespace DesktopCore
     internal static class Program
     {
         private const string DefaultPipeName = "chatcoder_desktop_core";
-        private const double ServerVersion = 1.0;
+        // 1.1（plan-20261019-desktop-targeting）：DPI 自检与显示器信息、落点读回校正、
+        // Chromium 网页元素读取（预热 + 可见节点快查）、点击前命中元素、按键重复。
+        private const double ServerVersion = 1.1;
 
         private static string _pipeName = DefaultPipeName;
         private static volatile bool _shutdown;
@@ -49,8 +51,19 @@ namespace DesktopCore
             // Declare Per-Monitor-V2 awareness before touching any UI API. Without this,
             // Windows virtualizes coordinates: GetSystemMetrics returns the scaled
             // resolution and clicks land in the wrong place on a 150% display.
+            //
+            // plan-20261019-desktop-targeting：主保障是内嵌的应用清单（进程启动即为 PMv2，见 src/app.manifest），
+            // 这里的 API 调用只是兜底；清单已生效时它会因「已设置」而返回 false，属正常。
+            // 返回值以前被忽略——万一两条路都没成功，进程就停在「未感知」，所有坐标被系统虚拟化而无人知晓。
+            // 现在用 DpiAwarenessName() 读回真实状态：没到 PMv2 就退到 System-Aware 兜底，并写进 ready / info，
+            // 由后端日志与设置页「检测」暴露出来。
             try { Native.SetProcessDpiAwarenessContext(Native.PMv2); }
             catch { /* pre-1703 Windows: continue at the inherited awareness level */ }
+            if (Native.DpiAwarenessName() == "Unaware")
+            {
+                try { Native.SetProcessDPIAware(); }
+                catch { }
+            }
 
             Console.OutputEncoding = new UTF8Encoding(false);
 
@@ -71,6 +84,7 @@ namespace DesktopCore
 
             Console.WriteLine("{\"ready\":true,\"version\":" + ServerVersion.ToString("F1", CultureInfo.InvariantCulture)
                 + ",\"pid\":" + Process.GetCurrentProcess().Id
+                + ",\"dpiAwareness\":\"" + Native.DpiAwarenessName() + "\""
                 + ",\"pipe\":\"" + Js.Esc(_pipeName) + "\""
                 + ",\"screen\":[" + Native.GetSystemMetrics(Native.SM_CXSCREEN) + ","
                 + Native.GetSystemMetrics(Native.SM_CYSCREEN) + "],"
@@ -161,6 +175,8 @@ namespace DesktopCore
                         return "{\"pong\":true}";
                     case "info":
                         return Info();
+                    case "calib":
+                        return Calib(line);
                     case "shutdown":
                         _shutdown = true;
                         return "{\"stopping\":true}";
@@ -229,14 +245,105 @@ namespace DesktopCore
             int vy = Native.GetSystemMetrics(Native.SM_YVIRTUALSCREEN);
             int vw = Native.GetSystemMetrics(Native.SM_CXVIRTUALSCREEN);
             int vh = Native.GetSystemMetrics(Native.SM_CYVIRTUALSCREEN);
+            Native.POINT cur = new Native.POINT();
+            Native.GetCursorPos(out cur);
             return "{\"version\":" + ServerVersion.ToString("F1", CultureInfo.InvariantCulture)
                  + ",\"pid\":" + Process.GetCurrentProcess().Id
                  + ",\"screen\":[" + Native.GetSystemMetrics(Native.SM_CXSCREEN) + ","
                  + Native.GetSystemMetrics(Native.SM_CYSCREEN) + "]"
                  + ",\"virtualScreen\":{\"x\":" + vx + ",\"y\":" + vy + ",\"w\":" + vw + ",\"h\":" + vh + "}"
+                 + ",\"dpiAwareness\":\"" + Native.DpiAwarenessName() + "\""
+                 + ",\"monitors\":" + MonitorsJson()
+                 + ",\"cursor\":[" + cur.X + "," + cur.Y + "]"
                  + ",\"uptime\":"
                  + ((int)(DateTime.UtcNow - Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalSeconds)
                  + "}";
+        }
+
+        /// <summary>
+        /// 每块显示器的物理矩形、有效 DPI 与缩放百分比（96 DPI = 100%）。
+        /// 后端据此在日志与设置页「检测」里写明「当前缩放 150%」，并校验感知级别是否正确。
+        /// </summary>
+        private static string MonitorsJson()
+        {
+            StringBuilder sb = new StringBuilder(256);
+            sb.Append('[');
+            int n = 0;
+            try
+            {
+                Native.EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, delegate(IntPtr hMon, IntPtr hdc, ref Native.RECT rc, IntPtr data)
+                {
+                    Native.MONITORINFOEX mi = new Native.MONITORINFOEX();
+                    mi.cbSize = Marshal.SizeOf(typeof(Native.MONITORINFOEX));
+                    bool primary = false;
+                    if (Native.GetMonitorInfoW(hMon, ref mi)) primary = (mi.dwFlags & 1) != 0;
+                    uint dx = 96, dy = 96;
+                    try { Native.GetDpiForMonitor(hMon, 0, out dx, out dy); }   // MDT_EFFECTIVE_DPI
+                    catch { }
+                    if (dx == 0) dx = 96;
+                    if (n > 0) sb.Append(',');
+                    sb.Append("{\"x\":").Append(rc.Left).Append(",\"y\":").Append(rc.Top)
+                      .Append(",\"w\":").Append(rc.Right - rc.Left).Append(",\"h\":").Append(rc.Bottom - rc.Top)
+                      .Append(",\"dpi\":").Append(dx)
+                      .Append(",\"scale\":").Append((int)Math.Round(dx * 100.0 / 96.0))
+                      .Append(",\"primary\":").Append(primary ? "true" : "false").Append('}');
+                    n++;
+                    return true;
+                }, IntPtr.Zero);
+            }
+            catch { }
+            sb.Append(']');
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// 光标落点自检：依次移到虚拟桌面内几个有代表性的点，读回系统实际位置，报告偏差。
+        /// 既用来验证 SendInput 归一化在当前缩放 / 多显示器配置下是否到位（rawMax），
+        /// 也证明校正之后的最终落点（finalMax）。会让光标短暂跳动，只在用户点「检测」或诊断脚本里调用。
+        /// </summary>
+        private static string Calib(string line)
+        {
+            int vx, vy, vw, vh;
+            Native.VirtualScreen(out vx, out vy, out vw, out vh);
+            int inset = 12;
+            int[] xs = new int[] { vx + inset, vx + vw / 4 + 1, vx + vw / 2 + 3, vx + (vw * 3) / 4 - 2, vx + vw - 1 - inset };
+            int[] ys = new int[] { vy + inset, vy + vh / 3 + 1, vy + vh / 2 + 1, vy + (vh * 2) / 3 - 1, vy + vh - 1 - inset };
+            StringBuilder sb = new StringBuilder(512);
+            int rawMax = 0, finalMax = 0, corrected = 0, disturbed = 0, n = 0;
+            Native.POINT save = new Native.POINT();
+            Native.GetCursorPos(out save);
+            for (int i = 0; i < xs.Length; i++)
+            {
+                int x = xs[i], y = ys[(i * 2) % ys.Length];
+                // 每个点最多试 3 次：用户的真实鼠标在读回的几毫秒里动一下就会让这一次偏差很大，
+                // 属于外部干扰而不是公式问题。取各次里最小的原始偏差代表 SendInput 本身的质量，
+                // 第一次不干净而后面干净的记为 disturbed
+                int bestRaw = int.MaxValue, firstRaw = 0, lastErr = 0, lastX = 0, lastY = 0;
+                bool fixedByCursor = false;
+                for (int attempt = 0; attempt < 3; attempt++)
+                {
+                    Input.MoveTo(x, y);
+                    if (attempt == 0) firstRaw = Input.LastRawErr;
+                    bestRaw = Math.Min(bestRaw, Input.LastRawErr);
+                    lastErr = Input.LastErr; lastX = Input.LastX; lastY = Input.LastY;
+                    if (Input.LastCorrected) fixedByCursor = true;
+                    if (lastErr <= 1) break;
+                    System.Threading.Thread.Sleep(60);
+                }
+                if (firstRaw > 0 && bestRaw == 0) disturbed++;
+                rawMax = Math.Max(rawMax, bestRaw);
+                finalMax = Math.Max(finalMax, lastErr);
+                if (fixedByCursor) corrected++;
+                if (n > 0) sb.Append(',');
+                sb.Append("{\"x\":").Append(x).Append(",\"y\":").Append(y)
+                  .Append(",\"gotX\":").Append(lastX).Append(",\"gotY\":").Append(lastY)
+                  .Append(",\"raw\":").Append(bestRaw).Append('}');
+                n++;
+            }
+            Native.SetCursorPos(save.X, save.Y);   // 还原光标
+            return "{\"points\":[" + sb + "],\"rawMax\":" + rawMax + ",\"finalMax\":" + finalMax
+                 + ",\"corrected\":" + corrected + ",\"disturbed\":" + disturbed
+                 + ",\"dpiAwareness\":\"" + Native.DpiAwarenessName() + "\"}";
         }
 
         // ── sensing ops ──────────────────────────────────────────────────────
@@ -473,7 +580,9 @@ namespace DesktopCore
             bool interactiveOnly = Js.GetBool(line, "interactiveOnly", true);
             int depth = Js.GetInt(line, "depth", 0);
             int timeBudgetMs = Js.GetInt(line, "timeBudgetMs", 0);
-            return Sensing.Snapshot(h, budget, interactiveOnly, depth, timeBudgetMs);
+            // 预热上限：Chromium 窗口首次读取时等网页无障碍树就绪的最长时间；0 = 不等（旧调用方的默认行为）
+            int warmupMs = Js.GetInt(line, "warmupMs", 0);
+            return Sensing.Snapshot(h, budget, interactiveOnly, depth, timeBudgetMs, warmupMs);
         }
 
         private static string Hit(string line)
@@ -635,6 +744,8 @@ namespace DesktopCore
                                        Js.GetStr(line, "title", ""), Js.GetStr(line, "proc", ""));
             if (h == IntPtr.Zero) return "{\"error\":\"未找到目标窗口\"}";
             bool ok = Sensing.Focus(h);
+            // Chromium 窗口：后台提前触发网页无障碍树构建，之后取元素时树已就绪
+            Sensing.WarmAsync(h);
             return "{\"focused\":" + (ok ? "true" : "false")
                  + ",\"handle\":" + h.ToInt64()
                  + ",\"foreground\":" + (Native.GetForegroundWindow() == h ? "true" : "false") + "}";
@@ -671,7 +782,14 @@ namespace DesktopCore
             // 最后按下：悬停效果不会被算成点击引起的变化
             Input.MoveTo(x, y);
             System.Threading.Thread.Sleep(30);
+            // 点击点下的元素（点前取，悬停态已生效）：让调用方能告诉模型「你点到的是什么」，
+            // 点偏时模型立刻看得出来，而不是对着「已点击」三个字继续往下猜
+            string hit = Js.GetBool(line, "verifyHit", true) ? Sensing.HitBrief(x, y, 250) : null;
             Sensing.Sample before = BeginSettle(line, x, y);
+            // 悬停等待与命中测试期间用户可能碰了鼠标：按下前最后一刻再确认并拉回目标点
+            Input.EnsureAt(x, y);
+            int landX = Input.LastX, landY = Input.LastY, landErr = Input.LastErr;
+            bool landFixed = Input.LastCorrected;
             bool ok = Input.Press(Js.GetStr(line, "button", "left"), Js.GetInt(line, "count", 1));
 
             // Optional "click then type then press Enter" in one call: this is the single
@@ -695,13 +813,17 @@ namespace DesktopCore
             if (thenKeys.Length > 0)
             {
                 System.Threading.Thread.Sleep(80);
-                string err = Input.Keys(thenKeys);
+                int thenPressed;
+                string err = Input.KeysSeq(thenKeys, Js.GetInt(line, "repeat", 1), out thenPressed);
                 if (err.Length > 0) extra.Append(",\"keysError\":\"").Append(Js.Esc(err)).Append('"');
             }
             extra.Append(EndSettle(line, before, x, y));
 
             return "{\"clicked\":" + (ok ? "true" : "false")
                  + ",\"at\":[" + x + "," + y + "]"
+                 + ",\"cursor\":[" + landX + "," + landY + "],\"landErr\":" + landErr
+                 + ",\"landFixed\":" + (landFixed ? "true" : "false")
+                 + (hit != null ? ",\"hit\":" + hit : "")
                  + ",\"target\":\"" + Js.Esc(t.Title) + "\""
                  + ",\"targetProc\":\"" + Js.Esc(t.ProcessName) + "\""
                  + ",\"foreground\":" + (t.IsForeground ? "true" : "false")
@@ -740,7 +862,8 @@ namespace DesktopCore
             if (afterKeys.Length > 0)
             {
                 System.Threading.Thread.Sleep(80);
-                keysErr = Input.Keys(afterKeys);
+                int afterPressed;
+                keysErr = Input.KeysSeq(afterKeys, Js.GetInt(line, "repeat", 1), out afterPressed);
             }
 
             return "{\"typed\":" + n + ",\"target\":\"" + Js.Esc(t.Title) + "\""
@@ -764,9 +887,13 @@ namespace DesktopCore
             int lx = Js.GetInt(line, "lx", NoPoint), ly = Js.GetInt(line, "ly", NoPoint);
             if (lx == NoPoint) ly = NoPoint;
             Sensing.Sample before = BeginSettle(line, lx, ly);
-            string err = Input.Keys(Js.GetStr(line, "keys", ""));
+
+            // 空格分隔的多个按键依次发送（"TAB TAB TAB"、"DOWN DOWN ENTER"），repeat 把整串重复若干次：
+            // 模型常这样写，旧实现把整串当成一个未知按键报错，或忽略 repeat 只按一次却报告成功
+            int pressed;
+            string err = Input.KeysSeq(Js.GetStr(line, "keys", ""), Js.GetInt(line, "repeat", 1), out pressed);
             if (err.Length > 0) return "{\"error\":\"" + Js.Esc(err) + "\"}";
-            return "{\"sent\":true,\"target\":\"" + Js.Esc(t.Title) + "\""
+            return "{\"sent\":true,\"pressed\":" + pressed + ",\"target\":\"" + Js.Esc(t.Title) + "\""
                  + ",\"focusedNow\":" + (focusedNow ? "true" : "false")
                  + EndSettle(line, before, lx, ly) + "}";
         }
@@ -800,7 +927,9 @@ namespace DesktopCore
             Sensing.Sample before = BeginSettle(line, x2, y2);
             bool ok = Input.Drag(Js.GetInt(line, "x1", 0), Js.GetInt(line, "y1", 0),
                                  x2, y2, Js.GetInt(line, "duration", 300));
-            return "{\"dragged\":" + (ok ? "true" : "false") + EndSettle(line, before, x2, y2) + "}";
+            return "{\"dragged\":" + (ok ? "true" : "false")
+                 + ",\"cursor\":[" + Input.LastX + "," + Input.LastY + "],\"landErr\":" + Input.LastErr
+                 + EndSettle(line, before, x2, y2) + "}";
         }
 
         /// <summary>移动鼠标（悬停）：悬停才展开的菜单、提示需要它（plan-20261019-desktop-precision）。</summary>
@@ -810,6 +939,7 @@ namespace DesktopCore
             Sensing.Sample before = BeginSettle(line, x, y);
             bool ok = Input.MoveTo(x, y);
             return "{\"moved\":" + (ok ? "true" : "false") + ",\"at\":[" + x + "," + y + "]"
+                 + ",\"cursor\":[" + Input.LastX + "," + Input.LastY + "],\"landErr\":" + Input.LastErr
                  + EndSettle(line, before, x, y) + "}";
         }
 

@@ -18,6 +18,8 @@ export { IconButton } from "./IconButton";
 export { Collapse } from "./Collapse";
 export { Dialog, DialogSection, InsetCard, InsetRow } from "./Dialog";
 export { Popover, type PopoverPlacement } from "./Popover";
+export { Floating, placeFloating, type FloatingSide, type FloatingAlign } from "./Floating";
+export { HoverCard } from "./HoverCard";
 export { usePresence } from "./usePresence";
 export { Badge, type BadgeTone } from "./Badge";
 export { Segmented, type SegmentedOption } from "./Segmented";
