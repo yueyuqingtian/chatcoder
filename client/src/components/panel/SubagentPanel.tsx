@@ -246,6 +246,38 @@ export function SubagentPanel({ threadId, agentName, visible = true }: {
 
   if (threadId == null) return <Empty size="sm" title="未指定子代理" />;
 
+  // plan-20261019-subagent-ghost: 没有元信息、或已结束却没有任何线程消息的条目，
+  // 说明它没有可查看的过程（典型来源：历史版本把主代理完成事件误记成「子代理 #N」）。
+  // 旧实现仍然渲染一个空消息流，用户点开只看到一片空白，分不清是加载失败还是记录不存在。
+  // 只在「消息数为 0」或「没有任何归属锚点且计数尚未回填」时判定为空——
+  // 有 turn/task 归属、计数还没回填的条目先交给消息流的加载态，避免误报。
+  const hasAnchor = meta != null && (meta.turnId != null || meta.taskId != null
+    || meta.programId != null || meta.spawnMessageId != null);
+  const noOutput = !running && liveCount === 0
+    && (meta?.messageCount === 0 || (!hasAnchor && meta?.messageCount == null));
+  if (!meta || noOutput) {
+    return (
+      <div className="subagent-panel">
+        <div className="subagent-panel-top">
+          <div className="subagent-panel-head">
+            <div className="subagent-panel-title">
+              <span className="subagent-panel-icon"><IconCpu size={13} /></span>
+              <span className="subagent-panel-name">{agentName || meta?.name || `子代理 #${threadId}`}</span>
+              <span className="subagent-panel-count">无记录</span>
+            </div>
+          </div>
+        </div>
+        <div className="subagent-panel-body">
+          <Empty
+            size="sm"
+            title="这个子代理没有可查看的过程"
+            desc="它可能已被清理，或不属于当前会话。可以关闭此标签，主会话的执行不受影响。"
+          />
+        </div>
+      </div>
+    );
+  }
+
   const wf = meta?.workflow;
   // 与主代理输入框对齐：补充说明只在节点仍在执行时提供（完成后不再出现输入卡）
   const canNote = !!wf && wf.program_id != null && !!wf.flow_key && (wf.status === "running" || wf.status === "recovering");

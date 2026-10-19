@@ -424,67 +424,195 @@ namespace DesktopCore
             AppendElementBody(sb, e);
         }
 
-        /// <summary>
-        /// 等待一块区域画面稳定（plan-365-1757 A7）。
-        ///
-        /// 为什么需要它：动效/加载中的界面里，「截图时是 A、点击时已经是 B」是稳定的误点来源。
-        /// 固定 sleep 既慢又不可靠——快的时候白等，慢的时候仍然点早。
-        /// 这里改用画面哈希：连续两次抓取的哈希一致即视为稳定，最多等到 timeout。
-        ///
-        /// 抓取时做下采样（长边 480）并落 PNG 再读回哈希：稳定与否只取决于像素是否变化，
-        /// 不需要清晰度，小图能把单次抓取压到几毫秒。
-        /// </summary>
-        public static string WaitStable(int x, int y, int w, int h, int timeoutMs, int settleMs)
-        {
-            if (timeoutMs <= 0) timeoutMs = 3000;
-            if (settleMs <= 0) settleMs = 60;
+        // ── 画面采样与稳定检测（plan-20261019-desktop-precision）──────────────────
+        //
+        // 旧实现（plan-365-1757 A7）按「两次抓图逐字节相同」判稳定：输入框光标闪烁、悬浮窗小动画、
+        // 任务栏时钟都会让它永远判为不稳定，每次等满超时（实测连续 5 次 3 s 超时）。
+        // 改为缩略灰度图 + 容差：变化像素占比低于阈值即视为同一画面，噪声级的局部变化不再阻塞。
 
-            System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
-            string tmp = System.IO.Path.Combine(
-                System.IO.Path.GetTempPath(), "desktop_core_stable.png");
-            long prev = 0;
-            int checks = 0;
-            bool stable = false;
+        /// <summary>区域缩略采样的长边像素：足以分辨界面级变化，单次采样只需几毫秒。</summary>
+        private const int ThumbSide = 480;
+        /// <summary>单个像素灰度差超过此值才算变化：滤掉缩放与抗锯齿带来的轻微抖动。</summary>
+        private const int PixelDelta = 18;
+        /// <summary>相邻两帧变化占比不超过此值视为静止（光标闪烁、悬浮窗小动画都在此之下）。</summary>
+        private const double StillRatio = 0.003;
+        /// <summary>动作前后变化占比超过此值视为画面有变化。</summary>
+        private const double ChangedRatio = 0.003;
+        /// <summary>动作点周边局部块的边长（物理像素）与判定「局部有变化」的最少变化像素数。</summary>
+        private const int LocalSide = 160;
+        private const int LocalMinChanged = 6;
+
+        /// <summary>动作前的画面采样：区域缩略图 + 动作点周边局部块（无动作点时为 null）。</summary>
+        internal sealed class Sample
+        {
+            public byte[] Global;
+            public byte[] Local;
+        }
+
+        /// <summary>把屏幕矩形缩略成灰度数组（长边不超过 maxSide）；失败返回 null。</summary>
+        public static byte[] Thumb(int x, int y, int w, int h, int maxSide)
+        {
+            if (w <= 0 || h <= 0) return null;
+            double sc = Math.Min(1.0, (double)maxSide / Math.Max(w, h));
+            int tw = Math.Max(1, (int)Math.Round(w * sc));
+            int th = Math.Max(1, (int)Math.Round(h * sc));
+
+            IntPtr screen = Native.GetDC(IntPtr.Zero);
+            if (screen == IntPtr.Zero) return null;
+            IntPtr mem = IntPtr.Zero, dib = IntPtr.Zero, old = IntPtr.Zero;
             try
             {
-                while (true)
-                {
-                    long hash = 0;
-                    try
-                    {
-                        Capture(tmp, x, y, w, h, 480, "png", 100);
-                        hash = FileHash(tmp);
-                    }
-                    catch { /* 抓取失败：按未稳定处理，等下一轮或超时 */ }
+                mem = Native.CreateCompatibleDC(screen);
+                Native.BITMAPINFO bmi = new Native.BITMAPINFO();
+                bmi.bmiHeader.biSize = (uint)Marshal.SizeOf(typeof(Native.BITMAPINFOHEADER));
+                bmi.bmiHeader.biWidth = tw;
+                bmi.bmiHeader.biHeight = -th;   // 负高度 = 自上而下的行序
+                bmi.bmiHeader.biPlanes = 1;
+                bmi.bmiHeader.biBitCount = 32;
+                IntPtr bits;
+                dib = Native.CreateDIBSection(mem, ref bmi, 0, out bits, IntPtr.Zero, 0);
+                if (dib == IntPtr.Zero || bits == IntPtr.Zero) return null;
+                old = Native.SelectObject(mem, dib);
+                // HALFTONE 按区域平均缩小，比最近邻稳定得多：同一画面两次采样几乎逐像素一致
+                Native.SetStretchBltMode(mem, Native.HALFTONE);
+                Native.SetBrushOrgEx(mem, 0, 0, IntPtr.Zero);
+                if (!Native.StretchBlt(mem, 0, 0, tw, th, screen, x, y, w, h, Native.SRCCOPY)) return null;
+                Native.GdiFlush();
 
-                    checks++;
-                    if (hash != 0 && hash == prev) { stable = true; break; }
-                    prev = hash;
-                    if (sw.ElapsedMilliseconds >= timeoutMs) break;
-                    System.Threading.Thread.Sleep(settleMs);
+                int[] px = new int[tw * th];
+                Marshal.Copy(bits, px, 0, px.Length);
+                byte[] gray = new byte[px.Length];
+                for (int i = 0; i < px.Length; i++)
+                {
+                    int v = px[i];
+                    int b = v & 0xFF, g = (v >> 8) & 0xFF, r = (v >> 16) & 0xFF;
+                    gray[i] = (byte)((r * 299 + g * 587 + b * 114) / 1000);
                 }
+                return gray;
             }
+            catch { return null; }
             finally
             {
-                try { System.IO.File.Delete(tmp); } catch { }
+                if (old != IntPtr.Zero) Native.SelectObject(mem, old);
+                if (dib != IntPtr.Zero) Native.DeleteObject(dib);
+                if (mem != IntPtr.Zero) Native.DeleteDC(mem);
+                Native.ReleaseDC(IntPtr.Zero, screen);
+            }
+        }
+
+        /// <summary>区域缺省（宽或高 ≤ 0）时取整个虚拟桌面。</summary>
+        private static void NormalizeRegion(ref int x, ref int y, ref int w, ref int h)
+        {
+            if (w > 0 && h > 0) return;
+            x = Native.GetSystemMetrics(Native.SM_XVIRTUALSCREEN);
+            y = Native.GetSystemMetrics(Native.SM_YVIRTUALSCREEN);
+            w = Native.GetSystemMetrics(Native.SM_CXVIRTUALSCREEN);
+            h = Native.GetSystemMetrics(Native.SM_CYVIRTUALSCREEN);
+            if (w <= 0) w = Native.GetSystemMetrics(Native.SM_CXSCREEN);
+            if (h <= 0) h = Native.GetSystemMetrics(Native.SM_CYSCREEN);
+        }
+
+        /// <summary>两份采样的变化像素占比；尺寸不一致或缺失视为完全不同（changed = int.MaxValue）。</summary>
+        private static double ChangeRatio(byte[] a, byte[] b, out int changed)
+        {
+            changed = 0;
+            if (a == null || b == null || a.Length == 0 || a.Length != b.Length)
+            {
+                changed = int.MaxValue;
+                return 1.0;
+            }
+            for (int i = 0; i < a.Length; i++)
+            {
+                int d = a[i] - b[i];
+                if (d < 0) d = -d;
+                if (d > PixelDelta) changed++;
+            }
+            return (double)changed / a.Length;
+        }
+
+        private static byte[] LocalThumb(int px, int py)
+        {
+            int half = LocalSide / 2;
+            return Thumb(px - half, py - half, LocalSide, LocalSide, LocalSide);
+        }
+
+        /// <summary>动作前取样；调用方应在鼠标已移到目标、悬停态生效之后再取，悬停效果不计入动作引起的变化。</summary>
+        public static Sample TakeSample(int x, int y, int w, int h, bool hasPoint, int px, int py)
+        {
+            NormalizeRegion(ref x, ref y, ref w, ref h);
+            Sample s = new Sample();
+            s.Global = Thumb(x, y, w, h, ThumbSide);
+            if (hasPoint) s.Local = LocalThumb(px, py);
+            return s;
+        }
+
+        /// <summary>与动作前相比是否有可见变化：区域缩略图占比，或动作点周边局部块（捕捉勾选框、焦点框这类小变化）。</summary>
+        private static bool HasChanged(Sample before, byte[] global, bool hasPoint, int px, int py)
+        {
+            int n;
+            if (before.Global != null && global != null
+                && ChangeRatio(before.Global, global, out n) > ChangedRatio)
+                return true;
+            if (hasPoint && before.Local != null)
+            {
+                ChangeRatio(before.Local, LocalThumb(px, py), out n);
+                if (n != int.MaxValue && n >= LocalMinChanged) return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// 等待区域画面稳定：先等 minMs，再每 intervalMs 采样一次，相邻两次比较都静止即视为稳定，最长 timeoutMs。
+        ///
+        /// before 非空时同时判定动作是否引起了可见变化（返回 changed）：已静止但还没出现任何变化时，
+        /// 继续等到 noChangeMs——先发请求再渲染的界面常在 300–800 ms 后才开始变，过早截图正是
+        /// 「图上还是旧画面 → 模型再点一次」的根源（plan-20261019-desktop-precision 实录）。
+        /// </summary>
+        public static string Settle(int x, int y, int w, int h, Sample before, bool hasPoint, int px, int py,
+                                    int minMs, int timeoutMs, int intervalMs, int noChangeMs)
+        {
+            NormalizeRegion(ref x, ref y, ref w, ref h);
+            if (minMs < 0) minMs = 0;
+            if (timeoutMs <= 0) timeoutMs = 1500;
+            if (intervalMs <= 0) intervalMs = 60;
+            if (noChangeMs <= 0) noChangeMs = 900;
+            // 动作前采样失败时无从判断有无变化：只判稳定，不给出 changed
+            bool judge = before != null && (before.Global != null || before.Local != null);
+
+            System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+            if (minMs > 0) System.Threading.Thread.Sleep(minMs);
+            byte[] prev = Thumb(x, y, w, h, ThumbSide);
+            int checks = 1, stillRuns = 0, changedPx;
+            bool sawChange = judge && HasChanged(before, prev, hasPoint, px, py);
+            bool stable = false;
+            while (sw.ElapsedMilliseconds < timeoutMs)
+            {
+                System.Threading.Thread.Sleep(intervalMs);
+                byte[] cur = Thumb(x, y, w, h, ThumbSide);
+                checks++;
+                if (judge && !sawChange) sawChange = HasChanged(before, cur, hasPoint, px, py);
+                double r = ChangeRatio(prev, cur, out changedPx);
+                stillRuns = r <= StillRatio ? stillRuns + 1 : 0;
+                prev = cur;
+                if (stillRuns >= 2 && (!judge || sawChange || sw.ElapsedMilliseconds >= noChangeMs))
+                {
+                    stable = true;
+                    break;
+                }
             }
 
             return "{\"stable\":" + (stable ? "true" : "false")
                  + ",\"elapsedMs\":" + sw.ElapsedMilliseconds
-                 + ",\"checks\":" + checks + "}";
+                 + ",\"checks\":" + checks
+                 + (judge ? ",\"changed\":" + (sawChange ? "true" : "false") : "")
+                 + "}";
         }
 
-        /// <summary>FNV-1a 64 位文件哈希：只用于「两张抓图是否同一画面」的比较。</summary>
-        private static long FileHash(string path)
+        /// <summary>兼容旧 op（waitstable）：只判稳定，口径与 Settle 一致。</summary>
+        public static string WaitStable(int x, int y, int w, int h, int timeoutMs, int settleMs)
         {
-            byte[] b = System.IO.File.ReadAllBytes(path);
-            long h = -3750763034362895579L;   // FNV offset basis (14695981039346656037 的有符号表示)
-            for (int i = 0; i < b.Length; i++)
-            {
-                h ^= b[i];
-                h *= 1099511628211L;
-            }
-            return h;
+            return Settle(x, y, w, h, null, false, 0, 0, 0, timeoutMs <= 0 ? 3000 : timeoutMs,
+                          settleMs <= 0 ? 60 : settleMs, 0);
         }
 
         /// <summary>
@@ -494,6 +622,16 @@ namespace DesktopCore
         /// </summary>
         public static string Capture(string outPath, int x, int y, int w, int h, int maxDim,
                                       string format, int quality)
+        {
+            return Capture(outPath, x, y, w, h, maxDim, format, quality, false);
+        }
+
+        /// <summary>
+        /// fit=true 时小区域也放大到长边 maxDim（最多 4 倍，plan-20261019-desktop-precision）：
+        /// 「放大查看」的意义在于让模型看清小字与图标，原尺寸裁剪对很小的区域几乎没有帮助。
+        /// </summary>
+        public static string Capture(string outPath, int x, int y, int w, int h, int maxDim,
+                                      string format, int quality, bool fit)
         {
             int vx = Native.GetSystemMetrics(Native.SM_XVIRTUALSCREEN);
             int vy = Native.GetSystemMetrics(Native.SM_YVIRTUALSCREEN);
@@ -526,17 +664,22 @@ namespace DesktopCore
             Bitmap output = bmp;
             Bitmap scaled = null;
             int ow = w, oh = h;
-            if (maxDim > 0 && (w > maxDim || h > maxDim))
+            bool shrink = maxDim > 0 && (w > maxDim || h > maxDim);
+            bool grow = fit && maxDim > 0 && w < maxDim && h < maxDim;
+            if (shrink || grow)
             {
                 double sc = Math.Min((double)maxDim / w, (double)maxDim / h);
+                if (grow) sc = Math.Min(sc, 4.0);
                 ow = Math.Max(1, (int)Math.Round(w * sc));
                 oh = Math.Max(1, (int)Math.Round(h * sc));
                 scaled = new Bitmap(ow, oh, PixelFormat.Format24bppRgb);
                 using (Graphics g2 = Graphics.FromImage(scaled))
                 {
-                    // Bilinear is measured-faster than bicubic and good enough for a model
-                    // to read; the difference is not visible after downscaling.
-                    g2.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBilinear;
+                    // 缩小用双线性（实测比双三次快，缩小后肉眼无差别）；放大用双三次，小字边缘更清楚
+                    g2.InterpolationMode = grow
+                        ? System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic
+                        : System.Drawing.Drawing2D.InterpolationMode.HighQualityBilinear;
+                    g2.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
                     g2.DrawImage(bmp, 0, 0, ow, oh);
                 }
                 output = scaled;

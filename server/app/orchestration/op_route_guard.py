@@ -21,7 +21,7 @@ from app.orchestration.route_hints import host_of
 
 # 会改变界面状态的操作类工具（只读的截图 / 快照 / 读取不计）
 _DESKTOP_ACTIONS = frozenset({
-    "desktop_click", "desktop_type", "desktop_keys", "desktop_scroll",
+    "desktop_click", "desktop_type", "desktop_keys", "desktop_scroll", "desktop_batch",
 })
 _BROWSER_ACTIONS = frozenset({
     "browser_click", "browser_type", "browser_fill", "browser_press", "browser_drag",
@@ -74,7 +74,7 @@ class OpRouteGuard:
         if not scope:
             return
         if ok:
-            steps = len(a.get("actions") or []) if tool_name == "browser_batch" else 1
+            steps = len(a.get("actions") or []) if tool_name in ("browser_batch", "desktop_batch") else 1
             self.actions[scope] += max(1, steps)
         else:
             self.failures[scope] += 1

@@ -1,4 +1,4 @@
-﻿# 冒烟测试 plan-365-1757 新增的内核 op：frame / waitstable / zoom / findtext（复用图片）。
+﻿# 冒烟测试内核只读 op：frame / waitstable / zoom（plan-365-1757）与 settle（plan-20261019-desktop-precision）。
 #
 # 为什么单独测这几个：它们是「点准」链路新增的本地能力，全部只读、不注入任何输入，
 # 因此可以在不影响用户桌面的前提下直接验证；一旦这里返回结构不对，工具层的换算就会跟着错。
@@ -158,66 +158,21 @@ try {
         Assert ($z.data.scale -ge 0.99) 'zoom 未发生降采样（长边 320 < maxDim 900）'
     }
 
-    # ⑤ findtext 复用图片：先在一张全屏截图里找一个真实存在的文字，再断言「复用路径 ≡ 自截图路径」。
-    #    这是坐标换算闭环的强验证——两条路径看同一张画面必须给出同一个点。
-    #    注：文字没搜到时内核按既有约定只返回 found/hint/visible，不返回 count/imageSize，
-    #    所以断言必须放在 found=true 的分支里（踩过：对空字段取下标会直接抛错）。
-    $full = Invoke-Op ('{"op":"shot","maxDim":1600,"format":"png","path":"' + $stem + '-full.png"}')
-    Assert (-not $full.data.error) '全屏截图成功'
-    $fullJson = $full.data.path.Replace('/', '\').Replace('\', '\\')   # 生产端 Python 的写法
+    # ⑤ settle（plan-20261019-desktop-precision）：容差稳定检测——静止区域应在少量采样内判稳；
+    #    独立调用只判稳定、不比较动作前后，因此不应带 changed 字段
+    $se = Invoke-Op ('{"op":"settle","x":' + $rx + ',"y":' + $ry + ',"w":' + $rw +
+        ',"h":' + $rh + ',"minMs":0,"timeout":1500,"interval":60}')
+    Write-Output ("  settle: stable=" + $se.data.stable + " elapsedMs=" + $se.data.elapsedMs +
+        " checks=" + $se.data.checks)
+    Assert ($null -ne $se.data.stable) 'settle 结构完整'
+    Assert ($null -eq $se.data.changed) '独立 settle 不给出 changed'
+    if ($regionStatic) { Assert ([bool]$se.data.stable -and $se.data.elapsedMs -lt 1000) '静止区域快速判稳' }
 
-    $picked = $null
-    $reused = $null
-    foreach ($q in @('微信', 'e', 'a', '的', '设置', '文件')) {
-        $probe = Invoke-Op ('{"op":"findtext","text":"' + $q + '","image":"' + $fullJson +
-            '","scale":' + $full.data.scale + ',"srcX":' + $full.data.srcX + ',"srcY":' + $full.data.srcY +
-            ',"maxDim":1600,"maxCandidates":3}')
-        Assert (-not $probe.data.error) ('findtext 复用图片（"' + $q + '"）无错误')
-        if (-not $probe.data.error -and $probe.data.found) { $picked = $q; $reused = $probe; break }
-    }
-
-    if ($null -eq $picked) {
-        Write-Output '  （当前屏幕上找不到可用于验证的文字，复用路径闭环比对跳过）'
-    } else {
-        Write-Output ('  验证文字: "' + $picked + '" → 复用路径 (' + $reused.data.x + ',' + $reused.data.y +
-            ') imageSize=' + (@($reused.data.imageSize) -join 'x'))
-        Write-Output ('  复用路径自描述: src=' + $reused.data.src + ' scaleUsed=' + $reused.data.scaleUsed +
-            ' origin=' + (@($reused.data.origin) -join ',') + ' rawXY=' + (@($reused.data.rawXY) -join ','))
-        Assert (@($reused.data.imageSize).Count -ge 2) '复用图片时能回显图片尺寸'
-        $inScreen = ($reused.data.x -ge 0) -and ($reused.data.x -le $vw) -and
-                    ($reused.data.y -ge 0) -and ($reused.data.y -le $vh)
-        Assert $inScreen '复用路径坐标落在屏幕范围内'
-
-        # 判定性门槛：先连跑两次「自截图」路径。若两次结果本身就差很多，说明取样窗口内
-        # 画面在变（测试环境问题），此时任何与复用路径的比对都不具判定力——如实标注并跳过，
-        # 避免把「屏幕在动」误报成「换算错误」。
-        $f1 = Invoke-Op ('{"op":"findtext","text":"' + $picked + '","maxDim":1600,"maxCandidates":3}')
-        Start-Sleep -Milliseconds 120
-        $f2 = Invoke-Op ('{"op":"findtext","text":"' + $picked + '","maxDim":1600,"maxCandidates":3}')
-        Assert (-not $f1.data.error) 'findtext 自截图路径可用'
-        if ($f1.data.error -or -not $f1.data.found -or -not $f2.data.found) {
-            Write-Output '  （自截图路径未找到同一文字，闭环比对跳过）'
-        }
-        else {
-            $sdx = [Math]::Abs([int]$f1.data.x - [int]$f2.data.x)
-            $sdy = [Math]::Abs([int]$f1.data.y - [int]$f2.data.y)
-            Write-Output ('  自截图两次: (' + $f1.data.x + ',' + $f1.data.y + ') / (' +
-                $f2.data.x + ',' + $f2.data.y + ')  自身Δ=' + $sdx + ',' + $sdy)
-            if (($sdx -gt 20) -or ($sdy -gt 20)) {
-                Write-Output '  （屏幕在变化，本次比对不具判定性，仅记录数据）'
-            }
-            else {
-                $dx = [Math]::Abs([int]$reused.data.x - [int]$f1.data.x)
-                $dy = [Math]::Abs([int]$reused.data.y - [int]$f1.data.y)
-                Write-Output ('  复用 vs 自截图 Δ=' + $dx + ',' + $dy)
-                Assert (($dx -le 20) -and ($dy -le 20)) '复用与自截图两条路径坐标一致（缩放换算闭环）'
-            }
-        }
-    }
-
-    # ⑦ 复用不存在的图片：必须给出可读错误而不是抛异常
-    $bad = Invoke-Op '{"op":"findtext","text":"a","image":"Z:/nope/missing.png","scale":0.5}'
-    Assert ($bad.data.error -like '*不存在*') '图片不存在时给出可读错误'
+    # ⑥ OCR 已移除（plan-20261019-desktop-precision）：findtext / ocrboxes 必须报未知 op
+    $gone = Invoke-Op '{"op":"findtext","text":"a"}'
+    Assert ($gone.data.error -like '*unknown op*') 'findtext 已移除'
+    $gone2 = Invoke-Op '{"op":"ocrboxes"}'
+    Assert ($gone2.data.error -like '*unknown op*') 'ocrboxes 已移除'
 
     if ($fail -eq 0) { Write-Output 'SMOKE-365: PASS' } else { Write-Output ("SMOKE-365: FAIL (" + $fail + ")") }
 }

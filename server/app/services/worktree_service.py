@@ -64,22 +64,118 @@ async def _ensure_tool_dir_ignored(repo: str) -> None:
     未跟踪目录而恒被判为"有未提交变更"——合并与删除会被自己的目录死死挡住。
     用 `info/exclude` 而非 `.gitignore`：不污染用户的版本控制内容，且立即生效。
     """
+    await _ensure_excluded(repo, [f"{_TOOL_DIR}/"])
+
+
+async def _ensure_excluded(repo: str, patterns: list[str]) -> None:
+    """把若干忽略规则追加进仓库的 `info/exclude`（已存在的不重复写）。
+
+    取 `--git-common-dir`：工作树与主仓库共用同一份 `info/exclude`，按 `--git-dir`
+    在工作树里写会落到 `.git/worktrees/<名>/` 下，git 根本不读（plan-20261019-git-multirepo）。
+    """
     try:
-        ok, git_dir, _ = await _git(repo, "rev-parse", "--git-dir")
-        if not ok or not git_dir.strip():
+        ok, common, _ = await _git(repo, "rev-parse", "--git-common-dir")
+        if not ok or not common.strip():
             return
-        gd = Path(git_dir.strip())
+        gd = Path(common.strip())
         if not gd.is_absolute():
             gd = Path(repo) / gd
         exclude = gd / "info" / "exclude"
         exclude.parent.mkdir(parents=True, exist_ok=True)
         existing = exclude.read_text(encoding="utf-8", errors="replace") if exclude.exists() else ""
-        if f"{_TOOL_DIR}/" in existing:
+        have = {ln.strip() for ln in existing.splitlines()}
+        missing = [p for p in patterns if p and p not in have]
+        if not missing:
             return
         line = "" if existing.endswith("\n") or not existing else "\n"
-        exclude.write_text(existing + line + f"{_TOOL_DIR}/\n", encoding="utf-8")
+        exclude.write_text(existing + line + "\n".join(missing) + "\n", encoding="utf-8")
     except OSError:
-        logger.debug("[worktree] 写入 .git/info/exclude 失败(非阻塞)", exc_info=True)
+        logger.debug("[worktree] 写入 info/exclude 失败(非阻塞)", exc_info=True)
+
+
+def _norm(path: str | Path) -> str:
+    """路径比较口径：正斜杠、去尾斜杠、忽略大小写（Windows）。"""
+    return str(path).replace("\\", "/").rstrip("/").lower()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# plan-20261019-git-multirepo：工作树「成员」
+#
+# 工作树目录里可能有一个或多个 git 工作树：
+#   - 单仓库工作树：目录本身就是某仓库的工作树（<repo>/.chatcoder/worktrees/<名>）；
+#   - 工作树组（多仓库项目）：<项目根>/.chatcoder/worktrees/<名>/ 下按原目录结构放着各仓库的工作树。
+# 统一按「成员」处理：每个成员记下它对应的源仓库。此前合并 / 统计 / 删除一律拿「父项目目录」当仓库，
+# 子仓库的工作树（父项目根本身不是仓库）在这些操作上全都找错了仓库。
+# ═══════════════════════════════════════════════════════════════════════
+
+
+async def _source_repo_of(wt_dir: str) -> str | None:
+    """工作树目录 → 源仓库根目录（`--git-common-dir` 的上一级）；不是关联工作树返回 None。"""
+    ok, out, _ = await _git(wt_dir, "rev-parse", "--git-common-dir")
+    if not ok or not out.strip():
+        return None
+    common = Path(out.strip())
+    if not common.is_absolute():
+        common = (Path(wt_dir) / common).resolve()
+    if common.name != ".git":
+        return None
+    src = str(common.parent).replace("\\", "/")
+    return None if _norm(src) == _norm(wt_dir) else src
+
+
+async def worktree_members(wt_path: str) -> list[dict]:
+    """工作树目录里的成员 [{rel, path, source, name, branch}]，根成员（rel 为空）在前。"""
+    from app.services import git_service
+
+    root = Path(wt_path or "")
+    if not wt_path or not root.is_dir():
+        return []
+    dirs: list[tuple[str, Path]] = []
+    if (root / ".git").is_file():
+        dirs.append(("", root))
+    for p in git_service.find_nested_repos(root):
+        if (p / ".git").is_file():
+            dirs.append((p.relative_to(root).as_posix(), p))
+    members: list[dict] = []
+    for rel, d in dirs:
+        src = await _source_repo_of(str(d))
+        if not src:
+            continue
+        members.append({
+            "rel": rel, "path": str(d), "source": src, "name": Path(src).name,
+            "branch": await _branch_of_worktree(str(d)),
+        })
+    return members
+
+
+async def _repos_of_project(project) -> list[str]:
+    """父项目目录里的全部仓库（根仓库 + 两层内的子仓库）；项目缺失或不是仓库目录时为空。"""
+    from app.services import git_service
+
+    if project is None or not getattr(project, "path", None):
+        return []
+    try:
+        return [p for _rel, p in await git_service.repo_dirs(project.path)]
+    except git_service.GitError:
+        return []
+
+
+def _pick_member(members: list[dict], repo: str | None) -> dict:
+    """按 repo（成员相对路径）取成员；工作树组未指定仓库时要求先选择。"""
+    if not members:
+        raise ValueError("工作树目录不存在或已损坏，无法操作")
+    raw = (repo or "").replace("\\", "/").strip()
+    want = "" if raw in (".", "./") else raw.strip("/")
+    if raw:
+        # "." 明确指根成员（工作树组同时包含根仓库与子仓库时用来区分）
+        for m in members:
+            if m["rel"] == want:
+                return m
+        raise ValueError(f"工作树中没有仓库「{repo}」")
+    if len(members) == 1:
+        return members[0]
+    names = "、".join(m["rel"] or m["name"] for m in members)
+    raise ValueError(f"该工作树包含多个仓库（{names}），请先选择要操作的仓库")
 
 
 def _force_rmtree(path: Path) -> bool:
@@ -128,25 +224,31 @@ async def create_worktree(db: AsyncSession, session_id: int, *, branch: str | No
     if project is None:
         raise ValueError("项目不存在")
     repo = project.path
+    if session.worktree_path:
+        raise ValueError("会话已存在工作树")
+    branch_name = branch or f"chatcoder/session-{session_id}"
+    wt_path = Path(repo) / ".chatcoder" / "worktrees" / f"session_{session_id}"
 
     ok, out, _ = await _git(repo, "rev-parse", "--is-inside-work-tree")
     if not ok or out.strip() != "true":
-        raise ValueError("项目目录不是 git 仓库，无法创建工作树")
-    if session.worktree_path:
-        raise ValueError("会话已存在工作树")
+        # plan-20261019-git-multirepo：根目录不是仓库、代码在子仓库（前端 + 后端）的项目，
+        # 为全部有提交的子仓库建一个工作树组，会话照常在同一个目录里同时修改各仓库
+        from app.services import git_service
 
-    base = Path(repo) / ".chatcoder" / "worktrees"
-    base.mkdir(parents=True, exist_ok=True)
-    wt_path = base / f"session_{session_id}"
-    branch_name = branch or f"chatcoder/session-{session_id}"
+        subs = [str(p) for p in git_service.find_nested_repos(Path(repo)) if await _has_commits(str(p))]
+        if not subs:
+            raise ValueError("项目目录不是 git 仓库，也没有找到已有提交的子仓库，无法创建工作树")
+        members = await _build_group(repo, wt_path, branch_name, subs)
+        branch_name = members[0]["branch"] if members else branch_name
+    else:
+        wt_path.parent.mkdir(parents=True, exist_ok=True)
+        # 分支已存在时给出可读提示（否则 git 直接抛 "a branch named ... already exists"）
+        if await _branch_exists(repo, branch_name):
+            raise ValueError(f"仓库已存在分支 {branch_name}，请另填分支名或先删除该分支")
 
-    # 分支已存在时给出可读提示（否则 git 直接抛 "a branch named ... already exists"）
-    if await _branch_exists(repo, branch_name):
-        raise ValueError(f"仓库已存在分支 {branch_name}，请另填分支名或先删除该分支")
-
-    ok, out, err = await _git(repo, "worktree", "add", str(wt_path), "-b", branch_name)
-    if not ok:
-        raise ValueError(f"创建工作树失败: {(err or out)[:200]}")
+        ok, out, err = await _git(repo, "worktree", "add", str(wt_path), "-b", branch_name)
+        if not ok:
+            raise ValueError(f"创建工作树失败: {(err or out)[:200]}")
 
     from app.persistence.database import run_write_locked
 
@@ -167,31 +269,30 @@ async def remove_worktree(db: AsyncSession, session_id: int) -> dict:
     if session is None or not session.worktree_path:
         raise ValueError("会话无工作树")
     wt = session.worktree_path
+    # plan-20261019-git-multirepo：按成员处理（多仓库项目的会话工作树是一个工作树组）
+    members = await worktree_members(wt)
 
-    # 先检查工作树是否干净
-    ok, out, _ = await _git(wt, "status", "--porcelain")
-    if ok and out.strip():
-        raise ValueError("工作树存在未提交变更，请先 commit 或 stash")
+    # 先检查工作树是否干净（分支名也必须在摘除之前读取，摘除后工作树目录已不存在）
+    for m in members:
+        if await _is_repo_dirty(m["path"]):
+            raise ValueError("工作树存在未提交变更，请先 commit 或 stash")
+    branch = members[0]["branch"] if members else await _branch_of_worktree(wt)
 
-    # 分支名必须在摘除工作树之前读取（摘除后工作树目录已不存在）
-    branch = await _branch_of_worktree(wt)
-
-    from app.services.project_service import get_project
-    project = await get_project(db, session.project_id) if session.project_id else None
-    repo = project.path if project else wt
-
-    ok, out, err = await _git(repo, "worktree", "remove", "--force", wt)
-    if not ok:
-        # git 拒绝（含被忽略文件 / 文件被占用 / 登记与目录不一致）时兜底：
-        # 先清掉 git 登记，再强删目录——否则会留下"记录删了、目录还在"的残留。
-        await _git(repo, "worktree", "prune")
-        if not _force_rmtree(Path(wt)):
-            raise ValueError(f"移除工作树失败，目录仍被占用: {wt}")
-        logger.warning("worktree remove 失败，已强制清理目录 %s: %s", wt, (err or out)[:200])
-
-    # 连带删除该工作树的本地分支，避免仓库残留 chatcoder/session-xxx
-    branch_deleted = await _delete_local_branch(repo, branch)
-    await _git(repo, "worktree", "prune")
+    branch_deleted = False
+    for m in sorted(members, key=lambda m: -len(m["rel"])):
+        ok, out, err = await _git(m["source"], "worktree", "remove", "--force", m["path"])
+        if not ok:
+            # git 拒绝（含被忽略文件 / 文件被占用 / 登记与目录不一致）时兜底：
+            # 先清掉 git 登记，再强删目录——否则会留下"记录删了、目录还在"的残留。
+            await _git(m["source"], "worktree", "prune")
+            if not _force_rmtree(Path(m["path"])):
+                raise ValueError(f"移除工作树失败，目录仍被占用: {m['path']}")
+            logger.warning("worktree remove 失败，已强制清理目录 %s: %s", m["path"], (err or out)[:200])
+        # 连带删除该工作树的本地分支，避免仓库残留 chatcoder/session-xxx
+        branch_deleted = await _delete_local_branch(m["source"], m["branch"]) or branch_deleted
+        await _git(m["source"], "worktree", "prune")
+    if Path(wt).exists() and not _force_rmtree(Path(wt)):
+        raise ValueError(f"移除工作树失败，目录仍被占用: {wt}")
     from app.persistence.database import run_write_locked
 
     def _persist_path(s, value: str | None):
@@ -372,18 +473,17 @@ async def list_repo_candidates(db: AsyncSession, project_id: int) -> list[dict]:
 
     root_info = await _describe(project.path, True)
     if root_info is not None:
+        root_info["rel"] = ""
         out.append(root_info)
 
-    try:
-        children = sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.name.lower())
-    except OSError:
-        children = []
+    # plan-20261019-git-multirepo：与 Git 面板的仓库识别同一口径（向下两层，覆盖 apps/web 这类布局）
+    from app.services import git_service
 
-    for child in children:
-        if child.name in _SKIP_DIRS or child.name.startswith("."):
-            continue
+    for child in git_service.find_nested_repos(root):
         info = await _describe(str(child), False)
         if info is not None:
+            info["rel"] = child.relative_to(root).as_posix()
+            info["name"] = info["rel"]
             out.append(info)
 
     return out
@@ -431,6 +531,9 @@ async def create_worktree_for_project(
         raise ValueError("没有可用的仓库")
 
     multi = len(targets) > 1
+    if multi:
+        # plan-20261019-git-multirepo：多仓库建成一个「工作树组」，作为一个工作区登记
+        return await _create_worktree_group(project, wt_name, branch, targets)
     results: list[dict] = []
 
     for repo in targets:
@@ -514,6 +617,114 @@ async def _require_repo_path(repo: str) -> None:
         raise ValueError(f"{repo} 不是仓库根目录（它属于 {top}）")
 
 
+async def _build_group(project_path: str, group: Path, branch_name: str, targets: list[str]) -> list[dict]:
+    """在 group 目录下按原目录结构为每个仓库建工作树（同名新分支），返回成员列表。
+
+    任一仓库失败即回滚已建好的部分（摘除工作树、删除分支、删目录），不留半截工作树组。
+    根仓库先建——它的工作树就是 group 本身，子仓库的工作树放在 group 里对应的相对位置。
+    """
+    root = Path(project_path)
+    root_norm = _norm(project_path)
+    items: list[tuple[str, str]] = []
+    for repo in targets:
+        rp = Path(repo)
+        if _norm(rp) == root_norm:
+            items.append(("", repo))
+            continue
+        try:
+            rel = rp.resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            raise ValueError(f"仓库 {repo} 不在项目目录内，不能加入工作树组") from None
+        items.append((rel, repo))
+    items.sort(key=lambda it: (it[0] != "", it[0]))
+    if group.exists():
+        raise ValueError(f"工作树目录已存在: {group}")
+
+    # 根目录本身是仓库时，工作树组目录位于它的 .chatcoder/ 下：先本地忽略，免得主仓库恒为「有改动」
+    from app.services import git_service
+
+    if git_service.has_git(root):
+        await _ensure_tool_dir_ignored(project_path)
+    sub_rels = [rel for rel, _ in items if rel]
+    if items and items[0][0] == "" and sub_rels:
+        # 根仓库的工作树里放着子仓库的工作树：本地忽略这些目录，避免合并快照（add -A）把子仓库当嵌入仓库收进根仓库
+        await _ensure_excluded(project_path, [f"/{rel}/" for rel in sub_rels])
+
+    created: list[dict] = []
+    try:
+        group.parent.mkdir(parents=True, exist_ok=True)
+        for rel, repo in items:
+            await _require_repo_path(repo)
+            await _require_initial_commit(repo)
+            if await _branch_exists(repo, branch_name):
+                raise ValueError(f"仓库 {_Path_name(repo)} 已存在分支 {branch_name}，请另填一个分支名后再创建工作树")
+            base_branch = await _default_branch(repo)
+            if not base_branch:
+                raise ValueError(f"{repo} 没有可用的起始分支，无法创建工作树")
+            wt_path = group / rel if rel else group
+            if rel:
+                wt_path.parent.mkdir(parents=True, exist_ok=True)
+            ok, out, err = await _git(repo, "worktree", "add", "-b", branch_name, str(wt_path), base_branch)
+            if not ok:
+                raise ValueError(f"在 {repo} 创建工作树失败: {(err or out)[:200]}")
+            created.append({"rel": rel, "path": str(wt_path), "source": repo.replace("\\", "/"),
+                            "name": Path(repo).name, "branch": branch_name})
+    except Exception:
+        for m in reversed(created):
+            await _git(m["source"], "worktree", "remove", "--force", "--force", m["path"])
+            await _delete_local_branch(m["source"], m["branch"])
+            await _git(m["source"], "worktree", "prune")
+        if group.exists():
+            _force_rmtree(group)
+        raise
+    return created
+
+
+async def _create_worktree_group(project, wt_name: str, branch: str | None, targets: list[str]) -> dict:
+    """多仓库项目的工作树：一个目录、一个工作区（plan-20261019-git-multirepo）。
+
+    此前每个仓库各建一个工作区，前端、后端分在两个工作区里，会话只能改其中一个仓库；
+    现在按原目录结构放在同一个工作树组里，会话能同时修改前后端，Git 面板自动识别出各仓库。
+    """
+    from app.persistence.database import run_write_locked
+
+    group = _wt_dir_of(project.path) / wt_name
+    branch_name = branch or f"chatcoder/{wt_name}"
+    members = await _build_group(project.path, group, branch_name, targets)
+
+    def _create(s):
+        from app.persistence.models.project import Project as _P
+        row = _P(
+            name=wt_name,
+            path=str(group),
+            is_worktree=True,
+            parent_project_id=project.id,
+            worktree_branch=branch_name,
+            auto_scan_rules=False,
+        )
+        s.add(row)
+        s.flush()
+        new_id = row.id
+        s.commit()
+        return new_id
+
+    new_id = await run_write_locked(_create, label=f"worktree.create_group.{project.id}")
+    logger.info("项目 %s 创建工作树组 %s（%d 个仓库，branch=%s, project=%s）",
+                project.id, group, len(members), branch_name, new_id)
+    repos = [{"rel": m["rel"], "name": m["name"], "path": m["path"]} for m in members]
+    return {
+        "ok": True,
+        "count": 1,
+        "worktrees": [{"project_id": new_id, "path": str(group), "branch": branch_name,
+                       "name": wt_name, "repo": project.path, "repos": repos}],
+        "project_id": new_id,
+        "path": str(group),
+        "branch": branch_name,
+        "name": wt_name,
+        "repos": repos,
+    }
+
+
 async def list_worktrees(db: AsyncSession, project_id: int | None = None) -> list[dict]:
     """列出工作树（可按主项目筛选），带 git 状态摘要。"""
     from sqlalchemy import select
@@ -539,22 +750,37 @@ async def list_worktrees(db: AsyncSession, project_id: int | None = None) -> lis
             "dirty": False,
             "ahead": 0,
             "behind": 0,
+            "repos": [],
         }
-        # git 状态：未提交变更数 + 相对主分支的领先/落后提交数
-        if parent is not None:
-            ok, status_out, _ = await _git(wt.path, "status", "--porcelain")
-            if ok:
-                info["dirty"] = bool(_status_lines(status_out))
-            base_branch = await _default_branch(parent.path)
-            ok, counts, _ = await _git(wt.path, "rev-list", "--left-right", "--count",
-                                       f"{base_branch}...{wt.worktree_branch or 'HEAD'}")
+        # git 状态：按成员（各自的源仓库）统计未提交变更与相对源仓库当前分支的领先 / 落后，
+        # 工作树组汇总各仓库（plan-20261019-git-multirepo；此前一律拿父项目目录当仓库）
+        for m in await worktree_members(wt.path):
+            dirty = await _is_repo_dirty(m["path"])
+            ahead = behind = 0
+            base_branch = await _default_branch(m["source"])
+            ok, counts, _ = await _git(m["path"], "rev-list", "--left-right", "--count",
+                                       f"{base_branch}...{m['branch'] or 'HEAD'}")
             if ok:
                 parts = counts.split()
                 if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-                    info["behind"] = int(parts[0])
-                    info["ahead"] = int(parts[1])
+                    behind, ahead = int(parts[0]), int(parts[1])
+            info["repos"].append({"rel": m["rel"], "name": m["name"], "branch": m["branch"],
+                                  "dirty": dirty, "ahead": ahead, "behind": behind})
+            info["dirty"] = info["dirty"] or dirty
+            info["ahead"] += ahead
+            info["behind"] += behind
         out.append(info)
     return out
+
+
+async def worktree_repos(db: AsyncSession, worktree_project_id: int) -> list[dict]:
+    """工作树的成员仓库（合并弹窗按仓库切换用）。"""
+    wt = await _project_of(db, worktree_project_id)
+    if wt is None or not getattr(wt, "is_worktree", False):
+        raise ValueError("工作树不存在")
+    return [{"rel": m["rel"], "name": m["name"], "branch": m["branch"],
+             "source": m["source"], "dirty": await _is_repo_dirty(m["path"])}
+            for m in await worktree_members(wt.path)]
 
 
 async def remove_worktree_project(db: AsyncSession, worktree_project_id: int, *, force: bool = False) -> dict:
@@ -573,55 +799,50 @@ async def remove_worktree_project(db: AsyncSession, worktree_project_id: int, *,
     if wt is None or not getattr(wt, "is_worktree", False):
         raise ValueError("工作树不存在")
     parent = await _project_of(db, wt.parent_project_id) if wt.parent_project_id else None
-    repo = parent.path if parent else wt.path
     # 分支名优先取登记值；老数据缺字段时从工作树现场读取（摘除前才读得到）
     branch = wt.worktree_branch or await _branch_of_worktree(wt.path)
+    # plan-20261019-git-multirepo：按成员逐个摘除（工作树组含多个仓库；子仓库工作树的源仓库不是父项目目录）
+    members = await worktree_members(wt.path)
 
     if not force:
-        ok, out, _ = await _git(wt.path, "status", "--porcelain")
-        if ok and _status_lines(out):
-            raise ValueError("工作树存在未提交变更，请先提交、或选择强制删除")
+        for m in members:
+            if await _is_repo_dirty(m["path"]):
+                where = f"（仓库 {m['rel'] or m['name']}）" if len(members) > 1 else ""
+                raise ValueError(f"工作树存在未提交变更{where}，请先提交、或选择强制删除")
 
     # plan-308-1542 修复：目录与 git 登记**都已不存在**（用户反馈"实际分支和目录已经删除，
     # 但左面板还是删不掉"）→ 不再做无意义的 git 调用，直接进入级联清理，
     # 保证这类僵尸项一定能被删掉。
-    already_gone = False
-    if not (wt.path and Path(wt.path).exists()):
-        listed = ""
-        ok_ls, ls_out, _ = await _git(repo, "worktree", "list", "--porcelain")
-        if ok_ls:
-            listed = (ls_out or "").replace("\\", "/")
-        norm_path = (wt.path or "").replace("\\", "/")
-        if not norm_path or norm_path not in listed:
-            already_gone = True
-            logger.info("[worktree] 目录与 git 登记均不存在，直接清理数据库登记: %s", wt.path)
-
-    if not already_gone:
-        # 先摘除 git 登记。--force 给两次：git ≥2.31 中第一次只覆盖"修改/未跟踪文件"，
-        # 含**被忽略文件**（如 node_modules）的工作树要第二次才肯删。
-        if force:
-            args = ["worktree", "remove", "--force", "--force", wt.path]
-        else:
-            args = ["worktree", "remove", wt.path]
-        ok, out, err = await _git(repo, *args)
-        if not ok:
-            # git 拒绝（被忽略文件 / 文件被占用 / 登记与目录不一致）→ 兜底清理：
-            # 先 prune 掉 git 登记，再强删目录，避免"DB 记录删了、磁盘目录还在"。
-            await _git(repo, "worktree", "prune")
-            if not _force_rmtree(Path(wt.path)):
-                raise ValueError(f"删除工作树目录失败（可能被其他程序占用）：{wt.path}")
-            logger.warning("worktree remove 失败，已强制清理目录 %s: %s", wt.path, (err or out)[:200])
-        else:
-            # 目录可能因被忽略文件仍未删净 → 再兜底一次（git 已摘除登记，此处只清磁盘）
-            if Path(wt.path).exists():
-                _force_rmtree(Path(wt.path))
-
-        # 工作树摘除后连带删除其本地分支——否则仓库里会残留一堆 chatcoder/xxx 分支
-        branch_deleted = await _delete_local_branch(repo, branch)
-        await _git(repo, "worktree", "prune")
+    branch_deleted = False
+    if members:
+        # 先摘子成员、再摘根成员：子仓库的工作树放在根成员的目录里面
+        for m in sorted(members, key=lambda m: -len(m["rel"])):
+            # --force 给两次：git ≥2.31 中第一次只覆盖"修改/未跟踪文件"，含**被忽略文件**（如 node_modules）的要第二次
+            args = ["worktree", "remove", "--force", "--force", m["path"]] if force else ["worktree", "remove", m["path"]]
+            ok, out, err = await _git(m["source"], *args)
+            if not ok:
+                # git 拒绝（被忽略文件 / 文件被占用 / 登记与目录不一致）→ 先 prune 登记，再强删目录
+                await _git(m["source"], "worktree", "prune")
+                if not _force_rmtree(Path(m["path"])):
+                    raise ValueError(f"删除工作树目录失败（可能被其他程序占用）：{m['path']}")
+                logger.warning("worktree remove 失败，已强制清理目录 %s: %s", m["path"], (err or out)[:200])
+            # 工作树摘除后连带删除其本地分支——否则仓库里会残留一堆 chatcoder/xxx 分支
+            # 分支以登记值为准（工作树组各成员同名）；老数据缺登记时用成员现场读到的分支
+            branch_deleted = await _delete_local_branch(m["source"], branch or m["branch"]) or branch_deleted
+            await _git(m["source"], "worktree", "prune")
+        # 工作树组目录本身（以及被忽略文件的残留）一并清掉
+        if wt.path and Path(wt.path).exists():
+            _force_rmtree(Path(wt.path))
     else:
-        branch_deleted = False
-        await _git(repo, "worktree", "prune")
+        # 目录已不存在，或还在但识别不出成员（git 登记已损坏）：清磁盘、清各仓库的失效登记；
+        # 登记过的工作树分支在仍存在它的仓库里一并删除（与正常删除口径一致）
+        if wt.path and Path(wt.path).exists() and not _force_rmtree(Path(wt.path)):
+            raise ValueError(f"删除工作树目录失败（可能被其他程序占用）：{wt.path}")
+        logger.info("[worktree] 工作树目录或 git 登记已失效，清理登记: %s", wt.path)
+        for repo in await _repos_of_project(parent):
+            await _git(repo, "worktree", "prune")
+            if wt.worktree_branch and await _branch_exists(repo, wt.worktree_branch):
+                branch_deleted = await _delete_local_branch(repo, wt.worktree_branch) or branch_deleted
 
     # plan-308-1542 需求3-C：级联删除该工作树下的所有会话（及其消息/任务/回滚等关联数据）。
     # 必须发生在删 Project 行**之前**，否则外键约束会让 Project 删除失败（正是原报错根因）。
@@ -719,11 +940,19 @@ async def cleanup_stale_worktrees(db: AsyncSession) -> dict:
         if path and Path(path).exists():
             continue
         parent = await _project_of(db, wt.parent_project_id) if wt.parent_project_id else None
-        repo = parent.path if parent else None
-        if repo:
+        # plan-20261019-git-multirepo：子仓库工作树 / 工作树组登记在各自的源仓库里，父项目根未必是仓库
+        listed = False
+        for repo in await _repos_of_project(parent):
             ok, out, _ = await _git(repo, "worktree", "list", "--porcelain")
-            if ok and path and path.replace("\\", "/") in (out or "").replace("\\", "/"):
-                continue  # git 仍登记 → 不算失效（目录可能是被临时移动）
+            if ok and path and _norm(path) in _norm(out or "").replace("\n", " "):
+                listed = True  # git 仍登记 → 不算失效（目录可能是被临时移动）
+                break
+            if ok and path and any(_norm(ln[len("worktree "):]).startswith(_norm(path) + "/")
+                                   for ln in (out or "").splitlines() if ln.startswith("worktree ")):
+                listed = True  # 工作树组：成员登记在组目录之下
+                break
+        if listed:
+            continue
         stale.append((int(wt.id), wt.name or "", path))
 
     if not stale:
@@ -898,8 +1127,12 @@ def _resolve_single(o: str | None, b: str | None, t: str | None,
     return merged_text is None, (merged_text or t)
 
 
-async def _merge_sides(db: AsyncSession, worktree_project_id: int, direction: str) -> dict:
-    """解析合并双方目录与共同祖先基点。"""
+async def _merge_sides(db: AsyncSession, worktree_project_id: int, direction: str, repo: str = "") -> dict:
+    """解析合并双方目录与共同祖先基点。
+
+    plan-20261019-git-multirepo：按成员解析——主工作区一侧是该成员的**源仓库**（此前固定取父项目目录，
+    子仓库工作树在父项目根不是仓库时直接找错仓库）；工作树组需用 repo 指定合并哪个仓库。
+    """
     if direction not in _DIRECTIONS:
         raise ValueError(f"不支持的合并方向: {direction}")
     wt = await _project_of(db, worktree_project_id)
@@ -909,19 +1142,21 @@ async def _merge_sides(db: AsyncSession, worktree_project_id: int, direction: st
     if parent is None:
         raise ValueError("找不到主工作区")
 
-    repo = parent.path
-    base_branch = await _default_branch(repo)
-    branch = wt.worktree_branch or "HEAD"
-    ok, mb, _ = await _git(repo, "merge-base", base_branch, branch)
+    member = _pick_member(await worktree_members(wt.path), repo)
+    source = member["source"]
+    wt_dir = member["path"]
+    base_branch = await _default_branch(source)
+    branch = member["branch"] or wt.worktree_branch or "HEAD"
+    ok, mb, _ = await _git(source, "merge-base", base_branch, branch)
     base_rev = mb.strip() if ok and mb.strip() else base_branch
 
     if direction == _DIR_TO_MAIN:
-        ours_dir, theirs_dir, target_dir = parent.path, wt.path, parent.path
+        ours_dir, theirs_dir, target_dir = source, wt_dir, source
     else:
-        ours_dir, theirs_dir, target_dir = wt.path, parent.path, wt.path
+        ours_dir, theirs_dir, target_dir = wt_dir, source, wt_dir
 
     return {
-        "wt": wt, "parent": parent, "repo": repo,
+        "wt": wt, "parent": parent, "repo": source, "member": member,
         "base_branch": base_branch, "branch": branch, "base_rev": base_rev,
         "ours_dir": ours_dir, "theirs_dir": theirs_dir, "target_dir": target_dir,
         "direction": direction,
@@ -929,7 +1164,7 @@ async def _merge_sides(db: AsyncSession, worktree_project_id: int, direction: st
 
 
 async def merge_preview(db: AsyncSession, worktree_project_id: int,
-                        *, direction: str = _DIR_TO_MAIN) -> dict:
+                        *, direction: str = _DIR_TO_MAIN, repo: str = "") -> dict:
     """差异文件列表（含**未提交改动**与自动冲突解决结果）。不改动任何工作区。
 
     plan-308-1542 需求3-A：判定与合并结果**全部交给 git**（此前是手写三态比较，
@@ -941,7 +1176,7 @@ async def merge_preview(db: AsyncSession, worktree_project_id: int,
       * `git merge-file --diff3` 取冲突文件的 git 原生标记内容
       * 双方工作区的未提交改动经**临时索引快照**参与合并
     """
-    ctx = await _merge_sides(db, worktree_project_id, direction)
+    ctx = await _merge_sides(db, worktree_project_id, direction, repo)
     from app.services import git_merge_engine as ge
 
     # 双方 revision：先按方向给出基线，再优先用"含未提交改动"的快照覆盖。
@@ -1110,13 +1345,13 @@ async def _merge_preview_fallback(ctx: dict, direction: str, *,
 
 
 async def merge_file_blobs(db: AsyncSession, worktree_project_id: int, path: str,
-                           *, direction: str = _DIR_TO_MAIN) -> dict:
+                           *, direction: str = _DIR_TO_MAIN, repo: str = "") -> dict:
     """三路内容：base（共同祖先）/ ours（目标侧）/ theirs（来源侧）。
 
     plan-308-1542 需求3-A：口径与 merge_preview 统一——**优先取 git 侧内容**
     （含未提交改动的快照 revision），保证"预览看到的 = 打开文件看到的"。
     """
-    ctx = await _merge_sides(db, worktree_project_id, direction)
+    ctx = await _merge_sides(db, worktree_project_id, direction, repo)
     rel = path.replace("\\", "/")
     from app.services import git_merge_engine as ge
 
@@ -1157,13 +1392,13 @@ async def merge_file_blobs(db: AsyncSession, worktree_project_id: int, path: str
 
 
 async def merge_apply(db: AsyncSession, worktree_project_id: int, files: list[dict],
-                      *, direction: str = _DIR_TO_MAIN) -> dict:
+                      *, direction: str = _DIR_TO_MAIN, repo: str = "") -> dict:
     """应用合并结果：把解决后的内容写入**目标侧**工作区并提交。
 
     files: [{path, content, deleted?}] —— content 为最终文本（deleted 表示删除）。
     目标侧原有的其他未提交改动不受影响（只 add 本次写入的文件，不做 `add -A`）。
     """
-    ctx = await _merge_sides(db, worktree_project_id, direction)
+    ctx = await _merge_sides(db, worktree_project_id, direction, repo)
     wt = ctx["wt"]
     target_dir = ctx["target_dir"]
     branch = ctx["branch"]
@@ -1219,14 +1454,15 @@ async def merge_apply(db: AsyncSession, worktree_project_id: int, files: list[di
 
 
 async def commit_worktree(db: AsyncSession, worktree_project_id: int, *,
-                          side: str = "worktree", message: str | None = None) -> dict:
+                          side: str = "worktree", message: str | None = None, repo: str = "") -> dict:
     """提交某一侧的未提交改动（side=worktree 提交工作树，side=main 提交主工作区）。
 
     合并前若来源侧有未提交改动，前端会先弹提示；用户确认后调用本接口自动提交，
     使这些改动成为正式提交后再走合并流程。
     """
-    ctx = await _merge_sides(db, worktree_project_id, _DIR_TO_MAIN)
-    target_dir = ctx["wt"].path if side == "worktree" else ctx["parent"].path
+    ctx = await _merge_sides(db, worktree_project_id, _DIR_TO_MAIN, repo)
+    # 工作树一侧是该成员的工作树目录，主工作区一侧是它的源仓库（plan-20261019-git-multirepo）
+    target_dir = ctx["member"]["path"] if side == "worktree" else ctx["repo"]
     if not await _is_repo_dirty(target_dir):
         return {"ok": True, "committed": False, "message": "没有需要提交的改动"}
 
@@ -1263,7 +1499,8 @@ def _tool_label(model_name: str | None = None) -> str:
 
 async def ai_merge_all(db: AsyncSession, worktree_project_id: int, *,
                        direction: str = _DIR_TO_MAIN, model_id: int | None = None,
-                       session_id: int | None = None, merge_id: str | None = None) -> dict:
+                       session_id: int | None = None, merge_id: str | None = None,
+                       repo: str = "") -> dict:
     """一键 AI 智能合并：git 判定 → 冲突文件逐个求模型建议，全程广播进度。
 
     plan-308-1542 需求3-A：用户要求"AI 自动合并要有进度展示（像消息流那样展示 AI 进度、
@@ -1284,7 +1521,7 @@ async def ai_merge_all(db: AsyncSession, worktree_project_id: int, *,
     })
 
     try:
-        preview = await merge_preview(db, worktree_project_id, direction=direction)
+        preview = await merge_preview(db, worktree_project_id, direction=direction, repo=repo)
     except ValueError as e:
         await _emit_merge_progress(session_id, {
             "merge_id": mid, "session_id": session_id, "direction": direction,
@@ -1355,7 +1592,7 @@ async def ai_merge_all(db: AsyncSession, worktree_project_id: int, *,
             "tool": "git merge-file --diff3", "detail": "已由 git 生成冲突标记，正在请求 AI 合并建议",
         })
         res = await ai_merge_suggest(db, worktree_project_id, rel, None,
-                                     direction=direction, model_id=model_id)
+                                     direction=direction, model_id=model_id, repo=repo)
         if res.get("ok") and res.get("suggestion"):
             resolved[rel] = res["suggestion"]
             report["ai"] += 1
@@ -1398,7 +1635,7 @@ async def ai_merge_all(db: AsyncSession, worktree_project_id: int, *,
 
 async def ai_merge_suggest(db: AsyncSession, worktree_project_id: int, path: str,
                            hunk: dict | None = None, *, direction: str = _DIR_TO_MAIN,
-                           model_id: int | None = None) -> dict:
+                           model_id: int | None = None, repo: str = "") -> dict:
     """针对某文件（或某个冲突块）给出 AI 合并建议。
 
     - `model_id`：用户在合并弹窗中自选的模型（可为任意供应商下的模型）；不传时
@@ -1406,7 +1643,7 @@ async def ai_merge_suggest(db: AsyncSession, worktree_project_id: int, path: str
     - 失败时返回 ok=False 并带可读原因，前端据此提示"AI 建议不可用，请手动解决"。
     """
     try:
-        blobs = await merge_file_blobs(db, worktree_project_id, path, direction=direction)
+        blobs = await merge_file_blobs(db, worktree_project_id, path, direction=direction, repo=repo)
     except ValueError as e:
         return {"ok": False, "error": str(e)}
 

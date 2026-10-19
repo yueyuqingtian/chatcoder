@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import difflib
 import hashlib
 import logging
@@ -29,6 +30,18 @@ logger = logging.getLogger(__name__)
 _MAX_GIT_TIMEOUT = 30
 _CHECKPOINT_DIR = ".chatcoder/checkpoints"
 _BINARY_SNIFF_BYTES = 8192  # 二进制判定采样字节数
+# plan-20261019-diff: 超限文本生成展示窗口时最多读取的字节数（超过则只保留回滚备份，
+# 不再为展示耗内存读全文）。默认回滚记录上限 1MB，8MB 足够覆盖常见的超大 md/日志。
+_DIFF_TEXT_MAX_BYTES = 8 * 1024 * 1024
+# 展示窗口本身的字符上限：窗口只服务 UI diff 渲染，超出部分对用户也不可读。
+_MAX_DIFF_WINDOW_CHARS = 200_000
+
+# 文件文本类型（plan-20261019-diff）：超限文本不再与真二进制混为一谈——
+# 前者仍可生成 diff 与 +N -M，只是全文不落库（回滚走 checkpoint）。
+FILE_KIND_TEXT = "text"
+FILE_KIND_BINARY = "binary"
+FILE_KIND_OVERSIZE = "oversize"
+FILE_KIND_UNKNOWN = "unknown"
 
 # 写盘工具集合：这些工具会改写工作区文件，回滚时只恢复这些文件（绝不全局 git 回滚）
 _WRITE_TOOLS = ("fs_write", "editor_apply_diff", "multi_file_edit")
@@ -39,35 +52,66 @@ _BINARY_SNIFF_RETRIES = 3
 _BINARY_SNIFF_RETRY_SEC = 0.08
 
 
-def _is_binary_path(workspace: str, rel: str, max_bytes: int = 0) -> bool | None:
-    """写盘文件是否为二进制或超限：是则只做 checkpoint 备份，不存文本前后内容。
+# 常见文本扩展名：中文项目里 GBK/GB18030 编码的 md、txt、源码文件很常见，
+# UTF-8 解码失败不代表二进制——按扩展名兜底，保证这类文件仍能显示 diff。
+_TEXT_SUFFIXES = {
+    ".md", ".markdown", ".txt", ".log", ".csv", ".tsv", ".json", ".jsonc",
+    ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte",
+    ".css", ".scss", ".less", ".html", ".htm", ".xml", ".svg", ".yml", ".yaml",
+    ".toml", ".ini", ".cfg", ".conf", ".env", ".sql", ".java", ".kt", ".go",
+    ".rs", ".c", ".h", ".cc", ".cpp", ".hpp", ".cs", ".rb", ".php", ".sh",
+    ".ps1", ".bat", ".cmd", ".gradle", ".properties",
+}
 
-    判定规则：含 NUL 字节 / 非 UTF-8 解码失败 / 超过 max_bytes（0=不限制）→ True。
-    plan-1085 三态：读取 OSError（含 PermissionError/共享冲突，Windows 杀软/EDR
-    会对刚写盘文件短暂持有扫描句柄）先短重试退避；重试仍失败返回 None（未知/
-    读取失败）并 warning 留痕，不再误判为二进制——由调用方（agent_loop）用内存
-    before/工具返回 new_content 兜底统计与记录。仅基于内容证据才判二进制。
+
+def _sample_is_text(sample: bytes, rel: str = "") -> bool:
+    """采样字节是否为文本。
+
+    不能用 sample.decode("utf-8") 直接判定：采样点可能刚好落在多字节字符中间
+    （中文 UTF-8 每个字 3 字节，8192 字节处极易被截断），那会把正常中文文档误判为
+    二进制，进而丢弃前后内容——表现为工具卡无 +N -M、展开提示「二进制/大文件」。
+    增量解码器 final=False 会保留不完整尾字节，正好避开采样边界。
+
+    UTF-8 解码失败时按文本扩展名兜底（GBK/GB18030 文档），否则才判二进制。
+    """
+    if b"\x00" in sample:
+        return False
+    try:
+        codecs.getincrementaldecoder("utf-8")().decode(sample, final=False)
+    except UnicodeDecodeError:
+        return Path(rel).suffix.lower() in _TEXT_SUFFIXES
+    return True
+
+
+def inspect_write_target(workspace: str, rel: str, max_bytes: int = 0) -> tuple[str, int]:
+    """判定写盘目标类型，返回 (kind, size)。
+
+    - text：可解码文本且未超限 → 前后内容可完整落库并生成精确 diff
+    - oversize：文本但超过 max_bytes → 回滚仍走 checkpoint，但可为展示生成窗口 diff
+    - binary：含 NUL 或非 UTF-8 → 只做 checkpoint，不展示文本 diff
+    - unknown：读取失败（杀软/EDR 瞬时锁）→ 交由调用方用内存/工具返回内容兜底
+
+    plan-20261019-diff: 旧实现把「超限」直接归入 binary，导致大 md 文档连 +N -M
+    都不显示、展开只剩「二进制/大文件」提示。
     """
     p = _fs_path(workspace, rel)
     try:
         if not p.exists() or not p.is_file():
-            return False
-        if max_bytes > 0 and p.stat().st_size > max_bytes:
-            return True
+            return FILE_KIND_TEXT, 0
+        size = p.stat().st_size
     except OSError as e:
         logger.warning("[rollback] 文件 stat 失败(判未知) %s: %s", rel, e)
-        return None
+        return FILE_KIND_UNKNOWN, 0
     last_err: OSError | None = None
     for attempt in range(_BINARY_SNIFF_RETRIES):
         try:
             with open(p, "rb") as f:
                 sample = f.read(_BINARY_SNIFF_BYTES)
-            if b"\x00" in sample:
-                return True
-            sample.decode("utf-8")
-            return False
-        except UnicodeDecodeError:
-            return True  # 内容证据：非 UTF-8
+            if not _sample_is_text(sample, rel):
+                return FILE_KIND_BINARY, size
+            if max_bytes > 0 and size > max_bytes:
+                return FILE_KIND_OVERSIZE, size
+            return FILE_KIND_TEXT, size
         except OSError as e:
             last_err = e
             if attempt + 1 < _BINARY_SNIFF_RETRIES:
@@ -75,7 +119,18 @@ def _is_binary_path(workspace: str, rel: str, max_bytes: int = 0) -> bool | None
     logger.warning(
         "[rollback] 文件读取失败(判未知而非二进制) %s: %s", rel, last_err,
     )
-    return None
+    return FILE_KIND_UNKNOWN, size
+
+
+def _is_binary_path(workspace: str, rel: str, max_bytes: int = 0) -> bool | None:
+    """写盘文件是否不可按文本记录：二进制或超限返回 True，文本 False，读失败 None。
+
+    保留旧签名供回滚/兼容调用；需要区分「超限文本」时用 inspect_write_target。
+    """
+    kind, _size = inspect_write_target(workspace, rel, max_bytes)
+    if kind == FILE_KIND_UNKNOWN:
+        return None
+    return kind != FILE_KIND_TEXT
 
 
 # ── git 基础操作 ──
@@ -759,10 +814,14 @@ def resolve_command_write_paths(tool_name: str, args: dict, workspace: str) -> l
 
 async def record_turn_write(db: AsyncSession, *, session_id: int, turn_id: int,
                             tool: str, path: str, before: str | None, after: str | None,
-                            binary: bool = False, call_key: str | None = None) -> None:
+                            binary: bool = False, call_key: str | None = None,
+                            diff_before: str | None = None,
+                            diff_after: str | None = None) -> None:
     """记录一次写盘操作的前后内容（精确回滚依据）。失败不阻塞（非关键路径）。
 
     binary=True 表示二进制/超限文件：不存文本前后内容，回滚走 checkpoint 备份恢复。
+    plan-20261019-diff: diff_before/diff_after 存「展示窗口」——超过记录上限的文本
+    仍能生成 UI diff 与 +N -M，避免大 md 文档只显示「二进制/大文件」。
     plan-89-387: call_key 关联发起该次写盘的工具调用——同一 turn 内同文件多次编辑时，
     前端据此精确取「这一次编辑」的前后内容（见 get_file_diff）。
     v975：经 WriteEngine 单写线程（写事务不阻塞事件循环、无锁单写者）。
@@ -774,7 +833,8 @@ async def record_turn_write(db: AsyncSession, *, session_id: int, turn_id: int,
             from app.persistence.models.rollback import RollbackWrite
             s.add(RollbackWrite(session_id=session_id, turn_id=turn_id, tool=tool,
                                 path=path, old_content=before, new_content=after,
-                                binary=binary, call_key=call_key))
+                                binary=binary, call_key=call_key,
+                                diff_before=diff_before, diff_after=diff_after))
             s.commit()
 
         await run_write_locked(_persist, label=f"rollback.write.{turn_id}")
@@ -800,23 +860,39 @@ async def list_turn_writes(db: AsyncSession, session_id: int, turn_id: int) -> l
 # ── 变更审核（v11）：以 RollbackWrite 为数据源的聚合 + FileReview 审核状态 ──
 
 _MAX_DIFF_CHANGE_LINES = 2000  # 单文件 diff 变更行数上限，超出截断提示
+# 单次响应渲染的行数上限（含上下文）：超出只返回前 N 行并标记 truncated，
+# 统计仍是全量——避免超大 diff 把前端渲染拖垮。
+_MAX_DIFF_LINES_RENDER = 4000
+# 大文本启用 autojunk：避免重复空行过多时 SequenceMatcher 退化卡顿。
+# 统计、取行、窗口三处共用同一匹配器，保证「摘要 +N -M」与展开的行完全一致。
+_JUNK_THRESHOLD_LINES = 6000
 
 
-def _diff_stats(before: str | None, after: str | None) -> tuple[int, int]:
-    """用 difflib.unified_diff 统计增删行数（仅含变更行，不含上下文/文件头）。"""
+def _matcher(a: list[str], b: list[str]) -> difflib.SequenceMatcher:
+    return difflib.SequenceMatcher(None, a, b, autojunk=len(a) + len(b) > _JUNK_THRESHOLD_LINES)
+
+
+def diff_stats(before: str | None, after: str | None) -> tuple[int, int]:
+    """行级增删统计（SequenceMatcher opcodes，与 _diff_lines 同源）。
+
+    旧实现走 unified_diff，和展开行用的 opcodes 是两套口径；遇到""空行/重复行时
+    摘要与展开行数可能对不上。统一为同一匹配器后，摘要 +N -M 恒等于展开的 add/del 行数。
+    """
     b = (before or "").splitlines()
     a = (after or "").splitlines()
     if b == a:
         return 0, 0
     additions = deletions = 0
-    for line in difflib.unified_diff(b, a, n=0, lineterm=""):
-        if line.startswith(("+++", "---")):
-            continue
-        if line.startswith("+"):
-            additions += 1
-        elif line.startswith("-"):
-            deletions += 1
+    for tag, i1, i2, j1, j2 in _matcher(b, a).get_opcodes():
+        if tag in ("insert", "replace"):
+            additions += j2 - j1
+        if tag in ("delete", "replace"):
+            deletions += i2 - i1
     return additions, deletions
+
+
+# 兼容旧调用名（agent_loop / 测试此前使用私有名）
+_diff_stats = diff_stats
 
 
 def _truncate_lines(text: str | None, limit: int = _MAX_DIFF_CHANGE_LINES) -> str | None:
@@ -839,7 +915,7 @@ def _diff_lines(before: str | None, after: str | None, context: int = 3) -> list
     """
     b = (before or "").splitlines()
     a = (after or "").splitlines()
-    sm = difflib.SequenceMatcher(None, b, a)
+    sm = _matcher(b, a)
     opcodes = sm.get_opcodes()
     n = len(opcodes)
     out: list[dict] = []
@@ -884,7 +960,7 @@ def _truncate_window(before: str | None, after: str | None, context: int = 50) -
     a = (after or "").splitlines()
     if b == a:
         return before, after
-    sm = difflib.SequenceMatcher(None, b, a, autojunk=False)
+    sm = _matcher(b, a)
     changes = [(i1, i2, j1, j2) for tag, i1, i2, j1, j2 in sm.get_opcodes() if tag != "equal"]
     if not changes:
         return before, after
@@ -898,6 +974,47 @@ def _truncate_window(before: str | None, after: str | None, context: int = 50) -
     b_slice = "\n".join(b[b_lo:b_hi])
     a_slice = "\n".join(a[a_lo:a_hi])
     return b_slice, a_slice
+
+
+def _cap_window_text(text: str | None) -> str | None:
+    """窗口文本按字符上限截断（UI 只渲染有限内容，避免超大 diff 拖垮前端）。"""
+    if text is None:
+        return None
+    if len(text) <= _MAX_DIFF_WINDOW_CHARS:
+        return text
+    return text[:_MAX_DIFF_WINDOW_CHARS] + "\n…(内容过长，已截断)"
+
+
+def _head_tail_excerpt(text: str, max_chars: int = _MAX_DIFF_WINDOW_CHARS // 2) -> str:
+    """超巨文本的降级摘录：保留头尾各一半，避免对超大内容做全量 diff。"""
+    if len(text) <= max_chars:
+        return text
+    half = max_chars // 2
+    return text[:half] + "\n…(内容过长，已截断)\n" + text[-half:]
+
+
+def build_diff_window(before: str | None, after: str | None) -> tuple[str | None, str | None]:
+    """为超限文本生成 UI diff 展示窗口（写盘前后各自裁到变更区周边）。
+
+    仅用于展示：全文不落库，回滚仍按写盘前 checkpoint 恢复。
+    真二进制（前后都无文本）返回 (None, None)，调用方保留「二进制」提示。
+    超巨文本（> _DIFF_TEXT_MAX_BYTES 字符）不做精确窗口定位，退化为头尾摘录，
+    避免为展示对几十 MB 内容跑 SequenceMatcher 卡住事件循环。
+    """
+    if before is None and after is None:
+        return None, None
+    b_raw, a_raw = before or "", after or ""
+    if b_raw == a_raw:
+        return _cap_window_text(b_raw), _cap_window_text(a_raw)
+    if len(b_raw) > _DIFF_TEXT_MAX_BYTES or len(a_raw) > _DIFF_TEXT_MAX_BYTES:
+        return _cap_window_text(_head_tail_excerpt(b_raw)), _cap_window_text(_head_tail_excerpt(a_raw))
+    b_disp, a_disp = _truncate_window(b_raw, a_raw, context=50)
+    return _cap_window_text(b_disp), _cap_window_text(a_disp)
+
+
+def read_diff_text(workspace: str, rel: str, limit: int = _DIFF_TEXT_MAX_BYTES) -> str | None:
+    """读取用于展示的文本内容（超过 limit 字节不读，避免为展示耗内存）。"""
+    return _read_file_text(workspace, rel, max_bytes=limit)
 
 
 async def list_turn_changes(db: AsyncSession, *, session_id: int, turn_id: int,
@@ -931,26 +1048,34 @@ async def list_turn_changes(db: AsyncSession, *, session_id: int, turn_id: int,
     changes: list[dict] = []
     for path, recs in by_path.items():
         binary = all(getattr(r, "binary", False) for r in recs)
-        before = recs[0].old_content
-        last = recs[-1]
-        if last.new_content is not None:
-            after = last.new_content
-        elif last.old_content is not None:
-            # plan-20261018-turn-changes：本轮最后一次写盘把文件删掉了。
-            # 不能回退磁盘（后续轮次可能重建了同名文件），否则会被误判成 modified，
-            # 且与 get_file_diff 的删除口径不一致。
-            after = None
+        # plan-20261019-diff: 超限文本带展示窗口时按窗口统计，不再固定 +0 -0
+        window_before = getattr(recs[0], "diff_before", None)
+        window_after = getattr(recs[-1], "diff_after", None)
+        has_window = window_before is not None or window_after is not None
+        existed_before = any(r.old_content is not None for r in recs) or bool(window_before)
+        if has_window:
+            before, after = window_before, window_after
         else:
-            after = _read_file_text(workspace, path)
-        if binary:
-            action = "modified"  # 二进制/大文件：按写盘前备份恢复，不展示文本 diff
-        elif all(r.old_content is None for r in recs):
+            before = recs[0].old_content
+            last = recs[-1]
+            if last.new_content is not None:
+                after = last.new_content
+            elif last.old_content is not None:
+                # plan-20261018-turn-changes：本轮最后一次写盘把文件删掉了。
+                # 不能回退磁盘（后续轮次可能重建了同名文件），否则会被误判成 modified，
+                # 且与 get_file_diff 的删除口径不一致。
+                after = None
+            else:
+                after = _read_file_text(workspace, path)
+        if binary and not has_window:
+            action = "modified"  # 真二进制：按写盘前备份恢复，不展示文本 diff
+        elif not existed_before:
             action = "added"
         elif after is None:
             action = "deleted"
         else:
             action = "modified"
-        additions, deletions = _diff_stats(before, after)
+        additions, deletions = diff_stats(before, after)
         changes.append({
             "path": path,
             "action": action,
@@ -1012,10 +1137,26 @@ async def get_file_diff(db: AsyncSession, *, session_id: int, turn_id: int,
         return None
 
     # plan-89-387: 单次编辑口径（命中该 call_key 的写盘记录）
+    # plan-20261019-diff: 一次调用可能对同一文件产生多条记录（multi_file_edit 多处编辑），
+    # 必须按整次调用合并：before=首条写盘前内容，after=末条写盘后内容。
     if call_key:
-        hit = next((w for w in writes if (getattr(w, "call_key", None) or "") == call_key), None)
-        if hit is not None:
-            return _single_write_diff(workspace, path, hit)
+        hits = [w for w in writes if (getattr(w, "call_key", None) or "") == call_key]
+        if hits:
+            return _single_write_diff(workspace, path, hits)
+        # 该文件记录都带 call_key 却都不匹配：说明消息上的 key 与记录不一致。
+        # 回退整轮会把同文件其它编辑并进来（展开第一次看到第二次的改动），
+        # 返回 None 让前端用调用参数兜底，保证每次展开只显示自己的改动。
+        if all((getattr(w, "call_key", None) or "") for w in writes):
+            return None
+
+    # plan-20261019-diff: 超限文本的展示窗口优先（全文不落库，回滚仍按 checkpoint）
+    window_before = getattr(writes[0], "diff_before", None)
+    window_after = getattr(writes[-1], "diff_after", None)
+    if window_before is not None or window_after is not None:
+        return _build_diff_payload(
+            path, window_before, window_after, single_edit=False,
+            reason="文件较大，仅展示变更窗口；完整内容按写盘前备份恢复",
+        )
 
     if writes[0].binary:
         # plan-1085: 历史污染轮降级——同 turn 同文件存在带内容的 bin=0 记录时，
@@ -1024,31 +1165,12 @@ async def get_file_diff(db: AsyncSession, *, session_id: int, turn_id: int,
         _fb = next((w for w in writes if not w.binary and w.old_content is not None), None)
         _after_now = _read_file_text(workspace, path)
         if _fb is not None and _after_now is not None:
-            _add_f, _del_f = _diff_stats(_fb.old_content, _after_now)
-            b_disp, a_disp = _truncate_window(_fb.old_content, _after_now)
-            return {
-                "path": path,
-                "before": b_disp,
-                "after": a_disp,
-                "truncated": (_add_f + _del_f) > _MAX_DIFF_CHANGE_LINES,
-                "reason": "该轮部分编辑文件读取失败，已降级展示最近可用版本 diff",
-                "lines": _diff_lines(_fb.old_content, _after_now),
-                "additions": _add_f,
-                "deletions": _del_f,
-                "single_edit": False,
-            }
+            return _build_diff_payload(
+                path, _fb.old_content, _after_now, single_edit=False,
+                reason="该轮部分编辑文件读取失败，已降级展示最近可用版本 diff",
+            )
         # 二进制/大文件：不展示文本 diff，提示按写盘前备份恢复
-        return {
-            "path": path,
-            "before": None,
-            "after": None,
-            "truncated": False,
-            "reason": "二进制/大文件，不展示文本 diff，回滚按写盘前备份恢复",
-            "lines": None,
-            "additions": 0,
-            "deletions": 0,
-            "single_edit": False,
-        }
+        return _binary_diff_payload(path, single_edit=False)
 
     # plan-20261018-turn-changes: 无 call_key 时按「该轮最后一次写盘」的边界取 after。
     # 旧实现 after 直接读当前磁盘，会把该轮之后其它轮次对同一文件的编辑并入本轮 diff
@@ -1063,55 +1185,68 @@ async def get_file_diff(db: AsyncSession, *, session_id: int, turn_id: int,
     else:
         # 老记录没有存写盘后内容，只能回退磁盘现状（唯一无法规避的兼容分支）
         after = _read_file_text(workspace, path)
-    add, dele = _diff_stats(before, after)
+    return _build_diff_payload(path, before, after, single_edit=False)
+
+
+def _binary_diff_payload(path: str, *, single_edit: bool) -> dict:
+    """真二进制/无任何文本证据：不展示文本 diff。"""
+    return {
+        "path": path,
+        "before": None,
+        "after": None,
+        "truncated": False,
+        "reason": "二进制/大文件，不展示文本 diff，回滚按写盘前备份恢复",
+        "lines": None,
+        "additions": 0,
+        "deletions": 0,
+        "single_edit": single_edit,
+    }
+
+
+def _build_diff_payload(path: str, before: str | None, after: str | None, *,
+                        single_edit: bool, reason: str | None = None) -> dict:
+    """统一生成 diff 响应：统计 / 行级 diff / 展示窗口同源，保证摘要与展开一致。"""
+    add, dele = diff_stats(before, after)
+    lines = _diff_lines(before, after)
     truncated = (add + dele) > _MAX_DIFF_CHANGE_LINES
+    if len(lines) > _MAX_DIFF_LINES_RENDER:
+        lines = lines[:_MAX_DIFF_LINES_RENDER]
+        truncated = True
     b_disp, a_disp = _truncate_window(before, after)
     return {
         "path": path,
         "before": b_disp,
         "after": a_disp,
         "truncated": truncated,
-        "lines": _diff_lines(before, after),
+        "reason": reason,
+        "lines": lines,
         "additions": add,
         "deletions": dele,
-        "single_edit": False,
+        "single_edit": single_edit,
     }
 
 
-def _single_write_diff(workspace: str, path: str, rec: RollbackWrite) -> dict:
-    """plan-89-387: 单条写盘记录的「本次变更」diff（不与其他编辑合并）。
+def _single_write_diff(workspace: str, path: str, recs: list[RollbackWrite]) -> dict:
+    """plan-89-387: 单次工具调用的「本次变更」diff。
 
-    before/after 取记录自身的 old_content / new_content；写盘后内容缺失
-    （二进制降级、磁盘读取失败且无工具兜底）时回退当前磁盘内容。
-    additions/deletions 与 lines 同源（_diff_stats / _diff_lines 均为
-    SequenceMatcher 口径），保证卡片 +N -M 与展开内容一致。
+    plan-20261019-diff: 同一次调用对同一文件的多次编辑（multi_file_edit）合并为
+    一次变更：before=首条 old_content，after=末条 new_content，避免只取第一条丢失
+    后续编辑；超限文本用 diff 窗口展示（全文按写盘前备份回滚）。
     """
-    if rec.binary:
-        return {
-            "path": path,
-            "before": None,
-            "after": None,
-            "truncated": False,
-            "reason": "二进制/大文件，不展示文本 diff，回滚按写盘前备份恢复",
-            "lines": None,
-            "additions": 0,
-            "deletions": 0,
-            "single_edit": True,
-        }
-    before = rec.old_content
-    after = rec.new_content if rec.new_content is not None else _read_file_text(workspace, path)
-    add, dele = _diff_stats(before, after)
-    b_disp, a_disp = _truncate_window(before, after)
-    return {
-        "path": path,
-        "before": b_disp,
-        "after": a_disp,
-        "truncated": (add + dele) > _MAX_DIFF_CHANGE_LINES,
-        "lines": _diff_lines(before, after),
-        "additions": add,
-        "deletions": dele,
-        "single_edit": True,
-    }
+    window_before = getattr(recs[0], "diff_before", None)
+    window_after = getattr(recs[-1], "diff_after", None)
+    if window_before is not None or window_after is not None:
+        return _build_diff_payload(
+            path, window_before, window_after, single_edit=True,
+            reason="文件较大，仅展示变更窗口；完整内容按写盘前备份恢复",
+        )
+    if all(getattr(r, "binary", False) for r in recs):
+        return _binary_diff_payload(path, single_edit=True)
+    before = recs[0].old_content
+    after = recs[-1].new_content
+    if after is None:
+        after = _read_file_text(workspace, path)
+    return _build_diff_payload(path, before, after, single_edit=True)
 
 
 async def reviewed_paths(db: AsyncSession, turn_id: int) -> dict[str, bool]:

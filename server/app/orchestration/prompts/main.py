@@ -208,10 +208,10 @@ Rules for the report:
 # plan-334-1661：电脑操控任务规范。仅在「设置 → 电脑操控」启用时注入，未启用零 token 成本。
 # 核心两件事：任务前先查已沉淀的路线（recall），任务成功后必须沉淀路线（save）——
 # 后者是模型最容易漏掉的一步，却是把「每次重新摸索」变成「一次摸索反复复用」的关键。
-# plan-365-1757：新增「点准」纪律——按锚点点（编号/文字/图片比例）而不是自己算屏幕坐标。
-# plan-20261018-operator-boost：截图编号默认关闭、截图默认不缩放（图片像素 = 屏幕物理像素），
-# 定位顺序改为「文字锚点 > 控件坐标 > image_px」；路线召回改为工具自动附带、沉淀有收尾守卫兜底。
-DESKTOP_TASK_PROMPT = """## Computer-Control Tasks — reuse routes, point by anchor, settle after
+# plan-20261019-desktop-precision：坐标契约改为「唯一坐标系 = 最近一次截图，口径按模型族写在截图结果里」，
+# 去掉 OCR 文字定位 / 截图编号 / 点前校验；动作默认带回已稳定的新画面，流程已知时用批量动作。
+# 本段与模型无关（不写具体口径），保证系统提示词前缀稳定、可命中缓存。
+DESKTOP_TASK_PROMPT = """## Computer-Control Tasks — one coordinate frame, batch the known, reuse routes
 When a task actually operates desktop apps with the `desktop_*` tools:
 - **Reuse saved routes**: `desktop_focus`, `desktop_apps` (start), `desktop_snapshot` and `desktop_screenshot`
   automatically append the saved route for the target app (`[已沉淀的操作路线 ...]`). When one is attached, follow
@@ -221,41 +221,35 @@ When a task actually operates desktop apps with the `desktop_*` tools:
   `desktop_recipe` (action=save) with the process name, a one-line intent, the general principle that worked
   (how you located things, the order, which steps can be merged) and the pitfalls. Never record coordinates.
   If the route was attached and worked unchanged, saving is optional; otherwise the system will remind you.
-- **Point by anchor, never by arithmetic**: prefer `desktop_click text_target="<visible text>"` — the tool
-  re-locates the text and checks it before clicking. For controls without text use the screen coordinates that
-  `desktop_snapshot` / the screenshot's element list report (`x`/`y`, already screen coordinates). For anything
-  else pass `image_px`/`image_py` — the pixel you read on the screenshot. Screenshots cover the whole screen, or only
-  the target window when you pass `title`/`handle` to `desktop_screenshot` (sharper — prefer it for a small app
-  window), and are scaled to the size you actually see, so image pixels are **not** screen pixels: never convert
-  them yourself — the tool does.
-  Pass `title` of the app you are clicking in; a click that would land outside that window is refused as a
-  coordinate error. If the numbered-marks setting is on, `desktop_click ref=<number>` also works.
-- **Batch an interaction into one call**: clicking a field, clearing it, typing and pressing Enter is
-  **one** call — `desktop_click text_target="..." clear_first=true text="..." keys=ENTER`; typing into an
-  already-focused field and submitting is `desktop_type text="..." keys=ENTER`. Each extra call costs a full
-  model round trip, which dwarfs the tool's own latency — combine whenever the sequence is known.
-- **Say what should be there**: pass `expect="<element name>"` with a coordinate click. The tool checks the
-  point and nudges a small offset to the element's centre; the default (*lenient*) level warns but still
-  executes. Treat a warning as feedback — adjust the anchor and retry once, never repeat the same call
-  unchanged. Clicking a blank spot is refused by default; pass `allow_blank=true` only for unlabelled icons
-  or canvas areas.
+- **One coordinate frame — the latest screenshot**: every `x`/`y` you pass (click, scroll, drag, batch steps,
+  zoom regions) is read off the most recent screenshot, in the convention stated on its `坐标口径` line (image
+  pixels, or 0–1000 relative position). Never convert to screen pixels yourself — the tool maps everything.
+  Zoom (`desktop_screenshot zoom="x0,y0,x1,y1"`) is only for looking closer; it never changes the frame.
+- **Native apps: snapshot, then click by element**: for apps with real controls (settings, Explorer, Office,
+  business clients) call `desktop_snapshot` once and click with `desktop_click element="e5"` — exact, no
+  coordinates involved. Web content and self-drawn apps usually expose no controls: use the screenshot.
+- **Actions return the settled screen**: click / type / keys / scroll wait until the screen stops changing and
+  attach a fresh screenshot (the new frame), so do not take an extra screenshot just to see the result. If the
+  result says `动作后画面没有可见变化`, the action had no effect — re-check the position (zoom if the target is
+  small) or switch to an element, instead of repeating the same call. If a page is still loading, use
+  `desktop_screenshot wait_stable=true` rather than clicking again.
+- **Batch what you can predict**: a known sequence (click a field, type, Tab, type, Enter; or several fixed
+  menu clicks) is **one** `desktop_batch` call — each model round trip costs far more than the actions. Clicking
+  a field and typing into it is also one `desktop_click … text="…" keys=ENTER`. Do not guess coordinates of
+  things not yet visible (menu items that appear after a click): run up to that point, then continue from the
+  new screenshot.
+- **Name the window you act in**: pass `title`/`handle` of the target app; a point outside that window is refused
+  as a coordinate error. If it is not in front, add `focus_first=true` instead of a separate focus call.
 - **Follow the window the app opens**: a click often opens a separate window (video player, detail page,
   dialog). The action result reports it with its handle (`操作后出现了新窗口 … handle=…`) — switch every later
   screenshot / click / key to that handle. Do not `desktop_focus` the old window back: that buries the new one.
-  A "window is not in the foreground" error that names another window of the same app means the same thing.
 - **Black is not broken**: video, game and copy-protected areas capture as black even while playing. When a
   screenshot reports a large near-black area, judge the state from window titles, visible text and controls
   (episode name, progress, pause button) instead of retrying or pressing Esc; ask the user if still unsure.
-- **Stop after two misses**: if the same target fails twice, change the approach (text anchor → snapshot
-  coordinates → zoom with `desktop_screenshot zoom_at`) instead of retrying the same thing.
-- **Destructive actions need proof**: for send / submit / delete / clear / pay / uninstall / overwrite,
-  pass `destructive=true`. The tool re-locates and confirms the target first, and refuses rather than guessing.
-- **Do not re-verify what you already know**: one snapshot per screen state; `desktop_hit` answers "what is
-  at this point" far more cheaply than a full snapshot.
+- **Stop after two misses**: if the same target fails twice, change the approach (zoom to read it precisely →
+  element from `desktop_snapshot` → keyboard navigation) instead of retrying the same thing.
 - **Read the error, then apply the fix**: desktop_* failures state the fix (e.g. "window is not in the
   foreground" → `focus_first=true`). Apply it instead of repeating the call.
-- **Combine action with observation**: when a click or keystroke changes the screen, pass `then_shot=true`
-  (plus `then_wait_stable=true` for animated or loading screens) so the new screen comes back in the same call.
 """
 
 

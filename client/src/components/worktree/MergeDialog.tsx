@@ -10,13 +10,14 @@
  * 冲突块识别：对本文件三个版本做行级 diff，取"两侧都相对 base 有改动且改动不同"的行区间。
  * 这里用轻量实现（LCS 行 diff），不引入额外依赖。
  */
-import { useEffect, useMemo, useState } from "react";
-import { api, type ModelOut, type WorktreeMergeDirection, type WorktreeOut } from "../../api/client";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { api, type ModelOut, type WorktreeMergeDirection, type WorktreeOut, type WorktreeRepoOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { sortModelsByProvider } from "../../utils/modelOrder";
 import { Dialog } from "../ui/Dialog";
+import { Popover } from "../ui";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { IconCheck, IconChevronDown, IconChevronUp, IconFileText, IconRefresh, IconWand } from "../icons";
+import { IconCheck, IconChevronDown, IconChevronUp, IconFileText, IconLayers, IconRefresh, IconWand } from "../icons";
 
 /* ── plan-308-1542 需求3-A：git diff3 冲突标记解析 ──
  *
@@ -210,12 +211,28 @@ export function MergeDialog({
   const [modelId, setModelId] = useState<number | null>(null);
   const [models, setModels] = useState<ModelOut[]>([]);
 
-  const loadPreview = async () => {
+  /* ── plan-20261019-git-multirepo：工作树组按仓库逐个合并 ──
+   * repos 为工作树里的成员仓库；repo 是当前选中的成员（相对路径，"" = 整树/根成员）。
+   * 只有多成员时才显示切换控件，单仓库与旧版行为完全一致。 */
+  const [repos, setRepos] = useState<WorktreeRepoOut[]>([]);
+  const [repo, setRepo] = useState("");
+  const [repoOpen, setRepoOpen] = useState(false);
+  const repoBtnRef = useRef<HTMLButtonElement | null>(null);
+  /** 成员的选择键：工作树组里根成员的 rel 是空串，而接口把空串当作「未指定仓库」，
+   *  多成员时必须用 "." 明确指向根成员（后端 _pick_member 支持该写法）。 */
+  const memberKey = (rel: string): string => (repos.length > 1 && !rel ? "." : rel);
+  /** AI 建议成功后的可见提示（声明在切换仓库之前，切换仓库时一并清空） */
+  const [aiNotice, setAiNotice] = useState("");
+
+  /** plan-20261019-git-multirepo：repoRel 显式传入（切换仓库时立刻用新值），
+   *  否则用当前 state——避免切换后仍拿旧仓库去求预览。 */
+  const loadPreview = async (repoRel?: string) => {
     if (!worktree) return;
+    const targetRepo = repoRel ?? repo;
     setLoading(true);
     setError("");
     try {
-      const pv = await api.worktreeMergePreview(worktree.id, direction);
+      const pv = await api.worktreeMergePreview(worktree.id, direction, targetRepo);
       setPreview(pv);
       // 可自动合并的文件直接预置为合并结果，用户只需处理冲突文件
       const auto: Record<string, string> = {};
@@ -233,16 +250,42 @@ export function MergeDialog({
 
   useEffect(() => {
     if (!open || !worktree) return;
+    // 局部 const：异步回调里保留非空收窄
+    const wt = worktree;
     setActivePath(null);
     setBlobs(null);
     setResolved({});
     setError("");
+    setPreview(null);
     setPostMerge(false);
     setPostError("");
     setConfirmCommit(false);
-    void loadPreview();
+    setRepoOpen(false);
+    setRepos([]);
+    setRepo("");
+    // 取仓库列表期间保持"正在检测差异"文案，避免多仓库打开瞬间内容区空白
+    setLoading(true);
+    let cancelled = false;
+    void (async () => {
+      // plan-20261019-git-multirepo：先取工作树里的成员仓库；多成员时逐个合并。
+      // 取不到（旧后端 / 非 git 组）就回落整树单仓库行为，不打扰用户。
+      let list: WorktreeRepoOut[] = [];
+      try {
+        list = await api.worktreeRepos(wt.id);
+      } catch {
+        list = [];
+      }
+      if (cancelled) return;
+      // 单成员保持 repo=""，与既有整树合并完全一致；多成员默认第一个，
+      // 根成员（rel 为空串）改写成 "."，否则后端会认为没有指定仓库。
+      const initial = list.length > 1 ? (list[0].rel || ".") : "";
+      setRepos(list);
+      setRepo(initial);
+      await loadPreview(initial);
+    })();
     // 模型列表：供 AI 合并自选供应商模型
     api.listModels().then(setModels).catch(() => setModels([]));
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, worktree?.id, direction]);
 
@@ -252,7 +295,8 @@ export function MergeDialog({
     setCommitting(true);
     setError("");
     try {
-      await api.worktreeCommit(worktree.id, toMain ? "worktree" : "main");
+      // plan-20261019-git-multirepo：只提交当前仓库成员，不能把其它成员一起提交
+      await api.worktreeCommit(worktree.id, toMain ? "worktree" : "main", undefined, repo);
       setConfirmCommit(false);
       await loadPreview();
     } catch (e) {
@@ -260,12 +304,27 @@ export function MergeDialog({
     } finally { setCommitting(false); }
   };
 
+  /** plan-20261019-git-multirepo：切换到另一个成员仓库。
+   *  显式把新 rel 传给 loadPreview，避免闭包里读到旧 repo 求到旧预览。 */
+  const switchRepo = (rel: string) => {
+    setRepoOpen(false);
+    if (rel === repo) return;
+    setRepo(rel);
+    setActivePath(null);
+    setBlobs(null);
+    setResolved({});
+    setPreview(null);
+    setError("");
+    setAiNotice("");
+    void loadPreview(rel);
+  };
+
   const openFile = async (path: string) => {
     if (!worktree) return;
     setLoading(true);
     setError("");
     try {
-      const data = await api.worktreeMergeFile(worktree.id, path, direction);
+      const data = await api.worktreeMergeFile(worktree.id, path, direction, repo);
       setBlobs({ base: data.base, ours: data.ours, theirs: data.theirs });
       // 默认合并结果：优先用后端自动三方合并的内容（含冲突标记），否则用来源侧版本
       const auto = preview?.files.find((f) => f.path === path)?.merged;
@@ -367,8 +426,6 @@ export function MergeDialog({
     setMerged(next);
   };
 
-  const [aiNotice, setAiNotice] = useState("");
-
   /** 请求 AI 建议（针对当前冲突块）。
    *
    * plan-308-1542 修复（用户反馈"ai 建议点击了看不到"）：
@@ -388,7 +445,7 @@ export function MergeDialog({
       const hunk = conflicts[hunkIndex];
       const res = await api.worktreeMergeAi(worktree.id, activePath,
         hunk ? { ours: hunk.oursLines.join("\n"), theirs: hunk.theirsLines.join("\n") } : undefined,
-        { direction, modelId });
+        { direction, modelId, repo });
       if (res.ok && res.suggestion != null) {
         if (hunk) {
           // 把建议替换到该冲突块位置
@@ -424,7 +481,7 @@ export function MergeDialog({
     resetMergeProgress();
     try {
       const res = await api.worktreeMergeAiAll(worktree.id, {
-        direction, modelId, sessionId: currentSessionId,
+        direction, modelId, sessionId: currentSessionId, repo,
       });
       // 后端返回的 resolved 是权威结果（含 git 自动合入 + AI 解决）
       if (res.resolved) setResolved({ ...resolved, ...res.resolved });
@@ -490,7 +547,7 @@ export function MergeDialog({
           ? { path: f.path, deleted: true }
           : { path: f.path, content: resolved[f.path] ?? f.merged ?? "" },
       );
-      await api.worktreeMergeApply(worktree.id, files, direction);
+      await api.worktreeMergeApply(worktree.id, files, direction, repo);
       setConfirmApply(false);
       if (toMain) {
         // 合并已写入主工作区：不直接关闭，改为二次确认是否删除当前工作树
@@ -534,6 +591,8 @@ export function MergeDialog({
   };
   const srcName = toMain ? `工作树「${worktree?.name ?? ""}」` : `主工作区`;
   const dstName = toMain ? `主工作区` : `工作树「${worktree?.name ?? ""}」`;
+  /** plan-20261019-git-multirepo：当前选中的成员仓库（根成员的选择键为 "."） */
+  const currentRepo = repos.find((r) => memberKey(r.rel) === repo) ?? repos[0] ?? null;
 
   return (
     <>
@@ -578,6 +637,68 @@ export function MergeDialog({
           </>
         }
       >
+        {/* plan-20261019-git-multirepo：工作树含多个仓库时逐仓库合并；
+            单仓库/加载失败不显示此行，界面与旧版一致。文件列表与三栏工作台都可见。 */}
+        {repos.length > 1 && currentRepo && (
+          <div className="merge-scope">
+            <span className="merge-scope-label">仓库</span>
+            <div className="merge-scope-wrap">
+              <button
+                ref={repoBtnRef}
+                type="button"
+                className={`merge-scope-btn${repoOpen ? " is-open" : ""}`}
+                aria-haspopup="menu"
+                aria-expanded={repoOpen}
+                onClick={() => setRepoOpen((v) => !v)}
+              >
+                <IconLayers size={13} />
+                <span className="merge-scope-name">{currentRepo.name}</span>
+                {currentRepo.branch && <span className="merge-scope-branch">{currentRepo.branch}</span>}
+                <IconChevronDown size={11} />
+              </button>
+              <Popover
+                open={repoOpen}
+                onClose={() => setRepoOpen(false)}
+                placement="bottom-start"
+                className="merge-scope-pop"
+                ignoreRefs={[repoBtnRef]}
+                role="menu"
+                aria-label="选择要合并的仓库"
+              >
+                <div className="merge-scope-list">
+                  {repos.map((r) => (
+                    <button
+                      key={r.rel || "root"}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={memberKey(r.rel) === repo}
+                      className={`merge-scope-item${memberKey(r.rel) === repo ? " is-current" : ""}`}
+                      onClick={() => switchRepo(memberKey(r.rel))}
+                    >
+                      <span className="merge-scope-main">
+                        <span className="merge-scope-item-name">{r.name}</span>
+                        {/* 相对路径与名称相同时不重复显示 */}
+                        {(r.rel && r.rel !== r.name) && (
+                          <span className="merge-scope-item-path">{r.rel}</span>
+                        )}
+                      </span>
+                      <span className="merge-scope-item-side">
+                        {r.branch && <span className="merge-scope-item-branch">{r.branch}</span>}
+                        <span className={`merge-scope-item-dirty${r.dirty ? "" : " is-clean"}`}>
+                          {r.dirty ? "有未提交改动" : "无未提交改动"}
+                        </span>
+                      </span>
+                      {memberKey(r.rel) === repo && <IconCheck size={13} />}
+                    </button>
+                  ))}
+                </div>
+              </Popover>
+            </div>
+            <span className="merge-scope-hint">
+              工作树包含多个仓库，一次合并一个仓库：切换后处理该仓库的差异，全部合并完成再删除工作树。
+            </span>
+          </div>
+        )}
         {error && <div className="merge-error merge-error-block">{error}</div>}
         {/* plan-308-1542 修复：AI 建议成功后的可见反馈（此前点了没有任何提示） */}
         {aiNotice && <div className="merge-ai-notice">{aiNotice}</div>}

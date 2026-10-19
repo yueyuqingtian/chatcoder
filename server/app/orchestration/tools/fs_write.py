@@ -70,9 +70,12 @@ class FsWriteTool(Tool):
         # 旧实现一律 UTF-8 + 平台换行写入：GBK 文件被转成 UTF-8、LF 文件被整份改成 CRLF。
         # 新文件（或原文件无法按文本识别）保持旧行为。
         data: bytes | None = None
+        old_text: str | None = None
         if target.is_file():
             try:
-                data = encode_text(read_text_file(target), str(content))
+                tf = read_text_file(target)
+                old_text = tf.text
+                data = encode_text(tf, str(content))
             except (TextFileError, UnicodeEncodeError):
                 data = None
         try:
@@ -91,7 +94,10 @@ class FsWriteTool(Tool):
             display = str(target)
 
         # plan-1085: data 带回写入内容，供 agent_loop 磁盘读取失败时兜底统计/记录（不进模型上下文）
+        # plan-20261019-diff: 同时带回写前内容，避免写前读盘失败时整篇被误算为新增
         _data: dict[str, Any] = {"path": display, "bytes": len(content.encode("utf-8"))}
+        if old_text is not None and len(old_text) <= _NEW_CONTENT_MAX_CHARS:
+            _data["old_content"] = old_text
         if len(content) <= _NEW_CONTENT_MAX_CHARS:
             _data["new_content"] = content
         return ToolResult(

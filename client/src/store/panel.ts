@@ -122,10 +122,11 @@ interface PanelState extends PanelBucket {
   /** v2.2 (对齐 zcode 3.13): 打开子代理详情 tab（每线程独立实例，可多开） */
   openSubagent: (threadId: number, agentName?: string) => void;
   /** plan-156-620：待在 Git 面板展开差异的文件（工具卡点击文件时写入，GitPanel 消费后清空）。
-   *  plan-156-621：带上项目标识——面板跨项目保活时，旧项目的路径不能拿到当前仓库请求差异。 */
-  gitFocus: { path: string; staged: boolean; projectId: number | null } | null;
+   *  plan-156-621：带上项目标识——面板跨项目保活时，旧项目的路径不能拿到当前仓库请求差异。
+   *  plan-20261019-git-multirepo：repo 是文件所属仓库（相对项目根），面板先切到该仓库再展开。 */
+  gitFocus: { path: string; staged: boolean; projectId: number | null; repo: string } | null;
   /** plan-156-620：打开 Git 标签并展开某文件的差异。 */
-  openGitFile: (path: string, staged: boolean, projectId?: number | null) => void;
+  openGitFile: (path: string, staged: boolean, projectId?: number | null, repo?: string) => void;
   clearGitFocus: () => void;
   closeTab: (key: string) => void;
   /** v2.2 (对齐 zcode 3.3.3): 恢复最近关闭的标签（同时从栈中移除） */
@@ -234,8 +235,8 @@ export const usePanelStore = create<PanelState>((set, get) => ({
   },
 
   gitFocus: null,
-  openGitFile: (path, staged, projectId = null) => {
-    set({ gitFocus: { path, staged, projectId } });
+  openGitFile: (path, staged, projectId = null, repo = "") => {
+    set({ gitFocus: { path, staged, projectId, repo } });
     get().openPanel();
     get().openTab("git");
   },

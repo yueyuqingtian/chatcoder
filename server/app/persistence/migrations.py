@@ -113,6 +113,9 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("team_agents", "mcp_server_ids", "JSON"),
     # ========== rollback_writes（plan-88：二进制/超限文件只走 checkpoint 恢复）==========
     ("rollback_writes", "binary", "BOOLEAN DEFAULT 0 NOT NULL"),
+    # plan-20261019-diff: 超限文本的 diff 展示窗口（全文仍走 checkpoint）
+    ("rollback_writes", "diff_before", "TEXT"),
+    ("rollback_writes", "diff_after", "TEXT"),
     # plan-89-387: 写盘记录关联工具调用键——同轮同文件多次编辑按 call_key 取本次变更
     ("rollback_writes", "call_key", "VARCHAR(64)"),
     # ========== rollback_writes（工作流写入归属：回滚与冲突基线，nullable）==========

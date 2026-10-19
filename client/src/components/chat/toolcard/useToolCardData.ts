@@ -37,12 +37,16 @@ export interface GitItem {
   path: string;
   code: string;
   staged: boolean;
+  /** plan-20261019-git-multirepo：文件所属仓库（相对项目根，根仓库为空串），点击时据此切换面板仓库 */
+  repo: string;
 }
 
 export interface GitSectionData {
   branch: string | null;
   items: GitItem[];
   fileCount: number;
+  /** 本次改动涉及的仓库数（多仓库项目才 > 1） */
+  repoCount: number;
 }
 
 export interface PlanSectionData {
@@ -89,13 +93,14 @@ const gitCache = new Map<number, { at: number; status: GitStatusOut }>();
 const gitInflight = new Map<number, Promise<GitStatusOut>>();
 const planTitleCache = new Map<string, string>();
 
-/** 取项目 git 状态：5s 内复用；并发请求合并为一个。 */
+/** 取项目 git 状态：5s 内复用；并发请求合并为一个。
+ *  plan-20261019-git-multirepo：改用 /git/status-all，多仓库项目的改动也能汇总到工具卡。 */
 async function fetchGitStatus(projectId: number, force: boolean): Promise<GitStatusOut> {
   const hit = gitCache.get(projectId);
   if (!force && hit && Date.now() - hit.at < GIT_CACHE_MS) return hit.status;
   const flying = gitInflight.get(projectId);
   if (flying) return flying;
-  const p = api.gitStatus(projectId)
+  const p = api.gitStatusAll(projectId)
     .then((status) => { gitCache.set(projectId, { at: Date.now(), status }); return status; })
     .finally(() => { gitInflight.delete(projectId); });
   gitInflight.set(projectId, p);
@@ -192,11 +197,21 @@ export function useToolCardData(sessionId: number | null): ToolCardData {
 
   const git = useMemo<GitSectionData | null>(() => {
     if (!gitStatus || gitStatus.clean || sessionPaths.size === 0) return null;
+    const repos = gitStatus.repos ?? [];
+    // plan-20261019-git-multirepo：按最长仓库前缀归位，根仓库（空串）兜底
+    const repoOf = (path: string): string => {
+      const p = normPath(path);
+      let hit = "";
+      for (const r of repos) {
+        if (r.rel && (p === r.rel || p.startsWith(`${r.rel}/`)) && r.rel.length > hit.length) hit = r.rel;
+      }
+      return hit;
+    };
     const all: GitItem[] = [
-      ...gitStatus.conflicts.map((f) => ({ path: f.path, code: f.code, staged: false })),
-      ...gitStatus.staged.map((f) => ({ path: f.path, code: f.code, staged: true })),
-      ...gitStatus.unstaged.map((f) => ({ path: f.path, code: f.code, staged: false })),
-      ...gitStatus.untracked.map((f) => ({ path: f.path, code: f.code, staged: false })),
+      ...gitStatus.conflicts.map((f) => ({ path: f.path, code: f.code, staged: false, repo: repoOf(f.path) })),
+      ...gitStatus.staged.map((f) => ({ path: f.path, code: f.code, staged: true, repo: repoOf(f.path) })),
+      ...gitStatus.unstaged.map((f) => ({ path: f.path, code: f.code, staged: false, repo: repoOf(f.path) })),
+      ...gitStatus.untracked.map((f) => ({ path: f.path, code: f.code, staged: false, repo: repoOf(f.path) })),
     ];
     const seen = new Set<string>();
     const items = all.filter((f) => {
@@ -206,7 +221,12 @@ export function useToolCardData(sessionId: number | null): ToolCardData {
       return true;
     });
     if (items.length === 0) return null;
-    return { branch: gitStatus.branch, items, fileCount: items.length };
+    return {
+      branch: gitStatus.branch,
+      items,
+      fileCount: items.length,
+      repoCount: new Set(items.map((i) => i.repo)).size,
+    };
   }, [gitStatus, sessionPaths]);
 
   const planBase = useMemo(
@@ -251,6 +271,12 @@ export function useToolCardData(sessionId: number | null): ToolCardData {
          「N 运行中」——而右面板按 status 判定、同一时刻显示「已完成」，两边自相矛盾。 */
       const isTerminal = TERMINAL_SUBAGENT_STATUS.has(String(m.status));
       const isRunningAgent = !isTerminal && (m.status === "running" || m.status === "in_progress");
+      /* plan-20261019-subagent-ghost：没有任何归属锚点、也没有任何输出的条目
+         （典型来源是主代理完成事件曾被误记成「子代理 #N」）不进入栏目——
+         它们点开只是一个空面板。运行中的条目仍保留：它可能还没来得及产出消息。 */
+      const hasAnchor = m.turnId != null || m.taskId != null || m.programId != null
+        || m.spawnMessageId != null || (m.messageCount ?? 0) > 0;
+      if (!hasAnchor && !isRunningAgent) continue;
       const isCurrentTurn = m.turnId != null && m.turnId === runningTurnId;
       if (isRunningAgent) running.push({ id, name });
       else if (isCurrentTurn) currentTurnFinished.push({ id, name });

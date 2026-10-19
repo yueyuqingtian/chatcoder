@@ -13,7 +13,8 @@ declare global {
       openPath?: (path: string) => Promise<string>;
       /** 用系统默认浏览器打开外部链接 */
       openExternal?: (url: string) => Promise<unknown>;
-      showItemInFolder?: (path: string) => Promise<void>;
+      /** 返回 ok=false 表示路径不存在等失败原因（前端据此提示，不再静默无反应） */
+      showItemInFolder?: (path: string) => Promise<{ ok: boolean; error?: string; fallback?: string } | void>;
       openInApp?: (target: string, path: string) => Promise<{ ok: boolean; launcher?: string; error?: string }>;
       /** plan-308-1542 需求5：手动指定外部应用可执行文件（自动探测失败兜底） */
       selectApp?: (appName: string, currentPath?: string) => Promise<{ ok: boolean; path?: string; canceled?: boolean }>;

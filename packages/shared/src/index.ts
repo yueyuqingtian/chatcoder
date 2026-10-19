@@ -125,6 +125,20 @@ export interface WorktreeOut {
   /** 相对主分支的领先/落后提交数 */
   ahead: number;
   behind: number;
+  /** plan-20261019-git-multirepo：成员仓库（工作树组含多个；rel 为相对工作树目录的路径，根成员为空串） */
+  repos?: WorktreeRepoOut[];
+}
+
+/** plan-20261019-git-multirepo：工作树里的一个成员仓库 */
+export interface WorktreeRepoOut {
+  rel: string;
+  name: string;
+  branch: string | null;
+  dirty: boolean;
+  ahead?: number;
+  behind?: number;
+  /** 源仓库目录（GET /projects/worktrees/{id}/repos 返回） */
+  source?: string;
 }
 
 /** plan-282-1441（#5）：可用于创建工作树的仓库候选（项目根 + 子仓库）。
@@ -132,6 +146,8 @@ export interface WorktreeOut {
 export interface RepoCandidate {
   path: string;
   name: string;
+  /** plan-20261019-git-multirepo：相对项目根的路径（根仓库为空串） */
+  rel?: string;
   /** 是否为项目根仓库 */
   is_root: boolean;
   /** 是否已有提交（空仓库不能作为工作树起点） */

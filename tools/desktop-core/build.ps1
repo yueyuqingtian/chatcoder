@@ -39,7 +39,7 @@ foreach ($r in $refs) {
     if (-not (Test-Path $r)) { throw "缺少引用程序集：$r" }
 }
 
-$sources = @('Interop.cs', 'Sensing.cs', 'Input.cs', 'Apps.cs', 'Ocr.cs', 'Program.cs') | ForEach-Object {
+$sources = @('Interop.cs', 'Sensing.cs', 'Input.cs', 'Apps.cs', 'Program.cs') | ForEach-Object {
     Join-Path $root "src\$_"
 }
 foreach ($s in $sources) {

@@ -5,12 +5,12 @@
  * 点击任一文件在下方查看差异；丢弃改动、删除分支等不可逆操作先确认。
  * 状态在打开面板、完成操作、AI 结束一轮改动后刷新。 */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, type GitBranchesOut, type GitCommitDetailOut, type GitDiffOut, type GitLogEntry, type GitStatusOut } from "../../api/client";
+import { api, type GitBranchesOut, type GitCommitDetailOut, type GitDiffOut, type GitLogEntry, type GitRepoOut, type GitStatusOut } from "../../api/client";
 import { findSession, useChatStore } from "../../store/chat";
 import { bucketSessionId, usePanelStore } from "../../store/panel";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { Button, Checkbox, Dialog, Empty, FormDialog, IconButton, Input, Menu, Popover, Segmented, Tooltip } from "../ui";
-import { IconAlertTriangle, IconArrowDown, IconArrowUp, IconCheck, IconChevronDown, IconChevronRight, IconDownload, IconGitBranch, IconGlobe, IconMoreHorizontal, IconPlus, IconRefresh, IconTrash, IconX } from "../icons";
+import { IconAlertTriangle, IconArrowDown, IconArrowUp, IconCheck, IconChevronDown, IconChevronRight, IconDownload, IconGitBranch, IconGlobe, IconLayers, IconMoreHorizontal, IconPlus, IconRefresh, IconTrash, IconX } from "../icons";
 import { FileIcon } from "../iconkit/FileIcon";
 import { highlightLines } from "../chat/CodeView";
 
@@ -145,6 +145,14 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
   const isRunning = useChatStore((s) => s.isRunning);
 
   const [status, setStatus] = useState<GitStatusOut | null>(null);
+  /** plan-20261019-git-multirepo：项目内的仓库列表；多于一个时顶栏出现仓库切换。
+   *  repo 记录所选仓库与它所属项目——切换项目时不会沿用上一个项目的仓库路径。 */
+  const [repos, setRepos] = useState<GitRepoOut[]>([]);
+  const [repoSel, setRepoSel] = useState<{ projectId: number | null; rel: string }>({ projectId: null, rel: "" });
+  const [reposReady, setReposReady] = useState(false);
+  const [repoOpen, setRepoOpen] = useState(false);
+  const repo = repoSel.projectId === projectId ? repoSel.rel : "";
+  const repoBtnRef = useRef<HTMLButtonElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -188,7 +196,7 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
     const mine = ++seq.current;
     setLoading(true);
     try {
-      const st = await api.gitStatus(projectId);
+      const st = await api.gitStatus(projectId, { repo });
       if (mine !== seq.current) return null;
       setStatus(st);
       setError(null);
@@ -201,7 +209,7 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
     } finally {
       if (mine === seq.current) setLoading(false);
     }
-  }, [projectId]);
+  }, [projectId, repo]);
 
   /** 读取历史第一页（reset）或追加下一页。以 skip 翻页，不依赖页内游标。 */
   const loadHistory = useCallback(async (reset: boolean) => {
@@ -210,7 +218,7 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
     setHistoryLoading(true);
     try {
       const skip = reset ? 0 : history.length;
-      const page = await api.gitLog(projectId, HISTORY_PAGE, skip);
+      const page = await api.gitLog(projectId, HISTORY_PAGE, skip, { repo });
       if (mine !== histSeq.current) return;
       setHistory((prev) => (reset ? page : [...prev, ...page]));
       setHistoryMore(page.length === HISTORY_PAGE);
@@ -220,7 +228,7 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
     } finally {
       setHistoryLoading(false);
     }
-  }, [projectId, history.length]);
+  }, [projectId, history.length, repo]);
 
   const closeCommit = () => {
     commitSeq.current++;
@@ -240,7 +248,7 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
     setOpenSha(sha);
     setCommitLoading(true);
     try {
-      const detail = await api.gitCommitDetail(projectId, sha);
+      const detail = await api.gitCommitDetail(projectId, sha, { repo });
       if (mine === commitSeq.current) setCommit(detail);
     } catch (e) {
       if (mine === commitSeq.current) setError(e instanceof Error ? e.message.replace(/^Error:\s*/, "") : String(e));
@@ -257,7 +265,7 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
     setCommitDiff(null);
     setCommitDiffLoading(true);
     try {
-      const d = await api.gitCommitDiff(projectId, openSha, path);
+      const d = await api.gitCommitDiff(projectId, openSha, path, { repo });
       if (mine === diffSeq.current) setCommitDiff(d);
     } catch (e) {
       if (mine === diffSeq.current) setError(e instanceof Error ? e.message.replace(/^Error:\s*/, "") : String(e));
@@ -268,39 +276,107 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
 
   const refreshBranches = useCallback(async () => {
     if (projectId == null) return;
-    try { setBranches(await api.gitBranches(projectId)); } catch { setBranches(null); }
+    try { setBranches(await api.gitBranches(projectId, { repo })); } catch { setBranches(null); }
+  }, [projectId, repo]);
+
+  /** plan-20261019-git-multirepo：重新读取仓库列表（打开下拉时刷新一次改动数）。 */
+  const fetchRepos = useCallback(async () => {
+    if (projectId == null) return;
+    try { setRepos(await api.gitRepos(projectId)); } catch { /* 读取失败保留现有列表 */ }
   }, [projectId]);
 
-  // 打开 / 切换项目时刷新；面板隐藏时不请求。历史只在历史视图下才读取
+  /** 切换仓库：记住选择，清空旧仓库状态，交给刷新 effect 重新读取。 */
+  const chooseRepo = (rel: string) => {
+    if (projectId == null) return;
+    setRepoOpen(false);
+    setStatus(null);
+    setBranches(null);
+    setRepoSel({ projectId, rel });
+    try {
+      if (rel) localStorage.setItem(`chatcoder.git.repo.${projectId}`, rel);
+      else localStorage.removeItem(`chatcoder.git.repo.${projectId}`);
+    } catch { /* 记忆失败不影响切换 */ }
+  };
+
+  // 项目变化时重新识别仓库，并恢复该项目上次选择的仓库；识别完成前不发状态请求，
+  // 避免拿上一个项目的仓库路径去请求新项目。
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || projectId == null) return;
+    let cancelled = false;
+    setRepoOpen(false);
+    setReposReady(false);
+    setRepos([]);
+    void api.gitRepos(projectId)
+      .then((list) => {
+        if (cancelled) return;
+        setRepos(list);
+        let saved = "";
+        try { saved = localStorage.getItem(`chatcoder.git.repo.${projectId}`) ?? ""; } catch { saved = ""; }
+        const pick = list.find((r) => r.rel === saved) ?? list.find((r) => r.is_root) ?? list[0];
+        setRepoSel({ projectId, rel: pick?.rel ?? "" });
+        setReposReady(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // 不是 Git 项目：回到单仓库模式，沿用原来的错误提示
+        setRepos([]);
+        setRepoSel({ projectId, rel: "" });
+        setReposReady(true);
+      });
+    return () => { cancelled = true; };
+  }, [projectId, visible]);
+
+  // 打开 / 切换项目或仓库时刷新；面板隐藏时不请求。历史只在历史视图下才读取
+  useEffect(() => {
+    if (!visible || !reposReady) return;
     setSelected(null);
     setDiff(null);
     setHistory([]);
     closeCommit();
     void refresh();
-  }, [projectId, visible, refresh]);
+  }, [projectId, repo, visible, reposReady, refresh]);
 
   useEffect(() => {
-    if (!visible || view !== "history") return;
+    if (!visible || view !== "history" || !reposReady) return;
     void loadHistory(true);
-    // 仅在项目 / 视图切换时整页重读；翻页由「加载更多」负责
-  }, [projectId, visible, view]);
+    // 仅在项目 / 仓库 / 视图切换时整页重读；翻页由「加载更多」负责
+  }, [projectId, repo, visible, view, reposReady]);
+
+  /** plan-20261019-git-multirepo：工具卡路径属于哪个仓库——取最长匹配前缀，根仓库（空串）兜底。 */
+  const repoOfPath = useCallback((path: string): string => {
+    const norm = path.replace(/\\/g, "/");
+    let hit = "";
+    for (const r of repos) {
+      if (r.rel && (norm === r.rel || norm.startsWith(`${r.rel}/`)) && r.rel.length > hit.length) hit = r.rel;
+    }
+    return hit;
+  }, [repos]);
 
   /** plan-156-620：工具卡点击文件 → 状态就绪后切到变更视图并展开该文件差异（消费一次即清空）。 */
   const gitFocus = usePanelStore((s) => s.gitFocus);
   useEffect(() => {
-    if (!visible || !gitFocus || !status) return;
-    usePanelStore.getState().clearGitFocus();
+    if (!visible || !gitFocus || !status || !reposReady) return;
     // plan-156-621：焦点不属于本面板项目时直接丢弃——跨项目保活时把旧路径拿到当前仓库请求差异，
     // 只会得到「文件不存在」或读到同名但无关的文件。
-    if (gitFocus.projectId != null && projectId != null && gitFocus.projectId !== projectId) return;
+    if (gitFocus.projectId != null && projectId != null && gitFocus.projectId !== projectId) {
+      usePanelStore.getState().clearGitFocus();
+      return;
+    }
+    // plan-20261019-git-multirepo：先切到文件所属仓库，焦点保留到新仓库状态就绪后再展开，
+    // 否则会用旧仓库的状态去匹配新仓库的路径。路径前缀比调用方传的 repo 更可靠（前缀最长优先）。
+    const target = repoOfPath(gitFocus.path) || gitFocus.repo;
+    if (target !== repo) { chooseRepo(target); return; }
+    usePanelStore.getState().clearGitFocus();
+    // 工具卡给的是项目内路径，单仓库请求需要去掉仓库前缀
+    const path = repo && (gitFocus.path === repo || gitFocus.path.startsWith(`${repo}/`))
+      ? gitFocus.path.slice(repo.length + 1)
+      : gitFocus.path;
     setView("changes");
-    if (selected?.path === gitFocus.path) return;
-    setSelected({ path: gitFocus.path, staged: gitFocus.staged });
-    void loadDiff(gitFocus.path, gitFocus.staged);
+    if (selected?.path === path) return;
+    setSelected({ path, staged: gitFocus.staged });
+    void loadDiff(path, gitFocus.staged);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gitFocus, status, visible, projectId]);
+  }, [gitFocus, status, visible, projectId, repo, reposReady]);
 
   // AI 一轮结束（运行态回落）后，工作区很可能已变化：刷新一次
   const wasRunning = useRef(isRunning);
@@ -348,7 +424,7 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
     const mine = ++workDiffSeq.current;
     setDiffLoading(true);
     try {
-      const d = await api.gitDiff(projectId, path, staged);
+      const d = await api.gitDiff(projectId, path, staged, { repo });
       if (mine === workDiffSeq.current) setDiff(d);
     } catch (e) {
       if (mine !== workDiffSeq.current) return;
@@ -452,8 +528,8 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
   /** 单行勾选：只动这一个文件，且不改变它所在的分组 */
   const toggleRow = (r: ChangeRow) => void run(r.staged ? "unstage" : "stage", async () => {
     if (projectId == null) return;
-    if (r.staged) await api.gitUnstage(projectId, [r.path]);
-    else await api.gitStage(projectId, [r.path]);
+    if (r.staged) await api.gitUnstage(projectId, [r.path], { repo });
+    else await api.gitStage(projectId, [r.path], { repo });
   });
 
   /** 一组内的全选 / 全不选 */
@@ -462,15 +538,15 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
       if (projectId == null) return;
       const targets = rows.filter((r) => (stage ? !r.staged : r.staged)).map((r) => r.path);
       if (targets.length === 0) return;
-      if (stage) await api.gitStage(projectId, targets);
-      else await api.gitUnstage(projectId, targets);
+      if (stage) await api.gitStage(projectId, targets, { repo });
+      else await api.gitUnstage(projectId, targets, { repo });
     });
 
   const canCommit = message.trim().length > 0 && (stagedCount > 0 || amend) && !busy;
 
   const doCommit = () => run("commit", async () => {
     if (projectId == null) return;
-    const res = await api.gitCommit(projectId, message.trim(), amend);
+    const res = await api.gitCommit(projectId, message.trim(), amend, { repo });
     setMessage("");
     setAmend(false);
     void loadHistory(true);
@@ -481,25 +557,25 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
   /** 提交并推送：一次完成，不需要再去顶栏找推送入口 */
   const doCommitAndPush = () => run("commit-push", async () => {
     if (projectId == null) return;
-    await api.gitCommit(projectId, message.trim(), amend);
+    await api.gitCommit(projectId, message.trim(), amend, { repo });
     setMessage("");
     setAmend(false);
     void loadHistory(true);
-    const out = await api.gitSync(projectId, "push");
+    const out = await api.gitSync(projectId, "push", { repo });
     await refresh();
     return out.output || "已提交并推送";
   });
 
   const doDiscard = (p: Extract<Pending, { kind: "discard" }>) => run("discard", async () => {
     if (projectId == null) return;
-    await api.gitDiscard(projectId, p.paths, p.untracked);
+    await api.gitDiscard(projectId, p.paths, p.untracked, { repo });
     setPending(null);
     return "已丢弃改动";
   });
 
   const doDeleteBranch = (name: string) => run("branch", async () => {
     if (projectId == null) return;
-    const out = await api.gitBranch(projectId, "delete", name);
+    const out = await api.gitBranch(projectId, "delete", name, {}, { repo });
     setPending(null);
     void refreshBranches();
     return out.output;
@@ -624,7 +700,7 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
   /** 拉取：冲突不当作失败——刷新状态并切到变更视图，冲突区会置顶 */
   const doPull = () => run("pull", async () => {
     if (projectId == null) return;
-    const res = await api.gitSync(projectId, "pull");
+    const res = await api.gitSync(projectId, "pull", { repo });
     if (res.conflict) {
       setView("changes");
       setNoticeTone("warn");
@@ -642,7 +718,7 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
     setError(null);
     setNotice(null);
     try {
-      const res = await api.gitBranch(projectId, "checkout", name, { onDirty });
+      const res = await api.gitBranch(projectId, "checkout", name, { onDirty }, { repo });
       if (res.switched === false && res.reason === "dirty") {
         setDirtySwitch({ name, files: res.files ?? [] });
         return;
@@ -673,13 +749,43 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
    *  其余收进「⋯」会让用户无法判断哪些操作存在，也不会去点开菜单探索。 */
   const doFetch = () => void run("fetch", async () => {
     if (projectId == null) return;
-    return (await api.gitSync(projectId, "fetch")).output;
+    return (await api.gitSync(projectId, "fetch", { repo })).output;
   });
   const doPush = () => void run("push", async () => {
     if (projectId == null) return;
-    return (await api.gitSync(projectId, "push")).output;
+    return (await api.gitSync(projectId, "push", { repo })).output;
   });
   const aheadCount = status?.ahead ?? 0;
+
+  /** plan-20261019-git-multirepo：仓库下拉——名称、相对路径、分支与改动数同屏，当前项打勾。 */
+  const repoPopover = (
+    <Popover open={repoOpen} onClose={() => setRepoOpen(false)} placement="bottom-start"
+      className="gp-repo-pop" ignoreRefs={[repoBtnRef]} role="menu" aria-label="切换仓库">
+      <div className="gp-repo-scroll">
+        {repos.map((r) => (
+          <button key={r.rel || "root"} type="button" role="menuitemradio" aria-checked={r.rel === repo}
+            className={`gp-repo-item${r.rel === repo ? " is-current" : ""}`} onClick={() => chooseRepo(r.rel)}>
+            <span className="gp-repo-item-main">
+              <span className="gp-repo-item-name">
+                {r.rel === repo && <IconCheck size={12} />}
+                <span>{r.name}</span>
+              </span>
+              {/* 位于项目根下一层的仓库，相对路径与名称相同：重复的路径行不再显示 */}
+              {(r.rel && r.rel !== r.name) && <span className="gp-repo-item-path">{r.rel}</span>}
+            </span>
+            <span className="gp-repo-item-side">
+              <span className="gp-repo-item-branch">{r.detached ? "游离 HEAD" : r.branch ?? "—"}</span>
+              <span className={`gp-repo-item-changes${r.changes > 0 ? "" : " is-clean"}`}>
+                {r.changes > 0 ? `${r.changes} 个改动` : "无改动"}
+              </span>
+            </span>
+          </button>
+        ))}
+      </div>
+      <div className="gp-repo-sep">切换后，变更、历史、分支与提交都作用于所选仓库</div>
+    </Popover>
+  );
+  const currentRepoName = repos.find((r) => r.rel === repo)?.name ?? "仓库";
 
   const branchPopover = (
     <Popover open={branchOpen} onClose={() => setBranchOpen(false)} placement="bottom-start" className="gp-branch-pop" ignoreRefs={[branchBtnRef]} role="menu" aria-label="分支">
@@ -823,24 +929,42 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
 
   return (
     <div className="gp-panel">
-      {/* 顶栏：分支 + 同步 */}
+      {/* 顶栏：仓库（多仓库时）+ 分支 + 同步 */}
       <div className="gp-head">
-        <div className="gp-branch-wrap">
-          <button ref={branchBtnRef} type="button" className={`gp-branch-btn${branchOpen ? " is-open" : ""}`}
-            aria-haspopup="menu" aria-expanded={branchOpen} onClick={() => setBranchOpen((v) => !v)}>
-            <IconGitBranch size={13} />
-            <span className="gp-branch-label">{branchName}</span>
-            <IconChevronDown size={11} />
-          </button>
-          {status && (status.ahead > 0 || status.behind > 0) && (
-            <Tooltip title={`领先 ${status.ahead} · 落后 ${status.behind}`} side="bottom">
-              <span className="gp-sync-chip">
-                {status.ahead > 0 && <span className="gp-up"><IconArrowUp size={10} />{status.ahead}</span>}
-                {status.behind > 0 && <span className="gp-down"><IconArrowDown size={10} />{status.behind}</span>}
-              </span>
-            </Tooltip>
+        <div className="gp-head-scope">
+          {repos.length > 1 && (
+            <div className="gp-repo-wrap">
+              <button ref={repoBtnRef} type="button" className={`gp-repo-btn${repoOpen ? " is-open" : ""}`}
+                aria-haspopup="menu" aria-expanded={repoOpen} aria-label={`切换仓库，当前 ${currentRepoName}`}
+                onClick={() => {
+                  const next = !repoOpen;
+                  setRepoOpen(next);
+                  if (next) void fetchRepos();
+                }}>
+                <IconLayers size={13} />
+                <span className="gp-repo-name">{currentRepoName}</span>
+                <IconChevronDown size={11} />
+              </button>
+              {repoPopover}
+            </div>
           )}
-          {branchPopover}
+          <div className="gp-branch-wrap">
+            <button ref={branchBtnRef} type="button" className={`gp-branch-btn${branchOpen ? " is-open" : ""}`}
+              aria-haspopup="menu" aria-expanded={branchOpen} onClick={() => setBranchOpen((v) => !v)}>
+              <IconGitBranch size={13} />
+              <span className="gp-branch-label">{branchName}</span>
+              <IconChevronDown size={11} />
+            </button>
+            {status && (status.ahead > 0 || status.behind > 0) && (
+              <Tooltip title={`领先 ${status.ahead} · 落后 ${status.behind}`} side="bottom">
+                <span className="gp-sync-chip">
+                  {status.ahead > 0 && <span className="gp-up"><IconArrowUp size={10} />{status.ahead}</span>}
+                  {status.behind > 0 && <span className="gp-down"><IconArrowDown size={10} />{status.behind}</span>}
+                </span>
+              </Tooltip>
+            )}
+            {branchPopover}
+          </div>
         </div>
         <div className="gp-head-ops">
           <Tooltip content="抓取远端更新（不合并到本地）" side="bottom">
@@ -904,7 +1028,7 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
                 {conflictCount > 0 ? `合并进行中，${conflictCount} 个文件有冲突` : "合并进行中，冲突已全部解决，可提交完成合并"}
               </span>
               <Button variant="ghost" size="sm" disabled={busy != null}
-                onClick={() => void run("abort", async () => { await api.gitMergeAbort(projectId!); return "已中止合并"; })}>
+                onClick={() => void run("abort", async () => { await api.gitMergeAbort(projectId!, { repo }); return "已中止合并"; })}>
                 中止合并
               </Button>
             </div>
@@ -920,9 +1044,9 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
                       <span className="gp-conflict-name">{c.path}</span>
                     </Tooltip>
                     <Button variant="ghost" size="sm" disabled={busy != null}
-                      onClick={() => void run("resolve", async () => { await api.gitResolve(projectId!, c.path, "ours"); })}>采用我方</Button>
+                      onClick={() => void run("resolve", async () => { await api.gitResolve(projectId!, c.path, "ours", { repo }); })}>采用我方</Button>
                     <Button variant="ghost" size="sm" disabled={busy != null}
-                      onClick={() => void run("resolve", async () => { await api.gitResolve(projectId!, c.path, "theirs"); })}>采用对方</Button>
+                      onClick={() => void run("resolve", async () => { await api.gitResolve(projectId!, c.path, "theirs", { repo }); })}>采用对方</Button>
                   </div>
                 ))}
               </div>
@@ -1021,7 +1145,7 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
         onSubmit={() => {
           const name = newBranch.trim();
           setNewBranchOpen(false);
-          void run("branch", async () => (await api.gitBranch(projectId!, "create", name)).output);
+          void run("branch", async () => (await api.gitBranch(projectId!, "create", name, {}, { repo })).output);
         }}
         width={420}
       >

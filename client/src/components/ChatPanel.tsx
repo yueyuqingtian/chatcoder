@@ -6,17 +6,19 @@ import { PluginSlot } from "../plugins/registry";
 import { ContentWidthResizer } from "./chat/ContentWidthResizer";
 import { useContentColumnGeometry } from "./chat/useContentColumnGeometry";
 import { SessionToolCard } from "./chat/toolcard/SessionToolCard";
-import { CLEARANCE_CAPSULE, CLEARANCE_EXPANDED, CLEARANCE_NONE } from "./chat/contentColumnGeometry";
+import { CLEARANCE_NONE, clearanceForForm } from "./chat/contentColumnGeometry";
 import type { ToolCardForm } from "./chat/toolcard/useToolCardFit";
 
 export function ChatPanel() {
   const panelRef = useRef<HTMLDivElement>(null);
 
   /** plan-156-619 S7 / plan-156-620：工具卡对右侧空间的需求随形态变化（展开 / 胶囊 / 隐藏）。
-   *  内容列只在右缘真的会被遮住时才左移，且只移需要的那一段（宽度冻结）。 */
+   *  内容列只在右缘真的会被遮住时才左移，且只移需要的那一段（宽度冻结）。
+   *  plan-20261019：胶囊是内容自适应宽度，按实测宽让位——此前一律按上限 260px 计算，
+   *  折叠后右侧明明放得下也会把消息列与输入框整体左移。 */
   const [clearance, setClearance] = useState(CLEARANCE_NONE);
-  const onCardFormChange = useCallback((form: ToolCardForm) => {
-    setClearance(form === "expanded" ? CLEARANCE_EXPANDED : form === "capsule" ? CLEARANCE_CAPSULE : CLEARANCE_NONE);
+  const onCardFormChange = useCallback((form: ToolCardForm, capsuleW?: number) => {
+    setClearance(clearanceForForm(form, capsuleW));
   }, []);
 
   /** plan-156-619 S3（需求 C1）；plan-156-623 性能重做：内容列宽度只由宿主宽与用户偏好

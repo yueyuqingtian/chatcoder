@@ -92,7 +92,10 @@ class EditorApplyDiffTool(Tool):
         if note:
             output += f"（{note}）"
         # plan-1085: data 带回新内容，供 agent_loop 磁盘读取失败时兜底统计/记录（不进模型上下文）
+        # plan-20261019-diff: 同时带回写前内容——写前读盘失败时若没有它，整篇会被误算为新增
         _data: dict[str, Any] = {"path": path, "delta": len(str(new_text)) - len(str(old_text))}
+        if len(tf.text) <= _NEW_CONTENT_MAX_CHARS:
+            _data["old_content"] = tf.text
         if len(res.text) <= _NEW_CONTENT_MAX_CHARS:
             _data["new_content"] = res.text
         return ToolResult(ok=True, output=output, data=_data)

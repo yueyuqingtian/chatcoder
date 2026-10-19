@@ -34,6 +34,25 @@ export const CLEARANCE_EXPANDED = CARD_W + CARD_INSET + CARD_GAP;
 export const CLEARANCE_CAPSULE = CAPSULE_MAX_W + CARD_INSET + CARD_GAP;
 export const CLEARANCE_NONE = 0;
 
+/**
+ * 胶囊实际需要让出的右侧空间。
+ *
+ * 折叠后的胶囊是**内容自适应宽度**（「39 子代理已完成 +1」实测不到 200px），
+ * 旧实现一律按 `CAPSULE_MAX_W` 让位，右侧明明放得下也会把消息列与输入框整体左移。
+ * 传入实测宽度就按实测算；尚未测到时才退回上限（宁可多让，不能压住正文）。
+ */
+export function capsuleClearance(measuredW?: number): number {
+  const w = measuredW && measuredW > 0 ? Math.min(measuredW, CAPSULE_MAX_W) : CAPSULE_MAX_W;
+  return w + CARD_INSET + CARD_GAP;
+}
+
+/** 按形态取需要的让位空间；胶囊按实测宽，其余形态宽度固定。 */
+export function clearanceForForm(form: "expanded" | "capsule" | "hidden", measuredW?: number): number {
+  if (form === "hidden") return CLEARANCE_NONE;
+  if (form === "expanded") return CLEARANCE_EXPANDED;
+  return capsuleClearance(measuredW);
+}
+
 export interface ColumnGeoInput {
   /** 内容列可用宽：宿主内宽（**已扣滚动条 gutter**，与 RO 的 contentRect 同口径）。 */
   hostW: number;

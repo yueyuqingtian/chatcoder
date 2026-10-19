@@ -126,7 +126,9 @@
 
 .tcc-count {
   flex: 0 0 auto;
-  font-size: calc(var(--fs-md, 13px) + 1px);
+  /* 与消息流正文同字号（--fs-md 即设置里的「对话字号」）：此前 +1px 让表头
+     比上下文大一档，用户会读成「所有字都变大了」 */
+  font-size: var(--fs-md, 13px);
   /* 表头标题不加粗：靠字号与主文案色形成层次，不靠字重抢眼 */
   font-weight: 400;
   line-height: 1.45;

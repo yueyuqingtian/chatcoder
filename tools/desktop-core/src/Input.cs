@@ -83,6 +83,21 @@ namespace DesktopCore
             original.X = 0; original.Y = 0;
             GetCursor(out original);
 
+            MoveTo(x, y);
+            Thread.Sleep(20);   // let the hover state settle so the target receives the press
+            bool ok = Press(button, count);
+
+            if (restoreCursor) Native.SetCursorPos(original.X, original.Y);
+            return ok;
+        }
+
+        /// <summary>
+        /// 在当前光标位置按下并抬起（不移动鼠标）。与移动拆开，调用方可在悬停态生效后、按下之前
+        /// 采样画面（plan-20261019-desktop-precision）：悬停效果不会被误算成点击引起的变化。
+        /// 按下与抬起之间留 10 ms，贴近真实点击，个别按下即开始计时的控件不再漏判。
+        /// </summary>
+        public static bool Press(string button, int count)
+        {
             uint down, up;
             switch ((button ?? "left").ToLowerInvariant())
             {
@@ -91,20 +106,18 @@ namespace DesktopCore
                 default: down = Native.MOUSEEVENTF_LEFTDOWN; up = Native.MOUSEEVENTF_LEFTUP; break;
             }
 
-            MoveTo(x, y);
-            Thread.Sleep(20);   // let the hover state settle so the target receives the press
-
             bool ok = true;
             for (int i = 0; i < Math.Max(1, count); i++)
             {
                 ok &= Native.Send(new[] {
                     Native.MouseInput(down | Native.MOUSEEVENTF_ABSOLUTE | Native.MOUSEEVENTF_VIRTUALDESK, 0, 0, 0),
+                });
+                Thread.Sleep(10);
+                ok &= Native.Send(new[] {
                     Native.MouseInput(up | Native.MOUSEEVENTF_ABSOLUTE | Native.MOUSEEVENTF_VIRTUALDESK, 0, 0, 0),
                 });
                 if (i + 1 < count) Thread.Sleep(60);
             }
-
-            if (restoreCursor) Native.SetCursorPos(original.X, original.Y);
             return ok;
         }
 
@@ -129,6 +142,12 @@ namespace DesktopCore
         {
             MoveTo(x, y);
             Thread.Sleep(20);
+            return Wheel(delta, horizontal);
+        }
+
+        /// <summary>在当前光标位置滚动滚轮（不移动鼠标），用法同 Press。</summary>
+        public static bool Wheel(int delta, bool horizontal)
+        {
             uint flag = horizontal ? Native.MOUSEEVENTF_HWHEEL : Native.MOUSEEVENTF_WHEEL;
             return Native.Send(new[] { Native.MouseInput(flag, 0, 0, (uint)delta) });
         }

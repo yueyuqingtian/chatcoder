@@ -14,7 +14,7 @@ import type { DesktopRecipe, DesktopStatus, RecipeScope } from "../../api/client
 import { useChatStore } from "../../store/chat";
 import { useI18n } from "../../store/i18n";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { Badge, Button, CardRow, Checkbox, FormDialog, Input, List, ListRow, Segmented, Select, Slider, Textarea } from "../ui";
+import { Badge, Button, CardRow, Checkbox, FormDialog, Input, List, ListRow, Segmented, Slider, Textarea } from "../ui";
 import { Field } from "../ui/Field";
 import { Row, Sw } from "./shared";
 
@@ -53,27 +53,10 @@ type DesktopCfg = {
   desktop_screenshot_quality: number;
   desktop_screenshot_max_dim: number;
   desktop_recipe_enabled: boolean;
-  /** plan-365-1757: 截图元素编号 / 点击前校验 / 破坏性操作词表 */
-  desktop_mark_shot: boolean;
-  /** plan-365-1769: 校验档位 off / lenient / strict（旧布尔值由 normalizeVerifyMode 迁移） */
-  desktop_verify_click: string;
-  desktop_destructive_words: string;
 };
 
-// 词表默认值与后端 config.py 保持一致：拉取失败时至少不是一个空词表。
-const DEFAULT_DESTRUCTIVE_WORDS =
-  "发送,提交,删除,清空,卸载,格式化,支付,付款,转账,购买,确认下单,退出登录,覆盖保存";
-
-/** plan-365-1769: 校验档归一化——兼容后端可能返回的旧布尔值（true→宽松 / false→关闭） */
-function normalizeVerifyMode(raw: unknown): string {
-  if (raw === true) return "lenient";
-  if (raw === false) return "off";
-  const s = String(raw ?? "").trim().toLowerCase();
-  if (s === "off" || s === "strict") return s;
-  return "lenient";
-}
-
-// plan-20261018-operator-boost：默认开启电脑操控；截图不缩放、画质 100、元素编号关闭（与后端 config.py 一致）
+// plan-20261018-operator-boost：默认开启电脑操控；截图自动适配模型可见尺寸、画质 100（与后端 config.py 一致）。
+// plan-20261019-desktop-precision：截图元素编号、点击前校验、破坏性操作词表随 OCR 一并移除。
 const DEFAULTS: DesktopCfg = {
   desktop_enabled: true,
   desktop_plain_ops_enabled: true,
@@ -82,9 +65,6 @@ const DEFAULTS: DesktopCfg = {
   desktop_screenshot_quality: 100,
   desktop_screenshot_max_dim: 0,
   desktop_recipe_enabled: true,
-  desktop_mark_shot: false,
-  desktop_verify_click: "lenient",
-  desktop_destructive_words: DEFAULT_DESTRUCTIVE_WORDS,
 };
 
 function DesktopBasicSection() {
@@ -122,10 +102,6 @@ function DesktopBasicSection() {
         desktop_screenshot_max_dim: typeof g.desktop_screenshot_max_dim === "number"
           ? g.desktop_screenshot_max_dim : 0,
         desktop_recipe_enabled: g.desktop_recipe_enabled !== false,
-        desktop_mark_shot: g.desktop_mark_shot === true,
-        desktop_verify_click: normalizeVerifyMode(g.desktop_verify_click),
-        desktop_destructive_words: typeof g.desktop_destructive_words === "string"
-          ? g.desktop_destructive_words : DEFAULT_DESTRUCTIVE_WORDS,
       });
     } catch { /* 拉取失败沿用默认值 */ }
   }, []);
@@ -216,34 +192,6 @@ function DesktopBasicSection() {
             value={cfg.desktop_screenshot_quality}
             onChange={(v) => patch({ desktop_screenshot_quality: v })}
             format={(v) => `${v}`}
-          />
-        </Row>
-        <Row title={t("dp.mark")} desc={t("dp.mark_desc")} disabled={dimPlain}>
-          <Sw
-            checked={cfg.desktop_mark_shot}
-            onChange={(v) => patch({ desktop_mark_shot: v })}
-          />
-        </Row>
-        <Row title={t("dp.verify")} desc={t("dp.verify_desc")} disabled={dimPlain}>
-          <Select
-            value={cfg.desktop_verify_click}
-            onChange={(v) => patch({ desktop_verify_click: v })}
-            disabled={dimPlain}
-            options={[
-              { value: "lenient", label: t("dp.verify.lenient") },
-              { value: "strict", label: t("dp.verify.strict") },
-              { value: "off", label: t("dp.verify.off") },
-            ]}
-            aria-label={t("dp.verify")}
-          />
-        </Row>
-        <Row title={t("dp.destructive")} desc={t("dp.destructive_desc")} disabled={dimPlain}>
-          <Textarea
-            rows={2}
-            style={{ width: 320 }}
-            value={cfg.desktop_destructive_words}
-            disabled={dimPlain}
-            onChange={(e) => patch({ desktop_destructive_words: e.target.value })}
           />
         </Row>
         <Row title={t("dp.recipe")} desc={t("dp.recipe_desc")} disabled={dimPlain}>

@@ -1106,7 +1106,10 @@ async def _sync_task_status(db, session_id: int, task_id: int, status: str, note
         if agent_id is not None and status in ("done", "failed", "cancelled"):
             await broadcast(session_id, {
                 "event": "agent.completed",
-                "payload": {"agent_id": agent_id, "status": status},
+                # plan-20261019-subagent-ghost: 显式标注这是子代理（主代理完成事件同样走
+                # agent.completed），并带上会话 id 供前端做串会话防护。
+                "payload": {"agent_id": agent_id, "kind": "sub",
+                            "session_id": session_id, "status": status},
             })
     except Exception:
         logger.debug("[subagent] 子任务状态同步失败(非阻塞)", exc_info=True)

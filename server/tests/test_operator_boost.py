@@ -24,13 +24,11 @@ def test_upgrade_desktop_defaults_only_touches_old_defaults(monkeypatch):
         "desktop_enabled": False,            # 旧默认 → 升级为开启
         "desktop_screenshot_quality": 60,    # 用户改过 → 保持
         "desktop_screenshot_max_dim": 1600,  # 旧默认 → 不缩放
-        "desktop_mark_shot": True,           # 旧默认 → 关闭
     }
     router._upgrade_desktop_defaults(data)
     assert data["desktop_enabled"] is True
     assert data["desktop_screenshot_quality"] == 60
     assert data["desktop_screenshot_max_dim"] == 0
-    assert data["desktop_mark_shot"] is False
     assert data["desktop_defaults_rev"] == router._DESKTOP_DEFAULTS_REV
     assert saved, "升级后必须落盘，避免每次启动重复判断"
 
@@ -48,9 +46,10 @@ def test_new_install_defaults():
     assert s.desktop_plain_ops_enabled and s.desktop_browser_ops_enabled and s.desktop_require_foreground
     assert s.desktop_screenshot_max_dim == 0
     assert s.desktop_screenshot_quality == 100
-    assert s.desktop_mark_shot is False
-    assert s.desktop_verify_click == "lenient"
     assert s.desktop_recipe_enabled is True
+    # plan-20261019-desktop-precision：编号 / 点前校验 / 破坏性词表已移除；坐标口径默认按模型自动选择
+    assert s.desktop_coord_mode == "auto"
+    assert not hasattr(s, "desktop_mark_shot") and not hasattr(s, "desktop_verify_click")
 
 
 def test_screenshot_max_dim_follows_setting(monkeypatch):
@@ -237,22 +236,23 @@ def test_download_event_lines():
 
 
 def test_model_safe_max_dim():
-    from app.orchestration.tools.desktop import _model_safe_max_dim
+    from app.core.desktop_coords import model_safe_max_dim
 
     # 整屏 16:9：缩到短边 768（模型实际看到的尺寸），长边 1365
-    assert _model_safe_max_dim(2560, 1440, 0) == 1365
-    assert _model_safe_max_dim(1920, 1080, 0) == 1365
+    assert model_safe_max_dim(2560, 1440, 0) == 1365
+    assert model_safe_max_dim(1920, 1080, 0) == 1365
     # 小区域本身就在可见尺寸内：不缩放
-    assert _model_safe_max_dim(900, 600, 0) == 0
+    assert model_safe_max_dim(900, 600, 0) == 0
     # 显式设置更小时用设置值；更大时不超过可见尺寸
-    assert _model_safe_max_dim(2560, 1440, 1000) == 1000
-    assert _model_safe_max_dim(2560, 1440, 2560) == 1365
+    assert model_safe_max_dim(2560, 1440, 1000) == 1000
+    assert model_safe_max_dim(2560, 1440, 2560) == 1365
     # 超宽屏受长边 1568 约束
-    assert _model_safe_max_dim(5120, 1440, 0) == 1568
+    assert model_safe_max_dim(5120, 1440, 0) == 1568
 
 
 @pytest.mark.asyncio
-async def test_click_outside_target_window_refused(monkeypatch):
+async def test_click_outside_target_window_refused(monkeypatch, tmp_path):
+    from app.core import desktop_shots
     from app.orchestration.tools import desktop as D
     from app.orchestration.tools.base import ToolContext
 
@@ -268,25 +268,26 @@ async def test_click_outside_target_window_refused(monkeypatch):
             return {"clicked": True, "at": [params["x"], params["y"]], "target": "记事本"}
         return {}
 
-    async def fake_elements(self, ctx, win, *, fresh=False):
-        return []
-
     monkeypatch.setattr(D, "_call", fake_call)
-    monkeypatch.setattr(D.DesktopClickTool, "_elements", fake_elements)
     monkeypatch.setattr(settings, "desktop_enabled", True, raising=False)
     monkeypatch.setattr(settings, "desktop_plain_ops_enabled", True, raising=False)
-    monkeypatch.setattr(settings, "desktop_verify_click", "off", raising=False)
-    ctx = ToolContext(workspace_root=".", session_id=1, task_id=1, agent_id=1, agent_name="t")
+    ctx = ToolContext(workspace_root=str(tmp_path), session_id=1, task_id=1, agent_id=1, agent_name="t",
+                      model_name="claude-opus-5")
+    desktop_shots.clear(ctx)
+    # 整屏截图 2560x1600 → 1280x800（像素口径：图上坐标 ×2 即屏幕坐标）
+    desktop_shots.store_frame(ctx, path="a.jpg", mode="pixel", meta={
+        "srcX": 0, "srcY": 0, "srcW": 2560, "srcH": 1600, "width": 1280, "height": 800})
 
-    res = await D.DesktopClickTool().run({"x": 120, "y": 90, "title": "记事本", "allow_blank": True}, ctx)
+    res = await D.DesktopClickTool().run({"x": 60, "y": 45, "title": "记事本", "then_shot": False}, ctx)
     assert not res.ok and "不在目标窗口" in res.error and not clicked
 
-    ok = await D.DesktopClickTool().run({"x": 700, "y": 500, "title": "记事本", "allow_blank": True}, ctx)
+    ok = await D.DesktopClickTool().run({"x": 350, "y": 250, "title": "记事本", "then_shot": False}, ctx)
     assert ok.ok and clicked and clicked[-1]["x"] == 700
 
     out = await D.DesktopClickTool().run(
-        {"x": 120, "y": 90, "title": "记事本", "allow_blank": True, "allow_outside": True}, ctx)
+        {"x": 60, "y": 45, "title": "记事本", "allow_outside": True, "then_shot": False}, ctx)
     assert out.ok
+    desktop_shots.clear(ctx)
 
 
 # ── 电脑操控：新窗口跟随 / 前台提示 / 黑画面提示 / 稀疏控件树（腾讯视频实录） ──

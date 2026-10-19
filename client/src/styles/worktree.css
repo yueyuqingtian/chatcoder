@@ -142,6 +142,154 @@
   color: var(--error);
 }
 
+/* ── 合并弹窗：工作树组按仓库逐个合并（plan-20261019-git-multirepo） ──
+ * 一行说明 + 仓库切换按钮；行底实色，不使用带 alpha 的 hover 令牌。
+ * 仓库列表的层级：名称（600）> 相对路径（mono、muted）> 改动数（warning）。 */
+.merge-scope {
+  --merge-scope-muted: color-mix(in oklab, var(--text-1) 88%, transparent);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--r-md);
+  background: color-mix(in oklab, var(--text-1) 6%, var(--bg-panel));
+}
+.merge-scope-label {
+  flex-shrink: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--merge-scope-muted);
+}
+.merge-scope-wrap { position: relative; min-width: 0; }
+.merge-scope-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 260px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-panel);
+  color: var(--text-1);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-standard), border-color var(--dur-1) var(--ease-standard);
+}
+.merge-scope-btn:hover,
+.merge-scope-btn.is-open {
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
+  background: var(--bg-hover);
+}
+.merge-scope-btn svg { flex-shrink: 0; color: var(--merge-scope-muted); }
+.merge-scope-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.merge-scope-branch {
+  flex-shrink: 0;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--merge-scope-muted);
+}
+.merge-scope-hint {
+  flex-basis: 100%;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--merge-scope-muted);
+}
+.merge-scope-pop { width: 300px; max-width: min(300px, calc(100vw - 32px)); padding: 4px; }
+.merge-scope-list {
+  max-height: min(300px, 46vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.merge-scope-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 8px;
+  border: none;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text-1);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.merge-scope-item:hover { background: var(--bg-hover); }
+.merge-scope-item.is-current { background: var(--bg-active); }
+.merge-scope-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.merge-scope-item-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.merge-scope-item-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--merge-scope-muted);
+}
+.merge-scope-item-side {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  max-width: 42%;
+}
+.merge-scope-item-branch {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--merge-scope-muted);
+}
+.merge-scope-item-dirty {
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--warning);
+  white-space: nowrap;
+}
+.merge-scope-item-dirty.is-clean { color: var(--merge-scope-muted); }
+
+@media (prefers-reduced-motion: reduce) {
+  .merge-scope-btn { transition: none; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .wtc-repo { transition: none; }
 }

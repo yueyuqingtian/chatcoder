@@ -1,5 +1,5 @@
 ﻿# 诊断脚本（plan-365-1774）：Chrome 窗口的 UIA 快照到底返回什么、不同时间预算的代价，
-# 以及 OCR 冷/热对比。用于决定「Chromium 无 CDP 时」元素采集该走 UIA 还是 OCR。
+# 用于评估「Chromium 无 CDP 时」UIA 快照的可用性（OCR 已于 plan-20261019-desktop-precision 移除）。
 #
 # 只读：截屏 + 遍历 + 命中测试，不注入任何输入。
 # 用法（务必 -NoProfile）：
@@ -85,25 +85,6 @@ try {
             $n++
         }
     }
-
-    # OCR 对比：同一张整屏图的冷/热识别
-    $s = Invoke-Timed ('{"op":"shot","maxDim":1600,"format":"png","path":"' + $stem + '-full.png"}')
-    Write-Output ('--- shot: ' + $script:lastMs + ' ms  scale=' + $s.data.scale +
-        '  src=' + $s.data.srcW + 'x' + $s.data.srcH)
-    $imgJson = $s.data.path.Replace('\', '/')
-    $r2 = Invoke-Timed ('{"op":"ocrboxes","image":"' + $imgJson + '","scale":' + $s.data.scale +
-        ',"srcX":' + $s.data.srcX + ',"srcY":' + $s.data.srcY + ',"maxDim":1600,"maxBoxes":300}')
-    $boxes = @($r2.data.boxes)
-    Write-Output ('--- ocrboxes(冷): ' + $script:lastMs + ' ms  ' + $boxes.Count + ' 块')
-    $n = 0
-    foreach ($bx in $boxes) {
-        if ($n -ge 25) { break }
-        Write-Output ('    ' + $bx.t)
-        $n++
-    }
-    $r3 = Invoke-Timed ('{"op":"ocrboxes","image":"' + $imgJson + '","scale":' + $s.data.scale +
-        ',"srcX":' + $s.data.srcX + ',"srcY":' + $s.data.srcY + ',"maxDim":1600,"maxBoxes":300}')
-    Write-Output ('--- ocrboxes(热): ' + $script:lastMs + ' ms')
 }
 finally {
     try {

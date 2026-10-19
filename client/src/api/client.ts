@@ -46,6 +46,7 @@ import type {
   WorktreeMergePreview,
   WorktreeMergeDirection,
   WorktreeOut,
+  WorktreeRepoOut,
   MergeReportOut,
 } from "@chatcoder/shared";
 
@@ -591,6 +592,8 @@ export interface GitStatusOut {
   untracked: GitFileEntry[];
   conflicts: GitFileEntry[];
   clean: boolean;
+  /** plan-20261019-git-multirepo：/git/status-all 汇总的各仓库信息（普通 /git/status 不返回） */
+  repos?: Array<{ rel: string; branch: string | null; clean: boolean }>;
 }
 export interface GitDiffOut { path: string; text: string; truncated: boolean; binary: boolean; new: boolean }
 /** 提交上的引用装饰（分支 / 远端分支 / 标签 / HEAD），历史行上以小标签展示。 */
@@ -614,6 +617,32 @@ export interface GitCommitDetailOut {
 export interface GitBranchesOut {
   local: Array<{ name: string; current: boolean; upstream: string | null; date: string }>;
   remote: Array<{ name: string; date: string }>;
+}
+/** plan-20261019-git-multirepo：项目内的一个仓库（根仓库 rel 为空串） */
+export interface GitRepoOut {
+  rel: string;
+  name: string;
+  path: string;
+  is_root: boolean;
+  branch: string | null;
+  detached: boolean;
+  ahead: number;
+  behind: number;
+  /** 未提交改动的文件数（含未跟踪） */
+  changes: number;
+}
+/** plan-20261019-git-multirepo：Git 接口的作用对象——哪个仓库（相对项目根）、哪个会话（会话工作树优先） */
+export interface GitScope { repo?: string; sessionId?: number | null }
+
+function gitQs(projectId: number, scope: GitScope = {}): string {
+  const q = new URLSearchParams({ project_id: String(projectId) });
+  if (scope.repo) q.set("repo", scope.repo);
+  if (scope.sessionId != null) q.set("session_id", String(scope.sessionId));
+  return q.toString();
+}
+
+function gitBody(projectId: number, scope: GitScope = {}): Record<string, unknown> {
+  return { project_id: projectId, repo: scope.repo || null, session_id: scope.sessionId ?? null };
 }
 
 export const api = {
@@ -641,39 +670,45 @@ export const api = {
   cleanupStaleWorktrees: () =>
     post<{ ok: boolean; cleaned: number; stale: Array<{ id: number; name: string; path: string }> }>(
       "/projects/worktrees/cleanup-stale", {}),
-  worktreeMergePreview: (worktreeProjectId: number, direction: WorktreeMergeDirection = "to_main") =>
-    post<WorktreeMergePreview>(`/projects/worktrees/${worktreeProjectId}/merge/preview`, { direction }),
-  worktreeMergeFile: (worktreeProjectId: number, path: string, direction: WorktreeMergeDirection = "to_main") =>
+  /** plan-20261019-git-multirepo：工作树包含的仓库（工作树组有多个，合并时逐个选择） */
+  worktreeRepos: (worktreeProjectId: number) =>
+    get<WorktreeRepoOut[]>(`/projects/worktrees/${worktreeProjectId}/repos`),
+  // plan-20261019-git-multirepo：以下合并接口的 repo 为工作树组里的成员（相对路径，"." = 根仓库）
+  worktreeMergePreview: (worktreeProjectId: number, direction: WorktreeMergeDirection = "to_main", repo = "") =>
+    post<WorktreeMergePreview>(`/projects/worktrees/${worktreeProjectId}/merge/preview`, { direction, repo }),
+  worktreeMergeFile: (worktreeProjectId: number, path: string, direction: WorktreeMergeDirection = "to_main", repo = "") =>
     post<{ ok: boolean; path: string; base: string | null; ours: string | null; theirs: string | null; binary?: boolean }>(
-      `/projects/worktrees/${worktreeProjectId}/merge/file`, { path, direction }),
+      `/projects/worktrees/${worktreeProjectId}/merge/file`, { path, direction, repo }),
   worktreeMergeApply: (
     worktreeProjectId: number,
     files: Array<{ path: string; content?: string; deleted?: boolean }>,
     direction: WorktreeMergeDirection = "to_main",
+    repo = "",
   ) =>
     post<{ ok: boolean; committed: boolean; written: string[] }>(
-      `/projects/worktrees/${worktreeProjectId}/merge/apply`, { files, direction }),
+      `/projects/worktrees/${worktreeProjectId}/merge/apply`, { files, direction, repo }),
   worktreeMergeAi: (
     worktreeProjectId: number,
     path: string,
     hunk?: Record<string, unknown>,
-    opts?: { direction?: WorktreeMergeDirection; modelId?: number | null },
+    opts?: { direction?: WorktreeMergeDirection; modelId?: number | null; repo?: string },
   ) =>
     post<{ ok: boolean; suggestion?: string; error?: string; model?: string }>(
       `/projects/worktrees/${worktreeProjectId}/merge/ai`,
-      { path, hunk, direction: opts?.direction ?? "to_main", model_id: opts?.modelId ?? null }),
+      { path, hunk, direction: opts?.direction ?? "to_main", model_id: opts?.modelId ?? null, repo: opts?.repo ?? "" }),
   /** plan-308-1542 需求3-A：一键 AI 智能合并（进度经 WS merge.progress 广播）。 */
   worktreeMergeAiAll: (
     worktreeProjectId: number,
-    opts?: { direction?: WorktreeMergeDirection; modelId?: number | null; sessionId?: number | null },
+    opts?: { direction?: WorktreeMergeDirection; modelId?: number | null; sessionId?: number | null; repo?: string },
   ) =>
     post<{ ok: boolean; merge_id: string; resolved?: Record<string, string>; report?: MergeReportOut; engine?: string; preview?: WorktreeMergePreview }>(
       `/projects/worktrees/${worktreeProjectId}/merge/ai-all`,
-      { direction: opts?.direction ?? "to_main", model_id: opts?.modelId ?? null, session_id: opts?.sessionId ?? null }),
+      { direction: opts?.direction ?? "to_main", model_id: opts?.modelId ?? null, session_id: opts?.sessionId ?? null,
+        repo: opts?.repo ?? "" }),
   /** 合并前自动提交某一侧的未提交改动（side: worktree | main） */
-  worktreeCommit: (worktreeProjectId: number, side: "worktree" | "main", message?: string) =>
+  worktreeCommit: (worktreeProjectId: number, side: "worktree" | "main", message?: string, repo = "") =>
     post<{ ok: boolean; committed: boolean; message: string }>(
-      `/projects/worktrees/${worktreeProjectId}/commit`, { side, message }),
+      `/projects/worktrees/${worktreeProjectId}/commit`, { side, message, repo }),
   // ── 插件市场（plan-282-1441 #6）──
   pluginMarketplace: () =>
     get<{ ok: boolean; items: PluginMarketItem[]; installedCount: number }>("/plugins/marketplace"),
@@ -882,41 +917,51 @@ export const api = {
   },
   rollbackPreview: (turnId: number) => get<RollbackPreviewOut>(`/turns/${turnId}/rollback_preview`),
   // ── Git（plan-20261017-goal12 项 5）──
-  gitStatus: (projectId: number) => get<GitStatusOut>(`/git/status?project_id=${projectId}`),
-  gitDiff: (projectId: number, path: string, staged = false) =>
-    get<GitDiffOut>(`/git/diff?project_id=${projectId}&path=${encodeURIComponent(path)}&staged=${staged ? "true" : "false"}`),
-  gitLog: (projectId: number, limit = 40, skip = 0) =>
-    get<GitLogEntry[]>(`/git/log?project_id=${projectId}&limit=${limit}&skip=${skip}`),
-  gitCommitDetail: (projectId: number, sha: string) =>
-    get<GitCommitDetailOut>(`/git/commit?project_id=${projectId}&sha=${encodeURIComponent(sha)}`),
-  gitCommitDiff: (projectId: number, sha: string, path: string) =>
-    get<GitDiffOut>(`/git/commit/diff?project_id=${projectId}&sha=${encodeURIComponent(sha)}&path=${encodeURIComponent(path)}`),
-  gitBranches: (projectId: number) => get<GitBranchesOut>(`/git/branches?project_id=${projectId}`),
-  gitStage: (projectId: number, paths: string[]) => post<{ ok: boolean }>("/git/stage", { project_id: projectId, paths }),
-  gitUnstage: (projectId: number, paths: string[]) => post<{ ok: boolean }>("/git/unstage", { project_id: projectId, paths }),
-  gitDiscard: (projectId: number, paths: string[], untracked: string[]) =>
-    post<{ ok: boolean }>("/git/discard", { project_id: projectId, paths, untracked }),
-  gitCommit: (projectId: number, message: string, amend = false) =>
-    post<{ ok: boolean; sha: string }>("/git/commit", { project_id: projectId, message, amend }),
+  // plan-20261019-git-multirepo：scope 指定操作哪个仓库（相对项目根，空 = 根仓库）与会话（会话工作树优先）
+  /** 项目内的全部仓库（根仓库在前），带分支与改动数 */
+  gitRepos: (projectId: number, scope: GitScope = {}) =>
+    get<GitRepoOut[]>(`/git/repos?${gitQs(projectId, { sessionId: scope.sessionId })}`),
+  /** 汇总全部仓库的状态（路径带仓库前缀），供工具卡按项目展示改动 */
+  gitStatusAll: (projectId: number, scope: GitScope = {}) =>
+    get<GitStatusOut>(`/git/status-all?${gitQs(projectId, { sessionId: scope.sessionId })}`),
+  gitStatus: (projectId: number, scope: GitScope = {}) => get<GitStatusOut>(`/git/status?${gitQs(projectId, scope)}`),
+  gitDiff: (projectId: number, path: string, staged = false, scope: GitScope = {}) =>
+    get<GitDiffOut>(`/git/diff?${gitQs(projectId, scope)}&path=${encodeURIComponent(path)}&staged=${staged ? "true" : "false"}`),
+  gitLog: (projectId: number, limit = 40, skip = 0, scope: GitScope = {}) =>
+    get<GitLogEntry[]>(`/git/log?${gitQs(projectId, scope)}&limit=${limit}&skip=${skip}`),
+  gitCommitDetail: (projectId: number, sha: string, scope: GitScope = {}) =>
+    get<GitCommitDetailOut>(`/git/commit?${gitQs(projectId, scope)}&sha=${encodeURIComponent(sha)}`),
+  gitCommitDiff: (projectId: number, sha: string, path: string, scope: GitScope = {}) =>
+    get<GitDiffOut>(`/git/commit/diff?${gitQs(projectId, scope)}&sha=${encodeURIComponent(sha)}&path=${encodeURIComponent(path)}`),
+  gitBranches: (projectId: number, scope: GitScope = {}) => get<GitBranchesOut>(`/git/branches?${gitQs(projectId, scope)}`),
+  gitStage: (projectId: number, paths: string[], scope: GitScope = {}) =>
+    post<{ ok: boolean }>("/git/stage", { ...gitBody(projectId, scope), paths }),
+  gitUnstage: (projectId: number, paths: string[], scope: GitScope = {}) =>
+    post<{ ok: boolean }>("/git/unstage", { ...gitBody(projectId, scope), paths }),
+  gitDiscard: (projectId: number, paths: string[], untracked: string[], scope: GitScope = {}) =>
+    post<{ ok: boolean }>("/git/discard", { ...gitBody(projectId, scope), paths, untracked }),
+  gitCommit: (projectId: number, message: string, amend = false, scope: GitScope = {}) =>
+    post<{ ok: boolean; sha: string }>("/git/commit", { ...gitBody(projectId, scope), message, amend }),
   // 拉取冲突不抛错：conflict/conflicts/state 交给面板直接进入冲突处理
-  gitSync: (projectId: number, action: "fetch" | "pull" | "push") =>
+  gitSync: (projectId: number, action: "fetch" | "pull" | "push", scope: GitScope = {}) =>
     post<{ ok: boolean; output: string; conflict?: boolean; conflicts?: string[]; state?: string }>(
-      "/git/sync", { project_id: projectId, action }),
+      "/git/sync", { ...gitBody(projectId, scope), action }),
   // 切换分支时可能返回 switched=false + reason=dirty：界面据此让用户选择暂存或放弃改动
   gitBranch: (projectId: number, action: "checkout" | "create" | "delete", name: string,
-    opts: { base?: string; force?: boolean; onDirty?: "stash" | "discard" } = {}) =>
+    opts: { base?: string; force?: boolean; onDirty?: "stash" | "discard" } = {}, scope: GitScope = {}) =>
     post<{
       ok: boolean; output: string;
       switched?: boolean; stashed?: boolean; created?: boolean; deleted?: boolean;
       reason?: "dirty"; files?: string[];
       conflict?: boolean; conflicts?: string[]; state?: string;
     }>("/git/branch", {
-      project_id: projectId, action, name,
+      ...gitBody(projectId, scope), action, name,
       base: opts.base, force: opts.force, on_dirty: opts.onDirty,
     }),
-  gitResolve: (projectId: number, path: string, side: "ours" | "theirs") =>
-    post<{ ok: boolean }>("/git/resolve", { project_id: projectId, path, side }),
-  gitMergeAbort: (projectId: number) => post<{ ok: boolean }>("/git/merge/abort", { project_id: projectId }),
+  gitResolve: (projectId: number, path: string, side: "ours" | "theirs", scope: GitScope = {}) =>
+    post<{ ok: boolean }>("/git/resolve", { ...gitBody(projectId, scope), path, side }),
+  gitMergeAbort: (projectId: number, scope: GitScope = {}) =>
+    post<{ ok: boolean }>("/git/merge/abort", gitBody(projectId, scope)),
   getTurnSnapshot: (turnId: number) => get<TurnSnapshotOut>(`/turns/${turnId}/snapshot`),
 
   // ── 变更审核（v11）──
@@ -956,6 +1001,8 @@ export const api = {
       workflow?: WorkflowNodeBrief | null;
       /** 工作流节点的子代理：派发时刻（线程首条消息 id），主消息流据此定位节点卡（普通子代理为空） */
       spawn_message_id?: number | null;
+      /** plan-20261019-subagent-ghost: 线程消息数（0 且无任务、非运行中 = 幽灵条目） */
+      message_count?: number;
     }>>(`/turns/sessions/${sessionId}/subagents`),
   listSessionTasks: (sessionId: number) => get<TaskOut[]>(`/turns/sessions/${sessionId}/tasks`),
   /** v38 (plan-482): 确认/取消方案文档（不再涉及 group/steps）。 */
@@ -1485,7 +1532,7 @@ export const api = {
 export type {
   ProjectOut, SessionOut, TurnOut, MessageOut, TaskOut, ArtifactOut, ModelOut,
   ProviderOut, ProviderCredentialOut, ScannedModel,
-  WorktreeOut, WorktreeMergeFile, WorktreeMergePreview, WorktreeMergeDirection, MergeReportOut, PluginMarketItem,
+  WorktreeOut, WorktreeRepoOut, WorktreeMergeFile, WorktreeMergePreview, WorktreeMergeDirection, MergeReportOut, PluginMarketItem,
   DbConnectionOut, DbPolicyOut, DebugStatusOut, RepoCandidate,
   DebugSettingsOut,
   ArthasStatusOut, ArthasEntryOut, ArthasProcessOut, ArthasConfigOut,
@@ -1628,12 +1675,6 @@ export interface GlobalSettingsOut {
   desktop_screenshot_max_dim?: number;
   /** plan-334-1661: 操作路线沉淀开关 */
   desktop_recipe_enabled?: boolean;
-  /** plan-365-1757: 截图元素编号（按编号点击，而非自行换算坐标） */
-  desktop_mark_shot?: boolean;
-  /** plan-365-1757/1769: 点击前校验档位（off / lenient / strict）；旧值为布尔，读取时自动迁移 */
-  desktop_verify_click?: boolean | string;
-  /** plan-365-1757: 破坏性操作词表（逗号分隔） */
-  desktop_destructive_words?: string;
   /** v36: 子代理同时运行上限（超出后新派发排队等待，1~16） */
   max_concurrent_subagents?: number;
   /** v36: 每轮子代理派发总量上限（含已完成，1~32） */

@@ -109,33 +109,33 @@ def test_derivation_does_not_mutate_input():
 # ───────────────────────── 桌面工具关键参数（本次故障的直接回归） ─────────────────────────
 
 
-def test_desktop_click_exposes_anchor_params_to_ta3():
-    """desktop_click 的锚点参数必须在 ta3 侧可见（本次故障的回归测试）。
+def test_desktop_click_exposes_target_params_to_ta3():
+    """desktop_click 的目标参数（元素编号 / 截图坐标）必须在 ta3 侧可见。
 
-    只要这些参数再次在 ta3 会话中缺失，模型就会退回「看图心算屏幕坐标」——
-    这正是点击准确率大幅下降的直接原因。
+    plan-20261019-desktop-precision：坐标统一取自最近一次截图、口径按模型族写在截图结果里；
+    OCR 文字定位、截图编号、点前校验相关参数已移除。参数一旦在 ta3 会话缺失，模型就只能手算坐标。
     """
     disguised = disguise_tools(_registry_schemas())
     click = _disguised_by_name(disguised, "DesktopClick")
     assert click is not None, "ta3 会话下 DesktopClick 不可见"
     props = click["function"]["parameters"].get("properties", {})
-    for key in ("ref", "text_target", "image_px", "image_py", "image_x", "image_y", "shot_id",
-                "expect", "destructive", "then_shot", "then_wait_stable", "allow_blank"):
-        assert key in props, f"DesktopClick 缺参数 {key}——ta3 侧又回到只能手算坐标的状态"
+    for key in ("element", "x", "y", "button", "count", "title", "handle", "focus_first",
+                "allow_outside", "then_shot"):
+        assert key in props, f"DesktopClick 缺参数 {key}"
+    for gone in ("ref", "text_target", "image_px", "image_x", "expect", "destructive", "allow_blank"):
+        assert gone not in props, f"DesktopClick 仍暴露已移除的参数 {gone}"
 
 
 def test_desktop_screenshot_exposes_new_capabilities_to_ta3():
-    """desktop_screenshot 的编号 / 区域 / 稳定等待能力必须在 ta3 侧可见。
-
-    plan-365-1773：`fresh`（强制新截图）随「截图复用」一并移除——每次截图都取当前画面。
-    """
+    """desktop_screenshot 的窗口截图 / 放大查看 / 稳定等待能力必须在 ta3 侧可见。"""
     disguised = disguise_tools(_registry_schemas())
     shot = _disguised_by_name(disguised, "DesktopScreenshot")
     assert shot is not None, "ta3 会话下 DesktopScreenshot 不可见"
     props = shot["function"]["parameters"].get("properties", {})
-    for key in ("handle", "title", "region", "max_dim", "mark", "with_elements",
-                "zoom_at", "zoom_radius", "wait_stable"):
+    for key in ("handle", "title", "zoom", "wait_stable"):
         assert key in props, f"DesktopScreenshot 缺参数 {key}"
+    for gone in ("mark", "with_elements", "zoom_at", "region"):
+        assert gone not in props, f"DesktopScreenshot 仍暴露已移除的参数 {gone}"
 
 
 def test_desktop_type_and_keys_expose_then_shot_to_ta3():
@@ -145,15 +145,13 @@ def test_desktop_type_and_keys_expose_then_shot_to_ta3():
         schema = _disguised_by_name(disguised, alias)
         assert schema is not None, f"ta3 会话下 {alias} 不可见"
         props = schema["function"]["parameters"].get("properties", {})
-        for key in ("then_shot", "then_wait_stable"):
-            assert key in props, f"{alias} 缺参数 {key}"
+        assert "then_shot" in props, f"{alias} 缺参数 then_shot"
 
 
 def test_desktop_batch_input_params_visible_to_ta3():
-    """「点击 → 清空 → 输入 → 回车」一步完成的参数必须在 ta3 侧可见（plan-365-1774）。
+    """一步完成多段操作的能力必须在 ta3 侧可见：点击带输入、以及 desktop_batch 本身。
 
-    提速的主刀不是单步工具耗时，而是把多次往返合并成一次调用；
-    这些参数一旦在 ta3 侧缺失，模型只能退回「点一下、再输一次、再按一次」的三步走。
+    提速的主刀不是单步工具耗时，而是把多次往返合并成一次调用。
     """
     disguised = disguise_tools(_registry_schemas())
     click = _disguised_by_name(disguised, "DesktopClick")
@@ -162,21 +160,25 @@ def test_desktop_batch_input_params_visible_to_ta3():
     for key in ("text", "keys", "clear_first"):
         assert key in click_props, f"DesktopClick 缺批量输入参数 {key}"
 
-    type_tool = _disguised_by_name(disguised, "DesktopType")
-    assert type_tool is not None
-    type_props = type_tool["function"]["parameters"].get("properties", {})
-    for key in ("text", "keys", "clear_first"):
-        assert key in type_props, f"DesktopType 缺参数 {key}"
+    batch = _disguised_by_name(disguised, "DesktopBatch")
+    assert batch is not None, "ta3 会话下 DesktopBatch 不可见"
+    batch_params = batch["function"]["parameters"]
+    assert "actions" in batch_params.get("properties", {})
+    assert batch_params.get("required") == ["actions"]
+
+
+def test_desktop_removed_tools_not_exposed_to_ta3():
+    """OCR 文字定位与命中测试已移除：ta3 侧不应再出现对应伪装工具。"""
+    disguised = disguise_tools(_registry_schemas())
+    assert _disguised_by_name(disguised, "DesktopFindText") is None
+    assert _disguised_by_name(disguised, "DesktopHit") is None
 
 
 def test_desktop_click_no_longer_requires_bare_coordinates():
-    """锚点参数在场时，x/y 不应再是唯一必需项（否则模型被逼着给坐标）。"""
+    """元素编号在场时，x/y 不应是必需项（否则模型被逼着给坐标）。"""
     disguised = disguise_tools(_registry_schemas())
     click = _disguised_by_name(disguised, "DesktopClick")
     assert click is not None
     required = set(click["function"]["parameters"].get("required", []) or [])
-    assert "ref" in click["function"]["parameters"].get("properties", {})
-    assert required != {"x", "y"}, (
-        "DesktopClick 仍要求必填 x/y：工具描述引导用 ref/text_target，"
-        "但参数契约在逼模型给坐标，模型会自行换算——这正是误点之源"
-    )
+    assert "element" in click["function"]["parameters"].get("properties", {})
+    assert not ({"x", "y"} & required), "DesktopClick 仍要求必填 x/y"

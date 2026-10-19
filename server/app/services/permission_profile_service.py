@@ -67,7 +67,7 @@ _BROWSER_READ = [
 ]
 # 电脑操控：读屏类（键鼠操作与切换窗口不放进白名单）
 _DESKTOP_READ = [
-    "desktop_windows", "desktop_snapshot", "desktop_hit", "desktop_find_text", "desktop_screenshot",
+    "desktop_windows", "desktop_snapshot", "desktop_screenshot",
 ]
 # v36 (plan-321-1600 R1): 四模式全支持子代理——只读 / 计划模式仅暴露只读探索子代理（运行时强制 explore）
 _SUBAGENT = [

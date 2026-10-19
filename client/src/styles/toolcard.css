@@ -6,7 +6,8 @@
  *  · 去掉「会话工具」顶栏，第一个栏目标题行右侧承载「⋯ / 收起」（参考动态组卡片）；
  *  · 字号跟随设置 --fs-md、行首图标槽位跟随 --flow-icon，与消息流同规格（此前写死 11.5px，比消息流小一号）；
  *  · 胶囊加大到 36px 高、正文字号，折叠态也能一眼读清；
- *  · 进程栏目去掉横向进度条，状态只用行首图标表达（完成圆勾 / 进行中转圈 / 待办箭头）。
+ *  · 进程栏目去掉横向进度条，状态只用行首图标表达（完成圆勾 / 进行中转圈 / 待办空心圆；
+ *    四态共用同一环径 r=8，切换时视觉大小不跳）。
  *
  * 约束（AGENTS.md）：
  *  · 圆角只用令牌：浮层 --r-pop、内部控件 --r-md、胶囊 999px；
@@ -56,7 +57,9 @@
   to { opacity: 1; transform: none; }
 }
 
-/* ── 操作区：叠在第一个栏目标题行右侧；在滚动容器之外，浮层不会被裁切 ── */
+/* ── 操作区：贴在第一个栏目标题行右侧，**在滚动容器内**——
+      按内容坐标定位，随内容一起上移，第一个栏目滚出卡片时一并被裁掉（不再一直浮在右上角）。
+      定位基准是 .tcard-card-body 的 padding box，与首栏组的标题行同一条水平线。 ── */
 .tcard-card-ops {
   position: absolute;
   top: 7px;
@@ -69,8 +72,20 @@
   background: var(--bg-panel);
   border-radius: var(--r-md);
 }
+/* ── 浮层锚点：与「⋯」同位，但留在滚动容器之外——菜单若挂在卡片体内会被 overflow 裁掉。
+      本身不接收指针事件（不挡按钮），只给 .ui-pop 提供定位基准。 ── */
+.tcard-menu-anchor {
+  position: absolute;
+  top: 7px;
+  right: 8px;
+  width: 50px;
+  height: 24px;
+  pointer-events: none;
+}
+.tcard-menu-anchor .ui-pop { pointer-events: auto; }
 /* ── 卡片体：栏目列表，超出内部滚动（圆角跟随卡片，内容不溢出圆角） ── */
 .tcard-card-body {
+  position: relative;
   flex: 1 1 auto;
   min-height: 0;
   max-height: var(--tcard-max-h);
@@ -149,7 +164,7 @@
 .tcard-row.is-done { color: var(--text-3); }
 .tcard-row:focus-visible { outline: none; background: var(--bg-hover); }
 
-/* ── 进程行：完成 = 绿色圆勾 + 删除线淡出；进行中 = 强调色转圈；待办 = 箭头；中断 = 警示色 ── */
+/* ── 进程行：完成 = 绿色圆勾 + 删除线淡出；进行中 = 强调色转圈；待办 = 空心圆；中断 = 警示色 ── */
 .tcard-proc.is-done .tcard-ic { color: var(--success); }
 .tcard-proc.is-done .tcard-row-text { color: var(--text-3); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--text-3) 60%, transparent); }
 .tcard-proc.is-running .tcard-ic { color: var(--accent); }

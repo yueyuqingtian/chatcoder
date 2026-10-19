@@ -601,14 +601,24 @@ async def list_session_subagents(session_id: int, turn_id: int | None = None,
     from sqlalchemy import func as _func
 
     node_thread_ids = [agent.id for agent, _task in rows if agent.workflow_node_id]
+    # plan-20261019-subagent-ghost: 一次查出所有子代理线程的派发锚点（首条消息 id）与消息数。
+    # message_count 供前端识别「没有任何输出、也没有关联任务」的幽灵条目——它们点开是空面板。
+    node_thread_set = set(node_thread_ids)
+    thread_ids = [agent.id for agent, _task in rows]
     spawn_ids: dict[int, int] = {}
-    if node_thread_ids:
-        spawn_rows = await db.execute(
-            select(_Message.thread_id, _func.min(_Message.id))
-            .where(_Message.thread_id.in_(node_thread_ids))
+    message_counts: dict[int, int] = {}
+    if thread_ids:
+        stat_rows = await db.execute(
+            select(_Message.thread_id, _func.min(_Message.id), _func.count())
+            .where(_Message.thread_id.in_(thread_ids))
             .group_by(_Message.thread_id)
         )
-        spawn_ids = {int(tid): int(mid) for tid, mid in spawn_rows.all() if tid is not None}
+        for tid, first_id, count in stat_rows.all():
+            if tid is None:
+                continue
+            spawn_ids[int(tid)] = int(first_id)
+            message_counts[int(tid)] = int(count)
+    spawn_ids = {tid: mid for tid, mid in spawn_ids.items() if tid in node_thread_set}
     out: list[dict] = []
     for agent, task in rows:
         _h = _mgr.get(agent.id) if _mgr is not None else None
@@ -631,6 +641,9 @@ async def list_session_subagents(session_id: int, turn_id: int | None = None,
             "updated_at": str(task.updated_at) if task and task.updated_at else None,
             "token_usage": (task.token_usage or 0) if task else 0,
             "files_count": len(_h.files_touched) if _h is not None else 0,
+            # plan-20261019-subagent-ghost: 线程消息数——0 且无任务、非运行中的条目
+            # 属于没有产出也无法定位的幽灵记录，前端不展示。
+            "message_count": message_counts.get(agent.id, 0),
         })
     return out
 

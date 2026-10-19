@@ -233,12 +233,11 @@ _MANAGE_TOOLS = frozenset({"terminal_bg_kill"})
 
 # 电脑操控：写操作（真的动鼠标键盘）
 _DESKTOP_WRITE_TOOLS = frozenset({
-    "desktop_click", "desktop_type", "desktop_keys", "desktop_scroll",
+    "desktop_click", "desktop_type", "desktop_keys", "desktop_scroll", "desktop_batch",
 })
 # 电脑操控：只读感知（读屏幕/无障碍树），与文件读取同为纯读
 _DESKTOP_READ_TOOLS = frozenset({
-    "desktop_windows", "desktop_snapshot", "desktop_hit", "desktop_focus",
-    "desktop_find_text", "desktop_screenshot",
+    "desktop_windows", "desktop_snapshot", "desktop_focus", "desktop_screenshot",
 })
 
 # 执行任意命令

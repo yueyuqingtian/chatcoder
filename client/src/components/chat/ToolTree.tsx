@@ -143,33 +143,56 @@ const ChangeStat = memo(function ChangeStat({ additions, deletions }: { addition
   );
 });
 
-/** v19: 简易行级 diff（before/after 文本 → add/del/ctx 行），超长降级为全量 -/+ */
+/** 按行切分（与服务端 splitlines 同口径）：
+ *  去掉 BOM、兼容 CRLF，并丢弃末尾换行产生的空行——否则「文件末尾有无换行」
+ *  会被前端当成多一行新增，出现摘要 +0 -0、展开却多一行的错位。 */
+function splitLines(text: string): string[] {
+  if (!text) return [];
+  const normalized = text.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+  const lines = normalized.split("\n");
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+
+/** v19: 简易行级 diff（before/after 文本 → add/del/ctx 行）。
+ *
+ *  plan-20261019-diff: 先裁掉公共前后缀，再只对差异段做 LCS——大文件里改动
+ *  通常只占几行，裁剪后规模很小，不再一超过 1600 行就退化成「整篇删除+整篇新增」。
+ *  差异段仍然过大时保留全量 -/+ 降级，避免前端卡死。 */
 function simpleLineDiff(before: string, after: string): Array<{ type: "add" | "del" | "ctx"; text: string }> {
-  const a = before ? before.split("\n") : [];
-  const b = after ? after.split("\n") : [];
-  if (a.length + b.length > 1600) {
-    return [
-      ...a.map((t) => ({ type: "del" as const, text: t })),
-      ...b.map((t) => ({ type: "add" as const, text: t })),
-    ];
-  }
-  // LCS 行 diff（带长度上限的 DP）
-  const n = a.length, m = b.length;
-  const dp: Uint16Array[] = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const a = splitLines(before);
+  const b = splitLines(after);
+  let start = 0;
+  while (start < a.length && start < b.length && a[start] === b[start]) start++;
+  let endA = a.length, endB = b.length;
+  while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) { endA--; endB--; }
+  const head = a.slice(0, start);
+  const midA = a.slice(start, endA);
+  const midB = b.slice(start, endB);
+  const tail = a.slice(endA);
+  const out: Array<{ type: "add" | "del" | "ctx"; text: string }> = head.map((t) => ({ type: "ctx" as const, text: t }));
+  const n = midA.length, m = midB.length;
+  // 差异段规模上限：超过后退化为全量 -/+（对用户仍是完整内容，只是不区分公共行）
+  if (n * m > 1_600_000) {
+    out.push(...midA.map((t) => ({ type: "del" as const, text: t })));
+    out.push(...midB.map((t) => ({ type: "add" as const, text: t })));
+  } else {
+    const dp: Uint16Array[] = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) {
+        dp[i][j] = midA[i] === midB[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
     }
+    let i = 0, j = 0;
+    while (i < n && j < m) {
+      if (midA[i] === midB[j]) { out.push({ type: "ctx", text: midA[i] }); i++; j++; }
+      else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ type: "del", text: midA[i] }); i++; }
+      else { out.push({ type: "add", text: midB[j] }); j++; }
+    }
+    while (i < n) out.push({ type: "del", text: midA[i++] });
+    while (j < m) out.push({ type: "add", text: midB[j++] });
   }
-  const out: Array<{ type: "add" | "del" | "ctx"; text: string }> = [];
-  let i = 0, j = 0;
-  while (i < n && j < m) {
-    if (a[i] === b[j]) { out.push({ type: "ctx", text: a[i] }); i++; j++; }
-    else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ type: "del", text: a[i] }); i++; }
-    else { out.push({ type: "add", text: b[j] }); j++; }
-  }
-  while (i < n) { out.push({ type: "del", text: a[i++] }); }
-  while (j < m) { out.push({ type: "add", text: b[j++] }); }
+  out.push(...tail.map((t) => ({ type: "ctx" as const, text: t })));
   return out;
 }
 
@@ -226,15 +249,24 @@ function InlineDiff({ turnId, path, callKey, fallbackLines, onStat }: {
     api.getFileDiff(turnId, path, callKey)
       .then((d) => {
         if (cancelled) return;
-        // 行级 diff 优先（服务端 SequenceMatcher 预计算，与徽标 +N -M 同源一致，
-        // 避免大文件本地 LCS 命中 1600 行阈值退化为全量 -/+）；
-        // 无 lines（二进制 / 无前后内容）时优先兜底、再回退本地 LCS
-        const rendered = d.lines && d.lines.length > 0
-          ? d.lines.map((l) => ({ type: l.type, text: l.text }))
-          : (d.before == null && d.after == null && fb ? fb : simpleLineDiff(d.before ?? "", d.after ?? ""));
-        const c = countDiffLines(rendered);
-        const adds = typeof d.additions === "number" ? d.additions : c.additions;
-        const dels = typeof d.deletions === "number" ? d.deletions : c.deletions;
+        // 行级 diff 优先（服务端 SequenceMatcher 预计算，与徽标 +N -M 同源一致）。
+        // plan-20261019-diff: 统计必须跟着「实际渲染来源」走——旧实现即使回退到参数
+        // 兜底 diff，仍沿用服务端 additions/deletions（二进制/大文件时为 0），
+        // 于是出现「摘要 +0 -0、展开却有一行新增」。
+        const serverLines = d.lines && d.lines.length > 0
+          ? d.lines.map((l) => ({ type: l.type as "add" | "del" | "ctx", text: l.text }))
+          : null;
+        const usingFallback = !serverLines && d.before == null && d.after == null && !!fb;
+        const rendered = serverLines
+          ?? (usingFallback ? fb! : simpleLineDiff(d.before ?? "", d.after ?? ""));
+        const counted = countDiffLines(rendered);
+        // 服务端给了非零统计且渲染的是服务端 lines：以服务端为准（截断时也是全量统计）；
+        // 其余情况（参数兜底 / 旧记录 0/0）一律按实际渲染行统计，保证摘要与展开一致。
+        const serverAdds = d.additions ?? 0;
+        const serverDels = d.deletions ?? 0;
+        const trustServer = !!serverLines && (serverAdds > 0 || serverDels > 0);
+        const adds = trustServer ? serverAdds : counted.additions;
+        const dels = trustServer ? serverDels : counted.deletions;
         setState({
           kind: "ok",
           lines: rendered,
@@ -242,7 +274,7 @@ function InlineDiff({ turnId, path, callKey, fallbackLines, onStat }: {
           additions: adds,
           deletions: dels,
           singleEdit: d.single_edit === true,
-          note: d.reason ?? null,
+          note: usingFallback ? "展示调用参数中的本次编辑内容" : (d.reason ?? null),
         });
         onStat?.({ additions: adds, deletions: dels });
       })
@@ -505,6 +537,14 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [isWrite, leaf.callKey, path],
   );
+  // plan-20261019-diff: 折叠态统计兜底——历史消息缺 change_stat 时，用调用参数
+  // 计算本次编辑的 +N -M。只有 editor_apply_diff / multi_file_edit 的参数能精确
+  // 表达一次编辑；fs_write 是整篇覆盖，参数只有 after，无法反映删改，不能用它兜底。
+  const fallbackStat = useMemo(() => {
+    if (!isWrite || !fallbackLines || fallbackLines.length === 0) return null;
+    if (leaf.tool !== "editor_apply_diff" && leaf.tool !== "multi_file_edit") return null;
+    return countDiffLines(fallbackLines);
+  }, [isWrite, leaf.tool, fallbackLines]);
   const hasOutput = (leaf.output && leaf.output.length > 0) || !!leaf.error;
   const isCommand = COMMAND_TOOLS.has(leaf.tool);
   // v7(B): 运行中（ok===null）恒可展开——即使 output 尚未落库，也能看实时输出
@@ -565,7 +605,10 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
         {/* v7(H): 写操作运行中 changeStat 未落库时回退到实时结果；
             plan-89-387: 历史消息缺统计时，展开后按「本次变更」回填行数 */}
         {(() => {
-          const stat = leaf.changeStat ?? liveResult?.change_stat ?? loadedStat;
+          // plan-20261019-diff: 0/0 一律不展示（旧记录缺统计时继续向后找兜底），
+          // 避免出现「+0 -0」这种与实际展开内容矛盾的摘要。
+          const stat = [leaf.changeStat, liveResult?.change_stat, loadedStat, fallbackStat]
+            .find((s) => s && (s.additions > 0 || s.deletions > 0)) ?? null;
           return stat
             ? <ChangeStat additions={stat.additions} deletions={stat.deletions} />
             : null;
@@ -746,8 +789,21 @@ const WriteMergedRow = memo(function WriteMergedRow({ leaves }: { leaves: ToolLe
   const running = leaves.some((l) => l.ok === null);
   const failed = leaves.some((l) => l.ok === false);
   const path = leafPath(leaves[0]) ?? "";
-  const add = leaves.reduce((s, l) => s + (l.changeStat?.additions ?? 0), 0);
-  const del = leaves.reduce((s, l) => s + (l.changeStat?.deletions ?? 0), 0);
+  // plan-20261019-diff: 合并行按「changeStat → 调用参数兜底」取每行统计。
+  // 历史消息缺 change_stat 时，折叠态整行此前不显示 +N -M。
+  const statOf = (l: ToolLeaf): { additions: number; deletions: number } | null => {
+    if (l.changeStat && (l.changeStat.additions > 0 || l.changeStat.deletions > 0)) return l.changeStat;
+    if (l.tool === "editor_apply_diff" || l.tool === "multi_file_edit") {
+      const fb = leafFallbackDiff(l, leafPath(l));
+      if (fb && fb.length > 0) {
+        const c = countDiffLines(fb);
+        if (c.additions > 0 || c.deletions > 0) return c;
+      }
+    }
+    return null;
+  };
+  const add = leaves.reduce((s, l) => s + (statOf(l)?.additions ?? 0), 0);
+  const del = leaves.reduce((s, l) => s + (statOf(l)?.deletions ?? 0), 0);
   const { dir, name } = path ? splitFilePath(path) : { dir: "", name: "" };
 
   return (

@@ -178,12 +178,10 @@ namespace DesktopCore
                         return ZoomOp(line);
                     case "waitstable":
                         return WaitStableOp(line);
+                    case "settle":
+                        return SettleOp(line);
                     case "frame":
                         return FrameOp(line);
-                    case "findtext":
-                        return FindText(line);
-                    case "ocrboxes":
-                        return OcrBoxes(line);
                     case "proccmd":
                         return ProcCmd(line);
                     case "listenports":
@@ -208,6 +206,8 @@ namespace DesktopCore
                         return ScrollOp(line);
                     case "drag":
                         return DragOp(line);
+                    case "move":
+                        return MoveOp(line);
                     case "invoke":
                         return InvokeOp(line);
                     case "settext":
@@ -491,7 +491,8 @@ namespace DesktopCore
                 Js.GetInt(line, "w", 0), Js.GetInt(line, "h", 0),
                 Js.GetInt(line, "maxDim", 1600),
                 Js.GetStr(line, "format", "jpg"),
-                Js.GetInt(line, "quality", 75));
+                Js.GetInt(line, "quality", 75),
+                Js.GetBool(line, "fit", false));
         }
 
         /// <summary>
@@ -529,7 +530,7 @@ namespace DesktopCore
                 Js.GetInt(line, "quality", 75));
         }
 
-        /// <summary>等待界面稳定（plan-365-1757 A7）：连续两次画面哈希一致即返回。</summary>
+        /// <summary>等待界面稳定（旧 op，保留兼容）：口径已改为容差比较，见 Sensing.Settle。</summary>
         private static string WaitStableOp(string line)
         {
             return Sensing.WaitStable(
@@ -537,6 +538,48 @@ namespace DesktopCore
                 Js.GetInt(line, "w", 0), Js.GetInt(line, "h", 0),
                 Js.GetInt(line, "timeout", 3000),
                 Js.GetInt(line, "settle", 60));
+        }
+
+        /// <summary>
+        /// 独立的稳定等待（plan-20261019-desktop-precision）：截图前 wait_stable、批量动作收尾时用，
+        /// 只判稳定、不比较动作前后。区域缺省为整个虚拟桌面。
+        /// </summary>
+        private static string SettleOp(string line)
+        {
+            return Sensing.Settle(
+                Js.GetInt(line, "x", 0), Js.GetInt(line, "y", 0),
+                Js.GetInt(line, "w", 0), Js.GetInt(line, "h", 0),
+                null, false, 0, 0,
+                Js.GetInt(line, "minMs", 0), Js.GetInt(line, "timeout", 1500),
+                Js.GetInt(line, "interval", 60), 0);
+        }
+
+        // 请求里没有动作点（lx/ly）时的占位值
+        private const int NoPoint = int.MinValue;
+
+        /// <summary>
+        /// 动作前按需采样（请求带 settle=true 时，plan-20261019-desktop-precision）。
+        /// 区域 sx/sy/sw/sh 为调用方的当前画面范围（窗口或整屏），缺省为整个虚拟桌面。
+        /// </summary>
+        private static Sensing.Sample BeginSettle(string line, int px, int py)
+        {
+            if (!Js.GetBool(line, "settle", false)) return null;
+            return Sensing.TakeSample(
+                Js.GetInt(line, "sx", 0), Js.GetInt(line, "sy", 0),
+                Js.GetInt(line, "sw", 0), Js.GetInt(line, "sh", 0),
+                px != NoPoint, px, py);
+        }
+
+        /// <summary>动作后等待稳定并判断有无可见变化，返回拼到响应里的 ,"settle":{...} 片段。</summary>
+        private static string EndSettle(string line, Sensing.Sample before, int px, int py)
+        {
+            if (before == null) return "";
+            return ",\"settle\":" + Sensing.Settle(
+                Js.GetInt(line, "sx", 0), Js.GetInt(line, "sy", 0),
+                Js.GetInt(line, "sw", 0), Js.GetInt(line, "sh", 0),
+                before, px != NoPoint, px, py,
+                Js.GetInt(line, "settleMinMs", 150), Js.GetInt(line, "settleMs", 1500),
+                Js.GetInt(line, "settleIntervalMs", 60), Js.GetInt(line, "noChangeMs", 900));
         }
 
         /// <summary>
@@ -557,43 +600,6 @@ namespace DesktopCore
                  + (fr.Right - fr.Left) + "," + (fr.Bottom - fr.Top) + "]"
                  + ",\"window\":[" + wr.Left + "," + wr.Top + ","
                  + (wr.Right - wr.Left) + "," + (wr.Bottom - wr.Top) + "]}";
-        }
-
-        /// <summary>
-        /// Locate on-screen text and return clickable absolute screen coordinates.
-        /// The escape hatch for self-drawn UIs where the UIA tree is empty.
-        ///
-        /// image/scale/srcX/srcY（plan-365-1757 B3）：传入则复用该图做 OCR，不再重新截屏。
-        /// </summary>
-        private static string FindText(string line)
-        {
-            return Ocr.FindText(
-                Js.GetStr(line, "text", ""),
-                Js.GetBool(line, "exact", false),
-                Js.GetStr(line, "region", ""),
-                Js.GetStr(line, "image", ""),
-                Js.GetDouble(line, "scale", 0),
-                Js.GetInt(line, "srcX", 0),
-                Js.GetInt(line, "srcY", 0),
-                Js.GetInt(line, "maxDim", 1600),
-                Js.GetInt(line, "maxCandidates", 5));
-        }
-
-        /// <summary>
-        /// 返回屏幕上全部文字行框（plan-365-1757 A2）。
-        /// 自绘界面拿不到控件树，只能靠文字行框给模型编号；image/scale/srcX/srcY
-        /// 可复用已有截图，避免为 OCR 再截一次屏。
-        /// </summary>
-        private static string OcrBoxes(string line)
-        {
-            return Ocr.Boxes(
-                Js.GetStr(line, "region", ""),
-                Js.GetStr(line, "image", ""),
-                Js.GetDouble(line, "scale", 0),
-                Js.GetInt(line, "srcX", 0),
-                Js.GetInt(line, "srcY", 0),
-                Js.GetInt(line, "maxDim", 1600),
-                Js.GetInt(line, "maxBoxes", 200));
         }
 
         // ── applications ─────────────────────────────────────────────────────
@@ -661,8 +667,12 @@ namespace DesktopCore
                 Js.GetStr(line, "proc", ""), requireFg);
             if (t.Error.Length > 0) return "{\"error\":\"" + Js.Esc(t.Error) + "\"}";
 
-            bool ok = Input.Click(x, y, Js.GetStr(line, "button", "left"),
-                                  Js.GetInt(line, "count", 1), Js.GetBool(line, "restoreCursor", false));
+            // 先移到目标、等悬停态生效，再采样「动作前」画面（plan-20261019-desktop-precision），
+            // 最后按下：悬停效果不会被算成点击引起的变化
+            Input.MoveTo(x, y);
+            System.Threading.Thread.Sleep(30);
+            Sensing.Sample before = BeginSettle(line, x, y);
+            bool ok = Input.Press(Js.GetStr(line, "button", "left"), Js.GetInt(line, "count", 1));
 
             // Optional "click then type then press Enter" in one call: this is the single
             // biggest step-count saver, because each round trip to the model is where the
@@ -688,6 +698,7 @@ namespace DesktopCore
                 string err = Input.Keys(thenKeys);
                 if (err.Length > 0) extra.Append(",\"keysError\":\"").Append(Js.Esc(err)).Append('"');
             }
+            extra.Append(EndSettle(line, before, x, y));
 
             return "{\"clicked\":" + (ok ? "true" : "false")
                  + ",\"at\":[" + x + "," + y + "]"
@@ -708,6 +719,10 @@ namespace DesktopCore
                 Js.GetLong(line, "handle", 0), Js.GetStr(line, "title", ""),
                 Js.GetStr(line, "proc", ""), requireFg);
             if (t.Error.Length > 0) return "{\"error\":\"" + Js.Esc(t.Error) + "\"}";
+
+            // 输入没有天然的动作点：调用方可用 lx/ly 传最近一次点击的位置（通常就是输入框）
+            int lx = Js.GetInt(line, "lx", NoPoint), ly = Js.GetInt(line, "ly", NoPoint);
+            Sensing.Sample before = BeginSettle(line, lx, lx == NoPoint ? NoPoint : ly);
 
             string text = Js.GetStr(line, "text", "");
             if (Js.GetBool(line, "clearFirst", false))
@@ -731,6 +746,7 @@ namespace DesktopCore
             return "{\"typed\":" + n + ",\"target\":\"" + Js.Esc(t.Title) + "\""
                  + ",\"focusedNow\":" + (focusedNow ? "true" : "false")
                  + (keysErr.Length > 0 ? ",\"keysError\":\"" + Js.Esc(keysErr) + "\"" : "")
+                 + EndSettle(line, before, lx, lx == NoPoint ? NoPoint : ly)
                  + "}";
         }
 
@@ -745,10 +761,14 @@ namespace DesktopCore
                 Js.GetStr(line, "proc", ""), requireFg);
             if (t.Error.Length > 0) return "{\"error\":\"" + Js.Esc(t.Error) + "\"}";
 
+            int lx = Js.GetInt(line, "lx", NoPoint), ly = Js.GetInt(line, "ly", NoPoint);
+            if (lx == NoPoint) ly = NoPoint;
+            Sensing.Sample before = BeginSettle(line, lx, ly);
             string err = Input.Keys(Js.GetStr(line, "keys", ""));
             if (err.Length > 0) return "{\"error\":\"" + Js.Esc(err) + "\"}";
             return "{\"sent\":true,\"target\":\"" + Js.Esc(t.Title) + "\""
-                 + ",\"focusedNow\":" + (focusedNow ? "true" : "false") + "}";
+                 + ",\"focusedNow\":" + (focusedNow ? "true" : "false")
+                 + EndSettle(line, before, lx, ly) + "}";
         }
 
         private static string ScrollOp(string line)
@@ -766,16 +786,31 @@ namespace DesktopCore
                 int clicks = Js.GetInt(line, "clicks", 3);
                 delta = clicks * 120;   // WHEEL_DELTA
             }
-            bool ok = Input.Scroll(x, y, delta, Js.GetBool(line, "horizontal", false));
-            return "{\"scrolled\":" + (ok ? "true" : "false") + ",\"delta\":" + delta + "}";
+            Input.MoveTo(x, y);
+            System.Threading.Thread.Sleep(20);
+            Sensing.Sample before = BeginSettle(line, x, y);
+            bool ok = Input.Wheel(delta, Js.GetBool(line, "horizontal", false));
+            return "{\"scrolled\":" + (ok ? "true" : "false") + ",\"delta\":" + delta
+                 + EndSettle(line, before, x, y) + "}";
         }
 
         private static string DragOp(string line)
         {
+            int x2 = Js.GetInt(line, "x2", 0), y2 = Js.GetInt(line, "y2", 0);
+            Sensing.Sample before = BeginSettle(line, x2, y2);
             bool ok = Input.Drag(Js.GetInt(line, "x1", 0), Js.GetInt(line, "y1", 0),
-                                 Js.GetInt(line, "x2", 0), Js.GetInt(line, "y2", 0),
-                                 Js.GetInt(line, "duration", 300));
-            return "{\"dragged\":" + (ok ? "true" : "false") + "}";
+                                 x2, y2, Js.GetInt(line, "duration", 300));
+            return "{\"dragged\":" + (ok ? "true" : "false") + EndSettle(line, before, x2, y2) + "}";
+        }
+
+        /// <summary>移动鼠标（悬停）：悬停才展开的菜单、提示需要它（plan-20261019-desktop-precision）。</summary>
+        private static string MoveOp(string line)
+        {
+            int x = Js.GetInt(line, "x", 0), y = Js.GetInt(line, "y", 0);
+            Sensing.Sample before = BeginSettle(line, x, y);
+            bool ok = Input.MoveTo(x, y);
+            return "{\"moved\":" + (ok ? "true" : "false") + ",\"at\":[" + x + "," + y + "]"
+                 + EndSettle(line, before, x, y) + "}";
         }
 
         private static string InvokeOp(string line)

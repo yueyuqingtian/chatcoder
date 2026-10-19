@@ -28,6 +28,7 @@ const FROM_TA3: Record<string, string> = {
   DesktopScreenshot: "desktop_screenshot", DesktopFindText: "desktop_find_text", DesktopClick: "desktop_click",
   DesktopType: "desktop_type", DesktopKeys: "desktop_keys", DesktopScroll: "desktop_scroll",
   DesktopFocus: "desktop_focus", DesktopApps: "desktop_apps", DesktopRecipe: "desktop_recipe",
+  DesktopBatch: "desktop_batch",
   TaskQuery: "collect_results", TaskCancel: "cancel_subagent", SubAgentInspect: "subagent_inspect",
   SendToSubagent: "send_to_subagent", ResumeSubagent: "resume_subagent",
   PlanWorkflow: "plan_workflow", StartWorkflow: "start_workflow", WorkflowStatus: "workflow_status",
@@ -115,7 +116,9 @@ export const TOOL_VERBS: Record<string, string> = {
   desktop_type: "已输入",
   desktop_keys: "已按键",
   desktop_scroll: "已滚动",
+  desktop_batch: "已批量操作",
   desktop_snapshot: "已读取界面",
+  // 已移除的工具（plan-20261019-desktop-precision）：保留标签，历史消息仍能正常显示
   desktop_hit: "已识别界面元素",
   desktop_windows: "已列出窗口",
   desktop_focus: "已切换窗口",

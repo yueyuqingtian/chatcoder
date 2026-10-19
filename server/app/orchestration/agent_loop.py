@@ -357,29 +357,11 @@ def _truncate_args(args: dict, limit: int = 800) -> str:
 def _line_change_stat(before: str | None, after: str | None) -> tuple[int, int]:
     """行级变更统计（v2.2，对齐 ZCode computeLineChangeStat 简化版）。
 
-    返回 (additions, deletions)：按行 diff 计数（SequenceMatcher opcode 聚合）。
+    plan-20261019-diff: 直接复用 rollback_service.diff_stats——工具卡摘要 +N -M
+    与展开区的行级 diff 必须同一套 SequenceMatcher 口径，否则会出现「摘要 +0 -0、
+    展开却有一行新增」这类对不上的情况。
     """
-    if before is None:
-        # 问题1: 新增文件（before 为空、after 有内容）→ 全量计为 additions
-        return (len((after or "").splitlines()), 0)
-    if after is None:
-        return (0, 0)
-    try:
-        import difflib
-        diff = list(difflib.SequenceMatcher(
-            None, before.splitlines(), after.splitlines(),
-        ).get_opcodes())
-        additions = sum(
-            (b2 - b1) for tag, _a1, _a2, b1, b2 in diff
-            if tag in ("insert", "replace")
-        )
-        deletions = sum(
-            (a2 - a1) for tag, a1, a2, _b1, _b2 in diff
-            if tag in ("delete", "replace")
-        )
-        return (int(additions), int(deletions))
-    except Exception:
-        return (0, 0)
+    return rollback_service.diff_stats(before, after)
 
 
 def _fallback_after_text(result, target) -> str | None:
@@ -403,6 +385,38 @@ def _fallback_after_text(result, target) -> str | None:
             if isinstance(k, str) and isinstance(v, str) and k.replace("\\", "/") == tn:
                 return v
     return None
+
+
+def _fallback_before_text(result, target) -> str | None:
+    """plan-20261019-diff: 写前读盘失败时从工具结果 data 取写前内容。
+
+    写工具在读取原文件时本来就知道旧内容，把它带回 data（不进模型上下文），
+    可避免「写前读取失败 → before=None → 整篇被当成新增」的统计失真。
+    """
+    data = getattr(result, "data", None)
+    if not isinstance(data, dict):
+        return None
+    oc = data.get("old_content")
+    if isinstance(oc, str):
+        return oc
+    ocs = data.get("old_contents")
+    if isinstance(ocs, dict):
+        tn = str(target).replace("\\", "/")
+        for k, v in ocs.items():
+            if isinstance(k, str) and isinstance(v, str) and k.replace("\\", "/") == tn:
+                return v
+    return None
+
+
+def _write_kind_to_bin(kind: str) -> bool | None:
+    """文件类型 → _resolve_write_record 的三态入参（True=不可存文本全文）。
+
+    oversize 也算 True：全文不落库、回滚走 checkpoint；区别只在于展示层会用
+    diff 窗口补出 +N -M，见 build_diff_window。
+    """
+    if kind == rollback_service.FILE_KIND_UNKNOWN:
+        return None
+    return kind != rollback_service.FILE_KIND_TEXT
 
 
 def _resolve_write_record(*, bin_pre: bool | None, bin_post: bool | None,
@@ -836,6 +850,11 @@ async def run_agent_loop(
     # plan-156-620：续读提示里的工具调用写法跟随当前模型（Ta3 会话用伪装名 / 伪装参数键）
     from app.orchestration.output_paging import set_ta3_visible
     set_ta3_visible(getattr(_cur_model, "api_format", "") == "ta3")
+    # plan-20261019-desktop-precision：工具按模型族选坐标口径（电脑操控），模型名随 ToolContext 下发。
+    # 提前取成标量：写失败恢复会 rollback 主 db，之后再访问 ORM 属性会触发同步 reload。
+    _tool_model_name = str(getattr(_cur_model, "name", "") or "")
+    # plan-20261019-desktop-precision：本轮上下文里的工具截图消息（按出现顺序），超量时裁掉较早的
+    _tool_image_msgs: list[ChatMessage] = []
     if provider is None:
         await _emit_agent_msg(db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
                               agent_id=agent_id, agent_name=agent_name,
@@ -966,7 +985,7 @@ async def run_agent_loop(
     # 只有本步真正调过 desktop_* 工具才非空——普通任务全程为空，零开销、零日志噪音。
     # 写操作集合用于区分「看了界面再动作」与「只是读取」两种场景。
     _desktop_write_tools = frozenset({
-        "desktop_click", "desktop_type", "desktop_keys", "desktop_scroll",
+        "desktop_click", "desktop_type", "desktop_keys", "desktop_scroll", "desktop_batch",
         "desktop_focus", "desktop_apps",
     })
     _obs_tools: list[tuple[str, bool]] = []
@@ -2052,6 +2071,7 @@ async def run_agent_loop(
                             sandbox_mode=sandbox_mode,
                             reasoning_effort=reasoning_effort,
                             on_tool_output=_emit_tool_output,
+                            model_name=_tool_model_name,
                         )
                         # S12（plan-41-197）：pre_tool_use 钩子——工具调用前触发（可按工具名匹配）；
                         # 提示词型钩子文本注入下一步上下文，命令型钩子在此执行（fail-open）。
@@ -2073,16 +2093,19 @@ async def run_agent_loop(
                         _pre_before = {p: rollback_service._read_file_text(workspace, p) for p in _pre_paths}
                         # v2.2 (plan-88): 写盘前二进制/超限判定——此类文件回滚走 checkpoint 恢复，
                         # 不存文本前后内容（防乱码损坏文件 / DB 膨胀）
-                        _pre_bin = {p: rollback_service._is_binary_path(workspace, p, settings.rollback_record_max_bytes)
-                                    for p in _pre_paths}
+                        # plan-20261019-diff: 区分 text/oversize/binary/unknown，超限文本仍可展示 diff
+                        _pre_kind = {p: rollback_service.inspect_write_target(
+                            workspace, p, settings.rollback_record_max_bytes)[0] for p in _pre_paths}
+                        _pre_bin = {p: _write_kind_to_bin(_pre_kind[p]) for p in _pre_paths}
                         # v25: 工具伪装兜底——非白名单写盘工具（terminal_exec 等）从命令解析候选写盘路径
                         # （重定向 / Set-Content / Out-File / python open 等），执行前后对比内容识别真实变更，
                         # 使"改文件"在工具卡展开/输入框贴条中可见，且回滚记录完整。
                         _guess_paths = (rollback_service.resolve_command_write_paths(tool_name, args, workspace)
                                         if tool_name not in _WRITE_TOOLS else [])
                         _guess_before = {p: rollback_service._read_file_text(workspace, p) for p in _guess_paths}
-                        _guess_bin = {p: rollback_service._is_binary_path(workspace, p, settings.rollback_record_max_bytes)
-                                      for p in _guess_paths}
+                        _guess_kind = {p: rollback_service.inspect_write_target(
+                            workspace, p, settings.rollback_record_max_bytes)[0] for p in _guess_paths}
+                        _guess_bin = {p: _write_kind_to_bin(_guess_kind[p]) for p in _guess_paths}
                         # v10: 对已存在的目标文件额外建立磁盘 checkpoint（.chatcoder/checkpoints 兜底备份），
                         # 与精确回滚的 before/after 记录双保险，防数据库记录异常时无法恢复。
                         # v1.1: 取消穿透——长工具执行期间轮询 cancel_event，命中即取消底层任务
@@ -2174,14 +2197,37 @@ async def run_agent_loop(
                             # v2.2 (plan-88): 二进制/超限文件只做 checkpoint 备份，不存文本前后内容
                             # plan-1085 三态：pre/post 任一 True→二进制；post False→文本；
                             # post None(读取失败)时磁盘内容+工具兜底均不可得才降级二进制并 warning
-                            _bin_post = rollback_service._is_binary_path(
+                            # plan-20261019-diff: 用 kind 区分超限文本，后者仍生成展示窗口
+                            _kind_post, _ = rollback_service.inspect_write_target(
                                 workspace, target, settings.rollback_record_max_bytes)
+                            _bin_post = _write_kind_to_bin(_kind_post)
                             _is_bin, _after_text = _resolve_write_record(
                                 bin_pre=_pre_bin.get(target), bin_post=_bin_post,
                                 disk_after=rollback_service._read_file_text(workspace, target),
                                 result=result, target=target,
                                 turn_id=turn_id, tool_name=tool_name,
                             )
+                            # 写前内容：磁盘读取失败时用工具返回的旧内容兜底（新建文件为 None）
+                            _before_text = _pre_before.get(target)
+                            if _before_text is None:
+                                _before_text = _fallback_before_text(result, target)
+                            # 超限文本：存一份变更窗口供 UI 展示（回滚仍按 checkpoint）
+                            _diff_before = _diff_after = None
+                            _textual = (_pre_kind.get(target) in (
+                                            rollback_service.FILE_KIND_TEXT,
+                                            rollback_service.FILE_KIND_OVERSIZE)
+                                        or _kind_post in (
+                                            rollback_service.FILE_KIND_TEXT,
+                                            rollback_service.FILE_KIND_OVERSIZE))
+                            if _is_bin and _textual:
+                                _diff_after_text = rollback_service.read_diff_text(workspace, target)
+                                if _diff_after_text is None:
+                                    _diff_after_text = _fallback_after_text(result, target)
+                                # 写后内容不可得时宁可不展示：否则 before 有值、after 为空
+                                # 会被 diff 统计误算成「整篇删除」。
+                                if _diff_after_text is not None:
+                                    _diff_before, _diff_after = rollback_service.build_diff_window(
+                                        _before_text, _diff_after_text)
                             if _pre_before.get(target) is not None:
                                 _ckpt = rollback_service.checkpoint_file(workspace, target,
                                                                         session_id=session_id, turn_id=turn_id)
@@ -2195,15 +2241,21 @@ async def run_agent_loop(
                             await rollback_service.record_turn_write(
                                 db, session_id=session_id, turn_id=turn_id, tool=tool_name,
                                 path=target,
-                                before=None if _is_bin else _pre_before.get(target),
+                                before=None if _is_bin else _before_text,
                                 after=None if _is_bin else _after_text,
                                 binary=_is_bin,
                                 # plan-89-387: 关联工具调用——同轮同文件多次编辑各自独立取 diff
                                 call_key=call_key,
+                                # plan-20261019-diff: 超限文本的展示窗口
+                                diff_before=_diff_before,
+                                diff_after=_diff_after,
                             )
                             # v2.2 (对齐 zcode 3.7): 行级变更统计（+N -M），工具卡摘要展示
                             if not _is_bin:
-                                _add, _del = _line_change_stat(_pre_before.get(target), _after_text)
+                                _add, _del = _line_change_stat(_before_text, _after_text)
+                            elif _diff_before is not None or _diff_after is not None:
+                                # 超限文本：窗口内统计（不再固定 +0 -0）
+                                _add, _del = rollback_service.diff_stats(_diff_before, _diff_after)
                             else:
                                 _add = _del = 0
                             _total_add += _add
@@ -2239,13 +2291,31 @@ async def run_agent_loop(
                             _target_rel = rollback_service.normalize_workspace_path(workspace, target)
                             # v2.2 (plan-88): 二进制/超限文件只做 checkpoint 备份
                             # plan-1085 三态：与精确写盘分支同口径
-                            _bin_post_g = rollback_service._is_binary_path(
+                            # plan-20261019-diff: 超限文本仍生成展示窗口
+                            _kind_post_g, _ = rollback_service.inspect_write_target(
                                 workspace, target, settings.rollback_record_max_bytes)
+                            _bin_post_g = _write_kind_to_bin(_kind_post_g)
                             _is_bin, _after = _resolve_write_record(
                                 bin_pre=_guess_bin.get(target), bin_post=_bin_post_g,
                                 disk_after=_after, result=result, target=target,
                                 turn_id=turn_id, tool_name=tool_name,
                             )
+                            _before_text_g = _guess_before.get(target)
+                            _diff_before_g = _diff_after_g = None
+                            _textual_g = (_guess_kind.get(target) in (
+                                              rollback_service.FILE_KIND_TEXT,
+                                              rollback_service.FILE_KIND_OVERSIZE)
+                                          or _kind_post_g in (
+                                              rollback_service.FILE_KIND_TEXT,
+                                              rollback_service.FILE_KIND_OVERSIZE))
+                            if _is_bin and _textual_g:
+                                _diff_after_text_g = rollback_service.read_diff_text(workspace, target)
+                                if _diff_after_text_g is None:
+                                    _diff_after_text_g = _after
+                                # 同精确写盘分支：写后内容不可得不生成窗口，避免误算整篇删除
+                                if _diff_after_text_g is not None:
+                                    _diff_before_g, _diff_after_g = rollback_service.build_diff_window(
+                                        _before_text_g, _diff_after_text_g)
                             if _guess_before.get(target) is not None:
                                 _ckpt = rollback_service.checkpoint_file(workspace, target,
                                                                         session_id=session_id, turn_id=turn_id)
@@ -2258,15 +2328,20 @@ async def run_agent_loop(
                                 )
                             await rollback_service.record_turn_write(
                                 db, session_id=session_id, turn_id=turn_id, tool=tool_name,
-                                path=target, before=None if _is_bin else _guess_before.get(target),
+                                path=target, before=None if _is_bin else _before_text_g,
                                 after=None if _is_bin else _after, binary=_is_bin,
                                 # plan-89-387: 伪装写盘同样关联工具调用（terminal_exec 等）
                                 call_key=call_key,
+                                # plan-20261019-diff: 超限文本的展示窗口
+                                diff_before=_diff_before_g,
+                                diff_after=_diff_after_g,
                             )
-                            if _is_bin:
-                                _add = _del = 0
+                            if not _is_bin:
+                                _add, _del = rollback_service.diff_stats(_before_text_g, _after)
+                            elif _diff_before_g is not None or _diff_after_g is not None:
+                                _add, _del = rollback_service.diff_stats(_diff_before_g, _diff_after_g)
                             else:
-                                _add, _del = rollback_service._diff_stats(_guess_before.get(target), _after)
+                                _add = _del = 0
                             _total_add += _add
                             _total_del += _del
                         if _total_add or _total_del:
@@ -2351,11 +2426,15 @@ async def run_agent_loop(
                             import mimetypes as _mt
                             _fname = str((result.data or {}).get("filename") or (result.data or {}).get("path") or "")
                             _mime = _mt.guess_type(_fname)[0] or "image/png"
-                            messages.append(ChatMessage(
+                            _img_msg = ChatMessage(
                                 role="user",
                                 content=f"[系统] 上面工具 {tool_name} 读取的图片内容如下，请直接查看：",
                                 content_blocks=[{"type": "image_url", "image_url": {"url": f"data:{_mime};base64,{_b64}"}}],
-                            ))
+                            )
+                            messages.append(_img_msg)
+                            if tool_name.startswith(_SCREEN_TOOL_PREFIXES):
+                                _tool_image_msgs.append(_img_msg)
+                                _prune_tool_images(_tool_image_msgs)
                 continue
 
             # ── v43: 主代理收工等待后台子代理（会话保持运行，直到子代理结束）──
@@ -2519,7 +2598,11 @@ async def run_agent_loop(
 
         await broadcast(session_id, {
             "event": "agent.completed",
-            "payload": {"agent_id": agent_id, "summary": final_text, "artifact_ids": artifact_ids},
+            # plan-20261019-subagent-ghost: 必须带 kind——主代理每轮结束也走这里，
+            # 不带类型时前端会把主代理（agent_id=1）记成「子代理 #1」，点开是一个空面板。
+            "payload": {"agent_id": agent_id, "kind": agent_kind,
+                        "session_id": session_id,
+                        "summary": final_text, "artifact_ids": artifact_ids},
         })
         return AgentOutput(kind="message", text=final_text, artifact_ids=artifact_ids,
                            tokens=total_tokens)
@@ -2550,13 +2633,50 @@ async def run_agent_loop(
 # ── 辅助 ──
 
 async def _poll_cancel(task: asyncio.Task, cancel_event: asyncio.Event | None):
-    """等待工具任务完成；期间轮询取消信号，命中则取消底层任务（停止按钮对长工具即时生效）。"""
-    while not task.done():
-        if cancel_event is not None and cancel_event.is_set():
-            task.cancel()
-            raise asyncio.CancelledError("cancelled by user")
-        await asyncio.sleep(0.2)
+    """等待工具任务完成；期间监听取消信号，命中则取消底层任务（停止按钮对长工具即时生效）。
+
+    plan-20261019-desktop-precision：改为同时等待「任务完成 / 取消信号」两个事件。此前每 0.2 s 轮询一次，
+    任何工具（包括 1 ms 级的读窗口、读文件）都要等到下一个轮询点才返回，每次调用白白多出最多 0.2 s。
+    """
+    if cancel_event is None:
+        return await task
+    if cancel_event.is_set():
+        task.cancel()
+        raise asyncio.CancelledError("cancelled by user")
+    waiter = asyncio.ensure_future(cancel_event.wait())
+    try:
+        done, _ = await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        if not waiter.done():
+            waiter.cancel()
+    if task not in done:
+        task.cancel()
+        raise asyncio.CancelledError("cancelled by user")
     return await task
+
+
+# 产出屏幕截图的工具前缀：电脑操控与内置浏览器（用户附件、view_image 读的图不在此列）
+_SCREEN_TOOL_PREFIXES = ("desktop_", "browser_")
+# 本轮上下文保留最近几张工具截图；超过「保留数 + 块大小」时一次裁到保留数
+_KEEP_TOOL_IMAGES = 3
+_PRUNE_TOOL_IMAGES_CHUNK = 3
+
+
+def _prune_tool_images(image_msgs: list[ChatMessage]) -> int:
+    """把较早的工具截图替换为文字占位，返回本次裁掉的张数（plan-20261019-desktop-precision）。
+
+    为什么：截图会在本轮每次请求里重复发送。实测一轮二十多张截图后 prompt 从 34K 涨到 68K，
+    单步耗时从 2 s 涨到 7–22 s；而旧截图对决策几乎没有价值。按块裁剪（攒满 3 张再一起裁）
+    是 Anthropic 参考实现的做法：减少前缀变化次数，让供应商侧的提示缓存尽量多命中。
+    """
+    live = [m for m in image_msgs if m.content_blocks]
+    if len(live) <= _KEEP_TOOL_IMAGES + _PRUNE_TOOL_IMAGES_CHUNK:
+        return 0
+    drop = live[: len(live) - _KEEP_TOOL_IMAGES]
+    for m in drop:
+        m.content_blocks = None
+        m.content = "[系统] 这里原有一张较早的截图，已省略以控制上下文；请以最新截图为准。"
+    return len(drop)
 
 
 async def _emit_agent_msg(db, *, session_id, turn_id, thread_id, agent_id, agent_name,

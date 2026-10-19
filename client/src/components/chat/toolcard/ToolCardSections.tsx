@@ -17,7 +17,7 @@
  *    状态切换（转圈 → 勾）不改变文字起点。
  */
 import { memo, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
-import { IconArrowRight, IconCheckCircle, IconCpu, IconGitBranch, IconListChecks, IconSpinner } from "../../icons";
+import { IconCheckCircle, IconCpu, IconGitBranch, IconListChecks, IconSpinner } from "../../icons";
 import { IxWorkflow } from "../../iconkit/StackIcons";
 import { FileIcon } from "../../iconkit/FileIcon";
 import { StatusIcon } from "../../iconkit/StatusIcon";
@@ -114,12 +114,31 @@ const OwnerChip = memo(function OwnerChip({ id }: { id: number }) {
   );
 });
 
-/** 进程行状态图标：完成 = 圆勾、进行中 = 转圈、待办 = 箭头、中断 = 警示。 */
+/** 进程行图标统一尺寸：24 网格下环径 r=8、线宽 2，四种状态外缘一致，切换不跳大小。 */
+const PROC_ICON_SIZE = 14;
+
+/** 进程行状态图标：完成 = 圆勾、进行中 = 转圈、待办 = 空心圆、中断 = 警示。
+ *  待办不再用箭头（用户口径）；圆勾也收到与转圈同一环径，避免完成态视觉上大一圈。 */
 function ProcessIcon({ status }: { status: ProgressRow["status"] }) {
-  if (status === "done") return <IconCheckCircle size={15} />;
-  if (status === "running") return <IconSpinner size={14} />;
-  if (status === "interrupted") return <StatusIcon status="interrupted" size={14} />;
-  return <IconArrowRight size={14} />;
+  if (status === "running") return <IconSpinner size={PROC_ICON_SIZE} />;
+  if (status === "interrupted") return <StatusIcon status="interrupted" size={PROC_ICON_SIZE} />;
+  const done = status === "done";
+  return (
+    <svg
+      width={PROC_ICON_SIZE}
+      height={PROC_ICON_SIZE}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="8" />
+      {done && <path d="M8.2 12.3l2.5 2.5 5.1-5.3" />}
+    </svg>
+  );
 }
 
 export const GitSection = memo(function GitSection({ data }: { data: GitSectionData }) {
@@ -136,13 +155,13 @@ export const GitSection = memo(function GitSection({ data }: { data: GitSectionD
           text={f.path.split(/[\\/]/).pop() || f.path}
           tip={`${f.path}${f.staged ? "（已暂存）" : ""} · 点击查看差异`}
           trailing={<span className="tcard-git-code" data-code={f.code.toUpperCase()}>{f.code.toUpperCase()}</span>}
-          onClick={() => openGitFile(f.path, f.staged, projectId)}
+          onClick={() => openGitFile(f.path, f.staged, projectId, f.repo)}
         />
       ))}
       <Row
         className="tcard-row-sub"
         icon={<IconGitBranch size={14} />}
-        text={`${data.branch || "detached"}${rest > 0 ? ` · 另有 ${rest} 个文件` : ""}`}
+        text={`${data.repoCount > 1 ? `${data.repoCount} 个仓库` : (data.branch || "detached")}${rest > 0 ? ` · 另有 ${rest} 个文件` : ""}`}
         trailing={<span className="tcard-row-hint">提交与推送</span>}
         onClick={openGitPanel}
       />

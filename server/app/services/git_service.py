@@ -86,6 +86,154 @@ def _safe_paths(paths: list[str]) -> list[str]:
     return [_safe_rel(p) for p in paths]
 
 
+# ── 多仓库识别（plan-20261019-git-multirepo）────────────────────────────────
+#
+# 同一个工作目录下常有多个独立仓库（如 frontend/ 与 backend/，根目录本身不是仓库），
+# 此前 Git 面板只认根目录，这种布局直接报「不是 Git 仓库」。这里统一识别项目内的仓库，
+# 面板与接口按「相对项目根的子目录」（repo 参数）指定操作哪个仓库。
+
+# 扫描时跳过的目录：依赖、构建产物、虚拟环境（与 worktree_service 的候选扫描一致）
+_SCAN_SKIP = {
+    "node_modules", "dist", "build", "target", "out", "venv", ".venv", "env",
+    "__pycache__", "vendor", "bin", "obj",
+}
+# 向下扫描的层数：覆盖 frontend/、backend/ 与 apps/web、services/api 这两类常见布局
+REPO_SCAN_DEPTH = 2
+
+
+def has_git(path: Path) -> bool:
+    """目录下有 .git（普通仓库是目录，子模块与工作树是文件）即视为仓库根。"""
+    try:
+        return (path / ".git").exists()
+    except OSError:
+        return False
+
+
+def find_nested_repos(root: Path, depth: int = REPO_SCAN_DEPTH) -> list[Path]:
+    """root 之下（不含 root）的仓库根目录：逐层扫描，找到仓库就不再深入它。"""
+    found: list[Path] = []
+    level = [root]
+    for _ in range(max(0, depth)):
+        nxt: list[Path] = []
+        for d in level:
+            try:
+                children = sorted((p for p in d.iterdir() if p.is_dir()), key=lambda p: p.name.lower())
+            except OSError:
+                continue
+            for child in children:
+                if child.name.startswith(".") or child.name in _SCAN_SKIP:
+                    continue
+                if has_git(child):
+                    found.append(child)
+                else:
+                    nxt.append(child)
+        level = nxt
+    # 按相对路径排序：下拉列表与工作树候选的顺序稳定、可预期（apps/web 排在 backend 前）
+    return sorted(found, key=lambda p: p.relative_to(root).as_posix().lower())
+
+
+def _rel_of(root: Path, path: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+async def repo_dirs(root_path: str) -> list[tuple[str, str]]:
+    """项目内的仓库列表 [(相对路径, 绝对路径)]，根仓库的相对路径为空串、排在最前。
+
+    项目目录本身位于某个仓库内部（打开的是仓库的子目录）时按单仓库处理，返回 [("", 项目目录)]。
+    """
+    root = Path(root_path)
+    if not root_path or not root.is_dir():
+        raise GitError("项目目录不存在")
+    out: list[tuple[str, str]] = []
+    if has_git(root):
+        out.append(("", str(root)))
+    else:
+        rc, top, _ = await _run(str(root), "rev-parse", "--show-toplevel")
+        if rc == 0 and top.strip():
+            return [("", str(root))]
+    out.extend((_rel_of(root, p), str(p)) for p in find_nested_repos(root))
+    return out
+
+
+def repo_dir(project_path: str, repo: str | None) -> str:
+    """接口里的 repo（相对项目根的子目录）→ 仓库目录；空值表示项目根（单仓库项目即仓库本身）。"""
+    if not repo or not str(repo).strip() or str(repo).strip() in (".", "/"):
+        return project_path
+    rel = _safe_rel(str(repo).strip().strip("/"))
+    path = Path(project_path) / rel
+    if not path.is_dir() or not has_git(path):
+        raise GitError(f"仓库不存在：{repo}")
+    return str(path)
+
+
+async def _repo_summary(rel: str, path: str) -> dict | None:
+    """仓库下拉列表的一行：名称、分支、领先 / 落后、改动数（一次 git status 取齐）。"""
+    rc, out, _ = await _run(path, "status", "--porcelain=v2", "--branch", "--untracked-files=normal")
+    if rc != 0:
+        return None
+    branch, detached, ahead, behind, changes = None, False, 0, 0, 0
+    for line in out.splitlines():
+        if line.startswith("# branch.head "):
+            head = line[len("# branch.head "):].strip()
+            detached = head == "(detached)"
+            branch = None if detached else head
+        elif line.startswith("# branch.ab "):
+            m = re.match(r"# branch\.ab \+(\d+) -(\d+)", line)
+            if m:
+                ahead, behind = int(m.group(1)), int(m.group(2))
+        elif line and not line.startswith("#"):
+            changes += 1
+    return {
+        "rel": rel, "name": Path(path).name, "path": path.replace("\\", "/"),
+        "is_root": rel == "", "branch": branch, "detached": detached,
+        "ahead": ahead, "behind": behind, "changes": changes,
+    }
+
+
+async def discover_repos(root_path: str) -> list[dict]:
+    """识别项目内的全部仓库（根仓库在前），每个带分支与改动数，供面板的仓库切换列表使用。"""
+    dirs = await repo_dirs(root_path)
+    rows = await asyncio.gather(*(_repo_summary(rel, p) for rel, p in dirs))
+    return [r for r in rows if r]
+
+
+async def status_all(root_path: str) -> dict:
+    """汇总项目内全部仓库的状态：路径带仓库前缀（相对项目根），与会话改动记录口径一致。
+
+    给工具卡等「按项目看改动」的地方用：多仓库项目此前直接报「不是 Git 仓库」，工具卡里看不到改动。
+    """
+    dirs = await repo_dirs(root_path)
+    results = await asyncio.gather(*(status(p) for _rel, p in dirs), return_exceptions=True)
+    merged: dict = {"repos": [], "staged": [], "unstaged": [], "untracked": [], "conflicts": []}
+    first: dict | None = None
+    for (rel, _p), st in zip(dirs, results):
+        if isinstance(st, BaseException):
+            continue
+        first = first or st
+        prefix = f"{rel}/" if rel else ""
+        merged["repos"].append({"rel": rel, "branch": st.get("branch"), "clean": st.get("clean")})
+        for key in ("staged", "unstaged", "untracked", "conflicts"):
+            for e in st.get(key) or []:
+                old = e.get("old_path")
+                merged[key].append(_entry(prefix + e["path"], e["code"], (prefix + old) if old else None))
+    if first is None:
+        raise GitError("当前项目不是 Git 仓库（可在终端执行 git init 后再使用）")
+    single = len(merged["repos"]) == 1
+    merged.update({
+        "root": root_path, "branch": first.get("branch") if single else None,
+        "detached": bool(first.get("detached")) if single else False,
+        "upstream": first.get("upstream") if single else None,
+        "ahead": sum(int(r.get("ahead") or 0) for r in results if isinstance(r, dict)),
+        "behind": sum(int(r.get("behind") or 0) for r in results if isinstance(r, dict)),
+        "oid": first.get("oid") if single else None, "state": "normal",
+        "clean": not any(merged[k] for k in ("staged", "unstaged", "untracked", "conflicts")),
+    })
+    return merged
+
+
 async def repo_root(path: str) -> str:
     """返回仓库根目录；不是 Git 仓库时给出中文提示。"""
     if not path or not Path(path).is_dir():

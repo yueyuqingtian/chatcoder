@@ -37,6 +37,9 @@ class ToolContext:
     # v7(B): 运行时输出回调——长命令（terminal_exec 同步模式）执行期间逐帧上报增量输出，
     # 由 agent_loop 注入闭包并广播 tool.output WS 事件（前端运行中实时展示）。
     on_tool_output: Callable[[str], Awaitable[None]] | None = None
+    # plan-20261019-desktop-precision：当前模型名。电脑操控按模型族选择坐标口径
+    # （Claude / GPT 习惯截图像素，DeepSeek / Qwen3 / GLM 等原生是 0–1000 比例）。
+    model_name: str = ""
 
 
 @dataclass

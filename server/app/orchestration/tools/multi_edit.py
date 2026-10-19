@@ -175,6 +175,7 @@ class MultiFileEditTool(Tool):
         backups: list[tuple[Path, bytes]] = []
         applied: list[str] = []
         new_contents: dict[str, str] = {}  # plan-1085: 各文件写后新内容（统计/回滚兜底数据源）
+        old_contents: dict[str, str] = {}  # plan-20261019-diff: 写前内容（写前读盘失败时兜底统计）
 
         try:
             for resolved in order:
@@ -187,6 +188,8 @@ class MultiFileEditTool(Tool):
                 except ValueError:
                     _rel = str(resolved)
                 applied.append(_rel)
+                if len(tf.text) <= _NEW_CONTENT_MAX_CHARS:
+                    old_contents[_rel] = tf.text
                 if len(text) <= _NEW_CONTENT_MAX_CHARS:
                     new_contents[_rel] = text
 
@@ -208,5 +211,6 @@ class MultiFileEditTool(Tool):
         return ToolResult(
             ok=True,
             output=output,
-            data={"files": applied, "count": len(applied), "new_contents": new_contents},
+            data={"files": applied, "count": len(applied),
+                  "new_contents": new_contents, "old_contents": old_contents},
         )

@@ -101,7 +101,7 @@ def test_browser_gate_is_union_of_two_entries(desktop_flags):
 
 def test_desktop_write_tools_classified_as_desktop(tmp_path):
     ctx = _ctx(tmp_path)
-    for name in ("desktop_click", "desktop_type", "desktop_keys", "desktop_scroll"):
+    for name in ("desktop_click", "desktop_type", "desktop_keys", "desktop_scroll", "desktop_batch"):
         info = classify(name, {}, ctx, risk_level="high")
         assert info.action == ACTION_DESKTOP, name
         assert info.label  # 审批卡需要有可读标题
@@ -109,8 +109,7 @@ def test_desktop_write_tools_classified_as_desktop(tmp_path):
 
 def test_desktop_read_tools_classified_as_read(tmp_path):
     ctx = _ctx(tmp_path)
-    for name in ("desktop_windows", "desktop_snapshot", "desktop_hit", "desktop_screenshot",
-                 "desktop_focus", "desktop_find_text"):
+    for name in ("desktop_windows", "desktop_snapshot", "desktop_screenshot", "desktop_focus"):
         info = classify(name, {}, ctx, risk_level="low")
         assert info.action == ACTION_READ, name
 
@@ -304,15 +303,9 @@ def test_desktop_tool_schemas_are_byte_stable():
     """稳定前缀：工具 schema 必须逐字节稳定，否则 provider 侧 prompt cache 无法命中。"""
     import json
 
-    from app.orchestration.tools.desktop import (
-        DesktopClickTool,
-        DesktopHitTool,
-        DesktopScreenshotTool,
-        DesktopSnapshotTool,
-    )
+    from app.orchestration.tools.desktop import ALL_DESKTOP_TOOLS
 
-    for tool_cls in (DesktopSnapshotTool, DesktopHitTool,
-                     DesktopScreenshotTool, DesktopClickTool):
+    for tool_cls in ALL_DESKTOP_TOOLS:
         first = json.dumps(tool_cls().function_schema(), ensure_ascii=False, sort_keys=True)
         second = json.dumps(tool_cls().function_schema(), ensure_ascii=False, sort_keys=True)
         assert first == second

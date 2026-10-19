@@ -107,8 +107,9 @@ function sectionMeta(section: ToolCardSection, data: ToolCardData): string {
 export interface SessionToolCardProps {
   /** 几何缺口（来自 useContentColumnGeometry）：决定能否展开 / 能否显示胶囊。 */
   fit: ToolCardFit;
-  /** 形态变化回调：父层据此告诉几何层需要让出多少右侧空间（宽度冻结，只改位置）。 */
-  onFormChange?: (form: ToolCardForm) => void;
+  /** 形态变化回调：父层据此告诉几何层需要让出多少右侧空间（宽度冻结，只改位置）。
+   *  胶囊形态附带实测宽度——折叠后胶囊窄于上限时，右侧够用就不左移内容列。 */
+  onFormChange?: (form: ToolCardForm, capsuleW?: number) => void;
 }
 
 export function SessionToolCard({ fit, onFormChange }: SessionToolCardProps) {
@@ -144,7 +145,31 @@ export function SessionToolCard({ fit, onFormChange }: SessionToolCardProps) {
   // 形态变化通知父层：宽度冻结，只有位置随需求变化。
   // plan-156-621：用 useLayoutEffect——此前是 useEffect，卡片本体已按新形态绘制、
   // 内容列左移却晚一帧，展开瞬间会看到「卡片先压住正文再让位」的闪动。
-  useLayoutEffect(() => { onFormChange?.(form); }, [form, onFormChange]);
+  // plan-20261019：胶囊形态先量真实宽度再上报——折叠后胶囊是内容自适应宽度，
+  // 按上限 260px 让位会让消息列白白左移；同一 layout 周期内量完，不会先移再回弹。
+  const capsuleRef = useRef<HTMLButtonElement>(null);
+  const capsuleWRef = useRef(0);
+
+  useLayoutEffect(() => {
+    if (form !== "capsule") {
+      capsuleWRef.current = 0;
+      onFormChange?.(form);
+      return;
+    }
+    const el = capsuleRef.current;
+    if (!el) return;
+    const report = () => {
+      const w = Math.ceil(el.offsetWidth);
+      if (!(w > 0) || Math.abs(w - capsuleWRef.current) < 1) return;
+      capsuleWRef.current = w;
+      onFormChange?.("capsule", w);
+    };
+    report();
+    // 计数 / 文案变化会改胶囊宽度：跟着上报，内容列只让出真正需要的那一段
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(report) : null;
+    ro?.observe(el);
+    return () => ro?.disconnect();
+  }, [form, onFormChange]);
   // 收起 / 隐藏时关掉浮层，避免它悬空残留
   useEffect(() => { if (form !== "expanded") setMenuOpen(false); }, [form]);
   // plan-156-621：菜单打开后把焦点移到首项（此前 Tab 要穿过触发按钮才能到达选项）
@@ -189,6 +214,7 @@ export function SessionToolCard({ fit, onFormChange }: SessionToolCardProps) {
         side="bottom"
       >
         <button
+          ref={capsuleRef}
           type="button"
           className="tcard-capsule"
           onClick={() => { if (canExpand) setExpanded(sessionId, true); }}
@@ -213,26 +239,9 @@ export function SessionToolCard({ fit, onFormChange }: SessionToolCardProps) {
   // expanded：完整卡片
   return (
     <div className="tcard-card" role="region" aria-label="会话工具">
-      {/* 操作区：与第一个栏目标题行同高，放在滚动容器之外（浮层不被裁切） */}
-      <div className="tcard-card-ops">
-        {/* 项目规则：图标按钮统一 ui/IconButton（自带 Tooltip），不新增私有按钮类 */}
-        <IconButton
-          ref={menuBtnRef}
-          size="xs"
-          icon={<IconMoreHorizontal size={15} />}
-          title="折叠策略"
-          active={menuOpen}
-          aria-haspopup="menu"
-          aria-expanded={menuOpen}
-          onClick={() => setMenuOpen((v) => !v)}
-        />
-        <IconButton
-          size="xs"
-          icon={<IconMinimize size={14} />}
-          title="收起"
-          aria-label="收起为胶囊"
-          onClick={() => setExpanded(sessionId, false)}
-        />
+      {/* 浮层锚点：与「⋯」同位，但留在滚动容器之外——菜单挂在卡片体里会被 overflow 裁掉
+          （plan-156-620 踩过的坑）。锚点本身不接收指针事件，只提供定位基准。 */}
+      <div className="tcard-menu-anchor">
         <Popover
           open={menuOpen}
           onClose={() => setMenuOpen(false)}
@@ -261,7 +270,33 @@ export function SessionToolCard({ fit, onFormChange }: SessionToolCardProps) {
         </Popover>
       </div>
 
-      <div className="tcard-card-body">
+      {/* 滚动时菜单的锚点已经移走，留一份悬浮菜单会错位——直接关掉 */}
+      <div
+        className="tcard-card-body"
+        onScroll={menuOpen ? () => setMenuOpen(false) : undefined}
+      >
+        {/* 操作区：与第一个栏目标题行同高，随栏目一起滚动，滚出后被卡片体裁切。
+            它按内容坐标贴在顶部，不依赖第一个栏目是哪一类（Git / 进程 / 计划都成立）。 */}
+        <div className="tcard-card-ops">
+          {/* 项目规则：图标按钮统一 ui/IconButton（自带 Tooltip），不新增私有按钮类 */}
+          <IconButton
+            ref={menuBtnRef}
+            size="xs"
+            icon={<IconMoreHorizontal size={15} />}
+            title="折叠策略"
+            active={menuOpen}
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((v) => !v)}
+          />
+          <IconButton
+            size="xs"
+            icon={<IconMinimize size={14} />}
+            title="收起"
+            aria-label="收起为胶囊"
+            onClick={() => setExpanded(sessionId, false)}
+          />
+        </div>
         {present.map((section, index) => {
           const open = sections[section];
           return (

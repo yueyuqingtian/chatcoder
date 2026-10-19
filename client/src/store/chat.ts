@@ -158,6 +158,9 @@ export interface SubagentMeta {
   programId?: number | null;
   /** 工作流节点的子代理派发时刻（plan-20261013-wf-order）：线程首条消息的 id。主消息流中 id 小于它的消息都先于派发产生，节点卡放在它们之后 */
   spawnMessageId?: number | null;
+  /** plan-20261019-subagent-ghost: 线程消息数（REST 回填）。用于识别「没有任何输出、
+   *  也没有关联任务」的幽灵条目——它们没有可查看的过程，不该出现在工具卡与面板入口里。 */
+  messageCount?: number;
 }
 
 /** plan-75-332: 审批卡「解释」状态。
@@ -747,6 +750,56 @@ const SUBSESSION_TURN_TERMINAL = new Set(["completed", "failed", "interrupted", 
  *  「启动 / 进度」类事件都不得把它改回 running——迟到重放的 agent.started 尤其常见
  *  （断线补发、resume_subagent / continue_subagent 会再次广播）。 */
 export const TERMINAL_SUBAGENT_STATUS = new Set(["done", "completed", "failed", "cancelled", "terminated"]);
+
+/** plan-20261019-subagent-ghost: 合并服务端子代理列表（以列表为基线重建）。
+ *
+ * 为什么不能只做增量 merge：主代理每轮结束也会广播 `agent.completed`，旧前端不看 kind
+ * 就把它记成「子代理 #N」——这类幽灵条目没有消息、没有归属轮次，却一直留在工具卡上，
+ * 点开是一个空白面板。以服务端列表为基线即可把它们清掉。
+ * 仅保留本地仍在运行、但列表尚未落库的条目（事件先到、REST 稍后的正常窗口不误删）。
+ */
+function mergeSubagentMeta(
+  prev: Record<number, SubagentMeta>,
+  list: Awaited<ReturnType<typeof api.listSessionSubagents>>,
+): Record<number, SubagentMeta> {
+  const next: Record<number, SubagentMeta> = {};
+  for (const it of list) {
+    const p = prev[it.agent_id];
+    next[it.agent_id] = {
+      name: it.name || p?.name || `子代理 #${it.agent_id}`,
+      turnId: it.turn_id ?? p?.turnId ?? null,
+      taskId: it.task_id ?? p?.taskId ?? null,
+      // plan-156-624：运行中不得把 updated_at 当结束时刻（该值只在启动/进度时推进）
+      startedAt: it.created_at ?? p?.startedAt ?? null,
+      endedAt: (it.status === "done" || it.status === "failed"
+        || it.status === "cancelled" || it.status === "terminated")
+        ? (it.updated_at ?? p?.endedAt ?? null)
+        : null,
+      filesCount: it.files_count ?? p?.filesCount ?? 0,
+      tokens: it.token_usage ?? p?.tokens ?? 0,
+      workflow: it.workflow ?? p?.workflow ?? null,
+      programId: it.workflow?.program_id ?? p?.programId ?? null,
+      spawnMessageId: it.spawn_message_id ?? p?.spawnMessageId ?? null,
+      messageCount: it.message_count ?? p?.messageCount ?? 0,
+      // 终态单向不可逆：本地已 done/failed 不被 REST 滞后的 running/pending 回退
+      status: (p?.status === "done" || p?.status === "failed") && (it.status === "running" || it.status === "pending")
+        ? p.status
+        : (p?.status === "running" && it.status === "pending" ? "running" : (it.status || p?.status || "running")),
+    };
+  }
+  for (const [idStr, m] of Object.entries(prev)) {
+    const id = Number(idStr);
+    if (next[id]) continue;
+    if (m.status === "running" || m.status === "in_progress") next[id] = m;
+  }
+  return next;
+}
+
+/** 运行中的子代理数（用于「等待子代理结束」与会话转圈）。 */
+function countPendingSubagents(meta: Record<number, SubagentMeta>): number {
+  return Object.values(meta).filter((m) =>
+    m.status === "running" || m.status === "in_progress" || m.status === "pending").length;
+}
 
 /** 全局通道事件 → 子会话行运行态（置位 / 摘除）；返回 null 表示事件与运行态无关。 */
 function subsessionRunningOf(event: string, p: Record<string, unknown>): boolean | null {
@@ -2276,42 +2329,33 @@ export const useChatStore = create<ChatState>((set, get) => ({
   cancelRollback: () => set({ rollbackPending: null }),
 
   loadSessionSubagents: async () => {
-    const { currentSessionId } = get();
-    if (!currentSessionId) return;
+    const sid = get().currentSessionId;
+    if (!sid) return;
     try {
-      const list = await api.listSessionSubagents(currentSessionId);
-      set((s) => {
-        const meta = { ...s.subagentMeta };
-        for (const it of list) {
-          const prev = meta[it.agent_id];
-          meta[it.agent_id] = {
-            name: it.name || prev?.name || `子代理 #${it.agent_id}`,
-            turnId: it.turn_id ?? prev?.turnId ?? null,
-            taskId: it.task_id ?? prev?.taskId ?? null,
-            // v36 (plan-321-1600 M2): 头部展示字段（用时 / 文件数 / 用量）
-            // plan-156-624：运行中**不得**把 task.updated_at 当结束时间——该值只在启动与进度
-            // 更新时推进（≈created_at），子代理完成后没有事件修正它，用时因此恒为 0 秒。
-            startedAt: it.created_at ?? prev?.startedAt ?? null,
-            endedAt: (it.status === "done" || it.status === "failed"
-              || it.status === "cancelled" || it.status === "terminated")
-              ? (it.updated_at ?? prev?.endedAt ?? null)
-              : null,
-            filesCount: it.files_count ?? prev?.filesCount ?? 0,
-            tokens: it.token_usage ?? prev?.tokens ?? 0,
-            workflow: it.workflow ?? prev?.workflow ?? null,
-            programId: it.workflow?.program_id ?? prev?.programId ?? null,
-            spawnMessageId: it.spawn_message_id ?? prev?.spawnMessageId ?? null,
-            // 终态单向不可逆：本地已 done/failed 不被 REST 滞后的 running/pending 回退
-            status: (prev?.status === "done" || prev?.status === "failed") && (it.status === "running" || it.status === "pending")
-              ? prev.status
-              : (prev?.status === "running" && it.status === "pending" ? "running" : (it.status || prev?.status || "running")),
+      const list = await api.listSessionSubagents(sid);
+      const st = get();
+      // plan-20261019-subagent-ghost: 迟到响应不得写进已切换的会话视图（串会话）。
+      // 归位到发起会话的切片——切回该会话时仍是最新数据，当前会话不被污染。
+      // 切片在 set 内部读取，避免请求期间该会话的其它更新被外部快照覆盖。
+      if (st.currentSessionId !== sid) {
+        set((s) => {
+          const slice = s.sessionState[sid];
+          if (!slice) return {};
+          const meta = mergeSubagentMeta(slice.subagentMeta, list);
+          return {
+            sessionState: {
+              ...s.sessionState,
+              [sid]: { ...slice, subagentMeta: meta, pendingSubagents: countPendingSubagents(meta) },
+            },
           };
-        }
+        });
+        return;
+      }
+      set((s) => {
+        const meta = mergeSubagentMeta(s.subagentMeta, list);
         // v39: 依据合并后的状态统计运行中子代理数——切回会话/断线重连后
         // 「等待子代理结束…」状态可恢复（终态不回退，口径与卡片一致）。
-        const pending = Object.values(meta).filter((m) =>
-          m.status === "running" || m.status === "in_progress" || m.status === "pending").length;
-        return { subagentMeta: meta, pendingSubagents: pending };
+        return { subagentMeta: meta, pendingSubagents: countPendingSubagents(meta) };
       });
     } catch { /* 非阻塞 */ }
   },
@@ -2914,20 +2958,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // plan-156-624：完成事件必须同时写下结束时刻——此前只改 status，计时条沿用启动时
         // 回填的 endedAt（≈开始时间），完成后恒定显示「已工作 0 秒」。
         const doneAid = Number(payload.agent_id ?? 0);
+        const doneKind = String(payload.kind ?? "");
+        const doneSid = Number(payload.session_id ?? 0);
+        // plan-20261019-subagent-ghost: 携带 session_id 的事件必须属于当前会话（串会话防护）
+        if (doneSid && doneSid !== get().currentSessionId) break;
         if (doneAid) {
           const doneAt = new Date().toISOString();
-          set((s) => ({
-            subagentMeta: {
-              ...s.subagentMeta,
-              [doneAid]: {
-                ...(s.subagentMeta[doneAid] ?? {
-                  name: `子代理 #${doneAid}`, turnId: null, taskId: null, status: "done",
-                }),
-                status: "done",
-                endedAt: s.subagentMeta[doneAid]?.endedAt ?? doneAt,
+          set((s) => {
+            // plan-20261019-subagent-ghost: 主代理每轮结束也会广播 agent.completed
+            // （agent_id=1）。旧实现不看 kind 就写 subagentMeta，工具卡因此多出
+            // 「子代理 #1」，点开是一个没有任何消息的空面板。
+            // 只有明确标为 sub，或本地已有该子代理的元信息时才更新。
+            if (doneKind !== "sub" && !s.subagentMeta[doneAid]) return {};
+            const prev = s.subagentMeta[doneAid];
+            return {
+              subagentMeta: {
+                ...s.subagentMeta,
+                [doneAid]: {
+                  ...(prev ?? {
+                    name: `子代理 #${doneAid}`, turnId: null, taskId: null, status: "done",
+                  }),
+                  status: "done",
+                  endedAt: prev?.endedAt ?? doneAt,
+                },
               },
-            },
-          }));
+            };
+          });
         }
         get().refreshTasks();
         // 库里 task 的起止时间是权威值：完成后再校正一次，用时会换成真实耗时
@@ -2937,23 +2993,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
       case "subagent.failed": {
         // plan-330-1648 M7: 子代理失败/取消 → 卡片与面板展示原因（不再只有一个红叉）
         const fAid = Number(payload.agent_id ?? 0);
+        const fKind = String(payload.kind ?? "");
+        const fSid = Number(payload.session_id ?? 0);
         const fErr = typeof payload.error === "string" ? payload.error : "";
         const fStatus = String(payload.status ?? "failed");
+        // plan-20261019-subagent-ghost: 同 agent.completed——不认识的代理不凭空建条目
+        if (fSid && fSid !== get().currentSessionId) break;
         if (fAid) {
-          set((s) => ({
-            subagentMeta: {
-              ...s.subagentMeta,
-              [fAid]: {
-                ...(s.subagentMeta[fAid] ?? {
-                  name: `子代理 #${fAid}`, turnId: null, taskId: null, status: fStatus,
-                }),
-                status: fStatus,
-                error: fErr || "未知原因",
-                // plan-156-624：失败/取消也是终态，同样补结束时刻（否则计时条停在 0 秒）
-                endedAt: s.subagentMeta[fAid]?.endedAt ?? new Date().toISOString(),
+          set((s) => {
+            if (fKind !== "sub" && !s.subagentMeta[fAid]) return {};
+            const prev = s.subagentMeta[fAid];
+            return {
+              subagentMeta: {
+                ...s.subagentMeta,
+                [fAid]: {
+                  ...(prev ?? {
+                    name: `子代理 #${fAid}`, turnId: null, taskId: null, status: fStatus,
+                  }),
+                  status: fStatus,
+                  error: fErr || "未知原因",
+                  // plan-156-624：失败/取消也是终态，同样补结束时刻（否则计时条停在 0 秒）
+                  endedAt: prev?.endedAt ?? new Date().toISOString(),
+                },
               },
-            },
-          }));
+            };
+          });
         }
         get().refreshTasks();
         break;
@@ -3000,6 +3064,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // v19: 子代理启动 → 消息流卡片实时出现（engine 直启与 spawn_subagent 路径均广播）
         const aid = Number(payload.agent_id ?? 0);
         const kind = String(payload.kind ?? "");
+        const startedSid = Number(payload.session_id ?? 0);
+        // plan-20261019-subagent-ghost: 串会话防护——带会话 id 的事件必须属于当前会话
+        if (startedSid && startedSid !== get().currentSessionId) break;
         if (aid && kind === "sub") {
           const turnId = payload.turn_id != null ? Number(payload.turn_id) : null;
           const taskId = payload.task_id != null ? Number(payload.task_id) : null;

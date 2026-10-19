@@ -45,11 +45,28 @@ const TARGET_LABEL: Record<OpenTarget, string> = {
   vscode: "VS Code",
 };
 
-/** 项目根 + 相对路径：统一成 /，避免 Windows 反斜杠混进 URL 与剪贴板 */
+/** 是否为绝对路径（Windows 盘符 / UNC / POSIX 根）。 */
+function isAbsolutePath(p: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("\\\\") || p.startsWith("/");
+}
+
+/** 项目根 + 相对路径：统一成 /，避免 Windows 反斜杠混进 URL 与剪贴板。
+ *  写盘记录里的 path 由模型原样传入，可能本身就是绝对路径——此前无条件拼项目根，
+ *  会得到 `D:\proj\D:\proj\a.ts` 这类非法路径：IDEA 报「无效路径」、资源管理器静默无反应。 */
 function toAbsPath(root: string, rel: string): string {
   const clean = rel.replace(/\\/g, "/");
+  if (isAbsolutePath(clean)) return clean;
   if (!root) return clean;
   return `${root.replace(/\\/g, "/").replace(/\/+$/, "")}/${clean}`;
+}
+
+/** 父目录（终端只按目录打开：文件在部分终端里无法直接打开）。 */
+function parentDirPath(abs: string): string {
+  const clean = abs.replace(/\\/g, "/").replace(/\/+$/, "");
+  const i = clean.lastIndexOf("/");
+  const dir = i > 0 ? clean.slice(0, i) : clean;
+  // 盘符根（D:）补回分隔符，避免终端拿到裸盘符
+  return /^[A-Za-z]:$/.test(dir) ? `${dir}/` : dir;
 }
 
 function targetIcon(target: OpenTarget, size = 15) {
@@ -152,18 +169,22 @@ export function TurnChangesCard({ turnId }: { turnId: number }) {
 
   /** 用外部应用打开：桌面版走 IPC，网页调试环境由本机后端代开 */
   async function openWith(target: OpenTarget, abs: string) {
+    // 终端按目录打开：部分终端无法直接打开文件（用户口径）。
+    const targetPath = target === "terminal" ? parentDirPath(abs) : abs;
     if (hasDesktop) {
       if (target === "explorer") {
-        // 资源管理器：文件定位、目录直接打开
-        await window.chatcoderAPI?.showItemInFolder?.(abs);
+        // 资源管理器：文件定位、目录直接打开。失败要提示——旧实现不看返回值，
+        // 路径拼错 / 文件已被删除时图标静默无效，用户只会看到「点了没反应」。
+        const res = await window.chatcoderAPI?.showItemInFolder?.(abs);
+        if (res && res.ok === false) setFlowError(`打开失败：${res.error ?? "路径不存在"}`, turnId);
         return;
       }
-      const res = await window.chatcoderAPI?.openInApp?.(target, abs);
+      const res = await window.chatcoderAPI?.openInApp?.(target, targetPath);
       if (res && res.ok === false) setFlowError(`打开失败：${res.error ?? "未找到可用的应用"}`, turnId);
       return;
     }
     try {
-      const res = await api.openPathOnHost(abs, target);
+      const res = await api.openPathOnHost(targetPath, target);
       if (!res.ok) setFlowError(`打开失败：${res.error ?? "未知原因"}`, turnId);
     } catch (e) {
       setFlowError(`打开失败：${String(e)}`, turnId);

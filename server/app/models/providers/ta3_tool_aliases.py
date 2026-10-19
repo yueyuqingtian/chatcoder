@@ -98,15 +98,15 @@ TO_TA3: dict[str, str] = {
     # plan-334-1661: 电脑操控工具集（内置原生工具）。
     # 缺映射会被 disguise_tools 整体剔除——ta3 会话里模型既看不到也调不动，
     # 而本能力正是为提升界面任务效率而建，故必须补齐。参数键名与真实工具一致，无需 ARGS 适配。
+    # plan-20261019-desktop-precision：去掉 desktop_hit / desktop_find_text（OCR），新增 desktop_batch
     "desktop_windows": "DesktopWindows",         # limit ✓
     "desktop_snapshot": "DesktopSnapshot",       # handle/title/depth/interactive_only/budget ✓
-    "desktop_hit": "DesktopHit",                 # x/y/chain ✓
-    "desktop_screenshot": "DesktopScreenshot",   # max_dim/region/format ✓
-    "desktop_find_text": "DesktopFindText",      # text/limit/... ✓
-    "desktop_click": "DesktopClick",             # x/y/handle/title/button/count/focus_first ✓
+    "desktop_screenshot": "DesktopScreenshot",   # handle/title/zoom/wait_stable ✓
+    "desktop_click": "DesktopClick",             # element/x/y/handle/title/button/count/focus_first ✓
     "desktop_type": "DesktopType",               # text/handle/title/clear_first ✓
     "desktop_keys": "DesktopKeys",               # keys/handle/title ✓
-    "desktop_scroll": "DesktopScroll",           # handle/title/delta/... ✓
+    "desktop_scroll": "DesktopScroll",           # x/y/clicks/horizontal ✓
+    "desktop_batch": "DesktopBatch",             # actions/handle/title/focus_first ✓
     "desktop_focus": "DesktopFocus",             # handle/title ✓
     "desktop_apps": "DesktopApps",               # action/keyword/exe ✓
     "desktop_recipe": "DesktopRecipe",           # action/app_name/intent/principle/pitfalls/steps ✓
@@ -178,9 +178,9 @@ FROM_TA3.update({
 # `tests/test_ta3_schema_parity.py` 守护测试直接拦下（不会静默漂移）。
 DYNAMIC_SCHEMA_ALIASES: frozenset[str] = frozenset({
     # 电脑操控（plan-334-1661 起；plan-365-1769 起改为动态派生）
-    "DesktopWindows", "DesktopSnapshot", "DesktopHit", "DesktopScreenshot",
-    "DesktopFindText", "DesktopClick", "DesktopType", "DesktopKeys",
-    "DesktopScroll", "DesktopFocus", "DesktopApps", "DesktopRecipe",
+    "DesktopWindows", "DesktopSnapshot", "DesktopScreenshot",
+    "DesktopClick", "DesktopType", "DesktopKeys", "DesktopScroll", "DesktopBatch",
+    "DesktopFocus", "DesktopApps", "DesktopRecipe",
     # 浏览器套件（v43 补映射）
     "BrowserNavigate", "BrowserScreenshot", "BrowserClick",
     "BrowserType", "BrowserSnapshot", "BrowserEvaluate",

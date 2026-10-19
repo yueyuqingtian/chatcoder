@@ -53,13 +53,26 @@ async def test_get_file_diff_by_call_key_returns_single_edit():
         # 两次编辑的 diff 不同——这是用户反馈「每次应只展示本次变更」的核心
         assert first["lines"] != second["lines"]
 
-        # 未命中 call_key（老数据）时回退整轮累积口径，仍能拿到内容
-        fallback = await rollback_service.get_file_diff(
+        # plan-20261019-diff: 该文件的记录都带 call_key 却都不匹配时不再回退整轮——
+        # 回退会把同文件其它编辑并进来（展开第一次却看到第二次的改动）。
+        # 返回 None 让前端用调用参数兜底，保证「每次展开只显示自己的改动」。
+        missing = await rollback_service.get_file_diff(
             db, session_id=session.id, turn_id=7, workspace=".", path="src/App.tsx",
             call_key="tc_missing",
         )
-        assert fallback is not None
-        assert fallback["single_edit"] is False
+        assert missing is None
+
+        # 老记录（无 call_key）没有更精确的口径，仍回退整轮累积
+        db.add(RollbackWrite(session_id=session.id, turn_id=9, tool="fs_write",
+                             path="src/Old.tsx", old_content="a\n", new_content="a\nb\n",
+                             binary=False, call_key=None))
+        await db.flush()
+        legacy = await rollback_service.get_file_diff(
+            db, session_id=session.id, turn_id=9, workspace=".", path="src/Old.tsx",
+            call_key="tc_missing",
+        )
+        assert legacy is not None
+        assert legacy["single_edit"] is False
 
         await db.rollback()
 

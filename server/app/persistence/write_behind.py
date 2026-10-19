@@ -373,6 +373,8 @@ def _persist_batch(batch: list[WriteItem], s) -> list[dict]:
                 tool=p.get("tool", ""), path=p.get("path", ""),
                 old_content=p.get("before"), new_content=p.get("after"),
                 binary=bool(p.get("binary")),
+                # plan-20261019-diff: 超限文本的展示窗口随记录一起落库
+                diff_before=p.get("diff_before"), diff_after=p.get("diff_after"),
             ))
         elif kind == "rollback_ckpt":
             # checkpoint 登记：查 turn 快照并追加 file_list/new_files（同 turn 同文件去重）。

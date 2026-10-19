@@ -1487,7 +1487,25 @@ ipcMain.handle("shell:openPath", (_event, p) => {
   if (p) shell.openPath(p);
 });
 ipcMain.handle("shell:showItemInFolder", (_event, p) => {
-  if (p) shell.showItemInFolder(p);
+  if (!p) return { ok: false, error: "路径为空" };
+  const target = path.normalize(String(p));
+  try {
+    if (fs.existsSync(target)) {
+      shell.showItemInFolder(target);
+      return { ok: true };
+    }
+    // 文件已被删除（变更卡片的「已删除」行）或路径失效时，showItemInFolder
+    // 在 Windows 上静默无效，用户会以为「点了没反应」。回退打开最近存在的父目录。
+    let dir = path.dirname(target);
+    while (dir && !fs.existsSync(dir) && path.dirname(dir) !== dir) dir = path.dirname(dir);
+    if (dir && fs.existsSync(dir)) {
+      void shell.openPath(dir);
+      return { ok: true, fallback: "dir" };
+    }
+    return { ok: false, error: "路径不存在" };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
 });
 // ── plan-308-1542 需求5：外部应用启动器解析（"从 IDEA 打开"点击无反应）──
 // 原实现 `spawn("idea", [p], { shell: true })` 后**立即 return true**，不监听 error：
@@ -1664,12 +1682,18 @@ ipcMain.handle("shell:openInApp", (_event, target, projectPath) => {
     }
     if (target === "terminal") {
       const { spawn } = require("child_process");
+      // 终端按目录打开：部分终端无法直接打开文件（用户口径）。
+      // 从标题栏等入口可能仍传文件路径，这里统一取父目录。
+      let dir = p;
+      try {
+        if (fs.existsSync(p) && fs.statSync(p).isFile()) dir = path.dirname(p);
+      } catch { /* 路径不可读时按原样传入 */ }
       if (process.platform === "win32") {
-        spawn("wt.exe", ["-d", p], { shell: true, detached: true }).on("error", () => {
-          spawn("cmd.exe", ["/c", "start", "powershell.exe", "-NoExit", "-Command", `Set-Location '${p}'`], { shell: true, detached: true });
+        spawn("wt.exe", ["-d", dir], { shell: true, detached: true }).on("error", () => {
+          spawn("cmd.exe", ["/c", "start", "powershell.exe", "-NoExit", "-Command", `Set-Location '${dir}'`], { shell: true, detached: true });
         });
       } else {
-        shell.openPath(p);
+        shell.openPath(dir);
       }
       return { ok: true };
     }

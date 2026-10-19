@@ -69,6 +69,34 @@ namespace DesktopCore
         [DllImport("gdi32.dll")] public static extern IntPtr SelectObject(IntPtr hdc, IntPtr o);
         [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr o);
         [DllImport("gdi32.dll")] public static extern bool DeleteDC(IntPtr hdc);
+        // 画面缩略采样（plan-20261019-desktop-precision）：StretchBlt + HALFTONE 一步完成「截取 + 区域平均缩小」，
+        // 直接写进 DIB 内存读回像素，不经过 Bitmap 编码与文件，单次只需几毫秒，适合动作后高频轮询。
+        [DllImport("gdi32.dll")]
+        public static extern bool StretchBlt(IntPtr hdcDest, int xDest, int yDest, int wDest, int hDest,
+                                             IntPtr hdcSrc, int xSrc, int ySrc, int wSrc, int hSrc, int rop);
+        [DllImport("gdi32.dll")] public static extern int SetStretchBltMode(IntPtr hdc, int mode);
+        // 直接读 DIB 内存前必须刷新 GDI 批处理队列，否则可能读到尚未绘制完成的像素
+        [DllImport("gdi32.dll")] public static extern bool GdiFlush();
+        [DllImport("gdi32.dll")] public static extern bool SetBrushOrgEx(IntPtr hdc, int x, int y, IntPtr prev);
+        [DllImport("gdi32.dll")]
+        public static extern IntPtr CreateDIBSection(IntPtr hdc, ref BITMAPINFO bmi, uint usage,
+                                                     out IntPtr bits, IntPtr section, uint offset);
+        public const int HALFTONE = 4;
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct BITMAPINFOHEADER
+        {
+            public uint biSize;
+            public int biWidth, biHeight;
+            public ushort biPlanes, biBitCount;
+            public uint biCompression, biSizeImage;
+            public int biXPelsPerMeter, biYPelsPerMeter;
+            public uint biClrUsed, biClrImportant;
+        }
+
+        // 32 位 BI_RGB 不需要调色板；结构体仍需占一个 RGBQUAD 的位置
+        [StructLayout(LayoutKind.Sequential)]
+        public struct BITMAPINFO { public BITMAPINFOHEADER bmiHeader; public uint bmiColors; }
 
         // ── 进程查询（plan-340-1705）：进程名、命令行、按 pid 枚举监听端口 ──
         // 为什么不用 System.Diagnostics.Process：它为每个 pid 打开句柄并建立进程快照，

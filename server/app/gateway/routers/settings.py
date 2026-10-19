@@ -7,7 +7,6 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from app.core.config import settings, update_workspace_root
-from app.core.desktop_marks import normalize_verify_mode
 
 router = APIRouter()
 
@@ -74,7 +73,6 @@ _DESKTOP_DEFAULT_UPGRADES: dict[str, tuple[object, object]] = {
     "desktop_enabled": (False, True),
     "desktop_screenshot_quality": (75, 100),
     "desktop_screenshot_max_dim": (1600, 0),
-    "desktop_mark_shot": (True, False),
 }
 
 
@@ -137,21 +135,18 @@ def load_persisted_workspace() -> None:
     # plan-20261018-operator-boost：电脑操控默认值升级（只升级「仍等于旧默认值」的项，用户改过的不动）
     _upgrade_desktop_defaults(data)
     # plan-334-1661: 电脑操控相关开关
-    # plan-365-1757: 追加「点准」开关（截图元素编号 / 点击前校验）
-    # plan-365-1769: desktop_verify_click 由布尔改为三档字符串（off/lenient/strict），
-    # 不再走布尔循环——旧布尔值经 normalize_verify_mode 迁移。
+    # plan-20261019-desktop-precision：截图元素编号 / 点击前校验 / 破坏性词表已移除，旧配置里的键直接忽略
     _DESKTOP_BOOL_KEYS = (
         "desktop_enabled", "desktop_plain_ops_enabled", "desktop_browser_ops_enabled",
         "desktop_require_foreground", "desktop_recipe_enabled",
-        "desktop_mark_shot",
     )
     for _k in _DESKTOP_BOOL_KEYS:
         if _k in data:
             setattr(settings, _k, bool(data[_k]))
-    if "desktop_verify_click" in data:
-        settings.desktop_verify_click = normalize_verify_mode(data["desktop_verify_click"])
-    if "desktop_destructive_words" in data:
-        settings.desktop_destructive_words = str(data["desktop_destructive_words"] or "")
+    # 坐标口径：隐藏配置（只读 config.json），auto 以外的取值才覆盖按模型族自动选择
+    if "desktop_coord_mode" in data:
+        _mode = str(data["desktop_coord_mode"] or "auto").strip().lower()
+        settings.desktop_coord_mode = _mode if _mode in ("auto", "pixel", "norm1000") else "auto"
     if "desktop_screenshot_quality" in data:
         try:
             settings.desktop_screenshot_quality = max(10, min(100, int(data["desktop_screenshot_quality"])))
@@ -331,12 +326,6 @@ class GlobalSettingsOut(BaseModel):
     desktop_screenshot_quality: int = 100
     desktop_screenshot_max_dim: int = 0
     desktop_recipe_enabled: bool = True
-    # plan-365-1757: 「点准」开关（截图元素编号 / 点击前校验 / 破坏性操作词表）
-    # plan-20261018-operator-boost：编号默认关闭
-    desktop_mark_shot: bool = False
-    # plan-365-1769 F5: 点击前校验档位（off / lenient / strict），默认宽松
-    desktop_verify_click: str = "lenient"
-    desktop_destructive_words: str = ""
     # v36: 子代理并发治理（设置中心「子代理」面板可配，运行时立即生效）
     max_concurrent_subagents: int = 6   # 同时运行上限（超出排队等待，1~16）
     max_subagents_per_turn: int = 10    # 每轮派发总量上限（含已完成，1~32）
@@ -450,11 +439,6 @@ class GlobalSettingsIn(BaseModel):
     desktop_screenshot_quality: int | None = None
     desktop_screenshot_max_dim: int | None = None
     desktop_recipe_enabled: bool | None = None
-    # plan-365-1757: 「点准」开关
-    desktop_mark_shot: bool | None = None
-    # plan-365-1769 F5: 三档字符串；接受 bool 旧值（归一化时兼容 true→lenient / false→off）
-    desktop_verify_click: str | bool | None = None
-    desktop_destructive_words: str | None = None
     # v36: 子代理并发治理
     max_concurrent_subagents: int | None = None
     max_subagents_per_turn: int | None = None
@@ -558,14 +542,6 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
             "desktop_screenshot_max_dim", getattr(settings, "desktop_screenshot_max_dim", 0))),
         desktop_recipe_enabled=data.get(
             "desktop_recipe_enabled", getattr(settings, "desktop_recipe_enabled", True)),
-        # plan-365-1757: 「点准」开关
-        desktop_mark_shot=data.get(
-            "desktop_mark_shot", getattr(settings, "desktop_mark_shot", False)),
-        # plan-365-1769 F5: 三档归一化输出（旧布尔值自动迁移）
-        desktop_verify_click=normalize_verify_mode(data.get(
-            "desktop_verify_click", getattr(settings, "desktop_verify_click", "lenient"))),
-        desktop_destructive_words=str(data.get(
-            "desktop_destructive_words", getattr(settings, "desktop_destructive_words", "")) or ""),
         # plan-75-332: 审批卡「解释」专用模型 / 思考深度（0/空 = 跟随会话）
         approval_explain_model_id=int(data.get("approval_explain_model_id", 0) or 0),
         approval_explain_reasoning_effort=str(
@@ -802,22 +778,11 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
     for _field in (
         "desktop_enabled", "desktop_plain_ops_enabled", "desktop_browser_ops_enabled",
         "desktop_require_foreground", "desktop_recipe_enabled",
-        # plan-365-1757: 「点准」开关
-        "desktop_mark_shot",
     ):
         _val = getattr(body, _field, None)
         if _val is not None:
             data[_field] = bool(_val)
             setattr(settings, _field, bool(_val))
-    # plan-365-1769 F5: 三档字符串（兼容旧布尔输入）
-    if body.desktop_verify_click is not None:
-        _vm = normalize_verify_mode(body.desktop_verify_click)
-        data["desktop_verify_click"] = _vm
-        settings.desktop_verify_click = _vm
-    if body.desktop_destructive_words is not None:
-        _dw = str(body.desktop_destructive_words)
-        data["desktop_destructive_words"] = _dw
-        settings.desktop_destructive_words = _dw
     if body.desktop_screenshot_quality is not None:
         _q = max(10, min(100, int(body.desktop_screenshot_quality)))
         data["desktop_screenshot_quality"] = _q

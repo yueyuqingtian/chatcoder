@@ -37,6 +37,10 @@ class RollbackWrite(Base):
     path: Mapped[str] = mapped_column(String(512))  # 目标文件相对路径
     old_content: Mapped[str | None] = mapped_column(String)  # 写盘前内容（None=新建文件或二进制）
     new_content: Mapped[str | None] = mapped_column(String)  # 写盘后内容
+    # plan-20261019-diff: 超限文本的展示窗口（写盘前后各截取变更区周边内容）。
+    # 全文不落库（回滚仍走 checkpoint），但 UI 必须能看到 +N -M 与变更行。
+    diff_before: Mapped[str | None] = mapped_column(String)
+    diff_after: Mapped[str | None] = mapped_column(String)
     # v2.2 (plan-88): 二进制/超限文件——不存文本前后内容，回滚走 checkpoint 备份恢复
     binary: Mapped[bool] = mapped_column(Boolean, default=False)
     # plan-89-387: 工具调用键——同一 turn 内同文件多次编辑时，前端按 call_key
