@@ -1438,6 +1438,90 @@ def read_diff_text(workspace: str, rel: str, limit: int = _DIFF_TEXT_MAX_BYTES) 
     return _read_file_text(workspace, rel, max_bytes=limit)
 
 
+# ── 「本轮由未登记途径新建、又被删除」的文件（plan-20261020-born-in-turn）──
+# 浏览器截图、构建脚本等产出的文件不经写盘工具，也解析不出写路径，所以本轮没有「新建」记录；
+# 随后用命令把它们删掉时，删除记录会把它们当成「本轮之前就存在」——变更卡片出现「已删除」行、
+# 撤销时又从删除前的备份把它们还原出来（本轮开始前根本没有这些文件）。
+# 判据：文件（或其删除前备份）的创建 / 修改时间不早于本轮开始，且本轮没有更早的写盘记录。
+
+_BORN_SLACK_S = 0.5
+
+
+async def turn_started_epoch(db: AsyncSession, turn_id: int) -> float | None:
+    """本轮开始时刻（epoch 秒）；取不到返回 None。"""
+    from datetime import datetime, timezone
+    from app.persistence.models.turn import Turn
+
+    try:
+        turn = await db.get(Turn, turn_id)
+        raw = str(getattr(turn, "started_at", "") or "").strip()
+        if not raw:
+            return None
+        at = datetime.fromisoformat(raw.replace(" ", "T"))
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        return at.timestamp()
+    except (ValueError, TypeError, OSError):
+        return None
+
+
+def file_born_after(path: Path, since: float | None) -> bool:
+    """文件是否创建于 since 之后（优先用创建时间；Windows 的 st_ctime 即创建时间）。
+
+    取不到创建时间（非 Windows 且无 st_birthtime）时返回 False——宁可保留记录，也不误判。
+    """
+    if since is None:
+        return False
+    try:
+        st = path.stat()
+    except OSError:
+        return False
+    birth = getattr(st, "st_birthtime", None)
+    if birth is None and os.name == "nt":
+        birth = st.st_ctime
+    return birth is not None and birth >= since - _BORN_SLACK_S
+
+
+def file_mtime_after(path: Path, since: float | None) -> bool:
+    """文件修改时间是否不早于 since（用于旧记录：删除前备份保留了源文件的修改时间）。"""
+    if since is None:
+        return False
+    try:
+        return path.stat().st_mtime >= since - _BORN_SLACK_S
+    except OSError:
+        return False
+
+
+async def has_turn_write(db: AsyncSession, turn_id: int, path: str) -> bool:
+    """本轮是否已有该路径的写盘记录。"""
+    res = await db.execute(
+        select(RollbackWrite.id).where(RollbackWrite.turn_id == turn_id, RollbackWrite.path == path).limit(1)
+    )
+    return res.first() is not None
+
+
+async def unrecorded_birth_paths(db: AsyncSession, turn_id: int,
+                                 by_path: dict[str, list[RollbackWrite]]) -> set[str]:
+    """旧记录兜底：首条记录就是「删除」、且删除前备份的修改时间不早于本轮开始的路径。
+
+    这类文件是本轮新建（未登记）又被删掉的，对本轮零净变更：不进变更清单，撤销时也不能还原。
+    """
+    cands = [p for p, recs in by_path.items()
+             if recs and getattr(recs[0], "op", None) == OP_DELETE]
+    if not cands:
+        return set()
+    snap = await _snapshot_for_turn(db, turn_id)
+    t0 = await turn_started_epoch(db, turn_id)
+    if snap is None or t0 is None:
+        return set()
+    out: set[str] = set()
+    for p in cands:
+        ckpt = _checkpoint_for_path(snap, p)
+        if ckpt and file_mtime_after(Path(ckpt), t0):
+            out.add(p)
+    return out
+
+
 async def list_turn_changes(db: AsyncSession, *, session_id: int, turn_id: int,
                             workspace: str) -> list[dict]:
     """聚合该 turn 的全部写盘记录为变更清单（不含文件全文）。
@@ -1468,7 +1552,10 @@ async def list_turn_changes(db: AsyncSession, *, session_id: int, turn_id: int,
 
     reviewed = await reviewed_paths(db, turn_id)
     changes: list[dict] = []
+    bogus = await unrecorded_birth_paths(db, turn_id, by_path)
     for path, recs in by_path.items():
+        if path in bogus:
+            continue  # 本轮新建（未登记）又被删除：零净变更
         net = _net_state(workspace, path, recs)
         if net is None:
             continue  # 净效果为零（本轮新建又被删除、改了又改回）：不展示
@@ -1538,6 +1625,40 @@ def _net_state(workspace: str, path: str, recs: list[RollbackWrite]) -> _NetStat
     if not existed_before and not exists_after:
         return None
     return _NetState(existed_before, exists_after, before, after, binary, has_window)
+
+
+async def session_product_paths(db: AsyncSession, session_id: int, workspace: str) -> list[str]:
+    """会话「产物」：本会话写过、且**现在仍然存在**的文件（按首次写入先后）。
+
+    摘要面板的产物列以此为准，与变更卡片同一口径——被删除的文件（含本轮新建又删除的临时文件）
+    不是产物。按路径取全会话最后一条记录判断写后是否还在；旧记录没存写后状态时读磁盘兜底。
+    本轮新建（未登记）又被删除的文件（旧记录）同样排除。
+    """
+    res = await db.execute(
+        select(RollbackWrite).where(RollbackWrite.session_id == session_id).order_by(RollbackWrite.id.asc())
+    )
+    by_turn_path: dict[int, dict[str, list[RollbackWrite]]] = {}
+    last_of: dict[str, RollbackWrite] = {}
+    order: list[str] = []
+    for w in res.scalars().all():
+        if w.path not in last_of:
+            order.append(w.path)
+        last_of[w.path] = w
+        if w.turn_id is not None:
+            by_turn_path.setdefault(int(w.turn_id), {}).setdefault(w.path, []).append(w)
+    bogus: set[str] = set()
+    for tid, grouped in by_turn_path.items():
+        bogus |= await unrecorded_birth_paths(db, tid, grouped)
+    out: list[str] = []
+    for p in order:
+        if p in bogus:
+            continue
+        alive = rec_exists_after(last_of[p])
+        if alive is None:
+            alive = path_exists(workspace, p)
+        if alive:
+            out.append(p)
+    return out
 
 
 async def visible_change_turns(db: AsyncSession, session_id: int) -> list[int]:
@@ -1642,6 +1763,8 @@ async def get_file_diff(db: AsyncSession, *, session_id: int, turn_id: int,
             return None
 
     # plan-20261019-toolcard-v2：整轮口径先折成净变更——新建后又删除、改了又改回的文件没有可展示的变更
+    if await unrecorded_birth_paths(db, turn_id, {writes[0].path: writes}):
+        return None
     net = _net_state(workspace, path, writes)
     if net is None:
         return None
@@ -2424,6 +2547,16 @@ async def _plan_for_turn(db: AsyncSession, session_id: int, turn_id: int, worksp
         select(TurnSnapshot).where(TurnSnapshot.session_id == session_id, TurnSnapshot.turn_id >= turn_id)
     )
     snaps = {s.turn_id: s for s in res.scalars().all()}
+    # 各轮「新建（未登记）又被删除」的文件本来就不存在于该轮之前：不参与还原
+    by_turn: dict[int, dict[str, list[RollbackWrite]]] = {}
+    for w in writes:
+        by_turn.setdefault(int(w.turn_id), {}).setdefault(w.path, []).append(w)
+    drop: set[tuple[int, str]] = set()
+    for tid, grouped in by_turn.items():
+        for p in await unrecorded_birth_paths(db, tid, grouped):
+            drop.add((tid, p))
+    if drop:
+        writes = [w for w in writes if (int(w.turn_id), w.path) not in drop]
     return build_plan(workspace, writes, lambda rec: _checkpoint_for_path(snaps.get(rec.turn_id), rec.path))
 
 
@@ -2509,9 +2642,18 @@ async def revert_turn_files(db: AsyncSession, *, turn_id: int, allow_partial: bo
     writes = list(write_res.scalars().all())
     if not writes:
         return {"ok": False, "code": "no_writes", "reason": "该轮次没有文件改动"}
+    # 本轮新建（未登记）又被删除的文件：本轮开始前并不存在，撤销时不能从删除前备份还原
+    _by_path: dict[str, list[RollbackWrite]] = {}
+    for w in writes:
+        _by_path.setdefault(w.path, []).append(w)
+    _bogus = await unrecorded_birth_paths(db, turn_id, _by_path)
+    if _bogus:
+        writes_for_plan = [w for w in writes if w.path not in _bogus]
+    else:
+        writes_for_plan = writes
 
     # 3. 复用三路合并规划：冲突时默认整体拒绝，未改动任何文件
-    plan = build_plan(workspace, writes, lambda rec: _checkpoint_for_path(snap, rec.path))
+    plan = build_plan(workspace, writes_for_plan, lambda rec: _checkpoint_for_path(snap, rec.path))
     conflicts = _conflict_list(plan)
     if conflicts and not allow_partial:
         # plan-20261019-toolcard-v2：本轮之后被改动过的文件一律拒绝撤销，并逐个说明原因（conflicts[].reason）

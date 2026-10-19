@@ -163,6 +163,8 @@ function buildItems(messages: MessageOut[]): MiniItem[] {
     }
     if (m.sender_type !== "agent") continue;
     if (m.msg_type === "tool_call") {
+      // 建议工具只为生成建议卡，不计入「执行了 N 个操作」
+      if (content.tool === "suggest_next_task" || content.tool === "SuggestNextTask") continue;
       if (tools === 0) toolsKey = `t${m.id}`;
       tools++;
       lastTool = typeof content.tool === "string" ? content.tool : "";

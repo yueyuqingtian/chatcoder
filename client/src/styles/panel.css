@@ -322,6 +322,8 @@ button.ts-row:focus-visible { outline: 2px solid color-mix(in oklab, var(--info)
 .ft-ph-file { flex: 1; min-width: 0; display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--text-1); }
 .ft-ph-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ft-back { margin-left: -2px; }
+/* 已删除文件的预览头标记：胶囊角标，不靠色条 */
+.ft-ph-deleted { flex: 0 0 auto; padding: 1px 8px; border-radius: var(--r-pill); background: var(--error-soft); color: var(--error); font-size: 11px; line-height: 1.45; }
 .ft-crumbs { display: flex; align-items: center; height: 26px; margin-top: -4px; padding: 0 10px 2px; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; font-size: 11.5px; }
 .ft-crumbs::-webkit-scrollbar { display: none; }
 .ft-crumb-wrap { display: inline-flex; align-items: center; flex-shrink: 0; }

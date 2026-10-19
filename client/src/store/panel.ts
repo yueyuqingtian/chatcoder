@@ -27,6 +27,8 @@ export interface DiffPreview {
   before: string | null;
   after: string | null;
   truncated: boolean;
+  /** plan-20261019-toolcard-v2：文件在本轮被删除——磁盘上已不存在，预览不读盘、不提供「当前内容」 */
+  deleted?: boolean;
 }
 
 /** 单个会话（或无会话的 home）持有的面板内容状态。 */

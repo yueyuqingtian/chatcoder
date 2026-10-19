@@ -43,6 +43,13 @@ export function persistLastReasoning(value: string | null) {
 }
 
 /** 上下文占用详情（输入框圆环）。 */
+/** 撤销本轮文件改动的结果：被严格拒绝时带回逐文件原因（plan-20261019-toolcard-v2）。 */
+export interface RevertFilesOutcome {
+  ok: boolean;
+  message?: string;
+  conflicts?: Array<{ path: string; reason: string }>;
+}
+
 export interface UsageDetail {
   input: number;
   cached_input: number;
@@ -553,7 +560,7 @@ resumeTurn: () => Promise<void>;
   /** plan-20261018-turn-changes: 拉取撤销顺序锁（切会话 / 撤销后 / WS 撤销事件）。 */
   loadRevertLock: (sessionId: number) => Promise<void>;
   /** plan-20261018-turn-changes: 仅撤销该轮文件改动（不动消息）。返回是否成功。 */
-  revertTurnFiles: (turnId: number, allowPartial?: boolean) => Promise<boolean>;
+  revertTurnFiles: (turnId: number, allowPartial?: boolean) => Promise<RevertFilesOutcome>;
   refreshMessages: () => Promise<void>;
   refreshTurns: () => Promise<void>;
   refreshTasks: () => Promise<void>;
@@ -1285,6 +1292,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       await api.dismissSuggestion(cur.id);
       set({ pendingSuggestion: null });
     } catch (e) {
+      // 后端已是终态（已取消 / 已接受 / 已不存在）：本地卡片是过期残留，直接清掉，不当作失败
+      if (e instanceof ApiError && /已处理过|不存在/.test(e.message)) {
+        if (get().pendingSuggestion?.id === cur.id) set({ pendingSuggestion: null });
+        return;
+      }
       set({ error: "取消建议失败：" + String(e) });
     }
   },
@@ -1779,6 +1791,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       isRunning: true,
       pendingPlan: null,
       pendingPlanTurn: null,
+      // 发新消息 = 默认放弃上一条「下一步建议」：卡片立即消失（后端在建 turn 时同步置为已取消）
+      pendingSuggestion: null,
       ...(prevPending?.turnId != null && s.plansByTurn[prevPending.turnId]
         ? {
             plansByTurn: {
@@ -2049,13 +2063,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // 成功后清掉该轮变更缓存并重拉锁，让上一轮卡片解锁；失败把原因写进消息流错误卡。
   revertTurnFiles: async (turnId, allowPartial = false) => {
     const sid = get().currentSessionId;
-    if (sid == null) return false;
+    if (sid == null) return { ok: false };
     try {
       await api.revertTurnFiles(turnId, allowPartial);
     } catch (e) {
       const msg = e instanceof ApiError ? e.message : String(e);
+      // plan-20261019-toolcard-v2：文件在本轮之后被改动 → 严格拒绝。逐文件原因由变更卡片的撤销弹窗展示，
+      // 不再叠一张消息流错误卡（同一件事两处提示会让人以为发生了两次失败）。
+      if (e instanceof ApiError && e.code === "conflict") {
+        const raw = (e.detail as { conflicts?: unknown } | undefined)?.conflicts;
+        const conflicts = Array.isArray(raw)
+          ? (raw as Array<{ path?: unknown; reason?: unknown }>)
+              .filter((c) => typeof c?.path === "string")
+              .map((c) => ({ path: String(c.path), reason: typeof c.reason === "string" ? c.reason : "" }))
+          : [];
+        return { ok: false, message: msg, conflicts };
+      }
       if (get().currentSessionId === sid) get().setFlowError(`撤销失败：${msg}`, turnId);
-      return false;
+      return { ok: false, message: msg };
     }
     if (get().currentSessionId === sid) {
       set((s) => {
@@ -2067,7 +2092,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 后端已删除该轮写盘记录 → 重拉返回空，卡片随之消失（双保险）
       void get().loadTurnChanges(turnId);
     }
-    return true;
+    return { ok: true };
   },
 
   // v11: 拉取该 turn 的变更审核清单（含后端持久化审核状态）。失败静默，下次完成/切会话时重试。
@@ -3628,17 +3653,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (sid > 0 && sid !== get().currentSessionId) break;
         const suggestionId = Number(payload.suggestion_id ?? 0);
         if (suggestionId <= 0) break;
-        set({
-          pendingSuggestion: {
-            id: suggestionId,
-            session_id: sid,
-            turn_id: payload.turn_id != null ? Number(payload.turn_id) : null,
-            title: String(payload.title ?? "下一步建议"),
-            summary: String(payload.summary ?? ""),
-            steps: Array.isArray(payload.steps) ? payload.steps.map((s) => String(s)) : [],
-            mode: String(payload.mode ?? "agent"),
-            rationale: payload.rationale ? String(payload.rationale) : undefined,
-          },
+        // 订阅重放会把历史上的 suggestion.created 再投递一遍——已取消 / 已接受的建议若直接渲染，
+        // 重进会话后卡片又冒出来，再点取消还报「该建议已处理过」。事件只当作「有新建议」的信号，
+        // 是否展示以后端当前的 pending 为准（建议先落库再广播，核对必然看得到真正的新建议）。
+        const evSid = sid > 0 ? sid : get().currentSessionId;
+        const fromEvent = {
+          id: suggestionId,
+          session_id: sid,
+          turn_id: payload.turn_id != null ? Number(payload.turn_id) : null,
+          title: String(payload.title ?? "下一步建议"),
+          summary: String(payload.summary ?? ""),
+          steps: Array.isArray(payload.steps) ? payload.steps.map((s) => String(s)) : [],
+          mode: String(payload.mode ?? "agent"),
+          rationale: payload.rationale ? String(payload.rationale) : undefined,
+        };
+        if (evSid == null) break;
+        void api.getLatestSuggestion(evSid).then((res) => {
+          if (get().currentSessionId !== evSid) return;
+          set({ pendingSuggestion: res.suggestion ?? null });
+        }).catch(() => {
+          // 核对失败：宁可展示（点取消时遇到「已处理过」会自动清掉），也不吞掉新建议
+          if (get().currentSessionId === evSid) set({ pendingSuggestion: fromEvent });
         });
         break;
       }

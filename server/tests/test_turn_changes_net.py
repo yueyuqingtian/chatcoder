@@ -126,6 +126,14 @@ async def db(monkeypatch, tmp_path):
     _we.configure(None)
 
 
+def _backdate(path, seconds: float = 86400) -> None:
+    """把文件的修改时间调到「很久以前」。"""
+    import os
+    import time
+    t = time.time() - seconds
+    os.utime(path, (t, t))
+
+
 async def _session(db, workspace) -> Session:
     sess = Session(project_id=None, worktree_path=str(workspace), title="net_test", status="active")
     db.add(sess)
@@ -353,6 +361,7 @@ async def test_revert_restores_deleted_file_from_checkpoint_bytes(db, tmp_path):
     original = "中文内容\n".encode("gb18030")
     ckpt = tmp_path / "ckpt_old.txt"
     ckpt.write_bytes(original)
+    _backdate(ckpt)  # 备份由 copy2 复制，保留源文件的修改时间：本轮之前就存在的文件，备份时间早于本轮开始
     sess = await _session(db, ws)
     turn = await _turn(db, sess, file_list=[{"ckpt": str(ckpt), "path": "old.txt"}])
     # 文本记录的写前内容是有损解码的结果，恢复不能依赖它
@@ -481,3 +490,74 @@ def test_checkpoint_skips_directories_and_discard_is_safe(workspace):
     rs.discard_checkpoint(ck)  # 重复删除不抛
     rs.discard_checkpoint(None)
     assert not __import__("pathlib").Path(ck).exists()
+
+
+# ── 本轮新建（未登记）又被删除的文件（plan-20261020-born-in-turn）──────────────────
+
+
+@pytest.mark.asyncio
+async def test_unrecorded_birth_then_delete_is_hidden_and_not_restored(db, tmp_path):
+    """用户反馈：截图等未登记途径新建的文件，被命令删掉后，变更卡片出现「已删除」、撤销还把它们还原出来。
+    首条记录是删除、且删除前备份的修改时间不早于本轮开始 → 本轮才创建的，零净变更，撤销也不还原。"""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    ckpt = tmp_path / "ckpt_shot.png"
+    ckpt.write_bytes(b"\x89PNG fake")  # 修改时间 = 现在 ≥ 本轮开始
+    sess = await _session(db, ws)
+    turn = await _turn(db, sess, file_list=[{"ckpt": str(ckpt), "path": "shots/a.png"}])
+    await _write(db, sess, turn, ws, "shots/a.png", before=None, after=None, op=rs.OP_DELETE, binary=True)
+
+    assert await rs.list_turn_changes(db, session_id=sess.id, turn_id=turn.id, workspace=str(ws)) == []
+    assert await rs.get_file_diff(db, session_id=sess.id, turn_id=turn.id, workspace=str(ws),
+                                  path="shots/a.png") is None
+    res = await rs.revert_turn_files(db, turn_id=turn.id)
+    assert res["ok"] is True, res
+    assert not (ws / "shots" / "a.png").exists()  # 不能从备份还原出本来就没有的文件
+
+
+@pytest.mark.asyncio
+async def test_preexisting_binary_deleted_is_still_listed_and_restored(db, tmp_path):
+    """反例：删除前备份的修改时间早于本轮开始 → 本轮之前就存在，照常显示「已删除」并可还原。"""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    ckpt = tmp_path / "ckpt_old.png"
+    ckpt.write_bytes(b"\x89PNG old")
+    _backdate(ckpt)
+    sess = await _session(db, ws)
+    turn = await _turn(db, sess, file_list=[{"ckpt": str(ckpt), "path": "logo.png"}])
+    await _write(db, sess, turn, ws, "logo.png", before=None, after=None, op=rs.OP_DELETE, binary=True)
+
+    changes = await rs.list_turn_changes(db, session_id=sess.id, turn_id=turn.id, workspace=str(ws))
+    assert [(c["path"], c["action"]) for c in changes] == [("logo.png", "deleted")]
+    res = await rs.revert_turn_files(db, turn_id=turn.id)
+    assert res["ok"] is True, res
+    assert (ws / "logo.png").read_bytes() == b"\x89PNG old"
+
+
+def test_file_born_after(tmp_path):
+    import time
+    f = tmp_path / "x.bin"
+    f.write_bytes(b"1")
+    now = time.time()
+    assert rs.file_born_after(f, now - 60) is True       # 一分钟前开始的轮次，文件刚创建
+    assert rs.file_born_after(f, now + 3600) is False    # 轮次在文件创建之后才开始
+    assert rs.file_born_after(f, None) is False
+    assert rs.file_born_after(tmp_path / "missing", now - 60) is False
+
+
+@pytest.mark.asyncio
+async def test_session_products_exclude_deleted_and_net_zero(db, tmp_path):
+    """摘要面板「产物」：只有写过且现在仍存在的文件；被删除的、新建又删除的都不算。"""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    sess = await _session(db, ws)
+    turn = await _turn(db, sess)
+    (ws / "keep.css").write_text("a{}\n", encoding="utf-8")
+    await _write(db, sess, turn, ws, "keep.css", before=None, after="a{}\n", op=rs.OP_CREATE)
+    (ws / "tmp.html").write_text("x\n", encoding="utf-8")
+    await _write(db, sess, turn, ws, "tmp.html", before=None, after="x\n", op=rs.OP_CREATE)
+    (ws / "tmp.html").unlink()
+    await _write(db, sess, turn, ws, "tmp.html", before="x\n", after=None, op=rs.OP_DELETE)
+    await _write(db, sess, turn, ws, "gone.png", before=None, after=None, op=rs.OP_DELETE, binary=True)
+
+    assert await rs.session_product_paths(db, sess.id, str(ws)) == ["keep.css"]

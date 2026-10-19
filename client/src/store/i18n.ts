@@ -391,6 +391,8 @@ const DICT: Dict = {
   "gp.enhanced_search_desc":      ["使用 ripgrep 进行更快的全库文本搜索", "Use ripgrep for faster full-repo text search"],
   "gp.message_search":            ["消息搜索按钮", "Message search button"],
   "gp.message_search_desc":       ["在消息区左上角显示搜索入口；关闭后仅隐藏按钮，Ctrl+F 仍可唤起搜索", "Show a search button at the top-left of the message area; hiding it keeps Ctrl+F working"],
+  "gp.suggestion":                ["下一步建议卡", "Next-step suggestion card"],
+  "gp.suggestion_desc":           ["开启后，智能体与工作流模式的主会话会在任务收尾、且子会话 / 子代理 / 工作流都已完成时，按需给出一条下一步建议卡；只读、计划模式与子会话、子代理不使用", "When on, the main session in agent and workflow modes may offer one next-step card after the work is done and all subsessions, subagents and workflows have finished; not used in readonly or plan mode, subsessions or subagents"],
   "gp.parallel_subsession":       ["优先使用子会话并行处理", "Prefer parallel subsessions"],
   "gp.parallel_subsession_desc":  ["每轮消息附带一段提示，让 AI 在存在互不影响的工作点时优先分派子会话并行执行；计划模式下会要求把可并行的步骤分组写进方案文档，确认执行时按分组派发（只读、工作流模式不生效）", "Adds a hint to every turn so the AI splits independent work into parallel subsessions; in plan mode the plan document must list parallelizable groups, which are dispatched on confirm (not applied in readonly or workflow modes)"],
   "gp.memory":                    ["AI 主动生成记忆", "Auto Memory"],

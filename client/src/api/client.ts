@@ -1035,6 +1035,8 @@ export const api = {
   retryTask: (turnId: number, taskId: number) =>
     post<{ ok: boolean }>(`/turns/${turnId}/tasks/${taskId}/retry`, {}),
   listSessionArtifacts: (sessionId: number) => get<ArtifactOut[]>(`/turns/sessions/${sessionId}/artifacts`),
+  /** 摘要面板「产物」：本会话写过且现在仍存在的文件（与变更卡片同一口径，删除的不算） */
+  listSessionProducts: (sessionId: number) => get<{ files: string[] }>(`/turns/sessions/${sessionId}/products`),
   listSessionSnapshots: (sessionId: number) => get<TurnSnapshotOut[]>(`/turns/sessions/${sessionId}/snapshots`),
   listSessionAudit: (sessionId: number) => get<AuditLogOut[]>(`/turns/sessions/${sessionId}/audit`),
   getSessionUsage: (sessionId: number) => get<{
@@ -1685,6 +1687,8 @@ export interface GlobalSettingsOut {
   agent_retry_intervals?: string;
   browser_enabled?: boolean;
   browser_headless?: boolean;
+  /** 下一步建议卡开关（默认关闭；开启后智能体 / 工作流模式才注入建议卡工具与提示词） */
+  suggestion_enabled?: boolean;
   /** plan-334-1661: 电脑操控总开关（开启后 desktop_* 工具集可用） */
   desktop_enabled?: boolean;
   /** plan-334-1661: 普通电脑操作子开关 */

@@ -737,6 +737,10 @@ function workflowProgramsOf(calls: MessageOut[], resultsByKey: Map<string, Messa
   return ids;
 }
 
+/** 建议工具：调用只为生成「下一步建议」卡，消息流不展示其调用行与随后的思考（只展示建议卡本身）。
+ *  同时兼容真实名与 ta3 伪装名。 */
+const SUGGESTION_TOOLS = new Set(["suggest_next_task", "SuggestNextTask"]);
+
 /** turn 内消息归类：严格按消息时间序；相邻 tool_call 合并 cluster；系统消息 → divider。 */
 function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
   // §3.3: 相邻 tool_call 合并为 tool-cluster，AI 文字切段时新开 cluster
@@ -781,15 +785,25 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
 
   // §3.3 (plan-548): 全部消息按时间序归类。用户消息不再强制提升到 turn 开头——
   // 正常 turn 其 id 最小天然在前；任务执行中排队注入的消息（id 更大）落在实际发送位置
+  // plan-20261019-suggestion-flow：汇报之后调用建议工具，其调用行与调用后的思考都不进入时间线，
+  // 汇报与建议卡连续展示；否则这行调用 + 思考会夹在两者之间，还把前面的汇报当成「过程」折叠。
+  // 遇到下一条正文 / 用户消息等即恢复（调用后的思考只在紧随其后、正文之前被丢弃）。
+  let afterSuggestion = false;
   for (const m of msgs) {
     if (m.sender_type === SenderType.User) {
+      afterSuggestion = false;
       flushTools();
       // plan-671 / v39：目标续跑、子代理与工作流唤醒消息都是系统生成的，不渲染为用户气泡
       items.push(userItemOf(m));
       continue;
     }
     const c = m.content as Record<string, unknown>;
+    if ((m.msg_type === MsgType.ToolCall || m.msg_type === MsgType.ToolResult) && SUGGESTION_TOOLS.has(String(c.tool ?? ""))) {
+      afterSuggestion = true;
+      continue;
+    }
     if (m.msg_type === MsgType.ToolCall) {
+      afterSuggestion = false; // 建议工具之后又有别的工具调用：其后的思考属于正常过程
       if (c.tool === "spawn_subagent") {
         // v22: spawn_subagent 工具调用独立作为时间线条目，按时间轴精准穿插在消息流中
         // （此前被当成普通工具节点混入 ToolTree，且 SubagentCard 全部堆在用户消息下方）
@@ -809,6 +823,7 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
       // v7: 兼容两种后端写法——agent_loop 写 MsgType.Thinking；
       // agent_runtime 的 _emit_thread(thinking=True) 写 MsgType.Text + content.thinking=true。
       // 否则思考内容会被当作正文展示在消息流中间，导致"思考块与消息/工具调用位置错乱"。
+      if (afterSuggestion) continue;
       flushTools();
       items.push({ kind: "thinking", msg: m });
     } else if (m.msg_type === MsgType.Summary) {
@@ -825,6 +840,7 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
       // plan-548: 产物变更统一在输入框上方任务面板（TaskStatusPanel）展示，消息流不再渲染
       continue;
     } else if (m.msg_type === MsgType.Text) {
+      afterSuggestion = false;
       flushTools();
       items.push({ kind: "text", msg: m });
     } else if (m.msg_type === MsgType.Plan) {

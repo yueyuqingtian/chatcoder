@@ -29,6 +29,7 @@ import { ToolGlyph } from "../iconkit/ToolGlyphs";
 import { ChatCollapse } from "./ChatCollapse";
 import { toolVerb, runningVerb, toolDisplayName } from "./toolLabels";
 import { tailClamp } from "../../utils/tailClamp";
+import { Tooltip } from "../ui/Tooltip";
 import {
   IconFileRead, IconFileWrite, IconFolder, IconGlobe, IconTerminal,
   IconUsers, IconBox, IconZap, IconFlask, IconGitBranch, IconBrain,
@@ -302,7 +303,7 @@ function InlineDiff({ turnId, path, callKey, fallbackLines, onStat }: {
       {(hasStat || state.note || path) && (
         <div className="tc-diff-head cv-head">
           <FileIcon name={path} size={14} />
-          <span className="cv-name">{splitFilePath(path).name}</span>
+          <Tooltip content={path} side="top"><span className="cv-name">{splitFilePath(path).name}</span></Tooltip>
           {hasStat && (
             <span className="tc-diff-stat">
               {state.singleEdit ? "本次变更" : "该轮累计"}
@@ -310,7 +311,7 @@ function InlineDiff({ turnId, path, callKey, fallbackLines, onStat }: {
               <span className="tc-del">-{state.deletions}</span>
             </span>
           )}
-          {state.note && <span className="tc-diff-note">{state.note}</span>}
+          {state.note && <Tooltip content={state.note} side="top"><span className="tc-diff-note">{state.note}</span></Tooltip>}
         </div>
       )}
       {state.lines.length > 0 ? (
@@ -319,7 +320,8 @@ function InlineDiff({ turnId, path, callKey, fallbackLines, onStat }: {
             <div key={i} className={`tc-diff-line ${l.type}`}><span className="cv-ln">{l.type === "add" ? "+" : l.type === "del" ? "−" : ""}</span><code className="cv-code">{l.text || " "}</code></div>
           ))}
         </pre>
-      ) : (
+      ) : state.note ? null : (
+        // 有口径说明（二进制 / 已删除等）时说明本身已交代原因，不再重复一行「无文本变更」
         <div className="tc-diff-empty">本次无文本变更</div>
       )}
       {state.truncated && <div className="tc-diff-trunc">变更过大，已截断显示</div>}

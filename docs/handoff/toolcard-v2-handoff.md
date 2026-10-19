@@ -2,7 +2,8 @@
 
 - 初版：2026-10-19；分支：`master`（直接提交，未新建分支）
 - 计划文档：`ai/chatcoder-plan-20261019-toolcard-v2.md`——**仅存在于本机**（`ai/` 被 `.gitignore` 忽略）。本文已含要点；计划文档里还没补「补充 C～G」，见 §二。
-- **状态：开发暂停，按用户要求未跑构建与全量测试就提交推送。** 最后一次 `npx tsc --noEmit` 通过（提交前最后一次改动 `store/toolCard.ts` 之后跑的）；`npm run build`、全量 pytest 未重跑。
+- **状态更新（2026-10-19 接手完成）：§四全部完成，`tsc`、`npm run build`、两个客户端单测与 62 项后端测试通过；§三「未验证」的浏览器项仍未逐项走查。** 以下为暂停时的原始记录。
+- **原状态：开发暂停，按用户要求未跑构建与全量测试就提交推送。** 最后一次 `npx tsc --noEmit` 通过（提交前最后一次改动 `store/toolCard.ts` 之后跑的）；`npm run build`、全量 pytest 未重跑。
 
 ## 一、已完成（代码已在仓库中）
 
@@ -41,7 +42,9 @@
 
 **未验证**：Git 图谱对话框、新建分支对话框、卡片 ⋯ 设置菜单；计划 / 进程 / 子代理 / 工作流各栏在真实数据下的表现与折叠行 hover；深色与各世界主题下的胶囊 / 卡片；1.5× 缩放；老后端降级在浏览器里的实际显示（只过了类型检查）；`npm run build`。
 
-## 四、未完成清单（建议顺序）
+## 四、未完成清单（建议顺序）——已全部完成
+
+补充完成：左侧子卡片（分支弹窗 / ⋯ 菜单 / 折叠项浮窗）hover 无底色——根因是 `--tcard-*` 令牌只声明在 `.chat-panel`，portal 到 body 的浮层取不到，已提到 `:root`。
 
 1. **Git 面板层级关系**（用户最新反馈，截图：「更改 1」分组标题与其下的 `b.txt M` 文件行勾选框在同一 x 位置，看不出分组 → 文件的从属；「未跟踪文件」同理）。入口：`client/src/components/panel/GitPanel.tsx` 约 598–700 行（`changeRow`、`gp-section` 渲染），样式 `client/src/styles/git-panel.css` 约 472–630 行（`.gp-section-head` / `.gp-section-body` / `.gp-row`）。**尚未读代码、未改动。** 方向：文件行整体右移一级，让文件勾选框与图标对齐到分组标题文字起点之后；分组标题用字号 / 字重 / 底色区分；遵守设计语言——**禁止左侧装饰竖线**。冲突区、历史视图里的文件行（`gp-cv-file`）一并检查。
 2. 设置页「会话工具卡」分组：`components/settings/AppearancePanel.tsx` 增加默认形态（胶囊 / 展开）与五栏默认展开，「修改即保存」，用 `saveToolCardForm` / `saveToolCardSection` / `hydrateToolCardPrefs`。

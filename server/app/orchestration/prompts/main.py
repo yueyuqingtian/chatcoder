@@ -36,9 +36,10 @@ MAIN_SYSTEM_PROMPT = """You are an autonomous coding agent working in a project.
 - Add brief comments for key decisions. Self-check runnability before delivery.
 
 ## Wrap-up — offer the next step as a card (`suggest_next_task`)
-The interface renders your suggestion as a card at the bottom of the message flow, so the user can start it in one click instead of retyping the requirement. Treat it as part of finishing a turn, not as an optional extra.
-- **Call it once near the end of every turn that actually delivered work** (code changed, files produced, a bug diagnosed, a decision implemented). Leaving it out makes the user re-describe what to do next.
-- **Skip it only when**: the turn is pure Q&A / explanation with no work product; the user is still mid-task or explicitly said they will take the next step; or there is genuinely nothing sensible left to do.
+The interface can render one suggestion as a card at the bottom of the message flow, so the user can start it in one click instead of retyping the requirement. It is optional, not part of every turn.
+- **Offer it only when there is a concrete, worthwhile follow-up**: you delivered real work (code changed, files produced, a bug diagnosed) AND something specific remains that is worth doing in its own session (missing tests, a risk you just found, a leftover you deliberately postponed).
+- **Skip it** for pure Q&A / explanation, small or self-contained changes, when the user is still mid-task or said they will take the next step, and whenever nothing sensible is left. Skipping is the normal case — never fabricate a follow-up just to show a card.
+- **Only after everything has finished**: do not call it while any subagent, sub-session or workflow is still running or paused; wait until they are all done and their results are integrated into your report.
 - **Write it as work, not politeness**: a verb-object title, one line on why it is worth doing, and 2–5 executable steps. Never "还需要我做什么吗" style filler.
 - **Do not let it replace the work**: propose the next step only after the current one is truly done and verified; never stop early to show the card.
 - Do not repeat the card content in your reply body — the user can already see it.
@@ -319,7 +320,8 @@ def build_main_system_prompt(extra_context: str = "", enable_subagents: bool = T
                              language: str = "auto",
                              language_source: str = "user",
                              desktop_enabled: bool = False,
-                             browser_enabled: bool = False) -> str:
+                             browser_enabled: bool = False,
+                             suggestion_enabled: bool = False) -> str:
     """构建主代理系统提示词。
 
     如果用户关闭了子代理，剔除关于 spawn_subagent 的引导与决策章节。
@@ -327,12 +329,19 @@ def build_main_system_prompt(extra_context: str = "", enable_subagents: bool = T
     替换为"直接执行、除非用户明示否则不要编写计划文档"的简明指引——保证模式遵循度。
     language（plan-19-82）：本轮用户消息语言（zh/en/auto）。语言纪律块置于提示词
     **首尾双锚**（首部对抗默认英文、尾部位近用户消息以对抗长上下文漂移）。
+    suggestion_enabled：开启时才保留「收尾给下一步建议卡」一节。
     desktop_enabled（plan-334-1661）：开启电脑操控时追加该能力的任务规范
     （先查路线、完成后沉淀路线），未开启时不注入。
     """
     from app.orchestration.prompts.language import build_language_directive
 
     prompt = MAIN_SYSTEM_PROMPT
+    # 下一步建议卡：设置关闭 / 非智能体·工作流模式 / 子会话时，整节提示词都不注入
+    # （工具本身也不下发，见 engine 的 suggestion_allowed）
+    if not suggestion_enabled and "## Wrap-up — offer the next step as a card" in prompt:
+        _w_start = prompt.index("## Wrap-up — offer the next step as a card")
+        _w_end = prompt.index("## Core Principles", _w_start)
+        prompt = prompt[:_w_start] + prompt[_w_end:]
     if not plan_flow_enabled:
         # 非计划模式：移除规划文档工作流与多轮迭代章节（Collect→Merge→Replan），
         # 换为直接执行指引。边界：从 "## Planning — decide for yourself" 段内

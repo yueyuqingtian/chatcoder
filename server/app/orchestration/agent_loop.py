@@ -991,11 +991,8 @@ async def run_agent_loop(
     # 已有产出时 finish=stop 空响应 = 任务完成正常结束（对齐 zcode/AI SDK），
     # 不重试不报错；零产出时保留重试兜底瞬时故障。
     _tool_executed = False
-    # plan-20261019-suggestion-priority：收尾建议守卫——模型准备收工时若本轮有实际产出
-    # 却未生成建议卡，注入提醒再走一步（只催一次）。实测数十轮只触发一次，
-    # 根因是「建议卡」全靠模型自觉，提示词与运行时都没有固定钩子。
-    _suggestion_offered = False
-    _suggestion_nudged = False
+    # 本轮开始时刻（epoch 秒，惰性读取一次；判断文件是否「本轮才创建」用）
+    _turn_t0_box: list[float | None] = []
     # plan-547 C1: 进度提醒计数——连续 N 步无面向用户的文字输出时注入提醒
     _steps_since_last_text = 0
     # plan-547 C3: 最近一次 todo_write 的清单全集（plan 模式每步注入状态标记）
@@ -1862,6 +1859,8 @@ async def run_agent_loop(
                     # reasoning_content（模型本步产生的思考），否则下一轮调用 400
                     reasoning_content=response.thinking or None,
                 ))
+                # plan-20261019-suggestion-flow：本步的建议工具是否成功（收束判定用，见 for 循环之后）
+                _suggestion_ok_this_step = False
                 for tc in response.tool_calls:
                     # v6.4: 工具执行前检查中断信号
                     if cancel_event and cancel_event.is_set():
@@ -2143,6 +2142,15 @@ async def run_agent_loop(
                         # 并按指纹（而不是有损的文本解码结果）判断命令有没有真的改动文件。
                         _guess_existed = {p: rollback_service.path_exists(workspace, p) for p in _guess_paths}
                         _guess_digest = {p: rollback_service.file_digest(workspace, p) for p in _guess_paths}
+                        # plan-20261020-born-in-turn：本轮才创建的文件（截图 / 构建产物等未登记途径新建）——
+                        # 之后被命令删掉时对本轮零净变更，不能当成「删除了本来就有的文件」记录（否则撤销会把它们还原出来）
+                        if _guess_paths and not _turn_t0_box:
+                            _turn_t0_box.append(await rollback_service.turn_started_epoch(db, turn_id))
+                        _guess_born = {
+                            p: rollback_service.file_born_after(
+                                rollback_service._fs_path(workspace, p), _turn_t0_box[0] if _turn_t0_box else None)
+                            for p in _guess_paths if _guess_existed.get(p)
+                        }
                         _pre_existed = {p: rollback_service.path_exists(workspace, p) for p in _pre_paths}
                         # plan-20261019-toolcard-v2：写前备份必须在工具执行**之前**取。此前在执行之后才复制，
                         # 备份里装的是写后内容，二进制文件被改写 / 删除后无从恢复。
@@ -2343,6 +2351,9 @@ async def run_agent_loop(
                             _exists_post_g = rollback_service.path_exists(workspace, target)
                             _digest_pre_g = _guess_digest.get(target)
                             _digest_post_g = rollback_service.file_digest(workspace, target) if _exists_post_g else None
+                            if (_existed_g and not _exists_post_g and _guess_born.get(target)
+                                    and not await rollback_service.has_turn_write(db, turn_id, target)):
+                                continue  # 本轮由未登记途径新建又被删除：零净变更，不记录（备份由下方统一清理）
                             if _existed_g == _exists_post_g:
                                 if _digest_pre_g is not None and _digest_post_g is not None:
                                     if _digest_pre_g == _digest_post_g:
@@ -2475,10 +2486,9 @@ async def run_agent_loop(
                     except Exception:
                         await db.rollback()
                         logger.debug("[agent] 步级提交失败 turn=%s tool=%s", turn_id, tool_name, exc_info=True)
-                    # plan-20261019-suggestion-priority：记录本轮是否已生成建议卡
-                    # （真实名 / ta3 伪装名都认），收尾兜底提醒据此只催一次
+                    # 记录本步建议卡是否生成成功（真实名 / ta3 伪装名都认），供下方「汇报 + 建议卡」收束判定
                     if tool_name in ("suggest_next_task", "SuggestNextTask"):
-                        _suggestion_offered = True
+                        _suggestion_ok_this_step = bool(result.ok)
                     # v2.2: todo_write 成功 → 重置 todo 提醒计数
                     if tool_name == "todo_write" and result.ok:
                         _todo_active = True
@@ -2507,6 +2517,26 @@ async def run_agent_loop(
                             if tool_name.startswith(_SCREEN_TOOL_PREFIXES):
                                 _tool_image_msgs.append(_img_msg)
                                 _prune_tool_images(_tool_image_msgs)
+                # plan-20261019-suggestion-flow：汇报与建议卡连续展示——本步正文（汇报）已随本步落库，
+                # 且本步只调用了建议工具并成功时直接收束 turn：不再让模型多走一步
+                # （否则会多出「已调用工具 + 思考 + 一段重复收尾语」，还把前面的汇报当成过程折叠）。
+                # 后台子代理仍在跑时不收束（需继续等待它们）；正文为空时也不收束，留给下一步补汇报。
+                # 只对主代理生效，且不绕过收尾前的两道纠偏：规划模式必须写 ai/ 计划文档、
+                # GUI 操作路线沉淀提醒——这两道只在「无工具调用的收工步」才会触发，提前 break 会整个跳过。
+                if (_suggestion_ok_this_step and agent_kind == "main" and permission_mode != "plan"
+                        and not _route_guard.has_pending_reminder()
+                        and (response.content or "").strip()
+                        and all(tc.get("name", "") in ("suggest_next_task", "SuggestNextTask")
+                                for tc in response.tool_calls)):
+                    _mgr_now = (subagent_context or {}).get("manager")
+                    try:
+                        _bg_pending = int(_mgr_now.pending_count()) if _mgr_now is not None else 0
+                    except Exception:
+                        _bg_pending = 0
+                    if _bg_pending == 0:
+                        logger.info("[agent] turn=%s 建议卡已生成，收束本轮（汇报已落库）", turn_id)
+                        final_text = response.content or ""
+                        break
                 continue
 
             # ── v43: 主代理收工等待后台子代理（会话保持运行，直到子代理结束）──
@@ -2561,30 +2591,6 @@ async def run_agent_loop(
                     messages.append(ChatMessage(role="assistant", content=response.content))
                 logger.info("[agent] turn=%s 注入操作路线沉淀提醒", turn_id)
                 messages.append(ChatMessage(role="user", content=_route_note))
-                continue
-
-            # plan-20261019-suggestion-priority：收尾建议兜底——模型准备结束本轮、
-            # 且本轮真实动过工具（纯问答不触发），但没给下一步建议时，提醒一次再走一步。
-            # 为什么不靠提示词就够：长会话里工具描述与系统提示词会被稀释，实测触发率极低。
-            # 只催一次（_suggestion_nudged），用户不想要时可以取消卡片，不会被反复骚扰。
-            if (agent_kind == "main" and _tool_executed and response.content
-                    and not _suggestion_offered and not _suggestion_nudged):
-                _suggestion_nudged = True
-                logger.info("[agent] turn=%s 注入收尾建议提醒", turn_id)
-                await message_service.create_message(
-                    db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
-                    sender_type=SenderType.AGENT.value, sender_id=agent_id,
-                    msg_type=MsgType.TEXT.value,
-                    content={"text": response.content, "agent_name": agent_name},
-                )
-                messages.append(ChatMessage(role="assistant", content=response.content))
-                messages.append(ChatMessage(role="user", content=(
-                    "[系统提醒] 本轮已有实际产出，收尾还差一步：调用 suggest_next_task "
-                    "给出一条具体可执行的下一步建议（用户会以卡片形式看到，可一键在新子会话执行）。\n"
-                    "写「做什么 + 为什么值得做 + 2~5 步」，不要写客套式提问。\n"
-                    "例外：纯问答/解释、用户明确还要接着做、或确实没有合适的下一步——"
-                    "此时用一句话说明为什么不需要，然后直接结束本轮。不要复述本条提示。"
-                )))
                 continue
 
             # 最终文本

@@ -89,6 +89,12 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
         broadcast=False,
     )
     turn_id = await turn_service.create_turn(db, session_id=body.session_id, user_message_id=user_msg.id)
+    # 用户发新消息 = 默认取消上一条未处理的「下一步建议」（刷新 / 重进会话后也不再展示）
+    try:
+        from app.services import suggestion_service
+        await suggestion_service.dismiss_pending_for_session(body.session_id)
+    except Exception:
+        logger.debug("发送时取消待处理建议失败(非阻塞)", exc_info=True)
     # 回填用户消息的 turn_id：保证前端按 turn 分组时用户消息归入该 turn，
     # 且（消息按 id 升序）用户消息排在 AI 回复之前（修复消息顺序颠倒）
     # ——经写引擎单写线程补丁（无锁单写者）
@@ -846,6 +852,15 @@ async def confirm_plan_turn(turn_id: int, body: TaskConfirmBody,
 async def list_session_artifacts(session_id: int, db: AsyncSession = Depends(get_db)):
     """产物聚合（v12）：Artifact 表全量（含 title/summary/files），前端按任务分组展示。"""
     return await task_service.list_artifacts(db, session_id)
+
+
+@router.get("/sessions/{session_id}/products")
+async def list_session_products(session_id: int, db: AsyncSession = Depends(get_db)):
+    """摘要面板「产物」：本会话写过且现在仍存在的文件（删除的、本轮新建又删除的不算）。"""
+    workspace = await rollback_service._workspace_for_session(db, session_id)
+    if not workspace:
+        return {"files": []}
+    return {"files": await rollback_service.session_product_paths(db, session_id, workspace)}
 
 
 @router.get("/sessions/{session_id}/snapshots", response_model=list[TurnSnapshotOut])

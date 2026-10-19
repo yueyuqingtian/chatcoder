@@ -385,6 +385,14 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
     wasRunning.current = isRunning;
   }, [isRunning, visible, refresh]);
 
+  // plan-20261019-toolcard-v2：会话工具卡里切换分支 / 暂存后广播该事件，面板可见时同步刷新
+  useEffect(() => {
+    if (!visible) return;
+    const onChanged = () => { void refresh(); };
+    window.addEventListener("chatcoder:git-changed", onChanged);
+    return () => window.removeEventListener("chatcoder:git-changed", onChanged);
+  }, [visible, refresh]);
+
   useEffect(() => {
     if (branchOpen) void refreshBranches();
   }, [branchOpen, refreshBranches]);

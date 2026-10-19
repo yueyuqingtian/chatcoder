@@ -1143,6 +1143,13 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         # 旧版请求都不会让模式解析落空。
         _mode = normalize_execution_mode(mode)
         _approval_mode = normalize_approval_mode(getattr(session, "approval_mode", None))
+        # 下一步建议卡：设置开启 + 主会话 + 智能体 / 工作流模式才注入工具与提示词（见 suggestion_allowed）
+        from app.orchestration.tools.suggestion import suggestion_allowed
+        _suggestion_on = suggestion_allowed(_mode, session) and (
+            _mode_whitelist is None or "suggest_next_task" in _mode_whitelist
+        )
+        if _suggestion_on:
+            _available_tools = _available_tools | {"suggest_next_task"}
         # 用户反馈修复：移除旧「完全访问豁免规划流程」特殊化——权限模式（ask/auto/full）
         # 只决定"要不要问"，能力边界与流程说明一律由执行模式（_mode）决定。此前完全访问
         # 会跳过模式说明/Plan History 注入，并按全量下发工具，「计划模式 + 完全访问」下
@@ -1164,6 +1171,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             goal={"text": session.goal_text, "turns_used": session.goal_turns_used or 0}
             if (session.goal_status or "none") == "active" and session.goal_text else None,
             available_tools=_available_tools,
+            suggestion_enabled=_suggestion_on,
             # plan-128-518: ta3 会话里模型看到的是伪装名 CompleteGoal，提示词必须引用同一个名字
             goal_tool_name=_visible_goal_tool(selected_model),
             effective_model_id=effective_model_id,
@@ -1224,7 +1232,9 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         # 用户反馈修复：工具清单只由执行模式（能力边界）决定，与权限模式无关——
         # 此前「完全访问」走全量下发，把 plan 下必然被拒的编辑类工具也发给模型，
         # 模型见得到、试了必被拒：多轮调整计划时反复尝试编辑历史方案文档（用户反馈）。
-        tool_schemas = tool_registry.all_schemas(_schema_whitelist, include_scoped=_goal_tools_on)
+        tool_schemas = tool_registry.all_schemas(
+            _schema_whitelist, include_scoped=_goal_tools_on, include_suggestion=_suggestion_on,
+        )
         await _inject_mcp_tools(
             db, main_agent, tool_schemas, turn_id,
             readonly_only=_mode_readonly,
@@ -2198,10 +2208,14 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             + "\n若发现上方方案文档未覆盖其中的历史未完成需求，在总结中明确指出差异，不要静默丢弃。"
             if _open_summary.strip() else ""
         )
+        # 确认执行阶段按智能体模式运行，建议卡口径与 start_turn 一致
+        from app.orchestration.tools.suggestion import suggestion_allowed as _sugg_allowed
+        _suggestion_on_confirm = _sugg_allowed("agent", session)
         bundle = await build_main_context(
             db, agent=main_agent, session=session, project=project, turn=turn,
             user_message=original_request,
             multimodal=_is_multimodal,
+            suggestion_enabled=_suggestion_on_confirm,
             effective_model_id=effective_model_id,
             # plan-91-394: 中断可续跑的子代理清单（用户说“继续”时主代理据此续跑，而非重新派发）
             paused_subagents=await list_resumable_subagents(session.id),
@@ -2238,7 +2252,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             + (f"\n\n{_exec_parallel}" if _exec_parallel else "")
             + _open_section
         )
-        main_tools = tool_registry.all_schemas()
+        main_tools = tool_registry.all_schemas(include_suggestion=_suggestion_on_confirm)
         try:
             from app.services.skill_service import get_agent_mcp_servers
             from app.orchestration.tools.mcp_wrapper import build_mcp_tools_for_agent

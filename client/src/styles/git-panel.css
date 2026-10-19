@@ -520,7 +520,9 @@
 }
 /* 分组头右侧批量操作：文字按钮与更多菜单之间留 4px */
 .gp-section-actions { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
-.gp-section-body { display: flex; flex-direction: column; padding: 0 12px 4px; }
+/* plan-20261019-toolcard-v2：文件行整体右移一级，文件勾选框落在分组标题按钮起点（12 + 16 + 4 = 32px），
+   与组头复选框错开一列，看得出「分组 → 文件」的从属；层次靠缩进而不是装饰竖线。 */
+.gp-section-body { display: flex; flex-direction: column; padding: 0 12px 4px 32px; }
 .gp-row {
   display: flex;
   align-items: center;
@@ -892,7 +894,8 @@
   flex-direction: column;
   border-top: 1px solid var(--border);
 }
-.gp-cv-file { border-radius: var(--r-md); }
+.gp-cv-file { border-radius: var(--r-md); padding-left: 8px; }
+.gp-cv-file:hover { background: var(--bg-hover); }
 .gp-cv-file.is-active { background: var(--bg-active); }
 .gp-cv-count {
   flex-shrink: 0;

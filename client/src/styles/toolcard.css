@@ -21,7 +21,9 @@
  *
  * 几何令牌与 contentColumnGeometry.ts 的 CARD_W / CAPSULE_MAX_W / CARD_INSET 同源，改一处必须同步另一处。
  */
-.chat-panel {
+/* 令牌声明在 :root 而不是 .chat-panel：分支弹窗、设置菜单、折叠项浮窗都经 portal 挂到 body，
+   取不到 .chat-panel 上的变量，hover 底色、字号、行高会整体失效（用户反馈左侧子卡片 hover 无背景）。 */
+:root {
   --tcard-w: 280px;
   --tcard-cap-max-w: 260px;
   --tcard-cap-h: 32px;
@@ -51,7 +53,7 @@
      必须是绝对像素、并且约束的是卡片体而不是外壳——百分比限高会随外壳在形变动画里的高度一起变，
      卡片体被压小、内容一超出就冒出滚动条，动画结束又消失（用户反馈的「展开时出现滚动条又消失、跳一下」）。 */
 }
-:root[data-theme="dark"] .chat-panel {
+:root[data-theme="dark"] {
   --tcard-bg: var(--bg-elevated);
   --tcard-ring: color-mix(in srgb, var(--text-1) 10%, transparent);
   --tcard-shadow:

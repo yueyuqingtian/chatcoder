@@ -327,6 +327,9 @@ class Settings(BaseSettings):
     max_concurrent_subagents: int = 6
     # ── 工作流运行时（设计 §8）：并发上限与默认返工次数；0 = 不限（仅并发上限支持）──
     workflow_enabled: bool = True
+    # 下一步建议卡（设置 → 常规）：默认关闭；开启后才向主会话的智能体 / 工作流模式注入
+    # suggest_next_task 工具与对应提示词（子会话、子代理、只读、计划模式一律不注入）
+    suggestion_enabled: bool = False
     workflow_max_concurrent_global: int = 3  # 所有会话的工作流子代理合计，保守默认
     workflow_max_concurrent_per_session: int = 2  # 同一会话合计，保守默认
     workflow_max_parallel_nodes_per_flow: int = 2  # 单个子工作流内并行节点

@@ -217,9 +217,18 @@
   flex: 0 0 auto;
 }
 
+/* 文件名 + 目录合成一个悬停区：Tooltip 的锚点，截断时悬停看完整路径 */
+.tcc-path {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .tcc-name {
   flex: 0 1 auto;
-  max-width: 46%;
+  max-width: 70%;
   font-size: var(--fs-md, 13px);
   line-height: 1.4;
   font-weight: 500;
@@ -341,6 +350,39 @@
 
 .tcc-more .btn:hover:not(:disabled) {
   color: var(--text-1);
+}
+
+/* ── 撤销被拒绝：逐文件原因 ──────────────────────────────── */
+
+.tcc-reject-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 4px;
+  max-height: 260px;
+  overflow-y: auto;
+  border-radius: var(--r-md);
+  background: var(--bg-hover);
+  scrollbar-width: thin;
+}
+
+.tcc-reject-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+}
+
+.tcc-reject-path {
+  font-size: var(--fs-md, 13px);
+  font-weight: 500;
+  color: var(--text-1);
+  overflow-wrap: anywhere;
+}
+
+.tcc-reject-reason {
+  font-size: calc(var(--fs-md, 13px) - 1px);
+  color: var(--text-3);
+  overflow-wrap: anywhere;
 }
 
 /* ── 窄宽度：目录名先让位，文件名与操作区优先 ─────────────── */

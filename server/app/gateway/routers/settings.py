@@ -151,6 +151,8 @@ def load_persisted_workspace() -> None:
         settings.browser_enabled = bool(data["browser_enabled"])
     if "browser_headless" in data:
         settings.browser_headless = bool(data["browser_headless"])
+    if "suggestion_enabled" in data:
+        settings.suggestion_enabled = bool(data["suggestion_enabled"])
     # plan-20261018-operator-boost：电脑操控默认值升级（只升级「仍等于旧默认值」的项，用户改过的不动）
     _upgrade_desktop_defaults(data)
     # plan-334-1661: 电脑操控相关开关
@@ -342,6 +344,8 @@ class GlobalSettingsOut(BaseModel):
     # 浏览器自动化开关与无头模式
     browser_enabled: bool = True
     browser_headless: bool = True
+    # 下一步建议卡开关（默认关闭，见 config.suggestion_enabled）
+    suggestion_enabled: bool = False
     # plan-334-1661: 电脑操控（内核常驻的内置工具集，不作为 MCP 注册）
     # 注意：这些字段必须同时出现在 Out 与 In 两个模型里——只加 In 会导致
     # _global_settings_out 传入的 kwarg 被 pydantic 静默丢弃，前端表现为"改了不保存"。
@@ -462,6 +466,7 @@ class GlobalSettingsIn(BaseModel):
     agent_retry_intervals: str | None = None
     browser_enabled: bool | None = None
     browser_headless: bool | None = None
+    suggestion_enabled: bool | None = None
     # plan-334-1661: 电脑操控（集中一处，_global_settings_out 与 PUT 都读这里）
     desktop_enabled: bool | None = None
     desktop_plain_ops_enabled: bool | None = None
@@ -563,6 +568,7 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
         agent_retry_intervals=data.get("agent_retry_intervals", settings.agent_retry_intervals),
         browser_enabled=data.get("browser_enabled", settings.browser_enabled),
         browser_headless=data.get("browser_headless", settings.browser_headless),
+        suggestion_enabled=bool(data.get("suggestion_enabled", settings.suggestion_enabled)),
         # plan-334-1661: 电脑操控（新增字段只需改这里，不会再漏——见本函数 docstring）
         desktop_enabled=data.get("desktop_enabled", getattr(settings, "desktop_enabled", True)),
         desktop_plain_ops_enabled=data.get(
@@ -815,6 +821,9 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
     if body.browser_headless is not None:
         data["browser_headless"] = bool(body.browser_headless)
         settings.browser_headless = bool(body.browser_headless)
+    if body.suggestion_enabled is not None:
+        data["suggestion_enabled"] = bool(body.suggestion_enabled)
+        settings.suggestion_enabled = bool(body.suggestion_enabled)
     # plan-334-1661: 电脑操控开关（落盘 + 运行时立即生效，工具门禁每次调用都读 settings）
     for _field in (
         "desktop_enabled", "desktop_plain_ops_enabled", "desktop_browser_ops_enabled",

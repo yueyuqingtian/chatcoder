@@ -879,6 +879,8 @@ async def build_main_context(
     plan_history: str = "",
     goal: dict | None = None,
     available_tools: set[str] | None = None,
+    # 下一步建议卡：开启时才在系统提示词里注入「收尾给建议」一节（见 build_main_system_prompt）
+    suggestion_enabled: bool = False,
     # plan-128-518: 模型可见的目标完成工具名（ta3 会话为伪装名 CompleteGoal，其它为 goal_complete）
     goal_tool_name: str = "goal_complete",
     # plan-166-767: 请求携带的权威模型（切换模型后立即发送时优先），
@@ -941,7 +943,8 @@ async def build_main_context(
                                                  language=_reply_lang,
                                                  language_source=_lang_source,
                                                  desktop_enabled=bool(getattr(settings, "desktop_enabled", False)),
-                                                 browser_enabled=_browser_on)
+                                                 browser_enabled=_browser_on,
+                                                 suggestion_enabled=suggestion_enabled)
     bundle = ContextBundle(
         system=system_prompt,
         instruction=user_message,

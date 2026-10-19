@@ -266,7 +266,9 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
 
   // v11: 当前是否处于 diff 视图（diffPreview 与预览文件匹配）
   const hasDiff = diffPreview != null && diffPreview.path === previewPath;
-  const showDiff = viewMode === "diff" && hasDiff;
+  /** 本轮被删除的文件：磁盘上已没有，只能看变更对比 */
+  const isDeletedDiff = hasDiff && diffPreview!.deleted === true;
+  const showDiff = (viewMode === "diff" || isDeletedDiff) && hasDiff;
 
   /** plan-20261018-turn-changes: diff 的 model 唯一键。
    *  连续点不同轮次的「审查」时，@monaco-editor/react 会复用同一 model URI；
@@ -340,11 +342,13 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
     // plan-75-334 阶段3：隐藏期不请求磁盘（面板不可见时读盘+编辑器刷新都是白做）；
     // 恢复可见时本 effect 因 visible 变化重跑，键未记录 ⇒ 补算一次。
     if (!visible) return;
+    // 已删除文件不读盘（读取必然失败，还会闪出错误态）
+    if (isDeletedDiff) return;
     const key = `${previewPath}#${previewChangeSignature}`;
     if (loadedKeyRef.current === key) return;
     loadedKeyRef.current = key;
     void loadFile(previewPath, ++loadSeqRef.current);
-  }, [previewPath, previewChangeSignature, visible, currentProjectId]);
+  }, [previewPath, previewChangeSignature, visible, currentProjectId, isDeletedDiff]);
 
   // v19.2 (plan-917): 彻底隔离右侧文件面板与主会话流式输出。
   // 文件面板永远展示磁盘真实文件内容，绝不被 streamingBuffers 覆盖。
@@ -630,7 +634,8 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
                   <FileIcon name={fileName} size={16} />
                   <span className="ft-ph-name">{fileName}</span>
                 </span>
-                {hasDiff && (
+                {isDeletedDiff && <span className="ft-ph-deleted">已删除</span>}
+                {hasDiff && !isDeletedDiff && (
                   <Segmented
                     size="sm"
                     value={viewMode}
@@ -648,9 +653,11 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
                     options={[{ value: "preview", label: "预览" }, { value: "source", label: "源码" }]}
                   />
                 )}
-                <Tooltip content="在外部打开" side="bottom">
-                  <button type="button" className="ui-icon-btn" aria-label="在外部打开" onClick={() => openExternal(previewPath)}><IconExternalLink size={14} /></button>
-                </Tooltip>
+                {!isDeletedDiff && (
+                  <Tooltip content="在外部打开" side="bottom">
+                    <button type="button" className="ui-icon-btn" aria-label="在外部打开" onClick={() => openExternal(previewPath)}><IconExternalLink size={14} /></button>
+                  </Tooltip>
+                )}
                 {!narrow && (
                   <Tooltip content="关闭预览" side="bottom">
                     <button type="button" className="ui-icon-btn" aria-label="关闭预览" onClick={() => setPreviewPath(null)}><IconX size={14} /></button>

@@ -56,14 +56,16 @@ svg.ic-spinner .ic-spinner-arc { transform-box: view-box; transform-origin: 12px
 .cv { font-family: var(--font-mono); font-size: 12px; line-height: 1.65; }
 .cv-head {
   position: sticky; top: 0; z-index: 1;
-  display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px;
+  /* 窄栏自适应：头部恒为单行 30px，文件名 / 说明文字过长时省略号截断（完整文本走 Tooltip），
+     不换行、不撑高、不压到下方正文区 */
+  display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; overflow: hidden;
   background: color-mix(in oklab, var(--surface-inset) 92%, var(--text-1) 4%);
   border-bottom: 1px solid var(--surface-inset-border);
   font-family: var(--font-sans); font-size: 12px;
 }
-.cv-name { color: var(--text-1); font-weight: 600; }
-.cv-meta { color: var(--text-3); margin-left: auto; font-variant-numeric: tabular-nums; }
-.cv-head .tc-diff-stat { margin-left: auto; display: inline-flex; gap: 6px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.cv-name { color: var(--text-1); font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cv-meta { color: var(--text-3); margin-left: auto; font-variant-numeric: tabular-nums; flex-shrink: 0; white-space: nowrap; }
+.cv-head .tc-diff-stat { margin-left: auto; display: inline-flex; gap: 6px; color: var(--text-3); font-variant-numeric: tabular-nums; flex-shrink: 0; white-space: nowrap; }
 .cv-body { padding: 6px 0; min-width: max-content; }
 .cv-line, .tc-diff-line { display: flex; min-height: 1.65em; }
 .cv-ln {
@@ -79,7 +81,8 @@ svg.ic-spinner .ic-spinner-arc { transform-box: view-box; transform-origin: 12px
 .tc-diff-line.del { background: color-mix(in oklab, var(--error) 11%, transparent); }
 .tc-diff-line.del .cv-ln { color: var(--error); opacity: 1; }
 .tc-diff-line.del .cv-code { color: var(--text-2); }
-.tc-diff-note { color: var(--text-3); font-size: 11.5px; }
+/* 口径说明可能很长（二进制降级、撤销说明等）：占满头部剩余宽度，放不下就省略号，悬停看全文 */
+.tc-diff-note { color: var(--text-3); font-size: 11.5px; min-width: 0; flex: 1 1 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tc-diff-empty, .tc-diff-trunc { padding: 8px 12px; color: var(--text-3); font-family: var(--font-sans); font-size: 12px; }
 /* plan-124-498：滚动归属修正（承接 plan-282-1434）——代码卡片此前由整卡 .tc-output 滚动，
    滚动条从卡片顶边（sticky 头部右侧）贯穿到底，把头部右缘切开、露出系统滚动条箭头；
@@ -185,70 +188,53 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
      · 纯色底 + 1px 边框 + --r-lg，不用渐变 / 毛玻璃（浮层不透明原则）；
      · 不用左侧装饰性竖线表达层级，层次靠留白、字号字重、底色；
      · 按钮走 ui/Button，圆角与间距全部用令牌。 */
+/* 紧凑化：整张卡以消息流字号（--fs-md）为基准，内部尺寸全部用 em——对话字号调小，卡片同比变小；
+   宽度随内容收缩（上限 36em），不再通栏占满；无顶部图标栏，标题行前缀「下一步」即可说明用途。 */
 .sg-card {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  margin: 8px 0 10px;
-  padding: 12px 14px;
+  gap: 0.55em;
+  width: fit-content;
+  max-width: min(100%, 36em);
+  margin: 6px 0 8px;
+  padding: 0.75em 0.95em;
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
   background: var(--bg-panel);
-}
-.sg-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  /* plan-156-621：字号走令牌跟随外观设置，此前硬编码 11.5px 比消息流小一号 */
-  font-size: var(--fs-sm);
-  line-height: 1.7;
-  color: var(--text-3);
-}
-.sg-head-icon { display: inline-flex; flex-shrink: 0; color: var(--accent); }
-.sg-head-title { flex-shrink: 0; font-weight: 600; color: var(--text-2); letter-spacing: 0.02em; }
-.sg-head-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-.sg-body { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.sg-title {
   font-size: var(--fs-md, 13px);
-  font-weight: 600;
   line-height: 1.6;
-  color: var(--text-1);
 }
-.sg-summary {
-  font-size: var(--fs-sm);
-  line-height: 1.75;
-  color: var(--text-2);
-  overflow-wrap: anywhere;
-}
+.sg-body { display: flex; flex-direction: column; gap: 0.3em; min-width: 0; }
+.sg-title { font-weight: 600; color: var(--text-1); overflow-wrap: anywhere; }
+.sg-kicker { margin-right: 0.5em; font-weight: 500; color: var(--text-3); }
+.sg-summary { font-size: 0.92em; color: var(--text-2); overflow-wrap: anywhere; }
 
-.sg-steps { display: flex; flex-direction: column; gap: 4px; margin: 2px 0 0; padding: 0; list-style: none; }
-/* plan-20261019-motion-sweep：超出 3 步的部分放在 Collapse 里的第二个列表——与上一个列表的 4px 间距
-   写在容器内部（折叠时随内层一起被裁成 0 高度），不依赖 flex gap */
-.sg-steps.sg-steps-rest { margin: 0; padding-top: 4px; }
-.sg-steps li { display: flex; align-items: flex-start; gap: 7px; min-width: 0; font-size: var(--fs-sm); line-height: 1.75; color: var(--text-2); }
+.sg-steps { display: flex; flex-direction: column; gap: 0.15em; margin: 0.15em 0 0; padding: 0; list-style: none; }
+/* 超出可见步数的部分放在 Collapse 里的第二个列表——与上一个列表的间距写在容器内部
+   （折叠时随内层一起被裁成 0 高度），不依赖 flex gap */
+.sg-steps.sg-steps-rest { margin: 0; padding-top: 0.15em; }
+.sg-steps li { display: flex; align-items: flex-start; gap: 0.5em; min-width: 0; font-size: 0.92em; color: var(--text-2); }
 .sg-step-idx {
   flex-shrink: 0;
-  width: 16px; height: 16px;
-  margin-top: 3px;
+  width: 1.3em; height: 1.3em;
+  margin-top: 0.2em;
   display: inline-flex; align-items: center; justify-content: center;
   border-radius: 999px;
   background: var(--bg-hover);
   color: var(--text-3);
-  font-size: calc(var(--fs-sm) - 2px);
+  font-size: 0.78em;
   font-variant-numeric: tabular-nums;
 }
 .sg-step-text { min-width: 0; overflow-wrap: anywhere; }
 
 .sg-steps-more {
   align-self: flex-start;
-  display: inline-flex; align-items: center; gap: 4px;
-  margin-top: 1px; padding: 2px 6px;
+  display: inline-flex; align-items: center; gap: 0.3em;
+  padding: 0.1em 0.4em;
   border: none; border-radius: var(--r-sm);
   background: transparent;
   color: var(--text-3);
-  font-size: calc(var(--fs-sm) - 1px); line-height: 1.7;
+  font-size: 0.85em;
   cursor: pointer;
   transition: background var(--dur-fast), color var(--dur-fast);
 }
@@ -256,15 +242,11 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
 .sg-steps-caret { flex-shrink: 0; transition: transform var(--dur-3) var(--ease-emphasized-decel); }
 .sg-steps-caret.is-open { transform: rotate(180deg); }
 
-.sg-error {
-  font-size: var(--fs-sm);
-  line-height: 1.7;
-  color: var(--danger, #e5484d);
-  overflow-wrap: anywhere;
-}
+.sg-error { font-size: 0.92em; color: var(--danger, #e5484d); overflow-wrap: anywhere; }
+.sg-busy { font-size: 0.85em; color: var(--text-3); }
 
-/* 操作行：主操作在前，取消在后；两者之间 8px（项目规则：并列按钮必须有间距） */
-.sg-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* 操作行：主操作在前，取消在后；两者之间留间距（项目规则：并列按钮必须有间距） */
+.sg-actions { display: flex; align-items: center; gap: 0.5em; flex-wrap: wrap; }
 
 /* ══ 截图卡（plan-20261015-browser-agent）══════════════════════════════════
    浏览器 / 电脑操控截图在时间线上的常显预览：与工具行同一左边界、同一字号层级；

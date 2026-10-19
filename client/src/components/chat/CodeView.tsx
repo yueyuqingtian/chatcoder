@@ -2,6 +2,7 @@
  * 顶部文件头（文件类型图标 + 文件名 + 行数）、左侧行号槽、语法高亮、等宽字体。
  * 高亮复用已有依赖 highlight.js（按需注册常用语言，不引入全量包）；超长内容仍走 tailClamp 尾部截断。 */
 import { memo, useMemo } from "react";
+import { Tooltip } from "../ui/Tooltip";
 import hljs from "highlight.js/lib/core";
 import typescript from "highlight.js/lib/languages/typescript";
 import javascript from "highlight.js/lib/languages/javascript";
@@ -93,7 +94,7 @@ export const CodeView = memo(function CodeView({ path, text }: { path: string; t
     <div className="cv">
       <div className="cv-head">
         <FileIcon name={path} size={14} />
-        <span className="cv-name">{baseName(path)}</span>
+        <Tooltip content={path} side="top"><span className="cv-name">{baseName(path)}</span></Tooltip>
         <span className="cv-meta">{lines.length} 行{omitted > 0 ? ` · 已省略前 ${omitted.toLocaleString()} 字符` : ""}</span>
       </div>
       <div className="cv-body" style={{ ["--cv-gutter" as string]: `${gutterW + 2}ch` }}>

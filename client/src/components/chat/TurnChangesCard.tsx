@@ -25,7 +25,7 @@ import {
   IconCopy,
   IconRotateCcw,
 } from "../icons";
-import { Button, Collapse, Menu, Tooltip, type MenuEntry } from "../ui";
+import { Button, Collapse, Dialog, Menu, Tooltip, type MenuEntry } from "../ui";
 import { FileBadge, splitFilePath } from "./FileBadge";
 
 /** 模块级 in-flight 去重：同一轮可能在消息流与折叠区同时挂载，只允许发一次请求 */
@@ -110,6 +110,8 @@ export function TurnChangesCard({ turnId }: { turnId: number }) {
   const [showAll, setShowAll] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [reverting, setReverting] = useState(false);
+  /** 撤销被严格拒绝时的原因（文件在本轮之后被改动）；非空时撤销弹窗显示「已取消」视图 */
+  const [rejected, setRejected] = useState<{ message: string; conflicts: Array<{ path: string; reason: string }> } | null>(null);
   /** 刚复制的菜单项 key；2 秒后回退文案（不依赖全局 toast） */
   const [copied, setCopied] = useState<string | null>(null);
   /** 首次挂载时读一次：这张卡此前从未展示过才播放入场（见 enteredTurns） */
@@ -172,6 +174,7 @@ export function TurnChangesCard({ turnId }: { turnId: number }) {
       const d = await api.getFileDiff(turnId, path);
       openDiffPreview(d.path || path, {
         path: d.path, before: d.before, after: d.after, truncated: d.truncated,
+        deleted: d.action === "deleted",
       });
     } catch {
       // 取 diff 失败时仍打开文件本身，让用户至少能看到当前内容
@@ -241,12 +244,20 @@ export function TurnChangesCard({ turnId }: { turnId: number }) {
     return entries;
   }
 
+  function closeRevert() {
+    setConfirmOpen(false);
+    // 关闭动画结束前保留「已取消」视图，避免淡出过程中内容瞬间切回确认文案
+    window.setTimeout(() => setRejected(null), 300);
+  }
+
   async function confirmRevert() {
     setReverting(true);
     try {
-      const ok = await revertTurnFiles(turnId, false);
-      // 失败已由 store 写进消息流错误卡，这里只解除忙碌态、允许关闭弹窗
-      if (ok) setConfirmOpen(false);
+      const res = await revertTurnFiles(turnId, false);
+      // 严格拒绝：弹窗切到「已取消」视图，逐文件说明原因（未动任何文件）；
+      // 其余失败已由 store 写进消息流错误卡，这里只解除忙碌态、允许关闭弹窗
+      if (res.ok) setConfirmOpen(false);
+      else if (res.conflicts) setRejected({ message: res.message ?? "撤销已取消", conflicts: res.conflicts });
     } finally {
       // plan-20261018-turn-changes-fix：必须 finally——store 若在 setFlowError / 状态写入阶段
       // 抛出同步异常，reverting 会永久停在 true，按钮与弹窗一起钉死在「撤销中…」。
@@ -263,10 +274,14 @@ export function TurnChangesCard({ turnId }: { turnId: number }) {
     return (
       <div className={`tcc-row${deleted ? " is-deleted" : ""}`} key={c.path}>
         <FileBadge path={c.path} size={badgeSize} />
-        <span className="tcc-name">{name}</span>
-        {dir && <span className="tcc-dir">{dir}</span>}
+        {/* 文件名 / 目录被截断时，悬停显示完整相对路径（plan-20261019-toolcard-v2） */}
+        <Tooltip content={rel} side="top">
+          <span className="tcc-path">
+            <span className="tcc-name">{name}</span>
+            {dir && <span className="tcc-dir">{dir}</span>}
+          </span>
+        </Tooltip>
         {deleted && <span className="tcc-tag">已删除</span>}
-        <span className="tcc-spacer" />
         <span className="tcc-stat">
           <span className="tcc-add">+{c.additions}</span>
           {c.deletions > 0 && <span className="tcc-del">-{c.deletions}</span>}
@@ -275,21 +290,23 @@ export function TurnChangesCard({ turnId }: { turnId: number }) {
           <Button variant="outline" size="sm" onClick={() => void openDiff(c.path)}>
             审查
           </Button>
-          {/* 「打开 ⌄」是分体按钮：左侧直接打开，右侧角标选应用 */}
-          <span className="tcc-split">
-            <Button variant="outline" size="sm" onClick={() => void openWith("explorer", abs)}>
-              打开
-            </Button>
-            <Menu
-              align="end"
-              trigger={
-                <button type="button" className="tcc-split-caret" aria-label={`选择打开方式：${name}`}>
-                  <IconChevronDown size={iconSmall} />
-                </button>
-              }
-              entries={menuEntries(rel, abs)}
-            />
-          </span>
+          {/* 「打开 ⌄」是分体按钮：左侧直接打开，右侧角标选应用。已删除的文件无从打开，整组隐藏 */}
+          {!deleted && (
+            <span className="tcc-split">
+              <Button variant="outline" size="sm" onClick={() => void openWith("explorer", abs)}>
+                打开
+              </Button>
+              <Menu
+                align="end"
+                trigger={
+                  <button type="button" className="tcc-split-caret" aria-label={`选择打开方式：${name}`}>
+                    <IconChevronDown size={iconSmall} />
+                  </button>
+                }
+                entries={menuEntries(rel, abs)}
+              />
+            </span>
+          )}
         </div>
       </div>
     );
@@ -353,17 +370,37 @@ export function TurnChangesCard({ turnId }: { turnId: number }) {
         )}
       </Collapse>
 
-      <ConfirmDialog
-        open={confirmOpen}
-        danger
-        title="撤销本轮文件改动"
-        message={`将把本轮 ${files.length} 个文件恢复到本轮开始前的内容，消息记录不会删除，且不可恢复。`}
-        confirmLabel="撤销"
-        busyLabel="撤销中…"
-        busy={reverting}
-        onCancel={() => setConfirmOpen(false)}
-        onConfirm={() => void confirmRevert()}
-      />
+      {rejected ? (
+        <Dialog
+          open={confirmOpen}
+          onClose={closeRevert}
+          width={480}
+          title="撤销已取消"
+          footer={<Button variant="secondary" onClick={closeRevert}>知道了</Button>}
+        >
+          <div className="ui-dialog-message">{rejected.message}</div>
+          <ul className="tcc-reject-list">
+            {rejected.conflicts.map((c) => (
+              <li key={c.path} className="tcc-reject-item">
+                <span className="tcc-reject-path">{c.path}</span>
+                {c.reason && <span className="tcc-reject-reason">{c.reason}</span>}
+              </li>
+            ))}
+          </ul>
+        </Dialog>
+      ) : (
+        <ConfirmDialog
+          open={confirmOpen}
+          danger
+          title="撤销本轮文件改动"
+          message={`将把本轮 ${files.length} 个文件恢复到本轮开始前的内容，消息记录不会删除，且不可恢复。若文件在本轮之后又被改动，撤销会整体取消。`}
+          confirmLabel="撤销"
+          busyLabel="撤销中…"
+          busy={reverting}
+          onCancel={closeRevert}
+          onConfirm={() => void confirmRevert()}
+        />
+      )}
     </div>
   );
 }

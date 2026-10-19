@@ -6,8 +6,12 @@
  *  - 移除「动画效果」配置（固定标准动画，动效统一由 --dur-* / --motion-scale 控制）；
  *  - 移除「面板拖拽排版 / 拖拽自动降级」（按要求固定"实时、不降级"）；
  *  - 移除左/右面板宽度滑杆（改为主界面直接拖拽分隔条，使用合理默认值）。 */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useThemeStore, WORLDS, type Theme, type World } from "../../store/theme";
+import {
+  SECTION_LABEL, TOOL_CARD_SECTIONS, hydrateToolCardPrefs, saveToolCardForm, saveToolCardSection,
+  useToolCardStore, type ToolCardDefaultForm, type ToolCardSection,
+} from "../../store/toolCard";
 import { useUiStore, UI_FONT_OPTIONS } from "../../store/ui";
 import { Select, Slider } from "../ui";
 import { Dada } from "../mascot/Dada";
@@ -34,6 +38,15 @@ const WORLD_DOT: Record<World, string> = {
   sakura: "oklch(60% 0.07 0)",
 };
 
+const TOOL_CARD_FORMS: Record<ToolCardDefaultForm, string> = { capsule: "胶囊", expanded: "展开" };
+const TOOL_CARD_SECTION_DESC: Record<ToolCardSection, string> = {
+  git: "展开卡片时是否直接显示未提交行数、分支与提交入口",
+  plan: "展开卡片时是否直接显示当前计划的步骤",
+  process: "展开卡片时是否直接显示正在运行与待执行的进程",
+  subagent: "展开卡片时是否直接显示子代理列表",
+  workflow: "展开卡片时是否直接显示工作流进度",
+};
+
 /** S5：玻璃强度三档（0 轻柔 / 1 标准 / 2 深邃）——不透明度由 tokens.css 的
  *  --frost-left-alpha 声明式驱动（深邃透出最多、轻柔最实）。 */
 const GLASS_STRENGTHS: Array<{ value: number; label: string; desc: string }> = [
@@ -45,6 +58,10 @@ const GLASS_STRENGTHS: Array<{ value: number; label: string; desc: string }> = [
 export function AppearancePanel() {
   const { theme, setTheme, world, setWorld } = useThemeStore();
   const ui = useUiStore();
+  const toolCardForm = useToolCardStore((s) => s.defaultForm);
+  const toolCardSections = useToolCardStore((s) => s.sectionDefaults);
+  // 设置页可能先于工具卡挂载：补读一次后端全局默认（内部只读一次）
+  useEffect(() => { hydrateToolCardPrefs(); }, []);
   // 选中时让该卡片里的嗒嗒眨一下眼；key 递增保证重复点击也会触发
   const [wink, setWink] = useState(0);
 
@@ -141,6 +158,29 @@ export function AppearancePanel() {
             onChange={(v) => ui.setPrefs({ contentMaxWidth: v })}
             format={(v) => (v === 0 ? "不限" : `${v}px`)} aria-label="内容展示宽度" />
         </Row>
+      </div>
+
+      <div className="settings-card">
+        <div className="settings-card-title">会话工具卡</div>
+        <Row title="默认形态" desc="新打开的会话中，右上角工具卡先显示为胶囊还是直接展开（会话内手动切换仍会记住）">
+          <div style={{ display: "flex", gap: 6 }}>
+            {(Object.keys(TOOL_CARD_FORMS) as ToolCardDefaultForm[]).map((f) => (
+              <button
+                key={f}
+                type="button"
+                className={"settings-pill" + (toolCardForm === f ? " active" : "")}
+                onClick={() => saveToolCardForm(f)}
+              >
+                {TOOL_CARD_FORMS[f]}
+              </button>
+            ))}
+          </div>
+        </Row>
+        {TOOL_CARD_SECTIONS.map((key) => (
+          <Row key={key} title={`${SECTION_LABEL[key]}栏默认展开`} desc={TOOL_CARD_SECTION_DESC[key]}>
+            <Sw checked={toolCardSections[key]} onChange={(v) => saveToolCardSection(key, v)} />
+          </Row>
+        ))}
       </div>
 
       <div className="settings-card">

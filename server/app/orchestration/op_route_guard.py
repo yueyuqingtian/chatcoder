@@ -91,6 +91,10 @@ class OpRouteGuard:
             out.append(scope)
         return out
 
+    def has_pending_reminder(self) -> bool:
+        """是否还有未发出的沉淀提醒（只读判断，不消耗「每轮最多一次」的额度）。"""
+        return bool(self.enabled and not self.reminded and self._pending_scopes())
+
     def reminder(self) -> str | None:
         """turn 准备结束时调用：需要提醒沉淀时返回提醒文本（每轮最多一次），否则 None。"""
         if not self.enabled or self.reminded:

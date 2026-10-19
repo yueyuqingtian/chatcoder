@@ -93,8 +93,27 @@ export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
   const progressRows = progress.rows;
   const progressDone = progress.done;
 
-  /** 产物文件 = 轮次产出的 artifact 消息 ∪ 后端产物清单，按路径去重；只读展示 */
+  /** 产物文件：以后端按写盘记录折算的「本会话写过且现在仍存在」清单为准（与变更卡片同一口径，
+   *  被删除的文件、本轮新建又删除的临时文件都不算产物）；刷新时机跟随变更清单（写盘 / 轮次结束都会重拉）。
+   *  清单请求失败时才回退到 artifact 消息并集，且不展示已知被删除的文件。 */
+  const turnChanges = useChatStore((state) => state.turnChanges);
+  const [productPaths, setProductPaths] = useState<string[] | null>(null);
+  const productSessionId = session?.id ?? null;
+  useEffect(() => {
+    if (!visible || productSessionId == null) return;
+    let dead = false;
+    const timer = window.setTimeout(() => {
+      api.listSessionProducts(productSessionId)
+        .then((r) => { if (!dead) setProductPaths(r.files); })
+        .catch(() => { if (!dead) setProductPaths(null); });
+    }, 300);
+    return () => { dead = true; window.clearTimeout(timer); };
+  }, [visible, productSessionId, turnChanges, isRunning]);
+  useEffect(() => { setProductPaths(null); }, [productSessionId]);
   const productFiles = useMemo<string[]>(() => {
+    if (productPaths) return productPaths;
+    const deleted = new Set<string>();
+    for (const list of Object.values(turnChanges)) for (const c of list ?? []) if (c.action === "deleted") deleted.add(c.path);
     const set = new Set<string>();
     for (const message of messages) {
       const content = message.content as Record<string, unknown>;
@@ -102,8 +121,8 @@ export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
       for (const file of content.files.map(String)) set.add(file);
     }
     for (const artifact of artifacts) for (const file of artifact.files ?? []) set.add(file);
-    return [...set];
-  }, [messages, artifacts]);
+    return [...set].filter((f) => !deleted.has(f));
+  }, [productPaths, messages, artifacts, turnChanges]);
 
   const openFile = (path: string) => {
     setPreviewPath(path);

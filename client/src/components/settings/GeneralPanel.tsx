@@ -45,6 +45,8 @@ export function GeneralPanel() {
     show_message_search: false,
     // plan-156-621：优先用子会话并行处理的提示词注入（默认开启）
     parallel_subsession_hint: true,
+    // 下一步建议卡（默认关闭；开启后智能体 / 工作流模式才注入建议卡工具与提示词）
+    suggestion_enabled: false,
   });
   // S4（plan-41-197）：改为「修改即保存」——移除底部保存按钮，所有项在改动后
   // 300ms 内自动落盘（config.json），与外观/模型等页操作逻辑统一（用户反馈
@@ -124,6 +126,8 @@ export function GeneralPanel() {
         show_message_search: g.show_message_search === true,
         // plan-156-621：后端缺省视为开启
         parallel_subsession_hint: g.parallel_subsession_hint !== false,
+        // 下一步建议卡：后端缺省视为关闭
+        suggestion_enabled: g.suggestion_enabled === true,
       });
     } catch {}
   }, []);
@@ -174,6 +178,9 @@ export function GeneralPanel() {
             确认执行时按分组派发（只读 / 工作流模式仍不生效）。 */}
         <Row title={t("gp.parallel_subsession")} desc={t("gp.parallel_subsession_desc")}>
           <Sw checked={cfg.parallel_subsession_hint} onChange={(v) => patch({ parallel_subsession_hint: v })} />
+        </Row>
+        <Row title={t("gp.suggestion")} desc={t("gp.suggestion_desc")}>
+          <Sw checked={cfg.suggestion_enabled} onChange={(v) => patch({ suggestion_enabled: v })} />
         </Row>
         <Row title={t("gp.memory")} desc={t("gp.memory_desc")}>
           <Sw checked={cfg.memory_enabled} onChange={(v) => patch({ memory_enabled: v })} />

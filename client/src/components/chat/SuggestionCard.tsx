@@ -12,11 +12,11 @@
  */
 import { memo, useState } from "react";
 import { useChatStore } from "../../store/chat";
-import { IconSparkles, IconChevronDown, IconCheck, IconCpu } from "../icons";
+import { IconChevronDown, IconCheck, IconCpu } from "../icons";
 import { Button, Collapse } from "../ui";
-import { api } from "../../api/client";
+import { api, ApiError } from "../../api/client";
 
-const MAX_VISIBLE_STEPS = 3;
+const MAX_VISIBLE_STEPS = 2;
 
 export const SuggestionCard = memo(function SuggestionCard() {
   const suggestion = useChatStore((s) => s.pendingSuggestion);
@@ -49,8 +49,8 @@ export const SuggestionCard = memo(function SuggestionCard() {
     setError(null);
     try {
       const res = await api.acceptSuggestion(suggestion.id);
-      // 先清卡片：后端已置 accepted，本地保留会与「已消费」状态不一致
-      useChatStore.setState({ pendingSuggestion: null });
+      // 先清卡片：后端已置 accepted，本地保留会与「已消费」状态不一致（只清自己这张）
+      if (useChatStore.getState().pendingSuggestion?.id === suggestion.id) useChatStore.setState({ pendingSuggestion: null });
       if (res?.subsession_id != null) {
         // plan-156-620：后端返回的 session_id 是根主会话；子会话桶整体重建，
         // 无论建议来自主会话还是子会话，新子会话都出现在左栏同一父会话下方
@@ -58,6 +58,12 @@ export const SuggestionCard = memo(function SuggestionCard() {
         await switchSession(res.subsession_id);
       }
     } catch (e) {
+      // 后端已是终态（已处理过）：卡片是过期残留，直接清掉
+      if (e instanceof ApiError && /已处理过|不存在/.test(e.message)) {
+        // 只清自己这张：期间若已到达新建议，不能一并抹掉
+        if (useChatStore.getState().pendingSuggestion?.id === suggestion.id) useChatStore.setState({ pendingSuggestion: null });
+        return;
+      }
       // 失败保留卡片可重试——后端 accept 是「先建会话、成功后才置状态」，
       // 因此这里失败意味着建议仍是 pending，重试安全。
       setError("创建子会话失败：" + String(e));
@@ -68,14 +74,11 @@ export const SuggestionCard = memo(function SuggestionCard() {
 
   return (
     <div className="sg-card" role="region" aria-label="后续任务建议">
-      <div className="sg-head">
-        <span className="sg-head-icon"><IconSparkles size={13} /></span>
-        <span className="sg-head-title">下一步建议</span>
-        {busy && <span className="sg-head-hint">正在创建子会话…</span>}
-      </div>
-
       <div className="sg-body">
-        <div className="sg-title">{suggestion.title}</div>
+        <div className="sg-title">
+          <span className="sg-kicker">下一步</span>
+          {suggestion.title}
+        </div>
         {suggestion.summary && <div className="sg-summary">{suggestion.summary}</div>}
 
         {steps.length > 0 && (
@@ -128,6 +131,7 @@ export const SuggestionCard = memo(function SuggestionCard() {
           <IconCheck size={12} />
           <span>取消</span>
         </Button>
+        {busy && <span className="sg-busy">正在创建子会话…</span>}
       </div>
     </div>
   );

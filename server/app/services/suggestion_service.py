@@ -187,6 +187,34 @@ async def dismiss(db: AsyncSession, suggestion_id: int) -> None:
         raise SuggestionError("该建议已处理过")
 
 
+async def dismiss_pending_for_session(session_id: int) -> int:
+    """用户发了新消息而没处理建议卡：把该会话所有 pending 建议默认置 dismissed，此后不再展示。
+
+    只动 pending 与超时残留的 accepting——未超时的 accepting（正在建子会话）不能被抹掉，否则用户失去取消入口。
+    返回被取消的条数。
+    """
+    from app.persistence.database import run_write_locked
+    from app.persistence.models.suggestion import TaskSuggestion
+
+    def _do(s) -> int:
+        rows = s.execute(
+            select(TaskSuggestion).where(
+                TaskSuggestion.session_id == session_id,
+                TaskSuggestion.status.in_((STATUS_PENDING, STATUS_ACCEPTING)),
+            )
+        ).scalars().all()
+        # 超时残留的 accepting 会被 latest_pending 重新展示，同样要清；未超时的是正在建子会话，保留
+        rows = [r for r in rows if r.status == STATUS_PENDING or _is_stale_accepting(r)]
+        for row in rows:
+            row.status = STATUS_DISMISSED
+            row.decided_at = _now()
+        if rows:
+            s.commit()
+        return len(rows)
+
+    return int(await run_write_locked(_do, label="suggestion.dismiss_pending"))
+
+
 async def accept(db: AsyncSession, suggestion_id: int) -> dict:
     """接受建议 → 建一个子会话执行建议内容。
 

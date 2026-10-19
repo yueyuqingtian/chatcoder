@@ -67,7 +67,8 @@ class ToolRegistry:
     def all(self) -> list[Tool]:
         return list(self._tools.values())
 
-    def for_agent(self, whitelist: list[str] | None, include_scoped: bool = False) -> list[Tool]:
+    def for_agent(self, whitelist: list[str] | None, include_scoped: bool = False,
+                  include_suggestion: bool = False) -> list[Tool]:
         """返回 agent 白名单内的工具。
 
         v2.4: 白名单为空或 None 时返回全量(之前保守返回空导致 agent 无工具可用)。
@@ -81,14 +82,18 @@ class ToolRegistry:
         pool = [
             t for t in self._tools.values()
             if (include_scoped or not getattr(t, "session_scoped", False)) and not _gated_off(t)
+            # 建议卡工具默认不下发：只有引擎确认「开关开启 + 主会话 + 智能体 / 工作流模式」才显式放行，
+            # 子代理 / 工作流节点 / 审阅等其它取工具的入口天然拿不到
+            and (include_suggestion or t.name != "suggest_next_task")
         ]
         if not whitelist:
             return pool
         return [t for t in pool if t.name in whitelist]
 
-    def all_schemas(self, whitelist: list[str] | None = None, include_scoped: bool = False) -> list[dict]:
+    def all_schemas(self, whitelist: list[str] | None = None, include_scoped: bool = False,
+                    include_suggestion: bool = False) -> list[dict]:
         """返回 OpenAI function-calling 的 tools 列表。"""
-        tools = self.for_agent(whitelist, include_scoped=include_scoped)
+        tools = self.for_agent(whitelist, include_scoped=include_scoped, include_suggestion=include_suggestion)
         return [t.function_schema() for t in tools]
 
 
