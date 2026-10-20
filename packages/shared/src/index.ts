@@ -636,6 +636,10 @@ export interface ProviderCredentialOut {
   /** workbuddy 等账号积分余额缓存 */
   credits: number | null;
   extra: Record<string, unknown> | null;
+  /** plan-20261020-retry-cred-perf：当前会被优先取用的凭据（「当前使用」徽标） */
+  preferred?: boolean;
+  /** 处于失败暂缓窗口内（「暂缓使用」，窗口到期自动恢复） */
+  demoted?: boolean;
 }
 
 export interface ScannedModel {

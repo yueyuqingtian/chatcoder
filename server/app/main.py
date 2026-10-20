@@ -221,6 +221,15 @@ async def lifespan(app: FastAPI):
         await write_behind.shutdown()
     except Exception:
         logging.getLogger(__name__).debug("shutdown drain write-behind failed", exc_info=True)
+    # plan-20261020-bgtask：服务关停时终止全部后台命令，避免 dev server 等成为占着端口的孤儿
+    try:
+        from app.orchestration.tools.bg_process import bg_process_registry
+
+        await bg_process_registry.kill_all()
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).debug("shutdown kill bg processes failed", exc_info=True)
     # plan-334-1661: 停止桌面操控内核子进程。
     # 必须显式关停：内核是长驻子进程，若只让父进程退出，在部分场景下它会残留
     # （Windows 无进程组级联退出），既占着命名管道也让下次启动连到旧实例。
@@ -319,6 +328,8 @@ def create_app() -> FastAPI:
     app.include_router(settings_routes.router, prefix="/api", tags=["settings"])
     app.include_router(usage.router, prefix="/api", tags=["usage"])
     app.include_router(subagents.router, prefix="/api", tags=["subagents"])
+    # plan-474-2105：运行时并发上限只读接口（/api/runtime/limits）
+    app.include_router(subagents.limits_router, prefix="/api", tags=["runtime"])
     app.include_router(workflows.router, prefix="/api", tags=["workflows"])
     app.include_router(workflows.session_router, prefix="/api", tags=["workflows"])
     app.include_router(ta3_auth.router, prefix="/api", tags=["ta3"])

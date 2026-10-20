@@ -15,17 +15,20 @@
  *  · 行首图标统一放在 `.tcard-ic` 固定槽位（16px），状态切换（转圈 → 勾）不改变文字起点。
  */
 import { createContext, memo, useContext, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
-import { IconChevronLeft, IconCpu, IconListChecks } from "../../icons";
+import { IconChevronLeft, IconCpu, IconListChecks, IconStop, IconTerminal } from "../../icons";
 import { IxWorkflow } from "../../iconkit/StackIcons";
-import { HoverCard, Tooltip } from "../../ui";
+import { HoverCard, IconButton, Tooltip } from "../../ui";
 import { useChatStore } from "../../../store/chat";
 import { usePanelStore } from "../../../store/panel";
 import { useWorkflowStore } from "../../../store/workflow";
+import { bgTaskElapsedSec, useBgTaskStore, type BgTask } from "../../../store/bgTasks";
+import { bgCommandLine, formatBgElapsed } from "../../../utils/bgFormat";
 import type { ProgressRow } from "../taskProgress";
+import { subscribeTick } from "../useRunningTicker";
 import { foldLabel, type FoldKind } from "./processFold";
 import {
   openPlanDoc, revealPanelTab,
-  type PlanSectionData, type ProcessSectionData, type SubagentSectionData,
+  type BgTaskSectionData, type PlanSectionData, type ProcessSectionData, type SubagentSectionData,
   type WorkflowItem, type WorkflowSectionData,
 } from "./useToolCardData";
 
@@ -142,11 +145,15 @@ const OwnerChip = memo(function OwnerChip({ id }: { id: number }) {
   );
 });
 
-/** 折叠行：一行「‹ 已完成 4 项」，悬停 / 点击弹出被折叠条目的全文列表。 */
-const FoldRow = memo(function FoldRow({ label, children, className = "" }: {
+/** 折叠行：一行「‹ 已完成 4 项」，悬停 / 点击弹出被折叠条目的全文列表。
+ *  hint 只出现在浮窗头部（plan-486-2114）：折叠只折首尾连续段，区间提示让用户确认折的是哪几步；
+ *  主行文案不带区间，避免把单行折叠行撑宽、挤掉步骤标题。
+ */
+const FoldRow = memo(function FoldRow({ label, children, className = "", hint }: {
   label: string;
   children: ReactNode;
   className?: string;
+  hint?: string;
 }) {
   const edgeRef = useContext(ToolCardEdgeContext);
   return (
@@ -163,7 +170,7 @@ const FoldRow = memo(function FoldRow({ label, children, className = "" }: {
       )}
     >
       <div className="tcard-fold-pop">
-        <div className="tcard-fold-head">{label}</div>
+        <div className="tcard-fold-head">{label}{hint ? ` · ${hint}` : ""}</div>
         <div className="tcard-fold-list">{children}</div>
       </div>
     </HoverCard>
@@ -221,7 +228,11 @@ export const ProcessSection = memo(function ProcessSection({ data }: { data: Pro
         }
         // 折叠行的 key 按「种类」固定：被折叠的项变了，行不会重挂载（悬停中的浮窗不会闪）
         return (
-          <FoldRow key={`fold-${entry.fold}`} label={foldLabel(entry.fold as FoldKind, entry.rows.length)}>
+          <FoldRow
+            key={`fold-${entry.fold}`}
+            label={foldLabel(entry.fold as FoldKind, entry.rows.length)}
+            hint={`第 ${entry.range[0] + 1}–${entry.range[1] + 1} 步`}
+          >
             {entry.rows.map((row) => (
               <FoldItem
                 key={row.key}
@@ -265,6 +276,59 @@ export const SubagentSection = memo(function SubagentSection({ data }: { data: S
           ))}
         </FoldRow>
       )}
+    </>
+  );
+});
+
+/** 已运行时间：文本直接写进 DOM，随共享秒级节拍更新——不触发 React 重渲染，也不为每行各开一个定时器。 */
+const BgElapsed = memo(function BgElapsed({ task }: { task: BgTask }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  useLayoutEffect(() => {
+    const paint = (now: number) => {
+      if (ref.current) ref.current.textContent = formatBgElapsed(bgTaskElapsedSec(task, now));
+    };
+    paint(Date.now());
+    return subscribeTick(paint);
+  }, [task]);
+  return <span ref={ref} className="tcard-row-hint tcard-bg-elapsed" />;
+});
+
+/** 一个运行中的后台命令：行首终端图标 → 命令（首行，省略展示，悬停给全文）→ 运行时间 → 停止。 */
+const BgTaskRow = memo(function BgTaskRow({ sessionId, task }: { sessionId: number; task: BgTask }) {
+  const stop = useBgTaskStore((s) => s.stop);
+  const line = bgCommandLine(task.command) || task.shellId;
+  const full = task.command.trim();
+  // 多行 / 很长的命令：固定给全文提示；单行放得下时由 Row 自己判断是否被省略
+  const tip = full !== line ? full.slice(0, 800) : undefined;
+  return (
+    <Row
+      className="tcard-bg"
+      icon={<IconTerminal size={16} />}
+      text={line}
+      tip={tip}
+      trailing={(
+        <>
+          <BgElapsed task={task} />
+          <IconButton
+            className="tcard-bg-stop"
+            size="xs"
+            tone="danger"
+            icon={<IconStop size={16} />}
+            title={task.stopping ? "正在停止…" : "停止，并通知会话"}
+            aria-label="停止这个后台命令"
+            disabled={task.stopping}
+            onClick={() => { void stop(sessionId, task.shellId); }}
+          />
+        </>
+      )}
+    />
+  );
+});
+
+export const BgTaskSection = memo(function BgTaskSection({ data }: { data: BgTaskSectionData }) {
+  return (
+    <>
+      {data.tasks.map((t) => <BgTaskRow key={t.shellId} sessionId={data.sessionId} task={t} />)}
     </>
   );
 });

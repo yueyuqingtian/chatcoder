@@ -704,12 +704,47 @@ def _unquote_token(raw: str) -> str:
     return raw
 
 
+def _mask_quoted(command: str) -> str:
+    """把引号内的内容换成空格（位置不变）：引号里的 > / >> 是正则、泛型或比较，不是重定向。"""
+    chars = list(command)
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        if c in ("'", '"'):
+            j = i + 1
+            while j < n and command[j] != c:
+                j += 2 if (c == '"' and command[j] in ("\\", "`")) else 1
+            for k in range(i + 1, min(j, n)):
+                chars[k] = " "
+            i = j + 1
+            continue
+        i += 1
+    return "".join(chars)
+
+
+_NULL_TARGETS = frozenset({"nul", "con", "/dev/null", "$null"})
+_REDIRECT_PATH_RE = _re.compile(r'\s*(?P<p>' + _PATH_TOKEN + r')')
+
+
+def _static_path(p: str) -> bool:
+    """能静态确定的路径：含 $变量（$env:TEMP\\x、$PWD/…）的路径执行前无法展开，不当作工作区相对路径。"""
+    return bool(p) and "$" not in p
+
+
 def _redirect_targets(command: str) -> list[str]:
-    """重定向写盘：> file / >> file / 1> file / 2> file（排除 >&1 等 fd 引用与空设备）。"""
+    """重定向写盘：> file / >> file / 1> file / 2> file（排除 >&1 等 fd 引用与空设备）。
+
+    plan-20261020-pts：只认引号外的 >（-Pattern "List<A>> x" 里的 >> 不是重定向），
+    $null 视为空设备——此前这两类在工作流节点里被判成「写入范围之外的文件」，命令整条被拦。
+    """
     out: list[str] = []
-    for m in _re.finditer(r'(?<![<>=-])>+[\s]*(?P<p>' + _PATH_TOKEN + r')', command, _re.I):
-        p = _unquote_token(m.group("p"))
-        if p and p.lower() not in ("nul", "con", "/dev/null"):
+    masked = _mask_quoted(command)
+    for m in _re.finditer(r'(?<![<>=-])>+', masked):
+        mm = _REDIRECT_PATH_RE.match(command, m.end())
+        if not mm:
+            continue
+        p = _unquote_token(mm.group("p"))
+        if p and p.lower() not in _NULL_TARGETS and _static_path(p):
             out.append(p)
     return out
 
@@ -789,7 +824,8 @@ def extract_shell_write_paths(command: str) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
     for p in raw:
-        if p and p not in seen:
+        # plan-20261020-pts：含 $变量 的路径执行前无法展开，按工作区相对路径解析只会得出错误目标
+        if p and p not in seen and _static_path(p):
             seen.add(p)
             out.append(p)
     return out
@@ -1084,6 +1120,21 @@ _DIGEST_MAX_BYTES = 64 * 1024 * 1024
 _CKPT_MAX_BYTES = 128 * 1024 * 1024
 
 
+def write_path_key(path: str) -> str:
+    """写盘路径的规范形式：统一分隔符、去掉 `./` 前缀与重复斜杠。
+
+    plan-20261020-path-dedupe：模型写同一个文件时，路径参数有时用 `clinic\\docs\\a.md`、
+    有时用 `clinic/docs/a.md`——记录里成了两个字符串，按 path 分组就会把同一文件
+    展示成两行（变更卡片与右侧「产物」各出现一次）。这里只做写法归一，
+    不解析 `..`、不改大小写（Linux 工作区里 `A.md` 与 `a.md` 可能是两个文件）。
+    """
+    s = (path or "").replace("\\", "/").strip()
+    while s.startswith("./"):
+        s = s[2:]
+    s = _re.sub(r"/{2,}", "/", s)
+    return s.rstrip("/")
+
+
 def path_exists(workspace: str, rel: str) -> bool:
     """工作区内该路径是否是一个存在的文件（目录不算）。"""
     try:
@@ -1175,8 +1226,9 @@ async def record_turn_write(db: AsyncSession, *, session_id: int, turn_id: int,
 
         def _persist(s):
             from app.persistence.models.rollback import RollbackWrite
+            # 写库前统一路径写法，后续再按 path 分组时不会再出现同一文件两行
             s.add(RollbackWrite(session_id=session_id, turn_id=turn_id, tool=tool,
-                                path=path, old_content=before, new_content=after,
+                                path=write_path_key(path), old_content=before, new_content=after,
                                 binary=binary, call_key=call_key,
                                 diff_before=diff_before, diff_after=diff_after,
                                 op=op, after_hash=after_hash))
@@ -1214,7 +1266,9 @@ async def reconcile_turn_writes(db: AsyncSession, *, session_id: int, turn_id: i
         )
         by_path: dict[str, list[RollbackWrite]] = {}
         for w in res.scalars().all():
-            by_path.setdefault(w.path, []).append(w)
+            # 归一后再分组：历史记录里同一文件可能同时存在正 / 反斜杠两种写法，
+            # 分两组会对账两次并补记出重复条目（plan-20261020-path-dedupe）
+            by_path.setdefault(write_path_key(w.path), []).append(w)
         added = 0
         for path, recs in by_path.items():
             if not _is_safe_rel_path(path):
@@ -1493,11 +1547,12 @@ def file_mtime_after(path: Path, since: float | None) -> bool:
 
 
 async def has_turn_write(db: AsyncSession, turn_id: int, path: str) -> bool:
-    """本轮是否已有该路径的写盘记录。"""
+    """本轮是否已有该路径的写盘记录（正 / 反斜杠写法视为同一文件）。"""
     res = await db.execute(
-        select(RollbackWrite.id).where(RollbackWrite.turn_id == turn_id, RollbackWrite.path == path).limit(1)
+        select(RollbackWrite.path).where(RollbackWrite.turn_id == turn_id)
     )
-    return res.first() is not None
+    target = write_path_key(path)
+    return any(write_path_key(row[0]) == target for row in res.all())
 
 
 async def unrecorded_birth_paths(db: AsyncSession, turn_id: int,
@@ -1548,7 +1603,9 @@ async def list_turn_changes(db: AsyncSession, *, session_id: int, turn_id: int,
 
     by_path: dict[str, list[RollbackWrite]] = {}
     for w in writes:
-        by_path.setdefault(w.path, []).append(w)
+        # plan-20261020-path-dedupe：按归一后的路径分组，同一文件的正 / 反斜杠记录
+        # 合并成一条（此前会展示成「2 个文件已更改」却没说是同一个文件）
+        by_path.setdefault(write_path_key(w.path), []).append(w)
 
     reviewed = await reviewed_paths(db, turn_id)
     changes: list[dict] = []
@@ -1641,11 +1698,13 @@ async def session_product_paths(db: AsyncSession, session_id: int, workspace: st
     last_of: dict[str, RollbackWrite] = {}
     order: list[str] = []
     for w in res.scalars().all():
-        if w.path not in last_of:
-            order.append(w.path)
-        last_of[w.path] = w
+        # plan-20261020-path-dedupe：产物也按归一路径去重，否则同一文件会列出两行
+        key = write_path_key(w.path)
+        if key not in last_of:
+            order.append(key)
+        last_of[key] = w
         if w.turn_id is not None:
-            by_turn_path.setdefault(int(w.turn_id), {}).setdefault(w.path, []).append(w)
+            by_turn_path.setdefault(int(w.turn_id), {}).setdefault(key, []).append(w)
     bogus: set[str] = set()
     for tid, grouped in by_turn_path.items():
         bogus |= await unrecorded_birth_paths(db, tid, grouped)
@@ -1688,7 +1747,7 @@ async def visible_change_turns(db: AsyncSession, session_id: int) -> list[int]:
             old_content="x" if row.has_old else None, new_content="x" if row.has_new else None,
             diff_before="x" if row.has_dbefore else None, diff_after="x" if row.has_dafter else None,
         )
-        by_turn.setdefault(int(row.turn_id), {}).setdefault(row.path, []).append(light)
+        by_turn.setdefault(int(row.turn_id), {}).setdefault(write_path_key(row.path), []).append(light)
     visible: list[int] = []
     for tid in sorted(by_turn):
         for recs in by_turn[tid].values():
@@ -1876,9 +1935,14 @@ def _single_write_diff(workspace: str, path: str, recs: list[RollbackWrite]) -> 
 
 
 async def reviewed_paths(db: AsyncSession, turn_id: int) -> dict[str, bool]:
-    """查询该 turn 的全部审核记录（path -> reviewed）。"""
+    """查询该 turn 的全部审核记录（归一 path -> reviewed）。"""
     res = await db.execute(select(FileReview).where(FileReview.turn_id == turn_id))
-    return {r.path: bool(r.reviewed) for r in res.scalars().all()}
+    out: dict[str, bool] = {}
+    for r in res.scalars().all():
+        # 历史记录可能用反斜杠；同一文件的审核状态合并成一条，任一已审即视为已审
+        key = write_path_key(r.path)
+        out[key] = out.get(key, False) or bool(r.reviewed)
+    return out
 
 
 async def upsert_file_reviews(db: AsyncSession, *, turn_id: int,
@@ -1890,9 +1954,10 @@ async def upsert_file_reviews(db: AsyncSession, *, turn_id: int,
     请求会在"查不到→INSERT"窗口内双双判不存在，触发 uq_file_review_turn_path
     唯一约束冲突（server.log 2026-08-31 turn=631/632 实例）。
     """
-    # 保序去重：批内重复路径会在同一条多行 INSERT 内自撞唯一键
+    # 保序去重：批内重复路径会在同一条多行 INSERT 内自撞唯一键；
+    # 同时统一路径写法，保证审核状态与变更清单（已归一）使用同一个键
     unique_paths = list(dict.fromkeys(
-        p for p in (paths or []) if isinstance(p, str) and p.strip()
+        write_path_key(p) for p in (paths or []) if isinstance(p, str) and p.strip()
     ))
     if not unique_paths:
         return 0
@@ -1900,6 +1965,18 @@ async def upsert_file_reviews(db: AsyncSession, *, turn_id: int,
     from app.persistence.database import run_write_locked
 
     def _persist(s):
+        from sqlalchemy import update as _update
+        # 历史记录可能用了另一种斜杠写法：归一后属于同一文件的旧行一起更新，
+        # 否则「取消审核」只改新写法行，归一读取时仍被旧行的 True 掩盖（plan-20261020-path-dedupe）
+        keys = set(unique_paths)
+        legacy_changed = 0
+        existing = s.execute(select(FileReview).where(FileReview.turn_id == turn_id)).scalars().all()
+        for r in existing:
+            if r.path in keys or write_path_key(r.path) not in keys:
+                continue
+            if bool(r.reviewed) != reviewed:
+                s.execute(_update(FileReview).where(FileReview.id == r.id).values(reviewed=reviewed))
+                legacy_changed += 1
         stmt = sqlite_insert(FileReview).values(
             [{"turn_id": turn_id, "path": p, "reviewed": reviewed} for p in unique_paths]
         )
@@ -1911,7 +1988,7 @@ async def upsert_file_reviews(db: AsyncSession, *, turn_id: int,
         ).returning(FileReview.id)
         rows = s.execute(stmt).all()  # 先消费结果再 commit（SQLite 不允许有未读结果时提交）
         s.commit()
-        return len(rows)
+        return len(rows) + legacy_changed
 
     return await run_write_locked(_persist, label="review.upsert")
 
@@ -2399,9 +2476,9 @@ def build_plan(workspace: str, writes: list[RollbackWrite],
     plan = RollbackPlan(workspace=workspace)
     by_path: dict[str, list[RollbackWrite]] = {}
     for rec in reversed(writes):  # 路径按「最近写入」倒序出现，与此前的步骤顺序一致
-        by_path.setdefault(rec.path, [])
+        by_path.setdefault(write_path_key(rec.path), [])
     for rec in writes:
-        by_path[rec.path].append(rec)
+        by_path[write_path_key(rec.path)].append(rec)
     for rel, recs in by_path.items():
         if not _is_safe_rel_path(rel):
             plan.steps.append(_Step(rel, recs[-1].turn_id, "noop", True, "路径不在工作区内，已跳过"))
@@ -2550,13 +2627,13 @@ async def _plan_for_turn(db: AsyncSession, session_id: int, turn_id: int, worksp
     # 各轮「新建（未登记）又被删除」的文件本来就不存在于该轮之前：不参与还原
     by_turn: dict[int, dict[str, list[RollbackWrite]]] = {}
     for w in writes:
-        by_turn.setdefault(int(w.turn_id), {}).setdefault(w.path, []).append(w)
+        by_turn.setdefault(int(w.turn_id), {}).setdefault(write_path_key(w.path), []).append(w)
     drop: set[tuple[int, str]] = set()
     for tid, grouped in by_turn.items():
         for p in await unrecorded_birth_paths(db, tid, grouped):
             drop.add((tid, p))
     if drop:
-        writes = [w for w in writes if (int(w.turn_id), w.path) not in drop]
+        writes = [w for w in writes if (int(w.turn_id), write_path_key(w.path)) not in drop]
     return build_plan(workspace, writes, lambda rec: _checkpoint_for_path(snaps.get(rec.turn_id), rec.path))
 
 
@@ -2582,8 +2659,9 @@ def _checkpoint_for_path(snap: TurnSnapshot | None, rel: str) -> str | None:
     """从快照 file_list 反查该 path 的 checkpoint 路径（v26 {ckpt, path} 条目）。"""
     if snap is None:
         return None
+    target = write_path_key(rel)
     for item in snap.file_list or []:
-        if isinstance(item, dict) and item.get("path") == rel:
+        if isinstance(item, dict) and write_path_key(str(item.get("path") or "")) == target:
             return item.get("ckpt") or None
     return None
 
@@ -2645,10 +2723,10 @@ async def revert_turn_files(db: AsyncSession, *, turn_id: int, allow_partial: bo
     # 本轮新建（未登记）又被删除的文件：本轮开始前并不存在，撤销时不能从删除前备份还原
     _by_path: dict[str, list[RollbackWrite]] = {}
     for w in writes:
-        _by_path.setdefault(w.path, []).append(w)
+        _by_path.setdefault(write_path_key(w.path), []).append(w)
     _bogus = await unrecorded_birth_paths(db, turn_id, _by_path)
     if _bogus:
-        writes_for_plan = [w for w in writes if w.path not in _bogus]
+        writes_for_plan = [w for w in writes if write_path_key(w.path) not in _bogus]
     else:
         writes_for_plan = writes
 
@@ -2707,7 +2785,7 @@ async def revert_turn_files(db: AsyncSession, *, turn_id: int, allow_partial: bo
         "deleted": applied.get("deleted", 0),
         "skipped": len(conflicts),
         "conflicts": conflicts,
-        "files": list(dict.fromkeys(w.path for w in writes)),
+        "files": list(dict.fromkeys(write_path_key(w.path) for w in writes)),
     }
 
 

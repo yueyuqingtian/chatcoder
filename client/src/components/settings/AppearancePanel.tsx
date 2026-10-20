@@ -45,6 +45,7 @@ const TOOL_CARD_SECTION_DESC: Record<ToolCardSection, string> = {
   process: "展开卡片时是否直接显示正在运行与待执行的进程",
   subagent: "展开卡片时是否直接显示子代理列表",
   workflow: "展开卡片时是否直接显示工作流进度",
+  bgtask: "展开卡片时是否直接显示运行中的后台命令（含运行时间与停止按钮）",
 };
 
 /** S5：玻璃强度三档（0 轻柔 / 1 标准 / 2 深邃）——不透明度由 tokens.css 的

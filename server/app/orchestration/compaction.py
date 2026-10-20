@@ -374,6 +374,7 @@ def normalize_tool_sequence(messages: list[ChatMessage]) -> list[ChatMessage]:
 
 def build_api_copy(
     messages: list[ChatMessage],
+    workspace_root: str | None = None,
 ) -> list[ChatMessage]:
     """v6.0 + v16: 基于原始历史构造发给模型的 API 副本。
 
@@ -400,7 +401,7 @@ def build_api_copy(
     # v2.2 (对齐 zcode 3.10 micro-compact): 单条超长 tool result 就地折叠——
     # 原文落盘 .compact-cache，占位符提示可用 fs_read 恢复（防模型失忆重复读取）。
     before_micro = sum(len(m.content or "") for m in api if m.role == "tool")
-    api, micro_folded = _micro_compact(api)
+    api, micro_folded = _micro_compact(api, workspace_root)
     after_micro = sum(len(m.content or "") for m in api if m.role == "tool")
 
     # plan-282-1441：记录"本轮上下文被回收了多少"（超长结果落盘，占比折叠已移除）。
@@ -432,12 +433,16 @@ def take_last_reclaim() -> dict | None:
     return stats
 
 
-def _micro_compact(api: list[ChatMessage]) -> tuple[list[ChatMessage], int]:
+def _micro_compact(api: list[ChatMessage], workspace_root: str | None = None) -> tuple[list[ChatMessage], int]:
     """v2.2 (对齐 zcode 3.10): 单个超大工具结果 → 占位符 + 落盘引用。
 
     与 buildClearedToolResultContent 对齐：sha256 前 8 位标识，原文写
     {workspace}/.compact-cache/{hash8}.txt，占位文本附恢复路径提示。
     返回 (处理后的列表, 折叠条数)；条数供前端"上下文回收"提示展示（v16）。
+
+    plan-20261020-pts：落盘位置改为**本会话的工作区**（调用方传入）。此前固定写全局默认工作区，
+    占位提示却让模型「用 fs_read 读 .compact-cache/xxx.txt」——fs_read 按会话工作区解析相对路径，
+    会话绑定了项目时一律「文件不存在」（真实库里这类失败约 30 次）。
     """
     from app.core.config import settings
 
@@ -452,7 +457,7 @@ def _micro_compact(api: list[ChatMessage]) -> tuple[list[ChatMessage], int]:
             from app.core.config import resolve_workspace_root
 
             digest = hashlib.sha256(m.content.encode("utf-8", errors="replace")).hexdigest()[:8]
-            cache_dir = Path(resolve_workspace_root()) / ".compact-cache"
+            cache_dir = Path(resolve_workspace_root(workspace_root)) / ".compact-cache"
             cache_dir.mkdir(parents=True, exist_ok=True)
             cache_file = cache_dir / f"{digest}.txt"
             if not cache_file.exists():

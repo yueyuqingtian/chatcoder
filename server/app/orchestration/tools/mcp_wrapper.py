@@ -13,6 +13,9 @@ from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 
 logger = logging.getLogger(__name__)
 
+# plan-20261020-pts：MCP 子进程 stdout 的单行读取上限（asyncio 默认 64KB，数据库查询等大结果会超）
+_MCP_STREAM_LIMIT = 16 * 1024 * 1024
+
 
 def _to_root_uri(root_path: str | None) -> str | None:
     """将本地项目路径转换为 MCP initialize 的 rootUri（Windows 兼容）。
@@ -183,6 +186,9 @@ class McpToolWrapper(Tool):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=full_env,
+                # plan-20261020-pts：JSON-RPC 按行收发，默认单行上限 64KB——查询结果稍大就报
+                # 「Separator is found, but chunk is longer than limit」，整次调用失败
+                limit=_MCP_STREAM_LIMIT,
             )
         except FileNotFoundError:
             return ToolResult(ok=False, output="", error=f"MCP 命令不存在: {command}")

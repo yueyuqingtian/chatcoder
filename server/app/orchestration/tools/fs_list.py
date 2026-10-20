@@ -123,9 +123,25 @@ class FsListTool(Tool):
         if target is None:
             return ToolResult(ok=False, output="", error=f"路径越界或非法: {path}")
         if not target.exists():
-            return ToolResult(ok=False, output="", error=f"目录不存在: {path}")
+            # plan-20261020-pts：附上同名目录的实际位置与最近存在的上级目录（本函数已在线程里执行）
+            from app.orchestration.tools.path_hints import missing_path_hint
+
+            return ToolResult(
+                ok=False, output="",
+                error=f"目录不存在: {path}{missing_path_hint(workspace_root, path, want_dir=True)}",
+            )
         if not target.is_dir():
-            return ToolResult(ok=False, output="", error=f"非目录: {path}")
+            # plan-20261020-pts：传了文件——说明它是文件即可，不当成失败
+            try:
+                size = target.stat().st_size
+            except OSError:
+                size = -1
+            size_text = f"，{size} 字节" if size >= 0 else ""
+            return ToolResult(
+                ok=True,
+                output=f"{path} 是文件（不是目录{size_text}）。读取内容请用 fs_read。",
+                data={"path": path, "is_file": True},
+            )
 
         try:
             ws_root = Path(workspace_root)

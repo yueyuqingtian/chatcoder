@@ -108,13 +108,18 @@ async def create_side_session(session_id: int, db: AsyncSession = Depends(get_db
     子会话沿用主会话的项目、模型、执行/权限模式与工作树，之后的 turn 与主会话走同一条流水线，
     因此工具调用与消息展示完全一致。
 
-    plan-156-619 S5：**允许子会话再开子会话，但结果仍是同级**——
-    旧实现直接 400 拒绝，导致子会话无法派生同级；现在统一把 `side_parent_id` 指向
-    根主会话（一层扁平），因此左侧栏永远只有「主会话 → 子会话」两层，不会出现三级嵌套。
+    plan-474-2105：**子会话不能再创建任何同级 / 下级会话**——
+    旧实现（plan-156-619 S5）允许子会话派生同级，导致一个任务可以无限套娃并绕开并发上限；
+    需求 3 明确禁止。这里按调用方身份直接拒绝（工具层已剥离 create_subsession，这是 REST 入口的防线）。
     """
     parent = await session_service.get_session(db, session_id)
     if parent is None:
         raise HTTPException(status_code=404, detail="会话不存在")
+    if parent.side_parent_id is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="子会话不能再创建会话：需要更多执行力时，把需求写进汇报交给主代理",
+        )
     if parent.project_id is None:
         raise HTTPException(status_code=400, detail="该会话没有所属项目，无法开启侧边会话")
 
@@ -242,9 +247,14 @@ async def delete_session(session_id: int, permanent: bool = False,
             if child.id not in seen:
                 child_ids.append(child.id)
                 seen.add(child.id)
+        # plan-20261020-bgtask：会话一删，界面上再没有入口能管理它名下的后台命令——先停掉，免得成为占端口的孤儿
+        from app.orchestration.tools.bg_process import bg_process_registry
+
         for child_id in child_ids:
+            await bg_process_registry.kill_session(child_id)
             await workflow_service.on_session_deleted(child_id)
             await session_service.delete_session_permanent(db, child_id)
+        await bg_process_registry.kill_session(session_id)
         await workflow_service.on_session_deleted(session_id)
         result = await session_service.delete_session_permanent(db, session_id)
         if result is None:
@@ -266,6 +276,35 @@ async def stop_session(session_id: int):
 
     result = await engine.stop_session_execution(session_id)
     return {"ok": True, **result}
+
+
+@router.get("/{session_id}/bg-processes", response_model=dict)
+async def list_bg_processes(session_id: int):
+    """会话名下仍在运行的后台命令（右上角「后台任务」栏的数据源；已结束的不再列出）。
+
+    plan-20261020-bgtask：`elapsed` 为服务端算好的已运行秒数，前端以收到的时刻为基准累加，不依赖两端时钟一致。
+    """
+    from app.orchestration.tools.bg_process import bg_process_registry
+
+    return {"items": bg_process_registry.list_session(session_id)}
+
+
+@router.post("/{session_id}/bg-processes/{shell_id}/stop", response_model=dict)
+async def stop_bg_process(session_id: int, shell_id: str):
+    """用户在界面上停止一个后台命令：终止整棵进程树。
+
+    进程退出后注册表广播 `bg.process.exited`（卡片上这一行随之消失），并经完成回报把
+    「被用户停止」告知所属会话（空闲会话不会被叫醒，下一轮开始时带上这条说明）。
+    """
+    from app.orchestration.tools.bg_process import bg_process_registry
+
+    # 只能停本会话名下的命令：shell_id 跨会话不可猜，但这里仍显式校验归属
+    if bg_process_registry.owner_session(shell_id) != session_id:
+        raise HTTPException(404, "后台命令不存在或已结束")
+    info = await bg_process_registry.kill(shell_id, by="user")
+    if info is None:
+        raise HTTPException(404, "后台命令不存在或已结束")
+    return {"ok": True, "stopped": bool(info.get("killed")), "returncode": info.get("returncode")}
 
 
 @router.post("/{session_id}/fork", response_model=SessionOut)

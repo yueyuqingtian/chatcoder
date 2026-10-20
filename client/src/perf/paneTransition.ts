@@ -73,6 +73,9 @@ export function supportsPaneViewTransition(): boolean {
  */
 export function applyPaneUpdate(apply: () => void): void {
   acquire("panel-anim");
+  // plan-20261020-retry-cred-perf A3：`body.panel-animating` 此前只被 bus.ts 读取、
+  // 全仓无人写入——面板展开/收起这 260ms 的 CSS 降级（暂停常驻循环动画）从未生效。
+  document.body.classList.add("panel-animating");
   // plan-387-1825 B1：几何即将变化、布局**尚未**被改写的瞬间先广播一次。
   // 折叠/展开期间消息流容器宽度是逐帧渐变的，MessageFlow 的 ResizeObserver 在
   // 运动期只记账（isBusy 为真）不捕获；若等布局改写完再捕获，锚点已被污染。
@@ -83,6 +86,7 @@ export function applyPaneUpdate(apply: () => void): void {
     if (done) return;
     done = true;
     release("panel-anim");
+    document.body.classList.remove("panel-animating");
     // 与拖分隔条收尾同口径：先摘状态、再广播、最后统一收敛。
     window.dispatchEvent(new CustomEvent("chatcoder:panel-drag-end"));
     runReconcile();

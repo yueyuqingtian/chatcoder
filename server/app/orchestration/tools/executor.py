@@ -79,6 +79,77 @@ def _notify_symbol_index(tool_name: str, args: dict, ctx: ToolContext) -> None:
         logger.debug("[symbols] 写盘钩子通知失败(非阻塞)", exc_info=True)
 
 
+def _annotate_result(result: ToolResult | None, tool: Any, norm: Any) -> None:
+    """plan-20261020-pts：把参数归一化的结论附到结果上。
+
+    成功：附一句「参数已自动纠正……」，模型在同一会话里就能改用正确写法；
+    失败：补上缺失的必填参数与不认识的参数，并列出本工具的参数清单——
+    权限拒绝 / 审批未通过与参数无关，不附加（免得把注意力引到错误方向）。
+    """
+    if result is None or tool is None:
+        return
+    from app.orchestration.tools.arg_normalizer import missing_args_error, notes_suffix, unknown_suffix
+
+    try:
+        if result.ok:
+            suffix = notes_suffix(norm.notes)
+            if suffix:
+                result.output = f"{result.output}{suffix}"
+            return
+        data = result.data or {}
+        if data.get("denied") or data.get("approved") is False:
+            return
+        extra = ""
+        if norm.missing:
+            extra += "\n" + missing_args_error(tool, norm.missing)
+        extra += unknown_suffix(tool, norm.unknown)
+        if not extra and norm.notes:
+            extra = notes_suffix(norm.notes)
+        if not extra:
+            return
+        if result.error:
+            result.error = f"{result.error}{extra}"
+        else:
+            result.output = f"{result.output}{extra}"
+    except Exception:  # noqa: BLE001 —— 注解失败不影响工具结果本身
+        logger.debug("[tool.args] 结果注解失败(非阻塞)", exc_info=True)
+
+
+# plan-20261020-pts：其它工具体系里的常见工具名 → 本项目工具（只用于「未知工具」的改用建议，不自动改调）
+_TOOL_NAME_HINTS: dict[str, str] = {
+    "read": "fs_read", "read_file": "fs_read", "view": "fs_read", "view_file": "fs_read", "cat": "fs_read",
+    "write": "fs_write", "write_file": "fs_write", "create_file": "fs_write",
+    "edit": "editor_apply_diff", "edit_file": "editor_apply_diff", "str_replace": "editor_apply_diff",
+    "str_replace_editor": "editor_apply_diff", "search_replace": "editor_apply_diff",
+    "multiedit": "multi_file_edit", "apply_patch": "multi_file_edit",
+    "bash": "terminal_exec", "shell": "terminal_exec", "powershell": "terminal_exec", "run_command": "terminal_exec",
+    "run_terminal_cmd": "terminal_exec", "execute_command": "terminal_exec", "terminal": "terminal_exec",
+    "grep": "fs_grep", "grep_search": "fs_grep", "search": "fs_grep", "ripgrep": "fs_grep", "search_files": "fs_grep",
+    "ls": "fs_list", "list": "fs_list", "list_dir": "fs_list", "list_directory": "fs_list", "list_files": "fs_list",
+    "glob": "fs_list", "file_search": "fs_list",
+    "todowrite": "todo_write", "todo": "todo_write", "update_todos": "todo_write",
+    "webfetch": "web_fetch", "fetch": "web_fetch", "websearch": "web_search", "search_web": "web_search",
+    "ask": "ask_user_question", "askuser": "ask_user_question", "ask_followup_question": "ask_user_question",
+}
+
+
+def _unknown_tool_error(tool_name: str) -> str:
+    import difflib
+
+    names = [t.name for t in tool_registry.all()]
+    key = str(tool_name or "").strip()
+    picks: list[str] = []
+    hint = _TOOL_NAME_HINTS.get(key.lower().replace("-", "_").replace(" ", "_"))
+    if hint and hint in names:
+        picks.append(hint)
+    for n in difflib.get_close_matches(key.lower(), names, n=3, cutoff=0.6):
+        if n not in picks:
+            picks.append(n)
+    if picks:
+        return f"未知工具: {tool_name}。你可能想用：{', '.join(picks)}。请只调用本轮工具列表里的工具，参数以工具定义为准。"
+    return f"未知工具: {tool_name}。请只调用本轮工具列表里的工具。"
+
+
 async def _refresh_approval_mode(ctx: ToolContext) -> None:
     """把 ctx.approval_mode 刷新为会话当前的权限模式（读不到时沿用 ctx 上的值）。
 
@@ -167,6 +238,15 @@ class ServerToolExecutor(ToolExecutor):
                     "要写入或替换的内容很长时，拆成几次较小的编辑。"
                 ),
             )
+        # plan-20261020-pts：按工具 schema 归一化参数（别名、驼峰 / 下划线、字符串形式的布尔 / 数字 /
+        # 数组、枚举大小写），后续的工作流检查、权限裁决与工具本身都看到同一份整理后的参数。
+        from app.orchestration.tools.arg_normalizer import normalize_args
+
+        norm_tool = tool_registry.get(tool_name)
+        norm = normalize_args(norm_tool, args) if norm_tool is not None else None
+        if norm is not None:
+            args = norm.args
+
         # 工作流节点的写入契约（设计 §5A.1）：范围 / 一致性 / git 状态检查先于权限裁决，
         # 越界或过期的写入不会弹出审批，直接以工具错误回到模型
         from app.orchestration.workflow import guard as workflow_guard
@@ -190,6 +270,8 @@ class ServerToolExecutor(ToolExecutor):
                 ctx=ctx,
                 on_approval_request=on_approval_request,
             )
+            if norm is not None:
+                _annotate_result(result, norm_tool, norm)
             return result
         finally:
             await workflow_guard.ledger_end(ticket, ok=result.ok if result is not None else None)
@@ -209,7 +291,7 @@ class ServerToolExecutor(ToolExecutor):
 
         tool = tool_registry.get(tool_name)
         if tool is None:
-            return ToolResult(ok=False, output="", error=f"未知工具: {tool_name}")
+            return ToolResult(ok=False, output="", error=_unknown_tool_error(tool_name))
 
         # agent 白名单校验已由调用方（agent_loop）控制，此处只做统一权限裁决
 

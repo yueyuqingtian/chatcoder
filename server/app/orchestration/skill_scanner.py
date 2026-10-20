@@ -449,6 +449,8 @@ async def fetch_mcp_tools(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=full_env,
+            # plan-20261020-pts：工具清单较大的 MCP 服务一行 JSON 就可能超过默认 64KB 读取上限
+            limit=16 * 1024 * 1024,
         )
     except Exception:
         return []

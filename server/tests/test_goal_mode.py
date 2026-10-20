@@ -127,12 +127,15 @@ async def test_goal_complete_tool_marks_completed(db_env):
 
 
 async def test_goal_complete_tool_rejects_inactive(db_env):
+    """plan-20261020-pts：未激活目标时调用只是多余——以「已忽略」的正常结果返回，不改任何状态。"""
     db, _ = db_env
     await _mk_session(db)  # goal_status 默认 none
     tool = GoalCompleteTool()
     res = await tool.run({"summary": "x"}, _tool_ctx(db))
-    assert not res.ok
-    assert "没有激活的目标" in res.error
+    assert res.ok
+    assert res.data.get("ignored") is True
+    assert "没有进行中的目标" in res.output
+    assert (await db.get(SessionModel, 1)).goal_status != "completed"
 
 
 async def test_goal_complete_tool_empty_summary(db_env):

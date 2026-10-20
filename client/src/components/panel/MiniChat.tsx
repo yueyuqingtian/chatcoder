@@ -27,6 +27,7 @@ import { msgText } from "../chat/timeline";
 import { toolVerb } from "../chat/toolLabels";
 import { ToolGlyph } from "../iconkit/ToolGlyphs";
 import { attachmentsOf } from "../chat/AttachmentCard";
+import { StickyBottom } from "../chat/stickyBottom";
 import { IconArrowDown, IconFileText, IconMessageSquare, IconMinus, IconOperationCluster, IconPaperclip, IconPin, IconSpinner, IconX } from "../icons";
 import { IconSendStop } from "../iconkit/MorphIcons";
 import { Tooltip } from "../ui";
@@ -231,7 +232,15 @@ export function MiniChat() {
   const flowRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
-  const stickRef = useRef(true);
+  /** plan-20261020-pts：与主消息流共用贴底内核——此前在滚动事件里按 24px 阈值重算跟随，
+   *  图片加载、Markdown 重排引起的位置钳制同样会被误判成「用户离开底部」。 */
+  const [following, setFollowing] = useState(true);
+  const [sticky] = useState(() => new StickyBottom({
+    onFollowChange: (f) => {
+      setFollowing(f);
+      if (f) setUnseen(false);
+    },
+  }));
   const open = state !== "hidden";
 
   // 视口缩小后把锚点收回可视区（小窗与胶囊共用同一条规则）
@@ -263,41 +272,29 @@ export function MiniChat() {
     };
   }, [state]);
 
-  /** 贴底：把滚动条拉到底（仅当用户处于贴底状态） */
-  const stickToBottom = () => {
-    const el = bodyRef.current;
-    if (el && stickRef.current) el.scrollTop = el.scrollHeight;
-  };
-
-  // 新消息 / 流式增长：贴底时跟随；不贴底时记下「有新消息」
+  // 小窗打开时绑定贴底内核并直接落到底部；内容高度变化（图片加载、Markdown 重排、表格展开）由内核的尺寸观察跟随
   useLayoutEffect(() => {
-    if (stickRef.current) {
-      stickToBottom();
+    const el = bodyRef.current;
+    if (!open || !el) return;
+    sticky.attach(el);
+    sticky.setContent(flowRef.current);
+    sticky.stick();
+    return () => sticky.detach();
+  }, [open, sticky]);
+
+  // 新消息 / 流式增长：跟随时贴底；不跟随时记下「有新消息」
+  useLayoutEffect(() => {
+    if (sticky.isFollowing()) {
+      sticky.pin();
       setUnseen(false);
     } else if (items.length > 0 || shownStream) {
       setUnseen(true);
     }
-  }, [items, shownStream, open]);
+  }, [items, shownStream, open, sticky]);
 
-  // 内容高度变化（图片加载、Markdown 重排、表格展开）同样跟随到底部——只靠数据变化会漏掉这些
-  useEffect(() => {
-    const inner = flowRef.current;
-    if (!inner || typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(() => stickToBottom());
-    ro.observe(inner);
-    return () => ro.disconnect();
-  }, [open]);
-
-  const onScroll = () => {
-    const el = bodyRef.current;
-    if (!el) return;
-    stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-    if (stickRef.current) setUnseen(false);
-  };
   const jumpToLatest = () => {
-    stickRef.current = true;
     setUnseen(false);
-    stickToBottom();
+    sticky.stick(true);
   };
 
   // 输入框随内容增高（最多约 5 行）
@@ -348,7 +345,7 @@ export function MiniChat() {
     const st = useChatStore.getState();
     const mode = normalizeDraftMode(session?.permission_mode);
     const effort = useDraftsStore.getState().getDraft(`s${currentSessionId}`)?.reasoningEffort ?? st.lastReasoningEffort ?? undefined;
-    stickRef.current = true;
+    sticky.stick();
     // 与主输入框同口径：agent 透传 null（引擎默认全量工具），其余模式名原样透传；运行中由 sendTurn 自动排队
     void st.sendTurn(text, atts as unknown as Record<string, unknown>[], effort, mode === "agent" ? null : mode, session?.model_id ?? st.lastModelId ?? null, []);
     setInput("");
@@ -424,7 +421,7 @@ export function MiniChat() {
           </button>
         </Tooltip>
       </div>
-      <div className="mini-chat-body" ref={bodyRef} onScroll={onScroll}>
+      <div className="mini-chat-body" ref={bodyRef}>
         <div className="mini-chat-flow" ref={flowRef}>
           {items.length === 0 && !shownStream && (
             <div className="mini-chat-empty">还没有对话，在下方输入开始</div>
@@ -492,7 +489,7 @@ export function MiniChat() {
           )}
         </div>
       </div>
-      {unseen && !stickRef.current && (
+      {unseen && !following && (
         <button type="button" className="mini-chat-jump" onClick={jumpToLatest}>
           <IconArrowDown size={13} />
           <span>有新消息</span>

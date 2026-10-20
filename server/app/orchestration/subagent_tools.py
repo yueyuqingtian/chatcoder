@@ -295,6 +295,28 @@ SUBAGENT_TOOL_RISK: dict[str, str] = {
     "report_to_leader": "low",
 }
 
+# ── plan-474-2105：子代理的能力边界 ──────────────────────────
+# 子代理是主代理派生的一次性执行体：
+#   · 不得直接向用户提问（用户只与主代理对话，提问会无人可见而无限阻塞），
+#     需要决策用 report_to_leader(kind="question")；
+#   · 不得再派生下级执行体，也不得跨会话操作（子会话工具一律不可见）。
+# 子代理工具名按字面量列出（不 import subsession_tools，避免两模块循环导入）。
+SUBAGENT_FORBIDDEN: frozenset[str] = frozenset({
+    "ask_user_question",
+    "create_subsession", "send_to_subsession", "get_subsession_progress",
+    "interrupt_subsession", "message_main", "message_peer",
+    "spawn_subagent", "collect_results", "subagent_inspect", "cancel_subagent",
+    "send_to_subagent", "resume_subagent",
+})
+
+
+def strip_for_subagent(tool_schemas: list[dict]) -> list[dict]:
+    """剔除子代理不得拥有的工具（保留 report_to_leader 这一条自有通道）。"""
+    return [
+        s for s in tool_schemas
+        if s.get("function", {}).get("name") not in SUBAGENT_FORBIDDEN
+    ]
+
 
 def _spawn_schema(explore_only: bool) -> dict:
     """spawn_subagent schema；只读/计划模式下替换为「只读探索」版本（v36）。

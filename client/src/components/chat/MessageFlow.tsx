@@ -5,7 +5,7 @@
  * 共享内核 MessageFlowCore：虚拟化 + 贴底滚动 + 跳底按钮 + 入场动画 + 搜索 + JumpDots，
  * 与参考项目「同一渲染引擎 + 数据注入」对齐——中间面板与右面板共用同一注册插件。
  */
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, useId, memo, type ReactNode } from "react";
+import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, useId, memo, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { TimelineEntry, ToolNode, TurnItem } from "./timeline";
 import { createTimelineBuilder, createRoundMerger, msgText, lastPersistedText, getTurnById, tailRoundIndex, pruneModelDividers } from "./timeline";
@@ -25,10 +25,11 @@ import { MarkdownContent } from "../MarkdownContent";
 import { MsgType } from "@chatcoder/shared";
 import { useChatStore } from "../../store/chat";
 import { useUiStore } from "../../store/ui";
-import { useScoped, useScopedGetter } from "./convoScope";
+import { useScoped, useScopedGetter, ConvoScopeContext } from "./convoScope";
 import { latestWorkflowEndMs, selectSessionWorkflowBusy, useWorkflowStore } from "../../store/workflow";
 import { api } from "../../api/client";
 import { Empty } from "../ui";
+import { StickyBottom } from "./stickyBottom";
 
 /** plan-31-152 S5-4：运动期（拖分隔条/窗口缩放）视口 rect 的提交节流间隔（毫秒）。
  *  逐帧提交会让虚拟器每帧 setState → 整棵可见消息树 React 重渲染（含 markdown/工具树），
@@ -37,31 +38,9 @@ import { Empty } from "../ui";
  *  运动结束由收敛序列（order 20）立即提交最终 rect 保证精确。 */
 const MOTION_RECT_THROTTLE_MS = 120;
 
-/** plan-387-1825 D1：程序滚动标记的**自动失效窗口**（毫秒）。
- *  标记用于让 onScroll 忽略「由我们自己写 scrollTop 触发的 scroll 事件」；
- *  但它一旦因某条代码路径漏复位而永久为真，onScroll 就永久早退 —— 用户的真实滚动
- *  不再被记录（自动贴底、上滑接管解除、「回到底部」按钮显隐、scrollspy 全部失灵），
- *  表现为「折叠/展开面板后再也不自动贴底，只能点回到底部才恢复」。
- *  正常路径（双帧补滚 / 锚点还原最多 5 帧校正）均在该窗口内完成，
- *  超时即视为标记泄漏，自动恢复真实滚动判定。 */
-const PROGRAMMATIC_SCROLL_GRACE_MS = 320;
-
-/** 进入「贴底跟随」的距离阈值（px）。
- *  取 60 而非 0：抵抗高 DPI 缩放的浮点舍入与末尾元素的 margin/padding 波动。 */
-const NEAR_BOTTOM_ENTER_PX = 60;
-
-/** 解除「用户接管」的宽松阈值（px）。
- *  【plan-20261018-sticky-fix】这里必须明显大于 `NEAR_BOTTOM_ENTER_PX`：
- *  滚动容器的 `scrollHeight` 存在**结构性余量**（实测 39px：虚拟列表总高 + 尾部留白
- *  与实际内容末端不相等）。用户把滚动条拖到最底时物理 `scrollTop` 已到 maxScroll，
- *  但 `distance` 仍是 39 —— 旧实现要求 `distance < 8` 才解除接管，于是永远解不开：
- *  既不再自动贴底，也不再显示「回到底部」（39 < 120）。 */
-const STICKY_RELEASE_PX = 72;
-
-/** `suppressFollowRef` 的兜底有效期（ms）。宽度收尾正常在数帧内完成（含 5 帧像素校正
- *  + 320ms 程序滚动宽限），超过该时长仍为 true 即视为标记泄漏，恢复真实滚动判定——
- *  否则一旦某条路径漏复位，onScroll 会永久早退（贴底 / 接管解除 / 按钮显隐全部冻结）。 */
-const SUPPRESS_FOLLOW_MAX_MS = 1500;
+/* plan-20261020-pts：贴底跟随改由 StickyBottom 内核负责（见 ./stickyBottom.ts）。
+   此前这里的程序滚动宽限、跟随抑制有效期、两档距底阈值都是给「滚动事件里按距底距离重算跟随」
+   打的补丁——那个判定本身会把测量补偿 / 滚动锚定 / 视口塌缩误判成用户离开底部，已整体移除。 */
 
 /** plan-75-334 阶段1：子代理面板不消费「turn 错误抑制列表」——固定传空数组，
  *  避免每次渲染新建 [] 破坏 TurnGroup 的 memo 命中。 */
@@ -254,8 +233,7 @@ function MessageFlowCore({
      同页可能同时存在多个 MessageFlowCore（主消息流 + 右面板「侧边对话」+「子代理」，
      且右面板标签常驻挂载）。reconcile 任务表以 id 为键、后注册者覆盖前者，
      固定 id 会让主实例的「还原滚动锚点 / 提交虚拟器视口尺寸」被别处顶掉——
-     锚点还原永不执行、suppressFollowRef 永久为真、onScroll 早退，
-     表现就是「展开过右面板后新消息不再自动贴底，手动下滚也救不回来」。 */
+     锚点还原永不执行、虚拟器视口尺寸停在旧值。 */
   const instanceId = useId();
 
   const parentRef = useRef<HTMLDivElement>(null);
@@ -263,51 +241,20 @@ function MessageFlowCore({
   // plan-282-1444：显式含 null 联合类型，保证 ref 可变（需在回调里同时交给虚拟列表）
   const innerRef = useRef<HTMLDivElement | null>(null);
   const scrollIdleTimerRef = useRef(0);
-  const [autoScroll, setAutoScroll] = useState(true);
-  /** autoScroll 的 ref 镜像：ResizeObserver 回调读取，避免每次回调 setState */
-  const autoScrollRef = useRef(true);
-  /** 用户接管标记（本轮优化）：用户在消息流内向上滑动（滚轮/触控板）后置位。
-   *  接管期间——无论内容多快增长、条目如何增加——都不再把视图拉回底部；
-   *  只有用户自己滚回贴底（距底 < 8px）才解除接管并恢复自动跟随。
-   *  修复"上滑一点点 → 被 60px 贴底阈值立刻判回跟随 → 内容增长又拉回底部"的鬼畜循环。 */
-  const userScrollOverrideRef = useRef(false);
-  /** 程序补滚标记：补滚/锚点还原期间 onScroll 不翻转跟随状态。
-   *  plan-387-1825 D1：必须与截止时间配套使用 —— 单纯布尔标记一旦某条路径漏复位，
-   *  onScroll 会永久早退（真实滚动不再被记录），表现见 PROGRAMMATIC_SCROLL_GRACE_MS 注释。 */
-  const programmaticScrollRef = useRef(false);
-  const programmaticScrollUntilRef = useRef(0);
-  /** 标记「接下来写入 scrollTop 的是程序自己」；超过窗口未清除则自动失效。 */
-  const markProgrammaticScroll = useCallback(() => {
-    programmaticScrollRef.current = true;
-    programmaticScrollUntilRef.current = performance.now() + PROGRAMMATIC_SCROLL_GRACE_MS;
-  }, []);
-  const clearProgrammaticScroll = useCallback(() => {
-    programmaticScrollRef.current = false;
-    programmaticScrollUntilRef.current = 0;
-  }, []);
+  const [showScrollBottom, setShowScrollBottom] = useState(false);
+  /** plan-20261020-pts：贴底跟随内核。每个实例一份（切会话时宿主按会话 key 重建本组件，
+   *  新会话天然从「跟随」开始）；跟随状态只由用户意图改变，详见 stickyBottom.ts。 */
+  const [sticky] = useState(() => new StickyBottom({ onJumpChange: setShowScrollBottom }));
 
   /** plan-282-1441（#2）：宽度变化时的"视口锚点"。
    *  拖拽面板分隔条会改变消息列宽度 → 文本重排 → 每条消息高度变化 → 虚拟列表重新测量
    *  → 总高度变化 → 同一个 scrollTop 对应的内容整体位移（"拖宽时消息位置漂移"）。
-   *  这里在宽度变化时记录"首条可见项 + 其相对视口偏移"，待重测收敛后按锚点还原：
-   *   - 原本贴底 → 仍然贴底（保持"我在最底部"的语义）；
-   *   - 否则 → 让那条消息停在原来的视口位置（看哪条就停在哪条）。 */
+   *  plan-20261020-pts：只在**不跟随**时记录"首条可见项 + 其相对视口偏移"，重测收敛后
+   *  让那条消息停回原来的视口位置；跟随中由 StickyBottom 在每次尺寸变化时当帧贴底。 */
   const widthAnchorRef = useRef<
-    { index: number; offset: number; atBottom: boolean; ratio: number; untrusted: boolean } | null
+    { index: number; offset: number; ratio: number; untrusted: boolean } | null
   >(null);
   const lastWidthRef = useRef(0);
-  const [showScrollBottom, setShowScrollBottom] = useState(false);
-  /** 宽度收尾期间（面板展开/折叠/拖分隔条）暂停跟随判定：
-   *  内容先重排变高、scrollTop 随后才被还原，中间读到的 distance 只反映瞬时状态，
-   *  据此更新会把「贴底」误判成「用户已离开底部」（按钮常驻 + 新消息不自动滚动）。
-   *  抑制解除时由 finishRestore() 按最终几何统一同步一次。 */
-  const suppressFollowRef = useRef(false);
-  /** 上述抑制标记的置位时刻：用于超时兜底（见 SUPPRESS_FOLLOW_MAX_MS）。 */
-  const suppressFollowAtRef = useRef(0);
-  /** 最近一次滚轮方向：1=向下，-1=向上，0=未知（滚动条拖拽 / 键盘翻页）。
-   *  解除用户接管需要方向信息——只有「用户主动向下滚到底」才放宽到 STICKY_RELEASE_PX，
-   *  否则轻微上滑（几十像素）会被宽松阈值立刻判回跟随，又变成「划不动」的鬼畜循环。 */
-  const lastWheelDirRef = useRef(0);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchKeyword, setSearchKeyword] = useState("");
   const [activeMatchIndex, setActiveMatchIndex] = useState(0);
@@ -379,6 +326,9 @@ function MessageFlowCore({
     // 消息数较多时默认 transform 会让每个可视虚拟项进入合成层；切为 top 定位，
     // 避免窗口动画/滚动时维护大量图层。绝对定位项已满足 position 模式契约。
     directDomUpdatesMode: "position",
+    // plan-20261020-pts：测量回调里条目尺寸 / 位置 / 总高刚写入 DOM，此时请求贴底可在同一帧完成
+    // （上方条目变高时尾项尺寸不变，容器高度的尺寸通知又要晚一帧，只靠尺寸观察会露出一帧未贴底）
+    onChange: () => sticky.requestPin(),
     // plan-31-152 S5-4（用户反馈"拖左右侧面板卡顿，空态首页不卡"）：
     //   拖拽期间容器宽度每帧在变，若每帧都 cb 提交 rect → 虚拟器 setState →
     //   **整棵可见消息树 React 重渲染**（含 markdown/工具树），这正是卡顿主因；
@@ -471,7 +421,9 @@ function MessageFlowCore({
   const setInnerRef = useCallback((node: HTMLDivElement | null) => {
     innerRef.current = node;
     virtualizer.containerRef(node);
-  }, [virtualizer]);
+    // plan-20261020-pts：内容容器交给贴底内核观察（空态 → 有内容时节点才出现）
+    sticky.setContent(node);
+  }, [virtualizer, sticky]);
 
   /* RFL-1（plan-329-1647 S4）：原本这里还有一个「冻结消息列内容宽度」的 effect
      （拖拽/窗口运动期间把 innerRef 的宽度钉成当前像素值，松手再解冻）。
@@ -482,42 +434,13 @@ function MessageFlowCore({
        · 位置稳定交给浏览器原生滚动锚定 + 结束时的收敛序列（RFL-4 / RFL-6）。
      注：右面板内容根仍由 ResizeHandle.freezeRefs 冻结（见 App.tsx）。 */
 
-  /** 贴底滚动。
-   *  force=false（默认）：仅在"跟随态且用户未接管"时补滚，且不改变跟随状态——
-   *    内容增长/条目增加触发的补滚不得复活被用户取消的跟随；
-   *  force=true：用户主动要求贴底（切换会话 / 发起任务 / 发送消息 / 点"回到底部"），
-   *    解除用户接管并恢复自动跟随。 */
-  const scrollToBottom = useCallback((smooth = false, force = false) => {
+  /** plan-20261020-pts：贴底内核绑定滚动容器。布局阶段绑定，保证首帧的尺寸观察与滚动事件都不漏。 */
+  useLayoutEffect(() => {
     const el = parentRef.current;
     if (!el) return;
-    if (!force && (!autoScrollRef.current || userScrollOverrideRef.current)) return;
-    if (smooth) {
-      // plan-387-1825 D1：平滑补滚同样标记为程序滚动——动画途中距底距离由大变小，
-      // 不标记的话中途的 scroll 事件会把跟随态误判成「用户已离开底部」。
-      markProgrammaticScroll();
-      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-    } else {
-      markProgrammaticScroll();
-      el.scrollTop = el.scrollHeight;
-      // plan-547/v0.3.1 (对齐 v0.2.0)：双帧补滚——虚拟列表动态测量在渲染后才把总高度撑大，
-      // 首帧撑开排版，次帧补齐 TanStack Virtual 测量差额坚决贴底（彻底删除 anchor 误杀拦截）
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          const el2 = parentRef.current;
-          // plan-238-1188: 补滚窗口内用户若已上滚（wheel 捕获即时置 autoScrollRef=false），
-          // 放弃这次补滚——否则快速流式刷新时用户的上滚会被逐帧拉回底部（"划不动"）
-          if (el2 && autoScrollRef.current && !userScrollOverrideRef.current) el2.scrollTop = el2.scrollHeight;
-          clearProgrammaticScroll();
-        });
-      });
-    }
-    if (force) {
-      userScrollOverrideRef.current = false;
-      setAutoScroll(true);
-      autoScrollRef.current = true;
-      setShowScrollBottom(false);
-    }
-  }, [markProgrammaticScroll, clearProgrammaticScroll]);
+    sticky.attach(el);
+    return () => sticky.detach();
+  }, [sticky]);
 
   /** 问题12: scrollspy——取视口上 1/3 焦点线所在虚拟项，映射为 entry 下标传给 JumpDots */
   const updateActiveEntry = useCallback((el: HTMLDivElement) => {
@@ -551,80 +474,17 @@ function MessageFlowCore({
   }, [updateActiveEntry]);
 
 
+  /** 滚动中显示滚动条 + scrollspy。跟随判定不在这里（由贴底内核按用户意图维护）。 */
   const onScroll = useCallback(() => {
     const el = parentRef.current;
-    if (el) {
-      el.classList.add("is-scrolling");
-      window.clearTimeout(scrollIdleTimerRef.current);
-      scrollIdleTimerRef.current = window.setTimeout(() => {
-        parentRef.current?.classList.remove("is-scrolling");
-      }, 700);
-    }
-    // plan-547: 程序补滚产生的 scroll 事件不参与跟随判定。
-    // plan-387-1825 D1：带截止时间兜底——标记超时未复位即视为泄漏，恢复真实判定，
-    // 否则一次漏复位会让自动贴底 / 接管解除 / 回到底部按钮永久失效。
-    if (programmaticScrollRef.current) {
-      if (performance.now() < programmaticScrollUntilRef.current) return;
-      clearProgrammaticScroll();
-    }
     if (!el) return;
-    // 宽度收尾期间不更新跟随态：重排尚未完成，distance 不代表用户意图。
-    // 但必须有超时兜底——抑制标记一旦漏复位，onScroll 会永久早退（见 SUPPRESS_FOLLOW_MAX_MS）。
-    if (suppressFollowRef.current) {
-      if (performance.now() - suppressFollowAtRef.current < SUPPRESS_FOLLOW_MAX_MS) return;
-      suppressFollowRef.current = false;
-    }
-    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-    // 物理到底：scrollTop 已到浏览器允许的最大值。这是唯一不受 scrollHeight 结构性余量
-    // 影响的判定（见 STICKY_RELEASE_PX 注释），命中即一定处于「看到内容末端」。
-    const atPhysicalBottom = el.scrollTop >= el.scrollHeight - el.clientHeight - 2;
-    const isNearBottom = distance < NEAR_BOTTOM_ENTER_PX;
-    if (userScrollOverrideRef.current) {
-      /* 用户接管期间：只有「确实回到底部」才恢复跟随。
-         三条放行条件（任一成立即解除）：
-           ① 物理到底 —— 覆盖 scrollHeight 余量，用户拖到底一定解开；
-           ② 距离 < 8px —— 无余量时的精确贴底；
-           ③ 正在向下滚且进入宽松贴底区 —— 用户明确在回底部途中，不必逼他精确到底。 */
-      const backToBottom = atPhysicalBottom
-        || distance < 8
-        || (lastWheelDirRef.current > 0 && distance <= STICKY_RELEASE_PX);
-      if (backToBottom) {
-        userScrollOverrideRef.current = false;
-        setAutoScroll(true);
-        autoScrollRef.current = true;
-        setShowScrollBottom(false);
-        scheduleSpy();
-        return;
-      }
-    } else {
-      setAutoScroll(isNearBottom);
-      autoScrollRef.current = isNearBottom;
-    }
-    setShowScrollBottom(distance > 120);
+    el.classList.add("is-scrolling");
+    window.clearTimeout(scrollIdleTimerRef.current);
+    scrollIdleTimerRef.current = window.setTimeout(() => {
+      parentRef.current?.classList.remove("is-scrolling");
+    }, 700);
     scheduleSpy();
-  }, [scheduleSpy, clearProgrammaticScroll]);
-
-  /** plan-238-1188 + 本轮优化: 用户上滚意图必须"当帧生效"。
-   *  思考内容快速刷新时，ResizeObserver / 双帧补滚都可能在 scroll 事件派发前
-   *  把 scrollTop 拉回底部，表现为"消息流往上划不动"。
-   *  在 wheel 捕获阶段同步关闭跟随（passive，不拦截默认滚动）并置"用户接管"标记：
-   *  贴底状态下检测到向上滑动立即取消贴底；此后内容增长一律不打扰，
-   *  直到用户滚回贴底由 onScroll 清除标记、自动刷新贴底跟随。 */
-  useEffect(() => {
-    const el = parentRef.current;
-    if (!el) return;
-    const onWheelCapture = (e: WheelEvent) => {
-      // 记录方向：解除用户接管时用它区分「回到底部途中」与「继续上滑」。
-      if (e.deltaY !== 0) lastWheelDirRef.current = e.deltaY > 0 ? 1 : -1;
-      if (e.deltaY < 0 && !userScrollOverrideRef.current) {
-        userScrollOverrideRef.current = true;
-        autoScrollRef.current = false;
-        setAutoScroll(false);
-      }
-    };
-    el.addEventListener("wheel", onWheelCapture, { passive: true, capture: true });
-    return () => el.removeEventListener("wheel", onWheelCapture, { capture: true });
-  }, []);
+  }, [scheduleSpy]);
 
   // 滚动条自动隐藏的延时器不能在组件卸载后继续回写 DOM。
   useEffect(() => () => {
@@ -674,77 +534,15 @@ function MessageFlowCore({
     };
   }, []);
 
-  /** plan-547: 内容总高度变化（虚拟测量/图片加载/展开）时若处于跟随态则保持贴底。
-   *
-   *  本轮优化（用户反馈"拖拉尺寸时内容重渲染的延迟很高"）：
-   *  窗口/面板几何变化的每一帧，浏览器都要重排一次；而 `el.scrollHeight` 是**布局属性读取**，
-   *  读取它会强制把此前的脏布局全部算完（forced synchronous layout）。把它放在逐帧的
-   *  RO 回调里，等于每帧额外付一次全量重排，与"重排后每条消息高度变化 → 虚拟列表测量
-   *  → 再次重排"叠加成两倍开销。
-   *  现在运动期间只**记账**，几何落定后统一补一次贴底——中间帧本来就看不到底部变化。 */
-  const hasContent = totalCount > 0;
-  useEffect(() => {
-    if (!hasContent) return;
-    const inner = innerRef.current;
-    const el = parentRef.current;
-    if (!inner || !el || typeof ResizeObserver === "undefined") return;
-    let missedStick = false;
-    const inMotion = () => isBusy(); // PerfBus（S3）
-    const stick = () => {
-      if (!autoScrollRef.current || userScrollOverrideRef.current) return;
-      el.scrollTop = el.scrollHeight;
-    };
-    const stickAfterMotion = () => {
-      if (!missedStick) return;
-      missedStick = false;
-      stick();
-    };
-    const onMotionEnd = (e: Event) => {
-      if ((e as CustomEvent<{ active?: boolean }>).detail?.active === false) stickAfterMotion();
-    };
-    const onPointerUp = () => stickAfterMotion();
-    /* plan-20261018-sticky-fix：面板展开/折叠（panel-anim）收尾补一次贴底。
-       右面板展开走的是 applyPaneUpdate（登记 panel-anim，结束派发 chatcoder:panel-drag-end），
-       它的收尾时刻**早于**本次 pointerup、也没有窗口几何运动——此前三条补做路径全都不命中，
-       RO 在运动期记下的 missedStick 无人消费，于是「展开面板后新消息不再自动贴底」。 */
-    const onPaneSettled = () => stickAfterMotion();
-    /* 内容增长本身不派发 scroll 事件：若用户上一次滚动已把跟随态关掉（例如展开面板导致
-       scrollHeight 瞬变被误判为「离开了底部」），这里就不会再有任何东西把它拉回来。
-       因此 RO 回调里除贴底外，还按当前几何同步一次跟随态与「回到底部」按钮。 */
-    const syncFollowState = () => {
-      if (userScrollOverrideRef.current) return; // 用户接管期间不打扰
-      const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-      const atBottom = distance < NEAR_BOTTOM_ENTER_PX;
-      autoScrollRef.current = atBottom;
-      setAutoScroll(atBottom);
-      setShowScrollBottom(distance > 120);
-    };
-    window.addEventListener("chatcoder:window-motion", onMotionEnd);
-    window.addEventListener("chatcoder:panel-drag-end", onPaneSettled);
-    window.addEventListener("pointerup", onPointerUp, true);
-    const ro = new ResizeObserver(() => {
-      // 问题4 回退：内容高度变化时若处于跟随态直接贴底；用户上滑已由 onScroll
-      // 关闭 autoScroll（补滚窗口内则靠 scrollToBottom 的「用户已滚动则放弃」兜底），
-      // 无需在 RO 内重复判定（内容增长后 scrollHeight 先变大，dist 判定会误关 autoScroll）。
-      // 本轮补充：用户接管期间（已上滑）RO 也不得贴底，否则内容增长会把视图拉回底部。
-      if (inMotion()) { missedStick = true; return; } // 运动中不读布局属性（见上方说明）
-      stick();
-      syncFollowState();
-    });
-    ro.observe(inner);
-    return () => {
-      window.removeEventListener("chatcoder:window-motion", onMotionEnd);
-      window.removeEventListener("chatcoder:panel-drag-end", onPaneSettled);
-      window.removeEventListener("pointerup", onPointerUp, true);
-      ro.disconnect();
-    };
-  }, [hasContent]);
+  /* plan-20261020-pts：原「内容高度 RO + 运动期记账、运动结束补滚 + 按距底距离同步跟随态」整段移除。
+     跟随中的贴底由 StickyBottom 在视口 / 内容 / 尾项的尺寸观察里当帧完成（运动期同样贴底：
+     ResizeObserver 回调发生在布局之后，此时读 scrollHeight 不会额外触发重排）；
+     按距底距离同步跟随态正是「贴底被误判成离开底部」的来源，不再保留。 */
 
-  /** plan-282-1441（#2）：宽度变化 → 锚点补偿。
+  /** plan-282-1441（#2）：宽度变化 → 锚点补偿（仅不跟随时）。
    *
-   *  与上面"高度 RO"分工明确：
-   *   - 高度 RO 负责"内容增长时贴底跟随"（跟随态语义）；
-   *   - 本 effect 负责"**容器宽度变化**时保持用户当前看到的位置"（拖拽分隔条语义）。
+   *  分工：跟随中由贴底内核在尺寸变化时当帧贴底；本 effect 只负责「**不跟随**时容器宽度变化，
+   *  保持用户正在看的那条消息停在原位」（拖拽分隔条 / 折叠展开面板 / 窗口缩放）。
    *
    *  必须在宽度变化**当帧**记录锚点（此时还没重排），否则记录到的偏移已被污染。 */
   useEffect(() => {
@@ -752,9 +550,12 @@ function MessageFlowCore({
     if (!el || typeof ResizeObserver === "undefined") return;
 
     const capture = () => {
-      // 从这里到 restore 完成，跟随态一律由 finishRestore() 收口（见 suppressFollowRef 注释）
-      suppressFollowRef.current = true;
-      suppressFollowAtRef.current = performance.now();
+      // plan-20261020-pts：跟随中不记锚点——贴底内核会在每次尺寸变化时当帧贴底，
+      // 这里再按锚点还原只会和它抢位置。
+      if (sticky.isFollowing()) {
+        widthAnchorRef.current = null;
+        return;
+      }
       const nodes = Array.from(el.querySelectorAll<HTMLElement>("[data-index]"));
       const viewportTop = el.getBoundingClientRect().top + el.clientTop;
       const firstNode = nodes.find((node) => node.getBoundingClientRect().bottom > viewportTop);
@@ -762,16 +563,12 @@ function MessageFlowCore({
       const first = Number.isFinite(firstIndex) && firstIndex >= 0
         ? { index: firstIndex, start: el.scrollTop + firstNode!.getBoundingClientRect().top - viewportTop }
         : null;
-      // plan-387-1825 A7：宽度为 0（折叠态）或拿不到虚拟项时，scrollHeight/clientHeight
-      // 都处于**塌缩状态**，据此算出的 atBottom 不可信 —— 会被误判成「原本在底部」，
-      // restore() 于是执行 scrollTop = scrollHeight，把用户从中间一把拽到最下方
-      // （用户反馈「展开/折叠后消息流聚焦到最下方」）。
-      // 此时只记比例、且标记 untrusted=true，restore 不再据此判定贴底。
+      // plan-387-1825 A7：宽度为 0（折叠态）或拿不到虚拟项时几何处于塌缩状态，
+      // 只记比例、标记 untrusted，还原时按比例保持，不做逐项定位。
       const max = el.scrollHeight - el.clientHeight;
       if (el.clientWidth === 0 || !first) {
         widthAnchorRef.current = {
           index: -1, offset: 0,
-          atBottom: false,
           untrusted: true,
           ratio: max > 0 ? el.scrollTop / max : 0,
         };
@@ -786,47 +583,19 @@ function MessageFlowCore({
             ? node.getBoundingClientRect().top - el.getBoundingClientRect().top - el.clientTop
             : first.start - el.scrollTop;
         })(),
-        atBottom: max - el.scrollTop < 60,
         untrusted: false,
         ratio: max > 0 ? el.scrollTop / max : 0,
       };
     };
 
-    /** 宽度收尾结束：解除跟随判定抑制，并按**最终几何**同步一次跟随态。
-     *  为什么必须显式同步：贴底分支只写 scrollTop，而这次写入产生的 scroll 事件落在
-     *  程序滚动宽限内被早退，之后不会再有第二个 scroll 事件回来修正 autoScroll /
-     *  showScrollBottom——状态于是停在「视觉贴底、逻辑却判为已离开底部」，
-     *  表现为回到底部按钮常驻、点它位置不变、且新消息不再自动滚动。 */
-    const finishRestore = () => {
-      suppressFollowRef.current = false;
-      const el2 = parentRef.current;
-      if (!el2) return;
-      const distance = el2.scrollHeight - el2.scrollTop - el2.clientHeight;
-      // 与 onScroll 同口径：物理到底优先（scrollHeight 的结构性余量会让 distance 恒 >0）
-      const atPhysicalBottom = el2.scrollTop >= el2.scrollHeight - el2.clientHeight - 2;
-      const atBottom = atPhysicalBottom || distance < NEAR_BOTTOM_ENTER_PX;
-      if (atBottom) userScrollOverrideRef.current = false;
-      autoScrollRef.current = atBottom;
-      setAutoScroll(atBottom);
-      setShowScrollBottom(distance > 120);
-    };
-
+    /* plan-20261020-pts：还原只负责位置，不再改写跟随状态（原 finishRestore 按还原后的几何
+       重算跟随，测量尚未收敛时会把贴底误判成离开底部）。还原途中若用户又开始跟随，立即让位。 */
     const restore = () => {
       const anchor = widthAnchorRef.current;
       const el2 = parentRef.current;
-      if (!anchor || !el2) { suppressFollowRef.current = false; return; }
-      markProgrammaticScroll();
+      if (!anchor || !el2 || sticky.isFollowing()) return;
       const max = el2.scrollHeight - el2.clientHeight;
-      // plan-387-1825 A13：锚点不可信（容器宽为 0、几何塌缩）时**禁止**走「贴底」分支——
-      // 那会把用户从中间一把拽到最下方。此时只按比例保持。
-      if (anchor.atBottom && !anchor.untrusted) {
-        el2.scrollTop = el2.scrollHeight;
-        // plan-387-1825 D1：本分支此前**漏了解除程序滚动标记**（复位被写在两个 else 分支里），
-        // 标记因而永久为真 → onScroll 永久早退 → 「展开/拖拉/折叠面板之后就再也不自动贴底」，
-        // 且上滑接管态再也无法通过「滚回贴底」自行解除（只能点回到底部按钮强制复位）。
-        // 这里显式复位，并再跨一帧兜住「scroll 事件异步派发」的时序。
-        requestAnimationFrame(() => { clearProgrammaticScroll(); finishRestore(); });
-      } else if (anchor.index >= 0) {
+      if (anchor.index >= 0) {
         // ① 粗还原：按虚拟器几何把锚点项放回它原来的视口偏移。
         const offsetTop = virtualizer.getOffsetForIndex(anchor.index)?.[0];
         if (typeof offsetTop === "number") {
@@ -841,7 +610,8 @@ function MessageFlowCore({
         //    锚点项此刻必然已挂载（上一步刚把它定位进视口），直接量它的真实位置做像素级校正，
         //    等价于用实测值覆盖估算值。虚拟项自带 data-index（见渲染处 data-index={item.index}）。
         const correctAnchor = (remaining: number) => {
-          let node = el2.querySelector(`[data-index="${anchor.index}"]`);
+          if (sticky.isFollowing()) return;
+          const node = el2.querySelector(`[data-index="${anchor.index}"]`);
           if (!(node instanceof HTMLElement) && remaining > 0) {
             virtualizer.scrollToIndex(anchor.index, { align: "start", behavior: "auto" });
             requestAnimationFrame(() => correctAnchor(remaining - 1));
@@ -853,12 +623,10 @@ function MessageFlowCore({
             if (Math.abs(delta) > 1) el2.scrollTop += delta;
           }
           if (remaining > 0) requestAnimationFrame(() => correctAnchor(remaining - 1));
-          else { clearProgrammaticScroll(); finishRestore(); }
         };
         requestAnimationFrame(() => correctAnchor(5));
-      } else {
-        if (max > 0) el2.scrollTop = anchor.ratio * max;
-        requestAnimationFrame(() => { clearProgrammaticScroll(); finishRestore(); });
+      } else if (max > 0) {
+        el2.scrollTop = anchor.ratio * max;
       }
     };
 
@@ -896,8 +664,6 @@ function MessageFlowCore({
             missedDuringMotion = false;
             restoreStartedAt = 0;
             lastProbeW = -1;
-            // 容器已卸载：必须解除抑制，否则跟随判定会永久失效
-            suppressFollowRef.current = false;
             return;
           }
           const w = el2.clientWidth;
@@ -980,61 +746,46 @@ function MessageFlowCore({
       window.removeEventListener("chatcoder:panel-drag-start", onDragStart);
       window.removeEventListener("chatcoder:pane-change-start", onPaneChangeStart);
       ro.disconnect();
-      /* 卸载兜底：本 effect 重跑会丢掉在途的 restore，若此时仍留着抑制标记，
-         新闭包里没有任何东西会清除它（onScroll 从此永久早退）。 */
-      suppressFollowRef.current = false;
     };
-  }, [virtualizer, markProgrammaticScroll, clearProgrammaticScroll, instanceId]);
+  }, [virtualizer, instanceId, sticky]);
 
   /** 已做过"会话首次填充贴底"的会话标识（切换会话时重新进入首次填充分支） */
   const initSessionKeyRef = useRef<string | number | null>(null);
   /** plan-282-1444：首次定位的收敛轮询句柄（切会话/卸载时取消） */
   const settleRafRef = useRef(0);
   useLayoutEffect(() => {
-    // v0.3.1: 长会话切换时优先将虚拟列表定位到最后一条（end），再执行贴底双帧补滚，
-    // 彻底解决由于消息过多、初始估算高度误差导致切换会话后停在中间的 Bug。
-    // 本轮修复: 原实现以 totalCount 为触发条件并无条件贴底 + 恢复跟随——任务执行期间
-    // 条目持续增加（工具节点/注入/压缩卡）会把上滑中的用户反复拉回底部（"鬼畜"）。
-    // 现在：仅"会话首次填充"强制贴底，后续条目增加只在跟随态（用户未接管）下补滚。
-    //
     // plan-282-1434（B6）：首次填充是"点击会话"路径 —— 必须**直接呈现底部**，
-    // 不能出现"先顶部、再滚下去"的过程。因此：
-    //  - 定位使用非平滑滚动（scrollToIndex 默认 auto + scrollToBottom(smooth=false)）；
-    //  - 定位收敛前用 .is-positioning 隐藏（见下方揭示逻辑）。
+    // 不能出现"先顶部、再滚下去"的过程：定位收敛前用 .is-positioning 隐藏（见下方揭示逻辑）。
+    //
+    // plan-20261020-pts：首屏定位只用 scrollTop = scrollHeight 收敛（经贴底内核），
+    // 不再逐帧调用 scrollToIndex(末项, end)——它只对齐到末项底边、不含滚动区留白，
+    // 还会在虚拟列表内部定时重试，与贴底来回拉扯；首次进入后变更卡片等异步内容撑高时
+    // 由内核的尺寸观察继续贴底，而不是只在这 400ms 窗口内有效。
     if (totalCount === 0) return;
     if (initSessionKeyRef.current !== sessionKey) {
       initSessionKeyRef.current = sessionKey;
       setPositioned(false); // 进入新会话：先隐藏，待定位完成
-      virtualizer.scrollToIndex(totalCount - 1, { align: "end" });
-      scrollToBottom(false, true);
+      sticky.stick();
 
-      /** plan-282-1444：揭示时机由"固定两帧"改为"测量收敛"。
-       *  原来只等 2 帧就取消隐藏，但长会话里可见项的真实高度要经过多轮
-       *  ResizeObserver → resizeItem 才逐步收敛；在仍按 estimateSize(140) 排版的那一帧
-       *  揭示，就会看到"一部分消息重叠"，且随测量快慢时有时无（用户描述的"偶发、
-       *  重进又找不到"）。现在：每帧持续补滚贴底，且只有总高连续 2 帧不变（收敛）
-       *  才显示；10 帧 / 400ms 强制揭示兜底，不允许内容被永久隐藏。 */
+      /** plan-282-1444：揭示时机按"测量收敛"：总高连续 2 帧不变才显示；
+       *  10 帧 / 400ms 强制揭示兜底，不允许内容被永久隐藏。 */
       cancelAnimationFrame(settleRafRef.current);
       const startedAt = performance.now();
       let lastTotal = -1;
       let stableFrames = 0;
       let frames = 0;
       const settle = () => {
-        const el = parentRef.current;
         const total = virtualizer.getTotalSize();
         stableFrames = total === lastTotal ? stableFrames + 1 : 0;
         lastTotal = total;
         frames += 1;
-        // 用户在这段窗口内主动上滑（wheel 捕获即时置接管标记）：立即停止定位并揭示，
-        // 不与他抢滚动（沿用全局"用户接管"协议）。
-        if (userScrollOverrideRef.current) {
+        // 用户在这段窗口内主动上滑：立即停止定位并揭示，不与他抢滚动
+        if (!sticky.isFollowing()) {
           settleRafRef.current = 0;
           setPositioned(true);
           return;
         }
-        // 收敛过程中持续贴底：测量把高度撑开时不能停在中间
-        if (el && autoScrollRef.current) el.scrollTop = el.scrollHeight;
-        virtualizer.scrollToIndex(totalCount - 1, { align: "end" });
+        sticky.pin(); // 收敛过程中持续贴底：测量把高度撑开时不能停在中间
         const settled = stableFrames >= 2 && frames >= 2;
         if (settled || frames >= 10 || performance.now() - startedAt > 400) {
           settleRafRef.current = 0;
@@ -1046,10 +797,15 @@ function MessageFlowCore({
       settleRafRef.current = requestAnimationFrame(settle);
       return;
     }
-    if (!autoScrollRef.current || userScrollOverrideRef.current) return;
-    virtualizer.scrollToIndex(totalCount - 1, { align: "end" });
-    scrollToBottom(false);
-  }, [sessionKey, scrollToBottom, totalCount, virtualizer]);
+    // 条目数变化：跟随中在本次提交、绘制之前贴底（尺寸观察是下一拍的兜底）
+    sticky.pin();
+  }, [sessionKey, totalCount, virtualizer, sticky]);
+
+  /** plan-20261020-pts：尾项交给贴底内核观察——流式输出与异步卡片都在最后一条里长高，
+   *  直接观察它可在同一帧完成贴底（只观察内容容器要晚一帧，新行会先露出半截再跳）。 */
+  useLayoutEffect(() => {
+    sticky.setTail(innerRef.current?.lastElementChild ?? null);
+  });
 
   // plan-282-1444：切会话/卸载时取消首次定位轮询，避免对已换掉的内容继续补滚
   useEffect(() => () => { cancelAnimationFrame(settleRafRef.current); settleRafRef.current = 0; }, []);
@@ -1064,14 +820,11 @@ function MessageFlowCore({
   // v0.3.1: 对话启动（running 由 false -> true）时强制滚到底部并恢复跟随
   const prevRunningRef = useRef(running);
   useEffect(() => {
-    if (running && !prevRunningRef.current) {
-      scrollToBottom(false, true);
-    }
+    if (running && !prevRunningRef.current) sticky.stick();
     prevRunningRef.current = running;
-  }, [running, scrollToBottom]);
+  }, [running, sticky]);
 
-  // 用户发送消息（时间线末尾新增"以用户消息开头"的新 turn）→ 无条件滚底，
-  // 不受 autoScroll 影响（此前上滑过则发送后不滚底）
+  // 用户发送消息（时间线末尾新增"以用户消息开头"的新 turn）→ 无条件滚底并恢复跟随
   const prevEntryLenRef = useRef(entries.length);
   useEffect(() => {
     const grew = entries.length > prevEntryLenRef.current;
@@ -1080,41 +833,18 @@ function MessageFlowCore({
     const last = entries[entries.length - 1];
     const lastStartsUser = last != null && last.kind === "turn"
       && last.items.length > 0 && last.items[0].kind === "user";
-    if (lastStartsUser) scrollToBottom(false, true);
-  }, [entries, scrollToBottom]);
+    if (lastStartsUser) sticky.stick();
+  }, [entries, sticky]);
 
-  // S8：流式增长 → 跟随态下贴底。改为**直接订阅 store**（不再经 props）：
-  // 缓冲每帧换新引用，若作为 prop 传入会让整棵消息流每帧重渲染。
-  // 这里只做一次轻量长度比较（数字），命中变化才 scrollToBottom，全程不触发 React 重渲染。
-  useEffect(() => {
-    // 问题4 回退：流式内容变化时在跟随态（autoScroll）下直接贴底。
-    // autoScroll 由 onScroll（用户滚动）与补滚的「用户已滚动则放弃」判定维护——
-    // 此处不另设距底判定，否则内容增长后 scrollHeight 先变大、scrollTop 未贴底的
-    // 时序会误判 dist>60 而误关 autoScroll，导致"已在底部却不自动滚动"。
-    const total = (map: Record<number, string> | undefined) => {
-      let n = 0;
-      if (map) for (const k in map) n += map[k].length;
-      return n;
-    };
-    const measure = (s: ReturnType<typeof useChatStore.getState>) =>
-      total(s.streamingBuffers) + total(s.thinkingBuffers)
-      + total(s.subagentStreams) + total(s.subagentThinking);
-    let last = measure(useChatStore.getState());
-    return useChatStore.subscribe((s) => {
-      const len = measure(s);
-      if (len === last) return;
-      last = len;
-      if (autoScrollRef.current) scrollToBottom(false);
-    });
-  }, [scrollToBottom]);
+  /* plan-20261020-pts：原「订阅流式缓冲长度 → 补滚」已移除。流式文本长在尾项里，
+     由贴底内核对尾项的尺寸观察当帧贴底；在订阅回调里读写滚动位置反而发生在
+     React 渲染新文本之前，读到的是旧高度。 */
 
   // v0.3.1: 内容整表替换（refreshMessages 等 REST 刷新/回滚/压缩）后同样贴底——
-  // 依赖 entries 引用而非 length：REST 刷新常使 entries 重建但长度不变，
-  // 旧实现（entries.length）不触发，刷新后 scrollTop 因虚拟测量/高度变化离底，
-  // 表现为"刷新前在底部、刷新后有时在底部有时不在"。上滑用户（autoScroll=false）不受打扰。
+  // 依赖 entries 引用而非 length：REST 刷新常使 entries 重建但长度不变。不跟随时不打扰。
   useEffect(() => {
-    if (autoScroll) scrollToBottom(false);
-  }, [entries, autoScroll, scrollToBottom]);
+    sticky.pin();
+  }, [entries, sticky]);
 
   // 本轮修复：强制贴底信号（"立即发送"后用户消息固定在时间线内，entries.length 不变，
   // 故由宿主下发信号保证"发送即滚到最新"）。
@@ -1122,8 +852,8 @@ function MessageFlowCore({
   useEffect(() => {
     if (forceBottomKey === prevForceBottomRef.current) return;
     prevForceBottomRef.current = forceBottomKey;
-    scrollToBottom(false, true);
-  }, [forceBottomKey, scrollToBottom]);
+    sticky.stick();
+  }, [forceBottomKey, sticky]);
 
   /** 问题12: 内容/滚动变化后刷新 scrollspy 焦点，保证 JumpDots 自动跟随 */
   useEffect(() => {
@@ -1180,18 +910,24 @@ function MessageFlowCore({
     return () => window.removeEventListener("keydown", onKey);
   }, [search]);
 
+  /** plan-20261020-pts：主动跳到某条消息（搜索命中 / JumpDots / 任务卡定位）是用户意图，
+   *  先解除跟随——否则下一次内容增长会把视图拉回底部，跳转白做。 */
+  const jumpToIndex = useCallback((index: number, align: "start" | "center") => {
+    if (index < 0) return;
+    sticky.release();
+    virtualizer.scrollToIndex(index, { align, behavior: "smooth" });
+  }, [sticky, virtualizer]);
+
   useEffect(() => {
     setActiveMatchIndex(0);
-    if (matchedIndices.length > 0) {
-      virtualizer.scrollToIndex(matchedIndices[0], { align: "center", behavior: "smooth" });
-    }
-  }, [matchedIndices, virtualizer]);
+    if (matchedIndices.length > 0) jumpToIndex(matchedIndices[0], "center");
+  }, [matchedIndices, jumpToIndex]);
 
   const jumpMatch = (dir: 1 | -1) => {
     if (matchedIndices.length === 0) return;
     const next = (activeMatchIndex + dir + matchedIndices.length) % matchedIndices.length;
     setActiveMatchIndex(next);
-    virtualizer.scrollToIndex(matchedIndices[next], { align: "center", behavior: "smooth" });
+    jumpToIndex(matchedIndices[next], "center");
   };
 
   useEffect(() => {
@@ -1199,11 +935,11 @@ function MessageFlowCore({
     if (scrollTarget.turnId != null) {
       const idx = entries.findIndex((e) => e.kind === "turn" && e.turnId === scrollTarget.turnId);
       if (idx >= 0) {
-        virtualizer.scrollToIndex(idx, { align: "start", behavior: "smooth" });
+        jumpToIndex(idx, "start");
         clearScrollTarget?.();
       }
     }
-  }, [scrollTarget, entries, virtualizer, clearScrollTarget]);
+  }, [scrollTarget, entries, jumpToIndex, clearScrollTarget]);
 
   return (
     <div className={`message-flow-outer ${className || ""}`}>
@@ -1256,7 +992,7 @@ function MessageFlowCore({
         </div>
       )}
 
-      {jumpDots && <JumpDots entries={entries} activeIndex={activeEntryIndex} onJump={(entry) => virtualizer.scrollToIndex(entries.indexOf(entry), { align: "start", behavior: "smooth" })} />}
+      {jumpDots && <JumpDots entries={entries} activeIndex={activeEntryIndex} onJump={(entry) => jumpToIndex(entries.indexOf(entry), "start")} />}
 
       {/* plan-282-1434（B6）：首次填充贴底完成前隐藏内容，避免看到"从顶部滚下来"的过程 */}
       <div
@@ -1328,7 +1064,7 @@ function MessageFlowCore({
         <button
           type="button"
           className="flow-scroll-bottom-btn"
-          onClick={() => scrollToBottom(true, true)}
+          onClick={() => sticky.stick(true)}
           title="回到底部"
           aria-label="回到底部"
         >
@@ -1364,6 +1100,11 @@ function MainMessageFlow({
   // v39: 后台子代理运行数——主会话等待子代理时显示「等待子代理结束…」
   const pendingSubagents = useScoped("pendingSubagents");
   const currentSessionId = useScoped("currentSessionId");
+  /* plan-20261020-suggestion-gate：会话首次加载期间消息还没渲染出来。
+   * 建议卡属于「已收口的一轮」，先于消息出现会让人以为任务只剩这一步，因此等消息落地后再展示。
+   * 侧边对话（ConvoScopeProvider）不消费主仓库的加载态——它本身也关闭了建议卡。 */
+  const sessionLoading = useChatStore((s) => s.sessionLoading);
+  const messagesPending = useContext(ConvoScopeContext) == null && sessionLoading;
   // 主代理未在跑、但后台工作流在执行（含工作流结束后等待唤醒主代理的空档）：消息流下方显示「等待响应…」（工作流才是此刻的执行者）
   const workflowBusy = useWorkflowStore((s) => selectSessionWorkflowBusy(s, currentSessionId));
   // 本会话已启动的工作流里最晚的结束时刻（完成 / 取消 / 暂停）：整轮「已工作」用时的终点下限，见 TurnGroup
@@ -1552,7 +1293,8 @@ function MainMessageFlow({
         // 与错误卡同为收尾信息，但建议是正向出口，放在更靠前的位置更容易被看到。
         // 运行中 / 等待子代理时不展示：建议只属于「已收口」的一轮。
         // plan-156-621：侧边对话等复用场景可通过 suggestionCard=false 关闭。
-        !isRunning && pendingSubagents === 0 && !activeDebug && !flowError && suggestionCard !== false ? <SuggestionCard />
+        // plan-20261020-suggestion-gate：消息尚未落地（会话首次加载中）时不展示建议卡。
+        !isRunning && pendingSubagents === 0 && !activeDebug && !flowError && !messagesPending && suggestionCard !== false ? <SuggestionCard />
           // v39: 后台子代理运行期间主会话保持“运行中”——主 turn 未跑但有子代理在跑时，
           // 用与流式状态行同款样式显示「等待子代理结束…」（完成后服务端自动唤醒新一轮）。
           : !isRunning && pendingSubagents > 0 ? <SubagentWaitingLine count={pendingSubagents} />

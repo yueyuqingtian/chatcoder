@@ -22,6 +22,12 @@ from app.gateway.ws import manager as ws_manager
 from app.models.registry import get_model_registry
 from app.models.schemas import ChatMessage, ChatRequest
 from app.orchestration.agent_events import broadcast
+from app.orchestration.call_recovery import (
+    Failure as CallFailure,
+    RecoveryCancelled,
+    classify_failure,
+    recover_model_call,
+)
 from app.orchestration.approval_policy import (
     normalize_approval_mode,
     normalize_execution_mode,
@@ -122,17 +128,127 @@ def _retry_plan() -> list[float]:
     return [_retry_wait_seconds(i) for i in range(1, count + 1)]
 
 
+def _credential_slots(db_creds: int) -> int:
+    """一轮重试最多尝试几个凭据（N 个 Key 不吃掉重试次数）。"""
+    return max(1, int(db_creds or 1))
+
+
+def _retry_exhausted_text(reason: str, attempts: int, intervals: list[float],
+                          creds: int = 1) -> str:
+    """重试穷尽后的用户可见文案（R11）：说清重试了几轮、试过几个 Key。
+
+    此前异常路径只写原始错误、响应路径只写重试次数，用户分不清「没重试」还是
+    「重试过」；多 Key 时也看不到系统确实换了账号再试。
+    """
+    rounds = len(intervals)
+    tried = max(int(attempts or 0), rounds)
+    if creds > 1:
+        return f"{reason}（已自动重试 {rounds} 次，尝试 {tried} 个 Key/账号仍失败）"
+    return f"{reason}（已自动重试 {rounds} 次仍失败）"
+
+
+async def _report_credential(db, provider, failure: CallFailure | None = None,
+                             ok_reported: set[int] | None = None) -> None:
+    """统一凭据记账（plan-20261020-retry-cred-perf R7）。
+
+    - 非 ta3：成功走 report_success（**每次**都刷新「最近一次成功」，内部节流落盘），
+      失败走 report_failure（指数退避暂缓；client 类不计入）；
+    - ta3：保持旧行为（mark_ok 每个 loop 每凭据只记一次、mark_failed 按阈值冷却）。
+    """
+    cid = getattr(provider, "credential_row_id", None)
+    if cid is None:
+        return
+    legacy = bool(getattr(provider, "credential_legacy", False))
+    try:
+        from app.services import credential_service as _cred_svc
+
+        if failure is None:
+            if legacy:
+                if ok_reported is not None:
+                    if cid in ok_reported:
+                        return
+                    ok_reported.add(cid)
+                await _cred_svc.mark_ok(db, cid)
+            else:
+                _cred_svc.report_success(cid)
+        elif legacy:
+            if _cred_svc.is_retryable_error(failure.text):
+                await _cred_svc.mark_failed(db, cid, failure.text)
+        else:
+            _cred_svc.report_failure(cid, failure.text, reset_at=failure.reset_at,
+                                     counted=failure.counted)
+    except Exception:  # noqa: BLE001 - 记账失败不影响调用
+        logger.debug("[agent] 凭据记账失败(非阻塞)", exc_info=True)
+
+
+async def _retry_stream_call(*, db, model, state: dict, api_messages, tool_schemas,
+                             session_id, turn_id, step, agent_id, agent_name,
+                             thread_id, cancel_event, reasoning_effort, thinking,
+                             workspace, effort, index_no, failed_creds: set[int]):
+    """重试中的一次尝试：轮内第 2 次起先换凭据，再走**与首次相同的流式管线**。
+
+    - R5：messages 用调用方传入的 api_messages（build_api_copy 后的同一份 payload），
+      不再重发未做落盘保护/旧推理剥离的原始 messages；
+    - R6：统一走 _stream_chat_and_broadcast，长思考模型不会被网关总超时截断，UI 也有流式反馈。
+    """
+    provider = state["provider"]
+    _cur_cid = getattr(provider, "credential_row_id", None)
+    # 「失败即换」：本轮当前凭据刚失败过（已在 failed_creds 里）时，首次尝试就切走，
+    # 不再先用同一个 Key 白打一次。
+    _must_switch = (
+        (index_no > 1 or (_cur_cid is not None and _cur_cid in failed_creds))
+        and bool(failed_creds)
+    )
+    if _must_switch and model is not None:
+        try:
+            _np, _nreason, _ncid = await get_model_registry().next_provider_for_model(
+                db, model, exclude=failed_creds,
+            )
+            if _np is not None:
+                state["provider"] = provider = _np
+                logger.warning("[agent] turn=%s 已切换到备用凭据 #%s", turn_id, _ncid)
+                await _broadcast_turn_status(
+                    session_id, turn_id, thread_id, "当前凭据不可用，已自动切换…",
+                )
+        except Exception:  # noqa: BLE001 - 切换失败沿用当前凭据
+            logger.warning("[agent] turn=%s 凭据切换失败，沿用当前凭据重试", turn_id,
+                           exc_info=True)
+    # v29: 降档序列里的 "none" 显式关闭思考；有档位时开启；空档位沿用原三态
+    _eff_l = (effort or "").strip().lower()
+    _retry_thinking = False if _eff_l == "none" else (True if _eff_l else thinking)
+    _retry_req = ChatRequest(
+        messages=api_messages, model="",
+        tools=tool_schemas or None,
+        temperature=settings.agent_tool_temperature if tool_schemas else settings.agent_text_temperature,
+        reasoning_effort=effort or reasoning_effort or (
+            settings.agent_reasoning_effort if tool_schemas else None),
+        max_tokens=settings.agent_max_output_tokens or None,
+        session_id=str(session_id),
+        message_id=f"{session_id}-{turn_id}-{step}-retry",
+        thinking=_retry_thinking,
+        workspace_dir=workspace or None,  # plan-270-1358: ta3 x-ws-id
+    )
+    return await _stream_chat_and_broadcast(
+        provider, _retry_req,
+        session_id=session_id, turn_id=turn_id,
+        agent_id=agent_id, agent_name=agent_name,
+        cancel_event=cancel_event, thread_id=thread_id,
+    )
+
+
 # plan-91-394: 瞬时故障判定——只有网络/网关/超时/空响应/流丢帧类失败才允许子代理保活等待恢复。
 # 确定性失败（输出达到上限、仅生成思考、鉴权、模型不可用、上下文溢出）即使重试也不会好转，不保活。
+# plan-20261020-retry-cred-perf R10: 补齐 500 / at capacity / peer closed 等常见文案；
+# 「不可用」不再算永久失败——真实案例「503 所有渠道均不可用」被误判永久，子代理因此不保活。
 _TRANSIENT_HINTS = (
-    "超时", "网关", "空响应", "断流", "丢帧", "截断", "中断",
+    "超时", "网关", "空响应", "断流", "丢帧", "截断", "中断", "限流", "过载",
     "timeout", "timed out", "connection", "connect", "reset", "eof", "broken pipe",
-    "gateway", "502", "503", "504", "429", "rate limit", "overloaded", "temporarily",
-    "remote disconnected",
+    "gateway", "500", "502", "503", "504", "429", "rate limit", "overloaded",
+    "temporarily", "at capacity", "peer closed", "remote disconnected", "unavailable",
 )
 _PERMANENT_HINTS = (
     "401", "403", "unauthorized", "forbidden", "invalid api key", "authentication",
-    "token 上限", "仅生成思考", "不可用", "model not found", "overflow", "context length",
+    "token 上限", "仅生成思考", "model not found", "overflow", "context length",
 )
 
 
@@ -743,6 +859,88 @@ async def _agent_started_extra(agent) -> dict:
     return extra
 
 
+# ── plan-474-2105：身份二次防御 ──────────────────────────────
+# 工具 schema 在组装时已按身份剥离（subsession_tools.strip_for_subsession /
+# subagent_tools.strip_for_subagent），但「类型工具白名单」「历史 profile 配置」
+# 「自定义权限模式」都可能把工具名重新塞回来。这里按调用方身份再拦一次：
+# 剥离解决「模型看不到」，本守卫解决「看到了也执行不了」。
+_SUBSESSION_DENIED: frozenset[str] = frozenset({
+    # 子会话不得直接问用户：用户可能正停在主会话，子会话的提问会无人可见而无限阻塞
+    "ask_user_question",
+    # 不得派生下级执行体，也不得跨会话操作
+    "create_subsession", "send_to_subsession", "get_subsession_progress", "interrupt_subsession",
+    "spawn_subagent", "collect_results", "subagent_inspect", "cancel_subagent",
+    "send_to_subagent", "resume_subagent", "report_to_leader",
+})
+_SUBAGENT_DENIED: frozenset[str] = frozenset({
+    # 子代理只能通过 report_to_leader 向主代理求助，不得直接打扰用户
+    "ask_user_question",
+    # 不得派生下级执行体，也不得碰子会话
+    "create_subsession", "send_to_subsession", "get_subsession_progress", "interrupt_subsession",
+    "message_main", "message_peer",
+    "spawn_subagent", "collect_results", "subagent_inspect", "cancel_subagent",
+    "send_to_subagent", "resume_subagent",
+})
+
+
+def _interruptible_for(tool_name: str, args: dict) -> str:
+    """邮箱打断档位（plan-474-2105）。
+
+    返回值与 engine.request_interrupt / 本模块的让出分派一致：
+      · never  —— 默认：不打断，消息留在注入队列，动作结束后、下一次 LLM 调用前立刻生效；
+      · detach —— 前台同步命令（含 sleep）：进程转后台，控制权让回主代理；
+      · abort  —— 明确在「等待」的工具（terminal_bg_status 的 wait_until_done）：直接结束等待。
+
+    plan-20261020-bgtask：此前除写工具外一律 abort，连 todo_write / fs_read / 浏览器与电脑操控这类
+    瞬间完成、且带副作用的工具也会被取消——动作已经发生、结果却被丢掉，模型还会据此重复操作。
+    现在只有白名单里真正在等的工具才允许让出，其余一律不打断。
+    """
+    if tool_name == "terminal_exec":
+        raw = args.get("waitForCompletion")
+        if isinstance(raw, str):
+            is_bg = raw.strip().lower() in ("false", "0", "no")
+        else:
+            is_bg = raw is False
+        # 后台启动瞬间返回 shell_id：取消它会让进程已启动、模型却拿不到 shell_id
+        return "never" if is_bg else "detach"
+    if tool_name == "terminal_bg_status":
+        raw = args.get("wait_until_done")
+        waiting = raw.strip().lower() not in ("false", "0", "no", "") if isinstance(raw, str) else bool(raw)
+        return "abort" if waiting else "never"
+    return "never"
+
+
+# plan-20261020-bgtask：邮箱消息类型 → 让出等待时给模型看的来源说明
+_INTERRUPT_SOURCE_LABEL: dict[str, str] = {
+    "subsession_question": "收到子会话提问",
+    "subsession_report": "收到子会话汇报",
+    "main_reply": "收到主会话答复",
+    "bg_command_done": "有后台命令已结束",
+    "bg_command_stopped": "有后台命令已被停止",
+}
+
+
+def _interrupt_source_label(source: str) -> str:
+    return _INTERRUPT_SOURCE_LABEL.get(source, "收到新的系统消息")
+
+
+def _deny_tool_for_identity(tool_name: str, *, is_subsession: bool, is_subagent: bool) -> str:
+    """按调用方身份返回拒绝文案；允许时返回空串。"""
+    if is_subagent and tool_name in _SUBAGENT_DENIED:
+        return (
+            f"Error: 子代理无权调用工具 {tool_name}。"
+            "需要主代理决策时用 report_to_leader(kind=\"question\")，"
+            "需要用户决策时把问题写进最终结论，由主代理转达。不要重试本工具。"
+        )
+    if is_subsession and tool_name in _SUBSESSION_DENIED:
+        return (
+            f"Error: 子会话无权调用工具 {tool_name}。"
+            "需要澄清时用 message_main(kind=\"question\") 询问主代理，"
+            "由主代理决定自己回答还是转问用户；子会话不能再创建子会话或派发子代理。不要重试本工具。"
+        )
+    return ""
+
+
 async def run_agent_loop(
     db: AsyncSession,
     *,
@@ -791,6 +989,20 @@ async def run_agent_loop(
     agent_kind = agent.kind
     agent_model_id = getattr(agent, "model_id", None)
     thread_id = None if agent_kind == "main" else agent_id  # 子代理消息进自己的线程
+
+    # plan-474-2105：调用方身份（工具权限的二次防御依据）。
+    # 子代理：由主代理派生，subagent_comm 非空或 agent 行 kind≠main；
+    # 子会话：本身就是会话，靠 sessions.side_parent_id 判定——每个 turn 只查一次。
+    _caller_is_subagent = bool(subagent_comm) or agent_kind != "main"
+    _caller_is_subsession = False
+    try:
+        from app.persistence.models.message import Session as _IdentSession
+        _ident_row = await db.get(_IdentSession, session_id)
+        _caller_is_subsession = bool(
+            _ident_row is not None and getattr(_ident_row, "side_parent_id", None)
+        )
+    except Exception:
+        logger.debug("[agent] turn=%s 会话身份判定失败(按主会话处理)", turn_id, exc_info=True)
 
     # v2.2 (对齐 zcode 3.12): 会话权限模式（executor 审批门前决策）
     # plan-330-1648 M1: 子代理按类型锁定运行模式（subagent_mode），**不继承会话模式**——
@@ -887,6 +1099,16 @@ async def run_agent_loop(
     # plan-248-1258 M2.2: 凭据轮询状态——已失败的凭据 id 集合 + 已上报成功的集合
     _failed_creds: set[int] = set()
     _ok_reported: set[int] = set()
+    # plan-20261020-retry-cred-perf：该供应商的凭据条数——决定一轮重试能换几次 Key。
+    # 多凭据时轮内换 Key 不等待，N 个 Key 不会吃掉重试次数。
+    _cred_total = 1
+    try:
+        _cred_pid = getattr(provider, "provider_row_id", None)
+        if _cred_pid:
+            from app.services import credential_service as _cred_svc0
+            _cred_total = max(1, len(await _cred_svc0.list_credentials(db, _cred_pid)))
+    except Exception:  # noqa: BLE001 - 数不清就按单凭据处理
+        _cred_total = 1
 
     # v21: thinking 模式开关 —— provider 支持 thinking 参数（DeepSeek/GLM/Kimi 系）
     # 且本轮 effort 非 none 时开启（对齐 deepseek-harness：thinking:{type:"enabled"} + effort）。
@@ -975,6 +1197,9 @@ async def run_agent_loop(
     _sub_mgr_for_reminder = (subagent_context or {}).get("manager") if subagent_context else None
     _subagent_reminded_sig: tuple[int, ...] = ()
     _subagent_reminded_at_step = 0
+    # plan-20261020-bgtask：本轮自己启动、仍在运行的后台命令提醒的节流状态
+    _bg_reminded_sig: tuple[str, ...] = ()
+    _bg_reminded_at_step = 0
     # S12（plan-41-197）：user_prompt_submit 钩子——每轮任务开始时触发，
     # 提示词型钩子的文本并入本轮首批提醒（fail-open，不影响主流程）。
     try:
@@ -1098,7 +1323,8 @@ async def run_agent_loop(
                 # v16: build_api_copy 不再按占用占比折叠历史（隐式压缩已移除），
                 # 只保留单条超长工具结果的落盘保护；压缩仅由超设置阈值的
                 # 落库式压缩（可见压缩卡片）完成。
-                api_messages = build_api_copy(messages)
+                # plan-20261020-pts：超长结果落盘到本会话工作区，模型按占位提示 fs_read 才读得回
+                api_messages = build_api_copy(messages, workspace)
                 # plan-282-1441：把本轮"上下文回收"如实告知用户（此前静默折叠，
                 # 用户只看到占用突然降几十 k，误以为丢历史——即"隐藏压缩"的观感来源）。
                 try:
@@ -1143,7 +1369,7 @@ async def run_agent_loop(
                     messages = repair_tool_call_ids(messages)
                     messages = ensure_tool_pairing(messages)
                     messages = normalize_tool_sequence(messages)
-                    api_messages = build_api_copy(messages)
+                    api_messages = build_api_copy(messages, workspace)
                     _est_after = int((_est_tokens(api_messages) + _tools_tokens) * _calib_factor)
                     logger.info("[agent] turn=%s step=%s 前置压缩后 prompt=%d -> %d (persistent=%s)", turn_id, step, _est_prompt, _est_after, bool(_cc_pre))
                     await broadcast(session_id, {"event": "usage.update", "payload": {"agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id, "prompt_tokens": _est_after, "completion_tokens": 0, "total_tokens": _est_after, "context_window": agent_window, "usage_source": "est_after_compact", "cached_input_tokens": 0, "reasoning_tokens": 0, "agent_kind": agent_kind}})
@@ -1216,6 +1442,26 @@ async def run_agent_loop(
                 elif not _running_now:
                     # 全部结束：复位签名，下一批新派发的子代理能立即触发一次提醒
                     _subagent_reminded_sig = ()
+
+            # plan-20261020-bgtask：本轮自己启动、仍在运行的后台命令——长驻服务用完必须主动停。
+            # 只在主线程提醒（子代理线程不替主代理管命令）；只提醒**本轮**启动的，
+            # 前几轮有意留给用户使用的服务不再纠缠。节流同子代理提醒：集合变化立即提醒一次，
+            # 不变时每 _BG_REMINDER_STEP_GAP 步才重复，避免占上下文。
+            if thread_id is None:
+                try:
+                    from app.orchestration.tools.bg_process import bg_process_registry as _bg_registry
+
+                    _bg_mine = [r for r in _bg_registry.list_session(session_id) if r.get("turn_id") == turn_id]
+                except Exception:  # noqa: BLE001 — 提醒失败不影响主循环
+                    _bg_mine = []
+                _bg_sig = tuple(sorted(str(r.get("shell_id")) for r in _bg_mine))
+                if _bg_mine and (_bg_sig != _bg_reminded_sig
+                                 or step - _bg_reminded_at_step >= _BG_REMINDER_STEP_GAP):
+                    _pending_reminders.append(_build_bg_running_reminder(_bg_mine))
+                    _bg_reminded_sig = _bg_sig
+                    _bg_reminded_at_step = step
+                elif not _bg_mine:
+                    _bg_reminded_sig = ()
 
             # v2.2: 注入待发的重复调用提醒（上一步工具执行中检测到）
             if _pending_reminders:
@@ -1292,14 +1538,9 @@ async def run_agent_loop(
                         reply_language="auto",
                     )
                 # plan-248-1258 M2.2: 凭据调用成功 → 清冷却并刷新粘性（后续优先复用该凭据）
-                _cur_cred = getattr(provider, "credential_row_id", None)
-                if _cur_cred is not None and _cur_cred not in _ok_reported:
-                    _ok_reported.add(_cur_cred)
-                    try:
-                        from app.services import credential_service as _cred_svc
-                        await _cred_svc.mark_ok(db, _cur_cred)
-                    except Exception:
-                        logger.debug("[agent] 标记凭据成功异常(非阻塞)", exc_info=True)
+                # plan-20261020-retry-cred-perf：走统一记账——非 ta3 每次都刷新「最近一次成功」
+                # （内部 60 秒节流落盘），ta3 保持「每个 loop 每凭据只记一次」。
+                await _report_credential(db, provider, None, _ok_reported)
                 # v19: 兜底剥离内联思考标签（流式路径已剥离则为 no-op）
                 if response.content:
                     _c, _t = _split_inline_thinking(response.content)
@@ -1329,82 +1570,83 @@ async def run_agent_loop(
                     # v45: 统一异常重试——任何 fatal 响应（空响应/超时中断/零帧断流）
                     # 都按配置的重试计划（默认 10/20/30 秒）依次重试，穷尽后才停止并显示报错。
                     # 重试时按降档序列降低思考强度（effort），提高拿到有效响应的概率。
+                    # R7: 空响应/断流也是凭据失败——记一次并换下一个 Key（旧逻辑只在异常路径记账）
+                    if _fatal:
+                        _resp_failure = CallFailure(kind=classify_failure(_reason).kind, text=_reason)
+                        _cid0 = getattr(provider, "credential_row_id", None)
+                        if _cid0 is not None:
+                            _failed_creds.add(_cid0)
+                        await _report_credential(db, provider, _resp_failure, _ok_reported)
                     _retry_waits = _retry_plan()
+                    _retry_attempts = 0
                     if _fatal and _retry_waits:
                         _efforts = settings.agent_empty_retry_effort_list
-                        for _ri in range(1, len(_retry_waits) + 1):
-                            _eff = _efforts[_ri - 1] if _ri - 1 < len(_efforts) else None
-                            _wait_s = _retry_waits[_ri - 1]
-                            logger.warning(
-                                "[agent] turn=%s step=%s 响应异常重试 %d/%d (effort=%s, wait=%.0fs): %s",
-                                turn_id, step, _ri, len(_retry_waits),
-                                _eff or "(default)", _wait_s, _reason,
-                            )
-                            # v35: 重试提示改为状态广播（不落库、不进消息流），并按间隔等待
-                            await _broadcast_turn_status(
-                                session_id, turn_id, thread_id,
-                                f"{_reason}，{_wait_s:.0f} 秒后重试 {_ri}/{len(_retry_waits)}…",
-                            )
-                            if not await _wait_retry_interval(cancel_event, _wait_s):
-                                # plan-365-1790: 带出原始失败原因——此前的日志只有“收到中断信号”，
-                                # 导致“本来是一次报错、被取消信号收尾成用户中断”的链路不可追溯。
-                                logger.warning(
-                                    "[agent] turn=%s 响应异常重试等待期间收到中断信号，停止重试（原始原因：%s）",
-                                    turn_id, _reason,
-                                )
-                                return AgentOutput(kind="cancelled", error="任务被用户中断")
-                            # v29: 重试档位同样三态传递——降档到 none 时显式关闭思考
-                            _eff_l = (_eff or "").strip().lower()
-                            _retry_thinking = (
-                                False if _eff_l == "none" else (True if _eff_l else None)
-                            )
-                            _retry_req = ChatRequest(
-                                messages=api_messages, model="",
-                                tools=tool_schemas or None,
-                                temperature=settings.agent_tool_temperature if tool_schemas else settings.agent_text_temperature,
-                                reasoning_effort=_eff or None,
-                                max_tokens=settings.agent_max_output_tokens or None,
-                                session_id=str(session_id),
-                                message_id=f"{session_id}-{turn_id}-{step}-empty-retry-{_ri}",
-                                thinking=_retry_thinking,
-                                workspace_dir=workspace or None,  # plan-270-1358: ta3 x-ws-id
-                            )
-                            try:
-                                _r = await _stream_chat_and_broadcast(
-                                    provider, _retry_req,
-                                    session_id=session_id, turn_id=turn_id,
+                        _state = {"provider": provider}
+
+                        def _health(resp):
+                            """重试响应同样过健康检查（R3）：非致命（带正文的超时/截断）不算失败。"""
+                            _rf = _response_failure_reason(resp, _tool_executed)
+                            if _rf is None or not _rf[1]:
+                                return None
+                            return CallFailure(kind=classify_failure(_rf[0]).kind, text=_rf[0])
+
+                        async def _outcome(_att, _resp, _fail):
+                            await _report_credential(db, _state["provider"], _fail, _ok_reported)
+
+                        try:
+                            _rec = await recover_model_call(
+                                call=lambda _att: _retry_stream_call(
+                                    db=db, model=_cur_model, state=_state,
+                                    api_messages=api_messages, tool_schemas=tool_schemas,
+                                    session_id=session_id, turn_id=turn_id, step=step,
                                     agent_id=agent_id, agent_name=agent_name,
-                                    cancel_event=cancel_event,
-                                    thread_id=thread_id,
-                                )
-                            except Exception:
-                                logger.warning("[agent] turn=%s step=%s 响应异常重试调用异常，继续下一轮",
-                                               turn_id, step, exc_info=True)
-                                continue
-                            if _r.content:
-                                _c2, _t2 = _split_inline_thinking(_r.content)
-                                if _t2:
-                                    _r.content = _c2 or None
-                                    _r.thinking = (_r.thinking + "\n" + _t2).strip() if _r.thinking else _t2
-                            _rf = _response_failure_reason(_r, _tool_executed)
-                            if _rf is None:
-                                response = _r
-                                _failure = None
-                                logger.info("[agent] turn=%s step=%s 响应异常重试成功 (effort=%s)",
-                                            turn_id, step, _eff or "(default)")
-                                # v35: 重试成功 → 状态行切换为恢复提示（流式 delta 到达后前端自动清除）
-                                await _broadcast_turn_status(
-                                    session_id, turn_id, thread_id, "已恢复正常，继续执行…",
-                                )
-                                break
-                            logger.warning("[agent] turn=%s step=%s 响应异常重试仍失败: %s",
-                                           turn_id, step, _rf[0])
+                                    thread_id=thread_id, cancel_event=cancel_event,
+                                    reasoning_effort=reasoning_effort, thinking=_thinking_flag,
+                                    workspace=workspace, effort=_att.effort,
+                                    index_no=_att.index, failed_creds=_failed_creds,
+                                ),
+                                check=_health,
+                                intervals=_retry_waits,
+                                wait=lambda _s: _wait_retry_interval(cancel_event, _s),
+                                cancelled=lambda: bool(cancel_event and cancel_event.is_set()),
+                                efforts=_efforts,
+                                per_round=_credential_slots(_cred_total),
+                                on_status=lambda _t: _broadcast_turn_status(
+                                    session_id, turn_id, thread_id, _t),
+                                on_outcome=_outcome,
+                            )
+                        except RecoveryCancelled:
+                            logger.warning(
+                                "[agent] turn=%s 响应异常重试期间收到中断信号，停止重试（原始原因：%s）",
+                                turn_id, _reason,
+                            )
+                            return AgentOutput(kind="cancelled", error="任务被用户中断")
+                        provider = _state["provider"]
+                        _retry_attempts = _rec.attempts
+                        if _rec.ok:
+                            response = _rec.response
+                            _failure = None
+                            logger.info("[agent] turn=%s step=%s 响应异常重试成功 (attempts=%d)",
+                                        turn_id, step, _rec.attempts)
+                            # v35: 重试成功 → 状态行切换为恢复提示（流式 delta 到达后前端自动清除）
+                            await _broadcast_turn_status(
+                                session_id, turn_id, thread_id, "已恢复正常，继续执行…",
+                            )
+                        elif _rec.failure is not None and _rec.failure.is_client:
+                            # 重试途中变成请求内容问题（上下文溢出等）：交回外层修复后重试（R4）
+                            logger.warning("[agent] turn=%s 重试期间转为请求内容问题: %s",
+                                           turn_id, _rec.failure.text[:200])
+                            raise RuntimeError(_rec.failure.text)
+                        else:
+                            logger.warning("[agent] turn=%s step=%s 响应异常重试仍失败（attempts=%d）: %s",
+                                           turn_id, step, _rec.attempts, _reason)
                     if _failure is not None:
                         # v968: 按配置次数重试穷尽后报错——文案注明已重试次数，
                         # 用户能明确知道系统已尽力（而非再次误以为"无故中断"）。
                         _err_text = _reason
                         if _fatal and _retry_waits:
-                            _err_text = f"{_reason}（已自动重试 {len(_retry_waits)} 次仍失败）"
+                            _err_text = _retry_exhausted_text(
+                                _reason, _retry_attempts, _retry_waits, _cred_total)
                         # plan-365-1790: 致命响应终止前记录诊断字段——
                         # 以 finish/frames/usage 三者组合区分「网关截断」与「模型真无输出」。
                         logger.warning(
@@ -1426,184 +1668,155 @@ async def run_agent_loop(
                                                transient=_is_transient_failure_text(_reason))
             except Exception as api_err:
                 logger.warning("[agent] turn=%s 模型调用失败，尝试修复/压缩: %s", turn_id, str(api_err)[:200])
+                # 先兜底初始化：下方 except 分支会读它们，若在赋值前就抛异常不能变成 NameError
+                _repair_waits: list[float] = []
+                _rec = None
                 try:
                     _err_msg = str(api_err)
-                    # Gemini 等严格网关对 function call 配对/重复 id 直接 400。
-                    # 这类错误无需压缩上下文，先"仅重分配 id"自愈重试（保住上下文）；
-                    # 修复不涉及或失败才走紧急压缩。
-                    _fc_400 = (
-                        "Please ensure that function call" in _err_msg
-                        or "called exactly once" in _err_msg
-                        or "must be followed by tool" in _err_msg
-                        or "role 'tool' must be a response" in _err_msg
-                    )
-                    if _fc_400:
-                        from app.orchestration.compaction import (
-                            build_api_copy as _build_api_fc,
-                            ensure_tool_pairing as _ensure_pairing,
-                            normalize_tool_sequence as _norm_fc,
-                            repair_tool_call_ids as _repair_fc,
+                    # R7: 进入恢复流程前先记一次失败。client 类（溢出/function-call 400）
+                    # 不计入凭据健康、也不换 Key——修请求内容才有用。
+                    _failure0 = classify_failure(_err_msg)
+                    if not _failure0.is_client:
+                        _cid0 = getattr(provider, "credential_row_id", None)
+                        if _cid0 is not None:
+                            _failed_creds.add(_cid0)
+                        await _report_credential(db, provider, _failure0, _ok_reported)
+                    _repair_waits = _retry_plan()
+                    if not _repair_waits:
+                        raise api_err  # 未配置重试：交回外层按失败收尾
+                    # plan-20261020-retry-cred-perf R4：修复/压缩只负责改请求内容，之后的失败
+                    # 进入同一套轮式重试（不再「修完只给一次机会，再失败就终止」）。
+                    for _repair_round in range(1, 3):
+                        _fc_400 = (
+                            "Please ensure that function call" in _err_msg
+                            or "called exactly once" in _err_msg
+                            or "must be followed by tool" in _err_msg
+                            or "role 'tool' must be a response" in _err_msg
                         )
-                        messages = _repair_fc(messages)
-                        messages = _ensure_pairing(messages)
-                        messages = _norm_fc(messages)
-                        # v37: 重试发送前同样构建 api_messages 副本
-                        _retry_api_messages = _build_api_fc(messages)
-                        request = ChatRequest(
-                            messages=_retry_api_messages, model="", tools=tool_schemas or None,
-                            temperature=settings.agent_tool_temperature if tool_schemas else settings.agent_text_temperature,
-                            # plan-53-258 R3: 重试同样携带思考深度——此前只带 thinking，
-                            # 用户配置的档位在重试时静默失效（首次与重试行为不一致）。
-                            reasoning_effort=reasoning_effort or (settings.agent_reasoning_effort if tool_schemas else None),
-                            max_tokens=settings.agent_max_output_tokens or None,
-                            session_id=str(session_id),
-                            message_id=f"{session_id}-{turn_id}-{step}-fc-retry",
-                            thinking=_thinking_flag,
-                            workspace_dir=workspace or None,  # plan-270-1358: ta3 x-ws-id
-                        )
-                        response = await provider.chat(request)
-                        logger.info("[agent] turn=%s function-call 400 修复重试成功", turn_id)
-                    elif _is_context_overflow_error(_err_msg):
-                        # v33: 仅真正的上下文溢出才走紧急压缩（对齐 deepseek-harness：
-                        # context-overflow 只对 provider 确认的溢出恢复触发）。
-                        from app.orchestration.compaction import emergency_compact
-                        from app.orchestration.token_counter import get_agent_context_window
-                        # v16: 与主循环同口径——实际调用模型的窗口
-                        agent_window = await get_agent_context_window(db, agent, model_id=model_id)
-                        # v30: 溢出恢复优先落库式（保留最近6回合 + LLM 摘要 + 限次重试），
-                        # 失败回退旧硬编码 emergency_compact。
-                        _cc_ovf, messages = await _compact_persistent_or_fallback(
-                            db, session_id=session_id, provider=provider, agent_window=agent_window,
-                            used_tokens=None, agent_id=agent_id, agent_name=agent_name,
-                            turn_id=turn_id, messages=messages, trigger="context-overflow",
-                            reply_language=reply_language,
-                        )
-                        if _cc_ovf is None:
-                            messages = emergency_compact(messages, agent_window)
-                        # 紧急压缩后同样修复 id + 规范化工具消息序列，防止孤立 tool / 夹层消息
-                        messages = repair_tool_call_ids(messages)
-                        messages = normalize_tool_sequence(messages)
-                        request = ChatRequest(
-                            messages=messages, model="", tools=tool_schemas or None,
-                            temperature=settings.agent_tool_temperature if tool_schemas else settings.agent_text_temperature,
-                            # plan-53-258 R3: 紧急压缩重试同样保持思考深度
-                            reasoning_effort=reasoning_effort or (settings.agent_reasoning_effort if tool_schemas else None),
-                            max_tokens=settings.agent_max_output_tokens or None,
-                            session_id=str(session_id),
-                            message_id=f"{session_id}-{turn_id}-{step}-retry",
-                            thinking=_thinking_flag,  # v21: 紧急压缩重试同样保持 thinking
-                            workspace_dir=workspace or None,  # plan-270-1358: ta3 x-ws-id
-                        )
-                        response = await provider.chat(request)
-                    else:
-                        # v33: 429/503/连接/超时等瞬时故障——压缩无意义且会拖垮 turn。
-                        # plan-248-1258 M2.2: 先尝试切换到「下一个可用凭据」（多 Key/多账号
-                        # 自动轮询）。
-                        # v45: 统一异常重试——任何报错都按配置的重试计划（默认 10/20/30 秒）
-                        # 依次重试，穷尽后才停止并显示报错（不再只重试一次就终止）。
-                        logger.warning(
-                            "[agent] turn=%s step=%s 模型调用失败(非溢出，不压缩): %s",
-                            turn_id, step, _err_msg[:200],
-                        )
-                        _cur_cred = getattr(provider, "credential_row_id", None)
-                        if _cur_cred is not None:
-                            _failed_creds.add(_cur_cred)
-                            try:
-                                from app.services import credential_service as _cred_svc
-                                if _cred_svc.is_retryable_error(_err_msg):
-                                    # plan-290: 是否真进入冷却由服务层判定——连续失败达阈值
-                                    # 才冷却，单凭据供应商永不冷却（此时仅计数留痕）。
-                                    _cooled = await _cred_svc.mark_failed(db, _cur_cred, _err_msg)
-                                    if _cooled:
-                                        logger.warning(
-                                            "[agent] turn=%s 凭据 #%s 连续失败达阈值，已进入冷却",
-                                            turn_id, _cur_cred,
-                                        )
-                                    else:
-                                        logger.warning(
-                                            "[agent] turn=%s 凭据 #%s 本次失败未冷却（未达阈值或唯一凭据），可继续尝试",
-                                            turn_id, _cur_cred,
-                                        )
-                            except Exception:
-                                logger.debug("[agent] 标记凭据失败异常(非阻塞)", exc_info=True)
-                        _retry_waits = _retry_plan()
-                        if not _retry_waits:
-                            raise api_err  # 未配置重试：交回外层按失败收尾
-                        _ok = False
-                        for _ri in range(1, len(_retry_waits) + 1):
-                            _wait_s = _retry_waits[_ri - 1]
-                            _switched = False
-                            if _cur_model is not None and _failed_creds:
-                                try:
-                                    _np, _nreason, _ncid = await registry.next_provider_for_model(
-                                        db, _cur_model, exclude=_failed_creds,
-                                    )
-                                    if _np is not None:
-                                        provider = _np
-                                        _switched = True
-                                        logger.warning(
-                                            "[agent] turn=%s 已切换到备用凭据 #%s（原凭据失败）",
-                                            turn_id, _ncid,
-                                        )
-                                        await _broadcast_turn_status(
-                                            session_id, turn_id, thread_id, "当前凭据不可用，已自动切换…",
-                                        )
-                                except Exception:
-                                    logger.warning("[agent] 凭据切换失败，回退原位重试", turn_id, exc_info=True)
-                            if not _switched:
-                                await _broadcast_turn_status(
-                                    session_id, turn_id, thread_id,
-                                    f"调用异常，{_wait_s:.0f} 秒后重试 {_ri}/{len(_retry_waits)}…",
-                                )
-                                if not await _wait_retry_interval(cancel_event, _wait_s):
-                                    # plan-365-1790: 同上——重试等待期被中断会掩盖原始调用错误。
-                                    logger.warning(
-                                        "[agent] turn=%s 调用异常重试等待期间收到中断信号，停止重试（原始错误：%s）",
-                                        turn_id, str(api_err)[:200],
-                                    )
-                                    return AgentOutput(kind="cancelled", error="任务被用户中断")
-                            request = ChatRequest(
-                                messages=messages, model="", tools=tool_schemas or None,
-                                temperature=settings.agent_tool_temperature if tool_schemas else settings.agent_text_temperature,
-                                # plan-53-258 R3: 瞬时故障重试同样保持思考深度
-                                reasoning_effort=reasoning_effort or (settings.agent_reasoning_effort if tool_schemas else None),
-                                max_tokens=settings.agent_max_output_tokens or None,
-                                session_id=str(session_id),
-                                message_id=f"{session_id}-{turn_id}-{step}-transient-retry-{_ri}",
-                                thinking=_thinking_flag,
-                                workspace_dir=workspace or None,  # plan-270-1358: ta3 x-ws-id
+                        if _fc_400:
+                            from app.orchestration.compaction import (
+                                build_api_copy as _build_api_fc,
+                                ensure_tool_pairing as _ensure_pairing,
+                                normalize_tool_sequence as _norm_fc,
+                                repair_tool_call_ids as _repair_fc,
                             )
-                            try:
-                                response = await provider.chat(request)
-                            except Exception as _retry_call_err:
-                                logger.warning(
-                                    "[agent] turn=%s step=%s 重试 %d/%d 仍失败: %s",
-                                    turn_id, step, _ri, len(_retry_waits), str(_retry_call_err)[:200],
-                                )
-                                # 重试失败同样进入凭据冷却，下一轮尝试切换
-                                _nc = getattr(provider, "credential_row_id", None)
-                                if _nc is not None:
-                                    _failed_creds.add(_nc)
-                                continue
-                            _ok = True
+                            messages = _repair_fc(messages)
+                            messages = _ensure_pairing(messages)
+                            messages = _norm_fc(messages)
+                            # v37: 重试发送前同样构建 api_messages 副本
+                            api_messages = _build_api_fc(messages, workspace)
+                            logger.info("[agent] turn=%s function-call 400 已修复请求，进入重试", turn_id)
+                        elif _is_context_overflow_error(_err_msg):
+                            # v33: 仅真正的上下文溢出才走紧急压缩（对齐 deepseek-harness：
+                            # context-overflow 只对 provider 确认的溢出恢复触发）。
+                            from app.orchestration.compaction import (
+                                build_api_copy as _build_api_dc,
+                                emergency_compact,
+                            )
+                            from app.orchestration.token_counter import get_agent_context_window
+                            # v16: 与主循环同口径——实际调用模型的窗口
+                            agent_window = await get_agent_context_window(db, agent, model_id=model_id)
+                            # v30: 溢出恢复优先落库式（保留最近6回合 + LLM 摘要 + 限次重试），
+                            # 失败回退旧硬编码 emergency_compact。
+                            _cc_ovf, messages = await _compact_persistent_or_fallback(
+                                db, session_id=session_id, provider=provider, agent_window=agent_window,
+                                used_tokens=None, agent_id=agent_id, agent_name=agent_name,
+                                turn_id=turn_id, messages=messages, trigger="context-overflow",
+                                reply_language=reply_language,
+                            )
+                            if _cc_ovf is None:
+                                messages = emergency_compact(messages, agent_window)
+                            # 紧急压缩后同样修复 id + 规范化工具消息序列，防止孤立 tool / 夹层消息
+                            messages = repair_tool_call_ids(messages)
+                            messages = normalize_tool_sequence(messages)
+                            # R5: 与首次同一份 payload（含超长结果落盘保护、旧推理剥离）
+                            api_messages = _build_api_dc(messages, workspace)
+                            logger.info("[agent] turn=%s 上下文溢出已压缩，进入重试", turn_id)
+                        else:
+                            # v33: 429/503/连接/超时等瞬时故障——压缩无意义且会拖垮 turn
+                            logger.warning(
+                                "[agent] turn=%s step=%s 模型调用失败(非溢出，不压缩): %s",
+                                turn_id, step, _err_msg[:200],
+                            )
+
+                        _state = {"provider": provider}
+
+                        def _health(resp):
+                            """R3: 恢复得到的响应同样过健康检查，空响应/断流不能当正常结果。"""
+                            _rf = _response_failure_reason(resp, _tool_executed)
+                            if _rf is None or not _rf[1]:
+                                return None
+                            return CallFailure(kind=classify_failure(_rf[0]).kind, text=_rf[0])
+
+                        async def _outcome(_att, _resp, _fail):
+                            await _report_credential(db, _state["provider"], _fail, _ok_reported)
+
+                        try:
+                            _rec = await recover_model_call(
+                                call=lambda _att: _retry_stream_call(
+                                    db=db, model=_cur_model, state=_state,
+                                    api_messages=api_messages, tool_schemas=tool_schemas,
+                                    session_id=session_id, turn_id=turn_id, step=step,
+                                    agent_id=agent_id, agent_name=agent_name,
+                                    thread_id=thread_id, cancel_event=cancel_event,
+                                    reasoning_effort=reasoning_effort, thinking=_thinking_flag,
+                                    workspace=workspace, effort=_att.effort,
+                                    index_no=_att.index, failed_creds=_failed_creds,
+                                ),
+                                check=_health,
+                                intervals=_repair_waits,
+                                wait=lambda _s: _wait_retry_interval(cancel_event, _s),
+                                cancelled=lambda: bool(cancel_event and cancel_event.is_set()),
+                                per_round=_credential_slots(_cred_total),
+                                on_status=lambda _t: _broadcast_turn_status(
+                                    session_id, turn_id, thread_id, _t),
+                                on_outcome=_outcome,
+                            )
+                        except RecoveryCancelled:
+                            logger.warning(
+                                "[agent] turn=%s 调用异常重试等待期间收到中断信号，停止重试（原始错误：%s）",
+                                turn_id, str(api_err)[:200],
+                            )
+                            return AgentOutput(kind="cancelled", error="任务被用户中断")
+                        provider = _state["provider"]
+                        if _rec.ok:
+                            response = _rec.response
+                            logger.info("[agent] turn=%s step=%s 模型调用恢复成功（attempts=%d）",
+                                        turn_id, step, _rec.attempts)
+                            # v35: 重试成功 → 清除重试状态（下一次流式 delta 或 turn 结束也会兜底清除）
+                            await _broadcast_turn_status(session_id, turn_id, thread_id, "")
                             break
-                        if not _ok:
-                            raise api_err
-                        # v35: 重试成功 → 清除重试状态（下一次流式 delta 或 turn 结束也会兜底清除）
-                        await _broadcast_turn_status(session_id, turn_id, thread_id, "")
+                        if (_rec.failure is not None and _rec.failure.is_client
+                                and _repair_round < 2):
+                            # 换 Key/等待都无效，属于请求内容问题：再修一次请求后重进引擎
+                            _err_msg = _rec.failure.text
+                            logger.warning(
+                                "[agent] turn=%s 恢复失败仍属请求内容问题，重新修复后重试: %s",
+                                turn_id, _err_msg[:200])
+                            continue
+                        raise api_err
+                    if _rec is None or not _rec.ok:
+                        raise api_err
                     # 重试路径同样剥离内联思考标签
                     if response.content:
                         _c, _t = _split_inline_thinking(response.content)
                         if _t:
                             response.content = _c or None
                             response.thinking = (response.thinking + "\n" + _t).strip() if response.thinking else _t
+                except RecoveryCancelled:
+                    return AgentOutput(kind="cancelled", error="任务被用户中断")
                 except Exception as retry_err:
                     logger.error("[agent] turn=%s 紧急压缩重试失败: %s", turn_id, retry_err)
+                    _final_err = str(api_err)[:200]
+                    if _repair_waits:
+                        _final_err = _retry_exhausted_text(
+                            _final_err, _rec.attempts if _rec is not None else 0,
+                            _repair_waits, _cred_total)
                     await _emit_agent_msg(db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
                                           agent_id=agent_id, agent_name=agent_name,
                                           msg_type=MsgType.ERROR,
-                                          content={"text": f"模型调用失败: {str(api_err)[:200]}", "agent_name": agent_name})
-                    return AgentOutput(kind="error", error=str(api_err),
+                                          content={"text": f"模型调用失败: {_final_err}", "agent_name": agent_name})
+                    return AgentOutput(kind="error", error=f"模型调用失败: {_final_err}",
                                        transient=_is_transient_failure_text(str(api_err)))
 
             # 诊断日志：每步模型输出摘要
@@ -1870,6 +2083,44 @@ async def run_agent_loop(
                     args = tc.get("arguments", {}) or {}
                     call_key = "tc_" + uuid.uuid4().hex[:12]
 
+                    # plan-474-2105：身份二次防御——命中即拒绝并把错误作为工具结果回给模型，
+                    # 不进入任何执行分支（子会话问用户 / 子会话再建子会话 / 子代理再派子代理）。
+                    _identity_err = _deny_tool_for_identity(
+                        tool_name,
+                        is_subsession=_caller_is_subsession,
+                        is_subagent=_caller_is_subagent,
+                    )
+                    if _identity_err:
+                        logger.warning(
+                            "[agent] 身份拦截 tool=%s session=%s subsession=%s subagent=%s",
+                            tool_name, session_id, _caller_is_subsession, _caller_is_subagent,
+                        )
+                        await message_service.create_message(
+                            db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
+                            sender_type=SenderType.AGENT.value, sender_id=agent_id,
+                            msg_type=MsgType.TOOL_CALL.value,
+                            content={"tool": tool_name, "args": args, "call_key": call_key,
+                                     "agent_name": agent_name},
+                            buffered=True,
+                        )
+                        await message_service.create_message(
+                            db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
+                            sender_type=SenderType.AGENT.value, sender_id=agent_id,
+                            msg_type=MsgType.TOOL_RESULT.value,
+                            content={"tool": tool_name, "call_key": call_key,
+                                     "ok": False, "output": "", "error": _identity_err,
+                                     "agent_name": agent_name},
+                            buffered=True,
+                        )
+                        messages.append(ChatMessage(
+                            role="tool", content=_identity_err,
+                            name=tool_name, tool_call_id=tc.get("id", ""),
+                        ))
+                        continue
+
+                    # plan-474-2105：邮箱打断事件——每步一个，terminal_exec 命中后据此转后台
+                    _detach_event = asyncio.Event()
+
                     # v2.2 (对齐 zcode 3.14): 重复调用签名检测——连续 ≥2 步同工具同参数
                     # 注入提醒（对齐 buildRepeatedToolCallReminderBody），防死循环空转。
                     try:
@@ -2100,6 +2351,9 @@ async def run_agent_loop(
                             reasoning_effort=reasoning_effort,
                             on_tool_output=_emit_tool_output,
                             model_name=_tool_model_name,
+                            # plan-474-2105：邮箱打断通道——终端命令据此把运行中的进程转后台
+                            detach_event=_detach_event,
+                            turn_id=turn_id,
                         )
                         # S12（plan-41-197）：pre_tool_use 钩子——工具调用前触发（可按工具名匹配）；
                         # 提示词型钩子文本注入下一步上下文，命令型钩子在此执行（fail-open）。
@@ -2176,20 +2430,68 @@ async def run_agent_loop(
                             on_approval_request=_make_approval_emitter(session_id, _pending_reminders),
                             llm_call_id=tc.get("id"),
                         ))
+                        # plan-474-2105：登记工具运行态，等待期间邮箱消息据此决定
+                        # 「能否打断 / 以什么方式让出」（写文件与等用户回答一律不打断）。
+                        from app.orchestration.engine import (
+                            claim_pending_interrupt as _claim_pending_interrupt,
+                            clear_tool_state as _clear_tool_state,
+                            interrupt_source as _interrupt_source,
+                            set_tool_state as _set_tool_state,
+                            wake_event_for as _wake_event_for,
+                        )
+
+                        _wake_event = _wake_event_for(turn_id)
+                        _interruptible = _interruptible_for(tool_name, args)
+                        # plan-20261020-bgtask：先清掉残留信号，再登记运行态——消息本身已在注入队列里，
+                        # 不能让一个过期信号把刚启动的工具当场取消。清理与登记之间没有 await，不会漏掉真正的打断。
+                        if _wake_event.is_set():
+                            _wake_event.clear()
+                        _set_tool_state(turn_id, tool=tool_name, interruptible=_interruptible)
+                        # 模型思考期间到达的打断请求（子会话提问 / 主会话答复）在这里兑现：
+                        # 会等待的工具（前台命令 / wait 轮询）立刻让出，让模型马上看到那条消息；
+                        # 瞬间完成的工具（todo_write 等）直接丢弃，消息在下一次 LLM 调用前注入。
+                        _deferred_source = _claim_pending_interrupt(turn_id)
+                        if _deferred_source and _interruptible in ("abort", "detach"):
+                            from app.orchestration.engine import tool_state as _tool_state
+
+                            _st_now = _tool_state(turn_id)
+                            if _st_now is not None:
+                                _st_now["interrupt_source"] = _deferred_source
+                            _wake_event.set()
                         try:
                             if tool_name == "ask_user_question":
                                 # plan-238-1188: 结构化提问彻底不设执行超时——
                                 # 等待用户回答的时长不可预估（approval.py 已对 question
                                 # 取消审批超时，但本层 tool_exec_timeout_sec 仍会杀掉
                                 # 等待中的工具，表现为"提问工具还是会超时"）。
-                                # 结束方式：用户回答，或取消 turn（_poll_cancel 命中
+                                # 结束方式：用户回答，或取消 turn（_poll_cancel_or_wake 命中
                                 # cancel_event 取消底层任务 → CancelledError 分支）。
-                                result = await asyncio.shield(_poll_cancel(_exec_task, cancel_event))
+                                result, _wake_reason = await asyncio.shield(
+                                    _poll_cancel_or_wake(_exec_task, cancel_event, _wake_event)
+                                )
                             else:
-                                result = await asyncio.wait_for(
-                                    asyncio.shield(_poll_cancel(_exec_task, cancel_event)),
+                                result, _wake_reason = await asyncio.wait_for(
+                                    asyncio.shield(
+                                        _poll_cancel_or_wake(_exec_task, cancel_event, _wake_event)
+                                    ),
                                     timeout=settings.tool_exec_timeout_sec,  # v21: 120s → 可配置(默认600s)，长编译/测试不再被误杀
                                 )
+                            # plan-474-2105：邮箱打断 → 按档位让出控制权
+                            if _wake_reason == "mailbox":
+                                from app.orchestration.tools.base import ToolResult as _TR
+                                if _interruptible == "detach":
+                                    # 前台命令：进程不终止，交后台继续跑，等它返回 shell_id
+                                    _detach_event.set()
+                                    result = await _exec_task
+                                elif _interruptible == "abort":
+                                    _exec_task.cancel()
+                                    result = _TR(
+                                        ok=False, output="",
+                                        error=f"[已让出等待] {_interrupt_source_label(_interrupt_source(turn_id))}，"
+                                              "先处理消息。本次等待已中断，需要时可重新调用该工具。",
+                                    )
+                                else:  # never：登记时不会置位，兜底按原样等完
+                                    result = await _exec_task
                         except asyncio.TimeoutError:
                             _exec_task.cancel()
                             from app.orchestration.tools.base import ToolResult
@@ -2215,6 +2517,17 @@ async def run_agent_loop(
                                 ok=False, output="",
                                 error=f"[工具执行异常] {type(exc).__name__}: {exc}",
                             )
+                        finally:
+                            # plan-474-2105：无论成功、超时、取消还是让出，都要清掉运行态，
+                            # 否则下一轮的邮箱消息会被误判成「上一个工具还不可打断」；
+                            # 同时复位打断信号——Event 一旦保持 set，后续每个工具都会在启动
+                            # 瞬间被判定为「收到子会话消息」而立刻让出，表现为空转。
+                            _clear_tool_state(turn_id)
+                            try:
+                                if _wake_event.is_set():
+                                    _wake_event.clear()
+                            except Exception:  # noqa: BLE001 — 复位失败不影响工具结果
+                                logger.debug("[agent] 打断信号复位失败 turn=%s", turn_id, exc_info=True)
                     _dur = int((time.monotonic() - _ts0) * 1000)
                     # v31 (plan-89): 工具已执行（无论成败）即视为有产出——后续空响应
                     # 判定据此豁免 stop 空响应的 fatal，避免"任务完成后误报异常"。
@@ -2757,6 +3070,43 @@ async def _poll_cancel(task: asyncio.Task, cancel_event: asyncio.Event | None):
     return await task
 
 
+async def _poll_cancel_or_wake(
+    task: asyncio.Task,
+    cancel_event: asyncio.Event | None,
+    wake_event: asyncio.Event | None = None,
+):
+    """等待工具任务；同时监听「用户取消」与「邮箱打断」两个信号。
+
+    返回值 `(结果, wake_reason)`：
+      · 正常完成 → (result, None)
+      · 用户取消 → 取消底层任务并抛 CancelledError（与原 `_poll_cancel` 一致）
+      · 邮箱打断 → (None, "mailbox")，底层任务保持运行，由调用方按档位决定
+        转后台（detach）还是取消放弃（abort）——见 `_interruptible_for`。
+    """
+    if cancel_event is None and wake_event is None:
+        return await task, None
+    if cancel_event is not None and cancel_event.is_set():
+        task.cancel()
+        raise asyncio.CancelledError("cancelled by user")
+    waiters: dict[str, asyncio.Future] = {}
+    if cancel_event is not None:
+        waiters["cancel"] = asyncio.ensure_future(cancel_event.wait())
+    if wake_event is not None:
+        waiters["wake"] = asyncio.ensure_future(wake_event.wait())
+    try:
+        done, _ = await asyncio.wait({task, *waiters.values()}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for w in waiters.values():
+            if not w.done():
+                w.cancel()
+    if task in done:
+        return await task, None
+    if "cancel" in waiters and waiters["cancel"] in done:
+        task.cancel()
+        raise asyncio.CancelledError("cancelled by user")
+    return None, "mailbox"
+
+
 # 产出屏幕截图的工具前缀：电脑操控与内置浏览器（用户附件、view_image 读的图不在此列）
 _SCREEN_TOOL_PREFIXES = ("desktop_", "browser_")
 # 本轮上下文保留最近几张工具截图；超过「保留数 + 块大小」时一次裁到保留数
@@ -2870,6 +3220,13 @@ def _response_failure_reason(response, has_progress: bool = False) -> tuple[str,
                 True,
             )
         return f"模型返回空响应 (finish_reason={finish})，未生成内容或工具调用", True
+    # plan-20261020-retry-cred-perf R2: 超时/思考超时且**无正文、无工具调用**一律致命——
+    # 即使已经有思考内容。长思考模型的典型断流形态就是“思考完、正文一个字符没出”，
+    # 旧逻辑此时 `return …, False` → 不重试、turn 静默收尾，用户什么都拿不到。
+    # 带正文的部分输出仍保留并提示（非致命），避免重试后 UI 文字重复。
+    if finish in ("timeout", "thinking_timeout") and not response.content and not response.tool_calls:
+        return ("模型思考超时，未生成任何内容" if finish == "thinking_timeout"
+                else "模型响应因网关空闲超时中断，未生成任何内容"), True
     if finish == "timeout":
         return "响应因网关空闲超时中断，以上为已生成的部分内容", False
     if finish in ("max_tokens", "length"):
@@ -3088,6 +3445,15 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
                 turn_id, type(e).__name__, str(e)[:120], len(full_thinking), len(full_content),
             )
         else:
+            # plan-20261020-retry-cred-perf R8: 429 / 鉴权类错误换请求方式也没用——
+            # 直接抛给上层换 Key 或重试，不再白白多打一轮非流式请求。
+            _stream_kind = classify_failure(e).kind
+            if _stream_kind in ("quota", "auth"):
+                logger.warning(
+                    "[agent] turn=%s 流式调用失败(%s)，跳过非流式回退: %s",
+                    turn_id, _stream_kind, str(e)[:160],
+                )
+                raise
             logger.exception("[agent] turn=%s 流式调用异常，回退非流式", turn_id)
             # 问题5: 非流式回退也可取消——与 cancel_event 竞速，命中即中断该请求
             response = await _chat_with_cancel(provider, request, cancel_event)
@@ -3221,6 +3587,31 @@ def _build_subagent_running_reminder(snapshot: list[dict]) -> str:
         "② 只做与它们不重叠的工作；"
         "③ 没有非重叠工作可做时，调用 collect_results(wait=true) 阻塞等待，完成后统一整合其报告。"
     )
+
+# plan-20261020-bgtask：后台命令运行中提醒的节流间隔（步）——集合不变时至少间隔这么多步才重复注入
+_BG_REMINDER_STEP_GAP = 8
+
+
+def _build_bg_running_reminder(rows: list[dict]) -> str:
+    """plan-20261020-bgtask：本轮启动、仍在运行的后台命令提醒。
+
+    只陈述事实 + 两条纪律：会自己结束的不必管（跑完会主动回报）；长驻服务用完必须主动停，
+    确需保留给用户时要在最终回复里说明。集合清空后自然不再注入。
+    """
+    parts: list[str] = []
+    for _r in rows[:5]:
+        _cmd = " ".join(str(_r.get("command") or "").split())[:80]
+        parts.append(
+            f"`{_cmd}`（{_r.get('shell_id')}，已运行 {_format_elapsed_zh(float(_r.get('elapsed') or 0))}）"
+        )
+    more = f"（另有 {len(rows) - 5} 个未列出）" if len(rows) > 5 else ""
+    return (
+        "[后台命令运行中] 你在本轮启动的后台命令仍在运行：" + "；".join(parts) + more + "。\n"
+        "· 会自己结束的（构建、测试）：跑完后系统会主动把结果送回来，无需轮询，继续做别的即可；\n"
+        "· 长驻服务（dev server / watch / 后端）：不再需要时立刻用 terminal_bg_kill（BashKill）停止，"
+        "不要留在后台占着端口；确需保留给用户使用时，在最终回复里说明它在运行以及如何访问。"
+    )
+
 
 def _subagent_context_snapshot(subagent_context: dict, original_request: str = "") -> dict:
     """plan-248-1258 M6: 汇总主代理的当前上下文快照，传给子代理并留档供 inspect。
@@ -3577,23 +3968,38 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         except Exception:
             logger.warning("[agent] 子代理类型开关检查失败(非阻塞)", exc_info=True)
 
-        # v36 优化：两道独立闸门（此前用同一个 pending_count 兼职判两件事，语义错位——
-        # 快速完成的子代理不占“每轮总量”额度，一轮内实际派发数远超上限）：
-        #   ① 每轮派发总量（含已完成）达上限 → 直接拒绝，给主代理明确的收尾信号；
-        #   ② 同时运行数达上限 → 排队等任一子代理结束（超时继续放行，不卡死主代理）。
+        # plan-474-2105：只保留「单会话并发」一道闸门——本轮不限累计总量（每轮派发总量
+        # 上限已废弃），一个会话内同时跑的子代理不得超过设置值。
+        # 旧实现排队超时后**仍然放行**，等于没有限制；这里改为超时即拒绝，
+        # 让主代理明确「收结果或自己做」，而不是无限膨胀并发。
         from app.core.config import settings
-        _per_turn = max(1, int(getattr(settings, "max_subagents_per_turn", 10) or 10))
-        _dispatched = manager.spawned_count(turn_id)
-        if _dispatched >= _per_turn:
-            return (
-                f"Error: subagent limit reached ({_dispatched}/{_per_turn} dispatched this turn). "
-                "Do not spawn more subagents this turn. Collect the results of already spawned ones "
-                "with collect_results, or perform the remaining work yourself directly."
-            )
-        _max_conc = max(1, int(getattr(settings, "max_concurrent_subagents", 6) or 6))
-        if manager.pending_count() >= _max_conc:
+        _max_conc = max(1, min(30, int(getattr(settings, "max_concurrent_subagents", 4) or 4)))
+        _running = manager.pending_count()
+        _gate_waited_ms = 0
+        _gate_result = "pass"
+        if _running >= _max_conc:
             _wait_s = float(getattr(settings, "subagent_queue_wait_s", 60.0) or 60.0)
+            _t0 = time.monotonic()
             await manager.wait_one(timeout=_wait_s)
+            _gate_waited_ms = int((time.monotonic() - _t0) * 1000)
+            _running = manager.pending_count()
+            if _running >= _max_conc:
+                _gate_result = "rejected"
+                logger.info(
+                    "[subagent.gate] session=%s running=%s/%s waited=%sms result=%s tool=%s",
+                    session_id, _running, _max_conc, _gate_waited_ms, _gate_result, tool_name,
+                )
+                return (
+                    f"Error: 会话内子代理并发已满（{_running}/{_max_conc} 个在运行），"
+                    f"已等待 {_gate_waited_ms // 1000} 秒仍无空位，本次派发已取消。\n"
+                    "不要重试同一派发。请先 collect_results(wait=true) 收已有结果，"
+                    "或自己直接完成剩余工作；确需更多并行时由用户到设置 →「子代理与子会话」调高上限。"
+                )
+            _gate_result = "queued"
+        logger.info(
+            "[subagent.gate] session=%s running=%s/%s waited=%sms result=%s tool=%s",
+            session_id, _running, _max_conc, _gate_waited_ms, _gate_result, tool_name,
+        )
 
         # 创建子代理 Agent + Task（写引擎单写线程一次事务：Agent 创建 → Task 创建 →
         # 立即提交；返回 agent_id/task_id 供后续 thread_id=sub_agent.id 等 id 链使用）。
@@ -3751,6 +4157,14 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
                     sub_tools.append(_own)
         except Exception:
             logger.debug("[agent] 子代理通信工具追加失败(非阻塞)", exc_info=True)
+
+        # plan-474-2105：子代理不得直接问用户，也不得再派生下级执行体（套娃 / 绕过并发上限）。
+        # 放在白名单与自有工具追加**之后**统一剥离：白名单是老配置，可能仍含这些工具名。
+        try:
+            from app.orchestration.subagent_tools import strip_for_subagent
+            sub_tools = strip_for_subagent(sub_tools)
+        except Exception:
+            logger.warning("[agent] 子代理工具边界剥离失败(按原样继续)", exc_info=True)
 
         from app.orchestration.subagent import get_subagent_manager
         mgr = manager or get_subagent_manager(session_id)

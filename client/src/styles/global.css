@@ -336,8 +336,15 @@ a { color: var(--accent); text-decoration: none; }
 .sb-session-actions:hover { background: var(--sidebar-selected); color: var(--text-1); }
 .sb-session-actions:focus-visible { opacity: 1; pointer-events: auto; background: var(--sidebar-selected); color: var(--text-1); }
 .sb-session-actions.sb-session-more.is-open { background: var(--sidebar-selected); color: var(--text-1); opacity: 1; }
-/* v7: 左侧会话行一键归档按钮——运行中禁用 */
-.sb-session-archive.disabled { opacity: .4; cursor: not-allowed; pointer-events: none; }
+/* v7: 左侧会话行一键归档按钮——运行中禁用。
+   plan-20261020-sidebar-archive：禁用态此前直接写 opacity: .4，优先级高于基础隐藏规则
+   （.sb-session-actions 的 opacity: 0），导致运行中的会话没有悬停也会常显一枚淡化归档图标。
+   禁用只表达「不可点」，出现时机必须与普通归档一致：默认隐藏，行悬停 / armed 时才淡出到 40%。 */
+.sb-session-archive.disabled { opacity: 0; cursor: not-allowed; pointer-events: none; }
+.sb-session:hover .sb-session-archive.disabled,
+.sb-session.menu-open .sb-session-archive.disabled,
+.sb-session-archive.disabled.is-armed,
+.sb-session-archive.disabled:focus-visible { opacity: .4; }
 .sb-session { display: flex; align-items: center; gap: var(--sb-row-gap); height: 32px; padding: 0 var(--sb-row-pad); border-radius: var(--r-md); font-size: var(--sidebar-fs, 14px); color: var(--text-1); cursor: pointer; position: relative; transition: background var(--dur-fast); }
 .sb-session:hover { background: var(--sidebar-hover); color: var(--text-1); }
 .sb-session.active { background: var(--sidebar-selected); color: var(--text-1); font-weight: 500; }
@@ -1981,6 +1988,8 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .btn-md { height: var(--btn-h-md); padding: 0 var(--btn-px-md); font-size: 13px; }
 .btn-lg { height: var(--btn-h-lg); padding: 0 var(--btn-px-lg); font-size: 14px; }
 .btn-block { width: 100%; }
+/* plan-20261020-pts：胶囊形（ui/Button pill）——圆角走 --r-pill 令牌，横向内边距略放宽让胶囊两端更圆润 */
+.btn-pill { border-radius: var(--r-pill); padding-left: calc(var(--btn-px-md) + 2px); padding-right: calc(var(--btn-px-md) + 2px); }
 /* 仅图标按钮：正方形，宽度跟随尺寸档 */
 .btn-icon-only { padding: 0; width: var(--btn-h-sm); }
 .btn-icon-only.btn-xs { width: var(--btn-h-xs); }
@@ -2609,193 +2618,170 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 }
 
 /* plan-282-1434（B1）：.composer-plan-bar 系列已删除——
-   计划确认入口统一收进计划卡内部下方居中（见 .plan-inline-footer / .plan-inline-actions）。 */
+   计划确认入口统一收进计划卡底栏（见 .plan-card-foot / .plan-card-actions）。 */
 
-/* 计划确认内嵌卡（plan-632: 对齐图二——无竖条、纯净浮层底、内容溢出时底部渐隐） */
-.plan-inline-card {
+/* 计划卡（plan-20261020-pts，按用户参考图）：扁平白卡（深色为浮层色）+ 1px 细边、无阴影。
+   左上「计划」小标签与状态、右上复制；正文直接从方案标题开始，底部逐渐淡出，
+   底部居中悬浮胶囊按钮「查看完整计划」；待确认时卡片底部多一行「取消 / 确认执行」。
+   字号全部从 --fs-md（设置 → 对话字号）派生，与消息流同步缩放。 */
+.plan-card {
+  position: relative;
   margin: 8px 0 14px;
+  padding: 10px 16px 16px;
+  background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
-  background: var(--bg-elevated);
-  padding: 12px 14px;
-  box-shadow: var(--shadow-sm);
-  transition: border-color var(--dur-fast), box-shadow var(--dur-fast);
   min-width: 0;
+  font-size: var(--fs-md, 13px);
 }
-.plan-inline-card:hover {
-  border-color: var(--border-strong, var(--border));
-  box-shadow: var(--shadow-md);
-}
-.plan-inline-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 8px;
-  min-width: 0;
-}
-.plan-inline-head-left {
+.plan-card-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-1);
-  min-width: 0;
-  flex: 1;
+  min-height: var(--btn-h-xs);
+  margin-bottom: 6px;
 }
-.plan-inline-icon {
+.plan-card-label {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--text-3);
+  font-size: 0.92em;
+  white-space: nowrap;
 }
-.plan-inline-title {
+.plan-card-label svg {
+  flex: 0 0 auto;
+}
+/* 状态跟在「计划」后面：分隔点 + 色点 + 中性文字（颜色只落在点上） */
+.plan-card-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
 }
-.plan-inline-badge {
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-weight: 500;
-  flex-shrink: 0;
-  white-space: nowrap;
-}
-.plan-inline-badge.awaiting {
-  background: var(--warning-soft);
-  color: var(--warning);
-}
-.plan-inline-badge.confirmed {
-  background: var(--success-soft);
-  color: var(--success);
-}
-.plan-inline-badge.cancelled {
-  background: var(--bg-hover);
+.plan-card-status::before {
+  content: "·";
+  margin: 0 2px 0 0;
   color: var(--text-3);
 }
-/* plan-644: 已被更新方案取代（中性灰描边，区别于已调整） */
-.plan-inline-badge.superseded {
-  background: var(--bg-hover);
+.plan-card-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-3);
+  flex: 0 0 auto;
+}
+.plan-card-status[data-tone="info"] .plan-card-dot {
+  background: var(--info);
+  animation: breath var(--dur-pulse) ease-in-out infinite;
+}
+.plan-card-status[data-tone="warning"] .plan-card-dot { background: var(--warning); }
+.plan-card-status[data-tone="success"] .plan-card-dot { background: var(--success); }
+.plan-card-copy {
+  flex: 0 0 auto;
   color: var(--text-3);
-  border: 1px solid var(--border);
 }
-.plan-inline-badge.running {
-  background: var(--info-soft);
-  color: var(--info);
+
+/* 正文 + 悬浮按钮共用一个定位容器：按钮只压在正文的渐隐区上，不会盖住下方的决策行 */
+.plan-card-body {
+  position: relative;
 }
-.plan-compact-markdown {
-  max-height: 180px;
+.plan-card-preview {
+  max-height: calc(var(--fs-md, 13px) * 17);
   overflow: hidden;
-  font-size: 13px;
-  line-height: 1.6;
+  line-height: 1.75;
   color: var(--text-2);
-  margin-bottom: 10px;
   min-width: 0;
 }
-/* 内容溢出时底部从上往下逐渐变淡隐藏（plan-632: 对齐图二渐隐效果；由 PlanCard 溢出检测动态启用） */
-.plan-compact-markdown.is-faded {
-  mask-image: linear-gradient(to bottom, #000 55%, transparent 96%);
-  -webkit-mask-image: linear-gradient(to bottom, #000 55%, transparent 96%);
+/* 内容被截断时底部逐渐淡出（由 PlanCard 溢出检测动态启用），悬浮按钮就落在淡出区 */
+.plan-card-preview.is-faded {
+  mask-image: linear-gradient(to bottom, #000 38%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 38%, transparent 100%);
 }
-.plan-compact-markdown .md-body {
+.plan-card-preview .md-body {
   overflow-wrap: anywhere;
   min-width: 0;
 }
-.plan-compact-markdown .md-table,
-.plan-compact-markdown .md-code-block {
+.plan-card-preview .md-table,
+.plan-card-preview .md-code-block {
   max-width: 100%;
 }
-.plan-compact-markdown p {
+.plan-card-preview p {
   margin: 4px 0;
 }
-.plan-compact-markdown h1, .plan-compact-markdown h2, .plan-compact-markdown h3 {
-  font-size: 13px;
+.plan-card-preview h1,
+.plan-card-preview h2,
+.plan-card-preview h3,
+.plan-card-preview h4 {
+  font-size: 1.05em;
   font-weight: 600;
+  line-height: 1.5;
   color: var(--text-1);
-  margin: 6px 0 2px;
+  margin: 12px 0 4px;
 }
-.plan-compact-markdown ul, .plan-compact-markdown ol {
+/* 方案标题（文档第一行）：比小节标题大一档，作为整张卡的标题 */
+.plan-card-preview .md-body > :first-child {
+  margin-top: 0;
+}
+.plan-card-preview .md-body > :is(h1, h2, h3):first-child {
+  font-size: 1.15em;
+  margin-bottom: 8px;
+}
+.plan-card-preview ul,
+.plan-card-preview ol {
   margin: 4px 0;
   padding-left: 18px;
 }
-/* plan-282-1434（B1）：footer 改为纵向居中——路径提示在上，操作按钮在下、整体居中。
-   此前是左右分栏（提示靠左、按钮靠右），且「确认执行」在输入框上方横幅里，
-   确认入口与计划内容分离。 */
-.plan-inline-footer {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--sp-3);
-  min-width: 0;
+/* 预览只是开头一段：文档里的分隔线在这里只会把版面切碎 */
+.plan-card-preview hr {
+  display: none;
 }
-.plan-inline-path-hint {
-  font-size: 11px;
-  color: var(--text-3);
+.plan-card-float {
   display: flex;
-  align-items: center;
   justify-content: center;
-  gap: 4px;
-  min-width: 0;
-  max-width: 100%;
+  margin-top: 12px;
 }
-.plan-inline-path-hint code {
-  font-family: var(--font-mono);
-  background: var(--bg-hover);
-  padding: 1px 5px;
-  border-radius: var(--r-xs);
-  color: var(--text-2);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 100%;
-  min-width: 0;
+.plan-card.is-clipped .plan-card-float {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 4px;
+  margin-top: 0;
+  pointer-events: none;
 }
-.plan-inline-actions {
+.plan-card.is-clipped .plan-card-float > * {
+  pointer-events: auto;
+}
+.plan-card-float .btn svg {
+  margin-right: -2px;
+}
+
+/* 待确认：决策行（ui/Collapse 展开收起），细分隔线与正文区隔 */
+.plan-card-decide {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: var(--sp-3);
   flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
 }
-/* plan-282-1434（B1）：两个按钮同形状——同高(28px)/同圆角(--r-md)/同横向内距(14px)/同字号。
-   区别只在语义色调：查看完整计划=次要(描边)，确认执行=主要(实底)。 */
-.plan-inline-view,
-.plan-inline-confirm {
+.plan-card-decide-hint {
+  flex: 1 1 160px;
+  min-width: 0;
+  color: var(--text-3);
+  font-size: 0.92em;
+}
+.plan-card-actions {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  height: var(--ctl-h-sm);
-  padding: 0 14px;
-  border-radius: var(--r-md);
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background var(--dur-2) var(--ease-standard),
-              color var(--dur-2) var(--ease-standard),
-              border-color var(--dur-2) var(--ease-standard);
-}
-.plan-inline-view {
-  background: transparent;
-  color: var(--text-2);
-  border: 1px solid var(--border);
-}
-.plan-inline-view:hover {
-  background: var(--bg-hover);
-  color: var(--text-1);
-  border-color: var(--border-hover);
-}
-.plan-inline-confirm {
-  background: var(--accent);
-  color: var(--accent-contrast, #fff) !important;
-  font-weight: 600;
-  border: 1px solid transparent;
-}
-.plan-inline-confirm:hover {
-  background: var(--accent-hover, var(--accent));
+  gap: 8px;
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 .plan-confirm-overlay { position: fixed; inset: var(--titlebar-h) 0 0 0; z-index: 200; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.35); animation: plan-fade var(--dur-fast); }
 .plan-confirm-card { width: min(520px, 88vw); background: var(--color-popover); border: 1px solid var(--border); border-radius: var(--r-xl); box-shadow: var(--shadow-lg); padding: 20px; animation: plan-pop var(--dur-med); }
@@ -3897,6 +3883,32 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 :is(html[data-window-motion="1"], body.panel-dragging) .goal-pill.running .goal-pill-label,
 :is(html[data-window-motion="1"], body.panel-dragging) .icon-ring-spin,
 :is(html[data-window-motion="1"], body.panel-dragging) .idx-dot {
+  animation-play-state: paused !important;
+}
+/* plan-20261020-retry-cred-perf A1：此前漏在运动期暂停清单之外的常驻循环动画——
+   工具卡运行中图标（12 种 SVG 子元素动画）、各类转圈弧线、排队 shimmer、侧聊直播点、
+   等待光标。它们在面板展开/收起、分隔条拖拽、窗口运动期间逐帧重绘，与几何变化抢帧预算。
+   只在运动期暂停（结束当帧恢复），视觉与动画时长不变。
+   A3：body.panel-animating 由 applyPaneUpdate 写入/摘除，这 260ms 的降级此前是死钩子。 */
+:is(html[data-window-motion="1"], body.panel-dragging, body.panel-animating) .ic-spinner-arc,
+:is(html[data-window-motion="1"], body.panel-dragging, body.panel-animating) .st-arc,
+:is(html[data-window-motion="1"], body.panel-dragging, body.panel-animating) .tcard-step-arc,
+:is(html[data-window-motion="1"], body.panel-dragging, body.panel-animating) .btn-spinner,
+:is(html[data-window-motion="1"], body.panel-dragging, body.panel-animating) .sd-tab-dot.is-live,
+:is(html[data-window-motion="1"], body.panel-dragging, body.panel-animating) .cc-queue-item.is-flushing,
+:is(html[data-window-motion="1"], body.panel-dragging, body.panel-animating) .wait-mark .wm-dot,
+:is(html[data-window-motion="1"], body.panel-dragging, body.panel-animating) .wait-mark .wm-caret,
+:is(html[data-window-motion="1"], body.panel-dragging, body.panel-animating) [data-tool-state="running"] svg.tg .tg-scan,
+:is(html[data-window-motion="1"], body.panel-dragging, body.panel-animating) [data-tool-state="running"] svg.tg .tg-pen,
+:is(html[data-window-motion="1"], body.panel-dragging, body.panel-animating) [data-tool-state="running"] svg.tg .tg-blink,
+:is(html[data-window-motion="1"], body.panel-dragging, body.panel-animating) [data-tool-state="running"] svg.tg .tg-orbit,
+:is(html[data-window-motion="1"], body.panel-dragging, body.panel-animating) [data-tool-state="running"] svg.tg .tg-turn,
+:is(html[data-window-motion="1"], body.panel-dragging, body.panel-animating) [data-tool-state="running"] svg.tg .tg-hop,
+:is(html[data-window-motion="1"], body.panel-dragging, body.panel-animating) [data-tool-state="running"] svg.tg .tg-drop,
+:is(html[data-window-motion="1"], body.panel-dragging, body.panel-animating) [data-tool-state="running"] svg.tg .tg-bubble,
+:is(html[data-window-motion="1"], body.panel-dragging, body.panel-animating) [data-tool-state="running"] svg.tg .tg-pulse,
+:is(html[data-window-motion="1"], body.panel-dragging, body.panel-animating) [data-tool-state="running"] svg.tg .tg-flow,
+:is(html[data-window-motion="1"], body.panel-dragging, body.panel-animating) [data-tool-state="running"] svg.tg .tg-draw {
   animation-play-state: paused !important;
 }
 /* plan-329-1647：运动期「左列实底」降级已整体撤除。

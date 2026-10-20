@@ -23,6 +23,8 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   loading?: boolean;
   /** 占满父级宽度 */
   block?: boolean;
+  /** 胶囊形（圆角 --r-pill）：悬浮在内容上的单个主操作，如计划卡底部的「查看完整计划」 */
+  pill?: boolean;
 }
 
 const variants: Record<Variant, string> = {
@@ -49,6 +51,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
   iconOnly = false,
   loading = false,
   block = false,
+  pill = false,
   children,
   className = "",
   disabled,
@@ -60,6 +63,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
     sizes[size],
     iconOnly ? "btn-icon-only" : "",
     block ? "btn-block" : "",
+    pill ? "btn-pill" : "",
     loading ? "is-loading" : "",
     className,
   ]

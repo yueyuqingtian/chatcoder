@@ -52,8 +52,10 @@ class MultiFileEditTool(Tool):
     description = (
         "多文件结构化编辑。在一次调用中对多个文件执行 search-replace。\n"
         "原子性：全部成功或全部回滚。\n"
-        "每个 edit 包含: path(文件路径), old_text(要替换的原文), new_text(替换后的文本)。\n"
-        "old_text 必须在文件中唯一匹配。new_text 为空字符串表示删除。"
+        "每个 edit 都必须写齐 path(文件路径), old_text(要替换的原文), new_text(替换后的文本)——"
+        "同一文件的多处修改也要逐项写 path。\n"
+        "old_text 必须在文件中唯一匹配（逐字复制原文，含缩进）。new_text 为空字符串表示删除。\n"
+        '例: {"edits": [{"path": "src/a.ts", "old_text": "原文", "new_text": "新文本"}]}'
     )
 
     def function_schema(self) -> dict:
@@ -116,6 +118,8 @@ class MultiFileEditTool(Tool):
             if p and p not in known_paths:
                 known_paths.append(p)
         sole_path = known_paths[0] if len(known_paths) == 1 else ""
+        missing_path = False
+        missing_files: list[str] = []
 
         for i, edit in enumerate(edits):
             path_str = str(pick_arg(edit, *_EDIT_PATH_KEYS) or "").strip()
@@ -128,9 +132,9 @@ class MultiFileEditTool(Tool):
                 if sole_path:
                     path_str = sole_path
                 else:
-                    errors.append(
-                        f"edit[{i}]: 缺少 path（每个 edit 都要写 path；多个文件时无法推断）"
-                    )
+                    # plan-20261020-pts：不按最近读写的文件推断路径（用户决定），只在末尾给出正确写法示例
+                    errors.append(f"edit[{i}]: 缺少 path")
+                    missing_path = True
                     continue
             if not old_text:
                 errors.append(f"edit[{i}]: old_text 为空")
@@ -145,7 +149,9 @@ class MultiFileEditTool(Tool):
 
             if resolved not in files:
                 if not resolved.exists():
-                    errors.append(f"edit[{i}]: 文件不存在: {path_str}")
+                    errors.append(f"edit[{i}]: 文件不存在: {path_str}（新建文件请用 fs_write）")
+                    if path_str not in missing_files:
+                        missing_files.append(path_str)
                     continue
                 try:
                     tf = read_text_file(resolved)
@@ -166,9 +172,25 @@ class MultiFileEditTool(Tool):
                 notes.append(f"edit[{i}] {note}")
 
         if errors:
+            tail = ""
+            if missing_path:
+                tail += (
+                    "\n每一项都要写自己的 path（同一文件的多处修改也要逐项写），例如："
+                    '{"edits": [{"path": "src/a.ts", "old_text": "原文", "new_text": "新文本"}, '
+                    '{"path": "src/a.ts", "old_text": "另一处原文", "new_text": "另一处新文本"}]}'
+                )
+            if missing_files:
+                import asyncio
+
+                from app.orchestration.tools.path_hints import missing_path_hint
+
+                for p in missing_files[:2]:
+                    hint = await asyncio.to_thread(missing_path_hint, ctx.workspace_root, p, want_dir=False)
+                    if hint:
+                        tail += f"\n关于 {p}：{hint.lstrip()}"
             return ToolResult(
                 ok=False, output="",
-                error="验证失败（未修改任何文件）:\n" + "\n".join(errors),
+                error="验证失败（未修改任何文件）:\n" + "\n".join(errors) + tail,
             )
 
         # Phase 2: 原子性写入（先备份原始字节，全部成功或回滚）

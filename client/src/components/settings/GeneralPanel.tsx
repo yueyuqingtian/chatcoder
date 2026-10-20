@@ -140,6 +140,24 @@ export function GeneralPanel() {
     return next;
   });
 
+  // plan-20261020-retry-cred-perf R9：重试次数用草稿态——旧实现 `parseInt(...) || 0`
+  // 在「清空重输」时会把 0 防抖落盘，用户看到的重试策略被静默改成不重试。
+  const [retryCountDraft, setRetryCountDraft] = useState(String(cfg.agent_retry_count));
+  useEffect(() => {
+    setRetryCountDraft(String(cfg.agent_retry_count));
+  }, [cfg.agent_retry_count]);
+  /** 只提交合法整数（0–20）；非法输入回滚为当前生效值。 */
+  const commitRetryCount = () => {
+    const parsed = Number.parseInt(retryCountDraft, 10);
+    if (!Number.isFinite(parsed)) {
+      setRetryCountDraft(String(cfg.agent_retry_count));
+      return;
+    }
+    const clamped = Math.min(20, Math.max(0, parsed));
+    setRetryCountDraft(String(clamped));
+    if (clamped !== cfg.agent_retry_count) patch({ agent_retry_count: clamped });
+  };
+
   return (
     <div className="settings-card-stack sc-stack">
       <div className="settings-card">
@@ -235,9 +253,11 @@ export function GeneralPanel() {
             type="number"
             style={{ width: 90 }}
             min={0}
-            max={10}
-            value={cfg.agent_retry_count}
-            onChange={(e) => patch({ agent_retry_count: Math.max(0, parseInt(e.target.value) || 0) })}
+            max={20}
+            value={retryCountDraft}
+            onChange={(e) => setRetryCountDraft(e.target.value)}
+            onBlur={commitRetryCount}
+            onKeyDown={(e) => { if (e.key === "Enter") commitRetryCount(); }}
             aria-label={t("gp.retry_count")}
           />
         </Row>

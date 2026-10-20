@@ -40,7 +40,7 @@ const PanelContent = memo(function PanelContent({ tab, sessionId, visible }: { t
     case "subagent": return <SubagentPanel threadId={tab.meta?.threadId} agentName={tab.meta?.agentName} visible={visible} />;
     case "debug": return <DebugPanel sessionId={sessionId} />;
     case "workflow": return <WorkflowPanel sessionId={sessionId} visible={visible} />;
-    case "side": return <SidePanel />;
+    case "side": return <SidePanel visible={visible} />;
     case "git": return <GitPanel visible={visible} />;
     default: return null;
   }

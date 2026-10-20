@@ -51,8 +51,9 @@ function withTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
 
 function errText(e: unknown): string {
   const s = e instanceof Error ? e.message : String(e);
-  // Electron 把页面脚本异常包装成固定英文提示，换成可读说明
-  if (/Script failed to execute/i.test(s)) return "页面脚本执行失败（页面可能正在跳转或被弹窗阻塞）";
+  // Electron 把页面脚本异常包装成固定英文提示，换成可读说明。
+  // plan-20261020-pts：服务端已把运行时错误包装成带回的值，到这里的多为脚本语法错误，其次才是页面跳转
+  if (/Script failed to execute/i.test(s)) return "页面脚本执行失败（多为脚本语法错误，也可能是页面正在跳转或被弹窗阻塞）";
   return s;
 }
 

@@ -11,7 +11,10 @@ agent_loop 在遇到可重试错误时调用 next_credential() 取下一凭据�
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -73,6 +76,236 @@ def is_retryable_error(err: object) -> bool:
     """判断错误是否值得切换凭据重试（认证/限流/5xx/网络）。"""
     text = str(err).lower()
     return any(h in text for h in _RETRYABLE_HINTS)
+
+
+# ── plan-20261020-retry-cred-perf §二：非 ta3 供应商的凭据健康与取用排序 ──
+# 与用户确认的语义：
+# - 粘性（默认）：**最近一次成功**的凭据优先（严格按最近成功时间倒序，从未成功者在后），
+#   不是「成功过」的布尔标记——否则额度耗尽的老账号会每轮被先试一遍；
+# - 优先级：严格按 (priority, id)，失败者进入「暂缓」窗口排到队尾；
+# - 暂缓是软降级：窗口内只是靠后，绝不从列表剔除——其余都失败时下一轮仍会试到它；
+# - 窗口 = min(30min, 30s·2^(连续失败-1))；额度类错误带重置时间则到重置时刻，最长 6 小时；
+# - 状态进程内即时生效，库里以 status=cooldown + cooldown_until 异步合并落盘（无需迁移）。
+DEMOTE_BASE_SECONDS = 30
+DEMOTE_MAX_SECONDS = 30 * 60
+DEMOTE_CAP_SECONDS = 6 * 3600
+# 成功落盘节流：连续成功调用不必每次都写库；首次成功/解除暂缓时立即落
+OK_FLUSH_INTERVAL_SECONDS = 60
+
+
+@dataclass
+class _Health:
+    """单条凭据的进程内健康状态（重启后由库里的 status/last_ok_at 恢复）。"""
+
+    fail_count: int = 0
+    last_ok_at: datetime | None = None
+    demoted_until: datetime | None = None
+    last_error: str | None = None
+    last_ok_flushed: datetime | None = field(default=None, repr=False)
+
+
+_state: dict[int, _Health] = {}
+_state_lock = threading.RLock()
+# 待合并落盘：credential_id → 最新一次是否成功
+_pending_flush: dict[int, bool] = {}
+_flusher: asyncio.Task | None = None
+
+
+def demote_window_seconds(fail_count: int, *, reset_at: datetime | None = None,
+                          now: datetime | None = None) -> int:
+    """连续失败 `fail_count` 次后的暂缓秒数（指数退避）。
+
+    reset_at 给定时按「到额度重置时刻」计算（额度类错误），并夹到最长 6 小时；
+    退避上限 30 分钟——超过这个量级说明是持续性故障，多等无益。
+    """
+    if reset_at is not None:
+        left = (reset_at - (now or _now())).total_seconds()
+        return int(max(0.0, min(float(DEMOTE_CAP_SECONDS), left)))
+    n = max(1, int(fail_count or 1))
+    return int(min(DEMOTE_MAX_SECONDS, DEMOTE_BASE_SECONDS * (2 ** min(n - 1, 10))))
+
+
+def _health(cred: ProviderCredential) -> _Health:
+    """取凭据的进程内健康状态；首次访问时从库行的字段惰性恢复。"""
+    cid = int(getattr(cred, "id", 0) or 0)
+    with _state_lock:
+        hit = _state.get(cid)
+        if hit is not None:
+            return hit
+        status = (getattr(cred, "status", "ok") or "ok").lower()
+        until = _parse_iso(getattr(cred, "cooldown_until", None))
+        if status != "cooldown":
+            until = None  # 只剩历史 cooldown_until、状态已恢复 → 不当作暂缓
+        item = _Health(
+            fail_count=int(getattr(cred, "fail_count", 0) or 0),
+            last_ok_at=_parse_iso(getattr(cred, "last_ok_at", None)),
+            demoted_until=until,
+            last_error=getattr(cred, "last_error", None),
+        )
+        _state[cid] = item
+        return item
+
+
+def _sticky_rank_key(cred: ProviderCredential) -> tuple:
+    """粘性序：最近成功时间倒序 → 从未成功者靠后 → priority 小 → id 小。"""
+    last = _health(cred).last_ok_at
+    if last is None:
+        return (1, 0.0, cred.priority or 0, cred.id or 0)
+    return (0, -last.timestamp(), cred.priority or 0, cred.id or 0)
+
+
+def rank_credentials(creds: list[ProviderCredential], strategy: str = "sticky",
+                     now: datetime | None = None) -> list[ProviderCredential]:
+    """非 ta3 供应商的尝试序：healthy（按策略）+ demoted（暂缓者，窗口最早到期在前）。
+
+    与 `available_credentials` 的关键差异：**不过滤暂缓者**。全部凭据都在列表里，
+    暂缓者只是排到队尾，因此「其余都不可用」时仍会回头试它（R1 的软降级）。
+    """
+    now = now or _now()
+    healthy: list[ProviderCredential] = []
+    parked: list[ProviderCredential] = []
+    for c in creds:
+        if not getattr(c, "is_active", True):
+            continue
+        h = _health(c)
+        if h.demoted_until is not None and h.demoted_until <= now:
+            h.demoted_until = None  # 窗口到期自动解除
+        (parked if h.demoted_until is not None else healthy).append(c)
+    if (strategy or "sticky").lower() == "round_robin":
+        healthy.sort(key=_round_robin_key)
+    else:
+        healthy.sort(key=_sticky_rank_key)
+    parked.sort(key=lambda c: (_health(c).demoted_until or now, c.priority or 0, c.id or 0))
+    return healthy + parked
+
+
+def is_demoted(cred: ProviderCredential, now: datetime | None = None) -> bool:
+    """该凭据当前是否处于「暂缓」窗口内（窗口到期即自动解除）。"""
+    now = now or _now()
+    h = _health(cred)
+    if h.demoted_until is not None and h.demoted_until <= now:
+        h.demoted_until = None
+    return h.demoted_until is not None
+
+
+def report_success(credential_id: int | None) -> None:
+    """记一次成功：连续失败清零、解除暂缓、刷新「最近一次成功」。
+
+    落盘节流 60 秒（首次成功或刚解除暂缓时立即落），避免流式调用每次都写库。
+    """
+    if credential_id is None:
+        return
+    cid = int(credential_id)
+    now = _now()
+    due = False
+    with _state_lock:
+        h = _state.setdefault(cid, _Health())
+        was_parked = h.demoted_until is not None
+        h.fail_count = 0
+        h.demoted_until = None
+        h.last_ok_at = now
+        h.last_error = None
+        due = (h.last_ok_flushed is None or was_parked
+               or (now - h.last_ok_flushed).total_seconds() >= OK_FLUSH_INTERVAL_SECONDS)
+        if due:
+            h.last_ok_flushed = now
+    if due:
+        _schedule_persist(cid, success=True)
+
+
+def report_failure(credential_id: int | None, error: object, *,
+                   reset_at: datetime | None = None, counted: bool = True) -> None:
+    """记一次失败：连续失败 +1 并按指数退避设置暂缓窗口。
+
+    counted=False 用于 client 类错误（上下文溢出、function-call 400、参数错误）——
+    这类问题出在请求内容上，换 Key 不会好转，因此只留痕、不计入凭据健康。
+    """
+    if credential_id is None:
+        return
+    cid = int(credential_id)
+    now = _now()
+    with _state_lock:
+        h = _state.setdefault(cid, _Health())
+        h.last_error = str(error)[:300]
+        if not counted:
+            return
+        h.fail_count += 1
+        h.demoted_until = now + timedelta(seconds=demote_window_seconds(
+            h.fail_count, reset_at=reset_at, now=now))
+    _schedule_persist(cid, success=False)
+
+
+def forget(credential_id: int | None) -> None:
+    """清掉进程内健康状态（删除凭据 / 手动复位 / 重新启用后调用）。"""
+    if credential_id is None:
+        return
+    cid = int(credential_id)
+    with _state_lock:
+        _state.pop(cid, None)
+        _pending_flush.pop(cid, None)
+
+
+def _schedule_persist(credential_id: int, *, success: bool) -> None:
+    """把一次健康变化合并到后台落盘；无事件循环时只改内存（纯逻辑单测）。"""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    with _state_lock:
+        prev = _pending_flush.get(credential_id)
+        # 同一批里成功优先：成功会清掉暂缓，不能被更早的失败覆盖
+        _pending_flush[credential_id] = success or (prev is False)
+    global _flusher
+    if _flusher is None or _flusher.done():
+        _flusher = loop.create_task(_flush_health_loop())
+
+
+async def _flush_health_loop() -> None:
+    """把待写的健康状态逐条落库；写失败只记日志，不影响调用链。"""
+    await asyncio.sleep(0)  # 让同一 tick 内的多次上报合并成一批
+    while True:
+        with _state_lock:
+            if not _pending_flush:
+                return
+            items = list(_pending_flush.items())
+            _pending_flush.clear()
+        for cid, success in items:
+            try:
+                await _persist_health(cid, success=success)
+            except Exception:  # noqa: BLE001 - 落盘失败不影响调用
+                logger.debug("[credential] 健康状态落盘失败 #%s", cid, exc_info=True)
+
+
+async def _persist_health(credential_id: int, *, success: bool) -> None:
+    from app.persistence.database import run_write_locked
+
+    with _state_lock:
+        h = _state.get(credential_id)
+        if h is None:
+            return
+        fail = h.fail_count
+        until = h.demoted_until
+        last_ok = h.last_ok_at
+        err = h.last_error
+
+    def patch(s):
+        cred = s.get(ProviderCredential, credential_id)
+        if cred is None:
+            return
+        cred.fail_count = fail
+        cred.last_error = err
+        if success:
+            cred.status = "ok"
+            cred.cooldown_until = None
+            if last_ok is not None:
+                cred.last_ok_at = _iso(last_ok)
+        else:
+            # 复用 status=cooldown + cooldown_until 表达「暂缓」，重启后由库恢复
+            cred.status = "cooldown" if until is not None else "ok"
+            cred.cooldown_until = _iso(until) if until is not None else None
+        s.commit()
+
+    await run_write_locked(patch, label=f"credential.health.{credential_id}")
 
 
 def _sort_key(cred: ProviderCredential) -> tuple:
@@ -271,10 +504,16 @@ async def update_credential(db: AsyncSession, credential_id: int, **fields) -> b
             cred.status = "ok"
             cred.cooldown_until = None
             cred.fail_count = 0  # plan-290: 重新启用即重置连续失败计数
+            _reset_later = True
+        else:
+            _reset_later = False
         s.commit()
-        return True
+        return _reset_later
 
-    return await run_write_locked(patch, label=f"credential.update.{credential_id}")
+    reset = await run_write_locked(patch, label=f"credential.update.{credential_id}")
+    if reset:
+        forget(credential_id)  # 进程内健康状态同步复位，避免新排序仍认为它暂缓中
+    return bool(reset)
 
 
 async def delete_credential(db: AsyncSession, credential_id: int) -> bool:
@@ -291,7 +530,9 @@ async def delete_credential(db: AsyncSession, credential_id: int) -> bool:
         s.commit()
         return True
 
-    return await run_write_locked(patch, label=f"credential.delete.{credential_id}")
+    ok = await run_write_locked(patch, label=f"credential.delete.{credential_id}")
+    forget(credential_id)
+    return ok
 
 
 def _purge_auth_rows(session, credential_id: int) -> int:
@@ -426,7 +667,10 @@ async def reset_credential(db: AsyncSession, credential_id: int) -> bool:
         s.commit()
         return True
 
-    return await run_write_locked(patch, label=f"credential.reset.{credential_id}")
+    ok = await run_write_locked(patch, label=f"credential.reset.{credential_id}")
+    if ok:
+        forget(credential_id)
+    return ok
 
 
 async def mark_ok(db: AsyncSession, credential_id: int) -> None:

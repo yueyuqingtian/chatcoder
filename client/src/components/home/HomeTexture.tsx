@@ -4,6 +4,7 @@
  * 两种墨色：--world-tex-a（中性墨）为主，--world-tex-b（强调色淡墨）点缀少量元素。
  * 鼠标附近纹理轻微变亮、位移；canvas 只在指针移动时重绘，降低动效时保持静态。 */
 import { useEffect, useRef } from "react";
+import { isBusy, subscribe } from "../../perf/bus";
 import { useThemeStore, type World } from "../../store/theme";
 
 const RADIUS = 180;
@@ -141,6 +142,21 @@ export function HomeTexture() {
     const paint = PAINTERS[world] ?? PAINTERS.graphite;
     const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
     let px = -9999, py = -9999, raf = 0;
+    /** 运动期收到的尺寸变化（只记账，结束后重画一次） */
+    let resizePending = false;
+    /** 补画兜底：PerfBus 的订阅只在「忙碌翻转」时通知，若某条路径只写了 DOM 类
+     *  而未登记（bus 的 DOM 兜底路径），订阅收不到事件。这里用一次廉价的 rAF 自检
+     *  保证待画标记一定被消费——isBusy() 只读 classList/属性，不触发强制布局。 */
+    let flushRaf = 0;
+    const flushWhenIdle = () => {
+      if (flushRaf) return;
+      flushRaf = requestAnimationFrame(() => {
+        flushRaf = 0;
+        if (!resizePending) return;
+        if (isBusy()) { flushWhenIdle(); return; }
+        resize();
+      });
+    };
     const css = getComputedStyle(document.documentElement);
     // 纹理墨色：中性墨为主，强调色只做点缀；透明度在 canvas 内另行控制
     const a = css.getPropertyValue("--text-2").trim() || "#888";
@@ -159,6 +175,11 @@ export function HomeTexture() {
     }
 
     const resize = () => {
+      // plan-20261020-retry-cred-perf D12：运动期（拖分隔条 / 拖窗口 / 面板过渡）跳过
+      // 「重建画布 + 重画上千个图元」，只记一笔；运动结束时由 PerfBus 订阅补一次，
+      // 保证终态尺寸与纹理一定画到位，不丢最后一帧。
+      if (isBusy()) { resizePending = true; flushWhenIdle(); return; }
+      resizePending = false;
       const r = cv.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
       cv.width = r.width * dpr; cv.height = r.height * dpr;
@@ -176,10 +197,12 @@ export function HomeTexture() {
     const onLeave = () => { px = py = -9999; draw(); };
     const ro = new ResizeObserver(resize);
     ro.observe(cv);
+    // PerfBus 只在「忙碌 → 空闲」翻转时通知：正好是补画最后一帧的时机
+    const offBusy = subscribe((busy) => { if (!busy && resizePending) resize(); });
     host.addEventListener("pointermove", onMove);
     host.addEventListener("pointerleave", onLeave);
     return () => {
-      ro.disconnect(); cancelAnimationFrame(raf);
+      ro.disconnect(); cancelAnimationFrame(raf); cancelAnimationFrame(flushRaf); offBusy();
       host.removeEventListener("pointermove", onMove);
       host.removeEventListener("pointerleave", onLeave);
     };

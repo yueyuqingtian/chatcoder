@@ -16,6 +16,7 @@ import type { ToolImage } from "../../store/chat";
 import { MsgType, SenderType } from "@chatcoder/shared";
 import type { TurnOut } from "@chatcoder/shared";
 import { recordDerivation } from "../../perf/metrics";
+import { formatBgElapsed } from "../../utils/bgFormat";
 
 export interface ToolLeaf {
   callKey: string;
@@ -85,7 +86,9 @@ export type TurnItem =
   | { kind: "workflow"; programId: number; turnId: number | null; firstId?: number }
   /** plan-20261015-browser-agent：截图卡——截图类工具调用之后的截图预览，固定在该次调用的时间线位置，
    *  随所在的「工作过程」一起折叠（汇报之后的截图仍常显）；firstId 为该次调用消息 id */
-  | { kind: "shot"; leaf: ToolLeaf; firstId?: number };
+  | { kind: "shot"; leaf: ToolLeaf; firstId?: number }
+  /** plan-474-2105：子会话提问（系统消息）——只读提示卡，来源按钮跳转到该子会话 */
+  | { kind: "subsession-question"; msg: MessageOut };
 
 export type TimelineEntry =
   /** turnIds：并入续跑轮后的全部轮 id（首个即 turnId）；未并入时缺省，见 createRoundMerger */
@@ -100,9 +103,11 @@ export const SYSTEM_CONTINUATION_KINDS: ReadonlySet<string> = new Set([
 ]);
 
 /** 常显项（不进入「工作过程」折叠）：工作流卡与工作流唤醒分隔线——进度、暂停 / 继续需要始终可见。
- *  截图卡不在此列：它是执行过程的一部分，完成后应与过程一起折叠，否则汇报区会被截图占满。 */
+ *  截图卡不在此列：它是执行过程的一部分，完成后应与过程一起折叠，否则汇报区会被截图占满。
+ *  plan-474-2105：子会话提问同样常显——它要用户/主代理看到并回应，一旦并入「工作过程」，
+ *  主代理给出汇报后整段默认折叠，提问就再也看不到了。 */
 export function isOutsideProcess(item: TurnItem): boolean {
-  return item.kind === "workflow" || item.kind === "workflow-wakeup";
+  return item.kind === "workflow" || item.kind === "workflow-wakeup" || item.kind === "subsession-question";
 }
 
 /** 执行段的切分结果（见 splitFlowSegments）。 */
@@ -741,6 +746,73 @@ function workflowProgramsOf(calls: MessageOut[], resultsByKey: Map<string, Messa
  *  同时兼容真实名与 ta3 伪装名。 */
 const SUGGESTION_TOOLS = new Set(["suggest_next_task", "SuggestNextTask"]);
 
+/** plan-474-2105：系统消息的 mailbox.kind（子会话治理的事件类型都挂在这里）。 */
+function mailboxKindOf(c: Record<string, unknown>): string {
+  const mb = c.mailbox;
+  if (!mb || typeof mb !== "object") return "";
+  const kind = (mb as Record<string, unknown>).kind;
+  return typeof kind === "string" ? kind : "";
+}
+
+/** plan-474-2105：子会话提问——mailbox.kind 优先，旧消息兜底非空 question_id。 */
+function isSubsessionQuestion(c: Record<string, unknown>): boolean {
+  if (mailboxKindOf(c) === "subsession_question") return true;
+  return typeof c.question_id === "string" && c.question_id.length > 0;
+}
+
+/** plan-20261020-bgtask：后台命令的完成 / 停止通知（系统消息）。 */
+const BG_NOTICE_KINDS: ReadonlySet<string> = new Set(["bg_command_done", "bg_command_stopped"]);
+
+/** 把后台命令通知换成与普通工具完全一致的行（图标 + 动词 + 命令，可展开看结果）。
+ *
+ *  此前是一张风格独立的「后台命令完成」卡片：模型用 terminal_bg_status 查看过的结果，
+ *  下面又重复出现一遍。现在后端不再重复回报已被模型读到的结果，剩下的通知（模型没盯着时跑完 / 用户手动停止）
+ *  用普通工具行展示，工具名用 `bg_command_done / bg_command_stopped` 两个伪工具名区分动词。
+ *  结构化条目来自落库消息的 `bg_items`；旧消息没有它时整段文本放进展开区。 */
+function bgNoticeItem(m: MessageOut, c: Record<string, unknown>): TurnItem {
+  const tool = mailboxKindOf(c);
+  const stopped = tool === "bg_command_stopped";
+  const asNum = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const rows = (Array.isArray(c.bg_items) ? c.bg_items : [])
+    .filter((r): r is Record<string, unknown> => r != null && typeof r === "object");
+  const base = {
+    tool,
+    agentName: "",
+    threadId: null,
+    turnId: m.turn_id != null ? Number(m.turn_id) : null,
+    error: null,
+    changeStat: null,
+    image: null,
+  };
+  const leaves: ToolLeaf[] = rows.length > 0
+    ? rows.map((r, i) => {
+      const rc = asNum(r.returncode);
+      const elapsed = asNum(r.elapsed);
+      const tail = typeof r.tail === "string" ? r.tail.trim() : "";
+      const head = stopped
+        ? `用户手动停止${elapsed != null ? ` · 已运行 ${formatBgElapsed(elapsed)}` : ""}`
+        : `${rc === 0 ? "退出码 0（成功）" : `退出码 ${rc ?? "未知"}`}${elapsed != null ? ` · 耗时 ${formatBgElapsed(elapsed)}` : ""}`;
+      return {
+        ...base,
+        callKey: `bgnote-${m.id}-${i}`,
+        args: { command: typeof r.command === "string" ? r.command : "", shell_id: typeof r.shell_id === "string" ? r.shell_id : "" },
+        // 被用户停止不算失败（红叉只给非 0 退出）
+        ok: stopped ? true : rc == null || rc === 0,
+        output: tail ? `${head}\n\n${tail}` : head,
+        durationMs: elapsed != null ? Math.round(elapsed * 1000) : null,
+      };
+    })
+    : [{
+      ...base,
+      callKey: `bgnote-${m.id}-0`,
+      args: {},
+      ok: true,
+      output: msgText(c),
+      durationMs: null,
+    }];
+  return { kind: "tools", nodes: leaves.map((leaf) => ({ kind: "leaf" as const, leaf })), firstId: Number(m.id) };
+}
+
 /** turn 内消息归类：严格按消息时间序；相邻 tool_call 合并 cluster；系统消息 → divider。 */
 function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
   // §3.3: 相邻 tool_call 合并为 tool-cluster，AI 文字切段时新开 cluster
@@ -798,6 +870,19 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
       continue;
     }
     const c = m.content as Record<string, unknown>;
+    // plan-474-2105：子会话治理的两类系统消息先于 System / Text 分支判定——它们带着
+    // mailbox 标记但 msg_type 是 text，落到普通正文分支会显示成裸文本。
+    // buildTimeline 的完整构建与增量构建都经 buildTurnItems，因此刷新前后判定一致。
+    if (isSubsessionQuestion(c)) {
+      flushTools();
+      items.push({ kind: "subsession-question", msg: m });
+      continue;
+    }
+    if (BG_NOTICE_KINDS.has(mailboxKindOf(c))) {
+      flushTools();
+      items.push(bgNoticeItem(m, c));
+      continue;
+    }
     if ((m.msg_type === MsgType.ToolCall || m.msg_type === MsgType.ToolResult) && SUGGESTION_TOOLS.has(String(c.tool ?? ""))) {
       afterSuggestion = true;
       continue;

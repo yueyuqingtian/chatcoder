@@ -48,14 +48,17 @@ export function TerminalPanel({ tab, sessionId, visible = true }: TerminalPanelP
   const [spawnError, setSpawnError] = useState<string | null>(null);
   const [retryTick, setRetryTick] = useState(0);
 
-  const projects = useChatStore((s) => s.projects);
-  const currentProjectId = useChatStore((s) => s.currentProjectId);
-  const sessions = useChatStore((s) => s.sessions);
-
+  // plan-20261020-retry-cred-perf E15：只订阅「本标签的 cwd」这一个标量。
+  // 此前订阅整个 sessions 数组——全局通道每条 message.created 都会重建该数组，
+  // 于是所有保活终端实例（每个 tab 一个）都跟着重渲染，而它们真正需要的只是工作目录。
+  // 选择器返回原始字符串，值不变时 zustand 不通知重渲染。
   // 终端工作目录 = 标签所属会话的项目目录（无所属会话时退回当前项目）
-  const ownerSession = sessionId != null ? sessions.find((s) => s.id === sessionId) : undefined;
-  const project = projects.find((p) => p.id === (ownerSession?.project_id ?? currentProjectId));
-  const cwd = project?.path;
+  const cwd = useChatStore((s) => {
+    const ownerProjectId = sessionId != null
+      ? s.sessions.find((x) => x.id === sessionId)?.project_id
+      : undefined;
+    return s.projects.find((p) => p.id === (ownerProjectId ?? s.currentProjectId))?.path;
+  });
 
   useEffect(() => {
     if (!api?.ptySpawn || !containerRef.current) return;

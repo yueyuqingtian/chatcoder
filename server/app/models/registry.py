@@ -58,7 +58,7 @@ def _resolve_ta3_base_url(model, provider, meta: dict | None) -> str:
 
 def _build_provider(
     api_key: str, base_url: str, model: str, api_format: str = "openai",
-    meta: dict | None = None, provider=None,
+    meta: dict | None = None, provider=None, max_retries: int = 3,
 ) -> ModelProvider:
     """根据 api_format 构造对应的 Provider 实例。
 
@@ -396,11 +396,17 @@ async def _build_workbuddy_provider(
     return p, "workbuddy_session"
 
 
-def _attach_credential_meta(p: ModelProvider, provider_id: int | None, credential_id: int | None) -> None:
-    """把 provider/credential 归属写到实例上，供 agent_loop 上报成功/失败（轮询用）。"""
+def _attach_credential_meta(p: ModelProvider, provider_id: int | None, credential_id: int | None,
+                            *, legacy: bool = False) -> None:
+    """把 provider/credential 归属写到实例上，供 agent_loop 上报成功/失败（轮询用）。
+
+    plan-20261020-retry-cred-perf：legacy=True 表示 ta3 —— 它继续走旧的粘性/轮转排序与
+    mark_ok/mark_failed 上报；其余供应商走新的健康状态排序（rank_credentials）。
+    """
     try:
         p.provider_row_id = provider_id  # type: ignore[attr-defined]
         p.credential_row_id = credential_id  # type: ignore[attr-defined]
+        p.credential_legacy = bool(legacy)  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001 - 属性写入失败不影响主流程
         pass
 
@@ -464,11 +470,16 @@ async def _pick_credential(db: AsyncSession, provider, exclude: set[int] | None 
     pid = db_provider_id or provider.id
     creds = await credential_service.list_credentials(db, pid)
     strategy = getattr(provider, "credential_strategy", None) or "sticky"
-    avail = credential_service.available_credentials(
-        creds, strategy=strategy, provider_id=pid, rotate=True,
-    )
-    avail = [c for c in avail if c.id not in exclude]
     fmt = (provider.api_format or "openai").lower()
+    if fmt == "ta3":
+        # ta3 保持现状：旧的粘性/轮转排序与冷却硬过滤（既有单测与线上行为不变）
+        avail = credential_service.available_credentials(
+            creds, strategy=strategy, provider_id=pid, rotate=True,
+        )
+    else:
+        # 非 ta3：健康排序——暂缓者只排到队尾、不做硬过滤，也不再推进轮转游标
+        avail = credential_service.rank_credentials(creds, strategy=strategy)
+    avail = [c for c in avail if c.id not in exclude]
     for c in avail:
         if c.api_key:
             return c, c.api_key
@@ -531,7 +542,8 @@ class ModelRegistry:
                     # plan-248-1258 M2.4: 供应商被禁用即视为模型不可用
                     return None, "provider_disabled"
                 # 仅当确有凭据行时才以凭据为准；否则回落旧行为（独立 key / 占位符）
-                if await credential_service.list_credentials(db, provider.id):
+                creds = await credential_service.list_credentials(db, provider.id)
+                if creds:
                     api_format = (provider.api_format or getattr(model, "api_format", "openai") or "openai")
                     chosen, api_key = await _pick_credential(db, provider, exclude=set())
                     if chosen is None:
@@ -564,8 +576,12 @@ class ModelRegistry:
                         p = _build_provider(
                             api_key=_key, base_url=_base_url, model=model.name,
                             api_format=api_format, meta=_meta, provider=provider,
+                            # 多凭据时降 SDK 内置重试：故障/限流立刻切下一个 Key，不在同一个 Key 上睡
+                            max_retries=1 if len(creds) > 1 else 3,
                         )
-                        _attach_credential_meta(p, provider.id, chosen.id)
+                        # ta3 继续走旧的凭据排序与上报路径（见 _pick_credential）
+                        _attach_credential_meta(p, provider.id, chosen.id,
+                                                legacy=(api_format == "ta3"))
                         return p, "provider_credential"
                     return None, "provider_incomplete"
 
@@ -653,9 +669,12 @@ class ModelRegistry:
         else:
             if not (provider.base_url and api_key):
                 return None, "provider_incomplete", None
+            from app.services import credential_service as _cred_svc
+            _total = len(await _cred_svc.list_credentials(db, provider.id))
             p, reason = _build_provider(
                 api_key=api_key, base_url=provider.base_url, model=model.name,
                 api_format=api_format, provider=provider,
+                max_retries=1 if _total > 1 else 3,
             ), "provider_credential"
         if p is not None:
             _attach_credential_meta(p, provider.id, chosen.id)

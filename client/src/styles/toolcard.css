@@ -354,6 +354,15 @@ div.tcard-row:focus-visible { outline: none; background: var(--tcard-hover); }
 .tcard-chip > svg { flex-shrink: 0; }
 .tcard-chip-text { white-space: nowrap; }
 
+/* ── 后台任务栏（plan-20261020-bgtask）：图标 → 命令（等宽、单行省略）→ 运行时间 → 停止 ──
+   运行时间给固定最小宽并右对齐：数字逐秒变化、「59 秒 → 1 分 00 秒」换档时命令文字不跟着抖；
+   停止按钮常显（不是悬停才出现），悬停才变危险色。
+   不能给按钮加负的右外边距：栏目体外层的折叠容器会裁掉内容区之外的部分，悬停底色的右半边会被切掉。 */
+.tcard-bg .tcard-ic { color: var(--accent); }
+.tcard-bg .tcard-row-text { font-family: var(--font-mono); font-size: var(--tcard-fs-md); }
+.tcard-bg-elapsed { min-width: 5em; text-align: right; }
+.tcard-bg-stop { flex-shrink: 0; color: var(--text-3); }
+
 /* ── 折叠行：「‹ 已完成 4 项」 ── */
 .tcard-row-fold { color: var(--text-2); }
 .tcard-row-fold .tcard-ic { color: var(--text-3); }

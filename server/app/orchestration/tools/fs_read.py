@@ -80,6 +80,14 @@ class FsReadTool(Tool):
 
         # 附件目录兜底：用户消息附件在工作区外的 uploads 目录，允许只读
         target = safe_resolve_read(ctx.workspace_root, path)
+        # plan-20261020-pts：上下文折叠的落盘文件（.compact-cache/<hash>.txt）——旧会话的占位提示指向全局工作区，
+        # 会话工作区里没有时回落过去读（本软件自己的缓存，不走工作区外读取的审批）
+        if target is None or not target.exists():
+            from app.orchestration.tools.path_hints import compact_cache_fallback
+
+            _cache = compact_cache_fallback(ctx.workspace_root, path)
+            if _cache is not None:
+                target = _cache
         if target is None:
             # plan-75-332: 工作区外读取不再由工具自身弹审批卡——直接解析放行，
             # 是否询问用户由 approval_policy 按权限模式统一裁决。
@@ -94,7 +102,23 @@ class FsReadTool(Tool):
             # 交由下方统一报「文件不存在」（不再触发审批，工作区内无需授权）。
             pass
         if not target.exists():
-            return ToolResult(ok=False, output="", error=f"文件不存在: {path}")
+            # plan-20261020-pts：附上同名文件的实际位置与最近存在的上级目录，免得模型反复猜路径
+            import asyncio
+
+            from app.orchestration.tools.path_hints import missing_path_hint
+
+            hint = await asyncio.to_thread(missing_path_hint, ctx.workspace_root, str(path), want_dir=False)
+            return ToolResult(ok=False, output="", error=f"文件不存在: {path}{hint}")
+        if target.is_dir():
+            # plan-20261020-pts：传了目录——直接给出目录内容（模型下一步通常就是挑一个文件读），不再报错让它重来
+            from app.orchestration.tools.path_hints import list_dir_brief
+
+            listing = list_dir_brief(target, limit=60)
+            return ToolResult(
+                ok=True,
+                output=f"{path} 是目录（不是文件），其中有：{listing}\n读取文件请传具体文件路径；列目录可用 fs_list。",
+                data={"path": path, "is_dir": True},
+            )
         if not target.is_file():
             return ToolResult(ok=False, output="", error=f"不是文件: {path}")
 

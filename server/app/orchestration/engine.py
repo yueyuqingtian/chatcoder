@@ -56,6 +56,19 @@ _cancel_events: dict[int, asyncio.Event] = {}
 _turn_managers: dict[int, object] = {}
 _turn_tasks: dict[int, asyncio.Task] = {}
 
+# ── plan-474-2105：工具运行态与打断通道 ──────────────────────
+# 主代理在工具执行期间原本完全看不到注入队列，子会话的提问要等当前工具结束才可见；
+# 长命令 / sleep / wait 轮询会把这段时间拉得很长。这里登记「当前在跑什么、能不能打断」，
+# 由 mailbox 在投递控制面消息时决定：置打断信号让等待让出，或等动作结束后再注入。
+# turn_id → {"tool", "phase", "interruptible", "detail", "since"}
+_tool_states: dict[int, dict] = {}
+# turn_id → 打断信号（工具等待处与 LLM 调用前都会检查）
+_wake_events: dict[int, asyncio.Event] = {}
+# plan-20261020-bgtask：turn_id → 延后兑现的打断请求（来源标记）。
+# 请求到达时模型正在思考、没有工具在等：先记下，等下一个「会等待」的工具启动时立刻兑现；
+# 对 todo_write 这类瞬间完成的工具则直接丢弃——消息已在注入队列里，下一次 LLM 调用前就会被读到。
+_pending_interrupts: dict[int, str] = {}
+
 
 async def _flush_turn_buffer(session_id: int, turn_id: int) -> None:
     """在 turn 结束/状态直写前排空 write-behind 缓冲，并释放该 turn 的缓冲槽。"""
@@ -233,6 +246,138 @@ def _session_turn_leave(session_id: int | None) -> None:
         _running_session_turns.pop(session_id, None)
 
 
+def running_turn_id(session_id: int) -> int | None:
+    """该会话当前运行中的 turn id（无则 None）。
+
+    一个会话同时只有一个 turn，因此取第一个命中即可；mailbox 与后台命令回报
+    据此判断「注入当前轮」还是「拉起一轮」。
+    """
+    for tid, sid in _running_turn_session.items():
+        if sid == session_id:
+            return tid
+    return None
+
+
+def wake_event_for(turn_id: int) -> asyncio.Event:
+    """取该 turn 的打断信号（懒创建）。turn 收尾时自动丢弃。"""
+    ev = _wake_events.get(turn_id)
+    if ev is None:
+        ev = asyncio.Event()
+        _wake_events[turn_id] = ev
+    return ev
+
+
+def set_tool_state(
+    turn_id: int,
+    *,
+    tool: str,
+    phase: str = "running",
+    interruptible: str = "never",
+    detail: str = "",
+) -> None:
+    """登记当前工具运行态。`interruptible` 取值见 `request_interrupt`。
+
+    plan-20261020-bgtask：默认档位由 abort 改为 never——只有明确在「等待」的工具才允许被打断，
+    漏登记的工具宁可不打断，也不能被当场取消（取消会丢掉已发生的副作用与结果）。
+    """
+    _tool_states[turn_id] = {
+        "tool": tool,
+        "phase": phase,
+        "interruptible": interruptible,
+        "detail": detail[:200],
+        "since": time.monotonic(),
+    }
+
+
+def clear_tool_state(turn_id: int) -> None:
+    _tool_states.pop(turn_id, None)
+
+
+def tool_state(turn_id: int) -> dict | None:
+    return _tool_states.get(turn_id)
+
+
+def request_interrupt(turn_id: int, *, reason: str = "", source: str = "") -> bool:
+    """请求打断该 turn 的等待，让它尽快处理邮箱里的控制面消息。
+
+    三档语义（与 `agent_loop` 的工具分派一致）：
+      · never —— 写文件、正在等待用户回答：不打断，消息留在注入队列，动作结束立刻生效；
+      · detach —— 前台同步命令（含 sleep）：转后台后让出，进程继续跑；
+      · abort（默认）—— `wait=true` 类等待与纯读工具：直接结束等待。
+    返回是否真的置位了打断信号（False = 该 turn 不在运行，或当前没有可打断的动作）。
+
+    plan-20261020-bgtask：此刻没有任何工具在等（模型正在思考 / 输出）时**不直接置位**——
+    旧实现照样置位，信号一直残留到下一个工具启动的瞬间，把一个毫不相干的工具（如 todo_write）
+    当场「让出」，界面上就出现了莫名其妙的「已让出等待」。现在改为记成延后请求
+    （见 `claim_pending_interrupt`）：下一个会等待的工具启动时才兑现，其余工具直接丢弃。
+    `source` 记在运行态里，供让出文案说明到底是谁的消息。
+    """
+    if turn_id not in _running_turns:
+        return False
+    st = _tool_states.get(turn_id)
+    if st is None:
+        _pending_interrupts[turn_id] = source or reason
+        logger.info(
+            "[interrupt.defer] turn=%s reason=%s source=%s（此刻没有工具在等，下一个会等待的工具启动时兑现）",
+            turn_id, reason, source,
+        )
+        return False
+    if st.get("interruptible") not in ("abort", "detach"):
+        logger.info(
+            "[interrupt.skip] turn=%s tool=%s reason=%s（不可打断，动作结束后注入）",
+            turn_id, st.get("tool"), reason,
+        )
+        return False
+    ev = _wake_events.get(turn_id)
+    if ev is None:
+        return False
+    st["interrupt_source"] = source or reason
+    ev.set()
+    logger.info(
+        "[interrupt.request] turn=%s tool=%s reason=%s source=%s",
+        turn_id, st.get("tool"), reason, source,
+    )
+    return True
+
+
+def interrupt_source(turn_id: int) -> str:
+    """打断信号的来源标记（邮箱消息类型）；没有则空串。"""
+    return str((_tool_states.get(turn_id) or {}).get("interrupt_source") or "")
+
+
+def claim_pending_interrupt(turn_id: int) -> str | None:
+    """工具启动时取走（并清除）此前延后的打断请求，返回来源标记；没有则 None。
+
+    无论工具能否被打断都会取走：能打断的（前台命令 / wait 轮询）由调用方立刻兑现；
+    不能打断的瞬间工具直接丢弃——那条消息已在注入队列里，工具一结束、下一次 LLM 调用前就会被读到。
+    """
+    return _pending_interrupts.pop(turn_id, None)
+
+
+def pop_interrupt(turn_id: int) -> dict | None:
+    """取出并清除该 turn 的打断状态（工具等待处让出后调用）。"""
+    st = _tool_states.pop(turn_id, None)
+    ev = _wake_events.get(turn_id)
+    if ev is not None:
+        ev.clear()
+    return st
+
+
+def _mailbox_pending(session_id: int) -> list[dict]:
+    """取邮箱里排队的消息（plan-474-2105）。
+
+    P2 汇报不会主动唤醒会话（避免白烧 token），由这里在下一次 turn 开始时并入注入项；
+    P0 控制面消息通常已被 deliver 即时投递，取到的是「没能唤醒成功」的残留项。
+    """
+    try:
+        from app.orchestration import mailbox
+
+        return mailbox.take_pending(session_id)
+    except Exception:  # noqa: BLE001 — 取队列失败不能影响 turn 启动
+        logger.debug("[mailbox] 取排队消息失败(非阻塞) session=%s", session_id, exc_info=True)
+        return []
+
+
 def inject_input(turn_id: int, item: dict) -> bool:
     """向运行中的 turn 注入一条用户消息。turn 未在运行时返回 False（调用方走常规发送）。"""
     if turn_id not in _running_turns:
@@ -243,6 +388,8 @@ def inject_input(turn_id: int, item: dict) -> bool:
 
 def drain_injected_inputs(turn_id: int) -> list[dict]:
     """取走并清空该 turn 的待注入项（agent_loop 每次 LLM 调用前调用）。"""
+    # 模型即将读到这些消息，此前延后的打断请求随之作废
+    _pending_interrupts.pop(turn_id, None)
     return _pending_inputs.pop(turn_id, [])
 
 
@@ -634,6 +781,75 @@ async def _continue_goal_turn(session_id: int, prev_turn_id: int) -> None:
             logger.warning("[goal] 续跑 turn 创建失败 session=%s", session_id, exc_info=True)
 
 
+# plan-474-2105：空闲唤醒的合并窗口（秒）——同一时段的子会话提问 / 后台命令完成合并成一轮
+_WAKEUP_MERGE_DELAY_SEC = 1.5
+
+
+async def wakeup_session(session_id: int, *, prompt: str, reason: str = "") -> int | None:
+    """会话空闲时创建一轮，把 `prompt` 送进主代理上下文（邮箱与后台命令完成共用）。
+
+    返回新 turn id；会话仍忙 / 不存在 / 创建失败时返回 None（调用方负责把消息留在队列里）。
+    唤醒轮消息沿用 `subagent_wakeup` 标记：前端渲染为细分隔线而不是用户气泡，
+    语言判定回退到真实用户消息（与子代理唤醒完全同口径）。
+    """
+    from app.persistence.database import async_session_factory
+
+    try:
+        await asyncio.sleep(_WAKEUP_MERGE_DELAY_SEC)
+    except asyncio.CancelledError:
+        return None
+    if _session_turn_busy(session_id):
+        return None
+    try:
+        async with async_session_factory() as db:
+            session = await session_service.get_session(db, session_id)
+            if session is None:
+                return None
+            user_msg = await message_service.create_message(
+                db, session_id=session_id,
+                sender_type=SenderType.USER.value,
+                msg_type=MsgType.TEXT.value,
+                content={
+                    "text": prompt,
+                    "subagent_wakeup": True,
+                    "wakeup_reason": reason or "mailbox",
+                },
+                broadcast=True,
+            )
+            turn_id_new = await turn_service.create_turn(
+                db, session_id=session_id, user_message_id=user_msg.id,
+            )
+            await _patch_message(user_msg.id, turn_id=turn_id_new)
+            await broadcast(session_id, {
+                "event": "session.wakeup",
+                "payload": {"session_id": session_id, "turn_id": turn_id_new, "reason": reason},
+            })
+
+            async def _run():
+                async with async_session_factory() as s:
+                    try:
+                        await start_turn(s, turn_id=turn_id_new)
+                        await s.commit()
+                    except Exception:
+                        await s.rollback()
+                        logger.warning("[wakeup] turn=%s 执行异常 session=%s", turn_id_new, session_id,
+                                       exc_info=True)
+                        try:
+                            await turn_service.update_turn_status(
+                                s, turn_id_new, "failed", summary="唤醒轮执行异常", completed=True)
+                            await s.commit()
+                            await broadcast_turn_updated(session_id, turn_id_new, "failed")
+                        except Exception:
+                            pass
+
+            _turn_tasks[turn_id_new] = asyncio.get_event_loop().create_task(_run())
+            logger.info("[wakeup] session=%s turn=%s reason=%s", session_id, turn_id_new, reason)
+            return turn_id_new
+    except Exception:
+        logger.warning("[wakeup] session=%s reason=%s 创建失败", session_id, reason, exc_info=True)
+        return None
+
+
 async def _wakeup_turn_for_subagents(session_id: int) -> None:
     """v39 子代理完成唤醒：会话空闲时由服务端创建新 turn，把完成报告送达主代理。
 
@@ -893,6 +1109,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
     _running_turns.add(turn_id)
     _running_turn_session[turn_id] = session_id
     cancel_event = _cancel_events.setdefault(turn_id, asyncio.Event())
+    wake_event_for(turn_id)  # plan-474-2105：邮箱打断信号（懒建，收尾自动释放）
     # v39: 会话运行计数——后台子代理终态据此判断会话是否空闲（空闲才唤醒）
     _session_turn_enter(session_id)
     # v7: 主 turn 对应的任务记录（任务摘要步骤），创建后跟踪状态与产物
@@ -1128,9 +1345,11 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                 n for n in _available_tools if n in TO_TA3 or is_mcp_tool(n)
             }
         _type_states = await load_subagent_type_states(db)
-        # plan-156-624：设置中心「启用子代理与子会话」总开关此前只存在配置里、engine 从未读取，
-        # 关掉也不生效。这里统一门控两套机制；默认 True，升级用户开箱即用。
+        # plan-156-624：设置中心总开关此前只存在配置里、engine 从未读取，关掉也不生效。
+        # plan-20261020-subsession-switch：子代理与子会话已拆成两个独立开关，分别门控各自工具，
+        # 两者默认 True，升级用户开箱即用。
         _subagents_on = bool(getattr(settings, "subagent_enabled", True))
+        _subsessions_on = bool(getattr(settings, "subsession_enabled", True))
         _allow_subagents = _subagents_on and bool(
             _type_states.get("explore", True) or _type_states.get("general", True)
         )
@@ -1257,8 +1476,8 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         #   workflow → 只下发只读探索子代理（执行统一走工作流节点，避免两套机制重复派发）
         _caps = capabilities_for(_mode)
         _allow_explore = CAP_EXPLORE_AGENT in _caps and _subagents_on
-        # plan-156-624：总开关关闭时子会话工具一并撤销（两套机制同一口径）
-        _allow_subsession = CAP_SUBSESSION in _caps and _subagents_on
+        # plan-20261020-subsession-switch：子会话工具只看子会话开关（拆开后两种能力互不影响）
+        _allow_subsession = CAP_SUBSESSION in _caps and _subsessions_on
         _subagent_allowed: set[str] | None = None
         if _schema_whitelist is not None:
             _picked = SUBAGENT_TOOL_NAMES & set(_schema_whitelist)
@@ -1283,8 +1502,13 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         # plan-156-619 S4：子会话自己（side_parent_id != null）追加与主代理 / 同级通信的工具。
         # 与主代理侧的子会话工具互补：主代理能派发，子会话能汇报与横向对齐，两者不重叠。
         if getattr(session, "side_parent_id", None) is not None:
-            from app.orchestration.subsession_tools import append_own_tools
-            tool_schemas = append_own_tools(tool_schemas)
+            from app.orchestration.subsession_tools import append_own_tools, strip_for_subsession
+
+            # plan-474-2105：子会话是执行体，不是用户接口——先补齐自己的通信工具，
+            # 再剥掉「直接问用户 / 派生下级执行体 / 操作其它会话」这三类工具。
+            # 未剥离时子会话的 permission_mode 继承主会话（多为 agent），
+            # append_subsession_tools 会把 create_subsession 等主会话工具一并下发，形成套娃。
+            tool_schemas = strip_for_subsession(append_own_tools(tool_schemas))
         tool_schemas = append_workflow_tools(tool_schemas, readonly_only=bool(_mode_readonly))
         # 3. 运行主代理
         # v10/v13: 会话级模型覆盖；同一模型也用于规划评估与拆分。
@@ -1328,8 +1552,10 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             # plan-547: 每次 LLM 调用前 drain 运行中注入的用户消息；
             # v36 (plan-321-1600 M3): 同通道附带子代理完成通知——后台子代理结束时
             # 主代理无需轮询 collect_results 即可得知（已读过的结果不会重复推送）。
+            # plan-474-2105：再并入邮箱里排队的汇报类消息（P2 不主动唤醒，靠本轮带走）。
             injected_inputs_provider=lambda: (
                 drain_injected_inputs(turn_id)
+                + _mailbox_pending(session_id)
                 + [{"content": _note} for _note in mgr.drain_completions()]
             ),
         )
@@ -1589,6 +1815,10 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         _running_turns.discard(turn_id)
         _running_turn_session.pop(turn_id, None)
         _cancel_events.pop(turn_id, None)
+        # plan-474-2105：打断通道随 turn 收尾一并释放，避免陈旧信号误打断下一轮
+        _wake_events.pop(turn_id, None)
+        _pending_interrupts.pop(turn_id, None)
+        _tool_states.pop(turn_id, None)
         _turn_managers.pop(turn_id, None)
         _dropped_inputs = discard_injected_inputs(turn_id)  # plan-547: 取走残留注入项
         if _dropped_inputs:
@@ -2100,6 +2330,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         return {"ok": False, "error": "turn already running"}
     _running_turns.add(turn_id)
     cancel_event = _cancel_events.setdefault(turn_id, asyncio.Event())
+    wake_event_for(turn_id)  # plan-474-2105：与 start_turn 同口径（邮箱打断信号）
     _session_id: int | None = None
     try:
         from sqlalchemy import select
@@ -2270,9 +2501,10 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         # 并补下发子会话工具。此前这里只追加子代理工具，计划文档里标好的并行分组到了执行期
         # 无 create_subsession 可用，只能串行做完。
         _subagents_on = bool(getattr(settings, "subagent_enabled", True))
+        _subsessions_on = bool(getattr(settings, "subsession_enabled", True))
         if _subagents_on:
             main_tools = append_subagent_tools(main_tools, _type_states)
-        main_tools = append_subsession_tools(main_tools, enabled=_subagents_on)
+        main_tools = append_subsession_tools(main_tools, enabled=_subsessions_on)
         main_tools = append_workflow_tools(main_tools, readonly_only=False)
         mgr = get_subagent_manager(session.id)
         _turn_managers[turn_id] = mgr
@@ -2402,6 +2634,10 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         _running_turns.discard(turn_id)
         _running_turn_session.pop(turn_id, None)
         _cancel_events.pop(turn_id, None)
+        # plan-474-2105：打断通道随 turn 收尾一并释放，避免陈旧信号误打断下一轮
+        _wake_events.pop(turn_id, None)
+        _pending_interrupts.pop(turn_id, None)
+        _tool_states.pop(turn_id, None)
         _turn_managers.pop(turn_id, None)
         _dropped_inputs = discard_injected_inputs(turn_id)  # plan-547: 取走残留注入项
         if _dropped_inputs:

@@ -26,7 +26,12 @@ export const ThinkingBlock = memo(function ThinkingBlock({ text, active, turnId,
   const [duration, setDuration] = useState<number | null>(null);
   const startRef = useRef<number | null>(null);
 
-  const streamText = useChatStore((s) => (agentId != null ? s.thinkingBuffers[agentId] : undefined));
+  // plan-20261020-retry-cred-perf E13：只有「正在思考且尚未落库」的块才消费流式缓冲。
+  // 历史块已有 text、根本用不到订阅值；而主代理 id 全库单例——此前所有已挂载的历史块都订阅
+  // thinkingBuffers[agentId]，任一思考在流式时会让它们逐帧重渲染。不需要时选择器返回常量
+  // undefined，zustand 用 Object.is 比较引用，不相等才通知，因此这些块彻底脱离该更新流。
+  const needStream = active && !text;
+  const streamText = useChatStore((s) => (needStream && agentId != null ? s.thinkingBuffers[agentId] : undefined));
   const displayText = text || streamText || "";
   // v40: active 且尚未落库 = 思考中（首 token 到达前也显示「正在思考」+ 占位）
   const isThinking = active && !text;

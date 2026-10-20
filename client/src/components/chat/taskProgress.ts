@@ -27,6 +27,7 @@
  */
 import { useMemo, useRef } from "react";
 import { useChatStore } from "../../store/chat";
+import { resolveSubsessionRows, type SubsessionRunState } from "./progressOwner";
 import type { TaskOut } from "../../api/client";
 
 export type ProgressStatus = "pending" | "running" | "done" | "interrupted";
@@ -73,6 +74,11 @@ export interface ProgressResult {
   phase: TurnPhase;
 }
 
+/** 子会话运行态修正（plan-20261020-progress）：实现放在无依赖的纯模块里，
+ *  由本模块统一对外导出——胶囊 / 右面板 / 工具卡仍只需认 `taskProgress`。 */
+export { resolveSubsessionRows };
+export type { SubsessionRunState } from "./progressOwner";
+
 /** 展示态兜底：把"接下来要执行的那一项"标为进行中。
  *
  * plan-282-1441（修复）：**必须由实际运行态门控**——否则"上次退出前其实已跑完、
@@ -108,6 +114,21 @@ export function useProgressRows(enabled = true): ProgressResult {
   /** plan-75-334 阶段3：不可见（面板隐藏）期间的冻结结果。 */
   const frozenRef = useRef<ProgressResult | null>(null);
 
+  // ── 本会话子会话的运行态（plan-20261020-progress）──
+  const currentSessionId = useChatStore((s) => s.currentSessionId);
+  const subsessionsByParent = useChatStore((s) => s.subsessionsByParent);
+  /** 「id:运行态」签名：只在子会话新增 / 开始 / 结束时变化，子会话内部的每个事件都不变。
+   *  用它当进度派生的记忆化键——进度不需要随子会话的每一条 delta 重算。 */
+  const subsessionSig = useMemo(() => {
+    const list = currentSessionId != null ? subsessionsByParent[currentSessionId] : null;
+    if (!list || list.length === 0) return "";
+    return list.map((c) => `${c.id}:${c.has_running ? 1 : 0}`).sort().join(",");
+  }, [subsessionsByParent, currentSessionId]);
+  /** 运行态快照：签名未变时进度不重算，但 settle 里仍要用**当前**的值。 */
+  const subsRef = useRef<SubsessionRunState[]>([]);
+  subsRef.current = (currentSessionId != null ? subsessionsByParent[currentSessionId] ?? [] : [])
+    .map((c) => ({ id: c.id, running: Boolean(c.has_running) }));
+
   return useMemo<ProgressResult>(() => {
     // plan-75-334 阶段3：enabled=false 时直接复用上次结果，跳过任务扫描与 turn 查找——
     // 右侧面板隐藏标签不再随主会话每个 delta 重算进度；恢复可见时补算一次。
@@ -131,15 +152,18 @@ export function useProgressRows(enabled = true): ProgressResult {
 
     /** 按活跃态收口 + 计算展示行（所有出口共用）。 */
     const settle = (rows: ProgressRow[], useTodo: boolean, phase: TurnPhase): ProgressResult => {
+      // plan-20261020-progress：先按子会话真实运行态修正（并行派发时多项同时转圈），
+      // 再进收口与兜底——顺序反了，兜底会多标一项待办。
+      const resolved = resolveSubsessionRows(rows, subsRef.current);
       let list: ProgressRow[];
       if (phase === "concluded") {
         // 任务已结束：残留的未完成项不再当进度（这正是"重启后最后一步还在跑"的来源）
         list = [];
       } else if (phase === "interrupted") {
         // 停止后收口"进行中"假象：未完成项如实呈现为中断态（警示色、不带转圈）
-        list = rows.map((r) => (r.status === "running" ? { ...r, status: "interrupted" as const } : r));
+        list = resolved.map((r) => (r.status === "running" ? { ...r, status: "interrupted" as const } : r));
       } else {
-        list = rows;
+        list = resolved;
       }
       const display = withRunningFallback(list, phase === "running");
       const done = display.filter((r) => r.status === "done").length;
@@ -197,5 +221,5 @@ export function useProgressRows(enabled = true): ProgressResult {
     }
 
     return freeze({ rows: [], useTodo: false, done: 0, unfinished: 0, phase: "concluded" });
-  }, [tasks, todos, todosTurnId, todosCarried, turns, runningTurnId, isRunning, enabled]);
+  }, [tasks, todos, todosTurnId, todosCarried, turns, runningTurnId, isRunning, enabled, subsessionSig]);
 }

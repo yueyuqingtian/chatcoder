@@ -59,6 +59,9 @@ export const TOOL_VERBS: Record<string, string> = {
   shell_exec: "已运行",
   terminal_bg_status: "已查看后台命令",
   terminal_bg_kill: "已结束后台命令",
+  // plan-20261020-bgtask：后台命令的完成 / 停止通知（伪工具名，见 timeline.bgNoticeItem）
+  bg_command_done: "后台命令已结束",
+  bg_command_stopped: "后台命令已被停止",
   git: "已执行 Git",
   git_diff: "已检查改动",
   git_root: "已定位仓库",

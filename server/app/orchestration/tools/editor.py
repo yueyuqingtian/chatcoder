@@ -62,17 +62,38 @@ class EditorApplyDiffTool(Tool):
         old_text = pick_arg(args, "old_text", "old_string", "oldString", "old_str")
         new_text = pick_arg(args, "new_text", "new_string", "newString", "new_str")
         replace_all = bool(pick_arg(args, "replace_all", "replaceAll") or False)
+        # plan-20261020-pts：缺参时给出完整写法示例——不做路径推断（用户决定），只让模型一次补对
         if not path:
-            return ToolResult(ok=False, output="", error="缺少 path 参数（要编辑的文件路径）")
+            return ToolResult(
+                ok=False, output="",
+                error=(
+                    "缺少 path 参数（要编辑的文件路径，相对工作根），未修改任何文件。正确写法："
+                    '{"path": "src/app.ts", "old_text": "要替换的原文", "new_text": "替换后的文本"}'
+                ),
+            )
         if old_text is None or new_text is None:
-            return ToolResult(ok=False, output="", error="缺少 old_text 或 new_text 参数")
+            return ToolResult(
+                ok=False, output="",
+                error=(
+                    f"缺少 {'old_text' if old_text is None else 'new_text'} 参数，未修改文件。"
+                    "本工具的参数名是 path / old_text / new_text（不是 file_path / old_string / new_string）。"
+                ),
+            )
         # plan-75-332: 不再限制写入落在工作区内（越界写入交给 approval_policy 裁决）
         resolved = resolve_loose(path, ctx.workspace_root)
         if not resolved:
             return ToolResult(ok=False, output="", error=f"路径非法: {path}")
         target = Path(resolved)
         if not target.exists():
-            return ToolResult(ok=False, output="", error=f"文件不存在: {path}")
+            import asyncio
+
+            from app.orchestration.tools.path_hints import missing_path_hint
+
+            hint = await asyncio.to_thread(missing_path_hint, ctx.workspace_root, path, want_dir=False)
+            return ToolResult(
+                ok=False, output="",
+                error=f"文件不存在: {path}（新建文件请用 fs_write）{hint}",
+            )
         # plan-20261016-ux（问题 3）：按原编码 / BOM / 换行读写（见 text_edit），匹配支持空白与行号容错
         try:
             tf = read_text_file(target)

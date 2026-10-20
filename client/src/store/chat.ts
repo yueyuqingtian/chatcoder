@@ -12,6 +12,7 @@ import { isBusy } from "../perf/bus";
 import { registerReconcileTask, RECONCILE_ORDER } from "../perf/reconcile";
 import type { ServerEventName } from "@chatcoder/shared/events";
 import { useWorkflowStore } from "./workflow";
+import { useBgTaskStore } from "./bgTasks";
 import type { CompactSummaryPayload } from "@chatcoder/shared/events";
 
 /** v7: 全局最近选择思考深度的 localStorage 持久化 key——重启后仍能恢复上次选择 */
@@ -1064,23 +1065,57 @@ function _mergeMessages(existing: MessageOut[], fetched: MessageOut[]): MessageO
  *  · 在 baseIds 但 DB 结果里没有 ⇒ 确已删除（回滚等），丢弃——不可退化为只增不减。
  */
 function _mergeRefreshed(existing: MessageOut[], fetched: MessageOut[], baseIds: Set<number>): MessageOut[] {
+  /* plan-20261020-retry-cred-perf E14：整表重拉后复用未变更的消息对象。
+   *
+   * 背景：每轮结束都会整表重拉并整体替换消息对象（listSessionMessages 无分页），
+   * 时间线按引用比对因此全部失效——所有轮次重建、可见项全量重渲染，内存瞬时翻倍。
+   * 口径：签名一致（id / 发送方 / 类型 / 关联回合 / 创建时间 + 内容指纹）即沿用旧对象；
+   * 内容指纹只取几个会被服务端改写的关键字段的长度与标量，不做整串序列化
+   * （单条 thinking 最大 247K、会话体量 3800 万字符，整串比较本身就很贵）。
+   */
+  const existingById = new Map<number, MessageOut>();
+  for (const m of existing) {
+    const id = Number(m.id) || 0;
+    if (id > 0) existingById.set(id, m);
+  }
+  const reuse = (m: MessageOut): MessageOut => {
+    const old = existingById.get(Number(m.id) || 0);
+    if (!old) return m;
+    if (_messageSignature(old) !== _messageSignature(m)) return m;
+    return old;
+  };
   const out = new Map<number, MessageOut>();
   for (const m of fetched) {
     const id = Number(m.id) || 0;
-    if (id > 0 && id <= 1e12) out.set(id, m);
+    if (id > 0 && id <= 1e12) out.set(id, reuse(m));
   }
   for (const m of existing) {
     const id = Number(m.id) || 0;
     if (id > 1e12) {
       // 乐观占位：DB 已落库则替换为真实消息，否则保留等待落库
       const replaced = fetched.find((fm) => fm.sender_type === "user" && _sameUserContent(fm.content, m.content));
-      if (replaced && Number(replaced.id) > 0) out.set(Number(replaced.id), replaced);
+      if (replaced && Number(replaced.id) > 0) out.set(Number(replaced.id), reuse(replaced));
       else out.set(id, m);
     } else if (!out.has(id) && !baseIds.has(id)) {
       out.set(id, m); // 请求期间新增（快照尚未包含）：保留，避免被覆盖丢失
     }
   }
   return [...out.values()].sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
+}
+
+/** 消息对象复用用的轻量签名（见 _mergeRefreshed）。只取标量与关键字段长度。 */
+function _messageSignature(m: MessageOut): string {
+  const c = (m.content || {}) as Record<string, unknown>;
+  const parts: string[] = [String(Object.keys(c).length)];
+  for (const key of ["text", "result", "status", "error", "tool_name", "name", "is_partial"]) {
+    const v = c[key];
+    if (typeof v === "string") parts.push(`${key}:${v.length}`);
+    else if (typeof v === "number" || typeof v === "boolean") parts.push(`${key}:${v}`);
+  }
+  return [
+    m.id, m.sender_type, m.msg_type, m.turn_id ?? "", m.thread_id ?? "",
+    m.created_at ?? "", m.token_usage ?? "", parts.join(","),
+  ].join("|");
 }
 
 /** v967: cached 切回时刷新 messages（DB 最新），与快照去重合并——补齐切走期间已落库但未收到广播的消息。 */
@@ -1500,6 +1535,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     if (cached) {
       // v2.2: 缓存命中——零重载切换，静默补齐运行状态与任务（后台期间可能已变化）
+      // plan-20261020-suggestion-gate：加载态是会话级瞬态，缓存命中必须显式复位——
+      // 否则上一次「首次加载」留下的 true 会一直挂到本会话，建议卡就再也出不来。
+      set({ sessionLoading: false });
       if (cached.isRunning || cached.runningTurnId) {
         _startHeartbeat();
         // v967: 恢复流式缓冲显示"正在恢复"；后续流式/落库事件会清除该状态提示
@@ -1545,6 +1583,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ]);
       const running = turns.find((t) => t.status === "running");
       const interrupted = turns.find((t) => t.status === "interrupted");
+      // plan-20261020-suggestion-gate：请求期间可能已经切走——迟到的响应不得结束当前会话的加载态
+      // （否则建议卡会在新会话消息还没渲染时先冒出来）。
+      if (get().currentSessionId !== sessionId) return;
       set({
         messages, turns, tasks, loading: false, sessionLoading: false,
         runningTurnId: running?.id ?? null,
@@ -1681,7 +1722,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // plan-547: 切回会话若已空闲且存在排队输入，立即续发
       if (!get().isRunning) void get()._drainQueue();
     } catch (e) {
-      // plan-387-1825 C3：失败也要清 sessionLoading，否则骨架屏永久停留
+      // plan-387-1825 C3：失败也要清 sessionLoading，否则加载态永久停留。
+      // plan-20261020-suggestion-gate：同样只清自己的——切走后由目标会话自行结束加载态。
+      if (get().currentSessionId !== sessionId) return;
       set({ loading: false, sessionLoading: false, error: String(e) });
     }
   },
@@ -2612,6 +2655,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // 工作流事件不进入会话消息流：统一转发到工作流 store（以快照为准，事件只作刷新信号）
     if (event.startsWith("workflow.")) {
       useWorkflowStore.getState().applyEvent(payload);
+      return;
+    }
+    // plan-20261020-bgtask：后台命令的启动 / 退出不进入消息流，转发到后台任务 store（按 payload.session_id 归属）
+    if (event.startsWith("bg.process.")) {
+      useBgTaskStore.getState().applyEvent(event, payload);
       return;
     }
     // v2.1: 事件名契约化（packages/shared/src/events.ts 穷举），default 走 never 编译期兜底
@@ -3752,6 +3800,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       case "workflow.log.appended":
       case "workflow.conflict.detected":
       case "workflow.conflict.resolved":
+        break;
+      // 后台命令事件已在上方转发到后台任务 store，此处仅作穷举登记
+      case "bg.process.started":
+      case "bg.process.exited":
         break;
       default: {
         // 编译期穷举检查：后端新增事件未在 events.ts 登记时此处报错

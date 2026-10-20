@@ -234,7 +234,8 @@ function savePrefs(p: UiPrefs) {
 export function applyUiVars(p: UiPrefs, opts?: { glassToggle?: boolean }) {
   if (typeof document === "undefined") return;
   const root = document.documentElement;
-  root.style.setProperty("--sidebar-w", `${p.leftPanelWidth}px`);
+  // plan-20261020-retry-cred-perf B6：`--sidebar-w` 全仓只有定义、没有任何 CSS 消费者，
+  // 不再每次应用偏好都改写 :root（那会触发一次整文档样式失效）。
   root.style.setProperty("--fs-md", `${p.chatFontSize}px`);
   root.style.setProperty("--font-sans", (UI_FONT_OPTIONS[p.uiFontFamily] ?? UI_FONT_OPTIONS.inter).stack);
   // 对话字体无独立入口时跟随全局字体，避免消息区与界面字体不一致

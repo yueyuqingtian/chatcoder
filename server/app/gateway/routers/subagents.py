@@ -131,3 +131,36 @@ async def delete_profile(profile_id: int, db: AsyncSession = Depends(get_db)):
     if not ok:
         raise HTTPException(404, "子代理类型不存在")
     return {"ok": True}
+
+
+# ── plan-474-2105：运行时并发上限（只读快照）─────────────────────────
+# 路径必须是 /api/runtime/limits，不能挂在 /subagents 前缀下，
+# 否则会变成 /api/subagents/runtime/limits；因此单独建一个 router。
+limits_router = APIRouter(prefix="/runtime", tags=["runtime"])
+
+
+@limits_router.get("/limits")
+async def runtime_limits():
+    """单会话并发上限与当前占用（只读内存快照，供设置页与左栏展示）。"""
+    from app.core.config import settings
+    from app.orchestration.subagent import peek_subagent_manager
+    from app.services import subsession_service
+
+    sessions: list[dict] = []
+    try:
+        counts = await subsession_service.list_running_counts_by_parent()
+        for root_id, subsessions_running in counts.items():
+            manager = peek_subagent_manager(root_id)
+            sessions.append({
+                "session_id": root_id,
+                "subagents_running": manager.pending_count() if manager is not None else 0,
+                "subsessions_running": subsessions_running,
+            })
+    except Exception as exc:  # 展示型接口：读快照失败也返回上限，避免前端整块报错
+        logger.warning("读取运行时并发占用失败: %s", exc)
+        sessions = []
+    return {
+        "max_concurrent_subagents": settings.max_concurrent_subagents,
+        "max_subsessions_per_parent": settings.max_subsessions_per_parent,
+        "sessions": sessions,
+    }

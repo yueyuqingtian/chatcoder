@@ -18,16 +18,17 @@
 import { create } from "zustand";
 import { api } from "../api/client";
 
-/** 五个栏目。顺序即展示顺序（Git → 计划 → 进程 → 子代理 → 工作流）。 */
-export type ToolCardSection = "git" | "plan" | "process" | "subagent" | "workflow";
+/** 六个栏目。顺序即展示顺序（Git → 计划 → 进程 → 子代理 → 工作流 → 后台任务）。
+ *  plan-20261020-bgtask：新增「后台任务」——运行中的后台命令（dev server、watch、耗时构建），带运行时间与停止按钮。 */
+export type ToolCardSection = "git" | "plan" | "process" | "subagent" | "workflow" | "bgtask";
 
 export const TOOL_CARD_SECTIONS: readonly ToolCardSection[] = [
-  "git", "plan", "process", "subagent", "workflow",
+  "git", "plan", "process", "subagent", "workflow", "bgtask",
 ] as const;
 
-/** 折叠态胶囊只显示一项时的优先级（用户指定）：进程 > 工作流 > 子代理 > 计划 > git。 */
+/** 折叠态胶囊只显示一项时的优先级（用户指定）：进程 > 工作流 > 子代理 > 后台任务 > 计划 > git。 */
 export const CAPSULE_PRIORITY: readonly ToolCardSection[] = [
-  "process", "workflow", "subagent", "plan", "git",
+  "process", "workflow", "subagent", "bgtask", "plan", "git",
 ] as const;
 
 export const SECTION_LABEL: Record<ToolCardSection, string> = {
@@ -36,6 +37,7 @@ export const SECTION_LABEL: Record<ToolCardSection, string> = {
   process: "进程",
   subagent: "子代理",
   workflow: "工作流",
+  bgtask: "后台任务",
 };
 
 /** 工具卡默认形态：capsule = 右上角悬浮胶囊；expanded = 展开卡片。 */
@@ -44,7 +46,7 @@ export type ToolCardDefaultForm = "capsule" | "expanded";
 export type SectionMap = Record<ToolCardSection, boolean>;
 
 const fillSections = (v: boolean): SectionMap => ({
-  git: v, plan: v, process: v, subagent: v, workflow: v,
+  git: v, plan: v, process: v, subagent: v, workflow: v, bgtask: v,
 });
 
 interface Prefs {

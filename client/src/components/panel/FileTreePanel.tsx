@@ -90,6 +90,37 @@ interface FlatRow {
 }
 
 const ROW_H = 26;
+
+/** plan-20261020-retry-cred-perf D11：预览编辑器自己接管尺寸重排。
+ *  Monaco 的 automaticLayout 在拖右面板 / 面板折叠过渡期会逐帧重排整个可见视口（一帧甚至多次）；
+ *  这里改为 rAF 合帧的 ResizeObserver——每帧最多 layout 一次，拖拽期内容仍与容器同帧跟随，
+ *  视觉与自动布局一致，只是把重复重排压成一次。只作用于预览编辑器。 */
+interface LayoutTarget {
+  layout: () => void;
+  onDidDispose: (listener: () => void) => unknown;
+  /** 代码编辑器是 getDomNode，diff 编辑器是 getContainerDomNode——两者取其一 */
+  getDomNode?: () => HTMLElement | null;
+  getContainerDomNode?: () => HTMLElement;
+}
+
+function attachManualLayout(target: LayoutTarget): void {
+  const el = target.getDomNode?.() ?? target.getContainerDomNode?.() ?? null;
+  if (!el) return;
+  let raf = 0;
+  const ro = new ResizeObserver(() => {
+    if (raf) return;
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      try { target.layout(); } catch { /* 实例已销毁 */ }
+    });
+  });
+  ro.observe(el);
+  target.onDidDispose(() => {
+    ro.disconnect();
+    if (raf) cancelAnimationFrame(raf);
+  });
+}
+
 /** 面板窄于此值时，目录树与预览不再并排（各 200px 上下的代码预览根本放不下）：打开预览就占满面板，用「返回」回到目录树 */
 const NARROW_PX = 540;
 /** 面板宽于此值（典型为全屏）时，目录树即使没有预览也只占侧栏宽度，不让文件名横跨整个屏幕 */
@@ -693,7 +724,8 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
                     original={diffPreview!.before ?? ""}
                     modified={diffPreview!.after ?? ""}
                     theme={document.documentElement.getAttribute("data-theme") === "dark" ? "vs-dark" : "light"}
-                    options={{ readOnly: true, minimap: { enabled: false }, fontSize: 12, renderSideBySide: true }}
+                    options={{ readOnly: true, minimap: { enabled: false }, fontSize: 12, renderSideBySide: true, automaticLayout: false }}
+                    onMount={(editor) => { attachManualLayout(editor); }}
                   />
                 )}
                 {diffPreview!.truncated && <div className="ft-diff-truncated">变更行数过大，内容已截断显示</div>}
@@ -713,8 +745,8 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
                 language={contentLang}
                 value={content}
                 theme={document.documentElement.getAttribute("data-theme") === "dark" ? "vs-dark" : "light"}
-                options={{ readOnly: true, minimap: { enabled: false }, fontSize: 12 }}
-                onMount={(editor) => { editorRef.current = editor; }}
+                options={{ readOnly: true, minimap: { enabled: false }, fontSize: 12, automaticLayout: false }}
+                onMount={(editor) => { editorRef.current = editor; attachManualLayout(editor); }}
               />
             )}
           </div>

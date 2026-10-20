@@ -107,7 +107,7 @@ class OpenAICompatibleProvider(ModelProvider):
 
     def __init__(self, *, api_key: str, base_url: str, model: str,
                  proxy: str | None = None, proxy_disabled: bool = False,
-                 proxy_configured: bool = False):
+                 proxy_configured: bool = False, max_retries: int = 3):
         self._default_model = model
         # v28: stream chunk 空闲超时改读配置——长思考模型（grok-4.6 等）chunk 间隔
         # 可能超过旧硬编码 30s，导致"运行中突然停止且无报错"。
@@ -129,7 +129,10 @@ class OpenAICompatibleProvider(ModelProvider):
             api_key=api_key,
             base_url=base_url.rstrip("/"),
             timeout=_DEFAULT_TIMEOUT,
-            max_retries=3,
+            # plan-20261020-retry-cred-perf R8：多凭据供应商由 registry 传入 1——
+            # SDK 遇到 429 会按 Retry-After 连睡 3 次（最长数分钟），把整轮卡住才轮到下一个 Key；
+            # 单凭据保持 3 次，仍是「同一个 Key 自我重试」的兜底。
+            max_retries=max(0, int(max_retries)),
             default_headers={"Accept-Encoding": "gzip, deflate"},
             **({"http_client": http_client} if http_client is not None else {}),
         )

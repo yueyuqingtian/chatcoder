@@ -261,8 +261,11 @@ class Settings(BaseSettings):
     # plan-156-619 S4d：子会话默认模型 / 思考深度（0 / 空 = 跟随主代理）
     subagent_model_id: int = 0
     subagent_reasoning_effort: str = ""
-    # plan-156-619 S4e：子代理 / 子会话总开关（类型级开关已从 UI 移除，由它统一控制）
+    # plan-156-619 S4e：子代理开关（类型级开关已从 UI 移除，由它统一控制）
     subagent_enabled: bool = True
+    # plan-20261020-subsession-switch：子会话开关从「子代理与子会话」合并开关中拆出。
+    # 两者是彼此独立的并发资源，用户需要能只关其中一种（例如保留只读子代理、关闭可改文件的子会话）。
+    subsession_enabled: bool = True
     # plan-156-621：每轮用户消息注入「优先用子会话并行处理」的提示词。
     # 关闭后不注入；只读 / 计划 / 工作流等不下发子会话工具的模式本身也不会注入。
     parallel_subsession_hint: bool = True
@@ -317,14 +320,12 @@ class Settings(BaseSettings):
 
     # v4.6: 单会话 token 预算--超过此值任务自动终止
     session_token_budget: int = 2_000_000
-    # v10: 单个 turn 的子代理派发总量上限（含已完成/失败的）——主代理 spawn_subagent 的硬性限制。
-    # 超过上限时拒绝新子代理并提示主代理合并/串行处理，防止无限拆分导致资源失控。
-    # v36: 默认由 6 上调至 10（配合并发排队，给并行拆分留足空间）；设置中心「子代理」可改（1~32）。
-    max_subagents_per_turn: int = 10
-    # v36 (plan-321-1600 M3): 子代理并发治理——同时“运行中”的子代理达该值时，
-    # 新派发先排队等任意一个结束（不再像旧行为那样直接拒绝）。
-    # v36 优化：默认由 4 上调至 6；设置中心「子代理」可改（1~16）。
-    max_concurrent_subagents: int = 6
+    # plan-474-2105：单会话子代理并发上限：单个会话内同时运行的子代理数；
+    # 达到后新派发先排队等空位，超时即拒绝。设置中心可改（1~30）。
+    max_concurrent_subagents: int = 4
+    # plan-474-2105：单会话子会话并发上限：单个主会话下同时运行的子会话数；
+    # 达到后创建直接拒绝。设置中心可改（1~30）。
+    max_subsessions_per_parent: int = 4
     # ── 工作流运行时（设计 §8）：并发上限与默认返工次数；0 = 不限（仅并发上限支持）──
     workflow_enabled: bool = True
     # 下一步建议卡（设置 → 常规）：默认关闭；开启后才向主会话的智能体 / 工作流模式注入
@@ -475,7 +476,12 @@ class Settings(BaseSettings):
         if count == 0:
             return []
         parsed: list[float] = []
-        for tok in str(self.agent_retry_intervals or "").split(","):
+        # plan-20261020-retry-cred-perf R9：兼容中文逗号/顿号/分号与空格分隔——
+        # 旧实现只认半角逗号，用户输入「5，10，10」整串作废、静默回落为 10 秒。
+        _raw = str(self.agent_retry_intervals or "")
+        for _sep in ("，", "、", "；", ";", "\t", "\n", " ", "　"):
+            _raw = _raw.replace(_sep, ",")
+        for tok in _raw.split(","):
             tok = tok.strip()
             if not tok:
                 continue

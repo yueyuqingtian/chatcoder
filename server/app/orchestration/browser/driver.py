@@ -580,12 +580,34 @@ class BrowserDriver:
             raise ActionError(f"{info.get('label')} 不在可视区域内且无法滚入，请先滚动或换一个目标")
         return info
 
+    async def _resolve_actionable(self, args: dict, label_prefix: str, wait_s: float = 1.5) -> dict:
+        """plan-20261020-pts：定位目标并等待它「可操作」。
+
+        遮挡与不可见多是瞬时的：「加载中」蒙层、弹窗 / 下拉的入场动画、列表重新渲染。
+        此前第一眼看到就报错，模型要么傻等再试、要么直接 force=true 点到错误位置。
+        现在先轮询一小段时间（与常见浏览器自动化的可操作性等待同一思路），仍不满足才报错。
+        """
+        deadline = time.monotonic() + wait_s
+        while True:
+            try:
+                info = await self._resolve(args, label_prefix)
+            except (ActionError, HostCallError) as e:
+                if "当前不可见" in str(e) and time.monotonic() < deadline:
+                    await asyncio.sleep(0.25)
+                    continue
+                raise
+            if info.get("covered_by") and not args.get("force") and time.monotonic() < deadline:
+                await asyncio.sleep(0.25)
+                continue
+            return info
+
     async def click(self, args: dict) -> Outcome:
-        info = await self._resolve(args, "点击")
+        info = await self._resolve_actionable(args, "点击")
         covered = info.get("covered_by")
         if covered and not args.get("force"):
-            raise ActionError(f"{info.get('label')} 被 {covered} 遮挡（可能是弹窗、浮层或框架），"
-                              f"请先关闭遮挡，或确认无误后传 force=true")
+            raise ActionError(f"{info.get('label')} 被 {covered} 遮挡（可能是弹窗、浮层或框架，已等待 1.5 秒仍未消失）。"
+                              f"下拉 / 浮层可先用 browser_press 按 Escape 关闭，或 browser_snapshot 查看遮挡物；"
+                              f"确认目标无误后传 force=true")
         if info.get("disabled") and not args.get("force"):
             raise ActionError(f"{info.get('label')} 处于禁用状态，点击不会生效")
         count = max(1, min(int(args.get("click_count") or (2 if args.get("double") else 1)), 3))
@@ -811,15 +833,33 @@ class BrowserDriver:
         script = str(args.get("script") or "").strip()
         if not script:
             raise ActionError("script 不能为空")
-        resp = await self.call("eval", {"script": script, "label": "执行页面脚本"}, timeout=_T_KIT)
+        # plan-20261020-pts：统一包装（见 eval_wrap）——支持表达式 / 多语句 / 顶层 return 与 await，
+        # 运行时错误带回真实的「类型: 信息」，不再被说成「页面可能正在跳转」
+        from app.orchestration.browser.eval_wrap import eval_error_of, wrap_script
+
+        wrapped, note = wrap_script(script)
+        try:
+            resp = await self.call("eval", {"script": wrapped, "label": "执行页面脚本"}, timeout=_T_KIT)
+        except HostCallError as e:
+            msg = str(e)
+            if "页面脚本执行失败" in msg or "Script failed" in msg or "SyntaxError" in msg:
+                raise ActionError(
+                    "脚本无法执行：多为语法错误（括号 / 引号不配对等），也可能是页面正在跳转。"
+                    "脚本可以是表达式、多条语句（返回最后一个表达式的值），也可以用顶层 return / await，无需包成函数。"
+                ) from e
+            raise
         value = resp.get("value")
+        err = eval_error_of(value)
+        if err:
+            raise ActionError(f"脚本执行出错：{err}（页面状态未必如预期，可先用 browser_snapshot 确认元素是否存在）")
         try:
             shown = json.dumps(value, ensure_ascii=False, default=str)
         except (TypeError, ValueError):
             shown = str(value)
         if len(shown) > 8000:
             shown = shown[:8000] + "…（已截断）"
-        return Outcome(True, "执行结果：\n" + shown, data={"result": value if len(shown) <= 8000 else None})
+        head = f"执行结果（{note}）：\n" if note else "执行结果：\n"
+        return Outcome(True, head + shown, data={"result": value if len(shown) <= 8000 else None})
 
     async def logs(self, args: dict) -> Outcome:
         if args.get("request_id"):

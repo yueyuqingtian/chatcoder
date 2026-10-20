@@ -256,7 +256,10 @@ async def test_click_refuses_covered_target_unless_forced(fake_host):
     fake_host.kit_values["resolve"] = {"x": 1, "y": 1, "label": "按钮「付款」", "covered_by": "对话框「提示」", "rect": {}, "ref": "ref_7"}
     out = await drv.execute(1, "click", {"text": "付款"})
     assert not out.ok and "遮挡" in out.error
-    assert [c[0] for c in fake_host.calls] == ["kit"]
+    # plan-20261020-pts：遮挡多是瞬时的（加载蒙层 / 弹窗动画），会先轮询定位一小段时间再判定；
+    # 期间只有定位调用，绝不能发出点击
+    calls = [c[0] for c in fake_host.calls]
+    assert calls and set(calls) == {"kit"}
     # 强制点击：坐标会落在遮挡物上，改为直接在元素上派发点击（activate）
     out = await drv.execute(1, "click", {"text": "付款", "force": True})
     assert out.ok and "直接在元素上触发点击" in out.text
@@ -268,7 +271,7 @@ async def test_covered_forced_click_is_plain_left_click_only(fake_host):
     fake_host.kit_values["resolve"] = {"x": 1, "y": 1, "label": "按钮「付款」", "covered_by": "框架「遮罩」", "rect": {}, "ref": "ref_7"}
     out = await drv.execute(1, "click", {"text": "付款", "force": True, "double": True})
     assert not out.ok and "只支持左键单击" in out.error
-    assert [c[0] for c in fake_host.calls] == ["kit"]
+    assert [c[0] for c in fake_host.calls] == ["kit"]  # force=true 不等待遮挡消失，只定位一次
 
 
 async def test_get_text_notes_cross_origin_frames(fake_host):

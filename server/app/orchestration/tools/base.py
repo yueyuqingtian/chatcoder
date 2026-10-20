@@ -40,6 +40,11 @@ class ToolContext:
     # plan-20261019-desktop-precision：当前模型名。电脑操控按模型族选择坐标口径
     # （Claude / GPT 习惯截图像素，DeepSeek / Qwen3 / GLM 等原生是 0–1000 比例）。
     model_name: str = ""
+    # plan-474-2105：邮箱打断——set 后长命令应把「已在运行的进程」转后台并立即返回，
+    # 而不是被取消（命令本身有价值，取消等于白跑）。只有 terminal_exec 消费这个信号。
+    detach_event: asyncio.Event | None = None
+    # plan-474-2105：所属 turn（后台命令完成回报据此标注归属；可为空）
+    turn_id: int | None = None
 
 
 @dataclass

@@ -99,6 +99,7 @@ async def run_subsession_tool(tool_name: str, args: dict, *, session_id: int, db
                 f"已创建子会话 #{sid}「{args.get('title') or ''}」，任务已下发。\n"
                 "它会显示在用户左侧会话列表中；完成后结果会自动回到你的上下文，"
                 "需要更细的进展用 get_subsession_progress 查询。"
+                f"请在下一次 todo_write 里把对应步骤的 owner 设为 #{sid}，任务卡才能显示它的进度。"
                 "注意：不要自己再做一遍这项任务。"
             )
             # plan-156-621：schema 声明 background=false 会阻塞等待，此前 runner 完全忽略该参数，
@@ -115,11 +116,21 @@ async def run_subsession_tool(tool_name: str, args: dict, *, session_id: int, db
             target = _target_id(args, subsession_service.SubsessionError)
             # plan-156-620：只能操作本主会话名下的子会话
             await subsession_service.require_owned(db, session_id, target)
+            text = str(args.get("message") or "")
+            qid = str(args.get("question_id") or "").strip() or None
+            # plan-474-2105：带 question_id = 回答子会话的提问——直接唤醒等待方，
+            # 答复作为它那次 message_main 的工具结果返回，不再重复投递一遍消息。
+            if qid and subsession_service.resolve_question(qid, text):
+                return (
+                    f"已答复子会话 #{target} 的提问（question_id={qid}），"
+                    "它会立刻带着这条答复继续执行。"
+                )
             res = await subsession_service.send_message(
                 db, target, str(args.get("message") or ""),
             )
             how = "已注入到它当前的执行" if res.get("delivered") == "injected" else "已作为新一轮任务下发"
-            return f"消息{how}（子会话 #{res['subsession_id']}，turn {res.get('turn_id')}）。"
+            tail = "（该 question_id 已超时或不存在，本条按普通消息送达）" if qid else ""
+            return f"消息{how}（子会话 #{res['subsession_id']}，turn {res.get('turn_id')}）。{tail}"
 
         if tool_name == "get_subsession_progress":
             target = (_target_id(args, subsession_service.SubsessionError)
@@ -166,16 +177,42 @@ async def run_own_tool(tool_name: str, args: dict, *, session_id: int, db) -> st
         message = str(args.get("message") or "").strip()
         if not message:
             return "Error: message 不能为空"
+        kind = str(args.get("kind") or "progress").strip().lower()
+        if kind not in ("progress", "question"):
+            kind = "progress"
         try:
             res = await subsession_service.notify_main(
-                db, subsession_id=session_id, message=message,
-                kind=str(args.get("kind") or "progress"),
+                db, subsession_id=session_id, message=message, kind=kind,
             )
         except subsession_service.SubsessionError as e:
             return f"Error: {e}"
+
+        # plan-474-2105：提问默认阻塞等主代理答复——答复直接作为本次工具结果返回，
+        # 子会话不必空转轮询。主代理答不了会先转问用户，再把用户回答传回来。
+        qid = res.get("question_id")
+        if kind == "question" and qid:
+            raw_wait = args.get("wait")
+            do_wait = True if raw_wait is None else bool(raw_wait)
+            if do_wait:
+                try:
+                    timeout_s = float(args.get("timeout_s") or 0)
+                except (TypeError, ValueError):
+                    timeout_s = 0.0
+                if timeout_s <= 0:
+                    timeout_s = subsession_service.QUESTION_TIMEOUT_DEFAULT_S
+                reply = await subsession_service.wait_for_question_reply(qid, timeout_s)
+                if reply is None:
+                    return (
+                        f"未在 {int(timeout_s)} 秒内收到主代理答复（question_id={qid}）。"
+                        "请按最佳判断继续推进，并把该未决问题写进最终结论；不要重复提问。"
+                    )
+                return f"主代理答复（question_id={qid}）：\n{reply}"
+
         if res.get("delivered") == "injected":
             return "已送达主代理（会进入它下一次模型调用的上下文）。"
-        return "主代理当前空闲，汇报已记录在主会话中，主代理下一轮会看到。"
+        if res.get("delivered") == "woken":
+            return "主代理当前空闲，已自动拉起一轮读取你的消息，稍等它的答复。"
+        return "主代理当前空闲，消息已记录，主代理下一轮会看到。"
 
     if tool_name == "message_peer":
         try:

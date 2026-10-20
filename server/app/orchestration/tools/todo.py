@@ -4,7 +4,8 @@ plan-482: 分步决策权完全在模型——本工具只做清单存取，不�
 自动拆分/标题对齐引擎步骤"的加工。模型提交什么清单，任务卡就显示什么。
 
 行为：
-- 校验：1~12 项、content 非空、至多 1 个 in_progress（多余降级为 pending）；
+- 校验：1~20 项、content 非空、至多 1 个 in_progress（多余降级为 pending）；
+  超出上限时先折叠最早已完成的项，只有未完成项本身就超上限才报错（plan-20261020-pts）；
 - 落库到 Task 表：自建 kind=group、标题「任务清单」的区块，steps 按模型提交的
   content 一字不差增删改（消失的项标记隐藏），状态映射
   pending→pending / in_progress→running / completed→done；
@@ -22,7 +23,9 @@ from app.persistence.database import async_session_factory, commit_with_retry
 logger = logging.getLogger(__name__)
 
 _TODO_GROUP_TITLE = "任务清单"
-_MAX_TODOS = 12
+# plan-20261020-pts：12 → 20。真实失败全部是「13 项，其中 9～11 项已完成」——长任务做到一半，
+# 已完成的步骤把清单撑满，模型每次都要删掉历史再重提，白白失败一轮。
+_MAX_TODOS = 20
 _STATUS_MAP = {"pending": "pending", "in_progress": "running", "completed": "done"}
 
 
@@ -90,8 +93,27 @@ class TodoWriteTool(Tool):
         raw = args.get("todos")
         if not isinstance(raw, list) or not raw:
             return ToolResult(ok=False, output="", error="todos 不能为空")
+        folded = 0
         if len(raw) > _MAX_TODOS:
-            return ToolResult(ok=False, output="", error=f"清单最多 {_MAX_TODOS} 项")
+            # 先折叠最早已完成的项（它们只是历史记录），未完成项一个都不丢
+            open_count = sum(
+                1 for it in raw
+                if not (isinstance(it, dict) and str(it.get("status", "")).strip() == "completed")
+            )
+            if open_count > _MAX_TODOS:
+                return ToolResult(
+                    ok=False, output="",
+                    error=f"清单最多 {_MAX_TODOS} 项，未完成的步骤就有 {open_count} 项：请合并相近步骤后再提交",
+                )
+            folded = len(raw) - _MAX_TODOS
+            kept: list[Any] = []
+            to_drop = folded
+            for it in raw:
+                if to_drop > 0 and isinstance(it, dict) and str(it.get("status", "")).strip() == "completed":
+                    to_drop -= 1
+                    continue
+                kept.append(it)
+            raw = kept
 
         todos: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -144,7 +166,8 @@ class TodoWriteTool(Tool):
         done_count = sum(1 for t in todos if t["status"] == "completed")
         return ToolResult(
             ok=True,
-            output=f"任务清单已更新（{done_count}/{len(todos)} 完成）。",
+            output=f"任务清单已更新（{done_count}/{len(todos)} 完成）。"
+            + (f"清单超过 {_MAX_TODOS} 项，已折叠最早完成的 {folded} 项。" if folded else ""),
             data={"todos": todos, "persisted": persisted},
         )
 

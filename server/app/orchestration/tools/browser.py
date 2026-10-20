@@ -395,9 +395,10 @@ class BrowserEvaluateTool(_BrowserTool):
 
     def _desc(self):
         return (
-            "在当前页面上下文执行 JavaScript，返回最后一个表达式的值（支持 Promise）。"
-            "常规操作请用专用工具，它们更快且对用户可见。",
-            {"script": {"type": "string", "description": "JavaScript 代码"}},
+            "在当前页面上下文执行 JavaScript 并返回结果。脚本可以是表达式、多条语句（返回最后一个表达式的值），"
+            "也可以直接用顶层 return / await——无需包成函数；返回值需可序列化（对象请返回普通数据）。"
+            "运行时出错会带回真实的错误类型与信息。常规点击 / 输入请用专用工具，它们更快且对用户可见。",
+            {"script": {"type": "string", "description": "JavaScript 代码，如 `document.title` 或 `const n = document.querySelectorAll('li').length; return n;`"}},
             ["script"],
         )
 

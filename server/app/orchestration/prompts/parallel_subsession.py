@@ -53,6 +53,30 @@ PARALLEL_SUBSESSION_HINT = (
     "派出去的工作不要自己再做一遍；强依赖的步骤留在自己手里串行做。\n"
     "\n**只有这几种情况自己直接做**：单文件单处修改、纯问答或解释、"
     "一两次工具调用就能完成的小事；只读调研用只读子代理（spawn_subagent），不占用子会话。"
+    "\n\n**子会话提问的处理（必须遵守）**：你会收到形如"
+    "「[子会话汇报]「标题」提问（question_id=q_…）」的消息。\n"
+    "1. 能自己回答 → 立刻用 send_to_subsession(subsession_id, message, question_id=该 id) 答复，"
+    "等待中的子会话会直接拿到这句话继续执行；\n"
+    "2. 答不了（涉及用户偏好 / 需求取舍 / 权限范围）→ 先用 ask_user_question 问用户，"
+    "拿到回答后再按上一条转达；\n"
+    "3. **不要忽略提问，也不要只把答案说给自己听**——不带 question_id 的消息不会唤醒等待中的子会话，"
+    "它会一直阻塞到超时；\n"
+    "4. 提问是控制面消息：它会打断你的次要等待（前台命令自动转后台、wait 轮询让出），"
+    "但不会打断你正在写文件或正在等用户回答——那些动作结束后会立刻处理。"
+)
+
+# plan-474-2105：子会话专用纪律。子会话是执行体，不是用户接口——
+# 它看不到用户、用户也看不到它的提问，所以「直接问用户」这条路必须彻底堵死。
+SUBSESSION_SELF_HINT = (
+    "## 子会话约束（必须遵守）\n"
+    "1. **不能直接向用户提问**：`ask_user_question` 对你不可用，调用了也会被拒绝。\n"
+    "2. 需要澄清或决策时，用 `message_main(message, kind=\"question\", wait=true)` 询问主代理；"
+    "它会自己回答，或转问用户后再把答案传回来。答复会作为该次工具调用的结果直接返回。\n"
+    "3. 提问要一次说清「卡在哪、需要什么决定、可选方案」；等待超时就按最佳判断继续，"
+    "并把未决问题写进最终结论，**不要重复提问**。\n"
+    "4. **不能创建子会话，也不能派发子代理**（这些工具对你不可用）——工作自己做，或把需要并行的部分"
+    "在结论里告诉主代理。\n"
+    "5. 进度用 `message_main(kind=\"progress\")` 异步汇报，发完继续干活，不要等确认。"
 )
 
 # 排队消息附带的简短提醒：完整提示在 turn 开始时已给过，这里只做「本轮仍适用」的复述，避免重复长文本
@@ -90,12 +114,16 @@ EXECUTE_PARALLEL_SUBSESSION_HINT = (
 
 
 def _hint_enabled() -> bool:
-    """设置中心「优先使用子会话并行处理」是否开启（显式 false 才关闭）。"""
+    """设置中心「优先使用子会话并行处理」与子会话总开关是否均开启（显式 false 才关闭）。"""
     try:
         from app.core.config import settings
 
         # plan-156-622：只有显式关闭才不注入——默认开启。
         # 用 `is False` 而不是 `not`：配置项为 null / 属性缺失时都保持注入。
+        # plan-20261020-subsession-switch：子会话开关关闭时工具已不下发，
+        # 提示词必须同口径停止注入，否则模型会反复调用一个不存在的工具。
+        if getattr(settings, "subsession_enabled", True) is False:
+            return False
         return getattr(settings, "parallel_subsession_hint", True) is not False
     except Exception:  # noqa: BLE001 — 配置层不可用时不注入，避免误伤
         return False
@@ -157,6 +185,14 @@ OPERATOR_SUBSESSION_HINT = (
 )
 
 
+def subsession_self_hint(*, is_subsession: bool) -> str:
+    """子会话专用约束：只能经 message_main 提问、不能派生下级执行体。
+
+    非子会话返回空串——主代理侧的口径见 PARALLEL_SUBSESSION_HINT 的「子会话提问的处理」。
+    """
+    return SUBSESSION_SELF_HINT if is_subsession else ""
+
+
 def operator_subsession_hint(mode: str | None, *, gui_tools: bool, is_subsession: bool = False) -> str:
     """按设置、执行模式与 GUI 工具可用性返回「交给操控子会话」的提示；不应注入时返回空串。"""
     if not gui_tools or is_subsession:
@@ -164,6 +200,9 @@ def operator_subsession_hint(mode: str | None, *, gui_tools: bool, is_subsession
     try:
         from app.core.config import settings
 
+        # plan-20261020-subsession-switch：子会话总开关关闭时操控子会话同样不可用
+        if getattr(settings, "subsession_enabled", True) is False:
+            return ""
         if getattr(settings, "operator_subsession_enabled", True) is False:
             return ""
     except Exception:  # noqa: BLE001 — 配置层不可用时不注入

@@ -695,7 +695,8 @@ def _checkpoint_payload(handle: "SubagentHandle", spec: dict, reason: str) -> di
 
 def _build_tool_schemas(names: list[str] | None) -> list[dict]:
     """按工具名重建子代理工具 schema（与 spawn 时口径一致：注册表工具 + 子代理自身通信工具）。"""
-    from app.orchestration.subagent_tools import SUBAGENT_OWN_TOOLS
+    from app.orchestration.subagent_tools import SUBAGENT_OWN_TOOLS, strip_for_subagent
+
     wanted = set(names) if names else None
     out = [
         s for s in tool_registry.all_schemas()
@@ -706,7 +707,9 @@ def _build_tool_schemas(names: list[str] | None) -> list[dict]:
         name = own["function"]["name"]
         if (wanted is None or name in wanted) and name not in have:
             out.append(own)
-    return out
+    # plan-474-2105：续跑沿用旧检查点里的工具名，可能含已禁用的「问用户 / 派下级」工具——
+    # 与 spawn 路径同口径剥离，否则续跑等于绕过能力边界。
+    return strip_for_subagent(out)
 
 
 async def _persist_agent_state(agent_id: int, status: str, checkpoint: dict | None) -> None:

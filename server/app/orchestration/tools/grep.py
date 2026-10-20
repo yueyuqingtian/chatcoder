@@ -66,7 +66,7 @@ class GrepTool(Tool):
                         "path": {
                             "type": "string",
                             "description": (
-                                "搜索的起始目录（相对路径，如 'src' 或 'server/app'）。"
+                                "搜索范围：目录（相对路径，如 'src' 或 'server/app'）或单个文件。"
                                 "默认搜索整个工作区"
                             ),
                         },
@@ -115,16 +115,27 @@ class GrepTool(Tool):
                     return ToolResult(ok=False, output="", error=_err)
                 root = _outside
             if not root.exists():
-                return ToolResult(ok=False, output="", error=f"路径不存在: {search_path}")
+                # plan-20261020-pts：附上同名文件 / 目录的实际位置与最近存在的上级目录
+                from app.orchestration.tools.path_hints import missing_path_hint
+
+                hint = await asyncio.to_thread(missing_path_hint, ctx.workspace_root, str(search_path))
+                return ToolResult(ok=False, output="", error=f"路径不存在: {search_path}{hint}")
         else:
             root = ws_root
 
         # 编译正则
+        # plan-20261020-pts：正则不合法（最常见是 `foo(` 这类未转义的括号）时按普通文本搜索并说明，
+        # 不再直接失败——模型要找的几乎总是这段字面文本。
         flags = 0 if case_sensitive else re.IGNORECASE
+        literal_note = ""
         try:
             regex = re.compile(pattern_str, flags)
         except re.error as e:
-            return ToolResult(ok=False, output="", error=f"正则表达式错误: {e}")
+            regex = re.compile(re.escape(pattern_str), flags)
+            literal_note = (
+                f"（「{pattern_str}」不是合法正则（{e}），已按普通文本搜索；"
+                "要用正则请把括号等特殊字符转义）\n"
+            )
 
         # 编译 include glob
         include_re = None
@@ -139,9 +150,11 @@ class GrepTool(Tool):
             rg_result = await self._rg_search(
                 root=root, ws_root=ws_root, pattern=pattern_str,
                 include_glob=include_glob, case_sensitive=case_sensitive,
-                context_lines=context_lines,
+                context_lines=context_lines, fixed=bool(literal_note),
             )
             if rg_result is not None:
+                if literal_note:
+                    rg_result.output = literal_note + rg_result.output
                 return rg_result
             logger.debug("rg 不可用或执行失败，回退纯 Python 逐行匹配")
 
@@ -221,7 +234,7 @@ class GrepTool(Tool):
             output = f"{header}\n\n{body}"
 
         # plan-156-620：不再按 _MAX_OUTPUT 硬截断（截掉的匹配无法取回）；超出上下文预算由执行层落盘续读
-        output = cap_raw(output)
+        output = cap_raw(literal_note + output)
 
         logger.debug(
             "grep pattern=%s path=%s matches=%d files=%d",
@@ -246,13 +259,18 @@ class GrepTool(Tool):
         include_glob: str,
         case_sensitive: bool,
         context_lines: int,
+        fixed: bool = False,
     ) -> ToolResult | None:
-        """v1.1: ripgrep 快路径。任何异常/不可用返回 None，由调用方回退纯 Python。"""
+        """v1.1: ripgrep 快路径。任何异常/不可用返回 None，由调用方回退纯 Python。
+
+        fixed=True：按字面文本搜索（-F），用于模型给的正则不合法时的降级。"""
         cmd = [
             "rg", "--no-heading", "-n", "--color", "never",
             "--max-filesize", f"{_MAX_FILE_SIZE}B",
             "--max-count", str(_MAX_MATCHES),
         ]
+        if fixed:
+            cmd.append("-F")
         if not case_sensitive:
             cmd.append("-i")
         if context_lines > 0:

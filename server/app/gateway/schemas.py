@@ -602,6 +602,10 @@ class ProviderCredentialOut(BaseModel):
     last_ok_at: str | None = None
     credits: float | None = None
     extra: dict | None = None
+    # plan-20261020-retry-cred-perf：当前会被优先取用的凭据（模型页「当前使用」徽标）
+    preferred: bool = False
+    # 处于失败暂缓窗口内（模型页展示为「暂缓使用」，窗口到期自动恢复）
+    demoted: bool = False
 
 
 class ProviderCredentialCreate(BaseModel):
@@ -1004,6 +1008,9 @@ WS_EVENT_PAYLOAD_MODELS: dict[str, type[WsEventPayload]] = {
     "subagent.pending": WsEventPayload,
     "subagent.wakeup": WsEventPayload,
     "subagent.failed": WsEventPayload,
+    # plan-20261020-bgtask：后台命令启动 / 退出（右上角「后台任务」栏据此增删行；payload 带 session_id）
+    "bg.process.started": WsEventPayload,
+    "bg.process.exited": WsEventPayload,
     # 工作流运行时（设计 §5.7）：运行 / 节点 / 闸门 / 日志；payload.run_seq 为程序内序号
     "workflow.run.updated": WsEventPayload,
     "workflow.node.updated": WsEventPayload,

@@ -136,7 +136,13 @@ async def _resolve_scan_key(db: AsyncSession, provider: Provider) -> str | None:
 
     creds = await credential_service.list_credentials(db, provider.id)
     fmt = (provider.api_format or "openai").lower()
-    for c in credential_service.available_credentials(creds):
+    # plan-20261020-retry-cred-perf：扫描/测试用 key 与真实取用同序（非 ta3 走健康排序），
+    # 否则「测试该配置」用的 key 可能与实际调用不是同一条。
+    if fmt == "ta3":
+        ranked = credential_service.available_credentials(creds)
+    else:
+        ranked = credential_service.rank_credentials(creds)
+    for c in ranked:
         if c.api_key:
             return c.api_key
         if fmt in ("workbuddy", "ta3", "trae"):

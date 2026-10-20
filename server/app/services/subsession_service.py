@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
+import time
 from dataclasses import dataclass, field
 
 from sqlalchemy import select
@@ -31,7 +33,9 @@ from app.orchestration.approval_policy import normalize_approval_mode, normalize
 logger = logging.getLogger(__name__)
 
 # ── 规则常量（不写裸字面量）──
-MAX_SUBSESSIONS_PER_PARENT = 8
+# plan-474-2105：子会话并发上限改为设置项（settings.max_subsessions_per_parent，默认 4，范围 1~30），
+# 这里只保留「配置属性缺失时」的兜底值——不再作为唯一事实源。
+MAX_SUBSESSIONS_PER_PARENT_DEFAULT = 4
 DEFAULT_SUBSESSION_MODE = "agent"
 # plan-156-621：创建串行化——容量门禁「先查运行中数量、再建子会话」在并发下会同时通过校验。
 # 单写线程只保证写库不交错，不保证「校验 → 创建」这段临界区；创建是低频动作，全局串行无感。
@@ -147,6 +151,35 @@ async def list_all_children(db: AsyncSession, project_id: int | None = None) -> 
     return list(res.scalars().all())
 
 
+async def list_running_counts_by_parent() -> dict[int, int]:
+    """各主会话当前运行中的子会话数（只读快照，供 /runtime/limits 使用）。
+
+    plan-474-2105：只统计未归档子会话里「有运行中 turn」的那些，与建会话门禁同口径；
+    返回里保留运行数为 0 的父，方便前端一次拿全量占用。
+    """
+    from app.persistence.database import async_session_factory
+    from app.persistence.models.message import Session
+
+    counts: dict[int, int] = {}
+    async with async_session_factory() as db:
+        res = await db.execute(
+            select(Session.id, Session.side_parent_id)
+            .where(
+                Session.side_kind == SideKind.SUB.value,
+                Session.status != "archived",
+            )
+            .order_by(Session.id)
+        )
+        for sid, parent_id in res.all():
+            if parent_id is None:
+                continue
+            root = int(parent_id)
+            counts.setdefault(root, 0)
+            if await _running_turn_id(db, sid) is not None:
+                counts[root] += 1
+    return counts
+
+
 async def _require_subsession(db: AsyncSession, subsession_id: int):
     """取一个执行子会话（不存在或不是子会话时抛业务错误）。"""
     row = await _get_session_row(db, subsession_id)
@@ -183,12 +216,33 @@ async def _running_turn_id(db: AsyncSession, session_id: int) -> int | None:
 # ── 创建 ────────────────────────────────────────────────────
 
 
-async def assert_can_create(db: AsyncSession, root_session_id: int) -> None:
+async def assert_can_create(
+    db: AsyncSession,
+    root_session_id: int,
+    *,
+    caller_session_id: int | None = None,
+) -> None:
     """校验该主会话下还能不能再建子会话（路由与服务层共用同一口径）。
 
-    抽出来的原因：`/side-sessions`（建空会话）与 `/subsessions`（建了即开工）
-    都必须走同一道容量门禁，否则两条入口的上限会不一致。
+    plan-474-2105：
+      · 上限改读设置 `max_subsessions_per_parent`（单会话并发，默认 4，1~30）；
+      · 增加调用方身份校验——子会话不能再创建子会话（工具层已剥离，这里是第二道防线）；
+      · 只计「运行中」：已完成的子会话不占名额（本轮不限累计总量）。
     """
+    from app.core.config import settings
+
+    if caller_session_id is not None:
+        caller = await _get_session_row(db, caller_session_id)
+        if caller is not None and caller.side_parent_id is not None:
+            raise SubsessionError(
+                "子会话不能再创建子会话：需要更多执行力时，把需求写进汇报交给主代理，"
+                "由主代理决定是自己做还是再派一个同级子会话。"
+            )
+
+    limit = max(1, min(30, int(
+        getattr(settings, "max_subsessions_per_parent", MAX_SUBSESSIONS_PER_PARENT_DEFAULT)
+        or MAX_SUBSESSIONS_PER_PARENT_DEFAULT
+    )))
     # plan-156-620：门禁只计「运行中」的子会话——旧提示让用户「先完成或归档」，
     # 但已完成的仍计入上限，用户照做了也建不出来。
     children = await list_children(db, root_session_id)
@@ -196,10 +250,10 @@ async def assert_can_create(db: AsyncSession, root_session_id: int) -> None:
     for c in children:
         if c.status != "archived" and await _running_turn_id(db, c.id) is not None:
             running += 1
-    if running >= MAX_SUBSESSIONS_PER_PARENT:
+    if running >= limit:
         raise SubsessionError(
-            f"同一主会话下最多同时运行 {MAX_SUBSESSIONS_PER_PARENT} 个子会话，"
-            "请等已有子会话完成或中断后再创建"
+            f"本会话已有 {running} 个子会话在运行，达到上限 {limit}（单会话并发）。"
+            "请等其中一个结束，或在设置 →「子代理与子会话」调高上限。"
         )
 
 
@@ -237,7 +291,8 @@ async def create_subsession(
     # 把校验、建会话、建 turn 放进同一段串行区——第一次建出的 turn 是 running 状态，
     # 第二次校验才能把它算进上限。创建本身只做写库（执行是异步 spawn），串行代价很小。
     async with _CREATE_GUARD:
-        await assert_can_create(db, root)
+        # plan-474-2105：同时把调用方身份交给门禁——子会话再建子会话在服务层直接拒绝
+        await assert_can_create(db, root, caller_session_id=parent_session_id)
         sid = await session_service.create_session(
             db,
             project_id=parent.project_id,
@@ -565,6 +620,62 @@ async def interrupt(db: AsyncSession, subsession_id: int) -> dict:
 # 等主代理下一轮开始时由 injected_inputs 通道取走（不在本函数里阻塞等待）。
 _PENDING_PREFIX = "[子会话汇报]"
 
+# ── 提问注册表（plan-474-2105）────────────────────────────────
+# 子会话用 message_main(kind="question", wait=true) 提问后在这里挂起，主代理用
+# send_to_subsession(question_id=…) 答复时唤醒它——答复直接成为子会话那次工具调用的结果。
+# 进程内唯一：提问的生命周期不会跨重启（重启后子会话 turn 已中断，靠检查点续跑）。
+_PENDING_QUESTIONS: dict[str, dict] = {}
+# 默认等待上限（秒）：与设置项解耦，超时后按最佳判断继续，未决问题写进结论
+QUESTION_TIMEOUT_DEFAULT_S = 600.0
+
+
+def new_question_id(subsession_id: int) -> str:
+    return f"q_{int(subsession_id)}_{secrets.token_hex(4)}"
+
+
+def register_question(question_id: str) -> None:
+    """登记一个待答复的提问（同 id 重复登记时保留最早的等待者）。"""
+    if question_id in _PENDING_QUESTIONS:
+        return
+    _PENDING_QUESTIONS[question_id] = {
+        "event": asyncio.Event(),
+        "reply": None,
+        "created_at": time.time(),
+    }
+
+
+async def wait_for_question_reply(question_id: str, timeout_s: float) -> str | None:
+    """子会话侧等待答复；超时返回 None（调用方提示按最佳判断继续）。"""
+    entry = _PENDING_QUESTIONS.get(question_id)
+    if entry is None:
+        return None
+    try:
+        await asyncio.wait_for(entry["event"].wait(), timeout=max(1.0, float(timeout_s)))
+    except asyncio.TimeoutError:
+        _PENDING_QUESTIONS.pop(question_id, None)
+        logger.info("[subsession] 提问等待超时 question=%s", question_id)
+        return None
+    except asyncio.CancelledError:
+        _PENDING_QUESTIONS.pop(question_id, None)
+        raise
+    _PENDING_QUESTIONS.pop(question_id, None)
+    return entry.get("reply") or None
+
+
+def resolve_question(question_id: str, reply: str) -> bool:
+    """主代理答复：唤醒等待方。返回 False 表示该提问已超时/不存在（调用方退回普通发消息）。"""
+    entry = _PENDING_QUESTIONS.get(question_id)
+    if entry is None:
+        return False
+    entry["reply"] = reply
+    entry["event"].set()
+    return True
+
+
+def pending_question_count() -> int:
+    """当前挂起的提问数（诊断用）。"""
+    return len(_PENDING_QUESTIONS)
+
 # 汇报类型 → 文案（result 由收尾钩子自动发出，见 schedule_finish_report）
 _NOTIFY_KIND_LABEL: dict[str, str] = {
     "progress": "汇报",
@@ -580,35 +691,39 @@ async def notify_main(
     message: str,
     kind: str = "progress",
 ) -> dict:
-    """子会话 → 主代理：运行中注入主代理当前 turn；空闲则落库等待下一轮。
+    """子会话 → 主代理：提问 / 汇报统一经会话邮箱投递。
 
-    与探索子代理的 `report_to_leader` 同语义，但走会话级通道（子会话不是 agent 线程）。
+    plan-474-2105：
+      · 主代理运行中 → 注入当前轮；提问属控制面（P0），同时请求打断次要等待
+        （写文件 / 等用户回答不打断，动作结束后立刻生效）；
+      · 主代理空闲 → 提问会拉起一轮（否则子会话白等），汇报只排队等下一轮带走；
+      · 提问生成 `question_id` 一并送达，主代理答复时必须带回该 id（见 send_to_subsession）。
     """
-    from app.orchestration import engine
+    from app.orchestration import mailbox
     from app.persistence.models.message import Session
 
     row = await _get_session_row(db, subsession_id)
     if row is None or row.side_parent_id is None or row.side_kind != SideKind.SUB.value:
         raise SubsessionError("只有子会话可以向主代理汇报")
     root = row.side_parent_id
+    title = row.title or f"子会话 #{subsession_id}"
 
-    label = _NOTIFY_KIND_LABEL.get(kind, _NOTIFY_KIND_LABEL["progress"])
-    text = f"{_PENDING_PREFIX}「{row.title or f'子会话 #{subsession_id}'}」{label}：{message}"
+    question_id: str | None = None
+    if kind == "question":
+        question_id = new_question_id(subsession_id)
+        register_question(question_id)
+        text = (
+            f"{_PENDING_PREFIX}「{title}」提问（question_id={question_id}）：{message}\n"
+            f"答复方式：send_to_subsession({subsession_id}, message, question_id=\"{question_id}\")。"
+            "自己答得了就直接答；答不了先用 ask_user_question 问用户，再把用户回答转达给它。"
+            "在收到答复前它会一直等待，不要重复提问。"
+        )
+    else:
+        label = _NOTIFY_KIND_LABEL.get(kind, _NOTIFY_KIND_LABEL["progress"])
+        text = f"{_PENDING_PREFIX}「{title}」{label}：{message}"
 
-    main_turn = await _running_turn_id(db, root)
-    if main_turn is not None and engine.inject_input(main_turn, {
-        "content": text,
-        # plan-156-621：注入是内存队列，turn 收尾会清空。带此标记的项若没被 drain，
-        # 由 engine 收尾调用 persist_dropped_inputs 补落库，避免「注入与收尾同刻」时结论消失。
-        "_persist_on_drop": {
-            "session_id": root,
-            "subsession_id": subsession_id,
-            "text": text,
-        },
-    }):
-        return {"delivered": "injected", "main_turn_id": main_turn}
-
-    # 主代理空闲：作为一条系统提示落库，用户与主代理下一轮都能看到
+    # 1) 先落库：上下文装配据此把它作为一条独立输入交给主代理（保留既有标记，不改装配口径）；
+    #    同时保证投递因任何原因失败时消息仍在库里，下一轮仍能读到。
     try:
         from app.core.enums import MsgType, SenderType
         from app.services import message_service
@@ -617,13 +732,39 @@ async def notify_main(
             db, session_id=root,
             sender_type=SenderType.SYSTEM.value,
             msg_type=MsgType.TEXT.value,
-            # plan-156-620：打上来源标记——上下文装配据此把它作为一条独立的输入交给主代理，
-            # 而不是当成主代理自己的暂存正文（此前会被下一段正文覆盖而丢失）
-            content={"text": text, SUBSESSION_REPORT_FLAG: True, "subsession_id": subsession_id},
+            content={
+                "text": text,
+                SUBSESSION_REPORT_FLAG: True,
+                "subsession_id": subsession_id,
+                **({"question_id": question_id} if question_id else {}),
+                # plan-474-2105：与 mailbox.publish 的落库口径保持一致——前端据 mailbox.kind
+                # 直接识别「子会话提问卡 / 汇报」，不必再解析文本前缀。
+                "mailbox": {
+                    "kind": "subsession_question" if kind == "question" else "subsession_report",
+                    "priority": 0 if kind == "question" else 2,
+                    "source_session_id": subsession_id,
+                    "question_id": question_id,
+                },
+            },
         )
     except Exception:  # noqa: BLE001 — 落库失败不应让子会话任务中断
         logger.warning("[subsession] 主代理汇报落库失败 sid=%s", subsession_id, exc_info=True)
-    return {"delivered": "queued", "main_turn_id": None}
+
+    # 2) 投递（不再重复落库）：运行中注入并请求打断；空闲时提问拉起一轮、汇报排队
+    mail_kind = (
+        mailbox.MailKind.SUBSESSION_QUESTION if kind == "question"
+        else mailbox.MailKind.SUBSESSION_REPORT
+    )
+    try:
+        res = await mailbox.publish(
+            mail_kind, session_id=root, text=text,
+            source_session_id=subsession_id, question_id=question_id, persist=False,
+        )
+    except Exception:  # noqa: BLE001 — 投递异常按已排队处理（消息已落库）
+        logger.warning("[subsession] 邮箱投递失败 sid=%s", subsession_id, exc_info=True)
+        res = {"delivered": "queued"}
+    res["question_id"] = question_id
+    return res
 
 
 async def persist_dropped_inputs(items: list[dict]) -> None:

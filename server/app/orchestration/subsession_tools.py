@@ -120,7 +120,11 @@ SEND_TO_SUBSESSION_SCHEMA = {
         "description": (
             "向一个子会话发消息：运行中则把要求注入它下一次模型调用前（不打断当前步骤）；"
             "已中断/暂停则从检查点继续跑。"
-            "用于补充约束、纠正方向、或让它继续没做完的工作。"
+            "用于补充约束、纠正方向、或让它继续没做完的工作。\n"
+            "**回答子会话的提问时必须带上它给出的 question_id**（见消息里的 `question_id=...`）——"
+            "带 id 时答复会直接唤醒正在等待的子会话，作为它那次提问的工具结果返回；"
+            "不带 id 只是一条普通消息，子会话可能仍在阻塞等待。\n"
+            "自己无法决定的问题：先用 ask_user_question 问用户，拿到回答后用本工具带 question_id 转达。"
         ),
         "parameters": {
             "type": "object",
@@ -132,6 +136,10 @@ SEND_TO_SUBSESSION_SCHEMA = {
                 "message": {
                     "type": "string",
                     "description": "要传达的内容，需自包含（子会话看不到你与用户的对话）",
+                },
+                "question_id": {
+                    "type": "string",
+                    "description": "（回答提问时必填）子会话提问消息里给出的 question_id；不回答提问时留空",
                 },
             },
             "required": ["subsession_id", "message"],
@@ -194,10 +202,13 @@ MESSAGE_MAIN_SCHEMA = {
     "function": {
         "name": TOOL_MESSAGE_MAIN,
         "description": (
-            "向主代理汇报进度或提问（仅子会话可用）。消息会进入主代理下一次模型调用的上下文，"
-            "同时显示在你自己的会话里。kind=progress（默认）是异步状态更新；"
-            "kind=question 用于标记「需要主代理决定」——同样是异步送达，"
-            "不要在等待回复上空转，把未决问题写进自己的最终结论即可。"
+            "向主代理汇报进度或提问（仅子会话可用）。消息会进入主代理的上下文，"
+            "同时显示在你自己的会话里。\n"
+            "kind=progress（默认）：异步状态更新，发完继续干活。\n"
+            "kind=question：需要主代理决定。设 wait=true 会阻塞到你拿到答复（主代理可能先向用户确认），"
+            "答复作为本次工具结果直接返回——不要在等待期间空转，也不要重复发送同一个问题。"
+            "只有真正阻塞你继续工作的决策才提问；能自行判断的先做完并在结论里说明。\n"
+            "注意：你不能直接向用户提问（该能力已禁用），需要用户决策一律走本工具。"
         ),
         "parameters": {
             "type": "object",
@@ -206,6 +217,14 @@ MESSAGE_MAIN_SCHEMA = {
                 "kind": {
                     "type": "string",
                     "description": "progress（默认）= 状态更新；question = 需要主代理决定",
+                },
+                "wait": {
+                    "type": "boolean",
+                    "description": "仅 kind=question：true = 阻塞等待主代理答复（默认 true）",
+                },
+                "timeout_s": {
+                    "type": "integer",
+                    "description": "wait=true 时最长等待秒数（默认 600）；超时按最佳判断继续",
                 },
             },
             "required": ["message"],
@@ -292,3 +311,32 @@ def append_own_tools(tool_schemas: list[dict]) -> list[dict]:
             out.append(schema)
             names.add(name)
     return out
+
+
+# ── plan-474-2105：子会话的能力边界 ──────────────────────────
+# 子会话是「执行体」，不是「用户接口」：
+#   · 不得直接向用户提问——用户可能正停在主会话，子会话的提问会无人可见而无限阻塞；
+#     有疑问只能 message_main(kind="question") 交给主代理，由主代理决定自己答还是转问用户；
+#   · 不得再派生任何下级执行体（create_subsession / spawn_subagent），否则一个任务会
+#     无限套娃，也绕开单会话并发上限；
+#   · 不得操作其它会话（send_to_subsession / interrupt_subsession / get_subsession_progress）。
+# 集合口径：主会话侧的子会话工具（去掉自己那两个通信工具）+ 子代理工具 + ask_user_question。
+_SUBSESSION_OWN_NAMES: frozenset[str] = frozenset(
+    s["function"]["name"] for s in SUBSESSION_OWN_TOOLS
+)
+# 子代理工具名按字面量列出（不 import subagent_tools，避免两模块循环导入）
+_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
+    "spawn_subagent", "collect_results", "subagent_inspect", "cancel_subagent",
+    "send_to_subagent", "resume_subagent", "report_to_leader",
+})
+SUBSESSION_FORBIDDEN: frozenset[str] = (
+    frozenset(SUBSESSION_TOOL_NAMES) - _SUBSESSION_OWN_NAMES
+) | _SUBAGENT_TOOL_NAMES | {"ask_user_question"}
+
+
+def strip_for_subsession(tool_schemas: list[dict]) -> list[dict]:
+    """剔除子会话不得拥有的工具（幂等；白名单把工具塞回来也会被剥掉）。"""
+    return [
+        s for s in tool_schemas
+        if s.get("function", {}).get("name") not in SUBSESSION_FORBIDDEN
+    ]

@@ -64,10 +64,10 @@ const PROXY_MODES: Array<{ value: string; label: string; desc: string }> = [
   { value: "direct", label: "直连", desc: "不使用任何代理（含忽略环境变量）" },
 ];
 
-/** plan-271-1364 M3.2: 凭据取用策略（多 Key/多账号轮转方式） */
+/** plan-271-1364 M3.2: 凭据取用策略（多 Key/多账号取用顺序） */
 const STRATEGY_OPTS: Array<{ value: string; label: string; desc: string }> = [
-  { value: "sticky", label: "粘性优先", desc: "上次成功过的凭据优先，失败才切换（默认）" },
-  { value: "round_robin", label: "按优先级轮转", desc: "忽略粘性，严格按优先级顺序依次取用" },
+  { value: "sticky", label: "粘性优先", desc: "最近一次成功的凭据优先，失败后自动切换（默认）" },
+  { value: "round_robin", label: "按优先级", desc: "严格按设定优先级取用，近期失败的暂缓到队尾" },
 ];
 
 /** 状态徽标颜色类 */
@@ -376,7 +376,7 @@ function CredentialFormModal({ open, providerId, editing, onClose, onSaved }: {
         <div className="settings-modal-form-row"><label>API Key {editing && "(留空不修改)"}</label><Input type="password" placeholder="sk-..." value={apiKey} onChange={(e) => setApiKey(e.target.value)} /></div>
         <div className="settings-modal-form-row"><label>优先级（小的先用）</label><Input value={priority} onChange={(e) => setPriority(e.target.value)} /></div>
         <div className="settings-modal-form-row"><label>启用</label><Sw checked={isActive} onChange={setIsActive} /></div>
-        <div className="models-hint">同一供应商可配置多个 Key：某个 Key 报错（401/429/5xx）时会自动切换到下一个可用 Key，失败的 Key 进入冷却后自动恢复。</div>
+        <div className="models-hint">同一供应商可配置多个 Key：粘性模式优先用最近一次成功的 Key；优先级模式按设定顺序取用。失败的 Key 只是暂时靠后，其他 Key 都不可用时会自动回头重试，不会永久停用。</div>
       </div>
     </Modal>
   );
@@ -930,7 +930,13 @@ export function ModelsPanel() {
                       <div className="models-cred-main">
                         <div className="models-cred-title">
                           {c.label || (selected.api_format === "workbuddy" ? `账号 #${c.id}` : `凭据 #${c.id}`)}
-                          <span className={"models-badge sm " + credStatusClass(c.status, c.is_active)}>{credStatusLabel(c.status, c.is_active)}</span>
+                          {/* plan-20261020-retry-cred-perf：标出当前会优先取用的那一条 */}
+                          {c.preferred && c.is_active && (
+                            <span className="models-badge sm ok">当前使用</span>
+                          )}
+                          <span className={"models-badge sm " + credStatusClass(c.status, c.is_active, c.demoted)}>
+                            {credStatusLabel(c.status, c.is_active, c.demoted)}
+                          </span>
                         </div>
                         <div className="models-cred-desc">
                           {credDesc(c, selected.api_format)}
@@ -1126,21 +1132,24 @@ function patchProviderLocal(setProviders: React.Dispatch<React.SetStateAction<Pr
   setProviders((prev) => prev.map((p) => (p.id === id ? { ...p, [key]: value } : p)));
 }
 
-function credStatusClass(status: string, isActive?: boolean): string {
+function credStatusClass(status: string, isActive?: boolean, demoted?: boolean): string {
   // plan-271-1364 修复：停用统一走 muted，避免关掉开关后仍显示绿色「可用」。
   if (isActive === false) return "muted";
+  // plan-20261020-retry-cred-perf：暂缓只是降级、不是不可用，用 warn 而非 err
+  if (demoted) return "warn";
   if (status === "ok") return "ok";
   if (status === "cooldown") return "warn";
   if (status === "error") return "err";
   return "muted";
 }
 
-function credStatusLabel(status: string, isActive?: boolean): string {
+function credStatusLabel(status: string, isActive?: boolean, demoted?: boolean): string {
   // plan-271-1364 修复：停用的凭据不应再显示「可用」——此前只看 status，
   // 用户关掉开关后徽标仍显示可用，与实际取用行为不一致。
   if (isActive === false) return "已停用";
+  // plan-20261020-retry-cred-perf：失败不再踢出池子，只是短暂靠后 → 文案改「暂缓使用」
+  if (demoted || status === "cooldown") return "暂缓使用";
   if (status === "ok") return "可用";
-  if (status === "cooldown") return "冷却中";
   if (status === "error") return "异常";
   return "未启用";
 }

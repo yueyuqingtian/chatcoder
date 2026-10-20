@@ -57,7 +57,7 @@ import { parseRefLines } from "../../utils/refLines";
 import { api, resolveFileUrl, type AttachmentInfo, type ComposerRefOut, type McpServerOut, type PermissionProfileOut, type PluginMarketItem, type SkillOut, type TreeNode } from "../../api/client";
 import { openGallery } from "../../store/gallery";
 // plan-75-332: 权限模式菜单说明文案走统一 Tooltip（遵循“禁止新增原生 title”）
-import { Tooltip } from "../ui";
+import { Button, Tooltip } from "../ui";
 
 /** plan-20261009-ui U2：+ 浮窗中执行模式的顺序改为「智能体 → 计划 → 只读」——
  *  最常用的默认模式排在最上，自定义模式排在其后（保持后端返回的相对顺序）。 */
@@ -2352,14 +2352,15 @@ function QuestionWizardBox({
           >
             忽略
           </button>
-          <button
-            type="button"
-            className="plan-inline-confirm"
+          {/* plan-20261020-pts：原借用计划卡私有按钮类 .plan-inline-confirm（已随计划卡重做删除），改用统一按钮 */}
+          <Button
+            variant="primary"
+            size="sm"
             onClick={handleNextCustom}
             disabled={!customText.trim() && !currentAnswer}
           >
             {stepIndex < total - 1 ? "继续" : "提交回答"}
-          </button>
+          </Button>
         </div>
       </div>
       {/* plan-278-1391: 选项全文浮窗（portal 到 body，避免被输入框容器裁剪） */}

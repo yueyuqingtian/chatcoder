@@ -23,8 +23,14 @@ def _app() -> FastAPI:
 
 
 async def _project_and_session() -> tuple[int, int]:
+    # plan-474-2105：工作区路径用唯一值——以前写死 "C:/tmp/side-session-test"，
+    # 同一测试库连续跑多个用例时第二次插入就撞 projects.path 唯一约束（假失败）。
+    import uuid
+
+    unique_path = f"C:/tmp/side-session-test-{uuid.uuid4().hex[:8]}"
+
     def _op(s):
-        proj = ProjectRow(name="侧边测试", path="C:/tmp/side-session-test")
+        proj = ProjectRow(name="侧边测试", path=unique_path)
         s.add(proj)
         s.flush()
         row = SessionRow(title="主会话", project_id=proj.id, permission_mode="plan", approval_mode="auto")
@@ -58,26 +64,24 @@ async def test_side_session_inherits_parent_and_is_hidden_from_list():
     assert [c["id"] for c in children] == [child["id"]]
 
 
-async def test_subsession_can_create_sibling_not_nested():
-    """plan-156-619 S5：子会话可以再建子会话，但结果必须是**同级**（一层扁平）。
+async def test_subsession_cannot_create_subsession():
+    """plan-474-2105：子会话不得再创建任何同级 / 下级会话。
 
-    旧实现直接 400 拒绝（`test_side_session_cannot_nest`），导致子会话无法派生同级；
-    新语义：`side_parent_id` 一律指向根主会话，因此永远不会出现三级嵌套。
+    旧行为（plan-156-619 S5）允许子会话派生同级，结果是一个任务可以无限套娃、
+    并绕开单会话并发上限；需求明确改为直接拒绝。工具层已剥离 create_subsession，
+    这里验证 REST 入口的防线。
     """
     _, parent_id = await _project_and_session()
     client = TestClient(_app())
     child_id = client.post(f"/sessions/{parent_id}/side-sessions").json()["id"]
 
     res = client.post(f"/sessions/{child_id}/side-sessions")
-    assert res.status_code == 200, res.text
-    sibling = res.json()
-    # 关键断言：新会话挂在**根主会话**下，而不是挂在 child 下
-    assert sibling["side_parent_id"] == parent_id
-    assert sibling["side_parent_id"] != child_id
+    assert res.status_code == 400, res.text
+    assert "子会话不能再创建会话" in res.text
 
-    # 与第一个子会话同级：两者都从主会话的列表里能查到
+    # 主会话下的子会话仍然只有原来那一个
     children = client.get(f"/sessions/{parent_id}/side-sessions").json()
-    assert {c["id"] for c in children} == {child_id, sibling["id"]}
+    assert [c["id"] for c in children] == [child_id]
 
 
 

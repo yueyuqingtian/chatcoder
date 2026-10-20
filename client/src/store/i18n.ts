@@ -407,7 +407,7 @@ const DICT: Dict = {
   "gp.retry_count":               ["异常自动重试次数", "Auto Retry Count"],
   "gp.retry_count_desc":          ["网络或模型异常时自动重试的次数，主代理与子代理共用（0 = 不重试，任务暂停后可手动续跑）", "Automatic retries on network or model errors, shared by the main agent and subagents (0 = no retry; the task pauses and can be resumed)"],
   "gp.retry_intervals":           ["重试间隔（秒）", "Retry Intervals (seconds)"],
-  "gp.retry_intervals_desc":      ["每次重试前的等待秒数，逗号分隔；默认 10,20,30。子代理重试耗尽后仍按最后一个间隔等待恢复，直到主代理停止", "Seconds to wait before each retry, comma separated; default 10,20,30. After retries run out, a subagent keeps waiting at the last interval until the main agent stops"],
+  "gp.retry_intervals_desc":      ["每次重试前的等待秒数，逗号分隔（中文逗号、顿号、分号、空格均可）；默认 10,20,30。多个 Key 时一次重试会依次试完所有 Key，整轮失败才等待", "Seconds to wait before each retry, comma separated (Chinese comma, enumeration comma, semicolon or space also accepted); default 10,20,30. With multiple keys, one retry round tries every key before waiting"],
   "gp.browser":                   ["AI 操作内置浏览器", "AI Browser Control"],
   "gp.browser_desc":              ["允许 AI 在右侧浏览器面板中打开网页、点击、输入、截图与读取页面，操作过程实时可见", "Let AI open pages, click, type, screenshot and read pages in the browser panel, visible in real time"],
   "gp.browser_headless":          ["后台浏览器无头运行", "Headless Fallback Browser"],

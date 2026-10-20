@@ -25,8 +25,21 @@ from app.orchestration.tools.bg_process import (
 )
 from app.orchestration.tools.git_root import resolve_repo_for_cwd, list_git_repos
 from app.orchestration.tools.shell_env import resolve_shell, shell_kind
+from app.orchestration.tools.shell_hints import failure_hint, rewrite_null_device
 
 logger = logging.getLogger(__name__)
+
+# plan-20261020-pts：命令开头的切换目录（cd / chdir / Set-Location / sl / pushd / Push-Location，路径可带引号）
+_LEADING_CD_RE = re.compile(
+    r"^\s*(?:cd|chdir|set-location|sl|pushd|push-location)\s+(?:-(?:literal)?path\s+)?"
+    r"(?P<dir>\"[^\"]+\"|'[^']+'|[^\s&;|]+)\s*(?:&&|;|&)\s*",
+    re.I,
+)
+# 命令中任意位置的切换目录（用于判断「命令自己进了仓库目录」）
+_CD_ANYWHERE_RE = re.compile(r"(?:^|[;&|(\s])(?:cd|chdir|set-location|sl|pushd|push-location)\s+\S", re.I)
+# git 命令词（排除 .gitignore / github / digit 这类子串）；git -C <dir> 表示已指定仓库
+_GIT_CMD_RE = re.compile(r"(?<![\w.-])git(?:\.exe)?(?=\s|$)", re.I)
+_GIT_DASH_C_RE = re.compile(r"(?<![\w.-])git(?:\.exe)?\s+-C\s+\S", re.I)
 
 # v1.0 (plan-153-705): 同步等待默认超时（秒），可被 timeout 参数覆盖；
 # 上限钳制到 settings.tool_exec_timeout_sec（executor/agent_loop 外层同源）。
@@ -81,6 +94,58 @@ async def _await_returncode(proc: Any, timeout: float = 5.0) -> int | None:
     return getattr(proc, "returncode", None)
 
 
+async def detach_to_background(
+    proc: asyncio.subprocess.Process,
+    *,
+    command: str,
+    cwd: str | None,
+    session_id: int,
+    turn_id: int | None = None,
+    seeded: str = "",
+    out_task: asyncio.Task | None = None,
+    err_task: asyncio.Task | None = None,
+    started_at: float | None = None,
+) -> ToolResult:
+    """把**已在运行**的前台命令转后台（不终止进程），立即返回 shell_id。
+
+    plan-474-2105：主代理在同步命令里收到子会话提问时，不能把命令杀掉（等于白跑），
+    也不能一直等（提问会饿死）。这里把进程交给后台注册表继续收输出，控制权立刻让回。
+    转之前已读到的输出用 `seed_output` 写进后台缓冲，日志不会断档。
+    plan-20261020-bgtask：`started_at` 沿用命令真正的开跑时刻，后台任务栏的计时不从转后台那一刻重数。
+    """
+    for t in (out_task, err_task):
+        if t is not None and not t.done():
+            t.cancel()
+    pending = [t for t in (out_task, err_task) if t is not None]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    from app.orchestration.bg_notify import on_bg_exit
+
+    shell_id = bg_process_registry.register(
+        proc, command, cwd, session_id, turn_id=turn_id, on_exit=on_bg_exit,
+        started_at=started_at,
+    )
+    if seeded:
+        bg_process_registry.seed_output(shell_id, seeded)
+    logger.info(
+        "[term.detach] shell_id=%s pid=%s cmd=%r",
+        shell_id, getattr(proc, "pid", None), command[:200],
+    )
+    return ToolResult(
+        ok=True,
+        output=(
+            "命令已转后台继续运行（收到需要优先处理的消息，先处理消息）。\n"
+            f"shell_id: {shell_id}\n"
+            f"命令: {command}\n"
+            "用 terminal_bg_status 查询状态与日志(offset 增量读取)，terminal_bg_kill 终止。\n"
+            "进程不会因为本轮结束而停止；跑完后结果会自动回到本会话。"
+        ),
+        data={"shell_id": shell_id, "background": True, "detached": True,
+              "command": command, "cwd": cwd or ""},
+    )
+
+
 class TerminalExecTool(Tool):
     name = "terminal_exec"
     risk_level = "high"
@@ -91,11 +156,16 @@ class TerminalExecTool(Tool):
         "只读安全命令(如 git status/findstr/dir)免审批直接执行；危险命令被安全策略直接拒绝。\n"
         "重要: 每次调用是全新的 shell 进程,cd 不会跨调用持久化。\n"
         "如需在特定子目录执行,请用 cwd 参数指定,而不是 cd 命令。\n"
-        "启动 dev server、watch、后端服务等长驻进程时,将 waitForCompletion 设为 false,\n"
-        "命令进入后台运行并立即返回 shell_id,用 terminal_bg_status 查日志、terminal_bg_kill 终止。\n"
+        "三种运行方式:\n"
+        "1. 同步(默认 waitForCompletion=true): 阻塞到命令结束并直接返回输出,适合几分钟内能跑完的命令。\n"
+        "2. 后台(waitForCompletion=false)·会自己结束: 构建、全量测试、批处理等耗时命令——立即返回 shell_id,\n"
+        "   你可以先去做别的事;命令跑完后系统会主动把结果送回本会话,不必轮询。\n"
+        "3. 后台(waitForCompletion=false)·长驻服务: dev server、watch、后端服务永远不会自己结束——\n"
+        "   用 terminal_bg_status 看日志确认启动成功,用完后必须调用 terminal_bg_kill 主动停止,别留在后台占着端口。\n"
+        "   用户也能在界面右上角「后台任务」里手动停止,停止后会通知你。\n"
         "重要: 等待后台命令完成时,禁止用 Start-Sleep / sleep 固定等待(无法感知真正完成,\n"
-        "且会让界面长时间无输出)。正确做法: 用 terminal_bg_status 轮询直到 running=false,\n"
-        "或直接传 wait_until_done=true 一次等待完成(后台进程结束即返回,非固定秒数)。\n"
+        "且会让界面长时间无输出)。需要在当前步骤用到结果时,传 terminal_bg_status 的 wait_until_done=true\n"
+        "一次等待完成(后台进程结束即返回,非固定秒数);对长驻服务不要这样等。\n"
         '例: {"command": "git diff", "cwd": "clinic"}；'
         '后台例: {"command": "npm run dev", "waitForCompletion": false}'
     )
@@ -157,12 +227,11 @@ class TerminalExecTool(Tool):
                 data={"hint": "use_cwd_param"},
             )
 
-        # 2. 如果命令含 'cd xxx && yyy',提取 xxx 作为 cwd,并从命令中移除 cd 部分
+        # 2. 如果命令以 'cd xxx && yyy' / 'Set-Location xxx; yyy' 开头,提取 xxx 作为 cwd,并移除这一段
         #    (否则 subprocess 的 cwd=xxx 已切到该目录,cd xxx 再执行一次会失败)
-        cd_chain_match = re.search(
-            r"(?:^|\s)(?:cd|chdir)\s+([^\s&;|]+)\s*(?:&&|;|&)",
-            command, re.IGNORECASE,
-        )
+        #    plan-20261020-pts：补上 Set-Location / sl / pushd / Push-Location 与带引号（含空格）的路径；
+        #    只处理开头那一段——中途的 cd 交给 shell 自己执行，摘掉会改变后续命令的语义。
+        cd_chain_match = _LEADING_CD_RE.match(command)
         explicit_cwd = args.get("cwd", None)
         # plan-75-332: 取消了 cwd 越界限制——工具不再阻止在工作区外目录执行命令
         # （是否询问用户由 approval_policy 按权限模式裁决）。
@@ -171,23 +240,26 @@ class TerminalExecTool(Tool):
         if explicit_cwd:
             resolved_cwd = self._resolve_path(ctx.workspace_root, explicit_cwd)
         elif cd_chain_match:
-            cd_dir = cd_chain_match.group(1).strip().strip('"').strip("'")
+            cd_dir = cd_chain_match.group("dir").strip().strip('"').strip("'")
             resolved_cwd = self._resolve_path(ctx.workspace_root, cd_dir)
-            # 从命令中移除 'cd xxx && ' 部分
-            command = re.sub(
-                r"(?:cd|chdir)\s+[^\s&;|]+\s*(?:&&|;|&)\s*",
-                "", command, flags=re.IGNORECASE,
-            ).strip()
+            command = command[cd_chain_match.end():].strip()
 
         # 3. 若仍未确定 cwd 且命令含 git,尝试自动探测
+        # plan-20261020-pts：按 git 命令词判断（此前子串 "git" 会命中 .gitignore / github / digit）
+        uses_git = bool(_GIT_CMD_RE.search(command))
         if not resolved_cwd:
-            if "git" in command.lower():
+            if uses_git:
                 resolved_cwd = resolve_repo_for_cwd(ctx.workspace_root)
             else:
                 resolved_cwd = ctx.workspace_root
 
         # 4. 如果 cwd 是 workspace 根(非 git 仓库)但命令是 git → 报错提示 agent 用 cwd 参数
-        if "git" in command.lower() and resolved_cwd == ctx.workspace_root:
+        #    plan-20261020-pts：命令自己切换了目录（Set-Location / cd / pushd）或用 git -C 指定了仓库时放行——
+        #    此前 `Set-Location clinic; git diff` 这类写法一律被拦（真实库里 22 次）。
+        if (
+            uses_git and resolved_cwd == ctx.workspace_root
+            and not _CD_ANYWHERE_RE.search(command) and not _GIT_DASH_C_RE.search(command)
+        ):
             repos = list_git_repos(ctx.workspace_root)
             if repos:
                 repo_names = [Path(r).name for r in repos]
@@ -204,9 +276,13 @@ class TerminalExecTool(Tool):
         #    cmd 及其他走 create_subprocess_shell 默认解析）
         shell = resolve_shell()
         kind = shell_kind()
+        # plan-20261020-pts：PowerShell / cmd 下把 > /dev/null 改写成 $null / nul（Windows 没有这个设备，
+        # 原样执行要么报找不到路径，要么在盘符根目录建出 dev 目录）
+        command, _null_rewritten = rewrite_null_device(command, kind)
         wait_for_completion = _parse_wait_for_completion(args.get("waitForCompletion"))
         timeout_sec = _parse_timeout(args.get("timeout"))
         _t0 = time.monotonic()
+        _started_wall = time.time()  # plan-20261020-bgtask：转后台时沿用真正的开跑时刻
         # v36: 执行前留痕。打包后 shell 解析依赖 PATH/SystemRoot，
         # 环境缺失会静默退化成错误 shell，导致命令全部失败且难以查证。
         logger.info(
@@ -250,8 +326,13 @@ class TerminalExecTool(Tool):
         # v1.0 (plan-153-705): 后台模式——注册到 bg_process 立即返回 shell_id。
         # 后台进程不随 cancel_event 终止（dev server 需跨 turn 存活）。
         if not wait_for_completion:
+            # plan-474-2105：注册完成回调——进程退出后主动把结果送回发起会话
+            from app.orchestration.bg_notify import on_bg_exit
+
             shell_id = bg_process_registry.register(
                 proc, command, resolved_cwd, ctx.session_id,
+                turn_id=getattr(ctx, "turn_id", None),
+                on_exit=on_bg_exit,
             )
             return ToolResult(
                 ok=True,
@@ -261,7 +342,9 @@ class TerminalExecTool(Tool):
                     f"命令: {command}\n"
                     f"工作目录: {resolved_cwd}\n"
                     f"用 terminal_bg_status 查询状态与日志(offset 增量读取),"
-                    f"terminal_bg_kill 终止。"
+                    f"terminal_bg_kill 终止。\n"
+                    f"如果它会自己结束,跑完后系统会把结果送回本会话,不必轮询;"
+                    f"如果是长驻服务(dev server / watch),确认可用后记得用完就 terminal_bg_kill 停止。"
                 ),
                 data={"shell_id": shell_id, "background": True,
                       "command": command, "cwd": resolved_cwd},
@@ -309,6 +392,16 @@ class TerminalExecTool(Tool):
                 if ctx.cancel_event and ctx.cancel_event.is_set():
                     await kill_process_tree(proc)
                     return ToolResult(ok=False, output="", error="已被用户中断")
+                # plan-474-2105：收到子会话消息 → 命令转后台，进程不终止，控制权让回主代理
+                if ctx.detach_event is not None and ctx.detach_event.is_set():
+                    return await detach_to_background(
+                        proc, command=command, cwd=resolved_cwd,
+                        session_id=ctx.session_id,
+                        turn_id=getattr(ctx, "turn_id", None),
+                        seeded="".join(out_parts),
+                        out_task=out_task, err_task=err_task,
+                        started_at=_started_wall,
+                    )
                 if asyncio.get_running_loop().time() >= deadline:
                     raise asyncio.TimeoutError
                 # 主循环只轮询，不等待输出（reader task 常驻）
@@ -366,11 +459,14 @@ class TerminalExecTool(Tool):
             _inside = False
         if not _inside:
             data["outside_access"] = True
+        # plan-20261020-pts：失败时识别常见的 shell 误用（PowerShell 里写 head / grep、Select-String -Recurse、
+        # cmd 里写 PowerShell 命令、非 git 目录……），把正确写法直接附在错误后面
+        hint = "" if rc == 0 else failure_hint(command, combined, kind)
         return ToolResult(
             ok=rc == 0,
             output=combined or "(无输出)",
             data=data,
-            error="" if rc == 0 else f"退出码 {rc}",
+            error="" if rc == 0 else f"退出码 {rc}{hint}",
         )
 
     def approval_precheck(self, args: dict[str, Any], ctx: ToolContext) -> tuple[bool, str]:

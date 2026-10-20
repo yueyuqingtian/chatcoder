@@ -914,6 +914,13 @@ export const api = {
   forkSession: (id: number) => post<SessionOut>(`/sessions/${id}/fork`),
   /** 停止按钮：中断本会话的一切执行（主代理及子代理、后台子代理、运行中的工作流——暂停保留进度） */
   stopSession: (id: number) => post<{ ok: boolean; turns: number; agent_managers: number; workflows_paused: number; wakeup_cancelled?: number }>(`/sessions/${id}/stop`),
+  /** plan-20261020-bgtask：会话名下仍在运行的后台命令（右上角「后台任务」栏的数据源） */
+  listBgProcesses: (sessionId: number) => get<{ items: BgProcessOut[] }>(`/sessions/${sessionId}/bg-processes`),
+  /** 用户停止一个后台命令：终止进程树，并由服务端把「被用户停止」通知给会话 */
+  stopBgProcess: (sessionId: number, shellId: string) =>
+    post<{ ok: boolean; stopped: boolean; returncode: number | null }>(
+      `/sessions/${sessionId}/bg-processes/${encodeURIComponent(shellId)}/stop`,
+    ),
   renameSession: (id: number, title: string) =>
     post<SessionOut>(`/sessions/${id}/rename?title=${encodeURIComponent(title)}`),
   createWorktree: (id: number, branch?: string) =>
@@ -1512,6 +1519,8 @@ export const api = {
       { mode },
     ),
   setGlobalSettings: (data: Partial<GlobalSettingsIn>) => put<GlobalSettingsOut>("/settings/global", data),
+  /** 单会话并发上限与当前占用（只读内存快照） */
+  getRuntimeLimits: () => get<RuntimeLimitsOut>("/runtime/limits"),
   /** 问题7/8: 终端 Shell 存在性探测 + 候选等宽字体 */
   getTerminalOptions: () => get<TerminalOptionsOut>("/settings/terminal/options"),
 
@@ -1705,12 +1714,14 @@ export interface GlobalSettingsOut {
   desktop_recipe_enabled?: boolean;
   /** plan-20261019-desktop-targeting: 电脑操控坐标口径（auto 按模型自动 / pixel 图上像素 / norm1000 0–1000 比例） */
   desktop_coord_mode?: string;
-  /** v36: 子代理同时运行上限（超出后新派发排队等待，1~16） */
+  /** 单会话子代理并发上限（1~30） */
   max_concurrent_subagents?: number;
-  /** v36: 每轮子代理派发总量上限（含已完成，1~32） */
-  max_subagents_per_turn?: number;
-  /** plan-156-619 S4e: 子代理 / 子会话总开关（关闭后主代理不再派发） */
+  /** 单会话子会话并发上限（1~30） */
+  max_subsessions_per_parent?: number;
+  /** plan-156-619 S4e: 子代理开关（plan-20261020-subsession-switch 起只控制子代理） */
   subagent_enabled?: boolean;
+  /** plan-20261020-subsession-switch: 子会话开关（含操控子会话），与子代理独立 */
+  subsession_enabled?: boolean;
   /** plan-156-619 S4e: 子代理默认模型 id；0 = 跟随主代理 */
   subagent_model_id?: number;
   /** plan-156-619 S4e: 子代理思考深度档位；空 = 跟随会话档位 */
@@ -1758,6 +1769,23 @@ export interface GlobalSettingsOut {
 }
 
 export type GlobalSettingsIn = Partial<Omit<GlobalSettingsOut, never>>;
+
+/** plan-20261020-bgtask：运行中的后台命令；elapsed 为服务端算好的已运行秒数（前端以收到的时刻为基准累加） */
+export interface BgProcessOut {
+  shell_id: string;
+  command: string;
+  cwd: string;
+  turn_id: number | null;
+  started_at: number;
+  elapsed: number;
+}
+
+/** 单会话并发上限与当前占用（只读内存快照） */
+export interface RuntimeLimitsOut {
+  max_concurrent_subagents: number;
+  max_subsessions_per_parent: number;
+  sessions: Array<{ session_id: number; subagents_running: number; subsessions_running: number }>;
+}
 
 /** 问题7/8: 终端 Shell 选项（available=当前设备实际存在） */
 export interface TerminalShellOption { value: string; label: string; available: boolean; }

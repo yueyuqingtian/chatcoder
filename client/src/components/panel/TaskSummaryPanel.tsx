@@ -29,6 +29,13 @@ const EMPTY_MESSAGES: never[] = [];
  *  因此行上不展示，但仍用它识别续接态（plan-20261014-summary）。 */
 const CARRIED_NOTE = "待续接";
 
+/** 产物路径的归一键（plan-20261020-path-dedupe）：模型写同一个文件时会混用 `a\b.md` 与 `a/b.md`，
+ *  后端聚合已统一，这里再兜一层——接口失败回退到消息产物时同样按归一键去重，避免同一文件两行。
+ *  只统一分隔符与前导 `./`，不改大小写（Linux 工作区里 A.md 与 a.md 是两个文件）。 */
+function pathKey(p: string): string {
+  return p.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/{2,}/g, "/").replace(/\/+$/, "");
+}
+
 /** 模块卡片：整条表头可点折叠。计数与箭头收在表头右侧（计数用统一徽标，与拓展行的计数同款），
  *  折叠只转角度，不挤标题（plan-20261014-summary） */
 function SummaryCard({ id, title, icon, count, children }: {
@@ -111,17 +118,28 @@ export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
   }, [visible, productSessionId, turnChanges, isRunning]);
   useEffect(() => { setProductPaths(null); }, [productSessionId]);
   const productFiles = useMemo<string[]>(() => {
-    if (productPaths) return productPaths;
+    if (productPaths) {
+      // 后端已按归一路径去重；这里再按同一口径收一次，防止旧版本后端返回混合写法
+      const uniq = new Map<string, string>();
+      for (const p of productPaths) {
+        const k = pathKey(p);
+        if (!uniq.has(k)) uniq.set(k, k);
+      }
+      return [...uniq.values()];
+    }
     const deleted = new Set<string>();
-    for (const list of Object.values(turnChanges)) for (const c of list ?? []) if (c.action === "deleted") deleted.add(c.path);
-    const set = new Set<string>();
+    for (const list of Object.values(turnChanges)) for (const c of list ?? []) if (c.action === "deleted") deleted.add(pathKey(c.path));
+    // 回退口径与变更卡片一致：同一文件的两种斜杠写法合并成一行（plan-20261020-path-dedupe）
+    const set = new Map<string, string>();
     for (const message of messages) {
       const content = message.content as Record<string, unknown>;
       if (message.msg_type !== "artifact" || !Array.isArray(content.files)) continue;
-      for (const file of content.files.map(String)) set.add(file);
+      for (const file of content.files.map(String)) set.set(pathKey(file), pathKey(file));
     }
-    for (const artifact of artifacts) for (const file of artifact.files ?? []) set.add(file);
-    return [...set].filter((f) => !deleted.has(f));
+    for (const artifact of artifacts) {
+      for (const file of artifact.files ?? []) set.set(pathKey(file), pathKey(file));
+    }
+    return [...set.values()].filter((f) => !deleted.has(f));
   }, [productPaths, messages, artifacts, turnChanges]);
 
   const openFile = (path: string) => {

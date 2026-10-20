@@ -28,6 +28,7 @@ import {
 } from "react";
 import {
   IconChevronDown, IconCpu, IconGitBranch, IconListChecks, IconMinimize, IconMoreHorizontal, IconRingProgress,
+  IconTerminal,
 } from "../../icons";
 import { IxWorkflow } from "../../iconkit/StackIcons";
 import { Collapse, Floating, IconButton, Segmented, Switch, Tooltip } from "../../ui";
@@ -43,7 +44,7 @@ import { pickForm, type ToolCardFit, type ToolCardForm } from "./useToolCardFit"
 import { useToolCardData, type ToolCardData } from "./useToolCardData";
 import { GitToolSection } from "./GitToolSection";
 import {
-  PlanSection, ProcessSection, SubagentSection, ToolCardEdgeContext, WorkflowSection,
+  BgTaskSection, PlanSection, ProcessSection, SubagentSection, ToolCardEdgeContext, WorkflowSection,
 } from "./ToolCardSections";
 
 interface InertProps {
@@ -113,6 +114,15 @@ function CapsuleSummary({ section, data }: { section: ToolCardSection; data: Too
       </>
     );
   }
+  if (section === "bgtask" && data.bgtask) {
+    return (
+      <>
+        <span className="tcard-ic"><IconTerminal size={16} /></span>
+        <span className="tcard-cap-num">{data.bgtask.tasks.length}</span>
+        <span className="tcard-cap-text">后台任务运行中</span>
+      </>
+    );
+  }
   if (section === "plan" && data.plan) {
     return (
       <>
@@ -155,6 +165,7 @@ function sectionMeta(section: ToolCardSection, data: ToolCardData): string {
     if (data.workflow.open.length > 0) return `${data.workflow.open.length} 运行中`;
     return `${data.workflow.finished.length}`;
   }
+  if (section === "bgtask") return data.bgtask ? `${data.bgtask.tasks.length} 运行中` : "";
   return "";
 }
 
@@ -201,7 +212,7 @@ export function SessionToolCard({ fit, onFormChange }: SessionToolCardProps) {
   const present = useMemo(
     () => TOOL_CARD_SECTIONS.filter((s) => hasContent(data, s)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [data.git, data.plan, data.process, data.subagent, data.workflow],
+    [data.git, data.plan, data.process, data.subagent, data.workflow, data.bgtask],
   );
 
   const form = useMemo<ToolCardForm>(
@@ -412,6 +423,7 @@ export function SessionToolCard({ fit, onFormChange }: SessionToolCardProps) {
                     {section === "process" && data.process && <ProcessSection data={data.process} />}
                     {section === "subagent" && data.subagent && <SubagentSection data={data.subagent} />}
                     {section === "workflow" && data.workflow && <WorkflowSection data={data.workflow} />}
+                    {section === "bgtask" && data.bgtask && <BgTaskSection data={data.bgtask} />}
                   </div>
                 )}
               </Collapse>

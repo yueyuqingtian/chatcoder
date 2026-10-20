@@ -825,3 +825,66 @@
   from { opacity: 1; transform: none; }
   to { opacity: 0; transform: translateY(calc(4px * var(--motion-dist))) scale(0.985); }
 }
+
+/* ── plan-474-2105（组 C）：子会话治理的展示层 ─────────────────────────
+   左栏子会话运行数角标、消息流「子会话提问」卡、工具行打断徽标。
+   （后台命令完成 / 停止通知不再是独立卡片，作为普通工具行展示，见 timeline.bgNoticeItem。）
+   全部只用既有令牌；状态一律用文字与底色表达，不加装饰性竖线。 */
+
+/* 消息流：子会话提问卡（只读展示，不需要用户确认） */
+.sqc-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--bg-panel);
+}
+.sqc-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.sqc-head-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+.sqc-title {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text-1);
+}
+/* 问题正文：窄面板下也必须有确定行高（依赖继承会把多行挤在一起） */
+.sqc-body {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.sqc-note {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+/* 工具行：打断标记（已转后台 / 已让出等待）——中性提示色，不是失败态 */
+.tc-state-tag {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  height: 16px;
+  padding: 0 6px;
+  border-radius: var(--r-sm);
+  background: var(--info-soft);
+  color: var(--info);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}

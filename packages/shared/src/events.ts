@@ -157,6 +157,10 @@ export type ServerWsEvent =
   | { event: "subagent.pending"; payload: { session_id: number; pending: number } }
   /** v39: 子代理完成唤醒——服务端自动创建新 turn 送达完成报告（前端渲染分隔线） */
   | { event: "subagent.wakeup"; payload: { session_id: number; turn_id: number } }
+  /** plan-20261020-bgtask：后台命令启动——右上角「后台任务」栏新增一行（elapsed 为服务端算好的已运行秒数） */
+  | { event: "bg.process.started"; payload: BgProcessEventPayload }
+  /** 后台命令退出（自然结束 / 被用户或模型停止 / 会话删除）——栏目里撤掉这一行 */
+  | { event: "bg.process.exited"; payload: BgProcessEventPayload & { returncode: number | null; reason: BgProcessExitReason } }
   /** plan-156-619 S10：AI 提出了后续任务建议（消息流底部渲染卡片） */
   | {
       event: "suggestion.created";
@@ -189,6 +193,20 @@ export type ServerWsEvent =
   | { event: "sync.response"; payload: { last_seq: number; count: number } };
 
 export type ServerEventName = ServerWsEvent["event"];
+
+/** plan-20261020-bgtask：后台命令事件的公共载荷 */
+export interface BgProcessEventPayload {
+  session_id: number;
+  shell_id: string;
+  /** 完整命令（服务端截到 500 字符；界面按首行省略展示） */
+  command: string;
+  cwd: string;
+  turn_id: number | null;
+  /** 服务端算好的已运行秒数 */
+  elapsed: number;
+}
+
+export type BgProcessExitReason = "completed" | "stopped_by_user" | "stopped_by_agent" | "stopped_by_system";
 
 /**
  * 压缩结果载荷（compact.summary / compact.completed）。

@@ -48,7 +48,7 @@ def _save_config(data: dict) -> None:
 
 
 # plan-20261019-toolcard-v2：会话工具卡设置的取值夹紧（与前端 store/toolCard.ts 的栏目键一致）
-_TOOL_CARD_SECTIONS = ("git", "plan", "process", "subagent", "workflow")
+_TOOL_CARD_SECTIONS = ("git", "plan", "process", "subagent", "workflow", "bgtask")
 
 
 def _tool_card_form(value) -> str:
@@ -142,7 +142,8 @@ def load_persisted_workspace() -> None:
     # v45: 启动时恢复异常自动重试策略
     if "agent_retry_count" in data:
         try:
-            settings.agent_retry_count = max(0, int(data["agent_retry_count"]))
+            # plan-20261020-retry-cred-perf R9：次数夹到 0–20（上限避免一轮重试耗掉整天）
+            settings.agent_retry_count = min(20, max(0, int(data["agent_retry_count"])))
         except (TypeError, ValueError):
             pass
     if "agent_retry_intervals" in data:
@@ -210,15 +211,15 @@ def load_persisted_workspace() -> None:
             _ratio = None
         if _ratio is not None and 0.50 <= _ratio <= 0.95:
             settings.auto_compact_threshold_ratio = round(_ratio, 2)
-    # v36: 启动时恢复子代理并发治理（同时运行上限 / 每轮总量上限）
+    # plan-474-2105: 启动时恢复单会话并发上限（子代理 / 子会话，均为 1~30）
     if "max_concurrent_subagents" in data:
         try:
-            settings.max_concurrent_subagents = max(1, min(16, int(data["max_concurrent_subagents"])))
+            settings.max_concurrent_subagents = max(1, min(30, int(data["max_concurrent_subagents"])))
         except (TypeError, ValueError):
             pass
-    if "max_subagents_per_turn" in data:
+    if "max_subsessions_per_parent" in data:
         try:
-            settings.max_subagents_per_turn = max(1, min(32, int(data["max_subagents_per_turn"])))
+            settings.max_subsessions_per_parent = max(1, min(30, int(data["max_subsessions_per_parent"])))
         except (TypeError, ValueError):
             pass
     # plan-156-619 S4d：子会话默认模型与思考深度（设置中心「子代理」面板只留这两项）
@@ -231,6 +232,13 @@ def load_persisted_workspace() -> None:
         settings.subagent_reasoning_effort = str(data["subagent_reasoning_effort"] or "")[:20]
     if "subagent_enabled" in data:
         settings.subagent_enabled = bool(data["subagent_enabled"])
+    # plan-20261020-subsession-switch：子会话开关已从合并开关中拆出。旧配置只有合并开关，
+    # 键缺失时跟随它的取值——用户此前显式关闭的，升级后不要被静默打开。
+    if "subsession_enabled" in data:
+        settings.subsession_enabled = bool(data["subsession_enabled"])
+    else:
+        settings.subsession_enabled = bool(
+            data.get("subagent_enabled", getattr(settings, "subagent_enabled", True)))
     # plan-20261018-operator-boost：GUI 操作交给操控子会话 / 操控子会话思考深度
     if "operator_subsession_enabled" in data:
         settings.operator_subsession_enabled = bool(data["operator_subsession_enabled"])
@@ -277,6 +285,11 @@ def load_persisted_workspace() -> None:
             data[_key] = _default
             setattr(settings, _key, _default)
             _defaults_added = True
+    # plan-20261020-subsession-switch：子会话开关同步补写，取值跟随拆分前的合并开关
+    if "subsession_enabled" not in data:
+        data["subsession_enabled"] = bool(data.get("subagent_enabled", True))
+        settings.subsession_enabled = data["subsession_enabled"]
+        _defaults_added = True
     if _defaults_added:
         _save_config(data)
 
@@ -358,15 +371,17 @@ class GlobalSettingsOut(BaseModel):
     desktop_recipe_enabled: bool = True
     # plan-20261019-desktop-targeting：坐标口径 auto / pixel / norm1000
     desktop_coord_mode: str = "auto"
-    # v36: 子代理并发治理（设置中心「子代理」面板可配，运行时立即生效）
-    max_concurrent_subagents: int = 6   # 同时运行上限（超出排队等待，1~16）
-    max_subagents_per_turn: int = 10    # 每轮派发总量上限（含已完成，1~32）
+    # plan-474-2105: 单会话并发上限（设置中心「子代理」面板可配，运行时立即生效）
+    max_concurrent_subagents: int = 4    # 单会话并发上限（子代理，超出排队等待，1~30）
+    max_subsessions_per_parent: int = 4  # 单会话子会话并发上限（1~30）
     # plan-156-619 S4d：子会话默认模型 / 思考深度（0 / 空 = 跟随主代理）。
     # 工具范围与执行模式由主代理在创建时决定，设置里只保留这两项可调项。
     subagent_model_id: int = 0
     subagent_reasoning_effort: str = ""
-    # plan-156-619 S4e：子代理 / 子会话总开关
+    # plan-156-619 S4e：子代理开关（plan-20261020-subsession-switch 起只管子代理）
     subagent_enabled: bool = True
+    # plan-20261020-subsession-switch：子会话开关（含操控子会话）
+    subsession_enabled: bool = True
     # plan-20261018-operator-boost：GUI 操作交给操控子会话 / 操控子会话思考深度
     operator_subsession_enabled: bool = True
     operator_reasoning_effort: str = "lowest"
@@ -476,14 +491,16 @@ class GlobalSettingsIn(BaseModel):
     desktop_screenshot_max_dim: int | None = None
     desktop_recipe_enabled: bool | None = None
     desktop_coord_mode: str | None = None
-    # v36: 子代理并发治理
+    # plan-474-2105: 单会话并发上限
     max_concurrent_subagents: int | None = None
-    max_subagents_per_turn: int | None = None
+    max_subsessions_per_parent: int | None = None
     # plan-156-619 S4d：子会话默认模型 / 思考深度
     subagent_model_id: int | None = None
     subagent_reasoning_effort: str | None = None
-    # plan-156-619 S4e：子代理 / 子会话总开关
+    # plan-156-619 S4e：子代理开关（plan-20261020-subsession-switch 起只管子代理）
     subagent_enabled: bool | None = None
+    # plan-20261020-subsession-switch：子会话开关
+    subsession_enabled: bool | None = None
     # plan-20261018-operator-boost：操控子会话
     operator_subsession_enabled: bool | None = None
     operator_reasoning_effort: str | None = None
@@ -592,13 +609,16 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
             or getattr(settings, "approval_explain_reasoning_effort", "")
             or ""
         ),
-        # v36: 子代理并发治理
+        # plan-474-2105: 单会话并发上限
         max_concurrent_subagents=data.get("max_concurrent_subagents", settings.max_concurrent_subagents),
-        max_subagents_per_turn=data.get("max_subagents_per_turn", settings.max_subagents_per_turn),
+        max_subsessions_per_parent=data.get(
+            "max_subsessions_per_parent", settings.max_subsessions_per_parent),
         # plan-156-619 S4d：子会话默认模型 / 思考深度
         subagent_model_id=data.get("subagent_model_id", settings.subagent_model_id),
         subagent_reasoning_effort=data.get("subagent_reasoning_effort", settings.subagent_reasoning_effort),
         subagent_enabled=bool(data.get("subagent_enabled", settings.subagent_enabled)),
+        subsession_enabled=bool(data.get(
+            "subsession_enabled", getattr(settings, "subsession_enabled", True))),
         operator_subsession_enabled=bool(data.get(
             "operator_subsession_enabled", settings.operator_subsession_enabled)),
         operator_reasoning_effort=str(data.get(
@@ -808,7 +828,8 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         settings.approval_explain_reasoning_effort = _meff
     # v45: 异常自动重试策略（次数 + 间隔序列），运行时立即生效
     if body.agent_retry_count is not None:
-        _rc = max(0, int(body.agent_retry_count))
+        # plan-20261020-retry-cred-perf R9：夹到 0–20，与启动恢复同口径
+        _rc = min(20, max(0, int(body.agent_retry_count)))
         data["agent_retry_count"] = _rc
         settings.agent_retry_count = _rc
     if body.agent_retry_intervals is not None:
@@ -846,15 +867,15 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         _cm = _cm if _cm in ("auto", "pixel", "norm1000") else "auto"
         data["desktop_coord_mode"] = _cm
         settings.desktop_coord_mode = _cm
-    # v36: 子代理并发治理（夹紧上限，运行时立即生效——agent_loop 每次派发前读取）
+    # plan-474-2105: 单会话并发上限（夹紧到 1~30，运行时立即生效——派发 / 创建前读取）
     if body.max_concurrent_subagents is not None:
-        _mc = max(1, min(16, int(body.max_concurrent_subagents)))
+        _mc = max(1, min(30, int(body.max_concurrent_subagents)))
         data["max_concurrent_subagents"] = _mc
         settings.max_concurrent_subagents = _mc
-    if body.max_subagents_per_turn is not None:
-        _mt = max(1, min(32, int(body.max_subagents_per_turn)))
-        data["max_subagents_per_turn"] = _mt
-        settings.max_subagents_per_turn = _mt
+    if body.max_subsessions_per_parent is not None:
+        _mp = max(1, min(30, int(body.max_subsessions_per_parent)))
+        data["max_subsessions_per_parent"] = _mp
+        settings.max_subsessions_per_parent = _mp
     # plan-156-619 S4d：子会话默认模型 / 思考深度（子代理设置面板仅保留这两项可调项）
     if body.subagent_model_id is not None:
         _sm = max(0, int(body.subagent_model_id))
@@ -867,6 +888,10 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
     if body.subagent_enabled is not None:
         data["subagent_enabled"] = bool(body.subagent_enabled)
         settings.subagent_enabled = bool(body.subagent_enabled)
+    # plan-20261020-subsession-switch：子会话开关独立保存
+    if body.subsession_enabled is not None:
+        data["subsession_enabled"] = bool(body.subsession_enabled)
+        settings.subsession_enabled = bool(body.subsession_enabled)
     if body.operator_subsession_enabled is not None:
         data["operator_subsession_enabled"] = bool(body.operator_subsession_enabled)
         settings.operator_subsession_enabled = bool(body.operator_subsession_enabled)

@@ -85,7 +85,21 @@ class ReadAttachmentTool(Tool):
             # v15: 路径解析失败/文件不存在时按文件名兜底（模型猜错目录也能读到）
             target = _find_by_name(root, rel)
         if target is None:
-            return ToolResult(ok=False, output=f"附件路径非法或不存在: {rel}")
+            # plan-20261020-pts：不是上传附件而是工作区里的文件（模型常用它读 docx / pdf / xlsx）——按工作区路径解析。
+            # 只放行工作区内：本工具不在「读取工作区外文件」的审批判定范围里，放开外部路径等于绕过审批。
+            ws_target = safe_resolve(ctx.workspace_root, rel)
+            if ws_target is not None and ws_target.is_file():
+                target = ws_target
+        if target is None:
+            import asyncio
+
+            from app.orchestration.tools.path_hints import missing_path_hint
+
+            hint = await asyncio.to_thread(missing_path_hint, ctx.workspace_root, rel, want_dir=False)
+            return ToolResult(
+                ok=False,
+                output=f"附件路径非法或不存在: {rel}（工作区外的文件请用 fs_read 读取）{hint}",
+            )
         if not target.is_file():
             return ToolResult(ok=False, output=f"附件不存在: {rel}")
 

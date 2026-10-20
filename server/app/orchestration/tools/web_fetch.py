@@ -107,9 +107,19 @@ class WebFetchTool(Tool):
                 resp = await client.get(url, headers={"User-Agent": "chatcoder/1.0"})
                 text = resp.text
         except Exception as e:
-            return ToolResult(ok=False, output="", error=f"抓取失败: {e}")
+            # plan-20261020-pts：超时 / 连接类异常的文本常为空，旧提示只剩「抓取失败: 」——带上异常类型与改走的路
+            msg = str(e).strip()
+            return ToolResult(
+                ok=False, output="",
+                error=(
+                    f"抓取失败：{type(e).__name__}{('：' + msg) if msg else ''}。"
+                    "可稍后重试；页面需要执行脚本或登录时改用 browser_navigate 打开。"
+                ),
+            )
         # plan-156-620：不再硬截断；超出上下文预算由执行层落盘并给出续读方式
         text = cap_raw(text)
+        if resp.status_code >= 400:
+            text = f"[HTTP {resp.status_code}] 服务器返回错误状态，以下是响应内容：\n{text}"
         return ToolResult(
             ok=True,
             output=text,

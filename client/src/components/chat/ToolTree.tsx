@@ -38,7 +38,7 @@ import {
 } from "../icons";
 
 /** plan-20261016-ux（问题 4）：命令类工具——完成后即使没有输出也可展开，展开区给出「没有输出」提示卡 */
-const COMMAND_TOOLS = new Set([...RUN_TOOLS, "git", "terminal_bg_status", "terminal_bg_kill"]);
+const COMMAND_TOOLS = new Set([...RUN_TOOLS, "git", "terminal_bg_status", "terminal_bg_kill", "bg_command_done", "bg_command_stopped"]);
 /** 读文件类工具：只要有路径，展开区一律用编辑器式代码视图（不再按扩展名白名单判断） */
 const FILE_CONTENT_TOOLS = new Set(["fs_read", "read_file_range"]);
 
@@ -98,6 +98,14 @@ function toolIcon(tool: string): React.ReactNode {
   return <ToolGlyph tool={tool} size={16} />;
 }
 void TOOL_ICONS; void IconZap;
+
+/** plan-474-2105 组 C：主代理被邮箱打断时，工具结果会留下「转后台 / 让出等待」标记。
+ *  这两种都不是失败——用中性标签单独表达，避免落到红色失败态里误导用户。 */
+function interruptTagOf(leaf: ToolLeaf): string | null {
+  if (leaf.output && leaf.output.includes("命令已转后台继续运行")) return "已转后台";
+  if (leaf.error && leaf.error.trimStart().startsWith("[已让出等待]")) return "已让出等待";
+  return null;
+}
 
 
 function leafPath(leaf: ToolLeaf): string | null {
@@ -529,6 +537,9 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
   const [expanded, setExpanded] = useState(false);
   const path = leafPath(leaf);
   const ok = leaf.ok;
+  // plan-474-2105 组 C：先算打断标记——它必须比 ok===false 的失败态更早生效，
+  // 否则「已让出等待」（ok=false）会被渲染成红色失败。
+  const interruptTag: string | null = interruptTagOf(leaf);
   // v25: 工具伪装写盘（terminal_exec 等带 change_stat）按写操作渲染——可展开行内 diff
   const isWrite = isWriteLeaf(leaf);
   // plan-89-387: 展开后从服务端拿到的「本次变更」统计（行上无 changeStat 时回填展示，
@@ -558,11 +569,16 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
   /** 展开区是否有任何实际内容；没有时渲染提示卡（此前只剩 .tc-output 上下边框贴成的一根细线） */
   const hasBody = showsLive || grepHits.length > 0 || leaf.tool.startsWith("db_") || leaf.tool === "ask_user_question"
     || !!leaf.output || !!leaf.error || (isWrite && path == null && !!liveResult?.change_stat);
-  const emptyText = leaf.ok === null
-    ? (isCommand ? "命令执行中，暂时还没有输出" : "正在执行，暂时还没有返回内容")
-    : leaf.ok === false
-      ? "执行失败，没有返回错误信息"
-      : (isCommand ? "命令已执行完成，没有输出" : "执行完成，没有返回内容");
+  // plan-474-2105 组 C：打断标记优先于失败文案，空态不能说成「执行失败」
+  const emptyText = interruptTag === "已转后台"
+    ? "命令已转后台继续运行，可用 terminal_bg_status 查看日志"
+    : interruptTag === "已让出等待"
+      ? "本次等待已让出，可按需重新调用该工具"
+      : leaf.ok === null
+        ? (isCommand ? "命令执行中，暂时还没有输出" : "正在执行，暂时还没有返回内容")
+        : leaf.ok === false
+          ? "执行失败，没有返回错误信息"
+          : (isCommand ? "命令已执行完成，没有输出" : "执行完成，没有返回内容");
 
   const openGrepHit = (e: React.MouseEvent, hit: { path: string; line: number }) => {
     e.stopPropagation();
@@ -590,7 +606,7 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
   return (
     <div className="tc-node">
       <div className={"tc-row" + (expandable ? " has-output" : "") + (expanded ? " expanded" : "") + (isWrite ? " tc-write" : "")}
-          data-tool-state={ok === null ? "running" : ok === false ? "fail" : "done"} onClick={() => expandable && setExpanded(!expanded)}>
+          data-tool-state={ok === null ? "running" : interruptTag ? "noted" : ok === false ? "fail" : "done"} onClick={() => expandable && setExpanded(!expanded)}>
         <span className="tc-icon">{toolIcon(leaf.tool)}</span>
         <span className={"tc-verb" + (ok === null ? " text-shine" : "")}>
           {ok === null ? runningVerb(leaf.tool) : toolVerb(leaf.tool)}
@@ -615,8 +631,15 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
             ? <ChangeStat additions={stat.additions} deletions={stat.deletions} />
             : null;
         })()}
-        {ok === null && <span className="tc-status wait"><IconSpinner size={11} /></span>}
-        {ok === false && <span className="tc-status fail"><IconX size={11} /></span>}
+        {/* plan-474-2105 组 C：行尾状态槽只有一个——运行中仍是 spinner；打断标记用中性徽标，
+            不再与红色失败图标叠加 */}
+        {ok === null ? (
+          <span className="tc-status wait"><IconSpinner size={11} /></span>
+        ) : interruptTag ? (
+          <span className="tc-state-tag">{interruptTag}</span>
+        ) : ok === false ? (
+          <span className="tc-status fail"><IconX size={11} /></span>
+        ) : null}
         {expandable ? (
           <span className={"tc-chevron" + (expanded ? " open" : "")}><IconChevronRight size={11} /></span>
         ) : null}
@@ -644,7 +667,7 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
               )}
               {/* plan-20261016-ux（问题 4）：没有任何内容时的提示卡（运行中 / 完成 / 失败三态文案） */}
               {!hasBody && (
-                <div className="tc-empty" data-state={leaf.ok === null ? "running" : leaf.ok === false ? "fail" : "done"}>
+                <div className="tc-empty" data-state={leaf.ok === null ? "running" : interruptTag ? "noted" : leaf.ok === false ? "fail" : "done"}>
                   {leaf.ok === null ? <IconSpinner size={12} /> : <IconInfo size={14} />}
                   <span>{emptyText}</span>
                 </div>
@@ -712,7 +735,10 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
               ) : (
                 <ClampedPre className="tc-plain" text={leaf.output} />
               ))}
-              {leaf.error && <pre className="tc-error-output">{leaf.error}</pre>}
+              {/* plan-474-2105 组 C：「已让出等待」不是错误，用普通文本展示说明，不套红色错误块 */}
+              {leaf.error && (interruptTag
+                ? <ClampedPre className="tc-plain" text={leaf.error} />
+                : <pre className="tc-error-output">{leaf.error}</pre>)}
             </>
           )}
           </div>
@@ -728,7 +754,8 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
 const ActionClusterRow = memo(function ActionClusterRow({ leaves }: { leaves: ToolLeaf[] }) {
   const [expanded, setExpanded] = useState(false);
   const running = leaves.some((l) => l.ok === null);
-  const failed = leaves.some((l) => l.ok === false);
+  // plan-474-2105 组 C：转后台 / 让出等待不是失败，聚合行不要因此亮红叉
+  const failed = leaves.some((l) => l.ok === false && !interruptTagOf(l));
   // 问题2: 轮播只在未执行完成的命令（ok===null）间切换，不再切到已完成命令
   const runningLeaves = leaves.filter((l) => l.ok === null);
   const rollingPool = runningLeaves.length > 0 ? runningLeaves : leaves;
@@ -789,7 +816,8 @@ const ActionClusterRow = memo(function ActionClusterRow({ leaves }: { leaves: To
 const WriteMergedRow = memo(function WriteMergedRow({ leaves }: { leaves: ToolLeaf[] }) {
   const [expanded, setExpanded] = useState(false);
   const running = leaves.some((l) => l.ok === null);
-  const failed = leaves.some((l) => l.ok === false);
+  // plan-474-2105 组 C：同上——打断标记不计入失败，避免合并行亮红叉
+  const failed = leaves.some((l) => l.ok === false && !interruptTagOf(l));
   const path = leafPath(leaves[0]) ?? "";
   // plan-20261019-diff: 合并行按「changeStat → 调用参数兜底」取每行统计。
   // 历史消息缺 change_stat 时，折叠态整行此前不显示 +N -M。

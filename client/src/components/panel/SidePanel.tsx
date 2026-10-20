@@ -81,10 +81,20 @@ function lastAssistantText(messages: MessageOut[]): string {
   return "";
 }
 
-export function SidePanel() {
+export function SidePanel({ visible = true }: { visible?: boolean }) {
   const parentId = useChatStore((s) => s.currentSessionId);
   const mainMessages = useChatStore((s) => s.messages);
-  const mainTurns = useMemo(() => buildTurns(mainMessages), [mainMessages]);
+  /** plan-20261020-retry-cred-perf E15：面板不可见时冻结上次的引用候选。
+   *  引用候选要全量遍历主对话消息（buildTurns），而隐藏标签（display:none）依然挂在树上、
+   *  随主会话每条消息重渲染；隐藏期直接复用上次结果，恢复可见时再补算一次
+   *  （写法和 taskProgress 的 enabled / frozenRef 一致）。 */
+  const frozenTurnsRef = useRef<MainTurn[]>([]);
+  const mainTurns = useMemo(() => {
+    if (!visible) return frozenTurnsRef.current;
+    const next = buildTurns(mainMessages);
+    frozenTurnsRef.current = next;
+    return next;
+  }, [mainMessages, visible]);
 
   const [children, setChildren] = useState<SessionOut[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);

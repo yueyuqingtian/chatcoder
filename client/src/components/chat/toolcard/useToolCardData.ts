@@ -18,6 +18,7 @@ import { api, ApiError, type GitCardRepoOut, type GitDiffStatOut, type GitStatus
 import { useChatStore, TERMINAL_SUBAGENT_STATUS } from "../../../store/chat";
 import { usePanelStore, type PanelTabId } from "../../../store/panel";
 import { useWorkflowStore } from "../../../store/workflow";
+import { useBgTaskStore, type BgTask } from "../../../store/bgTasks";
 import { useProgressRows, type ProgressRow } from "../taskProgress";
 import { foldProcessRows, type ProcessEntry } from "./processFold";
 import type { PlanCardInfo } from "../../../store/chat";
@@ -94,6 +95,12 @@ export interface WorkflowSectionData {
   finished: WorkflowItem[];
 }
 
+/** plan-20261020-bgtask：运行中的后台命令（启动先后）。退出即消失，没有「已完成」折叠行。 */
+export interface BgTaskSectionData {
+  sessionId: number;
+  tasks: BgTask[];
+}
+
 export interface ToolCardActions {
   /** 重新读取 Git 摘要；force 绕过缓存（切分支 / 新建分支之后用） */
   refreshGit: (force?: boolean) => void;
@@ -107,6 +114,7 @@ export interface ToolCardData {
   process: ProcessSectionData | null;
   subagent: SubagentSectionData | null;
   workflow: WorkflowSectionData | null;
+  bgtask: BgTaskSectionData | null;
   actions: ToolCardActions;
 }
 
@@ -354,7 +362,11 @@ export function useToolCardData(sessionId: number | null): ToolCardData {
     const rows = progress.rows;
     if (rows.length === 0) return null;
     const done = rows.filter((r) => r.status === "done").length;
-    const current = rows.find((r) => r.status === "running")
+    /* plan-20261020-progress：并行派发时子会话步骤也会转圈，
+       「当前动作」优先取**主代理自己**（没有 owner）正在进行的那项——否则标题会被
+       某个子会话的步骤占住，用户看不到主代理实际在做什么。rows 的顺序保持不变。 */
+    const current = rows.find((r) => r.status === "running" && !r.owner)
+      ?? rows.find((r) => r.status === "running")
       ?? rows.find((r) => r.status !== "done");
     return {
       rows,
@@ -417,9 +429,20 @@ export function useToolCardData(sessionId: number | null): ToolCardData {
     return { open, finished };
   }, [runs]);
 
+  // ── 后台任务：REST 快照 + WS 增量（见 store/bgTasks.ts）──
+  // 切会话时拉一次；一轮开始 / 结束时再对一次账——事件是增量，断线重连期间漏掉的启动 / 退出由快照兜底
+  const bgTasks = useBgTaskStore((s) => (sessionId == null ? undefined : s.bySession[sessionId]));
+  useEffect(() => {
+    if (sessionId != null) void useBgTaskStore.getState().load(sessionId);
+  }, [sessionId, isRunning]);
+  const bgtaskData = useMemo<BgTaskSectionData | null>(
+    () => (sessionId != null && bgTasks && bgTasks.length > 0 ? { sessionId, tasks: bgTasks } : null),
+    [sessionId, bgTasks],
+  );
+
   const actions = useMemo<ToolCardActions>(() => ({ refreshGit, setGitRepo }), [refreshGit, setGitRepo]);
 
-  return { git, plan, process: processData, subagent: subagentData, workflow: workflowData, actions };
+  return { git, plan, process: processData, subagent: subagentData, workflow: workflowData, bgtask: bgtaskData, actions };
 }
 
 /** 打开右面板某标签（面板收起时先展开——旧实现只切标签，面板收起时点了看不到任何变化）。 */

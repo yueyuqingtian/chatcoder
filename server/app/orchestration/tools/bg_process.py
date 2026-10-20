@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 _MAX_BUFFER_CHARS = 64 * 1024
 # 单次 status 调用返回的日志上限（字符）：与 terminal_exec 输出上限同量级
 _MAX_STATUS_LOG_CHARS = 12_000
+# plan-474-2105：完成回报里附带的日志尾部长度（够看出报错/最后几行结果，又不刷屏）
+_NOTIFY_TAIL_CHARS = 2_000
 
 # wait_until_done=true 时的轮询间隔（秒）与进度广播间隔（秒）
 _WAIT_POLL_INTERVAL = 1.0
@@ -45,6 +47,21 @@ def decode_output(data: bytes) -> str:
         except UnicodeDecodeError:
             continue
     return data.decode("utf-8", errors="replace")
+
+
+def fmt_elapsed(sec: Any) -> str:
+    """秒数 → 「1 分 42 秒」。"""
+    try:
+        total = int(float(sec))
+    except (TypeError, ValueError):
+        return "未知"
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h} 小时 {m} 分"
+    if m:
+        return f"{m} 分 {s} 秒"
+    return f"{s} 秒"
 
 
 def _parse_bool(raw: Any) -> bool:
@@ -98,21 +115,38 @@ class _BgEntry:
     """单个后台进程的注册条目。"""
 
     __slots__ = ("shell_id", "proc", "command", "cwd", "session_id",
-                 "started_at", "buffer", "total_chars", "returncode", "finished_at")
+                 "started_at", "buffer", "total_chars", "returncode", "finished_at",
+                 "turn_id", "on_exit", "notified", "stopped_by", "observed", "start_task")
 
     def __init__(self, shell_id: str, proc: asyncio.subprocess.Process,
-                 command: str, cwd: str | None, session_id: int) -> None:
+                 command: str, cwd: str | None, session_id: int,
+                 turn_id: int | None = None, on_exit=None,
+                 started_at: float | None = None) -> None:
         self.shell_id = shell_id
         self.proc = proc
         self.command = command
         self.cwd = cwd or ""
         self.session_id = session_id
-        self.started_at = time.time()
+        self.started_at = started_at or time.time()
+        # plan-20261020-bgtask：谁终止了它（"user" 用户在界面停止 / "agent" 模型调用 terminal_bg_kill /
+        # "system" 会话删除或应用退出）；None = 自然退出。完成回报据此决定怎么通知。
+        self.stopped_by: str | None = None
+        # 模型是否已经从工具结果里看到了它的终态（terminal_bg_status 返回 running=false、
+        # terminal_bg_kill 返回）。已看到的就不必再把「命令完成」回报给会话——否则同一份结果出现两遍，
+        # 空闲时还会白白叫醒一轮。
+        self.observed = False
+        # 「启动」事件的广播任务：退出事件必须排在它之后（极快退出的进程否则会让 exited 抢在 started 前面，
+        # 卡片里留下一行永远不消失的假「运行中」）
+        self.start_task: asyncio.Task | None = None
         # deque 按字符块环形截断：total_chars 记录累计产出量（offset 基准）
         self.buffer: deque[str] = deque()
         self.total_chars = 0
         self.returncode: int | None = None
         self.finished_at: float | None = None
+        # plan-474-2105：完成回报——进程退出后回调一次（由 bg_notify 投递到会话）
+        self.turn_id = turn_id
+        self.on_exit = on_exit
+        self.notified = False
 
     def append_output(self, text: str) -> None:
         if not text:
@@ -154,19 +188,92 @@ class BgProcessRegistry:
 
     def __init__(self) -> None:
         self._entries: dict[str, _BgEntry] = {}
+        # 强引用后台任务（事件广播），避免被垃圾回收提前取消
+        self._tasks: set[asyncio.Task] = set()
 
     def register(self, proc: asyncio.subprocess.Process, command: str,
-                 cwd: str | None, session_id: int) -> str:
-        """注册后台进程并启动输出收集任务，返回 shell_id。"""
+                 cwd: str | None, session_id: int, *,
+                 turn_id: int | None = None,
+                 on_exit=None,
+                 started_at: float | None = None) -> str:
+        """注册后台进程并启动输出收集任务，返回 shell_id。
+
+        plan-474-2105：`on_exit(payload)` 在进程退出后**只调用一次**（异步回调也支持），
+        由 `bg_notify` 据此把「命令跑完了」投递给发起会话；不传则保持旧行为（只记日志）。
+        plan-20261020-bgtask：登记与退出都会广播 `bg.process.started / exited`（右上角「后台任务」栏据此增删行）；
+        `started_at` 供前台命令转后台时沿用真正的开跑时刻，计时不会从转后台那一刻重新数。
+        """
         shell_id = f"bg_{secrets.token_hex(4)}"
-        entry = _BgEntry(shell_id, proc, command, cwd, session_id)
+        entry = _BgEntry(shell_id, proc, command, cwd, session_id,
+                         turn_id=turn_id, on_exit=on_exit, started_at=started_at)
         self._entries[shell_id] = entry
-        asyncio.get_running_loop().create_task(self._collect(entry))
+        self._prune_exited()
+        loop = asyncio.get_running_loop()
+        entry.start_task = self._spawn(self._broadcast("bg.process.started", entry))
+        loop.create_task(self._collect(entry))
         logger.info(
-            "[bg.start] shell_id=%s pid=%s cmd=%r cwd=%s session=%s",
-            shell_id, proc.pid, command[:200], cwd, session_id,
+            "[bg.start] shell_id=%s pid=%s cmd=%r cwd=%s session=%s turn=%s",
+            shell_id, proc.pid, command[:200], cwd, session_id, turn_id,
         )
         return shell_id
+
+    def _spawn(self, coro) -> asyncio.Task | None:
+        """后台执行一个协程并持有引用（事件广播不阻塞调用方）。"""
+        try:
+            task = asyncio.get_running_loop().create_task(coro)
+        except RuntimeError:
+            coro.close()
+            return None
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
+    def _prune_exited(self, keep: int = 100) -> None:
+        """只保留最近 keep 条已退出条目（供事后查询日志），避免长期运行时缓冲无限累积。"""
+        done = [e for e in self._entries.values() if e.returncode is not None]
+        if len(done) <= keep:
+            return
+        done.sort(key=lambda e: e.finished_at or 0.0)
+        for e in done[: len(done) - keep]:
+            self._entries.pop(e.shell_id, None)
+
+    @staticmethod
+    def _elapsed(entry: _BgEntry) -> float:
+        return round(max(0.0, (entry.finished_at or time.time()) - entry.started_at), 1)
+
+    @staticmethod
+    def _exit_reason(entry: _BgEntry) -> str:
+        if entry.stopped_by == "user":
+            return "stopped_by_user"
+        if entry.stopped_by in ("agent", "system"):
+            return f"stopped_by_{entry.stopped_by}"
+        return "completed"
+
+    async def _broadcast(self, name: str, entry: _BgEntry) -> None:
+        """向发起会话广播后台进程的启动 / 退出（带 session_id，前端按它校验归属）。"""
+        payload: dict[str, Any] = {
+            "session_id": entry.session_id,
+            "shell_id": entry.shell_id,
+            "command": entry.command[:500],
+            "cwd": entry.cwd,
+            "turn_id": entry.turn_id,
+            "elapsed": self._elapsed(entry),
+        }
+        if name == "bg.process.exited":
+            payload["returncode"] = entry.returncode
+            payload["reason"] = self._exit_reason(entry)
+        try:
+            from app.orchestration.agent_events import broadcast
+
+            await broadcast(entry.session_id, {"event": name, "payload": payload})
+        except Exception:  # noqa: BLE001 — 广播失败不能影响进程记录与回报
+            logger.debug("[bg.event] 广播失败 %s shell_id=%s", name, entry.shell_id, exc_info=True)
+
+    def seed_output(self, shell_id: str, text: str) -> None:
+        """把转后台之前已收集的输出写入缓冲（前台命令 detach 时用）。"""
+        entry = self._entries.get(shell_id)
+        if entry is not None and text:
+            entry.append_output(text)
 
     async def _collect(self, entry: _BgEntry) -> None:
         """持续流式读取 stdout/stderr 到环形缓冲，进程退出后记录退出码。
@@ -209,6 +316,41 @@ class BgProcessRegistry:
             entry.shell_id, entry.returncode,
             entry.finished_at - entry.started_at, entry.command[:200],
         )
+        # plan-20261020-bgtask：先广播退出（右上角后台任务栏立刻撤掉这一行），再走完成回报。
+        # 退出事件排在启动事件之后，前端才不会先收到 exited、再收到 started 而留下假的运行中行
+        if entry.start_task is not None:
+            try:
+                await asyncio.shield(entry.start_task)
+            except Exception:  # noqa: BLE001 — 启动广播失败不影响退出广播
+                pass
+        await self._broadcast("bg.process.exited", entry)
+        # plan-474-2105：进程退出 → 通知发起会话（只触发一次；回调异常不影响收集任务）
+        await self._fire_on_exit(entry)
+
+    async def _fire_on_exit(self, entry: _BgEntry) -> None:
+        """调用完成回调（`on_exit` 可为同步或异步，只调用一次）。"""
+        if entry.on_exit is None or entry.notified:
+            return
+        entry.notified = True
+        if entry.stopped_by == "system":
+            return  # 会话被删除 / 应用退出：没有会话可通知
+        tail, _ = entry.read_from(max(0, entry.total_chars - _NOTIFY_TAIL_CHARS))
+        payload = {
+            "shell_id": entry.shell_id,
+            "session_id": entry.session_id,
+            "turn_id": entry.turn_id,
+            "command": entry.command,
+            "returncode": entry.returncode,
+            "elapsed": self._elapsed(entry),
+            "tail": tail[-_NOTIFY_TAIL_CHARS:],
+            "stopped_by": entry.stopped_by,
+        }
+        try:
+            res = entry.on_exit(payload)
+            if asyncio.iscoroutine(res):
+                await res
+        except Exception:  # noqa: BLE001 — 完成回报失败不能影响进程记录本身
+            logger.warning("[bg.on_exit_error] shell_id=%s", entry.shell_id, exc_info=True)
 
     def status(self, shell_id: str, offset: int = 0) -> dict[str, Any] | None:
         """查询状态与增量日志。返回 None 表示 shell_id 未知。"""
@@ -226,26 +368,88 @@ class BgProcessRegistry:
             "cwd": entry.cwd,
             "started_at": entry.started_at,
             "finished_at": entry.finished_at,
+            "elapsed": self._elapsed(entry),
+            "stopped_by": entry.stopped_by,
             "log": text,
             "next_offset": next_offset,
         }
 
-    async def kill(self, shell_id: str) -> dict[str, Any] | None:
-        """终止后台进程树。返回 None 表示 shell_id 未知。"""
+    def mark_observed(self, shell_id: str) -> None:
+        """模型已从工具结果里看到该进程的终态：之后的完成回报可以省掉。"""
+        entry = self._entries.get(shell_id)
+        if entry is not None:
+            entry.observed = True
+
+    def is_observed(self, shell_id: str) -> bool:
+        entry = self._entries.get(shell_id)
+        return bool(entry is not None and entry.observed)
+
+    def list_session(self, session_id: int) -> list[dict[str, Any]]:
+        """某会话仍在运行的后台进程（右上角「后台任务」栏的数据源），按启动先后排列。
+
+        `elapsed` 由服务端按自己的时钟算好：前端以收到的时刻为基准自行累加，
+        不依赖两端系统时钟一致。
+        """
+        rows = [
+            {
+                "shell_id": e.shell_id,
+                "command": e.command[:500],
+                "cwd": e.cwd,
+                "turn_id": e.turn_id,
+                "started_at": e.started_at,
+                "elapsed": self._elapsed(e),
+            }
+            for e in self._entries.values()
+            if e.session_id == session_id and e.returncode is None
+        ]
+        rows.sort(key=lambda r: r["started_at"])
+        return rows
+
+    def owner_session(self, shell_id: str) -> int | None:
+        entry = self._entries.get(shell_id)
+        return entry.session_id if entry is not None else None
+
+    async def kill(self, shell_id: str, by: str = "agent") -> dict[str, Any] | None:
+        """终止后台进程树。返回 None 表示 shell_id 未知。
+
+        `by` 记录是谁停的（agent / user / system）：用户在界面上停止的要通知会话，
+        模型自己停的它已经知道（工具结果里就有），所以标记为已读，不再回报。
+        """
         entry = self._entries.get(shell_id)
         if entry is None:
             return None
         if entry.returncode is not None:
+            if by == "agent":
+                entry.observed = True
             return {"shell_id": shell_id, "killed": False,
                     "running": False, "returncode": entry.returncode,
                     "note": "进程已退出，无需终止"}
+        if entry.stopped_by is None:
+            entry.stopped_by = by
+        if by == "agent":
+            entry.observed = True
         proc = entry.proc
         await kill_process_tree(proc)
         killed = entry.returncode is not None or proc.returncode is not None
-        logger.info("[bg.kill] shell_id=%s pid=%s killed=%s", shell_id, proc.pid, killed)
+        logger.info("[bg.kill] shell_id=%s pid=%s by=%s killed=%s", shell_id, proc.pid, by, killed)
         return {"shell_id": shell_id, "killed": killed,
                 "running": entry.returncode is None and proc.returncode is None,
                 "returncode": entry.returncode if entry.returncode is not None else proc.returncode}
+
+    async def kill_session(self, session_id: int) -> int:
+        """终止某会话名下全部运行中的后台进程（会话被永久删除时调用，之后再没有界面能管理它们）。"""
+        ids = [e.shell_id for e in self._entries.values()
+               if e.session_id == session_id and e.returncode is None]
+        if ids:
+            await asyncio.gather(*(self.kill(i, by="system") for i in ids), return_exceptions=True)
+        return len(ids)
+
+    async def kill_all(self) -> int:
+        """服务关停：终止全部运行中的后台进程，避免它们成为占着端口的孤儿。"""
+        ids = [e.shell_id for e in self._entries.values() if e.returncode is None]
+        if ids:
+            await asyncio.gather(*(self.kill(i, by="system") for i in ids), return_exceptions=True)
+        return len(ids)
 
 
 # 模块级单例（对齐 browser.py _BrowserSessionManager 模式）
@@ -265,9 +469,11 @@ class TerminalBgStatusTool(Tool):
         "查询后台命令的运行状态与增量日志。shell_id 来自 terminal_exec 以 "
         "waitForCompletion=false 启动命令时的返回。offset 传上次返回的 next_offset "
         "可增量读取新日志；首次查询传 0（或不传）。\n"
-        "等待后台命令完成的正确姿势（不要用 Start-Sleep 固定等待）：\n"
-        "1. 轮询直到 running=false；或\n"
-        "2. 直接传 wait_until_done=true 一次等待完成（后台进程结束即返回，非固定秒数）。\n"
+        "后台命令有两种：会自己结束的（构建、测试、批处理）与不会结束的长驻服务（dev server、watch）。\n"
+        "· 会结束的：不必轮询——跑完后系统会主动把结果送回本会话；确实要在当前步骤用到结果时，\n"
+        "  传 wait_until_done=true 一次等待完成（进程结束即返回，非固定秒数；不要用 Start-Sleep 固定等待）。\n"
+        "· 长驻服务：永远不会结束，**不要**对它 wait_until_done；用 offset 增量看日志确认启动成功即可，\n"
+        "  用完必须调用 terminal_bg_kill 停止。\n"
         "wait_timeout（秒）为最大等待时长，默认随全局工具超时，超时仍返回「仍在运行」结果。"
     )
 
@@ -314,10 +520,15 @@ class TerminalBgStatusTool(Tool):
         else:
             info = first
 
+        # plan-20261020-bgtask：模型已经看到了终态——完成回报不必再重复送一遍
+        if not info["running"]:
+            bg_process_registry.mark_observed(shell_id)
+        stopped_note = {"user": "，被用户手动停止", "agent": "，被你主动终止"}.get(info.get("stopped_by") or "", "")
         lines = [
             f"shell_id: {info['shell_id']}",
             f"状态: {'运行中' if info['running'] else '已退出'}"
-            + (f"（退出码 {info['returncode']}）" if not info["running"] else ""),
+            + (f"（退出码 {info['returncode']}{stopped_note}）" if not info["running"] else ""),
+            f"已运行: {fmt_elapsed(info.get('elapsed'))}",
             f"命令: {info['command']}",
             f"工作目录: {info['cwd'] or '(工作区根)'}",
         ]
@@ -387,7 +598,11 @@ class TerminalBgKillTool(Tool):
 
     name = "terminal_bg_kill"
     risk_level = "low"
-    description = "终止一个后台命令（及其全部子进程）。shell_id 来自 terminal_exec 以 waitForCompletion=false 启动命令时的返回。"
+    description = (
+        "终止一个后台命令（及其全部子进程）。shell_id 来自 terminal_exec 以 waitForCompletion=false 启动命令时的返回。\n"
+        "长驻服务（dev server、watch、后端服务）用完后必须由你主动停止，不要把它们留在后台占着端口；"
+        "只有明确要保留给用户使用时才不停，并在最终回复里说明它在运行。"
+    )
 
     def function_schema(self) -> dict:
         return {
@@ -409,7 +624,7 @@ class TerminalBgKillTool(Tool):
         shell_id = str(args.get("shell_id", "")).strip()
         if not shell_id:
             return ToolResult(ok=False, output="", error="shell_id 为空")
-        info = await bg_process_registry.kill(shell_id)
+        info = await bg_process_registry.kill(shell_id, by="agent")
         if info is None:
             return ToolResult(ok=False, output="", error=f"未知 shell_id: {shell_id}（服务重启后后台进程记录会失效）")
         if info.get("killed") or info.get("returncode") is not None:

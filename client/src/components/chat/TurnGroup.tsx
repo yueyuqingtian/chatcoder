@@ -33,7 +33,15 @@ import { TurnChangesCard } from "./TurnChangesCard";
 import { parseUtc } from "../../utils/time";
 import { MessageImageGrid, attachmentsOf } from "./AttachmentCard";
 import { UserBubble } from "./UserBubble";
+import { SubsessionQuestionCard } from "./SubsessionQuestionCard";
 import { recordComponentRender } from "../../perf/metrics";
+
+/** plan-20261020-bgtask：系统唤醒一轮时的分隔线文案（按唤醒原因）。缺省 = 子代理完成唤醒（历史口径）。 */
+const WAKEUP_DIVIDER_TEXT: Record<string, string> = {
+  bg_command_done: "后台命令已完成，继续执行",
+  subsession_question: "子会话有新提问，继续处理",
+  main_reply: "主会话已答复，继续执行",
+};
 
 /** plan-282-1421：turn 的「已结束」状态集合——AI 操作行必须在本轮进入这些状态后才显示。 */
 const TERMINAL_TURN_STATUSES: ReadonlySet<string> = new Set([
@@ -613,6 +621,13 @@ export const TurnGroup = memo(function TurnGroup({
           </div>
         );
       }
+      // plan-474-2105：子会话提问卡——只读提示，不做成审批卡（卡片自带来源跳转）
+      case "subsession-question":
+        return (
+          <div key={i} className="turn-item">
+            <SubsessionQuestionCard msg={item.msg} />
+          </div>
+        );
       // v2.2 (对齐 zcode 3.11): 系统分割线（模型切换 / 目标停止提示等）
       case "divider":
         return (
@@ -635,11 +650,14 @@ export const TurnGroup = memo(function TurnGroup({
         );
       }
       // v39: 子代理完成唤醒消息——细分隔线（系统生成，对应上方「等待子代理结束…」）
+      // plan-20261020-bgtask：这条唤醒消息也被后台命令完成 / 子会话提问复用，文案按 wakeup_reason 区分——
+      // 此前一律写「子代理已完成」，没有子代理的会话里也这么说
       case "subagent-wakeup": {
+        const wakeReason = String((item.msg.content as Record<string, unknown>).wakeup_reason ?? "");
         return (
           <div key={i} className="turn-item turn-item-divider subagent-wakeup-divider">
             <span className="turn-divider-line" />
-            <span className="turn-divider-text">子代理已完成，继续执行</span>
+            <span className="turn-divider-text">{WAKEUP_DIVIDER_TEXT[wakeReason] ?? "子代理已完成，继续执行"}</span>
             <span className="turn-divider-line" />
           </div>
         );

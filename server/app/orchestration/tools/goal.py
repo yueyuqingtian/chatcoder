@@ -66,10 +66,12 @@ class GoalCompleteTool(Tool):
 
         ok = await run_write_locked(_do_complete, label="goal.complete")
         if not ok:
+            # plan-20261020-pts：没有进行中的目标时这次调用只是多余，不是失败——
+            # 以正常结果返回（不广播、不改状态），避免界面出现红色失败、模型再去「修复」它
             return ToolResult(
-                ok=False,
-                output="",
-                error="当前会话没有激活的目标（goal_status 非 active），无需调用 goal_complete。",
+                ok=True,
+                output="当前会话没有进行中的目标，无需调用 goal_complete（本次调用已忽略），直接给出总结即可。",
+                data={"ignored": True},
             )
 
         await broadcast(ctx.session_id, {

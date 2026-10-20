@@ -34,7 +34,7 @@ def _mask_key(key: str | None) -> str | None:
     return f"{key[:4]}••••{key[-4:]}"
 
 
-async def _cred_to_out(c) -> ProviderCredentialOut:
+async def _cred_to_out(c, *, preferred_id: int | None = None) -> ProviderCredentialOut:
     """凭据序列化（plan-282-1441 修复：冷却到期即如实呈现为可用）。
 
     此前 `status` 原样输出——冷却已到期（cooldown_until 已过）的凭据仍然显示
@@ -42,9 +42,13 @@ async def _cred_to_out(c) -> ProviderCredentialOut:
     永远卡在冷却、也无法直接刷新的凭据（他反馈的"凭证进冷却不可刷新、直接不能用了"）。
     这里做展示层的自愈：冷却已过期 → 按 ok 呈现（并顺手清掉残留截止时间字段）。
     真正取用时 available_credentials 早已按同样规则放行，两边口径一致。
+
+    plan-20261020-retry-cred-perf：新增 preferred（当前优先取用）与 demoted（失败暂缓中）——
+    非 ta3 供应商的失败不再硬剔除，只是排到队尾；前端据此展示「当前使用 / 暂缓使用」。
     """
     status = c.status or "ok"
     cooldown_until = c.cooldown_until
+    demoted = credential_service.is_demoted(c)
     if status == "cooldown":
         until = credential_service._parse_iso(cooldown_until)
         if until is None or until <= credential_service._now():
@@ -65,13 +69,23 @@ async def _cred_to_out(c) -> ProviderCredentialOut:
         last_ok_at=c.last_ok_at,
         credits=float(c.credits) if c.credits is not None else None,
         extra=c.extra,
+        preferred=bool(preferred_id is not None and c.id == preferred_id),
+        demoted=demoted,
     )
 
 
 async def _to_out(db: AsyncSession, p) -> ProviderOut:
     # plan-248-1258 M2.2: 附带凭据统计，供前端徽标显示「N 个 Key/账号」
     creds = await credential_service.list_credentials(db, p.id)
-    active_creds = credential_service.available_credentials(creds)
+    # plan-20261020-retry-cred-perf：非 ta3 的「可用」只算健康凭据（暂缓中的不计入），
+    # ta3 保持旧的冷却硬过滤口径
+    if (p.api_format or "openai").lower() == "ta3":
+        active_creds = credential_service.available_credentials(creds)
+    else:
+        active_creds = [
+            c for c in credential_service.rank_credentials(creds)
+            if not credential_service.is_demoted(c)
+        ]
     return ProviderOut(
         id=p.id,
         name=p.name,
@@ -270,10 +284,16 @@ async def _require_provider(db: AsyncSession, provider_id: int):
 
 @router.get("/providers/{provider_id}/credentials", response_model=list[ProviderCredentialOut])
 async def list_credentials(provider_id: int, db: AsyncSession = Depends(get_db)):
-    """列出该供应商的全部凭据（按 priority）。"""
-    await _require_provider(db, provider_id)
+    """列出该供应商的全部凭据（按当前取用顺序，首个为「当前使用」）。"""
+    provider = await _require_provider(db, provider_id)
     creds = await credential_service.list_credentials(db, provider_id)
-    return [await _cred_to_out(c) for c in creds]
+    strategy = getattr(provider, "credential_strategy", None) or "sticky"
+    if (provider.api_format or "openai").lower() == "ta3":
+        ranked = credential_service.available_credentials(creds, strategy=strategy)
+    else:
+        ranked = credential_service.rank_credentials(creds, strategy=strategy)
+    preferred_id = ranked[0].id if ranked else None
+    return [await _cred_to_out(c, preferred_id=preferred_id) for c in ranked]
 
 
 @router.post("/providers/{provider_id}/credentials", response_model=ProviderCredentialOut)

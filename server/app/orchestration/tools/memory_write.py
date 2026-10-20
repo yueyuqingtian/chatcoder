@@ -11,9 +11,12 @@ memory consolidation），AI 无法在对话中途主动记录"这个事实很�
 low risk：写入的是记忆库（非用户文件系统），去重 + 长度门槛（8 字符）兜底；
 scope=project 的词条挂 project_id（由 save_memories 直接落库，无需事后回填）。
 """
+import logging
 from typing import Any
 
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
+
+logger = logging.getLogger(__name__)
 
 _KINDS = ("fact", "convention", "pitfall", "decision")
 
@@ -66,20 +69,23 @@ class MemoryWriteTool(Tool):
         from app.persistence.database import async_session_factory
 
         # scope=project 需要当前项目 id：从会话反查
+        # plan-20261020-pts：此前从不存在的模块 `app.persistence.models.session` 导入 Session，
+        # 异常被下面的 except 吞掉，项目级记忆于是**一律**报「未绑定项目」（真实库里项目级写入 100% 失败）。
         project_id = None
+        scope_note = ""
         if scope == "project":
             try:
-                from app.persistence.models.session import Session
+                from app.persistence.models.message import Session
                 async with async_session_factory() as db:
                     sess = await db.get(Session, ctx.session_id)
                     project_id = getattr(sess, "project_id", None) if sess else None
-            except Exception:
+            except Exception:  # noqa: BLE001
+                logger.warning("[memory_write] 反查会话所属项目失败，按会话级写入", exc_info=True)
                 project_id = None
             if project_id is None:
-                return ToolResult(
-                    ok=False, output="",
-                    error="当前会话未绑定项目，无法写入项目级记忆（可改用 scope=session 或 global）",
-                )
+                # 会话确实没有绑定项目：改存会话级而不是让整次调用失败（内容不丢，模型无需重试）
+                scope = "session"
+                scope_note = "（当前会话未绑定项目，已改存为会话级记忆）"
 
         from app.services import memory_service
 
@@ -93,7 +99,7 @@ class MemoryWriteTool(Tool):
         if count:
             return ToolResult(
                 ok=True,
-                output=f"已记录记忆（scope={scope}, kind={kind}）：{text}",
+                output=f"已记录记忆（scope={scope}, kind={kind}）{scope_note}：{text}",
                 data={"count": count, "scope": scope},
             )
         return ToolResult(ok=True, output="记忆已存在（去重跳过），未重复写入。", data={"count": 0})

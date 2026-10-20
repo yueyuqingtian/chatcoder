@@ -984,15 +984,23 @@ async def build_main_context(
         bundle.developer_parts.append(_parallel_hint)
     # 1.16 GUI 操作交给操控子会话（plan-20261018-operator-boost）：电脑操控或内置浏览器可用、
     # 且当前模式下发子会话工具时才注入；子会话自身不注入（它没有 create_subsession）。
-    from app.orchestration.prompts.parallel_subsession import operator_subsession_hint
+    from app.orchestration.prompts.parallel_subsession import (
+        operator_subsession_hint,
+        subsession_self_hint,
+    )
     from app.orchestration.tools.browser import browser_tools_enabled as _browser_tools_enabled
     _gui_tools = bool(getattr(settings, "desktop_enabled", False)) or _browser_tools_enabled()
+    _is_subsession = bool(session is not None and getattr(session, "side_kind", None) == "sub")
     _operator_hint = operator_subsession_hint(
-        _execution_mode, gui_tools=_gui_tools,
-        is_subsession=bool(session is not None and getattr(session, "side_kind", None) == "sub"),
+        _execution_mode, gui_tools=_gui_tools, is_subsession=_is_subsession,
     )
     if _operator_hint:
         bundle.developer_parts.append(_operator_hint)
+    # plan-474-2105：子会话是执行体，不是用户接口——明确「只能经 message_main 提问、
+    # 不能直接问用户、不能派生下级」，否则模型会反复尝试已被剥离的工具。
+    _self_hint = subsession_self_hint(is_subsession=_is_subsession)
+    if _self_hint:
+        bundle.developer_parts.append(_self_hint)
     # 1.3 Paused Subagents（plan-91-394）：上一轮中断、已保存进度的子代理。紧贴本轮用户消息之后，
     # 保证“继续”类意图与可续跑清单在注意力最高处同时出现。
     if paused_subagents and enable_subagents:

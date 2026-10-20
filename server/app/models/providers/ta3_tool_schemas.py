@@ -106,7 +106,7 @@ _EDIT: list[dict] = [
             "replaceAll": {"type": "boolean", "description": "是否替换所有匹配项。默认 false（oldString 必须唯一匹配，多匹配报错）；true=替换文件内所有匹配。"},
         },
     }),
-    _f("Bash", "在工作区根目录运行终端命令。默认需要审批。启动 dev server、watch、后端服务等长驻进程时，将 waitForCompletion 设为 false，让命令进入后台运行并持续收集日志。不要用它直接修改文件，文件编辑应由专门的编辑工具完成。", {
+    _f("Bash", "在工作区根目录运行终端命令。默认需要审批。启动 dev server、watch、后端服务等长驻进程时，将 waitForCompletion 设为 false，让命令进入后台运行并持续收集日志。会自己结束的耗时命令（构建、全量测试）也可以放后台，跑完后系统会主动回报，不必轮询；长驻服务用完后必须用 BashKill 主动停止。不要用它直接修改文件，文件编辑应由专门的编辑工具完成。", {
         "type": "object", "required": ["command"],
         "properties": {
             "command": {"type": "string", "description": "要执行的命令。"},
@@ -206,7 +206,8 @@ _WEB_SEARCH: list[dict] = [
 # ── background（plan-153-705：当前项目补充，非参考项目原生——后台进程管理）──
 _BACKGROUND: list[dict] = [
     _f("BashStatus", "查询后台命令的运行状态与增量日志。shellId 来自 Bash 以 waitForCompletion=false "
-        "启动命令时的返回。offset 传上次返回的 next_offset 可增量读取新日志；首次查询传 0（或不传）。", {
+        "启动命令时的返回。offset 传上次返回的 next_offset 可增量读取新日志；首次查询传 0（或不传）。"
+        "会自己结束的后台命令不用反复查询，跑完后系统会主动回报；长驻服务只需看日志确认启动成功。", {
         "type": "object", "required": ["shellId"],
         "properties": {
             "shellId": {"type": "string", "description": "后台命令标识（bg_ 开头）"},
@@ -214,7 +215,7 @@ _BACKGROUND: list[dict] = [
         },
     }),
     _f("BashKill", "终止一个后台命令（及其全部子进程）。shellId 来自 Bash 以 waitForCompletion=false "
-        "启动命令时的返回。", {
+        "启动命令时的返回。长驻服务（dev server、watch、后端服务）用完后必须主动停止，不要留在后台占着端口。", {
         "type": "object", "required": ["shellId"],
         "properties": {
             "shellId": {"type": "string", "description": "后台命令标识（bg_ 开头）"},
