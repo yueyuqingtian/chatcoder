@@ -48,6 +48,10 @@ class ChatRequest(BaseModel):
     # plan-270-1358: ta3（Ta+3 牛码）x-ws-id 伪装头需要工作目录指纹；
     # agent_loop 透传会话工作目录，其它供应商忽略。
     workspace_dir: str | None = None
+    # plan-20261021-usage-update：本次请求的计时便笺（time.monotonic 秒）。agent_loop 写入 start，
+    # Provider 在首个输出帧到达时写入 first（见 models.base.mark_first_token）。
+    # 不参与序列化，也不影响任何请求参数。
+    timing: dict[str, float] | None = Field(default=None, exclude=True)
 
 
 class Usage(BaseModel):
@@ -72,3 +76,7 @@ class ChatResponse(BaseModel):
     # v966: 本次流式响应收到的数据帧数（0 = 网关未下发任何帧=断流，用于空响应
     # 判定重试；None = provider 未提供该信号，保持旧判定逻辑）
     frames_received: int | None = None
+    # plan-20261021-usage-update：流式响应的性能计时（毫秒）——请求发起 → 首个输出帧、
+    # 首个输出帧 → 流结束。非流式 / 中断 / 超时的响应为 None（用量页按「无实测」处理）。
+    first_token_ms: int | None = None
+    gen_ms: int | None = None

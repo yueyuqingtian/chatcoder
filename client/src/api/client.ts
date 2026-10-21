@@ -400,6 +400,54 @@ export interface UsageStatsOut {
   peak_tokens: number;
   streak_current: number;
   streak_longest: number;
+  /** plan-20261021-usage-update：区间内平均首字 / 平均速度（旧后端无此字段） */
+  perf?: UsagePerfSummary;
+}
+
+export interface UsagePerfSummary {
+  avg_first_token_ms: number | null;
+  avg_speed: number | null;
+  /** 参与平均速度的实测调用数（输出 ≥ 100 token） */
+  speed_calls: number;
+}
+
+/** plan-20261021-usage-update：/api/usage/records 的一行（一次模型调用） */
+export interface UsageRecordItem {
+  id: number;
+  /** UTC 时间，带 Z；前端按本地时区格式化 */
+  time: string | null;
+  provider: string;
+  model: string;
+  /** 账号 / Key 备注名（OAuth 账号名、自定义备注；可能为空） */
+  account: string;
+  /** 掩码后的 Key（如 sk-a••••9f2a；OAuth 账号为空） */
+  account_hint: string;
+  prompt: number;
+  cached: number;
+  completion: number;
+  reasoning: number;
+  /** 请求发起 → 首个输出帧（毫秒）；历史记录为 null */
+  first_token_ms: number | null;
+  /** 首个输出帧 → 结束（毫秒）；历史记录为 null */
+  gen_ms: number | null;
+  /** 估算行：按会话时间戳估算的整次请求耗时（毫秒，含等首字） */
+  est_ms: number | null;
+  /** 输出速度 token/s；不满足口径（输出太少 / 无耗时）为 null */
+  speed: number | null;
+  /** true = 按会话时间戳估算（前端以 ≈ 标注） */
+  estimated: boolean;
+  session_id: number | null;
+}
+
+export interface UsageRecordsOut {
+  total: number;
+  page: number;
+  page_size: number;
+  pages: number;
+  provider: string | null;
+  /** 整个筛选结果（不止当前页）的平均首字 / 平均速度 */
+  summary: UsagePerfSummary;
+  items: UsageRecordItem[];
 }
 
 /* ── 工作流（设计 §5.9）：程序快照与操作 ── */
@@ -1061,6 +1109,18 @@ export const api = {
     if (params?.provider) q.set("provider", params.provider);
     const qs = q.toString();
     return get<UsageStatsOut>(`/usage/stats${qs ? `?${qs}` : ""}`);
+  },
+  /** plan-20261021-usage-update：调用记录（分页，默认每页 20 条），区间 / 供应商口径同 getUsageStats */
+  getUsageRecords: (params?: { start?: string; end?: string; days?: number; provider?: string; page?: number; page_size?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.start) q.set("start", params.start);
+    if (params?.end) q.set("end", params.end);
+    if (params?.days) q.set("days", String(params.days));
+    if (params?.provider) q.set("provider", params.provider);
+    if (params?.page) q.set("page", String(params.page));
+    if (params?.page_size) q.set("page_size", String(params.page_size));
+    const qs = q.toString();
+    return get<UsageRecordsOut>(`/usage/records${qs ? `?${qs}` : ""}`);
   },
 
   // ── 定时任务（plan-230-1144 M1.1：调度器落地）──

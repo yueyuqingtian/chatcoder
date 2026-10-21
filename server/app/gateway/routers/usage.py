@@ -1,12 +1,18 @@
-"""使用统计（plan-152-704：全软件 token 用量，支持自定义时间区间 + 供应商分组）。"""
+"""使用统计（plan-152-704：全软件 token 用量，支持自定义时间区间 + 供应商分组）。
+
+plan-20261021-usage-update：新增 /usage/records —— 按调用逐条列出（时间 / 供应商 / 账号 / 模型 /
+token / 首字 / 耗时 / 速度），分页，口径与 /usage/stats 的区间、供应商筛选一致。
+"""
+import math
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.database import get_db
+from app.services import usage_service
 
 router = APIRouter(prefix="/usage", tags=["usage"])
 
@@ -22,6 +28,22 @@ def _local_midnight_utc_naive(d: date) -> datetime:
     """本地某日 00:00 对应的 UTC 时刻（naive，便于与 created_at 列比较）。"""
     local_dt = datetime(d.year, d.month, d.day).astimezone()  # naive 按本地解释
     return local_dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _resolve_range(start: str | None, end: str | None, days: int) -> tuple[date, date, date, datetime, datetime]:
+    """把 start/end/days 解析成本地日期闭区间，返回 (start_d, end_d, today, t_start, t_end[右开 UTC])。"""
+    today = datetime.now().astimezone().date()
+    if start:
+        start_d = date.fromisoformat(start)
+        end_d = date.fromisoformat(end) if end else today
+        if end_d < start_d:
+            start_d, end_d = end_d, start_d
+    else:
+        end_d = today
+        start_d = today - timedelta(days=max(1, days or 30) - 1)
+    return (start_d, end_d, today,
+            _local_midnight_utc_naive(start_d),
+            _local_midnight_utc_naive(end_d + timedelta(days=1)))
 
 
 @router.get("/stats")
@@ -44,17 +66,7 @@ async def usage_stats(
     from app.persistence.models.usage_record import UsageRecord
 
     # ── 时间区间（本地日期，闭区间）──
-    today = datetime.now().astimezone().date()
-    if start:
-        start_d = date.fromisoformat(start)
-        end_d = date.fromisoformat(end) if end else today
-        if end_d < start_d:
-            start_d, end_d = end_d, start_d
-    else:
-        end_d = today
-        start_d = today - timedelta(days=max(1, days or 30) - 1)
-    t_start = _local_midnight_utc_naive(start_d)
-    t_end = _local_midnight_utc_naive(end_d + timedelta(days=1))  # 右开区间
+    start_d, end_d, today, t_start, t_end = _resolve_range(start, end, days)
 
     rows = (
         (await db.execute(
@@ -177,6 +189,11 @@ async def usage_stats(
         streak_current += 1
         cursor -= timedelta(days=1)
 
+    perf_conds = [UsageRecord.created_at >= t_start, UsageRecord.created_at < t_end]
+    if want:
+        perf_conds.append(_provider_condition(want))
+    perf = await _perf_summary(db, perf_conds)
+
     return {
         "total": {**total, "total": total["prompt"] + total["completion"], "calls": len(rows)},
         "by_model": by_model_out,
@@ -189,4 +206,161 @@ async def usage_stats(
         # plan-308-1542 需求6：供应商筛选 + 可选列表
         "providers": all_providers,
         "provider": want or None,
+        # plan-20261021-usage-update：平均首字 / 平均速度（与调用记录表同口径）
+        "perf": perf,
+    }
+
+
+# ── plan-20261021-usage-update：调用记录（分页） ──
+
+PAGE_SIZE_DEFAULT = 20
+PAGE_SIZE_MAX = 100
+
+
+def _provider_condition(want: str):
+    """供应商筛选条件（SQL 侧）：优先用流水自带的 provider_name，历史流水回落 model_id → 模型 → 供应商。"""
+    from app.persistence.models.model_reg import Model, Provider
+    from app.persistence.models.usage_record import UsageRecord
+
+    legacy_model_ids = (
+        select(Model.id).join(Provider, Provider.id == Model.provider_id).where(Provider.name == want)
+    )
+    return or_(
+        UsageRecord.provider_name == want,
+        and_(
+            or_(UsageRecord.provider_name.is_(None), UsageRecord.provider_name == ""),
+            UsageRecord.model_id.in_(legacy_model_ids),
+        ),
+    )
+
+
+async def _perf_summary(db: AsyncSession, conds: list) -> dict:
+    """区间内的平均首字 / 平均速度（调用记录表与统计总览共用同一口径）。
+
+    - 平均首字：所有有实测首字计时的记录；
+    - 平均速度：输出 ≥ 100 token 且有生成耗时的实测记录，按 token 加权（总输出 ÷ 总生成耗时）。
+    """
+    from app.persistence.models.usage_record import UsageRecord
+
+    ttft_avg = (await db.execute(
+        select(func.avg(UsageRecord.first_token_ms)).where(*conds, UsageRecord.first_token_ms.is_not(None))
+    )).scalar()
+    sp = (await db.execute(
+        select(func.count(), func.sum(UsageRecord.completion_tokens), func.sum(UsageRecord.gen_ms)).where(
+            *conds, UsageRecord.first_token_ms.is_not(None), UsageRecord.gen_ms > 0,
+            UsageRecord.completion_tokens >= usage_service.MIN_TOKENS_MEASURED,
+        )
+    )).one()
+    speed_calls, speed_tokens, speed_ms = int(sp[0] or 0), int(sp[1] or 0), int(sp[2] or 0)
+    avg_speed = round(speed_tokens / (speed_ms / 1000), 1) if speed_calls and speed_ms > 0 else None
+    return {
+        "avg_first_token_ms": int(ttft_avg) if ttft_avg is not None else None,
+        "avg_speed": avg_speed,
+        "speed_calls": speed_calls,
+    }
+
+
+def _iso_utc(dt: datetime | None) -> str | None:
+    """库里的 created_at 是 UTC naive，带 Z 返回，前端按本地时区格式化。"""
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt.replace(microsecond=0).isoformat() + "Z"
+
+
+@router.get("/records")
+async def usage_records(
+    start: str | None = Query(default=None, description="自定义起始日期 YYYY-MM-DD"),
+    end: str | None = Query(default=None, description="自定义截止日期 YYYY-MM-DD"),
+    days: int = Query(default=30, description="预设区间天数（无自定义日期时生效）"),
+    provider: str | None = None,
+    page: int = 1,
+    page_size: int = PAGE_SIZE_DEFAULT,
+    db: AsyncSession = Depends(get_db),
+):
+    """调用记录：按时间倒序逐条列出区间内的模型调用，分页（默认每页 20 条）。
+
+    - 区间、供应商筛选与 /usage/stats 同一口径；
+    - 速度 = 输出 token ÷ 首字到结束的耗时；实测只算输出 ≥ 100 token 的请求；
+    - 没有首字计时的历史记录按会话消息时间戳估算（estimated=true）：把等首字的时间也算进去，
+      所以偏低，且只估输出 ≥ 200 token 的请求；
+    - summary 是整个筛选结果（不止当前页）的平均首字与平均速度。
+    """
+    from app.persistence.models.model_reg import Model, Provider
+    from app.persistence.models.usage_record import UsageRecord
+
+    page = max(1, int(page or 1))
+    page_size = max(1, min(PAGE_SIZE_MAX, int(page_size or PAGE_SIZE_DEFAULT)))
+    _, _, _, t_start, t_end = _resolve_range(start, end, days)
+
+    conds = [UsageRecord.created_at >= t_start, UsageRecord.created_at < t_end]
+    want = (provider or "").strip()
+    if want:
+        conds.append(_provider_condition(want))
+
+    total = (await db.execute(select(func.count()).select_from(UsageRecord).where(*conds))).scalar() or 0
+    pages = max(1, math.ceil(total / page_size))
+
+    rows = (await db.execute(
+        select(UsageRecord).where(*conds)
+        .order_by(UsageRecord.created_at.desc(), UsageRecord.id.desc())
+        .limit(page_size).offset((page - 1) * page_size)
+    )).scalars().all()
+
+    # 历史流水的供应商名 / 模型名回填（model_id → Model → Provider）
+    ids = {r.model_id for r in rows if r.model_id is not None}
+    model_map: dict[int, tuple[str, str]] = {}
+    if ids:
+        mrows = (await db.execute(select(Model).where(Model.id.in_(ids)))).scalars().all()
+        pids = {m.provider_id for m in mrows if m.provider_id is not None}
+        prov: dict[int, str] = {}
+        if pids:
+            prov = {p.id: p.name for p in (await db.execute(
+                select(Provider).where(Provider.id.in_(pids)))).scalars().all()}
+        model_map = {m.id: (m.name, prov.get(m.provider_id, "")) for m in mrows}
+
+    # 没有实测首字计时的记录，按会话消息时间戳估算整次请求耗时
+    need_est = [r for r in rows if r.first_token_ms is None and (r.completion_tokens or 0) >= usage_service.MIN_TOKENS_ESTIMATED]
+    elapsed_map = await usage_service.estimate_elapsed_seconds(db, need_est) if need_est else {}
+
+    items = []
+    for r in rows:
+        fallback_model, fallback_provider = model_map.get(r.model_id, ("", "")) if r.model_id is not None else ("", "")
+        measured = r.first_token_ms is not None and r.gen_ms is not None
+        est_s = None if measured else elapsed_map.get(r.id)
+        speed = (
+            usage_service.compute_speed(r.completion_tokens or 0, (r.gen_ms or 0) / 1000, estimated=False)
+            if measured else usage_service.compute_speed(r.completion_tokens or 0, est_s, estimated=True)
+        )
+        items.append({
+            "id": r.id,
+            "time": _iso_utc(r.created_at),
+            "provider": r.provider_name or fallback_provider or "",
+            "model": r.model_name or fallback_model or "未知模型",
+            "account": r.credential_label or "",
+            "account_hint": r.credential_hint or "",
+            "prompt": r.prompt_tokens or 0,
+            "cached": r.cached_tokens or 0,
+            "completion": r.completion_tokens or 0,
+            "reasoning": r.reasoning_tokens or 0,
+            "first_token_ms": r.first_token_ms if measured else None,
+            "gen_ms": r.gen_ms if measured else None,
+            # 估算行：整次请求耗时（含等首字），前端以「≈」标注
+            "est_ms": int(est_s * 1000) if est_s else None,
+            "speed": speed,
+            "estimated": (not measured) and speed is not None,
+            "session_id": r.session_id,
+        })
+
+    summary = await _perf_summary(db, conds)
+
+    return {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": pages,
+        "provider": want or None,
+        "summary": summary,
+        "items": items,
     }

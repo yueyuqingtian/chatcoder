@@ -11,9 +11,7 @@ export interface TrendSeries {
 
 const W = 760;
 const H = 240;
-const PAD = { left: 48, right: 16, top: 16, bottom: 30 };
-const innerW = W - PAD.left - PAD.right;
-const innerH = H - PAD.top - PAD.bottom;
+const PAD = { top: 16, right: 16, bottom: 30 };
 const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
 
 function smoothPath(pts: Array<[number, number]>): string {
@@ -42,10 +40,19 @@ function dateLabel(iso: string): string {
 export function UsageTrendChart({ series, dates }: { series: TrendSeries[]; dates: string[] }) {
   const n = dates.length;
   const maxY = Math.max(1, ...series.flatMap((s) => dates.map((d) => s.record[d] || 0)));
-  const x = (i: number) => PAD.left + (n <= 1 ? innerW / 2 : (i / (n - 1)) * innerW);
+  const gridLevels = [0, 0.25, 0.5, 0.75, 1];
+  const tickLabels = gridLevels.map((lv) => fmtTokens(Math.round(lv * maxY)));
+  // plan-20261021-trend-ylabel：左内距按最长刻度文本动态留白。SVG 会裁掉 viewBox
+  // 之外的文字，原先固定 48 在「314.20M」这类 7 字符刻度下会把首位数字切掉。
+  const padLeft = Math.max(
+    48,
+    ...tickLabels.map((t) => Math.ceil(t.length * 6.8) + 12),
+  );
+  const innerW = W - padLeft - PAD.right;
+  const innerH = H - PAD.top - PAD.bottom;
+  const x = (i: number) => padLeft + (n <= 1 ? innerW / 2 : (i / (n - 1)) * innerW);
   const y = (v: number) => PAD.top + innerH - (v / maxY) * innerH;
 
-  const gridLevels = [0, 0.25, 0.5, 0.75, 1];
   const labelIdx = n === 0 ? [] : n === 1 ? [0] : [0, Math.floor((n - 1) / 2), n - 1];
 
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -58,7 +65,7 @@ export function UsageTrendChart({ series, dates }: { series: TrendSeries[]; date
     const rect = svgRef.current?.getBoundingClientRect();
     if (!rect) return;
     const svgX = ((e.clientX - rect.left) / rect.width) * W;
-    const i = Math.max(0, Math.min(n - 1, Math.round((svgX - PAD.left) / innerW * (n - 1))));
+    const i = Math.max(0, Math.min(n - 1, Math.round((svgX - padLeft) / innerW * (n - 1))));
     setHoverIdx(n <= 1 ? 0 : i);
     // x/y 统一为渲染像素坐标（viewBox 的 svgY 仅用于上面日期索引计算）
     setTipPos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
@@ -101,13 +108,13 @@ export function UsageTrendChart({ series, dates }: { series: TrendSeries[]; date
           onMouseMove={onMove}
           onMouseLeave={onLeave}
         >
-          {gridLevels.map((lv) => {
+          {gridLevels.map((lv, li) => {
             const gy = y(lv * maxY);
             return (
               <g key={lv}>
-                <line x1={PAD.left} x2={W - PAD.right} y1={gy} y2={gy} className="usage-trend-grid" />
-                <text x={PAD.left - 6} y={gy + 3} className="usage-trend-ylabel" textAnchor="end">
-                  {fmtTokens(Math.round(lv * maxY))}
+                <line x1={padLeft} x2={W - PAD.right} y1={gy} y2={gy} className="usage-trend-grid" />
+                <text x={padLeft - 8} y={gy + 3} className="usage-trend-ylabel" textAnchor="end">
+                  {tickLabels[li]}
                 </text>
               </g>
             );

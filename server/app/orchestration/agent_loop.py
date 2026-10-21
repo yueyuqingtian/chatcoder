@@ -1937,6 +1937,8 @@ async def run_agent_loop(
                 from app.persistence.models.usage_record import UsageRecord  # noqa: F401
                 _model_name = ""
                 _provider_name = ""
+                _m = None
+                _p = None
                 if model_id is not None:
                     from app.persistence.models.model_reg import Model, Provider
                     _m = await db.get(Model, model_id)
@@ -1945,6 +1947,11 @@ async def run_agent_loop(
                     if _m is not None and _m.provider_id is not None:
                         _p = await db.get(Provider, _m.provider_id)
                         _provider_name = _p.name if _p else ""
+                # plan-20261021-usage-update：这次调用实际用的账号 / Key 快照，调用记录表展示用
+                from app.services.usage_service import credential_snapshot as _cred_snapshot
+                _cred_id, _cred_label, _cred_hint = await _cred_snapshot(
+                    db, getattr(provider, "credential_row_id", None), _p, _m,
+                )
                 from app.persistence.write_behind import WriteItem, write_behind
                 _buf = write_behind.get(session_id, turn_id)
                 _buf.enqueue(WriteItem("usage", {
@@ -1955,6 +1962,10 @@ async def run_agent_loop(
                     "reasoning_tokens": (getattr(response.usage, "reasoning_tokens", 0) or 0) if response.usage else 0,
                     "cached_tokens": (getattr(response.usage, "cached_input_tokens", 0) or 0) if response.usage else 0,
                     "usage_source": _usage_source,
+                    "first_token_ms": getattr(response, "first_token_ms", None),
+                    "gen_ms": getattr(response, "gen_ms", None),
+                    "credential_id": _cred_id, "credential_label": _cred_label,
+                    "credential_hint": _cred_hint,
                 }))
                 # v1.1: 主代理同步持久化最后一次真实占用（重启/切会话后圆环口径一致）
                 if thread_id is None and _final_prompt > 0:
@@ -3335,6 +3346,13 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
     _splitter = _InlineThinkingStreamSplitter()
     _held = ""
     _released = False
+    # plan-20261021-usage-update：计时。start = 开始等待首个事件（请求即将发出）；
+    # Provider 在首个真实输出帧（含纯工具调用）写 request.timing["first"]；
+    # 没接入的 Provider 以首个 thinking / content 事件到达时刻兜底；done 事件到达即流结束。
+    _t_req = time.monotonic()
+    request.timing = {"start": _t_req}
+    _t_first_evt: float | None = None
+    _t_end: float | None = None
     try:
         async for event in _anext_with_cancel(provider.stream_structured(request), cancel_event):
             # v6.4: 流式输出中检查中断信号，立即停止（竞速后为幂等兜底）
@@ -3343,6 +3361,8 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
                 _cancelled = True
                 finish_reason = "cancelled"
                 break
+            if _t_first_evt is None and event["type"] in ("thinking", "content") and event.get("delta"):
+                _t_first_evt = time.monotonic()
             if event["type"] == "thinking":
                 delta = event.get("delta", "")
                 full_thinking += delta
@@ -3382,6 +3402,7 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
                                     "thread_id": thread_id},
                     })
             elif event["type"] == "done":
+                _t_end = time.monotonic()
                 _c, _t = _splitter.flush()
                 if _t:
                     await broadcast(session_id, {
@@ -3497,10 +3518,19 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
             "payload": {"agent_id": agent_id, "turn_id": turn_id, "full_text": full_content,
                         "thread_id": thread_id},
         })
+    # plan-20261021-usage-update：只有「流正常走到 done」才产生实测计时；取消 / 超时 / 异常回退
+    # 非流式的响应没有可信的首字与结束时刻，交给用量页按时间戳估算。
+    _first_ms: int | None = None
+    _gen_ms: int | None = None
+    _t_first = (request.timing or {}).get("first") or _t_first_evt
+    if _t_first is not None and _t_end is not None and not _cancelled:
+        _first_ms = max(0, int((_t_first - _t_req) * 1000))
+        _gen_ms = max(0, int((_t_end - _t_first) * 1000))
     return ChatResponse(
         content=full_content or None, thinking=full_thinking or None,
         tool_calls=tool_calls, finish_reason=finish_reason, usage=usage,
         frames_received=frames_received,
+        first_token_ms=_first_ms, gen_ms=_gen_ms,
     )
 
 

@@ -29,8 +29,9 @@ interface PageShellProps {
   title?: ReactNode;
   /** 仅在承载真实信息时传入——无实义时不渲染，避免"无意义文案" */
   subtitle?: ReactNode;
-  /** standard=常规表单页(720)；wide=图表/表格类(880) */
-  width?: "standard" | "wide";
+  /** standard=常规表单页(720)；wide=图表/表格类(880)；xwide=列很多的数据表页(1080，仅使用统计)。
+   *  宽度按页面固定，不随页内交互变化（页内切视图不会跳宽）。 */
+  width?: "standard" | "wide" | "xwide";
   /** 标题行右侧操作区（如刷新/新建）；内容组件也可通过 <PageActions> 投送 */
   actions?: ReactNode;
   /** S19（plan-41-197c）：填充式页面——页面自身不滚动，由内容组件内部滚动区承担
@@ -45,7 +46,7 @@ export function PageShell({ title, subtitle, width = "standard", actions, fill =
   const [slot, setSlot] = useState<HTMLElement | null>(null);
   return (
     <div className={`ui-page${fill ? " is-fill" : ""}`}>
-      <div className={`ui-page-inner${width === "wide" ? " is-wide" : ""}${fill ? " is-fill" : ""}`}>
+      <div className={`ui-page-inner${width === "wide" ? " is-wide" : width === "xwide" ? " is-xwide" : ""}${fill ? " is-fill" : ""}`}>
         {hasHead && (
           <div className="ui-page-head">
             <div style={{ minWidth: 0 }}>

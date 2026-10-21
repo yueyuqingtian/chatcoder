@@ -9,8 +9,6 @@ interface HmPoint { date: string; tokens: number; }
 
 interface HmTip { x: number; y: number; title: string; sub: string; }
 
-const CELL = 12;
-const GAP = 2;
 const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
 
 function tier(value: number, max: number): number {
@@ -97,6 +95,9 @@ export function UsageHeatmap({ daily_all }: { daily_all: HmPoint[] }) {
     return { weeks, weekTotal, months, byDate, cumByDate };
   }, [daily_all]);
 
+  // plan-20261021-usage-update：标题旁补「活跃天数」，让热力图不只是一片色块
+  const activeDays = useMemo(() => daily_all.filter((p) => p.tokens > 0).length, [daily_all]);
+
   const maxValue = useMemo(() => {
     if (mode === "weekly") return Math.max(0, ...model.weekTotal);
     if (mode === "cum") {
@@ -110,13 +111,11 @@ export function UsageHeatmap({ daily_all }: { daily_all: HmPoint[] }) {
     return model.byDate[date] || 0;
   }
 
-  const colWidth = CELL + GAP;
+  // plan-20261021-usage-heatmap-fill：列宽不再写死 12px，改为按容器宽度等分铺满整行，
+  // 行高由格子的 1:1 比例撑出（见 .usage-hm-grid）；列数固定，月份标签按列号百分比定位。
+  const colCount = Math.max(1, model.weeks.length);
   const gridStyle: CSSProperties = {
-    display: "grid",
-    gridTemplateRows: `repeat(7, ${CELL}px)`,
-    gridAutoFlow: "column",
-    gridAutoColumns: `${CELL}px`,
-    gap: GAP,
+    gridTemplateColumns: `repeat(${colCount}, minmax(0, 1fr))`,
   };
 
   return (
@@ -126,7 +125,7 @@ export function UsageHeatmap({ daily_all }: { daily_all: HmPoint[] }) {
           <IconLayoutGrid size={16} />
           <div className="usage-block-titles">
             <span className="usage-heatmap-title">Token 活动</span>
-            <span className="usage-block-sub">近 12 个月</span>
+            <span className="usage-block-sub">近 12 个月 · 活跃 {activeDays} 天</span>
           </div>
         </div>
         <div className="usage-seg-toggle">
@@ -142,53 +141,63 @@ export function UsageHeatmap({ daily_all }: { daily_all: HmPoint[] }) {
         </div>
       </div>
 
-      <div className="usage-heatmap-months" style={{ position: "relative", height: 16 }}>
-        {model.months.map((m) => (
-          <span
-            key={`${m.ci}-${m.label}`}
-            className="usage-hm-month"
-            style={{ position: "absolute", left: m.ci * colWidth }}
-          >
-            {m.label}
-          </span>
-        ))}
-      </div>
-
       <div className="usage-heatmap-body">
-        <div className="usage-heatmap-weekdays">
-          {WEEKDAYS.map((w) => (
-            <span key={w} style={{ height: CELL }}>{w}</span>
-          ))}
-        </div>
-
-        {mode === "weekly" ? (
-          <div className="usage-hm-grid" style={{ display: "grid", gridAutoFlow: "column", gridAutoColumns: `${CELL}px`, gridTemplateRows: `${CELL}px`, gap: GAP }}>
-            {model.weekTotal.map((v, ci) => (
-              <div
-                key={ci}
-                className={`usage-hm-cell usage-hm-${tier(v, maxValue)}`}
-                title={`第 ${ci + 1} 周：${fmtTokens(v)} tokens`}
-                onMouseEnter={(e) => showTip(e, `第 ${ci + 1} 周`, `${fmtTokens(v)} tokens`)}
-              />
+        {mode !== "weekly" && (
+          <div className="usage-heatmap-weekdays" aria-hidden>
+            {WEEKDAYS.map((w) => (
+              <span key={w}>{w}</span>
             ))}
           </div>
-        ) : (
-          <div className="usage-hm-grid" style={gridStyle}>
-            {model.weeks.flatMap((w, ci) =>
-              w.map((c, ri) => {
-                if (!c) return <div key={`${ci}-${ri}`} className="usage-hm-cell usage-hm-0" />;
-                return (
-                  <div
-                    key={`${ci}-${ri}`}
-                    className={`usage-hm-cell usage-hm-${tier(valueOf(c.date), maxValue)}`}
-                    title={`${c.date}：${fmtTokens(c.tokens)} tokens`}
-                    onMouseEnter={(e) => showTip(e, c.date, `${fmtTokens(valueOf(c.date))} tokens`)}
-                  />
-                );
-              }),
-            )}
-          </div>
         )}
+
+        <div className="usage-heatmap-main">
+          <div className="usage-heatmap-months">
+            {model.months.map((m) => (
+              <span
+                key={`${m.ci}-${m.label}`}
+                className="usage-hm-month"
+                style={{ left: `${(m.ci / colCount) * 100}%` }}
+              >
+                {m.label}
+              </span>
+            ))}
+          </div>
+
+          {mode === "weekly" ? (
+            <div className="usage-hm-grid is-weekly" style={gridStyle}>
+              {model.weekTotal.map((v, ci) => (
+                <div
+                  key={ci}
+                  className={`usage-hm-cell usage-hm-${tier(v, maxValue)}`}
+                  title={`第 ${ci + 1} 周：${fmtTokens(v)} tokens`}
+                  onMouseEnter={(e) => showTip(e, `第 ${ci + 1} 周`, `${fmtTokens(v)} tokens`)}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="usage-hm-grid" style={gridStyle}>
+              {model.weeks.flatMap((w, ci) =>
+                w.map((c, ri) => {
+                  if (!c) return <div key={`${ci}-${ri}`} className="usage-hm-cell usage-hm-0" />;
+                  return (
+                    <div
+                      key={`${ci}-${ri}`}
+                      className={`usage-hm-cell usage-hm-${tier(valueOf(c.date), maxValue)}`}
+                      title={`${c.date}：${fmtTokens(c.tokens)} tokens`}
+                      onMouseEnter={(e) => showTip(e, c.date, `${fmtTokens(valueOf(c.date))} tokens`)}
+                    />
+                  );
+                }),
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+      {/* 图例：色阶由浅到深 = 用量由少到多 */}
+      <div className="usage-hm-legend" aria-hidden>
+        <span>少</span>
+        {[0, 1, 2, 3, 4].map((t) => <i key={t} className={`usage-hm-cell usage-hm-${t}`} />)}
+        <span>多</span>
       </div>
       {tip && (
         <div

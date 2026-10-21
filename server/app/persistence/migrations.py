@@ -142,6 +142,12 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("workflow_runs", "closed_reason", "VARCHAR(32)"),
     # ========== usage_records（plan-152-704：供应商显示名）==========
     ("usage_records", "provider_name", "VARCHAR(120) DEFAULT ''"),
+    # plan-20261021-usage-update：调用性能（首字 / 生成耗时）与账号快照
+    ("usage_records", "first_token_ms", "INTEGER"),
+    ("usage_records", "gen_ms", "INTEGER"),
+    ("usage_records", "credential_id", "INTEGER"),
+    ("usage_records", "credential_label", "VARCHAR(120) DEFAULT ''"),
+    ("usage_records", "credential_hint", "VARCHAR(40) DEFAULT ''"),
     # ========== scheduled_tasks（plan-230-1144 M1.1：调度器落地所需的执行状态列）==========
     ("scheduled_tasks", "enabled", "BOOLEAN DEFAULT 1 NOT NULL"),
     ("scheduled_tasks", "last_run_at", "VARCHAR(40)"),
@@ -359,6 +365,28 @@ async def _cleanup_legacy_notnull_columns(db: AsyncSession) -> int:
     return cleaned
 
 
+# (索引名, 表名, 列)。create_all 不会给已存在的表补索引，这里幂等补建。
+_INDEXES: list[tuple[str, str, str]] = [
+    # plan-20261021-usage-update：调用记录表按时间倒序分页，数万行时没有索引会每页全表排序
+    ("ix_usage_records_created_at", "usage_records", "created_at"),
+]
+
+
+async def _ensure_indexes(db: AsyncSession) -> None:
+    for name, table, columns in _INDEXES:
+        try:
+            if not await _table_exists(db, table):
+                continue
+            await db.execute(text(f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({columns})"))
+            await db.commit()
+        except Exception as e:
+            logger.warning("迁移: 索引 %s 创建失败(非阻塞): %s", name, e)
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+
+
 async def run_migrations(db: AsyncSession) -> dict:
     """启动时执行,幂等。返回 {"migrated": int, "skipped": int, "errors": int}。"""
     migrated = 0
@@ -383,6 +411,8 @@ async def run_migrations(db: AsyncSession) -> dict:
                 await db.rollback()
             except Exception:
                 pass
+    await _ensure_indexes(db)
+
     # plan-278-1391: 清理模型已删除、库中仍为 NOT NULL 且无默认值的遗留列。
     # 根因：旧版 sessions.plan_restore_after_turn 为 NOT NULL 无默认值，新代码不带该列
     # 插入 → NOT NULL constraint failed（升级后新建会话/发消息必失败）。

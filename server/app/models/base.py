@@ -3,11 +3,25 @@
 所有 Provider 必须实现 chat / stream / stream_structured 三个方法，
 保证 OpenAI / Anthropic / 其它协议在 agent_loop 侧能力对齐。
 """
+import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from typing import Any
 
 from app.models.schemas import ChatRequest, ChatResponse
+
+
+def mark_first_token(request: ChatRequest) -> None:
+    """记录本次请求首个输出帧（正文 / 思考 / 工具参数）到达的时刻。
+
+    plan-20261021-usage-update：用量页的「首字」「速度」要从这个时刻算起。
+    仅靠 agent_loop 看 thinking / content 事件不够——纯工具调用的回复没有文字事件，
+    工具参数是在 Provider 内部拼装、结束时才一次性吐出，所以由 Provider 在循环里
+    首次拿到真实输出（非空 delta）时调用本函数。重复调用只记第一次，未写 start 则忽略。
+    """
+    timing = getattr(request, "timing", None)
+    if timing is not None and "first" not in timing:
+        timing["first"] = time.monotonic()
 
 
 class ModelProvider(ABC):

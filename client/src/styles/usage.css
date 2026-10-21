@@ -1,0 +1,145 @@
+/* ═══════════════════════════════════════════════════════════
+ * 使用统计（plan-20261021-usage-update）
+ * 结构：筛选栏 → 视图（概览 / 调用记录）→ 卡片（KPI / 图表 / 表格）
+ * 约定：圆角只用令牌；状态色只落在图标底色与迷你折线；表格数字一律等宽（tabular-nums）；
+ *       加载 / 翻页只改透明度，不改行高与列宽，避免布局抖动。
+ * 老的 .usage-* 图表样式（热力图 / 趋势 / 环形图）仍在 global.css，这里只做容器与新组件。
+ * ═══════════════════════════════════════════════════════════ */
+
+.up { display: flex; flex-direction: column; gap: var(--sp-5); container: up / inline-size; }
+
+/* ── 筛选栏 ── */
+.up-bar { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+.up-bar-spacer { flex: 1 1 0; min-width: 0; }
+.up-bar .usage-provider-select { max-width: 220px; }
+
+/* ── 视图：切换时淡入 + 轻微上移（只动 opacity / transform；减弱动效时 --dur 归零即瞬时） ── */
+.up-view { display: flex; flex-direction: column; gap: var(--sp-5); animation: up-view-in var(--dur-4) var(--ease-out) both; }
+@keyframes up-view-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.up-stack { display: flex; flex-direction: column; gap: var(--sp-5); transition: opacity var(--dur-3) var(--ease-standard); }
+.up-stack.is-loading { opacity: 0.6; }
+
+/* ── 卡片 ── */
+.up-card { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--r-lg); }
+.up-card-head { display: flex; align-items: center; gap: 10px; padding: 14px 18px 0; color: var(--text-2); }
+.up-card-head > svg { flex: none; }
+.up-card-titles { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.up-card-title { font-size: 14px; font-weight: 600; line-height: 1.4; color: var(--text-1); white-space: nowrap; }
+.up-card-sub { font-size: 11.5px; line-height: 1.5; color: var(--text-3); white-space: nowrap; }
+.up-card-body { padding: 12px 18px 18px; }
+.up-card-body.is-flush { padding: 8px 0 6px; }
+/* 图表自带的外框在卡片里不再重复 */
+.up-card .usage-trend, .up-card .usage-donut-wrap { border: 0; border-radius: 0; padding: 0; background: transparent; }
+/* 热力图自带头部 / 外框：与卡片同内距 */
+.up-stack > .usage-heatmap { padding: 14px 18px 16px; }
+.usage-hm-legend { display: flex; align-items: center; justify-content: flex-end; gap: 4px; margin-top: 2px; font-size: 11px; color: var(--text-3); }
+.usage-hm-legend .usage-hm-cell { flex: none; }
+.usage-hm-legend span:first-child { margin-right: 2px; }
+.usage-hm-legend span:last-child { margin-left: 2px; }
+
+/* ── KPI ── */
+.up-kpis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-4); }
+@container up (max-width: 760px) { .up-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@container up (max-width: 460px) { .up-kpis { grid-template-columns: minmax(0, 1fr); } }
+.up-kpi { --tone: var(--text-2); display: flex; flex-direction: column; gap: 8px; padding: 14px 16px 12px; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--r-lg); min-width: 0; }
+.up-kpi.tone-blue { --tone: #3b82f6; }
+.up-kpi.tone-green { --tone: #22c55e; }
+.up-kpi.tone-amber { --tone: #f59e0b; }
+.up-kpi.tone-violet { --tone: #a855f7; }
+.up-kpi.tone-sky { --tone: #06b6d4; }
+.up-kpi.tone-rose { --tone: #ec4899; }
+.up-kpi-head { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-2); }
+.up-kpi-ic { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 24px; height: 24px; border-radius: var(--r-md); color: var(--tone); background: color-mix(in oklab, var(--tone) 14%, transparent); }
+.up-kpi-ic svg { display: block; }
+.up-kpi-main { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; min-height: 34px; }
+.up-kpi-value { font-size: 26px; font-weight: 650; line-height: 1.15; letter-spacing: -0.3px; color: var(--text-1); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.up-kpi-value small { margin-left: 2px; font-size: 12.5px; font-weight: 500; letter-spacing: 0; color: var(--text-3); }
+.up-kpi-foot { font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.up-spark { flex: none; color: var(--tone); }
+.up-spark-line { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; }
+.up-spark-area { fill: color-mix(in oklab, currentColor 12%, transparent); stroke: none; }
+
+/* ── 共用小件 ── */
+.up-ell { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.up-dash { color: var(--text-3); opacity: 0.7; }
+.up-approx { margin-right: 2px; font-style: normal; color: var(--text-3); }
+/* 带解释浮层的数字 / 表头：虚下划线提示「这里能悬停」 */
+.up-has-tip { text-decoration: underline dotted; text-decoration-color: color-mix(in oklab, var(--text-3) 70%, transparent); text-underline-offset: 3px; cursor: default; }
+.up-dot { flex: none; width: 8px; height: 8px; border-radius: 999px; }
+
+/* ── 调用记录 ── */
+.up-rec { overflow: hidden; scroll-margin-top: 12px; }
+.up-rec .up-card-head { padding-bottom: 12px; }
+.up-rec-stats { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px var(--sp-5); margin-left: auto; }
+.up-stat { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-3); }
+.up-stat svg { flex: none; }
+.up-stat .v { color: var(--text-1); font-weight: 600; font-variant-numeric: tabular-nums; }
+.up-stat small { font-size: 11px; font-weight: 500; color: var(--text-3); }
+.up-rec-error { display: flex; align-items: center; gap: 8px; margin: 0 18px 12px; padding: 9px 12px; border-radius: var(--r-md); background: var(--error-soft); color: var(--error); font-size: 12.5px; }
+.up-rec-error .btn { margin-left: auto; }
+
+.up-rec-scroll { overflow-x: auto; scrollbar-width: thin; border-top: 1px solid var(--border-light); }
+.up-rec-table { min-width: 960px; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+/* 表头 / 分组行 / 数据行共用同一份列模板，列永远对齐 */
+.up-rec-groups, .up-rec-row {
+  display: grid;
+  grid-template-columns: 146px minmax(70px, 1fr) minmax(96px, 1.2fr) minmax(96px, 1.35fr) 68px 72px 68px 60px 66px 88px;
+  column-gap: 10px; align-items: center; padding: 0 16px;
+}
+.up-rec-groups > span, .up-rec-row > span { min-width: 0; }
+.up-rec-row { min-height: 40px; border-bottom: 1px solid var(--border-light); color: var(--text-2); }
+.up-rec-body .up-rec-row:last-child { border-bottom: 0; }
+.up-rec-row:not(.up-rec-head):not(.is-skeleton):hover { background: var(--bg-hover); }
+.up-rec-groups { padding-top: 8px; font-size: 11px; color: var(--text-3); }
+.up-rec-groups .g-token, .up-rec-groups .g-perf { padding-bottom: 4px; text-align: center; border-bottom: 1px solid var(--border-light); }
+.up-rec-groups .g-token { grid-column: 5 / span 3; }
+.up-rec-groups .g-perf { grid-column: 8 / span 3; }
+.up-rec-head { min-height: 32px; font-size: 11.5px; font-weight: 600; color: var(--text-3); }
+.up-rec .num { text-align: right; }
+.up-rec .is-zero { color: var(--text-3); }
+.up-rec-time { white-space: nowrap; }
+.up-rec-time .d { margin-right: 6px; color: var(--text-3); }
+.up-rec-time .c { color: var(--text-1); }
+.up-rec-model { color: var(--text-1); font-weight: 500; }
+.up-acc { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.up-acc-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-1); }
+.up-acc-key { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 11.5px; color: var(--text-3); }
+.up-rec-speed { color: var(--text-1); font-weight: 600; }
+.up-rec-body { transition: opacity var(--dur-2) var(--ease-standard); }
+.up-rec-body.is-loading { opacity: 0.5; pointer-events: none; }
+.up-rec-row.is-skeleton > span > i { display: block; width: 70%; height: 10px; border-radius: 999px; background: var(--bg-hover); animation: usage-pulse var(--dur-pulse) var(--ease-in-out) infinite; }
+.up-rec-row.is-skeleton > span:nth-child(n+5) > i { margin-left: auto; width: 55%; }
+.up-rec .ui-empty { padding: 36px 0 44px; }
+.up-rec-note { margin: 0; padding: 10px 18px 14px; border-top: 1px solid var(--border-light); font-size: 11.5px; line-height: 1.7; color: var(--text-3); }
+
+/* ── 模型明细（可排序） ── */
+.up-mt { display: flex; flex-direction: column; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.up-mt-row { display: grid; grid-template-columns: minmax(140px, 2fr) repeat(4, minmax(56px, 0.8fr)) minmax(190px, 1.9fr); column-gap: 12px; align-items: center; min-height: 38px; padding: 0 18px; border-bottom: 1px solid var(--border-light); color: var(--text-2); }
+.up-mt-row > span { min-width: 0; }
+.up-mt-row:last-child { border-bottom: 0; }
+.up-mt-row:not(.up-mt-head):hover { background: var(--bg-hover); }
+.up-mt-head { min-height: 32px; font-size: 11.5px; font-weight: 600; color: var(--text-3); }
+.up-mt .num { text-align: right; }
+.up-mt-name { display: flex; align-items: center; gap: 8px; color: var(--text-1); font-weight: 500; }
+.up-mt-total { display: flex; align-items: center; justify-content: flex-end; gap: 8px; color: var(--text-1); }
+.up-mt-total .v { font-weight: 600; }
+.up-mt-total .p { width: 44px; color: var(--text-3); font-weight: 500; }
+.up-meter { flex: 0 0 64px; height: 6px; border-radius: 999px; background: var(--bg-hover); overflow: hidden; }
+.up-meter i { display: block; height: 100%; border-radius: 999px; background: var(--accent); transition: width var(--dur-4) var(--ease-standard); }
+.up-sort { display: inline-flex; align-items: center; gap: 3px; padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; border-radius: var(--r-sm); transition: color var(--dur-2) var(--ease-standard); }
+.up-sort:hover, .up-sort.is-active { color: var(--text-1); }
+/* 数字列：图标放在文字左侧，文字右缘始终与下方数字对齐 */
+.up-mt .num .up-sort { flex-direction: row-reverse; }
+.up-sort-ic { opacity: 0; transition: opacity var(--dur-2) var(--ease-standard), transform var(--dur-3) var(--ease-standard); }
+.up-sort.is-active .up-sort-ic { opacity: 1; }
+.up-sort-ic.is-asc { transform: rotate(180deg); }
+
+/* 窄容器：记录表横向滚动已兜底；模型明细收成四列 */
+@container up (max-width: 700px) {
+  .up-mt-row { grid-template-columns: minmax(120px, 2fr) repeat(2, minmax(52px, 0.8fr)) minmax(150px, 1.6fr); }
+  .up-mt-row > span:nth-child(4), .up-mt-row > span:nth-child(5) { display: none; }
+  .up-meter { flex-basis: 40px; }
+}
+
+/* ── 错误条（概览） ── */
+.up-view .usage-error .btn { margin-left: auto; }

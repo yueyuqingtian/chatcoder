@@ -14,7 +14,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 
-from app.models.base import ModelProvider
+from app.models.base import ModelProvider, mark_first_token
 from app.models.providers.temperature_policy import pick_temperature
 from app.models.providers.tool_args import parse_tool_args
 from app.models.schemas import ChatRequest, ChatResponse, Usage
@@ -437,6 +437,7 @@ class AnthropicProvider(ModelProvider):
                         if event_type == "content_block_start":
                             block = chunk.get("content_block") or {}
                             if block.get("type") == "tool_use":
+                                mark_first_token(request)  # plan-20261021-usage-update：工具调用块起始即首字
                                 idx = int(chunk.get("index") or 0)
                                 new_id = str(block.get("id") or "")
                                 slot = tool_blocks.get(idx)
@@ -464,8 +465,10 @@ class AnthropicProvider(ModelProvider):
                             delta = chunk.get("delta") or {}
                             dt = delta.get("type")
                             if dt == "text_delta" and delta.get("text"):
+                                mark_first_token(request)
                                 yield {"type": "content", "delta": delta["text"]}
                             elif dt == "thinking_delta" and delta.get("thinking"):
+                                mark_first_token(request)
                                 yield {"type": "thinking", "delta": delta["thinking"]}
                             elif dt == "input_json_delta":
                                 slot = tool_blocks.get(int(chunk.get("index") or 0))

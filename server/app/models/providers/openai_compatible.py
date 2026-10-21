@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator
 from openai import APIConnectionError, APIError, APITimeoutError, AsyncOpenAI
 
 from app.core.config import settings
-from app.models.base import ModelProvider
+from app.models.base import ModelProvider, mark_first_token
 from app.models.providers.temperature_policy import (
     is_temperature_rejected,
     pick_temperature,
@@ -518,15 +518,17 @@ class OpenAICompatibleProvider(ModelProvider):
                               or getattr(delta, 'reasoning', None)
                               or getattr(delta, 'thinking', None))
                 if _reasoning:
+                    mark_first_token(request)  # plan-20261021-usage-update：首个真实输出帧
                     thinking_parts.append(_reasoning)
                     yield {"type": "thinking", "delta": _reasoning}
-                
+
                 if delta.content:
                     _clean = _dedup.feed(delta.content)
                     if _clean:
+                        mark_first_token(request)
                         content_parts.append(_clean)
                         yield {"type": "content", "delta": _clean}
-                
+
                 if delta.tool_calls:
                     for tc in delta.tool_calls:
                         idx = tc.index
@@ -537,8 +539,10 @@ class OpenAICompatibleProvider(ModelProvider):
                         if tc.function:
                             if tc.function.name:
                                 tool_calls_map[idx]["name"] += tc.function.name
+                                mark_first_token(request)  # 纯工具调用的回复没有文字事件，以工具名 / 参数帧为首字
                             if tc.function.arguments:
                                 tool_calls_map[idx]["arguments"] += tc.function.arguments
+                                mark_first_token(request)
 
             if choice_fr:
                 finish_reason = choice_fr

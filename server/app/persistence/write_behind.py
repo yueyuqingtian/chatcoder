@@ -359,6 +359,12 @@ def _persist_batch(batch: list[WriteItem], s) -> list[dict]:
                 reasoning_tokens=int(p.get("reasoning_tokens") or 0),
                 cached_tokens=int(p.get("cached_tokens") or 0),
                 usage_source=p.get("usage_source", "api"),
+                # plan-20261021-usage-update：调用性能与账号快照（缺省为空，旧调用路径不受影响）
+                first_token_ms=p.get("first_token_ms"),
+                gen_ms=p.get("gen_ms"),
+                credential_id=p.get("credential_id"),
+                credential_label=p.get("credential_label") or "",
+                credential_hint=p.get("credential_hint") or "",
             ))
         elif kind == "session_usage":
             from app.persistence.models.message import Session as SessionModel

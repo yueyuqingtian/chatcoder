@@ -1,79 +1,104 @@
-/** 设置中心：用量统计（plan-152-704 重写，严格按图二图三设计）。
- * 自上而下：统计卡片行 → Token 活动热力图（每日/每周/累计）→ 时间范围（近7日/近30日/自定义）→
- * 每日 Token 趋势折线图（多模型）→ 模型用量环形图 → 刷新按钮。
- * 移除原"会话上下文占用"折叠区。模型显示"供应商/模型名"以区分同名模型。
+/** 设置中心：使用统计（plan-152-704 重写；plan-20261021-usage-update 再强化）。
+ *
+ * 两个视图，共用同一条筛选栏（时间范围 / 供应商 / 刷新），切换视图不丢筛选：
+ *  - 概览：KPI 卡片 → Token 活动热力图 → 每日趋势 → 模型分布 → 模型明细（可排序）；
+ *  - 调用记录：逐次调用的时间 / 供应商 / 账户 / 模型 / token / 首字 / 耗时 / 速度，后端分页，每页 20 条。
+ * 模型显示「供应商/模型名」以区分同名模型。
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, type UsageStatsOut } from "../../api/client";
-import { IconAlertTriangle, IconBarChart, IconCalendar, IconDatabase, IconHash, IconRefresh, IconZap } from "../icons";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { api, type UsageRecordsOut, type UsageStatsOut } from "../../api/client";
+import { IconAlertTriangle, IconBarChart, IconDatabase, IconListOrdered, IconRefresh } from "../icons";
 import { UsageHeatmap } from "./usage/UsageHeatmap";
 import { UsageTrendChart, type TrendSeries } from "./usage/UsageTrendChart";
 import { UsageDonutChart, type DonutSeg } from "./usage/UsageDonutChart";
-import { fmtTokens, modelColor } from "./usage/chartUtils";
+import { UsageKpis } from "./usage/UsageKpis";
+import { UsageModelTable } from "./usage/UsageModelTable";
+import { UsageRecordsTable } from "./usage/UsageRecordsTable";
+import { modelColor } from "./usage/chartUtils";
 import { UsageDateRangePicker, presetRange, type RangeMode } from "./usage/UsageDateRangePicker";
-import { Select, Tooltip } from "../ui";
+import { Button, Empty, Segmented, Select, Tooltip } from "../ui";
 
-function buildRangeParams(mode: RangeMode, start: string, end: string, provider?: string): { start?: string; end?: string; days?: number; provider?: string } {
+/** 调用记录每页条数（与后端默认一致） */
+const RECORDS_PAGE_SIZE = 20;
+
+type UsageTab = "overview" | "records";
+
+interface Filters {
+  mode: RangeMode;
+  start: string;
+  end: string;
+  /** 空 = 全部供应商 */
+  provider: string;
+}
+
+function buildRangeParams(f: Filters): { start?: string; end?: string; days?: number; provider?: string } {
+  const provider = f.provider || undefined;
   // plan-308-1542 需求6：「今天」= 本地当日闭区间（days=1）
-  if (mode === "today") return { days: 1, provider };
-  if (mode === "7") return { days: 7, provider };
-  if (mode === "30") return { days: 30, provider };
+  if (f.mode === "today") return { days: 1, provider };
+  if (f.mode === "7") return { days: 7, provider };
+  if (f.mode === "30") return { days: 30, provider };
   // plan-91-393：「本月」按本地月初至今日的闭区间请求
-  if (mode === "month") { const r = presetRange("month")!; return { start: r[0], end: r[1], provider }; }
-  if (start && end) return { start, end, provider };
+  if (f.mode === "month") { const r = presetRange("month")!; return { start: r[0], end: r[1], provider }; }
+  if (f.start && f.end) return { start: f.start, end: f.end, provider };
   return { days: 30, provider };
 }
 
 export function UsagePanel() {
+  const [tab, setTab] = useState<UsageTab>("overview");
+  // S14（plan-41-197）：默认「今天」——用户要求打开即看当日用量
+  const [filters, setFilters] = useState<Filters>({ mode: "today", start: "", end: "", provider: "" });
+  /** 刷新按钮：递增即重新拉取当前视图 */
+  const [tick, setTick] = useState(0);
+
   const [stats, setStats] = useState<UsageStatsOut | null>(null);
-  // S14（plan-41-197）：默认「今天」——此前默认近 30 日，用户要求打开即看当日用量
-  const [rangeMode, setRangeMode] = useState<RangeMode>("today");
-  const [customStart, setCustomStart] = useState("");
-  const [customEnd, setCustomEnd] = useState("");
-  // plan-308-1542 需求6：按供应商筛选（空 = 全部供应商）
-  const [provider, setProvider] = useState<string>("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [statsError, setStatsError] = useState<string | null>(null);
+  const statsSeq = useRef(0);
 
-  const load = useCallback(async (mode: RangeMode, start: string, end: string, prov?: string) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const s = await api.getUsageStats(buildRangeParams(mode, start, end, prov ?? provider));
-      setStats(s);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
-    // provider 依赖：切换供应商后重新拉取（闭包读取最新值）
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [provider]);
+  const [page, setPage] = useState(1);
+  const [records, setRecords] = useState<UsageRecordsOut | null>(null);
+  const [recLoading, setRecLoading] = useState(false);
+  const [recError, setRecError] = useState<string | null>(null);
+  const recSeq = useRef(0);
 
-  // plan-41-197：默认「今天」是既定需求，此前只在按钮高亮上生效，首屏却拉了近 30 日，
-  // 这里让首次加载与默认选中项对齐（否则用户看到的数字口径与「今天」不符）。
-  useEffect(() => { void load("today", "", ""); }, [load]);
+  // 自定义区间只填了一半时不请求（选择器填全才会回调，这里是兜底）
+  const rangeReady = filters.mode !== "custom" || (!!filters.start && !!filters.end);
+  const rangeParams = useMemo(() => buildRangeParams(filters), [filters]);
 
-  const applyRange = (mode: RangeMode, start = customStart, end = customEnd) => {
-    setRangeMode(mode);
-    if (mode === "custom") {
-      setCustomStart(start);
-      setCustomEnd(end);
-      if (start && end) void load("custom", start, end); // 填全才刷新
-      return;
-    }
-    void load(mode, start, end);
-  };
+  // ── 概览数据：筛选或刷新变化时拉取；用序号丢弃过期响应，快速连点不会让旧结果覆盖新结果 ──
+  useEffect(() => {
+    if (!rangeReady) return;
+    const seq = ++statsSeq.current;
+    setStatsLoading(true);
+    setStatsError(null);
+    api.getUsageStats(rangeParams)
+      .then((s) => { if (seq === statsSeq.current) setStats(s); })
+      .catch((e) => { if (seq === statsSeq.current) setStatsError(String(e)); })
+      .finally(() => { if (seq === statsSeq.current) setStatsLoading(false); });
+  }, [rangeParams, rangeReady, tick]);
 
-  /** plan-308-1542 需求6：切换供应商（空字符串 = 全部供应商）。 */
-  const applyProvider = (p: string) => {
-    setProvider(p);
-    void load(rangeMode, customStart, customEnd, p);
-  };
+  // ── 调用记录：只在「调用记录」视图下拉取；翻页 / 筛选 / 刷新都会触发 ──
+  useEffect(() => {
+    if (tab !== "records" || !rangeReady) return;
+    const seq = ++recSeq.current;
+    setRecLoading(true);
+    setRecError(null);
+    api.getUsageRecords({ ...rangeParams, page, page_size: RECORDS_PAGE_SIZE })
+      .then((r) => { if (seq === recSeq.current) setRecords(r); })
+      .catch((e) => { if (seq === recSeq.current) setRecError(String(e)); })
+      .finally(() => { if (seq === recSeq.current) setRecLoading(false); });
+  }, [tab, rangeParams, rangeReady, page, tick]);
+
+  const applyFilters = useCallback((patch: Partial<Filters>) => {
+    setFilters((f) => ({ ...f, ...patch }));
+    setPage(1); // 换了范围 / 供应商，回到第一页
+  }, []);
+
+  const loading = tab === "records" ? recLoading : statsLoading;
 
   // ── 由 stats 派生的展示数据 ──
   const total = stats?.total;
-  const byModel = stats?.by_model ?? [];
+  const byModel = useMemo(() => stats?.by_model ?? [], [stats]);
   const totalTokens = total?.total ?? 0;
 
   const trendSeries = useMemo<TrendSeries[]>(() => {
@@ -133,160 +158,153 @@ export function UsagePanel() {
     return res;
   }, [byModel, totalTokens]);
 
-  const dates = stats?.daily.map((d) => d.date) ?? [];
+  const dates = useMemo(() => stats?.daily.map((d) => d.date) ?? [], [stats]);
+
+  // 当前选中的供应商即使不在本区间的列表里也要保留为可选项，否则下拉框会显示成空白
+  const providerOptions = useMemo(() => {
+    const list = stats?.providers ?? [];
+    const opts = [{ value: "", label: "全部供应商" }, ...list.map((p) => ({ value: p, label: p }))];
+    if (filters.provider && !list.includes(filters.provider)) opts.push({ value: filters.provider, label: filters.provider });
+    return opts;
+  }, [stats, filters.provider]);
+
+  const empty = !!stats && stats.total.calls === 0;
 
   return (
-    <div className="usage-panel">
-      {/* 时间范围 + 供应商 + 刷新（plan-91-393：日期改为浮层选择器） */}
-      <div className="usage-toolbar sc-usage-toolbar">
+    <div className="up">
+      {/* 筛选栏：视图切换 + 时间范围 + 供应商 + 刷新（两个视图共用） */}
+      <div className="up-bar">
+        <Segmented<UsageTab>
+          size="sm"
+          aria-label="用量视图"
+          value={tab}
+          onChange={setTab}
+          options={[
+            { value: "overview", label: "概览", icon: <IconBarChart size={14} /> },
+            { value: "records", label: "调用记录", icon: <IconListOrdered size={14} />, count: stats?.total.calls },
+          ]}
+        />
+        <span className="up-bar-spacer" />
         <UsageDateRangePicker
-          mode={rangeMode}
-          start={customStart}
-          end={customEnd}
+          mode={filters.mode}
+          start={filters.start}
+          end={filters.end}
           disabled={loading}
-          onApply={(m, s, e) => applyRange(m, s, e)}
+          onApply={(m, s, e) => applyFilters({ mode: m, start: s, end: e })}
         />
         {/* plan-308-1542 需求6：按供应商筛选（可切换查看对应供应商的使用情况） */}
         <Select
           size="sm"
           className="usage-provider-select"
           aria-label="按供应商筛选用量"
-          value={provider}
+          value={filters.provider}
           disabled={loading}
-          onChange={applyProvider}
-          options={[{ value: "", label: "全部供应商" }, ...(stats?.providers ?? []).map((p) => ({ value: p, label: p }))]}
+          onChange={(p) => applyFilters({ provider: p })}
+          options={providerOptions}
         />
-        <span className="sc-flex-spacer" />
-        <Tooltip content={rangeMode === "custom" && (!customStart || !customEnd) ? "请先选择起止日期" : "重新加载统计"}>
-          <button className="btn btn-ghost btn-sm" onClick={() => applyRange(rangeMode)} disabled={loading}>
+        <Tooltip content={filters.mode === "custom" && !rangeReady ? "请先选择起止日期" : "重新加载统计"}>
+          <Button variant="ghost" size="sm" onClick={() => setTick((n) => n + 1)} disabled={loading || !rangeReady}>
             <span className={`sc-icon-slot ${loading ? "spin" : ""}`}><IconRefresh size={13} /></span>
             <span className="sc-fixed-label">{loading ? "加载中" : "刷新"}</span>
-          </button>
+          </Button>
         </Tooltip>
       </div>
-      {provider && stats && stats.total.total === 0 && (
-        <div className="navpage-empty">「{provider}」在所选区间无用量。</div>
-      )}
 
-      {error && (
-        <div className="usage-error">
-          <IconAlertTriangle size={16} />
-          <span>加载失败：{error}</span>
+      {/* ── 调用记录视图 ── */}
+      {tab === "records" && (
+        <div className="up-view" key="records" role="tabpanel">
+          <UsageRecordsTable
+            data={records}
+            loading={recLoading}
+            error={recError}
+            page={page}
+            pageSize={RECORDS_PAGE_SIZE}
+            onPage={setPage}
+            onRetry={() => setTick((n) => n + 1)}
+          />
         </div>
       )}
 
-      {/* 首屏加载骨架 */}
-      {stats === null && loading && (
-        <div className="usage-skeleton">
-          <div className="usage-skeleton-cards">
-            <div className="usage-skeleton-card" />
-            <div className="usage-skeleton-card" />
-            <div className="usage-skeleton-card" />
-          </div>
-          <div className="usage-skeleton-block" />
-        </div>
-      )}
-
-      {/* KPI 卡片行（plan-91-393：大数字 + 标签 + 辅助对比行） */}
-      {total && (
-        <div className="sc-kpis">
-          <div className="sc-kpi">
-            <div className="sc-kpi-head"><IconDatabase size={14} /><span>区间 Token</span></div>
-            <div className="sc-kpi-value">{fmtTokens(total.total)}</div>
-            <div className="sc-kpi-delta">输入 {fmtTokens(total.prompt)} · 输出 {fmtTokens(total.completion)} · 缓存 {fmtTokens(total.cached)}</div>
-          </div>
-          <div className="sc-kpi">
-            <div className="sc-kpi-head"><IconZap size={14} /><span>历史单日峰值</span></div>
-            <div className="sc-kpi-value">{fmtTokens(stats?.peak_tokens ?? 0)}</div>
-            {/* plan-91-393：峰值取全部历史（与热力图同源），与左侧「区间」口径不同，文案需写明避免误读 */}
-            <div className="sc-kpi-delta">区间日均 {fmtTokens(dates.length ? Math.round(total.total / dates.length) : 0)}</div>
-          </div>
-          <div className="sc-kpi">
-            <div className="sc-kpi-head"><IconHash size={14} /><span>区间调用</span></div>
-            <div className="sc-kpi-value">{total.calls.toLocaleString()}</div>
-            <div className="sc-kpi-delta">每次约 {fmtTokens(total.calls ? Math.round(total.total / total.calls) : 0)}</div>
-          </div>
-          <div className="sc-kpi">
-            <div className="sc-kpi-head"><IconCalendar size={14} /><span>连续使用</span></div>
-            <div className="sc-kpi-value">{stats?.streak_current ?? 0}<small> 天</small></div>
-            <div className="sc-kpi-delta">最长 {stats?.streak_longest ?? 0} 天</div>
-          </div>
-        </div>
-      )}
-
-      {/* Token 活动热力图 */}
-      {stats && <UsageHeatmap daily_all={stats.daily_all} />}
-
-      {/* 每日 Token 趋势 */}
-      {trendSeries.length > 0 && (
-        <div className="usage-section-block">
-          <div className="usage-block-head">
-            <IconBarChart size={16} />
-            <div className="usage-block-titles">
-              <div className="usage-section-title">每日 Token 趋势</div>
-              <div className="usage-block-sub">区间内按日汇总</div>
+      {/* ── 概览视图 ── */}
+      {tab === "overview" && (
+        <div className="up-view" key="overview" role="tabpanel">
+          {statsError && (
+            <div className="usage-error">
+              <IconAlertTriangle size={16} />
+              <span>加载失败：{statsError}</span>
+              <Button variant="ghost" size="xs" icon={<IconRefresh size={12} />} onClick={() => setTick((n) => n + 1)}>重试</Button>
             </div>
-          </div>
-          <UsageTrendChart series={trendSeries} dates={dates} />
-        </div>
-      )}
+          )}
 
-      {/* 模型用量环形图 */}
-      {donutSegs.length > 0 && (
-        <div className="usage-section-block">
-          <div className="usage-block-head">
-            <IconDatabase size={16} />
-            <div className="usage-block-titles">
-              <div className="usage-section-title">模型用量</div>
-              <div className="usage-block-sub">区间内模型分布</div>
+          {/* 首屏加载骨架 */}
+          {stats === null && statsLoading && (
+            <div className="usage-skeleton">
+              <div className="usage-skeleton-cards">
+                {Array.from({ length: 6 }, (_, i) => <div key={i} className="usage-skeleton-card" />)}
+              </div>
+              <div className="usage-skeleton-block" />
             </div>
-          </div>
-          <UsageDonutChart segments={donutSegs} centerValue={totalTokens} />
-        </div>
-      )}
+          )}
 
-      {/* 模型/供应商明细表（plan-91-393：等宽数字 + 占比条） */}
-      {byModel.length > 0 && (
-        <div className="usage-section-block">
-          <div className="usage-block-head">
-            <IconHash size={16} />
-            <div className="usage-block-titles">
-              <div className="usage-section-title">模型明细</div>
-              <div className="usage-block-sub">按 Token 用量排序</div>
-            </div>
-          </div>
-          <div className="sc-table" role="table">
-            <div className="sc-tr sc-th" role="row">
-              <span>模型</span><span>输入</span><span>输出</span><span>缓存</span><span>调用</span><span>合计</span>
-            </div>
-            {byModel.map((b, i) => {
-              const pct = totalTokens ? (b.total / totalTokens) * 100 : 0;
-              return (
-                <div className="sc-tr" role="row" key={b.key}>
-                  <span className="sc-td-name">
-                    <i className="sc-dot" style={{ background: modelColor(Math.min(i, 8)) }} />
-                    <span className="sc-ellipsis">{b.display_name}</span>
-                  </span>
-                  <span>{fmtTokens(b.prompt)}</span>
-                  <span>{fmtTokens(b.completion)}</span>
-                  <span>{fmtTokens(b.cached)}</span>
-                  <span>{b.calls.toLocaleString()}</span>
-                  <span className="sc-td-total">
-                    <span>{fmtTokens(b.total)}</span>
-                    <span className="sc-bar"><i style={{ width: `${Math.max(2, pct)}%` }} /></span>
-                    <span className="sc-pct">{pct.toFixed(1)}%</span>
-                  </span>
+          {stats && (
+            <div className={"up-stack" + (statsLoading ? " is-loading" : "")}>
+              <UsageKpis stats={stats} />
+
+              {/* Token 活动热力图（全历史口径，不随时间范围变化） */}
+              <UsageHeatmap daily_all={stats.daily_all} />
+
+              {empty ? (
+                <div className="up-card">
+                  <Empty
+                    size="md"
+                    title={filters.provider ? `「${filters.provider}」在所选区间没有用量` : "所选区间还没有用量"}
+                    desc="换一个时间范围，或发送消息后再来看看"
+                  />
                 </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
+              ) : (
+                <>
+                  {trendSeries.length > 0 && (
+                    <section className="up-card">
+                      <header className="up-card-head">
+                        <IconBarChart size={16} />
+                        <div className="up-card-titles">
+                          <div className="up-card-title">每日 Token 趋势</div>
+                          <div className="up-card-sub">区间内按日汇总</div>
+                        </div>
+                      </header>
+                      <div className="up-card-body"><UsageTrendChart series={trendSeries} dates={dates} /></div>
+                    </section>
+                  )}
 
-      {!loading && !error && !total && byModel.length === 0 && (
-        <div className="usage-empty">
-          <IconBarChart size={32} />
-          <span>暂无用量数据，发送消息后统计</span>
+                  {donutSegs.length > 0 && (
+                    <section className="up-card">
+                      <header className="up-card-head">
+                        <IconDatabase size={16} />
+                        <div className="up-card-titles">
+                          <div className="up-card-title">模型用量</div>
+                          <div className="up-card-sub">区间内模型分布</div>
+                        </div>
+                      </header>
+                      <div className="up-card-body"><UsageDonutChart segments={donutSegs} centerValue={totalTokens} /></div>
+                    </section>
+                  )}
+
+                  {byModel.length > 0 && (
+                    <section className="up-card">
+                      <header className="up-card-head">
+                        <IconListOrdered size={16} />
+                        <div className="up-card-titles">
+                          <div className="up-card-title">模型明细</div>
+                          <div className="up-card-sub">点表头可按任意一列排序</div>
+                        </div>
+                      </header>
+                      <div className="up-card-body is-flush"><UsageModelTable rows={byModel} totalTokens={totalTokens} /></div>
+                    </section>
+                  )}
+                </>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>

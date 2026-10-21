@@ -460,6 +460,7 @@
   /* plan-282-1416 页面骨架宽度：单一档位取代旧 680/960 双宽（图表页走 wide） */
   --page-max-w: 720px;
   --page-max-w-wide: 880px;
+  --page-max-w-xwide: 1080px;
   /* plan-230-1144 M5.1: 时长阶梯重建（此前的 --dur-med/--dur-normal 同值 0.15s
      语义重复、--dur-slow 0.2s 与 --dur-view 0.16s 差距过小，"慢"动画实际不快）。
      新阶梯：1=微反馈 2=hover/色彩 3=展开/折叠 4=页面/模态 5=入场。

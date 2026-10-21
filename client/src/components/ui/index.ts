@@ -23,6 +23,7 @@ export { HoverCard } from "./HoverCard";
 export { usePresence } from "./usePresence";
 export { Badge, type BadgeTone } from "./Badge";
 export { Segmented, type SegmentedOption } from "./Segmented";
+export { Pagination } from "./Pagination";
 export { Section } from "./Section";
 export { Empty } from "./Empty";
 export { DadaLoader } from "./DadaLoader";
