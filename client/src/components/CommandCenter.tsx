@@ -104,6 +104,13 @@ export function CommandCenter() {
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
+  // 新建任务（Ctrl+N 或面板内「新建任务」）时命令中心若开着，一并收起
+  useEffect(() => {
+    const onNewTask = () => setOpen(false);
+    window.addEventListener("chatcoder:new-task", onNewTask);
+    return () => window.removeEventListener("chatcoder:new-task", onNewTask);
+  }, []);
+
   useEffect(() => {
     if (open) {
       const el = document.activeElement;
@@ -163,8 +170,9 @@ export function CommandCenter() {
       const suggest: Entry[] = [
         {
           icon: <IconPlus size={14} />, label: t("cmd.new_task"), hint: "Ctrl+N",
-          // plan-404-1892（图5）：统一走 startNewTask（含 artifacts / turnChanges 等会话级字段）
-          run: () => { useChatStore.getState().startNewTask(); },
+          // plan-404-1892（图5）：会话级字段由 startNewTask 统一清空；这里经事件交给 App，与 Ctrl+N 同一路径
+          // （命令中心可能从设置页打开，此时需要先离开设置页并回到会话页）
+          run: () => window.dispatchEvent(new CustomEvent("chatcoder:new-task")),
         },
         { icon: <IconFolderOpen size={14} />, label: t("cmd.open_workspace"), hint: "Ctrl+O", run: () => { void openWorkspace(); } },
         { icon: <IconSettings size={14} />, label: t("cmd.settings"), run: () => window.dispatchEvent(new CustomEvent("chatcoder:open-settings")) },

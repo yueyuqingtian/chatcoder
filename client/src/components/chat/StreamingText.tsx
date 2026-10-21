@@ -15,6 +15,7 @@ import { isBusy } from "../../perf/bus";
 import { ThinkingTicker } from "./ThinkingTicker";
 import { ThinkingExpanded } from "./ThinkingExpanded";
 import { ChatCollapse } from "./ChatCollapse";
+import { useLiveThinkingExpand } from "../../store/flowExpand";
 
 export interface StreamingTextProps {
   /** 是否处于运行中（不运行返回 null） */
@@ -29,6 +30,8 @@ export interface StreamingTextProps {
   waitingLabel?: string;
   /** v35: turn 级瞬态状态提示（如「调用异常，正在重试 1/2…」）；设置时优先展示，覆盖默认文案 */
   statusLabel?: string;
+  /** 子代理线程 id（主会话不传）：流式思考的展开态按线程区分 */
+  threadId?: number;
 }
 
 /** v40: 自适应"产字"平滑——delta 常成簇到达，按积压量比例逐帧释放，
@@ -101,45 +104,22 @@ function useSmoothText(target: string): string {
   return shown;
 }
 
-export function StreamingText({ active, thinking, text, processingLabel = "处理中…", waitingLabel = "等待响应…", statusLabel }: StreamingTextProps) {
+export function StreamingText({ active, thinking, text, processingLabel = "处理中…", waitingLabel = "等待响应…", statusLabel, threadId }: StreamingTextProps) {
   const thinkingText = thinking.trim();
   const smoothThinking = useSmoothText(thinkingText);
   const smoothBody = useSmoothText(text);
+  // 思考行以原始缓冲为界：思考落库（缓冲清空）的同一次渲染里它就卸载，展开态随落库移交给思考块
+  const thinkingShown = thinkingText !== "" && smoothThinking !== "";
   // plan-20261016-ux（问题 5）：正文里以 DSML 标签写出的工具调用（DeepSeek / 智谱）在流式期间改写成
   // 「正在准备 …」+ 代码块——正在输出的代码直接进代码框，而不是夹着标签的普通文本（见 dsmlStream）
   const displayBody = useMemo(() => rewriteDsmlForStream(smoothBody), [smoothBody]);
-  // v41: 思考尾部行可展开——展开后隐藏右侧刷字 ticker，下方渲染实时更新的思考全文
-  const [tailOpen, setTailOpen] = useState(false);
 
   if (!active) return null;
 
   return (
     <div className="turn-group turn-flow streaming-tail">
       {/* 当前轮次思考中：紧凑行（可点击展开）+ 单行滚动 ticker（思考落库后此行消失，思考块按时间顺序出现在消息流中） */}
-      {smoothThinking && (
-        <div className="tc-node thinking-node">
-          <div
-            className={`tc-row has-output thinking-row${tailOpen ? " expanded" : ""} active`}
-            data-tool-state="running"
-            onClick={() => setTailOpen((v) => !v)}
-          >
-            <span className="tc-icon"><ToolGlyph tool="thinking" size={16} /></span>
-            <span className="tc-verb">正在思考</span>
-            {!tailOpen && (
-              <span className="thinking-ticker-wrap">
-                <span className="thinking-breath-dot" />
-                <ThinkingTicker text={smoothThinking} />
-              </span>
-            )}
-            <span className={`tc-chevron${tailOpen ? " open" : ""}`}>
-              <IconChevronRight size={11} />
-            </span>
-          </div>
-          <ChatCollapse open={tailOpen}>
-            <ThinkingExpanded text={smoothThinking} />
-          </ChatCollapse>
-        </div>
-      )}
+      {thinkingShown && <StreamingThinkingRow text={smoothThinking} threadId={threadId} />}
       {displayBody && (
         <div className="turn-item turn-item-text">
           <div className="turn-agent-text">
@@ -160,11 +140,42 @@ export function StreamingText({ active, thinking, text, processingLabel = "处�
           消息流底部完全静默，用户看不到"还在进行"。
           现改为：只要有正文流式，尾部一律补状态行；仅当「无正文且无瞬态状态」
           时才交给上方思考行独表"进行中"（避免思考行 + 状态行两行重复）。 */}
-      {(statusLabel || smoothBody || !smoothThinking) && (
+      {(statusLabel || smoothBody || !thinkingShown) && (
         <StateLine
           label={statusLabel ?? (smoothBody ? processingLabel : waitingLabel)}
         />
       )}
+    </div>
+  );
+}
+
+/** 思考中的紧凑行：可展开查看实时更新的思考全文。展开态按流式键记在 flowExpand 中——
+ *  思考落库时移交给落库后的思考块（同一段思考），本行随之卸载；下一段思考从收起开始。 */
+function StreamingThinkingRow({ text, threadId }: { text: string; threadId?: number }) {
+  // v41: 展开后隐藏右侧刷字 ticker，下方渲染实时更新的思考全文
+  const [open, setOpen] = useLiveThinkingExpand(threadId);
+  return (
+    <div className="tc-node thinking-node">
+      <div
+        className={`tc-row has-output thinking-row${open ? " expanded" : ""} active`}
+        data-tool-state="running"
+        onClick={() => setOpen(!open)}
+      >
+        <span className="tc-icon"><ToolGlyph tool="thinking" size={16} /></span>
+        <span className="tc-verb">正在思考</span>
+        {!open && (
+          <span className="thinking-ticker-wrap">
+            <span className="thinking-breath-dot" />
+            <ThinkingTicker text={text} />
+          </span>
+        )}
+        <span className={`tc-chevron${open ? " open" : ""}`}>
+          <IconChevronRight size={11} />
+        </span>
+      </div>
+      <ChatCollapse open={open}>
+        <ThinkingExpanded text={text} />
+      </ChatCollapse>
     </div>
   );
 }

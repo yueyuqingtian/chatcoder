@@ -62,6 +62,8 @@ export const TOOL_VERBS: Record<string, string> = {
   // plan-20261020-bgtask：后台命令的完成 / 停止通知（伪工具名，见 timeline.bgNoticeItem）
   bg_command_done: "后台命令已结束",
   bg_command_stopped: "后台命令已被停止",
+  // plan-20261021-subq-row：子会话提问（伪工具名，见 timeline.subsessionQuestionItem）
+  subsession_question: "子会话提问",
   git: "已执行 Git",
   git_diff: "已检查改动",
   git_root: "已定位仓库",

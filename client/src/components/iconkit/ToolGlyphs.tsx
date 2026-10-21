@@ -46,6 +46,8 @@ const TOOL_KEY: Record<string, K> = {
   // plan-20261017-ux-overhaul：补齐此前落到「other」闪电图标的常用工具
   multi_file_edit: "patch", apply_patch: "patch", read_file_range: "read", read_attachment: "read",
   symbol_search: "search", outline: "list", shell_exec: "term", terminal_bg_status: "term", terminal_bg_kill: "term", bg_command_done: "term", bg_command_stopped: "term",
+  // plan-20261021-subq-row：子会话提问用对话气泡
+  subsession_question: "ask",
   git: "git", memory_write: "memory", skill_view: "read", compaction_index: "memory", compaction_view: "memory",
   goal_complete: "todo", cancel_subagent: "agent", subagent_inspect: "agent",
   send_to_subagent: "agent", resume_subagent: "agent", report_to_leader: "agent",

@@ -458,6 +458,7 @@
   padding-bottom: var(--sp-7);
 }
 .ui-page-inner.is-wide { max-width: var(--page-max-w-wide); }
+.ui-page-inner.is-xwide { max-width: var(--page-max-w-xwide); }
 /* 标题区高度固定为「标题 28 + 间距 2 + 副标题 18」= 48px：副标题缺省时按一行空位占位，各页卡片区起点恒定（plan-20261009-ui U4） */
 .ui-page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-4); min-height: 48px; }
 .ui-page-title { font-size: 20px; font-weight: 600; color: var(--text-1); line-height: 28px; letter-spacing: -0.2px; }
@@ -827,51 +828,54 @@
 }
 
 /* ── plan-474-2105（组 C）：子会话治理的展示层 ─────────────────────────
-   左栏子会话运行数角标、消息流「子会话提问」卡、工具行打断徽标。
-   （后台命令完成 / 停止通知不再是独立卡片，作为普通工具行展示，见 timeline.bgNoticeItem。）
+   左栏子会话运行数角标、消息流「子会话提问」行、工具行打断徽标。
+   （后台命令完成 / 停止通知与子会话提问都不是独立卡片，作为普通工具行展示，
+   见 timeline.bgNoticeItem / subsessionQuestionItem。）
    全部只用既有令牌；状态一律用文字与底色表达，不加装饰性竖线。 */
 
-/* 消息流：子会话提问卡（只读展示，不需要用户确认） */
-.sqc-card {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  padding: var(--sp-3) var(--sp-4);
-  border: 1px solid var(--border);
-  border-radius: var(--r-lg);
-  background: var(--bg-panel);
+/* 消息流：子会话提问行（plan-20261021-subq-row）——行版式复用 .tc-row，展开区复用 .tc-output */
+.tc-sq-row {
+  width: 100%;
+  text-align: left;
 }
-.sqc-head {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
+.tc-sq-title {
+  flex: 0 1 auto;
   min-width: 0;
-}
-.sqc-head-icon {
-  display: inline-flex;
-  flex-shrink: 0;
-  color: var(--text-3);
-}
-.sqc-title {
-  flex-shrink: 0;
-  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-weight: 600;
-  line-height: 1.4;
   color: var(--text-1);
 }
-/* 问题正文：窄面板下也必须有确定行高（依赖继承会把多行挤在一起） */
-.sqc-body {
-  margin: 0;
-  font-size: 12.5px;
+/* 提问通常是几段说明加 A / B / C 选项，比一般工具输出高：放宽展开区上限，常见长度不出滚动条 */
+.tc-sq .tc-output {
+  max-height: 460px;
+}
+/* 提问正文是自然语言：用比例字体（命令输出的等宽 .tc-plain 不适合），保留换行与 A / B / C 选项的分行 */
+.tc-sq-body {
+  padding: 10px 12px;
+  font-size: 12px;
   line-height: 1.6;
   color: var(--text-2);
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
-.sqc-note {
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--text-3);
+.tc-sq-body strong {
+  font-weight: 600;
+  color: var(--text-1);
+}
+.tc-sq-code {
+  padding: 0 4px;
+  border-radius: var(--r-sm);
+  background: color-mix(in oklab, var(--text-1) 6%, transparent);
+  color: var(--text-1);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+.tc-sq-foot {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 8px 8px;
 }
 
 /* 工具行：打断标记（已转后台 / 已让出等待）——中性提示色，不是失败态 */
@@ -888,3 +892,16 @@
   line-height: 1;
   white-space: nowrap;
 }
+
+/* ── Pagination 分页条（plan-20261021-usage-update） ──────────
+ * 左：范围 / 总数说明（数字等宽）；右：上一页 / 页码 / 下一页（+ 跳至）。
+ * 「加载中」占固定宽度、只改透明度，翻页时说明与按钮不位移。 */
+.ui-pager { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--sp-3) var(--sp-4); padding: 12px 18px; border-top: 1px solid var(--border-light); font-size: 12px; color: var(--text-3); }
+.ui-pager-info { display: flex; align-items: center; gap: 10px; min-width: 0; font-variant-numeric: tabular-nums; }
+.ui-pager-range { color: var(--text-1); font-weight: 500; }
+.ui-pager-busy { min-width: 4.5em; opacity: 0; transition: opacity var(--dur-2) var(--ease-standard); }
+.ui-pager-busy.is-on { opacity: 1; }
+.ui-pager-ctrl { display: flex; align-items: center; gap: 2px; }
+.ui-pager-num { min-width: 28px; padding-inline: 6px; font-variant-numeric: tabular-nums; }
+.ui-pager-gap { width: 20px; text-align: center; color: var(--text-3); user-select: none; }
+.ui-pager-jump { width: 112px; margin-left: var(--sp-3); }

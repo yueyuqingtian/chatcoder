@@ -6,7 +6,7 @@
  * 与参考项目「同一渲染引擎 + 数据注入」对齐——中间面板与右面板共用同一注册插件。
  */
 import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, useId, memo, type ReactNode } from "react";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { elementScroll, useVirtualizer, type VirtualItem, type Virtualizer } from "@tanstack/react-virtual";
 import type { TimelineEntry, ToolNode, TurnItem } from "./timeline";
 import { createTimelineBuilder, createRoundMerger, msgText, lastPersistedText, getTurnById, tailRoundIndex, pruneModelDividers } from "./timeline";
 import { isBusy, subscribe } from "../../perf/bus";
@@ -37,6 +37,30 @@ import { StickyBottom } from "./stickyBottom";
  *  既让虚拟器的可见范围跟上宽度变化，又把整树重渲染频率压到拖拽可接受的水平；
  *  运动结束由收敛序列（order 20）立即提交最终 rect 保证精确。 */
 const MOTION_RECT_THROTTLE_MS = 120;
+
+/** plan-20261021-scroll-comp：条目尺寸变化后要不要补偿 scrollTop（上滑经过用户消息处回弹 / 跳变的根治）。
+ *
+ *  现象：向上滚动时，视口上方某个历史轮次（刚被挂载进 overscan 的那条）的高度在挂载后继续变化——
+ *  变更清单卡片异步到达（+195px）、计划卡渲染后被裁切（−44px）、与缓存尺寸的细小差值……
+ *  变化发生在视口**上方**，它之后的所有条目被整体推下 / 拉上，而 scrollTop 没跟着动，
+ *  画面就是「往回弹一下」。每个轮次都以用户消息开头，视口顶边越过它时 overscan 窗口前移、
+ *  最上方多挂载一个历史轮次，所以回弹恰好落在「我发送消息的位置」。
+ *
+ *  根因：虚拟器 3.17 的默认口径对「重测」（该条目此前已有缓存尺寸，历史轮次再次挂载都属此类）
+ *  在向上滚动期间一律不补偿；原生滚动锚定又因虚拟项 top 被重写而失效（top 变化是锚定的抑制条件）。
+ *  于是视口上方条目的任何尺寸变化都直接露成位移。
+ *
+ *  口径：与默认一致，只去掉「向上滚动不补偿」——首次测量：整块估算高度在视口上方即补偿；
+ *  重测：只补偿**整条**已在视口上方的条目。跨过视口顶边的条目不补偿——它里面变化的部分
+ *  若在视口上方，由浏览器原生锚定负责（锚点在同一条目内，不受 top 重写影响）。 */
+function compensateItemAboveViewport(
+  item: VirtualItem,
+  _delta: number,
+  instance: Virtualizer<HTMLDivElement, Element>,
+): boolean {
+  const offset = instance.scrollOffset ?? 0;
+  return instance.itemSizeCache.has(item.key) ? item.end <= offset : item.start < offset;
+}
 
 /* plan-20261020-pts：贴底跟随改由 StickyBottom 内核负责（见 ./stickyBottom.ts）。
    此前这里的程序滚动宽限、跟随抑制有效期、两档距底阈值都是给「滚动事件里按距底距离重算跟随」
@@ -256,6 +280,7 @@ function MessageFlowCore({
   >(null);
   const lastWidthRef = useRef(0);
   const [searchOpen, setSearchOpen] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [searchKeyword, setSearchKeyword] = useState("");
   const [activeMatchIndex, setActiveMatchIndex] = useState(0);
   /** 问题12: scrollspy——当前视口焦点 entry 下标，用于 JumpDots 自动聚焦对应小横条 */
@@ -326,6 +351,15 @@ function MessageFlowCore({
     // 消息数较多时默认 transform 会让每个可视虚拟项进入合成层；切为 top 定位，
     // 避免窗口动画/滚动时维护大量图层。绝对定位项已满足 position 模式契约。
     directDomUpdatesMode: "position",
+    /* plan-20261021-scroll-comp：补偿写 scrollTop 之前先把内容容器撑到新总高。
+       directDomUpdates 下容器高度要等 onChange 才写入，而补偿发生在它之前：视口离底部不足补偿量时，
+       浏览器会按旧高度钳制 scrollTop，补偿被截断，剩下的部分又露成位移；
+       钳制到底部还会让贴底内核误判成「回到了底部」。 */
+    scrollToFn: (offset, options, instance) => {
+      const inner = innerRef.current;
+      if (inner) inner.style.height = `${instance.getTotalSize()}px`;
+      elementScroll(offset, options, instance);
+    },
     // plan-20261020-pts：测量回调里条目尺寸 / 位置 / 总高刚写入 DOM，此时请求贴底可在同一帧完成
     // （上方条目变高时尾项尺寸不变，容器高度的尺寸通知又要晚一帧，只靠尺寸观察会露出一帧未贴底）
     onChange: () => sticky.requestPin(),
@@ -390,6 +424,9 @@ function MessageFlowCore({
       };
     },
   });
+  // 实例属性而非构造选项；赋值幂等（模块级函数、引用恒定），与 setOptions 一样在渲染期写入，
+  // 保证首个 ref 回调里的同步测量就已按本口径判定。
+  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = compensateItemAboveViewport;
 
   /** 内层尺寸容器引用：既要给 RO 测高（innerRef），也要交给虚拟列表写高度。
    *  必须用稳定回调——内联箭头函数每次渲染都会触发 ref 脱挂/重挂，导致
@@ -893,18 +930,19 @@ function MessageFlowCore({
 
   /** plan-156-619 S2：Ctrl+F / Cmd+F 唤起搜索条。
    *  此前按钮 title 写着「Ctrl+F」但全项目没有绑定该快捷键（点按钮才能开），
-   *  入口一旦按开关隐藏就彻底没有搜索入口，因此这里把快捷键补实。 */
+   *  入口一旦按开关隐藏就彻底没有搜索入口，因此这里把快捷键补实。
+   *  焦点在输入框里（发消息后焦点一直在输入框）也要生效：Electron 没有挂原生查找，
+   *  Ctrl+F 在输入框内没有编辑含义，不能因为焦点在输入框就失效。 */
   useEffect(() => {
     if (!search) return;
     const onKey = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
       if (e.key !== "f" && e.key !== "F") return;
-      // 焦点在输入框/可编辑区时不抢占（用户可能在打字，浏览器原生查找也让位）
-      const t = e.target as HTMLElement | null;
-      const tag = t?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || t?.isContentEditable) return;
       e.preventDefault();
       setSearchOpen(true);
+      // 搜索条已展开时输入框已挂载：直接交出焦点并全选；未展开时由输入框的 autoFocus 完成
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -961,6 +999,7 @@ function MessageFlowCore({
             <div className="flow-search-bar">
               <IconSearch size={13} />
               <input
+                ref={searchInputRef}
                 autoFocus
                 value={searchKeyword}
                 onChange={(e) => setSearchKeyword(e.target.value)}

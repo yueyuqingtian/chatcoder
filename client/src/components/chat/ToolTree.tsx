@@ -22,11 +22,14 @@ import { SEARCH_TOOLS, RUN_TOOLS, isWriteLeaf } from "./timeline";
 import { api } from "../../api/client";
 import { usePanelStore } from "../../store/panel";
 import { useChatStore } from "../../store/chat";
+import { useFlowExpand, useFlowGroupExpand } from "../../store/flowExpand";
 import { splitFilePath } from "./FileBadge";
 import { FileIcon } from "../iconkit/FileIcon";
 import { CodeView } from "./CodeView";
 import { ToolGlyph } from "../iconkit/ToolGlyphs";
 import { ChatCollapse } from "./ChatCollapse";
+import { SubsessionQuestionRow } from "./SubsessionQuestionRow";
+import { SUBSESSION_QUESTION_TOOL } from "../../utils/subsessionQuestion";
 import { toolVerb, runningVerb, toolDisplayName } from "./toolLabels";
 import { tailClamp } from "../../utils/tailClamp";
 import { Tooltip } from "../ui/Tooltip";
@@ -534,7 +537,8 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
   // v7(B/H): 订阅运行中实时输出/结果（按 call_key 索引），运行中即可展开看到内容
   const liveOutput = useChatStore((s) => s.runningToolOutput[leaf.callKey]);
   const liveResult = useChatStore((s) => s.runningToolResults[leaf.callKey]);
-  const [expanded, setExpanded] = useState(false);
+  // 展开状态按调用身份记忆：新消息使它被并入聚合行、或换段重挂载后，仍保持用户刚展开的样子
+  const [expanded, setExpanded] = useFlowExpand(leaf.callKey);
   const path = leafPath(leaf);
   const ok = leaf.ok;
   // plan-474-2105 组 C：先算打断标记——它必须比 ok===false 的失败态更早生效，
@@ -708,20 +712,26 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
                     }
                   };
                   const answerMap = parseAnswers();
+                  const hasAnswers = Object.keys(answerMap).length > 0;
+                  // 后端最多只问 _MAX_QUESTIONS 题，多出的会被截掉、从未真正提问，而参数里仍是模型写的完整列表。
+                  // 有回答记录时只列出有答案的题（提问向导要求每道实际问到的题都作答），避免把没问过的题显示成「已回答」
+                  const rows = qs
+                    .map((q, idx) => ({ q, idx, hit: answerMap[String(idx)] ?? answerMap[String(idx + 1)] }))
+                    .filter((r) => !hasAnswers || r.hit != null);
+                  // 没有回答记录时按工具状态给占位：等待中 / 取消或超时 都不能显示成「已回答」
+                  const emptyHint = leaf.ok === null ? "等待回答…" : leaf.ok === false ? "未回答" : "已回答";
                   return (
                     <div className="tc-question-qa">
-                      {qs.map((q, idx) => {
-                        // plan-278-1391: 解析不到时不再回退 JSON 片段，用可读占位
-                        const val = answerMap[String(idx)] ?? answerMap[String(idx + 1)] ?? "已回答";
-                        return (
-                          <div key={idx} className="tc-question-qa-item">
-                            <div className="tc-question-qa-q">问题 {idx + 1}：{q.question || ""}</div>
-                            <div className="tc-question-qa-a">
-                              回答：<span className="tc-qa-val">{String(val)}</span>
-                            </div>
-                          </div>
-                        );
-                      })}
+                      {rows.map(({ q, idx, hit }) => (
+                        <div key={idx} className="tc-question-qa-item">
+                          <span className="tc-qa-label">问题 {idx + 1}</span>
+                          <span className="tc-qa-q">{q.question || ""}</span>
+                          <span className="tc-qa-label">回答</span>
+                          <span className={"tc-qa-val" + (hit == null ? " is-empty" : "")}>
+                            {hit == null ? emptyHint : String(hit)}
+                          </span>
+                        </div>
+                      ))}
                     </div>
                   );
                 })()
@@ -752,7 +762,7 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
  *  运行中——动词区每 1.2s 轮播最新操作（translateY 滚动动效）；
  *  完成后——「已执行 N 个操作（…）」摘要行，可展开查看全部明细。 */
 const ActionClusterRow = memo(function ActionClusterRow({ leaves }: { leaves: ToolLeaf[] }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useFlowGroupExpand(`group:${leaves[0].callKey}`, leaves.map((l) => l.callKey));
   const running = leaves.some((l) => l.ok === null);
   // plan-474-2105 组 C：转后台 / 让出等待不是失败，聚合行不要因此亮红叉
   const failed = leaves.some((l) => l.ok === false && !interruptTagOf(l));
@@ -814,7 +824,7 @@ const ActionClusterRow = memo(function ActionClusterRow({ leaves }: { leaves: To
 
 /** v19: 同文件连续写合并行：文件徽标 + 累加 +N -M（滚动动效），展开看每次写明细（各自内联 diff） */
 const WriteMergedRow = memo(function WriteMergedRow({ leaves }: { leaves: ToolLeaf[] }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useFlowGroupExpand(`group:${leaves[0].callKey}`, leaves.map((l) => l.callKey));
   const running = leaves.some((l) => l.ok === null);
   // plan-474-2105 组 C：同上——打断标记不计入失败，避免合并行亮红叉
   const failed = leaves.some((l) => l.ok === false && !interruptTagOf(l));
@@ -874,7 +884,10 @@ export const ToolTree = memo(function ToolTree({ nodes }: { nodes: ToolNode[] })
             ? <WriteMergedRow key={`w${i}`} leaves={n.leaves} />
             : n.kind === "group"
               ? n.leaves.map((leaf, j) => <LeafRow key={`g${i}-${j}`} leaf={leaf} />)
-              : <LeafRow key={`l${i}`} leaf={n.leaf} />,
+              // plan-20261021-subq-row：子会话提问是单叶子条目（时间线单独生成，不会并入聚合行）
+              : n.leaf.tool === SUBSESSION_QUESTION_TOOL
+                ? <SubsessionQuestionRow key={`l${i}`} leaf={n.leaf} />
+                : <LeafRow key={`l${i}`} leaf={n.leaf} />,
       )}
     </div>
   );

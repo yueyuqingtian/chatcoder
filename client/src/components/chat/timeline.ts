@@ -17,6 +17,7 @@ import { MsgType, SenderType } from "@chatcoder/shared";
 import type { TurnOut } from "@chatcoder/shared";
 import { recordDerivation } from "../../perf/metrics";
 import { formatBgElapsed } from "../../utils/bgFormat";
+import { SUBSESSION_QUESTION_TOOL, parseSubsessionQuestion } from "../../utils/subsessionQuestion";
 
 export interface ToolLeaf {
   callKey: string;
@@ -86,9 +87,7 @@ export type TurnItem =
   | { kind: "workflow"; programId: number; turnId: number | null; firstId?: number }
   /** plan-20261015-browser-agent：截图卡——截图类工具调用之后的截图预览，固定在该次调用的时间线位置，
    *  随所在的「工作过程」一起折叠（汇报之后的截图仍常显）；firstId 为该次调用消息 id */
-  | { kind: "shot"; leaf: ToolLeaf; firstId?: number }
-  /** plan-474-2105：子会话提问（系统消息）——只读提示卡，来源按钮跳转到该子会话 */
-  | { kind: "subsession-question"; msg: MessageOut };
+  | { kind: "shot"; leaf: ToolLeaf; firstId?: number };
 
 export type TimelineEntry =
   /** turnIds：并入续跑轮后的全部轮 id（首个即 turnId）；未并入时缺省，见 createRoundMerger */
@@ -104,10 +103,10 @@ export const SYSTEM_CONTINUATION_KINDS: ReadonlySet<string> = new Set([
 
 /** 常显项（不进入「工作过程」折叠）：工作流卡与工作流唤醒分隔线——进度、暂停 / 继续需要始终可见。
  *  截图卡不在此列：它是执行过程的一部分，完成后应与过程一起折叠，否则汇报区会被截图占满。
- *  plan-474-2105：子会话提问同样常显——它要用户/主代理看到并回应，一旦并入「工作过程」，
- *  主代理给出汇报后整段默认折叠，提问就再也看不到了。 */
+ *  plan-20261021-subq-row：子会话提问也不在此列——它已是一行普通的工具条目（见 subsessionQuestionItem），
+ *  任务完成后随工作过程一起折叠；此前常显的卡片会在汇报上方留下一大块，与其它过程信息的层次不一致。 */
 export function isOutsideProcess(item: TurnItem): boolean {
-  return item.kind === "workflow" || item.kind === "workflow-wakeup" || item.kind === "subsession-question";
+  return item.kind === "workflow" || item.kind === "workflow-wakeup";
 }
 
 /** 执行段的切分结果（见 splitFlowSegments）。 */
@@ -760,6 +759,39 @@ function isSubsessionQuestion(c: Record<string, unknown>): boolean {
   return typeof c.question_id === "string" && c.question_id.length > 0;
 }
 
+/** plan-20261021-subq-row：把子会话提问换成一条单叶子的工具条目（伪工具名 subsession_question）。
+ *
+ *  此前是一张常显卡片：任务进行中夹在工具行之间显得突兀，完成后又整张留在汇报上方（工作过程折叠不收它）。
+ *  现在它与后台命令通知同一做法——普通工具条目、按时间线位置固定、随工作过程折叠；
+ *  展示由 SubsessionQuestionRow 负责（行内是来源标题，展开看提问全文，可跳到来源子会话）。
+ *  来源会话优先取 mailbox.source_session_id，兜底 content.subsession_id（旧数据）。 */
+function subsessionQuestionItem(m: MessageOut, c: Record<string, unknown>): TurnItem {
+  const mb = (c.mailbox && typeof c.mailbox === "object" ? c.mailbox : {}) as Record<string, unknown>;
+  const asNum = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const sourceId = asNum(mb.source_session_id) ?? asNum(c.subsession_id);
+  const { title, body } = parseSubsessionQuestion(msgText(c));
+  const leaf: ToolLeaf = {
+    callKey: `subq-${m.id}`,
+    tool: SUBSESSION_QUESTION_TOOL,
+    args: {
+      source_session_id: sourceId,
+      title,
+      question_id: typeof c.question_id === "string" ? c.question_id : "",
+    },
+    agentName: "",
+    threadId: null,
+    turnId: m.turn_id != null ? Number(m.turn_id) : null,
+    // 提问是一条已发生的通知，没有「执行中 / 失败」之分
+    ok: true,
+    output: body,
+    error: null,
+    durationMs: null,
+    changeStat: null,
+    image: null,
+  };
+  return { kind: "tools", nodes: [{ kind: "leaf", leaf }], firstId: Number(m.id) };
+}
+
 /** plan-20261020-bgtask：后台命令的完成 / 停止通知（系统消息）。 */
 const BG_NOTICE_KINDS: ReadonlySet<string> = new Set(["bg_command_done", "bg_command_stopped"]);
 
@@ -819,6 +851,17 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
   const items: TurnItem[] = [];
   const pendingTools: MessageOut[] = [];
   const resultsByKey = new Map<string, MessageOut>();
+  // plan-20261021-subq-row：工具结果先整体索引一遍，再按时间序归类。
+  // 子会话提问 / 后台命令通知等系统消息会落在某个长命令的「调用」与「结果」之间（提问打断前台命令时，
+  // 结果要等命令转后台之后才写入）。遇到它们要先 flush 待处理的调用；若结果边走边收，
+  // flush 时这条调用还没有结果，叶子就此定格为「运行中」，结果之后到达也不会再回头更新——任务结束了仍转圈。
+  for (const m of msgs) {
+    if (m.msg_type !== MsgType.ToolResult) continue;
+    const rc = m.content as Record<string, unknown>;
+    // 与下方归类口径一致：子代理结果由 SubagentCard 展示，建议工具不进时间线
+    if (rc.tool === "spawn_subagent" || SUGGESTION_TOOLS.has(String(rc.tool ?? ""))) continue;
+    resultsByKey.set(String(rc.call_key ?? ""), m);
+  }
   // 同一轮内同一程序只出一张卡：plan 与 start 常被助手文字隔开，分属两次 flush
   const cardedPrograms = new Set<number>();
   // 本段消息所属轮（工作流卡记下它，节点子代理卡据此挂靠到同轮的卡）
@@ -875,7 +918,7 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
     // buildTimeline 的完整构建与增量构建都经 buildTurnItems，因此刷新前后判定一致。
     if (isSubsessionQuestion(c)) {
       flushTools();
-      items.push({ kind: "subsession-question", msg: m });
+      items.push(subsessionQuestionItem(m, c));
       continue;
     }
     if (BG_NOTICE_KINDS.has(mailboxKindOf(c))) {
@@ -898,12 +941,8 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
         pendingTools.push(m);
       }
     } else if (m.msg_type === MsgType.ToolResult) {
-      if (c.tool === "spawn_subagent") {
-        // 子代理结果由 SubagentCard 自身展示，不进入 ToolTree
-      } else {
-        const key = String(c.call_key ?? "");
-        resultsByKey.set(key, m);
-      }
+      // 结果已在循环前整体索引（见 resultsByKey 的说明），这里只需不把它当作任何时间线条目；
+      // 子代理结果由 SubagentCard 自身展示，同样不进入 ToolTree
     } else if (m.msg_type === MsgType.Thinking || (m.msg_type === MsgType.Text && c.thinking === true)) {
       // v7: 兼容两种后端写法——agent_loop 写 MsgType.Thinking；
       // agent_runtime 的 _emit_thread(thinking=True) 写 MsgType.Text + content.thinking=true。

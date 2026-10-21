@@ -77,6 +77,8 @@ export interface ComposerCoreProps {
   sessionId?: number | null;
   /** 首页变体：会话创建并发出首条消息后回调（宿主用于离开空态页） */
   onStarted?: () => void;
+  /** 是否响应「聚焦输入框」请求（chatcoder:focus-composer）：主输入框响应，侧栏子会话输入框不抢焦点 */
+  followFocusRequest?: boolean;
 }
 
 /** plan-238-1210 (A2): 引用 chips（@文件 / $技能）——不再内嵌进输入文本。 */
@@ -105,7 +107,7 @@ export function buildRefsSuffix(refs: ComposerRef[]): string {
   return lines.join("\n");
 }
 
-export function ComposerCore({ variant = "default", onStarted }: ComposerCoreProps) {
+export function ComposerCore({ variant = "default", onStarted, followFocusRequest = true }: ComposerCoreProps) {
   const { t } = useI18n();
   const isHome = variant === "home";
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -289,6 +291,14 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     window.addEventListener("chatcoder:composer-prefill", onPrefillEvt);
     return () => window.removeEventListener("chatcoder:composer-prefill", onPrefillEvt);
   }, []);
+
+  // 「聚焦输入框」请求（新建任务、切换会话、离开设置页之后派发）：此前全项目没有监听方，派发等于空转
+  useEffect(() => {
+    if (!followFocusRequest) return;
+    const onFocusEvt = () => taRef.current?.focus();
+    window.addEventListener("chatcoder:focus-composer", onFocusEvt);
+    return () => window.removeEventListener("chatcoder:focus-composer", onFocusEvt);
+  }, [followFocusRequest]);
 
   // 会话 229: 拉取可用技能（失败静默——技能菜单/分区整体不渲染）
   useEffect(() => {
@@ -1026,6 +1036,8 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
       if (goalStatus === "active") cancelGoal();
     }
     setMode(name);
+    // 菜单关闭后焦点交还输入框，Shift+Tab 等输入框内的快捷键紧接着就能用
+    window.setTimeout(() => taRef.current?.focus(), 0);
   };
 
   /** plan-75-332: 切换权限模式（询问审批 / 自动审批 / 完全访问）。
@@ -1182,12 +1194,17 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     return [...base].sort((a, b) => rank(a.name) - rank(b.name));
   }, [permProfiles]);
 
-  /** + 浮窗的模式项：内置模式取 modeMeta（图标 + 短名 + 一行说明），自定义模式取配置的名称与描述 */
+  /** Shift+Tab 将切到的下一个内置模式（目标锁定时循环被锁住，此时不给提示） */
+  const nextBuiltinMode = goalOn
+    ? null
+    : BUILTIN_MODE_ORDER[(BUILTIN_MODE_ORDER.indexOf(composerMode) + 1) % BUILTIN_MODE_ORDER.length];
+  /** + 浮窗的模式项：内置模式取 modeMeta（图标 + 短名 + 一行说明），自定义模式取配置的名称与描述；
+   *  ⇧ Tab 提示挂在下一个会被切到的模式上（此前固定挂在「计划」上，与实际切换的目标不一致） */
   const modeOptions: ModeOption[] = useMemo(() => {
     const base = modeMenuProfiles.map((p) => {
       const meta = MODE_META[p.name];
       return meta
-        ? { name: p.name, label: t(meta.shortKey), desc: t(meta.descKey), icon: meta.icon(16), kbd: p.name === "plan" ? "⇧ Tab" : undefined }
+        ? { name: p.name, label: t(meta.shortKey), desc: t(meta.descKey), icon: meta.icon(16), kbd: p.name === nextBuiltinMode ? "⇧ Tab" : undefined }
         : { name: p.name, label: p.display_name || p.name, desc: p.description || "自定义执行模式", icon: customModeIcon(16) };
     });
     // plan-128-518：“目标”排在内置三项之后、自定义模式之前
@@ -1195,7 +1212,7 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     const goalOpt: ModeOption = { name: GOAL_MODE, label: t(gm.shortKey), desc: t(gm.descKey), icon: gm.icon(16) };
     const at = base.findIndex((o) => !BUILTIN_MODE_ORDER.includes(o.name));
     return at < 0 ? [...base, goalOpt] : [...base.slice(0, at), goalOpt, ...base.slice(at)];
-  }, [modeMenuProfiles, t]);
+  }, [modeMenuProfiles, t, nextBuiltinMode]);
   /** 菜单中的“当前项”：目标生效时高亮“目标”，否则是真实执行模式 */
   const shownMode = goalOn ? GOAL_MODE : composerMode;
   const modeMeta = MODE_META[shownMode];
@@ -1204,14 +1221,32 @@ export function ComposerCore({ variant = "default", onStarted }: ComposerCorePro
     : (permProfiles.find((x) => x.name === shownMode)?.display_name ?? shownMode);
   const modeTone = modeMeta?.tone ?? "neutral";
 
-  /** Shift+Tab：在内置三种执行模式间循环（输入框聚焦时，与参考图4的快捷键提示一致） */
+  /** Shift+Tab：在内置执行模式间循环（智能体 → 工作流 → 计划 → 只读；输入框聚焦时生效，菜单打开时同样生效） */
   const cycleMode = () => {
     // plan-128-518：目标模式下锁定模式循环（续跑中途被切走会让目标空转），需要退出请在菜单里选其它模式
     if (goalOn) return;
     const order = BUILTIN_MODE_ORDER;
     const i = order.indexOf(composerMode);
     setMode(order[(i + 1) % order.length]);
+    // 从 + 浮窗触发时焦点停在菜单按钮上：切完交还输入框，连续按 Shift+Tab 不必再点一次
+    window.setTimeout(() => taRef.current?.focus(), 0);
   };
+  // cycleMode 每次渲染都是新函数：经 ref 取最新闭包，供下方菜单打开期间的监听使用
+  const cycleModeRef = useRef(cycleMode);
+  cycleModeRef.current = cycleMode;
+  // + 浮窗打开时焦点在菜单按钮 / 子浮窗搜索框上，输入框的 onKeyDown 收不到 Shift+Tab；
+  // 菜单里标着的「⇧ Tab」提示在这里补实，行为与输入框内一致
+  useEffect(() => {
+    if (!showPlus) return;
+    const onKey = (e: KeyboardEvent) => {
+      // 输入框已处理过（preventDefault）的不再重复循环
+      if (e.key !== "Tab" || !e.shiftKey || e.defaultPrevented) return;
+      e.preventDefault();
+      cycleModeRef.current();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showPlus]);
 
   /** + 浮窗「插件 / 技能 / 连接器」树的数据（只含已启用项，与 / 菜单同源） */
   const extItems = useMemo<Record<ExtKind, ExtItem[]>>(() => {
@@ -2170,6 +2205,7 @@ function QuestionWizardBox({
   const answers = draft?.answers ?? {};
   const [customText, setCustomText] = useState("");
   const customInputRef = useRef<HTMLInputElement>(null);
+  const wizardRef = useRef<HTMLDivElement>(null);
   // plan-278-1391: 选项浮窗——单行截断的长选项在悬停/键盘聚焦时完整展示。
   const [optTip, setOptTip] = useState<
     { text: string; top: number; left: number; maxWidth: number; placement: "top" | "bottom" } | null
@@ -2234,6 +2270,21 @@ function QuestionWizardBox({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stepIndex, currentAnswer, currentOptions.join("\u0000")]);
 
+  /** 键盘高亮项下标：0..选项数-1 为选项，紧随其后的一行为自定义回答（无自定义行时不会落到它上） */
+  const customIdx = currentOptions.length;
+  const optionCount = currentOptions.length + (allowCustom ? 1 : 0);
+  /** 切题时的高亮落点：该题已有答案则落在答案上（回到上一题可直接回车确认原答案），否则第一项 */
+  const initialKbIndex = (): number => {
+    const i = currentOptions.indexOf(currentAnswer);
+    if (i >= 0) return i;
+    return currentAnswer && allowCustom ? customIdx : 0;
+  };
+  /** 高亮状态记下「在哪一题、停在哪一项」：题号一变就回到该题的默认落点。
+   *  这里用派生而不是 effect 重置——切题（如点「上一题」）后紧跟的按键，不能读到还没重置的旧下标。 */
+  const [kbState, setKbState] = useState<{ step: number; idx: number } | null>(null);
+  const kbIndex = kbState && kbState.step === stepIndex ? kbState.idx : initialKbIndex();
+  const setKbIndex = (idx: number) => setKbState({ step: stepIndex, idx });
+
   const handlePickOption = (opt: string) => {
     const updated = { ...answers, [String(stepIndex)]: opt };
     setCustomText("");
@@ -2259,10 +2310,44 @@ function QuestionWizardBox({
     }
   };
 
+  /** 键盘：Tab / Shift+Tab、↑↓ 切换高亮项，回车确认高亮项（与底部「Tab / 上下键切换 · 回车确认」一致）。
+   *  只在焦点落在页面本身或卡片内时接管；焦点在侧栏输入框、设置页、弹窗等处时不抢按键。
+   *  挂到 window 上：提问卡出现后不必先点一下卡片，键盘即可操作。 */
+  const kbHandlerRef = useRef<(e: KeyboardEvent) => void>(() => {});
+  kbHandlerRef.current = (e: KeyboardEvent) => {
+    const ae = document.activeElement;
+    if (ae && ae !== document.body && !wizardRef.current?.contains(ae)) return;
+    if (e.isComposing || e.keyCode === 229 || e.altKey || e.ctrlKey || e.metaKey || optionCount === 0) return;
+    const hl = Math.min(kbIndex, optionCount - 1);
+    if (e.key === "Tab" || e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const back = e.key === "ArrowUp" || (e.key === "Tab" && e.shiftKey);
+      setKbIndex(back ? (hl - 1 + optionCount) % optionCount : (hl + 1) % optionCount);
+      return;
+    }
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      if (e.repeat) return; // 按住回车的自动重复不连续确认多道题
+      if (hl < customIdx) {
+        handlePickOption(currentOptions[hl]);
+      } else if (customText.trim()) {
+        handleNextCustom();
+      } else {
+        // 自定义行还没有输入：回车只把焦点交给输入框，不替用户确认别处的答案
+        customInputRef.current?.focus();
+      }
+    }
+  };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => kbHandlerRef.current(e);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const taskTag = String(detail.task_tag || detail.agent_name || "问答偏好");
 
   return (
-    <div className="composer-question-wizard">
+    <div className="composer-question-wizard" ref={wizardRef}>
       <div className="question-wizard-header">
         <div className="question-wizard-title-group">
           <span className="question-wizard-tag">{taskTag}</span>
@@ -2305,7 +2390,7 @@ function QuestionWizardBox({
               <button
                 key={opt}
                 type="button"
-                className={`question-wizard-opt-btn${isSelected ? " selected" : ""}`}
+                className={`question-wizard-opt-btn${isSelected ? " selected" : ""}${kbIndex === optIdx ? " is-kb" : ""}`}
                 onClick={() => handlePickOption(opt)}
                 onMouseEnter={(e) => showOptTip(e, opt)}
                 onMouseLeave={hideOptTip}
@@ -2319,20 +2404,16 @@ function QuestionWizardBox({
           })}
 
           {allowCustom && (
-            <div className="question-wizard-custom-row">
+            <div className={`question-wizard-custom-row${kbIndex === customIdx ? " is-kb" : ""}`}>
               <span className="question-wizard-opt-num">{currentOptions.length + 1}.</span>
+              {/* 回车确认由卡片级键盘处理统一负责（见 kbHandlerRef），这里只把高亮移到自定义行 */}
               <input
                 ref={customInputRef}
                 className="question-wizard-custom-input"
                 placeholder="输入自定义回答，按回车确认…"
                 value={customText}
                 onChange={(e) => setCustomText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    handleNextCustom();
-                  }
-                }}
+                onFocus={() => setKbIndex(customIdx)}
               />
             </div>
           )}

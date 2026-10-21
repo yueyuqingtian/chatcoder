@@ -13,16 +13,19 @@ import { ThinkingExpanded } from "./ThinkingExpanded";
 import { ChatCollapse } from "./ChatCollapse";
 import { useChatStore } from "../../store/chat";
 import { useUiStore } from "../../store/ui";
+import { thinkingKey, useFlowExpand } from "../../store/flowExpand";
 
-export const ThinkingBlock = memo(function ThinkingBlock({ text, active, turnId, agentId }: {
+export const ThinkingBlock = memo(function ThinkingBlock({ text, active, turnId, agentId, msgId }: {
   text: string;
   active: boolean;
   turnId?: number;
   agentId?: number;
+  /** 思考消息 id：展开状态按它记忆，块重挂载（如并入过程段）后保持用户的选择 */
+  msgId: number;
 }) {
   void turnId;
   const showReasoning = useUiStore((s) => s.showReasoning);
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useFlowExpand(thinkingKey(msgId));
   const [duration, setDuration] = useState<number | null>(null);
   const startRef = useRef<number | null>(null);
 

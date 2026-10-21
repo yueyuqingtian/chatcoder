@@ -33,7 +33,6 @@ import { TurnChangesCard } from "./TurnChangesCard";
 import { parseUtc } from "../../utils/time";
 import { MessageImageGrid, attachmentsOf } from "./AttachmentCard";
 import { UserBubble } from "./UserBubble";
-import { SubsessionQuestionCard } from "./SubsessionQuestionCard";
 import { recordComponentRender } from "../../perf/metrics";
 
 /** plan-20261020-bgtask：系统唤醒一轮时的分隔线文案（按唤醒原因）。缺省 = 子代理完成唤醒（历史口径）。 */
@@ -539,6 +538,7 @@ export const TurnGroup = memo(function TurnGroup({
             active={isRunning && i === lastThinkingIdx}
             turnId={entry.turnId ?? undefined}
             agentId={item.msg.sender_id ?? undefined}
+            msgId={Number(item.msg.id)}
           />
         );
       case "tools":
@@ -621,13 +621,6 @@ export const TurnGroup = memo(function TurnGroup({
           </div>
         );
       }
-      // plan-474-2105：子会话提问卡——只读提示，不做成审批卡（卡片自带来源跳转）
-      case "subsession-question":
-        return (
-          <div key={i} className="turn-item">
-            <SubsessionQuestionCard msg={item.msg} />
-          </div>
-        );
       // v2.2 (对齐 zcode 3.11): 系统分割线（模型切换 / 目标停止提示等）
       case "divider":
         return (

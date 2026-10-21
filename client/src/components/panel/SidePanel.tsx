@@ -402,7 +402,7 @@ export function SidePanel({ visible = true }: { visible?: boolean }) {
             )}
 
             <div className="sd-composer">
-              <ComposerCore variant="chat" />
+              <ComposerCore variant="chat" followFocusRequest={false} />
             </div>
           </div>
         </ConvoScopeProvider>

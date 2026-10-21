@@ -2303,11 +2303,19 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .usage-seg-toggle { display: inline-flex; gap: 2px; background: var(--bg-hover); border-radius: var(--r-md); padding: 2px; }
 .usage-seg-btn { border: none; background: transparent; color: var(--text-2); font-size: 12px; padding: 4px 12px; border-radius: var(--r-md); cursor: pointer; transition: all var(--dur-fast); }
 .usage-seg-btn.active { background: var(--bg-elevated); color: var(--text-1); font-weight: 500; box-shadow: inset 0 0 0 1px var(--border); }
-.usage-heatmap-months { margin-top: 2px; }
-.usage-hm-month { font-size: 10px; color: var(--text-3); top: 0; }
-.usage-heatmap-body { display: flex; gap: 4px; overflow-x: auto; }
-.usage-heatmap-weekdays { display: flex; flex-direction: column; gap: 2px; margin-top: 0; }
-.usage-heatmap-weekdays span { font-size: 9px; color: var(--text-3); line-height: 12px; text-align: center; }
+.usage-heatmap-months { position: relative; height: 16px; }
+.usage-hm-month { position: absolute; top: 0; font-size: 10px; line-height: 16px; color: var(--text-3); white-space: nowrap; }
+/* plan-20261021-usage-heatmap-fill：格子按容器宽度等分铺满整行，不再固定 12px
+   （宽卡片下原先右侧留一大片空白）。行高由 .usage-hm-cell 的 1:1 比例撑出，
+   星期列与网格同高、7 行等分，因此标签天然与格行居中对齐。 */
+.usage-heatmap-body { display: flex; gap: 6px; }
+.usage-heatmap-main { flex: 1 1 auto; min-width: 0; }
+.usage-heatmap-weekdays { flex: none; width: 10px; padding-top: 16px; display: grid; grid-template-rows: repeat(7, 1fr); gap: 2px; }
+.usage-heatmap-weekdays span { display: flex; align-items: center; justify-content: center; font-size: 9px; line-height: 1; color: var(--text-3); }
+.usage-hm-grid { display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, auto); gap: 2px; }
+.usage-hm-grid.is-weekly { grid-template-rows: auto; }
+/* 格子铺满后尺寸随卡宽变化（窄卡片约 8px），圆角固定 4px 会看起来像圆点，统一收到 2px */
+.usage-hm-grid .usage-hm-cell { width: auto; height: auto; aspect-ratio: 1 / 1; border-radius: var(--r-xs); }
 .usage-hm-cell { width: 12px; height: 12px; border-radius: var(--r-sm); transition: outline-color var(--dur-fast); }
 .usage-hm-cell:hover { outline: 1px solid var(--border-strong); }
 .usage-hm-0 { background: var(--bg-hover); }
@@ -2411,29 +2419,44 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .composer-slash-desc { color: var(--text-3); font-size: 10px; margin-left: 6px; }
 /* 工具树中提问折叠问答列表（对齐原型图四、图五）。
    plan-278-1391: 去掉独立卡片的边框与底色——问答直接落在通用 .tc-output 外框内，
-   与 fs_read / 文件编辑展开保持同一视觉口径（用户要求「不要用卡片包住」）。 */
+   与 fs_read / 文件编辑展开保持同一视觉口径（用户要求「不要用卡片包住」）。
+   排版：每题是两列网格——左列为等宽标签（问题 N / 回答），右列为正文；
+   同一列上下对齐，题与题之间用留白分隔（不加分隔线），层次由字号、字重与颜色表达。 */
 .tc-question-qa {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 2px 0;
+  gap: 14px;
+  padding: 10px 12px;
 }
 .tc-question-qa-item {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.tc-question-qa-q {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  align-items: baseline;
+  column-gap: 12px;
+  row-gap: 6px;
   font-size: 12px;
+  line-height: 1.6;
+}
+.tc-qa-label {
+  font-size: 11px;
+  font-weight: 500;
   color: var(--text-2);
+  white-space: nowrap;
 }
-.tc-question-qa-a {
-  font-size: 12px;
-  color: var(--text-3);
+.tc-qa-q {
+  color: var(--text-2);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
 }
-.tc-question-qa-a .tc-qa-val {
+.tc-qa-val {
   color: var(--text-1);
   font-weight: 500;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+.tc-qa-val.is-empty {
+  color: var(--text-3);
+  font-weight: 400;
 }
 
 /* 输入框直接替换形态的向导式提问卡片（对齐参考图 paste-20260829121505.png） */
@@ -2534,6 +2557,11 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   color: var(--text-1);
   font-weight: 500;
 }
+/* 键盘高亮（Tab / ↑↓）：与悬停同一底色，只换底色不加描边；已选中的选项保留选中样式 */
+.question-wizard-opt-btn.is-kb:not(.selected),
+.question-wizard-custom-row.is-kb {
+  background: var(--bg-hover);
+}
 .question-wizard-opt-num {
   font-size: 11px;
   font-weight: 600;
@@ -2575,7 +2603,7 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   border-radius: var(--r-md);
   border: 1px solid var(--border);
   background: var(--bg);
-  transition: border-color var(--dur-fast);
+  transition: border-color var(--dur-fast), background var(--dur-fast);
 }
 .question-wizard-custom-row:focus-within {
   /* plan-238-1188: 聚焦态中性化——不再出现浅蓝品牌色边框 */

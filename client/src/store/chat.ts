@@ -13,6 +13,7 @@ import { registerReconcileTask, RECONCILE_ORDER } from "../perf/reconcile";
 import type { ServerEventName } from "@chatcoder/shared/events";
 import { useWorkflowStore } from "./workflow";
 import { useBgTaskStore } from "./bgTasks";
+import { handOffThinkingExpand } from "./flowExpand";
 import type { CompactSummaryPayload } from "@chatcoder/shared/events";
 
 /** v7: 全局最近选择思考深度的 localStorage 持久化 key——重启后仍能恢复上次选择 */
@@ -2692,6 +2693,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // v19: 子代理线程消息进独立桶（右面板完整会话数据源），不混入主消息流
         const rawThread = rawMsg.thread_id != null ? Number(rawMsg.thread_id) : null;
         if (rawThread != null) {
+          // 流式思考落库：展开态移交给落库后的思考块（只认新增消息，重复投递不移交）
+          if (isThinking && !(get().subagentMessages[rawThread] ?? []).some((m) => m.id === rawMsg.id)) {
+            handOffThinkingExpand(rawMsg.id, rawThread);
+          }
           set((state) => {
             const bucket = state.subagentMessages[rawThread] ?? [];
             if (bucket.some((m) => m.id === rawMsg.id)) return {};
@@ -2721,6 +2726,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           });
           break;
         }
+        // 流式思考落库：展开态移交给落库后的思考块（只认新增消息，重复投递不移交）
+        if (isThinking && !get().messages.some((m) => m.id === rawMsg.id)) handOffThinkingExpand(rawMsg.id);
         set((state) => {
           // 去重
           if (state.messages.some((m) => m.id === rawMsg.id)) return {};

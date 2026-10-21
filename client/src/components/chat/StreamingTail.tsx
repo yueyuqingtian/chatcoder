@@ -36,16 +36,19 @@ export interface StreamingTailProps {
 }
 
 /** 尾部渲染体：不运行不占位；正文与已落库正文一致时隐藏，其余交 StreamingText。 */
-function TailBody({ active, statusLabel, persistedText, text, thinking }: {
+function TailBody({ active, statusLabel, persistedText, text, thinking, threadId }: {
   active: boolean;
   statusLabel?: string;
   persistedText?: string;
   text: string;
   thinking: string;
+  threadId?: number;
 }) {
   if (!active) return null;
   if (text && persistedText && text.trim() === persistedText.trim()) return null;
-  return <StreamingText active={active} thinking={thinking} text={text} statusLabel={statusLabel} />;
+  return (
+    <StreamingText active={active} thinking={thinking} text={text} statusLabel={statusLabel} threadId={threadId} />
+  );
 }
 
 /** 主会话尾部：订阅合并文本派生（唯一维护点在 store/streamMerged）。 */
@@ -78,6 +81,7 @@ const SubagentTail = memo(function SubagentTail({ threadId, active, statusLabel,
   const thinking = useChatStore((s) => s.subagentThinking[threadId] || "");
   return (
     <TailBody
+      threadId={threadId}
       active={active}
       statusLabel={statusLabel}
       persistedText={persistedText}

@@ -154,7 +154,7 @@ export default function App() {
     usePanelStore.getState().setOnScreen(rightShown);
   }, [rightShown]);
 
-  // Ctrl+B 切换侧栏（对齐 zcode）
+  // Ctrl+B 切换侧栏（对齐 zcode）；Ctrl+J 终端；Ctrl+N 新建任务（事件处理见下方 chatcoder:new-task）
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "b") {
@@ -164,6 +164,10 @@ export default function App() {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "j") {
         e.preventDefault();
         usePanelStore.getState().openTab("terminal");
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent("chatcoder:new-task"));
       }
     };
     window.addEventListener("keydown", handler);
@@ -218,6 +222,19 @@ export default function App() {
       window.dispatchEvent(new CustomEvent("chatcoder:focus-composer"));
     }, 50);
   }, [returnLocation, toggleRightPanel]);
+
+  // 新建任务：Ctrl+N 与命令中心「新建任务」共用此事件，语义同侧栏点「新建任务」。
+  // 设置页里侧栏已换成设置导航（不挂载 Sidebar），这里不依赖侧栏，先按正常路径离开设置，再进入会话页空态。
+  useEffect(() => {
+    const onNewTask = () => {
+      if (nav === "settings") leaveSettings();
+      setNav("chat");
+      useChatStore.getState().startNewTask();
+      window.dispatchEvent(new CustomEvent("chatcoder:focus-composer"));
+    };
+    window.addEventListener("chatcoder:new-task", onNewTask);
+    return () => window.removeEventListener("chatcoder:new-task", onNewTask);
+  }, [nav, leaveSettings]);
 
   // plan-41-233：会话切换时把右面板投影切到该会话的桶（旧会话的终端/浏览器实例继续保活，
   // 切回时原样恢复；不再出现「A 会话的子代理标签残留在 B 会话面板」）。
