@@ -27,7 +27,7 @@ import {
   IconChevronDown,
   IconFolder, IconLayers, IconSortDesc, IconPencil,
   IconMoreHorizontal, IconPin, IconPlus, IconRefresh,
-  IconFolderPlus, IconArrowDown, IconCopy, IconClock, IconSortAlpha, IconArchive, IconGitBranch, IconTrash,
+  IconFolderPlus, IconArrowDown, IconCopy, IconClock, IconSortAlpha, IconArchive, IconGitBranch, IconTrash, IconSpinner,
 } from "./icons";
 
 export type NavKey = "chat" | "scheduled" | "skills" | "mcp" | "settings";
@@ -71,18 +71,34 @@ function UpdateBadge() {
   const version = status.version ?? "";
   if (status.state === "downloading") {
     const percent = Math.max(0, Math.min(100, Math.round(status.percent ?? 0)));
+    // plan-20261021-usage-update：点击后立刻是「连接中」（带转圈），有数据后才是百分比；
+    // 断网 / 抖动 / 校验各有自己的一句话，全部落在同一个固定宽度胶囊里，切换不改尺寸
+    const phase = status.phase ?? "downloading";
+    const label =
+      phase === "connecting" ? t("sidebar.update_connecting")
+      : phase === "waiting" ? t("sidebar.update_waiting")
+      : phase === "retrying" ? t("sidebar.update_retrying")
+      : phase === "verifying" ? t("sidebar.update_verifying")
+      : `${percent}%`;
+    const tip =
+      phase === "connecting" ? t("sidebar.update_connecting_tip")
+      : phase === "waiting" ? t("sidebar.update_waiting_tip")
+      : phase === "retrying" ? t("sidebar.update_retrying_tip")
+      : phase === "verifying" ? t("sidebar.update_verifying_tip")
+      : t("sidebar.downloading_update", { percent });
     return (
-      <Tooltip content={t("sidebar.downloading_update", { percent })} side="top">
+      <Tooltip content={tip} side="top">
         <span
           className="sb-upd is-downloading"
           role="progressbar"
           aria-valuemin={0}
           aria-valuemax={100}
-          aria-valuenow={percent}
-          aria-label={t("sidebar.downloading_update", { percent })}
+          aria-valuenow={phase === "connecting" ? undefined : percent}
+          aria-label={tip}
           style={{ ["--p" as string]: `${percent}%` }}
         >
-          <span className="sb-upd-label">{percent}%</span>
+          {phase === "connecting" && <IconSpinner size={12} />}
+          <span className="sb-upd-label">{label}</span>
         </span>
       </Tooltip>
     );
@@ -292,18 +308,7 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
     { key: "skills", label: t("sidebar.extensions"), icon: <IxExtensions size={16} /> },
   ], [t]);
 
-  // Ctrl+N 新建任务
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n") {
-        e.preventDefault();
-        onChange("chat");
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [onChange]);
-
+  // Ctrl+N 新建任务由 App 统一处理（chatcoder:new-task），侧栏不再自行监听，避免设置页等场景下失效或重复触发
   const openCommandCenter = () => {
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true, cancelable: true }));
   };

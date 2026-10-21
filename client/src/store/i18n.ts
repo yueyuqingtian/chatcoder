@@ -50,6 +50,14 @@ const DICT: Dict = {
   "sidebar.update":               ["更新", "Update"],
   "sidebar.download_update_tip":  ["发现新版本 v{version}，点击下载；更新内容见「设置 › 关于」", "Version v{version} available. Click to download; see Settings › About for details"],
   "sidebar.downloading_update":   ["正在下载更新 {percent}%", "Downloading update {percent}%"],
+  "sidebar.update_connecting":    ["连接中", "Connecting"],
+  "sidebar.update_waiting":       ["等待网络", "Offline"],
+  "sidebar.update_retrying":      ["重试中", "Retrying"],
+  "sidebar.update_verifying":     ["校验中", "Verifying"],
+  "sidebar.update_connecting_tip": ["正在连接更新服务器，马上开始下载", "Connecting to the update server…"],
+  "sidebar.update_waiting_tip":   ["网络已断开，恢复后会自动接着下载（已下载的部分不会丢）", "Network is offline. The download resumes automatically once it is back; progress is kept."],
+  "sidebar.update_retrying_tip":  ["网络不稳定，正在重试（已下载的部分不会丢）", "The network is unstable, retrying (progress is kept)."],
+  "sidebar.update_verifying_tip": ["下载完成，正在校验安装包", "Download complete, verifying the installer"],
   "sidebar.restart_update_tip":   ["v{version} 已下载完成，点击重启完成更新", "v{version} downloaded. Click to restart and update"],
 
   // ── 通用 / 弹窗 ──

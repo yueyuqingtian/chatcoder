@@ -65,6 +65,9 @@ declare global {
       getUpdateState?: () => Promise<unknown>;
       downloadUpdate?: () => Promise<unknown>;
       installUpdate?: () => Promise<boolean>;
+      /** plan-20261021-usage-update：更新设置（autoDownload = 发现新版本自动静默下载，默认开） */
+      getUpdateSettings?: () => Promise<{ autoDownload: boolean }>;
+      setUpdateSettings?: (patch: { autoDownload?: boolean }) => Promise<{ autoDownload: boolean }>;
       getAppVersion?: () => Promise<string>;
       onUpdateStatus?: (cb: (state: unknown) => void) => () => void;
       /** plan-230-1144 M4.2: 更新内容可见 —— 版本历史 / 本次更新汇总 / 首启消费标记 */

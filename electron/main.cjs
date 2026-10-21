@@ -1998,13 +1998,16 @@ ipcMain.handle("browser:capturePage", async (_event, targetWebContentsId) => {
   return null;
 });
 
-// ── 自动更新（electron-updater + GitHub Releases）──
+// ── 自动更新（electron-updater + 自建源 / GitHub Releases）──
 // 仅打包版启用：dev 模式无 app-update.yml，检查会直接失败。
-// 状态机: idle → checking → available|none → downloading → downloaded → (quitAndInstall) / error
+// 状态机与下载编排在 update-manager.cjs（可单独做端到端验证）；这里只负责接线与「更新历史」。
 // plan-230-1144 M4.2: 透传 releaseNotes / releaseDate；支持按版本区间拉取更新历史；
 // 记录 lastSeenVersion 供升级后首启"本次更新"弹窗判定。
-let autoUpdater = null;
-let updateState = { state: "idle" };
+// plan-20261021-usage-update：
+//  - 点击下载 / 静默自动下载都先切到 downloading(phase=connecting)，不再等第一个数据块才有反馈；
+//  - 全量安装包改走自带的断点续传下载器（多连接分块、每块重试、多源切换），断网后接着下而不是重下；
+//  - 发现新版本默认自动下载（设置里可关）。
+const { createUpdateManager, normalizeReleaseNotes } = require("./update-manager.cjs");
 
 const UPDATE_STATE_FILE = () => path.join(app.getPath("userData"), "update-state.json");
 
@@ -2021,21 +2024,10 @@ function writeUpdateMeta(patch) {
   } catch (e) { logErr("[updater] 写入 update-state.json 失败:", e && e.message); }
 }
 
-function pushUpdateState() {
+function pushUpdateState(state) {
   if (mainWindow && !mainWindow.isDestroyed()) {
-    try { mainWindow.webContents.send("app:updateStatus", updateState); } catch {}
+    try { mainWindow.webContents.send("app:updateStatus", state); } catch {}
   }
-}
-
-/** releaseNotes 可能是 string 或 [{version, note}] 数组，统一成 Markdown 文本 */
-function normalizeReleaseNotes(notes) {
-  if (!notes) return "";
-  if (typeof notes === "string") return notes;
-  if (Array.isArray(notes)) {
-    return notes.map((n) => (typeof n === "string" ? n : (n && (n.note || n.body)) || "")).join("\n\n");
-  }
-  if (typeof notes === "object") return notes.note || notes.body || "";
-  return String(notes);
 }
 
 /** 本地打包的 CHANGELOG.md 路径（打包后位于 resources 或应用根） */
@@ -2059,8 +2051,6 @@ const UPDATER_REPO = { owner: "yueyuqingtian", repo: "chatcoder" };
 const UPDATES_BASE_URL = "https://service.guyueyu.asia/updates/";
 const MIRROR_FEED = { provider: "generic", url: UPDATES_BASE_URL, useMultipleRangeRequest: false };
 const GITHUB_FEED = { provider: "github", owner: UPDATER_REPO.owner, repo: UPDATER_REPO.repo };
-/** 当前生效源：mirror=自建主源 / github=备源；手动检查与启动首查从主源重新开始 */
-let activeFeed = "mirror";
 
 async function fetchReleases(limit = 20) {
   const url = `https://api.github.com/repos/${UPDATER_REPO.owner}/${UPDATER_REPO.repo}/releases?per_page=${limit}`;
@@ -2083,144 +2073,39 @@ async function fetchReleasesMirror(limit = 30) {
   return data.slice(0, limit);
 }
 
-/** 检查更新：主源优先、失败自动切 GitHub 备源（plan-90-390）。
- *  manual=true（用户手动检查）时重置回主源，给“重试主源”的机会。 */
-async function checkForUpdatesSmart(manual = false) {
-  if (!autoUpdater) return null;
-  if (manual) activeFeed = "mirror";
-  if (activeFeed === "mirror") {
-    try {
-      autoUpdater.setFeedURL(MIRROR_FEED);
-      return await autoUpdater.checkForUpdates();
-    } catch (e) {
-      logErr("[updater] 自建源检查失败，切换 GitHub 备源:", e && e.message);
-      activeFeed = "github";
-    }
-  }
-  autoUpdater.setFeedURL(GITHUB_FEED);
-  return await autoUpdater.checkForUpdates();
-}
+const updateManager = createUpdateManager({
+  pushState: pushUpdateState,
+  meta: { read: readUpdateMeta, write: writeUpdateMeta },
+  feeds: { mirror: MIRROR_FEED, github: GITHUB_FEED },
+  updatesBaseUrl: UPDATES_BASE_URL,
+  repo: UPDATER_REPO,
+  currentVersion: app.getVersion(),
+  net: require("electron").net,
+  log: (...a) => log(...a),
+  logErr: (...a) => logErr(...a),
+});
 
 function initAutoUpdater() {
   if (!app.isPackaged) return;
+  let updater;
   try {
-    ({ autoUpdater } = require("electron-updater"));
+    ({ autoUpdater: updater } = require("electron-updater"));
   } catch (e) {
     logErr("[updater] require electron-updater 失败:", e && e.message);
     return;
   }
-  // 手动触发才下载（用户点击侧栏更新按钮后开始），避免后台上传/下载占用带宽
-  autoUpdater.autoDownload = false;
-  autoUpdater.autoInstallOnAppQuit = false;
-  autoUpdater.on("checking-for-update", () => {
-    // 已下载完成待安装时，后续检查不得把状态冲回（否则侧栏「重启」按钮会闪回「下载」）
-    if (updateState.state === "downloaded") return;
-    updateState = { state: "checking" };
-    log("[updater] checking-for-update");
-    pushUpdateState();
-  });
-  autoUpdater.on("update-available", (info) => {
-    // 已下载完成（同版本已就绪）时保持 downloaded，避免定时检查把按钮冲回「下载」
-    if (updateState.state === "downloaded" && updateState.version === info.version) return;
-    // plan-230-1144 M4.2: 透传 releaseNotes/releaseDate——此前只取 version，
-    // 前端因此看不到"更新了什么"（问题6 的直接根因）。
-    updateState = {
-      state: "available",
-      version: info.version,
-      notes: normalizeReleaseNotes(info.releaseNotes),
-      releaseDate: info.releaseDate || "",
-    };
-    log("[updater] update-available:", info.version, "current:", app.getVersion());
-    pushUpdateState();
-  });
-  autoUpdater.on("update-not-available", (info) => {
-    // 已下载完成时保持 downloaded（理论上不会触发，防御性保护）
-    if (updateState.state === "downloaded") return;
-    updateState = { state: "none", version: info && info.version };
-    log("[updater] update-not-available");
-    pushUpdateState();
-  });
-  autoUpdater.on("download-progress", (p) => {
-    updateState = {
-      state: "downloading",
-      percent: Math.round(p.percent || 0),
-      transferred: p.transferred || 0,
-      total: p.total || 0,
-      bytesPerSecond: p.bytesPerSecond || 0,
-    };
-    pushUpdateState();
-  });
-  autoUpdater.on("update-downloaded", (info) => {
-    updateState = {
-      state: "downloaded",
-      version: info.version,
-      notes: normalizeReleaseNotes(info.releaseNotes),
-      releaseDate: info.releaseDate || "",
-    };
-    log("[updater] update-downloaded:", info.version);
-    pushUpdateState();
-  });
-  autoUpdater.on("error", (err) => {
-    updateState = { state: "error", message: String((err && err.message) || err) };
-    logErr("[updater] error:", updateState.message);
-    pushUpdateState();
-  });
-
-  // 打开软件 3s 内立即检查一次，之后每 20 分钟自动检测一次
-  // （主源为自建服务器；GitHub 备源匿名 API 限流 60 次/小时，20 分钟间隔量级安全）
-  setTimeout(() => {
-    checkForUpdatesSmart().catch((e) => logErr("[updater] 自动检查失败(启动后首查):", e && e.message));
-  }, 3 * 1000);
-  setInterval(() => {
-    // 下载中/已下载完成时跳过自动检查：避免 update-available 事件把 downloaded 状态冲回 available
-    if (updateState.state === "downloading" || updateState.state === "downloaded") return;
-    checkForUpdatesSmart().catch((e) => logErr("[updater] 自动检查失败(定时):", e && e.message));
-  }, 20 * 60 * 1000);
+  updateManager.attach(updater);
+  updateManager.startTimers();
 }
 
 // ── IPC:更新操作（手动检查 / 立即安装 / 查询状态 / 当前版本 / 更新历史）──
-ipcMain.handle("app:checkForUpdates", async () => {
-  if (!autoUpdater) return { state: "unsupported" };
-  try {
-    return await checkForUpdatesSmart(true);
-  } catch (e) {
-    updateState = { state: "error", message: String((e && e.message) || e) };
-    pushUpdateState();
-    return updateState;
-  }
-});
-ipcMain.handle("app:getUpdateState", () => updateState);
-ipcMain.handle("app:downloadUpdate", async () => {
-  if (!autoUpdater || updateState.state !== "available") return updateState;
-  try {
-    await autoUpdater.downloadUpdate();
-  } catch (e) {
-    // 主源下载失败：切 GitHub 备源重试一次（plan-90-390）
-    if (activeFeed === "mirror") {
-      logErr("[updater] 自建源下载失败，切换备源重试:", e && e.message);
-      activeFeed = "github";
-      try {
-        autoUpdater.setFeedURL(GITHUB_FEED);
-        await autoUpdater.checkForUpdates();
-        if (updateState.state === "available") {
-          await autoUpdater.downloadUpdate();
-          return updateState;
-        }
-      } catch (e2) {
-        logErr("[updater] 备源重试失败:", e2 && e2.message);
-      }
-    }
-    updateState = { state: "error", message: String((e && e.message) || e) };
-    pushUpdateState();
-  }
-  return updateState;
-});
-ipcMain.handle("app:installUpdate", () => {
-  if (!autoUpdater || updateState.state !== "downloaded") return false;
-  log("[updater] quitAndInstall ->", updateState.version);
-  setImmediate(() => { try { autoUpdater.quitAndInstall(); } catch (e) { logErr("[updater] quitAndInstall 失败:", e); } });
-  return true;
-});
+ipcMain.handle("app:checkForUpdates", () => updateManager.checkForUpdates());
+ipcMain.handle("app:getUpdateState", () => updateManager.getState());
+// 不等下载完成：立即进入 downloading(connecting) 并返回，后续进度靠 app:updateStatus 推送
+ipcMain.handle("app:downloadUpdate", () => updateManager.downloadNow());
+ipcMain.handle("app:getUpdateSettings", () => updateManager.getSettings());
+ipcMain.handle("app:setUpdateSettings", (_e, patch) => updateManager.setSettings(patch));
+ipcMain.handle("app:installUpdate", () => updateManager.install());
 ipcMain.handle("app:getVersion", () => app.getVersion());
 
 // plan-230-1144 M4.2 / plan-90-390: 更新历史 —— 自建源静态数据 → GitHub API → 本地 CHANGELOG.md 三级回落

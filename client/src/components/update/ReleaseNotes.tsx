@@ -63,21 +63,41 @@ function fmtBytes(n?: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
-/** 下载进度：百分比为主读数，大小与速度作次要信息（tabular 数字，跳动时不抖动布局） */
-export function UpdateProgress({ percent, transferred, total, bytesPerSecond }: {
+/** 剩余时间：不足 1 分钟写秒，不足 1 小时写分秒，其余写时分（只在有速度时给） */
+function fmtEta(seconds: number): string {
+  const s = Math.max(1, Math.round(seconds));
+  if (s < 60) return `${s} 秒`;
+  if (s < 3600) return `${Math.floor(s / 60)} 分 ${String(s % 60).padStart(2, "0")} 秒`;
+  return `${Math.floor(s / 3600)} 小时 ${Math.floor((s % 3600) / 60)} 分`;
+}
+
+/** 下载进度：百分比为主读数，大小 / 速度 / 剩余时间作次要信息（tabular 数字，跳动时不抖动布局）。
+ *  plan-20261021-usage-update：「连接中」没有进度可言，用不定长滑块而不是 0% 的空条；
+ *  断网 / 重试时保留已下载的百分比，只把条调成静止的弱色，避免看起来像卡死或归零。 */
+export function UpdateProgress({ percent, transferred, total, bytesPerSecond, phase, source }: {
   percent: number; transferred?: number; total?: number; bytesPerSecond?: number;
+  phase?: "connecting" | "downloading" | "waiting" | "retrying" | "verifying"; source?: string;
 }) {
   const p = Math.max(0, Math.min(100, Math.round(percent || 0)));
+  const connecting = phase === "connecting";
+  const stalled = phase === "waiting" || phase === "retrying";
   const size = total ? `${fmtBytes(transferred) || "0 KB"} / ${fmtBytes(total)}` : "";
-  const speed = bytesPerSecond ? `${fmtBytes(bytesPerSecond)}/s` : "";
+  const flowing = !stalled && !connecting && phase !== "verifying";
+  const speed = flowing && bytesPerSecond ? `${fmtBytes(bytesPerSecond)}/s` : "";
+  const eta = flowing && bytesPerSecond && total && transferred != null && total > transferred
+    ? `剩余 ${fmtEta((total - transferred) / bytesPerSecond)}` : "";
+  const sub = connecting ? "" : [size, speed, eta, flowing ? source : ""].filter(Boolean).join(" · ");
   return (
     <div className="upd-prog">
-      <div className="upd-prog-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={p}>
-        <div className="upd-prog-fill" style={{ width: `${p}%` }} />
+      <div
+        className={"upd-prog-track" + (connecting ? " is-indeterminate" : "") + (stalled ? " is-stalled" : "")}
+        role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={connecting ? undefined : p}
+      >
+        <div className="upd-prog-fill" style={connecting ? undefined : { width: `${p}%` }} />
       </div>
       <div className="upd-prog-meta">
-        <span className="upd-prog-pct">{p}%</span>
-        <span className="upd-prog-sub">{[size, speed].filter(Boolean).join(" · ")}</span>
+        <span className="upd-prog-pct">{connecting ? "连接中…" : `${p}%`}</span>
+        <span className="upd-prog-sub">{sub}</span>
       </div>
     </div>
   );

@@ -24,11 +24,11 @@ import { PetsPanel } from "./PetsPanel";
 // plan-334-1661：电脑操控专用设置页（内核常驻，不作为 MCP 注册，故不进连接器页）
 import { DesktopPanel } from "./DesktopPanel";
 import { IconAlertCircle, IconArrowDown, IconCheck, IconCopy, IconRefresh, IconSpinner } from "../icons";
-import { Button, Card, Collapse, PageShell, PageTransition } from "../ui";
+import { Button, Card, Collapse, PageShell, PageTransition, Switch } from "../ui";
 import { AppLogo } from "../AppLogo";
 import { ReleaseNotesView, UpdateProgress, countReleaseItems } from "../update/ReleaseNotes";
 import { PlaygroundPanel } from "./PlaygroundPanel";
-import { useUpdaterStore } from "../../store/updater";
+import { useUpdaterStore, type UpdateStatus } from "../../store/updater";
 import { useI18n } from "../../store/i18n";
 import { IconChevronDown } from "../icons";
 
@@ -90,6 +90,17 @@ export const NAV_GROUPS: Array<{ id: SettingsIndexItem["group"]; label: string }
  *  - 「软件更新」收成一行：固定槽位的状态图标 + 主文案 + 操作按钮，下载中在下方给进度条，
  *    有新版本时内联展示更新内容；
  *  - 更新历史为版本行列表（水平分隔），展开后与首启弹窗共用 ReleaseNotesView 排版。 */
+/** 下载中各阶段的一句话说明（点击下载后马上是「连接中」，而不是等第一个数据块才有变化） */
+function downloadPhaseDesc(s: Extract<UpdateStatus, { state: "downloading" }>): string {
+  switch (s.phase) {
+    case "connecting": return "正在连接更新服务器…";
+    case "waiting": return "网络已断开，恢复后会自动接着下载，已下载的部分不会丢";
+    case "retrying": return s.attempt && s.attempt > 1 ? `网络不稳定，正在重试（第 ${s.attempt} 次），已下载的部分不会丢` : "网络不稳定，正在重试，已下载的部分不会丢";
+    case "verifying": return "下载完成，正在校验安装包…";
+    default: return "下载在后台进行，可以继续使用；断网会自动续传";
+  }
+}
+
 function AboutPanel() {
   const status = useUpdaterStore((s) => s.status);
   const appVersion = useUpdaterStore((s) => s.appVersion);
@@ -99,6 +110,8 @@ function AboutPanel() {
   const releaseHistory = useUpdaterStore((s) => s.releaseHistory);
   const releaseSource = useUpdaterStore((s) => s.releaseSource);
   const loadReleaseHistory = useUpdaterStore((s) => s.loadReleaseHistory);
+  const autoDownload = useUpdaterStore((s) => s.autoDownload);
+  const setAutoDownload = useUpdaterStore((s) => s.setAutoDownload);
   const [expandedVersions, setExpandedVersions] = useState<Set<string>>(new Set());
   const [historyLimit, setHistoryLimit] = useState(5);
 
@@ -118,14 +131,21 @@ function AboutPanel() {
   const view: { tone: "ok" | "new" | "busy" | "err" | "idle"; icon: React.ReactNode; title: string; desc: string } =
     status.state === "checking" ? { tone: "busy", icon: <IconSpinner size={16} />, title: "正在检查更新…", desc: `当前 ${cur}` } :
     status.state === "available" ? { tone: "new", icon: <IconArrowDown size={16} />, title: `发现新版本 v${status.version}`, desc: `当前 ${cur}，下载完成后重启即可更新` } :
-    status.state === "downloading" ? { tone: "busy", icon: <IconArrowDown size={16} />, title: `正在下载${status.version ? ` v${status.version}` : "更新"}`, desc: "下载在后台进行，可以继续使用" } :
+    status.state === "downloading" ? {
+      tone: "busy",
+      icon: status.phase === "connecting" ? <IconSpinner size={16} /> : <IconArrowDown size={16} />,
+      title: `正在下载${status.version ? ` v${status.version}` : "更新"}${status.auto ? "（后台自动下载）" : ""}`,
+      desc: downloadPhaseDesc(status),
+    } :
     status.state === "downloaded" ? { tone: "new", icon: <IconRefresh size={16} />, title: `v${status.version} 已准备就绪`, desc: "重启应用即可完成更新" } :
     status.state === "none" ? { tone: "ok", icon: <IconCheck size={16} />, title: "已是最新版本", desc: `${cur} · 来自 ${sourceText}` } :
     status.state === "error" ? { tone: "err", icon: <IconAlertCircle size={16} />, title: "检查更新失败", desc: status.message } :
     { tone: "idle", icon: <IconRefresh size={16} />, title: "软件更新", desc: `当前 ${cur}，自动从 ${sourceText} 检查新版本` };
 
-  const activeVersion = (status.state === "available" || status.state === "downloaded") ? status.version : "";
-  const activeNotes = (status.state === "available" || status.state === "downloaded") ? (status.notes || "") : "";
+  // 下载中也保留「更新内容」（主进程把 notes 带进 downloading 状态），用户等待时可以先看看更新了什么
+  const hasNotes = status.state === "available" || status.state === "downloading" || status.state === "downloaded";
+  const activeVersion = hasNotes ? (status.version ?? "") : "";
+  const activeNotes = hasNotes ? (status.notes || "") : "";
   const busy = status.state === "checking" || status.state === "downloading";
 
   const toggleVersion = (key: string) => setExpandedVersions((prev) => {
@@ -173,7 +193,10 @@ function AboutPanel() {
             </div>
 
             {status.state === "downloading" && (
-              <UpdateProgress percent={status.percent} transferred={status.transferred} total={status.total} bytesPerSecond={status.bytesPerSecond} />
+              <UpdateProgress
+                percent={status.percent} transferred={status.transferred} total={status.total}
+                bytesPerSecond={status.bytesPerSecond} phase={status.phase} source={status.source}
+              />
             )}
 
             {activeNotes && (
@@ -182,6 +205,19 @@ function AboutPanel() {
                 <ReleaseNotesView notes={activeNotes} />
               </div>
             )}
+          </div>
+        )}
+
+        {/* 修改即保存（项目约定）：开关一拨就写入主进程设置；打开时若已发现新版本会立刻开始下载 */}
+        {supported && (
+          <div className="settings-row about-auto-row">
+            <div className="settings-row-info">
+              <div className="settings-row-title">发现新版本时自动下载</div>
+              <div className="settings-row-desc">启动时或定时检查到新版本后，在后台静默下载，完成后在侧栏提示重启更新。网络中断会自动续传，不会从头再来。</div>
+            </div>
+            <div className="settings-row-control">
+              <Switch checked={autoDownload} onChange={(v) => { void setAutoDownload(v); }} aria-label="发现新版本时自动下载" />
+            </div>
           </div>
         )}
       </div>
@@ -240,7 +276,7 @@ function AboutPanel() {
  *  - 副标题用 margin-top:-8px 反向补偿 flex gap，长文案换行时行高错位。
  * 现改为数据驱动：骨架只渲染一次（PageShell），内容组件按 tab 查表。
  */
-const PANELS: Record<SettingsTab, { Comp: React.ComponentType; width?: "standard" | "wide"; card?: boolean; selfHeader?: boolean; fill?: boolean }> = {
+const PANELS: Record<SettingsTab, { Comp: React.ComponentType; width?: "standard" | "wide" | "xwide"; card?: boolean; selfHeader?: boolean; fill?: boolean }> = {
   // general / appearance / memory / about 自带 settings-card(-stack) 结构，不再外包 Card
   general: { Comp: GeneralPanel },
   appearance: { Comp: AppearancePanel },
@@ -262,7 +298,8 @@ const PANELS: Record<SettingsTab, { Comp: React.ComponentType; width?: "standard
   hooks: { Comp: HooksPanel, card: true },
   // S19（plan-41-197c）：记忆页头部固定、列表独立滑动——走填充式布局（fill）
   memory: { Comp: MemoryPanel, fill: true },
-  usage: { Comp: UsagePanel, width: "wide", card: true },
+  // plan-20261021-usage-update：调用记录表有 10 列，用 xwide 档；面板自带卡片（概览 / 调用记录各自成卡），不再外包 Card
+  usage: { Comp: UsagePanel, width: "xwide" },
   diagnostics: { Comp: DiagnosticsPanel, card: true },
   index: { Comp: IndexLibraryPanel, card: true },
   worktrees: { Comp: WorktreesPanel },

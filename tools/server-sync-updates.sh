@@ -2,7 +2,12 @@
 # chatcoder 自建更新源同步（服务器端执行，plan-90-390）
 # 用法: bash server-sync-updates.sh [期望版本号]
 # 流程: 拉取 GitHub 最新 release -> 下载三件套到 staging -> sha512 校验 ->
-#       注入 releaseNotes -> 原子部署 -> 生成 releases.json -> 清理旧版本（只保留最新）
+#       注入 releaseNotes（及可选的额外镜像）-> 原子部署 -> 生成 releases.json -> 清理旧版本
+#       （安装包只保留最新；blockmap 保留最近 10 个，客户端差分更新要用旧版本的 blockmap）
+# 可选环境变量 EXTRA_MIRRORS：空格分隔的额外下载源根地址（https，目录下放同名安装包），
+#       会写进 latest.yml 的 mirrors 字段，客户端下载时与自建源 / GitHub 一起择优、失败自动切换，
+#       不用发新版客户端就能新增国内镜像（对象存储 / CDN 均可），例如：
+#       EXTRA_MIRRORS="https://xxx.oss-cn-hangzhou.aliyuncs.com/chatcoder/" bash server-sync-updates.sh 0.8.6
 set -euo pipefail
 
 REPO="yueyuqingtian/chatcoder"
@@ -82,7 +87,13 @@ import os, sys
 stage = sys.argv[1]
 yml_path = os.path.join(stage, "dl", "latest.yml")
 notes = open(os.path.join(stage, "notes.md"), encoding="utf-8").read().replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+# 额外镜像（EXTRA_MIRRORS）：先写 mirrors 列表——releaseNotes 是块标量，必须放在最后
+mirrors = [m for m in os.environ.get("EXTRA_MIRRORS", "").split() if m.startswith("https://")]
 with open(yml_path, "a", encoding="utf-8") as f:
+    if mirrors:
+        f.write("mirrors:\n")
+        for m in mirrors:
+            f.write("  - " + (m if m.endswith("/") else m + "/") + "\n")
     if not notes:
         f.write("releaseNotes: ''\n")
     else:
@@ -120,14 +131,19 @@ with open(os.path.join(target, "releases.json"), "w", encoding="utf-8") as f:
 print(f"[server-sync] releases.json: {len(items)} 个版本")
 PY
 
-echo "[server-sync] 清理旧版本文件（只保留最新）..."
+echo "[server-sync] 清理旧版本文件（安装包只留最新；blockmap 留最近 10 个）..."
 cd "$TARGET"
 shopt -s nullglob
-for f in chatcoder-Setup-*.exe chatcoder-Setup-*.exe.blockmap; do
+for f in chatcoder-Setup-*.exe; do
   case "$f" in
     *"$VERSION"*) : ;;
     *) echo "  删除 $f"; rm -f "$f" ;;
   esac
+done
+# 客户端的差分更新需要「旧版本」的 blockmap（约 350KB / 个）：此前随安装包一起删，
+# 导致差分在自建源上必然失败、整包 300MB+ 重下。按版本号从新到旧保留 10 个。
+ls -1 chatcoder-Setup-*.exe.blockmap 2>/dev/null | sort -V -r | tail -n +11 | while read -r f; do
+  echo "  删除 $f"; rm -f "$f"
 done
 
 echo "[server-sync] 当前目录:"

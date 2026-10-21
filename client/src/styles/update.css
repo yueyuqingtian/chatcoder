@@ -46,6 +46,7 @@
   background: var(--upd-fill);
   transition: width var(--dur-4) var(--ease-out);
 }
+.sb-upd.is-downloading .ic { flex-shrink: 0; }
 .sb-upd.is-ready { background: var(--upd-brand); color: #fff; }
 .sb-upd.is-ready:hover { background: color-mix(in oklab, var(--upd-brand) 88%, #000); }
 
@@ -58,6 +59,15 @@
   transition: width var(--dur-4) var(--ease-out);
 }
 .upd-prog-meta { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-variant-numeric: tabular-nums; }
+.upd-prog-track { position: relative; }
+/* 连接中：不定长滑块（没有进度可言，不画 0% 的空条）；动效时长走 --dur-loop，减弱动效时随令牌归零 */
+.upd-prog-track.is-indeterminate .upd-prog-fill {
+  position: absolute; inset: 0 auto 0 0; width: 34%;
+  animation: upd-slide var(--dur-loop) var(--ease-in-out) infinite;
+}
+@keyframes upd-slide { 0% { transform: translateX(-110%); } 100% { transform: translateX(300%); } }
+/* 断网 / 重试：保留已下载的百分比，条本身调成静止的弱色 */
+.upd-prog-track.is-stalled .upd-prog-fill { background: color-mix(in oklab, var(--upd-brand) 45%, var(--text-3)); }
 .upd-prog-pct { font-size: 13px; font-weight: 600; color: var(--text-1); }
 .upd-prog-sub { font-size: 12px; color: var(--text-3); }
 
@@ -113,6 +123,8 @@
 .about-upd-desc.is-err { color: var(--error); }
 .about-upd-actions { flex-shrink: 0; display: flex; align-items: center; gap: 8px; }
 .about-upd-notes { padding: 14px 16px 16px; border-radius: var(--r-md); background: var(--surface); }
+/* 自动下载开关行：与上方更新区之间一条细分隔线，内距与 .about-upd 对齐 */
+.about-auto-row { padding: 14px 20px; border-top: 1px solid var(--border-light); border-bottom: none; }
 .about-sub-title { margin-bottom: 12px; font-size: 12px; font-weight: 600; color: var(--text-2); }
 
 /* 更新历史 */

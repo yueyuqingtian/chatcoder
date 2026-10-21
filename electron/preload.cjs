@@ -130,6 +130,9 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
   getUpdateState: () => ipcRenderer.invoke("app:getUpdateState"),
   downloadUpdate: () => ipcRenderer.invoke("app:downloadUpdate"),
   installUpdate: () => ipcRenderer.invoke("app:installUpdate"),
+  // plan-20261021-usage-update：更新设置（发现新版本自动静默下载等）
+  getUpdateSettings: () => ipcRenderer.invoke("app:getUpdateSettings"),
+  setUpdateSettings: (patch) => ipcRenderer.invoke("app:setUpdateSettings", patch || {}),
   getAppVersion: () => ipcRenderer.invoke("app:getVersion"),
   onUpdateStatus: (cb) => {
     const handler = (_e, state) => cb(state);

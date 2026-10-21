@@ -10,12 +10,22 @@ import { create } from "zustand";
 
 import { htmlReleaseNotesToMarkdown } from "../utils/releaseNotes";
 
+/** 下载阶段（plan-20261021-usage-update）：点击后先「连接中」，有数据后「下载中」；
+ *  断网 / 抖动时「等待网络 / 重试中」（已下载的部分保留，恢复后接着下）；下完后「校验中」 */
+export type DownloadPhase = "connecting" | "downloading" | "waiting" | "retrying" | "verifying";
+
 export type UpdateStatus =
   | { state: "idle" }
   | { state: "checking" }
   | { state: "available"; version: string; notes?: string; releaseDate?: string }
   | { state: "none" }
-  | { state: "downloading"; version?: string; percent: number; transferred?: number; total?: number; bytesPerSecond?: number }
+  | {
+      state: "downloading"; version?: string; notes?: string; percent: number;
+      transferred?: number; total?: number; bytesPerSecond?: number;
+      phase?: DownloadPhase; source?: string; attempt?: number;
+      /** true = 发现新版本后的静默自动下载（非用户点击触发） */
+      auto?: boolean;
+    }
   | { state: "downloaded"; version: string; notes?: string; releaseDate?: string }
   | { state: "error"; message: string }
   | { state: "unsupported" };
@@ -37,6 +47,9 @@ interface UpdaterStore {
   releaseSource: "mirror" | "github" | "local" | "none" | "";
   /** 升级后首启"本次更新"数据；null=无需展示 */
   pendingWhatsNew: ReleaseNote[] | null;
+  /** 发现新版本时自动静默下载（设置「关于」里的开关；默认开，与主进程默认一致） */
+  autoDownload: boolean;
+  setAutoDownload: (on: boolean) => Promise<void>;
   /** 订阅主进程状态推送（幂等，App 挂载时调用一次） */
   init: () => void;
   checkForUpdates: () => Promise<void>;
@@ -53,6 +66,7 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
   status: { state: "idle" },
   appVersion: "",
   listening: false,
+  autoDownload: true,
   releaseHistory: [],
   releaseSource: "",
   pendingWhatsNew: null,
@@ -65,6 +79,7 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
     // 主进程可能在订阅前已推送（如启动检查完成），拉一次当前状态兜底
     void api.getUpdateState?.().then((s) => { if (isUpdateStatus(s)) set({ status: normalizeStatus(s) }); });
     void api.getAppVersion?.().then((v) => set({ appVersion: v || "" }));
+    void api.getUpdateSettings?.().then((s) => { if (s && typeof s.autoDownload === "boolean") set({ autoDownload: s.autoDownload }); }).catch(() => { /* 保持默认 */ });
     // plan-230-1144 M4.2: 升级后首启判定（异步，不阻塞初始化）
     void get().checkWhatsNew();
   },
@@ -80,10 +95,29 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
   downloadUpdate: async () => {
     const api = window.chatcoderAPI;
     if (!api) return;
+    // plan-20261021-usage-update：点击即进入「连接中」，不等主进程的第一个进度事件
+    // （此前要等连上服务器、拿到第一个数据块才有变化，点了没反应的体感长达数秒）
+    const before = get().status;
+    if (before.state === "available") {
+      set({ status: { state: "downloading", version: before.version, notes: before.notes, percent: 0, phase: "connecting" } });
+    }
     try {
       const r = await api.downloadUpdate?.();
       if (isUpdateStatus(r)) set({ status: normalizeStatus(r) });
-    } catch { /* ignore */ }
+    } catch {
+      // IPC 失败：还原成点击前的状态，让用户可以再点
+      if (get().status.state === "downloading" && before.state === "available") set({ status: before });
+    }
+  },
+  setAutoDownload: async (on) => {
+    const prev = get().autoDownload;
+    set({ autoDownload: on }); // 修改即保存：先落到界面，失败再还原
+    try {
+      const s = await window.chatcoderAPI?.setUpdateSettings?.({ autoDownload: on });
+      if (s && typeof s.autoDownload === "boolean") set({ autoDownload: s.autoDownload });
+    } catch {
+      set({ autoDownload: prev });
+    }
   },
   installUpdate: async () => {
     await window.chatcoderAPI?.installUpdate?.();
@@ -134,7 +168,7 @@ function isUpdateStatus(v: unknown): v is UpdateStatus {
 /** 状态机里的 notes 可能是 HTML（electron-builder 写入 latest.yml 的 releaseNotes），
  * 统一转成 Markdown 后再入库，保证侧栏浮窗 / 设置页 / 首启弹窗排版一致。 */
 function normalizeStatus(s: UpdateStatus): UpdateStatus {
-  if ((s.state === "available" || s.state === "downloaded") && s.notes) {
+  if ((s.state === "available" || s.state === "downloading" || s.state === "downloaded") && s.notes) {
     return { ...s, notes: htmlReleaseNotesToMarkdown(s.notes) };
   }
   return s;
