@@ -119,7 +119,9 @@ export function StreamingText({ active, thinking, text, processingLabel = "处�
   return (
     <div className="turn-group turn-flow streaming-tail">
       {/* 当前轮次思考中：紧凑行（可点击展开）+ 单行滚动 ticker（思考落库后此行消失，思考块按时间顺序出现在消息流中） */}
-      {thinkingShown && <StreamingThinkingRow text={smoothThinking} threadId={threadId} />}
+      <ChatCollapse open={thinkingShown} className="in-gap">
+        <StreamingThinkingRow text={smoothThinking} threadId={threadId} />
+      </ChatCollapse>
       {displayBody && (
         <div className="turn-item turn-item-text">
           <div className="turn-agent-text">

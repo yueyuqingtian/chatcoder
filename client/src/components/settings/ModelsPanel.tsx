@@ -18,7 +18,7 @@ import { useChatStore } from "../../store/chat";
 import { IconRefresh, IconPlus, IconX, IconTrash, IconPencil, IconEye, IconEyeOff } from "../icons";
 import { Modal } from "../Modal";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { Button, Checkbox, Collapse, Empty, IconButton, Input, PageActions, Segmented, Select, Switch, Tag } from "../ui";
+import { Button, Checkbox, Collapse, Empty, IconButton, Input, PageActions, Segmented, Select, Switch, Tag, Tooltip } from "../ui";
 import { Sw } from "./shared";
 import { Ta3QuotaSection } from "./Ta3QuotaSection";
 import { KiroQuotaSection } from "./KiroQuotaSection";
@@ -226,16 +226,21 @@ function ScanModelsModal({ open, provider, onClose, onSaved }: { open: boolean; 
       }
     >
       <div style={{ padding: 18 }}>
-        {loading && <div className="navpage-empty">正在向供应商请求模型列表…</div>}
-        {error && <div className="navpage-empty" style={{ color: "var(--error)" }}>扫描失败：{error}</div>}
-        {!loading && !error && (
+        {/* 状态提示与结果区走 Collapse：切换时平滑展开 / 收起，避免整块条件挂载造成跳动 */}
+        <Collapse open={loading} lazy>
+          <div className="navpage-empty">正在向供应商请求模型列表…</div>
+        </Collapse>
+        <Collapse open={!!error} lazy>
+          <div className="navpage-empty" style={{ color: "var(--error)" }}>扫描失败：{error}</div>
+        </Collapse>
+        <Collapse open={!loading && !error} lazy>
           <>
             <div className="models-hint">共发现 {items.length} 个模型，勾选要启用的模型并配置上下文 / 多模态</div>
             <div className="scan-list">
               {items.map((it) => (
                 <div key={it.name} className={"scan-item" + (it.enabled ? "" : " off")}>
                   <Checkbox checked={it.enabled} onChange={(v) => patch(it.name, { enabled: v })} aria-label={`启用 ${it.name}`} />
-                  <span className="scan-name" title={it.name}>{it.name}</span>
+                  <Tooltip content={it.name}><span className="scan-name">{it.name}</span></Tooltip>
                   <label>上下文 <Input className="scan-ctx" value={it.context_window} onChange={(e) => patch(it.name, { context_window: e.target.value })} /></label>
                   <label><Checkbox checked={it.is_multimodal} onChange={(v) => patch(it.name, { is_multimodal: v })} /> 多模态</label>
                 </div>
@@ -243,7 +248,7 @@ function ScanModelsModal({ open, provider, onClose, onSaved }: { open: boolean; 
               {items.length === 0 && <div className="navpage-empty">供应商未返回任何模型</div>}
             </div>
           </>
-        )}
+        </Collapse>
       </div>
     </Modal>
   );
@@ -949,9 +954,11 @@ export function ModelsPanel() {
                       <div className="models-cred-actions">
                         {selected.api_format === "workbuddy" && (
                           <>
-                            <button className="btn btn-ghost btn-xs" title="刷新积分余额" onClick={() => loadCredits(selected, true)}>
-                              <IconRefresh size={12} />
-                            </button>
+                            <Tooltip content="刷新积分余额">
+                              <button className="btn btn-ghost btn-xs" onClick={() => loadCredits(selected, true)}>
+                                <IconRefresh size={12} />
+                              </button>
+                            </Tooltip>
                             <button className="btn btn-ghost btn-xs" onClick={() => handleCheckin(selected, c.id)} disabled={busy} title="为该账号签到">签到</button>
                           </>
                         )}
@@ -991,12 +998,16 @@ export function ModelsPanel() {
                       {busy ? "签到中…" : "Buddy 加油站 · 签到领取积分"}
                     </button>
                     {/* 积分余额（多账号合计）+ 实时刷新 */}
-                    <span className="models-credits-head" title="workbuddy 积分余额（多账号时为合计）">
-                      积分 {totalCredits != null ? formatCredits(totalCredits) : "--"}
-                      <button className="btn btn-ghost btn-xs" title="刷新积分余额" onClick={() => loadCredits(selected, true)}>
-                        <IconRefresh size={12} />
-                      </button>
-                    </span>
+                    <Tooltip content="workbuddy 积分余额（多账号时为合计）">
+                      <span className="models-credits-head">
+                        积分 {totalCredits != null ? formatCredits(totalCredits) : "--"}
+                        <Tooltip content="刷新积分余额">
+                          <button className="btn btn-ghost btn-xs" onClick={() => loadCredits(selected, true)}>
+                            <IconRefresh size={12} />
+                          </button>
+                        </Tooltip>
+                      </span>
+                    </Tooltip>
                     <span className="models-hint" style={{ padding: 0 }}>打开软件后会自动后台签到，此处可手动补签。</span>
                   </div>
                 )}

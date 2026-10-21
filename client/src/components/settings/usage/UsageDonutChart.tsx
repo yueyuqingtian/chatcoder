@@ -1,6 +1,7 @@
 /** 模型用量环形图：SVG donut + 右侧图例列表 + 悬停分段高亮/tooltip/图例联动。纯 SVG，无依赖。 */
 import { useState, type CSSProperties } from "react";
 import { fmtTokens } from "./chartUtils";
+import { Tooltip } from "../../ui";
 
 export interface DonutSeg {
   label: string;
@@ -103,7 +104,7 @@ export function UsageDonutChart({ segments, centerValue }: { segments: DonutSeg[
                 {hover.children.map((c) => (
                   <div key={c.label} className="usage-tip-row">
                     <i className="usage-trend-dot" style={{ background: c.color }} />
-                    <span className="usage-tip-name" title={c.label}>{c.label}</span>
+                    <Tooltip content={c.label}><span className="usage-tip-name">{c.label}</span></Tooltip>
                     <span className="usage-tip-val">{fmtTokens(c.value)}</span>
                   </div>
                 ))}
@@ -120,7 +121,7 @@ export function UsageDonutChart({ segments, centerValue }: { segments: DonutSeg[
             onMouseEnter={() => setHoverIdx(i)}
           >
             <i className="usage-donut-dot" style={{ background: s.color }} />
-            <span className="usage-donut-legend-name" title={s.label}>{s.label}</span>
+            <Tooltip content={s.label}><span className="usage-donut-legend-name">{s.label}</span></Tooltip>
             <span className="usage-donut-legend-pct">{s.pct}%</span>
             <span className="usage-donut-legend-val">{fmtTokens(s.value)}</span>
           </div>

@@ -45,6 +45,9 @@ logger = logging.getLogger(__name__)
 
 # 参与压缩的消息类型（plan-19-82 步骤5：纳入 THINKING——此前既不参与压缩候选，
 # 重建历史时又被保留，导致 thinking 占用被永久保留、压缩后占用居高不下）。
+# LLM 摘要连续失败达到该次数后，同一次压缩内不再调用 LLM（参照 zcode 的压缩熔断）
+_LLM_FAIL_LIMIT = 3
+
 _COMPACT_KEEP_TYPES = {
     MsgType.TEXT.value, MsgType.TOOL_CALL.value, MsgType.TOOL_RESULT.value,
     MsgType.THINKING.value,
@@ -449,6 +452,7 @@ async def compact_session(
     shadowed_all: list = []
     summaries: list[str] = []
     rounds = 0
+    _llm_fail = 0  # 本次压缩内 LLM 连续失败次数（熔断用）
     while rounds < max_rounds:
         # 剩余候选总量已 <= 可压缩预算 → 达标，停止
         # plan-282-0: 用「有效口径」（剥离旧 reasoning 后）判定，与真实出站一致。
@@ -462,7 +466,9 @@ async def compact_session(
         if not chunk:
             break
         summary_text = ""
-        if provider is None:
+        _chunk_chars = sum(len(str(getattr(m, "content", "") or "")) for m in chunk)
+        # 熔断：本次压缩内 LLM 连续失败达上限后，剩余轮次直接用规则摘要，不再反复调用
+        if provider is None or _llm_fail >= _LLM_FAIL_LIMIT:
             summary_text = _fallback_summary(chunk, language=language)
         else:
             summary_text = await _summarize_with_llm(
@@ -470,9 +476,20 @@ async def compact_session(
                 workspace_dir=resolve_workspace_root(getattr(session, "workspace_root", None)),
                 language=language,
             )
-            if not summary_text:
+            if summary_text:
+                _llm_fail = 0
+            else:
+                _llm_fail += 1
+                logger.warning("[compressor] session=%s LLM 摘要失败（连续 %d 次），本轮降级规则摘要",
+                               session.id, _llm_fail)
                 summary_text = _fallback_summary(chunk, language=language)
         summary_text = summary_text.strip()
+        # 质量门：摘要不比原文短就没有压缩价值（反而增加占用）；先换规则摘要，仍不更短则放弃本轮
+        if summary_text and _chunk_chars and len(summary_text) >= _chunk_chars:
+            summary_text = _fallback_summary(chunk, language=language).strip()
+            if summary_text and len(summary_text) >= _chunk_chars:
+                logger.warning("[compressor] session=%s 摘要不短于原文，放弃本轮压缩", session.id)
+                summary_text = ""
         if not summary_text:
             logger.warning("[compressor] session=%s 第 %d 轮摘要为空，停止迭代", session.id, rounds + 1)
             break

@@ -1715,15 +1715,13 @@ export interface MarketCatalogOut {
 export interface GlobalSettingsOut {
   memory_enabled: boolean;
   global_rules: string;
-  auto_compact_enabled: boolean;
-  /** plan-278-1391: 上下文压缩触发阈值（0.50~0.95，默认 0.90） */
+  /** plan-278-1391: 上下文压缩触发阈值（0.50~0.95，默认 0.90）；压缩常开，由此阈值决定何时触发 */
   auto_compact_threshold_ratio?: number;
   language: string;
   /** plan-75-332: 以下五项旧风控已废弃（后端仅保留字段兼容旧 config.json，
    *  不再参与任何判定）——是否需审批统一由会话权限模式裁决。 */
   auto_approve_tools: boolean;
   force_approval_tools: string;
-  session_token_budget: number;
   /** 常规面板补项 */
   terminal_shell: string;
   terminal_font: string;
@@ -1754,6 +1752,11 @@ export interface GlobalSettingsOut {
   agent_retry_count?: number;
   /** v45: 每次重试前的等待秒数（逗号分隔，默认 10,20,30） */
   agent_retry_intervals?: string;
+  /** 采样温度（0–2）：工具轮 / 文本轮，默认 0.3 / 0.7；Claude 系与思考模式下由适配器按规则忽略 */
+  agent_tool_temperature?: number;
+  agent_text_temperature?: number;
+  /** 单次最大输出 token（0 = 不限制；官方直连由适配器按模型兜底） */
+  agent_max_output_tokens?: number;
   browser_enabled?: boolean;
   browser_headless?: boolean;
   /** 下一步建议卡开关（默认关闭；开启后智能体 / 工作流模式才注入建议卡工具与提示词） */

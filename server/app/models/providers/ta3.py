@@ -30,7 +30,7 @@ import httpx
 
 from app.core.config import settings
 from app.models.base import ModelProvider
-from app.models.providers.temperature_policy import pick_temperature
+from app.models.providers.temperature_policy import request_temperature
 from app.models.providers.tool_args import parse_tool_args
 from app.models.providers.ta3_tool_aliases import FROM_TA3, TO_TA3, disguise_args, restore_args
 from app.models.providers.ta3_mcp import (
@@ -546,10 +546,10 @@ class Ta3Provider(ModelProvider):
             "messages": self._sanitize_openai_tool_pairing(raw_msgs),
             "stream": True,
         }
-        # 对齐参考项目：temperature 用目录 completionOptions，默认 0.1。
-        # 模型名任一来源携带 claude 字样时只发默认温度，非默认值会被网关 400 拒绝。
-        _temp = pick_temperature(
-            None,
+        # 温度统一取值（temperature_policy.request_temperature）：思考开启时不设置；否则取设置中心的温度，
+        # 未给出时回落目录 completionOptions，再回落默认 0.1。Claude 系只下发默认温度。
+        _temp = request_temperature(
+            request,
             model_name=_identity(self._model_name, self._meta),
             extra_names=(request.model,),
             base_url=self._base_url,
@@ -774,20 +774,17 @@ class Ta3Provider(ModelProvider):
             "messages": messages,
             "stream": True,
         }
-        # kimi 保留专用采样温度；模型名任一来源携带 claude 字样时只发默认温度。
-        if is_kimi:
-            body["temperature"] = 0.2
-        else:
-            _temp = pick_temperature(
-                None,
-                model_name=_identity(self._model_name, self._meta),
-                extra_names=(request.model,),
-                base_url=self._base_url,
-                catalog_default=opts.get("temperature"),
-                non_claude_default=_DEFAULT_TEMPERATURE,
-            )
-            if _temp is not None:
-                body["temperature"] = _temp
+        # kimi 与其它模型一样遵循设置中心的统一温度（不再硬编码 0.2）；思考开启时不设置温度。
+        _temp = request_temperature(
+            request,
+            model_name=_identity(self._model_name, self._meta),
+            extra_names=(request.model,),
+            base_url=self._base_url,
+            catalog_default=opts.get("temperature"),
+            non_claude_default=_DEFAULT_TEMPERATURE,
+        )
+        if _temp is not None:
+            body["temperature"] = _temp
         if _catalog_max:
             body["max_tokens"] = int(min(request.max_tokens or _catalog_max, _catalog_max))
         elif request.max_tokens:

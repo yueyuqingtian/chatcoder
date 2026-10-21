@@ -10,7 +10,7 @@ import { usePanelStore } from "../store/panel";
 import { sessionKey, useBrowserStore } from "../store/browser";
 import { useI18n } from "../store/i18n";
 import { ConfirmDialog } from "./ConfirmDialog";
-import { Input } from "./ui";
+import { Input, Tooltip } from "./ui";
 import { WorktreeCreateDialog } from "./worktree/WorktreeCreateDialog";
 import { IconGitBranch as IconGitBranchTb } from "./icons";
 import {
@@ -189,14 +189,18 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page
           <span className="titlebar-workspace-title">{currentSessionId ? (session?.title || t("titlebar.new_task")) : t("titlebar.new_task")}</span>
         )}
         {projectName && (
-          <span className="titlebar-workspace-project" title={project?.path}>
-            <IconFolder size={13} /> {projectName}
-          </span>
+          <Tooltip content={project?.path}>
+            <span className="titlebar-workspace-project">
+              <IconFolder size={13} /> {projectName}
+            </span>
+          </Tooltip>
         )}
         {session?.worktree_path && (
-          <span className="titlebar-workspace-project" title={session.worktree_path}>
-            <IconGitBranch size={13} /> {t("titlebar.worktree")}
-          </span>
+          <Tooltip content={session.worktree_path}>
+            <span className="titlebar-workspace-project">
+              <IconGitBranch size={13} /> {t("titlebar.worktree")}
+            </span>
+          </Tooltip>
         )}
         {/* plan-156-621：子会话不提供工作树入口——它跟随主会话的工作区，
             以子会话 id 调 createWorktree 语义未定义（侧栏也只对主会话提供该入口）。 */}

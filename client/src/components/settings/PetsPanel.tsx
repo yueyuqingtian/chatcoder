@@ -8,7 +8,7 @@
  * 展示时必须裁出**左上角第一帧**，否则卡片里会露出一整排 8 个帧、认不出是什么宠物。
  */
 import { useEffect, useState } from "react";
-import { Button, Input, List, ListRow, Segmented, Slider, Switch } from "../ui";
+import { Button, Input, List, ListRow, Segmented, Slider, Switch, Tooltip } from "../ui";
 import { Row } from "./shared";
 import { usePetsStore } from "../../store/pets";
 import type { GalleryPet } from "../../store/pets";
@@ -323,10 +323,12 @@ export function PetsPanel() {
             {shown.map((p) => (
               <div className={`pets-card${p.installed ? " is-installed" : ""}`} key={p.slug}>
                 <PetThumb pet={p} />
-                <div className="pets-card-name" title={p.displayName}>{p.displayName}</div>
-                <div className="pets-card-meta" title={[p.author, p.kind].filter(Boolean).join(" · ")}>
-                  {p.author || p.kind || p.slug}
-                </div>
+                <Tooltip content={p.displayName}><div className="pets-card-name">{p.displayName}</div></Tooltip>
+                <Tooltip content={[p.author, p.kind].filter(Boolean).join(" · ")}>
+                  <div className="pets-card-meta">
+                    {p.author || p.kind || p.slug}
+                  </div>
+                </Tooltip>
                 {p.installed ? (
                   <Button size="xs" variant="subtle" disabled>已安装</Button>
                 ) : (

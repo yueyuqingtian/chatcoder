@@ -291,7 +291,7 @@ class ServerToolExecutor(ToolExecutor):
 
         tool = tool_registry.get(tool_name)
         if tool is None:
-            return ToolResult(ok=False, output="", error=_unknown_tool_error(tool_name))
+            return ToolResult(ok=False, output="", error=_unknown_tool_error(tool_name), error_code="NOT_FOUND")
 
         # agent 白名单校验已由调用方（agent_loop）控制，此处只做统一权限裁决
 
@@ -368,10 +368,12 @@ class ServerToolExecutor(ToolExecutor):
             import asyncio
 
             from app.core.config import settings as _settings
+            # 在分支之前赋值：except TimeoutError 会引用它，此前仅在 else 分支定义，
+            # ask_user_question 路径若抛超时会触发 UnboundLocalError
+            _timeout = float(_settings.tool_exec_timeout_sec)
             if tool_name == "ask_user_question":
                 result = await tool.run(args, ctx)
             else:
-                _timeout = float(_settings.tool_exec_timeout_sec)
                 result = await asyncio.wait_for(tool.run(args, ctx), timeout=_timeout)
             # plan-248-1258 M3.1: 写盘类工具成功后通知符号索引（失效该文件 + 标记待增量），
             # 使已开启索引的工作区在文件变更后自动更新（需求：修改文件时自动更新）。
@@ -380,10 +382,11 @@ class ServerToolExecutor(ToolExecutor):
                 await workflow_guard.after_tool(
                     tool_name, args if args is not None else {}, agent=agent, ctx=ctx, result=result
                 )
+            result.classify_if_missing()
             return result
         except asyncio.TimeoutError:
             logger.error("工具执行超时 %s", tool_name)
-            return ToolResult(ok=False, output="", error=f"工具执行超时({_timeout:.0f}s): {tool_name}")
+            return ToolResult(ok=False, output="", error=f"工具执行超时({_timeout:.0f}s): {tool_name}", error_code="TIMEOUT")
         except Exception as e:
             # v36: 记录完整堆栈（含异常链），并保留异常类型——
             # 仅凭 "工具异常: <msg>" 无法定位抛错文件与行号。
@@ -392,7 +395,7 @@ class ServerToolExecutor(ToolExecutor):
                 tool_name=tool_name, call_key=call_key, exc=e,
                 args=args, phase="run",
             )
-            return ToolResult(ok=False, output="", error=f"工具异常: {type(e).__name__}: {e}")
+            return ToolResult(ok=False, output="", error=f"工具异常: {type(e).__name__}: {e}", error_code="INTERNAL")
 
 
 # 全局单例(本期服务端执行)

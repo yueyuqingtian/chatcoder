@@ -41,7 +41,7 @@ CAP_SUBSESSION = "subsession"
 
 # ── 内置矩阵：唯一事实源 ──
 CAPABILITIES: dict[str, frozenset[str]] = {
-    MODE_READONLY: frozenset(),
+    MODE_READONLY: frozenset({CAP_EXPLORE_AGENT}),
     MODE_PLAN: frozenset({CAP_EXPLORE_AGENT}),
     MODE_AGENT: frozenset({CAP_EXPLORE_AGENT, CAP_SUBSESSION}),
     MODE_WORKFLOW: frozenset({CAP_EXPLORE_AGENT}),

@@ -579,7 +579,8 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
               if (e.key === "Escape") { e.preventDefault(); setRenaming(null); }
             }} />
         ) : (
-          <span className="sb-session-title" title={s.title || `会话 ${s.id}`}
+          <Tooltip content={s.title || `会话 ${s.id}`}>
+          <span className="sb-session-title"
             onMouseEnter={(e) => {
               // S1：标题溢出时 hover 跑马灯浏览全文（测量后写 CSS 变量，不改 state 避免重渲染）
               const el = e.currentTarget;
@@ -593,6 +594,7 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
           >
             <span className="sb-title-inner">{s.title || t("sidebar.new_task")}</span>
           </span>
+          </Tooltip>
         )}
         {/* plan-156-620：子会话开关——点击折叠 / 展开该会话下的子会话（记忆选择）。
             plan-20261018-sidebar-toggle：由「数量 + 箭头」胶囊改为与行尾归档 / 三点同规格的
@@ -736,9 +738,11 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
         {/* plan-20261017-sbwt：名称与标签放进同一主区，悬停操作以叠加层浮在右侧并淡出主区尾部，
             不再参与排版——此前操作按钮 display:none→flex 会挤压名称与标签造成跳变 */}
         <span className="sb-project-main">
-          <span className="sb-project-name" title={isWorktree ? `${p.worktree_branch || ""} · ${p.path}` : p.path}>
-            {displayName}
-          </span>
+          <Tooltip content={isWorktree ? `${p.worktree_branch || ""} · ${p.path}` : p.path}>
+            <span className="sb-project-name">
+              {displayName}
+            </span>
+          </Tooltip>
           {branchTag && (
             <Tooltip content={`分支 ${branchTag}`} side="top">
               <span className="sb-worktree-tag">{branchTag}</span>
@@ -899,8 +903,8 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
               ]}
             />
             <div className="sb-view-actions">
-              <button className={"sb-icon-btn" + (sortMenuOpen ? " active" : "")} title={t("sidebar.sort_title")} onClick={() => setSortMenuOpen(!sortMenuOpen)}><IconSortDesc size={14} /></button>
-              <button className="sb-icon-btn" title={t("sidebar.new_project")} onClick={handleNewProject}><IconFolderPlus size={14} /></button>
+              <Tooltip content={t("sidebar.sort_title")}><button className={"sb-icon-btn" + (sortMenuOpen ? " active" : "")} onClick={() => setSortMenuOpen(!sortMenuOpen)}><IconSortDesc size={14} /></button></Tooltip>
+              <Tooltip content={t("sidebar.new_project")}><button className="sb-icon-btn" onClick={handleNewProject}><IconFolderPlus size={14} /></button></Tooltip>
             </div>
             {sortMenuOpen && (
               <div className="context-menu sb-context-menu sb-sort-menu" onClick={() => setSortMenuOpen(false)}>
@@ -981,7 +985,7 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
 
       {/* 底部设置入口 */}
       <div className="sb-userbar">
-        <button className={`sb-user-settings${active === "settings" ? " active" : ""}`} title={t("cmd.settings")} onClick={() => onChange("settings")}><IxSettings size={16} /><span>{t("cmd.settings")}</span></button>
+        <Tooltip content={t("cmd.settings")}><button className={`sb-user-settings${active === "settings" ? " active" : ""}`} onClick={() => onChange("settings")}><IxSettings size={16} /><span>{t("cmd.settings")}</span></button></Tooltip>
         <UpdateBadge />
       </div>
 

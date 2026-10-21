@@ -247,6 +247,28 @@ async function main() {
     exeGone = false;
   }
 
+  // ═════════ E 取消下载 / 切换自建源（plan-20261022-update-route，真实 CancellationToken）═════════
+  {
+    const s = makeStack(tmp, base, "E", { autoDownload: false });
+    pieceDelay = 4;
+    await s.manager.checkForUpdates();
+    await until(() => s.manager.getState().state === "available", 8000, "available");
+    s.manager.downloadNow();
+    await until(() => (s.manager.getState().percent || 0) >= 15, 30000, "下载过半前");
+    await s.manager.cancelDownload();
+    results.E_cancelBackToAvailable = s.manager.getState().state === "available" && !s.manager._internals.isDownloadActive();
+    const partial = path.join(s.cacheRoot, "chatcoder-updater-e2e", "partial");
+    results.E_cancelKeepsPartial = fs.existsSync(partial) && fs.readdirSync(partial).some((f) => f.endsWith(".part.json"));
+    // 再次下载 → 下到一半点「切换自建源」→ 重新开始并接着下完
+    s.manager.downloadNow();
+    await until(() => (s.manager.getState().percent || 0) >= 40, 30000, "续传过 40%");
+    await s.manager.switchToPrimary();
+    results.E_switchRestarts = s.manager.getState().state === "downloading";
+    pieceDelay = 0;
+    await until(() => s.manager.getState().state === "downloaded", 60000, "切换后下载完成");
+    results.E_switchSameContent = Buffer.compare(fs.readFileSync(s.pendingFile()), FILE) === 0;
+  }
+
   await new Promise((r) => server.close(r));
   fs.rmSync(tmp, { recursive: true, force: true });
 
@@ -256,6 +278,7 @@ async function main() {
     "B_noAvailableFlash", "B_firstIsConnecting", "B_notesKept", "B_downloaded", "B_sameContent", "B_sawProgress",
     "C_availableNotDownloading", "C_instantFeedback", "C_checkDuringDownloadKeepsState", "C_downloaded", "C_installReturnsTrue", "C_installCalled",
     "D_clearError", "D_notStuckDownloading",
+    "E_cancelBackToAvailable", "E_cancelKeepsPartial", "E_switchRestarts", "E_switchSameContent",
   ];
   const failed = mustBeTrue.filter((k) => results[k] !== true);
   process.stdout.write(`E2E_RESULT ${JSON.stringify({ ok: failed.length === 0, failed, ...results })}\n`);

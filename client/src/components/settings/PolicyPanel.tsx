@@ -52,8 +52,9 @@ function RulesSection() {
 
   const handleSave = async () => {
     if (!formValid()) return;
+    // 先新建、成功后再删旧规则：新建失败时原规则保持不变，不会出现“删了却没建上”的丢失。
+    // 后端 command_pattern 无唯一约束，同模式的新旧规则可以并存，不会因此冲突。
     try {
-      if (editingId != null) await api.deleteExecPolicyRule(editingId);
       if (form.ruleType === "tool") {
         // 工具级规则：command_pattern 存 "(tool)xxx"（与 ws.py 审批卡"始终允许"生成格式一致）
         await api.createExecPolicyRule({
@@ -69,6 +70,7 @@ function RulesSection() {
           justification: form.justification.trim() || undefined,
         });
       }
+      if (editingId != null) await api.deleteExecPolicyRule(editingId);
       resetForm(); load();
     } catch (e) { useChatStore.setState({ error: String(e) }); }
   };
@@ -467,11 +469,13 @@ function ModeProfilesSection() {
                   <Fragment key={g.key}>
                     <div className="perm-tool-group">{g.label}（{g.items.length}）</div>
                     {g.items.map((t) => (
-                      <label key={t.name} className="perm-tool-check" title={t.description || undefined}>
-                        <Checkbox checked={editing.tools.includes(t.name)} onChange={() => startToolToggle(t.name)} aria-label={`${t.name} 白名单`} />
-                        <code>{t.name}</code>
-                        <span className="perm-tool-risk" data-risk={t.risk_level}>{t.risk_level}</span>
-                      </label>
+                      <Tooltip key={t.name} content={t.description || undefined}>
+                        <label className="perm-tool-check">
+                          <Checkbox checked={editing.tools.includes(t.name)} onChange={() => startToolToggle(t.name)} aria-label={`${t.name} 白名单`} />
+                          <code>{t.name}</code>
+                          <span className="perm-tool-risk" data-risk={t.risk_level}>{t.risk_level}</span>
+                        </label>
+                      </Tooltip>
                     ))}
                   </Fragment>
                 ))}

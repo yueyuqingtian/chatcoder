@@ -93,6 +93,8 @@ export function ExtensionPicker({ open, kind, items, onPick, onClose, onLeaveMen
     else if (er.bottom > lr.bottom) list.scrollTop += er.bottom - lr.bottom;
   }, [hl]);
 
+  // closeOnOutside=false：子菜单的触发按钮位于父级 PlusMenu 之内，子浮层若响应外部点击，
+  // 每次点击触发按钮都会“先关后开”。外部点击由父级统一收起；Esc 仍由本浮层响应。
   return (
     <Popover open={open} onClose={onClose} placement="right-end" className="cc-ext-pop" role="dialog" aria-label={`选择${noun}`} closeOnOutside={false}>
       <div className="pop-search">

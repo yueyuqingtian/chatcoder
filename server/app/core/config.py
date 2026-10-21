@@ -43,7 +43,6 @@ class Settings(BaseSettings):
     default_context_window: int = 1000000
     # v3.0: 上下文压缩相关配置（对齐 codex openai_models.rs）
     # 是否启用自动压缩
-    context_compaction_enabled: bool = True
     # v6.1: 对齐 codex -- auto_compact_token_limit = context_window * 90%
     auto_compact_threshold_ratio: float = 0.90
     # v16: 已移除 api_copy_fold_ratio（按占用比例折叠工具结果的隐式压缩）——
@@ -111,9 +110,9 @@ class Settings(BaseSettings):
     agent_text_temperature: float = 0.7
 
     # v6.5: 模型单次输出最大 token 数。
-    # 不限制输出：默认 0 = 请求不携带 max_tokens 字段，由网关/模型自身输出上限决定
-    # （修复"输出达到 token 上限，可能不完整"）。需要显式上限时（如个别网关默认值
-    # 很小导致截断）再配置具体数值。
+    # 不限制输出：默认 0 = 请求不携带 max_tokens 字段，由网关/模型自身输出上限决定；
+    # 例外：官方直连 api.anthropic.com 该字段必填，由 anthropic 适配器兜底为软件输出上限 128K。
+    # 需要显式上限时（如个别网关默认值很小导致截断）在设置中心「最大输出」中配置。
     agent_max_output_tokens: int = 0
 
     # v28: 模型流式响应空闲超时（秒）——SSE 流两次数据帧之间的最大间隔。
@@ -240,7 +239,17 @@ class Settings(BaseSettings):
 
     # v1.1: 工具输出字符阈值分级（痛点1：替代全局 3000 硬截断）
     # v15: fs_read 上限提到 16000，与内存/落库截断对齐，避免大文件一次读不全被迫分页重读
-    tool_output_chars_read: int = 16000        # fs_read / fs_list
+    # 字节口径（UTF-8）：中文 1 字符≈3 字节，按字符计会低估 token。fs_read 的窗口即其自身的单次预算，
+    # 不再套用 MAX_TOOL_OUTPUT_CHARS 的头部截断，避免“窗口→截成前段→再读”的循环。
+    tool_output_bytes_read: int = 32768        # fs_read 单次窗口上限（行窗口与字节双上限，先到者为准）
+    tool_output_chars_read: int = 16000        # 已弃用：仅保留读取兼容，运行时以 tool_output_bytes_read 为准
+    # 其余工具同为字节口径（参照 zcode：grep 20000 字节、终端 30000 字节；网页与兜底取中间值）。
+    # 终端保留头部 8KB + 尾部 22KB（报错多在尾部），超出部分落盘并给出续读方式。
+    tool_output_bytes_grep: int = 20480        # fs_grep / codebase_search
+    tool_output_bytes_terminal: int = 30720    # terminal_exec（头 8KB + 尾 22KB 呈现）
+    tool_output_bytes_terminal_tail: int = 22528  # 终端输出尾部保留量
+    tool_output_bytes_web: int = 12288         # web_fetch / web_search
+    tool_output_bytes_default: int = 16384     # 其它工具兜底
     tool_output_chars_grep: int = 16000        # fs_grep / codebase_search
     tool_output_chars_terminal: int = 12000    # terminal_exec
     tool_output_chars_web: int = 8000          # web_fetch / web_search
@@ -293,7 +302,6 @@ class Settings(BaseSettings):
     context_main_summarize_ratio: float = 0.15     # 主会话摘要触发阈值比例
     context_main_summarize_batch_ratio: float = 0.10  # 每次摘要目标 token 量比例
     context_thread_window_ratio: float = 0.30      # 子代理线程窗口比例
-    context_auto_compact_threshold_ratio: float = 0.90  # 自动压缩触发阈值比例
     # v6.1: reasoning_effort 控制推理深度（对齐 codex ReasoningEffort enum）
     # codex 默认 Medium；可选 none/minimal/low/medium/high/xhigh/max
     # none 表示不传（用模型默认，兼容不支持 reasoning 的模型/网关）
@@ -319,7 +327,6 @@ class Settings(BaseSettings):
     super_summary_keep_latest: int = 3  # 超级摘要保留最新 N 条不压缩
 
     # v4.6: 单会话 token 预算--超过此值任务自动终止
-    session_token_budget: int = 2_000_000
     # plan-474-2105：单会话子代理并发上限：单个会话内同时运行的子代理数；
     # 达到后新派发先排队等空位，超时即拒绝。设置中心可改（1~30）。
     max_concurrent_subagents: int = 4

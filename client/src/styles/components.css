@@ -126,10 +126,10 @@
   position: relative;
   flex-grow: 1;
   height: 4px;
-  border-radius: 2px;
+  border-radius: var(--r-sm);
   background: var(--border-strong);
 }
-.ui-slider-range { position: absolute; height: 100%; border-radius: 2px; background: var(--accent); }
+.ui-slider-range { position: absolute; height: 100%; border-radius: var(--r-sm); background: var(--accent); }
 .ui-slider-thumb {
   display: block;
   width: 14px;

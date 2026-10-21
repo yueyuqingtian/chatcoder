@@ -2204,7 +2204,12 @@ function QuestionWizardBox({
   const stepIndex = draft?.stepIndex ?? 0;
   const answers = draft?.answers ?? {};
   const [customText, setCustomText] = useState("");
-  const customInputRef = useRef<HTMLInputElement>(null);
+  const customInputRef = useRef<HTMLTextAreaElement>(null);
+  // 自定义回答支持多行：高度随内容增长（上限见 CSS），不依赖原生 field-sizing
+  const autosizeCustom = (el: HTMLTextAreaElement) => {
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  };
   const wizardRef = useRef<HTMLDivElement>(null);
   // plan-278-1391: 选项浮窗——单行截断的长选项在悬停/键盘聚焦时完整展示。
   const [optTip, setOptTip] = useState<
@@ -2318,6 +2323,8 @@ function QuestionWizardBox({
     const ae = document.activeElement;
     if (ae && ae !== document.body && !wizardRef.current?.contains(ae)) return;
     if (e.isComposing || e.keyCode === 229 || e.altKey || e.ctrlKey || e.metaKey || optionCount === 0) return;
+    // 自定义回答已含换行：上下键交给光标在多行文本内移动，不抢占选项导航
+    if ((e.key === "ArrowUp" || e.key === "ArrowDown") && ae === customInputRef.current && customText.includes("\n")) return;
     const hl = Math.min(kbIndex, optionCount - 1);
     if (e.key === "Tab" || e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
@@ -2351,9 +2358,11 @@ function QuestionWizardBox({
       <div className="question-wizard-header">
         <div className="question-wizard-title-group">
           <span className="question-wizard-tag">{taskTag}</span>
-          <span className="question-wizard-title-text" title={String(currentQ.question ?? "")}>
-            {String(currentQ.question ?? "请确认执行偏好")}
-          </span>
+          <Tooltip content={String(currentQ.question ?? "")}>
+            <span className="question-wizard-title-text">
+              {String(currentQ.question ?? "请确认执行偏好")}
+            </span>
+          </Tooltip>
         </div>
         <div className="question-wizard-pager">
           <button
@@ -2407,12 +2416,17 @@ function QuestionWizardBox({
             <div className={`question-wizard-custom-row${kbIndex === customIdx ? " is-kb" : ""}`}>
               <span className="question-wizard-opt-num">{currentOptions.length + 1}.</span>
               {/* 回车确认由卡片级键盘处理统一负责（见 kbHandlerRef），这里只把高亮移到自定义行 */}
-              <input
+              {/* 多行文本：回车确认（卡片级键盘处理），Shift+回车换行 */}
+              <textarea
                 ref={customInputRef}
                 className="question-wizard-custom-input"
-                placeholder="输入自定义回答，按回车确认…"
+                rows={1}
+                placeholder="输入自定义回答，回车确认，Shift+回车换行…"
                 value={customText}
-                onChange={(e) => setCustomText(e.target.value)}
+                onChange={(e) => {
+                  setCustomText(e.target.value);
+                  autosizeCustom(e.currentTarget);
+                }}
                 onFocus={() => setKbIndex(customIdx)}
               />
             </div>

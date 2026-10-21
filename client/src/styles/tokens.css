@@ -476,6 +476,9 @@
   --dur-spin-fast: 0.7s;
   --dur-pulse: 1.4s;
   --dur-loop: 1.6s;
+  /* 语义化循环时长（已含 --motion-scale）：加载条、吉祥物跳动，避免组件内写死 ms */
+  --dur-load: calc(1800ms * var(--motion-scale));
+  --dur-hop: calc(900ms * var(--motion-scale));
   /* 向后兼容别名（旧类名仍引用；下一版本清理） */
   --dur-fast: var(--dur-2);
   --dur-med: var(--dur-3);

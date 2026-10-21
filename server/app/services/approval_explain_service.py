@@ -158,7 +158,9 @@ async def explain_approval(db, approval_id: str) -> None:
         ],
         model="",
         reasoning_effort=effort,
-        max_tokens=800,
+        # 思考与正文共用输出预算：此前 800 在会话思考档位较高时会被思考吃光，正文为空。
+        # 档位仍按用户要求默认继承会话设置，这里只保证预算够用。
+        max_tokens=4000,
     )
 
     collected = ""

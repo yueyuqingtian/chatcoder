@@ -944,7 +944,10 @@ async def build_main_context(
                                                  language_source=_lang_source,
                                                  desktop_enabled=bool(getattr(settings, "desktop_enabled", False)),
                                                  browser_enabled=_browser_on,
-                                                 suggestion_enabled=suggestion_enabled)
+                                                 suggestion_enabled=suggestion_enabled,
+                                                 workflow_mode=(_execution_mode == "workflow"),
+                                                 execution_mode=_execution_mode,
+                                                 available_tools=available_tools)
     bundle = ContextBundle(
         system=system_prompt,
         instruction=user_message,
@@ -956,16 +959,17 @@ async def build_main_context(
     # summarized_ids，用户发新任务时看到占用莫名回退（52%→48%）、历史被悄悄改写。
     # 现在压缩只保留一条通道：占用超过「设置-常规设置」的压缩阈值后，由
     # agent_loop 走落库式压缩（前端压缩卡片、可恢复）。
-    # 1. Current Goal（plan-671：目标激活时为持久目标，本轮消息降级为 Current Task）
+    # 1. Current Goal（plan-671：目标激活时为持久目标）。
+    # 不再把本轮用户原文复制进 developer 段：它位于历史之前，原文每轮变化会让前缀失效（缓存不命中），
+    # 且原文会在对话末尾再出现一次。非目标模式只留一句常量指引，原文以末尾的用户消息为准。
     if goal and goal.get("text"):
         bundle.developer_parts.append(
             f"## Current Goal\n{goal['text'][:2000]}\n"
             f"（目标模式激活：持续朝该目标工作；完成前先对照目标逐条核验证据（运行测试/读取结果），"
             f"确认达成后调用 {goal_tool_name}，未达成就继续推进，不要提前宣告完成；已续跑 {goal.get('turns_used', 0)} 轮）"
         )
-        bundle.developer_parts.append(f"## Current Task\n{user_message[:2000]}")
     else:
-        bundle.developer_parts.append(f"## Current Goal\n{user_message[:2000]}")
+        bundle.developer_parts.append("## Current Goal\n以对话末尾的最新用户消息为本轮目标。")
     # 1.1 Reply Language（plan-19-82）：显式语言锚点，紧随 Current Goal。
     # 语言纪律已作为系统提示首尾双锚注入，这里再在注意力最高处落一行单锚，降低漂移。
     from app.orchestration.prompts.language import build_language_pin_line

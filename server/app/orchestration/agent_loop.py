@@ -35,6 +35,7 @@ from app.orchestration.approval_policy import (
 from app._diag import log_tool_error, summarize_args  # v36: 工具错误诊断日志
 from app.persistence.database import async_session_factory
 from app.orchestration.tools import ToolContext, tool_executor
+from app.orchestration.tools.read_cache import read_cache_for
 from app.orchestration.tools.registry import tool_registry
 from app.orchestration.workflow.tools import WORKFLOW_TOOL_NAMES, run_workflow_tool
 # plan-156-619 S4：子会话工具（主代理 4 个 + 子会话自身 2 个）与执行分发。
@@ -54,6 +55,8 @@ SUBSESSION_OWN_TOOL_NAMES: set[str] = {
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_OUTPUT_CHARS = 16000  # v15: 与 fs_read 上限(settings.tool_output_chars_read)对齐；历史上曾为 8000
+# 估算校准系数（real / est）按模型保存，跨轮复用；进程重启后回到 1.0 重新校准
+_CALIB_BY_MODEL: dict[str, float] = {}
 # subagent_inspect 诊断 JSON 的单次展示上限（超出时显式提示，结论全文走 collect_results 分段）
 _INSPECT_PAYLOAD_CHARS = 8000
 _STREAM_CHUNK_SIZE = 80
@@ -319,11 +322,25 @@ def _present_tool_output(text: object, *, tool_name: str, session_id: int, call_
     历史与本轮模型看到的不一致；被截掉的中间部分也没有任何办法取回。
     现在：两处用同一份文本；超出预算时完整输出落盘，结果里写明总字数与 read_attachment 续读方式。
     """
-    from app.orchestration.output_paging import present_output
+    from app.core.config import settings
+    from app.orchestration.output_paging import present_output_bytes
 
-    return present_output(
-        str(text or ""), MAX_TOOL_OUTPUT_CHARS,
+    # fs_read 的窗口已由工具自身的字节预算封顶，且完整写入落库；这里不再做头部截断，
+    # 否则会出现“窗口→截成前段→再读”的循环。其余工具按各自的字节预算呈现，超出部分落盘续读。
+    if tool_name == "fs_read":
+        return str(text or "")
+    if tool_name == "fs_grep":
+        budget = settings.tool_output_bytes_grep
+    elif tool_name in ("web_fetch", "web_search"):
+        budget = settings.tool_output_bytes_web
+    elif tool_name == "terminal_exec":
+        budget = settings.tool_output_bytes_terminal
+    else:
+        budget = settings.tool_output_bytes_default
+    return present_output_bytes(
+        str(text or ""), budget,
         session_id=session_id, tag=f"{tool_name}-{call_key or 'call'}",
+        tail_bytes=settings.tool_output_bytes_terminal_tail if tool_name == "terminal_exec" else 0,
     )
 
 
@@ -1186,9 +1203,12 @@ async def run_agent_loop(
     # v6.5: 估算校准系数 -- 用 API 真实 prompt_tokens 动态校准估算值。
     # 字节/4 对中文偏高，不同模型/网关分词差异大，静态常量无法精准。
     # 每次拿到 API 真实值就更新系数，用于前置压缩估算，实现自适应精准压缩。
-    _calib_factor = 1.0  # real / est，初始1.0（无校准）
+    # 校准系数按模型跨轮保留（进程内）：此前每次运行都从 1.0 重来，前几步的前置压缩判断总是偏离真实占用
+    _calib_key = str(model_id or "default")
+    _calib_factor = _CALIB_BY_MODEL.get(_calib_key, 1.0)  # real / est，初始1.0（无校准）
     # v2.2 (对齐 zcode 3.14): 重复工具调用检测——工具名+参数签名 → 连续次数
     _call_sigs: dict[str, int] = {}
+    _last_sig: str | None = None  # 上一次执行的工具签名（连续重复判定用）
     # 待注入提醒（下一步循环构建 api_messages 后追加，避免被重建丢弃）
     _pending_reminders: list[str] = []
     # plan-64-291: 运行中子代理提醒的节流状态——等待期纪律需「持续在场」。
@@ -1355,7 +1375,12 @@ async def run_agent_loop(
                 _tools_tokens = _est_tools(tool_schemas)
                 _est_raw = _est_tokens(api_messages) + _tools_tokens
                 _est_prompt = int(_est_raw * _calib_factor)
-                _pre_threshold = int(agent_window * settings.auto_compact_threshold_ratio)
+                # 阈值为窗口的比例，再扣掉为本次输出预留的余量（否则输出一吃满就会超窗）；下限取窗口的一半
+                _out_reserve = min(settings.agent_max_output_tokens or 8192, agent_window // 4)
+                _pre_threshold = max(
+                    int(agent_window * 0.5),
+                    int(agent_window * settings.auto_compact_threshold_ratio) - _out_reserve,
+                )
                 if _est_prompt >= _pre_threshold:
                     logger.info("[agent] turn=%s step=%s 前置估算 prompt=%d (raw=%d calib=%.3f) >= 阈值 %d，调用前压缩", turn_id, step, _est_prompt, _est_raw, _calib_factor, _pre_threshold)
                     await broadcast(session_id, {"event": "compact.started", "payload": {"agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id, "used_tokens": _est_prompt, "context_window": agent_window, "ratio": round(_est_prompt / agent_window * 100, 1)}})
@@ -1867,6 +1892,7 @@ async def run_agent_loop(
                 if _est_prompt > 0 and _api_prompt > 0:
                     _new_factor = max(0.3, min(3.0, _api_prompt / _est_prompt))
                     _calib_factor = max(0.3, min(3.0, _calib_factor * 0.5 + _new_factor * 0.5))
+                    _CALIB_BY_MODEL[_calib_key] = _calib_factor
                     logger.debug(
                         "[agent] turn=%s step=%s 校准系数更新: %.3f (real=%d est=%d new=%.3f)",
                         turn_id, step, _calib_factor, _api_prompt, _est_prompt, _new_factor,
@@ -2136,10 +2162,15 @@ async def run_agent_loop(
                     # 注入提醒（对齐 buildRepeatedToolCallReminderBody），防死循环空转。
                     try:
                         _sig = tool_name + "|" + json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
-                        _sig_count = _call_sigs.get(_sig, 0) + 1
+                        # 只统计“紧邻”的重复：中间夹了别的调用即重新计数（此前是累计，误伤间隔较远的正常复用）
+                        if _sig == _last_sig:
+                            _sig_count = _call_sigs.get(_sig, 0) + 1
+                        else:
+                            _sig_count = 1
+                            _call_sigs = {}
                         _call_sigs[_sig] = _sig_count
+                        _last_sig = _sig
                         if _sig_count >= 2:
-                            _call_sigs = {k: v for k, v in _call_sigs.items() if k == _sig or v < _sig_count}
                             _pending_reminders.append(
                                 f"[重复调用提醒] 你已连续 {_sig_count} 次调用 {tool_name} "
                                 "且参数完全相同，但结果未推动任务进展。"
@@ -2334,7 +2365,7 @@ async def run_agent_loop(
                         # v7(B): 注入运行时输出回调——工具每帧上报增量，广播 tool.output 前端实时展示。
                         # 累积上限钳制在 tool_output_chars_terminal，超量后停止转发（后续仍随最终结果返回）。
                         _out_sent = {"len": 0}
-                        _out_limit = int(getattr(settings, "tool_output_chars_terminal", 12_000))
+                        _out_limit = int(getattr(settings, "tool_output_bytes_terminal", 30_720))
 
                         async def _emit_tool_output(chunk: str) -> None:
                             if not chunk:
@@ -2365,6 +2396,8 @@ async def run_agent_loop(
                             # plan-474-2105：邮箱打断通道——终端命令据此把运行中的进程转后台
                             detach_event=_detach_event,
                             turn_id=turn_id,
+                            # fs_read 未变化短路：缓存按会话保存，消息列表用 getter 取本轮最新值（压缩会替换列表）
+                            read_cache=read_cache_for(session_id, lambda: messages),
                         )
                         # S12（plan-41-197）：pre_tool_use 钩子——工具调用前触发（可按工具名匹配）；
                         # 提示词型钩子文本注入下一步上下文，命令型钩子在此执行（fail-open）。
@@ -2786,16 +2819,28 @@ async def run_agent_loop(
                         msg_type=MsgType.TOOL_RESULT.value,
                         content={"tool": tool_name, "call_key": call_key,
                                  "ok": result.ok, "output": _presented_output,
-                                 "error": result.error, "duration_ms": _dur,
+                                 "error": result.error, "error_code": result.error_code, "duration_ms": _dur,
                                  "agent_name": agent_name,
                                  **({"change_stat": _change_stat} if _change_stat else {}),
                                  **({"image": _tool_image} if _tool_image else {})},
                         buffered=True,
                     )
+                    # 失败时把错误类别与恢复指引附在文本末尾，模型据此选择修正动作（落库的 error 字段保持原样）
+                    _model_content = _presented_output if result.output else (result.error or "")
+                    if not result.ok:
+                        result.classify_if_missing()
+                        _model_content = f"{_model_content}\n{result.failure_hint_line()}".strip()
                     messages.append(ChatMessage(
-                        role="tool", content=_presented_output if result.output else (result.error or ""),
+                        role="tool", content=_model_content,
                         name=tool_name, tool_call_id=tc.get("id", ""),
                     ))
+                    # fs_read 成功读取后登记：之后同文件同范围未变化时，可凭此结果回存根（见 tools/read_cache.py）
+                    if tool_name == "fs_read" and result.ok:
+                        _rc = read_cache_for(session_id, lambda: messages)
+                        _rk = result.data.get("read_key")
+                        _fp = result.data.get("fingerprint")
+                        if _rk and _fp:
+                            _rc.record(tuple(_rk), tuple(_fp), tc.get("id", ""))
                     # L3.1（plan-340-1705）：登记本步的电脑操控调用，供下一步的观测埋点使用
                     if tool_name.startswith("desktop_"):
                         _obs_tools.append((tool_name, bool(result.ok)))

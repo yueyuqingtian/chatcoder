@@ -677,9 +677,9 @@
 .ui-step-slider:hover .ui-step-core { --base: 1.06; }
 /* 拖动：拇指不加位置过渡（1:1 跟手），放大并抬起；刚按下的 160ms 带一小段过渡滑向按下点 */
 .ui-step.is-dragging .ui-step-thumb { cursor: grabbing; transition: none; }
-.ui-step.is-dragging.is-jump .ui-step-thumb { transition: left 160ms var(--ease-out); }
+.ui-step.is-dragging.is-jump .ui-step-thumb { transition: left var(--dur-2) var(--ease-out); }
 .ui-step.is-dragging .ui-step-range { transition: none; }
-.ui-step.is-dragging.is-jump .ui-step-range { transition: width 160ms var(--ease-out); }
+.ui-step.is-dragging.is-jump .ui-step-range { transition: width var(--dur-2) var(--ease-out); }
 .ui-step.is-dragging .ui-step-core { --base: 1.14; box-shadow: 0 3px 10px rgba(0, 0, 0, 0.3), 0 0 0 0.5px rgba(0, 0, 0, 0.1); }
 .ui-step-thumb:focus-visible .ui-step-core { box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28), 0 0 0 4px color-mix(in oklab, var(--text-1) 16%, transparent); }
 .ui-step-labels { position: relative; height: 34px; margin-top: 4px; }

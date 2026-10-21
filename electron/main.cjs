@@ -2103,6 +2103,9 @@ ipcMain.handle("app:checkForUpdates", () => updateManager.checkForUpdates());
 ipcMain.handle("app:getUpdateState", () => updateManager.getState());
 // 不等下载完成：立即进入 downloading(connecting) 并返回，后续进度靠 app:updateStatus 推送
 ipcMain.handle("app:downloadUpdate", () => updateManager.downloadNow());
+// plan-20261022-update-route：取消后回到「发现新版本」，断点保留；切换自建源 = 停下后从自建源重新开始
+ipcMain.handle("app:cancelUpdateDownload", () => updateManager.cancelDownload());
+ipcMain.handle("app:switchUpdateSource", () => updateManager.switchToPrimary());
 ipcMain.handle("app:getUpdateSettings", () => updateManager.getSettings());
 ipcMain.handle("app:setUpdateSettings", (_e, patch) => updateManager.setSettings(patch));
 ipcMain.handle("app:installUpdate", () => updateManager.install());

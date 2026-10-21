@@ -157,3 +157,54 @@ def present_output(text: str, limit: int, *, session_id: int | None, tag: str) -
         + f"\n\n（输出共 {len(text)} 字，以上为前 {head_len} 字；完整内容已保存，"
         f"如需其余部分请调用 {call} 分段读取。）"
     )
+
+
+def _prefix_bytes(text: str, limit: int) -> str:
+    """取不超过 limit 个 UTF-8 字节的前缀（不切断多字节字符）。"""
+    return text.encode("utf-8")[:max(0, limit)].decode("utf-8", errors="ignore")
+
+
+def _suffix_bytes(text: str, limit: int) -> str:
+    """取不超过 limit 个 UTF-8 字节的后缀（不切断多字节字符）。"""
+    raw = text.encode("utf-8")
+    return raw[-max(0, limit):].decode("utf-8", errors="ignore") if limit > 0 else ""
+
+
+def present_output_bytes(
+    text: str,
+    budget_bytes: int,
+    *,
+    session_id: int | None,
+    tag: str,
+    tail_bytes: int = 0,
+) -> str:
+    """按 UTF-8 字节预算呈现工具输出（字节口径，中文与 ASCII 同等计量）。
+
+    未超预算原样返回；超出时完整内容落盘，返回：
+    - 头部（以及 tail_bytes > 0 时的尾部，终端输出的报错多在尾部）；
+    - 续读方式（read_attachment 按字符 offset 分段）。
+    落盘失败时退回“头 + 省略说明 + 尾”，至少不静默丢弃。
+    """
+    if not text:
+        return text
+    raw_len = len(text.encode("utf-8"))
+    if raw_len <= budget_bytes:
+        return text
+    notice_reserve = 400
+    tail = _suffix_bytes(text, tail_bytes) if tail_bytes > 0 else ""
+    head_budget = max(1, budget_bytes - notice_reserve - len(tail.encode("utf-8")))
+    head = _prefix_bytes(text, head_budget)
+    path = spill_text(text, session_id=session_id, tag=tag)
+    if path is None:
+        return (
+            head
+            + f"\n\n...（输出共 {raw_len} 字节，超出上下文预算，中间部分未能保存，已省略）...\n\n"
+            + tail
+        )
+    call = tool_ref("read_attachment", path=str(path).replace("\\", "/"), offset=len(head))
+    tail_note = "，尾部保留在下方" if tail else ""
+    middle = (
+        f"\n\n（输出共 {raw_len} 字节，以上为前 {len(head)} 字符{tail_note}；完整内容已保存，"
+        f"如需其余部分请调用 {call} 分段读取。）\n\n"
+    )
+    return head + middle + tail

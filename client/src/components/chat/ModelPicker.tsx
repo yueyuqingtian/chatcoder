@@ -13,7 +13,7 @@ import { api, type ModelOut } from "../../api/client";
 import { providerRank } from "../../utils/modelOrder";
 import { IconCpu, IconCheck, IconChevronDown, IconChevronRight, IconMultimodal, IconRefresh } from "../icons";
 import { useDialogContentHost } from "../ui/Dialog";
-import { Empty } from "../ui";
+import { Empty, Tooltip } from "../ui";
 
 interface ModelGroup {
   name: string;
@@ -39,7 +39,7 @@ function ModelTags({ m }: { m: ModelOut }) {
       {m.trae_max_context ? <span className="mp-tag">长上下文</span> : null}
       {m.trae_consumption_rate ? <span className="mp-tag">消耗×{m.trae_consumption_rate}</span> : null}
       {m.is_multimodal ? (
-        <span className="mp-tag mp-tag-icon" title="支持图片输入（多模态）"><IconMultimodal size={12} /></span>
+        <Tooltip content="支持图片输入（多模态）"><span className="mp-tag mp-tag-icon"><IconMultimodal size={12} /></span></Tooltip>
       ) : null}
     </span>
   );
@@ -137,18 +137,21 @@ export function ModelPicker({
     const v = credits[g.providerId];
     const busy = !!creditsBusy[g.providerId];
     return (
-      <span className="mp-credits" title="workbuddy 积分余额">
-        {v != null ? `积分 ${fmtCredits(v)}` : busy ? "刷新中…" : "积分 --"}
-        <span
-          role="button"
-          className={"mp-credits-refresh" + (busy ? " busy" : "")}
-          title="刷新积分余额"
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={(e) => { e.preventDefault(); e.stopPropagation(); if (!busy) void refreshCredits(g.providerId!); }}
-        >
-          <IconRefresh size={11} />
+      <Tooltip content="workbuddy 积分余额">
+        <span className="mp-credits">
+          {v != null ? `积分 ${fmtCredits(v)}` : busy ? "刷新中…" : "积分 --"}
+          <Tooltip content="刷新积分余额">
+            <span
+              role="button"
+              className={"mp-credits-refresh" + (busy ? " busy" : "")}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => { e.preventDefault(); e.stopPropagation(); if (!busy) void refreshCredits(g.providerId!); }}
+            >
+              <IconRefresh size={11} />
+            </span>
+          </Tooltip>
         </span>
-      </span>
+      </Tooltip>
     );
   };
 
@@ -172,9 +175,10 @@ export function ModelPicker({
               <span className="ui-select-icon"><IconChevronDown size={14} /></span>
             </button>
           ) : (
-            <button className="composer-model-badge" type="button" title={label}>
+            // Radix Trigger(asChild) 需要子元素转发 ref，因此提示挂在按钮内部的文字上，按钮本身保持原样
+            <button className="composer-model-badge" type="button">
               <IconCpu size={13} />
-              <span className="mp-label">{label}</span>
+              <Tooltip content={label}><span className="mp-label">{label}</span></Tooltip>
             </button>
           )}
         </DropdownMenu.Trigger>
@@ -218,7 +222,7 @@ export function ModelPicker({
                   return (
                     <DropdownMenu.Sub key={g.name}>
                       <DropdownMenu.SubTrigger className="mp-group">
-                        <span className="mp-group-name" title={g.name}>{g.name}</span>
+                        <Tooltip content={g.name}><span className="mp-group-name">{g.name}</span></Tooltip>
                         {renderCredits(g)}
                         {holdsCurrent
                           ? <span className="mp-group-current"><IconCheck size={12} /></span>

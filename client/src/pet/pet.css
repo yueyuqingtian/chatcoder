@@ -427,7 +427,7 @@ body {
 .pet-anchor.is-dragging .pet-sprite {
   filter: drop-shadow(0 6px 10px rgba(0, 0, 0, 0.35));
   transform: scale(1.03);
-  transition: transform 120ms var(--pet-ease), filter 120ms var(--pet-ease);
+  transition: transform var(--dur-2) var(--pet-ease), filter var(--dur-2) var(--pet-ease);
 }
 
 .pet-sprite {

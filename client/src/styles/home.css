@@ -185,8 +185,8 @@
 @keyframes bd-caret { 50% { opacity: 0; } }
 
 /* 换一枚：绕竖轴翻转，90° 处换内容 */
-.es-badge-wrap[data-phase="out"] .es-badge-flip { animation: es-flip-out 150ms var(--ease-emphasized-accel) forwards; }
-.es-badge-wrap[data-phase="in"] .es-badge-flip { animation: es-flip-in 480ms var(--spring-bouncy) both; }
+.es-badge-wrap[data-phase="out"] .es-badge-flip { animation: es-flip-out var(--dur-2) var(--ease-emphasized-accel) forwards; }
+.es-badge-wrap[data-phase="in"] .es-badge-flip { animation: es-flip-in var(--dur-5) var(--spring-bouncy) both; }
 @keyframes es-flip-out { to { transform: perspective(700px) rotateY(86deg); opacity: 0.35; } }
 @keyframes es-flip-in { from { transform: perspective(700px) rotateY(-86deg); opacity: 0.35; } to { transform: none; opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .es-badge-wrap * { animation: none !important; } }
@@ -301,7 +301,7 @@
   transition: opacity var(--dur-3) var(--ease-standard);
 }
 .es-heat.is-loading { opacity: 0.55; }
-.es-heat .usage-hm-cell { width: auto; height: auto; aspect-ratio: 1 / 1; border-radius: 3px; }
+.es-heat .usage-hm-cell { width: auto; height: auto; aspect-ratio: 1 / 1; border-radius: var(--r-sm); }
 .es-heat .usage-hm-cell.is-future { visibility: hidden; }
 .es-heat-months { display: grid; grid-template-columns: repeat(53, minmax(0, 1fr)); gap: 3px; height: 14px; margin-top: 6px; }
 .es-heat-month { grid-row: 1; font-size: 10px; line-height: 14px; color: var(--text-3); white-space: nowrap; }

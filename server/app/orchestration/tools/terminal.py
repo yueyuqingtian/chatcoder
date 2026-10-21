@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
-from app.orchestration.output_paging import RAW_OUTPUT_CEILING, present_output
+from app.orchestration.output_paging import RAW_OUTPUT_CEILING, present_output_bytes
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 from app.orchestration.tools.bg_process import (
     bg_process_registry, decode_output, kill_process_tree,
@@ -210,7 +210,10 @@ class TerminalExecTool(Tool):
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         command = args.get("command", "").strip()
         if not command:
-            return ToolResult(ok=False, output="", error="command 为空")
+            return ToolResult(
+                ok=False, output="", error="command 为空", error_code="ARG_INVALID",
+                hint="command 不能为空：请给出要执行的完整命令（含参数）后再调用。",
+            )
 
         # plan-75-332: 工具不再拦截危险命令——分类与风险标注由 shell_policy 给出，
         # 最终是否询问/放行由 approval_policy 按权限模式裁决（完全访问下可直接执行）。
@@ -321,7 +324,7 @@ class TerminalExecTool(Tool):
                 command[:300], resolved_cwd, shell, kind,
                 type(e).__name__, e, (os.environ.get("PATH") or "")[:300],
             )
-            return ToolResult(ok=False, output="", error=f"执行失败: {type(e).__name__}: {e}")
+            return ToolResult(ok=False, output="", error=f"执行失败: {type(e).__name__}: {e}", error_code="INTERNAL")
 
         # v1.0 (plan-153-705): 后台模式——注册到 bg_process 立即返回 shell_id。
         # 后台进程不随 cancel_event 终止（dev server 需跨 turn 存活）。
@@ -353,7 +356,7 @@ class TerminalExecTool(Tool):
         # 同步模式：增量读取 stdout/stderr 并逐帧上报（v7(B)），保持 cancel/timeout 响应。
         # 不再用 proc.communicate() 一次性取——长命令执行期间前端可实时看到输出。
         # 两个常驻 reader task 并发泵出（避免一端写满阻塞），主循环只负责 cancel/timeout/退出观测。
-        max_output = int(settings.tool_output_chars_terminal)
+        max_output = int(settings.tool_output_bytes_terminal)
         deadline = asyncio.get_running_loop().time() + timeout_sec
         out_parts: list[str] = []
         err_parts: list[str] = []
@@ -437,11 +440,11 @@ class TerminalExecTool(Tool):
         combined = out
         if err:
             combined += ("\n-- stderr --\n" + err) if combined else err
-        if len(combined) > max_output:
-            # plan-156-620：不再按上下文预算硬截断；超出预算的部分由执行层落盘，给出续读方式
-            combined = present_output(
-                combined, max_output, session_id=getattr(ctx, "session_id", None), tag="terminal",
-            )
+        # 字节预算呈现：头 8KB + 尾 22KB（报错多在尾部），超出部分完整落盘并给出续读方式
+        combined = present_output_bytes(
+            combined, max_output, session_id=getattr(ctx, "session_id", None), tag="terminal",
+            tail_bytes=int(settings.tool_output_bytes_terminal_tail),
+        )
 
         # v36: 从 debug 提到 info——生产默认 INFO，出问题时才有据可查；
         # 输出长度与退出码是判断「命令是否真的生效」的关键。

@@ -117,3 +117,40 @@ def _is_default(value: float | int | str) -> bool:
         return abs(float(value) - DEFAULT_TEMPERATURE) < 1e-6
     except (TypeError, ValueError):
         return False
+
+
+def thinking_on(request) -> bool:
+    """本次请求是否开启思考：reasoning_effort 非空且不为 none，或 thinking 显式开启。
+
+    思考开启时所有模型都不设置温度（由模型/网关按思考模式固定采样），与模型系别无关。
+    """
+    effort = str(getattr(request, "reasoning_effort", "") or "").strip().lower()
+    if effort and effort != "none":
+        return True
+    return getattr(request, "thinking", None) is True
+
+
+def request_temperature(
+    request,
+    *,
+    model_name: str | None,
+    base_url: str | None = None,
+    extra_names: tuple[str | None, ...] = (),
+    catalog_default: float | None = None,
+    non_claude_default: float | None = None,
+) -> float | None:
+    """各供应商统一的请求温度取值（设置中心的温度即 request.temperature，所有通道一致）。
+
+    - 思考开启（thinking_on）：不设置温度，返回 None；
+    - 否则：请求温度（设置值）优先，再回落目录默认与兜底；Claude 系只下发默认温度（见 pick_temperature）。
+    """
+    if thinking_on(request):
+        return None
+    return pick_temperature(
+        getattr(request, "temperature", None),
+        model_name=model_name,
+        base_url=base_url,
+        catalog_default=catalog_default,
+        extra_names=extra_names,
+        non_claude_default=non_claude_default,
+    )

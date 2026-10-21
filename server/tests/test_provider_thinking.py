@@ -271,7 +271,8 @@ class TestAdaptivePayload:
         payload = self._payload()
         assert payload["thinking"] == {"type": "adaptive", "display": "summarized"}
         assert payload["output_config"] == {"effort": "high"}
-        assert payload["temperature"] == 1
+        # 思考开启时不设置温度（统一规则，见 temperature_policy.thinking_on）
+        assert "temperature" not in payload
 
     def test_effort_passthrough_and_fallback(self):
         assert self._payload(effort="max")["output_config"] == {"effort": "max"}

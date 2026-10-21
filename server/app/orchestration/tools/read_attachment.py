@@ -101,7 +101,7 @@ class ReadAttachmentTool(Tool):
                 output=f"附件路径非法或不存在: {rel}（工作区外的文件请用 fs_read 读取）{hint}",
             )
         if not target.is_file():
-            return ToolResult(ok=False, output=f"附件不存在: {rel}")
+            return ToolResult(ok=False, output=f"附件不存在: {rel}", error_code="NOT_FOUND")
 
         file_size = target.stat().st_size
         if file_size > _MAX_IMAGE_BYTES and is_image(target.name):

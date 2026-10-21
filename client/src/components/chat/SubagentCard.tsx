@@ -5,6 +5,7 @@
 import { memo } from "react";
 import { usePanelStore } from "../../store/panel";
 import { IconCpu, IconSpinner, IconX, IconCheck, IconChevronRight } from "../icons";
+import { Tooltip } from "../ui";
 
 export interface SubagentMetaLite {
   agentId: number;
@@ -39,7 +40,7 @@ export const SubagentCard = memo(function SubagentCard({ meta }: { meta: Subagen
         <span className={"tc-verb" + (running ? " text-shine" : "")}>
           {running ? "子代理执行中" : done ? "子代理已完成" : "子代理失败"}
         </span>
-        <span className="tc-query" title={meta.name}>{meta.name}</span>
+        <Tooltip content={meta.name}><span className="tc-query">{meta.name}</span></Tooltip>
         {running && <span className="tc-status wait"><IconSpinner size={11} /></span>}
         {done && <span className="tc-status ok"><IconCheck size={11} /></span>}
         {failed && <span className="tc-status fail"><IconX size={11} /></span>}
@@ -47,9 +48,11 @@ export const SubagentCard = memo(function SubagentCard({ meta }: { meta: Subagen
       </div>
       {/* plan-330-1648 M7: 失败原因（单行截断，完整内容见 title / 右面板） */}
       {errText && (
-        <div className="tc-subagent-error" title={errText}>
-          {errText}
-        </div>
+        <Tooltip content={errText}>
+          <div className="tc-subagent-error">
+            {errText}
+          </div>
+        </Tooltip>
       )}
     </div>
   );

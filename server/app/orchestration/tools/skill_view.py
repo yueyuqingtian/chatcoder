@@ -109,7 +109,7 @@ class SkillViewTool(Tool):
                     for s in near:
                         lines.append(f"- {s.name}: {(s.description or '')[:120]}")
                     return ToolResult(ok=True, output="\n".join(lines), data={"count": len(near)})
-                return ToolResult(ok=False, output="", error=f"技能 '{name}' 不存在（用不带参数的 skill_view 查看全部技能）")
+                return ToolResult(ok=False, output="", error=f"技能 '{name}' 不存在（用不带参数的 skill_view 查看全部技能）", error_code="NOT_FOUND")
             if not skill.is_active:
                 return ToolResult(ok=False, output="", error=f"技能 '{name}' 已停用，请在设置 → 技能中启用")
 

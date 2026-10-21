@@ -10,6 +10,7 @@
 - effective_context_window_percent = 95%（codex 默认值）
 """
 import logging
+import re
 
 from app.models.schemas import ChatMessage
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,23 +26,26 @@ _TOOL_CALL_OVERHEAD = 8   # tool_call 结构额外开销（function + id + type�
 _TOOL_RESULT_OVERHEAD = 8  # tool result 结构额外开销（tool_call_id + name）
 
 
+# CJK 统一表意文字及常见中日韩标点/假名/谚文/全角符号（均为 UTF-8 三字节的 BMP 字符）
+_CJK_RE = re.compile(
+    r"[　-〿぀-ヿ㐀-䶿一-鿿가-힯豈-﫿＀-￯]"
+)
+
+
 def _approx_token_count(text: str) -> int:
-    """对齐 codex approx_token_count：UTF-8 字节长度 / 4，向上取整。
+    """估算 token 数：CJK 字符按 1 token/字，其余按 UTF-8 字节 / 4（向上取整）。
 
-    codex 实现（truncate.rs:71）:
-        pub fn approx_token_count(text: &str) -> usize {
-            let len = text.len();  // UTF-8 字节长度
-            len.saturating_add(APPROX_BYTES_PER_TOKEN.saturating_sub(1)) / APPROX_BYTES_PER_TOKEN
-        }
-
-    旧版用 len(text_chars) / 3.0 是错误的：
-    - 中文 1 字符 = 3 字节，codex 算 0.75 token，旧版算 0.33 token（少算一倍）
-    - 英文 1 字符 = 1 字节，codex 算 0.25 token，旧版算 0.33 token（多算）
+    纯 bytes/4 对中文偏低：中文 1 字 = 3 字节只算 0.75 token，而主流分词器对中文通常接近 1 token/字。
+    用库内会话做过粗略对照（真实 prompt_tokens 与估算的比值，中文混合会话中位数约 1.1，样本噪声大，
+    仅作方向性依据）；运行时仍以真实 usage 回填的校准系数为准（agent_loop 的 _calib_factor）。
+    英文/代码部分保持 codex 的字节/4 口径不变。
     """
     if not text:
         return 0
     byte_len = len(text.encode("utf-8"))
-    return (byte_len + _BYTES_PER_TOKEN - 1) // _BYTES_PER_TOKEN
+    cjk = len(_CJK_RE.findall(text))
+    other_bytes = byte_len - cjk * 3
+    return cjk + (other_bytes + _BYTES_PER_TOKEN - 1) // _BYTES_PER_TOKEN
 
 
 # 保留旧函数名兼容外部调用，内部改用 _approx_token_count

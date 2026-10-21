@@ -49,7 +49,7 @@
   background: var(--accent); opacity: 0; pointer-events: none;
   transition: opacity var(--dur-3) var(--ease-standard);
 }
-.bp-load.is-loading { opacity: 1; animation: bp-load calc(1800ms * var(--motion-scale)) var(--ease-out) forwards; }
+.bp-load.is-loading { opacity: 1; animation: bp-load var(--dur-load) var(--ease-out) forwards; }
 @keyframes bp-load { from { width: 0; } to { width: 85%; } }
 
 /* ── 视口与标签框架 ── */
@@ -113,10 +113,10 @@
 .bpa-ripple {
   position: absolute; width: 28px; height: 28px; margin: -14px 0 0 -14px; border-radius: var(--r-pill);
   background: color-mix(in srgb, var(--accent) 34%, transparent);
-  animation: bpa-ripple calc(420ms * var(--motion-scale)) var(--ease-out) forwards;
+  animation: bpa-ripple var(--dur-5) var(--ease-out) forwards;
 }
 @keyframes bpa-ripple { from { transform: scale(0.3); opacity: 1; } to { transform: scale(1.7); opacity: 0; } }
-.bpa-flash { position: absolute; inset: 0; background: #fff; animation: bpa-flash calc(260ms * var(--motion-scale)) var(--ease-out) forwards; }
+.bpa-flash { position: absolute; inset: 0; background: #fff; animation: bpa-flash var(--dur-4) var(--ease-out) forwards; }
 @keyframes bpa-flash { from { opacity: 0.4; } to { opacity: 0; } }
 @keyframes bpa-fade-in { from { opacity: 0; } to { opacity: 1; } }
 

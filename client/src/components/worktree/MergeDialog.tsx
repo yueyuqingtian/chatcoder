@@ -15,7 +15,7 @@ import { api, type ModelOut, type WorktreeMergeDirection, type WorktreeOut, type
 import { useChatStore } from "../../store/chat";
 import { sortModelsByProvider } from "../../utils/modelOrder";
 import { Dialog } from "../ui/Dialog";
-import { Popover } from "../ui";
+import { Popover, Tooltip } from "../ui";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { IconCheck, IconChevronDown, IconChevronUp, IconFileText, IconLayers, IconRefresh, IconWand } from "../icons";
 
@@ -803,10 +803,10 @@ export function MergeDialog({
               <div className="merge-file-row" key={f.path}>
                 <span className={`merge-file-status ${f.status}`}>{statusLabel[f.status] ?? f.status}</span>
                 <IconFileText size={13} />
-                <span className="merge-file-path" title={f.path}>{f.path}</span>
-                {f.binary ? <span className="merge-file-binary" title={f.reason || "二进制文件"}>二进制</span>
+                <Tooltip content={f.path}><span className="merge-file-path">{f.path}</span></Tooltip>
+                {f.binary ? <Tooltip content={f.reason || "二进制文件"}><span className="merge-file-binary">二进制</span></Tooltip>
                   : f.conflict ? <span className="merge-file-conflict">冲突</span>
-                    : <span className="merge-file-auto" title={f.change_side === "theirs" ? "仅来源侧改动，已由 git 自动采用" : ""}>可自动合并</span>}
+                    : <Tooltip content={f.change_side === "theirs" ? "仅来源侧改动，已由 git 自动采用" : ""}><span className="merge-file-auto">可自动合并</span></Tooltip>}
                 {resolved[f.path] != null && <span className="merge-file-done">已解决</span>}
                 {f.status !== "deleted" && f.needs_manual && (
                   <span className="merge-file-manual">需人工选侧</span>

@@ -17,6 +17,15 @@ const TERMINAL_SHELLS = [
   { value: "git-bash", label: "Git Bash" },
 ];
 
+const MAX_OUTPUT_OPTIONS = [
+  { value: 0, label: "模型默认" },
+  { value: 8192, label: "8K" },
+  { value: 16384, label: "16K" },
+  { value: 32768, label: "32K" },
+  { value: 64000, label: "64K" },
+  { value: 128000, label: "128K" },
+];
+
 const MAX_STEPS_OPTIONS = [
   { value: 200, label: "200 步" },
   { value: 500, label: "500 步" },
@@ -47,6 +56,10 @@ export function GeneralPanel() {
     parallel_subsession_hint: true,
     // 下一步建议卡（默认关闭；开启后智能体 / 工作流模式才注入建议卡工具与提示词）
     suggestion_enabled: false,
+    // 采样温度（工具轮 / 文本轮）与单次最大输出；0 输出上限 = 由模型或官方兜底决定
+    agent_tool_temperature: 0.3,
+    agent_text_temperature: 0.7,
+    agent_max_output_tokens: 0,
   });
   // S4（plan-41-197）：改为「修改即保存」——移除底部保存按钮，所有项在改动后
   // 300ms 内自动落盘（config.json），与外观/模型等页操作逻辑统一（用户反馈
@@ -103,7 +116,11 @@ export function GeneralPanel() {
     return base;
   }, [fonts, cfg.terminal_font]);
 
+  // 加载失败时禁止写回：此时界面只是默认值，任何改动若落盘都会覆盖已保存的配置（如 HTTP 代理）
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState("");
   const load = useCallback(async () => {
+    setLoadError("");
     try {
       const g = await api.getGlobalSettings();
       setCfg({
@@ -128,17 +145,26 @@ export function GeneralPanel() {
         parallel_subsession_hint: g.parallel_subsession_hint !== false,
         // 下一步建议卡：后端缺省视为关闭
         suggestion_enabled: g.suggestion_enabled === true,
+        agent_tool_temperature: typeof g.agent_tool_temperature === "number" ? g.agent_tool_temperature : 0.3,
+        agent_text_temperature: typeof g.agent_text_temperature === "number" ? g.agent_text_temperature : 0.7,
+        agent_max_output_tokens: typeof g.agent_max_output_tokens === "number" ? g.agent_max_output_tokens : 0,
       });
-    } catch {}
+      setLoaded(true);
+    } catch (e) {
+      setLoadError(String(e));
+    }
   }, []);
   useEffect(() => { load(); }, [load]);
 
   /** S4：改动即保存——本地 state 立即更新，300ms 防抖后写后端（连续拖动只落一次） */
-  const patch = (p: Partial<typeof cfg>) => setCfg((prev) => {
-    const next = { ...prev, ...p };
-    scheduleSave(next);
-    return next;
-  });
+  const patch = (p: Partial<typeof cfg>) => {
+    if (!loaded) return; // 未成功加载时拒绝写回
+    setCfg((prev) => {
+      const next = { ...prev, ...p };
+      scheduleSave(next);
+      return next;
+    });
+  };
 
   // plan-20261020-retry-cred-perf R9：重试次数用草稿态——旧实现 `parseInt(...) || 0`
   // 在「清空重输」时会把 0 防抖落盘，用户看到的重试策略被静默改成不重试。
@@ -158,8 +184,50 @@ export function GeneralPanel() {
     if (clamped !== cfg.agent_retry_count) patch({ agent_retry_count: clamped });
   };
 
+  // 最大步数同样用草稿态：清空输入不再落盘 0（0 语义为“不限制”，误清空会取消步数上限）
+  const [maxStepsDraft, setMaxStepsDraft] = useState(String(cfg.agent_max_steps));
+  useEffect(() => {
+    setMaxStepsDraft(String(cfg.agent_max_steps));
+  }, [cfg.agent_max_steps]);
+  const commitMaxSteps = () => {
+    const parsed = Number.parseInt(maxStepsDraft, 10);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      setMaxStepsDraft(String(cfg.agent_max_steps));
+      return;
+    }
+    setMaxStepsDraft(String(parsed));
+    if (parsed !== cfg.agent_max_steps) patch({ agent_max_steps: parsed });
+  };
+
+  // 隐藏的性能诊断开关：写本地标记；开启时即时挂载采集器（关闭需重启生效，采集器不卸载）
+  const DIAG_FLAG = "chatcoder.diagnostics";
+  const [diagOn, setDiagOn] = useState(() => {
+    try { return localStorage.getItem(DIAG_FLAG) === "1"; } catch { return false; }
+  });
+  const toggleDiagnostics = () => {
+    const next = !diagOn;
+    try { localStorage.setItem(DIAG_FLAG, next ? "1" : "0"); } catch { /* 存储不可用：仅本次会话生效 */ }
+    setDiagOn(next);
+    if (next) void import("../../perf/metrics").then((m) => m.install());
+  };
+
   return (
-    <div className="settings-card-stack sc-stack">
+    <div
+      className="settings-card-stack sc-stack"
+      style={loaded ? undefined : { pointerEvents: "none", opacity: loadError ? 0.5 : 1 }}
+    >
+      {loadError && (
+        <div
+          className="settings-card"
+          role="alert"
+          style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "var(--sp-3)", padding: "var(--sp-3) var(--sp-4)" }}
+        >
+          <span style={{ color: "var(--warning)" }}>
+            设置加载失败，当前显示的是默认值；为避免覆盖已保存的配置，修改已暂停保存。
+          </span>
+          <Button size="sm" variant="secondary" onClick={() => void load()}>重试</Button>
+        </div>
+      )}
       <div className="settings-card">
         <Row title={t("gp.language")} desc={t("gp.language_desc")}>
           <Select
@@ -228,12 +296,51 @@ export function GeneralPanel() {
                 type="number"
                 style={{ width: 90 }}
                 min={0}
-                value={cfg.agent_max_steps}
-                onChange={(e) => patch({ agent_max_steps: Math.max(0, parseInt(e.target.value) || 0) })}
+                value={maxStepsDraft}
+                onChange={(e) => setMaxStepsDraft(e.target.value)}
+                onBlur={commitMaxSteps}
+                onKeyDown={(e) => { if (e.key === "Enter") commitMaxSteps(); }}
                 aria-label="自定义最大步数"
               />
             )}
           </div>
+        </Row>
+        {/* 采样温度与单次最大输出：修改即保存。部分模型（Claude 系、思考模式）由适配器固定，不受此项影响 */}
+        <Row title="工具轮温度" desc="工具调用轮次的采样温度（0–2）。数值越低输出越稳定，代码修改类任务通常偏低。">
+          <Slider
+            min={0}
+            max={2}
+            step={0.05}
+            value={cfg.agent_tool_temperature}
+            onChange={(v) => patch({ agent_tool_temperature: v })}
+            format={(v) => v.toFixed(2)}
+            aria-label="工具轮温度"
+          />
+        </Row>
+        <Row title="文本轮温度" desc="不调用工具时（回答、解释等）的采样温度（0–2）。">
+          <Slider
+            min={0}
+            max={2}
+            step={0.05}
+            value={cfg.agent_text_temperature}
+            onChange={(v) => patch({ agent_text_temperature: v })}
+            format={(v) => v.toFixed(2)}
+            aria-label="文本轮温度"
+          />
+        </Row>
+        <Row title="单次最大输出" desc="限制单次回复的最大长度。选择“模型默认”时，官方直连按 128K 兜底。">
+          <Select
+            style={{ minWidth: 160 }}
+            value={String(cfg.agent_max_output_tokens)}
+            onChange={(val) => patch({ agent_max_output_tokens: Number(val) })}
+            options={[
+              ...MAX_OUTPUT_OPTIONS.map((o) => ({ value: String(o.value), label: o.label })),
+              ...(!MAX_OUTPUT_OPTIONS.some((o) => o.value === cfg.agent_max_output_tokens)
+                ? [{ value: String(cfg.agent_max_output_tokens), label: `自定义 (${cfg.agent_max_output_tokens})` }]
+                : []),
+            ]}
+            aria-label="单次最大输出"
+          />
         </Row>
         {/* plan-278-1391: 上下文压缩触发阈值——占模型上下文窗口比例，达阈值即自动压缩 */}
         <Row title={t("gp.compact_threshold")} desc={t("gp.compact_threshold_desc")}>
@@ -295,6 +402,13 @@ export function GeneralPanel() {
         </Row>
       </div>
 
+      {/* 隐藏的性能诊断入口：开启后下次启动（或即时）采集卡顿指标，供反馈问题时导出；默认关闭 */}
+      <div className="settings-resource-desc" style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "flex-end" }}>
+        <span>{diagOn ? "性能诊断已开启（采集卡顿指标）" : ""}</span>
+        <Button variant="ghost" size="xs" onClick={toggleDiagnostics}>
+          {diagOn ? "关闭性能诊断" : "性能诊断"}
+        </Button>
+      </div>
     </div>
   );
 }

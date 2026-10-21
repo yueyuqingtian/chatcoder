@@ -54,8 +54,12 @@ void loadExternalPlugins();
 // v1.1: 启动时拉取后端全局设置（todos/reasoning 显示开关等）
 void useUiStore.getState().refreshGlobalFlags();
 
-// plan-329-1647 S12：dev 构建挂载性能度量护栏（window.__chatcoderPerf）；生产不挂载，零开销。
-if (import.meta.env.DEV) installPerfMetrics();
+// plan-329-1647 S12：dev 构建挂载性能度量护栏（window.__chatcoderPerf）。
+// 生产默认不挂载（零开销）；设置中心的隐藏「性能诊断」开关写入本地标记后，下次启动即挂载，便于反馈卡顿时采集。
+const DIAG_FLAG = "chatcoder.diagnostics";
+let diagnosticsOn = false;
+try { diagnosticsOn = localStorage.getItem(DIAG_FLAG) === "1"; } catch { /* 存储不可用时按关闭处理 */ }
+if (import.meta.env.DEV || diagnosticsOn) installPerfMetrics();
 
 // v4.5: 移除 StrictMode — 双重 effect 放大 WS handler 重复注册等竞态
 ReactDOM.createRoot(document.getElementById("root")!).render(<App />);

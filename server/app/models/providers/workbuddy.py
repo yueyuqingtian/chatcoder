@@ -26,7 +26,7 @@ import httpx
 
 from app.core.config import settings
 from app.models.base import ModelProvider
-from app.models.providers.temperature_policy import pick_temperature
+from app.models.providers.temperature_policy import request_temperature
 from app.models.providers.tool_args import parse_tool_args
 from app.models.providers.workbuddy_model_caps import get_model_caps, map_reasoning_effort
 from app.models.schemas import ChatMessage, ChatRequest, ChatResponse, Usage
@@ -176,11 +176,11 @@ class WorkBuddyProvider(ModelProvider):
             "messages": [self._convert_message(m) for m in request.messages],
             "stream": True,
         }
-        # 目录声明的 temperature 是该模型允许的采样温度；模型名任一来源携带
-        # claude 字样时只接受默认温度，agent 循环下发的 0.3/0.7 必须丢弃。
+        # 温度统一取值：思考开启时不设置；目录声明的 temperature 作为次级默认；
+        # 模型名任一来源携带 claude 字样时只接受默认温度（见 temperature_policy）。
         catalog_temp = self._meta.get("temperature")
-        _temp = pick_temperature(
-            request.temperature,
+        _temp = request_temperature(
+            request,
             model_name=self._model_name,
             extra_names=(request.model, self._meta.get("title"), self._meta.get("name")),
             base_url=self._base_url,

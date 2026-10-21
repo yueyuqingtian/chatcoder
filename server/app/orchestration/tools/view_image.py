@@ -49,7 +49,7 @@ class ViewImageTool(Tool):
             return ToolResult(ok=False, output=f"Cannot resolve path: {rel_path}")
 
         if not target.exists():
-            return ToolResult(ok=False, output=f"File not found: {rel_path}")
+            return ToolResult(ok=False, output=f"File not found: {rel_path}", error_code="NOT_FOUND")
 
         if not target.is_file():
             return ToolResult(ok=False, output=f"Not a file: {rel_path}")

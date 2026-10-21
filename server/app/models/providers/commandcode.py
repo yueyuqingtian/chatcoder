@@ -23,7 +23,7 @@ import httpx
 
 from app.core.config import settings
 from app.models.base import ModelProvider
-from app.models.providers.temperature_policy import pick_temperature
+from app.models.providers.temperature_policy import request_temperature
 from app.models.providers.tool_args import parse_tool_args
 from app.models.schemas import ChatMessage, ChatRequest, ChatResponse, Usage
 
@@ -257,9 +257,9 @@ class CommandCodeProvider(ModelProvider):
             "messages": messages,
             "stream": True,
         }
-        # 模型名任一来源携带 claude 字样时不下发温度；其余模型保持原 0.3 兜底。
-        _temp = pick_temperature(
-            request.temperature,
+        # 思考开启时不设置温度；其余按设置取值（Claude 系只下发默认温度）。
+        _temp = request_temperature(
+            request,
             model_name=request.model,
             extra_names=(self._default_model,),
             base_url=self._base_url,

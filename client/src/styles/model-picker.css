@@ -322,12 +322,12 @@
 /* 索引进度：进度条 + 已扫描/总文件数（进行中状态独立成行，不吃 desc 的 flex-wrap） */
 .idx-progress { display: flex; flex-direction: column; gap: 4px; margin-top: 5px; width: 100%; }
 .idx-progress-bar {
-  height: 4px; width: 100%; border-radius: 2px;
+  height: 4px; width: 100%; border-radius: var(--r-sm);
   background: color-mix(in oklab, var(--color-sky-500) 16%, transparent);
   overflow: hidden;
 }
 .idx-progress-fill {
-  height: 100%; border-radius: 2px;
+  height: 100%; border-radius: var(--r-sm);
   background: var(--accent, var(--color-sky-500));
   transition: width var(--dur-fast) var(--ease-out, linear);
 }

@@ -239,7 +239,7 @@ svg.lx .lx-draw { stroke-dasharray: 14; stroke-dashoffset: 0; }
   .lx-draw { animation: lx-draw var(--dur-5) var(--ease-emphasized-decel); }
   .lx-fill { fill-opacity: 0.1; }
 }
-:where(button, [role="button"], [role="tab"], .sb-nav-item, .sb-user-settings):active svg.lx { transform: scale(0.88); transition-duration: 90ms; }
+:where(button, [role="button"], [role="tab"], .sb-nav-item, .sb-user-settings):active svg.lx { transform: scale(0.88); transition-duration: var(--dur-1); }
 :is(.active, .is-active, [aria-selected="true"], [aria-current="page"], [data-state="open"]) svg.lx:not(.ic-duo) { color: var(--ic-accent); }
 :is(.active, .is-active, [aria-selected="true"], [aria-current="page"], [data-state="open"]) svg.lx .lx-fill { fill-opacity: 0.16; }
 @keyframes lx-blink { 50% { opacity: 0; } }

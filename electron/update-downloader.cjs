@@ -7,9 +7,10 @@
  * 做法：
  *  - 分块：把文件切成固定大小的块（默认 4MiB），多条连接并行用 Range 拉取，每块独立重试；
  *  - 断点：已完成的块序号写进 <文件>.part.json，进程重启 / 断网恢复后只补缺的块；
- *  - 多源：先用一小段 Range 探测各个源的吞吐，择优下载；连续失败自动换源，永不放弃网络类故障；
+ *  - 多源：按固定优先级 自建源 > 镜像 > GitHub 选源，失败按退避有序切换，不在最高优先级源上时
+ *    定时探测并自动回切（plan-20261022-update-route，见 update-source-policy.cjs）；网络类故障永不放弃；
  *  - 校验：整包 sha512 与 latest.yml 一致才改名落地，不一致就清掉重来；
- *  - 不支持 Range 的源退化为单连接顺序下载（失败从头来，但仍会换源重试）。
+ *  - 所有源都不支持 Range 时退化为单连接顺序下载（失败从头来，但仍会换源重试）。
  *
  * 纯 Node 模块：fetch 由调用方注入——主进程传 Electron 的 net.fetch（继承系统代理 / 证书设置），
  * 单测传全局 fetch。不依赖 electron。
@@ -18,9 +19,10 @@ const fs = require("fs");
 const fsp = fs.promises;
 const path = require("path");
 const crypto = require("crypto");
+const { createSourceController, normalizeSources } = require("./update-source-policy.cjs");
 
 const MiB = 1024 * 1024;
-const PROBE_BYTES = 256 * 1024;
+const PROBE_BYTES = 64 * 1024;
 
 class DownloadError extends Error {
   /** kind: network | http | range | size | checksum | disk | aborted | fatal */
@@ -32,10 +34,13 @@ class DownloadError extends Error {
   }
 }
 
+/** 取消原因（cancel=用户取消 / restart=切换线路后重新开始），随 aborted 错误抛出，供上层区分 */
+const abortReason = (signal) => (signal && typeof signal.reason === "string" ? signal.reason : "cancel");
+
 const sleep = (ms, signal) => new Promise((resolve, reject) => {
-  if (signal && signal.aborted) return reject(new DownloadError("aborted", "已取消"));
+  if (signal && signal.aborted) return reject(new DownloadError("aborted", "已取消", { reason: abortReason(signal) }));
   const t = setTimeout(() => { if (signal) signal.removeEventListener("abort", onAbort); resolve(); }, ms);
-  const onAbort = () => { clearTimeout(t); reject(new DownloadError("aborted", "已取消")); };
+  const onAbort = () => { clearTimeout(t); reject(new DownloadError("aborted", "已取消", { reason: abortReason(signal) })); };
   if (signal) signal.addEventListener("abort", onAbort, { once: true });
 });
 
@@ -88,17 +93,19 @@ async function discardPartial(partPath) {
 
 /**
  * @param {object} opts
- * @param {string[]} opts.urls          同一个文件的候选下载地址
+ * @param {Array<string|{url: string, tier: "primary"|"mirror"|"github", label?: string}>} opts.urls
+ *        同一个文件的候选下载地址；按层级 自建源 > 镜像 > GitHub 使用（字符串数组：第一个视为自建源）
  * @param {string}   opts.dest          校验通过后的最终路径
  * @param {string}   opts.partDir       断点文件目录（与 dest 同卷，最后一步才能原子改名）
  * @param {string}   opts.sha512        期望的整包 sha512（base64）
- * @param {number}   [opts.size]        期望总字节数（缺省时取探测到的 Content-Range 总长）
+ * @param {number}   [opts.size]        期望总字节数（缺省时从第一个连通的源取 Content-Range 总长）
  * @param {Function} [opts.fetchImpl]   (url, init) => Promise<Response>
  * @param {Function} [opts.isOnline]    () => boolean；网络类失败后用来判断是否先等网络
  * @param {Function} [opts.onProgress]  ({total, delta, transferred, percent, bytesPerSecond}) => void
  * @param {Function} [opts.onPhase]     (phase, info) => void；phase: connecting|downloading|waiting|retrying|verifying
- * @param {AbortSignal} [opts.signal]
- * @returns {Promise<{path: string, bytes: number, source: string, retries: number, resumedBytes: number}>}
+ *        info: {source, tier, label, attempt?, retryInMs?, nextLabel?, message?}
+ * @param {AbortSignal} [opts.signal]   abort(reason) 的 reason 会带到 aborted 错误的 reason 上
+ * @returns {Promise<{path: string, bytes: number, source: string, tier: string, label: string, retries: number, resumedBytes: number}>}
  */
 async function downloadResumable(opts) {
   const {
@@ -112,26 +119,41 @@ async function downloadResumable(opts) {
     chunkSize = 4 * MiB,
     concurrency = 4,
     connectTimeoutMs = 20000,
+    // 切到一个还没连通的源时，首个请求的等待上限：被墙 / 卡死的源不能拖住整个下载
+    firstConnectTimeoutMs = 8000,
     stallTimeoutMs = 15000,
     probeTimeoutMs = 12000,
-    probeGraceMs = 800,
     backoffBaseMs = 500,
     backoffMaxMs = 30000,
+    // 换源前的退避序列（plan-20261022-update-route：2s → 4s → 8s → 16s → 30s 封顶）
+    switchBackoffMs = [2000, 4000, 8000, 16000, 30000],
+    switchRounds = 2,
+    // 不在最高优先级源上时，每隔多久探测一次更高优先级的源，通了就切回去
+    recoverIntervalMs = 60000,
     offlineMaxWaitMs = 60000,
-    switchAfterFailures = 3,
   } = opts;
   const log = (level, ...a) => { try { (logger[level] || logger.info || (() => {}))(...a); } catch { /* ignore */ } };
-  if (!Array.isArray(urls) || urls.length === 0) throw new DownloadError("fatal", "没有可用的下载地址");
+  const sources = normalizeSources(urls);
+  if (sources.length === 0) throw new DownloadError("fatal", "没有可用的下载地址");
   if (typeof fetchImpl !== "function") throw new DownloadError("fatal", "缺少 fetch 实现");
 
   // 内部停止信号：外部取消，或任一 worker 致命失败时置位，让其余 worker 与在途请求立即停下
   const stopCtl = new AbortController();
   const stopSignal = stopCtl.signal;
+  let cancelReason = "cancel";
   if (signal) {
-    if (signal.aborted) stopCtl.abort();
-    else signal.addEventListener("abort", () => stopCtl.abort(), { once: true });
+    const onExternalAbort = () => { cancelReason = abortReason(signal); stopCtl.abort(); };
+    if (signal.aborted) onExternalAbort();
+    else signal.addEventListener("abort", onExternalAbort, { once: true });
   }
-  const throwIfAborted = () => { if (stopSignal.aborted) throw new DownloadError("aborted", "已取消"); };
+  const abortedErr = () => new DownloadError("aborted", "已取消", { reason: cancelReason });
+  // 当前这一轮工作的停止信号：分块下载期间是 runChunked 自己的信号（某个 worker 致命失败时只停这一轮，
+  // 之后仍可退化为单连接下载），其余时候就是 stopSignal
+  let workSignal = stopSignal;
+  const throwIfAborted = () => {
+    if (stopSignal.aborted) throw abortedErr();
+    if (workSignal.aborted) throw new DownloadError("aborted", "本轮下载已停止", { reason: "internal" });
+  };
   throwIfAborted();
 
   await fsp.mkdir(partDir, { recursive: true });
@@ -151,10 +173,11 @@ async function downloadResumable(opts) {
   /** 带超时 / 取消联动的 fetch：返回 {res, ctl, dispose}；超时只覆盖「等响应头」阶段 */
   async function request(url, headers, timeoutMs) {
     const ctl = new AbortController();
+    const sig = workSignal;
     const onAbort = () => ctl.abort();
-    stopSignal.addEventListener("abort", onAbort, { once: true });
+    if (sig.aborted) ctl.abort(); else sig.addEventListener("abort", onAbort, { once: true });
     const timer = setTimeout(() => ctl.abort(), timeoutMs);
-    const dispose = () => { clearTimeout(timer); stopSignal.removeEventListener("abort", onAbort); };
+    const dispose = () => { clearTimeout(timer); sig.removeEventListener("abort", onAbort); };
     try {
       const res = await fetchImpl(url, { headers, signal: ctl.signal, redirect: "follow", cache: "no-store" });
       clearTimeout(timer);
@@ -196,91 +219,63 @@ async function downloadResumable(opts) {
     return got;
   }
 
-  // ───────────── 1) 探测：各源吞吐 / 是否支持 Range / 文件大小是否吻合 ─────────────
-  onPhase("connecting", {});
-  const sources = urls.map((url, i) => ({ url, id: i, dead: false, noRange: false, speed: 0, fails: 0, label: hostOf(url) }));
+  async function waitForNetwork(minDelay) {
+    const deadline = Date.now() + offlineMaxWaitMs;
+    await sleep(minDelay, workSignal).catch((e) => { throwIfAborted(); throw e; });
+    while (!isOnline() && Date.now() < deadline) await sleep(2000, workSignal).catch((e) => { throwIfAborted(); throw e; });
+  }
 
+  /** 小段 Range 探测：确认源连通、支持分段、文件大小吻合。用于未知大小时取总长，以及定时回切。
+   *  返回 true=可用；false=暂时不通；致命问题（404 / 大小不符）直接标记该源不可用 */
   async function probe(src) {
-    const t0 = Date.now();
     try {
       const { res, ctl, dispose } = await request(src.url, { Range: `bytes=0-${PROBE_BYTES - 1}` }, probeTimeoutMs);
       try {
         if (res.status === 206) {
           const cr = parseContentRange(res.headers.get("content-range"));
-          if (size && cr && cr.total && cr.total !== size) { src.dead = true; src.reason = "size"; return; }
+          if (size && cr && cr.total && cr.total !== size) { controller.markDead(src, "文件大小与预期不符"); return false; }
           if (!size && cr && cr.total) size = cr.total;
-          // 读完探测段以估算吞吐（含建连）
-          const want = Math.min(PROBE_BYTES, (cr ? cr.end - cr.start + 1 : PROBE_BYTES));
-          const tmp = Buffer.allocUnsafe(want);
-          await readBody(res, ctl, tmp, () => {});
-          src.speed = want / Math.max(1, Date.now() - t0) * 1000;
-          return;
+          const want = Math.min(PROBE_BYTES, cr ? cr.end - cr.start + 1 : PROBE_BYTES);
+          await readBody(res, ctl, Buffer.allocUnsafe(want), () => {});
+          return true;
         }
         if (res.status === 200) {
-          src.noRange = true;
+          // 能通但不支持分段：只在所有源都不支持分段时才会被退化下载用到
           const len = Number(res.headers.get("content-length") || 0);
-          if (size && len && len !== size) { src.dead = true; src.reason = "size"; }
           if (!size && len) size = len;
           try { await res.body.cancel(); } catch { /* ignore */ }
-          src.speed = 1; // 能通但不能分块：排在支持 Range 的源之后
-          return;
+          src.noRange = true;
+          return false;
         }
-        if (httpFailureKind(res.status) === "dead") { src.dead = true; src.reason = `http ${res.status}`; }
+        if (httpFailureKind(res.status) === "dead") controller.markDead(src, `HTTP ${res.status}`);
         try { await res.body.cancel(); } catch { /* ignore */ }
+        return false;
       } finally { dispose(); }
     } catch (e) {
       if (e && e.kind === "aborted") throw e;
-      src.reason = String((e && e.message) || e);
+      return false;
     }
   }
 
-  /** 探测各源。第一个可用的源出现后，只再给其它源一个很短的宽限期（它们可能更快）就开始下载：
-   *  被墙的源（比如国内访问 GitHub）要等探测超时才有结果，不能拖慢启动；没探测完的源留在后备里继续探测，
-   *  下载结束时一并中断。 */
-  async function probeAll() {
-    for (let round = 0; ; round++) {
-      throwIfAborted();
-      const live = sources.filter((s) => !s.dead);
-      const tasks = live.map((s) => probe(s));
-      await new Promise((resolve) => {
-        let finished = 0;
-        let grace = null;
-        const finish = () => { if (grace) clearTimeout(grace); resolve(); };
-        const check = () => {
-          if (finished === tasks.length) return finish();
-          // 只有「支持分段」的源出现才开始宽限计时：只通了一个不支持 Range 的源时，还要等其它源的结果，
-          // 否则会因为它先到而放弃分块下载（退化成单连接、失败从头来）
-          if (!grace && live.some((s) => s.speed > 0 && !s.noRange)) grace = setTimeout(finish, probeGraceMs);
-        };
-        for (const t of tasks) t.then(() => { finished += 1; check(); }, () => { finished += 1; check(); });
-        if (stopSignal.aborted) finish(); else stopSignal.addEventListener("abort", finish, { once: true });
-      });
-      throwIfAborted();
-      const alive = sources.filter((s) => !s.dead && s.speed > 0);
-      if (alive.length) return alive;
-      if (sources.every((s) => s.dead)) {
-        throw new DownloadError("fatal", `所有下载源都不可用：${sources.map((s) => `${s.label}(${s.reason || "?"})`).join("、")}`);
-      }
-      // 全是网络类失败：等网络恢复后再探测（不放弃）
-      onPhase("waiting", { reason: "probe" });
-      await waitForNetwork(Math.min(backoffMaxMs, backoffBaseMs * 2 ** Math.min(round, 6)));
+  // ───────────── 1) 选源状态机（优先级固定，不测速） ─────────────
+  const controller = createSourceController({ sources, backoffSeqMs: switchBackoffMs, rounds: switchRounds });
+  const srcInfo = (s) => ({ source: s.host, tier: s.tier, label: s.label });
+  onPhase("connecting", srcInfo(controller.current()));
+  log("info", `[update-dl] 候选源（按优先级）：${sources.map((s) => `${s.label}(${s.host})`).join(" > ")}`);
+
+  // 没给大小（latest.yml 缺字段）：按优先级逐个探测取总长；全是网络类失败就退避后再来，不放弃
+  for (let round = 0; !size; round++) {
+    throwIfAborted();
+    for (const s of sources) {
+      if (s.dead) continue;
+      await probe(s);
+      if (size) break;
     }
+    if (size) break;
+    if (controller.allDead()) throw new DownloadError("fatal", `所有下载源都不可用：${sources.map((s) => `${s.label}(${s.reason || "?"})`).join("、")}`);
+    onPhase("waiting", { ...srcInfo(controller.current()), reason: "probe" });
+    await waitForNetwork(Math.min(backoffMaxMs, backoffBaseMs * 2 ** Math.min(round, 6)));
   }
-
-  async function waitForNetwork(minDelay) {
-    const deadline = Date.now() + offlineMaxWaitMs;
-    await sleep(minDelay, stopSignal);
-    while (!isOnline() && Date.now() < deadline) await sleep(2000, stopSignal);
-  }
-
-  const alive = await probeAll();
-  // 支持 Range 的源按吞吐降序；不支持的排后面；探测时偶发失败（但没被判死）的源留作后备，
-  // 之后换源时仍有机会轮到它（它可能只是探测那一刻网络抖了一下）
-  const ranked = alive.sort((a, b) => (Number(a.noRange) - Number(b.noRange)) || (b.speed - a.speed))
-    .concat(sources.filter((s) => !s.dead && !(s.speed > 0)));
-  const chunked = !ranked[0].noRange;
-  if (!size) throw new DownloadError("fatal", "无法确定更新包大小");
-  log("info", `[update-dl] 源排序：${ranked.map((s) => `${s.label}(${Math.round(s.speed / 1024)}KB/s${s.noRange ? ",无Range" : ""})`).join(" > ")} size=${size}`);
 
   // ───────────── 进度记账 ─────────────
   const nChunks = Math.ceil(size / chunkSize);
@@ -293,6 +288,7 @@ async function downloadResumable(opts) {
   let lastEmitBytes = 0;
   let samples = [{ t: Date.now(), b: 0 }];
   let phaseNow = "";
+  let phaseSource = null;
   // 最近一次收到数据的时刻：单个分块偶发失败（其余连接仍在出数据）不对外报「重试中」，避免界面来回闪
   let lastBytesAt = Date.now();
 
@@ -310,10 +306,17 @@ async function downloadResumable(opts) {
     const bps = now > first.t ? Math.max(0, (tr - first.b) / ((now - first.t) / 1000)) : 0;
     onProgress({ total: size, delta, transferred: tr, percent: size ? (tr / size) * 100 : 0, bytesPerSecond: bps });
   }
+  /** 数据在流动：阶段切回 downloading；换了源（含自动回切）也要重新上报，界面据此更新线路提示 */
+  function markFlowing(src) {
+    if (phaseNow === "downloading" && phaseSource === src) return;
+    phaseNow = "downloading";
+    phaseSource = src;
+    onPhase("downloading", srcInfo(src));
+  }
 
   // ───────────── 2) 准备断点文件 ─────────────
   let meta = await loadMeta(metaPath);
-  let reuse = !!meta && meta.size === size && meta.sha512 === sha512 && meta.chunkSize === chunkSize && chunked;
+  let reuse = !!meta && meta.size === size && meta.sha512 === sha512 && meta.chunkSize === chunkSize;
   if (reuse) {
     try { reuse = (await fsp.stat(partPath)).size === size; } catch { reuse = false; }
   }
@@ -331,40 +334,26 @@ async function downloadResumable(opts) {
   resumedBytes = doneBytes;
   if (resumedBytes) log("info", `[update-dl] 断点续传：已有 ${Math.round(resumedBytes / MiB)}MiB / ${Math.round(size / MiB)}MiB`);
 
+  let streaming = false; // 退化为单连接顺序下载后，分块进度不再有意义，不再落盘
   let lastSave = 0;
   const persist = async (force) => {
+    if (streaming) return;
     const now = Date.now();
     if (!force && now - lastSave < 1000) return;
     lastSave = now;
     await saveMeta(metaPath, { size, sha512, chunkSize, done: [...done].sort((a, b) => a - b) });
   };
 
-  // ───────────── 3) 源选择与故障切换 ─────────────
-  let active = 0; // ranked 下标
-  const currentSource = () => ranked[active % ranked.length];
-  function recordFailure(src, err) {
-    src.fails += 1;
-    if (err && err.kind === "http" && err.hard) { src.dead = true; src.reason = err.message; }
-    if (err && (err.kind === "size" || err.kind === "range")) { src.dead = true; src.reason = err.message; }
-    if (src.dead || src.fails >= switchAfterFailures) {
-      src.fails = 0;
-      const live = ranked.filter((s) => !s.dead);
-      if (live.length === 0) throw new DownloadError("fatal", `所有下载源都不可用：${ranked.map((s) => `${s.label}(${s.reason || "?"})`).join("、")}`);
-      const idx = live.indexOf(src);
-      const next = live[(idx + 1) % live.length];
-      active = ranked.indexOf(next);
-      log("warn", `[update-dl] 切换下载源 -> ${next.label}`);
-    }
-  }
-  const recordSuccess = (src) => { src.fails = 0; };
+  const allDeadError = () => new DownloadError("fatal", `所有下载源都不可用：${sources.map((s) => `${s.label}(${s.reason || "?"})`).join("、")}`);
 
-  // ───────────── 4) 分块下载 ─────────────
-  async function fetchChunk(i) {
-    const src = currentSource();
+  // ───────────── 3) 分块下载 ─────────────
+  async function fetchChunk(i, lease) {
+    const src = lease.src;
     const start = i * chunkSize;
     const len = chunkLen(i);
     const end = start + len - 1;
-    const { res, ctl, dispose } = await request(src.url, { Range: `bytes=${start}-${end}` }, connectTimeoutMs);
+    const timeout = lease.cold ? Math.min(firstConnectTimeoutMs, connectTimeoutMs) : connectTimeoutMs;
+    const { res, ctl, dispose } = await request(src.url, { Range: `bytes=${start}-${end}` }, timeout);
     try {
       if (res.status !== 206) {
         if (res.status === 200) throw new DownloadError("range", "下载源不支持分段请求");
@@ -378,7 +367,13 @@ async function downloadResumable(opts) {
       const buf = Buffer.allocUnsafe(len);
       inflight.set(i, 0);
       try {
-        const got = await readBody(res, ctl, buf, (n) => { inflight.set(i, n); lastBytesAt = Date.now(); emitProgress(false); });
+        const got = await readBody(res, ctl, buf, (n) => {
+          inflight.set(i, n);
+          lastBytesAt = Date.now();
+          controller.reportAlive(src);
+          if (controller.current() === src) markFlowing(src);
+          emitProgress(false);
+        });
         if (got !== len) throw new DownloadError("network", `第 ${i} 块数据不完整`);
       } catch (e) {
         inflight.delete(i);
@@ -403,28 +398,59 @@ async function downloadResumable(opts) {
   async function fetchChunkWithRetry(i) {
     for (let attempt = 0; ; attempt++) {
       throwIfAborted();
-      const src = currentSource();
+      const lease = await controller.acquire(workSignal).catch((e) => { throwIfAborted(); throw e; });
       try {
-        await fetchChunk(i);
-        recordSuccess(src);
-        if (phaseNow !== "downloading") { phaseNow = "downloading"; onPhase("downloading", { source: src.label }); }
+        await fetchChunk(i, lease);
+        controller.release(lease);
         return;
       } catch (e) {
-        if (e && e.kind === "aborted") throw e;
-        if (e && (e.kind === "disk" || e.kind === "fatal")) throw e;
+        if (e && e.kind === "aborted") { controller.release(lease); throw e; }
+        if (e && (e.kind === "disk" || e.kind === "fatal")) { controller.release(lease); throw e; }
         retries += 1;
-        recordFailure(src, e);
-        const next = currentSource();
-        log("warn", `[update-dl] 第 ${i} 块失败(${e && e.kind}): ${e && e.message}；来源 ${src.label} -> ${next.label}；重试 ${attempt + 1}`);
+        const verdict = controller.reportFailure(lease, e);
+        const from = lease.src;
+        log("warn", `[update-dl] 第 ${i} 块失败(${e && e.kind}): ${e && e.message}；${from.label} -> ${verdict.action}${verdict.to ? ` ${verdict.to.label}` : ""}`);
+        if (verdict.action === "fatal") throw allDeadError();
+        if (verdict.action === "stale") continue; // 已经换过源了：回去排队，按新的源重来
+        if (verdict.action === "switched") {
+          // 换源：不管有没有数据都要告诉用户（这一刻已经没有数据在流动了）
+          log("warn", `[update-dl] 切换下载源 ${from.label} -> ${verdict.to.label}，${verdict.delayMs}ms 后重试`);
+          phaseNow = "retrying"; phaseSource = null;
+          onPhase("retrying", {
+            ...srcInfo(from), attempt: attempt + 1, retryInMs: verdict.delayMs,
+            nextLabel: verdict.to.label, nextTier: verdict.to.tier, message: String((e && e.message) || e),
+          });
+          if ((!e || e.kind === "network") && !isOnline()) {
+            onPhase("waiting", { ...srcInfo(verdict.to), reason: "offline" }); phaseNow = "waiting";
+            await waitForNetwork(2000);
+          }
+          continue; // 退避由选源闸门统一执行（acquire 会等到闸门打开）
+        }
+        // 同源单块失败：源本身是好的，短暂退避后同源重试
         const quiet = Date.now() - lastBytesAt > 3000; // 已经好几秒没有任何数据进来，才值得告诉用户
-        if (quiet) { onPhase("retrying", { attempt: attempt + 1, source: next.label, message: String((e && e.message) || e) }); phaseNow = "retrying"; }
-        const networkLike = !e || e.kind === "network";
+        if (quiet) { onPhase("retrying", { ...srcInfo(from), attempt: attempt + 1, message: String((e && e.message) || e) }); phaseNow = "retrying"; phaseSource = null; }
         const delay = Math.min(backoffMaxMs, backoffBaseMs * 2 ** Math.min(attempt, 6)) * (0.7 + Math.random() * 0.6);
-        if (networkLike && !isOnline()) {
-          onPhase("waiting", { reason: "offline" }); phaseNow = "waiting"; // 确定离线：不受 quiet 限制，立刻告知
+        if ((!e || e.kind === "network") && !isOnline()) {
+          onPhase("waiting", { ...srcInfo(from), reason: "offline" }); phaseNow = "waiting"; // 确定离线：不受 quiet 限制，立刻告知
           await waitForNetwork(Math.min(delay, 2000));
         } else {
-          await sleep(delay, stopSignal);
+          await sleep(delay, workSignal).catch((err) => { throwIfAborted(); throw err; });
+        }
+      }
+    }
+  }
+
+  /** 定时回切：不在最高优先级源上时，串行探测更高优先级的源，通了就切回去（已完成的块不受影响） */
+  async function recoverLoop(recoverCtl) {
+    for (;;) {
+      await sleep(recoverIntervalMs, recoverCtl.signal);
+      for (const cand of controller.higherThanCurrent()) {
+        if (recoverCtl.signal.aborted) return;
+        if (await probe(cand)) {
+          const from = controller.current();
+          controller.promote(cand);
+          log("info", `[update-dl] ${cand.label} 已恢复，从 ${from.label} 切回`);
+          break;
         }
       }
     }
@@ -434,6 +460,12 @@ async function downloadResumable(opts) {
     const queue = [];
     for (let i = 0; i < nChunks; i++) if (!done.has(i)) queue.push(i);
     let cursor = 0;
+    const runCtl = new AbortController();
+    const onStop = () => runCtl.abort();
+    stopSignal.addEventListener("abort", onStop, { once: true });
+    workSignal = runCtl.signal;
+    const recoverCtl = new AbortController();
+    const recovering = recoverLoop(recoverCtl).catch(() => { /* 取消 / 结束时退出 */ });
     const workers = Array.from({ length: Math.max(1, Math.min(concurrency, queue.length || 1)) }, async () => {
       for (;;) {
         throwIfAborted();
@@ -446,26 +478,37 @@ async function downloadResumable(opts) {
     let primaryErr = null;
     await Promise.all(workers.map((w) => w.catch((e) => {
       if (!primaryErr || (primaryErr.kind === "aborted" && e && e.kind !== "aborted")) primaryErr = e;
-      stopCtl.abort();
+      runCtl.abort();
     })));
+    recoverCtl.abort();
+    await recovering;
+    stopSignal.removeEventListener("abort", onStop);
+    workSignal = stopSignal;
+    if (stopSignal.aborted) throw abortedErr();
     if (primaryErr) throw primaryErr;
   }
 
-  // 不支持 Range：单连接顺序下载（失败整体重来，但仍然会换源重试）
+  // 所有源都不支持 Range：单连接顺序下载，按优先级轮换（失败整体重来）
   async function runStreaming() {
+    streaming = true;
+    done.clear();
+    await fsp.unlink(metaPath).catch(() => {});
+    const list = sources.filter((s) => s.noRange);
     for (let attempt = 0; ; attempt++) {
       throwIfAborted();
-      const src = currentSource();
+      const src = list[attempt % list.length];
       try {
         const { res, ctl, dispose } = await request(src.url, {}, connectTimeoutMs);
         try {
           if (res.status !== 200) {
-            throw new DownloadError("http", `HTTP ${res.status}`, { status: res.status, hard: httpFailureKind(res.status) === "dead" });
+            if (httpFailureKind(res.status) === "dead") { list.splice(list.indexOf(src), 1); if (!list.length) throw allDeadError(); }
+            throw new DownloadError("http", `HTTP ${res.status}`, { status: res.status });
           }
           inflight.clear();
           doneBytes = 0;
           let pos = 0;
           const reader = res.body.getReader();
+          markFlowing(src);
           try {
             for (;;) {
               let timer;
@@ -484,26 +527,34 @@ async function downloadResumable(opts) {
             throw e instanceof DownloadError ? e : new DownloadError("network", String((e && e.message) || e));
           }
           if (pos !== size) throw new DownloadError("network", "数据不完整");
+          phaseSource = src;
           return;
         } finally { dispose(); }
       } catch (e) {
-        if (e && (e.kind === "aborted" || e.kind === "disk")) throw e;
+        if (e && (e.kind === "aborted" || e.kind === "disk" || e.kind === "fatal")) throw e;
         retries += 1;
-        recordFailure(src, e);
-        onPhase("retrying", { attempt: attempt + 1, source: currentSource().label, message: String((e && e.message) || e) });
-        if (!isOnline()) { onPhase("waiting", { reason: "offline" }); await waitForNetwork(2000); }
-        else await sleep(Math.min(backoffMaxMs, backoffBaseMs * 2 ** Math.min(attempt, 6)), stopSignal);
+        const next = list[(attempt + 1) % list.length];
+        const delay = switchBackoffMs[Math.min(attempt, switchBackoffMs.length - 1)];
+        phaseNow = "retrying"; phaseSource = null;
+        onPhase("retrying", { ...srcInfo(src), attempt: attempt + 1, retryInMs: delay, nextLabel: next.label, nextTier: next.tier, message: String((e && e.message) || e) });
+        if (!isOnline()) { onPhase("waiting", { ...srcInfo(next), reason: "offline" }); await waitForNetwork(2000); }
+        else await sleep(delay, stopSignal);
       }
     }
   }
 
-  // ───────────── 5) 执行 → 校验 → 落地 ─────────────
+  // ───────────── 4) 执行 → 校验 → 落地 ─────────────
   try {
-    onPhase("downloading", { source: currentSource().label });
-    phaseNow = "downloading";
     emitProgress(true);
-    if (done.size < nChunks || !chunked) {
-      if (chunked) await runChunked(); else await runStreaming();
+    if (done.size < nChunks) {
+      try {
+        await runChunked();
+      } catch (e) {
+        // 分块下载因「所有源都不可用」失败，但其中有源只是不支持 Range：退化为单连接下载
+        if (!(e && e.kind === "fatal" && sources.some((s) => s.noRange))) throw e;
+        log("warn", "[update-dl] 所有源都不支持分段请求，退化为单连接下载");
+        await runStreaming();
+      }
     }
     await persist(true);
   } catch (e) {
@@ -515,7 +566,7 @@ async function downloadResumable(opts) {
   await fh.close().catch(() => {});
   emitProgress(true);
 
-  onPhase("verifying", {});
+  onPhase("verifying", srcInfo(phaseSource || controller.current()));
   const actual = await hashFileSha512(partPath);
   if (actual !== sha512) {
     await discardPartial(partPath);
@@ -535,12 +586,9 @@ async function downloadResumable(opts) {
     }
   }
   await fsp.unlink(metaPath).catch(() => {});
-  stopCtl.abort(); // 还在后台探测的源（比如被墙的 GitHub）此时不再需要，立刻释放连接与定时器
-  return { path: dest, bytes: size, source: currentSource().label, retries, resumedBytes };
-}
-
-function hostOf(url) {
-  try { return new URL(url).host; } catch { return String(url).slice(0, 40); }
+  const used = phaseSource || controller.current();
+  stopCtl.abort(); // 还在后台的回切探测此时不再需要，立刻释放连接与定时器
+  return { path: dest, bytes: size, source: used.host, tier: used.tier, label: used.label, retries, resumedBytes };
 }
 
 module.exports = { downloadResumable, DownloadError, hashFileSha512, parseContentRange, discardPartial };

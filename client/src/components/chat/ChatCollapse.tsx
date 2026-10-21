@@ -34,6 +34,16 @@ export function ChatCollapse({
     if (open) setMounted(true);
   }, [open]);
 
+  // 兜底卸载：元素被隐藏或动效关闭时 transitionend 可能不触发，内容会一直挂着。
+  // 按动效系数估算过渡时长后卸载；transitionend 先到时由下方清理函数取消定时器。
+  useEffect(() => {
+    if (open || !mounted) return;
+    const scale = Number(getComputedStyle(document.documentElement).getPropertyValue("--motion-scale"));
+    const wait = 200 * (Number.isFinite(scale) && scale > 0 ? scale : 1) + 160;
+    const timer = window.setTimeout(() => setMounted(false), wait);
+    return () => window.clearTimeout(timer);
+  }, [open, mounted]);
+
   return (
     <div
       className={"tc-collapse" + (className ? " " + className : "")}

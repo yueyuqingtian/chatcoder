@@ -433,7 +433,8 @@ def build_rules_anchor(
             return head + (
                 "\nProject rule documents loaded from the workspace this turn: "
                 + ", ".join(docs)
-                + ". Read the relevant ones and keep working inside their conventions."
+                + ". Read the ones relevant to this task and keep working inside their conventions; "
+                "do not re-read a document you already read this session unless it has changed."
             )
         return head + (
             "\nNo project rule document was detected in this workspace — follow the existing "
@@ -448,7 +449,8 @@ def build_rules_anchor(
     if docs:
         return head + (
             "\n本轮已从工作区加载的项目规则文档：" + "、".join(docs)
-            + "。请先阅读相关文档，并在其约定内推进工作。"
+            + "。请先阅读与本次任务相关的文档，并在其约定内推进工作；"
+            "本会话里已读过且未修改的文档不必重复读取，直接沿用之前的结果。"
         )
     return head + (
         "\n本轮未在工作区检测到项目规则文档——请沿用既有代码风格与目录结构，"

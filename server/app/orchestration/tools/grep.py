@@ -119,7 +119,7 @@ class GrepTool(Tool):
                 from app.orchestration.tools.path_hints import missing_path_hint
 
                 hint = await asyncio.to_thread(missing_path_hint, ctx.workspace_root, str(search_path))
-                return ToolResult(ok=False, output="", error=f"路径不存在: {search_path}{hint}")
+                return ToolResult(ok=False, output="", error=f"路径不存在: {search_path}{hint}", error_code="NOT_FOUND")
         else:
             root = ws_root
 

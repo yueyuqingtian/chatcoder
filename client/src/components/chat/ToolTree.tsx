@@ -616,14 +616,16 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
           {ok === null ? runningVerb(leaf.tool) : toolVerb(leaf.tool)}
         </span>
         {path && (
-          <span className="tc-filelink" title={`${path}（点击查看${isWrite ? "变更" : "文件"}）`} onClick={(e) => void openFilePreview(e, path)}>
-            <FileIcon name={path} size={16} />
-            <span className="tc-filename">{name}</span>
-          </span>
+          <Tooltip content={`${path}（点击查看${isWrite ? "变更" : "文件"}）`}>
+            <span className="tc-filelink" onClick={(e) => void openFilePreview(e, path)}>
+              <FileIcon name={path} size={16} />
+              <span className="tc-filename">{name}</span>
+            </span>
+          </Tooltip>
         )}
-        {path && dir && <span className="tc-dir" title={path}>{dir}</span>}
+        {path && dir && <Tooltip content={path}><span className="tc-dir">{dir}</span></Tooltip>}
         {!path && toolDisplayName(leaf.tool) && <span className="tc-tool-name">{toolDisplayName(leaf.tool)}</span>}
-        {!path && summary && <span className="tc-query" title={summary}>{summary}</span>}
+        {!path && summary && <Tooltip content={summary}><span className="tc-query">{summary}</span></Tooltip>}
         {/* v7(H): 写操作运行中 changeStat 未落库时回退到实时结果；
             plan-89-387: 历史消息缺统计时，展开后按「本次变更」回填行数 */}
         {(() => {
@@ -679,11 +681,13 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
               {grepHits.length > 0 && (
                 <div className="tc-grep-hits">
                   {grepHits.slice(0, 20).map((hit, i) => (
-                    <button key={i} className="tc-grep-hit" title={hit.path} onClick={(e) => openGrepHit(e, hit)}>
-                      <span className="tc-grep-path">{hit.path.split(/[\\/]/).pop()}</span>
-                      <span className="tc-grep-ln">:{hit.line}</span>
-                      <span className="tc-grep-text">{hit.rest.slice(0, 60)}</span>
-                    </button>
+                    <Tooltip key={i} content={hit.path}>
+                      <button className="tc-grep-hit" onClick={(e) => openGrepHit(e, hit)}>
+                        <span className="tc-grep-path">{hit.path.split(/[\\/]/).pop()}</span>
+                        <span className="tc-grep-ln">:{hit.line}</span>
+                        <span className="tc-grep-text">{hit.rest.slice(0, 60)}</span>
+                      </button>
+                    </Tooltip>
                   ))}
                 </div>
               )}
@@ -858,7 +862,7 @@ const WriteMergedRow = memo(function WriteMergedRow({ leaves }: { leaves: ToolLe
             <span className="tc-filename">{name}</span>
           </span>
         )}
-        {path && dir && <span className="tc-dir" title={path}>{dir}</span>}
+        {path && dir && <Tooltip content={path}><span className="tc-dir">{dir}</span></Tooltip>}
         {(add > 0 || del > 0) && <ChangeStat additions={add} deletions={del} />}
         {running && <span className="tc-status wait"><IconSpinner size={11} /></span>}
         {!running && failed && <span className="tc-status fail"><IconX size={11} /></span>}

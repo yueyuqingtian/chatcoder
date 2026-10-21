@@ -17,7 +17,9 @@ class FsWriteTool(Tool):
     name = "fs_write"
     risk_level = "high"
     description = (
-        "在工作区内写入文本文件(覆盖已有文件或创建新文件)。需用户审批。\n"
+        "在工作区内整体写入文本文件：用于创建新文件，或整体重写一个已读取过的文件。需用户审批。\n"
+        "修改已有文件的局部内容请优先使用 editor_apply_diff（以 old_text 校验，改动更小、更不易误伤）。\n"
+        "覆盖已有文件前必须先用 fs_read 读取它，否则会被拒绝。\n"
         "path 使用相对路径(如 'clinic/docs/report.md'),也可用绝对路径。\n"
         "如果目录不存在会自动创建。"
     )
@@ -65,6 +67,15 @@ class FsWriteTool(Tool):
         if not resolved:
             return ToolResult(ok=False, output="", error=f"路径非法: {path}")
         target = Path(resolved)
+
+        # 先读后写：整体覆盖一个本会话从未读取过的已有文件，容易丢失未知内容，直接拒绝并提示先读取。
+        # 局部修改请用 editor_apply_diff（以 old_text 校验，无需先整体读取）。
+        # 缓存为空（进程刚重启）时不做强制，避免升级后首次覆盖被误拦。
+        _rc = getattr(ctx, "read_cache", None)
+        if _rc is not None and _rc.has_any() and target.is_file() and not _rc.has_read(target):
+            return ToolResult(
+                ok=False, output="", error=f"拒绝覆盖未读取的已有文件: {path}", error_code="STALE_READ",
+            )
 
         # plan-20261016-ux（问题 3）：覆盖已有文本文件时沿用其编码、BOM 与换行风格——
         # 旧实现一律 UTF-8 + 平台换行写入：GBK 文件被转成 UTF-8、LF 文件被整份改成 CRLF。

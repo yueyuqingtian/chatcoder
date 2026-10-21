@@ -693,7 +693,7 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .jump-tick-bar {
   display: block;
   height: 1.5px;
-  border-radius: 1px;
+  border-radius: var(--r-sm);
   background: var(--text-3);
   transition: width var(--dur-3) var(--ease-out), opacity var(--dur-3) var(--ease-out), background-color var(--dur-3) var(--ease-out);
 }
@@ -1201,7 +1201,7 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .tc-output::-webkit-scrollbar-thumb,
 .tc-error-output::-webkit-scrollbar-thumb {
   background: var(--border-strong);
-  border-radius: 2px;
+  border-radius: var(--r-sm);
 }
 .tc-output::-webkit-scrollbar-thumb:hover,
 .tc-error-output::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
@@ -1282,15 +1282,6 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   font-variant-numeric: tabular-nums;
 }
 .cq-pill-sending { flex-shrink: 0; display: inline-flex; align-items: center; color: var(--accent); padding: 0 2px; }
-.cq-pill-btn {
-  flex-shrink: 0; width: 20px; height: 20px; padding: 0;
-  display: inline-flex; align-items: center; justify-content: center;
-  border: none; border-radius: 999px; background: transparent;
-  color: var(--text-3); cursor: pointer;
-  transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard);
-}
-.cq-pill-btn.send:hover { background: var(--bg-active); color: var(--text-1); }
-.cq-pill-btn.remove:hover { background: var(--error-soft); color: var(--error); }
 /* plan-282-1421：.cq-pill-send / .cq-pill-remove 旧规则已删除，
    统一由 .cq-pill-btn（send/remove 修饰类）承担，见上方排队区样式。 */
 /* plan-671: 目标模式胶囊——复用排队胶囊语言（999px 圆角/细边框/label chip），对齐 zcode 低打扰 */
@@ -1333,18 +1324,6 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 }
 /* plan-230-1144 M5.2: focus 规则统一由 styles/focus.css 接管（原 11 处零散规则已移除） */
 .composer-mode-wrap { position: relative; }
-.composer-mode-btn {
-  display: inline-flex; align-items: center; gap: 5px;
-  height: 28px; padding: 0 8px; border-radius: var(--r-ctl);
-  border: none; background: transparent;
-  color: var(--warning, #b45309); font-size: 12px; font-weight: 500; cursor: pointer;
-  transition: background var(--dur-fast);
-}
-.composer-mode-btn:hover { background: var(--bg-hover); }
-.composer-mode-btn.mode-plan { color: var(--accent); }
-.composer-mode-btn.mode-readonly { color: var(--text-2); }
-/* plan-75-332: 执行模式三档——agent 为默认（原 default / accept_edits 已合并到此） */
-.composer-mode-btn.mode-agent { color: var(--text-2); }
 .composer-mode-menu { left: 0; bottom: calc(100% + 6px); top: auto; min-width: 140px; }
 
 /* plan-75-332: 权限模式选择器（紧跟执行模式右侧）——询问审批 / 自动审批 / 完全访问。
@@ -1352,15 +1331,6 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
    原两行描述在窄容器里会折行错位、与菜单左对齐基准不符（用户反馈）。
    完全访问为红色警示。 */
 .composer-approval-wrap { position: relative; }
-.composer-approval-btn {
-  display: inline-flex; align-items: center; gap: 5px;
-  height: 28px; padding: 0 8px; border-radius: var(--r-ctl);
-  border: none; background: transparent;
-  color: var(--text-2); font-size: 12px; font-weight: 500; cursor: pointer;
-  transition: background var(--dur-fast);
-}
-.composer-approval-btn:hover { background: var(--bg-hover); color: var(--text-1); }
-.composer-approval-btn.mode-full { color: var(--error); }
 .composer-approval-menu {
   left: 0; bottom: calc(100% + 6px); top: auto;
   min-width: 0; width: max-content; padding: 4px;
@@ -1524,9 +1494,9 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .usage-pop-pct { font-size: 13px; font-weight: 600; color: var(--text-1); font-variant-numeric: tabular-nums; }
 .usage-pop-bar {
   height: 4px; margin: var(--sp-2) 0 var(--sp-1);
-  border-radius: 2px; background: var(--border-strong); overflow: hidden;
+  border-radius: var(--r-sm); background: var(--border-strong); overflow: hidden;
 }
-.usage-pop-bar > span { display: block; height: 100%; border-radius: 2px; transition: width var(--dur-3) var(--ease-standard); }
+.usage-pop-bar > span { display: block; height: 100%; border-radius: var(--r-sm); transition: width var(--dur-3) var(--ease-standard); }
 .usage-pop-amount { font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
 .usage-pop-row { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4); padding: 2px 0; }
 .usage-pop-key { color: var(--text-3); font-size: 11px; }
@@ -1542,8 +1512,6 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
    plan-282-1495：遗留的 .composer-compacting-badge 文字徽标与 compacting-pulse 关键帧一并删除——
    该徽标 nowrap 会把输入卡工具条顶出边界（窄面板下宽度溢出），压缩反馈只保留圆环自转。 */
 .composer-reasoning { position: relative; }
-.composer-reasoning-btn { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; padding: 5px 8px; border-radius: var(--r-ctl); background: transparent; color: var(--text-2); cursor: pointer; white-space: nowrap; border: none; transition: all var(--dur-fast); }
-.composer-reasoning-btn:hover { background: var(--bg-hover); color: var(--text-1); }
 /* plan-282-1421（图4）：拖拽附件 = 输入卡自身激活态。
    旧实现是挂在 .composer 上的 absolute 虚线遮罩（inset:0），而 .composer 含
    padding: 4px 32px 10px → 虚框比真实输入卡（.composer-main）大一圈；圆角也各写各的
@@ -1875,7 +1843,8 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .automation-create-wrap { position: relative; display: flex; }
 .automation-btn-primary { display: inline-flex; align-items: center; height: 32px; padding: 0 14px; border-radius: 8px 0 0 8px; background: var(--text-1); color: var(--bg-elevated); font-size: 13px; font-weight: 500; border: none; cursor: pointer; transition: opacity var(--dur-fast); }
 .automation-btn-primary:hover { opacity: 0.85; }
-.automation-btn-caret { border-radius: 0 8px 8px 0; padding: 0 8px; border-left: 1px solid color-mix(in srgb, var(--bg-elevated) 25%, transparent); }
+/* 分裂按钮两段之间以间距分隔（不用竖线表达分组） */
+.automation-btn-caret { border-radius: 0 8px 8px 0; padding: 0 8px; margin-left: 2px; }
 .automation-create-menu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 40; min-width: 120px; }
 .automation-btn-ghost { height: 32px; padding: 0 14px; border-radius: var(--r-md); background: var(--bg-hover); color: var(--text-3); font-size: 13px; border: none; cursor: pointer; transition: all var(--dur-fast); }
 .automation-btn-ghost:hover { background: var(--bg-active); color: var(--text-1); }
@@ -2050,10 +2019,6 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .sp-pill:hover { background: var(--bg-hover); color: var(--text-1); }
 .sp-pill.active { background: var(--text-1); border-color: var(--text-1); color: var(--bg-main); }
 .navpage-form-actions { display: flex; justify-content: flex-end; gap: 8px; }
-/* 首页新增目录按钮 */
-.es-add-dir-btn { display: inline-flex; align-items: center; gap: 4px; padding: 5px 12px; border-radius: var(--r-ctl); border: 1px solid var(--border); background: var(--bg-elevated); color: var(--text-2); font-size: 12px; cursor: pointer; transition: all var(--dur-fast); white-space: nowrap; }
-.es-add-dir-btn:hover { background: var(--bg-hover); color: var(--text-1); border-color: var(--text-3); }
-.es-add-dir-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 /* 首页自定义项目下拉框 */
 .es-project-dropdown { position: relative; }
 .es-project-trigger { display: inline-flex; align-items: center; gap: 6px; max-width: 280px; padding: 5px 10px; border-radius: var(--r-md); border: none; background: var(--bg-hover); color: var(--text-1); font-size: 12px; cursor: pointer; transition: all var(--dur-fast); }
@@ -2402,7 +2367,7 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .cmd-center-item.active { background: var(--bg-active); }
 .cmd-center-item-icon { display: flex; align-items: center; color: var(--text-2); flex-shrink: 0; }
 .cmd-center-item-label { flex: 1; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cmd-center-item-label mark { background: var(--accent-soft); color: var(--text-1); border-radius: 2px; padding: 0 1px; }
+.cmd-center-item-label mark { background: var(--accent-soft); color: var(--text-1); border-radius: var(--r-sm); padding: 0 1px; }
 .cmd-center-item-hint { font-size: 11px; color: var(--text-3); flex-shrink: 0; }
 .cmd-center-empty { padding: 24px; text-align: center; color: var(--text-3); font-size: 12.5px; }
 /* S2：文件搜索结果——文件名主色 + 所属目录灰显（右侧对齐） */
@@ -2597,7 +2562,8 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 }
 .question-wizard-custom-row {
   display: flex;
-  align-items: center;
+  /* 多行输入时序号与文本框顶对齐；单行时与原先视觉一致 */
+  align-items: flex-start;
   gap: 8px;
   padding: 6px 12px;
   border-radius: var(--r-md);
@@ -2611,11 +2577,21 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 }
 .question-wizard-custom-input {
   flex: 1;
+  min-width: 0;
   background: transparent;
   border: none;
   outline: none;
+  font-family: inherit;
   font-size: 12.5px;
+  line-height: 20px;
   color: var(--text-1);
+  /* 多行自定义回答：随内容增高（JS 设置高度），超过上限后内部滚动，不撑破卡片 */
+  display: block;
+  margin: 0;
+  padding: 0;
+  resize: none;
+  max-height: 160px;
+  overflow-y: auto;
 }
 .question-wizard-custom-input::placeholder {
   color: var(--text-3);
@@ -4345,10 +4321,6 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 /* 浏览器标注 overlay（仅跨域 iframe 降级方案使用） */
 .browser-annot-overlay { position: absolute; inset: 0; z-index: 10; pointer-events: auto; cursor: crosshair; background: transparent; }
 .browser-annot-overlay.active { background: rgba(245, 158, 11, 0.05); }
-/* Sidebar 操作按钮 */
-.sidebar-action-btn { transition: all var(--dur-fast); }
-.sidebar-action-btn:hover { background: var(--bg-hover); color: var(--text-1); }
-.sidebar-action-btn.active { background: var(--bg-active); color: var(--text-1); }
 /* 设置页 */
 .settings-modal-body { display: flex; height: 100%; overflow: hidden; }
 .settings-nav { overflow-y: auto; flex-shrink: 0; height: 100%; }
@@ -4431,18 +4403,11 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
   background: var(--bg-elevated); border: 1px solid var(--border);
   border-radius: 999px; padding: 2px; box-shadow: var(--shadow-md);
 }
-.mf-turn-nav-btn {
-  width: 24px; height: 24px; border-radius: 50%;
-  display: flex; align-items: center; justify-content: center;
-  background: transparent; border: none; color: var(--text-2); cursor: pointer;
-  transition: color var(--dur-fast), background var(--dur-fast);
-}
-.mf-turn-nav-btn:hover { color: var(--text-1); background: var(--bg-hover); }
 .mf-turn-nav-idx { min-width: 34px; text-align: center; font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
 /* 空态首页分层入场 */
 .empty-state > * { animation: anim-slide-up var(--dur-slow) var(--ease-out) both; }
 .empty-state > *:nth-child(2) { animation-delay: 60ms; }
-.empty-state > *:nth-child(3) { animation-delay: 120ms; }
+.empty-state > *:nth-child(3) { animation-delay: var(--dur-2); }
 .empty-state > *:nth-child(4) { animation-delay: 170ms; }
 .empty-state > *:nth-child(5) { animation-delay: 210ms; }
 /* ── 发送与状态控件：中性高对比，降低大面积品牌光晕 ── */
@@ -5039,15 +5004,6 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 .usage-overview-label { font-size: 11px; color: var(--text-3); margin-bottom: 4px; }
 .usage-overview-value { font-size: 20px; font-weight: 600; color: var(--text-1); font-family: var(--font-mono, ui-monospace, Consolas, monospace); }
 .usage-section { margin-bottom: 16px; }
-/* plan-20261018-turn-changes：此处原有第二条 .usage-section-title（12px + margin-bottom: 8px），
-   属旧版折叠面板遗留，会覆盖上面的正式定义并把标题盒撑高，导致标题行图标与文字错位。
-   旧结构（.usage-section / .usage-collapse-btn）已无组件引用，故移除避免继续冲突。 */
-.usage-collapse-btn {
-  display: flex; align-items: center; gap: 6px; padding: 6px 0;
-  border: none; background: transparent; cursor: pointer;
-  font-size: 12px; font-weight: 600; color: var(--text-2);
-}
-.usage-collapse-btn:hover { color: var(--text-1); }
 .composer-usage-detail .composer-usage-note {
   margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border);
   font-size: 10px; line-height: 1.5; color: var(--text-3);
@@ -5256,12 +5212,6 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 .mcp-tool-item { display: flex; align-items: baseline; gap: 8px; font-size: 11px; color: var(--text-2); }
 .mcp-tool-item code { flex-shrink: 0; font-family: var(--font-mono); font-size: 11px; padding: 0 4px; border-radius: var(--r-xs); background: var(--color-tag); color: var(--text-1); }
 .mcp-tool-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); }
-
-/* ══ plan-230-1144 M2: 权限模式编辑器 ══ */
-.perm-tabs { display: flex; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid var(--border); }
-.perm-tab { padding: 6px 12px; border: none; background: transparent; color: var(--text-2); font-size: 13px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; transition: color var(--dur-fast), border-color var(--dur-fast); }
-.perm-tab:hover { color: var(--text-1); }
-.perm-tab.on { color: var(--text-1); font-weight: 600; border-bottom-color: var(--accent); }
 /* plan-234-1171 R8: 执行策略「权限模式」布局——
  * 根因：editing 初始为 null 且 load() 不自动选中，右列编辑区条件渲染不出现，
  * 首屏只渲染 280px 左列 → 右侧整片空白。现在 load 后自动选中首个模式，
@@ -5438,7 +5388,7 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
   animation: mkt-wave-draw calc(var(--dur-5) * 1.7) var(--ease-emphasized-decel) 120ms forwards;
 }
 /* 复描：更淡、稍晚落笔——同一处又描了一遍的痕迹 */
-.mkt-wave-echo { opacity: .34; animation-delay: 240ms; }
+.mkt-wave-echo { opacity: .34; animation-delay: var(--dur-4); }
 @keyframes mkt-wave-draw { to { clip-path: inset(0 -2% 0 0); } }
 
 /* 分类与排序 */

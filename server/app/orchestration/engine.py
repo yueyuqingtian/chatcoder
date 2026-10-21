@@ -1509,7 +1509,9 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             # 未剥离时子会话的 permission_mode 继承主会话（多为 agent），
             # append_subsession_tools 会把 create_subsession 等主会话工具一并下发，形成套娃。
             tool_schemas = strip_for_subsession(append_own_tools(tool_schemas))
-        tool_schemas = append_workflow_tools(tool_schemas, readonly_only=bool(_mode_readonly))
+        # 工作流工具仅在工作流执行模式下发（设置开关之外的第二道门）；只读 / 计划 / 智能体模式不暴露
+        if _mode == "workflow":
+            tool_schemas = append_workflow_tools(tool_schemas, readonly_only=False)
         # 3. 运行主代理
         # v10/v13: 会话级模型覆盖；同一模型也用于规划评估与拆分。
         from app.orchestration.subagent import get_subagent_manager
@@ -2505,7 +2507,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         if _subagents_on:
             main_tools = append_subagent_tools(main_tools, _type_states)
         main_tools = append_subsession_tools(main_tools, enabled=_subsessions_on)
-        main_tools = append_workflow_tools(main_tools, readonly_only=False)
+        # 确认执行的是计划文档（计划模式产出），不属于工作流执行模式，因此不下发工作流工具
         mgr = get_subagent_manager(session.id)
         _turn_managers[turn_id] = mgr
         mgr.owner_active = True  # plan-91-394: 主代理 turn 存活期间允许子代理保活等待恢复
