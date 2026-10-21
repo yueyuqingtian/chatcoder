@@ -55,7 +55,7 @@ void loadExternalPlugins();
 void useUiStore.getState().refreshGlobalFlags();
 
 // plan-329-1647 S12：dev 构建挂载性能度量护栏（window.__chatcoderPerf）。
-// 生产默认不挂载（零开销）；设置中心的隐藏「性能诊断」开关写入本地标记后，下次启动即挂载，便于反馈卡顿时采集。
+// 生产默认不挂载（零开销）；开发者在控制台写入本地标记后，下次启动即挂载，面向用户不提供设置入口。
 const DIAG_FLAG = "chatcoder.diagnostics";
 let diagnosticsOn = false;
 try { diagnosticsOn = localStorage.getItem(DIAG_FLAG) === "1"; } catch { /* 存储不可用时按关闭处理 */ }

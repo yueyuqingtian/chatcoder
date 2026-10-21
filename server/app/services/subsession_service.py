@@ -438,12 +438,43 @@ async def start_turn_in_subsession(db: AsyncSession, session_id: int, text: str)
     await message_service.patch_message(user_msg.id, turn_id=turn_id)
     user_msg.turn_id = turn_id
 
+    async def _fail_turn(reason: str) -> None:
+        """turn 没能正常跑起来：必须落成 failed 并回报主代理。
+
+        否则库里的 turn 永远是 running——子会话在左栏一直转圈、占着并发名额（连续失败几次后
+        再也建不出新的子会话），主代理的等待也只能熬到超时。
+        """
+        from app.orchestration.agent_events import broadcast
+        from app.persistence.database import async_session_factory
+
+        try:
+            async with async_session_factory() as s:
+                await turn_service.update_turn_status(s, turn_id, "failed", summary=reason[:200], completed=True)
+                await s.commit()
+            await broadcast(session_id, {
+                "event": "turn.updated",
+                "payload": {"turn_id": turn_id, "status": "failed", "session_id": session_id},
+            })
+            schedule_finish_report(session_id, turn_id, "failed", reason)
+        except Exception:  # noqa: BLE001 — 兜底收尾失败只记日志
+            logger.warning("[subsession] 失败收尾落库失败 sid=%s turn=%s", session_id, turn_id, exc_info=True)
+
     async def _run() -> None:
         # 独立会话：用新的 session 连接跑 turn，避免与调用方事务互相阻塞
         from app.persistence.database import async_session_factory
 
         async with async_session_factory() as s:
-            await engine.start_turn(s, turn_id=turn_id)
+            try:
+                res = await engine.start_turn(s, turn_id=turn_id)
+                await s.commit()
+            except Exception as exc:  # noqa: BLE001
+                await s.rollback()
+                logger.warning("[subsession] turn=%s 执行异常 sid=%s", turn_id, session_id, exc_info=True)
+                await _fail_turn(f"执行异常：{type(exc).__name__}")
+                return
+        # start_turn 在入口校验失败（项目不存在 / 会话不存在）时只返回 ok=False、不改 turn 状态
+        if isinstance(res, dict) and res.get("ok") is False and res.get("error") not in (None, "turn already running"):
+            await _fail_turn(str(res.get("error") or "启动失败"))
 
     _spawn(_run())
     return turn_id
@@ -558,8 +589,12 @@ async def collect(
     subsession_id: int | None = None,
     wait: bool = False,
     timeout_s: float = 300.0,
+    interrupt_check=None,
 ) -> list[SubsessionBrief]:
-    """汇总子会话进度；`wait=True` 时阻塞到目标全部结束（替代反复轮询）。"""
+    """汇总子会话进度；`wait=True` 时阻塞到目标全部结束（替代反复轮询）。
+
+    interrupt_check：等待期间轮询的判定，为真则提前返回当前进度（调用方有新消息要处理）。
+    """
     if subsession_id is not None:
         await require_owned(db, parent_session_id, subsession_id)
         targets = [subsession_id]
@@ -568,7 +603,7 @@ async def collect(
         targets = [c.id for c in children if c.status != "archived"]
 
     if wait and targets:
-        await _wait_until_idle(targets, timeout_s)
+        await _wait_until_idle(targets, timeout_s, interrupt_check)
         # 调用方会话仍持有等待前的读快照，看不到终态；也不能 rollback 它（会丢掉调用方
         # 尚未提交的改动）——改用新连接读取结果
         from app.persistence.database import async_session_factory
@@ -578,7 +613,7 @@ async def collect(
     return [await describe(db, sid) for sid in targets]
 
 
-async def _wait_until_idle(session_ids: list[int], timeout_s: float) -> None:
+async def _wait_until_idle(session_ids: list[int], timeout_s: float, interrupt_check=None) -> None:
     """轮询等待（服务端内部用，短间隔 + 超时上限，不占用模型上下文）。
 
     plan-156-620：每次轮询都用**新的数据库会话**。此前复用调用方的会话，
@@ -590,6 +625,8 @@ async def _wait_until_idle(session_ids: list[int], timeout_s: float) -> None:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + max(1.0, timeout_s)
     while loop.time() < deadline:
+        if interrupt_check is not None and interrupt_check():
+            return
         async with async_session_factory() as fresh:
             pending = [sid for sid in session_ids if await _running_turn_id(fresh, sid) is not None]
         if not pending:
@@ -644,13 +681,36 @@ def register_question(question_id: str) -> None:
     }
 
 
-async def wait_for_question_reply(question_id: str, timeout_s: float) -> str | None:
-    """子会话侧等待答复；超时返回 None（调用方提示按最佳判断继续）。"""
+async def wait_for_question_reply(
+    question_id: str, timeout_s: float, interrupt_check=None,
+) -> str | None:
+    """子会话侧等待答复；超时返回 None（调用方提示按最佳判断继续）。
+
+    interrupt_check：等待期间轮询的「有新消息」判定（用户直接给子会话发了消息、同级消息等）。
+    为真则放弃等待（撤销登记，主代理之后的答复按普通消息送达）并返回 None——
+    否则这些消息要等到提问超时（默认 10 分钟）才会被子会话读到。
+    """
     entry = _PENDING_QUESTIONS.get(question_id)
     if entry is None:
         return None
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(1.0, float(timeout_s))
     try:
-        await asyncio.wait_for(entry["event"].wait(), timeout=max(1.0, float(timeout_s)))
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            slice_s = min(remaining, 0.5) if interrupt_check is not None else remaining
+            try:
+                await asyncio.wait_for(entry["event"].wait(), timeout=slice_s)
+                break
+            except asyncio.TimeoutError:
+                if interrupt_check is not None and interrupt_check():
+                    _PENDING_QUESTIONS.pop(question_id, None)
+                    logger.info("[subsession] 提问等待被新消息打断 question=%s", question_id)
+                    return None
+                if loop.time() >= deadline:
+                    raise
     except asyncio.TimeoutError:
         _PENDING_QUESTIONS.pop(question_id, None)
         logger.info("[subsession] 提问等待超时 question=%s", question_id)
@@ -670,6 +730,16 @@ def resolve_question(question_id: str, reply: str) -> bool:
     entry["reply"] = reply
     entry["event"].set()
     return True
+
+
+def discard_question(question_id: str | None) -> None:
+    """撤销一个没人等待的提问登记（wait=false 的提问）。
+
+    否则主代理带 question_id 答复时会命中这条登记、被告知「已唤醒子会话」，
+    而实际上没有任何等待方——答复凭空丢失，子会话永远收不到。撤销后答复走普通消息送达。
+    """
+    if question_id:
+        _PENDING_QUESTIONS.pop(question_id, None)
 
 
 def pending_question_count() -> int:

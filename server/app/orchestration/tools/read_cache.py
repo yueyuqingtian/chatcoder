@@ -32,6 +32,8 @@ class ReadWindowCache:
     def __init__(self) -> None:
         self._messages: Callable[[], list[Any]] = lambda: []
         self._seen: dict[tuple, tuple[tuple[int, int], str]] = {}
+        # 本会话里由模型自己写入 / 修改过的文件：内容它已经知道，再次整体重写不需要先读
+        self._known: set[str] = set()
 
     def bind(self, messages_getter: Callable[[], list[Any]]) -> None:
         """每轮绑定当前的消息列表（列表可能被压缩替换，故用 getter 而非引用）。"""
@@ -60,10 +62,14 @@ class ReadWindowCache:
         """本进程内本会话是否登记过任何读取（重启后为空，此时不做“先读后写”强制）。"""
         return bool(self._seen)
 
+    def mark_known(self, path: object) -> None:
+        """登记模型自己写入 / 修改过的文件（之后整体重写不算「未读覆盖」）。"""
+        self._known.add(norm_path(path))
+
     def has_read(self, path: object) -> bool:
-        """本会话内是否读取过该文件（任意行范围）。"""
+        """本会话内是否读取过（或自己写入过）该文件。"""
         target = norm_path(path)
-        return any(k[0] == target for k in self._seen)
+        return target in self._known or any(k[0] == target for k in self._seen)
 
 
 _CACHES: dict[int, ReadWindowCache] = {}

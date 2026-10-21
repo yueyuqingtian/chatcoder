@@ -522,7 +522,12 @@ class SubagentManager:
         return bool(self._completion_queue)
 
     def pending_count(self) -> int:
-        return sum(1 for h in self._handles.values() if h.status == "running")
+        # 任务已结束而状态仍停在 running（驱动循环收尾时抛异常）的 handle 已经没有人在跑：
+        # 不能再算运行中，否则主代理的「等待子代理结束」会空等到总超时，并发名额也被永久占着
+        return sum(
+            1 for h in self._handles.values()
+            if h.status == "running" and (h.task is None or not h.task.done())
+        )
 
     def running_snapshot(self) -> list[dict]:
         """plan-64-291: 运行中子代理清单（agent_id / 标题 / 已运行秒数）。
@@ -556,6 +561,9 @@ class SubagentManager:
         """
         pending = [h.task for h in self._handles.values() if h.task is not None and not h.task.done()]
         if not pending:
+            # 没有可等的任务也要让出事件循环：调用方常在 while pending_count() > 0 里循环调用，
+            # 若某个 handle 状态停在 running 而任务早已结束（收尾异常），这里不 await 就会把循环空转卡死
+            await asyncio.sleep(min(0.5, timeout) if timeout else 0.05)
             return True
         done, _ = await asyncio.wait(pending, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
         return bool(done)

@@ -2289,10 +2289,15 @@ async def run_agent_loop(
                         if tool_name in SUBSESSION_OWN_TOOL_NAMES:
                             tool_output = await run_own_tool(
                                 tool_name, args, session_id=session_id, db=db,
+                                # 等主代理答复期间用户 / 同级发来新消息就让出，不必等到提问超时
+                                interrupt_check=lambda _t=turn_id: _has_injected_inputs(_t, urgent_only=True),
                             )
                         else:
                             tool_output = await run_subsession_tool(
                                 tool_name, args, session_id=session_id, db=db,
+                                # 等子会话结束期间有新消息（子会话提问 / 用户追加）就让出，
+                                # 否则子会话在等主代理答复、主代理在等子会话结束，互相等到超时
+                                interrupt_check=lambda _t=turn_id: _has_injected_inputs(_t, urgent_only=True),
                             )
                         tool_output = _present_tool_output(tool_output, tool_name=tool_name, session_id=session_id, call_key=tc.get("id", ""))
                         messages.append(ChatMessage(
@@ -2940,8 +2945,9 @@ async def run_agent_loop(
                     messages.append(ChatMessage(
                         role="user",
                         content=(
-                            "[系统] 后台子代理已结束，以下是它们的完成报告。"
-                            "请整合结论并继续推进任务；不要复述本条提示。\n\n"
+                            "[系统] 后台子代理有新进展，以下是它们的完成报告或提示。"
+                            "请整合结论并继续推进任务（若有子代理在等你答复，用 send_to_subagent 回复）；"
+                            "不要复述本条提示。\n\n"
                             + "\n\n".join(_wait_notes)
                         ),
                     ))
@@ -3716,6 +3722,19 @@ def _subagent_context_snapshot(subagent_context: dict, original_request: str = "
     return snap
 
 
+# 等待被新消息打断时交给调用方的提示（消息本身留在注入队列里，下一步由注入通道交给模型）
+_WAIT_WOKEN_NOTE = "等待期间收到了新的消息（见紧随其后的消息），请先处理它。"
+
+
+def _has_injected_inputs(turn_id: int, *, urgent_only: bool = False) -> bool:
+    try:
+        from app.orchestration.engine import has_injected_inputs
+
+        return has_injected_inputs(turn_id, urgent_only=urgent_only)
+    except Exception:  # noqa: BLE001 — 取不到队列状态按「没有」处理，退回原有的等待行为
+        return False
+
+
 async def _await_background_subagents(manager, *, session_id: int, turn_id: int,
                                       thread_id: int | None,
                                       cancel_event: asyncio.Event | None) -> list[str] | None:
@@ -3768,6 +3787,12 @@ async def _await_background_subagents(manager, *, session_id: int, turn_id: int,
                 logger.warning("[agent] turn=%s 等待子代理超时(%.0fs)，剩余 %d 个转由完成唤醒兜底",
                                turn_id, timeout_s, pending)
                 break
+            # 等待期间到达的消息（用户追加 / 子代理提问 / 子会话汇报）不能被晾到子代理结束：
+            # 提问方（后台子代理）正阻塞等答复，主代理却在这里等它——互相等到超时。
+            # 让出等待，调用方带着提示继续下一步，由注入通道把消息交给模型。
+            if _has_injected_inputs(turn_id, urgent_only=True):
+                await _clear()
+                return [_WAIT_WOKEN_NOTE]
             try:
                 # 单次最多等 0.5s：既避免忙轮询，又保证停止按钮响应时延可接受
                 await manager.wait_one(timeout=0.5)
@@ -3779,6 +3804,9 @@ async def _await_background_subagents(manager, *, session_id: int, turn_id: int,
                 if pending > 0:
                     await _show(pending)
         await _clear()
+    # 收尾瞬间才到的消息同样要处理（否则 turn 一结束，这些注入项就被丢弃）
+    if _has_injected_inputs(turn_id):
+        return [_WAIT_WOKEN_NOTE]
     try:
         return list(manager.drain_completions())
     except Exception:
@@ -3811,8 +3839,18 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         except (TypeError, ValueError):
             _report_offset = 0
         # plan-248-1258 M6: wait=true 时阻塞等待全部子代理完成（替代反复轮询空转）
+        _wait_note = ""
         if bool(args.get("wait", False)) and manager.pending_count() > 0:
-            await manager.wait_all()
+            # 分段等待而不是 wait_all 一等到底：期间有新消息（子代理提问 / 用户追加 / 子会话汇报）就让出，
+            # 否则正在等答复的后台子代理与这里互相等，直到各自超时。
+            while manager.pending_count() > 0:
+                if _has_injected_inputs(turn_id, urgent_only=True):
+                    _wait_note = (
+                        "[已让出等待] 等待期间收到新的消息，先处理它；仍在运行的子代理不受影响，"
+                        "需要时再次调用 collect_results(wait=true)。\n\n"
+                    )
+                    break
+                await manager.wait_one(timeout=0.5)
         if _only is not None:
             h = manager.get(_only)
             if h is None:
@@ -3830,7 +3868,7 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
                 manager.claim_notification(int(_r["agent_id"]))
         if not results:
             pending = manager.pending_count()
-            return f"No subagents have finished yet ({pending} still running)."
+            return f"{_wait_note}No subagents have finished yet ({pending} still running)."
         blocks: list[str] = []
         for r in results:
             status = "completed" if r["status"] == "done" else "failed"
@@ -3865,7 +3903,7 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         tail = ""
         if manager.pending_count():
             tail = f"\n\n({manager.pending_count()} subagents still running — call collect_results(wait=true) to block until they finish)"
-        return "Subagent results:\n\n" + "\n\n".join(blocks) + tail
+        return _wait_note + "Subagent results:\n\n" + "\n\n".join(blocks) + tail
 
     if tool_name == "subagent_inspect":
         # plan-248-1258 M6: 主代理按需查看子代理上下文/轨迹/结果

@@ -98,6 +98,9 @@ class FsWriteTool(Tool):
         except OSError as e:
             return ToolResult(ok=False, output="", error=f"写入失败: {e}")
 
+        if _rc is not None:
+            _rc.mark_known(target)
+
         # 计算相对路径用于输出显示
         try:
             display = str(target.relative_to(ctx.workspace_root))

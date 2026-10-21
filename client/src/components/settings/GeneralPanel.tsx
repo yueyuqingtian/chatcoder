@@ -199,18 +199,6 @@ export function GeneralPanel() {
     if (parsed !== cfg.agent_max_steps) patch({ agent_max_steps: parsed });
   };
 
-  // 隐藏的性能诊断开关：写本地标记；开启时即时挂载采集器（关闭需重启生效，采集器不卸载）
-  const DIAG_FLAG = "chatcoder.diagnostics";
-  const [diagOn, setDiagOn] = useState(() => {
-    try { return localStorage.getItem(DIAG_FLAG) === "1"; } catch { return false; }
-  });
-  const toggleDiagnostics = () => {
-    const next = !diagOn;
-    try { localStorage.setItem(DIAG_FLAG, next ? "1" : "0"); } catch { /* 存储不可用：仅本次会话生效 */ }
-    setDiagOn(next);
-    if (next) void import("../../perf/metrics").then((m) => m.install());
-  };
-
   return (
     <div
       className="settings-card-stack sc-stack"
@@ -400,14 +388,6 @@ export function GeneralPanel() {
             aria-label={t("gp.density")}
           />
         </Row>
-      </div>
-
-      {/* 隐藏的性能诊断入口：开启后下次启动（或即时）采集卡顿指标，供反馈问题时导出；默认关闭 */}
-      <div className="settings-resource-desc" style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "flex-end" }}>
-        <span>{diagOn ? "性能诊断已开启（采集卡顿指标）" : ""}</span>
-        <Button variant="ghost" size="xs" onClick={toggleDiagnostics}>
-          {diagOn ? "关闭性能诊断" : "性能诊断"}
-        </Button>
       </div>
     </div>
   );

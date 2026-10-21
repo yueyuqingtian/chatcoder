@@ -199,7 +199,7 @@ async def deliver(session_id: int) -> dict:
         delivered = 0
         interrupt_kind: str | None = None
         for it in drained:
-            ok = engine.inject_input(turn_id, {"content": _render(it)})
+            ok = engine.inject_input(turn_id, {"content": _render(it), "priority": it.priority})
             if not ok:
                 _push(it)  # 注入与收尾同刻失败 → 回队，等下个机会，不丢
                 continue

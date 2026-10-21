@@ -51,6 +51,16 @@ def _uses_adaptive_thinking(model: str) -> bool:
 _OFFICIAL_MAX_OUTPUT_TOKENS = 128_000
 
 
+# 官方各型号的单次输出上限不同：超过上限会 400（"max_tokens: N > M"）。统一兜底 128K 之后，
+# 首次遇到更低上限的型号时按报错自学上限并记住，后续请求直接收紧，不再每步先失败一次。
+_LEARNED_OUTPUT_CAPS: dict[str, int] = {}
+
+
+def _apply_learned_cap(model: str, value: int) -> int:
+    cap = _LEARNED_OUTPUT_CAPS.get(model or "")
+    return min(value, cap) if cap else value
+
+
 def _official_default_max_tokens(model: str) -> int:
     return _OFFICIAL_MAX_OUTPUT_TOKENS
 
@@ -72,6 +82,20 @@ def _degrade_thinking_payload(payload: dict, message: str) -> dict | None:
     """
     lowered = (message or "").lower()
     degraded = dict(payload)
+
+    # 输出上限超出该模型允许值（"max_tokens: 128000 > 64000, which is the maximum ..."）：
+    # 按报错里的上限收紧后重试，不让整轮失败；思考预算须小于 max_tokens，同步收紧。
+    cap_match = re.search(r"max_tokens:\s*(\d+)\s*>\s*(\d+)", lowered)
+    if cap_match:
+        cap = int(cap_match.group(2))
+        if cap <= 0 or cap >= int(degraded.get("max_tokens") or 0):
+            return None
+        degraded["max_tokens"] = cap
+        _LEARNED_OUTPUT_CAPS[str(degraded.get("model") or "")] = cap
+        thinking = degraded.get("thinking")
+        if isinstance(thinking, dict) and int(thinking.get("budget_tokens") or 0) >= cap:
+            degraded["thinking"] = {**thinking, "budget_tokens": max(1024, cap // 2)}
+        return degraded
 
     if "requires adaptive thinking" in lowered:
         thinking = degraded.get("thinking")
@@ -232,6 +256,8 @@ class AnthropicProvider(ModelProvider):
             payload["max_tokens"] = request.max_tokens
         elif "api.anthropic.com" in self._base_url.lower():
             payload["max_tokens"] = _official_default_max_tokens(request.model or self._default_model)
+        if payload.get("max_tokens") and "api.anthropic.com" in self._base_url.lower():
+            payload["max_tokens"] = _apply_learned_cap(payload["model"], int(payload["max_tokens"]))
         if system_parts:
             payload["system"] = "\n\n".join(system_parts)
         # 温度统一取值：思考开启时不设置温度；否则取设置值（Claude 系只下发默认温度，见 temperature_policy）

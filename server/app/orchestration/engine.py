@@ -386,6 +386,22 @@ def inject_input(turn_id: int, item: dict) -> bool:
     return True
 
 
+def has_injected_inputs(turn_id: int, *, urgent_only: bool = False) -> bool:
+    """该 turn 是否有尚未被模型读取的注入项（用户消息 / 子会话与子代理的提问、汇报）。
+
+    阻塞等待类的工具（等子代理 / 等子会话）据此在等待期间让出：消息已在队列里，
+    却要等阻塞结束才会被下一次 LLM 调用读到，对方（正在等答复的子会话 / 子代理）就会白等到超时。
+
+    urgent_only：只看值得打断等待的项。没有 priority 字段的（用户追加、同级消息）一律算紧急；
+    带 priority 的按邮箱口径，0 = 控制面（提问 / 答复）紧急，其余（进度汇报、完成汇报）不打断，
+    否则兄弟子会话每发一条进度就会把主代理的等待打断一次，白烧一步模型调用。
+    """
+    items = _pending_inputs.get(turn_id) or []
+    if not urgent_only:
+        return bool(items)
+    return any(int(it.get("priority", 0) or 0) <= 0 for it in items if isinstance(it, dict))
+
+
 def drain_injected_inputs(turn_id: int) -> list[dict]:
     """取走并清空该 turn 的待注入项（agent_loop 每次 LLM 调用前调用）。"""
     # 模型即将读到这些消息，此前延后的打断请求随之作废
@@ -413,7 +429,10 @@ def _on_agent_report(manager, session_id: int, turn_id: int,
     label = "子代理提问" if kind == "question" else "子代理进度上报"
     text = f"【{label} subagent#{agent_id}】{message}"
     if turn_id in _running_turns:
-        _pending_inputs.setdefault(turn_id, []).append({"content": text})
+        # 提问需要尽快答复（紧急）；进度上报不打断主代理的等待
+        _pending_inputs.setdefault(turn_id, []).append(
+            {"content": text, "priority": 0 if kind == "question" else 2}
+        )
         return
     try:
         manager.queue_leader_note(text)
@@ -1369,6 +1388,19 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         )
         if _suggestion_on:
             _available_tools = _available_tools | {"suggest_next_task"}
+        # 子会话 / 工作流工具不在工具注册表里（后面按模式单独追加），提示词的「本轮不可用」清单必须把
+        # 它们算进来，否则智能体模式下会被告知「不要调用 create_subsession」，子会话永远用不上。
+        # 口径与下方追加逻辑一致：能力矩阵 + 子会话开关；子会话自己则只有通信工具。
+        from app.orchestration.subsession_tools import (
+            SUBSESSION_OWN_TOOLS as _OWN_TOOLS, SUBSESSION_TOOL_SCHEMAS as _SUB_SCHEMAS,
+        )
+        if getattr(session, "side_parent_id", None) is not None:
+            _available_tools = _available_tools | {s["function"]["name"] for s in _OWN_TOOLS}
+        elif CAP_SUBSESSION in capabilities_for(_mode) and _subsessions_on:
+            _available_tools = _available_tools | {s["function"]["name"] for s in _SUB_SCHEMAS}
+        if _mode == "workflow" and settings.workflow_enabled:
+            from app.orchestration.workflow.tools import workflow_tool_schemas as _wf_schemas
+            _available_tools = _available_tools | {s["function"]["name"] for s in _wf_schemas()}
         # 用户反馈修复：移除旧「完全访问豁免规划流程」特殊化——权限模式（ask/auto/full）
         # 只决定"要不要问"，能力边界与流程说明一律由执行模式（_mode）决定。此前完全访问
         # 会跳过模式说明/Plan History 注入，并按全量下发工具，「计划模式 + 完全访问」下
@@ -2534,6 +2566,13 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
                 "approval_mode": _approval_mode,
                 "reasoning_effort": None,
             },
+            # 与 start_turn 同口径：确认执行期间同样要把注入消息（用户追加 / 子会话提问与汇报）和子代理完成通知
+            # 交给主代理。此前这里没有注入通道，这些消息在本轮里永远读不到；等待类工具也依赖它来让出等待。
+            injected_inputs_provider=lambda: (
+                drain_injected_inputs(turn_id)
+                + _mailbox_pending(session.id)
+                + [{"content": _note} for _note in mgr.drain_completions()]
+            ),
         )
 
         # —— 收尾：状态与产物 ——

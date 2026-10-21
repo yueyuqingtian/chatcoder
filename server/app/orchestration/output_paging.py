@@ -190,7 +190,9 @@ def present_output_bytes(
     raw_len = len(text.encode("utf-8"))
     if raw_len <= budget_bytes:
         return text
-    notice_reserve = 400
+    # 续读说明本身是多字节中文 + 路径，需留足余量，保证「头 + 说明 + 尾」不超过预算——
+    # 终端工具先呈现一次、agent_loop 再按同一预算呈现一次，超出会被二次截断并改写续读指引
+    notice_reserve = 1500
     tail = _suffix_bytes(text, tail_bytes) if tail_bytes > 0 else ""
     head_budget = max(1, budget_bytes - notice_reserve - len(tail.encode("utf-8")))
     head = _prefix_bytes(text, head_budget)
