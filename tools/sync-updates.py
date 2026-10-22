@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""chatcoder 发布后同步自建更新源（plan-90-390）。
+"""chatcoder 自建更新源运维入口（plan-90-390；plan-20261022-release-ci 改为服务器定时自取）。
 
-在 gh release create 之后调用：把服务器端同步脚本上传到更新服务器执行
-（由服务器从 GitHub 拉取三件套，规避本地跨境上行瓶颈），完成后回连验证。
+自建源现在由服务器**定时直接从 GitHub 拉取**：tools/server-install-updater.sh 装好
+systemd 定时器后，每 5 分钟比对一次 GitHub 最新正式版，有新版本就下载、校验、部署。
+发版只需推送 tag（GitHub Actions 打包发布），本机不再参与。本脚本只在两种场合使用：
+
+    python tools/sync-updates.py --install            一次性：上传同步脚本并安装定时任务
+    python tools/sync-updates.py [--version X.Y.Z]    立即同步一次（不想等定时任务时），并回连验证
 
 跨境 SSH 偶发抖动：连接/上传/轮询均带重试；服务器端同步以 nohup 后台执行，
 本地断线重连后继续看结果，不会中断服务器上的同步过程。
-
-用法:
-    python tools/sync-updates.py [--version X.Y.Z] [--dry-run]
 
 依赖: paramiko；SSH 私钥默认 ~/.ssh/chatcoder_deploy（可用 --key 指定）；
 也可用密码认证（--password 或环境变量 CHATCODER_DEPLOY_PASSWORD，二者优先密码）。
@@ -27,7 +28,11 @@ HOST = "47.77.233.39"
 USER = "root"
 DEFAULT_KEY = Path.home() / ".ssh" / "chatcoder_deploy"
 BASE_URL = "https://service.guyueyu.asia/updates/"
-REMOTE_SCRIPT = "/tmp/chatcoder-sync-updates.sh"
+# 定时任务与手动同步共用同一份脚本：手动同步时顺带把服务器上的脚本更新到仓库最新版
+REMOTE_DIR = "/opt/chatcoder-updates"
+REMOTE_SCRIPT = f"{REMOTE_DIR}/sync-updates.sh"
+REMOTE_UPLOAD = "/tmp/chatcoder-sync-updates.sh"
+REMOTE_INSTALLER = "/tmp/chatcoder-install-updater.sh"
 REMOTE_LOG = "/tmp/chatcoder-sync.log"
 REMOTE_EXIT = "/tmp/chatcoder-sync.exit"
 WAIT_TIMEOUT_S = 900
@@ -81,13 +86,14 @@ def run(client: paramiko.SSHClient, cmd: str, timeout: int = 60) -> str:
     return (out + ("\n[stderr] " + err if err.strip() else "")).strip()
 
 
-def upload_script(client: paramiko.SSHClient, script_bytes: bytes, key_path: str, password: str = ""):
+def upload_script(client: paramiko.SSHClient, script_bytes: bytes, key_path: str, password: str = "",
+                  remote_path: str = REMOTE_UPLOAD):
     """上传服务器端脚本（统一 LF），失败自动重连重试。"""
     last_err = None
     for i in range(1, 4):
         try:
             sftp = client.open_sftp()
-            with sftp.open(REMOTE_SCRIPT, "wb") as f:
+            with sftp.open(remote_path, "wb") as f:
                 f.write(script_bytes)
             sftp.close()
             return client
@@ -132,8 +138,26 @@ def wait_remote_sync(client: paramiko.SSHClient, key_path: str, password: str = 
     return rc, log
 
 
+def install_timer(client: paramiko.SSHClient, tools_dir: Path, key_path: str, password: str = "") -> int:
+    """一次性安装：上传同步脚本与安装脚本，在服务器上装好每 5 分钟的定时同步。"""
+    installer = tools_dir / "server-install-updater.sh"
+    if not installer.exists():
+        print(f"[sync] 缺少安装脚本: {installer}", file=sys.stderr)
+        return 1
+    client = upload_script(client, installer.read_bytes().replace(b"\r\n", b"\n"),
+                           key_path, password, remote_path=REMOTE_INSTALLER)
+    print(f"[sync] 已上传安装脚本 -> {REMOTE_INSTALLER}")
+    out = run(client, f"bash {REMOTE_INSTALLER} {REMOTE_UPLOAD} 2>&1; echo EXIT=$?", timeout=180)
+    print(out)
+    if not out.rstrip().endswith("EXIT=0"):
+        print("[sync] 定时同步安装失败", file=sys.stderr)
+        return 1
+    print("[sync] 定时同步已安装：服务器每 5 分钟从 GitHub 拉取最新正式版，发版后无需再手动同步")
+    return 0
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="同步自建更新源（服务器从 GitHub 拉取）")
+    parser = argparse.ArgumentParser(description="自建更新源：安装定时同步 / 立即同步一次（服务器直接从 GitHub 拉取）")
     parser.add_argument("--version", default="", help="期望版本号（默认读 package.json）")
     parser.add_argument("--key", default=str(DEFAULT_KEY), help="SSH 私钥路径")
     parser.add_argument(
@@ -141,16 +165,13 @@ def main() -> int:
         default=os.environ.get("CHATCODER_DEPLOY_PASSWORD", ""),
         help="SSH 密码（也可用环境变量 CHATCODER_DEPLOY_PASSWORD）；给定时走密码认证",
     )
+    parser.add_argument("--install", action="store_true", help="一次性安装服务器定时同步（每 5 分钟从 GitHub 拉取）")
     parser.add_argument("--dry-run", action="store_true", help="只上传脚本，不执行同步")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parent.parent
-    version = args.version
-    if not version:
-        version = json.loads((root / "package.json").read_text(encoding="utf-8"))["version"]
-    print(f"[sync] 目标版本: v{version}")
-
-    server_script = Path(__file__).resolve().parent / "server-sync-updates.sh"
+    tools_dir = Path(__file__).resolve().parent
+    server_script = tools_dir / "server-sync-updates.sh"
     if not server_script.exists():
         print(f"[sync] 缺少服务器端脚本: {server_script}", file=sys.stderr)
         return 1
@@ -160,14 +181,22 @@ def main() -> int:
         # 统一换行，避免 CRLF 在 Linux 上执行报错
         script_bytes = server_script.read_bytes().replace(b"\r\n", b"\n")
         client = upload_script(client, script_bytes, args.key, args.password)
-        print(f"[sync] 已上传服务器脚本 -> {REMOTE_SCRIPT}")
+        print(f"[sync] 已上传同步脚本 -> {REMOTE_UPLOAD}")
+
+        if args.install:
+            return install_timer(client, tools_dir, args.key, args.password)
 
         if args.dry_run:
             print("[sync] dry-run: 跳过执行")
             return 0
 
-        # nohup 后台执行：连接抖动不中断服务器上的同步
-        print("[sync] 服务器同步中（拉取/校验/注入/部署/清理）...")
+        version = args.version or json.loads((root / "package.json").read_text(encoding="utf-8"))["version"]
+        print(f"[sync] 目标版本: v{version}")
+        # 与定时任务共用同一份脚本：先替换服务器上的脚本，再 nohup 后台执行（连接抖动不中断同步）；
+        # 脚本自带文件锁，恰好撞上定时同步时会直接跳过，由正在跑的那次完成部署
+        run(client, f"install -d {REMOTE_DIR} && tr -d '\\r' < {REMOTE_UPLOAD} > {REMOTE_SCRIPT}.tmp "
+                    f"&& chmod 755 {REMOTE_SCRIPT}.tmp && mv -f {REMOTE_SCRIPT}.tmp {REMOTE_SCRIPT}")
+        print("[sync] 服务器同步中（拉取/校验/部署/清理）...")
         inner = f"bash {REMOTE_SCRIPT} {version} > {REMOTE_LOG} 2>&1; echo $? > {REMOTE_EXIT}"
         run(client, f"rm -f {REMOTE_LOG} {REMOTE_EXIT}; nohup bash -c '{inner}' >/dev/null 2>&1 & echo STARTED")
 

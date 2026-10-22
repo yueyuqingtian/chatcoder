@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     auto_confirm_plan: bool = False
     # v0.3: 审批超时(秒),超时自动拒绝
     approval_timeout_sec: int = 300
+    # plan-522-2209: 子会话 / 子代理的审批等待上限（秒），0 或负数 = 不超时，只等用户处理或 turn 被取消。
+    # 子任务的审批请求往往发生在用户并未停留的会话里，超时自动拒绝会让用户既看不到请求、
+    # 也看不到失败原因，只看到子任务莫名中断；因此这一类不设静默超时。
+    approval_timeout_sec_subsession: int = 0
     # v0.3: agent loop 单任务最大步数（仅作为绝对兜底防死循环的熔断值）
     # v3.5: 不再用固定步数限制，改为边际效应递减检测 + token 预算驱动
     # 0 或负数表示不限制步数
@@ -258,6 +262,11 @@ class Settings(BaseSettings):
 
     # v1.1: 增强搜索（ripgrep）；关闭或无 rg 时 fs_grep 回退纯 Python 逐行匹配
     enhanced_search: bool = True
+
+    # plan-522-2209：git 网络命令的 SSL 后端。Windows 上默认的 schannel 经 HTTP 代理访问
+    # GitHub 会握手挂死（实测同一仓库 git pull 挂 357 秒，换 openssl 后秒回）。
+    # auto = Windows 且检测到代理环境变量时用 openssl，其余平台/场景用 git 默认。
+    git_ssl_backend: str = "auto"   # auto / schannel / openssl / default
     # v31.2: 代理（HTTP/HTTPS），用于搜索引擎等 web 工具的网络请求；
     # 来源：设置面板 http_proxy 字段（持久化在 ~/.chatcoder/config.json），
     # 运行时写入本字段；启动时从 config 恢复。优先于环境变量 HTTP_PROXY/HTTPS_PROXY。
@@ -328,7 +337,7 @@ class Settings(BaseSettings):
 
     # v4.6: 单会话 token 预算--超过此值任务自动终止
     # plan-474-2105：单会话子代理并发上限：单个会话内同时运行的子代理数；
-    # 达到后新派发先排队等空位，超时即拒绝。设置中心可改（1~30）。
+    # 达到后新的派发直接拒绝（不再排队等待），设置中心可改（1~30）。
     max_concurrent_subagents: int = 4
     # plan-474-2105：单会话子会话并发上限：单个主会话下同时运行的子会话数；
     # 达到后创建直接拒绝。设置中心可改（1~30）。
@@ -366,8 +375,8 @@ class Settings(BaseSettings):
         "server/app/persistence/migrations.py,server/app/gateway/schemas.py,"
         "client/src/store/i18n.ts,server/app/orchestration/engine.py"
     )
-    # v36: 排队等待上限（秒）——等不到空位时不再干等，直接放行，避免阻塞主代理。
-    subagent_queue_wait_s: float = 60.0
+    # plan-20261022-subagent-reject-fast：原来的「并发满先排队等待 N 秒」配置已移除。
+    # 实测等待期对主代理完全静默、最终仍会被拒绝，等待没有收益；现在并发满直接拒绝。
     # plan-330-1648 M7: 单个子代理的 token 预算上限（0 = 不限）。
     # spawn 时下发为 run_agent_loop 的 token_budget，超限即熔断并按结构化汇报“预算耗尽”，
     # 避免子代理无人看管地无限消耗（此前 spawn 路径从不传预算）。
@@ -389,9 +398,14 @@ class Settings(BaseSettings):
     agent_progress_reminder_interval: int = 8
     # plan-19-82 增强（对齐 ZCode runtime-reminders）：语言重申间隔——每 N 个 agent 步
     # 重新注入一次语言锚（ZCode 的 TURNS_BETWEEN_ATTACHMENTS=5 为轮次口径，本项目按
-    # 步计，取更保守的 10）。语言纪律此前只在上下文构建时静态注入一次，长 turn 内
-    # 锚点随步骤稀释后不再重申，是确认执行后语言漂移的直接原因；0 = 禁用。
-    language_reminder_interval: int = 1
+    # 步计）。语言纪律此前只在上下文构建时静态注入一次，长 turn 内锚点随步骤稀释后
+    # 不再重申，是确认执行后语言漂移的直接原因。
+    #
+    # plan-522-2209：默认改为 0（关闭定时重申）。定时重申是「每步都注入一遍完整语言纪律」，
+    # 长 turn 下成本随步数线性增长，而真正管用的是按需纠正——agent_loop 每步检测模型实际
+    # 输出的语言，一旦与锚定语言不符立即注入（见 _lang_drift_reminders 分支）。保留本开关
+    # 供需要更密集约束的场景手动调回。
+    language_reminder_interval: int = 0
     # plan-19-82 增强：规则遵循重申间隔——每 N 步重申用户规则优先级，对抗长上下文
     # 下规则段被工具结果挤出注意力范围（对齐 ZCode 对 AGENTS.md 的 OVERRIDE 语义）；
     # 0 = 禁用。默认比语言重申更稀疏（规则比语言更稳定，无需过密）。

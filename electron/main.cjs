@@ -2,7 +2,7 @@
 // 修复: data: URL → loadFile / stdout 安全 / 全局错误捕获 / 图标
 // plan-75-335：libuv 线程池须在首次异步 IO 前配置（默认 4，提高到 8 增加主进程 IO 并行度）。
 process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || "8";
-const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, session } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const os = require("os");
@@ -2073,6 +2073,24 @@ async function fetchReleasesMirror(limit = 30) {
   return data.slice(0, limit);
 }
 
+/** 镜像线路专用的直连会话：setProxy({mode:"direct"}) 绕过系统代理（plan-20261022-update-route）。
+ *  gh-proxy 是境外 CDN，本机代理绕一圈反而更慢；会话在首次下载时才创建，不影响启动。
+ *  返回函数形态供下载器按源选择 fetch：镜像走这里，自建源与 GitHub 仍用 net.fetch（继承系统代理）。 */
+let updateDirectSessionPromise = null;
+function updateDirectFetch(url, init) {
+  if (!updateDirectSessionPromise) {
+    try {
+      const ses = session.fromPartition("chatcoder-update-direct");
+      updateDirectSessionPromise = ses.setProxy({ mode: "direct" }).then(() => ses).catch(() => ses);
+    } catch {
+      return require("electron").net.fetch(url, init);
+    }
+  }
+  return updateDirectSessionPromise.then((ses) => (
+    typeof ses.fetch === "function" ? ses.fetch(url, init) : require("electron").net.fetch(url, init)
+  ));
+}
+
 const updateManager = createUpdateManager({
   pushState: pushUpdateState,
   meta: { read: readUpdateMeta, write: writeUpdateMeta },
@@ -2081,6 +2099,7 @@ const updateManager = createUpdateManager({
   repo: UPDATER_REPO,
   currentVersion: app.getVersion(),
   net: require("electron").net,
+  directFetch: updateDirectFetch,
   log: (...a) => log(...a),
   logErr: (...a) => logErr(...a),
 });

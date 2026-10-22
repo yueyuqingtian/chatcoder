@@ -47,6 +47,7 @@ _EXCLUDE_DIRS = {
 
 class CodebaseSearchTool(Tool):
     name = "codebase_search"
+    concurrency_safe = True  # plan-522-2209：关键词检索只读，索引由后台任务独占更新
     risk_level = "low"
     description = (
         "关键词检索代码库（非语义向量检索）。按关键词在已索引的代码块中打分，"

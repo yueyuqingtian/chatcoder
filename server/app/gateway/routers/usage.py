@@ -24,6 +24,13 @@ def _local_date_str(dt: datetime) -> str:
     return dt.astimezone().date().isoformat()
 
 
+def _local_hour(dt: datetime) -> int:
+    """UTC 时间 → 本地小时（0~23），单日区间按小时汇总用。"""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone().hour
+
+
 def _local_midnight_utc_naive(d: date) -> datetime:
     """本地某日 00:00 对应的 UTC 时刻（naive，便于与 created_at 列比较）。"""
     local_dt = datetime(d.year, d.month, d.day).astimezone()  # naive 按本地解释
@@ -114,6 +121,11 @@ async def usage_stats(
     by_model: dict[str, dict] = {}
     daily_map: dict[str, list[int]] = defaultdict(lambda: [0, 0])  # date -> [tokens, calls]
     daily_by_model: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))  # key -> date -> tokens
+    # plan-20261022-release-ci：单日区间（默认的「今天」）逐日趋势只有一个点、整张图是空的，
+    # 改为按小时汇总，前端画成 24 小时分布
+    single_day = start_d == end_d
+    hourly_map: dict[int, list[int]] = defaultdict(lambda: [0, 0])  # hour -> [tokens, calls]
+    hourly_by_model: dict[str, dict[int, int]] = defaultdict(lambda: defaultdict(int))  # key -> hour -> tokens
     info: dict[str, dict] = {}
     for r in rows:
         total["prompt"] += r.prompt_tokens or 0
@@ -129,9 +141,15 @@ async def usage_stats(
         slot["calls"] += 1
         info[key] = {"model": name, "provider_name": provider, "display_name": display}
         d = _local_date_str(r.created_at)
-        daily_map[d][0] += (r.prompt_tokens or 0) + (r.completion_tokens or 0)
+        tokens = (r.prompt_tokens or 0) + (r.completion_tokens or 0)
+        daily_map[d][0] += tokens
         daily_map[d][1] += 1
-        daily_by_model[key][d] += (r.prompt_tokens or 0) + (r.completion_tokens or 0)
+        daily_by_model[key][d] += tokens
+        if single_day:
+            h = _local_hour(r.created_at)
+            hourly_map[h][0] += tokens
+            hourly_map[h][1] += 1
+            hourly_by_model[key][h] += tokens
 
     by_model_out = [
         {"key": k, **info[k], **v, "total": v["prompt"] + v["completion"]}
@@ -142,6 +160,17 @@ async def usage_stats(
         {"date": d, "key": k, "display_name": info[k]["display_name"], "tokens": t}
         for k, m in sorted(daily_by_model.items())
         for d, t in sorted(m.items())
+        if t > 0
+    ]
+    # 单日区间才给小时数据（多日区间为空列表，载荷不变大）；24 小时补齐，前端不必再补空档
+    hourly_out = (
+        [{"hour": h, "tokens": hourly_map[h][0], "calls": hourly_map[h][1]} for h in range(24)]
+        if single_day else []
+    )
+    hourly_by_model_out = [
+        {"hour": h, "key": k, "display_name": info[k]["display_name"], "tokens": t}
+        for k, m in sorted(hourly_by_model.items())
+        for h, t in sorted(m.items())
         if t > 0
     ]
 
@@ -199,6 +228,11 @@ async def usage_stats(
         "by_model": by_model_out,
         "daily": daily_out,
         "daily_by_model": daily_by_model_out,
+        # plan-20261022-release-ci：区间起止（本地日期，闭区间）——趋势图据此补齐没有用量的日子，
+        # 此前只画有数据的日期，30 天里用了 5 天就画成 5 个等距点，看不出中间的空档
+        "range": {"start": start_d.isoformat(), "end": end_d.isoformat()},
+        "hourly": hourly_out,
+        "hourly_by_model": hourly_by_model_out,
         "daily_all": daily_all,
         "peak_tokens": peak_tokens,
         "streak_current": streak_current,

@@ -7,6 +7,10 @@
  *
  * 处置动作只有「前往子会话」——提问不是审批，没有确认 / 拒绝。
  * 展开状态按调用身份记在 flowExpand（消息流虚拟化与重新分组都会重挂载本组件）。
+ *
+ * plan-20261022-release-ci：子会话的进度汇报（subsession_report）与一轮结论（subsession_result）也走这一行——
+ * 此前它们在主会话里按普通正文平铺，结论原文一铺就是一屏。结论按 Markdown 渲染（子会话的最终回复本身就是 Markdown），
+ * 行内动词带上结束状态（子会话已完成 / 执行失败 / 被中断）。
  */
 import { memo, useMemo, type ReactNode } from "react";
 import type { ToolLeaf } from "./timeline";
@@ -15,9 +19,10 @@ import { useFlowExpand } from "../../store/flowExpand";
 import { ToolGlyph } from "../iconkit/ToolGlyphs";
 import { IconChevronRight } from "../icons";
 import { Button } from "../ui";
+import { Markdown } from "../ui/Markdown";
 import { ChatCollapse } from "./ChatCollapse";
 import { toolVerb } from "./toolLabels";
-import { SUBSESSION_QUESTION_TOOL, splitInlineMarks, type InlineSpan } from "../../utils/subsessionQuestion";
+import { SUBSESSION_RESULT_TOOL, splitInlineMarks, type InlineSpan } from "../../utils/subsessionQuestion";
 
 /** 来源子会话的标题：取最新的（子会话可能在提问之后被重命名），查不到时用提问当时的标题，再退到编号。
  *  返回原始字符串，selector 值不变就不重渲染。 */
@@ -53,24 +58,30 @@ export const SubsessionQuestionRow = memo(function SubsessionQuestionRow({ leaf 
   const sourceId = typeof leaf.args.source_session_id === "number" ? leaf.args.source_session_id : null;
   const asked = typeof leaf.args.title === "string" ? leaf.args.title : "";
   const title = useSourceTitle(sourceId, asked);
+  const isResult = leaf.tool === SUBSESSION_RESULT_TOOL;
+  const status = typeof leaf.args.status === "string" ? leaf.args.status : "";
+  // 结论行的动词带上结束状态：子会话已完成 / 子会话执行失败 / 子会话被中断
+  const verb = isResult && status ? `子会话${status}` : toolVerb(leaf.tool);
 
   return (
-    <div className="tc-node tc-sq">
+    <div className={"tc-node tc-sq" + (isResult ? " is-result" : "")}>
       <button
         type="button"
         className={"tc-row has-output tc-sq-row" + (expanded ? " expanded" : "")}
-        data-tool-state="done"
+        data-tool-state={leaf.ok === false ? "fail" : "done"}
         aria-expanded={expanded}
         onClick={() => setExpanded(!expanded)}
       >
-        <span className="tc-icon"><ToolGlyph tool={SUBSESSION_QUESTION_TOOL} size={16} /></span>
-        <span className="tc-verb">{toolVerb(SUBSESSION_QUESTION_TOOL)}</span>
+        <span className="tc-icon"><ToolGlyph tool={leaf.tool} size={16} /></span>
+        <span className="tc-verb">{verb}</span>
         <span className="tc-sq-title">{`「${title}」`}</span>
         <span className={"tc-chevron" + (expanded ? " open" : "")}><IconChevronRight size={11} /></span>
       </button>
       <ChatCollapse open={expanded}>
         <div className="tc-output">
-          <QuestionBody text={leaf.output} />
+          {isResult
+            ? <div className="tc-sq-md"><Markdown>{leaf.output}</Markdown></div>
+            : <QuestionBody text={leaf.output} />}
           {sourceId != null && (
             <div className="tc-sq-foot">
               <Button variant="subtle" size="xs" onClick={() => void switchSession(sourceId)}>前往子会话</Button>

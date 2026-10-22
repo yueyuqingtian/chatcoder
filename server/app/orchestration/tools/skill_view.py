@@ -28,6 +28,7 @@ _SIBLING_LIMIT = 50
 
 class SkillViewTool(Tool):
     name = "skill_view"
+    concurrency_safe = True  # plan-522-2209：只读技能文件
     risk_level = "low"
     description = (
         "查看技能内容。技能是可复用的领域知识包/工作流指令，系统提示词的 "

@@ -17,7 +17,10 @@ import { MsgType, SenderType } from "@chatcoder/shared";
 import type { TurnOut } from "@chatcoder/shared";
 import { recordDerivation } from "../../perf/metrics";
 import { formatBgElapsed } from "../../utils/bgFormat";
-import { SUBSESSION_QUESTION_TOOL, parseSubsessionQuestion } from "../../utils/subsessionQuestion";
+import {
+  SUBSESSION_QUESTION_TOOL, SUBSESSION_REPORT_TOOL, SUBSESSION_RESULT_TOOL,
+  parseSubsessionNotice, parseSubsessionQuestion,
+} from "../../utils/subsessionQuestion";
 
 export interface ToolLeaf {
   callKey: string;
@@ -69,7 +72,9 @@ export type TurnItem =
   | { kind: "text"; msg: MessageOut }
   /** firstId：工具簇首条调用消息的 id，用于按创建先后定位节点子代理卡（见 firstIdOf） */
   | { kind: "tools"; nodes: ToolNode[]; firstId?: number }
-  | { kind: "subagent"; msg: MessageOut }
+  /** result：该次 spawn_subagent 的工具结果（可能还没到）——派发被拒绝时据此渲染失败态，
+   *  否则卡片会永久停在「执行中」且点击打开一个空面板（plan-20261022-subagent-dispatch-fail）。 */
+  | { kind: "subagent"; msg: MessageOut; result?: MessageOut }
   | { kind: "summary"; msg: MessageOut }
   | { kind: "error"; msg: MessageOut }
   /** v2.2 (对齐 zcode 3.11): 系统分割线（模型切换等 divider） */
@@ -792,6 +797,38 @@ function subsessionQuestionItem(m: MessageOut, c: Record<string, unknown>): Turn
   return { kind: "tools", nodes: [{ kind: "leaf", leaf }], firstId: Number(m.id) };
 }
 
+/** plan-20261022-release-ci：子会话的进度汇报与一轮结论（系统消息，带 subsession_report 标记）。
+ *  提问已由 isSubsessionQuestion 先行拦下；更早的消息没有 mailbox 标记时按文本里的「结束：」区分。 */
+function isSubsessionNotice(c: Record<string, unknown>): boolean {
+  const kind = mailboxKindOf(c);
+  return kind === "subsession_report" || kind === "subsession_result" || c.subsession_report === true;
+}
+
+/** 子会话汇报 / 结论 → 与提问同版式的单叶子工具条目（结论原文放进展开区，不再在主会话里平铺） */
+function subsessionNoticeItem(m: MessageOut, c: Record<string, unknown>): TurnItem {
+  const mb = (c.mailbox && typeof c.mailbox === "object" ? c.mailbox : {}) as Record<string, unknown>;
+  const asNum = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const sourceId = asNum(mb.source_session_id) ?? asNum(c.subsession_id);
+  const parsed = parseSubsessionNotice(msgText(c));
+  const isResult = mailboxKindOf(c) === "subsession_result" || parsed.kind === "result";
+  const leaf: ToolLeaf = {
+    callKey: `subn-${m.id}`,
+    tool: isResult ? SUBSESSION_RESULT_TOOL : SUBSESSION_REPORT_TOOL,
+    args: { source_session_id: sourceId, title: parsed.title, status: parsed.status },
+    agentName: "",
+    threadId: null,
+    turnId: m.turn_id != null ? Number(m.turn_id) : null,
+    // 失败 / 中断的结论按失败态着色（图标转为错误色），其余都是已发生的通知
+    ok: !(isResult && /失败|中断/.test(parsed.status)),
+    output: parsed.body,
+    error: null,
+    durationMs: null,
+    changeStat: null,
+    image: null,
+  };
+  return { kind: "tools", nodes: [{ kind: "leaf", leaf }], firstId: Number(m.id) };
+}
+
 /** plan-20261020-bgtask：后台命令的完成 / 停止通知（系统消息）。 */
 const BG_NOTICE_KINDS: ReadonlySet<string> = new Set(["bg_command_done", "bg_command_stopped"]);
 
@@ -851,6 +888,9 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
   const items: TurnItem[] = [];
   const pendingTools: MessageOut[] = [];
   const resultsByKey = new Map<string, MessageOut>();
+  // plan-20261022-subagent-dispatch-fail：子代理调用结果单独索引——它不进 ToolTree，
+  // 但卡片要靠它区分「真的在跑」与「派发已被后端拒绝」。
+  const spawnResultsByKey = new Map<string, MessageOut>();
   // plan-20261021-subq-row：工具结果先整体索引一遍，再按时间序归类。
   // 子会话提问 / 后台命令通知等系统消息会落在某个长命令的「调用」与「结果」之间（提问打断前台命令时，
   // 结果要等命令转后台之后才写入）。遇到它们要先 flush 待处理的调用；若结果边走边收，
@@ -858,8 +898,14 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
   for (const m of msgs) {
     if (m.msg_type !== MsgType.ToolResult) continue;
     const rc = m.content as Record<string, unknown>;
-    // 与下方归类口径一致：子代理结果由 SubagentCard 展示，建议工具不进时间线
-    if (rc.tool === "spawn_subagent" || SUGGESTION_TOOLS.has(String(rc.tool ?? ""))) continue;
+    const tool = String(rc.tool ?? "");
+    // 子代理结果由 SubagentCard 展示、不进 ToolTree；卡片用它区分「在跑」与「派发被拒」
+    if (tool === "spawn_subagent") {
+      spawnResultsByKey.set(String(rc.call_key ?? ""), m);
+      continue;
+    }
+    // 与下方归类口径一致：建议工具不进时间线
+    if (SUGGESTION_TOOLS.has(tool)) continue;
     resultsByKey.set(String(rc.call_key ?? ""), m);
   }
   // 同一轮内同一程序只出一张卡：plan 与 start 常被助手文字隔开，分属两次 flush
@@ -921,6 +967,11 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
       items.push(subsessionQuestionItem(m, c));
       continue;
     }
+    if (m.sender_type === SenderType.System && isSubsessionNotice(c)) {
+      flushTools();
+      items.push(subsessionNoticeItem(m, c));
+      continue;
+    }
     if (BG_NOTICE_KINDS.has(mailboxKindOf(c))) {
       flushTools();
       items.push(bgNoticeItem(m, c));
@@ -936,7 +987,12 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
         // v22: spawn_subagent 工具调用独立作为时间线条目，按时间轴精准穿插在消息流中
         // （此前被当成普通工具节点混入 ToolTree，且 SubagentCard 全部堆在用户消息下方）
         flushTools();
-        items.push({ kind: "subagent", msg: m });
+        // plan-20261022-subagent-dispatch-fail：带上本次调用自己的工具结果，
+        // 卡片据此判断派发是否已被后端拒绝（被拒时没有子代理记录可匹配）
+        items.push({
+          kind: "subagent", msg: m,
+          result: spawnResultsByKey.get(String(c.call_key || m.id)),
+        });
       } else {
         pendingTools.push(m);
       }

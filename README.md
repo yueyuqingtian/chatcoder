@@ -68,9 +68,9 @@ npm run dev                     # http://localhost:5173
 ## 桌面端打包（Windows）
 
 ```powershell
-# 一键脚本：构建前端 -> PyInstaller 打包后端 -> electron-builder 出 NSIS 安装包
+# 一键脚本：构建前端 -> PyInstaller 打包后端 -> electron-builder 出 NSIS 安装包 -> 安装包自检
 powershell -ExecutionPolicy Bypass -File build-release.ps1
-# 产物: 0.7.3/chatcoder-Setup-<version>.exe + latest.yml + .blockmap
+# 产物目录取 package.json 的 build.directories.output：chatcoder-Setup-<version>.exe + latest.yml + .blockmap
 ```
 
 或分步执行：
@@ -93,34 +93,26 @@ npm run dist
 更新源采用「国内主源 + 官方备源」双通道，自动回退：
 
 - 主源（自建）：`https://service.guyueyu.asia/updates/`，静态文件分发，国内实测下载 8MB/s 以上、无需代理；
+  文件由服务器定时直接从 GitHub Releases 拉取并校验 sha512，与 GitHub 上的安装包完全一致；
 - 备源：GitHub Releases，主源不可用时自动切换重试；
 - 更新历史同样三级回落：自建源静态数据（毫秒级）→ GitHub API → 本地 CHANGELOG。
 
-发布新版本（**必须先把 package.json 的 version 递增**，打 tag 为 `v<version>`）：
+发布新版本：先把 `package.json` 的 version 与 `CHANGELOG.md` 写好并提交，然后推送 tag，
+GitHub Actions 自动打包并发布到 GitHub Releases，自建源服务器每 5 分钟直接从 GitHub 拉取新版本：
 
-```powershell
-# 方式一：一键脚本打包并发布（需 gh CLI 已登录：gh auth login）
-powershell -ExecutionPolicy Bypass -File build-release.ps1 -Publish
-
-# 方式二：先手动打包，再单独发布
-powershell -ExecutionPolicy Bypass -File build-release.ps1
-gh release create v<version> `
-  0.7.3/chatcoder-Setup-<version>.exe 0.7.3/latest.yml 0.7.3/chatcoder-Setup-<version>.exe.blockmap `
-  --title "v<version>" --notes "ChatCoder v<version>"
-# 再同步自建更新源（服务器从 GitHub 拉取）
-python tools\sync-updates.py --version <version>
+```bash
+git tag v<version>
+git push origin v<version>
 ```
 
-`-Publish` 发布流程：
-
-1. `gh release create` 上传 GitHub Releases（备源三件套）；
-2. `tools/sync-updates.py` 同步自建源：服务器从 GitHub 拉取（约 10 秒）→ 校验 sha512 → 注入更新说明 → 原子部署 → 生成 releases.json → 清理旧版本文件（只保留最新版）。
+完整说明（手动重跑、本地兜底打包、自建源定时同步的一次性安装、仓库 Secret）见 [发布流程](docs/release.md)。
 
 注意：
 
 - Release 资产必须包含 `latest.yml`、`.exe`、`.blockmap` 三件套，且资产名与
   `latest.yml` 中 `url` 一致（package.json `nsis.artifactName` 已保证无空格，勿改回）。
-- 自建源只保留最新版本，磁盘占用恒定（约 325MB）；差分更新由客户端本地 blockmap 缓存支持。
+- `latest.yml` 内置本版本更新说明（取自 CHANGELOG），三条更新线路的客户端都能看到「更新了什么」。
+- 自建源只保留最新版本安装包与最近 10 个 blockmap（客户端已改为全量下载，保留仅为回退兼容），磁盘占用基本恒定。
 - 安装包未签名时，用户首次安装/更新会触发 Windows SmartScreen 提示（与手动下载一致）。
 
 ## 隐私说明

@@ -43,6 +43,7 @@ _BINARY_EXTENSIONS = {
 
 class GrepTool(Tool):
     name = "fs_grep"
+    concurrency_safe = True  # plan-522-2209：纯读，不写文件、不改库
     risk_level = "low"
     description = (
         "在工作区内搜索文件内容（支持正则表达式）。"

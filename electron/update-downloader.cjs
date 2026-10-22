@@ -7,13 +7,14 @@
  * 做法：
  *  - 分块：把文件切成固定大小的块（默认 4MiB），多条连接并行用 Range 拉取，每块独立重试；
  *  - 断点：已完成的块序号写进 <文件>.part.json，进程重启 / 断网恢复后只补缺的块；
- *  - 多源：按固定优先级 自建源 > 镜像 > GitHub 选源，失败按退避有序切换，不在最高优先级源上时
+ *  - 多源：按固定优先级 镜像 > 自建源 > GitHub 选源，失败按退避有序切换，不在最高优先级源上时
  *    定时探测并自动回切（plan-20261022-update-route，见 update-source-policy.cjs）；网络类故障永不放弃；
+ *  - 镜像单连接：gh-proxy 对多连接并发会主动降速，镜像线路固定一个在途请求；
  *  - 校验：整包 sha512 与 latest.yml 一致才改名落地，不一致就清掉重来；
  *  - 所有源都不支持 Range 时退化为单连接顺序下载（失败从头来，但仍会换源重试）。
  *
  * 纯 Node 模块：fetch 由调用方注入——主进程传 Electron 的 net.fetch（继承系统代理 / 证书设置），
- * 单测传全局 fetch。不依赖 electron。
+ * 单测传全局 fetch。镜像线路需要绕开代理，可用 fetchFor 按源指定直连实现。不依赖 electron。
  */
 const fs = require("fs");
 const fsp = fs.promises;
@@ -100,6 +101,7 @@ async function discardPartial(partPath) {
  * @param {string}   opts.sha512        期望的整包 sha512（base64）
  * @param {number}   [opts.size]        期望总字节数（缺省时从第一个连通的源取 Content-Range 总长）
  * @param {Function} [opts.fetchImpl]   (url, init) => Promise<Response>
+ * @param {Function} [opts.fetchFor]    (src) => fetch 实现；用于镜像走直连、自建源 / GitHub 走默认代理
  * @param {Function} [opts.isOnline]    () => boolean；网络类失败后用来判断是否先等网络
  * @param {Function} [opts.onProgress]  ({total, delta, transferred, percent, bytesPerSecond}) => void
  * @param {Function} [opts.onPhase]     (phase, info) => void；phase: connecting|downloading|waiting|retrying|verifying
@@ -170,8 +172,11 @@ async function downloadResumable(opts) {
   let size = Number(opts.size) || 0;
   let retries = 0;
 
+  /** 按源解析 fetch：镜像可注入直连实现（绕过系统代理），其余沿用默认 */
+  const fetchFor = typeof opts.fetchFor === "function" ? opts.fetchFor : () => fetchImpl;
+
   /** 带超时 / 取消联动的 fetch：返回 {res, ctl, dispose}；超时只覆盖「等响应头」阶段 */
-  async function request(url, headers, timeoutMs) {
+  async function request(src, headers, timeoutMs) {
     const ctl = new AbortController();
     const sig = workSignal;
     const onAbort = () => ctl.abort();
@@ -179,7 +184,7 @@ async function downloadResumable(opts) {
     const timer = setTimeout(() => ctl.abort(), timeoutMs);
     const dispose = () => { clearTimeout(timer); sig.removeEventListener("abort", onAbort); };
     try {
-      const res = await fetchImpl(url, { headers, signal: ctl.signal, redirect: "follow", cache: "no-store" });
+      const res = await fetchFor(src)(src.url, { headers, signal: ctl.signal, redirect: "follow", cache: "no-store" });
       clearTimeout(timer);
       return { res, ctl, dispose };
     } catch (e) {
@@ -229,7 +234,7 @@ async function downloadResumable(opts) {
    *  返回 true=可用；false=暂时不通；致命问题（404 / 大小不符）直接标记该源不可用 */
   async function probe(src) {
     try {
-      const { res, ctl, dispose } = await request(src.url, { Range: `bytes=0-${PROBE_BYTES - 1}` }, probeTimeoutMs);
+      const { res, ctl, dispose } = await request(src, { Range: `bytes=0-${PROBE_BYTES - 1}` }, probeTimeoutMs);
       try {
         if (res.status === 206) {
           const cr = parseContentRange(res.headers.get("content-range"));
@@ -353,7 +358,7 @@ async function downloadResumable(opts) {
     const len = chunkLen(i);
     const end = start + len - 1;
     const timeout = lease.cold ? Math.min(firstConnectTimeoutMs, connectTimeoutMs) : connectTimeoutMs;
-    const { res, ctl, dispose } = await request(src.url, { Range: `bytes=${start}-${end}` }, timeout);
+    const { res, ctl, dispose } = await request(src, { Range: `bytes=${start}-${end}` }, timeout);
     try {
       if (res.status !== 206) {
         if (res.status === 200) throw new DownloadError("range", "下载源不支持分段请求");
@@ -498,7 +503,7 @@ async function downloadResumable(opts) {
       throwIfAborted();
       const src = list[attempt % list.length];
       try {
-        const { res, ctl, dispose } = await request(src.url, {}, connectTimeoutMs);
+        const { res, ctl, dispose } = await request(src, {}, connectTimeoutMs);
         try {
           if (res.status !== 200) {
             if (httpFailureKind(res.status) === "dead") { list.splice(list.indexOf(src), 1); if (!list.length) throw allDeadError(); }

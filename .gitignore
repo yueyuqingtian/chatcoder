@@ -216,6 +216,9 @@ server/workspace/
 /Q
 ai/
 scripts/
+# 前端构建脚本（设计规范守卫，npm run build 依赖）必须入库：上一条 scripts/ 会把它一并忽略，
+# 干净检出（GitHub Actions 打包）时 lint:design 找不到脚本，构建直接失败
+!/client/scripts/
 dist_log.txt
 client/build_out.txt
 client/vite.config.js
@@ -262,3 +265,12 @@ server/*_out.txt
 /uploads/
 /server/uploads/
 /server/devdata/
+
+# 估算校准系数落盘（开发模式写到 server/ 下，运行时生成，不入库）
+/server/est_calibration.json
+
+# 会话内工具输出的折叠缓存（临时产物）
+/.compact-cache/
+
+# 临时源码检出目录
+/tmp-src-*/

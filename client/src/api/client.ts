@@ -396,6 +396,11 @@ export interface UsageStatsOut {
   }>;
   daily: Array<{ date: string; tokens: number; calls: number }>;
   daily_by_model: Array<{ date: string; key: string; display_name: string; tokens: number }>;
+  /** plan-20261022-release-ci：区间起止（本地日期，闭区间；旧后端无此字段） */
+  range?: { start: string; end: string };
+  /** 单日区间的 24 小时汇总（多日区间为空数组；旧后端无此字段） */
+  hourly?: Array<{ hour: number; tokens: number; calls: number }>;
+  hourly_by_model?: Array<{ hour: number; key: string; display_name: string; tokens: number }>;
   daily_all: Array<{ date: string; tokens: number }>;
   peak_tokens: number;
   streak_current: number;
@@ -1581,6 +1586,9 @@ export const api = {
   setGlobalSettings: (data: Partial<GlobalSettingsIn>) => put<GlobalSettingsOut>("/settings/global", data),
   /** 单会话并发上限与当前占用（只读内存快照） */
   getRuntimeLimits: () => get<RuntimeLimitsOut>("/runtime/limits"),
+  /** plan-522-2209：当前全部未决审批 / 提问的轻量摘要。
+   *  全局通道在断线重连与页面重载后会丢事件，靠这个接口重建跨会话等待索引。 */
+  getPendingApprovals: () => get<PendingApprovalsOut>("/approvals/pending"),
   /** 问题7/8: 终端 Shell 存在性探测 + 候选等宽字体 */
   getTerminalOptions: () => get<TerminalOptionsOut>("/settings/terminal/options"),
 
@@ -1848,6 +1856,26 @@ export interface RuntimeLimitsOut {
   max_concurrent_subagents: number;
   max_subsessions_per_parent: number;
   sessions: Array<{ session_id: number; subagents_running: number; subsessions_running: number }>;
+}
+
+/** plan-522-2209：一条未决交互的轻量摘要（不含命令原文与文件路径）。
+ *  用于前端在建立全局连接后重建「哪些会话在等我」的索引。 */
+export interface PendingApprovalItem {
+  approval_id: string;
+  session_id: number | null;
+  kind: "tool_call" | "question";
+  tool: string | null;
+  action_label: string | null;
+  agent_name: string | null;
+  is_subagent: boolean;
+  is_subsession: boolean;
+  /** 审批详情（已剔除提问的作答内容）——卡片要渲染工具名、动作短语与命令原文，
+   *  缺了它跨会话审批卡就只剩一句「有个审批在等你」。 */
+  detail: Record<string, unknown>;
+}
+export interface PendingApprovalsOut {
+  items: PendingApprovalItem[];
+  total: number;
 }
 
 /** 问题7/8: 终端 Shell 选项（available=当前设备实际存在） */

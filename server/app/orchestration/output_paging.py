@@ -159,6 +159,44 @@ def present_output(text: str, limit: int, *, session_id: int | None, tag: str) -
     )
 
 
+def budget_for_tool(tool_name: str) -> tuple[int, int]:
+    """按工具类型解析呈现预算，返回 (字节预算, 尾部保留字节)。
+
+    plan-522-2209：预算口径此前只在 agent_loop 里，历史重建路径拿不到，只能自己写死一个
+    字符上限——同一份工具输出在「刚跑完」与「压缩后重建」两种情况下被截成不同长度，
+    后者还无法续读。这里收成唯一来源，两条路径都调它。
+    """
+    from app.core.config import settings
+
+    if tool_name == "fs_grep":
+        return settings.tool_output_bytes_grep, 0
+    if tool_name in ("web_fetch", "web_search"):
+        return settings.tool_output_bytes_web, 0
+    if tool_name == "terminal_exec":
+        return settings.tool_output_bytes_terminal, settings.tool_output_bytes_terminal_tail
+    return settings.tool_output_bytes_default, 0
+
+
+def present_for_model(
+    text: str,
+    *,
+    tool_name: str,
+    session_id: int | None,
+    tag: str,
+) -> str:
+    """工具输出进入模型上下文的统一呈现（实时路径与历史重建路径共用）。
+
+    fs_read 例外：它的窗口已由工具自身的字节预算封顶且完整写入落库，再截一次会出现
+    「窗口→截成前段→再读」的循环。其余工具按 `budget_for_tool` 呈现，超出部分落盘续读。
+    """
+    if tool_name == "fs_read":
+        return str(text or "")
+    budget, tail = budget_for_tool(tool_name)
+    return present_output_bytes(
+        str(text or ""), budget, session_id=session_id, tag=tag, tail_bytes=tail,
+    )
+
+
 def _prefix_bytes(text: str, limit: int) -> str:
     """取不超过 limit 个 UTF-8 字节的前缀（不切断多字节字符）。"""
     return text.encode("utf-8")[:max(0, limit)].decode("utf-8", errors="ignore")

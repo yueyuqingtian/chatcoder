@@ -40,7 +40,7 @@ function normalizeReleaseNotes(notes) {
  * @param {object} [deps.tuning]          透传给下载器的调参（测试用）
  */
 function createUpdateManager(deps) {
-  const { pushState, meta, feeds, updatesBaseUrl, repo, currentVersion, net, log, logErr, tuning } = deps;
+  const { pushState, meta, feeds, updatesBaseUrl, repo, currentVersion, net, directFetch, log, logErr, tuning } = deps;
   const ghProxy = deps.ghProxy === undefined ? GH_PROXY_PREFIX : deps.ghProxy;
   const createCancellationToken = deps.createCancellationToken || (() => {
     const { CancellationToken } = require("builder-util-runtime");
@@ -86,17 +86,17 @@ function createUpdateManager(deps) {
     });
   }
 
-  /** 安装包候选下载地址，按层级排好（plan-20261022-update-route）：自建源 > 镜像 > GitHub。
-   *  不再把 electron-updater 解析出的地址放第一位——feed 回退到 GitHub 时那就是 GitHub 地址，会让下载一开始就走慢速线路。
+  /** 安装包候选下载地址，按层级排好（plan-20261022-update-route）：镜像 > 自建源 > GitHub。
+   *  镜像（gh-proxy）实测单连接更快，放第一位；自建源作为第二线路，GitHub 只做慢速兜底。
    *  整包 sha512 来自 latest.yml，下载自哪个源都要通过同一个校验。 */
   function buildDownloadUrls(_url, name) {
     const info = lastUpdateInfo || {};
     const list = [];
     const add = (url, tier) => { if (url && !list.some((s) => s.url === url)) list.push({ url, tier }); };
     const enc = encodeURIComponent(name);
-    add(new URL(enc, updatesBaseUrl).href, "primary");
     const gh = info.version && repo ? `https://github.com/${repo.owner}/${repo.repo}/releases/download/v${info.version}/${enc}` : "";
     if (gh && ghProxy) add(ghProxy + gh, "mirror");
+    add(new URL(enc, updatesBaseUrl).href, "primary");
     // 额外镜像（对象存储 / CDN 等）：在服务器端 latest.yml 里写 `mirrors: [https://xxx/updates/]`，客户端无需改版即可新增源
     for (const base of Array.isArray(info.mirrors) ? info.mirrors : []) {
       if (typeof base === "string" && /^https:\/\//i.test(base)) add(new URL(enc, base.endsWith("/") ? base : base + "/").href, "mirror");
@@ -105,13 +105,14 @@ function createUpdateManager(deps) {
     return list;
   }
 
-  /** 检查更新用的 feed 链：自建源 > 镜像 > GitHub。每次检查都从自建源开始（plan-20261022-update-route），
+  /** 检查更新用的 feed 链：镜像 > 自建源 > GitHub。每次检查都从镜像开始（plan-20261022-update-route），
    *  不再像旧实现那样失败一次就一直黏在 GitHub 上 */
   function feedChain() {
-    const chain = [["自建源", feeds.mirror]];
+    const chain = [];
     if (repo && ghProxy) {
       chain.push(["镜像", { provider: "generic", url: `${ghProxy}https://github.com/${repo.owner}/${repo.repo}/releases/latest/download/`, useMultipleRangeRequest: false }]);
     }
+    chain.push(["自建源", feeds.mirror]);
     if (feeds.github) chain.push(["GitHub", feeds.github]);
     return chain;
   }
@@ -153,7 +154,7 @@ function createUpdateManager(deps) {
       for (let attempt = 1; ; attempt++) {
         try {
           downloadToken = createCancellationToken();
-          // 每次下载都新建选源状态机：取消后重新下载 / 切换线路都会从自建源开始（已下载的块保留）
+          // 每次下载都新建选源状态机：取消后重新下载 / 切换线路都会从镜像开始（已下载的块保留）
           await autoUpdater.downloadUpdate(downloadToken); // 成功后 update-downloaded 事件把状态置为 downloaded
           return state;
         } catch (e) {
@@ -203,7 +204,7 @@ function createUpdateManager(deps) {
     return state;
   }
 
-  /** 「切换自建源」：停掉当前下载并立刻重新开始——新的选源状态机从自建源起步，断点续传接着下 */
+  /** 「切换线路」：停掉当前下载并立刻重新开始——新的选源状态机从第一优先级（镜像）起步，断点续传接着下 */
   async function switchToPrimary() {
     if (!downloadActive) return state;
     const auto = !!state.auto;
@@ -223,6 +224,7 @@ function createUpdateManager(deps) {
       getInfo: () => lastUpdateInfo,
       buildUrls: buildDownloadUrls,
       net,
+      directFetch,
       onPhase: onDownloadPhase,
       logger: { info: (...a) => log(...a), warn: (...a) => log(...a) },
       tuning,

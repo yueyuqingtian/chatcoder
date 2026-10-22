@@ -20,6 +20,7 @@ _KIND_LABEL = {
 
 class SymbolSearchTool(Tool):
     name = "symbol_search"
+    concurrency_safe = True  # plan-522-2209：只查符号索引，读到的是同一份只读视图
     risk_level = "low"
     description = (
         "在代码库的项目符号索引中搜索函数/方法/类/接口等符号，返回"
@@ -130,6 +131,7 @@ class SymbolSearchTool(Tool):
 
 class OutlineTool(Tool):
     name = "outline"
+    concurrency_safe = True  # plan-522-2209：只查符号索引，读到的是同一份只读视图
     risk_level = "low"
     description = (
         "查看单个文件的符号骨架（类/函数/方法及其行号区间，按定义顺序列出）。"

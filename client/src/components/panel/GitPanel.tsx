@@ -10,11 +10,18 @@ import { findSession, useChatStore } from "../../store/chat";
 import { bucketSessionId, usePanelStore } from "../../store/panel";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { Button, Checkbox, Collapse, Dialog, Empty, FormDialog, IconButton, Input, Menu, Popover, Segmented, Tooltip } from "../ui";
-import { IconAlertTriangle, IconArrowDown, IconArrowUp, IconCheck, IconChevronDown, IconDownload, IconGitBranch, IconGlobe, IconLayers, IconMoreHorizontal, IconPlus, IconRefresh, IconTrash, IconX } from "../icons";
+import { IconAlertTriangle, IconArrowDown, IconArrowUp, IconCheck, IconChevronDown, IconDownload, IconGitBranch, IconGlobe, IconLayers, IconMoreHorizontal, IconPlus, IconRefresh, IconSpinner, IconTrash, IconX } from "../icons";
 import { FileIcon } from "../iconkit/FileIcon";
 import { highlightLines } from "../chat/CodeView";
 
 type Section = "conflicts" | "staged" | "unstaged" | "untracked";
+
+/** plan-522-2209：联网同步操作的中文阶段名。顶栏进度行据此展示「正在拉取并合并 · 已等待 Ns」。 */
+const SYNC_LABELS: Record<string, string> = {
+  fetch: "正在抓取远端更新",
+  pull: "正在拉取并合并",
+  push: "正在推送",
+};
 
 /** 变更列表的一行：staged / unstaged / untracked 按路径合并后的唯一记录。
  *  勾选只改变这一行的暂存状态，不会让行在分组之间移动。 */
@@ -156,6 +163,11 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  /** plan-522-2209：同步已等待秒数（本地计时）。后端一次拉取可能要一两分钟，
+   *  只把按钮置灰用户看不出是否在动，这里给出可读的等待时长。 */
+  const [syncWaited, setSyncWaited] = useState(0);
+  /** plan-522-2209：写操作的序号。取消等待、切换项目/仓库后自增，晚到的旧响应不得再改当前视图。 */
+  const runSeq = useRef(0);
   const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<{ path: string; staged: boolean } | null>(null);
   const [diff, setDiff] = useState<GitDiffOut | null>(null);
@@ -329,12 +341,29 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
   // 打开 / 切换项目或仓库时刷新；面板隐藏时不请求。历史只在历史视图下才读取
   useEffect(() => {
     if (!visible || !reposReady) return;
+    // plan-522-2209：切换后必须放弃上一个项目/仓库的在途同步——否则按钮会一直保持
+    // 置灰（busy 没有对应请求来复位），且旧响应回来还会把结果写进新视图。
+    runSeq.current++;
+    setBusy(null);
+    setSyncWaited(0);
     setSelected(null);
     setDiff(null);
     setHistory([]);
     closeCommit();
     void refresh();
   }, [projectId, repo, visible, reposReady, refresh]);
+
+  // plan-522-2209：联网同步期间本地计时，进度行展示「已等待 Ns」。
+  // 只依赖 busy 是否存在：busy 变化即重新起算，避免跨操作累加。
+  useEffect(() => {
+    if (busy == null) { setSyncWaited(0); return; }
+    const started = Date.now();
+    setSyncWaited(0);
+    const timer = window.setInterval(() => {
+      setSyncWaited(Math.floor((Date.now() - started) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [busy]);
 
   useEffect(() => {
     if (!visible || view !== "history" || !reposReady) return;
@@ -397,33 +426,56 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
     if (branchOpen) void refreshBranches();
   }, [branchOpen, refreshBranches]);
 
+  /** plan-522-2209：同步类写操作的取消——只结束界面等待，不中断后端 git 进程。
+   *
+   *  后端是 HTTP 请求-响应模型，一次 pull 已经跑起来就停不掉（强杀 git 可能留下 index.lock，
+   *  反而让之后所有 git 操作失败）。因此「取消」的语义是：界面立刻退出等待态、隐藏进度行，
+   *  并把这次操作标记作废——它最终成功或失败都不再改动当前视图。 */
+  const cancelSync = () => {
+    runSeq.current++;          // 作废在途响应
+    setBusy(null);
+    setSyncWaited(0);
+    setNotice("已停止等待，同步请求仍在后台继续，完成后可点刷新查看结果");
+    setNoticeTone("warn");
+  };
+
   /** 执行一个写操作：无论成败都刷新状态（部分成功时，如提交成功、推送失败，列表必须反映已落盘的结果）；
    *  失败以提示条呈现，不打断浏览。refresh 成功会清空 error，因此失败文案在刷新之后写入。 */
   const run = async (label: string, fn: () => Promise<string | void>) => {
     if (projectId == null) return;
+    // plan-522-2209：setBusy(null) 原先放在末尾、refresh 之后，异常路径（或刷新抛错）会让
+    // 按钮永久置灰；改用 finally 保证一定复位。序号用于让「取消 / 切换项目」后的旧响应失效。
+    const mine = ++runSeq.current;
     setBusy(label);
+    setSyncWaited(0);
     setNotice(null);
     setError(null);
     let failure: string | null = null;
     try {
-      const out = await fn();
-      if (out) setNotice(out);
-    } catch (e) {
-      failure = e instanceof Error ? e.message.replace(/^Error:\s*/, "") : String(e);
-    }
-    const st = await refresh();
-    if (failure !== null) setError(failure);
-    if (selected && st) {
-      const still = st.unstaged.some((e) => e.path === selected.path) || st.staged.some((e) => e.path === selected.path);
-      if (!still) { workDiffSeq.current++; setSelected(null); setDiff(null); setDiffLoading(false); }
-      else {
-        // 暂存状态可能已变：差异要跟着切到新的一侧（已暂存 / 未暂存），否则展示的是过期内容
-        const staged = st.staged.some((e) => e.path === selected.path);
-        if (staged !== selected.staged) setSelected({ path: selected.path, staged });
-        void loadDiff(selected.path, staged);
+      try {
+        const out = await fn();
+        if (mine === runSeq.current && out) setNotice(out);
+      } catch (e) {
+        failure = e instanceof Error ? e.message.replace(/^Error:\s*/, "") : String(e);
       }
+      // 已被取消 / 切换：这次操作的结果作废，不写回当前视图
+      if (mine !== runSeq.current) return;
+      const st = await refresh();
+      if (failure !== null) setError(failure);
+      if (selected && st) {
+        const still = st.unstaged.some((e) => e.path === selected.path) || st.staged.some((e) => e.path === selected.path);
+        if (!still) { workDiffSeq.current++; setSelected(null); setDiff(null); setDiffLoading(false); }
+        else {
+          // 暂存状态可能已变：差异要跟着切到新的一侧（已暂存 / 未暂存），否则展示的是过期内容
+          const staged = st.staged.some((e) => e.path === selected.path);
+          if (staged !== selected.staged) setSelected({ path: selected.path, staged });
+          void loadDiff(selected.path, staged);
+        }
+      }
+    } finally {
+      // 刷新也走完后才解除忙碌：否则按钮已可点、状态还在读，用户会以为没生效
+      if (mine === runSeq.current) setBusy(null);
     }
-    setBusy(null);
   };
 
   /** 读取某个文件的差异。只保留最后一次请求的结果：快速切换文件时晚到的旧结果不会覆盖当前选中。 */
@@ -466,7 +518,14 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
   // 切换项目（或工作树）时分组归属重新学习
   useEffect(() => { groupOf.current.clear(); }, [projectId]);
 
-  const syncDisabled = busy != null || !status;
+  // plan-522-2209：把「为什么不能点」拆成两个独立原因——此前两者共用一个布尔量，
+  // 提示永远只有「正在同步」，仓库状态尚未读取时也会这么说，用户以为在同步而在等。
+  const statusMissing = !status;
+  const syncDisabled = statusMissing || busy != null;
+  /** 同步按钮的提示文案：随禁用原因变化；可用时用动作自身的说明。 */
+  const syncHint = (idle: string) => (statusMissing ? "仓库状态未就绪" : busy != null ? "正在同步…" : idle);
+  /** 当前是否为联网同步（决定顶栏进度行是否出现、哪个按钮显 loading）。 */
+  const syncing = busy != null && SYNC_LABELS[busy] !== undefined;
 
   /** 两组变更各自合并，组内勾选只改状态、不改变行位置：
    *  - trackedRows：git 已跟踪文件的改动（已暂存 + 未暂存按同一路径合并成一行）；
@@ -980,18 +1039,18 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
           </div>
         </div>
         <div className="gp-head-ops">
-          <Tooltip content="抓取远端更新（不合并到本地）" side="bottom">
+          <Tooltip content={syncHint("抓取远端更新（不合并到本地）")} side="bottom">
             <IconButton icon={<IconGlobe size={14} />} aria-label="抓取远端更新"
-              disabled={syncDisabled} onClick={doFetch} />
+              loading={busy === "fetch"} disabled={syncDisabled} onClick={doFetch} />
           </Tooltip>
-          <Tooltip content={(status?.behind ?? 0) > 0 ? `拉取并合并 ${status?.behind} 个远端提交` : "拉取并合并远端更新"} side="bottom">
+          <Tooltip content={syncHint((status?.behind ?? 0) > 0 ? `拉取并合并 ${status?.behind} 个远端提交` : "拉取并合并远端更新")} side="bottom">
             <IconButton icon={<IconDownload size={14} />} aria-label="拉取并合并远端更新"
-              disabled={syncDisabled} onClick={() => void doPull()} />
+              loading={busy === "pull"} disabled={syncDisabled} onClick={() => void doPull()} />
           </Tooltip>
-          <Tooltip content={aheadCount > 0 ? `推送 ${aheadCount} 个提交到远端` : "没有待推送的提交"} side="bottom">
+          <Tooltip content={syncHint(aheadCount > 0 ? `推送 ${aheadCount} 个提交到远端` : "没有待推送的提交")} side="bottom">
             <span className="gp-push-wrap">
               <IconButton icon={<IconArrowUp size={14} />} aria-label="推送当前分支"
-                disabled={syncDisabled || aheadCount === 0} onClick={doPush} />
+                loading={busy === "push"} disabled={syncDisabled || aheadCount === 0} onClick={doPush} />
               {aheadCount > 0 && <span className="gp-push-badge" aria-hidden>{aheadCount}</span>}
             </span>
           </Tooltip>
@@ -1000,6 +1059,19 @@ export function GitPanel({ visible = true }: { visible?: boolean }) {
           </Tooltip>
         </div>
       </div>
+
+      {/* plan-522-2209：联网同步的常驻进度行。此前点完同步只有三个按钮一起变灰，
+          既没有阶段也没有时长，几秒和两分钟的观感完全一样；这里给出阶段 + 已等待秒数 + 取消。
+          走 Collapse（不用条件渲染），出现/收起都不抖动下方列表。 */}
+      <Collapse open={syncing}>
+        <div className="gp-sync-bar" role="status" aria-live="polite">
+          <span className="gp-sync-spin" aria-hidden><IconSpinner size={12} /></span>
+          <span className="gp-sync-text">
+            {SYNC_LABELS[busy ?? ""] ?? "正在同步"} · 已等待 {syncWaited}s
+          </span>
+          <Button variant="ghost" size="sm" className="gp-sync-cancel" onClick={cancelSync}>取消等待</Button>
+        </div>
+      </Collapse>
 
       <div className="gp-views">
         <Segmented

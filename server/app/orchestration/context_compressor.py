@@ -64,6 +64,85 @@ def _call_key(m) -> str:
     return str(content.get("call_key") or "")
 
 
+def _collect_attachment_lines(messages: list) -> list[str]:
+    """从被压缩消息里提取附件清单（文件名 + 绝对路径）。
+
+    plan-527-2218：压缩后正文只剩摘要，附件路径若不写进 checkpoint，模型既不知道
+    有这些文件、也没有路径可重读——这正是「压缩后彻底忘了早期发过的文档」的直接原因。
+    """
+    try:
+        from app.orchestration.context_manager import _attachment_abs_path
+    except Exception:  # noqa: BLE001 — 路径工具不可用时退化为原始相对路径
+        def _attachment_abs_path(rel: str) -> str:  # type: ignore[misc]
+            return rel
+
+    lines: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for m in messages:
+        if m.msg_type != MsgType.TEXT.value:
+            continue
+        content = m.content if isinstance(m.content, dict) else {}
+        atts = content.get("attachments") or []
+        if not isinstance(atts, list):
+            continue
+        for a in atts:
+            if not isinstance(a, dict):
+                continue
+            rel = str(a.get("path") or "")
+            if not rel:
+                continue
+            abs_path = str(_attachment_abs_path(rel))
+            name = str(a.get("filename") or rel)
+            key = (name, abs_path)
+            if key in seen:
+                continue
+            seen.add(key)
+            lines.append(f"- {name}: `{abs_path}` (message #{m.id})")
+    return lines
+
+
+def _build_checkpoint_frame(summary_text: str, language: str, shadowed: list) -> str:
+    """拼接 checkpoint 帧：前言 + 摘要 + 附件清单。
+
+    附件清单无条件写入，不依赖 LLM 是否在摘要里提到——压缩后正文消失，
+    路径是模型重新读取早期文档的唯一线索。
+    """
+    frame = (f"{get_checkpoint_preamble(language)}\n\n"
+             f"{SUMMARY_OPEN_TAG}\n{summary_text}\n{SUMMARY_CLOSE_TAG}")
+    att_lines = _collect_attachment_lines(shadowed)
+    if att_lines:
+        title = ("## 已压缩区间的附件清单（需要原文时用 read_attachment 按路径重读）"
+                 if language == "zh" else
+                 "## Attachments in the compacted span (re-read via read_attachment)")
+        frame += "\n\n" + title + "\n" + "\n".join(att_lines)
+    return frame
+
+
+def compute_compacted_floor(
+    all_msgs: list, compacted_ids: set[int], prev_exceptions: list[int] | None = None,
+) -> tuple[int, list[int]]:
+    """计算压缩水位与例外集合（plan-527-2218）。
+
+    - 水位 ``floor`` = 已被遮蔽的最大消息 id。``id > floor`` 的消息一条都没被压缩，
+      可以从 SQL 下界直接查起，已压缩的整段历史不必读进内存。
+    - 例外 ``exceptions`` = 水位以下但**没有**被遮蔽的消息 id。主要是含图片附件的消息
+      （按 plan-166-767 不进压缩候选）：它们必须随下界查询一起带回，否则会从上下文
+      静默消失。数量取决于会话里的图片消息，通常个位数。
+
+    查询条件因此是 ``id > floor OR id IN (exceptions)``：大段已压缩历史整段跳过，
+    少量例外单独取回，兼顾正确性与成本。
+
+    早先实现用「未被遮蔽的最小 id - 1」，一旦最老消息恰好是图片消息，水位就永远停在
+    它前面、优化彻底失效（会话 464 正是如此）。改为最大遮蔽 id 后水位能正常推进。
+    """
+    if not compacted_ids:
+        return 0, []
+    floor = max(compacted_ids)
+    prev = {i for i in (prev_exceptions or []) if isinstance(i, int) and i <= floor}
+    cur = {m.id for m in all_msgs if m.id <= floor and m.id not in compacted_ids}
+    return floor, sorted(prev | cur)
+
+
 def _reasoning_cutoff(messages: list) -> int:
     """返回「旧 reasoning 分界线」索引：< cutoff 的 thinking 出站时会被剥离。
 
@@ -92,16 +171,14 @@ def estimate_effective_tokens(messages: list) -> int:
     thinking），使 post_compact_ratio 与保留区预算都反映真实占用。
 
     注意：保留窗口内的 thinking 仍全额计入（原样回传），只有更早的被排除。
+
+    plan-527-2218：改为统一委托 `token_counter.estimate_outbound_tokens_db`。
+    此前这里只剥离 thinking、不折算工具结果截断，与真实出站仍有系统性偏差；
+    现在压缩器、前置压缩判断、重建预算共用同一口径。
     """
-    cutoff = _reasoning_cutoff(messages)
-    total = 0
-    for i, m in enumerate(messages):
-        if i < cutoff and m.msg_type == MsgType.THINKING.value:
-            # 旧 reasoning：出站时被剥离，仅剩消息结构开销
-            total += 4
-            continue
-        total += estimate_message_tokens_from_model(m)
-    return total
+    from app.orchestration.token_counter import estimate_outbound_tokens_db
+
+    return estimate_outbound_tokens_db(messages)
 
 
 def select_compactable_range(messages: list, retain_tokens: int) -> tuple[int, int] | None:
@@ -394,8 +471,16 @@ async def compact_session(
         ctx = {}
     summarized_ids = set(ctx.get("summarized_ids") or [])
     compacted_ids = set(ctx.get("compacted_ids") or [])
+    # plan-527-2218: 压缩水位以下的区间已被遮蔽，SQL 层直接跳过（未被遮蔽的少量例外
+    # 单独带回）；limit=None 不设条数上限，保证最早那批未压缩消息一定进入压缩候选。
+    compacted_floor = int(ctx.get("compacted_floor") or 0)
+    compacted_exceptions = [
+        i for i in (ctx.get("compacted_exceptions") or []) if isinstance(i, int)
+    ]
 
-    all_msgs = await _fetch_main_messages(db, session.id, limit=2000)
+    all_msgs = await _fetch_main_messages(
+        db, session.id, limit=None,
+        min_id=compacted_floor, include_ids=compacted_exceptions)
     # 候选 = 未摘要未压缩、类型可压缩的主线程消息
     # plan-166-767: 跳过含图片附件的消息——图片一旦被遮蔽（compacted_ids）无法恢复，
     # 切回多模态模型后历史图片块将丢失。
@@ -533,8 +618,8 @@ async def compact_session(
     # 落库：SUMMARY 消息（checkpoint 帧）
     from app.services.message_service import create_message
 
-    frame_text = (f"{get_checkpoint_preamble(language)}\n\n"
-                  f"{SUMMARY_OPEN_TAG}\n{summary_text}\n{SUMMARY_CLOSE_TAG}")
+    # plan-527-2218: 帧内含附件清单，保证压缩后仍能按路径重读早期文档
+    frame_text = _build_checkpoint_frame(summary_text, language, shadowed_all)
     summary_msg = await create_message(
         db,
         session_id=session.id,
@@ -586,6 +671,12 @@ async def compact_session(
     new_ctx = dict(latest_ctx)
     new_ctx["compacted_ids"] = sorted(latest_compacted)
     new_ctx["compactions"] = latest_compactions
+    # plan-527-2218: 更新压缩水位与例外——下次重建与压缩只查 `id > floor` 的消息，
+    # 水位以下未被遮蔽的少量例外（图片消息）单独带回，不再全量读再内存过滤。
+    _floor, _exceptions = compute_compacted_floor(
+        all_msgs, latest_compacted, latest_ctx.get("compacted_exceptions"))
+    new_ctx["compacted_floor"] = _floor
+    new_ctx["compacted_exceptions"] = _exceptions
     # shared_context 写入经 WriteEngine 单写线程（无锁单写者；async db 不再持有写事务）
     from app.persistence.database import run_write_locked
 
@@ -682,7 +773,15 @@ async def emergency_compact_session(
     summarized_ids = set(ctx.get("summarized_ids") or [])
     compacted_ids = set(ctx.get("compacted_ids") or [])
 
-    all_msgs = await _fetch_main_messages(db, session.id, limit=2000)
+    # plan-527-2218: 与 pressure 路径同口径——水位以下跳过（例外单独带回）、不设条数上限，
+    # 保证最早那批未压缩消息也能被溢出压缩覆盖。
+    compacted_floor = int(ctx.get("compacted_floor") or 0)
+    compacted_exceptions = [
+        i for i in (ctx.get("compacted_exceptions") or []) if isinstance(i, int)
+    ]
+    all_msgs = await _fetch_main_messages(
+        db, session.id, limit=None,
+        min_id=compacted_floor, include_ids=compacted_exceptions)
     candidates = [
         m for m in all_msgs
         if m.id not in summarized_ids and m.id not in compacted_ids
@@ -711,6 +810,8 @@ async def emergency_compact_session(
         context_window=context_window, used_tokens=used_tokens,
         agent_id=agent_id, agent_name=agent_name, turn_id=turn_id,
         trigger="context-overflow", language=language,
+        # plan-527-2218: 传本次取数全集，提交时据此计算压缩水位
+        all_msgs=all_msgs,
     )
 
 
@@ -719,10 +820,13 @@ async def _commit_compaction(
     context_window: int, used_tokens: int | None,
     agent_id: int | None, agent_name: str, turn_id: int | None, trigger: str,
     language: str = "auto",
+    all_msgs: list | None = None,
 ) -> dict | None:
     """共享提交逻辑：摘要 → SUMMARY 消息 → compacted_ids → 广播。
 
     plan-19-82：language 参数控制摘要语言与 checkpoint 前言语言。
+    plan-527-2218：all_msgs 为本次压缩的取数全集，用于计算压缩水位；缺省时不更新
+    水位（宁可不优化，也不能把未被遮蔽的消息挡在下界之外）。
     """
     shadowed_ids = [m.id for m in shadowed]
     shadowed_tokens = messages_token_total(shadowed)
@@ -753,8 +857,8 @@ async def _commit_compaction(
 
     from app.services.message_service import create_message
 
-    frame_text = (f"{get_checkpoint_preamble(language)}\n\n"
-                  f"{SUMMARY_OPEN_TAG}\n{summary_text}\n{SUMMARY_CLOSE_TAG}")
+    # plan-527-2218: 与 pressure 路径共用同一帧构造（含附件清单）
+    frame_text = _build_checkpoint_frame(summary_text, language, shadowed)
     summary_msg = await create_message(
         db,
         session_id=session.id,
@@ -799,6 +903,12 @@ async def _commit_compaction(
     new_ctx = dict(latest_ctx)
     new_ctx["compacted_ids"] = sorted(latest_compacted)
     new_ctx["compactions"] = latest_compactions
+    # plan-527-2218: 与 pressure 路径同口径更新压缩水位与例外；调用方没给全集时保持原水位
+    if all_msgs is not None:
+        _floor, _exceptions = compute_compacted_floor(
+            all_msgs, latest_compacted, latest_ctx.get("compacted_exceptions"))
+        new_ctx["compacted_floor"] = _floor
+        new_ctx["compacted_exceptions"] = _exceptions
     # shared_context 写入经 WriteEngine 单写线程（无锁单写者；async db 不再持有写事务）
     from app.persistence.database import run_write_locked
 

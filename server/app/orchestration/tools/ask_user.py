@@ -124,6 +124,9 @@ class AskUserQuestionTool(Tool):
             "session_id": ctx.session_id,
             "agent_name": ctx.agent_name,
             "summary": f"{ctx.agent_name} 需要向你确认几个问题",
+            # plan-522-2209：提问与审批共用同一份身份标记，等待策略与日志口径保持单一来源
+            "is_subagent": bool(getattr(ctx, "is_subagent", False)),
+            "is_subsession": bool(getattr(ctx, "is_subsession", False)),
         }
         approved = await approval_manager.request(
             approval_id=approval_id, detail=detail,

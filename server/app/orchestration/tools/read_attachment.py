@@ -39,6 +39,7 @@ def _find_by_name(root: Path, rel: str) -> Path | None:
 
 class ReadAttachmentTool(Tool):
     name = "read_attachment"
+    concurrency_safe = True  # plan-522-2209：只读附件文件
     description = (
         "读取用户上传的附件文件内容。path 参数可直接使用用户消息附件中的"
         "服务器磁盘绝对路径（如 'C:/Users/xx/AppData/Local/chatcoder/uploads/1a2b3c/报告.docx'），"

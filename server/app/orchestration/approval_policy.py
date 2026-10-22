@@ -644,3 +644,19 @@ def decide(
         reason="" if verdict == VERDICT_ALLOW else info.risk_note,
         risk_note=info.risk_note,
     )
+
+
+def can_run_in_parallel(tool_name: str, args: dict, ctx, *, risk_level: str = "low") -> bool:
+    """plan-522-2209：该调用能否与其他并发安全的调用同时执行。
+
+    判定口径：按「动作类别 × 权限模式」矩阵**确定放行**才可并行。原因是审批是互斥交
+    互——ASK 会弹一张审批卡，批内多个调用同时问会一次冒出多张卡，用户既分不清先后、
+    也无法判断批哪一张；DENY 则本就不执行，没有并行的意义。两者都必须独占串行。
+
+    只做静态裁决（不查 exec_policy 规则）：调用方需要同步判定，规则取用要 db 会话。
+    用户「始终允许」规则只会让判定更宽松，这里保守地按矩阵判——最多少并行几个调用。
+    """
+    approval_mode = normalize_approval_mode(getattr(ctx, "approval_mode", None))
+    info = classify(tool_name, args or {}, ctx, risk_level=risk_level)
+    verdict = _MATRIX.get(info.action, {}).get(approval_mode, VERDICT_ASK)
+    return verdict == VERDICT_ALLOW

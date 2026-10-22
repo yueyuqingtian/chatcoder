@@ -29,6 +29,8 @@ _STATUS_TEXT: dict[str, str] = {
     "done": "已完成",
     "failed": "失败",
     "interrupted": "已中断",
+    # plan-20261022-release-ci：计划模式的子会话出完计划停在这里，需要用户在该子会话里确认后才会执行
+    "awaiting_confirmation": "已出计划、等待用户在该子会话中确认",
 }
 
 
@@ -113,10 +115,12 @@ async def run_subsession_tool(
                 context=str(args.get("context") or ""),
                 mode=args.get("mode") or None,
                 purpose=str(args.get("purpose") or ""),
+                dispatched=True,
             )
             created = (
                 f"已创建子会话 #{sid}「{args.get('title') or ''}」，任务已下发。\n"
-                "它会显示在用户左侧会话列表中；完成后结果会自动回到你的上下文，"
+                "它会显示在用户左侧会话列表中；完成后结果会自动回到你的上下文"
+                "（你已收工时，派出去的子会话全部结束后会自动叫醒你汇总，不必轮询等待），"
                 "需要更细的进展用 get_subsession_progress 查询。"
                 f"请在下一次 todo_write 里把对应步骤的 owner 设为 #{sid}，任务卡才能显示它的进度。"
                 "注意：不要自己再做一遍这项任务。"
@@ -149,7 +153,7 @@ async def run_subsession_tool(
                     "它会立刻带着这条答复继续执行。"
                 )
             res = await subsession_service.send_message(
-                db, target, str(args.get("message") or ""),
+                db, target, str(args.get("message") or ""), dispatched=True,
             )
             how = "已注入到它当前的执行" if res.get("delivered") == "injected" else "已作为新一轮任务下发"
             tail = "（该 question_id 已超时或不存在，本条按普通消息送达）" if qid else ""

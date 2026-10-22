@@ -1210,8 +1210,9 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .tc-plain { margin: 0; font-family: var(--font-mono); font-size: 11px; color: var(--text-2); white-space: pre-wrap; word-break: break-word; line-height: 1.4; }
 /* v7: 运行中命令行/工具输出的实时区——略浅前景 + 首帧上边距，避免与图标行贴死 */
 .tc-live { color: var(--text-3); padding-top: 2px; }
-/* plan-334-1661 S2: 超长输出被尾部截断时的提示行（说明省略量，复制仍为完整内容） */
-.tc-clamp-hint { margin: 0 0 2px; font-size: 10px; color: var(--text-3); font-family: var(--font-mono); }
+/* plan-334-1661 S2: 尾部截断提示行已由 plan-522-2209 R10 的 ClampBlock 接管
+   （统一标注「显示 前 N 行 + 后 M 行 / 共 T 行」，样式见 toolcard.css 的 .tc-clamp*），
+   原 .tc-clamp-hint 规则已无引用，随之移除。 */
 /* v2.2 (对齐 zcode 3.14.2): grep 命中行可点击跳转 */
 .tc-grep-hits { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px dashed var(--border); }
 .tc-grep-hit { display: flex; align-items: center; gap: 6px; padding: 3px 6px; border-radius: var(--r-sm); background: transparent; border: none; cursor: pointer; text-align: left; font-size: 11px; font-family: var(--font-mono); transition: background var(--dur-fast); }
@@ -2265,9 +2266,6 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 /* plan-20261018-turn-changes：补稳定行高，与 .usage-section-title 同档，
    保证同一行里的 14px 标题与 11px 副标题基线一致、图标与文字居中对齐 */
 .usage-heatmap-title { font-size: 14px; font-weight: 600; line-height: 1.4; color: var(--text-1); }
-.usage-seg-toggle { display: inline-flex; gap: 2px; background: var(--bg-hover); border-radius: var(--r-md); padding: 2px; }
-.usage-seg-btn { border: none; background: transparent; color: var(--text-2); font-size: 12px; padding: 4px 12px; border-radius: var(--r-md); cursor: pointer; transition: all var(--dur-fast); }
-.usage-seg-btn.active { background: var(--bg-elevated); color: var(--text-1); font-weight: 500; box-shadow: inset 0 0 0 1px var(--border); }
 .usage-heatmap-months { position: relative; height: 16px; }
 .usage-hm-month { position: absolute; top: 0; font-size: 10px; line-height: 16px; color: var(--text-3); white-space: nowrap; }
 /* plan-20261021-usage-heatmap-fill：格子按容器宽度等分铺满整行，不再固定 12px
@@ -2575,6 +2573,11 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   /* plan-238-1188: 聚焦态中性化——不再出现浅蓝品牌色边框 */
   border-color: var(--text-2);
 }
+/* 序号的 11px 小字在 20px 行盒里垂直居中，与输入框单行文本（同为 20px 行高）对齐；
+   多行时序号仍停在第一行，不会随文本框高度漂到中间 */
+.question-wizard-custom-row .question-wizard-opt-num {
+  line-height: 20px;
+}
 .question-wizard-custom-input {
   flex: 1;
   min-width: 0;
@@ -2585,7 +2588,10 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   font-size: 12.5px;
   line-height: 20px;
   color: var(--text-1);
-  /* 多行自定义回答：随内容增高（JS 设置高度），超过上限后内部滚动，不撑破卡片 */
+  /* 多行自定义回答：高度由内容驱动——输入增长、切题清空回落、返回上一题恢复多行答案都自动完成，
+     不再依赖 JS 测高（内联 height 会失去同步）。超过 max-height 后内部滚动，不撑破卡片。
+     JS 侧仅在浏览器不支持 field-sizing 时兜底测高（见 ComposerCore 的 supportsFieldSizing）。 */
+  field-sizing: content;
   display: block;
   margin: 0;
   padding: 0;
@@ -2826,6 +2832,17 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   color: var(--text-1);
 }
 .approval-head-action { font-size: 13px; color: var(--text-2); }
+/* plan-522-2209：来源标注（仅在审批来自子会话时出现）——标题行末尾一行小字。
+   单行省略：窄宽度下先牺牲会话名，右侧「另有 N 项」是决策信息，必须完整保留。 */
+.approval-head-source {
+  font-size: 11.5px;
+  color: var(--text-3);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+}
 /* 排队提示靠右，不抢标题行的工具名（plan-282-1530：多个审批依次处理时告知还有几项） */
 .approval-head-queue { margin-left: auto; font-size: 12px; color: var(--text-3); white-space: nowrap; }
 .approval-outside-hint {
@@ -4875,6 +4892,69 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 /* 流式尾部（StreamingText）首行间距与消息流内行间距一致：
    上方 turn 的 padding-bottom(12px)+margin(4px)=16px，扣回 8px 后净间距=--flow-gap */
 .turn-flow.streaming-tail { margin-top: calc(-1 * var(--flow-gap)); }
+
+/* plan-511-2182：流式尾部状态槽位。
+   「等待响应」与「正在思考」放进同一个 grid 单元叠放，切换只做透明度、不卸载节点：
+   槽位在任何时刻都至少被一行撑住，高度恒为一行。这样两次提交之间不会出现
+   「状态行先消失（高度少一行）→ 思考行再出现（高度多一行）」的中间窗口，
+   虚拟列表测不到尾部高度变化，贴底跟随也就不会二次修正、消息流不再抖动。 */
+.stream-state-slot {
+  display: grid;
+  grid-template-rows: 1fr;
+  min-width: 0;
+  margin-bottom: 0;
+  transition:
+    grid-template-rows var(--dur-3) var(--ease-emphasized-decel),
+    margin-bottom var(--dur-3) var(--ease-emphasized-decel);
+}
+/* 有正文且无思考：槽位折叠为 0 行；同时把它在 flex gap 中占的那一份间距抵消掉，
+   避免正文上方凭空多出一段空行 */
+.stream-state-slot[data-empty="true"] {
+  grid-template-rows: 0fr;
+  margin-bottom: calc(var(--flow-gap) * -1);
+}
+/* 两层共用同一个网格单元（grid-area 1/1），隐藏层仍占一行，槽位高度因此稳定 */
+.stream-state-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+}
+.stream-state-layer {
+  grid-area: 1 / 1;
+  min-width: 0;
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition:
+    opacity var(--dur-2) var(--ease-standard),
+    visibility 0s linear 0s;
+}
+.stream-state-layer[data-show="false"] {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  /* 退场先淡出，透明度过渡结束后才隐藏，避免淡出途中被瞬间截断 */
+  transition:
+    opacity var(--dur-2) var(--ease-standard),
+    visibility 0s linear var(--dur-2);
+}
+/* 槽位内思考行只做透明度：motion.css 的纵向入场位移会让两层交叉过渡时出现轻微上跳，
+   这里用更高的特异性（.stream-state-slot 前缀，0,3,0 > 0,2,0）在 global.css 中压掉它，
+   不依赖加载顺序、也不使用 !important */
+.stream-state-slot .tc-collapse > .tc-collapse-inner { transform: none; }
+/* plan-511-2182：隐藏层仍在格内占位（这正是槽位高度稳定的原因），但它不参与绘制，
+   内部的常驻循环动画（呼吸点 / 状态行 pulse）也就不该继续跑——与 motion.css 对折叠态
+   「不可见即停动画」的口径一致，避免流式期间白跑合成、和产字渲染抢帧预算。 */
+.stream-state-layer[data-show="false"] * { animation: none !important; }
+/* plan-511-2182：槽位内的状态行必须与思考行**等高**，否则叠放后仍是「矮行 → 高行」的高度变化。
+   两者行盒并不天然相同：状态行字号 12px（12 × --chat-line-height = 26.4px），
+   思考行字号 --fs-md 13px（13 × --chat-line-height = 28.6px），差 2.2px。
+   这里按 .tc-row 同一公式（--fs-md × --chat-line-height）给状态行补 min-height 对齐，
+   只作用于槽位内部，正文下方那条尾部状态行不受影响。 */
+.stream-state-slot .turn-status-line {
+  min-height: calc(var(--fs-md, 13px) * var(--chat-line-height, 2.2));
+}
 
 /* 问题2: 文本块首末块级元素 margin 归零——间距只由 --flow-gap 控制，
    消除"文本块↔工具/思考块/文本块"与"工具↔工具"之间的视觉差异

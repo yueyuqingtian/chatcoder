@@ -16,6 +16,7 @@ _ALLOWED_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 
 class ViewImageTool(Tool):
     name = "view_image"
+    concurrency_safe = True  # plan-522-2209：只读图片文件
     description = "View an image file. Returns image metadata (size, format, dimensions)."
     risk_level = "low"
 

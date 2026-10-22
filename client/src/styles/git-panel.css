@@ -408,6 +408,47 @@
   color: var(--gp-muted);
 }
 
+/* ── 同步进度行（plan-522-2209）─────────────────────────────
+   常驻一行：阶段文案 + 已等待秒数 + 取消。纯色底 + 1px 描边（不用半透明底，
+   否则下方变更列表会透上来把整块弄脏）；与提示条之间留 8px，避免两条紧贴。 */
+.gp-sync-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  min-height: 32px;
+  margin: 8px 12px 0;
+  padding: 0 6px 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-panel);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--gp-muted);
+}
+/* 旋转指示占固定槽位：与右侧文字之间用 gap 分隔，换图标不改变行高与缩进 */
+.gp-sync-spin {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  color: var(--accent);
+}
+.gp-sync-text {
+  flex: 1;
+  min-width: 0;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+}
+/* 取消是本地动作、不具破坏性，留给 ghost；与文案之间靠 gap(8px) 分隔 */
+.gp-sync-cancel {
+  flex: 0 0 auto;
+  color: var(--gp-muted);
+}
+.gp-sync-cancel:hover { color: var(--text-1); }
+
 /* ── 视图切换：不撑满，按内容宽度左对齐 ─────────────────── */
 .gp-views {
   flex-shrink: 0;

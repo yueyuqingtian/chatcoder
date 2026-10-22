@@ -182,3 +182,35 @@ async def test_provider_filter_unknown_returns_empty_but_ok(db):
     # 无 provider 过滤的旧调用签名仍然兼容（回归保护）
     res2 = await usage_stats(start=None, end=None, days=30, db=db)
     assert res2["total"]["calls"] == 1
+
+
+async def test_single_day_returns_hourly_and_range(db):
+    """plan-20261022-release-ci：单日区间按小时汇总（24 档补齐），多日区间不带小时数据；两者都带区间起止。"""
+    # 取本地今天 10:20 / 10:40 / 15:05 三次调用（created_at 存 UTC naive）
+    local_today = datetime.now().astimezone().replace(hour=10, minute=20, second=0, microsecond=0)
+
+    def utc_naive(local_dt):
+        return local_dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+    _add(db, model_id=None, model_name="a", provider_name="p", prompt=100, completion=10,
+         created_at=utc_naive(local_today))
+    _add(db, model_id=None, model_name="a", provider_name="p", prompt=50, completion=5,
+         created_at=utc_naive(local_today + timedelta(minutes=20)))
+    _add(db, model_id=None, model_name="b", provider_name="p", prompt=7, completion=3,
+         created_at=utc_naive(local_today.replace(hour=15, minute=5)))
+    await db.commit()
+
+    today = local_today.date().isoformat()
+    res = await usage_stats(start=None, end=None, days=1, db=db)
+    assert res["range"] == {"start": today, "end": today}
+    assert len(res["hourly"]) == 24
+    assert res["hourly"][10] == {"hour": 10, "tokens": 165, "calls": 2}
+    assert res["hourly"][15] == {"hour": 15, "tokens": 10, "calls": 1}
+    assert sum(h["calls"] for h in res["hourly"]) == 3
+    by_model = {(x["hour"], x["display_name"]): x["tokens"] for x in res["hourly_by_model"]}
+    assert by_model == {(10, "p/a"): 165, (15, "p/b"): 10}
+
+    multi = await usage_stats(start=None, end=None, days=7, db=db)
+    assert multi["hourly"] == [] and multi["hourly_by_model"] == []
+    assert multi["range"]["end"] == today
+    assert multi["range"]["start"] == (local_today.date() - timedelta(days=6)).isoformat()

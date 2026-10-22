@@ -381,6 +381,11 @@ export interface SessionOut {
   /** 会话有后台执行中的工作流（程序 running）：与 has_running 并列，工作流在跑时本会话可能已没有运行中的 turn */
   workflow_running?: boolean;
   has_interrupted_turn?: boolean;
+  /** plan-522-2209：该会话有停在「计划待确认」的 turn（awaiting_confirmation 已落库，重启后仍在）。
+   *  侧栏等待图标要跨会话展示，前端 turns 只覆盖当前会话，因此由后端提供。 */
+  plan_awaiting?: boolean;
+  /** plan-522-2209：计划待确认的 turn id（最早一条），供等待态定位到具体方案 */
+  plan_awaiting_turn_id?: number | null;
   /** 侧栏工作流标记：attention（待你决定）/ paused / running / draft；无进行中的工作流时为空 */
   workflow_state?: "attention" | "paused" | "running" | "draft" | null;
   last_activity_at?: string | null;

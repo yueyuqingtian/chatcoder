@@ -1,0 +1,180 @@
+# 发布流程：推送 v* tag → 在 GitHub 的 Windows 机器上完整打包 → 自检通过后发布到 GitHub Releases。
+#
+# 打包步骤与本地完全相同（都走 build-release.ps1 -CI），产物三件套（安装包 / blockmap / latest.yml）
+# 上传为 Release 资产；latest.yml 已内置本版本更新说明（取自 CHANGELOG.md 的 ## v<版本> 区块）。
+# 自建更新源由服务器定时直接从 GitHub 拉取（tools/server-sync-updates.sh），这里不需要任何服务器凭据。
+#
+# 发版：先把 package.json 的 version 与 CHANGELOG.md 写好并提交，然后
+#   git tag v<version> && git push origin v<version>
+# 手动重跑：Actions → 发布安装包 → Run workflow，填已有 tag 重新打包发布；不填 tag 只打包不发布（产物在本次运行的 Artifacts 里）。
+name: 发布安装包
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要（重新）打包发布的 tag，如 v0.9.1；留空 = 只打包当前分支、不发布"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+env:
+  # 中文日志 / requirements 注释按 UTF-8 处理（Windows 机器默认代码页不是 UTF-8）
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+  # 仓库 .npmrc 指向国内镜像；GitHub 机器在海外，统一改走官方源（锁文件里的镜像地址按官方源改写）
+  NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+  NPM_CONFIG_REPLACE_REGISTRY_HOST: always
+  NPM_CONFIG_FUND: "false"
+  NPM_CONFIG_AUDIT: "false"
+
+jobs:
+  build:
+    name: 打包 Windows 安装包
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: 确定版本与发布方式
+        id: meta
+        run: |
+          $version = (Get-Content package.json -Raw -Encoding UTF8 | ConvertFrom-Json).version
+          $tag = "${{ inputs.tag }}"
+          if (-not $tag -and "${{ github.ref_type }}" -eq "tag") { $tag = "${{ github.ref_name }}" }
+          if ($tag -and $tag -ne "v$version") {
+            throw "tag $tag 与 package.json 的版本 $version 不一致：请先提交版本号，再打 v$version 的 tag"
+          }
+          $changelog = Get-Content CHANGELOG.md -Raw -Encoding UTF8
+          if ($tag -and $changelog -notmatch "(?m)^## v$([regex]::Escape($version))\s*$") {
+            throw "CHANGELOG.md 缺少 ## v$version 区块，发布前请先写好本版本的更新内容"
+          }
+          $outDir = (Get-Content package.json -Raw -Encoding UTF8 | ConvertFrom-Json).build.directories.output
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "publish=$([bool]$tag)".ToLower() >> $env:GITHUB_OUTPUT
+          "prerelease=$($version.Contains('-'))".ToLower() >> $env:GITHUB_OUTPUT
+          "out_dir=$outDir" >> $env:GITHUB_OUTPUT
+          Write-Host "版本 v$version，tag：$(if ($tag) { $tag } else { '（无，只打包不发布）' })"
+
+      - name: 改用官方 npm 源
+        run: Set-Content -Path .npmrc -Value "registry=https://registry.npmjs.org/" -Encoding utf8
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            client/package-lock.json
+
+      - name: 安装 Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: server/requirements-build.txt
+
+      - name: 缓存 Electron 与打包工具下载
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\electron\Cache
+            ~\AppData\Local\electron-builder\Cache
+          key: electron-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: electron-${{ runner.os }}-
+
+      - name: 缓存内置 Chromium
+        uses: actions/cache@v4
+        with:
+          path: server/vendor/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('server/requirements-build.txt') }}
+
+      - name: 安装桌面壳依赖
+        run: npm ci
+
+      - name: 安装前端依赖
+        working-directory: client
+        run: npm ci
+
+      - name: 安装后端打包依赖
+        run: |
+          python -m venv server/.venv
+          server/.venv/Scripts/python.exe -m pip install --upgrade pip
+          server/.venv/Scripts/python.exe -m pip install -r server/requirements-build.txt
+
+      - name: 写入后端默认配置（可选）
+        env:
+          SERVER_ENV: ${{ secrets.SERVER_ENV }}
+        run: |
+          # 仓库 Secret SERVER_ENV = 本地 server/.env 的全文；随安装包分发（resources/server/chatcoder-server/.env）。
+          # 未配置时安装包不带默认模型，用户在设置里添加自己的模型即可正常使用。
+          if ($env:SERVER_ENV) {
+            [IO.File]::WriteAllText("server/.env", $env:SERVER_ENV, (New-Object Text.UTF8Encoding $false))
+            Write-Host "已写入 server/.env"
+          } else {
+            Write-Host "未配置 SERVER_ENV，安装包不内置默认模型配置"
+          }
+
+      - name: 打包（与本地 build-release.ps1 同一流程）
+        run: ./build-release.ps1 -CI
+
+      - name: 发布到 GitHub Releases
+        if: steps.meta.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          OUT_DIR: ${{ steps.meta.outputs.out_dir }}
+          PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+        run: |
+          $exe = "chatcoder-Setup-$env:VERSION.exe"
+          $assets = @("$env:OUT_DIR/$exe", "$env:OUT_DIR/$exe.blockmap", "$env:OUT_DIR/latest.yml")
+          $notes = "$env:OUT_DIR/release-notes.md"
+          $pre = if ($env:PRERELEASE -eq "true") { @("--prerelease") } else { @() }
+          gh release view $env:TAG *> $null
+          if ($LASTEXITCODE -eq 0) {
+            # 重跑同一个 tag：覆盖资产与说明；上次失败留下的草稿一并公开
+            gh release upload $env:TAG @assets --clobber
+            if ($LASTEXITCODE -ne 0) { throw "上传资产失败" }
+            gh release edit $env:TAG --title $env:TAG --notes-file $notes --draft=false @pre
+            if ($LASTEXITCODE -ne 0) { throw "更新 Release 说明失败" }
+          } else {
+            # 先建草稿、传完三件套再公开：公开的那一刻资产就是齐的，自建源的定时同步不会抓到半成品
+            gh release create $env:TAG @assets --title $env:TAG --notes-file $notes --draft @pre
+            if ($LASTEXITCODE -ne 0) { throw "创建 Release 失败" }
+            $latest = if ($env:PRERELEASE -eq "true") { @() } else { @("--latest") }
+            gh release edit $env:TAG --draft=false @latest
+            if ($LASTEXITCODE -ne 0) { throw "公开 Release 失败" }
+          }
+          $url = "https://github.com/${{ github.repository }}/releases/tag/$env:TAG"
+          "### 已发布 $env:TAG`n`n- Release：$url`n- 自建更新源会在 5 分钟内从 GitHub 拉取本版本" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "发布完成：$url"
+
+      - name: 上传打包产物（只打包不发布时）
+        if: steps.meta.outputs.publish != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: chatcoder-${{ steps.meta.outputs.version }}-win-x64
+          path: |
+            ${{ steps.meta.outputs.out_dir }}/chatcoder-Setup-${{ steps.meta.outputs.version }}.exe
+            ${{ steps.meta.outputs.out_dir }}/chatcoder-Setup-${{ steps.meta.outputs.version }}.exe.blockmap
+            ${{ steps.meta.outputs.out_dir }}/latest.yml
+          retention-days: 7
+          if-no-files-found: error

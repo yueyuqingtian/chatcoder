@@ -32,7 +32,10 @@ svg.ic-spinner .ic-spinner-arc { transform-box: view-box; transform-origin: 12px
   background: var(--surface-inset); border: 1px solid var(--surface-inset-border);
   max-height: 340px; overflow: auto;
 }
-.tc-output > .tc-plain, .tc-output > .tc-error-output, .tc-output > .tc-clamp-hint { padding: 8px 12px; }
+/* plan-522-2209 R10：输出文本现在由 ClampBlock 包裹（多了一层 .tc-clamp），
+   内边距必须挂到它上面——原先直接挂在 > .tc-plain 上，多一层后选择器不再命中，
+   输出会顶到卡片左缘。 */
+.tc-output > .tc-plain, .tc-output > .tc-error-output, .tc-output > .tc-clamp { padding: 8px 12px; }
 .tc-output .tc-plain { font-size: 12px; line-height: 1.6; }
 /* plan-20261016-ux（问题 4）：展开区没有任何内容时的提示卡——与输出区同一卡片，只放一行说明，
    不再出现上下边框贴在一起的「一根线」 */
@@ -73,6 +76,9 @@ svg.ic-spinner .ic-spinner-arc { transform-box: view-box; transform-origin: 12px
   color: var(--text-3); opacity: 0.7; user-select: none; font-variant-numeric: tabular-nums;
 }
 .cv-code { flex: 1; white-space: pre; padding-right: 16px; color: var(--text-1); background: none; }
+/* plan-522-2209 R10：代码视图的文字交给 ClampBlock 折叠，折叠行落在 .cv-body 里。
+   .cv-body 是 max-content 容器且无横向内边距，折叠行需要自己留出呼吸空间，否则会顶到行号槽上。 */
+.cv-body .tc-clamp-fold { margin: 4px 12px; width: auto; }
 .cv-line:hover { background: color-mix(in oklab, var(--text-1) 4%, transparent); }
 .tc-diff { margin: 0; padding: 6px 0; min-width: max-content; }
 .tc-diff-line .cv-ln { flex-basis: 3ch; font-weight: 600; }

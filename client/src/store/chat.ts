@@ -14,6 +14,8 @@ import type { ServerEventName } from "@chatcoder/shared/events";
 import { useWorkflowStore } from "./workflow";
 import { useBgTaskStore } from "./bgTasks";
 import { handOffThinkingExpand } from "./flowExpand";
+// plan-522-2209：跨会话待处理交互轻量索引（仅存摘要）——侧栏等待图标的依据之一
+import { pendingActions, kindOfDetail } from "./pendingInteractions";
 import type { CompactSummaryPayload } from "@chatcoder/shared/events";
 
 /** v7: 全局最近选择思考深度的 localStorage 持久化 key——重启后仍能恢复上次选择 */
@@ -609,6 +611,8 @@ let _drainingQueue = false;
 let _wsUnsub: (() => void) | null = null;
 /** v37: 全局通道订阅的清理函数（与 App 生命周期绑定） */
 let _globalWsUnsub: (() => void) | null = null;
+/** plan-522-2209: 全局通道「连上 / 重连上」回调的清理函数——用于重建跨会话等待索引 */
+let _globalOpenUnsub: (() => void) | null = null;
 let _workflowRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** 工作流状态变化：防抖刷新侧栏的工作流标记；只合并 workflow_state，不覆盖其它运行态字段 */
@@ -812,7 +816,8 @@ function countPendingSubagents(meta: Record<number, SubagentMeta>): number {
 
 /** 全局通道事件 → 子会话行运行态（置位 / 摘除）；返回 null 表示事件与运行态无关。 */
 function subsessionRunningOf(event: string, p: Record<string, unknown>): boolean | null {
-  if (event === "turn.started" || event === "subagent.wakeup") return true;
+  // session.wakeup：子会话里的后台命令跑完也会经邮箱唤醒它自己
+  if (event === "turn.started" || event === "subagent.wakeup" || event === "session.wakeup") return true;
   if (event === "turn.updated") {
     if (p.status === "running") return true;
     // 中断没有单独转发到全局通道的事件，靠 turn.updated 的终态摘除转圈
@@ -3123,19 +3128,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
         });
         break;
       }
-      case "subagent.wakeup": {
+      case "subagent.wakeup":
+      case "session.wakeup": {
         // v39: 子代理完成唤醒——服务端已创建新一轮（完成报告随该轮送达主代理）。
         // v44 修复：这里立即接管运行态，而不是只等随后的 turn.started——
         // 唤醒轮创建与 start_turn 之间存在延迟窗口，期间若无运行标记，
         // 左侧转圈会短暂/永久消失（turn.started 一旦丢失便再无恢复事件）。
+        // plan-20261022-release-ci：邮箱唤醒（session.wakeup：子会话提问 / 派出的子会话全部结束 / 后台命令完成）
+        // 此前前端完全没处理；两类唤醒同时把先于轮次广播的唤醒消息归入新轮（同 workflow.wakeup），
+        // 否则唤醒期间它是一条没有归属的孤儿消息，上一轮的操作行、计时条停在中间。
         const wakeSid = Number((payload as { session_id?: unknown }).session_id ?? 0);
         const wakeTurnId = Number((payload as { turn_id?: unknown }).turn_id ?? 0) || null;
         if (wakeSid) {
           set((s) => ({
             ...(wakeSid === s.currentSessionId
-              ? { isRunning: true, runningTurnId: s.runningTurnId ?? wakeTurnId }
+              ? {
+                  isRunning: true,
+                  runningTurnId: s.runningTurnId ?? wakeTurnId,
+                  ...(wakeTurnId != null ? { messages: adoptWakeupTurn(s.messages, wakeTurnId) } : {}),
+                }
               : {}),
-            sessions: s.sessions.map((x) => (x.id === wakeSid ? setSessionRunning(x, true) : x)),
+            ...patchSession(s, wakeSid, (x) => setSessionRunning(x, true)),
           }));
         }
         break;
@@ -3824,6 +3837,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   connectGlobalEvents: () => {
     if (_globalWsUnsub) return;
+    // plan-522-2209：全局事件是一次性的——断线重连、页面重载都会丢。连上（含重连）后拉一次
+    // 后端未决清单重建索引，否则「有东西在等我」会因为一次网络抖动永久消失。
+    // 先注册再 connect：onOpen 在当前已连上时会立刻回调，顺序反过来会漏掉首次连接。
+    _globalOpenUnsub = globalWsClient.onOpen(() => {
+      void api.getPendingApprovals()
+        .then((res) => {
+          pendingActions.reset();
+          for (const item of res.items) {
+            const itemSid = Number(item.session_id ?? 0);
+            if (!itemSid || !item.approval_id) continue;
+            pendingActions.noteRequest(
+              itemSid, item.approval_id,
+              item.kind === "question" ? "question" : "approval",
+              (item.detail || {}) as Record<string, unknown>,
+            );
+          }
+        })
+        .catch(() => { /* 拉取失败不阻塞界面：后续到达的事件仍会补齐索引 */ });
+    });
     globalWsClient.connect();
     _globalWsUnsub = globalWsClient.on((ev) => {
       const p = ev.payload as Record<string, unknown>;
@@ -3837,6 +3869,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       const sid = Number(p.session_id ?? 0);
       if (!sid) return;
+      // plan-522-2209：审批 / 提问到达与答复的跨会话索引。
+      // 全局通道早就在转发这两个事件（_GLOBAL_FORWARD_EVENTS），但侧栏从无消费者——
+      // 这就是「非当前会话在等你，左栏却什么都不显示」的根因。
+      // 只入轻量摘要（会话 / approvalId / 类型 / 到达时间），detail 不进跨会话内存。
+      if (ev.event === "approval.request") {
+        const approvalId = String(p.approval_id ?? "");
+        const detail = (p.detail || {}) as Record<string, unknown>;
+        pendingActions.noteRequest(sid, approvalId, kindOfDetail(detail), detail);
+        return;
+      }
+      if (ev.event === "approval.response") {
+        pendingActions.clearRequest(sid, String(p.approval_id ?? ""));
+        return;
+      }
       // plan-156-620：新建执行子会话（任意会话视图下都要即时出现在左栏父会话下方）
       if (ev.event === "subsession.created") {
         void get().loadSubsessionIndex();
@@ -3880,6 +3926,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return;
       }
       const event = ev.event as ServerEventName;
+      // plan-522-2209：计划待确认（awaiting_confirmation）的实时同步——侧栏等待图标跨会话的数据源。
+      // 不 return：回到 running 时下面还有「置位运行标记」分支要照常执行。
+      // 子会话也会出计划，patchSession 会落到子会话桶，两处都覆盖。
+      if (event === "turn.updated") {
+        const status = String(p.status ?? "");
+        const turnId = Number(p.turn_id ?? 0);
+        const planPatch = status === "awaiting_confirmation"
+          ? { plan_awaiting: true, ...(turnId > 0 ? { plan_awaiting_turn_id: turnId } : {}) }
+          : status === "running" || status === "completed" || status === "failed"
+            || status === "interrupted" || status === "cancelled"
+            ? { plan_awaiting: false, plan_awaiting_turn_id: null }
+            : null;
+        if (planPatch) {
+          set((s) => patchSession(s, sid, (x) => ({ ...x, ...planPatch })));
+        }
+      }
       if (event === "session.completed") {
         const ts = typeof p.last_activity_at === "string" ? p.last_activity_at : null;
         // v44 修复（左侧转圈在子代理流程后消失）：与会话级通道同口径——后台子代理
@@ -3903,7 +3965,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // （subagent.wakeup）/ 子代理开始运行（subagent.pending>0）/ turn 回到 running
       // 时同步置位运行标记。只置位、不清除：摘除统一由 session.completed 权威事件
       // 负责（含服务端空闲兜底补发），避免多条通道对同一会话互相覆盖。
-      if (event === "turn.started" || event === "subagent.wakeup"
+      if (event === "turn.started" || event === "subagent.wakeup" || event === "session.wakeup"
           || (event === "turn.updated" && p.status === "running")
           || (event === "subagent.pending" && Number(p.pending ?? 0) > 0)) {
         set((s) => {
@@ -3955,6 +4017,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (_globalWsUnsub) {
       _globalWsUnsub();
       _globalWsUnsub = null;
+    }
+    // plan-522-2209：一并解绑「连上即重建索引」的回调，避免重连时用旧闭包重复拉取
+    if (_globalOpenUnsub) {
+      _globalOpenUnsub();
+      _globalOpenUnsub = null;
     }
     globalWsClient.disconnect();
   },

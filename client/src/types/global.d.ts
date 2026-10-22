@@ -65,7 +65,7 @@ declare global {
       getUpdateState?: () => Promise<unknown>;
       downloadUpdate?: () => Promise<unknown>;
       installUpdate?: () => Promise<boolean>;
-      /** plan-20261022-update-route：取消下载（回到 available、断点保留）/ 切回自建源重新开始 */
+      /** plan-20261022-update-route：取消下载（回到 available、断点保留）/ 切回第一优先级（镜像）重新开始 */
       cancelUpdateDownload?: () => Promise<unknown>;
       switchUpdateSourceToPrimary?: () => Promise<unknown>;
       /** plan-20261021-usage-update：更新设置（autoDownload = 发现新版本自动静默下载，默认开） */

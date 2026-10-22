@@ -5,8 +5,9 @@
  * 换源只往后转、不回头，回退到 GitHub 后再也回不到自建源；4 个并发分块被同一次抖动同时打断，
  * 共用的失败计数瞬间凑满就换源。这里把「用哪个源」收拢成一个状态机，由下载器的所有 worker 共享：
  *
- *  - 优先级固定：自建源 > 镜像 > GitHub，不测速、不重排；
- *  - 切换序列：P → M → P → M → G → G …（两轮自建 / 镜像都失败才进 GitHub），每次切换前按 2s、4s、8s… 退避；
+ *  - 优先级固定：镜像 > 自建源 > GitHub，不测速、不重排（镜像实测更快，见 plan-20261022-update-route）；
+ *  - 镜像线路固定单连接：gh-proxy 对多连接并发会主动降速；
+ *  - 切换序列：M → P → M → P → G → G …（两轮镜像 / 自建源都失败才进 GitHub），每次切换前按 2s、4s、8s… 退避；
  *  - 同一时刻只试一个源：退避期间所有 worker 都停在闸门上；切到一个还没连通的源时只放一个请求过去探路；
  *  - 只认「源故障」：某个请求失败时，若同一源在它发出之后还有别的连接收到过数据，只算单块失败，同源重试；
  *  - 自动回切：不在最高优先级源上时，由下载器定时探测更高优先级的源，通了就 promote 回去。
@@ -14,8 +15,10 @@
  * 纯逻辑，不发请求、不依赖 electron；时间与随机数可注入，方便单测。
  */
 
-const TIER_LABEL = { primary: "快速通道", mirror: "镜像", github: "GitHub" };
-const TIER_RANK = { primary: 0, mirror: 1, github: 2 };
+const TIER_LABEL = { mirror: "镜像", primary: "自建源", github: "GitHub" };
+const TIER_RANK = { mirror: 0, primary: 1, github: 2 };
+/** 各层级默认的并发上限：镜像只允许一个连接，避免 gh-proxy 因并发降速 */
+const TIER_CONCURRENCY = { mirror: 1 };
 
 function hostOf(url) {
   try { return new URL(url).host; } catch { return String(url).slice(0, 40); }
@@ -36,6 +39,10 @@ function normalizeSources(urls) {
   return list.map((o, id) => ({
     id, url: o.url, tier: o.tier, label: o.label || TIER_LABEL[o.tier], host: hostOf(o.url),
     dead: false, noRange: false, reason: "", lastOkAt: 0,
+    // 单源在途请求上限：镜像默认 1（多连接并发会被 gh-proxy 降速），其余不限制
+    maxConcurrency: Number.isFinite(o.maxConcurrency)
+      ? Math.max(1, Math.floor(o.maxConcurrency))
+      : (TIER_CONCURRENCY[o.tier] || Infinity),
   }));
 }
 
@@ -67,6 +74,10 @@ function createSourceController(o) {
   let gateUntil = 0;
   let lease = null; // 冷源探路许可：同一时刻只有一个请求能去试一个还没连通的源
   let waiters = [];
+  // 各源在途请求数：镜像线路单连接靠它限流（acquire 时占位，release 时归还）
+  const active = new Map();
+  const limitOf = (src) => (src.maxConcurrency > 0 ? src.maxConcurrency : Infinity);
+  const isFull = (src) => (active.get(src) || 0) >= limitOf(src);
 
   function seqAt(k) {
     const head = rounds * nonGh.length;
@@ -115,20 +126,34 @@ function createSourceController(o) {
 
   const isWarm = (src) => src.lastOkAt > 0 && src.lastOkAt >= switchedAt;
 
+  /** 占一个并发位并返回租约 */
+  function take(src, cold) {
+    const l = { src, cold, startedAt: now(), released: false };
+    active.set(src, (active.get(src) || 0) + 1);
+    if (cold) lease = l;
+    return l;
+  }
+
   /** 取一个可用的源发请求。返回租约 {src, cold, startedAt}，请求结束后必须 release */
   async function acquire(signal) {
     for (;;) {
       const wait = gateUntil - now();
       if (wait > 0) { await waitChange(wait, signal); continue; }
       const src = cur;
-      if (isWarm(src)) return { src, cold: false, startedAt: now() };
-      if (!lease) { lease = { src, cold: true, startedAt: now() }; return lease; }
+      if (isFull(src)) { await waitChange(null, signal); continue; }
+      if (isWarm(src)) return take(src, false);
+      if (!lease) return take(src, true);
       await waitChange(null, signal);
     }
   }
 
   function release(l) {
-    if (l && lease === l) { lease = null; notify(); }
+    if (!l || l.released) return;
+    l.released = true;
+    const n = (active.get(l.src) || 0) - 1;
+    if (n > 0) active.set(l.src, n); else active.delete(l.src);
+    if (lease === l) lease = null;
+    notify();
   }
 
   /** 收到数据：标记该源连通；当前源恢复流动后退避与轮数清零 */

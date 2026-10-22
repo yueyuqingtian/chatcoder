@@ -170,6 +170,27 @@ def test_static_prompt_has_methodology_sections():
         assert heading in MAIN_SYSTEM_PROMPT
 
 
+def test_prompt_verifies_by_risk_and_volume_not_per_step():
+    """验证时机：按风险与改动量自行判断，不固定在每步/每批，交付前整体验证。"""
+    text = build_main_system_prompt(execution_mode="agent", available_tools={"fs_read"})
+    assert "Work in coherent batches" in text
+    assert "Judge for yourself when to verify" in text
+    assert "Verify the whole change before delivery" in text
+    assert "After each step, run tests or lint" not in text
+    assert "Verify each step" not in text
+    assert "Verify once per batch" not in text
+
+    from app.orchestration.prompts.ta3_fusion import (
+        CHATCODER_ADDENDUM,
+        CHATCODER_ADDENDUM_FULL_ACCESS,
+        CHATCODER_ADDENDUM_READONLY,
+    )
+
+    for tpl in (CHATCODER_ADDENDUM, CHATCODER_ADDENDUM_FULL_ACCESS, CHATCODER_ADDENDUM_READONLY):
+        assert "按需验证" in tpl
+        assert "小步修改" not in tpl
+
+
 def test_system_prompt_is_deterministic_for_same_inputs():
     a = build_main_system_prompt(execution_mode="agent", available_tools={"fs_read"})
     b = build_main_system_prompt(execution_mode="agent", available_tools={"fs_read"})

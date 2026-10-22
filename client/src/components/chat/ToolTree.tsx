@@ -29,9 +29,9 @@ import { CodeView } from "./CodeView";
 import { ToolGlyph } from "../iconkit/ToolGlyphs";
 import { ChatCollapse } from "./ChatCollapse";
 import { SubsessionQuestionRow } from "./SubsessionQuestionRow";
-import { SUBSESSION_QUESTION_TOOL } from "../../utils/subsessionQuestion";
+import { SUBSESSION_NOTICE_TOOLS } from "../../utils/subsessionQuestion";
 import { toolVerb, runningVerb, toolDisplayName } from "./toolLabels";
-import { tailClamp } from "../../utils/tailClamp";
+import { ClampBlock } from "./ClampBlock";
 import { Tooltip } from "../ui/Tooltip";
 import {
   IconFileRead, IconFileWrite, IconFolder, IconGlobe, IconTerminal,
@@ -213,7 +213,14 @@ function simpleLineDiff(before: string, after: string): Array<{ type: "add" | "d
  *  plan-89-387: 传 call_key 拉取「本次编辑」的 diff——同一轮内同文件多次编辑时，
  *  每次展开只展示本次变更（此前服务端按 turn+path 聚合，多次展开见同一份累积 diff）；
  *  老记录无 call_key 时服务端回退整轮累积口径，头部会标注「该轮累计」。
- *  v7(H): 运行中记录尚未落库（404）或无 turn 信息时，用调用参数兜底展示本次编辑内容。 */
+ *  v7(H): 运行中记录尚未落库（404）或无 turn 信息时，用调用参数兜底展示本次编辑内容。
+ *
+ *  plan-522-2209 R10：diff 区**不**套 ClampBlock，只把文案收敛成同一句式。依据是数据来源不同：
+ *  `ClampBlock` 拿到的文本是完整的，它自己数行、自己切头尾，标注的总量可信；
+ *  而这里收到的 `lines` 已经由后端裁过（`rollback_service.py` 的 `_MAX_DIFF_LINES_RENDER`，
+ *  超出只下发前 4000 行并置 `truncated`），前端的「总行数」只剩已下发的那部分——
+ *  再让 ClampBlock 折一遍，既折不出真正的尾部结论，还会把「已下发行数」当成总量标注，反而失真。
+ *  正确做法是让后端负责截断、前端只如实说明「其余未下发」，两种截断各归其位。 */
 function InlineDiff({ turnId, path, callKey, fallbackLines, onStat }: {
   turnId: number | null;
   path: string;
@@ -335,7 +342,15 @@ function InlineDiff({ turnId, path, callKey, fallbackLines, onStat }: {
         // 有口径说明（二进制 / 已删除等）时说明本身已交代原因，不再重复一行「无文本变更」
         <div className="tc-diff-empty">本次无文本变更</div>
       )}
-      {state.truncated && <div className="tc-diff-trunc">变更过大，已截断显示</div>}
+      {/* plan-522-2209 R10：文案收敛到 ClampBlock 的「显示 前 N 行」口径。
+          diff 不走 ClampBlock 的理由见 InlineDiff 顶部注释：全量行数只有后端知道，
+          交给 ClampBlock 会把「已下发的行数」当成总量标注，反而失真。
+          这里**不写「共 M 行」也不写「其余未下发」**——后端的 truncated 有两种来源
+          （变更行数 > 2000 只置标记、下发行数 > 4000 才真裁剪），前端分不清是哪一种，
+          所以只陈述确定的显示行数，把风险如实说明。 */}
+      {state.truncated && (
+        <div className="tc-diff-trunc">显示 前 {state.lines.length} 行（变更过大，行级 diff 可能不完整）</div>
+      )}
     </div>
   );
 }
@@ -509,26 +524,6 @@ function leafFallbackDiff(leaf: ToolLeaf, path: string | null): Array<{ type: "a
   return null;
 }
 
-/** plan-334-1661 S2：超长输出的**尾部**截断渲染。
- *  只截渲染文本（DOM 文本量有界），数据源与复制仍是全量；
- *  截断时显式提示省略量，避免用户误以为输出被吞。 */
-const ClampedPre = memo(function ClampedPre({ text, className, code = false }: {
-  text: string;
-  className: string;
-  /** true = 保留 <code> 包装（代码块分支） */
-  code?: boolean;
-}) {
-  const { text: shown, omitted } = useMemo(() => tailClamp(text), [text]);
-  return (
-    <>
-      {omitted > 0 && (
-        <div className="tc-clamp-hint">已省略前 {omitted.toLocaleString()} 字符（复制内容仍为完整输出）</div>
-      )}
-      <pre className={className}>{code ? <code>{shown}</code> : shown}</pre>
-    </>
-  );
-});
-
 const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
   const setPreviewPath = usePanelStore((s) => s.setPreviewPath);
   const setDiffPreview = usePanelStore((s) => s.setDiffPreview);
@@ -667,9 +662,11 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
               {isWrite && path == null && liveResult?.change_stat && (
                 <pre className="tc-plain tc-live">已变更 +{liveResult.change_stat.additions} -{liveResult.change_stat.deletions}</pre>
               )}
-              {/* v7(B): 运行中命令行的实时输出 */}
+              {/* v7(B): 运行中命令行的实时输出。
+                  plan-522-2209 R10：折叠与截断标注统一交给 ClampBlock（头 12 + 尾 4），
+                  实时输出的数据源本身是全量，copyText 直接给全文。 */}
               {showsLive && (
-                <ClampedPre className="tc-plain tc-live" text={liveOutput!} />
+                <ClampBlock text={liveOutput!} preClassName="tc-plain tc-live" copyText={liveOutput!} />
               )}
               {/* plan-20261016-ux（问题 4）：没有任何内容时的提示卡（运行中 / 完成 / 失败三态文案） */}
               {!hasBody && (
@@ -747,11 +744,13 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
               {leaf.output && leaf.tool !== "ask_user_question" && (path && (FILE_CONTENT_TOOLS.has(leaf.tool) || /\.(ts|tsx|js|jsx|py|json|md|css|html|go|rs|java|c|cpp|sh)$/i.test(path)) ? (
                 <CodeView path={path} text={leaf.output} />
               ) : (
-                <ClampedPre className="tc-plain" text={leaf.output} />
+                // plan-522-2209 R10：统一走 ClampBlock；copyText 传完整 output，
+                // 兑现「折叠只影响显示、复制仍是完整输出」的承诺。
+                <ClampBlock text={leaf.output} preClassName="tc-plain" copyText={leaf.output} />
               ))}
               {/* plan-474-2105 组 C：「已让出等待」不是错误，用普通文本展示说明，不套红色错误块 */}
               {leaf.error && (interruptTag
-                ? <ClampedPre className="tc-plain" text={leaf.error} />
+                ? <ClampBlock text={leaf.error} preClassName="tc-plain" copyText={leaf.error} />
                 : <pre className="tc-error-output">{leaf.error}</pre>)}
             </>
           )}
@@ -888,8 +887,9 @@ export const ToolTree = memo(function ToolTree({ nodes }: { nodes: ToolNode[] })
             ? <WriteMergedRow key={`w${i}`} leaves={n.leaves} />
             : n.kind === "group"
               ? n.leaves.map((leaf, j) => <LeafRow key={`g${i}-${j}`} leaf={leaf} />)
-              // plan-20261021-subq-row：子会话提问是单叶子条目（时间线单独生成，不会并入聚合行）
-              : n.leaf.tool === SUBSESSION_QUESTION_TOOL
+              // plan-20261021-subq-row：子会话提问是单叶子条目（时间线单独生成，不会并入聚合行）；
+              // plan-20261022-release-ci：子会话汇报 / 结论同一行版式
+              : SUBSESSION_NOTICE_TOOLS.has(n.leaf.tool)
                 ? <SubsessionQuestionRow key={`l${i}`} leaf={n.leaf} />
                 : <LeafRow key={`l${i}`} leaf={n.leaf} />,
       )}

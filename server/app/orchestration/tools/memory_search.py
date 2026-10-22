@@ -16,6 +16,7 @@ from app.persistence.database import async_session_factory
 
 class MemorySearchTool(Tool):
     name = "memory_search"
+    concurrency_safe = True  # plan-522-2209：只读检索，写操作在 memory_write（独占）
     risk_level = "low"
     description = (
         "跨来源检索记忆：同时搜索①记忆库（长期记忆条目，含项目/全局层）、"

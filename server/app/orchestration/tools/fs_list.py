@@ -22,6 +22,7 @@ _IGNORE_DIRS = {
 
 class FsListTool(Tool):
     name = "fs_list"
+    concurrency_safe = True  # plan-522-2209：纯读，不写文件、不改库
     risk_level = "low"
     description = (
         "列出工作区内指定目录的文件与子目录。\n"

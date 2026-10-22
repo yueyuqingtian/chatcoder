@@ -55,13 +55,13 @@ function makeManager(over = {}) {
 
 const info = (extra = {}) => ({ version: "0.9.0", releaseNotes: "n", releaseDate: "d", files: [{ url: "chatcoder-Setup-0.9.0.exe", sha512: "x", size: 1 }], ...extra });
 
-test("候选下载源：按 自建源 > 镜像（gh-proxy + 额外镜像）> GitHub 排列，不再把 feed 解析出的地址放第一位", () => {
+test("候选下载源：按 镜像（gh-proxy + 额外镜像）> 自建源 > GitHub 排列，镜像优先", () => {
   const { m, u } = makeManager();
   u.emit("update-available", info({ mirrors: ["https://cdn.example/x", "http://insecure.example/", "https://m.example/updates/"] }));
   const urls = m._internals.buildDownloadUrls(new URL("https://github.com/o/r/releases/download/v0.9.0/chatcoder-Setup-0.9.0.exe"), "chatcoder-Setup-0.9.0.exe");
   assert.deepEqual(urls, [
-    { url: "https://m.example/updates/chatcoder-Setup-0.9.0.exe", tier: "primary" },
     { url: "https://cdn.gh-proxy.org/https://github.com/o/r/releases/download/v0.9.0/chatcoder-Setup-0.9.0.exe", tier: "mirror" },
+    { url: "https://m.example/updates/chatcoder-Setup-0.9.0.exe", tier: "primary" },
     { url: "https://cdn.example/x/chatcoder-Setup-0.9.0.exe", tier: "mirror" },
     { url: "https://github.com/o/r/releases/download/v0.9.0/chatcoder-Setup-0.9.0.exe", tier: "github" },
   ]);
@@ -74,20 +74,20 @@ test("repo 为空时只剩自建源（不拼镜像与 GitHub）", () => {
   assert.deepEqual(urls, [{ url: "https://m.example/updates/chatcoder-Setup-0.9.0.exe", tier: "primary" }]);
 });
 
-test("检查更新：每次都从自建源开始，失败依次走镜像、GitHub，不会黏在 GitHub 上", async () => {
+test("检查更新：每次都从镜像开始，失败依次走自建源、GitHub，不会黏在 GitHub 上", async () => {
   const { m, u } = makeManager({ meta: { autoDownload: false } });
   let failFirst = 2;
   u.checkForUpdates = async () => { u.calls.push(["check"]); if (failFirst-- > 0) throw new Error("down"); return {}; };
   await m._internals.checkForUpdatesSmart();
   const feeds1 = u.calls.filter((c) => c[0] === "setFeedURL").map((c) => c[1].url || c[1].provider);
   assert.deepEqual(feeds1, [
-    "https://m.example/updates/",
     "https://cdn.gh-proxy.org/https://github.com/o/r/releases/latest/download/",
+    "https://m.example/updates/",
     "github",
   ]);
   u.calls.length = 0;
-  await m._internals.checkForUpdatesSmart(); // 定时检查：自建源已恢复，必须先试自建源
-  assert.equal(u.calls.find((c) => c[0] === "setFeedURL")[1].url, "https://m.example/updates/");
+  await m._internals.checkForUpdatesSmart(); // 定时检查：镜像已恢复，必须先试镜像
+  assert.equal(u.calls.find((c) => c[0] === "setFeedURL")[1].url, "https://cdn.gh-proxy.org/https://github.com/o/r/releases/latest/download/");
 });
 
 test("取消下载：回到 available（保留版本与说明），且同一版本不再被静默自动拉起", async () => {

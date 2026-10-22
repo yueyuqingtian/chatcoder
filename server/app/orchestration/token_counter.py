@@ -339,8 +339,78 @@ def select_messages_by_token_budget(
 
 
 def messages_token_total(messages: list) -> int:
-    """计算 DB Message 列表的总 token 数。"""
+    """计算 DB Message 列表的总 token 数（全量口径，含会被剥离的旧 thinking）。"""
     return sum(estimate_message_tokens_from_model(m) for m in messages)
+
+
+def _presented_for_estimate(text: str, tool_name: str) -> str:
+    """把工具输出折算成**真实出站**时的文本量（估算专用，不落盘）。
+
+    与 `output_paging.present_for_model` 的预算口径保持一致；fs_read 在该函数里
+    原样返回（其窗口已由工具自身封顶且完整落库），这里同样不折算。
+    """
+    if not text:
+        return text
+    try:
+        from app.orchestration.output_paging import budget_for_tool
+
+        budget, _tail = budget_for_tool(tool_name)
+    except Exception:  # noqa: BLE001 — 取不到预算就按原文估算（只会高估，不会低估）
+        return text
+    if tool_name == "fs_read" or budget <= 0:
+        return text
+    raw = text.encode("utf-8")
+    if len(raw) <= budget:
+        return text
+    # 超出预算时出站内容是「头部 + 续读说明 + 尾部」，总量级就是预算本身
+    return raw[:budget].decode("utf-8", errors="ignore")
+
+
+def estimate_outbound_tokens_db(messages: list) -> int:
+    """估算 DB Message 列表**真实发往模型**的 token 数（plan-527-2218）。
+
+    与 `messages_token_total`（全量 raw 口径）的区别是镜像了出站前的两次变换：
+    - 旧工具回合的 thinking 会被 `compaction.strip_stale_reasoning` 剥离，只留结构开销；
+    - 工具结果按 `output_paging.present_for_model` 的字节预算截断后才进 prompt。
+
+    压缩触发判断、压缩后占用核算、重建预算统一用这个口径，才能与上游返回的
+    `prompt_tokens` 保持较小差异。raw 口径会系统性高估（工具密集会话尤甚，
+    实测可达 20% 以上），进而让「是否超阈值」的判断失真。
+    """
+    from app.core.enums import MsgType
+
+    if not messages:
+        return 0
+    # 旧 reasoning 分界线：与 strip_stale_reasoning 同一语义（尾部数第 N 个工具回合）
+    try:
+        from app.orchestration.compaction import _REASONING_KEEP_TOOL_ROUNDS
+
+        keep_rounds = _REASONING_KEEP_TOOL_ROUNDS
+    except Exception:  # noqa: BLE001
+        keep_rounds = 3
+    seen = 0
+    cutoff = 0
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].msg_type == MsgType.TOOL_CALL.value:
+            seen += 1
+            if seen >= keep_rounds:
+                cutoff = i
+                break
+
+    total = 0
+    for i, m in enumerate(messages):
+        if i < cutoff and m.msg_type == MsgType.THINKING.value:
+            total += _MESSAGE_OVERHEAD  # 剥离后仅剩消息结构开销
+            continue
+        if m.msg_type == MsgType.TOOL_RESULT.value:
+            content = m.content if isinstance(m.content, dict) else {}
+            tool = str(content.get("tool") or "")
+            out = str(content.get("output") or content.get("error") or "")
+            total += _MESSAGE_OVERHEAD + _TOOL_RESULT_OVERHEAD
+            total += rough_token_estimate(tool + _presented_for_estimate(out, tool))
+            continue
+        total += estimate_message_tokens_from_model(m)
+    return total
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -427,3 +497,107 @@ def get_main_summarize_batch_tokens(context_window: int) -> int:
 def get_thread_window_budget(context_window: int) -> int:
     """根据 Agent 模型上下文窗口计算 Thread 窗口预算。"""
     return max(8000, int(context_window * THREAD_WINDOW_RATIO))
+
+
+# ───────────────────────────────────────────────────────────────────
+# 估算校准系数（real / est）——plan-527-2218
+# ───────────────────────────────────────────────────────────────────
+# 上游返回的 prompt_tokens 与本模块估算的比值。按模型分开存：不同分词器/网关差异大，
+# 单一系数无法兼顾。落盘到用户可写数据目录，**进程重启后仍然有效**——此前只存在
+# 进程内 dict，重启后从 1.0 重新校准，前几步的压缩判断必然偏离（低占用误压缩 /
+# 真超阈值漏压缩，两种都出现过）。
+_CALIB_BY_MODEL: dict[str, float] = {}
+_CALIB_LAST_SAVED: dict[str, float] = {}
+_CALIB_LOADED = False
+_CALIB_FILE = "est_calibration.json"
+_CALIB_MIN = 0.3
+_CALIB_MAX = 3.0
+_CALIB_SAVE_EPS = 0.01
+
+
+def _calibration_path():
+    """校准系数落盘路径；取不到用户数据目录时返回 None（退化为仅内存生效）。"""
+    try:
+        from app.core.logging import _writable_data_dir
+
+        return _writable_data_dir() / _CALIB_FILE
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _load_calibration() -> None:
+    global _CALIB_LOADED
+    if _CALIB_LOADED:
+        return
+    _CALIB_LOADED = True
+    path = _calibration_path()
+    if path is None or not path.exists():
+        return
+    try:
+        import json
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        logger.debug("[token] 校准系数读取失败(非阻塞)", exc_info=True)
+        return
+    if not isinstance(data, dict):
+        return
+    for k, v in data.items():
+        try:
+            factor = float(v)
+        except (TypeError, ValueError):
+            continue
+        if _CALIB_MIN <= factor <= _CALIB_MAX:
+            _CALIB_BY_MODEL[str(k)] = factor
+            _CALIB_LAST_SAVED[str(k)] = factor
+
+
+def _save_calibration() -> None:
+    path = _calibration_path()
+    if path is None:
+        return
+    try:
+        import json
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(_CALIB_BY_MODEL, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("[token] 校准系数落盘失败(非阻塞)", exc_info=True)
+
+
+def get_calibration_factor(model_key: str) -> float:
+    """取某模型的估算校准系数（real / est）；无记录时返回 1.0。"""
+    _load_calibration()
+    return _CALIB_BY_MODEL.get(str(model_key or "default"), 1.0)
+
+
+def update_calibration_factor(model_key: str, real_tokens: int, est_tokens: int) -> float:
+    """用一次真实 usage 校准估算系数（指数平滑 + 钳制），返回更新后的系数。
+
+    只作用于**出站等效口径**的估算（estimate_outbound_tokens_db / estimate_messages_tokens），
+    不要与全量 raw 口径混用，否则两种口径会互相污染。
+    """
+    _load_calibration()
+    key = str(model_key or "default")
+    cur = _CALIB_BY_MODEL.get(key, 1.0)
+    if real_tokens <= 0 or est_tokens <= 0:
+        return cur
+    new_factor = max(_CALIB_MIN, min(_CALIB_MAX, real_tokens / est_tokens))
+    cur = max(_CALIB_MIN, min(_CALIB_MAX, cur * 0.5 + new_factor * 0.5))
+    _CALIB_BY_MODEL[key] = cur
+    # 频繁落盘没有意义：变化不足 1% 时只更新内存
+    if abs(_CALIB_LAST_SAVED.get(key, 0.0) - cur) >= _CALIB_SAVE_EPS:
+        _CALIB_LAST_SAVED[key] = cur
+        _save_calibration()
+    return cur
+
+
+def estimate_outbound_with_calibration(messages: list, model_key: str) -> int:
+    """出站等效估算 × 该模型的校准系数（用于与上游 prompt_tokens 对比）。"""
+    raw = estimate_outbound_tokens_db(messages)
+    if raw <= 0:
+        return 0
+    return int(raw * get_calibration_factor(model_key))

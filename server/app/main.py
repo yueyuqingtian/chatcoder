@@ -13,6 +13,7 @@ from app.core.config import settings
 from app.core.logging import setup_logging
 from app.gateway.routers import (
     archive,
+    approvals,
     debug,
     desktop,
     diagnostics,
@@ -327,6 +328,8 @@ def create_app() -> FastAPI:
     app.include_router(skills_mcp.router, prefix="/api", tags=["skills-mcp"])
     app.include_router(settings_routes.router, prefix="/api", tags=["settings"])
     app.include_router(usage.router, prefix="/api", tags=["usage"])
+    # plan-522-2209：当前未决的审批 / 提问摘要——前端建全局连接后据此重建跨会话等待索引
+    app.include_router(approvals.router, prefix="/api", tags=["approvals"])
     app.include_router(subagents.router, prefix="/api", tags=["subagents"])
     # plan-474-2105：运行时并发上限只读接口（/api/runtime/limits）
     app.include_router(subagents.limits_router, prefix="/api", tags=["runtime"])

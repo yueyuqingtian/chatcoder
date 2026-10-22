@@ -50,6 +50,7 @@
 5. 版本号遵循语义化 `MAJOR.MINOR.PATCH`；影响用户既有配置或数据的改动提升 MINOR。
 6. **版本号只认 `package.json`**：更新内容一律归入 `package.json` 当前版本（尚未正式发布的版本）区块，同一批未发布改动持续追加在该区块内；**不得**擅自新增或提升版本号——例如凭空写出 `## v0.8.0`、`## v0.9.0` 另起区块，或把一批未发布改动拆成多个版本块。版本号的提升与定版，只在正式发布时由维护者统一调整。
 7. 发布前检查：更新内容与 `ai/` 下当期计划文档的验收项**一一对应**，不遗漏、不夸大、不写未交付的项。
+8. **发布方式**：推送 `v<版本>` tag，由 GitHub Actions（`.github/workflows/release.yml`）打包并发布到 GitHub Releases，自建更新源由服务器定时从 GitHub 拉取；tag 必须与 `package.json` 版本一致且 `CHANGELOG.md` 有该版本区块，否则工作流第一步即失败。流程与本地兜底打包见 `docs/release.md`。新增 electron 主进程模块无需登记白名单（`electron/*.cjs` 通配），打包后由 `tools/verify-package.cjs` 自检。
 
 ## 4. 代码与注释约定
 

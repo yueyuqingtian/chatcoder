@@ -160,7 +160,7 @@ async function main() {
     results.A_kills = stats.kills;
     results.A_progressMonotonic = progress.every((p, i) => i === 0 || p.transferred >= progress[i - 1].transferred);
     results.A_updateDownloadedEvent = !!downloadedEvent && downloadedEvent.version === "9.9.9";
-    results.A_blockmapTried = stats.blockmap404 > 0; // 差分尝试失败后回退到全量，正是自建源的真实情形
+    results.A_blockmapSkipped = stats.blockmap404 === 0; // 已关闭差分下载，不再请求 blockmap，安装包统一走全量下载器
     results.A_phases = [...new Set(phases)];
 
     // 中途取消 → 再下一次只补缺的块
@@ -273,7 +273,7 @@ async function main() {
   fs.rmSync(tmp, { recursive: true, force: true });
 
   const mustBeTrue = [
-    "A_patched", "A_available", "A_sameContent", "A_progressMonotonic", "A_updateDownloadedEvent", "A_blockmapTried",
+    "A_patched", "A_available", "A_sameContent", "A_progressMonotonic", "A_updateDownloadedEvent", "A_blockmapSkipped",
     "A_cancelled", "A_partialKept", "A_resumedSameContent", "A_resumed",
     "B_noAvailableFlash", "B_firstIsConnecting", "B_notesKept", "B_downloaded", "B_sameContent", "B_sawProgress",
     "C_availableNotDownloading", "C_instantFeedback", "C_checkDuringDownloadKeepsState", "C_downloaded", "C_installReturnsTrue", "C_installCalled",

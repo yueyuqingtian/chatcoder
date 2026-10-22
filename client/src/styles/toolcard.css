@@ -498,6 +498,56 @@ div.tcard-row:focus-visible { outline: none; background: var(--tcard-hover); }
 .tcard-gg-note.is-error { color: var(--error); }
 .tcard-gg-more { display: flex; justify-content: center; padding: 6px 0; }
 
+/* ═══════════ 工具输出折叠块（.tc-clamp*） ═══════════ */
+/* plan-522-2209 R10：工具输出的折叠与截断标注归一到 ClampBlock 一处。
+   类名沿用 `tc-` 而不是 `tcard-`：它服务的是工具树 / 代码视图的输出区（同域既有 .tc-plain、
+   .tc-diff），放本文件只是因为它与卡片共用同一批令牌，不必再开一个样式层。
+   约束（AGENTS.md）：圆角只用令牌、不用左侧竖线表达层级——折叠行靠留白与极淡底色区分。 */
+.tc-clamp { display: block; }
+/* 缺省渲染：与 .tc-plain 同一口径（等宽、可换行），保证折叠前后视觉不跳 */
+.tc-clamp-pre {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* 折叠行：整行是一个按钮，跨在头段与尾段之间。
+   底色取极淡的悬停色（不是状态色），左侧不加任何装饰竖线——用上下留白把它与内容分开。 */
+.tc-clamp-fold {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  margin: 4px 0;
+  padding: 4px 8px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--text-1) 4%, transparent);
+  color: var(--text-3);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast);
+}
+.tc-clamp-fold:hover,
+.tc-clamp-fold:focus-visible {
+  outline: none;
+  background: color-mix(in srgb, var(--text-1) 7%, transparent);
+  color: var(--text-2);
+}
+.tc-clamp-fold-text { min-width: 0; font-variant-numeric: tabular-nums; }
+/* 动作词单独一列：展开 / 收起的文案长短不一，固定槽位避免行内文字左右跳动 */
+.tc-clamp-fold-act { flex-shrink: 0; color: var(--text-2); }
+.tc-clamp-fold[aria-expanded="true"] .tc-clamp-fold-act { color: var(--text-3); }
+/* 复制入口：小号次级按钮，靠右不占满整行；只在传了 copyText 时出现 */
+.tc-clamp-foot { display: flex; justify-content: flex-end; margin-top: 2px; }
+
 /* ═══════════ 「⋯」工具卡设置浮层 ═══════════ */
 .tcard-menu { width: 236px; padding: 10px; font-size: var(--tcard-fs); line-height: var(--tcard-lh); }
 .tcard-menu-cap { padding: 2px 2px 6px; font-size: var(--tcard-fs-sm); color: var(--text-3); }

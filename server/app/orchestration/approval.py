@@ -115,12 +115,28 @@ class ApprovalManager:
                 # 用户可随时取消整个 turn 来结束等待（turn 取消会连带取消本协程）。
                 approved = await pa.ensure_future()
             else:
-                approved = await asyncio.wait_for(
-                    pa.ensure_future(), timeout=settings.approval_timeout_sec
+                # plan-522-2209：等待上限分两类。
+                # 子会话 / 子代理的审批往往发生在用户并未停留的会话里，超时自动拒绝等于让用户
+                # 两头都看不到（请求没看见、失败原因也没看见，只看到子任务莫名中断）——
+                # 按 approval_timeout_sec_subsession 处理，默认 0 即不设超时，只等用户处理或 turn 取消。
+                _is_child = bool(detail.get("is_subagent") or detail.get("is_subsession"))
+                _timeout = (
+                    settings.approval_timeout_sec_subsession if _is_child
+                    else settings.approval_timeout_sec
                 )
+                if _timeout is None or _timeout <= 0:
+                    approved = await pa.ensure_future()
+                else:
+                    approved = await asyncio.wait_for(
+                        pa.ensure_future(), timeout=_timeout
+                    )
             return approved
         except asyncio.TimeoutError:
-            logger.warning("审批超时自动拒绝 %s", approval_id)
+            logger.warning(
+                "审批超时自动拒绝 %s（kind=%s 身份=%s）",
+                approval_id, kind,
+                "子会话/子代理" if detail.get("is_subagent") or detail.get("is_subsession") else "主会话",
+            )
             return False
         finally:
             async with self._lock:
@@ -146,6 +162,31 @@ class ApprovalManager:
         """v2.2: 取 pending 审批的 detail（供"始终允许"生成规则）。"""
         pa = self._pending.get(approval_id)
         return dict(pa.detail) if pa else None
+
+    def pending_summaries(self) -> list[dict]:
+        """plan-522-2209：全部待处理交互的摘要（供 GET /api/approvals/pending 重建索引）。
+
+        带上 detail（剔除 answer）：用户在任意会话看到子会话的审批卡时，卡片要能显示
+        工具名、动作短语与命令原文，否则只剩一句「有个审批在等你」，等于逼用户跳进去看。
+        剔除 answer 是因为它是提问的作答内容，回填后属于已产生的结论，不该再被下发给别处。
+        """
+        out: list[dict] = []
+        for approval_id, pa in self._pending.items():
+            detail = dict(pa.detail or {})
+            detail.pop("answer", None)
+            kind = "question" if detail.get("kind") == "question" else "tool_call"
+            out.append({
+                "approval_id": approval_id,
+                "session_id": detail.get("session_id"),
+                "kind": kind,
+                "tool": detail.get("tool"),
+                "action_label": detail.get("action_label") or detail.get("summary"),
+                "agent_name": detail.get("agent_name"),
+                "is_subagent": bool(detail.get("is_subagent")),
+                "is_subsession": bool(detail.get("is_subsession")),
+                "detail": detail,
+            })
+        return out
 
     @property
     def pending_count(self) -> int:

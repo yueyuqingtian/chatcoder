@@ -12,6 +12,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,12 +30,13 @@ from app.orchestration.call_recovery import (
     recover_model_call,
 )
 from app.orchestration.approval_policy import (
+    can_run_in_parallel,
     normalize_approval_mode,
     normalize_execution_mode,
 )
 from app._diag import log_tool_error, summarize_args  # v36: 工具错误诊断日志
 from app.persistence.database import async_session_factory
-from app.orchestration.tools import ToolContext, tool_executor
+from app.orchestration.tools import ToolContext, ToolResult, tool_executor
 from app.orchestration.tools.read_cache import read_cache_for
 from app.orchestration.tools.registry import tool_registry
 from app.orchestration.workflow.tools import WORKFLOW_TOOL_NAMES, run_workflow_tool
@@ -55,8 +57,8 @@ SUBSESSION_OWN_TOOL_NAMES: set[str] = {
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_OUTPUT_CHARS = 16000  # v15: 与 fs_read 上限(settings.tool_output_chars_read)对齐；历史上曾为 8000
-# 估算校准系数（real / est）按模型保存，跨轮复用；进程重启后回到 1.0 重新校准
-_CALIB_BY_MODEL: dict[str, float] = {}
+# 估算校准系数（real / est）已迁移到 token_counter 并按模型落盘（plan-527-2218）：
+# 重启后不必从 1.0 重新校准，前置压缩判断从第一步起就是准的。
 # subagent_inspect 诊断 JSON 的单次展示上限（超出时显式提示，结论全文走 collect_results 分段）
 _INSPECT_PAYLOAD_CHARS = 8000
 _STREAM_CHUNK_SIZE = 80
@@ -321,26 +323,15 @@ def _present_tool_output(text: object, *, tool_name: str, session_id: int, call_
     此前：上下文里是「头尾各半 + 中间截断」，落库是「只取开头、无标记」——下一轮从库里重建的
     历史与本轮模型看到的不一致；被截掉的中间部分也没有任何办法取回。
     现在：两处用同一份文本；超出预算时完整输出落盘，结果里写明总字数与 read_attachment 续读方式。
-    """
-    from app.core.config import settings
-    from app.orchestration.output_paging import present_output_bytes
 
-    # fs_read 的窗口已由工具自身的字节预算封顶，且完整写入落库；这里不再做头部截断，
-    # 否则会出现“窗口→截成前段→再读”的循环。其余工具按各自的字节预算呈现，超出部分落盘续读。
-    if tool_name == "fs_read":
-        return str(text or "")
-    if tool_name == "fs_grep":
-        budget = settings.tool_output_bytes_grep
-    elif tool_name in ("web_fetch", "web_search"):
-        budget = settings.tool_output_bytes_web
-    elif tool_name == "terminal_exec":
-        budget = settings.tool_output_bytes_terminal
-    else:
-        budget = settings.tool_output_bytes_default
-    return present_output_bytes(
-        str(text or ""), budget,
-        session_id=session_id, tag=f"{tool_name}-{call_key or 'call'}",
-        tail_bytes=settings.tool_output_bytes_terminal_tail if tool_name == "terminal_exec" else 0,
+    plan-522-2209：预算解析与呈现规则收口到 output_paging（budget_for_tool / present_for_model），
+    历史重建路径调用同一个函数，避免两处口径再次分叉。
+    """
+    from app.orchestration.output_paging import present_for_model
+
+    return present_for_model(
+        str(text or ""), tool_name=tool_name, session_id=session_id,
+        tag=f"{tool_name}-{call_key or 'call'}",
     )
 
 
@@ -1178,6 +1169,14 @@ async def run_agent_loop(
         "payload": {"agent_id": agent_id, "kind": agent_kind, "name": agent_name,
                     "turn_id": turn_id, **(await _agent_started_extra(agent))},
     })
+    # plan-522-2209：把本轮使用的提示词版本记进日志。此前提示词改动无从追溯——
+    # 线上出现行为差异时只能翻 git 历史猜是哪次改动生效的。
+    try:
+        from app.orchestration.prompts import PROMPT_VERSION as _PROMPT_VERSION
+
+        logger.info("[agent] turn=%s prompt_version=%s", turn_id, _PROMPT_VERSION)
+    except Exception:
+        pass
     await broadcast(session_id, {
         "event": "agent.updated",
         "payload": {"agent_id": agent_id, "status": "running"},
@@ -1205,7 +1204,9 @@ async def run_agent_loop(
     # 每次拿到 API 真实值就更新系数，用于前置压缩估算，实现自适应精准压缩。
     # 校准系数按模型跨轮保留（进程内）：此前每次运行都从 1.0 重来，前几步的前置压缩判断总是偏离真实占用
     _calib_key = str(model_id or "default")
-    _calib_factor = _CALIB_BY_MODEL.get(_calib_key, 1.0)  # real / est，初始1.0（无校准）
+    # plan-527-2218: 系数按模型持久化（token_counter 落盘 store），重启后仍有效
+    from app.orchestration.token_counter import get_calibration_factor as _get_calib
+    _calib_factor = _get_calib(_calib_key)  # real / est
     # v2.2 (对齐 zcode 3.14): 重复工具调用检测——工具名+参数签名 → 连续次数
     _call_sigs: dict[str, int] = {}
     _last_sig: str | None = None  # 上一次执行的工具签名（连续重复判定用）
@@ -1302,8 +1303,11 @@ async def run_agent_loop(
                         # plan-166-767: 纯图片（无文字）注入项只要有图片块即保留，不再被 continue 丢弃
                         if not _txt and not _blocks:
                             continue
-                        # plan-156-621：用户排队消息补一条并行分派提醒；子会话汇报等系统注入项不加
-                        if _parallel_reminder and not _inj.get("_persist_on_drop"):
+                        # plan-156-621：用户排队消息补一条并行分派提醒；子会话汇报等系统注入项不加。
+                        # plan-20261022-release-ci：邮箱 / 子代理完成通知带 source 标记——此前只认旧的
+                        # _persist_on_drop，子会话的提问、汇报、结论每条都被附上「请并行分派子会话」，
+                        # 主代理读到结论反被催着再派一轮
+                        if _parallel_reminder and not (_inj.get("_persist_on_drop") or _inj.get("source")):
                             _suffix = f"{_suffix}\n\n{_parallel_reminder}"
                         _msg = ChatMessage(role="user", content=(_txt + _suffix).strip() or None)
                         if _blocks:
@@ -1890,12 +1894,16 @@ async def run_agent_loop(
                 # v33: 钳制到 [0.3, 3.0]——网关偶发把 cached/虚计值混入 prompt_tokens
                 # 时，raw 系数会异常膨胀导致前置估算虚高、过早触发压缩（低占用就压缩）。
                 if _est_prompt > 0 and _api_prompt > 0:
-                    _new_factor = max(0.3, min(3.0, _api_prompt / _est_prompt))
-                    _calib_factor = max(0.3, min(3.0, _calib_factor * 0.5 + _new_factor * 0.5))
-                    _CALIB_BY_MODEL[_calib_key] = _calib_factor
+                    from app.orchestration.token_counter import (
+                        update_calibration_factor as _update_calib,
+                    )
+                    # 本次实测比值（real/est）单独记录：它是判断估算口径是否漂移的直接依据
+                    _measured_factor = _api_prompt / _est_prompt
+                    _calib_factor = _update_calib(_calib_key, _api_prompt, _est_prompt)
                     logger.debug(
-                        "[agent] turn=%s step=%s 校准系数更新: %.3f (real=%d est=%d new=%.3f)",
-                        turn_id, step, _calib_factor, _api_prompt, _est_prompt, _new_factor,
+                        "[agent] turn=%s step=%s 校准系数更新: %.3f (real=%d est=%d measured=%.3f)",
+                        turn_id, step, _calib_factor, _api_prompt, _est_prompt,
+                        _measured_factor,
                     )
 
             total_tokens += (_api_total or (_final_prompt + _final_completion))
@@ -2111,14 +2119,79 @@ async def run_agent_loop(
                 ))
                 # plan-20261019-suggestion-flow：本步的建议工具是否成功（收束判定用，见 for 循环之后）
                 _suggestion_ok_this_step = False
-                for tc in response.tool_calls:
+                # plan-522-2209：先把本步切成可并行批次——连续「并发安全且确定免审」的调用为一批。
+                # 只读工具之间没有共享可变状态，逐个 await 只会白等磁盘 / 网络往返；一旦遇到
+                # 写盘、命令、审批、子会话等调用立即形成屏障，副作用调用之间仍严格按序。
+                _par_batch_of: dict[int, list[int]] = {}
+                # 并行批内每个调用预先分配 call_key：执行与提交两段必须用同一个键，
+                # 否则前端会把一次调用拆成两张卡（调用与结果对不上）。
+                _par_callkeys: dict[int, str] = {}
+                for _b in _parallel_batches(
+                    response.tool_calls,
+                    approval_mode=approval_mode,
+                    permission_mode=permission_mode,
+                    workspace=workspace,
+                    is_subagent=_caller_is_subagent,
+                    is_subsession=_caller_is_subsession,
+                ):
+                    for _i in _b:
+                        _par_batch_of[_i] = _b
+                        _par_callkeys[_i] = "tc_" + uuid.uuid4().hex[:12]
+                # 已并行执行的结果（按调用序号）与已启动的批次；提交仍在下面按序进行
+                _par_results: dict[int, tuple[ToolResult, int]] = {}
+                _par_started: set[int] = set()
+                # plan-522-2209：工作流节点的工具调用会读写节点相关状态（台账、
+                # 写入基线、读取索引），且 agent 是 ORM 对象——并发访问其关联字段
+                # 可能触发懒加载异常。这类场景一律不并行，走原串行路径。
+                if getattr(agent, "workflow_node_id", None) is not None:
+                    _par_batch_of.clear()
+                    _par_callkeys.clear()
+                for _idx, tc in enumerate(response.tool_calls):
                     # v6.4: 工具执行前检查中断信号
                     if cancel_event and cancel_event.is_set():
                         logger.warning("[agent] turn=%s 工具执行前检测到中断信号，退出循环", turn_id)
+                        # plan-522-2209：本步 assistant 消息已带上全部 tool_calls，直接返回会
+                        # 留下「有 tool_call 无 tool_result」的孤儿，下一次请求会被网关拒绝——
+                        # 还没提交的调用必须补结果；已并行跑完的用真实结果，未启动的补「中止」。
+                        await _append_aborted_tool_calls(
+                            db, list(response.tool_calls), start_index=_idx,
+                            session_id=session_id, turn_id=turn_id, thread_id=thread_id,
+                            agent_id=agent_id, agent_name=agent_name,
+                            messages=messages, done_results=_par_results,
+                            callkeys=_par_callkeys,
+                        )
                         return AgentOutput(kind="cancelled", error="任务被用户中断")
                     tool_name = tc.get("name", "")
                     args = tc.get("arguments", {}) or {}
-                    call_key = "tc_" + uuid.uuid4().hex[:12]
+                    call_key = _par_callkeys.get(_idx) or ("tc_" + uuid.uuid4().hex[:12])
+
+                    # plan-522-2209：本调用属于并行批时，第一次遇到它就把整批一次性并发跑完
+                    # （上限 4 路），结果按调用序号存表；下面每次提交仍按模型返回顺序串行进行。
+                    _par_res: tuple[ToolResult, int] | None = _par_results.get(_idx)
+                    _par_batch = _par_batch_of.get(_idx)
+                    if _par_batch is not None and _idx not in _par_started:
+                        _par_started.update(_par_batch)
+                        _par_done, _par_injected = await _run_parallel_batch(
+                            [(_j, response.tool_calls[_j], _par_callkeys[_j]) for _j in _par_batch],
+                            step=step, workspace=workspace, session_id=session_id,
+                            turn_id=turn_id, agent_id=agent_id, agent_name=agent_name,
+                            agent=agent, permission_mode=permission_mode,
+                            approval_mode=approval_mode, sandbox_mode=sandbox_mode,
+                            reasoning_effort=reasoning_effort, model_name=_tool_model_name,
+                            cancel_event=cancel_event,
+                            read_cache=read_cache_for(session_id, lambda: messages),
+                            is_subagent=_caller_is_subagent,
+                            is_subsession=_caller_is_subsession,
+                        )
+                        _par_results.update(_par_done)
+                        # 钩子注入文本按批内顺序并入：钩子仍在工具执行前生效，语义与串行一致
+                        for _inj_text in _par_injected:
+                            _pending_reminders.append(f"[钩子提示词]\n{_inj_text}")
+                        _par_res = _par_results.get(_idx)
+                        logger.info(
+                            "[agent] turn=%s step=%s 并行执行 %d 个只读工具调用（上限 %d 路）",
+                            turn_id, step, len(_par_batch), _PARALLEL_TOOL_LIMIT,
+                        )
 
                     # plan-474-2105：身份二次防御——命中即拒绝并把错误作为工具结果回给模型，
                     # 不进入任何执行分支（子会话问用户 / 子会话再建子会话 / 子代理再派子代理）。
@@ -2224,13 +2297,18 @@ async def run_agent_loop(
                             role="tool", content=tool_output,
                             name=tool_name, tool_call_id=tc.get("id", ""),
                         ))
+                        # plan-20261022-subagent-dispatch-fail：ok 记录真实成败——并发闸门拒绝、
+                        # 校验不过等错误输出此前一律标成 ok=True，前端卡片因此无法区分
+                        # 「子代理真在跑」与「派发已被拒绝」，被拒的调用会永远显示「执行中」。
+                        _sub_ok = not str(tool_output or "").lstrip().startswith("Error")
                         await message_service.create_message(
                             db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
                             sender_type=SenderType.AGENT.value, sender_id=agent_id,
                             msg_type=MsgType.TOOL_RESULT.value,
                             content={"tool": tool_name, "call_key": tc.get("id", ""),
-                                     "ok": True, "output": tool_output,
-                                     "error": "", "agent_name": agent_name},
+                                     "ok": _sub_ok, "output": tool_output,
+                                     "error": "" if _sub_ok else str(tool_output or "")[:300],
+                                     "agent_name": agent_name},
                             buffered=True,
                         )
                         _tool_executed = True
@@ -2403,21 +2481,26 @@ async def run_agent_loop(
                             turn_id=turn_id,
                             # fs_read 未变化短路：缓存按会话保存，消息列表用 getter 取本轮最新值（压缩会替换列表）
                             read_cache=read_cache_for(session_id, lambda: messages),
+                            # plan-522-2209：把身份带进工具上下文，审批等待策略据此豁免静默超时
+                            is_subagent=_caller_is_subagent,
+                            is_subsession=_caller_is_subsession,
                         )
                         # S12（plan-41-197）：pre_tool_use 钩子——工具调用前触发（可按工具名匹配）；
                         # 提示词型钩子文本注入下一步上下文，命令型钩子在此执行（fail-open）。
-                        try:
-                            for _hr in await hook_service.run_hooks(
-                                db, "pre_tool_use",
-                                {"tool": tool_name, "args": args,
-                                 "session_id": session_id, "turn_id": turn_id},
-                                matcher_key=tool_name,
-                            ):
-                                _inj = (_hr or {}).get("inject")
-                                if _inj:
-                                    _pending_reminders.append(f"[钩子提示词]\n{_inj}")
-                        except Exception:
-                            logger.debug("[agent] pre_tool_use 钩子执行失败(不阻断)", exc_info=True)
+                        # plan-522-2209：并行批内的调用已在执行体内各自跑过这个钩子，这里不重复。
+                        if _par_res is None:
+                            try:
+                                for _hr in await hook_service.run_hooks(
+                                    db, "pre_tool_use",
+                                    {"tool": tool_name, "args": args,
+                                     "session_id": session_id, "turn_id": turn_id},
+                                    matcher_key=tool_name,
+                                ):
+                                    _inj = (_hr or {}).get("inject")
+                                    if _inj:
+                                        _pending_reminders.append(f"[钩子提示词]\n{_inj}")
+                            except Exception:
+                                logger.debug("[agent] pre_tool_use 钩子执行失败(不阻断)", exc_info=True)
                         _ts0 = time.monotonic()
                         # v9: 写盘工具执行前读取原文件内容（精确回滚依据：只撤销 AI 改动部分）
                         _pre_paths = rollback_service.resolve_write_paths(tool_name, args) if tool_name in _WRITE_TOOLS else []
@@ -2473,12 +2556,17 @@ async def run_agent_loop(
                         # v10: 对已存在的目标文件额外建立磁盘 checkpoint（.chatcoder/checkpoints 兜底备份），
                         # 与精确回滚的 before/after 记录双保险，防数据库记录异常时无法恢复。
                         # v1.1: 取消穿透——长工具执行期间轮询 cancel_event，命中即取消底层任务
-                        _exec_task = asyncio.ensure_future(tool_executor.execute(
-                            tool_name=tool_name, args=args, call_key=call_key,
-                            agent=agent, ctx=ctx,
-                            on_approval_request=_make_approval_emitter(session_id, _pending_reminders),
-                            llm_call_id=tc.get("id"),
-                        ))
+                        # plan-522-2209：并行批已执行完的调用不再重跑，只把结果包成「已完成任务」
+                        # 送回同一条等待 / 异常 / 运行态清理路径。
+                        if _par_res is not None:
+                            _exec_task = asyncio.ensure_future(_already_done(_par_res[0]))
+                        else:
+                            _exec_task = asyncio.ensure_future(tool_executor.execute(
+                                tool_name=tool_name, args=args, call_key=call_key,
+                                agent=agent, ctx=ctx,
+                                on_approval_request=_make_approval_emitter(session_id, _pending_reminders),
+                                llm_call_id=tc.get("id"),
+                            ))
                         # plan-474-2105：登记工具运行态，等待期间邮箱消息据此决定
                         # 「能否打断 / 以什么方式让出」（写文件与等用户回答一律不打断）。
                         from app.orchestration.engine import (
@@ -2577,7 +2665,7 @@ async def run_agent_loop(
                                     _wake_event.clear()
                             except Exception:  # noqa: BLE001 — 复位失败不影响工具结果
                                 logger.debug("[agent] 打断信号复位失败 turn=%s", turn_id, exc_info=True)
-                    _dur = int((time.monotonic() - _ts0) * 1000)
+                    _dur = _par_res[1] if _par_res is not None else int((time.monotonic() - _ts0) * 1000)
                     # v31 (plan-89): 工具已执行（无论成败）即视为有产出——后续空响应
                     # 判定据此豁免 stop 空响应的 fatal，避免"任务完成后误报异常"。
                     _tool_executed = True
@@ -3167,6 +3255,288 @@ async def _poll_cancel_or_wake(
         task.cancel()
         raise asyncio.CancelledError("cancelled by user")
     return None, "mailbox"
+
+
+# ── plan-522-2209：工具并行执行 ──────────────────────────────
+# 并发上限硬编码 4：只读工具的实际瓶颈是磁盘 / 网络 / SQLite 读，4 路足以把
+# 「一条消息里 3 个 fs_read」的串行等待压掉，再多只会让单次工具的输出洪峰挤占上下文，
+# 并不会更快。不引入新配置项，避免多一个需要用户理解的旋钮。
+_PARALLEL_TOOL_LIMIT = 4
+
+# 取消时给「未启动的调用」补的合成结果。历史里不能出现「有 tool_call 无 tool_result」
+# 的孤儿，否则下一次请求会被网关以「消息序列不合法」拒绝。
+ABORTED_BEFORE_DISPATCH = "Error: tool call aborted before dispatch"
+
+# 无论是否标记并发安全都不得并行的工具：特判通道（子代理 / 工作流 / 子会话 / 上报）
+# 与互斥交互（结构化提问）。这些调用在原循环里走独立分支且带 user-visible 副作用，
+# 并行只会打乱它们的时序。
+_NEVER_PARALLEL_TOOLS: frozenset[str] = frozenset({
+    "ask_user_question",
+    "report_to_leader",
+    "spawn_subagent", "collect_results", "subagent_inspect", "cancel_subagent",
+    "send_to_subagent", "resume_subagent",
+}) | frozenset(WORKFLOW_TOOL_NAMES) | frozenset(SUBSESSION_TOOL_NAMES)
+
+
+def _parallel_batches(
+    tool_calls: list[dict],
+    *,
+    approval_mode: str,
+    permission_mode: str,
+    workspace: str,
+    is_subagent: bool,
+    is_subsession: bool,
+) -> list[list[int]]:
+    """把本步的工具调用切成可并行的批次（返回下标组）。
+
+    规则：连续的「并发安全且确定免审」调用成一批；遇到不满足的调用即断开（形成屏障），
+    该调用自己不参与并行。只有长度 ≥ 2 的组才值得并行——单个调用并行了也没有收益，
+    反而多套一层任务。
+
+    plan-522-2209：只看静态标记与策略矩阵，不查 exec_policy 规则（要 db 会话）——
+    规则只会让判定更宽松，这里保守处理，最多少并行几个调用。
+    """
+    # 判定上下文：只需裁决用到的字段，不构造真实 ToolContext（它要 db 会话，此处不该开）
+    stub = SimpleNamespace(
+        approval_mode=approval_mode,
+        permission_mode=permission_mode,
+        workspace_root=workspace,
+        is_subagent=is_subagent,
+        is_subsession=is_subsession,
+    )
+    batches: list[list[int]] = []
+    current: list[int] = []
+    for idx, tc in enumerate(tool_calls):
+        name = str(tc.get("name") or "")
+        args = tc.get("arguments", {}) or {}
+        safe = name not in _NEVER_PARALLEL_TOOLS and not _deny_tool_for_identity(
+            name, is_subsession=is_subsession, is_subagent=is_subagent,
+        )
+        tool = tool_registry.get(name) if safe else None
+        safe = bool(safe and tool is not None and getattr(tool, "concurrency_safe", False))
+        if safe and isinstance(args, dict):
+            try:
+                # 审批是互斥交互（一张卡对应一次决定）：询问档下的只读外部读取
+                # 也会弹卡，这类调用必须独占，不能与批内其它调用同时等用户。
+                safe = can_run_in_parallel(name, args, stub, risk_level=tool.risk_level)
+            except Exception:  # noqa: BLE001 — 判定异常时按独占处理（保守）
+                logger.debug("[agent] 并行判定失败 tool=%s", name, exc_info=True)
+                safe = False
+        if safe:
+            current.append(idx)
+            continue
+        if len(current) >= 2:
+            batches.append(current)
+        current = []
+    if len(current) >= 2:
+        batches.append(current)
+    return batches
+
+
+async def _run_parallel_batch(
+    batch: list[tuple[int, dict, str]],
+    *,
+    step: int,
+    workspace: str,
+    session_id: int,
+    turn_id: int,
+    agent_id: int,
+    agent_name: str,
+    agent,
+    permission_mode: str,
+    approval_mode: str,
+    sandbox_mode: str,
+    reasoning_effort: str | None,
+    model_name: str,
+    cancel_event: asyncio.Event | None,
+    read_cache,
+    is_subagent: bool,
+    is_subsession: bool,
+) -> tuple[dict[int, tuple["ToolResult", int]], list[str]]:
+    """并行执行一批调用，返回 ({下标: (结果, 耗时毫秒)}, 批内按序排列的钩子注入文本)。
+
+    plan-522-2209：这里只做**执行**——落库、messages 追加、post 钩子、回滚记账、呈现
+    全部留在原循环的提交段按模型返回顺序串行完成（历史必须可复现）。因此每路
+    执行体只读共享状态：文件系统、索引、网络；写库经由独立的 async_session_factory
+    会话，不碰主 db。
+    """
+    from app.orchestration.tools.base import ToolResult as _TR
+
+    results: dict[int, tuple[_TR, int]] = {}
+    # pre_tool_use 的注入文本按批内下标回填（并行收集、事后保序），与串行路径同一语义
+    injected: list[tuple[int, str]] = []
+    sem = asyncio.Semaphore(min(_PARALLEL_TOOL_LIMIT, len(batch)))
+
+    async def _one(idx: int, tc: dict, call_key: str) -> tuple[int, _TR, int]:
+        name = str(tc.get("name") or "")
+        args = tc.get("arguments", {}) or {}
+        aborted = _TR(ok=False, output="", error=ABORTED_BEFORE_DISPATCH, error_code="INTERNAL")
+        if cancel_event is not None and cancel_event.is_set():
+            return idx, aborted, 0
+        async with sem:
+            # 排队期间可能被取消：未启动的调用直接补合成结果，不再占资源
+            if cancel_event is not None and cancel_event.is_set():
+                return idx, aborted, 0
+            t0 = time.monotonic()
+            task: asyncio.Task | None = None
+            try:
+                async with async_session_factory() as tdb:
+                    # pre_tool_use 钩子仍在执行前跑，每路用自己的会话（不碰主 db）。
+                    # 注入文本只收集不追加，由提交段按模型返回顺序并入 _pending_reminders。
+                    try:
+                        for _hr in await hook_service.run_hooks(
+                            tdb, "pre_tool_use",
+                            {"tool": name, "args": args,
+                             "session_id": session_id, "turn_id": turn_id},
+                            matcher_key=name,
+                        ):
+                            _inj = (_hr or {}).get("inject")
+                            if _inj:
+                                injected.append((idx, _inj))
+                    except Exception:
+                        logger.debug("[agent] pre_tool_use 钩子执行失败(不阻断)", exc_info=True)
+                    ctx = ToolContext(
+                        workspace_root=workspace, session_id=session_id,
+                        task_id=turn_id, agent_id=agent_id, agent_name=agent_name,
+                        cancel_event=cancel_event,
+                        db=tdb,
+                        permission_mode=permission_mode,
+                        approval_mode=approval_mode,
+                        sandbox_mode=sandbox_mode,
+                        reasoning_effort=reasoning_effort,
+                        # 只读工具不产生增量输出（on_tool_output 只有 terminal_exec 消费）
+                        on_tool_output=None,
+                        model_name=model_name,
+                        turn_id=turn_id,
+                        read_cache=read_cache,
+                        is_subagent=is_subagent,
+                        is_subsession=is_subsession,
+                    )
+                    task = asyncio.ensure_future(tool_executor.execute(
+                        tool_name=name, args=args, call_key=call_key,
+                        agent=agent, ctx=ctx,
+                        on_approval_request=None,
+                        llm_call_id=tc.get("id"),
+                    ))
+                    result, _ = await asyncio.wait_for(
+                        asyncio.shield(_poll_cancel_or_wake(task, cancel_event, None)),
+                        timeout=settings.tool_exec_timeout_sec,
+                    )
+            except asyncio.TimeoutError:
+                if task is not None:
+                    task.cancel()
+                logger.error(
+                    "[tool.error] phase=timeout turn=%s step=%s tool=%s call_key=%s 超时(%ss) args=%s",
+                    turn_id, step, name, call_key,
+                    settings.tool_exec_timeout_sec, summarize_args(args),
+                )
+                result = _TR(
+                    ok=False, output="",
+                    error=f"[工具执行超时({settings.tool_exec_timeout_sec}s)] {name}",
+                    error_code="TIMEOUT",
+                )
+            except asyncio.CancelledError:
+                if task is not None:
+                    task.cancel()
+                result = _TR(ok=False, output="", error="[已被用户中断]", error_code="INTERNAL")
+            except Exception as exc:  # noqa: BLE001 — 单个调用异常不能炸掉整批
+                if task is not None:
+                    task.cancel()
+                log_tool_error(
+                    turn_id=turn_id, step=step, tool_name=name,
+                    call_key=call_key, exc=exc, args=args, phase="execute.parallel",
+                )
+                result = _TR(
+                    ok=False, output="",
+                    error=f"[工具执行异常] {type(exc).__name__}: {exc}",
+                    error_code="INTERNAL",
+                )
+            return idx, result, int((time.monotonic() - t0) * 1000)
+
+    gathered = await asyncio.gather(*(_one(i, tc, ck) for i, tc, ck in batch), return_exceptions=True)
+    for item in gathered:
+        if isinstance(item, BaseException):
+            continue
+        idx, result, dur = item
+        results[idx] = (result, dur)
+    # 兜底：任何没拿到结果的调用补合成结果——宁可报「已中止」，也不能留下孤儿调用
+    for i, _tc, _ck in batch:
+        results.setdefault(i, (
+            _TR(ok=False, output="", error=ABORTED_BEFORE_DISPATCH, error_code="INTERNAL"), 0,
+        ))
+    return results, [text for _i, text in sorted(injected, key=lambda x: x[0])]
+
+
+async def _already_done(value):
+    """plan-522-2209：把已算好的结果包成「立刻完成的任务」。
+
+    并行批已执行完的调用走这里回到原来的等待 / 异常 / 运行态清理路径——不复制一套
+    提交流程，提交只有一条代码路径可言，避免并行与串行两处行为漂移。
+    """
+    return value
+
+
+async def _append_aborted_tool_calls(
+    db, tool_calls: list[dict], *, start_index: int,
+    session_id: int, turn_id: int, thread_id: int | None,
+    agent_id: int, agent_name: str,
+    messages: list | None = None,
+    done_results: dict[int, "tuple[ToolResult, int]"] | None = None,
+    callkeys: dict[int, str] | None = None,
+) -> None:
+    """plan-522-2209：中断时给「还没提交的调用」补结果，保证历史里没有孤儿。
+
+    为什么必须补：中断时本步的 assistant 消息已经带着全部 tool_calls 追加进上下文，
+    若只 return 而不补 tool 消息，历史里就会留下「有 tool_call 无 tool_result」的孤儿，
+    下一次请求会被网关以消息序列不合法拒绝，用户看到的是任务莫名中断且无法继续。
+
+    已经并行执行完的调用不能一律报「已中止」——它的真实结果仍有效，只是没轮到提交；
+    这类调用按真实结果补记，只有确实未启动的才补 ABORTED_BEFORE_DISPATCH。
+    """
+    done_results = done_results or {}
+    callkeys = callkeys or {}
+    for _idx in range(start_index, len(tool_calls)):
+        tc = tool_calls[_idx]
+        name = str(tc.get("name") or "")
+        _done = done_results.get(_idx)
+        if _done is not None:
+            result, dur = _done
+            ok, output, error = bool(result.ok), str(result.output or ""), str(result.error or "")
+            # 与正常提交路径同一份呈现文本（plan-156-620）：否则同一次调用在
+            # 「已提交」与「中断补记」两条路径下落库的形态不同，重建历史时会不一致。
+            output = _present_tool_output(
+                output, tool_name=name, session_id=session_id, call_key=callkeys.get(_idx) or "",
+            ) if output else output
+        else:
+            ok, output, error, dur = False, "", ABORTED_BEFORE_DISPATCH, 0
+        call_key = callkeys.get(_idx) or ("tc_" + uuid.uuid4().hex[:12])
+        # 上下文与落库用同一份文本：只追加到 messages 而不落库会让两侧不一致
+        _model_content = output if ok and output else (error or "")
+        if messages is not None:
+            messages.append(ChatMessage(
+                role="tool", content=_model_content,
+                name=name, tool_call_id=tc.get("id", ""),
+            ))
+        try:
+            await message_service.create_message(
+                db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
+                sender_type=SenderType.AGENT.value, sender_id=agent_id,
+                msg_type=MsgType.TOOL_CALL.value,
+                content={"tool": name, "args": tc.get("arguments") or {}, "call_key": call_key,
+                         "agent_name": agent_name},
+                buffered=True,
+            )
+            await message_service.create_message(
+                db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
+                sender_type=SenderType.AGENT.value, sender_id=agent_id,
+                msg_type=MsgType.TOOL_RESULT.value,
+                content={"tool": name, "call_key": call_key, "ok": ok,
+                         "output": output, "error": error, "duration_ms": dur,
+                         "agent_name": agent_name},
+                buffered=True,
+            )
+        except Exception:  # noqa: BLE001 — 补记录失败不影响中断本身
+            logger.debug("[agent] 中断补记工具结果失败 tool=%s", name, exc_info=True)
 
 
 # 产出屏幕截图的工具前缀：电脑操控与内置浏览器（用户附件、view_image 读的图不在此列）
@@ -3814,6 +4184,45 @@ async def _await_background_subagents(manager, *, session_id: int, turn_id: int,
         return []
 
 
+def _running_subagents_note(manager) -> str:
+    """并发闸门拒绝时的「现在谁在跑」摘要（plan-20261022-subagent-reject-fast）。
+
+    主模型只有知道占用名额的是哪些任务，才能判断该 collect_results 收谁的结果、
+    哪些活可以自己做，而不是盲目重试一次派发。异常一律降级为空串，不影响拒绝本身。
+    """
+    try:
+        snap = manager.running_snapshot()
+    except Exception:
+        return ""
+    parts: list[str] = []
+    for s in snap[:5]:
+        title = str(s.get("title") or "未命名任务")
+        elapsed = s.get("elapsed_s")
+        suffix = f"（已运行 {int(elapsed)} 秒）" if isinstance(elapsed, (int, float)) else ""
+        parts.append(f"#{s.get('agent_id')} {title}{suffix}")
+    if len(snap) > 5:
+        parts.append(f"等共 {len(snap)} 个")
+    return "、".join(parts)
+
+
+def _subagent_concurrency_rejection(running: int, max_conc: int, running_note: str = "") -> str:
+    """并发已满时回给主模型的说明——**立即拒绝**，不再排队等空位。
+
+    plan-20261022-subagent-reject-fast：原实现先等 60 秒再拒绝。等待期主模型拿不到
+    任何进度、用户只看到一张卡住的卡片，最后结果仍是失败——等待不产生收益，
+    只把「并发满」这件事延后一分钟才告诉主模型。这里一次性说清原因、占用者与下一步。
+    """
+    detail = f"\n当前在运行：{running_note}" if running_note else ""
+    return (
+        f"Error: 会话内子代理并发已满（{running}/{max_conc} 个在运行），"
+        "本次未创建子代理，派发已取消。"
+        f"{detail}\n"
+        "不要重复调用 spawn_subagent 重试。请先 collect_results(wait=true) 收取已有结果，"
+        "或直接自己完成剩余工作；确需更多并行时，由用户到 设置 →「子代理」调高"
+        f"「单会话同时运行上限」（当前 {max_conc}），等有子代理结束后再派发。"
+    )
+
+
 async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent, workspace,
                              subagent_context, agent_model_id: int | None = None,
                              parent_agent_id: int | None = None) -> str:
@@ -4081,37 +4490,25 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         except Exception:
             logger.warning("[agent] 子代理类型开关检查失败(非阻塞)", exc_info=True)
 
-        # plan-474-2105：只保留「单会话并发」一道闸门——本轮不限累计总量（每轮派发总量
-        # 上限已废弃），一个会话内同时跑的子代理不得超过设置值。
-        # 旧实现排队超时后**仍然放行**，等于没有限制；这里改为超时即拒绝，
-        # 让主代理明确「收结果或自己做」，而不是无限膨胀并发。
+        # plan-474-2105 / plan-20261022-subagent-reject-fast：只保留「单会话并发」一道闸门——
+        # 本轮不限累计总量（每轮派发总量上限已废弃）。并发已满时**立即拒绝**：
+        # 原实现先排队等 60 秒再拒绝，主代理在等待期拿不到任何进度，用户只看到一张卡住的
+        # 卡片，最终仍然是失败——等待没有收益，只是把「并发满」延后一分钟才告诉主代理。
+        # 拒绝路径不创建 Agent / Task，也不占用任何名额。
         from app.core.config import settings
         _max_conc = max(1, min(30, int(getattr(settings, "max_concurrent_subagents", 4) or 4)))
         _running = manager.pending_count()
-        _gate_waited_ms = 0
-        _gate_result = "pass"
         if _running >= _max_conc:
-            _wait_s = float(getattr(settings, "subagent_queue_wait_s", 60.0) or 60.0)
-            _t0 = time.monotonic()
-            await manager.wait_one(timeout=_wait_s)
-            _gate_waited_ms = int((time.monotonic() - _t0) * 1000)
-            _running = manager.pending_count()
-            if _running >= _max_conc:
-                _gate_result = "rejected"
-                logger.info(
-                    "[subagent.gate] session=%s running=%s/%s waited=%sms result=%s tool=%s",
-                    session_id, _running, _max_conc, _gate_waited_ms, _gate_result, tool_name,
-                )
-                return (
-                    f"Error: 会话内子代理并发已满（{_running}/{_max_conc} 个在运行），"
-                    f"已等待 {_gate_waited_ms // 1000} 秒仍无空位，本次派发已取消。\n"
-                    "不要重试同一派发。请先 collect_results(wait=true) 收已有结果，"
-                    "或自己直接完成剩余工作；确需更多并行时由用户到设置 →「子代理与子会话」调高上限。"
-                )
-            _gate_result = "queued"
+            logger.info(
+                "[subagent.gate] session=%s running=%s/%s result=rejected tool=%s",
+                session_id, _running, _max_conc, tool_name,
+            )
+            return _subagent_concurrency_rejection(
+                _running, _max_conc, _running_subagents_note(manager),
+            )
         logger.info(
-            "[subagent.gate] session=%s running=%s/%s waited=%sms result=%s tool=%s",
-            session_id, _running, _max_conc, _gate_waited_ms, _gate_result, tool_name,
+            "[subagent.gate] session=%s running=%s/%s result=pass tool=%s",
+            session_id, _running, _max_conc, tool_name,
         )
 
         # 创建子代理 Agent + Task（写引擎单写线程一次事务：Agent 创建 → Task 创建 →

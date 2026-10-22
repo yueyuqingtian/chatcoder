@@ -51,6 +51,7 @@ def _render_window(
 
 class FsReadTool(Tool):
     name = "fs_read"
+    concurrency_safe = True  # plan-522-2209：纯读，不写文件、不改库
     risk_level = "low"
     description = (
         "读取工作区内指定文件的文本内容，自动显示行号。\n"

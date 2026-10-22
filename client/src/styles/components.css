@@ -353,6 +353,17 @@
 .ui-icon-btn.tone-danger:hover:not(:disabled) { color: var(--color-destructive); }
 .ui-icon-btn.size-xs { width: 24px; height: 24px; border-radius: var(--r-ctl); }
 .ui-icon-btn.size-lg { width: 32px; height: 32px; }
+/* plan-522-2209：图标固定槽位——loading 时图标换成 spinner、按钮尺寸不变，
+   否则「箭头 ↔ 旋转环」的替换会让按钮内容横向跳一下。 */
+.ui-icon-btn-slot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+}
+.ui-icon-btn:disabled.is-loading { opacity: 0.7; }
 
 /* ── ⑧ Card / ListRow：行分隔线走卡片全宽，不用负 margin ────── */
 .ui-card {
@@ -877,6 +888,16 @@
   justify-content: flex-end;
   padding: 0 8px 8px;
 }
+/* plan-20261022-release-ci：子会话结论原文按 Markdown 渲染（标题 / 列表 / 代码块），字号与提问正文同档 */
+.tc-sq-md {
+  padding: 4px 12px 8px;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.tc-sq-md > :first-child { margin-top: 0; }
+.tc-sq-md > :last-child { margin-bottom: 0; }
 
 /* 工具行：打断标记（已转后台 / 已让出等待）——中性提示色，不是失败态 */
 .tc-state-tag {

@@ -125,6 +125,11 @@ class SessionOut(BaseModel):
     # 侧栏工作流标记：attention（待你决定）/ paused / running / draft；无进行中的工作流时为 None
     workflow_state: str | None = None
     has_interrupted_turn: bool = False
+    # plan-522-2209：该会话有停在「计划待确认」的 turn（awaiting_confirmation 已落库、重启后仍在）。
+    # 侧栏要跨会话显示等待图标，前端 turns 只覆盖当前会话，因此必须由后端给出。
+    plan_awaiting: bool = False
+    # 计划待确认的 turn id（取最早一条），供等待入口定位到具体方案
+    plan_awaiting_turn_id: int | None = None
     last_activity_at: str | None = None  # 最近一条消息时间（侧栏相对时间展示）
     # 运行中 turn 的开始时间——侧栏「执行中任务」的稳定排序键（无运行中 turn 时为 None）
     running_started_at: str | None = None

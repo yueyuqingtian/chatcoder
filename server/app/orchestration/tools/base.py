@@ -47,6 +47,11 @@ class ToolContext:
     turn_id: int | None = None
     # fs_read 未变化短路的会话级缓存（见 tools/read_cache.py）；为空时不做短路
     read_cache: Any = None
+    # plan-522-2209：调用方身份（子代理 / 子会话）。审批等待策略据此区分：
+    # 子任务的审批可能发生在用户并未停留的会话里，超时自动拒绝等于让用户既看不到请求
+    # 也看不到失败原因，只看到子任务莫名中断——这类审批不设静默超时。
+    is_subagent: bool = False
+    is_subsession: bool = False
 
 
 # 失败类别：模型据此选择恢复动作（而不是只看到一段裸报错文本）
@@ -117,6 +122,11 @@ class Tool(ABC):
     risk_level: RiskLevel = "low"
     # plan-128-518：会话态工具标记——True 时不随全量工具下发，由引擎在会话满足条件时显式放行
     session_scoped: bool = False
+    # plan-522-2209：是否可与其他并发安全的调用同时执行。
+    # 默认 False（独占）——只有明确声明安全的工具才并行，未知一律串行。
+    # 判定口径参考 deepseek-harness：不是「看起来只读」就并行，而是「调用主体之间
+    # 不存在共享可变状态」。因此这里只对不写文件、不改库、不改变进程状态的工具置 True。
+    concurrency_safe: bool = False
     description: str = ""
 
     @abstractmethod

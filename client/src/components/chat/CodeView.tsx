@@ -1,7 +1,12 @@
 /** 工具调用展开区的代码视图（plan-91-393）：类 VSCode 编辑器外观——
  * 顶部文件头（文件类型图标 + 文件名 + 行数）、左侧行号槽、语法高亮、等宽字体。
- * 高亮复用已有依赖 highlight.js（按需注册常用语言，不引入全量包）；超长内容仍走 tailClamp 尾部截断。 */
-import { memo, useMemo } from "react";
+ * 高亮复用已有依赖 highlight.js（按需注册常用语言，不引入全量包）。
+ *
+ * plan-522-2209 R10：超长内容的折叠与截断标注统一交给 `ClampBlock`——
+ * 此前这里自己算 `tailClamp` 再拼「N 行 · 已省略前 X 字符」，与工具树 / 审批卡是三套口径。
+ * 本文件只保留「怎么解析成行」：`READ_HEADER` / `READ_TRUNC` 用于剥离 fs_read 的文件头与截断提示
+ * （它们混进正文会让「整段带行号」判定失败、行号错位），`NUMBERED` 决定行号起点。 */
+import { memo, useCallback, useMemo } from "react";
 import { Tooltip } from "../ui/Tooltip";
 import hljs from "highlight.js/lib/core";
 import typescript from "highlight.js/lib/languages/typescript";
@@ -21,7 +26,7 @@ import sql from "highlight.js/lib/languages/sql";
 import ini from "highlight.js/lib/languages/ini";
 import kotlin from "highlight.js/lib/languages/kotlin";
 import { FileIcon, baseName } from "../iconkit/FileIcon";
-import { tailClamp } from "../../utils/tailClamp";
+import { ClampBlock, splitClampLines, type ClampBlockRenderInfo } from "./ClampBlock";
 
 // plan-20261016-ux（问题 5）：补 sql / ini（properties、toml、conf）/ kotlin——Java 项目调研时最常读的
 // MyBatis 映射、配置文件此前全部按纯文本展示
@@ -67,45 +72,52 @@ export function highlightLines(path: string, lines: string[]): string[] | null {
 }
 
 export const CodeView = memo(function CodeView({ path, text }: { path: string; text: string }) {
-  const { text: shown, omitted } = useMemo(() => tailClamp(text), [text]);
-  const { lines, start } = useMemo(() => {
-    const raw = shown.replace(/\n$/, "").split("\n");
+  // 解析成「正文行 + 行号起点」：剥离文件头 / 截断提示后再判「整段带行号」，
+  // 保证行号槽与文件真实行号对齐（plan-522-2209 R10 保留了这段逻辑）
+  const { body, start, total } = useMemo(() => {
+    const raw = splitClampLines(text);
     if (raw.length > 1 && READ_HEADER.test(raw[0])) raw.shift();
     if (raw.length > 1 && READ_TRUNC.test(raw[raw.length - 1])) raw.pop();
     const m0 = NUMBERED.exec(raw[0] ?? "");
     const allNumbered = m0 && raw.every((l) => l === "" || NUMBERED.test(l));
-    if (allNumbered) return { lines: raw.map((l) => NUMBERED.exec(l)?.[2] ?? ""), start: Number(m0![1]) };
-    return { lines: raw, start: 1 };
-  }, [shown]);
-  const html = useMemo(() => {
-    const lang = langOf(path);
-    // 未知扩展名不再 highlightAuto（逐个语言试探，大日志文件很慢且常猜错）：保留编辑器外观、不着色
-    if (!lang) return null;
-    const src = lines.join("\n");
-    try {
-      return hljs.highlight(src, { language: lang, ignoreIllegals: true }).value;
-    } catch { return null; }
-  }, [lines, path]);
-  // 高亮结果按行切分：hljs 的 span 不会跨行闭合问题在单文件内可接受，逐行渲染保证行号对齐
-  const htmlLines = html ? html.split("\n") : null;
-  const gutterW = String(start + lines.length).length;
+    if (allNumbered) {
+      return { body: raw.map((l) => NUMBERED.exec(l)?.[2] ?? "").join("\n"), start: Number(m0![1]), total: raw.length };
+    }
+    return { body: raw.join("\n"), start: 1, total: raw.length };
+  }, [text]);
+  // 行号槽宽度按**总行数**算，不随折叠态变化——否则展开 / 收起时整块内容会横向跳一格
+  const gutterW = String(start + total).length;
+
+  /** 片段渲染：ClampBlock 把内容切成头 / 中 / 尾三段分别调用，
+   *  这里只负责把每段按行号槽渲染出来。片段各自高亮（跨片段的多行注释着色可能不连续），
+   *  这是折叠本身造成的内容断裂，展开后仍是同一份被夹着折叠行的文本。 */
+  const renderLines = useCallback((visible: string, _expanded: boolean, info: ClampBlockRenderInfo) => {
+    const lines = visible.length > 0 ? visible.split("\n") : [];
+    const htmlLines = highlightLines(path, lines);
+    return (
+      <>
+        {lines.map((l, i) => (
+          <div className="cv-line" key={info.startLine + i}>
+            <span className="cv-ln">{start + info.startLine + i}</span>
+            {htmlLines
+              ? <code className="cv-code hljs" dangerouslySetInnerHTML={{ __html: htmlLines[i] || " " }} />
+              : <code className="cv-code">{l || " "}</code>}
+          </div>
+        ))}
+      </>
+    );
+  }, [path, start]);
 
   return (
     <div className="cv">
       <div className="cv-head">
         <FileIcon name={path} size={14} />
         <Tooltip content={path} side="top"><span className="cv-name">{baseName(path)}</span></Tooltip>
-        <span className="cv-meta">{lines.length} 行{omitted > 0 ? ` · 已省略前 ${omitted.toLocaleString()} 字符` : ""}</span>
+        {/* 文件属性（共 N 行）：截断说明由 ClampBlock 的折叠行统一给出，这里不再拼「已省略…」 */}
+        <span className="cv-meta">{total} 行</span>
       </div>
       <div className="cv-body" style={{ ["--cv-gutter" as string]: `${gutterW + 2}ch` }}>
-        {lines.map((l, i) => (
-          <div className="cv-line" key={i}>
-            <span className="cv-ln">{start + i}</span>
-            {htmlLines
-              ? <code className="cv-code hljs" dangerouslySetInnerHTML={{ __html: htmlLines[i] || " " }} />
-              : <code className="cv-code">{l || " "}</code>}
-          </div>
-        ))}
+        <ClampBlock text={body} render={renderLines} lang={langOf(path) ?? undefined} copyText={text} />
       </div>
     </div>
   );

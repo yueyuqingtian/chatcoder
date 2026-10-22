@@ -64,6 +64,9 @@ _GLOBAL_FORWARD_EVENTS = frozenset({
     "approval.response",
     "subagent.pending",
     "subagent.wakeup",
+    # plan-20261022-release-ci：邮箱唤醒（子会话提问 / 子会话全部结束 / 后台命令完成）拉起的新一轮——
+    # 侧栏要在「唤醒轮创建 → turn.started」之间就把会话标成运行中，非当前会话同样需要
+    "session.wakeup",
     "message.created",
     # 工作流进度（侧栏会话标记）：只携带状态摘要，详情仍由工作流自身的会话通道提供
     "workflow.run.updated",

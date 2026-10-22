@@ -216,8 +216,8 @@ function AboutPanel() {
             <Collapse open={onSlowRoute} className="in-gap">
               <div className="about-upd-slow">
                 <IconAlertCircle size={14} className="about-upd-slow-ic" aria-hidden />
-                <span className="about-upd-slow-text">当前使用 GitHub 慢速下载，快速通道暂时连不上</span>
-                <Button variant="secondary" size="sm" icon={<IconRefresh size={13} />} onClick={() => void switchToPrimary()}>切换快速通道</Button>
+                <span className="about-upd-slow-text">当前使用 GitHub 慢速下载，镜像线路暂时连不上</span>
+                <Button variant="secondary" size="sm" icon={<IconRefresh size={13} />} onClick={() => void switchToPrimary()}>切换镜像线路</Button>
               </div>
             </Collapse>
 

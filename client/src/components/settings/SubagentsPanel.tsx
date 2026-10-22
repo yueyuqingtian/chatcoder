@@ -292,7 +292,7 @@ export function SubagentsPanel() {
         <CardRow
           className={cfg.enabled ? undefined : "settings-row-disabled"}
           title="单会话同时运行上限"
-          desc="一个会话里最多同时运行几个子代理。达到上限后新派发会排队等空位，等待 60 秒仍无空位就取消本次派发——避免一个任务把本机资源占满。"
+          desc="一个会话里最多同时运行几个子代理。达到上限后新的派发会被直接拒绝，并把当前运行数与上限告知主代理——等有子代理结束再派发即可，避免一次任务把本机资源占满。"
         >
           <Input
             type="number"

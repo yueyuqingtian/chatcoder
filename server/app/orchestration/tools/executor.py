@@ -336,6 +336,10 @@ class ServerToolExecutor(ToolExecutor):
                 # plan-75-332: 本 turn 的思考深度——审批卡「解释」默认沿用（未在设置中指定专用档位时）
                 "reasoning_effort": getattr(ctx, "reasoning_effort", None),
                 "summary": f"{ctx.agent_name} 申请{decision.label}",
+                # plan-522-2209：调用方身份——审批等待策略据此豁免静默超时（子任务的审批
+                # 可能发生在用户并未停留的会话里，超时自动拒绝会让用户两头都看不到）
+                "is_subagent": bool(getattr(ctx, "is_subagent", False)),
+                "is_subsession": bool(getattr(ctx, "is_subsession", False)),
             }
             # plan-230-1144: 不再注册全局单例回调——多会话并发时后注册者会覆盖前者，
             # 导致 A 会话的审批广播进 B 会话。approval_manager.request 现按

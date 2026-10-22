@@ -106,10 +106,24 @@ function useSmoothText(target: string): string {
 
 export function StreamingText({ active, thinking, text, processingLabel = "处理中…", waitingLabel = "等待响应…", statusLabel, threadId }: StreamingTextProps) {
   const thinkingText = thinking.trim();
+  // plan-511-2182：思考行是否出现改用原始缓冲判定。平滑器要下一帧才追上 target，
+  // 若仍用平滑后的文本，状态行卸载与思考行出现会落在两次提交里，中间出现高度为 0 的空窗。
+  // 用原始缓冲后，状态切换与数据到达同帧；思考落库（缓冲清空）时本行同样在同一次渲染里卸载。
+  const hasThinking = thinkingText !== "";
   const smoothThinking = useSmoothText(thinkingText);
   const smoothBody = useSmoothText(text);
-  // 思考行以原始缓冲为界：思考落库（缓冲清空）的同一次渲染里它就卸载，展开态随落库移交给思考块
-  const thinkingShown = thinkingText !== "" && smoothThinking !== "";
+  // plan-511-2182：正文可见性与正文渲染同帧判定，避免槽位折叠与正文出现错帧
+  const hasBody = smoothBody !== "";
+  // plan-511-2182：槽位内「等待状态行」与「正在思考行」两层同格叠放，槽位高度由格内最高层决定。
+  // 状态层只在既无思考也无正文时显示；思考行一到就由它接棒，状态层淡出但不退出布局，
+  // 于是槽位在任何时刻都至少撑起一行，切换过程中没有 0 高度窗口。
+  const slotStateShown = !hasThinking && !hasBody;
+  // plan-511-2182：有正文且无思考时槽位整体折叠为 0（样式侧同时抵消它在 flex gap 中的一份间距），
+  // 否则正文上方会多留一行空白。
+  const slotEmpty = !hasThinking && hasBody;
+  // plan-511-2182：尾部状态行位置语义不变——有正文时固定在正文下方；无正文时只有瞬时提示
+  // （重试 / 压缩等 statusLabel）才与思考行并存，默认「等待响应…」交给槽位状态层，避免两行重复。
+  const tailStateShown = hasBody || (hasThinking && Boolean(statusLabel));
   // plan-20261016-ux（问题 5）：正文里以 DSML 标签写出的工具调用（DeepSeek / 智谱）在流式期间改写成
   // 「正在准备 …」+ 代码块——正在输出的代码直接进代码框，而不是夹着标签的普通文本（见 dsmlStream）
   const displayBody = useMemo(() => rewriteDsmlForStream(smoothBody), [smoothBody]);
@@ -118,10 +132,26 @@ export function StreamingText({ active, thinking, text, processingLabel = "处�
 
   return (
     <div className="turn-group turn-flow streaming-tail">
-      {/* 当前轮次思考中：紧凑行（可点击展开）+ 单行滚动 ticker（思考落库后此行消失，思考块按时间顺序出现在消息流中） */}
-      <ChatCollapse open={thinkingShown} className="in-gap">
-        <StreamingThinkingRow text={smoothThinking} threadId={threadId} />
-      </ChatCollapse>
+      {/* plan-511-2182：把「等待响应…」状态行与「正在思考」紧凑行放进同一个 grid 单元（同格叠放），
+          槽位在任何时刻都至少撑起一行。原来状态行是 .turn-flow 的独立子项，思考行出现的那一帧
+          状态行被卸载、而 ChatCollapse 的 children 要到下一次提交才挂载，中间出现 0 高度空窗，
+          虚拟列表两次测高、贴底跟随两次修正，看起来就是整块先下移一行再上移一行。
+          叠放后状态层只淡出、不退出布局，高度由格内最高层决定，空窗不存在。 */}
+      <div className="stream-state-slot" data-empty={slotEmpty ? "true" : undefined}>
+        <div className="stream-state-grid">
+          {/* 思考层：可点击展开 + 单行滚动 ticker（思考落库后此行消失，思考块按时间顺序出现在消息流中）；
+              plan-511-2182：槽位内部是 grid 且无 gap，折叠间距只需由槽位自己抵消，无需再给折叠容器加间距类 */}
+          <div className="stream-state-layer" data-show={hasThinking ? "true" : "false"}>
+            <ChatCollapse open={hasThinking}>
+              <StreamingThinkingRow text={smoothThinking} threadId={threadId} />
+            </ChatCollapse>
+          </div>
+          {/* 状态层：思考行出现前的「等待响应…」/ 瞬时提示；被思考层接棒后仍留在格内撑住一行高度 */}
+          <div className="stream-state-layer" data-show={slotStateShown ? "true" : "false"}>
+            <StateLine label={statusLabel ?? waitingLabel} />
+          </div>
+        </div>
+      </div>
       {displayBody && (
         <div className="turn-item turn-item-text">
           <div className="turn-agent-text">
@@ -140,13 +170,11 @@ export function StreamingText({ active, thinking, text, processingLabel = "处�
           状态行被整条跳过。而思考行渲染在**正文上方**，当「思考流 + 正文同时产出」
           （典型：AI 边思考边写方案文档/正文）时，正文尾部既无三点光标、又无状态行，
           消息流底部完全静默，用户看不到"还在进行"。
-          现改为：只要有正文流式，尾部一律补状态行；仅当「无正文且无瞬态状态」
-          时才交给上方思考行独表"进行中"（避免思考行 + 状态行两行重复）。 */}
-      {(statusLabel || smoothBody || !thinkingShown) && (
-        <StateLine
-          label={statusLabel ?? (smoothBody ? processingLabel : waitingLabel)}
-        />
-      )}
+
+          plan-511-2182：门控收敛为 tailStateShown——有正文时本条固定在正文下方；
+          无正文时只有 statusLabel 才与思考行并存，默认「等待响应…」已移交槽位状态层，
+          语义与改动前一致，且不再需要与思考行互相抑制。 */}
+      {tailStateShown && <StateLine label={statusLabel ?? processingLabel} />}
     </div>
   );
 }

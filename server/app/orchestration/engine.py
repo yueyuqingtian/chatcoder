@@ -363,19 +363,50 @@ def pop_interrupt(turn_id: int) -> dict | None:
     return st
 
 
-def _mailbox_pending(session_id: int) -> list[dict]:
+def _mailbox_pending(session_id: int, replayed_upto: int | None = None) -> list[dict]:
     """取邮箱里排队的消息（plan-474-2105）。
 
     P2 汇报不会主动唤醒会话（避免白烧 token），由这里在下一次 turn 开始时并入注入项；
     P0 控制面消息通常已被 deliver 即时投递，取到的是「没能唤醒成功」的残留项。
+    replayed_upto：见 `_history_cutoff`——已被本轮历史回放的落库副本不再重复注入。
     """
     try:
         from app.orchestration import mailbox
 
-        return mailbox.take_pending(session_id)
+        return mailbox.take_pending(session_id, replayed_upto=replayed_upto)
     except Exception:  # noqa: BLE001 — 取队列失败不能影响 turn 启动
         logger.debug("[mailbox] 取排队消息失败(非阻塞) session=%s", session_id, exc_info=True)
         return []
+
+
+async def _history_cutoff(db: AsyncSession, session_id: int) -> int | None:
+    """本轮上下文装配前，该会话已有的最大消息 id（plan-20261022-release-ci）。
+
+    子会话的提问 / 汇报 / 结论先落库为主会话的系统消息，历史装配会把它作为一条用户输入回放；
+    同一条消息若还留在邮箱队列或注入队列里，第一次模型调用前又会被注入一遍——结论原文在同一轮
+    上下文里出现两次。装配前记下这条判定线，落库副本 id 不超过它的注入项直接丢弃。
+    """
+    try:
+        from sqlalchemy import func as _func, select as _select
+
+        from app.persistence.models.message import Message as _Message
+
+        return (await db.execute(
+            _select(_func.max(_Message.id)).where(_Message.session_id == session_id)
+        )).scalar()
+    except Exception:  # noqa: BLE001 — 取不到判定线就不去重（宁可重复，不丢消息）
+        logger.debug("[engine] 取历史判定线失败(非阻塞) session=%s", session_id, exc_info=True)
+        return None
+
+
+def _not_replayed(items: list[dict], replayed_upto: int | None) -> list[dict]:
+    """去掉已被历史回放的注入项（落库副本 id 不超过判定线）。"""
+    if replayed_upto is None:
+        return items
+    return [
+        it for it in items
+        if not (isinstance(it, dict) and isinstance(it.get("message_id"), int) and it["message_id"] <= replayed_upto)
+    ]
 
 
 def inject_input(turn_id: int, item: dict) -> bool:
@@ -757,6 +788,42 @@ async def _continue_goal_turn(session_id: int, prev_turn_id: int) -> None:
                 "继续执行剩余工作。声称完成前先做完成审计：对照目标逐条核验证据（运行测试、读取结果）；"
                 f"若目标已实际达成，请调用 {_goal_tool} 工具标记完成并给出总结；未达成就继续推进。"
             )
+            # plan-522-2209：续跑轮此前用硬编码中文 f-string，绕过了 build_continuation_prompt，
+            # 导致规则语言与语言纪律在续跑轮失效（该工厂成了死代码）。现在拼上工厂产出，
+            # 让续跑轮与正常轮共享同一套语言约束与证据纪律。
+            # 语言来源必须与上下文构建同源（全局规则 > 项目规则 > 用户消息）——
+            # 不能凭空读一个不存在的 settings.reply_language，否则永远回落到 auto。
+            try:
+                from app.orchestration.context_manager import (
+                    _resolve_rule_language,
+                    _resolve_session_language,
+                )
+                from app.orchestration.prompts.continuation import build_continuation_prompt
+                from app.services import project_service
+
+                _goal_project = (
+                    await project_service.get_project(db, session.project_id)
+                    if getattr(session, "project_id", None) else None
+                )
+                _goal_ws = getattr(session, "worktree_path", None) or (
+                    getattr(_goal_project, "path", "") or ""
+                )
+                _user_lang = await _resolve_session_language(
+                    db, session_id, session.goal_text or "",
+                )
+                _reply_lang, _ = await _resolve_rule_language(_goal_ws, _goal_project, _user_lang)
+                prompt = (
+                    build_continuation_prompt(
+                        objective=session.goal_text or "",
+                        tokens_used=next_n,
+                        token_budget=None,
+                        language=_reply_lang,
+                    )
+                    + "\n\n---\n\n"
+                    + prompt
+                )
+            except Exception:
+                logger.debug("[goal] 续跑提示词组装失败，沿用基础文案", exc_info=True)
             user_msg = await message_service.create_message(
                 db, session_id=session_id,
                 sender_type=SenderType.USER.value,
@@ -1410,6 +1477,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             _plan_history = await _collect_plan_history(db, session, workspace)
             if _plan_history:
                 logger.info("[engine] turn=%s 注入 Plan History %d 字符", turn_id, len(_plan_history))
+        _replayed_upto = await _history_cutoff(db, session_id)
         bundle = await build_main_context(
             db, agent=main_agent, session=session, project=project, turn=turn,
             user_message=user_text, attachments=attachments,
@@ -1587,10 +1655,11 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             # v36 (plan-321-1600 M3): 同通道附带子代理完成通知——后台子代理结束时
             # 主代理无需轮询 collect_results 即可得知（已读过的结果不会重复推送）。
             # plan-474-2105：再并入邮箱里排队的汇报类消息（P2 不主动唤醒，靠本轮带走）。
+            # plan-20261022-release-ci：已被本轮历史回放的子会话消息不再重复注入（见 _history_cutoff）。
             injected_inputs_provider=lambda: (
-                drain_injected_inputs(turn_id)
-                + _mailbox_pending(session_id)
-                + [{"content": _note} for _note in mgr.drain_completions()]
+                _not_replayed(drain_injected_inputs(turn_id), _replayed_upto)
+                + _mailbox_pending(session_id, _replayed_upto)
+                + [{"content": _note, "source": "subagent"} for _note in mgr.drain_completions()]
             ),
         )
 
@@ -2476,6 +2545,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         # 确认执行阶段按智能体模式运行，建议卡口径与 start_turn 一致
         from app.orchestration.tools.suggestion import suggestion_allowed as _sugg_allowed
         _suggestion_on_confirm = _sugg_allowed("agent", session)
+        _replayed_upto = await _history_cutoff(db, session.id)
         bundle = await build_main_context(
             db, agent=main_agent, session=session, project=project, turn=turn,
             user_message=original_request,
@@ -2507,7 +2577,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             f"【方案文档】\n{plan_doc or '（文档读取失败，请依据用户原始请求执行）'}\n\n"
             "【执行要求】\n"
             "1. 先用 todo_write 按文档重建执行清单——分几步、每步粒度由你决定，"
-            "以可独立验证的交付物为界；之前的调研清单已清空。\n"
+            "以完整可交付的改动为界（一组相关改动一起完成；是否中途验证由你按风险与改动量判断，交付前再整体验证一次）；之前的调研清单已清空。\n"
             "2. 再按文档推进：文档标注为可并行子会话执行的独立步骤，优先派发子会话并行处理"
             "（派发后继续推进其余步骤，不要轮询）；有前后依赖的步骤自己串行做。\n"
             "3. 每完成一步立即用 todo_write 把该项标记为 completed、下一项标记为"
@@ -2569,9 +2639,9 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             # 与 start_turn 同口径：确认执行期间同样要把注入消息（用户追加 / 子会话提问与汇报）和子代理完成通知
             # 交给主代理。此前这里没有注入通道，这些消息在本轮里永远读不到；等待类工具也依赖它来让出等待。
             injected_inputs_provider=lambda: (
-                drain_injected_inputs(turn_id)
-                + _mailbox_pending(session.id)
-                + [{"content": _note} for _note in mgr.drain_completions()]
+                _not_replayed(drain_injected_inputs(turn_id), _replayed_upto)
+                + _mailbox_pending(session.id, _replayed_upto)
+                + [{"content": _note, "source": "subagent"} for _note in mgr.drain_completions()]
             ),
         )
 

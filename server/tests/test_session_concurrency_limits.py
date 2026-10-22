@@ -22,6 +22,29 @@ def test_config_defaults():
     assert app_settings.max_subsessions_per_parent == 4
     # 每轮派发总量限制本轮已废弃：只限并发、不限累计总量
     assert not hasattr(app_settings, "max_subagents_per_turn")
+    # plan-20261022-subagent-reject-fast：并发满直接拒绝，排队等待配置已移除
+    assert not hasattr(app_settings, "subagent_queue_wait_s")
+
+
+def test_gate_rejection_explains_why_and_what_next():
+    """并发满的拒绝文案：说明未创建、当前占用、可执行动作。
+
+    该函数是纯同步函数——拒绝路径不再等待空位（等待期对主模型静默，
+    最终仍会失败），用例同时锁住「不排队」这一语义。
+    """
+    from app.orchestration.agent_loop import _subagent_concurrency_rejection
+
+    msg = _subagent_concurrency_rejection(2, 2, "#253 调研 A（已运行 12 秒）")
+    assert msg.startswith("Error:")
+    assert "2/2" in msg
+    assert "本次未创建子代理" in msg
+    assert "#253 调研 A" in msg
+    assert "collect_results(wait=true)" in msg
+    assert "设置 →「子代理」" in msg
+    # 没有运行中摘要时也不留空行残句
+    plain = _subagent_concurrency_rejection(1, 1)
+    assert "当前在运行：" not in plain
+    assert "1/1" in plain
 
 
 @pytest.fixture

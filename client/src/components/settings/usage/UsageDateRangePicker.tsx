@@ -98,9 +98,10 @@ export function UsageDateRangePicker({ mode, start, end, disabled, onApply }: Pr
 
   return (
     <div className="usage-drp" ref={rootRef}>
+      {/* plan-20261022-release-ci：与旁边的供应商下拉、刷新按钮同一外观（描边、透明底），筛选栏不再一灰两白 */}
       <button
         type="button"
-        className="btn btn-secondary btn-sm usage-drp-trigger"
+        className="btn btn-ghost btn-sm usage-drp-trigger"
         disabled={disabled}
         aria-haspopup="dialog"
         aria-expanded={open}
