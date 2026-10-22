@@ -1,15 +1,25 @@
-﻿# chatcoder 一键打包脚本(Windows)
-# 产物:0.8.5/chatcoder-Setup-<version>.exe（electron-builder 输出目录见 package.json build.directories.output）
-# 用法:powershell -ExecutionPolicy Bypass -File build-release.ps1 [-Publish]
-#   -Publish: 打包后自动创建 GitHub Release 并上传产物（需 gh CLI 已登录，见 README 发布章节）
+﻿# chatcoder 一键打包脚本(Windows；本地与 GitHub Actions 共用同一份)
+# 产物目录取 package.json 的 build.directories.output（下文 $outDir），不再在脚本里写死。
+# 用法:
+#   powershell -ExecutionPolicy Bypass -File build-release.ps1            本地打包
+#   powershell -ExecutionPolicy Bypass -File build-release.ps1 -Publish   本地打包并发布到 GitHub Releases（需 gh 已登录）
+#   pwsh -File build-release.ps1 -CI                                      GitHub Actions：跳过「部署到本地运行目录」，发布由工作流负责
+# 正式发布推荐走 tag：git tag v<version> && git push origin v<version>，由 .github/workflows/release.yml 自动打包发布。
 param(
-    [switch]$Publish
+    [switch]$Publish,
+    [switch]$CI
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
-Write-Host "=== [1/6] 内置能力预检（Chromium / 桌面操控内核）===" -ForegroundColor Cyan
+$pkg = Get-Content "$root\package.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+$version = $pkg.version
+$outDir = Join-Path $root $pkg.build.directories.output
+$exeName = "chatcoder-Setup-$version.exe"
+Write-Host ("版本 v{0}，产物目录 {1}" -f $version, $outDir) -ForegroundColor Cyan
+
+Write-Host "=== [1/7] 内置能力预检（Chromium / 桌面操控内核）===" -ForegroundColor Cyan
 # 幂等：已准备好则跳过下载；浏览器由 chatcoder-server.spec 打进 _internal/ms-playwright
 & "$root\server\prepare-playwright-browsers.ps1"
 
@@ -17,16 +27,16 @@ Write-Host "=== [1/6] 内置能力预检（Chromium / 桌面操控内核）===" 
 # 由 chatcoder-server.spec 打进 _internal/desktop-core。
 & "$root\tools\desktop-core\build.ps1" -OutDir "$root\server\vendor\desktop-core"
 
-Write-Host "=== [2/6] 构建前端 ===" -ForegroundColor Cyan
+Write-Host "=== [2/7] 构建前端 ===" -ForegroundColor Cyan
 Push-Location "$root\client"
 npm run build
 if ($LASTEXITCODE -ne 0) { throw "前端构建失败" }
 Pop-Location
 
-Write-Host "=== [3/6] 打包后端(PyInstaller, --clean 全量重建) ===" -ForegroundColor Cyan
+Write-Host "=== [3/7] 打包后端(PyInstaller, --clean 全量重建) ===" -ForegroundColor Cyan
 Push-Location "$root\server"
 $pyi = ".venv\Scripts\pyinstaller.exe"
-if (-not (Test-Path $pyi)) { throw "未找到 PyInstaller,请先 .venv\Scripts\pip install pyinstaller" }
+if (-not (Test-Path $pyi)) { throw "未找到 PyInstaller,请先 .venv\Scripts\pip install -r requirements-build.txt" }
 # --clean 必须保留：增量构建在模块列表不变时不会重建 PYZ，会把旧字节码打进 exe
 & $pyi chatcoder-server.spec --noconfirm --clean
 if ($LASTEXITCODE -ne 0) { throw "后端打包失败" }
@@ -60,46 +70,82 @@ if (-not (Test-Path $coreExe)) {
 }
 Write-Host ("桌面操控内核: {0} ({1:N0} KB)" -f (Split-Path $coreExe -Leaf), ((Get-Item $coreExe).Length/1KB)) -ForegroundColor Yellow
 
-Write-Host "=== [4/6] 部署后端到运行目录 ===" -ForegroundColor Cyan
-# 同步产物到目标目录，不重启任何正在运行的进程
-& "$root\deploy-server.ps1" -TargetDir "0.8.5\win-unpacked\resources\server\chatcoder-server"
-
-Write-Host "=== [5/6] 打包桌面应用(electron-builder) ===" -ForegroundColor Cyan
-& npx electron-builder --win
-if ($LASTEXITCODE -ne 0) { throw "electron-builder 打包失败" }
-
-Write-Host "=== [6/6] 完成 ===" -ForegroundColor Green
-Get-ChildItem "$root\0.8.5\*.exe" | ForEach-Object {
-    Write-Host ("产物: " + $_.Name + " (" + [math]::Round($_.Length/1MB,1) + " MB)") -ForegroundColor Yellow
+if ($CI) {
+    Write-Host "=== [4/7] 部署后端到本地运行目录（CI 跳过）===" -ForegroundColor DarkGray
+} else {
+    Write-Host "=== [4/7] 部署后端到本地运行目录 ===" -ForegroundColor Cyan
+    # 同步产物到目标目录，不重启任何正在运行的进程
+    & "$root\deploy-server.ps1" -TargetDir (Join-Path $outDir "win-unpacked\resources\server\chatcoder-server")
 }
 
-# ── 发布到 GitHub Releases（自动更新源：latest.yml + exe + blockmap）──
+Write-Host "=== [5/7] 生成更新说明（CHANGELOG 当前版本区块）===" -ForegroundColor Cyan
+# 更新说明与 CHANGELOG 同源：同一份文本既是 GitHub Release 正文，也由 electron-builder 写进 latest.yml 的
+# releaseNotes——三条更新线路（自建源 / 镜像 / GitHub）的客户端都能直接看到「更新了什么」。
+New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+$notesFile = Join-Path $outDir "release-notes.md"
+$changelog = Get-Content "$root\CHANGELOG.md" -Raw -Encoding UTF8
+$notesText = ""
+if ($changelog -match "(?ms)^## v$([regex]::Escape($version))\s*\r?\n(.*?)(?=^## |\z)") {
+    $notesText = $matches[1].Trim()
+}
+if (-not $notesText) {
+    if ($CI -or $Publish) { throw "CHANGELOG.md 缺少 ## v$version 区块，发布前请先写好本版本的更新内容" }
+    $notesText = "ChatCoder v$version"
+    Write-Host "CHANGELOG.md 没有 v$version 区块，更新说明暂用版本号占位（本地打包不阻塞）" -ForegroundColor Yellow
+}
+[IO.File]::WriteAllText($notesFile, ($notesText -replace "`r`n", "`n"), (New-Object Text.UTF8Encoding $false))
+Write-Host ("更新说明: {0}（{1} 字）" -f $notesFile, $notesText.Length) -ForegroundColor Yellow
+
+Write-Host "=== [6/7] 打包桌面应用(electron-builder) ===" -ForegroundColor Cyan
+# --publish never：上传统一由下方 -Publish 或 GitHub Actions 负责，避免 electron-builder 隐式发布
+& npx electron-builder --win --publish never "--config.releaseInfo.releaseNotesFile=$notesFile"
+if ($LASTEXITCODE -ne 0) { throw "electron-builder 打包失败" }
+
+Write-Host "=== [7/7] 安装包自检 ===" -ForegroundColor Cyan
+& node "$root\tools\verify-package.cjs" (Join-Path $outDir "win-unpacked")
+if ($LASTEXITCODE -ne 0) { throw "安装包自检未通过" }
+$assets = @(
+    (Join-Path $outDir $exeName),
+    (Join-Path $outDir "$exeName.blockmap"),
+    (Join-Path $outDir "latest.yml")
+)
+foreach ($a in $assets) {
+    if (-not (Test-Path $a)) { throw "发布三件套缺失: $a" }
+}
+$ymlPath = Join-Path $outDir "latest.yml"
+$yml = Get-Content $ymlPath -Raw -Encoding UTF8
+if ($yml -notmatch "(?m)^version:\s*$([regex]::Escape($version))\s*$") { throw "latest.yml 的版本号与 package.json（$version）不一致" }
+if ($yml -notmatch "(?m)^releaseNotes:") {
+    # 兜底：electron-builder 没写入时自己追加块标量（顶层键，放在文件末尾即可）
+    $lines = ($notesText -replace "`r`n", "`n").Split("`n") | ForEach-Object { ("  " + $_).TrimEnd() }
+    $block = "releaseNotes: |`n" + ($lines -join "`n")
+    [IO.File]::WriteAllText($ymlPath, ($yml.TrimEnd() + "`n" + $block + "`n"), (New-Object Text.UTF8Encoding $false))
+    Write-Host "latest.yml 未带更新说明，已补写 releaseNotes" -ForegroundColor Yellow
+}
+foreach ($a in $assets) {
+    Write-Host ("产物: {0} ({1:N1} MB)" -f (Split-Path $a -Leaf), ((Get-Item $a).Length/1MB)) -ForegroundColor Yellow
+}
+
+# ── 本地发布到 GitHub Releases（自动更新源：latest.yml + exe + blockmap）──
+# 正式发布推荐推送 tag 交给 GitHub Actions；此处保留本地发布能力，便于 Actions 不可用时兜底。
 if ($Publish) {
-    $version = (Get-Content "$root\package.json" | ConvertFrom-Json).version
     $tag = "v$version"
     Write-Host "=== 发布 $tag 到 GitHub Releases ===" -ForegroundColor Cyan
-    # electron-updater 检查的是 latest 这个 tag 的动态链接，tag 名不影响检查；
-    # 资产名必须与 latest.yml 中 url 一致（package.json nsis.artifactName 已保证无空格）。
-    # 更新说明与 CHANGELOG 同源：提取当前版本区块作为 release notes。
-    # 服务器同步脚本会把 notes 注入自建源 latest.yml，客户端「更新说明」展示它。
-    $notesFile = "$root\0.8.5\release-notes.md"
-    $notesArgs = @("--notes", "ChatCoder $tag")
-    $changelog = Get-Content "$root\CHANGELOG.md" -Raw -Encoding UTF8
-    if ($changelog -match "(?ms)^## v$([regex]::Escape($version))\s*\r?\n(.*?)(?=^## |\z)") {
-        $notesText = $matches[1].Trim()
-        if ($notesText) {
-            [IO.File]::WriteAllText($notesFile, $notesText, (New-Object Text.UTF8Encoding $false))
-            $notesArgs = @("--notes-file", $notesFile)
-        }
-    }
-    gh release create $tag "$root\0.8.5\chatcoder-Setup-$version.exe" "$root\0.8.5\latest.yml" "$root\0.8.5\chatcoder-Setup-$version.exe.blockmap" --title $tag @notesArgs
+    # 先建草稿、传完三件套再公开：公开的瞬间资产就是齐的，
+    # 自建源的定时同步不会抓到「有 release 没安装包」的半成品。
+    gh release create $tag @assets --title $tag --notes-file $notesFile --draft
     if ($LASTEXITCODE -ne 0) { throw "gh release create 失败" }
+    gh release edit $tag --draft=false --latest
+    if ($LASTEXITCODE -ne 0) { throw "gh release edit（公开草稿）失败" }
     Write-Host "发布完成: https://github.com/yueyuqingtian/chatcoder/releases/tag/$tag" -ForegroundColor Green
 
-    # 同步自建更新源：服务器从 GitHub 拉取三件套（plan-90-390），
-    # 避免本地跨境上行（约 0.2MB/s）成为发布瓶颈；含校验、清理旧版本与 releaseNotes 注入。
-    Write-Host "=== 同步自建更新源（服务器从 GitHub 拉取）===" -ForegroundColor Cyan
+    # 自建更新源已改为服务器定时从 GitHub 拉取（tools/server-sync-updates.sh，见 docs/release.md），
+    # 这里只是立即触发一次，省去最多 5 分钟的等待；失败不影响已完成的发布。
+    Write-Host "=== 触发自建更新源同步（服务器直接从 GitHub 拉取）===" -ForegroundColor Cyan
     python "$root\tools\sync-updates.py" --version $version
-    if ($LASTEXITCODE -ne 0) { throw "自建更新源同步失败" }
-    Write-Host "更新源就绪: https://service.guyueyu.asia/updates/latest.yml" -ForegroundColor Green
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "立即同步失败：服务器的定时同步仍会在 5 分钟内从 GitHub 拉取新版本" -ForegroundColor Yellow
+    } else {
+        Write-Host "更新源就绪: https://service.guyueyu.asia/updates/latest.yml" -ForegroundColor Green
+    }
 }

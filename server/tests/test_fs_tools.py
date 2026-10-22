@@ -74,12 +74,12 @@ async def test_fs_read_outside_resolved_without_config(workspace, tmp_path):
 @pytest.mark.asyncio
 async def test_fs_read_truncates_large_file(workspace):
     f = workspace / "big.txt"
-    # v1.1: v15 起 tool_output_chars_read=16000，需超过该上限才能触发截断
+    # 单行超过 2000 字符即按行截断并标注原长（窗口口径，见 tools/fs_read.py）
     f.write_text("X" * 20000, encoding="utf-8")
     tool = FsReadTool()
     r = await tool.run({"path": "big.txt"}, _ctx(workspace))
     assert r.ok is True
-    assert "已截断" in r.output
+    assert "行截断，原长 20000 字符" in r.output
     assert r.data["total_lines"] == 1
 
 
@@ -123,13 +123,13 @@ async def test_fs_read_numeric_string_args(workspace):
 
 @pytest.mark.asyncio
 async def test_fs_read_limit_clamped(workspace):
-    """plan-645: limit 超上限钳到 400，传 0/负数钳到 1。"""
+    """plan-645: limit 超上限钳到 2000（窗口口径），传 0/负数钳到 1。"""
     f = workspace / "many.txt"
     f.write_text("\n".join(f"line{i}" for i in range(1, 451)) + "\n", encoding="utf-8")
     tool = FsReadTool()
     r = await tool.run({"path": "many.txt", "limit": 99999}, _ctx(workspace))
     assert r.ok is True
-    assert r.data["shown_lines"] == "1-400"
+    assert r.data["shown_lines"] == "1-450"
     r0 = await tool.run({"path": "many.txt", "limit": 0}, _ctx(workspace))
     assert r0.ok is True
     assert r0.data["shown_lines"] == "1-1"

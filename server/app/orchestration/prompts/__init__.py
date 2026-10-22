@@ -1,4 +1,12 @@
 """提示词分层包（v2，英文）。统一导出，便于集中维护。"""
+
+# plan-522-2209：提示词版本号。
+# 此前全库没有任何版本标识，提示词一旦改动就无从追溯——线上出现行为差异时，只能靠翻 git
+# 历史猜是哪次改动生效的，也无法把 CHANGELOG 条目与提示词行为变更对应起来。
+# 改动本包内任何提示词文本时同步提升此值，并把该值随 turn 记录落库（见 engine/agent_loop 的
+# turn 元数据），排查时能直接确认「这一轮用的是哪一版提示词」。
+PROMPT_VERSION = "2026.10.22-1"
+
 from app.orchestration.prompts.base import (
     WORKFLOW_COMMON,
     build_default_agent_prompt,

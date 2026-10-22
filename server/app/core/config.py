@@ -43,7 +43,6 @@ class Settings(BaseSettings):
     default_context_window: int = 1000000
     # v3.0: 上下文压缩相关配置（对齐 codex openai_models.rs）
     # 是否启用自动压缩
-    context_compaction_enabled: bool = True
     # v6.1: 对齐 codex -- auto_compact_token_limit = context_window * 90%
     auto_compact_threshold_ratio: float = 0.90
     # v16: 已移除 api_copy_fold_ratio（按占用比例折叠工具结果的隐式压缩）——
@@ -53,6 +52,10 @@ class Settings(BaseSettings):
     auto_confirm_plan: bool = False
     # v0.3: 审批超时(秒),超时自动拒绝
     approval_timeout_sec: int = 300
+    # plan-522-2209: 子会话 / 子代理的审批等待上限（秒），0 或负数 = 不超时，只等用户处理或 turn 被取消。
+    # 子任务的审批请求往往发生在用户并未停留的会话里，超时自动拒绝会让用户既看不到请求、
+    # 也看不到失败原因，只看到子任务莫名中断；因此这一类不设静默超时。
+    approval_timeout_sec_subsession: int = 0
     # v0.3: agent loop 单任务最大步数（仅作为绝对兜底防死循环的熔断值）
     # v3.5: 不再用固定步数限制，改为边际效应递减检测 + token 预算驱动
     # 0 或负数表示不限制步数
@@ -111,9 +114,9 @@ class Settings(BaseSettings):
     agent_text_temperature: float = 0.7
 
     # v6.5: 模型单次输出最大 token 数。
-    # 不限制输出：默认 0 = 请求不携带 max_tokens 字段，由网关/模型自身输出上限决定
-    # （修复"输出达到 token 上限，可能不完整"）。需要显式上限时（如个别网关默认值
-    # 很小导致截断）再配置具体数值。
+    # 不限制输出：默认 0 = 请求不携带 max_tokens 字段，由网关/模型自身输出上限决定；
+    # 例外：官方直连 api.anthropic.com 该字段必填，由 anthropic 适配器兜底为软件输出上限 128K。
+    # 需要显式上限时（如个别网关默认值很小导致截断）在设置中心「最大输出」中配置。
     agent_max_output_tokens: int = 0
 
     # v28: 模型流式响应空闲超时（秒）——SSE 流两次数据帧之间的最大间隔。
@@ -240,7 +243,17 @@ class Settings(BaseSettings):
 
     # v1.1: 工具输出字符阈值分级（痛点1：替代全局 3000 硬截断）
     # v15: fs_read 上限提到 16000，与内存/落库截断对齐，避免大文件一次读不全被迫分页重读
-    tool_output_chars_read: int = 16000        # fs_read / fs_list
+    # 字节口径（UTF-8）：中文 1 字符≈3 字节，按字符计会低估 token。fs_read 的窗口即其自身的单次预算，
+    # 不再套用 MAX_TOOL_OUTPUT_CHARS 的头部截断，避免“窗口→截成前段→再读”的循环。
+    tool_output_bytes_read: int = 32768        # fs_read 单次窗口上限（行窗口与字节双上限，先到者为准）
+    tool_output_chars_read: int = 16000        # 已弃用：仅保留读取兼容，运行时以 tool_output_bytes_read 为准
+    # 其余工具同为字节口径（参照 zcode：grep 20000 字节、终端 30000 字节；网页与兜底取中间值）。
+    # 终端保留头部 8KB + 尾部 22KB（报错多在尾部），超出部分落盘并给出续读方式。
+    tool_output_bytes_grep: int = 20480        # fs_grep / codebase_search
+    tool_output_bytes_terminal: int = 30720    # terminal_exec（头 8KB + 尾 22KB 呈现）
+    tool_output_bytes_terminal_tail: int = 22528  # 终端输出尾部保留量
+    tool_output_bytes_web: int = 12288         # web_fetch / web_search
+    tool_output_bytes_default: int = 16384     # 其它工具兜底
     tool_output_chars_grep: int = 16000        # fs_grep / codebase_search
     tool_output_chars_terminal: int = 12000    # terminal_exec
     tool_output_chars_web: int = 8000          # web_fetch / web_search
@@ -249,6 +262,11 @@ class Settings(BaseSettings):
 
     # v1.1: 增强搜索（ripgrep）；关闭或无 rg 时 fs_grep 回退纯 Python 逐行匹配
     enhanced_search: bool = True
+
+    # plan-522-2209：git 网络命令的 SSL 后端。Windows 上默认的 schannel 经 HTTP 代理访问
+    # GitHub 会握手挂死（实测同一仓库 git pull 挂 357 秒，换 openssl 后秒回）。
+    # auto = Windows 且检测到代理环境变量时用 openssl，其余平台/场景用 git 默认。
+    git_ssl_backend: str = "auto"   # auto / schannel / openssl / default
     # v31.2: 代理（HTTP/HTTPS），用于搜索引擎等 web 工具的网络请求；
     # 来源：设置面板 http_proxy 字段（持久化在 ~/.chatcoder/config.json），
     # 运行时写入本字段；启动时从 config 恢复。优先于环境变量 HTTP_PROXY/HTTPS_PROXY。
@@ -293,7 +311,6 @@ class Settings(BaseSettings):
     context_main_summarize_ratio: float = 0.15     # 主会话摘要触发阈值比例
     context_main_summarize_batch_ratio: float = 0.10  # 每次摘要目标 token 量比例
     context_thread_window_ratio: float = 0.30      # 子代理线程窗口比例
-    context_auto_compact_threshold_ratio: float = 0.90  # 自动压缩触发阈值比例
     # v6.1: reasoning_effort 控制推理深度（对齐 codex ReasoningEffort enum）
     # codex 默认 Medium；可选 none/minimal/low/medium/high/xhigh/max
     # none 表示不传（用模型默认，兼容不支持 reasoning 的模型/网关）
@@ -319,9 +336,8 @@ class Settings(BaseSettings):
     super_summary_keep_latest: int = 3  # 超级摘要保留最新 N 条不压缩
 
     # v4.6: 单会话 token 预算--超过此值任务自动终止
-    session_token_budget: int = 2_000_000
     # plan-474-2105：单会话子代理并发上限：单个会话内同时运行的子代理数；
-    # 达到后新派发先排队等空位，超时即拒绝。设置中心可改（1~30）。
+    # 达到后新的派发直接拒绝（不再排队等待），设置中心可改（1~30）。
     max_concurrent_subagents: int = 4
     # plan-474-2105：单会话子会话并发上限：单个主会话下同时运行的子会话数；
     # 达到后创建直接拒绝。设置中心可改（1~30）。
@@ -359,8 +375,8 @@ class Settings(BaseSettings):
         "server/app/persistence/migrations.py,server/app/gateway/schemas.py,"
         "client/src/store/i18n.ts,server/app/orchestration/engine.py"
     )
-    # v36: 排队等待上限（秒）——等不到空位时不再干等，直接放行，避免阻塞主代理。
-    subagent_queue_wait_s: float = 60.0
+    # plan-20261022-subagent-reject-fast：原来的「并发满先排队等待 N 秒」配置已移除。
+    # 实测等待期对主代理完全静默、最终仍会被拒绝，等待没有收益；现在并发满直接拒绝。
     # plan-330-1648 M7: 单个子代理的 token 预算上限（0 = 不限）。
     # spawn 时下发为 run_agent_loop 的 token_budget，超限即熔断并按结构化汇报“预算耗尽”，
     # 避免子代理无人看管地无限消耗（此前 spawn 路径从不传预算）。
@@ -382,9 +398,14 @@ class Settings(BaseSettings):
     agent_progress_reminder_interval: int = 8
     # plan-19-82 增强（对齐 ZCode runtime-reminders）：语言重申间隔——每 N 个 agent 步
     # 重新注入一次语言锚（ZCode 的 TURNS_BETWEEN_ATTACHMENTS=5 为轮次口径，本项目按
-    # 步计，取更保守的 10）。语言纪律此前只在上下文构建时静态注入一次，长 turn 内
-    # 锚点随步骤稀释后不再重申，是确认执行后语言漂移的直接原因；0 = 禁用。
-    language_reminder_interval: int = 1
+    # 步计）。语言纪律此前只在上下文构建时静态注入一次，长 turn 内锚点随步骤稀释后
+    # 不再重申，是确认执行后语言漂移的直接原因。
+    #
+    # plan-522-2209：默认改为 0（关闭定时重申）。定时重申是「每步都注入一遍完整语言纪律」，
+    # 长 turn 下成本随步数线性增长，而真正管用的是按需纠正——agent_loop 每步检测模型实际
+    # 输出的语言，一旦与锚定语言不符立即注入（见 _lang_drift_reminders 分支）。保留本开关
+    # 供需要更密集约束的场景手动调回。
+    language_reminder_interval: int = 0
     # plan-19-82 增强：规则遵循重申间隔——每 N 步重申用户规则优先级，对抗长上下文
     # 下规则段被工具结果挤出注意力范围（对齐 ZCode 对 AGENTS.md 的 OVERRIDE 语义）；
     # 0 = 禁用。默认比语言重申更稀疏（规则比语言更稳定，无需过密）。

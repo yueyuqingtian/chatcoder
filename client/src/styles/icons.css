@@ -136,7 +136,8 @@ svg.ic[data-open="true"] .ic-pane { opacity: var(--ic-fill-active); }
 .ic-foldermorph[data-open="true"] .ic-fm-paper { opacity: 1; }
 
 /* ── 状态图标（components/icons/StatusIcon.tsx）── */
-.st-icon { display: inline-grid; place-items: center; flex-shrink: 0; color: var(--st-color, var(--text-3)); }
+/* plan-522-2209：从「进行中转圈（--accent）」切到「等待问号（--waiting）」时颜色需要有过渡，不瞬跳 */
+.st-icon { display: inline-grid; place-items: center; flex-shrink: 0; color: var(--st-color, var(--text-3)); transition: color var(--dur-fast); }
 .st-icon > svg { grid-area: 1 / 1; overflow: visible; }
 .st-icon[data-status="pending"] { --st-color: var(--text-3); }
 .st-icon[data-status="queued"] { --st-color: var(--text-3); }
@@ -154,6 +155,9 @@ svg.ic[data-open="true"] .ic-pane { opacity: var(--ic-fill-active); }
 .st-icon .st-pulse { transform-box: fill-box; transform-origin: center; animation: st-breathe var(--dur-loop) var(--ease-in-out) infinite; }
 @keyframes st-breathe { 0%, 100% { transform: scale(0.7); opacity: 0.55; } 50% { transform: scale(1); opacity: 1; } }
 :root[data-motion="reduced"] .st-icon .st-pulse { animation: none; }
+/* plan-522-2209：等待用户处理的会话状态槽图标（子会话 / 父会话 / 审批卡标题行共用）。
+   与「进行中」转圈靠形状与颜色双重区分：转圈是 --accent，本图标是 --waiting。 */
+.st-icon.st-waiting { --st-color: var(--waiting); }
 
 /* ── 角色色磁贴（components/iconkit/ToneTile.tsx）：角色色淡底 + 线性图标；
  *    闲置灰度（安静）→ 宿主聚焦恢复角色色并轻轻抬起（弹簧），图标自带的部件微动效同时触发 ── */
@@ -239,7 +243,7 @@ svg.lx .lx-draw { stroke-dasharray: 14; stroke-dashoffset: 0; }
   .lx-draw { animation: lx-draw var(--dur-5) var(--ease-emphasized-decel); }
   .lx-fill { fill-opacity: 0.1; }
 }
-:where(button, [role="button"], [role="tab"], .sb-nav-item, .sb-user-settings):active svg.lx { transform: scale(0.88); transition-duration: 90ms; }
+:where(button, [role="button"], [role="tab"], .sb-nav-item, .sb-user-settings):active svg.lx { transform: scale(0.88); transition-duration: var(--dur-1); }
 :is(.active, .is-active, [aria-selected="true"], [aria-current="page"], [data-state="open"]) svg.lx:not(.ic-duo) { color: var(--ic-accent); }
 :is(.active, .is-active, [aria-selected="true"], [aria-current="page"], [data-state="open"]) svg.lx .lx-fill { fill-opacity: 0.16; }
 @keyframes lx-blink { 50% { opacity: 0; } }

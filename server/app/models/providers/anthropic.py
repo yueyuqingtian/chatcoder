@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator
 import httpx
 
 from app.models.base import ModelProvider, mark_first_token
-from app.models.providers.temperature_policy import pick_temperature
+from app.models.providers.temperature_policy import request_temperature
 from app.models.providers.tool_args import parse_tool_args
 from app.models.schemas import ChatRequest, ChatResponse, Usage
 
@@ -44,6 +44,27 @@ def _uses_adaptive_thinking(model: str) -> bool:
         return False
 
 
+# 官方直连未显式配置输出上限时的兜底（api.anthropic.com 要求必填）。
+# 此前写死 4096：Claude 5.x 的 adaptive 思考与正文共用该预算，思考一吃满即正文截断/为空。
+# 统一取软件输出上限 128K（与设置中心「单次最大输出」的最大档位一致）；
+# 用户在设置中心选择的最大输出会以 request.max_tokens 传入，优先于此兜底。
+_OFFICIAL_MAX_OUTPUT_TOKENS = 128_000
+
+
+# 官方各型号的单次输出上限不同：超过上限会 400（"max_tokens: N > M"）。统一兜底 128K 之后，
+# 首次遇到更低上限的型号时按报错自学上限并记住，后续请求直接收紧，不再每步先失败一次。
+_LEARNED_OUTPUT_CAPS: dict[str, int] = {}
+
+
+def _apply_learned_cap(model: str, value: int) -> int:
+    cap = _LEARNED_OUTPUT_CAPS.get(model or "")
+    return min(value, cap) if cap else value
+
+
+def _official_default_max_tokens(model: str) -> int:
+    return _OFFICIAL_MAX_OUTPUT_TOKENS
+
+
 def _output_effort(effort: str) -> str:
     """chatcoder 档位 → output_config.effort 合法值（调用方已排除 none）。"""
     value = (effort or "").strip().lower()
@@ -61,6 +82,20 @@ def _degrade_thinking_payload(payload: dict, message: str) -> dict | None:
     """
     lowered = (message or "").lower()
     degraded = dict(payload)
+
+    # 输出上限超出该模型允许值（"max_tokens: 128000 > 64000, which is the maximum ..."）：
+    # 按报错里的上限收紧后重试，不让整轮失败；思考预算须小于 max_tokens，同步收紧。
+    cap_match = re.search(r"max_tokens:\s*(\d+)\s*>\s*(\d+)", lowered)
+    if cap_match:
+        cap = int(cap_match.group(2))
+        if cap <= 0 or cap >= int(degraded.get("max_tokens") or 0):
+            return None
+        degraded["max_tokens"] = cap
+        _LEARNED_OUTPUT_CAPS[str(degraded.get("model") or "")] = cap
+        thinking = degraded.get("thinking")
+        if isinstance(thinking, dict) and int(thinking.get("budget_tokens") or 0) >= cap:
+            degraded["thinking"] = {**thinking, "budget_tokens": max(1024, cap // 2)}
+        return degraded
 
     if "requires adaptive thinking" in lowered:
         thinking = degraded.get("thinking")
@@ -133,12 +168,22 @@ class AnthropicProvider(ModelProvider):
         system_parts: list[str] = []
         messages: list[dict] = []
 
+        seen_dialogue = False  # 是否已出现过非系统消息（之后的 system 属于对话中途的动态提醒）
         for m in request.messages:
-            # v6.1: developer 角色（对齐 codex）——Anthropic 无 developer 概念，合并到顶层 system
+            # v6.1: developer 角色（对齐 codex）——Anthropic 无 developer 概念，开头的系统段合并到顶层 system。
+            # 对话中途注入的动态提醒（语言 / 规则 / 计划状态等）若也并入顶层 system，会被挪到开头、失去
+            # “贴近动作点”的效果；这里改为原位置的 user 消息（system-reminder 包裹），Anthropic 会合并相邻同角色消息。
             if m.role in ("system", "developer"):
                 if m.content:
-                    system_parts.append(m.content)
+                    if seen_dialogue:
+                        messages.append({
+                            "role": "user",
+                            "content": f"<system-reminder>\n{m.content}\n</system-reminder>",
+                        })
+                    else:
+                        system_parts.append(m.content)
                 continue
+            seen_dialogue = True
 
             if m.role == "tool":
                 messages.append({
@@ -210,13 +255,14 @@ class AnthropicProvider(ModelProvider):
         if request.max_tokens:
             payload["max_tokens"] = request.max_tokens
         elif "api.anthropic.com" in self._base_url.lower():
-            payload["max_tokens"] = 4096
+            payload["max_tokens"] = _official_default_max_tokens(request.model or self._default_model)
+        if payload.get("max_tokens") and "api.anthropic.com" in self._base_url.lower():
+            payload["max_tokens"] = _apply_learned_cap(payload["model"], int(payload["max_tokens"]))
         if system_parts:
             payload["system"] = "\n\n".join(system_parts)
-        # Claude/Anthropic 系只接受默认温度，非默认值（agent 循环的 0.3/0.7）
-        # 会被网关 400 "does not support non-default temperature"。
-        _temp = pick_temperature(
-            request.temperature,
+        # 温度统一取值：思考开启时不设置温度；否则取设置值（Claude 系只下发默认温度，见 temperature_policy）
+        _temp = request_temperature(
+            request,
             model_name=request.model,
             extra_names=(self._default_model,),
             base_url=self._base_url,
@@ -250,8 +296,7 @@ class AnthropicProvider(ModelProvider):
                 )
                 if _official and payload.get("max_tokens", 0) <= budget:
                     payload["max_tokens"] = budget + 4096
-            # Anthropic thinking 要求 temperature=1（adaptive 同样只接受默认温度）
-            payload["temperature"] = 1
+            # 思考开启时不设置温度（temperature_policy.request_temperature 已返回 None，字段不下发）
         elif request.thinking is False or _effort == "none":
             payload["thinking"] = {"type": "disabled"}
         if request.tools:

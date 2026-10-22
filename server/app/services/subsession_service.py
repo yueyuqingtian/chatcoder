@@ -63,7 +63,17 @@ _FINISH_STATUS_TEXT: dict[str, str] = {
     "completed": "已完成",
     "failed": "执行失败",
     "interrupted": "被中断",
+    "cancelled": "被中断",
+    "awaiting_confirmation": "已出计划、等待确认",
 }
+# plan-20261022-release-ci：子会话停在「计划待确认」——既不在跑也没结束，单列一个状态，
+# 否则进度查询把它报成「进行中」，主代理用 wait=true 等它会立刻返回、再等再返回
+STATUS_AWAITING = "awaiting_confirmation"
+# plan-20261022-release-ci：由主代理 / 同级子会话派发的 turn（create_subsession / send_to_subsession /
+# message_peer）。只有这些 turn 结束时才会叫醒空闲的主代理汇总；用户在子会话里自己发的消息跑完，
+# 结论照常排队回报，但不打扰主会话。
+_DISPATCHED_TURNS: set[int] = set()
+_DISPATCHED_TURNS_MAX = 4096
 # plan-156-621：同一 (子会话, turn) 只回报一次。正常收尾与中断 finalizer 都可能触发，
 # 两次回报会让主代理上下文出现两条相同结论、主会话多一条系统消息。
 _REPORTED_TURNS: set[tuple[int, int]] = set()
@@ -213,6 +223,25 @@ async def _running_turn_id(db: AsyncSession, session_id: int) -> int | None:
     return res.scalar_one_or_none()
 
 
+def _mark_dispatched(turn_id: int | None) -> None:
+    """登记一个由主代理 / 同级子会话派发的 turn（见 _DISPATCHED_TURNS）。"""
+    if turn_id is None:
+        return
+    if len(_DISPATCHED_TURNS) >= _DISPATCHED_TURNS_MAX:
+        _DISPATCHED_TURNS.clear()
+    _DISPATCHED_TURNS.add(int(turn_id))
+
+
+async def _siblings_running(db: AsyncSession, root_session_id: int, *, exclude: int) -> bool:
+    """同一主会话下，除 exclude 外是否还有子会话在跑（决定结论回报要不要叫醒主代理）。"""
+    for child in await list_children(db, root_session_id):
+        if child.id == exclude or child.status == "archived":
+            continue
+        if await _running_turn_id(db, child.id) is not None:
+            return True
+    return False
+
+
 # ── 创建 ────────────────────────────────────────────────────
 
 
@@ -267,8 +296,12 @@ async def create_subsession(
     mode: str | None = None,
     start: bool = True,
     purpose: str = "",
+    dispatched: bool = False,
 ) -> int:
     """创建一个子会话并（默认）立刻下发首条任务。
+
+    dispatched：由主代理的工具调用创建（而不是用户在界面上建的）——这一轮跑完、且同组子会话
+    都已结束时，结论会叫醒空闲的主代理汇总（见 _report_finish）。
 
     - `side_parent_id` 一律指向根主会话：子会话派生仍是同级，不产生嵌套；
     - 执行模式由调用方（主代理）指定，权限模式继承主会话——模式是能力边界，
@@ -323,7 +356,7 @@ async def create_subsession(
             first = _compose_first_message(task, context)
             if operator:
                 first = f"{OPERATOR_BRIEF}\n\n---\n\n{first}"
-            await start_turn_in_subsession(db, sid, first)
+            await start_turn_in_subsession(db, sid, first, dispatched=dispatched)
     await _broadcast_created(root, sid, clean_title)
     return sid
 
@@ -415,8 +448,13 @@ async def _broadcast_created(root_session_id: int, subsession_id: int, title: st
 # ── 下发首条 / 后续消息 ──────────────────────────────────────
 
 
-async def start_turn_in_subsession(db: AsyncSession, session_id: int, text: str) -> int:
-    """在子会话里创建用户消息与 turn，并异步启动执行。返回 turn id。"""
+async def start_turn_in_subsession(
+    db: AsyncSession, session_id: int, text: str, *, dispatched: bool = False,
+) -> int:
+    """在子会话里创建用户消息与 turn，并异步启动执行。返回 turn id。
+
+    dispatched：这一轮由主代理 / 同级子会话派发（结束时可能叫醒主代理，见 _report_finish）。
+    """
     from app.core.enums import MsgType, SenderType
     from app.orchestration import engine
     from app.services import message_service, turn_service
@@ -437,20 +475,59 @@ async def start_turn_in_subsession(db: AsyncSession, session_id: int, text: str)
     )
     await message_service.patch_message(user_msg.id, turn_id=turn_id)
     user_msg.turn_id = turn_id
+    if dispatched:
+        _mark_dispatched(turn_id)
+
+    async def _fail_turn(reason: str) -> None:
+        """turn 没能正常跑起来：必须落成 failed 并回报主代理。
+
+        否则库里的 turn 永远是 running——子会话在左栏一直转圈、占着并发名额（连续失败几次后
+        再也建不出新的子会话），主代理的等待也只能熬到超时。
+        """
+        from app.orchestration.agent_events import broadcast
+        from app.persistence.database import async_session_factory
+
+        try:
+            async with async_session_factory() as s:
+                await turn_service.update_turn_status(s, turn_id, "failed", summary=reason[:200], completed=True)
+                await s.commit()
+            await broadcast(session_id, {
+                "event": "turn.updated",
+                "payload": {"turn_id": turn_id, "status": "failed", "session_id": session_id},
+            })
+            schedule_finish_report(session_id, turn_id, "failed", reason)
+        except Exception:  # noqa: BLE001 — 兜底收尾失败只记日志
+            logger.warning("[subsession] 失败收尾落库失败 sid=%s turn=%s", session_id, turn_id, exc_info=True)
 
     async def _run() -> None:
         # 独立会话：用新的 session 连接跑 turn，避免与调用方事务互相阻塞
         from app.persistence.database import async_session_factory
 
         async with async_session_factory() as s:
-            await engine.start_turn(s, turn_id=turn_id)
+            try:
+                res = await engine.start_turn(s, turn_id=turn_id)
+                await s.commit()
+            except Exception as exc:  # noqa: BLE001
+                await s.rollback()
+                logger.warning("[subsession] turn=%s 执行异常 sid=%s", turn_id, session_id, exc_info=True)
+                await _fail_turn(f"执行异常：{type(exc).__name__}")
+                return
+        # start_turn 在入口校验失败（项目不存在 / 会话不存在）时只返回 ok=False、不改 turn 状态
+        if isinstance(res, dict) and res.get("ok") is False and res.get("error") not in (None, "turn already running"):
+            await _fail_turn(str(res.get("error") or "启动失败"))
 
     _spawn(_run())
     return turn_id
 
 
-async def send_message(db: AsyncSession, subsession_id: int, message: str) -> dict:
-    """向子会话发消息：运行中 → 注入当前 turn；空闲 / 已中断 → 新开一个 turn。"""
+async def send_message(
+    db: AsyncSession, subsession_id: int, message: str, *, dispatched: bool = False,
+) -> dict:
+    """向子会话发消息：运行中 → 注入当前 turn；空闲 / 已中断 → 新开一个 turn。
+
+    dispatched：主代理发来的（工具调用）。注入到用户自己在跑的那一轮时，那一轮也随之算作派发——
+    主代理既然介入了，结束后就该把结论交还给它。
+    """
     from app.orchestration import engine
 
     await _require_subsession(db, subsession_id)
@@ -462,9 +539,11 @@ async def send_message(db: AsyncSession, subsession_id: int, message: str) -> di
         ok = engine.inject_input(running, {"content": message})
         if not ok:
             raise SubsessionError("子会话正在运行，但注入通道不可用，请稍后重试")
+        if dispatched:
+            _mark_dispatched(running)
         return {"subsession_id": subsession_id, "delivered": "injected", "turn_id": running}
 
-    turn_id = await start_turn_in_subsession(db, subsession_id, message)
+    turn_id = await start_turn_in_subsession(db, subsession_id, message, dispatched=dispatched)
     return {"subsession_id": subsession_id, "delivered": "new_turn", "turn_id": turn_id}
 
 
@@ -514,6 +593,7 @@ async def describe(db: AsyncSession, subsession_id: int) -> SubsessionBrief:
     last_output = ""
     report = ""
     files: list[str] = []
+    risks: list[str] = []
 
     last_turn = (await db.execute(
         select(Turn).where(Turn.session_id == subsession_id).order_by(Turn.id.desc()).limit(1)
@@ -522,7 +602,7 @@ async def describe(db: AsyncSession, subsession_id: int) -> SubsessionBrief:
         if last_turn.status in _TERMINAL_TURN_STATUS:
             status = _TERMINAL_TURN_STATUS[last_turn.status]
         elif last_turn.status == "awaiting_confirmation":
-            status = STATUS_RUNNING
+            status = STATUS_AWAITING
 
     if last_turn is not None:
         report = await final_answer(db, subsession_id, last_turn.id)
@@ -533,11 +613,11 @@ async def describe(db: AsyncSession, subsession_id: int) -> SubsessionBrief:
             last_output = "; ".join(
                 f"{s.title}[{s.status}]" for s in steps[-6:] if s.title
             )[:_OUTPUT_PREVIEW_CHARS]
-        # todo 落库的步骤带 agent_id / note，可用于汇总已改动文件
-        for s in steps:
-            note = (s.note or "").strip()
-            if note and note not in files and ("/" in note or "\\" in note):
-                files.append(note)
+        # plan-522-2209：涉及文件与风险改由**工具调用记录**得出。
+        # 此前 files 靠「todo 步骤的 note 里是否含 `/` 或 `\`」猜——note 是给人看的说明文字，
+        # 含斜杠的句子（如「见 a/b 文档」）会被误收，而真正写入却没写 note 的步骤会漏收。
+        # 现在只认写入类工具的 path 参数，口径与「这轮实际改了哪些文件」一致。
+        files, risks = await _turn_files_and_risks(db, subsession_id, last_turn.id)
 
     return SubsessionBrief(
         subsession_id=subsession_id,
@@ -548,7 +628,100 @@ async def describe(db: AsyncSession, subsession_id: int) -> SubsessionBrief:
         last_output=last_output,
         report=report,
         files=files[:20],
+        risks=risks[:_RISKS_MAX],
     )
+
+
+# 写入类工具：只有这些工具的 path / paths 参数才算「涉及文件」
+_WRITE_TOOLS = frozenset({"fs_write", "editor_apply_diff", "multi_file_edit"})
+# 风险条目上限（工具返回 / 左栏行共用同一口径，太多等于没重点）
+_RISKS_MAX = 3
+# 扫描的工具消息条数上限：只看最后一轮的尾部，避免大轮次把内存拉满
+_RISK_SCAN_LIMIT = 300
+
+
+async def _turn_files_and_risks(
+    db: AsyncSession, session_id: int, turn_id: int,
+) -> tuple[list[str], list[str]]:
+    """从最后一轮的工具调用 / 结果消息里提取「涉及文件」与「风险」。
+
+    plan-522-2209：`SubsessionBrief.risks` 字段一直存在但从未被赋值——模型查进度时
+    永远拿不到「这一轮出了什么问题」，只能自己再点开工具结果逐条翻。这里兑现该字段：
+    失败的工具、超时、被拒绝的审批各算一条风险，按发生顺序最多 3 条。
+
+    返回 (files, risks)；任何异常都退化为空列表，不让进度查询因为提取失败而报错。
+    """
+    from app.core.enums import MsgType
+    from app.persistence.models.message import Message
+
+    try:
+        rows = (await db.execute(
+            select(Message)
+            .where(
+                Message.session_id == session_id,
+                Message.turn_id == turn_id,
+                Message.msg_type.in_([MsgType.TOOL_CALL.value, MsgType.TOOL_RESULT.value]),
+                Message.deleted.is_(False),
+            )
+            .order_by(Message.id.asc())
+            .limit(_RISK_SCAN_LIMIT)
+        )).scalars().all()
+    except Exception:
+        logger.debug("[subsession] 工具消息读取失败(非阻塞) session=%s turn=%s", session_id, turn_id, exc_info=True)
+        return [], []
+
+    files: list[str] = []
+    risks: list[str] = []
+    # call_key → 工具名（TOOL_CALL 先到，TOOL_RESULT 靠它配对，结果消息自身不带 args）
+    call_tool: dict[str, str] = {}
+
+    for msg in rows:
+        content = msg.content or {}
+        tool = str(content.get("tool") or "")
+        call_key = str(content.get("call_key") or "")
+        if msg.msg_type == MsgType.TOOL_CALL.value:
+            if call_key:
+                call_tool[call_key] = tool
+            if tool in _WRITE_TOOLS:
+                args = content.get("args")
+                if isinstance(args, str):
+                    try:
+                        import json as _json
+                        args = _json.loads(args)
+                    except Exception:
+                        args = {}
+                if isinstance(args, dict):
+                    paths: list[str] = []
+                    single = args.get("path") or args.get("file")
+                    if isinstance(single, str) and single.strip():
+                        paths.append(single.strip())
+                    many = args.get("paths") or args.get("files")
+                    if isinstance(many, list):
+                        paths.extend(str(x).strip() for x in many if str(x).strip())
+                    for p in paths:
+                        if p not in files:
+                            files.append(p)
+            continue
+
+        # TOOL_RESULT：判定失败 / 超时 / 审批拒绝
+        ok = content.get("ok")
+        if ok is not False:
+            continue
+        err = str(content.get("error") or "").strip()
+        code = str(content.get("error_code") or "").strip()
+        name = tool or call_tool.get(call_key, "") or "工具"
+        if code == "TIMEOUT" or "超时" in err:
+            label = f"{name} 超时"
+        elif code == "PERMISSION" or "审批" in err or "权限" in err:
+            label = f"{name} 被拒绝或未获审批"
+        elif code == "SANDBOX":
+            label = f"{name} 被策略拦截"
+        else:
+            label = f"{name} 执行失败"
+        detail = err[:80].replace("\n", " ")
+        risks.append(f"{label}：{detail}" if detail else label)
+
+    return files, risks
 
 
 async def collect(
@@ -558,8 +731,12 @@ async def collect(
     subsession_id: int | None = None,
     wait: bool = False,
     timeout_s: float = 300.0,
+    interrupt_check=None,
 ) -> list[SubsessionBrief]:
-    """汇总子会话进度；`wait=True` 时阻塞到目标全部结束（替代反复轮询）。"""
+    """汇总子会话进度；`wait=True` 时阻塞到目标全部结束（替代反复轮询）。
+
+    interrupt_check：等待期间轮询的判定，为真则提前返回当前进度（调用方有新消息要处理）。
+    """
     if subsession_id is not None:
         await require_owned(db, parent_session_id, subsession_id)
         targets = [subsession_id]
@@ -568,7 +745,7 @@ async def collect(
         targets = [c.id for c in children if c.status != "archived"]
 
     if wait and targets:
-        await _wait_until_idle(targets, timeout_s)
+        await _wait_until_idle(targets, timeout_s, interrupt_check)
         # 调用方会话仍持有等待前的读快照，看不到终态；也不能 rollback 它（会丢掉调用方
         # 尚未提交的改动）——改用新连接读取结果
         from app.persistence.database import async_session_factory
@@ -578,7 +755,7 @@ async def collect(
     return [await describe(db, sid) for sid in targets]
 
 
-async def _wait_until_idle(session_ids: list[int], timeout_s: float) -> None:
+async def _wait_until_idle(session_ids: list[int], timeout_s: float, interrupt_check=None) -> None:
     """轮询等待（服务端内部用，短间隔 + 超时上限，不占用模型上下文）。
 
     plan-156-620：每次轮询都用**新的数据库会话**。此前复用调用方的会话，
@@ -590,6 +767,8 @@ async def _wait_until_idle(session_ids: list[int], timeout_s: float) -> None:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + max(1.0, timeout_s)
     while loop.time() < deadline:
+        if interrupt_check is not None and interrupt_check():
+            return
         async with async_session_factory() as fresh:
             pending = [sid for sid in session_ids if await _running_turn_id(fresh, sid) is not None]
         if not pending:
@@ -644,13 +823,36 @@ def register_question(question_id: str) -> None:
     }
 
 
-async def wait_for_question_reply(question_id: str, timeout_s: float) -> str | None:
-    """子会话侧等待答复；超时返回 None（调用方提示按最佳判断继续）。"""
+async def wait_for_question_reply(
+    question_id: str, timeout_s: float, interrupt_check=None,
+) -> str | None:
+    """子会话侧等待答复；超时返回 None（调用方提示按最佳判断继续）。
+
+    interrupt_check：等待期间轮询的「有新消息」判定（用户直接给子会话发了消息、同级消息等）。
+    为真则放弃等待（撤销登记，主代理之后的答复按普通消息送达）并返回 None——
+    否则这些消息要等到提问超时（默认 10 分钟）才会被子会话读到。
+    """
     entry = _PENDING_QUESTIONS.get(question_id)
     if entry is None:
         return None
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(1.0, float(timeout_s))
     try:
-        await asyncio.wait_for(entry["event"].wait(), timeout=max(1.0, float(timeout_s)))
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            slice_s = min(remaining, 0.5) if interrupt_check is not None else remaining
+            try:
+                await asyncio.wait_for(entry["event"].wait(), timeout=slice_s)
+                break
+            except asyncio.TimeoutError:
+                if interrupt_check is not None and interrupt_check():
+                    _PENDING_QUESTIONS.pop(question_id, None)
+                    logger.info("[subsession] 提问等待被新消息打断 question=%s", question_id)
+                    return None
+                if loop.time() >= deadline:
+                    raise
     except asyncio.TimeoutError:
         _PENDING_QUESTIONS.pop(question_id, None)
         logger.info("[subsession] 提问等待超时 question=%s", question_id)
@@ -672,6 +874,16 @@ def resolve_question(question_id: str, reply: str) -> bool:
     return True
 
 
+def discard_question(question_id: str | None) -> None:
+    """撤销一个没人等待的提问登记（wait=false 的提问）。
+
+    否则主代理带 question_id 答复时会命中这条登记、被告知「已唤醒子会话」，
+    而实际上没有任何等待方——答复凭空丢失，子会话永远收不到。撤销后答复走普通消息送达。
+    """
+    if question_id:
+        _PENDING_QUESTIONS.pop(question_id, None)
+
+
 def pending_question_count() -> int:
     """当前挂起的提问数（诊断用）。"""
     return len(_PENDING_QUESTIONS)
@@ -690,14 +902,19 @@ async def notify_main(
     subsession_id: int,
     message: str,
     kind: str = "progress",
+    wake: bool = False,
 ) -> dict:
-    """子会话 → 主代理：提问 / 汇报统一经会话邮箱投递。
+    """子会话 → 主代理：提问 / 汇报 / 结论统一经会话邮箱投递。
 
     plan-474-2105：
       · 主代理运行中 → 注入当前轮；提问属控制面（P0），同时请求打断次要等待
         （写文件 / 等用户回答不打断，动作结束后立刻生效）；
       · 主代理空闲 → 提问会拉起一轮（否则子会话白等），汇报只排队等下一轮带走；
       · 提问生成 `question_id` 一并送达，主代理答复时必须带回该 id（见 send_to_subsession）。
+    plan-20261022-release-ci：
+      · kind="result"（一轮结束的结论）单独成类（P1）：不打断运行中的主代理；wake=True 时
+        主代理空闲也会被叫醒汇总（由 _report_finish 判定：派发的轮次、且同组子会话都已结束）；
+      · 落库消息的 id 随邮件一起走，下一轮历史已回放时不再重复注入。
     """
     from app.orchestration import mailbox
     from app.persistence.models.message import Session
@@ -722,13 +939,20 @@ async def notify_main(
         label = _NOTIFY_KIND_LABEL.get(kind, _NOTIFY_KIND_LABEL["progress"])
         text = f"{_PENDING_PREFIX}「{title}」{label}：{message}"
 
+    mail_kind = (
+        mailbox.MailKind.SUBSESSION_QUESTION if kind == "question"
+        else mailbox.MailKind.SUBSESSION_RESULT if kind == "result"
+        else mailbox.MailKind.SUBSESSION_REPORT
+    )
+
     # 1) 先落库：上下文装配据此把它作为一条独立输入交给主代理（保留既有标记，不改装配口径）；
     #    同时保证投递因任何原因失败时消息仍在库里，下一轮仍能读到。
+    message_id: int | None = None
     try:
         from app.core.enums import MsgType, SenderType
         from app.services import message_service
 
-        await message_service.create_message(
+        msg = await message_service.create_message(
             db, session_id=root,
             sender_type=SenderType.SYSTEM.value,
             msg_type=MsgType.TEXT.value,
@@ -738,27 +962,25 @@ async def notify_main(
                 "subsession_id": subsession_id,
                 **({"question_id": question_id} if question_id else {}),
                 # plan-474-2105：与 mailbox.publish 的落库口径保持一致——前端据 mailbox.kind
-                # 直接识别「子会话提问卡 / 汇报」，不必再解析文本前缀。
+                # 直接识别「子会话提问 / 汇报 / 结论」，不必再解析文本前缀。
                 "mailbox": {
-                    "kind": "subsession_question" if kind == "question" else "subsession_report",
-                    "priority": 0 if kind == "question" else 2,
+                    "kind": mail_kind.value,
+                    "priority": mailbox.PRIORITY.get(mail_kind.value, 2),
                     "source_session_id": subsession_id,
                     "question_id": question_id,
                 },
             },
         )
+        message_id = getattr(msg, "id", None)
     except Exception:  # noqa: BLE001 — 落库失败不应让子会话任务中断
         logger.warning("[subsession] 主代理汇报落库失败 sid=%s", subsession_id, exc_info=True)
 
-    # 2) 投递（不再重复落库）：运行中注入并请求打断；空闲时提问拉起一轮、汇报排队
-    mail_kind = (
-        mailbox.MailKind.SUBSESSION_QUESTION if kind == "question"
-        else mailbox.MailKind.SUBSESSION_REPORT
-    )
+    # 2) 投递（不再重复落库）：运行中注入并请求打断；空闲时提问拉起一轮、汇报排队、结论按 wake 决定
     try:
         res = await mailbox.publish(
             mail_kind, session_id=root, text=text,
             source_session_id=subsession_id, question_id=question_id, persist=False,
+            wake=wake, message_id=message_id,
         )
     except Exception:  # noqa: BLE001 — 投递异常按已排队处理（消息已落库）
         logger.warning("[subsession] 邮箱投递失败 sid=%s", subsession_id, exc_info=True)
@@ -838,8 +1060,9 @@ async def message_peer(
         # 同一会话并发两个 turn，消息流与进度会互相覆盖。
         raise SubsessionError(f"子会话 #{to_subsession} 正在运行，消息暂时无法送达，请稍后重试")
 
-    # 对端空闲：直接给它开一轮，把消息作为任务说明（子会话之间无需「点确认」）
-    turn_id = await start_turn_in_subsession(db, to_subsession, label)
+    # 对端空闲：直接给它开一轮，把消息作为任务说明（子会话之间无需「点确认」）；
+    # 同级派发的这一轮也算自动化工作的一部分，跑完同样参与「全部结束 → 叫醒主代理」
+    turn_id = await start_turn_in_subsession(db, to_subsession, label, dispatched=True)
     return {"delivered": "new_turn", "turn_id": turn_id}
 
 
@@ -872,6 +1095,10 @@ async def _report_finish(session_id: int, turn_id: int, final_status: str, summa
         _REPORTED_TURNS.clear()
         _REPORTED_TURNS.add(key)
 
+    # plan-20261022-release-ci：派发的轮次结束时才考虑叫醒主代理（用户在子会话里自己发起的轮次不打扰主会话）
+    dispatched = int(turn_id) in _DISPATCHED_TURNS
+    _DISPATCHED_TURNS.discard(int(turn_id))
+
     try:
         async with async_session_factory() as db:
             row = await _get_session_row(db, session_id)
@@ -883,8 +1110,17 @@ async def _report_finish(session_id: int, turn_id: int, final_status: str, summa
             report = await final_answer(db, session_id, turn_id) or (summary or "").strip()
             page = page_of(report, 0, REPORT_PAGE_CHARS)
             body = page.text or "（子会话没有输出文字结论）"
+            # 同组还有子会话在跑：结论先排队，等最后一个结束时一起叫醒，主代理一次拿全再汇总，
+            # 不会每完成一个就被叫醒一次、回复一句「还在等其他子会话」。
+            # 被中断的不叫醒：可能是用户按了停止（不该自动续跑），也可能是主代理自己中断的（它已知情）
+            wake = (
+                dispatched
+                and final_status not in ("interrupted", "cancelled")
+                and row.side_parent_id is not None
+                and not await _siblings_running(db, row.side_parent_id, exclude=session_id)
+            )
             await notify_main(
-                db, subsession_id=session_id, kind="result",
+                db, subsession_id=session_id, kind="result", wake=wake,
                 message=f"turn {turn_id} {status_text}。结论原文：\n{body}{continuation_hint(page, session_id)}",
             )
     except Exception:  # noqa: BLE001 — 回报失败只记日志，不影响子会话自身收尾

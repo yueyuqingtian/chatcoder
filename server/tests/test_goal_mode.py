@@ -355,9 +355,8 @@ async def test_build_main_context_goal_injection(db_env, workspace):
     goal_part = next(p for p in bundle.developer_parts if p.startswith("## Current Goal"))
     assert "修复登录页深色主题样式" in goal_part
     assert "已续跑 2 轮" in goal_part
-    # 本轮用户消息降级为 Current Task 段
-    task_part = next(p for p in bundle.developer_parts if p.startswith("## Current Task"))
-    assert "继续推进" in task_part
+    # 本轮用户原文不再作为 Current Task 段复制进 developer 段（末尾 user 消息已承载原文）
+    assert not any(p.startswith("## Current Task") for p in bundle.developer_parts)
 
 
 async def test_build_main_context_without_goal(workspace, db_env):
@@ -371,7 +370,27 @@ async def test_build_main_context_without_goal(workspace, db_env):
         db, agent=agent, session=session, project=project, turn=turn,
         user_message="最近一条消息即目标", goal=None,
     )
-    # 无目标时维持现状：Current Goal 段为最近用户消息，无 Current Task 段
+    # 无目标时 Current Goal 段为常量指引（不复制用户原文），原文以末尾 user 消息为准
     goal_part = next(p for p in bundle.developer_parts if p.startswith("## Current Goal"))
-    assert "最近一条消息即目标" in goal_part
+    assert "以对话末尾的最新用户消息为本轮目标" in goal_part
+    assert not any("最近一条消息即目标" in p for p in bundle.developer_parts)
     assert not any(p.startswith("## Current Task") for p in bundle.developer_parts)
+
+
+async def test_developer_prefix_stable_across_turns(workspace, db_env):
+    """developer 段不应随本轮用户原文变化：否则每轮前缀失效，缓存不命中（计划 3.2）。"""
+    db, _ = db_env
+    agent = SimpleNamespace(id=1, model_id=None, name="main")
+    session = SimpleNamespace(id=1, worktree_path=None, model_id=None)
+    project = SimpleNamespace(path=str(workspace), rules_docs=None)
+    turn = SimpleNamespace(id=1)
+
+    first = await build_main_context(
+        db, agent=agent, session=session, project=project, turn=turn,
+        user_message="请帮我检查登录模块", goal=None,
+    )
+    second = await build_main_context(
+        db, agent=agent, session=session, project=project, turn=turn,
+        user_message="另外再看看设置页的保存逻辑", goal=None,
+    )
+    assert first.developer_parts == second.developer_parts

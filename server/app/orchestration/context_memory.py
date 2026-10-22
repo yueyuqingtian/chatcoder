@@ -21,7 +21,7 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import resolve_workspace_root
@@ -73,23 +73,44 @@ _DEFAULT_CTX_WINDOW_FALLBACK = 500000
 
 
 async def _fetch_main_messages(
-    db: AsyncSession, session_id: int, limit: int = 200
+    db: AsyncSession, session_id: int, limit: int | None = 200,
+    *, min_id: int | None = None, include_ids: list[int] | None = None,
 ) -> "list[Message]":
-    """取主会话全部消息（按时间正序）。"""
+    """取主会话消息（按时间正序）。
+
+    plan-527-2218：上下文裁剪只由压缩一条通道负责，因此这里支持两种「让压缩器
+    看到全部未压缩历史」的取数方式，同时避免每轮全量读再内存过滤：
+
+    - ``min_id``：压缩水位，SQL 层 ``id > min_id`` 过滤。水位以上还没被压缩，
+      水位以下的大段已压缩历史查回来也没用，直接在数据库端跳过。
+    - ``include_ids``：水位以下但未被遮蔽的例外（含图片附件的消息不参与压缩），
+      必须单独取回，否则会从上下文静默消失。合起来即 ``id > floor OR id IN (例外)``。
+    - ``limit=None``：不追加 LIMIT，取回全部未压缩消息。压缩器与主重建路径用这个，
+      保证最早那批消息一定进入候选，不会因为条数上限被排除在压缩范围之外。
+
+    默认 ``limit=200`` 保持不变，侧栏/诊断等既有调用不受影响。
+    """
     from app.persistence.models.message import Message
 
-    res = await db.execute(
+    stmt = (
         select(Message)
         .where(Message.session_id == session_id)
         .where(Message.thread_id.is_(None))
         # 问题14: 摘要/压缩仅取未回滚软删的主线程消息
         .where(Message.deleted == False)  # noqa: E712
-        # v8: 必须加 id 次级排序 —— 同一步内多条消息 created_at 相同（同一秒），
-        # 仅按 created_at 排序不稳定，reversed 后 text/tool_call/tool_result 相对顺序错乱，
-        # 导致 assistant(tool_calls) 与 tool 消息之间夹着 assistant 文本，网关报 400。
-        .order_by(Message.created_at.desc(), Message.id.desc())
-        .limit(limit)
     )
+    if min_id is not None and min_id > 0:
+        cond = Message.id > min_id
+        if include_ids:
+            cond = or_(cond, Message.id.in_(include_ids))
+        stmt = stmt.where(cond)
+    # v8: 必须加 id 次级排序 —— 同一步内多条消息 created_at 相同（同一秒），
+    # 仅按 created_at 排序不稳定，reversed 后 text/tool_call/tool_result 相对顺序错乱，
+    # 导致 assistant(tool_calls) 与 tool 消息之间夹着 assistant 文本，网关报 400。
+    stmt = stmt.order_by(Message.created_at.desc(), Message.id.desc())
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    res = await db.execute(stmt)
     return list(reversed(res.scalars().all()))
 
 
@@ -312,7 +333,19 @@ async def maybe_summarize_main_session(
     - context_window 由调用方传入，或自动从 Leader 模型解析
     - 触发阈值 = context_window × MAIN_SUMMARIZE_RATIO (85%)  # v6.3: 从 15% 提升到 85%
     - 每次摘要量 = context_window × MAIN_SUMMARIZE_BATCH_RATIO (35%)  # v6.3: 从 6% 提升到 35%
+
+    plan-527-2218：本通道已停用，历史裁剪统一交给落库式压缩（context_compressor）。
+    原因：v16 起重建不再注入摘要文本，本通道一旦触发只会把消息写进 summarized_ids、
+    让它们从上下文里消失且没有替代物；同时它会与压缩竞争同一批消息，提前吞掉压缩候选。
+    压缩通道有 checkpoint（含附件清单）与可恢复原文，是唯一出口。
     """
+    logger.info(
+        "[main_summary] session=%s 渐进摘要通道已停用（plan-527-2218），历史裁剪由压缩负责",
+        getattr(session, "id", "-"),
+    )
+    return
+
+    # ── 以下为停用前的原实现，保留备查；如需恢复请先确认重建路径会注入 ctx["summary"] ──
     # v3.3: 解析 Leader 的 context_window
     if context_window is None:
         context_window = await _resolve_leader_context_window(db, session)

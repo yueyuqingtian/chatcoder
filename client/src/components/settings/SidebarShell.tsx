@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { IconArrowLeft } from "../icons";
 import { NAV_GROUPS, SETTINGS_INDEX, type SettingsTab } from "./index";
 import { useI18n } from "../../store/i18n";
+import { Tooltip } from "../ui";
 
 export function SidebarShell({ collapsed, children, footer }: {
   collapsed: boolean;
@@ -35,10 +36,12 @@ export function SettingsSidebar({ tab, onTab, onBack, collapsed = false }: {
       {(
         <div className="sb-list">
           {/* 返回行与导航项同在滚动列内：几何（左右内距、滚动条槽）与导航项天然一致 */}
-          <button className="sb-back-item" onClick={onBack} title={t("titlebar.back")} type="button">
-            <span className="sb-back-icon"><IconArrowLeft size={14} /></span>
-            <span>{t("titlebar.back")}</span>
-          </button>
+          <Tooltip content={t("titlebar.back")}>
+            <button className="sb-back-item" onClick={onBack} type="button">
+              <span className="sb-back-icon"><IconArrowLeft size={14} /></span>
+              <span>{t("titlebar.back")}</span>
+            </button>
+          </Tooltip>
           {NAV_GROUPS.map((g) => (
             <div key={g.id} className="sb-section-group">
               <div className="sb-section-label">{t(`settingsGroup.${g.id}`)}</div>

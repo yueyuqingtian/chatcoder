@@ -222,10 +222,18 @@ class TestTa3Temperature:
         )
         assert "temperature" not in body
 
-    def test_openai_body_keeps_default_for_other(self):
+    def test_openai_body_honors_requested_temperature_for_other(self):
+        """设置中心的温度（请求温度）对非 Claude 模型生效。"""
         body = self._provider("metis-4")._build_openai_body(
             _request("metis-4"), [],
         )
+        assert body["temperature"] == 0.3  # _request 默认温度
+
+    def test_openai_body_falls_back_to_default_without_requested_temperature(self):
+        """请求未给出温度时，回落目录默认 0.1。"""
+        req = _request("metis-4")
+        req.temperature = None
+        body = self._provider("metis-4")._build_openai_body(req, [])
         assert body["temperature"] == 0.1
 
     def test_anthropic_body_drops_temperature_for_claude(self):
@@ -257,3 +265,48 @@ class TestCommandCodeTemperature:
         p = CommandCodeProvider(api_key="test-key", model="claude-haiku-5-5")
         payload = p._build_payload(_request("alias-model", 0.3))
         assert "temperature" not in payload["params"]
+
+
+class TestUnifiedTemperatureRules:
+    """统一规则：思考开启时不设置温度（所有模型）；否则遵循设置温度（含 ta3 / kimi）。"""
+
+    def test_thinking_on_detection(self):
+        from app.models.providers.temperature_policy import thinking_on
+
+        def req(effort=None, thinking=None):
+            return ChatRequest(messages=[ChatMessage(role="user", content="x")], model="m",
+                               reasoning_effort=effort, thinking=thinking)
+
+        assert thinking_on(req(effort="high")) is True
+        assert thinking_on(req(effort="none")) is False
+        assert thinking_on(req(effort="")) is False
+        assert thinking_on(req(effort=None, thinking=True)) is True
+        assert thinking_on(req(effort=None, thinking=False)) is False
+
+    def test_request_temperature_none_when_thinking_on(self):
+        from app.models.providers.temperature_policy import request_temperature
+
+        r = ChatRequest(messages=[ChatMessage(role="user", content="x")], model="metis-4",
+                        temperature=0.3, reasoning_effort="medium")
+        assert request_temperature(r, model_name="metis-4") is None
+
+    def test_request_temperature_follows_setting_when_thinking_off(self):
+        from app.models.providers.temperature_policy import request_temperature
+
+        r = ChatRequest(messages=[ChatMessage(role="user", content="x")], model="metis-4",
+                        temperature=0.3, reasoning_effort="none")
+        assert request_temperature(r, model_name="metis-4") == 0.3
+
+    def test_ta3_kimi_body_follows_setting_not_hardcoded(self):
+        p = Ta3Provider(api_key="llm-test", base_url="https://lc.example.com/newcoder/ai/dispatch/v2",
+                        model="kimi-k2", meta={})
+        body = p._build_anthropic_body(_request("kimi-k2", 0.5), [])
+        assert body.get("temperature") == 0.5
+
+    def test_ta3_openai_body_drops_temperature_when_thinking(self):
+        p = Ta3Provider(api_key="llm-test", base_url="https://lc.example.com/newcoder/ai/dispatch/v2",
+                        model="metis-4", meta={})
+        req = _request("metis-4", 0.3)
+        req.reasoning_effort = "high"
+        body = p._build_openai_body(req, [])
+        assert "temperature" not in body

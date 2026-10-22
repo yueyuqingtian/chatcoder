@@ -45,6 +45,38 @@ class ToolContext:
     detach_event: asyncio.Event | None = None
     # plan-474-2105：所属 turn（后台命令完成回报据此标注归属；可为空）
     turn_id: int | None = None
+    # fs_read 未变化短路的会话级缓存（见 tools/read_cache.py）；为空时不做短路
+    read_cache: Any = None
+    # plan-522-2209：调用方身份（子代理 / 子会话）。审批等待策略据此区分：
+    # 子任务的审批可能发生在用户并未停留的会话里，超时自动拒绝等于让用户既看不到请求
+    # 也看不到失败原因，只看到子任务莫名中断——这类审批不设静默超时。
+    is_subagent: bool = False
+    is_subsession: bool = False
+
+
+# 失败类别：模型据此选择恢复动作（而不是只看到一段裸报错文本）
+ERROR_CODES = (
+    "NOT_FOUND",       # 路径 / 工具 / 资源不存在
+    "ARG_INVALID",     # 参数缺失或非法
+    "TIMEOUT",         # 执行超时
+    "PERMISSION",      # 审批拒绝 / 权限不足
+    "STALE_READ",      # 修改前未读取或文件已变化
+    "SANDBOX",         # 沙箱 / 策略拒绝（不是命令本身的缺陷）
+    "EXEC_FAILED",     # 工具执行后返回失败（默认类别）
+    "INTERNAL",        # 工具内部异常
+)
+
+# 各类别的恢复指引：拼入给模型的文本，告诉它下一步该怎么做
+ERROR_HINTS = {
+    "NOT_FOUND": "目标不存在。先用 fs_list / fs_grep 确认路径（相对工作区）后再操作，不要凭记忆臆测路径。",
+    "ARG_INVALID": "参数缺失或格式不对。对照工具说明修正参数后再调用一次。",
+    "TIMEOUT": "执行超时。可拆分任务或缩小范围，必要时调大超时；不要用相同参数立即重试。",
+    "PERMISSION": "操作未获批准或权限不足。不要绕过；改用只读方式完成，或说明需要用户授权的部分。",
+    "STALE_READ": "修改前必须先读取该文件的当前内容。先 fs_read 再修改。",
+    "SANDBOX": "被沙箱 / 策略拒绝，这不是命令本身的缺陷。不要换写法绕过，改用允许的方式或告知用户。",
+    "EXEC_FAILED": "工具执行失败。根据错误信息定位原因，修正后重试；仍失败则换一种方式或说明阻塞点。",
+    "INTERNAL": "工具内部异常。先检查参数与路径；若仍失败，改用其它工具或说明阻塞点。",
+}
 
 
 @dataclass
@@ -55,9 +87,32 @@ class ToolResult:
     output: str  # 给 LLM 看的文本输出
     data: dict[str, Any] = field(default_factory=dict)  # 结构化附加信息
     error: str = ""
+    error_code: str = ""  # ERROR_CODES 之一；失败时由工具或执行器填写
+    hint: str = ""  # 可选的具体恢复建议；为空时按 error_code 取默认指引
 
     def to_dict(self) -> dict:
-        return {"ok": self.ok, "output": self.output, "data": self.data, "error": self.error}
+        return {
+            "ok": self.ok, "output": self.output, "data": self.data, "error": self.error,
+            "error_code": self.error_code, "hint": self.hint,
+        }
+
+    def failure_hint_line(self) -> str:
+        """失败时附在模型可见文本末尾的一行：错误类别 + 恢复指引。"""
+        code = self.error_code if self.error_code in ERROR_CODES else "EXEC_FAILED"
+        hint = self.hint or ERROR_HINTS[code]
+        return f"[错误类别: {code}] {hint}"
+
+    def failure_text(self) -> str:
+        """模型可见的失败文本：原始报错 + 类别 + 恢复指引（成功结果不使用）。"""
+        if self.ok:
+            return self.error or ""
+        body = self.error or "工具执行失败（无错误信息）"
+        return f"{body}\n{self.failure_hint_line()}"
+
+    def classify_if_missing(self) -> None:
+        """工具只返回 ok=False 而未标注类别时，补上默认类别（不覆盖工具自己的标注）。"""
+        if not self.ok and self.error_code not in ERROR_CODES:
+            self.error_code = "EXEC_FAILED"
 
 
 class Tool(ABC):
@@ -67,6 +122,11 @@ class Tool(ABC):
     risk_level: RiskLevel = "low"
     # plan-128-518：会话态工具标记——True 时不随全量工具下发，由引擎在会话满足条件时显式放行
     session_scoped: bool = False
+    # plan-522-2209：是否可与其他并发安全的调用同时执行。
+    # 默认 False（独占）——只有明确声明安全的工具才并行，未知一律串行。
+    # 判定口径参考 deepseek-harness：不是「看起来只读」就并行，而是「调用主体之间
+    # 不存在共享可变状态」。因此这里只对不写文件、不改库、不改变进程状态的工具置 True。
+    concurrency_safe: bool = False
     description: str = ""
 
     @abstractmethod

@@ -157,3 +157,94 @@ def present_output(text: str, limit: int, *, session_id: int | None, tag: str) -
         + f"\n\n（输出共 {len(text)} 字，以上为前 {head_len} 字；完整内容已保存，"
         f"如需其余部分请调用 {call} 分段读取。）"
     )
+
+
+def budget_for_tool(tool_name: str) -> tuple[int, int]:
+    """按工具类型解析呈现预算，返回 (字节预算, 尾部保留字节)。
+
+    plan-522-2209：预算口径此前只在 agent_loop 里，历史重建路径拿不到，只能自己写死一个
+    字符上限——同一份工具输出在「刚跑完」与「压缩后重建」两种情况下被截成不同长度，
+    后者还无法续读。这里收成唯一来源，两条路径都调它。
+    """
+    from app.core.config import settings
+
+    if tool_name == "fs_grep":
+        return settings.tool_output_bytes_grep, 0
+    if tool_name in ("web_fetch", "web_search"):
+        return settings.tool_output_bytes_web, 0
+    if tool_name == "terminal_exec":
+        return settings.tool_output_bytes_terminal, settings.tool_output_bytes_terminal_tail
+    return settings.tool_output_bytes_default, 0
+
+
+def present_for_model(
+    text: str,
+    *,
+    tool_name: str,
+    session_id: int | None,
+    tag: str,
+) -> str:
+    """工具输出进入模型上下文的统一呈现（实时路径与历史重建路径共用）。
+
+    fs_read 例外：它的窗口已由工具自身的字节预算封顶且完整写入落库，再截一次会出现
+    「窗口→截成前段→再读」的循环。其余工具按 `budget_for_tool` 呈现，超出部分落盘续读。
+    """
+    if tool_name == "fs_read":
+        return str(text or "")
+    budget, tail = budget_for_tool(tool_name)
+    return present_output_bytes(
+        str(text or ""), budget, session_id=session_id, tag=tag, tail_bytes=tail,
+    )
+
+
+def _prefix_bytes(text: str, limit: int) -> str:
+    """取不超过 limit 个 UTF-8 字节的前缀（不切断多字节字符）。"""
+    return text.encode("utf-8")[:max(0, limit)].decode("utf-8", errors="ignore")
+
+
+def _suffix_bytes(text: str, limit: int) -> str:
+    """取不超过 limit 个 UTF-8 字节的后缀（不切断多字节字符）。"""
+    raw = text.encode("utf-8")
+    return raw[-max(0, limit):].decode("utf-8", errors="ignore") if limit > 0 else ""
+
+
+def present_output_bytes(
+    text: str,
+    budget_bytes: int,
+    *,
+    session_id: int | None,
+    tag: str,
+    tail_bytes: int = 0,
+) -> str:
+    """按 UTF-8 字节预算呈现工具输出（字节口径，中文与 ASCII 同等计量）。
+
+    未超预算原样返回；超出时完整内容落盘，返回：
+    - 头部（以及 tail_bytes > 0 时的尾部，终端输出的报错多在尾部）；
+    - 续读方式（read_attachment 按字符 offset 分段）。
+    落盘失败时退回“头 + 省略说明 + 尾”，至少不静默丢弃。
+    """
+    if not text:
+        return text
+    raw_len = len(text.encode("utf-8"))
+    if raw_len <= budget_bytes:
+        return text
+    # 续读说明本身是多字节中文 + 路径，需留足余量，保证「头 + 说明 + 尾」不超过预算——
+    # 终端工具先呈现一次、agent_loop 再按同一预算呈现一次，超出会被二次截断并改写续读指引
+    notice_reserve = 1500
+    tail = _suffix_bytes(text, tail_bytes) if tail_bytes > 0 else ""
+    head_budget = max(1, budget_bytes - notice_reserve - len(tail.encode("utf-8")))
+    head = _prefix_bytes(text, head_budget)
+    path = spill_text(text, session_id=session_id, tag=tag)
+    if path is None:
+        return (
+            head
+            + f"\n\n...（输出共 {raw_len} 字节，超出上下文预算，中间部分未能保存，已省略）...\n\n"
+            + tail
+        )
+    call = tool_ref("read_attachment", path=str(path).replace("\\", "/"), offset=len(head))
+    tail_note = "，尾部保留在下方" if tail else ""
+    middle = (
+        f"\n\n（输出共 {raw_len} 字节，以上为前 {len(head)} 字符{tail_note}；完整内容已保存，"
+        f"如需其余部分请调用 {call} 分段读取。）\n\n"
+    )
+    return head + middle + tail

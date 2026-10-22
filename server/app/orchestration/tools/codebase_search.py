@@ -47,6 +47,7 @@ _EXCLUDE_DIRS = {
 
 class CodebaseSearchTool(Tool):
     name = "codebase_search"
+    concurrency_safe = True  # plan-522-2209：关键词检索只读，索引由后台任务独占更新
     risk_level = "low"
     description = (
         "关键词检索代码库（非语义向量检索）。按关键词在已索引的代码块中打分，"
@@ -83,7 +84,7 @@ class CodebaseSearchTool(Tool):
 
         workspace = Path(ctx.workspace_root)
         if not workspace.is_dir():
-            return ToolResult(ok=False, output="", error=f"工作区不存在: {ctx.workspace_root}")
+            return ToolResult(ok=False, output="", error=f"工作区不存在: {ctx.workspace_root}", error_code="NOT_FOUND")
 
         # 构建/加载索引（含符号边界信息）。这是同步磁盘/解析 IO，
         # 必须移出事件循环；大项目索引期间仍要能响应 providers/models 等请求。

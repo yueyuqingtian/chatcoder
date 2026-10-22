@@ -39,6 +39,7 @@ def _find_by_name(root: Path, rel: str) -> Path | None:
 
 class ReadAttachmentTool(Tool):
     name = "read_attachment"
+    concurrency_safe = True  # plan-522-2209：只读附件文件
     description = (
         "读取用户上传的附件文件内容。path 参数可直接使用用户消息附件中的"
         "服务器磁盘绝对路径（如 'C:/Users/xx/AppData/Local/chatcoder/uploads/1a2b3c/报告.docx'），"
@@ -101,7 +102,7 @@ class ReadAttachmentTool(Tool):
                 output=f"附件路径非法或不存在: {rel}（工作区外的文件请用 fs_read 读取）{hint}",
             )
         if not target.is_file():
-            return ToolResult(ok=False, output=f"附件不存在: {rel}")
+            return ToolResult(ok=False, output=f"附件不存在: {rel}", error_code="NOT_FOUND")
 
         file_size = target.stat().st_size
         if file_size > _MAX_IMAGE_BYTES and is_image(target.name):

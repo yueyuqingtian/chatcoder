@@ -9,8 +9,12 @@
  *
  * plan-20261017-frontend-polish：补 forwardRef。被 Menu / Popover 的 asChild 触发器包裹时，
  * Radix 必须拿到原生 button 才能锚定与触发；此前缺失会导致「三个点」点不开。
+ *
+ * plan-522-2209：新增 loading——进行中把图标换成同尺寸 spinner，并给图标一个固定尺寸槽，
+ * 否则「箭头 → 旋转环」的替换会让按钮内容横向跳一下。
  */
 import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { IconSpinner } from "../icons";
 import { Tooltip } from "./Tooltip";
 
 type Size = "xs" | "sm" | "lg";
@@ -22,10 +26,12 @@ interface IconButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, 
   active?: boolean;
   /** 悬停色调：默认中性，danger 走危险色 */
   tone?: "default" | "danger";
+  /** 进行中：图标槽换成 spinner，按钮尺寸不变（plan-522-2209） */
+  loading?: boolean;
 }
 
 export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(function IconButton(
-  { icon, size = "sm", active = false, tone = "default", className = "", title, ...props },
+  { icon, size = "sm", active = false, tone = "default", loading = false, className = "", title, ...props },
   ref,
 ) {
   const cls = [
@@ -33,12 +39,14 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
     size !== "sm" ? `size-${size}` : "",
     active ? "is-active" : "",
     tone === "danger" ? "tone-danger" : "",
+    loading ? "is-loading" : "",
     className,
   ].filter(Boolean).join(" ");
   const label = props["aria-label"] ?? (typeof title === "string" ? title : undefined);
   const btn = (
-    <button ref={ref} type="button" className={cls} aria-label={label} {...props}>
-      {icon}
+    <button ref={ref} type="button" className={cls} aria-label={label}
+      aria-busy={loading || undefined} {...props}>
+      <span className="ui-icon-btn-slot">{loading ? <IconSpinner size={14} /> : icon}</span>
     </button>
   );
   return typeof title === "string" && title ? <Tooltip title={title} side="top">{btn}</Tooltip> : btn;

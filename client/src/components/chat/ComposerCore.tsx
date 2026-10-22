@@ -9,6 +9,7 @@ import {
   useState,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   type DragEvent,
   type WheelEvent,
@@ -49,6 +50,7 @@ import { ModelPicker } from "./ModelPicker";
 // plan-75-332: 审批卡——与 QuestionWizardBox 同构，需要审批时替换输入框主体
 import { ApprovalCard } from "./ApprovalCard";
 import { useChatStore, persistLastReasoning, patchSession, useCurrentSession, type UsageDetail } from "../../store/chat";
+import { usePendingInteractions } from "../../store/pendingInteractions";
 import { useScoped } from "./convoScope";
 import { selectSessionWorkflowBusy, useWorkflowStore } from "../../store/workflow";
 import { useDraftsStore, normalizeDraftMode, normalizeApprovalMode, type ApprovalMode } from "../../store/drafts";
@@ -1289,12 +1291,55 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
   /** 当前会话所在项目（会话态工作区胶囊只读展示） */
   const sessionProject = projects.find((p) => p.id === (currentSession?.project_id ?? currentProjectId)) ?? null;
 
+  /** plan-522-2209：有效待审批项——当前会话有就用它，否则回退到跨会话索引里最早到达的一条。
+   *  为什么要回退：审批只广播到发起会话的通道，用户停在别的会话时那张卡根本不会出现，
+   *  子任务就在他眼皮底下卡到自动拒绝。两级回退保证「任何地方在等我」都能在当前输入区处理。
+   *  订阅整个索引是为了审批到达 / 结束时能重算，否则卡片会停在旧值。 */
+  const crossSessionPending = usePendingInteractions((s) => s.pendingBySession);
+  const effectivePendingApproval = useMemo(() => {
+    if (pendingApproval) return { approvalId: pendingApproval.approvalId, detail: pendingApproval.detail, fromOther: null as number | null };
+    // 只取「有 detail」的条目：没有详情就渲染不出卡片内容
+    let best: { sid: number; aid: string; detail: Record<string, unknown>; createdAt: number } | null = null;
+    for (const sidKey of Object.keys(crossSessionPending)) {
+      const sidNum = Number(sidKey);
+      if (sidNum === currentSessionId) continue;
+      const bucket = crossSessionPending[sidNum];
+      for (const aid of Object.keys(bucket)) {
+        const entry = bucket[aid];
+        if (!entry.detail || Object.keys(entry.detail).length === 0) continue;
+        if (!best || entry.createdAt < best.createdAt) {
+          best = { sid: sidNum, aid, detail: entry.detail, createdAt: entry.createdAt };
+        }
+      }
+    }
+    return best ? { approvalId: best.aid, detail: best.detail, fromOther: best.sid } : null;
+  }, [pendingApproval, crossSessionPending, currentSessionId]);
+
+  /** 来源标题：来自子会话时按 id 反查最新标题（子会话可能被重命名），查不到退编号。 */
+  const subsessionsByParent = useChatStore((s) => s.subsessionsByParent);
+  /** 跨会话待办总条数：跨会话回退时「另有 N 项」要用它，
+   *  不能沿用当前会话的 approvalQueue 长度（那是另一个会话的队列，语义对不上）。 */
+  const crossSessionPendingTotal = useMemo(() => {
+    let n = 0;
+    for (const bucket of Object.values(crossSessionPending)) n += Object.keys(bucket).length;
+    return n;
+  }, [crossSessionPending]);
+  const pendingSource = useMemo(() => {
+    const sid = effectivePendingApproval?.fromOther;
+    if (sid == null) return null;
+    for (const list of Object.values(subsessionsByParent)) {
+      const hit = list.find((c) => c.id === sid);
+      if (hit?.title) return { subsessionId: sid, title: hit.title };
+    }
+    return { subsessionId: sid, title: `子会话 #${sid}` };
+  }, [effectivePendingApproval, subsessionsByParent]);
+
   // 是否处于 AI 结构化提问阶段（直接替换输入框主体）
-  const isQuestionMode = !isHome && pendingApproval?.detail?.kind === "question";
+  const isQuestionMode = !isHome && effectivePendingApproval?.detail?.kind === "question";
 
   // plan-75-332: 是否处于工具审批阶段——与提问同构：审批卡直接替换输入框主体，
   // 不再用全屏遮罩弹窗（遮罩会把用户的视线与操作位置从输入区移开）。
-  const isApprovalMode = !isHome && pendingApproval != null && !isQuestionMode;
+  const isApprovalMode = !isHome && effectivePendingApproval != null && !isQuestionMode;
 
   /** 会话 229: 输入框 placeholder（textarea 文字透明后由标签层渲染，保持视觉一致） */
   const placeholderText = goalArmed
@@ -1338,20 +1383,21 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
           旧的全屏遮罩弹窗（.approval-overlay）已删除。 */}
       {isQuestionMode ? (
         <QuestionWizardBox
-          approvalId={pendingApproval.approvalId}
-          detail={pendingApproval.detail}
-          onCancel={() => respondApproval(pendingApproval.approvalId, false)}
-          onSubmit={(answers) => respondApproval(pendingApproval.approvalId, true, false, answers)}
+          approvalId={effectivePendingApproval!.approvalId}
+          detail={effectivePendingApproval!.detail}
+          onCancel={() => respondApproval(effectivePendingApproval!.approvalId, false)}
+          onSubmit={(answers) => respondApproval(effectivePendingApproval!.approvalId, true, false, answers)}
         />
       ) : isApprovalMode ? (
         <ApprovalCard
-          approvalId={pendingApproval.approvalId}
-          detail={pendingApproval.detail}
-          onDeny={() => respondApproval(pendingApproval.approvalId, false)}
-          onAllowOnce={() => respondApproval(pendingApproval.approvalId, true)}
+          approvalId={effectivePendingApproval!.approvalId}
+          detail={effectivePendingApproval!.detail}
+          onDeny={() => respondApproval(effectivePendingApproval!.approvalId, false)}
+          onAllowOnce={() => respondApproval(effectivePendingApproval!.approvalId, true)}
           onAlwaysAllow={(scope) =>
-            respondApproval(pendingApproval.approvalId, true, true, undefined, scope)}
-          queuedCount={Math.max(0, approvalQueueLength - 1)}
+            respondApproval(effectivePendingApproval!.approvalId, true, true, undefined, scope)}
+          queuedCount={pendingSource ? Math.max(0, crossSessionPendingTotal - 1) : Math.max(0, approvalQueueLength - 1)}
+          source={pendingSource}
         />
       ) : (
         <div className={`composer-main${dragOver ? " is-drag-over" : ""}`}>
@@ -2182,6 +2228,12 @@ function normalizeQuestionOption(raw: unknown): string {
   return String(raw ?? "");
 }
 
+/** 原生支持 field-sizing 时，自定义回答的高度完全由内容驱动（见 .question-wizard-custom-input），
+ *  输入、切题清空、返回上一题恢复多行答案都由浏览器自动撑高 / 回落，不再依赖 JS 测高的执行时机。
+ *  Electron 44（Chromium 142）支持；不支持的环境仍走下面的 JS 兜底。 */
+const supportsFieldSizing =
+  typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("field-sizing", "content");
+
 function QuestionWizardBox({
   approvalId,
   detail,
@@ -2204,7 +2256,7 @@ function QuestionWizardBox({
   const stepIndex = draft?.stepIndex ?? 0;
   const answers = draft?.answers ?? {};
   const [customText, setCustomText] = useState("");
-  const customInputRef = useRef<HTMLInputElement>(null);
+  const customInputRef = useRef<HTMLTextAreaElement>(null);
   const wizardRef = useRef<HTMLDivElement>(null);
   // plan-278-1391: 选项浮窗——单行截断的长选项在悬停/键盘聚焦时完整展示。
   const [optTip, setOptTip] = useState<
@@ -2270,6 +2322,18 @@ function QuestionWizardBox({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stepIndex, currentAnswer, currentOptions.join("\u0000")]);
 
+  /** 自定义回答高度随内容自适应（上限见 CSS 的 max-height）。
+   *  原生支持 field-sizing（见 supportsFieldSizing）时高度由浏览器按内容算，这里直接跳过；
+   *  兜底分支按「当前文本 + 题号」重算：此前内联 height 只在 onChange 写入，
+   *  切到下一题文本被清空后高度仍是上一题的多行值（用户反馈「换题不回落为 1 行」）。 */
+  useLayoutEffect(() => {
+    if (supportsFieldSizing) return;
+    const el = customInputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [customText, stepIndex, allowCustom]);
+
   /** 键盘高亮项下标：0..选项数-1 为选项，紧随其后的一行为自定义回答（无自定义行时不会落到它上） */
   const customIdx = currentOptions.length;
   const optionCount = currentOptions.length + (allowCustom ? 1 : 0);
@@ -2318,6 +2382,8 @@ function QuestionWizardBox({
     const ae = document.activeElement;
     if (ae && ae !== document.body && !wizardRef.current?.contains(ae)) return;
     if (e.isComposing || e.keyCode === 229 || e.altKey || e.ctrlKey || e.metaKey || optionCount === 0) return;
+    // 自定义回答已含换行：上下键交给光标在多行文本内移动，不抢占选项导航
+    if ((e.key === "ArrowUp" || e.key === "ArrowDown") && ae === customInputRef.current && customText.includes("\n")) return;
     const hl = Math.min(kbIndex, optionCount - 1);
     if (e.key === "Tab" || e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
@@ -2351,9 +2417,11 @@ function QuestionWizardBox({
       <div className="question-wizard-header">
         <div className="question-wizard-title-group">
           <span className="question-wizard-tag">{taskTag}</span>
-          <span className="question-wizard-title-text" title={String(currentQ.question ?? "")}>
-            {String(currentQ.question ?? "请确认执行偏好")}
-          </span>
+          <Tooltip content={String(currentQ.question ?? "")}>
+            <span className="question-wizard-title-text">
+              {String(currentQ.question ?? "请确认执行偏好")}
+            </span>
+          </Tooltip>
         </div>
         <div className="question-wizard-pager">
           <button
@@ -2407,10 +2475,12 @@ function QuestionWizardBox({
             <div className={`question-wizard-custom-row${kbIndex === customIdx ? " is-kb" : ""}`}>
               <span className="question-wizard-opt-num">{currentOptions.length + 1}.</span>
               {/* 回车确认由卡片级键盘处理统一负责（见 kbHandlerRef），这里只把高亮移到自定义行 */}
-              <input
+              {/* 多行文本：回车确认（卡片级键盘处理），Shift+回车换行 */}
+              <textarea
                 ref={customInputRef}
                 className="question-wizard-custom-input"
-                placeholder="输入自定义回答，按回车确认…"
+                rows={1}
+                placeholder="输入自定义回答，回车确认，Shift+回车换行…"
                 value={customText}
                 onChange={(e) => setCustomText(e.target.value)}
                 onFocus={() => setKbIndex(customIdx)}

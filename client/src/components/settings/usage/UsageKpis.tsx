@@ -1,13 +1,14 @@
-/** 用量统计 · KPI 卡片行（plan-20261021-usage-update）。
+/** 使用统计 · KPI 卡片行（plan-20261021-usage-update；plan-20261022-release-ci 调整）。
  *
- * 六张卡：区间 Token / 区间调用 / 历史单日峰值 / 连续使用 / 平均首字 / 平均速度。
- * 图标底色按卡片着色（沿用图表色板），文字保持中性三层；前两张带逐日迷你折线，
- * 一眼看出区间内是平稳还是尖峰。无数据的指标显示「—」并写明原因，不隐藏卡片（避免布局随数据跳变）。
+ * 六张卡：Token / 调用 / 历史单日峰值 / 连续使用 / 平均首字 / 平均速度，固定 3×2。
+ * 图标底色按卡片着色（沿用图表色板），文字保持中性三层；前两张带迷你折线
+ * （多日区间按日、单日区间按小时），一眼看出是平稳还是尖峰。
+ * 无数据的指标显示「—」并写明原因，不隐藏卡片——旧后端没有性能字段时也保持六张，布局不随数据跳变。
  */
-import { useMemo, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import type { UsageStatsOut } from "../../../api/client";
 import { IconCalendar, IconClock, IconDatabase, IconGauge, IconHash, IconZap } from "../../icons";
-import { addDays, fmtTokens, parseDate, toISO } from "./chartUtils";
+import { fmtTokens } from "./chartUtils";
 import { fmtSec, fmtSpeed } from "./format";
 
 type Tone = "blue" | "green" | "amber" | "violet" | "sky" | "rose";
@@ -55,35 +56,45 @@ function Kpi({ tone, icon, label, value, unit, foot, spark }: {
   );
 }
 
-/** 把「只含有数据的日子」补成连续日期序列（缺的日子记 0），迷你折线才不会把空档压扁 */
-function fillDays(daily: UsageStatsOut["daily"], pick: (d: UsageStatsOut["daily"][number]) => number): number[] {
-  if (daily.length === 0) return [];
-  const byDate = new Map(daily.map((d) => [d.date, pick(d)]));
-  const first = parseDate(daily[0].date);
-  const last = parseDate(daily[daily.length - 1].date);
-  const out: number[] = [];
-  for (let d = first; d <= last; d = addDays(d, 1)) out.push(byDate.get(toISO(d)) ?? 0);
-  return out;
+const pct = (part: number, whole: number) => (whole > 0 ? Math.round((part / whole) * 100) : 0);
+
+/** 「9月18日」——峰值日期只看月日 */
+function monthDay(iso: string | null): string {
+  if (!iso) return "";
+  const [, m, d] = iso.split("-").map(Number);
+  return `${m}月${d}日`;
 }
 
-export function UsageKpis({ stats }: { stats: UsageStatsOut }) {
+export interface UsageKpisProps {
+  stats: UsageStatsOut;
+  /** 区间口径的称呼：单日今天 =「今日」，其余 =「区间」 */
+  scope: "今日" | "区间";
+  /** 区间天数（日均按自然日计，不是只算有用量的日子） */
+  rangeDays: number;
+  tokenSpark: number[];
+  callSpark: number[];
+}
+
+export function UsageKpis({ stats, scope, rangeDays, tokenSpark, callSpark }: UsageKpisProps) {
   const { total, perf } = stats;
-  const days = stats.daily.length;
-
-  const tokenSpark = useMemo(() => fillDays(stats.daily, (d) => d.tokens), [stats.daily]);
-  const callSpark = useMemo(() => fillDays(stats.daily, (d) => d.calls), [stats.daily]);
-
+  const peakDate = stats.daily_all.reduce<{ date: string | null; tokens: number }>(
+    (best, d) => (d.tokens > best.tokens ? { date: d.date, tokens: d.tokens } : best),
+    { date: null, tokens: 0 },
+  ).date;
+  const cacheRate = pct(total.cached, total.prompt);
   const noTiming = !perf || perf.avg_first_token_ms == null;
+  const noSpeed = !perf || perf.avg_speed == null;
+
   return (
     <div className="up-kpis">
       <Kpi
-        tone="blue" icon={<IconDatabase size={15} />} label="区间 Token"
+        tone="blue" icon={<IconDatabase size={15} />} label={`${scope} Token`}
         value={fmtTokens(total.total)}
-        foot={`输入 ${fmtTokens(total.prompt)} · 输出 ${fmtTokens(total.completion)} · 缓存 ${fmtTokens(total.cached)}`}
+        foot={`输入 ${fmtTokens(total.prompt)}（缓存命中 ${cacheRate}%）· 输出 ${fmtTokens(total.completion)}`}
         spark={tokenSpark}
       />
       <Kpi
-        tone="green" icon={<IconHash size={15} />} label="区间调用"
+        tone="green" icon={<IconHash size={15} />} label={`${scope}调用`}
         value={total.calls.toLocaleString()}
         foot={`每次约 ${fmtTokens(total.calls ? Math.round(total.total / total.calls) : 0)} token`}
         spark={callSpark}
@@ -91,27 +102,25 @@ export function UsageKpis({ stats }: { stats: UsageStatsOut }) {
       <Kpi
         tone="amber" icon={<IconZap size={15} />} label="历史单日峰值"
         value={fmtTokens(stats.peak_tokens ?? 0)}
-        foot={`区间日均 ${fmtTokens(days ? Math.round(total.total / days) : 0)}`}
+        foot={rangeDays > 1
+          ? `区间日均 ${fmtTokens(Math.round(total.total / rangeDays))}${peakDate ? ` · 峰值在 ${monthDay(peakDate)}` : ""}`
+          : peakDate ? `出现在 ${monthDay(peakDate)}` : "还没有用量"}
       />
       <Kpi
         tone="violet" icon={<IconCalendar size={15} />} label="连续使用"
         value={stats.streak_current ?? 0} unit=" 天"
         foot={`最长 ${stats.streak_longest ?? 0} 天`}
       />
-      {perf && (
-        <>
-          <Kpi
-            tone="sky" icon={<IconClock size={15} />} label="平均首字"
-            value={noTiming ? "—" : fmtSec(perf.avg_first_token_ms)}
-            foot={noTiming ? "这个范围内的调用没有首字计时" : "请求发出到第一个字出现"}
-          />
-          <Kpi
-            tone="rose" icon={<IconGauge size={15} />} label="平均速度"
-            value={perf.avg_speed == null ? "—" : fmtSpeed(perf.avg_speed)} unit={perf.avg_speed == null ? undefined : " token/s"}
-            foot={perf.avg_speed == null ? "需要输出不少于 100 token 的实测调用" : `基于 ${perf.speed_calls.toLocaleString()} 次调用 · 从首字算到结束`}
-          />
-        </>
-      )}
+      <Kpi
+        tone="sky" icon={<IconClock size={15} />} label="平均首字"
+        value={noTiming ? "—" : fmtSec(perf!.avg_first_token_ms)}
+        foot={noTiming ? "这个范围内的调用没有首字计时" : "请求发出到第一个字出现"}
+      />
+      <Kpi
+        tone="rose" icon={<IconGauge size={15} />} label="平均速度"
+        value={noSpeed ? "—" : fmtSpeed(perf!.avg_speed)} unit={noSpeed ? undefined : " token/s"}
+        foot={noSpeed ? "需要输出不少于 100 token 的实测调用" : `基于 ${perf!.speed_calls.toLocaleString()} 次调用 · 从首字算到结束`}
+      />
     </div>
   );
 }

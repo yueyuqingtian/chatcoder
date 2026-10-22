@@ -29,6 +29,8 @@ _STATUS_TEXT: dict[str, str] = {
     "done": "已完成",
     "failed": "失败",
     "interrupted": "已中断",
+    # plan-20261022-release-ci：计划模式的子会话出完计划停在这里，需要用户在该子会话里确认后才会执行
+    "awaiting_confirmation": "已出计划、等待用户在该子会话中确认",
 }
 
 
@@ -80,8 +82,27 @@ def _target_id(args: dict, error_cls: type[Exception]) -> int:
     return value
 
 
-async def run_subsession_tool(tool_name: str, args: dict, *, session_id: int, db) -> str:
-    """执行一个子会话工具。`session_id` 是**调用方**所在会话（主会话或子会话）。"""
+_YIELD_NOTE = (
+    "[已让出等待] 等待期间收到新的消息（可能是子会话的提问或用户追加），先处理它；"
+    "子会话仍在后台运行，需要时再用 get_subsession_progress(wait=true) 继续等。"
+)
+
+
+def _yielded(briefs: list, interrupt_check) -> bool:
+    """等待是否因新消息而提前结束（此时还有子会话在运行）。"""
+    return bool(
+        interrupt_check is not None and interrupt_check()
+        and any(getattr(b, "status", "") == "running" for b in briefs)
+    )
+
+
+async def run_subsession_tool(
+    tool_name: str, args: dict, *, session_id: int, db, interrupt_check=None,
+) -> str:
+    """执行一个子会话工具。`session_id` 是**调用方**所在会话（主会话或子会话）。
+
+    interrupt_check：阻塞等待期间轮询的「有新消息」判定；为真时提前结束等待并说明原因。
+    """
     from app.services import subsession_service
 
     try:
@@ -94,10 +115,12 @@ async def run_subsession_tool(tool_name: str, args: dict, *, session_id: int, db
                 context=str(args.get("context") or ""),
                 mode=args.get("mode") or None,
                 purpose=str(args.get("purpose") or ""),
+                dispatched=True,
             )
             created = (
                 f"已创建子会话 #{sid}「{args.get('title') or ''}」，任务已下发。\n"
-                "它会显示在用户左侧会话列表中；完成后结果会自动回到你的上下文，"
+                "它会显示在用户左侧会话列表中；完成后结果会自动回到你的上下文"
+                "（你已收工时，派出去的子会话全部结束后会自动叫醒你汇总，不必轮询等待），"
                 "需要更细的进展用 get_subsession_progress 查询。"
                 f"请在下一次 todo_write 里把对应步骤的 owner 设为 #{sid}，任务卡才能显示它的进度。"
                 "注意：不要自己再做一遍这项任务。"
@@ -107,7 +130,11 @@ async def run_subsession_tool(tool_name: str, args: dict, *, session_id: int, db
             if args.get("background") is False:
                 briefs = await subsession_service.collect(
                     db, parent_session_id=session_id, subsession_id=sid, wait=True,
+                    interrupt_check=interrupt_check,
                 )
+                if _yielded(briefs, interrupt_check):
+                    body = _format_result(f"子会话 #{sid} 进度", briefs, report_offset=0)
+                    return f"{created}\n\n{_YIELD_NOTE}\n\n{body}"
                 body = _format_result(f"子会话 #{sid} 已结束", briefs, report_offset=0)
                 return f"{created}\n\n(background=false：已等待该子会话结束)\n\n{body}"
             return created
@@ -126,7 +153,7 @@ async def run_subsession_tool(tool_name: str, args: dict, *, session_id: int, db
                     "它会立刻带着这条答复继续执行。"
                 )
             res = await subsession_service.send_message(
-                db, target, str(args.get("message") or ""),
+                db, target, str(args.get("message") or ""), dispatched=True,
             )
             how = "已注入到它当前的执行" if res.get("delivered") == "injected" else "已作为新一轮任务下发"
             tail = "（该 question_id 已超时或不存在，本条按普通消息送达）" if qid else ""
@@ -140,8 +167,11 @@ async def run_subsession_tool(tool_name: str, args: dict, *, session_id: int, db
                 parent_session_id=session_id,
                 subsession_id=target,
                 wait=bool(args.get("wait")),
+                interrupt_check=interrupt_check,
             )
             header = "子会话进度" if target is None else f"子会话 #{target} 进度"
+            if bool(args.get("wait")) and _yielded(briefs, interrupt_check):
+                header = f"{_YIELD_NOTE}\n\n{header}"
             # 指定单个子会话时按 report_offset 分段返回结论全文；汇总时只给开头 + 续读提示
             offset = None
             if target is not None:
@@ -169,7 +199,7 @@ async def run_subsession_tool(tool_name: str, args: dict, *, session_id: int, db
     return f"Error: 未知的子会话工具 {tool_name}"
 
 
-async def run_own_tool(tool_name: str, args: dict, *, session_id: int, db) -> str:
+async def run_own_tool(tool_name: str, args: dict, *, session_id: int, db, interrupt_check=None) -> str:
     """子会话侧的通信工具：向主代理汇报 / 向同级子会话发消息。"""
     from app.services import subsession_service
 
@@ -200,13 +230,20 @@ async def run_own_tool(tool_name: str, args: dict, *, session_id: int, db) -> st
                     timeout_s = 0.0
                 if timeout_s <= 0:
                     timeout_s = subsession_service.QUESTION_TIMEOUT_DEFAULT_S
-                reply = await subsession_service.wait_for_question_reply(qid, timeout_s)
+                reply = await subsession_service.wait_for_question_reply(qid, timeout_s, interrupt_check)
+                if reply is None and interrupt_check is not None and interrupt_check():
+                    return (
+                        "[已让出等待] 等待主代理答复期间收到了新的消息，先处理它；"
+                        f"你的提问（question_id={qid}）尚未得到答复，主代理的答复会作为消息送达，不要重复提问。"
+                    )
                 if reply is None:
                     return (
                         f"未在 {int(timeout_s)} 秒内收到主代理答复（question_id={qid}）。"
                         "请按最佳判断继续推进，并把该未决问题写进最终结论；不要重复提问。"
                     )
                 return f"主代理答复（question_id={qid}）：\n{reply}"
+            # 不等待：没有等待方，撤销登记，主代理的答复将作为普通消息注入而不是被吞掉
+            subsession_service.discard_question(qid)
 
         if res.get("delivered") == "injected":
             return "已送达主代理（会进入它下一次模型调用的上下文）。"

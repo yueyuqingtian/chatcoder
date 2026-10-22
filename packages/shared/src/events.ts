@@ -157,6 +157,9 @@ export type ServerWsEvent =
   | { event: "subagent.pending"; payload: { session_id: number; pending: number } }
   /** v39: 子代理完成唤醒——服务端自动创建新 turn 送达完成报告（前端渲染分隔线） */
   | { event: "subagent.wakeup"; payload: { session_id: number; turn_id: number } }
+  /** plan-474-2105 邮箱唤醒（子会话提问 / 派出的子会话全部结束 / 后台命令完成）——服务端已创建新 turn。
+   *  plan-20261022-release-ci 起前端据此立即接管运行态，并把唤醒消息归入该轮。 */
+  | { event: "session.wakeup"; payload: { session_id: number; turn_id: number; reason?: string } }
   /** plan-20261020-bgtask：后台命令启动——右上角「后台任务」栏新增一行（elapsed 为服务端算好的已运行秒数） */
   | { event: "bg.process.started"; payload: BgProcessEventPayload }
   /** 后台命令退出（自然结束 / 被用户或模型停止 / 会话删除）——栏目里撤掉这一行 */
@@ -279,6 +282,7 @@ export const ORDERED_EVENTS: ReadonlySet<string> = new Set([
   "subagent.failed",
   "subagent.pending",
   "subagent.wakeup",
+  "session.wakeup",
   "workflow.wakeup",
   "usage.update",
   "debug.paused",

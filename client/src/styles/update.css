@@ -104,7 +104,14 @@
   font-family: var(--font-mono); font-size: 12px; font-weight: 600;
 }
 
-.about-upd { display: flex; flex-direction: column; gap: 14px; padding: 16px 20px 18px; border-top: 1px solid var(--border-light); }
+.about-upd { --collapse-gap: 14px; display: flex; flex-direction: column; gap: 14px; padding: 16px 20px 18px; border-top: 1px solid var(--border-light); }
+/* 慢速线路提示（plan-20261022-update-route）：底色 + 图标色表达状态，不用侧边色条；按钮固定在行尾 */
+.about-upd-slow {
+  display: flex; align-items: center; gap: 10px; min-width: 0;
+  padding: 8px 8px 8px 12px; border-radius: var(--r-md); background: var(--warning-soft);
+}
+.about-upd-slow-ic { flex-shrink: 0; color: var(--warning); }
+.about-upd-slow-text { flex: 1; min-width: 0; font-size: 12px; line-height: 1.5; color: var(--text-2); }
 .about-upd-row { display: flex; align-items: center; gap: 12px; min-width: 0; }
 /* 状态图标槽位固定 32px：检查 / 下载 / 就绪切换时文案不位移 */
 .about-upd-ic {

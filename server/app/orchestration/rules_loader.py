@@ -218,6 +218,7 @@ async def load_session_rules(workspace: str, rules_docs: list[str] | None = None
 
     parts: list[str] = []
     seen: set[str] = set()
+    skipped: list[str] = []  # 因总量上限未载入的规则文件（用于在末尾告知模型）
     total = 0
     for p in candidates:
         key = str(p)
@@ -236,14 +237,29 @@ async def load_session_rules(workspace: str, rules_docs: list[str] | None = None
                     rel = p.name
                 src = _source_of(rel)
                 label = f"{rel}" + (f" · {src}" if src else "")
-                chunk = f"({label})\n{text[:_MAX_SINGLE_BYTES]}"
+                # 截断必须可见：模型要知道规则并不完整，才会去要求用户精简或自行核对
+                body = text
+                if len(text) > _MAX_SINGLE_BYTES:
+                    body = (
+                        text[:_MAX_SINGLE_BYTES]
+                        + f"\n…（单文件超过 {_MAX_SINGLE_BYTES // 1024}KB 上限，其后 "
+                        f"{len(text) - _MAX_SINGLE_BYTES} 字未载入，请精简或拆分）"
+                    )
+                chunk = f"({label})\n{body}"
                 if total + len(chunk) > _MAX_TOTAL_BYTES:
-                    break
+                    # 总量超限：跳过该文件、继续尝试后面较小的文件，并在末尾列出未载入的文件名
+                    skipped.append(rel)
+                    continue
                 parts.append(chunk)
                 total += len(chunk)
         except OSError:
             continue
 
+    if skipped:
+        parts.append(
+            f"（以下规则文件因总量超过 {_MAX_TOTAL_BYTES // 1024}KB 上限未载入：{'、'.join(skipped)}；"
+            "请精简规则文件，或把细则拆到子目录的规则文件中）"
+        )
     if not parts:
         return ""
     return "\n\n".join(parts)

@@ -95,7 +95,13 @@ function downloadPhaseDesc(s: Extract<UpdateStatus, { state: "downloading" }>): 
   switch (s.phase) {
     case "connecting": return "正在连接更新服务器…";
     case "waiting": return "网络已断开，恢复后会自动接着下载，已下载的部分不会丢";
-    case "retrying": return s.attempt && s.attempt > 1 ? `网络不稳定，正在重试（第 ${s.attempt} 次），已下载的部分不会丢` : "网络不稳定，正在重试，已下载的部分不会丢";
+    case "retrying":
+      // plan-20261022-update-route：换线路时说清「哪条线路不通、几秒后试哪条」，不再只有一句「正在重试」
+      if (s.nextLabel && s.retryInMs != null) {
+        const sec = Math.max(1, Math.round(s.retryInMs / 1000));
+        return `${s.source || "当前线路"}连接失败，${s.retryInMs < 1000 ? "正在" : `${sec} 秒后`}尝试${s.nextLabel}，已下载的部分不会丢`;
+      }
+      return s.attempt && s.attempt > 1 ? `网络不稳定，正在重试（第 ${s.attempt} 次），已下载的部分不会丢` : "网络不稳定，正在重试，已下载的部分不会丢";
     case "verifying": return "下载完成，正在校验安装包…";
     default: return "下载在后台进行，可以继续使用；断网会自动续传";
   }
@@ -106,6 +112,8 @@ function AboutPanel() {
   const appVersion = useUpdaterStore((s) => s.appVersion);
   const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
   const downloadUpdate = useUpdaterStore((s) => s.downloadUpdate);
+  const cancelDownload = useUpdaterStore((s) => s.cancelDownload);
+  const switchToPrimary = useUpdaterStore((s) => s.switchToPrimary);
   const installUpdate = useUpdaterStore((s) => s.installUpdate);
   const releaseHistory = useUpdaterStore((s) => s.releaseHistory);
   const releaseSource = useUpdaterStore((s) => s.releaseSource);
@@ -147,6 +155,10 @@ function AboutPanel() {
   const activeVersion = hasNotes ? (status.version ?? "") : "";
   const activeNotes = hasNotes ? (status.notes || "") : "";
   const busy = status.state === "checking" || status.state === "downloading";
+  // 校验阶段已经下完，取消没有意义（也会白白丢掉一次完整下载）
+  const cancellable = status.state === "downloading" && status.phase !== "verifying";
+  // 落到 GitHub 兜底线路：提示慢速，并给一键切回自建源（重置线路优先级后接着下）
+  const onSlowRoute = status.state === "downloading" && status.tier === "github" && status.phase !== "verifying";
 
   const toggleVersion = (key: string) => setExpandedVersions((prev) => {
     const next = new Set(prev);
@@ -178,7 +190,9 @@ function AboutPanel() {
                 {status.state === "error" && (
                   <Button variant="ghost" size="sm" icon={<IconCopy size={13} />} onClick={() => { void navigator.clipboard.writeText(status.message).catch(() => { /* ignore */ }); }}>复制错误</Button>
                 )}
-                {status.state !== "downloaded" && (
+                {status.state === "downloading" ? (
+                  <Button variant="secondary" size="sm" disabled={!cancellable} onClick={() => void cancelDownload()}>取消下载</Button>
+                ) : status.state !== "downloaded" && (
                   <Button variant={status.state === "available" ? "ghost" : "secondary"} size="sm" disabled={busy} onClick={() => void checkForUpdates()}>
                     {status.state === "error" ? "重试" : "检查更新"}
                   </Button>
@@ -198,6 +212,14 @@ function AboutPanel() {
                 bytesPerSecond={status.bytesPerSecond} phase={status.phase} source={status.source}
               />
             )}
+
+            <Collapse open={onSlowRoute} className="in-gap">
+              <div className="about-upd-slow">
+                <IconAlertCircle size={14} className="about-upd-slow-ic" aria-hidden />
+                <span className="about-upd-slow-text">当前使用 GitHub 慢速下载，镜像线路暂时连不上</span>
+                <Button variant="secondary" size="sm" icon={<IconRefresh size={13} />} onClick={() => void switchToPrimary()}>切换镜像线路</Button>
+              </div>
+            </Collapse>
 
             {activeNotes && (
               <div className="about-upd-notes">

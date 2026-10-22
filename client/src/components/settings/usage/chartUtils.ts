@@ -12,6 +12,8 @@ export function modelColor(index: number): string {
 
 /** 把 token 数格式化为可读字符串（M/k 缩写）。 */
 export function fmtTokens(n: number): string {
+  // 缓存命中多的会话一周就能到十亿级，「1253.33M」太长，换成 B
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
   return String(n);

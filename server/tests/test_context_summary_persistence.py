@@ -71,22 +71,27 @@ class TestSharedContextPersisted:
         assert reloaded.shared_context == {"summary": "abc", "summarized_ids": [1, 2, 3]}
 
 
-class TestSummarizeWritesContext:
-    async def test_over_threshold_summarizes_and_marks_ids(self, db: AsyncSession):
+class TestSummarizeChannelDisabled:
+    """plan-527-2218：渐进摘要通道已停用，历史裁剪统一由压缩负责。
+
+    停用原因：v16 起重建不再注入 ctx["summary"]，该通道一旦触发只会把消息写进
+    summarized_ids、让它们从上下文消失且没有替代物。以下用例锁定「不再写入」，
+    防止后续有人误以为仍是活跃通道而去调阈值。
+    """
+
+    async def test_over_threshold_does_not_write(self, db: AsyncSession):
         s = await _mk_session(db)
-        # 当前摘要阈值为 0.85×窗口；20×6000 字符约 3 万 token，使用 30K 窗口
-        # 明确覆盖阈值，避免测试依赖旧版 0.35 比例。
-        msgs = await _mk_text_messages(db, s.id, 20, "x" * 6000)
+        # 20×6000 字符约 3 万 token，用 30K 窗口明确超过 0.85 阈值——
+        # 停用前这里会写入摘要与 summarized_ids，停用后必须两者都不写。
+        await _mk_text_messages(db, s.id, 20, "x" * 6000)
         await db.commit()  # 提交数据（maybe_summarize 经写引擎独立连接写入，避免快照隔离）
 
         await maybe_summarize_main_session(db, s, context_window=30_000)
 
         await db.refresh(s)  # 写引擎独立连接提交，重读最新
         ctx = s.shared_context or {}
-        assert ctx.get("summary"), "摘要应写入 shared_context"
-        summarized_ids = set(ctx.get("summarized_ids") or [])
-        assert summarized_ids, "被摘要的消息 id 应被标记"
-        assert len(summarized_ids) >= 3
+        assert not ctx.get("summary"), "通道停用后不应写入摘要文本"
+        assert not (ctx.get("summarized_ids") or []), "通道停用后不应标记摘要 id"
 
     async def test_below_threshold_skips(self, db: AsyncSession):
         s = await _mk_session(db)
@@ -97,12 +102,10 @@ class TestSummarizeWritesContext:
         ctx = s.shared_context or {}
         assert not ctx.get("summary"), "未超阈值不应触发摘要"
 
-    async def test_restored_compaction_messages_not_summarized(self, db: AsyncSession):
-        """v33: 已还原压缩块的消息不进入渐进摘要——还原后立即被摘要吞掉是
-        "还原后 AI 仍看不到原文"的根因，必须排除。"""
+    async def test_restored_compaction_messages_not_touched(self, db: AsyncSession):
+        """已还原压缩块的消息同样不会被标记——停用后整条通道都不再改写摘要状态，
+        「还原后又被摘要吞掉」的旧坑不可能复现。"""
         s = await _mk_session(db)
-        # 当前摘要比例为 0.85；用 14 条中等长度消息，并只排除前 7 条，
-        # 让剩余候选既超过阈值，又能满足每批至少 3 条的保护条件。
         msgs = await _mk_text_messages(db, s.id, 14, "x" * 4000)
         restored_ids = [m.id for m in msgs[:7]]
 
@@ -116,13 +119,10 @@ class TestSummarizeWritesContext:
         s.shared_context = ctx
         await db.commit()  # 提交数据（maybe_summarize 经写引擎独立连接写入，避免快照隔离）
 
-        # 候选为后 7 条，使用 5K 窗口确保剩余候选超过当前 0.85 阈值。
         await maybe_summarize_main_session(db, s, context_window=5_000)
 
         await db.refresh(s)  # 写引擎独立连接提交，重读最新
         after = s.shared_context or {}
         summarized_ids = set(after.get("summarized_ids") or [])
-        # 已还原的消息不得被摘要标记
-        assert not summarized_ids.intersection(restored_ids), "已还原消息不应被渐进摘要吞掉"
-        # 未还原的消息（后半段）正常摘要
-        assert summarized_ids, "未还原消息应正常触发渐进摘要"
+        assert not summarized_ids.intersection(restored_ids), "已还原消息不应被摘要吞掉"
+        assert not summarized_ids, "通道停用后不应新增摘要标记"

@@ -3,9 +3,10 @@
 WORKFLOW_COMMON = """## Work Methodology
 
 1. **Explore before editing**: Use fs_grep to locate relevant symbols/functions/classes. Read target files with fs_read to confirm current state. Never guess or edit blindly.
-2. **Small verifiable steps**: Break work into small steps. After each step, run tests or lint with terminal_exec. Revert on failure.
-3. **Verify after changes**: Run tests/type-checks/build after writing code. Never deliver unverified code.
-4. **Error-first debugging**: Read complete error messages. Identify root cause before fixing. Do not blindly retry.
+2. **Work in coherent batches**: Group changes into coherent chunks and land a whole chunk before moving on. Do not run tests or lint after every single edit.
+3. **Verify on your own judgement of risk and volume**: run an intermediate test or lint only when the change is high-risk (shared contracts or types, schema or migrations, dependency changes, concurrency / persistence logic, a large rewrite) or after unverified edits have piled up across several files — not on a fixed cadence.
+4. **Verify the whole change before delivery**: Run tests/type-checks/build once over the complete change set. Never deliver unverified code.
+5. **Error-first debugging**: Read complete error messages. Identify root cause before fixing. Do not blindly retry.
 
 ## Tool Usage
 - fs_grep: locate functions/classes/config/strings in the codebase

@@ -14,7 +14,7 @@ import { useChatStore } from "../../store/chat";
 import { SkillsPanel } from "./SkillsPanel";
 import { McpPanel } from "./McpPanel";
 import { FormDialog } from "../ui/FormDialog";
-import { Dialog, Input, Tooltip } from "../ui";
+import { Collapse, Dialog, Input, Tooltip } from "../ui";
 import { ConfirmDialog } from "../ConfirmDialog";
 import {
   IconBox, IconDownload, IconPlug, IconRefresh, IconSearch, IconTrash, IconZap,
@@ -265,8 +265,11 @@ function PluginsCatalog() {
       </div>
 
       {/* 卡片网格 */}
-      {loading && <div className="navpage-empty">正在扫描本机插件…</div>}
-      {!loading && filtered.length === 0 && (
+      {/* 加载提示与空态走 Collapse：出现 / 消失都有过渡，不再整块条件挂载造成跳动 */}
+      <Collapse open={loading} lazy>
+        <div className="navpage-empty">正在扫描本机插件…</div>
+      </Collapse>
+      <Collapse open={!loading && filtered.length === 0} lazy>
         <div className="catalog-empty">
           <span className="catalog-empty-icon"><IconBox size={20} /></span>
           <div className="catalog-empty-title">
@@ -286,7 +289,7 @@ function PluginsCatalog() {
             <button className="btn btn-ghost btn-sm" onClick={() => setQuery("")}>清除搜索</button>
           )}
         </div>
-      )}
+      </Collapse>
       <div className="catalog-grid">
         {filtered.map((item) => (
           <div className={`catalog-card${item.installed ? " is-installed" : ""}`} key={item.name}>

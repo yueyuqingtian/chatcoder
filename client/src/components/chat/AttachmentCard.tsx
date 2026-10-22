@@ -6,6 +6,7 @@
 import { IconPaperclip, IconFileText, IconBox, IconPlug, IconPackage } from "../icons";
 import { type AttachmentInfo, type ComposerRefOut, resolveFileUrl } from "../../api/client";
 import { openGallery } from "../../store/gallery";
+import { Tooltip } from "../ui";
 import { tokenize, tokenDisplayName } from "../../utils/tokens";
 
 function fmtSize(n: number): string {
@@ -26,15 +27,17 @@ export function AttachmentCard({ att }: { att: AttachmentInfo }) {
     else window.open(url, "_blank", "noopener");
   };
   return (
-    <div className="attach-card" onClick={open} title={`${att.filename}（点击预览）`}>
-      {isImageAtt(att) ? (
-        <img className="attach-card-thumb" src={url} alt={att.filename} loading="lazy" decoding="async" />
-      ) : (
-        <span className="attach-card-icon"><IconPaperclip size={13} /></span>
-      )}
-      <span className="attach-card-name">{att.filename}</span>
-      <span className="attach-card-size">{fmtSize(att.size)}</span>
-    </div>
+    <Tooltip content={`${att.filename}（点击预览）`}>
+      <div className="attach-card" onClick={open}>
+        {isImageAtt(att) ? (
+          <img className="attach-card-thumb" src={url} alt={att.filename} loading="lazy" decoding="async" />
+        ) : (
+          <span className="attach-card-icon"><IconPaperclip size={13} /></span>
+        )}
+        <span className="attach-card-name">{att.filename}</span>
+        <span className="attach-card-size">{fmtSize(att.size)}</span>
+      </div>
+    </Tooltip>
   );
 }
 

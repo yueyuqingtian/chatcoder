@@ -117,15 +117,17 @@ export function ScheduledPanel() {
                   {st && <span className="sched-status" style={{ color: st.color, borderColor: st.color }}>{st.label}</span>}
                 </div>
                 <div className="settings-resource-desc">
-                  <span className="sched-human" title={t.cron}>{describeCron(t.cron)}</span>
+                  <Tooltip content={t.cron}><span className="sched-human">{describeCron(t.cron)}</span></Tooltip>
                   <span>会话 #{t.session_id}</span>
                   {t.missed_policy === "run_once" && <span className="sched-tag">错过补跑</span>}
                 </div>
                 <div className="sched-times">
-                  <span title={absTime(t.next_run_at)}>
-                    下次运行：<b>{t.enabled ? relTime(t.next_run_at, nowMs) : "已停用"}</b>
-                  </span>
-                  <span title={absTime(t.last_run_at)}>上次：{relTime(t.last_run_at, nowMs)}</span>
+                  <Tooltip content={absTime(t.next_run_at)}>
+                    <span>
+                      下次运行：<b>{t.enabled ? relTime(t.next_run_at, nowMs) : "已停用"}</b>
+                    </span>
+                  </Tooltip>
+                  <Tooltip content={absTime(t.last_run_at)}><span>上次：{relTime(t.last_run_at, nowMs)}</span></Tooltip>
                 </div>
                 {t.last_error && <div className="sched-last-error">{t.last_error}</div>}
                 {/* plan-20261019-motion-sweep：排程预览展开走 Collapse（此前只有淡入、没有高度过渡与收起动画） */}
@@ -134,7 +136,7 @@ export function ScheduledPanel() {
                     <div className="sched-preview">
                       {(preview ?? []).length === 0
                         ? <span className="sched-preview-empty">该表达式不会触发</span>
-                        : (preview ?? []).map((p, i) => <div key={i} title={p}>{i + 1}. {absTime(p)}</div>)}
+                        : (preview ?? []).map((p, i) => <Tooltip key={i} content={p}><div>{i + 1}. {absTime(p)}</div></Tooltip>)}
                     </div>
                   )}
                 </Collapse>

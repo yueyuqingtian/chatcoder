@@ -70,6 +70,9 @@ def _validate_url(url: str) -> str | None:
 
 class WebFetchTool(Tool):
     name = "web_fetch"
+    # plan-522-2209：单次 GET 无共享状态；询价模式下的审批互斥由批处理层
+    # 的「确定免审才并行」判定兜住（approval_policy.can_parallelize）。
+    concurrency_safe = True
     risk_level = "medium"
     description = "HTTP GET 抓取 URL 的文本响应(超时 15s；内容较长时完整保存并分段读取)。需用户审批。"
 

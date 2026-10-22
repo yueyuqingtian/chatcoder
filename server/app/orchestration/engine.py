@@ -363,19 +363,50 @@ def pop_interrupt(turn_id: int) -> dict | None:
     return st
 
 
-def _mailbox_pending(session_id: int) -> list[dict]:
+def _mailbox_pending(session_id: int, replayed_upto: int | None = None) -> list[dict]:
     """取邮箱里排队的消息（plan-474-2105）。
 
     P2 汇报不会主动唤醒会话（避免白烧 token），由这里在下一次 turn 开始时并入注入项；
     P0 控制面消息通常已被 deliver 即时投递，取到的是「没能唤醒成功」的残留项。
+    replayed_upto：见 `_history_cutoff`——已被本轮历史回放的落库副本不再重复注入。
     """
     try:
         from app.orchestration import mailbox
 
-        return mailbox.take_pending(session_id)
+        return mailbox.take_pending(session_id, replayed_upto=replayed_upto)
     except Exception:  # noqa: BLE001 — 取队列失败不能影响 turn 启动
         logger.debug("[mailbox] 取排队消息失败(非阻塞) session=%s", session_id, exc_info=True)
         return []
+
+
+async def _history_cutoff(db: AsyncSession, session_id: int) -> int | None:
+    """本轮上下文装配前，该会话已有的最大消息 id（plan-20261022-release-ci）。
+
+    子会话的提问 / 汇报 / 结论先落库为主会话的系统消息，历史装配会把它作为一条用户输入回放；
+    同一条消息若还留在邮箱队列或注入队列里，第一次模型调用前又会被注入一遍——结论原文在同一轮
+    上下文里出现两次。装配前记下这条判定线，落库副本 id 不超过它的注入项直接丢弃。
+    """
+    try:
+        from sqlalchemy import func as _func, select as _select
+
+        from app.persistence.models.message import Message as _Message
+
+        return (await db.execute(
+            _select(_func.max(_Message.id)).where(_Message.session_id == session_id)
+        )).scalar()
+    except Exception:  # noqa: BLE001 — 取不到判定线就不去重（宁可重复，不丢消息）
+        logger.debug("[engine] 取历史判定线失败(非阻塞) session=%s", session_id, exc_info=True)
+        return None
+
+
+def _not_replayed(items: list[dict], replayed_upto: int | None) -> list[dict]:
+    """去掉已被历史回放的注入项（落库副本 id 不超过判定线）。"""
+    if replayed_upto is None:
+        return items
+    return [
+        it for it in items
+        if not (isinstance(it, dict) and isinstance(it.get("message_id"), int) and it["message_id"] <= replayed_upto)
+    ]
 
 
 def inject_input(turn_id: int, item: dict) -> bool:
@@ -384,6 +415,22 @@ def inject_input(turn_id: int, item: dict) -> bool:
         return False
     _pending_inputs.setdefault(turn_id, []).append(item)
     return True
+
+
+def has_injected_inputs(turn_id: int, *, urgent_only: bool = False) -> bool:
+    """该 turn 是否有尚未被模型读取的注入项（用户消息 / 子会话与子代理的提问、汇报）。
+
+    阻塞等待类的工具（等子代理 / 等子会话）据此在等待期间让出：消息已在队列里，
+    却要等阻塞结束才会被下一次 LLM 调用读到，对方（正在等答复的子会话 / 子代理）就会白等到超时。
+
+    urgent_only：只看值得打断等待的项。没有 priority 字段的（用户追加、同级消息）一律算紧急；
+    带 priority 的按邮箱口径，0 = 控制面（提问 / 答复）紧急，其余（进度汇报、完成汇报）不打断，
+    否则兄弟子会话每发一条进度就会把主代理的等待打断一次，白烧一步模型调用。
+    """
+    items = _pending_inputs.get(turn_id) or []
+    if not urgent_only:
+        return bool(items)
+    return any(int(it.get("priority", 0) or 0) <= 0 for it in items if isinstance(it, dict))
 
 
 def drain_injected_inputs(turn_id: int) -> list[dict]:
@@ -413,7 +460,10 @@ def _on_agent_report(manager, session_id: int, turn_id: int,
     label = "子代理提问" if kind == "question" else "子代理进度上报"
     text = f"【{label} subagent#{agent_id}】{message}"
     if turn_id in _running_turns:
-        _pending_inputs.setdefault(turn_id, []).append({"content": text})
+        # 提问需要尽快答复（紧急）；进度上报不打断主代理的等待
+        _pending_inputs.setdefault(turn_id, []).append(
+            {"content": text, "priority": 0 if kind == "question" else 2}
+        )
         return
     try:
         manager.queue_leader_note(text)
@@ -738,6 +788,42 @@ async def _continue_goal_turn(session_id: int, prev_turn_id: int) -> None:
                 "继续执行剩余工作。声称完成前先做完成审计：对照目标逐条核验证据（运行测试、读取结果）；"
                 f"若目标已实际达成，请调用 {_goal_tool} 工具标记完成并给出总结；未达成就继续推进。"
             )
+            # plan-522-2209：续跑轮此前用硬编码中文 f-string，绕过了 build_continuation_prompt，
+            # 导致规则语言与语言纪律在续跑轮失效（该工厂成了死代码）。现在拼上工厂产出，
+            # 让续跑轮与正常轮共享同一套语言约束与证据纪律。
+            # 语言来源必须与上下文构建同源（全局规则 > 项目规则 > 用户消息）——
+            # 不能凭空读一个不存在的 settings.reply_language，否则永远回落到 auto。
+            try:
+                from app.orchestration.context_manager import (
+                    _resolve_rule_language,
+                    _resolve_session_language,
+                )
+                from app.orchestration.prompts.continuation import build_continuation_prompt
+                from app.services import project_service
+
+                _goal_project = (
+                    await project_service.get_project(db, session.project_id)
+                    if getattr(session, "project_id", None) else None
+                )
+                _goal_ws = getattr(session, "worktree_path", None) or (
+                    getattr(_goal_project, "path", "") or ""
+                )
+                _user_lang = await _resolve_session_language(
+                    db, session_id, session.goal_text or "",
+                )
+                _reply_lang, _ = await _resolve_rule_language(_goal_ws, _goal_project, _user_lang)
+                prompt = (
+                    build_continuation_prompt(
+                        objective=session.goal_text or "",
+                        tokens_used=next_n,
+                        token_budget=None,
+                        language=_reply_lang,
+                    )
+                    + "\n\n---\n\n"
+                    + prompt
+                )
+            except Exception:
+                logger.debug("[goal] 续跑提示词组装失败，沿用基础文案", exc_info=True)
             user_msg = await message_service.create_message(
                 db, session_id=session_id,
                 sender_type=SenderType.USER.value,
@@ -1369,6 +1455,19 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         )
         if _suggestion_on:
             _available_tools = _available_tools | {"suggest_next_task"}
+        # 子会话 / 工作流工具不在工具注册表里（后面按模式单独追加），提示词的「本轮不可用」清单必须把
+        # 它们算进来，否则智能体模式下会被告知「不要调用 create_subsession」，子会话永远用不上。
+        # 口径与下方追加逻辑一致：能力矩阵 + 子会话开关；子会话自己则只有通信工具。
+        from app.orchestration.subsession_tools import (
+            SUBSESSION_OWN_TOOLS as _OWN_TOOLS, SUBSESSION_TOOL_SCHEMAS as _SUB_SCHEMAS,
+        )
+        if getattr(session, "side_parent_id", None) is not None:
+            _available_tools = _available_tools | {s["function"]["name"] for s in _OWN_TOOLS}
+        elif CAP_SUBSESSION in capabilities_for(_mode) and _subsessions_on:
+            _available_tools = _available_tools | {s["function"]["name"] for s in _SUB_SCHEMAS}
+        if _mode == "workflow" and settings.workflow_enabled:
+            from app.orchestration.workflow.tools import workflow_tool_schemas as _wf_schemas
+            _available_tools = _available_tools | {s["function"]["name"] for s in _wf_schemas()}
         # 用户反馈修复：移除旧「完全访问豁免规划流程」特殊化——权限模式（ask/auto/full）
         # 只决定"要不要问"，能力边界与流程说明一律由执行模式（_mode）决定。此前完全访问
         # 会跳过模式说明/Plan History 注入，并按全量下发工具，「计划模式 + 完全访问」下
@@ -1378,6 +1477,7 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             _plan_history = await _collect_plan_history(db, session, workspace)
             if _plan_history:
                 logger.info("[engine] turn=%s 注入 Plan History %d 字符", turn_id, len(_plan_history))
+        _replayed_upto = await _history_cutoff(db, session_id)
         bundle = await build_main_context(
             db, agent=main_agent, session=session, project=project, turn=turn,
             user_message=user_text, attachments=attachments,
@@ -1509,7 +1609,9 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             # 未剥离时子会话的 permission_mode 继承主会话（多为 agent），
             # append_subsession_tools 会把 create_subsession 等主会话工具一并下发，形成套娃。
             tool_schemas = strip_for_subsession(append_own_tools(tool_schemas))
-        tool_schemas = append_workflow_tools(tool_schemas, readonly_only=bool(_mode_readonly))
+        # 工作流工具仅在工作流执行模式下发（设置开关之外的第二道门）；只读 / 计划 / 智能体模式不暴露
+        if _mode == "workflow":
+            tool_schemas = append_workflow_tools(tool_schemas, readonly_only=False)
         # 3. 运行主代理
         # v10/v13: 会话级模型覆盖；同一模型也用于规划评估与拆分。
         from app.orchestration.subagent import get_subagent_manager
@@ -1553,10 +1655,11 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             # v36 (plan-321-1600 M3): 同通道附带子代理完成通知——后台子代理结束时
             # 主代理无需轮询 collect_results 即可得知（已读过的结果不会重复推送）。
             # plan-474-2105：再并入邮箱里排队的汇报类消息（P2 不主动唤醒，靠本轮带走）。
+            # plan-20261022-release-ci：已被本轮历史回放的子会话消息不再重复注入（见 _history_cutoff）。
             injected_inputs_provider=lambda: (
-                drain_injected_inputs(turn_id)
-                + _mailbox_pending(session_id)
-                + [{"content": _note} for _note in mgr.drain_completions()]
+                _not_replayed(drain_injected_inputs(turn_id), _replayed_upto)
+                + _mailbox_pending(session_id, _replayed_upto)
+                + [{"content": _note, "source": "subagent"} for _note in mgr.drain_completions()]
             ),
         )
 
@@ -2442,6 +2545,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         # 确认执行阶段按智能体模式运行，建议卡口径与 start_turn 一致
         from app.orchestration.tools.suggestion import suggestion_allowed as _sugg_allowed
         _suggestion_on_confirm = _sugg_allowed("agent", session)
+        _replayed_upto = await _history_cutoff(db, session.id)
         bundle = await build_main_context(
             db, agent=main_agent, session=session, project=project, turn=turn,
             user_message=original_request,
@@ -2473,7 +2577,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             f"【方案文档】\n{plan_doc or '（文档读取失败，请依据用户原始请求执行）'}\n\n"
             "【执行要求】\n"
             "1. 先用 todo_write 按文档重建执行清单——分几步、每步粒度由你决定，"
-            "以可独立验证的交付物为界；之前的调研清单已清空。\n"
+            "以完整可交付的改动为界（一组相关改动一起完成；是否中途验证由你按风险与改动量判断，交付前再整体验证一次）；之前的调研清单已清空。\n"
             "2. 再按文档推进：文档标注为可并行子会话执行的独立步骤，优先派发子会话并行处理"
             "（派发后继续推进其余步骤，不要轮询）；有前后依赖的步骤自己串行做。\n"
             "3. 每完成一步立即用 todo_write 把该项标记为 completed、下一项标记为"
@@ -2505,7 +2609,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         if _subagents_on:
             main_tools = append_subagent_tools(main_tools, _type_states)
         main_tools = append_subsession_tools(main_tools, enabled=_subsessions_on)
-        main_tools = append_workflow_tools(main_tools, readonly_only=False)
+        # 确认执行的是计划文档（计划模式产出），不属于工作流执行模式，因此不下发工作流工具
         mgr = get_subagent_manager(session.id)
         _turn_managers[turn_id] = mgr
         mgr.owner_active = True  # plan-91-394: 主代理 turn 存活期间允许子代理保活等待恢复
@@ -2532,6 +2636,13 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
                 "approval_mode": _approval_mode,
                 "reasoning_effort": None,
             },
+            # 与 start_turn 同口径：确认执行期间同样要把注入消息（用户追加 / 子会话提问与汇报）和子代理完成通知
+            # 交给主代理。此前这里没有注入通道，这些消息在本轮里永远读不到；等待类工具也依赖它来让出等待。
+            injected_inputs_provider=lambda: (
+                _not_replayed(drain_injected_inputs(turn_id), _replayed_upto)
+                + _mailbox_pending(session.id, _replayed_upto)
+                + [{"content": _note, "source": "subagent"} for _note in mgr.drain_completions()]
+            ),
         )
 
         # —— 收尾：状态与产物 ——

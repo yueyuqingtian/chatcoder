@@ -202,6 +202,8 @@
   --color-success: var(--color-green-500);
   --color-destructive: var(--color-red-500);
   --color-warning: var(--color-yellow-500);
+  /* plan-522-2209：深色底上把等待色提亮（82% 浅黄 + 白），保证问号小图标在深底上不发闷、不隐形 */
+  --waiting: color-mix(in oklab, var(--color-yellow-500) 82%, white);
   --color-idle-task: var(--color-violet-400);
   --color-idle-task-surface: color-mix(in oklab, var(--color-violet-950) 50%, transparent);
 
@@ -323,6 +325,9 @@
   --success-soft: color-mix(in oklab, var(--color-green-600) 10%, transparent);
   --warning: var(--color-warning);
   --warning-soft: color-mix(in oklab, var(--color-yellow-600) 10%, transparent);
+  /* plan-522-2209：等待用户处理（审批 / 计划待确认）的语义色。
+     刻意不复用 --warning（映射 yellow-600，浅底上偏金黄发橙），这里要更清透的浅黄。 */
+  --waiting: var(--color-yellow-500);
   --error: var(--color-destructive);
   --error-soft: color-mix(in oklab, var(--color-red-600) 10%, transparent);
   --info: var(--color-sky-600);
@@ -476,6 +481,9 @@
   --dur-spin-fast: 0.7s;
   --dur-pulse: 1.4s;
   --dur-loop: 1.6s;
+  /* 语义化循环时长（已含 --motion-scale）：加载条、吉祥物跳动，避免组件内写死 ms */
+  --dur-load: calc(1800ms * var(--motion-scale));
+  --dur-hop: calc(900ms * var(--motion-scale));
   /* 向后兼容别名（旧类名仍引用；下一版本清理） */
   --dur-fast: var(--dur-2);
   --dur-med: var(--dur-3);

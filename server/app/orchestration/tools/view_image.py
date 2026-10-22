@@ -16,6 +16,7 @@ _ALLOWED_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 
 class ViewImageTool(Tool):
     name = "view_image"
+    concurrency_safe = True  # plan-522-2209：只读图片文件
     description = "View an image file. Returns image metadata (size, format, dimensions)."
     risk_level = "low"
 
@@ -49,7 +50,7 @@ class ViewImageTool(Tool):
             return ToolResult(ok=False, output=f"Cannot resolve path: {rel_path}")
 
         if not target.exists():
-            return ToolResult(ok=False, output=f"File not found: {rel_path}")
+            return ToolResult(ok=False, output=f"File not found: {rel_path}", error_code="NOT_FOUND")
 
         if not target.is_file():
             return ToolResult(ok=False, output=f"Not a file: {rel_path}")

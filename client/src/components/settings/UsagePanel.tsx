@@ -1,9 +1,13 @@
 /** 设置中心：使用统计（plan-152-704 重写；plan-20261021-usage-update 再强化）。
  *
  * 两个视图，共用同一条筛选栏（时间范围 / 供应商 / 刷新），切换视图不丢筛选：
- *  - 概览：KPI 卡片 → Token 活动热力图 → 每日趋势 → 模型分布 → 模型明细（可排序）；
+ *  - 概览：KPI 卡片 → 趋势 → 模型分布（环形图 + 可排序明细）→ Token 活动热力图；
  *  - 调用记录：逐次调用的时间 / 供应商 / 账户 / 模型 / token / 首字 / 耗时 / 速度，后端分页，每页 20 条。
  * 模型显示「供应商/模型名」以区分同名模型。
+ *
+ * plan-20261022-release-ci：跟随筛选的卡片排在一起，不随筛选变化的全历史热力图挪到最后；
+ * 单日区间的趋势改为 24 小时分布（此前「今天」只有一个点，整张图是空的），多日区间补齐无用量的日子；
+ * 环形图与模型明细合并成一张卡，明细表兼作图例。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type UsageRecordsOut, type UsageStatsOut } from "../../api/client";
@@ -14,9 +18,50 @@ import { UsageDonutChart, type DonutSeg } from "./usage/UsageDonutChart";
 import { UsageKpis } from "./usage/UsageKpis";
 import { UsageModelTable } from "./usage/UsageModelTable";
 import { UsageRecordsTable } from "./usage/UsageRecordsTable";
-import { modelColor } from "./usage/chartUtils";
-import { UsageDateRangePicker, presetRange, type RangeMode } from "./usage/UsageDateRangePicker";
+import { addDays, modelColor, parseDate, toISO } from "./usage/chartUtils";
+import { UsageDateRangePicker, presetRange, ymd, type RangeMode } from "./usage/UsageDateRangePicker";
 import { Button, Empty, Segmented, Select, Tooltip } from "../ui";
+
+const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
+
+/** 区间内的全部日期（含没有用量的日子）；旧后端没有 range 字段时退回「有数据的日期」 */
+function rangeDates(stats: UsageStatsOut): string[] {
+  if (!stats.range) return stats.daily.map((d) => d.date);
+  const out: string[] = [];
+  for (let d = parseDate(stats.range.start); toISO(d) <= stats.range.end; d = addDays(d, 1)) out.push(toISO(d));
+  return out;
+}
+
+/** 按模型拆成折线 / 柱状序列：用量前 5 的模型各一条，其余合并为「其他」 */
+function buildSeries(
+  byModel: UsageStatsOut["by_model"],
+  points: Array<{ key: string; bucket: string; tokens: number }>,
+  buckets: Set<string>,
+): TrendSeries[] {
+  const recordByKey: Record<string, Record<string, number>> = {};
+  for (const p of points) {
+    if (!buckets.has(p.bucket)) continue;
+    const rec = (recordByKey[p.key] ??= {});
+    rec[p.bucket] = (rec[p.bucket] ?? 0) + p.tokens;
+  }
+  const top = byModel.slice(0, 5);
+  const otherKeys = new Set(byModel.slice(5).map((b) => b.key));
+  const otherRecord: Record<string, number> = {};
+  for (const p of points) {
+    if (otherKeys.has(p.key) && buckets.has(p.bucket)) otherRecord[p.bucket] = (otherRecord[p.bucket] ?? 0) + p.tokens;
+  }
+  const res: TrendSeries[] = top.map((b, i) => ({ display_name: b.display_name, color: modelColor(i), record: recordByKey[b.key] ?? {} }));
+  if (otherKeys.size > 0) res.push({ display_name: "其他", color: modelColor(top.length), record: otherRecord });
+  return res;
+}
+
+const dayTick = (iso: string) => { const [, m, d] = iso.split("-").map(Number); return `${m}月${d}日`; };
+const dayTip = (iso: string) => {
+  const [y, m, d] = iso.split("-").map(Number);
+  return `${m}月${d}日 周${WEEKDAYS[new Date(y, m - 1, d).getDay()]}`;
+};
+const hourTick = (h: string) => `${h}时`;
+const hourTip = (h: string) => `${h.padStart(2, "0")}:00 – ${String(Number(h) + 1).padStart(2, "0")}:00`;
 
 /** 调用记录每页条数（与后端默认一致） */
 const RECORDS_PAGE_SIZE = 20;
@@ -101,29 +146,39 @@ export function UsagePanel() {
   const byModel = useMemo(() => stats?.by_model ?? [], [stats]);
   const totalTokens = total?.total ?? 0;
 
-  const trendSeries = useMemo<TrendSeries[]>(() => {
-    if (!stats) return [];
-    const dateKey = new Set(stats.daily.map((d) => d.date));
-    const recordByKey: Record<string, Record<string, number>> = {};
-    for (const d of stats.daily_by_model) {
-      if (!dateKey.has(d.date)) continue;
-      (recordByKey[d.key] ??= {})[d.date] = (recordByKey[d.key]?.[d.date] ?? 0) + d.tokens;
+  // ── 趋势：单日区间按小时（后端只在单日区间返回 hourly），多日区间按日并补齐空档 ──
+  const trend = useMemo(() => {
+    if (!stats) return null;
+    const hourly = stats.hourly ?? [];
+    if (hourly.length === 24) {
+      // 今天：只画到当前小时，后面还没发生的小时不画成 0（迷你折线结尾不会掉到底）
+      const isToday = stats.range?.end === ymd(new Date());
+      const lastHour = isToday ? new Date().getHours() : 23;
+      const keys = hourly.map((h) => String(h.hour));
+      const points = (stats.hourly_by_model ?? []).map((p) => ({ key: p.key, bucket: String(p.hour), tokens: p.tokens }));
+      const upToNow = hourly.filter((h) => h.hour <= lastHour);
+      return {
+        kind: "bar" as const,
+        keys,
+        series: buildSeries(byModel, points, new Set(keys)),
+        tokenSpark: upToNow.map((h) => h.tokens),
+        callSpark: upToNow.map((h) => h.calls),
+        days: 1,
+        isToday,
+      };
     }
-    const top = byModel.slice(0, 5);
-    const otherKeys = new Set(byModel.slice(5).map((b) => b.key));
-    const otherRecord: Record<string, number> = {};
-    for (const d of stats.daily_by_model) {
-      if (otherKeys.has(d.key)) otherRecord[d.date] = (otherRecord[d.date] ?? 0) + d.tokens;
-    }
-    const res: TrendSeries[] = top.map((b, i) => ({
-      display_name: b.display_name,
-      color: modelColor(i),
-      record: recordByKey[b.key] ?? {},
-    }));
-    if (otherKeys.size > 0) {
-      res.push({ display_name: "其他", color: modelColor(top.length), record: otherRecord });
-    }
-    return res;
+    const keys = rangeDates(stats);
+    const byDate = new Map(stats.daily.map((d) => [d.date, d]));
+    const points = stats.daily_by_model.map((p) => ({ key: p.key, bucket: p.date, tokens: p.tokens }));
+    return {
+      kind: "line" as const,
+      keys,
+      series: buildSeries(byModel, points, new Set(keys)),
+      tokenSpark: keys.map((k) => byDate.get(k)?.tokens ?? 0),
+      callSpark: keys.map((k) => byDate.get(k)?.calls ?? 0),
+      days: Math.max(1, keys.length),
+      isToday: keys.length === 1 && keys[0] === ymd(new Date()),
+    };
   }, [stats, byModel]);
 
   const donutSegs = useMemo<DonutSeg[]>(() => {
@@ -157,8 +212,6 @@ export function UsagePanel() {
     }
     return res;
   }, [byModel, totalTokens]);
-
-  const dates = useMemo(() => stats?.daily.map((d) => d.date) ?? [], [stats]);
 
   // 当前选中的供应商即使不在本区间的列表里也要保留为可选项，否则下拉框会显示成空白
   const providerOptions = useMemo(() => {
@@ -246,12 +299,15 @@ export function UsagePanel() {
             </div>
           )}
 
-          {stats && (
+          {stats && trend && (
             <div className={"up-stack" + (statsLoading ? " is-loading" : "")}>
-              <UsageKpis stats={stats} />
-
-              {/* Token 活动热力图（全历史口径，不随时间范围变化） */}
-              <UsageHeatmap daily_all={stats.daily_all} />
+              <UsageKpis
+                stats={stats}
+                scope={trend.isToday ? "今日" : "区间"}
+                rangeDays={trend.days}
+                tokenSpark={trend.tokenSpark}
+                callSpark={trend.callSpark}
+              />
 
               {empty ? (
                 <div className="up-card">
@@ -263,46 +319,49 @@ export function UsagePanel() {
                 </div>
               ) : (
                 <>
-                  {trendSeries.length > 0 && (
-                    <section className="up-card">
-                      <header className="up-card-head">
-                        <IconBarChart size={16} />
-                        <div className="up-card-titles">
-                          <div className="up-card-title">每日 Token 趋势</div>
-                          <div className="up-card-sub">区间内按日汇总</div>
+                  <section className="up-card">
+                    <header className="up-card-head">
+                      <IconBarChart size={16} />
+                      <div className="up-card-titles">
+                        <div className="up-card-title">{trend.kind === "bar" ? "每小时 Token" : "每日 Token 趋势"}</div>
+                        <div className="up-card-sub">
+                          {trend.kind === "bar"
+                            ? `${trend.isToday ? "今天" : stats.range?.start ?? ""}按小时汇总（本地时间），按模型堆叠`
+                            : `${trend.days} 天 · 没有用量的日子记为 0`}
                         </div>
-                      </header>
-                      <div className="up-card-body"><UsageTrendChart series={trendSeries} dates={dates} /></div>
-                    </section>
-                  )}
-
-                  {donutSegs.length > 0 && (
-                    <section className="up-card">
-                      <header className="up-card-head">
-                        <IconDatabase size={16} />
-                        <div className="up-card-titles">
-                          <div className="up-card-title">模型用量</div>
-                          <div className="up-card-sub">区间内模型分布</div>
-                        </div>
-                      </header>
-                      <div className="up-card-body"><UsageDonutChart segments={donutSegs} centerValue={totalTokens} /></div>
-                    </section>
-                  )}
+                      </div>
+                    </header>
+                    <div className="up-card-body">
+                      <UsageTrendChart
+                        series={trend.series}
+                        keys={trend.keys}
+                        kind={trend.kind}
+                        tickLabel={trend.kind === "bar" ? hourTick : dayTick}
+                        tipTitle={trend.kind === "bar" ? hourTip : dayTip}
+                      />
+                    </div>
+                  </section>
 
                   {byModel.length > 0 && (
                     <section className="up-card">
                       <header className="up-card-head">
-                        <IconListOrdered size={16} />
+                        <IconDatabase size={16} />
                         <div className="up-card-titles">
-                          <div className="up-card-title">模型明细</div>
-                          <div className="up-card-sub">点表头可按任意一列排序</div>
+                          <div className="up-card-title">模型分布</div>
+                          <div className="up-card-sub">{byModel.length} 个模型 · 点表头可按任意一列排序</div>
                         </div>
                       </header>
-                      <div className="up-card-body is-flush"><UsageModelTable rows={byModel} totalTokens={totalTokens} /></div>
+                      <div className="up-card-body up-models">
+                        <UsageDonutChart segments={donutSegs} centerValue={totalTokens} legend={false} />
+                        <UsageModelTable rows={byModel} totalTokens={totalTokens} />
+                      </div>
                     </section>
                   )}
                 </>
               )}
+
+              {/* Token 活动热力图：全历史口径、不随上方时间范围变化，放在跟随筛选的卡片之后 */}
+              <UsageHeatmap daily_all={stats.daily_all} />
             </div>
           )}
         </div>

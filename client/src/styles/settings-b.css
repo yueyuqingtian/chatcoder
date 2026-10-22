@@ -60,19 +60,6 @@ textarea.sb-code-editor, .sb-code-editor textarea {
   background: var(--surface-inset); border-color: var(--surface-inset-border); border-radius: var(--r-lg);
   padding: 12px 14px;
 }
-
-/* 执行策略：页签统一为分段控件 */
-.perm-tabs {
-  display: inline-flex; gap: 2px; padding: 3px; margin-bottom: 16px;
-  border: 1px solid var(--surface-inset-border); border-bottom: 1px solid var(--surface-inset-border);
-  border-radius: var(--r-md); background: var(--surface-inset);
-}
-.perm-tab {
-  height: 26px; padding: 0 14px; margin: 0; border: none; border-radius: var(--r-sm);
-  font-size: 12.5px; color: var(--text-2);
-  transition: background var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
-}
-.perm-tab.on { background: var(--bg-main); color: var(--text-1); font-weight: 600; box-shadow: var(--shadow-sm); border-bottom-color: transparent; }
 .sb-model-picker { display: inline-flex; min-width: 220px; }
 
 /* 拓展管理：已安装行——描述两行截断、开关右对齐、悬停底色 */

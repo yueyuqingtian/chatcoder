@@ -270,7 +270,7 @@ export function WorktreesPanel() {
                   ? <span className="wt-repo-branch">分支 {c.branch || "—"}</span>
                   : <span className="wt-repo-nocommit">尚无提交，不可用</span>}
               </div>
-              <div className="wt-repo-path" title={c.path}>{c.path}</div>
+              <Tooltip content={c.path}><div className="wt-repo-path">{c.path}</div></Tooltip>
             </div>
           </div>
         ))}

@@ -14,6 +14,8 @@ import { htmlReleaseNotesToMarkdown } from "../utils/releaseNotes";
  *  断网 / 抖动时「等待网络 / 重试中」（已下载的部分保留，恢复后接着下）；下完后「校验中」 */
 export type DownloadPhase = "connecting" | "downloading" | "waiting" | "retrying" | "verifying";
 
+export type UpdateTier = "primary" | "mirror" | "github";
+
 export type UpdateStatus =
   | { state: "idle" }
   | { state: "checking" }
@@ -23,6 +25,10 @@ export type UpdateStatus =
       state: "downloading"; version?: string; notes?: string; percent: number;
       transferred?: number; total?: number; bytesPerSecond?: number;
       phase?: DownloadPhase; source?: string; attempt?: number;
+      /** 当前线路层级（plan-20261022-update-route）：自建源 / 镜像 / GitHub（慢速兜底） */
+      tier?: UpdateTier;
+      /** 换源退避：多少毫秒后尝试 nextLabel 这条线路 */
+      retryInMs?: number; nextLabel?: string;
       /** true = 发现新版本后的静默自动下载（非用户点击触发） */
       auto?: boolean;
     }
@@ -54,6 +60,10 @@ interface UpdaterStore {
   init: () => void;
   checkForUpdates: () => Promise<void>;
   downloadUpdate: () => Promise<void>;
+  /** 取消下载：回到「发现新版本」，已下载的部分保留，再次下载从镜像线路开始 */
+  cancelDownload: () => Promise<void>;
+  /** 切回第一优先级（镜像）：重置线路优先级后接着下 */
+  switchToPrimary: () => Promise<void>;
   installUpdate: () => Promise<void>;
   /** 拉取更新历史（AboutPanel 打开时调用，缓存于 store） */
   loadReleaseHistory: (force?: boolean) => Promise<void>;
@@ -108,6 +118,21 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
       // IPC 失败：还原成点击前的状态，让用户可以再点
       if (get().status.state === "downloading" && before.state === "available") set({ status: before });
     }
+  },
+  cancelDownload: async () => {
+    try {
+      const r = await window.chatcoderAPI?.cancelUpdateDownload?.();
+      if (isUpdateStatus(r)) set({ status: normalizeStatus(r) });
+    } catch { /* 主进程会推送最新状态 */ }
+  },
+  switchToPrimary: async () => {
+    const before = get().status;
+    // 点击即回到「连接中」：主进程停下旧下载再重开需要一点时间，界面不能停在 GitHub 提示上
+    if (before.state === "downloading") set({ status: { ...before, phase: "connecting", tier: "mirror", source: "镜像", retryInMs: undefined, nextLabel: undefined } });
+    try {
+      const r = await window.chatcoderAPI?.switchUpdateSourceToPrimary?.();
+      if (isUpdateStatus(r)) set({ status: normalizeStatus(r) });
+    } catch { /* 主进程会推送最新状态 */ }
   },
   setAutoDownload: async (on) => {
     const prev = get().autoDownload;

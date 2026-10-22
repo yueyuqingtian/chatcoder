@@ -1,7 +1,10 @@
-/** 用量统计 · 调用记录表（plan-20261021-usage-update）。
+/** 使用统计 · 调用记录表（plan-20261021-usage-update）。
  *
- * 一行 = 一次模型调用：时间（年月日时分秒）/ 供应商 / 账户·Key / 模型 /
+ * 一行 = 一次模型调用：时间 / 供应商 / 账户·Key / 模型 /
  * 输入 · 缓存输入 · 输出 / 首字 · 耗时 · 速度。后端分页（每页 20 条），本组件只负责展示。
+ *
+ * plan-20261022-release-ci：按日期分组（组头写「今天 / 昨天 / 10月20日 周一」，行内只留时分秒），
+ * 不再每行重复年月日；缓存输入旁给出命中率；口径说明收成一行，细节放在表头悬停提示里。
  *
  * 口径（与脚注一致）：
  *  - 首字 = 请求发出 → 第一个字出现；耗时 = 首字出现 → 输出结束；速度 = 输出 token ÷ 耗时；
@@ -9,11 +12,11 @@
  *  - 带 ≈ 的是历史记录按会话日志时间戳估算：没有首字计时，等首字的时间也算在内，所以偏低，
  *    且只估输出 ≥ 200 token 的请求。
  */
-import { memo, useRef } from "react";
+import { Fragment, memo, useRef } from "react";
 import type { UsageRecordItem, UsageRecordsOut } from "../../../api/client";
 import { Button, Empty, Pagination, Tooltip } from "../../ui";
 import { IconAlertTriangle, IconClock, IconListOrdered, IconRefresh, IconZap } from "../../icons";
-import { fmtInt, fmtSec, fmtSecRough, fmtSpeed, splitLocalTime } from "./format";
+import { dayLabel, fmtInt, fmtSec, fmtSecRough, fmtSpeed, splitLocalTime } from "./format";
 
 const SKELETON_ROWS = 10;
 /** 用户在 OAuth / 单 Key 供应商里没改过名的默认备注，展示时不占位（直接显示 Key） */
@@ -43,11 +46,11 @@ const RecordRow = memo(function RecordRow({ r }: { r: UsageRecordItem }) {
   const accountText = [r.account, r.account_hint].filter(Boolean).join("　");
   const showLabel = !!r.account && !(GENERIC_ACCOUNT_LABELS.has(r.account) && r.account_hint);
 
+  const cacheRate = r.prompt > 0 && r.cached > 0 ? Math.round((r.cached / r.prompt) * 100) : null;
+
   return (
     <div className="up-rec-row" role="row">
-      <span className="up-rec-time" role="cell">
-        {t ? (<><span className="d">{t.date}</span><span className="c">{t.clock}</span></>) : <Dash />}
-      </span>
+      <span className="up-rec-time" role="cell">{t ? t.clock : <Dash />}</span>
       <span role="cell">
         {r.provider ? <Tooltip content={r.provider}><span className="up-ell">{r.provider}</span></Tooltip> : <Dash />}
       </span>
@@ -65,7 +68,10 @@ const RecordRow = memo(function RecordRow({ r }: { r: UsageRecordItem }) {
         <Tooltip content={r.model}><span className="up-ell up-rec-model">{r.model}</span></Tooltip>
       </span>
       <span className="num" role="cell">{fmtInt(r.prompt)}</span>
-      <span className={"num" + (r.cached ? "" : " is-zero")} role="cell">{fmtInt(r.cached)}</span>
+      <span className={"num up-rec-cache" + (r.cached ? "" : " is-zero")} role="cell">
+        {fmtInt(r.cached)}
+        <small className="up-rec-rate">{cacheRate != null ? `${cacheRate}%` : ""}</small>
+      </span>
       <span className="num" role="cell">
         {r.reasoning > 0 ? (
           <Tooltip content={`其中思考 ${fmtInt(r.reasoning)} token`}>
@@ -93,6 +99,18 @@ const SkeletonRow = () => (
     {Array.from({ length: 10 }, (_, k) => <span key={k}><i /></span>)}
   </div>
 );
+
+/** 当前页按本地日期分段：组头只在日期变化处出现（跨页时新一页的第一组照常带组头） */
+function groupByDay(items: UsageRecordItem[]): Array<{ day: string; rows: UsageRecordItem[] }> {
+  const groups: Array<{ day: string; rows: UsageRecordItem[] }> = [];
+  for (const r of items) {
+    const day = splitLocalTime(r.time)?.date ?? "";
+    const last = groups[groups.length - 1];
+    if (last && last.day === day) last.rows.push(r);
+    else groups.push({ day, rows: [r] });
+  }
+  return groups;
+}
 
 export interface UsageRecordsTableProps {
   data: UsageRecordsOut | null;
@@ -168,8 +186,12 @@ export function UsageRecordsTable({ data, loading, error, page, pageSize, onPage
               <span role="columnheader">账户 / Key</span>
               <span role="columnheader">模型</span>
               <span className="num" role="columnheader">输入</span>
-              <span className="num" role="columnheader">缓存输入</span>
-              <span className="num" role="columnheader">输出</span>
+              <span className="num" role="columnheader">
+                <Tooltip content="输入里命中缓存的部分；右侧百分比为命中率，越高越省"><span className="up-has-tip">缓存输入</span></Tooltip>
+              </span>
+              <span className="num" role="columnheader">
+                <Tooltip content="含思考 token；有思考的行悬停数字可看思考占多少"><span className="up-has-tip">输出</span></Tooltip>
+              </span>
               <span className="num" role="columnheader">
                 <Tooltip content="请求发出后，第一个字出现用了多久"><span className="up-has-tip">首字</span></Tooltip>
               </span>
@@ -177,13 +199,20 @@ export function UsageRecordsTable({ data, loading, error, page, pageSize, onPage
                 <Tooltip content="从首字出现到输出结束用了多久"><span className="up-has-tip">耗时</span></Tooltip>
               </span>
               <span className="num" role="columnheader">
-                <Tooltip content="每秒输出多少 token，从首字算到结束"><span className="up-has-tip">速度 token/s</span></Tooltip>
+                <Tooltip content="每秒输出多少 token，从首字算到结束；只统计输出不少于 100 token 的调用"><span className="up-has-tip">速度 token/s</span></Tooltip>
               </span>
             </div>
             <div className={"up-rec-body" + (loading && data ? " is-loading" : "")} role="rowgroup">
               {firstLoad
                 ? Array.from({ length: SKELETON_ROWS }, (_, i) => <SkeletonRow key={i} />)
-                : items.map((r) => <RecordRow key={r.id} r={r} />)}
+                : groupByDay(items).map((g) => (
+                  <Fragment key={g.day || "unknown"}>
+                    <div className="up-rec-day" role="row">
+                      <span role="cell">{g.day ? dayLabel(g.day) : "时间未知"}</span>
+                    </div>
+                    {g.rows.map((r) => <RecordRow key={r.id} r={r} />)}
+                  </Fragment>
+                ))}
             </div>
           </div>
         </div>
@@ -203,9 +232,7 @@ export function UsageRecordsTable({ data, loading, error, page, pageSize, onPage
       )}
 
       <p className="up-rec-note">
-        速度 = 输出 token ÷ 首字到结束的耗时，只统计输出不少于 100 token 的请求；思考过程不外露的模型，速度是近似值。
-        带 <i className="up-approx">≈</i> 的是历史记录按会话日志的时间戳估算：没有首字计时，等首字的时间也算在内，所以偏低，
-        且只估输出不少于 200 token 的请求。
+        带 <i className="up-approx">≈</i> 的是早期记录按会话时间戳估算的值（含等待首字的时间，偏低）；各列口径悬停表头查看。
       </p>
     </section>
   );

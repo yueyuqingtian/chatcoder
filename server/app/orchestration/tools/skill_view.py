@@ -28,6 +28,7 @@ _SIBLING_LIMIT = 50
 
 class SkillViewTool(Tool):
     name = "skill_view"
+    concurrency_safe = True  # plan-522-2209：只读技能文件
     risk_level = "low"
     description = (
         "查看技能内容。技能是可复用的领域知识包/工作流指令，系统提示词的 "
@@ -109,7 +110,7 @@ class SkillViewTool(Tool):
                     for s in near:
                         lines.append(f"- {s.name}: {(s.description or '')[:120]}")
                     return ToolResult(ok=True, output="\n".join(lines), data={"count": len(near)})
-                return ToolResult(ok=False, output="", error=f"技能 '{name}' 不存在（用不带参数的 skill_view 查看全部技能）")
+                return ToolResult(ok=False, output="", error=f"技能 '{name}' 不存在（用不带参数的 skill_view 查看全部技能）", error_code="NOT_FOUND")
             if not skill.is_active:
                 return ToolResult(ok=False, output="", error=f"技能 '{name}' 已停用，请在设置 → 技能中启用")
 

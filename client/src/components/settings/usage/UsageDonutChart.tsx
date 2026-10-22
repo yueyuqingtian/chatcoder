@@ -1,6 +1,9 @@
-/** 模型用量环形图：SVG donut + 右侧图例列表 + 悬停分段高亮/tooltip/图例联动。纯 SVG，无依赖。 */
+/** 模型用量环形图：SVG donut + 右侧图例列表 + 悬停分段高亮/tooltip/图例联动。纯 SVG，无依赖。
+ *  plan-20261022-release-ci：概览页把环形图与模型明细表并排放进同一张卡，明细表本身就是图例，
+ *  这时传 legend={false} 只画环，避免同一份数据列两遍。 */
 import { useState, type CSSProperties } from "react";
 import { fmtTokens } from "./chartUtils";
+import { Tooltip } from "../../ui";
 
 export interface DonutSeg {
   label: string;
@@ -28,7 +31,11 @@ function arc(a0: number, a1: number, r: number): string {
   return `M ${sx},${sy} A ${r},${r} 0 ${large} 1 ${ex},${ey}`;
 }
 
-export function UsageDonutChart({ segments, centerValue }: { segments: DonutSeg[]; centerValue: number }) {
+export function UsageDonutChart({ segments, centerValue, legend = true }: {
+  segments: DonutSeg[];
+  centerValue: number;
+  legend?: boolean;
+}) {
   const total = Math.max(1, segments.reduce((s, x) => s + x.value, 0));
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
 
@@ -57,7 +64,7 @@ export function UsageDonutChart({ segments, centerValue }: { segments: DonutSeg[
   }
 
   return (
-    <div className="usage-donut-wrap" onMouseLeave={() => setHoverIdx(null)}>
+    <div className={"usage-donut-wrap" + (legend ? "" : " is-bare")} onMouseLeave={() => setHoverIdx(null)}>
       <div className="usage-donut" style={{ width: SIZE, height: SIZE }}>
         <svg viewBox={`0 0 ${SIZE} ${SIZE}`} width={SIZE} height={SIZE}>
           <circle cx={CX} cy={CY} r={R} fill="none" stroke="var(--bg-hover)" strokeWidth={STROKE} />
@@ -71,7 +78,7 @@ export function UsageDonutChart({ segments, centerValue }: { segments: DonutSeg[
                 strokeWidth={hoverIdx === i ? STROKE + 4 : STROKE}
                 strokeLinecap="butt"
                 opacity={hoverIdx == null || hoverIdx === i ? 1 : 0.45}
-                style={{ cursor: "pointer", transition: "stroke-width .12s ease, opacity .12s ease" }}
+                className="usage-donut-arc"
                 onMouseEnter={() => setHoverIdx(i)}
               />
             ) : null,
@@ -103,7 +110,7 @@ export function UsageDonutChart({ segments, centerValue }: { segments: DonutSeg[
                 {hover.children.map((c) => (
                   <div key={c.label} className="usage-tip-row">
                     <i className="usage-trend-dot" style={{ background: c.color }} />
-                    <span className="usage-tip-name" title={c.label}>{c.label}</span>
+                    <Tooltip content={c.label}><span className="usage-tip-name">{c.label}</span></Tooltip>
                     <span className="usage-tip-val">{fmtTokens(c.value)}</span>
                   </div>
                 ))}
@@ -112,7 +119,7 @@ export function UsageDonutChart({ segments, centerValue }: { segments: DonutSeg[
           </div>
         )}
       </div>
-      <div className="usage-donut-legend">
+      {legend && <div className="usage-donut-legend">
         {segments.map((s, i) => (
           <div
             key={s.label}
@@ -120,12 +127,12 @@ export function UsageDonutChart({ segments, centerValue }: { segments: DonutSeg[
             onMouseEnter={() => setHoverIdx(i)}
           >
             <i className="usage-donut-dot" style={{ background: s.color }} />
-            <span className="usage-donut-legend-name" title={s.label}>{s.label}</span>
+            <Tooltip content={s.label}><span className="usage-donut-legend-name">{s.label}</span></Tooltip>
             <span className="usage-donut-legend-pct">{s.pct}%</span>
             <span className="usage-donut-legend-val">{fmtTokens(s.value)}</span>
           </div>
         ))}
-      </div>
+      </div>}
     </div>
   );
 }

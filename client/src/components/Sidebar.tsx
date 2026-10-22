@@ -22,6 +22,9 @@ import { MergeDialog } from "./worktree/MergeDialog";
 import { WorktreeCreateDialog } from "./worktree/WorktreeCreateDialog";
 import { Collapse, Empty, Input, Segmented, Tooltip } from "./ui";
 import { ProjectIcon } from "./project/ProjectIcon";
+import { WaitingIcon } from "./iconkit/WaitingIcon";
+import { usePendingInteractions } from "../store/pendingInteractions";
+import { waitingOf } from "../utils/sessionWaiting";
 import { openProjectDialog } from "../store/projectDialog";
 import {
   IconChevronDown,
@@ -161,6 +164,17 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
   const loadBootstrap = useChatStore((s) => s.loadBootstrap);
   /** plan-156-619 S5：主会话 id → 子会话列表（子会话不进入 list_sessions，必须单独取）。 */
   const subsessionsByParent = useChatStore((s) => s.subsessionsByParent);
+  /** plan-522-2209：跨会话待办索引。订阅整个 map 是为了「审批到达 / 结束时侧栏重算等待态」——
+   *  hasPending() 读的是 getState()，不订阅就不会触发重渲染，问号会停在旧值上。 */
+  const pendingBySession = usePendingInteractions((s) => s.pendingBySession);
+  /** 把订阅值折成一个纯判定函数：不读 getState，避免与订阅时序错位。 */
+  const hasPendingOf = useMemo(
+    () => (id: number) => {
+      const bucket = pendingBySession[id];
+      return Boolean(bucket && Object.keys(bucket).length > 0);
+    },
+    [pendingBySession],
+  );
   const switchSession = useChatStore((s) => s.switchSession);
   const deleteSession = useChatStore((s) => s.deleteSession);
   const renameSession = useChatStore((s) => s.renameSession);
@@ -502,16 +516,17 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
   const renderSessionRow = (s: SessionOut, child: boolean, inPinnedSection = false) => {
     const isCurrent = s.id === currentSessionId && !pageMode;
     const editing = renaming?.id === s.id;
-    const busy = sessionBusy(s, busyIds);
-    // plan-156-619 修复（用户口径）：置顶入口不再绑定「聚焦」，而是**悬停会话行即出现**，
-    // 且始终是同一枚普通图钉（不因已置顶换成别的图标）。
-    // 槽位宽度恒定，图标只在 hover 时淡入 —— 标题起点不会因为出现/消失而位移。
-    // 运行中优先显示转圈：此时不提供置顶入口，避免「边跑边改排序」造成列表跳动。
     // plan-156-619 S5：主会话下的子会话（不含子会话自身——子项不再向下嵌套，一层扁平）
     // plan-156-623：已置顶的子会话移到「置顶」分区，父组里不再重复显示。
+    // plan-522-2209：children 的计算必须在等待态判定之前——父行的等待态要聚合子会话。
     const children = !child && s.side_parent_id == null
       ? [...(subsessionsByParent[s.id] || [])].filter((c) => !c.pinned).sort((a, b) => a.id - b.id)
       : [];
+    const busy = sessionBusy(s, busyIds);
+    // plan-522-2209：等待态优先级最高，且父行要连带子会话——
+    // 「父亲自身计划待确认」与「任一子会话在等我」都属于「有东西等我处理」。
+    const waiting = waitingOf(s, hasPendingOf)
+      || children.some((c) => waitingOf(c, hasPendingOf));
     // plan-156-620：当前就在某个子会话里时强制展开，避免活动会话被折叠藏起来
     const subsOpen = !collapsedSubs.has(s.id) || children.some((c) => c.id === currentSessionId);
     const childRunning = children.some((c) => sessionBusy(c, busyIds));
@@ -527,9 +542,15 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
         {/* plan-156-619 修复：行首固定槽位，悬停时淡入置顶按钮。
             已置顶与未置顶共用同一枚图钉图标（用户明确要求「非置顶图标」），
             状态差异只由颜色（accent）与 tooltip 文案表达，不换图标形状。
-            plan-156-623：已置顶的行统一在「置顶」分区，那里不再重复钉子（分区标题已表达状态）。 */}
+            plan-156-623：已置顶的行统一在「置顶」分区，那里不再重复钉子（分区标题已表达状态）。
+            plan-522-2209：三分支且等待态最高优先——等待时置顶按钮根本不渲染，
+            悬停也就无从把它替换掉（用户明确要求「hover 不被置顶图标替换」）。 */}
         <span className="sb-session-slot">
-          {busy ? (
+          {waiting ? (
+            <Tooltip content={s.plan_awaiting ? "计划待确认，等你看过再决定是否执行" : "有子任务在等你处理"} side="top">
+              <WaitingIcon size={15} label="等待处理" />
+            </Tooltip>
+          ) : busy ? (
             <span className="sb-session-pulse on" aria-hidden="true" />
           ) : (
             <Tooltip content={s.pinned ? t("sidebar.ctx_unpin") : t("sidebar.ctx_pin")} side="top">
@@ -579,7 +600,8 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
               if (e.key === "Escape") { e.preventDefault(); setRenaming(null); }
             }} />
         ) : (
-          <span className="sb-session-title" title={s.title || `会话 ${s.id}`}
+          <Tooltip content={s.title || `会话 ${s.id}`}>
+          <span className="sb-session-title"
             onMouseEnter={(e) => {
               // S1：标题溢出时 hover 跑马灯浏览全文（测量后写 CSS 变量，不改 state 避免重渲染）
               const el = e.currentTarget;
@@ -593,6 +615,7 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
           >
             <span className="sb-title-inner">{s.title || t("sidebar.new_task")}</span>
           </span>
+          </Tooltip>
         )}
         {/* plan-156-620：子会话开关——点击折叠 / 展开该会话下的子会话（记忆选择）。
             plan-20261018-sidebar-toggle：由「数量 + 箭头」胶囊改为与行尾归档 / 三点同规格的
@@ -736,9 +759,11 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
         {/* plan-20261017-sbwt：名称与标签放进同一主区，悬停操作以叠加层浮在右侧并淡出主区尾部，
             不再参与排版——此前操作按钮 display:none→flex 会挤压名称与标签造成跳变 */}
         <span className="sb-project-main">
-          <span className="sb-project-name" title={isWorktree ? `${p.worktree_branch || ""} · ${p.path}` : p.path}>
-            {displayName}
-          </span>
+          <Tooltip content={isWorktree ? `${p.worktree_branch || ""} · ${p.path}` : p.path}>
+            <span className="sb-project-name">
+              {displayName}
+            </span>
+          </Tooltip>
           {branchTag && (
             <Tooltip content={`分支 ${branchTag}`} side="top">
               <span className="sb-worktree-tag">{branchTag}</span>
@@ -899,8 +924,8 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
               ]}
             />
             <div className="sb-view-actions">
-              <button className={"sb-icon-btn" + (sortMenuOpen ? " active" : "")} title={t("sidebar.sort_title")} onClick={() => setSortMenuOpen(!sortMenuOpen)}><IconSortDesc size={14} /></button>
-              <button className="sb-icon-btn" title={t("sidebar.new_project")} onClick={handleNewProject}><IconFolderPlus size={14} /></button>
+              <Tooltip content={t("sidebar.sort_title")}><button className={"sb-icon-btn" + (sortMenuOpen ? " active" : "")} onClick={() => setSortMenuOpen(!sortMenuOpen)}><IconSortDesc size={14} /></button></Tooltip>
+              <Tooltip content={t("sidebar.new_project")}><button className="sb-icon-btn" onClick={handleNewProject}><IconFolderPlus size={14} /></button></Tooltip>
             </div>
             {sortMenuOpen && (
               <div className="context-menu sb-context-menu sb-sort-menu" onClick={() => setSortMenuOpen(false)}>
@@ -981,7 +1006,7 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
 
       {/* 底部设置入口 */}
       <div className="sb-userbar">
-        <button className={`sb-user-settings${active === "settings" ? " active" : ""}`} title={t("cmd.settings")} onClick={() => onChange("settings")}><IxSettings size={16} /><span>{t("cmd.settings")}</span></button>
+        <Tooltip content={t("cmd.settings")}><button className={`sb-user-settings${active === "settings" ? " active" : ""}`} onClick={() => onChange("settings")}><IxSettings size={16} /><span>{t("cmd.settings")}</span></button></Tooltip>
         <UpdateBadge />
       </div>
 

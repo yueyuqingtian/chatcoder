@@ -6,7 +6,7 @@
  *      空态由四条灰色长条改为 2×2 工具启动卡（角色色磁贴，闲置灰度、聚焦彩色）。
  */
 import { IxTasks, IxBrowser, IxTerminal, IxFiles, IxBot, IxBug, IxWorkflow } from "../iconkit/StackIcons";
-import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { lazy, memo, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api } from "../../api/client";
 import { isBusy, subscribe } from "../../perf/bus";
 import { usePanelStore, bucketSessionId } from "../../store/panel";
@@ -19,14 +19,18 @@ import {
 import { Popover, Tooltip } from "../ui";
 import { TaskSummaryPanel } from "./TaskSummaryPanel";
 import { BrowserPanel } from "./BrowserPanel";
-import { FileTreePanel } from "./FileTreePanel";
-import { TerminalPanel } from "./TerminalPanel";
 import { SubagentPanel } from "./SubagentPanel";
 import { DebugPanel } from "./DebugPanel";
 import { WorkflowPanel } from "../workflow/WorkflowPanel";
 import { SidePanel } from "./SidePanel";
 import { GitPanel } from "./GitPanel";
 import { ErrorBoundary } from "../ErrorBoundary";
+
+/** 文件树（内含 Monaco 编辑器）与终端（内含 xterm）体积大，只在对应标签打开时才加载，不进首屏包。
+ *  占位层与面板同样撑满剩余空间，加载瞬间不产生布局跳动。 */
+const FileTreePanel = lazy(() => import("./FileTreePanel").then((m) => ({ default: m.FileTreePanel })));
+const TerminalPanel = lazy(() => import("./TerminalPanel").then((m) => ({ default: m.TerminalPanel })));
+const LazyPanelFallback = () => <div style={{ flex: 1, minHeight: 0 }} aria-busy="true" />;
 
 /** plan-75-334 阶段3：面板内容按 tab/sessionId/visible 记忆化。
  *  此前标签列表无关变化（新增/关闭其它标签、全屏切换等）会重建**全部**面板内容，
@@ -35,8 +39,16 @@ const PanelContent = memo(function PanelContent({ tab, sessionId, visible }: { t
   switch (tab.id) {
     case "task-summary": return <TaskSummaryPanel visible={visible} />;
     case "browser": return <BrowserPanel sessionId={sessionId} visible={visible} />;
-    case "terminal": return <TerminalPanel tab={tab} sessionId={sessionId} visible={visible} />;
-    case "files": return <FileTreePanel visible={visible} sessionId={sessionId} />;
+    case "terminal": return (
+      <Suspense fallback={<LazyPanelFallback />}>
+        <TerminalPanel tab={tab} sessionId={sessionId} visible={visible} />
+      </Suspense>
+    );
+    case "files": return (
+      <Suspense fallback={<LazyPanelFallback />}>
+        <FileTreePanel visible={visible} sessionId={sessionId} />
+      </Suspense>
+    );
     case "subagent": return <SubagentPanel threadId={tab.meta?.threadId} agentName={tab.meta?.agentName} visible={visible} />;
     case "debug": return <DebugPanel sessionId={sessionId} />;
     case "workflow": return <WorkflowPanel sessionId={sessionId} visible={visible} />;

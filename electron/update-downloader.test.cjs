@@ -72,6 +72,7 @@ function base(extra = {}) {
       sha512: SHA, size: FILE.length,
       chunkSize: 1 * MiB, concurrency: 4,
       backoffBaseMs: 5, backoffMaxMs: 40, stallTimeoutMs: 15000, connectTimeoutMs: 5000, probeTimeoutMs: 5000,
+      firstConnectTimeoutMs: 3000, switchBackoffMs: [5, 10, 20, 40], recoverIntervalMs: 60000,
       ...extra,
     },
   };
@@ -154,31 +155,143 @@ test("清理：其它版本遗留的断点文件会在新下载开始时删除�
   } finally { await s.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("多源：被墙的源一直不响应，不拖慢启动——几乎立刻用好的源下载", async () => {
+test("多源：镜像一直不响应，首个连接短超时后切到自建源，不会等满常规超时", async () => {
   const hung = await startServer(FILE, { hang: true });
   const good = await startServer(FILE);
-  const { dir, opts } = base({ probeTimeoutMs: 8000, probeGraceMs: 200 });
+  const { dir, opts } = base({ firstConnectTimeoutMs: 300, connectTimeoutMs: 8000 });
   const t0 = Date.now();
   try {
-    const r = await downloadResumable(await prep({ ...opts, urls: [hung.url, good.url] }));
+    const r = await downloadResumable(await prep({ ...opts, urls: [{ url: hung.url, tier: "mirror" }, { url: good.url, tier: "primary" }] }));
     const elapsed = Date.now() - t0;
-    assert.ok(elapsed < 4000, `不应等被墙源的探测超时（实际 ${elapsed}ms）`);
-    assert.ok(r.source.endsWith(String(good.server.address().port)));
+    assert.ok(elapsed < 4000, `不应等满常规连接超时（实际 ${elapsed}ms）`);
+    assert.equal(r.tier, "primary");
+    assert.equal(hung.stats.requests, 1, "冷源同一时刻只放一个请求探路");
     assert.ok(sameFile(opts.dest));
   } finally { await hung.close(); await good.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("多源：下载途中主源开始 500，自动切到备源", async () => {
-  // 探测 1 次 + 前 3 个分块请求正常，之后一律 500
-  const flaky = await startServer(FILE, { failAfterRequests: 4, delayMs: 1 });
-  const good = await startServer(FILE, { delayMs: 3 }); // 比主源慢，保证探测时主源排第一
-  const { dir, opts } = base({ concurrency: 2 });
+test("镜像单连接：并发 4 也只发一个在途请求，并走 fetchFor 指定的直连实现", async () => {
+  const mirror = await startServer(FILE, { delayMs: 2 });
+  const { dir, opts } = base({ chunkSize: 512 * 1024, concurrency: 4 });
+  let directCalls = 0;
+  let inflight = 0;
+  let peak = 0;
+  // 在应用层统计并发：响应体读完才释放计数，避免服务端 close 事件的时序造成误判
+  const countingFetch = async (u, init) => {
+    directCalls += 1;
+    inflight += 1;
+    peak = Math.max(peak, inflight);
+    const res = await fetch(u, init);
+    if (!res.body) { inflight -= 1; return res; }
+    const reader = res.body.getReader();
+    let settled = false;
+    const done = () => { if (!settled) { settled = true; inflight -= 1; } };
+    const stream = new ReadableStream({
+      async pull(ctrl) {
+        const { done: end, value } = await reader.read();
+        if (end) { done(); ctrl.close(); } else ctrl.enqueue(value);
+      },
+      cancel() { done(); return reader.cancel(); },
+    });
+    return new Response(stream, { status: res.status, statusText: res.statusText, headers: res.headers });
+  };
   try {
-    const r = await downloadResumable(await prep({ ...opts, urls: [flaky.url, good.url] }));
+    const r = await downloadResumable(await prep({
+      ...opts,
+      urls: [{ url: mirror.url, tier: "mirror" }],
+      fetchFor: () => countingFetch,
+    }));
+    assert.equal(r.tier, "mirror");
+    assert.ok(directCalls > 0, "镜像请求应走 fetchFor 指定的直连实现");
+    assert.equal(peak, 1, `镜像线路应串行（实际峰值 ${peak}）`);
     assert.ok(sameFile(opts.dest));
-    assert.ok(good.stats.ranged > 0, "备源应分担了剩余的块");
-    assert.ok(r.retries > 0);
-  } finally { await flaky.close(); await good.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+  } finally { await mirror.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("优先级固定：GitHub 更快也不会排到自建源前面", async () => {
+  const slowPrimary = await startServer(FILE, { delayMs: 1 });
+  const fastGh = await startServer(FILE);
+  const { dir, opts } = base();
+  try {
+    const r = await downloadResumable(await prep({ ...opts, urls: [{ url: fastGh.url, tier: "github" }, { url: slowPrimary.url, tier: "primary" }] }));
+    assert.equal(r.tier, "primary");
+    assert.equal(fastGh.stats.requests, 0, "自建源正常时不应碰 GitHub");
+    assert.ok(sameFile(opts.dest));
+  } finally { await slowPrimary.close(); await fastGh.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("切换序列：镜像 → 自建源 → 镜像 → 自建源 → GitHub，切换前按退避等待", async () => {
+  const p = await startServer(FILE, { status: 503 });
+  const m = await startServer(FILE, { status: 503 });
+  const g = await startServer(FILE);
+  const order = [];
+  for (const [name, srv] of [["P", p], ["M", m], ["G", g]]) srv.server.prependListener("request", () => order.push(name));
+  const { dir, opts } = base({ switchBackoffMs: [40, 80, 160, 320] });
+  const retrying = [];
+  const t0 = Date.now();
+  try {
+    const r = await downloadResumable(await prep({
+      ...opts,
+      urls: [{ url: p.url, tier: "primary" }, { url: m.url, tier: "mirror" }, { url: g.url, tier: "github" }],
+      onPhase: (ph, info) => { if (ph === "retrying" && info.retryInMs != null) retrying.push(`${info.label}->${info.nextLabel}`); },
+    }));
+    const elapsed = Date.now() - t0;
+    assert.equal(r.tier, "github");
+    assert.deepEqual(order.slice(0, 5), ["M", "P", "M", "P", "G"], `实际顺序 ${order.join(",")}`);
+    assert.deepEqual(retrying, ["镜像->自建源", "自建源->镜像", "镜像->自建源", "自建源->GitHub"]);
+    // 40 + 80 + 160 + 320 = 600ms（±15% 抖动）
+    assert.ok(elapsed >= 500, `应按退避等待（实际 ${elapsed}ms）`);
+    assert.ok(sameFile(opts.dest));
+  } finally { await p.close(); await m.close(); await g.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("多连接同时被掐断：只算单块失败，不换源", async () => {
+  const primary = await startServer(FILE, { failRate: 0.5 });
+  const backup = await startServer(FILE);
+  const { dir, opts } = base();
+  try {
+    // 用两个同层（自建源）的源：同层保持传入顺序，第一个一直有数据流入就不应切到第二个
+    const r = await downloadResumable(await prep({ ...opts, urls: [{ url: primary.url, tier: "primary" }, { url: backup.url, tier: "primary" }] }));
+    assert.ok(primary.stats.failures > 0, "应发生过断连");
+    assert.equal(r.tier, "primary");
+    assert.equal(backup.stats.requests, 0, "当前源一直有数据流入，不应切到备用源");
+    assert.ok(sameFile(opts.dest));
+  } finally { await primary.close(); await backup.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("自动回切：落到 GitHub 后自建源恢复，探测通过即切回自建源", async () => {
+  const primary = await startServer(FILE, { status: 503 });
+  const gh = await startServer(FILE, { delayMs: 4 });
+  const { dir, opts } = base({ recoverIntervalMs: 150, concurrency: 2 });
+  const tiers = [];
+  try {
+    const run = downloadResumable(await prep({
+      ...opts,
+      urls: [{ url: primary.url, tier: "primary" }, { url: gh.url, tier: "github" }],
+      onPhase: (ph, info) => { if (ph === "downloading") tiers.push(info.tier); },
+    }));
+    // GitHub 出数据后再让自建源恢复
+    for (let i = 0; i < 200 && !tiers.includes("github"); i++) await new Promise((r) => setTimeout(r, 10));
+    primary.server.removeAllListeners("request");
+    primary.server.on("request", okHandler());
+    const r = await run;
+    assert.ok(tiers.includes("github"), "应先落到 GitHub");
+    assert.equal(tiers.at(-1), "primary", `最后应回到自建源（实际 ${tiers.join(",")}）`);
+    assert.equal(r.tier, "primary");
+    assert.ok(sameFile(opts.dest));
+  } finally { await primary.close(); await gh.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("取消原因：abort(reason) 透传到 aborted 错误上", async () => {
+  const s = await startServer(FILE, { delayMs: 2 });
+  const { dir, opts } = base();
+  try {
+    const ac = new AbortController();
+    await assert.rejects(
+      downloadResumable(await prep({ ...opts, urls: [s.url], signal: ac.signal, onProgress: (p) => { if (p.percent > 5) ac.abort("restart"); } })),
+      (e) => e.kind === "aborted" && e.reason === "restart",
+    );
+  } finally { await s.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("源不支持 Range：退化为单连接顺序下载仍能完成", async () => {

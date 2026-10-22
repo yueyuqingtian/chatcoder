@@ -27,8 +27,15 @@ import { openGallery } from "../../store/gallery";
 import { TableBlock } from "./TableBlock";
 import { Tooltip } from "./Tooltip";
 
-/** 相对链接存在性校验缓存（path → 存在且为文件） */
+/** 相对链接存在性校验缓存（path → 存在且为文件）；长会话中路径不断增加，设上限防止无界增长 */
+const STAT_CACHE_LIMIT = 1000;
 const statCache = new Map<string, boolean>();
+function statCacheSet(key: string, value: boolean): void {
+  if (!statCache.has(key) && statCache.size >= STAT_CACHE_LIMIT) {
+    statCache.delete(statCache.keys().next().value as string);
+  }
+  statCache.set(key, value);
+}
 
 function CodeBlockWrapper({ children }: { children: ReactNode }) {
   const [copied, setCopied] = useState(false);
@@ -109,7 +116,7 @@ function FileLink({ href, children }: { href?: string; children?: ReactNode }) {
       .then((r) => {
         if (dead) return;
         const ok = r.exists && !r.is_dir;
-        statCache.set(clean, ok);
+        statCacheSet(clean, ok);
         setStat(ok);
       })
       .catch(() => { if (!dead) setStat(false); });

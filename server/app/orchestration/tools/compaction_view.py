@@ -55,6 +55,7 @@ def _message_to_text(m, *, snippet: int | None = _DEFAULT_SNIPPET) -> str:
 
 class CompactionIndexTool(Tool):
     name = "compaction_index"
+    concurrency_safe = True  # plan-522-2209：只读压缩块索引
     risk_level = "low"
     description = (
         "【按需回看第 1 步】列出当前会话内全部上下文压缩块的索引（序号/覆盖消息范围/节省 token/"
@@ -100,6 +101,7 @@ class CompactionIndexTool(Tool):
 
 class CompactionViewTool(Tool):
     name = "compaction_view"
+    concurrency_safe = True  # plan-522-2209：只读压缩块内容
     risk_level = "low"
     description = (
         "【按需回看第 2 步】按索引查看某个上下文压缩块遮蔽的压缩前会话消息。参数二选一："

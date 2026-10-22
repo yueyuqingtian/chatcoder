@@ -446,10 +446,15 @@ def _micro_compact(api: list[ChatMessage], workspace_root: str | None = None) ->
     """
     from app.core.config import settings
 
-    limit = getattr(settings, "tool_output_chars_read", 16000) or 16000
+    # fs_read 窗口按字节预算封顶，阈值与之对齐，合法窗口不会被折叠（否则出现“读→折叠→再读”）；
+    # 其它工具保持原先的 16000 字符阈值
+    read_limit = getattr(settings, "tool_output_bytes_read", 32768) or 32768
     folded = 0
     for m in api:
-        if m.role != "tool" or not m.content or len(m.content) <= limit:
+        if m.role != "tool" or not m.content:
+            continue
+        limit = read_limit if getattr(m, "name", None) == "fs_read" else 16000
+        if len(m.content) <= limit:
             continue
         try:
             import hashlib

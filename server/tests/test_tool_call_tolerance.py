@@ -169,7 +169,8 @@ async def test_grep_invalid_regex_falls_back_to_literal(workspace):
 
 
 def test_micro_compact_writes_into_session_workspace(workspace, monkeypatch):
-    monkeypatch.setattr(settings, "tool_output_chars_read", 100, raising=False)
+    # fs_read 窗口阈值已改为字节口径（tool_output_bytes_read）
+    monkeypatch.setattr(settings, "tool_output_bytes_read", 100, raising=False)
     msgs = [
         ChatMessage(role="user", content="u"),
         ChatMessage(role="tool", content="x" * 500, name="fs_read", tool_call_id="c1"),

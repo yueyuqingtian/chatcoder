@@ -11,6 +11,7 @@
  */
 import { IconChevronLeft } from "./icons";
 import { Dialog } from "./ui/Dialog";
+import { Tooltip } from "./ui/Tooltip";
 
 interface ModalProps {
   open: boolean;
@@ -41,9 +42,11 @@ export function Modal({ open, onClose, title, subtitle, actions, footer, childre
       actions={
         <>
           {showBack && (
-            <button type="button" className="ui-icon-btn" title="返回" aria-label="返回" onClick={onClose}>
-              <IconChevronLeft size={16} />
-            </button>
+            <Tooltip content="返回">
+              <button type="button" className="ui-icon-btn" aria-label="返回" onClick={onClose}>
+                <IconChevronLeft size={16} />
+              </button>
+            </Tooltip>
           )}
           {actions}
         </>

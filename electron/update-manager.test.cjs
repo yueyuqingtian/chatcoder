@@ -13,9 +13,23 @@ function fakeUpdater() {
   u.calls = [];
   u.setFeedURL = (f) => { u.calls.push(["setFeedURL", f]); };
   u.checkForUpdates = async () => { u.calls.push(["check"]); return { isUpdateAvailable: false }; };
-  u.downloadUpdate = async () => { u.calls.push(["download"]); };
+  u.downloadUpdate = async (token) => { u.calls.push(["download", token]); };
   u.quitAndInstall = () => { u.calls.push(["install"]); };
   return u;
+}
+
+/** 假的取消令牌：cancel 时触发 onCancel 回调 */
+function fakeToken() {
+  const cbs = [];
+  return { cancelled: false, onCancel: (f) => cbs.push(f), cancel() { this.cancelled = true; for (const f of cbs) f(); } };
+}
+
+/** 一个可被取消令牌中断的假下载：返回 Promise，取消时以 aborted 拒绝 */
+function hangingDownload(u, starts) {
+  u.downloadUpdate = (token) => new Promise((_, reject) => {
+    starts.push(token);
+    token.onCancel(() => { const e = new Error("已取消"); e.kind = "aborted"; reject(e); });
+  });
 }
 
 function makeManager(over = {}) {
@@ -31,6 +45,8 @@ function makeManager(over = {}) {
     net: {},
     log() {}, logErr() {},
     tuning: { retryDelayMs: 1 },
+    ghProxy: over.ghProxy,
+    createCancellationToken: fakeToken,
   });
   const u = fakeUpdater();
   m.attach(u);
@@ -39,22 +55,89 @@ function makeManager(over = {}) {
 
 const info = (extra = {}) => ({ version: "0.9.0", releaseNotes: "n", releaseDate: "d", files: [{ url: "chatcoder-Setup-0.9.0.exe", sha512: "x", size: 1 }], ...extra });
 
-test("候选下载源：当前 feed 解析出的地址优先，其次自建源与 GitHub，额外镜像只收 https，且去重", () => {
+test("候选下载源：按 镜像（gh-proxy + 额外镜像）> 自建源 > GitHub 排列，镜像优先", () => {
   const { m, u } = makeManager();
   u.emit("update-available", info({ mirrors: ["https://cdn.example/x", "http://insecure.example/", "https://m.example/updates/"] }));
   const urls = m._internals.buildDownloadUrls(new URL("https://github.com/o/r/releases/download/v0.9.0/chatcoder-Setup-0.9.0.exe"), "chatcoder-Setup-0.9.0.exe");
   assert.deepEqual(urls, [
-    "https://github.com/o/r/releases/download/v0.9.0/chatcoder-Setup-0.9.0.exe",
-    "https://m.example/updates/chatcoder-Setup-0.9.0.exe",
-    "https://cdn.example/x/chatcoder-Setup-0.9.0.exe",
+    { url: "https://cdn.gh-proxy.org/https://github.com/o/r/releases/download/v0.9.0/chatcoder-Setup-0.9.0.exe", tier: "mirror" },
+    { url: "https://m.example/updates/chatcoder-Setup-0.9.0.exe", tier: "primary" },
+    { url: "https://cdn.example/x/chatcoder-Setup-0.9.0.exe", tier: "mirror" },
+    { url: "https://github.com/o/r/releases/download/v0.9.0/chatcoder-Setup-0.9.0.exe", tier: "github" },
   ]);
 });
 
-test("repo 为空时不把 GitHub 列入候选源", () => {
+test("repo 为空时只剩自建源（不拼镜像与 GitHub）", () => {
   const { m, u } = makeManager({ repo: null });
   u.emit("update-available", info());
   const urls = m._internals.buildDownloadUrls(new URL("https://m.example/updates/chatcoder-Setup-0.9.0.exe"), "chatcoder-Setup-0.9.0.exe");
-  assert.deepEqual(urls, ["https://m.example/updates/chatcoder-Setup-0.9.0.exe"]);
+  assert.deepEqual(urls, [{ url: "https://m.example/updates/chatcoder-Setup-0.9.0.exe", tier: "primary" }]);
+});
+
+test("检查更新：每次都从镜像开始，失败依次走自建源、GitHub，不会黏在 GitHub 上", async () => {
+  const { m, u } = makeManager({ meta: { autoDownload: false } });
+  let failFirst = 2;
+  u.checkForUpdates = async () => { u.calls.push(["check"]); if (failFirst-- > 0) throw new Error("down"); return {}; };
+  await m._internals.checkForUpdatesSmart();
+  const feeds1 = u.calls.filter((c) => c[0] === "setFeedURL").map((c) => c[1].url || c[1].provider);
+  assert.deepEqual(feeds1, [
+    "https://cdn.gh-proxy.org/https://github.com/o/r/releases/latest/download/",
+    "https://m.example/updates/",
+    "github",
+  ]);
+  u.calls.length = 0;
+  await m._internals.checkForUpdatesSmart(); // 定时检查：镜像已恢复，必须先试镜像
+  assert.equal(u.calls.find((c) => c[0] === "setFeedURL")[1].url, "https://cdn.gh-proxy.org/https://github.com/o/r/releases/latest/download/");
+});
+
+test("取消下载：回到 available（保留版本与说明），且同一版本不再被静默自动拉起", async () => {
+  const { m, u } = makeManager();
+  const starts = [];
+  hangingDownload(u, starts);
+  u.emit("update-available", info());
+  assert.equal(m.getState().state, "downloading");
+  await m.cancelDownload();
+  assert.equal(m.getState().state, "available");
+  assert.equal(m.getState().version, "0.9.0");
+  assert.equal(starts.length, 1);
+  assert.equal(m._internals.isDownloadActive(), false);
+  u.emit("update-available", info()); // 20 分钟后的定时检查
+  assert.equal(m.getState().state, "available", "用户取消后不应自动重下");
+});
+
+test("切换自建源：停掉当前下载并立刻用新的取消令牌重新开始", async () => {
+  const { m, u } = makeManager({ meta: { autoDownload: false } });
+  const starts = [];
+  hangingDownload(u, starts);
+  u.emit("update-available", info());
+  m.downloadNow();
+  await new Promise((r) => setTimeout(r, 10));
+  await m.switchToPrimary();
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(starts.length, 2, "应重新发起一次下载");
+  assert.ok(starts[0].cancelled && !starts[1].cancelled);
+  assert.equal(m.getState().state, "downloading");
+  assert.equal(m.getState().phase, "connecting");
+  await m.cancelDownload();
+});
+
+test("下载阶段透传线路信息：层级、友好名、退避时长与下一线路", async () => {
+  const { m, u } = makeManager({ meta: { autoDownload: false } });
+  hangingDownload(u, []);
+  u.emit("update-available", info());
+  m.downloadNow();
+  m._internals.onDownloadPhase("retrying", { source: "m.example", tier: "primary", label: "快速通道", attempt: 1, retryInMs: 2000, nextLabel: "镜像" });
+  let st = m.getState();
+  assert.equal(st.phase, "retrying");
+  assert.equal(st.tier, "primary");
+  assert.equal(st.source, "快速通道");
+  assert.equal(st.retryInMs, 2000);
+  assert.equal(st.nextLabel, "镜像");
+  m._internals.onDownloadPhase("downloading", { source: "github.com", tier: "github", label: "GitHub" });
+  st = m.getState();
+  assert.equal(st.tier, "github");
+  assert.equal(st.retryInMs, undefined, "恢复下载后不应残留退避信息");
+  await m.cancelDownload();
 });
 
 test("设置：默认开启自动下载；关闭后发现新版本只停在 available", async () => {

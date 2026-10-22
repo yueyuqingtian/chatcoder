@@ -121,8 +121,14 @@ def load_persisted_workspace() -> None:
         settings.auto_approve_tools = bool(data["auto_approve_tools"])
     if "force_approval_tools" in data:
         settings.force_approval_tools = str(data["force_approval_tools"])
-    if "session_token_budget" in data:
-        settings.session_token_budget = int(data["session_token_budget"])
+    # 审批解释模型：PUT 会写运行时，这里补上启动还原，否则重启后回落为默认（不使用专用模型）
+    if "approval_explain_model_id" in data:
+        try:
+            settings.approval_explain_model_id = int(data["approval_explain_model_id"] or 0) or None
+        except (TypeError, ValueError):
+            pass
+    if "approval_explain_reasoning_effort" in data:
+        settings.approval_explain_reasoning_effort = str(data["approval_explain_reasoning_effort"] or "")[:20]
     if "enhanced_search" in data:
         settings.enhanced_search = bool(data["enhanced_search"])
     if "show_todos" in data:
@@ -137,6 +143,18 @@ def load_persisted_workspace() -> None:
     if "agent_max_steps" in data:
         try:
             settings.agent_max_steps = int(data["agent_max_steps"])
+        except (TypeError, ValueError):
+            pass
+    # 采样温度与最大输出：与 PUT 同口径夹紧，启动即生效（否则重启后回落到环境变量或默认值）
+    for _fkey in ("agent_tool_temperature", "agent_text_temperature"):
+        if _fkey in data:
+            try:
+                setattr(settings, _fkey, min(2.0, max(0.0, float(data[_fkey]))))
+            except (TypeError, ValueError):
+                pass
+    if "agent_max_output_tokens" in data:
+        try:
+            settings.agent_max_output_tokens = min(128_000, max(0, int(data["agent_max_output_tokens"])))
         except (TypeError, ValueError):
             pass
     # v45: 启动时恢复异常自动重试策略
@@ -276,6 +294,11 @@ def load_persisted_workspace() -> None:
                 setattr(settings, _key, max(_lo, min(_hi, int(data[_key]))))
             except (TypeError, ValueError):
                 pass
+    # 已显式保存的子代理 / 子会话开关必须还原到运行时：此前只做“缺失补写”，
+    # 用户保存的 false 重启后运行时回落为默认 true，而设置页读文件仍显示关闭。
+    for _key in ("subagent_enabled", "parallel_subsession_hint", "subsession_enabled"):
+        if isinstance(data.get(_key), bool):
+            setattr(settings, _key, data[_key])
     # plan-156-624：升级默认值——旧版本没有这两个键时补写为开启并落盘，用户升级后
     # 无需手动去「设置 → 子代理 / 常规」打开子会话与并行分派。只补缺失键：
     # 已存在的 false 是用户显式关闭，不覆盖。
@@ -314,7 +337,6 @@ async def set_workspace(body: WorkspaceIn) -> WorkspaceOut:
 class GlobalSettingsOut(BaseModel):
     memory_enabled: bool = True
     global_rules: str = ""
-    auto_compact_enabled: bool = True
     # plan-278-1391: 上下文压缩触发阈值（占模型窗口比例）。默认 0.90，可配置范围 0.50~0.95。
     auto_compact_threshold_ratio: float = 0.90
     language: str = "zh"
@@ -325,7 +347,6 @@ class GlobalSettingsOut(BaseModel):
     # 字段保留仅为兼容旧配置文件回读（不做物理删除），前端不再展示。
     auto_approve_tools: bool = False
     force_approval_tools: str = "terminal_exec,ci_run,browser_navigate,browser_click,browser_type"
-    session_token_budget: int = 200_000
     # v2.2 (对齐 zcode 3.15/3.18): 常规面板补项
     terminal_shell: str = "auto"  # auto/pwsh/powershell/cmd/git-bash
     terminal_font: str = ""  # 留空继承系统终端字体
@@ -349,6 +370,9 @@ class GlobalSettingsOut(BaseModel):
     auto_reset_on_quota_exceeded: bool = False
     # Agent 最大步数（200 / 500 / 1000 / 0=不限制）
     agent_max_steps: int = 1000
+    agent_tool_temperature: float = 0.3
+    agent_text_temperature: float = 0.7
+    agent_max_output_tokens: int = 0
     # v45: 异常自动重试策略（任何报错都按此重试，穷尽后才停止并显示报错）
     # agent_retry_count: 重试次数（0 = 不重试）
     # agent_retry_intervals: 每次重试前的等待秒数（逗号分隔，默认 10,20,30）
@@ -449,14 +473,12 @@ def _isolation_default(value: object) -> str:
 class GlobalSettingsIn(BaseModel):
     memory_enabled: bool | None = None
     global_rules: str | None = None
-    auto_compact_enabled: bool | None = None
     # plan-278-1391: 压缩触发阈值比例（0.50~0.95）
     auto_compact_threshold_ratio: float | None = None
     language: str | None = None
     # v1.0: Agent/安全配置
     auto_approve_tools: bool | None = None
     force_approval_tools: str | None = None
-    session_token_budget: int | None = None
     # v2.2 (对齐 zcode 3.15/3.18): 常规面板补项
     terminal_shell: str | None = None
     terminal_font: str | None = None
@@ -476,6 +498,9 @@ class GlobalSettingsIn(BaseModel):
     # v46: ta3 额度自动重置
     auto_reset_on_quota_exceeded: bool | None = None
     agent_max_steps: int | None = None
+    agent_tool_temperature: float | None = None
+    agent_text_temperature: float | None = None
+    agent_max_output_tokens: int | None = None
     # v45: 异常自动重试策略
     agent_retry_count: int | None = None
     agent_retry_intervals: str | None = None
@@ -542,7 +567,6 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
     return GlobalSettingsOut(
         memory_enabled=data.get("memory_enabled", True),
         global_rules=data.get("global_rules", ""),
-        auto_compact_enabled=data.get("auto_compact_enabled", True),
         # plan-278-1391: 压缩触发阈值（默认取运行时 settings，即 0.90）
         auto_compact_threshold_ratio=float(
             data.get("auto_compact_threshold_ratio", settings.auto_compact_threshold_ratio)
@@ -550,7 +574,6 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
         language=data.get("language", "zh"),
         auto_approve_tools=data.get("auto_approve_tools", settings.auto_approve_tools),
         force_approval_tools=data.get("force_approval_tools", settings.force_approval_tools),
-        session_token_budget=data.get("session_token_budget", 200_000),
         # v2.2: 常规面板补项
         terminal_shell=data.get("terminal_shell", "auto"),
         terminal_font=data.get("terminal_font", ""),
@@ -581,6 +604,9 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
             data.get("auto_reset_on_quota_exceeded", settings.auto_reset_on_quota_exceeded)
         ),
         agent_max_steps=data.get("agent_max_steps", settings.agent_max_steps),
+        agent_tool_temperature=data.get("agent_tool_temperature", settings.agent_tool_temperature),
+        agent_text_temperature=data.get("agent_text_temperature", settings.agent_text_temperature),
+        agent_max_output_tokens=data.get("agent_max_output_tokens", settings.agent_max_output_tokens),
         agent_retry_count=data.get("agent_retry_count", settings.agent_retry_count),
         agent_retry_intervals=data.get("agent_retry_intervals", settings.agent_retry_intervals),
         browser_enabled=data.get("browser_enabled", settings.browser_enabled),
@@ -739,8 +765,6 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         data["memory_enabled"] = body.memory_enabled
     if body.global_rules is not None:
         data["global_rules"] = body.global_rules
-    if body.auto_compact_enabled is not None:
-        data["auto_compact_enabled"] = body.auto_compact_enabled
     # plan-278-1391: 压缩触发阈值（夹紧到 0.50~0.95，非法值忽略），运行时立即生效
     if body.auto_compact_threshold_ratio is not None:
         try:
@@ -759,9 +783,6 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
     if body.force_approval_tools is not None:
         data["force_approval_tools"] = body.force_approval_tools
         settings.force_approval_tools = body.force_approval_tools
-    if body.session_token_budget is not None:
-        data["session_token_budget"] = body.session_token_budget
-        settings.session_token_budget = body.session_token_budget
     # v2.2: 常规面板补项
     if body.terminal_shell is not None:
         data["terminal_shell"] = body.terminal_shell
@@ -832,6 +853,19 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         _rc = min(20, max(0, int(body.agent_retry_count)))
         data["agent_retry_count"] = _rc
         settings.agent_retry_count = _rc
+    # 采样温度 / 最大输出（设置中心高级项）：夹紧后立即生效；0 输出上限 = 由模型或官方兜底决定
+    if body.agent_tool_temperature is not None:
+        _tt = min(2.0, max(0.0, float(body.agent_tool_temperature)))
+        data["agent_tool_temperature"] = _tt
+        settings.agent_tool_temperature = _tt
+    if body.agent_text_temperature is not None:
+        _xt = min(2.0, max(0.0, float(body.agent_text_temperature)))
+        data["agent_text_temperature"] = _xt
+        settings.agent_text_temperature = _xt
+    if body.agent_max_output_tokens is not None:
+        _mo = min(128_000, max(0, int(body.agent_max_output_tokens)))
+        data["agent_max_output_tokens"] = _mo
+        settings.agent_max_output_tokens = _mo
     if body.agent_retry_intervals is not None:
         _ri = str(body.agent_retry_intervals).strip()
         data["agent_retry_intervals"] = _ri
@@ -949,9 +983,6 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
             data[_key] = _clamped
             setattr(settings, _key, _clamped)
     _save_config(data)
-    # 运行时更新 context compaction 设置
-    if body.auto_compact_enabled is not None:
-        settings.context_compaction_enabled = body.auto_compact_enabled
     return _global_settings_out(data)
 
 

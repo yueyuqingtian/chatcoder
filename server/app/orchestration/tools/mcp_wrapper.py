@@ -191,7 +191,7 @@ class McpToolWrapper(Tool):
                 limit=_MCP_STREAM_LIMIT,
             )
         except FileNotFoundError:
-            return ToolResult(ok=False, output="", error=f"MCP 命令不存在: {command}")
+            return ToolResult(ok=False, output="", error=f"MCP 命令不存在: {command}", error_code="NOT_FOUND")
         except Exception as e:
             return ToolResult(ok=False, output="", error=f"MCP 进程启动失败: {e}")
 

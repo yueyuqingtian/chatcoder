@@ -603,6 +603,9 @@ class SessionFlags:
     has_interrupted_turn: bool = False
     last_activity_at: str | None = None
     running_started_at: str | None = None
+    # plan-522-2209：停在「计划待确认」的 turn（awaiting_confirmation）——侧栏等待态跨会话数据源
+    plan_awaiting: bool = False
+    plan_awaiting_turn_id: int | None = None
 
 
 # IN 子句单批上限（SQLite 变量数默认上限 999，留足余量）
@@ -610,17 +613,21 @@ _FLAGS_BATCH = 500
 
 
 async def session_flags_batch(db: AsyncSession, sessions: list[Session]) -> dict[int, SessionFlags]:
-    """批量计算会话列表的运行态字段：固定 4 条聚合查询，替代逐会话 5 条查询。
+    """批量计算会话列表的运行态字段：固定 5 条聚合查询，替代逐会话多条查询。
 
     plan-156-620：会话列表此前对每个会话串行跑 has_running / workflow_running /
     has_interrupted / last_activity / running_started 五条查询（N+1）。
     百余个会话时单次 /sessions 要 5~6 秒，启动、切会话、任何触发列表刷新的操作都被拖慢。
+
+    plan-522-2209：第 5 条聚合给出「计划待确认」（awaiting_confirmation）的会话与最早 turn id。
+    侧栏等待图标要覆盖所有会话，必须走这条批量口径，不要退化成逐会话查询。
     """
     ids = [s.id for s in sessions]
     running: dict[int, str | None] = {}
     interrupted: set[int] = set()
     wf_running: set[int] = set()
     last_msg: dict[int, str | None] = {}
+    awaiting: dict[int, int] = {}
     for i in range(0, len(ids), _FLAGS_BATCH):
         chunk = ids[i:i + _FLAGS_BATCH]
         for sid, started in (await db.execute(
@@ -645,6 +652,13 @@ async def session_flags_batch(db: AsyncSession, sessions: list[Session]) -> dict
             .group_by(Message.session_id)
         )).all():
             last_msg[sid] = ts
+        # plan-522-2209：计划待确认（取最早一条，多个时以先到的方案为准）
+        for sid, tid in (await db.execute(
+            select(Turn.session_id, func.min(Turn.id))
+            .where(Turn.session_id.in_(chunk), Turn.status == "awaiting_confirmation")
+            .group_by(Turn.session_id)
+        )).all():
+            awaiting[sid] = tid
     return {
         s.id: SessionFlags(
             has_running=s.id in running,
@@ -652,6 +666,8 @@ async def session_flags_batch(db: AsyncSession, sessions: list[Session]) -> dict
             has_interrupted_turn=s.id in interrupted,
             last_activity_at=last_msg.get(s.id) or s.created_at,
             running_started_at=running.get(s.id),
+            plan_awaiting=s.id in awaiting,
+            plan_awaiting_turn_id=awaiting.get(s.id),
         )
         for s in sessions
     }
@@ -711,6 +727,21 @@ async def running_turn_started_at(db: AsyncSession, session_id: int) -> str | No
             Turn.session_id == session_id,
             Turn.status == "running",
         ).order_by(Turn.started_at.desc(), Turn.id.desc()).limit(1)
+    )
+    return res.scalar_one_or_none()
+
+
+async def plan_awaiting_turn_id(db: AsyncSession, session_id: int) -> int | None:
+    """该会话是否有停在「计划待确认」的 turn；返回最早的 turn id 或 None。
+
+    plan-522-2209：单会话路径（get_session / patch / fork 等）用；
+    列表路径必须走 session_flags_batch 的批量聚合，不要逐会话调本函数。
+    """
+    res = await db.execute(
+        select(func.min(Turn.id)).where(
+            Turn.session_id == session_id,
+            Turn.status == "awaiting_confirmation",
+        )
     )
     return res.scalar_one_or_none()
 

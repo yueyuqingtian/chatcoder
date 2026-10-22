@@ -31,6 +31,21 @@ export function fmtSpeed(v: number | null | undefined): string | null {
   return v >= 100 ? String(Math.round(v)) : v.toFixed(1);
 }
 
+const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
+
+/** 本地日期（YYYY-MM-DD）→ 分组标题：「今天 · 10月22日 周四」「昨天 · …」「10月20日 周一」，跨年时带年份 */
+export function dayLabel(iso: string, now: Date = new Date()): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  if (!y || !m || !d) return iso;
+  const date = new Date(y, m - 1, d);
+  const base = `${y !== now.getFullYear() ? `${y}年` : ""}${m}月${d}日 周${WEEKDAYS[date.getDay()]}`;
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const diff = Math.round((today.getTime() - date.getTime()) / 86_400_000);
+  if (diff === 0) return `今天 · ${base}`;
+  if (diff === 1) return `昨天 · ${base}`;
+  return base;
+}
+
 /** UTC ISO（带 Z）→ 本地 年-月-日 与 时:分:秒，分开返回便于把日期弱化显示 */
 export function splitLocalTime(iso: string | null | undefined): { date: string; clock: string } | null {
   if (!iso) return null;

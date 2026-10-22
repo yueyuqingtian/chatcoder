@@ -171,6 +171,17 @@ async def restore_compaction(
     # 拷贝新 dict 再赋值：JSON 列同引用赋值不触发 UPDATE（SQLAlchemy 按 identity 检测 dirty）
     new_ctx = dict(ctx)
     new_ctx["compacted_ids"] = sorted(compacted)
+    # plan-527-2218: 压缩水位必须随之回退——否则被还原的早期消息仍落在 SQL 下界之外，
+    # 表现为「点了还原但 AI 还是看不到」。id ≤ 还原块起点的消息在还原前就已被遮蔽且
+    # 未被还原，所以把水位退到该起点之前即可，不需要全量重查。
+    if shadowed_ids:
+        new_floor = max(0, min(shadowed_ids) - 1)
+        new_ctx["compacted_floor"] = new_floor
+        # 例外只保留仍在水位以下的；水位以上的会走正常查询，不必再列为例外
+        new_ctx["compacted_exceptions"] = sorted(
+            i for i in (ctx.get("compacted_exceptions") or [])
+            if isinstance(i, int) and i <= new_floor
+        )
     # v33: 保留压缩块记录并标记已还原（此前直接删除导致原文接口失效、序号重复、
     # 且已还原块无法被上下文侧识别排除）
     new_ctx["compactions"] = [

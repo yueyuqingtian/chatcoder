@@ -17,7 +17,7 @@ import { api, type DebugStatusOut, type McpServerOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { Button, DialogSection, Field, InsetCard, InsetRow, Input, Tooltip } from "../ui";
 import { IconBug, IconRefresh, IconTerminal } from "../icons";
-import { ConnectorMaster, ConnectorSaveBar } from "./ConnectorShell";
+import { ConnectorMaster } from "./ConnectorShell";
 
 const JDWP_HINT = (port: number) =>
   `-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:${port}`;
@@ -50,6 +50,14 @@ export function DebuggerPanel({ server }: { server?: McpServerOut }) {
 
   const dirty = webPort !== savedCfg.web_port || host !== savedCfg.jdwp_host
     || javaPort !== savedCfg.jdwp_port;
+
+  /** 修改即保存（300ms 防抖）：纯端口配置不需要显式保存按钮（设置中心统一规范，见 CLAUDE.md §2） */
+  useEffect(() => {
+    if (!dirty) return;
+    const timer = window.setTimeout(() => { void save(); }, 300);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- save 每次渲染重建，仅依据配置值触发
+  }, [dirty, webPort, host, javaPort]);
 
   /** 保存到数据库（服务端校验端口范围；非法值会被忽略并返回原值） */
   const save = async () => {
@@ -237,13 +245,10 @@ export function DebuggerPanel({ server }: { server?: McpServerOut }) {
         </InsetCard>
       </DialogSection>
 
-      {/* 保存条：配置落库（此前这些输入只存在组件 state 里，重进面板即丢） */}
-      <ConnectorSaveBar
-        dirty={dirty}
-        saving={saving}
-        idleText={saveMsg || (savedAt ? `已保存（${savedAt}）` : "配置会保存到数据库，重新进入自动读回")}
-        onSave={() => void save()}
-      />
+      {/* 保存状态提示：修改即保存，这里只反馈结果（配置落库后重新进入自动读回） */}
+      <div className="settings-resource-desc" aria-live="polite">
+        {saving ? "保存中…" : saveMsg || (savedAt ? `已保存（${savedAt}）` : "修改即保存，配置会写入数据库，重新进入自动读回")}
+      </div>
     </div>
   );
 }

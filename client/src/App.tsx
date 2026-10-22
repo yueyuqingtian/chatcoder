@@ -32,11 +32,10 @@ import { MiniChat } from "./components/panel/MiniChat";
 /** 中列最小宽（px）：与 tokens.css 的 --main-min-w 同值——拖拽上限与 CSS 渲染期钳制同口径（plan-20261016-ux）。 */
 const MAIN_MIN_W = 420;
 
-/** S7（plan-329-1647）：面板折叠/展开的过渡已整体改为 View Transition。
+/** 面板折叠/展开的过渡：统一为单一 CSS 几何过渡（见 client/src/perf/paneTransition.ts）。
  *
- *  原实现在这里（beginPaneAnimation）：给面板 180ms 的 CSS width 过渡，同时把内容根宽度
- *  钉死以省掉逐帧折行——代价是过渡期内容被裁切、结束瞬间一次集中重排。
- *  现在缩放交给合成器快照动画（见 client/src/perf/paneTransition.ts），布局一次性到位；
+ *  曾尝试 View Transition 快照动画，但折叠态元素不生成旧快照、快照缩放与真实折行不同步，
+ *  导致“中间先缩、右面板随后铺出”的两段式观感，已放弃（详见 paneTransition.ts 头部说明）。
  *  过渡期与收尾的“运动中”状态由 PerfBus 的 panel-anim 统一表达。
  *  下方 applyPaneUpdate 的调用点：本文件的左栏折叠、以及 store/panel.ts 的右栏展开/折叠/全屏。 */
 

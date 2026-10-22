@@ -26,12 +26,17 @@ async def _to_out(db: AsyncSession, s, flags: "session_service.SessionFlags | No
     )
 
     if flags is None:
+        # plan-522-2209：单会话路径也要给出计划待确认值（get_session / patch / fork 等响应
+        # 会直接覆盖列表里的那一行，漏掉就会被旧值洗回 False）。
+        _plan_awaiting_turn_id = await session_service.plan_awaiting_turn_id(db, s.id)
         flags = session_service.SessionFlags(
             has_running=await session_service.has_running_turn(db, s.id),
             workflow_running=await session_service.has_running_workflow(db, s.id),
             has_interrupted_turn=await session_service.has_interrupted_turn(db, s.id),
             last_activity_at=await session_service.last_activity_at(db, s.id),
             running_started_at=await session_service.running_turn_started_at(db, s.id),
+            plan_awaiting=_plan_awaiting_turn_id is not None,
+            plan_awaiting_turn_id=_plan_awaiting_turn_id,
         )
     return SessionOut(
         id=s.id, project_id=s.project_id, title=s.title, model_id=s.model_id,
@@ -48,6 +53,8 @@ async def _to_out(db: AsyncSession, s, flags: "session_service.SessionFlags | No
         has_running=flags.has_running,
         workflow_running=flags.workflow_running,
         has_interrupted_turn=flags.has_interrupted_turn,
+        plan_awaiting=flags.plan_awaiting,
+        plan_awaiting_turn_id=flags.plan_awaiting_turn_id,
         last_activity_at=flags.last_activity_at,
         running_started_at=flags.running_started_at,
         goal_text=s.goal_text,

@@ -14,15 +14,20 @@ const { downloadResumable } = require("./update-downloader.cjs");
  * @param {() => object|null} deps.getInfo      最近一次 update-available 的 info（取 files[].size / sha512）
  * @param {(url: URL, name: string) => string[]} deps.buildUrls  安装包候选下载地址
  * @param {object} deps.net          Electron net（fetch / isOnline）
+ * @param {(url: string, init?: object) => Promise<Response>} [deps.directFetch]
+ *        直连 fetch（独立 session，绕过系统代理）；镜像线路使用，未传则退回 net.fetch
  * @param {(phase: string, info?: object) => void} [deps.onPhase]
  * @param {{info?: Function, warn?: Function}} [deps.logger]
  * @param {object} [deps.tuning]     透传给下载器的调参（测试用）
  * @returns {boolean} 是否已接管
  */
-function installResumableDownloader({ autoUpdater, getInfo, buildUrls, net, onPhase, logger, tuning }) {
+function installResumableDownloader({ autoUpdater, getInfo, buildUrls, net, directFetch, onPhase, logger, tuning }) {
   const exec = autoUpdater && autoUpdater.httpExecutor;
   if (!exec || typeof exec.download !== "function") return false;
   const stock = exec.download.bind(exec);
+  // 差分下载由 electron-updater 自己发 Range 请求，既绕不过系统代理、也无法限成单连接，
+  // 镜像线路的「直连 + 单连接」对它不生效（实测差分还会中途卡死再回退）。接管全量下载的同时关闭差分。
+  try { autoUpdater.disableDifferentialDownload = true; } catch { /* 个别实现不可写，不影响全量下载 */ }
   exec.download = async (url, destination, options) => {
     if (!/\.exe$/i.test((url && url.pathname) || "")) return stock(url, destination, options);
     const name = decodeURIComponent(path.posix.basename(url.pathname));
@@ -38,8 +43,12 @@ function installResumableDownloader({ autoUpdater, getInfo, buildUrls, net, onPh
       partDir: path.join(path.dirname(path.dirname(destination)), "partial"),
       sha512: (options && options.sha512) || (file && file.sha512),
       size: file && Number(file.size),
-      // Chromium 网络栈：继承系统代理 / 证书设置，与 electron-updater 其余请求一致
+      // Chromium 网络栈：默认继承系统代理 / 证书设置，与 electron-updater 其余请求一致。
+      // 镜像是境外 CDN，走系统代理反而更慢，所以镜像源改用直连 fetch（plan-20261022-update-route）。
       fetchImpl: (u, init) => net.fetch(u, init),
+      fetchFor: (src) => (src.tier === "mirror" && typeof directFetch === "function"
+        ? directFetch
+        : (u, init) => net.fetch(u, init)),
       isOnline: () => net.isOnline(),
       onProgress: (p) => { if (options && typeof options.onProgress === "function") options.onProgress(p); },
       onPhase: onPhase || (() => {}),

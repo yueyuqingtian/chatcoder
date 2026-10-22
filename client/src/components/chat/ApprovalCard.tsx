@@ -28,6 +28,7 @@ import {
   IconWand,
 } from "../icons";
 import { Button, Tooltip } from "../ui";
+import { WaitingIcon } from "../iconkit/WaitingIcon";
 import { ChatCollapse } from "./ChatCollapse";
 
 /** 审批卡字段文案对照（工具参数名 → 中文标签）。未知字段回落原名。 */
@@ -193,10 +194,13 @@ export interface ApprovalCardProps {
   onAlwaysAllow: (scope: "session" | "global") => void;
   /** 排在本卡之后的待审批数量（多个子代理并行申请时）；大于 0 时在标题行提示 */
   queuedCount?: number;
+  /** plan-522-2209：这条审批来自子会话时传入（标题行末尾标注来源 + 图标切换为等待态）。
+   *  为 null / 缺省表示来自当前会话自己，此时不显示来源行——避免给自己发起的审批加噪音。 */
+  source?: { subsessionId: number; title: string } | null;
 }
 
 export function ApprovalCard({
-  approvalId, detail, onDeny, onAllowOnce, onAlwaysAllow, queuedCount = 0,
+  approvalId, detail, onDeny, onAllowOnce, onAlwaysAllow, queuedCount = 0, source = null,
 }: ApprovalCardProps) {
   const [showMore, setShowMore] = useState(false);
   const explain = useChatStore((s) => s.approvalExplain);
@@ -230,10 +234,19 @@ export function ApprovalCard({
   return (
     <div className="composer-approval-card" ref={cardRef}>
       <div className="approval-head">
-        <span className="approval-head-icon">{actionIcon(action)}</span>
+        {/* plan-522-2209：来自子会话的审批用等待态图标（与左栏同语义、同一组件），
+            当前会话自己的审批沿用按动作类别区分的图标——用户一眼能分清「谁在问」。 */}
+        <span className="approval-head-icon">
+          {source ? <WaitingIcon size={15} /> : actionIcon(action)}
+        </span>
         <span className="approval-head-text">
           <span className="approval-head-tool">{tool ? toolTitle(tool) : "工具"}</span>
           <span className="approval-head-action">想要{actionLabel}</span>
+          {/* plan-522-2209：来源标注放标题行末尾、与 action 同一基线。
+              单行省略：窄宽度下先牺牲会话名，右侧「另有 N 项」是决策信息必须完整。 */}
+          {source && (
+            <span className="approval-head-source">来自子会话「{source.title}」</span>
+          )}
         </span>
         {queuedCount > 0 && <span className="approval-head-queue">另有 {queuedCount} 项待审批</span>}
       </div>

@@ -119,4 +119,7 @@ class EditorApplyDiffTool(Tool):
             _data["old_content"] = tf.text
         if len(res.text) <= _NEW_CONTENT_MAX_CHARS:
             _data["new_content"] = res.text
+        _rc = getattr(ctx, "read_cache", None)
+        if _rc is not None:
+            _rc.mark_known(target)
         return ToolResult(ok=True, output=output, data=_data)

@@ -15,13 +15,20 @@ import asyncio
 import logging
 import os
 import re
+import subprocess
+import sys
 from pathlib import Path
-from typing import Literal
+from typing import Awaitable, Callable, Literal
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 LOCAL_TIMEOUT = 30
 NETWORK_TIMEOUT = 180
+# plan-522-2209：连接阶段短超时——只探一次 ls-remote，失败就立刻报错，
+# 不必等满 NETWORK_TIMEOUT 才把「连不上」告诉用户。
+CONNECT_TIMEOUT = 20
 MAX_DIFF_BYTES = 400_000
 MAX_NEW_FILE_BYTES = 256_000
 _UNMERGED = {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}
@@ -31,7 +38,133 @@ class GitError(Exception):
     """可直接展示给用户的错误（已是中文或 git 原文）。"""
 
 
-async def _run(cwd: str, *args: str, timeout: int = LOCAL_TIMEOUT, stdin: bytes | None = None) -> tuple[int, str, str]:
+ProgressCb = Callable[[str], Awaitable[None]]
+
+# plan-522-2209：网络类 git 命令的 SSL 后端。
+#
+# 根因：Windows 上 git 默认用 schannel，经本机 HTTP 代理（127.0.0.1:7897）访问 GitHub 会在
+# TLS 握手阶段挂死——同一仓库 git pull 实测 357.7 秒才退出，加 `-c http.sslBackend=openssl`
+# 后 ls-remote 秒回。这里按配置给联网命令显式指定后端；本地命令不插入，避免无谓改变行为。
+_PROXY_ENV = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
+# git 配置里 http.proxy 的探测结果缓存：进程生命周期内极少变动，不必每次联网都跑一遍
+_git_http_proxy: bool | None = None
+
+
+def _git_config_has_proxy() -> bool:
+    """git 配置里是否已有 http.proxy（有代理但没设环境变量时，这是「要走代理」的唯一线索）。"""
+    global _git_http_proxy
+    if _git_http_proxy is None:
+        try:
+            r = subprocess.run(["git", "config", "--get", "http.proxy"],
+                               capture_output=True, timeout=5, text=True)
+            _git_http_proxy = r.returncode == 0 and bool(r.stdout.strip())
+        except (OSError, subprocess.SubprocessError):
+            _git_http_proxy = False
+    return _git_http_proxy
+
+
+async def _ssl_backend() -> str | None:
+    """按配置决定 `-c http.sslBackend` 的取值；None 表示不插入（走 git 默认）。
+
+    plan-522-2209：auto = 「Windows 且检测到代理」时用 openssl，其余平台/场景用 git 默认。
+    除环境变量外，项目自身的 http_proxy 配置与 git 的 http.proxy 同样算作「要走代理」——
+    桌面版常常只在设置中心填了代理，环境变量里并没有。
+    """
+    raw = (settings.git_ssl_backend or "auto").strip().lower()
+    if raw in ("default", "none", "off", "0"):
+        return None
+    if raw in ("schannel", "openssl"):
+        return raw
+    # auto（含无法识别的取值，按 auto 处理）
+    if sys.platform != "win32":
+        return None
+    if any(os.environ.get(k) for k in _PROXY_ENV) or (settings.http_proxy or "").strip():
+        return "openssl"
+    if await asyncio.to_thread(_git_config_has_proxy):
+        return "openssl"
+    return None
+
+
+async def _kill(proc: asyncio.subprocess.Process | None) -> None:
+    """结束子进程：超时后必须杀掉，否则卡住的 git 会常驻并持有 index.lock，阻塞之后所有操作。"""
+    if proc is None or proc.returncode is not None:
+        return
+    try:
+        proc.kill()
+        await proc.wait()
+    except ProcessLookupError:
+        pass
+
+
+async def _emit_progress(cb: ProgressCb, raw: bytes) -> None:
+    text = raw.decode("utf-8", errors="replace").strip()
+    if not text:
+        return
+    try:
+        await cb(text)
+    except Exception:  # 进度回调失败不能打断 git 本身
+        logger.debug("[git] 进度回调异常", exc_info=True)
+
+
+async def _pump(proc: asyncio.subprocess.Process, stdin: bytes | None, on_progress: ProgressCb) -> tuple[bytes, bytes]:
+    """流式版本：stdout 分块读完、stderr 逐行回调，最后等进程退出（communicate 做不到这件事）。
+
+    返回的 stderr 仍是原始字节（与 communicate 的行为一致，不改变错误文案）；
+    \r 只是额外拆出进度行喂给回调。
+    """
+    out_chunks: list[bytes] = []
+    err_chunks: list[bytes] = []
+    progress = b""
+
+    async def feed_stdin() -> None:
+        if proc.stdin is None:
+            return
+        try:
+            if stdin:
+                proc.stdin.write(stdin)
+                await proc.stdin.drain()
+            proc.stdin.close()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    async def read_stdout() -> None:
+        while True:
+            chunk = await proc.stdout.read(65536)
+            if not chunk:
+                return
+            out_chunks.append(chunk)
+
+    async def read_stderr() -> None:
+        nonlocal progress
+        while True:
+            chunk = await proc.stderr.read(4096)
+            if not chunk:
+                break
+            err_chunks.append(chunk)
+            # git 的进度行用 \r 原地覆盖，按 \n 分行会把整段进度攒到最后才吐出
+            progress += chunk.replace(b"\r", b"\n")
+            *lines, progress = progress.split(b"\n")
+            for line in lines:
+                await _emit_progress(on_progress, line)
+        if progress:
+            await _emit_progress(on_progress, progress)
+            progress = b""
+
+    await asyncio.gather(feed_stdin(), read_stdout(), read_stderr())
+    await proc.wait()
+    return b"".join(out_chunks), b"".join(err_chunks)
+
+
+async def _run(
+    cwd: str, *args: str, timeout: int = LOCAL_TIMEOUT, stdin: bytes | None = None,
+    network: bool = False, on_progress: ProgressCb | None = None,
+) -> tuple[int, str, str]:
+    """执行 git 命令。
+
+    plan-522-2209：network=True 时（fetch / pull / push / ls-remote / clone）按配置在 `git` 与
+    子命令之间插入 `-c http.sslBackend=<backend>`；传 on_progress 时改为流式读取，
+    逐行回调 stderr，调用方能拿到「Receiving objects: 45%」这类进度。
+    """
     env = dict(os.environ)
     env.update({
         "GIT_TERMINAL_PROMPT": "0",
@@ -40,7 +173,12 @@ async def _run(cwd: str, *args: str, timeout: int = LOCAL_TIMEOUT, stdin: bytes 
         "GIT_PAGER": "cat",
         "LC_ALL": "C.UTF-8",
     })
-    cmd = ["git", "-c", "core.quotepath=off", "-c", "color.ui=never", "--no-pager", *args]
+    cmd = ["git", "-c", "core.quotepath=off", "-c", "color.ui=never", "--no-pager"]
+    if network:
+        backend = await _ssl_backend()
+        if backend:
+            cmd += ["-c", f"http.sslBackend={backend}"]
+    cmd += list(args)
     proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -48,15 +186,12 @@ async def _run(cwd: str, *args: str, timeout: int = LOCAL_TIMEOUT, stdin: bytes 
             stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-        out, err = await asyncio.wait_for(proc.communicate(stdin), timeout=timeout)
+        if on_progress is None:
+            out, err = await asyncio.wait_for(proc.communicate(stdin), timeout=timeout)
+        else:
+            out, err = await asyncio.wait_for(_pump(proc, stdin, on_progress), timeout=timeout)
     except asyncio.TimeoutError:
-        # 超时必须结束子进程：否则卡住的 git（如等待凭据）会常驻并持有 index.lock，阻塞之后所有操作
-        if proc is not None and proc.returncode is None:
-            try:
-                proc.kill()
-                await proc.wait()
-            except ProcessLookupError:
-                pass
+        await _kill(proc)
         raise GitError(f"git 命令超时（>{timeout}s），可能是网络或凭据问题") from None
     except FileNotFoundError:
         raise GitError("系统未安装 git，请先安装后再使用 Git 功能") from None
@@ -65,8 +200,12 @@ async def _run(cwd: str, *args: str, timeout: int = LOCAL_TIMEOUT, stdin: bytes 
     return proc.returncode or 0, out.decode("utf-8", errors="replace"), err.decode("utf-8", errors="replace")
 
 
-async def _must(cwd: str, *args: str, timeout: int = LOCAL_TIMEOUT, stdin: bytes | None = None) -> str:
-    rc, out, err = await _run(cwd, *args, timeout=timeout, stdin=stdin)
+async def _must(
+    cwd: str, *args: str, timeout: int = LOCAL_TIMEOUT, stdin: bytes | None = None,
+    network: bool = False, on_progress: ProgressCb | None = None,
+) -> str:
+    rc, out, err = await _run(cwd, *args, timeout=timeout, stdin=stdin, network=network,
+                              on_progress=on_progress)
     if rc != 0:
         raise GitError((err or out).strip() or f"git {args[0]} 失败（退出码 {rc}）")
     return out
@@ -502,16 +641,59 @@ async def commit(path: str, message: str, amend: bool = False) -> str:
 
 # ── 远端同步 ─────────────────────────────────────────────────────────────────
 
-async def sync(path: str, action: Literal["fetch", "pull", "push"]) -> dict:
+# plan-522-2209：连接类错误的特征词。只有命中这些才判定「连不上远端」；
+# 认证失败、仓库不存在等交给真正的命令去报原文，不要替换成误导性的「请检查网络」。
+_CONNECT_ERROR_HINTS = (
+    "could not resolve host", "failed to connect", "connection timed out", "connection reset",
+    "operation timed out", "connection refused", "unable to access", "ssl", "tls",
+    "proxy", "schannel", "recv failure", "send failure", "empty reply from server",
+)
+
+# 连接失败时给用户的文案：不提 git 原文，直接说清「查网络或代理」
+_CONNECT_FAIL_TEXT = "无法连接远端仓库，请检查网络或代理设置后重试"
+
+
+async def _ensure_reachable(root: str, upstream: str | None) -> None:
+    """联网操作前先探一次连通性，连不上就立刻失败。
+
+    plan-522-2209：此前只有 NETWORK_TIMEOUT=180 兜底，连接阶段就挂死也要等满 180 秒，
+    用户全程只看到按钮变灰。这里用 ls-remote 做 20 秒短探测，把「连不上」提前暴露。
+    没有上游分支的仓库（如刚 init 的本地仓库）不探测——那不是网络问题，交给 sync 的分支处理。
+    """
+    if not upstream:
+        return
+    remote = upstream.split("/", 1)[0] or "origin"
+    try:
+        code, _out, err = await _run(root, "ls-remote", "--exit-code", "--heads", remote,
+                                     timeout=CONNECT_TIMEOUT, network=True)
+    except GitError as e:
+        # plan-522-2209：只有探测超时才归为连接问题；「未安装 git」「git 执行失败」等
+        # 属于环境故障，原样抛出，不要包装成「请检查网络或代理」把用户带偏。
+        if "未安装 git" in str(e) or "执行失败" in str(e):
+            raise
+        raise GitError(_CONNECT_FAIL_TEXT) from None
+    if code == 0:
+        return
+    if any(h in (err or "").lower() for h in _CONNECT_ERROR_HINTS):
+        raise GitError(_CONNECT_FAIL_TEXT)
+
+
+async def sync(path: str, action: Literal["fetch", "pull", "push"],
+               on_progress: ProgressCb | None = None) -> dict:
     """抓取 / 拉取 / 推送。
 
     plan-20261017-git-conflict：拉取产生冲突时不再以错误返回——git 已经把冲突写进工作区，
     界面需要拿到冲突文件清单直接进入处理流程，而不是只看到一句「拉取失败」。
+
+    plan-522-2209：联网命令一律 network=True（按配置走 openssl 后端）、带 --progress，
+    并支持 on_progress 回调逐行接收进度；本地前置检查仍先做，避免为一个必然失败的拉取白等探测。
     """
     root = await repo_root(path)
     st = await status(path)
     if action == "fetch":
-        out = await _must(root, "fetch", "--prune", timeout=NETWORK_TIMEOUT)
+        await _ensure_reachable(root, st["upstream"])
+        out = await _must(root, "fetch", "--progress", "--prune", timeout=NETWORK_TIMEOUT,
+                          network=True, on_progress=on_progress)
     elif action == "pull":
         if st["detached"]:
             raise GitError("当前是游离 HEAD，无法拉取，请先切换到分支")
@@ -519,7 +701,9 @@ async def sync(path: str, action: Literal["fetch", "pull", "push"]) -> dict:
             raise GitError("当前分支没有设置上游分支，请在终端执行 git push -u 后再拉取")
         if st["conflicts"]:
             raise GitError("存在未解决的冲突，请先处理冲突")
-        code, out, err = await _run(root, "pull", "--no-rebase", "--no-edit", timeout=NETWORK_TIMEOUT)
+        await _ensure_reachable(root, st["upstream"])
+        code, out, err = await _run(root, "pull", "--progress", "--no-rebase", "--no-edit",
+                                    timeout=NETWORK_TIMEOUT, network=True, on_progress=on_progress)
         if code != 0:
             # 冲突不是错误：git 已把冲突写进工作区，界面据此直接进入冲突处理
             after = await status(path)
@@ -535,10 +719,13 @@ async def sync(path: str, action: Literal["fetch", "pull", "push"]) -> dict:
     else:
         if st["detached"] or not st["branch"]:
             raise GitError("当前是游离 HEAD，无法推送")
+        await _ensure_reachable(root, st["upstream"])
         if st["upstream"]:
-            out = await _must(root, "push", timeout=NETWORK_TIMEOUT)
+            out = await _must(root, "push", "--progress", timeout=NETWORK_TIMEOUT,
+                              network=True, on_progress=on_progress)
         else:
-            out = await _must(root, "push", "-u", "origin", st["branch"], timeout=NETWORK_TIMEOUT)
+            out = await _must(root, "push", "--progress", "-u", "origin", st["branch"],
+                              timeout=NETWORK_TIMEOUT, network=True, on_progress=on_progress)
     return {"output": (out or "完成").strip(), "conflict": False, "conflicts": [], "state": st["state"]}
 
 

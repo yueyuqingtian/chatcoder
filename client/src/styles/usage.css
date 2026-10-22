@@ -30,6 +30,29 @@
 .up-card-body.is-flush { padding: 8px 0 6px; }
 /* 图表自带的外框在卡片里不再重复 */
 .up-card .usage-trend, .up-card .usage-donut-wrap { border: 0; border-radius: 0; padding: 0; background: transparent; }
+
+/* ── 趋势图（plan-20261022-release-ci：按容器宽度 1:1 绘制，文字不再随宽度放大）── */
+.up-card .usage-trend { gap: var(--sp-3); }
+.usage-trend-chart { width: 100%; }
+.usage-trend-svg { display: block; width: 100%; height: 220px; }
+.usage-trend-grid.is-base { stroke: var(--border-strong); }
+.usage-trend-line { stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: stroke-width var(--dur-2) var(--ease-standard); }
+.usage-trend-series, .usage-trend-bar { transition: opacity var(--dur-2) var(--ease-standard); }
+.usage-trend-series.is-dim, .usage-trend-bar.is-dim { opacity: 0.3; }
+.usage-trend-series.is-focus .usage-trend-line { stroke-width: 3; }
+.usage-trend-point { stroke: var(--bg-elevated); stroke-width: 1; }
+.usage-trend-band { fill: var(--bg-hover); }
+.usage-trend-legend-item { cursor: default; transition: opacity var(--dur-2) var(--ease-standard); }
+.usage-trend-legend-item.is-dim { opacity: 0.45; }
+.usage-donut-arc { cursor: pointer; transition: stroke-width var(--dur-2) var(--ease-standard), opacity var(--dur-2) var(--ease-standard); }
+
+/* ── 模型分布：环形图 + 明细表同卡（明细表兼作图例）── */
+.up-models { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: var(--sp-7); align-items: center; }
+.up-models .usage-donut-wrap { justify-content: center; }
+.up-models .up-mt-row { padding: 0 var(--sp-1); }
+@container up (max-width: 760px) {
+  .up-models { grid-template-columns: minmax(0, 1fr); }
+}
 /* 热力图自带头部 / 外框：与卡片同内距 */
 .up-stack > .usage-heatmap { padding: 14px 18px 16px; }
 .usage-hm-legend { display: flex; align-items: center; justify-content: flex-end; gap: 4px; margin-top: 2px; font-size: 11px; color: var(--text-3); }
@@ -81,9 +104,10 @@
 .up-rec-scroll { overflow-x: auto; scrollbar-width: thin; border-top: 1px solid var(--border-light); }
 .up-rec-table { min-width: 960px; font-size: 12.5px; font-variant-numeric: tabular-nums; }
 /* 表头 / 分组行 / 数据行共用同一份列模板，列永远对齐 */
+/* plan-20261022-release-ci：日期挪到分组行，时间列只放时分秒；省下的宽度给供应商 / 模型，缓存列加命中率 */
 .up-rec-groups, .up-rec-row {
   display: grid;
-  grid-template-columns: 146px minmax(70px, 1fr) minmax(96px, 1.2fr) minmax(96px, 1.35fr) 68px 72px 68px 60px 66px 88px;
+  grid-template-columns: 64px minmax(84px, 1fr) minmax(96px, 1.1fr) minmax(110px, 1.4fr) 72px 108px 68px 60px 66px 88px;
   column-gap: 10px; align-items: center; padding: 0 16px;
 }
 .up-rec-groups > span, .up-rec-row > span { min-width: 0; }
@@ -97,9 +121,16 @@
 .up-rec-head { min-height: 32px; font-size: 11.5px; font-weight: 600; color: var(--text-3); }
 .up-rec .num { text-align: right; }
 .up-rec .is-zero { color: var(--text-3); }
-.up-rec-time { white-space: nowrap; }
-.up-rec-time .d { margin-right: 6px; color: var(--text-3); }
-.up-rec-time .c { color: var(--text-1); }
+.up-rec-time { white-space: nowrap; color: var(--text-1); }
+/* 日期分组行：整行一条浅底，日期只在日期变化处出现一次 */
+.up-rec-day {
+  display: flex; align-items: center; min-height: 30px; padding: 0 16px;
+  border-bottom: 1px solid var(--border-light);
+  background: color-mix(in oklab, var(--bg-hover) 55%, transparent);
+  font-size: 11.5px; font-weight: 600; color: var(--text-2);
+}
+.up-rec-cache { display: flex; align-items: baseline; justify-content: flex-end; gap: 6px; }
+.up-rec-rate { flex: none; min-width: 30px; font-size: 11px; font-weight: 500; color: var(--text-3); text-align: right; }
 .up-rec-model { color: var(--text-1); font-weight: 500; }
 .up-acc { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .up-acc-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-1); }

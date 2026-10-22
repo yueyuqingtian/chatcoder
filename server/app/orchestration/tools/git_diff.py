@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 class GitDiffTool(Tool):
     name = "git_diff"
+    concurrency_safe = True  # plan-522-2209：只读 git diff，不写仓库
     risk_level = "low"
     description = (
         "查看 git 仓库中未提交的代码变更。\n"

@@ -1,0 +1,20 @@
+{
+  "src/components/chat/AttachmentCard.tsx|native-title": 2,
+  "src/components/chat/ComposerCore.tsx|native-title": 12,
+  "src/components/chat/ImageGallery.tsx|native-title": 5,
+  "src/components/chat/MessageFlow.tsx|native-title": 5,
+  "src/components/chat/SubagentCard.tsx|native-title": 1,
+  "src/components/chat/ToolTree.tsx|native-title": 1,
+  "src/components/settings/AppearancePanel.tsx|native-title": 1,
+  "src/components/settings/HooksPanel.tsx|native-title": 1,
+  "src/components/settings/KiroQuotaSection.tsx|native-title": 1,
+  "src/components/settings/ModelsPanel.tsx|native-title": 1,
+  "src/components/settings/PolicyPanel.tsx|native-title": 1,
+  "src/components/settings/ScheduledTaskFormModal.tsx|native-title": 1,
+  "src/components/settings/SidebarShell.tsx|native-title": 1,
+  "src/components/settings/Ta3QuotaSection.tsx|native-title": 3,
+  "src/components/Sidebar.tsx|native-title": 1,
+  "src/components/TitleBar.tsx|native-title": 9,
+  "src/components/ui/Input.tsx|native-title": 1,
+  "src/components/worktree/MergeDialog.tsx|native-title": 3
+}

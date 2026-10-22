@@ -64,6 +64,16 @@ export const TOOL_VERBS: Record<string, string> = {
   bg_command_stopped: "后台命令已被停止",
   // plan-20261021-subq-row：子会话提问（伪工具名，见 timeline.subsessionQuestionItem）
   subsession_question: "子会话提问",
+  // plan-20261022-release-ci：子会话汇报 / 结论（伪工具名，见 timeline.subsessionNoticeItem）
+  subsession_report: "子会话汇报",
+  subsession_result: "子会话已结束",
+  // 子会话工具：此前没有中文动词，工具行显示成「已调用工具 发送 to subsession」
+  create_subsession: "已创建子会话",
+  send_to_subsession: "已发消息给子会话",
+  get_subsession_progress: "已查看子会话进度",
+  interrupt_subsession: "已中断子会话",
+  message_main: "已向主代理汇报",
+  message_peer: "已发消息给同级子会话",
   git: "已执行 Git",
   git_diff: "已检查改动",
   git_root: "已定位仓库",

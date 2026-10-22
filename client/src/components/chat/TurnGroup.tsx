@@ -39,8 +39,29 @@ import { recordComponentRender } from "../../perf/metrics";
 const WAKEUP_DIVIDER_TEXT: Record<string, string> = {
   bg_command_done: "后台命令已完成，继续执行",
   subsession_question: "子会话有新提问，继续处理",
+  // plan-20261022-release-ci：派出去的子会话全部结束 → 叫醒主代理汇总
+  subsession_result: "子会话已全部结束，继续汇总",
   main_reply: "主会话已答复，继续执行",
 };
+
+/** plan-20261022-subagent-dispatch-fail：这次 spawn_subagent 的结果是否表示「派发失败」。
+ *
+ *  背景：子代理卡片的**存在**由工具调用消息决定（调用先落库、再执行），而被后端拒绝的派发
+ *  不会产生任何子代理记录。此前这类卡片匹配不到 meta 就兜底成「执行中」，且沿用主代理的
+ *  sender_id 当 agentId——点击后打开一个空面板，看起来像「并发上限没生效」。
+ *  成功派发返回 "Subagent #N dispatched…" / "Exploration subagent #N finished…"，
+ *  失败一律以 "Error:" 开头。 */
+function subagentDispatchError(result?: Extract<TurnItem, { kind: "subagent" }>["result"]): string | null {
+  if (!result) return null;
+  const rc = (result.content ?? {}) as Record<string, unknown>;
+  const output = typeof rc.output === "string" ? rc.output : "";
+  const firstLine = output.trim().split("\n")[0]?.trim() ?? "";
+  const errText = typeof rc.error === "string" ? rc.error.trim() : "";
+  // 历史消息里 ok 恒为 true（旧后端缺陷），因此同时保留文本前缀判定
+  const failed = rc.ok === false || /^Error[：:]/i.test(firstLine);
+  if (!failed) return null;
+  return (firstLine || errText || "派发失败").replace(/^Error[：:]\s*/i, "").slice(0, 200);
+}
 
 /** plan-282-1421：turn 的「已结束」状态集合——AI 操作行必须在本轮进入这些状态后才显示。 */
 const TERMINAL_TURN_STATUSES: ReadonlySet<string> = new Set([
@@ -563,11 +584,12 @@ export const TurnGroup = memo(function TurnGroup({
         const matched = (subagents || []).find(
           (sa) => sa.name === taskTitle || sa.name === `探索·${taskTitle}` || sa.name.includes(taskTitle)
         );
-        const meta: SubagentMetaLite = matched || {
-          agentId: Number(item.msg.sender_id ?? item.msg.id),
-          name: taskTitle,
-          status: "running",
-        };
+        const dispatchError = subagentDispatchError(item.result);
+        const meta: SubagentMetaLite = matched || (dispatchError
+          // plan-20261022-subagent-dispatch-fail：派发被拒 → 明确的失败行 + 原因，
+          // 不再兜底成「执行中」；agentId=0 表示没有可打开的子代理会话。
+          ? { agentId: 0, name: taskTitle, status: "failed", error: dispatchError, dispatchFailed: true }
+          : { agentId: Number(item.msg.sender_id ?? item.msg.id), name: taskTitle, status: "running" });
         // v36 修复：去掉内联 28px 左缩进——子代理行此前比工具调用行右移 28px，
         // 与「子代理卡片与工具调用行共用同一左侧边界」的规范不一致（用户反馈未对齐）。
         return (

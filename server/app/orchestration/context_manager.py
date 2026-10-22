@@ -944,7 +944,10 @@ async def build_main_context(
                                                  language_source=_lang_source,
                                                  desktop_enabled=bool(getattr(settings, "desktop_enabled", False)),
                                                  browser_enabled=_browser_on,
-                                                 suggestion_enabled=suggestion_enabled)
+                                                 suggestion_enabled=suggestion_enabled,
+                                                 workflow_mode=(_execution_mode == "workflow"),
+                                                 execution_mode=_execution_mode,
+                                                 available_tools=available_tools)
     bundle = ContextBundle(
         system=system_prompt,
         instruction=user_message,
@@ -956,16 +959,17 @@ async def build_main_context(
     # summarized_ids，用户发新任务时看到占用莫名回退（52%→48%）、历史被悄悄改写。
     # 现在压缩只保留一条通道：占用超过「设置-常规设置」的压缩阈值后，由
     # agent_loop 走落库式压缩（前端压缩卡片、可恢复）。
-    # 1. Current Goal（plan-671：目标激活时为持久目标，本轮消息降级为 Current Task）
+    # 1. Current Goal（plan-671：目标激活时为持久目标）。
+    # 不再把本轮用户原文复制进 developer 段：它位于历史之前，原文每轮变化会让前缀失效（缓存不命中），
+    # 且原文会在对话末尾再出现一次。非目标模式只留一句常量指引，原文以末尾的用户消息为准。
     if goal and goal.get("text"):
         bundle.developer_parts.append(
             f"## Current Goal\n{goal['text'][:2000]}\n"
             f"（目标模式激活：持续朝该目标工作；完成前先对照目标逐条核验证据（运行测试/读取结果），"
             f"确认达成后调用 {goal_tool_name}，未达成就继续推进，不要提前宣告完成；已续跑 {goal.get('turns_used', 0)} 轮）"
         )
-        bundle.developer_parts.append(f"## Current Task\n{user_message[:2000]}")
     else:
-        bundle.developer_parts.append(f"## Current Goal\n{user_message[:2000]}")
+        bundle.developer_parts.append("## Current Goal\n以对话末尾的最新用户消息为本轮目标。")
     # 1.1 Reply Language（plan-19-82）：显式语言锚点，紧随 Current Goal。
     # 语言纪律已作为系统提示首尾双锚注入，这里再在注意力最高处落一行单锚，降低漂移。
     from app.orchestration.prompts.language import build_language_pin_line
@@ -1222,11 +1226,23 @@ async def build_main_context(
         # v30: 压缩遮蔽消息（context_compressor 落库的 compacted_ids）不注入历史——
         # 其内容已被 checkpoint 摘要承载，重复注入等于未压缩。
         compacted_ids = set(ctx.get("compacted_ids") or [])
+        # plan-527-2218: 压缩水位——水位以下的消息已全部被 checkpoint 承载，
+        # 在 SQL 层直接跳过；水位以下未被遮蔽的少量例外（图片消息不参与压缩）单独带回。
+        compacted_floor = int(ctx.get("compacted_floor") or 0)
+        compacted_exceptions = [
+            i for i in (ctx.get("compacted_exceptions") or []) if isinstance(i, int)
+        ]
 
-        # v6.4: 提高limit到2000，覆盖全部历史消息（原来200条会丢失早期对话）
-        all_msgs = await _fetch_main_messages(db, session.id, limit=2000)
-        unsummarized = [m for m in all_msgs
-                        if m.id not in summarized_ids and m.id not in compacted_ids]
+        # plan-527-2218: 全量取回未压缩历史，**不设条数上限**。上下文裁剪只由压缩负责：
+        # 旧实现 limit=2000 会让最早的文档消息在会话变长后永久滑出窗口，且不留任何提示
+        # （实测会话 464 有 856 条历史因此永远进不了上下文）。
+        all_msgs = await _fetch_main_messages(
+            db, session.id, limit=None,
+            min_id=compacted_floor, include_ids=compacted_exceptions)
+        # plan-527-2218: 只排除压缩遮蔽的消息。v16 起重建不再注入渐进摘要文本，
+        # summarized_ids 已没有任何替代物——继续按它过滤会让消息静默消失，
+        # 而压缩通道有 checkpoint（含附件清单）兜底。summarized_ids 仅保留在日志里。
+        unsummarized = [m for m in all_msgs if m.id not in compacted_ids]
 
         # v6.5: 保留 text + tool_call + tool_result（过滤 thinking/plan 等非对话类型）。
         # 旧版只保留 text，导致 AI 看不到工具调用历史，上下文严重偏低且无法复用工具结果。
@@ -1237,10 +1253,57 @@ async def build_main_context(
                        _MsgType.TOOL_RESULT.value, _MsgType.THINKING.value}
         unsummarized = [m for m in unsummarized if m.msg_type in _keep_types]
 
-        # Token-budget 选取：从最新向前贪心，直到预算耗尽
-        recent, _ = select_messages_by_token_budget(
-            unsummarized, window_budget, min_keep=MIN_MESSAGES_KEEP,
-        )
+        # plan-527-2218: 未压缩历史全量注入，只在「真的会撑爆请求」时兜底。
+        # 正常的裁剪交给压缩：出站估算超过压缩阈值(90%)后由 agent_loop 前置压缩处理，
+        # 压缩完成后水位更新，下一轮重建只查水位之后的未压缩消息，形成闭环。
+        # 旧实现按 window_budget 静默丢弃早期对话，模型既看不到内容也得不到任何提示。
+        #
+        # 估算与裁剪单独包一层 try：失败时降级为「全量注入」而不是让整段历史注入失败——
+        # 外层 try 会把异常吞成一条 warning，若估算抛错，bundle.history 会整个变空，
+        # 表现为「AI 突然完全不记得之前聊过什么」，比不裁剪严重得多。
+        recent = unsummarized
+        try:
+            from app.orchestration.token_counter import (
+                estimate_outbound_tokens_db, rough_token_estimate,
+            )
+            # 固定开销（系统提示 + developer 段）同样占真实窗口，必须从上限里扣掉，
+            # 否则「历史估算没超限、整包请求却超窗」。工具 schema 在重建阶段拿不到，
+            # 用 95% 上限预留 5% 给它。
+            _est_fixed = rough_token_estimate(bundle.system) + sum(
+                rough_token_estimate(p) for p in bundle.developer_parts)
+            _hard_limit = max(4000, int(context_window * 0.95) - _est_fixed)
+            _est_all = estimate_outbound_tokens_db(unsummarized)
+            if _est_all > _hard_limit:
+                recent, _ = select_messages_by_token_budget(
+                    unsummarized, _hard_limit, min_keep=MIN_MESSAGES_KEEP,
+                )
+                _dropped = len(unsummarized) - len(recent)
+                _dropped_tokens = max(0, _est_all - estimate_outbound_tokens_db(recent))
+                logger.warning(
+                    "[context] session=%s 未压缩历史出站估算 %d tokens 超硬上限 %d，"
+                    "保留最近 %d 条并显式告知省略 %d 条（约 %d tokens）",
+                    session.id, _est_all, _hard_limit, len(recent), _dropped, _dropped_tokens,
+                )
+                if _reply_lang == "zh":
+                    bundle.developer_parts.append(
+                        f"## 历史截断提示\n"
+                        f"本轮上下文超过窗口硬上限，更早的 {_dropped} 条历史消息"
+                        f"（约 {_dropped_tokens} tokens）未注入。这些消息尚未被压缩，"
+                        f"下一轮上下文重建会重新纳入；若当前任务需要，可用 memory_search 检索。"
+                    )
+                else:
+                    bundle.developer_parts.append(
+                        f"## History truncated\n"
+                        f"{_dropped} earlier messages (~{_dropped_tokens} tokens) were omitted because "
+                        f"the context exceeded the hard window limit. They are not compacted and will be "
+                        f"restored on the next rebuild; use memory_search if needed."
+                    )
+        except Exception:  # noqa: BLE001 — 估算失败必须退化为全量注入，不能连累历史
+            logger.warning(
+                "[context] session=%s 历史预算估算失败，降级为全量注入（%d 条）",
+                session.id, len(unsummarized), exc_info=True,
+            )
+            recent = unsummarized
 
         # v21: 移除 v6.5 注入的假历史标记消息（user "## Conversation History" +
         # assistant "Understood..."）——它们浪费 token 且干扰模型对消息角色的理解，
@@ -1354,9 +1417,16 @@ async def build_main_context(
                 output = m.content.get("output", "") or ""
                 error = m.content.get("error", "") or ""
                 result_text = output or error or "(无输出)"
-                # 截断过长的工具输出，避免单条结果撑爆窗口（与落库截断 MAX_TOOL_OUTPUT_CHARS 对齐）
-                if len(result_text) > 16000:
-                    result_text = result_text[:16000] + "\n...(工具输出已截断)"
+                # plan-522-2209：历史重建与实时路径共用同一份呈现口径（output_paging.present_for_model）。
+                # 此前这里写死 16000 字符硬截断，压缩/重建后模型看到的输出比刚跑完时更短、且无法续读——
+                # 与 agent_loop 那段「两处用同一份文本」的承诺直接冲突。
+                from app.orchestration.output_paging import present_for_model
+
+                result_text = present_for_model(
+                    result_text, tool_name=tool_name,
+                    session_id=getattr(session, "id", None),
+                    tag=f"{tool_name}-{call_key or 'call'}",
+                )
                 bundle.history.append(_CM(
                     role="tool",
                     content=result_text,

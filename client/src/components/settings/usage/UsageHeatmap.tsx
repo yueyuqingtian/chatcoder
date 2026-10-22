@@ -1,7 +1,10 @@
-/** Token 活动热力图：GitHub 风格贡献图，支持 每日/每周/累计 三种粒度。纯 SVG/div，无依赖。 */
+/** Token 活动热力图：GitHub 风格贡献图，支持 每日/每周/累计 三种粒度。纯 SVG/div，无依赖。
+ *  plan-20261022-release-ci：粒度切换改用 ui/Segmented（不再用页面私有按钮）；去掉格子上的原生 title
+ *  （与自绘浮层重复，悬停时会出现两层提示）。热力图是全历史口径，不随上方时间范围变化，副标题写明。 */
 import { useMemo, useRef, useState, type CSSProperties, type MouseEvent } from "react";
 import { addDays, parseDate, toISO, fmtTokens } from "./chartUtils";
 import { IconLayoutGrid } from "../../icons";
+import { Segmented } from "../../ui";
 
 type Mode = "daily" | "weekly" | "cum";
 
@@ -125,20 +128,20 @@ export function UsageHeatmap({ daily_all }: { daily_all: HmPoint[] }) {
           <IconLayoutGrid size={16} />
           <div className="usage-block-titles">
             <span className="usage-heatmap-title">Token 活动</span>
-            <span className="usage-block-sub">近 12 个月 · 活跃 {activeDays} 天</span>
+            <span className="usage-block-sub">近 12 个月 · 活跃 {activeDays} 天 · 不随时间范围变化</span>
           </div>
         </div>
-        <div className="usage-seg-toggle">
-          {(["daily", "weekly", "cum"] as Mode[]).map((m) => (
-            <button
-              key={m}
-              className={`usage-seg-btn ${mode === m ? "active" : ""}`}
-              onClick={() => setMode(m)}
-            >
-              {m === "daily" ? "每日" : m === "weekly" ? "每周" : "累计"}
-            </button>
-          ))}
-        </div>
+        <Segmented<Mode>
+          size="sm"
+          aria-label="热力图粒度"
+          value={mode}
+          onChange={setMode}
+          options={[
+            { value: "daily", label: "每日" },
+            { value: "weekly", label: "每周" },
+            { value: "cum", label: "累计" },
+          ]}
+        />
       </div>
 
       <div className="usage-heatmap-body">
@@ -169,7 +172,6 @@ export function UsageHeatmap({ daily_all }: { daily_all: HmPoint[] }) {
                 <div
                   key={ci}
                   className={`usage-hm-cell usage-hm-${tier(v, maxValue)}`}
-                  title={`第 ${ci + 1} 周：${fmtTokens(v)} tokens`}
                   onMouseEnter={(e) => showTip(e, `第 ${ci + 1} 周`, `${fmtTokens(v)} tokens`)}
                 />
               ))}
@@ -183,7 +185,6 @@ export function UsageHeatmap({ daily_all }: { daily_all: HmPoint[] }) {
                     <div
                       key={`${ci}-${ri}`}
                       className={`usage-hm-cell usage-hm-${tier(valueOf(c.date), maxValue)}`}
-                      title={`${c.date}：${fmtTokens(c.tokens)} tokens`}
                       onMouseEnter={(e) => showTip(e, c.date, `${fmtTokens(valueOf(c.date))} tokens`)}
                     />
                   );

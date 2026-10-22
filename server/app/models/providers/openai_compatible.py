@@ -18,7 +18,7 @@ from app.core.config import settings
 from app.models.base import ModelProvider, mark_first_token
 from app.models.providers.temperature_policy import (
     is_temperature_rejected,
-    pick_temperature,
+    request_temperature,
 )
 from app.models.providers.tool_args import parse_tool_args
 from app.models.schemas import ChatRequest, ChatResponse, Usage
@@ -195,8 +195,9 @@ class OpenAICompatibleProvider(ModelProvider):
         0.3/0.7 会被网关 400 "does not support non-default temperature"；
         策略收敛在 temperature_policy，各通道共用同一判定。
         """
-        value = pick_temperature(
-            request.temperature,
+        # 思考开启时不设置温度（所有模型统一），其余按设置取值
+        value = request_temperature(
+            request,
             model_name=request.model,
             extra_names=(self._default_model,),
             base_url=self._base_url,

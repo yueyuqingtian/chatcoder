@@ -8,8 +8,10 @@
  * 状态机: idle → checking → available|none → downloading → downloaded → (quitAndInstall) / error
  * 下载中（downloading）带 phase：connecting | downloading | waiting | retrying | verifying。
  */
-const path = require("path");
 const { installResumableDownloader } = require("./update-glue.cjs");
+
+/** GitHub 加速镜像前缀（plan-20261022-update-route）：拼在 GitHub 原始地址前面即可，支持 Range */
+const GH_PROXY_PREFIX = "https://cdn.gh-proxy.org/";
 
 /** releaseNotes 可能是 string 或 [{version, note}] 数组，统一成 Markdown 文本 */
 function normalizeReleaseNotes(notes) {
@@ -33,10 +35,17 @@ function normalizeReleaseNotes(notes) {
  * @param {object} deps.net               Electron net
  * @param {(...a) => void} deps.log
  * @param {(...a) => void} deps.logErr
+ * @param {string|null} [deps.ghProxy]    GitHub 加速镜像前缀；null 表示不用镜像（测试用）
+ * @param {Function} [deps.createCancellationToken]  () => CancellationToken；缺省取 builder-util-runtime
  * @param {object} [deps.tuning]          透传给下载器的调参（测试用）
  */
 function createUpdateManager(deps) {
-  const { pushState, meta, feeds, updatesBaseUrl, repo, currentVersion, net, log, logErr, tuning } = deps;
+  const { pushState, meta, feeds, updatesBaseUrl, repo, currentVersion, net, directFetch, log, logErr, tuning } = deps;
+  const ghProxy = deps.ghProxy === undefined ? GH_PROXY_PREFIX : deps.ghProxy;
+  const createCancellationToken = deps.createCancellationToken || (() => {
+    const { CancellationToken } = require("builder-util-runtime");
+    return new CancellationToken();
+  });
 
   let autoUpdater = null;
   let state = { state: "idle" };
@@ -44,8 +53,9 @@ function createUpdateManager(deps) {
   let lastUpdateInfo = null;
   // 一次下载任务（含重试）正在进行：期间 electron-updater 抛出的 error 事件、周期检查都不得冲掉 downloading 状态
   let downloadActive = false;
-  // 当前生效源：mirror=自建主源 / github=备源；手动检查与启动首查从主源重新开始
-  let activeFeed = "mirror";
+  // 当前下载任务的取消令牌，以及取消的原因（cancel=用户取消 / restart=切换线路后重新开始）
+  let downloadToken = null;
+  let cancelIntent = null;
   // 静默自动下载：同一版本本次运行最多尝试几次，避免每 20 分钟检查一次就重复失败
   const AUTO_DOWNLOAD_MAX_ATTEMPTS = 3;
   const autoDownloadAttempts = new Map();
@@ -65,42 +75,62 @@ function createUpdateManager(deps) {
   }
 
   function onDownloadPhase(phase, info) {
-    setDownloadState({ phase, source: (info && info.source) || undefined, attempt: (info && info.attempt) || undefined });
+    const i = info || {};
+    setDownloadState({
+      phase,
+      source: i.label || i.source || undefined,
+      tier: i.tier || undefined,
+      attempt: i.attempt || undefined,
+      retryInMs: i.retryInMs != null ? i.retryInMs : undefined,
+      nextLabel: i.nextLabel || undefined,
+    });
   }
 
-  /** 安装包候选下载地址：electron-updater 解析出的地址 + 自建源 + GitHub Release + latest.yml 声明的额外镜像。
-   *  任何一个源能用就能下；整包 sha512 来自 latest.yml，下载自哪个源都要通过同一个校验。 */
-  function buildDownloadUrls(url, name) {
+  /** 安装包候选下载地址，按层级排好（plan-20261022-update-route）：镜像 > 自建源 > GitHub。
+   *  镜像（gh-proxy）实测单连接更快，放第一位；自建源作为第二线路，GitHub 只做慢速兜底。
+   *  整包 sha512 来自 latest.yml，下载自哪个源都要通过同一个校验。 */
+  function buildDownloadUrls(_url, name) {
     const info = lastUpdateInfo || {};
     const list = [];
-    const add = (u) => { if (u && !list.includes(u)) list.push(u); };
-    add(url.href);
+    const add = (url, tier) => { if (url && !list.some((s) => s.url === url)) list.push({ url, tier }); };
     const enc = encodeURIComponent(name);
-    add(new URL(enc, updatesBaseUrl).href);
-    if (info.version && repo) add(`https://github.com/${repo.owner}/${repo.repo}/releases/download/v${info.version}/${enc}`);
+    const gh = info.version && repo ? `https://github.com/${repo.owner}/${repo.repo}/releases/download/v${info.version}/${enc}` : "";
+    if (gh && ghProxy) add(ghProxy + gh, "mirror");
+    add(new URL(enc, updatesBaseUrl).href, "primary");
     // 额外镜像（对象存储 / CDN 等）：在服务器端 latest.yml 里写 `mirrors: [https://xxx/updates/]`，客户端无需改版即可新增源
     for (const base of Array.isArray(info.mirrors) ? info.mirrors : []) {
-      if (typeof base === "string" && /^https:\/\//i.test(base)) add(new URL(enc, base.endsWith("/") ? base : base + "/").href);
+      if (typeof base === "string" && /^https:\/\//i.test(base)) add(new URL(enc, base.endsWith("/") ? base : base + "/").href, "mirror");
     }
+    if (gh) add(gh, "github");
     return list;
   }
 
-  /** 检查更新：主源优先、失败自动切 GitHub 备源（plan-90-390）。
-   *  manual=true（用户手动检查）时重置回主源，给“重试主源”的机会。 */
-  async function checkForUpdatesSmart(manual = false) {
+  /** 检查更新用的 feed 链：镜像 > 自建源 > GitHub。每次检查都从镜像开始（plan-20261022-update-route），
+   *  不再像旧实现那样失败一次就一直黏在 GitHub 上 */
+  function feedChain() {
+    const chain = [];
+    if (repo && ghProxy) {
+      chain.push(["镜像", { provider: "generic", url: `${ghProxy}https://github.com/${repo.owner}/${repo.repo}/releases/latest/download/`, useMultipleRangeRequest: false }]);
+    }
+    chain.push(["自建源", feeds.mirror]);
+    if (feeds.github) chain.push(["GitHub", feeds.github]);
+    return chain;
+  }
+
+  async function checkForUpdatesSmart() {
     if (!autoUpdater) return null;
-    if (manual) activeFeed = "mirror";
-    if (activeFeed === "mirror") {
+    const chain = feedChain();
+    for (let i = 0; i < chain.length; i++) {
+      const [label, feed] = chain[i];
       try {
-        autoUpdater.setFeedURL(feeds.mirror);
+        autoUpdater.setFeedURL(feed);
         return await autoUpdater.checkForUpdates();
       } catch (e) {
-        logErr("[updater] 自建源检查失败，切换 GitHub 备源:", e && e.message);
-        activeFeed = "github";
+        if (i === chain.length - 1) throw e;
+        logErr(`[updater] ${label}检查失败，改用${chain[i + 1][0]}:`, e && e.message);
       }
     }
-    autoUpdater.setFeedURL(feeds.github);
-    return await autoUpdater.checkForUpdates();
+    return null;
   }
 
   function friendlyError(e) {
@@ -116,21 +146,25 @@ function createUpdateManager(deps) {
     if (!autoUpdater || downloadActive || state.state !== "available") return state;
     const keep = { version: state.version, notes: state.notes, releaseDate: state.releaseDate };
     downloadActive = true;
+    cancelIntent = null;
     state = { state: "downloading", ...keep, percent: 0, transferred: 0, total: 0, bytesPerSecond: 0, phase: "connecting", auto };
     push();
     log("[updater] 开始下载", keep.version, auto ? "(静默自动)" : "(手动)");
     try {
       for (let attempt = 1; ; attempt++) {
         try {
-          await autoUpdater.downloadUpdate(); // 成功后 update-downloaded 事件把状态置为 downloaded
+          downloadToken = createCancellationToken();
+          // 每次下载都新建选源状态机：取消后重新下载 / 切换线路都会从镜像开始（已下载的块保留）
+          await autoUpdater.downloadUpdate(downloadToken); // 成功后 update-downloaded 事件把状态置为 downloaded
           return state;
         } catch (e) {
           const kind = e && e.kind;
+          if (cancelIntent) throw e; // 用户取消 / 切换线路：不重试，由外层统一处理
           logErr(`[updater] 下载失败(第 ${attempt} 次, ${kind || "unknown"}):`, e && e.message);
           if (kind === "disk" || kind === "aborted" || attempt >= 3) throw e;
           if (kind === "fatal") {
             // 所有下载源都不可用：多半是服务器上已经换成了更新的版本，重新检查后对新版本重来
-            await checkForUpdatesSmart(true).catch(() => {});
+            await checkForUpdatesSmart().catch(() => {});
             if (lastUpdateInfo && lastUpdateInfo.version) setDownloadState({ version: lastUpdateInfo.version });
           } else {
             await new Promise((r) => setTimeout(r, (tuning && tuning.retryDelayMs != null ? tuning.retryDelayMs : 3000) * attempt));
@@ -139,12 +173,44 @@ function createUpdateManager(deps) {
         }
       }
     } catch (e) {
-      state = { state: "error", message: friendlyError(e) };
+      if (cancelIntent) {
+        // 取消不是错误：回到「发现新版本」，断点文件保留，再点下载会接着下
+        log("[updater] 下载已停止:", cancelIntent);
+        state = { state: "available", ...keep };
+      } else {
+        state = { state: "error", message: friendlyError(e) };
+      }
       push();
       return state;
     } finally {
       downloadActive = false;
+      downloadToken = null;
     }
+  }
+
+  /** 取消当前下载并等它真正停下（取消令牌触发后，下载器会中断在途请求并落盘进度） */
+  async function stopDownload(intent) {
+    if (!downloadActive) return;
+    cancelIntent = intent;
+    try { if (downloadToken) downloadToken.cancel(); } catch { /* ignore */ }
+    for (let i = 0; i < 400 && downloadActive; i++) await new Promise((r) => setTimeout(r, 25));
+  }
+
+  /** 用户在「关于」里手动取消。同一版本本次运行不再静默自动下载，避免定时检查又把它拉起来 */
+  async function cancelDownload() {
+    if (!downloadActive) return state;
+    if (state.version) autoDownloadAttempts.set(state.version, AUTO_DOWNLOAD_MAX_ATTEMPTS);
+    await stopDownload("cancel");
+    return state;
+  }
+
+  /** 「切换线路」：停掉当前下载并立刻重新开始——新的选源状态机从第一优先级（镜像）起步，断点续传接着下 */
+  async function switchToPrimary() {
+    if (!downloadActive) return state;
+    const auto = !!state.auto;
+    await stopDownload("restart");
+    if (state.state === "available") void startDownload({ auto });
+    return state;
   }
 
   /** 绑定 electron-updater 实例：事件 → 状态机；全量下载换成断点续传 */
@@ -158,6 +224,7 @@ function createUpdateManager(deps) {
       getInfo: () => lastUpdateInfo,
       buildUrls: buildDownloadUrls,
       net,
+      directFetch,
       onPhase: onDownloadPhase,
       logger: { info: (...a) => log(...a), warn: (...a) => log(...a) },
       tuning,
@@ -254,7 +321,7 @@ function createUpdateManager(deps) {
     if (state.state === "downloading" || state.state === "downloaded") return state;
     autoDownloadAttempts.clear(); // 手动检查 = 用户想重试：静默下载的次数额度重置
     try {
-      return await checkForUpdatesSmart(true);
+      return await checkForUpdatesSmart();
     } catch (e) {
       state = { state: "error", message: String((e && e.message) || e) };
       push();
@@ -289,10 +356,10 @@ function createUpdateManager(deps) {
   return {
     attach, startTimers, stopTimers,
     getState: () => state,
-    checkForUpdates, downloadNow, getSettings, setSettings, install,
+    checkForUpdates, downloadNow, cancelDownload, switchToPrimary, getSettings, setSettings, install,
     // 供测试观察
-    _internals: { buildDownloadUrls, startDownload, checkForUpdatesSmart, isDownloadActive: () => downloadActive, autoDownloadAttempts },
+    _internals: { buildDownloadUrls, startDownload, checkForUpdatesSmart, feedChain, onDownloadPhase, isDownloadActive: () => downloadActive, autoDownloadAttempts },
   };
 }
 
-module.exports = { createUpdateManager, normalizeReleaseNotes };
+module.exports = { createUpdateManager, normalizeReleaseNotes, GH_PROXY_PREFIX };

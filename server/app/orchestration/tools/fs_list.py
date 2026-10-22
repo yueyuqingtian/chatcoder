@@ -22,6 +22,7 @@ _IGNORE_DIRS = {
 
 class FsListTool(Tool):
     name = "fs_list"
+    concurrency_safe = True  # plan-522-2209：纯读，不写文件、不改库
     risk_level = "low"
     description = (
         "列出工作区内指定目录的文件与子目录。\n"
@@ -88,7 +89,7 @@ class FsListTool(Tool):
                        workspace_root: str, display_path: str) -> ToolResult:
         """列目录（target 已解析完毕，可为工作区外路径）。"""
         if not target.exists():
-            return ToolResult(ok=False, output="", error=f"目录不存在: {display_path}")
+            return ToolResult(ok=False, output="", error=f"目录不存在: {display_path}", error_code="NOT_FOUND")
         if not target.is_dir():
             return ToolResult(ok=False, output="", error=f"非目录: {display_path}")
 

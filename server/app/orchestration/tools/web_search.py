@@ -36,6 +36,9 @@ _ENGINES = ("workbuddy", "bing", "google", "duckduckgo")
 
 class WebSearchTool(Tool):
     name = "web_search"
+    # plan-522-2209：检索请求之间无共享可变状态；询问审批模式下会被批处理层
+    # 降级为独占（approval_policy.can_parallelize）。
+    concurrency_safe = True
     description = (
         "Search the web for real-time information. Returns titles, URLs, and snippets. "
         "engine: workbuddy (default, uses the logged-in WorkBuddy account; falls back to bing "
