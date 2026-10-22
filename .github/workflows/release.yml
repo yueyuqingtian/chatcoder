@@ -144,23 +144,39 @@ jobs:
           OUT_DIR: ${{ steps.meta.outputs.out_dir }}
           PRERELEASE: ${{ steps.meta.outputs.prerelease }}
         run: |
+          # 不要用 @变量 splatting 传 flag：PowerShell 会把单元素数组 @("--latest") 解包成字符串，
+          # 再 splat 时按字符逐个展开（实测得到 - - l a t e s t），gh release edit 于是报
+          # "accepts 1 arg(s), received 9"，打包成功后卡在最后一步。这里一律显式列出路径与 flag。
           $exe = "chatcoder-Setup-$env:VERSION.exe"
-          $assets = @("$env:OUT_DIR/$exe", "$env:OUT_DIR/$exe.blockmap", "$env:OUT_DIR/latest.yml")
-          $notes = "$env:OUT_DIR/release-notes.md"
-          $pre = if ($env:PRERELEASE -eq "true") { @("--prerelease") } else { @() }
+          $exePath = Join-Path $env:OUT_DIR $exe
+          $bmPath = "$exePath.blockmap"
+          $ymlPath = Join-Path $env:OUT_DIR "latest.yml"
+          $notesPath = Join-Path $env:OUT_DIR "release-notes.md"
+          $isPre = $env:PRERELEASE -eq "true"
           gh release view $env:TAG *> $null
           if ($LASTEXITCODE -eq 0) {
             # 重跑同一个 tag：覆盖资产与说明；上次失败留下的草稿一并公开
-            gh release upload $env:TAG @assets --clobber
+            gh release upload $env:TAG $exePath $bmPath $ymlPath --clobber
             if ($LASTEXITCODE -ne 0) { throw "上传资产失败" }
-            gh release edit $env:TAG --title $env:TAG --notes-file $notes --draft=false @pre
+            if ($isPre) {
+              gh release edit $env:TAG --title $env:TAG --notes-file $notesPath --draft=false --prerelease
+            } else {
+              gh release edit $env:TAG --title $env:TAG --notes-file $notesPath --draft=false
+            }
             if ($LASTEXITCODE -ne 0) { throw "更新 Release 说明失败" }
           } else {
             # 先建草稿、传完三件套再公开：公开的那一刻资产就是齐的，自建源的定时同步不会抓到半成品
-            gh release create $env:TAG @assets --title $env:TAG --notes-file $notes --draft @pre
+            if ($isPre) {
+              gh release create $env:TAG $exePath $bmPath $ymlPath --title $env:TAG --notes-file $notesPath --draft --prerelease
+            } else {
+              gh release create $env:TAG $exePath $bmPath $ymlPath --title $env:TAG --notes-file $notesPath --draft
+            }
             if ($LASTEXITCODE -ne 0) { throw "创建 Release 失败" }
-            $latest = if ($env:PRERELEASE -eq "true") { @() } else { @("--latest") }
-            gh release edit $env:TAG --draft=false @latest
+            if ($isPre) {
+              gh release edit $env:TAG --draft=false
+            } else {
+              gh release edit $env:TAG --draft=false --latest
+            }
             if ($LASTEXITCODE -ne 0) { throw "公开 Release 失败" }
           }
           $url = "https://github.com/${{ github.repository }}/releases/tag/$env:TAG"
