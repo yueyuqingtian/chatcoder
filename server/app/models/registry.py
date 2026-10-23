@@ -476,6 +476,21 @@ async def _pick_credential(db: AsyncSession, provider, exclude: set[int] | None 
         avail = credential_service.available_credentials(
             creds, strategy=strategy, provider_id=pid, rotate=True,
         )
+        # v47 修复：额度耗尽会让凭据进入冷却，而这里是**硬过滤**——全部凭据都在冷却时
+        # avail 为空，上层直接返回 provider_credential_unavailable，请求根本没发出去
+        # （用户反馈：kimi-k3 这类高消耗模型打满日额度后，刷新额度也没用，一发送就秒报错）。
+        # 冷却只是"暂缓"，不应当成"永久不可用"：只剩冷却行时按既有尝试序照常取第一条，
+        # 让远端来判定是否真的没有额度；真正的失败会再次上报，不会卡死在本地。
+        # 用 order_credentials 而非 rank_credentials：前者不创建进程内健康状态，
+        # ta3 继续沿用自己那套"粘性/优先级"语义，不引入新的记账副作用。
+        # exclude 里的凭据不参与兜底，否则重试会无限撞同一个 Key。
+        if not avail:
+            _enabled = [c for c in creds
+                        if getattr(c, "is_active", True) and c.id not in exclude]
+            if _enabled:
+                avail = credential_service.order_credentials(
+                    _enabled, strategy=strategy, rotate=False, provider_id=pid,
+                )
     else:
         # 非 ta3：健康排序——暂缓者只排到队尾、不做硬过滤，也不再推进轮转游标
         avail = credential_service.rank_credentials(creds, strategy=strategy)

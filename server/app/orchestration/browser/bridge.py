@@ -44,10 +44,15 @@ class HostConn:
 
 
 class BrowserBridge:
+    # 超时后「结果未知」标记的保留时长（秒）：过期自动清理，避免长期积累
+    _UNKNOWN_TTL = 180.0
+
     def __init__(self) -> None:
         self._hosts: dict[int, HostConn] = {}
         # request_id -> (future, 发往的宿主 key)
         self._pending: dict[str, tuple[asyncio.Future, int]] = {}
+        # 超时/取消后被 pop 的 request_id -> 标记时间：用于把「迟到回包」认出来
+        self._unknown: dict[str, float] = {}
 
     # ── 宿主登记 ──────────────────────────────────────────
     async def register(self, ws: Any, payload: dict) -> HostConn:
@@ -117,16 +122,37 @@ class BrowserBridge:
                 return fut.result()
             if cancel_task is not None and cancel_task in done:
                 raise asyncio.CancelledError()
-            raise HostCallError(f"浏览器操作超时（{int(timeout)} 秒）")
+            # 请求超时（plan-537-2251）：rid 已在 finally 里 pop，但宿主可能已经把动作执行完了。
+            # 标记「结果未知」让迟到的回包能被识别；宿主协议只有 browser.request（前端 host.ts → electron），
+            # 没有 cancel 通道，所以不伪造取消请求，只在文案上要求模型先核对页面状态再决定是否重试。
+            self._note_unknown(rid)
+            raise HostCallError(
+                f"浏览器操作超时（{op}）：宿主可能已经执行了这次操作，"
+                "请先用 browser_get_text / browser_snapshot 核对页面状态，再决定是否重试，不要直接重复同一操作"
+            )
         finally:
             self._pending.pop(rid, None)
             if cancel_task is not None:
                 cancel_task.cancel()
 
+    def _note_unknown(self, rid: str) -> None:
+        """记录一个「已超时但宿主可能已执行」的请求，并顺带清理过期标记。"""
+        now = time.monotonic()
+        for k, ts in list(self._unknown.items()):
+            if now - ts > self._UNKNOWN_TTL:
+                self._unknown.pop(k, None)
+        self._unknown[rid] = now
+
     def resolve(self, payload: dict) -> None:
         rid = str(payload.get("request_id") or "")
         entry = self._pending.get(rid)
         if not entry:
+            # 迟到回包：请求已超时（或宿主连接重置）后才回来——说明动作实际执行了，
+            # 模型若重试就会重复点击/重复提交，日志保留现场便于排查
+            if self._unknown.pop(rid, None) is not None:
+                logger.debug("[browser] 收到迟到回包（%s 已超时，结果未知）：ok=%s", rid, payload.get("ok"))
+            else:
+                logger.debug("[browser] 收到未知请求回包（无对应在途请求，已丢弃）：rid=%s ok=%s", rid, payload.get("ok"))
             return
         fut, _ = entry
         if fut.done():

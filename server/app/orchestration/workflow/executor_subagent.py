@@ -426,7 +426,6 @@ class SubagentNodeExecutor:
             tool_schemas=schemas,
             workspace=req.workspace,
             subagent_mode="readonly" if readonly else "default",
-            is_blocking=False,
             task_title=title,
             task_description=description,
         )

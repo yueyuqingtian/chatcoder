@@ -58,9 +58,9 @@ class Settings(BaseSettings):
     approval_timeout_sec_subsession: int = 0
     # v0.3: agent loop 单任务最大步数（仅作为绝对兜底防死循环的熔断值）
     # v3.5: 不再用固定步数限制，改为边际效应递减检测 + token 预算驱动
-    # 0 或负数表示不限制步数
-    agent_max_steps: int = 1000
-    # 内置浏览器工具开关（可通过设置中心持久化配置）。
+    # 0 或负数表示不限制步数；设置页已移除该项，固定为不限制（旧配置里的值不再读取）
+    agent_max_steps: int = 0
+    # 内置浏览器工具开关（设置 → 电脑操控 → 内置浏览器；开启电脑操控时自动打开）。
     # plan-20261015-browser-agent：默认开启——工具操作的是右侧面板里用户看得见、随时可接管的浏览器，
     # 外部网页的点击/输入仍按权限模式审批；关闭后浏览器工具不再下发给模型。
     browser_enabled: bool = True
@@ -74,8 +74,6 @@ class Settings(BaseSettings):
     desktop_enabled: bool = True
     # 普通电脑操作子开关（点击/输入/截图/UIA 感知等）
     desktop_plain_ops_enabled: bool = True
-    # 浏览器操作子开关（本能力统一入口；与 browser_enabled 的区别见设置页说明）
-    desktop_browser_ops_enabled: bool = True
     # 安全：写操作是否要求目标窗口处于前台。默认开启——这是防止「输入打到错误窗口」
     # 的关键护栏，关闭后风险自负。
     desktop_require_foreground: bool = True
@@ -215,14 +213,10 @@ class Settings(BaseSettings):
     #   ta3_stream_idle_timeout。
     agent_empty_response_retries: int = 2
     agent_empty_retry_efforts: str = "low,none"
-    # v35: 重试间隔（秒）——空响应/瞬时故障重试前等待，避免背靠背重试打爆网关
-    agent_retry_interval_seconds: float = 10.0
     # v45: 统一异常重试策略（任何报错都重试，穷尽后才停止并显示报错）。
-    # - agent_retry_count: 重试次数（0 = 不重试，报错直接停止）
-    # - agent_retry_intervals: 每次重试前的等待秒数序列（逗号分隔）；不足时用最后一个值补齐，
-    #   为空时回退到 agent_retry_interval_seconds。默认 10,20,30 = 第 1/2/3 次重试分别等 10/20/30 秒。
-    # 二者均由设置-常规面板写入（/settings/global）并持久化到 config.json。
-    agent_retry_count: int = 3
+    # 间隔序列即重试计划：每个元素是一次重试前的等待秒数，个数即重试次数（不再单独配置次数）。
+    # 默认 10,20,30 = 共 3 次重试，分别等 10/20/30 秒；空串 = 不自动重试。
+    # 由设置-常规面板写入（/settings/global）并持久化到 config.json。
     agent_retry_intervals: str = "10,20,30"
     ta3_kimi_thinking_effort: str = "low"
     # DEPRECATED (plan-838): 思考看门狗已移除——kimi-k3 与 TA3 其它模型统一使用
@@ -273,7 +267,6 @@ class Settings(BaseSettings):
     http_proxy: str = ""
     # v1.1: 消息流展示开关（后端缓存值，前端启动时拉取）
     show_todos: bool = True
-    show_reasoning: bool = True
     # plan-156-619 S2：消息区搜索入口按钮（左上角）。默认关闭；关闭只隐藏入口，Ctrl+F 仍可唤起搜索条
     show_message_search: bool = False
     # plan-156-619 S4d：子会话默认模型 / 思考深度（0 / 空 = 跟随主代理）
@@ -284,9 +277,6 @@ class Settings(BaseSettings):
     # plan-20261020-subsession-switch：子会话开关从「子代理与子会话」合并开关中拆出。
     # 两者是彼此独立的并发资源，用户需要能只关其中一种（例如保留只读子代理、关闭可改文件的子会话）。
     subsession_enabled: bool = True
-    # plan-156-621：每轮用户消息注入「优先用子会话并行处理」的提示词。
-    # 关闭后不注入；只读 / 计划 / 工作流等不下发子会话工具的模式本身也不会注入。
-    parallel_subsession_hint: bool = True
     # plan-20261018-operator-boost：GUI 操作（电脑操控 / 内置浏览器的多步操作）交给「操控子会话」执行。
     # 操作本身不需要深度推理，却是延迟大户（每步一次模型往返）；交给低思考档的子会话，
     # 主会话保留高思考深度处理设计、编码与结论。只在下发子会话工具的模式下生效。
@@ -487,42 +477,49 @@ class Settings(BaseSettings):
 
     @property
     def agent_retry_interval_list(self) -> list[float]:
-        """v45: 解析统一重试的等待间隔序列（秒）。
+        """解析异常重试的间隔序列（秒）：每个元素即一次重试前的等待时长，个数即重试次数。
 
-        返回长度 = agent_retry_count；序列项不足时用最后一项补齐，
-        序列为空/非法时回退到 agent_retry_interval_seconds（默认 10s）。
-        调用方按下标取第 i 次重试的等待秒数，越界自动取最后一项。
+        空串或全部非法时返回空列表，即不自动重试。
         """
-        count = max(0, int(self.agent_retry_count or 0))
-        if count == 0:
-            return []
-        parsed: list[float] = []
-        # plan-20261020-retry-cred-perf R9：兼容中文逗号/顿号/分号与空格分隔——
-        # 旧实现只认半角逗号，用户输入「5，10，10」整串作废、静默回落为 10 秒。
-        _raw = str(self.agent_retry_intervals or "")
-        for _sep in ("，", "、", "；", ";", "\t", "\n", " ", "　"):
-            _raw = _raw.replace(_sep, ",")
-        for tok in _raw.split(","):
-            tok = tok.strip()
-            if not tok:
-                continue
-            try:
-                val = float(tok)
-            except (TypeError, ValueError):
-                continue
-            if val >= 0:
-                parsed.append(val)
-        if not parsed:
-            fallback = max(0.0, float(self.agent_retry_interval_seconds or 0.0))
-            parsed = [fallback]
-        # 序列不足按最后一项补齐，保证每次重试都有确定的等待时长
-        while len(parsed) < count:
-            parsed.append(parsed[-1])
-        return parsed[:count]
+        return parse_retry_intervals(self.agent_retry_intervals)
 
     @property
     def default_model_ready(self) -> bool:
         return bool(self.default_llm_base_url and self.default_llm_api_key and self.default_llm_model)
+
+
+RETRY_MAX_COUNT = 20
+RETRY_MAX_INTERVAL_SECONDS = 3600
+
+
+def parse_retry_intervals(raw: str | None) -> list[float]:
+    """解析重试间隔标签串（逗号 / 顿号 / 分号 / 空白分隔，兼容中文标点）。
+
+    只保留 0~3600 秒之间的数字，非法项静默跳过，最多保留 20 项。
+    设置页已做即时校验，这里是服务端兜底，保证运行时拿到的序列一定合法。
+    """
+    text = str(raw or "")
+    for sep in ("，", "、", "；", ";", "\t", "\n", " ", "　"):
+        text = text.replace(sep, ",")
+    out: list[float] = []
+    for tok in text.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            val = float(tok)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= val <= RETRY_MAX_INTERVAL_SECONDS:
+            out.append(val)
+        if len(out) >= RETRY_MAX_COUNT:
+            break
+    return out
+
+
+def format_retry_intervals(values: list[float]) -> str:
+    """把间隔序列写回配置串：整数不带小数点（10.0 → 10），与设置页输入口径一致。"""
+    return ",".join(f"{v:g}" for v in values)
 
 
 @lru_cache

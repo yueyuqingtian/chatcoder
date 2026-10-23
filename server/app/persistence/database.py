@@ -5,6 +5,9 @@ SQLite 在桌面端是单写者数据库。这里统一关闭隐式 autoflush，
 """
 import asyncio
 import logging
+import os
+import sys
+import tempfile
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any, TypeVar
@@ -56,6 +59,45 @@ def _connect_args(url: str) -> dict:
         return {"timeout": 10, "check_same_thread": False}
     return {}
 
+
+def _force_test_database_if_needed() -> None:
+    """plan-20261023-testdb-guard：pytest 进程绝不允许连接真实数据库。
+
+    背景：`tests/conftest.py` 已在导入 app 之前把 DATABASE_URL 指向临时库，但只要
+    有一次运行没有加载到该 conftest（换了 rootdir、从脚本里 import 测试、或环境变量
+    被外部进程继承覆盖），测试就会直接在生产库上建表 / 删会话。实测已发生：
+    测试进程执行 `session.delete_permanent.<id>` 把用户正在跑的子会话连同消息、
+    轮次、任务一起物理删除，且 SQLite 无 AUTOINCREMENT 导致 id 被后续新会话复用。
+
+    这里加一道与加载顺序无关的硬保护：只要进程里存在 pytest，就强制落到临时库。
+    确需连真实库的集成测试可显式设置 CHATCODER_ALLOW_REAL_DB_FOR_TESTS=1。
+    """
+    if os.environ.get("CHATCODER_ALLOW_REAL_DB_FOR_TESTS") == "1":
+        return
+    in_pytest = (
+        "pytest" in sys.modules
+        or "_pytest" in sys.modules
+        or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+    )
+    if not in_pytest:
+        return
+    tmp_path = os.path.join(tempfile.gettempdir(), "chatcoder_pytest.db")
+    url = str(settings.database_url)
+    if url.startswith("sqlite"):
+        current = os.path.abspath(url.rsplit("///", 1)[-1])
+        if current == os.path.abspath(tmp_path):
+            return
+        logger.warning("[database] pytest 进程强制改用隔离数据库: %s（原配置: %s）", tmp_path, url)
+        settings.database_url = "sqlite+aiosqlite:///" + tmp_path
+        return
+    raise RuntimeError(
+        "测试进程禁止连接非临时数据库（plan-20261023-testdb-guard）："
+        "请在 tests/conftest.py 中把 DATABASE_URL 指向临时 SQLite，"
+        "或设置 CHATCODER_ALLOW_REAL_DB_FOR_TESTS=1 明确承担风险。"
+    )
+
+
+_force_test_database_if_needed()
 
 engine = create_async_engine(
     settings.database_url,

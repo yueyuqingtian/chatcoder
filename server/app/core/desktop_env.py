@@ -266,7 +266,11 @@ class DesktopCore:
                 self._transport.write(line.encode("utf-8"))
                 raw = await asyncio.wait_for(self._reader.readline(), timeout=_CALL_TIMEOUT_SEC)
             except asyncio.TimeoutError as exc:
-                raise DesktopCoreError(f"桌面操控调用超时（{op}）。") from exc
+                # plan-537-2251：超时后内核的迟到响应仍留在命名管道里，而协议没有请求 id，
+                # 下一次调用会读到上一条响应，导致此后每次调用错位一格（表现为窗口列表为空、
+                # 截图元数据全 0）。这里与相邻两个分支保持一致，先重置连接再抛错。
+                await self._teardown()
+                raise DesktopCoreError(f"桌面操控调用超时（{op}），已重置连接，请重试。") from exc
             except (ConnectionError, OSError) as exc:
                 # 管道断了：内核可能崩溃，清掉状态让下次调用重建
                 await self._teardown()

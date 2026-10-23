@@ -115,6 +115,8 @@ const DEFAULT_PREF = {
   showBadge: true,
   hideOnFullscreen: false,
   hideOnMinimize: true,
+  /** 宠物安装目录（用户在设置 → 宠物中指定）；空串 = 默认目录（见 defaultPetsDir） */
+  petsDir: "",
 };
 
 // ─────────────────────────── 模块状态 ───────────────────────────
@@ -135,11 +137,93 @@ const logErr = (...a) => ctx.logErr("[pet]", ...a);
 // ─────────────────────────── 路径与偏好 ───────────────────────────
 
 function prefFile() { return path.join(app.getPath("userData"), "pet-pref.json"); }
-function petsDir() { return path.join(app.getPath("userData"), "pets"); }
+/** 默认安装目录：安装包取软件安装目录下的 pets（与浏览器下载目录同口径）；开发态取用户数据目录。 */
+function defaultPetsDir() {
+  if (app.isPackaged) return path.join(path.dirname(app.getPath("exe")), "pets");
+  return path.join(app.getPath("userData"), "pets");
+}
+/** 升级前的旧默认目录（用户数据目录下），用于一次性迁移与不可写时的回落。 */
+function legacyPetsDir() { return path.join(app.getPath("userData"), "pets"); }
+function dirWritable(dir) {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.accessSync(dir, fs.constants.W_OK);
+    return true;
+  } catch { return false; }
+}
+/** 实际使用的宠物目录：用户指定（且可写）→ 默认安装目录（可写）→ 用户数据目录（安装在只读位置时的回落）。 */
+function petsDir() {
+  const custom = pref && pref.petsDir ? String(pref.petsDir) : "";
+  if (custom && dirWritable(custom)) return custom;
+  const dflt = defaultPetsDir();
+  if (dirWritable(dflt)) return dflt;
+  const alt = legacyPetsDir();
+  dirWritable(alt);
+  return alt;
+}
 function manifestCacheFile() { return path.join(app.getPath("userData"), "pet-manifest.json"); }
 /** 会话标题持久缓存（plan-73-341）：解决"浮窗长期显示「会话 N」"—— */
 function titlesFile() { return path.join(app.getPath("userData"), "pet-titles.json"); }
 function petDir(slug) { return path.join(petsDir(), slug); }
+
+/** 把源目录下的宠物逐个复制到目标目录，成功后删除源；同名已存在则保留目标端（不覆盖），计入 skipped。 */
+function migratePetsDir(fromDir, toDir) {
+  const result = { moved: 0, skipped: 0 };
+  if (!fromDir || !toDir || path.resolve(fromDir) === path.resolve(toDir)) return result;
+  let names = [];
+  try {
+    names = fs.readdirSync(fromDir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
+  } catch { return result; }
+  for (const name of names) {
+    const src = path.join(fromDir, name);
+    const dst = path.join(toDir, name);
+    if (fs.existsSync(dst)) { result.skipped++; continue; }
+    try {
+      fs.mkdirSync(toDir, { recursive: true });
+      fs.cpSync(src, dst, { recursive: true });
+      fs.rmSync(src, { recursive: true, force: true });
+      result.moved++;
+    } catch (e) {
+      result.skipped++;
+      logErr("宠物迁移失败:", name, e && e.message);
+    }
+  }
+  return result;
+}
+
+/** 升级后把旧默认目录（用户数据目录）里的宠物迁到当前默认目录；目录相同或迁移不需要时为空操作。 */
+function migrateLegacyPets() {
+  const target = petsDir();
+  const r = migratePetsDir(legacyPetsDir(), target);
+  if (r.moved) log("已把旧版宠物迁到当前宠物目录:", r.moved, "个");
+}
+
+function getPetsDirInfo() {
+  const dir = petsDir();
+  const custom = !!(pref && pref.petsDir);
+  const dflt = defaultPetsDir();
+  return {
+    dir,
+    custom,
+    default_dir: dflt,
+    /** 默认目录不可写（如安装在 Program Files），已回落到用户数据目录 */
+    fallback: !custom && path.resolve(dir) !== path.resolve(dflt),
+  };
+}
+
+/** 设置宠物安装目录：校验可写 → 把已安装的宠物迁过去 → 持久化偏好 → 通知宠物窗口重读资源。dir 为空 = 恢复默认。 */
+function setPetsDir(dirRaw) {
+  const before = petsDir();
+  const requested = String(dirRaw || "").trim();
+  if (requested && !dirWritable(requested)) throw new Error("该目录不可写，请换一个目录");
+  writePref({ petsDir: requested });
+  const after = petsDir();
+  const moved = migratePetsDir(before, after);
+  if (moved.moved) log("宠物安装目录已变更，迁移", moved.moved, "个宠物到", after);
+  broadcastPref();
+  pushAssets();
+  return { ...getPetsDirInfo(), moved: moved.moved, skipped: moved.skipped };
+}
 
 /** 读取标题缓存（id → title）。损坏时返回空表，绝不抛错。 */
 function readTitles() {
@@ -1006,6 +1090,7 @@ function registerPetIpc(options) {
     getBackendPort: (options && options.getBackendPort) || (() => 12973),
   };
   pref = readPref();
+  try { migrateLegacyPets(); } catch (e) { logErr("旧版宠物迁移失败:", e && e.message); }
   // plan-365-1770：睡眠唤醒后重放宠物窗口状态（穿透/置顶/可见性），解决「唤醒后交互全失效」
   registerSystemRecovery();
 
@@ -1035,6 +1120,15 @@ function registerPetIpc(options) {
   });
 
   ipcMain.handle("pet:getPref", () => ({ ...pref }));
+
+  // 宠物安装目录（设置 → 宠物）：查询 / 修改（自动迁移已安装的宠物）/ 打开
+  ipcMain.handle("pet:getDir", () => getPetsDirInfo());
+  ipcMain.handle("pet:setDir", (_e, dir) => setPetsDir(dir));
+  ipcMain.handle("pet:openDir", async () => {
+    const err = await shell.openPath(petsDir());
+    if (err) throw new Error(err);
+    return getPetsDirInfo();
+  });
 
   ipcMain.handle("pet:setPref", (_e, patch) => {
     const before = { ...pref };

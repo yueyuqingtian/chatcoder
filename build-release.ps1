@@ -19,13 +19,17 @@ $outDir = Join-Path $root $pkg.build.directories.output
 $exeName = "chatcoder-Setup-$version.exe"
 Write-Host ("版本 v{0}，产物目录 {1}" -f $version, $outDir) -ForegroundColor Cyan
 
-Write-Host "=== [1/7] 内置能力预检（Chromium / 桌面操控内核）===" -ForegroundColor Cyan
+Write-Host "=== [1/7] 内置能力预检（Chromium / 桌面操控内核 / ripgrep）===" -ForegroundColor Cyan
 # 幂等：已准备好则跳过下载；浏览器由 chatcoder-server.spec 打进 _internal/ms-playwright
 & "$root\server\prepare-playwright-browsers.ps1"
 
 # 桌面操控内核：用系统自带 csc.exe 编译，产物落到 server/vendor/desktop-core，
 # 由 chatcoder-server.spec 打进 _internal/desktop-core。
 & "$root\tools\desktop-core\build.ps1" -OutDir "$root\server\vendor\desktop-core"
+
+# 增强搜索的 ripgrep：复制本机 rg.exe 到 server/vendor/ripgrep，由 chatcoder-server.spec 打进 _internal/ripgrep。
+# 找不到时只警告（运行时回退纯 Python 搜索），不阻塞发布。
+& "$root\server\prepare-ripgrep.ps1"
 
 Write-Host "=== [2/7] 构建前端 ===" -ForegroundColor Cyan
 Push-Location "$root\client"

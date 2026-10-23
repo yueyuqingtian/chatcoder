@@ -170,6 +170,13 @@ class ConnectionManager:
         # v2.1: 注入会话级单调 seq 并写入补偿缓冲区（仅对可重放事件计数）
         # v967: 高频流式增量事件（token/thinking delta）不入缓冲、不占 seq——
         #       防止 500 条环形缓冲被增量挤占，保证关键事件可被 sync.request 补发。
+        # plan-20261023-ownerfix：会话通道的 payload 也必须带 session_id。
+        #   前端多处「按 payload.session_id 复核会话归属」的兜底之前实际一直拿到 0
+        #   （只有全局通道 _forward_global 会注入），切换瞬间的迟到事件因此被放行，
+        #   表现为新会话的右侧进程/计划卡显示上一个会话的内容。
+        _payload = event.get("payload")
+        if isinstance(_payload, dict) and _payload.get("session_id") is None:
+            _payload["session_id"] = session_id
         if event.get("event") not in _STREAM_NO_BUFFER_EVENTS and "seq" not in event:
             event["seq"] = self.next_seq(session_id)
             self._buffers[session_id].append(event)

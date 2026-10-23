@@ -19,9 +19,11 @@ class MemorySearchTool(Tool):
     concurrency_safe = True  # plan-522-2209：只读检索，写操作在 memory_write（独占）
     risk_level = "low"
     description = (
-        "跨来源检索记忆：同时搜索①记忆库（长期记忆条目，含项目/全局层）、"
+        "跨来源检索记忆：同时搜索①记忆库（长期记忆条目，跨 session/project/global 三层）、"
         "②当前会话全部历史消息（含被摘要/压缩的早期消息）、③被压缩遮蔽的原始消息。"
-        "当需要回忆之前讨论过的细节、决策、任务安排、项目约定时使用。"
+        "两个用途：**写记忆前查重**（先搜同主题条目，能更新就不新增）、"
+        "回忆之前讨论过的细节/决策/任务安排/项目约定。"
+        "注意：记忆库结果是历史快照，可能已过时或被后续决策取代，采信前先与当前代码/对话核对。"
         "**按需检索**：必须给出具体关键词（不要空泛词），结果已限量分页；"
         "如需查看完整段落，再用 compaction_view 按 index + keyword 精确取回，"
         "**不要全量拉取压缩前上下文**。"
@@ -74,6 +76,8 @@ class MemorySearchTool(Tool):
 
         async with async_session_factory() as db:
             # ── 源 1: 记忆库（三层 + 候选区）──
+            # plan-537-2256：跳过 superseded_by 非空的行（被取代/已过期，不再是有效记忆）；
+            # 候选区仍可检索——它们只是未达注入阈值，标注「（候选·未注入）」提示置信度。
             if "memory" in sources:
                 try:
                     from sqlalchemy import select
@@ -81,7 +85,10 @@ class MemorySearchTool(Tool):
                     from app.persistence.models.memory import MemoryEntry
                     res = await db.execute(
                         select(MemoryEntry)
-                        .where(MemoryEntry.text.ilike(f"%{keyword}%"))
+                        .where(
+                            MemoryEntry.text.ilike(f"%{keyword}%"),
+                            MemoryEntry.superseded_by.is_(None),
+                        )
                         .order_by(MemoryEntry.usage_count.desc())
                         .limit(limit)
                     )
@@ -95,6 +102,8 @@ class MemorySearchTool(Tool):
                             lines.append(f"- [{tag}/{e.kind}{cand}] {e.text}")
                         sections.append("\n".join(lines))
                         data["memory"] = len(mems)
+                        # plan-537-2256：被主动检索命中才算「使用」——注入只让模型看到，不计次。
+                        await _bump_usage([e.id for e in mems])
                 except Exception:
                     pass
 
@@ -169,6 +178,37 @@ class MemorySearchTool(Tool):
             f"记忆库 {data['memory']} 条 · 历史消息 {data['history']} 条 · 压缩块 {data['compaction']} 条"
         )
         return ToolResult(ok=True, output=header + "\n\n" + "\n\n".join(sections), data=data)
+
+
+async def _bump_usage(ids: list[int]) -> None:
+    """命中记忆的「使用」计数（plan-537-2256）：usage_count + 1 且记录真实活跃时间。
+
+    批量更新走写引擎单写线程；计数失败不影响检索结果，只记日志。
+    """
+    if not ids:
+        return
+    import logging
+    from datetime import datetime, timezone
+
+    from sqlalchemy import select, update
+
+    from app.persistence.database import run_write_locked
+    from app.persistence.models.memory import MemoryEntry
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    def _persist(s):
+        s.execute(
+            update(MemoryEntry)
+            .where(MemoryEntry.id.in_(ids))
+            .values(usage_count=MemoryEntry.usage_count + 1, last_usage_at=now_iso)
+        )
+        s.commit()
+
+    try:
+        await run_write_locked(_persist, label="memory.search_usage")
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).warning("[memory_search] 记忆使用计数更新失败(非阻塞)", exc_info=True)
 
 
 def _flatten(items) -> list:

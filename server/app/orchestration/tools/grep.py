@@ -8,11 +8,11 @@ import asyncio
 import logging
 import os
 import re
-import shutil
 from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
+from app.core.ripgrep_env import locate_ripgrep
 from app.orchestration.output_paging import cap_raw
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 from app.orchestration.tools.safe_path import safe_resolve
@@ -144,14 +144,15 @@ class GrepTool(Tool):
             glob_pattern = include_glob.replace(".", r"\.").replace("*", ".*")
             include_re = re.compile(f"^{glob_pattern}$", re.IGNORECASE)
 
-        # v1.1: 增强搜索 — enhanced_search 开启且系统有 ripgrep 时走 rg 快路径；
+        # v1.1: 增强搜索 — enhanced_search 开启且能定位到 ripgrep（内置或 PATH）时走 rg 快路径；
         # rg 不可用/超时/失败返回 None，回退下方纯 Python 逐行匹配。
         # v1.2: rg 快路径仅对目录生效（rg 的 cwd 必须是目录），单文件走纯 Python 匹配。
-        if root.is_dir() and settings.enhanced_search and shutil.which("rg"):
+        rg = locate_ripgrep() if (root.is_dir() and settings.enhanced_search) else None
+        if rg is not None:
             rg_result = await self._rg_search(
                 root=root, ws_root=ws_root, pattern=pattern_str,
                 include_glob=include_glob, case_sensitive=case_sensitive,
-                context_lines=context_lines, fixed=bool(literal_note),
+                context_lines=context_lines, fixed=bool(literal_note), rg_path=rg.path,
             )
             if rg_result is not None:
                 if literal_note:
@@ -261,13 +262,18 @@ class GrepTool(Tool):
         case_sensitive: bool,
         context_lines: int,
         fixed: bool = False,
+        rg_path: str = "rg",
     ) -> ToolResult | None:
         """v1.1: ripgrep 快路径。任何异常/不可用返回 None，由调用方回退纯 Python。
 
-        fixed=True：按字面文本搜索（-F），用于模型给的正则不合法时的降级。"""
+        fixed=True：按字面文本搜索（-F），用于模型给的正则不合法时的降级。
+        注意：--max-filesize 只接受纯字节数或 K/M/G 后缀，不能带 B（否则 rg 报错，快路径形同虚设）。"""
         cmd = [
-            "rg", "--no-heading", "-n", "--color", "never",
-            "--max-filesize", f"{_MAX_FILE_SIZE}B",
+            rg_path, "--no-heading", "-n", "--color", "never",
+            # -0：路径后接 NUL 而不是 ":"，匹配行为 "路径\0行号:内容"、上下文行为 "路径\0行号-内容"，
+            # 解析时不会被路径或内容里的 ":数字:" 误导
+            "-0",
+            "--max-filesize", str(_MAX_FILE_SIZE),
             "--max-count", str(_MAX_MATCHES),
         ]
         if fixed:
@@ -312,14 +318,21 @@ class GrepTool(Tool):
                 break
             if not line or line == "--":
                 continue
-            stripped = rel_prefix + line if rel_prefix else line
-            m = re.match(r"^(.+?):(\d+):", stripped)
-            if m:
+            path_part, nul, rest = line.partition("\0")
+            if not nul:
+                continue
+            # rg 输出的路径形如 ".\\src\\a.py"（cwd=root 时带 ./ 前缀），统一成与纯 Python 分支一致的相对路径
+            path = path_part[2:] if path_part[:2] in ("./", ".\\") else path_part
+            m = re.match(r"^\d+([:-])", rest)
+            if not m:
+                continue
+            is_match = m.group(1) == ":"
+            if is_match:
                 total_matches += 1
-                file_set.add(m.group(1))
+                file_set.add(path)
             elif context_lines <= 0:
                 continue
-            lines.append(stripped)
+            lines.append(f"{rel_prefix}{path}{m.group(1)}{rest}")
 
         if not lines:
             output = f"未找到匹配项 (rg)"

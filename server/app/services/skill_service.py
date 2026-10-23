@@ -516,10 +516,13 @@ async def get_global_skills(db: AsyncSession) -> list[Skill]:
     「Available Skills」，AI 看不到也调不到——这正是"插件里装的技能 AI 用不了"的一环。
     """
     res = await db.execute(
-        select(Skill).where(
+        select(Skill)
+        .where(
             Skill.is_active == True,  # noqa: E712
             Skill.auto_load.is_not(False),
         )
+        # plan-537-2262 S5：清单顺序必须可复现，否则每轮提示词前缀不稳定、KV cache 命中率下降。
+        .order_by(Skill.source, Skill.name)
     )
     return list(res.scalars().all())
 
@@ -527,6 +530,9 @@ async def get_global_skills(db: AsyncSession) -> list[Skill]:
 async def get_global_mcp_servers(db: AsyncSession) -> list[McpServer]:
     """全局激活 MCP Server。"""
     res = await db.execute(
-        select(McpServer).where(McpServer.is_active == True)  # noqa: E712
+        select(McpServer)
+        .where(McpServer.is_active == True)  # noqa: E712
+        # plan-537-2262 S5：固定顺序，避免每轮提示词前缀抖动导致 KV cache 失效。
+        .order_by(McpServer.name)
     )
     return list(res.scalars().all())

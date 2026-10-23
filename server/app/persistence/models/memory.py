@@ -13,8 +13,12 @@ class MemoryEntry(Base):
     __tablename__ = "memory_entries"
 
     id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
-    # 会话记忆挂 session；项目/全局记忆 session_id 存创建来源（保留可追溯）
-    session_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("sessions.id"))
+    # 会话记忆挂 session；项目/全局记忆 session_id 只是「创建来源」（保留可追溯）。
+    # plan-537-2256：来源会话被删除时置空（SET NULL）——跨会话长期记忆（project/global）
+    # 不能因来源会话消失而一起消失，故该列必须可空。
+    session_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("sessions.id", ondelete="SET NULL"),
+    )
     turn_id: Mapped[int | None] = mapped_column(BigInteger)
     text: Mapped[str] = mapped_column(nullable=False)  # 提取的记忆内容
     kind: Mapped[str] = mapped_column(String(20), default="fact")  # fact / convention / pitfall / decision

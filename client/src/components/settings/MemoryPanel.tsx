@@ -150,14 +150,17 @@ export function MemoryPanel() {
     setDetailText(m.text || "");
   };
 
-  /** S8：保存详情编辑——内容有变化才请求；后端将清除候选标记 */
+  /** S8：保存详情编辑；后端将清除候选标记。
+   *  plan-537-2256：改为**总是**发请求——此前只在文本变化时才 PATCH，
+   *  于是「只想确认一条候选记忆」时点保存不会清 candidate，候选永远转不正
+   *  （候选不参与注入）。保存动作本身就代表人工确认。 */
   const saveDetail = async () => {
     if (!detail) return;
     const text = detailText.trim();
     if (!text) { setErr("记忆内容不能为空"); return; }
     setDetailSaving(true);
     try {
-      if (text !== detail.text) await api.updateMemory(detail.id, { text });
+      await api.updateMemory(detail.id, { text });
       setDetail(null);
       await load();
     } catch (e) { setErr(String(e)); }

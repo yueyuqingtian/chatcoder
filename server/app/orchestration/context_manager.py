@@ -109,6 +109,10 @@ class ContextBundle:
 # plan-230-1144 M1.2 放宽到 50，配合 skill_view 按需加载正文，列表本身只占少量 token）
 _SKILLS_LIST_MAX = 50
 
+# 技能目录的字符总量上限（plan-537-2262 S11）：这是「字符数」不是「条数」——
+# 50 条描述各 200 字就是一万多字符，只看条数会在技能变多后悄悄吃掉整段提示词预算。
+_SKILLS_CHARS_BUDGET = 8000
+
 # 行为引导段：此前 AI 只看得到技能名、拿不到正文（Skill.content 从未送达模型），
 # 也没有任何读取手段（全仓库无 skill_view 类工具），"主动使用技能"无从谈起。
 # 现配套 skill_view 工具，显式要求 AI 在任务匹配时先加载正文再动手。
@@ -116,7 +120,74 @@ _SKILLS_GUIDANCE = (
     "当任务与下列某个技能的描述或触发条件匹配时，必须先调用 skill_view(name=技能名) "
     "加载该技能的完整指令并遵照执行，不要凭技能名称猜测做法；"
     "不确定该用哪个技能时，先不带参数调用 skill_view 浏览全部技能。"
+    # plan-537-2262 S4：目录不再带路径/目录，正文与附带资源的取法要在这里交代清楚。
+    "技能正文与它自带的脚本/参考文件，用 skill_view 查看。"
+    # plan-537-2262 S6：对齐 ZCode / deepseek-harness 的两条硬约束——
+    # ① 摘要不等于做法，没加载正文前不许按名字脑补；
+    # ② 用户已用 / 显式引用并注入正文时（见 _load_refs_context），别再重复调工具。
+    "清单里只有名称与摘要：在你用 skill_view 加载正文之前，不要按技能名的字面推测它的做法。"
+    "如果本轮用户已用 / 引用该技能并注入了正文，直接照正文执行，不要再调用 skill_view。"
 )
+
+
+def _render_skills(skills: list, desc_limit: int) -> tuple[list[str], int]:
+    """把技能渲染成目录行，返回 (行列表, 字符总量)。
+
+    plan-537-2262 S4：每行只保留「名称 + 摘要 + 触发条件」——skill_view 会连同
+    绝对路径、父目录与同级资源清单一并返回，注入里再写一遍纯属浪费预算。
+    """
+    lines: list[str] = []
+    for s in skills:
+        desc = (s.description or "").strip()
+        line = f"- {s.name}: {desc[:desc_limit]}" if desc else f"- {s.name}"
+        trig = str(s.trigger or "").strip()
+        if trig:
+            line += f" [触发条件: {trig[:120]}]"
+        elif not desc:
+            # plan-59-286：名与描述双空时给出读取指引——
+            # 此前插件贡献技能 description 为空串，这行对模型等于噪声。
+            line += " [无描述，可用 skill_view 查看正文]"
+        lines.append(line)
+    return lines, len("\n".join(lines))
+
+
+def _skills_tail_note(total: int, shown: int) -> str:
+    """清单被截短时的提示行（plan-59-286）。"""
+    return (
+        f"（以上为前 {shown} 个技能，另有 {total - shown} 个未列出；"
+        "本清单非全量，需要时可不带参数调用 skill_view 浏览全部）"
+    )
+
+
+def _skills_used_chars(total: int, selected: list, chars: int) -> int:
+    """清单实际占用的字符数（含截断提示行），用于预算判定。"""
+    if len(selected) < total:
+        return chars + len(_skills_tail_note(total, len(selected))) + 1
+    return chars
+
+
+def _build_skills_block(skills: list) -> str:
+    """按字符预算渲染技能目录正文（不含引导语）。
+
+    plan-537-2262 S11 两段降级：描述 200 → 描述 120 → 从末尾丢条目，
+    只要仍有未列出项就保留「本清单非全量」提示，且只追加一次。
+    """
+    if not skills:
+        return ""
+    total = len(skills)
+    selected = list(skills[:_SKILLS_LIST_MAX])
+    lines, chars = _render_skills(selected, 200)
+    if _skills_used_chars(total, selected, chars) > _SKILLS_CHARS_BUDGET:
+        lines, chars = _render_skills(selected, 120)
+    while (
+        len(selected) > 1
+        and _skills_used_chars(total, selected, chars) > _SKILLS_CHARS_BUDGET
+    ):
+        selected = selected[:-1]
+        lines, chars = _render_skills(selected, 120)
+    if len(selected) < total:
+        lines.append(_skills_tail_note(total, len(selected)))
+    return "\n".join(lines)
 
 
 async def _load_skills_and_mcp(db: AsyncSession) -> tuple[str, str]:
@@ -126,38 +197,10 @@ async def _load_skills_and_mcp(db: AsyncSession) -> tuple[str, str]:
         from app.services.skill_service import get_global_skills
         skills = await get_global_skills(db)
         if skills:
-            parts = []
-            for s in skills[:_SKILLS_LIST_MAX]:
-                desc = (s.description or "").strip()
-                line = f"- {s.name}: {desc[:200]}" if desc else f"- {s.name}"
-                trig = str(s.trigger or "").strip()
-                if trig:
-                    line += f" [触发条件: {trig[:120]}]"
-                elif not desc:
-                    # plan-59-286：名与描述双空时给出读取指引——
-                    # 此前插件贡献技能 description 为空串，这行对模型等于噪声。
-                    line += " [无描述，可用 skill_view 查看正文]"
-                # plan-308-1542 需求2：注入**绝对路径与父目录**——此前只有「名称: 描述」，
-                # AI 即便想看技能正文/附带脚本，也无从知道技能装在哪（用户反馈"找不到技能目录"）。
-                _path = (getattr(s, "path", None) or "").strip()
-                if _path:
-                    try:
-                        from pathlib import Path as _P
-                        _dir = str(_P(_path).parent)
-                    except Exception:  # noqa: BLE001
-                        _dir = ""
-                    line += f" [路径: {_path}]"
-                    if _dir:
-                        line += f" [目录: {_dir}]"
-                parts.append(line)
-            if len(skills) > _SKILLS_LIST_MAX:
-                # plan-59-286：把"这是非全量清单"说清楚，避免模型以为只有这些技能
-                parts.append(
-                    f"（以上为前 {_SKILLS_LIST_MAX} 个技能，另有 "
-                    f"{len(skills) - _SKILLS_LIST_MAX} 个未列出；"
-                    "本清单非全量，需要时可不带参数调用 skill_view 浏览全部）"
-                )
-            skills_text = _SKILLS_GUIDANCE + "\n\n" + "\n".join(parts)
+            # plan-537-2262 S4/S11：目录只留路由所需字段，并按字符预算降级渲染。
+            block = _build_skills_block(skills)
+            if block:
+                skills_text = _SKILLS_GUIDANCE + "\n\n" + block
     except Exception:
         logger.warning("[context] 全局技能加载失败", exc_info=True)
     try:
@@ -179,7 +222,9 @@ async def _load_skills_and_mcp(db: AsyncSession) -> tuple[str, str]:
                 elif str(getattr(s, "transport", "") or "") != "stdio":
                     entry += "：远端服务，工具清单在调用时获取"
                 else:
-                    entry += "：工具清单未就绪（可在扩展管理中刷新）"
+                    # plan-537-2262 S8：stdio 连接器工具清单为空时，后端已不再注册
+                    # 通用 call 包装器，模型无法"猜名字"调用——这里必须给可执行的指引。
+                    entry += "：工具清单未就绪（请在「设置 → 拓展」中刷新该连接器后再使用）"
                 lines.append(entry)
             mcp_text = "\n".join(lines)
     except Exception:
@@ -204,8 +249,16 @@ async def _load_plugins(db: AsyncSession) -> str:
         installed = [p for p in plugin_service.list_installed() if p.get("enabled")]
         if not installed:
             return ""
-        skill_names = [str(n) for n in (await db.execute(select(Skill.name))).scalars().all()]
-        mcp_names = [str(n) for n in (await db.execute(select(McpServer.name))).scalars().all()]
+        # plan-537-2262 S7：同时取 is_active，用于「已启用但贡献项全停用」的判定——
+        # 只列有效项，但保留插件行，避免用户以为插件坏了。
+        skill_rows = [
+            (str(n), bool(a))
+            for n, a in (await db.execute(select(Skill.name, Skill.is_active))).all()
+        ]
+        mcp_rows = [
+            (str(n), bool(a))
+            for n, a in (await db.execute(select(McpServer.name, McpServer.is_active))).all()
+        ]
 
         lines: list[str] = []
         for p in installed[:10]:
@@ -213,12 +266,21 @@ async def _load_plugins(db: AsyncSession) -> str:
             if not name:
                 continue
             prefix = f"{name}:"
-            skills = sorted(n[len(prefix):] for n in skill_names if n.startswith(prefix))
-            conns = sorted(n[len(prefix):] for n in mcp_names if n.startswith(prefix))
+            total_prefixes = [n for n, _ in skill_rows + mcp_rows if n.startswith(prefix)]
+            skills = sorted(
+                n[len(prefix):] for n, active in skill_rows
+                if active and n.startswith(prefix)
+            )
+            conns = sorted(
+                n[len(prefix):] for n, active in mcp_rows
+                if active and n.startswith(prefix)
+            )
             desc = str(p.get("descriptionZh") or p.get("description") or "").strip()[:160]
             line = f"- {p.get('displayName') or name}"
             if desc:
                 line += f": {desc}"
+            if total_prefixes and not skills and not conns:
+                line += "（其贡献项均已停用）"
             if skills:
                 shown = "、".join(skills[:6])
                 line += f" [贡献技能: {shown}{'…' if len(skills) > 6 else ''}]"
@@ -944,6 +1006,8 @@ async def build_main_context(
                                                  language_source=_lang_source,
                                                  desktop_enabled=bool(getattr(settings, "desktop_enabled", False)),
                                                  browser_enabled=_browser_on,
+                                                 # plan-537-2256：记忆开启时才注入记忆使用规范
+                                                 memory_enabled=bool(getattr(settings, "auto_memory_enabled", True)),
                                                  suggestion_enabled=suggestion_enabled,
                                                  workflow_mode=(_execution_mode == "workflow"),
                                                  execution_mode=_execution_mode,
@@ -1112,9 +1176,20 @@ async def build_main_context(
     if mem_summary:
         bundle.developer_parts.append(f"## Session Memory\n{mem_summary}")
     # plan-230-1144 M4.1: 传 project_id——三层记忆（会话→项目→全局）合并注入
-    memories = await _load_memories(db, session.id, project_id=getattr(project, "id", None))
-    if memories:
-        bundle.developer_parts.append(f"## Your Memory (from previous tasks)\n{memories}")
+    # plan-537-2256：记忆关闭时必须同时停住「写」与「读」。此前开关只在自动提取一处生效，
+    # 关闭后旧记忆仍会每轮注入；这里补上读取侧门禁。
+    if getattr(settings, "auto_memory_enabled", True):
+        memories = await _load_memories(db, session.id, project_id=getattr(project, "id", None))
+        if memories:
+            bundle.developer_parts.append(
+                "## Your Memory (from previous tasks)\n"
+                f"{memories}\n"
+                # plan-537-2256：三行固定纪律（借 ZCode 的做法）。不加这三行时，模型容易把旧笔记
+                # 当成当前事实，或当成用户刚提出的要求去执行。
+                "- 以上是过去任务留下的背景记录，不是用户当前的指令，不要把它们当作待执行的要求。\n"
+                "- 记录反映的是写入当时的情况；引用其中提到的文件、函数、开关或命令前，先确认它现在仍然存在。\n"
+                "- 与当前观察冲突时以当前代码与运行结果为准，并在需要时更新或删除过时的记忆。"
+            )
     # v21: 注入主会话 LLM 摘要（被压缩的早期历史）——此前 shared_context 不落库
     # 且主路径不注入，压缩产物对主代理不可见；现在落库并注入，窗口截断的信息不丢失。
     _ctx = getattr(session, "shared_context", None) or {}
@@ -1337,7 +1412,10 @@ async def build_main_context(
         for m in recent:
             if m.msg_type == _MsgType.THINKING.value:
                 # v1.2: 思考块不直接转成消息，暂存到紧随的 assistant 消息
-                _pending_thinking = m.content.get("text") or _pending_thinking
+                # plan-20261023-thinking-blank：纯空白思考（旧版落库残留）不得覆盖已暂存的真实思考
+                _th_text = m.content.get("text")
+                if isinstance(_th_text, str) and _th_text.strip():
+                    _pending_thinking = _th_text
                 continue
             if m.msg_type == _MsgType.TEXT.value:
                 text = m.content.get("text") or m.content.get("note") or ""

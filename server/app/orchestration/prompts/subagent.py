@@ -29,8 +29,9 @@ fresh context. Everything above applies to you unchanged — the following only 
 - `report_to_leader(message, kind="progress")` — send a status update or raise a blocker. The main
   agent sees it before its next model call; keep working afterwards (do NOT wait for an ack).
 - `report_to_leader(kind="question", wait=true)` — ask the main agent for a decision and block until
-  it replies. Only **background** subagents may wait; if you run synchronously the tool refuses —
-  put the open question in your final report instead.
+  it replies (bounded by `timeout_s`; on timeout, continue with your best judgment and record the
+  open question in your final report). Every subagent runs in the background, so waiting is always
+  available to you.
 - The main agent may send you instructions while you work (its `send_to_subagent` call). They arrive
   as a message starting with `[Instruction from main agent]`. Treat newer instructions as
   authoritative for how to proceed, and mention the change in your final report.

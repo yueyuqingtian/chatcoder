@@ -14,6 +14,7 @@ import { registerReconcileTask, RECONCILE_ORDER } from "../../perf/reconcile";
 import { recordDerivation } from "../../perf/metrics";
 import { useChatStore } from "../../store/chat";
 import type { PanelTab } from "../../store/panel";
+import { useUiStore } from "../../store/ui";
 
 import { Empty } from "../ui";
 interface TerminalPanelProps {
@@ -25,6 +26,20 @@ interface TerminalPanelProps {
    *  PTY 进程、数据订阅与滚动缓冲全部保留（恢复可见时补一次 fit）。
    *  注意：不得进入 PTY 建连 effect 的依赖，否则隐藏/显示会重建终端。 */
   visible?: boolean;
+}
+
+/** 终端默认字体：JetBrains Mono 随应用内置（@font-face 加载），不依赖本机安装。 */
+const DEFAULT_TERMINAL_FONT = "JetBrains Mono";
+const TERMINAL_FALLBACK_FONTS = '"Cascadia Code", Consolas, "Courier New", monospace';
+
+/** 设置里选定的终端字体家族名（空 = 默认内置字体）。 */
+function terminalFontFamily(name: string): string {
+  return (name || "").trim().replace(/"/g, "") || DEFAULT_TERMINAL_FONT;
+}
+
+/** 终端字体栈：选定字体在最前，缺字形时逐级回落（CJK 字形由系统字体兜底）。 */
+function terminalFontStack(name: string): string {
+  return `"${terminalFontFamily(name)}", ${TERMINAL_FALLBACK_FONTS}`;
 }
 
 function readCssVar(name: string, fallback: string): string {
@@ -60,12 +75,21 @@ export function TerminalPanel({ tab, sessionId, visible = true }: TerminalPanelP
     return s.projects.find((p) => p.id === (ownerProjectId ?? s.currentProjectId))?.path;
   });
 
+  // 终端字体随「设置 → 常规 → 终端字体」即时切换：已打开的终端直接改 options，并重算行列
+  const terminalFont = useUiStore((s) => s.terminalFont);
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    term.options.fontFamily = terminalFontStack(terminalFont);
+    doFitRef.current?.();
+  }, [terminalFont]);
+
   useEffect(() => {
     if (!api?.ptySpawn || !containerRef.current) return;
     const container = containerRef.current;
 
     const term = new Terminal({
-      fontFamily: '"Cascadia Code", Consolas, "Courier New", monospace',
+      fontFamily: terminalFontStack(useUiStore.getState().terminalFont),
       fontSize: 13,
       lineHeight: 1.2,
       cursorBlink: true,
@@ -92,6 +116,14 @@ export function TerminalPanel({ tab, sessionId, visible = true }: TerminalPanelP
     let disposed = false;
     let offData: (() => void) | undefined;
     let offExit: (() => void) | undefined;
+    // 内置字体在首次使用前可能尚未加载：加载完成后重算字形度量并 fit，避免行列按回落字体算错
+    void document.fonts?.load?.(`13px "${terminalFontFamily(useUiStore.getState().terminalFont)}"`)
+      .then(() => {
+        if (disposed || termRef.current !== term) return;
+        term.options.fontFamily = terminalFontStack(useUiStore.getState().terminalFont);
+        doFitRef.current?.();
+      })
+      .catch(() => { /* 字体加载失败时沿用回落字体 */ });
 
     function spawnPty() {
       const cols = term.cols || 80;

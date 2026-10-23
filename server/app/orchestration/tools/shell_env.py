@@ -5,10 +5,16 @@ Windows 默认按存在性探测 pwsh → powershell → cmd（避免直接 spaw
 提供 shell_hint() 供上下文管理器把"当前 shell 是什么、能用什么命令"注入系统提示词，
 防止 agent 在 cmd 里写 PowerShell 命令、或写 bash 才有的语法。
 """
+import logging
 import os
 import shutil
 import sys
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
+
+# 设置项中需要显式指定可执行文件的 Shell（auto 不在此列，走平台默认）
+_WIN_EXPLICIT_SHELLS = {"pwsh": "pwsh.exe", "powershell": "powershell.exe", "cmd": "cmd.exe", "git-bash": "git-bash"}
 
 # 与 electron/pty.cjs 相同的 git-bash 候选安装路径
 _GIT_BASH_CANDIDATES = [
@@ -35,11 +41,48 @@ def _user_config() -> dict:
 
 
 def resolve_git_bash() -> str | None:
-    """定位 git-bash 的 bash.exe；找不到返回 None。"""
+    """定位 Git for Windows 的 bash.exe；找不到返回 None。
+
+    只认 Git 安装目录：不回退到 PATH 上的 bash——Windows 自带的 System32\\bash.exe 是 WSL 启动器，
+    会被误当成 Git Bash 启动。
+    """
     for p in _GIT_BASH_CANDIDATES:
         if p and Path(p).exists():
             return p
-    return shutil.which("bash")
+    git = shutil.which("git")
+    if git:
+        # git.exe 位于 <Git>\cmd 或 <Git>\bin，bash.exe 在 <Git>\bin
+        candidate = Path(git).resolve().parent.parent / "bin" / "bash.exe"
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def _find_exe(name: str, extra_dirs: tuple[str, ...] = ()) -> str | None:
+    """在 PATH 与给定目录中查找可执行文件，返回首个命中的完整路径。"""
+    found = shutil.which(name)
+    if found:
+        return found
+    for d in extra_dirs:
+        if d and (Path(d) / name).exists():
+            return str(Path(d) / name)
+    return None
+
+
+def shell_available(kind: str) -> bool:
+    """本机是否装了该 Shell（设置页据此把未安装项置灰并标注「未安装」）。auto 恒为可用。"""
+    sys32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+    if kind == "auto":
+        return True
+    if kind == "pwsh":
+        return _find_exe("pwsh.exe", (str(sys32),)) is not None
+    if kind == "powershell":
+        return _find_exe("powershell.exe", (str(sys32 / "WindowsPowerShell" / "v1.0"),)) is not None
+    if kind == "cmd":
+        return _find_exe("cmd.exe", (str(sys32),)) is not None
+    if kind == "git-bash":
+        return resolve_git_bash() is not None
+    return False
 
 
 def resolve_win_default() -> str:
@@ -59,14 +102,17 @@ def resolve_win_default() -> str:
 
 
 def resolve_shell() -> str:
-    """返回 terminal_exec 实际执行的 shell（可执行文件路径/文件名）。"""
+    """返回 terminal_exec 实际执行的 shell（可执行文件路径/文件名）。
+
+    设置的 Shell 未安装时回退到平台默认，避免每条命令都因 spawn 失败而报错。
+    """
     want = (_user_config().get("terminal_shell") or "auto").strip().lower()
-    if want in ("pwsh", "powershell"):
-        return want + ".exe"
-    if want == "cmd":
-        return "cmd.exe"
-    if want == "git-bash":
-        return resolve_git_bash() or "bash"
+    if sys.platform == "win32" and want in _WIN_EXPLICIT_SHELLS:
+        if shell_available(want):
+            if want == "git-bash":
+                return resolve_git_bash() or "bash"
+            return _WIN_EXPLICIT_SHELLS[want]
+        _log.debug("terminal_shell=%s 未安装，回退平台默认 shell", want)
     if sys.platform == "win32":
         return resolve_win_default()
     return os.environ.get("SHELL", "bash")

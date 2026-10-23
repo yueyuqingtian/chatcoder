@@ -23,7 +23,7 @@
 2. 运行中注入的排队消息（agent_loop 每步 drain）：给该条用户消息附一行简短提醒。
 
 【不注入的情况】
-- 设置中心关闭「优先使用子会话并行处理」（`settings.parallel_subsession_hint=False`）；
+- 设置中心关闭「子会话」开关（`settings.subsession_enabled=False`）；
 - 当前执行模式不下发子会话工具（只读 / 计划 / 工作流，见 subagent_capabilities）——
   否则等于让模型调用一个不存在的工具。
 """
@@ -118,13 +118,10 @@ def _hint_enabled() -> bool:
     try:
         from app.core.config import settings
 
-        # plan-156-622：只有显式关闭才不注入——默认开启。
-        # 用 `is False` 而不是 `not`：配置项为 null / 属性缺失时都保持注入。
-        # plan-20261020-subsession-switch：子会话开关关闭时工具已不下发，
-        # 提示词必须同口径停止注入，否则模型会反复调用一个不存在的工具。
-        if getattr(settings, "subsession_enabled", True) is False:
-            return False
-        return getattr(settings, "parallel_subsession_hint", True) is not False
+        # 提示词只跟随「子会话」开关：开启即注入（默认开启），关闭即停止注入。
+        # 用 `is not False` 而不是 `bool()`：配置项为 null / 属性缺失时都保持注入。
+        # 子会话开关关闭时工具已不下发，提示词必须同口径停止注入，否则模型会反复调用一个不存在的工具。
+        return getattr(settings, "subsession_enabled", True) is not False
     except Exception:  # noqa: BLE001 — 配置层不可用时不注入，避免误伤
         return False
 

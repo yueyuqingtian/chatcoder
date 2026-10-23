@@ -8,9 +8,9 @@ import { IconX } from "../icons";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { CardRow, IconButton, List, ListRow, Switch } from "../ui";
 
-/** 开关（兼容旧签名 checked/onChange） */
-export function Sw({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
-  return <Switch checked={checked} onChange={onChange} />;
+/** 开关（兼容旧签名 checked/onChange；disabled 可选，用于与所在行的置灰口径一致） */
+export function Sw({ checked, onChange, disabled }: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
+  return <Switch checked={checked} onChange={onChange} disabled={disabled} />;
 }
 
 /** 卡片行：标题 + 描述 + 右侧控件槽（title 支持 ReactNode，便于在标题右侧挂徽标） */

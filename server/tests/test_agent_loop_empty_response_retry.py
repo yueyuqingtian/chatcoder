@@ -177,40 +177,48 @@ def test_healthy_stop_not_fatal():
     assert _response_failure_reason(ChatResponse(content="完成", finish_reason="stop")) is None
 
 
-# ── v45: 统一异常重试策略（次数 + 间隔序列）──
+# ── v45: 统一异常重试策略（间隔标签序列，个数即重试次数）──
 
 def test_retry_interval_list_default_is_10_20_30():
     """默认策略：3 次重试，间隔依次为 10/20/30 秒。"""
     s = Settings()
-    assert s.agent_retry_count == 3
     assert s.agent_retry_interval_list == [10.0, 20.0, 30.0]
 
 
-def test_retry_interval_list_pads_with_last_value():
-    """间隔序列项数不足以覆盖重试次数时，用最后一项补齐。"""
-    s = Settings(agent_retry_count=3, agent_retry_intervals="5")
-    assert s.agent_retry_interval_list == [5.0, 5.0, 5.0]
+def test_retry_interval_list_count_follows_tags():
+    """间隔个数即重试次数，不再补齐或截断。"""
+    s = Settings(agent_retry_intervals="5,5")
+    assert s.agent_retry_interval_list == [5.0, 5.0]
 
 
-def test_retry_interval_list_truncated_to_count():
-    """间隔序列比重试次数长时，截断到次数长度。"""
-    s = Settings(agent_retry_count=2, agent_retry_intervals="10,20,30")
-    assert s.agent_retry_interval_list == [10.0, 20.0]
-
-
-def test_retry_interval_list_disabled_with_zero_retries():
-    """重试次数为 0（不重试）时，计划为空——报错直接停止。"""
-    s = Settings(agent_retry_count=0, agent_retry_intervals="10,20,30")
+def test_retry_interval_list_empty_disables_retry():
+    """没有任何间隔标签时不自动重试——报错直接停止。"""
+    s = Settings(agent_retry_intervals="")
     assert s.agent_retry_interval_list == []
 
 
-def test_retry_interval_list_falls_back_when_intervals_blank():
-    """间隔序列为空/非法时回退到 agent_retry_interval_seconds。"""
-    s = Settings(agent_retry_count=2, agent_retry_intervals="", agent_retry_interval_seconds=7.0)
-    assert s.agent_retry_interval_list == [7.0, 7.0]
-
-
 def test_retry_interval_list_ignores_invalid_tokens():
-    """非法项被跳过，合法项仍生效并可补齐。"""
-    s = Settings(agent_retry_count=3, agent_retry_intervals="10, abc ,20")
-    assert s.agent_retry_interval_list == [10.0, 20.0, 20.0]
+    """非法项与越界项被跳过，合法项仍生效。"""
+    s = Settings(agent_retry_intervals="10, abc ,20,-1,5000")
+    assert s.agent_retry_interval_list == [10.0, 20.0]
+
+
+def test_retry_interval_list_capped_at_20_items():
+    """重试次数上限 20，超出的标签丢弃。"""
+    s = Settings(agent_retry_intervals=",".join(["1"] * 25))
+    assert len(s.agent_retry_interval_list) == 20
+
+
+def test_migrate_retry_policy_expands_legacy_count(tmp_path, monkeypatch):
+    """旧版「次数 + 间隔」迁移为间隔序列：次数多于序列则用末项补齐，次数为 0 则清空，旧键删除。"""
+    from app.gateway.routers import settings as settings_router
+
+    monkeypatch.setattr(settings_router, "_USER_CONFIG_PATH", tmp_path / "config.json")
+    data = {"agent_retry_count": 4, "agent_retry_intervals": "5,10"}
+    settings_router._migrate_retry_policy(data)
+    assert data["agent_retry_intervals"] == "5,10,10,10"
+    assert "agent_retry_count" not in data
+
+    data = {"agent_retry_count": 0, "agent_retry_intervals": "10,20,30"}
+    settings_router._migrate_retry_policy(data)
+    assert data["agent_retry_intervals"] == ""

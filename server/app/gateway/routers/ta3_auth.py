@@ -165,18 +165,49 @@ def _raise_quota_http(e: Exception, provider_id: int, stage: str) -> None:
     raise
 
 
+async def _revive_credentials_quietly(db: AsyncSession, provider_id: int, stage: str) -> None:
+    """额度恢复后解除该供应商凭据的冷却（尽力而为，失败只记日志）。
+
+    v47 修复：ta3 的凭据选取对冷却行是硬过滤，额度耗尽导致的冷却会一直挡在
+    选取阶段，表现为「刷新了额度还是一条消息都发不出去」。刷新额度、透支、
+    重置都是用户的显式恢复意图，因此这三条路径统一在这里解除冷却。
+    """
+    try:
+        from app.services import credential_service
+
+        revived = await credential_service.revive_provider_credentials_by_id(db, provider_id)
+        if revived:
+            logger.info("[ta3] provider=%s %s后已解除 %d 条凭据的冷却",
+                        provider_id, stage, revived)
+    except Exception:  # noqa: BLE001 - 解除冷却失败不影响主流程
+        logger.warning("[ta3] provider=%s %s后解除凭据冷却失败(非阻塞)",
+                       provider_id, stage, exc_info=True)
+
+
 @router.get("/providers/{provider_id}/ta3/quota")
 async def ta3_quota_get(provider_id: int, force: bool = False,
                         db: AsyncSession = Depends(get_db)):
-    """本人额度（窗口百分比、重置时刻、可执行动作）；force=true 跳过 10s 缓存。"""
+    """本人额度（窗口百分比、重置时刻、可执行动作）；force=true 跳过 10s 缓存。
+
+    v47 修复：force=true（用户在设置页点「刷新」，或额度动作完成后的回刷）同时解除
+    该供应商凭据的冷却——此前刷新只清了额度展示缓存，凭据行的 status=cooldown 原样
+    保留，而 ta3 的选取路径对冷却行是硬过滤，于是刷新之后并发消息仍然在本地直接
+    报 provider_credential_unavailable（表现为"请求根本没发出去"）。刷新是用户的
+    显式恢复意图，冷却只是"暂缓"，这里不保留任何时间门槛。
+    """
     provider = await _get_ta3_provider(db, provider_id)
     api_base = _resolve_api_base(provider)
     # plan-110-438 M2: 额度查询按该供应商的代理配置出网
     _ckw = provider_client_kwargs(provider)
     try:
-        return await ta3_quota.get_quota(db, provider_id, api_base, force=force, client_kwargs=_ckw)
+        payload = await ta3_quota.get_quota(db, provider_id, api_base, force=force,
+                                            client_kwargs=_ckw)
     except Exception as e:  # noqa: BLE001
         _raise_quota_http(e, provider_id, "额度查询")
+    if force:
+        # v47: 手动刷新是用户的显式恢复意图——顺手解除凭据冷却（见 _revive_credentials_quietly）
+        await _revive_credentials_quietly(db, provider_id, "手动刷新额度")
+    return payload
 
 
 @router.get("/providers/{provider_id}/ta3/quota/trend")
@@ -206,10 +237,13 @@ async def ta3_quota_overdraft(provider_id: int, body: Ta3QuotaRemarkBody,
     api_base = _resolve_api_base(provider)
     _ckw = provider_client_kwargs(provider)  # plan-110-438 M2
     try:
-        return await ta3_quota.request_overdraft(db, provider_id, api_base, body.remark,
-                                                client_kwargs=_ckw)
+        result = await ta3_quota.request_overdraft(db, provider_id, api_base, body.remark,
+                                                  client_kwargs=_ckw)
     except Exception as e:  # noqa: BLE001
         _raise_quota_http(e, provider_id, "日窗透支")
+    # v47: 额度已恢复 → 一并解除凭据冷却，否则后续请求仍在本地被挡在选取阶段
+    await _revive_credentials_quietly(db, provider_id, "日窗透支")
+    return result
 
 
 @router.post("/providers/{provider_id}/ta3/quota/reset")
@@ -220,10 +254,13 @@ async def ta3_quota_reset(provider_id: int, body: Ta3QuotaResetBody,
     api_base = _resolve_api_base(provider)
     _ckw = provider_client_kwargs(provider)  # plan-110-438 M2
     try:
-        return await ta3_quota.request_reset(db, provider_id, api_base, body.window_type, body.remark,
-                                             client_kwargs=_ckw)
+        result = await ta3_quota.request_reset(db, provider_id, api_base, body.window_type,
+                                              body.remark, client_kwargs=_ckw)
     except Exception as e:  # noqa: BLE001
         _raise_quota_http(e, provider_id, "额度重置")
+    # v47: 同上——重置成功即恢复额度，凭据冷却必须随之解除
+    await _revive_credentials_quietly(db, provider_id, "额度重置")
+    return result
 
 
 @router.get("/providers/{provider_id}/ta3/model-status")

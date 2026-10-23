@@ -98,6 +98,9 @@
 @media (max-width: 900px) {
   .models-body { grid-template-columns: 1fr; }
 }
+/* 完全空态（无供应商也无独立模型）：左列不渲染，卡片收成单列，空态居中占满整卡。
+   不加这条会留下 248px 空白栏 + 左上角一行「暂无供应商」，与右列空态重复。 */
+.models-body.is-empty { grid-template-columns: minmax(0, 1fr); }
 
 /* ── 左列（plan-41-225 重构）：无分组标题 + 拖拽排序 + 末尾添加入口 ──
    行高 36px / 行距 2px = 拖拽步距 38px（与 ProviderSideList.tsx 的 STEP 常量一致，
@@ -142,15 +145,6 @@
 .models-side-item.dragging { box-shadow: var(--shadow-md); opacity: 0.92; z-index: 1; cursor: grabbing; transition: none; }
 /* 拖拽期间整列禁用文本选择，避免选区高亮闪烁 */
 .models-side-scroll.is-dragging { user-select: none; }
-/* 添加入口：列表流末尾（“加在最后”的列表心智），行式、无底色、hover 变浅底 */
-.models-side-add {
-  display: flex; align-items: center; gap: 6px;
-  height: 36px; padding: 0 8px 0 22px; margin-top: 2px;
-  border: none; border-radius: var(--r-md); background: transparent;
-  color: var(--text-2); font-size: 13px; text-align: left; width: 100%; cursor: pointer;
-  transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard);
-}
-.models-side-add:hover { background: var(--bg-hover); color: var(--text-1); }
 /* 独立模型区：末端小标题 + 上方细分隔线（弱分隔，不与供应商抢层级） */
 .models-side-group {
   display: flex; align-items: center;

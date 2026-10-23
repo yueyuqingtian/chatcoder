@@ -14,7 +14,7 @@ import type { DesktopRecipe, DesktopStatus, RecipeScope } from "../../api/client
 import { useChatStore } from "../../store/chat";
 import { useI18n } from "../../store/i18n";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { Badge, Button, CardRow, Checkbox, FormDialog, Input, List, ListRow, Segmented, Slider, Textarea } from "../ui";
+import { Badge, Button, CardRow, Checkbox, FormDialog, Input, List, ListRow, Segmented, Slider, Textarea, Tooltip } from "../ui";
 import { Field } from "../ui/Field";
 import { Row, Sw } from "./shared";
 
@@ -33,7 +33,7 @@ export function DesktopPanel() {
     <div className="dp-panel">
       {/* plan-114-450：页内标签统一为灰底分段控件（参照 Qoder），取代私有 .dp-subtab 下划线样式 */}
       <div className="ui-toolbar">
-        <Segmented value={tab} onChange={setTab} aria-label={t("dp.tab.basic")}
+        <Segmented value={tab} onChange={setTab} aria-label={t("dp.tab.group")}
           options={SUBTABS.map((s) => ({ value: s.key, label: t(s.i18n) }))} />
       </div>
 
@@ -50,7 +50,10 @@ type CoordMode = "auto" | "pixel" | "norm1000";
 type DesktopCfg = {
   desktop_enabled: boolean;
   desktop_plain_ops_enabled: boolean;
-  desktop_browser_ops_enabled: boolean;
+  /** 内置浏览器：AI 在右侧浏览器面板中操作网页（浏览器工具的唯一开关） */
+  browser_enabled: boolean;
+  /** 后台无头浏览器：仅未连接桌面端时的兜底浏览器生效 */
+  browser_headless: boolean;
   desktop_require_foreground: boolean;
   desktop_screenshot_quality: number;
   desktop_screenshot_max_dim: number;
@@ -64,7 +67,8 @@ type DesktopCfg = {
 const DEFAULTS: DesktopCfg = {
   desktop_enabled: true,
   desktop_plain_ops_enabled: true,
-  desktop_browser_ops_enabled: true,
+  browser_enabled: true,
+  browser_headless: true,
   desktop_require_foreground: true,
   desktop_screenshot_quality: 100,
   desktop_screenshot_max_dim: 0,
@@ -76,60 +80,110 @@ function toCoordMode(v: unknown): CoordMode {
   return v === "pixel" || v === "norm1000" ? v : "auto";
 }
 
-/** 「检测」结果的一句话：分辨率、各显示器缩放、DPI 感知级别（不是 PerMonitorV2 时明确提示会偏移）、落点自检。 */
-function describeProbe(info: Record<string, unknown>, calib?: Record<string, unknown>): string {
+type Translate = (key: string, params?: Record<string, string | number>) => string;
+
+/** 「检测」结果的一句话：分辨率、各显示器缩放、DPI 感知级别（不是 PerMonitorV2 时明确提示会偏移）、落点自检。
+ *  plan-537-2251：改由 i18n 键拼装（原先硬编码中文，英文界面不生效），拼接格式保持不变。 */
+function describeProbe(t: Translate, info: Record<string, unknown>, calib?: Record<string, unknown>): string {
   const screen = (info.screen as number[] | undefined) ?? [];
   const monitors = (info.monitors as Array<{ w?: number; h?: number; scale?: number }> | undefined) ?? [];
   const aware = typeof info.dpiAwareness === "string" ? info.dpiAwareness : "";
   const parts = [
-    `内核可用，版本 ${info.version ?? "?"}`,
+    t("dp.probe.core", { version: String(info.version ?? "?") }),
     monitors.length > 0
-      ? `显示器 ${monitors.map((m) => `${m.w ?? "?"}×${m.h ?? "?"}（缩放 ${m.scale ?? 100}%）`).join("、")}`
-      : `分辨率 ${screen[0] ?? "?"}×${screen[1] ?? "?"}`,
+      ? t("dp.probe.monitors", {
+        list: monitors.map((m) => t("dp.probe.monitor_item", { w: String(m.w ?? "?"), h: String(m.h ?? "?"), scale: String(m.scale ?? 100) })).join("、"),
+      })
+      : t("dp.probe.screen", { w: String(screen[0] ?? "?"), h: String(screen[1] ?? "?") }),
   ];
   if (aware) {
     parts.push(aware === "PerMonitorV2"
-      ? "DPI 感知正常（坐标为物理像素，不受缩放影响）"
-      : `DPI 感知为 ${aware}，坐标可能被系统缩放，建议更新应用或重启`);
+      ? t("dp.probe.dpi_ok")
+      : t("dp.probe.dpi_warn", { level: aware }));
   }
   if (calib && typeof calib.finalMax === "number") {
     parts.push(calib.finalMax === 0
-      ? "光标落点自检通过（5 个点位偏差 0 像素）"
-      : `光标落点自检最大偏差 ${calib.finalMax} 像素（已自动校正）`);
+      ? t("dp.probe.calib_ok")
+      : t("dp.probe.calib_warn", { px: String(calib.finalMax) }));
   }
-  parts.push(`进程 ${info.pid ?? "?"}`);
+  parts.push(t("dp.probe.pid", { pid: String(info.pid ?? "?") }));
   return parts.join("，") + "。";
 }
 
 function DesktopBasicSection() {
   const { t } = useI18n();
+  // i18n 的 t 每次渲染都是新函数，放进依赖会让加载副作用反复重跑；用 ref 取最新值
+  const tRef = useRef(t);
+  tRef.current = t;
+
   const [cfg, setCfg] = useState<DesktopCfg>(DEFAULTS);
   const [status, setStatus] = useState<DesktopStatus | null>(null);
   const [probing, setProbing] = useState(false);
   const [probeMsg, setProbeMsg] = useState("");
+  // plan-537-2251：拉取设置成功前禁止写回——一次失败的读取会用默认值把用户配置整体覆盖
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  // 长边输入框的中间态：逐字输入只改文本，失焦时才提交解析后的数值
+  const [maxDimText, setMaxDimText] = useState(String(DEFAULTS.desktop_screenshot_max_dim));
+  /** 中间态文本与已加载标记：卸载清理的闭包读不到最新 state */
+  const maxDimTextRef = useRef(maxDimText);
+  maxDimTextRef.current = maxDimText;
+  const loadedRef = useRef(false);
 
   // 与其它设置页一致：改动即保存（300ms 防抖，连续拖动只落一次盘）
   const saveTimerRef = useRef<number | null>(null);
+  /** 是否有尚未落盘的改动 */
+  const dirtyRef = useRef(false);
+  /** 最新配置：卸载清理的闭包只能拿到挂载时的旧值，必须走 ref */
+  const latestRef = useRef(cfg);
+  latestRef.current = cfg;
+  /** 卸载后不再 setState（检测请求可能晚于切页返回） */
+  const mountedRef = useRef(true);
+
   const flushSave = useCallback(async (payload: DesktopCfg) => {
+    dirtyRef.current = false;
     try {
       await api.setGlobalSettings(payload);
     } catch (e) {
-      useChatStore.setState({ error: "保存失败: " + String(e) });
+      useChatStore.setState({ error: t("dp.save_fail", { error: String(e) }) });
     }
   }, []);
   const scheduleSave = useCallback((next: DesktopCfg) => {
+    dirtyRef.current = true;
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = window.setTimeout(() => { void flushSave(next); }, 300);
+    saveTimerRef.current = window.setTimeout(() => {
+      saveTimerRef.current = null;
+      void flushSave(next);
+    }, 300);
   }, [flushSave]);
-  useEffect(() => () => { if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current); }, []);
+  // 卸载（含切换子标签）：先取消计时，再把待落盘的改动立即补写一次
+  useEffect(() => () => {
+    if (saveTimerRef.current) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    // 输入框可能因切页卸载而未触发失焦：把未提交的长边文本一并算进这次补写
+    const parsed = Number.parseInt(maxDimTextRef.current, 10);
+    const pendingMaxDim = Number.isFinite(parsed) ? Math.min(4096, Math.max(0, parsed)) : 0;
+    if (loadedRef.current && pendingMaxDim !== latestRef.current.desktop_screenshot_max_dim) {
+      void flushSave({ ...latestRef.current, desktop_screenshot_max_dim: pendingMaxDim });
+    } else if (dirtyRef.current) {
+      void flushSave(latestRef.current);
+    }
+  }, [flushSave]);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   const load = useCallback(async () => {
     try {
       const g = await api.getGlobalSettings();
-      setCfg({
+      const next: DesktopCfg = {
         desktop_enabled: g.desktop_enabled !== false,
         desktop_plain_ops_enabled: g.desktop_plain_ops_enabled !== false,
-        desktop_browser_ops_enabled: g.desktop_browser_ops_enabled !== false,
+        browser_enabled: g.browser_enabled !== false,
+        browser_headless: g.browser_headless !== false,
         desktop_require_foreground: g.desktop_require_foreground !== false,
         desktop_screenshot_quality: typeof g.desktop_screenshot_quality === "number"
           ? g.desktop_screenshot_quality : 100,
@@ -137,20 +191,37 @@ function DesktopBasicSection() {
           ? g.desktop_screenshot_max_dim : 0,
         desktop_recipe_enabled: g.desktop_recipe_enabled !== false,
         desktop_coord_mode: toCoordMode(g.desktop_coord_mode),
-      });
-    } catch { /* 拉取失败沿用默认值 */ }
+      };
+      setCfg(next);
+      setMaxDimText(String(next.desktop_screenshot_max_dim));
+      loadedRef.current = true;
+      setLoaded(true);
+      setLoadError("");
+    } catch (e) {
+      // 读取失败：界面沿用默认展示，但保持「未加载」状态以禁止写回
+      setLoadError(String(e));
+      useChatStore.setState({ error: tRef.current("dp.load_fail", { error: String(e) }) });
+    }
   }, []);
   useEffect(() => { load(); }, [load]);
 
-  const patch = (p: Partial<DesktopCfg>) => setCfg((prev) => {
-    const next = { ...prev, ...p };
+  // plan-537-2251：副作用放在 update 外面——先算出下一份配置，再分别提交状态与保存
+  const patch = useCallback((p: Partial<DesktopCfg>) => {
+    if (!loaded || loadError) return;
+    const next = { ...latestRef.current, ...p };
+    latestRef.current = next;
+    setCfg(next);
     scheduleSave(next);
-    return next;
-  });
+  }, [loaded, loadError, scheduleSave]);
 
-  // 内核状态：仅展示，不触发启动（避免打开设置页就拉起子进程）
+  // 内核状态：仅展示，不触发启动（避免打开设置页就拉起子进程）。
+  // 本区块随子标签卸载重挂，因此切回「基础配置」即等于重新读取。
   useEffect(() => {
-    api.getDesktopStatus().then(setStatus).catch(() => setStatus(null));
+    let alive = true;
+    api.getDesktopStatus()
+      .then((s) => { if (alive) setStatus(s); })
+      .catch(() => { if (alive) setStatus(null); });
+    return () => { alive = false; };
   }, []);
 
   const probe = useCallback(async () => {
@@ -158,17 +229,30 @@ function DesktopBasicSection() {
     setProbeMsg("");
     try {
       const r = await api.probeDesktop();
-      setProbeMsg(describeProbe(r.info as Record<string, unknown>, r.calib));
-      api.getDesktopStatus().then(setStatus).catch(() => { /* 状态展示非关键 */ });
+      if (!mountedRef.current) return;
+      setProbeMsg(describeProbe(tRef.current, r.info as Record<string, unknown>, r.calib));
+      api.getDesktopStatus()
+        .then((s) => { if (mountedRef.current) setStatus(s); })
+        .catch(() => { /* 状态展示非关键 */ });
     } catch (e) {
-      setProbeMsg("检测失败：" + String(e));
+      if (mountedRef.current) setProbeMsg(tRef.current("dp.probe.fail", { error: String(e) }));
     } finally {
-      setProbing(false);
+      if (mountedRef.current) setProbing(false);
     }
   }, []);
 
+  // 长边输入：逐字编辑不写库，失焦时解析为整数并夹取到后端可接受范围（清空按 0 = 自动适配）
+  const commitMaxDim = () => {
+    const parsed = Number.parseInt(maxDimText, 10);
+    const v = Number.isFinite(parsed) ? Math.min(4096, Math.max(0, parsed)) : 0;
+    setMaxDimText(String(v));
+    patch({ desktop_screenshot_max_dim: v });
+  };
+
   const dim = !cfg.desktop_enabled;
   const dimPlain = dim || !cfg.desktop_plain_ops_enabled;
+  // 未找到操控内核时无法检测，按钮置灰并说明原因
+  const coreMissing = status?.core_found === false;
   const statusText =
     status === null ? t("dp.status.unknown")
     : status.running ? t("dp.status.running")
@@ -179,18 +263,31 @@ function DesktopBasicSection() {
     <div className="settings-card-stack sc-stack">
       <div className="settings-card">
         <Row title={t("dp.enable")} desc={t("dp.enable_desc")}>
-          <Sw checked={cfg.desktop_enabled} onChange={(v) => patch({ desktop_enabled: v })} />
+          {/* plan-537-2251：只改电脑操控本身，不再连带打开内置浏览器（它有独立开关） */}
+          <Sw
+            checked={cfg.desktop_enabled}
+            onChange={(v) => patch({ desktop_enabled: v })}
+          />
         </Row>
         <Row title={t("dp.plain")} desc={t("dp.plain_desc")} disabled={dim}>
           <Sw
             checked={cfg.desktop_plain_ops_enabled}
+            disabled={dim}
             onChange={(v) => patch({ desktop_plain_ops_enabled: v })}
           />
         </Row>
-        <Row title={t("dp.browser")} desc={t("dp.browser_desc")} disabled={dim}>
+        <Row title={t("dp.browser")} desc={t("dp.browser_desc")}>
+          <Sw checked={cfg.browser_enabled} onChange={(v) => patch({ browser_enabled: v })} />
+        </Row>
+        <Row
+          title={t("dp.browser_headless")}
+          desc={t("dp.browser_headless_desc")}
+          disabled={!cfg.browser_enabled}
+        >
           <Sw
-            checked={cfg.desktop_browser_ops_enabled}
-            onChange={(v) => patch({ desktop_browser_ops_enabled: v })}
+            checked={cfg.browser_headless}
+            disabled={!cfg.browser_enabled}
+            onChange={(v) => { if (cfg.browser_enabled) patch({ browser_headless: v }); }}
           />
         </Row>
       </div>
@@ -199,6 +296,7 @@ function DesktopBasicSection() {
         <Row title={t("dp.foreground")} desc={t("dp.foreground_desc")} disabled={dimPlain}>
           <Sw
             checked={cfg.desktop_require_foreground}
+            disabled={dimPlain}
             onChange={(v) => patch({ desktop_require_foreground: v })}
           />
         </Row>
@@ -208,15 +306,17 @@ function DesktopBasicSection() {
             style={{ width: 100 }}
             min={0}
             max={4096}
-            value={cfg.desktop_screenshot_max_dim}
+            value={maxDimText}
             disabled={dimPlain}
-            onChange={(e) => patch({ desktop_screenshot_max_dim: Math.max(0, parseInt(e.target.value) || 0) })}
+            onChange={(e) => setMaxDimText(e.target.value)}
+            onBlur={commitMaxDim}
           />
         </Row>
         <Row title={t("dp.coord_mode")} desc={t("dp.coord_mode_desc")} disabled={dimPlain}>
           <Segmented
             value={cfg.desktop_coord_mode}
             onChange={(v) => patch({ desktop_coord_mode: v })}
+            disabled={dimPlain}
             aria-label={t("dp.coord_mode")}
             options={(["auto", "pixel", "norm1000"] as const).map((m) => ({
               value: m, label: t(`dp.coord_mode.${m}`),
@@ -225,7 +325,7 @@ function DesktopBasicSection() {
         </Row>
         <Row title={t("dp.quality")} desc={t("dp.quality_desc")} disabled={dimPlain}>
           <Slider
-            min={30}
+            min={10}
             max={100}
             step={5}
             disabled={dimPlain}
@@ -234,9 +334,10 @@ function DesktopBasicSection() {
             format={(v) => `${v}`}
           />
         </Row>
-        <Row title={t("dp.recipe")} desc={t("dp.recipe_desc")} disabled={dimPlain}>
+        <Row title={t("dp.recipe")} desc={t("dp.recipe_desc")} disabled={dim}>
           <Sw
             checked={cfg.desktop_recipe_enabled}
+            disabled={dim}
             onChange={(v) => patch({ desktop_recipe_enabled: v })}
           />
         </Row>
@@ -246,9 +347,23 @@ function DesktopBasicSection() {
         <CardRow title={t("dp.status")} desc={t("dp.status_desc")}>
           <div style={{ display: "flex", alignItems: "center", gap: "var(--sp-3)" }}>
             <span style={{ fontSize: 12, color: "var(--text-3)" }}>{statusText}</span>
-            <Button variant="secondary" size="sm" onClick={probe} loading={probing}>
-              {t("dp.detect")}
-            </Button>
+            {/* 内核缺失时按钮置灰，悬停说明原因；外层 span 只做事件宿主，不改变布局 */}
+            <Tooltip
+              content={t("dp.status.missing_hint")}
+              disabled={!coreMissing}
+            >
+              <span style={{ display: "inline-flex" }}>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={probe}
+                  loading={probing}
+                  disabled={coreMissing}
+                >
+                  {t("dp.detect")}
+                </Button>
+              </span>
+            </Tooltip>
           </div>
         </CardRow>
         {probeMsg && (
@@ -265,6 +380,9 @@ function DesktopBasicSection() {
 
 function DesktopRecipeSection() {
   const { t } = useI18n();
+  // 同样用 ref 固定 t 引用，避免列表加载副作用被反复触发
+  const tRef = useRef(t);
+  tRef.current = t;
   const [items, setItems] = useState<DesktopRecipe[]>([]);
   const [keyword, setKeyword] = useState("");
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -276,6 +394,12 @@ function DesktopRecipeSection() {
   const [notice, setNotice] = useState("");
   const fileRef = useRef<HTMLInputElement | null>(null);
 
+  // plan-537-2251：结果行在卡片中部，底部批量操作后容易看不见，同步发一条全局提示
+  const notify = useCallback((msg: string) => {
+    setNotice(msg);
+    useChatStore.setState({ error: msg });
+  }, []);
+
   const load = useCallback(async (kw = "") => {
     try {
       const r = await api.listDesktopRecipes(kw);
@@ -283,9 +407,9 @@ function DesktopRecipeSection() {
       // 列表刷新后清理已不存在的选中项，避免「删了却还勾着」
       setSelected((prev) => new Set([...prev].filter((id) => r.items.some((it) => it.id === id))));
     } catch (e) {
-      setNotice("加载失败：" + String(e));
+      notify(tRef.current("dp.recipe.load_fail", { error: String(e) }));
     }
-  }, []);
+  }, [notify]);
   useEffect(() => { load(); }, [load]);
 
   const toggleSelect = (id: number) => setSelected((prev) => {
@@ -300,29 +424,29 @@ function DesktopRecipeSection() {
     setBusy(true);
     try {
       const r = await api.deleteDesktopRecipes([...selected]);
-      setNotice(`已删除 ${r.deleted} 条。`);
+      notify(tRef.current("dp.recipe.deleted", { n: r.deleted }));
       setSelected(new Set());
       await load(keyword);
     } catch (e) {
-      setNotice("删除失败：" + String(e));
+      notify(tRef.current("dp.recipe.delete_fail", { error: String(e) }));
     } finally {
       setBusy(false);
     }
-  }, [selected, keyword, load]);
+  }, [selected, keyword, load, notify]);
 
   const clearAll = useCallback(async () => {
     setBusy(true);
     try {
       const r = await api.deleteAllDesktopRecipes();
-      setNotice(`已清空 ${r.deleted} 条。`);
+      notify(tRef.current("dp.recipe.cleared", { n: r.deleted }));
       setSelected(new Set());
       await load(keyword);
     } catch (e) {
-      setNotice("清空失败：" + String(e));
+      notify(tRef.current("dp.recipe.clear_fail", { error: String(e) }));
     } finally {
       setBusy(false);
     }
-  }, [keyword, load]);
+  }, [keyword, load, notify]);
 
   const doExport = useCallback(async () => {
     try {
@@ -334,25 +458,27 @@ function DesktopRecipeSection() {
       a.download = `desktop-recipes-${new Date().toISOString().slice(0, 10)}.json`;
       a.click();
       URL.revokeObjectURL(url);
-      setNotice(`已导出 ${data.count} 条。`);
+      notify(tRef.current("dp.recipe.exported", { n: data.count }));
     } catch (e) {
-      setNotice("导出失败：" + String(e));
+      notify(tRef.current("dp.recipe.export_fail", { error: String(e) }));
     }
-  }, []);
+  }, [notify]);
 
   const doImport = useCallback(async (file: File) => {
     setBusy(true);
     try {
       const payload = JSON.parse(await file.text());
       const r = await api.importDesktopRecipes(payload);
-      setNotice(`导入完成：新增 ${r.created} 条，更新 ${r.updated} 条，跳过 ${r.skipped} 条。`);
+      notify(tRef.current("dp.recipe.imported", {
+        created: r.created, updated: r.updated, skipped: r.skipped,
+      }));
       await load(keyword);
     } catch (e) {
-      setNotice("导入失败：" + String(e));
+      notify(tRef.current("dp.recipe.import_fail", { error: String(e) }));
     } finally {
       setBusy(false);
     }
-  }, [keyword, load]);
+  }, [keyword, load, notify]);
 
   return (
     <div className="settings-card-stack sc-stack">
@@ -396,7 +522,7 @@ function DesktopRecipeSection() {
               label={t("dp.recipe.select_all")}
             />
             <span className="dp-toolbar-hint">
-              已选 {selected.size} / {items.length} 条
+              {t("dp.recipe.selected", { n: selected.size, total: items.length })}
             </span>
           </div>
           <div className="dp-toolbar-group">
@@ -487,10 +613,10 @@ function DesktopRecipeSection() {
         open={creating || editing !== null}
         recipe={editing}
         onClose={() => { setCreating(false); setEditing(null); }}
-        onSaved={async () => {
+        onSaved={async (created?: boolean) => {
           setCreating(false);
           setEditing(null);
-          setNotice("已保存。");
+          notify(tRef.current(created === false ? "dp.recipe.saved_updated" : "dp.recipe.saved"));
           await load(keyword);
         }}
       />
@@ -498,7 +624,7 @@ function DesktopRecipeSection() {
       <ConfirmDialog
         open={confirmDelete}
         title={t("dp.recipe.delete_selected")}
-        message={`确定删除选中的 ${selected.size} 条操作路线？此操作不可撤销。`}
+        message={t("dp.recipe.delete_confirm", { n: selected.size })}
         danger
         onCancel={() => setConfirmDelete(false)}
         onConfirm={async () => {
@@ -509,7 +635,7 @@ function DesktopRecipeSection() {
       <ConfirmDialog
         open={confirmClear}
         title={t("dp.recipe.clear")}
-        message={`确定清空全部 ${items.length} 条操作路线？此操作不可撤销。`}
+        message={t("dp.recipe.clear_confirm", { n: items.length })}
         danger
         onCancel={() => setConfirmClear(false)}
         onConfirm={async () => {
@@ -531,7 +657,7 @@ function RecipeEditor({
   open: boolean;
   recipe: DesktopRecipe | null;
   onClose: () => void;
-  onSaved: () => void | Promise<void>;
+  onSaved: (created?: boolean) => void | Promise<void>;
 }) {
   const { t } = useI18n();
   const [scope, setScope] = useState<RecipeScope>("desktop");
@@ -540,7 +666,8 @@ function RecipeEditor({
   const [principle, setPrinciple] = useState("");
   const [pitfalls, setPitfalls] = useState("");
   const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState("");
+  // plan-537-2251：错误按字段分开，挂到对应输入项下（原先单一错误挂在「坑点」上，指向错误位置）
+  const [errs, setErrs] = useState<{ appName?: string; intent?: string; principle?: string }>({});
   const principleRef = useRef<HTMLTextAreaElement | null>(null);
   const pitfallsRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -552,7 +679,7 @@ function RecipeEditor({
     setIntent(recipe?.intent ?? "");
     setPrinciple(recipe?.principle ?? "");
     setPitfalls(recipe?.pitfalls ?? "");
-    setErr("");
+    setErrs({});
     // 长内容从开头看起：受控组件换值后浏览器可能保留上一次的滚动位置
     requestAnimationFrame(() => {
       if (principleRef.current) principleRef.current.scrollTop = 0;
@@ -561,21 +688,26 @@ function RecipeEditor({
   }, [open, recipe]);
 
   const save = useCallback(async () => {
-    if (!appName.trim() || !intent.trim() || !principle.trim()) {
-      setErr(t("dp.recipe.required"));
-      return;
-    }
+    const required = t("dp.recipe.required");
+    const nextErrs = {
+      appName: appName.trim() ? undefined : required,
+      intent: intent.trim() ? undefined : required,
+      principle: principle.trim() ? undefined : required,
+    };
+    setErrs(nextErrs);
+    if (nextErrs.appName || nextErrs.intent || nextErrs.principle) return;
     setSaving(true);
-    setErr("");
     try {
       if (recipe) {
         await api.updateDesktopRecipe(recipe.id, { app_name: appName, intent, principle, pitfalls, scope });
+        await onSaved();
       } else {
-        await api.createDesktopRecipe({ app_name: appName, intent, principle, pitfalls, scope });
+        const r = await api.createDesktopRecipe({ app_name: appName, intent, principle, pitfalls, scope });
+        // 同名路线后端会直接覆盖：把 created=false 传给上层，提示用户这次实际是更新
+        await onSaved(r.created);
       }
-      await onSaved();
     } catch (e) {
-      setErr("保存失败：" + String(e));
+      useChatStore.setState({ error: t("dp.recipe.save_fail", { error: String(e) }) });
     } finally {
       setSaving(false);
     }
@@ -607,17 +739,18 @@ function RecipeEditor({
         <Field
           label={scope === "browser" ? t("dp.recipe.site") : t("dp.recipe.app_name")}
           hint={scope === "browser" ? t("dp.recipe.site_hint") : t("dp.recipe.app_name_hint")}
+          error={errs.appName}
           required
         >
           <Input value={appName} onChange={(e) => setAppName(e.target.value)} />
         </Field>
-        <Field label={t("dp.recipe.intent")} hint={t("dp.recipe.intent_hint")} required>
+        <Field label={t("dp.recipe.intent")} hint={t("dp.recipe.intent_hint")} error={errs.intent} required>
           <Input value={intent} onChange={(e) => setIntent(e.target.value)} />
         </Field>
-        <Field label={t("dp.recipe.principle")} hint={t("dp.recipe.principle_hint")} required>
+        <Field label={t("dp.recipe.principle")} hint={t("dp.recipe.principle_hint")} error={errs.principle} required>
           <Textarea ref={principleRef} rows={8} value={principle} onChange={(e) => setPrinciple(e.target.value)} />
         </Field>
-        <Field label={t("dp.recipe.pitfalls")} hint={t("dp.recipe.pitfalls_hint")} error={err}>
+        <Field label={t("dp.recipe.pitfalls")} hint={t("dp.recipe.pitfalls_hint")}>
           <Textarea ref={pitfallsRef} rows={4} value={pitfalls} onChange={(e) => setPitfalls(e.target.value)} />
         </Field>
       </div>

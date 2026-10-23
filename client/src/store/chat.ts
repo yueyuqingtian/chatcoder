@@ -224,6 +224,8 @@ export interface SessionSlice {
   rollbackPending: { turnId: number; files: RollbackPreviewFile[]; conflicts: RollbackConflict[]; affected: RollbackAffected } | null;
   turnChanges: Record<number, FileChangeOut[]>;
   todos: TodoItem[] | null;
+  /** plan-20261023-ownerfix：清单归属会话 id——切换瞬间的迟到事件不得被新会话当作自己的进度。 */
+  todosSessionId: number | null;
   /** plan-282-1492：AI 清单所属 turn——判定"这份清单还活着吗"的判据（随会话分桶保存/恢复）。 */
   todosTurnId: number | null;
   /** 续接清单：上一轮未完成、本轮模型尚未更新的清单（显示为「待续接」，不当作本轮进度） */
@@ -244,6 +246,11 @@ export interface SessionSlice {
   subagentMeta: Record<number, SubagentMeta>;
   /** v39: 后台子代理运行数——主会话保持“运行中”与「等待子代理结束…」提示的数据源。 */
   pendingSubagents: number;
+  /** plan-20261023-ownerfix：切片所属会话的创建时间。
+   *  SQLite 主键没有 AUTOINCREMENT，会话被物理删除后 id 会被新会话复用；
+   *  缓存按 id 存放，仅凭 id 命中会把上一个同 id 会话的消息/清单恢复到新会话。
+   *  命中缓存时与列表里的 created_at 比对，不一致即丢弃该切片。 */
+  sessionCreatedAt?: string | null;
 }
 
 /** plan-282-1421：会话累计缓存统计。
@@ -285,6 +292,7 @@ function _snapshotSlice(s: ChatState): SessionSlice {
     rollbackPending: s.rollbackPending,
     turnChanges: s.turnChanges,
     todos: s.todos,
+    todosSessionId: s.todosSessionId,
     todosTurnId: s.todosTurnId,
     todosCarried: s.todosCarried,
     todoPersisted: s.todoPersisted,
@@ -300,6 +308,8 @@ function _snapshotSlice(s: ChatState): SessionSlice {
     subagentThinking: s.subagentThinking,
     subagentMeta: s.subagentMeta,
     pendingSubagents: s.pendingSubagents,
+    // plan-20261023-ownerfix：记录会话创建时间，供切回时识别 id 复用
+    sessionCreatedAt: findSession(s, s.currentSessionId)?.created_at ?? null,
   };
 }
 
@@ -314,7 +324,8 @@ function _restorePendingDeltas(slice: SessionSlice) {
 /** slice → 视图投影（切换会话时恢复缓存，跳过重复 REST 拉取）。 */
 function _sliceToView(slice: SessionSlice | undefined): Partial<ChatState> {
   if (!slice) return {};
-  return { ...slice };
+  // plan-20261023-ownerfix：旧缓存可能没有清单归属字段，补 null（否则 todos 会被判为不属于任何会话）
+  return { ...slice, todosSessionId: slice.todosSessionId ?? null };
 }
 
 /** 按会话 id 读取会话切片（侧边会话统一的基础设施，plan 20261017-side-session P1）。
@@ -422,6 +433,9 @@ interface ChatState {
   revertLockLoaded: boolean;
   /** v15: 当前 turn 模型自主维护的执行清单（todo.updated 事件）。 */
   todos: TodoItem[] | null;
+  /** plan-20261023-ownerfix：清单归属的会话 id（事件到达时记录）。切会话后若与
+   *  currentSessionId 不一致，进度模块忽略它，避免右侧「进程」显示上一个会话的清单。 */
+  todosSessionId: number | null;
   /** plan-282-1492: 清单所属 turnId（todo.updated 载荷）——清单是否仍"活着"靠它判定。 */
   todosTurnId: number | null;
   /** 续接清单：上一轮未完成、本轮模型尚未更新的清单（显示为「待续接」，不当作本轮进度） */
@@ -1068,7 +1082,8 @@ function _mergeMessages(existing: MessageOut[], fetched: MessageOut[]): MessageO
  *
  *  baseIds = 请求发起时本地已确认消息（id ≤ 1e12）的 id 集合，用于区分两种情况：
  *  · 不在 baseIds 且 DB 结果里没有 ⇒ 请求期间新增（乐观消息或刚落库），保留；
- *  · 在 baseIds 但 DB 结果里没有 ⇒ 确已删除（回滚等），丢弃——不可退化为只增不减。
+ *  · 在 baseIds 但在 DB 结果里没有 ⇒ 仅当后端快照的最大 id 已越过它时才判为删除；
+ *    大于快照最大 id 的消息属于写队列尚未落库的尾部（plan-20261023-emptyflow）。
  */
 function _mergeRefreshed(existing: MessageOut[], fetched: MessageOut[], baseIds: Set<number>): MessageOut[] {
   /* plan-20261020-retry-cred-perf E14：整表重拉后复用未变更的消息对象。
@@ -1091,10 +1106,23 @@ function _mergeRefreshed(existing: MessageOut[], fetched: MessageOut[], baseIds:
     return old;
   };
   const out = new Map<number, MessageOut>();
+  let maxFetchedId = 0;
   for (const m of fetched) {
     const id = Number(m.id) || 0;
-    if (id > 0 && id <= 1e12) out.set(id, reuse(m));
+    if (id > 0 && id <= 1e12) {
+      out.set(id, reuse(m));
+      if (id > maxFetchedId) maxFetchedId = id;
+    }
   }
+  /* plan-20261023-emptyflow：后端快照为空时**一律保留本地消息**。
+   *
+   * 根因（子会话消息流整片空白）：消息先经 message.created 事件进入前端，落库则由
+   * write_behind 异步队列完成；整表重拉若赶上队列积压，DB 会返回比本地更少的消息。
+   * 旧逻辑把「baseIds 里有、DB 结果里没有」一律当成已删除，于是刚在跑的整轮消息
+   * （用户消息之后才是 AI 消息）被一次性清掉——界面上只剩计时条与「等待响应…」。
+   * 空结果更不可能表示"会话被清空"，只可能是查询瞬间尚无数据，直接沿用本地数组
+   * （保持引用，避免无意义重渲染）。 */
+  if (out.size === 0 && existing.length > 0) return existing;
   for (const m of existing) {
     const id = Number(m.id) || 0;
     if (id > 1e12) {
@@ -1102,8 +1130,12 @@ function _mergeRefreshed(existing: MessageOut[], fetched: MessageOut[], baseIds:
       const replaced = fetched.find((fm) => fm.sender_type === "user" && _sameUserContent(fm.content, m.content));
       if (replaced && Number(replaced.id) > 0) out.set(Number(replaced.id), reuse(replaced));
       else out.set(id, m);
-    } else if (!out.has(id) && !baseIds.has(id)) {
-      out.set(id, m); // 请求期间新增（快照尚未包含）：保留，避免被覆盖丢失
+    } else if (!out.has(id)) {
+      /* 删除判定收紧（plan-20261023-emptyflow）：只有「后端快照的最大 id 已经越过它、
+       * 却仍查不到」才算真的删了。id 大于快照最大 id 的消息是写队列尚未落库的尾部，
+       * 必须保留——否则刷新一次就丢一段，表现为消息流越用越空。
+       * 回滚场景由 turn.rolled_back 事件就地裁剪（见 handleWs），不依赖这里。 */
+      if (!baseIds.has(id) || id > maxFetchedId) out.set(id, m);
     }
   }
   return [...out.values()].sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
@@ -1186,6 +1218,7 @@ function _resetSessionState(): Partial<ChatState> {
     latestChangeTurnId: null,
     revertLockLoaded: false,
     todos: null,
+    todosSessionId: null,
     todosTurnId: null,
     todosCarried: false,
     todoPersisted: false,
@@ -1249,6 +1282,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   latestChangeTurnId: null,
   revertLockLoaded: false,
   todos: null,
+  todosSessionId: null,
   todosTurnId: null,
   todosCarried: false,
   todoPersisted: false,
@@ -1509,7 +1543,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set((s) => ({ sessionState: { ...s.sessionState, [prevId]: slice } }));
     }
 
-    const cached = get().sessionState[sessionId];
+    /* plan-20261023-ownerfix：会话 id 会被复用（SQLite 主键无 AUTOINCREMENT），
+     * 缓存切片仅凭 id 命中会把「上一个同 id 会话」的消息/清单恢复进新会话。
+     * 用创建时间做身份证：两边都有且不一致 ⇒ 缓存陈旧，丢弃后走 REST 首次加载。 */
+    const session = findSession(get(), sessionId);
+    const rawCached = get().sessionState[sessionId];
+    const cacheIsStale = Boolean(
+      rawCached?.sessionCreatedAt && session?.created_at
+      && rawCached.sessionCreatedAt !== session.created_at,
+    );
+    if (rawCached && cacheIsStale) {
+      set((s) => {
+        const next = { ...s.sessionState };
+        delete next[sessionId];
+        return { sessionState: next };
+      });
+    }
+    const cached = cacheIsStale ? undefined : rawCached;
     set({
       currentSessionId: sessionId,
       ..._resetSessionState(),
@@ -1519,7 +1569,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // plan-156-621：用 findSession 而非 sessions.find——子会话不在 sessions 里，
     // 从其他项目的主会话直接点开子会话时 currentProjectId 会停在旧项目，
     // Git 面板的暂存 / 提交 / 丢弃会作用到错误仓库。
-    const session = findSession(get(), sessionId);
     if (session?.project_id) set({ currentProjectId: session.project_id });
     // plan-546: 会话模型作为"最近使用模型"，供新空态首页默认承接
     if (session?.model_id != null) set({ lastModelId: session.model_id });
@@ -3008,7 +3057,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
               changed = true;
             }
           }
-          return changed ? { turnChanges: next } : {};
+          /* plan-20261023-emptyflow：回滚会软删该轮及之后的全部消息（含快照最大 id），
+           * 这类「尾部删除」无法由 _mergeRefreshed 的 max-id 判据识别，故在此就地裁剪；
+           * 随后的 refreshMessages 再按 DB 真值补齐（无 turn_id 的独立消息不参与）。 */
+          return {
+            ...(changed ? { turnChanges: next } : {}),
+            messages: s.messages.filter((m) => m.turn_id == null || m.turn_id < rollbackTurnId),
+          };
         });
         get().refreshMessages();
         get().refreshTurns();
@@ -3237,7 +3292,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       case "thinking.done": {
         const aid = Number(payload.agent_id);
         const full = typeof payload.full_text === "string" ? payload.full_text : null;
-        if (aid && full != null) {
+        // plan-20261023-thinking-blank：纯空白终结帧直接丢弃。
+        // 旧后端会把网关的空白占位当成有效思考广播，这里一旦写进 buffer 就会盖掉
+        // 流式期间已展示的真实内容，思考块随即变成空白（与落库空格同源）。
+        if (aid && full != null && full.trim()) {
           const tid = payload.thread_id != null ? Number(payload.thread_id) : null;
           _clearPendingFor(aid);
           if (tid != null) set((s) => ({ subagentThinking: { ...s.subagentThinking, [tid]: full } }));
@@ -3263,7 +3321,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       case "token.done": {
         const aid = Number(payload.agent_id);
         const full = typeof payload.full_text === "string" ? payload.full_text : null;
-        if (aid && full != null) {
+        // plan-20261023-thinking-blank：正文同理——空白终结帧不能覆盖已展示的流式正文。
+        if (aid && full != null && full.trim()) {
           const tid = payload.thread_id != null ? Number(payload.thread_id) : null;
           _clearPendingFor(aid);
           if (tid != null) set((s) => ({ subagentStreams: { ...s.subagentStreams, [tid]: full } }));
@@ -3347,6 +3406,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             .filter((t) => t.content),
           // plan-282-1492: 记下清单归属 turn——首载（重启）后即便清单还在，
           // 也要先判断这一轮是否已经结束，避免把结束任务的残留清单当成进行中进度。
+          todosSessionId: evSidTodo || get().currentSessionId,
           todosTurnId: Number(payload.turn_id) || null,
           // 续接清单（服务端在新一轮开始时广播，carried=true）：本轮模型尚未更新，界面按「待续接」展示
           todosCarried: payload.carried === true,

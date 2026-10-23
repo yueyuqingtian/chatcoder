@@ -224,6 +224,9 @@
 .ui-select-item[data-highlighted] { background: var(--bg-hover); }
 .ui-select-item[data-state="checked"] { color: var(--text-1); font-weight: 500; }
 .ui-select-item-indicator { display: inline-flex; color: var(--accent); flex-shrink: 0; }
+/* 选项角标（如「未安装」）：靠右的小胶囊，禁用项整体降噪但角标仍可读 */
+.ui-select-item-hint { margin-left: auto; padding: 1px 7px; border-radius: 999px; background: var(--bg-hover); color: var(--text-3); font-size: 11px; line-height: 16px; white-space: nowrap; }
+.ui-select-item[data-disabled] { color: var(--text-3); cursor: not-allowed; }
 .ui-select-group-label { padding: var(--sp-2) var(--sp-3) var(--sp-1); font-size: 11px; color: var(--text-3); user-select: none; }
 
 /* 原生 select 兜底（NativeSelect）：外观与 trigger 对齐 */
@@ -444,6 +447,39 @@
   background: color-mix(in oklab, var(--text-1) 5%, transparent);
 }
 .ui-tag.is-mono { font-family: var(--font-mono); font-size: 10.5px; }
+
+/* 标签式输入（TagInput）：外层复用 .ui-input 的高度 / 圆角 / 悬停；标签为胶囊，输入位占满剩余宽度 */
+.ui-taginput-wrap { position: relative; display: flex; flex-direction: column; align-items: stretch; gap: 4px; max-width: 100%; min-width: 0; }
+/* 始终单行：不换行、不横向滚动。放不下的标签由组件折叠成末尾「+N」，此处只负责裁掉不可见部分 */
+.ui-taginput { display: flex; flex-wrap: nowrap; align-items: center; gap: 6px; height: var(--ctl-h-md); min-height: var(--ctl-h-md); padding: 0 var(--ctl-px); overflow: hidden; cursor: text; }
+.ui-taginput > * { flex: 0 0 auto; }
+.ui-taginput:focus-within { border-color: var(--border-hover); }
+.ui-taginput[aria-invalid="true"] { border-color: var(--color-destructive); }
+/* 标签本体用 Badge（描边中性胶囊，与全站徽标一致）；这里只收紧右侧内距，让删除按钮贴近文字。
+   用三类选择器压过 .ui-badge.bd-sm 的默认内距；测量层与真实标签必须完全同规格，否则折叠个数算不准 */
+.ui-taginput .ui-badge.ui-taginput-tag,
+.ui-taginput-measure .ui-badge.ui-taginput-tag { flex: 0 0 auto; gap: 2px; padding-right: 3px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ui-taginput-x { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--text-3); cursor: pointer; transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard); }
+.ui-taginput-x:hover { background: var(--border-light); color: var(--text-1); }
+/* 输入位保底宽度 72px：折叠再紧也要留得住打字的位置，超长草稿在 input 内部自行滚动 */
+.ui-taginput-field { flex: 1 1 72px; min-width: 72px; max-width: 100%; height: 22px; padding: 0; border: 0; outline: none; background: transparent; color: var(--text-1); font: inherit; font-size: var(--fs-md, 13px); }
+.ui-taginput-field::placeholder { color: var(--text-3); }
+.ui-taginput-field:disabled { cursor: not-allowed; }
+/* 折叠计数：与标签同高的小胶囊，可点开查看被折叠项 */
+.ui-taginput-overflow { display: inline-flex; align-items: center; justify-content: center; height: 20px; padding: 0 7px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg-hover); color: var(--text-2); font: inherit; font-size: 11.5px; line-height: 1; font-variant-numeric: tabular-nums; white-space: nowrap; cursor: pointer; transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard), border-color var(--dur-2) var(--ease-standard); }
+.ui-taginput-overflow:hover { background: var(--border-light); color: var(--text-1); border-color: var(--border-hover); }
+.ui-taginput-error { font-size: 12px; line-height: 1.4; color: var(--color-destructive); }
+/* 折叠项浮层：列出被折叠的标签，逐项可删。overlay.css 后加载，故用复合选择器提权 */
+.ui-pop.ui-taginput-pop { min-width: 176px; max-width: 240px; }
+.ui-taginput-pop-title { padding: 2px 4px 6px; font-size: 11.5px; line-height: 1.4; color: var(--text-3); }
+.ui-taginput-pop-list { display: flex; flex-direction: column; max-height: 200px; overflow-y: auto; }
+.ui-taginput-pop-row { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); padding: 3px 2px 3px 6px; border-radius: var(--r-sm); }
+.ui-taginput-pop-row:hover { background: var(--bg-hover); }
+.ui-taginput-pop-label { font-size: 12px; line-height: 1.4; color: var(--text-1); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* 测量层：宽度 0 的外壳 + 隐藏的内联行，只为拿真实像素宽，不参与布局、不产生页面滚动。
+   字体与行高必须显式对齐 .ui-input（13px / 1.5），否则量出的标签偏窄，折叠个数会多算一个 */
+.ui-taginput-measure { position: absolute; top: 0; left: 0; width: 0; height: 0; overflow: hidden; visibility: hidden; pointer-events: none; }
+.ui-taginput-measure-row { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-family: inherit; font-size: var(--fs-md, 13px); line-height: 1.5; }
 /* 整行可点击（如打开详情弹窗）：悬停给出反馈，与设置页其它可点元素同用动效令牌 */
 .ui-list-row.is-clickable { cursor: pointer; transition: background var(--dur-2) var(--ease-standard); }
 .ui-list-row.is-clickable:hover { background: var(--bg-hover); }

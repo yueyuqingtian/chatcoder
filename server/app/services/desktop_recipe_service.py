@@ -33,6 +33,26 @@ def _norm(value: str | None) -> str:
     return (value or "").strip()
 
 
+# plan-537-2251：网页路线的站点必须是 host（含端口）。用户在「网站」里填的是从地址栏
+# 复制来的「https://erp.example.com/path」时，匹配侧的 _host_matches 会把含 ':' 的串
+# 直接判为不匹配 —— 这条路线永远召不回来，而保存时又没有任何提示。
+# 统一在这里归一，保存侧与匹配侧共用。
+_PROTOCOL_OR_PATH = ("://", "/")
+
+
+def _browser_host(value: str | None) -> str:
+    """把网址或 host 统一成小写的 host[:port]；无法解析时原样返回。"""
+    raw = _norm(value).casefold()
+    if not raw:
+        return ""
+    if any(mark in raw for mark in _PROTOCOL_OR_PATH):
+        # 函数内导入：route_hints 反过来要引用本模块，顶层导入会成环
+        from app.orchestration.route_hints import host_of
+
+        return host_of(raw) or raw
+    return raw
+
+
 # plan-20261018-operator-boost：路线类型。桌面应用（电脑操控）与网页（内置浏览器）共用一张表。
 SCOPE_DESKTOP = "desktop"
 SCOPE_BROWSER = "browser"
@@ -87,6 +107,9 @@ async def save_recipe(
     """
     scope = norm_scope(scope)
     app_name = _norm(app_name)
+    # plan-537-2251：网页路线无论从哪里录入，都先归一成 host[-]（保存与匹配同一口径）
+    if scope == SCOPE_BROWSER:
+        app_name = _browser_host(app_name) or app_name
     intent = _norm(intent)
     principle = _norm(principle)
     if not app_name:
@@ -198,9 +221,13 @@ async def recall_recipe(
 
 
 def _host_matches(recipe_app: str, host: str) -> bool:
-    """网页路线的站点匹配：完全相同、子域名，或路线未写端口时忽略端口比较。"""
-    a = recipe_app.strip().casefold()
-    h = host.strip().casefold()
+    """网页路线的站点匹配：完全相同、子域名，或路线未写端口时忽略端口比较。
+
+    plan-537-2251：两侧都先归一化（去掉协议 / 路径）——存量里如果有「https://host」
+    这种手填记录，不再因为含 ':' 而直接判为不匹配。
+    """
+    a = _browser_host(recipe_app)
+    h = _browser_host(host)
     if not a or not h:
         return False
     if a == h or h.endswith("." + a):
@@ -263,8 +290,11 @@ async def list_recipes(
             or (kw in ("网页", "web", "browser") and _scope_of(r) == SCOPE_BROWSER)
             or (kw in ("桌面", "desktop") and _scope_of(r) == SCOPE_DESKTOP)
         ]
-    # 常用且最近的排前面
-    rows.sort(key=lambda r: (-(r.usage_count or 0), r.updated_at or r.created_at or ""), reverse=False)
+    # 常用且最近的排前面。
+    # plan-537-2251：此前单键 lambda 的第二列是升序（reverse=False），把**最早**更新的
+    # 排到了前面，与注释相反。改为两次稳定排序：先按更新时间降序，再按使用次数降序。
+    rows.sort(key=lambda r: (r.updated_at or r.created_at or ""), reverse=True)
+    rows.sort(key=lambda r: (r.usage_count or 0), reverse=True)
     return rows[:limit]
 
 

@@ -1,4 +1,4 @@
-/** 供应商列表（plan-41-225 S3）：无分组标题 + 拖拽排序 + 末尾添加入口。
+/** 供应商列表（plan-41-225 S3）：无分组标题 + 拖拽排序。
  *
  * 设计要点（详见 ai/chatcoder-plan-41-225.md §2）：
  *  - **不分组**：列表里只有供应商一种实体，分组标题不提供任何区分信息，只是视觉噪声；
@@ -12,11 +12,13 @@
  *  - **乐观更新**：松手立即按本地顺序渲染（无 loading、不闪烁），后台静默提交，
  *    失败才回滚并提示 —— 否则一次网络往返内列表会跳回旧顺序，观感是"拖了没用"。
  *  - **键盘可达**：手柄可 Tab 聚焦，↑/↓ 移动一行、Enter 确认、Esc 取消。
+ *  - 列表末尾不再放「添加供应商」：顶部工具栏已有同名主按钮，左列重复入口在长列表里还会被滚走。
+ *  - 供应商多到溢出时，拖到可视区上下边缘自动滚动（位移含 scroll 增量，被拖行仍跟着指针）。
  */
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { api, type ModelOut, type ProviderOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
-import { IconGripVertical, IconPlus } from "../icons";
+import { IconGripVertical } from "../icons";
 import { ProviderAvatar } from "./ProviderAvatar";
 
 /** 行高与行距（与 settings-models.css 的 .models-side-item / .models-side-scroll 一致）——
@@ -27,6 +29,10 @@ const ROW_GAP = 2;
 const STEP = ROW_H + ROW_GAP;
 /** 进入拖拽的纵向位移阈值（px） */
 const DRAG_THRESHOLD = 4;
+/** 拖到距列表上下边缘多少像素内开始自动滚动 */
+const AUTOSCROLL_EDGE = 44;
+/** 自动滚动每帧最大位移（px）：按贴近边缘的程度线性量增 */
+const AUTOSCROLL_MAX_STEP = 14;
 
 function notify(msg: string) { useChatStore.setState({ error: msg }); }
 
@@ -49,12 +55,11 @@ interface ProviderSideListProps {
   onSelect: (id: number) => void;
   /** 本地顺序更新（乐观渲染 / 失败回滚共用） */
   onLocalReorder: (next: ProviderOut[]) => void;
-  onAdd: () => void;
 }
 
 export function ProviderSideList({
   providers, independentModels, selectedId, statusDotClass, oauthFormats,
-  onSelect, onLocalReorder, onAdd,
+  onSelect, onLocalReorder,
 }: ProviderSideListProps) {
   // 拖拽态：用 state 驱动渲染（ref 不触发重渲染），另有 ref 保存最新值供异步收尾读取
   const [dragId, setDragId] = useState<number | null>(null);
@@ -62,7 +67,11 @@ export function ProviderSideList({
   const [dragOffset, setDragOffset] = useState(0);
   const [overIndex, setOverIndex] = useState<number | null>(null);
 
-  const dragRef = useRef<{ id: number; startIndex: number; startY: number; moved: boolean } | null>(null);
+  const dragRef = useRef<{ id: number; startIndex: number; startY: number; moved: boolean; scroll0: number; lastY: number; tickTs: number } | null>(null);
+  /** 列表滚动容器：溢出时拖到边缘要自动滚动 */
+  const scrollRef = useRef<HTMLDivElement>(null);
+  /** 自动滚动的 rAF 句柄（拖拽结束必须停，否则松手后还在滚） */
+  const autoScrollRef = useRef<number | null>(null);
   /** 拖拽结束后立即到来的那次 click 需要被忽略（拖完不该顺带切换右列详情） */
   const suppressClickRef = useRef(false);
   /** 键盘排序：起始顺序快照（Esc 回滚用；Enter 确认后清空） */
@@ -84,12 +93,71 @@ export function ProviderSideList({
     }
   }, [onLocalReorder]);
 
+  /** 停掉自动滚动（松手 / 取消 / 卸载都必须调用，否则 rAF 会一直跑） */
+  const stopAutoScroll = useCallback(() => {
+    if (autoScrollRef.current != null) {
+      cancelAnimationFrame(autoScrollRef.current);
+      autoScrollRef.current = null;
+    }
+  }, []);
+
+  /** 按当前指针位置更新被拖行的位移与目标行。
+   *  位移含容器滚动增量：列表自动滚过多少，指针相对内容就多走了多少——
+   *  否则滚到边缘后目标行不再变化，拖拽会「卡在屏幕边缘」。 */
+  const applyDrag = useCallback((clientY: number) => {
+    const st = dragRef.current;
+    if (!st) return;
+    const box = scrollRef.current;
+    const scrolled = box ? box.scrollTop - st.scroll0 : 0;
+    const dy = clientY - st.startY + scrolled;
+    if (!st.moved && Math.abs(dy) < DRAG_THRESHOLD) return;
+    st.moved = true;
+    setDragOffset(dy);
+    const count = providersRef.current.length;
+    const target = Math.max(0, Math.min(count - 1, st.startIndex + Math.round(dy / STEP)));
+    setOverIndex(target);
+  }, []);
+
+  /** 自动滚动：指针停在上下边缘带内即持续滚动，越贴边越快。
+   *  位移按真实经过时间换算（而不是每帧固定步长）：rAF 在窗口失焦 / 后台标签下会被节流到几 fps，
+   *  固定步长会让「拖到边缘」几乎滚不动；这里以 60fps 为基准缩放，并把单帧系数封顶，
+   *  节流时一次多滚一点、仍能滚到目标，正常时依旧平滑。
+   *  只在真正滚动成功时重算目标行，避免到顶/到底后空转刷渲染。 */
+  const autoScrollTick = useCallback((ts: number) => {
+    const st = dragRef.current;
+    const box = scrollRef.current;
+    if (!st || !box) { autoScrollRef.current = null; return; }
+    const prevTs = st.tickTs || ts;
+    st.tickTs = ts;
+    const frames = Math.min(3, Math.max(1, (ts - prevTs) / 16.67));
+    const rect = box.getBoundingClientRect();
+    const distTop = st.lastY - rect.top;
+    const distBottom = rect.bottom - st.lastY;
+    let delta = 0;
+    if (distTop < AUTOSCROLL_EDGE) {
+      delta = -AUTOSCROLL_MAX_STEP * frames * Math.min(1, (AUTOSCROLL_EDGE - distTop) / AUTOSCROLL_EDGE);
+    } else if (distBottom < AUTOSCROLL_EDGE) {
+      delta = AUTOSCROLL_MAX_STEP * frames * Math.min(1, (AUTOSCROLL_EDGE - distBottom) / AUTOSCROLL_EDGE);
+    }
+    if (Math.abs(delta) >= 1) {
+      const before = box.scrollTop;
+      const max = box.scrollHeight - box.clientHeight;
+      box.scrollTop = Math.max(0, Math.min(max, before + Math.round(delta)));
+      if (box.scrollTop !== before) applyDrag(st.lastY);
+    }
+    autoScrollRef.current = requestAnimationFrame(autoScrollTick);
+  }, [applyDrag]);
+
   const cancelDrag = useCallback(() => {
+    stopAutoScroll();
     dragRef.current = null;
     setDragId(null);
     setDragOffset(0);
     setOverIndex(null);
-  }, []);
+  }, [stopAutoScroll]);
+
+  // 卸载兜底：组件被切走时 rAF 不能留
+  useEffect(() => () => stopAutoScroll(), [stopAutoScroll]);
 
   // 拖拽中按 Esc 取消（回到起始顺序，且不产生任何请求）
   useEffect(() => {
@@ -107,22 +175,23 @@ export function ProviderSideList({
     e.stopPropagation();
     // 指针捕获：指针移出列表/窗口后仍能收到 move/up，避免卡在拖拽态
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* 环境不支持时忽略 */ }
-    dragRef.current = { id: p.id, startIndex: index, startY: e.clientY, moved: false };
+    dragRef.current = {
+      id: p.id, startIndex: index, startY: e.clientY, moved: false,
+      scroll0: scrollRef.current?.scrollTop ?? 0, lastY: e.clientY, tickTs: 0,
+    };
     setDragId(p.id);
     setDragStart(index);
     setDragOffset(0);
     setOverIndex(index);
+    stopAutoScroll();
+    autoScrollRef.current = requestAnimationFrame(autoScrollTick);
   };
 
   const onHandlePointerMove = (e: PointerEvent<HTMLSpanElement>) => {
     const st = dragRef.current;
     if (!st) return;
-    const dy = e.clientY - st.startY;
-    if (!st.moved && Math.abs(dy) < DRAG_THRESHOLD) return;
-    st.moved = true;
-    setDragOffset(dy);
-    const target = Math.max(0, Math.min(providers.length - 1, st.startIndex + Math.round(dy / STEP)));
-    setOverIndex(target);
+    st.lastY = e.clientY;
+    applyDrag(e.clientY);
   };
 
   const onHandlePointerUp = (e: PointerEvent<HTMLSpanElement>) => {
@@ -183,7 +252,7 @@ export function ProviderSideList({
   return (
     <aside className="models-side">
       {/* user-select: none 由 .models-side-scroll 承担，防止原生文本拖拽抢事件 */}
-      <div className={"models-side-scroll" + (dragId != null ? " is-dragging" : "")}>
+      <div ref={scrollRef} className={"models-side-scroll" + (dragId != null ? " is-dragging" : "")}>
         {providers.map((p, index) => {
           const dragging = dragId === p.id;
           const shift = shiftOf(index);
@@ -234,11 +303,6 @@ export function ProviderSideList({
           );
         })}
         {providers.length === 0 && <div className="models-side-empty">暂无供应商</div>}
-
-        {/* 添加入口：列表流末尾、随列表滚动 —— "添加"是列表的延续（加在最后） */}
-        <button type="button" className="models-side-add" onClick={onAdd}>
-          <span className="models-side-add-ic" aria-hidden><IconPlus size={14} /></span> 添加供应商
-        </button>
 
         {/* 独立模型：与供应商是不同实体，末端小标题做弱分隔（仅存在时渲染） */}
         {independentModels.length > 0 && (

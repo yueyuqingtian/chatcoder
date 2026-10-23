@@ -12,7 +12,6 @@ import { ThinkingTicker } from "./ThinkingTicker";
 import { ThinkingExpanded } from "./ThinkingExpanded";
 import { ChatCollapse } from "./ChatCollapse";
 import { useChatStore } from "../../store/chat";
-import { useUiStore } from "../../store/ui";
 import { thinkingKey, useFlowExpand } from "../../store/flowExpand";
 
 export const ThinkingBlock = memo(function ThinkingBlock({ text, active, turnId, agentId, msgId }: {
@@ -24,7 +23,6 @@ export const ThinkingBlock = memo(function ThinkingBlock({ text, active, turnId,
   msgId: number;
 }) {
   void turnId;
-  const showReasoning = useUiStore((s) => s.showReasoning);
   const [open, setOpen] = useFlowExpand(thinkingKey(msgId));
   const [duration, setDuration] = useState<number | null>(null);
   const startRef = useRef<number | null>(null);
@@ -50,7 +48,10 @@ export const ThinkingBlock = memo(function ThinkingBlock({ text, active, turnId,
     }
   }, [active, text]);
 
-  if (!showReasoning || (!active && !text)) return null;
+  // plan-20261023-thinking-blank：纯空白文本等同于没有思考内容——不渲染。
+  // 旧版后端会把「网关回一个空格」的占位思考落库，这类块只显示「思考过程 持续了几秒」，
+  // 展开后一片空白；时间线已过滤存量数据，这里再兜一层，避免其它渲染入口（如插件替换）重现。
+  if (!active && !text.trim()) return null;
 
   return (
     <div className="tc-node thinking-node">

@@ -103,15 +103,15 @@
 .usage-drp-range { color: var(--text-3); }
 .usage-drp-pop {
   position: absolute; top: calc(100% + 6px); left: 0; z-index: 50; width: 288px; padding: 12px;
-  background: var(--bg-main); border: 1px solid var(--border-light); border-radius: var(--r-pop);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  background: var(--color-popover); border: 1px solid var(--border-light); border-radius: var(--r-pop);
+  box-shadow: var(--shadow-pop);
   transform-origin: top left; animation: usage-drp-in var(--dur-base) var(--spring-soft) both;
 }
 @keyframes usage-drp-in { from { opacity: 0; transform: translateY(-4px) scale(0.97); } to { opacity: 1; transform: none; } }
 .usage-drp-chips { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 10px; margin-bottom: 8px; border-bottom: 1px solid var(--border-light); }
 .usage-drp-chip {
   height: 26px; padding: 0 10px; border-radius: 999px; font-size: 12px; cursor: pointer;
-  background: var(--surface-inset); color: var(--text-2); border: 1px solid transparent;
+  background: var(--bg-panel); color: var(--text-2); border: 1px solid transparent;
   transition: background var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
 }
 .usage-drp-chip:hover { color: var(--text-1); border-color: var(--border-light); }

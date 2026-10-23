@@ -69,9 +69,11 @@
 .mem-scroll::-webkit-scrollbar-track,
 .inst-scroll::-webkit-scrollbar-track { background: transparent; }
 
-/* 左列：行高 40（与 ProviderSideList.tsx 的 ROW_H 一致）、行距 2 */
+/* 左列：行高 40（与 ProviderSideList.tsx 的 ROW_H 一致）、行距 2。
+   供应商多到溢出时会出现 8px 竖向滚动条：gutter 必须预设（stable），否则溢出瞬间行宽缩 10px、
+   名称与状态点整体左跳；model-picker.css 里虽有 stable，但本层后加载会覆盖成 auto。 */
 .models-side { border-right-color: var(--border-light, var(--border)); background: color-mix(in oklab, var(--text-1) 1.5%, transparent); }
-.models-side-scroll { padding: 10px 8px; gap: 2px; scrollbar-gutter: auto; }
+.models-side-scroll { padding: 10px 8px; gap: 2px; scrollbar-gutter: stable; }
 .models-side-item {
   height: 40px; padding: 0 8px; gap: 10px;
   border-radius: var(--r-md); font-size: 13px; color: var(--text-1);
@@ -88,15 +90,7 @@
   border-radius: var(--r-sm); color: var(--text-3);
 }
 .models-side-row:hover .models-drag-handle { opacity: 0.85; }
-.models-side-add {
-  height: 40px; padding: 0 8px; gap: 10px; margin-top: 4px;
-  border-radius: var(--r-md); font-size: 13px; color: var(--text-2);
-}
-.models-side-add-ic {
-  display: grid; place-items: center; width: 26px; height: 26px; border-radius: 8px;
-  border: 1px dashed color-mix(in oklab, var(--text-1) 22%, transparent); color: var(--text-2);
-}
-.models-side-add:hover .models-side-add-ic { border-style: solid; color: var(--text-1); }
+/* 供应商行间不再有「添加供应商」行（顶部工具栏已有主按钮），左列只承载列表本身 */
 .models-side-group { border-top: 1px solid var(--border-light, var(--border)); padding: 14px 8px 6px; margin-top: 10px; }
 .models-side-empty { padding: 20px 10px; text-align: center; font-size: 12px; color: var(--text-3); }
 

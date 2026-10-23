@@ -319,6 +319,10 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
     let img = null;
     let cssW = vw;
     let cssH = vh;
+    // plan-537-2251：mode 记录「实际走的截图路径」，不按请求参数反推——整页失败会静默退回视口，
+    // 若仍按整页口径告诉模型坐标，点击会落到错误位置。truncated 标记整页被 12000px 上限截断。
+    let mode = "viewport";
+    let truncated = false;
     if (a.full_page && st && st.attached) {
       cssW = Math.min(Math.max(vw, sw), 4000);
       cssH = Math.min(sh, 12000);
@@ -328,9 +332,13 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
           clip: { x: 0, y: 0, width: cssW, height: cssH, scale: 1 },
         }), 12000, "整页截图超时");
         img = nativeImage.createFromBuffer(Buffer.from(res.data, "base64"));
+        mode = "full";
+        truncated = sh > 12000;
       } catch (err) {
         log("[browser-agent] 整页截图失败，退回视口截图:", err && err.message);
         img = null;
+        mode = "viewport";
+        truncated = false;
         cssW = vw;
         cssH = vh;
       }
@@ -338,6 +346,7 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
     if (!img) {
       let rect;
       if (a.clip) {
+        mode = "clip";
         const x = Math.max(0, Math.round(Number(a.clip.x) || 0));
         const y = Math.max(0, Math.round(Number(a.clip.y) || 0));
         rect = { x, y, width: Math.max(1, Math.min(vw - x, Math.round(Number(a.clip.width) || 1))), height: Math.max(1, Math.min(vh - y, Math.round(Number(a.clip.height) || 1))) };
@@ -358,6 +367,8 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
     return {
       base64: buf.toString("base64"), mime: "image/jpeg", width: tw, height: th, css_width: cssW, css_height: cssH,
       scroll, viewport: { width: vw, height: vh }, page_url: pageUrl,
+      // 实际截图口径：full=整页、viewport=视口、clip=指定区域；服务端据此决定坐标换算并给模型正确提示
+      mode, truncated,
     };
   }
 

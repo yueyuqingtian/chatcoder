@@ -185,10 +185,17 @@ _MATRIX: dict[str, dict[str, str]] = {
 _READ_TOOLS = frozenset({
     "fs_read", "fs_list", "fs_grep", "git_diff", "codebase_search",
     "symbol_search", "outline", "view_image", "read_attachment",
-    "memory_search", "memory_write", "compaction_index", "compaction_view",
+    "memory_search", "compaction_index", "compaction_view",
     "skill_view", "todo_write", "ask_user_question", "goal_complete",
     "terminal_bg_status",
 })
+
+# 记忆写工具（plan-537-2256）：memory_write 会往记忆库落新行，属改变状态，
+# 不能留在只读集合——否则只读/计划模式下的调用会被当成纯读直接放行。
+# 复用 ACTION_WRITE：它是本项目「改变应用数据」的既有最小写档位（与 todo_write
+# 那类轻量状态工具同口径：询问审批下问、自动审批放行、完全访问放行），
+# 不需要再引入新的动作类别去扩散策略矩阵。
+_MEMORY_WRITE_TOOLS = frozenset({"memory_write"})
 
 # 带路径参数、需要判定工作区内外的读工具
 # 注：read_attachment 不在其中——附件上传目录是用户主动提供内容的白名单根，
@@ -232,12 +239,16 @@ _BROWSER_SEVERITY = {ACTION_READ: 0, ACTION_BROWSER_LOCAL: 1, ACTION_NETWORK: 2,
 _MANAGE_TOOLS = frozenset({"terminal_bg_kill"})
 
 # 电脑操控：写操作（真的动鼠标键盘）
+# plan-537-2251 L5：desktop_focus 会 SetForegroundWindow 并预热目标窗口的无障碍树，
+# 属于改变系统状态（会把用户正在用的窗口压到后面），不是「读屏幕内容」。此前它被归到只读集合，
+# 因此 desktop.py 里把它标成 high 风险也不会生效（classify 里集合判断优先于 risk_level）。
 _DESKTOP_WRITE_TOOLS = frozenset({
     "desktop_click", "desktop_type", "desktop_keys", "desktop_scroll", "desktop_batch",
+    "desktop_focus",
 })
 # 电脑操控：只读感知（读屏幕/无障碍树），与文件读取同为纯读
 _DESKTOP_READ_TOOLS = frozenset({
-    "desktop_windows", "desktop_snapshot", "desktop_focus", "desktop_screenshot",
+    "desktop_windows", "desktop_snapshot", "desktop_screenshot",
 })
 
 # 执行任意命令
@@ -498,6 +509,10 @@ def classify(tool_name: str, args: dict, ctx, *, risk_level: str = "low") -> Act
 
     if tool_name in _DESKTOP_READ_TOOLS:
         return ActionInfo(ACTION_READ, label="读取屏幕内容")
+
+    if tool_name in _MEMORY_WRITE_TOOLS:
+        # plan-537-2256：写入记忆库（应用自身数据，不触碰用户文件系统）
+        return ActionInfo(ACTION_WRITE, label="写入记忆")
 
     if tool_name in _READ_TOOLS:
         if tool_name in _PATH_READ_TOOLS:

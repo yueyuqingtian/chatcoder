@@ -21,6 +21,18 @@ export interface PetInfo {
   spriteDataUrl?: string;
 }
 
+/** 宠物安装目录的当前状态（设置 → 宠物） */
+export interface PetsDirInfo {
+  /** 当前生效的目录 */
+  dir: string;
+  /** 是否为用户指定（false = 默认目录） */
+  custom: boolean;
+  /** 默认目录：安装包为软件安装目录下的 pets */
+  default_dir: string;
+  /** 默认目录不可写（如装在 Program Files），已回落到用户数据目录 */
+  fallback: boolean;
+}
+
 export interface PetPref {
   enabled: boolean;
   slug: string;

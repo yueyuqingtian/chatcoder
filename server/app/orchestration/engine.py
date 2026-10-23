@@ -1899,6 +1899,9 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                 prompt=user_text or "",
                 summary=summary or "",
                 model_id=getattr(session, "model_id", None),
+                # plan-537-2256：显式传项目与游标，省掉函数内部的会话回查
+                project_id=getattr(session, "project_id", None),
+                last_extracted_turn_id=_memory_cursor(session),
             )
 
         # plan_restore_after_turn 粘性机制已移除：切换后的权限模式保持到手动切换
@@ -2912,6 +2915,82 @@ async def retry_failed_step(db: AsyncSession, *, turn_id: int, task_id: int) -> 
     return {"ok": ok, "status": step.status}
 
 
+# plan-537-2256：每会话一个提取槽（借鉴 ZCode 的 pending 合并）。
+# 此前每次收尾都新起一个提取任务，子会话 / 定时任务密集时同一会话会并发跑多次 LLM 调用；
+# 现在「正在跑时只保留最新一次待跑」。task 引用单独保存，避免被 GC 提前回收（此前不保存引用）。
+_MEM_EXTRACT_STATE: dict[int, dict] = {}
+_MEM_EXTRACT_TASKS: dict[int, object] = {}
+
+# plan-537-2256：惰性整理的节流状态（借 ZCode dream 的思路）。
+# 整理只做「同作用域文本完全相同」的合并与过期标记，不调 LLM；但若每轮都扫库，
+# 长会话下会反复全表读，故用「24h 最小间隔 + 10min 扫描节流 + 进程内互斥」三层限制。
+# key 为 "session_id:project_id"，让同一项目的多个会话共享一次整理。
+_MEM_MAINT_LAST_RUN: dict[str, float] = {}
+_MEM_MAINT_LAST_SCAN: dict[str, float] = {}
+_MEM_MAINT_INFLIGHT: set[str] = set()
+_MEM_MAINT_MIN_INTERVAL_S = 24 * 60 * 60
+_MEM_MAINT_SCAN_THROTTLE_S = 10 * 60
+
+
+async def _maybe_consolidate_memories(session_id: int, project_id: int | None) -> None:
+    """提取成功后顺手整理记忆库（幂等、失败不影响主流程）。
+
+    节流：10min 内重复进入直接返回；距上次真正整理不足 24h 只记录扫描时间。
+    互斥：同一 key 已在整理中则不重入（并发下可能有别的会话正在整理同一项目）。
+    """
+    key = f"{session_id}:{project_id or 0}"
+    if key in _MEM_MAINT_INFLIGHT:
+        return
+    now = time.monotonic()
+    if now - _MEM_MAINT_LAST_SCAN.get(key, 0.0) < _MEM_MAINT_SCAN_THROTTLE_S:
+        return
+    _MEM_MAINT_LAST_SCAN[key] = now
+    last_run = _MEM_MAINT_LAST_RUN.get(key, 0.0)
+    if last_run and now - last_run < _MEM_MAINT_MIN_INTERVAL_S:
+        return
+    _MEM_MAINT_INFLIGHT.add(key)
+    try:
+        from app.persistence.database import async_session_factory
+        from app.services.memory_service import consolidate_memories
+
+        async with async_session_factory() as s:
+            result = await consolidate_memories(s, session_id=session_id, project_id=project_id)
+        _MEM_MAINT_LAST_RUN[key] = now
+        if result.get("merged") or result.get("expired"):
+            logger.info("[memory] 记忆整理完成 session=%s merged=%s expired=%s",
+                        session_id, result.get("merged"), result.get("expired"))
+    except Exception:  # noqa: BLE001 — 整理只是清理重复项，失败不影响记忆本身可用
+        logger.debug("[memory] 记忆整理失败 session=%s", session_id, exc_info=True)
+    finally:
+        _MEM_MAINT_INFLIGHT.discard(key)
+
+
+def _memory_cursor(session) -> int:
+    """本会话「已提取到第几轮」（借 ZCode 的 cursor 思路）。
+
+    存在 session.shared_context 里，不新增表。缺失或非法一律视为 0（还什么都没提取过）。
+    """
+    ctx = getattr(session, "shared_context", None) or {}
+    try:
+        return int(ctx.get("memory_extracted_turn_id") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _has_real_user_prose(text: str) -> bool:
+    """是否有值得提炼的真实用户正文（借 ZCode 的 containsEligibleUserProse）。
+
+    纯工具轮、系统提醒轮、只有「继续」「ok」这类应答的轮次，不该再花一次 LLM 调用。
+    中文没有空格，故同时用字符长度兜底。
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    if t.startswith("[系统]") or t.startswith("<system-reminder>"):
+        return False
+    return len(t.split()) >= 3 or len(t) >= 12
+
+
 async def _spawn_memory_extract(
     db,
     *,
@@ -2921,11 +3000,17 @@ async def _spawn_memory_extract(
     summary: str = "",
     model_id: int | None = None,
     auto_memory_enabled: bool | None = None,
+    project_id: int | None = None,
+    last_extracted_turn_id: int | None = None,
 ) -> None:
     """异步提取记忆（D8）。不阻塞 turn 返回。
 
-    受设置中心「AI 主动生成记忆」开关控制：关闭时（settings.auto_memory_enabled=False）
-    跳过提取。
+    plan-537-2256（借 ZCode 的三道闸门 + cursor + pending 合并）：
+    1. 开关关闭 → 跳过（省一次 LLM 调用）；
+    2. 没有真实用户正文 → 跳过（纯工具轮、系统提醒轮不触发）；
+    3. 无增量（已提取到本轮或更晚）→ 跳过；
+    4. 同一会话已有提取在跑 → 只保留最新一次待跑，不排队堆积。
+
     修复：
     1. 优先使用当前会话绑定模型构造 Provider；若无则回退系统已配置活跃模型，最后回退全局默认配置。
     2. 聚合「用户意图」与「执行结果/技术解答」，传给提炼模型。
@@ -2934,6 +3019,30 @@ async def _spawn_memory_extract(
     if auto_memory_enabled is None:
         auto_memory_enabled = settings.auto_memory_enabled
     if not auto_memory_enabled:
+        return
+    # 兼容旧调用点：没显式传 project_id / cursor 时自己查一次会话
+    # （比让每处调用点各自记得传更不容易漏；收尾时一条本地 SELECT，开销可忽略）
+    if project_id is None or last_extracted_turn_id is None:
+        try:
+            from app.persistence.database import async_session_factory as _asf
+            from app.persistence.models.message import Session as _SessRowQ
+
+            async with _asf() as _s_row:
+                _row = await _s_row.get(_SessRowQ, session_id)
+                if _row is not None:
+                    if project_id is None:
+                        project_id = getattr(_row, "project_id", None)
+                    if last_extracted_turn_id is None:
+                        last_extracted_turn_id = _memory_cursor(_row)
+        except Exception:  # noqa: BLE001 — 查不到就当“无增量未知”，按 0 处理
+            pass
+    if last_extracted_turn_id is None:
+        last_extracted_turn_id = 0
+    # 闸门 2：没有真实用户正文（纯工具轮 / 系统提醒轮）
+    if not _has_real_user_prose(prompt):
+        return
+    # 闸门 3：无增量（cursor 已推进到本轮或更晚）
+    if last_extracted_turn_id >= int(turn_id or 0):
         return
 
     context_parts: list[str] = []
@@ -2945,7 +3054,7 @@ async def _spawn_memory_extract(
         return
     text = "\n\n".join(context_parts)
 
-    async def _extract():
+    async def _extract_one(item: dict):
         try:
             from app.models.registry import get_model_registry
             from app.models.schemas import ChatMessage, ChatRequest
@@ -2962,6 +3071,33 @@ async def _spawn_memory_extract(
                 _sess_row = await s.get(_SessionRow, session_id)
                 _ws_dir = (resolve_workspace_root(getattr(_sess_row, "workspace_root", None))
                            if _sess_row is not None else None)
+
+                # plan-537-2256（借 ZCode）：把现有记忆清单交给提炼模型，要求「能更新就不新增」。
+                # 只在同一 session / 同 project / global 范围内取，最多 30 条；取不到不影响提取。
+                _existing_block = ""
+                try:
+                    from sqlalchemy import or_ as _or
+                    from sqlalchemy import select as _select
+
+                    from app.persistence.models.memory import MemoryEntry as _MemRow
+
+                    _stmt = _select(_MemRow.text).where(
+                        _MemRow.session_id == session_id,
+                        _or(_MemRow.scope.is_(None), _MemRow.scope.in_(("session", "global"))),
+                    ).limit(30)
+                    _texts = [str(t) for (t,) in (await s.execute(_stmt)).all() if t]
+                    if item.get("project_id") is not None:
+                        _p_stmt = _select(_MemRow.text).where(
+                            _MemRow.scope == "project", _MemRow.project_id == item["project_id"],
+                        ).limit(15)
+                        _texts += [str(t) for (t,) in (await s.execute(_p_stmt)).all() if t]
+                    if _texts:
+                        _existing_block = (
+                            "\n\nEXISTING MEMORIES (do not duplicate these):\n"
+                            + "\n".join(f"- {t[:120]}" for t in _texts[:30])
+                        )
+                except Exception:  # noqa: BLE001 — 清单只是辅助，取不到就退回无清单
+                    _existing_block = ""
 
                 # 1. 尝试从 session 的 model_id 解析
                 if model_id:
@@ -3000,14 +3136,34 @@ async def _spawn_memory_extract(
                     ChatMessage(
                         role="system",
                         content=(
-                            "You are a project memory extraction assistant. Analyze the user request and execution outcome below to extract 1-3 durable, useful facts about this specific project (such as architectural patterns, directory structure conventions, library choices, pitfalls, or domain rules). "
-                            'Format as a strict JSON array like [{"kind": "fact", "text": "...", "importance": 0.8}]. '
-                            "'kind' must be one of: 'fact', 'convention', 'pitfall', 'decision'. "
-                            "'importance' must be a number between 0.65 and 1.0. "
-                            "Return [] if the content is trivial, transient, or lacks general project knowledge."
+                            # plan-537-2256（借 ZCode 的提取提示词）：此前不说 scope，落库一律是会话级
+                            # 30 天过期，导致「项目 / 全局」两层永远不会被自动填充；也不给现有清单，
+                            # 近重复项只能靠代码层去重兜底。这里补齐四件事：scope 判定、importance 分层、
+                            # 现有清单、不存什么。
+                            "You are a memory extraction assistant for a coding agent. Read the user request "
+                            "and the execution outcome below, then extract at most 3 durable memories that "
+                            "will still be useful in FUTURE sessions.\n"
+                            'Output a strict JSON array like [{"kind": "fact", "text": "...", '
+                            '"importance": 0.8, "scope": "project"}].\n'
+                            "'kind' must be one of: 'fact', 'convention', 'pitfall', 'decision'.\n"
+                            "'scope' must be one of: 'session' (only this conversation), 'project' (this "
+                            "working directory), 'global' (across projects — how the user prefers to work, "
+                            "machine/tooling facts). Pick the narrowest scope that still makes sense later.\n"
+                            "'importance' must be between 0.4 and 1.0 — below 0.65 the entry is kept as a "
+                            "low-confidence candidate and is NOT injected until a human confirms it.\n"
+                            "Write each 'text' as one self-contained sentence in the user's language, and "
+                            "convert relative dates ('yesterday', 'last week') into absolute dates.\n"
+                            "Check the EXISTING MEMORIES list first: if an entry already covers the same "
+                            "fact, skip it instead of adding a near-duplicate.\n"
+                            "Do NOT save: code structure, file paths, dependency choices, class/function "
+                            "inventories; git history or who-changed-what; debugging recipes or fix steps; "
+                            "anything already stated in AGENTS.md / CLAUDE.md; current-task progress or "
+                            "temporary state.\n"
+                            "Return [] when nothing meets the bar. Never invent facts that are not in the "
+                            "input." + _existing_block
                         ),
                     ),
-                    ChatMessage(role="user", content=text[:4500]),
+                    ChatMessage(role="user", content=item["text"][:4500]),
                 ],
                 model=model_name or getattr(provider, "model", "") or "default",
                 reasoning_effort=_effort,
@@ -3025,18 +3181,66 @@ async def _spawn_memory_extract(
             if not isinstance(data, list) or not data:
                 return
             from app.services.memory_service import save_memories
+
+            # plan-537-2256：传 project_id——提炼结果可能带 scope=project，缺它会被降级成会话级
             async with async_session_factory() as s:
-                count = await save_memories(s, session_id=session_id, turn_id=turn_id, memories=data)
+                count = await save_memories(
+                    s, session_id=session_id, turn_id=item["turn_id"], memories=data,
+                    project_id=item.get("project_id"),
+                )
                 await s.commit()
-                if count > 0:
-                    logger.info("[memory] Turn %s 自动生成并保存了 %d 条记忆", turn_id, count)
+            if count > 0:
+                logger.info("[memory] Turn %s 自动生成并保存了 %d 条记忆", item["turn_id"], count)
+            # plan-537-2256：推进提取游标——只处理增量，下一轮不必重复提炼同一段内容。
+            # 即使本次 0 条也要推进（「这轮无值得记的」本身就是一个结论）。
+            # 失败路径不推进（异常会被外层 except 接住），下次仍会重试。
+            try:
+                from app.persistence.database import run_write_locked
+                from app.persistence.models.message import Session as _SessionRow2
+
+                def _advance(s2):
+                    row = s2.get(_SessionRow2, session_id)
+                    if row is None:
+                        return
+                    ctx = dict(getattr(row, "shared_context", None) or {})
+                    ctx["memory_extracted_turn_id"] = int(item["turn_id"])
+                    row.shared_context = ctx
+                    s2.commit()
+
+                await run_write_locked(_advance, label=f"memory.cursor.{session_id}")
+            except Exception:  # noqa: BLE001 — 游标失败只是多提炼一次，不影响主流程
+                logger.debug("[memory] 推进提取游标失败 session=%s", session_id, exc_info=True)
+            # plan-537-2256：提取成功后顺手整理（重复项合并 / 过期标记）。
+            # 有节流与互斥，正常只在首次或距上次 24h 后真正执行。
+            await _maybe_consolidate_memories(session_id, item.get("project_id"))
         except Exception:
             logger.warning("[memory] 记忆提取异常(非阻塞)", exc_info=True)
 
+    # 闸门 4：同会话已有提取在跑 → 只保留最新一次待跑（借 ZCode 的 pending 合并）。
+    st = _MEM_EXTRACT_STATE.setdefault(session_id, {"running": False, "pending": None})
+    payload = {"turn_id": turn_id, "text": text, "project_id": project_id}
+    if st["running"]:
+        st["pending"] = payload
+        return
+    st["running"] = True
+
+    async def _runner():
+        cur = payload
+        try:
+            while cur is not None:
+                await _extract_one(cur)
+                cur = st.get("pending")
+                st["pending"] = None
+        finally:
+            st["running"] = False
+
     try:
-        asyncio.create_task(_extract())
+        _task = asyncio.create_task(_runner())
     except Exception:
         try:
-            asyncio.get_event_loop().create_task(_extract())
+            _task = asyncio.get_event_loop().create_task(_runner())
         except Exception:
-            pass
+            st["running"] = False
+            return
+    # 保存引用：不保存时任务可能被 GC 提前回收（此前只留一条 warning，表现为「偶尔没沉淀」）
+    _MEM_EXTRACT_TASKS[session_id] = _task

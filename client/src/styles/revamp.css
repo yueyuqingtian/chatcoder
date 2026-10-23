@@ -120,6 +120,10 @@
 .models-status-pill.on, .models-badge.ok { background: color-mix(in oklab, var(--success) 14%, transparent); }
 
 /* ── 设置页：卡片、行、分组标题与控件统一 ── */
+/* plan-537-2246：卡片保留一层弱投影——下缘极淡的落影让白卡从 #f8f8f8 页面底上「浮」起来。
+   比 --shadow-sm（0 1px 3px 6% + 0 1px 2px 4% 双层）更轻，不会在底部形成明显线条；
+   此前用户看到的「常规页面下面一条阴影线」真正的根因是 GeneralPanel 里一个只有 1px 描边的
+   空卡片壳（已修，见 BrowserDownloadDirRow），与这层投影无关。 */
 .settings-card,
 .ui-card { background: var(--bg-main); border-color: var(--border-light); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03); }
 .settings-row { border-bottom-color: var(--border-light); min-height: 60px; }

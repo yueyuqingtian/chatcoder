@@ -415,7 +415,8 @@ async def test_self_window_is_not_listed_unless_targeted(core, tmp_path, monkeyp
 
     me = dict(_WIN, proc="chatcoder", title="chatcoder")
 
-    async def fg():
+    # plan-537-2251：_foreground_window 新增 ctx 首参（窗口快照改为按会话隔离）
+    async def fg(ctx):
         return me
 
     monkeypatch.setattr(D, "_foreground_window", fg)

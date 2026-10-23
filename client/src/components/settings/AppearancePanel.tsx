@@ -13,7 +13,8 @@ import {
   useToolCardStore, type ToolCardDefaultForm, type ToolCardSection,
 } from "../../store/toolCard";
 import { useUiStore, UI_FONT_OPTIONS } from "../../store/ui";
-import { Select, Slider } from "../ui";
+import { isFontInstalled } from "../../utils/fontProbe";
+import { Select, Slider, type SelectOption } from "../ui";
 import { Dada } from "../mascot/Dada";
 import { Row, Sw } from "./shared";
 
@@ -40,13 +41,21 @@ const WORLD_DOT: Record<World, string> = {
 
 const TOOL_CARD_FORMS: Record<ToolCardDefaultForm, string> = { capsule: "胶囊", expanded: "展开" };
 const TOOL_CARD_SECTION_DESC: Record<ToolCardSection, string> = {
-  git: "展开卡片时是否直接显示未提交行数、分支与提交入口",
-  plan: "展开卡片时是否直接显示当前计划的步骤",
-  process: "展开卡片时是否直接显示正在运行与待执行的进程",
-  subagent: "展开卡片时是否直接显示子代理列表",
-  workflow: "展开卡片时是否直接显示工作流进度",
-  bgtask: "展开卡片时是否直接显示运行中的后台命令（含运行时间与停止按钮）",
+  git: "工具卡展开时默认展开 Git 栏，显示未提交改动、分支与提交入口",
+  plan: "工具卡展开时默认展开计划栏，显示当前计划的步骤",
+  process: "工具卡展开时默认展开进程栏，显示正在运行与待执行的进程",
+  subagent: "工具卡展开时默认展开子代理栏，显示子代理列表",
+  workflow: "工具卡展开时默认展开工作流栏，显示工作流进度",
+  bgtask: "工具卡展开时默认展开后台任务栏，显示运行中的后台命令（含运行时间与停止按钮）",
 };
+
+/** 需要系统已安装才会生效的界面字体：选项置灰并标注「未安装」；内置与系统自带字体无需探测 */
+const UI_FONT_PROBE: Record<string, string> = {
+  harmony: "HarmonyOS Sans SC",
+  sourcehan: "Source Han Sans SC",
+  yahei: "Microsoft YaHei UI",
+};
+const isUiFontInstalled = (key: string): boolean => !UI_FONT_PROBE[key] || isFontInstalled(UI_FONT_PROBE[key]);
 
 /** S5：玻璃强度三档（0 轻柔 / 1 标准 / 2 深邃）——不透明度由 tokens.css 的
  *  --frost-left-alpha 声明式驱动（深邃透出最多、轻柔最实）。 */
@@ -69,7 +78,7 @@ export function AppearancePanel() {
   return (
     <div className="settings-card-stack">
       <div className="settings-card">
-        <Row title="主题模式" desc="浅色 / 深色">
+        <Row title="主题模式" desc="切换界面的浅色或深色配色，立即生效">
           <div style={{ display: "flex", gap: 6 }}>
             {(Object.keys(THEMES) as Theme[]).map((t) => (
               <button
@@ -82,7 +91,7 @@ export function AppearancePanel() {
             ))}
           </div>
         </Row>
-        <Row title="主题世界" desc="决定强调色、场景与嗒嗒的装扮；底色与侧栏始终保持中性" />
+        <Row title="主题世界" desc="决定强调色、背景场景与嗒嗒的装扮；深色模式下底色保持中性" />
         <div className="world-grid" role="radiogroup" aria-label="主题世界">
           {WORLDS.map((w) => (
             <button
@@ -115,12 +124,15 @@ export function AppearancePanel() {
         </div>
         <Row
           title="毛玻璃效果"
-          desc={ui.glassmorphism ? "左侧面板半透明磨砂，轻微透出桌面壁纸" : "启用左侧面板与启动页的半透明磨砂背景"}
+          desc={
+            (ui.glassmorphism ? "左侧面板半透明磨砂，透出桌面壁纸" : "左侧面板使用实色底")
+            + (ui.glassNeedRestart ? "（设置已保存，重启应用后生效）" : "")
+          }
         >
           <Sw checked={ui.glassmorphism} onChange={(v) => ui.setPrefs({ glassmorphism: v })} />
         </Row>
         {ui.glassmorphism && (
-          <Row title="玻璃强度" desc="左侧面板的不透明度。深色壁纸下若看不出透出，请选「深邃」">
+          <Row title="玻璃强度" desc="调节左侧面板透出桌面壁纸的程度；深色壁纸下若看不出透出，请选「深邃」">
             <div style={{ display: "flex", gap: 6 }}>
               {GLASS_STRENGTHS.map((s) => (
                 <button
@@ -138,23 +150,32 @@ export function AppearancePanel() {
       </div>
 
       <div className="settings-card">
-        <Row title="界面字体" desc={(UI_FONT_OPTIONS[ui.uiFontFamily] ?? UI_FONT_OPTIONS.inter).desc}>
+        <Row
+          title="界面字体"
+          desc={
+            (UI_FONT_OPTIONS[ui.uiFontFamily] ?? UI_FONT_OPTIONS.inter).desc
+            + (isUiFontInstalled(ui.uiFontFamily) ? "" : "（所选字体未安装，当前已回退为默认字体）")
+          }
+        >
           <Select
             value={UI_FONT_OPTIONS[ui.uiFontFamily] ? ui.uiFontFamily : "inter"}
             onChange={(v) => ui.setPrefs({ uiFontFamily: v })}
-            options={Object.entries(UI_FONT_OPTIONS).map(([value, f]) => ({ value, label: f.label }))}
+            options={Object.entries(UI_FONT_OPTIONS).map(([value, f]): SelectOption => {
+              const ok = isUiFontInstalled(value);
+              return { value, label: f.label, disabled: !ok, hint: ok ? undefined : "未安装" };
+            })}
             aria-label="界面字体"
           />
         </Row>
-        <Row title="对话字号" desc="控制对话消息的文字大小（立即生效）">
+        <Row title="对话字号" desc="对话消息的文字大小（立即生效）">
           <Slider min={11} max={18} step={1} value={ui.chatFontSize}
             onChange={(v) => ui.setPrefs({ chatFontSize: v })} format={(v) => `${v}px`} aria-label="对话字号" />
         </Row>
-        <Row title="消息行距" desc="控制对话消息的行间间距倍率（立即生效）">
+        <Row title="消息行距" desc="对话消息的行高倍数，数值越大行间越宽松（立即生效）">
           <Slider min={1.2} max={2.2} step={0.05} value={ui.chatLineHeight}
             onChange={(v) => ui.setPrefs({ chatLineHeight: v })} format={(v) => v.toFixed(2)} aria-label="消息行距" />
         </Row>
-        <Row title="内容展示宽度" desc="消息与输入区的最大宽度，0 表示铺满整个内容区">
+        <Row title="内容展示宽度" desc="消息与输入框的最大宽度；拖到最左（不限）时铺满整个内容区">
           <Slider min={0} max={1600} step={50} value={ui.contentMaxWidth}
             onChange={(v) => ui.setPrefs({ contentMaxWidth: v })}
             format={(v) => (v === 0 ? "不限" : `${v}px`)} aria-label="内容展示宽度" />

@@ -403,7 +403,8 @@ async def test_click_by_element_and_stale_relocation(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "desktop_enabled", True)
     monkeypatch.setattr(settings, "desktop_plain_ops_enabled", True)
     win = dict(_WIN, cls="Notepad", title="设置")
-    monkeypatch.setattr(D, "_resolve_window", lambda h, t: _async(win))
+    # plan-537-2251：_resolve_window 新增 ctx 首参（窗口快照改为按会话隔离）
+    monkeypatch.setattr(D, "_resolve_window", lambda ctx, h, t: _async(win))
 
     ctx = _ctx(tmp_path)
     snap = await D.DesktopSnapshotTool().run({"handle": 100}, ctx)

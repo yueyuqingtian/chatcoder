@@ -17,24 +17,13 @@ from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 
 
 def _check_browser_enabled() -> str | None:
-    """浏览器工具门禁。
+    """浏览器工具门禁：只认「设置 → 电脑操控 → 内置浏览器」这一个开关（browser_enabled）。
 
-    plan-334-1661：浏览器能力有两个入口，任一开启即可用——
-      1.「设置 → 常规 → 内置浏览器工具」（browser_enabled，历史入口）；
-      2.「设置 → 电脑操控 → 浏览器操作」（desktop_enabled + desktop_browser_ops_enabled）。
-    这样用户在专用页里把「电脑操控」打开后，不必再回到常规页二次开启同一件事；
-    两个开关是「并集」而非「主从」，任一为真都放行。
+    开启电脑操控时该开关会自动打开；关闭它则浏览器工具不再下发给模型。
     """
     if getattr(settings, "browser_enabled", False):
         return None
-    if getattr(settings, "desktop_enabled", False) and getattr(
-        settings, "desktop_browser_ops_enabled", True
-    ):
-        return None
-    return (
-        "浏览器工具当前未启用。可在「设置 → 常规 → 内置浏览器工具」中开启，"
-        "或在「设置 → 电脑操控 → 浏览器操作」开启。"
-    )
+    return "浏览器工具当前未启用。可在「设置 → 电脑操控 → 内置浏览器」中开启。"
 
 
 def browser_tools_enabled() -> bool:
@@ -61,6 +50,13 @@ def _schema(name: str, desc: str, props: dict[str, Any], required: list[str] | N
             "parameters": {"type": "object", "properties": props, **({"required": required} if required else {})},
         },
     }
+
+
+# plan-537-2251：会改变页面状态的浏览器动作。这些动作的结果里补一次站点路线提示——
+# 自动附带原本只在 browser_navigate 触发，模型直接 click / type 时整轮都拿不到已沉淀的路线。
+_ROUTE_WRITE_ACTIONS = frozenset({
+    "click", "type", "fill", "press", "drag", "hover", "scroll", "batch",
+})
 
 
 class _BrowserTool(Tool):
@@ -97,6 +93,18 @@ class _BrowserTool(Tool):
             from app.orchestration.route_hints import host_of, route_hint
 
             host = host_of(str(data.get("url") or ""))
+            hint = await route_hint(ctx, scope="browser", names=[host], target_label=host) if host else ""
+            if hint:
+                text += hint
+                data["route_hint"] = True
+        elif self.action in _ROUTE_WRITE_ACTIONS and not data.get("route_hint"):
+            # plan-537-2251：模型常常跳过 browser_navigate 直接 click / type，而自动附带只在 navigate 触发，
+            # 于是整轮都拿不到已沉淀的路线。这里在写操作的结果里补一次（_SHOWN 保证同会话同条只附一次），
+            # 让「先复用路线」在最迟第一次动手后就进入上下文，而不是等到反复试错。
+            from app.orchestration.browser.driver import current_url
+            from app.orchestration.route_hints import host_of, route_hint
+
+            host = host_of(current_url(ctx.session_id) or "")
             hint = await route_hint(ctx, scope="browser", names=[host], target_label=host) if host else ""
             if hint:
                 text += hint
@@ -479,9 +487,12 @@ class BrowserRecipeTool(Tool):
     feature_enabled = staticmethod(browser_tools_enabled)
     description = (
         "记录或查询内置浏览器的「操作路线」——某站点某操作意图的通用做法，用于下次直接复用、少走弯路。\n"
-        "action=recall：在某站点做不熟悉的操作前查一次（browser_navigate 打开站点时也会自动附上已有路线）。\n"
-        "action=save：一次多步网页操作成功后沉淀：site 填站点 host（如 localhost:5173、erp.example.com），"
-        "intent 一句话目标，principle 写怎么定位元素、按什么顺序、哪些步骤可合并，pitfalls 写踩过的坑。\n"
+        "action=recall：**必须先于操作**——本轮首次在某站点做操作前就要调用一次（传 site + intent）。\n"
+        "browser_navigate 打开站点时也会自动附上已有路线；但如果你不先 navigate 而是直接 click / type，"
+        "自动附带不会触发，所以动手前先 recall 是硬要求。\n"
+        "action=save：**在写最终汇报之前**保存，不要等到汇报完再补：site 填站点 host"
+        "（如 localhost:5173、erp.example.com；不要填完整 URL），intent 一句话目标，"
+        "principle 写怎么定位元素、按什么顺序、哪些步骤可合并，pitfalls 写踩过的坑。\n"
         "**存通用做法，不存 ref / 坐标**——它们每次都会变。同站点同意图只保留一条，重复保存会更新内容。"
     )
 

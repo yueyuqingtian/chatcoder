@@ -144,11 +144,12 @@ _TASK: list[dict] = [
                                 }}},
         },
     }),
+    # plan-541-2264: 同步派发整体下线后，SubAgent 已不在下发路径上（出站一律发 SubAgentAsync）。
+    # 该硬编码 schema 仍保留，用于历史会话入站还原与 TA3 schema 守护测试；描述同步去掉
+    # 「同步执行 / 会阻塞」的承诺，避免后续维护者误以为还留着同步派发能力。
     _f("SubAgent",
-       "启动子代理处理独立子任务。subagent_type=Explore 时按只读探索同步执行，直接返回调研结论，"
-       "但会阻塞当前工作——仅当下一步强依赖结论且子任务很小时使用；结论不急需的只读调研请改用 "
-       "SubAgentAsync（配 subagent_type=Explore 保持只读、后台执行）。"
-       "其他类型（含缺省）转为后台异步执行，完成后结果自动推送回来（无需轮询）。"
+       "启动子代理处理独立子任务（subagent_type=Explore 表示只读探索）。子代理一律在后台派发，"
+       "不阻塞当前工作，完成时结果自动推送回来（无需轮询）。"
        "适用：可拆分为互不依赖的子任务；需要跨多个文件调研（超过约 3 次搜索/读取才能回答）；"
        "只需结论、不需要把原始输出灌进自己的上下文。"
        "不适用：已知文件/符号/取值的单点查询（直接搜索更快）；简单或强串行的工作（自己直接用工具做）。"
@@ -158,7 +159,7 @@ _TASK: list[dict] = [
            "properties": {
                "subagent_type": {"type": "string",
                                  "enum": ["Explore", "Plan", "GeneralPurpose", "Verification"],
-                                 "description": "子代理类型：Explore=只读探索（同步返回结论、会阻塞主流程）；其他类型=后台异步执行。"},
+                                 "description": "子代理类型：Explore=只读探索（不修改文件）；其他/缺省=可写子代理。"},
                "prompt": {"type": "string", "description": "传递给子代理的任务描述（必须自包含：子代理看不到你的上下文）。"},
                "description": {"type": "string", "description": "5 个词以内的任务摘要。"},
            },
@@ -282,14 +283,8 @@ def disguise_tools(tool_schemas: list[dict]) -> list[dict]:
         native = TA3_NATIVE_SCHEMAS.get(alias)
         if native is None:
             continue
+        # plan-541-2264: 原「一对多下发」（spawn_subagent → SubAgent + SubAgentAsync）
+        # 已删除——TO_TA3 现在直接指向 SubAgentAsync，一个真实工具对应一个伪装工具；
+        # 同步派发下线后不再需要额外追加异步入口，命中 TA3_NATIVE_SCHEMAS 即产出。
         out.append(native)
-        # plan-73-322: 一对多下发——spawn_subagent 在 ta3 侧对应两个原生工具
-        # （SubAgent=按类型同步/异步、SubAgentAsync=恒后台异步）。此前只出 SubAgent，
-        # 模型没有显式异步入口，「只读调研 + 不阻塞」在模型侧无法表达。
-        if alias == "SubAgent" and "SubAgentAsync" not in {
-            s.get("function", {}).get("name") for s in out
-        }:
-            _async_native = TA3_NATIVE_SCHEMAS.get("SubAgentAsync")
-            if _async_native is not None:
-                out.append(_async_native)
     return out

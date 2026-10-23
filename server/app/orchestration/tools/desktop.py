@@ -83,6 +83,39 @@ def _text(lines: list[str]) -> str:
     return "\n".join(lines)
 
 
+def _flag(v: Any) -> bool:
+    """布尔参数归一（与 browser/driver.py 的 _flag 同语义）。
+
+    plan-537-2251 M15：模型或上游常把布尔写成字符串，"false"/"0"/"no"/"off" 走 bool() 会变成 True，
+    于是「明确关掉」的选项被悄悄打开（marks、grid、then_shot 这类开关尤其明显）。
+    """
+    if isinstance(v, str):
+        return v.strip().lower() not in ("", "false", "0", "no", "off")
+    return bool(v)
+
+
+def _clamp_int(args: dict[str, Any], key: str, default: int, lo: int, hi: int) -> tuple[int, str, bool]:
+    """取整数参数并夹到 [lo, hi]，返回 (值, 错误文本, 是否被夹取)。
+
+    plan-537-2251 M14：int() 遇到非法值会抛 ValueError 打断整次调用，这里转成可读错误；
+    越界值（count=99、clicks=-999）此前原样发给内核，夹取后行为可预期，由调用方在 output 里说明。
+    """
+    raw = args.get(key)
+    if raw is None or raw == "":
+        return default, "", False
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return default, f"{key} 必须是整数（收到 {raw!r}）。", False
+    capped = max(lo, min(hi, v))
+    return capped, "", capped != v
+
+
+def _cap_note(capped: bool, key: str, value: int) -> str:
+    """夹取说明：只在真的被夹过时出现，避免每步都多一句噪音。"""
+    return f"{key} 超出允许范围，已按上限处理为 {value}。" if capped else ""
+
+
 def _fmt_num(v: Any) -> str:
     try:
         return f"{float(v):g}"
@@ -141,16 +174,29 @@ _CDP_FAIL_TTL_S = 60.0
 
 # 最近一次窗口列表（plan-20261018-operator-boost）：动作前解析目标窗口时顺带记下，动作后与新列表比对，
 # 就能发现「点了之后应用弹出了新窗口」——不必为此在动作前多付一次枚举。
-_LAST_WINDOWS: dict[str, Any] = {"at": 0.0, "items": []}
+# plan-537-2251 M12：按 (session_id, task_id) 隔离，与 desktop_shots 的键一致。
+# 此前是模块级单份状态，主代理 / 子代理或两个会话交替操作时会互相覆盖「动作前快照」，
+# 窗口变化比对得出「凭空多出一个窗口」这类错误结论。
+_LAST_WINDOWS: dict[tuple[int, int], dict[str, Any]] = {}
 
 
-async def _window_list() -> list[dict]:
+def _state_key(ctx: Any) -> tuple[int, int]:
+    """会话键：与 desktop_shots._key 同口径，坐标 / 元素表 / 窗口快照按同一维度隔离。"""
+    return (int(getattr(ctx, "session_id", 0) or 0), int(getattr(ctx, "task_id", 0) or 0))
+
+
+def _last_windows(ctx: Any) -> dict[str, Any]:
+    """本会话最近一次窗口快照；没有则返回空快照（at=0 表示过期，调用方不会据此判断新窗口）。"""
+    return _LAST_WINDOWS.get(_state_key(ctx)) or {"at": 0.0, "items": []}
+
+
+async def _window_list(ctx: Any) -> list[dict]:
     try:
         data = await _call("windows", {"limit": 120})
     except Exception:  # noqa: BLE001
         return []
     items = list(data.get("items") or [])
-    _LAST_WINDOWS.update(at=time.monotonic(), items=items)
+    _LAST_WINDOWS[_state_key(ctx)] = {"at": time.monotonic(), "items": items}
     return items
 
 
@@ -168,9 +214,9 @@ def _describe_window(w: dict) -> str:
     return f"「{w.get('title') or '(无标题)'}」（handle={w.get('h')}，进程 {w.get('proc') or '?'}）"
 
 
-async def _resolve_window(handle: int, title: str) -> dict | None:
+async def _resolve_window(ctx: Any, handle: int, title: str) -> dict | None:
     """按 handle 或 title 取窗口信息（cls / pid / rect），供通道分流与窗口范围判断。"""
-    items = await _window_list()
+    items = await _window_list(ctx)
     if not items:
         return None
     if handle:
@@ -185,12 +231,23 @@ async def _resolve_window(handle: int, title: str) -> dict | None:
     return None
 
 
-async def _foreground_window() -> dict | None:
+async def _foreground_window(ctx: Any) -> dict | None:
     """取当前前台窗口。"""
-    for it in await _window_list():
+    for it in await _window_list(ctx):
         if it.get("fg"):
             return it
     return None
+
+
+def _window_missing_error(handle: int, title: str) -> str:
+    """显式点名了窗口却找不到时的统一文案（plan-537-2251 M8）。
+
+    此前这种情况会静默退回整屏截图 / 跳过窗口范围校验，模型以为看的就是目标窗口，
+    接着拿整屏坐标去点，实际点在别的程序上。
+    """
+    target = f"「{title}」" if title else f"handle={handle}"
+    return (f"未找到目标窗口：{target}。请用 desktop_windows 确认窗口是否存在，"
+            "或省略 title 改为整屏截图。")
 
 
 async def _try_cdp(win: dict) -> dict | None:
@@ -221,6 +278,9 @@ async def _try_cdp(win: dict) -> dict | None:
         rect=list(win.get("rect") or [0, 0, 0, 0]),
         cmdline=cmdline,
         ports_provider=_ports,
+        # plan-537-2251 M10：必须传 DWM 可见边界。缺省时 CDP 元素坐标回退用 GetWindowRect，
+        # 它含 Win10/11 左右各 7–8 px 的不可见调整边框，网页元素坐标会系统性偏移这么多像素。
+        frame=await _window_frame(win),
     )
     if not res or not res.get("items"):
         _CDP_FAILED[pid] = now
@@ -228,15 +288,16 @@ async def _try_cdp(win: dict) -> dict | None:
     return res
 
 
-async def _window_change_note(target: dict | None) -> tuple[str, dict | None]:
+async def _window_change_note(ctx: Any, target: dict | None) -> tuple[str, dict | None]:
     """动作后窗口变化（plan-20261018-operator-boost）：返回 (给模型的说明, 应跟随的新前台窗口)。
 
     真实故障：腾讯视频首页点开剧集后弹出独立的播放窗口并成为前台，工具不说，模型继续对首页窗口截图 / 按键，
     每次都报「不在前台」，只能反复 focus 首页——把播放窗口又压到后面，越操作越乱。
     """
-    before_items = list(_LAST_WINDOWS.get("items") or [])
-    fresh = time.monotonic() - float(_LAST_WINDOWS.get("at") or 0) < 30
-    after = await _window_list()
+    snapshot = _last_windows(ctx)
+    before_items = list(snapshot.get("items") or [])
+    fresh = time.monotonic() - float(snapshot.get("at") or 0) < 30
+    after = await _window_list(ctx)
     if not after:
         return "", None
     fg = next((w for w in after if w.get("fg")), None)
@@ -264,12 +325,12 @@ async def _window_change_note(target: dict | None) -> tuple[str, dict | None]:
     return "\n".join(lines), follow
 
 
-async def _not_foreground_hint(exc: Exception, handle: int, title: str) -> str:
+async def _not_foreground_hint(ctx: Any, exc: Exception, handle: int, title: str) -> str:
     """内核报「目标窗口不在前台」时补充真实前台是谁：多数情况是同一应用弹出了新窗口。"""
     msg = str(exc)
     if "不在前台" not in msg:
         return msg
-    items = await _window_list()
+    items = await _window_list(ctx)
     fg = next((w for w in items if w.get("fg")), None)
     target = next((w for w in items if handle and int(w.get("h") or 0) == handle), None)
     if target is None and title:
@@ -479,12 +540,12 @@ def _norm_label(text: str) -> str:
     return desktop_elements.norm_text(text)
 
 
-async def _relocate_element(item: dict, table: desktop_shots.ElementTable) -> dict | None:
+async def _relocate_element(ctx: Any, item: dict, table: desktop_shots.ElementTable) -> dict | None:
     """界面变化后按「名称 + 类型」在当前界面重新找该元素：唯一命中才返回，否则 None（不猜）。"""
     name = _norm_label(_element_name(item) or str(item.get("_label") or ""))
     if not name:
         return None
-    win = await _resolve_window(table.handle, table.title)
+    win = await _resolve_window(ctx, table.handle, table.title)
     if win is None:
         return None
     items, _channel, _info = await _collect_elements(win)
@@ -519,18 +580,18 @@ async def _element_target_window(ctx: ToolContext, args: dict[str, Any]) -> dict
     handle = int(args.get("handle") or 0)
     title = str(args.get("title") or "")
     if handle or title:
-        return await _resolve_window(handle, title)
+        return await _resolve_window(ctx, handle, title)
     table = desktop_shots.get_table(ctx)
     if table is not None and (table.handle or table.title):
-        win = await _resolve_window(table.handle, table.title)
+        win = await _resolve_window(ctx, table.handle, table.title)
         if win is not None:
             return win
     frame = desktop_shots.get_frame(ctx)
     if frame is not None and frame.handle:
-        win = await _resolve_window(frame.handle, frame.window)
+        win = await _resolve_window(ctx, frame.handle, frame.window)
         if win is not None:
             return win
-    return await _foreground_window()
+    return await _foreground_window(ctx)
 
 
 async def _element_listing(
@@ -568,7 +629,7 @@ async def _resolve_ref(ctx: ToolContext, ref: str) -> _Point:
     name = desktop_elements.label_of(item)
     source = f"元素 {shown}「{name}」"
     if table.stale:
-        relocated = await _relocate_element(item, table)
+        relocated = await _relocate_element(ctx, item, table)
         if relocated is None:
             return _Point(error=(f"界面已变化，元素 {shown}「{name}」在当前界面找不到唯一匹配。"
                                  "请重新 desktop_screenshot 获取最新清单，或按截图坐标操作。"))
@@ -606,6 +667,11 @@ async def _resolve_text(ctx: ToolContext, args: dict[str, Any], text: str, *,
             refreshed = True
             src_handle = int(win.get("h") or 0)
             cands = desktop_elements.find_by_text(full, text)
+            # plan-537-2251 M7：重读界面会覆盖编号表。模型手上的旧 eN 若继续沿用，会静默指向
+            # 新表的第 N 项（点了别的控件，结果里还写着「成功」）。标记 stale 后旧引用改走
+            # _relocate_element 按名称重定位，找不到唯一匹配就报错，不会静默点错。
+            # allow_refresh=False（批量规划）不重读，故不受影响。
+            desktop_shots.mark_stale(ctx)
     if not cands:
         return _Point(error=(f"当前界面没有找到文字为「{text}」的元素。请对照最近一次清单换个说法，"
                              "或 desktop_screenshot 刷新清单；自绘界面里读不到元素时按截图坐标操作。"))
@@ -669,7 +735,7 @@ async def _outside_window_error(win: dict | None, pt: _Point, args: dict[str, An
     坐标给错时点击会落到窗口外、点中别的程序或桌面——宁可拒绝并说明，也不静默点错。
     最小化窗口的边界在屏幕外（-32000），focus_first 会先还原它，此时不校验。
     """
-    if not win or win.get("min") or bool(args.get("allow_outside", False)):
+    if not win or win.get("min") or _flag(args.get("allow_outside", False)):
         return ""
     frame = await _window_frame(win)
     if not frame:
@@ -746,7 +812,7 @@ def _dark_ratio(path: str) -> float:
         return 0.0
 
 
-def _shot_notes(path: str, win: dict | None, explicit_target: bool) -> list[str]:
+def _shot_notes(ctx: Any, path: str, win: dict | None, explicit_target: bool) -> list[str]:
     """截图附加说明：画面大面积纯黑、目标窗口被其它窗口盖住。"""
     notes: list[str] = []
     ratio = _dark_ratio(path)
@@ -757,7 +823,7 @@ def _shot_notes(path: str, win: dict | None, explicit_target: bool) -> list[str]
             "暂停按钮等）判断状态，不要因此反复截图或重试。"
         )
     if explicit_target and win and not win.get("fg"):
-        fg = next((w for w in (_LAST_WINDOWS.get("items") or []) if w.get("fg")), None)
+        fg = next((w for w in (_last_windows(ctx).get("items") or []) if w.get("fg")), None)
         if fg and int(fg.get("h") or 0) != int(win.get("h") or 0):
             line = ("注意：目标窗口当前不在前台，截图截的是它所在的屏幕区域，画面里可能叠着前台窗口"
                     + _describe_window(fg) + "。")
@@ -817,9 +883,28 @@ async def _take_shot(
     """
     explicit = bool(handle or title)
     if win is None:
-        win = await _resolve_window(handle, title) if explicit else await _foreground_window()
+        win = await _resolve_window(ctx, handle, title) if explicit else await _foreground_window(ctx)
+    # plan-537-2251 M8：显式点名了窗口却解析不到时不能静默改截整屏（见 _window_missing_error）。
+    if explicit and win is None:
+        raise _CoreFailure(_window_missing_error(handle, title))
     rect, region_src = await _capture_region(win, prefer_window=explicit)
     src_w, src_h = (rect[2], rect[3]) if rect else await _screen_size()
+
+    # plan-537-2251 M9：先读元素、后截图。此前是先截图（毫秒级）再花 0.1–0.5 s 读元素，
+    # 这期间界面若发生变化，图与清单就来自两个不同时刻，模型照清单点下去看着对、实际点偏。
+    # 改成先读元素后截图，图反映的是清单读取之后的状态，两者顺序不会倒退。
+    # region 用本次截图区域 rect（整屏时为 None，元素本身只含屏幕内可见节点）。
+    want_elements = elements if elements is not None else bool(getattr(settings, "desktop_auto_elements", True))
+    mapping: dict[str, dict] = {}
+    elem_info: dict = {}
+    channel = ""
+    if want_elements and win is not None and not win.get("min") and not _is_self_window(win, explicit):
+        try:
+            mapping, channel, elem_info = await _element_listing(
+                ctx, win, region=rect, limit=list_limit)
+        except Exception as exc:  # noqa: BLE001 — 元素清单是增强，不能让截图失败
+            logger.debug("[desktop] 截图附带元素清单失败：%s", exc)
+
     params: dict[str, Any] = {
         "maxDim": desktop_coords.model_safe_max_dim(int(src_w), int(src_h), _setting_max_dim()),
         "format": "jpg",
@@ -844,17 +929,7 @@ async def _take_shot(
         desktop_coords.convention_line(mode, meta["width"], meta["height"]),
     ]
 
-    # 元素清单：读不到不报错（自绘界面本来就没有），只是这一段不出现
-    want_elements = elements if elements is not None else bool(getattr(settings, "desktop_auto_elements", True))
-    mapping: dict[str, dict] = {}
-    elem_info: dict = {}
-    channel = ""
-    if want_elements and win is not None and not win.get("min") and not _is_self_window(win, explicit):
-        try:
-            mapping, channel, elem_info = await _element_listing(
-                ctx, win, region=frame.region(), limit=list_limit)
-        except Exception as exc:  # noqa: BLE001 — 元素清单是增强，不能让截图失败
-            logger.debug("[desktop] 截图附带元素清单失败：%s", exc)
+    # 元素清单已在截图之前读取（plan-537-2251 M9），这里只负责呈现
     if mapping:
         if dedupe_list and elem_info.get("same_as_prev"):
             # 动作后的清单与上一份完全一致（表单录入、翻页前后很常见）：不再重复整份，编号沿用
@@ -886,7 +961,7 @@ async def _take_shot(
     except Exception as exc:  # noqa: BLE001 — 叠加层是增强
         logger.debug("[desktop] 叠加层绘制失败：%s", exc)
 
-    lines.extend(_shot_notes(meta["path"], win, explicit))
+    lines.extend(_shot_notes(ctx, meta["path"], win, explicit))
     lines.append(f"已保存：{meta['path']}")
     _obs("screenshot", mode=mode, region=region_src, size=f"{meta['width']}x{meta['height']}",
          elements=len(mapping), channel=channel or "-", warm_ms=elem_info.get("warmMs"))
@@ -966,9 +1041,9 @@ def _settle_note(settle: dict | None, *, judge_change: bool) -> str:
     return ""
 
 
-def _window_before(handle: int, title: str) -> dict | None:
-    """动作前的目标窗口（取自最近一次窗口列表），动作后据此判断有没有弹出新窗口。"""
-    items = list(_LAST_WINDOWS.get("items") or [])
+def _window_before(ctx: Any, handle: int, title: str) -> dict | None:
+    """动作前的目标窗口（取自本会话最近一次窗口列表），动作后据此判断有没有弹出新窗口。"""
+    items = list(_last_windows(ctx).get("items") or [])
     for it in items:
         if (handle and int(it.get("h") or 0) == handle) or (
                 not handle and title and title.lower() in str(it.get("title") or "").lower()):
@@ -989,9 +1064,9 @@ async def _after_action(
     附带观察失败只追加一行说明，绝不让动作本身报错。
     clicks：本次动作的点击落点（屏幕坐标），画在新截图上让模型看到「实际点在哪」。
     """
-    target = _window_before(handle, title)
+    target = _window_before(ctx, handle, title)
     try:
-        note, follow = await _window_change_note(target)
+        note, follow = await _window_change_note(ctx, target)
     except Exception:  # noqa: BLE001 — 窗口比对只是附加信息
         note, follow = "", None
     if note:
@@ -1002,7 +1077,19 @@ async def _after_action(
         line = _settle_note(settle, judge_change=judge_change and not note)
         if line:
             output += "\n" + line
-    if not bool(args.get("then_shot", True)):
+    # plan-537-2251：桌面写操作的结果里补一次已沉淀的路线。
+    # 原有召回只在 desktop_focus / desktop_apps / desktop_snapshot / desktop_screenshot 触发，
+    # 模型直接 desktop_click 动手时整轮都拿不到路线。route_hint 内部按会话去重（_SHOWN），
+    # 同一路线一个会话只附一次，不会刷屏；召回失败绝不影响动作本身。
+    if not data.get("route_hint"):
+        try:
+            route = await _desktop_hint(ctx, target, title)
+        except Exception:  # noqa: BLE001 — 召回只是锦上添花
+            route = ""
+        if route:
+            output += route
+            data["route_hint"] = True
+    if not _flag(args.get("then_shot", True)):
         return output
     if settle is None:
         # 内核未做动作后采样（旧版本）：固定等一下，避免截到动作前的画面
@@ -1070,16 +1157,22 @@ class DesktopWindowsTool(Tool):
         if err:
             return ToolResult(ok=False, output="", error=err)
 
+        # plan-537-2251 M14：limit 夹到 1..200，非法值给可读错误
+        limit, limit_err, limit_capped = _clamp_int(args, "limit", 30, 1, 200)
+        if limit_err:
+            return ToolResult(ok=False, output="", error=limit_err)
         try:
             data = await _call("windows", {
                 "filter": str(args.get("filter") or ""),
-                "limit": int(args.get("limit") or 30),
+                "limit": limit,
             })
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
         items = data.get("items") or []
         lines = [f"共 {data.get('count', 0)} 个可见窗口，当前前台：{data.get('foregroundTitle') or '(无)'}"]
+        if limit_capped:
+            lines.append(_cap_note(True, "limit", limit))
         for w in items:
             flags = []
             if w.get("fg"):
@@ -1148,16 +1241,22 @@ class DesktopSnapshotTool(Tool):
         if not title and not handle:
             return ToolResult(ok=False, output="", error="必须提供 title 或 handle 之一。")
 
-        win = await _resolve_window(handle, title)
+        win = await _resolve_window(ctx, handle, title)
         if win is None:
             return ToolResult(ok=False, output="", error="未找到目标窗口，请先 desktop_windows 确认 handle 或标题。")
         route = await _desktop_hint(ctx, win, title)
-        limit = max(1, min(300, int(args.get("budget") or 120)))
-        interactive_only = bool(args.get("interactive_only", False))
+        # plan-537-2251 M14/M15：参数统一夹取 + 布尔归一
+        limit, limit_err, limit_capped = _clamp_int(args, "budget", 120, 1, 200)
+        if limit_err:
+            return ToolResult(ok=False, output="", error=limit_err)
+        time_budget, tb_err, tb_capped = _clamp_int(args, "time_budget_ms", 800, 50, 10000)
+        if tb_err:
+            return ToolResult(ok=False, output="", error=tb_err)
+        interactive_only = _flag(args.get("interactive_only", False))
         try:
             mapping, channel, info = await _element_listing(
                 ctx, win, region=await _window_frame(win), limit=limit, interactive_only=interactive_only,
-                budget=max(limit * 2, 300), time_budget_ms=int(args.get("time_budget_ms") or 800))
+                budget=max(limit * 2, 300), time_budget_ms=time_budget)
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
@@ -1179,6 +1278,10 @@ class DesktopSnapshotTool(Tool):
             lines.append("注意：元素较多，只列出一部分（可交互项优先）；找不到目标时先滚动页面再读，或按截图坐标操作。")
         if info.get("fallback"):
             lines.append("注意：快速读取失败，已回退到逐层遍历，结果可能不完整。")
+        caps = [n for n in (_cap_note(limit_capped, "budget", limit),
+                            _cap_note(tb_capped, "time_budget_ms", time_budget)) if n]
+        if caps:
+            lines.extend(caps)
         # plan-20261018-operator-boost：控件树只覆盖窗口一小条（自绘 / 内嵌网页）时直说，避免误判内容区为空
         if channel == "uia" and not info.get("chromium") and _uia_sparse(
                 list(mapping.values()), await _window_frame(win)):
@@ -1251,27 +1354,31 @@ class DesktopScreenshotTool(Tool):
             return ToolResult(ok=False, output="", error=err)
 
         zoom = args.get("zoom")
+        handle = int(args.get("handle") or 0)
+        title = str(args.get("title") or "").strip()
+        win = await _resolve_window(ctx, handle, title) if (handle or title) else await _foreground_window(ctx)
+        # plan-537-2251 M8：点名了窗口却找不到时直接报错，不静默改截整屏
+        if (handle or title) and win is None:
+            return ToolResult(ok=False, output="", error=_window_missing_error(handle, title))
         if zoom not in (None, "", []):
-            return await self._zoom(zoom, ctx)
+            # plan-537-2251 L4：同时给了 zoom 与 handle/title 时按窗口范围裁剪，而不是直接忽略窗口
+            return await self._zoom(zoom, ctx, win=win if (handle or title) else None)
 
         if "marks" in args or "grid" in args:
             desktop_shots.set_overlay(
                 ctx,
-                marks=bool(args["marks"]) if "marks" in args else None,
-                grid=bool(args["grid"]) if "grid" in args else None,
+                marks=_flag(args["marks"]) if "marks" in args else None,
+                grid=_flag(args["grid"]) if "grid" in args else None,
             )
 
-        handle = int(args.get("handle") or 0)
-        title = str(args.get("title") or "").strip()
-        win = await _resolve_window(handle, title) if (handle or title) else await _foreground_window()
-        if bool(args.get("wait_stable", False)):
+        if _flag(args.get("wait_stable", False)):
             region, _src = await _capture_region(win, prefer_window=bool(handle or title))
             await _standalone_settle(region, timeout_ms=3000)
 
         try:
             data, text, _frame = await _take_shot(
                 ctx, handle=handle, title=title, win=win,
-                elements=bool(args["elements"]) if "elements" in args else None)
+                elements=_flag(args["elements"]) if "elements" in args else None)
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
@@ -1286,7 +1393,7 @@ class DesktopScreenshotTool(Tool):
             data["route_hint"] = True
         return ToolResult(ok=True, output=text, data=data)
 
-    async def _zoom(self, raw: Any, ctx: ToolContext) -> ToolResult:
+    async def _zoom(self, raw: Any, ctx: ToolContext, *, win: dict | None = None) -> ToolResult:
         """放大查看（只读）：区域取自当前坐标系，放大图不成为新的坐标参照——与 Claude computer use 的 zoom 一致。"""
         frame = desktop_shots.get_frame(ctx)
         if frame is None:
@@ -1300,6 +1407,27 @@ class DesktopScreenshotTool(Tool):
             x, w = x - (96 - w) // 2, 96
         if h < 96:
             y, h = y - (96 - h) // 2, 96
+        # plan-537-2251 L4：先与目标窗口求交（给了窗口时），再夹到虚拟桌面。
+        # 此前 zoom 与 handle/title 同时给出时窗口被直接忽略，放大图可能越过窗口、看到别的程序。
+        note = ""
+        if win is not None and not win.get("min"):
+            wf = await _window_frame(win)
+            if wf and wf[2] > 0 and wf[3] > 0:
+                left, top = max(x, wf[0]), max(y, wf[1])
+                right, bottom = min(x + w, wf[0] + wf[2]), min(y + h, wf[1] + wf[3])
+                if right - left >= 16 and bottom - top >= 16:
+                    if (left, top, right - left, bottom - top) != (x, y, w, h):
+                        x, y, w, h = left, top, right - left, bottom - top
+                        note = f"（已按窗口「{win.get('title') or ''}」范围裁剪）"
+        vs = await _virtual_screen()
+        if vs is not None:
+            left, top = max(x, vs[0]), max(y, vs[1])
+            right, bottom = min(x + w, vs[0] + vs[2]), min(y + h, vs[1] + vs[3])
+            if right - left >= 1 and bottom - top >= 1:
+                if (left, top, right - left, bottom - top) != (x, y, w, h):
+                    x, y, w, h = left, top, right - left, bottom - top
+                    if not note:
+                        note = "（已按屏幕可见范围裁剪）"
         params = {
             "x": x, "y": y, "w": w, "h": h,
             "maxDim": desktop_coords.model_safe_max_dim(w, h, 1024),
@@ -1314,7 +1442,7 @@ class DesktopScreenshotTool(Tool):
             return _fail(exc)
         meta = _shot_meta(data)
         lines = [
-            f"放大查看：屏幕区域 ({x},{y}) {w}×{h}，放大图 {meta['width']}×{meta['height']}。",
+            f"放大查看：屏幕区域 ({x},{y}) {w}×{h}{note}，放大图 {meta['width']}×{meta['height']}。",
             f"只用于看清细节：之后的坐标仍按截图 shot_id={frame.shot_id} 取值，口径不变。",
             f"已保存：{meta['path']}",
         ]
@@ -1435,24 +1563,30 @@ class DesktopClickTool(Tool):
         if pt.handle and not (handle or title):
             handle = pt.handle
 
-        win = await _resolve_window(handle, title) if (handle or title) else None
+        win = await _resolve_window(ctx, handle, title) if (handle or title) else None
+        # plan-537-2251 M8：点名了窗口却找不到时直接报错，不跳过范围校验把点击送到别的程序
+        if (handle or title) and win is None:
+            return ToolResult(ok=False, output="", error=_window_missing_error(handle, title))
         outside = await _outside_window_error(win, pt, args, "点击")
         if outside:
             return ToolResult(ok=False, output="", error=outside,
                               data={"action": "refuse", "at": [pt.x, pt.y], "coord_source": pt.source})
 
+        count, count_err, count_capped = _clamp_int(args, "count", 1, 1, 3)
+        if count_err:
+            return ToolResult(ok=False, output="", error=count_err)
         params: dict[str, Any] = {
             "x": pt.x,
             "y": pt.y,
             "title": title,
             "handle": handle,
             "button": str(args.get("button") or "left"),
-            "count": int(args.get("count") or 1),
-            "focusFirst": bool(args.get("focus_first", False)),
+            "count": count,
+            "focusFirst": _flag(args.get("focus_first", False)),
             "requireForeground": bool(getattr(settings, "desktop_require_foreground", True)),
             "text": str(args.get("text") or ""),
             "keys": str(args.get("keys") or ""),
-            "clearFirst": bool(args.get("clear_first", False)),
+            "clearFirst": _flag(args.get("clear_first", False)),
             **(await _settle_args(ctx, win)),
         }
         # 点击点「附近有什么」要用点击时刻的界面：取点击前的元素表（写动作之后它会被标为过期）
@@ -1461,13 +1595,13 @@ class DesktopClickTool(Tool):
         try:
             data = await _call("click", params)
         except Exception as exc:  # noqa: BLE001
-            return ToolResult(ok=False, output="", error=await _not_foreground_hint(exc, handle, title))
+            return ToolResult(ok=False, output="", error=await _not_foreground_hint(ctx, exc, handle, title))
 
         # 动作改变了界面：元素编号需要重新定位；记下点击位置供随后的输入观察局部变化
         desktop_shots.mark_stale(ctx)
         desktop_shots.note_point(ctx, pt.x, pt.y)
 
-        verb = {1: "点击", 2: "双击"}.get(int(args.get("count") or 1), "连击")
+        verb = {1: "点击", 2: "双击"}.get(count, "连击")
         if str(args.get("button") or "left") == "right":
             verb = "右键点击"
         parts = [f"已{verb}（{pt.source}）"]
@@ -1482,6 +1616,14 @@ class DesktopClickTool(Tool):
         output = "，".join(parts) + "。"
         if pt.note:
             output += f"（{pt.note}）"
+        # plan-537-2251 S1：clicked=false 表示 SendInput 被系统拒绝（目标提权 / 锁屏 / 输入策略不允许）。
+        # 这里仍返回 ok=True：ok=False 时 executor 只把 error 给模型、output 会被丢弃（base.py:105-110），
+        # 而落点反馈与动作后截图正是模型修正下一步的依据——让模型看到现场比语义纯洁更重要。
+        if data.get("clicked") is False:
+            output = ("点击未生效：系统拒绝了输入（目标窗口可能提权、锁屏，或被输入策略不允许）。\n" + output)
+            data["failed"] = True
+        if count_capped:
+            output += "\n" + _cap_note(True, "count", count)
         feedback = _click_feedback(pt, data, near_items)
         if feedback:
             output += "\n" + "\n".join(feedback)
@@ -1537,13 +1679,16 @@ class DesktopTypeTool(Tool):
             return ToolResult(ok=False, output="", error="text 不能为空。")
         handle = int(args.get("handle") or 0)
         title = str(args.get("title") or "")
-        win = await _resolve_window(handle, title) if (handle or title) else None
+        win = await _resolve_window(ctx, handle, title) if (handle or title) else None
+        # plan-537-2251 M8：点名了窗口却找不到时直接报错，不静默降级
+        if (handle or title) and win is None:
+            return ToolResult(ok=False, output="", error=_window_missing_error(handle, title))
         params: dict[str, Any] = {
             "text": text,
             "title": title,
             "handle": handle,
-            "focusFirst": bool(args.get("focus_first", False)),
-            "clearFirst": bool(args.get("clear_first", False)),
+            "focusFirst": _flag(args.get("focus_first", False)),
+            "clearFirst": _flag(args.get("clear_first", False)),
             "keys": str(args.get("keys") or ""),
             "requireForeground": bool(getattr(settings, "desktop_require_foreground", True)),
             **(await _settle_args(ctx, win)),
@@ -1554,7 +1699,7 @@ class DesktopTypeTool(Tool):
         try:
             data = await _call("type", params)
         except Exception as exc:  # noqa: BLE001
-            return ToolResult(ok=False, output="", error=await _not_foreground_hint(exc, handle, title))
+            return ToolResult(ok=False, output="", error=await _not_foreground_hint(ctx, exc, handle, title))
 
         desktop_shots.mark_stale(ctx)
         focused = "（已先激活目标窗口）" if data.get("focusedNow") else ""
@@ -1610,17 +1755,20 @@ class DesktopKeysTool(Tool):
             return ToolResult(ok=False, output="", error="keys 不能为空。")
         handle = int(args.get("handle") or 0)
         title = str(args.get("title") or "")
-        win = await _resolve_window(handle, title) if (handle or title) else None
-        try:
-            repeat = max(1, min(50, int(args.get("repeat") or 1)))
-        except (TypeError, ValueError):
-            repeat = 1
+        win = await _resolve_window(ctx, handle, title) if (handle or title) else None
+        # plan-537-2251 M8：点名了窗口却找不到时直接报错，不静默降级
+        if (handle or title) and win is None:
+            return ToolResult(ok=False, output="", error=_window_missing_error(handle, title))
+        # plan-537-2251 M14：repeat 夹到 1..20（连按次数过大既慢又容易误操作）
+        repeat, repeat_err, repeat_capped = _clamp_int(args, "repeat", 1, 1, 50)
+        if repeat_err:
+            return ToolResult(ok=False, output="", error=repeat_err)
         params: dict[str, Any] = {
             "keys": keys,
             "repeat": repeat,
             "title": title,
             "handle": handle,
-            "focusFirst": bool(args.get("focus_first", False)),
+            "focusFirst": _flag(args.get("focus_first", False)),
             "requireForeground": bool(getattr(settings, "desktop_require_foreground", True)),
             **(await _settle_args(ctx, win)),
         }
@@ -1630,11 +1778,13 @@ class DesktopKeysTool(Tool):
         try:
             data = await _call("keys", params)
         except Exception as exc:  # noqa: BLE001
-            return ToolResult(ok=False, output="", error=await _not_foreground_hint(exc, handle, title))
+            return ToolResult(ok=False, output="", error=await _not_foreground_hint(ctx, exc, handle, title))
 
         desktop_shots.mark_stale(ctx)
         times = f"（共按下 {data.get('pressed')} 次）" if int(data.get("pressed") or 1) > 1 else ""
         output = f"已发送按键 {keys}{times} 到「{data.get('target') or '当前窗口'}」。"
+        if repeat_capped:
+            output += "\n" + _cap_note(True, "repeat", repeat)
         settle = data.get("settle") if isinstance(data.get("settle"), dict) else None
         output = await _after_action(ctx, args, handle=handle, title=title, output=output, data=data,
                                      settle=settle, judge_change=False)
@@ -1678,10 +1828,21 @@ class DesktopScrollTool(Tool):
 
         handle = int(args.get("handle") or 0)
         title = str(args.get("title") or "")
-        win = await _resolve_window(handle, title) if (handle or title) else None
+        win = await _resolve_window(ctx, handle, title) if (handle or title) else None
+        # plan-537-2251 M8：点名了窗口却找不到时直接报错，不静默降级
+        if (handle or title) and win is None:
+            return ToolResult(ok=False, output="", error=_window_missing_error(handle, title))
+        # plan-537-2251 M14：clicks 夹到 -50..50，非法值给可读错误而不是抛 ValueError
+        clicks, clicks_err, clicks_capped = _clamp_int(args, "clicks", -3, -50, 50)
+        if clicks_err:
+            return ToolResult(ok=False, output="", error=clicks_err)
         params: dict[str, Any] = {
-            "clicks": int(args.get("clicks") if args.get("clicks") is not None else -3),
-            "horizontal": bool(args.get("horizontal", False)),
+            "clicks": clicks,
+            "horizontal": _flag(args.get("horizontal", False)),
+            # plan-537-2251 L3：点名窗口时让内核做与点击相同的前台 / 范围校验
+            "title": title,
+            "handle": handle,
+            "requireForeground": bool(getattr(settings, "desktop_require_foreground", True)),
             **(await _settle_args(ctx, win)),
         }
         where = "当前画面中央"
@@ -1705,6 +1866,13 @@ class DesktopScrollTool(Tool):
 
         desktop_shots.mark_stale(ctx)
         output = f"已滚动 {params['clicks']} 格（{where}）。"
+        # plan-537-2251 S1：scrolled=false 说明系统拒绝了滚轮输入；保留 ok=True 以保住截图与现场说明
+        # （ok=False 时 output 会被 executor 丢掉，见 base.py:105-110）。
+        if data.get("scrolled") is False:
+            output = ("滚动未生效：系统拒绝了输入（目标窗口可能提权、锁屏，或被输入策略不允许）。\n" + output)
+            data["failed"] = True
+        if clicks_capped:
+            output += "\n" + _cap_note(True, "clicks", clicks)
         settle = data.get("settle") if isinstance(data.get("settle"), dict) else None
         output = await _after_action(ctx, args, handle=handle, title=title, output=output, data=data,
                                      settle=settle, judge_change=True)
@@ -1725,6 +1893,16 @@ _BATCH_ALIASES = {
 }
 _BATCH_ACTIONS = ["click", "double_click", "right_click", "move", "drag", "scroll", "type", "key", "wait"]
 _BATCH_MAX_STEPS = 30
+
+# 内核回报 <key>=false 时的统一原因文案（plan-537-2251 S1 / L2）：系统拒绝了输入，
+# 四种动作的成因相同，集中一份避免各处措辞漂移
+_ACTION_REJECTED = {
+    "click": "点击未生效：系统拒绝了输入（目标窗口可能提权、锁屏，或被输入策略不允许）",
+    "scroll": "滚动未生效：系统拒绝了输入（目标窗口可能提权、锁屏，或被输入策略不允许）",
+    "drag": "拖动未生效：系统拒绝了输入（目标窗口可能提权、锁屏，或被输入策略不允许）",
+    "move": "移动未生效：系统拒绝了输入（目标窗口可能提权、锁屏，或被输入策略不允许）",
+}
+_ACTION_OK_FIELD = {"click": "clicked", "scroll": "scrolled", "drag": "dragged", "move": "moved"}
 
 
 class DesktopBatchTool(Tool):
@@ -1831,9 +2009,13 @@ class DesktopBatchTool(Tool):
                                            "_coord": pt.item is None},
                                  f"{verb}（{pt.source}）"))
             elif kind == "scroll":
+                # plan-537-2251 M14/M15：clicks 夹取、horizontal 布尔归一
+                clicks, clicks_err, _clicks_capped = _clamp_int(raw, "clicks", -3, -50, 50)
+                if clicks_err:
+                    return [], f"第 {i} 步：{clicks_err}"
                 payload: dict[str, Any] = {
-                    "clicks": int(raw.get("clicks") if raw.get("clicks") is not None else -3),
-                    "horizontal": bool(raw.get("horizontal", False)),
+                    "clicks": clicks,
+                    "horizontal": _flag(raw.get("horizontal", False)),
                 }
                 if raw.get("x") is not None and raw.get("y") is not None:
                     pt = await _resolve_point(ctx, raw, allow_refresh=allow_refresh)
@@ -1845,21 +2027,23 @@ class DesktopBatchTool(Tool):
                 text = str(raw.get("text") or "")
                 if not text:
                     return [], f"第 {i} 步：type 需要 text"
-                plan.append(("type", {"text": text, "clearFirst": bool(raw.get("clear_first", False))},
+                plan.append(("type", {"text": text, "clearFirst": _flag(raw.get("clear_first", False))},
                              f"输入 {len(text)} 个字符"))
             elif kind == "key":
                 keys = str(raw.get("keys") or raw.get("key") or raw.get("text") or "").strip()
                 if not keys:
                     return [], f"第 {i} 步：key 需要 keys"
-                try:
-                    rep = max(1, min(50, int(raw.get("repeat") or 1)))
-                except (TypeError, ValueError):
-                    rep = 1
+                rep, rep_err, _rep_capped = _clamp_int(raw, "repeat", 1, 1, 50)
+                if rep_err:
+                    return [], f"第 {i} 步：{rep_err}"
                 plan.append(("keys", {"keys": keys, "repeat": rep}, f"按键 {keys}" + (f" ×{rep}" if rep > 1 else "")))
             else:
-                try:
-                    ms = max(0, min(5000, int(raw.get("ms") or raw.get("duration_ms") or 500)))
-                except (TypeError, ValueError):
+                # plan-537-2251 M14：wait 的时长优先取 ms，其次 duration_ms，夹到 0..5000
+                if raw.get("ms") is None:
+                    ms, ms_err, _ms_capped = _clamp_int(raw, "duration_ms", 500, 0, 5000)
+                else:
+                    ms, ms_err, _ms_capped = _clamp_int(raw, "ms", 500, 0, 5000)
+                if ms_err:
                     return [], f"第 {i} 步：wait 的 ms 必须是数字"
                 plan.append(("wait", {"ms": ms}, f"等待 {ms} ms"))
         return plan, ""
@@ -1872,8 +2056,10 @@ class DesktopBatchTool(Tool):
         actions = args.get("actions")
         if not isinstance(actions, list) or not actions:
             return ToolResult(ok=False, output="", error="actions 需要是非空的动作列表。")
-        if len(actions) > _BATCH_MAX_STEPS:
-            return ToolResult(ok=False, output="", error=f"一次最多 {_BATCH_MAX_STEPS} 步，请拆成多次。")
+        # plan-537-2251 M14：步数超限不再整批拒绝，截断到上限执行并在结果里明确说明
+        steps_capped = len(actions) > _BATCH_MAX_STEPS
+        if steps_capped:
+            actions = list(actions[:_BATCH_MAX_STEPS])
 
         handle = int(args.get("handle") or 0)
         title = str(args.get("title") or "")
@@ -1882,20 +2068,25 @@ class DesktopBatchTool(Tool):
             tbl = desktop_shots.get_table(ctx)
             if tbl is not None and tbl.handle:
                 handle = int(tbl.handle)
-        win = await _resolve_window(handle, title) if (handle or title) else None
+        win = await _resolve_window(ctx, handle, title) if (handle or title) else None
+        # plan-537-2251 M8：点名了窗口却找不到时直接报错，不静默降级
+        if (handle or title) and win is None:
+            return ToolResult(ok=False, output="", error=_window_missing_error(handle, title))
         plan, plan_err = await self._plan(ctx, actions, win, args)
         if plan_err:
             return ToolResult(ok=False, output="", error=plan_err + "（未执行任何步骤）")
 
         require_fg = bool(getattr(settings, "desktop_require_foreground", True))
-        if bool(args.get("focus_first", False)) and (handle or title):
-            # 先激活一次：悬停 / 拖动 / 滚动这几类内核动作不带前台校验，放在每步里激活会漏掉它们
+        if _flag(args.get("focus_first", False)) and (handle or title):
+            # 先激活一次：批量里的滚动 / 悬停 / 拖动同样走内置的前台校验（plan-537-2251 L3），
+            # 不先激活就会在第一步被拒；统一激活一次比每步都激活省往返
             try:
                 await _call("focus", {"title": title, "handle": handle, "proc": ""})
             except Exception as exc:  # noqa: BLE001
                 return ToolResult(ok=False, output="", error=f"激活目标窗口失败：{exc}（未执行任何步骤）")
         done: list[str] = []
         failure = ""
+        soft_failures: list[str] = []
         last_click: tuple[int, int] | None = None
         click_marks: list[tuple[int, int, str]] = []
         hit_notes: list[str] = []
@@ -1906,13 +2097,18 @@ class DesktopBatchTool(Tool):
             try:
                 if op == "wait":
                     await asyncio.sleep(payload["ms"] / 1000.0)
-                elif op in ("click", "type", "keys"):
+                elif op in ("click", "type", "keys", "scroll", "move", "drag"):
                     res = await _call(op, {**wire, **guarded})
                 else:
                     res = await _call(op, wire)
             except Exception as exc:  # noqa: BLE001
-                failure = f"第 {i} 步（{desc}）失败：{await _not_foreground_hint(exc, handle, title)}"
+                failure = f"第 {i} 步（{desc}）失败：{await _not_foreground_hint(ctx, exc, handle, title)}"
                 break
+            # plan-537-2251 L2：动作本身被系统拒绝（<key>=false）时不算异常，但要计入失败，
+            # 并明确告诉模型「后续步骤已继续」——否则「已执行 N 步」会让它以为全部生效
+            ok_field = _ACTION_OK_FIELD.get(op)
+            if ok_field and res.get(ok_field) is False:
+                soft_failures.append(f"第 {i} 步（{desc}）失败：{_ACTION_REJECTED[op]}（后续步骤已继续）")
             if op == "click":
                 last_click = (int(payload["x"]), int(payload["y"]))
                 click_marks.append((last_click[0], last_click[1], ""))
@@ -1937,22 +2133,34 @@ class DesktopBatchTool(Tool):
             output += "\n注意：" + "；".join(hit_notes) + "——按坐标点到了不可点击的位置，请对照新截图里的落点标记修正。"
         if failure:
             output += "\n" + failure + "\n后续步骤未执行；请看新截图确认当前状态后再继续。"
+        if soft_failures:
+            output += "\n" + "\n".join(soft_failures)
+        if steps_capped:
+            output += f"\n动作数超过一次上限，已按上限处理为前 {_BATCH_MAX_STEPS} 步。"
         settle = await _standalone_settle(await _settle_region(ctx, win), timeout_ms=1500, min_ms=120)
-        data: dict[str, Any] = {"steps": len(plan), "done": len(done), "failed": bool(failure)}
-        shot_args = {"then_shot": bool(args.get("screenshot", True))}
+        # plan-537-2251 L2：部分动作失败（异常中断或被系统拒绝）都计入 failed，ok 仍然为 True
+        data: dict[str, Any] = {"steps": len(plan), "done": len(done),
+                                "failed": bool(failure or soft_failures), "capped_steps": steps_capped}
+        shot_args = {"then_shot": _flag(args.get("screenshot", True))}
         output = await _after_action(ctx, shot_args, handle=handle, title=title, output=output, data=data,
                                      settle=settle or None, judge_change=False, clicks=click_marks or None)
-        _obs("batch", steps=len(plan), done=len(done), failed=bool(failure))
+        _obs("batch", steps=len(plan), done=len(done), failed=bool(failure or soft_failures),
+             soft=len(soft_failures))
         # 部分完成也算成功返回：模型需要看到新截图才能决定下一步（失败原因已写在结果里）
         return ToolResult(ok=True, output=output, data=data)
 
 
 class DesktopFocusTool(Tool):
     name = "desktop_focus"
-    risk_level = "low"
+    # plan-537-2251 L5：它会 SetForegroundWindow 并把目标压到最前、预热无障碍树，属于改变系统状态，
+    # 不是纯读；风险等级与写操作同级，approval_policy 也已把它从只读集合移入写操作集合，
+    # 使这个等级真正生效（classify 里集合判断优先于 risk_level）。
+    risk_level = "high"
     description = (
         "把指定窗口激活到前台。\n"
-        "当 desktop_click/desktop_type 提示「目标窗口不在前台」时，先用本工具激活它（或在动作里设 focus_first=true）。\n"
+        "注意：本操作会改变窗口层级（目标窗口被切到最前、原前台窗口被压到后面），并预热目标窗口的无障碍树；\n"
+        "它不只是读取状态。当 desktop_click/desktop_type 提示「目标窗口不在前台」时，先用本工具激活它"
+        "（或在动作里设 focus_first=true）。\n"
         "需在「设置 → 电脑操控」中启用。"
     )
 
@@ -2006,11 +2214,12 @@ class DesktopRecipeTool(Tool):
     risk_level = "low"
     description = (
         "记录或查询「操作路线」——某应用某操作意图的通用原则，用于减少重复推演。\n"
-        "action=recall：在操控某个应用之前先查一次。若命中已有路线，按其 principle 执行即可，\n"
+        "action=recall：**必须先于操作**——本轮首次操控某个应用前就要调用一次。若命中已有路线，按其 principle 执行即可，\n"
         "不必重新摸索界面（这是本工具的主要价值：降低模型思考与推理开销）。\n"
-        "desktop_focus / desktop_apps start / desktop_snapshot / desktop_screenshot 确定目标应用时也会自动附上已有路线。\n"
+        "desktop_focus / desktop_apps start / desktop_snapshot / desktop_screenshot 确定目标应用时也会自动附上已有路线；\n"
+        "但如果你跳过它们直接 desktop_click，自动附带不会触发，所以动手前先 recall 是硬要求。\n"
         "网页（内置浏览器）的路线用 browser_recipe。\n"
-        "action=save：一次操控成功后，把「怎么做才有效、踩了什么坑」沉淀下来。\n"
+        "action=save：**在写最终汇报之前**保存，不要等到汇报完再补：把「怎么做才有效、踩了什么坑」记下来。\n"
         "**存的是通用原则，不是坐标回放**——界面会变，原则不会。\n"
         "同一应用同一意图只保留一条：重复保存会累加使用次数并更新原则，不会产生重复条目。\n"
         "需在「设置 → 电脑操控」中启用。"
@@ -2198,9 +2407,13 @@ class DesktopAppsTool(Tool):
                 output=f"已启动「{data.get('title')}」（handle={data.get('handle')}）。" + route,
                 data=data,
             )
+        # plan-537-2251 L6：启动命令已发出但没在超时内检出窗口——保持 ok=True 让模型看到现场输出，
+        # 但必须置 failed 并明说，否则「已启动」会被当成启动成功
+        data = {**data, "failed": True}
         return ToolResult(
             ok=True,
-            output=f"已启动 {data.get('exe')}，但未在超时内检测到窗口。" + route,
+            output=(f"已启动 {data.get('exe')}，但未在超时内检测到窗口，可能需要更长时间或启动失败。"
+                    "请稍等后用 desktop_windows 确认窗口是否出现（或改用 desktop_apps find 核对启动路径）。" + route),
             data=data,
         )
 

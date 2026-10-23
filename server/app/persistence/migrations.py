@@ -365,6 +365,136 @@ async def _cleanup_legacy_notnull_columns(db: AsyncSession) -> int:
     return cleaned
 
 
+async def _memory_session_nullable(db: AsyncSession) -> bool:
+    """plan-537-2256：去掉 memory_entries.session_id 的 NOT NULL（幂等）。
+
+    记忆的 session_id 只是「创建来源」，project/global 记忆是跨会话资产——
+    来源会话被永久删除时只应解除关联（外键 ON DELETE SET NULL），行本身必须保留。
+    SET NULL 的前提是列可空 + 外键带 ON DELETE 动作，而旧库两者都没有：
+    旧 DDL 是 `session_id BIGINT NOT NULL` + 表级 `FOREIGN KEY(...) REFERENCES sessions (id)`
+    （RESTRICT），直接删会话会因跨层记忆仍引用而被拒。SQLite 不支持事后改列/改外键，
+    故按「建新表 → 复制数据 → 换名 → 重放索引」重建，并在改写 DDL 时同时
+    去掉 NOT NULL、补上 ON DELETE SET NULL。非 SQLite 走 ALTER + 重建约束，失败只记 warning。
+    """
+    import re
+
+    if not await _table_exists(db, "memory_entries"):
+        return False
+    meta = await _legacy_column_meta(db, "memory_entries")
+    target = next((m for m in meta if m[0] == "session_id"), None)
+    if target is None or not target[2]:
+        return False  # 列不存在或已可空：什么也不做（幂等）
+
+    if not settings.database_url.startswith("sqlite"):
+        try:
+            await db.execute(text(
+                "ALTER TABLE memory_entries ALTER COLUMN session_id DROP NOT NULL"))
+            await db.commit()
+            logger.info("迁移: memory_entries.session_id 已改为可空")
+        except Exception as e:
+            logger.warning("迁移: memory_entries.session_id 改可空失败(非阻塞): %s", e)
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            return False
+        # 外键若仍是 RESTRICT，删会话会被跨层记忆挡住——尽力改成 SET NULL
+        try:
+            names = [r[0] for r in (await db.execute(text(
+                "SELECT constraint_name FROM information_schema.table_constraints "
+                "WHERE table_name='memory_entries' AND constraint_type='FOREIGN KEY'"
+            ))).fetchall()]
+            for name in names:
+                cols = [r[0] for r in (await db.execute(text(
+                    "SELECT column_name FROM information_schema.key_column_usage "
+                    "WHERE table_name='memory_entries' AND constraint_name=:n"
+                ), {"n": name})).fetchall()]
+                if cols != ["session_id"]:
+                    continue
+                await db.execute(text(f'ALTER TABLE memory_entries DROP CONSTRAINT "{name}"'))
+                await db.execute(text(
+                    f'ALTER TABLE memory_entries ADD CONSTRAINT "{name}" '
+                    "FOREIGN KEY (session_id) REFERENCES sessions (id) ON DELETE SET NULL"))
+            await db.commit()
+        except Exception as e:
+            logger.warning("迁移: memory_entries 外键改 SET NULL 失败(非阻塞): %s", e)
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+        return True
+
+    rows = (await db.execute(text(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_entries'"
+    ))).fetchall()
+    create_sql = str(rows[0][0] or "") if rows else ""
+    if not create_sql:
+        return False
+
+    # 1) session_id 列定义：去 NOT NULL；若外键写在该列内（REFERENCES）则补 ON DELETE SET NULL
+    pattern = re.compile(r'(?is)(["`\[]?session_id["`\]]?\s+)([^,)]*)')
+
+    def _fix_column(m: "re.Match") -> str:
+        body = re.sub(r"(?is)\s+NOT\s+NULL", "", m.group(2))
+        if "references" in body.lower() and "on delete" not in body.lower():
+            body = re.sub(
+                r"(?is)(references\s+[\"`\[]?sessions[\"`\]]?\s*\([^)]*\))",
+                r"\1 ON DELETE SET NULL", body, count=1,
+            )
+        return m.group(1) + body
+
+    rewritten, n = pattern.subn(_fix_column, create_sql, count=1)
+    if n == 0:
+        logger.warning("迁移: 未能定位 memory_entries.session_id 列定义，跳过改可空")
+        return False
+
+    # 2) 表级外键约束：FOREIGN KEY(session_id) REFERENCES sessions (id) → 补 ON DELETE SET NULL
+    fk_pattern = re.compile(
+        r'(?is)(FOREIGN\s+KEY\s*\(\s*["`\[]?session_id["`\]]?\s*\)\s*'
+        r'REFERENCES\s+["`\[]?sessions["`\]]?\s*\([^)]*\))(\s+ON\s+DELETE\s+\w+)?'
+    )
+
+    def _fix_fk(m: "re.Match") -> str:
+        return m.group(1) + " ON DELETE SET NULL"
+
+    rewritten = fk_pattern.sub(_fix_fk, rewritten, count=1)
+
+    before = int((await db.execute(text("SELECT count(*) FROM memory_entries"))).scalar() or 0)
+    tmp = "memory_entries__nullable_tmp"
+    tmp_sql = re.sub(
+        r'(?is)^\s*CREATE\s+TABLE\s+["`\[]?memory_entries["`\]]?',
+        f'CREATE TABLE "{tmp}"', rewritten, count=1,
+    )
+    # DROP TABLE 会连带删索引，重建后重放
+    index_rows = (await db.execute(text(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='memory_entries' AND sql IS NOT NULL"
+    ))).fetchall()
+    try:
+        await db.execute(text(f'DROP TABLE IF EXISTS "{tmp}"'))
+        await db.execute(text(tmp_sql))
+        await db.execute(text(f'INSERT INTO "{tmp}" SELECT * FROM "memory_entries"'))
+        after = int((await db.execute(text(f'SELECT count(*) FROM "{tmp}"'))).scalar() or 0)
+        if after != before:
+            # 绝不静默丢行：回滚后抛出，由调用方显式报错
+            raise RuntimeError(f"记忆表重建前后行数不一致：{before} → {after}")
+        await db.execute(text('DROP TABLE "memory_entries"'))
+        await db.execute(text(f'ALTER TABLE "{tmp}" RENAME TO "memory_entries"'))
+        for (idx_sql,) in index_rows:
+            try:
+                await db.execute(text(str(idx_sql)))
+            except Exception:  # 索引可能已随重建存在或与当前结构等价，忽略
+                pass
+        await db.commit()
+    except Exception:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        raise
+    logger.info("迁移: memory_entries 已重建，session_id 允许为空（%d 行）", before)
+    return True
+
+
 # (索引名, 表名, 列)。create_all 不会给已存在的表补索引，这里幂等补建。
 _INDEXES: list[tuple[str, str, str]] = [
     # plan-20261021-usage-update：调用记录表按时间倒序分页，数万行时没有索引会每页全表排序
@@ -420,6 +550,18 @@ async def run_migrations(db: AsyncSession) -> dict:
         await _cleanup_legacy_notnull_columns(db)
     except Exception as e:
         logger.warning("遗留 NOT NULL 列清理失败(非阻塞): %s", e)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
+    # plan-537-2256: memory_entries.session_id 改为可空（外键 SET NULL 的前提）。
+    try:
+        await _memory_session_nullable(db)
+    except Exception as e:
+        # 行数校验不通过时 helper 已回滚（不丢行）；这里必须显式报错，不能悄悄放过
+        logger.error("记忆表 session_id 改可空失败，记忆写入可能仍受 NOT NULL 限制: %s", e,
+                     exc_info=True)
         try:
             await db.rollback()
         except Exception:

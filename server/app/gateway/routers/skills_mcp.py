@@ -73,7 +73,10 @@ class SkillCreate(BaseModel):
     trigger: str | None = None
     tools: list[str] | None = None
     tags: list[str] | None = None
-    auto_load: bool = False
+    # plan-537-2262 S1：默认必须为 True，与 service 层 create_skill 保持一致。
+    # 注入条件是 is_active 为真且 auto_load 不为 False，默认 False 会让新建即启用的技能
+    # 在列表里显示「已启用」却永远不进上下文，用户无法从界面看出差异。
+    auto_load: bool = True
 
 
 class SkillUpdate(BaseModel):

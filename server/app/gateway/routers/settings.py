@@ -6,7 +6,13 @@ from pathlib import Path
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from app.core.config import settings, update_workspace_root
+from app.core.config import (
+    format_retry_intervals,
+    parse_retry_intervals,
+    settings,
+    update_workspace_root,
+)
+from app.core.ripgrep_env import locate_ripgrep
 
 router = APIRouter()
 
@@ -110,6 +116,29 @@ def _upgrade_desktop_defaults(data: dict) -> None:
     _save_config(data)
 
 
+def _migrate_retry_policy(data: dict) -> None:
+    """异常重试由「次数 + 间隔」改为「间隔标签」：个数即次数，旧次数键迁移后删除（幂等）。
+
+    旧口径：次数少于间隔序列则截断，多于序列则用最后一项补齐，次数为 0 即不重试。
+    这里按旧口径展开一次，保证升级前后的重试行为一致。
+    """
+    if "agent_retry_count" not in data:
+        return
+    try:
+        count = min(20, max(0, int(data.get("agent_retry_count") or 0)))
+    except (TypeError, ValueError):
+        count = 3
+    parsed = parse_retry_intervals(data.get("agent_retry_intervals", "10,20,30"))
+    if count == 0:
+        expanded: list[float] = []
+    else:
+        base = parsed or [10.0]
+        expanded = (base + [base[-1]] * count)[:count]
+    data["agent_retry_intervals"] = format_retry_intervals(expanded)
+    data.pop("agent_retry_count", None)
+    _save_config(data)
+
+
 def load_persisted_workspace() -> None:
     """启动时从用户配置恢复工作目录及全局设置。"""
     data = _load_config()
@@ -133,18 +162,11 @@ def load_persisted_workspace() -> None:
         settings.enhanced_search = bool(data["enhanced_search"])
     if "show_todos" in data:
         settings.show_todos = bool(data["show_todos"])
-    if "show_reasoning" in data:
-        settings.show_reasoning = bool(data["show_reasoning"])
     # plan-156-619 S2：消息搜索入口开关（默认关闭，关闭时只隐藏入口按钮，Ctrl+F 仍可用）
     if "show_message_search" in data:
         settings.show_message_search = bool(data["show_message_search"])
     if "memory_enabled" in data:
         settings.auto_memory_enabled = bool(data["memory_enabled"])
-    if "agent_max_steps" in data:
-        try:
-            settings.agent_max_steps = int(data["agent_max_steps"])
-        except (TypeError, ValueError):
-            pass
     # 采样温度与最大输出：与 PUT 同口径夹紧，启动即生效（否则重启后回落到环境变量或默认值）
     for _fkey in ("agent_tool_temperature", "agent_text_temperature"):
         if _fkey in data:
@@ -157,15 +179,11 @@ def load_persisted_workspace() -> None:
             settings.agent_max_output_tokens = min(128_000, max(0, int(data["agent_max_output_tokens"])))
         except (TypeError, ValueError):
             pass
-    # v45: 启动时恢复异常自动重试策略
-    if "agent_retry_count" in data:
-        try:
-            # plan-20261020-retry-cred-perf R9：次数夹到 0–20（上限避免一轮重试耗掉整天）
-            settings.agent_retry_count = min(20, max(0, int(data["agent_retry_count"])))
-        except (TypeError, ValueError):
-            pass
-    if "agent_retry_intervals" in data:
-        settings.agent_retry_intervals = str(data["agent_retry_intervals"] or "")
+    # v45: 启动时恢复异常自动重试策略（旧版「次数 + 间隔」先迁移为间隔序列）
+    _migrate_retry_policy(data)
+    settings.agent_retry_intervals = format_retry_intervals(
+        parse_retry_intervals(data.get("agent_retry_intervals", settings.agent_retry_intervals))
+    )
     if "browser_enabled" in data:
         settings.browser_enabled = bool(data["browser_enabled"])
     if "browser_headless" in data:
@@ -177,7 +195,7 @@ def load_persisted_workspace() -> None:
     # plan-334-1661: 电脑操控相关开关
     # plan-20261019-desktop-precision：截图元素编号 / 点击前校验 / 破坏性词表已移除，旧配置里的键直接忽略
     _DESKTOP_BOOL_KEYS = (
-        "desktop_enabled", "desktop_plain_ops_enabled", "desktop_browser_ops_enabled",
+        "desktop_enabled", "desktop_plain_ops_enabled",
         "desktop_require_foreground", "desktop_recipe_enabled",
         # plan-20261019-desktop-targeting：截图附带元素清单（隐藏配置，只读 config.json）
         "desktop_auto_elements",
@@ -296,14 +314,14 @@ def load_persisted_workspace() -> None:
                 pass
     # 已显式保存的子代理 / 子会话开关必须还原到运行时：此前只做“缺失补写”，
     # 用户保存的 false 重启后运行时回落为默认 true，而设置页读文件仍显示关闭。
-    for _key in ("subagent_enabled", "parallel_subsession_hint", "subsession_enabled"):
+    for _key in ("subagent_enabled", "subsession_enabled"):
         if isinstance(data.get(_key), bool):
             setattr(settings, _key, data[_key])
     # plan-156-624：升级默认值——旧版本没有这两个键时补写为开启并落盘，用户升级后
     # 无需手动去「设置 → 子代理 / 常规」打开子会话与并行分派。只补缺失键：
     # 已存在的 false 是用户显式关闭，不覆盖。
     _defaults_added = False
-    for _key, _default in (("subagent_enabled", True), ("parallel_subsession_hint", True)):
+    for _key, _default in (("subagent_enabled", True),):
         if _key not in data:
             data[_key] = _default
             setattr(settings, _key, _default)
@@ -352,12 +370,11 @@ class GlobalSettingsOut(BaseModel):
     terminal_font: str = ""  # 留空继承系统终端字体
     http_proxy: str = ""
     enhanced_search: bool = True  # ripgrep 增强搜索
+    # 只读：增强搜索实际使用的 rg 来源（bundled 随包内置 / path 系统 PATH / none 未找到，回落纯 Python 搜索）
+    ripgrep_source: str = "none"
     show_todos: bool = True  # 消息流显示 todos 卡片
-    show_reasoning: bool = True  # 消息流显示 reasoning 块
     # plan-156-619 S2：消息区搜索入口按钮（左上角）。默认关闭；关闭只隐藏入口，Ctrl+F 仍可唤起
     show_message_search: bool = False
-    # plan-156-621：每轮用户消息注入「优先用子会话并行处理」的提示词（默认开启）
-    parallel_subsession_hint: bool = True
     # v3.0 (plan-88): 计划模式允许访问工作区外路径
     plan_mode_allow_outside_access: bool = False
     # v32 (plan-89): 沙箱模式（三态：workspace-write / read-only / danger-full-access）
@@ -368,15 +385,11 @@ class GlobalSettingsOut(BaseModel):
     auto_overdraft_on_quota_exceeded: bool = False
     # v46: ta3 额度自动重置（报错时查额度，窗口用尽则自动提交重置；日窗走透支）
     auto_reset_on_quota_exceeded: bool = False
-    # Agent 最大步数（200 / 500 / 1000 / 0=不限制）
-    agent_max_steps: int = 1000
     agent_tool_temperature: float = 0.3
     agent_text_temperature: float = 0.7
     agent_max_output_tokens: int = 0
     # v45: 异常自动重试策略（任何报错都按此重试，穷尽后才停止并显示报错）
-    # agent_retry_count: 重试次数（0 = 不重试）
-    # agent_retry_intervals: 每次重试前的等待秒数（逗号分隔，默认 10,20,30）
-    agent_retry_count: int = 3
+    # 间隔标签序列：每个间隔即一次重试（个数即次数），逗号分隔，默认 10,20,30 = 3 次；空串 = 不重试
     agent_retry_intervals: str = "10,20,30"
     # 浏览器自动化开关与无头模式
     browser_enabled: bool = True
@@ -388,7 +401,6 @@ class GlobalSettingsOut(BaseModel):
     # _global_settings_out 传入的 kwarg 被 pydantic 静默丢弃，前端表现为"改了不保存"。
     desktop_enabled: bool = True
     desktop_plain_ops_enabled: bool = True
-    desktop_browser_ops_enabled: bool = True
     desktop_require_foreground: bool = True
     desktop_screenshot_quality: int = 100
     desktop_screenshot_max_dim: int = 0
@@ -485,10 +497,7 @@ class GlobalSettingsIn(BaseModel):
     http_proxy: str | None = None
     enhanced_search: bool | None = None
     show_todos: bool | None = None
-    show_reasoning: bool | None = None
     show_message_search: bool | None = None
-    # plan-156-621：优先使用子会话并行处理的提示词注入开关
-    parallel_subsession_hint: bool | None = None
     plan_mode_allow_outside_access: bool | None = None
     sandbox_mode: str | None = None
     # v36 (plan-321-1600 R2): 工作目录外读取自动审批
@@ -497,12 +506,10 @@ class GlobalSettingsIn(BaseModel):
     auto_overdraft_on_quota_exceeded: bool | None = None
     # v46: ta3 额度自动重置
     auto_reset_on_quota_exceeded: bool | None = None
-    agent_max_steps: int | None = None
     agent_tool_temperature: float | None = None
     agent_text_temperature: float | None = None
     agent_max_output_tokens: int | None = None
-    # v45: 异常自动重试策略
-    agent_retry_count: int | None = None
+    # v45: 异常自动重试策略（间隔标签序列）
     agent_retry_intervals: str | None = None
     browser_enabled: bool | None = None
     browser_headless: bool | None = None
@@ -510,7 +517,6 @@ class GlobalSettingsIn(BaseModel):
     # plan-334-1661: 电脑操控（集中一处，_global_settings_out 与 PUT 都读这里）
     desktop_enabled: bool | None = None
     desktop_plain_ops_enabled: bool | None = None
-    desktop_browser_ops_enabled: bool | None = None
     desktop_require_foreground: bool | None = None
     desktop_screenshot_quality: int | None = None
     desktop_screenshot_max_dim: int | None = None
@@ -579,17 +585,9 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
         terminal_font=data.get("terminal_font", ""),
         http_proxy=data.get("http_proxy", ""),
         enhanced_search=data.get("enhanced_search", True),
+        ripgrep_source=(_rg.source if (_rg := locate_ripgrep()) else "none"),
         show_todos=data.get("show_todos", True),
-        show_reasoning=data.get("show_reasoning", True),
         show_message_search=data.get("show_message_search", False),
-        # plan-156-621：优先使用子会话并行处理的提示词注入（默认开启）。
-        # plan-156-622：只有持久化值**显式为 false** 才关闭；键缺失或值为 null
-        # （旧配置文件、手工编辑）都回落到运行时默认 true，避免默认值被翻成关闭。
-        parallel_subsession_hint=(
-            data["parallel_subsession_hint"]
-            if isinstance(data.get("parallel_subsession_hint"), bool)
-            else bool(getattr(settings, "parallel_subsession_hint", True))
-        ),
         plan_mode_allow_outside_access=data.get("plan_mode_allow_outside_access", False),
         sandbox_mode=data.get("sandbox_mode", settings.sandbox_mode),
         # v36 (plan-321-1600 R2/R3): 两项自动审批/自动额度开关（回填持久化值）
@@ -603,12 +601,12 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
         auto_reset_on_quota_exceeded=bool(
             data.get("auto_reset_on_quota_exceeded", settings.auto_reset_on_quota_exceeded)
         ),
-        agent_max_steps=data.get("agent_max_steps", settings.agent_max_steps),
         agent_tool_temperature=data.get("agent_tool_temperature", settings.agent_tool_temperature),
         agent_text_temperature=data.get("agent_text_temperature", settings.agent_text_temperature),
         agent_max_output_tokens=data.get("agent_max_output_tokens", settings.agent_max_output_tokens),
-        agent_retry_count=data.get("agent_retry_count", settings.agent_retry_count),
-        agent_retry_intervals=data.get("agent_retry_intervals", settings.agent_retry_intervals),
+        agent_retry_intervals=format_retry_intervals(
+            parse_retry_intervals(data.get("agent_retry_intervals", settings.agent_retry_intervals))
+        ),
         browser_enabled=data.get("browser_enabled", settings.browser_enabled),
         browser_headless=data.get("browser_headless", settings.browser_headless),
         suggestion_enabled=bool(data.get("suggestion_enabled", settings.suggestion_enabled)),
@@ -616,8 +614,6 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
         desktop_enabled=data.get("desktop_enabled", getattr(settings, "desktop_enabled", True)),
         desktop_plain_ops_enabled=data.get(
             "desktop_plain_ops_enabled", getattr(settings, "desktop_plain_ops_enabled", True)),
-        desktop_browser_ops_enabled=data.get(
-            "desktop_browser_ops_enabled", getattr(settings, "desktop_browser_ops_enabled", True)),
         desktop_require_foreground=data.get(
             "desktop_require_foreground", getattr(settings, "desktop_require_foreground", True)),
         desktop_screenshot_quality=int(data.get(
@@ -697,64 +693,34 @@ class TerminalShellOption(BaseModel):
     available: bool
 
 
-class TerminalFontOption(BaseModel):
-    value: str
-    label: str
-
-
 class TerminalOptionsOut(BaseModel):
     shells: list[TerminalShellOption]
-    fonts: list[TerminalFontOption]
+
+
+# 设置项值 → 展示名（auto 恒可用，其余按本机是否装了该 Shell 标注可用性）
+_TERMINAL_SHELL_LABELS: tuple[tuple[str, str], ...] = (
+    ("pwsh", "PowerShell 7 (pwsh)"),
+    ("powershell", "Windows PowerShell"),
+    ("cmd", "命令提示符 (cmd)"),
+    ("git-bash", "Git Bash"),
+)
+_TERMINAL_SHELL_VALUES = ("auto",) + tuple(v for v, _ in _TERMINAL_SHELL_LABELS)
 
 
 def _detect_shells() -> list[TerminalShellOption]:
-    """问题7: 按当前设备实际存在性探测可用 Shell（auto 恒可用）。"""
-    import shutil
-    from pathlib import Path as _P
-    sys32 = _P(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+    """列出全部 Shell 并标注本机是否安装；未安装的照常返回（available=false），由设置页置灰并标注「未安装」。"""
+    from app.orchestration.tools.shell_env import shell_available
 
-    def _exists(p: str | None) -> bool:
-        if not p:
-            return False
-        return _P(p).exists()
-
-    pwsh = shutil.which("pwsh") or str(sys32 / "pwsh.exe")
-    powershell = shutil.which("powershell") or str(sys32 / "WindowsPowerShell" / "v1.0" / "powershell.exe")
-    cmd = shutil.which("cmd") or str(sys32 / "cmd.exe")
-    git_bash = None
-    try:
-        from app.orchestration.tools.shell_env import resolve_git_bash
-        git_bash = resolve_git_bash()
-    except Exception:
-        pass
-
-    return [
-        TerminalShellOption(value="auto", label="自动（按平台默认）", available=True),
-        TerminalShellOption(value="pwsh", label="PowerShell 7 (pwsh)", available=_exists(pwsh)),
-        TerminalShellOption(value="powershell", label="Windows PowerShell", available=_exists(powershell)),
-        TerminalShellOption(value="cmd", label="命令提示符 (cmd)", available=_exists(cmd)),
-        TerminalShellOption(value="git-bash", label="Git Bash", available=bool(git_bash)),
-    ]
-
-
-def _terminal_fonts() -> list[TerminalFontOption]:
-    """问题8: 常用等宽字体候选，供终端字体下拉选择（value 传给终端渲染器）。"""
-    return [
-        TerminalFontOption(value="", label="继承系统终端字体"),
-        TerminalFontOption(value="Cascadia Code", label="Cascadia Code"),
-        TerminalFontOption(value="Consolas", label="Consolas"),
-        TerminalFontOption(value="JetBrains Mono", label="JetBrains Mono"),
-        TerminalFontOption(value="Fira Code", label="Fira Code"),
-        TerminalFontOption(value="Source Code Pro", label="Source Code Pro"),
-        TerminalFontOption(value="Sarasa Mono SC", label="Sarasa Mono SC（更纱黑体/等宽）"),
-        TerminalFontOption(value="Microsoft YaHei", label="Microsoft YaHei（微软雅黑）"),
+    return [TerminalShellOption(value="auto", label="自动（按平台默认）", available=True)] + [
+        TerminalShellOption(value=value, label=label, available=shell_available(value))
+        for value, label in _TERMINAL_SHELL_LABELS
     ]
 
 
 @router.get("/settings/terminal/options", response_model=TerminalOptionsOut)
 async def get_terminal_options() -> TerminalOptionsOut:
-    """问题7/8: 返回当前设备实际存在的终端 Shell 与候选等宽字体。"""
-    return TerminalOptionsOut(shells=_detect_shells(), fonts=_terminal_fonts())
+    """返回 Shell 列表及本机可用性。终端字体的安装情况由前端探测（渲染端才是字体的最终消费者）。"""
+    return TerminalOptionsOut(shells=_detect_shells())
 
 
 @router.put("/settings/global", response_model=GlobalSettingsOut)
@@ -784,10 +750,12 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         data["force_approval_tools"] = body.force_approval_tools
         settings.force_approval_tools = body.force_approval_tools
     # v2.2: 常规面板补项
+    # 终端 Shell 只认已知取值（非法值回落 auto）；字体名去掉首尾空白并限制长度
     if body.terminal_shell is not None:
-        data["terminal_shell"] = body.terminal_shell
+        _shell = str(body.terminal_shell or "").strip().lower()
+        data["terminal_shell"] = _shell if _shell in _TERMINAL_SHELL_VALUES else "auto"
     if body.terminal_font is not None:
-        data["terminal_font"] = body.terminal_font
+        data["terminal_font"] = str(body.terminal_font or "").strip()[:80]
     if body.http_proxy is not None:
         data["http_proxy"] = body.http_proxy
         # v31.2: 同步运行时 settings（http_client 显式读取，不依赖 trust_env）
@@ -804,15 +772,9 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
     if body.show_todos is not None:
         data["show_todos"] = body.show_todos
         settings.show_todos = body.show_todos
-    if body.show_reasoning is not None:
-        data["show_reasoning"] = body.show_reasoning
-        settings.show_reasoning = body.show_reasoning
     if body.show_message_search is not None:
         data["show_message_search"] = body.show_message_search
         settings.show_message_search = body.show_message_search
-    if body.parallel_subsession_hint is not None:
-        data["parallel_subsession_hint"] = body.parallel_subsession_hint
-        settings.parallel_subsession_hint = body.parallel_subsession_hint
     if body.plan_mode_allow_outside_access is not None:
         data["plan_mode_allow_outside_access"] = body.plan_mode_allow_outside_access
         settings.plan_mode_allow_outside_access = body.plan_mode_allow_outside_access
@@ -833,9 +795,6 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
     if body.memory_enabled is not None:
         data["memory_enabled"] = body.memory_enabled
         settings.auto_memory_enabled = body.memory_enabled
-    if body.agent_max_steps is not None:
-        data["agent_max_steps"] = int(body.agent_max_steps)
-        settings.agent_max_steps = int(body.agent_max_steps)
     # plan-75-332: 审批卡「解释」专用模型 / 思考深度（0/空 = 跟随会话）
     # 改回「跟随会话」时前端显式传 null，必须用 model_fields_set 区分「未提供」与
     # 「显式清空」：否则 `is not None` 会把清空当成未修改，设置不生效。
@@ -847,12 +806,6 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         _meff = str(body.approval_explain_reasoning_effort or "").strip()
         data["approval_explain_reasoning_effort"] = _meff
         settings.approval_explain_reasoning_effort = _meff
-    # v45: 异常自动重试策略（次数 + 间隔序列），运行时立即生效
-    if body.agent_retry_count is not None:
-        # plan-20261020-retry-cred-perf R9：夹到 0–20，与启动恢复同口径
-        _rc = min(20, max(0, int(body.agent_retry_count)))
-        data["agent_retry_count"] = _rc
-        settings.agent_retry_count = _rc
     # 采样温度 / 最大输出（设置中心高级项）：夹紧后立即生效；0 输出上限 = 由模型或官方兜底决定
     if body.agent_tool_temperature is not None:
         _tt = min(2.0, max(0.0, float(body.agent_tool_temperature)))
@@ -866,8 +819,9 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         _mo = min(128_000, max(0, int(body.agent_max_output_tokens)))
         data["agent_max_output_tokens"] = _mo
         settings.agent_max_output_tokens = _mo
+    # v45: 异常自动重试间隔（标签序列，个数即次数）：非法项丢弃、夹到 0–3600 秒、最多 20 项，运行时立即生效
     if body.agent_retry_intervals is not None:
-        _ri = str(body.agent_retry_intervals).strip()
+        _ri = format_retry_intervals(parse_retry_intervals(body.agent_retry_intervals))
         data["agent_retry_intervals"] = _ri
         settings.agent_retry_intervals = _ri
     if body.browser_enabled is not None:
@@ -881,7 +835,7 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         settings.suggestion_enabled = bool(body.suggestion_enabled)
     # plan-334-1661: 电脑操控开关（落盘 + 运行时立即生效，工具门禁每次调用都读 settings）
     for _field in (
-        "desktop_enabled", "desktop_plain_ops_enabled", "desktop_browser_ops_enabled",
+        "desktop_enabled", "desktop_plain_ops_enabled",
         "desktop_require_foreground", "desktop_recipe_enabled",
     ):
         _val = getattr(body, _field, None)

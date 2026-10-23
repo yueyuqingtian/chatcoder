@@ -54,6 +54,17 @@ else:
         % _DESKTOP_STAGING
     )
 
+# 内置 ripgrep（增强搜索的快路径，约 5MB）：由 server/prepare-ripgrep.ps1 复制到 server/vendor/ripgrep，
+# 运行时 app/core/ripgrep_env.py 从 _internal/ripgrep/rg.exe 定位；缺失时回退系统 PATH，再不行回退纯 Python 搜索。
+_RIPGREP_STAGING = SERVER_DIR / "vendor" / "ripgrep"
+if _RIPGREP_STAGING.is_dir():
+    datas.append((str(_RIPGREP_STAGING), "ripgrep"))
+else:
+    print(
+        "[chatcoder-server.spec] 警告: 未找到 %s，产物将不含 ripgrep（增强搜索回退系统 PATH / 纯 Python）；"
+        "可运行 server/prepare-ripgrep.ps1" % _RIPGREP_STAGING
+    )
+
 hiddenimports = [
     "sqlite3",
     "uvicorn.logging",

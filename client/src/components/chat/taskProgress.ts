@@ -116,6 +116,15 @@ export function useProgressRows(enabled = true): ProgressResult {
 
   // ── 本会话子会话的运行态（plan-20261020-progress）──
   const currentSessionId = useChatStore((s) => s.currentSessionId);
+  /** plan-20261023-ownerfix：AI 清单的归属会话（事件到达时记录）。 */
+  const todosSessionId = useChatStore((s) => s.todosSessionId);
+  /** 冻结结果只对生成它的会话有效：切换会话必须丢弃，否则面板隐藏期间的旧结果
+   *  会在新会话里继续展示（用户看到「新开会话还是上一个会话的进程」）。 */
+  const frozenSidRef = useRef<number | null>(null);
+  if (frozenSidRef.current !== currentSessionId) {
+    frozenRef.current = null;
+    frozenSidRef.current = currentSessionId;
+  }
   const subsessionsByParent = useChatStore((s) => s.subsessionsByParent);
   /** 「id:运行态」签名：只在子会话新增 / 开始 / 结束时变化，子会话内部的每个事件都不变。
    *  用它当进度派生的记忆化键——进度不需要随子会话的每一条 delta 重算。 */
@@ -171,7 +180,10 @@ export function useProgressRows(enabled = true): ProgressResult {
     };
 
     // ① AI 清单优先（todo.updated 事件，运行中实时）
-    const todoItems = Array.isArray(todos) ? todos.filter((t) => t.content) : [];
+    // plan-20261023-ownerfix：清单必须属于当前会话——切换瞬间到达的旧会话事件会写进
+    // 新会话的 todos，此时宁可不展示（回退到本会话的引擎步骤），也不能把旧进度当成本轮进度。
+    const todoItems = Array.isArray(todos) && todosSessionId === currentSessionId
+      ? todos.filter((t) => t.content) : [];
     if (todoItems.length > 0) {
       if (todosCarried) {
         // 续接清单：上一轮未完成、本轮模型尚未更新。它不是本轮进度，只如实呈现为「待续接」（警示色、不转圈）；
@@ -221,5 +233,5 @@ export function useProgressRows(enabled = true): ProgressResult {
     }
 
     return freeze({ rows: [], useTodo: false, done: 0, unfinished: 0, phase: "concluded" });
-  }, [tasks, todos, todosTurnId, todosCarried, turns, runningTurnId, isRunning, enabled, subsessionSig]);
+  }, [tasks, todos, todosSessionId, todosTurnId, todosCarried, turns, runningTurnId, isRunning, enabled, subsessionSig, currentSessionId]);
 }

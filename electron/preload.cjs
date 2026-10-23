@@ -160,6 +160,10 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
   // 设置页「重新显示」按钮（store/pets.ts 的 showPet）恒拿到 undefined 静默早退，
   // 隐藏后彻底无法恢复。
   petShowPet: () => ipcRenderer.invoke("pet:showPet"),
+  // 宠物安装目录：查询 / 修改（自动迁移）/ 打开
+  petGetDir: () => ipcRenderer.invoke("pet:getDir"),
+  petSetDir: (dir) => ipcRenderer.invoke("pet:setDir", dir),
+  petOpenDir: () => ipcRenderer.invoke("pet:openDir"),
   onPetPrefChanged: (cb) => {
     const handler = (_e, pref) => cb(pref);
     ipcRenderer.on("pet:prefChanged", handler);

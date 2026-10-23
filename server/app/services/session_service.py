@@ -358,6 +358,7 @@ def purge_session_children(s, session_ids: list[int]) -> dict:
     返回各表删除行数（供提示与测试断言）。调用方负责 commit。
     """
     from sqlalchemy import delete as _delete
+    from sqlalchemy import or_ as _or
     from sqlalchemy import select as _select
     from sqlalchemy import update as _update
 
@@ -421,9 +422,15 @@ def purge_session_children(s, session_ids: list[int]) -> dict:
         _purge(ExecPolicyRule, ExecPolicyRule.session_id.in_(chunk))
         _purge(ScheduledTask, ScheduledTask.session_id.in_(chunk))
         _purge(FileReview, FileReview.turn_id.in_(turns_q))
-        # 2) 记忆：session_id 是 NOT NULL 外键——**所有**引用这些会话的行都必须删，
-        #    否则孤儿行会阻断 sessions 删除（project/global 记忆只在删除这些会话时受影响）。
-        _purge(MemoryEntry, MemoryEntry.session_id.in_(chunk))
+        # 2) 记忆：session_id 只是「创建来源」，project/global 是跨会话资产——
+        #    plan-537-2256：只删会话私有（scope=session，含历史空值）的行；其余行随
+        #    sessions 行删除时由外键 ON DELETE SET NULL 解除来源关联（session_id 已可空），
+        #    因此不再阻断 sessions 删除，也不会让项目/全局记忆随会话消失。
+        _purge(
+            MemoryEntry,
+            MemoryEntry.session_id.in_(chunk),
+            _or(MemoryEntry.scope == "session", MemoryEntry.scope.is_(None)),
+        )
         # 3) 用量流水：只解除关联（保留历史用量）
         res = s.execute(
             _update(UsageRecord)

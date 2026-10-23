@@ -41,8 +41,6 @@ export interface UiPrefs {
   sidebarIconSize: number;
   /** 左面板聚焦颜色 */
   sidebarFocusColor: string;
-  /** 消息流密度：comfortable=舒适(默认) compact=紧凑 */
-  msgDensity: "comfortable" | "compact";
   /** 界面语言 */
   language: Language;
   /** plan-248-1258 M5: 动画效果档位——full=标准 reduced=减弱(低配机省性能) off=关闭 */
@@ -81,7 +79,6 @@ const DEFAULTS: UiPrefs = {
   sidebarFontSize: 14,
   sidebarIconSize: 16,
   sidebarFocusColor: "",
-  msgDensity: "comfortable",
   language: "zh",
   motionLevel: "full",
   panelDragLayout: "realtime",
@@ -312,12 +309,10 @@ export function applyUiVars(p: UiPrefs, opts?: { glassToggle?: boolean }) {
   else root.style.removeProperty("--ambient-c2");
   // v1.1: 阴影强度（此前完全未应用）
   root.style.setProperty("--shadow-strength", String(p.shadowStrength));
-  // 消息流密度：舒适(默认 10px 块间距) / 紧凑(2px)。
-  // 注意：AI 消息流项间距由 --flow-gap 控制（.turn-flow gap），--msg-gap 只作用于
-  // 独立消息项；密度同时覆盖两者才真正生效。
-  root.style.setProperty("--msg-gap", p.msgDensity === "compact" ? "2px" : "10px");
-  if (p.msgDensity === "compact") root.style.setProperty("--flow-gap", "2px");
-  else root.style.removeProperty("--flow-gap");
+  // 消息块间距固定为舒适档（10px）：AI 消息流项间距由 --flow-gap 控制（.turn-flow gap），
+  // --msg-gap 作用于独立消息项；其余行距由外观页「消息行距」（--chat-line-height）控制。
+  root.style.setProperty("--msg-gap", "10px");
+  root.style.removeProperty("--flow-gap");
   root.setAttribute("data-lang", p.language);
   // plan-248-1258 M5: 动画效果档位落到根节点属性，motion.css 据此降级；
   // 系统 prefers-reduced-motion 与「减弱」等价（在 CSS 侧已分别处理）。
@@ -336,9 +331,10 @@ interface UiState extends UiPrefs {
   setPrefs: (partial: Partial<UiPrefs>) => void;
   toggleGlass: () => void;
   setLanguage: (lang: Language) => void;
-  /** v1.1: 后端全局设置缓存（show_todos/show_reasoning 等） */
+  /** v1.1: 后端全局设置缓存（show_todos 等） */
   showTodos: boolean;
-  showReasoning: boolean;
+  /** 终端字体（设置 → 常规 → 终端字体；空 = 使用默认字体）；变更后已打开的终端即时生效 */
+  terminalFont: string;
   /** plan-156-619 S2：消息区搜索入口按钮（左上角）；默认关闭，关闭只隐藏入口，Ctrl+F 仍可用 */
   showMessageSearch: boolean;
   refreshGlobalFlags: () => Promise<void>;
@@ -357,7 +353,7 @@ export const useUiStore = create<UiState>((set, get) => ({
 
   // v1.1: 消息流显示开关默认开，启动后由后端全局设置刷新
   showTodos: true,
-  showReasoning: true,
+  terminalFont: "",
   // plan-156-619 S2：搜索入口默认关闭（用户要求），由后端全局设置刷新
   showMessageSearch: false,
   glassNeedRestart: false, // plan-26-126 M5：瞬时状态，由 setGlassMode 回包驱动
@@ -370,8 +366,8 @@ export const useUiStore = create<UiState>((set, get) => ({
       const data = await api.getGlobalSettings();
       set({
         showTodos: data.show_todos !== false,
-        showReasoning: data.show_reasoning !== false,
         showMessageSearch: data.show_message_search === true,
+        terminalFont: data.terminal_font || "",
       });
     } catch { /* 后端不可达时保持默认 */ }
   },

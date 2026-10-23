@@ -140,7 +140,9 @@
   --color-file-node: color-mix(in oklab, var(--color-sky-600) 14%, transparent);
   --color-file-node-foreground: var(--color-sky-600);
   --color-toast: var(--color-white);
-  --color-tooltip: var(--color-neutral-100);
+  /* plan-20261023-solid-white：浅色下提示浮窗也用纯白（原来取 neutral-100 呈灰块，
+     与「浮窗背景保证 #FFFFFF」的要求不符；靠描边 + 阴影保持与白底的边界）。 */
+  --color-tooltip: var(--color-white);
   --color-tooltip-foreground: var(--color-neutral-950);
   --color-find-highlight: #fde68a;
   --color-find-highlight-active: #facc15;

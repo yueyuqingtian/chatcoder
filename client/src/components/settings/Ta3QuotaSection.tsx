@@ -300,6 +300,8 @@ export function Ta3QuotaSection({ provider }: { provider: ProviderOut }) {
   const planEndEpoch = toNumberOrNull(quota?.plan?.endEpochSeconds);
 
   const refresh = useCallback(async () => {
+    // force=true 会跳过服务端缓存；后端同时会解除该供应商凭据的冷却，
+    // 因此额度打满导致凭据被暂缓后，点这里刷新即可立刻恢复发送能力。
     await Promise.allSettled([loadCore(true), loadTrend(trendPeriod)]);
   }, [loadCore, loadTrend, trendPeriod]);
 
@@ -419,7 +421,8 @@ export function Ta3QuotaSection({ provider }: { provider: ProviderOut }) {
         </label>
         <span className="ta3-quota-muted">
           开启后：模型请求报错时查询一次额度，任一窗口已用尽（≥100%）则自动提交一次重置；
-          日窗无独立重置能力，走「透支本周额度」恢复今日用量（同一供应商 5 分钟内只尝试一次）
+          日窗无独立重置能力，走「透支本周额度」恢复今日用量。同一额度状态只提交一次，
+          额度恢复或错误变化后可立即再次尝试，不做时间限流
         </span>
       </div>
 

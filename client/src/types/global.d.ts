@@ -1,4 +1,4 @@
-import type { InstalledPet, PetPref } from "../pet/petApi";
+import type { InstalledPet, PetPref, PetsDirInfo } from "../pet/petApi";
 
 export {};
 
@@ -106,6 +106,11 @@ declare global {
       petRevealPet?: (slug: string) => Promise<boolean>;
       /** 恢复显示（隐藏角标置 visible=false 后，从设置页恢复） */
       petShowPet?: () => Promise<boolean>;
+      /** 宠物安装目录（设置 → 宠物）：dir 为当前生效目录；custom = 用户指定；fallback = 默认目录不可写已回落 */
+      petGetDir?: () => Promise<PetsDirInfo>;
+      /** 修改宠物安装目录（空串 = 恢复默认），已安装宠物自动迁移；返回迁移结果 */
+      petSetDir?: (dir: string) => Promise<PetsDirInfo & { moved: number; skipped: number }>;
+      petOpenDir?: () => Promise<PetsDirInfo>;
       /** 主进程偏好变更广播（宠物窗口与设置页共用同一份偏好真相） */
       onPetPrefChanged?: (cb: (pref: PetPref) => void) => () => void;
       /** 宠物面板「查看会话」：切到主窗对应会话 */

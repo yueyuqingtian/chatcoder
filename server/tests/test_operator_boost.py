@@ -43,7 +43,7 @@ def test_new_install_defaults():
 
     s = Settings()
     assert s.desktop_enabled is True
-    assert s.desktop_plain_ops_enabled and s.desktop_browser_ops_enabled and s.desktop_require_foreground
+    assert s.desktop_plain_ops_enabled and s.desktop_require_foreground
     assert s.desktop_screenshot_max_dim == 0
     assert s.desktop_screenshot_quality == 100
     assert s.desktop_recipe_enabled is True
@@ -307,8 +307,10 @@ async def test_window_change_note_reports_new_player_window(monkeypatch):
         return {"items": [dict(_HOME), dict(_PLAYER, fg=True), dict(_CHAT)]}
 
     monkeypatch.setattr(D, "_call", fake_call)
-    D._LAST_WINDOWS.update(at=D.time.monotonic(), items=[dict(_HOME, fg=True), dict(_CHAT)])
-    note, follow = await D._window_change_note(dict(_HOME))
+    # plan-537-2251：窗口快照改为按 (session_id, task_id) 隔离，测试需用同一 ctx 键写入
+    ctx = SimpleNamespace(session_id=1, task_id=1)
+    D._LAST_WINDOWS[D._state_key(ctx)] = {"at": D.time.monotonic(), "items": [dict(_HOME, fg=True), dict(_CHAT)]}
+    note, follow = await D._window_change_note(ctx, dict(_HOME))
     assert "新窗口" in note and "handle=200" in note and "不要再 desktop_focus" in note
     assert follow and follow["h"] == 200
 
@@ -321,9 +323,10 @@ async def test_not_foreground_hint_names_same_app_window(monkeypatch):
         return {"items": [dict(_HOME), dict(_PLAYER, fg=True)]}
 
     monkeypatch.setattr(D, "_call", fake_call)
-    msg = await D._not_foreground_hint(RuntimeError("目标窗口不在前台（腾讯视频）。"), 100, "")
+    ctx = SimpleNamespace(session_id=1, task_id=1)
+    msg = await D._not_foreground_hint(ctx, RuntimeError("目标窗口不在前台（腾讯视频）。"), 100, "")
     assert "同一应用的另一个窗口" in msg and "handle=200" in msg
-    assert await D._not_foreground_hint(RuntimeError("别的错误"), 100, "") == "别的错误"
+    assert await D._not_foreground_hint(ctx, RuntimeError("别的错误"), 100, "") == "别的错误"
 
 
 def test_shot_notes_dark_and_covered(tmp_path, monkeypatch):
@@ -336,12 +339,13 @@ def test_shot_notes_dark_and_covered(tmp_path, monkeypatch):
     bright = tmp_path / "bright.jpg"
     Image.new("RGB", (640, 400), (230, 230, 230)).save(bright)
     assert D._dark_ratio(str(black)) > 0.9 and D._dark_ratio(str(bright)) == 0
-    assert any("接近纯黑" in n for n in D._shot_notes(str(black), None, False))
+    ctx = SimpleNamespace(session_id=1, task_id=1)
+    assert any("接近纯黑" in n for n in D._shot_notes(ctx, str(black), None, False))
 
-    D._LAST_WINDOWS.update(at=D.time.monotonic(), items=[dict(_HOME), dict(_PLAYER, fg=True)])
-    notes = D._shot_notes(str(bright), dict(_HOME), True)
+    D._LAST_WINDOWS[D._state_key(ctx)] = {"at": D.time.monotonic(), "items": [dict(_HOME), dict(_PLAYER, fg=True)]}
+    notes = D._shot_notes(ctx, str(bright), dict(_HOME), True)
     assert len(notes) == 1 and "handle=200" in notes[0]
-    assert D._shot_notes(str(bright), dict(_HOME, fg=True), True) == []
+    assert D._shot_notes(ctx, str(bright), dict(_HOME, fg=True), True) == []
 
 
 def test_uia_sparse():

@@ -43,14 +43,10 @@ SPAWN_SUBAGENT_SCHEMA = {
             "- A single-fact lookup where you already know the file, symbol or value — search directly.\n"
             "- Simple or tightly sequential work: do it yourself with a few direct tool calls.\n"
             "\n## How to dispatch\n"
-            "- background=true is the DEFAULT and recommended way: dispatch and return immediately, keep "
-            "working on other things, and the completion report is pushed back to you automatically "
-            "(do NOT poll for it). Combine it with explore=true when the subtask is read-only research.\n"
-            "- explore=true only marks the subtask READ-ONLY — pair it with background=true for read-only "
-            "research you do not need to block on.\n"
-            "- explore=true WITHOUT background=true BLOCKS your turn until the subagent finishes and returns "
-            "its findings inline. Use that combination only when your very next step depends on the "
-            "conclusion and the subtask is small.\n"
+            "- Dispatch returns immediately: you are NOT blocked while the subagent runs. Keep working on "
+            "other things and the completion report is pushed back to you automatically (do NOT poll).\n"
+            "- explore only sets the READ/WRITE scope: true = read-only research (no writes, no commands), "
+            "false = the subagent may write. It never changes how the dispatch is scheduled.\n"
             "- Independent subtasks: send SEVERAL spawn_subagent calls in ONE message so they run concurrently.\n"
             "- NEVER dispatch the same subtask twice, and give each subtask a distinct task_title; "
             "check collect_results first if unsure whether an equivalent one already exists.\n"
@@ -87,18 +83,9 @@ SPAWN_SUBAGENT_SCHEMA = {
                 "explore": {
                     "type": "boolean",
                     "description": (
-                        "True = the subtask is READ-ONLY research (no writes, no commands). Default false. "
-                        "Combine with background=true for non-blocking read-only research; setting explore "
-                        "alone BLOCKS your turn until the subagent finishes."
-                    ),
-                },
-                "background": {
-                    "type": "boolean",
-                    "description": (
-                        "PREFER setting this to true: dispatch and return immediately (run in the background), "
-                        "no blocking wait — you keep doing other work in parallel. The completion report is "
-                        "pushed back to you automatically when the subagent finishes, so do NOT poll. Leave it "
-                        "false only when you need the conclusion inline before your next step. Default false."
+                        "True = the subtask is READ-ONLY research (no writes, no commands, no shell). "
+                        "False = the subagent may write to the workspace. It only sets the scope; it has "
+                        "no effect on scheduling. Default false."
                     ),
                 },
             },
@@ -244,9 +231,9 @@ REPORT_TO_LEADER_SCHEMA = {
             "The message reaches the main agent's context before its next model call, and is also "
             "visible in your own thread. "
             "kind=\"progress\" (default): fire-and-forget status update — keep working afterwards. "
-            "kind=\"question\" with wait=true: block until the main agent replies. Only background "
-            "subagents may wait; synchronous/read-only subagents cannot (include the open question "
-            "in your final report instead)."
+            "kind=\"question\" with wait=true: block, up to timeout_s, until the main agent replies. "
+            "Every subagent runs in the background, so any of them may wait this way — use it when you "
+            "genuinely cannot proceed without a decision."
         ),
         "parameters": {
             "type": "object",
@@ -322,9 +309,8 @@ def _spawn_schema(explore_only: bool) -> dict:
     """spawn_subagent schema；只读/计划模式下替换为「只读探索」版本（v36）。
 
     explore_only=True 时：描述改为仅支持只读探索子任务，并移除 explore 参数（只读由
-    运行时强制、无需模型传参）；background 参数**保留**——plan-64-289 起 background 只
-    决定调度方式、不再影响读写范围，「只读 + 异步」合法且推荐（v36 早期注释称连带移除
-    background，系解耦前口径，已作废）。
+    运行时强制、无需模型传参）。plan-541-2264：只读/计划模式下同样只有后台派发，
+    参数面不再存在任何调度开关。
     """
     if not explore_only:
         return SPAWN_SUBAGENT_SCHEMA
@@ -348,10 +334,8 @@ def _spawn_schema(explore_only: bool) -> dict:
         "- The current permission mode is READ-ONLY / PLAN: only read-only exploration is "
         "available. NEVER ask the subagent to modify, write or create files — it will be rejected.\n"
         "\n## How to dispatch\n"
-        "- PREFER background=true: dispatch and return immediately, keep working on other things, "
-        "and the completion report is pushed back to you automatically (do NOT poll).\n"
-        "- Without background=true the call BLOCKS your turn until the subagent finishes and "
-        "returns the findings inline — use it only when you need the conclusion right now.\n"
+        "- Dispatch returns immediately: you are NOT blocked. The conclusion comes back as a completion "
+        "report pushed to you automatically; use collect_results(wait=true) only when you need it now.\n"
         "- Send SEVERAL spawn_subagent calls in ONE message to run them concurrently.\n"
         "- Give each subtask a distinct task_title; never dispatch the same subtask twice.\n"
         "\n## After the dispatch\n"
@@ -407,7 +391,7 @@ def append_subagent_tools(tool_schemas: list[dict],
 
     v36 (plan-321-1600 R1): 四种权限模式都支持子代理——
     - explore_only=True（只读/计划模式）：仅暴露只读探索子代理（spawn 描述换成
-      只读探索版；隐藏 explore、保留 background，支持只读+异步），general 不参与本模式；
+      只读探索版；隐藏 explore 参数，只读由运行时强制），general 不参与本模式；
     - allowed：白名单模式下的子代理工具子集（None = 全量）——设置页未勾选的
       子代理工具不暴露，勾选真正生效。
 

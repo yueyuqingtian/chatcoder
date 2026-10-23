@@ -1,15 +1,18 @@
 /** 设置中心：常规（v2.2 对齐 zcode 3.18）。
- * 界面语言、HTTP 代理、终端 Shell/字体、增强搜索、消息流显示开关。
- * 所有设置项走 /settings/global 持久化（config.json），重启不丢。 */
+ * 界面语言、HTTP 代理、终端 Shell / 字体、增强搜索、消息区与智能体的运行开关、异常自动重试等。
+ * 所有设置项「修改即保存」（300ms 防抖），走 /settings/global 持久化（config.json），重启不丢。
+ * 外观（主题、字号、行距、宽度）见「外观」页；电脑操控与内置浏览器见「电脑操控」页；子代理 / 子会话见「子代理」页。 */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api } from "../../api/client";
+import { api, type TerminalShellOption } from "../../api/client";
 import { useUiStore } from "../../store/ui";
 import { useChatStore } from "../../store/chat";
 import { useI18n } from "../../store/i18n";
-import { Button, Input, Select, Slider } from "../ui";
+import { isFontInstalled } from "../../utils/fontProbe";
+import { Button, Input, Select, Slider, TagInput, type SelectOption } from "../ui";
 import { Row, Sw } from "./shared";
 
-const TERMINAL_SHELLS = [
+/** 终端 Shell 兜底列表（后端探测结果未返回时使用，此时全部视为可用） */
+const TERMINAL_SHELLS: Array<{ value: string; label: string }> = [
   { value: "auto", label: "自动（按平台默认）" },
   { value: "pwsh", label: "PowerShell 7 (pwsh)" },
   { value: "powershell", label: "Windows PowerShell" },
@@ -17,53 +20,57 @@ const TERMINAL_SHELLS = [
   { value: "git-bash", label: "Git Bash" },
 ];
 
-const MAX_OUTPUT_OPTIONS = [
-  { value: 0, label: "模型默认" },
-  { value: 8192, label: "8K" },
-  { value: 16384, label: "16K" },
-  { value: 32768, label: "32K" },
-  { value: 64000, label: "64K" },
-  { value: 128000, label: "128K" },
+/** 终端字体候选（等宽）。JetBrains Mono 随应用内置，始终可用；其余字体取决于本机是否安装。 */
+const DEFAULT_TERMINAL_FONT = "JetBrains Mono";
+const TERMINAL_FONTS: Array<{ value: string; label: string; bundled?: boolean }> = [
+  { value: DEFAULT_TERMINAL_FONT, label: "JetBrains Mono（内置）", bundled: true },
+  { value: "Cascadia Code", label: "Cascadia Code" },
+  { value: "Consolas", label: "Consolas" },
+  { value: "Fira Code", label: "Fira Code" },
+  { value: "Source Code Pro", label: "Source Code Pro" },
+  { value: "Sarasa Mono SC", label: "更纱等宽 (Sarasa Mono SC)" },
 ];
 
-const MAX_STEPS_OPTIONS = [
-  { value: 200, label: "200 步" },
-  { value: 500, label: "500 步" },
-  { value: 1000, label: "1000 步（默认）" },
-  { value: 0, label: "不限制步数" },
-];
+/** 异常重试间隔：每个标签是一次重试前的等待秒数（整数 0–3600），标签个数即重试次数（最多 20） */
+const RETRY_MAX_COUNT = 20;
+const RETRY_MAX_SECONDS = 3600;
+
+function validateRetrySeconds(raw: string): string | null {
+  if (!/^\d+$/.test(raw)) return "请输入整数秒数（0–3600）";
+  if (Number(raw) > RETRY_MAX_SECONDS) return `最长 ${RETRY_MAX_SECONDS} 秒`;
+  return null;
+}
+
+/** 把后端保存的间隔串（逗号 / 中文标点分隔）拆成标签；不合法的项丢弃，与服务端口径一致 */
+function parseRetryIntervals(raw: string): string[] {
+  return raw
+    .split(/[,，、；;\s]+/)
+    .map((s) => s.trim())
+    .filter((s) => /^\d+$/.test(s) && Number(s) <= RETRY_MAX_SECONDS)
+    .slice(0, RETRY_MAX_COUNT);
+}
 
 export function GeneralPanel() {
   const ui = useUiStore();
   const { t } = useI18n();
   const [cfg, setCfg] = useState({
-    terminal_shell: "auto", terminal_font: "", http_proxy: "",
-    enhanced_search: true, show_reasoning: true,
-    // plan-75-332：原「自动批准工具调用 / 始终需要审批的工具 / 沙箱模式 /
-    // 工作目录外读取自动审批 / 计划模式外部访问」五项已移除——是否需审批统一由
-    // 权限模式（询问审批 / 自动审批 / 完全访问）裁决，入口在输入框右侧。
-    memory_enabled: true,
-    agent_max_steps: 1000,
-    agent_retry_count: 3,
+    terminal_shell: "auto", terminal_font: DEFAULT_TERMINAL_FONT, http_proxy: "",
+    enhanced_search: true,
+    show_message_search: false,
+    suggestion_enabled: false,
     agent_retry_intervals: "10,20,30",
-    browser_enabled: true,
-    browser_headless: true,
     // plan-278-1391: 上下文压缩触发阈值（占模型窗口比例，默认 0.90）
     auto_compact_threshold_ratio: 0.90,
-    // plan-156-619 S2：消息区搜索入口按钮（默认关闭）
-    show_message_search: false,
-    // plan-156-621：优先用子会话并行处理的提示词注入（默认开启）
-    parallel_subsession_hint: true,
-    // 下一步建议卡（默认关闭；开启后智能体 / 工作流模式才注入建议卡工具与提示词）
-    suggestion_enabled: false,
     // 采样温度（工具轮 / 文本轮）与单次最大输出；0 输出上限 = 由模型或官方兜底决定
     agent_tool_temperature: 0.3,
     agent_text_temperature: 0.7,
     agent_max_output_tokens: 0,
   });
+  /** 增强搜索实际使用的 rg 来源（只读，由后端探测；不随设置一起回写） */
+  const [rgSource, setRgSource] = useState<"bundled" | "path" | "none" | undefined>(undefined);
+
   // S4（plan-41-197）：改为「修改即保存」——移除底部保存按钮，所有项在改动后
-  // 300ms 内自动落盘（config.json），与外观/模型等页操作逻辑统一（用户反馈
-  // “常规下面有个保存按钮，和其余标签页的操作逻辑不一致”）。
+  // 300ms 内自动落盘（config.json），与外观/模型等页操作逻辑统一。
   const saveTimerRef = useRef<number | null>(null);
   const flushSave = useCallback(async (payload: typeof cfg) => {
     try {
@@ -72,7 +79,7 @@ export function GeneralPanel() {
         // plan-278-1391: 压缩触发阈值（保留两位小数，避免浮点噪声）
         auto_compact_threshold_ratio: Math.round(payload.auto_compact_threshold_ratio * 100) / 100,
       });
-      // v1.1: 保存即生效——刷新 todos/reasoning 显示开关
+      // 保存即生效：刷新 todos / 搜索入口 / 终端字体等全局显示开关
       await useUiStore.getState().refreshGlobalFlags();
     } catch (e) { useChatStore.setState({ error: "保存失败: " + String(e) }); }
   }, []);
@@ -81,40 +88,46 @@ export function GeneralPanel() {
     saveTimerRef.current = window.setTimeout(() => { void flushSave(next); }, 300);
   }, [flushSave]);
   useEffect(() => () => { if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current); }, []);
-  // 问题7/8: 终端 Shell/字体选项（后端按当前设备存在性探测）
-  const [shells, setShells] = useState(TERMINAL_SHELLS);
-  const [fonts, setFonts] = useState<{ value: string; label: string }[]>([]);
 
+  // 终端 Shell：后端按本机实际安装情况给出可用性，未安装的置灰并标注
+  const [shells, setShells] = useState<TerminalShellOption[] | null>(null);
   useEffect(() => {
     api.getTerminalOptions()
-      .then((o) => {
-        setFonts(o.fonts || []);
-        const avail = (o.shells || [])
-          .filter((s) => s.available || s.value === "auto")
-          .map((s) => ({ value: s.value, label: s.label }));
-        if (avail.length > 0) setShells(avail);
-      })
-      .catch(() => { /* 拉取失败沿用硬编码候选 */ });
+      .then((o) => setShells(o.shells?.length ? o.shells : null))
+      .catch(() => setShells(null));
   }, []);
+  const shellOptions = useMemo<SelectOption[]>(() => {
+    const list: Array<{ value: string; label: string; available: boolean }> =
+      shells ?? TERMINAL_SHELLS.map((s) => ({ ...s, available: true }));
+    return list.map((s) => ({
+      value: s.value,
+      label: s.label,
+      disabled: !s.available,
+      hint: s.available ? undefined : "未安装",
+    }));
+  }, [shells]);
+  const shellMissing = !!shells && shells.some((s) => s.value === cfg.terminal_shell && !s.available);
 
-  /** plan-282-1416：下拉选项改为 Select 组件的 options 数组——
-   *  「已选值不在候选列表中时保留显示」的逻辑在此保留（追加为第一项）。 */
-  const shellOptions = useMemo(() => {
-    const base = shells.map((s) => ({ value: s.value, label: s.label }));
-    if (!shells.some((s) => s.value === cfg.terminal_shell)) {
-      base.unshift({ value: cfg.terminal_shell, label: cfg.terminal_shell });
+  // 终端字体：内置字体恒可用；其余按本机是否安装（渲染端 canvas 探测）置灰并标注
+  const fontOptions = useMemo<SelectOption[]>(() => {
+    const opts: SelectOption[] = TERMINAL_FONTS.map((f) => {
+      const ok = !!f.bundled || isFontInstalled(f.value);
+      return { value: f.value, label: f.label, disabled: !ok, hint: ok ? undefined : "未安装" };
+    });
+    if (cfg.terminal_font && !opts.some((o) => o.value === cfg.terminal_font)) {
+      const ok = isFontInstalled(cfg.terminal_font);
+      opts.push({ value: cfg.terminal_font, label: cfg.terminal_font, disabled: !ok, hint: ok ? undefined : "未安装" });
     }
-    return base;
-  }, [shells, cfg.terminal_shell]);
+    return opts;
+  }, [cfg.terminal_font]);
 
-  const fontOptions = useMemo(() => {
-    const list = fonts.length ? fonts : [{ value: "", label: "继承系统终端字体" }];
-    const base = list.map((f) => ({ value: f.value, label: f.label }));
-    if (!list.some((f) => f.value === cfg.terminal_font)) {
-      base.unshift({ value: cfg.terminal_font, label: cfg.terminal_font || "继承系统终端字体" });
-    }
-    return base;
-  }, [fonts, cfg.terminal_font]);
+  const rgDesc = rgSource === "bundled"
+    ? "使用随应用内置的 ripgrep 做全库文本搜索，速度更快。"
+    : rgSource === "path"
+      ? "使用本机 PATH 中的 ripgrep（rg）做全库文本搜索。"
+      : rgSource === "none"
+        ? "未找到 ripgrep（rg），当前使用内置的 Python 逐行搜索。安装 ripgrep 并重启应用后会自动启用。"
+        : "全库文本搜索优先使用 ripgrep（rg），未找到时回退为内置的 Python 逐行搜索。";
 
   // 加载失败时禁止写回：此时界面只是默认值，任何改动若落盘都会覆盖已保存的配置（如 HTTP 代理）
   const [loaded, setLoaded] = useState(false);
@@ -125,30 +138,20 @@ export function GeneralPanel() {
       const g = await api.getGlobalSettings();
       setCfg({
         terminal_shell: g.terminal_shell || "auto",
-        terminal_font: g.terminal_font || "",
+        terminal_font: g.terminal_font || DEFAULT_TERMINAL_FONT,
         http_proxy: g.http_proxy || "",
-        enhanced_search: g.enhanced_search,
-        show_reasoning: g.show_reasoning,
-        memory_enabled: g.memory_enabled !== false,
-        agent_max_steps: typeof g.agent_max_steps === "number" ? g.agent_max_steps : 1000,
-        agent_retry_count: typeof g.agent_retry_count === "number" ? g.agent_retry_count : 3,
+        enhanced_search: g.enhanced_search !== false,
+        show_message_search: g.show_message_search === true,
+        suggestion_enabled: g.suggestion_enabled === true,
         agent_retry_intervals: typeof g.agent_retry_intervals === "string" ? g.agent_retry_intervals : "10,20,30",
-        // plan-20261015-browser-agent：服务端默认开启（AI 操作的是用户看得见的面板浏览器）
-        browser_enabled: g.browser_enabled !== false,
-        browser_headless: g.browser_headless !== false,
         // plan-278-1391: 压缩触发阈值（后端可能未返回，回退默认 0.90）
         auto_compact_threshold_ratio: typeof g.auto_compact_threshold_ratio === "number"
           ? g.auto_compact_threshold_ratio : 0.90,
-        // plan-156-619 S2：搜索入口默认关闭
-        show_message_search: g.show_message_search === true,
-        // plan-156-621：后端缺省视为开启
-        parallel_subsession_hint: g.parallel_subsession_hint !== false,
-        // 下一步建议卡：后端缺省视为关闭
-        suggestion_enabled: g.suggestion_enabled === true,
         agent_tool_temperature: typeof g.agent_tool_temperature === "number" ? g.agent_tool_temperature : 0.3,
         agent_text_temperature: typeof g.agent_text_temperature === "number" ? g.agent_text_temperature : 0.7,
         agent_max_output_tokens: typeof g.agent_max_output_tokens === "number" ? g.agent_max_output_tokens : 0,
       });
+      setRgSource(g.ripgrep_source);
       setLoaded(true);
     } catch (e) {
       setLoadError(String(e));
@@ -156,7 +159,7 @@ export function GeneralPanel() {
   }, []);
   useEffect(() => { load(); }, [load]);
 
-  /** S4：改动即保存——本地 state 立即更新，300ms 防抖后写后端（连续拖动只落一次） */
+  /** 改动即保存——本地 state 立即更新，300ms 防抖后写后端（连续拖动只落一次） */
   const patch = (p: Partial<typeof cfg>) => {
     if (!loaded) return; // 未成功加载时拒绝写回
     setCfg((prev) => {
@@ -164,39 +167,6 @@ export function GeneralPanel() {
       scheduleSave(next);
       return next;
     });
-  };
-
-  // plan-20261020-retry-cred-perf R9：重试次数用草稿态——旧实现 `parseInt(...) || 0`
-  // 在「清空重输」时会把 0 防抖落盘，用户看到的重试策略被静默改成不重试。
-  const [retryCountDraft, setRetryCountDraft] = useState(String(cfg.agent_retry_count));
-  useEffect(() => {
-    setRetryCountDraft(String(cfg.agent_retry_count));
-  }, [cfg.agent_retry_count]);
-  /** 只提交合法整数（0–20）；非法输入回滚为当前生效值。 */
-  const commitRetryCount = () => {
-    const parsed = Number.parseInt(retryCountDraft, 10);
-    if (!Number.isFinite(parsed)) {
-      setRetryCountDraft(String(cfg.agent_retry_count));
-      return;
-    }
-    const clamped = Math.min(20, Math.max(0, parsed));
-    setRetryCountDraft(String(clamped));
-    if (clamped !== cfg.agent_retry_count) patch({ agent_retry_count: clamped });
-  };
-
-  // 最大步数同样用草稿态：清空输入不再落盘 0（0 语义为“不限制”，误清空会取消步数上限）
-  const [maxStepsDraft, setMaxStepsDraft] = useState(String(cfg.agent_max_steps));
-  useEffect(() => {
-    setMaxStepsDraft(String(cfg.agent_max_steps));
-  }, [cfg.agent_max_steps]);
-  const commitMaxSteps = () => {
-    const parsed = Number.parseInt(maxStepsDraft, 10);
-    if (!Number.isFinite(parsed) || parsed < 0) {
-      setMaxStepsDraft(String(cfg.agent_max_steps));
-      return;
-    }
-    setMaxStepsDraft(String(parsed));
-    if (parsed !== cfg.agent_max_steps) patch({ agent_max_steps: parsed });
   };
 
   return (
@@ -228,70 +198,28 @@ export function GeneralPanel() {
         <Row title={t("gp.http_proxy")} desc={t("gp.http_proxy_desc")}>
           <Input placeholder="如 http://127.0.0.1:7890" value={cfg.http_proxy} onChange={(e) => patch({ http_proxy: e.target.value })} style={{ minWidth: 220 }} />
         </Row>
-        <Row title={t("gp.terminal_shell")} desc={t("gp.terminal_shell_desc")}>
-          {/* 问题7: 仅列出当前设备实际存在的 Shell；已选值不在列表中时保留显示（见 shellOptions） */}
-          <Select value={cfg.terminal_shell} onChange={(v) => patch({ terminal_shell: v })} options={shellOptions} style={{ minWidth: 200 }} aria-label={t("gp.terminal_shell")} />
+        <Row
+          title={t("gp.terminal_shell")}
+          desc={shellMissing ? `${t("gp.terminal_shell_desc")} 当前所选 Shell 未安装，已回退为平台默认。` : t("gp.terminal_shell_desc")}
+        >
+          <Select value={cfg.terminal_shell} onChange={(v) => patch({ terminal_shell: v })} options={shellOptions} style={{ minWidth: 220 }} aria-label={t("gp.terminal_shell")} />
         </Row>
         <Row title={t("gp.terminal_font")} desc={t("gp.terminal_font_desc")}>
-          {/* 问题8: 字体改为下拉候选；已选自定义值不在列表中时保留显示（见 fontOptions） */}
-          <Select value={cfg.terminal_font} onChange={(v) => patch({ terminal_font: v })} options={fontOptions} style={{ minWidth: 200 }} aria-label={t("gp.terminal_font")} />
+          <Select value={cfg.terminal_font} onChange={(v) => patch({ terminal_font: v })} options={fontOptions} style={{ minWidth: 220 }} aria-label={t("gp.terminal_font")} />
         </Row>
       </div>
 
       <div className="settings-card">
-        <Row title={t("gp.enhanced_search")} desc={t("gp.enhanced_search_desc")}>
+        <Row title={t("gp.enhanced_search")} desc={rgDesc}>
           <Sw checked={cfg.enhanced_search} onChange={(v) => patch({ enhanced_search: v })} />
         </Row>
         {/* plan-156-619 S2：消息区搜索入口开关。默认关闭——入口按钮此前常驻右上角，
             与综合工具卡抢位；关闭只隐藏按钮，Ctrl+F 仍可唤起搜索条。 */}
         <Row title={t("gp.message_search")} desc={t("gp.message_search_desc")}>
-          <Sw checked={cfg.show_message_search ?? false} onChange={(v) => patch({ show_message_search: v })} />
-        </Row>
-        {/* plan-156-621：并行分派子会话的提示词开关。关闭后不再注入；
-            plan-156-623：计划模式下不下发子会话工具，但会要求把可并行步骤分组写进方案文档，
-            确认执行时按分组派发（只读 / 工作流模式仍不生效）。 */}
-        <Row title={t("gp.parallel_subsession")} desc={t("gp.parallel_subsession_desc")}>
-          <Sw checked={cfg.parallel_subsession_hint} onChange={(v) => patch({ parallel_subsession_hint: v })} />
+          <Sw checked={cfg.show_message_search} onChange={(v) => patch({ show_message_search: v })} />
         </Row>
         <Row title={t("gp.suggestion")} desc={t("gp.suggestion_desc")}>
           <Sw checked={cfg.suggestion_enabled} onChange={(v) => patch({ suggestion_enabled: v })} />
-        </Row>
-        <Row title={t("gp.memory")} desc={t("gp.memory_desc")}>
-          <Sw checked={cfg.memory_enabled} onChange={(v) => patch({ memory_enabled: v })} />
-        </Row>
-        <Row title={t("gp.reasoning")} desc={t("gp.reasoning_desc")}>
-          <Sw checked={cfg.show_reasoning} onChange={(v) => patch({ show_reasoning: v })} />
-        </Row>
-        <Row title={t("gp.max_steps")} desc={t("gp.max_steps_desc")}>
-          <div style={{ display: "flex", gap: "var(--sp-3)", alignItems: "center" }}>
-            <Select
-              style={{ minWidth: 160 }}
-              value={String([200, 500, 1000, 0].includes(cfg.agent_max_steps) ? cfg.agent_max_steps : "custom")}
-              onChange={(val) => {
-                if (val === "custom") return;
-                patch({ agent_max_steps: Number(val) });
-              }}
-              options={[
-                ...MAX_STEPS_OPTIONS.map((o) => ({ value: String(o.value), label: o.label })),
-                ...(![200, 500, 1000, 0].includes(cfg.agent_max_steps)
-                  ? [{ value: "custom", label: `自定义 (${cfg.agent_max_steps} 步)` }]
-                  : []),
-              ]}
-              aria-label={t("gp.max_steps")}
-            />
-            {![200, 500, 1000, 0].includes(cfg.agent_max_steps) && (
-              <Input
-                type="number"
-                style={{ width: 90 }}
-                min={0}
-                value={maxStepsDraft}
-                onChange={(e) => setMaxStepsDraft(e.target.value)}
-                onBlur={commitMaxSteps}
-                onKeyDown={(e) => { if (e.key === "Enter") commitMaxSteps(); }}
-                aria-label="自定义最大步数"
-              />
-            )}
-          </div>
         </Row>
         {/* 采样温度与单次最大输出：修改即保存。部分模型（Claude 系、思考模式）由适配器固定，不受此项影响 */}
         <Row title="工具轮温度" desc="工具调用轮次的采样温度（0–2）。数值越低输出越稳定，代码修改类任务通常偏低。">
@@ -342,60 +270,41 @@ export function GeneralPanel() {
             aria-label={t("gp.compact_threshold")}
           />
         </Row>
-        {/* v45: 异常自动重试策略——任何报错按间隔依次重试，穷尽后才停止并显示报错 */}
-        <Row title={t("gp.retry_count")} desc={t("gp.retry_count_desc")}>
-          <Input
-            type="number"
-            style={{ width: 90 }}
-            min={0}
-            max={20}
-            value={retryCountDraft}
-            onChange={(e) => setRetryCountDraft(e.target.value)}
-            onBlur={commitRetryCount}
-            onKeyDown={(e) => { if (e.key === "Enter") commitRetryCount(); }}
-            aria-label={t("gp.retry_count")}
-          />
-        </Row>
+        {/* v45: 异常自动重试——标签即一次重试，个数即次数；全部用完仍失败才停止并显示报错 */}
         <Row title={t("gp.retry_intervals")} desc={t("gp.retry_intervals_desc")}>
-          <Input
-            type="text"
-            style={{ width: 160 }}
-            placeholder="10,20,30"
-            value={cfg.agent_retry_intervals}
-            onChange={(e) => patch({ agent_retry_intervals: e.target.value })}
+          <TagInput
+            values={parseRetryIntervals(cfg.agent_retry_intervals)}
+            onChange={(vals) => patch({ agent_retry_intervals: vals.join(",") })}
+            validate={validateRetrySeconds}
+            maxTags={RETRY_MAX_COUNT}
+            placeholder="输入秒数，回车添加"
+            formatTag={(v) => `${v} 秒`}
+            width={260}
             aria-label={t("gp.retry_intervals")}
           />
         </Row>
-        <Row title={t("gp.browser")} desc={t("gp.browser_desc")}>
-          <Sw checked={cfg.browser_enabled} onChange={(v) => patch({ browser_enabled: v })} />
-        </Row>
-        <Row
-          className={cfg.browser_enabled ? undefined : "settings-row-disabled"}
-          title={t("gp.browser_headless")}
-          desc={t("gp.browser_headless_desc")}
-        >
-          <Sw
-            checked={cfg.browser_headless}
-            onChange={(v) => { if (cfg.browser_enabled) patch({ browser_headless: v }); }}
-          />
-        </Row>
-        <BrowserDownloadDirRow />
-        <Row title={t("gp.density")} desc={t("gp.density_desc")}>
-          <Select
-            value={ui.msgDensity}
-            onChange={(v) => ui.setPrefs({ msgDensity: v as "comfortable" | "compact" })}
-            options={[{ value: "comfortable", label: "舒适" }, { value: "compact", label: "紧凑" }]}
-            aria-label={t("gp.density")}
-          />
-        </Row>
       </div>
+
+      <BrowserDownloadDirRow />
     </div>
   );
 }
 
+const MAX_OUTPUT_OPTIONS = [
+  { value: 0, label: "模型默认" },
+  { value: 8192, label: "8K" },
+  { value: 16384, label: "16K" },
+  { value: 32768, label: "32K" },
+  { value: 64000, label: "64K" },
+  { value: 128000, label: "128K" },
+];
+
 /** plan-20261018-operator-boost：内置浏览器下载目录。
  * 下载不再弹系统保存框，统一保存到这里（默认安装目录下的 downloads，不存在会自动创建）；
- * 目录由 Electron 主进程持有（下载拦截发生在主进程），因此只在桌面端显示。选择目录即保存。 */
+ * 目录由 Electron 主进程持有（下载拦截发生在主进程），因此只在桌面端显示。选择目录即保存。
+ * plan-537-2246：卡片容器改由本组件自己持有——此前外层无条件渲染 <div class="settings-card">，
+ * 而本组件在无 Electron API 时返回 null，于是页面底部留下一个只有 1px 描边的空卡片，
+ * 看起来就是一条“阴影线”。现在返回 null 时整块（含卡片壳）都不渲染。 */
 function BrowserDownloadDirRow() {
   const { t } = useI18n();
   const exec = typeof window !== "undefined" ? window.chatcoderAPI?.browserAgentExec : undefined;
@@ -419,24 +328,26 @@ function BrowserDownloadDirRow() {
 
   const where = info ? info.dir + (info.custom ? "" : t("gp.download_dir_default_tag")) : "…";
   return (
-    <Row
-      title={t("gp.download_dir")}
-      desc={`${t("gp.download_dir_desc")}${where}${info?.fallback ? t("gp.download_dir_fallback") : ""}`}
-    >
-      <div style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)" }}>
-        {pick && (
-          <Button variant="secondary" size="sm" onClick={async () => {
-            const dir = await pick();
-            if (dir) await run({ action: "set", dir });
-          }}>{t("gp.download_dir_change")}</Button>
-        )}
-        <Button variant="ghost" size="sm" onClick={() => void run({ action: "open" })}>{t("gp.download_dir_open")}</Button>
-        {info?.custom && (
-          <Button variant="ghost" size="sm" onClick={() => void run({ action: "set", dir: "" })}>
-            {t("gp.download_dir_reset")}
-          </Button>
-        )}
-      </div>
-    </Row>
+    <div className="settings-card">
+      <Row
+        title={t("gp.download_dir")}
+        desc={`${t("gp.download_dir_desc")}${where}${info?.fallback ? t("gp.download_dir_fallback") : ""}`}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)" }}>
+          {pick && (
+            <Button variant="secondary" size="sm" onClick={async () => {
+              const dir = await pick();
+              if (dir) await run({ action: "set", dir });
+            }}>{t("gp.download_dir_change")}</Button>
+          )}
+          <Button variant="ghost" size="sm" onClick={() => void run({ action: "open" })}>{t("gp.download_dir_open")}</Button>
+          {info?.custom && (
+            <Button variant="ghost" size="sm" onClick={() => void run({ action: "set", dir: "" })}>
+              {t("gp.download_dir_reset")}
+            </Button>
+          )}
+        </div>
+      </Row>
+    </div>
   );
 }

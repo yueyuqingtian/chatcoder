@@ -5,14 +5,19 @@
  * 亮暗由 data-theme 决定，世界由 data-world 决定，两者正交组合。
  * ═══════════════════════════════════════════════════════════ */
 
-/* 弹窗与浮层底色（plan-20261017-goal12 项 11）：与主面板同一中性底（--bg-panel），
- * 弹窗不再比主面板更亮、更偏色；白色分组卡在深色下取 neutral-800，与浮层同一层级。 */
+/* 弹窗与浮层底色（plan-20261017-goal12 项 11；plan-20261023-solid-white 调整）：
+ * 浅色下弹窗为纯白底、分组卡改浅灰保留层次；深色下与主面板同一中性底（--bg-panel），
+ * 白色分组卡取 neutral-800，与浮层同一层级。 */
 :root,
 :root[data-theme="light"] {
-  --surface-dialog: var(--bg-panel);
+  --surface-dialog: var(--color-white);
   --surface-inset: var(--color-white);
-  --bg-overlay: color-mix(in srgb, oklch(25% 0.01 60) 26%, transparent);
+  --bg-overlay: color-mix(in srgb, oklch(20% 0.01 60) 34%, transparent);
+  /* 弹窗蒙层的磨砂模糊半径（所有模态遮罩共用） */
+  --overlay-blur: 12px;
 }
+/* 浅色弹窗为纯白底：弹窗内的分组卡改用浅灰底，保留分组层次 */
+:root:not([data-theme="dark"]) .ui-dialog-content { --surface-inset: var(--bg-panel); }
 :root[data-theme="dark"] {
   --surface-dialog: var(--bg-panel);
   --surface-inset: var(--color-neutral-800);
@@ -190,14 +195,43 @@
 /* 风景铺设位置：主内容区、设置页底、侧栏（只在毛玻璃关闭时；开启时由桌面材质透出） */
 .app-main { background-image: var(--world-scene, none); }
 :root:not([data-glass="on"]) .sidebar { background-image: var(--world-scene-side, none); }
+/* 深色主题：主区与侧栏底色保持中性（与浅色的中性底色反相），不叠加世界配色的渐变 */
+:root[data-theme="dark"] .app-main,
+:root[data-theme="dark"] .sidebar { background-image: none; }
 /* 设置卡片与首页卡片微透：让风景淡淡透过来，又不影响文字对比
    （plan-121-482：.mem-list / .inst-list 是「记忆 / 拓展」页的独立列表卡片，跟随同一半透规则；
-    plan-20261019-dsh-ui：第三方插件分组的空态壳也是同页卡片，必须同源，否则与相邻列表背景割裂） */
-:root[data-world] .settings-card,
-:root[data-world] .ui-card,
-:root[data-world] .mem-list,
-:root[data-world] .inst-list,
-:root[data-world] .cx-plugins-blank { background: color-mix(in oklab, var(--color-card) 82%, transparent); }
+    plan-20261019-dsh-ui：第三方插件分组的空态壳也是同页卡片，必须同源，否则与相邻列表背景割裂）。
+   plan-20261023-solid-white：用户要求「浅色模式下设置页卡片与浮窗背景保证纯白 #FFFFFF」——
+   82% 半透会让卡片呈灰调、并随主题世界偏色，故微透只保留在深色主题。 */
+:root[data-theme="dark"][data-world] .settings-card,
+:root[data-theme="dark"][data-world] .ui-card,
+:root[data-theme="dark"][data-world] .mem-list,
+:root[data-theme="dark"][data-world] .inst-list,
+:root[data-theme="dark"][data-world] .cx-plugins-blank { background: color-mix(in oklab, var(--color-card) 82%, transparent); }
+
+/* 浅色：设置页内所有卡片面统一纯白。除上面命中半透规则的卡壳外，还有一批列表容器直接用
+   --bg-main / --color-card 当底（资源列表、分组列表、模型与凭据列表），继续留着就是「白卡里套灰列表」。
+   在设置页作用域内重定义这两个令牌最省事且不漏项：.settings-tex-host 内 --bg-main 只用于卡片内衬，
+   页面底由 .app-main 的 --bg-panel（#f8f8f8）提供，不会把页面刷白。
+   .models-side 是模型页左列（供应商列表）：原底是 text-1 1.5% 的淡灰，与右侧纯白详情同卡内并列时
+   会显出「左灰右白」的层次，用户要求一致为纯白；左右分栏改由 border-right 与行悬停/选中态表达。 */
+:root[data-theme="light"] .settings-tex-host {
+  --bg-main: #fff;
+  --color-card: #fff;
+}
+:root[data-theme="light"] .settings-tex-host :is(
+  .settings-card,
+  .ui-card,
+  .settings-resource-list,
+  .sc-list,
+  .inst-list,
+  .mem-list,
+  .cx-plugins-blank,
+  .models-model-list,
+  .models-cred-list,
+  .idx-list,
+  .models-side
+) { background: #fff; }
 
 /* ── plan-114-448：面板级轻纹理（CSS 平铺 SVG，透明度极低）──
  * 只铺在「留白多」的地方：设置页底、右侧面板启动页；每个世界的纹理各不相同，与首页 canvas 纹理同族。
@@ -238,8 +272,17 @@
   --world-paper: oklch(19% 0.002 80);
 }
 
-/* 弹窗遮罩统一走令牌；plan-114-447 去掉 backdrop-filter，软件渲染下模糊遮罩会明显卡顿 */
-.ui-dialog-overlay,
-:root[data-theme="dark"] .ui-dialog-overlay {
+/* 模态弹窗的蒙层统一为磨砂半透明（参考图）：底色走 --bg-overlay 令牌，背后界面轻度模糊、略降饱和，
+   让弹窗从界面里浮出来。所有模态遮罩共用这一条规则；:root 前缀保证压过各组件里的旧写法。
+   注意：backdrop-filter 在软件渲染下开销较大，如遇卡顿可把 --overlay-blur 调小或设为 0px。 */
+:root .ui-dialog-overlay,
+:root .bpa-dialog-scrim,
+:root .plan-confirm-overlay,
+:root .modal-overlay,
+:root .confirm-overlay,
+:root .confirm-dialog-overlay,
+:root .cmd-center-overlay {
   background: var(--bg-overlay);
+  -webkit-backdrop-filter: blur(var(--overlay-blur)) saturate(0.9);
+  backdrop-filter: blur(var(--overlay-blur)) saturate(0.9);
 }

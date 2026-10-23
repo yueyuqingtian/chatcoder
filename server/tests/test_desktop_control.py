@@ -45,7 +45,6 @@ def desktop_flags(monkeypatch):
     _set(
         desktop_enabled=False,
         desktop_plain_ops_enabled=True,
-        desktop_browser_ops_enabled=True,
         desktop_require_foreground=True,
         desktop_recipe_enabled=True,
     )
@@ -72,25 +71,18 @@ def test_check_plain_ops_respects_sub_switch(desktop_flags):
     assert _check_plain_ops() is None
 
 
-def test_browser_gate_is_union_of_two_entries(desktop_flags):
-    """浏览器能力：常规页开关与电脑操控页开关任一开启即可用。"""
+def test_browser_gate_follows_single_switch(desktop_flags):
+    """浏览器能力只认「电脑操控 → 内置浏览器」这一个开关（browser_enabled）。"""
     from app.orchestration.tools.browser import _check_browser_enabled
 
-    desktop_flags(desktop_enabled=False, desktop_browser_ops_enabled=True)
-    settings.browser_enabled = False
+    desktop_flags(desktop_enabled=False, browser_enabled=False)
     assert _check_browser_enabled() is not None
 
-    # 电脑操控页开启即可（无需回常规页二次开启）
-    desktop_flags(desktop_enabled=True, desktop_browser_ops_enabled=True)
+    desktop_flags(browser_enabled=True)
     assert _check_browser_enabled() is None
 
-    # 电脑操控页的子开关关闭时，回落到常规页开关
-    desktop_flags(desktop_enabled=True, desktop_browser_ops_enabled=False)
-    settings.browser_enabled = True
-    assert _check_browser_enabled() is None
-
-    desktop_flags(desktop_enabled=True, desktop_browser_ops_enabled=False)
-    settings.browser_enabled = False
+    # 电脑操控总开关不再参与门禁：关闭内置浏览器即停用，与电脑操控开关无关
+    desktop_flags(desktop_enabled=True, browser_enabled=False)
     assert _check_browser_enabled() is not None
 
 
@@ -109,9 +101,18 @@ def test_desktop_write_tools_classified_as_desktop(tmp_path):
 
 def test_desktop_read_tools_classified_as_read(tmp_path):
     ctx = _ctx(tmp_path)
-    for name in ("desktop_windows", "desktop_snapshot", "desktop_screenshot", "desktop_focus"):
+    # plan-537-2251 L5：desktop_focus 会 SetForegroundWindow 并把目标窗口压到最前，
+    # 属于改变系统状态而非读取，已移入写操作集合（见 test_desktop_focus_classified_as_write）。
+    for name in ("desktop_windows", "desktop_snapshot", "desktop_screenshot"):
         info = classify(name, {}, ctx, risk_level="low")
         assert info.action == ACTION_READ, name
+
+
+def test_desktop_focus_classified_as_write(tmp_path):
+    """plan-537-2251 L5：激活窗口会改变前台，不能算只读。"""
+    ctx = _ctx(tmp_path)
+    info = classify("desktop_focus", {}, ctx, risk_level="high")
+    assert info.action == ACTION_DESKTOP
 
 
 def test_desktop_write_asks_even_in_auto_mode(tmp_path):

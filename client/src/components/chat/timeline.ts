@@ -1004,6 +1004,11 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
       // agent_runtime 的 _emit_thread(thinking=True) 写 MsgType.Text + content.thinking=true。
       // 否则思考内容会被当作正文展示在消息流中间，导致"思考块与消息/工具调用位置错乱"。
       if (afterSuggestion) continue;
+      // plan-20261023-thinking-blank：纯空白思考不产出条目。
+      // 历史库里有只含一个空格的 thinking 消息（旧版落库未按 strip 判断），
+      // 它们会渲染成「思考过程」行、展开却一片空白；跳过即可让存量会话也恢复正常。
+      // 这里不 flushTools：空白块消失后前后工具调用应继续聚成同一簇。
+      if (!msgText(m.content).trim()) continue;
       flushTools();
       items.push({ kind: "thinking", msg: m });
     } else if (m.msg_type === MsgType.Summary) {
@@ -1021,6 +1026,9 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
       continue;
     } else if (m.msg_type === MsgType.Text) {
       afterSuggestion = false;
+      // plan-20261023-thinking-blank：纯空白正文不产出条目。
+      // 思考块空白同源：结束帧的空白占位曾直接当正文落库，渲染成一个看不到内容的空行。
+      if (!msgText(m.content).trim()) continue;
       flushTools();
       items.push({ kind: "text", msg: m });
     } else if (m.msg_type === MsgType.Plan) {

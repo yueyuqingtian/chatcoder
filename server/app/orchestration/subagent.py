@@ -116,12 +116,10 @@ class SubagentManager:
               task_title: str = "", task_description: str = "",
               context_snapshot: dict | None = None,
               reasoning_effort: str | None = None,
-              subagent_mode: str | None = None,
-              is_blocking: bool = False) -> int:
-        """异步启动子代理 agent_loop，返回 subagent id。
+              subagent_mode: str | None = None) -> int:
+        """后台启动子代理 agent_loop，返回 subagent id（派发即返回，不阻塞调用方）。
 
-        is_blocking（plan-330-1648 M4）：主代理是否正阻塞等待本子代理（spawn_and_wait）
-        —— 用于禁止 report_to_leader(wait=true) 造成死锁。
+        plan-541-2264：同步派发能力已彻底删除，这里是唯一的派发入口。
         """
         handle = SubagentHandle(
             agent_id=agent.id,
@@ -149,44 +147,14 @@ class SubagentManager:
         handle.live_messages = list(context_bundle.to_messages())
         handle.task = asyncio.create_task(self._drive(
             handle, agent_id=agent.id, task_id=getattr(task, "id", None), turn_id=turn_id,
-            messages=handle.live_messages, cancel_event=cancel_event, is_blocking=bool(is_blocking),
+            messages=handle.live_messages, cancel_event=cancel_event,
         ))
         return agent.id
-
-    async def spawn_and_wait(self, db, *, agent, turn_id: int, task, handoff_summary: str,
-                             context_bundle, tool_schemas: list[dict], workspace: str,
-                             cancel_event: asyncio.Event | None = None,
-                             token_budget: int | None = None,
-                             task_title: str = "", task_description: str = "",
-                             context_snapshot: dict | None = None,
-                             reasoning_effort: str | None = None,
-                             subagent_mode: str | None = None) -> SubagentHandle:
-        """同步启动并等待子代理完成，返回已填充结果的 handle。
-
-        v20: 探索子代理（只读调研）用——主代理调用 spawn_subagent(explore=true) 后
-        直接拿到结论文本（handle.findings），不必再轮询 collect_results。
-        """
-        handle_id = self.spawn(
-            db, agent=agent, turn_id=turn_id, task=task,
-            handoff_summary=handoff_summary, context_bundle=context_bundle,
-            tool_schemas=tool_schemas, workspace=workspace,
-            cancel_event=cancel_event, token_budget=token_budget,
-            task_title=task_title, task_description=task_description,
-            context_snapshot=context_snapshot,
-            reasoning_effort=reasoning_effort,
-            subagent_mode=subagent_mode,
-            is_blocking=True,
-        )
-        handle = self._handles.get(handle_id)
-        if handle is not None and handle.task is not None:
-            await handle.task
-        return handle
 
     # ── plan-91-394: 驱动循环 / 检查点 / 暂停 ──────────
 
     async def _drive(self, handle: "SubagentHandle", *, agent_id: int, task_id: int | None,
-                     turn_id: int, messages: list, cancel_event: asyncio.Event | None,
-                     is_blocking: bool) -> None:
+                     turn_id: int, messages: list, cancel_event: asyncio.Event | None) -> None:
         """子代理驱动循环：执行 → 瞬时故障保活重试 → 终态或暂停。
 
         - 成功：status=done，清空检查点；
@@ -217,7 +185,9 @@ class SubagentManager:
                             reasoning_effort=spec.get("reasoning_effort"),
                             subagent_mode=spec.get("subagent_mode"),
                             injected_inputs_provider=(lambda _aid=agent_id: self.drain_agent_inputs(_aid)),
-                            subagent_comm={"manager": self, "agent_id": agent_id, "sync": bool(is_blocking)},
+                            # plan-541-2264：不再携带 sync 标记——所有子代理都是后台执行，
+                            # report_to_leader(wait=true) 对所有子代理都合法，无需死锁防护。
+                            subagent_comm={"manager": self, "agent_id": agent_id},
                             reply_language=spec.get("reply_language", "auto"),
                             reply_language_source=spec.get("reply_language_source", "user"),
                             checkpoint_sink=lambda msgs, _h=handle: _on_step(_h, msgs),
@@ -812,7 +782,7 @@ async def resume_subagent(session_id: int, agent_id: int, *, turn_id: int,
     await _persist_agent_state(agent_id, "running", ck)
     handle.task = asyncio.create_task(manager._drive(
         handle, agent_id=agent_id, task_id=spec.get("task_id"), turn_id=turn_id,
-        messages=messages, cancel_event=cancel_event or asyncio.Event(), is_blocking=False,
+        messages=messages, cancel_event=cancel_event or asyncio.Event(),
     ))
     # 与派发路径一致：前端卡片重新进入运行态、待完成计数同步（失败不影响续跑本身）
     try:
@@ -883,7 +853,7 @@ async def continue_subagent(session_id: int, agent_id: int, *, turn_id: int, not
     await _persist_agent_state(agent_id, "running", _checkpoint_payload(live, spec, "continue"))
     live.task = asyncio.create_task(manager._drive(
         live, agent_id=agent_id, task_id=spec.get("task_id"), turn_id=turn_id,
-        messages=messages, cancel_event=asyncio.Event(), is_blocking=False,
+        messages=messages, cancel_event=asyncio.Event(),
     ))
     # 与派发 / 续跑一致：子代理面板与卡片重新进入运行态（否则节点在转圈、点开却显示已完成）
     try:

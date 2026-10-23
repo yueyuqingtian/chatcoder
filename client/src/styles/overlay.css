@@ -8,8 +8,7 @@
  * ═══════════════════════════════════════════════════════════ */
 
 /* ── ① 弹窗 ───────────────────────────────────────────────── */
-.ui-dialog-overlay { background: color-mix(in srgb, #000 28%, transparent); }
-:root[data-theme="dark"] .ui-dialog-overlay { background: color-mix(in srgb, #000 55%, transparent); }
+/* 遮罩颜色统一由 themes.css 的 --bg-overlay 令牌决定（浅色 / 深色分别取值） */
 .ui-dialog-content {
   background: var(--surface-dialog);
   border: 1px solid var(--surface-inset-border);

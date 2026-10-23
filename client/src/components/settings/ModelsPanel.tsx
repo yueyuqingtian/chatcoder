@@ -200,10 +200,22 @@ function ScanModelsModal({ open, provider, onClose, onSaved }: { open: boolean; 
     if (!provider) return;
     setSaving(true);
     try {
+      // plan-537-2245：单行上下文填了非法值时只跳过该行的 context_window（后端保留原值），
+      // 不中断整批保存。此前 Number(v) || undefined 会把它静默抹掉，用户以为已经存上了。
+      let invalidRows = 0;
       const payload = items
         .filter((it) => it.enabled || it.existing)
-        .map((it) => ({ name: it.name, is_active: it.enabled, context_window: Number(it.context_window) || undefined, is_multimodal: it.is_multimodal }));
+        .map((it) => {
+          const row: { name: string; is_active: boolean; context_window?: number; is_multimodal: boolean } = {
+            name: it.name, is_active: it.enabled, is_multimodal: it.is_multimodal,
+          };
+          const ctx = Number(it.context_window);
+          if (Number.isFinite(ctx) && ctx > 0) row.context_window = ctx;
+          else invalidRows += 1;
+          return row;
+        });
       await api.bulkSaveProviderModels(provider.id, payload);
+      if (invalidRows > 0) notify(`${invalidRows} 个模型的上下文窗口不是大于 0 的整数，已保留原值`);
       onSaved();
       onClose();
     } catch (e) { notify(String(e)); }
@@ -271,11 +283,15 @@ function ModelFormModal({ open, editing, targetProvider, onClose, onSaved }: { o
   const underProvider = !!editing?.provider_id || !!targetProvider;
   const handleSave = async () => {
     if (!form.name.trim()) return;
+    // plan-537-2245：Number("") 与 Number("abc") 分别是 0 与 NaN，原写法 `|| undefined` 会让
+    // 这两种情况静默丢字段，后端回落默认 200000——用户以为改成了自己的值，实际没生效。
+    const ctx = Number(form.context_window);
+    if (!Number.isFinite(ctx) || ctx <= 0) { notify("上下文窗口需为大于 0 的整数"); return; }
     try {
       const data: Record<string, unknown> = {
         name: form.name.trim(),
         provider: targetProvider ? (targetProvider.api_format || "openai_compatible") : form.provider,
-        context_window: Number(form.context_window) || undefined,
+        context_window: ctx,
         is_active: form.is_active,
         is_multimodal: form.is_multimodal,
       };
@@ -400,6 +416,9 @@ export function ModelsPanel() {
   const [detailProviderId, setDetailProviderId] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const detailRequestId = useRef(0);
+  /** plan-537-2245：详情滚动容器。切换供应商时要回到顶部——此前不重置，
+   *  切到内容较少的供应商会停在底部看到一片空白。 */
+  const detailScrollRef = useRef<HTMLElement>(null);
   const detailCache = useRef(new Map<number, { models: ModelOut[]; credentials: ProviderCredentialOut[] }>());
 
   const [showProviderForm, setShowProviderForm] = useState(false);
@@ -423,6 +442,11 @@ export function ModelsPanel() {
   // plan-41-225（右列照图）：名称常态为「标题 + 铅笔」（点击才编辑）、
   // Key 为密码框（可显隐）、多凭据收进附属入口（主区只留一个 Key 框）。
   const [renamingName, setRenamingName] = useState(false);
+  /** plan-537-2245：进入编辑前的名称快照。onChange 会实时把新名字写进 providers（左列同步变），
+   *  所以 Esc 回滚与空值兜底都不能再读 selected.name——那时它已经被改掉了。 */
+  const renameBaseRef = useRef("");
+  /** Esc 已回滚并退出编辑：用来拦掉随后由卸载触发的 onBlur，避免又提交一次 */
+  const renameCancelledRef = useRef(false);
   const [showKey, setShowKey] = useState(false);
   const [showAllCreds, setShowAllCreds] = useState(false);
 
@@ -453,6 +477,10 @@ export function ModelsPanel() {
 
   const selected = providers.find((p) => p.id === selectedId) || null;
   const isOAuth = !!selected && OAUTH_FORMATS.has(selected.api_format);
+  /** 左列是否有可列内容。系统不支持「只加模型不加供应商」，所以有独立模型时必然也有供应商，
+   *  判据只看 providers；两者都为空时不再渲染空左列——否则是「248px 空白栏 + 左上角一行暂无供应商」，
+   *  而右侧大空态已经把同一件事说清楚了。 */
+  const hasSideList = providers.length > 0;
 
   // workbuddy 供应商级积分合计（多账号时汇总展示在详情头部；全部未知时显示 --）
   const creditValues = credentials.map((c) => c.credits).filter((v): v is number => v != null);
@@ -478,8 +506,15 @@ export function ModelsPanel() {
       setDetailLoading(false);
       return;
     }
-    // plan-114-449：silent 刷新（保存后的后台同步）不切加载态，避免每次修改都闪一下
-    if (!silent) setDetailLoading(true);
+    // plan-114-449：silent 刷新（保存后的后台同步）不切加载态，避免每次修改都闪一下。
+    // plan-537-2245：非 silent 的加载 = 切换供应商/首次打开。此时必须先清空旧数据——
+    // 此前只置 loading、保留 A 的模型与凭据，B 还没回来时右列显示的是 A 的内容，
+    // 用户可能对别家的模型执行停用或删除。silent 刷新不清（是同一家的数据，清了会整块闪）。
+    if (!silent) {
+      setDetailLoading(true);
+      setProviderModels([]);
+      setCredentials([]);
+    }
     setDetailProviderId(p.id);
     try {
       const [modelsResult, credentialsResult] = await Promise.allSettled([
@@ -528,6 +563,12 @@ export function ModelsPanel() {
     setRenamingName(false);
     setShowKey(false);
     setShowAllCreds(false);
+    // plan-537-2245：重命名的快照与取消标记同属临时态，切走必须清，
+    // 否则上一家的快照会当成下一家改名时的回滚目标
+    renameBaseRef.current = "";
+    renameCancelledRef.current = false;
+    // plan-537-2245：详情滚动位置回到顶部——两家内容高度不同，不复位会停在底部空白处
+    if (detailScrollRef.current) detailScrollRef.current.scrollTop = 0;
   }, [selectedId]);
 
   const patchProvider = async (id: number, data: Record<string, unknown>) => {
@@ -715,28 +756,39 @@ export function ModelsPanel() {
       {/* plan-114-450：页头交还 PageShell（统一标题字号与间距），页面改为填充式——卡片撑满剩余高度，
           左右两列各自在卡片内滚动（此前 80vh 定高，滚动条悬在卡片内侧无留白，用户觉得怪异） */}
       <PageActions>
-        <Button variant="secondary" size="sm" icon={<IconRefresh size={13} />} onClick={load}>刷新</Button>
+        {/* plan-537-2245：刷新必须刷到底——此前只 load()（供应商列表 + 独立模型），
+            而详情由 selectedId 变化驱动，选中项没变就永远不重拉；即便重拉也会命中
+            detailCache 直接返回旧缓存。所以补一次强制、静默的详情刷新：
+            force 绕过缓存，silent 不切 loading 态（避免整块闪一下）。 */}
+        <Button variant="secondary" size="sm" icon={<IconRefresh size={13} />} onClick={async () => {
+          await load();
+          await loadDetail(selected, true, true);
+        }}>刷新</Button>
         <Button variant="primary" size="sm" icon={<IconPlus size={13} />} onClick={() => { setEditingProvider(null); setShowProviderForm(true); }}>添加供应商</Button>
       </PageActions>
 
-      <div className="models-body">
-        {/* 左：供应商列表（plan-41-225：无分组标题 + 拖拽排序 + 末尾添加入口） */}
-        <ProviderSideList
-          providers={providers}
-          independentModels={independentModels}
-          selectedId={selectedId}
-          statusDotClass={statusDotClass}
-          oauthFormats={OAUTH_FORMATS}
-          onSelect={setSelectedId}
-          onLocalReorder={setProviders}
-          onAdd={() => { setEditingProvider(null); setShowProviderForm(true); }}
-        />
+      <div className={"models-body" + (hasSideList ? "" : " is-empty")}>
+        {/* 左：供应商列表（plan-41-225：无分组标题 + 拖拽排序）；添加入口只在顶部工具栏保留一处。
+            完全空态时整列不渲染，卡片收成单列，由右侧空态独占引导。 */}
+        {hasSideList && (
+          <ProviderSideList
+            providers={providers}
+            independentModels={independentModels}
+            selectedId={selectedId}
+            statusDotClass={statusDotClass}
+            oauthFormats={OAUTH_FORMATS}
+            onSelect={setSelectedId}
+            onLocalReorder={setProviders}
+          />
+        )}
 
         {/* 右：详情 */}
-        <section className="models-detail">
+        <section className="models-detail" ref={detailScrollRef}>
           {!selected ? (
             <div className="models-detail-empty">
-              <Empty size="lg" title={providers.length ? "选择左侧供应商查看配置" : "还没有模型供应商"}
+              {/* 文案按「有没有可选的供应商」判定：独立模型行是 static 不可点击的，
+                  提示「选择左侧供应商」会指向不存在的操作。 */}
+              <Empty size="lg" title={hasSideList ? "选择左侧供应商查看配置" : "还没有模型供应商"}
                 desc="添加供应商并填好 URL / Key，嗒嗒就能用它来回答你"
                 action={<Button variant="primary" size="sm" icon={<IconPlus size={13} />} onClick={() => { setEditingProvider(null); setShowProviderForm(true); }}>添加供应商</Button>} />
             </div>
@@ -759,18 +811,37 @@ export function ModelsPanel() {
                     onChange={(e) => patchProviderLocal(setProviders, selected.id, e.target.value, "name")}
                     onBlur={(e) => {
                       setRenamingName(false);
-                      patchProvider(selected.id, { name: e.target.value.trim() || selected.name });
+                      // plan-537-2245：Esc 已回滚并退出编辑，卸载引发的这次 blur 不能再提交
+                      if (renameCancelledRef.current) { renameCancelledRef.current = false; return; }
+                      // 空值兜底用进入编辑前的快照：此前写的是 selected.name，但它已被 onChange 改成空串，
+                      // 兜底失效 → 清空输入后失焦会把名称存成空。
+                      const base = renameBaseRef.current || selected.name;
+                      patchProvider(selected.id, { name: e.target.value.trim() || base });
                     }}
                     onKeyDown={(e) => {
                       if (e.key === "Enter") { e.preventDefault(); (e.target as HTMLInputElement).blur(); }
-                      if (e.key === "Escape") { e.preventDefault(); setRenamingName(false); }
+                      if (e.key === "Escape") {
+                        e.preventDefault();
+                        // plan-537-2245：按快照把 providers 里的名称还原——不回滚的话标题与左列
+                        // 会停在一个从未保存过的名字上（刷新后又变回去，看着像"没保存"）。
+                        const base = renameBaseRef.current;
+                        if (base && base !== selected.name) {
+                          patchProviderLocal(setProviders, selected.id, base, "name");
+                        }
+                        renameCancelledRef.current = true;
+                        setRenamingName(false);
+                      }
                     }}
                     aria-label="供应商名称"
                   />
                 ) : (
                   <>
                     <span className="models-detail-name">{selected.name}</span>
-                    <IconButton size="xs" title="重命名" icon={<IconPencil size={13} />} onClick={() => setRenamingName(true)} />
+                    <IconButton size="xs" title="重命名" icon={<IconPencil size={13} />} onClick={() => {
+                      renameBaseRef.current = selected.name;
+                      renameCancelledRef.current = false;
+                      setRenamingName(true);
+                    }} />
                   </>
                 )}
                 </div>
@@ -833,6 +904,9 @@ export function ModelsPanel() {
                       defaultValue={primaryCred?.api_key_preview || ""}
                       placeholder="sk-..."
                       wrapClassName="models-key-wrap"
+                      // plan-537-2245：框里预填的是掩码（前4 + •••• + 后4）。聚焦即全选，
+                      // 任何输入都会整体替换掩码，不会产生"掩码 + 新字符"的混合值。
+                      onFocus={(e) => e.currentTarget.select()}
                       suffix={
                         <IconButton size="sm" title={showKey ? "隐藏密钥" : "显示密钥"}
                           icon={showKey ? <IconEyeOff size={14} /> : <IconEye size={14} />}
@@ -842,6 +916,11 @@ export function ModelsPanel() {
                         const v = e.target.value.trim();
                         // 未改动（含仍是后端返回的掩码）→ 不写库，避免把掩码当成真 key 保存
                         if (!v || v === (primaryCred?.api_key_preview || "")) return;
+                        // plan-537-2245：兜底——掩码必然含占位符（后端 _mask_key 口径为
+                        // 前4 + "••••" + 后4，U+2022）。在掩码上改几个字符时上面的相等判断
+                        // 拦不住，会把这个混合值当成新 Key 覆盖真 Key，凭据随即失效。
+                        // 含连续两个以上占位符一律不提交；真实 Key 不会出现 • 或 ?。
+                        if (/[•?]{2,}/.test(v)) return;
                         try {
                           if (primaryCred) await api.updateProviderCredential(primaryCred.id, { api_key: v });
                           else await api.createProviderCredential(selected.id, { label: "默认凭据", api_key: v, priority: 0, is_active: true } as never);

@@ -114,8 +114,13 @@ export function PetsPanel() {
   const remove = usePetsStore((s) => s.remove);
   const importLocal = usePetsStore((s) => s.importLocal);
   const showPet = usePetsStore((s) => s.showPet);
+  const petsDir = usePetsStore((s) => s.petsDir);
+  const setPetsDir = usePetsStore((s) => s.setPetsDir);
+  const openPetsDir = usePetsStore((s) => s.openPetsDir);
 
   const [query, setQuery] = useState("");
+  /** 最近一次修改安装目录的结果（迁移了几只宠物） */
+  const [dirNotice, setDirNotice] = useState("");
   const [limit, setLimit] = useState(GALLERY_PAGE);
 
   useEffect(() => {
@@ -142,6 +147,20 @@ export function PetsPanel() {
   const shown = gallery.slice(0, limit);
   const current: InstalledPet | null = installed.find((p) => p.slug === pref?.slug) || null;
   const hidden = pref?.visible === false;
+
+  /** 更改安装目录：dir 为空串 = 恢复默认；未传则弹出目录选择（取消即不处理） */
+  const changePetsDir = async (dir?: string) => {
+    const target = dir ?? (await window.chatcoderAPI?.selectDirectory?.());
+    if (target === null || target === undefined) return;
+    setDirNotice("");
+    const res = await setPetsDir(target);
+    if (!res) return;
+    setDirNotice(
+      res.moved
+        ? `已迁移 ${res.moved} 只宠物到新目录${res.skipped ? `；另有 ${res.skipped} 只因同名已存在或迁移失败，保留在原位置` : ""}。`
+        : "新目录已生效。",
+    );
+  };
 
   return (
     <div className="settings-card-stack">
@@ -182,6 +201,26 @@ export function PetsPanel() {
             </>
           ) : null}
         </Row>
+      </div>
+
+      <div className="settings-card">
+        <Row
+          title="安装目录"
+          desc={
+            petsDir
+              ? `宠物文件的保存位置。默认安装在软件安装目录下的 pets 文件夹，更改后会自动迁移已安装的宠物。当前：${petsDir.dir}${petsDir.custom ? "" : "（默认）"}${petsDir.fallback ? "。默认目录不可写（可能装在系统目录），已改用用户数据目录" : ""}`
+              : "宠物文件的保存位置，更改后会自动迁移已安装的宠物"
+          }
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)" }}>
+            <Button size="sm" onClick={() => void changePetsDir()}>更改</Button>
+            <Button size="sm" onClick={() => void openPetsDir()}>打开</Button>
+            {petsDir?.custom && (
+              <Button size="sm" variant="ghost" onClick={() => void changePetsDir("")}>恢复默认</Button>
+            )}
+          </div>
+        </Row>
+        {dirNotice && <Row title="迁移结果" desc={dirNotice}><span /></Row>}
       </div>
 
       <div className="settings-card">
@@ -248,7 +287,7 @@ export function PetsPanel() {
       </div>
 
       <div className="settings-card">
-        <Row title={`已安装（${installed.length}）`} desc="点击宠物可设为当前；损坏的资源建议移除后重新安装">
+        <Row title={`已安装（${installed.length}）`} desc="在下方列表中点「设为当前」选择要在桌面显示的宠物；资源损坏的建议移除后重新安装">
           <Button size="sm" variant="primary" onClick={() => void importLocal()}>
             从本地导入
           </Button>

@@ -1735,12 +1735,11 @@ export interface GlobalSettingsOut {
   terminal_font: string;
   http_proxy: string;
   enhanced_search: boolean;
+  /** 只读：增强搜索实际使用的 rg 来源（bundled 随包内置 / path 系统 PATH / none 未找到，回落纯 Python） */
+  ripgrep_source?: "bundled" | "path" | "none";
   show_todos: boolean;
-  show_reasoning: boolean;
   /** plan-156-619 S2：消息区搜索入口按钮（左上角）。默认关闭；关闭只隐藏入口，Ctrl+F 仍可唤起 */
   show_message_search?: boolean;
-  /** plan-156-621：每轮用户消息注入「优先用子会话并行处理」的提示词（默认开启） */
-  parallel_subsession_hint?: boolean;
   /** v3.0 (plan-88): 计划模式允许访问工作区外路径（plan-75-332 废弃） */
   plan_mode_allow_outside_access: boolean;
   /** v32 (plan-89): 沙箱模式（plan-75-332 废弃） */
@@ -1755,17 +1754,16 @@ export interface GlobalSettingsOut {
   auto_overdraft_on_quota_exceeded?: boolean;
   /** v46: ta3 额度自动重置（报错时查额度，周/月额度用尽则自动提交重置） */
   auto_reset_on_quota_exceeded?: boolean;
-  agent_max_steps?: number;
-  /** v45: 异常自动重试次数（0 = 不重试） */
-  agent_retry_count?: number;
-  /** v45: 每次重试前的等待秒数（逗号分隔，默认 10,20,30） */
+  /** v45: 异常自动重试间隔（逗号分隔的秒数标签，个数即重试次数；空串 = 不重试，默认 10,20,30） */
   agent_retry_intervals?: string;
   /** 采样温度（0–2）：工具轮 / 文本轮，默认 0.3 / 0.7；Claude 系与思考模式下由适配器按规则忽略 */
   agent_tool_temperature?: number;
   agent_text_temperature?: number;
   /** 单次最大输出 token（0 = 不限制；官方直连由适配器按模型兜底） */
   agent_max_output_tokens?: number;
+  /** 内置浏览器工具开关（设置 → 电脑操控 → 内置浏览器） */
   browser_enabled?: boolean;
+  /** 后台无头浏览器（仅未连接桌面端时的兜底浏览器生效；设置 → 电脑操控） */
   browser_headless?: boolean;
   /** 下一步建议卡开关（默认关闭；开启后智能体 / 工作流模式才注入建议卡工具与提示词） */
   suggestion_enabled?: boolean;
@@ -1773,8 +1771,6 @@ export interface GlobalSettingsOut {
   desktop_enabled?: boolean;
   /** plan-334-1661: 普通电脑操作子开关 */
   desktop_plain_ops_enabled?: boolean;
-  /** plan-334-1661: 浏览器操作子开关 */
-  desktop_browser_ops_enabled?: boolean;
   /** plan-334-1661: 写操作是否要求目标窗口在前台（安全护栏） */
   desktop_require_foreground?: boolean;
   /** plan-334-1661: 截图 JPEG 画质（10~100） */
@@ -1881,8 +1877,7 @@ export interface PendingApprovalsOut {
 /** 问题7/8: 终端 Shell 选项（available=当前设备实际存在） */
 export interface TerminalShellOption { value: string; label: string; available: boolean; }
 /** 问题7/8: 候选等宽字体 */
-export interface TerminalFontOption { value: string; label: string; }
-export interface TerminalOptionsOut { shells: TerminalShellOption[]; fonts: TerminalFontOption[]; }
+export interface TerminalOptionsOut { shells: TerminalShellOption[]; }
 
 
 /** v3.0 (plan-88): 工具级规则候选清单项（PolicyPanel 工具下拉数据源） */

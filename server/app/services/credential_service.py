@@ -673,6 +673,53 @@ async def reset_credential(db: AsyncSession, credential_id: int) -> bool:
     return ok
 
 
+def revive_provider_credentials(session, provider_id: int) -> int:
+    """把某供应商下所有「冷却中」的凭据恢复为可用，返回恢复条数。
+
+    用户手动刷新额度（或额度透支/重置成功）后，额度已恢复，凭据冷却按理也应
+    一起解除——此前刷新只清了额度展示缓存，凭据行的 status=cooldown 原样保留，
+    ta3 的 `available_credentials` 又是**硬过滤**冷却行，于是刷新之后仍然本地
+    直接报 provider_credential_unavailable，形如「请求根本没发出去」。
+    仅在写锁（run_write_locked 的 patch）内调用；与其他 patch 一致需自行 commit。
+    """
+    rows = list(
+        session.execute(
+            select(ProviderCredential).where(ProviderCredential.provider_id == provider_id)
+        ).scalars().all()
+    )
+    revived = 0
+    for cred in rows:
+        status = (cred.status or "ok").lower()
+        if status != "cooldown" and not cred.cooldown_until:
+            continue
+        cred.status = "ok"
+        cred.cooldown_until = None
+        cred.fail_count = 0
+        revived += 1
+    session.commit()
+    return revived
+
+
+async def revive_provider_credentials_by_id(db: AsyncSession, provider_id: int) -> int:
+    """revive_provider_credentials 的异步包装：落库 + 清进程内健康状态。
+
+    进程内 `_state` 里的 demoted_until/fail_count 与库里的冷却必须一起清，
+    否则非 ta3 供应商会被内存中的暂缓窗口继续排到队尾。
+    """
+    from app.persistence.database import run_write_locked
+
+    creds = await list_credentials(db, provider_id)
+    ids = [int(c.id) for c in creds if c.id is not None]
+
+    def patch(s):
+        return revive_provider_credentials(s, provider_id)
+
+    revived = await run_write_locked(patch, label=f"credential.revive.{provider_id}")
+    for cid in ids:
+        forget(cid)
+    return int(revived or 0)
+
+
 async def mark_ok(db: AsyncSession, credential_id: int) -> None:
     """标记凭据成功（清冷却、刷新粘性时间、清零连续失败计数）。"""
     from app.persistence.database import run_write_locked

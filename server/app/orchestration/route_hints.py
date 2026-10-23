@@ -82,5 +82,5 @@ async def route_hint(ctx: Any, *, scope: str, names: list[str], target_label: st
         lines.append(f"  原则：{h.principle}")
         if h.pitfalls:
             lines.append(f"  注意：{h.pitfalls}")
-    lines.append(f"（本次做法若有改进或新坑点，完成后用 {tool} action=save 以相同 intent 更新。）")
+    lines.append(f"（本次做法若有改进或新坑点，先用 {tool} action=save 更新，再给最终汇报。）")
     return "\n".join(lines)

@@ -18,28 +18,26 @@ from app.orchestration.subagent_capabilities import (
 # ───────────────── 启动还原 ─────────────────
 
 
-def test_saved_false_subsession_hint_survives_restart(monkeypatch):
-    """用户保存的 false 必须被还原到运行时，而不是回落为默认 true。"""
+def test_saved_false_subsession_survives_restart(monkeypatch):
+    """用户保存的子会话 false 必须被还原到运行时，而不是回落为默认 true。"""
     monkeypatch.setattr(settings_router, "_load_config", lambda: {
-        "parallel_subsession_hint": False, "subsession_enabled": False, "subagent_enabled": True,
+        "subsession_enabled": False, "subagent_enabled": True,
     })
     monkeypatch.setattr(settings_router, "_save_config", lambda data: None)
-    monkeypatch.setattr(settings, "parallel_subsession_hint", True)
     monkeypatch.setattr(settings, "subsession_enabled", True)
     settings_router.load_persisted_workspace()
-    assert settings.parallel_subsession_hint is False
     assert settings.subsession_enabled is False
 
 
-def test_missing_switch_keys_are_backfilled_true(monkeypatch):
-    """旧配置缺键时补写为开启（升级默认值），且不覆盖已有的 false。"""
+def test_missing_switch_keys_are_backfilled(monkeypatch):
+    """旧配置缺键时补写（子会话跟随旧的合并开关），且不覆盖已有的 false；不再写入已移除的并行提示开关。"""
     saved: dict = {}
     monkeypatch.setattr(settings_router, "_load_config", lambda: {"subagent_enabled": False})
     monkeypatch.setattr(settings_router, "_save_config", lambda data: saved.update(data))
-    monkeypatch.setattr(settings, "parallel_subsession_hint", False)
     settings_router.load_persisted_workspace()
     assert saved.get("subagent_enabled") is False  # 已存在的 false 保留
-    assert saved.get("parallel_subsession_hint") is True  # 缺失键补写为 true
+    assert saved.get("subsession_enabled") is False  # 子会话开关跟随旧的合并开关
+    assert "parallel_subsession_hint" not in saved
 
 
 def test_approval_explain_model_restored_on_startup(monkeypatch):

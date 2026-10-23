@@ -3,7 +3,9 @@
 覆盖点：
 - M1 运行模式按类型锁定：子代理不继承会话 permission_mode；计划文档纠偏只对主代理。
 - M2 模型 / 思考深度配置链：SubagentProfile.reasoning_effort 列 + API 出入参 + 迁移声明。
-- M4 双向通信：主代理→子代理 inbox 注入、子代理→主代理上报、提问等待与超时、同步禁用 wait。
+- M4 双向通信：主代理→子代理 inbox 注入、子代理→主代理上报、提问等待与超时。
+- plan-541-2264：子代理派发一律后台异步，同步派发能力已整体下线（无 background 参数、
+  spawn() 不再接受 is_blocking、report_to_leader 的 wait 对所有子代理开放）。
 - M5-a 落库时序：spawn 的 TOOL_CALL 在工具执行前落库并排空（卡片位置正确的充要条件）。
 - M7 保活：未送达通知阻止 manager 被销毁。
 """
@@ -52,25 +54,42 @@ def test_append_subagent_tools_idempotent():
     assert _names(out).count("send_to_subagent") == 1
 
 
-def test_explore_only_schema_keeps_background_only():
-    """只读/计划模式（plan-64-289）：explore 仍隐藏（运行时强制只读），但保留 background——
-    否则该模式下唯一路径必然同步阻塞（用户反馈：AI 倾向同步子代理，主 turn 被长时间挂住）。"""
+def test_explore_only_schema_has_no_dispatch_switch():
+    """只读/计划模式（plan-541-2264）：explore 隐藏（运行时强制只读），调度参数整体消失——
+    只读版与普通版都不再有 background，模型拿不到任何阻塞派发的入口。"""
     out = append_subagent_tools([], None, explore_only=True)
     spawn = next(s for s in out if s["function"]["name"] == "spawn_subagent")
     props = spawn["function"]["parameters"]["properties"]
     assert "explore" not in props
-    assert "background" in props
+    assert "background" not in props
 
 
-# ── plan-64-289: 派发异步化与续跑正文固化 ────────────────────
+# ── plan-541-2264: 同步派发整体下线（禁止回潮守护） ──────────
 
-def test_explore_and_background_are_composable():
-    """plan-64-289：explore 只锁读写范围、background 只锁调度方式，两者可自由组合——
-    旧「background 强制 explore=false」互斥已移除，同步分支只在 explore 且非 background 时走。"""
-    text = (_ORCH / "agent_loop.py").read_text(encoding="utf-8")
-    assert "background = bool(args.get(\"background\", False))" in text
-    assert "if explore and not background:" in text
-    assert "\n        if bool(args.get(\"background\", False)):\n            explore = False\n" not in text
+
+def test_synchronous_dispatch_path_is_gone():
+    """plan-541-2264：只读子代理曾走 spawn_and_wait 同步阻塞（主 turn 被挂住直到子代理
+    结束）。现在派发一律后台，源码层面不允许再出现同步分支与调度参数——回潮即失败。"""
+    loop_text = (_ORCH / "agent_loop.py").read_text(encoding="utf-8")
+    mgr_text = (_ORCH / "subagent.py").read_text(encoding="utf-8")
+    assert "spawn_and_wait" not in loop_text
+    assert "spawn_and_wait" not in mgr_text
+    assert "if explore and not background:" not in loop_text
+    assert "args.get(\"background\"" not in loop_text
+    assert "def spawn_and_wait" not in mgr_text
+    # spawn() 不再接受 is_blocking：工作流等调用点传了会抛 TypeError
+    assert "is_blocking" not in mgr_text
+    assert "is_blocking" not in inspect.getsource(subagent_mod.SubagentManager.spawn)
+
+
+def test_spawn_schema_has_no_background_param():
+    """plan-541-2264：普通模式下 spawn_subagent 也不再暴露 background。"""
+    out = append_subagent_tools([], None)
+    spawn = next(s for s in out if s["function"]["name"] == "spawn_subagent")
+    props = spawn["function"]["parameters"]["properties"]
+    assert "background" not in props
+    assert "explore" in props
+    assert "task_title" in props and "task_description" in props
 
 
 def test_continuation_paths_persist_step_text():
@@ -184,14 +203,16 @@ def test_push_agent_input_requires_running_subagent():
     assert mgr.push_agent_input(7, "again") is False  # 已结束不可投递
 
 
-async def test_report_to_leader_sync_refuses_wait():
-    """同步子代理（主代理正阻塞等待）不得 wait=true——否则死锁，工具层直接拒绝。"""
-    comm = {"manager": None, "agent_id": 1, "sync": True}
+async def test_report_to_leader_wait_allowed_for_every_subagent():
+    """plan-541-2264：所有子代理都后台执行，不再有「同步子代理会被拒绝」的死锁防护——
+    wait=true 一律放行，只在无人答复时按超时返回「按最佳判断继续」（不是报错拒绝）。"""
+    comm = {"manager": None, "agent_id": 1}
     out = await agent_loop_mod._run_report_to_leader(
-        comm, {"message": "which API?", "kind": "question", "wait": True},
+        comm, {"message": "which API?", "kind": "question", "wait": True, "timeout_s": 1},
         session_id=1, turn_id=1, thread_id=1, agent_id=1, agent_name="sub", db=None,
     )
-    assert "cannot wait for a reply" in out
+    assert "cannot wait for a reply" not in out
+    assert "No reply from the main agent" in out
 
 
 async def test_wait_for_reply_timeout_then_delivery():

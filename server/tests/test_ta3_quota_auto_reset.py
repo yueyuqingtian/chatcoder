@@ -138,3 +138,45 @@ def test_config_enabled_by_either_switch(monkeypatch):
     monkeypatch.setattr(settings, "auto_reset_on_quota_exceeded", False, raising=False)
     monkeypatch.setattr(settings, "auto_overdraft_on_quota_exceeded", True, raising=False)
     assert auto_recover._config_enabled() is True
+
+
+# ── 4) v47：取消 5 分钟时间限流，改为按额度状态幂等去重 ──
+
+
+@pytest.fixture()
+def recover_mod(monkeypatch):
+    from app.auth.ta3 import auto_recover
+
+    monkeypatch.setattr(auto_recover, "_last_attempt", {}, raising=False)
+    return auto_recover
+
+
+def test_no_fixed_cooldown_constant(recover_mod):
+    """5 分钟固定冷却必须已移除（高消耗模型打满额度后不能等 5 分钟）。"""
+    assert not hasattr(recover_mod, "_COOLDOWN_SECONDS")
+
+
+def test_dedupe_only_within_same_quota_state(recover_mod):
+    """同一额度状态只提交一次；用量回落即视为已恢复，允许立即重试。"""
+    mod = recover_mod
+    pid = 7
+
+    assert mod._dedupe_hit(pid, "DAILY", 120.0, "模型请求失败 429") is False
+    mod._last_attempt[pid] = ("DAILY", "模型请求失败 429", 120.0, mod.time.monotonic())
+
+    # 同一状态、极短时间内重复报错 → 去重
+    assert mod._dedupe_hit(pid, "DAILY", 130.0, "模型请求失败 429") is True
+    # 用量回落（重置/透支生效）→ 不再去重
+    assert mod._dedupe_hit(pid, "DAILY", 40.0, "模型请求失败 429") is False
+    # 窗口变了 → 允许尝试
+    assert mod._dedupe_hit(pid, "WEEKLY", 120.0, "模型请求失败 429") is False
+    # 错误类型变了 → 允许尝试
+    assert mod._dedupe_hit(pid, "DAILY", 120.0, "模型请求失败 500") is False
+
+
+def test_dedupe_expires_quickly(recover_mod):
+    """去重窗口只有十几秒，不是用户操作的频率限制。"""
+    mod = recover_mod
+    pid = 8
+    mod._last_attempt[pid] = ("DAILY", "err", 100.0, mod.time.monotonic() - 60)
+    assert mod._dedupe_hit(pid, "DAILY", 100.0, "err") is False

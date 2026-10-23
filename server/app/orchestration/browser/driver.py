@@ -15,7 +15,7 @@
 | mouse | tab?, action(click·move·wheel·drag·activate), x, y, ref?, button, count, modifiers, dx, dy, to_x, to_y, label, rect, on_dialog, settle_ms, shot? | settle, aimed? |
 | keys | tab?, keys[], repeat, label, on_dialog, settle_ms, shot? | settle |
 | text | tab?, text, label, rect, settle_ms, shot? | settle |
-| capture | tab?, full_page?, clip?, marks?, max_side, quality, label | base64, mime, width, height, css_width, css_height, scroll, viewport, page_url, marks? |
+| capture | tab?, full_page?, clip?, marks?, max_side, quality, label | base64, mime, width, height, css_width, css_height, scroll, viewport, page_url, mode(full·viewport·clip), truncated, marks? |
 | logs | tab?, kind(console·network), limit, only_errors, pattern, clear | entries, total |
 | net_body | tab?, request_id | body, base64, mime |
 | viz | tab?, label, rect? | — |
@@ -264,6 +264,21 @@ def _flag(v: Any) -> bool:
     return bool(v)
 
 
+def _int_arg(v: Any, default: int, lo: int, hi: int, name: str) -> int:
+    """数值入参归一（plan-537-2251）：解析失败给可读错误，并 clamp 到 [lo, hi]。
+
+    模型偶发把数字写成 "3 次" 或传明显越界的值（如 repeat=1000）；此前直接 int() 抛裸异常、
+    或原样下发到宿主，前者变成「浏览器操作异常」后者会卡住界面。空值走 default。
+    """
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return default
+    try:
+        n = int(float(v))
+    except (TypeError, ValueError) as e:
+        raise ActionError(f"{name} 必须是数字，收到 {v!r}") from e
+    return max(lo, min(n, hi))
+
+
 def _target_args(args: dict) -> dict:
     out = {}
     for k in ("ref", "selector", "text"):
@@ -389,7 +404,7 @@ class BrowserDriver:
             url = normalize_url(str(args.get("url") or ""))
             payload["url"] = url
             payload["label"] = f"打开 {_clip(url, 60)}"
-            if args.get("new_tab"):
+            if _flag(args.get("new_tab")):
                 payload["new_tab"] = True
         resp = await self.call("nav", payload, timeout=_T_NAV)
         lines = [f"已打开：{_clip(resp.get('title') or '(无标题)', 60)} — {resp.get('url') or ''}"
@@ -489,12 +504,13 @@ class BrowserDriver:
         return Outcome(True, head + "\n" + "\n".join(lines), data=resp)
 
     async def snapshot(self, args: dict) -> Outcome:
-        a = {"filter": args.get("filter") or "interactive", "max_chars": args.get("max_chars") or 12000}
+        a = {"filter": args.get("filter") or "interactive",
+             "max_chars": _int_arg(args.get("max_chars"), 12000, 200, 40000, "max_chars")}
         if args.get("ref"):
             a["ref"] = str(args["ref"])
         if args.get("query"):
             a["query"] = str(args["query"])
-        if args.get("viewport_only"):
+        if _flag(args.get("viewport_only")):
             a["viewport_only"] = True
         if args.get("tab_id"):
             await self.call("tabs.select", {"tab": str(args["tab_id"])})
@@ -504,7 +520,7 @@ class BrowserDriver:
                                           "count": (v or {}).get("count"), "truncated": (v or {}).get("truncated")})
 
     async def get_text(self, args: dict) -> Outcome:
-        a: dict = {"max_chars": args.get("max_chars") or 8000}
+        a: dict = {"max_chars": _int_arg(args.get("max_chars"), 8000, 200, 40000, "max_chars")}
         a.update(_target_args(args))
         v = await self.kit("text", a, label="读取页面正文")
         v = v or {}
@@ -521,8 +537,8 @@ class BrowserDriver:
             await self.navigate({"url": args["url"]})
         payload: dict = {"max_side": 1280, "quality": 72, "label": "截图"}
         target = _target_args(args)
-        viewport_shot = True
         kind = "viewport"
+        want_full = False
         if target:
             info = await self.kit("resolve", target, label="定位截图区域")
             r = info.get("rect") or {}
@@ -530,12 +546,11 @@ class BrowserDriver:
             payload["clip"] = {"x": max(0, r.get("x", 0) - pad), "y": max(0, r.get("y", 0) - pad),
                                "width": max(1, r.get("width", 1) + pad * 2), "height": max(1, r.get("height", 1) + pad * 2)}
             payload["label"] = f"截图 {info.get('label') or ''}"
-            viewport_shot = False
             kind = "element"
-        elif args.get("full_page"):
+        elif _flag(args.get("full_page")):
             payload["full_page"] = True
             payload["label"] = "整页截图"
-            viewport_shot = False
+            want_full = True
             kind = "full"
         elif _flag(args.get("marks")):
             payload["marks"] = True
@@ -543,14 +558,25 @@ class BrowserDriver:
         b64 = resp.get("base64") or ""
         if not b64:
             raise ActionError("截图失败：没有拿到图像数据")
+        # plan-537-2251：以宿主回报的实际截图口径为准（整页截图失败时宿主会退回视口截图）。
+        # 旧宿主没有 mode 字段时保持请求阶段推定的 kind，行为不变。
+        host_mode = str(resp.get("mode") or "").strip().lower()
+        if want_full and host_mode in ("full", "viewport"):
+            kind = host_mode
+        truncated = bool(resp.get("truncated")) if want_full else False
         w, h = int(resp.get("width") or 0), int(resp.get("height") or 0)
         tab = str(resp.get("tab") or self.st.tab or "")
+        # 记账用实际口径：后续按截图坐标点击时，kit 的 shotToViewport 依据 kind 决定是否按整页滚入
         self._remember_shot({**resp, "tab": tab}, kind)
         rel, abs_path = _save_shot(b64, resp.get("mime") or "image/jpeg")
         hint = {"viewport": "（视口截图：图上像素坐标可直接用于 browser_click 的 x/y）",
                 "full": "（整页截图：图上坐标为整页位置，点击时会自动滚到该处）",
                 "element": "（元素截图，坐标不能用于点击）"}[kind]
         lines = [f"截图完成：{_clip(resp.get('title') or '', 60)} — {resp.get('url') or ''}", f"图片 {w}×{h}" + hint]
+        if want_full and kind == "viewport":
+            lines.append("整页截图失败，已退回视口截图：图上坐标按当前视口计算，不要按整页坐标换算")
+        if truncated:
+            lines.append("页面高度超过 12000px，只截取到前 12000px")
         marks = resp.get("marks") or []
         if marks:
             lines.append("图上编号对应的元素（按 ref 操作最准）：")
@@ -596,7 +622,7 @@ class BrowserDriver:
                     await asyncio.sleep(0.25)
                     continue
                 raise
-            if info.get("covered_by") and not args.get("force") and time.monotonic() < deadline:
+            if info.get("covered_by") and not _flag(args.get("force")) and time.monotonic() < deadline:
                 await asyncio.sleep(0.25)
                 continue
             return info
@@ -604,13 +630,14 @@ class BrowserDriver:
     async def click(self, args: dict) -> Outcome:
         info = await self._resolve_actionable(args, "点击")
         covered = info.get("covered_by")
-        if covered and not args.get("force"):
+        force = _flag(args.get("force"))
+        if covered and not force:
             raise ActionError(f"{info.get('label')} 被 {covered} 遮挡（可能是弹窗、浮层或框架，已等待 1.5 秒仍未消失）。"
                               f"下拉 / 浮层可先用 browser_press 按 Escape 关闭，或 browser_snapshot 查看遮挡物；"
                               f"确认目标无误后传 force=true")
-        if info.get("disabled") and not args.get("force"):
+        if info.get("disabled") and not force:
             raise ActionError(f"{info.get('label')} 处于禁用状态，点击不会生效")
-        count = max(1, min(int(args.get("click_count") or (2 if args.get("double") else 1)), 3))
+        count = _int_arg(args.get("click_count"), 2 if _flag(args.get("double")) else 1, 1, 3, "click_count")
         button = str(args.get("button") or "left")
         verb = {1: "点击", 2: "双击", 3: "三击"}[count] if button == "left" else ("右键点击" if button == "right" else "中键点击")
         mods = _modifiers(args.get("modifiers"))
@@ -660,12 +687,11 @@ class BrowserDriver:
             raise ActionError("text 不能为空")
         text = str(text)
         target = _target_args(args)
-        clear = args.get("clear", args.get("clear_before", True))
-        clear = bool(clear) if not isinstance(clear, str) else clear.lower() not in ("false", "0", "no")
+        clear = _flag(args.get("clear", args.get("clear_before", True)))
         info = await self.kit("focus", {**target, "clear": clear}, label="聚焦输入框")
         label = info.get("label") or "输入框"
         before = self.st.urls.get(self.st.tab or "", "")
-        submit = bool(args.get("submit") or args.get("press_enter"))
+        submit = _flag(args.get("submit")) or _flag(args.get("press_enter"))
         shot = _flag(args.get("screenshot"))
         resp = await self.call("text", {"text": text, "label": f"在{label}输入", "rect": info.get("rect"),
                                         "settle_ms": 0 if submit else _SETTLE_TEXT, "shot": shot and not submit},
@@ -688,7 +714,7 @@ class BrowserDriver:
             combos = normalize_keys(args.get("keys") or args.get("key"))
         except KeyParseError as e:
             raise ActionError(str(e)) from e
-        repeat = max(1, min(int(args.get("repeat") or 1), 50))
+        repeat = _int_arg(args.get("repeat"), 1, 1, 20, "repeat")
         if args.get("ref") or args.get("selector") or args.get("text"):
             await self.kit("focus", _target_args(args), label="聚焦目标")
         shown = " ".join(describe(c) for c in combos) + (f" ×{repeat}" if repeat > 1 else "")
@@ -721,6 +747,7 @@ class BrowserDriver:
             px = vp["height"] * 0.8 if direction in ("up", "down") else vp["width"] * 0.8
         elif px <= 10:  # 小数字按「屏」理解
             px = px * (vp["height"] if direction in ("up", "down") else vp["width"])
+        px = min(px, 20000)  # plan-537-2251：无上限的滚动量会让页面直接飞出很远
         if target:
             info = await self.kit("resolve", target, label="定位滚动区域")
             x, y = info["x"], info["y"]
@@ -775,7 +802,7 @@ class BrowserDriver:
 
     async def clipboard(self, args: dict) -> Outcome:
         action = str(args.get("action") or "copy").lower()
-        system = bool(args.get("system"))
+        system = _flag(args.get("system"))
         target = _target_args(args)
         if action == "select_all":
             v = await self.kit("selectAll", target, label="全选")
@@ -816,12 +843,12 @@ class BrowserDriver:
 
     async def wait(self, args: dict) -> Outcome:
         if args.get("ms") is not None and not (args.get("text") or args.get("selector") or args.get("ref")):
-            ms = max(0, min(int(args.get("ms") or 0), 30000))
+            ms = _int_arg(args.get("ms"), 0, 0, 30000, "ms")
             await asyncio.sleep(ms / 1000)
             return Outcome(True, f"已等待 {ms} ms")
-        a: dict = {"timeout_ms": int(args.get("timeout_ms") or 10000)}
+        a: dict = {"timeout_ms": _int_arg(args.get("timeout_ms"), 10000, 100, 60000, "timeout_ms")}
         a.update(_target_args(args))
-        if args.get("gone"):
+        if _flag(args.get("gone")):
             a["gone"] = True
         what = a.get("text") or a.get("selector") or a.get("ref") or "页面加载完成"
         v = await self.kit("wait", a, label=f"等待 {_clip(what, 30)}", timeout=a["timeout_ms"] / 1000 + 8)
@@ -871,11 +898,13 @@ class BrowserDriver:
                 body = body[:20000] + "\n…（已截断）"
             return Outcome(True, f"响应体（{v.get('mime') or ''}）：\n{body}")
         kind = "network" if str(args.get("kind") or "").lower() == "network" else "console"
-        v = await self.call("logs", {"kind": kind, "limit": args.get("limit") or 50, "only_errors": bool(args.get("only_errors")),
-                                     "pattern": args.get("pattern") or "", "clear": bool(args.get("clear"))})
+        v = await self.call("logs", {"kind": kind, "limit": _int_arg(args.get("limit"), 50, 1, 500, "limit"),
+                                     "only_errors": _flag(args.get("only_errors")),
+                                     "pattern": args.get("pattern") or "", "clear": _flag(args.get("clear"))})
         entries = v.get("entries") or []
         if not entries:
-            return Outcome(True, "没有" + ("网络请求" if kind == "network" else "控制台消息") + "记录" + ("（已按条件过滤）" if args.get("pattern") or args.get("only_errors") else ""))
+            return Outcome(True, "没有" + ("网络请求" if kind == "network" else "控制台消息") + "记录"
+                           + ("（已按条件过滤）" if args.get("pattern") or _flag(args.get("only_errors")) else ""))
         lines = [f"{'网络请求' if kind == 'network' else '控制台消息'}（共 {v.get('total')} 条，显示最近 {len(entries)} 条）："]
         for e in entries:
             if kind == "network":

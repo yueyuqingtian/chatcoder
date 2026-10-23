@@ -343,7 +343,7 @@ export default function App() {
         </div>
         {/* RFL-1（plan-329-1647 S4）：中列不冻结——拖左分隔条时中列内容宽度实时跟随，消息流文本逐帧折行。
             左侧例外（plan-282-1520）：侧栏内容根 freezeRefs 钉住后逐帧跟随面板宽，拖拽期不留空白带。 */}
-        {/* 折叠时不再卸载分隔条（否则边框会瞬间消失）：它随左面板收窄一起左移，收到 0 后禁用拖拽命中 */}
+        {/* 折叠时不卸载分隔条：保持挂载、只禁用拖拽命中，接缝线由 CSS 在折叠态直接隐藏（见 global.css 的 .resize-handle.is-disabled） */}
         {/* plan-20261016-ux（问题 10）：左栏上限随窗口宽适度放大（max(480, 窗口宽 × 24%)，store 兜底 640） */}
         <ResizeHandle side="left" baseWidth={leftPanelWidth} minWidth={240} maxWidth={480} maxViewportRatio={0.24} reservePx={MAIN_MIN_W} panelEl={leftPanelElRef} onCommit={setLeftPanelWidth} freezeRefs={[leftPanelElRef]} disabled={sidebarHidden} />
         <div className="app-right">

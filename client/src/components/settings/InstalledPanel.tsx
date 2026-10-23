@@ -102,12 +102,20 @@ const SOURCE_LABEL: Record<string, string> = {
 
 function notify(msg: string) { useChatStore.setState({ error: msg }); }
 
+/** plan-537-2262 S2：Promise.allSettled 的 reason 类型未知，统一转成可读短文案用于失败态 */
+function reasonText(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e ?? "未知错误");
+  return raw.length > 80 ? `${raw.slice(0, 80)}…` : raw;
+}
+
 export function InstalledPanel() {
   const [plugins, setPlugins] = useState<PluginMarketItem[]>([]);
   const [skills, setSkills] = useState<SkillOut[]>([]);
   const [connectors, setConnectors] = useState<McpServerOut[]>([]);
   const [counts, setCounts] = useState<Record<InstKind, number>>({ plugin: 0, skill: 0, connector: 0 });
   const [loading, setLoading] = useState(false);
+  /** plan-537-2262 S2：三个列表接口各自的失败项（"插件（原因）" 形式）；非空即视为数据不完整 */
+  const [loadError, setLoadError] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   // plan-20261009-ui A：输入框「+」浮窗的「管理插件 / 技能 / 连接器」落到这里时预选对应分类（消费一次）
   const [kindFilter, setKindFilter] = useState<"all" | InstKind>(() => useNavIntentStore.getState().takeInstalledKind() ?? "all");
@@ -137,15 +145,24 @@ export function InstalledPanel() {
     try {
       // plan-41-226：不再请求已安装聚合（那个接口含「智能体」计数，本项目无此管理能力）。
       // 三个列表长度即事实源——计数与列表天然一致，少一次请求也少一处不一致风险。
-      const [pl, sk, mc] = await Promise.all([
-        api.pluginInstalled().catch(() => [] as PluginMarketItem[]),
-        api.listSkills().catch(() => [] as SkillOut[]),
-        api.listMcpServers().catch(() => [] as McpServerOut[]),
+      // plan-537-2262 S2：逐项结算——此前三个接口统一 .catch(() => []) 把失败吞成空数组，
+      // 页面上就变成「还没有安装任何扩展」，用户会以为已装内容丢了。
+      const [pl, sk, mc] = await Promise.allSettled([
+        api.pluginInstalled(), api.listSkills(), api.listMcpServers(),
       ]);
-      setPlugins(pl);
-      setSkills(sk);
-      setConnectors(mc);
-      setCounts({ plugin: pl.length, skill: sk.length, connector: mc.length });
+      const failures: string[] = [];
+      const plList: PluginMarketItem[] = pl.status === "fulfilled" ? pl.value : [];
+      const skList: SkillOut[] = sk.status === "fulfilled" ? sk.value : [];
+      const mcList: McpServerOut[] = mc.status === "fulfilled" ? mc.value : [];
+      if (pl.status === "rejected") failures.push(`插件（${reasonText(pl.reason)}）`);
+      if (sk.status === "rejected") failures.push(`技能（${reasonText(sk.reason)}）`);
+      if (mc.status === "rejected") failures.push(`连接器（${reasonText(mc.reason)}）`);
+      setPlugins(plList);
+      setSkills(skList);
+      setConnectors(mcList);
+      setCounts({ plugin: plList.length, skill: skList.length, connector: mcList.length });
+      setLoadError(failures);
+      if (failures.length) notify(`拓展列表加载失败：${failures.join("；")}`);
     } finally {
       setLoading(false);
     }
@@ -227,7 +244,12 @@ export function InstalledPanel() {
     setBusy(row.key);
     try {
       if (row.kind === "plugin") await api.pluginSetEnabled(row.name, !row.enabled);
-      else if (row.kind === "skill" && row.dbId != null) await api.updateSkill(row.dbId, { is_active: !row.enabled });
+      // plan-537-2262 S1：「已启用」必须等于「会注入」——注入条件是 is_active 且 auto_load 不为 False，
+      // 启用时同步提交 auto_load: true（历史数据里 auto_load=false 的技能此前启用了也不进上下文）；
+      // 停用只关 is_active，保留用户/导入方设定的 auto_load，避免下次启用时被静默改写。
+      else if (row.kind === "skill" && row.dbId != null) {
+        await api.updateSkill(row.dbId, row.enabled ? { is_active: false } : { is_active: true, auto_load: true });
+      }
       else if (row.kind === "connector" && row.dbId != null) await api.updateMcpServer(row.dbId, { is_active: !row.enabled });
       await load();
       await useChatStore.getState().loadBootstrap();
@@ -266,24 +288,56 @@ export function InstalledPanel() {
     } catch (e) { notify("扫描失败：" + String(e)); }
   };
 
-  /** 扫描本机已配置的 MCP 服务器并导入（默认不启用，由用户逐个开启） */
+  /** 扫描本机已配置的 MCP 服务器并导入（默认不启用，由用户逐个开启）
+   *
+   *  plan-537-2262 S3：先查重再创建、逐条结算——此前不查重，重复扫描会把同一批配置反复建库；
+   *  中途一条失败还会直接抛到外层 catch，已创建的条目留在库里但用户只看到「扫描失败」。 */
   const scanMcp = async () => {
     try {
       const candidates = await api.scanMcpServers();
       if (candidates.length === 0) { notify("本机未发现可导入的 MCP 配置"); return; }
-      let n = 0;
+      const existing = await api.listMcpServers();
+      // 判重主键：名称（忽略大小写）；兜底指纹：启动命令 + 参数，命中同名不同源的重复配置
+      const nameKeys = new Set(existing.map((m) => m.name.trim().toLowerCase()));
+      const fingerprintOf = (command?: string | null, args?: string[] | null) => {
+        const cmd = (command || "").trim();
+        return cmd ? `${cmd} ${(args ?? []).join(" ")}`.trim().toLowerCase() : "";
+      };
+      const fingerprints = new Set(
+        existing.map((m) => fingerprintOf(m.command, m.args)).filter((fp) => fp !== ""),
+      );
+      let created = 0;
+      let skipped = 0;
+      let failed = 0;
+      let firstError = "";
       for (const c of candidates) {
-        await api.createMcpServer({
-          name: c.name, transport: c.transport, command: c.command || undefined,
-          args: c.args, env: c.env || undefined, url: c.url || undefined,
-          is_active: false, path: c.source_path || undefined,
-        });
-        n += 1;
+        const nameKey = c.name.trim().toLowerCase();
+        const fingerprint = fingerprintOf(c.command, c.args);
+        if (nameKeys.has(nameKey) || (fingerprint !== "" && fingerprints.has(fingerprint))) {
+          skipped += 1;
+          continue;
+        }
+        try {
+          await api.createMcpServer({
+            name: c.name, transport: c.transport, command: c.command || undefined,
+            args: c.args, env: c.env || undefined, url: c.url || undefined,
+            is_active: false, path: c.source_path || undefined,
+          });
+          created += 1;
+          // 同一批候选里可能有重复项，创建成功后同步进集合，后续同项直接跳过
+          nameKeys.add(nameKey);
+          if (fingerprint !== "") fingerprints.add(fingerprint);
+        } catch (e) {
+          failed += 1;
+          if (!firstError) firstError = reasonText(e);
+        }
       }
       await load();
       await useChatStore.getState().loadBootstrap();
-      notify(`已从本机配置导入 ${n} 个连接器（默认未启用）`);
-    } catch (e) { notify("扫描失败：" + String(e)); }
+      let msg = `已导入 ${created} 个连接器（默认未启用）；跳过 ${skipped} 个已存在`;
+      if (failed > 0) msg += `；失败 ${failed} 个：${firstError}`;
+      notify(msg);
+    } catch (e) { notify("扫描失败：" + reasonText(e)); }
   };
 
   // ── 技能仓库：打开弹窗时加载列表（与 SkillsPanel 同一套 API，能力对等） ──
@@ -389,9 +443,21 @@ export function InstalledPanel() {
             <CordisPluginsSection embedded query={query} onCountChange={setDshCount} />
           </div>
         )}
+        {/* plan-537-2262 S2：接口失败时给可重试的失败态，且失败期间不渲染任何「没装东西」的空态 */}
+        {!loading && loadError.length > 0 && (
+          <div className="ui-card">
+            <Empty
+              mood="think"
+              title="部分内容加载失败"
+              desc={`${loadError.join("；")}。列表可能不完整，检查服务状态后可重试。`}
+              action={<Button variant="ghost" size="sm" onClick={() => void load()}>重试</Button>}
+            />
+          </div>
+        )}
         {/* 空态分三种：搜索无结果 / 该类型未安装 / 全空；后两类带「前往市场」引导（plan-114-450 换成嗒嗒空状态）
-            dsh 插件存在时不显示整页空态，否则会出现「装了第三方插件却提示没装」。 */}
-        {!loading && filtered.length === 0 && !(showCordis && dshCount > 0) && (
+            dsh 插件存在时不显示整页空态，否则会出现「装了第三方插件却提示没装」。
+            plan-537-2262 S9：仅非搜索态保留该豁免——搜索词也匹配 dsh 插件，搜索无匹配时留白会让人以为没搜到结果。 */}
+        {!loading && loadError.length === 0 && filtered.length === 0 && !(showCordis && dshCount > 0 && !query) && (
           <div className="ui-card">
             {query ? (
               <Empty mood="think" title={`没有匹配「${query}」的已安装项`}

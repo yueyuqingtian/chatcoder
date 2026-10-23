@@ -24,6 +24,8 @@ export interface SelectOption {
   value: string;
   label: string;
   disabled?: boolean;
+  /** 选项右侧的小角标（如「未安装」），只在下拉列表里显示，不进入触发器 */
+  hint?: string;
 }
 
 interface SelectProps {
@@ -87,6 +89,7 @@ export function Select({
                   <IconCheck size={11} />
                 </RadixSelect.ItemIndicator>
                 <RadixSelect.ItemText>{o.label}</RadixSelect.ItemText>
+                {o.hint && <span className="ui-select-item-hint">{o.hint}</span>}
               </RadixSelect.Item>
             ))}
           </RadixSelect.Viewport>

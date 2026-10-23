@@ -118,7 +118,7 @@ def test_transient_failure_keeps_progress_and_recovers(monkeypatch, stubs):
     mgr.owner_active = True
     handle = _new_handle()
     asyncio.run(mgr._drive(handle, agent_id=7, task_id=None, turn_id=3,
-                           messages=_base_messages(), cancel_event=None, is_blocking=False))
+                           messages=_base_messages(), cancel_event=None))
 
     assert handle.status == "done"
     assert len(calls) == 2
@@ -143,7 +143,7 @@ def test_transient_without_owner_turn_pauses_instead_of_keepalive(monkeypatch, s
     mgr = SubagentManager(session_id=1)  # owner_active 默认 False：主代理 turn 已不存活
     handle = _new_handle()
     asyncio.run(mgr._drive(handle, agent_id=7, task_id=None, turn_id=3,
-                           messages=_base_messages(), cancel_event=None, is_blocking=False))
+                           messages=_base_messages(), cancel_event=None))
 
     assert len(calls) == 1  # 不保活、不重复
     assert handle.status == "paused" and handle.resumable is True
@@ -161,7 +161,7 @@ def test_non_transient_failure_is_failed_but_resumable(monkeypatch, stubs):
     mgr.owner_active = True
     handle = _new_handle()
     asyncio.run(mgr._drive(handle, agent_id=7, task_id=None, turn_id=3,
-                           messages=_base_messages(), cancel_event=None, is_blocking=False))
+                           messages=_base_messages(), cancel_event=None))
 
     assert handle.status == "failed"
     assert handle.resumable is True
@@ -186,7 +186,7 @@ def test_interrupt_pauses_with_checkpoint_and_does_not_notify(monkeypatch, stubs
     mgr.set_finish_notify(lambda h: notified.append(h))
     handle = _new_handle()
     asyncio.run(mgr._drive(handle, agent_id=7, task_id=None, turn_id=3,
-                           messages=_base_messages(), cancel_event=None, is_blocking=False))
+                           messages=_base_messages(), cancel_event=None))
 
     assert handle.status == "paused"
     assert notified == [], "暂停不得唤醒主代理（由用户“继续”决定）"
@@ -206,7 +206,7 @@ def test_explicit_cancel_is_terminal_and_clears_checkpoint(monkeypatch, stubs):
     handle = _new_handle()
     handle.cancel_requested = True  # cancel_subagent 工具路径
     asyncio.run(mgr._drive(handle, agent_id=7, task_id=None, turn_id=3,
-                           messages=_base_messages(), cancel_event=None, is_blocking=False))
+                           messages=_base_messages(), cancel_event=None))
 
     assert handle.status == "cancelled"
     assert stubs[-1] == (7, "cancelled", None)

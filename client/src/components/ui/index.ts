@@ -5,6 +5,7 @@
  */
 export { Button } from "./Button";
 export { Input, Textarea, type ControlSize } from "./Input";
+export { TagInput, type TagInputProps } from "./TagInput";
 export { Field } from "./Field";
 export { Slider } from "./Slider";
 export { StepSlider, type StepSliderStep } from "./StepSlider";

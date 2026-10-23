@@ -20,13 +20,15 @@ export interface SegmentedOption<T extends string> {
   disabled?: boolean;
 }
 
-export function Segmented<T extends string>({ value, onChange, options, size = "md", block = false, className = "", "aria-label": ariaLabel }: {
+export function Segmented<T extends string>({ value, onChange, options, size = "md", block = false, className = "", disabled = false, "aria-label": ariaLabel }: {
   value: T;
   onChange: (v: T) => void;
   options: Array<SegmentedOption<T>>;
   size?: "sm" | "md";
   block?: boolean;
   className?: string;
+  /** 整体禁用：所有选项不可点、不可聚焦（与 option 级 disabled 叠加） */
+  disabled?: boolean;
   "aria-label"?: string;
 }) {
   const trackRef = useRef<HTMLDivElement>(null);
@@ -67,9 +69,9 @@ export function Segmented<T extends string>({ value, onChange, options, size = "
           role="tab"
           data-value={o.value}
           aria-selected={o.value === value}
-          disabled={o.disabled}
+          disabled={disabled || o.disabled}
           className={"ui-seg-item" + (o.value === value ? " is-active" : "")}
-          onClick={() => { if (o.value !== value) onChange(o.value); }}
+          onClick={() => { if (disabled) return; if (o.value !== value) onChange(o.value); }}
         >
           {o.icon}
           <span className="ui-seg-label">{o.label}</span>

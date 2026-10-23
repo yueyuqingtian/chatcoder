@@ -412,6 +412,15 @@ def build_mcp_tools_for_agent(
                 )
                 tools.append(wrapper)
         else:
+            # plan-537-2262 S8：stdio 连接器工具清单为空，说明握手/刷新没跑通，
+            # 此时给通用 call 包装器只会诱导模型猜工具名、发起必然失败的调用。
+            # 远端（sse/http/websocket）的工具清单本就需要运行时获取，保留兜底。
+            if str(getattr(srv, "transport", "") or "").strip().lower() == "stdio":
+                logger.info(
+                    "[mcp] 跳过 stdio 连接器 %s：工具清单未就绪，不注册通用 call 包装器",
+                    srv.name,
+                )
+                continue
             # 没有缓存的 tools 列表，创建一个通用的 MCP 调用工具
             wrapper = McpToolWrapper(
                 server_name=srv.name,

@@ -8,17 +8,18 @@
 
 参数适配说明：
 - editor_apply_diff(path/old_text/new_text) → Edit(filepath/oldString/newString)
-- spawn_subagent(task_title/task_description/acceptance_criteria/explore/background)
-    → SubAgent(description/prompt/subagent_type)
+- spawn_subagent(task_title/task_description/acceptance_criteria/explore)
+    → SubAgentAsync(description/prompt/subagent_type)
 - v36 (plan-321-1600 M3): 接入 ta3 侧异步子代理三件套——
-    SubAgentAsync → spawn_subagent(background=True)（后台派发，完成时自动推送）
+    SubAgentAsync → spawn_subagent（后台派发，完成时自动推送）
     TaskQuery     → collect_results(taskId→agent_id)
     TaskCancel    → cancel_subagent(taskId→agent_id)
-  并**取消**此前 SubAgent 的 explore 强制同步：改按 subagent_type 决定
-  （Explore → 只读同步探索；其余/缺省 → 后台异步），使 ta3 模型真正能用上并行子代理。
-- plan-73-322: SubAgentAsync 入站补透传只读语义（subagent_type=Explore → explore=True
-  + background=True，即「只读 + 异步」）；配套在 disguise_tools 侧把 SubAgentAsync 真正
-  下发给模型——此前一对一出站映射使它从未暴露，「只读调研不阻塞」在模型侧无法表达。
+- plan-541-2264: 同步派发整体下线。出站只下发 SubAgentAsync（一个真实工具对应一个伪装
+  工具，取消原先的一对多下发）；入站两个伪装名都只按 subagent_type 还原 explore 语义，
+  不再给任何分支补充调度参数——调度方式恒为后台异步，由执行层保证，无需参数表达。
+  SubAgent 仅保留入站映射，用于历史会话回放（旧会话里的 SubAgent 调用仍能执行）。
+- plan-73-322: SubAgentAsync 入站补透传只读语义（subagent_type=Explore → explore=True），
+  避免只读调研被派发成可写子代理。
 """
 from __future__ import annotations
 
@@ -33,7 +34,8 @@ TO_TA3: dict[str, str] = {
     "terminal_exec": "Bash",           # command/waitForCompletion ✓
     "web_search": "WebSearch",         # query ✓
     "todo_write": "TodoWrite",         # todos ✓
-    "spawn_subagent": "SubAgent",      # 参数适配（explore/background 按 subagent_type 还原）
+    # plan-541-2264: 同步派发下线后只下发异步入口；参数按 description/prompt/subagent_type 适配
+    "spawn_subagent": "SubAgentAsync",
     "memory_search": "get_project_memory",  # query ✓
     # plan-147-674: 附件/图片读取工具——ta3 参考项目无对应工具，但缺失会导致
     # 多模态图片只能用 Read 读二进制、docx/pdf 附件完全无法解析，故补充伪装名
@@ -144,9 +146,12 @@ TO_TA3: dict[str, str] = {
 
 # 伪装名 → 真实执行名（反查）
 FROM_TA3: dict[str, str] = {v: k for k, v in TO_TA3.items()}
-# v36 (plan-321-1600 M3): ta3 异步子代理工具 → 本项目工具（多对一，TO_TA3 反查得不到）
+# v36 (plan-321-1600 M3): ta3 子代理工具 → 本项目工具（此处显式列出，不依赖 TO_TA3 反查）
 FROM_TA3.update({
     "SubAgentAsync": "spawn_subagent",
+    # plan-541-2264: 出站已改指 SubAgentAsync，SubAgent 不再能由 TO_TA3 反查得到；
+    # 显式保留这条入站映射，保证历史会话里的旧 SubAgent 调用回放时仍能执行。
+    "SubAgent": "spawn_subagent",
     "TaskQuery": "collect_results",
     "TaskCancel": "cancel_subagent",
     # ta3 参考项目的另一套编辑工具：schema 已随 TA3_NATIVE_SCHEMAS 定义，此前
@@ -171,8 +176,10 @@ FROM_TA3.update({
 # 这样真实工具演进后，ta3 侧自动跟随，不再需要人工同步。
 #
 # **维持硬编码的**：① ta3 原生工具（Read/Write/Edit/Bash/List/Search/Diff/WebSearch/
-# TodoWrite/SubAgent 等，描述需贴合 ta3 语义）；② 有参数适配器的（键名需转换）；
-# ③ 一对多下发特例（spawn_subagent → SubAgent + SubAgentAsync）。
+# TodoWrite/SubAgent/SubAgentAsync 等，描述需贴合 ta3 语义）；② 有参数适配器的（键名需转换）。
+# plan-541-2264: 原先的「一对多下发特例（spawn_subagent → SubAgent + SubAgentAsync）」已取消，
+# 出站只下发 SubAgentAsync；SubAgent 的硬编码 schema 仍留在 TA3_NATIVE_SCHEMAS，仅用于
+# 历史会话入站还原与 TA3 schema 守护测试。
 #
 # 新增自造工具时，只需在 TO_TA3 与本清单各加一行；漏加会被
 # `tests/test_ta3_schema_parity.py` 守护测试直接拦下（不会静默漂移）。
@@ -229,7 +236,6 @@ ARGS_TO_TA3: dict[str, dict[str, str | None]] = {
         "task_description": "prompt",
         "acceptance_criteria": None,   # ta3 无对应
         "explore": None,               # 出站丢弃：ta3 侧由 subagent_type 表达
-        "background": None,            # v36: 同上（ta3 侧由 SubAgentAsync 表达）
     },
     # plan-153-705: 后台进程工具键名适配（offset 键名一致免映射）
     "terminal_bg_status": {"shell_id": "shellId"},
@@ -263,7 +269,7 @@ ARGS_FROM_TA3: dict[str, dict[str, str | None]] = {
     "SubAgent": {
         "prompt": "task_description",
         "description": "task_title",
-        "subagent_type": None,         # v36: 丢弃前先用于判定 explore/background（见 restore_args）
+        "subagent_type": None,         # 丢弃前先用于判定 explore（见 restore_args）
     },
     # v36 (plan-321-1600 M3): ta3 异步子代理三件套
     "SubAgentAsync": {
@@ -290,6 +296,8 @@ ARGS_FROM_TA3: dict[str, dict[str, str | None]] = {
 
 # v36 (plan-321-1600 M3): 原 SPAWN_FORCED_ARGS（强制 explore=True）已删除——
 # 它让 ta3 侧调用永远同步阻塞，模型无法并行派发子代理。现按 subagent_type 判定。
+# plan-541-2264: 同步派发整体下线，也不再存在「explore 强制同步」的分支——两个伪装名都
+# 只还原 explore（只读语义）；调度方式恒为后台异步，由执行层保证。
 
 
 def visible_tool_name(real_name: str, ta3: bool) -> str:
@@ -327,19 +335,18 @@ def restore_args(ta3_name: str, args: dict) -> dict:
         if target is None:
             continue
         out[target] = v
+    # plan-541-2264: 两个伪装名都只按 subagent_type 还原 explore（只读语义）；
+    # 调度方式恒为后台异步（执行层保证），不再给任何分支补充调度参数。
     if ta3_name == "SubAgentAsync":
         # ta3 异步派发 → 本项目后台子代理（立即返回，完成时自动推送）
-        out["background"] = True
-        # plan-73-322: 补透传只读语义——subagent_type=Explore 表示只读调研，须同时置 explore，
+        # plan-73-322: 补透传只读语义——subagent_type=Explore 表示只读调研，须置 explore，
         # 否则会被派发成可写子代理（全工具），与「Explore=只读」约定不符。
         if str(args.get("subagent_type") or "").strip().lower() == "explore":
             out["explore"] = True
     elif ta3_name == "SubAgent":
-        # v36: 按 ta3 给出的 subagent_type 决定同步/异步——
-        # Explore → 只读同步探索（主代理直接拿结论）；其余/缺省 → 后台异步并行。
+        # plan-541-2264: SubAgent 只在历史会话回放时出现，语义与 SubAgentAsync 一致——
+        # 只按 subagent_type 判定 explore，调度一律后台。
         _st = str(args.get("subagent_type") or "").strip().lower()
         if _st == "explore":
             out["explore"] = True
-        else:
-            out["background"] = True
     return out

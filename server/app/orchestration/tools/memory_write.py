@@ -27,8 +27,12 @@ class MemoryWriteTool(Tool):
     description = (
         "主动记录一条长期有价值的记忆（事实/约定/坑点/决策），跨 turn 生效。"
         "适用：用户明确要求记住某事；发现了重要项目约定、易踩的坑、关键决策。"
-        "scope 选择：session=本会话（默认）；project=本项目长期有效；global=跨项目全局规范。"
-        "不要记录临时性内容（如单次命令输出、当前任务进度）。"
+        "写入前先用 memory_search 查同主题是否已有记忆——能更新（edit/promote）就不要新增重复条目。"
+        "scope 选择口径：session=本会话事实（默认，30 天后过期）；"
+        "project=本项目长期有效（需会话已绑定项目）；global=跨项目通用的规范/偏好。"
+        "不要记录：代码结构、文件路径、依赖选择；git 历史与「谁改了什么」；"
+        "调试修复步骤；AGENTS.md/CLAUDE.md 已写明的规则；当前任务进度与临时状态"
+        "（如单次命令输出、进行中的待办）。"
     )
 
     def function_schema(self) -> dict:
@@ -56,6 +60,13 @@ class MemoryWriteTool(Tool):
         }
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        # plan-537-2256：开关必须同时挡在工具入口与 save_memories（后端唯一写入口），
+        # 否则用户关掉记忆后模型仍能从工具侧写入。
+        from app.core.config import settings
+
+        if not getattr(settings, "auto_memory_enabled", True):
+            return ToolResult(ok=False, output="", error="记忆功能已在「设置 → 记忆」中关闭。")
+
         text = str(args.get("text") or "").strip()
         if len(text) < 8:
             return ToolResult(ok=False, output="", error="记忆内容过短（至少 8 字符）")

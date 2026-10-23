@@ -112,25 +112,21 @@ async def _wait_retry_interval(cancel_event: asyncio.Event | None, seconds: floa
 
 
 def _retry_wait_seconds(attempt: int) -> float:
-    """v45: 第 attempt 次重试（1-based）前的等待秒数。
-
-    取 settings.agent_retry_interval_list 的第 attempt-1 项（不足按最后一项补齐）；
-    序列为空（agent_retry_count=0 或解析失败）时回退 agent_retry_interval_seconds。
-    """
+    """v45: 第 attempt 次重试（1-based）前的等待秒数，取间隔标签序列的对应项；序列为空时为 0。"""
     intervals = settings.agent_retry_interval_list
     if not intervals:
-        return max(0.0, float(settings.agent_retry_interval_seconds or 0.0))
+        return 0.0
     idx = min(max(int(attempt), 1), len(intervals)) - 1
     return max(0.0, float(intervals[idx]))
 
 
 def _retry_plan() -> list[float]:
-    """v45: 统一重试计划——每次重试前的等待秒数序列（长度 = agent_retry_count）。
+    """v45: 统一重试计划——每次重试前的等待秒数序列，个数即重试次数。
 
     任何报错（模型异常 / 空响应 / 超时中断）都按该序列依次重试，穷尽后才停止并显示报错。
+    间隔为空时不自动重试。
     """
-    count = max(0, int(settings.agent_retry_count or 0))
-    return [_retry_wait_seconds(i) for i in range(1, count + 1)]
+    return list(settings.agent_retry_interval_list)
 
 
 def _credential_slots(db_creds: int) -> int:
@@ -366,6 +362,16 @@ def _is_context_overflow_error(err_msg: str) -> bool:
 # 不再要求标签闭合；<thinking> 到文本末尾的截断内容同样视为思考块。
 _INLINE_THINKING_TAG_RE = re.compile(r"<(?:/?)(?:thinking|thought)>", re.IGNORECASE)
 _INLINE_THINKING_TAGS = ("<thinking>", "<thought>", "</thinking>", "</thought>")
+
+
+def _is_substantive_thinking(text: str | None) -> bool:
+    """思考内容是否含有实质文字（plan-20261023-thinking-blank）。
+
+    网关常用纯空白 reasoning 当占位（实测单个空格）；这类内容一旦被当有效值
+    落库或广播，前端就会出现「思考过程 持续了几秒」+ 展开后一片空白的块。
+    统一按 strip 后是否为空判定，调用点不再各自写 `if text:`。
+    """
+    return bool((text or "").strip())
 
 
 def _split_inline_thinking(text: str) -> tuple[str, str]:
@@ -962,8 +968,9 @@ async def run_agent_loop(
     cancel_event: asyncio.Event | None = None,
     token_budget: int | None = None,
     subagent_context: dict | None = None,
-    # plan-330-1648 M4: 子代理侧的双向通信上下文（manager + agent_id + 是否同步阻塞），
-    # 用于 report_to_leader 上报/提问；主代理为 None。
+    # plan-330-1648 M4: 子代理侧的双向通信上下文（manager + agent_id），
+    # 用于 report_to_leader 上报/提问；主代理为 None。plan-541-2264：子代理一律后台执行，
+    # 不再携带「是否同步阻塞」标记。
     subagent_comm: dict | None = None,
     # plan-547: 运行中注入的用户消息提供方（每次 LLM 调用前 drain，返回注入项列表）
     injected_inputs_provider: Callable[[], list[dict]] | None = None,
@@ -2093,11 +2100,15 @@ async def run_agent_loop(
 
 
             # 思考写入消息
-            if response.thinking:
+            # plan-20261023-thinking-blank：纯空白思考不落库。旧判据 `if response.thinking:` 对
+            # " " 这类占位是 truthy，于是库里留下一条只有一个空格的 thinking 消息——前端照常渲染
+            # 「思考过程」行，展开却是空白块。落库按 strip 后判断，正文仍保留原文（含内部换行缩进）。
+            _thinking_text = (response.thinking or "").strip()
+            if _is_substantive_thinking(response.thinking):
                 await _emit_agent_msg(db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
                                       agent_id=agent_id, agent_name=agent_name,
                                       msg_type=MsgType.THINKING,
-                                      content={"text": response.thinking, "agent_name": agent_name,
+                                      content={"text": _thinking_text, "agent_name": agent_name,
                                                "thinking": True})
 
             # 工具调用
@@ -2941,6 +2952,16 @@ async def run_agent_loop(
                         _route_guard.observe(tool_name, args, bool(result.ok), result.data)
                     except Exception:  # noqa: BLE001 — 守卫只做登记，失败不影响主流程
                         logger.debug("[agent] 路线守卫登记失败 tool=%s", tool_name, exc_info=True)
+                    # plan-537-2251：沉淀提醒提前到「还在执行」的阶段。
+                    # 收尾分支里的 reminder() 发出时，本步的最终汇报正文已经落库（见下方「最终文本」前
+                    # 的注入顺序），沉淀因此必然晚于汇报。这里在每步工具结果登记后补一次中途提醒，
+                    # 让模型在任务没结束时就顺手把路线存下来；收尾那次仍保留作为兜底。
+                    try:
+                        _mid_note = _route_guard.mid_reminder()
+                        if _mid_note:
+                            _pending_reminders.append(_mid_note)
+                    except Exception:  # noqa: BLE001 — 同为辅助提醒，失败不影响主流程
+                        logger.debug("[agent] 路线中途提醒失败 tool=%s", tool_name, exc_info=True)
                     # 步级提交：结束主 db 零星写（checkpoint/任务态）形成短事务边界，
                     # 避免消息缓冲化后主 db 长事务悬挂（违背短事务原则）。
                     try:
@@ -3611,7 +3632,7 @@ def _response_failure_reason(response, has_progress: bool = False) -> tuple[str,
     content/thinking/tool_calls、无 usage），只要本 turn 执行过工具就会被判
     "任务完成、主动结束"，turn 静默收尾：用户视角是"回了几句话后无故中断"，
     既无报错也无重试。真正"任务完成主动结束"必然产出最终正文，完全空响应几乎
-    只来自流截断；一律纳入 fatal 走统一重试计划（次数取 agent_retry_count 配置），
+    只来自流截断；一律纳入 fatal 走统一重试计划（次数即间隔序列长度），
     重试穷尽后由调用方显式报错。
     """
     finish = response.finish_reason or "stop"
@@ -3834,17 +3855,33 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
                 if _c:
                     _held += _c
                 event_content = event.get("content") or ""
-                full_content = event_content or full_content or _held
-                full_thinking = event.get("thinking") or full_thinking
+                # plan-20261023-thinking-blank：正文与思考同理——结束帧的 content 只有含实质文字时才覆盖
+                # 流式累积值。网关截断 / 重试后常回一两个空白字符当占位，`or` 会把它当有效值，
+                # 把已经广播给用户的正文覆盖成空白（消息流里正文凭空消失）。
+                if event_content.strip():
+                    full_content = event_content
+                elif not full_content:
+                    full_content = _held
+                # plan-20261023-thinking-blank：结束帧的 thinking 只有含实质内容时才覆盖流式累积值。
+                # 网关在重试 / 降档后常回一个纯空白 reasoning（如单个空格）当占位；旧写法用
+                # `or` 判定，空白是非空字符串 → 被当成有效值，把已经广播给用户的完整思考覆盖掉。
+                # 用户看到的过程就是「思考中 ticker 有内容，思考结束后展开一片空白」，落库同样只剩空格。
+                _done_thinking = event.get("thinking") or ""
+                if _is_substantive_thinking(_done_thinking):
+                    full_thinking = _done_thinking
                 tool_calls = event.get("tool_calls", [])
                 finish_reason = event.get("finish_reason", "stop")
                 usage = event.get("usage", UsageModel())
                 frames_received = event.get("frames")
                 if not tool_calls:
-                    full_content = event_content or full_content or _held
+                    if event_content.strip():
+                        full_content = event_content
+                    elif not full_content:
+                        full_content = _held
                     if _opening_language_mismatch(full_content, reply_language):
                         return ChatResponse(
-                            content=None, thinking=full_thinking or None,
+                            content=None,
+                            thinking=(full_thinking if _is_substantive_thinking(full_thinking) else None),
                             finish_reason="language_mismatch", usage=usage,
                         )
                     # 增量此前均被缓冲；此时发送完整正文一次，不重复追加。
@@ -3927,13 +3964,15 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
             full_thinking = (full_thinking + "\n" + _inline_think).strip() if full_thinking else _inline_think
             full_content = _clean
 
-    if full_thinking:
+    # plan-20261023-thinking-blank：纯空白思考不广播——前端收到 full_text 后会把它当成落库文本，
+    # 覆盖掉流式累积的真实内容，思考块随即变成空白。
+    if _is_substantive_thinking(full_thinking):
         await broadcast(session_id, {
             "event": "thinking.done",
             "payload": {"agent_id": agent_id, "turn_id": turn_id, "full_text": full_thinking,
                         "thread_id": thread_id},
         })
-    if full_content:
+    if full_content.strip():
         await broadcast(session_id, {
             "event": "token.done",
             "payload": {"agent_id": agent_id, "turn_id": turn_id, "full_text": full_content,
@@ -3948,7 +3987,12 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
         _first_ms = max(0, int((_t_first - _t_req) * 1000))
         _gen_ms = max(0, int((_t_end - _t_first) * 1000))
     return ChatResponse(
-        content=full_content or None, thinking=full_thinking or None,
+        # plan-20261023-thinking-blank：正文与思考同一口径——只有含实质文字才作为有效内容返回。
+        # 网关的空白占位一旦当正文返回，上游会落库成一条看不见内容的消息。
+        content=(full_content if full_content.strip() else None),
+        # plan-20261023-thinking-blank：只含空白的思考等同于没有思考——返回 None 后上游不会落库，
+        # 也不会再生成一个展开后空白的思考块（历史库里的空格记录由前端时间线统一跳过）。
+        thinking=(full_thinking if _is_substantive_thinking(full_thinking) else None),
         tool_calls=tool_calls, finish_reason=finish_reason, usage=usage,
         frames_received=frames_received,
         first_token_ms=_first_ms, gen_ms=_gen_ms,
@@ -4438,15 +4482,13 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         task_title = str(args.get("task_title", ""))[:200]
         task_desc = str(args.get("task_description", ""))[:4000]
         acceptance = str(args.get("acceptance_criteria", ""))[:500]
-        # plan-64-289: explore 只决定读写范围（只读探索），background 只决定调度方式，
-        # 两者解耦、可自由组合——此前 background 会强制 explore=false，导致「只读 + 异步」
-        # 在参数层面无法表达：模型派只读调研子代理时只能选同步阻塞，主 turn 被长时间挂住。
+        # plan-541-2264：explore 退化为纯读写范围开关（只读调研 / 可写），不再有任何调度含义；
+        # 派发方式只有后台异步一种，因此无需从参数里解析调度选强。
         explore = bool(args.get("explore", False))
-        background = bool(args.get("background", False))
         # v36 (plan-321-1600 R1) + plan-330-1648 M1: 主代理处于只读/计划模式时，只允许派发
         # 只读探索子代理（忽略模型传入的 explore）——主代理侧的**模式语义护栏**
         # （该模式下不产生业务写入），与“子代理不继承会话模式”不冲突：explore 子代理本就只读。
-        # plan-64-289: 该护栏只锁「只读」、不再连带锁「同步」——异步只读探索同样不产生写入。
+        # plan-541-2264：该护栏现在只锁「读写范围」，调度方式已无变量（一律后台）。
         _pm = normalize_execution_mode(subagent_context.get("permission_mode"))
         if _pm in ("readonly", "plan"):
             explore = True
@@ -4678,47 +4720,9 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
 
         from app.orchestration.subagent import get_subagent_manager
         mgr = manager or get_subagent_manager(session_id)
-        # v20: explore 子代理同步等待——主代理拿结论后继续串行整合。
-        # plan-64-289: 仅当未显式要求 background 时才同步——只读调研同样可异步派发
-        # （主代理继续做别的事、完成报告自动推送），不再「只读必然阻塞」。
-        if explore and not background:
-            await broadcast(session.id, {
-                "event": "agent.started",
-                "payload": {"agent_id": sub_agent.id, "kind": "sub",
-                            "name": sub_agent.name, "turn_id": turn_id},
-            })
-            handle = await mgr.spawn_and_wait(
-                db, agent=sub_agent, turn_id=turn_id, task=task,
-                handoff_summary=task_desc, context_bundle=bundle,
-                tool_schemas=sub_tools, workspace=workspace,
-                cancel_event=cancel_event,
-                token_budget=_sub_budget,
-                task_title=task_title, task_description=task_desc,
-                context_snapshot=_subagent_context_snapshot(subagent_context, _orig_req),
-                reasoning_effort=_spawn_effort,
-                subagent_mode=_sub_mode,
-            )
-            if handle is not None and handle.status == "done":
-                _extra = ""
-                if handle.files_touched:
-                    _extra += "\nFiles touched: " + ", ".join(handle.files_touched[:30])
-                # v36 (plan-321-1600 M1): 探索子代理同步返回闭环信息（验证/验收）
-                if handle.verification:
-                    _extra += "\nVerification: " + "; ".join(handle.verification[:5])
-                if handle.acceptance:
-                    _extra += "\nAcceptance: " + "; ".join(handle.acceptance[:5])
-                if handle.risks:
-                    _extra += "\nRisks: " + "; ".join(handle.risks[:5])
-                return (
-                    f"Exploration subagent #{sub_agent.id} finished for: {task_title}.\n"
-                    f"[运行参数] mode={_sub_mode} model=#{_spawn_model_id} "
-                    f"effort={_spawn_effort or 'default'}\n"
-                    f"Findings:\n{(handle.findings or handle.summary or '')[:4000]}{_extra}"
-                )
-            return (
-                f"Exploration subagent #{sub_agent.id} failed for: {task_title}.\n"
-                f"Error: {(handle.error if handle else 'unknown')[:1000]}"
-            )
+        # v20: explore 子代理旧版在这里同步等待拿结论；plan-541-2264 删除该分支后，
+        # 只读与可写子代理走**同一条**后台派发路径（派发即返回，结论由完成报告推回），
+        # 因此 agent.started 广播、pending 计数等公共动作只在下面这一处执行。
         sub_agent_id = mgr.spawn(
             db, agent=sub_agent, turn_id=turn_id, task=task,
             handoff_summary=task_desc, context_bundle=bundle,
@@ -4763,8 +4767,8 @@ async def _run_report_to_leader(comm: dict, args: dict, *, session_id: int, turn
     """report_to_leader 工具实现（plan-330-1648 M4）：子代理 → 主代理上报/提问。
 
     - 落子代理线程（面板可见）+ 进主代理注入队列（下一次 LLM 调用前可见）；
-    - wait=true（提问并等答复）仅后台子代理可用：同步子代理（主代理正阻塞等待）等待会死锁，
-      工具层直接拒绝并提示改为在最终汇报里带上该问题；
+    - wait=true（提问并等答复）对所有子代理可用：plan-541-2264 起子代理一律后台执行，
+      主代理不会阻塞在派发上，因此不存在“同步子代理等待会死锁”的情况；
     - 超时（默认 300s）返回“未收到答复，按最佳判断继续”。
     """
     manager = comm.get("manager")
@@ -4775,12 +4779,6 @@ async def _run_report_to_leader(comm: dict, args: dict, *, session_id: int, turn
     if kind not in ("progress", "question"):
         kind = "progress"
     wait = bool(args.get("wait", False)) and kind == "question"
-    if wait and bool(comm.get("sync")):
-        return (
-            "Error: this subagent runs synchronously (the main agent is blocking on it), so it "
-            "cannot wait for a reply. Continue with your best judgment and include the open "
-            "question in your final report instead."
-        )
     label = "子代理提问" if kind == "question" else "子代理进度上报"
     # 1) 落子代理线程（面板可见，与普通文本同渲染路径）
     try:

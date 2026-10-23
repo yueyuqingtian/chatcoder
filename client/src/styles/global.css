@@ -3798,9 +3798,15 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   border-left: var(--seam-w) solid var(--border);
   pointer-events: none;
   isolation: isolate;
+  /* 展开时等左栏到位后再淡入，避免接缝线跟着面板一路扫过顶部导航区 */
+  transition: opacity var(--dur-fast) var(--dur-pane);
 }
-/* plan-128-518：折叠中的分隔条只承载边框，不接收指针；左面板宽度收到 0 后整条线贴左缘（与左面板同一条曲线位移） */
+/* plan-128-518：折叠中的分隔条只承载边框，不接收指针。
+   接缝线在折叠瞬间直接隐藏、不随左栏收窄：收窄时它以亚像素位置扫过导航按钮，
+   玻璃态下颜色更实，会表现为一根闪烁的竖线；左栏收起后本就没有需要分隔的边。 */
 .resize-handle.is-disabled { pointer-events: none; cursor: default; }
+.resize-handle.is-disabled::before,
+.resize-handle.is-disabled::after { opacity: 0; transition: none; }
 .resize-handle-left::after { right: 50%; }
 .resize-handle-right::after { left: 50%; }
 /* 毛玻璃：颜色换更实的 --frost-seam（宽度不用改，已由 --seam-w 统一）。 */

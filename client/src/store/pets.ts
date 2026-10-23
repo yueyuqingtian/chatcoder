@@ -7,7 +7,7 @@
  * 图库与安装动作的 UI 状态（加载中 / 错误 / 忙碌项）也集中在此，面板组件保持无状态渲染。
  */
 import { create } from "zustand";
-import type { InstalledPet, PetPref } from "../pet/petApi";
+import type { InstalledPet, PetPref, PetsDirInfo } from "../pet/petApi";
 
 export interface GalleryPet {
   slug: string;
@@ -45,6 +45,12 @@ interface PetsState {
   importLocal: () => Promise<boolean>;
   /** 恢复显示（宠物窗口下方隐藏角标置 visible=false 后从这里恢复） */
   showPet: () => Promise<void>;
+  /** 宠物安装目录（设置 → 宠物）的当前状态 */
+  petsDir: PetsDirInfo | null;
+  loadPetsDir: () => Promise<void>;
+  /** 修改安装目录（空串 = 恢复默认）：已安装的宠物自动迁移；返回迁移结果，失败时返回 null 并写入 actionError */
+  setPetsDir: (dir: string) => Promise<{ moved: number; skipped: number } | null>;
+  openPetsDir: () => Promise<void>;
 }
 
 const errText = (e: unknown): string => {
@@ -75,6 +81,7 @@ export const usePetsStore = create<PetsState>((set, get) => ({
     } catch {
       // 偏好读取失败不阻断面板（后续操作会再次尝试）
     }
+    await get().loadPetsDir();
     await get().loadInstalled();
   },
 
@@ -192,6 +199,43 @@ export const usePetsStore = create<PetsState>((set, get) => ({
       await api.petShowPet();
       const pref = get().pref;
       if (pref) set({ pref: { ...pref, visible: true } });
+    } catch (e) {
+      set({ actionError: errText(e) });
+    }
+  },
+
+  petsDir: null,
+
+  loadPetsDir: async () => {
+    const api = window.chatcoderAPI;
+    if (!api?.petGetDir) return;
+    try {
+      set({ petsDir: await api.petGetDir() });
+    } catch (e) {
+      set({ actionError: errText(e) });
+    }
+  },
+
+  setPetsDir: async (dir) => {
+    const api = window.chatcoderAPI;
+    if (!api?.petSetDir) return null;
+    set({ actionError: null });
+    try {
+      const { moved, skipped, ...info } = await api.petSetDir(dir);
+      set({ petsDir: info });
+      await get().loadInstalled();
+      return { moved, skipped };
+    } catch (e) {
+      set({ actionError: errText(e) });
+      return null;
+    }
+  },
+
+  openPetsDir: async () => {
+    const api = window.chatcoderAPI;
+    if (!api?.petOpenDir) return;
+    try {
+      set({ petsDir: await api.petOpenDir() });
     } catch (e) {
       set({ actionError: errText(e) });
     }

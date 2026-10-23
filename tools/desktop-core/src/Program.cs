@@ -752,6 +752,16 @@ namespace DesktopCore
         }
 
         /// <summary>
+        /// 字段是否存在（plan-537-2251 M11）：区分「调用方没给坐标」与「给了 0 / 负坐标」。
+        /// 副屏位于主屏左侧或上方时负坐标是合法的，不能用 x &lt; 0 当成「未提供」。
+        /// </summary>
+        private static bool HasField(string line, string key)
+        {
+            if (string.IsNullOrEmpty(line)) return false;
+            return line.IndexOf("\"" + key + "\":", StringComparison.Ordinal) >= 0;
+        }
+
+        /// <summary>
         /// focusFirst=true 表示调用方显式授权本次操作主动激活目标窗口：先激活，再做前台校验，
         /// 使「激活 + 操作」一步完成，省掉模型单独跑一次 focus 的往返；
         /// 激活失败时前台校验照样拦截，安全护栏没有被绕过。
@@ -900,8 +910,14 @@ namespace DesktopCore
 
         private static string ScrollOp(string line)
         {
-            int x = Js.GetInt(line, "x", -1), y = Js.GetInt(line, "y", -1);
-            if (x < 0 || y < 0)
+            // plan-537-2251 M11：此前用 x < 0 || y < 0 判定「未提供坐标」，副屏在主屏左侧 / 上方时
+            // 合法的负坐标会被替换成主屏中心，滚动落到错误的显示器。改为按「字段是否存在」判断；
+            // 上游若显式给了 has_point / hasPoint 则以它为准。
+            bool hasPoint = HasField(line, "x") && HasField(line, "y");
+            if (HasField(line, "has_point")) hasPoint = Js.GetBool(line, "has_point", hasPoint);
+            if (HasField(line, "hasPoint")) hasPoint = Js.GetBool(line, "hasPoint", hasPoint);
+            int x = Js.GetInt(line, "x", 0), y = Js.GetInt(line, "y", 0);
+            if (!hasPoint)
             {
                 // Default to the centre of the screen so scroll works without a hit test.
                 x = Native.GetSystemMetrics(Native.SM_CXSCREEN) / 2;
@@ -913,33 +929,62 @@ namespace DesktopCore
                 int clicks = Js.GetInt(line, "clicks", 3);
                 delta = clicks * 120;   // WHEEL_DELTA
             }
+
+            // plan-537-2251 L3：点名了窗口就做与点击相同的前台校验；没点名时放行（滚动当前画面）
+            bool focusedNow = MaybeFocusFirst(line);
+            Input.Target t = Input.ResolveTarget(
+                Js.GetLong(line, "handle", 0), Js.GetStr(line, "title", ""),
+                Js.GetStr(line, "proc", ""), Js.GetBool(line, "requireForeground", true));
+            if (t.Error.Length > 0) return "{\"error\":\"" + Js.Esc(t.Error) + "\"}";
+
             Input.MoveTo(x, y);
             System.Threading.Thread.Sleep(20);
             Sensing.Sample before = BeginSettle(line, x, y);
             bool ok = Input.Wheel(delta, Js.GetBool(line, "horizontal", false));
             return "{\"scrolled\":" + (ok ? "true" : "false") + ",\"delta\":" + delta
+                 + ",\"at\":[" + x + "," + y + "]"
+                 + ",\"target\":\"" + Js.Esc(t.Title) + "\""
+                 + ",\"focusedNow\":" + (focusedNow ? "true" : "false")
                  + EndSettle(line, before, x, y) + "}";
         }
 
         private static string DragOp(string line)
         {
+            // plan-537-2251 L3：与点击一致的前台校验（起点 / 终点坐标不做 <0 判定，负坐标在多显示器下合法）
+            bool focusedNow = MaybeFocusFirst(line);
+            Input.Target t = Input.ResolveTarget(
+                Js.GetLong(line, "handle", 0), Js.GetStr(line, "title", ""),
+                Js.GetStr(line, "proc", ""), Js.GetBool(line, "requireForeground", true));
+            if (t.Error.Length > 0) return "{\"error\":\"" + Js.Esc(t.Error) + "\"}";
+
             int x2 = Js.GetInt(line, "x2", 0), y2 = Js.GetInt(line, "y2", 0);
             Sensing.Sample before = BeginSettle(line, x2, y2);
             bool ok = Input.Drag(Js.GetInt(line, "x1", 0), Js.GetInt(line, "y1", 0),
                                  x2, y2, Js.GetInt(line, "duration", 300));
             return "{\"dragged\":" + (ok ? "true" : "false")
                  + ",\"cursor\":[" + Input.LastX + "," + Input.LastY + "],\"landErr\":" + Input.LastErr
+                 + ",\"target\":\"" + Js.Esc(t.Title) + "\""
+                 + ",\"focusedNow\":" + (focusedNow ? "true" : "false")
                  + EndSettle(line, before, x2, y2) + "}";
         }
 
         /// <summary>移动鼠标（悬停）：悬停才展开的菜单、提示需要它（plan-20261019-desktop-precision）。</summary>
         private static string MoveOp(string line)
         {
+            // plan-537-2251 L3：与点击一致的前台校验；坐标按原值使用（负坐标在多显示器下合法）
+            bool focusedNow = MaybeFocusFirst(line);
+            Input.Target t = Input.ResolveTarget(
+                Js.GetLong(line, "handle", 0), Js.GetStr(line, "title", ""),
+                Js.GetStr(line, "proc", ""), Js.GetBool(line, "requireForeground", true));
+            if (t.Error.Length > 0) return "{\"error\":\"" + Js.Esc(t.Error) + "\"}";
+
             int x = Js.GetInt(line, "x", 0), y = Js.GetInt(line, "y", 0);
             Sensing.Sample before = BeginSettle(line, x, y);
             bool ok = Input.MoveTo(x, y);
             return "{\"moved\":" + (ok ? "true" : "false") + ",\"at\":[" + x + "," + y + "]"
                  + ",\"cursor\":[" + Input.LastX + "," + Input.LastY + "],\"landErr\":" + Input.LastErr
+                 + ",\"target\":\"" + Js.Esc(t.Title) + "\""
+                 + ",\"focusedNow\":" + (focusedNow ? "true" : "false")
                  + EndSettle(line, before, x, y) + "}";
         }
 

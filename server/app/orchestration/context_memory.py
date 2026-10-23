@@ -617,7 +617,12 @@ async def build_thread_context_with_window(
     _pending_thinking = ""
     for m in selected:
         if m.msg_type == MsgType.THINKING:
-            _pending_thinking = m.content.get("text") or _pending_thinking
+            # plan-20261023-thinking-blank：只接受含实质文字的思考。库里存有旧版落下的纯空白
+            # thinking（单个空格），旧写法 `or` 会把前一段真实思考覆盖成空格，导致重建出的
+            # assistant.reasoning_content 变成空白、模型下一轮丢掉推理上下文。
+            _th_text = m.content.get("text")
+            if isinstance(_th_text, str) and _th_text.strip():
+                _pending_thinking = _th_text
             continue
         if m.msg_type == MsgType.TOOL_CALL:
             # 序列化为 assistant 的 tool_call（让 LLM 能看到之前调用了什么工具）
